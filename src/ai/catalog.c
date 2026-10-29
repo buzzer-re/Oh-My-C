@@ -1,0 +1,424 @@
+/* catalog.c - bundled model catalog (assets/models.json.z) + provider metadata + custom models. */
+#include "ai.h"
+#include "core/embed.h"
+#include "core/fs.h"
+#include "core/proc.h"
+
+#include <pthread.h>
+#include <zlib.h>
+
+static VEC(ai_model_t *) g_models;
+static json_t *g_providers; /* {providers:{id:{...}}, auth:[...]} */
+static json_t *g_defaults;  /* per-api compat defaults */
+static pthread_once_t g_once = PTHREAD_ONCE_INIT;
+
+static char *inflate_buf(const unsigned char *data, size_t len, size_t *out_len) {
+    z_stream zs = {0};
+    if (inflateInit(&zs) != Z_OK) return NULL;
+    sb_t b = SB_INIT;
+    char out[65536];
+    zs.next_in = (Bytef *)data;
+    zs.avail_in = (uInt)len;
+    int r;
+    do {
+        zs.next_out = (Bytef *)out;
+        zs.avail_out = sizeof out;
+        r = inflate(&zs, Z_NO_FLUSH);
+        if (r != Z_OK && r != Z_STREAM_END) {
+            inflateEnd(&zs);
+            sb_free(&b);
+            return NULL;
+        }
+        sb_appendn(&b, out, sizeof out - zs.avail_out);
+    } while (r != Z_STREAM_END);
+    inflateEnd(&zs);
+    *out_len = b.len;
+    return sb_detach(&b);
+}
+
+static json_t *load_embedded_json(const char *name) {
+    size_t len;
+    const char *z = embed_get(name, &len);
+    if (!z) return NULL;
+    size_t n;
+    char *raw = inflate_buf((const unsigned char *)z, len, &n);
+    if (!raw) return NULL;
+    json_t *j = json_parse(raw, n, NULL);
+    free(raw);
+    return j;
+}
+
+static void fill_model(ai_model_t *m) {
+    json_t *r = m->raw;
+    m->id = json_get_str(r, "id");
+    m->name = json_get_str(r, "name");
+    if (!m->name) m->name = m->id;
+    m->api = json_get_str(r, "api");
+    m->provider = json_get_str(r, "provider");
+    m->base_url = json_get_str(r, "baseUrl");
+    if (!m->base_url) m->base_url = "";
+    m->reasoning = json_get_bool(r, "reasoning", false);
+    m->input_image = false;
+    json_t *in = json_get(r, "input"), *it;
+    json_arr_foreach(in, i, it) {
+        if (str_eq(json_sv(it), "image")) m->input_image = true;
+    }
+    json_t *cost = json_get(r, "cost");
+    m->cost_input = json_get_num(cost, "input", 0);
+    m->cost_output = json_get_num(cost, "output", 0);
+    m->cost_cache_read = json_get_num(cost, "cacheRead", 0);
+    m->cost_cache_write = json_get_num(cost, "cacheWrite", 0);
+    m->context_window = json_get_int(r, "contextWindow", 128000);
+    m->max_tokens = json_get_int(r, "maxTokens", 0);
+    if (m->max_tokens <= 0) m->max_tokens = MIN(m->context_window, (int64_t)32000);
+    m->compat = json_get_obj(r, "compat");
+    m->headers = json_get_obj(r, "headers");
+    m->thinking = json_get_obj(r, "thinking");
+}
+
+static ai_model_t *add_model(json_t *obj) {
+    const char *api = json_get_str(obj, "api");
+    json_t *defs = api ? json_get_obj(g_defaults, api) : NULL;
+    if (defs) {
+        json_t *compat = json_get_obj(obj, "compat");
+        json_t *merged = json_clone(defs);
+        if (compat) json_merge(merged, compat);
+        json_set(obj, "compat", merged);
+    }
+    ai_model_t *m = xcalloc(1, sizeof(*m));
+    m->raw = obj;
+    fill_model(m);
+    if (!m->id || !m->api || !m->provider) {
+        json_free(obj);
+        free(m);
+        return NULL;
+    }
+    /* replace existing same provider/id */
+    for (size_t i = 0; i < g_models.n; i++) {
+        ai_model_t *o = g_models.v[i];
+        if (strcmp(o->provider, m->provider) == 0 && strcmp(o->id, m->id) == 0) {
+            /* keep old allocation alive (callers may hold pointers): swap contents */
+            json_t *old = o->raw;
+            *o = *m;
+            free(m);
+            UNUSED(old); /* intentionally leaked: borrowed strings may still be referenced */
+            return o;
+        }
+    }
+    vec_push(&g_models, m);
+    return m;
+}
+
+/* models.yml / models.json custom providers (upstream shape) */
+extern json_t *yaml_parse_file_json(const char *path, char **err) __attribute__((weak));
+
+static json_t *load_custom_models_file(void) {
+    static const char *names[] = {"models.yml", "models.yaml", "models.json"};
+    for (size_t i = 0; i < ARRAY_LEN(names); i++) {
+        char *p = omc_agent_path(names[i]);
+        if (!fs_is_file(p)) {
+            free(p);
+            continue;
+        }
+        json_t *j = NULL;
+        if (str_ends(p, ".json")) {
+            size_t n;
+            char *s = fs_read(p, &n);
+            if (s) j = json_parse(s, n, NULL);
+            free(s);
+        } else if (yaml_parse_file_json) {
+            char *err = NULL;
+            j = yaml_parse_file_json(p, &err);
+            if (err) {
+                LOGW("models config %s: %s", p, err);
+                free(err);
+            }
+        }
+        free(p);
+        if (j) return j;
+    }
+    return NULL;
+}
+
+static void apply_custom(json_t *cfg) {
+    json_t *provs = json_get_obj(cfg, "providers");
+    const char *pid;
+    json_t *pv;
+    json_obj_foreach(provs, i, pid, pv) {
+        const char *base = json_get_str(pv, "baseUrl");
+        const char *api = json_get_str(pv, "api");
+        json_t *headers = json_get_obj(pv, "headers");
+        /* provider-level overrides of bundled models */
+        if (base) {
+            for (size_t k = 0; k < g_models.n; k++) {
+                ai_model_t *m = g_models.v[k];
+                if (strcmp(m->provider, pid) == 0 && (!api || strcmp(m->api, api) == 0)) {
+                    json_set_str(m->raw, "baseUrl", base);
+                    fill_model(m);
+                }
+            }
+        }
+        json_t *ov = json_get_obj(pv, "modelOverrides");
+        const char *mid;
+        json_t *mv;
+        json_obj_foreach(ov, k2, mid, mv) {
+            const ai_model_t *m = catalog_find(pid, mid);
+            if (m) {
+                json_merge(m->raw, mv);
+                fill_model((ai_model_t *)m);
+            }
+        }
+        json_t *models = json_get_arr(pv, "models"), *mm;
+        json_arr_foreach(models, k3, mm) {
+            json_t *o = json_clone(mm);
+            if (!json_get_str(o, "provider")) json_set_str(o, "provider", pid);
+            if (!json_get_str(o, "api")) json_set_str(o, "api", api ? api : "openai-completions");
+            if (!json_get_str(o, "baseUrl") && base) json_set_str(o, "baseUrl", base);
+            if (headers && !json_get(o, "headers")) json_set(o, "headers", json_clone(headers));
+            if (!json_get(o, "input")) {
+                json_t *in = json_arr();
+                json_push_str(in, "text");
+                json_set(o, "input", in);
+            }
+            add_model(o);
+        }
+        /* register provider info for key resolution */
+        json_t *pmap = json_get_obj(g_providers, "providers");
+        if (pmap && !json_get(pmap, pid)) {
+            json_t *info = json_obj();
+            json_set_str(info, "id", pid);
+            json_set(pmap, pid, info);
+        }
+        json_t *info = json_get(pmap, pid);
+        const char *key = json_get_str(pv, "apiKey");
+        if (info && key) json_set_str(info, "configApiKey", key);
+        if (info && headers) json_set(info, "headers", json_clone(headers));
+    }
+}
+
+static void do_init(void) {
+    json_t *cat = load_embedded_json("assets/models.json.z");
+    g_providers = load_embedded_json("assets/providers.json.z");
+    if (!g_providers) g_providers = json_obj();
+    if (!json_get(g_providers, "providers")) json_set(g_providers, "providers", json_obj());
+    if (cat) {
+        g_defaults = json_take(cat, "defaults");
+        json_t *provs = json_get_obj(cat, "providers");
+        const char *pid;
+        json_t *pv;
+        json_obj_foreach(provs, i, pid, pv) {
+            const char *mid;
+            json_t *mv;
+            json_obj_foreach(pv, j, mid, mv) {
+                /* steal the object out of the tree to avoid a deep copy */
+                pv->u.obj.vals[j] = json_null();
+                add_model(mv);
+            }
+        }
+        json_free(cat);
+    } else {
+        LOGE("bundled model catalog missing or corrupt");
+    }
+    json_t *custom = load_custom_models_file();
+    if (custom) {
+        apply_custom(custom);
+        json_free(custom);
+    }
+}
+
+void catalog_init(void) { pthread_once(&g_once, do_init); }
+
+size_t catalog_count(void) {
+    catalog_init();
+    return g_models.n;
+}
+
+const ai_model_t *catalog_at(size_t i) {
+    catalog_init();
+    return i < g_models.n ? g_models.v[i] : NULL;
+}
+
+const ai_model_t *catalog_register(json_t *obj) {
+    catalog_init();
+    return add_model(obj);
+}
+
+const ai_model_t *catalog_find(const char *provider, const char *id) {
+    catalog_init();
+    if (!id) return NULL;
+    for (size_t i = 0; i < g_models.n; i++) {
+        ai_model_t *m = g_models.v[i];
+        if ((!provider || strcmp(m->provider, provider) == 0) && strcmp(m->id, id) == 0) return m;
+    }
+    return NULL;
+}
+
+/* provider preference order when an id is ambiguous */
+static int provider_rank(const char *p) {
+    static const char *order[] = {"anthropic", "openai", "google", "openai-codex", "xai", "groq", "cerebras",
+                                  "mistral", "deepseek", "openrouter"};
+    for (size_t i = 0; i < ARRAY_LEN(order); i++)
+        if (strcmp(order[i], p) == 0) return (int)i;
+    return 100;
+}
+
+static bool provider_has_credentials(const char *p);
+
+const ai_model_t *catalog_resolve(const char *pattern) {
+    catalog_init();
+    if (!pattern || !*pattern) return NULL;
+    const char *slash = strchr(pattern, '/');
+    if (slash) {
+        char *prov = xstrndup(pattern, (size_t)(slash - pattern));
+        const ai_model_t *m = catalog_find(prov, slash + 1);
+        if (!m) {
+            /* fuzzy within provider */
+            const ai_model_t *best = NULL;
+            for (size_t i = 0; i < g_models.n; i++) {
+                ai_model_t *c = g_models.v[i];
+                if (strcmp(c->provider, prov) != 0) continue;
+                if (str_istr(c->id, slash + 1) && (!best || strlen(c->id) < strlen(best->id))) best = c;
+            }
+            m = best;
+        }
+        free(prov);
+        if (m) return m;
+        /* ids like "openrouter-style/vendor/model" */
+        const ai_model_t *exact = catalog_find(NULL, pattern);
+        if (exact) return exact;
+    }
+    /* exact id across providers: prefer authenticated, then provider rank */
+    const ai_model_t *best = NULL;
+    int best_score = 1 << 30;
+    for (size_t i = 0; i < g_models.n; i++) {
+        ai_model_t *m = g_models.v[i];
+        if (strcasecmp(m->id, pattern) != 0) continue;
+        int score = provider_rank(m->provider) + (provider_has_credentials(m->provider) ? 0 : 1000);
+        if (score < best_score) {
+            best = m;
+            best_score = score;
+        }
+    }
+    if (best) return best;
+    /* substring match: shortest id, authenticated first */
+    for (size_t i = 0; i < g_models.n; i++) {
+        ai_model_t *m = g_models.v[i];
+        if (!str_istr(m->id, pattern) && !str_istr(m->name, pattern)) continue;
+        int score = (int)strlen(m->id) * 4 + provider_rank(m->provider) + (provider_has_credentials(m->provider) ? 0 : 5000);
+        if (score < best_score) {
+            best = m;
+            best_score = score;
+        }
+    }
+    return best;
+}
+
+json_t *catalog_provider_info(const char *provider) {
+    catalog_init();
+    return json_get(json_get_obj(g_providers, "providers"), provider);
+}
+
+json_t *catalog_auth_providers(void) {
+    catalog_init();
+    return json_get_arr(g_providers, "auth");
+}
+
+const char *catalog_provider_default_model(const char *provider) {
+    return json_get_str(catalog_provider_info(provider), "defaultModel");
+}
+
+bool model_compat_bool(const ai_model_t *m, const char *key, bool def) {
+    if (!m || !m->compat) return def;
+    return json_get_bool(m->compat, key, def);
+}
+
+const char *model_compat_str(const ai_model_t *m, const char *key) {
+    if (!m || !m->compat) return NULL;
+    return json_get_str(m->compat, key);
+}
+
+bool model_supports_effort(const ai_model_t *m, ai_effort_t e) {
+    if (e == EFFORT_OFF) return true;
+    if (!m || !m->reasoning) return false;
+    json_t *efforts = json_get_arr(m->thinking, "efforts");
+    if (!efforts) return e <= EFFORT_HIGH;
+    json_t *it;
+    json_arr_foreach(efforts, i, it) {
+        if (str_eq(json_sv(it), effort_name(e))) return true;
+    }
+    return false;
+}
+
+ai_effort_t model_clamp_effort(const ai_model_t *m, ai_effort_t e) {
+    if (e == EFFORT_OFF || !m || !m->reasoning) return m && m->reasoning ? e : EFFORT_OFF;
+    if (model_supports_effort(m, e)) return e;
+    /* nearest lower supported, else nearest higher */
+    for (int k = (int)e - 1; k >= EFFORT_MINIMAL; k--)
+        if (model_supports_effort(m, (ai_effort_t)k)) return (ai_effort_t)k;
+    for (int k = (int)e + 1; k <= EFFORT_MAX; k++)
+        if (model_supports_effort(m, (ai_effort_t)k)) return (ai_effort_t)k;
+    return e;
+}
+
+/* ---------- env api keys ---------- */
+
+static const struct {
+    const char *provider;
+    const char *env;
+} legacy_env[] = {
+    {"azure-openai-responses", "AZURE_OPENAI_API_KEY"},
+    {"jina", "JINA_API_KEY"},
+    {"brave", "BRAVE_API_KEY"},
+    {"tinyfish", "TINYFISH_API_KEY"},
+    {"firecrawl", "FIRECRAWL_API_KEY"},
+    {"anthropic", "ANTHROPIC_OAUTH_TOKEN"},
+    {"google", "GOOGLE_API_KEY"},
+    {"github-copilot", "COPILOT_GITHUB_TOKEN"},
+};
+
+const char *ai_env_api_key_name(const char *provider) {
+    json_t *info = catalog_provider_info(provider);
+    json_t *vars = json_get_arr(info, "envVars"), *v;
+    json_arr_foreach(vars, i, v) {
+        if (json_is_str(v) && env_get(json_sv(v))) return json_sv(v);
+    }
+    if (vars && json_len(vars)) return json_sv(json_at(vars, 0));
+    for (size_t i = 0; i < ARRAY_LEN(legacy_env); i++)
+        if (strcmp(legacy_env[i].provider, provider) == 0) return legacy_env[i].env;
+    return NULL;
+}
+
+char *ai_env_api_key(const char *provider) {
+    json_t *info = catalog_provider_info(provider);
+    json_t *vars = json_get_arr(info, "envVars"), *v;
+    json_arr_foreach(vars, i, v) {
+        const char *val = json_is_str(v) ? env_get(json_sv(v)) : NULL;
+        if (val) return xstrdup(val);
+    }
+    for (size_t i = 0; i < ARRAY_LEN(legacy_env); i++) {
+        if (strcmp(legacy_env[i].provider, provider) == 0) {
+            const char *val = env_get(legacy_env[i].env);
+            if (val) return xstrdup(val);
+        }
+    }
+    /* models.yml apiKey: env var name or literal */
+    const char *ck = json_get_str(info, "configApiKey");
+    if (ck) {
+        const char *ev = env_get(ck);
+        if (ev) return xstrdup(ev);
+        if (ck[0] == '!') return proc_shell_capture(ck + 1, NULL, 10000);
+        return xstrdup(ck);
+    }
+    return NULL;
+}
+
+/* hook implemented by the auth module; weak so ai can link standalone */
+extern bool auth_has_credentials(const char *provider) __attribute__((weak));
+
+static bool provider_has_credentials(const char *p) {
+    if (auth_has_credentials && auth_has_credentials(p)) return true;
+    char *k = ai_env_api_key(p);
+    bool ok = k != NULL;
+    free(k);
+    return ok;
+}

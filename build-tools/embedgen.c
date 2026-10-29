@@ -13,7 +13,7 @@ int main(int argc, char **argv) {
         if (!f) { perror(argv[i]); return 1; }
         fprintf(out, "static const unsigned char e%d[] = {", i);
         int c; size_t n = 0;
-        while ((c = fgetc(f)) != EOF) { fprintf(out, "%s%d", n % 40 ? "," : ",\n", c); n++; }
+        while ((c = fgetc(f)) != EOF) { if (n) fputc(',', out); if (n % 40 == 0) fputc('\n', out); fprintf(out, "%d", c); n++; }
         fprintf(out, "%s0};\n", n ? "," : "");
         fclose(f);
     }

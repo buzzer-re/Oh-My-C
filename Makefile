@@ -3,7 +3,7 @@ CC      ?= cc
 PKG     ?= pkg-config
 OPT     ?= -O2
 CFLAGS  ?= $(OPT) -g
-CFLAGS  += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wshadow=local \
+CFLAGS  += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-unused-but-set-variable -Wshadow=local \
            -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -Isrc -MMD -MP
 LDFLAGS += -pie -Wl,-z,relro,-z,now
 LIBS    += $(shell $(PKG) --libs openssl 2>/dev/null || echo -lssl -lcrypto) -lz -lpthread -lm

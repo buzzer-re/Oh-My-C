@@ -42,6 +42,8 @@ void proc_result_free(proc_result_t *r);
 char *proc_capture(const char *const *argv, const char *cwd, int64_t timeout_ms);
 const char *proc_shell_path(void); /* bash if available, else /bin/sh */
 int proc_shell(const char *cmd, const proc_opts_t *opts, proc_result_t *res); /* bash -c / sh -c */
+/* run a shell command, return trimmed stdout if exit 0 (owned) else NULL */
+char *proc_shell_capture(const char *cmd, const char *cwd, int64_t timeout_ms);
 
 /* long-lived child with pipes (LSP, MCP stdio, RPC peers) */
 typedef struct {

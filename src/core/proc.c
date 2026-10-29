@@ -274,6 +274,11 @@ int proc_shell(const char *cmd, const proc_opts_t *o, proc_result_t *res) {
     return proc_run(argv, o, res);
 }
 
+char *proc_shell_capture(const char *cmd, const char *cwd, int64_t timeout_ms) {
+    const char *argv[] = {proc_shell_path(), "-c", cmd, NULL};
+    return proc_capture(argv, cwd, timeout_ms);
+}
+
 /* ---------- long-lived child ---------- */
 
 int child_spawn(const char *const *argv, const char *cwd, const char *const *env_extra, bool capture_stderr,

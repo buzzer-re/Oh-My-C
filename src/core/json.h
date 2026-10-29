@@ -98,11 +98,12 @@ char *json_quote(const char *s);
 /* object merge (deep): copies entries from src into dst */
 void json_merge(json_t *dst, const json_t *src);
 
-#define json_arr_foreach(arr, idx, item) \
-    for (size_t idx = 0; json_is_arr(arr) && idx < (arr)->u.arr.n && ((item) = (arr)->u.arr.items[idx], 1); idx++)
-#define json_obj_foreach(obj, idx, k, v)                                                         \
-    for (size_t idx = 0; json_is_obj(obj) && idx < (obj)->u.obj.n &&                             \
-                         ((k) = (obj)->u.obj.keys[idx], (v) = (obj)->u.obj.vals[idx], 1);        \
-         idx++)
+#define json_arr_foreach(A_, IDX_, ITEM_)                                                        \
+    for (size_t IDX_ = 0; json_is_arr(A_) && IDX_ < (A_)->u.arr.n && ((ITEM_) = (A_)->u.arr.items[IDX_], 1); \
+         IDX_++)
+#define json_obj_foreach(O_, IDX_, K_, V_)                                                       \
+    for (size_t IDX_ = 0; json_is_obj(O_) && IDX_ < (O_)->u.obj.n &&                             \
+                          ((K_) = (O_)->u.obj.keys[IDX_], (V_) = (O_)->u.obj.vals[IDX_], 1);     \
+         IDX_++)
 
 #endif
