@@ -63,6 +63,8 @@ typedef struct tool_env {
     /* called after write/edit lands a file; returns owned text appended to the result (e.g. LSP diagnostics) */
     char *(*after_write)(struct tool_env *env, const char *abs_path);
     char *local_dir;           /* root for local:// session artifacts */
+    /* one-shot model completion (judge role) for tools like find; owned text or NULL */
+    char *(*complete)(struct tool_env *env, const char *system, const char *user);
     /* write to xd://propose (plan approval); returns owned result text, sets *is_error */
     char *(*propose_plan)(struct tool_env *env, const char *content, bool *is_error);
     /* spawn a subagent: returns owned final text; used by task tool (set by app) */
@@ -100,6 +102,7 @@ agent_tool_t *tool_web_search_new(tool_env_t *env);
 agent_tool_t *tool_task_new(tool_env_t *env);
 agent_tool_t *tool_eval_new(tool_env_t *env); /* NULL if no Python */
 agent_tool_t *tool_ast_grep_new(tool_env_t *env);
+agent_tool_t *tool_find_new(tool_env_t *env);
 agent_tool_t *tool_ast_edit_new(tool_env_t *env);
 /* finalize a staged ast_edit proposal (xd://resolve / xd://reject) */
 char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_error);

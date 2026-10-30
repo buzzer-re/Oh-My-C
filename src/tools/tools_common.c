@@ -281,7 +281,7 @@ void format_hashline_header(sb_t *b, const char *display_path, const char *tag) 
 /* ---------- registration ---------- */
 
 static const char *const DEFAULT_TOOLS[] = {"read", "write", "edit", "bash", "grep", "glob", "todo", "ask",
-                                            "web_search", "task", "eval", "ast_grep", "ast_edit", NULL};
+                                            "web_search", "task", "eval", "ast_grep", "ast_edit", "find", NULL};
 
 const char *const *tools_default_names(void) { return DEFAULT_TOOLS; }
 
@@ -294,7 +294,7 @@ static const struct {
     {"bash", tool_bash_new},   {"grep", tool_grep_new},   {"glob", tool_glob_new},
     {"todo", tool_todo_new},   {"ask", tool_ask_new},     {"web_search", tool_web_search_new},
     {"task", tool_task_new},   {"eval", tool_eval_new},   {"ast_grep", tool_ast_grep_new},
-    {"ast_edit", tool_ast_edit_new},
+    {"ast_edit", tool_ast_edit_new}, {"find", tool_find_new},
 };
 
 void tools_register_builtin(agent_t *a, tool_env_t *env, const strvec_t *enabled) {

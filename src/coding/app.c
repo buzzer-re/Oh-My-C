@@ -387,6 +387,16 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
 
 /* ---------- setup ---------- */
 
+static char *app_tool_complete(tool_env_t *env, const char *system, const char *user) {
+    app_t *a = env->session;
+    const ai_model_t *m = NULL;
+    const char *role = settings_str("modelRoles.judge", NULL);
+    if (!role) role = settings_str("modelRoles.smol", NULL);
+    if (role) m = app_resolve_model_pattern(role, NULL, NULL);
+    if (!m) m = a->model;
+    return app_complete_text(a, m, system, user, EFFORT_OFF);
+}
+
 static char *app_after_write(tool_env_t *env, const char *abs) {
     app_t *a = env->session;
     if (!a || !a->lsp || !settings_bool("lsp.diagnosticsOnWrite", true)) return NULL;
@@ -536,6 +546,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     a->env->subagent_depth = o->subagent_depth;
     a->env->session = a;
     a->env->run_subagent = app_run_subagent;
+    a->env->complete = app_tool_complete;
     discover_all(a->cwd, &a->disc, o->no_context_files, o->no_skills, o->no_rules);
     a->env->disc = &a->disc;
     a->ttsr = ttsr_new(&a->disc);
