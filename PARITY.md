@@ -43,7 +43,7 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 ## Tools
 | Tool | Status | Notes |
 |---|---|---|
-| read (selectors, hashline anchors, summaries, dirs, images, URLs, skill:// rule:// artifact:// local:// pr:// issue://) | ✅ | archives/sqlite/pdf/notebooks ❌ |
+| read (selectors, hashline anchors, summaries, dirs, images, URLs, skill:// rule:// artifact:// local:// pr:// issue://; zip/jar/whl/tar/tar.gz/gz members, SQLite tables/rows/`?where=`/`?q=SELECT` via an on-disk-format parser with WAL overlay, PDF text with page selection, `.ipynb` cells) | ✅ | other archive codecs (bz2/xz/zst/7z/rar/iso/...) ❌; SQLite `?q=` is single-table SELECT only (no JOIN/GROUP BY/subqueries); encrypted PDFs, OCR of image-only pages and `:pageN.png` page rendering ❌ (`:pageN.png` returns that page's extracted text) |
 | write, edit (hashline PUT/CUT/REM/MV, registers, block anchors; replace mode) | ✅ | apply_patch/patch/sloppy modes ❌ |
 | bash (persistent shell session, timeouts, PTY, artifact spill, `async` background jobs delivered as follow-ups / idle wake-up, `wait` tool, `/jobs`) | ✅ | services (launch), async task jobs ❌ |
 | grep, glob | ✅ | |

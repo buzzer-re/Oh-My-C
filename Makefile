@@ -45,8 +45,9 @@ T_test_providers_oai := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provi
                         $(O)/ai/provider_openai_responses.o $(O)/ai/provider_ollama.o
 T_test_http          := $(CORE_OBJ) $(NET_OBJ)
 T_test_providers_bedrock := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/aws.o $(O)/ai/provider_bedrock.o
+T_test_readfmt       := $(CORE_OBJ) $(O)/tools/readfmt.o
 T_tui_demo           := $(T_test_tui)
-UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock
+UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt
 
 .SECONDEXPANSION:
 build/tests/%: tests/%.c $$(T_$$*)
