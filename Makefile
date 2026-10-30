@@ -28,7 +28,7 @@ build/embedgen: build-tools/embedgen.c
 
 EMBED_FILES := $(shell find prompts assets -type f 2>/dev/null | LC_ALL=C sort)
 build/embedded.c: build/embedgen $(EMBED_FILES)
-	./build/embedgen $@ $(EMBED_FILES)
+	@./build/embedgen $@ $(EMBED_FILES)
 
 build/obj/embedded.o: build/embedded.c
 	@mkdir -p $(dir $@)

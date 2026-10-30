@@ -122,6 +122,7 @@ char *utf8_sanitize(const char *s, size_t len); /* replace invalid sequences wit
 /* ---------- hashing ---------- */
 uint64_t hash_fnv1a(const void *data, size_t len);
 uint64_t hash_xx64(const void *data, size_t len, uint64_t seed);
+uint32_t hash_xx32(const void *data, size_t len, uint32_t seed);
 
 /* ---------- string -> pointer hash map ---------- */
 typedef struct {

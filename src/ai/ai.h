@@ -51,7 +51,8 @@ typedef struct ai_model {
     double cost_input, cost_output, cost_cache_read, cost_cache_write; /* $ per 1M tokens */
     int64_t context_window;
     int64_t max_tokens;
-    json_t *compat;     /* borrowed from raw (may be NULL) */
+    json_t *compat;     /* per-model compat overrides, borrowed from raw (may be NULL); use model_compat_get */
+    json_t *compat_defaults; /* per-api defaults (borrowed, may be NULL) */
     json_t *headers;    /* borrowed */
     json_t *thinking;   /* borrowed: {mode, efforts[], defaultLevel?} */
 } ai_model_t;
@@ -67,6 +68,7 @@ const char *catalog_provider_default_model(const char *provider);
 json_t *catalog_provider_info(const char *provider);   /* borrowed: {id, envVars, defaultModel, ...} */
 json_t *catalog_auth_providers(void);                  /* borrowed array of OAuth login descriptors */
 const ai_model_t *catalog_register(json_t *model_obj); /* takes ownership; for custom/discovered models */
+json_t *model_compat_get(const ai_model_t *m, const char *key); /* override, else api default (borrowed) */
 bool model_compat_bool(const ai_model_t *m, const char *key, bool def);
 const char *model_compat_str(const ai_model_t *m, const char *key);
 bool model_supports_effort(const ai_model_t *m, ai_effort_t e);

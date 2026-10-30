@@ -1,0 +1,730 @@
+/* test_tui.c - unit tests for src/tui */
+#include "core/core.h"
+#include "core/json.h"
+#include "tui/ansi.h"
+#include "tui/components.h"
+#include "tui/editor.h"
+#include "tui/keys.h"
+#include "tui/markdown.h"
+#include "tui/render.h"
+#include "tui/term.h"
+#include "tui/theme.h"
+
+#include <fcntl.h>
+#include <unistd.h>
+
+static int failures, checks;
+
+#define CHECK(cond)                                                          \
+    do {                                                                     \
+        checks++;                                                            \
+        if (!(cond)) {                                                       \
+            failures++;                                                      \
+            fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond); \
+        }                                                                    \
+    } while (0)
+
+#define CHECK_STR(a, b)                                                                     \
+    do {                                                                                    \
+        checks++;                                                                           \
+        const char *a_ = (a), *b_ = (b);                                                    \
+        if (!str_eq(a_, b_)) {                                                              \
+            failures++;                                                                     \
+            fprintf(stderr, "%s:%d: expected \"%s\" got \"%s\"\n", __FILE__, __LINE__, b_, a_ ? a_ : "(null)"); \
+        }                                                                                   \
+    } while (0)
+
+/* ---------- keys ---------- */
+
+static void key_id_of(const char *bytes, char *buf, size_t cap) {
+    tui_key_t k[4];
+    size_t n = tui_keys_decode_all(bytes, strlen(bytes), k, 4);
+    buf[0] = 0;
+    if (n >= 1) tui_key_id(&k[0], buf, cap);
+    for (size_t i = 0; i < n; i++) tui_key_free(&k[i]);
+}
+
+static void test_keys(void) {
+    char id[64];
+    struct {
+        const char *in, *id;
+    } cases[] = {
+        {"a", "a"},
+        {"A", "shift+a"},
+        {"\x03", "ctrl+c"},
+        {"\x01", "ctrl+a"},
+        {"\r", "enter"},
+        {"\n", "ctrl+j"},
+        {"\t", "tab"},
+        {"\x7f", "backspace"},
+        {"\x1b[A", "up"},
+        {"\x1bOB", "down"},
+        {"\x1b[1;5C", "ctrl+right"},
+        {"\x1b[1;3D", "alt+left"},
+        {"\x1b[3~", "delete"},
+        {"\x1b[3;5~", "ctrl+delete"},
+        {"\x1b[5~", "pageup"},
+        {"\x1b[6~", "pagedown"},
+        {"\x1b[H", "home"},
+        {"\x1b[F", "end"},
+        {"\x1b[1~", "home"},
+        {"\x1bOP", "f1"},
+        {"\x1b[15~", "f5"},
+        {"\x1b[24~", "f12"},
+        {"\x1b[Z", "shift+tab"},
+        {"\x1b" "b", "alt+b"},
+        {"\x1b\r", "alt+enter"},
+        {"\x1b\x7f", "alt+backspace"},
+        {"\x1b[13;2u", "shift+enter"},
+        {"\x1b[99;5u", "ctrl+c"},
+        {"\x1b[97;7u", "ctrl+alt+a"},
+        {"\x1b[27;5;13~", "ctrl+enter"},
+        {"\x1b[27u", "escape"},
+        {"\x1b[127;5u", "ctrl+backspace"},
+        {"\x1b[1;2A", "shift+up"},
+        {"\x1f", "ctrl+_"},
+        {"\x1b", "escape"},
+    };
+    for (size_t i = 0; i < ARRAY_LEN(cases); i++) {
+        key_id_of(cases[i].in, id, sizeof id);
+        CHECK_STR(id, cases[i].id);
+    }
+
+    /* utf-8 text */
+    tui_key_t k[8];
+    size_t n = tui_keys_decode_all("\xc3\xa9x", 3, k, 8);
+    CHECK(n == 2);
+    CHECK(k[0].kind == TUI_KEY_CHAR && k[0].codepoint == 0xE9);
+    CHECK_STR(tui_key_text(&k[0]), "\xc3\xa9");
+    for (size_t i = 0; i < n; i++) tui_key_free(&k[i]);
+
+    /* kitty shifted letter carries uppercase text */
+    n = tui_keys_decode_all("\x1b[97;2u", 7, k, 8);
+    CHECK(n == 1 && tui_key_text(&k[0]) && !strcmp(tui_key_text(&k[0]), "A"));
+    tui_key_id(&k[0], id, sizeof id);
+    CHECK_STR(id, "shift+a");
+    tui_key_free(&k[0]);
+
+    /* release events are dropped */
+    n = tui_keys_decode_all("\x1b[97;1:3u" "b", 10, k, 8);
+    CHECK(n == 1 && k[0].codepoint == 'b');
+    for (size_t i = 0; i < n; i++) tui_key_free(&k[i]);
+
+    /* bracketed paste */
+    const char *p = "x\x1b[200~hello\r\nworld\x1b[201~y";
+    n = tui_keys_decode_all(p, strlen(p), k, 8);
+    CHECK(n == 3);
+    CHECK(k[1].kind == TUI_KEY_PASTE);
+    CHECK_STR(k[1].text, "hello\r\nworld");
+    CHECK(k[2].codepoint == 'y');
+    for (size_t i = 0; i < n; i++) tui_key_free(&k[i]);
+
+    /* focus + responses */
+    n = tui_keys_decode_all("\x1b[I\x1b[?1u\x1b[?62;22c\x1b]11;rgb:0000/0000/0000\x07", 40, k, 8);
+    CHECK(n == 4);
+    CHECK(k[0].kind == TUI_KEY_FOCUS_IN);
+    CHECK(k[1].kind == TUI_KEY_RESPONSE && k[2].kind == TUI_KEY_RESPONSE && k[3].kind == TUI_KEY_RESPONSE);
+    for (size_t i = 0; i < n; i++) tui_key_free(&k[i]);
+
+    /* split sequence across feeds + escape timeout */
+    tui_keydec_t d;
+    tui_keydec_init(&d);
+    tui_key_t key;
+    tui_keydec_feed(&d, "\x1b[", 2);
+    CHECK(!tui_keydec_next(&d, &key, 1000));
+    CHECK(tui_keydec_timeout_ms(&d, 1000) == TUI_ESC_TIMEOUT_MS);
+    tui_keydec_feed(&d, "B", 1);
+    CHECK(tui_keydec_next(&d, &key, 1001) && key.kind == TUI_KEY_DOWN);
+    tui_key_free(&key);
+    tui_keydec_feed(&d, "\x1b", 1);
+    CHECK(!tui_keydec_next(&d, &key, 2000));
+    CHECK(!tui_keydec_next(&d, &key, 2000 + TUI_ESC_TIMEOUT_MS - 1));
+    CHECK(tui_keydec_next(&d, &key, 2000 + TUI_ESC_TIMEOUT_MS) && key.kind == TUI_KEY_ESCAPE);
+    tui_key_free(&key);
+    /* split paste */
+    tui_keydec_feed(&d, "\x1b[200~abc", 9);
+    CHECK(!tui_keydec_next(&d, &key, 3000));
+    tui_keydec_feed(&d, "def\x1b[20", 7);
+    CHECK(!tui_keydec_next(&d, &key, 3000));
+    tui_keydec_feed(&d, "1~", 2);
+    CHECK(tui_keydec_next(&d, &key, 3000) && key.kind == TUI_KEY_PASTE);
+    CHECK_STR(key.text, "abcdef");
+    tui_key_free(&key);
+    tui_keydec_free(&d);
+
+    /* matcher */
+    n = tui_keys_decode_all("\x03", 1, k, 8);
+    CHECK(tui_key_matches(&k[0], "ctrl+c"));
+    CHECK(tui_key_matches(&k[0], "Ctrl+C") == false); /* uppercase letter implies shift */
+    CHECK(tui_key_matches(&k[0], "control+c"));
+    CHECK(!tui_key_matches(&k[0], "ctrl+d"));
+    tui_key_free(&k[0]);
+    n = tui_keys_decode_all("\x1b[1;6A", 6, k, 8);
+    CHECK(tui_key_matches(&k[0], "shift+ctrl+up"));
+    CHECK(tui_key_matches(&k[0], "ctrl+shift+up"));
+    tui_key_free(&k[0]);
+    n = tui_keys_decode_all("?", 1, k, 8);
+    CHECK(tui_key_matches(&k[0], "?"));
+    tui_key_free(&k[0]);
+
+    char canon[64];
+    CHECK(tui_key_canonical("Alt+Shift+P", canon, sizeof canon));
+    CHECK_STR(canon, "shift+alt+p");
+    CHECK(tui_key_canonical("esc", canon, sizeof canon));
+    CHECK_STR(canon, "escape");
+    CHECK(!tui_key_canonical("hyper+x", canon, sizeof canon));
+
+    /* keybindings: defaults + JSON override */
+    tui_keybindings_t *kb = tui_keybindings_new();
+    n = tui_keys_decode_all("\x1b\r", 2, k, 8);
+    CHECK(tui_keybindings_matches(kb, &k[0], "tui.input.newLine"));
+    CHECK(!tui_keybindings_matches(kb, &k[0], "tui.input.submit"));
+    tui_key_free(&k[0]);
+    json_t *j = json_parse_str("{\"tui.input.submit\": [\"ctrl+s\", \"Enter\"], \"tui.editor.yank\": []}");
+    CHECK(tui_keybindings_load_json(kb, j) == 2);
+    json_free(j);
+    n = tui_keys_decode_all("\x13", 1, k, 8);
+    CHECK(tui_keybindings_matches(kb, &k[0], "tui.input.submit"));
+    tui_key_free(&k[0]);
+    n = tui_keys_decode_all("\x19", 1, k, 8);
+    CHECK(!tui_keybindings_matches(kb, &k[0], "tui.editor.yank"));
+    tui_key_free(&k[0]);
+    tui_keybindings_free(kb);
+}
+
+/* ---------- ansi utils ---------- */
+
+static void test_ansi(void) {
+    CHECK(tui_visible_width("hello") == 5);
+    CHECK(tui_visible_width("\x1b[31mhello\x1b[0m") == 5);
+    CHECK(tui_visible_width("\xe6\x97\xa5\xe6\x9c\xac") == 4);
+    CHECK(tui_visible_width("a" TUI_CURSOR_MARKER "b") == 2);
+    CHECK(tui_visible_width("\x1b]8;;http://x\x07link\x1b]8;;\x07") == 4);
+    CHECK(tui_visible_width("a\tb") == 2 + TUI_TAB_WIDTH);
+
+    char *t = tui_truncate_to_width("hello world", 8, NULL);
+    CHECK(tui_visible_width(t) == 8);
+    char *plain = tui_strip_ansi(t);
+    CHECK_STR(plain, "hello w\xe2\x80\xa6");
+    free(plain);
+    free(t);
+    t = tui_truncate_to_width("short", 10, NULL);
+    CHECK_STR(t, "short");
+    free(t);
+    t = tui_truncate_to_width("\x1b[1mbold text here\x1b[0m", 6, "");
+    plain = tui_strip_ansi(t);
+    CHECK_STR(plain, "bold t");
+    CHECK(str_starts(t, "\x1b[1m"));
+    free(plain);
+    free(t);
+    /* wide chars never split */
+    t = tui_truncate_to_width("\xe6\x97\xa5\xe6\x97\xa5\xe6\x97\xa5", 5, "");
+    CHECK(tui_visible_width(t) == 4);
+    free(t);
+
+    strvec_t w = {0};
+    tui_wrap_text_with_ansi("the quick brown fox jumps", 10, &w);
+    CHECK(w.n == 3);
+    if (w.n == 3) {
+        CHECK_STR(w.v[0], "the quick");
+        CHECK_STR(w.v[1], "brown fox");
+        CHECK_STR(w.v[2], "jumps");
+    }
+    strvec_free(&w);
+    /* SGR state carried to the next line */
+    tui_wrap_text_with_ansi("\x1b[31mred words wrap here\x1b[0m", 9, &w);
+    CHECK(w.n >= 2);
+    if (w.n >= 2) {
+        CHECK(str_starts(w.v[1], "\x1b[31m"));
+        CHECK(str_ends(w.v[0], "\x1b[0m"));
+    }
+    for (size_t i = 0; i < w.n; i++) CHECK(tui_visible_width(w.v[i]) <= 9);
+    strvec_free(&w);
+    /* long word broken */
+    tui_wrap_text_with_ansi("abcdefghijklmnop", 5, &w);
+    CHECK(w.n == 4);
+    if (w.n == 4) CHECK_STR(w.v[3], "p");
+    strvec_free(&w);
+    /* explicit newlines */
+    tui_wrap_text_with_ansi("a\n\nb", 10, &w);
+    CHECK(w.n == 3);
+    strvec_free(&w);
+
+    char *pd = tui_pad_to_width("\x1b[1mab\x1b[0m", 5);
+    CHECK(tui_visible_width(pd) == 5 && str_ends(pd, "   "));
+    free(pd);
+
+    char *sl = tui_slice_cols("\x1b[32mhello world\x1b[0m", 6, 5);
+    char *sp = tui_strip_ansi(sl);
+    CHECK_STR(sp, "world");
+    CHECK(str_starts(sl, "\x1b[32m"));
+    free(sp);
+    free(sl);
+    char *rt = tui_replace_tabs("a\tb");
+    CHECK_STR(rt, "a   b");
+    free(rt);
+}
+
+/* ---------- theme ---------- */
+
+static void test_theme(void) {
+    tui_theme_t *th = tui_theme_builtin("dark", TUI_COLOR_TRUECOLOR);
+    CHECK(th != NULL);
+    CHECK_STR(th->fg[TUI_TC_ACCENT], "\x1b[38;2;254;188;56m");
+    CHECK_STR(th->fg[TUI_TC_TEXT], "\x1b[39m");
+    CHECK_STR(th->fg[TUI_TC_STATUS_LINE_SEP], "\x1b[38;5;244m");
+    CHECK(th->nspinner == 8);
+    tui_theme_free(th);
+    th = tui_theme_builtin("light", TUI_COLOR_256);
+    CHECK(th && strstr(th->fg[TUI_TC_ACCENT], "38;5;"));
+    tui_theme_free(th);
+    CHECK(tui_rgb_to_256(255, 0, 0) == 196);
+    CHECK(tui_rgb_to_256(128, 128, 128) == 244);
+    CHECK(tui_theme_slot_from_name("mdHeading") == TUI_TC_MD_HEADING);
+    char *err = NULL;
+    json_t *j = json_parse_str("{\"name\":\"x\",\"colors\":{\"accent\":\"#ff0000\"}}");
+    th = tui_theme_from_json(j, TUI_COLOR_TRUECOLOR, &err);
+    CHECK(th == NULL && err && strstr(err, "missing required colors"));
+    free(err);
+    json_free(j);
+}
+
+/* ---------- markdown ---------- */
+
+static strvec_t md_plain(const char *src, int width) {
+    tui_md_opts_t o;
+    tui_md_opts_default(&o);
+    strvec_t lines = {0}, plain = {0};
+    tui_md_render(src, width, &o, &lines);
+    for (size_t i = 0; i < lines.n; i++) {
+        CHECK(tui_visible_width(lines.v[i]) <= width);
+        strvec_push_own(&plain, tui_strip_ansi(lines.v[i]));
+    }
+    strvec_free(&lines);
+    return plain;
+}
+
+static bool has_line(const strvec_t *v, const char *s) {
+    for (size_t i = 0; i < v->n; i++)
+        if (!strcmp(v->v[i], s)) return true;
+    return false;
+}
+
+static void test_markdown(void) {
+    tui_theme_set(tui_theme_builtin("dark", TUI_COLOR_TRUECOLOR));
+    const char *doc = "# Title\n"
+                      "\n"
+                      "Some **bold** and *italic* text with `code` and a [link](https://example.com).\n"
+                      "\n"
+                      "- item one\n"
+                      "- item two\n"
+                      "  - nested\n"
+                      "1. first\n"
+                      "2. second\n"
+                      "\n"
+                      "> quoted text\n"
+                      "\n"
+                      "```c\n"
+                      "int main(void) { return 0; }\n"
+                      "```\n"
+                      "\n"
+                      "| Name | Value |\n"
+                      "|------|------:|\n"
+                      "| a    | 1     |\n"
+                      "\n"
+                      "---\n"
+                      "### Sub\n";
+    strvec_t p = md_plain(doc, 60);
+    CHECK(p.n > 10);
+    CHECK(has_line(&p, "Title"));
+    CHECK(has_line(&p, "Some bold and italic text with code and a link."));
+    CHECK(has_line(&p, "- item one"));
+    CHECK(has_line(&p, "  - nested"));
+    CHECK(has_line(&p, "1. first"));
+    CHECK(has_line(&p, "2. second"));
+    CHECK(has_line(&p, "\xe2\x94\x82 quoted text"));
+    CHECK(has_line(&p, "```c"));
+    CHECK(has_line(&p, "  int main(void) { return 0; }"));
+    CHECK(has_line(&p, "\xe2\x94\x8c\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\xac"
+                       "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x90"));
+    CHECK(has_line(&p, "\xe2\x94\x82 Name \xe2\x94\x82 Value \xe2\x94\x82"));
+    CHECK(has_line(&p, "\xe2\x94\x82 a    \xe2\x94\x82     1 \xe2\x94\x82"));
+    CHECK(has_line(&p, "### Sub"));
+    /* title followed by blank line */
+    CHECK(p.n >= 2 && !strcmp(p.v[0], "Title") && !strcmp(p.v[1], ""));
+    strvec_free(&p);
+
+    /* raw output checks: bold SGR, OSC 8 link, keyword coloring */
+    tui_md_opts_t o;
+    tui_md_opts_default(&o);
+    strvec_t raw = {0};
+    tui_md_render(doc, 60, &o, &raw);
+    char *all = strvec_join(&raw, "\n");
+    CHECK(strstr(all, "\x1b[1mbold") != NULL);
+    CHECK(strstr(all, "\x1b]8;;https://example.com\a") != NULL);
+    CHECK(strstr(all, "\x1b[38;2;86;156;214mreturn") != NULL); /* syntaxKeyword #569CD6 */
+    free(all);
+    strvec_free(&raw);
+
+    /* streaming: unclosed fence renders without crashing */
+    p = md_plain("text\n```python\ndef f():\n    pass", 40);
+    CHECK(has_line(&p, "  def f():"));
+    strvec_free(&p);
+
+    /* wrapping keeps widths */
+    p = md_plain("word word word word word word word word word word word word", 20);
+    CHECK(p.n == 3);
+    strvec_free(&p);
+
+    /* narrow table falls back */
+    p = md_plain("| a | b | c | d |\n|---|---|---|---|\n| 1 | 2 | 3 | 4 |", 8);
+    CHECK(p.n >= 2);
+    strvec_free(&p);
+
+    /* deep nesting is bounded */
+    sb_t deep = SB_INIT;
+    for (int i = 0; i < 500; i++) sb_append(&deep, "> ");
+    sb_append(&deep, "deep");
+    p = md_plain(sb_cstr(&deep), 40);
+    CHECK(p.n >= 1);
+    strvec_free(&p);
+    sb_clear(&deep);
+    for (int i = 0; i < 300; i++) {
+        sb_repeat(&deep, "  ", i);
+        sb_append(&deep, "- x\n");
+    }
+    p = md_plain(sb_cstr(&deep), 2000);
+    CHECK(p.n >= 1);
+    strvec_free(&p);
+    sb_free(&deep);
+
+    /* emphasis edge cases */
+    char *s = tui_md_inline("snake_case_name and a * b * c", NULL);
+    char *sp = tui_strip_ansi(s);
+    CHECK_STR(sp, "snake_case_name and a * b * c");
+    free(sp);
+    free(s);
+}
+
+/* ---------- editor ---------- */
+
+static void feed(tui_editor_t *ed, const char *bytes) {
+    tui_key_t k[256];
+    size_t n = tui_keys_decode_all(bytes, strlen(bytes), k, 256);
+    for (size_t i = 0; i < n; i++) {
+        tui_editor_handle_key(ed, &k[i]);
+        tui_key_free(&k[i]);
+    }
+}
+
+static void check_text(tui_editor_t *ed, const char *expect) {
+    char *t = tui_editor_get_text(ed);
+    CHECK_STR(t, expect);
+    free(t);
+}
+
+static char *g_submitted;
+static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
+    free(g_submitted);
+    g_submitted = xstrdup(text);
+}
+
+static bool fake_provider(void *ud, const char *before, bool first_line, bool forced, tui_ac_result_t *out) {
+    if (first_line && before[0] == '/' && !strchr(before, ' ')) {
+        tui_ac_result_add(out, "/help ", "/help", "Show help");
+        tui_ac_result_add(out, "/model ", "/model", "Pick model");
+        out->prefix_len = strlen(before);
+        return true;
+    }
+    return false;
+}
+
+static void test_editor(void) {
+    tui_editor_t *ed = tui_editor_new();
+    tui_editor_set_on_submit(ed, on_submit, NULL);
+    feed(ed, "hello world");
+    check_text(ed, "hello world");
+    CHECK(ed->cc == 11);
+    feed(ed, "\x17"); /* ctrl+w */
+    check_text(ed, "hello ");
+    feed(ed, "\x1f"); /* undo */
+    check_text(ed, "hello world");
+    feed(ed, "\x01"); /* ctrl+a */
+    CHECK(ed->cc == 0);
+    feed(ed, "\x1b" "f"); /* alt+f */
+    CHECK(ed->cc == 5);
+    feed(ed, "\x0b"); /* ctrl+k */
+    check_text(ed, "hello");
+    feed(ed, "\x19"); /* ctrl+y */
+    check_text(ed, "hello world");
+    feed(ed, "\x05\x1b" "b"); /* ctrl+e, alt+b */
+    CHECK(ed->cc == 6);
+    feed(ed, "\x1b" "d"); /* alt+d */
+    check_text(ed, "hello ");
+    feed(ed, "\x15"); /* ctrl+u */
+    check_text(ed, "");
+    /* multi-line via shift+enter (kitty) and alt+enter */
+    feed(ed, "ab\x1b[13;2u" "cd\x1b\r" "ef");
+    check_text(ed, "ab\ncd\nef");
+    CHECK(ed->cl == 2 && ed->cc == 2);
+    feed(ed, "\x1b[A"); /* up */
+    CHECK(ed->cl == 1 && ed->cc == 2);
+    feed(ed, "\x1b[D\x1b[D\x7f"); /* left left backspace joins lines */
+    check_text(ed, "abcd\nef");
+    CHECK(ed->cl == 0 && ed->cc == 2);
+    feed(ed, "\x1b[3~"); /* delete */
+    check_text(ed, "abd\nef");
+    /* utf-8 backspace */
+    tui_editor_clear(ed);
+    feed(ed, "h\xc3\xa9\xe6\x97\xa5");
+    feed(ed, "\x7f");
+    check_text(ed, "h\xc3\xa9");
+    /* submit */
+    feed(ed, "\r");
+    CHECK_STR(g_submitted, "h\xc3\xa9");
+    CHECK(tui_editor_is_empty(ed));
+    /* history */
+    feed(ed, "second\r");
+    feed(ed, "\x1b[A");
+    check_text(ed, "second");
+    feed(ed, "\x1b[A");
+    check_text(ed, "h\xc3\xa9");
+    feed(ed, "\x1b[B\x1b[B");
+    check_text(ed, "");
+    /* large paste collapses into a marker */
+    sb_t big = SB_INIT;
+    sb_append(&big, "\x1b[200~");
+    for (int i = 0; i < 15; i++) sb_appendf(&big, "line %d\n", i);
+    sb_append(&big, "\x1b[201~");
+    feed(ed, "x ");
+    feed(ed, sb_cstr(&big));
+    sb_free(&big);
+    check_text(ed, "x [Paste #1, +16 lines]");
+    char *exp = tui_editor_get_expanded_text(ed);
+    CHECK(str_starts(exp, "x line 0\nline 1\n") && strstr(exp, "line 14\n"));
+    free(exp);
+    feed(ed, "\x7f"); /* atomic delete */
+    check_text(ed, "x ");
+    /* small paste inserted verbatim, CRLF normalized */
+    feed(ed, "\x1b[200~a\r\nb\x1b[201~");
+    check_text(ed, "x a\nb");
+    /* word wrap layout and cursor marker */
+    tui_editor_clear(ed);
+    feed(ed, "aaaa bbbb cccc dddd");
+    ed->base.focused = true;
+    strvec_t out = {0};
+    tui_component_render(&ed->base, 12, &out);
+    CHECK(out.n == 4); /* border, 2 content rows, border */
+    int marker_row = -1;
+    for (size_t i = 0; i < out.n; i++) {
+        CHECK(tui_visible_width(out.v[i]) <= 12);
+        if (strstr(out.v[i], TUI_CURSOR_MARKER)) marker_row = (int)i;
+    }
+    CHECK(marker_row == 2);
+    if (out.n == 4) {
+        char *pl = tui_strip_ansi(out.v[1]);
+        CHECK(str_starts(pl, "aaaa bbbb "));
+        free(pl);
+    }
+    strvec_free(&out);
+    /* up moves by visual line */
+    feed(ed, "\x1b[A");
+    CHECK(ed->cl == 0 && ed->cc == 9);
+    /* autocomplete */
+    tui_editor_clear(ed);
+    tui_editor_set_autocomplete(ed, fake_provider, NULL);
+    feed(ed, "/m");
+    CHECK(tui_editor_autocomplete_open(ed));
+    feed(ed, "\x1b[B\t"); /* down, tab accept */
+    check_text(ed, "/model ");
+    CHECK(!tui_editor_autocomplete_open(ed));
+    tui_component_destroy(&ed->base);
+    free(g_submitted);
+    g_submitted = NULL;
+}
+
+/* ---------- select list ---------- */
+
+static void test_select(void) {
+    tui_select_list_t *l = tui_select_list_new(3);
+    tui_select_list_add(l, "apple", NULL, "fruit");
+    tui_select_list_add(l, "banana", NULL, NULL);
+    tui_select_list_add(l, "cherry", NULL, NULL);
+    tui_select_list_add(l, "date", NULL, NULL);
+    strvec_t out = {0};
+    tui_component_render(&l->base, 50, &out);
+    CHECK(out.n == 4); /* 3 items + scroll status */
+    strvec_free(&out);
+    tui_key_t k[4];
+    size_t n = tui_keys_decode_all("an", 2, k, 4);
+    for (size_t i = 0; i < n; i++) {
+        tui_component_handle_key(&l->base, &k[i]);
+        tui_key_free(&k[i]);
+    }
+    CHECK(tui_select_list_visible_count(l) == 1);
+    CHECK_STR(tui_select_list_selected(l)->value, "banana");
+    tui_select_list_set_filter(l, NULL);
+    tui_select_list_move(l, -1, true);
+    CHECK_STR(tui_select_list_selected(l)->value, "date");
+    tui_component_destroy(&l->base);
+    CHECK(tui_fuzzy_score("mdl", "model") > 0);
+    CHECK(tui_fuzzy_score("xz", "model") < 0);
+}
+
+/* ---------- differential renderer ---------- */
+
+static char *drain_fd(int fd) {
+    sb_t b = SB_INIT;
+    char buf[4096];
+    ssize_t r;
+    while ((r = read(fd, buf, sizeof buf)) > 0) sb_appendn(&b, buf, (size_t)r);
+    return sb_detach(&b);
+}
+
+static void test_renderer(void) {
+    int pfd[2];
+    CHECK(pipe(pfd) == 0);
+    fcntl(pfd[0], F_SETFL, O_NONBLOCK);
+    tui_term_t *tm = tui_term_new(-1, pfd[1]);
+    tui_term_set_size(tm, 40, 10);
+    tui_t *t = tui_new(tm);
+    tui_text_t *a = tui_text_new("line one", 0, 0);
+    tui_text_t *b = tui_text_new("line two", 0, 0);
+    tui_text_t *c = tui_text_new("line three", 0, 0);
+    tui_container_add(tui_root(t), &a->base);
+    tui_container_add(tui_root(t), &b->base);
+    tui_container_add(tui_root(t), &c->base);
+    tui_render_now(t);
+    char *o1 = drain_fd(pfd[0]);
+    CHECK(strstr(o1, "line one") && strstr(o1, "line two") && strstr(o1, "line three"));
+    free(o1);
+
+    /* no change: nothing but sync/cursor bookkeeping */
+    tui_render_now(t);
+    char *o0 = drain_fd(pfd[0]);
+    CHECK(!strstr(o0, "line"));
+    free(o0);
+
+    /* one-line change: only that line is rewritten */
+    tui_text_set(b, "line 2!");
+    tui_render_now(t);
+    char *o2 = drain_fd(pfd[0]);
+    CHECK(strstr(o2, "line 2!") != NULL);
+    CHECK(!strstr(o2, "line one") && !strstr(o2, "line three"));
+    CHECK(str_count(o2, "\x1b[2K") == 1);
+    CHECK(strstr(o2, "\x1b[1A") != NULL); /* moved up one row from the last line */
+    CHECK(strlen(o2) < 80);
+    free(o2);
+
+    /* append */
+    tui_text_t *d = tui_text_new("line four", 0, 0);
+    tui_container_add(tui_root(t), &d->base);
+    tui_render_now(t);
+    char *o3 = drain_fd(pfd[0]);
+    CHECK(strstr(o3, "\r\n") && strstr(o3, "line four") && !strstr(o3, "line three"));
+    free(o3);
+    CHECK(tui_prev_lines(t)->n == 4);
+
+    /* shrink: trailing lines cleared */
+    tui_container_remove(tui_root(t), &d->base);
+    tui_component_destroy(&d->base);
+    tui_render_now(t);
+    char *o4 = drain_fd(pfd[0]);
+    CHECK(strstr(o4, "\x1b[2K") != NULL && !strstr(o4, "line"));
+    free(o4);
+    CHECK(tui_prev_lines(t)->n == 3);
+
+    /* scroll content past the viewport, then change a line in scrollback -> full redraw */
+    for (int i = 0; i < 12; i++) {
+        char buf[32];
+        snprintf(buf, sizeof buf, "extra %d", i);
+        tui_container_add(tui_root(t), &tui_text_new(buf, 0, 0)->base);
+    }
+    tui_render_now(t);
+    free(drain_fd(pfd[0]));
+    int fulls = tui_full_redraw_count(t);
+    tui_text_set(a, "changed first");
+    tui_render_now(t);
+    char *o5 = drain_fd(pfd[0]);
+    CHECK(tui_full_redraw_count(t) == fulls + 1);
+    CHECK(strstr(o5, "\x1b[3J") != NULL);
+    free(o5);
+
+    /* overlay composited over the bottom of the viewport */
+    tui_select_list_t *sl = tui_select_list_new(3);
+    tui_select_list_add(sl, "opt-a", NULL, NULL);
+    tui_select_list_add(sl, "opt-b", NULL, NULL);
+    tui_overlay_opts_t oo = {TUI_ANCHOR_BOTTOM, 20, 0, 0, 0};
+    tui_overlay_show(t, &sl->base, &oo);
+    tui_render_now(t);
+    char *o6 = drain_fd(pfd[0]);
+    CHECK(strstr(o6, "opt-a") && strstr(o6, "opt-b"));
+    free(o6);
+    const strvec_t *pl = tui_prev_lines(t);
+    char *last = tui_strip_ansi(pl->v[pl->n - 1]);
+    CHECK(strstr(last, "opt-b") != NULL);
+    CHECK(tui_visible_width(last) <= 40);
+    free(last);
+    CHECK(tui_focus(t) == &sl->base);
+    tui_overlay_hide(t, &sl->base);
+    CHECK(tui_focus(t) == NULL);
+    tui_render_now(t);
+    free(drain_fd(pfd[0]));
+    tui_component_destroy(&sl->base);
+
+    /* cursor marker positions the hardware cursor */
+    tui_editor_t *ed = tui_editor_new();
+    tui_container_add(tui_root(t), &ed->base);
+    tui_set_focus(t, &ed->base);
+    feed(ed, "abc");
+    tui_render_now(t);
+    char *o7 = drain_fd(pfd[0]);
+    CHECK(strstr(o7, "\x1b[4G") != NULL); /* column after "abc" */
+    CHECK(!strstr(o7, "\x1b_pi:c"));
+    free(o7);
+
+    /* resize -> full redraw */
+    tui_term_set_size(tm, 30, 10);
+    tui_render_now(t);
+    CHECK(tui_full_redraw_count(t) == fulls + 2);
+    free(drain_fd(pfd[0]));
+
+    /* posted callbacks + timers via run_once */
+    tui_free(t);
+    close(pfd[0]);
+}
+
+static int g_posted;
+static void post_cb(void *ud) { g_posted += *(int *)ud; }
+
+static void test_loop(void) {
+    int pfd[2];
+    CHECK(pipe(pfd) == 0);
+    fcntl(pfd[0], F_SETFL, O_NONBLOCK);
+    tui_term_t *tm = tui_term_new(-1, pfd[1]);
+    tui_t *t = tui_new(tm);
+    int v = 5;
+    tui_post(t, post_cb, &v);
+    tui_add_timer(t, 1, false, post_cb, &v);
+    for (int i = 0; i < 20 && g_posted < 10; i++) tui_run_once(t, 5);
+    CHECK(g_posted == 10);
+    tui_stop(t, 3);
+    CHECK(!tui_run_once(t, 0));
+    tui_free(t);
+    close(pfd[0]);
+}
+
+int main(void) {
+    test_keys();
+    test_ansi();
+    test_theme();
+    test_markdown();
+    test_editor();
+    test_select();
+    test_renderer();
+    test_loop();
+    tui_theme_set(NULL);
+    tui_keybindings_set_global(NULL);
+    printf("test_tui: %d checks, %d failures\n", checks, failures);
+    return failures ? 1 : 0;
+}

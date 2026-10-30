@@ -428,6 +428,27 @@ static bool truthy(const json_t *j) {
     return false;
 }
 
+static json_t *keep(rctx_t *r, json_t *j);
+
+/* json_path plus JS-ish ".length" on arrays/strings/objects */
+static const json_t *tpl_path(rctx_t *r, const json_t *v, const char *path) {
+    const char *dot = strrchr(path, '.');
+    const char *last = dot ? dot + 1 : path;
+    if (strcmp(last, "length") == 0) {
+        const json_t *base = v;
+        if (dot) {
+            char *head = xstrndup(path, (size_t)(dot - path));
+            base = json_path(v, head);
+            free(head);
+        }
+        if (json_is_arr(base) || json_is_obj(base)) return keep(r, json_int((int64_t)json_len(base)));
+        if (json_is_str(base)) return keep(r, json_int((int64_t)utf8_strlen(json_sv(base))));
+        if (!dot) return json_path(v, path);
+        return NULL;
+    }
+    return json_path(v, path);
+}
+
 static const json_t *lookup_path(rctx_t *r, frame_t *f, const char *path) {
     if (!path || !*path) return NULL;
     if (strcmp(path, "this") == 0 || strcmp(path, ".") == 0) return f->ctx;
@@ -438,8 +459,7 @@ static const json_t *lookup_path(rctx_t *r, frame_t *f, const char *path) {
     if (path[0] == '@') {
         if (strcmp(path, "@root") == 0) return r->root;
         if (str_starts(path, "@root.")) {
-            frame_t rf = {.ctx = r->root};
-            return lookup_path(r, &rf, path + 6);
+            return tpl_path(r, r->root, path + 6);
         }
         for (frame_t *x = f; x; x = x->parent)
             if (x->data) return json_get(x->data, path + 1);
@@ -454,12 +474,11 @@ static const json_t *lookup_path(rctx_t *r, frame_t *f, const char *path) {
             if (strncmp(path, x->bp_names[i], n) == 0 && (path[n] == 0 || path[n] == '.')) {
                 const json_t *v = x->bp_vals[i];
                 if (path[n] == 0) return v;
-                return json_path(v, path + n + 1);
+                return tpl_path(r, v, path + n + 1);
             }
         }
     }
-    const json_t *v = json_path(f->ctx, path);
-    return v;
+    return tpl_path(r, f->ctx, path);
 }
 
 static const json_t *eval_param(rctx_t *r, frame_t *f, param_t *p);
@@ -997,6 +1016,14 @@ char *prompt_render(const char *rel, const json_t *ctx) {
     char *t = prompt_load(rel);
     if (!t) return xstrdup("");
     char *r = tpl_render(t, ctx);
+    free(t);
+    return r;
+}
+
+char *prompt_load_or(const char *rel, const char *fallback) {
+    char *t = prompt_load(rel);
+    if (!t) return xstrdup(fallback ? fallback : "");
+    char *r = tpl_render(t, NULL);
     free(t);
     return r;
 }

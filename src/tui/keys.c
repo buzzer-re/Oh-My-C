@@ -454,10 +454,8 @@ static int decode_one(const char *s, size_t n, tui_key_t *k, bool force, size_t 
             }
         }
         if (c1 == ']' || c1 == 'P' || c1 == '_' || c1 == '^' || c1 == 'X') {
-            size_t l = tui_esc_len_raw:
-            ;
             /* string sequence terminated by BEL or ST */
-            l = 0;
+            size_t l = 0;
             for (size_t i = 2; i < n; i++) {
                 if (s[i] == '\a') { l = i + 1; break; }
                 if (s[i] == '\x1b' && i + 1 < n && s[i + 1] == '\\') { l = i + 2; break; }

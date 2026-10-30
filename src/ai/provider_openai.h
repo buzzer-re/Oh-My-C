@@ -51,6 +51,14 @@ const char *oai_effort_wire(const ai_model_t *m, const json_t *over, const char 
 char *oai_bearer_key(const ai_model_t *m, const ai_stream_opts_t *o); /* owned or NULL */
 char *oai_base_url(const ai_model_t *m, const char *def);           /* owned, without trailing '/' */
 void oai_add_openrouter_headers(http_headers_t *h);
+/* emit an event for a block the builder does not currently hold open */
+void oai_emit(ai_builder_t *b, ai_event_type_t t, int idx, const char *delta, size_t n, const json_t *blk);
+/* OpenAI-family usage accounting (calculateOpenAIUsageAccounting); cw_* < 0 => not reported */
+void oai_usage_accounting(ai_builder_t *b, int64_t prompt, int64_t output, int64_t cached, int64_t reasoning,
+                          int64_t cw_openrouter, int64_t cw_deepseek, bool has_deepseek_hit_miss);
+/* parse tool-call argument JSON (complete, then partial, else {}); owned object */
+json_t *oai_parse_args(const char *s, size_t n);
+bool oai_is_reasoning_field(const char *s); /* reasoning_content / reasoning / reasoning_text */
 
 /* ---------- Chat Completions ---------- */
 

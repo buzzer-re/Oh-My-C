@@ -321,7 +321,9 @@ static void wrap_one_line(wrapper_t *w, const char *s, size_t n) {
             size_t l = tui_esc_len(s + i, n - i);
             if (!l) l = n - i;
             tui_sgr_feed(&w->st, s + i, l);
-            sb_appendn(&w->line, s + i, l);
+            /* keep ordering relative to pending whitespace; if the whitespace is dropped at a
+             * break, the effect survives through the state re-emitted on the next line */
+            sb_appendn(pend.len ? &pend : &w->line, s + i, l);
             i += l;
             continue;
         }

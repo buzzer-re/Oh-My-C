@@ -1,0 +1,769 @@
+#include "app.h"
+
+#include "config/auth.h"
+#include "config/settings.h"
+#include "core/fs.h"
+#include "prompt/template.h"
+
+#include <math.h>
+
+/* ---------- model resolution ---------- */
+
+const ai_model_t *app_resolve_model_pattern(const char *pattern, ai_effort_t *effort_out, bool *has_effort) {
+    if (has_effort) *has_effort = false;
+    if (!pattern || !*pattern) return NULL;
+    char *p = xstrdup(pattern);
+    if (p[0] == '@') memmove(p, p + 1, strlen(p));
+    /* role reference: modelRoles.<role> */
+    char *rk = xasprintf("modelRoles.%s", p);
+    const char *role = settings_str(rk, NULL);
+    free(rk);
+    if (role && strcmp(role, pattern) != 0) {
+        const ai_model_t *m = app_resolve_model_pattern(role, effort_out, has_effort);
+        free(p);
+        return m;
+    }
+    char *colon = strrchr(p, ':');
+    if (colon) {
+        ai_effort_t e;
+        if (effort_parse(colon + 1, &e) == 0) {
+            *colon = 0;
+            if (effort_out) *effort_out = e;
+            if (has_effort) *has_effort = true;
+        }
+    }
+    const ai_model_t *m = catalog_resolve(p);
+    free(p);
+    return m;
+}
+
+char *app_api_key_for(const ai_model_t *m) { return m ? auth_get_api_key(m->provider) : NULL; }
+
+const ai_model_t *app_default_model(void) {
+    const char *def = settings_str("modelRoles.default", NULL);
+    if (def) {
+        const ai_model_t *m = app_resolve_model_pattern(def, NULL, NULL);
+        if (m) return m;
+    }
+    static const char *order[] = {"anthropic", "openai", "openai-codex", "google", "openrouter", "xai", "groq",
+                                  "deepseek", "mistral", "cerebras", "zai", "ollama"};
+    for (size_t i = 0; i < ARRAY_LEN(order); i++) {
+        if (!auth_has_credentials(order[i])) continue;
+        const char *dm = catalog_provider_default_model(order[i]);
+        const ai_model_t *m = dm ? catalog_find(order[i], dm) : NULL;
+        if (m) return m;
+    }
+    /* any provider with credentials */
+    for (size_t i = 0; i < catalog_count(); i++) {
+        const ai_model_t *m = catalog_at(i);
+        if (!auth_has_credentials(m->provider)) continue;
+        const char *dm = catalog_provider_default_model(m->provider);
+        const ai_model_t *d = dm ? catalog_find(m->provider, dm) : NULL;
+        return d ? d : m;
+    }
+    return NULL;
+}
+
+char *app_model_label(app_t *a) {
+    return a->model ? xasprintf("%s/%s", a->model->provider, a->model->id) : xstrdup("(no model)");
+}
+
+const char *app_session_file(app_t *a) { return a->session ? a->session->file : NULL; }
+
+/* ---------- persistence listener ---------- */
+
+static void notice(app_t *a, const char *level, const char *fmt, ...) PRINTF_LIKE(3, 4);
+static void notice(app_t *a, const char *level, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    char *s = xvasprintf(fmt, ap);
+    va_end(ap);
+    LOGI("[%s] %s", level, s);
+    if (a->notice) a->notice(a->notice_ud, level, s);
+    free(s);
+}
+
+static void maybe_title(app_t *a);
+
+static void on_agent_event(void *ud, const agent_event_t *ev) {
+    app_t *a = ud;
+    if (ev->type == AGENT_EV_MESSAGE_END && ev->message) {
+        const char *role = json_get_str(ev->message, "role");
+        if (role && a->session) session_append_message(a->session, ev->message);
+        if (str_eq(role, "assistant")) {
+            json_t *u = json_get(ev->message, "usage");
+            a->total_cost += json_get_num(json_get(u, "cost"), "total", 0);
+            int64_t ctx = json_get_int(u, "input", 0) + json_get_int(u, "cacheRead", 0) + json_get_int(u, "cacheWrite", 0) +
+                          json_get_int(u, "output", 0);
+            if (ctx > 0) a->last_context_tokens = ctx;
+        }
+    }
+}
+
+/* ---------- hooks ---------- */
+
+static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
+    app_t *a = ud;
+    free(ag->api_key);
+    ag->api_key = app_api_key_for(a->model);
+    o->api_key = ag->api_key;
+    o->cache_retention = settings_str("providers.cacheRetention", "short");
+    json_t *tb = settings_get("thinkingBudgets");
+    if (json_is_obj(tb)) o->thinking_budgets = tb;
+    double temp = settings_num("temperature", NAN);
+    if (!isnan(temp)) o->temperature = temp;
+    o->text_verbosity = settings_str("textVerbosity", NULL);
+    const char *tier = settings_str("tier.openai", NULL);
+    if (tier) o->service_tier = tier;
+}
+
+static bool is_overflow(const char *err) {
+    return err && (str_istr(err, "prompt is too long") || str_istr(err, "context length") || str_istr(err, "maximum context") ||
+                   str_istr(err, "context_length_exceeded") || str_istr(err, "too many tokens") ||
+                   str_istr(err, "exceeds the context window") || str_istr(err, "input is too long"));
+}
+
+static bool is_retryable(const char *err) {
+    if (!err) return false;
+    const char *pats[] = {"overloaded", "rate limit", "rate_limit", "429", "500", "502", "503", "504", "529",
+                          "timed out", "timeout", "connection", "network", "reset", "closed before", "mid-body",
+                          "internal server error", "service unavailable", "bad gateway", "temporarily", "try again",
+                          "stream ended", "terminated"};
+    for (size_t i = 0; i < ARRAY_LEN(pats); i++)
+        if (str_istr(err, pats[i])) return true;
+    return false;
+}
+
+static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int attempt) {
+    app_t *a = ud;
+    if (attempt < 0) return false;
+    const char *stop = json_get_str(assistant, "stopReason");
+    if (str_eq(stop, "aborted") || ag->cancel) return false;
+    const char *err = json_get_str(assistant, "errorMessage");
+    if (is_overflow(err) && attempt == 0 && !a->compacting) {
+        notice(a, "warning", "Context overflow; compacting and retrying");
+        char *cerr = NULL;
+        if (app_compact(a, NULL, &cerr) == 0) return true;
+        notice(a, "error", "Compaction failed: %s", cerr ? cerr : "?");
+        free(cerr);
+        return false;
+    }
+    if (!settings_bool("retry.enabled", true)) return false;
+    int max = (int)settings_int("retry.maxRetries", 3);
+    if (attempt >= max || !is_retryable(err)) return false;
+    int64_t base = settings_int("retry.baseDelayMs", 2000), maxd = settings_int("retry.maxDelayMs", 60000);
+    int64_t delay = base << attempt;
+    if (delay > maxd) delay = maxd;
+    notice(a, "warning", "Retrying (%d/%d) in %llds: %s", attempt + 1, max, (long long)(delay / 1000), err ? err : "error");
+    int64_t until = mono_ms() + delay;
+    while (mono_ms() < until) {
+        if (ag->cancel) return false;
+        sleep_ms(50);
+    }
+    return true;
+}
+
+/* ---------- setup ---------- */
+
+static void install_agent(app_t *a) {
+    agent_t *ag = agent_new();
+    a->agent = ag;
+    ag->app = a;
+    ag->max_turns = a->opts.max_turns;
+    ag->hooks.prepare_request = hook_prepare;
+    ag->hooks.should_retry = hook_should_retry;
+    ag->hooks.ud = a;
+    free(ag->session_id);
+    ag->session_id = a->session ? xstrdup(session_id(a->session)) : uuid_v7();
+    agent_subscribe(ag, on_agent_event, a);
+    agent_set_model(ag, a->model);
+    ag->thinking = a->thinking;
+    if (!a->opts.no_tools) tools_register_builtin(ag, a->env, a->opts.tools);
+    if (a->opts.subagent && a->opts.subagent_depth >= (int)settings_int("task.maxRecursionDepth", 2))
+        agent_remove_tool(ag, "task");
+}
+
+void app_rebuild_system_prompt(app_t *a) {
+    strvec_t names = {0};
+    for (size_t i = 0; i < a->agent->tools.n; i++) strvec_push(&names, a->agent->tools.v[i]->name);
+    char *label = app_model_label(a);
+    sysprompt_opts_t so = {.cwd = a->cwd,
+                           .model_name = label,
+                           .tool_names = &names,
+                           .disc = &a->disc,
+                           .custom_prompt = a->sys_custom,
+                           .append_prompt = a->sys_append,
+                           .subagent = a->opts.subagent};
+    json_t *blocks = build_system_prompt(&so);
+    agent_set_system_prompt_parts(a->agent, blocks);
+    free(label);
+    strvec_free(&names);
+}
+
+static void load_session_into_agent(app_t *a) {
+    session_context_t sc;
+    session_build_context(a->session, &sc);
+    agent_replace_messages(a->agent, sc.messages);
+    sc.messages = NULL;
+    if (sc.model && !a->opts.model) {
+        const ai_model_t *m = catalog_resolve(sc.model);
+        if (m) {
+            a->model = m;
+            agent_set_model(a->agent, m);
+        }
+    }
+    if (sc.thinking && !a->opts.thinking) {
+        ai_effort_t e;
+        if (effort_parse(sc.thinking, &e) == 0) {
+            a->thinking = e;
+            a->agent->thinking = e;
+        }
+    }
+    session_context_free(&sc);
+}
+
+app_t *app_create(const app_opts_t *o, char **err) {
+    *err = NULL;
+    ai_providers_init();
+    catalog_init();
+    auth_init();
+    app_t *a = xcalloc(1, sizeof(*a));
+    pthread_mutex_init(&a->mu, NULL);
+    a->opts = *o;
+    a->cwd = o->cwd ? path_abs(o->cwd, NULL) : get_cwd();
+    a->sys_custom = o->system_prompt ? xstrdup(o->system_prompt) : NULL;
+    a->sys_append = o->append_system_prompt ? xstrdup(o->append_system_prompt) : NULL;
+    /* model */
+    ai_effort_t eff = EFFORT_OFF;
+    bool has_eff = false;
+    if (o->model) {
+        char *pat = o->provider && !strchr(o->model, '/') ? xasprintf("%s/%s", o->provider, o->model) : xstrdup(o->model);
+        a->model = app_resolve_model_pattern(pat, &eff, &has_eff);
+        free(pat);
+        if (!a->model) {
+            *err = xasprintf("Unknown model: %s (see `omc models`)", o->model);
+            app_free(a);
+            return NULL;
+        }
+    } else if (o->provider) {
+        const char *dm = catalog_provider_default_model(o->provider);
+        a->model = dm ? catalog_find(o->provider, dm) : NULL;
+        if (!a->model) {
+            for (size_t i = 0; i < catalog_count() && !a->model; i++)
+                if (!strcmp(catalog_at(i)->provider, o->provider)) a->model = catalog_at(i);
+        }
+    }
+    if (o->api_key && (a->model || o->provider)) auth_set_runtime_key(a->model ? a->model->provider : o->provider, o->api_key);
+    if (o->thinking) {
+        if (effort_parse(o->thinking, &eff) != 0 && strcmp(o->thinking, "auto") != 0) {
+            *err = xasprintf("Invalid thinking level: %s", o->thinking);
+            app_free(a);
+            return NULL;
+        }
+        has_eff = true;
+    }
+    if (!has_eff) effort_parse(settings_str("defaultThinkingLevel", "medium"), &eff);
+    a->thinking = eff;
+    /* environment & discovery */
+    a->env = tool_env_new(a->cwd);
+    a->env->settings = settings_effective();
+    a->env->subagent_depth = o->subagent_depth;
+    a->env->session = a;
+    a->env->run_subagent = app_run_subagent;
+    discover_all(a->cwd, &a->disc, o->no_context_files, o->no_skills, o->no_rules);
+    /* session */
+    if (o->no_session) {
+        a->session = session_in_memory(a->cwd);
+    } else if (o->resume) {
+        char *path = session_resolve(o->resume, a->cwd);
+        if (!path) {
+            *err = xasprintf("Session not found: %s", o->resume);
+            app_free(a);
+            return NULL;
+        }
+        a->session = session_open(path, err);
+        free(path);
+        if (!a->session) {
+            app_free(a);
+            return NULL;
+        }
+    } else if (o->fork) {
+        char *path = session_resolve(o->fork, a->cwd);
+        session_t *src = path ? session_open(path, err) : NULL;
+        free(path);
+        if (!src) {
+            if (!*err) *err = xasprintf("Session not found: %s", o->fork);
+            app_free(a);
+            return NULL;
+        }
+        a->session = session_fork(src, NULL, o->session_dir);
+        session_free(src);
+    } else if (o->continue_recent) {
+        a->session = session_continue_recent(a->cwd, o->session_dir);
+        if (!a->session) a->session = session_create(a->cwd, o->session_dir);
+    } else {
+        a->session = session_create(a->cwd, o->session_dir);
+    }
+    if (!a->model) {
+        session_context_t sc;
+        session_build_context(a->session, &sc);
+        if (sc.model) a->model = catalog_resolve(sc.model);
+        session_context_free(&sc);
+    }
+    if (!a->model) a->model = app_default_model();
+    if (!a->model) {
+        *err = xstrdup("No model available. Set an API key (e.g. ANTHROPIC_API_KEY or OPENAI_API_KEY), run `omc login`, "
+                       "or pass --model provider/id with --api-key.");
+        app_free(a);
+        return NULL;
+    }
+    install_agent(a);
+    if (json_len(a->session->entries)) load_session_into_agent(a);
+    app_rebuild_system_prompt(a);
+    if (!json_len(a->session->entries) && a->session->persist) {
+        char *label = app_model_label(a);
+        session_append_model_change(a->session, label, NULL);
+        session_append_thinking_change(a->session, effort_name(a->thinking));
+        free(label);
+    }
+    a->title_done = a->session->title != NULL;
+    return a;
+}
+
+void app_free(app_t *a) {
+    if (!a) return;
+    agent_free(a->agent);
+    session_free(a->session);
+    tool_env_free(a->env);
+    discovery_free(&a->disc);
+    free(a->cwd);
+    free(a->sys_custom);
+    free(a->sys_append);
+    pthread_mutex_destroy(&a->mu);
+    free(a);
+}
+
+int app_set_model(app_t *a, const char *pattern, char **err) {
+    ai_effort_t e;
+    bool has_e;
+    const ai_model_t *m = app_resolve_model_pattern(pattern, &e, &has_e);
+    if (!m) {
+        *err = xasprintf("Unknown model: %s", pattern);
+        return -1;
+    }
+    a->model = m;
+    agent_set_model(a->agent, m);
+    if (has_e) app_set_thinking(a, e);
+    char *label = app_model_label(a);
+    session_append_model_change(a->session, label, NULL);
+    free(label);
+    app_rebuild_system_prompt(a);
+    return 0;
+}
+
+void app_set_thinking(app_t *a, ai_effort_t e) {
+    a->thinking = e;
+    a->agent->thinking = e;
+    session_append_thinking_change(a->session, effort_name(e));
+}
+
+void app_abort(app_t *a) { agent_abort(a->agent); }
+
+/* ---------- one-shot completion ---------- */
+
+char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const char *user, ai_effort_t effort) {
+    if (!m) m = a->model;
+    json_t *sys = json_arr();
+    if (system) json_push_str(sys, system);
+    json_t *msgs = json_arr();
+    json_push(msgs, msg_user_text(user));
+    ai_context_t ctx = {.system_prompt = sys, .messages = msgs};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    char *key = app_api_key_for(m);
+    o.api_key = key;
+    o.reasoning = model_clamp_effort(m, effort);
+    o.disable_reasoning = effort == EFFORT_OFF;
+    o.cancel = &a->agent->cancel;
+    json_t *r = ai_complete(m, &ctx, &o);
+    char *text = NULL;
+    const char *stop = json_get_str(r, "stopReason");
+    if (!str_eq(stop, "error") && !str_eq(stop, "aborted")) text = ai_message_text(r);
+    else LOGW("one-shot completion failed: %s", json_get_str(r, "errorMessage"));
+    json_free(r);
+    json_free(sys);
+    json_free(msgs);
+    free(key);
+    return text;
+}
+
+/* ---------- title ---------- */
+
+static void maybe_title(app_t *a) {
+    if (a->title_done || a->opts.subagent || env_truthy("PI_NO_TITLE") || env_truthy("OMC_NO_TITLE")) return;
+    a->title_done = true;
+    /* first user message */
+    const char *first = NULL;
+    json_t *m;
+    json_arr_foreach(a->agent->messages, i, m) {
+        if (!first && str_eq(json_get_str(m, "role"), "user")) {
+            json_t *c = json_get(m, "content");
+            if (json_is_str(c)) first = json_sv(c);
+            else first = json_get_str(json_at(c, 0), "text");
+        }
+    }
+    if (!first) return;
+    char *sys = prompt_load_or("coding-agent/prompts/system/title-system.md",
+                               "Generate a concise 3-6 word title for this conversation. Output only the title.");
+    const ai_model_t *tm = NULL;
+    const char *smol = settings_str("modelRoles.smol", NULL);
+    if (smol) tm = app_resolve_model_pattern(smol, NULL, NULL);
+    if (!tm) tm = a->model;
+    char *snippet = xasprintf("%.2000s", first);
+    char *title = app_complete_text(a, tm, sys, snippet, EFFORT_OFF);
+    if (title) {
+        char *t = str_trim(title);
+        /* strip quotes / trailing punctuation, single line */
+        char *nl = strchr(t, '\n');
+        if (nl) *nl = 0;
+        size_t n = strlen(t);
+        while (n && (t[n - 1] == '.' || t[n - 1] == '"')) t[--n] = 0;
+        char *s = t;
+        while (*s == '"' || *s == '#' || *s == ' ') s++;
+        if (*s) session_set_title(a->session, s, "auto");
+        free(t);
+    }
+    free(title);
+    free(snippet);
+    free(sys);
+}
+
+/* ---------- compaction ---------- */
+
+static int64_t estimate_tokens(const json_t *msg) {
+    char *s = json_dump(json_get(msg, "content"), 0);
+    int64_t n = (int64_t)strlen(s) / 4 + 4;
+    free(s);
+    return n;
+}
+
+static void serialize_for_summary(sb_t *b, const json_t *msg) {
+    const char *role = json_get_str(msg, "role");
+    json_t *c = json_get(msg, "content");
+    if (str_eq(role, "user")) sb_append(b, "[User]: ");
+    else if (str_eq(role, "assistant")) sb_append(b, "[Assistant]: ");
+    else if (str_eq(role, "toolResult")) sb_appendf(b, "[Tool result %s]: ", json_get_str(msg, "toolName"));
+    else sb_appendf(b, "[%s]: ", role ? role : "message");
+    if (json_is_str(c)) {
+        sb_append(b, json_sv(c));
+    } else {
+        json_t *blk;
+        json_arr_foreach(c, i, blk) {
+            const char *t = json_get_str(blk, "type");
+            if (str_eq(t, "text")) {
+                const char *tx = json_get_str(blk, "text");
+                size_t n = strlen(tx);
+                if (str_eq(role, "toolResult") && n > 4000) sb_appendf(b, "%.2000s\n…[%zu chars elided]…\n%s", tx, n - 4000, tx + n - 2000);
+                else sb_append(b, tx);
+            } else if (str_eq(t, "toolCall")) {
+                char *args = json_dump(json_get(blk, "arguments"), 0);
+                if (strlen(args) > 2000) args[2000] = 0;
+                sb_appendf(b, "\n<tool_call name=\"%s\">%s</tool_call>", json_get_str(blk, "name"), args);
+                free(args);
+            } else if (str_eq(t, "image")) {
+                sb_append(b, "[image]");
+            }
+        }
+    }
+    sb_append(b, "\n\n");
+}
+
+int app_compact(app_t *a, const char *instructions, char **err) {
+    if (a->compacting) {
+        *err = xstrdup("compaction already running");
+        return -1;
+    }
+    a->compacting = true;
+    int rc = -1;
+    json_t *path = session_path_to(a->session, a->session->leaf_id);
+    /* find message entries, pick cut point keeping ~keepRecentTokens at a user-message boundary */
+    int64_t keep = settings_int("compaction.keepRecentTokens", 20000);
+    ssize_t cut = -1;
+    int64_t acc = 0;
+    size_t n = json_len(path);
+    for (size_t i = n; i > 0; i--) {
+        json_t *e = json_at(path, i - 1);
+        if (!str_eq(json_get_str(e, "type"), "message")) continue;
+        json_t *m = json_get(e, "message");
+        acc += estimate_tokens(m);
+        if (acc >= keep && str_eq(json_get_str(m, "role"), "user")) {
+            cut = (ssize_t)(i - 1);
+            break;
+        }
+    }
+    /* previous compaction summary on path */
+    const char *prev_summary = NULL;
+    ssize_t prev_idx = -1;
+    for (size_t i = 0; i < n; i++)
+        if (str_eq(json_get_str(json_at(path, i), "type"), "compaction")) {
+            prev_summary = json_get_str(json_at(path, i), "summary");
+            prev_idx = (ssize_t)i;
+        }
+    if (cut < 0) {
+        /* keep only the last user turn */
+        for (size_t i = n; i > 0 && cut < 0; i--) {
+            json_t *e = json_at(path, i - 1);
+            if (str_eq(json_get_str(e, "type"), "message") && str_eq(json_get_str(json_get(e, "message"), "role"), "user") &&
+                (ssize_t)(i - 1) > prev_idx)
+                cut = (ssize_t)(i - 1);
+        }
+    }
+    if (cut <= prev_idx + 1) {
+        *err = xstrdup("Nothing to compact");
+        goto out;
+    }
+    sb_t conv = SB_INIT;
+    sb_append(&conv, "<conversation>\n");
+    size_t from = prev_idx >= 0 ? (size_t)prev_idx + 1 : 0;
+    for (size_t i = from; i < (size_t)cut; i++) {
+        json_t *e = json_at(path, i);
+        if (str_eq(json_get_str(e, "type"), "message")) serialize_for_summary(&conv, json_get(e, "message"));
+    }
+    sb_append(&conv, "</conversation>\n\n");
+    if (prev_summary) {
+        sb_appendf(&conv, "<previous-summary>\n%s\n</previous-summary>\n\n", prev_summary);
+        char *p = prompt_load_or("agent/compaction/prompts/compaction-update-summary.md", "Update the summary.");
+        sb_append(&conv, p);
+        free(p);
+    } else {
+        char *p = prompt_load_or("agent/compaction/prompts/compaction-summary.md", "Summarize the conversation.");
+        sb_append(&conv, p);
+        free(p);
+    }
+    if (instructions && *instructions) sb_appendf(&conv, "\n\nAdditional focus: %s", instructions);
+    char *sys = prompt_load_or("agent/compaction/prompts/summarization-system.md", "Summarize.");
+    const ai_model_t *cm = a->model;
+    const char *cmodel = settings_str("modelRoles.compaction", NULL);
+    if (cmodel) {
+        const ai_model_t *x = app_resolve_model_pattern(cmodel, NULL, NULL);
+        if (x) cm = x;
+    }
+    notice(a, "info", "Compacting context…");
+    char *summary = app_complete_text(a, cm, sys, sb_cstr(&conv), EFFORT_LOW);
+    sb_free(&conv);
+    free(sys);
+    if (!summary || !*summary) {
+        *err = xstrdup("summarization request failed");
+        free(summary);
+        goto out;
+    }
+    const char *first_kept = json_get_str(json_at(path, (size_t)cut), "id");
+    session_append_compaction(a->session, summary, first_kept, a->last_context_tokens, NULL);
+    free(summary);
+    load_session_into_agent(a);
+    a->last_context_tokens = 0;
+    notice(a, "info", "Context compacted");
+    rc = 0;
+out:
+    json_free(path);
+    a->compacting = false;
+    return rc;
+}
+
+static void maybe_auto_compact(app_t *a) {
+    if (!settings_bool("compaction.enabled", true) || !a->model) return;
+    int64_t window = a->model->context_window;
+    if (window <= 0) return;
+    int64_t reserve = settings_int("compaction.reserveTokens", 16384);
+    double pct = settings_num("compaction.thresholdPercent", 85);
+    int64_t thresh = (int64_t)((double)window * pct / 100.0);
+    int64_t abs_t = settings_int("compaction.thresholdTokens", 0);
+    if (abs_t > 0) thresh = abs_t;
+    if (window - reserve < thresh) thresh = window - reserve;
+    if (a->last_context_tokens < thresh) return;
+    char *err = NULL;
+    if (app_compact(a, NULL, &err) != 0) {
+        notice(a, "error", "Auto-compaction failed: %s", err ? err : "?");
+        free(err);
+    }
+}
+
+/* ---------- prompting ---------- */
+
+int app_prompt(app_t *a, const char *text, json_t *images) {
+    json_t *content = json_arr();
+    json_push(content, text_block(text));
+    json_t *img;
+    json_arr_foreach(images, i, img) json_push(content, json_clone(img));
+    json_free(images);
+    json_t *msgs = json_arr();
+    json_push(msgs, msg_user_content(content));
+    int rc = agent_prompt(a->agent, msgs);
+    if (rc == 0) {
+        maybe_title(a);
+        maybe_auto_compact(a);
+    }
+    return rc;
+}
+
+int app_new_session(app_t *a) {
+    session_t *ns = a->opts.no_session ? session_in_memory(a->cwd) : session_create(a->cwd, a->opts.session_dir);
+    session_free(a->session);
+    a->session = ns;
+    agent_replace_messages(a->agent, json_arr());
+    free(a->agent->session_id);
+    a->agent->session_id = xstrdup(session_id(ns));
+    char *label = app_model_label(a);
+    session_append_model_change(ns, label, NULL);
+    session_append_thinking_change(ns, effort_name(a->thinking));
+    free(label);
+    a->title_done = false;
+    a->total_cost = 0;
+    a->last_context_tokens = 0;
+    json_free(a->env->todo.phases);
+    a->env->todo.phases = json_arr();
+    return 0;
+}
+
+int app_switch_session(app_t *a, const char *path, char **err) {
+    session_t *s = session_open(path, err);
+    if (!s) return -1;
+    session_free(a->session);
+    a->session = s;
+    free(a->agent->session_id);
+    a->agent->session_id = xstrdup(session_id(s));
+    load_session_into_agent(a);
+    a->title_done = s->title != NULL;
+    return 0;
+}
+
+int app_fork_from(app_t *a, const char *entry_id, char **err) {
+    session_t *ns = session_fork(a->session, entry_id, a->opts.session_dir);
+    if (!ns) {
+        *err = xstrdup("fork failed");
+        return -1;
+    }
+    session_free(a->session);
+    a->session = ns;
+    load_session_into_agent(a);
+    return 0;
+}
+
+json_t *app_stats(app_t *a) {
+    json_t *o = json_obj();
+    int64_t in = 0, out = 0, cr = 0, cw = 0;
+    int user = 0, asst = 0, tools = 0;
+    json_t *m;
+    json_arr_foreach(a->agent->messages, i, m) {
+        const char *role = json_get_str(m, "role");
+        if (str_eq(role, "user")) user++;
+        else if (str_eq(role, "toolResult")) tools++;
+        else if (str_eq(role, "assistant")) {
+            asst++;
+            json_t *u = json_get(m, "usage");
+            in += json_get_int(u, "input", 0);
+            out += json_get_int(u, "output", 0);
+            cr += json_get_int(u, "cacheRead", 0);
+            cw += json_get_int(u, "cacheWrite", 0);
+        }
+    }
+    json_set_int(o, "userMessages", user);
+    json_set_int(o, "assistantMessages", asst);
+    json_set_int(o, "toolResults", tools);
+    json_set_int(o, "input", in);
+    json_set_int(o, "output", out);
+    json_set_int(o, "cacheRead", cr);
+    json_set_int(o, "cacheWrite", cw);
+    json_set_num(o, "cost", a->total_cost);
+    json_set_int(o, "contextTokens", a->last_context_tokens);
+    json_set_int(o, "contextWindow", a->model ? a->model->context_window : 0);
+    json_set_num(o, "contextPercent",
+                 a->model && a->model->context_window ? 100.0 * (double)a->last_context_tokens / (double)a->model->context_window : 0);
+    if (a->session->file) json_set_str(o, "sessionFile", a->session->file);
+    json_set_str(o, "sessionId", session_id(a->session));
+    return o;
+}
+
+/* ---------- subagents ---------- */
+
+typedef struct {
+    volatile sig_atomic_t *pc;
+    agent_t *ag;
+    volatile int done;
+} watch_ctx_t;
+
+static void *cancel_watch(void *x) {
+    watch_ctx_t *w = x;
+    while (!w->done) {
+        if (*w->pc) {
+            agent_abort(w->ag);
+            break;
+        }
+        sleep_ms(50);
+    }
+    return NULL;
+}
+
+char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assignment, const char *context,
+                       json_t **details, volatile sig_atomic_t *cancel) {
+    app_t *parent = env->session;
+    app_opts_t o = {0};
+    o.cwd = env->cwd;
+    char *label = app_model_label(parent);
+    json_t *defs = agent_defs_load(env->cwd);
+    json_t *def = json_get(defs, agent_name ? agent_name : "task");
+    const char *role_model = settings_str("modelRoles.task", NULL);
+    o.model = role_model ? role_model : label;
+    const char *dm = json_get_str(def, "model");
+    if (dm && dm[0] == '@') {
+        char *rk = xasprintf("modelRoles.%s", dm + 1);
+        if (settings_str(rk, NULL)) o.model = dm;
+        free(rk);
+    } else if (dm && catalog_resolve(dm)) {
+        o.model = dm;
+    }
+    o.append_system_prompt = json_get_str(def, "body");
+    strvec_t tools = {0};
+    json_t *tl = json_get_arr(def, "tools"), *tn;
+    json_arr_foreach(tl, i, tn) if (json_is_str(tn)) strvec_push(&tools, json_sv(tn));
+    if (tools.n) o.tools = &tools;
+    o.no_session = true;
+    o.subagent = true;
+    o.subagent_depth = env->subagent_depth + 1;
+    o.no_context_files = false;
+    char *err = NULL;
+    app_t *child = app_create(&o, &err);
+    free(label);
+    strvec_free(&tools);
+    json_free(defs);
+    if (!child) {
+        char *r = xasprintf("Failed to start subagent: %s", err ? err : "?");
+        free(err);
+        return r;
+    }
+    child->thinking = parent->thinking;
+    child->agent->thinking = parent->thinking;
+    sb_t p = SB_INIT;
+    if (agent_name && *agent_name) sb_appendf(&p, "You are the `%s` subagent.\n\n", agent_name);
+    if (context && *context) sb_appendf(&p, "<context>\n%s\n</context>\n\n", context);
+    sb_append(&p, assignment ? assignment : "");
+    /* propagate cancellation */
+    volatile sig_atomic_t *pc = cancel;
+    pthread_t watcher;
+    watch_ctx_t wc = {pc, child->agent, 0};
+    bool watching = pc && pthread_create(&watcher, NULL, cancel_watch, &wc) == 0;
+    app_prompt(child, sb_cstr(&p), NULL);
+    wc.done = 1;
+    if (watching) pthread_join(watcher, NULL);
+    sb_free(&p);
+    const json_t *last = last_assistant(child->agent->messages);
+    char *text = last ? ai_message_text(last) : xstrdup("");
+    if (details) {
+        *details = app_stats(child);
+        json_set_str(*details, "agent", agent_name ? agent_name : "task");
+        if (last && json_get_str(last, "errorMessage")) json_set_str(*details, "error", json_get_str(last, "errorMessage"));
+    }
+    parent->total_cost += child->total_cost;
+    app_free(child);
+    return text;
+}

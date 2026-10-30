@@ -17,5 +17,7 @@ char *prompt_format(const char *text);
 char *prompt_load(const char *rel);
 /* load + render */
 char *prompt_render(const char *rel, const json_t *ctx);
+/* load + render (empty ctx); fallback text when the prompt is missing */
+char *prompt_load_or(const char *rel, const char *fallback);
 
 #endif

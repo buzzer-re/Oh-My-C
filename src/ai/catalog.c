@@ -8,6 +8,7 @@
 #include <zlib.h>
 
 static VEC(ai_model_t *) g_models;
+static hmap_t g_index; /* "provider/id" -> ai_model_t* */
 static json_t *g_providers; /* {providers:{id:{...}}, auth:[...]} */
 static json_t *g_defaults;  /* per-api compat defaults */
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
@@ -78,33 +79,28 @@ static void fill_model(ai_model_t *m) {
 
 static ai_model_t *add_model(json_t *obj) {
     const char *api = json_get_str(obj, "api");
-    json_t *defs = api ? json_get_obj(g_defaults, api) : NULL;
-    if (defs) {
-        json_t *compat = json_get_obj(obj, "compat");
-        json_t *merged = json_clone(defs);
-        if (compat) json_merge(merged, compat);
-        json_set(obj, "compat", merged);
-    }
     ai_model_t *m = xcalloc(1, sizeof(*m));
     m->raw = obj;
     fill_model(m);
+    m->compat_defaults = api ? json_get_obj(g_defaults, api) : NULL;
     if (!m->id || !m->api || !m->provider) {
         json_free(obj);
         free(m);
         return NULL;
     }
     /* replace existing same provider/id */
-    for (size_t i = 0; i < g_models.n; i++) {
-        ai_model_t *o = g_models.v[i];
-        if (strcmp(o->provider, m->provider) == 0 && strcmp(o->id, m->id) == 0) {
-            /* keep old allocation alive (callers may hold pointers): swap contents */
-            json_t *old = o->raw;
-            *o = *m;
-            free(m);
-            UNUSED(old); /* intentionally leaked: borrowed strings may still be referenced */
-            return o;
-        }
+    char *key = xasprintf("%s\x1f%s", m->provider, m->id);
+    ai_model_t *o = hmap_get(&g_index, key);
+    if (o) {
+        /* keep old allocation alive (callers may hold pointers): swap contents; old raw intentionally leaked
+           because borrowed strings may still be referenced */
+        *o = *m;
+        free(m);
+        free(key);
+        return o;
     }
+    hmap_put(&g_index, key, m);
+    free(key);
     vec_push(&g_models, m);
     return m;
 }
@@ -246,9 +242,15 @@ const ai_model_t *catalog_register(json_t *obj) {
 const ai_model_t *catalog_find(const char *provider, const char *id) {
     catalog_init();
     if (!id) return NULL;
+    if (provider) {
+        char *key = xasprintf("%s\x1f%s", provider, id);
+        ai_model_t *m = hmap_get(&g_index, key);
+        free(key);
+        return m;
+    }
     for (size_t i = 0; i < g_models.n; i++) {
         ai_model_t *m = g_models.v[i];
-        if ((!provider || strcmp(m->provider, provider) == 0) && strcmp(m->id, id) == 0) return m;
+        if (strcmp(m->id, id) == 0) return m;
     }
     return NULL;
 }
@@ -327,15 +329,19 @@ const char *catalog_provider_default_model(const char *provider) {
     return json_get_str(catalog_provider_info(provider), "defaultModel");
 }
 
-bool model_compat_bool(const ai_model_t *m, const char *key, bool def) {
-    if (!m || !m->compat) return def;
-    return json_get_bool(m->compat, key, def);
+json_t *model_compat_get(const ai_model_t *m, const char *key) {
+    if (!m) return NULL;
+    json_t *v = m->compat ? json_get(m->compat, key) : NULL;
+    if (!v && m->compat_defaults) v = json_get(m->compat_defaults, key);
+    return v;
 }
 
-const char *model_compat_str(const ai_model_t *m, const char *key) {
-    if (!m || !m->compat) return NULL;
-    return json_get_str(m->compat, key);
+bool model_compat_bool(const ai_model_t *m, const char *key, bool def) {
+    json_t *v = model_compat_get(m, key);
+    return json_is_bool(v) ? v->u.b : def;
 }
+
+const char *model_compat_str(const ai_model_t *m, const char *key) { return json_sv(model_compat_get(m, key)); }
 
 bool model_supports_effort(const ai_model_t *m, ai_effort_t e) {
     if (e == EFFORT_OFF) return true;

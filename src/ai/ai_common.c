@@ -1,6 +1,8 @@
+#define _GNU_SOURCE
 #include "ai.h"
 
 #include <math.h>
+#include <time.h>
 
 /* ---------- effort ---------- */
 
@@ -168,7 +170,11 @@ void aib_end_block(ai_builder_t *b) {
     } else if (kind == 3) {
         json_t *args = json_get(blk, "arguments");
         bool have_args = json_is_obj(args) && json_len(args) > 0;
-        if (b->buf.len && !have_args) {
+        json_t *full = b->buf.len ? json_parse(b->buf.s, b->buf.len, NULL) : NULL;
+        if (json_is_obj(full)) {
+            json_set(blk, "arguments", full);
+        } else if (b->buf.len && !have_args) {
+            json_free(full);
             json_t *parsed = json_parse(b->buf.s, b->buf.len, NULL);
             if (!parsed) parsed = json_parse_partial(b->buf.s, b->buf.len);
             if (!json_is_obj(parsed)) {
@@ -177,7 +183,10 @@ void aib_end_block(ai_builder_t *b) {
             }
             json_set(blk, "arguments", parsed);
         } else if (!json_is_obj(args)) {
+            json_free(full);
             json_set(blk, "arguments", json_obj());
+        } else {
+            json_free(full);
         }
         sb_clear(&b->buf);
         emit(b, AI_EV_TOOLCALL_END, idx, NULL, 0, blk, NULL);
@@ -456,7 +465,22 @@ static int on_hdr(void *ud, int status, const http_headers_t *h) {
     c->retry_after_ms = -1;
     const char *ra = http_headers_get(h, "retry-after-ms");
     if (ra) c->retry_after_ms = strtoll(ra, NULL, 10);
-    else if ((ra = http_headers_get(h, "retry-after"))) c->retry_after_ms = (int64_t)(strtod(ra, NULL) * 1000);
+    else if ((ra = http_headers_get(h, "retry-after"))) {
+        char *end;
+        double secs = strtod(ra, &end);
+        if (end != ra) {
+            c->retry_after_ms = (int64_t)(secs * 1000);
+        } else {
+            /* HTTP-date form */
+            struct tm tm;
+            memset(&tm, 0, sizeof tm);
+            if (strptime(ra, "%a, %d %b %Y %H:%M:%S", &tm)) {
+                int64_t when = (int64_t)timegm(&tm) * 1000;
+                int64_t d = when - now_ms();
+                c->retry_after_ms = d > 0 ? d : 0;
+            }
+        }
+    }
     return 0;
 }
 
@@ -581,13 +605,14 @@ int64_t ai_thinking_budget(const ai_model_t *m, ai_effort_t e, const json_t *cus
         if (v > 0) return v;
     }
     int64_t b;
+    bool google = m && m->api && str_starts(m->api, "google");
     switch (e) {
     case EFFORT_MINIMAL: b = 1024; break;
-    case EFFORT_LOW: b = 4096; break;
-    case EFFORT_MEDIUM: b = 10240; break;
-    case EFFORT_HIGH: b = 32768; break;
-    case EFFORT_XHIGH: b = 49152; break;
-    case EFFORT_MAX: b = 63999; break;
+    case EFFORT_LOW: b = google ? 2048 : 4096; break;
+    case EFFORT_MEDIUM: b = google ? 8192 : 8192; break;
+    case EFFORT_HIGH: b = google ? 24575 : 16384; break;
+    case EFFORT_XHIGH: b = 32768; break;
+    case EFFORT_MAX: b = 32768; break;
     default: b = 0;
     }
     if (m && m->max_tokens > 0 && b >= m->max_tokens) b = m->max_tokens > 2048 ? m->max_tokens - 1024 : m->max_tokens / 2;
@@ -648,8 +673,17 @@ json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target) 
                         json_push(nc, json_clone(blk));
                     } else {
                         const char *th = json_get_str(blk, "thinking");
-                        if (!str_empty(th)) {
-                            /* foreign thinking: drop (upstream converts to plain text only when required) */
+                        if (!str_empty(th) && target) {
+                            /* foreign thinking: demote to text in the target model's thinking dialect */
+                            char *txt;
+                            if (str_istr(target->id, "claude")) txt = xstrdup(th);
+                            else if (str_istr(target->id, "gemini")) txt = xasprintf("```thinking\n%s\n```", th);
+                            else txt = xasprintf("<think>\n%s\n</think>", th);
+                            json_t *tb = json_obj();
+                            json_set_str(tb, "type", "text");
+                            json_set_str(tb, "text", txt);
+                            json_push(nc, tb);
+                            free(txt);
                         }
                     }
                 } else if (str_eq(t, "redactedThinking")) {
@@ -700,7 +734,7 @@ json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target) 
                 if (dropped) {
                     json_t *t = json_obj();
                     json_set_str(t, "type", "text");
-                    json_set_str(t, "text", "(image omitted: model does not support images)");
+                    json_set_str(t, "text", "[image omitted: model does not support vision]");
                     json_push(nc, t);
                 }
                 json_set(nm, "content", nc);

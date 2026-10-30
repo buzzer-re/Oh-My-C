@@ -483,7 +483,7 @@ size_t str_display_width(const char *s) {
                 i++;
                 while (i < len && !((unsigned char)s[i] >= 0x40 && (unsigned char)s[i] <= 0x7E)) i++;
                 if (i < len) i++;
-            } else if (i < len && s[i] == ']') {
+            } else if (i < len && (s[i] == ']' || s[i] == 'P' || s[i] == '_' || s[i] == '^' || s[i] == 'X')) {
                 /* OSC: terminated by BEL or ST */
                 while (i < len && s[i] != '\a' && !(s[i] == '\x1b' && i + 1 < len && s[i + 1] == '\\')) i++;
                 if (i < len && s[i] == '\a') i++;
@@ -576,6 +576,49 @@ uint64_t hash_xx64(const void *data, size_t len, uint64_t seed) {
     h ^= h >> 29;
     h *= XX_P3;
     h ^= h >> 32;
+    return h;
+}
+
+/* xxHash32 */
+#define X32_P1 2654435761U
+#define X32_P2 2246822519U
+#define X32_P3 3266489917U
+#define X32_P4 668265263U
+#define X32_P5 374761393U
+static inline uint32_t rotl32(uint32_t x, int r) { return (x << r) | (x >> (32 - r)); }
+
+uint32_t hash_xx32(const void *data, size_t len, uint32_t seed) {
+    const unsigned char *p = data, *end = p + len;
+    uint32_t h;
+    if (len >= 16) {
+        const unsigned char *limit = end - 16;
+        uint32_t v1 = seed + X32_P1 + X32_P2, v2 = seed + X32_P2, v3 = seed, v4 = seed - X32_P1;
+        do {
+            v1 = rotl32(v1 + rd32(p) * X32_P2, 13) * X32_P1; p += 4;
+            v2 = rotl32(v2 + rd32(p) * X32_P2, 13) * X32_P1; p += 4;
+            v3 = rotl32(v3 + rd32(p) * X32_P2, 13) * X32_P1; p += 4;
+            v4 = rotl32(v4 + rd32(p) * X32_P2, 13) * X32_P1; p += 4;
+        } while (p <= limit);
+        h = rotl32(v1, 1) + rotl32(v2, 7) + rotl32(v3, 12) + rotl32(v4, 18);
+    } else {
+        h = seed + X32_P5;
+    }
+    h += (uint32_t)len;
+    while (p + 4 <= end) {
+        h += rd32(p) * X32_P3;
+        h = rotl32(h, 17) * X32_P4;
+        p += 4;
+    }
+    while (p < end) {
+        h += (*p) * X32_P5;
+        h = rotl32(h, 11) * X32_P1;
+        p++;
+    }
+    h ^= h >> 15;
+    h *= X32_P2;
+    h ^= h >> 13;
+    h *= X32_P3;
+    h ^= h >> 16;
     return h;
 }
 
