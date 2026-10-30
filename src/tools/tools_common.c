@@ -130,6 +130,56 @@ char *tool_resolve_path(tool_env_t *env, const char *p) {
     return path_abs(p, env->cwd);
 }
 
+char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err) {
+    *err = NULL;
+    const char *schemes[] = {"skill://", "rule://", "artifact://"};
+    size_t si = ARRAY_LEN(schemes);
+    for (size_t i = 0; i < ARRAY_LEN(schemes); i++)
+        if (str_starts(url, schemes[i])) si = i;
+    if (si == ARRAY_LEN(schemes)) return NULL;
+    const char *rest = url + strlen(schemes[si]);
+    /* split off a trailing :selector */
+    const char *colon = strchr(rest, ':');
+    char *target = colon ? xstrndup(rest, (size_t)(colon - rest)) : xstrdup(rest);
+    const char *sel = colon ? colon : "";
+    char *path = NULL;
+    if (si == 0) {
+        char *slash = strchr(target, '/');
+        if (slash) *slash = 0;
+        const skill_t *sk = discovery_find_skill(env->disc, target);
+        if (!sk) *err = xasprintf("Unknown skill: %s", target);
+        else if (slash && slash[1]) {
+            char *p = path_join(sk->dir, slash + 1);
+            char *n = path_normalize(p);
+            free(p);
+            if (!str_starts(n, sk->dir)) *err = xasprintf("Path escapes skill directory: %s", url);
+            else path = xstrdup(n);
+            free(n);
+        } else path = xstrdup(sk->path);
+    } else if (si == 1) {
+        const rule_t *r = discovery_find_rule(env->disc, target);
+        if (!r) *err = xasprintf("Unknown rule: %s", target);
+        else path = xstrdup(r->path);
+    } else {
+        if (strchr(target, '/') || strstr(target, "..")) *err = xasprintf("Invalid artifact id: %s", target);
+        else {
+            char *dir = env->artifacts_dir ? xstrdup(env->artifacts_dir) : omc_agent_path("artifacts");
+            path = xasprintf("%s/%s.log", dir, target);
+            free(dir);
+            if (!fs_is_file(path)) {
+                *err = xasprintf("Artifact not found: %s", target);
+                free(path);
+                path = NULL;
+            }
+        }
+    }
+    free(target);
+    if (!path) return NULL;
+    char *r = xasprintf("%s%s", path, sel);
+    free(path);
+    return r;
+}
+
 /* ---------- truncation ---------- */
 
 char *tool_truncate_tail(const char *s, size_t len, size_t max_bytes, size_t max_lines, bool *truncated) {

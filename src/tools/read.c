@@ -413,6 +413,8 @@ static int read_conflicts(const char *display, const char *data, tool_result_t *
     return 0;
 }
 
+static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out);
+
 static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     const char *path = json_get_str(args, "path");
@@ -422,6 +424,21 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     }
     if (str_starts(path, "http://") || str_starts(path, "https://")) {
         return web_read_url(env, path, ctx->cancel, out);
+    }
+    char *uerr = NULL;
+    char *internal = tool_resolve_internal_url(env, path, &uerr);
+    if (uerr) {
+        tool_result_error(out, "%s", uerr);
+        free(uerr);
+        return 0;
+    }
+    if (internal) {
+        json_t *a2 = json_obj();
+        json_set_str(a2, "path", internal);
+        free(internal);
+        int rc = read_execute(self, ctx, a2, out);
+        json_free(a2);
+        return rc;
     }
     selector_t sel;
     char *abs = split_path_sel(env, path, &sel);

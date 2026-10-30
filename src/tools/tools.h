@@ -3,6 +3,7 @@
 #define OMC_TOOLS_H
 
 #include "agent/agent.h"
+#include "coding/discovery.h"
 #include "core/core.h"
 #include "core/json.h"
 
@@ -57,6 +58,7 @@ typedef struct tool_env {
     char *artifacts_dir;       /* where spilled outputs go */
     int subagent_depth;
     void *session;             /* app session (for task tool) */
+    const discovery_t *disc;   /* skills/rules for skill:// and rule:// (borrowed) */
     /* spawn a subagent: returns owned final text; used by task tool (set by app) */
     char *(*run_subagent)(struct tool_env *env, const char *agent_name, const char *assignment, const char *context,
                           json_t **out_details, volatile sig_atomic_t *cancel);
@@ -66,6 +68,9 @@ typedef struct tool_env {
 tool_env_t *tool_env_new(const char *cwd);
 void tool_env_free(tool_env_t *e);
 
+/* map internal URLs (skill://, rule://, artifact://) to a local path, keeping any :selector suffix.
+ * Returns owned path or NULL if not an internal URL; sets *err (owned) when the URL is unknown. */
+char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err);
 /* resolve a model-supplied path against env cwd (expands ~), owned */
 char *tool_resolve_path(tool_env_t *env, const char *p);
 /* truncate output to a byte/line budget keeping the tail; returns owned text + notice */

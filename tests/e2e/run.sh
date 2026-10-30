@@ -48,4 +48,12 @@ check "edit apply"     "[e.txt#"  "$B" -m mock/mock-1 -p "edit:[e.txt#$TAG]\nPUT
 check "edit result"    $'alpha\nBETA\ngamma\ndelta'  cat e.txt
 check "edit stale tag" "current tag #"  "$B" -m mock/mock-1 -p "edit:[e.txt#$TAG]\nPUT 1.=1:\n+x"
 check "todo tool"      "Remaining items (2)"  "$B" -m mock/mock-1 -p "todo:first,second"
+# skills + internal URLs + context files
+mkdir -p "$T/agent/skills/demo"
+printf -- '---\nname: demo\ndescription: Demo skill for tests\n---\nSKILL BODY LINE\n' > "$T/agent/skills/demo/SKILL.md"
+printf 'Project rule: always test.\n' > AGENTS.md
+check "skill url"      "SKILL BODY LINE"  "$B" -m mock/mock-1 -p "read:skill://demo"
+check "unknown skill"  "Unknown skill"    "$B" -m mock/mock-1 -p "read:skill://nope"
+grep -q "Demo skill for tests" "$T/req.jsonl" && echo "   ok  skill in system prompt" || { echo "   FAIL skill in system prompt"; fail=1; }
+grep -q "Project rule: always test." "$T/req.jsonl" && echo "   ok  AGENTS.md in prompt" || { echo "   FAIL AGENTS.md in prompt"; fail=1; }
 exit $fail

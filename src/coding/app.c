@@ -271,6 +271,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     a->env->session = a;
     a->env->run_subagent = app_run_subagent;
     discover_all(a->cwd, &a->disc, o->no_context_files, o->no_skills, o->no_rules);
+    a->env->disc = &a->disc;
     /* session */
     if (o->no_session) {
         a->session = session_in_memory(a->cwd);
