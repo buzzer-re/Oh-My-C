@@ -814,22 +814,121 @@ char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const
     return text;
 }
 
+/* ---------- side questions, branching, maintenance ---------- */
+
+char *app_side_question(app_t *a, const char *question, char **err) {
+    json_t *c = json_obj();
+    json_set_str(c, "question", question);
+    char *q = prompt_render("coding-agent/prompts/system/btw-user.md", c);
+    json_free(c);
+    pthread_mutex_lock(&a->agent->mu);
+    json_t *msgs = json_clone(a->agent->messages);
+    json_t *sys = json_clone(a->agent->system_prompt);
+    pthread_mutex_unlock(&a->agent->mu);
+    json_push(msgs, msg_user_text(q));
+    free(q);
+    ai_context_t ctx = {.system_prompt = sys, .messages = msgs};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    char *key = app_api_key_for(a->model);
+    o.api_key = key;
+    o.reasoning = model_clamp_effort(a->model, a->thinking);
+    o.disable_reasoning = a->thinking == EFFORT_OFF;
+    volatile sig_atomic_t cancel = 0;
+    o.cancel = &cancel;
+    json_t *r = ai_complete(a->model, &ctx, &o);
+    char *text = NULL;
+    const char *stop = json_get_str(r, "stopReason");
+    if (str_eq(stop, "error") || str_eq(stop, "aborted"))
+        *err = xstrdup(json_get_str(r, "errorMessage") ? json_get_str(r, "errorMessage") : "side question failed");
+    else text = ai_message_text(r);
+    json_free(r);
+    json_free(sys);
+    json_free(msgs);
+    free(key);
+    return text;
+}
+
+int app_branch_to(app_t *a, const char *entry_id) {
+    if (!a->session || agent_is_running(a->agent)) return -1;
+    if (entry_id) session_branch(a->session, entry_id);
+    else session_reset_leaf(a->session);
+    load_session_into_agent(a);
+    if (!entry_id) agent_replace_messages(a->agent, json_arr());
+    return 0;
+}
+
+int app_clear_context(app_t *a) {
+    if (agent_is_running(a->agent)) return -1;
+    if (a->session) session_append_reset_boundary(a->session);
+    agent_replace_messages(a->agent, json_arr());
+    a->last_context_tokens = 0;
+    return 0;
+}
+
+int app_handoff(app_t *a, char **err) {
+    char *doc = prompt_load("agent/compaction/prompts/handoff-document.md");
+    int rc = app_compact(a, doc, err);
+    free(doc);
+    return rc;
+}
+
+int app_retry(app_t *a, char **err) {
+    pthread_mutex_lock(&a->agent->mu);
+    json_t *msgs = a->agent->messages;
+    size_t n = json_len(msgs);
+    json_t *last = n ? json_at(msgs, n - 1) : NULL;
+    bool failed = last && str_eq(json_get_str(last, "role"), "assistant") &&
+                  (str_eq(json_get_str(last, "stopReason"), "error") || str_eq(json_get_str(last, "stopReason"), "aborted"));
+    if (failed) json_free(json_arr_remove(msgs, n - 1));
+    pthread_mutex_unlock(&a->agent->mu);
+    if (!failed) {
+        *err = xstrdup("Nothing to retry: the last turn did not fail.");
+        return -1;
+    }
+    a->retry_count = 0;
+    return agent_continue(a->agent);
+}
+
+size_t app_shake(app_t *a, size_t min_chars) {
+    size_t count = 0;
+    pthread_mutex_lock(&a->agent->mu);
+    json_t *m;
+    json_arr_foreach(a->agent->messages, i, m) {
+        if (!str_eq(json_get_str(m, "role"), "toolResult")) continue;
+        char *t = ai_message_text(m);
+        size_t len = strlen(t);
+        bool has_image = false;
+        json_t *b;
+        json_arr_foreach(json_get_arr(m, "content"), k, b) if (str_eq(json_get_str(b, "type"), "image")) has_image = true;
+        if (len >= min_chars || has_image) {
+            char *note = xasprintf("[%zu chars%s of %s output elided by /shake]", len, has_image ? " and images" : "",
+                                   json_get_str(m, "toolName") ? json_get_str(m, "toolName") : "tool");
+            json_t *c = json_arr();
+            json_push(c, text_block(note));
+            json_set(m, "content", c);
+            free(note);
+            count++;
+        }
+        free(t);
+    }
+    pthread_mutex_unlock(&a->agent->mu);
+    return count;
+}
+
 /* ---------- title ---------- */
 
-static void maybe_title(app_t *a) {
-    if (a->title_done || a->opts.subagent || env_truthy("PI_NO_TITLE") || env_truthy("OMC_NO_TITLE")) return;
-    a->title_done = true;
-    /* first user message */
+char *app_generate_title(app_t *a) {
     const char *first = NULL;
     json_t *m;
     json_arr_foreach(a->agent->messages, i, m) {
-        if (!first && str_eq(json_get_str(m, "role"), "user")) {
+        if (!first && str_eq(json_get_str(m, "role"), "user") && !json_get_bool(m, "synthetic", false)) {
             json_t *c = json_get(m, "content");
             if (json_is_str(c)) first = json_sv(c);
             else first = json_get_str(json_at(c, 0), "text");
         }
     }
-    if (!first) return;
+    if (!first) return NULL;
     char *sys = prompt_load_or("coding-agent/prompts/system/title-system.md",
                                "Generate a concise 3-6 word title for this conversation. Output only the title.");
     const ai_model_t *tm = NULL;
@@ -838,6 +937,7 @@ static void maybe_title(app_t *a) {
     if (!tm) tm = a->model;
     char *snippet = xasprintf("%.2000s", first);
     char *title = app_complete_text(a, tm, sys, snippet, EFFORT_OFF);
+    char *res = NULL;
     if (title) {
         char *t = str_trim(title);
         /* strip quotes / trailing punctuation, single line */
@@ -847,12 +947,21 @@ static void maybe_title(app_t *a) {
         while (n && (t[n - 1] == '.' || t[n - 1] == '"')) t[--n] = 0;
         char *s = t;
         while (*s == '"' || *s == '#' || *s == ' ') s++;
-        if (*s) session_set_title(a->session, s, "auto");
+        if (*s) res = xstrdup(s);
         free(t);
     }
     free(title);
     free(snippet);
     free(sys);
+    return res;
+}
+
+static void maybe_title(app_t *a) {
+    if (a->title_done || a->opts.subagent || env_truthy("PI_NO_TITLE") || env_truthy("OMC_NO_TITLE")) return;
+    a->title_done = true;
+    char *t = app_generate_title(a);
+    if (t) session_set_title(a->session, t, "auto");
+    free(t);
 }
 
 /* ---------- compaction ---------- */

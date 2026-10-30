@@ -17,6 +17,7 @@ struct goal {
     int64_t wall_last; /* ms; 0 = wall clock not running */
     bool budget_reported;
     bool tool_installed;
+    bool interview; /* guided-goal: tool offered before a goal exists */
     /* continuation bookkeeping */
     int pending_cont;
     bool suppress;
@@ -234,7 +235,7 @@ static int goal_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
 
 static void sync_tool(app_t *a) {
     goal_t *g = G(a);
-    bool want = settings_bool("goal.enabled", true) && g->present && (g->enabled || g->exiting);
+    bool want = settings_bool("goal.enabled", true) && ((g->present && (g->enabled || g->exiting)) || (g->interview && !g->present));
     if (want && !agent_find_tool(a->agent, "goal")) {
         char *desc = tool_prompt("goal", NULL);
         json_t *s = schema_obj();
@@ -296,10 +297,16 @@ int app_goal_create(app_t *a, const char *objective, int64_t budget, char **err)
         return -1;
     }
     set_objective(g, objective, budget);
+    g->interview = false;
     persist(a, "goal");
     sync_tool(a);
     emit(a);
     return 0;
+}
+
+void app_goal_expose_tool(app_t *a) {
+    G(a)->interview = true;
+    sync_tool(a);
 }
 
 int app_goal_replace(app_t *a, const char *objective, int64_t budget, char **err) {

@@ -29,7 +29,8 @@ int app_goal_set_budget(app_t *a, int64_t budget, char **err); /* 0 = no budget 
 void app_goal_on_event(app_t *a, const agent_event_t *ev);
 json_t *app_goal_context_message(app_t *a); /* hidden per-prompt context or NULL (owned) */
 void app_goal_on_abort(app_t *a);           /* user interrupt pauses an active goal */
-void app_goal_restore(app_t *a);            /* rebuild from the session's last mode_change */
+void app_goal_restore(app_t *a);
+void app_goal_expose_tool(app_t *a);      /* /guided-goal: offer the goal tool before a goal exists */            /* rebuild from the session's last mode_change */
 /* after a run ends: returns the hidden continuation prompt (owned) when the goal should keep going.
  * mode is "interactive" / "rpc" / "print" (checked against goal.continuationModes). */
 char *app_goal_after_run(app_t *a, const json_t *run_messages, bool was_continuation, const char *mode);

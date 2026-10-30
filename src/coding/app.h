@@ -86,6 +86,14 @@ int app_new_session(app_t *a);
 int app_switch_session(app_t *a, const char *path, char **err);
 int app_fork_from(app_t *a, const char *entry_id, char **err);
 void app_abort(app_t *a);
+/* /btw: answer a side question from the current context without tools; not added to the history (owned) */
+char *app_side_question(app_t *a, const char *question, char **err);
+int app_branch_to(app_t *a, const char *entry_id);  /* move the session leaf and reload context */
+int app_clear_context(app_t *a);                    /* reset boundary: empty context, same session */
+int app_handoff(app_t *a, char **err);              /* handoff document + compact in place */
+int app_retry(app_t *a, char **err);                /* drop a failed last assistant turn and continue (blocking) */
+size_t app_shake(app_t *a, size_t min_chars);       /* elide large tool results from the live context; returns count */
+char *app_generate_title(app_t *a);                 /* owned or NULL */
 json_t *app_stats(app_t *a); /* {tokens, cost, messages, contextPercent, ...} owned */
 char *app_model_label(app_t *a); /* "provider/id" owned */
 const char *app_session_file(app_t *a);

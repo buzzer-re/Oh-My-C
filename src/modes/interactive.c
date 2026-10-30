@@ -1,6 +1,9 @@
 /* interactive mode: TUI chat (port of omp's InteractiveMode, core feature set). */
 #include "modes.h"
 #include "coding/goal.h"
+#include "mcp/mcp.h"
+#include "prompt/template.h"
+#include <unistd.h>
 
 #include "config/auth.h"
 #include "config/settings.h"
@@ -536,6 +539,34 @@ static void *worker_main(void *p) {
     return NULL;
 }
 
+static void *retry_main(void *p) {
+    ui_t *u = p;
+    char *err = NULL;
+    if (app_retry(u->app, &err) != 0 && err) ui_notice(u, "warning", err);
+    free(err);
+    tui_post(u->tui, worker_done, u);
+    return NULL;
+}
+
+typedef struct {
+    ui_t *u;
+    char *q;
+} btw_t;
+
+static void *btw_main(void *p) {
+    btw_t *b = p;
+    char *err = NULL;
+    char *ans = app_side_question(b->u->app, b->q, &err);
+    char *msg = ans ? xasprintf("btw: %s\n%s", b->q, ans) : xasprintf("btw failed: %s", err ? err : "no answer");
+    ui_notice(b->u, ans ? "info" : "error", msg);
+    free(msg);
+    free(ans);
+    free(err);
+    free(b->q);
+    free(b);
+    return NULL;
+}
+
 static void start_hidden(ui_t *u, const char *text) {
     job_t *j = xcalloc(1, sizeof(*j));
     j->u = u;
@@ -577,6 +608,49 @@ static void picker_close(ui_t *u) {
 
 static void ask_next(ui_t *u);
 
+/* rebuild the transcript view from the agent's live context */
+static void reload_chat(ui_t *u) {
+    tui_container_clear(u->chat);
+    hmap_free(&u->tools, NULL);
+    hmap_init(&u->tools);
+    u->cur_assistant = NULL;
+    json_t *m;
+    json_arr_foreach(u->app->agent->messages, i, m) {
+        const char *role = json_get_str(m, "role");
+        if (str_eq(role, "user") && !json_get_bool(m, "synthetic", false)) {
+            msgview_t *v = mv_new(MV_USER);
+            v->text = ai_message_text(m);
+            add_view(u, v);
+        } else if (str_eq(role, "assistant")) {
+            msgview_t *v = mv_new(MV_ASSISTANT);
+            v->msg = json_clone(m);
+            add_view(u, v);
+        }
+    }
+    tui_request_full_render(u->tui);
+}
+
+/* move the session leaf; a user message is re-opened in the editor (its parent becomes the leaf) */
+static void branch_pick(ui_t *u, const char *entry_id) {
+    app_t *a = u->app;
+    json_t *e = session_get(a->session, entry_id);
+    if (!e) return;
+    json_t *msg = json_get(e, "message");
+    bool user = str_eq(json_get_str(e, "type"), "message") && str_eq(json_get_str(msg, "role"), "user");
+    char *text = user ? ai_message_text(msg) : NULL;
+    const char *target = user ? json_get_str(e, "parentId") : entry_id;
+    char *tgt = target ? xstrdup(target) : NULL;
+    if (app_branch_to(a, tgt) != 0) {
+        add_notice(u, "warning", "Cannot switch branches while the agent is running.");
+    } else {
+        reload_chat(u);
+        if (text) tui_editor_set_text(u->editor, text);
+        add_notice(u, "info", user ? "Branched: edit and resend the message to continue on a new branch" : "Switched branch");
+    }
+    free(tgt);
+    free(text);
+}
+
 static void on_pick(tui_select_list_t *l, const tui_select_item_t *it, void *ud) {
     ui_t *u = ud;
     UNUSED(l);
@@ -604,26 +678,15 @@ static void on_pick(tui_select_list_t *l, const tui_select_item_t *it, void *ud)
         char *err = NULL;
         if (app_switch_session(u->app, val, &err) != 0) add_notice(u, "error", err);
         else {
-            tui_container_clear(u->chat);
-            json_t *m;
-            json_arr_foreach(u->app->agent->messages, i, m) {
-                const char *role = json_get_str(m, "role");
-                if (str_eq(role, "user")) {
-                    msgview_t *v = mv_new(MV_USER);
-                    v->text = ai_message_text(m);
-                    add_view(u, v);
-                } else if (str_eq(role, "assistant")) {
-                    msgview_t *v = mv_new(MV_ASSISTANT);
-                    v->msg = json_clone(m);
-                    add_view(u, v);
-                }
-            }
+            reload_chat(u);
             add_notice(u, "info", "Session resumed");
         }
         free(err);
     } else if (kind == 4) {
         ai_effort_t e;
         if (effort_parse(val, &e) == 0) app_set_thinking(u->app, e);
+    } else if (kind == 5) {
+        branch_pick(u, val);
     }
     free(val);
     tui_request_render(u->tui);
@@ -751,10 +814,29 @@ static const struct {
     {"thinking", "Set thinking level"},       {"new", "Start a new session"},
     {"plan", "Toggle read-only plan mode"},
     {"goal", "Goal mode: /goal <objective> | set | show | pause | resume | drop | budget <N|off>"},
+    {"guided-goal", "Have the agent interview you, then set up goal mode [rough objective]"},
+    {"tree", "Navigate the session tree (switch branches)"},
+    {"branch", "Rewind to a previous message, keeping the old path as a branch"},
+    {"retry", "Retry the last failed agent turn"},
+    {"btw", "Ask a side question without adding it to the context"},
+    {"queue", "Queue a message for after the agent yields"},
+    {"handoff", "Summarize the session into a handoff document and compact in place"},
+    {"shake", "Drop heavy tool output from the context"},
+    {"rename", "Rename the session (omit title to generate)"},
+    {"delete", "Delete the current session and start a new one"},
+    {"todo", "Show the agent's todo list"},
+    {"tools", "Show tools visible to the agent"},
+    {"context", "Show context usage"},
+    {"skills", "List discovered skills"},
+    {"mcp", "Show MCP server status"},
+    {"dirs", "List workspace directories"},
+    {"effort", "Set thinking level (alias of /thinking)"},
+    {"usage", "Show token usage and cost"},
+    {"dump", "Copy the session transcript to the clipboard"},
     {"resume", "Resume a previous session"},  {"compact", "Compact the context [instructions]"},
     {"session", "Show session info"},         {"name", "Set session title"},
     {"export", "Export session [path]"},      {"copy", "Copy last answer to clipboard"},
-    {"fork", "Fork the session here"},        {"clear", "Clear the screen and start a new session"},
+    {"fork", "Fork the session here"},        {"clear", "Clear the conversation context in place, keeping the session"},
     {"hotkeys", "Show keyboard shortcuts"},   {"quit", "Exit omc"},
     {"exit", "Exit omc"},
 };
@@ -885,10 +967,190 @@ static bool handle_command(ui_t *u, const char *line) {
         if (*arg && a->plan_mode) start_prompt(u, arg);
     } else if (!strcmp(cmd, "goal")) {
         goal_command(u, arg);
-    } else if (!strcmp(cmd, "new") || !strcmp(cmd, "clear")) {
+    } else if (!strcmp(cmd, "guided-goal")) {
+        if (a->plan_mode) add_notice(u, "warning", "Goal mode is blocked while plan mode is active. Exit plan mode first (/plan).");
+        else if (app_goal(a)) add_notice(u, "info", "A goal already exists. Use /goal to manage it, or /goal drop to start over.");
+        else if (u->worker_running) add_notice(u, "warning", "Wait for the agent to finish first.");
+        else {
+            app_goal_expose_tool(a);
+            json_t *c = json_obj();
+            if (*arg) json_set_str(c, "initial", arg);
+            char *k = prompt_render("coding-agent/prompts/goals/guided-goal-interview.md", c);
+            json_free(c);
+            start_hidden(u, k);
+            free(k);
+        }
+    } else if (!strcmp(cmd, "tree") || !strcmp(cmd, "branch")) {
+        if (u->worker_running) {
+            add_notice(u, "warning", "Cannot switch branches while the agent is running.");
+        } else {
+            bool tree = !strcmp(cmd, "tree");
+            ensure_picker(u);
+            tui_select_list_clear(u->picker);
+            json_t *list = tree ? json_clone(a->session->entries) : session_path_to(a->session, a->session->leaf_id);
+            json_t *e;
+            size_t shown = 0;
+            json_arr_foreach(list, i, e) {
+                if (!str_eq(json_get_str(e, "type"), "message")) continue;
+                json_t *m = json_get(e, "message");
+                const char *role = json_get_str(m, "role");
+                if (!str_eq(role, "user") && !(tree && str_eq(role, "assistant"))) continue;
+                if (json_get_bool(m, "synthetic", false)) continue;
+                int depth = 0;
+                for (const char *pid = json_get_str(e, "parentId"); pid && depth < 64; depth++) {
+                    json_t *pe = session_get(a->session, pid);
+                    pid = pe ? json_get_str(pe, "parentId") : NULL;
+                }
+                char *t = ai_message_text(m);
+                if (!*t) {
+                    sb_t tb = SB_INIT;
+                    json_t *blk;
+                    json_arr_foreach(json_get_arr(m, "content"), k, blk) if (str_eq(json_get_str(blk, "type"), "toolCall"))
+                        sb_appendf(&tb, "%s[%s]", tb.len ? " " : "", json_get_str(blk, "name"));
+                    free(t);
+                    t = sb_detach(&tb);
+                }
+                for (char *q = t; *q; q++)
+                    if (*q == '\n') *q = ' ';
+                bool on_path = a->session->leaf_id && !strcmp(json_get_str(e, "id"), a->session->leaf_id);
+                char *label = xasprintf("%*s%s %.70s", tree ? MIN(depth / 2, 20) : 0, "", str_eq(role, "user") ? ">" : "<", t);
+                tui_select_list_add(u->picker, json_get_str(e, "id"), label, on_path ? "(current)" : NULL);
+                free(label);
+                free(t);
+                shown++;
+            }
+            json_free(list);
+            if (!shown) add_notice(u, "info", "No messages yet.");
+            else show_picker(u, 5);
+        }
+    } else if (!strcmp(cmd, "retry")) {
+        if (u->worker_running) add_notice(u, "warning", "The agent is already running.");
+        else {
+            u->worker_running = true;
+            if (pthread_create(&u->worker, NULL, retry_main, u) != 0) u->worker_running = false;
+        }
+    } else if (!strcmp(cmd, "btw")) {
+        if (!*arg) add_notice(u, "info", "Usage: /btw <question>");
+        else {
+            btw_t *b = xcalloc(1, sizeof(*b));
+            b->u = u;
+            b->q = xstrdup(arg);
+            pthread_t th;
+            if (pthread_create(&th, NULL, btw_main, b) == 0) pthread_detach(th);
+            add_notice(u, "info", "Asking side question…");
+        }
+    } else if (!strcmp(cmd, "queue")) {
+        if (!*arg) add_notice(u, "info", "Usage: /queue <message>");
+        else if (u->worker_running) {
+            agent_follow_up(a->agent, msg_user_text(arg));
+            add_notice(u, "info", "Queued for after the agent yields");
+        } else start_prompt(u, arg);
+    } else if (!strcmp(cmd, "handoff")) {
+        char *err = NULL;
+        add_notice(u, "info", "Writing handoff…");
+        tui_render_now(u->tui);
+        if (app_handoff(a, &err) != 0) add_notice(u, "error", err ? err : "handoff failed");
+        else {
+            reload_chat(u);
+            add_notice(u, "info", "Handoff written; context compacted");
+        }
+        free(err);
+    } else if (!strcmp(cmd, "shake")) {
+        size_t n = app_shake(a, *arg ? (size_t)atoi(arg) : 2000);
+        char *m = xasprintf("Elided %zu heavy tool result%s from the context", n, n == 1 ? "" : "s");
+        add_notice(u, "info", m);
+        free(m);
+    } else if (!strcmp(cmd, "rename")) {
+        char *t = *arg ? xstrdup(arg) : app_generate_title(a);
+        if (t) {
+            session_set_title(a->session, t, *arg ? "user" : "auto");
+            char *m = xasprintf("Session renamed: %s", t);
+            add_notice(u, "info", m);
+            free(m);
+        } else add_notice(u, "warning", "Could not generate a title");
+        free(t);
+    } else if (!strcmp(cmd, "delete")) {
+        char *path = app_session_file(a) ? xstrdup(app_session_file(a)) : NULL;
+        app_new_session(a);
+        if (path) unlink(path);
+        free(path);
+        tui_container_clear(u->chat);
+        add_notice(u, "info", "Session deleted; new session started");
+    } else if (!strcmp(cmd, "todo")) {
+        json_t *ph, *t;
+        sb_t b = SB_INIT;
+        json_arr_foreach(a->env->todo.phases, i, ph) {
+            sb_appendf(&b, "%s%s\n", b.len ? "\n" : "", json_get_str(ph, "name") ? json_get_str(ph, "name") : "Todo");
+            json_arr_foreach(json_get_arr(ph, "tasks"), k, t) {
+                const char *st = json_get_str(t, "status");
+                sb_appendf(&b, "  %s %s\n", str_eq(st, "completed") ? "[x]" : str_eq(st, "in_progress") ? "[>]" : str_eq(st, "abandoned") ? "[-]" : "[ ]",
+                           json_get_str(t, "content"));
+            }
+        }
+        add_notice(u, "info", b.len ? sb_cstr(&b) : "No todos.");
+        sb_free(&b);
+    } else if (!strcmp(cmd, "tools")) {
+        sb_t b = SB_INIT;
+        sb_appendf(&b, "%zu tools visible to the agent:\n", a->agent->tools.n);
+        for (size_t i = 0; i < a->agent->tools.n; i++) {
+            const char *d = a->agent->tools.v[i]->description ? a->agent->tools.v[i]->description : "";
+            sb_appendf(&b, "  %-14s %.*s\n", a->agent->tools.v[i]->name, (int)MIN(strcspn(d, "\n"), (size_t)90), d);
+        }
+        add_notice(u, "info", sb_cstr(&b));
+        sb_free(&b);
+    } else if (!strcmp(cmd, "context") || !strcmp(cmd, "usage")) {
+        json_t *st = app_stats(a);
+        size_t sys = 0;
+        json_t *x;
+        json_arr_foreach(a->agent->system_prompt, i, x) sys += strlen(json_sv(x));
+        size_t tools = 0;
+        for (size_t i = 0; i < a->agent->tools.n; i++) {
+            char *w = json_dump(a->agent->tools.v[i]->parameters, 0);
+            tools += strlen(w) + strlen(a->agent->tools.v[i]->description ? a->agent->tools.v[i]->description : "");
+            free(w);
+        }
+        char *m = !strcmp(cmd, "context")
+                      ? xasprintf("Context: %lld / %lld tokens (%.1f%%)\n  system prompt ~%zu tokens · tools ~%zu tokens · %zu messages",
+                                  (long long)json_get_int(st, "contextTokens", 0), (long long)json_get_int(st, "contextWindow", 0),
+                                  json_get_num(st, "contextPercent", 0), sys / 4, tools / 4, json_len(a->agent->messages))
+                      : xasprintf("Usage: %lld in · %lld out · %lld cache read · %lld cache write · $%.4f",
+                                  (long long)json_get_int(st, "input", 0), (long long)json_get_int(st, "output", 0),
+                                  (long long)json_get_int(st, "cacheRead", 0), (long long)json_get_int(st, "cacheWrite", 0),
+                                  json_get_num(st, "cost", 0));
+        add_notice(u, "info", m);
+        free(m);
+        json_free(st);
+    } else if (!strcmp(cmd, "skills")) {
+        sb_t b = SB_INIT;
+        for (size_t i = 0; i < a->disc.skills.n; i++)
+            sb_appendf(&b, "  %-20s %s\n", a->disc.skills.v[i].name, a->disc.skills.v[i].description ? a->disc.skills.v[i].description : "");
+        add_notice(u, "info", b.len ? sb_cstr(&b) : "No skills discovered.");
+        sb_free(&b);
+    } else if (!strcmp(cmd, "mcp")) {
+        char *st = a->mcp ? mcp_status(a->mcp) : NULL;
+        add_notice(u, "info", st && *st ? st : "No MCP servers configured.");
+        free(st);
+    } else if (!strcmp(cmd, "dirs")) {
+        add_notice(u, "info", a->cwd);
+    } else if (!strcmp(cmd, "effort")) {
+        char *l = xasprintf("/thinking %s", arg);
+        handle_command(u, l);
+        free(l);
+    } else if (!strcmp(cmd, "dump")) {
+        char *md = session_export_markdown(a->session);
+        tui_term_copy_osc52(tui_term(u->tui), md, strlen(md));
+        free(md);
+        add_notice(u, "info", "Copied session transcript to clipboard");
+    } else if (!strcmp(cmd, "clear")) {
+        if (u->worker_running || app_clear_context(a) != 0) add_notice(u, "warning", "Wait for the agent to finish first.");
+        else {
+            tui_container_clear(u->chat);
+            tui_request_full_render(u->tui);
+            add_notice(u, "info", "Context cleared (same session)");
+        }
+    } else if (!strcmp(cmd, "new")) {
         app_new_session(a);
         tui_container_clear(u->chat);
-        if (!strcmp(cmd, "clear")) tui_request_full_render(u->tui);
         add_notice(u, "info", "New session started");
     } else if (!strcmp(cmd, "resume")) {
         session_picker(u);
