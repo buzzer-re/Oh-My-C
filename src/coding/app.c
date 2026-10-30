@@ -3,6 +3,7 @@
 #include "config/auth.h"
 #include "config/settings.h"
 #include "core/fs.h"
+#include "coding/ttsr.h"
 #include "prompt/template.h"
 
 #include <math.h>
@@ -87,8 +88,23 @@ static void maybe_title(app_t *a);
 
 static void on_agent_event(void *ud, const agent_event_t *ev) {
     app_t *a = ud;
+    if (ev->type == AGENT_EV_TURN_START || ev->type == AGENT_EV_MESSAGE_START) {
+        if (ev->type == AGENT_EV_TURN_START || str_eq(json_get_str(ev->message, "role"), "assistant")) ttsr_reset(a->ttsr);
+    }
     if (ev->type == AGENT_EV_MESSAGE_END && ev->message) {
         const char *role = json_get_str(ev->message, "role");
+        /* TTSR discard mode: the interrupted partial response is dropped, never persisted */
+        if (a->ttsr_interrupting && str_eq(role, "assistant") && str_eq(json_get_str(ev->message, "stopReason"), "aborted"))
+            return;
+        if (str_eq(role, "assistant") && !str_eq(json_get_str(ev->message, "stopReason"), "error")) {
+            char *def = ttsr_take_deferred(a->ttsr);
+            if (def) {
+                json_t *m = msg_user_text(def);
+                json_set_bool(m, "synthetic", true);
+                agent_follow_up(a->agent, m);
+                free(def);
+            }
+        }
         if (role && a->session) session_append_message(a->session, ev->message);
         if (str_eq(role, "assistant")) {
             json_t *u = json_get(ev->message, "usage");
@@ -134,9 +150,65 @@ static bool is_retryable(const char *err) {
     return false;
 }
 
+static int hook_stream(void *ud, agent_t *ag, const ai_event_t *ev) {
+    app_t *a = ud;
+    UNUSED(ag);
+    if (ttsr_on_event(a->ttsr, ev)) {
+        a->ttsr_interrupting = true;
+        return 1;
+    }
+    return 0;
+}
+
+static void hook_after_tool(void *ud, agent_t *ag, const json_t *call, tool_result_t *res) {
+    app_t *a = ud;
+    UNUSED(ag);
+    char *rem = ttsr_take_tool_reminder(a->ttsr, json_get_str(call, "id"));
+    if (rem) {
+        tool_result_text(res, rem);
+        notice(a, "info", "Rule reminder attached to %s result", json_get_str(call, "name"));
+        free(rem);
+    }
+}
+
 static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int attempt) {
     app_t *a = ud;
-    if (attempt < 0) return false;
+    if (attempt < 0) {
+        json_t *names = NULL;
+        char *inj = ttsr_take_interrupt(a->ttsr, &names);
+        a->ttsr_interrupting = false;
+        if (!inj) return false;
+        sb_t nl = SB_INIT;
+        json_t *x;
+        json_arr_foreach(names, i, x) sb_appendf(&nl, "%s%s", i ? ", " : "", json_sv(x));
+        notice(a, "warning", "Injecting rule: %s", sb_cstr(&nl));
+        sb_free(&nl);
+        json_t *m = json_obj();
+        json_set_str(m, "role", "custom");
+        json_set_str(m, "customType", "ttsr-injection");
+        json_set_str(m, "content", inj);
+        json_set_bool(m, "display", false);
+        json_t *det = json_obj();
+        json_set(det, "rules", names);
+        json_set(m, "details", det);
+        json_set_int(m, "timestamp", now_ms());
+        /* the agent sends custom messages as user content (see session to_llm) */
+        json_t *llm = msg_user_text(inj);
+        json_set_bool(llm, "synthetic", true);
+        agent_append_message(ag, llm);
+        if (a->session) {
+            json_t *e = json_obj();
+            json_set_str(e, "type", "custom_message");
+            json_set_str(e, "customType", "ttsr-injection");
+            json_set_str(e, "content", inj);
+            json_set_bool(e, "display", false);
+            json_set(e, "details", json_clone(det));
+            session_append_entry(a->session, e);
+        }
+        json_free(m);
+        free(inj);
+        return true;
+    }
     const char *stop = json_get_str(assistant, "stopReason");
     if (str_eq(stop, "aborted") || ag->cancel) return false;
     const char *err = json_get_str(assistant, "errorMessage");
@@ -172,6 +244,8 @@ static void install_agent(app_t *a) {
     ag->max_turns = a->opts.max_turns;
     ag->hooks.prepare_request = hook_prepare;
     ag->hooks.should_retry = hook_should_retry;
+    ag->hooks.on_stream_delta = hook_stream;
+    ag->hooks.after_tool = hook_after_tool;
     ag->hooks.ud = a;
     free(ag->session_id);
     ag->session_id = a->session ? xstrdup(session_id(a->session)) : uuid_v7();
@@ -272,6 +346,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     a->env->run_subagent = app_run_subagent;
     discover_all(a->cwd, &a->disc, o->no_context_files, o->no_skills, o->no_rules);
     a->env->disc = &a->disc;
+    a->ttsr = ttsr_new(&a->disc);
     /* session */
     if (o->no_session) {
         a->session = session_in_memory(a->cwd);
@@ -336,6 +411,7 @@ void app_free(app_t *a) {
     agent_free(a->agent);
     session_free(a->session);
     tool_env_free(a->env);
+    ttsr_free(a->ttsr);
     discovery_free(&a->disc);
     free(a->cwd);
     free(a->sys_custom);

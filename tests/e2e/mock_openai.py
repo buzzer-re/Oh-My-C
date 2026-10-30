@@ -45,12 +45,19 @@ class H(BaseHTTPRequestHandler):
             if u.startswith("title:") or "Generate" in (body.get("messages", [{}])[0].get("content") or "")[:0]:
                 pass
             kind, _, rest = u.partition(":")
+            if "<system-interrupt" in u:
+                kind, rest = "say", "complied with rule"
             if kind == "bash": name, args = "bash", {"command": rest}
             elif kind == "write":
                 p, _, t = rest.partition(":"); name, args = "write", {"path": p, "content": t}
             elif kind == "read": name, args = "read", {"path": rest}
             elif kind == "glob": name, args = "glob", {"path": rest}
             elif kind == "grep": name, args = "grep", {"pattern": rest}
+            elif kind == "say":
+                for w in rest.split(" "):
+                    chunks.append({**base, "choices": [{"index": 0, "delta": {"content": w + " "}}]})
+                chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+                name = None
             elif kind == "edit": name, args = "edit", {"input": rest.replace("\\n", "\n")}
             elif kind == "todo": name, args = "todo", {"op": "init", "items": rest.split(",")}
             else:

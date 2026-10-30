@@ -46,6 +46,8 @@ struct app {
     bool compacting;
     bool title_done;
     int retry_count;
+    struct ttsr *ttsr;
+    volatile bool ttsr_interrupting;
     app_notice_fn notice;
     void *notice_ud;
     pthread_mutex_t mu;

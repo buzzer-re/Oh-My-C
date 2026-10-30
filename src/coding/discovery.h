@@ -26,7 +26,10 @@ typedef struct {
     char *content;
     strvec_t globs;
     bool always;
-    char *ttsr;   /* stream-trigger regex (time-traveling rules), optional */
+    char *ttsr;   /* stream-trigger regex `condition` (time-traveling rules), optional */
+    char *scope;  /* TTSR scope: "text", "thinking", "tool", "tool:edit(*.rs)", comma-separated */
+    char *interrupt_mode; /* always | prose-only | tool-only | never (NULL = setting) */
+    bool builtin; /* bundled builtin-defaults rule */
 } rule_t;
 
 typedef struct {

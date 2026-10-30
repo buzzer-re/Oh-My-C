@@ -3,6 +3,9 @@
 #include "config/settings.h"
 #include "core/fs.h"
 #include "prompt/template.h"
+#include "core/embed.h"
+
+#include <unistd.h>
 
 #include <ctype.h>
 #include <sys/utsname.h>
@@ -210,9 +213,15 @@ static void scan_skills_dir(discovery_t *d, const char *dir) {
 
 /* ---------- rules ---------- */
 
+static rule_t *add_rule_text(discovery_t *d, char *text, const char *path, const char *default_name);
+
 static void add_rule(discovery_t *d, const char *path, const char *default_name) {
     char *text = read_nonempty(path);
-    if (!text) return;
+    if (text) add_rule_text(d, text, path, default_name);
+}
+
+/* takes ownership of text; returns the added rule or NULL (duplicate) */
+static rule_t *add_rule_text(discovery_t *d, char *text, const char *path, const char *default_name) {
     const char *body;
     json_t *fm = frontmatter_parse(text, &body);
     rule_t r = {0};
@@ -223,7 +232,7 @@ static void add_rule(discovery_t *d, const char *path, const char *default_name)
             free(r.name);
             json_free(fm);
             free(text);
-            return;
+            return NULL;
         }
     r.description = xstrdup(json_get_str(fm, "description") ? json_get_str(fm, "description") : "");
     r.path = xstrdup(path);
@@ -245,12 +254,16 @@ static void add_rule(discovery_t *d, const char *path, const char *default_name)
     }
     for (size_t i = 0; i < r.globs.n; i++)
         if (!strcmp(r.globs.v[i], "*") || !strcmp(r.globs.v[i], "**") || !strcmp(r.globs.v[i], "**/*")) r.always = true;
-    const char *tt = json_get_str(fm, "ttsr");
+    const char *tt = json_get_str(fm, "condition");
+    if (!tt) tt = json_get_str(fm, "ttsr");
     if (!tt) tt = json_get_str(fm, "ttsrTrigger");
     if (tt) r.ttsr = xstrdup(tt);
+    if (json_get_str(fm, "scope")) r.scope = xstrdup(json_get_str(fm, "scope"));
+    if (json_get_str(fm, "interruptMode")) r.interrupt_mode = xstrdup(json_get_str(fm, "interruptMode"));
     vec_push(&d->rules, r);
     json_free(fm);
     free(text);
+    return &d->rules.v[d->rules.n - 1];
 }
 
 static void scan_rules_dir(discovery_t *d, const char *dir, const char *ext) {
@@ -358,6 +371,20 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
             }
             free(p);
         }
+        if (settings_bool("ttsr.builtinRules", true)) {
+            const char *pre = "prompts/coding-agent/discovery/builtin-rules/";
+            for (size_t i = 0; i < omc_embedded_count; i++) {
+                const char *nm = omc_embedded[i].name;
+                if (!str_starts(nm, pre) || !str_ends(nm, ".md")) continue;
+                char *base = xstrndup(nm + strlen(pre), strlen(nm) - strlen(pre) - 3);
+                char *text = xstrndup((const char *)omc_embedded[i].data, omc_embedded[i].len);
+                char *label = xasprintf("builtin://%s", base);
+                rule_t *r = add_rule_text(d, text, label, base);
+                if (r) r->builtin = true;
+                free(label);
+                free(base);
+            }
+        }
         char *gh = path_join(cwd, ".github/instructions");
         scan_rules_dir(d, gh, ".instructions.md");
         free(gh);
@@ -410,6 +437,8 @@ void discovery_free(discovery_t *d) {
         free(r->path);
         free(r->content);
         free(r->ttsr);
+        free(r->scope);
+        free(r->interrupt_mode);
         strvec_free(&r->globs);
     }
     vec_free(&d->rules);
@@ -509,6 +538,7 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     }
     for (size_t i = 0; o->disc && i < o->disc->rules.n; i++) {
         const rule_t *r = &o->disc->rules.v[i];
+        if (r->ttsr) continue; /* stream-triggered rules are not listed in the prompt */
         json_t *x = json_obj();
         json_set_str(x, "name", r->name);
         json_set_str(x, "description", r->description);
