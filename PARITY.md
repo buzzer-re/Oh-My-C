@@ -50,7 +50,8 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 | MCP (stdio, streamable HTTP, SSE; omp/Claude/Cursor/VS Code configs) | ✅ | OAuth for MCP ❌ |
 | eval (persistent Python kernel, tool bridge, figures; JS/Bun runtime intentionally omitted) | ✅ | |
 | debug (DAP: all 28 actions; 14 bundled adapters + user adapters) | ✅ | verified against a scripted adapter; native adapters can't ptrace in the dev VM |
-| find, ast_grep, ast_edit, browser, computer, github, ssh, image_gen, tts, checkpoint/rewind | ❌ | |
+| ast_grep, ast_edit (bracket-aware structural matcher with ast-grep metavariables; staged xd://resolve / xd://reject) | 🟡 | token-tree matching, not tree-sitter ASTs |
+| find, browser, computer, github, ssh, image_gen, tts, checkpoint/rewind | ❌ | |
 
 ## Modes & UI
 | Feature | Status |

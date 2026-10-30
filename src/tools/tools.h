@@ -99,6 +99,10 @@ agent_tool_t *tool_ask_new(tool_env_t *env);
 agent_tool_t *tool_web_search_new(tool_env_t *env);
 agent_tool_t *tool_task_new(tool_env_t *env);
 agent_tool_t *tool_eval_new(tool_env_t *env); /* NULL if no Python */
+agent_tool_t *tool_ast_grep_new(tool_env_t *env);
+agent_tool_t *tool_ast_edit_new(tool_env_t *env);
+/* finalize a staged ast_edit proposal (xd://resolve / xd://reject) */
+char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_error);
 
 /* agent definitions (bundled + ~/.omc/agent/agents + .omc/agents): owned object name -> {name, description, tools[], model?, body} */
 json_t *agent_defs_load(const char *cwd);

@@ -21,6 +21,14 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         return 0;
     }
     if (!content) content = "";
+    if (!strcmp(path, "xd://resolve") || !strcmp(path, "xd://reject")) {
+        bool err = false;
+        char *r = astedit_resolve(env, !strcmp(path, "xd://resolve"), content, &err);
+        tool_result_text(out, r);
+        out->is_error = err;
+        free(r);
+        return 0;
+    }
     if (!strcmp(path, "xd://propose")) {
         if (!env->propose_plan) {
             tool_result_error(out, "xd://propose is only available in plan mode");
