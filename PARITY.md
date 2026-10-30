@@ -36,7 +36,7 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 | Context files, skills, rules (`.omc/`, `.omp/`, AGENTS.md, CLAUDE.md, cursor, …) | ✅ | |
 | Subagents (`task`, bundled + user agent definitions, parallel) | ✅ | worktree isolation ❌, IRC ❌, async jobs ❌ |
 | Plan mode (local:// plans, xd://propose approval, read-only gating) | ✅ | |
-| Goal mode (goal tool, hidden goal context + todo context, token/time budget accounting, budget-limit steer, auto-continuation with no-progress stop, pause on interrupt/resume, `/goal` + `--goal`, RPC `goal` command, mode_change persistence) | ✅ | guided-goal interview ❌ |
+| Goal mode (goal tool, hidden goal context + todo context, token/time budget accounting, budget-limit steer, auto-continuation with no-progress stop, pause on interrupt/resume, `/goal` + `--goal`, RPC `goal` command, mode_change persistence) | ✅ | guided-goal interview ✅ (`/guided-goal`) |
 | Advisor (second model with read/grep/glob + `advise`, incremental session updates, nit/concern/blocker routing, steer mid-run, continuation at run end per continueSeverity, dedup, note budget, immune turns, `/advisor`, RPC `set_advisor`) | 🟡 | multiple named advisors, WATCHDOG.yml grants, secret obfuscation, transcript recorder ❌ |
 | Memory backends, autolearn | ❌ | |
 
@@ -62,7 +62,7 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 ## Modes & UI
 | Feature | Status |
 |---|---|
-| Print mode (text / json), RPC mode (core commands) | ✅ |
+| Print mode (text / json), RPC mode: prompt/steer/follow_up/abort*, queue remove/promote, state, goal, advisor, todos, host tools (set_host_tools ↔ host_tool_call/result/cancel), event filter, tree/navigate/label/branch messages, messages paging, model/thinking cycle, compaction/retry toggles, export_html, handoff, btw, available commands, login providers | ✅ | host URI schemes, subagent streaming, live voice/dictation, predict_word, session lease ❌ |
 | Interactive TUI (streaming markdown, tool cards, editor, autocomplete, pickers, status line, themes) | ✅ |
 | Slash commands: help model thinking/effort plan goal guided-goal new clear resume compact handoff session name/rename export copy dump fork tree branch retry btw queue shake delete todo tools context usage skills mcp dirs hotkeys quit/exit | ✅ |
 | Slash commands: help, model, thinking, new, resume, compact, session, name, export, copy, fork, clear, quit | ✅ |

@@ -107,6 +107,9 @@ rm -f "$T/agent/config.yml"
 printf 'advisor:\n  enabled: true\n' > "$T/agent/config.yml"
 check "advisor note"   "acknowledged advisory"  "$B" -m mock/mock-1 --no-session -p "bash:echo ADVISE_ME"
 rm -f "$T/agent/config.yml"
+# RPC: host-implemented tools, tree navigation, paging
+check "rpc host tool"  "Tool said: host says hi"  python3 -I "$ROOT/tests/e2e/rpc_client.py" "$B"
+check "rpc navigate"   '"editorText": "second"'   python3 -I "$ROOT/tests/e2e/rpc_client.py" "$B"
 # ACP (Agent Client Protocol): permission request answered by the test client
 check "acp prompt"     "tool_call_update completed acp-ok"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo acp-ok"
 check "acp reject"     "tool_call_update failed The user rejected"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo no" reject_once
