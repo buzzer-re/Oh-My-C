@@ -61,5 +61,6 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 | Print mode (text / json), RPC mode (core commands) | ✅ |
 | Interactive TUI (streaming markdown, tool cards, editor, autocomplete, pickers, status line, themes) | ✅ |
 | Slash commands: help, model, thinking, new, resume, compact, session, name, export, copy, fork, clear, quit | ✅ |
-| ACP mode, collab, stats dashboard, Agent Hub, /tree, /review, /commit, /annotate | ❌ |
+| ACP mode (`--mode acp`: initialize, session/new/load/list/prompt/cancel/set_mode, streamed message/thought/tool_call/plan/usage updates, session/request_permission for edit/execute tools) | ✅ |
+| collab, stats dashboard, Agent Hub, /tree, /review, /commit, /annotate | ❌ |
 | OAuth login (generic PKCE flow from omp descriptors) | ✅ | device-code / custom hook providers ❌ |

@@ -14,6 +14,7 @@ typedef struct {
 int run_print_mode(app_t *a, const print_opts_t *o);
 int run_rpc_mode(app_t *a);
 int run_interactive_mode(app_t *a, const char *initial_prompt);
+int run_acp_mode(const app_opts_t *base); /* one app per ACP session */
 
 /* shared: thread-safe line writer to stdout */
 void out_json_line(const json_t *j);

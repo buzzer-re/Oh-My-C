@@ -22,7 +22,8 @@ static void usage(FILE *f) {
             "  omc [options] [prompt...]          interactive session (prompt optional)\n"
             "  omc -p [options] <prompt...>       print mode: run and print the final answer\n"
             "  omc --mode json -p <prompt>        print mode emitting JSON event lines\n"
-            "  omc --mode rpc                     JSONL RPC over stdin/stdout\n\n"
+            "  omc --mode rpc                     JSONL RPC over stdin/stdout\n"
+            "  omc --mode acp                     Agent Client Protocol (Zed etc.) over stdio\n\n"
             "Subcommands:\n"
             "  omc models [filter]                list models (with credentials marked)\n"
             "  omc login [provider]               OAuth login (anthropic, openai-codex, ...)\n"
@@ -321,7 +322,7 @@ int main(int argc, char **argv) {
     }
     app_opts_t o = {0};
     strvec_t tools = {0}, configs = {0}, prompt_parts = {0};
-    bool print = false, json = false, rpc = false, print_thoughts = false, plan_mode = false;
+    bool print = false, json = false, rpc = false, acp = false, print_thoughts = false, plan_mode = false;
     const char *mode = NULL;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -375,6 +376,7 @@ int main(int argc, char **argv) {
     if (mode) {
         if (!strcmp(mode, "json")) json = true;
         else if (!strcmp(mode, "rpc")) rpc = true;
+        else if (!strcmp(mode, "acp")) acp = true;
         else if (strcmp(mode, "text") != 0) {
             fprintf(stderr, "omc: unsupported mode %s\n", mode);
             return 2;
@@ -400,6 +402,11 @@ int main(int argc, char **argv) {
         }
     }
     bool read_stdin = false;
+    if (acp) {
+        int arc = run_acp_mode(&o);
+        free(cwd);
+        return arc;
+    }
     if (!rpc && !isatty(0)) {
         struct stat st;
         if (fstat(0, &st) == 0) {
