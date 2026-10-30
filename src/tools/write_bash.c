@@ -4,6 +4,7 @@
 #include "config/settings.h"
 #include "core/fs.h"
 #include "core/proc.h"
+#include "shell.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -206,7 +207,15 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
                      .ud = &bs};
     proc_result_t r;
     int64_t t0 = mono_ms();
-    int rc = proc_shell(full, &o, &r);
+    int rc;
+    if (!pty && settings_bool("bash.persistent", true)) {
+        pthread_mutex_lock(&env->mu);
+        if (!env->shell) env->shell = shell_new();
+        pthread_mutex_unlock(&env->mu);
+        rc = shell_run(env->shell, full, cwd, &o, &r);
+    } else {
+        rc = proc_shell(full, &o, &r);
+    }
     int64_t dur = mono_ms() - t0;
     sb_free(&bs.buf);
     if (rc != 0) {

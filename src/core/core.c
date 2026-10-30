@@ -82,6 +82,7 @@ void sb_reserve(sb_t *b, size_t extra) {
     while (cap < need) cap *= 2;
     b->s = xrealloc(b->s, cap);
     b->cap = cap;
+    b->s[b->len] = 0; /* always NUL-terminated, even before the first append */
 }
 
 void sb_appendn(sb_t *b, const char *s, size_t n) {

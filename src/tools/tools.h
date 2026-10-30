@@ -58,6 +58,7 @@ typedef struct tool_env {
     char *artifacts_dir;       /* where spilled outputs go */
     int subagent_depth;
     void *session;             /* app session (for task tool) */
+    struct shell *shell;       /* persistent bash session (lazy) */
     const discovery_t *disc;   /* skills/rules for skill:// and rule:// (borrowed) */
     /* called after write/edit lands a file; returns owned text appended to the result (e.g. LSP diagnostics) */
     char *(*after_write)(struct tool_env *env, const char *abs_path);

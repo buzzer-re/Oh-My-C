@@ -2,6 +2,7 @@
 
 #include "core/fs.h"
 #include "prompt/template.h"
+#include "shell.h"
 
 /* ---------- edit store ---------- */
 
@@ -120,6 +121,7 @@ void tool_env_free(tool_env_t *e) {
     json_free(e->todo.phases);
     free(e->edit_mode);
     free(e->artifacts_dir);
+    shell_free(e->shell);
     pthread_mutex_destroy(&e->mu);
     free(e);
 }

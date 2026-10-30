@@ -241,7 +241,8 @@ static int cmd_tool(const char *name, int argc, char **argv) {
     char *cwd = get_cwd();
     tool_env_t *env = tool_env_new(cwd);
     free(cwd);
-    agent_tool_t *t = !strcmp(name, "read") ? tool_read_new(env) : !strcmp(name, "grep") ? tool_grep_new(env) : tool_glob_new(env);
+    agent_tool_t *t = !strcmp(name, "read") ? tool_read_new(env) : !strcmp(name, "grep") ? tool_grep_new(env)
+                      : !strcmp(name, "bash") ? tool_bash_new(env) : tool_glob_new(env);
     json_t *args = json_obj();
     if (!strcmp(name, "read")) {
         if (argc < 1) { fprintf(stderr, "Usage: omc read <path[:selector]>\n"); return 2; }
@@ -250,6 +251,10 @@ static int cmd_tool(const char *name, int argc, char **argv) {
         if (argc < 1) { fprintf(stderr, "Usage: omc grep <pattern> [path]\n"); return 2; }
         json_set_str(args, "pattern", argv[0]);
         if (argc > 1) json_set_str(args, "path", argv[1]);
+    } else if (!strcmp(name, "bash")) {
+        if (argc < 1) { fprintf(stderr, "Usage: omc bash <command> [timeout-seconds]\n"); return 2; }
+        json_set_str(args, "command", argv[0]);
+        if (argc > 1) json_set_num(args, "timeout", atof(argv[1]));
     } else {
         if (argc > 0) json_set_str(args, "path", argv[0]);
     }
@@ -303,7 +308,7 @@ int main(int argc, char **argv) {
         if (!strcmp(c, "sessions")) return cmd_sessions(argc - 2, argv + 2);
         if (!strcmp(c, "export")) return cmd_export(argc - 2, argv + 2);
         if (!strcmp(c, "config")) return cmd_config(argc - 2, argv + 2);
-        if (!strcmp(c, "read") || !strcmp(c, "grep") || !strcmp(c, "glob")) return cmd_tool(c, argc - 2, argv + 2);
+        if (!strcmp(c, "read") || !strcmp(c, "grep") || !strcmp(c, "glob") || !strcmp(c, "bash")) return cmd_tool(c, argc - 2, argv + 2);
         if (!strcmp(c, "version")) {
             printf("omc %s\n", OMC_VERSION);
             return 0;
