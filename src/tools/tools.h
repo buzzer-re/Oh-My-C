@@ -98,6 +98,7 @@ agent_tool_t *tool_todo_new(tool_env_t *env);
 agent_tool_t *tool_ask_new(tool_env_t *env);
 agent_tool_t *tool_web_search_new(tool_env_t *env);
 agent_tool_t *tool_task_new(tool_env_t *env);
+agent_tool_t *tool_eval_new(tool_env_t *env); /* NULL if no Python */
 
 /* agent definitions (bundled + ~/.omc/agent/agents + .omc/agents): owned object name -> {name, description, tools[], model?, body} */
 json_t *agent_defs_load(const char *cwd);

@@ -48,7 +48,8 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 | web_search (Brave, Tavily, Exa, DuckDuckGo) | 🟡 | other 19 providers ❌ |
 | lsp (55 bundled servers; all 13 actions; diagnostics on write) | ✅ | |
 | MCP (stdio, streamable HTTP, SSE; omp/Claude/Cursor/VS Code configs) | ✅ | OAuth for MCP ❌ |
-| find, ast_grep, ast_edit, eval, debug (DAP), browser, computer, github, ssh, image_gen, tts, checkpoint/rewind | ❌ | |
+| eval (persistent Python kernel, tool bridge, figures; JS/Bun runtime intentionally omitted) | ✅ | |
+| find, ast_grep, ast_edit, debug (DAP), browser, computer, github, ssh, image_gen, tts, checkpoint/rewind | ❌ | |
 
 ## Modes & UI
 | Feature | Status |
