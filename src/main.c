@@ -6,6 +6,7 @@
 #include "core/fs.h"
 #include "core/proc.h"
 #include "modes/modes.h"
+#include "coding/goal.h"
 #include "tools/tools.h"
 
 #include <errno.h>
@@ -55,6 +56,7 @@ static void usage(FILE *f) {
             "      --print-thoughts               print thinking to stderr in print mode\n"
             "      --max-turns <n>                stop after n turns\n"
             "      --plan-mode                    start in read-only plan mode\n"
+            "      --goal <objective>             start a fresh interactive session in goal mode\n"
             "  -v, --version                      print version\n"
             "  -h, --help                         this help\n",
             OMC_VERSION);
@@ -324,6 +326,7 @@ int main(int argc, char **argv) {
     strvec_t tools = {0}, configs = {0}, prompt_parts = {0};
     bool print = false, json = false, rpc = false, acp = false, print_thoughts = false, plan_mode = false;
     const char *mode = NULL;
+    const char *goal = NULL;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
@@ -364,6 +367,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--max-turns")) o.max_turns = atoi(need(argc, argv, &i));
         else if (!strcmp(a, "--no-title")) setenv("OMC_NO_TITLE", "1", 1);
         else if (!strcmp(a, "--plan-mode")) plan_mode = true;
+        else if (!strcmp(a, "--goal")) goal = need(argc, argv, &i);
         else if (!strcmp(a, "--")) {
             for (i++; i < argc; i++) strvec_push(&prompt_parts, argv[i]);
         } else if (a[0] == '-' && a[1]) {
@@ -443,6 +447,26 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (plan_mode) app_set_plan_mode(app, true);
+    if (goal) {
+        if (print || json || rpc || !isatty(0)) {
+            fprintf(stderr, "omc: --goal requires an interactive terminal (not --print or --mode).\n");
+            app_free(app);
+            return 2;
+        }
+        if (o.resume || o.fork || o.continue_recent || o.no_session) {
+            fprintf(stderr, "omc: --goal requires a fresh session (no resume, continue, fork, or no-session).\n");
+            app_free(app);
+            return 2;
+        }
+        char *gerr = NULL;
+        if (app_goal_create(app, goal, 0, &gerr) != 0) {
+            fprintf(stderr, "omc: %s\n", gerr);
+            free(gerr);
+            app_free(app);
+            return 2;
+        }
+        if (!prompt.len) sb_append(&prompt, goal);
+    }
     int rc;
     if (rpc) {
         rc = run_rpc_mode(app);

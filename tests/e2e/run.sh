@@ -97,6 +97,12 @@ check "ssh write"      "Wrote ssh://box"    env PATH="$ROOT/tests/e2e/bin:$PATH"
 check "ssh write file" "via ssh"            cat "$T/sub/w.txt"
 check "ssh override"   "overrides are not allowed"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "read:ssh://me@box/etc/hosts"
 rm -f ssh.json
+# goal mode over RPC: hidden context, auto-continuation (stops on no progress), completion, resume pauses
+printf 'goal:\n  continuationModes: ["rpc"]\n' > "$T/agent/config.yml"
+check "goal continue"  '"customType":"goal-continuation"'  bash -c "( echo '{\"id\":\"g\",\"type\":\"goal\",\"op\":\"create\",\"objective\":\"Ship it\"}'; sleep 0.5; echo '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"bash:echo step\"}'; sleep 4 ) | '$B' -m mock/mock-1 --mode rpc"
+check "goal resumed paused" '"status":"paused"'  bash -c "( echo '{\"id\":\"s\",\"type\":\"goal\",\"op\":\"get\"}'; sleep 1 ) | '$B' -m mock/mock-1 -c --mode rpc"
+check "goal complete"  'Status: complete'  bash -c "( echo '{\"id\":\"r\",\"type\":\"goal\",\"op\":\"resume\"}'; sleep 0.5; echo '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"call:goal:{\\\"op\\\":\\\"complete\\\"}\"}'; sleep 3 ) | '$B' -m mock/mock-1 -c --mode rpc"
+rm -f "$T/agent/config.yml"
 # ACP (Agent Client Protocol): permission request answered by the test client
 check "acp prompt"     "tool_call_update completed acp-ok"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo acp-ok"
 check "acp reject"     "tool_call_update failed The user rejected"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo no" reject_once

@@ -1,5 +1,6 @@
 /* rpc mode: JSONL commands on stdin, responses + agent events on stdout (omp RPC protocol subset). */
 #include "modes.h"
+#include "coding/goal.h"
 
 #include "config/auth.h"
 #include "config/settings.h"
@@ -54,6 +55,7 @@ static void notice_rpc(void *ud, const char *level, const char *text) {
 
 static void *prompt_thread(void *p) {
     rpc_t *r = p;
+    size_t before = json_len(r->a->agent->messages);
     app_prompt(r->a, r->text, r->images);
     r->images = NULL;
     const json_t *last = last_assistant(r->a->agent->messages);
@@ -72,8 +74,27 @@ static void *prompt_thread(void *p) {
         json_set_bool(e, "retryable", false);
         json_set(res, "error", e);
     }
+    /* goal mode: keep going with hidden continuation turns while the goal is active and making progress */
+    bool was_cont = false;
+    for (;;) {
+        json_t *run = json_arr();
+        pthread_mutex_lock(&r->a->agent->mu);
+        for (size_t i = before; i < json_len(r->a->agent->messages); i++) json_push(run, json_clone(json_at(r->a->agent->messages, i)));
+        pthread_mutex_unlock(&r->a->agent->mu);
+        char *cont = app_goal_after_run(r->a, run, was_cont, "rpc");
+        json_free(run);
+        if (!cont) break;
+        if (!was_cont) {
+            json_set_bool(res, "sessionSettled", false);
+            out_json_line(res);
+        }
+        was_cont = true;
+        before = json_len(r->a->agent->messages);
+        app_prompt_hidden(r->a, cont, "goal-continuation");
+        free(cont);
+    }
     json_set_bool(res, "sessionSettled", true);
-    out_json_line(res);
+    if (!was_cont) out_json_line(res);
     json_free(res);
     json_t *settled = json_obj();
     json_set_str(settled, "type", "session_settled");
@@ -112,6 +133,7 @@ static json_t *state_json(app_t *a) {
     json_set_str(s, "followUpMode", settings_str("followUpMode", "one-at-a-time"));
     json_set_str(s, "interruptMode", settings_str("interruptMode", "immediate"));
     json_set(s, "stats", app_stats(a));
+    json_set(s, "goal", goal_state_json(app_goal(a)));
     return s;
 }
 
@@ -171,6 +193,25 @@ static void handle(rpc_t *r, json_t *cmd) {
     } else if (!strcmp(type, "abort")) {
         agent_abort(a->agent);
         respond(id, type, true, NULL, NULL);
+    } else if (!strcmp(type, "goal")) {
+        const char *op = json_get_str(cmd, "op");
+        char *err = NULL;
+        int rc = 0;
+        int64_t budget = json_get_int(cmd, "token_budget", 0);
+        if (str_eq(op, "create")) rc = app_goal_create(a, json_get_str(cmd, "objective"), budget, &err);
+        else if (str_eq(op, "resume")) rc = app_goal_resume(a, &err);
+        else if (str_eq(op, "pause")) rc = app_goal(a) ? app_goal_pause(a) : (err = xstrdup("No goal."), -1);
+        else if (str_eq(op, "drop")) app_goal_drop(a);
+        else if (!str_eq(op, "get")) rc = (err = xasprintf("unknown goal op '%s'", op ? op : ""), -1);
+        if (rc) {
+            respond(id, type, false, NULL, err ? err : "goal operation failed");
+        } else {
+            json_t *d = json_obj();
+            json_set(d, "goal", goal_json(app_goal(a)));
+            json_set(d, "state", goal_state_json(app_goal(a)));
+            respond(id, type, true, d, NULL);
+        }
+        free(err);
     } else if (!strcmp(type, "get_state")) {
         respond(id, type, true, state_json(a), NULL);
     } else if (!strcmp(type, "get_messages")) {

@@ -61,6 +61,7 @@ struct app {
     char *pending_rewind;       /* report waiting for turn end */
     bool checkpoint_pending;    /* checkpoint tool ran; boundary captured at its message_end */
     char *plan_file; /* local:// path of the current plan */
+    struct goal *goal; /* goal mode state (goal.c) */
     volatile bool ttsr_interrupting;
     app_notice_fn notice;
     void *notice_ud;
@@ -73,6 +74,8 @@ void app_free(app_t *a);
 
 /* run a prompt to completion (blocking). images: array of image blocks or NULL. */
 int app_prompt(app_t *a, const char *text, json_t *images);
+/* run a hidden prompt (not shown in transcripts), e.g. goal continuations; custom_type tags the session entry */
+int app_prompt_hidden(app_t *a, const char *text, const char *custom_type);
 int app_set_model(app_t *a, const char *pattern, char **err);
 void app_set_thinking(app_t *a, ai_effort_t e);
 /* enter/leave read-only plan mode (rebuilds the system prompt) */

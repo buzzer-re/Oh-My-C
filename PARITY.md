@@ -35,7 +35,8 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 | Context files, skills, rules (`.omc/`, `.omp/`, AGENTS.md, CLAUDE.md, cursor, …) | ✅ | |
 | Subagents (`task`, bundled + user agent definitions, parallel) | ✅ | worktree isolation ❌, IRC ❌, async jobs ❌ |
 | Plan mode (local:// plans, xd://propose approval, read-only gating) | ✅ | |
-| Goal mode, advisor, memory backends, autolearn | ❌ | |
+| Goal mode (goal tool, hidden goal context + todo context, token/time budget accounting, budget-limit steer, auto-continuation with no-progress stop, pause on interrupt/resume, `/goal` + `--goal`, RPC `goal` command, mode_change persistence) | ✅ | guided-goal interview ❌ |
+| Advisor, memory backends, autolearn | ❌ | |
 
 ## Tools
 | Tool | Status | Notes |

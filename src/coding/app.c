@@ -1,4 +1,5 @@
 #include "app.h"
+#include "coding/goal.h"
 
 #include "config/auth.h"
 #include "config/settings.h"
@@ -92,6 +93,7 @@ static void maybe_title(app_t *a);
 
 static void on_agent_event(void *ud, const agent_event_t *ev) {
     app_t *a = ud;
+    app_goal_on_event(a, ev);
     if (ev->type == AGENT_EV_TURN_START || ev->type == AGENT_EV_MESSAGE_START) {
         if (ev->type == AGENT_EV_TURN_START || str_eq(json_get_str(ev->message, "role"), "assistant")) ttsr_reset(a->ttsr);
     }
@@ -144,7 +146,15 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
                 free(def);
             }
         }
-        if (role && a->session) session_append_message(a->session, ev->message);
+        const char *ctype = json_get_str(ev->message, "customType");
+        if (role && a->session && ctype && str_eq(role, "user")) {
+            /* hidden steering (goal context, continuations, budget limits) persists as custom_message like omp */
+            char *txt = ai_message_text(ev->message);
+            session_append_custom_message(a->session, ctype, txt, false);
+            free(txt);
+        } else if (role && a->session) {
+            session_append_message(a->session, ev->message);
+        }
         if (str_eq(role, "assistant")) {
             json_t *u = json_get(ev->message, "usage");
             a->total_cost += json_get_num(json_get(u, "cost"), "total", 0);
@@ -713,6 +723,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     }
     install_agent(a);
     if (json_len(a->session->entries)) load_session_into_agent(a);
+    if (!o->subagent) app_goal_restore(a);
     app_rebuild_system_prompt(a);
     if (!json_len(a->session->entries) && a->session->persist) {
         char *label = app_model_label(a);
@@ -741,6 +752,7 @@ void app_free(app_t *a) {
     free(a->plan_file);
     free(a->checkpoint_entry);
     free(a->pending_rewind);
+    goal_free(a->goal);
     pthread_mutex_destroy(&a->mu);
     free(a);
 }
@@ -769,7 +781,10 @@ void app_set_thinking(app_t *a, ai_effort_t e) {
     session_append_thinking_change(a->session, effort_name(e));
 }
 
-void app_abort(app_t *a) { agent_abort(a->agent); }
+void app_abort(app_t *a) {
+    agent_abort(a->agent);
+    app_goal_on_abort(a);
+}
 
 /* ---------- one-shot completion ---------- */
 
@@ -1032,12 +1047,27 @@ int app_prompt(app_t *a, const char *text, json_t *images) {
     json_arr_foreach(images, i, img) json_push(content, json_clone(img));
     json_free(images);
     json_t *msgs = json_arr();
+    json_t *gm = app_goal_context_message(a);
+    if (gm) json_push(msgs, gm);
     json_push(msgs, msg_user_content(content));
     int rc = agent_prompt(a->agent, msgs);
     if (rc == 0) {
         maybe_title(a);
         maybe_auto_compact(a);
     }
+    return rc;
+}
+
+int app_prompt_hidden(app_t *a, const char *text, const char *custom_type) {
+    json_t *msgs = json_arr();
+    json_t *gm = app_goal_context_message(a);
+    if (gm) json_push(msgs, gm);
+    json_t *m = msg_user_text(text);
+    json_set_bool(m, "synthetic", true);
+    json_set_str(m, "customType", custom_type);
+    json_push(msgs, m);
+    int rc = agent_prompt(a->agent, msgs);
+    if (rc == 0) maybe_auto_compact(a);
     return rc;
 }
 
@@ -1057,6 +1087,7 @@ int app_new_session(app_t *a) {
     a->last_context_tokens = 0;
     json_free(a->env->todo.phases);
     a->env->todo.phases = json_arr();
+    app_goal_restore(a);
     return 0;
 }
 
@@ -1069,6 +1100,7 @@ int app_switch_session(app_t *a, const char *path, char **err) {
     a->agent->session_id = xstrdup(session_id(s));
     load_session_into_agent(a);
     a->title_done = s->title != NULL;
+    app_goal_restore(a);
     return 0;
 }
 

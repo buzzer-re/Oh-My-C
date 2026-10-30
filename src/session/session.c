@@ -532,6 +532,8 @@ static void emit_entry(json_t *out, const json_t *e) {
         json_t *c = json_get(e, "content");
         json_set(m, "content", c ? json_clone(c) : json_str(""));
         json_set_int(m, "timestamp", now_ms());
+        if (!json_get_bool(e, "display", true)) json_set_bool(m, "synthetic", true);
+        if (json_get_str(e, "customType")) json_set_str(m, "customType", json_get_str(e, "customType"));
         json_push(out, m);
     } else if (str_eq(t, "branch_summary")) {
         json_push(out, summary_msg("agent/compaction/prompts/branch-summary-context.md", json_get_str(e, "summary")));

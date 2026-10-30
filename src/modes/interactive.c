@@ -1,5 +1,6 @@
 /* interactive mode: TUI chat (port of omp's InteractiveMode, core feature set). */
 #include "modes.h"
+#include "coding/goal.h"
 
 #include "config/auth.h"
 #include "config/settings.h"
@@ -63,6 +64,7 @@ struct ui {
     size_t ask_index;
     bool ask_done;
     tui_select_list_t *picker;
+    char *goal_cont; /* pending goal continuation prompt */
     int picker_kind; /* 1 model, 2 session, 3 ask, 4 thinking */
     json_t *picker_data;
 };
@@ -308,7 +310,7 @@ static void status_render(tui_component_t *c, int width, strvec_t *out) {
     char *cx = fg(TUI_TC_STATUS_LINE_CONTEXT, ctx);
     char *co = fg(TUI_TC_STATUS_LINE_COST, cs);
     char *sep = fg(TUI_TC_STATUS_LINE_SEP, " · ");
-    char *line = xasprintf(" %s%s%s%s%s%s%s%s%s%s", a->plan_mode ? "[plan] " : "", m, sep, t, sep, p, sep, cx, sep, co);
+    char *line = xasprintf(" %s%s%s%s%s%s%s%s%s%s", a->plan_mode ? "[plan] " : app_goal(a) && goal_enabled(app_goal(a)) ? "[goal] " : app_goal(a) ? "[goal paused] " : "", m, sep, t, sep, p, sep, cx, sep, co);
     if (a->session && a->session->title) {
         char *tt = fg(TUI_TC_MUTED, a->session->title);
         char *l2 = xasprintf("%s%s%s", line, sep, tt);
@@ -489,22 +491,62 @@ static void post_notice(void *x) {
 typedef struct {
     ui_t *u;
     char *text;
+    bool hidden; /* goal continuation */
 } job_t;
+
+static void start_hidden(ui_t *u, const char *text);
+
+static void goal_continue_cb(void *ud) {
+    ui_t *u = ud;
+    char *c = u->goal_cont;
+    u->goal_cont = NULL;
+    if (!c) return;
+    char *draft = tui_editor_get_text(u->editor);
+    bool busy = u->worker_running || (draft && *draft) || u->picker_kind;
+    free(draft);
+    if (!busy) start_hidden(u, c);
+    free(c);
+}
 
 static void worker_done(void *ud) {
     ui_t *u = ud;
     pthread_join(u->worker, NULL);
     u->worker_running = false;
+    if (u->goal_cont) tui_add_timer(u->tui, 800, false, goal_continue_cb, u);
     tui_request_render(u->tui);
 }
 
 static void *worker_main(void *p) {
     job_t *j = p;
-    app_prompt(j->u->app, j->text, NULL);
+    app_t *a = j->u->app;
+    size_t before = json_len(a->agent->messages);
+    if (j->hidden) app_prompt_hidden(a, j->text, "goal-continuation");
+    else app_prompt(a, j->text, NULL);
+    json_t *run = json_arr();
+    pthread_mutex_lock(&a->agent->mu);
+    for (size_t i = before; i < json_len(a->agent->messages); i++) json_push(run, json_clone(json_at(a->agent->messages, i)));
+    pthread_mutex_unlock(&a->agent->mu);
+    char *cont = app_goal_after_run(a, run, j->hidden, "interactive");
+    json_free(run);
+    free(j->u->goal_cont);
+    j->u->goal_cont = cont;
     tui_post(j->u->tui, worker_done, j->u);
     free(j->text);
     free(j);
     return NULL;
+}
+
+static void start_hidden(ui_t *u, const char *text) {
+    job_t *j = xcalloc(1, sizeof(*j));
+    j->u = u;
+    j->text = xstrdup(text);
+    j->hidden = true;
+    u->worker_running = true;
+    if (pthread_create(&u->worker, NULL, worker_main, j) != 0) {
+        u->worker_running = false;
+        free(j->text);
+        free(j);
+    }
 }
 
 static void start_prompt(ui_t *u, const char *text) {
@@ -708,6 +750,7 @@ static const struct {
     {"help", "Show commands and keys"},       {"model", "Switch model (picker or /model <pattern>)"},
     {"thinking", "Set thinking level"},       {"new", "Start a new session"},
     {"plan", "Toggle read-only plan mode"},
+    {"goal", "Goal mode: /goal <objective> | set | show | pause | resume | drop | budget <N|off>"},
     {"resume", "Resume a previous session"},  {"compact", "Compact the context [instructions]"},
     {"session", "Show session info"},         {"name", "Set session title"},
     {"export", "Export session [path]"},      {"copy", "Copy last answer to clipboard"},
@@ -715,6 +758,82 @@ static const struct {
     {"hotkeys", "Show keyboard shortcuts"},   {"quit", "Exit omc"},
     {"exit", "Exit omc"},
 };
+
+static void goal_show(ui_t *u) {
+    const goal_t *g = app_goal(u->app);
+    if (!g) {
+        add_notice(u, "info", "No goal. Start one with /goal <objective>.");
+        return;
+    }
+    char *s = goal_budget(g) ? xasprintf("Goal [%s]: %s\nTokens: %lld / %lld", goal_status(g), goal_objective(g), (long long)goal_used(g),
+                                         (long long)goal_budget(g))
+                             : xasprintf("Goal [%s]: %s\nTokens: %lld used", goal_status(g), goal_objective(g), (long long)goal_used(g));
+    add_notice(u, "info", s);
+    free(s);
+}
+
+static void goal_command(ui_t *u, const char *arg) {
+    app_t *a = u->app;
+    if (a->plan_mode) {
+        add_notice(u, "warning", "Goal mode is blocked while plan mode is active. Exit plan mode first (/plan).");
+        return;
+    }
+    if (!settings_bool("goal.enabled", true)) {
+        add_notice(u, "warning", "Goal mode is disabled. Enable it in settings (goal.enabled).");
+        return;
+    }
+    char *sub = xstrndup(arg, strcspn(arg, " \t"));
+    const char *rest = arg + strlen(sub);
+    while (*rest == ' ' || *rest == '\t') rest++;
+    const goal_t *g = app_goal(a);
+    char *err = NULL;
+    bool known = true;
+    if (!strcmp(sub, "show")) {
+        goal_show(u);
+    } else if (!strcmp(sub, "pause")) {
+        if (app_goal_pause(a) != 0) add_notice(u, "warning", "No goal to pause.");
+        else add_notice(u, "info", "Goal paused.");
+    } else if (!strcmp(sub, "resume")) {
+        if (app_goal_resume(a, &err) != 0) add_notice(u, "warning", err);
+        else {
+            add_notice(u, "info", "Goal resumed.");
+            char *c = app_goal_after_run(a, NULL, false, "interactive");
+            if (c && !u->worker_running) start_hidden(u, c);
+            free(c);
+        }
+    } else if (!strcmp(sub, "drop")) {
+        app_goal_drop(a);
+        add_notice(u, "info", "Goal dropped; goal mode ended.");
+    } else if (!strcmp(sub, "budget")) {
+        int64_t b = !strcmp(rest, "off") || !*rest ? 0 : strtoll(rest, NULL, 10);
+        if ((strcmp(rest, "off") && *rest && b <= 0) || app_goal_set_budget(a, b, &err) != 0)
+            add_notice(u, "warning", err ? err : "Usage: /goal budget <N|off>");
+        else goal_show(u);
+    } else if (!strcmp(sub, "set")) {
+        if (!*rest) add_notice(u, "warning", "Usage: /goal set <objective>");
+        else if (app_goal_replace(a, rest, 0, &err) != 0) add_notice(u, "warning", err);
+        else if (!u->worker_running) start_prompt(u, rest);
+    } else {
+        known = false;
+    }
+    if (!known) {
+        if (g && goal_enabled(g)) {
+            if (*arg) add_notice(u, "info", "Goal mode is already active. Use /goal to manage it, or /goal drop to start over.");
+            else goal_show(u);
+        } else if (g) {
+            if (*arg) add_notice(u, "warning", "Resume the current goal first, or drop it before setting a new objective.");
+            else goal_show(u);
+        } else if (!*arg) {
+            add_notice(u, "info", "Usage: /goal <objective>");
+        } else if (app_goal_create(a, arg, 0, &err) != 0) {
+            add_notice(u, "warning", err);
+        } else if (!u->worker_running) {
+            start_prompt(u, arg);
+        }
+    }
+    free(err);
+    free(sub);
+}
 
 static bool handle_command(ui_t *u, const char *line) {
     char *cmd = xstrndup(line + 1, strcspn(line + 1, " \t"));
@@ -764,6 +883,8 @@ static bool handle_command(ui_t *u, const char *line) {
         add_notice(u, "info", a->plan_mode ? "Plan mode on: read-only exploration; the agent proposes a plan for approval."
                                            : "Plan mode off.");
         if (*arg && a->plan_mode) start_prompt(u, arg);
+    } else if (!strcmp(cmd, "goal")) {
+        goal_command(u, arg);
     } else if (!strcmp(cmd, "new") || !strcmp(cmd, "clear")) {
         app_new_session(a);
         tui_container_clear(u->chat);
@@ -1078,7 +1199,9 @@ int run_interactive_mode(app_t *a, const char *initial) {
     json_t *m;
     json_arr_foreach(a->agent->messages, i, m) {
         const char *role = json_get_str(m, "role");
-        if (str_eq(role, "user")) {
+        if (str_eq(role, "user") && json_get_bool(m, "synthetic", false)) {
+            continue;
+        } else if (str_eq(role, "user")) {
             msgview_t *v = mv_new(MV_USER);
             v->text = ai_message_text(m);
             tui_container_add(u.chat, &v->base);
