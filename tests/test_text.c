@@ -102,8 +102,8 @@ static const rxcase_t RX_CASES[] = {
     {"a\\.b", 0, "axb a.b", 4, 7},
     {"a\\-b", 0, "a-b", 0, 3},
     {"\\Qx", 0, "", -2, -2},
-    {"(?=a)", 0, "", -2, -2},
-    {"(a)\\1", 0, "", -2, -2},
+    {"(?=a)a", 0, "ba", 1, 2},
+    {"(a)\\1", 0, "xaa", 1, 3},
     {"(abc", 0, "", -2, -2},
     {"abc)", 0, "", -2, -2},
     {"*a", 0, "", -2, -2},
@@ -223,7 +223,8 @@ static void test_regex_misc(void) {
     CHECK(rx && rx_matches(rx, "a[unclosed"), "grep compile literal fallback for class");
     rx_free(rx);
     rx = rx_compile_grep("(?<=a)b", 0, &err);
-    CHECK(!rx && err && strstr(err, "look-around"), "look-around reported: %s", err ? err : "");
+    CHECK(rx && rx_matches(rx, "ab") && !rx_matches(rx, "cb"), "look-behind via backtracking fallback");
+    rx_free(rx);
     free(err);
 
     /* invalid UTF-8 haystack doesn't break anything */
@@ -626,7 +627,7 @@ static void test_search(const char *root) {
     search_result_free(&r);
 
     o.pattern = "(?<=x)y";
-    CHECK(search_run(&o, &r) == -1 && r.error, "unsupported regex error");
+    CHECK(search_run(&o, &r) == 0, "look-behind search runs via backtracking fallback");
     search_result_free(&r);
 
     /* in-memory buffer */

@@ -1,6 +1,7 @@
 /* regex.c - see regex.h. Thompson NFA over UTF-8 bytes + lazy DFA + Pike VM. */
 #define _GNU_SOURCE
 #include "text/regex.h"
+#include "text/rxbt.h"
 
 #include <ctype.h>
 #include <limits.h>
@@ -1337,6 +1338,7 @@ static void compile_node(comp_t *c, const node_t *n, int depth) {
  * rx_t
  * ====================================================================== */
 struct rx {
+    struct rxbt *bt; /* backtracking fallback for look-around / backreferences */
     int flags;
     int ngroups;
     char **names;
@@ -1958,6 +1960,7 @@ void rx_free(rx_t *rx) {
     }
     free(rx->lit);
     free(rx->req);
+    rxbt_free(rx->bt);
     free(rx);
 }
 
@@ -2023,6 +2026,23 @@ static rx_t *compile_impl(const char *pattern, int flags, char **err, bool *unsu
         if (!ps.err && ps.pos < ps.len) {
             ps.err = xasprintf("regex parse error at position %zu: unopened group", ps.pos);
         }
+    }
+    if (ps.err && (strstr(ps.err, "look-around") || strstr(ps.err, "backreferences"))) {
+        /* PCRE-style fallback: bounded backtracking engine */
+        char *berr = NULL;
+        rxbt_t *bt = rxbt_compile(pattern, flags, &berr);
+        if (bt) {
+            free(ps.err);
+            nfree(root);
+            for (size_t i = 0; i < ps.names.n; i++) free(ps.names.v[i]);
+            vec_free(&ps.names);
+            rx_t *rx = xcalloc(1, sizeof(*rx));
+            rx->bt = bt;
+            rx->flags = flags;
+            rx->ngroups = rxbt_ngroups(bt);
+            return rx;
+        }
+        free(berr);
     }
     if (ps.err) {
         if (unsupported) *unsupported = ps.unsupported;
@@ -2155,6 +2175,13 @@ static bool find_impl(const rx_t *rx, rxcache_t *c, const char *s, size_t len, s
 
 bool rx_find(const rx_t *rx, const char *s, size_t len, size_t start, size_t *mstart, size_t *mend) {
     if (!rx || start > len) return false;
+    if (rx->bt) {
+        ptrdiff_t caps[2];
+        if (!rxbt_search(rx->bt, s, len, start, caps, 2)) return false;
+        if (mstart) *mstart = (size_t)caps[0];
+        if (mend) *mend = (size_t)caps[1];
+        return true;
+    }
     size_t ms = 0, me = 0;
     if (rx->pure) {
         ptrdiff_t p = lit_find(s, len, start, rx->lit, rx->litlen, rx->lit_icase);
@@ -2175,6 +2202,7 @@ bool rx_find(const rx_t *rx, const char *s, size_t len, size_t start, size_t *ms
 
 bool rx_is_match(const rx_t *rx, const char *s, size_t len, size_t start) {
     if (!rx || start > len) return false;
+    if (rx->bt) return rxbt_search(rx->bt, s, len, start, NULL, 0);
     if (rx->pure) return lit_find(s, len, start, rx->lit, rx->litlen, rx->lit_icase) >= 0;
     rxcache_t *c = cache_get(rx);
     size_t ms, me;
@@ -2185,6 +2213,21 @@ bool rx_is_match(const rx_t *rx, const char *s, size_t len, size_t start) {
 
 bool rx_search(const rx_t *rx, const char *s, size_t len, size_t start, rx_match_t *m) {
     if (!rx || start > len) return false;
+    if (rx->bt) {
+        ptrdiff_t caps[2 * RX_MAX_GROUPS];
+        if (!rxbt_search(rx->bt, s, len, start, caps, 2 * RX_MAX_GROUPS)) return false;
+        if (m) {
+            m->start = (size_t)caps[0];
+            m->end = (size_t)caps[1];
+            m->ngroups = MIN(rx->ngroups, RX_MAX_GROUPS);
+            for (int i = 0; i < m->ngroups; i++) {
+                m->groups[i].start = caps[2 * i];
+                m->groups[i].end = caps[2 * i + 1];
+                if (m->groups[i].start < 0 || m->groups[i].end < 0) m->groups[i].start = m->groups[i].end = -1;
+            }
+        }
+        return true;
+    }
     size_t ms = 0, me = 0;
     rxcache_t *c = NULL;
     bool ok;
@@ -2225,6 +2268,7 @@ int rx_flags(const rx_t *rx) { return rx ? rx->flags : 0; }
 
 int rx_group_index(const rx_t *rx, const char *name) {
     if (!rx || !name) return -1;
+    if (rx->bt) return rxbt_group_index(rx->bt, name);
     for (int i = 1; i < rx->ngroups; i++)
         if (rx->names[i] && strcmp(rx->names[i], name) == 0) return i;
     return -1;
@@ -2232,6 +2276,7 @@ int rx_group_index(const rx_t *rx, const char *name) {
 
 const char *rx_group_name(const rx_t *rx, int i) {
     if (!rx || i <= 0 || i >= rx->ngroups) return NULL;
+    if (rx->bt) return rxbt_group_name(rx->bt, i);
     return rx->names[i];
 }
 
