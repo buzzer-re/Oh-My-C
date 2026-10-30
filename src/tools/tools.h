@@ -103,6 +103,9 @@ agent_tool_t *tool_eval_new(tool_env_t *env); /* NULL if no Python */
 /* agent definitions (bundled + ~/.omc/agent/agents + .omc/agents): owned object name -> {name, description, tools[], model?, body} */
 json_t *agent_defs_load(const char *cwd);
 
+/* GitHub pr:// and issue:// reads */
+int github_read(tool_env_t *env, const char *url, tool_result_t *out);
+
 /* helpers shared across tools */
 char *tool_prompt(const char *name, const json_t *ctx); /* renders prompts/coding-agent/prompts/tools/<name>.md */
 json_t *schema_obj(void);

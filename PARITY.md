@@ -40,7 +40,7 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 ## Tools
 | Tool | Status | Notes |
 |---|---|---|
-| read (selectors, hashline anchors, summaries, dirs, images, URLs, skill:// rule:// artifact://) | ✅ | archives/sqlite/pdf/notebooks ❌ |
+| read (selectors, hashline anchors, summaries, dirs, images, URLs, skill:// rule:// artifact:// local:// pr:// issue://) | ✅ | archives/sqlite/pdf/notebooks ❌ |
 | write, edit (hashline PUT/CUT/REM/MV, registers, block anchors; replace mode) | ✅ | apply_patch/patch/sloppy modes ❌ |
 | bash (persistent shell session, timeouts, PTY, artifact spill) | ✅ | services, async jobs ❌ |
 | grep, glob | ✅ | |

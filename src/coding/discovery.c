@@ -570,7 +570,7 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     json_set(data, "rules", rules);
     json_set(data, "alwaysApplyRules", always);
     json_t *urls = json_arr();
-    const char *url_docs[] = {"skill", "rule", "artifact", "agent"};
+    const char *url_docs[] = {"skill", "rule", "artifact", "agent", "local", "issue"};
     for (size_t i = 0; i < ARRAY_LEN(url_docs); i++) {
         if (!strcmp(url_docs[i], "skill") && !json_len(skills)) continue;
         if (!strcmp(url_docs[i], "rule") && !json_len(rules)) continue;

@@ -507,6 +507,7 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     if (str_starts(path, "http://") || str_starts(path, "https://")) {
         return web_read_url(env, path, ctx->cancel, out);
     }
+    if (str_starts(path, "pr://") || str_starts(path, "issue://")) return github_read(env, path, out);
     char *uerr = NULL;
     char *internal = tool_resolve_internal_url(env, path, &uerr);
     if (uerr) {
