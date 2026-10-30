@@ -8,6 +8,7 @@
 #include "mcp/mcp.h"
 #include "prompt/template.h"
 
+#include <ctype.h>
 #include <math.h>
 
 /* ---------- model resolution ---------- */
@@ -265,7 +266,11 @@ static void install_agent(app_t *a) {
     bool lsp_ok = !a->opts.no_tools && settings_bool("lsp.enabled", true) &&
                   (!a->opts.tools || strvec_contains(a->opts.tools, "lsp"));
     if (lsp_ok) {
-        if (!a->lsp) a->lsp = lsp_manager_new(a->cwd);
+        if (!a->lsp && a->opts.lsp) a->lsp = a->opts.lsp;
+        if (!a->lsp) {
+            a->lsp = lsp_manager_new(a->cwd);
+            a->owns_lsp = true;
+        }
         agent_add_tool(ag, tool_lsp_new(a->env, a->lsp));
         a->env->after_write = app_after_write;
     }
@@ -443,7 +448,7 @@ void app_free(app_t *a) {
     tool_env_free(a->env);
     ttsr_free(a->ttsr);
     if (a->owns_mcp) mcp_manager_free(a->mcp);
-    lsp_manager_free(a->lsp);
+    if (a->owns_lsp) lsp_manager_free(a->lsp);
     discovery_free(&a->disc);
     free(a->cwd);
     free(a->sys_custom);
@@ -699,9 +704,42 @@ static void maybe_auto_compact(app_t *a) {
 
 /* ---------- prompting ---------- */
 
+/* omp `@path` mentions: inline existing files (bounded) after the prompt text */
+static void add_mentions(app_t *a, const char *text, json_t *content) {
+    size_t budget = 256u * 1024;
+    strvec_t seen = {0};
+    for (const char *p = text; (p = strchr(p, '@')); p++) {
+        if (p > text && !isspace((unsigned char)p[-1]) && p[-1] != '(' && p[-1] != '"') continue;
+        size_t n = 0;
+        while (p[1 + n] && !isspace((unsigned char)p[1 + n]) && !strchr("\"'`),;", p[1 + n])) n++;
+        while (n && strchr(".:!?", p[n])) n--; /* trailing punctuation */
+        if (!n) continue;
+        char *rel = xstrndup(p + 1, n);
+        char *abs = path_abs(rel, a->cwd);
+        if (fs_is_file(abs) && !strvec_contains(&seen, abs)) {
+            size_t len;
+            bool trunc = false;
+            char *data = fs_read_limit(abs, MIN(budget, (size_t)(64u * 1024)), &len, &trunc);
+            if (data && !fs_is_binary(data, len)) {
+                char *t = xasprintf("<file path=\"%s\">\n%s%s\n</file>", rel, data, trunc ? "\n[…truncated]" : "");
+                json_push(content, text_block(t));
+                free(t);
+                budget = budget > len ? budget - len : 0;
+                strvec_push(&seen, abs);
+            }
+            free(data);
+        }
+        free(abs);
+        free(rel);
+        if (!budget) break;
+    }
+    strvec_free(&seen);
+}
+
 int app_prompt(app_t *a, const char *text, json_t *images) {
     json_t *content = json_arr();
     json_push(content, text_block(text));
+    add_mentions(a, text, content);
     json_t *img;
     json_arr_foreach(images, i, img) json_push(content, json_clone(img));
     json_free(images);
@@ -833,6 +871,7 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
     }
     o.append_system_prompt = json_get_str(def, "body");
     o.mcp = parent->mcp;
+    o.lsp = parent->lsp;
     strvec_t tools = {0};
     json_t *tl = json_get_arr(def, "tools"), *tn;
     json_arr_foreach(tl, i, tn) if (json_is_str(tn)) strvec_push(&tools, json_sv(tn));

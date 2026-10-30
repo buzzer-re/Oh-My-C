@@ -856,6 +856,43 @@ static void run_bang(ui_t *u, const char *line) {
     tui_request_render(u->tui);
 }
 
+/* ---------- prompt history (persisted across sessions) ---------- */
+
+static void history_load(tui_editor_t *ed) {
+    char *p = omc_agent_path("prompt-history.jsonl");
+    size_t n;
+    char *data = fs_read(p, &n);
+    free(p);
+    if (!data) return;
+    strvec_t lines = str_split_lines(data, n);
+    size_t start = lines.n > 500 ? lines.n - 500 : 0;
+    for (size_t i = start; i < lines.n; i++) {
+        json_t *j = json_parse_str(lines.v[i]);
+        const char *t = json_get_str(j, "text");
+        if (t && *t) tui_editor_add_history(ed, t);
+        json_free(j);
+    }
+    strvec_free(&lines);
+    free(data);
+}
+
+static void history_append(const char *text, const char *cwd) {
+    char *p = omc_agent_path("prompt-history.jsonl");
+    json_t *j = json_obj();
+    json_set_str(j, "text", text);
+    json_set_str(j, "cwd", cwd);
+    json_set_int(j, "ts", now_ms());
+    char *line = json_dump(j, 0);
+    sb_t b = SB_INIT;
+    sb_append(&b, line);
+    sb_putc(&b, '\n');
+    fs_append(p, b.s, b.len);
+    sb_free(&b);
+    free(line);
+    json_free(j);
+    free(p);
+}
+
 /* ---------- input ---------- */
 
 static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
@@ -866,6 +903,7 @@ static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
         return;
     }
     tui_editor_add_history(ed, t);
+    history_append(t, u->app->cwd);
     tui_editor_clear(ed);
     if (t[0] == '/' && handle_command(u, t)) {
         free(t);
@@ -1019,6 +1057,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     u.editor = tui_editor_new();
     tui_editor_set_on_submit(u.editor, on_submit, &u);
     tui_editor_set_placeholder(u.editor, "Ask omc anything… (/help)");
+    history_load(u.editor);
     tui_ac_default_t *ac = tui_ac_default_new(a->cwd);
     for (size_t i = 0; i < ARRAY_LEN(COMMANDS); i++) tui_ac_default_add_command(ac, COMMANDS[i].name, COMMANDS[i].desc);
     tui_editor_set_autocomplete(u.editor, tui_ac_default_provider, ac);
