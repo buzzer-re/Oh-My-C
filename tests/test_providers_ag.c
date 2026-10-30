@@ -735,7 +735,7 @@ static void test_google_request_gemini3(void) {
     CHECK_STR(P(c, "1.parts.0.functionCall.id"), "x1");
     CHECK_STR(P(c, "2.parts.0.functionResponse.id"), "x1");
     /* ai_transform_messages already swaps images for its own note on non-vision models */
-    CHECK_STR(P(c, "2.parts.0.functionResponse.response.output"), "(image omitted: model does not support images)");
+    CHECK_STR(P(c, "2.parts.0.functionResponse.response.output"), "[image omitted: model does not support vision]");
     CHECK(json_get(b, "tools") == NULL && json_get(b, "toolConfig") == NULL);
     json_free(b);
     o.reasoning = EFFORT_MEDIUM; /* unsupported -> clamps to low */

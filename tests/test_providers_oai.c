@@ -24,14 +24,6 @@ static int g_fail = 0, g_checks = 0;
     } while (0)
 
 /* ---------- catalog stubs ---------- */
-bool model_compat_bool(const ai_model_t *m, const char *key, bool def) {
-    if (!m || !m->compat) return def;
-    return json_get_bool(m->compat, key, def);
-}
-const char *model_compat_str(const ai_model_t *m, const char *key) {
-    if (!m || !m->compat) return NULL;
-    return json_get_str(m->compat, key);
-}
 ai_effort_t model_clamp_effort(const ai_model_t *m, ai_effort_t e) { return e; }
 char *ai_env_api_key(const char *provider) { return NULL; }
 bool model_supports_effort(const ai_model_t *m, ai_effort_t e) { return true; }

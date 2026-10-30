@@ -41,6 +41,22 @@ void ai_stream_opts_init(ai_stream_opts_t *o) {
     o->max_retries = 3;
 }
 
+/* ---------- model compat accessors ---------- */
+
+json_t *model_compat_get(const ai_model_t *m, const char *key) {
+    if (!m) return NULL;
+    json_t *v = m->compat ? json_get(m->compat, key) : NULL;
+    if (!v && m->compat_defaults) v = json_get(m->compat_defaults, key);
+    return v;
+}
+
+bool model_compat_bool(const ai_model_t *m, const char *key, bool def) {
+    json_t *v = model_compat_get(m, key);
+    return json_is_bool(v) ? v->u.b : def;
+}
+
+const char *model_compat_str(const ai_model_t *m, const char *key) { return json_sv(model_compat_get(m, key)); }
+
 /* ---------- registry ---------- */
 
 typedef struct {

@@ -123,6 +123,11 @@ void session_free(session_t *s) {
 const char *session_id(const session_t *s) { return json_get_str(s->header, "id"); }
 const char *session_cwd(const session_t *s) { return json_get_str(s->header, "cwd"); }
 
+const char *session_short_id(const char *id) {
+    size_t n = id ? strlen(id) : 0;
+    return n > 8 ? id + n - 8 : (id ? id : "");
+}
+
 json_t *session_get(const session_t *s, const char *id) { return id ? hmap_get(&s->by_id, id) : NULL; }
 
 static char *title_slot_line(const char *title, const char *source) {
@@ -728,7 +733,7 @@ char *session_resolve(const char *query, const char *cwd) {
         if (pass == 0) session_list(dir, &l);
         else session_list_all(&l);
         for (size_t i = 0; i < l.n && !found; i++) {
-            if ((l.v[i].id && str_starts(l.v[i].id, query)) || strstr(l.v[i].path, query))
+            if ((l.v[i].id && strstr(l.v[i].id, query)) || strstr(l.v[i].path, query))
                 found = xstrdup(l.v[i].path);
         }
         session_list_free(&l);

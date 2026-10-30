@@ -555,6 +555,7 @@ static int item_cmp(const void *a, const void *b) {
 
 int walk_collect(const char *root, const walk_opts_t *opts, walk_list_t *out) {
     collect_t c;
+    memset(out, 0, sizeof(*out));
     pthread_mutex_init(&c.mu, NULL);
     c.out = out;
     int r = walk(root, opts, collect_cb, &c);

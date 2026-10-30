@@ -790,7 +790,7 @@ static bool handle_command(ui_t *u, const char *line) {
         if (*arg) session_set_title(a->session, arg, "user");
     } else if (!strcmp(cmd, "export")) {
         char *text = str_ends(arg, ".md") ? session_export_markdown(a->session) : session_export_html(a->session);
-        char *dest = *arg ? xstrdup(arg) : xasprintf("omc-session-%.8s.html", session_id(a->session));
+        char *dest = *arg ? xstrdup(arg) : xasprintf("omc-session-%s.html", session_short_id(session_id(a->session)));
         int rc = fs_write(dest, text, strlen(text));
         char *m = rc ? xasprintf("Export failed: %s", strerror(-rc)) : xasprintf("Exported to %s", dest);
         add_notice(u, rc ? "error" : "info", m);
@@ -1068,6 +1068,6 @@ int run_interactive_mode(app_t *a, const char *initial) {
     hmap_free(&u.tools, NULL);
     json_free(u.pending_partial);
     if (a->session && a->session->file && a->session->on_disk)
-        fprintf(stderr, "Session saved: %s\nResume with: omc -r %.8s\n", a->session->file, session_id(a->session));
+        fprintf(stderr, "Session saved: %s\nResume with: omc -r %s\n", a->session->file, session_short_id(session_id(a->session)));
     return code;
 }

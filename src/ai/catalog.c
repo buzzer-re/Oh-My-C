@@ -329,20 +329,6 @@ const char *catalog_provider_default_model(const char *provider) {
     return json_get_str(catalog_provider_info(provider), "defaultModel");
 }
 
-json_t *model_compat_get(const ai_model_t *m, const char *key) {
-    if (!m) return NULL;
-    json_t *v = m->compat ? json_get(m->compat, key) : NULL;
-    if (!v && m->compat_defaults) v = json_get(m->compat_defaults, key);
-    return v;
-}
-
-bool model_compat_bool(const ai_model_t *m, const char *key, bool def) {
-    json_t *v = model_compat_get(m, key);
-    return json_is_bool(v) ? v->u.b : def;
-}
-
-const char *model_compat_str(const ai_model_t *m, const char *key) { return json_sv(model_compat_get(m, key)); }
-
 bool model_supports_effort(const ai_model_t *m, ai_effort_t e) {
     if (e == EFFORT_OFF) return true;
     if (!m || !m->reasoning) return false;

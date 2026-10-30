@@ -30,6 +30,7 @@ void session_free(session_t *s);
 
 const char *session_id(const session_t *s);
 const char *session_cwd(const session_t *s);
+const char *session_short_id(const char *id); /* last 8 chars (random part of UUIDv7) */
 char *session_dir_for_cwd(const char *cwd); /* ~/.omc/agent/sessions/<encoded> (owned) */
 
 /* appends (return the new entry id, borrowed) */

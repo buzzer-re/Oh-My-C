@@ -8,6 +8,10 @@
 #include "modes/modes.h"
 
 #include <errno.h>
+#include <poll.h>
+#include <sys/stat.h>
+#include <execinfo.h>
+#include <signal.h>
 #include <unistd.h>
 
 static void usage(FILE *f) {
@@ -149,7 +153,7 @@ static int cmd_sessions(int argc, char **argv) {
         const char *title = s->title ? s->title : s->first_message ? s->first_message : "(empty)";
         char *t1 = xstrndup(title, strcspn(title, "\n"));
         if (strlen(t1) > 70) strcpy(t1 + 67, "...");
-        printf("%.8s  %.19s  %3d msgs  %s%s%s\n", s->id ? s->id : "????????", when, s->message_count, t1,
+        printf("%s  %.19s  %3d msgs  %s%s%s\n", session_short_id(s->id), when, s->message_count, t1,
                all ? "  " : "", all && s->cwd ? s->cwd : "");
         free(t1);
         free(when);
@@ -182,7 +186,7 @@ static int cmd_export(int argc, char **argv) {
     const char *out = argc > 1 ? argv[1] : NULL;
     bool md = out && str_ends(out, ".md");
     char *text = md ? session_export_markdown(s) : session_export_html(s);
-    char *dest = out ? xstrdup(out) : xasprintf("omc-session-%.8s.html", session_id(s));
+    char *dest = out ? xstrdup(out) : xasprintf("omc-session-%s.html", session_short_id(session_id(s)));
     int rc = fs_write(dest, text, strlen(text));
     if (rc == 0) printf("%s\n", dest);
     else fprintf(stderr, "omc: write failed: %s\n", strerror(-rc));
@@ -229,8 +233,24 @@ static int cmd_config(int argc, char **argv) {
 
 /* ---------- main ---------- */
 
+static void crash_handler(int sig) {
+    void *frames[64];
+    int n = backtrace(frames, 64);
+    const char msg[] = "omc: fatal signal; backtrace:\n";
+    if (write(2, msg, sizeof msg - 1) < 0) {}
+    backtrace_symbols_fd(frames, n, 2);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+
 int main(int argc, char **argv) {
     proc_ignore_sigpipe();
+    if (env_truthy("OMC_DEBUG")) {
+        signal(SIGSEGV, crash_handler);
+        signal(SIGABRT, crash_handler);
+        signal(SIGBUS, crash_handler);
+    }
     const char *lp = env_get("OMC_LOG");
     if (lp) log_init(lp, env_truthy("OMC_DEBUG") ? LOG_DEBUG : LOG_INFO);
     /* subcommands */
@@ -334,7 +354,19 @@ int main(int argc, char **argv) {
             sb_appendf(&prompt, "%s%s", prompt.len ? " " : "", p);
         }
     }
+    bool read_stdin = false;
     if (!rpc && !isatty(0)) {
+        struct stat st;
+        if (fstat(0, &st) == 0) {
+            if (!prompt.len) read_stdin = S_ISREG(st.st_mode) || S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode);
+            else if (S_ISREG(st.st_mode)) read_stdin = st.st_size > 0;
+            else if (S_ISFIFO(st.st_mode)) {
+                struct pollfd pf = {0, POLLIN, 0};
+                read_stdin = poll(&pf, 1, 150) > 0;
+            }
+        }
+    }
+    if (read_stdin) {
         size_t n;
         char *in = NULL;
         sb_t sin = SB_INIT;
