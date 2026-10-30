@@ -677,7 +677,15 @@ bool tui_editor_handle_key(tui_editor_t *ed, const tui_key_t *k) {
             return true;
         }
         if (tui_kb(k, "tui.input.tab") || tui_kb(k, "tui.input.submit")) {
+            bool submit = tui_kb(k, "tui.input.submit");
             accept_ac(ed);
+            /* like upstream: Enter on a slash-command completion runs the command */
+            if (submit && ed->cl == 0 && !ed->ac_list) {
+                char *line = cur_line(ed);
+                size_t n = line ? strlen(line) : 0;
+                while (n && line[n - 1] == ' ') n--;
+                if (line && line[0] == '/' && !memchr(line, ' ', n)) do_submit(ed);
+            }
             return true;
         }
     }
