@@ -49,7 +49,8 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 | lsp (55 bundled servers; all 13 actions; diagnostics on write) | ✅ | |
 | MCP (stdio, streamable HTTP, SSE; omp/Claude/Cursor/VS Code configs) | ✅ | OAuth for MCP ❌ |
 | eval (persistent Python kernel, tool bridge, figures; JS/Bun runtime intentionally omitted) | ✅ | |
-| find, ast_grep, ast_edit, debug (DAP), browser, computer, github, ssh, image_gen, tts, checkpoint/rewind | ❌ | |
+| debug (DAP: all 28 actions; 14 bundled adapters + user adapters) | ✅ | verified against a scripted adapter; native adapters can't ptrace in the dev VM |
+| find, ast_grep, ast_edit, browser, computer, github, ssh, image_gen, tts, checkpoint/rewind | ❌ | |
 
 ## Modes & UI
 | Feature | Status |

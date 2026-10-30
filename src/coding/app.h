@@ -54,6 +54,7 @@ struct app {
     bool owns_mcp;
     struct lsp_manager *lsp;
     bool owns_lsp;
+    struct dap_manager *dap;
     bool plan_mode;
     char *plan_file; /* local:// path of the current plan */
     volatile bool ttsr_interrupting;

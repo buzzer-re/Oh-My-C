@@ -4,6 +4,7 @@
 #include "config/settings.h"
 #include "core/fs.h"
 #include "coding/ttsr.h"
+#include "dap/dap.h"
 #include "lsp/lsp.h"
 #include "mcp/mcp.h"
 #include "prompt/template.h"
@@ -421,6 +422,10 @@ static void install_agent(app_t *a) {
         agent_add_tool(ag, tool_lsp_new(a->env, a->lsp));
         a->env->after_write = app_after_write;
     }
+    if (!a->opts.no_tools && settings_bool("debug.enabled", true) && (!a->opts.tools || strvec_contains(a->opts.tools, "debug"))) {
+        if (!a->dap) a->dap = dap_manager_new(a->cwd);
+        agent_add_tool(ag, tool_debug_new(a->env, a->dap));
+    }
     if (a->opts.subagent && a->opts.subagent_depth >= (int)settings_int("task.maxRecursionDepth", 2))
         agent_remove_tool(ag, "task");
 }
@@ -622,6 +627,7 @@ void app_free(app_t *a) {
     ttsr_free(a->ttsr);
     if (a->owns_mcp) mcp_manager_free(a->mcp);
     if (a->owns_lsp) lsp_manager_free(a->lsp);
+    dap_manager_free(a->dap);
     discovery_free(&a->disc);
     free(a->cwd);
     free(a->sys_custom);
