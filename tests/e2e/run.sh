@@ -103,6 +103,10 @@ check "goal continue"  '"customType":"goal-continuation"'  bash -c "( echo '{\"i
 check "goal resumed paused" '"status":"paused"'  bash -c "( echo '{\"id\":\"s\",\"type\":\"goal\",\"op\":\"get\"}'; sleep 1 ) | '$B' -m mock/mock-1 -c --mode rpc"
 check "goal complete"  'Status: complete'  bash -c "( echo '{\"id\":\"r\",\"type\":\"goal\",\"op\":\"resume\"}'; sleep 0.5; echo '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"call:goal:{\\\"op\\\":\\\"complete\\\"}\"}'; sleep 3 ) | '$B' -m mock/mock-1 -c --mode rpc"
 rm -f "$T/agent/config.yml"
+# advisor: shadow model reviews the turn, its concern continues the run as an <advisory>
+printf 'advisor:\n  enabled: true\n' > "$T/agent/config.yml"
+check "advisor note"   "acknowledged advisory"  "$B" -m mock/mock-1 --no-session -p "bash:echo ADVISE_ME"
+rm -f "$T/agent/config.yml"
 # ACP (Agent Client Protocol): permission request answered by the test client
 check "acp prompt"     "tool_call_update completed acp-ok"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo acp-ok"
 check "acp reject"     "tool_call_update failed The user rejected"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo no" reject_once

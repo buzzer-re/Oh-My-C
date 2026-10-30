@@ -67,7 +67,8 @@ struct ui {
     size_t ask_index;
     bool ask_done;
     tui_select_list_t *picker;
-    char *goal_cont; /* pending goal continuation prompt */
+    char *goal_cont; /* pending hidden continuation prompt (goal / advisor) */
+    const char *cont_type;
     int picker_kind; /* 1 model, 2 session, 3 ask, 4 thinking */
     json_t *picker_data;
 };
@@ -313,7 +314,7 @@ static void status_render(tui_component_t *c, int width, strvec_t *out) {
     char *cx = fg(TUI_TC_STATUS_LINE_CONTEXT, ctx);
     char *co = fg(TUI_TC_STATUS_LINE_COST, cs);
     char *sep = fg(TUI_TC_STATUS_LINE_SEP, " · ");
-    char *line = xasprintf(" %s%s%s%s%s%s%s%s%s%s", a->plan_mode ? "[plan] " : app_goal(a) && goal_enabled(app_goal(a)) ? "[goal] " : app_goal(a) ? "[goal paused] " : "", m, sep, t, sep, p, sep, cx, sep, co);
+    char *line = xasprintf(" %s%s%s%s%s%s%s%s%s%s", a->advisor && !a->plan_mode ? "[advisor] " : a->plan_mode ? "[plan] " : app_goal(a) && goal_enabled(app_goal(a)) ? "[goal] " : app_goal(a) ? "[goal paused] " : "", m, sep, t, sep, p, sep, cx, sep, co);
     if (a->session && a->session->title) {
         char *tt = fg(TUI_TC_MUTED, a->session->title);
         char *l2 = xasprintf("%s%s%s", line, sep, tt);
@@ -494,10 +495,10 @@ static void post_notice(void *x) {
 typedef struct {
     ui_t *u;
     char *text;
-    bool hidden; /* goal continuation */
+    const char *hidden; /* custom type of a hidden prompt (goal continuation, advisor), NULL for user input */
 } job_t;
 
-static void start_hidden(ui_t *u, const char *text);
+static void start_hidden(ui_t *u, const char *text, const char *ctype);
 
 static void goal_continue_cb(void *ud) {
     ui_t *u = ud;
@@ -507,7 +508,7 @@ static void goal_continue_cb(void *ud) {
     char *draft = tui_editor_get_text(u->editor);
     bool busy = u->worker_running || (draft && *draft) || u->picker_kind;
     free(draft);
-    if (!busy) start_hidden(u, c);
+    if (!busy) start_hidden(u, c, u->cont_type ? u->cont_type : "goal-continuation");
     free(c);
 }
 
@@ -523,16 +524,18 @@ static void *worker_main(void *p) {
     job_t *j = p;
     app_t *a = j->u->app;
     size_t before = json_len(a->agent->messages);
-    if (j->hidden) app_prompt_hidden(a, j->text, "goal-continuation");
+    if (j->hidden) app_prompt_hidden(a, j->text, j->hidden);
     else app_prompt(a, j->text, NULL);
     json_t *run = json_arr();
     pthread_mutex_lock(&a->agent->mu);
     for (size_t i = before; i < json_len(a->agent->messages); i++) json_push(run, json_clone(json_at(a->agent->messages, i)));
     pthread_mutex_unlock(&a->agent->mu);
-    char *cont = app_goal_after_run(a, run, j->hidden, "interactive");
+    const char *ctype = NULL;
+    char *cont = app_after_run(a, run, j->hidden, "interactive", &ctype);
     json_free(run);
     free(j->u->goal_cont);
     j->u->goal_cont = cont;
+    j->u->cont_type = ctype;
     tui_post(j->u->tui, worker_done, j->u);
     free(j->text);
     free(j);
@@ -567,11 +570,11 @@ static void *btw_main(void *p) {
     return NULL;
 }
 
-static void start_hidden(ui_t *u, const char *text) {
+static void start_hidden(ui_t *u, const char *text, const char *ctype) {
     job_t *j = xcalloc(1, sizeof(*j));
     j->u = u;
     j->text = xstrdup(text);
-    j->hidden = true;
+    j->hidden = ctype;
     u->worker_running = true;
     if (pthread_create(&u->worker, NULL, worker_main, j) != 0) {
         u->worker_running = false;
@@ -814,6 +817,7 @@ static const struct {
     {"thinking", "Set thinking level"},       {"new", "Start a new session"},
     {"plan", "Toggle read-only plan mode"},
     {"goal", "Goal mode: /goal <objective> | set | show | pause | resume | drop | budget <N|off>"},
+    {"advisor", "Toggle the advisor (a second model that reviews each turn and injects notes)"},
     {"guided-goal", "Have the agent interview you, then set up goal mode [rough objective]"},
     {"tree", "Navigate the session tree (switch branches)"},
     {"branch", "Rewind to a previous message, keeping the old path as a branch"},
@@ -880,7 +884,7 @@ static void goal_command(ui_t *u, const char *arg) {
         else {
             add_notice(u, "info", "Goal resumed.");
             char *c = app_goal_after_run(a, NULL, false, "interactive");
-            if (c && !u->worker_running) start_hidden(u, c);
+            if (c && !u->worker_running) start_hidden(u, c, "goal-continuation");
             free(c);
         }
     } else if (!strcmp(sub, "drop")) {
@@ -967,6 +971,16 @@ static bool handle_command(ui_t *u, const char *line) {
         if (*arg && a->plan_mode) start_prompt(u, arg);
     } else if (!strcmp(cmd, "goal")) {
         goal_command(u, arg);
+    } else if (!strcmp(cmd, "advisor")) {
+        bool on = !strcmp(arg, "on") ? true : !strcmp(arg, "off") ? false : !a->advisor;
+        app_set_advisor(a, on);
+        char *ml = NULL;
+        const char *role = settings_str("modelRoles.advisor", NULL);
+        ml = role ? xstrdup(role) : app_model_label(a);
+        char *m = on ? xasprintf("Advisor on (%s)", ml) : xstrdup("Advisor off");
+        add_notice(u, "info", m);
+        free(m);
+        free(ml);
     } else if (!strcmp(cmd, "guided-goal")) {
         if (a->plan_mode) add_notice(u, "warning", "Goal mode is blocked while plan mode is active. Exit plan mode first (/plan).");
         else if (app_goal(a)) add_notice(u, "info", "A goal already exists. Use /goal to manage it, or /goal drop to start over.");
@@ -977,7 +991,7 @@ static bool handle_command(ui_t *u, const char *line) {
             if (*arg) json_set_str(c, "initial", arg);
             char *k = prompt_render("coding-agent/prompts/goals/guided-goal-interview.md", c);
             json_free(c);
-            start_hidden(u, k);
+            start_hidden(u, k, "guided-goal");
             free(k);
         }
     } else if (!strcmp(cmd, "tree") || !strcmp(cmd, "branch")) {

@@ -34,7 +34,12 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         chunks = []
         base = {"id": "c1", "object": "chat.completion.chunk", "model": body.get("model")}
-        if last.get("role") == "tool":
+        sysc = text_of(msgs[0]) if msgs and msgs[0].get("role") in ("system", "developer") else ""
+        advisor = "peer-shadow" in sysc
+        if advisor and last.get("role") == "tool":
+            chunks.append({**base, "choices": [{"index": 0, "delta": {"content": "noted"}}]})
+            chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+        elif last.get("role") == "tool":
             out = text_of(last)
             words = ("Tool said: " + out.strip()).split(" ")
             for i, w in enumerate(words):
@@ -47,6 +52,10 @@ class H(BaseHTTPRequestHandler):
             kind, _, rest = u.partition(":")
             if "<system-interrupt" in u:
                 kind, rest = "say", "complied with rule"
+            if advisor:
+                kind, rest = ("call", 'advise:{"note":"Check the empty-input edge case","severity":"concern"}') if "ADVISE_ME" in u else ("say", "silent")
+            elif "<advisory" in u:
+                kind, rest = "say", "acknowledged advisory"
             if kind == "bash": name, args = "bash", {"command": rest}
             elif kind == "write":
                 p, _, t = rest.partition(":"); name, args = "write", {"path": p, "content": t}

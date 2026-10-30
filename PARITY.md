@@ -36,7 +36,8 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 | Subagents (`task`, bundled + user agent definitions, parallel) | ✅ | worktree isolation ❌, IRC ❌, async jobs ❌ |
 | Plan mode (local:// plans, xd://propose approval, read-only gating) | ✅ | |
 | Goal mode (goal tool, hidden goal context + todo context, token/time budget accounting, budget-limit steer, auto-continuation with no-progress stop, pause on interrupt/resume, `/goal` + `--goal`, RPC `goal` command, mode_change persistence) | ✅ | guided-goal interview ❌ |
-| Advisor, memory backends, autolearn | ❌ | |
+| Advisor (second model with read/grep/glob + `advise`, incremental session updates, nit/concern/blocker routing, steer mid-run, continuation at run end per continueSeverity, dedup, note budget, immune turns, `/advisor`, RPC `set_advisor`) | 🟡 | multiple named advisors, WATCHDOG.yml grants, secret obfuscation, transcript recorder ❌ |
+| Memory backends, autolearn | ❌ | |
 
 ## Tools
 | Tool | Status | Notes |

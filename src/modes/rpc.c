@@ -76,12 +76,14 @@ static void *prompt_thread(void *p) {
     }
     /* goal mode: keep going with hidden continuation turns while the goal is active and making progress */
     bool was_cont = false;
+    const char *prev_type = NULL;
     for (;;) {
         json_t *run = json_arr();
         pthread_mutex_lock(&r->a->agent->mu);
         for (size_t i = before; i < json_len(r->a->agent->messages); i++) json_push(run, json_clone(json_at(r->a->agent->messages, i)));
         pthread_mutex_unlock(&r->a->agent->mu);
-        char *cont = app_goal_after_run(r->a, run, was_cont, "rpc");
+        const char *ctype = NULL;
+        char *cont = app_after_run(r->a, run, prev_type, "rpc", &ctype);
         json_free(run);
         if (!cont) break;
         if (!was_cont) {
@@ -90,7 +92,8 @@ static void *prompt_thread(void *p) {
         }
         was_cont = true;
         before = json_len(r->a->agent->messages);
-        app_prompt_hidden(r->a, cont, "goal-continuation");
+        prev_type = ctype;
+        app_prompt_hidden(r->a, cont, ctype);
         free(cont);
     }
     json_set_bool(res, "sessionSettled", true);
@@ -212,6 +215,9 @@ static void handle(rpc_t *r, json_t *cmd) {
             respond(id, type, true, d, NULL);
         }
         free(err);
+    } else if (!strcmp(type, "set_advisor")) {
+        app_set_advisor(a, json_get_bool(cmd, "enabled", true));
+        respond(id, type, true, NULL, NULL);
     } else if (!strcmp(type, "get_state")) {
         respond(id, type, true, state_json(a), NULL);
     } else if (!strcmp(type, "get_messages")) {

@@ -67,7 +67,22 @@ int run_print_mode(app_t *a, const print_opts_t *o) {
     }
     int rc = 0;
     for (size_t i = 0; i < o->messages.n; i++) {
+        size_t before = json_len(a->agent->messages);
         app_prompt(a, o->messages.v[i], NULL);
+        /* advisor notes (and goal continuations when "print" is enabled) extend the run before printing */
+        const char *prev = NULL;
+        for (int guard = 0; guard < 50; guard++) {
+            json_t *run = json_arr();
+            for (size_t k = before; k < json_len(a->agent->messages); k++) json_push(run, json_clone(json_at(a->agent->messages, k)));
+            const char *ctype = NULL;
+            char *cont = app_after_run(a, run, prev, "print", &ctype);
+            json_free(run);
+            if (!cont) break;
+            before = json_len(a->agent->messages);
+            prev = ctype;
+            app_prompt_hidden(a, cont, ctype);
+            free(cont);
+        }
         const json_t *last = last_assistant(a->agent->messages);
         const char *stop = json_get_str(last, "stopReason");
         if (str_eq(stop, "error") || str_eq(stop, "aborted")) {

@@ -62,6 +62,7 @@ struct app {
     bool checkpoint_pending;    /* checkpoint tool ran; boundary captured at its message_end */
     char *plan_file; /* local:// path of the current plan */
     struct goal *goal; /* goal mode state (goal.c) */
+    struct advisor *advisor; /* shadow reviewer (advisor.c), NULL when off */
     volatile bool ttsr_interrupting;
     app_notice_fn notice;
     void *notice_ud;
@@ -94,6 +95,10 @@ int app_handoff(app_t *a, char **err);              /* handoff document + compac
 int app_retry(app_t *a, char **err);                /* drop a failed last assistant turn and continue (blocking) */
 size_t app_shake(app_t *a, size_t min_chars);       /* elide large tool results from the live context; returns count */
 char *app_generate_title(app_t *a);                 /* owned or NULL */
+void app_set_advisor(app_t *a, bool on);
+/* after a run: hidden follow-up prompt (owned) from the advisor or goal mode, or NULL; *custom_type names it.
+ * prev_type is the custom type of the run that just ended (NULL for a user prompt). */
+char *app_after_run(app_t *a, const json_t *run_messages, const char *prev_type, const char *mode, const char **custom_type);
 json_t *app_stats(app_t *a); /* {tokens, cost, messages, contextPercent, ...} owned */
 char *app_model_label(app_t *a); /* "provider/id" owned */
 const char *app_session_file(app_t *a);

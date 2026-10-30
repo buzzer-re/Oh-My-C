@@ -1,5 +1,6 @@
 #include "app.h"
 #include "coding/goal.h"
+#include "coding/advisor.h"
 
 #include "config/auth.h"
 #include "config/settings.h"
@@ -94,6 +95,7 @@ static void maybe_title(app_t *a);
 static void on_agent_event(void *ud, const agent_event_t *ev) {
     app_t *a = ud;
     app_goal_on_event(a, ev);
+    if (a->advisor) advisor_on_event(a->advisor, ev);
     if (ev->type == AGENT_EV_TURN_START || ev->type == AGENT_EV_MESSAGE_START) {
         if (ev->type == AGENT_EV_TURN_START || str_eq(json_get_str(ev->message, "role"), "assistant")) ttsr_reset(a->ttsr);
     }
@@ -733,6 +735,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     }
     a->title_done = a->session->title != NULL;
     if (settings_bool("plan.defaultOnStartup", false) && !o->subagent) app_set_plan_mode(a, true);
+    if (settings_bool("advisor.enabled", false) && !o->subagent) app_set_advisor(a, true);
     return a;
 }
 
@@ -752,6 +755,7 @@ void app_free(app_t *a) {
     free(a->plan_file);
     free(a->checkpoint_entry);
     free(a->pending_rewind);
+    advisor_free(a->advisor);
     goal_free(a->goal);
     pthread_mutex_destroy(&a->mu);
     free(a);
@@ -814,6 +818,33 @@ char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const
     return text;
 }
 
+/* ---------- advisor ---------- */
+
+void app_set_advisor(app_t *a, bool on) {
+    if (on && !a->advisor) a->advisor = advisor_new(a);
+    else if (!on && a->advisor) {
+        advisor_free(a->advisor);
+        a->advisor = NULL;
+    }
+}
+
+char *app_after_run(app_t *a, const json_t *run_messages, const char *prev_type, const char *mode, const char **custom_type) {
+    *custom_type = NULL;
+    const char *stop = json_get_str(last_assistant(a->agent->messages), "stopReason");
+    if (a->advisor && !str_eq(stop, "aborted")) {
+        bool cont = false;
+        char *t = advisor_after_run(a->advisor, &cont);
+        if (t && cont) {
+            *custom_type = "advisor";
+            return t;
+        }
+        free(t);
+    }
+    char *g = app_goal_after_run(a, run_messages, str_eq(prev_type, "goal-continuation"), mode);
+    if (g) *custom_type = "goal-continuation";
+    return g;
+}
+
 /* ---------- side questions, branching, maintenance ---------- */
 
 char *app_side_question(app_t *a, const char *question, char **err) {
@@ -855,6 +886,7 @@ int app_branch_to(app_t *a, const char *entry_id) {
     else session_reset_leaf(a->session);
     load_session_into_agent(a);
     if (!entry_id) agent_replace_messages(a->agent, json_arr());
+    advisor_reset(a->advisor);
     return 0;
 }
 
