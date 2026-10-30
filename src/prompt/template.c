@@ -431,7 +431,31 @@ static bool truthy(const json_t *j) {
 static json_t *keep(rctx_t *r, json_t *j);
 
 /* json_path plus JS-ish ".length" on arrays/strings/objects */
+static const json_t *tpl_path_norm(rctx_t *r, const json_t *v, const char *path);
+
+/* Handlebars segment-literal syntax: `jobs.[0].jobId`, `[weird key]` -> plain dotted path */
 static const json_t *tpl_path(rctx_t *r, const json_t *v, const char *path) {
+    if (!strchr(path, '[')) return tpl_path_norm(r, v, path);
+    sb_t b = SB_INIT;
+    for (const char *p = path; *p; p++) {
+        if (*p == '[') {
+            const char *e = strchr(p, ']');
+            if (!e) {
+                sb_append(&b, p);
+                break;
+            }
+            sb_appendn(&b, p + 1, (size_t)(e - p - 1));
+            p = e;
+        } else {
+            sb_putc(&b, *p);
+        }
+    }
+    const json_t *res = tpl_path_norm(r, v, sb_cstr(&b));
+    sb_free(&b);
+    return res;
+}
+
+static const json_t *tpl_path_norm(rctx_t *r, const json_t *v, const char *path) {
     const char *dot = strrchr(path, '.');
     const char *last = dot ? dot + 1 : path;
     if (strcmp(last, "length") == 0) {

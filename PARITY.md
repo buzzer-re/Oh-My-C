@@ -45,7 +45,7 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 |---|---|---|
 | read (selectors, hashline anchors, summaries, dirs, images, URLs, skill:// rule:// artifact:// local:// pr:// issue://) | ✅ | archives/sqlite/pdf/notebooks ❌ |
 | write, edit (hashline PUT/CUT/REM/MV, registers, block anchors; replace mode) | ✅ | apply_patch/patch/sloppy modes ❌ |
-| bash (persistent shell session, timeouts, PTY, artifact spill) | ✅ | services, async jobs ❌ |
+| bash (persistent shell session, timeouts, PTY, artifact spill, `async` background jobs delivered as follow-ups / idle wake-up, `wait` tool, `/jobs`) | ✅ | services (launch), async task jobs ❌ |
 | grep, glob | ✅ | |
 | todo, ask | ✅ | |
 | web_search (Brave, Tavily, Exa, DuckDuckGo) | 🟡 | other 19 providers ❌ |

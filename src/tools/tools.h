@@ -70,6 +70,7 @@ typedef struct tool_env {
     /* spawn a subagent: returns owned final text; used by task tool (set by app) */
     char *(*run_subagent)(struct tool_env *env, const char *agent_name, const char *assignment, const char *context,
                           json_t **out_details, volatile sig_atomic_t *cancel);
+    struct jobs *jobs;         /* async background jobs (owned; NULL disables async) */
     pthread_mutex_t mu;
 } tool_env_t;
 
@@ -94,6 +95,9 @@ agent_tool_t *tool_read_new(tool_env_t *env);
 agent_tool_t *tool_write_new(tool_env_t *env);
 agent_tool_t *tool_edit_new(tool_env_t *env);
 agent_tool_t *tool_bash_new(tool_env_t *env);
+agent_tool_t *tool_wait_new(tool_env_t *env);
+/* render settled background jobs ([{jobId,label,result}]) as the async-result notice (owned) */
+char *jobs_render_results(const json_t *jobs);
 agent_tool_t *tool_grep_new(tool_env_t *env);
 agent_tool_t *tool_glob_new(tool_env_t *env);
 agent_tool_t *tool_todo_new(tool_env_t *env);

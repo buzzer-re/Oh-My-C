@@ -1,6 +1,7 @@
 #include "app.h"
 #include "coding/goal.h"
 #include "coding/advisor.h"
+#include "tools/jobs.h"
 
 #include "config/auth.h"
 #include "config/settings.h"
@@ -92,8 +93,33 @@ static void notice(app_t *a, const char *level, const char *fmt, ...) {
 
 static void maybe_title(app_t *a);
 
+/* a background job settled: running sessions pick it up at the next turn boundary, idle ones are woken */
+static void app_job_settled(void *ud) {
+    app_t *a = ud;
+    if (!agent_is_running(a->agent) && a->wake) a->wake(a->wake_ud);
+}
+
+static json_t *job_results_message(app_t *a) {
+    json_t *done = jobs_take_finished(a->env->jobs);
+    if (!json_len(done)) {
+        json_free(done);
+        return NULL;
+    }
+    char *txt = jobs_render_results(done);
+    json_free(done);
+    json_t *m = msg_user_text(txt);
+    json_set_bool(m, "synthetic", true);
+    json_set_str(m, "customType", "async-result");
+    free(txt);
+    return m;
+}
+
 static void on_agent_event(void *ud, const agent_event_t *ev) {
     app_t *a = ud;
+    if (ev->type == AGENT_EV_TURN_END && a->env && jobs_undelivered(a->env->jobs)) {
+        json_t *m = job_results_message(a);
+        if (m) agent_steer(a->agent, m);
+    }
     app_goal_on_event(a, ev);
     if (a->advisor) advisor_on_event(a->advisor, ev);
     if (ev->type == AGENT_EV_TURN_START || ev->type == AGENT_EV_MESSAGE_START) {
@@ -649,6 +675,8 @@ app_t *app_create(const app_opts_t *o, char **err) {
     a->thinking = eff;
     /* environment & discovery */
     a->env = tool_env_new(a->cwd);
+    a->env->jobs = jobs_new();
+    jobs_set_notify(a->env->jobs, app_job_settled, a);
     a->env->settings = settings_effective();
     a->env->subagent_depth = o->subagent_depth;
     a->env->session = a;
@@ -741,6 +769,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
 
 void app_free(app_t *a) {
     if (!a) return;
+    if (a->env && a->env->jobs) jobs_set_notify(a->env->jobs, NULL, NULL);
     agent_free(a->agent);
     session_free(a->session);
     tool_env_free(a->env);
@@ -828,8 +857,25 @@ void app_set_advisor(app_t *a, bool on) {
     }
 }
 
+char *app_job_results_text(app_t *a) {
+    json_t *done = jobs_take_finished(a->env->jobs);
+    char *txt = json_len(done) ? jobs_render_results(done) : NULL;
+    json_free(done);
+    return txt;
+}
+
 char *app_after_run(app_t *a, const json_t *run_messages, const char *prev_type, const char *mode, const char **custom_type) {
     *custom_type = NULL;
+    /* print mode has no idle wake-up: finish outstanding background jobs before the final answer */
+    if (!strcmp(mode, "print") && jobs_running(a->env->jobs) && !str_eq(json_get_str(last_assistant(a->agent->messages), "stopReason"), "aborted"))
+        jobs_wait_any(a->env->jobs, NULL, settings_int("async.printWaitMs", 30 * 60 * 1000));
+    if (jobs_undelivered(a->env->jobs)) {
+        char *t = app_job_results_text(a);
+        if (t) {
+            *custom_type = "async-result";
+            return t;
+        }
+    }
     const char *stop = json_get_str(last_assistant(a->agent->messages), "stopReason");
     if (a->advisor && !str_eq(stop, "aborted")) {
         bool cont = false;

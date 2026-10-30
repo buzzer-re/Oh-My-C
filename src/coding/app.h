@@ -63,6 +63,9 @@ struct app {
     char *plan_file; /* local:// path of the current plan */
     struct goal *goal; /* goal mode state (goal.c) */
     struct advisor *advisor; /* shadow reviewer (advisor.c), NULL when off */
+    /* wake an idle session when a background job settles (modes set this; called from the job thread) */
+    void (*wake)(void *ud);
+    void *wake_ud;
     volatile bool ttsr_interrupting;
     app_notice_fn notice;
     void *notice_ud;
@@ -96,6 +99,7 @@ int app_retry(app_t *a, char **err);                /* drop a failed last assist
 size_t app_shake(app_t *a, size_t min_chars);       /* elide large tool results from the live context; returns count */
 char *app_generate_title(app_t *a);                 /* owned or NULL */
 void app_set_advisor(app_t *a, bool on);
+char *app_job_results_text(app_t *a); /* settled background jobs as the async-result notice (owned) or NULL */
 /* after a run: hidden follow-up prompt (owned) from the advisor or goal mode, or NULL; *custom_type names it.
  * prev_type is the custom type of the run that just ended (NULL for a user prompt). */
 char *app_after_run(app_t *a, const json_t *run_messages, const char *prev_type, const char *mode, const char **custom_type);

@@ -2,6 +2,7 @@
 #include "modes.h"
 #include "coding/goal.h"
 #include "mcp/mcp.h"
+#include "tools/jobs.h"
 #include "prompt/template.h"
 #include <unistd.h>
 
@@ -570,6 +571,24 @@ static void *btw_main(void *p) {
     return NULL;
 }
 
+/* a background job settled while idle: deliver its result as a hidden turn */
+static void job_wake_cb(void *ud) {
+    ui_t *u = ud;
+    if (u->worker_running || u->picker_kind) return; /* worker_done delivers at the end of the run */
+    char *draft = tui_editor_get_text(u->editor);
+    bool typing = draft && *draft;
+    free(draft);
+    if (typing) return;
+    char *t = app_job_results_text(u->app);
+    if (t) start_hidden(u, t, "async-result");
+    free(t);
+}
+
+static void ui_wake(void *ud) {
+    ui_t *u = ud;
+    tui_post(u->tui, job_wake_cb, u);
+}
+
 static void start_hidden(ui_t *u, const char *text, const char *ctype) {
     job_t *j = xcalloc(1, sizeof(*j));
     j->u = u;
@@ -817,6 +836,7 @@ static const struct {
     {"thinking", "Set thinking level"},       {"new", "Start a new session"},
     {"plan", "Toggle read-only plan mode"},
     {"goal", "Goal mode: /goal <objective> | set | show | pause | resume | drop | budget <N|off>"},
+    {"jobs", "Show background jobs status"},
     {"advisor", "Toggle the advisor (a second model that reviews each turn and injects notes)"},
     {"guided-goal", "Have the agent interview you, then set up goal mode [rough objective]"},
     {"tree", "Navigate the session tree (switch branches)"},
@@ -971,6 +991,14 @@ static bool handle_command(ui_t *u, const char *line) {
         if (*arg && a->plan_mode) start_prompt(u, arg);
     } else if (!strcmp(cmd, "goal")) {
         goal_command(u, arg);
+    } else if (!strcmp(cmd, "jobs")) {
+        json_t *snap = jobs_snapshot(a->env->jobs), *x;
+        sb_t b = SB_INIT;
+        json_arr_foreach(snap, i, x) sb_appendf(&b, "%s%-8s %-10s %5llds  %s", b.len ? "\n" : "", json_get_str(x, "id"), json_get_str(x, "status"),
+                                                  (long long)(json_get_int(x, "durationMs", 0) / 1000), json_get_str(x, "label"));
+        add_notice(u, "info", b.len ? sb_cstr(&b) : "No background jobs.");
+        sb_free(&b);
+        json_free(snap);
     } else if (!strcmp(cmd, "advisor")) {
         bool on = !strcmp(arg, "on") ? true : !strcmp(arg, "off") ? false : !a->advisor;
         app_set_advisor(a, on);
@@ -1490,6 +1518,8 @@ int run_interactive_mode(app_t *a, const char *initial) {
     agent_subscribe(a->agent, ui_listener, &u);
     a->notice = ui_notice;
     a->notice_ud = &u;
+    a->wake = ui_wake;
+    a->wake_ud = &u;
     a->env->ui.ask = ui_ask;
     a->env->ui.ud = &u;
     if (initial) {
@@ -1505,6 +1535,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     }
     agent_unsubscribe(a->agent, ui_listener, &u);
     a->notice = NULL;
+    a->wake = NULL;
     a->env->ui.ask = NULL;
     if (u.picker && tui_overlay_visible(u.tui)) tui_overlay_hide(u.tui, &u.picker->base);
     tui_free(u.tui);

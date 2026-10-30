@@ -1,5 +1,7 @@
 /* write + bash tools */
 #include "tools.h"
+#include "jobs.h"
+#include "prompt/template.h"
 
 #include "config/settings.h"
 #include "core/fs.h"
@@ -226,6 +228,33 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     const char *prefix = settings_str("shellCommandPrefix", "");
     char *full = (prefix && *prefix) ? xasprintf("%s\n%s", prefix, cmd) : xstrdup(cmd);
     bool pty = json_get_bool(args, "pty", false);
+    if (json_get_bool(args, "async", false) && env->jobs && settings_bool("async.enabled", true)) {
+        char *jid = jobs_start_bash(env->jobs, full, cwd, tsec > 0 ? (int64_t)(tsec * 1000) : 0, NULL);
+        if (tsec > 0)
+            tool_result_textf(out, "Backgrounded as job %s (killed once it has run %.0fs in total; `timeout: 0` disables the deadline); its "
+                                   "output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no "
+                                   "`sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn. Do other work, or end "
+                                   "your reply and wait to be woken.",
+                              jid, tsec);
+        else
+            tool_result_textf(out, "Backgrounded as job %s (no deadline); its output is injected into the conversation as a follow-up the "
+                                   "moment it finishes. Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every "
+                                   "poll is a wasted turn. Do other work, or end your reply and wait to be woken.",
+                              jid);
+        out->details = json_obj();
+        json_t *as = json_obj();
+        json_set_str(as, "state", "running");
+        json_set_str(as, "jobId", jid);
+        json_set_str(as, "type", "bash");
+        json_set(out->details, "async", as);
+        if (tsec > 0) json_set_int(out->details, "timeoutSeconds", (int64_t)tsec);
+        else json_set_bool(out->details, "timeoutDisabled", true);
+        free(jid);
+        free(full);
+        free(cwd);
+        free(cmd);
+        return 0;
+    }
 
     static const char *env_extra[] = {"PAGER=cat", "GIT_PAGER=cat", "GIT_TERMINAL_PROMPT=0", "TERM=dumb",
                                       "NO_COLOR=1", "OMC=1", NULL};
@@ -297,7 +326,7 @@ done:
 agent_tool_t *tool_bash_new(tool_env_t *env) {
     json_t *ctx = json_obj();
     json_set_bool(ctx, "hasEval", false);
-    json_set_bool(ctx, "asyncEnabled", false);
+    json_set_bool(ctx, "asyncEnabled", settings_bool("async.enabled", true));
     json_set_int(ctx, "defaultTimeoutSec", 300);
     char *desc = tool_prompt("bash", ctx);
     json_free(ctx);
@@ -306,8 +335,61 @@ agent_tool_t *tool_bash_new(tool_env_t *env) {
     schema_prop(s, "timeout", "number", "Timeout in seconds (default 300, 0 disables)", false);
     schema_prop(s, "cwd", "string", "Working directory", false);
     schema_prop(s, "pty", "boolean", "Run in a pseudo-terminal", false);
+    if (settings_bool("async.enabled", true)) schema_prop(s, "async", "boolean", "Run in the background; the result is delivered when it finishes", false);
     agent_tool_t *t = agent_tool_new("bash", "Bash", desc, s, bash_execute);
     t->exclusive = true;
+    free(desc);
+    t->ud = env;
+    return t;
+}
+
+/* ---------- wait (background jobs) ---------- */
+
+char *jobs_render_results(const json_t *jobs) {
+    json_t *c = json_obj();
+    json_set(c, "jobs", json_clone(jobs));
+    json_set_bool(c, "multiple", json_len(jobs) > 1);
+    char *s = prompt_render("coding-agent/prompts/tools/async-result.md", c);
+    json_free(c);
+    return s;
+}
+
+static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
+    tool_env_t *env = self->ud;
+    UNUSED(args);
+    out->details = json_obj();
+    json_set_str(out->details, "op", "wait");
+    if (!env->jobs || (!jobs_undelivered(env->jobs) && !jobs_running(env->jobs))) {
+        tool_result_text(out, "Nothing to wait for: no background job or service you started is running, and no agent you messaged this "
+                              "run owes a reply. Other agents' results and messages arrive on their own.");
+        json_set(out->details, "jobs", json_arr());
+        return 0;
+    }
+    jobs_wait_any(env->jobs, ctx ? ctx->cancel : NULL, 30 * 60 * 1000);
+    json_t *done = jobs_take_finished(env->jobs);
+    if (json_len(done)) {
+        char *txt = jobs_render_results(done);
+        tool_result_text(out, txt);
+        free(txt);
+    } else if (ctx && ctx->cancel && *ctx->cancel) {
+        tool_result_text(out, "Wait interrupted.");
+    } else {
+        json_t *snap = jobs_snapshot(env->jobs), *x;
+        sb_t b = SB_INIT;
+        sb_append(&b, "Still running after the wait cap:");
+        json_arr_foreach(snap, i, x) if (str_eq(json_get_str(x, "status"), "running"))
+            sb_appendf(&b, "\n- %s (%s, %llds)", json_get_str(x, "id"), json_get_str(x, "label"), (long long)(json_get_int(x, "durationMs", 0) / 1000));
+        tool_result_text(out, sb_cstr(&b));
+        sb_free(&b);
+        json_free(snap);
+    }
+    json_set(out->details, "jobs", done);
+    return 0;
+}
+
+agent_tool_t *tool_wait_new(tool_env_t *env) {
+    char *desc = tool_prompt("wait", NULL);
+    agent_tool_t *t = agent_tool_new("wait", "Wait", desc, schema_obj(), wait_execute);
     free(desc);
     t->ud = env;
     return t;

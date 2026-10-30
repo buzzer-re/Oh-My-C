@@ -6,6 +6,7 @@
 #include "config/settings.h"
 #include "core/proc.h"
 #include "core/fs.h"
+#include "tools/jobs.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -18,6 +19,7 @@ typedef struct {
     char *prompt_id;
     char *text;
     json_t *images;
+    const char *hidden; /* custom type when the run is a hidden wake-up (async-result) */
     pthread_mutex_t mu;
 } rpc_t;
 
@@ -198,8 +200,10 @@ static void notice_rpc(void *ud, const char *level, const char *text) {
 
 static void *prompt_thread(void *p) {
     rpc_t *r = p;
+again:;
     size_t before = json_len(r->a->agent->messages);
-    app_prompt(r->a, r->text, r->images);
+    if (r->hidden) app_prompt_hidden(r->a, r->text, r->hidden);
+    else app_prompt(r->a, r->text, r->images);
     r->images = NULL;
     const json_t *last = last_assistant(r->a->agent->messages);
     const char *stop = json_get_str(last, "stopReason");
@@ -219,7 +223,7 @@ static void *prompt_thread(void *p) {
     }
     /* goal mode: keep going with hidden continuation turns while the goal is active and making progress */
     bool was_cont = false;
-    const char *prev_type = NULL;
+    const char *prev_type = r->hidden;
     for (;;) {
         json_t *run = json_arr();
         pthread_mutex_lock(&r->a->agent->mu);
@@ -251,9 +255,46 @@ static void *prompt_thread(void *p) {
     r->text = NULL;
     free(r->prompt_id);
     r->prompt_id = NULL;
+    /* a job may have settled between the run's last check and now: deliver it in this same thread */
+    char *late = jobs_undelivered(r->a->env->jobs) ? app_job_results_text(r->a) : NULL;
+    if (late) {
+        r->text = late;
+        r->hidden = "async-result";
+        r->images = NULL;
+        pthread_mutex_unlock(&r->mu);
+        goto again;
+    }
     r->running = false;
+    r->hidden = NULL;
     pthread_mutex_unlock(&r->mu);
     return NULL;
+}
+
+/* background job settled while idle: run its result as a hidden turn */
+static void rpc_wake(void *ud) {
+    rpc_t *r = ud;
+    pthread_mutex_lock(&r->mu);
+    if (r->running) {
+        pthread_mutex_unlock(&r->mu);
+        return;
+    }
+    char *t = app_job_results_text(r->a);
+    if (!t) {
+        pthread_mutex_unlock(&r->mu);
+        return;
+    }
+    if (r->th) pthread_join(r->th, NULL);
+    r->th = 0;
+    r->running = true;
+    r->hidden = "async-result";
+    r->text = t;
+    r->prompt_id = NULL;
+    r->images = NULL;
+    if (pthread_create(&r->th, NULL, prompt_thread, r) != 0) {
+        r->running = false;
+        r->hidden = NULL;
+    }
+    pthread_mutex_unlock(&r->mu);
 }
 
 static json_t *state_json(app_t *a) {
@@ -307,11 +348,19 @@ static void handle(rpc_t *r, json_t *cmd) {
         respond(id, type, true, d, NULL);
     } else if (!strcmp(type, "prompt") || !strcmp(type, "abort_and_prompt")) {
         const char *msg = json_get_str(cmd, "message");
-        if (!strcmp(type, "abort_and_prompt") && r->running) {
-            agent_abort(a->agent);
-            pthread_join(r->th, NULL);
+        if (!strcmp(type, "abort_and_prompt")) {
+            app_abort(a);
+            for (int k = 0; k < 600; k++) { /* wait for the run to unwind (max ~60s) */
+                pthread_mutex_lock(&r->mu);
+                bool busy = r->running;
+                pthread_mutex_unlock(&r->mu);
+                if (!busy) break;
+                usleep(100 * 1000);
+            }
         }
+        pthread_mutex_lock(&r->mu);
         if (r->running) {
+            pthread_mutex_unlock(&r->mu);
             const char *behav = json_get_str(cmd, "streamingBehavior");
             json_t *m = msg_user_content(content_with_images(msg, json_get_arr(cmd, "images")));
             if (str_eq(behav, "followUp")) agent_follow_up(a->agent, m);
@@ -322,10 +371,12 @@ static void handle(rpc_t *r, json_t *cmd) {
         if (r->th) pthread_join(r->th, NULL);
         r->th = 0;
         r->running = true;
+        r->hidden = NULL;
         r->text = xstrdup(msg ? msg : "");
         r->prompt_id = id ? xstrdup(id) : NULL;
         json_t *imgs = json_get_arr(cmd, "images");
         r->images = imgs ? json_clone(imgs) : NULL;
+        pthread_mutex_unlock(&r->mu);
         respond(id, type, true, NULL, NULL);
         if (pthread_create(&r->th, NULL, prompt_thread, r) != 0) {
             r->running = false;
@@ -795,6 +846,8 @@ int run_rpc_mode(app_t *a) {
     pthread_mutex_init(&r.mu, NULL);
     agent_subscribe(a->agent, rpc_listener, NULL);
     a->notice = notice_rpc;
+    a->wake = rpc_wake;
+    a->wake_ud = &r;
     json_t *ready = json_parse_str("{\"type\":\"ready\",\"protocolVersion\":1,\"supportedProtocolVersions\":[1],"
                                    "\"maxFrameBytes\":1048576}");
     out_json_line(ready);
@@ -821,7 +874,11 @@ int run_rpc_mode(app_t *a) {
             free(t);
         }
     }
-    if (r.th) pthread_join(r.th, NULL);
+    a->wake = NULL;
+    pthread_mutex_lock(&r.mu);
+    pthread_t th = r.th;
+    pthread_mutex_unlock(&r.mu);
+    if (th) pthread_join(th, NULL);
     sb_free(&line);
     pthread_mutex_destroy(&r.mu);
     return 0;

@@ -110,6 +110,11 @@ rm -f "$T/agent/config.yml"
 # RPC: host-implemented tools, tree navigation, paging
 check "rpc host tool"  "Tool said: host says hi"  python3 -I "$ROOT/tests/e2e/rpc_client.py" "$B"
 check "rpc navigate"   '"editorText": "second"'   python3 -I "$ROOT/tests/e2e/rpc_client.py" "$B"
+# async jobs: background bash delivered as a follow-up; wait with nothing running returns at once
+: > "$T/req.jsonl"
+check "async bash"     "Backgrounded as job bg_1"  bash -c "'$B' -m mock/mock-1 --mode json -p 'call:bash:{\"command\":\"sleep 1; echo bgdone\",\"async\":true}' | grep -o 'Backgrounded as job bg_1'"
+grep -q "Background job bg_1 has completed" "$T/req.jsonl" && echo "   ok  async delivered" || { echo "   FAIL async delivered"; fail=1; }
+check "wait nothing"   "Nothing to wait for"  "$B" -m mock/mock-1 -p 'call:wait:{}'
 # ACP (Agent Client Protocol): permission request answered by the test client
 check "acp prompt"     "tool_call_update completed acp-ok"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo acp-ok"
 check "acp reject"     "tool_call_update failed The user rejected"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo no" reject_once

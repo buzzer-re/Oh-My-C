@@ -1,4 +1,6 @@
 #include "tools.h"
+#include "jobs.h"
+#include "config/settings.h"
 
 #include "core/fs.h"
 #include "prompt/template.h"
@@ -123,6 +125,7 @@ void tool_env_free(tool_env_t *e) {
     free(e->artifacts_dir);
     free(e->local_dir);
     shell_free(e->shell);
+    jobs_free(e->jobs);
     pthread_mutex_destroy(&e->mu);
     free(e);
 }
@@ -294,12 +297,13 @@ static const struct {
     {"bash", tool_bash_new},   {"grep", tool_grep_new},   {"glob", tool_glob_new},
     {"todo", tool_todo_new},   {"ask", tool_ask_new},     {"web_search", tool_web_search_new},
     {"task", tool_task_new},   {"eval", tool_eval_new},   {"ast_grep", tool_ast_grep_new},
-    {"ast_edit", tool_ast_edit_new}, {"find", tool_find_new},
+    {"ast_edit", tool_ast_edit_new}, {"find", tool_find_new}, {"wait", tool_wait_new},
 };
 
 void tools_register_builtin(agent_t *a, tool_env_t *env, const strvec_t *enabled) {
     for (size_t i = 0; i < ARRAY_LEN(CTORS); i++) {
         if (enabled && !strvec_contains(enabled, CTORS[i].name)) continue;
+        if (!strcmp(CTORS[i].name, "wait") && (!env->jobs || !settings_bool("async.enabled", true))) continue;
         agent_tool_t *t = CTORS[i].ctor(env);
         if (t) agent_add_tool(a, t);
     }
