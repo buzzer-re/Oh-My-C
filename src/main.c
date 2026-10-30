@@ -6,6 +6,7 @@
 #include "core/fs.h"
 #include "core/proc.h"
 #include "modes/modes.h"
+#include "tools/tools.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -29,7 +30,10 @@ static void usage(FILE *f) {
             "  omc auth set <provider> <key>      store an API key; `omc auth list`\n"
             "  omc sessions [--all]               list sessions for this directory\n"
             "  omc export <session> [out.html|md] export a session\n"
-            "  omc config get|set|unset|list|path manage settings (config.yml)\n\n"
+            "  omc config get|set|unset|list|path manage settings (config.yml)\n"
+            "  omc read <path[:sel]>              run the read tool directly\n"
+            "  omc grep <pattern> [path]          run the grep tool directly\n"
+            "  omc glob [pattern]                 run the glob tool directly\n\n"
             "Options:\n"
             "  -m, --model <pattern[:effort]>     model (fuzzy, provider/id, or @role)\n"
             "      --provider <name>              provider\n"
@@ -231,6 +235,39 @@ static int cmd_config(int argc, char **argv) {
     return 2;
 }
 
+/* run a builtin tool directly: omc read <path> | grep <pattern> [path] | glob <pattern> */
+static int cmd_tool(const char *name, int argc, char **argv) {
+    settings_init(NULL, NULL);
+    char *cwd = get_cwd();
+    tool_env_t *env = tool_env_new(cwd);
+    free(cwd);
+    agent_tool_t *t = !strcmp(name, "read") ? tool_read_new(env) : !strcmp(name, "grep") ? tool_grep_new(env) : tool_glob_new(env);
+    json_t *args = json_obj();
+    if (!strcmp(name, "read")) {
+        if (argc < 1) { fprintf(stderr, "Usage: omc read <path[:selector]>\n"); return 2; }
+        json_set_str(args, "path", argv[0]);
+    } else if (!strcmp(name, "grep")) {
+        if (argc < 1) { fprintf(stderr, "Usage: omc grep <pattern> [path]\n"); return 2; }
+        json_set_str(args, "pattern", argv[0]);
+        if (argc > 1) json_set_str(args, "path", argv[1]);
+    } else {
+        if (argc > 0) json_set_str(args, "path", argv[0]);
+    }
+    tool_result_t r = {0};
+    tool_ctx_t ctx = {.tool_name = name};
+    t->execute(t, &ctx, args, &r);
+    char *text = tool_result_joined_text(&r);
+    fputs(text, r.is_error ? stderr : stdout);
+    fputc('\n', r.is_error ? stderr : stdout);
+    int rc = r.is_error ? 1 : 0;
+    free(text);
+    tool_result_free(&r);
+    json_free(args);
+    agent_tool_free(t);
+    tool_env_free(env);
+    return rc;
+}
+
 /* ---------- main ---------- */
 
 static void crash_handler(int sig) {
@@ -266,6 +303,7 @@ int main(int argc, char **argv) {
         if (!strcmp(c, "sessions")) return cmd_sessions(argc - 2, argv + 2);
         if (!strcmp(c, "export")) return cmd_export(argc - 2, argv + 2);
         if (!strcmp(c, "config")) return cmd_config(argc - 2, argv + 2);
+        if (!strcmp(c, "read") || !strcmp(c, "grep") || !strcmp(c, "glob")) return cmd_tool(c, argc - 2, argv + 2);
         if (!strcmp(c, "version")) {
             printf("omc %s\n", OMC_VERSION);
             return 0;

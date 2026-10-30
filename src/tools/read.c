@@ -3,6 +3,7 @@
 
 #include "config/settings.h"
 #include "core/fs.h"
+#include "summary.h"
 #include "web.h"
 
 #include <errno.h>
@@ -271,7 +272,88 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
     int64_t seen_lo = -1, seen_hi = -1;
     bool whole = false;
 
-    if (!sel->ranges.n) {
+    summary_lang_t slang = summary_lang(abs);
+    bool want_summary = !sel->ranges.n && !sel->raw && slang != SUM_NONE && total >= 100 && len <= (2u << 20) &&
+                        total <= 20000 && settings_bool("read.summarize.enabled", true);
+    bool *keep = NULL;
+    size_t elided = 0;
+    if (want_summary) {
+        keep = xcalloc((size_t)total, sizeof(bool));
+        summary_build(&t.lines, slang, keep);
+        for (int64_t i = 0; i < total; i++)
+            if (!keep[i]) elided++;
+        if (elided < 5) {
+            free(keep);
+            keep = NULL;
+        }
+    }
+    if (keep) {
+        sb_t body = SB_INIT;
+        VEC(line_span_t) runs = {0};
+        int64_t i = 0;
+        const char *tag = NULL;
+        while (i < total) {
+            if (keep[i]) {
+                int64_t j = i;
+                while (j + 1 < total && keep[j + 1]) j++;
+                if (hashline) tag = edit_store_record(&env->store, abs, data, i + 1, j + 1);
+                for (int64_t k = i; k <= j; k++) {
+                    /* merge "opener {" + elided body + "}" into one anchored line */
+                    bool merged = false;
+                    if (k == j && j + 1 < total && !keep[j + 1]) {
+                        int64_t e = j + 1;
+                        while (e < total && !keep[e]) e++;
+                        const char *op = t.lines.v[k];
+                        size_t ol = strlen(op);
+                        while (ol && isspace((unsigned char)op[ol - 1])) ol--;
+                        const char *cl = e < total ? t.lines.v[e] + strspn(t.lines.v[e], " \t") : "";
+                        if (ol && op[ol - 1] == '{' && e < total && (!strcmp(cl, "}") || !strcmp(cl, "};") || !strcmp(cl, "},"))) {
+                            char *m = xasprintf("%.*s … %s", (int)ol, op, cl);
+                            emit_line(&body, k + 1, m, numbered);
+                            free(m);
+                            line_span_t r = {j + 2, e};
+                            vec_push(&runs, r);
+                            i = e + 1; /* closer consumed */
+                            merged = true;
+                        }
+                    }
+                    if (!merged) emit_line(&body, k + 1, t.lines.v[k], numbered);
+                    if (merged) goto next_run;
+                }
+                i = j + 1;
+            } else {
+                int64_t j = i;
+                while (j + 1 < total && !keep[j + 1]) j++;
+                sb_append(&body, "…\n");
+                line_span_t r = {i + 1, j + 1};
+                vec_push(&runs, r);
+                i = j + 1;
+            }
+        next_run:;
+        }
+        if (hashline) format_hashline_header(&b, display, tag ? tag : edit_store_record(&env->store, abs, data, 1, 1));
+        sb_append(&b, sb_cstr(&body));
+        sb_free(&body);
+        int64_t elines = 0;
+        for (size_t k = 0; k < runs.n; k++) elines += runs.v[k].hi - runs.v[k].lo + 1;
+        sb_t ex = SB_INIT;
+        size_t samples = MIN(runs.n, (size_t)3);
+        for (size_t k = 0; k < samples; k++) {
+            if (k) sb_putc(&ex, ',');
+            if (runs.v[k].lo == runs.v[k].hi) sb_appendf(&ex, "%lld", (long long)runs.v[k].lo);
+            else sb_appendf(&ex, "%lld-%lld", (long long)runs.v[k].lo, (long long)runs.v[k].hi);
+        }
+        sb_appendf(&b, "[…%lldln elided; re-read needed ranges%s %s:%s]", (long long)elines,
+                   runs.n > samples ? ", e.g." : " with", display, sb_cstr(&ex));
+        sb_free(&ex);
+        json_t *sum = json_obj();
+        json_set_int(sum, "lines", total);
+        json_set_int(sum, "elidedSpans", (int64_t)runs.n);
+        json_set_int(sum, "elidedLines", elines);
+        json_set(details, "summary", sum);
+        vec_free(&runs);
+        free(keep);
+    } else if (!sel->ranges.n) {
         int64_t limit = DEFAULT_LIMIT;
         int64_t end = MIN(total, limit);
         size_t bytes = 0;
