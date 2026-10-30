@@ -52,7 +52,8 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 | debug (DAP: all 28 actions; 14 bundled adapters + user adapters) | ✅ | verified against a scripted adapter; native adapters can't ptrace in the dev VM |
 | ast_grep, ast_edit (bracket-aware structural matcher with ast-grep metavariables; staged xd://resolve / xd://reject) | 🟡 | token-tree matching, not tree-sitter ASTs |
 | find (lexical IDF scan → passage windows → model judge, lexical fallback) | ✅ | single judge pass (upstream: 3 waves) |
-| browser, computer, ssh, image_gen, tts, checkpoint/rewind | ❌ | |
+| checkpoint / rewind (context cut + session branch + report) | ✅ | |
+| browser, computer, ssh, image_gen, tts | ❌ | |
 
 ## Modes & UI
 | Feature | Status |

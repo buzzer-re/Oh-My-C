@@ -77,6 +77,8 @@ check "plan approve"   "approved. Plan mode ended"  bash -c "( printf '%s\n' '{\
 if command -v python3 >/dev/null; then
     check "eval python"    "Tool said: 42"  "$B" -m mock/mock-1 -p 'call:eval:{"language":"py","code":"6*7"}'
 fi
+# checkpoint / rewind
+check "rewind"         "Rewinding to checkpoint"  bash -c "( for m in 'call:checkpoint:{\"goal\":\"g\"}' 'read:a/b.txt' 'call:rewind:{\"report\":\"done\"}'; do python3 -c 'import json,sys; print(json.dumps({\"id\":\"x\",\"type\":\"prompt\",\"message\":sys.argv[1]}))' \"\$m\"; sleep 2; done ) | '$B' -m mock/mock-1 --mode rpc"
 # ast_grep structural search
 printf 'function f(a) {\n  console.log(a, 1);\n  if (q == q) {}\n}\n' > s.ts
 check "ast_grep"       '$A = q'  "$B" -m mock/mock-1 -p 'call:ast_grep:{"pat":"$A == $A","path":"s.ts"}'

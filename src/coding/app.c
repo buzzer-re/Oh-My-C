@@ -95,8 +95,43 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
     if (ev->type == AGENT_EV_TURN_START || ev->type == AGENT_EV_MESSAGE_START) {
         if (ev->type == AGENT_EV_TURN_START || str_eq(json_get_str(ev->message, "role"), "assistant")) ttsr_reset(a->ttsr);
     }
+    if (ev->type == AGENT_EV_TURN_END && a->pending_rewind && a->checkpoint_index > 0) {
+        /* cut the context back to the checkpoint and retain only the report */
+        pthread_mutex_lock(&a->agent->mu);
+        json_t *msgs = a->agent->messages;
+        while ((int64_t)json_len(msgs) > a->checkpoint_index) json_free(json_arr_remove(msgs, json_len(msgs) - 1));
+        pthread_mutex_unlock(&a->agent->mu);
+        json_t *ctx = json_obj();
+        json_set_str(ctx, "report", a->pending_rewind);
+        char *txt = prompt_render("coding-agent/prompts/system/rewind-report.md", ctx);
+        json_free(ctx);
+        json_t *m = msg_user_text(txt);
+        json_set_bool(m, "synthetic", true);
+        if (a->session && a->checkpoint_entry) session_branch(a->session, a->checkpoint_entry);
+        if (a->session) session_append_message(a->session, m);
+        agent_append_message(a->agent, m);
+        free(txt);
+        free(a->pending_rewind);
+        a->pending_rewind = NULL;
+        a->checkpoint_index = 0;
+        free(a->checkpoint_entry);
+        a->checkpoint_entry = NULL;
+        notice(a, "info", "Rewound to checkpoint; exploration replaced by report");
+        return;
+    }
     if (ev->type == AGENT_EV_MESSAGE_END && ev->message) {
         const char *role = json_get_str(ev->message, "role");
+        if (a->checkpoint_pending && str_eq(role, "toolResult") && str_eq(json_get_str(ev->message, "toolName"), "checkpoint") &&
+            !json_get_bool(ev->message, "isError", false)) {
+            a->checkpoint_pending = false;
+            a->checkpoint_index = (int64_t)json_len(a->agent->messages); /* result already appended */
+            if (a->session) {
+                const char *eid = session_append_message(a->session, ev->message);
+                free(a->checkpoint_entry);
+                a->checkpoint_entry = eid ? xstrdup(eid) : NULL;
+                return; /* persisted here */
+            }
+        }
         /* TTSR discard mode: the interrupted partial response is dropped, never persisted */
         if (a->ttsr_interrupting && str_eq(role, "assistant") && str_eq(json_get_str(ev->message, "stopReason"), "aborted"))
             return;
@@ -385,6 +420,63 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
     return true;
 }
 
+/* ---------- checkpoint / rewind ---------- */
+
+static int checkpoint_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
+    app_t *a = self->ud;
+    UNUSED(ctx);
+    if (a->checkpoint_index > 0 || a->checkpoint_pending) {
+        tool_result_error(out, "Checkpoint already active.");
+        return 0;
+    }
+    a->checkpoint_pending = true;
+    char *ts = iso8601_now();
+    const char *goal = json_get_str(args, "goal");
+    tool_result_textf(out, "Checkpoint started%s%s. Explore, then call rewind with a concise report before yielding.",
+                      goal ? ": " : "", goal ? goal : "");
+    out->details = json_obj();
+    json_set_str(out->details, "startedAt", ts);
+    if (goal) json_set_str(out->details, "goal", goal);
+    free(ts);
+    return 0;
+}
+
+static int rewind_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
+    app_t *a = self->ud;
+    UNUSED(ctx);
+    const char *report = json_get_str(args, "report");
+    if (a->checkpoint_index <= 0) {
+        tool_result_error(out, "No active checkpoint.");
+        return 0;
+    }
+    if (!report || !*report) {
+        tool_result_error(out, "report is required");
+        return 0;
+    }
+    free(a->pending_rewind);
+    a->pending_rewind = xstrdup(report);
+    tool_result_text(out, "Rewinding to checkpoint; exploration will be replaced by the report.");
+    return 0;
+}
+
+static void add_checkpoint_tools(app_t *a, agent_t *ag) {
+    char *d1 = tool_prompt("checkpoint", NULL), *d2 = tool_prompt("rewind", NULL);
+    json_t *s1 = schema_obj();
+    schema_prop(s1, "goal", "string", "What the exploration should establish", true);
+    agent_tool_t *t1 = agent_tool_new("checkpoint", "Checkpoint", d1, s1, checkpoint_execute);
+    t1->ud = a;
+    t1->exclusive = true;
+    json_t *s2 = schema_obj();
+    schema_prop(s2, "report", "string", "Concise findings to retain", true);
+    agent_tool_t *t2 = agent_tool_new("rewind", "Rewind", d2, s2, rewind_execute);
+    t2->ud = a;
+    t2->exclusive = true;
+    agent_add_tool(ag, t1);
+    agent_add_tool(ag, t2);
+    free(d1);
+    free(d2);
+}
+
 /* ---------- setup ---------- */
 
 static char *app_tool_complete(tool_env_t *env, const char *system, const char *user) {
@@ -432,6 +524,9 @@ static void install_agent(app_t *a) {
         agent_add_tool(ag, tool_lsp_new(a->env, a->lsp));
         a->env->after_write = app_after_write;
     }
+    if (!a->opts.no_tools && !a->opts.subagent && settings_bool("checkpoint.enabled", true) &&
+        (!a->opts.tools || strvec_contains(a->opts.tools, "checkpoint")))
+        add_checkpoint_tools(a, ag);
     if (!a->opts.no_tools && settings_bool("debug.enabled", true) && (!a->opts.tools || strvec_contains(a->opts.tools, "debug"))) {
         if (!a->dap) a->dap = dap_manager_new(a->cwd);
         agent_add_tool(ag, tool_debug_new(a->env, a->dap));
@@ -644,6 +739,8 @@ void app_free(app_t *a) {
     free(a->sys_custom);
     free(a->sys_append);
     free(a->plan_file);
+    free(a->checkpoint_entry);
+    free(a->pending_rewind);
     pthread_mutex_destroy(&a->mu);
     free(a);
 }

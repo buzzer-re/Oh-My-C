@@ -56,6 +56,10 @@ struct app {
     bool owns_lsp;
     struct dap_manager *dap;
     bool plan_mode;
+    int64_t checkpoint_index;   /* agent message count at checkpoint (0 = none) */
+    char *checkpoint_entry;     /* session entry id of the checkpoint tool result */
+    char *pending_rewind;       /* report waiting for turn end */
+    bool checkpoint_pending;    /* checkpoint tool ran; boundary captured at its message_end */
     char *plan_file; /* local:// path of the current plan */
     volatile bool ttsr_interrupting;
     app_notice_fn notice;
