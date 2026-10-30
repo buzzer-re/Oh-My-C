@@ -41,4 +41,11 @@ check "json mode"      '"type":"agent_end"'              "$B" -m mock/mock-1 --m
 check "rpc mode"       '"status":"completed"'            bash -c "printf '%s\n' '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"bash:echo r\"}' | (cat; sleep 2) | '$B' -m mock/mock-1 --mode rpc"
 check "sessions list"  "msgs"                            "$B" sessions
 check "no-session"     "plain answer"                    "$B" -m mock/mock-1 --no-session -p "x"
+# hashline edit: read to get the tag, then replace line 1 and append after it
+printf 'alpha\nbeta\ngamma\n' > e.txt
+TAG=$(timeout 30 "$B" -m mock/mock-1 -p "read:e.txt" </dev/null | grep -o 'e.txt#[0-9A-F]*' | head -1 | cut -d'#' -f2)
+check "edit apply"     "[e.txt#"  "$B" -m mock/mock-1 -p "edit:[e.txt#$TAG]\nPUT 2.=2:\n+BETA\nPUT >3:\n+delta"
+check "edit result"    $'alpha\nBETA\ngamma\ndelta'  cat e.txt
+check "edit stale tag" "current tag #"  "$B" -m mock/mock-1 -p "edit:[e.txt#$TAG]\nPUT 1.=1:\n+x"
+check "todo tool"      "Remaining items (2)"  "$B" -m mock/mock-1 -p "todo:first,second"
 exit $fail

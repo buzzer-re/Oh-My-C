@@ -51,6 +51,8 @@ class H(BaseHTTPRequestHandler):
             elif kind == "read": name, args = "read", {"path": rest}
             elif kind == "glob": name, args = "glob", {"path": rest}
             elif kind == "grep": name, args = "grep", {"pattern": rest}
+            elif kind == "edit": name, args = "edit", {"input": rest.replace("\\n", "\n")}
+            elif kind == "todo": name, args = "todo", {"op": "init", "items": rest.split(",")}
             else:
                 chunks.append({**base, "choices": [{"index": 0, "delta": {"content": "plain answer"}}]})
                 chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
