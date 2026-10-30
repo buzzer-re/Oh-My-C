@@ -4,6 +4,7 @@
 #include "config/settings.h"
 #include "core/fs.h"
 #include "coding/ttsr.h"
+#include "mcp/mcp.h"
 #include "prompt/template.h"
 
 #include <math.h>
@@ -253,6 +254,7 @@ static void install_agent(app_t *a) {
     agent_set_model(ag, a->model);
     ag->thinking = a->thinking;
     if (!a->opts.no_tools) tools_register_builtin(ag, a->env, a->opts.tools);
+    if (a->mcp && !a->opts.no_tools) mcp_register_tools(a->mcp, ag);
     if (a->opts.subagent && a->opts.subagent_depth >= (int)settings_int("task.maxRecursionDepth", 2))
         agent_remove_tool(ag, "task");
 }
@@ -269,6 +271,9 @@ void app_rebuild_system_prompt(app_t *a) {
                            .append_prompt = a->sys_append,
                            .subagent = a->opts.subagent};
     json_t *blocks = build_system_prompt(&so);
+    char *mi = a->mcp ? mcp_instructions(a->mcp) : NULL;
+    if (mi && *mi) json_push_str(blocks, mi);
+    free(mi);
     agent_set_system_prompt_parts(a->agent, blocks);
     free(label);
     strvec_free(&names);
@@ -347,6 +352,17 @@ app_t *app_create(const app_opts_t *o, char **err) {
     discover_all(a->cwd, &a->disc, o->no_context_files, o->no_skills, o->no_rules);
     a->env->disc = &a->disc;
     a->ttsr = ttsr_new(&a->disc);
+    if (o->mcp) {
+        a->mcp = o->mcp;
+    } else if (!o->no_mcp && !o->no_tools && settings_bool("mcp.enabled", true)) {
+        json_t *cfg = mcp_discover_config(a->cwd);
+        if (json_len(cfg)) {
+            a->mcp = mcp_manager_new();
+            a->owns_mcp = true;
+            mcp_connect_all(a->mcp, cfg, settings_int("mcp.startupTimeoutMs", 15000));
+        }
+        json_free(cfg);
+    }
     /* session */
     if (o->no_session) {
         a->session = session_in_memory(a->cwd);
@@ -412,6 +428,7 @@ void app_free(app_t *a) {
     session_free(a->session);
     tool_env_free(a->env);
     ttsr_free(a->ttsr);
+    if (a->owns_mcp) mcp_manager_free(a->mcp);
     discovery_free(&a->disc);
     free(a->cwd);
     free(a->sys_custom);
@@ -800,6 +817,7 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
         o.model = dm;
     }
     o.append_system_prompt = json_get_str(def, "body");
+    o.mcp = parent->mcp;
     strvec_t tools = {0};
     json_t *tl = json_get_arr(def, "tools"), *tn;
     json_arr_foreach(tl, i, tn) if (json_is_str(tn)) strvec_push(&tools, json_sv(tn));

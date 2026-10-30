@@ -53,6 +53,9 @@ class H(BaseHTTPRequestHandler):
             elif kind == "read": name, args = "read", {"path": rest}
             elif kind == "glob": name, args = "glob", {"path": rest}
             elif kind == "grep": name, args = "grep", {"pattern": rest}
+            elif kind == "call":
+                tname, _, a = rest.partition(":")
+                name, args = tname, json.loads(a or "{}")
             elif kind == "say":
                 for w in rest.split(" "):
                     chunks.append({**base, "choices": [{"index": 0, "delta": {"content": w + " "}}]})

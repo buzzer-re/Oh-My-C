@@ -3,6 +3,7 @@
 #include "config/settings.h"
 #include "core/fs.h"
 #include "prompt/template.h"
+#include "text/yaml.h"
 #include "core/embed.h"
 
 #include <unistd.h>
@@ -44,7 +45,24 @@ static json_t *scalar(const char *v) {
     return r;
 }
 
+static json_t *frontmatter_parse_flat(const char *text, const char **body);
+
 json_t *frontmatter_parse(const char *text, const char **body) {
+    *body = text;
+    if (strncmp(text, "---", 3) != 0) return json_obj();
+    char *err = NULL;
+    const char *b2 = NULL;
+    json_t *j = yaml_frontmatter(text, strlen(text), &b2, &err);
+    if (j && json_is_obj(j) && !err) {
+        if (b2) *body = b2;
+        return j;
+    }
+    json_free(j);
+    free(err);
+    return frontmatter_parse_flat(text, body);
+}
+
+static json_t *frontmatter_parse_flat(const char *text, const char **body) {
     json_t *o = json_obj();
     *body = text;
     if (strncmp(text, "---", 3) != 0 || (text[3] != '\n' && text[3] != '\r')) return o;

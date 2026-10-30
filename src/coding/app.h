@@ -26,6 +26,8 @@ typedef struct {
     bool subagent;
     int subagent_depth;
     int max_turns;
+    struct mcp_manager *mcp; /* borrowed shared MCP connections (subagents); NULL => discover */
+    bool no_mcp;
 } app_opts_t;
 
 typedef struct app app_t;
@@ -47,6 +49,8 @@ struct app {
     bool title_done;
     int retry_count;
     struct ttsr *ttsr;
+    struct mcp_manager *mcp;
+    bool owns_mcp;
     volatile bool ttsr_interrupting;
     app_notice_fn notice;
     void *notice_ud;
