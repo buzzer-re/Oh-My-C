@@ -62,6 +62,9 @@ typedef struct tool_env {
     const discovery_t *disc;   /* skills/rules for skill:// and rule:// (borrowed) */
     /* called after write/edit lands a file; returns owned text appended to the result (e.g. LSP diagnostics) */
     char *(*after_write)(struct tool_env *env, const char *abs_path);
+    char *local_dir;           /* root for local:// session artifacts */
+    /* write to xd://propose (plan approval); returns owned result text, sets *is_error */
+    char *(*propose_plan)(struct tool_env *env, const char *content, bool *is_error);
     /* spawn a subagent: returns owned final text; used by task tool (set by app) */
     char *(*run_subagent)(struct tool_env *env, const char *agent_name, const char *assignment, const char *context,
                           json_t **out_details, volatile sig_atomic_t *cancel);

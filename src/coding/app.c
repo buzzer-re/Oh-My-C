@@ -163,6 +163,152 @@ static int hook_stream(void *ud, agent_t *ag, const ai_event_t *ev) {
     return 0;
 }
 
+static bool cmd_mutates(const char *cmd) {
+    static const char *const pats[] = {"rm ", "rm\t", "rmdir", "mv ", "cp ", "mkdir", "touch ", "chmod", "chown", "ln ",
+                                       "git commit", "git push", "git checkout", "git reset", "git merge", "git rebase",
+                                       "git add", "git rm", "git mv", "git stash", "git apply", "git switch", "git restore",
+                                       "npm install", "npm i ", "pnpm add", "pnpm install", "yarn add", "pip install",
+                                       "cargo add", "go get", "apt ", "brew install", "sed -i", "tee ", "truncate",
+                                       "dd ", "make install", "patch "};
+    for (size_t i = 0; i < ARRAY_LEN(pats); i++)
+        if (strstr(cmd, pats[i])) return true;
+    /* output redirection to a file (allow 2>&1 and >/dev/null) */
+    for (const char *p = strchr(cmd, '>'); p; p = strchr(p + 1, '>')) {
+        const char *t = p + 1;
+        if (*t == '>') t++;
+        while (*t == ' ') t++;
+        if (*t == '&' || str_starts(t, "/dev/null")) continue;
+        if (p > cmd && p[-1] == '2' && str_starts(t, "/dev/")) continue;
+        return true;
+    }
+    return false;
+}
+
+static tool_gate_t hook_before_tool(void *ud, agent_t *ag, const json_t *call, char **reason) {
+    app_t *a = ud;
+    UNUSED(ag);
+    if (!a->plan_mode) return TOOL_ALLOW;
+    const char *name = json_get_str(call, "name");
+    json_t *args = json_get(call, "arguments");
+    if (str_eq(name, "write")) {
+        const char *p = json_get_str(args, "path");
+        if (p && (str_starts(p, "local://") || !strcmp(p, "xd://propose"))) return TOOL_ALLOW;
+        *reason = xstrdup("Plan mode is active: the working tree is read-only. Write plans to local://<slug>-plan.md and "
+                          "propose with xd://propose.");
+        return TOOL_BLOCK;
+    }
+    if (str_eq(name, "edit")) {
+        const char *in = json_get_str(args, "input");
+        const char *p = json_get_str(args, "path");
+        bool ok = p && str_starts(p, "local://");
+        if (in && !p) {
+            ok = true;
+            bool any = false;
+            for (const char *s2 = in; (s2 = strchr(s2, '[')); s2++) {
+                if (s2 != in && s2[-1] != '\n') continue;
+                const char *h = strchr(s2, '#'), *e = strchr(s2, ']');
+                if (!h || !e || h > e) continue;
+                char *hp = xstrndup(s2 + 1, (size_t)(h - s2 - 1));
+                char *abs = tool_resolve_path(a->env, hp);
+                if (!a->env->local_dir || !str_starts(abs, a->env->local_dir)) ok = false;
+                any = true;
+                free(abs);
+                free(hp);
+            }
+            if (!any) ok = false;
+        }
+        if (ok) return TOOL_ALLOW;
+        *reason = xstrdup("Plan mode is active: only the plan file (local://) may be edited.");
+        return TOOL_BLOCK;
+    }
+    if (str_eq(name, "bash")) {
+        const char *c = json_get_str(args, "command");
+        if (c && cmd_mutates(c)) {
+            *reason = xasprintf("Plan mode is active: refusing a state-changing command (`%s`). Explore read-only.", c);
+            return TOOL_BLOCK;
+        }
+    }
+    return TOOL_ALLOW;
+}
+
+static char *app_propose_plan(tool_env_t *env, const char *content, bool *is_error) {
+    app_t *a = env->session;
+    *is_error = false;
+    if (!a->plan_mode) {
+        *is_error = true;
+        return xstrdup("Not in plan mode.");
+    }
+    char *slug = str_trim(content);
+    char *nl = strchr(slug, '\n');
+    if (nl) *nl = 0;
+    for (char *p = slug; *p; p++)
+        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '-')) *p = '-';
+    char *url = xasprintf("local://%s-plan.md", slug);
+    char *abs = tool_resolve_path(env, url);
+    size_t n;
+    char *plan = fs_read(abs, &n);
+    if (!plan) {
+        *is_error = true;
+        char *r = xasprintf("Plan file %s not found; write it first, then propose the same slug.", url);
+        free(url);
+        free(abs);
+        free(slug);
+        return r;
+    }
+    bool approved = true;
+    if (env->ui.ask) {
+        json_t *qs = json_parse_str("[{\"id\":\"plan\",\"question\":\"Approve the plan?\",\"options\":["
+                                    "{\"label\":\"Approve and execute\"},{\"label\":\"Keep planning\"}]}]");
+        char *q = xasprintf("Approve plan %s?", url);
+        json_set_str(json_at(qs, 0), "question", q);
+        free(q);
+        json_t *ans = env->ui.ask(env->ui.ud, qs);
+        approved = ans && str_eq(json_get_str(ans, "plan"), "Approve and execute");
+        json_free(ans);
+        json_free(qs);
+    }
+    char *r;
+    if (!approved) {
+        r = xasprintf("User chose to keep planning. Refine %s and propose again when ready.", url);
+    } else {
+        free(a->plan_file);
+        a->plan_file = xstrdup(url);
+        app_set_plan_mode(a, false);
+        json_t *ctx = json_obj();
+        json_set_bool(ctx, "contextPreserved", true);
+        json_set_str(ctx, "planFilePath", url);
+        json_set_str(ctx, "planContent", plan);
+        json_t *tl = json_arr();
+        for (size_t i = 0; i < a->agent->tools.n; i++) json_push_str(tl, a->agent->tools.v[i]->name);
+        json_set(ctx, "tools", tl);
+        char *msg = prompt_render("coding-agent/prompts/system/plan-mode-approved.md", ctx);
+        json_free(ctx);
+        json_t *m = msg_user_text(msg);
+        json_set_bool(m, "synthetic", true);
+        agent_follow_up(a->agent, m);
+        free(msg);
+        notice(a, "info", "Plan approved: %s — executing", url);
+        r = xasprintf("Plan %s approved. Plan mode ended; full tool access restored. Execute it now.", url);
+    }
+    free(plan);
+    free(url);
+    free(abs);
+    free(slug);
+    return r;
+}
+
+void app_set_plan_mode(app_t *a, bool on) {
+    a->plan_mode = on;
+    a->env->propose_plan = on ? app_propose_plan : NULL;
+    if (a->session) {
+        json_t *e = json_obj();
+        json_set_str(e, "type", "mode_change");
+        json_set_str(e, "mode", on ? "plan" : "none");
+        session_append_entry(a->session, e);
+    }
+    app_rebuild_system_prompt(a);
+}
+
 static void hook_after_tool(void *ud, agent_t *ag, const json_t *call, tool_result_t *res) {
     app_t *a = ud;
     UNUSED(ag);
@@ -255,6 +401,7 @@ static void install_agent(app_t *a) {
     ag->hooks.should_retry = hook_should_retry;
     ag->hooks.on_stream_delta = hook_stream;
     ag->hooks.after_tool = hook_after_tool;
+    ag->hooks.before_tool = hook_before_tool;
     ag->hooks.ud = a;
     free(ag->session_id);
     ag->session_id = a->session ? xstrdup(session_id(a->session)) : uuid_v7();
@@ -290,6 +437,22 @@ void app_rebuild_system_prompt(app_t *a) {
                            .append_prompt = a->sys_append,
                            .subagent = a->opts.subagent};
     json_t *blocks = build_system_prompt(&so);
+    if (a->plan_mode) {
+        json_t *pc = json_obj();
+        json_set_str(pc, "writeToolName", "write");
+        json_set_str(pc, "editToolName", "edit");
+        json_set_str(pc, "askToolName", "ask");
+        json_set_bool(pc, "askAvailable", agent_find_tool(a->agent, "ask") != NULL);
+        json_set_bool(pc, "taskAvailable", agent_find_tool(a->agent, "task") != NULL);
+        json_set_bool(pc, "scoutAvailable", agent_find_tool(a->agent, "task") != NULL);
+        json_set_bool(pc, "isHashlineEditMode", str_eq(a->env->edit_mode, "hashline"));
+        json_set_bool(pc, "planExists", a->plan_file != NULL);
+        if (a->plan_file) json_set_str(pc, "planFilePath", a->plan_file);
+        char *pm = prompt_render("coding-agent/prompts/system/plan-mode-active.md", pc);
+        json_push_str(blocks, pm);
+        free(pm);
+        json_free(pc);
+    }
     char *mi = a->mcp ? mcp_instructions(a->mcp) : NULL;
     if (mi && *mi) json_push_str(blocks, mi);
     free(mi);
@@ -428,6 +591,15 @@ app_t *app_create(const app_opts_t *o, char **err) {
         app_free(a);
         return NULL;
     }
+    {
+        const char *sid = session_id(a->session);
+        if (a->session->dir) a->env->local_dir = xasprintf("%s/%s/local", a->session->dir, sid);
+        else {
+            char *base = omc_agent_path("local");
+            a->env->local_dir = xasprintf("%s/%s", base, sid);
+            free(base);
+        }
+    }
     install_agent(a);
     if (json_len(a->session->entries)) load_session_into_agent(a);
     app_rebuild_system_prompt(a);
@@ -438,6 +610,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
         free(label);
     }
     a->title_done = a->session->title != NULL;
+    if (settings_bool("plan.defaultOnStartup", false) && !o->subagent) app_set_plan_mode(a, true);
     return a;
 }
 
@@ -453,6 +626,7 @@ void app_free(app_t *a) {
     free(a->cwd);
     free(a->sys_custom);
     free(a->sys_append);
+    free(a->plan_file);
     pthread_mutex_destroy(&a->mu);
     free(a);
 }

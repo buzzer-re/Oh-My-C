@@ -121,12 +121,27 @@ void tool_env_free(tool_env_t *e) {
     json_free(e->todo.phases);
     free(e->edit_mode);
     free(e->artifacts_dir);
+    free(e->local_dir);
     shell_free(e->shell);
     pthread_mutex_destroy(&e->mu);
     free(e);
 }
 
 char *tool_resolve_path(tool_env_t *env, const char *p) {
+    if (p && str_starts(p, "local://")) {
+        const char *rest = p + 8;
+        char *root = env->local_dir ? xstrdup(env->local_dir) : xasprintf("%s/.omc-local", env->cwd);
+        fs_mkdir_p(root, 0700);
+        char *j = path_join(root, rest);
+        char *n = path_normalize(j);
+        free(j);
+        if (!str_starts(n, root)) { /* escape attempt: clamp to root */
+            free(n);
+            n = xstrdup(root);
+        }
+        free(root);
+        return n;
+    }
     if (!p || !*p || strcmp(p, "/") == 0) return xstrdup(env->cwd); /* omp: bare "/" means session cwd */
     if (str_starts(p, "file://")) p += 7;
     return path_abs(p, env->cwd);

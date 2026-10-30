@@ -53,6 +53,7 @@ static void usage(FILE *f) {
             "      --config <file>                extra config overlay (repeatable)\n"
             "      --print-thoughts               print thinking to stderr in print mode\n"
             "      --max-turns <n>                stop after n turns\n"
+            "      --plan-mode                    start in read-only plan mode\n"
             "  -v, --version                      print version\n"
             "  -h, --help                         this help\n",
             OMC_VERSION);
@@ -320,7 +321,7 @@ int main(int argc, char **argv) {
     }
     app_opts_t o = {0};
     strvec_t tools = {0}, configs = {0}, prompt_parts = {0};
-    bool print = false, json = false, rpc = false, print_thoughts = false;
+    bool print = false, json = false, rpc = false, print_thoughts = false, plan_mode = false;
     const char *mode = NULL;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -361,6 +362,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--print-thoughts")) print_thoughts = true;
         else if (!strcmp(a, "--max-turns")) o.max_turns = atoi(need(argc, argv, &i));
         else if (!strcmp(a, "--no-title")) setenv("OMC_NO_TITLE", "1", 1);
+        else if (!strcmp(a, "--plan-mode")) plan_mode = true;
         else if (!strcmp(a, "--")) {
             for (i++; i < argc; i++) strvec_push(&prompt_parts, argv[i]);
         } else if (a[0] == '-' && a[1]) {
@@ -433,6 +435,7 @@ int main(int argc, char **argv) {
         free(err);
         return 1;
     }
+    if (plan_mode) app_set_plan_mode(app, true);
     int rc;
     if (rpc) {
         rc = run_rpc_mode(app);

@@ -34,14 +34,15 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 | TTSR (stream rules, builtin rules, interrupt/inject/retry, tool reminders) | ✅ | regex conditions; AST conditions ❌ |
 | Context files, skills, rules (`.omc/`, `.omp/`, AGENTS.md, CLAUDE.md, cursor, …) | ✅ | |
 | Subagents (`task`, bundled + user agent definitions, parallel) | ✅ | worktree isolation ❌, IRC ❌, async jobs ❌ |
-| Plan mode, goal mode, advisor, memory backends, autolearn | ❌ | |
+| Plan mode (local:// plans, xd://propose approval, read-only gating) | ✅ | |
+| Goal mode, advisor, memory backends, autolearn | ❌ | |
 
 ## Tools
 | Tool | Status | Notes |
 |---|---|---|
 | read (selectors, hashline anchors, summaries, dirs, images, URLs, skill:// rule:// artifact://) | ✅ | archives/sqlite/pdf/notebooks ❌ |
 | write, edit (hashline PUT/CUT/REM/MV, registers, block anchors; replace mode) | ✅ | apply_patch/patch/sloppy modes ❌ |
-| bash (timeouts, PTY, artifact spill) | 🟡 | persistent shell sessions, services, async ❌ |
+| bash (persistent shell session, timeouts, PTY, artifact spill) | ✅ | services, async jobs ❌ |
 | grep, glob | ✅ | |
 | todo, ask | ✅ | |
 | web_search (Brave, Tavily, Exa, DuckDuckGo) | 🟡 | other 19 providers ❌ |

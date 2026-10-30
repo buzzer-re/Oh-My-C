@@ -21,8 +21,20 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         return 0;
     }
     if (!content) content = "";
+    if (!strcmp(path, "xd://propose")) {
+        if (!env->propose_plan) {
+            tool_result_error(out, "xd://propose is only available in plan mode");
+            return 0;
+        }
+        bool err = false;
+        char *r = env->propose_plan(env, content, &err);
+        tool_result_text(out, r ? r : "");
+        out->is_error = err;
+        free(r);
+        return 0;
+    }
     char *abs = tool_resolve_path(env, path);
-    char *display = path_display(abs, env->cwd);
+    char *display = str_starts(path, "local://") ? xstrdup(path) : path_display(abs, env->cwd);
     struct stat st;
     bool existed = stat(abs, &st) == 0;
     if (existed && S_ISDIR(st.st_mode)) {

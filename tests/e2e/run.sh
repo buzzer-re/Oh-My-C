@@ -70,6 +70,9 @@ rm -f "$T/agent/mcp.json"
 # persistent bash: state survives across calls in one session
 check "bash persists"  "FOO=kept"  bash -c "( printf '%s\n' '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"bash:export FOO=kept\"}'; sleep 2; printf '%s\n' '{\"id\":\"2\",\"type\":\"prompt\",\"message\":\"bash:echo FOO=\$FOO\"}'; sleep 2 ) | '$B' -m mock/mock-1 --mode rpc"
 check "bash exit code" "exited with code 3"  "$B" bash 'exit 3'
+# plan mode: read-only gating, local:// plan, xd://propose approval (auto-approved without a UI)
+check "plan blocks"    "working tree is read-only"  "$B" -m mock/mock-1 --plan-mode -p "write:real.txt:x"
+check "plan approve"   "approved. Plan mode ended"  bash -c "( printf '%s\n' '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"call:write:{\\\"path\\\":\\\"local://p-plan.md\\\",\\\"content\\\":\\\"# P\\\"}\"}'; sleep 2; printf '%s\n' '{\"id\":\"2\",\"type\":\"prompt\",\"message\":\"call:write:{\\\"path\\\":\\\"xd://propose\\\",\\\"content\\\":\\\"p\\\"}\"}'; sleep 3 ) | '$B' -m mock/mock-1 --plan-mode --mode rpc"
 # LSP (only when clangd is installed)
 if command -v clangd >/dev/null; then
     printf 'static int add(int a, int b) { return a + b; }\nint main(void) { return add(1, 2); }\n' > l.c

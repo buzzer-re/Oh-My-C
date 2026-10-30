@@ -54,6 +54,8 @@ struct app {
     bool owns_mcp;
     struct lsp_manager *lsp;
     bool owns_lsp;
+    bool plan_mode;
+    char *plan_file; /* local:// path of the current plan */
     volatile bool ttsr_interrupting;
     app_notice_fn notice;
     void *notice_ud;
@@ -68,6 +70,8 @@ void app_free(app_t *a);
 int app_prompt(app_t *a, const char *text, json_t *images);
 int app_set_model(app_t *a, const char *pattern, char **err);
 void app_set_thinking(app_t *a, ai_effort_t e);
+/* enter/leave read-only plan mode (rebuilds the system prompt) */
+void app_set_plan_mode(app_t *a, bool on);
 void app_rebuild_system_prompt(app_t *a);
 int app_compact(app_t *a, const char *instructions, char **err);
 int app_new_session(app_t *a);

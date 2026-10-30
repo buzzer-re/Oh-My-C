@@ -308,7 +308,7 @@ static void status_render(tui_component_t *c, int width, strvec_t *out) {
     char *cx = fg(TUI_TC_STATUS_LINE_CONTEXT, ctx);
     char *co = fg(TUI_TC_STATUS_LINE_COST, cs);
     char *sep = fg(TUI_TC_STATUS_LINE_SEP, " · ");
-    char *line = xasprintf(" %s%s%s%s%s%s%s%s%s", m, sep, t, sep, p, sep, cx, sep, co);
+    char *line = xasprintf(" %s%s%s%s%s%s%s%s%s%s", a->plan_mode ? "[plan] " : "", m, sep, t, sep, p, sep, cx, sep, co);
     if (a->session && a->session->title) {
         char *tt = fg(TUI_TC_MUTED, a->session->title);
         char *l2 = xasprintf("%s%s%s", line, sep, tt);
@@ -707,6 +707,7 @@ static const struct {
 } COMMANDS[] = {
     {"help", "Show commands and keys"},       {"model", "Switch model (picker or /model <pattern>)"},
     {"thinking", "Set thinking level"},       {"new", "Start a new session"},
+    {"plan", "Toggle read-only plan mode"},
     {"resume", "Resume a previous session"},  {"compact", "Compact the context [instructions]"},
     {"session", "Show session info"},         {"name", "Set session title"},
     {"export", "Export session [path]"},      {"copy", "Copy last answer to clipboard"},
@@ -758,6 +759,11 @@ static bool handle_command(ui_t *u, const char *line) {
                     tui_select_list_add(u->picker, effort_name((ai_effort_t)i), effort_name((ai_effort_t)i), NULL);
             show_picker(u, 4);
         }
+    } else if (!strcmp(cmd, "plan")) {
+        app_set_plan_mode(a, !a->plan_mode);
+        add_notice(u, "info", a->plan_mode ? "Plan mode on: read-only exploration; the agent proposes a plan for approval."
+                                           : "Plan mode off.");
+        if (*arg && a->plan_mode) start_prompt(u, arg);
     } else if (!strcmp(cmd, "new") || !strcmp(cmd, "clear")) {
         app_new_session(a);
         tui_container_clear(u->chat);
