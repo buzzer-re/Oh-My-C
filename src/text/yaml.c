@@ -17,6 +17,7 @@ typedef struct {
     hmap_t anchors; /* name -> json_t* (owned) */
     size_t alias_nodes;
     bool force_str; /* !!str tag pending for the next scalar */
+    bool inline_value; /* next parse_node is a mapping value on the key's line */
 } yp_t;
 
 static void yerr_at(yp_t *y, size_t at, const char *fmt, ...) PRINTF_LIKE(3, 4);
@@ -590,7 +591,10 @@ static json_t *parse_block_map(yp_t *y, int m, char *first_key, bool first_merge
         y->pos++; /* ':' */
         skip_space(y);
         if (at_eol(y)) v = parse_value_block(y, m, true);
-        else v = parse_node(y, m);
+        else {
+            y->inline_value = true;
+            v = parse_node(y, m);
+        }
         if (!v) { free(key); goto fail; }
         if (!insert_pair(y, obj, key, merge, v, kpos)) goto fail;
         key = NULL;
@@ -667,6 +671,8 @@ static json_t *parse_node(yp_t *y, int n) {
     }
     json_t *v = NULL;
     char *anchor = NULL;
+    bool inl = y->inline_value;
+    y->inline_value = false;
     for (;;) {
         char c = cur(y);
         if (c == '&') {
@@ -702,6 +708,8 @@ static json_t *parse_node(yp_t *y, int n) {
                 v = NULL;
             }
         }
+    } else if (inl && (c == '-' || c == '?') && is_blank_or_end(at(y, 1))) {
+        yerr(y, "block collections are not allowed as an inline mapping value");
     } else if (c == '-' && is_blank_or_end(at(y, 1))) {
         v = parse_block_seq(y, c0);
     } else if (c == '?' && is_blank_or_end(at(y, 1))) {
@@ -727,7 +735,10 @@ static json_t *parse_node(yp_t *y, int n) {
         char *s = parse_quoted(y);
         if (s) {
             skip_space(y);
-            if (cur(y) == ':' && is_blank_or_end(at(y, 1))) {
+            if (cur(y) == ':' && is_blank_or_end(at(y, 1)) && inl) {
+                yerr(y, "mapping values are not allowed here");
+                free(s);
+            } else if (cur(y) == ':' && is_blank_or_end(at(y, 1))) {
                 y->pos = st;
                 bool merge;
                 char *k = parse_key(y, &merge);
@@ -746,7 +757,10 @@ static json_t *parse_node(yp_t *y, int n) {
     } else {
         size_t st = y->pos;
         size_t e = scan_plain_line(y, st, false);
-        if (e < y->len && y->s[e] == ':' && e >= st) {
+        if (e < y->len && y->s[e] == ':' && inl) {
+            y->pos = e;
+            yerr(y, "mapping values are not allowed here");
+        } else if (e < y->len && y->s[e] == ':' && e >= st) {
             bool merge;
             char *k = parse_key(y, &merge);
             v = k ? parse_block_map(y, c0, k, merge) : NULL;
@@ -965,8 +979,10 @@ static json_t *parse_stream(const char *s, size_t len, char **err, bool all) {
     y.s = s ? s : "";
     y.len = s ? len : 0;
     hmap_init(&y.anchors);
-    if (y.len >= 3 && (unsigned char)y.s[0] == 0xEF && (unsigned char)y.s[1] == 0xBB && (unsigned char)y.s[2] == 0xBF)
-        y.pos = 3;
+    if (y.len >= 3 && (unsigned char)y.s[0] == 0xEF && (unsigned char)y.s[1] == 0xBB && (unsigned char)y.s[2] == 0xBF) {
+        y.s += 3;
+        y.len -= 3;
+    }
     json_t *docs = json_arr();
     for (;;) {
         skip_to_content(&y);

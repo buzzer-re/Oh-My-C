@@ -1838,20 +1838,25 @@ static ptrdiff_t lit_find(const char *h, size_t hl, size_t from, const char *nd,
     bool alpha = c0 >= 'a' && c0 <= 'z';
     uint8_t c1 = alpha ? (uint8_t)(c0 - 32) : c0;
     size_t last = hl - nl;
-    const char *pa = NULL, *pb = NULL;
+    /* cached next occurrence of each case of the first byte; end = exhausted */
+    const char *end = h + last + 1;
+    const char *pa = NULL, *pb = alpha ? NULL : end;
     size_t i = from;
     while (i <= last) {
-        if (!pa || pa < h + i) pa = memchr(h + i, c0, last + 1 - i);
-        if (alpha && (!pb || pb < h + i)) pb = memchr(h + i, c1, last + 1 - i);
-        const char *p = pa;
-        if (alpha && pb && (!p || pb < p)) p = pb;
-        if (!p) return -1;
+        if (!pa || (pa != end && pa < h + i)) {
+            pa = memchr(h + i, c0, last + 1 - i);
+            if (!pa) pa = end;
+        }
+        if (!pb || (pb != end && pb < h + i)) {
+            pb = memchr(h + i, c1, last + 1 - i);
+            if (!pb) pb = end;
+        }
+        const char *p = pa < pb ? pa : pb;
+        if (p >= end) return -1;
         size_t k = 1;
         while (k < nl && lt[(uint8_t)p[k]] == (uint8_t)nd[k]) k++;
         if (k == nl) return p - h;
         i = (size_t)(p - h) + 1;
-        if (!pa) pa = h + hl; /* exhausted */
-        if (alpha && !pb) pb = h + hl;
     }
     return -1;
 }
