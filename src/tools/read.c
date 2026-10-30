@@ -1,8 +1,9 @@
-/* read tool: files (line selectors, hashline anchors), directories, images, URLs. */
+/* read tool: files (line selectors, hashline anchors), directories, images, URLs, archives, SQLite, PDF, notebooks. */
 #include "tools.h"
 
 #include "config/settings.h"
 #include "core/fs.h"
+#include "readfmt.h"
 #include "summary.h"
 #include "web.h"
 
@@ -26,6 +27,9 @@ typedef struct {
     bool raw, img, conflicts;
     VEC(lrange_t) ranges;
     bool has_sel;
+    /* in-memory documents (archive members, PDFs, notebooks): no hashline anchors, no summary */
+    bool immutable;
+    const char *entity; /* "file" when NULL */
 } selector_t;
 
 static bool parse_range_chunk(const char *c, lrange_t *r) {
@@ -269,8 +273,9 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
     text_lines_t t;
     split_text(data, len, &t);
     int64_t total = (int64_t)t.lines.n;
-    bool hashline = !sel->raw && str_eq(env->edit_mode, "hashline");
+    bool hashline = !sel->raw && !sel->immutable && str_eq(env->edit_mode, "hashline");
     bool numbered = hashline || (!sel->raw && settings_bool("readLineNumbers", false));
+    const char *ent = sel->entity ? sel->entity : "file";
     sb_t b = SB_INIT;
     json_t *details = json_obj();
     json_set_str(details, "resolvedPath", abs);
@@ -278,7 +283,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
     bool whole = false;
 
     summary_lang_t slang = summary_lang(abs);
-    bool want_summary = !sel->ranges.n && !sel->raw && slang != SUM_NONE && total >= 100 && len <= (2u << 20) &&
+    bool want_summary = !sel->ranges.n && !sel->raw && !sel->immutable && slang != SUM_NONE && total >= 100 && len <= (2u << 20) &&
                         total <= 20000 && settings_bool("read.summarize.enabled", true);
     bool *keep = NULL;
     size_t elided = 0;
@@ -378,10 +383,10 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         sb_append(&b, sb_cstr(&body));
         sb_free(&body);
         if (last < total)
-            sb_appendf(&b, "\n[%lld more lines in file. Use :%lld to continue]", (long long)(total - last),
+            sb_appendf(&b, "\n[%lld more lines in %s. Use :%lld to continue]", (long long)(total - last), ent,
                        (long long)(last + 1));
         else if (total == 0)
-            sb_append(&b, "(empty file)");
+            sb_appendf(&b, "(empty %s)", ent);
         whole = last >= total;
         seen_lo = 1;
         seen_hi = last;
@@ -399,11 +404,11 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
             }
             if (r.start > total) {
                 if (sel->ranges.n == 1) {
-                    sb_appendf(&notes, "Line %lld is beyond end of file (%lld lines total). Use :%lld to read the end.",
-                               (long long)r.start, (long long)total, (long long)MAX(1, total - 20));
+                    sb_appendf(&notes, "Line %lld is beyond end of %s (%lld lines total). Use :%lld to read the end.",
+                               (long long)r.start, ent, (long long)total, (long long)MAX(1, total - 20));
                 } else {
-                    sb_appendf(&notes, "[Range %lld is beyond end of file (%lld lines total); skipped]\n", (long long)r.start,
-                               (long long)total);
+                    sb_appendf(&notes, "[Range %lld is beyond end of %s (%lld lines total); skipped]\n", (long long)r.start,
+                               ent, (long long)total);
                 }
                 continue;
             }
@@ -461,7 +466,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         sb_append(&b, sb_cstr(&body));
         sb_free(&body);
         if (cut || (rs.n == 1 && sel->ranges.v[0].end == 0 && last_shown < total && !sel->raw))
-            sb_appendf(&b, "\n[%lld more lines in file. Use :%lld to continue]", (long long)(total - last_shown),
+            sb_appendf(&b, "\n[%lld more lines in %s. Use :%lld to continue]", (long long)(total - last_shown), ent,
                        (long long)(last_shown + 1));
         if (notes.len) {
             if (b.len) sb_putc(&b, '\n');
@@ -498,6 +503,282 @@ static int read_conflicts(const char *display, const char *data, tool_result_t *
     sb_free(&b);
     strvec_free(&lines);
     return 0;
+}
+
+/* ---------- structured formats: archives, SQLite, PDF, notebooks (readfmt.c) ---------- */
+
+/* render in-memory text through the selector pipeline as an immutable document */
+static void read_mem(tool_env_t *env, const char *abs, const char *text, size_t len, selector_t *sel, const char *entity,
+                     tool_result_t *out) {
+    sel->immutable = true;
+    sel->entity = entity;
+    if (sel->conflicts) read_conflicts(abs, text, out);
+    else read_text(env, abs, abs, text, len, sel, out);
+}
+
+/* upstream PDF_PAGE_MEMBER_RE ("p2.png", "page-3_img0.png") plus omc's "page2" / "page2-4" text selectors */
+static bool pdf_page_token(const char *tok, int *first, int *last) {
+    const char *p = tok;
+    if (!strncasecmp(p, "page", 4)) {
+        p += 4;
+        if (*p == '-' || *p == '_') p++;
+    } else if (*p == 'p' || *p == 'P') {
+        p++;
+    } else {
+        return false;
+    }
+    if (!isdigit((unsigned char)*p)) return false;
+    char *e;
+    long a = strtol(p, &e, 10), b = a;
+    if (a < 1 || a > 1000000) return false;
+    size_t el = strlen(e);
+    if (!strcasecmp(e, ".png") || ((*e == '-' || *e == '_') && el >= 5 && !strcasecmp(e + el - 4, ".png"))) {
+        *first = *last = (int)a;
+        return true;
+    }
+    if (*e == '-' && isdigit((unsigned char)e[1])) {
+        b = strtol(e + 1, &e, 10);
+        if (b < a || b > 1000000) return false;
+    }
+    if (*e) return false;
+    *first = (int)a;
+    *last = (int)b;
+    return true;
+}
+
+/* extract a PDF and render pages [first,last] (0 = all) through the selector pipeline */
+static void read_pdf_bytes(tool_env_t *env, const char *abs, const char *data, size_t len, int first, int last,
+                           selector_t *sel, tool_result_t *out) {
+    strvec_t pages;
+    char *err = NULL;
+    if (rf_pdf_extract(data, len, &pages, &err) != 0) {
+        tool_result_textf(out, "[Cannot read .pdf file: %s]", err);
+        free(err);
+        return;
+    }
+    char *text = rf_pdf_render(&pages, first, last, &err);
+    if (!text) {
+        tool_result_textf(out, "[Cannot read .pdf file: %s]", err);
+        free(err);
+    } else {
+        sb_t b = SB_INIT;
+        if (first > 0) {
+            sb_appendf(&b, "[omc cannot render PDF pages as images; showing the extracted text of page %d", first);
+            if (last > first) sb_appendf(&b, "-%d", last);
+            sb_append(&b, "]\n");
+        }
+        sb_append(&b, text);
+        read_mem(env, abs, sb_cstr(&b), b.len, sel, "document", out);
+        sb_free(&b);
+        free(text);
+    }
+    strvec_free(&pages);
+}
+
+static void read_archive(tool_env_t *env, const char *path, const char *abs, const char *sub, tool_result_t *out) {
+    char *err = NULL;
+    rf_archive_t *a = rf_archive_open(abs, &err);
+    if (!a) {
+        tool_result_error(out, "%s", err);
+        free(err);
+        return;
+    }
+    selector_t sel;
+    memset(&sel, 0, sizeof sel);
+    char *member = xstrdup(sub);
+    strip_sel(member, &sel);
+    int64_t size = 0;
+    int kind = rf_archive_stat(a, member, &size);
+    int pdf_first = 0, pdf_last = 0;
+    if (!kind && *sub) {
+        if (rf_archive_stat(a, sub, &size)) { /* member names win over selector-looking suffixes */
+            free(member);
+            member = xstrdup(sub);
+            vec_free(&sel.ranges);
+            memset(&sel, 0, sizeof sel);
+            kind = rf_archive_stat(a, member, &size);
+        } else {
+            /* "archive.zip:500" / "archive.zip:raw": the whole remainder is a selector on the root */
+            selector_t s2;
+            memset(&s2, 0, sizeof s2);
+            char *w = xasprintf("x:%s", sub);
+            strip_sel(w, &s2);
+            if (!strcmp(w, "x") && s2.has_sel) {
+                free(member);
+                member = xstrdup("");
+                vec_free(&sel.ranges);
+                sel = s2;
+                kind = 2;
+            } else {
+                vec_free(&s2.ranges);
+            }
+            free(w);
+        }
+    }
+    if (!kind) { /* "doc.pdf:page2.png" inside the archive */
+        char *colon = strrchr(member, ':');
+        if (colon && colon - member >= 4 && !strncasecmp(colon - 4, ".pdf", 4) &&
+            pdf_page_token(colon + 1, &pdf_first, &pdf_last)) {
+            *colon = 0;
+            kind = rf_archive_stat(a, member, &size) == 1 ? 1 : 0;
+        }
+    }
+    json_t *details = NULL;
+    if (!kind) {
+        tool_result_error(out, "Path '%s' not found inside archive", path);
+    } else if (kind == 2) {
+        rf_dirents_t ents;
+        if (sel.ranges.n > 1) {
+            tool_result_error(out, "Multi-range line selectors are not supported for archive directory listings.");
+        } else if (rf_archive_list(a, member, &ents, &err) != 0) {
+            tool_result_error(out, "%s", err);
+            free(err);
+        } else {
+            /* selectors address entries with line semantics: ":50" starts at the 50th, ":-20" lists the last 20 */
+            int64_t total = (int64_t)ents.n, off = 1, limit = 500;
+            if (sel.ranges.n == 1) {
+                lrange_t r = sel.ranges.v[0];
+                if (r.start < 0) {
+                    off = MAX(1, total + r.start + 1);
+                    limit = MAX((int64_t)1, MIN(-r.start, total));
+                } else {
+                    off = r.start;
+                    if (r.end) limit = r.end - r.start + 1;
+                }
+            }
+            int64_t avail = MAX((int64_t)0, total - (off - 1));
+            int64_t shown = MIN(avail, limit);
+            char *list = shown > 0 ? rf_format_dirents(ents.v + (off - 1), (size_t)shown) : xstrdup("(empty archive directory)");
+            if (limit > 0 && avail >= limit)
+                tool_result_textf(out, "%s\n\n[%lld results limit reached. Use limit=%lld for more]", list, (long long)limit,
+                                  (long long)limit * 2);
+            else
+                tool_result_text(out, list);
+            free(list);
+            details = json_obj();
+            json_set_str(details, "resolvedPath", abs);
+            json_set_bool(details, "isDirectory", true);
+            rf_dirents_free(&ents);
+        }
+    } else {
+        size_t len = 0;
+        char *norm = NULL;
+        char *data = rf_archive_read(a, member, &len, &norm, &err);
+        if (!data) {
+            tool_result_error(out, "%s", err);
+            free(err);
+        } else if (strlen(norm) >= 4 && !strcasecmp(norm + strlen(norm) - 4, ".pdf")) {
+            char *mp = xasprintf("%s:%s", abs, norm);
+            read_pdf_bytes(env, mp, data, len, pdf_first, pdf_last, &sel, out);
+            free(mp);
+        } else if (!rf_is_text(data, len)) {
+            char *sz = rf_fmt_bytes((int64_t)len);
+            tool_result_textf(out, "[Cannot read binary archive entry '%s' (%s)]", norm, sz);
+            free(sz);
+        } else {
+            read_mem(env, abs, data, len, &sel, "archive entry", out);
+        }
+        free(norm);
+        free(data);
+    }
+    if (details) {
+        json_free(out->details);
+        out->details = details;
+    }
+    vec_free(&sel.ranges);
+    free(member);
+    rf_archive_free(a);
+}
+
+/* archive members ("x.zip:dir/file:10-20") and SQLite selectors ("x.db:table?limit=5"); true when handled */
+static bool read_structured(tool_env_t *env, const char *path, tool_result_t *out) {
+    char *full = tool_resolve_path(env, path);
+    bool literal = fs_exists(full);
+    free(full);
+    rf_splits_t c;
+    rf_archive_candidates(path, &c);
+    for (size_t i = 0; i < c.n; i++) {
+        if (literal && *c.v[i].sub) continue; /* a real file name with a selector-looking suffix wins */
+        char *abs = tool_resolve_path(env, c.v[i].container);
+        struct stat st;
+        bool ok = stat(abs, &st) == 0 && !S_ISDIR(st.st_mode);
+        if (ok) {
+            read_archive(env, path, abs, c.v[i].sub, out);
+            if (!out->details) {
+                out->details = json_obj();
+                json_set_str(out->details, "resolvedPath", abs);
+            }
+        }
+        free(abs);
+        if (ok) {
+            rf_splits_free(&c);
+            return true;
+        }
+    }
+    rf_splits_free(&c);
+    rf_sqlite_candidates(path, &c);
+    for (size_t i = 0; i < c.n; i++) {
+        if (literal && (*c.v[i].sub || *c.v[i].query)) continue;
+        char *abs = tool_resolve_path(env, c.v[i].container);
+        struct stat st;
+        bool ok = stat(abs, &st) == 0 && S_ISREG(st.st_mode) && rf_sqlite_sniff(abs);
+        if (ok) {
+            bool is_err = false;
+            char *txt = rf_sqlite_read(abs, c.v[i].sub, c.v[i].query, &is_err);
+            if (is_err) tool_result_error(out, "%s", txt);
+            else tool_result_text(out, txt);
+            free(txt);
+            json_free(out->details);
+            out->details = json_obj();
+            json_set_str(out->details, "resolvedPath", abs);
+        }
+        free(abs);
+        if (ok) {
+            rf_splits_free(&c);
+            return true;
+        }
+    }
+    rf_splits_free(&c);
+    return false;
+}
+
+/* "doc.pdf:page2.png" / "doc.pdf:page2-4[:sel]" when no such literal file exists; true when handled */
+static bool read_pdf_pages(tool_env_t *env, const char *path, tool_result_t *out) {
+    const char *hit = NULL;
+    for (const char *p = path; (p = strchr(p, ':')); p++)
+        if (p - path >= 4 && !strncasecmp(p - 4, ".pdf", 4)) hit = p;
+    if (!hit) return false;
+    char *full = tool_resolve_path(env, path);
+    bool literal = fs_exists(full);
+    free(full);
+    if (literal) return false;
+    char *rest = xstrdup(hit + 1);
+    char *selpart = strchr(rest, ':');
+    if (selpart) *selpart++ = 0;
+    int first, last;
+    if (!pdf_page_token(rest, &first, &last)) {
+        free(rest);
+        return false;
+    }
+    char *pdf = xstrndup(path, (size_t)(hit - path));
+    char *abs = tool_resolve_path(env, pdf);
+    selector_t sel;
+    memset(&sel, 0, sizeof sel);
+    if (selpart) {
+        char *w = xasprintf("x:%s", selpart);
+        strip_sel(w, &sel);
+        free(w);
+    }
+    size_t len = 0;
+    char *data = fs_is_file(abs) ? fs_read_limit(abs, 256u << 20, &len, NULL) : NULL;
+    if (!data) tool_result_error(out, "Path '%s' not found", pdf);
+    else read_pdf_bytes(env, abs, data, len, first, last, &sel, out);
+    free(data);
+    vec_free(&sel.ranges);
+    free(abs);
+    free(pdf);
+    free(rest);
+    return true;
 }
 
 static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out);
@@ -563,6 +844,7 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         json_free(a2);
         return rc;
     }
+    if (read_structured(env, path, out) || read_pdf_pages(env, path, out)) return 0;
     selector_t sel;
     char *abs = split_path_sel(env, path, &sel);
     char *display = path_display(abs, env->cwd);
@@ -615,11 +897,29 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         free(data);
         goto done;
     }
+    if (!strcasecmp(path_ext(abs), ".pdf") && !sel.raw) {
+        size_t plen = 0;
+        char *pdata = fs_read_limit(abs, 256u << 20, &plen, NULL);
+        if (!pdata) tool_result_error(out, "Cannot read %s: %s", display, strerror(errno));
+        else read_pdf_bytes(env, abs, pdata, plen, 0, 0, &sel, out);
+        free(pdata);
+        goto done;
+    }
     size_t len;
     bool trunc = false;
     char *data = fs_read_limit(abs, 64u << 20, &len, &trunc);
     if (!data) {
         tool_result_error(out, "Cannot read %s: %s", display, strerror(errno));
+        goto done;
+    }
+    if (!strcasecmp(path_ext(abs), ".ipynb") && !sel.raw) {
+        char *nerr = NULL;
+        char *nb = rf_ipynb_text(data, len, display, &nerr);
+        if (!nb) tool_result_error(out, "%s", nerr);
+        else read_mem(env, abs, nb, strlen(nb), &sel, "notebook", out);
+        free(nb);
+        free(nerr);
+        free(data);
         goto done;
     }
     if (!sel.raw && fs_is_binary(data, len)) {

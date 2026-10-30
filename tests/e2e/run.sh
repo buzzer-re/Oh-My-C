@@ -106,6 +106,23 @@ rm -f "$T/agent/config.yml"
 # ACP (Agent Client Protocol): permission request answered by the test client
 check "acp prompt"     "tool_call_update completed acp-ok"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo acp-ok"
 check "acp reject"     "tool_call_update failed The user rejected"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo no" reject_once
+# structured reads: archives, SQLite, PDF, notebooks (fixtures generated with Python's zipfile/tarfile/sqlite3)
+if python3 -I "$ROOT/tests/readfmt_fixtures.py" fx >/dev/null 2>&1; then
+    check "read zip list"     "hello.txt (16B)"                "$B" -m mock/mock-1 -p "read:fx/t.zip"
+    check "read zip member"   "row 12"                         "$B" -m mock/mock-1 -p "read:fx/t.zip:many.txt:12-12"
+    check "read zip missing"  "not found inside archive"       "$B" -m mock/mock-1 -p "read:fx/t.zip:nope.txt"
+    check "read tgz symlink"  "alpha tar"                      "$B" -m mock/mock-1 -p "read:fx/t.tgz:d/link.txt"
+    check "read sqlite list"  "users (3000 rows)"              "$B" -m mock/mock-1 -p "read:fx/t.db"
+    check "read sqlite table" "[2995 more rows; append :users?limit=20&offset=5"  "$B" -m mock/mock-1 -p "read:fx/t.db:users"
+    check "read sqlite row"   "name: user0042"                 "$B" -m mock/mock-1 -p "read:fx/t.db:users:42"
+    check "read sqlite query" "| key499 | 249001 |"           "$B" -m mock/mock-1 -p "read:fx/t.db?q=SELECT * FROM kv ORDER BY v DESC LIMIT 1"
+    check "read sqlite wal"   "wal row 5"                      "$B" -m mock/mock-1 -p "read:fx/wal.db:events?where=id%3E4"
+    check "read pdf"          "Hello PDF world"                "$B" -m mock/mock-1 -p "read:fx/simple.pdf"
+    check "read pdf page"     "From the form"                  "$B" -m mock/mock-1 -p "read:fx/simple.pdf:page2.png"
+    check "read pdf objstm"   "Ünïcode ✓ ok"                   "$B" -m mock/mock-1 -p "read:fx/objstm.pdf"
+    check "read pdf in zip"   "Second line"                    "$B" -m mock/mock-1 -p "read:fx/docs.zip:papers/simple.pdf"
+    check "read notebook"     "# %%% [code] cell:9"            "$B" -m mock/mock-1 -p "read:fx/t.ipynb"
+fi
 # LSP (only when clangd is installed)
 if command -v clangd >/dev/null; then
     printf 'static int add(int a, int b) { return a + b; }\nint main(void) { return add(1, 2); }\n' > l.c
