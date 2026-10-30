@@ -88,6 +88,15 @@ printf 'debug:\n  adapters:\n    mockdap:\n      command: python3\n      args: [
 touch prog.mock
 check "debug session"  "x = 60"  bash -c "( for m in 'call:debug:{\"action\":\"launch\",\"program\":\"prog.mock\"}' 'call:debug:{\"action\":\"set_breakpoint\",\"file\":\"prog.mock\",\"line\":5}' 'call:debug:{\"action\":\"continue\"}' 'call:debug:{\"action\":\"step_over\"}' 'call:debug:{\"action\":\"variables\",\"variable_ref\":7}'; do python3 -c 'import json,sys; print(json.dumps({\"id\":\"x\",\"type\":\"prompt\",\"message\":sys.argv[1]}))' \"\$m\"; sleep 2; done ) | '$B' -m mock/mock-1 --mode rpc"
 rm -f "$T/agent/config.yml"
+# ssh:// internal URLs through a fake ssh client that runs the remote command locally
+printf 'remote one\nremote two\n' > "$T/remote.txt"
+printf '{"hosts":{"box":{"host":"localhost","username":"me","description":"test box"}}}' > ssh.json
+check "ssh hosts"      "[box](ssh://box/)"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "read:ssh://"
+check "ssh read sel"   "2:remote two"       env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "read:ssh://box$T/remote.txt:2"
+check "ssh write"      "Wrote ssh://box"    env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/w.txt\",\"content\":\"via ssh\"}"
+check "ssh write file" "via ssh"            cat "$T/sub/w.txt"
+check "ssh override"   "overrides are not allowed"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "read:ssh://me@box/etc/hosts"
+rm -f ssh.json
 # ACP (Agent Client Protocol): permission request answered by the test client
 check "acp prompt"     "tool_call_update completed acp-ok"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo acp-ok"
 check "acp reject"     "tool_call_update failed The user rejected"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo no" reject_once

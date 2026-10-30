@@ -570,11 +570,16 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     json_set(data, "rules", rules);
     json_set(data, "alwaysApplyRules", always);
     json_t *urls = json_arr();
-    const char *url_docs[] = {"skill", "rule", "artifact", "agent", "local", "issue"};
+    const char *url_docs[] = {"skill", "rule", "artifact", "agent", "local", "issue", "ssh"};
     for (size_t i = 0; i < ARRAY_LEN(url_docs); i++) {
         if (!strcmp(url_docs[i], "skill") && !json_len(skills)) continue;
         if (!strcmp(url_docs[i], "rule") && !json_len(rules)) continue;
         if (!strcmp(url_docs[i], "agent") && !(o->tool_names && strvec_contains(o->tool_names, "task"))) continue;
+        if (!strcmp(url_docs[i], "ssh")) {
+            char *ssh = which("ssh");
+            free(ssh);
+            if (!ssh) continue;
+        }
         char *rel = xasprintf("coding-agent/prompts/internal-urls/%s.md", url_docs[i]);
         char *doc = prompt_load(rel);
         free(rel);

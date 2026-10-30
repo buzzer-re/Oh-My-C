@@ -41,6 +41,21 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         free(r);
         return 0;
     }
+    if (str_starts(path, "ssh://")) {
+        char *err = NULL;
+        size_t n = strlen(content);
+        if (ssh_store(env, path, content, n, &err) != 0) {
+            tool_result_error(out, "%s", err);
+        } else {
+            size_t lines = n ? str_count(content, "\n") + (content[n - 1] != '\n') : 0;
+            tool_result_textf(out, "Wrote %s (%zu lines, %zu bytes)", path, lines, n);
+            out->details = json_obj();
+            json_set_str(out->details, "path", path);
+            json_set_int(out->details, "lines", (int64_t)lines);
+        }
+        free(err);
+        return 0;
+    }
     char *abs = tool_resolve_path(env, path);
     char *display = str_starts(path, "local://") ? xstrdup(path) : path_display(abs, env->cwd);
     struct stat st;

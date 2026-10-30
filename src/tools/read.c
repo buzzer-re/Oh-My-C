@@ -108,12 +108,8 @@ static bool parse_sel_token(const char *tok, selector_t *sel, bool *single_bare)
 }
 
 /* split "path:sel:sel" preferring literal existing files */
-static char *split_path_sel(tool_env_t *env, const char *in, selector_t *sel) {
-    memset(sel, 0, sizeof(*sel));
-    char *abs = tool_resolve_path(env, in);
-    if (fs_exists(abs)) return abs;
-    free(abs);
-    char *work = xstrdup(in);
+/* strip trailing :selector tokens from work (in place) into sel */
+static void strip_sel(char *work, selector_t *sel) {
     bool single_bare = false;
     for (int guard = 0; guard < 3; guard++) {
         char *colon = strrchr(work, ':');
@@ -146,6 +142,15 @@ static char *split_path_sel(tool_env_t *env, const char *in, selector_t *sel) {
     /* a lone bare N beside :raw is that single line */
     if (sel->raw && single_bare && sel->ranges.n == 1 && sel->ranges.v[0].end == 0 && sel->ranges.v[0].start > 0)
         sel->ranges.v[0].end = sel->ranges.v[0].start;
+}
+
+static char *split_path_sel(tool_env_t *env, const char *in, selector_t *sel) {
+    memset(sel, 0, sizeof(*sel));
+    char *abs = tool_resolve_path(env, in);
+    if (fs_exists(abs)) return abs;
+    free(abs);
+    char *work = xstrdup(in);
+    strip_sel(work, sel);
     char *r = tool_resolve_path(env, work);
     free(work);
     return r;
@@ -497,6 +502,40 @@ static int read_conflicts(const char *display, const char *data, tool_result_t *
 
 static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out);
 
+static int read_ssh(tool_env_t *env, const char *path, tool_result_t *out) {
+    selector_t sel;
+    memset(&sel, 0, sizeof sel);
+    char *url = xstrdup(path);
+    char *ps = strchr(url + 6, '/'); /* selectors only after the authority */
+    if (ps) strip_sel(ps, &sel);
+    char *data = NULL, *err = NULL;
+    size_t len = 0;
+    bool is_dir = false;
+    if (ssh_fetch(env, url, &data, &len, &is_dir, &err) != 0) {
+        tool_result_error(out, "%s", err ? err : "ssh:// read failed");
+    } else if (is_dir || sel.raw || sel.conflicts) {
+        if (sel.ranges.n) {
+            tool_env_t tmp = *env;
+            tmp.edit_mode = "raw";
+            sel.raw = true;
+            read_text(&tmp, url, url, data, len, &sel, out);
+        } else {
+            tool_result_text(out, data);
+        }
+        if (is_dir) {
+            if (!out->details) out->details = json_obj();
+            json_set_bool(out->details, "isDirectory", true);
+        }
+    } else {
+        read_text(env, url, url, data, len, &sel, out);
+    }
+    free(err);
+    free(data);
+    free(url);
+    vec_free(&sel.ranges);
+    return 0;
+}
+
 static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     const char *path = json_get_str(args, "path");
@@ -508,6 +547,7 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         return web_read_url(env, path, ctx->cancel, out);
     }
     if (str_starts(path, "pr://") || str_starts(path, "issue://")) return github_read(env, path, out);
+    if (str_starts(path, "ssh://")) return read_ssh(env, path, out);
     char *uerr = NULL;
     char *internal = tool_resolve_internal_url(env, path, &uerr);
     if (uerr) {

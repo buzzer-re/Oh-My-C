@@ -1,0 +1,16 @@
+#!/bin/sh
+# Fake OpenSSH client for e2e tests: validates the argv shape omc builds and runs the remote command locally.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -n|-T) shift ;;
+        -o|-p|-i) shift 2 ;;
+        -*) echo "fake ssh: unexpected option $1" >&2; exit 255 ;;
+        *) break ;;
+    esac
+done
+dest=$1; shift
+case "$dest" in
+    unreachable*) echo "ssh: connect to host $dest port 22: Connection refused" >&2; exit 255 ;;
+esac
+[ -n "$FAKE_SSH_LOG" ] && echo "$dest" >> "$FAKE_SSH_LOG"
+exec /bin/sh -c "$*"

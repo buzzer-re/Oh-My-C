@@ -112,6 +112,11 @@ json_t *agent_defs_load(const char *cwd);
 
 /* GitHub pr:// and issue:// reads */
 int github_read(tool_env_t *env, const char *url, tool_result_t *out);
+/* ssh://[user@]host[:port]/path (ssh.c): remote UTF-8 text (<=1 MiB) or one-level dir listing; bare ssh:// lists hosts */
+int ssh_fetch(tool_env_t *env, const char *url, char **content, size_t *len, bool *is_dir, char **err);
+int ssh_store(tool_env_t *env, const char *url, const char *data, size_t len, char **err);
+bool ssh_available(void);
+char *ssh_quote(const char *s); /* POSIX single-quote */
 
 /* helpers shared across tools */
 char *tool_prompt(const char *name, const json_t *ctx); /* renders prompts/coding-agent/prompts/tools/<name>.md */
