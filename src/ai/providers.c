@@ -13,4 +13,5 @@ void ai_providers_init(void) {
     ai_register_api("openai-codex-responses", provider_openai_responses_stream);
     ai_register_api("google-generative-ai", provider_google_stream);
     ai_register_api("ollama-chat", provider_ollama_stream);
+    ai_register_api("bedrock-converse-stream", provider_bedrock_stream);
 }

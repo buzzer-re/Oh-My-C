@@ -21,7 +21,8 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 | openai-responses / azure-openai-responses / openai-codex-responses | ✅ |
 | google-generative-ai / google-vertex (API key, bearer) | ✅ |
 | ollama-chat | ✅ |
-| bedrock-converse-stream, cursor-agent, google-gemini-cli, devin, gitlab-duo | ❌ |
+| bedrock-converse-stream (SigV4 + bearer key, AWS credential chain: env / web identity / profile static-SSO-credential_process-role_arn / ECS / IMDSv2, event-stream, geo-aware region, cache points, thinking/effort/binding controls, guardrails) | ✅ (Bedrock server-side compaction via InvokeModel ❌) |
+| cursor-agent, google-gemini-cli, devin, gitlab-duo | ❌ |
 | Codex websocket transport, Anthropic server-side fallback/compaction | ❌ |
 
 ## Agent & session

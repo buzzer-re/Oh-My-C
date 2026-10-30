@@ -2,6 +2,7 @@
 #include "auth.h"
 
 #include "ai/ai.h"
+#include "ai/aws.h"
 #include "core/fs.h"
 #include "core/proc.h"
 #include "net/http.h"
@@ -311,6 +312,8 @@ bool auth_has_credentials(const char *provider) {
     char *k = ai_env_api_key(provider);
     ok = k != NULL;
     free(k);
+    /* Bedrock authenticates outside the API-key path (SigV4 credential chain or AWS_BEARER_TOKEN_BEDROCK) */
+    if (!ok && str_eq(provider, "amazon-bedrock")) ok = aws_has_credential_source();
     return ok;
 }
 

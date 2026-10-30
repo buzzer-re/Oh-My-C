@@ -110,6 +110,26 @@ rm -f "$T/agent/config.yml"
 # ACP (Agent Client Protocol): permission request answered by the test client
 check "acp prompt"     "tool_call_update completed acp-ok"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo acp-ok"
 check "acp reject"     "tool_call_update failed The user rejected"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo no" reject_once
+# Amazon Bedrock ConverseStream against a mock that verifies SigV4 independently and speaks event-stream
+BPORT=$((PORT + 1))
+MOCK_LOG="$T/bedrock.jsonl" MOCK_BEDROCK_BEARER=br-token python3 -I "$ROOT/tests/e2e/mock_bedrock.py" $BPORT & BPID=$!
+trap 'kill $MPID $BPID 2>/dev/null; rm -rf "$T"' EXIT
+for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$BPORT) 2>/dev/null && break; sleep 0.1; done
+cp "$T/agent/models.yml" "$T/models.yml.bak"
+printf '  amazon-bedrock:\n    baseUrl: http://127.0.0.1:%s\n' $BPORT >> "$T/agent/models.yml"
+BM=amazon-bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0
+BENV=(env -u AWS_PROFILE -u AWS_SESSION_TOKEN -u AWS_BEARER_TOKEN_BEDROCK -u AWS_DEFAULT_REGION -u AWS_WEB_IDENTITY_TOKEN_FILE \
+    -u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI -u AWS_CONTAINER_CREDENTIALS_FULL_URI -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY \
+    HOME="$T" AWS_REGION=us-west-2 AWS_EC2_METADATA_DISABLED=true AWS_CONFIG_FILE="$T/none" AWS_SHARED_CREDENTIALS_FILE="$T/none")
+check "bedrock models"  "* amazon-bedrock"      "${BENV[@]}" AWS_ACCESS_KEY_ID=AKIDMOCK AWS_SECRET_ACCESS_KEY=mock-secret "$B" models sonnet-4-5
+check "bedrock text"    "plain bedrock answer"  "${BENV[@]}" AWS_ACCESS_KEY_ID=AKIDMOCK AWS_SECRET_ACCESS_KEY=mock-secret "$B" -m "$BM" --no-session -p "hi"
+check "bedrock tool"    "Tool said: br-e2e"     "${BENV[@]}" AWS_ACCESS_KEY_ID=AKIDMOCK AWS_SECRET_ACCESS_KEY=mock-secret "$B" -m "$BM" --no-session -p "bash:echo br-e2e"
+check "bedrock bearer"  "plain bedrock answer"  "${BENV[@]}" AWS_BEARER_TOKEN_BEDROCK=br-token "$B" -m "$BM" --no-session -p "hi"
+check "bedrock bad sig" "Bedrock HTTP 403: The request signature we calculated does not match"  "${BENV[@]}" AWS_ACCESS_KEY_ID=AKIDMOCK AWS_SECRET_ACCESS_KEY=wrong "$B" -m "$BM" --no-session -p "hi"
+check "bedrock no creds" "Unable to resolve AWS credentials"  "${BENV[@]}" "$B" -m "$BM" --no-session -p "hi"
+grep -q '"path": "/model/us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/converse-stream"' "$T/bedrock.jsonl" && echo "   ok  bedrock request path" || { echo "   FAIL bedrock request path"; fail=1; }
+grep -q '"toolResult": {"toolUseId": "tooluse_mock1"' "$T/bedrock.jsonl" && echo "   ok  bedrock toolResult replay" || { echo "   FAIL bedrock toolResult replay"; fail=1; }
+cp "$T/models.yml.bak" "$T/agent/models.yml"
 # LSP (only when clangd is installed)
 if command -v clangd >/dev/null; then
     printf 'static int add(int a, int b) { return a + b; }\nint main(void) { return add(1, 2); }\n' > l.c
