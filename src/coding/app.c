@@ -4,6 +4,7 @@
 #include "config/settings.h"
 #include "core/fs.h"
 #include "coding/ttsr.h"
+#include "lsp/lsp.h"
 #include "mcp/mcp.h"
 #include "prompt/template.h"
 
@@ -238,6 +239,12 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
 
 /* ---------- setup ---------- */
 
+static char *app_after_write(tool_env_t *env, const char *abs) {
+    app_t *a = env->session;
+    if (!a || !a->lsp || !settings_bool("lsp.diagnosticsOnWrite", true)) return NULL;
+    return lsp_after_write(a->lsp, abs, settings_int("lsp.diagnosticsWaitMs", 3000));
+}
+
 static void install_agent(app_t *a) {
     agent_t *ag = agent_new();
     a->agent = ag;
@@ -255,6 +262,13 @@ static void install_agent(app_t *a) {
     ag->thinking = a->thinking;
     if (!a->opts.no_tools) tools_register_builtin(ag, a->env, a->opts.tools);
     if (a->mcp && !a->opts.no_tools) mcp_register_tools(a->mcp, ag);
+    bool lsp_ok = !a->opts.no_tools && settings_bool("lsp.enabled", true) &&
+                  (!a->opts.tools || strvec_contains(a->opts.tools, "lsp"));
+    if (lsp_ok) {
+        if (!a->lsp) a->lsp = lsp_manager_new(a->cwd);
+        agent_add_tool(ag, tool_lsp_new(a->env, a->lsp));
+        a->env->after_write = app_after_write;
+    }
     if (a->opts.subagent && a->opts.subagent_depth >= (int)settings_int("task.maxRecursionDepth", 2))
         agent_remove_tool(ag, "task");
 }
@@ -429,6 +443,7 @@ void app_free(app_t *a) {
     tool_env_free(a->env);
     ttsr_free(a->ttsr);
     if (a->owns_mcp) mcp_manager_free(a->mcp);
+    lsp_manager_free(a->lsp);
     discovery_free(&a->disc);
     free(a->cwd);
     free(a->sys_custom);

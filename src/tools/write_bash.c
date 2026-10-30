@@ -39,6 +39,13 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
             sb_t b = SB_INIT;
             sb_appendf(&b, "%s %s (%zu lines, %zu bytes)\n", existed ? "Overwrote" : "Created", display, lines, n);
             if (str_eq(env->edit_mode, "hashline")) format_hashline_header(&b, display, tag);
+            if (env->after_write) {
+                char *diag = env->after_write(env, abs);
+                if (diag) {
+                    sb_appendf(&b, "\n%s", diag);
+                    free(diag);
+                }
+            }
             tool_result_text(out, sb_cstr(&b));
             sb_free(&b);
             out->details = json_obj();

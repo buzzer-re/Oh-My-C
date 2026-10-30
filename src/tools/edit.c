@@ -706,6 +706,13 @@ int hashline_apply(tool_env_t *env, const char *input, tool_result_t *out) {
             preview(&b, &nl, lo, hi);
             strvec_free(&nl);
         }
+        if (env->after_write) {
+            char *diag = env->after_write(env, target);
+            if (diag) {
+                sb_appendf(&b, "%s\n", diag);
+                free(diag);
+            }
+        }
         char *dd = diff_unified(r->old_text, r->new_text, r->display, tdisp, 3);
         sb_append(&all_diff, dd);
         json_t *f = json_obj();

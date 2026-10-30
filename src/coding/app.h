@@ -51,6 +51,7 @@ struct app {
     struct ttsr *ttsr;
     struct mcp_manager *mcp;
     bool owns_mcp;
+    struct lsp_manager *lsp;
     volatile bool ttsr_interrupting;
     app_notice_fn notice;
     void *notice_ud;
