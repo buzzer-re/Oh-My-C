@@ -3,8 +3,8 @@
  * each visual area has its own module here:
  *   chat.c        transcript message views (user, assistant, notices)
  *   toolcards.c   tool execution cards
- *   statusline.c  status band + composer chrome
- *   welcome.c     welcome banner (logo, wordmark, version, tip)
+ *   statusline.c  status band / bottom bar, composer wiring, working-row title, key hints
+ *   welcome.c     welcome banner (gradient logo + intro, wordmark, version, tip)
  */
 #ifndef OMC_UI_H
 #define OMC_UI_H
@@ -74,6 +74,9 @@ struct ui {
     const char *cont_type;
     int picker_kind; /* 1 model, 2 session, 3 ask, 4 thinking */
     json_t *picker_data;
+    /* chrome (welcome.c / statusline.c) */
+    tui_component_t *welcome;
+    bool status_row_occupied; /* the working/idle-title row rendered lines this frame */
 };
 
 
@@ -92,9 +95,22 @@ void render_tool(msgview_t *v, int width, strvec_t *out);
 char *args_summary(const char *tool, const json_t *args);
 
 /* statusline.c */
-tui_component_t *ui_status_new(ui_t *u);
+tui_component_t *ui_status_new(ui_t *u);   /* standalone bottom bar (pi/borderless/claude/rule/field/rail) */
+void ui_chrome_setup(ui_t *u);              /* composer shape, chrome colors, status top, hint, cursor */
+void ui_chrome_turn(ui_t *u, bool active);  /* agent turn start/end: brand spinner, time_spent */
+tui_component_t *ui_status_row_new(ui_t *u, tui_component_t *loader); /* loader, else idle title row */
+tui_component_t *ui_editor_gap_new(ui_t *u); /* blank row above the editor (collapses under band) */
+char *ui_title_trailer(ui_t *u);            /* band: dim italic session title for the working row */
+const char *ui_composer_shape(void);        /* composer.shape setting (default band) */
+char *ui_status_render(ui_t *u, int width, const char *layout); /* box|band|plain-full|plain-left|plain-right */
+void ui_hint_record(const char *id);        /* composer hint gesture used ("effort", "agents") */
+char *ui_key_hint(const char *key);         /* "shift+tab" -> "⇧⇥" (active symbol preset) */
+char *ui_double_tap_hint(const char *key);
 
 /* welcome.c */
 tui_component_t *ui_welcome_new(void);
+void ui_welcome_play_intro(tui_component_t *w, tui_t *tui);
+void ui_welcome_set_tip(tui_component_t *w, const char *tip); /* fixed tip (tests); NULL = random */
+void ui_welcome_tip_lines(const char *tip, int width, double phase, strvec_t *out);
 
 #endif

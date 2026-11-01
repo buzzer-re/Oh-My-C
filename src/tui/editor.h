@@ -12,12 +12,15 @@
  * "[Paste #N, C chars]" markers that delete atomically and expand on submit.
  *
  * Rendering: top border, word-wrapped content (cursor drawn in reverse video plus
- * TUI_CURSOR_MARKER when focused), bottom border, then the autocomplete list if open.
+ * TUI_CURSOR_MARKER when focused), bottom border, then the autocomplete list if open. With a
+ * composer style set (tui_editor_set_composer) the frame, prompt gutter, status attachment and
+ * right-aligned placeholder follow that omp composer shape instead.
  */
 #ifndef OMC_TUI_EDITOR_H
 #define OMC_TUI_EDITOR_H
 
 #include "tui/components.h"
+#include "tui/composer.h"
 
 /* ---------- autocomplete ---------- */
 typedef struct {
@@ -94,6 +97,21 @@ struct tui_editor {
     int border_slot;  /* theme slot for borders */
     bool disable_submit;
     char *placeholder;
+
+    /* composer chrome (tui/composer.h); NULL = classic rules above and below */
+    const tui_composer_style_t *composer;
+    tui_composer_color_fn chrome_border, chrome_accent, chrome_surface;
+    void *chrome_ud;
+    /* status content for the composer's top chrome; returns owned styled text and its width */
+    char *(*top_fn)(void *ud, int avail, int *width);
+    void *top_ud;
+    /* right-aligned styled hint painted after the cursor while the composer is empty */
+    char *(*placeholder_fn)(void *ud);
+    void *placeholder_ud;
+    char *gutter;        /* prompt gutter override (NULL = the style's default) */
+    char text_fg[32];    /* foreground escape for typed text ("" = terminal default) */
+    int theme_padding_x; /* theme's editor padding request (-1 = unset) */
+    bool use_terminal_cursor; /* park the hardware cursor instead of drawing a cursor cell */
 };
 
 tui_editor_t *tui_editor_new(void);
@@ -111,6 +129,13 @@ void tui_editor_set_on_change(tui_editor_t *ed, tui_editor_change_fn fn);
 void tui_editor_set_autocomplete(tui_editor_t *ed, tui_autocomplete_fn fn, void *ud);
 void tui_editor_set_placeholder(tui_editor_t *ed, const char *text);
 bool tui_editor_autocomplete_open(const tui_editor_t *ed);
+/* Composer chrome: render through the named composer shape (box, band, claude, pi, borderless,
+ * rule, field, rail; NULL restores the classic rules). */
+void tui_editor_set_composer(tui_editor_t *ed, const char *shape);
+void tui_editor_set_chrome_colors(tui_editor_t *ed, tui_composer_color_fn border, tui_composer_color_fn accent,
+                                  tui_composer_color_fn surface, void *ud);
+void tui_editor_set_top_provider(tui_editor_t *ed, char *(*fn)(void *ud, int avail, int *width), void *ud);
+void tui_editor_set_placeholder_fn(tui_editor_t *ed, char *(*fn)(void *ud), void *ud);
 /* Feed a key (same as the component's handle_key). */
 bool tui_editor_handle_key(tui_editor_t *ed, const tui_key_t *k);
 

@@ -106,10 +106,12 @@ static void ui_apply_event(void *ud) {
     case AGENT_EV_AGENT_END:
         tui_loader_stop(u->loader);
         u->loader->base.hidden = true;
+        ui_chrome_turn(u, false);
         break;
     case AGENT_EV_AGENT_START:
+        ui_chrome_turn(u, true);
         u->loader->base.hidden = false;
-        tui_loader_set_message(u->loader, "Working… (esc to interrupt)");
+        tui_loader_set_message(u->loader, "Working…");
         tui_loader_start(u->loader);
         break;
     default: break;
@@ -286,6 +288,16 @@ static void start_hidden(ui_t *u, const char *text, const char *ctype) {
 }
 
 static void start_prompt(ui_t *u, const char *text) {
+    if (!u->app->model) { /* omp AgentSession.prompt: "No model selected." */
+        char *agent_dir = omc_agent_path("");
+        char *m = xasprintf("No model selected.\n\nUse /login, set an API key environment variable, or create %s/models.yml\n\n"
+                            "Then use /model to select a model.",
+                            agent_dir);
+        add_notice(u, "error", m);
+        free(m);
+        free(agent_dir);
+        return;
+    }
     msgview_t *v = mv_new(MV_USER);
     v->text = xstrdup(text);
     add_view(u, v);
@@ -1081,6 +1093,7 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
             if (model_supports_effort(a->model, e)) break;
         }
         app_set_thinking(a, e);
+        ui_hint_record("effort");
         tui_request_render(t);
         return true;
     }
@@ -1144,33 +1157,23 @@ int run_interactive_mode(app_t *a, const char *initial) {
         return 1;
     }
     tui_container_t *root = tui_root(u.tui);
-    char *ml = app_model_label(a);
-    char *hdr = xasprintf("**omc** %s · %s · /help for commands", OMC_VERSION, ml);
-    free(ml);
-    tui_container_add(root, &tui_markdown_new(hdr, 1, 0)->base);
-    free(hdr);
-    if (a->disc.files.n) {
-        sb_t b = SB_INIT;
-        sb_append(&b, "Loaded context:");
-        for (size_t i = 0; i < a->disc.files.n; i++) {
-            char *d = path_display(a->disc.files.v[i].path, a->cwd);
-            sb_appendf(&b, " %s", d);
-            free(d);
-        }
-        char *c = fg(TUI_TC_DIM, sb_cstr(&b));
-        tui_container_add(root, &tui_text_new(c, 1, 0)->base);
-        free(c);
-        sb_free(&b);
+    tui_sym_set_preset(settings_str("symbolPreset", "unicode"));
+    /* header: welcome banner between one-row spacers (omp Composer#rebuildHeader) */
+    if (!settings_bool("startup.quiet", false)) {
+        u.welcome = ui_welcome_new();
+        tui_container_add(root, &tui_spacer_new(1)->base);
+        tui_container_add(root, u.welcome);
+        tui_container_add(root, &tui_spacer_new(1)->base);
     }
     u.chat = tui_container_new();
     tui_container_add(root, &u.chat->base);
     u.loader = tui_loader_new(u.tui, "Working…");
     u.loader->base.hidden = true;
-    tui_container_add(root, &u.loader->base);
-    tui_container_add(root, &tui_spacer_new(1)->base);
+    tui_container_add(root, ui_status_row_new(&u, &u.loader->base));
+    tui_container_add(root, ui_editor_gap_new(&u));
     u.editor = tui_editor_new();
     tui_editor_set_on_submit(u.editor, on_submit, &u);
-    tui_editor_set_placeholder(u.editor, "Ask omc anything… (/help)");
+    ui_chrome_setup(&u);
     history_load(u.editor);
     tui_ac_default_t *ac = tui_ac_default_new(a->cwd);
     for (size_t i = 0; i < ARRAY_LEN(COMMANDS); i++) tui_ac_default_add_command(ac, COMMANDS[i].name, COMMANDS[i].desc);
@@ -1209,6 +1212,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
         j->text = xstrdup(initial);
         tui_post(u.tui, initial_prompt_cb, j);
     }
+    if (u.welcome) ui_welcome_play_intro(u.welcome, u.tui);
     int code = tui_run(u.tui);
     if (u.worker_running) {
         app_abort(a);

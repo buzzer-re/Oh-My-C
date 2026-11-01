@@ -93,7 +93,9 @@ T_test_readfmt       := $(CORE_OBJ) $(O)/tools/readfmt.o
 T_test_editmodes     := $(CORE_OBJ) $(O)/tools/diff.o $(O)/tools/fuzzy.o $(O)/tools/patch.o $(O)/tools/sloppy.o \
                         $(O)/text/regex.o $(O)/text/rxbt.o
 T_tui_demo           := $(T_test_tui)
-UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes
+T_test_chrome        := $(LIB_OBJ)
+UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
+              test_chrome
 
 .SECONDEXPANSION:
 build/tests/%: tests/%.c $$(T_$$*)

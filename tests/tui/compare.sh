@@ -10,6 +10,8 @@
 #   tests/tui/compare.sh stop
 # HOME is a throwaway dir too (no ~/.claude MCP/plugin discovery); omp's update check is off.
 # Env: CMP_DIR (default: $TMPDIR/omc-tuicmp), OMP_BIN (default: omp), CMP_SETUP=1 keeps omp's wizard,
+#      CMP_NOMODEL=1 (no models.yml / default model: the no-credentials first screen),
+#      CMP_CONFIG (extra config.yml lines for both, e.g. 'composer:\n  shape: box'),
 #      CMP_NAME (tmux session prefix, default cmp; set a unique one when several harnesses run at once).
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -20,6 +22,7 @@ N=${CMP_NAME:-cmp}
 cmd=${1:-}; shift || true
 mkagent() { # dir port
     mkdir -p "$1"
+    if [ -n "${CMP_NOMODEL:-}" ]; then printf 'startup:\n  checkUpdate: false\n' > "$1/config.yml"; return; fi
     cat > "$1/models.yml" <<YML
 providers:
   mock:
@@ -33,6 +36,7 @@ providers:
         maxTokens: 4096
 YML
     printf 'modelRoles:\n  default: mock/mock-1\nstartup:\n  checkUpdate: false\n' > "$1/config.yml"
+    [ -n "${CMP_CONFIG:-}" ] && printf '%b\n' "$CMP_CONFIG" >> "$1/config.yml"; true
 }
 case "$cmd" in
 start)
@@ -71,5 +75,5 @@ diff)
 stop)
     tmux kill-session -t $N-omp 2>/dev/null; tmux kill-session -t $N-omc 2>/dev/null
     [ -f "$D/mock.pid" ] && kill "$(cat "$D/mock.pid")" 2>/dev/null; true;;
-*) sed -n '2,14p' "$0"; exit 2;;
+*) sed -n '2,16p' "$0"; exit 2;;
 esac

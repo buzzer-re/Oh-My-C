@@ -838,8 +838,190 @@ static void border_line(sb_t *b, int width, int slot, const char *label) {
     sb_free(&inner);
 }
 
+/* ---------- composer chrome rendering (omp components/editor.ts render) ---------- */
+
+#define PLACEHOLDER_MIN_GAP 2
+
+/* upstream Theme.fgResolved: color the text, re-opening it after nested fg/full resets */
+static char *text_colored(const tui_editor_t *ed, const char *s) {
+    if (!ed->text_fg[0]) return xstrdup(s);
+    sb_t b = SB_INIT;
+    sb_append(&b, ed->text_fg);
+    for (const char *p = s; *p;) {
+        if (!strncmp(p, "\x1b[0m", 4) || !strncmp(p, "\x1b[39m", 5)) {
+            size_t n = p[2] == '0' ? 4 : 5;
+            sb_appendn(&b, p, n);
+            sb_append(&b, ed->text_fg);
+            p += n;
+        } else {
+            sb_putc(&b, *p++);
+        }
+    }
+    sb_append(&b, "\x1b[39m");
+    return sb_detach(&b);
+}
+
+static int composer_padding(const tui_editor_t *ed) {
+    return ed->composer->default_padding_x(ed->theme_padding_x);
+}
+
+static const char *composer_gutter(const tui_editor_t *ed) {
+    if (ed->composer->side_borders) return NULL;
+    return ed->gutter ? ed->gutter : ed->composer->default_gutter;
+}
+
+static void composer_render(tui_editor_t *ed, int width, strvec_t *out) {
+    const tui_composer_style_t *st = ed->composer;
+    tui_component_t *c = &ed->base;
+    int px = composer_padding(ed);
+    bool side = st->side_borders;
+    int chrome = st->side_chrome_width(px);
+    const char *gsrc = composer_gutter(ed);
+    int gw = gsrc ? MIN(tui_visible_width(gsrc), MAX(0, width - 2 * chrome)) : 0;
+    char *g_first = gw ? tui_slice_cols(gsrc, 0, gw) : NULL;
+    sb_t gc = SB_INIT;
+    tui_sb_spaces(&gc, gw);
+    char *g_cont = sb_detach(&gc);
+    int lcw = MAX(0, width - 2 * chrome - gw);
+    int W = MAX(1, lcw - (side && px == 0 ? 1 : 0));
+    ed->layout_width = W;
+
+    segvec_t segs = {0};
+    layout(ed, W, &segs);
+    size_t csi = cursor_seg(ed, &segs);
+    int total = (int)segs.n;
+    int vis = ed->max_height > 0 ? MIN(ed->max_height, total) : total;
+    if (ed->scroll > (int)csi) ed->scroll = (int)csi;
+    if ((int)csi >= ed->scroll + vis) ed->scroll = (int)csi - vis + 1;
+    if (ed->scroll > total - vis) ed->scroll = total - vis;
+    if (ed->scroll < 0) ed->scroll = 0;
+
+    tui_composer_ctx_t ctx = {.width = width, .padding_x = px, .border = ed->chrome_border, .accent = ed->chrome_accent,
+                              .surface = ed->chrome_surface, .ud = ed->chrome_ud};
+    char *top = NULL;
+    if (st->status_attachment != TUI_ATTACH_NONE && ed->top_fn) {
+        int tw = 0;
+        top = ed->top_fn(ed->top_ud, MAX(0, width - chrome * 2), &tw);
+        ctx.top_content = top;
+        ctx.top_width = tw;
+    }
+    char *row = st->render_top(&ctx);
+    if (row) strvec_push_own(out, row);
+
+    bool empty = tui_editor_is_empty(ed);
+    char *ph = empty && !ed->ac_list && ed->placeholder_fn ? ed->placeholder_fn(ed->placeholder_ud) : NULL;
+    if (ph && !*ph) {
+        free(ph);
+        ph = NULL;
+    }
+    int phw = ph ? tui_visible_width(ph) : 0;
+
+    for (int vi = ed->scroll; vi < ed->scroll + vis; vi++) {
+        const seg_t *sg = &segs.v[vi];
+        const char *line = ed->lines.v[sg->line];
+        char *text = xstrndup(line + sg->start, sg->end - sg->start);
+        int dw = tui_visible_width(text);
+        const char *gutter = !gw ? "" : vi == ed->scroll ? g_first : g_cont;
+        bool has_cursor = (size_t)vi == csi && c->focused;
+        int overflow = 0;
+        if (!side && dw > lcw) {
+            char *t = tui_slice_cols(text, 0, lcw);
+            free(text);
+            text = t;
+            dw = tui_visible_width(text);
+        }
+        sb_t d = SB_INIT;
+        if (has_cursor) {
+            size_t cpos = MIN(ed->cc - sg->start, strlen(text));
+            const char *after = text + cpos;
+            if (ed->use_terminal_cursor) {
+                int avail = MAX(0, lcw - dw);
+                if (!*after && ph && avail - phw >= PLACEHOLDER_MIN_GAP) {
+                    sb_appendn(&d, text, cpos);
+                    sb_append(&d, TUI_CURSOR_MARKER);
+                    tui_sb_spaces(&d, avail - phw);
+                    sb_append(&d, ph);
+                    dw += avail;
+                } else if (!*after && !side && dw >= lcw && cpos > 0) {
+                    size_t last = cpos;
+                    while (last > 0 && ((unsigned char)text[last - 1] & 0xC0) == 0x80) last--;
+                    if (last > 0) last--;
+                    sb_appendn(&d, text, last);
+                    sb_append(&d, TUI_CURSOR_MARKER);
+                    sb_append(&d, text + last);
+                } else {
+                    sb_appendn(&d, text, cpos);
+                    sb_append(&d, TUI_CURSOR_MARKER);
+                    sb_append(&d, after);
+                }
+            } else if (*after) {
+                size_t nx = next_char(text, cpos);
+                sb_appendn(&d, text, cpos);
+                sb_append(&d, TUI_CURSOR_MARKER);
+                sb_append(&d, "\x1b[7m");
+                sb_appendn(&d, after, nx - cpos);
+                sb_append(&d, "\x1b[0m");
+                sb_append(&d, text + nx);
+            } else if (!side && dw + 1 > lcw && cpos > 0) {
+                size_t last = cpos;
+                while (last > 0 && ((unsigned char)text[last - 1] & 0xC0) == 0x80) last--;
+                if (last > 0) last--;
+                sb_appendn(&d, text, last);
+                sb_append(&d, TUI_CURSOR_MARKER);
+                sb_append(&d, "\x1b[7m");
+                sb_append(&d, text + last);
+                sb_append(&d, "\x1b[0m");
+            } else {
+                sb_appendn(&d, text, cpos);
+                sb_append(&d, TUI_CURSOR_MARKER);
+                sb_append(&d, "\x1b[7m \x1b[0m");
+                dw += 1;
+                int avail = MAX(0, lcw - dw);
+                if (ph && avail - phw >= PLACEHOLDER_MIN_GAP) {
+                    tui_sb_spaces(&d, avail - phw);
+                    sb_append(&d, ph);
+                    dw += avail;
+                }
+                if (dw > lcw && px > 0) overflow = dw - lcw;
+            }
+        } else {
+            if (dw > lcw) {
+                char *t = tui_truncate_to_width(text, lcw, NULL);
+                free(text);
+                text = t;
+                dw = tui_visible_width(text);
+            }
+            sb_append(&d, text);
+        }
+        char *disp = sb_detach(&d);
+        char *rendered = st->filled_surface ? xstrdup(disp) : text_colored(ed, disp);
+        tui_composer_row_t r = {.ctx = &ctx,
+                                .text = rendered,
+                                .pad = MAX(0, lcw - dw),
+                                .gutter = gutter,
+                                .is_last_row = vi == ed->scroll + vis - 1,
+                                .cursor_overflow = overflow};
+        st->render_row(&r, out);
+        free(rendered);
+        free(disp);
+        free(text);
+    }
+    row = st->render_bottom(&ctx);
+    if (row) strvec_push_own(out, row);
+    free(top);
+    free(ph);
+    free(g_first);
+    free(g_cont);
+    vec_free(&segs);
+    if (ed->ac_list) tui_component_render(&ed->ac_list->base, width, out);
+}
+
 static void editor_render(tui_component_t *c, int width, strvec_t *out) {
     tui_editor_t *ed = (tui_editor_t *)c;
+    if (ed->composer) {
+        composer_render(ed, width, out);
+        return;
+    }
     int content_w = MAX(1, width - 2 * ed->padding_x);
     int W = effective_layout_width(ed, width);
     ed->layout_width = W;
@@ -932,6 +1114,7 @@ static void editor_destroy(tui_component_t *c) {
     }
     vec_free(&ed->pastes);
     free(ed->placeholder);
+    free(ed->gutter);
     free(ed);
 }
 
@@ -940,6 +1123,7 @@ static const tui_component_vt EDITOR_VT = {"editor", editor_render, editor_key, 
 tui_editor_t *tui_editor_new(void) {
     tui_editor_t *ed = xcalloc(1, sizeof *ed);
     tui_component_init(&ed->base, &EDITOR_VT);
+    ed->theme_padding_x = -1;
     strvec_push(&ed->lines, "");
     ed->preferred_col = -1;
     ed->hist_index = -1;
@@ -1019,3 +1203,27 @@ void tui_editor_set_placeholder(tui_editor_t *ed, const char *text) {
 }
 
 bool tui_editor_autocomplete_open(const tui_editor_t *ed) { return ed->ac_list != NULL; }
+
+void tui_editor_set_composer(tui_editor_t *ed, const char *shape) {
+    ed->composer = shape ? tui_composer_style(shape) : NULL;
+    ed->scroll = 0;
+    tui_component_request_render(&ed->base);
+}
+
+void tui_editor_set_chrome_colors(tui_editor_t *ed, tui_composer_color_fn border, tui_composer_color_fn accent,
+                                  tui_composer_color_fn surface, void *ud) {
+    ed->chrome_border = border;
+    ed->chrome_accent = accent;
+    ed->chrome_surface = surface;
+    ed->chrome_ud = ud;
+}
+
+void tui_editor_set_top_provider(tui_editor_t *ed, char *(*fn)(void *ud, int avail, int *width), void *ud) {
+    ed->top_fn = fn;
+    ed->top_ud = ud;
+}
+
+void tui_editor_set_placeholder_fn(tui_editor_t *ed, char *(*fn)(void *ud), void *ud) {
+    ed->placeholder_fn = fn;
+    ed->placeholder_ud = ud;
+}

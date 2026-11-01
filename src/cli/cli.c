@@ -494,6 +494,7 @@ int omc_main(int argc, char **argv) {
     if (json) print = true;
     if (rpc) setenv("OMC_NO_TITLE", "1", 1);
     char *err = NULL;
+    o.allow_no_model = !print && !rpc && isatty(0) && isatty(1); /* omp opens the TUI and lets you /login */
     app_t *app = app_create(&o, &err);
     if (!app) {
         fprintf(stderr, "omc: %s\n", err ? err : "failed to start");

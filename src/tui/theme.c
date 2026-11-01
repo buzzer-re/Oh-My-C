@@ -1,5 +1,6 @@
 /* theme.c - color slots, built-in themes, JSON theme loading. */
 #include "tui/theme.h"
+#include "tui/color.h"
 #include "core/embed.h"
 #include "core/fs.h"
 
@@ -157,7 +158,7 @@ static bool resolve_color(tui_theme_t *t, int slot, const json_t *val, const jso
         }
         snprintf(t->fg[slot], sizeof t->fg[slot], "\x1b[38;5;%dm", idx);
         snprintf(t->bg[slot], sizeof t->bg[slot], "\x1b[48;5;%dm", idx);
-        t->rgb[slot] = -1;
+        t->rgb[slot] = tui_palette_rgb(idx);
         return true;
     }
     const char *s = json_sv(val);
@@ -213,6 +214,7 @@ tui_theme_t *tui_theme_from_json(const json_t *j, tui_color_mode_t mode, char **
     }
     tui_theme_t *t = xcalloc(1, sizeof *t);
     t->mode = mode;
+    for (int i = 0; i < TUI_TC__COUNT; i++) t->rgb[i] = -1;
     t->name = xstrdup(json_get_str(j, "name") ? json_get_str(j, "name") : "custom");
     sb_t missing = SB_INIT;
     for (int i = 0; i < TUI_TC__COUNT; i++) {
@@ -238,6 +240,7 @@ tui_theme_t *tui_theme_from_json(const json_t *j, tui_color_mode_t mode, char **
     if (!json_get(colors, "thinkingMax")) {
         memcpy(t->fg[TUI_TC_THINKING_MAX], t->fg[TUI_TC_THINKING_XHIGH], sizeof t->fg[0]);
         memcpy(t->bg[TUI_TC_THINKING_MAX], t->bg[TUI_TC_THINKING_XHIGH], sizeof t->bg[0]);
+        t->rgb[TUI_TC_THINKING_MAX] = t->rgb[TUI_TC_THINKING_XHIGH];
     }
     if (!json_get(colors, "assistantMessageText")) {
         strcpy(t->fg[TUI_TC_ASSISTANT_MESSAGE_TEXT], "\x1b[39m");
@@ -246,6 +249,7 @@ tui_theme_t *tui_theme_from_json(const json_t *j, tui_color_mode_t mode, char **
     if (!json_get(colors, "link")) {
         memcpy(t->fg[TUI_TC_LINK], t->fg[TUI_TC_MD_LINK], sizeof t->fg[0]);
         memcpy(t->bg[TUI_TC_LINK], t->bg[TUI_TC_MD_LINK], sizeof t->bg[0]);
+        t->rgb[TUI_TC_LINK] = t->rgb[TUI_TC_MD_LINK];
     }
     /* spinner frames: symbols.spinnerFrames = [..] | {"status": [..]} */
     const json_t *sym = json_get_obj(j, "symbols");
@@ -321,7 +325,10 @@ tui_theme_t *tui_theme_load(const char *name, tui_color_mode_t mode, char **err)
 static tui_theme_t *g_theme;
 
 const tui_theme_t *tui_theme(void) {
-    if (!g_theme) g_theme = tui_theme_builtin(tui_detect_theme_name(), tui_detect_color_mode());
+    if (!g_theme) { /* upstream defaults: theme.dark = titanium, theme.light = light */
+        const char *n = tui_detect_theme_name();
+        g_theme = tui_theme_builtin(str_eq(n, "dark") ? "titanium" : n, tui_detect_color_mode());
+    }
     return g_theme;
 }
 

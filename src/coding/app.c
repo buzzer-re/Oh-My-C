@@ -830,7 +830,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
         session_context_free(&sc);
     }
     if (!a->model) a->model = app_default_model();
-    if (!a->model) {
+    if (!a->model && !o->allow_no_model) {
         *err = xstrdup("No model available. Set an API key (e.g. ANTHROPIC_API_KEY or OPENAI_API_KEY), run `omc login`, "
                        "or pass --model provider/id with --api-key.");
         app_free(a);
@@ -850,7 +850,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (json_len(a->session->entries)) load_session_into_agent(a);
     if (!o->subagent) app_goal_restore(a);
     app_rebuild_system_prompt(a);
-    if (!json_len(a->session->entries) && a->session->persist) {
+    if (!json_len(a->session->entries) && a->session->persist && a->model) {
         char *label = app_model_label(a);
         session_append_model_change(a->session, label, NULL);
         session_append_thinking_change(a->session, effort_name(a->thinking));

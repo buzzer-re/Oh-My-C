@@ -29,6 +29,7 @@ typedef struct {
     struct mcp_manager *mcp; /* borrowed shared MCP connections (subagents); NULL => discover */
     struct lsp_manager *lsp; /* borrowed shared LSP manager (subagents) */
     bool no_mcp;
+    bool allow_no_model; /* interactive: start without a model (pick one with /model or /login) */
 } app_opts_t;
 
 typedef struct app app_t;

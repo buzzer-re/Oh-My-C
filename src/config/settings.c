@@ -23,7 +23,7 @@ static const char *DEFAULTS_JSON =
     "\"readLineNumbers\":false,"
     "\"compaction\":{\"enabled\":true,\"thresholdPercent\":85,\"reserveTokens\":16384,\"keepRecentTokens\":20000,"
     "\"autoContinue\":true},"
-    "\"theme\":{\"dark\":\"dark\",\"light\":\"light\"},"
+    "\"theme\":{\"dark\":\"titanium\",\"light\":\"light\"},"
     "\"todo\":{\"enabled\":true},"
     "\"task\":{\"enabled\":true,\"maxConcurrency\":8,\"maxRecursionDepth\":2},"
     "\"web\":{\"enabled\":true},"

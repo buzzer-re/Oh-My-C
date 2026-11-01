@@ -61,7 +61,7 @@ typedef struct {
     tui_color_mode_t mode;
     char fg[TUI_TC__COUNT][24]; /* full escape, e.g. "\x1b[38;2;1;2;3m" or "\x1b[39m" */
     char bg[TUI_TC__COUNT][24];
-    int64_t rgb[TUI_TC__COUNT]; /* 0xRRGGBB, or -1 for default/palette */
+    int64_t rgb[TUI_TC__COUNT]; /* 0xRRGGBB (palette indices resolved), or -1 for terminal default */
     char *spinner[TUI_MAX_SPINNER_FRAMES];
     int nspinner;
 } tui_theme_t;
