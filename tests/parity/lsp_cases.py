@@ -41,6 +41,35 @@ CASES = [
     ("noserver", {"action": "hover", "file": "compile_flags.txt", "line": 1}),
 ]
 
+def xd(args):
+    return ["write", {"path": "xd://lsp", "content": json.dumps(args)}]
+
+# several calls in one session (warm server: rebuild-path diagnostics, cached diagnostics for code actions, ...)
+SEQS = [
+    ("warm", [{"action": "diagnostics", "file": "main.c"}, {"action": "status"},
+              {"action": "diagnostics", "file": "main.c"}, {"action": "diagnostics", "file": "*.c"},
+              {"action": "code_actions", "file": "main.c", "line": 9, "symbol": "missing_symbol"},
+              {"action": "hover", "file": "util.h", "line": 7, "symbol": "point"}]),
+    ("code_action_apply", [{"action": "diagnostics", "file": "main.c"},
+                           {"action": "code_actions", "file": "main.c", "line": 7, "symbol": "unused_var", "query": "0", "apply": True},
+                           {"action": "code_actions", "file": "main.c", "line": 7, "symbol": "unused_var", "query": "nomatch", "apply": True}]),
+    ("write_then_diag", [["write", {"path": "bad.c", "content": "#include \"util.h\"\nint f(void) {\n    return add(1, nothere);\n}\n"}],
+                         {"action": "diagnostics", "file": "bad.c"},
+                         ["write", {"path": "bad.c", "content": "#include \"util.h\"\nint f(void) {\n    return add(1, nothere) + gone;\n}\n"}],
+                         ["write", {"path": "bad.c", "content": "int f(void) { return 1; }\n"}]]),
+    ("code_action_fix", [["write", {"path": "unused.c", "content": "#include \"util.h\"\nint g(void) { return 1; }\n"}],
+                         {"action": "diagnostics", "file": "unused.c"},
+                         {"action": "code_actions", "file": "unused.c", "line": 1},
+                         {"action": "code_actions", "file": "unused.c", "line": 1, "query": "remove", "apply": True},
+                         {"action": "diagnostics", "file": "unused.c"}]),
+    ("rename_multi", [{"action": "rename", "file": "util.c", "line": 7, "symbol": "point_sum", "new_name": "psum", "apply": False},
+                      {"action": "rename", "file": "util.c", "line": 7, "symbol": "point_sum", "new_name": "psum"},
+                      {"action": "references", "file": "util.c", "line": 3, "symbol": "add"}]),
+]
+
 for name, args in CASES:
     print(f"# {name}")
     print("call:write:" + json.dumps({"path": "xd://lsp", "content": json.dumps(args)}))
+for name, calls in SEQS:
+    print(f"# {name}")
+    print("seq:" + json.dumps([c if isinstance(c, list) else xd(c) for c in calls]))

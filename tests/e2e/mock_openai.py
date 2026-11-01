@@ -9,6 +9,7 @@ Display commands (used by tests/tui/compare.sh to exercise transcript views):
   - "slow:<secs>:<text>"     wait <secs> (loader visible), then stream <text> slowly
   - "fail:<status>:<msg>"    reply with an HTTP error (non-retryable for 400/401/403/404)
   - "streamfail:<text>"      stream <text>, then an in-stream error chunk
+  - "seq:[[tool, args], ...]" one tool call per turn, in order, then the usual "Tool said:" answer
 Eval helper side requests (omc eval completion()/judge()):
   - completion (system "You are a helpful assistant." or a forced `respond` tool) -> "completion says: <prompt>", or a
     `respond` call whose fields echo the prompt (strings) / 42 (numbers) / true (booleans)
@@ -58,6 +59,15 @@ def text_of(msg):
     if isinstance(c, list):  # skip injected <system-reminder> blocks (omp prepends date/cwd)
         return "".join(p.get("text", "") for p in c if isinstance(p, dict) and not p.get("text", "").startswith("<system-reminder>"))
     return ""
+
+def seq_next(msgs):
+    """`seq:[[tool, args], ...]` user prompt: the call after the tool results so far (None when done)."""
+    ui = max((i for i, m in enumerate(msgs) if m.get("role") == "user" and text_of(m).startswith("seq:")), default=None)
+    if ui is None: return None
+    try: calls = json.loads(text_of(msgs[ui])[4:])
+    except ValueError: return None
+    done = sum(1 for m in msgs[ui:] if m.get("role") == "tool")
+    return calls[done] if done < len(calls) else None
 
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -114,6 +124,12 @@ class H(BaseHTTPRequestHandler):
         elif advisor and last.get("role") == "tool":
             chunks.append({**base, "choices": [{"index": 0, "delta": {"content": "noted"}}]})
             chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+        elif last.get("role") == "tool" and seq_next(msgs):
+            tname, targs = seq_next(msgs)
+            a = json.dumps(targs)
+            n = sum(1 for m in msgs if m.get("role") == "tool")
+            chunks.append({**base, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": f"call_{n + 1}", "type": "function", "function": {"name": tname, "arguments": a}}]}}]})
+            chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
         elif last.get("role") == "tool":
             out = text_of(last)
             words = ("Tool said: " + out.strip()).split(" ")
@@ -146,6 +162,8 @@ class H(BaseHTTPRequestHandler):
             elif kind == "call":
                 tname, _, a = rest.partition(":")
                 name, args = tname, json.loads(a or "{}")
+            elif kind == "seq":
+                name, args = json.loads(rest)[0]
             elif kind == "say":
                 for w in rest.split(" "):
                     chunks.append({**base, "choices": [{"index": 0, "delta": {"content": w + " "}}]})
