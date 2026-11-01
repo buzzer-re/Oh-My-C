@@ -11,13 +11,16 @@ case "${1:-}" in --reset) ;; *) [ -n "${1:-}" ] && export TD_ONLY=$1 ;; esac
 if [ "${1:-}" = "--reset" ]; then # internal: build the git fixture in $2
     W=$2; R=$(dirname "$W")/remote.git; S=$(dirname "$W")/seed
     rm -rf "$R" "$S" "$WT_DIR"; mkdir -p "$WT_DIR"
+    export GIT_AUTHOR_DATE=2026-01-01T00:00:00Z GIT_COMMITTER_DATE=2026-01-01T00:00:00Z # stable SHAs across runs
     g() { git -c user.name=Fix -c user.email=fix@example.com -c init.defaultBranch=main -c commit.gpgsign=false "$@"; }
     g init -q --bare "$R"
     g init -q "$S"
     printf '# Widgets\n' > "$S/README.md"; g -C "$S" add -A; g -C "$S" commit -qm init
     g -C "$S" checkout -qb feature/frob; printf 'int frob(void);\n' > "$S/frob.h"; g -C "$S" add -A; g -C "$S" commit -qm frob
     g -C "$S" push -q "$R" main feature/frob
-    rm -rf "$W"; g clone -q "$R" "$W" 2>/dev/null
+    rm -rf "$W" "$(dirname "$W")/fork.git"; g clone -q "$R" "$W" 2>/dev/null
+    g clone -q --bare "$R" "$(dirname "$W")/fork.git" 2>/dev/null
+    g -C "$W" branch -q pr-15 main # pr_checkout 15: the local branch exists at another commit
     g -C "$W" config user.name Fix; g -C "$W" config user.email fix@example.com; g -C "$W" config commit.gpgsign false
     # a branch with pr_checkout's push metadata (as if `op: pr_checkout` had run) plus one local commit
     g -C "$W" branch -q pr-12-pre origin/feature/frob
@@ -29,8 +32,6 @@ if [ "${1:-}" = "--reset" ]; then # internal: build the git fixture in $2
     rm -rf "$S"
     exit 0
 fi
-setup() { printf 'github:\n  enabled: true\n' >> "$1/config.yml"; }
-export -f setup
 export WT_DIR="$TD_DIR/wt"
 export TD_SETUP="$TD_DIR/setup.sh" TD_RESET="$TD_DIR/reset.sh" TD_PATH="$ROOT/tests/e2e/bin-gh"
 printf '#!/bin/sh\nprintf "github:\\n  enabled: true\\n" >> "$1/config.yml"\n' > "$TD_SETUP"
@@ -39,6 +40,6 @@ chmod +x "$TD_SETUP" "$TD_RESET"
 mkdir -p "$TD_DIR/ghconfig"
 unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GH_HOST
 export GH_CONFIG_DIR="$TD_DIR/ghconfig" OMP_GITHUB_CACHE_DB="$TD_DIR/gh-cache.db" OMP_WORKTREE_DIR="$WT_DIR" \
-    OMC_WORKTREE_DIR="$WT_DIR" FAKE_GH_REMOTE="$TD_DIR/remote.git"
+    OMC_WORKTREE_DIR="$WT_DIR" FAKE_GH_REMOTE="$TD_DIR/remote.git" FAKE_GH_FORK="$TD_DIR/fork.git"
 python3 "$ROOT/tests/parity/gh_cases.py" > "$TD_DIR/cases.txt"
 exec "$ROOT/tests/parity/tool_diff.sh" "$TD_DIR/cases.txt"

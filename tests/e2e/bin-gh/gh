@@ -258,6 +258,9 @@ def cmd_repo_view():
         fail("failed to run git: fatal: not a git repository (or any of the parent directories): .git")
     if target and target.split("/")[-1] == "missing":
         fail(f"GraphQL: Could not resolve to a Repository with the name '{target}'. (repository)")
+    if target and target.endswith("Fork-Owner/widgets"):
+        out(fields({"nameWithOwner": "Fork-Owner/widgets", "url": "https://github.com/Fork-Owner/widgets",
+                    "sshUrl": os.environ.get("FAKE_GH_FORK", "git@github.com:Fork-Owner/widgets.git")}))
     if opt("-q") == ".url": out(URL)
     out(fields(REPO_DATA))
 
@@ -273,6 +276,12 @@ def cmd_pr_view():
         fail('no pull requests found for branch "main"')
     if n in ("12", "feature/frob", URL + "/pull/12"):
         out(fields(pr_data()))
+    if n in ("14", "15"):
+        d = pr_data(); d.update({"number": int(n), "url": URL + "/pull/" + n})
+        if n == "14":
+            d.update({"isCrossRepository": True, "headRepository": {"name": "widgets", "nameWithOwner": "Fork-Owner/widgets"},
+                      "headRepositoryOwner": {"login": "Fork-Owner"}, "maintainerCanModify": False})
+        out(fields(d))
     if n == "13":
         d = pr_data(); d.update({"number": 13, "title": "New PR", "isDraft": True, "headRefName": "topic", "url": URL + "/pull/13", "labels": []})
         out(fields(d))

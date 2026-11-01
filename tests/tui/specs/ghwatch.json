@@ -1,0 +1,196 @@
+[
+ {
+  "user": "w1"
+ },
+ {
+  "tool": "github",
+  "args": {
+   "op": "run_watch",
+   "branch": "main",
+   "repo": "acme/widgets"
+  },
+  "text": "# GitHub Actions for c0ffee000000\n\nRepository: acme/widgets\nBranch: main\nCommit: c0ffee0000000000000000000000000000000001\nRuns: 2\n\n### Run #1001 - CI\n\nTitle: Add frobnicator\nBranch: main\nCommit: c0ffee000000\nStatus: completed\nConclusion: success\nCreated: 2026-10-07T10:00:00Z\nUpdated: 2026-10-07T10:05:00Z\nURL: https://github.com/acme/widgets/actions/runs/1001\n\n## Jobs (2)\n\n- [success] build\n  Started: 2026-10-07T10:00:10Z\n  Completed: 2026-10-07T10:02:40Z\n  URL: https://github.com/acme/widgets/actions/runs/1001/job/9001\n- [skipped] test\n\n### Run #1002 - Lint\n\nTitle: Add frobnicator\nBranch: main\nCommit: c0ffee000000\nStatus: completed\nConclusion: failure\nCreated: 2026-10-07T10:00:00Z\nUpdated: 2026-10-07T10:06:00Z\nURL: https://github.com/acme/widgets/actions/runs/1002\n\n## Jobs (2)\n\n- [failure] clang-format\n  Started: 2026-10-07T10:00:10Z\n  Completed: 2026-10-07T10:01:00Z\n  URL: https://github.com/acme/widgets/actions/runs/1002/job/9003\n- [cancelled] tidy\n  Started: 2026-10-07T10:00:10Z\n  Completed: 2026-10-07T10:01:30Z\n  URL: https://github.com/acme/widgets/actions/runs/1002/job/9004\n\n## Failed Jobs\n\n### clang-format [failure]\nRun: #1002\nWorkflow: Lint\nStarted: 2026-10-07T10:00:10Z\nCompleted: 2026-10-07T10:01:00Z\nURL: https://github.com/acme/widgets/actions/runs/1002/job/9003\n\nLast 15 log lines:\n```text\n2026-10-07T10:00:17Z line 17\n2026-10-07T10:00:18Z line 18\n2026-10-07T10:00:19Z line 19\n2026-10-07T10:00:20Z line 20\n2026-10-07T10:00:21Z line 21\n2026-10-07T10:00:22Z line 22\n2026-10-07T10:00:23Z line 23\n2026-10-07T10:00:24Z line 24\n2026-10-07T10:00:25Z line 25\n2026-10-07T10:00:26Z line 26\n2026-10-07T10:00:27Z line 27\n2026-10-07T10:00:28Z line 28\n2026-10-07T10:00:29Z line 29\n2026-10-07T10:00:30Z line 30\nError: src/frob.c is not formatted\n```\n\n### tidy [cancelled]\nRun: #1002\nWorkflow: Lint\nStarted: 2026-10-07T10:00:10Z\nCompleted: 2026-10-07T10:01:30Z\nURL: https://github.com/acme/widgets/actions/runs/1002/job/9004\n\nLog tail unavailable.\nReason: gh failed with exit code 1: gh: Not Found (HTTP 404)\n\nWorkflow runs for this commit failed.\n\nPartial failed-job logs: artifact://0",
+  "details": {
+   "repo": "acme/widgets",
+   "branch": "main",
+   "headSha": "c0ffee0000000000000000000000000000000001",
+   "runIds": [
+    1001,
+    1002
+   ],
+   "status": "completed",
+   "conclusion": "failure",
+   "failedJobs": [
+    "Lint: clang-format",
+    "Lint: tidy"
+   ],
+   "watch": {
+    "mode": "commit",
+    "state": "completed",
+    "repo": "acme/widgets",
+    "branch": "main",
+    "headSha": "c0ffee0000000000000000000000000000000001",
+    "runs": [
+     {
+      "id": 1001,
+      "workflowName": "CI",
+      "displayTitle": "Add frobnicator",
+      "status": "completed",
+      "conclusion": "success",
+      "branch": "main",
+      "headSha": "c0ffee0000000000000000000000000000000001",
+      "url": "https://github.com/acme/widgets/actions/runs/1001",
+      "jobs": [
+       {
+        "id": 9001,
+        "name": "build",
+        "status": "completed",
+        "conclusion": "success",
+        "durationSeconds": 150,
+        "url": "https://github.com/acme/widgets/actions/runs/1001/job/9001"
+       },
+       {
+        "id": 9002,
+        "name": "test",
+        "status": "completed",
+        "conclusion": "skipped"
+       }
+      ]
+     },
+     {
+      "id": 1002,
+      "workflowName": "Lint",
+      "displayTitle": "Add frobnicator",
+      "status": "completed",
+      "conclusion": "failure",
+      "branch": "main",
+      "headSha": "c0ffee0000000000000000000000000000000001",
+      "url": "https://github.com/acme/widgets/actions/runs/1002",
+      "jobs": [
+       {
+        "id": 9003,
+        "name": "clang-format",
+        "status": "completed",
+        "conclusion": "failure",
+        "durationSeconds": 50,
+        "url": "https://github.com/acme/widgets/actions/runs/1002/job/9003"
+       },
+       {
+        "id": 9004,
+        "name": "tidy",
+        "status": "completed",
+        "conclusion": "cancelled",
+        "durationSeconds": 80,
+        "url": "https://github.com/acme/widgets/actions/runs/1002/job/9004"
+       }
+      ]
+     }
+    ],
+    "failedLogs": [
+     {
+      "runId": 1002,
+      "workflowName": "Lint",
+      "jobName": "clang-format",
+      "conclusion": "failure",
+      "tail": "2026-10-07T10:00:17Z line 17\n2026-10-07T10:00:18Z line 18\n2026-10-07T10:00:19Z line 19\n2026-10-07T10:00:20Z line 20\n2026-10-07T10:00:21Z line 21\n2026-10-07T10:00:22Z line 22\n2026-10-07T10:00:23Z line 23\n2026-10-07T10:00:24Z line 24\n2026-10-07T10:00:25Z line 25\n2026-10-07T10:00:26Z line 26\n2026-10-07T10:00:27Z line 27\n2026-10-07T10:00:28Z line 28\n2026-10-07T10:00:29Z line 29\n2026-10-07T10:00:30Z line 30\nError: src/frob.c is not formatted",
+      "available": true
+     },
+     {
+      "runId": 1002,
+      "workflowName": "Lint",
+      "jobName": "tidy",
+      "conclusion": "cancelled",
+      "available": false,
+      "unavailableReason": "gh failed with exit code 1: gh: Not Found (HTTP 404)"
+     }
+    ]
+   },
+   "artifactId": "0"
+  }
+ },
+ {
+  "user": "w2"
+ },
+ {
+  "tool": "github",
+  "args": {
+   "op": "run_watch",
+   "run": "1001"
+  },
+  "text": "# GitHub Actions Run #1001\n\nAll jobs passed.",
+  "details": {
+   "repo": "acme/widgets",
+   "branch": "main",
+   "headSha": "c0ffee0000000000000000000000000000000001",
+   "runIds": [
+    1001,
+    1002
+   ],
+   "status": "completed",
+   "conclusion": "failure",
+   "failedJobs": [
+    "Lint: clang-format",
+    "Lint: tidy"
+   ],
+   "watch": {
+    "mode": "run",
+    "state": "completed",
+    "repo": "acme/widgets",
+    "branch": "main",
+    "headSha": "c0ffee0000000000000000000000000000000001",
+    "failedLogs": [],
+    "run": {
+     "id": 1001,
+     "workflowName": "CI",
+     "displayTitle": "Add frobnicator",
+     "status": "completed",
+     "conclusion": "success",
+     "branch": "main",
+     "headSha": "c0ffee0000000000000000000000000000000001",
+     "url": "https://github.com/acme/widgets/actions/runs/1001",
+     "jobs": [
+      {
+       "id": 9001,
+       "name": "build",
+       "status": "completed",
+       "conclusion": "success",
+       "durationSeconds": 150,
+       "url": "https://github.com/acme/widgets/actions/runs/1001/job/9001"
+      },
+      {
+       "id": 9002,
+       "name": "test",
+       "status": "completed",
+       "conclusion": "skipped"
+      }
+     ]
+    }
+   },
+   "artifactId": "0"
+  }
+ },
+ {
+  "user": "w3"
+ },
+ {
+  "tool": "github",
+  "args": {
+   "op": "run_watch"
+  },
+  "text": "boom",
+  "details": {
+   "watch": {
+    "mode": "commit",
+    "state": "watching",
+    "repo": "acme/widgets",
+    "branch": "main",
+    "headSha": "c0ffee0000000000000000000000000000000001",
+    "pollCount": 1,
+    "note": "All known workflow runs completed successfully. Waiting 3s to ensure no additional runs appear for this commit.",
+    "runs": [],
+    "failedLogs": []
+   }
+  },
+  "isError": true
+ }
+]

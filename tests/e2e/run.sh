@@ -366,4 +366,16 @@ check "login device saved" '"refresh": "kimi-r1"'         cat "$T/lagent/auth.js
 check "login copilot"      "Logged in to github-copilot." bash -c "printf '\n' | ${LENV[*]} '$B' login github-copilot"
 check "login list"         "openai-codex-device"          "$B" login
 kill $APID 2>/dev/null
+# github tool + pr:// / issue:// through the fake `gh` (tests/e2e/bin-gh: canned acme/widgets data, never GitHub)
+mkdir -p "$T/ghagent" "$T/ghcfg"; cp "$T/agent/models.yml" "$T/ghagent/"; printf 'github:\n  enabled: true\n' > "$T/ghagent/config.yml"
+GENV=(env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST PATH="$ROOT/tests/e2e/bin-gh:$PATH" GH_CONFIG_DIR="$T/ghcfg" OMC_CODING_AGENT_DIR="$T/ghagent")
+check "gh repo_view"     "Default branch: main"  "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"repo_view\",\"repo\":\"acme/widgets\"}"}'
+check "gh search"        "Labels: bug, p1"       "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"search_issues\",\"query\":\"crash\",\"repo\":\"acme/widgets\"}"}'
+check "gh run_watch"     "All jobs passed."      "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"run_watch\",\"run\":\"1001\",\"repo\":\"acme/widgets\"}"}'
+check "gh bad op"        "op must be github operation (was \"nope\")"  "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"nope\"}"}'
+check "pr:// view"       "Review Comments (2)"   "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p "read:pr://acme/widgets/12"
+check "pr:// diff list"  "3. new.txt  +0 -0  [renamed]  (renamed from old.txt)"  "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p "read:pr://acme/widgets/12/diff"
+check "issue:// list"    "# Issues in acme/widgets (open, up to 30)"  "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p "read:issue://acme/widgets"
+check "issue:// error"   "issue:// resolution failed: GraphQL: Could not resolve"  "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p "read:issue://acme/widgets/999"
+check "gh needs enable"  "No such tool: xd://github"  env PATH="$ROOT/tests/e2e/bin-gh:$PATH" "$B" -m mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"repo_view\"}"}'
 exit $fail
