@@ -3,6 +3,7 @@
 #define OMC_MCP_H
 
 #include "agent/agent.h"
+#include "config/auth.h"
 #include "core/core.h"
 #include "core/json.h"
 
@@ -23,6 +24,15 @@ char *mcp_instructions(mcp_manager_t *m);
 /* Human-readable status lines (owned). */
 char *mcp_status(mcp_manager_t *m);
 size_t mcp_server_count(mcp_manager_t *m);
+
+/* OAuth for remote servers (oauth.c). Credentials are stored as "mcp:<url>" in auth.json. */
+char *mcp_oauth_key(const char *url);
+char *mcp_oauth_token(const char *url); /* refreshed access token or NULL */
+int mcp_oauth_logout(const char *url);
+json_t *mcp_oauth_descriptor(const char *server_url, const json_t *server_cfg, const char *www_authenticate, char **err);
+int mcp_oauth_login(const char *server_url, const json_t *server_cfg, const char *www_authenticate, const auth_io_t *io, char **err);
+/* the URL a config entry connects to (url / serverUrl), or NULL for stdio servers */
+const char *mcp_config_url(const json_t *cfg);
 
 /* low-level */
 json_t *mcp_request(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, char **err);

@@ -89,6 +89,21 @@ printf '{"mcpServers":{"mockmcp":{"command":"python3","args":["-I","%s"]}}}' "$R
 check "mcp tool"       "mcp echo: hi-mcp"  "$B" -m mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"hi-mcp"}'
 grep -q "Mock MCP server instructions" "$T/req.jsonl" && echo "   ok  mcp instructions in prompt" || { echo "   FAIL mcp instructions"; fail=1; }
 rm -f "$T/agent/mcp.json"
+# MCP OAuth: discovery -> dynamic registration -> PKCE code (curl plays the browser) -> bearer token
+OPORT=$((PORT + 1)); python3 -I "$ROOT/tests/e2e/mock_mcp_oauth.py" $OPORT & OPID=$!
+for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$OPORT) 2>/dev/null && break; sleep 0.1; done
+printf '{"mcpServers":{"oa":{"type":"http","url":"http://127.0.0.1:%s/mcp"}}}' $OPORT > "$T/agent/mcp.json"
+check "mcp oauth needed" "omc mcp login oa"  bash -c "'$B' -m mock/mock-1 -p 'say:x' >/dev/null; OMC_LOG=/dev/stderr '$B' -m mock/mock-1 -p 'call:mcp__oa_whoami:{}' 2>&1 | grep -o 'omc mcp login oa' | head -1"
+( sleep 20 | OMC_NO_BROWSER=1 "$B" mcp login oa > "$T/mcplogin.log" 2>&1 ) & LPID=$!
+for _ in $(seq 100); do grep -q "authorize?" "$T/mcplogin.log" 2>/dev/null && break; sleep 0.1; done
+curl -s -L -o /dev/null "$(grep -o 'http://127.0.0.1:[0-9]*/authorize?[^ ]*' "$T/mcplogin.log" | head -1)"
+for _ in $(seq 100); do kill -0 $LPID 2>/dev/null || break; sleep 0.1; done
+check "mcp oauth login" "Authorized oa"  cat "$T/mcplogin.log"
+check "mcp oauth tool"  "authorized as tok-1"  "$B" -m mock/mock-1 -p 'call:mcp__oa_whoami:{}'
+check "mcp oauth list"  "[oauth: logged in]"  "$B" mcp list
+python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); [v.update(expires=1) for k,v in d.items() if k.startswith("mcp:")]; json.dump(d,open(p,"w"))' "$T/agent/auth.json"
+check "mcp oauth refresh" "authorized as tok-2"  "$B" -m mock/mock-1 -p 'call:mcp__oa_whoami:{}'
+kill $OPID $LPID 2>/dev/null; rm -f "$T/agent/mcp.json"
 # persistent bash: state survives across calls in one session
 check "bash persists"  "FOO=kept"  bash -c "( printf '%s\n' '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"bash:export FOO=kept\"}'; sleep 2; printf '%s\n' '{\"id\":\"2\",\"type\":\"prompt\",\"message\":\"bash:echo FOO=\$FOO\"}'; sleep 2 ) | '$B' -m mock/mock-1 --mode rpc"
 check "bash exit code" "exited with code 3"  "$B" bash 'exit 3'

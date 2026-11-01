@@ -55,7 +55,8 @@ This file is the single source of truth for what is implemented; it is updated w
 | todo, ask | ✅ | |
 | web_search (Brave, Tavily, Exa, DuckDuckGo) | 🟡 | other 19 providers ❌ |
 | lsp (55 bundled servers; all 13 actions; diagnostics on write) | ✅ | |
-| MCP (stdio, streamable HTTP, SSE; omp/Claude/Cursor/VS Code configs) | ✅ | OAuth for MCP ❌ |
+| MCP (stdio, streamable HTTP, SSE; omp/Claude/Cursor/VS Code configs) | ✅ | |
+| MCP OAuth for remote servers: RFC 9728 resource metadata (WWW-Authenticate `resource_metadata` + well-known fallbacks), RFC 8414/OIDC server metadata, RFC 7591 dynamic registration (or configured `oauth.clientId`/`clientSecret`/`scopes`/`callbackPort`), auth code + PKCE with RFC 8707 `resource`, bearer injection on every request, automatic refresh, `omc mcp list/login/logout`, 401 → actionable error | ✅ | interactive `/mcp` reauth UI, brokered/managed credential profiles ❌ |
 | eval (persistent Python kernel, tool bridge, figures; JS/Bun runtime intentionally omitted) | ✅ | |
 | debug (DAP: all 28 actions; 14 bundled adapters + user adapters) | ✅ | verified against a scripted adapter; native adapters can't ptrace in the dev VM |
 | ast_grep, ast_edit (bracket-aware structural matcher with ast-grep metavariables; staged xd://resolve / xd://reject) | 🟡 | token-tree matching, not tree-sitter ASTs |

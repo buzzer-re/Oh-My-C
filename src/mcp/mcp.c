@@ -42,6 +42,7 @@ struct mcp_server {
     json_t *tools;      /* tools/list result array */
     char *instructions;
     char *error;
+    char *www_auth; /* last 401 challenge (OAuth discovery) */
     bool connected;
     int64_t timeout_ms;
 };
@@ -289,6 +290,13 @@ static int post_sse_cb(void *ud, const char *event, const char *data, size_t len
 static int post_hdr(void *ud, int status, const http_headers_t *h) {
     post_ctx_t *c = ud;
     c->status = status;
+    if (status == 401) {
+        const char *w = http_headers_get(h, "WWW-Authenticate");
+        pthread_mutex_lock(&c->s->mu);
+        free(c->s->www_auth);
+        c->s->www_auth = w ? xstrdup(w) : NULL;
+        pthread_mutex_unlock(&c->s->mu);
+    }
     const char *ct = http_headers_get(h, "Content-Type");
     c->is_sse = ct && str_istr(ct, "text/event-stream");
     const char *sid = http_headers_get(h, "Mcp-Session-Id");
@@ -308,10 +316,23 @@ static int post_data(void *ud, const char *d, size_t n) {
     return 0;
 }
 
+/* Bearer token from a stored MCP OAuth credential unless the config sets Authorization itself */
+static void add_oauth(mcp_server_t *s, http_headers_t *h) {
+    if (http_headers_get(h, "Authorization")) return;
+    char *tok = mcp_oauth_token(s->url);
+    if (tok && *tok) {
+        char *v = xasprintf("Bearer %s", tok);
+        http_headers_set(h, "Authorization", v);
+        free(v);
+    }
+    free(tok);
+}
+
 static int http_send(mcp_server_t *s, const json_t *msg, char **err) {
     char *body = json_dump(msg, 0);
     http_headers_t h = {0};
     for (size_t i = 0; i < s->headers.n; i++) http_headers_add(&h, s->headers.v[i].name, s->headers.v[i].value);
+    add_oauth(s, &h);
     http_headers_set(&h, "Content-Type", "application/json");
     http_headers_set(&h, "Accept", "application/json, text/event-stream");
     pthread_mutex_lock(&s->mu);
@@ -329,6 +350,9 @@ static int http_send(mcp_server_t *s, const json_t *msg, char **err) {
     if (rc == 0 && c.is_sse) sse_finish(&c.sse);
     if (rc != 0) {
         *err = xstrdup(r.error ? r.error : "request failed");
+    } else if (c.status == 401) {
+        *err = xasprintf("HTTP 401: the server requires OAuth authorization; run `omc mcp login %s`", s->name);
+        rc = -1;
     } else if (c.status >= 400) {
         *err = xasprintf("HTTP %d: %.300s", c.status, sb_cstr(&c.body));
         rc = -1;
@@ -471,6 +495,7 @@ static void *sse_reader(void *p) {
     http_headers_t h = {0};
     for (size_t i = 0; i < s->headers.n; i++) http_headers_add(&h, s->headers.v[i].name, s->headers.v[i].value);
     http_headers_set(&h, "Accept", "text/event-stream");
+    add_oauth(s, &h);
     volatile sig_atomic_t cancel = 0;
     http_req_t req = {.method = "GET", .url = s->url, .headers = &h, .on_data = sse_bg_data, .ud = &c,
                       .idle_timeout_ms = 24 * 3600 * 1000LL, .cancel = &cancel};
@@ -525,6 +550,7 @@ static void server_free(mcp_server_t *s) {
     free(s->post_url);
     free(s->session_id);
     free(s->instructions);
+    free(s->www_auth);
     free(s->error);
     vec_free(&s->pending);
     pthread_mutex_destroy(&s->mu);
@@ -835,4 +861,10 @@ char *mcp_status(mcp_manager_t *m) {
     }
     if (b.len) sb_truncate(&b, b.len - 1);
     return sb_detach(&b);
+}
+
+const char *mcp_config_url(const json_t *cfg) {
+    if (json_get_str(cfg, "command")) return NULL;
+    const char *u = json_get_str(cfg, "url");
+    return u ? u : json_get_str(cfg, "serverUrl");
 }

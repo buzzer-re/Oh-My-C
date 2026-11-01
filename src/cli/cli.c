@@ -1,6 +1,7 @@
 /* cli.c - the omc command line (omc_main): subcommands, flags, mode dispatch. */
 #include "ai/ai.h"
 #include "coding/app.h"
+#include "mcp/mcp.h"
 #include "config/auth.h"
 #include "config/settings.h"
 #include "core/fs.h"
@@ -27,6 +28,7 @@ static void usage(FILE *f) {
             "  omc --mode acp                     Agent Client Protocol (Zed etc.) over stdio\n\n"
             "Subcommands:\n"
             "  omc models [filter]                list models (with credentials marked)\n"
+            "  omc mcp list|login|logout [name]   MCP servers and their OAuth authorization\n"
             "  omc login [provider]               OAuth login (anthropic, openai-codex, ...)\n"
             "  omc logout <provider>              remove stored credentials\n"
             "  omc auth set <provider> <key>      store an API key; `omc auth list`\n"
@@ -123,6 +125,57 @@ static int cmd_login(int argc, char **argv) {
     }
     fprintf(stderr, "Logged in to %s.\n", provider);
     return 0;
+}
+
+/* omc mcp list | login <server> | logout <server> */
+static int cmd_mcp(int argc, char **argv) {
+    auth_init();
+    char *cwd = get_cwd();
+    settings_init(cwd, NULL);
+    json_t *cfg = mcp_discover_config(cwd);
+    free(cwd);
+    const char *sub = argc > 0 ? argv[0] : "list";
+    int rc = 0;
+    if (!strcmp(sub, "list")) {
+        const char *k;
+        json_t *v;
+        json_obj_foreach(cfg, i, k, v) {
+            const char *url = mcp_config_url(v);
+            char *key = url ? mcp_oauth_key(url) : NULL;
+            bool authed = key && auth_has_credentials(key);
+            printf("%-24s %s%s\n", k, url ? url : json_get_str(v, "command") ? json_get_str(v, "command") : "?",
+                   url ? (authed ? "  [oauth: logged in]" : "") : "  [stdio]");
+            free(key);
+        }
+    } else if ((!strcmp(sub, "login") || !strcmp(sub, "logout")) && argc > 1) {
+        json_t *srv = json_get_obj(cfg, argv[1]);
+        const char *url = mcp_config_url(srv);
+        if (!srv) {
+            fprintf(stderr, "omc: no MCP server named %s\n", argv[1]);
+            rc = 1;
+        } else if (!url) {
+            fprintf(stderr, "omc: %s is a stdio server; OAuth applies to remote (HTTP/SSE) servers\n", argv[1]);
+            rc = 1;
+        } else if (!strcmp(sub, "logout")) {
+            rc = mcp_oauth_logout(url) ? 1 : 0;
+            if (!rc) fprintf(stderr, "Logged out of %s.\n", argv[1]);
+        } else {
+            auth_io_t io = {.print = io_print};
+            char *err = NULL;
+            if (mcp_oauth_login(url, srv, NULL, &io, &err) != 0) {
+                fprintf(stderr, "omc: MCP login failed: %s\n", err ? err : "?");
+                rc = 1;
+            } else {
+                fprintf(stderr, "Authorized %s.\n", argv[1]);
+            }
+            free(err);
+        }
+    } else {
+        fprintf(stderr, "Usage: omc mcp list | login <server> | logout <server>\n");
+        rc = 2;
+    }
+    json_free(cfg);
+    return rc;
 }
 
 static int cmd_auth(int argc, char **argv) {
@@ -304,6 +357,7 @@ int omc_main(int argc, char **argv) {
         const char *c = argv[1];
         if (!strcmp(c, "models")) return cmd_models(argc - 2, argv + 2);
         if (!strcmp(c, "login")) return cmd_login(argc - 2, argv + 2);
+        if (!strcmp(c, "mcp")) return cmd_mcp(argc - 2, argv + 2);
         if (!strcmp(c, "logout")) {
             auth_init();
             return argc > 2 ? (auth_logout(argv[2]) ? 1 : 0) : 2;

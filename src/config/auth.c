@@ -236,7 +236,9 @@ static int token_request(const json_t *tok, json_t *params, const char *state, j
 }
 
 static int refresh_oauth(const char *provider, json_t *entry, char **err) {
-    json_t *d = descriptor(provider);
+    /* credentials minted from a runtime descriptor (MCP OAuth) carry it along */
+    json_t *d = json_get_obj(entry, "descriptor");
+    if (!d) d = descriptor(provider);
     json_t *rf = json_get_obj(d, "refresh");
     if (!rf || !str_eq(json_get_str(rf, "kind"), "request")) {
         *err = xasprintf("no refresh flow for %s", provider);
@@ -262,6 +264,7 @@ static int refresh_oauth(const char *provider, json_t *entry, char **err) {
     if (!cred_desc) cred_desc = json_get_obj(json_get_obj(d, "login"), "credential");
     json_t *c = extract_cred(cred_desc, resp, entry);
     json_free(resp);
+    if (json_get_obj(entry, "descriptor")) json_set(c, "descriptor", json_clone(json_get_obj(entry, "descriptor")));
     json_set(g_store, provider, c);
     save();
     return 0;
@@ -373,9 +376,18 @@ static void parse_pasted(const char *in, char **code, char **state) {
     free(t);
 }
 
+static int login_with(const char *provider, const json_t *d, bool embed, const auth_io_t *io, char **err);
+
 int auth_login(const char *provider, const auth_io_t *io, char **err) {
+    return login_with(provider, descriptor(provider), false, io, err);
+}
+
+int auth_login_descriptor(const char *key, const json_t *d, const auth_io_t *io, char **err) {
+    return login_with(key, d, true, io, err);
+}
+
+static int login_with(const char *provider, const json_t *d, bool embed, const auth_io_t *io, char **err) {
     *err = NULL;
-    json_t *d = descriptor(provider);
     json_t *login = json_get_obj(d, "login");
     if (!login || !str_eq(json_get_str(login, "kind"), "oauth-code")) {
         *err = xasprintf("%s does not support browser OAuth login in omc; set an API key with `omc auth set %s <key>`",
@@ -424,7 +436,7 @@ int auth_login(const char *provider, const auth_io_t *io, char **err) {
         free(m);
     }
     /* try to open the browser */
-    const char *opener = which("xdg-open") ? "xdg-open" : which("open") ? "open" : NULL;
+    const char *opener = env_truthy("OMC_NO_BROWSER") ? NULL : which("xdg-open") ? "xdg-open" : which("open") ? "open" : NULL;
     if (opener) {
         const char *argv[] = {opener, sb_cstr(&u), NULL};
         proc_opts_t po = {.timeout_ms = 5000, .new_session = true};
@@ -498,6 +510,7 @@ int auth_login(const char *provider, const auth_io_t *io, char **err) {
         if (token_request(tok, params, state, &resp, err) == 0) {
             json_t *c = extract_cred(json_get_obj(login, "credential"), resp, NULL);
             json_free(resp);
+            if (embed) json_set(c, "descriptor", json_clone(d));
             pthread_mutex_lock(&g_mu);
             load();
             json_set(g_store, provider, c);

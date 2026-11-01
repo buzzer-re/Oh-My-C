@@ -21,6 +21,9 @@ typedef struct {
     void *ud;
 } auth_io_t;
 int auth_login(const char *provider, const auth_io_t *io, char **err);
+/* OAuth code+PKCE login from a runtime descriptor (same shape as catalog auth descriptors); the
+ * credential is stored under `key` together with the descriptor so it can refresh itself. */
+int auth_login_descriptor(const char *key, const json_t *descriptor, const auth_io_t *io, char **err);
 json_t *auth_oauth_providers(void); /* borrowed array of descriptors with login.kind == oauth-code */
 
 #endif
