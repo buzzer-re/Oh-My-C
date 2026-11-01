@@ -1,6 +1,7 @@
 /* read tool: files (line selectors, hashline anchors), directories, images, URLs, archives, SQLite, PDF, notebooks. */
 #include "tools.h"
 #include "xdev.h"
+#include "vurl.h"
 
 #include "config/settings.h"
 #include "core/embed.h"
@@ -942,6 +943,7 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     if (xdev_read(ctx ? ctx->agent : NULL, path, out)) return 0;
     if (str_starts(path, "pr://") || str_starts(path, "issue://")) return github_read(env, path, out);
     if (str_starts(path, "ssh://")) return read_ssh(env, path, out);
+    if (vurl_is(path)) return vurl_read(env, path, out);
     if (str_starts(path, "omc://")) return read_omc_docs(env, path, out);
     if (str_starts(path, "mcp://")) return read_mcp(env, path, out);
     char *uerr = NULL;

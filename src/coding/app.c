@@ -5,6 +5,7 @@
 #include "coding/advisor.h"
 #include "tools/jobs.h"
 #include "tools/xdev.h"
+#include "agents.h"
 
 #include "config/auth.h"
 #include "config/settings.h"
@@ -801,6 +802,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     a->env->settings = settings_effective();
     a->env->subagent_depth = o->subagent_depth;
     a->env->session = a;
+    if (!o->subagent) agents_register_main(a);
     a->env->run_subagent = app_run_subagent;
     a->env->complete = app_tool_complete;
     discover_all(a->cwd, &a->disc, o->no_context_files, o->no_skills, o->no_rules);
@@ -891,7 +893,14 @@ app_t *app_create(const app_opts_t *o, char **err) {
 
 void app_free(app_t *a) {
     if (!a) return;
-    if (a->env && a->env->jobs) jobs_set_notify(a->env->jobs, NULL, NULL);
+    agents_unregister(a);
+    if (a->env && a->env->jobs) {
+        /* join background jobs (task runs, auto-backgrounded commands) before their session state goes away */
+        jobs_set_notify(a->env->jobs, NULL, NULL);
+        jobs_free(a->env->jobs);
+        a->env->jobs = NULL;
+    }
+    agents_release_children(a);
     agent_free(a->agent);
     session_free(a->session);
     tool_env_free(a->env);
@@ -987,15 +996,26 @@ char *app_job_results_text(app_t *a) {
     json_t *done = jobs_take_finished(a->env->jobs);
     char *txt = json_len(done) ? jobs_render_results(done) : NULL;
     json_free(done);
+    /* peer messages that arrived while this session was idle */
+    char *irc = agents_take_pending_for(a);
+    if (irc) {
+        char *both = txt ? xasprintf("%s\n\n%s", txt, irc) : xstrdup(irc);
+        free(txt);
+        free(irc);
+        txt = both;
+    }
     return txt;
 }
 
 char *app_after_run(app_t *a, const json_t *run_messages, const char *prev_type, const char *mode, const char **custom_type) {
     *custom_type = NULL;
     /* print mode has no idle wake-up: finish outstanding background jobs before the final answer */
-    if (!strcmp(mode, "print") && jobs_running(a->env->jobs) && !str_eq(json_get_str(last_assistant(a->agent->messages), "stopReason"), "aborted"))
-        jobs_wait_any(a->env->jobs, NULL, settings_int("async.printWaitMs", 30 * 60 * 1000));
-    if (jobs_undelivered(a->env->jobs)) {
+    if (!strcmp(mode, "print") && jobs_running(a->env->jobs) && !str_eq(json_get_str(last_assistant(a->agent->messages), "stopReason"), "aborted")) {
+        int64_t deadline = mono_ms() + settings_int("async.printWaitMs", 30 * 60 * 1000);
+        while (mono_ms() < deadline && !agents_has_pending(a) &&
+               !jobs_wait_any(a->env->jobs, NULL, MIN(500, MAX(1, deadline - mono_ms()))) && jobs_running(a->env->jobs)) {}
+    }
+    if (jobs_undelivered(a->env->jobs) || agents_has_pending(a)) {
         char *t = app_job_results_text(a);
         if (t) {
             *custom_type = "async-result";
@@ -1479,13 +1499,12 @@ static void *cancel_watch(void *x) {
     return NULL;
 }
 
-char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assignment, const char *context,
-                       json_t **details, volatile sig_atomic_t *cancel) {
-    app_t *parent = env->session;
+app_t *app_subagent_new(app_t *parent, const char *agent_name, const char *model_override, const char *append_prompt,
+                        char **err) {
     app_opts_t o = {0};
-    o.cwd = env->cwd;
+    o.cwd = parent->cwd;
     char *label = app_model_label(parent);
-    json_t *defs = agent_defs_load(env->cwd);
+    json_t *defs = agent_defs_load(parent->cwd);
     json_t *def = json_get(defs, agent_name ? agent_name : "task");
     const char *role_model = settings_str("modelRoles.task", NULL);
     o.model = role_model ? role_model : label;
@@ -1497,7 +1516,8 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
     } else if (dm && catalog_resolve(dm)) {
         o.model = dm;
     }
-    o.append_system_prompt = json_get_str(def, "body");
+    if (model_override && *model_override && app_resolve_model_pattern(model_override, NULL, NULL)) o.model = model_override;
+    o.append_system_prompt = append_prompt ? append_prompt : json_get_str(def, "body");
     o.mcp = parent->mcp;
     o.lsp = parent->lsp;
     strvec_t tools = {0};
@@ -1506,20 +1526,28 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
     if (tools.n) o.tools = &tools;
     o.no_session = true;
     o.subagent = true;
-    o.subagent_depth = env->subagent_depth + 1;
+    o.subagent_depth = parent->env->subagent_depth + 1;
     o.no_context_files = false;
-    char *err = NULL;
-    app_t *child = app_create(&o, &err);
+    app_t *child = app_create(&o, err);
     free(label);
     strvec_free(&tools);
     json_free(defs);
+    if (!child) return NULL;
+    child->thinking = parent->thinking;
+    child->agent->thinking = parent->thinking;
+    return child;
+}
+
+char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assignment, const char *context,
+                       json_t **details, volatile sig_atomic_t *cancel) {
+    app_t *parent = env->session;
+    char *err = NULL;
+    app_t *child = app_subagent_new(parent, agent_name, NULL, NULL, &err);
     if (!child) {
         char *r = xasprintf("Failed to start subagent: %s", err ? err : "?");
         free(err);
         return r;
     }
-    child->thinking = parent->thinking;
-    child->agent->thinking = parent->thinking;
     sb_t p = SB_INIT;
     if (agent_name && *agent_name) sb_appendf(&p, "You are the `%s` subagent.\n\n", agent_name);
     if (context && *context) sb_appendf(&p, "<context>\n%s\n</context>\n\n", context);
