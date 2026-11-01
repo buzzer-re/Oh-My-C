@@ -3,6 +3,7 @@
 #include "core/core.h"
 #include "core/fs.h"
 #include "img/img.h"
+#include "img/imgpipe.h"
 #include <dirent.h>
 #include <math.h>
 #include <unistd.h>
@@ -231,6 +232,110 @@ static void test_resize(void) {
     CHECK(img_alloc(&c, 70000, 1) < 0 && img_alloc(&c, 20000, 20000) < 0, "caps");
 }
 
+static uint8_t *gradient_png(int w, int h, bool alpha, size_t *n) {
+    img_t im = {0};
+    img_alloc(&im, w, h);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            uint8_t *p = im.px + ((size_t)y * w + x) * 4;
+            p[0] = (uint8_t)(x * 13 + y), p[1] = (uint8_t)(y * 7), p[2] = (uint8_t)((x ^ y) * 3), p[3] = alpha ? (uint8_t)(x % 256) : 255;
+        }
+    uint8_t *png = img_png_encode(&im, 1, n);
+    img_free(&im);
+    return png;
+}
+
+/* resizeImage / formatDimensionNote / imageDecodeFailureReason / loadImageInput ports */
+static void test_pipeline(void) {
+    size_t n;
+    /* oversized: fits 1568 on the long edge, keeps aspect (Math.round), reports a dimension note */
+    uint8_t *png = gradient_png(3200, 1800, false, &n);
+    img_resized_t r;
+    CHECK(img_resize_image(png, n, "image/png", NULL, &r, NULL) == 0 && r.was_resized && r.w == 1568 && r.h == 882 &&
+              r.orig_w == 3200 && r.len <= 500 * 1024,
+          "resize big %dx%d len %zu", r.w, r.h, r.len);
+    char *note = img_dimension_note(&r);
+    CHECK(note && !strcmp(note, "[Image: original 3200x1800, displayed at 1568x882. Multiply coordinates by 2.04 to map to "
+                                 "original image.]"),
+          "note %s", note ? note : "(null)");
+    free(note);
+    img_meta_t m;
+    CHECK(img_sniff(r.buf, r.len, &m) && m.w == 1568 && m.h == 882, "resized decodable header");
+    img_resized_free(&r);
+    free(png);
+    /* tiny: lifted toward the 200px floor without distorting (150x100 -> 300x200), scale note 0.50 */
+    png = gradient_png(150, 100, false, &n);
+    CHECK(img_resize_image(png, n, NULL, NULL, &r, NULL) == 0 && r.w == 300 && r.h == 200, "upscale %dx%d", r.w, r.h);
+    note = img_dimension_note(&r);
+    CHECK(note && strstr(note, "by 0.50 to map"), "upscale note");
+    free(note);
+    img_resized_free(&r);
+    free(png);
+    /* fast path: in bounds and under budget/4 -> untouched bytes, same mime */
+    png = gradient_png(400, 300, false, &n);
+    CHECK(img_resize_image(png, n, NULL, NULL, &r, NULL) == 0 && !r.was_resized && r.len == n && !memcmp(r.buf, png, n) &&
+              !strcmp(r.mime, "image/png") && !img_dimension_note(&r),
+          "fast path");
+    img_resized_free(&r);
+    free(png);
+    /* translucent: never JPEG */
+    png = gradient_png(2000, 300, true, &n);
+    CHECK(img_resize_image(png, n, NULL, NULL, &r, NULL) == 0 && strcmp(r.mime, "image/jpeg") && r.w <= 1568 &&
+              abs(r.w * 300 - r.h * 2000) <= 2000,
+          "translucent %s %dx%d", r.mime, r.w, r.h);
+    img_resized_free(&r);
+    free(png);
+    /* undecodable: original bytes back, decode_failed; with WebP exclusion and no type info it throws */
+    const uint8_t junk[] = "not an image at all";
+    CHECK(img_resize_image(junk, sizeof junk, "image/png", NULL, &r, NULL) == 0 && r.decode_failed && !strcmp(r.mime, "image/png"),
+          "undecodable");
+    img_resized_free(&r);
+    img_resize_opts_t ex = {.exclude_webp = 1};
+    char *err = NULL;
+    CHECK(img_resize_image(junk, sizeof junk, NULL, &ex, &r, &err) < 0 && err, "exclude webp throws");
+    free(err);
+    /* decode verdicts */
+    CHECK(img_b64_failure("", 0) && !strcmp(img_b64_failure("", 0), "empty image data"), "empty b64");
+    CHECK(img_b64_failure("ab$=", 4), "bad char");
+    CHECK(img_b64_failure("QQ=", 3), "bad padding"); /* "QQ==" required */
+    CHECK(img_b64_failure("QR==", 4), "non-zero trailing bits");
+    CHECK(!img_b64_failure("QQ==", 4) && !img_b64_failure("QQ", 2), "valid / unpadded");
+    png = gradient_png(64, 64, false, &n);
+    char *b64 = base64_encode(png, n);
+    char *why = img_decode_failure_reason(b64, "image/png");
+    CHECK(!why, "decodes");
+    free(why);
+    why = img_decode_failure_reason(b64, "image/jpeg");
+    CHECK(why && !strcmp(why, "declared image/jpeg but contains image/png"), "mismatch %s", why ? why : "");
+    free(why);
+    b64[strlen(b64) / 2] = 0; /* truncated stream, still valid base64 */
+    size_t bl = strlen(b64);
+    b64[bl - bl % 4] = 0;
+    why = img_decode_failure_reason(b64, "image/png");
+    CHECK(why && !strcmp(why, "Image: decode failed"), "truncated %s", why ? why : "");
+    free(why);
+    free(b64);
+    /* loadImageInput messages */
+    img_loaded_t l;
+    CHECK(img_load_input(png, n, "image/png", "/x/a.png", "Read image file", true, 0, &l, &err) == 0 &&
+              str_starts(l.text_note, "Read image file [image/png]") &&
+              strstr(l.text_note, "\n[Image: original 64x64, displayed at 200x200. Multiply coordinates by 0.32 to map to "
+                                  "original image.]"),
+          "load note %s", l.text_note ? l.text_note : "");
+    img_loaded_free(&l);
+    CHECK(img_load_input(png, n / 2, "image/png", "/x/a.png", "Read image file", true, 0, &l, &err) < 0 &&
+              !strcmp(err, "/x/a.png is not a decodable image/png image: Image: decode failed"),
+          "load undecodable %s", err ? err : "");
+    free(err);
+    free(png);
+    char *fb = img_format_bytes(21u * 1024 * 1024 + 5);
+    CHECK(!strcmp(fb, "21.0MB"), "formatBytes %s", fb);
+    free(fb);
+    fb = img_format_bytes(1536);
+    CHECK(!strcmp(fb, "1.5KB"), "formatBytes KB %s", fb);
+    free(fb);
+}
+
 int main(void) {
     const char *tmp = getenv("TMPDIR");
     snprintf(DIR_, sizeof DIR_, "%s/omc-img-test-%d", tmp && *tmp ? tmp : "/tmp", (int)getpid());
@@ -245,6 +350,7 @@ int main(void) {
     test_bad();
     test_png_roundtrip();
     test_resize();
+    test_pipeline();
     cmd = xasprintf("rm -rf '%s'", DIR_);
     if (system(cmd)) {}
     free(cmd);

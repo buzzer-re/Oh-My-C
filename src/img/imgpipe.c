@@ -211,6 +211,7 @@ int img_resize_image(const uint8_t *in, size_t n, const char *caller_mime, const
     best.mime = "image/png";
     if (lossy) {
         cand_t l = encode_lossy(&target, quality, translucent, exclude_webp);
+        if (!l.buf) lossy = false; /* no lossy encoder produced output: PNG-only dimension ladder */
         keep_smallest(&best, &l);
     }
     static const int quality_steps[] = {70, 60, 50, 40};
@@ -227,7 +228,7 @@ int img_resize_image(const uint8_t *in, size_t n, const char *caller_mime, const
         if (!lossy && scale == 1.0) continue;
         int w = (int)js_round(tw * scale), h = (int)js_round(th * scale);
         if (w < 100 || h < 100) break;
-        fw = w, fh = h;
+        /* the reported size follows the buffer kept (omp: the last size encoded) */
         img_t sized = {0};
         if (scale == 1.0) {
             sized = target;
@@ -238,7 +239,7 @@ int img_resize_image(const uint8_t *in, size_t n, const char *caller_mime, const
             cand_t p = {0};
             p.buf = img_png_encode(&sized, -1, &p.len);
             p.mime = "image/png";
-            if (p.buf) cand_free(&best), best = p;
+            if (p.buf) cand_free(&best), best = p, fw = w, fh = h;
             img_free(&sized);
             if (best.buf && best.len <= max_bytes) goto done;
             continue;
@@ -246,7 +247,7 @@ int img_resize_image(const uint8_t *in, size_t n, const char *caller_mime, const
         bool fit = false;
         for (size_t i = 0; i < 4 && !fit; i++) {
             cand_t l = encode_lossy(&sized, quality_steps[i], translucent, exclude_webp);
-            if (l.buf) cand_free(&best), best = l;
+            if (l.buf) cand_free(&best), best = l, fw = w, fh = h;
             fit = best.buf && best.len <= max_bytes;
         }
         if (scale != 1.0) img_free(&sized);
