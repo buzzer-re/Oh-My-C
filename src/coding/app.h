@@ -80,6 +80,7 @@ struct app {
     /* wake an idle session when a background job settles (modes set this; called from the job thread) */
     void (*wake)(void *ud);
     void *wake_ud;
+    json_t *job_batch; /* jobs app_job_results_text took; details of the next async-result prompt */
     volatile bool ttsr_interrupting;
     app_notice_fn notice;
     void *notice_ud;

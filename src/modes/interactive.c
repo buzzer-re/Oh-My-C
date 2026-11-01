@@ -70,6 +70,7 @@ static void ui_apply_event(void *ud) {
     ui_t *u = e->u;
     switch (e->type) {
     case AGENT_EV_MESSAGE_END:
+        if (str_eq(json_get_str(e->msg, "role"), "user")) ui_async_result(u, e->msg);
         if (str_eq(json_get_str(e->msg, "role"), "assistant")) {
             ui_apply_partial(u);
             if (!u->cur_assistant) {

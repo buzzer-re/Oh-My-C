@@ -104,6 +104,21 @@ static void app_job_settled(void *ud) {
     if (!agent_is_running(a->agent) && a->wake) a->wake(a->wake_ud);
 }
 
+/* omp async-result custom message details: {jobs: [{jobId, type, label, durationMs}]} (owned) */
+static json_t *job_batch_details(const json_t *done) {
+    json_t *d = json_obj(), *jobs = json_arr(), *j;
+    json_arr_foreach(done, i, j) {
+        json_t *e = json_obj();
+        if (json_get_str(j, "jobId")) json_set_str(e, "jobId", json_get_str(j, "jobId"));
+        if (json_get_str(j, "type")) json_set_str(e, "type", json_get_str(j, "type"));
+        if (json_get_str(j, "label")) json_set_str(e, "label", json_get_str(j, "label"));
+        if (json_get(j, "durationMs")) json_set_int(e, "durationMs", json_get_int(j, "durationMs", 0));
+        json_push(jobs, e);
+    }
+    json_set(d, "jobs", jobs);
+    return d;
+}
+
 static json_t *job_results_message(app_t *a) {
     json_t *done = jobs_take_finished(a->env->jobs);
     if (!json_len(done)) {
@@ -111,10 +126,11 @@ static json_t *job_results_message(app_t *a) {
         return NULL;
     }
     char *txt = jobs_render_results(done);
-    json_free(done);
     json_t *m = msg_user_text(txt);
     json_set_bool(m, "synthetic", true);
     json_set_str(m, "customType", "async-result");
+    json_set(m, "details", job_batch_details(done));
+    json_free(done);
     free(txt);
     return m;
 }
@@ -184,7 +200,16 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
         if (role && a->session && ctype && str_eq(role, "user")) {
             /* hidden steering (goal context, continuations, budget limits) persists as custom_message like omp */
             char *txt = ai_message_text(ev->message);
-            session_append_custom_message(a->session, ctype, txt, false);
+            const json_t *det = json_get(ev->message, "details");
+            if (det) { /* async-result job rows */
+                json_t *e = json_obj();
+                json_set_str(e, "type", "custom_message");
+                json_set_str(e, "customType", ctype);
+                json_set_str(e, "content", txt);
+                json_set_bool(e, "display", false);
+                json_set(e, "details", json_clone(det));
+                session_append_entry(a->session, e);
+            } else session_append_custom_message(a->session, ctype, txt, false);
             free(txt);
         } else if (role && a->session) {
             session_append_message(a->session, ev->message);
@@ -960,6 +985,7 @@ void app_free(app_t *a) {
     skilldesc_free(a->skilldesc);
     json_free(a->dcr_sent);
     free(a->dcr_last);
+    json_free(a->job_batch);
     pthread_mutex_destroy(&a->mu);
     free(a);
 }
@@ -1034,6 +1060,8 @@ void app_set_advisor(app_t *a, bool on) {
 char *app_job_results_text(app_t *a) {
     json_t *done = jobs_take_finished(a->env->jobs);
     char *txt = json_len(done) ? jobs_render_results(done) : NULL;
+    json_free(a->job_batch);
+    a->job_batch = json_len(done) ? job_batch_details(done) : NULL;
     json_free(done);
     /* peer messages that arrived while this session was idle */
     char *irc = agents_take_pending_for(a);
@@ -1473,6 +1501,10 @@ int app_prompt_hidden(app_t *a, const char *text, const char *custom_type) {
     json_t *m = msg_user_text(text);
     json_set_bool(m, "synthetic", true);
     json_set_str(m, "customType", custom_type);
+    if (str_eq(custom_type, "async-result") && a->job_batch) {
+        json_set(m, "details", a->job_batch);
+        a->job_batch = NULL;
+    }
     json_push(msgs, m);
     int rc = agent_prompt(a->agent, msgs);
     if (rc == 0) maybe_auto_compact(a);

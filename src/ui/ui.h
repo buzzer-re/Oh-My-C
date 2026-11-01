@@ -103,6 +103,8 @@ void add_view(ui_t *u, msgview_t *v);
 /* "info" -> dim status line (consecutive ones update in place), "warning" -> "Warning: …",
  * "error" -> "Error: …"; "Injecting rule: …" becomes a TTSR notice, "Retrying (n/m) in Ns…" the retry row */
 void add_notice(ui_t *u, const char *level, const char *text);
+/* `• Background job completed …` rows for a delivered async-result prompt (no-op for other messages) */
+void ui_async_result(ui_t *u, const json_t *msg);
 void ui_assistant_streamed(ui_t *u, msgview_t *v); /* message_update applied: drive the smooth reveal */
 void ui_assistant_end(ui_t *u, msgview_t *v);      /* message_end: pin a provider error in the banner */
 void ui_tool_started(ui_t *u, const char *tool_call_id); /* tool card added: post-tool text follows */
