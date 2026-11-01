@@ -1,4 +1,4 @@
-/* patch.h - non-hashline edit modes: replace, patch (unified-diff hunks), apply_patch (Codex envelope), sloppy.
+/* patch.h - edit modes: replace, patch (unified-diff hunks), apply_patch (Codex envelope), sloppy, hashline.
  * Port of omp's pi-edit mode engines + session apply: stage every file in memory (all-or-nothing), then write
  * in payload order and render the model-facing result text and details like upstream. */
 #ifndef OMC_PATCH_H
@@ -7,7 +7,7 @@
 #include "core/core.h"
 #include "core/json.h"
 
-typedef enum { PE_REPLACE, PE_PATCH, PE_APPLY_PATCH, PE_SLOPPY } pe_mode_t;
+typedef enum { PE_REPLACE, PE_PATCH, PE_APPLY_PATCH, PE_SLOPPY, PE_HASHLINE } pe_mode_t;
 
 typedef struct {
     const char *cwd;
@@ -25,6 +25,10 @@ typedef struct {
     int (*remote_read)(void *ud, const char *abs_path, char **data, size_t *len, char **err);
     int (*remote_write)(void *ud, const char *abs_path, const char *data, size_t len, char **err);
     void *ud;
+    /* hashline mode: the session edit store (edit_store_t *), edit.enforceSeenLines, display column cap */
+    void *store;
+    bool enforce_seen;
+    size_t max_columns;
 } pe_opts_t;
 
 typedef struct {
@@ -35,11 +39,11 @@ typedef struct {
     int writes;             /* number of filesystem writes performed */
 } pe_result_t;
 
-/* "replace" | "patch" | "apply_patch" | "sloppy" -> mode, else -1 */
+/* "replace" | "patch" | "apply_patch" | "sloppy" | "hashline" -> mode, else -1 */
 int pe_mode_parse(const char *name);
 const char *pe_mode_name(pe_mode_t m);
 /* Stage + apply one edit call. args: replace {path, old_string, new_string, replace_all?, edits?},
- * patch {path, edits:[{op?, rename?, diff?}]}, apply_patch / sloppy {input}. */
+ * patch {path, edits:[{op?, rename?, diff?}]}, apply_patch / sloppy / hashline {input}. */
 void pe_run(pe_mode_t mode, const json_t *args, const pe_opts_t *o, pe_result_t *out);
 void pe_result_free(pe_result_t *r);
 

@@ -7,6 +7,8 @@
 #include "core/fs.h"
 #include "diff.h"
 #include "fuzzy.h"
+#include "hashline.h"
+#include "tools.h"
 
 #include <errno.h>
 #include <math.h>
@@ -672,6 +674,10 @@ typedef struct {
     char *diff, *preview_diff;
     int64_t first_changed;
     strvec_t after_preview, warnings;
+    /* hashline: `[path#TAG]` header, block-resolution rows above the preview, no-op text */
+    bool hashline;
+    strvec_t before_preview;
+    char *text_override;
 } staged_t;
 typedef VEC(staged_t) stageds_t;
 
@@ -688,6 +694,8 @@ static void staged_free(staged_t *s) {
     free(s->preview_diff);
     strvec_free(&s->after_preview);
     strvec_free(&s->warnings);
+    strvec_free(&s->before_preview);
+    free(s->text_override);
 }
 
 static void stageds_free(stageds_t *v) {
@@ -3037,8 +3045,156 @@ static bool sloppy_stage(fsrc_t *fs, const json_t *args, stageds_t *out, perr_t 
 }
 
 /* ======================================================================================
+ * hashline mode (modes/hashline/mod.rs + patcher.rs stage_patch)
+ * ====================================================================================== */
+
+static bool hashline_header_only(fsrc_t *fs, const char *path, perr_t *e) {
+    char *abs, *display;
+    if (!fs_resolve(fs, path, &abs, &display, e)) return false;
+    fread_t *r = NULL;
+    if (fs_try_read(fs, abs, display, &r, e)) {
+        if (r) {
+            char *tag = file_tag(r->text, strlen(r->text));
+            fail(e, K_APPLY, hl_header_only_message(path, tag));
+            free(tag);
+        } else {
+            FAIL(e, K_NOTFOUND, "File not found: %s. Use the write tool to create new files.", path);
+        }
+    }
+    free(abs);
+    free(display);
+    return false;
+}
+
+static bool hashline_stage(fsrc_t *fs, const json_t *args, hl_clip_t *clip, stageds_t *out, perr_t *e) {
+    const pe_opts_t *o = fs->o;
+    const char *input = json_get_str(args, "input");
+    if (!input) input = "";
+    char *err = NULL;
+    hl_patch_t *p = hl_patch_parse(input, o->cwd, &err);
+    if (!p) return fail(e, K_PARSE, err);
+    if (!hl_patch_count(p)) {
+        hl_patch_free(p);
+        char *path = hl_first_header_path(input, o->cwd);
+        if (!path) return FAIL(e, K_PARSE, "No hashline sections found in input.");
+        bool r = hashline_header_only(fs, path, e);
+        free(path);
+        return r;
+    }
+    bool ok = true;
+    strvec_t canon = {0}, canon_src = {0};
+    for (size_t i = 0; i < hl_patch_count(p) && ok; i++) {
+        const char *path = hl_section_path(p, i);
+        const char *tag = hl_section_tag(p, i);
+        bool range_err = false;
+        if (!hl_section_parse(p, i, &err, &range_err)) {
+            if (range_err) {
+                char *abs = path_abs(path, o->cwd);
+                size_t len;
+                char *raw = abs ? fs_read(abs, &len) : NULL;
+                char *text = raw ? fz_normalize_to_lf(raw) : NULL;
+                free(err);
+                err = hl_range_error_message(p, i, text);
+                free(text);
+                free(raw);
+                free(abs);
+            }
+            ok = fail(e, K_PARSE, err);
+            break;
+        }
+        char *abs, *display;
+        if (!fs_resolve(fs, path, &abs, &display, e)) {
+            ok = false;
+            break;
+        }
+        fread_t *r = NULL;
+        if (!fs_try_read(fs, abs, display, &r, e)) ok = false;
+        else if (!r) ok = FAIL(e, K_NOTFOUND, "File not found: %s. Use the write tool to create new files.", path);
+        else if (!tag) ok = fail(e, K_APPLY, hl_mismatch_message(p, i, abs, r->text, NULL, o->store));
+        if (ok)
+            for (size_t k = 0; k < canon.n; k++)
+                if (!strcmp(canon.v[k], abs)) {
+                    ok = FAIL(e, K_APPLY,
+                              "Multiple hashline sections resolve to the same file (%s and %s). Merge their ops under "
+                              "one header before applying.",
+                              canon_src.v[k], path);
+                    break;
+                }
+        const char *dest = NULL;
+        int fop = ok ? hl_section_file_op(p, i, &dest) : 0;
+        char *mabs = NULL, *mdisp = NULL;
+        if (ok && fop == 2) {
+            if (!fs_resolve(fs, dest, &mabs, &mdisp, e)) ok = false;
+            else if (!strcmp(mabs, abs)) ok = FAIL(e, K_APPLY, "MV destination is the same as %s.", path);
+        }
+        hl_applied_t ap;
+        memset(&ap, 0, sizeof(ap));
+        if (ok) {
+            strvec_push(&canon, abs);
+            strvec_push(&canon_src, path);
+            if (!hl_section_apply(p, i, abs, r->text, o->store, clip, o->enforce_seen, o->max_columns, &ap, &err))
+                ok = fail(e, K_APPLY, err);
+        }
+        if (!ok) {
+            free(abs);
+            free(display);
+            free(mabs);
+            free(mdisp);
+            break;
+        }
+        staged_t s;
+        memset(&s, 0, sizeof(s));
+        s.display = display;
+        s.abs = abs;
+        s.op = fop == 1 ? OP_DELETE : (!strcmp(ap.text, r->text) && !fop) ? OP_NOOP : OP_UPDATE;
+        s.move_abs = mabs;
+        s.move_display = mdisp;
+        s.existed = true;
+        s.before_raw = xstrdup(r->raw);
+        s.before = xstrdup(r->text);
+        s.after = ap.text;
+        ap.text = NULL;
+        int64_t dfirst = 0;
+        s.diff = diff_numbered(s.before, s.after, -1, &dfirst);
+        s.first_changed = ap.first_changed ? ap.first_changed : dfirst;
+        if (s.op == OP_UPDATE) s.persisted = persist(r, s.after);
+        s.hashline = true;
+        s.before_preview = ap.block_preview;
+        s.warnings = ap.warnings;
+        memset(&ap.block_preview, 0, sizeof(ap.block_preview));
+        memset(&ap.warnings, 0, sizeof(ap.warnings));
+        hl_applied_free(&ap);
+        if (s.op == OP_NOOP && hl_patch_count(p) == 1) {
+            bool escalate = false;
+            uint32_t count = hl_record_noop(o->store, abs, input, &escalate);
+            if (escalate) {
+                ok = fail(e, K_NOCHANGE, hl_no_change_loop_message(path, count));
+                staged_free(&s);
+                break;
+            }
+            s.text_override = hl_no_change_message(path);
+        }
+        vec_push(out, s);
+    }
+    if (ok && out->n > 1)
+        for (size_t i = 0; i < out->n; i++)
+            if (out->v[i].op == OP_NOOP) {
+                bool escalate = false;
+                uint32_t count = hl_record_noop(o->store, out->v[i].abs, input, &escalate);
+                ok = fail(e, K_NOCHANGE, escalate ? hl_no_change_loop_message(out->v[i].display, count)
+                                                  : hl_no_change_message(out->v[i].display));
+                break;
+            }
+    strvec_free(&canon);
+    strvec_free(&canon_src);
+    hl_patch_free(p);
+    return ok;
+}
+
+/* ======================================================================================
  * apply (session.rs) + rendering
  * ====================================================================================== */
+
 
 int pe_mode_parse(const char *name) {
     if (!name) return -1;
@@ -3046,11 +3202,12 @@ int pe_mode_parse(const char *name) {
     if (!strcmp(name, "patch")) return PE_PATCH;
     if (!strcmp(name, "apply_patch")) return PE_APPLY_PATCH;
     if (!strcmp(name, "sloppy")) return PE_SLOPPY;
+    if (!strcmp(name, "hashline")) return PE_HASHLINE;
     return -1;
 }
 
 const char *pe_mode_name(pe_mode_t m) {
-    static const char *const N[] = {"replace", "patch", "apply_patch", "sloppy"};
+    static const char *const N[] = {"replace", "patch", "apply_patch", "sloppy", "hashline"};
     return N[m];
 }
 
@@ -3062,7 +3219,8 @@ void pe_result_free(pe_result_t *r) {
 
 static const char *op_label(int op) { return op == OP_CREATE ? "create" : op == OP_DELETE ? "delete" : "update"; }
 
-static char *format_file_text(const staged_t *s) {
+static char *format_file_text(const staged_t *s, const char *tag) {
+    if (s->text_override) return xstrdup(s->text_override);
     sb_t b = SB_INIT;
     if (s->op == OP_DELETE) {
         sb_appendf(&b, "Deleted %s", s->display);
@@ -3070,7 +3228,9 @@ static char *format_file_text(const staged_t *s) {
         const char *src = s->preview_diff ? s->preview_diff : s->diff;
         char *preview = diff_compact_preview(src, NULL, NULL);
         strvec_t parts = {0};
-        strvec_push_own(&parts, xasprintf("[%s]", s->move_display ? s->move_display : s->display));
+        const char *hp = s->move_display ? s->move_display : s->display;
+        strvec_push_own(&parts, tag ? xasprintf("[%s#%s]", hp, tag) : xasprintf("[%s]", hp));
+        for (size_t i = 0; i < s->before_preview.n; i++) strvec_push(&parts, s->before_preview.v[i]);
         if (s->move_display) strvec_push_own(&parts, xasprintf("Moved to %s", s->move_display));
         if (*preview) strvec_push(&parts, preview);
         for (size_t i = 0; i < s->after_preview.n; i++) strvec_push(&parts, s->after_preview.v[i]);
@@ -3196,7 +3356,7 @@ static json_t *per_file_json(const staged_t *s, pe_mode_t mode, bool single, boo
     return o;
 }
 
-static void finish(stageds_t *st, pe_mode_t mode, const pe_opts_t *o, pe_result_t *out) {
+static void finish(stageds_t *st, pe_mode_t mode, const pe_opts_t *o, hl_clip_t *clip, pe_result_t *out) {
     strvec_t texts = {0};
     for (size_t i = 0; i < st->n; i++) {
         staged_t *s = &st->v[i];
@@ -3214,7 +3374,21 @@ static void finish(stageds_t *st, pe_mode_t mode, const pe_opts_t *o, pe_result_
             }
             out->writes++;
         }
-        char *t = format_file_text(s);
+        char *tag = NULL;
+        const char *key = s->move_abs ? s->move_abs : s->abs;
+        if (s->hashline && o->store) {
+            if (s->op == OP_DELETE) hl_store_invalidate(o->store, s->abs);
+            else tag = file_tag(s->after, strlen(s->after));
+        }
+        char *t = format_file_text(s, tag);
+        if (s->hashline && o->store && s->op != OP_DELETE) {
+            char *rt = s->op == OP_NOOP ? hl_record_plain(o->store, key, s->after)
+                                        : hl_record_after(o->store, s->abs, key, s->before, s->after, t, true);
+            free(rt);
+            if (s->op != OP_NOOP) hl_reset_noop(o->store, s->abs);
+        }
+        free(tag);
+        if (clip && i + 1 == st->n) hl_clip_commit(clip, o->store);
         if (s->op != OP_DELETE && o->after_write) {
             char *d = o->after_write(o->ud, s->move_abs ? s->move_abs : s->abs);
             if (d && *d) {
@@ -3281,11 +3455,16 @@ void pe_run(pe_mode_t mode, const json_t *args, const pe_opts_t *o, pe_result_t 
     fs.o = o;
     stageds_t st = {0};
     perr_t e = {0};
+    hl_clip_t *clip = NULL;
     bool ok;
     switch (mode) {
     case PE_REPLACE: ok = replace_stage(&fs, args, o->allow_fuzzy, o->fuzzy_threshold, &st, &e); break;
     case PE_PATCH: ok = patch_stage(&fs, args, o->allow_fuzzy, o->fuzzy_threshold, &st, &e); break;
     case PE_APPLY_PATCH: ok = apply_patch_stage(&fs, args, o->allow_fuzzy, o->fuzzy_threshold, &st, &e); break;
+    case PE_HASHLINE:
+        clip = hl_clip_start(o->store);
+        ok = hashline_stage(&fs, args, clip, &st, &e);
+        break;
     default: ok = sloppy_stage(&fs, args, &st, &e); break;
     }
     if (!ok) {
@@ -3296,8 +3475,9 @@ void pe_run(pe_mode_t mode, const json_t *args, const pe_opts_t *o, pe_result_t 
         json_set_str(out->details, "diff", "");
         json_set_str(out->details, "errorKind", out->error_kind);
     } else {
-        finish(&st, mode, o, out);
+        finish(&st, mode, o, clip, out);
     }
+    hl_clip_free(clip);
     stageds_free(&st);
     fsrc_free(&fs);
 }

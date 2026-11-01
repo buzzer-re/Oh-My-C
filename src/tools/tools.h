@@ -25,6 +25,7 @@ typedef struct {
     pthread_mutex_t mu;
     VEC(snapshot_t *) snaps; /* newest last */
     hmap_t registers;        /* named clipboard registers: name -> char* (owned) */
+    hmap_t noop;             /* hashline no-op streaks: abs path -> "payloadhash:count" (owned) */
 } edit_store_t;
 
 void edit_store_init(edit_store_t *s);
@@ -148,8 +149,6 @@ json_t *schema_obj(void);
 json_t *schema_lit(const char *json);
 void schema_prop(json_t *schema, const char *name, const char *type, const char *desc, bool required);
 void schema_prop_json(json_t *schema, const char *name, json_t *prop, bool required);
-/* edit-engine entry (hashline) used by edit tool and tests; other modes live in patch.h */
-int hashline_apply(tool_env_t *env, const char *input, tool_result_t *out);
 /* line-numbered rendering used by read & grep */
 void format_hashline_header(sb_t *b, const char *display_path, const char *tag);
 /* omp grouped-file-output display text (details.displayContent) from
