@@ -208,6 +208,16 @@ static void post_notice(void *x) {
         uiev_free(e);
         return;
     }
+    if (!strcmp(e->name, "retry-failed")) {
+        char *f1 = strchr(e->out, '\x1f'), *f2 = f1 ? strchr(f1 + 1, '\x1f') : NULL;
+        if (f1 && f2) {
+            *f1 = *f2 = 0;
+            ui_retry_failed(e->u, atoi(e->out), f1 + 1, f2 + 1);
+        }
+        tui_request_render(e->u->tui);
+        uiev_free(e);
+        return;
+    }
     if (!strcmp(e->name, "retry_fallback_applied")) {
         char *m = app_fallback_notice_text(e->out);
         add_notice(e->u, "warning", m);

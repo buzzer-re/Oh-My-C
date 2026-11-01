@@ -811,8 +811,11 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
     }
     if (!retryable) return false;
     if (exhausted) {
-        notice(a, "error", "Retry budget exhausted after %d %s: %s", saga - 1, saga - 1 == 1 ? "retry" : "retries",
-               err ? err : "error");
+        /* closeRetrySaga failure: the final turn reads "Retry budget exhausted …", superseded attempts hide,
+         * then "Retry failed after N attempts: <error>" (fields: attempts \x1f final turn error \x1f error) */
+        notice(a, "retry-failed", "%d\x1fRetry budget exhausted after %d %s: %s\x1f%s", saga - 1, saga - 1,
+               saga - 1 == 1 ? "retry" : "retries", err ? err : "error", err ? err : "Unknown error");
+        strvec_free(&a->retry_notes);
         return false;
     }
     int64_t delay = mr_retry_backoff_ms(settings_int("retry.baseDelayMs", 500), saga);

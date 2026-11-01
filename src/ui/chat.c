@@ -881,6 +881,34 @@ void ui_retry_recovered(ui_t *u, const char *notes) {
     ui_error_banner_clear(u);
 }
 
+/* auto_retry_end failure: the run's earlier failed attempts are superseded (removed), the final one shows
+ * `final_error` inline instead of the pinned banner, then "Retry failed after N attempts: <error>" */
+void ui_retry_failed(ui_t *u, int attempts, const char *final_error, const char *error) {
+    msgview_t *last = NULL;
+    for (size_t i = u->chat->children.n; i-- > 0;) {
+        tui_component_t *c = u->chat->children.v[i];
+        if (c->vt != &MV_VT) continue;
+        msgview_t *mv = (msgview_t *)c;
+        if (mv->kind == MV_USER) break;
+        if (mv->kind != MV_ASSISTANT || mv->retry_note || !str_eq(json_get_str(mv->msg, "stopReason"), "error")) continue;
+        if (!last) {
+            last = mv;
+            json_set_str(mv->msg, "errorMessage", final_error);
+            mv->error_pinned = false;
+            mv->dirty = true;
+            continue;
+        }
+        if (u->pinned_error == mv) u->pinned_error = NULL;
+        tui_container_remove(u->chat, c);
+        tui_component_destroy(c);
+    }
+    if (last && u->pinned_error == last) u->pinned_error = NULL;
+    ui_error_banner_clear(u);
+    char *m = xasprintf("Retry failed after %d attempts: %s", attempts, error);
+    add_notice(u, "error", m);
+    free(m);
+}
+
 /* showStatus / showWarning / showError. Consecutive status lines update in place instead of stacking. */
 void add_notice(ui_t *u, const char *level, const char *text) {
     if (!strcmp(level, "warning") && str_starts(text, "Injecting rule: ")) {

@@ -199,6 +199,18 @@ static void rpc_listener(void *ud, const agent_event_t *ev) {
 static void notice_rpc(void *ud, const char *level, const char *text) {
     rpc_t *r = ud;
     if (!strcmp(level, "retry-recovered")) return;
+    if (!strcmp(level, "retry-failed")) {
+        const char *f1 = strchr(text, '\x1f'), *f2 = f1 ? strchr(f1 + 1, '\x1f') : NULL;
+        if (!f1 || !f2) return;
+        json_t *j = json_obj();
+        json_set_str(j, "type", "auto_retry_end");
+        json_set_bool(j, "success", false);
+        json_set_int(j, "attempt", atoi(text));
+        json_set_str(j, "finalError", f2 + 1);
+        emit(r, j);
+        json_free(j);
+        return;
+    }
     if (!strcmp(level, "retry_fallback_applied")) {
         static const char *const keys[] = {"from", "to", "role", "reason"};
         json_t *j = json_obj();
