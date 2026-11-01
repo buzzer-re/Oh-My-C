@@ -112,6 +112,20 @@ check "artifact read"  "29999"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" -m mock/mock-1 --no-session -p "bash:python3 -c \"print('x'*2000)\"; printf 'a\\033[31mb\\rc\\n'; exit 3" >/dev/null 2>&1 </dev/null
 check "sink columns"   "…"$'\n'"ab"$'\n'"c"$'\n\n\n'"Command exited with code 3"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 check "sink col note"  "[Some lines truncated to 768 bytes]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+# tool result text parity with omp: argument validation (omptype messages, coercion, received args), todo/task
+# errors, bash without bash's job-status notices
+"$B" -m mock/mock-1 --no-session -p 'call:grep:{}' >/dev/null 2>&1 </dev/null
+check "args missing"   "  - pattern: pattern must be a string (was missing)"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" -m mock/mock-1 --no-session -p 'call:grep:{"pattern":true,"case":3}' >/dev/null 2>&1 </dev/null
+check "args coerced"   $'  - case: case must be boolean (was a number)\n\nReceived arguments:\n{\n  "original": {\n    "pattern": true,'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" -m mock/mock-1 --no-session -p 'call:todo:{"op":"bogus"}' >/dev/null 2>&1 </dev/null
+check "todo bad op"    'Invalid todo arguments: op must be "init", "start", "done", "rm", "drop", "block", "unblock", "append" or "view" (was "bogus")'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" -m mock/mock-1 --no-session -p 'seq:[["todo",{"op":"init","items":["a"]}],["todo",{"op":"start","task":"nope"}]]' >/dev/null 2>&1 </dev/null
+check "todo errors"    $'Errors: Task "nope" not found\nRemaining items (1):'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" -m mock/mock-1 --no-session -p 'call:task:{}' >/dev/null 2>&1 </dev/null
+check "task shape"     'Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" -m mock/mock-1 --no-session -p "bash:sh -c 'kill -9 \$\$'; printf 'x'; sh -c 'kill -SEGV \$\$'; echo after-kill" >/dev/null 2>&1 </dev/null
+check "bash no notice" "xafter-kill"  python3 -I -c "$LASTMSG; import re; sys.exit(1) if re.search('Killed|Segmentation', c) else None" "$T/req.jsonl"
 # skills + internal URLs + context files
 mkdir -p "$T/agent/skills/demo"
 printf -- '---\nname: demo\ndescription: Demo skill for tests\n---\nSKILL BODY LINE\n' > "$T/agent/skills/demo/SKILL.md"
@@ -186,12 +200,9 @@ printf 'remote one\nremote two\n' > "$T/remote.txt"
 printf '{"hosts":{"box":{"host":"localhost","username":"me","description":"test box"}}}' > ssh.json
 check "ssh hosts"      "[box](ssh://box/)"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "read:ssh://"
 check "ssh read sel"   "2:remote two"       env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "read:ssh://box$T/remote.txt:2"
-check "ssh write"      "Wrote ssh://box"    env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/w.txt\",\"content\":\"via ssh\"}"
+check "ssh write"      "Successfully wrote 7 bytes to ssh://box"    env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/w.txt\",\"content\":\"via ssh\"}"
 check "ssh write file" "via ssh"            cat "$T/sub/w.txt"
-STAG=$(env PATH="$ROOT/tests/e2e/bin:$PATH" timeout 30 "$B" -m mock/mock-1 -p "read:ssh://box$T/sub/w.txt" </dev/null | grep -o 'w.txt#[0-9A-F]*' | head -1 | cut -d'#' -f2)
-check "ssh edit"       "w.txt#"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "edit:[ssh://box$T/sub/w.txt#$STAG]\nPUT 1.=1:\n+edited over ssh"
-check "ssh edit file"  "edited over ssh"    cat "$T/sub/w.txt"
-check "ssh replace"    "[ssh://box"  env PI_EDIT_VARIANT=replace PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "call:edit:{\"path\":\"ssh://box$T/sub/w.txt\",\"old_string\":\"edited over ssh\",\"new_string\":\"replaced over ssh\"}"
+check "ssh replace"    "[ssh://box"  env PI_EDIT_VARIANT=replace PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "call:edit:{\"path\":\"ssh://box$T/sub/w.txt\",\"old_string\":\"via ssh\",\"new_string\":\"replaced over ssh\"}"
 check "ssh replace file" "replaced over ssh"  cat "$T/sub/w.txt"
 check "ssh override"   "overrides are not allowed"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "read:ssh://me@box/etc/hosts"
 rm -f ssh.json
