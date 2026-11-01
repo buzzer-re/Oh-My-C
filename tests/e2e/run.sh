@@ -316,7 +316,8 @@ check "managed SKILL.md" $'---\nname: e2e-skill\ndescription: Use for e2e tests\
 check "managed listed"  "Do the thing."         "${MENV[@]}" "$B" -m mock/mock-1 -p "read:skill://e2e-skill"
 check "manage dup"      "already exists"        "${MENV[@]}" "$B" -m mock/mock-1 -p 'call:manage_skill:{"action":"create","name":"e2e-skill","description":"d","body":"b"}'
 # the previous runs are idle rollouts now: a slow prompt keeps this process alive while startup consolidates them
-check "memory startup"  "done"                  "${MENV[@]}" "$B" -m mock/mock-1 -p "slow:4:done"
+check "memory startup"  "done"                  "${MENV[@]}" "$B" -m mock/mock-1 -p "slow:10:done"
+for _ in $(seq 50); do [ -f "$MROOT/memory_summary.md" ] && break; sleep 0.2; done
 check "memory summary"  "MOCK SUMMARY from consolidation"  cat "$MROOT/memory_summary.md"
 check "memory skill"    "echo mock"             cat "$MROOT/skills/mock-skill/scripts/run.sh"
 check "memory rollout"  "Mock rollout summary." bash -c "cat '$MROOT'/rollout_summaries/*-mock_slug.md"
