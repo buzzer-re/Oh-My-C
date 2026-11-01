@@ -18,6 +18,7 @@
 #include "coding/ttsr.h"
 #include "dap/dap.h"
 #include "lsp/lsp.h"
+#include "tools/gh.h"
 #include "mcp/mcp.h"
 #include "prompt/template.h"
 
@@ -735,6 +736,11 @@ static void install_agent(app_t *a) {
         (a->opts.tools ? strvec_contains(a->opts.tools, "checkpoint") || strvec_contains(a->opts.tools, "rewind")
                        : !a->opts.subagent))
         add_checkpoint_tools(a, ag);
+    /* github: discoverable; only with the gh CLI on PATH and github.enabled (tools/index.ts) */
+    if (!a->opts.no_tools && settings_bool("github.enabled", false) && (!a->opts.tools || strvec_contains(a->opts.tools, "github"))) {
+        agent_tool_t *gt = tool_github_new(a->env);
+        if (gt) agent_add_tool(ag, gt);
+    }
     if (!a->opts.no_tools && settings_bool("debug.enabled", true) && (!a->opts.tools || strvec_contains(a->opts.tools, "debug"))) {
         if (!a->dap) a->dap = dap_manager_new(a->cwd);
         agent_add_tool(ag, tool_debug_new(a->env, a->dap));
@@ -745,7 +751,7 @@ static void install_agent(app_t *a) {
     /* discoverable (xd://-mountable) tools added outside tools_register_builtin; MCP tools too */
     for (size_t i = 0; i < ag->all_tools.n; i++) {
         agent_tool_t *t = ag->all_tools.v[i];
-        if (str_eq(t->name, "lsp") || str_eq(t->name, "debug") || str_eq(t->name, "checkpoint") ||
+        if (str_eq(t->name, "lsp") || str_eq(t->name, "debug") || str_eq(t->name, "github") || str_eq(t->name, "checkpoint") ||
             str_eq(t->name, "rewind") || str_starts(t->name, "mcp__"))
             t->discoverable = true;
     }

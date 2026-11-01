@@ -29,6 +29,8 @@ typedef struct {
     const char *cwd;      /* project dir (path shortening, `cd` prefixes) */
     int term_rows;        /* terminal height (preview windows); 0 = unknown */
     int64_t now_ms;       /* wall clock for live elapsed facts (0 = now) */
+    /* registered tool label lookup (xd:// device writes delegate to the mounted tool's card); may be NULL */
+    const char *(*label_of)(const char *tool);
 } tc_call_t;
 
 /* Render one tool call (any tool; falls back to the generic card). Appends lines to `out`. */
@@ -159,8 +161,6 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out);
 void tc_glob(const tc_call_t *c, int width, strvec_t *out);
 void tc_todo(const tc_call_t *c, int width, strvec_t *out);
 void tc_generic(const tc_call_t *c, int width, strvec_t *out);
-/* label of a registered tool (set by the host; NULL when unknown) */
-extern const char *(*tc_tool_label)(const char *name);
 void tc_tinted_box(const strvec_t *body, int width, tui_tc_t bg_slot, strvec_t *out);
 void tc_mcp(const tc_call_t *c, int width, strvec_t *out);
 void tc_render_diff(const char *diff, const char *path, strvec_t *out);

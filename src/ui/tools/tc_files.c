@@ -129,7 +129,81 @@ void tc_render_read_group(const tc_call_t *calls, size_t n, int width, strvec_t 
     free(title_b);
 }
 
-void tc_read(const tc_call_t *c, int width, strvec_t *out) { tc_render_read_group(c, 1, width, out); }
+/* standalone read of a markdown resource (pr://, issue://): renderMarkdownCell with a `Read <path>` title */
+static bool read_markdown_card(const tc_call_t *c, int width, strvec_t *out) {
+    if (!c->has_result || c->partial || c->is_error || !str_eq(json_get_str(c->details, "contentType"), "text/markdown")) return false;
+    const char *raw = json_get_str(c->args, "path");
+    if (!raw) raw = json_get_str(c->args, "file_path");
+    if (!raw || json_get_bool(c->args, "raw", false)) return false;
+    const char *sel = strstr(raw, "://");
+    sel = sel ? strchr(sel + 3, ':') : NULL;
+    if (sel) {
+        strvec_t chunks = str_split(sel + 1, ":");
+        bool rawsel = false;
+        for (size_t i = 0; i < chunks.n; i++)
+            if (!strcasecmp(chunks.v[i], "raw")) rawsel = true;
+        strvec_free(&chunks);
+        if (rawsel) return false;
+    }
+    char *text = tc_text_of(c->content);
+    /* displayContent: the page without its model-facing continuation notice */
+    char *nt = strstr(text, "\n[");
+    while (nt) {
+        char *next = strstr(nt + 2, "\n[");
+        if (!next) break;
+        nt = next;
+    }
+    if (nt && strstr(nt, " more lines in ") && str_ends(nt, " to continue]")) {
+        *nt = 0;
+        size_t l = strlen(text);
+        while (l && text[l - 1] == '\n') text[--l] = 0;
+    }
+    char *shown = tc_shorten_path(raw);
+    char *t = xasprintf("Read %s", shown);
+    char *icon = tc_status_icon(TC_ST_DONE, -1);
+    char *tt = tc_fg(TUI_TC_TOOL_TITLE, t);
+    char *title = xasprintf("%s %s", icon, tt);
+    int iw = MAX(20, tc_block_content_width(width, -1, -1));
+    tc_section_t sec = {0};
+    char *trimmed = str_trim(text);
+    if (*trimmed) {
+        tui_md_opts_t mo;
+        tui_md_opts_default(&mo);
+        strvec_t all = {0};
+        tui_md_render(text, iw, &mo, &all);
+        size_t lim = c->expanded ? all.n : MIN(all.n, (size_t)12);
+        for (size_t i = 0; i < lim; i++) strvec_push(&sec.lines, all.v[i]);
+        if (all.n > lim) {
+            char *mi = tc_more_items((int64_t)(all.n - lim), "line");
+            char *hint = tc_expand_hint();
+            char *hp = tui_strip_ansi(hint);
+            char *m = xasprintf("%s %s", mi, hp);
+            strvec_push_own(&sec.lines, tc_fg(TUI_TC_DIM, m));
+            free(m);
+            free(hp);
+            free(hint);
+            free(mi);
+        }
+        strvec_free(&all);
+    }
+    tc_block_t blk = {.header = title, .state = TC_STATE_SUCCESS, .sections = &sec, .nsections = 1, .width = width,
+                      .pad_left = -1, .pad_right = -1, .border_slot = -1};
+    tc_output_block(&blk, out);
+    strvec_free(&sec.lines);
+    free(trimmed);
+    free(title);
+    free(tt);
+    free(icon);
+    free(t);
+    free(shown);
+    free(text);
+    return true;
+}
+
+void tc_read(const tc_call_t *c, int width, strvec_t *out) {
+    if (read_markdown_card(c, width, out)) return;
+    tc_render_read_group(c, 1, width, out);
+}
 
 /* ---------- write ---------- */
 
@@ -229,10 +303,98 @@ static void write_preview(const char *content, const char *lang, bool expanded, 
     free(norm);
 }
 
+/* `write xd://<tool>`: the device dispatch renders as the mounted tool's own card (omp tools/xdev.ts
+ * renderXdevCall / renderXdevResult). Returns false when the write is not a device dispatch. */
+static bool write_xdev(const tc_call_t *c, const char *raw, int width, strvec_t *out) {
+    if (strncasecmp(raw, "xd://", 5) != 0) return false;
+    const char *nm = strstr(raw, "://") + 3;
+    size_t nl = strcspn(nm, "/?#");
+    if (!nl || nm[nl]) return false; /* bare xd:// and xd://<tool>/<topic> keep the write card */
+    char *name = xstrndup(nm, nl);
+    if (!strcmp(name, "report_issue") || !strcmp(name, "resolve") || !strcmp(name, "reject") || !strcmp(name, "propose")) {
+        free(name);
+        return false;
+    }
+    const json_t *xd = c->has_result ? json_get_obj(c->details, "xdev") : NULL;
+    if (c->has_result && !xd) {
+        free(name);
+        return false;
+    }
+    const char *label = c->label_of ? c->label_of(name) : NULL;
+    tc_call_t ic = *c;
+    ic.name = name;
+    ic.label = label;
+    if (xd) {
+        bool ok = true;
+        if (str_eq(json_get_str(xd, "mode"), "help")) {
+            sb_t tb = SB_INIT;
+            const json_t *blk;
+            json_arr_foreach(c->content, i, blk) {
+                const char *t = str_eq(json_get_str(blk, "type"), "text") ? json_get_str(blk, "text") : NULL;
+                if (!t || !*t) continue;
+                if (tb.len) sb_putc(&tb, '\n');
+                sb_append(&tb, t);
+            }
+            if (tb.len) {
+                char *txt = tc_replace_tabs(sb_cstr(&tb));
+                char *col = tc_fg(TUI_TC_TOOL_OUTPUT, txt);
+                tc_push_wrapped(out, col, width);
+                free(col);
+                free(txt);
+            } else {
+                ok = false;
+            }
+            sb_free(&tb);
+            free(name);
+            return ok;
+        }
+        json_t *empty = json_obj();
+        const json_t *ia = json_get_obj(xd, "args");
+        ic.args = ia ? ia : empty;
+        ic.details = json_get_obj(xd, "inner");
+        if (!ic.label) ic.label = name;
+        tc_render(&ic, width, out);
+        json_free(empty);
+        free(name);
+        return true;
+    }
+    /* call phase: nothing until the path settles (content started), queued until execution, then the device card */
+    const json_t *cj = json_get(c->args, "content");
+    if (!cj) {
+        free(name);
+        return true;
+    }
+    const char *content = json_sv(cj);
+    json_t *args = content ? json_parse_partial(content, strlen(content)) : NULL;
+    if (!json_is_obj(args)) {
+        json_free(args);
+        args = json_obj();
+    }
+    ic.args = args;
+    ic.content = NULL;
+    ic.details = NULL;
+    ic.has_result = false;
+    if (!c->exec_started) {
+        char *ql = xasprintf("queued %s", label ? label : name);
+        ic.label = ql;
+        ic.partial = true;
+        ic.spinner = -1;
+        tc_generic(&ic, width, out);
+        free(ql);
+    } else {
+        if (!ic.label) ic.label = name;
+        tc_render(&ic, width, out);
+    }
+    json_free(args);
+    free(name);
+    return true;
+}
+
 void tc_write(const tc_call_t *c, int width, strvec_t *out) {
     const char *raw = json_get_str(c->args, "path");
     if (!raw) raw = json_get_str(c->args, "file_path");
     if (!raw) raw = "";
+    if (write_xdev(c, raw, width, out)) return;
     const char *content = json_get_str(c->args, "content");
     char *fp = tc_shorten_path(raw);
     const char *lang = *raw ? tc_lang_from_path(raw) : NULL;

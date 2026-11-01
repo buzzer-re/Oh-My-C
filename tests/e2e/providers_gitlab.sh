@@ -34,7 +34,7 @@ grep -q '"query": "/gl/api/v4/ai/duo_workflows/ws?project_id=7&namespace_id=42&r
 grep -q '"x-gitlab-client-type": "node-websocket"' "$GLL" && echo "   ok  duo-agent websocket headers" || { echo "   FAIL duo-agent websocket headers"; fail=1; }
 grep -q '"flowConfigSchemaVersion": "v1", "flowConfig": {"version": "v1", "environment": "ambient"' "$GLL" \
     && echo "   ok  duo-agent inline flow" || { echo "   FAIL duo-agent inline flow"; fail=1; }
-grep -q '"frame": {"actionResponse": {"requestID": "req-1", "plainTextResponse": {"response": "wf-e2e"}}}' "$GLL" \
+grep -q '"frame": {"actionResponse": {"requestID": "req-1", "plainTextResponse": {"response": "wf-e2e\\n"}}}' "$GLL" \
     && echo "   ok  duo-agent action response" || { echo "   FAIL duo-agent action response"; fail=1; }
 [ "$(grep -c '"ws": "start"' "$GLL")" = 4 ] && echo "   ok  duo-agent socket reuse" || { echo "   FAIL duo-agent socket reuse"; fail=1; }
 grep -q '"method": "PATCH", "path": "/gl/api/v4/ai/duo_workflows/workflows/[0-9]*".*"status_event": "stop"' "$GLL" \

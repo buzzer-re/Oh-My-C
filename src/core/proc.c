@@ -33,10 +33,11 @@ static char **build_env(const char *const *extra) {
         size_t kl = eq ? (size_t)(eq - environ[i]) : strlen(environ[i]);
         bool overridden = false;
         for (size_t j = 0; j < m; j++)
-            if (strncmp(extra[j], environ[i], kl) == 0 && extra[j][kl] == '=') overridden = true;
+            if (strncmp(extra[j], environ[i], kl) == 0 && (extra[j][kl] == '=' || extra[j][kl] == 0)) overridden = true;
         if (!overridden) env[k++] = environ[i];
     }
-    for (size_t j = 0; j < m; j++) env[k++] = (char *)extra[j];
+    for (size_t j = 0; j < m; j++)
+        if (strchr(extra[j], '=')) env[k++] = (char *)extra[j]; /* a bare NAME unsets it */
     env[k] = NULL;
     return env;
 }

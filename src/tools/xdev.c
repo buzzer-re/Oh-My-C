@@ -644,6 +644,14 @@ static json_t *xdev_details(const char *tool, const char *mode, const json_t *ar
     return d;
 }
 
+/* dispatchXdevTool innerOnUpdate: a device's partial result renders through the write card as the device's own */
+static void xdev_update(tool_ctx_t *ctx, const tool_result_t *partial) {
+    tool_result_t q = *partial;
+    q.details = xdev_details(ctx->xdev_tool, "execute", ctx->xdev_args, partial->details);
+    ctx->xdev_outer_update(ctx, &q);
+    json_free(q.details);
+}
+
 bool xdev_write(tool_ctx_t *ctx, const char *path, const char *content, tool_result_t *out) {
     if (!path || strncasecmp(path, XD, 5) != 0) return false;
     agent_t *a = ctx ? ctx->agent : NULL;
@@ -694,6 +702,7 @@ bool xdev_write(tool_ctx_t *ctx, const char *path, const char *content, tool_res
         char *e = no_such_tool(a, name);
         tool_result_error(out, "%s", e);
         free(e);
+        out->details = xdev_details(name, "execute", NULL, NULL);
         goto done;
     }
     if (help_content(content)) {
@@ -709,6 +718,7 @@ bool xdev_write(tool_ctx_t *ctx, const char *path, const char *content, tool_res
         tool_result_error(out, XD "%s expects a JSON args object as content (%s). Write `?` for docs.", name,
                           perr ? perr : "parse error");
         free(perr);
+        out->details = xdev_details(name, "execute", NULL, NULL);
         goto done;
     }
     free(perr);
@@ -717,6 +727,7 @@ bool xdev_write(tool_ctx_t *ctx, const char *path, const char *content, tool_res
                           json_is_arr(args) ? "array" : json_is_str(args) ? "string" : json_is_num(args) ? "number"
                           : json_is_bool(args) ? "boolean" : "object");
         json_free(args);
+        out->details = xdev_details(name, "execute", NULL, NULL);
         goto done;
     }
     if (json_get(args, INTENT_FIELD) && !schema_declares_property(t->parameters, INTENT_FIELD))
@@ -731,12 +742,24 @@ bool xdev_write(tool_ctx_t *ctx, const char *path, const char *content, tool_res
         free(d);
         free(verr);
         json_free(args);
+        out->details = xdev_details(name, "execute", NULL, NULL);
         goto done;
     }
     /* the ctx is embedded in the agent's job record (update callbacks locate it by address): reuse it */
     const char *outer_name = ctx->tool_name;
     ctx->tool_name = t->name;
+    void (*outer_update)(tool_ctx_t *, const tool_result_t *) = ctx->update;
+    if (outer_update) {
+        ctx->xdev_outer_update = outer_update;
+        ctx->xdev_tool = name;
+        ctx->xdev_args = args;
+        ctx->update = xdev_update;
+    }
     t->execute(t, ctx, args, out);
+    ctx->update = outer_update;
+    ctx->xdev_outer_update = NULL;
+    ctx->xdev_tool = NULL;
+    ctx->xdev_args = NULL;
     ctx->tool_name = outer_name;
     json_t *inner = out->details;
     out->details = xdev_details(name, "execute", args, inner);

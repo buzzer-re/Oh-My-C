@@ -491,85 +491,8 @@ bool tc_wants_tick(const char *name) {
     return true;
 }
 
-const char *(*tc_tool_label)(const char *name);
-
-static char *joined_text(const json_t *content) {
-    sb_t b = SB_INIT;
-    json_t *x;
-    json_arr_foreach(content, i, x) {
-        const char *t = str_eq(json_get_str(x, "type"), "text") ? json_get_str(x, "text") : NULL;
-        if (!t || !*t) continue;
-        if (b.len) sb_putc(&b, '\n');
-        sb_append(&b, t);
-    }
-    return sb_detach(&b);
-}
-
-/* `write xd://<tool>` delegates to the device's own card (tui/src/tools/xdev.ts renderXdevCall/renderXdevResult;
- * every built-in device renderer merges call and result). Returns false when the call is not a device write. */
-static bool tc_xdev(const tc_call_t *c, int width, strvec_t *out) {
-    const char *path = json_get_str(c->args, "path");
-    if (!path || strncmp(path, "xd://", 5) != 0) return false;
-    size_t nl = strcspn(path + 5, "/?#");
-    if (!nl) return false;
-    char *name = xstrndup(path + 5, nl);
-    if (!strcmp(name, "report_issue")) {
-        free(name);
-        return false;
-    }
-    const json_t *xd = json_get_obj(c->details, "xdev");
-    if (c->has_result && !c->partial && !xd) { /* invalid dispatch: the write card shows the error */
-        free(name);
-        return false;
-    }
-    const char *lbl = tc_tool_label ? tc_tool_label(name) : NULL;
-    tc_call_t in = *c;
-    in.name = name;
-    in.label = lbl ? lbl : name;
-    in.details = xd ? json_get_obj(xd, "inner") : NULL;
-    json_t *decoded = NULL;
-    const json_t *xargs = xd ? json_get_obj(xd, "args") : NULL;
-    if (!xargs) {
-        const char *content = json_get_str(c->args, "content");
-        decoded = content ? json_parse_partial(content, strlen(content)) : NULL;
-        if (!json_is_obj(decoded)) {
-            json_free(decoded);
-            decoded = json_obj();
-        }
-        xargs = decoded;
-    }
-    in.args = xargs;
-    if (xd && str_eq(json_get_str(xd, "mode"), "help")) {
-        char *txt = joined_text(c->content);
-        if (txt && *txt) {
-            strvec_t ls = {0};
-            tc_split_lines(txt, &ls);
-            for (size_t i = 0; i < ls.n; i++) {
-                char *f = tc_fg(TUI_TC_TOOL_OUTPUT, ls.v[i]);
-                tc_push_wrapped(out, f, width);
-                free(f);
-            }
-            strvec_free(&ls);
-        }
-        free(txt);
-    } else if (!c->exec_started && !c->has_result) {
-        char *q = xasprintf("queued %s", in.label);
-        in.label = q;
-        in.partial = true;
-        in.spinner = -1;
-        tc_generic(&in, width, out);
-        free(q);
-    } else {
-        tc_render(&in, width, out);
-    }
-    json_free(decoded);
-    free(name);
-    return true;
-}
-
 void tc_render(const tc_call_t *c, int width, strvec_t *out) {
     const char *n = c->name ? c->name : "";
-    if (!strcmp(n, "write") && tc_xdev(c, width, out)) return;
     if (!strcmp(n, "bash")) tc_bash(c, width, out);
     else if (!strcmp(n, "read")) tc_read(c, width, out);
     else if (!strcmp(n, "write")) tc_write(c, width, out);

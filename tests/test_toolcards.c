@@ -194,7 +194,9 @@ static void run_spec(const char *name) {
         json_set(r, "content", content);
         if (json_get(e, "details")) json_set(r, "details", json_clone(json_get(e, "details")));
         json_t *args = json_get(e, "args");
-        tc_call_t c = {.name = tool, .args = args, .content = json_get_arr(r, "content"), .details = json_get_obj(r, "details"),
+        /* github renders its own card only when the tool is registered (gh on PATH + github.enabled) */
+        tc_call_t c = {.name = tool, .label = !strcmp(tool, "github") ? "GitHub" : NULL, .args = args,
+                       .content = json_get_arr(r, "content"), .details = json_get_obj(r, "details"),
                        .has_result = true, .is_error = json_get_bool(e, "isError", false), .spinner = -1, .elapsed_ms = -1,
                        .cwd = "/work", .term_rows = 80};
         strvec_t out = {0};
@@ -358,7 +360,7 @@ int main(void) {
     }
     /* replayed transcripts (tests/tui/specs) against omp captures; lsp1 hover / cells error highlighting differ in
      * token colors (omc's highlighter vs syntect), so those specs avoid such tokens or are compared via lsp2 only */
-    static const char *const SPECS[] = {"ws", "ask", "goal", "find", "ast", "debug", "task", "wait", "lsp2"};
+    static const char *const SPECS[] = {"ws", "ask", "goal", "find", "ast", "debug", "task", "wait", "lsp2", "github", "ghwatch"};
     for (size_t i = 0; i < ARRAY_LEN(SPECS); i++) run_spec(SPECS[i]);
     if (failures) fprintf(stderr, "%d failure(s)\n", failures);
     return failures ? 1 : 0;

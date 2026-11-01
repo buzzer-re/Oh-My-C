@@ -7,7 +7,9 @@
 #   tests/parity/tool_diff.sh <cases-file>      # one prompt per line; `# name` lines label the next case
 # Env: TD_DIR (scratch, default $TMPDIR/omc-tooldiff), OMP_BIN (default omp), TD_FIXTURE (directory
 # copied to $TD_DIR/work before each run; default: empty dir), TD_SETUP=<script> runs `$TD_SETUP <agent-dir>`
-# for both agent dirs, TD_PATH (prepended to PATH for both apps, e.g. a fake `gh`), TD_ONLY=<name> runs one case.
+# for both agent dirs, TD_PATH (prepended to PATH for both apps, e.g. a fake `gh`), TD_ONLY=<name> runs one case,
+# TD_RESET=<script> runs `$TD_RESET <work-dir>` before each app run (after the fixture copy). Each app run sees
+# TD_CASE_LOG=$TD_DIR/out/<case>.<app>.log (fake CLIs log their argv there; compare the two logs).
 # Exit status: number of differing cases.
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -38,9 +40,11 @@ for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null && break; 
 run() { # app env-var agent-dir binary prompt
     rm -rf "$D/work"; mkdir -p "$D/work"
     [ -n "${TD_FIXTURE:-}" ] && cp -a "$TD_FIXTURE/." "$D/work/"
-    : > "$D/mock.jsonl"
-    (cd "$D/work" && env MOCK_KEY=x OMC_NO_TITLE=1 PI_NO_TITLE=1 PATH="${TD_PATH:+$TD_PATH:}$PATH" "$2=$3" \
+    [ -n "${TD_RESET:-}" ] && "$TD_RESET" "$D/work"
+    : > "$D/mock.jsonl"; rm -f "$D/out/$1.log"
+    (cd "$D/work" && env MOCK_KEY=x OMC_NO_TITLE=1 PI_NO_TITLE=1 PATH="${TD_PATH:+$TD_PATH:}$PATH" TD_CASE_LOG="$D/out/$1.log" "$2=$3" \
         timeout 120 "$4" -p "$5" </dev/null >"$D/out/$1.stdout" 2>&1)
+    cp "$D/mock.jsonl" "$D/out/$1.req.jsonl"
     python3 -I - "$D/mock.jsonl" "$D/work" <<'PY' > "$D/out/$1.txt"
 import json, sys
 log, work = sys.argv[1], sys.argv[2]
