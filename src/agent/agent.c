@@ -771,13 +771,20 @@ static void run_tool(tool_job_t *j) {
         if (gate == TOOL_BLOCK) {
             tool_result_error(&j->res, "%s", reason ? reason : "Tool call was blocked");
         } else {
-            char *verr = j->tool->lenient_args ? NULL : schema_validate(j->tool->parameters, j->args);
+            /* omp validateToolArguments: normalized/coerced args replace the call's; a lenient tool gets its raw
+             * args when they still fail */
+            char *recv = NULL;
+            char *verr = schema_validate_args(j->tool->parameters, j->args, &recv);
+            if (verr && j->tool->lenient_args) {
+                free(verr);
+                verr = NULL;
+            }
             if (verr) {
-                char *argstr = json_dump(j->args, 0);
-                tool_result_error(&j->res, "Validation failed for tool \"%s\":\n%s\n\nReceived arguments:\n%s", name, verr, argstr);
-                free(argstr);
+                tool_result_error(&j->res, "Validation failed for tool \"%s\":\n%s\n\nReceived arguments:\n%s", name, verr, recv);
+                free(recv);
                 free(verr);
             } else {
+                free(recv);
                 j->ctx.agent = a;
                 j->ctx.tool_call_id = id;
                 j->ctx.tool_name = name;
@@ -1097,174 +1104,3 @@ int agent_continue(agent_t *a) {
     return 0;
 }
 
-/* ---------- schema validation ---------- */
-
-static bool type_matches(const char *type, const json_t *v) {
-    if (!type) return true;
-    if (strcmp(type, "string") == 0) return json_is_str(v);
-    if (strcmp(type, "number") == 0) return json_is_num(v);
-    if (strcmp(type, "integer") == 0) return json_is_num(v) && v->u.num.d == floor(v->u.num.d);
-    if (strcmp(type, "boolean") == 0) return json_is_bool(v);
-    if (strcmp(type, "object") == 0) return json_is_obj(v);
-    if (strcmp(type, "array") == 0) return json_is_arr(v);
-    if (strcmp(type, "null") == 0) return v && v->type == JSON_NULL;
-    return true;
-}
-
-static json_t *coerce(const char *type, const json_t *v) {
-    if (!type || !v) return NULL;
-    if ((strcmp(type, "number") == 0 || strcmp(type, "integer") == 0) && json_is_str(v)) {
-        char *end;
-        double d = strtod(json_sv(v), &end);
-        if (end != json_sv(v) && *end == 0) return json_num(d);
-    }
-    if (strcmp(type, "boolean") == 0 && json_is_str(v)) {
-        if (strcmp(json_sv(v), "true") == 0) return json_bool(true);
-        if (strcmp(json_sv(v), "false") == 0) return json_bool(false);
-    }
-    if (strcmp(type, "string") == 0 && json_is_num(v)) {
-        char *s = json_dump(v, 0);
-        return json_str_own(s);
-    }
-    if ((strcmp(type, "array") == 0 || strcmp(type, "object") == 0) && json_is_str(v)) {
-        /* models sometimes stringify nested JSON */
-        json_t *p = json_parse_str(json_sv(v));
-        if (p && type_matches(type, p)) return p;
-        json_free(p);
-    }
-    return NULL;
-}
-
-/* arktype-style problem text (omp's tool validation): `<path> must be <expected> (was <actual>)` */
-static char *schema_expected(const json_t *schema) {
-    const char *desc = json_get_str(schema, "description");
-    if (desc && *desc) return xstrdup(desc);
-    json_t *en = json_get_arr(schema, "enum");
-    if (en && json_len(en)) {
-        sb_t b = SB_INIT;
-        for (size_t i = 0; i < json_len(en); i++) {
-            if (i) sb_append(&b, i + 1 == json_len(en) ? " or " : ", ");
-            char *j = json_dump(json_at(en, i), 0);
-            sb_append(&b, j);
-            free(j);
-        }
-        return sb_detach(&b);
-    }
-    const char *t = json_get_str(schema, "type");
-    if (!t) return xstrdup("valid");
-    if (!strcmp(t, "number")) return xstrdup("a number");
-    if (!strcmp(t, "integer")) return xstrdup("an integer");
-    if (!strcmp(t, "string")) return xstrdup("a string");
-    if (!strcmp(t, "object")) return xstrdup("an object");
-    if (!strcmp(t, "array")) return xstrdup("an array");
-    return xstrdup(t); /* boolean, null */
-}
-
-static const char *value_domain(const json_t *v) {
-    if (!v || v->type == JSON_NULL) return "null";
-    switch (v->type) {
-    case JSON_STRING: return "a string";
-    case JSON_NUMBER: return "a number";
-    case JSON_BOOL: return "boolean";
-    case JSON_ARRAY: return "an array";
-    default: return "an object";
-    }
-}
-
-static void problem(sb_t *errs, const char *path, const json_t *schema, const char *was) {
-    char *exp = schema_expected(schema);
-    const char *p = *path ? path : "value";
-    sb_appendf(errs, "  - %s: %s must be %s (was %s)\n", *path ? path : "root", p, exp, was);
-    free(exp);
-}
-
-static void validate_node(const json_t *schema, json_t *parent, const char *key, size_t idx, json_t *v, const char *path,
-                          sb_t *errs, int depth) {
-    if (!json_is_obj(schema) || depth > 32) return;
-    json_t *anyof = json_get_arr(schema, "anyOf");
-    if (!anyof) anyof = json_get_arr(schema, "oneOf");
-    if (anyof) {
-        json_t *alt;
-        json_arr_foreach(anyof, i, alt) {
-            sb_t sub = SB_INIT;
-            validate_node(alt, parent, key, idx, v, path, &sub, depth + 1);
-            bool ok = sub.len == 0;
-            sb_free(&sub);
-            if (ok) return;
-        }
-        sb_appendf(errs, "  - %s: does not match any allowed schema\n", *path ? path : "root");
-        return;
-    }
-    json_t *tj = json_get(schema, "type");
-    const char *type = json_sv(tj);
-    if (json_is_arr(tj)) {
-        bool any = false;
-        json_t *t;
-        json_arr_foreach(tj, i, t) if (type_matches(json_sv(t), v)) any = true;
-        if (!any) sb_appendf(errs, "  - %s: wrong type\n", *path ? path : "root");
-        return;
-    }
-    if (type && !type_matches(type, v)) {
-        json_t *c = coerce(type, v);
-        if (c && parent) {
-            if (key) json_set(parent, key, c);
-            else {
-                json_free(parent->u.arr.items[idx]);
-                parent->u.arr.items[idx] = c;
-            }
-            v = c;
-        } else {
-            json_free(c);
-            problem(errs, path, schema, value_domain(v));
-            return;
-        }
-    }
-    json_t *en = json_get_arr(schema, "enum");
-    if (en) {
-        bool found = false;
-        json_t *e;
-        json_arr_foreach(en, i, e) if (json_equal(e, v)) found = true;
-        if (!found) {
-            char *was = json_dump(v, 0);
-            problem(errs, path, schema, was);
-            free(was);
-        }
-    }
-    if (json_is_obj(v)) {
-        json_t *props = json_get_obj(schema, "properties");
-        json_t *req = json_get_arr(schema, "required"), *r;
-        json_arr_foreach(req, i, r) {
-            if (json_is_str(r) && !json_get(v, json_sv(r))) {
-                char *cp = *path ? xasprintf("%s.%s", path, json_sv(r)) : xstrdup(json_sv(r));
-                problem(errs, cp, json_get(props, json_sv(r)), "missing");
-                free(cp);
-            }
-        }
-        const char *k;
-        json_t *pv;
-        json_obj_foreach(props, i, k, pv) {
-            json_t *child = json_get(v, k);
-            if (!child) continue;
-            char *cp = *path ? xasprintf("%s.%s", path, k) : xstrdup(k);
-            validate_node(pv, v, k, 0, child, cp, errs, depth + 1);
-            free(cp);
-        }
-    } else if (json_is_arr(v)) {
-        json_t *items = json_get_obj(schema, "items");
-        if (items) {
-            for (size_t i = 0; i < json_len(v); i++) {
-                char *cp = xasprintf("%s[%zu]", *path ? path : "", i);
-                validate_node(items, v, NULL, i, json_at(v, i), cp, errs, depth + 1);
-                free(cp);
-            }
-        }
-    }
-}
-
-char *schema_validate(const json_t *schema, json_t *args) {
-    sb_t errs = SB_INIT;
-    validate_node(schema, NULL, NULL, 0, args, "", &errs, 0);
-    if (!errs.len) return NULL;
-    if (errs.s[errs.len - 1] == '\n') sb_truncate(&errs, errs.len - 1);
-    return sb_detach(&errs);
-}

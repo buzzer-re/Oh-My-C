@@ -188,8 +188,16 @@ json_t *image_block(const char *b64, const char *mime);
 /* last assistant message in an array (borrowed) */
 const json_t *last_assistant(const json_t *messages);
 
-/* JSON schema validation + light coercion (string->number/bool, number->string). Returns NULL if ok,
- * else owned error text. May modify args in place for coercion. */
+/* Tool-argument validation (src/agent/validate.c, port of omp validateToolArguments with omptype messages).
+ * tool_args_validate: on success returns NULL and replaces *args with the normalized/coerced value; on failure
+ * returns the issue lines ("  - path/0/key: key[0].x must be a string (was missing)") and, when received is
+ * non-NULL, the received-arguments JSON (2-space; {original, normalized} when a repair changed them). */
+char *tool_args_validate(const json_t *schema, json_t **args, char **received);
+/* same, updating the object args in place on success */
+char *schema_validate_args(const json_t *schema, json_t *args, char **received);
+/* schema_validate_args without the received text */
 char *schema_validate(const json_t *schema, json_t *args);
+/* omptype `summary` of value's schema errors without any repair (NULL when valid) */
+char *schema_summary(const json_t *schema, const json_t *value);
 
 #endif

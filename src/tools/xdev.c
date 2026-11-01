@@ -732,10 +732,10 @@ bool xdev_write(tool_ctx_t *ctx, const char *path, const char *content, tool_res
     }
     if (json_get(args, INTENT_FIELD) && !schema_declares_property(t->parameters, INTENT_FIELD))
         json_del(args, INTENT_FIELD);
-    char *verr = t->lenient_args ? NULL : schema_validate(t->parameters, args);
+    char *argstr = NULL;
+    char *verr = t->lenient_args ? NULL : schema_validate_args(t->parameters, args, &argstr);
     if (verr) {
         char *d = render_docs(t, "#", 0);
-        char *argstr = json_dump(args, 2);
         tool_result_error(out, "Invalid args for " XD "%s: Validation failed for tool \"%s\":\n%s\n\nReceived arguments:\n%s\n\n%s",
                           name, name, verr, argstr, d);
         free(argstr);
