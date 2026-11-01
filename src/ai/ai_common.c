@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "ai.h"
+#include "provider_transport.h"
 
 #include <math.h>
 #include <time.h>
@@ -378,23 +379,40 @@ void aib_free(ai_builder_t *b) {
 
 json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts, ai_event_cb cb,
                   void *ud) {
-    ai_stream_fn fn = ai_lookup_api(model->api);
+    ai_stream_fn fn;
     ai_stream_opts_t def;
     if (!opts) {
         ai_stream_opts_init(&def);
         opts = &def;
     }
-    if (!fn) {
-        char *e = xasprintf("Unsupported API \"%s\" for model %s/%s", model->api, model->provider, model->id);
-        json_t *m = ai_error_message(model, "error", e);
-        free(e);
+    ai_transport_t t;
+    char *terr = NULL;
+    if (ai_transport_prepare(model, ctx, opts, &t, &terr) != 0) {
+        json_t *m = ai_error_message(model, "error", terr ? terr : "provider configuration error");
+        free(terr);
+        ai_transport_free(&t);
         if (cb) {
             ai_event_t ev = {.type = AI_EV_ERROR, .content_index = -1, .partial = m, .reason = "error"};
             cb(ud, &ev);
         }
         return m;
     }
-    return fn(model, ctx, opts, cb, ud);
+    fn = ai_lookup_api(t.model.api);
+    if (!fn) {
+        char *e = xasprintf("Unsupported API \"%s\" for model %s/%s", t.model.api, model->provider, model->id);
+        json_t *m = ai_error_message(model, "error", e);
+        free(e);
+        ai_transport_free(&t);
+        if (cb) {
+            ai_event_t ev = {.type = AI_EV_ERROR, .content_index = -1, .partial = m, .reason = "error"};
+            cb(ud, &ev);
+        }
+        return m;
+    }
+    json_t *r = fn(&t.model, ctx, &t.opts, cb, ud);
+    ai_transport_finish(&t, r);
+    ai_transport_free(&t);
+    return r;
 }
 
 json_t *ai_complete(const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts) {
@@ -536,6 +554,13 @@ static int on_body(void *ud, const char *data, size_t len) {
     return rc;
 }
 
+static bool copilot_model_not_supported(const char *body) {
+    json_t *j = body ? json_parse_str(body) : NULL;
+    bool r = str_eq(json_get_str(json_get_obj(j, "error"), "code"), "model_not_supported");
+    json_free(j);
+    return r;
+}
+
 static bool retryable_status(int s) { return s == 408 || s == 409 || s == 425 || s == 429 || s == 500 || s == 502 || s == 503 || s == 504 || s == 520 || s == 522 || s == 524 || s == 529; }
 
 static int stream_post_url(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
@@ -546,6 +571,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
     int64_t max_delay = opts && opts->max_retry_delay_ms ? opts->max_retry_delay_ms : 60000;
     *err = NULL;
     *status = 0;
+    const char *identity_retry = NULL; /* Copilot identity the one-shot denial retry switched to */
     for (int attempt = 0;; attempt++) {
         sse_ctx_t c = {0};
         c.sse_cb = sse_cb;
@@ -577,6 +603,8 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
             sb_free(&c.errbody);
             return -2;
         }
+        if (identity_retry && opts->copilot_cache_key && rc == 0)
+            ai_copilot_cache_set(opts->copilot_cache_key, c.ok ? identity_retry : NULL);
         if (rc == 0 && c.ok) {
             int ret = 0;
             if (c.abort_rc) ret = c.abort_rc;
@@ -588,6 +616,27 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
             sse_free(&c.sse);
             sb_free(&c.errbody);
             return ret;
+        }
+        /* GitHub Copilot client-identity denial (wrapFetchForCopilotFallback): retry once as the other surface */
+        if (opts && opts->copilot_identity_retry && !identity_retry && rc == 0 &&
+            (c.status == 403 || (c.status == 400 && copilot_model_not_supported(sb_cstr(&c.errbody))))) {
+            const char *out = http_headers_get(headers, "Copilot-Integration-Id");
+            const char *alt = NULL;
+            if (str_eq(out, "copilot-chat")) alt = "copilot-developer-cli";
+            else if (str_eq(out, "copilot-developer-cli") && opts->copilot_cache_key &&
+                     str_eq(opts->copilot_cache_snapshot, "copilot-developer-cli"))
+                alt = "copilot-chat";
+            if (alt) {
+                LOGW("GitHub Copilot %s identity denied (HTTP %d); retrying once as %s",
+                     str_eq(alt, "copilot-chat") ? "CLI" : "chat", c.status, str_eq(alt, "copilot-chat") ? alt : "the Copilot CLI");
+                http_headers_set(headers, "Copilot-Integration-Id", alt);
+                identity_retry = alt;
+                http_resp_free(&resp);
+                sse_free(&c.sse);
+                sb_free(&c.errbody);
+                attempt--;
+                continue;
+            }
         }
         /* failure: decide retry */
         bool transient = (rc != 0 && !c.got_data) || retryable_status(c.status);
@@ -604,6 +653,20 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
         http_resp_free(&resp);
         sse_free(&c.sse);
         sb_free(&c.errbody);
+        if (opts && opts->copilot_cache_key && rc == 0 && (c.status == 401 || c.status == 403)) {
+            /* http-inspector.ts rewriteCopilotError */
+            free(msg);
+            msg = xstrdup(c.status == 401
+                              ? "GitHub Copilot authentication failed (HTTP 401). Your token may have been revoked. Please re-login "
+                                "with /login github-copilot"
+                              : "GitHub Copilot access denied (HTTP 403). Your token is valid but the account may not have access to "
+                                "this model or feature. Check your Copilot plan or model policy settings. Business organizations can "
+                                "also restrict which clients may call the API: omc sends Copilot-Integration-Id copilot-chat by "
+                                "default (COPILOT_INTEGRATION_ID overrides it) and retries a denied default-identity request once as "
+                                "the Copilot CLI (copilot-developer-cli). If both identities are denied, ask your org admin to allow "
+                                "one of them; if you pinned an identity, try the other.");
+            transient = false;
+        }
         if (!transient || attempt >= max_retries || c.got_data || (max_delay > 0 && delay > max_delay)) {
             if (max_delay > 0 && delay > max_delay && transient && attempt < max_retries) {
                 char *m2 = xasprintf("%s (server requested retry in %llds)", msg, (long long)(delay / 1000));

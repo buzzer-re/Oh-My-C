@@ -1511,7 +1511,7 @@ json_t *provider_openai_completions_stream(const ai_model_t *m, const ai_context
     ai_apply_headers(&h, NULL, o);
     const char *sess_hdr = oai_cstr(m, NULL, "promptCacheSessionHeader", NULL);
     if (sess_hdr && !str_empty(o->session_id) && !http_headers_get(&h, sess_hdr)) http_headers_set(&h, sess_hdr, o->session_id);
-    if (key && !http_headers_get(&h, "Authorization")) {
+    if (key && strcmp(key, AI_NO_AUTH_SENTINEL) != 0 && !http_headers_get(&h, "Authorization")) {
         char *a = xasprintf("Bearer %s", key);
         http_headers_set(&h, "Authorization", a);
         free(a);

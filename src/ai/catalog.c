@@ -322,6 +322,11 @@ json_t *catalog_provider_info(const char *provider) {
     return json_get(json_get_obj(g_providers, "providers"), provider);
 }
 
+json_t *catalog_api_defaults(const char *api) {
+    catalog_init();
+    return api ? json_get_obj(g_defaults, api) : NULL;
+}
+
 json_t *catalog_auth_providers(void) {
     catalog_init();
     return json_get_arr(g_providers, "auth");

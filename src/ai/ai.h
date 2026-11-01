@@ -76,6 +76,18 @@ ai_effort_t model_clamp_effort(const ai_model_t *m, ai_effort_t e);
 /* catalog compat delegationBias for the model: "eager" (default), "gated", "restrained" (static string) */
 const char *model_delegation_bias(const ai_model_t *m);
 
+/* per-api compat defaults (borrowed, may be NULL) */
+json_t *catalog_api_defaults(const char *api);
+
+/* keyless sentinel: no Authorization header is sent (omp NO_AUTH_SENTINEL) */
+#define AI_NO_AUTH_SENTINEL "N/A"
+/* credential helpers shared with the login flows */
+char *ai_snowflake_account_url(const char *input, char **err); /* owned https://<host> or NULL + *err */
+bool ai_cloudflare_credential(const char *value, char **token, char **account, char **gateway);
+void ai_copilot_parse_key(const char *raw, char **token, char **enterprise, char **api_endpoint);
+char *ai_copilot_cache_get(const char *key);           /* owned or NULL */
+void ai_copilot_cache_set(const char *key, const char *id); /* id NULL clears */
+
 /* api key from environment for provider (catalog envVars + legacy) */
 char *ai_env_api_key(const char *provider);
 const char *ai_env_api_key_name(const char *provider);
@@ -119,6 +131,11 @@ typedef struct {
     void (*on_payload)(void *ud, const json_t *payload);
     void *payload_ud;
     const ai_cursor_exec_t *cursor_exec; /* cursor-agent tool bridge (borrowed, may be NULL) */
+    /* GitHub Copilot identity fallback (set by the transport layer): a denied default chat identity (403, or 400
+     * model_not_supported) is retried once as the Copilot CLI and the working identity remembered per key */
+    bool copilot_identity_retry;
+    const char *copilot_cache_key;      /* borrowed */
+    const char *copilot_cache_snapshot; /* cached identity the headers were built from (NULL = none) */
 } ai_stream_opts_t;
 
 void ai_stream_opts_init(ai_stream_opts_t *o);

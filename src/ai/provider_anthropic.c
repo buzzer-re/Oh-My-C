@@ -1502,7 +1502,7 @@ json_t *anthropic_build_request(const ai_model_t *m, const ai_context_t *ctx, co
     apply_head_caching(system, tools, cc);
 
     json_t *p = json_obj();
-    json_set_str(p, "model", m->id);
+    json_set_str(p, "model", json_get_str(m->raw, "requestModelId") ? json_get_str(m->raw, "requestModelId") : m->id);
     json_set(p, "messages", msgs);
     if (system) json_set(p, "system", system);
     if (tools) json_set(p, "tools", tools);
@@ -1715,6 +1715,45 @@ void anthropic_build_headers(const ai_model_t *m, const ai_stream_opts_t *o, con
     char *beta_hdr = strvec_join(&betas, ",");
     strvec_free(&betas);
 
+    if (str_eq(m->provider, "github-copilot")) {
+        /* buildAnthropicClientOptions copilot branch: the proxy rejects Anthropic betas, so only caller headers
+         * (model headers, dynamic Copilot identity, options) ride on the base set */
+        http_headers_set(h, "Accept", "text/event-stream");
+        http_headers_set(h, "Content-Type", "application/json");
+        http_headers_set(h, "anthropic-version", "2023-06-01");
+        http_headers_set(h, "Anthropic-Dangerous-Direct-Browser-Access", "true");
+        char *bearer = xasprintf("Bearer %s", api_key ? api_key : "");
+        http_headers_set(h, "Authorization", bearer);
+        free(bearer);
+        for (size_t i = 0; i < caller.n; i++) http_headers_set(h, caller.v[i].name, caller.v[i].value);
+        if (!str_empty(o->session_id)) http_headers_set(h, "X-Claude-Code-Session-Id", o->session_id);
+        free(beta_hdr);
+        http_headers_free(&caller);
+        free(base_url);
+        return;
+    }
+    if (str_eq(m->provider, "cloudflare-ai-gateway") && !oauth) {
+        /* buildAnthropicHeaders isCloudflare: the gateway authenticates via cf-aig-authorization; caller
+         * Authorization / X-Api-Key are dropped so they cannot leak upstream */
+        for (size_t i = 0; i < caller.n; i++)
+            if (!is_enforced(caller.v[i].name)) http_headers_set(h, caller.v[i].name, caller.v[i].value);
+        http_headers_set(h, "Accept", "text/event-stream");
+        http_headers_set(h, "Connection", "keep-alive");
+        http_headers_set(h, "Content-Type", "application/json");
+        http_headers_set(h, "anthropic-dangerous-direct-browser-access", "true");
+        http_headers_set(h, "x-app", "cli");
+        http_headers_set(h, "anthropic-version", "2023-06-01");
+        if (in_ua) http_headers_set(h, "User-Agent", in_ua);
+        if (*beta_hdr) http_headers_set(h, "anthropic-beta", beta_hdr);
+        char *cf = xasprintf("Bearer %s", api_key ? api_key : "");
+        http_headers_set(h, "cf-aig-authorization", cf);
+        free(cf);
+        if (!str_empty(o->session_id)) http_headers_set(h, "X-Claude-Code-Session-Id", o->session_id);
+        free(beta_hdr);
+        http_headers_free(&caller);
+        free(base_url);
+        return;
+    }
     /* non-enforced caller headers pass through (stainless keys too on non-OAuth requests) */
     for (size_t i = 0; i < caller.n; i++) {
         const char *k = caller.v[i].name;
