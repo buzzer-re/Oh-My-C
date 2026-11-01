@@ -29,6 +29,7 @@ typedef struct {
     char *id, *name;
     json_t *args;
     char *out;
+    json_t *result; /* tool result {content, details} */
     bool is_error;
 } uiev_t;
 
@@ -38,6 +39,7 @@ static void uiev_free(uiev_t *e) {
     free(e->name);
     json_free(e->args);
     free(e->out);
+    json_free(e->result);
     free(e);
 }
 
@@ -59,6 +61,7 @@ static void ui_apply_partial(void *ud) {
     u->cur_assistant->msg = p;
     u->cur_assistant->dirty = true;
     ui_assistant_streamed(u, u->cur_assistant);
+    toolcard_note_message(u, p, false);
     tui_request_render(u->tui);
 }
 
@@ -77,17 +80,14 @@ static void ui_apply_event(void *ud) {
             u->cur_assistant->msg = e->msg;
             e->msg = NULL;
             ui_assistant_end(u, u->cur_assistant);
+            toolcard_note_message(u, u->cur_assistant->msg, true);
             u->cur_assistant = NULL;
         }
         break;
     case AGENT_EV_TOOL_START: {
-        msgview_t *v = mv_new(MV_TOOL);
-        v->tool_name = xstrdup(e->name);
-        v->tool_id = xstrdup(e->id);
-        v->args = e->args;
+        msgview_t *v = toolcard_start(u, e->id, e->name, e->args ? e->args : json_obj());
         e->args = NULL;
         hmap_put(&u->tools, e->id, v);
-        add_view(u, v);
         ui_tool_started(u, e->id);
         break;
     }
@@ -98,12 +98,9 @@ static void ui_apply_event(void *ud) {
         free(v->output);
         v->output = e->out;
         e->out = NULL;
-        if (e->type == AGENT_EV_TOOL_END) {
-            v->done = true;
-            v->is_error = e->is_error;
-            hmap_del(&u->tools, e->id);
-        }
-        v->dirty = true;
+        toolcard_result(u, v, e->id, e->result, e->type != AGENT_EV_TOOL_END, e->is_error);
+        e->result = NULL;
+        if (e->type == AGENT_EV_TOOL_END) hmap_del(&u->tools, e->id);
         break;
     }
     case AGENT_EV_AGENT_END:
@@ -111,6 +108,7 @@ static void ui_apply_event(void *ud) {
         ui_chrome_turn(u, false);
         break;
     case AGENT_EV_AGENT_START:
+        toolcard_break_group(u);
         ui_chrome_turn(u, true);
         ui_agent_start(u);
         break;
@@ -151,7 +149,12 @@ static void ui_listener(void *ud, const agent_event_t *ev) {
     if (ev->tool_call_id) e->id = xstrdup(ev->tool_call_id);
     if (ev->tool_name) e->name = xstrdup(ev->tool_name);
     if (ev->args) e->args = json_clone(ev->args);
-    if (ev->result) e->out = result_display(ev->tool_name ? ev->tool_name : "", ev->result);
+    if (ev->result) {
+        e->out = result_display(ev->tool_name ? ev->tool_name : "", ev->result);
+        e->result = json_obj();
+        json_set(e->result, "content", ev->result->content ? json_clone(ev->result->content) : json_arr());
+        if (ev->result->details) json_set(e->result, "details", json_clone(ev->result->details));
+    }
     e->is_error = ev->is_error;
     tui_post(u->tui, ui_apply_event, e);
 }
@@ -938,6 +941,7 @@ static void run_bang(ui_t *u, const char *line) {
     v->tool_name = xstrdup("$");
     v->args = json_obj();
     json_set_str(v->args, "command", cmd);
+    if (exclude) json_set_bool(v->args, "exclude", true);
     add_view(u, v);
     tui_render_now(u->tui);
     proc_opts_t o = {.cwd = u->app->cwd, .timeout_ms = 600000, .merge_stderr = true, .new_session = true};
@@ -945,6 +949,7 @@ static void run_bang(ui_t *u, const char *line) {
     if (proc_shell(cmd, &o, &r) == 0) {
         v->output = utf8_sanitize(r.out, r.out_len);
         v->is_error = r.exit_code != 0;
+        json_set_int(v->args, "exitCode", r.exit_code);
         json_t *m = json_obj();
         json_set_str(m, "role", "bashExecution");
         json_set_str(m, "command", cmd);
@@ -1085,6 +1090,7 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
     }
     if (tui_key_matches(k, "ctrl+o")) {
         u->expand_tools = !u->expand_tools;
+        add_notice(u, "info", u->expand_tools ? "Tool output expansion: enabled" : "Tool output expansion: disabled");
         for (size_t i = 0; i < tui_container_count(u->chat); i++) tui_component_invalidate(u->chat->children.v[i]);
         tui_request_render(t);
         return true;

@@ -10,6 +10,9 @@ char *diff_unified(const char *a, const char *b, const char *path_a, const char 
 int64_t diff_first_changed_line(const char *a, const char *b);
 /* counts of added / removed lines */
 void diff_stats(const char *a, const char *b, int64_t *added, int64_t *removed);
+/* omp's compact numbered diff (`-N|old`, `+N|new`, ` N|ctx`, `context` lines around changes; 2 when < 0).
+ * Owned; `first_changed` (may be NULL) gets the first changed line of b (0 when equal). */
+char *diff_numbered(const char *a, const char *b, int context, int64_t *first_changed);
 
 /* ---- jsdiff-compatible renderings used by the edit engines (port of omp pi-edit diff_string.rs) ---- */
 /* Numbered diff rows ("+N|text", "-N|text", " N|text", "" gaps) with nearby (context, default 2 when < 0) and

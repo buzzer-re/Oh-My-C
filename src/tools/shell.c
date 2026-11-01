@@ -147,7 +147,14 @@ int shell_run(shell_t *s, const char *cmd, const char *cwd, const proc_opts_t *o
             }
         }
         /* stream everything except a possible partial marker at the tail */
-        size_t safe = out.len > mlen + 32 ? out.len - mlen - 32 : 0;
+        /* hold back only a tail that could still grow into the marker, so short output streams live */
+        size_t hold = 0;
+        for (size_t k = MIN(out.len, mlen + 32); k > 0; k--)
+            if (memcmp(out.s + out.len - k, marker, MIN(k, mlen)) == 0 || (k <= mlen - 1 && memcmp(out.s + out.len - k, marker + 1, k) == 0)) {
+                hold = k;
+                break;
+            }
+        size_t safe = out.len - hold;
         if (o && o->on_output && safe > emitted) {
             o->on_output(o->ud, 1, out.s + emitted, safe - emitted);
             emitted = safe;
