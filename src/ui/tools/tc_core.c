@@ -563,7 +563,7 @@ void tc_output_pane(const tc_pane_t *p, strvec_t *out) {
     strvec_t styled = {0};
     for (size_t i = 0; i < p->lines->n; i++)
         strvec_push_own(&styled, p->style_plain ? xstrdup(p->lines->v[i]) : tc_fg(p->style, p->lines->v[i]));
-    int limit = p->expanded ? -1 : p->collapsed_max;
+    int limit = p->expanded ? (p->expanded_max > 0 ? p->expanded_max : -1) : p->collapsed_max;
     strvec_t visible = {0};
     size_t hidden = 0;
     if (limit >= 0) {
@@ -742,25 +742,6 @@ void tc_push_wrapped(strvec_t *out, const char *s, int width) { tui_wrap_text_wi
 
 static bool is_meta_key(const char *k) { return !strcmp(k, "i") || !strcmp(k, "__partialJson"); }
 
-static void scalar_text(sb_t *b, const json_t *v, int max) {
-    char *s;
-    if (json_is_str(v)) {
-        s = xstrdup(json_sv(v));
-    } else {
-        s = json_dump(v, 0);
-    }
-    for (char *p = s; *p; p++)
-        if (*p == '\n' || *p == '\r' || *p == '\t') *p = ' ';
-    if (max > 0 && tui_visible_width(s) > max) {
-        char *t = tui_truncate_to_width(s, max, NULL);
-        sb_append(b, t);
-        free(t);
-    } else {
-        sb_append(b, s);
-    }
-    free(s);
-}
-
 /* formatScalar: quoted/escaped strings, `[N items]`, `{N keys}` */
 static char *format_scalar(const json_t *v, int max) {
     if (!v || json_is_null(v)) return xstrdup("null");
@@ -825,71 +806,291 @@ char *tc_json_inline(const json_t *args, int max_width) {
     return sb_detach(&res);
 }
 
-static void tree_rec(const json_t *v, const char *key, int depth, const char *prefix, bool last, int max_depth, int max_lines,
-                     int max_scalar, bool hide_meta, strvec_t *out, bool *trunc) {
-    if ((int)out->n >= max_lines) {
-        *trunc = true;
+/* renderJsonTreeLines (tools/json-tree.ts) with hooked roots: `└ • key: value` root rows, nested rows branching
+ * from under the root label; containers whose one-line form fits 60 chars render inline (`key: [1, 2]`),
+ * larger ones as `key {N}` / `key [N]` with children (a `…` child past max_depth); multi-line strings
+ * hang under their key. Stops at max_lines rows (*truncated set). */
+
+typedef struct {
+    int max_depth, max_lines, max_scalar;
+    int rows, max_rows;
+    strvec_t *out;
+    size_t start;
+    bool truncated, full;
+    int rendered; /* body lines rendered (multi-line string budget) */
+} jt_ctx_t;
+
+static bool bare_key(const char *k) {
+    if (!*k) return false;
+    for (const char *p = k; *p; p++)
+        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '$' || *p == '-')) return false;
+    return true;
+}
+
+static char *js_number(const json_t *v) { return json_dump(v, 0); }
+
+static size_t u16len(const char *s) {
+    size_t n = 0;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++)
+        if ((*p & 0xC0) != 0x80) n += (*p >= 0xF0) ? 2 : 1;
+    return n;
+}
+
+/* inlineJson: styled one-line form, NULL when it exceeds 60 chars */
+typedef struct {
+    sb_t b;
+    size_t len;
+    int last_slot;
+    bool over;
+} jinl_t;
+
+static void jinl_push(jinl_t *j, const char *text, tui_tc_t slot) {
+    if (j->over) return;
+    j->len += u16len(text);
+    if (j->len > 60) {
+        j->over = true;
         return;
     }
-    sb_t line = SB_INIT;
-    sb_append(&line, prefix);
-    if (depth > 0) {
-        char *c = tc_fg(TUI_TC_DIM, last ? tc_sym("tree.last") : tc_sym("tree.branch"));
-        sb_append(&line, c);
-        sb_putc(&line, ' ');
-        free(c);
+    if (j->last_slot != (int)slot) {
+        if (j->last_slot >= 0) sb_append(&j->b, "\x1b[39m");
+        sb_append(&j->b, tui_fg_seq(NULL, slot));
+        j->last_slot = (int)slot;
     }
-    if (key) {
-        char *k = tc_fg(TUI_TC_MUTED, key);
-        sb_append(&line, k);
-        free(k);
-    }
-    bool container = json_is_obj(v) || json_is_arr(v);
-    if (!container) {
-        if (key) sb_append(&line, ": ");
-        sb_t s = SB_INIT;
-        scalar_text(&s, v, max_scalar);
-        char *st = tc_fg(json_is_str(v) ? TUI_TC_TOOL_OUTPUT : TUI_TC_ACCENT, sb_cstr(&s));
-        sb_append(&line, st);
-        free(st);
-        sb_free(&s);
-        strvec_push_own(out, sb_detach(&line));
-        return;
-    }
-    if (depth >= max_depth) {
-        if (key) sb_append(&line, ": ");
-        char *d = tc_fg(TUI_TC_DIM, json_is_obj(v) ? "{…}" : "[…]");
-        sb_append(&line, d);
-        free(d);
-        strvec_push_own(out, sb_detach(&line));
-        return;
-    }
-    if (key || depth > 0) strvec_push_own(out, sb_detach(&line));
-    else sb_free(&line);
-    char *child_prefix = depth > 0 ? xasprintf("%s%s", prefix, last ? "   " : "│  ") : xstrdup(prefix);
-    size_t n = json_len(v), shown = 0;
-    for (size_t i = 0; i < n; i++) {
-        const char *ck = NULL;
-        json_t *cv;
-        char idx[24];
-        if (json_is_obj(v)) {
-            ck = v->u.obj.keys[i];
-            cv = v->u.obj.vals[i];
-            if (hide_meta && depth == 0 && is_meta_key(ck)) continue;
-        } else {
-            cv = json_at(v, i);
-            snprintf(idx, sizeof idx, "[%zu]", i);
-            ck = idx;
+    sb_append(&j->b, text);
+}
+
+static char *jt_quote(const char *s) {
+    json_t *t = json_str(s);
+    char *r = json_dump(t, 0);
+    json_free(t);
+    return r;
+}
+
+static void jinl_walk(jinl_t *j, const json_t *v) {
+    if (j->over) return;
+    if (json_is_arr(v)) {
+        jinl_push(j, "[", TUI_TC_MUTED);
+        for (size_t i = 0; i < json_len(v) && !j->over; i++) {
+            if (i) jinl_push(j, ", ", TUI_TC_MUTED);
+            jinl_walk(j, json_at(v, i));
         }
-        shown++;
-        tree_rec(cv, ck, depth + 1, child_prefix, i + 1 == n, max_depth, max_lines, max_scalar, hide_meta, out, trunc);
+        jinl_push(j, "]", TUI_TC_MUTED);
+    } else if (json_is_obj(v)) {
+        jinl_push(j, "{", TUI_TC_MUTED);
+        for (size_t i = 0; i < json_len(v) && !j->over; i++) {
+            const char *k = v->u.obj.keys[i];
+            char *q = bare_key(k) ? xstrdup(k) : jt_quote(k);
+            char *t = xasprintf("%s%s: ", i ? ", " : "", q);
+            jinl_push(j, t, TUI_TC_MUTED);
+            free(t);
+            free(q);
+            jinl_walk(j, v->u.obj.vals[i]);
+        }
+        jinl_push(j, "}", TUI_TC_MUTED);
+    } else if (json_is_str(v)) {
+        char *q = jt_quote(json_sv(v));
+        jinl_push(j, q, TUI_TC_SYNTAX_STRING);
+        free(q);
+    } else {
+        char *s = !v || json_is_null(v) ? xstrdup("null") : js_number(v);
+        jinl_push(j, s, json_is_num(v) ? TUI_TC_SYNTAX_NUMBER : TUI_TC_SYNTAX_KEYWORD);
+        free(s);
     }
-    (void)shown;
-    free(child_prefix);
+}
+
+static char *inline_json(const json_t *v) {
+    if (!json_is_arr(v) && !json_is_obj(v)) return NULL;
+    jinl_t j = {.b = SB_INIT, .last_slot = -1};
+    jinl_walk(&j, v);
+    if (j.over) {
+        sb_free(&j.b);
+        return NULL;
+    }
+    if (j.last_slot >= 0) sb_append(&j.b, "\x1b[39m");
+    return sb_detach(&j.b);
+}
+
+/* one row: body lines for a node */
+static void jt_body(jt_ctx_t *c, const json_t *v, const char *key, tui_tc_t kc, bool placeholder, strvec_t *body) {
+    if (placeholder) {
+        strvec_push_own(body, tc_fg(TUI_TC_DIM, "\xe2\x80\xa6"));
+        return;
+    }
+    char *inl = inline_json(v);
+    const char *dk = key ? key : json_is_arr(v) ? "array" : json_is_obj(v) ? "object" : "value";
+    char *label = tc_fg(key ? kc : TUI_TC_MUTED, dk);
+    if (inl) {
+        strvec_push_own(body, xasprintf("%s: %s", label, inl));
+    } else if (json_is_arr(v)) {
+        char n[32];
+        snprintf(n, sizeof n, "[%zu]", json_len(v));
+        char *d = tc_fg(TUI_TC_DIM, n);
+        strvec_push_own(body, xasprintf("%s %s", label, d));
+        free(d);
+    } else if (json_is_obj(v)) {
+        char n[32];
+        snprintf(n, sizeof n, "{%zu}", json_len(v));
+        char *d = tc_fg(TUI_TC_DIM, n);
+        strvec_push_own(body, xasprintf("%s %s", label, d));
+        free(d);
+    } else if (json_is_str(v) && strchr(json_sv(v), '\n')) {
+        strvec_t src = str_split(json_sv(v), "\n");
+        int avail = MAX(1, c->max_lines - c->rendered);
+        size_t shown = MIN(src.n, (size_t)MAX(1, avail - 1));
+        char *head = xasprintf("%s: ", label);
+        char *hp = tui_strip_ansi(head);
+        int iw = tui_visible_width(hp) + 1;
+        free(hp);
+        for (size_t i = 0; i < shown; i++) {
+            char *t = tui_truncate_to_width(src.v[i], c->max_scalar, NULL);
+            char *q = i == 0 ? xasprintf("\"%s", t) : xstrdup(t);
+            char *s = tc_fg(TUI_TC_SYNTAX_STRING, q);
+            strvec_push_own(body, i == 0 ? xasprintf("%s%s", head, s) : xasprintf("%*s%s", iw, "", s));
+            free(s);
+            free(q);
+            free(t);
+        }
+        if (src.n > shown) {
+            c->truncated = true;
+            char *m = xasprintf("\xe2\x80\xa6(%zu more lines)\"", src.n - shown);
+            char *d = tc_fg(TUI_TC_DIM, m);
+            strvec_push_own(body, xasprintf("%*s%s", iw, "", d));
+            free(d);
+            free(m);
+        } else {
+            char *q = tc_fg(TUI_TC_SYNTAX_STRING, "\"");
+            char *last = body->v[body->n - 1];
+            body->v[body->n - 1] = xasprintf("%s%s", last, q);
+            free(last);
+            free(q);
+        }
+        free(head);
+        strvec_free(&src);
+    } else {
+        char *s = format_scalar(v, c->max_scalar);
+        tui_tc_t slot = json_is_str(v) ? TUI_TC_SYNTAX_STRING : json_is_num(v) ? TUI_TC_SYNTAX_NUMBER : TUI_TC_SYNTAX_KEYWORD;
+        char *st = tc_fg(slot, s);
+        strvec_push_own(body, xasprintf("%s: %s", label, st));
+        free(st);
+        free(s);
+    }
+    c->rendered += (int)body->n;
+    free(label);
+    free(inl);
+}
+
+/* ancestors: isLast flags of ancestors below the root level (index 0 = root's child level) */
+static void jt_emit(jt_ctx_t *c, const json_t *v, const char *key, tui_tc_t kc, bool placeholder, int depth, bool *anc,
+                    int nanc, bool is_last, int sib_index) {
+    if (c->rows >= c->max_rows || c->full) {
+        c->truncated = true;
+        return;
+    }
+    c->rows++;
+    const char *hook = tc_sym("tree.hook"), *bullet = tc_sym("format.bullet");
+    int hw = tui_visible_width(hook), bw = tui_visible_width(bullet);
+    char *gutter = xasprintf("%*s %*s ", hw, "", bw, "");
+    char *first, *cont;
+    if (nanc < 0) { /* a root row */
+        char *lead = sib_index == 0 ? tc_fg(TUI_TC_DIM, hook) : xasprintf("%*s", hw, "");
+        char *bd = tc_fg(TUI_TC_DIM, bullet);
+        first = xasprintf("%s %s ", lead, bd);
+        cont = xstrdup(gutter);
+        free(bd);
+        free(lead);
+    } else {
+        sb_t a = SB_INIT;
+        for (int i = 0; i < nanc; i++) sb_append(&a, anc[i] ? "   " : "\xe2\x94\x82  ");
+        char *conn = tc_fg(TUI_TC_DIM, tc_sym(is_last ? "tree.last" : "tree.branch"));
+        first = xasprintf("%s%s%s ", gutter, sb_cstr(&a), conn);
+        cont = xasprintf("%s%s%s", gutter, sb_cstr(&a), is_last ? "   " : "\xe2\x94\x82  ");
+        free(conn);
+        sb_free(&a);
+    }
+    strvec_t body = {0};
+    jt_body(c, v, key, kc, placeholder, &body);
+    for (size_t i = 0; i < body.n; i++) {
+        if ((int)(c->out->n - c->start) >= c->max_lines) {
+            c->truncated = true;
+            c->full = true;
+            break;
+        }
+        char *t = tc_replace_tabs(body.v[i]);
+        strvec_push_own(c->out, xasprintf("%s%s", i ? cont : first, t));
+        free(t);
+    }
+    if ((int)(c->out->n - c->start) >= c->max_lines) c->full = true;
+    strvec_free(&body);
+    free(first);
+    free(cont);
+    free(gutter);
+    /* inline, scalar and placeholder rows have no children */
+    if (placeholder || !(json_is_arr(v) || json_is_obj(v))) return;
+    char *x = inline_json(v);
+    bool inl = x != NULL;
+    free(x);
+    if (inl) return;
+    size_t n = json_len(v);
+    if (!n) return;
+    bool *nanc_v = xcalloc((size_t)(nanc < 0 ? 0 : nanc) + 1, sizeof(bool));
+    int child_nanc = nanc < 0 ? 0 : nanc + 1;
+    if (nanc > 0) memcpy(nanc_v, anc, (size_t)nanc * sizeof(bool));
+    if (nanc >= 0) nanc_v[nanc] = is_last;
+    if (depth >= c->max_depth) {
+        jt_emit(c, NULL, NULL, TUI_TC_DIM, true, depth + 1, nanc_v, child_nanc, true, 0);
+    } else {
+        int w = 1;
+        if (json_is_arr(v)) {
+            char b[24];
+            w = snprintf(b, sizeof b, "%zu", n - 1);
+        }
+        for (size_t i = 0; i < n; i++) {
+            char kb[32];
+            const char *ck;
+            const json_t *cv;
+            tui_tc_t kcol;
+            if (json_is_arr(v)) {
+                snprintf(kb, sizeof kb, "%*zu", w, i);
+                ck = kb;
+                cv = json_at(v, i);
+                kcol = TUI_TC_DIM;
+            } else {
+                ck = v->u.obj.keys[i];
+                cv = v->u.obj.vals[i];
+                kcol = TUI_TC_MUTED;
+            }
+            jt_emit(c, cv, ck, kcol, false, depth + 1, nanc_v, child_nanc, i + 1 == n, (int)i);
+        }
+    }
+    free(nanc_v);
 }
 
 void tc_json_tree(const json_t *v, int max_depth, int max_lines, int max_scalar, bool hide_meta, strvec_t *out, bool *truncated) {
-    bool t = false;
-    tree_rec(v, NULL, 0, "", true, max_depth, max_lines, max_scalar, hide_meta, out, &t);
-    if (truncated) *truncated = t;
+    jt_ctx_t c = {.max_depth = MAX(0, max_depth), .max_lines = MAX(0, max_lines), .max_scalar = MAX(0, max_scalar),
+                  .max_rows = MAX(0, max_lines) + 1, .out = out, .start = out->n};
+    if (json_is_arr(v) || json_is_obj(v)) {
+        size_t n = json_len(v);
+        VEC(size_t) idx = {0};
+        for (size_t i = 0; i < n; i++)
+            if (!(json_is_obj(v) && hide_meta && is_meta_key(v->u.obj.keys[i]))) vec_push(&idx, i);
+        int w = 1;
+        if (json_is_arr(v) && n) {
+            char b[24];
+            w = snprintf(b, sizeof b, "%zu", n - 1);
+        }
+        for (size_t k = 0; k < idx.n; k++) {
+            size_t i = idx.v[k];
+            char kb[32];
+            if (json_is_arr(v)) {
+                snprintf(kb, sizeof kb, "%*zu", w, i);
+                jt_emit(&c, json_at(v, i), kb, TUI_TC_DIM, false, 1, NULL, -1, k + 1 == idx.n, (int)k);
+            } else {
+                jt_emit(&c, v->u.obj.vals[i], v->u.obj.keys[i], TUI_TC_MUTED, false, 1, NULL, -1, k + 1 == idx.n, (int)k);
+            }
+        }
+        vec_free(&idx);
+    } else {
+        jt_emit(&c, v, NULL, TUI_TC_MUTED, false, 0, NULL, -1, true, 0);
+    }
+    if (truncated) *truncated = c.truncated;
 }

@@ -133,6 +133,7 @@ typedef struct {
     tui_tc_t style;        /* applied to each line */
     bool style_plain;      /* don't style */
     bool hint_when_uncapped;
+    int expanded_max;      /* cap while expanded (0 = none) */
 } tc_pane_t;
 void tc_output_pane(const tc_pane_t *p, strvec_t *out);
 /* renderTreeList over pre-rendered single/multi-line items */
@@ -158,6 +159,8 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out);
 void tc_glob(const tc_call_t *c, int width, strvec_t *out);
 void tc_todo(const tc_call_t *c, int width, strvec_t *out);
 void tc_generic(const tc_call_t *c, int width, strvec_t *out);
+void tc_tinted_box(const strvec_t *body, int width, tui_tc_t bg_slot, strvec_t *out);
+void tc_mcp(const tc_call_t *c, int width, strvec_t *out);
 void tc_render_diff(const char *diff, const char *path, strvec_t *out);
 void tc_web_search(const tc_call_t *c, int width, strvec_t *out);
 void tc_ast_grep(const tc_call_t *c, int width, strvec_t *out);
