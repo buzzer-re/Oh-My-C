@@ -20,6 +20,7 @@ ports of a named omp file, and the docs below always say which one.
 | [testing.md](testing.md) | Unit tests, e2e suite and mocks, side-by-side TUI harness, request parity diff, golden captures, adding tests |
 | [security.md](security.md) | Supply-chain stance, trust boundaries, untrusted-input parsers, subprocess and path guards, secret handling |
 | [status.md](status.md) | **Single source of truth for what is implemented** (feature tables with ✅ / 🟡 / ❌) |
+| [gaps.md](gaps.md) | Gap audit: omp's whole user-facing surface (slash commands, keys, settings, tools, overlays, RPC/ACP/CLI, background systems) checked against omc, with the prioritized **work packages** for what is missing |
 | [CONVENTIONS.md](CONVENTIONS.md) | Coding rules for contributors |
 | [../UPDATE.md](../UPDATE.md) | How to port later upstream omp commits; holds the **upstream pin** (last omp commit ported) |
 | [../AGENTS.md](../AGENTS.md) | Short rules for coding agents working on this repo |

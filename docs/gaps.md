@@ -28,9 +28,103 @@ When status.md and this file disagree, check the code. Several status.md rows ma
 - the "Slash commands" row, where many commands are one-line notices that stand in for omp overlays;
 - compaction, which is a single summary pass.
 
+## Contents
+
+- [Top 15 gaps](#top-15-gaps-by-user-impact) · [Work packages](#prioritized-work-packages)
+- Inventory: [1. Slash commands](#1-slash-commands) · [2. Keybindings and flows](#2-keybindings-and-interactive-flows) ·
+  [3. Settings](#3-settings) · [4. Tools, xd://, internal URLs](#4-tools-xd-devices-and-internal-urls) ·
+  [5. Overlays and controllers](#5-overlays-dialogs-and-command-controllers) · [6. RPC, ACP, CLI](#6-rpc-acp-and-cli) ·
+  [7. Compaction and background systems](#7-compaction-and-background-systems)
+
+## Top 15 gaps by user impact
+
+Ranked by how soon a user hits the gap in a normal interactive session.
+
+1. **Plan approval doesn't show the plan.** `xd://propose` ends in a generic Ask, "Approve plan local://x-plan.md?", with Approve / Keep planning / Other. Feedback typed under "Other" is dropped. omp's options are missing: execute in fresh context / compact / keep context, save & quit, and the tier slider. (WP-1)
+2. **Steered and follow-up messages vanish.** Messages delivered while the agent runs never appear in the transcript until a rebuild. There is no pending-queue view and no dequeue, Esc doesn't restore the queue, and follow-up is bound to Alt+Enter instead of Ctrl+Q / Ctrl+Enter. (WP-2)
+3. **`!cmd`, `/compact` and `/handoff` run on the UI thread.** The TUI freezes, Esc is ignored and keys typed meanwhile are garbled. While streaming, `!cmd` is sent to the model as steer text. (WP-2)
+4. **grep output differs for the model.** No context lines; omp defaults to 1 before and 3 after. (WP-3)
+5. **Unknown URL schemes are written to disk.** `write out://…` / `cfg://…` / `conflict://N` create `./out:/…`, `./cfg:/…` and `./conflict:/…` in the project and report success. `out://` and `cfg://` are missing. (WP-3)
+6. **`thinking: auto` turns thinking off.** This happens via `--thinking auto` or `defaultThinkingLevel: auto`. (WP-3)
+7. **Slash-command argument bugs.**
+   - `/advisor status` toggles the advisor.
+   - `/compact soft` sends "soft" as summary instructions.
+   - `/shake images` runs with threshold 0.
+   - `/handoff <focus>` and `/resume <id>` ignore their argument.
+   - Aliases `/models`, `/rewind`, `/q`, `/providers` are missing. (WP-4)
+8. **No app keybinding layer.**
+   - These keys do nothing: Ctrl+Z, Ctrl+G (external editor), Ctrl+R (history search), Ctrl+P (role cycle), Alt+P, F5, Esc-Esc (rewind).
+   - `keybindings.yml` overrides are ignored.
+   - `/hotkeys` advertises about 20 unbound keys. (WP-5, WP-6)
+9. **`/context`, `/session`, `/tools`, `/jobs`, `/todo` are one-line notices instead of omp's panels.** `/jobs kill` and the `/todo` subcommands are missing, and `/context` numbers don't add up. (WP-7)
+10. **`/tree` and `/branch` are flat 14-row pickers.** omp has a tree selector (filters, labels, folding) and a rewind selector. (WP-8)
+11. **Custom markdown commands and `/skill:<name>` don't work.** This covers `.omp/.claude/.opencode commands/*.md`. RPC `get_available_commands` advertises `skill:<name>` entries that nothing executes. (WP-9)
+12. **304 of the 402 settings shown in `/settings` have no effect.** This includes `tools.approvalMode`, so the TUI never asks for approval even after the user picks "Always ask". (WP-10, WP-26)
+13. **Default-on agent guards are missing.** Todo reminders, unexpected-stop detection, the tool-call loop guard, fabricated-result abort and magic keywords (`ultrathink` …) are absent. Turn-end/ask notifications and the terminal title are also missing. (WP-11, WP-12)
+14. **Compaction is a single summary pass.** No method ladder, server-side compaction, mid-turn/async compaction, stale-read pruning or prompt-cache warming. (WP-13, WP-14)
+15. **`omc acp` starts a TUI instead of ACP mode.** Editors call `omp acp`. RPC/ACP prompts don't run slash commands, RPC message events have no `messageId`, the `ask` tool fails in RPC, and several RPC response shapes differ. (WP-15, WP-16)
+
 ## Prioritized work packages
 
-_(being assembled; see the inventory sections below)_
+WP numbers are stable IDs; the tiers give the order. Each package is sized for one agent. It lists the omc files to change and the upstream files to port
+from: **T** = `packages/tui/src`, **U** = `packages/coding-agent/src`, **A** = `packages/agent/src`.
+Every package must:
+- update [status.md](status.md) and the matching rows here;
+- add e2e or TUI checks;
+- be verified side by side with `tests/tui/compare.sh` where it is visual.
+
+### P0 — hit in every normal session
+
+| WP | Scope | omc files | Upstream sources |
+|---|---|---|---|
+| WP-1 Plan review and plan-mode parity | Fullscreen plan review that renders the plan markdown with a Contents sidebar. Five actions: execute in fresh context / compact / keep context (with token count) / refine (feedback to model) / save & quit. Also: tier slider, copy, Ctrl+G edit, `/plan-review`, "Exit plan mode?" confirm with a draft, paused state, `plan.enabled`, `plan.autosave(Dir)`, `modelRoles.plan` switch/restore | `src/coding/app.c` (`app_propose_plan`, `app_set_plan_mode`), new `src/ui/planreview.c`, `src/modes/interactive.c` | T/overlays/plan-review-overlay.ts, plan-toc.ts, plan-save-overlay.ts; U/modes/interactive-mode.ts (`handlePlanModeCommand`, `showPlanReview`, `#approvePlan`, `#exitPlanMode`); U/plan-mode/* |
+| WP-2 Queue and non-blocking input | Render delivered steer/follow-up user messages; pending-messages view; dequeue (Alt+Up); Esc restores the queue to the editor; follow-up on Ctrl+Q / Ctrl+Enter. Move `!cmd`, `!!cmd`, `/compact`, `/handoff` to a worker with Esc cancel. Defer `!cmd` while streaming. `$code` / `$$code` user eval in the shared kernel. Queue `/compact` for the yield while streaming | `src/modes/interactive.c` (`on_submit`, `run_bang`, `ui_apply_event`, `key_hook`), `src/coding/app.c` (`app_user_bash`, `app_compact`, `app_handoff`), `src/ui/chat.c` | U/modes/controllers/input-controller.ts (`handleFollowUp`, `handleDequeue`, `restoreQueuedMessagesToEditor`), interactive-mode.ts (`updatePendingMessagesDisplay`), command-controller.ts (`handleBashCommand`, `handlePythonCommand`, `handleCompactCommand`), U/modes/prompt/queued-messages.ts |
+| WP-3 Model-facing correctness bugs | grep context lines (`grep.contextBefore/After`, defaults 1/3). Reject unregistered `scheme://` in read/write/edit. Port `out://`, `cfg://`, `conflict://N`. Make `thinking: auto` stop meaning off: resolve it like omp, or to the model default until the WP-12 classifier lands. Verify with `tests/parity/request_diff.sh` / `tool_diff.sh` | `src/tools/grep_glob.c`, `src/text/search.c`, `src/tools/write_bash.c`, `src/tools/read.c`, `src/tools/vurl.c`, `src/coding/app.c` (thinking setup), `src/ui/settings.c` | U/tools/grep.ts, U/internal-urls/{router,out-protocol,cfg-protocol,conflict-protocol}.ts, U/tools/conflict-detect.ts, U/auto-thinking/* |
+| WP-4 Slash-command correctness and shared registry | One registry (name, aliases, subcommands, hints, handler) used by TUI, RPC and ACP. Fix `/advisor` (status/dump), `/compact [soft\|remote\|snapcompact] [focus]`, `/shake [elide\|images\|thinking]`, `/handoff [focus]`, `/resume <id>`, `/effort` errors, `/delete` on in-memory sessions. Add aliases (models, rewind, q, providers, status, subagents, worktree, plugin, force:). Bare `exit`/`quit`/`q`. `/export` with omp's HTML viewer (`export/html/template.*` embedded as assets). `/dump all\|anon` + request-JSON sidecar | `src/modes/interactive.c` (`handle_command`, `COMMANDS[]`), `src/ui/slash.c`, `src/coding/app.c`, `src/session/session.c` (`session_export_html`), `assets/` | U/slash-commands/builtin-*.ts, builtin-registry.ts, helpers/*, U/session/compact-modes.ts, shake-types.ts, session-dump-format.ts, U/export/html/* |
+| WP-5 App keybinding layer | Add the 45 `app.*` actions to the key table. Load `keybindings.yml` (+ legacy .json migration, profile inherit); `/migrate` copies it. Make `key_hook` use `tui_kb()`. Generate `/hotkeys` from the live bindings. Cheap keys: Ctrl+Z suspend, F5/Alt+R retry, Alt+Shift+P plan, Ctrl+C semantics (500 ms, no abort), Ctrl+T status + persist, Ctrl+] jumps, Alt+Y kill ring, Alt+L display reset, Esc-Esc → `doubleEscapeAction`. Fix the false claims in docs/tui.md | `src/tui/keys.c`, `src/tui/editor.c`, `src/modes/interactive.c`, `src/ui/overlays.c` (`hotkeys_markdown`), `src/coding/migrate.c`, docs/tui.md | T/app-keybindings.ts, T/keybindings.ts, T/kill-ring.ts, T/hotkeys-markdown.ts, U/modes/controllers/input-controller.ts |
+| WP-7 Report panels | `/context` viewer (category breakdown, browse content); `/session` info overlay + `delete`/`pin`; `/tools` markdown panel incl. xd:// tools; `/jobs` panel + job tree + `full`/`kill`; `/todo` subcommands; `/advisor status\|dump`. Report-panel inline docking for short reports | `src/modes/interactive.c`, `src/ui/overlays.c` (`ui_show_report`), new `src/ui/context.c`, `src/tools/jobs.c`, `src/tools/todo_ask.c` | T/overlays/context-viewer*.ts, session-info-overlay.ts, jobs-panel.ts, job-tree.ts, report-panel.ts; U/modes/controllers/command-controller.ts, todo-command-controller.ts; U/slash-commands/helpers/context-report.ts |
+| WP-8 Tree and rewind selectors | `/tree` tree selector (glyphs, filters / `treeFilterMode`, labels, search, fold, branch prev/next); rewind selector for `/branch`, `/rewind`, Esc-Esc; optional branch summary prompt (`branchSummary.enabled`) | `src/modes/interactive.c` ("tree"/"branch"), new `src/ui/tree.c`, `src/coding/app.c` | T/overlays/tree-selector.ts, rewind-selector.ts; U/modes/controllers/selector-controller.ts; A/compaction/branch-summarization.ts |
+| WP-9 Custom and skill commands | Discover `commands/*.md` (omp/Claude/OpenCode, user + project, `commands.enable*`) with `$ARGUMENTS`/frontmatter. `/skill:<name>` invocation + completion (`skills.enableSkillCommands`). MCP prompts as commands. Autocomplete entries. Execution from RPC `prompt` / ACP `session/prompt` (uses the WP-4 registry) | `src/coding/discovery.c`, `src/modes/interactive.c`, `src/ui/slash.c`, `src/tui/editor.c`, `src/modes/rpc.c`, `src/modes/acp.c` | U/capability/slash-command.ts, U/extensibility/{custom-commands,skills.ts,slash-commands.ts}, U/modes/skill-command.ts, U/modes/prompt/skill-tokens.ts, U/discovery/{claude,opencode}.ts |
+
+### P1 — common, or the default behaviour differs
+
+| WP | Scope | omc files | Upstream sources |
+|---|---|---|---|
+| WP-6 Editor I/O | Ctrl+G external editor (main editor + ask "Other"); Ctrl+R history search; copy line/prompt (Alt+Shift+L/C); Ctrl+V image paste + image-path paste + attachments; raw paste; large-paste chip/menu; fuzzy project-wide `@` mentions; `#` prompt actions (`#123` → pr:// / issue://) | `src/tui/editor.c`, `src/modes/interactive.c`, `src/ui/ask.c`, `src/tui/term.c`, new `src/ui/histsearch.c` | U/modes/controllers/input-controller.ts, T/overlays/history-search.ts, U/modes/prompt/{attachment-chips,prompt-action-autocomplete}.ts, T/autocomplete.ts |
+| WP-10 Tool approval system | `tools.approvalMode` tiers (always-ask, ask-and-remember, write, yolo), `tools.approval` per-tool policies, `tools.restrictedFolders`, approval dialog (Ctrl+Enter/Ctrl+Q), remembered grants, `/forget-approvals`, `--approval-mode` / `--auto-approve` / `--yolo` | `src/coding/app.c` (`hook_before_tool`), new `src/ui/approval.c`, `src/modes/acp.c`, `src/cli/cli.c` | U/tools/approval.ts, approval-cache.ts, approval-targets.ts, search-approval-targets.ts; T/overlays/approval-dialog.ts |
+| WP-11 Turn-lifecycle signals | Completion/ask/error notifications (OSC 9/777, `*.notify`); terminal title with run state + spinner (`tui.titleState`, `tui.titleSpinner`); OSC 7501 program status; idle recap (`recap.*`); sleep prevention (logind inhibitor); release check | `src/modes/interactive.c`, `src/tui/term.c` (`tui_term_set_title`), `src/coding/title.c`, `src/coding/app.c` | U/modes/controllers/event-controller.ts (`send*Notification`), T/desktop-notify.ts, U/utils/{run-status,title-generator}.ts, U/session/idle-maintenance.ts, U/session/power-assertion-backend.ts |
+| WP-12 Default-on agent guards | Todo reminders + auto-clear (`todo.reminders`, `remindersMax`, `tasks.todoClearDelay`); unexpected-stop detection; tool-call loop guard / redirect and assistant loop guard (`model.loopGuard.*`); fabricated-result abort; magic keywords (ultrathink/orchestrate/workflow/jevify + hidden notices); auto-thinking classifier. Each must keep `request_diff.sh` clean | `src/coding/app.c` (turn end), `src/agent/agent.c`, `src/modes/interactive.c` (prompt pre-processing) | U/session/{todo-tracker,unexpected-stop-classifier,tool-call-loop-redirect}.ts, U/modes/magic-keywords.ts, U/prompts/system/*-notice.md, U/auto-thinking/* |
+| WP-13 Compaction ladder | `compaction.methodOrder` (remote → snapcompact → handoff → shake → soft); shake/handoff as automatic methods (shake regions, tail protection, artifact offload, persisted); server-side compaction (OpenAI Responses, Anthropic, Bedrock); mid-turn + async compaction; pruning (`supersedeReads`, `dropUseless`); `handoffSaveToDisk`; per-model thresholds. snapcompact can be a follow-up package | `src/coding/app.c` (`app_compact`, auto-compaction, `app_shake`, `app_handoff`), `src/session/session.c`, `src/ai/provider_anthropic.c`, `src/ai/provider_openai_responses.c`, `src/ai/provider_bedrock.c` | U/session/{compaction-methods,session-maintenance,compact-modes}.ts, A/compaction/{compaction,shake,pruning,openai,anthropic,bedrock}.ts, packages/snapcompact |
+| WP-14 Provider knobs and cache warming | Prompt cache warmer (`providers.cacheWarming`); service tiers `/fast`, `/slow`, `tier.*`, `--service-tier`; `/extended-context` + `extendedContext`; stream first-event/idle timeouts; `providers.maxInFlightRequests`; RPC `set_fast_mode` / `set_slow_mode` / `set_cache_warming` | `src/coding/app.c`, `src/ai/provider_*.c`, `src/ai/ai_common.c`, `src/modes/rpc.c` | U/session/cache-warmer.ts, anthropic-slow-mode.ts, model-controls.ts; U/slash-commands/builtin-modes.ts (fast/slow/extended-context) |
+| WP-15 RPC wire parity | `messageId` + `partial` + start/done/error on message events, delta filter; session events (compaction, retry, model/thinking changed, goal_updated, queue_update, available_commands_update, …); response shapes (set_model, new/switch/open/branch/fork, get_entries leafId/since, get_messages_page cursor, get_session_stats, compact, handoff, btw); full `get_state`; `extension_ui_request`/`_response` so `ask` works; login/logout; async `bash` so `abort_bash` works; protocol v2 + `rpc_chunk`; subagent frames; mark status.md 🟡 | `src/modes/rpc.c`, `src/agent/agent.c` (`agent_event_to_json`), `src/coding/app.c` (structured events beside `notice`), `src/modes/print.c`, `src/tools/todo_ask.c` | U/modes/rpc/{rpc-types,rpc-mode,rpc-session-events,rpc-messages,rpc-compat,rpc-frame}.ts, U/session/agent-session-events.ts |
+| WP-16 ACP parity | `omc acp` subcommand; slash commands in `session/prompt`; `session/resume`, `close`, `fork`, `set_config_option`, `_session/steering`; `configOptions` + `config_option_update` / `session_info_update` / `available_commands_update`; `mcpServers` in new/load; tool-call history replay; structured diff/terminal tool content; `usage_update {size,used,cost}`; errors → `end_turn`/`refusal`; fs/terminal/elicitation client bridges | `src/modes/acp.c`, `src/cli/cli.c` | U/modes/acp/{acp-agent,acp-event-mapper,acp-client-bridge}.ts, U/slash-commands/acp-builtins.ts, U/commands/acp.ts |
+| WP-17 CLI flags and subcommands | `--flag=value`; unknown subcommand-shaped words become an error instead of a prompt; `-r` without a value opens the picker; `--restore`, `--export`, `--models`, `--smol/--slow/--plan`, `--hide-thinking`, `--advisor`, `--max-time/--max-cost/--warn-cost`, `--add-dir`, `--no-lsp`, `--skills`, `--system-prompt-template`, `--mode rpc-ui`; `@image` args. Subcommands: commit, completions, token, usage, setup, session, worktree, agents, ttsr, ssh, search. Fill gaps in models/grep/auth/config | `src/cli/cli.c`, `src/main.c` | U/cli/{args,flag-tables}.ts, U/cli-commands.ts, U/commands/*.ts, U/main.ts |
+
+### P2 — specific workflows
+
+| WP | Scope | omc files | Upstream sources |
+|---|---|---|---|
+| WP-18 MCP and SSH management | `/mcp add` wizard, list, remove, test, reauth, unauth, enable, disable, reconnect, reload, resources, prompts, notifications (`mcp.enableProjectConfig`, `mcp.notifications`, `mcp.renderMarkdownResults`); `/ssh add\|list\|remove` | `src/mcp/mcp.c`, `src/mcp/oauth.c`, `src/modes/interactive.c`, new `src/ui/mcpwizard.c`, `src/tools/ssh.c` | U/modes/controllers/{mcp-command-controller,ssh-command-controller}.ts, T/overlays/mcp-add-wizard.ts, U/slash-commands/helpers/{mcp,ssh}.ts |
+| WP-19 Model switching | `/switch` + Alt+P temporary model picker; Ctrl+P / Shift+Ctrl+P role cycle with cycle track; `/modelpreset` + hub presets; prewalk (`/prewalk`, `prewalk.*`); retry fallback chains (`retry.*`, hub `f`) | `src/ui/modelhub.c`, `src/modes/interactive.c`, `src/coding/app.c` | T/overlays/model-picker.ts, model-hub.ts; U/modes/controllers/input-controller.ts (`cycleRoleModel`); U/session/{prewalk,retry-fallback-chains,role-models}.ts |
+| WP-20 Conversation utilities | `/copy` picker + `code\|cmd\|link` targets; `/btw` streaming panel, follow-up and history browser; `/open` | `src/modes/interactive.c`, new `src/ui/copysel.c`, `src/ui/btw.c` | T/overlays/{copy-selector,copy-targets,btw-panel,btw-history-panel}.ts, U/modes/controllers/btw-controller.ts, U/session/btw-history.ts |
+| WP-21 Workspace and session lifecycle | `/move`, `/wt` + `worktree.*`, `/add-dir` / `/remove-dir` / multi-root `/dirs`, `/restart`, `/fresh`, `/pin`, `/local` + Alt+G | `src/coding/app.c`, `src/session/session.c`, `src/modes/interactive.c` | U/slash-commands/builtin-lifecycle.ts, U/session/session-worktree.ts, T/overlays/move-overlay.ts, U/modes/local-file-editor.ts |
+| WP-22 Subagent visibility | `/hub` agent hub (roster, chat view, revive, kill), `/agents`, running-subagent badge in the status line, agent transcript viewer, session focus (←←), live job widgets (`async.widgets`) | `src/ui/statusline.c`, new `src/ui/agenthub.c`, `src/coding/agents.c`, `src/tools/jobs.c` | T/overlays/{agent-hub*,agents-hub,agent-transcript-viewer,running-subagent-badge}.ts, U/modes/controllers/session-focus-controller.ts, U/job-widgets/* |
+| WP-23 Loop mode | `/loop [count\|duration] [--while\|--until cmd] [prompt]`, `loop.*`, Esc suspends | `src/modes/interactive.c`, `src/coding/app.c` | U/slash-commands/builtin-modes.ts (loop), U/modes/{loop-limit,loop-condition}.ts |
+| WP-24 Provider usage | `/usage` provider quota dashboard + `/usage reset` selector; per-provider usage fetchers; per-turn usage row (`display.showTokenUsage`, `display.showTurnTime`) | `src/modes/interactive.c`, `src/config/auth*.c`, `src/ui/chat.c` | T/overlays/{usage-dashboard,usage-display,usage-row,reset-usage-selector}.ts, U/slash-commands/helpers/usage-report.ts |
+| WP-25 Web search providers | Search through logged-in providers (anthropic, openai, gemini, codex, xai, perplexity, kimi, zai), SearXNG (`searxng.endpoint`), `providers.fetch` | `src/tools/web.c` | U/web/search/{index,providers/*}.ts |
+| WP-26 Settings honesty | Until each feature lands, hide ⛔-subsystem settings (§3c) from `/settings`, or mark them unsupported (decide the presentation with the user, since parity says the UI should match omp). Add a unit test that fails when a newly read key is undocumented here | `src/ui/settings.c`, `build-tools/extract_settings.sh` | T/overlays/settings-selector.ts |
+
+### P3 — niche or large, low frequency
+
+| WP | Scope | omc files | Upstream sources |
+|---|---|---|---|
+| WP-27 Remaining tools | generate_image, remote tts, security_scan + `security://` + `/security`, hindsight memory backend (retain/recall/reflect), `mr://`, `attachment://`, think, yield + `task.structured`, task isolation / outputSchema / perCallModel, eval `agent()` / workpool | `src/tools/*`, `src/coding/memory.c`, `src/tools/task.c` | U/tools/{image-gen,tts,security-scan,think,yield}.ts, U/hindsight/*, U/internal-urls/{mr,attachment,security}-protocol.ts, U/task/* |
+| WP-28 Extra commands | `/omfg` (on top of `src/coding/ttsr.c`), `/tan`, `/cleanse`, `/vibe`, `/ratchet`, `/changelog` (embed CHANGELOG), `/debug` selector, `/record`, `/pause`, `/force`, `/skillful`, `/setup` reopen, marketplace/plugins install (git-based; JS parts ⛔), stats aggregation | `src/modes/interactive.c`, `src/coding/*` | U/slash-commands/builtin-*.ts, U/modes/controllers/{omfg,tan,cleanse}-*.ts, U/vibe/*, U/ratchet/*, U/extensibility/plugins/* |
+| WP-29 Rich rendering and display options | Mermaid / SVG / inline images (kitty/iTerm/sixel, `terminal.showImages`), table auto-graph, reactions, `display.collapseCompacted`, `display.hideToolActivity` (Ctrl+Shift+O), cache-miss marker, `tui.hyperlinks`, `tui.mouse`, `tui.tight`, vim mode, composer token rate | `src/tui/markdown.c`, `src/ui/chat.c`, `src/tui/term.c`, `src/tui/editor.c` | T/{kitty-graphics,sixel,vim,latex-block}.ts, T/charts/*, T/chat/*, U/auto-graph/* |
+
+Out of scope (⛔) and not packaged: JS/TS extensions, hooks and custom tools; the eval JS kernel;
+collab/share/stream (hosted); the skills.omp.sh registry; browser and computer use; STT, live voice,
+local TTS and tiny models; IDA; macOS spelling; npm self-update.
 
 ## 1. Slash commands
 
@@ -406,56 +500,6 @@ ast_edit debug eval glob grep find lsp checkpoint rewind task wait todo web_sear
 | attachment:// | — | ❌ | |
 | security://, vault:// | — | ❌ | off by default |
 
-## 7. Compaction and background systems
-
-### 7a. Compaction
-
-| Item | Upstream | omc | Status | Notes |
-|---|---|---|---|---|
-| Method ladder `compaction.methodOrder` (remote → snapcompact → handoff → shake → soft) | session/compaction-methods.ts | — | ❌ | omc always runs the summary ("soft") method |
-| Summary compaction | agent/src/compaction/compaction.ts | `app_compact` | 🟡 | single pass, chars/4 estimate; previous-summary update and `modelRoles.compaction` ok; no split-turn handling, no per-model thresholds |
-| Server-side compaction (OpenAI Responses, Anthropic, Bedrock) | compaction/{openai,anthropic,bedrock}.ts | — | ❌ | `provider_anthropic.c` only recognises the `compaction` stop reason |
-| snapcompact | packages/snapcompact | — | ❌ | renders history to PNG frames for vision models; portable but large |
-| handoff | session-maintenance.ts | `app_handoff` | 🟡 | manual only; not an automatic method; no `handoffSaveToDisk` |
-| shake | agent/src/compaction/shake.ts | `app_shake` | 🟡 | manual only; drops images too; no fenced/XML regions, recent-tail protection, artifact offload; not persisted |
-| Threshold trigger | compaction-threshold.ts | `app_compaction_threshold` | ✅ | |
-| Mid-turn compaction (`midTurnEnabled`, on) | session-maintenance.ts | — | ❌ | auto-compaction runs only after a prompt |
-| Async compaction (`asyncEnabled`, on) | session-maintenance.ts | — | ❌ | status-line marker only |
-| Overflow recovery | session-maintenance.ts | `app.c` | ✅ | `contextPromotion` ❌ |
-| Pruning (`supersedeReads`, `dropUseless`, on) | compaction/pruning.ts | — | ❌ | `agent.c` sets a `useless` flag nothing consumes |
-| Idle compaction | idle-maintenance.ts | — | ❌ | off by default |
-| Branch summary | compaction/branch-summarization.ts | `rpc.c` navigate only | 🟡 | ad-hoc prompt; no interactive /tree prompt |
-
-### 7b. Background systems
-
-| System | Upstream | omc | Status | Notes |
-|---|---|---|---|---|
-| Prompt cache warmer (`providers.cacheWarming` idle) | session/cache-warmer.ts | — | ❌ | cost impact |
-| Idle recap (`recap.enabled`, 240 s) | idle-maintenance.ts | — | ❌ | |
-| Turn-end / ask / error notifications | event-controller.ts, tui/desktop-notify.ts | — | ❌ | default on |
-| Terminal title + OSC 7501 program status | utils/run-status.ts, title-generator.ts | `tui_term_set_title` never called | ❌ | |
-| Update check | main.ts | — | ❌ | npm self-update ⛔, but a release check is portable |
-| Auto-thinking classifier | auto-thinking/classifier.ts | — | ❌ | plus the `auto` → off bug above |
-| Todo reminders, unexpected-stop detection, tool-call loop redirect, fabricated-result abort, loop guard | session/todo-tracker.ts, unexpected-stop-classifier.ts, tool-call-loop-redirect.ts | — | ❌ | all default on |
-| Magic keywords (ultrathink/orchestrate/workflow/jevify) | modes/magic-keywords.ts | — | ❌ | default on |
-| Sleep prevention | power-assertion-backend.ts | — | ❌ | Linux: logind inhibitor |
-| Session cost caps (`--max-cost`, warn) | session/settings.ts | — | ❌ | |
-| Prewalk / auto-prewalk, speculation | session/prewalk.ts, speculation/ | — | ❌ | off by default |
-| Telemetry OTLP export | telemetry-export*.ts | — | ❌ | only with `OTEL_*` env |
-| Stats (packages/stats) | packages/stats | — | ❌ | aggregation portable; the bundled web dashboard is the large part |
-| Custom markdown commands, skill commands | custom-commands, skill-command.ts | — | ❌ | §1 |
-| Plugins / marketplace | extensibility/plugins | `plugins.c` (Claude plugin skills) | 🟡 | install/update, plugin MCP/commands ❌ |
-| Worktrees (`/wt`, `task.isolation`) | session-worktree.ts | — | ❌ | |
-| Job widgets / activity | job-widgets/, activity/ | — | ❌ | |
-| Secrets obfuscation | secrets/ | — | ❌ | off by default |
-| IRC / agent messaging, checkpoints | irc/bus.ts, checkpoint.ts | `agents.c`, `app.c` | ✅ | |
-| Hooks (`.claude/hooks`, `.omp` hooks) | extensibility/hooks | — | ⛔ | omp loads only `.ts`/`.js` hook modules under Bun |
-| Extensions, custom tools | extensibility/extensions, custom-tools | — | ⛔ | Bun/JS runtime |
-| Collab / share / stream | collab/, packages/collab-web | — | ⛔ | hosted relay/blob service (secret-gist share is portable) |
-| Tern native rendering | tools/tern-media.ts | — | ⛔ | external native host |
-| STT, live voice, predict_word, local TTS | stt/, live/, predict/, tts/ | — | ⛔ | on-device ML / audio |
-| Skillshare registry | skillshare/ | — | ⛔ | hosted registry |
-
 ## 5. Overlays, dialogs and command controllers
 
 Upstream: `packages/tui/src/overlays/*`, `packages/coding-agent/src/modes/components/*`,
@@ -663,3 +707,53 @@ the prompt.
 | share, join, collab, clip, stream, skill/skills | ⛔ | hosted relay/stream/Skillshare services |
 | say, predict, tiny-models, browser-relay, launch | ⛔ | local TTS/ML runtimes, Chrome CDP relay, internal |
 | omc-only: mcp, migrate, logout, sessions, export, glob, bash, version, help | n/a | |
+
+## 7. Compaction and background systems
+
+### 7a. Compaction
+
+| Item | Upstream | omc | Status | Notes |
+|---|---|---|---|---|
+| Method ladder `compaction.methodOrder` (remote → snapcompact → handoff → shake → soft) | session/compaction-methods.ts | — | ❌ | omc always runs the summary ("soft") method |
+| Summary compaction | agent/src/compaction/compaction.ts | `app_compact` | 🟡 | single pass, chars/4 estimate; previous-summary update and `modelRoles.compaction` ok; no split-turn handling, no per-model thresholds |
+| Server-side compaction (OpenAI Responses, Anthropic, Bedrock) | compaction/{openai,anthropic,bedrock}.ts | — | ❌ | `provider_anthropic.c` only recognises the `compaction` stop reason |
+| snapcompact | packages/snapcompact | — | ❌ | renders history to PNG frames for vision models; portable but large |
+| handoff | session-maintenance.ts | `app_handoff` | 🟡 | manual only; not an automatic method; no `handoffSaveToDisk` |
+| shake | agent/src/compaction/shake.ts | `app_shake` | 🟡 | manual only; drops images too; no fenced/XML regions, recent-tail protection, artifact offload; not persisted |
+| Threshold trigger | compaction-threshold.ts | `app_compaction_threshold` | ✅ | |
+| Mid-turn compaction (`midTurnEnabled`, on) | session-maintenance.ts | — | ❌ | auto-compaction runs only after a prompt |
+| Async compaction (`asyncEnabled`, on) | session-maintenance.ts | — | ❌ | status-line marker only |
+| Overflow recovery | session-maintenance.ts | `app.c` | ✅ | `contextPromotion` ❌ |
+| Pruning (`supersedeReads`, `dropUseless`, on) | compaction/pruning.ts | — | ❌ | `agent.c` sets a `useless` flag nothing consumes |
+| Idle compaction | idle-maintenance.ts | — | ❌ | off by default |
+| Branch summary | compaction/branch-summarization.ts | `rpc.c` navigate only | 🟡 | ad-hoc prompt; no interactive /tree prompt |
+
+### 7b. Background systems
+
+| System | Upstream | omc | Status | Notes |
+|---|---|---|---|---|
+| Prompt cache warmer (`providers.cacheWarming` idle) | session/cache-warmer.ts | — | ❌ | cost impact |
+| Idle recap (`recap.enabled`, 240 s) | idle-maintenance.ts | — | ❌ | |
+| Turn-end / ask / error notifications | event-controller.ts, tui/desktop-notify.ts | — | ❌ | default on |
+| Terminal title + OSC 7501 program status | utils/run-status.ts, title-generator.ts | `tui_term_set_title` never called | ❌ | |
+| Update check | main.ts | — | ❌ | npm self-update ⛔, but a release check is portable |
+| Auto-thinking classifier | auto-thinking/classifier.ts | — | ❌ | plus the `auto` → off bug above |
+| Todo reminders, unexpected-stop detection, tool-call loop redirect, fabricated-result abort, loop guard | session/todo-tracker.ts, unexpected-stop-classifier.ts, tool-call-loop-redirect.ts | — | ❌ | all default on |
+| Magic keywords (ultrathink/orchestrate/workflow/jevify) | modes/magic-keywords.ts | — | ❌ | default on |
+| Sleep prevention | power-assertion-backend.ts | — | ❌ | Linux: logind inhibitor |
+| Session cost caps (`--max-cost`, warn) | session/settings.ts | — | ❌ | |
+| Prewalk / auto-prewalk, speculation | session/prewalk.ts, speculation/ | — | ❌ | off by default |
+| Telemetry OTLP export | telemetry-export*.ts | — | ❌ | only with `OTEL_*` env |
+| Stats (packages/stats) | packages/stats | — | ❌ | aggregation portable; the bundled web dashboard is the large part |
+| Custom markdown commands, skill commands | custom-commands, skill-command.ts | — | ❌ | §1 |
+| Plugins / marketplace | extensibility/plugins | `plugins.c` (Claude plugin skills) | 🟡 | install/update, plugin MCP/commands ❌ |
+| Worktrees (`/wt`, `task.isolation`) | session-worktree.ts | — | ❌ | |
+| Job widgets / activity | job-widgets/, activity/ | — | ❌ | |
+| Secrets obfuscation | secrets/ | — | ❌ | off by default |
+| IRC / agent messaging, checkpoints | irc/bus.ts, checkpoint.ts | `agents.c`, `app.c` | ✅ | |
+| Hooks (`.claude/hooks`, `.omp` hooks) | extensibility/hooks | — | ⛔ | omp loads only `.ts`/`.js` hook modules under Bun |
+| Extensions, custom tools | extensibility/extensions, custom-tools | — | ⛔ | Bun/JS runtime |
+| Collab / share / stream | collab/, packages/collab-web | — | ⛔ | hosted relay/blob service (secret-gist share is portable) |
+| Tern native rendering | tools/tern-media.ts | — | ⛔ | external native host |
+| STT, live voice, predict_word, local TTS | stt/, live/, predict/, tts/ | — | ⛔ | on-device ML / audio |
+| Skillshare registry | skillshare/ | — | ⛔ | hosted registry |
