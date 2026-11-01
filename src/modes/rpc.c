@@ -741,11 +741,12 @@ static void handle(rpc_t *r, json_t *cmd) {
         json_t *provs = auth_oauth_providers();
         json_t *p;
         json_arr_foreach(provs, i, p) {
+            if (!json_get_obj(p, "login")) continue; /* env-only providers have no login flow */
             json_t *x = json_obj();
             json_set_str(x, "id", json_get_str(p, "id"));
             json_set_str(x, "name", json_get_str(p, "name") ? json_get_str(p, "name") : json_get_str(p, "id"));
             json_set_bool(x, "available", true);
-            json_set_bool(x, "authenticated", auth_has_credentials(json_get_str(p, "id")));
+            json_set_bool(x, "authenticated", auth_has_credentials(auth_store_id(json_get_str(p, "id"))));
             json_push(arr, x);
         }
         json_t *d = json_obj();

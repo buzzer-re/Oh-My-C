@@ -108,13 +108,11 @@ static int cmd_login(int argc, char **argv) {
     auth_init();
     const char *provider = argc > 0 ? argv[0] : NULL;
     if (!provider) {
-        fprintf(stderr, "Usage: omc login <provider>\nOAuth providers:\n");
+        fprintf(stderr, "Usage: omc login <provider>\nLogin providers:\n");
         json_t *arr = auth_oauth_providers(), *d;
         json_arr_foreach(arr, i, d) {
-            json_t *lg = json_get_obj(d, "login");
-            if (str_eq(json_get_str(lg, "kind"), "oauth-code") ||
-                (str_eq(json_get_str(lg, "kind"), "custom") && str_eq(json_get_str(lg, "hook"), "cursor")))
-                fprintf(stderr, "  %-22s %s\n", json_get_str(d, "id"), json_get_str(d, "name") ? json_get_str(d, "name") : "");
+            if (json_get_obj(d, "login"))
+                fprintf(stderr, "  %-24s %s\n", json_get_str(d, "id"), json_get_str(d, "name") ? json_get_str(d, "name") : "");
         }
         return 2;
     }
@@ -125,7 +123,9 @@ static int cmd_login(int argc, char **argv) {
         free(err);
         return 1;
     }
-    fprintf(stderr, "Logged in to %s.\n", provider);
+    const char *store = auth_store_id(provider);
+    if (strcmp(store, provider)) fprintf(stderr, "Logged in to %s (stored as %s).\n", provider, store);
+    else fprintf(stderr, "Logged in to %s.\n", provider);
     return 0;
 }
 

@@ -1,7 +1,8 @@
 /* login.c - provider sign-in UI shared by the setup wizard and /login (ports of omp
  * overlays/oauth-selector.ts and overlays/login-dialog.ts, v18.14.2): a searchable provider list in a
  * "Select provider to login" panel, then a "Login to <provider>" dialog that shows the authorize URL,
- * instructions, progress and code / API-key prompts while a worker thread runs the flow. */
+ * instructions (device codes: "Enter code: XXXX-XXXX"), progress, and the flow's prompts (API keys, enterprise
+ * domains, regions, OTP codes) while a worker thread runs the provider's login from src/config/auth.c. */
 #include "ui/overlays.h"
 #include "ui/ui.h"
 
@@ -83,7 +84,7 @@ ui_oauth_sel_t *ui_oauth_sel_new(bool logout) {
             off = off || !auth_has_credentials(id);
         } else {
             json_t *d;
-            json_arr_foreach(disabled, k, d) if (str_eq(json_sv(d), id) || str_eq(json_sv(d), json_get_str(p, "storeCredentialsAs"))) off =
+            json_arr_foreach(disabled, k, d) if (str_eq(json_sv(d), id) || str_eq(json_sv(d), json_get_str(p, "storeAs"))) off =
                 true;
         }
         if (!off) vec_push(&s->items, i);
@@ -273,9 +274,13 @@ struct ui_login {
     VEC(ditem_t) items;
     /* active input */
     bool input_open, input_secret, input_is_code, manual_pending;
+    long input_idx;         /* item index of the mounted input field, -1 when none */
     sb_t input;
     char *pasted;           /* handed to the worker (code paste) */
-    char *api_key;          /* entered key (api-key flow) */
+    /* worker prompt (OAuthPrompt) waiting for an answer */
+    pthread_cond_t cv;
+    bool prompt_waiting;
+    char *prompt_answer;
     volatile int abort_flag;
     bool closed;            /* dialog dismissed (cancel or finished) */
     int refcount;
@@ -302,7 +307,8 @@ static void login_release(ui_login_t *l) {
     vec_free(&l->items);
     sb_free(&l->input);
     free(l->pasted);
-    free(l->api_key);
+    free(l->prompt_answer);
+    pthread_cond_destroy(&l->cv);
     free(l->provider);
     free(l->name);
     free(l->err);
@@ -339,6 +345,7 @@ static void open_in_browser(const char *url) {
 static void show_auth(ui_login_t *l, const char *url, const char *instructions, const char *launch) {
     for (size_t i = 0; i < l->items.n; i++) free(l->items.v[i].text);
     l->items.n = 0;
+    l->input_idx = -1; /* the cleared container no longer mounts the field */
     dspacer(l);
     char *acc = xasprintf("\x1b]8;;%s\x07%s\x1b]8;;\x07", url, url);
     dpush(l, DI_TEXT, S(TUI_TC_ACCENT, acc));
@@ -372,11 +379,20 @@ static void open_input(ui_login_t *l, bool secret, bool code) {
     l->input_secret = secret;
     l->input_is_code = code;
     sb_clear(&l->input);
+    l->input_idx = (long)l->items.n;
     dpush(l, DI_INPUT, xstrdup(""));
 }
 
-/* showPrompt (API key / generic prompts) */
+/* showPrompt: multi-step flows keep prior answers visible ("> value", secrets masked), then the new question */
 static void show_prompt(ui_login_t *l, const char *message, const char *placeholder, bool secret) {
+    if (l->input_idx >= 0 && (size_t)l->input_idx < l->items.n && l->items.v[l->input_idx].kind == DI_INPUT) {
+        char *ans = xasprintf("> %s", l->input_secret ? "********" : sb_cstr(&l->input));
+        free(l->items.v[l->input_idx].text);
+        l->items.v[l->input_idx].kind = DI_TEXT;
+        l->items.v[l->input_idx].text = S(TUI_TC_DIM, ans);
+        free(ans);
+        l->input_idx = -1;
+    }
     dspacer(l);
     dpush(l, DI_TEXT, S(TUI_TC_TEXT, message));
     if (placeholder && *placeholder) {
@@ -449,6 +465,35 @@ static char *poll_code_cb(void *ud) {
     return p;
 }
 
+/* OAuthController.onPrompt: blocks the worker until the dialog submits or closes */
+static char *prompt_cb(void *ud, const auth_prompt_t *p) {
+    ui_login_t *l = ud;
+    pthread_mutex_lock(&l->mu);
+    if (l->closed || l->abort_flag) {
+        pthread_mutex_unlock(&l->mu);
+        return NULL;
+    }
+    show_prompt(l, p->message, p->placeholder, p->secret);
+    free(l->prompt_answer);
+    l->prompt_answer = NULL;
+    l->prompt_waiting = true;
+    pthread_mutex_unlock(&l->mu);
+    request(l);
+    pthread_mutex_lock(&l->mu);
+    while (l->prompt_waiting && !l->closed && !l->abort_flag) pthread_cond_wait(&l->cv, &l->mu);
+    char *a = l->prompt_waiting ? NULL : l->prompt_answer;
+    l->prompt_answer = NULL;
+    l->prompt_waiting = false;
+    pthread_mutex_unlock(&l->mu);
+    return a;
+}
+
+static void wake_worker(ui_login_t *l) {
+    pthread_mutex_lock(&l->mu);
+    pthread_cond_broadcast(&l->cv);
+    pthread_mutex_unlock(&l->mu);
+}
+
 static void login_finish_ui(void *ud) {
     ui_login_t *l = ud;
     bool was_closed = l->closed;
@@ -467,18 +512,12 @@ static void *login_worker(void *ud) {
     h.on_auth = on_auth_cb;
     h.on_progress = on_progress_cb;
     h.poll_code = poll_code_cb;
+    h.prompt = prompt_cb;
     h.abort = &l->abort_flag;
     h.ud = l;
     l->rc = auth_login_hooked(l->provider, &h, &l->err);
     tui_post(l->u->tui, login_finish_ui, l);
     return NULL;
-}
-
-static void store_api_key(ui_login_t *l, const char *key) {
-    l->rc = auth_set_api_key(l->provider, key);
-    if (l->rc) l->err = xstrdup("failed to save credentials");
-    l->refcount++;
-    login_finish_ui(l);
 }
 
 ui_login_t *ui_login_start(ui_t *u, const char *provider, ui_login_done_fn done, void *ud) {
@@ -490,20 +529,12 @@ ui_login_t *ui_login_start(ui_t *u, const char *provider, ui_login_done_fn done,
     l->done = done;
     l->done_ud = ud;
     l->refcount = 1; /* owner */
+    l->input_idx = -1;
     pthread_mutex_init(&l->mu, NULL);
-    json_t *lg = json_get_obj(p, "login");
-    const char *kind = json_get_str(lg, "kind");
-    if (str_eq(kind, "api-key")) {
-        const char *url = json_get_str(lg, "authUrl");
-        if (url) show_auth(l, url, json_get_str(lg, "instructions"), NULL);
-        char *msg = json_get_str(lg, "prompt") ? xstrdup(json_get_str(lg, "prompt")) : xasprintf("Paste your %s API key", l->name);
-        show_prompt(l, msg, json_get_str(lg, "placeholder"), false);
-        free(msg);
-        return l;
-    }
-    if (!str_eq(kind, "oauth-code")) {
+    pthread_cond_init(&l->cv, NULL);
+    if (!json_get_obj(p, "login")) {
         l->rc = -1;
-        l->err = xasprintf("%s sign-in is not supported by omc yet", l->name);
+        l->err = xasprintf("%s has no interactive login", l->name);
         l->refcount++;
         tui_post(u->tui, login_finish_ui, l);
         return l;
@@ -524,6 +555,7 @@ void ui_login_free(ui_login_t *l) {
     if (!l) return;
     l->closed = true;
     l->abort_flag = 1;
+    wake_worker(l);
     login_release(l);
 }
 
@@ -570,6 +602,7 @@ bool ui_login_key(ui_login_t *l, const tui_key_t *k) {
         /* LoginDialogComponent#cancel: abort, close; no outcome */
         l->abort_flag = 1;
         l->closed = true;
+        wake_worker(l);
         if (l->done) l->done(l->done_ud, UI_LOGIN_CANCELLED, l->name, NULL);
         return true;
     }
@@ -577,19 +610,18 @@ bool ui_login_key(ui_login_t *l, const tui_key_t *k) {
     const char *txt = tui_key_text(k);
     pthread_mutex_lock(&l->mu);
     if (tui_kb(k, "tui.input.submit")) {
-        char *v = str_trim(sb_cstr(&l->input));
         if (l->input_is_code) {
             free(l->pasted);
-            l->pasted = v;
-            v = NULL;
+            l->pasted = str_trim(sb_cstr(&l->input));
+        } else if (l->prompt_waiting) {
+            /* prompt answered: the field stays mounted until the next question replaces it */
+            free(l->prompt_answer);
+            l->prompt_answer = xstrdup(sb_cstr(&l->input));
+            l->prompt_waiting = false;
+            l->input_open = false;
+            pthread_cond_broadcast(&l->cv);
         }
         pthread_mutex_unlock(&l->mu);
-        if (v) {
-            /* api-key prompt answered */
-            l->input_open = false;
-            store_api_key(l, v);
-            free(v);
-        }
         return true;
     }
     if (k->kind == TUI_KEY_PASTE && k->text) sb_append(&l->input, k->text);
