@@ -3,6 +3,7 @@
 #define OMC_APP_H
 
 #include "agent/agent.h"
+#include "config/model_resolver.h"
 #include "coding/discovery.h"
 #include "session/session.h"
 #include "tools/tools.h"
@@ -143,6 +144,12 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
 char *app_api_key_for(const ai_model_t *m);
 /* pick a default model: settings modelRoles.default, else first provider with credentials */
 const ai_model_t *app_default_model(void);
+/* a role's model (resolveModelRoleValue("@role") over its candidate pool) */
+const ai_model_t *app_role_model(const char *role, ai_effort_t *effort_out, bool *has_effort);
+/* first answer from `models` (skipping the session model), then the session model; owned or NULL */
+char *app_complete_first(app_t *a, const mr_pool_t *models, const char *system, const char *user, ai_effort_t effort);
+/* compaction model candidates in attempt order */
+void app_compaction_candidates(app_t *a, mr_pool_t *out);
 /* parse "pattern:effort" */
 const ai_model_t *app_resolve_model_pattern(const char *pattern, ai_effort_t *effort_out, bool *has_effort);
 

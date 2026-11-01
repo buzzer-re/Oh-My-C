@@ -153,8 +153,13 @@ static void build_agent(advisor_t *ad) {
     app_t *a = ad->app;
     agent_t *ag = agent_new();
     const ai_model_t *m = NULL;
-    const char *role = settings_str("modelRoles.advisor", NULL);
-    if (role) m = app_resolve_model_pattern(role, NULL, NULL);
+    /* resolveAdvisorRoleSelection: modelRoles.advisor, else a configured slow, else the slow chain */
+    mr_pool_t avail = {0};
+    mr_pool_available(&avail, "chat");
+    mr_result_t r;
+    if (mr_resolve_value("@advisor", &avail, &r)) m = r.model;
+    mr_result_clear(&r);
+    mr_pool_free(&avail);
     if (!m) m = a->model;
     agent_set_model(ag, m);
     ag->thinking = model_clamp_effort(m, a->thinking);

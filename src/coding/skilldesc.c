@@ -165,14 +165,19 @@ char *skilldesc_valid(const char *text) {
 
 /* ---------- background compression ---------- */
 
+/* skill-descriptions.ts select(): the smol role chain's first candidate over the available chat
+ * models (configured smol, the inherited default, then the built-in chain), else a configured tiny;
+ * never the session's foreground model */
 static const ai_model_t *pick_model(void) {
-    const char *roles[] = {"modelRoles.smol", "modelRoles.default", "modelRoles.tiny"};
-    for (size_t i = 0; i < ARRAY_LEN(roles); i++) {
-        const char *r = settings_str(roles[i], NULL);
-        const ai_model_t *m = r ? app_resolve_model_pattern(r, NULL, NULL) : NULL;
-        if (m) return m;
-    }
-    return app_default_model();
+    mr_pool_t avail = {0};
+    mr_pool_available(&avail, "chat");
+    mr_chain_t chain;
+    mr_role_chain("smol", &avail, &chain);
+    const ai_model_t *m = chain.n ? chain.v[0].model : NULL;
+    mr_chain_free(&chain);
+    if (!m) m = mr_role_selection("tiny", &avail, NULL);
+    mr_pool_free(&avail);
+    return m;
 }
 
 typedef struct {

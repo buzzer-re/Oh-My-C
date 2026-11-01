@@ -94,8 +94,12 @@ printf 'Project rule: always test.\n' > AGENTS.md
 check "skill url"      "SKILL BODY LINE"  "$B" -m mock/mock-1 -p "read:skill://demo"
 check "unknown skill"  "Unknown skill"    "$B" -m mock/mock-1 -p "read:skill://nope"
 grep -q "Demo skill for tests" "$T/req.jsonl" && echo "   ok  skill in system prompt" || { echo "   FAIL skill in system prompt"; fail=1; }
+# skill hints are compressed on the smol role chain (omp never falls back to the session model)
+printf 'modelRoles:\n  smol: mock/mock-1\n' > "$T/agent/config.yml"
+"$B" -m mock/mock-1 -p "warm hints" >/dev/null 2>&1 </dev/null
 sleep 1; "$B" -m mock/mock-1 -p "hi again" >/dev/null 2>&1 </dev/null
 tail -1 "$T/req.jsonl" | grep -q "Use for demo skill test routing" && echo "   ok  skill hint compressed" || { echo "   FAIL skill hint compressed"; fail=1; }
+rm -f "$T/agent/config.yml"
 grep -q "Project rule: always test." "$T/req.jsonl" && echo "   ok  AGENTS.md in prompt" || { echo "   FAIL AGENTS.md in prompt"; fail=1; }
 # TTSR: a stream-triggered rule interrupts, injects and retries
 mkdir -p .omc/rules

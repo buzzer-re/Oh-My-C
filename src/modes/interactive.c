@@ -700,8 +700,8 @@ static bool handle_command(ui_t *u, const char *line) {
         bool on = !strcmp(arg, "on") ? true : !strcmp(arg, "off") ? false : !a->advisor;
         app_set_advisor(a, on);
         char *ml = NULL;
-        const char *role = settings_str("modelRoles.advisor", NULL);
-        ml = role ? xstrdup(role) : app_model_label(a);
+        const ai_model_t *am = a->advisor ? app_role_model("advisor", NULL, NULL) : NULL;
+        ml = am ? mr_model_key(am) : app_model_label(a);
         char *m = on ? xasprintf("Advisor on (%s)", ml) : xstrdup("Advisor off");
         add_notice(u, "info", m);
         free(m);

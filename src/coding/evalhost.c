@@ -73,11 +73,9 @@ static void slot_release(void) {
 
 static char *model_label(const ai_model_t *m) { return xasprintf("%s/%s", m->provider, m->id); }
 
+/* `@role` through the shared resolver (configured value, inheritance and the catalog role defaults) */
 static const ai_model_t *role_model(const char *role, ai_effort_t *eff, bool *has_eff) {
-    char *k = xasprintf("modelRoles.%s", role);
-    const char *v = settings_str(k, NULL);
-    free(k);
-    return v && *v ? app_resolve_model_pattern(v, eff, has_eff) : NULL;
+    return app_role_model(role, eff, has_eff);
 }
 
 /* text of an assistant reply: text blocks joined by one space (+ the forced judgment tool's answer), trimmed */
@@ -576,23 +574,20 @@ static json_t *load_images(const json_t *v, const char *cwd, char **err) {
     return out;
 }
 
-/* judge role chain: modelRoles.judge, then tiny (-> smol -> default), smol (-> default), default, the session model */
+/* the live judge role chain (resolveRoleChain("judge"): modelRoles.judge or the catalog chain
+ * typesafe jev -> @tiny -> @smol -> @default, or retry.fallbackChains.judge), then the session model */
 static size_t judge_candidates(app_t *a, const ai_model_t **out, size_t max) {
-    const ai_model_t *c[6] = {0};
-    c[0] = role_model("judge", NULL, NULL);
-    const ai_model_t *dflt = role_model("default", NULL, NULL), *smol = role_model("smol", NULL, NULL);
-    const ai_model_t *tiny = role_model("tiny", NULL, NULL);
-    c[1] = tiny ? tiny : smol ? smol : dflt;
-    c[2] = smol ? smol : dflt;
-    c[3] = dflt;
-    c[4] = a->model;
+    mr_chain_t chain;
+    mr_role_chain("judge", NULL, &chain);
     size_t n = 0;
-    for (size_t i = 0; i < 5 && n < max; i++) {
-        if (!c[i]) continue;
+    for (size_t i = 0; i <= chain.n && n < max; i++) {
+        const ai_model_t *m = i < chain.n ? chain.v[i].model : a->model;
+        if (!m) continue;
         bool dup = false;
-        for (size_t k = 0; k < n; k++) dup = dup || out[k] == c[i];
-        if (!dup) out[n++] = c[i];
+        for (size_t k = 0; k < n; k++) dup = dup || out[k] == m;
+        if (!dup) out[n++] = m;
     }
+    mr_chain_free(&chain);
     return n;
 }
 
@@ -605,8 +600,8 @@ typedef struct {
 static bool run_judge(app_t *a, const json_t *state, const json_t *questions, const json_t *images,
                       volatile sig_atomic_t *c1, volatile sig_atomic_t *c2, double *cost, verdict_t *v, char **err) {
     *err = NULL;
-    const ai_model_t *cands[6];
-    size_t n = judge_candidates(a, cands, 6);
+    const ai_model_t *cands[16];
+    size_t n = judge_candidates(a, cands, 16);
     bool want_images = json_len(images) > 0, compatible = false, unsupported = false;
     char *system = NULL, *user = NULL;
     judgment_render_prompt(state, questions, &system, &user);

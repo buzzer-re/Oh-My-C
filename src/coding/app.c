@@ -13,6 +13,7 @@
 
 #include "config/auth.h"
 #include "config/settings.h"
+#include "config/model_resolver.h"
 #include "core/fs.h"
 #include "core/proc.h"
 #include "coding/ttsr.h"
@@ -25,62 +26,49 @@
 #include <ctype.h>
 #include <math.h>
 
-/* ---------- model resolution ---------- */
+/* ---------- model resolution (config/model_resolver.c) ---------- */
 
+static void level_out(const char *lv, ai_effort_t *effort_out, bool *has_effort) {
+    ai_effort_t e;
+    if (lv && effort_parse(lv, &e) == 0) {
+        if (effort_out) *effort_out = e;
+        if (has_effort) *has_effort = true;
+    }
+}
+
+/* a user/config selector: role aliases, `provider/id`, bare/fuzzy ids, `:level` suffixes. Resolved
+ * over the available chat models first (omp resolveModelRoleValue), then over the whole catalog so
+ * an explicit selection of an uncredentialed model still names it (omp resolveCliModel). */
 const ai_model_t *app_resolve_model_pattern(const char *pattern, ai_effort_t *effort_out, bool *has_effort) {
     if (has_effort) *has_effort = false;
     if (!pattern || !*pattern) return NULL;
-    char *p = xstrdup(pattern);
-    if (p[0] == '@') memmove(p, p + 1, strlen(p));
-    /* role reference: modelRoles.<role> */
-    char *rk = xasprintf("modelRoles.%s", p);
-    const char *role = settings_str(rk, NULL);
-    free(rk);
-    if (role && strcmp(role, pattern) != 0) {
-        const ai_model_t *m = app_resolve_model_pattern(role, effort_out, has_effort);
-        free(p);
-        return m;
+    mr_result_t r;
+    const ai_model_t *m = NULL;
+    if (mr_resolve_value(pattern, NULL, &r)) m = r.model;
+    else {
+        mr_result_clear(&r);
+        mr_pool_t all = {0};
+        mr_pool_all(&all, "all");
+        if (mr_resolve_value(pattern, &all, &r)) m = r.model;
+        mr_pool_free(&all);
     }
-    char *colon = strrchr(p, ':');
-    if (colon) {
-        ai_effort_t e;
-        if (effort_parse(colon + 1, &e) == 0) {
-            *colon = 0;
-            if (effort_out) *effort_out = e;
-            if (has_effort) *has_effort = true;
-        }
-    }
-    const ai_model_t *m = catalog_resolve(p);
-    free(p);
+    if (m) level_out(r.level, effort_out, has_effort);
+    mr_result_clear(&r);
+    return m;
+}
+
+/* a role's model (resolveModelRoleValue("@role") over the role's candidate pool) */
+const ai_model_t *app_role_model(const char *role, ai_effort_t *effort_out, bool *has_effort) {
+    if (has_effort) *has_effort = false;
+    const char *lv = NULL;
+    const ai_model_t *m = mr_resolve_role(role, &lv);
+    if (m) level_out(lv, effort_out, has_effort);
     return m;
 }
 
 char *app_api_key_for(const ai_model_t *m) { return m ? auth_get_api_key(m->provider) : NULL; }
 
-const ai_model_t *app_default_model(void) {
-    const char *def = settings_str("modelRoles.default", NULL);
-    if (def) {
-        const ai_model_t *m = app_resolve_model_pattern(def, NULL, NULL);
-        if (m) return m;
-    }
-    static const char *order[] = {"anthropic", "openai", "openai-codex", "google", "openrouter", "xai", "groq",
-                                  "deepseek", "mistral", "cerebras", "zai", "ollama"};
-    for (size_t i = 0; i < ARRAY_LEN(order); i++) {
-        if (!auth_has_credentials(order[i])) continue;
-        const char *dm = catalog_provider_default_model(order[i]);
-        const ai_model_t *m = dm ? catalog_find(order[i], dm) : NULL;
-        if (m) return m;
-    }
-    /* any provider with credentials */
-    for (size_t i = 0; i < catalog_count(); i++) {
-        const ai_model_t *m = catalog_at(i);
-        if (!auth_has_credentials(m->provider)) continue;
-        const char *dm = catalog_provider_default_model(m->provider);
-        const ai_model_t *d = dm ? catalog_find(m->provider, dm) : NULL;
-        return d ? d : m;
-    }
-    return NULL;
-}
+const ai_model_t *app_default_model(void) { return mr_default_model(NULL); }
 
 char *app_model_label(app_t *a) {
     return a->model ? xasprintf("%s/%s", a->model->provider, a->model->id) : xstrdup("(no model)");
@@ -664,14 +652,17 @@ static void add_checkpoint_tools(app_t *a, agent_t *ag) {
 
 /* ---------- setup ---------- */
 
+/* the find tool's judge: the live judge-role chain (judgment/index.ts resolveJudge), then the session model */
 static char *app_tool_complete(tool_env_t *env, const char *system, const char *user) {
     app_t *a = env->session;
-    const ai_model_t *m = NULL;
-    const char *role = settings_str("modelRoles.judge", NULL);
-    if (!role) role = settings_str("modelRoles.smol", NULL);
-    if (role) m = app_resolve_model_pattern(role, NULL, NULL);
-    if (!m) m = a->model;
-    return app_complete_text(a, m, system, user, EFFORT_OFF);
+    mr_chain_t chain;
+    mr_role_chain("judge", NULL, &chain);
+    mr_pool_t models = {0};
+    for (size_t i = 0; i < chain.n; i++) mr_pool_push(&models, chain.v[i].model);
+    mr_chain_free(&chain);
+    char *r = app_complete_first(a, &models, system, user, EFFORT_OFF);
+    mr_pool_free(&models);
+    return r;
 }
 
 static json_t *app_eval_bridge(tool_env_t *env, const char *name, const json_t *args, int64_t cell,
@@ -1090,6 +1081,17 @@ char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const
     return text;
 }
 
+/* try each model (then the session model) until one answers */
+char *app_complete_first(app_t *a, const mr_pool_t *models, const char *system, const char *user, ai_effort_t effort) {
+    for (size_t i = 0; models && i < models->n; i++) {
+        if (models->v[i] == a->model) continue;
+        char *t = app_complete_text(a, models->v[i], system, user, effort);
+        if (t) return t;
+        if (a->agent->cancel) return NULL;
+    }
+    return a->model ? app_complete_text(a, a->model, system, user, effort) : NULL;
+}
+
 /* ---------- advisor ---------- */
 
 void app_set_advisor(app_t *a, bool on) {
@@ -1250,21 +1252,69 @@ size_t app_shake(app_t *a, size_t min_chars) {
     return count;
 }
 
+/* session-maintenance.ts resolveCompactionModelCandidates: the model's compactionModel target, the
+ * session model, each configured chat role, then the largest-context available model */
+void app_compaction_candidates(app_t *a, mr_pool_t *out) {
+    mr_pool_t avail = {0};
+    mr_pool_available(&avail, "chat");
+    const ai_model_t *pm = a->model;
+#define ADD(M_)                                                                                          \
+    do {                                                                                                 \
+        const ai_model_t *m_ = (M_);                                                                     \
+        if (m_ && !mr_pool_contains(out, m_)) mr_pool_push(out, m_);                                     \
+    } while (0)
+    if (pm) {
+        const char *target = json_get_str(pm->raw, "compactionModel");
+        if (target && *target) {
+            char *base;
+            mr_split_level(target, -1, true, &base);
+            const ai_model_t *t = NULL;
+            for (size_t i = 0; i < avail.n && !t; i++) {
+                char *k = mr_model_key(avail.v[i]);
+                if (!strcmp(k, base)) t = avail.v[i];
+                free(k);
+            }
+            for (size_t i = 0; i < avail.n && !t; i++)
+                if (!strcmp(avail.v[i]->provider, pm->provider) && !strcmp(avail.v[i]->id, target)) t = avail.v[i];
+            free(base);
+            ADD(t);
+        }
+        ADD(pm);
+    }
+    for (size_t r = 0; r < MR_CHAT_ROLE_COUNT; r++) {
+        const char *v = mr_role_get(MR_ROLE_IDS[r]);
+        char *dflt = NULL;
+        if (!v && !strcmp(MR_ROLE_IDS[r], "default") && pm) v = dflt = mr_model_key(pm);
+        mr_result_t res = {0};
+        if (v && mr_resolve_value(v, &avail, &res)) ADD(res.model);
+        mr_result_clear(&res);
+        free(dflt);
+    }
+    const ai_model_t *big = NULL;
+    for (size_t i = 0; i < avail.n; i++)
+        if (!mr_pool_contains(out, avail.v[i]) && (!big || avail.v[i]->context_window > big->context_window)) big = avail.v[i];
+    ADD(big);
+#undef ADD
+    mr_pool_free(&avail);
+}
+
 /* ---------- title ---------- */
 
 char *app_generate_title_from(app_t *a, const char *text) {
     if (!text || !*text) return NULL;
     char *sys = prompt_load_or("coding-agent/prompts/system/title-system.md",
                                "Generate a concise 3-6 word title for this conversation. Output only the title.");
-    const ai_model_t *tm = NULL;
-    const char *roles[] = {"modelRoles.tiny", "modelRoles.commit", "modelRoles.smol"};
-    for (size_t i = 0; i < ARRAY_LEN(roles) && !tm; i++) {
-        const char *r = settings_str(roles[i], NULL);
-        if (r) tm = app_resolve_model_pattern(r, NULL, NULL);
-    }
-    if (!tm) tm = a->model;
+    /* title-generator.ts getTitleModels: tiny/commit/smol role primaries + their retry chains, then
+     * the session model and its own chain */
+    static const char *const roles[] = {"tiny", "commit", "smol"};
+    mr_pool_t models = {0};
+    mr_online_tiny_candidates(roles, ARRAY_LEN(roles), a->model, &models);
     char *snippet = xasprintf("%.2000s", text);
-    char *title = app_complete_text(a, tm, sys, snippet, EFFORT_OFF);
+    char *title = NULL;
+    for (size_t i = 0; i < models.n && !title && !a->agent->cancel; i++)
+        title = app_complete_text(a, models.v[i], sys, snippet, EFFORT_OFF);
+    if (!models.n && a->model) title = app_complete_text(a, a->model, sys, snippet, EFFORT_OFF);
+    mr_pool_free(&models);
     free(snippet);
     free(sys);
     return title;
@@ -1397,14 +1447,13 @@ int app_compact(app_t *a, const char *instructions, char **err) {
     }
     if (instructions && *instructions) sb_appendf(&conv, "\n\nAdditional focus: %s", instructions);
     char *sys = prompt_load_or("agent/compaction/prompts/summarization-system.md", "Summarize.");
-    const ai_model_t *cm = a->model;
-    const char *cmodel = settings_str("modelRoles.compaction", NULL);
-    if (cmodel) {
-        const ai_model_t *x = app_resolve_model_pattern(cmodel, NULL, NULL);
-        if (x) cm = x;
-    }
     notice(a, "info", "Compacting context…");
-    char *summary = app_complete_text(a, cm, sys, sb_cstr(&conv), EFFORT_LOW);
+    mr_pool_t cands = {0};
+    app_compaction_candidates(a, &cands);
+    char *summary = NULL;
+    for (size_t i = 0; i < cands.n && !summary && !a->agent->cancel; i++)
+        summary = app_complete_text(a, cands.v[i], sys, sb_cstr(&conv), EFFORT_LOW);
+    mr_pool_free(&cands);
     sb_free(&conv);
     free(sys);
     if (!summary || !*summary) {
