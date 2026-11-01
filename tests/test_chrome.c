@@ -1,7 +1,7 @@
 /* test_chrome.c - screen chrome regression checks against captured omp output.
  *
  * The fixtures under tests/fixtures/chrome/ are `tmux capture-pane -e` captures of omp v18.13.3
- * (tests/tui/compare.sh, 120 columns, titanium theme, truecolor, unicode glyphs, mock model
+ * (rechecked unchanged on v18.14.2; tests/tui/compare.sh, 120 columns, titanium theme, truecolor, unicode glyphs, mock model
  * "Mock One" with a 100K window). Each test renders the same rows through omc's welcome,
  * working/idle row, editor top gap and band composer, then compares cell by cell: glyph,
  * foreground, background and attributes. The wordmark rows only compare the logo cells (omc
