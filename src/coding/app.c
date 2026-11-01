@@ -4,6 +4,8 @@
 #include "coding/skilldesc.h"
 #include "coding/advisor.h"
 #include "coding/evalhost.h"
+#include "coding/autolearn.h"
+#include "coding/memory.h"
 #include "tools/jobs.h"
 #include "tools/xdev.h"
 #include "agents.h"
@@ -128,6 +130,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
     app_goal_on_event(a, ev);
     title_on_event(a, ev);
     if (a->advisor) advisor_on_event(a->advisor, ev);
+    autolearn_on_event(a->autolearn, ev);
     if (ev->type == AGENT_EV_TURN_START || ev->type == AGENT_EV_MESSAGE_START) {
         if (ev->type == AGENT_EV_TURN_START || str_eq(json_get_str(ev->message, "role"), "assistant")) ttsr_reset(a->ttsr);
     }
@@ -698,6 +701,7 @@ static void install_agent(app_t *a) {
     }
     if (a->opts.subagent && a->opts.subagent_depth >= (int)settings_int("task.maxRecursionDepth", 2))
         agent_remove_tool(ag, "task");
+    if (!a->opts.no_tools) autolearn_register_tools(a, ag);
     /* discoverable (xd://-mountable) tools added outside tools_register_builtin; MCP tools too */
     for (size_t i = 0; i < ag->all_tools.n; i++) {
         agent_tool_t *t = ag->all_tools.v[i];
@@ -720,6 +724,14 @@ void app_rebuild_system_prompt(app_t *a) {
     }
     char *label = app_model_label(a);
     json_t *xdev_tools = xdev_entries(a->agent);
+    /* sdk.ts appendParts: memory backend instructions, then auto-learn guidance (driven by the tools present) */
+    sb_t gen = SB_INIT;
+    char *mem = memory_instructions(a);
+    char *al = autolearn_instructions(a->agent);
+    if (mem) sb_append(&gen, mem);
+    if (al) sb_appendf(&gen, "%s%s", gen.len ? "\n\n" : "", al);
+    free(mem);
+    free(al);
     char *xdev_docs = json_len(xdev_tools) ? xdev_prompt_docs(a->agent) : xstrdup("");
     sysprompt_opts_t so = {.cwd = a->cwd,
                            .model_name = label,
@@ -736,8 +748,10 @@ void app_rebuild_system_prompt(app_t *a) {
                            .auto_qa = !a->opts.tools && xdev_autoqa_enabled(),
                            .tool_refs = refs,
                            .delegation_bias = model_delegation_bias(a->model),
-                           .irc_enabled = !a->opts.tools && agent_find_tool(a->agent, "task") != NULL};
+                           .irc_enabled = !a->opts.tools && agent_find_tool(a->agent, "task") != NULL,
+                           .generated_append = sb_cstr(&gen)};
     json_t *blocks = build_system_prompt(&so);
+    sb_free(&gen);
     json_free(labels);
     json_free(refs);
     json_free(xdev_tools);
@@ -912,6 +926,8 @@ app_t *app_create(const app_opts_t *o, char **err) {
         }
     }
     a->skilldesc = skilldesc_new();
+    a->memory = memory_rt_new();
+    if (!o->subagent) a->autolearn = autolearn_new(a);
     install_agent(a);
     if (json_len(a->session->entries)) load_session_into_agent(a);
     if (!o->subagent) app_goal_restore(a);
@@ -925,12 +941,17 @@ app_t *app_create(const app_opts_t *o, char **err) {
     a->title_done = a->session->title != NULL;
     if (settings_bool("plan.defaultOnStartup", false) && !o->subagent) app_set_plan_mode(a, true);
     if (settings_bool("advisor.enabled", false) && !o->subagent) app_set_advisor(a, true);
+    memory_start(a);
     return a;
 }
 
 void app_free(app_t *a) {
     if (!a) return;
     agents_unregister(a);
+    autolearn_free(a->autolearn); /* abort a private capture before the session it reads goes away */
+    a->autolearn = NULL;
+    memory_rt_free(a->memory);   /* cancel + join the memory startup pipeline */
+    a->memory = NULL;
     evalhost_shutdown(a->evalhost); /* cancel completions / judge batches before their jobs are joined */
     if (a->env && a->env->jobs) {
         /* join background jobs (task runs, auto-backgrounded commands) before their session state goes away */
@@ -1447,6 +1468,7 @@ static void begin_turn_budget(app_t *a, const char *text) {
 }
 
 int app_prompt(app_t *a, const char *text, json_t *images) {
+    memory_take_prompt_refresh(a);
     begin_turn_budget(a, text);
     json_t *content = json_arr();
     json_push(content, text_block(text));

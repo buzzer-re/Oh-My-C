@@ -17,6 +17,7 @@ typedef struct {
     char *path; /* SKILL.md */
     char *dir;
     bool hide;
+    bool managed; /* auto-learn managed skill (<agentDir>/managed-skills), lowest priority */
 } skill_t;
 
 typedef struct {
@@ -73,6 +74,7 @@ typedef struct {
     const json_t *tool_refs;          /* object: tool name -> name used in prompt references (e.g. edit -> apply_patch) */
     const char *delegation_bias;      /* model_delegation_bias() of the session model */
     bool irc_enabled;                 /* `write agent://<id>` peer messaging available */
+    const char *generated_append;     /* memory + auto-learn blocks composed ahead of the user append */
 } sysprompt_opts_t;
 
 /* Whether a rule renders in the system prompt (<domain-rules> / <generic-rules>). Rules with a TTSR
@@ -84,6 +86,7 @@ bool discovery_rule_listed(const rule_t *r);
 typedef struct {
     bool skill_uri_access; /* a skill-reading tool is active and skills exist */
     size_t rule_count;     /* rulebook rules listed in the prompt */
+    bool memory_local;     /* memory.backend=local owns the file-backed memory://root namespace */
     bool has_task;         /* HOOK: agent://, history://, proc:// are listed only while the task tool is
                             * active (omp lists them unconditionally; gate until omc serves them) */
 } sysprompt_url_host_t;

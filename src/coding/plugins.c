@@ -539,7 +539,7 @@ static void scan_legacy_dir(discovery_t *d, const char *dir) {
         }
         if (!(json_is_bool(en) && !en->u.b) && !strchr(name, '/') && !strchr(name, '\\')) {
             skill_t s = {name, xstrdup(json_get_str(fm, "description") ? json_get_str(fm, "description") : ""),
-                         xstrdup(paths.v[i]), sdir, fm_hidden(fm)};
+                         xstrdup(paths.v[i]), sdir, fm_hidden(fm), false};
             vec_push(&items, s);
         } else {
             free(name);

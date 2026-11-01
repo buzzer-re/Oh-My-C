@@ -7,6 +7,7 @@
 #include "text/yaml.h"
 #include "core/embed.h"
 #include "coding/plugins.h"
+#include "coding/memory.h"
 
 #include <unistd.h>
 
@@ -206,7 +207,7 @@ bool discovery_add_skill(discovery_t *d, const char *name, const char *descripti
                          bool hide) {
     for (size_t k = 0; k < d->skills.n; k++)
         if (!strcmp(d->skills.v[k].name, name)) return false;
-    skill_t s = {xstrdup(name), xstrdup(description ? description : ""), xstrdup(path), xstrdup(dir), hide};
+    skill_t s = {xstrdup(name), xstrdup(description ? description : ""), xstrdup(path), xstrdup(dir), hide, false};
     vec_push(&d->skills, s);
     return true;
 }
@@ -246,6 +247,50 @@ static void scan_skills_dir_opt(discovery_t *d, const char *dir, bool require_de
 }
 
 static void scan_skills_dir(discovery_t *d, const char *dir) { scan_skills_dir_opt(d, dir, false); }
+
+static bool managed_name_ok(const char *n) {
+    size_t len = strlen(n);
+    if (len < 1 || len > 64) return false;
+    for (size_t i = 0; i < len; i++)
+        if (!((n[i] >= 'a' && n[i] <= 'z') || (n[i] >= '0' && n[i] <= '9') || (i > 0 && n[i] == '-'))) return false;
+    return true;
+}
+
+/* auto-learn managed skills: lowest priority, valid names only, descriptions re-sanitized on read
+ * (discovery/builtin.ts loadManagedSkills + extensibility/skills.ts managed pass) */
+static void scan_managed_skills(discovery_t *d) {
+    char *dir = omc_agent_path("managed-skills");
+    dirlist_t dl;
+    if (fs_list_dir(dir, &dl) == 0) {
+        for (size_t i = 0; i < dl.n; i++) {
+            if (!dl.v[i].is_dir || dl.v[i].name[0] == '.') continue;
+            char *sd = path_join(dir, dl.v[i].name);
+            char *sf = path_join(sd, "SKILL.md");
+            char *text = read_nonempty(sf);
+            if (text) {
+                const char *body;
+                json_t *fm = frontmatter_parse(text, &body);
+                const char *raw = json_get_str(fm, "name");
+                char *name = raw && *raw ? str_trim(raw) : xstrdup(dl.v[i].name);
+                const char *desc = json_get_str(fm, "description");
+                if (desc && *desc && managed_name_ok(name)) {
+                    char *clean = memory_neutralize(desc);
+                    if (discovery_add_skill(d, name, clean, sf, sd,
+                                            json_get_bool(fm, "hide", false) || json_get_bool(fm, "disableModelInvocation", false)))
+                        d->skills.v[d->skills.n - 1].managed = true;
+                    free(clean);
+                }
+                free(name);
+                json_free(fm);
+                free(text);
+            }
+            free(sf);
+            free(sd);
+        }
+        dirlist_free(&dl);
+    }
+    free(dir);
+}
 
 /* omp compareSkillOrder: case-insensitive name, then exact name, then path */
 static int cmp_skill(const void *a, const void *b) {
@@ -530,6 +575,7 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
         }
         plugin_skills_legacy(&roots, d);
         plugin_roots_free(&roots);
+        scan_managed_skills(d);
         if (d->skills.n > 1) qsort(d->skills.v, d->skills.n, sizeof(skill_t), cmp_skill);
     }
     free(native);
@@ -613,6 +659,7 @@ strvec_t internal_url_docs(const sysprompt_url_host_t *h) {
     strvec_t out = {0};
     if (h->skill_uri_access) push_url_doc(&out, "skill", NULL, NULL);
     if (h->rule_count > 0) push_url_doc(&out, "rule", NULL, NULL);
+    if (h->memory_local) push_url_doc(&out, "memory", NULL, NULL);
     if (h->has_task) push_url_doc(&out, "agent", NULL, NULL);
     if (h->has_task) push_url_doc(&out, "history", NULL, NULL);
     push_url_doc(&out, "artifact", NULL, NULL);
@@ -748,6 +795,7 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
         .skill_uri_access = json_len(skills) > 0,
         .rule_count = json_len(rules),
         .has_task = o->tool_names && strvec_contains(o->tool_names, "task"),
+        .memory_local = str_eq(memory_backend(), "local"),
     };
     strvec_t docs = internal_url_docs(&host);
     for (size_t i = 0; i < docs.n; i++) json_push_str(urls, docs.v[i]);
@@ -792,6 +840,23 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     }
     char *append = maybe_file(o->append_prompt);
     if (!append) append = load_override(o->cwd, "APPEND_SYSTEM.md");
+    /* composeAppendPrompt: generated blocks (memory, auto-learn) then the user's append in its own section */
+    if (o->generated_append && *o->generated_append) {
+        char *ua = append ? str_trim(append) : NULL;
+        if (!ua || !*ua) {
+            free(append);
+            append = xstrdup(o->generated_append);
+        } else {
+            json_t *uc = json_obj();
+            json_set_str(uc, "generatedAppend", o->generated_append);
+            json_set_str(uc, "userAppend", append);
+            char *w = prompt_render("coding-agent/prompts/system/user-append.md", uc);
+            json_free(uc);
+            free(append);
+            append = w;
+        }
+        free(ua);
+    }
     json_set_str(data, "appendPrompt", append ? append : "");
     char *custom = maybe_file(o->custom_prompt);
     if (!custom) custom = load_override(o->cwd, "SYSTEM.md");
