@@ -7,7 +7,7 @@ GLPORT=$((PORT + 12))
 MOCK_LOG="$T/gitlab.jsonl" python3 -I "$ROOT/tests/e2e/mock_gitlab.py" $GLPORT & GLPID=$!
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$GLPORT) 2>/dev/null && break; sleep 0.1; done
 mkdir -p "$T/glwork"
-GLENV=(env HOME="$T" GITLAB_TOKEN=glpat-test -u GITLAB_DUO_NAMESPACE_ID -u GITLAB_DUO_PROJECT_ID -u GITLAB_DUO_PROJECT_PATH
+GLENV=(env -u GITLAB_DUO_NAMESPACE_ID -u GITLAB_DUO_PROJECT_ID -u GITLAB_DUO_PROJECT_PATH HOME="$T" GITLAB_TOKEN=glpat-test
        OMC_PROVIDER_URL_REWRITE="https://gitlab.com=http://127.0.0.1:$GLPORT/gl,https://cloud.gitlab.com=http://127.0.0.1:$GLPORT/cgl")
 GLA=gitlab-duo-agent/claude_sonnet_4_6_vertex
 pushd "$T/glwork" >/dev/null
