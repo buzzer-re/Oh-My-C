@@ -5,7 +5,7 @@ prioritized gap list. [status.md](status.md) records what agents ported. This fi
 upstream side instead, so it also covers features nobody had listed.
 
 - **Upstream reference:** omp v18.14.2 (`7efd772`), the pin in [../UPDATE.md](../UPDATE.md).
-- **omc reference:** main at `fbe0c7f`.
+- **omc reference:** main at `41f5226`.
 - **Method:** each category was enumerated from the upstream sources named in its section. Each item was
   checked in omc's code, and cheap cases were probed with `build/omc` against `tests/e2e/mock_openai.py`
   using throwaway agent dirs (no real models).
@@ -43,8 +43,8 @@ Ranked by how soon a user hits the gap in a normal interactive session.
 1. **Plan approval doesn't show the plan.** `xd://propose` ends in a generic Ask, "Approve plan local://x-plan.md?", with Approve / Keep planning / Other. Feedback typed under "Other" is dropped. omp's options are missing: execute in fresh context / compact / keep context, save & quit, and the tier slider. (WP-1)
 2. **Steered and follow-up messages vanish.** Messages delivered while the agent runs never appear in the transcript until a rebuild. There is no pending-queue view and no dequeue, Esc doesn't restore the queue, and follow-up is bound to Alt+Enter instead of Ctrl+Q / Ctrl+Enter. (WP-2)
 3. **`!cmd`, `/compact` and `/handoff` run on the UI thread.** The TUI freezes, Esc is ignored and keys typed meanwhile are garbled. While streaming, `!cmd` is sent to the model as steer text. (WP-2)
-4. **grep output differs for the model.** No context lines; omp defaults to 1 before and 3 after. (WP-3)
-5. **Unknown URL schemes are written to disk.** `write out://…` / `cfg://…` / `conflict://N` create `./out:/…`, `./cfg:/…` and `./conflict:/…` in the project and report success. `out://` and `cfg://` are missing. (WP-3)
+4. **No turn-end, ask or error notifications, and the terminal title never changes.** `completion.notify` and `ask.notify` are on by default in omp. `tui_term_set_title` exists but is never called. (WP-11)
+5. **The `/export` HTML is a placeholder.** It is the markdown transcript inside a `<pre>`, while omp embeds the session in its interactive viewer (`export/html/template.*`). `/dump` lacks `all`/`anon` and the request-JSON sidecar. (WP-4)
 6. **`thinking: auto` turns thinking off.** This happens via `--thinking auto` or `defaultThinkingLevel: auto`. (WP-3)
 7. **Slash-command argument bugs.**
    - `/advisor status` toggles the advisor.
@@ -60,7 +60,7 @@ Ranked by how soon a user hits the gap in a normal interactive session.
 10. **`/tree` and `/branch` are flat 14-row pickers.** omp has a tree selector (filters, labels, folding) and a rewind selector. (WP-8)
 11. **Custom markdown commands and `/skill:<name>` don't work.** This covers `.omp/.claude/.opencode commands/*.md`. RPC `get_available_commands` advertises `skill:<name>` entries that nothing executes. (WP-9)
 12. **304 of the 402 settings shown in `/settings` have no effect.** This includes `tools.approvalMode`, so the TUI never asks for approval even after the user picks "Always ask". (WP-10, WP-26)
-13. **Default-on agent guards are missing.** Todo reminders, unexpected-stop detection, the tool-call loop guard, fabricated-result abort and magic keywords (`ultrathink` …) are absent. Turn-end/ask notifications and the terminal title are also missing. (WP-11, WP-12)
+13. **Default-on agent guards are missing.** Todo reminders, unexpected-stop detection, the tool-call loop guard, fabricated-result abort and magic keywords (`ultrathink` …) are absent. The `out://` reply channel and `cfg://` are missing too; their writes are now refused. (WP-12, WP-3)
 14. **Compaction is a single summary pass.** No method ladder, server-side compaction, mid-turn/async compaction, stale-read pruning or prompt-cache warming. (WP-13, WP-14)
 15. **`omc acp` starts a TUI instead of ACP mode.** Editors call `omp acp`. RPC/ACP prompts don't run slash commands, RPC message events have no `messageId`, the `ask` tool fails in RPC, and several RPC response shapes differ. (WP-15, WP-16)
 
@@ -79,7 +79,7 @@ Every package must:
 |---|---|---|---|
 | WP-1 Plan review and plan-mode parity | Fullscreen plan review that renders the plan markdown with a Contents sidebar. Five actions: execute in fresh context / compact / keep context (with token count) / refine (feedback to model) / save & quit. Also: tier slider, copy, Ctrl+G edit, `/plan-review`, "Exit plan mode?" confirm with a draft, paused state, `plan.enabled`, `plan.autosave(Dir)`, `modelRoles.plan` switch/restore | `src/coding/app.c` (`app_propose_plan`, `app_set_plan_mode`), new `src/ui/planreview.c`, `src/modes/interactive.c` | T/overlays/plan-review-overlay.ts, plan-toc.ts, plan-save-overlay.ts; U/modes/interactive-mode.ts (`handlePlanModeCommand`, `showPlanReview`, `#approvePlan`, `#exitPlanMode`); U/plan-mode/* |
 | WP-2 Queue and non-blocking input | Render delivered steer/follow-up user messages; pending-messages view; dequeue (Alt+Up); Esc restores the queue to the editor; follow-up on Ctrl+Q / Ctrl+Enter. Move `!cmd`, `!!cmd`, `/compact`, `/handoff` to a worker with Esc cancel. Defer `!cmd` while streaming. `$code` / `$$code` user eval in the shared kernel. Queue `/compact` for the yield while streaming | `src/modes/interactive.c` (`on_submit`, `run_bang`, `ui_apply_event`, `key_hook`), `src/coding/app.c` (`app_user_bash`, `app_compact`, `app_handoff`), `src/ui/chat.c` | U/modes/controllers/input-controller.ts (`handleFollowUp`, `handleDequeue`, `restoreQueuedMessagesToEditor`), interactive-mode.ts (`updatePendingMessagesDisplay`), command-controller.ts (`handleBashCommand`, `handlePythonCommand`, `handleCompactCommand`), U/modes/prompt/queued-messages.ts |
-| WP-3 Model-facing correctness bugs | grep context lines (`grep.contextBefore/After`, defaults 1/3). Reject unregistered `scheme://` in read/write/edit. Port `out://`, `cfg://`, `conflict://N`. Make `thinking: auto` stop meaning off: resolve it like omp, or to the model default until the WP-12 classifier lands. Verify with `tests/parity/request_diff.sh` / `tool_diff.sh` | `src/tools/grep_glob.c`, `src/text/search.c`, `src/tools/write_bash.c`, `src/tools/read.c`, `src/tools/vurl.c`, `src/coding/app.c` (thinking setup), `src/ui/settings.c` | U/tools/grep.ts, U/internal-urls/{router,out-protocol,cfg-protocol,conflict-protocol}.ts, U/tools/conflict-detect.ts, U/auto-thinking/* |
+| WP-3 Model-facing correctness bugs | Port `out://`, `cfg://`, `conflict://N` (write now refuses unknown schemes; main 44b5fc3). Make `thinking: auto` stop meaning off: resolve it like omp, or to the model default until the WP-12 classifier lands. Verify with `tests/parity/request_diff.sh` / `tool_diff.sh` | `src/tools/write_bash.c`, `src/tools/read.c`, `src/tools/vurl.c`, `src/coding/app.c` (thinking setup), `src/ui/settings.c` | U/internal-urls/{router,out-protocol,cfg-protocol,conflict-protocol}.ts, U/tools/conflict-detect.ts, U/auto-thinking/* |
 | WP-4 Slash-command correctness and shared registry | One registry (name, aliases, subcommands, hints, handler) used by TUI, RPC and ACP. Fix `/advisor` (status/dump), `/compact [soft\|remote\|snapcompact] [focus]`, `/shake [elide\|images\|thinking]`, `/handoff [focus]`, `/resume <id>`, `/effort` errors, `/delete` on in-memory sessions. Add aliases (models, rewind, q, providers, status, subagents, worktree, plugin, force:). Bare `exit`/`quit`/`q`. `/export` with omp's HTML viewer (`export/html/template.*` embedded as assets). `/dump all\|anon` + request-JSON sidecar | `src/modes/interactive.c` (`handle_command`, `COMMANDS[]`), `src/ui/slash.c`, `src/coding/app.c`, `src/session/session.c` (`session_export_html`), `assets/` | U/slash-commands/builtin-*.ts, builtin-registry.ts, helpers/*, U/session/compact-modes.ts, shake-types.ts, session-dump-format.ts, U/export/html/* |
 | WP-5 App keybinding layer | Add the 45 `app.*` actions to the key table. Load `keybindings.yml` (+ legacy .json migration, profile inherit); `/migrate` copies it. Make `key_hook` use `tui_kb()`. Generate `/hotkeys` from the live bindings. Cheap keys: Ctrl+Z suspend, F5/Alt+R retry, Alt+Shift+P plan, Ctrl+C semantics (500 ms, no abort), Ctrl+T status + persist, Ctrl+] jumps, Alt+Y kill ring, Alt+L display reset, Esc-Esc → `doubleEscapeAction`. Fix the false claims in docs/tui.md | `src/tui/keys.c`, `src/tui/editor.c`, `src/modes/interactive.c`, `src/ui/overlays.c` (`hotkeys_markdown`), `src/coding/migrate.c`, docs/tui.md | T/app-keybindings.ts, T/keybindings.ts, T/kill-ring.ts, T/hotkeys-markdown.ts, U/modes/controllers/input-controller.ts |
 | WP-7 Report panels | `/context` viewer (category breakdown, browse content); `/session` info overlay + `delete`/`pin`; `/tools` markdown panel incl. xd:// tools; `/jobs` panel + job tree + `full`/`kill`; `/todo` subcommands; `/advisor status\|dump`. Report-panel inline docking for short reports | `src/modes/interactive.c`, `src/ui/overlays.c` (`ui_show_report`), new `src/ui/context.c`, `src/tools/jobs.c`, `src/tools/todo_ask.c` | T/overlays/context-viewer*.ts, session-info-overlay.ts, jobs-panel.ts, job-tree.ts, report-panel.ts; U/modes/controllers/command-controller.ts, todo-command-controller.ts; U/slash-commands/helpers/context-report.ts |
@@ -328,7 +328,7 @@ both are false. Rows marked (tmux) were probed in tmux against the mock model.
 Method: every `path` in `assets/tui/settings-ui.json` (omp's own settings registry, 402 entries shown
 in `/settings`) was searched as a string literal in `src/` outside the settings UI (`src/ui/settings.c`).
 omc reads settings only by literal key (`settings_bool/str/int/num/get("key")`), so a key that never
-appears is shown and saved by `/settings` but **has no effect**. Result (main at fbe0c7f): **98 read, 304 never read**.
+appears is shown and saved by `/settings` but **has no effect**. Result (main at 41f5226): **100 read, 302 never read**.
 
 The `/settings` UI should either honour these or hide them. Rows are grouped by what the gap means for a
 user who never opens `/settings` (default-on behaviour omc lacks) versus switches that do nothing.
@@ -338,7 +338,6 @@ user who never opens `/settings` (default-on behaviour omc lacks) versus switche
 | Setting (default) | What omp does by default | omc |
 |---|---|---|
 | `tools.approvalMode` (yolo) + `tools.approval` ({}) + `tools.restrictedFolders` | Approval tiers (always-ask, ask-and-remember, write, yolo), per-tool allow/prompt/deny, approval dialog | ❌ only ACP reads `approvalMode`; TUI never asks. Users who set "Always ask" get yolo silently |
-| `grep.contextBefore` (1) / `grep.contextAfter` (3) | grep results carry 1 line before / 3 after each match | ❌ `src/tools/grep_glob.c` requests no context lines: model-facing output differs |
 | `magicKeywords.*` (on) | "ultrathink" / "orchestrate" / "workflow" / "jevify" in a prompt raise thinking and attach hidden notices (`modes/magic-keywords.ts`) | ❌ |
 | `model.loopGuard.*`, `model.toolCallLoopGuard.enabled` (on) | detects repeated assistant output / identical tool-call loops and steers | ❌ |
 | `todo.reminders` (on), `todo.remindersMax` (3), `todo.eager` | reminds the model of unfinished todos at stop; eager todo creation | ❌ |
@@ -430,9 +429,7 @@ github, MCP). With every optional setting on, the mock model saw omc offer: read
 ast_edit debug eval glob grep find lsp checkpoint rewind task wait todo web_search write manage_skill
 (+ github on main).
 
-**Two bugs found by probing:**
-- **Unknown `scheme://` paths are written to disk.** `write out://reply` reports `Created out:/reply` and
-  creates `./out:/reply` in the project. `cfg://…` and `conflict://N` do the same. omp routes all three.
+**Bug found by probing:**
 - **`thinking: auto` turns thinking off.** `--thinking auto`, or `defaultThinkingLevel: auto`, fails
   `effort_parse` and leaves `eff = EFFORT_OFF` (`src/coding/app.c`, app setup). omp runs its
   auto-thinking classifier instead.
@@ -446,12 +443,12 @@ ast_edit debug eval glob grep find lsp checkpoint rewind task wait todo web_sear
 | edit | edit/* | `edit.c`, `patch.c`, `sloppy.c` | 🟡 | `edit.blockAutoGenerated` (default on), `edit.recoverInlineEdits`, `edit.modelVariants` missing; others in status.md |
 | bash | tools/bash.ts, exec/* | `write_bash.c`, `shell.c` | 🟡 | `bash.direnv` (default auto), `bash.gitGuard`, `bashInterceptor`, shell minimizer missing |
 | eval | tools/eval.ts | `eval.c`, `evalhost.c` | 🟡 | Python only; JS backend ⛔ (Bun); agent()/workpool/archive/ratchet preludes ❌; browser/computer preludes ⛔ |
-| glob, grep | glob.ts, grep.ts | `grep_glob.c` | 🟡 | **grep emits no context lines**; omp defaults to 1 before / 3 after (`grep.contextBefore/After`), so model-facing output differs |
-| find | jfind/* | `find.c` | 🟡 | `auto` treated as off; one judge pass instead of 3 |
+| glob, grep | glob.ts, grep.ts | `grep_glob.c` | ✅ | result text ported on main (context lines, grouped tree, pages) |
+| find | jfind/* | `find.c` | ✅ | jfind cascade with judge waves ported on main |
 | ast_grep, ast_edit | ast-grep.ts, ast-edit.ts | `astgrep.c` | 🟡 | token-tree matcher, not tree-sitter |
 | ask, todo, wait, goal | ask.ts, todo.ts, wait.ts, goals/ | `todo_ask.c`, `write_bash.c`, `goal.c` | ✅ | todo reminders missing (§7) |
 | task | task/* | `task.c`, `agents.c` | 🟡 | no isolation/worktrees, `outputSchema`, `perCallModel`, `speculativeLaunch`, `completionProbe`, soft request budget |
-| web_search | web/search/* (~30 providers) | `web.c` | 🟡 | 4 providers (brave, tavily, exa, duckduckgo); omp also searches through the user's logged-in providers (anthropic, openai, gemini, codex, xai, perplexity, kimi, zai, searxng …) |
+| web_search | web/search/* (~30 providers) | `web.c` | 🟡 | 5 providers (parallel, brave, tavily, exa, duckduckgo); omp also searches through the user's logged-in providers (anthropic, openai, gemini, codex, xai, perplexity, kimi, zai, searxng …) |
 | lsp | lsp/* | `src/lsp/lsp.c` | ✅ | ported on main (byte-identical text, tests/parity/lsp_parity.sh) |
 | debug | debug.ts | `src/dap/` | ✅ | |
 | checkpoint, rewind | checkpoint.ts | `app.c` | ✅ | |
@@ -493,9 +490,9 @@ ast_edit debug eval glob grep find lsp checkpoint rewind task wait todo web_sear
 | memory:// | `memory_url_resolve` | 🟡 | local backend only |
 | pr://, issue:// | `github.c` via gh (main) | ✅ | |
 | ssh:// | `ssh.c` | 🟡 | grep over ssh:// missing |
-| out:// | — | ❌ | `out.enabled` default on; **writes create `./out:`** |
-| cfg:// | — | ❌ | **writes create `./cfg:`** |
-| conflict:// | `:conflicts` selector only | 🟡 | `conflict://N` read/write missing; **writes create `./conflict:`** |
+| out:// | — | ❌ | `out.enabled` default on; write refuses it as an unknown URI-like target |
+| cfg:// | — | ❌ | write refuses it |
+| conflict:// | `:conflicts` selector only | 🟡 | `conflict://N` read/write missing |
 | mr:// | — | ❌ | GitLab MRs via `glab` |
 | attachment:// | — | ❌ | |
 | security://, vault:// | — | ❌ | off by default |
