@@ -601,15 +601,15 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     tool_result_text(out, *shown ? shown : "(no output)");
     /* omp EvalToolDetails: one cell for the transcript's code-cell card */
     out->details = json_obj();
-    json_t *cells = json_arr(), *cell = json_obj();
-    json_set_int(cell, "index", 0);
-    if (json_get_str(args, "title")) json_set_str(cell, "title", json_get_str(args, "title"));
-    json_set_str(cell, "code", code);
-    json_set_str(cell, "language", "python");
-    json_set_str(cell, "output", shown);
-    json_set_str(cell, "status", out->is_error ? "error" : "complete");
-    json_set_int(cell, "durationMs", mono_ms() - t0);
-    json_push(cells, cell);
+    json_t *cells = json_arr(), *cj = json_obj();
+    json_set_int(cj, "index", 0);
+    if (json_get_str(args, "title")) json_set_str(cj, "title", json_get_str(args, "title"));
+    json_set_str(cj, "code", code);
+    json_set_str(cj, "language", "python");
+    json_set_str(cj, "output", shown);
+    json_set_str(cj, "status", out->is_error ? "error" : "complete");
+    json_set_int(cj, "durationMs", mono_ms() - t0);
+    json_push(cells, cj);
     json_set(out->details, "cells", cells);
     json_set_str(out->details, "language", "python");
     json_t *langs = json_arr();
