@@ -1,0 +1,14 @@
+[
+ {"user": "w1"},
+ {"tool": "wait", "args": {}, "text": "results",
+  "details": {"op": "wait", "jobs": [
+   {"id": "bg_1", "type": "bash", "status": "completed", "label": "make test", "durationMs": 4200, "resultText": "ok"},
+   {"id": "Ann", "type": "task", "status": "failed", "label": "Ann", "durationMs": 900, "errorText": "\n  boom: something broke\nmore"},
+   {"id": "bg_2", "type": "bash", "status": "running", "label": "sleep 100", "durationMs": 100}]}},
+ {"user": "w2"},
+ {"tool": "wait", "args": {}, "text": "Nothing to wait for", "details": {"op": "wait", "jobs": []}},
+ {"user": "w3"},
+ {"tool": "wait", "args": {}, "text": "Wait interrupted by message.", "details": {"op": "wait", "interrupted": true}},
+ {"user": "w4"},
+ {"tool": "wait", "args": {}, "text": "x", "details": {"op": "wait", "jobs": [{"id": "bg_3", "type": "bash", "status": "running", "label": "sleep 5", "durationMs": 100}]}}
+]

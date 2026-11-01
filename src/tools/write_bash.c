@@ -646,7 +646,21 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         out->useless = true;
     }
     free(who);
-    json_set(out->details, "jobs", done);
+    /* omp JobSnapshot rows: {id, type, status, label, durationMs, resultText | errorText} */
+    json_t *snaps = json_arr(), *x;
+    json_arr_foreach(done, i, x) {
+        json_t *s = json_obj();
+        bool failed = json_get_bool(x, "failed", false);
+        json_set_str(s, "id", json_get_str(x, "jobId") ? json_get_str(x, "jobId") : "");
+        json_set_str(s, "type", json_get_str(x, "type") ? json_get_str(x, "type") : "bash");
+        json_set_str(s, "status", failed ? "failed" : "completed");
+        json_set_str(s, "label", json_get_str(x, "label") ? json_get_str(x, "label") : "");
+        json_set_int(s, "durationMs", json_get_int(x, "durationMs", 0));
+        json_set_str(s, failed ? "errorText" : "resultText", json_get_str(x, "result") ? json_get_str(x, "result") : "");
+        json_push(snaps, s);
+    }
+    json_free(done);
+    json_set(out->details, "jobs", snaps);
     return 0;
 }
 
