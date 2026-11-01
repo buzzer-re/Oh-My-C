@@ -1974,17 +1974,53 @@ app_t *app_subagent_new(app_t *parent, const char *agent_name, const char *model
     char *label = app_model_label(parent);
     json_t *defs = agent_defs_load(parent->cwd);
     json_t *def = json_get(defs, agent_name ? agent_name : "task");
-    const char *role_model = settings_str("modelRoles.task", NULL);
-    o.model = role_model ? role_model : label;
-    const char *dm = json_get_str(def, "model");
-    if (dm && dm[0] == '@') {
-        char *rk = xasprintf("modelRoles.%s", dm + 1);
-        if (settings_str(rk, NULL)) o.model = dm;
-        free(rk);
-    } else if (dm && catalog_resolve(dm)) {
-        o.model = dm;
+    /* resolveAgentModelSelection: request model, task.agentModelOverrides[agent], the agent's own
+     * `model` (bar session-inheriting aliases), else the parent's active model; then the first
+     * pattern that resolves over the available models (resolveModelOverrideWithAuthFallback) */
+    const char *an = agent_name ? agent_name : "task";
+    char *agent_model = NULL;
+    json_t *dmj = json_get(def, "model");
+    if (json_is_str(dmj)) agent_model = xstrdup(json_sv(dmj));
+    else if (json_is_arr(dmj)) {
+        strvec_t v = {0};
+        json_t *x;
+        json_arr_foreach(dmj, i, x) if (json_is_str(x)) strvec_push(&v, json_sv(x));
+        agent_model = strvec_join(&v, ",");
+        strvec_free(&v);
     }
-    if (model_override && *model_override && app_resolve_model_pattern(model_override, NULL, NULL)) o.model = model_override;
+    json_t *ovj = json_get(json_get_obj(settings_get("task"), "agentModelOverrides"), an);
+    const char *override = json_is_str(ovj) ? json_sv(ovj) : NULL;
+    strvec_t pats = mr_configured_patterns(model_override);
+    if (!pats.n) pats = mr_configured_patterns(override);
+    if (!pats.n && agent_model) {
+        strvec_t single = mr_pattern_list(agent_model);
+        const char *one = single.n == 1 ? single.v[0] : NULL;
+        bool inherits = one && (!strcmp(one, "default") || !strcmp(one, "@default") || !strcmp(one, "*") ||
+                                !strcmp(one, "pi/default") || !strcmp(one, "@task") || !strcmp(one, "pi/task"));
+        bool task_alias = one && (!strcmp(one, "@task") || !strcmp(one, "pi/task"));
+        strvec_t cp = mr_configured_patterns(agent_model);
+        if (cp.n && (task_alias || !inherits)) {
+            strvec_free(&pats);
+            pats = cp;
+        } else
+            strvec_free(&cp);
+        strvec_free(&single);
+    }
+    if (!pats.n) {
+        strvec_free(&pats);
+        pats = mr_configured_patterns(label);
+    }
+    mr_result_t sel;
+    char *chosen = NULL;
+    if (mr_resolve_override(&pats, &sel)) {
+        char *k = mr_model_key(sel.model);
+        chosen = sel.explicit_level ? mr_selector_with_level(k, sel.level) : xstrdup(k);
+        free(k);
+    }
+    mr_result_clear(&sel);
+    strvec_free(&pats);
+    free(agent_model);
+    o.model = chosen ? chosen : label;
     o.append_system_prompt = append_prompt ? append_prompt : json_get_str(def, "body");
     o.mcp = parent->mcp;
     o.lsp = parent->lsp;
@@ -1998,6 +2034,7 @@ app_t *app_subagent_new(app_t *parent, const char *agent_name, const char *model
     o.no_context_files = false;
     app_t *child = app_create(&o, err);
     free(label);
+    free(chosen);
     strvec_free(&tools);
     json_free(defs);
     if (!child) return NULL;
