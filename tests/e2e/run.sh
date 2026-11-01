@@ -152,7 +152,13 @@ printf "astGrep:\n  enabled: true\n" > "$T/agent/config.yml"
 printf 'function f(a) {\n  console.log(a, 1);\n  if (q == q) {}\n}\n' > s.ts
 check "ast_grep"       '$A = q'  "$B" -m mock/mock-1 -p 'call:ast_grep:{"pat":"$A == $A","path":"s.ts"}'
 rm -f "$T/agent/config.yml"
-check "ast_edit stage" "(proposed) 1 replacement"  "$B" -m mock/mock-1 -p 'call:ast_edit:{"ops":[{"pat":"console.log($$$X)","out":"log($$$X)"}],"paths":["s.ts"]}'
+# find: jfind cascade through the judge role (off by default: find.enabled)
+printf "find:\n  enabled: on\n" > "$T/agent/config.yml"
+mkdir -p fnd && printf 'int parse_token(const char *raw) {\n  return raw[0];\n}\n' > fnd/tok.c && printf 'int other(void) { return 1; } /* FAILJUDGE */\n' > fnd/fail.c
+check "find hits"      $'1 hit(s) for "where are tokens parsed" in fnd/ (\xcf\x84 0.20), strongest first\npartial: 2 of 4 judge requests failed; unjudged files may still match\n\nfnd/tok.c  1.00  3 lines judged\n  fnd/tok.c:1-3  1.00  int parse_token(const char *raw) {\n\nlisted 2 \xc2\xb7 judged 2 \xc2\xb7 read 2 files' "$B" -m mock/mock-1 -p 'call:find:{"query":"where are tokens parsed","grep_keywords":["parse_token"],"path":"fnd"}'
+check "find empty"     '`query` must be a non-empty description'  "$B" -m mock/mock-1 -p 'call:find:{"query":"  ","grep_keywords":[]}'
+rm -f "$T/agent/config.yml"
+check "ast_edit stage" "(proposed) 1 replacement" "$B" -m mock/mock-1 -p 'call:ast_edit:{"ops":[{"pat":"console.log($$$X)","out":"log($$$X)"}],"paths":["s.ts"]}'
 # debug tool (DAP) against a scripted mock adapter
 printf 'debug:\n  adapters:\n    mockdap:\n      command: python3\n      args: ["-I", "%s"]\n      fileTypes: [".mock"]\n' "$ROOT/tests/e2e/mock_dap.py" > "$T/agent/config.yml"
 touch prog.mock
