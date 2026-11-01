@@ -1,5 +1,6 @@
 #include "app.h"
 #include "coding/goal.h"
+#include "coding/title.h"
 #include "coding/advisor.h"
 #include "tools/jobs.h"
 
@@ -121,6 +122,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
         if (m) agent_steer(a->agent, m);
     }
     app_goal_on_event(a, ev);
+    title_on_event(a, ev);
     if (a->advisor) advisor_on_event(a->advisor, ev);
     if (ev->type == AGENT_EV_TURN_START || ev->type == AGENT_EV_MESSAGE_START) {
         if (ev->type == AGENT_EV_TURN_START || str_eq(json_get_str(ev->message, "role"), "assistant")) ttsr_reset(a->ttsr);
@@ -230,10 +232,21 @@ static char *dcr_render(app_t *a) {
     return trim;
 }
 
+static json_t *hook_transform_locked(app_t *a, const json_t *messages);
+
+/* the title fork runs the same transform from its own thread: serialize the reminder state */
 static json_t *hook_transform(void *ud, agent_t *ag, const json_t *messages) {
     app_t *a = ud;
     UNUSED(ag);
     if (!settings_bool("dateCwdReminder", true)) return NULL;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu);
+    json_t *r = hook_transform_locked(a, messages);
+    pthread_mutex_unlock(&mu);
+    return r;
+}
+
+static json_t *hook_transform_locked(app_t *a, const json_t *messages) {
     ssize_t first = -1;
     json_t *m;
     json_arr_foreach(messages, i, m) if (str_eq(json_get_str(m, "role"), "user")) {
@@ -864,6 +877,7 @@ void app_free(app_t *a) {
     free(a->pending_rewind);
     advisor_free(a->advisor);
     goal_free(a->goal);
+    title_free(a);
     json_free(a->dcr_sent);
     free(a->dcr_last);
     pthread_mutex_destroy(&a->mu);
@@ -1076,6 +1090,24 @@ size_t app_shake(app_t *a, size_t min_chars) {
 
 /* ---------- title ---------- */
 
+char *app_generate_title_from(app_t *a, const char *text) {
+    if (!text || !*text) return NULL;
+    char *sys = prompt_load_or("coding-agent/prompts/system/title-system.md",
+                               "Generate a concise 3-6 word title for this conversation. Output only the title.");
+    const ai_model_t *tm = NULL;
+    const char *roles[] = {"modelRoles.tiny", "modelRoles.commit", "modelRoles.smol"};
+    for (size_t i = 0; i < ARRAY_LEN(roles) && !tm; i++) {
+        const char *r = settings_str(roles[i], NULL);
+        if (r) tm = app_resolve_model_pattern(r, NULL, NULL);
+    }
+    if (!tm) tm = a->model;
+    char *snippet = xasprintf("%.2000s", text);
+    char *title = app_complete_text(a, tm, sys, snippet, EFFORT_OFF);
+    free(snippet);
+    free(sys);
+    return title;
+}
+
 char *app_generate_title(app_t *a) {
     const char *first = NULL;
     json_t *m;
@@ -1086,40 +1118,17 @@ char *app_generate_title(app_t *a) {
             else first = json_get_str(json_at(c, 0), "text");
         }
     }
-    if (!first) return NULL;
-    char *sys = prompt_load_or("coding-agent/prompts/system/title-system.md",
-                               "Generate a concise 3-6 word title for this conversation. Output only the title.");
-    const ai_model_t *tm = NULL;
-    const char *smol = settings_str("modelRoles.smol", NULL);
-    if (smol) tm = app_resolve_model_pattern(smol, NULL, NULL);
-    if (!tm) tm = a->model;
-    char *snippet = xasprintf("%.2000s", first);
-    char *title = app_complete_text(a, tm, sys, snippet, EFFORT_OFF);
-    char *res = NULL;
-    if (title) {
-        char *t = str_trim(title);
-        /* strip quotes / trailing punctuation, single line */
-        char *nl = strchr(t, '\n');
-        if (nl) *nl = 0;
-        size_t n = strlen(t);
-        while (n && (t[n - 1] == '.' || t[n - 1] == '"')) t[--n] = 0;
-        char *s = t;
-        while (*s == '"' || *s == '#' || *s == ' ') s++;
-        if (*s) res = xstrdup(s);
-        free(t);
-    }
-    free(title);
-    free(snippet);
-    free(sys);
-    return res;
+    if (!first || title_low_signal(first)) return NULL;
+    char *raw = app_generate_title_from(a, first);
+    char *t = raw ? title_normalize(raw) : NULL;
+    free(raw);
+    return t;
 }
 
 static void maybe_title(app_t *a) {
-    if (a->title_done || a->opts.subagent || env_truthy("PI_NO_TITLE") || env_truthy("OMC_NO_TITLE")) return;
-    a->title_done = true;
-    char *t = app_generate_title(a);
-    if (t) session_set_title(a->session, t, "auto");
-    free(t);
+    /* the side request started when the reply began; give it a moment, then apply */
+    title_wait(a, 3000);
+    title_apply(a);
 }
 
 /* ---------- compaction ---------- */

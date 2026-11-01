@@ -53,6 +53,10 @@ class H(BaseHTTPRequestHandler):
             kind, _, rest = u.partition(":")
             if "<system-interrupt" in u:
                 kind, rest = "say", "complied with rule"
+            if "<title-request>" in u:  # fork title side request (omp/omc title.generator: fork)
+                kind, rest = "say", '<title emoji="🧪" code="PARK">Fix flaky park tests</title>'
+            elif "You name coding-agent sessions" in sysc:  # title model fallback
+                kind, rest = "say", "<title>Fix flaky park tests</title>"
             if advisor:
                 kind, rest = ("call", 'advise:{"note":"Check the empty-input edge case","severity":"concern"}') if "ADVISE_ME" in u else ("say", "silent")
             elif "<advisory" in u:

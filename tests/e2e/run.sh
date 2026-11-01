@@ -140,6 +140,8 @@ check "rpc navigate"   '"editorText": "second"'   python3 -I "$ROOT/tests/e2e/rp
 check "async bash"     "Backgrounded as job bg_1"  bash -c "'$B' -m mock/mock-1 --mode json -p 'call:bash:{\"command\":\"sleep 1; echo bgdone\",\"async\":true}' | grep -o 'Backgrounded as job bg_1'"
 grep -q "Background job bg_1 has completed" "$T/req.jsonl" && echo "   ok  async delivered" || { echo "   FAIL async delivered"; fail=1; }
 check "wait nothing"   "Nothing to wait for"  "$B" -m mock/mock-1 -p 'call:wait:{}'
+# automatic session title: fork side request returns a card title
+check "fork title"     "🧪 PARK: Fix flaky park tests"  bash -c "env -u OMC_NO_TITLE '$B' -m mock/mock-1 -p 'bash:echo titled' >/dev/null && '$B' sessions | head -3"
 # libomc embedding (built by `make test` via `make lib`)
 if [ -x "$ROOT/build/examples/embed" ]; then
     check "lib host tool"  "hello from the host app, Ada"  "$ROOT/build/examples/embed" 'call:greet:{"name":"Ada"}' mock/mock-1

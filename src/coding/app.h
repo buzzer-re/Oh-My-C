@@ -62,6 +62,7 @@ struct app {
     bool checkpoint_pending;    /* checkpoint tool ran; boundary captured at its message_end */
     char *plan_file; /* local:// path of the current plan */
     struct goal *goal; /* goal mode state (goal.c) */
+    struct title_state *title; /* automatic session title (title.c) */
     /* date/cwd reminder injected per request into user turns (never persisted) */
     int64_t dcr_first_ts;
     json_t *dcr_sent; /* "role:ts" -> reminder text the turn was first sent with */
@@ -111,6 +112,8 @@ json_t *app_stats(app_t *a); /* {tokens, cost, messages, contextPercent, ...} ow
 char *app_model_label(app_t *a); /* "provider/id" owned */
 const char *app_session_file(app_t *a);
 /* run a one-shot completion with no tools (titles, summaries) */
+/* plain title from the title model (title-system.md) for `text`; owned raw reply or NULL */
+char *app_generate_title_from(app_t *a, const char *text);
 char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const char *user, ai_effort_t effort);
 /* subagent runner (task tool) */
 char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assignment, const char *context,
