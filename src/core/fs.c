@@ -74,7 +74,9 @@ static int write_all(int fd, const void *data, size_t len) {
 int fs_write_atomic(const char *path, const void *data, size_t len, mode_t mode) {
     char *dir = path_dirname(path);
     fs_mkdir_p(dir, 0755);
-    char *tmp = xasprintf("%s/.%s.omc-tmp-%s", dir, path_basename(path), short_id());
+    char *sid = short_id();
+    char *tmp = xasprintf("%s/.%s.omc-tmp-%s", dir, path_basename(path), sid);
+    free(sid);
     free(dir);
     struct stat st;
     if (stat(path, &st) == 0) mode = st.st_mode & 07777;

@@ -90,8 +90,10 @@ T_test_providers_oai := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provi
 T_test_http          := $(CORE_OBJ) $(NET_OBJ)
 T_test_providers_bedrock := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/aws.o $(O)/ai/provider_bedrock.o
 T_test_readfmt       := $(CORE_OBJ) $(O)/tools/readfmt.o
+T_test_editmodes     := $(CORE_OBJ) $(O)/tools/diff.o $(O)/tools/fuzzy.o $(O)/tools/patch.o $(O)/tools/sloppy.o \
+                        $(O)/text/regex.o $(O)/text/rxbt.o
 T_tui_demo           := $(T_test_tui)
-UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt
+UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes
 
 .SECONDEXPANSION:
 build/tests/%: tests/%.c $$(T_$$*)

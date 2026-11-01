@@ -46,7 +46,7 @@ This file is the single source of truth for what is implemented; it is updated w
 | Tool | Status | Notes |
 |---|---|---|
 | read (selectors, hashline anchors, summaries, dirs, images, URLs, skill:// rule:// artifact:// local:// pr:// issue://; zip/jar/whl/tar/tar.gz/gz members, SQLite tables/rows/`?where=`/`?q=SELECT` via an on-disk-format parser with WAL overlay, PDF text with page selection, `.ipynb` cells) | ✅ | other archive codecs (bz2/xz/zst/7z/rar/iso/...) ❌; SQLite `?q=` is single-table SELECT only (no JOIN/GROUP BY/subqueries); encrypted PDFs, OCR of image-only pages and `:pageN.png` page rendering ❌ (`:pageN.png` returns that page's extracted text) |
-| write, edit (hashline PUT/CUT/REM/MV, registers, block anchors; replace mode) | ✅ | apply_patch/patch/sloppy modes ❌ |
+| write, edit (`edit.mode`/`PI_EDIT_VARIANT`: hashline PUT/CUT/REM/MV, registers, block anchors; replace, patch, apply_patch (Codex envelope, Add/Update/Delete/Move, first-match context ladder), sloppy (Find/Replace/Insert, … captures, ＋/－ rows); fuzzy ladder, numbered diffs + compact previews, notebooks) | 🟡 | replace/patch/apply_patch pass all upstream pi-edit fixtures; sloppy: legacy ⟪⟫ selections, desired-text/diff-shaped/typo recovery ❌; NFC normalization, tree-sitter diff context, unique-suffix path recovery, auto-generated guard, `edit.modelVariants`, streaming previews, apply_patch custom-tool wire ❌ |
 | bash (persistent shell session, timeouts, PTY, artifact spill, `async` background jobs delivered as follow-ups / idle wake-up, `wait` tool, `/jobs`) | ✅ | services (launch), async task jobs ❌ |
 | grep, glob | ✅ | |
 | todo, ask | ✅ | |
