@@ -12,6 +12,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include "core/compat_sys.h"
 
 char *mcp_oauth_key(const char *url) { return xasprintf("mcp:%s", url ? url : ""); }
 

@@ -25,6 +25,7 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#include "core/compat_sys.h"
 
 extern char **environ;
 

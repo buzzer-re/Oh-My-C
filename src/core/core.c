@@ -8,6 +8,7 @@
 #include <sys/random.h>
 #include <time.h>
 #include <unistd.h>
+#include "core/compat_sys.h"
 
 /* ---------- allocation ---------- */
 

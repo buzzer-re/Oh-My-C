@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <zlib.h>
+#include "core/compat_sys.h"
 
 /* ---------- URL ---------- */
 

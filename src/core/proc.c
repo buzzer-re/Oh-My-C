@@ -14,6 +14,7 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+#include "core/compat_sys.h"
 
 extern char **environ;
 

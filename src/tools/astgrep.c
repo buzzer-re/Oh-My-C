@@ -229,7 +229,7 @@ static char *norm_span(const char *src, size_t a, size_t b) {
     return sb_detach(&s);
 }
 
-static bool bind(mctx_t *m, const char *name, size_t a, size_t b) {
+static bool mv_bind(mctx_t *m, const char *name, size_t a, size_t b) {
     if (!*name || !strcmp(name, "_")) return true;
     for (size_t i = 0; i < m->caps.n; i++) {
         if (!strcmp(m->caps.v[i].name, name)) {
@@ -279,7 +279,7 @@ static bool match_seq(mctx_t *m, unit_t **pat, size_t np, unit_t **src, size_t n
             if (!multi && k > 0 && is_sep(src[k - 1])) break;
             size_t a = k ? u_start(src[0]) : (ns ? u_start(src[0]) : 0);
             size_t b = k ? u_end(src[k - 1]) : a;
-            if (!bind(m, p->tok.text, a, b)) {
+            if (!mv_bind(m, p->tok.text, a, b)) {
                 unbind_to(m, mark);
                 continue;
             }
