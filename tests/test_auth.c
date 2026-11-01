@@ -100,6 +100,16 @@ static void expire(const char *provider) {
     auth_reload();
 }
 
+static json_t *jwt_claims(const char *tok) {
+    const char *a = tok ? strchr(tok, '.') : NULL, *b = a ? strchr(a + 1, '.') : NULL;
+    if (!b) return NULL;
+    size_t n;
+    unsigned char *d = base64_decode(a + 1, (size_t)(b - a - 1), &n);
+    json_t *j = d ? json_parse((const char *)d, n, NULL) : NULL;
+    free(d);
+    return j;
+}
+
 static json_t *mock_log(int port) {
     char *url = xasprintf("http://127.0.0.1:%d/_log", port);
     http_resp_t r;
@@ -194,7 +204,7 @@ int main(void) {
         /* refresh: request rule with the kimi headers hook */
         expire("kimi-code");
         char *k = auth_get_api_key("kimi-code");
-        json_t *p = auth_jwt_payload_for_test(k);
+        json_t *p = jwt_claims(k);
         CHECK(json_get_int(p, "n", 0) == 2, "kimi refreshed access token: %s", k ? k : "(null)");
         json_free(p);
         free(k);
@@ -450,12 +460,6 @@ int main(void) {
         json_free(c);
         free(err);
         s_free(&ol);
-        script_t ds = {.answers = {"Bearer sk-deep"}};
-        setenv("OMC_AUTH_URL_REWRITE_SAVE", rw, 1);
-        rc = login("deepseek", &ds, &err); /* validation hits the (unmapped) real host: only check the normalization */
-        (void)rc;
-        free(err);
-        s_free(&ds);
 
         unsetenv("COREWEAVE_PROJECT");
         unsetenv("WANDB_INFERENCE_PROJECT");
