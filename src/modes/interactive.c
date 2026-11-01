@@ -1181,6 +1181,21 @@ int run_interactive_mode(app_t *a, const char *initial) {
     }
     tui_container_t *root = tui_root(u.tui);
     tui_sym_set_preset(settings_str("symbolPreset", "unicode"));
+    /* config warnings head the header (interactive-mode.ts #buildConfigWarningComponents): retry.fallbackChains
+     * validation (turn-recovery validateRetryFallbackChains) */
+    {
+        strvec_t warns = {0};
+        mr_fallback_validate(&warns);
+        for (size_t i = 0; i < warns.n; i++) {
+            char *t = xasprintf("Warning: %s", warns.v[i]);
+            char *styled = tui_fgs(NULL, TUI_TC_WARNING, t);
+            tui_container_add(root, &tui_text_new(styled, 1, 0)->base);
+            tui_container_add(root, &tui_spacer_new(1)->base);
+            free(styled);
+            free(t);
+        }
+        strvec_free(&warns);
+    }
     /* header: welcome banner between one-row spacers (omp Composer#rebuildHeader) */
     if (!settings_bool("startup.quiet", false)) {
         u.welcome = ui_welcome_new();
