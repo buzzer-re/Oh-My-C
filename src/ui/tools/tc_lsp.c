@@ -592,12 +592,10 @@ static void render_hover(const char *text, const char *lang, const char *code_s,
     char *code = str_trim(code0);
     char *before0 = xstrndup(text, (size_t)(strstr(text, "```") - text));
     char *before = tc_trim_end(before0);
-    const char *after_p = strstr(text + 3, "```");
-    after_p = after_p ? strstr(after_p + 3, "```") : NULL;
-    /* omp: text after the fence that follows the first fence opener's index + 3 */
-    const char *close = strstr(strstr(text, "```") + 3, "```");
-    char *after = close ? str_trim(close + 3) : xstrdup("");
-    (void)after_p;
+    /* omp: fullText.slice(fullText.indexOf("```", 3) + 3) — the first fence at offset >= 3, which is the opening
+     * fence itself whenever text precedes it (so the code block then repeats as the "after" text) */
+    const char *close = strlen(text) > 3 ? strstr(text + 3, "```") : NULL;
+    char *after = str_trim(close ? close + 3 : text + MIN(strlen(text), (size_t)2));
     strvec_t cl = {0};
     tc_highlight(code, *lang ? lang : NULL, &cl);
     char *icon = tc_styled_sym("status.info", TUI_TC_ACCENT);
