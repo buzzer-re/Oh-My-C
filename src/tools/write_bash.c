@@ -367,7 +367,7 @@ static int write_local(tool_env_t *env, const char *raw_path, const char *raw_co
     if (env->after_write) {
         char *diag = env->after_write(env, abs);
         if (diag) {
-            sb_appendf(&b, "\n%s", diag);
+            sb_appendf(&b, "\n\n%s", diag); /* omp: diagnostics notice at the message boundary */
             free(diag);
         }
     }

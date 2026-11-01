@@ -3392,7 +3392,7 @@ static void finish(stageds_t *st, pe_mode_t mode, const pe_opts_t *o, hl_clip_t 
         if (s->op != OP_DELETE && o->after_write) {
             char *d = o->after_write(o->ud, s->move_abs ? s->move_abs : s->abs);
             if (d && *d) {
-                char *t2 = xasprintf("%s\n%s", t, d);
+                char *t2 = xasprintf("%s\n\n%s", t, d); /* omp: diagnostics notice at the message boundary */
                 free(t);
                 t = t2;
             }
