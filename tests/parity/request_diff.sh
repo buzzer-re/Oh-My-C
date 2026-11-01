@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Compare the first model request omp and omc send for the same prompt (print mode, same cwd, same
-# mock model through throwaway agent dirs). Prints tool-set/param differences and a system-prompt diff.
+# mock model through throwaway agent dirs; the product name omp->omc is normalized). Prints tool-set/param differences and a system-prompt diff.
 #   tests/parity/request_diff.sh [prompt] [cwd]
 # Env: RD_DIR (scratch, default $TMPDIR/omc-reqdiff), OMP_BIN (default omp), RD_SETUP=<script> runs
 # `$RD_SETUP <agent-dir>` for both agent dirs before the run (e.g. to add skills/rules/settings).
@@ -44,6 +44,8 @@ def main(name):
     rs = [r for r in rs if r.get("tools")]
     return rs[0] if rs else None
 a, b = main("omp"), main("omc")
+def prod(s):  # product name only: omp's -> omc's, omp:// -> omc://
+    return s.replace("omp's", "omc's").replace("omp://", "omc://") if isinstance(s, str) else s
 if not a or not b: sys.exit(f"missing request: omp={bool(a)} omc={bool(b)}")
 ta = [t["function"]["name"] for t in a["tools"]]; tb = [t["function"]["name"] for t in b["tools"]]
 print("tools omp:", ta); print("tools omc:", tb)
@@ -52,7 +54,7 @@ for t in a["tools"]:
     o = next((x for x in b["tools"] if x["function"]["name"] == n), None)
     if o is None: continue
     for k in ("description", "parameters"):
-        if t["function"].get(k) != o["function"].get(k):
+        if prod(t["function"].get(k)) != o["function"].get(k):
             print(f"  tool {n}: {k} differs")
             json.dump(t["function"].get(k), open(f"{D}/tool.{n}.{k}.omp", "w"), indent=1, ensure_ascii=False)
             json.dump(o["function"].get(k), open(f"{D}/tool.{n}.{k}.omc", "w"), indent=1, ensure_ascii=False)
@@ -61,7 +63,7 @@ for k in sorted(set(a) | set(b)):
 def txt(m):
     c = m["content"]
     return c if isinstance(c, str) else "".join(x.get("text", "") for x in c)
-open(f"{D}/sys.omp", "w").write(txt(a["messages"][0]).replace("omp's", "omc's"))
+open(f"{D}/sys.omp", "w").write(prod(txt(a["messages"][0])))
 open(f"{D}/sys.omc", "w").write(txt(b["messages"][0]))
 open(f"{D}/msgs.omp", "w").write(json.dumps(a["messages"][1:], indent=1, ensure_ascii=False))
 open(f"{D}/msgs.omc", "w").write(json.dumps(b["messages"][1:], indent=1, ensure_ascii=False))

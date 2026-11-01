@@ -284,6 +284,12 @@ char *tool_prompt(const char *name, const json_t *ctx) {
     char *rel = xasprintf("coding-agent/prompts/tools/%s.md", name);
     char *r = prompt_render(rel, ctx);
     free(rel);
+    /* product name: omp's harness docs scheme is served as omc:// here */
+    if (r && strstr(r, "omp://")) {
+        char *x = str_replace(r, "omp://", "omc://");
+        free(r);
+        r = x;
+    }
     return r;
 }
 
