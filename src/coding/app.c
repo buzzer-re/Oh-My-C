@@ -564,7 +564,10 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
     const char *stop = json_get_str(assistant, "stopReason");
     if (str_eq(stop, "aborted") || ag->cancel) return false;
     const char *err = json_get_str(assistant, "errorMessage");
-    if (is_overflow(err) && attempt == 0 && !a->compacting) {
+    bool flagged = false; /* providers mark opaque overflow errors (Devin large-history invalid_argument) */
+    json_t *fl;
+    json_arr_foreach(json_get(assistant, "errorFlags"), fi, fl) flagged = flagged || str_eq(json_sv(fl), "contextOverflow");
+    if ((flagged || is_overflow(err)) && attempt == 0 && !a->compacting) {
         notice(a, "warning", "Context overflow; compacting and retrying");
         char *cerr = NULL;
         if (app_compact(a, NULL, &cerr) == 0) return true;
