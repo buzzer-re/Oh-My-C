@@ -18,7 +18,8 @@
 #      CMP_WAIT (seconds to wait after launching, default 6).
 # Without CMP_SETUP both config.yml files start with setupVersion: 2 (both apps past the first-run wizard).
 #      CMP_SPLIT=1 gives each app its own work dir ($D/omp/work, $D/omc/work: tools that modify files don't race),
-#      CMP_SEED=<dir> is copied into the work dir(s) before start.
+#      CMP_SEED=<dir> is copied into the work dir(s) before start, CMP_PATH=<dir> is prepended to both apps' PATH
+#      (e.g. tests/e2e/bin-gh for the fake `gh` the github tool needs).
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 D=${CMP_DIR:-${TMPDIR:-/tmp}/omc-tuicmp}
@@ -49,8 +50,8 @@ workdirs() { if [ -n "${CMP_SPLIT:-}" ]; then WO=$D/omp/work; WC=$D/omc/work; el
 launch() { # cols rows extra-args...
     local cols=$1 rows=$2; shift 2
     workdirs
-    tmux new-session -d -s "$N-omp" -x "$cols" -y "$rows" -c "$WO" "env HOME=$D/home MOCK_KEY=x PI_CODING_AGENT_DIR=$D/omp-agent $OMP $*"
-    tmux new-session -d -s "$N-omc" -x "$cols" -y "$rows" -c "$WC" "env HOME=$D/home MOCK_KEY=x OMC_CODING_AGENT_DIR=$D/omc-agent $ROOT/build/omc $*"
+    tmux new-session -d -s "$N-omp" -x "$cols" -y "$rows" -c "$WO" "env HOME=$D/home MOCK_KEY=x ${CMP_PATH:+PATH=$CMP_PATH:$PATH} PI_CODING_AGENT_DIR=$D/omp-agent $OMP $*"
+    tmux new-session -d -s "$N-omc" -x "$cols" -y "$rows" -c "$WC" "env HOME=$D/home MOCK_KEY=x ${CMP_PATH:+PATH=$CMP_PATH:$PATH} OMC_CODING_AGENT_DIR=$D/omc-agent $ROOT/build/omc $*"
     echo "$cols $rows" > "$D/size"
 }
 case "$cmd" in
@@ -97,8 +98,8 @@ replay)
     workdirs
     python3 -I "$ROOT/tests/tui/mksession.py" "$1" "$WO" "$D/replay-omp.jsonl"
     python3 -I "$ROOT/tests/tui/mksession.py" "$1" "$WC" "$D/replay-omc.jsonl"
-    tmux new-session -d -s "$N-omp" -x "$cols" -y "$rows" -c "$WO" "env HOME=$D/home MOCK_KEY=x PI_CODING_AGENT_DIR=$D/omp-agent $OMP -r $D/replay-omp.jsonl"
-    tmux new-session -d -s "$N-omc" -x "$cols" -y "$rows" -c "$WC" "env HOME=$D/home MOCK_KEY=x OMC_CODING_AGENT_DIR=$D/omc-agent $ROOT/build/omc -r $D/replay-omc.jsonl"
+    tmux new-session -d -s "$N-omp" -x "$cols" -y "$rows" -c "$WO" "env HOME=$D/home MOCK_KEY=x ${CMP_PATH:+PATH=$CMP_PATH:$PATH} PI_CODING_AGENT_DIR=$D/omp-agent $OMP -r $D/replay-omp.jsonl"
+    tmux new-session -d -s "$N-omc" -x "$cols" -y "$rows" -c "$WC" "env HOME=$D/home MOCK_KEY=x ${CMP_PATH:+PATH=$CMP_PATH:$PATH} OMC_CODING_AGENT_DIR=$D/omc-agent $ROOT/build/omc -r $D/replay-omc.jsonl"
     sleep "${CMP_WAIT:-5}"
     echo "replayed";;
 keys)

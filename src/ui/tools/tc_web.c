@@ -285,7 +285,7 @@ static void ws_result(const tc_call_t *c, int width, strvec_t *out) {
     free(raw);
 }
 
-/* ---------- github (tools/github.ts; run_watch's workflow view is not ported) ---------- */
+/* ---------- github (tools/github.ts) ---------- */
 
 static const char *gh_title(const char *op) {
     static const char *const T[][2] = {{"repo_view", "GitHub Repo"},           {"pr_checkout", "GitHub PR Checkout"},
@@ -358,11 +358,236 @@ static void gh_meta(const json_t *a, const char *op, strvec_t *meta) {
     }
 }
 
+/* run_watch live view (buildWatchSections / renderRunBlock / renderFailedLogs) */
+static bool gh_in(const char *v, const char *const *set) {
+    for (; v && *set; set++)
+        if (!strcmp(v, *set)) return true;
+    return false;
+}
+static const char *const GH_OK[] = {"success", "neutral", "skipped", NULL};
+static const char *const GH_FAIL[] = {"failure", "timed_out", "cancelled", "action_required", "startup_failure", NULL};
+static const char *const GH_PENDING[] = {"queued", "requested", "waiting", "pending", NULL};
+
+static char *gh_watch_header(const json_t *w) {
+    const json_t *run = json_get_obj(w, "run");
+    bool watching = str_eq(json_get_str(w, "state"), "watching");
+    const char *repo = json_get_str(w, "repo");
+    if (str_eq(json_get_str(w, "mode"), "run") && run)
+        return xasprintf("%srun #%lld on %s", watching ? "watching " : "", (long long)json_get_int(run, "id", 0), repo ? repo : "");
+    const char *sha = json_get_str(w, "headSha");
+    char *ss = sha && *sha ? xstrndup(sha, 12) : xstrdup("this commit");
+    char *r = watching ? xasprintf("watching %s on %s", ss, repo ? repo : "") : xasprintf("workflow runs for %s on %s", ss, repo ? repo : "");
+    free(ss);
+    return r;
+}
+
+static void gh_run_block(const json_t *run, int width, strvec_t *out) {
+    const char *wf = json_get_str(run, "workflowName");
+    if (!wf) wf = json_get_str(run, "displayTitle");
+    char *label = tc_replace_tabs(wf ? wf : "GitHub Actions");
+    strvec_t parts = {0};
+    const char *br = json_get_str(run, "branch"), *sha = json_get_str(run, "headSha");
+    if (br) strvec_push_own(&parts, tc_replace_tabs(br));
+    else if (sha) strvec_push_own(&parts, xstrndup(sha, 12));
+    strvec_push_own(&parts, xasprintf("#%lld", (long long)json_get_int(run, "id", 0)));
+    sb_t line = SB_INIT;
+    char *t = tc_fg(TUI_TC_ACCENT, label);
+    sb_append(&line, t);
+    free(t);
+    for (size_t i = 0; i < parts.n; i++) {
+        char *m = tc_fg(i + 1 == parts.n ? TUI_TC_MUTED : TUI_TC_TEXT, parts.v[i]);
+        sb_appendf(&line, "  %s", m);
+        free(m);
+    }
+    strvec_push_own(out, sb_detach(&line));
+    strvec_free(&parts);
+    free(label);
+    const json_t *jobs = json_get_arr(run, "jobs");
+    if (!json_len(jobs)) {
+        strvec_push_own(out, tc_fg(TUI_TC_DIM, "waiting for workflow jobs..."));
+        return;
+    }
+    for (size_t i = 0; i < json_len(jobs); i++) {
+        const json_t *j = json_at(jobs, i);
+        const char *concl = json_get_str(j, "conclusion"), *st = json_get_str(j, "status");
+        const char *icon;
+        tui_tc_t ic, tcol;
+        if (gh_in(concl, GH_OK)) icon = tc_sym("status.success"), ic = TUI_TC_ACCENT, tcol = TUI_TC_SUCCESS;
+        else if (gh_in(concl, GH_FAIL)) icon = tc_sym("status.error"), ic = TUI_TC_ERROR, tcol = TUI_TC_ERROR;
+        else if (str_eq(st, "in_progress")) icon = tc_sym("status.enabled"), ic = TUI_TC_WARNING, tcol = TUI_TC_WARNING;
+        else icon = tc_sym("status.shadowed"), ic = TUI_TC_MUTED, tcol = TUI_TC_MUTED;
+        (void)GH_PENDING;
+        char *pt = xasprintf("%s ", icon);
+        char *prefix = tc_fg(ic, pt);
+        free(pt);
+        char *dur = NULL;
+        if (json_get(j, "durationSeconds")) {
+            char *d = xasprintf("%llds", (long long)json_get_int(j, "durationSeconds", 0));
+            dur = tc_fg(tcol, d);
+            free(d);
+        }
+        int reserved = tui_visible_width(prefix) + (dur ? 1 + tui_visible_width(dur) : 0);
+        int nw = MAX(8, width - reserved);
+        char *nm = tc_replace_tabs(json_get_str(j, "name") ? json_get_str(j, "name") : "");
+        char *tr = tui_truncate_to_width(nm, nw, NULL);
+        char *name = tc_fg(tcol, tr);
+        sb_t l = SB_INIT;
+        sb_append(&l, prefix);
+        sb_append(&l, name);
+        if (dur) {
+            int pad = MAX(1, width - tui_visible_width(sb_cstr(&l)) - tui_visible_width(dur));
+            for (int k = 0; k < pad; k++) sb_putc(&l, ' ');
+            sb_append(&l, dur);
+        }
+        strvec_push_own(out, sb_detach(&l));
+        free(name);
+        free(tr);
+        free(nm);
+        free(prefix);
+        free(dur);
+    }
+}
+
+static void gh_failed_logs(const json_t *logs, int width, bool expanded, strvec_t *out) {
+    for (size_t i = 0; i < json_len(logs); i++) {
+        const json_t *e = json_at(logs, i);
+        const char *wf = json_get_str(e, "workflowName");
+        int64_t rid = json_get_int(e, "runId", 0);
+        char *ctx = wf ? xasprintf("%s  #%lld", wf, (long long)rid) : xasprintf("run #%lld", (long long)rid);
+        char *mctx = tc_fg(TUI_TC_MUTED, ctx);
+        char *jn = tc_replace_tabs(json_get_str(e, "jobName") ? json_get_str(e, "jobName") : "");
+        char *head = xasprintf("%s %s  %s", tc_sym("status.error"), jn, mctx);
+        strvec_push_own(out, tc_fg(TUI_TC_ERROR, head));
+        free(head);
+        free(jn);
+        free(mctx);
+        free(ctx);
+        const char *tail = json_get_str(e, "tail");
+        if (!json_get_bool(e, "available", false) || !tail || !*tail) {
+            const char *reason = json_get_str(e, "unavailableReason");
+            char *rs = reason ? tc_sanitize_line(reason) : NULL;
+            char *msg = rs && *rs ? xasprintf("  log tail unavailable: %s", rs) : xstrdup("  log tail unavailable");
+            char *tr = tui_truncate_to_width(msg, MAX(8, width), NULL);
+            strvec_push_own(out, tc_fg(TUI_TC_DIM, tr));
+            free(tr);
+            free(msg);
+            free(rs);
+            continue;
+        }
+        char *tt = tc_replace_tabs(tail);
+        strvec_t all = {0}, lines = {0};
+        tc_split_lines(tt, &all);
+        for (size_t k = 0; k < all.n; k++)
+            if (*all.v[k]) strvec_push(&lines, all.v[k]);
+        size_t lim = expanded ? lines.n : MIN((size_t)3, lines.n);
+        for (size_t k = lines.n - lim; k < lines.n; k++) {
+            char *tr = tui_truncate_to_width(lines.v[k], MAX(8, width - 2), NULL);
+            char *l = xasprintf("  %s", tr);
+            strvec_push_own(out, tc_fg(TUI_TC_DIM, l));
+            free(l);
+            free(tr);
+        }
+        if (!expanded && lines.n > lim) {
+            char *hint = tc_expand_hint();
+            char *l = xasprintf("  \xe2\x80\xa6 %zu more log lines %s", lines.n - lim, hint);
+            strvec_push_own(out, tc_fg(TUI_TC_DIM, l));
+            free(l);
+            free(hint);
+        }
+        strvec_free(&all);
+        strvec_free(&lines);
+        free(tt);
+    }
+}
+
+static void gh_watch_result(const tc_call_t *c, const json_t *w, int width, strvec_t *out) {
+    char *wh = gh_watch_header(w);
+    const char *meta[1] = {wh};
+    bool err = c->is_error, part = c->partial;
+    char *ov = !part && !err ? tc_styled_sym("tool.gh", TUI_TC_ACCENT) : NULL;
+    tc_status_line_t sl = {.icon = part ? (c->spinner >= 0 ? TC_ST_RUNNING : TC_ST_PENDING) : TC_ST_ERROR, .icon_override = ov,
+                           .spinner = part ? c->spinner : -1, .title = "GitHub Run Watch",
+                           .title_slot = part ? -1 : err ? TUI_TC_ERROR : TUI_TC_ACCENT, .meta = meta, .nmeta = 1};
+    char *header = tc_status_line(&sl);
+    int iw = tc_block_content_width(width, -1, -1);
+    tc_section_t secs[2];
+    memset(secs, 0, sizeof secs);
+    size_t ns = 0;
+    strvec_t main = {0};
+    const char *note = json_get_str(w, "note");
+    if (note) {
+        char *n = tc_replace_tabs(note);
+        strvec_push_own(&main, tc_fg(TUI_TC_DIM, n));
+        free(n);
+    }
+    if (str_eq(json_get_str(w, "mode"), "run") && json_get_obj(w, "run")) {
+        gh_run_block(json_get_obj(w, "run"), iw, &main);
+    } else if (str_eq(json_get_str(w, "mode"), "commit")) {
+        const json_t *runs = json_get_arr(w, "runs");
+        if (!json_len(runs)) strvec_push_own(&main, tc_fg(TUI_TC_DIM, "waiting for workflow runs..."));
+        for (size_t i = 0; i < json_len(runs); i++) {
+            if (i) strvec_push(&main, "");
+            gh_run_block(json_at(runs, i), iw, &main);
+        }
+    }
+    if (main.n) secs[ns++].lines = main;
+    strvec_t failed = {0};
+    gh_failed_logs(json_get_arr(w, "failedLogs"), iw, c->expanded, &failed);
+    if (failed.n) {
+        secs[ns].label = "failed logs";
+        secs[ns++].lines = failed;
+    }
+    tc_block_t blk = {.header = header, .state = part ? TC_STATE_RUNNING : err ? TC_STATE_ERROR : TC_STATE_SUCCESS, .sections = secs,
+                      .nsections = ns, .width = width, .no_bg = true, .pad_left = -1, .pad_right = -1,
+                      .border_slot = err ? TUI_TC_ERROR : TUI_TC_BORDER_MUTED};
+    tc_output_block(&blk, out);
+    strvec_free(&main);
+    strvec_free(&failed);
+    free(header);
+    free(ov);
+    free(wh);
+}
+
 void tc_github(const tc_call_t *c, int width, strvec_t *out) {
     char *op = json_get_str(c->args, "op") ? str_trim(json_get_str(c->args, "op")) : NULL;
     if (op && !*op) {
         free(op);
         op = NULL;
+    }
+    const json_t *watch = c->has_result ? json_get_obj(c->details, "watch") : NULL;
+    if (watch) {
+        gh_watch_result(c, watch, width, out);
+        free(op);
+        return;
+    }
+    if (!c->has_result && str_eq(op, "run_watch")) {
+        /* renderWatchCall */
+        char *icon = tc_status_icon(c->spinner >= 0 ? TC_ST_RUNNING : TC_ST_PENDING, c->spinner);
+        char *run = json_get_str(c->args, "run") ? str_trim(json_get_str(c->args, "run")) : xstrdup("");
+        char *br = json_get_str(c->args, "branch") ? str_trim(json_get_str(c->args, "branch")) : xstrdup("");
+        char *meta;
+        if (*run) {
+            char *m = xasprintf("#%s", run);
+            meta = tc_fg(TUI_TC_MUTED, m);
+            free(m);
+        } else if (*br) {
+            meta = tc_fg(TUI_TC_TEXT, br);
+        } else {
+            meta = tc_fg(TUI_TC_MUTED, "current HEAD");
+        }
+        char *title = tc_fg(TUI_TC_ACCENT, "GitHub Run Watch");
+        char *wait = tc_fg(TUI_TC_DIM, "waiting for workflow data...");
+        char *all = xasprintf("%s %s  %s\n%s", icon, title, meta, wait);
+        tc_push_wrapped(out, all, width);
+        free(all);
+        free(wait);
+        free(title);
+        free(meta);
+        free(br);
+        free(run);
+        free(icon);
+        free(op);
+        return;
     }
     strvec_t meta = {0};
     gh_meta(c->args, op, &meta);
