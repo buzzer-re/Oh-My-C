@@ -5,6 +5,7 @@
 #include "tui/ansi.h"
 #include "tui/components.h"
 #include "tui/editor.h"
+#include "tui/fuzzy.h"
 #include "tui/keys.h"
 #include "tui/markdown.h"
 #include "tui/render.h"
@@ -710,6 +711,58 @@ static void test_select(void) {
     CHECK(tui_fuzzy_score("xz", "model") < 0);
 }
 
+/* upstream fuzzy.ts ranking and SelectList layout (setup wizard / overlays) */
+static void test_fuzzy_select(void) {
+    const char *names[] = {"ChatGPT Plus/Pro (Codex Subscription) openai-codex", "Anthropic (Claude Pro/Max) anthropic",
+                           "OpenRouter openrouter", "OpenCode Zen opencode-zen", "vLLM (Local OpenAI-compatible) vllm",
+                           "Kimi Code kimi-code"};
+    size_t idx[6];
+    size_t n = tui_fuzzy_rank("open", names, 6, idx);
+    CHECK(n == 4);
+    CHECK(idx[0] == 2 && idx[1] == 3); /* whole-word prefix hits first, registry order kept on ties */
+    CHECK(tui_fuzzy_rank("", names, 6, idx) == 6 && idx[5] == 5);
+    char *norm = tui_fuzzy_normalize("parseHTTPResponse_v2");
+    CHECK_STR(norm, "parse http response v2");
+    free(norm);
+    tui_fuzzy_query_t *q = tui_fuzzy_query_new("gpt4");
+    CHECK(tui_fuzzy_query_match(q, "gpt-4o", NULL)); /* compact phrase across the dash */
+    tui_fuzzy_query_free(q);
+
+    /* glyph-scene list: cursor + label padded to the 32-col primary column, muted description */
+    tui_select_list_t *l = tui_select_list_new(3);
+    tui_select_list_add(l, "nerd", "1  Nerd Font", "a b");
+    tui_select_list_add(l, "unicode", "2  Unicode", "c d");
+    tui_select_list_set_selected(l, 1);
+    strvec_t out = {0};
+    tui_component_render(&l->base, 80, &out);
+    CHECK(out.n == 2); /* no overflow: no search status row, no scrollbar */
+    char *r0 = tui_strip_ansi(out.v[0]), *r1 = tui_strip_ansi(out.v[1]);
+    CHECK(str_starts(r0, "  1 Nerd Font"));
+    CHECK(strstr(r0, "a b") == r0 + 2 + 32); /* sanitized label, description at prefix + 32 */
+    CHECK(str_starts(r1, "\xe2\x9d\xaf 2 Unicode"));
+    free(r0);
+    free(r1);
+    strvec_free(&out);
+    tui_component_destroy(&l->base);
+
+    /* overflow: scrollbar column + "Type to search" */
+    l = tui_select_list_new(2);
+    for (int i = 0; i < 5; i++) {
+        char v[8];
+        snprintf(v, sizeof v, "item%d", i);
+        tui_select_list_add(l, v, NULL, NULL);
+    }
+    tui_component_render(&l->base, 40, &out);
+    CHECK(out.n == 3);
+    char *bar = tui_strip_ansi(out.v[0]), *st = tui_strip_ansi(out.v[2]);
+    CHECK(str_ends(bar, "\xe2\x96\x88")); /* thumb at the top */
+    CHECK_STR(st, "  Type to search");
+    free(bar);
+    free(st);
+    strvec_free(&out);
+    tui_component_destroy(&l->base);
+}
+
 /* ---------- differential renderer ---------- */
 
 static char *drain_fd(int fd) {
@@ -861,6 +914,7 @@ int main(void) {
     test_golden();
     test_editor();
     test_select();
+    test_fuzzy_select();
     test_renderer();
     test_loop();
     tui_theme_set(NULL);

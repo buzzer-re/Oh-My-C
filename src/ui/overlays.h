@@ -137,8 +137,8 @@ bool ui_theme_is_light(const char *name);
 /* built-in + custom theme names, sorted */
 void ui_theme_list(strvec_t *out);
 
-/* status rows used by previews (composer shape). statusline.c may provide strong definitions; weak
- * fallbacks live in appearance.c. All owned; `title` is a stand-in session title. */
+/* status rows used by the composer-shape preview, rendered by statusline.c's live status line.
+ * All owned; `title` is upstream's stand-in session title (unused: the live title applies). */
 char *ui_status_top_border(ui_t *u, int width, const char *title, int *out_width);
 char *ui_status_band_top(ui_t *u, int width, const char *title, int *out_width);
 char *ui_status_rule_chip(ui_t *u, int width, const char *title, int *out_width);

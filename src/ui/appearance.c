@@ -134,73 +134,39 @@ const ui_composer_shape_t UI_COMPOSER_SHAPES[8] = {
     {"rail", "Accent Rail", "Filled one-row field anchored by a single accent rail"},
 };
 
-/* ---------- status rows (weak fallbacks; statusline.c may define the real ones) ---------- */
+/* ---------- status rows for the preview: the live status line (statusline.c) in each layout ---------- */
 
-static char *status_left_plain(ui_t *u, const char *sep) {
-    app_t *a = u->app;
-    const char *name = a->model ? (a->model->name && *a->model->name ? a->model->name : a->model->id) : "no model";
-    char *path = path_display(a->cwd, NULL);
-    char *m = xasprintf("%s %s", tui_sym("icon.model"), name);
-    char *sm = tui_fgs(NULL, TUI_TC_STATUS_LINE_MODEL, m), *sp = tui_fgs(NULL, TUI_TC_STATUS_LINE_PATH, path);
-    char *pi = tui_fgs(NULL, TUI_TC_ACCENT, "\xcf\x80");
-    char *r = xasprintf("%s%s%s%s%s", pi, sep, sm, sep, sp);
-    free(pi);
-    free(sm);
-    free(sp);
-    free(m);
-    free(path);
-    return r;
+/* render with upstream's previewTitle: an unnamed session shows the stand-in title */
+static char *render_titled(ui_t *u, int width, const char *layout, const char *title) {
+    session_t *ss = u->app ? u->app->session : NULL;
+    bool stand_in = ss && title && (!ss->title || !*ss->title);
+    char *saved = stand_in ? ss->title : NULL;
+    if (stand_in) ss->title = (char *)title;
+    char *s = ui_status_render(u, width, layout);
+    if (stand_in) ss->title = saved;
+    return s;
 }
 
-__attribute__((weak)) char *ui_status_band_top(ui_t *u, int width, const char *title, int *out_width) {
-    char *sep = tui_fgs(NULL, TUI_TC_STATUS_LINE_SEP, " > ");
-    char *l = status_left_plain(u, sep);
-    char *s = xasprintf(" %s ", l);
-    char *r = tui_truncate_to_width(s, width, NULL);
-    if (out_width) *out_width = tui_visible_width(r);
-    free(s);
-    free(l);
-    free(sep);
-    return r;
-}
-
-__attribute__((weak)) char *ui_status_top_border(ui_t *u, int width, const char *title, int *out_width) {
-    char *sep = tui_fgs(NULL, TUI_TC_STATUS_LINE_SEP, " > ");
-    char *l = status_left_plain(u, sep);
-    char *s = xasprintf(" %s ", l);
-    char *r = tui_truncate_to_width(s, width, NULL);
-    if (out_width) *out_width = tui_visible_width(r);
-    free(s);
-    free(l);
-    free(sep);
-    return r;
-}
-
-__attribute__((weak)) char *ui_status_rule_chip(ui_t *u, int width, const char *title, int *out_width) {
-    char *s = xasprintf(" %s ", title ? title : "");
-    char *r = tui_fgs(NULL, TUI_TC_MUTED, s);
+static char *status_layout(ui_t *u, int width, const char *layout, const char *title, int *out_width) {
+    char *s = render_titled(u, width, layout, title);
     if (out_width) *out_width = tui_visible_width(s);
-    free(s);
-    return r;
+    return s;
 }
 
-__attribute__((weak)) char *ui_status_bottom_bar(ui_t *u, int width, bool full, const char *title) {
-    char *sep = tui_fgs(NULL, TUI_TC_STATUS_LINE_SEP, " \xc2\xb7 ");
-    char *l = status_left_plain(u, sep);
-    char *left = xasprintf(" %s", l);
-    char *r;
-    if (full && title) {
-        int gap = MAX(1, width - tui_visible_width(left) - tui_visible_width(title) - 1);
-        r = xasprintf("%s%*s%s", left, gap, "", title);
-    } else {
-        r = xstrdup(left);
-    }
-    char *t = tui_truncate_to_width(r, width, NULL);
-    free(r);
-    free(left);
-    free(l);
-    free(sep);
-    return t;
+char *ui_status_band_top(ui_t *u, int width, const char *title, int *out_width) {
+    return status_layout(u, width, "band", title, out_width);
+}
+
+char *ui_status_top_border(ui_t *u, int width, const char *title, int *out_width) {
+    return status_layout(u, width, "box", title, out_width);
+}
+
+char *ui_status_rule_chip(ui_t *u, int width, const char *title, int *out_width) {
+    return status_layout(u, width, "plain-right", title, out_width);
+}
+
+char *ui_status_bottom_bar(ui_t *u, int width, bool full, const char *title) {
+    return render_titled(u, width, full ? "plain-full" : "plain-left", title);
 }
 
 /* ---------- composer styles (components/composer) ---------- */
