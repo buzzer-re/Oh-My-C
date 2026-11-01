@@ -155,6 +155,9 @@ void tc_todo(const tc_call_t *c, int width, strvec_t *out);
 void tc_generic(const tc_call_t *c, int width, strvec_t *out);
 void tc_render_diff(const char *diff, const char *path, strvec_t *out);
 void tc_web_search(const tc_call_t *c, int width, strvec_t *out);
+void tc_ask(const tc_call_t *c, int width, strvec_t *out);
+/* wrapPrefixedLine: `prefix` + wrapped content, continuation rows behind `cont` */
+void tc_wrap_prefixed(const char *prefix, const char *cont, const char *content, int width, strvec_t *out);
 
 /* web helpers (tc_web.c) */
 char *tc_url_domain(const char *url);                        /* hostname without www. */

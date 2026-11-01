@@ -318,6 +318,55 @@ agent_tool_t *tool_todo_new(tool_env_t *env) {
 
 /* ---------- ask ---------- */
 
+static bool label_known(const json_t *opts, const char *s) {
+    json_t *o;
+    json_arr_foreach(opts, i, o) if (str_eq(json_sv(o), s)) return true;
+    return false;
+}
+
+/* omp AskToolDetails from the dialog answers ({id: label | [labels] | custom text}): one question's
+ * fields inline, several questions as `results` */
+static json_t *ask_details(const json_t *qs, const json_t *ans) {
+    json_t *results = json_arr(), *q;
+    json_arr_foreach(qs, i, q) {
+        const char *id = json_get_str(q, "id");
+        json_t *r = json_obj(), *opts = json_arr(), *sel = json_arr(), *o;
+        json_set_str(r, "id", id ? id : "");
+        json_set_str(r, "question", json_get_str(q, "question") ? json_get_str(q, "question") : "");
+        json_arr_foreach(json_get_arr(q, "options"), k, o) {
+            const char *l = json_is_str(o) ? json_sv(o) : json_get_str(o, "label");
+            if (l) json_push_str(opts, l);
+        }
+        json_set(r, "options", opts);
+        json_set_bool(r, "multi", json_get_bool(q, "multi", false));
+        const json_t *a = json_get(ans, id ? id : "");
+        const char *custom = NULL;
+        if (json_is_arr(a)) {
+            json_t *x;
+            json_arr_foreach(a, k, x) {
+                if (!json_is_str(x)) continue;
+                if (label_known(opts, json_sv(x))) json_push_str(sel, json_sv(x));
+                else if (!custom) custom = json_sv(x);
+            }
+        } else if (json_is_str(a)) {
+            if (label_known(opts, json_sv(a))) json_push_str(sel, json_sv(a));
+            else custom = json_sv(a);
+        }
+        json_set(r, "selectedOptions", sel);
+        if (custom) json_set_str(r, "customInput", custom);
+        json_push(results, r);
+    }
+    if (json_len(results) == 1) {
+        json_t *d = json_clone(json_at(results, 0));
+        json_del(d, "id");
+        json_free(results);
+        return d;
+    }
+    json_t *d = json_obj();
+    json_set(d, "results", results);
+    return d;
+}
+
 static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     UNUSED(ctx);
@@ -353,7 +402,8 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
         sb_putc(&b, '\n');
     }
     tool_result_text(out, sb_cstr(&b));
-    out->details = ans;
+    out->details = ask_details(qs, ans);
+    json_free(ans);
     sb_free(&b);
     return 0;
 }
