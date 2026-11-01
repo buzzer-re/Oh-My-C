@@ -141,24 +141,38 @@ int main(void) {
     setenv("OMC_NO_BROWSER", "1", 1);
     setenv("OMC_AUTH_POLL_SCALE_MS", "20", 1);
     srand((unsigned)getpid());
-    int port = 30000 + rand() % 20000;
-    char ports[16];
-    snprintf(ports, sizeof ports, "%d", port);
-    pid_t mock = fork();
-    if (mock == 0) {
-        execlp("python3", "python3", "-I", "tests/e2e/mock_auth.py", ports, (char *)NULL);
-        _exit(127);
-    }
-    char *base = xasprintf("http://127.0.0.1:%d", port);
-    for (int i = 0; i < 100; i++) {
-        http_resp_t r;
-        char *u = xasprintf("%s/_log", base);
-        int rc = http_get(u, NULL, 1000, &r);
-        int st = r.status;
-        http_resp_free(&r);
-        free(u);
-        if (rc == 0 && st == 200) break;
-        usleep(100000);
+    /* random port; retry on another one when the mock can't bind (other test suites may hold it) */
+    int port = 0;
+    pid_t mock = -1;
+    char *base = NULL;
+    for (int attempt = 0; attempt < 8; attempt++) {
+        port = 30000 + rand() % 20000;
+        char ports[16];
+        snprintf(ports, sizeof ports, "%d", port);
+        mock = fork();
+        if (mock == 0) {
+            execlp("python3", "python3", "-I", "tests/e2e/mock_auth.py", ports, (char *)NULL);
+            _exit(127);
+        }
+        free(base);
+        base = xasprintf("http://127.0.0.1:%d", port);
+        bool ready = false;
+        for (int i = 0; i < 100 && !ready; i++) {
+            int status;
+            if (waitpid(mock, &status, WNOHANG) == mock) break; /* mock exited (port taken) */
+            http_resp_t r;
+            char *u = xasprintf("%s/_log", base);
+            int rc = http_get(u, NULL, 1000, &r);
+            int st = r.status;
+            http_resp_free(&r);
+            free(u);
+            if (rc == 0 && st == 200) ready = true;
+            else usleep(100000);
+        }
+        if (ready) break;
+        kill(mock, SIGTERM);
+        waitpid(mock, NULL, 0);
+        mock = -1;
     }
     char *rw = xasprintf("https://github.com=%1$s/gh,https://api.github.com=%1$s/ghapi,https://api.individual.githubcopilot.com=%1$s/capi,"
                          "https://ghe.example.com=%1$s/ghe,https://auth.x.ai=%1$s/xauth,https://api.x.ai=%1$s/xaiapi,"
@@ -522,8 +536,10 @@ int main(void) {
         s_free(&sf);
     }
 
-    kill(mock, SIGTERM);
-    waitpid(mock, NULL, 0);
+    if (mock > 0) {
+        kill(mock, SIGTERM);
+        waitpid(mock, NULL, 0);
+    }
     char *cmd = xasprintf("rm -rf '%s'", dir);
     if (system(cmd) != 0) {}
     free(cmd);
