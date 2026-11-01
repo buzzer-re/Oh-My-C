@@ -296,4 +296,19 @@ if command -v clangd >/dev/null; then
     check "lsp definition"  "l.c:1:12"  "$B" -m mock/mock-1 -p 'call:lsp:{"action":"definition","file":"l.c","line":2,"symbol":"add"}'
     check "lsp write diags" "undeclared identifier"  "$B" -m mock/mock-1 -p 'write:bad.c:int main(void) { return nope; }'
 fi
+# provider logins over stdin (omc login) against tests/e2e/mock_auth.py
+APORT=$((PORT + 3)); python3 -I "$ROOT/tests/e2e/mock_auth.py" $APORT & APID=$!
+for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$APORT) 2>/dev/null && break; sleep 0.1; done
+AB="http://127.0.0.1:$APORT"
+mkdir -p "$T/lagent"
+LENV=(env OMC_CODING_AGENT_DIR="$T/lagent" OMC_NO_BROWSER=1 OMC_AUTH_POLL_SCALE_MS=20 KIMI_CODE_OAUTH_HOST="$AB/kimi"
+      OMC_AUTH_URL_REWRITE="https://api.x.ai=$AB/xaiapi,https://github.com=$AB/gh,https://api.github.com=$AB/ghapi,https://api.individual.githubcopilot.com=$AB/capi")
+check "login api key"      "Logged in to xai."            bash -c "printf 'good-key\n' | ${LENV[*]} '$B' login xai"
+check "login key stored"   '"key": "good-key"'            cat "$T/lagent/auth.json"
+check "login key rejected" "xAI API key validation failed (401)"  bash -c "printf 'bad\n' | ${LENV[*]} '$B' login xai"
+check "login device code"  "Enter code: ABCD-1234"        bash -c "${LENV[*]} '$B' login kimi-code </dev/null"
+check "login device saved" '"refresh": "kimi-r1"'         cat "$T/lagent/auth.json"
+check "login copilot"      "Logged in to github-copilot." bash -c "printf '\n' | ${LENV[*]} '$B' login github-copilot"
+check "login list"         "openai-codex-device"          "$B" login
+kill $APID 2>/dev/null
 exit $fail

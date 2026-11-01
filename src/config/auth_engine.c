@@ -1526,7 +1526,8 @@ int auth_refresh_credential(const char *provider, const json_t *d, const json_t 
     vset(std, "refresh_token", rt);
     vset(std, "organization_id", json_get_str(stored, "activeOrganizationId"));
     if (auth_post_token(json_get_obj(rf, "token"), std, vars, &hh, provider, "token-refresh", &c, NULL, &body, err) != 0) goto out;
-    json_t *cred = auth_map_credentials(json_get_obj(rf, "credential"), body, provider, stored, err);
+    const json_t *cmap = json_get_obj(rf, "credential") ? json_get_obj(rf, "credential") : json_get_obj(login, "credential");
+    json_t *cred = auth_map_credentials(cmap, body, provider, stored, err);
     if (!cred) goto out;
     auth_apply_userinfo(json_get_obj(rf, "userinfo"), cred, &hh, NULL, &c);
     if (auth_after_exchange(json_get_str(rf, "afterRefresh"), &c, "refresh", &cred, body, stored, err) != 0) {
