@@ -30,7 +30,7 @@ check() { # name expected-substring command...
 }
 echo "== e2e"
 check "bash tool"      "Tool said: hello-e2e"            "$B" -m mock/mock-1 -p "bash:echo hello-e2e"
-check "write tool"     "Created a/b.txt"                 "$B" -m mock/mock-1 -p "write:a/b.txt:written by omc"
+check "write tool"     "Successfully wrote 14 bytes to a/b.txt" "$B" -m mock/mock-1 -p "write:a/b.txt:written by omc"
 check "file content"   "written by omc"                  cat a/b.txt
 check "read hashline"  "1:written by omc"                "$B" -m mock/mock-1 -p "read:a/b.txt"
 # intent field: injected (required) into tool schemas, stripped before execution
@@ -62,7 +62,24 @@ printf 'alpha\nbeta\ngamma\n' > e.txt
 TAG=$(timeout 30 "$B" -m mock/mock-1 -p "read:e.txt" </dev/null | grep -o 'e.txt#[0-9A-F]*' | head -1 | cut -d'#' -f2)
 check "edit apply"     "[e.txt#"  "$B" -m mock/mock-1 -p "edit:[e.txt#$TAG]\nPUT 2.=2:\n+BETA\nPUT >3:\n+delta"
 check "edit result"    $'alpha\nBETA\ngamma\ndelta'  cat e.txt
-check "edit stale tag" "current tag #"  "$B" -m mock/mock-1 -p "edit:[e.txt#$TAG]\nPUT 1.=1:\n+x"
+check "edit stale tag" "is not from this session."  "$B" -m mock/mock-1 -p "edit:[e.txt#$TAG]\nPUT 1.=1:\n+x"
+# hashline engine messages (omp pi-edit wording): no-op, header-only, parse errors, unseen-line reveal, blocks
+TAG=$(timeout 30 "$B" -m mock/mock-1 -p "read:e.txt" </dev/null | grep -o 'e.txt#[0-9A-F]*' | head -1 | cut -d'#' -f2)
+check "edit no-op"     "parsed and applied cleanly, but produced no change"  "$B" -m mock/mock-1 -p "edit:[e.txt#$TAG]\nPUT 1.=1:\n+alpha"
+check "edit hdr only"  "no ops follow the header; put them under this file's current tag, #$TAG."  "$B" -m mock/mock-1 -p "edit:[e.txt#$TAG]"
+check "edit no header" 'input must begin with "[PATH#HASH]" on the first non-blank line'  "$B" -m mock/mock-1 -p "edit:PUT 1.=1:\n+x"
+check "edit bare row"  'line 1: payload line has no preceding hunk header. Use `PUT N.=M:`'  "$B" -m mock/mock-1 -p "edit:[e.txt#$TAG]\nfoo"
+check "edit range"     "Line 9 does not exist (file has 5 lines)"  "$B" -m mock/mock-1 -p "edit:[e.txt#$TAG]\nPUT 9.=9:\n+x"
+seq 1 30 > big.txt
+BTAG=$(timeout 30 "$B" -m mock/mock-1 -p "read:big.txt" </dev/null | grep -o 'big.txt#[0-9A-F]*' | head -1 | cut -d'#' -f2)
+check "edit unseen"    "This edit anchors to lines 20 of big.txt that [big.txt#$BTAG] never displayed"  "$B" -m mock/mock-1 --mode json -p "calls:[[\"read\",{\"path\":\"big.txt:1-3\"}],[\"edit\",{\"input\":\"[big.txt#$BTAG]\\nPUT 20.=20:\\n+X\"}]]"
+printf 'int f(void) {\n    return 1;\n}\n' > blk.c
+CTAG=$(timeout 30 "$B" -m mock/mock-1 -p "read:blk.c" </dev/null | grep -o 'blk.c#[0-9A-F]*' | head -1 | cut -d'#' -f2)
+check "edit block"     "PUT 1*: → resolved lines 1-3 (3 lines)"  "$B" -m mock/mock-1 -p "edit:[blk.c#$CTAG]\nPUT 1*:\n+int f(void) { return 2; }"
+printf 'a\r\nb\r\n' > crlf.txt
+check "write crlf"     "Note: kept the replaced file's CRLF line endings."  "$B" -m mock/mock-1 -p 'call:write:{"path":"crlf.txt","content":"x\ny\n"}'
+check "write no content" "content is required for nc.txt."  "$B" -m mock/mock-1 -p 'call:write:{"path":"nc.txt"}'
+check "write eisdir"   "EISDIR: illegal operation on a directory, open '"  "$B" -m mock/mock-1 -p "write:a:x"
 # edit modes: apply_patch via config.yml (edit.mode), patch / replace / sloppy via PI_EDIT_VARIANT
 printf 'edit:\n  mode: apply_patch\n' > "$T/agent/config.yml"
 printf 'one\ntwo\nthree\n' > ap.txt; printf 'bye\n' > ap-gone.txt
