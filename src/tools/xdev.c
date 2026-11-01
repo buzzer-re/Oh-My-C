@@ -584,7 +584,23 @@ bool xdev_read(agent_t *a, const char *path, tool_result_t *out) {
     if (kind == 0) {
         tool_result_error(out, "Invalid xd:// URL: %s. Use xd://, xd://<tool>, or xd://<tool>/<topic>.", path);
     } else if (kind == 2) {
-        tool_result_error(out, "Tool '%s' has no doc topics.", name);
+        /* xd://<tool>/<topic>: one named doc topic of a session tool (e.g. xd://eval/judge) */
+        agent_tool_t *t = a ? agent_find_tool(a, name) : NULL;
+        json_t *topics = t && t->doc_topics && (t->mounted || is_active(a, t)) ? t->doc_topics(t) : NULL;
+        const char *doc = json_get_str(topics, topic);
+        if (!topics) {
+            tool_result_error(out, "Tool '%s' has no doc topics.", name);
+        } else if (!doc) {
+            sb_t b = SB_INIT;
+            const char *k;
+            json_t *v;
+            json_obj_foreach(topics, i, k, v) sb_appendf(&b, "%s%s", i ? ", " : "", k);
+            tool_result_error(out, "Unknown topic '%s' for %s. Available: %s.", topic, name, sb_cstr(&b));
+            sb_free(&b);
+        } else {
+            tool_result_text(out, doc);
+        }
+        json_free(topics);
     } else if (name && str_eq(name, REPORT_ISSUE)) {
         tool_result_text(out, REPORT_USAGE);
     } else if (!a || !xdev_mounted_count(a)) {

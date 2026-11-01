@@ -71,6 +71,12 @@ struct app {
     json_t *dcr_sent; /* "role:ts" -> reminder text the turn was first sent with */
     char *dcr_last;
     struct advisor *advisor; /* shadow reviewer (advisor.c), NULL when off */
+    struct evalhost *evalhost; /* eval helpers' host state: completion handles, judge batches (evalhost.c) */
+    int64_t output_tokens;     /* cumulative assistant output tokens (atomic; eval `budget`) */
+    /* `+Nk` / `+Nk!` per-turn budget directive of the latest user prompt (0 = none) */
+    int64_t turn_budget_total;
+    bool turn_budget_hard;
+    int64_t turn_output_baseline;
     /* wake an idle session when a background job settles (modes set this; called from the job thread) */
     void (*wake)(void *ud);
     void *wake_ud;

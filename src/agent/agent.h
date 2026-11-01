@@ -54,6 +54,8 @@ struct agent_tool {
     int (*execute)(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out);
     void *ud;
     void (*destroy)(agent_tool_t *self);
+    /* named doc topics served at xd://<tool>/<topic>: owned object topic -> markdown (NULL: none) */
+    json_t *(*doc_topics)(agent_tool_t *self);
 };
 
 enum { INTENT_REQUIRE = 0, INTENT_OPTIONAL = 1, INTENT_OMIT = 2 };

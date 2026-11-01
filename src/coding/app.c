@@ -3,6 +3,7 @@
 #include "coding/title.h"
 #include "coding/skilldesc.h"
 #include "coding/advisor.h"
+#include "coding/evalhost.h"
 #include "tools/jobs.h"
 #include "tools/xdev.h"
 #include "agents.h"
@@ -191,6 +192,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
         if (str_eq(role, "assistant")) {
             json_t *u = json_get(ev->message, "usage");
             a->total_cost += json_get_num(json_get(u, "cost"), "total", 0);
+            __atomic_add_fetch(&a->output_tokens, json_get_int(u, "output", 0), __ATOMIC_SEQ_CST);
             int64_t ctx = json_get_int(u, "input", 0) + json_get_int(u, "cacheRead", 0) + json_get_int(u, "cacheWrite", 0) +
                           json_get_int(u, "output", 0);
             if (ctx > 0) a->last_context_tokens = ctx;
@@ -628,6 +630,16 @@ static char *app_tool_complete(tool_env_t *env, const char *system, const char *
     return app_complete_text(a, m, system, user, EFFORT_OFF);
 }
 
+static json_t *app_eval_bridge(tool_env_t *env, const char *name, const json_t *args, int64_t cell,
+                               volatile sig_atomic_t *cancel, char **err) {
+    app_t *a = env->session;
+    if (!a || !a->evalhost) {
+        *err = xstrdup("eval helpers are unavailable in this session");
+        return NULL;
+    }
+    return evalhost_call(a->evalhost, name, args, cell, cancel, err);
+}
+
 static char *app_after_write(tool_env_t *env, const char *abs) {
     app_t *a = env->session;
     if (!a || !a->lsp || !settings_bool("lsp.diagnosticsOnWrite", true)) return NULL;
@@ -828,6 +840,8 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (!o->subagent) agents_register_main(a);
     a->env->run_subagent = app_run_subagent;
     a->env->complete = app_tool_complete;
+    a->evalhost = evalhost_new(a);
+    a->env->eval_bridge = app_eval_bridge;
     discover_all(a->cwd, &a->disc, o->no_context_files, o->no_skills, o->no_rules);
     a->env->disc = &a->disc;
     a->ttsr = ttsr_new(&a->disc);
@@ -917,6 +931,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
 void app_free(app_t *a) {
     if (!a) return;
     agents_unregister(a);
+    evalhost_shutdown(a->evalhost); /* cancel completions / judge batches before their jobs are joined */
     if (a->env && a->env->jobs) {
         /* join background jobs (task runs, auto-backgrounded commands) before their session state goes away */
         jobs_set_notify(a->env->jobs, NULL, NULL);
@@ -924,7 +939,8 @@ void app_free(app_t *a) {
         a->env->jobs = NULL;
     }
     agents_release_children(a);
-    agent_free(a->agent);
+    agent_free(a->agent); /* the eval tool's bridge workers finish here */
+    evalhost_free(a->evalhost);
     session_free(a->session);
     tool_env_free(a->env);
     ttsr_free(a->ttsr);
@@ -1398,7 +1414,40 @@ static void add_mentions(app_t *a, const char *text, json_t *content) {
     strvec_free(&seen);
 }
 
+/* `+Nk` turn budget directive (modes/turn-budget.ts): a standalone `+<number>[k|m][!]` token */
+static void begin_turn_budget(app_t *a, const char *text) {
+    int64_t total = 0;
+    bool hard = false;
+    for (const char *p = text ? text : ""; *p; p++) {
+        if (*p != '+' || (p > text && !isspace((unsigned char)p[-1]))) continue;
+        const char *q = p + 1;
+        if (!isdigit((unsigned char)*q)) continue;
+        char *end;
+        double v = strtod(q, &end);
+        if (end == q || (end[-1] == '.')) continue;
+        for (const char *d = q; d < end; d++)
+            if (!isdigit((unsigned char)*d) && *d != '.') v = -1;
+        if (v < 0) continue;
+        q = end;
+        double mul = 1;
+        if (*q == 'k' || *q == 'K') mul = 1e3, q++;
+        else if (*q == 'm' || *q == 'M') mul = 1e6, q++;
+        bool h = *q == '!';
+        if (h) q++;
+        if (*q && !isspace((unsigned char)*q)) continue;
+        if (v > 0 && isfinite(v * mul)) {
+            total = (int64_t)llround(v * mul);
+            hard = h;
+        }
+        break;
+    }
+    a->turn_budget_total = total;
+    a->turn_budget_hard = hard;
+    a->turn_output_baseline = __atomic_load_n(&a->output_tokens, __ATOMIC_SEQ_CST);
+}
+
 int app_prompt(app_t *a, const char *text, json_t *images) {
+    begin_turn_budget(a, text);
     json_t *content = json_arr();
     json_push(content, text_block(text));
     add_mentions(a, text, content);
