@@ -57,19 +57,12 @@ incremental builds are correct. The Makefile compiles every `src/*.c`, `src/*/*.
 Everything omc reads from its own distribution is compiled into the binary, so `build/omc` is a
 single self-contained file:
 
-1. `build-tools/embedgen.c` (29 lines, built first as `build/embedgen` with the host compiler) turns
-   a list of files into `build/embedded.c`. Each file becomes a `static const unsigned char[]` array,
-   and the table `omc_embedded[] = {name, data, len}` keeps the order of the arguments.
-2. The file list is `find prompts assets -type f | LC_ALL=C sort`, then `README.md` and
-   `docs/*.md`. The order matters because `embed_get()` (`src/core/embed.c`) does a binary search
-   by name and assumes the table is sorted (bytewise, `strcmp`).
-
-   **Known issue:** `README.md` and `docs/*.md` are appended *after* the sorted
-   `prompts`/`assets` list, so the table is not fully sorted. `embed_get()` can't find
-   `README.md` or any `docs/*.md` (so `omc://` doc reads come back empty), and depending on how long
-   that tail is, the alphabetically last prompt or two cannot be found either (currently
-   `prompts/tui/overlays/snapcompact-shape-preview-doc.md`, which no code reads). The fix is to sort
-   the whole list in the Makefile (or to fall back to a linear scan in `embed_get()`).
+1. `build-tools/embedgen.c` (built first as `build/embedgen` with the host compiler) turns a list of
+   files into `build/embedded.c`. Each file becomes a `static const unsigned char[]` array, and the
+   table `omc_embedded[] = {name, data, len}` is emitted in `strcmp` order: embedgen sorts its own
+   arguments, because `embed_get()` (`src/core/embed.c`) binary-searches the table by name.
+2. The file list is every file under `prompts/` and `assets/`, plus `README.md` and `docs/*.md`
+   (served to the model as `omc://` docs).
 3. Code reads an asset with `embed_get("assets/...", &len)`. Prompts go through
    `prompt_load()` (`src/prompt/template.c`), which first looks for a user override at
    `<agent dir>/prompts/<rel>` and otherwise uses the embedded `prompts/<rel>`.
