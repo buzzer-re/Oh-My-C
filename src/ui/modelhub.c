@@ -2170,7 +2170,8 @@ static void apply_preset(hub_t *h, const char *name) {
             free(gv);
         }
     }
-    if (plevel && strcmp(settings_str("defaultThinkingLevel", "high"), plevel)) settings_set_global("defaultThinkingLevel", json_str(plevel));
+    if (plevel && !str_eq(json_get_str(settings_global(), "defaultThinkingLevel"), plevel))
+        settings_set_global("defaultThinkingLevel", json_str(plevel));
     /* roles another layer still decides */
     json_t *after = effective_roles();
     strvec_t un = preset_role_union(after, roles);

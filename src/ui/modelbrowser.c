@@ -417,8 +417,8 @@ static void detail_lines(const ui_model_browser_t *b, int width, strvec_t *out) 
         char *glyph = thinking_glyph(ra->level);
         char *suffix = NULL;
         if (*glyph) {
-            char *g = xasprintf(" %s", glyph);
-            suffix = tui_fgs(NULL, TUI_TC_DIM, g);
+            char *g = tui_fgs(NULL, TUI_TC_DIM, glyph);
+            suffix = xasprintf(" %s", g);
             free(g);
         } else
             suffix = xstrdup("");

@@ -225,9 +225,17 @@ void settings_unset_runtime(const char *path) {
     pthread_mutex_unlock(&g_mu);
 }
 
+/* Bun's YAML.stringify (omp stringifyYamlConfig) ends the document without a trailing newline */
+static char *yaml_text(const json_t *j) {
+    char *text = yaml_dump(j);
+    size_t n = strlen(text);
+    while (n && text[n - 1] == '\n') text[--n] = 0;
+    return text;
+}
+
 static int save_global(void) {
     char *text;
-    if (yaml_dump && !str_ends(g_global_path, ".json")) text = yaml_dump(g_global);
+    if (yaml_dump && !str_ends(g_global_path, ".json")) text = yaml_text(g_global);
     else text = json_dump(g_global, 2);
     int rc = fs_write_atomic(g_global_path, text, strlen(text), 0600);
     free(text);
@@ -346,7 +354,7 @@ int settings_set_project_entry(const char *parent, const char *key, json_t *val)
     fs_mkdir_p(dir, 0755);
     if (!g_project_dir) g_project_dir = xstrdup(dir);
     free(dir);
-    char *text = yaml_dump ? yaml_dump(file) : json_dump(file, 2);
+    char *text = yaml_dump ? yaml_text(file) : json_dump(file, 2);
     int rc = fs_write_atomic(path, text, strlen(text), 0644);
     free(text);
     free(path);
