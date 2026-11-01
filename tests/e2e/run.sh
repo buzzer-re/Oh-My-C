@@ -95,6 +95,9 @@ check "ssh hosts"      "[box](ssh://box/)"  env PATH="$ROOT/tests/e2e/bin:$PATH"
 check "ssh read sel"   "2:remote two"       env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "read:ssh://box$T/remote.txt:2"
 check "ssh write"      "Wrote ssh://box"    env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/w.txt\",\"content\":\"via ssh\"}"
 check "ssh write file" "via ssh"            cat "$T/sub/w.txt"
+STAG=$(env PATH="$ROOT/tests/e2e/bin:$PATH" timeout 30 "$B" -m mock/mock-1 -p "read:ssh://box$T/sub/w.txt" </dev/null | grep -o 'w.txt#[0-9A-F]*' | head -1 | cut -d'#' -f2)
+check "ssh edit"       "w.txt#"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "edit:[ssh://box$T/sub/w.txt#$STAG]\nPUT 1.=1:\n+edited over ssh"
+check "ssh edit file"  "edited over ssh"    cat "$T/sub/w.txt"
 check "ssh override"   "overrides are not allowed"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "read:ssh://me@box/etc/hosts"
 rm -f ssh.json
 # goal mode over RPC: hidden context, auto-continuation (stops on no progress), completion, resume pauses

@@ -56,7 +56,7 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 | ast_grep, ast_edit (bracket-aware structural matcher with ast-grep metavariables; staged xd://resolve / xd://reject) | 🟡 | token-tree matching, not tree-sitter ASTs |
 | find (lexical IDF scan → passage windows → model judge, lexical fallback) | ✅ | single judge pass (upstream: 3 waves) |
 | checkpoint / rewind (context cut + session branch + report) | ✅ | |
-| ssh:// URLs (ssh.json hosts, ControlMaster, POSIX shell probe, /~ HOME, 1 MiB UTF-8 reads, dir listings, staged byte-exact writes) | 🟡 | read/write ✅; grep/edit over ssh:// ❌ |
+| ssh:// URLs (ssh.json hosts, ControlMaster, POSIX shell probe, /~ HOME, 1 MiB UTF-8 reads, dir listings, staged byte-exact writes) | 🟡 | read/write/edit ✅; grep over ssh:// ❌ |
 | browser, computer, image_gen, tts | ❌ | |
 
 ## Modes & UI

@@ -457,17 +457,56 @@ typedef struct {
     sb_t msg;
 } sres_t;
 
+/* file I/O that understands ssh:// targets */
+static char *edit_read(tool_env_t *env, const char *abs, size_t *len, char **err) {
+    if (str_starts(abs, "ssh://")) {
+        char *data = NULL, *e = NULL;
+        bool is_dir = false;
+        if (ssh_fetch(env, abs, &data, len, &is_dir, &e) != 0) {
+            *err = e;
+            return NULL;
+        }
+        if (is_dir) {
+            free(data);
+            *err = xasprintf("Cannot edit '%s': it is a directory", abs);
+            return NULL;
+        }
+        return data;
+    }
+    struct stat st;
+    if (stat(abs, &st) != 0) {
+        *err = xstrdup("file not found (use write to create files)");
+        return NULL;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        *err = xstrdup("it is not a regular file");
+        return NULL;
+    }
+    char *cur = fs_read(abs, len);
+    if (!cur) *err = xasprintf("cannot read: %s", strerror(errno));
+    return cur;
+}
+
+static int edit_write(tool_env_t *env, const char *abs, const char *text, char **err) {
+    if (str_starts(abs, "ssh://")) return ssh_store(env, abs, text, strlen(text), err);
+    int rc = fs_write_atomic(abs, text, strlen(text), 0644);
+    if (rc != 0) *err = xstrdup(strerror(-rc));
+    return rc;
+}
+
 /* prepares one section: computes new text without writing */
 static char *prepare_section(tool_env_t *env, hsection_t *s, hmap_t *anon_regs, sres_t *r) {
     memset(r, 0, sizeof(*r));
     r->abs = tool_resolve_path(env, s->path);
     r->display = path_display(r->abs, env->cwd);
-    struct stat st;
-    if (stat(r->abs, &st) != 0) return xasprintf("[%s] file not found (use write to create files)", s->path);
-    if (!S_ISREG(st.st_mode)) return xasprintf("Cannot edit '%s': it is not a regular file", s->path);
     size_t len;
-    char *cur = fs_read(r->abs, &len);
-    if (!cur) return xasprintf("[%s] cannot read: %s", s->path, strerror(errno));
+    char *rerr = NULL;
+    char *cur = edit_read(env, r->abs, &len, &rerr);
+    if (!cur) {
+        char *e = xasprintf("[%s] %s", s->path, rerr ? rerr : "cannot read");
+        free(rerr);
+        return e;
+    }
     if (memchr(cur, 0, len)) {
         free(cur);
         return xasprintf("[%s] is a binary file", s->path);
@@ -502,6 +541,10 @@ static char *prepare_section(tool_env_t *env, hsection_t *s, hmap_t *anon_regs, 
     int order = 0;
     for (size_t k = 0; k < s->ops.n && !err; k++) {
         hop_t *o = &s->ops.v[k];
+        if ((o->kind == OP_REM || o->kind == OP_MV) && str_starts(r->abs, "ssh://")) {
+            err = xasprintf("[%s] REM/MV are not supported for ssh:// files; use bash with a remote command", s->path);
+            break;
+        }
         if (o->kind == OP_REM) {
             r->remove = true;
             continue;
@@ -684,9 +727,10 @@ int hashline_apply(tool_env_t *env, const char *input, tool_result_t *out) {
             continue;
         }
         const char *target = r->move_to ? r->move_to : r->abs;
-        int rc = fs_write_atomic(target, r->new_text, strlen(r->new_text), 0644);
-        if (rc != 0) {
-            sb_appendf(&b, "Failed to write %s: %s\n", r->display, strerror(-rc));
+        char *werr = NULL;
+        if (edit_write(env, target, r->new_text, &werr) != 0) {
+            sb_appendf(&b, "Failed to write %s: %s\n", r->display, werr ? werr : "write failed");
+            free(werr);
             out->is_error = true;
             break;
         }
@@ -751,9 +795,12 @@ int replace_apply(tool_env_t *env, const char *path, const char *old_s, const ch
     char *abs = tool_resolve_path(env, path);
     char *display = path_display(abs, env->cwd);
     size_t len;
-    char *cur = fs_read(abs, &len);
+    char *rerr = NULL;
+    char *cur = edit_read(env, abs, &len, &rerr);
     if (!cur) {
-        tool_result_error(out, "File not found: %s", display);
+        if (str_starts(abs, "ssh://")) tool_result_error(out, "%s", rerr ? rerr : "read failed");
+        else tool_result_error(out, "File not found: %s", display);
+        free(rerr);
         goto done;
     }
     if (!old_s || !*old_s) {
@@ -819,9 +866,11 @@ int replace_apply(tool_env_t *env, const char *path, const char *old_s, const ch
         free(next);
         goto done;
     }
-    int rc = fs_write_atomic(abs, next, strlen(next), 0644);
+    char *werr = NULL;
+    int rc = edit_write(env, abs, next, &werr);
     if (rc != 0) {
-        tool_result_error(out, "Failed to write %s: %s", display, strerror(-rc));
+        tool_result_error(out, "Failed to write %s: %s", display, werr ? werr : "write failed");
+        free(werr);
     } else {
         edit_store_record(&env->store, abs, next, 0, 0);
         char *dd = diff_unified(cur, next, display, display, 3);
