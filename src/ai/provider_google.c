@@ -1,9 +1,12 @@
 /*
- * provider_google.c - Gemini generateContent streaming (apis "google-generative-ai" and "google-vertex").
+ * provider_google.c - Gemini generateContent streaming (apis "google-generative-ai" and "google-vertex") and the
+ * request/response mapping shared with the Cloud Code Assist provider (provider_gemini_cli.c).
  * Port of packages/ai/src/providers/google.ts, google-vertex.ts, google-shared.ts and the Google branches of
- * stream.ts option mapping + utils/schema normalizeSchemaForGoogle.
+ * stream.ts option mapping. Schema normalization lives in google_schema.c, ADC in google_auth.c.
  */
 #include "ai/provider_google.h"
+
+#include "ai/google_auth.h"
 
 #include <math.h>
 
@@ -14,7 +17,6 @@
 #define OUTPUT_CAP_WHEN_UNKNOWN 64000
 #define MAX_EMPTY_STREAM_RETRIES 2
 #define EMPTY_STREAM_BASE_DELAY_MS 500
-#define SCHEMA_MAX_DEPTH 64
 
 static const int64_t GOOGLE_THINKING[] = {0, 1024, 4096, 8192, 16384, 24575, 32768};
 
@@ -125,391 +127,6 @@ static bool valid_signature(const char *s) {
 }
 
 static const char *resolve_signature(bool same, const char *sig) { return same && valid_signature(sig) ? sig : NULL; }
-
-/* ======================================================================
- * schema normalization (normalizeSchemaForGoogle)
- * ====================================================================== */
-
-static const char *const UNSUPPORTED[] = {
-    "$schema", "$id", "$anchor", "$ref", "$defs", "$dynamicRef", "$dynamicAnchor", "examples", "prefixItems",
-    "unevaluatedProperties", "unevaluatedItems", "patternProperties", "additionalProperties", "propertyNames",
-    "minItems", "maxItems", "uniqueItems", "contains", "minContains", "maxContains", "additionalItems", "minLength",
-    "maxLength", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "pattern", "format",
-    "contentEncoding", "contentMediaType", "contentSchema", "dependencies", "dependentSchemas", "dependentRequired",
-    "x-mcp-header", "deprecated", "readOnly", "writeOnly", "$comment", "definitions"};
-static const char *const LIFTABLE[] = {"pattern", "format", "minLength", "maxLength", "minimum", "maximum",
-                                       "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "minItems", "maxItems",
-                                       "uniqueItems", "minProperties", "maxProperties", "default", "examples"};
-static const char *const MAP_KEYS[] = {"properties", "patternProperties", "dependencies", "dependentSchemas", "$defs",
-                                       "definitions"};
-static const char *const VALUE_KEYS[] = {"items", "additionalItems", "unevaluatedItems", "not", "if", "then", "else",
-                                         "contains", "propertyNames", "contentSchema"};
-static const char *const ARRAY_KEYS[] = {"anyOf", "oneOf", "allOf", "prefixItems"};
-static const char *const TS_ARRAY[] = {"items", "prefixItems", "contains", "minContains", "maxContains", "minItems",
-                                       "maxItems", "uniqueItems", "unevaluatedItems"};
-static const char *const TS_OBJECT[] = {"properties", "required", "additionalProperties", "patternProperties",
-                                        "propertyNames", "minProperties", "maxProperties", "dependentRequired",
-                                        "dependentSchemas", "unevaluatedProperties"};
-static const char *const TS_STRING[] = {"minLength", "maxLength", "pattern", "format", "contentEncoding", "contentMediaType"};
-static const char *const TS_NUMBER[] = {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"};
-
-static bool in_list(const char *k, const char *const *l, size_t n) {
-    for (size_t i = 0; i < n; i++)
-        if (!strcmp(k, l[i])) return true;
-    return false;
-}
-#define IN(k, L) in_list((k), (L), ARRAY_LEN(L))
-
-static bool type_specific_for(const char *type, const char *k) {
-    if (!type) return false;
-    if (!strcmp(type, "array")) return IN(k, TS_ARRAY);
-    if (!strcmp(type, "object")) return IN(k, TS_OBJECT);
-    if (!strcmp(type, "string")) return IN(k, TS_STRING);
-    if (!strcmp(type, "number") || !strcmp(type, "integer")) return IN(k, TS_NUMBER);
-    return false;
-}
-
-static bool any_type_specific(const char *k) { return IN(k, TS_ARRAY) || IN(k, TS_OBJECT) || IN(k, TS_STRING) || IN(k, TS_NUMBER); }
-
-static const char *snake_rename(const char *k) {
-    if (!strcmp(k, "additional_properties")) return "additionalProperties";
-    if (!strcmp(k, "any_of")) return "anyOf";
-    if (!strcmp(k, "prefix_items")) return "prefixItems";
-    if (!strcmp(k, "property_ordering")) return "propertyOrdering";
-    return k;
-}
-
-/* 0 none, 1 schema, 2 map */
-static int child_kind(const char *k, const json_t *v, bool in_map) {
-    if (in_map) return 1;
-    if (IN(k, MAP_KEYS)) return 2;
-    if (IN(k, VALUE_KEYS) || IN(k, ARRAY_KEYS)) return 1;
-    if ((!strcmp(k, "additionalProperties") || !strcmp(k, "unevaluatedProperties")) && json_is_obj(v)) return 1;
-    return 0;
-}
-
-static const char *infer_type(const json_t *v) {
-    if (!v) return NULL;
-    switch (v->type) {
-    case JSON_NULL: return "null";
-    case JSON_ARRAY: return "array";
-    case JSON_STRING: return "string";
-    case JSON_NUMBER: return "number";
-    case JSON_BOOL: return "boolean";
-    case JSON_OBJECT: return "object";
-    }
-    return NULL;
-}
-
-static void push_enum(json_t *arr, const json_t *v) {
-    json_t *it;
-    json_arr_foreach(arr, i, it) {
-        if (json_equal(it, v)) return;
-    }
-    json_push(arr, json_clone(v));
-}
-
-/* $ref "#/$defs/X" | "#/definitions/X" inlining with a depth cap */
-static json_t *deref(const json_t *node, const json_t *root, int depth) {
-    if (depth > SCHEMA_MAX_DEPTH) return json_obj();
-    if (json_is_arr(node)) {
-        json_t *o = json_arr(), *it;
-        json_arr_foreach(node, i, it) { json_push(o, deref(it, root, depth + 1)); }
-        return o;
-    }
-    if (!json_is_obj(node)) return json_clone(node);
-    const char *ref = json_get_str(node, "$ref");
-    if (ref) {
-        const char *name = NULL;
-        json_t *defs = NULL;
-        if (str_starts(ref, "#/$defs/")) {
-            defs = json_get_obj(root, "$defs");
-            name = ref + 8;
-        } else if (str_starts(ref, "#/definitions/")) {
-            defs = json_get_obj(root, "definitions");
-            name = ref + 14;
-        }
-        json_t *target = defs && name ? json_get(defs, name) : NULL;
-        if (target) {
-            json_t *res = deref(target, root, depth + 1);
-            if (json_is_obj(res)) {
-                const char *k;
-                json_t *v;
-                json_obj_foreach(node, i, k, v) {
-                    if (strcmp(k, "$ref") != 0 && !json_get(res, k)) json_set(res, k, deref(v, root, depth + 1));
-                }
-            }
-            return res;
-        }
-    }
-    json_t *o = json_obj();
-    const char *k;
-    json_t *v;
-    json_obj_foreach(node, i, k, v) { json_set(o, k, deref(v, root, depth + 1)); }
-    return o;
-}
-
-static json_t *gnorm(const json_t *v, bool in_map, bool bool_is_schema, int depth);
-
-static void spill_to_description(json_t *node, json_t *spill) {
-    if (json_len(spill) == 0) return;
-    sb_t b = SB_INIT;
-    const char *existing = json_get_str(node, "description");
-    if (existing && *existing) {
-        sb_append(&b, existing);
-        sb_append(&b, "\n\n");
-    }
-    sb_putc(&b, '{');
-    const char *k;
-    json_t *v;
-    json_obj_foreach(spill, i, k, v) {
-        if (i) sb_append(&b, ", ");
-        sb_append(&b, k);
-        sb_append(&b, ": ");
-        json_dump_sb(&b, v, 0);
-    }
-    sb_putc(&b, '}');
-    json_set(node, "description", json_str_own(sb_detach(&b)));
-}
-
-static json_t *norm_child(const char *k, const json_t *v, bool in_map, int depth) {
-    int kind = child_kind(k, v, in_map);
-    if (!kind) return json_clone(v);
-    return gnorm(v, kind == 2, kind == 1, depth + 1);
-}
-
-static void post_process(json_t *res, bool bool_is_schema) {
-    json_t *en = json_get(res, "enum");
-    if (bool_is_schema && json_is_arr(en)) {
-        bool all_str = json_len(en) > 0;
-        json_t *it;
-        json_arr_foreach(en, i, it) {
-            if (!json_is_str(it)) all_str = false;
-        }
-        if (!all_str) json_del(res, "enum");
-    }
-}
-
-static json_t *gnorm(const json_t *v, bool in_map, bool bool_is_schema, int depth) {
-    if (depth > SCHEMA_MAX_DEPTH) return json_obj();
-    if (json_is_arr(v)) {
-        json_t *o = json_arr(), *it;
-        json_arr_foreach(v, i, it) { json_push(o, gnorm(it, false, bool_is_schema, depth + 1)); }
-        return o;
-    }
-    if (json_is_bool(v)) {
-        if (!bool_is_schema) return json_clone(v);
-        if (v->u.b) return json_obj();
-        json_t *o = json_obj();
-        json_set(o, "not", json_obj());
-        return o;
-    }
-    if (!json_is_obj(v)) return json_clone(v);
-    if (in_map) {
-        json_t *o = json_obj();
-        const char *k;
-        json_t *x;
-        json_obj_foreach(v, i, k, x) { json_set(o, k, gnorm(x, false, true, depth + 1)); }
-        return o;
-    }
-    /* snake_case renames */
-    json_t *obj = json_obj();
-    {
-        const char *k;
-        json_t *x;
-        json_obj_foreach(v, i, k, x) {
-            const char *rk = snake_rename(k);
-            if (!json_get(obj, rk) || rk != k) json_set(obj, rk, json_clone(x));
-        }
-    }
-    /* multi-type array -> anyOf branches */
-    json_t *ta = json_get(obj, "type");
-    if (json_is_arr(ta) && !json_is_arr(json_get(obj, "anyOf"))) {
-        strvec_t types = {0};
-        bool has_null = false;
-        json_t *it;
-        json_arr_foreach(ta, i, it) {
-            if (!json_is_str(it)) continue;
-            if (!strcmp(json_sv(it), "null")) has_null = true;
-            else if (!strvec_contains(&types, json_sv(it))) strvec_push(&types, json_sv(it));
-        }
-        if (types.n >= 2) {
-            json_t *out = json_obj(), *branches = json_arr();
-            for (size_t t = 0; t < types.n; t++) {
-                json_t *br = json_obj();
-                json_set_str(br, "type", types.v[t]);
-                json_push(branches, br);
-            }
-            const char *k;
-            json_t *x;
-            json_obj_foreach(obj, i, k, x) {
-                if (!strcmp(k, "type")) continue;
-                if (!any_type_specific(k)) {
-                    json_set(out, k, json_clone(x));
-                    continue;
-                }
-                for (size_t t = 0; t < types.n; t++)
-                    if (type_specific_for(types.v[t], k)) json_set(json_at(branches, t), k, json_clone(x));
-            }
-            if (has_null) json_set_bool(out, "nullable", true);
-            json_set(out, "anyOf", branches);
-            json_free(obj);
-            obj = out;
-        }
-        strvec_free(&types);
-    }
-    /* collapse null fields */
-    if (str_eq(json_get_str(obj, "type"), "null")) {
-        json_del(obj, "type");
-        json_set_bool(obj, "nullable", true);
-    } else if (json_is_arr(json_get(obj, "anyOf"))) {
-        json_t *kept = json_arr(), *it;
-        bool saw_null = false;
-        json_arr_foreach(json_get(obj, "anyOf"), i, it) {
-            if (json_is_obj(it) && str_eq(json_get_str(it, "type"), "null")) saw_null = true;
-            else json_push(kept, json_clone(it));
-        }
-        if (saw_null) {
-            json_set_bool(obj, "nullable", true);
-            if (json_len(kept) == 0) {
-                json_del(obj, "anyOf");
-                json_free(kept);
-            } else if (json_len(kept) == 1 && json_is_obj(json_at(kept, 0))) {
-                json_del(obj, "anyOf");
-                const char *k;
-                json_t *x;
-                json_obj_foreach(json_at(kept, 0), i, k, x) {
-                    if (!json_get(obj, k)) json_set(obj, k, json_clone(x));
-                }
-                json_free(kept);
-            } else {
-                json_set(obj, "anyOf", kept);
-            }
-        } else {
-            json_free(kept);
-        }
-    }
-    json_t *res = json_obj(), *spill = json_obj();
-    /* all-const anyOf/oneOf -> enum */
-    static const char *const combs[] = {"anyOf", "oneOf"};
-    const char *const_comb = NULL;
-    for (int c = 0; c < 2 && !const_comb; c++) {
-        json_t *vars = json_get(obj, combs[c]);
-        if (!json_is_arr(vars) || json_len(vars) == 0) continue;
-        bool all = true;
-        json_t *it;
-        json_arr_foreach(vars, i, it) {
-            if (!json_is_obj(it) || !json_get(it, "const")) all = false;
-        }
-        if (!all) continue;
-        const_comb = combs[c];
-        json_t *en = json_arr();
-        json_arr_foreach(vars, i, it) { push_enum(en, json_get(it, "const")); }
-        json_set(res, "enum", en);
-        const char *t0 = json_get_str(json_at(vars, 0), "type");
-        bool same = t0 != NULL;
-        json_arr_foreach(vars, i, it) {
-            if (!str_eq(json_get_str(it, "type"), t0)) same = false;
-        }
-        if (same) {
-            json_set_str(res, "type", t0);
-        } else {
-            strvec_t inferred = {0};
-            bool has_null = false;
-            json_arr_foreach(en, i, it) {
-                const char *t = infer_type(it);
-                if (!strcmp(t, "null")) has_null = true;
-                else if (!strvec_contains(&inferred, t)) strvec_push(&inferred, t);
-            }
-            if (inferred.n == 1 && !has_null) json_set_str(res, "type", inferred.v[0]);
-            else if (inferred.n == 0 && has_null) json_set_str(res, "type", "null");
-            else if (inferred.n == 1 && has_null) {
-                json_set_str(res, "type", inferred.v[0]);
-                json_set_bool(res, "nullable", true);
-            }
-            strvec_free(&inferred);
-        }
-    }
-    json_t *const_val = NULL;
-    const char *k;
-    json_t *x;
-    json_obj_foreach(obj, i, k, x) {
-        if (const_comb && (!strcmp(k, const_comb) || json_get(res, k))) continue;
-        if (IN(k, UNSUPPORTED)) {
-            if (IN(k, LIFTABLE)) json_set(spill, k, json_clone(x));
-            continue;
-        }
-        if (!const_comb && !strcmp(k, "const")) {
-            const_val = x;
-            continue;
-        }
-        json_set(res, k, norm_child(k, x, false, depth));
-    }
-    if (!const_comb) {
-        json_t *tt = json_get(res, "type");
-        if (json_is_arr(tt)) {
-            const char *first = NULL, *nonnull = NULL;
-            bool has_null = false;
-            json_t *it;
-            json_arr_foreach(tt, i, it) {
-                if (!json_is_str(it)) continue;
-                if (!first) first = json_sv(it);
-                if (!strcmp(json_sv(it), "null")) has_null = true;
-                else if (!nonnull) nonnull = json_sv(it);
-            }
-            char *pick = xstrdup(nonnull ? nonnull : first ? first : "string");
-            if (has_null) json_set_bool(res, "nullable", true);
-            json_set_str(res, "type", pick);
-            /* drop keywords constraining other types */
-            for (size_t q = json_len(res); q > 0; q--) {
-                const char *rk = res->u.obj.keys[q - 1];
-                if (any_type_specific(rk) && !type_specific_for(pick, rk)) json_del(res, rk);
-            }
-            free(pick);
-        }
-        if (const_val) {
-            json_t *en = json_is_arr(json_get(res, "enum")) ? json_clone(json_get(res, "enum")) : json_arr();
-            push_enum(en, const_val);
-            json_set(res, "enum", en);
-            if (!json_get(res, "type")) json_set_str(res, "type", infer_type(const_val));
-        }
-        json_t *en = json_get(res, "enum");
-        if (!json_get(res, "type") && !json_is_arr(json_get(res, "anyOf")) && !json_is_arr(json_get(res, "oneOf")) &&
-            json_is_arr(en) && json_len(en) > 0) {
-            const char *t0 = infer_type(json_at(en, 0));
-            bool same = true;
-            json_t *it;
-            json_arr_foreach(en, i, it) {
-                if (!str_eq(infer_type(it), t0)) same = false;
-            }
-            if (same) json_set_str(res, "type", t0);
-        }
-        if (str_eq(json_get_str(res, "type"), "null")) {
-            json_del(res, "type");
-            json_set_bool(res, "nullable", true);
-        }
-        json_t *props = json_get(res, "properties");
-        if (str_eq(json_get_str(res, "type"), "object") && !json_get(res, "propertyOrdering") && json_is_obj(props) &&
-            json_len(props) > 1) {
-            json_t *ord = json_arr();
-            for (size_t q = 0; q < props->u.obj.n; q++) json_push_str(ord, props->u.obj.keys[q]);
-            json_set(res, "propertyOrdering", ord);
-        }
-        if (str_eq(json_get_str(res, "type"), "object") && !json_get(res, "properties")) json_set(res, "properties", json_obj());
-    }
-    spill_to_description(res, spill);
-    json_free(spill);
-    json_free(obj);
-    post_process(res, bool_is_schema);
-    return res;
-}
-
-json_t *google_normalize_schema(const json_t *schema) {
-    json_t *d = deref(schema, schema, 0);
-    json_t *out = gnorm(d, false, true, 0);
-    json_free(d);
-    return out;
-}
 
 /* ======================================================================
  * message conversion (google-shared convertMessages)
@@ -839,6 +456,52 @@ static void resolve_thinking(const ai_model_t *m, const ai_stream_opts_t *o, gth
     t->budget = budget;
 }
 
+/* convertTools: Claude behind Cloud Code Assist (ccaLegacyParametersSchema) takes the legacy `parameters` field */
+json_t *google_convert_tools(const ai_model_t *m, const json_t *tools) {
+    if (json_len(tools) == 0) return NULL;
+    json_t *decls = json_arr(), *t;
+    bool legacy = cflag(m, "ccaLegacyParametersSchema");
+    json_arr_foreach(tools, i, t) {
+        json_t *d = json_obj();
+        const char *name = json_get_str(t, "name"), *desc = json_get_str(t, "description");
+        json_set_str(d, "name", name ? name : "");
+        json_set_str(d, "description", desc ? desc : "");
+        json_t *params = json_get(t, "parameters");
+        json_t *ps = NULL;
+        if (params) ps = legacy ? google_normalize_schema_cca(params) : google_normalize_schema(params);
+        if (!ps || json_is_null(ps)) {
+            json_free(ps);
+            ps = json_obj();
+            json_set_str(ps, "type", "object");
+            json_set(ps, "properties", json_obj());
+        }
+        json_set(d, legacy ? "parameters" : "parametersJsonSchema", ps);
+        json_push(decls, d);
+    }
+    json_t *out = json_arr(), *fd = json_obj();
+    json_set(fd, "functionDeclarations", decls);
+    json_push(out, fd);
+    return out;
+}
+
+json_t *google_convert_messages(const ai_model_t *m, const json_t *transformed) { return convert_messages(m, transformed); }
+
+/* thinking helpers shared with the Cloud Code Assist provider */
+ai_effort_t google_clamp_effort(const ai_model_t *m, ai_effort_t e) { return clamp_effort(m, e); }
+const char *google_thinking_level(ai_effort_t e, const ai_model_t *m) { return thinking_level(e, m); }
+int64_t google_thinking_headroom(const ai_model_t *m, const ai_stream_opts_t *o, ai_effort_t e) {
+    return thinking_headroom(m, o, e);
+}
+int64_t google_max_output(int64_t base, const ai_model_t *m, int64_t headroom) { return max_output(base, m, headroom); }
+int64_t google_effort_budget(const ai_model_t *m, const ai_stream_opts_t *o, ai_effort_t e) {
+    bool f;
+    int64_t v = custom_budget(o, e, &f);
+    if (f) return v;
+    v = effort_budget_field(m, e, &f);
+    if (f) return v;
+    return (int)e >= 0 && (size_t)e < ARRAY_LEN(GOOGLE_THINKING) ? GOOGLE_THINKING[e] : 0;
+}
+
 json_t *google_build_request(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o) {
     ai_stream_opts_t defo;
     if (!o) {
@@ -866,28 +529,7 @@ json_t *google_build_request(const ai_model_t *m, const ai_context_t *ctx, const
 
     bool has_tools = json_len(ctx->tools) > 0;
     if (has_tools) {
-        json_t *decls = json_arr(), *t;
-        bool legacy = cflag(m, "ccaLegacyParametersSchema");
-        json_arr_foreach(ctx->tools, i, t) {
-            json_t *d = json_obj();
-            const char *name = json_get_str(t, "name"), *desc = json_get_str(t, "description");
-            json_set_str(d, "name", name ? name : "");
-            json_set_str(d, "description", desc ? desc : "");
-            json_t *params = json_get(t, "parameters");
-            json_t *ps = google_normalize_schema(params ? params : json_null());
-            if (json_is_null(ps)) {
-                json_free(ps);
-                ps = json_obj();
-                json_set_str(ps, "type", "object");
-                json_set(ps, "properties", json_obj());
-            }
-            json_set(d, legacy ? "parameters" : "parametersJsonSchema", ps);
-            json_push(decls, d);
-        }
-        json_t *tools = json_arr(), *fd = json_obj();
-        json_set(fd, "functionDeclarations", decls);
-        json_push(tools, fd);
-        json_set(body, "tools", tools);
+        json_set(body, "tools", google_convert_tools(m, ctx->tools));
         /* toolConfig */
         json_t *tc = o->tool_choice;
         const char *mode = NULL, *name = NULL;
@@ -968,6 +610,21 @@ static char *vertex_host(const char *location) {
     return xasprintf("%s-aiplatform.googleapis.com", location);
 }
 
+/* A models.yml baseUrl without the catalog's `{location}` template (a gateway or proxy) replaces the regional
+ * Vertex origin; owned or NULL. omc extension: upstream always targets *aiplatform.googleapis.com. */
+static char *vertex_custom_origin(const ai_model_t *m) {
+    const char *b = m->base_url;
+    if (!b || !*b || strstr(b, "{location}")) return NULL;
+    char *o = str_trim(b);
+    size_t n = strlen(o);
+    while (n && o[n - 1] == '/') o[--n] = 0;
+    if (!*o) {
+        free(o);
+        return NULL;
+    }
+    return o;
+}
+
 static const char *env_first(const char *a, const char *b, const char *c) {
     const char *v = env_get(a);
     if (!v && b) v = env_get(b);
@@ -1043,6 +700,13 @@ static void push_text_part(google_sse_t *s, const json_t *part) {
     sign_block(s, s->b.cur_index, sig);
 }
 
+/* nextToolCallId: one process-wide sequence across the Google APIs */
+char *google_next_tool_call_id(const char *name) {
+    static unsigned long counter;
+    unsigned long n = __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED);
+    return xasprintf("%s_%lld_%lu", name && *name ? name : "tool", (long long)now_ms(), n);
+}
+
 static void push_function_call(google_sse_t *s, const json_t *part) {
     json_t *fc = json_get_obj(part, "functionCall");
     aib_end_block(&s->b);
@@ -1055,8 +719,7 @@ static void push_function_call(google_sse_t *s, const json_t *part) {
             if (str_eq(json_get_str(b, "type"), "toolCall") && str_eq(json_get_str(b, "id"), id)) need_new = true;
         }
     }
-    static unsigned long counter;
-    char *gen = need_new ? xasprintf("%s_%lld_%lu", name && *name ? name : "tool", (long long)now_ms(), ++counter) : NULL;
+    char *gen = need_new ? google_next_tool_call_id(name) : NULL;
     aib_toolcall_start(&s->b, gen ? gen : id, name ? name : "");
     free(gen);
     json_t *args = json_get_obj(fc, "args");
@@ -1066,17 +729,20 @@ static void push_function_call(google_sse_t *s, const json_t *part) {
     aib_end_block(&s->b);
 }
 
-static void apply_usage(google_sse_t *s, const json_t *u) {
+/* mapGoogleUsage */
+void google_apply_usage(ai_builder_t *b, const json_t *u) {
     int64_t cand = json_get_int(u, "candidatesTokenCount", 0), thoughts = json_get_int(u, "thoughtsTokenCount", 0);
     int64_t total = json_get_int(u, "totalTokenCount", 0);
     int64_t prompt = json_get_int(u, "promptTokenCount", 0);
     if (!prompt) prompt = MAX(0, total - cand - thoughts);
     int64_t cached = MIN(json_get_int(u, "cachedContentTokenCount", 0), prompt);
-    aib_usage(&s->b, prompt - cached, cand + thoughts, cached, 0);
-    json_t *usage = json_get(s->b.msg, "usage");
-    if (thoughts > 0) aib_usage_add_reasoning(&s->b, thoughts);
+    aib_usage(b, prompt - cached, cand + thoughts, cached, 0);
+    json_t *usage = json_get(b->msg, "usage");
+    if (thoughts > 0) aib_usage_add_reasoning(b, thoughts);
     else json_del(usage, "reasoningTokens");
 }
+
+static void apply_usage(google_sse_t *s, const json_t *u) { google_apply_usage(&s->b, u); }
 
 int google_sse_event(void *ud, const char *event, const char *data, size_t len) {
     google_sse_t *s = ud;
@@ -1195,35 +861,47 @@ json_t *provider_google_stream(const ai_model_t *m, const ai_context_t *ctx, con
     } else {
         if (str_eq(o->service_tier, "priority")) http_headers_set(&h, "X-Vertex-AI-LLM-Shared-Request-Type", "priority");
         const char *loc = env_first("GOOGLE_VERTEX_LOCATION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION");
+        /* omc extension: a stored `ya29.` OAuth access token is used as a bearer instead of an API key */
         bool access_token = key && str_starts(key, "ya29.");
+        char *custom = vertex_custom_origin(m);
         if (key && *key && !access_token) {
+            /* an ambient (env) region falls back to the global endpoint on 404 */
             const char *location = loc ? loc : "global";
             char *host = vertex_host(location);
             char *path = xasprintf("v1/publishers/google/models/%s:streamGenerateContent?alt=sse", m->id);
-            url = xasprintf("https://%s/%s", host, path);
-            if (loc && strcmp(host, "aiplatform.googleapis.com") != 0)
-                fallback_url = xasprintf("https://aiplatform.googleapis.com/%s", path);
+            if (custom) {
+                url = xasprintf("%s/%s", custom, path);
+            } else {
+                url = xasprintf("https://%s/%s", host, path);
+                if (loc && strcmp(host, "aiplatform.googleapis.com") != 0)
+                    fallback_url = xasprintf("https://aiplatform.googleapis.com/%s", path);
+            }
             http_headers_set(&h, "x-goog-api-key", key);
             free(host);
             free(path);
-        } else if (access_token) {
+        } else {
             const char *project = env_first("GOOGLE_CLOUD_PROJECT", "GCP_PROJECT", "GCLOUD_PROJECT");
+            char *token = access_token ? xstrdup(key) : NULL;
             if (!project)
                 cfg_err = xstrdup("Vertex AI requires a project ID. Set GOOGLE_CLOUD_PROJECT/GCP_PROJECT/GCLOUD_PROJECT or pass project in options.");
             else if (!loc)
                 cfg_err = xstrdup("Vertex AI requires a location. Set GOOGLE_VERTEX_LOCATION/GOOGLE_CLOUD_LOCATION/VERTEX_LOCATION or pass location in options.");
-            else {
+            else if (!token)
+                token = google_vertex_access_token(&cfg_err);
+            if (!cfg_err) {
                 char *host = vertex_host(loc);
-                url = xasprintf("https://%s/v1/projects/%s/locations/%s/publishers/google/models/%s:streamGenerateContent?alt=sse",
-                                host, project, loc, m->id);
+                char *origin = custom ? xstrdup(custom) : xasprintf("https://%s", host);
+                url = xasprintf("%s/v1/projects/%s/locations/%s/publishers/google/models/%s:streamGenerateContent?alt=sse",
+                                origin, project, loc, m->id);
+                free(origin);
                 free(host);
-                char *bearer = xasprintf("Bearer %s", key);
+                char *bearer = xasprintf("Bearer %s", token);
                 http_headers_set(&h, "Authorization", bearer);
                 free(bearer);
             }
-        } else {
-            cfg_err = xstrdup("Vertex AI requires GOOGLE_CLOUD_API_KEY or an OAuth access token (ADC is not supported yet).");
+            free(token);
         }
+        free(custom);
     }
     if (cfg_err) {
         ai_builder_t b;

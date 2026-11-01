@@ -201,6 +201,13 @@ json_t *ai_error_message(const ai_model_t *m, const char *stop_reason, const cha
 typedef int (*ai_sse_cb)(void *ud, const char *event, const char *data, size_t len);
 int ai_sse_post(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
                 ai_sse_cb on_event, void *ud, int *status, char **err);
+/* ai_sse_post with extras. */
+typedef struct {
+    int64_t idle_timeout_ms; /* max silence between received bytes (0 => 300s) */
+    char *err_body;          /* out: raw body of the last failed (non-2xx) response, owned (caller frees) */
+} ai_post_ex_t;
+int ai_sse_post_ex(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
+                   ai_sse_cb on_event, void *ud, int *status, char **err, ai_post_ex_t *ex);
 /* Raw streaming POST (for newline-delimited JSON etc.). */
 int ai_stream_post(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
                    http_data_cb on_data, void *ud, int *status, char **err);
@@ -226,5 +233,6 @@ json_t *provider_openai_responses_stream(const ai_model_t *, const ai_context_t 
 json_t *provider_google_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 json_t *provider_ollama_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 json_t *provider_bedrock_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
+json_t *provider_gemini_cli_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 
 #endif
