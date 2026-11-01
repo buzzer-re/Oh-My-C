@@ -56,7 +56,9 @@ case "$cmd" in
 start)
     cols=${1:-120}; rows=${2:-40}
     "$0" stop >/dev/null 2>&1
-    rm -rf "$D"; mkdir -p "$D/home"
+    rm -rf "$D"; mkdir -p "$D/home/.omp"
+    # omp extracts its native module into ~/.omp/natives; share the real cache (omp's own files) with the throwaway HOME
+    [ -d "$HOME/.omp/natives" ] && ln -s "$HOME/.omp/natives" "$D/home/.omp/natives"
     workdirs; mkdir -p "$WO" "$WC"
     if [ -n "${CMP_SEED:-}" ]; then cp -R "$CMP_SEED/." "$WO/"; [ "$WO" = "$WC" ] || cp -R "$CMP_SEED/." "$WC/"; fi
     # pick a free port; retry when another harness grabbed it first (the mock exits on EADDRINUSE)
