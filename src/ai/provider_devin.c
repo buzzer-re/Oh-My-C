@@ -213,10 +213,14 @@ static int gunzip_buf(const void *in, size_t n, sb_t *out) {
 
 /* decodeDevinUnaryMessage: bare protobuf, else gzipped protobuf */
 static json_t *decode_unary(const char *name, const char *data, size_t len) {
-    json_t *j = pb_decode(dmsg(name), data, len, NULL);
+    char *e = NULL;
+    json_t *j = pb_decode(dmsg(name), data, len, &e);
+    free(e);
     if (j) return j;
     sb_t z = SB_INIT;
-    if (gunzip_buf(data, len, &z) == 0) j = pb_decode(dmsg(name), z.s ? z.s : "", z.len, NULL);
+    e = NULL;
+    if (gunzip_buf(data, len, &z) == 0) j = pb_decode(dmsg(name), z.s ? z.s : "", z.len, &e);
+    free(e);
     sb_free(&z);
     return j;
 }
