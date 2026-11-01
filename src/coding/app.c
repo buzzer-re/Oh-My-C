@@ -130,6 +130,24 @@ static json_t *job_results_message(app_t *a) {
 
 static void on_agent_event(void *ud, const agent_event_t *ev) {
     app_t *a = ud;
+    if (ev->type == AGENT_EV_AGENT_START) strvec_free(&a->retry_notes);
+    if (ev->type == AGENT_EV_MESSAGE_END && str_eq(json_get_str(ev->message, "role"), "assistant")) {
+        const char *stop = json_get_str(ev->message, "stopReason");
+        if (!str_eq(stop, "error") && !str_eq(stop, "aborted")) {
+            if (a->retry_notes.n) {
+                char *notes = strvec_join(&a->retry_notes, "\n");
+                notice(a, "retry-recovered", "%s", notes);
+                free(notes);
+                strvec_free(&a->retry_notes);
+            }
+            if (a->fallback.active && !a->fallback.served && a->model) {
+                a->fallback.served = true;
+                char *k = mr_model_key(a->model);
+                notice(a, "retry_fallback_succeeded", "%s\x1f%s", k, a->fallback.role ? a->fallback.role : "");
+                free(k);
+            }
+        }
+    }
     if (ev->type == AGENT_EV_TURN_END && a->env && jobs_undelivered(a->env->jobs)) {
         json_t *m = job_results_message(a);
         if (m) agent_steer(a->agent, m);
@@ -468,6 +486,7 @@ static char *app_propose_plan(tool_env_t *env, const char *content, bool *is_err
         free(a->plan_file);
     free(a->fallback.role);
     free(a->fallback.original);
+    strvec_free(&a->retry_notes);
         a->plan_file = xstrdup(url);
         app_set_plan_mode(a, false);
         json_t *ctx = json_obj();
@@ -615,6 +634,7 @@ static void apply_fallback(app_t *a, const char *role, const ai_model_t *cand, c
         a->fallback.original_thinking = prev;
         a->fallback.pinned = false;
     }
+    a->fallback.served = false;
     a->fallback.last_thinking = next;
     app_rebuild_system_prompt(a);
     notice(a, "warning", "Fallback: %s -> %s\nRequest failed: %s", from, key, err ? err : "provider returned an error without details");
@@ -768,6 +788,7 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
     }
     if (switched) {
         a->retry_offset = attempt + 1; /* a fallback model gets a fresh retry budget */
+        strvec_push(&a->retry_notes, usage_limit ? "rate-limited; switched model; retried" : "switched model; retried");
         return true;
     }
     if (!retryable) return false;
@@ -792,6 +813,7 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
         return false;
     }
     notice(a, "warning", "Retrying (%d/%d) in %llds: %s", saga, max, (long long)((delay + 999) / 1000), err ? err : "error");
+    strvec_push(&a->retry_notes, usage_limit ? "rate-limited; waited; retried" : "error; retried");
     int64_t until = mono_ms() + delay;
     while (mono_ms() < until) {
         if (ag->cancel) return false;

@@ -52,10 +52,11 @@ struct app {
     bool compacting;
     bool title_done;
     int retry_count;
-    int retry_offset; /* agent retry attempts spent before the latest fallback switch (fresh budget) */
+    int retry_offset;
+    strvec_t retry_notes; /* recovery notes of this run's retried attempts, applied when a turn succeeds */ /* agent retry attempts spent before the latest fallback switch (fresh budget) */
     /* active retry fallback (turn-recovery.ts ActiveRetryFallbackState) */
     struct {
-        bool active, pinned;
+        bool active, pinned, served;
         char *role;     /* chain key that produced it */
         char *original; /* selector "provider/id[:level]" of the primary */
         ai_effort_t original_thinking, last_thinking;

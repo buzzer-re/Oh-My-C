@@ -515,6 +515,14 @@ static void render_assistant(msgview_t *v, int width, strvec_t *o) {
     }
     json_free(shown);
     const char *stop = json_get_str(v->msg, "stopReason");
+    if (v->retry_note && !v->streaming) {
+        /* resolveAssistantErrorPresentation compact-recovered: a dim note in place of the error */
+        strvec_push(o, "");
+        char *c = fg(TUI_TC_DIM, v->retry_note);
+        text_rows(o, c, width);
+        free(c);
+        return;
+    }
     if (has_tools || v->streaming) return;
     if (str_eq(stop, "aborted")) {
         const char *label = abort_label(v->msg);
@@ -813,6 +821,7 @@ static void mv_destroy(tui_component_t *c) {
     reveal_stop(v);
     json_free(v->msg);
     free(v->text);
+    free(v->retry_note);
     free(v->tool_name);
     free(v->tool_id);
     json_free(v->args);
@@ -843,6 +852,34 @@ static msgview_t *last_view(ui_t *u) {
 }
 
 static int working_mode(ui_t *u);
+
+/* auto_retry_end success: the failed attempts of this run (newest last) take the recovery notes
+ * ("\n"-separated, oldest first) and the pinned error banner goes away */
+void ui_retry_recovered(ui_t *u, const char *notes) {
+    strvec_t v = {0};
+    for (const char *s = notes; s && *s;) {
+        const char *nl = strchr(s, '\n');
+        size_t n = nl ? (size_t)(nl - s) : strlen(s);
+        char *t = xstrndup(s, n);
+        strvec_push(&v, t);
+        free(t);
+        s = nl ? nl + 1 : NULL;
+    }
+    size_t k = v.n;
+    for (size_t i = u->chat->children.n; i-- > 0 && k > 0;) {
+        tui_component_t *c = u->chat->children.v[i];
+        if (c->vt != &MV_VT) continue;
+        msgview_t *mv = (msgview_t *)c;
+        if (mv->kind == MV_USER) break;
+        if (mv->kind != MV_ASSISTANT || mv->retry_note || !str_eq(json_get_str(mv->msg, "stopReason"), "error")) continue;
+        mv->retry_note = xstrdup(v.v[--k]);
+        mv->error_pinned = false;
+        mv->dirty = true;
+        if (u->pinned_error == mv) u->pinned_error = NULL;
+    }
+    strvec_free(&v);
+    ui_error_banner_clear(u);
+}
 
 /* showStatus / showWarning / showError. Consecutive status lines update in place instead of stacking. */
 void add_notice(ui_t *u, const char *level, const char *text) {

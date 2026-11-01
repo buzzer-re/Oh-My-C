@@ -36,6 +36,7 @@ typedef struct {
     bool synthetic;     /* user: agent-attributed input (dim) */
     bool streaming;     /* assistant: still receiving deltas */
     bool error_pinned;  /* assistant: its error is shown in the banner instead of inline */
+    char *retry_note;   /* assistant: failed attempt recovered by a retry ("switched model; retried") */
     size_t revealed;    /* assistant: smooth streaming reveal position (codepoints of visible text) */
     int reveal_timer;
     /* tool */
@@ -105,6 +106,7 @@ void add_view(ui_t *u, msgview_t *v);
 void add_notice(ui_t *u, const char *level, const char *text);
 /* `• Background job completed …` rows for a delivered async-result prompt (no-op for other messages) */
 void ui_async_result(ui_t *u, const json_t *msg);
+void ui_retry_recovered(ui_t *u, const char *notes); /* "\n"-separated notes for the failed attempts */
 void ui_assistant_streamed(ui_t *u, msgview_t *v); /* message_update applied: drive the smooth reveal */
 void ui_assistant_end(ui_t *u, msgview_t *v);      /* message_end: pin a provider error in the banner */
 void ui_tool_started(ui_t *u, const char *tool_call_id); /* tool card added: post-tool text follows */

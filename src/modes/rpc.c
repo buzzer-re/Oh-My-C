@@ -198,6 +198,19 @@ static void rpc_listener(void *ud, const agent_event_t *ev) {
 
 static void notice_rpc(void *ud, const char *level, const char *text) {
     rpc_t *r = ud;
+    if (!strcmp(level, "retry-recovered")) return;
+    if (!strcmp(level, "retry_fallback_succeeded")) {
+        const char *sep = strchr(text, '\x1f');
+        json_t *j = json_obj();
+        json_set_str(j, "type", "retry_fallback_succeeded");
+        char *model = sep ? xstrndup(text, (size_t)(sep - text)) : xstrdup(text);
+        json_set_str(j, "model", model);
+        json_set_str(j, "role", sep ? sep + 1 : "");
+        free(model);
+        emit(r, j);
+        json_free(j);
+        return;
+    }
     json_t *j = json_obj();
     json_set_str(j, "type", "notice");
     json_set_str(j, "level", level);

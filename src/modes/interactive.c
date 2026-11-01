@@ -182,6 +182,23 @@ static void ui_notice(void *ud, const char *level, const char *text) {
 
 static void post_notice(void *x) {
     uiev_t *e = x;
+    if (!strcmp(e->name, "retry-recovered")) {
+        ui_retry_recovered(e->u, e->out);
+        tui_request_render(e->u->tui);
+        uiev_free(e);
+        return;
+    }
+    if (!strcmp(e->name, "retry_fallback_succeeded")) {
+        /* text: "<selector>\x1f<role>" */
+        char *sep = strchr(e->out, '\x1f');
+        if (sep) *sep = 0;
+        char *m = xasprintf("Fallback succeeded on %s", e->out);
+        add_notice(e->u, "info", m);
+        free(m);
+        tui_request_render(e->u->tui);
+        uiev_free(e);
+        return;
+    }
     const char *lvl = !strcmp(e->name, "error") ? "error" : !strcmp(e->name, "warning") ? "warning" : "info";
     /* a generated session title only shows in the status band / working row, as in omp */
     if (strcmp(e->name, "title")) add_notice(e->u, lvl, e->out);

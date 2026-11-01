@@ -1012,13 +1012,15 @@ static void run_loop(agent_t *a, json_t *new_messages) {
                 continue;
             }
             failed = true;
-        } else if (failed && !a->cancel && a->hooks.should_retry &&
-                   a->hooks.should_retry(a->hooks.ud, a, assistant, retry_attempt)) {
-            retry_attempt++;
+        } else if (failed && !a->cancel && a->hooks.should_retry) {
+            /* the failed attempt ends before the retry policy runs (its notices follow it, as in omp) */
             emit_message(a, AGENT_EV_MESSAGE_END, assistant);
-            json_free(assistant);
-            json_free(cursor_results);
-            continue;
+            if (a->hooks.should_retry(a->hooks.ud, a, assistant, retry_attempt)) {
+                retry_attempt++;
+                json_free(assistant);
+                json_free(cursor_results);
+                continue;
+            }
         } else {
             emit_message(a, AGENT_EV_MESSAGE_END, assistant);
         }
