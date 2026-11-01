@@ -70,8 +70,10 @@ typedef struct tool_env {
     char *(*after_write)(struct tool_env *env, const char *abs_path);
     char *(*after_edit)(struct tool_env *env, const char *abs); /* edit-tool variant (lsp.diagnosticsOnEdit) */
     char *local_dir;           /* root for local:// session artifacts */
-    /* one-shot model completion (judge role) for tools like find; owned text or NULL */
-    char *(*complete)(struct tool_env *env, const char *system, const char *user);
+    /* one judgment through the judge role chain (find): normalized questions {id: {type, instructions}}; owned
+     * answers keyed by id or NULL with *err (owned); usage accumulates [input, output, cost] (set by app) */
+    json_t *(*judge)(struct tool_env *env, const json_t *state, const json_t *questions, volatile sig_atomic_t *cancel,
+                     double usage[3], char **err);
     /* write to xd://propose (plan approval); returns owned result text, sets *is_error */
     char *(*propose_plan)(struct tool_env *env, const char *content, bool *is_error);
     /* spawn a subagent: returns owned final text; used by task tool (set by app) */

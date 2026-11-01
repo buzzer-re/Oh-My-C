@@ -3,7 +3,7 @@
 #include "coding/judgment.h"
 
 #include "prompt/template.h"
-#include "text/yaml.h"
+#include <math.h>
 
 #include <ctype.h>
 
@@ -140,6 +140,251 @@ static char *scalar_text(const json_t *v) {
     return json_dump(v, 0);
 }
 
+/* ---------- Bun YAML.stringify(value, null, 2) (bun src/runtime/api/YAMLObject.rs) ---------- */
+
+/* next code point of UTF-8 text (invalid bytes read as themselves) */
+static uint32_t cp_at(const char *s, size_t n, size_t i, size_t *len) {
+    unsigned char c = (unsigned char)s[i];
+    size_t l = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 1;
+    if (i + l > n) l = 1;
+    uint32_t cp = l == 1 ? c : l == 2 ? c & 0x1f : l == 3 ? c & 0x0f : c & 0x07;
+    for (size_t k = 1; k < l; k++) cp = (cp << 6) | ((unsigned char)s[i + k] & 0x3f);
+    *len = l;
+    return cp;
+}
+
+typedef struct {
+    uint32_t *v;
+    size_t n;
+} cps_t;
+
+static cps_t to_cps(const char *s) {
+    size_t n = strlen(s);
+    cps_t r = {xmalloc((n + 1) * sizeof(uint32_t)), 0};
+    for (size_t i = 0; i < n;) {
+        size_t l;
+        r.v[r.n++] = cp_at(s, n, i, &l);
+        i += l;
+    }
+    return r;
+}
+
+static bool is_inf_suffix(const cps_t *s, size_t i) {
+    if (i + 4 > s->n) return false;
+    uint32_t a = s->v[i + 1], b = s->v[i + 2], c = s->v[i + 3];
+    return (a == 'i' && b == 'n' && c == 'f') || (a == 'I' && b == 'n' && c == 'f') || (a == 'I' && b == 'N' && c == 'F');
+}
+
+static bool string_is_number(const cps_t *s) {
+    size_t len = s->n, i = 0;
+    if (!len) return false;
+    if (s->v[0] == '+' || s->v[0] == '-') {
+        i = 1;
+        if (i >= len) return false;
+        if (s->v[i] == '.' && is_inf_suffix(s, i)) return true;
+    }
+    int base = 10;
+    if (i + 1 < len && s->v[i] == '0') {
+        if (s->v[i + 1] == 'x' || s->v[i + 1] == 'X') {
+            base = 16;
+            i += 2;
+            if (i >= len) return false;
+        } else if (s->v[i + 1] == 'o' || s->v[i + 1] == 'O') {
+            base = 8;
+            i += 2;
+            if (i >= len) return false;
+        }
+    }
+    bool dot = false, exp = false, minus = false;
+    for (; i < len; i++) {
+        uint32_t c = s->v[i];
+        if (c >= '0' && c <= '9') continue;
+        if ((c >= 'a' && c <= 'd') || c == 'f' || (c >= 'A' && c <= 'D') || c == 'F') {
+            if (base != 16) return false;
+        } else if (c == 'e' || c == 'E') {
+            if (base == 10) {
+                if (exp) return false;
+                exp = true;
+            }
+        } else if (c == '.') {
+            if (dot || base != 10) return false;
+            dot = true;
+        } else if (c == '+') {
+            if (base == 16) return false;
+        } else if (c == '-') {
+            if (minus) return false;
+            minus = true;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool flowish(uint32_t c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '[' || c == ']' || c == '{' || c == '}' || c == ','; }
+
+static bool string_needs_quotes(const char *str) {
+    cps_t s = to_cps(str);
+    bool q = false;
+    if (!s.n) {
+        q = true;
+        goto done;
+    }
+    uint32_t last = s.v[s.n - 1];
+    if (last == ' ' || last == '\t' || last == '\n' || last == '\r' || last == ':') {
+        q = true;
+        goto done;
+    }
+    if (strchr("&*?|-<>!%@:,[]{}#'\"` \t\n\r", (int)(s.v[0] < 0x80 ? s.v[0] : 1)) && s.v[0] < 0x80 && s.v[0] != 0) {
+        q = true;
+        goto done;
+    }
+    if (s.v[0] == 0xfeff) {
+        q = true;
+        goto done;
+    }
+    static const char *const KW[] = {"true", "True", "TRUE", "false", "False", "FALSE", "yes", "Yes", "YES", "no", "No",
+                                     "NO", "on", "On", "ON", "off", "Off", "OFF", "n", "N", "y", "Y", "null", "Null",
+                                     "NULL", "~", ".inf", ".Inf", ".INF", ".nan", ".NaN", ".NAN", NULL};
+    for (size_t k = 0; KW[k]; k++)
+        if (!strcmp(str, KW[k])) {
+            q = true;
+            goto done;
+        }
+    for (size_t i = 0; i < s.n && !q; i++) {
+        uint32_t c = s.v[i];
+        switch (c) {
+        case '{': case '}': case '[': case ']': case ',': case '#': case '`': case '\'': q = true; break;
+        case ':':
+            if (i + 1 < s.n && (s.v[i + 1] == ' ' || s.v[i + 1] == '\t' || s.v[i + 1] == '\n' || s.v[i + 1] == '\r')) q = true;
+            break;
+        case '-':
+        case '.':
+            if (i + 2 < s.n && s.v[i + 1] == c && s.v[i + 2] == c) {
+                if (i + 3 >= s.n || flowish(s.v[i + 3])) q = true;
+            }
+            if (!q && i == 0 && string_is_number(&s)) q = true;
+            break;
+        case '+':
+            if (i == 0 && string_is_number(&s)) q = true;
+            break;
+        default:
+            if (c >= '0' && c <= '9') {
+                if (i == 0 && string_is_number(&s)) q = true;
+            } else if (c <= 0x1f || c == 0x22 || c == 0x7f || c == 0x85 || c == 0xa0 || c == 0x2028 || c == 0x2029) {
+                q = true;
+            }
+        }
+    }
+done:
+    free(s.v);
+    return q;
+}
+
+static void yaml_quoted(sb_t *b, const char *s) {
+    static const char *const LOW[32] = {"\\0", "\\x01", "\\x02", "\\x03", "\\x04", "\\x05", "\\x06", "\\a", "\\b", "\\t", "\\n",
+                                        "\\v", "\\f", "\\r", "\\x0e", "\\x0f", "\\x10", "\\x11", "\\x12", "\\x13", "\\x14",
+                                        "\\x15", "\\x16", "\\x17", "\\x18", "\\x19", "\\x1a", "\\e", "\\x1c", "\\x1d", "\\x1e",
+                                        "\\x1f"};
+    size_t n = strlen(s);
+    sb_putc(b, '"');
+    for (size_t i = 0; i < n;) {
+        size_t l;
+        uint32_t c = cp_at(s, n, i, &l);
+        if (c < 0x20) sb_append(b, LOW[c]);
+        else if (c == '"') sb_append(b, "\\\"");
+        else if (c == '\\') sb_append(b, "\\\\");
+        else if (c == 0x7f) sb_append(b, "\\x7f");
+        else if (c == 0x85) sb_append(b, "\\N");
+        else if (c == 0xa0) sb_append(b, "\\_");
+        else if (c == 0x2028) sb_append(b, "\\L");
+        else if (c == 0x2029) sb_append(b, "\\P");
+        else sb_appendn(b, s + i, l);
+        i += l;
+    }
+    sb_putc(b, '"');
+}
+
+static void yaml_string(sb_t *b, const char *s) {
+    if (string_needs_quotes(s)) yaml_quoted(b, s);
+    else sb_append(b, s);
+}
+
+typedef struct {
+    sb_t *b;
+    int indent;
+    size_t item_offset;
+} yctx_t;
+
+static void y_newline(yctx_t *y) {
+    sb_putc(y->b, '\n');
+    for (int i = 0; i < y->indent * 2; i++) sb_putc(y->b, ' ');
+    for (size_t i = 0; i < y->item_offset; i++) sb_putc(y->b, ' ');
+}
+
+static void y_value(yctx_t *y, const json_t *v, bool after_key, int depth) {
+    bool obj = json_is_obj(v) || json_is_arr(v);
+    if (after_key && !obj) sb_putc(y->b, ' ');
+    if (depth > 64) { /* bounded recursion on untrusted state */
+        sb_append(y->b, "null");
+        return;
+    }
+    if (json_is_null(v)) {
+        sb_append(y->b, "null");
+    } else if (json_is_bool(v)) {
+        sb_append(y->b, v->u.b ? "true" : "false");
+    } else if (json_is_num(v)) {
+        double d = v->u.num.d;
+        if (isinf(d)) sb_append(y->b, d < 0 ? "-.inf" : ".inf");
+        else if (isnan(d)) sb_append(y->b, ".nan");
+        else if (d == 0 && signbit(d)) sb_append(y->b, "-0");
+        else {
+            char *t = json_dump(v, 0);
+            sb_append(y->b, t);
+            free(t);
+        }
+    } else if (json_is_str(v)) {
+        yaml_string(y->b, json_sv(v));
+    } else if (json_is_arr(v)) {
+        if (!json_len(v)) {
+            if (after_key) sb_putc(y->b, ' ');
+            sb_append(y->b, "[]");
+            return;
+        }
+        json_t *it;
+        json_arr_foreach(v, i, it) {
+            if (i || after_key) y_newline(y);
+            sb_append(y->b, "- ");
+            y->item_offset += 2;
+            y_value(y, it, false, depth + 1);
+            y->item_offset -= 2;
+        }
+    } else {
+        if (!json_len(v)) {
+            if (after_key) sb_putc(y->b, ' ');
+            sb_append(y->b, "{}");
+            return;
+        }
+        const char *k;
+        json_t *it;
+        json_obj_foreach(v, i, k, it) {
+            if (i || after_key) y_newline(y);
+            yaml_string(y->b, k);
+            sb_putc(y->b, ':');
+            y->indent++;
+            y_value(y, it, true, depth + 1);
+            y->indent--;
+        }
+    }
+}
+
+static char *bun_yaml_stringify(const json_t *v) {
+    sb_t b = SB_INIT;
+    yctx_t y = {&b, 0, 0};
+    y_value(&y, v, false, 0);
+    return sb_detach(&b);
+}
+
 static void render_field(sb_t *b, const char *key, const json_t *v) {
     bool tag = xml_tag_name(key);
     if (tag) sb_appendf(b, "<%s>", key);
@@ -153,9 +398,7 @@ static void render_field(sb_t *b, const char *key, const json_t *v) {
         xml_escape(b, t, false);
         free(t);
     } else {
-        char *y = yaml_dump(v);
-        size_t n = strlen(y);
-        while (n && y[n - 1] == '\n') y[--n] = 0;
+        char *y = bun_yaml_stringify(v);
         sb_putc(b, '\n');
         xml_escape(b, y, false);
         sb_putc(b, '\n');

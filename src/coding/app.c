@@ -664,14 +664,9 @@ static void add_checkpoint_tools(app_t *a, agent_t *ag) {
 
 /* ---------- setup ---------- */
 
-static char *app_tool_complete(tool_env_t *env, const char *system, const char *user) {
-    app_t *a = env->session;
-    const ai_model_t *m = NULL;
-    const char *role = settings_str("modelRoles.judge", NULL);
-    if (!role) role = settings_str("modelRoles.smol", NULL);
-    if (role) m = app_resolve_model_pattern(role, NULL, NULL);
-    if (!m) m = a->model;
-    return app_complete_text(a, m, system, user, EFFORT_OFF);
+static json_t *app_tool_judge(tool_env_t *env, const json_t *state, const json_t *questions,
+                              volatile sig_atomic_t *cancel, double usage[3], char **err) {
+    return evalhost_judge(env->session, state, questions, cancel, usage, err);
 }
 
 static json_t *app_eval_bridge(tool_env_t *env, const char *name, const json_t *args, int64_t cell,
@@ -899,7 +894,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     a->env->session = a;
     if (!o->subagent) agents_register_main(a);
     a->env->run_subagent = app_run_subagent;
-    a->env->complete = app_tool_complete;
+    a->env->judge = app_tool_judge;
     a->evalhost = evalhost_new(a);
     a->env->eval_bridge = app_eval_bridge;
     discover_all(a->cwd, &a->disc, o->no_context_files, o->no_skills, o->no_rules);

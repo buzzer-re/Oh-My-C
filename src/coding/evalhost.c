@@ -599,6 +599,8 @@ static size_t judge_candidates(app_t *a, const ai_model_t **out, size_t max) {
 typedef struct {
     json_t *answers; /* owned */
     char *model;     /* owned provider/id */
+    int64_t in_tok, out_tok; /* usage of the completion that answered (TextJudge result.usage) */
+    double cost;
 } verdict_t;
 
 /* answer every question about one state through the judge chain; false with *err on failure */
@@ -699,6 +701,10 @@ static bool run_judge(app_t *a, const json_t *state, const json_t *questions, co
                 break; /* next candidate */
             }
             char *text = reply_text(r, attempt ? SUBMIT_TOOL : NULL);
+            const json_t *usage = json_get(r, "usage");
+            v->in_tok = json_get_int(usage, "input", 0);
+            v->out_tok = json_get_int(usage, "output", 0);
+            v->cost = message_cost(r);
             json_free(r);
             char *perr = NULL;
             json_t *ans = judgment_parse_reply(questions, text, &perr);
@@ -756,6 +762,21 @@ static json_t *op_judge(evalhost_t *h, const json_t *args, volatile sig_atomic_t
     }
     json_free(qs);
     return res;
+}
+
+json_t *evalhost_judge(struct app *a, const json_t *state, const json_t *questions, volatile sig_atomic_t *cancel,
+                       double usage[3], char **err) {
+    *err = NULL;
+    double cost = 0;
+    verdict_t v = {0};
+    if (!run_judge(a, state, questions, NULL, cancel, NULL, &cost, &v, err)) return NULL;
+    if (usage) {
+        usage[0] += (double)v.in_tok;
+        usage[1] += (double)v.out_tok;
+        usage[2] += v.cost;
+    }
+    free(v.model);
+    return v.answers;
 }
 
 /* ---------- judge_batch() ---------- */

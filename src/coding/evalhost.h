@@ -28,5 +28,10 @@ void evalhost_free(evalhost_t *h); /* joins completion threads */
  * *err (owned). */
 json_t *evalhost_call(evalhost_t *h, const char *name, const json_t *args, int64_t cell, volatile sig_atomic_t *cancel,
                       char **err);
+/* One judgment through the judge role chain (text bridge or native judge): normalized questions
+ * {id: {type, instructions[, criteria]}} about `state`. Returns owned answers keyed by id, or NULL with *err (owned).
+ * usage (optional) accumulates [input tokens, output tokens, cost] of the answering completion. */
+json_t *evalhost_judge(struct app *a, const json_t *state, const json_t *questions, volatile sig_atomic_t *cancel,
+                       double usage[3], char **err);
 
 #endif
