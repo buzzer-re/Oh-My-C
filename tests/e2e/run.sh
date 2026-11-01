@@ -235,6 +235,32 @@ grep -q '"ua": "antigravity/hub/2.26.0 (aidev_client; .*"model": "claude-opus-4-
     && echo "   ok  antigravity envelope" || { echo "   FAIL antigravity envelope"; fail=1; }
 grep -q '"functionResponse": {"name": "bash"' "$T/google.jsonl" && echo "   ok  cca functionResponse replay" || { echo "   FAIL cca functionResponse replay"; fail=1; }
 if [ -f "$T/auth.json.bak" ]; then mv "$T/auth.json.bak" "$T/agent/auth.json"; else rm -f "$T/agent/auth.json"; fi
+# Cursor agent (Connect + protobuf over HTTP/1.1: RunSSE stream + BidiAppend unary appends, exec channel, KV blobs)
+CPORT=$((PORT + 3))
+MOCK_LOG="$T/cursor.jsonl" MOCK_CURSOR_TOKEN=cur-token python3 -I "$ROOT/tests/e2e/mock_cursor.py" $CPORT & CPID=$!
+trap 'kill $MPID $BPID $GPID $CPID 2>/dev/null; rm -rf "$T"' EXIT
+for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$CPORT) 2>/dev/null && break; sleep 0.1; done
+printf '  cursor:\n    baseUrl: http://127.0.0.1:%s\n' $CPORT >> "$T/agent/models.yml"
+CENV=(env HOME="$T" CURSOR_ACCESS_TOKEN=cur-token)
+CM=cursor/claude-4.5-sonnet
+mkdir -p "$T/cur" && printf 'cursor line one\ncursor line two\n' > "$T/cur/r.txt"
+check "cursor text"     "plain cursor answer"   "${CENV[@]}" "$B" -m "$CM" --no-session -p "hi"
+check "cursor shell"    "Tool said: cur-e2e"    "${CENV[@]}" "$B" -m "$CM" --session-dir "$T/cur" -p "bash:echo cur-e2e"
+check "cursor history"  "user,assistant,tool,assistant"  "${CENV[@]}" "$B" -m "$CM" --session-dir "$T/cur" -c -p "history"
+check "cursor read"     "Read said: cursor line one"     "${CENV[@]}" "$B" -m "$CM" --no-session -p "read:$T/cur/r.txt"
+check "cursor mcp"      "MCP said: "            "${CENV[@]}" "$B" -m "$CM" --no-session -p 'mcp:glob:{"path":"**/*.txt"}'
+check "cursor end err"  "Connect error resource_exhausted: Error"  "${CENV[@]}" "$B" -m "$CM" --no-session -p "fail"
+check "cursor retry"    "recovered"             "${CENV[@]}" "$B" -m "$CM" --no-session -p "flaky"
+check "cursor 401"      "Cursor RunSSE failed with HTTP 401"  env HOME="$T" CURSOR_ACCESS_TOKEN=wrong "$B" -m "$CM" --no-session -p "hi"
+check "cursor effort"   "plain cursor answer"   "${CENV[@]}" "$B" -m cursor/gpt-5.4 --thinking high --no-session -p "hi"
+check "cursor json"     '"toolName":"bash"'     "${CENV[@]}" "$B" -m "$CM" --no-session --mode json -p "bash:echo j"
+grep -q '"requestedModel": "gpt-5.4", "maxMode": false, "parameters": \[{"id": "reasoning", "value": "high"}\]' "$T/cursor.jsonl" \
+    && echo "   ok  cursor effort parameters" || { echo "   FAIL cursor effort parameters"; fail=1; }
+grep -q '"modelDetails": "gpt-5.4-high"' "$T/cursor.jsonl" && echo "   ok  cursor model details" || { echo "   FAIL cursor model details"; fail=1; }
+grep -q '"clientVersion": "cli-2026.09.02-c22c1a3", "clientType": "cli", "streaming": "true"' "$T/cursor.jsonl" \
+    && echo "   ok  cursor client headers" || { echo "   FAIL cursor client headers"; fail=1; }
+grep -q '"requestContext": {"tools": \[[^]]*"write"' "$T/cursor.jsonl" && echo "   ok  cursor request context" || { echo "   FAIL cursor request context"; fail=1; }
+grep -q '"originalRequestId": "[0-9a-f-]\{36\}"' "$T/cursor.jsonl" && echo "   ok  cursor retry original id" || { echo "   FAIL cursor retry original id"; fail=1; }
 cp "$T/models.yml.bak" "$T/agent/models.yml"
 # structured reads: archives, SQLite, PDF, notebooks (fixtures generated with Python's zipfile/tarfile/sqlite3)
 if python3 -I "$ROOT/tests/readfmt_fixtures.py" fx >/dev/null 2>&1; then
