@@ -6,7 +6,7 @@ built. Every request is appended to $MOCK_LOG as {method, path, headers (lower-c
 Protocols (chosen by path suffix):
   .../chat/completions  OpenAI Chat Completions SSE      .../responses  OpenAI Responses SSE
   .../messages          Anthropic Messages SSE           .../v1/systemone, .../ai/run/<model>  native judgments
-A user message "bash:<cmd>" gets a bash tool call (chat completions / anthropic), "call:<tool>:<json args>" any tool
+A user message "bash:<cmd>" gets a bash tool call (chat completions / anthropic), "read:<path>" a read call (anthropic), "call:<tool>:<json args>" any tool
 (chat completions), a tool result gets the final text.
 Paths under /deny answer 403 to Copilot-Integration-Id copilot-chat (identity fallback test)."""
 import json, os, sys
@@ -128,9 +128,10 @@ class H(BaseHTTPRequestHandler):
         if path.endswith("/messages"):
             self.sse_start()
             self.ev({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": [], "usage": {"input_tokens": 5, "output_tokens": 0}}}, "message_start")
-            if kind == "user" and text.startswith("bash:"):
-                self.ev({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "bash", "input": {}}}, "content_block_start")
-                self.ev({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps({"command": text[5:]})}}, "content_block_delta")
+            if kind == "user" and text.startswith(("bash:", "read:")):
+                tool, args = ("bash", {"command": text[5:]}) if text.startswith("bash:") else ("read", {"path": text[5:]})
+                self.ev({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": tool, "input": {}}}, "content_block_start")
+                self.ev({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps(args)}}, "content_block_delta")
                 stop = "tool_use"
             else:
                 answer = ("Tool said: " + text.strip()) if kind == "tool" else "plain provider answer"

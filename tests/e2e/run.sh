@@ -448,6 +448,7 @@ fi
 source "$ROOT/tests/e2e/providers_transport.sh"
 source "$ROOT/tests/e2e/providers_devin.sh"
 source "$ROOT/tests/e2e/providers_gitlab.sh"
+source "$ROOT/tests/e2e/images.sh"
 # provider logins over stdin (omc login) against tests/e2e/mock_auth.py
 APORT=$((PORT + 7)); python3 -I "$ROOT/tests/e2e/mock_auth.py" $APORT & APID=$!
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$APORT) 2>/dev/null && break; sleep 0.1; done
