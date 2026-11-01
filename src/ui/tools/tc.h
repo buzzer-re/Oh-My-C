@@ -159,6 +159,14 @@ void tc_todo(const tc_call_t *c, int width, strvec_t *out);
 void tc_generic(const tc_call_t *c, int width, strvec_t *out);
 void tc_render_diff(const char *diff, const char *path, strvec_t *out);
 void tc_web_search(const tc_call_t *c, int width, strvec_t *out);
+void tc_ast_grep(const tc_call_t *c, int width, strvec_t *out);
+void tc_ast_edit(const tc_call_t *c, int width, strvec_t *out);
+
+/* grouped-file-output helpers (tc_search.c) */
+char *tc_paths_of(const json_t *args);                       /* path/paths arg joined ", " (NULL none) */
+bool tc_is_search_header(const char *l);                     /* `# dir/`, `## file#TAG` */
+const char *tc_search_header_lang(const char *line);
+char *tc_style_search_line(const char *line, const char *lang); /* header tint / code-frame highlight */
 void tc_ask(const tc_call_t *c, int width, strvec_t *out);
 void tc_goal(const tc_call_t *c, int width, strvec_t *out);
 void tc_find(const tc_call_t *c, int width, strvec_t *out);

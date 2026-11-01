@@ -473,6 +473,7 @@ static int astgrep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *ar
     sb_t b = SB_INIT;
     size_t total = 0, shown = 0, nfiles = 0;
     const size_t LIMIT = 100;
+    json_t *dfiles = json_arr(); /* omp displayContent source: [{path, lines}] */
     for (size_t f = 0; f < files.n; f++) {
         if (!lang && !lang_supported(files.v[f])) continue;
         size_t n;
@@ -497,15 +498,52 @@ static int astgrep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *ar
             nfiles++;
             char *disp = path_display(files.v[f], env->cwd);
             bool header = false;
+            json_t *dlines = NULL;
             for (size_t i = 0; i < ms.n; i++) {
                 total++;
                 if ((int64_t)total <= skip || shown >= LIMIT) continue;
                 if (!header) {
                     sb_appendf(&b, "%s%s\n", b.len ? "\n" : "", disp);
                     header = true;
+                    json_t *df = json_obj();
+                    json_set_str(df, "path", disp);
+                    dlines = json_arr();
+                    json_set(df, "lines", dlines);
+                    json_push(dfiles, df);
                 }
                 shown++;
                 int64_t l1 = line_of(src, ms.v[i].start), l2 = line_of(src, ms.v[i].end);
+                {
+                    /* display rows: the whole matched text from its first line's start */
+                    size_t ls = ms.v[i].start;
+                    while (ls > 0 && src[ls - 1] != '\n') ls--;
+                    size_t le = ms.v[i].end;
+                    while (le < n && src[le] != '\n') le++;
+                    strvec_t ml = str_split_lines(src + ls, le - ls);
+                    for (size_t k = 0; k < ml.n && k < 50; k++) {
+                        json_t *dl = json_obj();
+                        json_set_int(dl, "line", l1 + (int64_t)k);
+                        json_set_bool(dl, "match", k == 0);
+                        json_set_str(dl, "text", ml.v[k]);
+                        json_push(dlines, dl);
+                    }
+                    strvec_free(&ml);
+                    if (ms.v[i].caps.n) {
+                        sb_t mb = SB_INIT;
+                        sb_append(&mb, "  meta: ");
+                        for (size_t k = 0; k < ms.v[i].caps.n; k++) {
+                            capture_t *c = &ms.v[i].caps.v[k];
+                            sb_appendf(&mb, "%s%s=%.*s", k ? ", " : "", c->name, (int)MIN(c->end - c->start, (size_t)120), src + c->start);
+                        }
+                        for (char *p = mb.s; *p; p++)
+                            if (*p == '\n') *p = ' ';
+                        json_t *dl = json_obj();
+                        json_set_int(dl, "line", 0);
+                        json_set_str(dl, "text", sb_cstr(&mb));
+                        json_push(dlines, dl);
+                        sb_free(&mb);
+                    }
+                }
                 char *text = xstrndup(src + ms.v[i].start, MIN(ms.v[i].end - ms.v[i].start, (size_t)300));
                 char *nl = strchr(text, '\n');
                 if (nl) strcpy(nl, " …");
@@ -540,6 +578,18 @@ static int astgrep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *ar
     out->details = json_obj();
     json_set_int(out->details, "matchCount", (int64_t)total);
     json_set_int(out->details, "fileCount", (int64_t)nfiles);
+    json_set_int(out->details, "filesSearched", (int64_t)files.n);
+    json_set_bool(out->details, "limitReached", total > (size_t)skip + shown);
+    if (json_get_str(args, "path")) json_set_str(out->details, "scopePath", json_get_str(args, "path"));
+    json_set_str(out->details, "cwd", env->cwd);
+    if (json_len(dfiles)) {
+        /* a directory scope groups by path (omp formatFileMatches isDirectory) */
+        bool single = json_get_str(args, "path") && files.n == 1 && str_ends(files.v[0], json_get_str(args, "path"));
+        char *dc = grep_display_content(dfiles, !single);
+        json_set_str(out->details, "displayContent", dc);
+        free(dc);
+    }
+    json_free(dfiles);
     sb_free(&b);
     strvec_free(&files);
     pat_free(&cp);
@@ -648,6 +698,8 @@ static int astedit_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *ar
     staged_clear();
     size_t total = 0;
     sb_t preview = SB_INIT;
+    json_t *dfiles = json_arr(); /* omp displayContent source: per file `-N│before` / `+N│after` rows */
+    size_t nsearched = 0;
     for (size_t f = 0; f < files.n; f++) {
         if (!lang_supported(files.v[f])) continue;
         size_t n;
@@ -656,8 +708,10 @@ static int astedit_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *ar
             free(src);
             continue;
         }
+        nsearched++;
         char *cur = src;
         size_t file_hits = 0;
+        json_t *dlines = json_arr();
         for (size_t pi = 0; pi < pats.n; pi++) {
             toks_t toks = {0};
             size_t cl = strlen(cur);
@@ -687,6 +741,22 @@ static int astedit_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *ar
                     if (ms.v[k].start < last) continue; /* overlap */
                     sb_appendn(&nb, cur + last, ms.v[k].start - last);
                     char *rep = substitute(tpl ? tpl : "", cur, &ms.v[k]);
+                    {
+                        int64_t ln = line_of(cur, ms.v[k].start);
+                        size_t bl = strcspn(cur + ms.v[k].start, "\n");
+                        bl = MIN(bl, ms.v[k].end - ms.v[k].start);
+                        char *before = xstrndup(cur + ms.v[k].start, MIN(bl, (size_t)120));
+                        char *after = xstrndup(rep, MIN(strcspn(rep, "\n"), (size_t)120));
+                        for (int side = 0; side < 2; side++) {
+                            json_t *dl = json_obj();
+                            json_set_int(dl, "line", ln);
+                            json_set_str(dl, "mark", side ? "+" : "-");
+                            json_set_str(dl, "text", side ? after : before);
+                            json_push(dlines, dl);
+                        }
+                        free(after);
+                        free(before);
+                    }
                     sb_append(&nb, rep);
                     free(rep);
                     last = ms.v[k].end;
@@ -704,6 +774,14 @@ static int astedit_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *ar
         if (file_hits) {
             total += file_hits;
             char *disp = path_display(files.v[f], env->cwd);
+            json_t *df = json_obj();
+            json_set_str(df, "path", disp);
+            char *sfx = xasprintf(" (%zu replacement%s)", file_hits, file_hits == 1 ? "" : "s");
+            json_set_str(df, "suffix", sfx);
+            free(sfx);
+            json_set(df, "lines", dlines);
+            dlines = NULL;
+            json_push(dfiles, df);
             char *d = diff_unified(src, cur, disp, disp, 2);
             if (preview.len < 40000) sb_append(&preview, d);
             free(d);
@@ -714,6 +792,7 @@ static int astedit_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *ar
             if (cur != src) free(cur);
             free(src);
         }
+        json_free(dlines);
     }
     for (size_t k = 0; k < pats.n; k++) pat_free(&pats.v[k]);
     vec_free(&pats);
@@ -729,7 +808,26 @@ static int astedit_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *ar
         json_set_int(out->details, "replacements", (int64_t)total);
         json_set_int(out->details, "files", (int64_t)g_staged.n);
         json_set_bool(out->details, "proposed", true);
+        /* omp AstEditToolDetails */
+        json_set_int(out->details, "totalReplacements", (int64_t)total);
+        json_set_int(out->details, "filesTouched", (int64_t)g_staged.n);
+        json_set_int(out->details, "filesSearched", (int64_t)nsearched);
+        json_set_bool(out->details, "applied", false);
+        json_set_bool(out->details, "limitReached", false);
+        json_set_str(out->details, "cwd", env->cwd);
+        strvec_t sp = {0};
+        json_t *pe;
+        json_arr_foreach(paths, i, pe) if (json_is_str(pe)) strvec_push(&sp, json_sv(pe));
+        char *spj = strvec_join(&sp, ", ");
+        json_set_str(out->details, "scopePath", spj);
+        free(spj);
+        strvec_free(&sp);
+        bool single = json_len(paths) == 1 && nsearched == 1 && json_len(dfiles) == 1;
+        char *dc = grep_display_content(dfiles, !single);
+        json_set_str(out->details, "displayContent", dc);
+        free(dc);
     }
+    json_free(dfiles);
     sb_free(&preview);
     return 0;
 }
