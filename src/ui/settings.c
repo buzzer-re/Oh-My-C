@@ -12,6 +12,7 @@
 #include "ui/ui.h"
 
 #include "config/settings.h"
+#include "coding/autolearn.h"
 #include "core/embed.h"
 #include "tui/composer.h"
 #include "tui/fuzzy.h"
@@ -1721,6 +1722,7 @@ static void apply_change(settings_view_t *v, const char *path) {
         if (strcmp(lv, "auto") && effort_parse(lv, &e) == 0) app_set_thinking(u->app, e);
     }
     if (!strcmp(path, "hideThinkingBlock")) u->hide_thinking = get_bool(path, false);
+    if (!strcmp(path, "autolearn.enabled") || !strcmp(path, "memory.backend")) autolearn_reconcile(u->app);
     ui_chrome_setup(u);
     tui_request_full_render(u->tui);
 }

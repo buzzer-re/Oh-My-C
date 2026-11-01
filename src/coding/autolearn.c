@@ -444,6 +444,16 @@ void autolearn_register_tools(app_t *a, agent_t *ag) {
     if (!strcmp(b, "local") && (!req || strvec_contains(req, "learn") || top)) agent_add_tool(ag, learn_tool_new(a->env));
 }
 
+void autolearn_reconcile(app_t *a) {
+    if (!a || !a->agent || a->opts.no_tools || agent_is_running(a->agent)) return;
+    agent_remove_tool(a->agent, "learn");
+    agent_remove_tool(a->agent, "manage_skill");
+    autolearn_register_tools(a, a->agent);
+    tools_finalize(a->agent, a->opts.tools);
+    memory_start(a);
+    app_rebuild_system_prompt(a);
+}
+
 char *autolearn_instructions(agent_t *ag) {
     bool ms = false, learn = false;
     for (size_t i = 0; i < ag->tools.n; i++) {

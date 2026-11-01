@@ -25,6 +25,10 @@ void autolearn_register_tools(struct app *a, agent_t *ag);
 /* buildAutoLearnInstructions from the tools present; owned or NULL */
 char *autolearn_instructions(agent_t *ag);
 
+/* live `autolearn.*` / `memory.backend` change: re-register learn/manage_skill, (re)start the backend and
+ * rebuild the prompt (session built-in reconcile + applyMemoryBackend). No-op while a run is in flight. */
+void autolearn_reconcile(struct app *a);
+
 /* controller: installed for top-level sessions; reads autolearn.* live at every stop */
 autolearn_t *autolearn_new(struct app *a);
 void autolearn_on_event(autolearn_t *al, const agent_event_t *ev);
