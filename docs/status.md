@@ -20,10 +20,12 @@ This file is the single source of truth for what is implemented; it is updated w
 | anthropic-messages (API key + Claude OAuth identity) | ✅ |
 | openai-completions / openrouter (compat flags, reasoning formats) | ✅ |
 | openai-responses / azure-openai-responses / openai-codex-responses | ✅ |
-| google-generative-ai / google-vertex (API key, bearer) | ✅ |
+| google-generative-ai (API key) | ✅ |
+| google-vertex (ADC / service account), google-gemini-cli + google-antigravity (Cloud Code Assist, OAuth) | 🟡 | in progress |
 | ollama-chat | ✅ |
 | bedrock-converse-stream (SigV4 + bearer key, AWS credential chain: env / web identity / profile static-SSO-credential_process-role_arn / ECS / IMDSv2, event-stream, geo-aware region, cache points, thinking/effort/binding controls, guardrails) | ✅ (Bedrock server-side compaction via InvokeModel ❌) |
-| cursor-agent, google-gemini-cli, devin, gitlab-duo | ❌ |
+| cursor-agent (123 catalog models; HTTP/2 + Connect + protobuf), devin-agent, gitlab-duo-agent, typesafe, workers-ai-systemone, local-inference | ❌ |
+| Non-chat APIs: openai/openrouter images, video, embeddings, rerank, transcriptions, speech (xai-tts, openai-speech), decisions | ❌ |
 | Codex websocket transport, Anthropic server-side fallback/compaction | ❌ |
 
 ## Agent & session
