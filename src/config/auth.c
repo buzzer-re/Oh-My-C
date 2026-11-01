@@ -343,7 +343,7 @@ int auth_oauth_code_flow(const actx_t *c, const json_t *login, json_t **cred_out
         free(m);
     }
     bool pkce = json_get_bool(login, "pkce", true);
-    unsigned char vb[32];
+    unsigned char vb[96]; /* generatePKCE: 96 random bytes -> 128-char verifier */
     rand_bytes(vb, sizeof vb);
     char *verifier = base64url_encode(vb, sizeof vb);
     char *challenge = pkce_challenge(verifier);

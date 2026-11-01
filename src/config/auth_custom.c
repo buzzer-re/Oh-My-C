@@ -319,6 +319,12 @@ out:
 /* Cursor (registry/oauth/cursor.ts)                                                        */
 /* ======================================================================================= */
 
+/* api2.cursor.sh URL for path; OMC_TEST_CURSOR_API (test hook shared with the Cursor provider) replaces the origin */
+static char *cursor_api(const char *path) {
+    const char *b = env_get("OMC_TEST_CURSOR_API");
+    return xasprintf("%s%s", b ? b : "https://api2.cursor.sh", path);
+}
+
 static char *cursor_sub(const char *tok) {
     json_t *p = auth_jwt_payload(tok);
     char *s = json_get_str(p, "sub") ? trimd(json_get_str(p, "sub")) : NULL;
@@ -340,8 +346,10 @@ static void cursor_email(const actx_t *c, json_t *cred) {
     http_headers_set(&h, "Connect-Protocol-Version", "1");
     http_headers_set(&h, "Content-Type", "application/json");
     http_resp_t r;
-    if (auth_http("POST", "https://api2.cursor.sh/aiserver.v1.DashboardService/GetMe", &h, "{}", 3000, c, &r) == 0 && r.status >= 200 &&
-        r.status < 300) {
+    char *gm = cursor_api("/aiserver.v1.DashboardService/GetMe");
+    int grc = auth_http("POST", gm, &h, "{}", 3000, c, &r);
+    free(gm);
+    if (grc == 0 && r.status >= 200 && r.status < 300) {
         json_t *j = body_json(&r);
         if (str_eq(json_get_str(j, "authId"), sub) && json_get_str(j, "email")) {
             char *e = trimd(json_get_str(j, "email"));
@@ -356,7 +364,7 @@ static void cursor_email(const actx_t *c, json_t *cred) {
 }
 
 static int cursor_login(const actx_t *c, alogin_t *out, char **err) {
-    unsigned char vb[32], dig[SHA256_DIGEST_LENGTH];
+    unsigned char vb[96], dig[SHA256_DIGEST_LENGTH]; /* generatePKCE: 96 random bytes */
     rand_bytes(vb, sizeof vb);
     char *verifier = base64url_encode(vb, sizeof vb);
     SHA256((const unsigned char *)verifier, strlen(verifier), dig);
@@ -368,7 +376,9 @@ static int cursor_login(const actx_t *c, alogin_t *out, char **err) {
     int64_t scale = scale_ms();
     double delay = (double)scale;
     int errors = 0, rc = -1;
-    char *poll_url = xasprintf("https://api2.cursor.sh/auth/poll?uuid=%s&verifier=%s", uuid, verifier);
+    char *pp = xasprintf("/auth/poll?uuid=%s&verifier=%s", uuid, verifier);
+    char *poll_url = cursor_api(pp);
+    free(pp);
     for (int attempt = 0; attempt < 150 && rc != 0 && !*err; attempt++) {
         if (!actx_sleep(c, (int64_t)delay)) {
             cancelled(c, err);
@@ -415,7 +425,9 @@ static int cursor_refresh(const json_t *stored, json_t **out, char **err) {
     http_headers_t h = {0};
     http_headers_set(&h, "Content-Type", "application/json");
     http_resp_t r;
-    int rc = auth_http("POST", "https://api2.cursor.sh/oauth/token", &h, body, 30000, NULL, &r);
+    char *tu = cursor_api("/oauth/token");
+    int rc = auth_http("POST", tu, &h, body, 30000, NULL, &r);
+    free(tu);
     http_headers_free(&h);
     free(body);
     if (rc != 0 || r.status < 200 || r.status >= 300) {
