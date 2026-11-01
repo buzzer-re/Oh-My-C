@@ -9,6 +9,12 @@ Display commands (used by tests/tui/compare.sh to exercise transcript views):
   - "slow:<secs>:<text>"     wait <secs> (loader visible), then stream <text> slowly
   - "fail:<status>:<msg>"    reply with an HTTP error (non-retryable for 400/401/403/404)
   - "streamfail:<text>"      stream <text>, then an in-stream error chunk
+Eval helper side requests (omc eval completion()/judge()):
+  - completion (system "You are a helpful assistant." or a forced `respond` tool) -> "completion says: <prompt>", or a
+    `respond` call whose fields echo the prompt (strings) / 42 (numbers) / true (booleans)
+  - judgment (user text "State:\n...") -> keyword answers: choice = first option label named in the state (else the
+    first option), yes/no = YES when the state contains "yes", score = first digit in the state (else 0); a state
+    containing SLOWJUDGE answers after 1.5 s, FAILJUDGE answers gibberish (unparseable even on retries)
 $MOCK_DELAY (seconds, default 0) is slept between streamed chunks.
 Every request body is appended to $MOCK_LOG (JSONL) for assertions."""
 import json, os, sys, time
@@ -21,6 +27,27 @@ FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tui",
 def sse(handler, obj):
     handler.wfile.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
     handler.wfile.flush()
+
+def judge_reply(system, user):
+    import re as _re
+    state = user.split("\n\n")[0][len("State:\n"):] if user.startswith("State:\n") else user
+    if "SLOWJUDGE" in state: time.sleep(1.5)
+    if "FAILJUDGE" in state: return "I cannot decide"
+    low = state.lower()
+    def answer(section):
+        labels = _re.findall(r"^- `([^`]+)`", section, _re.M)
+        if "Levels, lowest to highest" in section:
+            m = _re.search(r"\b(\d)\b", state)
+            return str(min(int(m.group(1)), len(labels) - 1) if m else 0)
+        if labels:
+            for l in labels:
+                if _re.search(r"\b" + _re.escape(l.lower()) + r"\b", low): return l
+            return labels[0]
+        return "YES" if "yes" in low else "NO"
+    parts = _re.split(r"^Question `([^`]+)`: ", system, flags=_re.M)
+    if len(parts) > 1:
+        return "\n".join(f"{parts[i]}: {answer(parts[i + 1])}" for i in range(1, len(parts), 2))
+    return answer(system)
 
 def text_of(msg):
     c = msg.get("content")
@@ -57,7 +84,26 @@ class H(BaseHTTPRequestHandler):
         base = {"id": "c1", "object": "chat.completion.chunk", "model": body.get("model")}
         sysc = text_of(msgs[0]) if msgs and msgs[0].get("role") in ("system", "developer") else ""
         advisor = "peer-shadow" in sysc
-        if advisor and last.get("role") == "tool":
+        tnames = [t.get("function", {}).get("name") for t in body.get("tools") or []]
+        lu_all = text_of(last) if last.get("role") == "user" else ""
+        side = None
+        if last.get("role") == "user" and "respond" in tnames:
+            params = next(t["function"].get("parameters") or {} for t in body["tools"] if t["function"]["name"] == "respond")
+            vals = {"string": lu_all, "number": 42, "integer": 42, "boolean": True}
+            side = ("call", "respond", {k: vals.get(v.get("type"), lu_all) for k, v in (params.get("properties") or {}).items()})
+        elif last.get("role") == "user" and sysc == "You are a helpful assistant.":
+            side = ("say", "completion says: " + lu_all)
+        elif last.get("role") == "user" and lu_all.startswith("State:\n"):
+            ans = judge_reply(sysc, lu_all)
+            side = ("call", "submit_judgment", {"answer": ans}) if "submit_judgment" in tnames else ("say", ans)
+        if side and side[0] == "say":
+            chunks.append({**base, "choices": [{"index": 0, "delta": {"content": side[1]}}]})
+            chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+        elif side:
+            a = json.dumps(side[2])
+            chunks.append({**base, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_s", "type": "function", "function": {"name": side[1], "arguments": a}}]}}]})
+            chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
+        elif advisor and last.get("role") == "tool":
             chunks.append({**base, "choices": [{"index": 0, "delta": {"content": "noted"}}]})
             chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
         elif last.get("role") == "tool":

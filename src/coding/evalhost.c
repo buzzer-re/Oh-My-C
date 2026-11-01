@@ -498,7 +498,7 @@ static bool image_mime_ok(const char *m) {
     return str_eq(m, "image/png") || str_eq(m, "image/jpeg") || str_eq(m, "image/gif") || str_eq(m, "image/webp");
 }
 
-static json_t *image_block(const char *data, const char *mime, const json_t *detail) {
+static json_t *judge_image_block(const char *data, const char *mime, const json_t *detail) {
     json_t *b = json_obj();
     json_set_str(b, "type", "image");
     json_set_str(b, "data", data);
@@ -541,7 +541,7 @@ static json_t *load_images(const json_t *v, const char *cwd, char **err) {
                     else if (!mime) *err = xasprintf("invalid judgment image source: images[%zu] path %s is not a supported image", i, q);
                     else {
                         char *b64 = base64_encode(data, n);
-                        json_push(out, image_block(b64, mime, NULL));
+                        json_push(out, judge_image_block(b64, mime, NULL));
                         free(b64);
                     }
                     free(data);
@@ -562,7 +562,7 @@ static json_t *load_images(const json_t *v, const char *cwd, char **err) {
                                  "mimeType, detail? } with valid base64 data, an image MIME type, and detail auto, low, high, "
                                  "or original", i);
             } else {
-                json_push(out, image_block(data, mime, detail));
+                json_push(out, judge_image_block(data, mime, detail));
             }
             free(raw);
         }
