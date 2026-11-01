@@ -59,4 +59,14 @@ with `omc_send()`, receive responses and agent events through one callback. `omc
 turn synchronously, `omc_register_tool()` adds native tools implemented by the host, and
 `omc_main()` runs the whole CLI/TUI in-process. See `examples/embed.c`.
 
-See [docs/status.md](docs/status.md) for what is and is not implemented yet.
+## Documentation
+
+Architecture and design docs live in [docs/](docs/index.md): how omc is layered and how each module
+maps to omp ([architecture](docs/architecture.md)), [build and embedded assets](docs/build.md), the
+[provider layer](docs/ai.md), the [agent runtime](docs/agent.md), [tools](docs/tools.md), the
+[terminal UI](docs/tui.md), [run modes and the library API](docs/modes.md), [testing](docs/testing.md)
+and [security](docs/security.md). The same files are embedded in the binary and readable by the
+model as `omc://`.
+
+See [docs/status.md](docs/status.md) for what is and is not implemented yet, and
+[docs/CONVENTIONS.md](docs/CONVENTIONS.md) for coding rules.
