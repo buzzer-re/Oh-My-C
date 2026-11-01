@@ -137,3 +137,15 @@ To refresh one: reproduce the screen with `compare.sh`, capture omp with `shot`,
   `make test` guards it without omp.
 - Never use real credentials or the user's agent dir. Always use a temp `OMC_CODING_AGENT_DIR` /
   `PI_CODING_AGENT_DIR`.
+
+## Image pipeline
+
+- `tests/test_img.c`, `test_img_jpeg.c`, `test_img_webp.c`: codecs against Pillow-decoded references generated
+  at test time by `tests/img_fixtures.py` (PNG exact, GIF / lossless WebP exact, JPEG / lossy WebP within a
+  tolerance), malformed-input fuzzing, encoder round trips (own decoder + Pillow), and the `resizeImage` /
+  `loadImageInput` ports.
+- `tests/e2e/images.sh` (sourced by `run.sh`): read-tool notes and the wire image (1568x882, <= 500 KiB),
+  undecodable and magic-byte detection, text-only metadata, the Anthropic per-image clamp against
+  `mock_providers.py`, session blob persistence and resume.
+- TUI: `CMP_IMAGES=1 tests/tui/compare.sh start` + `compare.sh paste <path>` reproduces a pasted / dropped image
+  path in both apps (chips, band, transcript, request).

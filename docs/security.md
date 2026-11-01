@@ -107,3 +107,12 @@ strings. In practice:
 When changing a parser, protocol or path-handling routine: keep the explicit caps, add a fuzz or
 corruption case next to the existing ones (`test_readfmt`, `test_ws`, `test_text`), and note
 security-relevant behavior here.
+
+## Image codecs
+
+`src/img/` decodes files and payloads the model or a user hands omc (read tool, pasted paths, clipboard, MCP
+results, resumed sessions). Every decoder bounds-checks each read, rejects images over 65,535 px per side or
+2^27 pixels before allocating, caps scan / chunk / LZW / Huffman structures to their spec limits and never
+recurses on input. The test suites fuzz each format with byte flips and truncations (run under ASan/UBSan
+during development). Session blob references are accepted only as `blob:sha256:<64 lowercase hex>`, so a
+crafted session line cannot read files outside the blob directory.
