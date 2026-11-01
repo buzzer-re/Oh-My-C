@@ -13,7 +13,9 @@
 # Env: CMP_DIR (default: $TMPDIR/omc-tuicmp), OMP_BIN (default: omp), CMP_SETUP=1 keeps omp's wizard,
 #      CMP_NOMODEL=1 (no models.yml / default model: the no-credentials first screen),
 #      CMP_CONFIG (extra config.yml lines for both, e.g. 'composer:\n  shape: box'),
-#      CMP_NAME (tmux session prefix, default cmp; set a unique one when several harnesses run at once).
+#      CMP_NAME (tmux session prefix, default cmp; set a unique one when several harnesses run at once),
+#      CMP_WAIT (seconds to wait after launching, default 6).
+# Without CMP_SETUP both config.yml files start with setupVersion: 2 (both apps past the first-run wizard).
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 D=${CMP_DIR:-${TMPDIR:-/tmp}/omc-tuicmp}
@@ -37,7 +39,8 @@ providers:
         maxTokens: 4096
 YML
     printf 'modelRoles:\n  default: mock/mock-1\nstartup:\n  checkUpdate: false\n' > "$1/config.yml"
-    [ -n "${CMP_CONFIG:-}" ] && printf '%b\n' "$CMP_CONFIG" >> "$1/config.yml"; true
+    [ -n "${CMP_CONFIG:-}" ] && printf '%b\n' "$CMP_CONFIG" >> "$1/config.yml"
+    [ -n "${CMP_SETUP:-}" ] || printf 'setupVersion: 2\n' >> "$1/config.yml"; true
 }
 launch() { # cols rows extra-args...
     local cols=$1 rows=$2; shift 2
@@ -55,7 +58,7 @@ start)
     MOCK_LOG="$D/req.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $port > "$D/mock.log" 2>&1 & echo $! > "$D/mock.pid"
     for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null && break; sleep 0.1; done
     launch "$cols" "$rows"
-    sleep 6
+    sleep "${CMP_WAIT:-6}"
     if [ -z "${CMP_SETUP:-}" ]; then
         # a fresh omp agent dir opens the 5-step first-run wizard; Esc skips each step
         for _ in 1 2 3 4 5; do

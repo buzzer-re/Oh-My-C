@@ -1123,6 +1123,16 @@ static void initial_prompt_cb(void *ud) {
     free(j);
 }
 
+static void setup_done_cb(void *ud) {
+    if (g_ui && g_ui->welcome) ui_welcome_play_intro(g_ui->welcome, g_ui->tui); /* playWelcomeIntro */
+    if (ud) initial_prompt_cb(ud);
+}
+
+static void setup_start_cb(void *ud) {
+    job_t *j = ud;
+    ui_setup_run(g_ui, setup_done_cb, j);
+}
+
 int run_interactive_mode(app_t *a, const char *initial) {
     ui_t u = {0};
     g_ui = &u;
@@ -1131,12 +1141,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     pthread_mutex_init(&u.mu, NULL);
     pthread_cond_init(&u.ask_cv, NULL);
     hmap_init(&u.tools);
-    char *terr = NULL;
-    const char *tname = settings_str(tui_detect_theme_name() && !strcmp(tui_detect_theme_name(), "light") ? "theme.light" : "theme.dark",
-                                     tui_detect_theme_name());
-    tui_theme_t *th = tui_theme_load(tname ? tname : "dark", tui_detect_color_mode(), &terr);
-    if (th) tui_theme_set(th);
-    free(terr);
+    ui_apply_appearance(); /* theme.dark/light (titanium/light), symbolPreset, colorBlindMode */
     u.tui = tui_new(NULL);
     if (!u.tui) {
         fprintf(stderr, "omc: cannot initialize terminal (not a TTY?). Use -p for print mode.\n");
@@ -1182,13 +1187,20 @@ int run_interactive_mode(app_t *a, const char *initial) {
     a->wake_ud = &u;
     a->env->ui.ask = ui_ask;
     a->env->ui.ud = &u;
+    job_t *init_job = NULL;
     if (initial) {
-        job_t *j = xcalloc(1, sizeof(*j));
-        j->u = &u;
-        j->text = xstrdup(initial);
-        tui_post(u.tui, initial_prompt_cb, j);
+        init_job = xcalloc(1, sizeof(*init_job));
+        init_job->u = &u;
+        init_job->text = xstrdup(initial);
     }
-    if (u.welcome) ui_welcome_play_intro(u.welcome, u.tui);
+    /* first-run setup wizard (omp main.ts: stale setupVersion, not resuming, TTY); the welcome intro
+     * plays after it instead of at startup */
+    if (ui_setup_pending(a->opts.resume || a->opts.continue_recent)) {
+        tui_post(u.tui, setup_start_cb, init_job);
+    } else {
+        if (u.welcome) ui_welcome_play_intro(u.welcome, u.tui);
+        if (init_job) tui_post(u.tui, initial_prompt_cb, init_job);
+    }
     int code = tui_run(u.tui);
     if (u.worker_running) {
         app_abort(a);

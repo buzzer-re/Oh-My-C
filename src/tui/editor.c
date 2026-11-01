@@ -13,7 +13,7 @@ enum { ACT_NONE, ACT_TYPE, ACT_OTHER };
 
 void tui_ac_result_add(tui_ac_result_t *r, const char *value, const char *label, const char *description) {
     tui_select_item_t it = {xstrdup(value ? value : ""), label ? xstrdup(label) : NULL,
-                            description && *description ? xstrdup(description) : NULL};
+                            description && *description ? xstrdup(description) : NULL, NULL, NULL, false};
     vec_push(&r->items, it);
 }
 

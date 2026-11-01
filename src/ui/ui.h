@@ -20,6 +20,7 @@
 #include "tui/render.h"
 #include "tui/symbols.h"
 #include "tui/theme.h"
+#include "ui/overlays.h"
 
 #include <pthread.h>
 

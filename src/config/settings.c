@@ -7,7 +7,7 @@
 /* Built-in defaults mirroring omp's registered setting defaults (subset that omc reads). */
 static const char *DEFAULTS_JSON =
     "{"
-    "\"defaultThinkingLevel\":\"medium\","
+    "\"defaultThinkingLevel\":\"high\","
     "\"hideThinkingBlock\":false,"
     "\"steeringMode\":\"one-at-a-time\","
     "\"followUpMode\":\"one-at-a-time\","

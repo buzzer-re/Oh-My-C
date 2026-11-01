@@ -24,6 +24,20 @@ int auth_login(const char *provider, const auth_io_t *io, char **err);
 /* OAuth code+PKCE login from a runtime descriptor (same shape as catalog auth descriptors); the
  * credential is stored under `key` together with the descriptor so it can refresh itself. */
 int auth_login_descriptor(const char *key, const json_t *descriptor, const auth_io_t *io, char **err);
+
+/* TUI-friendly variant: never reads stdin unless read_stdin; reports the authorize URL through
+ * on_auth (launch_url: optional local /launch shortcut), polls poll_code (owned pasted code / redirect URL, or NULL) and stops when *abort != 0.
+ * Runs on the calling (worker) thread; callbacks are invoked on it. */
+typedef struct {
+    void (*on_auth)(void *ud, const char *url, const char *launch_url, const char *instructions);
+    void (*on_progress)(void *ud, const char *msg);
+    char *(*poll_code)(void *ud);
+    volatile int *abort;
+    bool read_stdin;
+    void *ud;
+    const auth_io_t *legacy_io; /* internal: auth_login's console io */
+} auth_login_hooks_t;
+int auth_login_hooked(const char *provider, const auth_login_hooks_t *hooks, char **err);
 json_t *auth_oauth_providers(void); /* borrowed array of descriptors with login.kind == oauth-code */
 
 #endif

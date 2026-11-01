@@ -67,12 +67,31 @@ void tui_loader_set_message(tui_loader_t *l, const char *message);
 void tui_loader_start(tui_loader_t *l); /* starts the animation timer (UI thread) */
 void tui_loader_stop(tui_loader_t *l);
 
-/* ---------- SelectList: filterable, scrolling list ---------- */
+/* ---------- SelectList: filterable, scrolling list (port of omp components/select-list.ts) ----------
+ * Rows: `<cursor> [icon] label<pad to primary column>description`, the selected row in accent, the
+ * description muted; a scrollbar column (muted track │ / accent thumb █) appears when rows overflow
+ * max_visible; typing edits a search query (fuzzy, upstream ranking) when the list overflows
+ * (search policy "overflow", default) and a status row shows "  Type to search" / "  Search: q". */
 typedef struct {
     char *value;
     char *label;       /* NULL -> value */
     char *description; /* optional */
+    char *icon;        /* optional glyph column */
+    char *hint;        /* optional extra search text */
+    bool disabled;     /* rendered muted, skipped by navigation */
 } tui_select_item_t;
+
+enum { TUI_SELECT_SEARCH_OVERFLOW, TUI_SELECT_SEARCH_ALWAYS, TUI_SELECT_SEARCH_NEVER };
+
+typedef struct {
+    int min_primary, max_primary; /* primary (label) column bounds; 0 -> 32 */
+    int search;                   /* TUI_SELECT_SEARCH_* */
+    bool no_wrap_navigation;      /* up/down stop at the edges */
+    bool wrap_description;        /* wrap long descriptions onto extra rows */
+    int max_description_rows;     /* cap for wrapped descriptions (0 = none) */
+    const char *empty_text;       /* default "No items" */
+    const char *no_match_text;    /* default "No matching items" */
+} tui_select_layout_t;
 
 typedef struct tui_select_list tui_select_list_t;
 typedef void (*tui_select_fn)(tui_select_list_t *l, const tui_select_item_t *item, void *ud);
@@ -84,8 +103,10 @@ struct tui_select_list {
     VEC(size_t) visible; /* indices into items after filtering */
     size_t selected;     /* index into visible */
     int max_visible;
-    char *filter;
-    bool filter_enabled; /* typed text edits the filter (default true) */
+    char *filter;        /* current search query (NULL = none) */
+    bool filter_enabled; /* false forces search policy "never" (editor autocomplete) */
+    tui_select_layout_t layout;
+    char *cursor;        /* cursor glyph captured at creation (nav.cursor) */
     tui_select_fn on_select;
     tui_select_fn on_change;
     tui_select_cancel_fn on_cancel;
@@ -94,10 +115,16 @@ struct tui_select_list {
 
 tui_select_list_t *tui_select_list_new(int max_visible);
 void tui_select_list_add(tui_select_list_t *l, const char *value, const char *label, const char *description);
+/* add with an icon and disabled flag; returns the item (owned by the list) for further fields */
+tui_select_item_t *tui_select_list_add_item(tui_select_list_t *l, const char *value, const char *label,
+                                            const char *description, const char *icon, bool disabled);
 void tui_select_list_clear(tui_select_list_t *l);
 void tui_select_list_set_filter(tui_select_list_t *l, const char *filter);
 const tui_select_item_t *tui_select_list_selected(const tui_select_list_t *l);
 void tui_select_list_move(tui_select_list_t *l, int delta, bool wrap);
+void tui_select_list_set_selected(tui_select_list_t *l, size_t visible_index);
+bool tui_select_list_select_value(tui_select_list_t *l, const char *value);
+void tui_select_list_set_max_visible(tui_select_list_t *l, int rows);
 size_t tui_select_list_visible_count(const tui_select_list_t *l);
 /* Subsequence fuzzy score (higher is better); -1 when `query` doesn't match `text`. */
 int tui_fuzzy_score(const char *query, const char *text);

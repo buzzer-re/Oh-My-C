@@ -765,7 +765,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
         }
         has_eff = true;
     }
-    if (!has_eff) effort_parse(settings_str("defaultThinkingLevel", "medium"), &eff);
+    if (!has_eff) effort_parse(settings_str("defaultThinkingLevel", "high"), &eff);
     a->thinking = eff;
     /* environment & discovery */
     a->env = tool_env_new(a->cwd);

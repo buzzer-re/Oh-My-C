@@ -699,8 +699,11 @@ static void test_select(void) {
     }
     CHECK(tui_select_list_visible_count(l) == 1);
     CHECK_STR(tui_select_list_selected(l)->value, "banana");
-    tui_select_list_set_filter(l, NULL);
+    tui_select_list_set_filter(l, NULL); /* upstream setQuery retains the selected item */
+    CHECK_STR(tui_select_list_selected(l)->value, "banana");
     tui_select_list_move(l, -1, true);
+    CHECK_STR(tui_select_list_selected(l)->value, "apple");
+    tui_select_list_move(l, -1, true); /* wraps */
     CHECK_STR(tui_select_list_selected(l)->value, "date");
     tui_component_destroy(&l->base);
     CHECK(tui_fuzzy_score("mdl", "model") > 0);
