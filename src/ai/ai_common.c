@@ -414,6 +414,25 @@ char *ai_message_text(const json_t *msg) {
 
 /* ---------- HTTP helpers ---------- */
 
+char *ai_rewrite_url(const char *url) {
+    const char *rw = env_get("OMC_PROVIDER_URL_REWRITE");
+    char *out = NULL;
+    if (rw && *rw && url) {
+        strvec_t parts = str_split(rw, ",");
+        for (size_t i = 0; i < parts.n && !out; i++) {
+            char *eq = strchr(parts.v[i], '=');
+            if (!eq) continue;
+            *eq = 0;
+            char *from = str_trim(parts.v[i]), *to = str_trim(eq + 1);
+            if (*from && str_starts(url, from)) out = xasprintf("%s%s", to, url + strlen(from));
+            free(from);
+            free(to);
+        }
+        strvec_free(&parts);
+    }
+    return out ? out : xstrdup(url ? url : "");
+}
+
 void ai_apply_headers(http_headers_t *h, const ai_model_t *m, const ai_stream_opts_t *o) {
     const char *k;
     json_t *v;
@@ -519,8 +538,8 @@ static int on_body(void *ud, const char *data, size_t len) {
 
 static bool retryable_status(int s) { return s == 408 || s == 409 || s == 425 || s == 429 || s == 500 || s == 502 || s == 503 || s == 504 || s == 520 || s == 522 || s == 524 || s == 529; }
 
-static int stream_post(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
-                       ai_sse_cb sse_cb, http_data_cb raw_cb, void *ud, int *status, char **err, ai_post_ex_t *ex) {
+static int stream_post_url(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
+                           ai_sse_cb sse_cb, http_data_cb raw_cb, void *ud, int *status, char **err, ai_post_ex_t *ex) {
     if (!http_headers_get(headers, "Content-Type")) http_headers_add(headers, "Content-Type", "application/json");
     if (sse_cb && !http_headers_get(headers, "Accept")) http_headers_add(headers, "Accept", "text/event-stream");
     int max_retries = opts && opts->max_retries > 0 ? opts->max_retries : 0;
@@ -605,6 +624,14 @@ static int stream_post(const char *url, http_headers_t *headers, const char *bod
             sleep_ms(50);
         }
     }
+}
+
+static int stream_post(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
+                       ai_sse_cb sse_cb, http_data_cb raw_cb, void *ud, int *status, char **err, ai_post_ex_t *ex) {
+    char *u = ai_rewrite_url(url);
+    int rc = stream_post_url(u, headers, body, opts, sse_cb, raw_cb, ud, status, err, ex);
+    free(u);
+    return rc;
 }
 
 int ai_sse_post(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,

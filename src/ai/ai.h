@@ -228,6 +228,9 @@ int ai_sse_post_ex(const char *url, http_headers_t *headers, const char *body, c
 /* Raw streaming POST (for newline-delimited JSON etc.). */
 int ai_stream_post(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
                    http_data_cb on_data, void *ud, int *status, char **err);
+/* Test-only: OMC_PROVIDER_URL_REWRITE ("from=to,from=to", prefix match) redirects provider requests (applied by
+ * ai_sse_post / ai_stream_post; providers making their own HTTP calls apply it too). Owned. */
+char *ai_rewrite_url(const char *url);
 /* Extract a human-readable error from a provider error body. Owned. */
 char *ai_extract_error(int status, const char *body);
 /* Copy model headers + option headers into h. */
