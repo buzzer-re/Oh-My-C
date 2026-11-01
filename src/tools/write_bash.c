@@ -655,6 +655,7 @@ agent_tool_t *tool_wait_new(tool_env_t *env) {
     json_t *s = json_parse_str("{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("wait", "Wait", desc, s, wait_execute);
     free(desc);
+    t->intent_mode = INTENT_OPTIONAL; /* wait.ts: intent = "optional" */
     t->ud = env;
     return t;
 }
