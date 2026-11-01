@@ -957,6 +957,23 @@ static void read_virtual(tool_env_t *env, const char *url, const char *text, sel
     read_text(&tmp, url, url, text, strlen(text), sel, out);
 }
 
+/* pr:// and issue:// (github.c renders; selectors page the markdown like any remote resource) */
+static int read_github(tool_env_t *env, const char *path, tool_result_t *out) {
+    char *work = xstrdup(path);
+    selector_t sel;
+    memset(&sel, 0, sizeof sel);
+    strip_sel(work + (str_starts(work, "pr://") ? 5 : 8), &sel);
+    sel.entity = "resource";
+    char *content = NULL, *err = NULL;
+    if (github_resolve(env, work, &content, &err) != 0) tool_result_error(out, "%s", err ? err : "GitHub read failed");
+    else read_virtual(env, work, content, &sel, out);
+    free(content);
+    free(err);
+    free(work);
+    vec_free(&sel.ranges);
+    return 0;
+}
+
 /* omc:// harness docs (port of omp:// docs): README.md and docs/ (*.md) embedded at build time */
 static bool omc_doc_name(const char *embed_name, const char **doc) {
     if (!strcmp(embed_name, "README.md")) {
@@ -1069,7 +1086,7 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         return web_read_url(env, path, ctx->cancel, out);
     }
     if (xdev_read(ctx ? ctx->agent : NULL, path, out)) return 0;
-    if (str_starts(path, "pr://") || str_starts(path, "issue://")) return github_read(env, path, out);
+    if (str_starts(path, "pr://") || str_starts(path, "issue://")) return read_github(env, path, out);
     if (str_starts(path, "ssh://")) return read_ssh(env, path, out);
     if (vurl_is(path)) return vurl_read(env, path, out);
     if (str_starts(path, "omc://")) return read_omc_docs(env, path, out);
