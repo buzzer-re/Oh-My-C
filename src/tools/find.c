@@ -87,19 +87,117 @@ static size_t count_occ(const char *hay, const char *needle) {
     return c;
 }
 
-static bool is_ws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'; }
+/* byte length of the JS whitespace character (String#trim set) starting at s, 0 when none */
+static size_t ws_len(const char *s) {
+    unsigned char c = (unsigned char)s[0];
+    if (c == ' ' || (c >= 0x09 && c <= 0x0d)) return 1;
+    if (c < 0x80) return 0;
+    const unsigned char *u = (const unsigned char *)s;
+    if (u[0] == 0xC2 && u[1] == 0xA0) return 2;                                 /* U+00A0 */
+    if (u[0] == 0xE1 && u[1] == 0x9A && u[2] == 0x80) return 3;                 /* U+1680 */
+    if (u[0] == 0xE2 && u[1] == 0x80 && ((u[2] >= 0x80 && u[2] <= 0x8A) || u[2] == 0xA8 || u[2] == 0xA9 || u[2] == 0xAF))
+        return 3;                                                               /* U+2000-200A, 2028, 2029, 202F */
+    if (u[0] == 0xE2 && u[1] == 0x81 && u[2] == 0x9F) return 3;                 /* U+205F */
+    if (u[0] == 0xE3 && u[1] == 0x80 && u[2] == 0x80) return 3;                 /* U+3000 */
+    if (u[0] == 0xEF && u[1] == 0xBB && u[2] == 0xBF) return 3;                 /* U+FEFF */
+    return 0;
+}
+
+/* length of the trailing JS whitespace run of s[0..n) */
+static size_t ws_tail(const char *s, size_t n) {
+    size_t t = 0;
+    while (n > t) {
+        size_t k = n - t, st = k - 1;
+        while (st > 0 && ((unsigned char)s[st] & 0xC0) == 0x80) st--;
+        size_t l = ws_len(s + st);
+        if (!l || st + l != k) break;
+        t += l;
+    }
+    return t;
+}
 
 static bool blank(const char *s) {
-    for (; *s; s++)
-        if (!is_ws(*s)) return false;
+    for (size_t l; *s; s += l)
+        if (!(l = ws_len(s))) return false;
     return true;
 }
 
 static char *trim_dup(const char *s) {
-    while (is_ws(*s)) s++;
+    for (size_t l; *s && (l = ws_len(s));) s += l;
     size_t n = strlen(s);
-    while (n && is_ws(s[n - 1])) n--;
+    n -= ws_tail(s, n);
     return xstrndup(s, n);
+}
+
+static void put_utf8(sb_t *b, uint32_t cp) {
+    if (cp < 0x80) sb_putc(b, (char)cp);
+    else if (cp < 0x800) {
+        sb_putc(b, (char)(0xC0 | (cp >> 6)));
+        sb_putc(b, (char)(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        sb_putc(b, (char)(0xE0 | (cp >> 12)));
+        sb_putc(b, (char)(0x80 | ((cp >> 6) & 0x3F)));
+        sb_putc(b, (char)(0x80 | (cp & 0x3F)));
+    } else {
+        sb_putc(b, (char)(0xF0 | (cp >> 18)));
+        sb_putc(b, (char)(0x80 | ((cp >> 12) & 0x3F)));
+        sb_putc(b, (char)(0x80 | ((cp >> 6) & 0x3F)));
+        sb_putc(b, (char)(0x80 | (cp & 0x3F)));
+    }
+}
+
+/* decode one code point (invalid bytes read as themselves) */
+static uint32_t next_cp(const char *s, size_t *len) {
+    const unsigned char *u = (const unsigned char *)s;
+    size_t l = u[0] < 0x80 ? 1 : (u[0] >> 5) == 6 ? 2 : (u[0] >> 4) == 14 ? 3 : (u[0] >> 3) == 30 ? 4 : 1;
+    for (size_t k = 1; k < l; k++)
+        if ((u[k] & 0xC0) != 0x80) l = 1;
+    uint32_t cp = l == 1 ? u[0] : l == 2 ? u[0] & 0x1F : l == 3 ? u[0] & 0x0F : u[0] & 0x07;
+    for (size_t k = 1; k < l; k++) cp = (cp << 6) | (u[k] & 0x3F);
+    *len = l;
+    return cp;
+}
+
+/* String#toLowerCase for ASCII, Latin-1, Latin Extended-A, Greek and Cyrillic capitals */
+static char *js_lower(const char *s) {
+    sb_t b = SB_INIT;
+    for (size_t l; *s; s += l) {
+        uint32_t c = next_cp(s, &l);
+        if (l == 1 && c >= 0x80) { /* invalid byte: copy through */
+            sb_putc(&b, *s);
+            continue;
+        }
+        if (c >= 'A' && c <= 'Z') c += 32;
+        else if (c >= 0xC0 && c <= 0xDE && c != 0xD7) c += 32;
+        else if (c == 0x130) {
+            sb_putc(&b, 'i');
+            c = 0x307;
+        } else if ((c >= 0x100 && c <= 0x137 && !(c & 1)) || (c >= 0x14A && c <= 0x177 && !(c & 1))) c += 1;
+        else if ((c >= 0x139 && c <= 0x148 && (c & 1)) || (c >= 0x179 && c <= 0x17E && (c & 1))) c += 1;
+        else if (c == 0x178) c = 0xFF;
+        else if (c >= 0x391 && c <= 0x3A9 && c != 0x3A2) c += 32;
+        else if (c == 0x386) c = 0x3AC;
+        else if (c >= 0x388 && c <= 0x38A) c += 37;
+        else if (c == 0x38C) c = 0x3CC;
+        else if (c == 0x38E || c == 0x38F) c += 63;
+        else if (c >= 0x410 && c <= 0x42F) c += 32;
+        else if (c >= 0x400 && c <= 0x40F) c += 80;
+        put_utf8(&b, c);
+    }
+    return sb_detach(&b);
+}
+
+/* \p{L}, \p{N} or '_' (approximation outside ASCII: everything but common punctuation/symbol/space blocks) */
+static bool token_cp(uint32_t c) {
+    if (c < 0x80) return isalnum((int)c) || c == '_';
+    if (c <= 0xBF) return c == 0xAA || c == 0xB2 || c == 0xB3 || c == 0xB5 || c == 0xB9 || c == 0xBA || (c >= 0xBC && c <= 0xBE);
+    if (c == 0xD7 || c == 0xF7) return false;
+    if ((c >= 0x2000 && c <= 0x206F) || (c >= 0x2190 && c <= 0x2BFF) || (c >= 0x3000 && c <= 0x3003) ||
+        (c >= 0x3008 && c <= 0x3020) || c == 0xFEFF || (c >= 0xFF01 && c <= 0xFF0F) || (c >= 0xFF1A && c <= 0xFF20) ||
+        (c >= 0xFF3B && c <= 0xFF40) || (c >= 0xFF5B && c <= 0xFF65) || (c >= 0x1F000 && c <= 0x1FAFF) ||
+        (c >= 0xE000 && c <= 0xF8FF))
+        return false;
+    return true;
 }
 
 /* JS Number#toFixed: round half away from zero on the exact decimal value of the double */
@@ -225,20 +323,27 @@ static bool stopword(const char *w) {
     return false;
 }
 
+static size_t utf16_units(const char *s, size_t n) {
+    size_t u = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if ((c & 0xC0) != 0x80) u += c >= 0xF0 ? 2 : 1;
+    }
+    return u;
+}
+
 /* cheap stem: spawned -> spawn, compacted -> compact (base must keep >= 4 UTF-16 units) */
 static void stem(char *t) {
     static const char *const SUF[] = {"ing", "ed", "es", "s"};
     size_t n = strlen(t);
     for (size_t i = 0; i < 4; i++) {
         size_t l = strlen(SUF[i]);
-        if (n >= l && !strcmp(t + n - l, SUF[i]) && n - l >= 4) {
+        if (n >= l && !strcmp(t + n - l, SUF[i]) && utf16_units(t, n - l) >= 4) {
             t[n - l] = 0;
             return;
         }
     }
 }
-
-static bool token_byte(unsigned char c) { return isalnum(c) || c == '_' || c >= 0x80; }
 
 static void derive_keywords(const char *query, const json_t *extra, strvec_t *out) {
     sb_t rest = SB_INIT;
@@ -254,7 +359,7 @@ static void derive_keywords(const char *query, const json_t *extra, strvec_t *ou
         bool closed = query[j] == c;
         char *raw = xstrndup(query + i + 1, j - i - 1);
         char *t = trim_dup(raw);
-        char *phrase = str_lower(t);
+        char *phrase = js_lower(t);
         free(raw);
         free(t);
         if (closed && strlen(phrase) >= 3) {
@@ -267,13 +372,13 @@ static void derive_keywords(const char *query, const json_t *extra, strvec_t *ou
         i = closed ? j + 1 : j;
     }
     const char *s = sb_cstr(&rest);
-    for (size_t i = 0;;) {
-        while (s[i] && !token_byte((unsigned char)s[i])) i++;
+    for (size_t i = 0, l;;) {
+        while (s[i] && !token_cp(next_cp(s + i, &l))) i += l;
         if (!s[i]) break;
         size_t st = i;
-        while (s[i] && token_byte((unsigned char)s[i])) i++;
+        while (s[i] && token_cp(next_cp(s + i, &l))) i += l;
         char *tok = xstrndup(s + st, i - st);
-        char *lower = str_lower(tok);
+        char *lower = js_lower(tok);
         free(tok);
         if (strlen(lower) >= 3 && !stopword(lower) && strspn(lower, "0123456789") != strlen(lower)) {
             stem(lower);
@@ -286,7 +391,7 @@ static void derive_keywords(const char *query, const json_t *extra, strvec_t *ou
     json_arr_foreach(extra, k, x) {
         if (!json_is_str(x)) continue;
         char *t = trim_dup(json_sv(x));
-        char *l = str_lower(t);
+        char *l = js_lower(t);
         free(t);
         if (*l && !strvec_contains(out, l)) strvec_push(out, l);
         free(l);
@@ -342,7 +447,7 @@ static bool has_ext(const char *lower, const char *const *exts) {
 static bool secret_name(const char *name) {
     if (in_list(SECRET_FILES, name)) return true;
     if (str_starts(name, ".env.")) return !in_list(ENV_TEMPLATES, name);
-    char *l = str_lower(name);
+    char *l = js_lower(name);
     bool r = has_ext(l, SECRET_EXT);
     free(l);
     return r;
@@ -357,7 +462,7 @@ static bool eligible_file(const char *rel, int64_t size, bool include_hidden) {
         if (in_list(DENY_DIRS, segs.v[i]) || (!include_hidden && segs.v[i][0] == '.')) ok = false;
     if (ok && !include_hidden && name[0] == '.') ok = false;
     if (ok) {
-        char *l = str_lower(name);
+        char *l = js_lower(name);
         ok = !in_list(DENY_FILES, name) && !secret_name(name) && !has_ext(l, BINARY_EXT);
         free(l);
     }
@@ -538,7 +643,7 @@ static void grep_index(const char *root, const strvec_t *kw, gindex_t *ix) {
                 strvec_push(&ix->rels, h->path);
                 vec_push(&ix->counts, xcalloc(kw->n, sizeof(double)));
             }
-            char *line = str_lower(h->text);
+            char *line = js_lower(h->text);
             for (size_t k = 0; k < kw->n; k++) ix->counts.v[f][k] += (double)count_occ(line, kw->v[k]);
             free(line);
         }
@@ -590,7 +695,7 @@ static void make_windows(const strvec_t *src, size_t bytes, const strvec_t *kw, 
             end++;
             if (used >= bytes) break;
         }
-        char *lower = str_lower(sb_cstr(&content));
+        char *lower = js_lower(sb_cstr(&content));
         double score = 0;
         for (size_t k = 0; k < kw->n; k++) score += w[k] * log1p((double)count_occ(lower, kw->v[k]));
         free(lower);
@@ -680,7 +785,7 @@ static char *make_sketch(const passage_t *p, const strvec_t *kw, const double *w
     for (size_t i = 0; i < plain.n; i++) {
         const char *line = plain.v[i];
         if (blank(line)) continue;
-        char *lower = str_lower(line);
+        char *lower = js_lower(line);
         double score = strchr(line, '(') ? 0.1 : 0;
         for (size_t k = 0; k < kw->n; k++)
             if (strstr(lower, kw->v[k])) score += w[k];
@@ -1067,7 +1172,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     VEC(rank_t) ranked = {0};
     for (size_t i = 0; i < entries.n; i++) {
         const double *c = index_counts(&ix, entries.v[i].rel);
-        char *lower = str_lower(entries.v[i].rel);
+        char *lower = js_lower(entries.v[i].rel);
         double score = 0;
         for (size_t k = 0; k < kw.n; k++) {
             double in_path = strstr(lower, kw.v[k]) ? 1 : 0;
