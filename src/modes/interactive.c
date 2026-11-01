@@ -491,7 +491,7 @@ static const struct {
     {"session", "Show session info"},         {"name", "Set session title"},
     {"export", "Export session [path]"},      {"copy", "Copy last answer to clipboard"},
     {"fork", "Fork the session here"},        {"clear", "Clear the conversation context in place, keeping the session"},
-    {"hotkeys", "Show keyboard shortcuts"},   {"quit", "Exit omc"},
+    {"hotkeys", "Show keyboard shortcuts"},   {"settings", "Open settings menu"},   {"quit", "Exit omc"},
     {"login", "Login with OAuth provider"},   {"logout", "Logout from OAuth provider"},
     {"exit", "Exit omc"},
 };
@@ -580,6 +580,8 @@ static bool handle_command(ui_t *u, const char *line) {
     app_t *a = u->app;
     if (!strcmp(cmd, "quit") || !strcmp(cmd, "exit")) {
         tui_stop(u->tui, 0);
+    } else if (!strcmp(cmd, "settings")) {
+        ui_overlay_settings(u);
     } else if (!strcmp(cmd, "hotkeys")) {
         ui_overlay_hotkeys(u);
     } else if (!strcmp(cmd, "login") || !strcmp(cmd, "logout")) {

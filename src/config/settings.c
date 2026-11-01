@@ -205,6 +205,14 @@ void settings_set_runtime(const char *path, json_t *val) {
     pthread_mutex_unlock(&g_mu);
 }
 
+void settings_unset_runtime(const char *path) {
+    ensure();
+    pthread_mutex_lock(&g_mu);
+    del_path(g_runtime, path);
+    rebuild();
+    pthread_mutex_unlock(&g_mu);
+}
+
 static int save_global(void) {
     char *text;
     if (yaml_dump && !str_ends(g_global_path, ".json")) text = yaml_dump(g_global);

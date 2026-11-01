@@ -13,6 +13,7 @@ double settings_num(const char *path, double def);
 bool settings_bool(const char *path, bool def);
 void settings_set_runtime(const char *path, json_t *val); /* in-memory override (takes ownership) */
 int settings_set_global(const char *path, json_t *val);   /* persist to config.yml (takes ownership) */
+void settings_unset_runtime(const char *path);           /* drop an in-memory override */
 int settings_unset_global(const char *path);
 json_t *settings_effective(void);  /* borrowed merged tree */
 json_t *settings_global(void);     /* borrowed global layer */

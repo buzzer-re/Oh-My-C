@@ -101,7 +101,11 @@ void ui_overlay_session(ui_t *u);
 void ui_resume_session(ui_t *u, const char *path); /* interactive.c: switch session + reload transcript */
 void ui_overlay_thinking(ui_t *u);
 void ui_overlay_theme(ui_t *u);
+/* settings.c: the /settings menu (fullscreen, alternate screen) */
 void ui_overlay_settings(ui_t *u);
+/* the status bar as the active composer shape renders it ("\n"-joined rows), for previews. Owned. */
+char *ui_settings_status_preview(ui_t *u, int cols);
+size_t ui_settings_def_count(void);
 void ui_overlay_hotkeys(ui_t *u);
 /* titled command report (overlays/report-panel.ts): fullscreen page, scrolls, Esc closes; takes `body` */
 void ui_show_report(ui_t *u, const char *title, tui_component_t *body);
