@@ -290,6 +290,46 @@ if python3 -I "$ROOT/tests/readfmt_fixtures.py" fx >/dev/null 2>&1; then
     check "read pdf in zip"   "Second line"                    "$B" -m mock/mock-1 -p "read:fx/docs.zip:papers/simple.pdf"
     check "read notebook"     "# %%% [code] cell:9"            "$B" -m mock/mock-1 -p "read:fx/t.ipynb"
 fi
+# Memory (memory.backend=local): learn -> learned.md, startup pipeline (phase 1 + 2) -> memory_summary.md / skills,
+# memory block in the next system prompt, memory:// reads; auto-learn manage_skill + private capture turn
+MA="$T/magent"; mkdir -p "$MA" "$T/mwork"
+cp "$T/agent/models.yml" "$MA/models.yml"
+printf 'modelRoles:\n  default: mock/mock-1\nmemory:\n  backend: local\nmemories:\n  minRolloutIdleHours: 0\nautolearn:\n  enabled: true\n  autoContinue: true\n  minToolCalls: 1\n' > "$MA/config.yml"
+MENV=(env OMC_CODING_AGENT_DIR="$MA")
+MROOT="$MA/memories/--$(cd "$T/mwork" && pwd | sed 's#^/##; s#[/:]#-#g')--"
+pushd "$T/mwork" >/dev/null
+check "learn tool"      "Lesson stored."        "${MENV[@]}" "$B" -m mock/mock-1 -p 'call:learn:{"memory":"Run <make test> before commit; key_ab12cd34ef56gh78","context":"ci"}'
+check "learned.md"      "- Run make test before commit; [REDACTED] _(context: ci)_"  cat "$MROOT/learned.md"
+check "manage_skill"    'Created managed skill "e2e-skill" (managed-skills/e2e-skill/SKILL.md)'  "${MENV[@]}" "$B" -m mock/mock-1 -p 'call:manage_skill:{"action":"create","name":"e2e-skill","description":"Use for e2e <tests>","body":"Do the thing."}'
+check "managed SKILL.md" $'---\nname: e2e-skill\ndescription: Use for e2e tests\n---\n\nDo the thing.'  cat "$MA/managed-skills/e2e-skill/SKILL.md"
+check "managed listed"  "Do the thing."         "${MENV[@]}" "$B" -m mock/mock-1 -p "read:skill://e2e-skill"
+check "manage dup"      "already exists"        "${MENV[@]}" "$B" -m mock/mock-1 -p 'call:manage_skill:{"action":"create","name":"e2e-skill","description":"d","body":"b"}'
+# the previous runs are idle rollouts now: a slow prompt keeps this process alive while startup consolidates them
+check "memory startup"  "done"                  "${MENV[@]}" "$B" -m mock/mock-1 -p "slow:4:done"
+check "memory summary"  "MOCK SUMMARY from consolidation"  cat "$MROOT/memory_summary.md"
+check "memory skill"    "echo mock"             cat "$MROOT/skills/mock-skill/scripts/run.sh"
+check "memory rollout"  "Mock rollout summary." bash -c "cat '$MROOT'/rollout_summaries/*-mock_slug.md"
+check "memory raw"      "[REDACTED]"            cat "$MROOT/raw_memories.md"
+check "memory evil path" "absent"               bash -c "[ -e '$MROOT/skills/evil' ] || [ -e '$MROOT/skills/mock-skill/evil' ] && echo present || echo absent"
+check "memory read url" "MOCK SUMMARY"          "${MENV[@]}" "$B" -m mock/mock-1 -p "read:memory://root"
+check "memory url trav" "not allowed"           "${MENV[@]}" "$B" -m mock/mock-1 -p "read:memory://root/../x"
+"${MENV[@]}" "$B" -m mock/mock-1 -p "hello memory" </dev/null >/dev/null 2>&1
+python3 -I -c '
+import json,sys
+rs=[json.loads(l) for l in open(sys.argv[1])]
+r=[x for x in rs if x.get("tools") and "hello memory" in json.dumps(x["messages"][-1])][-1]
+s=r["messages"][0]["content"]; s=s if isinstance(s,str) else "".join(p.get("text","") for p in s)
+ok="Memory summary:\nMOCK SUMMARY from consolidation" in s and "Learned lessons" in s and "## Auto-Learn (experimental)" in s and "`memory://root`" in s
+print("ok" if ok else "missing memory block")' "$T/req.jsonl" | grep -q '^ok$' && echo "   ok  memory prompt block" || { echo "   FAIL memory prompt block"; fail=1; }
+# auto-continue capture: one tool call reaches minToolCalls; rpc mode keeps the session alive for the private turn
+printf '%s\n' '{"id":"1","type":"prompt","message":"bash:echo cap"}' | (cat; sleep 3) | "${MENV[@]}" "$B" -m mock/mock-1 --mode rpc >/dev/null 2>&1
+grep -q 'Automated capture turn' "$T/req.jsonl" && echo "   ok  autolearn capture turn" || { echo "   FAIL autolearn capture turn"; fail=1; }
+python3 -I -c '
+import json,sys
+rs=[json.loads(l) for l in open(sys.argv[1])]
+c=[x for x in rs if "Automated capture turn" in json.dumps(x.get("messages",[])[-1:])]
+print(sorted(t["function"]["name"] for t in c[-1]["tools"]) if c else "none")' "$T/req.jsonl" | grep -q "\['learn', 'manage_skill'\]" && echo "   ok  autolearn capture tools" || { echo "   FAIL autolearn capture tools"; fail=1; }
+popd >/dev/null
 # LSP (only when clangd is installed)
 if command -v clangd >/dev/null; then
     printf 'static int add(int a, int b) { return a + b; }\nint main(void) { return add(1, 2); }\n' > l.c

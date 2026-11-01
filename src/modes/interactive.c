@@ -2,6 +2,7 @@
 #include "modes.h"
 #include "ui/ui.h"
 #include "coding/goal.h"
+#include "coding/memory.h"
 #include "mcp/mcp.h"
 #include "tools/jobs.h"
 #include "prompt/template.h"
@@ -616,6 +617,18 @@ static bool handle_command(ui_t *u, const char *line) {
         } else {
             ui_overlay_thinking(u);
         }
+    } else if (!strcmp(cmd, "memory")) {
+        memory_cmd_result_t r;
+        memory_command(a, arg, &r);
+        if (str_eq(r.level, "panel")) {
+            char *t = str_trim(r.text);
+            tui_markdown_t *m = tui_markdown_new(t, 0, 0);
+            free(t);
+            ui_show_report(u, r.title, &m->base);
+        } else {
+            add_notice(u, r.level, r.text);
+        }
+        memory_cmd_result_free(&r);
     } else if (!strcmp(cmd, "plan")) {
         app_set_plan_mode(a, !a->plan_mode);
         add_notice(u, "info", a->plan_mode ? "Plan mode on: read-only exploration; the agent proposes a plan for approval."

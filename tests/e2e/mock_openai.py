@@ -16,6 +16,9 @@ Eval helper side requests (omc eval completion()/judge()):
     first option), yes/no = YES when the state contains "yes", score = first digit in the state (else 0); a state
     containing SLOWJUDGE answers after 1.5 s, FAILJUDGE answers gibberish (unparseable even on retries)
 $MOCK_DELAY (seconds, default 0) is slept between streamed chunks.
+Memory pipeline side requests (memory.backend=local startup):
+  - stage-1 extraction (system "Memory-stage-one extractor") -> strict JSON {rollout_summary, rollout_slug, raw_memory}
+  - stage-2 consolidation (system "memory-stage-two consolidator") -> {memory_md, memory_summary, skills:[mock-skill]}
 Every request body is appended to $MOCK_LOG (JSONL) for assertions."""
 import json, os, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -87,7 +90,12 @@ class H(BaseHTTPRequestHandler):
         tnames = [t.get("function", {}).get("name") for t in body.get("tools") or []]
         lu_all = text_of(last) if last.get("role") == "user" else ""
         side = None
-        if last.get("role") == "user" and "respond" in tnames:
+        if last.get("role") == "user" and sysc.startswith("Memory-stage-one extractor"):
+            side = ("say", json.dumps({"rollout_summary": "Mock rollout summary.", "rollout_slug": "Mock Slug!", "raw_memory": "- mock raw memory token_abcdefghij123456"}))
+        elif last.get("role") == "user" and "memory-stage-two consolidator" in sysc:
+            side = ("say", "Here you go:\n" + json.dumps({"memory_md": "# Mock MEMORY", "memory_summary": "MOCK SUMMARY from consolidation", "skills": [
+                {"name": "Mock Skill", "content": "Mock skill body", "scripts": [{"path": "run.sh", "content": "echo mock"}, {"path": "../evil", "content": "x"}]}]}))
+        elif last.get("role") == "user" and "respond" in tnames:
             params = next(t["function"].get("parameters") or {} for t in body["tools"] if t["function"]["name"] == "respond")
             vals = {"string": lu_all, "number": 42, "integer": 42, "boolean": True}
             side = ("call", "respond", {k: vals.get(v.get("type"), lu_all) for k, v in (params.get("properties") or {}).items()})

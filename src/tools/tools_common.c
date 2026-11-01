@@ -1,4 +1,5 @@
 #include "tools.h"
+#include "coding/memory.h"
 #include "jobs.h"
 #include "config/settings.h"
 
@@ -153,6 +154,16 @@ char *tool_resolve_path(tool_env_t *env, const char *p) {
 
 char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err) {
     *err = NULL;
+    if (str_starts(url, "memory://")) { /* file-backed project memory (coding/memory.c) */
+        const char *colon = strchr(url + 9, ':');
+        char *u = colon ? xstrndup(url, (size_t)(colon - url)) : xstrdup(url);
+        char *p = memory_url_resolve(env->cwd, u, err);
+        free(u);
+        if (!p) return NULL;
+        char *r = xasprintf("%s%s", p, colon ? colon : "");
+        free(p);
+        return r;
+    }
     const char *schemes[] = {"skill://", "rule://", "artifact://"};
     size_t si = ARRAY_LEN(schemes);
     for (size_t i = 0; i < ARRAY_LEN(schemes); i++)
