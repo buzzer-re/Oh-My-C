@@ -16,4 +16,5 @@ void ai_providers_init(void) {
     ai_register_api("google-gemini-cli", provider_gemini_cli_stream);
     ai_register_api("ollama-chat", provider_ollama_stream);
     ai_register_api("bedrock-converse-stream", provider_bedrock_stream);
+    ai_register_api("cursor-agent", provider_cursor_stream);
 }

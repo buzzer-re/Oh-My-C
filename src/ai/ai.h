@@ -80,6 +80,20 @@ const char *model_delegation_bias(const ai_model_t *m);
 char *ai_env_api_key(const char *provider);
 const char *ai_env_api_key_name(const char *provider);
 
+/* ---------- cursor-agent exec bridge ----------
+ * Cursor's server drives the agent loop and asks the client to run its tools mid-stream (exec frames).
+ * The host runs them as local tools (emitting its own tool events) and keeps the results, which belong
+ * after the assistant message in the transcript. Every call the provider resolves this way is paired
+ * with exactly one `result` before the stream returns. */
+typedef struct {
+    /* Run local tool `name` with `args` for call `id`; returns an owned ToolResultMessage, or NULL when
+     * no such tool is available to the agent. Called on the streaming thread. */
+    json_t *(*run)(void *ud, const char *id, const char *name, const json_t *args);
+    /* A ToolResultMessage (owned) pairing a resolved toolCall block of the streamed message. */
+    void (*result)(void *ud, json_t *tool_result);
+    void *ud;
+} ai_cursor_exec_t;
+
 /* ---------- stream options & context ---------- */
 typedef struct {
     const char *api_key;
@@ -104,6 +118,7 @@ typedef struct {
     /* debug: called with the request JSON before sending (may be NULL) */
     void (*on_payload)(void *ud, const json_t *payload);
     void *payload_ud;
+    const ai_cursor_exec_t *cursor_exec; /* cursor-agent tool bridge (borrowed, may be NULL) */
 } ai_stream_opts_t;
 
 void ai_stream_opts_init(ai_stream_opts_t *o);
@@ -236,5 +251,6 @@ json_t *provider_google_stream(const ai_model_t *, const ai_context_t *, const a
 json_t *provider_ollama_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 json_t *provider_bedrock_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 json_t *provider_gemini_cli_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
+json_t *provider_cursor_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 
 #endif

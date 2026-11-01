@@ -1,6 +1,9 @@
 #include "agent.h"
 
+#include <errno.h>
 #include <math.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* ---------- tool results ---------- */
 
@@ -651,7 +654,11 @@ typedef struct {
     agent_t *a;
     bool started;
     int abort_requested;
+    json_t *cursor_results; /* cursor-agent: tool results the provider resolved during the stream */
 } stream_ud_t;
+
+static json_t *cursor_bridge_run(void *ud, const char *id, const char *name, const json_t *args);
+static void cursor_bridge_result(void *ud, json_t *tool_result);
 
 static void on_ai_event(void *ud, const ai_event_t *ev) {
     stream_ud_t *s = ud;
@@ -675,7 +682,7 @@ static void on_ai_event(void *ud, const ai_event_t *ev) {
     }
 }
 
-static json_t *stream_assistant(agent_t *a, int *ttsr_abort) {
+static json_t *stream_assistant(agent_t *a, int *ttsr_abort, json_t **cursor_results) {
     json_t *ctx_msgs = NULL;
     pthread_mutex_lock(&a->mu);
     json_t *snapshot = json_clone(a->messages);
@@ -704,10 +711,14 @@ static json_t *stream_assistant(agent_t *a, int *ttsr_abort) {
     opts.cancel = &a->cancel;
     if (a->hooks.prepare_request) a->hooks.prepare_request(a->hooks.ud, a, &opts);
 
-    stream_ud_t s = {.a = a};
+    stream_ud_t s = {.a = a, .cursor_results = json_arr()};
+    /* Cursor runs its tools through exec frames mid-stream; they execute here as local tools */
+    ai_cursor_exec_t bridge = {.run = cursor_bridge_run, .result = cursor_bridge_result, .ud = &s};
+    if (a->model->api && strcmp(a->model->api, "cursor-agent") == 0 && !opts.cursor_exec) opts.cursor_exec = &bridge;
     json_t *msg = ai_stream(a->model, &ctx, &opts, on_ai_event, &s);
     if (!s.started) emit_message(a, AGENT_EV_MESSAGE_START, msg);
     *ttsr_abort = s.abort_requested;
+    *cursor_results = s.cursor_results;
     json_free(ctx_msgs);
     json_free(tools);
     json_free(sys);
@@ -791,12 +802,118 @@ static void *tool_thread(void *p) {
     return NULL;
 }
 
-static void execute_tools(agent_t *a, json_t *run_msgs, const json_t *assistant, json_t *results_out) {
+/* ---------- cursor-agent exec bridge (omp coding-agent cursor.ts CursorExecHandlers) ---------- */
+
+static json_t *cursor_unavailable(agent_t *a, const char *id, const char *name) {
+    sb_t names = SB_INIT;
+    pthread_mutex_lock(&a->mu);
+    size_t n = a->tools.n;
+    for (size_t i = 0; i < n && i < 12; i++) sb_appendf(&names, "%s%s", i ? ", " : "", a->tools.v[i]->name);
+    pthread_mutex_unlock(&a->mu);
+    char *extra = n > 12 ? xasprintf(" and %zu more", n - 12) : xstrdup("");
+    tool_result_t r = {0};
+    tool_result_textf(&r, "Tool \"%s\" not available to this agent; calling it again fails the same way. Use one of: %s%s.",
+                      name, names.len ? names.s : "none", extra);
+    r.is_error = true;
+    r.details = json_obj();
+    json_t *m = msg_tool_result(id, name, &r);
+    tool_result_free(&r);
+    free(extra);
+    sb_free(&names);
+    return m;
+}
+
+/* Cursor's native delete frame removes the file directly (no registry tool backs it) */
+static json_t *cursor_delete(agent_t *a, const char *id, const json_t *args) {
+    const char *path = json_get_str(args, "path");
+    agent_event_t st = {.type = AGENT_EV_TOOL_START, .tool_call_id = id, .tool_name = "delete", .args = args};
+    emit(a, &st);
+    tool_result_t r = {0};
+    json_t *call = json_obj();
+    json_set_str(call, "type", "toolCall");
+    json_set_str(call, "id", id);
+    json_set_str(call, "name", "delete");
+    json_set(call, "arguments", json_clone(args));
+    char *reason = NULL;
+    if (a->hooks.before_tool && a->hooks.before_tool(a->hooks.ud, a, call, &reason) == TOOL_BLOCK) {
+        tool_result_error(&r, "%s", reason ? reason : "Tool call was blocked");
+    } else {
+        struct stat sbuf;
+        if (!path || stat(path, &sbuf) != 0) {
+            tool_result_error(&r, "File not found: %s", path ? path : "");
+        } else if (!S_ISREG(sbuf.st_mode)) {
+            tool_result_error(&r, "Path is not a file: %s", path);
+        } else if (unlink(path) != 0) {
+            tool_result_error(&r, "%s", strerror(errno));
+        } else {
+            if (sbuf.st_size) tool_result_textf(&r, "Deleted %s (%lld bytes)", path, (long long)sbuf.st_size);
+            else tool_result_textf(&r, "Deleted %s", path);
+            r.details = json_obj();
+            json_set_int(r.details, "fileSize", (int64_t)sbuf.st_size);
+        }
+    }
+    free(reason);
+    json_free(call);
+    if (r.is_error && !r.details) r.details = json_obj();
+    agent_event_t en = {.type = AGENT_EV_TOOL_END, .tool_call_id = id, .tool_name = "delete", .result = &r,
+                        .is_error = r.is_error};
+    emit(a, &en);
+    json_t *m = msg_tool_result(id, "delete", &r);
+    tool_result_free(&r);
+    return m;
+}
+
+static json_t *cursor_bridge_run(void *ud, const char *id, const char *name, const json_t *args) {
+    stream_ud_t *s = ud;
+    agent_t *a = s->a;
+    agent_tool_t *tool = agent_find_tool(a, name);
+    if (!tool && strcmp(name, "delete") == 0) return cursor_delete(a, id, args);
+    if (!tool) return cursor_unavailable(a, id, name);
+    tool_job_t j = {0};
+    json_t *call = json_obj();
+    json_set_str(call, "type", "toolCall");
+    json_set_str(call, "id", id);
+    json_set_str(call, "name", name);
+    json_set(call, "arguments", json_is_obj(args) ? json_clone(args) : json_obj());
+    j.a = a;
+    j.call = call;
+    j.tool = tool;
+    j.args = json_is_obj(args) ? json_clone(args) : json_obj();
+    run_tool(&j);
+    json_t *m = msg_tool_result(id, name, &j.res);
+    tool_result_free(&j.res);
+    json_free(j.args);
+    json_free(call);
+    return m;
+}
+
+static void cursor_bridge_result(void *ud, json_t *tool_result) {
+    stream_ud_t *s = ud;
+    /* a re-dispatched call (same id) keeps only its newest result */
+    const char *id = json_get_str(tool_result, "toolCallId");
+    for (size_t i = 0; i < json_len(s->cursor_results); i++) {
+        if (str_eq(json_get_str(json_at(s->cursor_results, i), "toolCallId"), id)) {
+            json_free(json_arr_remove(s->cursor_results, i));
+            break;
+        }
+    }
+    json_push(s->cursor_results, tool_result);
+}
+
+static bool resolved_call(const json_t *resolved, const char *id) {
+    json_t *r;
+    json_arr_foreach(resolved, i, r) if (str_eq(json_get_str(r, "toolCallId"), id)) return true;
+    return false;
+}
+
+static void execute_tools(agent_t *a, json_t *run_msgs, const json_t *assistant, json_t *results_out,
+                          const json_t *resolved) {
     json_t *content = json_get(assistant, "content");
     VEC(tool_job_t *) jobs = {0};
     json_t *blk;
     json_arr_foreach(content, i, blk) {
         if (!str_eq(json_get_str(blk, "type"), "toolCall")) continue;
+        if (resolved_call(resolved, json_get_str(blk, "id"))) continue;
         tool_job_t *j = xcalloc(1, sizeof(*j));
         j->a = a;
         j->call = blk;
@@ -877,7 +994,8 @@ static void run_loop(agent_t *a, json_t *new_messages) {
     for (;;) {
         emit_simple(a, AGENT_EV_TURN_START);
         int ttsr = 0;
-        json_t *assistant = stream_assistant(a, &ttsr);
+        json_t *cursor_results = NULL;
+        json_t *assistant = stream_assistant(a, &ttsr, &cursor_results);
         const char *stop = json_get_str(assistant, "stopReason");
         bool failed = stop && (strcmp(stop, "error") == 0 || strcmp(stop, "aborted") == 0);
         if (ttsr && a->hooks.should_retry) {
@@ -886,6 +1004,7 @@ static void run_loop(agent_t *a, json_t *new_messages) {
             a->cancel = 0;
             if (a->hooks.should_retry(a->hooks.ud, a, assistant, -1)) {
                 json_free(assistant);
+                json_free(cursor_results);
                 agent_event_t te = {.type = AGENT_EV_TURN_END, .message = NULL, .tool_results = NULL};
                 emit(a, &te);
                 continue;
@@ -896,6 +1015,7 @@ static void run_loop(agent_t *a, json_t *new_messages) {
             retry_attempt++;
             emit_message(a, AGENT_EV_MESSAGE_END, assistant);
             json_free(assistant);
+            json_free(cursor_results);
             continue;
         } else {
             emit_message(a, AGENT_EV_MESSAGE_END, assistant);
@@ -906,12 +1026,20 @@ static void run_loop(agent_t *a, json_t *new_messages) {
         pthread_mutex_unlock(&a->mu);
         json_push(run_msgs, json_clone(assistant));
         json_t *results = json_arr();
+        /* results of calls Cursor resolved mid-stream follow the assistant message */
+        json_t *cr;
+        json_arr_foreach(cursor_results, i, cr) {
+            json_push(results, json_clone(cr));
+            add_message(a, run_msgs, json_clone(cr));
+        }
         bool has_tools = false;
         json_t *blk;
         json_arr_foreach(json_get(assistant, "content"), i, blk) {
-            if (str_eq(json_get_str(blk, "type"), "toolCall")) has_tools = true;
+            if (str_eq(json_get_str(blk, "type"), "toolCall") && !resolved_call(cursor_results, json_get_str(blk, "id")))
+                has_tools = true;
         }
-        if (!failed && has_tools) execute_tools(a, run_msgs, assistant, results);
+        if (!failed && has_tools) execute_tools(a, run_msgs, assistant, results, cursor_results);
+        json_free(cursor_results);
         agent_event_t te = {.type = AGENT_EV_TURN_END, .message = assistant, .tool_results = results};
         emit(a, &te);
         json_free(results);
