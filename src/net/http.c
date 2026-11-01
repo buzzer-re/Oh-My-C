@@ -574,6 +574,17 @@ static net_conn_t *open_conn(const url_t *u, bool tls, const char *proxy, bool *
     return c;
 }
 
+/* Connection for a non-HTTP protocol (websockets): TLS for https/wss, CONNECT tunnel through the configured
+ * proxy for TLS targets (a plain ws:// target connects directly). */
+net_conn_t *net_open(const url_t *u, int64_t timeout_ms, char **err) {
+    http_global_init();
+    bool tls = strcmp(u->scheme, "https") == 0 || strcmp(u->scheme, "wss") == 0;
+    const char *proxy = proxy_for(u->scheme, u->host);
+    if (!tls) proxy = NULL;
+    bool via = false;
+    return open_conn(u, tls, proxy, &via, timeout_ms, err);
+}
+
 /* ---------- body decoding pipeline ---------- */
 
 typedef struct {

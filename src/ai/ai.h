@@ -273,5 +273,9 @@ json_t *provider_bedrock_stream(const ai_model_t *, const ai_context_t *, const 
 json_t *provider_gemini_cli_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 json_t *provider_devin_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 json_t *provider_cursor_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
+/* provider "gitlab-duo" (any of its chat APIs): direct-access token + GitLab Cloud Connector proxy */
+json_t *provider_gitlab_duo_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
+/* api "gitlab-duo-agent": Duo Workflow Service over WebSocket */
+json_t *provider_gitlab_duo_workflow_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 
 #endif

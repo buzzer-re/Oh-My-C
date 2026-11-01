@@ -991,6 +991,7 @@ static void run_loop(agent_t *a, json_t *new_messages) {
     }
     int turns = 0;
     int retry_attempt = 0;
+    int paused_continuations = 0; /* MAX_PAUSED_TURN_CONTINUATIONS (agent-loop.ts) */
     for (;;) {
         emit_simple(a, AGENT_EV_TURN_START);
         int ttsr = 0;
@@ -1052,7 +1053,16 @@ static void run_loop(agent_t *a, json_t *new_messages) {
             json_free(steer);
             continue;
         }
-        if (has_tools) continue;
+        if (has_tools) {
+            paused_continuations = 0;
+            continue;
+        }
+        /* non-terminal stop (stopDetails.type pause_turn): re-sample so the provider continues the turn */
+        if (!failed && str_eq(json_get_str(assistant, "stopReason"), "stop") &&
+            str_eq(json_get_str(json_get_obj(assistant, "stopDetails"), "type"), "pause_turn") && paused_continuations < 8) {
+            paused_continuations++;
+            continue;
+        }
         json_t *fu = take_queue(a, &a->follow_up);
         if (fu) {
             json_arr_foreach(fu, i, m) add_message(a, run_msgs, json_clone(m));

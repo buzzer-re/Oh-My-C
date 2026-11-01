@@ -2115,6 +2115,11 @@ json_t *anthropic_sse_finish(anthropic_sse_t *s, int rc, const char *err) {
 
 json_t *provider_anthropic_stream(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o,
                                   ai_event_cb cb, void *ud) {
+    return provider_anthropic_stream_ex(m, ctx, o, -1, cb, ud);
+}
+
+json_t *provider_anthropic_stream_ex(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, int is_oauth,
+                                     ai_event_cb cb, void *ud) {
     ai_stream_opts_t defo;
     if (!o) {
         ai_stream_opts_init(&defo);
@@ -2133,7 +2138,7 @@ json_t *provider_anthropic_stream(const ai_model_t *m, const ai_context_t *ctx, 
         free(env_key);
         return msg;
     }
-    bool oauth = anthropic_is_oauth_token(key);
+    bool oauth = is_oauth >= 0 ? is_oauth != 0 : anthropic_is_oauth_token(key);
     json_t *result = NULL;
     for (int attempt = 0; attempt < 2; attempt++) {
         json_t *params = anthropic_build_request(m, ctx, o, oauth);

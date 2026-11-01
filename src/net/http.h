@@ -100,5 +100,7 @@ ssize_t net_read(net_conn_t *c, void *buf, size_t n, int64_t timeout_ms); /* -2 
 int net_write_all(net_conn_t *c, const void *buf, size_t n);
 void net_close(net_conn_t *c);
 int net_fd(net_conn_t *c);
+/* connect for url's scheme (https/wss => TLS), honoring HTTPS_PROXY / NO_PROXY for TLS targets */
+net_conn_t *net_open(const url_t *u, int64_t timeout_ms, char **err);
 
 #endif
