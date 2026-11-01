@@ -187,6 +187,43 @@ check "bedrock no creds" "Unable to resolve AWS credentials"  "${BENV[@]}" "$B" 
 grep -q '"path": "/model/us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/converse-stream"' "$T/bedrock.jsonl" && echo "   ok  bedrock request path" || { echo "   FAIL bedrock request path"; fail=1; }
 grep -q '"toolResult": {"toolUseId": "tooluse_mock1"' "$T/bedrock.jsonl" && echo "   ok  bedrock toolResult replay" || { echo "   FAIL bedrock toolResult replay"; fail=1; }
 cp "$T/models.yml.bak" "$T/agent/models.yml"
+# Google: Vertex AI via Application Default Credentials (service-account RS256 JWT -> token endpoint) and Cloud Code
+# Assist (google-gemini-cli / google-antigravity) with a stored OAuth credential, against a local mock; no real creds.
+GPORT=$((PORT + 2))
+MOCK_LOG="$T/google.jsonl" python3 -I "$ROOT/tests/e2e/mock_google.py" $GPORT & GPID=$!
+trap 'kill $MPID $BPID $GPID 2>/dev/null; rm -rf "$T"' EXIT
+for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$GPORT) 2>/dev/null && break; sleep 0.1; done
+printf '  google-vertex:\n    baseUrl: http://127.0.0.1:%s\n  google-gemini-cli:\n    baseUrl: http://127.0.0.1:%s\n  google-antigravity:\n    baseUrl: http://127.0.0.1:%s\n' \
+    $GPORT $GPORT $GPORT >> "$T/agent/models.yml"
+GENV=(env -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_ACCESS_TOKEN -u CLOUDSDK_AUTH_ACCESS_TOKEN -u GOOGLE_CLOUD_API_KEY \
+    -u GOOGLE_CLOUD_PROJECT -u GCP_PROJECT -u GCLOUD_PROJECT -u GOOGLE_VERTEX_LOCATION -u GOOGLE_CLOUD_LOCATION -u VERTEX_LOCATION \
+    HOME="$T" GCE_METADATA_HOST=127.0.0.1:1 PI_AI_ANTIGRAVITY_VERSION=2.26.0)
+if openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$T/sa.pem" 2>/dev/null; then
+    python3 -I -c 'import json,sys; print(json.dumps({"type":"service_account","client_email":"sa@mock.iam.gserviceaccount.com","private_key":open(sys.argv[1]).read(),"private_key_id":"k1","token_uri":"http://127.0.0.1:%s/token" % sys.argv[2]}))' "$T/sa.pem" $GPORT > "$T/sa.json"
+    VENV=("${GENV[@]}" GOOGLE_APPLICATION_CREDENTIALS="$T/sa.json" GOOGLE_CLOUD_PROJECT=proj-v GOOGLE_CLOUD_LOCATION=us-central1)
+    check "vertex models"     "* google-vertex"       "${VENV[@]}" "$B" models gemini-3.1-pro-preview
+    check "vertex adc text"   "plain google answer"   "${VENV[@]}" "$B" -m google-vertex/gemini-3.1-pro-preview --no-session -p "hi"
+    check "vertex adc tool"   "Tool said: vx-e2e"     "${VENV[@]}" "$B" -m google-vertex/gemini-3.1-pro-preview --no-session -p "bash:echo vx-e2e"
+    check "vertex no project" "Vertex AI requires a project ID"  "${GENV[@]}" GOOGLE_APPLICATION_CREDENTIALS="$T/sa.json" "$B" -m google-vertex/gemini-3.1-pro-preview --no-session -p "hi"
+    grep -q '"path": "/v1/projects/proj-v/locations/us-central1/publishers/google/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse", "ua": "[^"]*", "auth": "Bearer ya29.mock-sa"' "$T/google.jsonl" \
+        && echo "   ok  vertex request path" || { echo "   FAIL vertex request path"; fail=1; }
+fi
+check "vertex no adc"     "  google-vertex"      "${GENV[@]}" "$B" models gemini-3.1-pro-preview
+cp "$T/agent/auth.json" "$T/auth.json.bak" 2>/dev/null
+FAR=$(( $(date +%s) * 1000 + 3600000 ))
+printf '{"google-gemini-cli":{"type":"oauth","access":"cca-token","refresh":"r1","expires":%s,"projectId":"proj-cca","email":"me@example.com"},"google-antigravity":{"type":"oauth","access":"cca-token","refresh":"r2","expires":%s,"projectId":"proj-cca"}}' \
+    $FAR $FAR > "$T/agent/auth.json"
+check "gemini-cli models" "* google-gemini-cli"  "${GENV[@]}" "$B" models gemini-2.5-pro
+check "gemini-cli text"   "plain cca answer"     "${GENV[@]}" "$B" -m google-gemini-cli/gemini-2.5-pro --no-session -p "hi"
+check "gemini-cli tool"   "Tool said: gc-e2e"    "${GENV[@]}" "$B" -m google-gemini-cli/gemini-2.5-pro --no-session -p "bash:echo gc-e2e"
+check "antigravity claude" "plain cca answer"    "${GENV[@]}" "$B" -m google-antigravity/claude-opus-4-6 --no-session -p "hi"
+check "antigravity tool"  "Tool said: ag-e2e"    "${GENV[@]}" "$B" -m google-antigravity/gemini-3.1-pro --no-session -p "bash:echo ag-e2e"
+grep -q '"ua": "GeminiCLI/0.46.0/gemini-2.5-pro (' "$T/google.jsonl" && echo "   ok  gemini-cli client headers" || { echo "   FAIL gemini-cli client headers"; fail=1; }
+grep -q '"ua": "antigravity/hub/2.26.0 (aidev_client; .*"model": "claude-opus-4-6-thinking", "userAgent": "antigravity"' "$T/google.jsonl" \
+    && echo "   ok  antigravity envelope" || { echo "   FAIL antigravity envelope"; fail=1; }
+grep -q '"functionResponse": {"name": "bash"' "$T/google.jsonl" && echo "   ok  cca functionResponse replay" || { echo "   FAIL cca functionResponse replay"; fail=1; }
+if [ -f "$T/auth.json.bak" ]; then mv "$T/auth.json.bak" "$T/agent/auth.json"; else rm -f "$T/agent/auth.json"; fi
+cp "$T/models.yml.bak" "$T/agent/models.yml"
 # structured reads: archives, SQLite, PDF, notebooks (fixtures generated with Python's zipfile/tarfile/sqlite3)
 if python3 -I "$ROOT/tests/readfmt_fixtures.py" fx >/dev/null 2>&1; then
     check "read zip list"     "hello.txt (16B)"                "$B" -m mock/mock-1 -p "read:fx/t.zip"

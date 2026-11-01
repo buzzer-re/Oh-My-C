@@ -3,6 +3,8 @@
 
 #include "ai/ai.h"
 #include "ai/aws.h"
+#include "ai/google_auth.h"
+#include "ai/google_cca.h"
 #include "core/fs.h"
 #include "core/proc.h"
 #include "net/http.h"
@@ -110,9 +112,17 @@ static json_t *descriptor(const char *provider) {
 
 json_t *auth_oauth_providers(void) { return catalog_auth_providers(); }
 
+/* descriptor value: env overrides first, then the (possibly base64) literal */
 static char *value_of(const json_t *v) {
     if (!v) return NULL;
     if (json_is_str(v)) return xstrdup(json_sv(v));
+    json_t *e;
+    json_arr_foreach(json_get_arr(v, "env"), i, e) {
+        const char *ev = json_is_str(e) ? env_get(json_sv(e)) : NULL;
+        char *t = ev ? str_trim(ev) : NULL;
+        if (t && *t) return t;
+        free(t);
+    }
     const char *val = json_get_str(v, "value");
     if (!val) return NULL;
     if (str_eq(json_get_str(v, "encoding"), "base64")) {
@@ -158,7 +168,7 @@ static json_t *extract_cred(const json_t *cred_desc, const json_t *resp, const j
     /* keep previous refresh token when the provider doesn't rotate it */
     if (prev && !json_get(c, "refresh") && json_get_str(prev, "refresh")) json_set_str(c, "refresh", json_get_str(prev, "refresh"));
     if (prev) {
-        const char *keep[] = {"accountId", "email", "orgId", "orgName"};
+        const char *keep[] = {"accountId", "email", "orgId", "orgName", "projectId", "apiEndpoint", "enterpriseUrl"};
         for (size_t i = 0; i < ARRAY_LEN(keep); i++)
             if (!json_get(c, keep[i]) && json_get(prev, keep[i])) json_set(c, keep[i], json_clone(json_get(prev, keep[i])));
     }
@@ -174,10 +184,6 @@ static int token_request(const json_t *tok, json_t *params, const char *state, j
     /* extra params */
     const char *k;
     json_t *v;
-    json_obj_foreach(json_get_obj(tok, "params"), i, k, v) {
-        if (json_is_str(v)) json_set_str(params, k, subst(json_sv(v), state)), free(NULL);
-    }
-    /* fix: subst returns owned; re-run to avoid leak */
     json_obj_foreach(json_get_obj(tok, "params"), i, k, v) {
         if (json_is_str(v)) {
             char *s = subst(json_sv(v), state);
@@ -245,6 +251,14 @@ static int refresh_oauth(const char *provider, json_t *entry, char **err) {
         *err = xasprintf("no refresh flow for %s", provider);
         return -1;
     }
+    json_t *req;
+    json_arr_foreach(json_get_arr(rf, "require"), i, req) {
+        const char *field = json_sv(req);
+        if (field && !json_truthy(json_get(entry, field))) {
+            *err = xasprintf("%s credentials are missing %s; sign in again", provider, field);
+            return -1;
+        }
+    }
     const char *rt = json_get_str(entry, "refresh");
     if (!rt) {
         *err = xstrdup("no refresh token stored");
@@ -253,22 +267,44 @@ static int refresh_oauth(const char *provider, json_t *entry, char **err) {
     json_t *tok = json_get_obj(rf, "token");
     json_t *params = json_obj();
     json_set_str(params, "grant_type", "refresh_token");
-    json_set_str(params, "refresh_token", rt);
     char *cid = value_of(json_get(json_get_obj(d, "login"), "clientId"));
     if (cid) json_set_str(params, "client_id", cid);
     free(cid);
+    char *secret = value_of(json_get(json_get_obj(d, "login"), "clientSecret"));
+    if (secret) json_set_str(params, "client_secret", secret);
+    free(secret);
+    json_set_str(params, "refresh_token", rt);
     json_t *resp = NULL;
     int rc = token_request(tok, params, NULL, &resp, err);
     json_free(params);
     if (rc) return -1;
     json_t *cred_desc = json_get_obj(rf, "credential");
     if (!cred_desc) cred_desc = json_get_obj(json_get_obj(d, "login"), "credential");
+    /* the Google project hooks only carry the stored projectId across refreshes, which extract_cred does */
     json_t *c = extract_cred(cred_desc, resp, entry);
     json_free(resp);
     if (json_get_obj(entry, "descriptor")) json_set(c, "descriptor", json_clone(json_get_obj(entry, "descriptor")));
     json_set(g_store, provider, c);
     save();
     return 0;
+}
+
+/* `api-key-format "structured"`: request-time credential metadata travels as the JSON-encoded credential */
+static char *structured_key(const json_t *e) {
+    json_t *k = json_obj();
+    static const char *const fields[][2] = {{"apiEndpoint", "apiEndpoint"}, {"token", "access"},
+                                            {"enterpriseUrl", "enterpriseUrl"}, {"projectId", "projectId"},
+                                            {"refreshToken", "refresh"}};
+    for (size_t i = 0; i < ARRAY_LEN(fields); i++) {
+        json_t *v = json_get(e, fields[i][1]);
+        if (v && !json_is_null(v)) json_set(k, fields[i][0], json_clone(v));
+    }
+    if (json_get(e, "expires")) json_set(k, "expiresAt", json_clone(json_get(e, "expires")));
+    if (json_get_str(e, "email")) json_set_str(k, "email", json_get_str(e, "email"));
+    if (json_get_str(e, "accountId")) json_set_str(k, "accountId", json_get_str(e, "accountId"));
+    char *s = json_dump(k, 0);
+    json_free(k);
+    return s;
 }
 
 char *auth_get_api_key(const char *provider) {
@@ -299,7 +335,9 @@ char *auth_get_api_key(const char *provider) {
                 e = json_get_obj(g_store, provider);
             }
             const char *acc = json_get_str(e, "access");
-            if (acc) r = xstrdup(acc);
+            json_t *dd = json_get_obj(e, "descriptor");
+            if (!dd) dd = descriptor(provider);
+            if (acc) r = str_eq(json_get_str(dd, "apiKeyFormat"), "structured") ? structured_key(e) : xstrdup(acc);
         }
     }
     pthread_mutex_unlock(&g_mu);
@@ -318,6 +356,8 @@ bool auth_has_credentials(const char *provider) {
     free(k);
     /* Bedrock authenticates outside the API-key path (SigV4 credential chain or AWS_BEARER_TOKEN_BEDROCK) */
     if (!ok && str_eq(provider, "amazon-bedrock")) ok = aws_has_credential_source();
+    /* env hook google-vertex-adc: GOOGLE_CLOUD_API_KEY, or an ADC file plus project and location */
+    if (!ok && str_eq(provider, "google-vertex")) ok = google_vertex_has_credentials();
     return ok;
 }
 
@@ -329,7 +369,8 @@ static char *pkce_challenge(const char *verifier) {
     return base64url_encode(dig, sizeof dig);
 }
 
-static int listen_port(int port) {
+/* loopback listener; port 0 picks a free one. *bound receives the actual port. */
+static int listen_port(int port, int *bound) {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) return -1;
     int one = 1;
@@ -340,7 +381,69 @@ static int listen_port(int port) {
         close(fd);
         return -1;
     }
+    socklen_t al = sizeof a;
+    *bound = getsockname(fd, (struct sockaddr *)&a, &al) == 0 ? ntohs(a.sin_port) : port;
     return fd;
+}
+
+/* bearer GET declared by `userinfo`; failures leave the identity fields unset */
+static void apply_userinfo(const json_t *ui, json_t *cred) {
+    const char *url = json_get_str(ui, "url");
+    const char *acc = json_get_str(cred, "access");
+    if (!url || !acc) return;
+    http_headers_t h = {0};
+    char *bearer = xasprintf("Bearer %s", acc);
+    http_headers_set(&h, "Authorization", bearer);
+    free(bearer);
+    http_resp_t r;
+    if (http_get(url, &h, 30000, &r) == 0 && r.status >= 200 && r.status < 300) {
+        json_t *j = json_parse_str(r.body ? r.body : "");
+        static const char *const fields[] = {"email", "accountId"};
+        for (size_t i = 0; i < ARRAY_LEN(fields); i++) {
+            const char *path = json_get_str(ui, fields[i]);
+            json_t *v = path ? json_path(j, path) : NULL;
+            if (json_is_str(v) && *json_sv(v)) json_set_str(cred, fields[i], json_sv(v));
+            else if (json_is_num(v)) json_set(cred, fields[i], json_str_own(xasprintf("%.0f", v->u.num.d)));
+        }
+        json_free(j);
+    }
+    http_resp_free(&r);
+    http_headers_free(&h);
+}
+
+static void io_progress(void *ud, const char *msg) {
+    const auth_io_t *io = ud;
+    if (io && io->print) io->print(io->ud, msg);
+}
+
+/* after-exchange hooks (registry/hooks/oauth-code.ts) */
+static int after_exchange(const char *hook, const char *provider, json_t *cred, const json_t *raw, const auth_io_t *io,
+                          char **err) {
+    if (!hook) return 0;
+    if (str_eq(hook, "google-gemini-cli-project") || str_eq(hook, "google-antigravity-project")) {
+        const char *rt = json_get_str(raw, "refresh_token");
+        if (!rt || !*rt) {
+            *err = xstrdup("No refresh token received. Please try again.");
+            return -1;
+        }
+        char *project = NULL, *derr = NULL;
+        if (cca_discover_project(provider, json_get_str(cred, "access"), NULL, io_progress, (void *)io, &project, &derr) != 0) {
+            char *vu = cca_extract_validation_url(derr);
+            if (vu) {
+                *err = cca_validation_message(vu, "sign in again", json_get_str(cred, "email"));
+                free(vu);
+                free(derr);
+            } else {
+                *err = derr;
+            }
+            return -1;
+        }
+        json_set_str(cred, "projectId", project);
+        free(project);
+        return 0;
+    }
+    /* other providers' hooks (identity enrichment, key minting) are not ported; the exchanged token is kept */
+    return 0;
 }
 
 static char *query_param(const char *q, const char *name) {
@@ -384,10 +487,6 @@ static void io_print_auth(void *ud, const char *url, const char *launch, const c
     (void)instructions;
 }
 
-static void io_progress(void *ud, const char *msg) {
-    const auth_io_t *io = ud;
-    if (io && io->print) io->print(io->ud, msg);
-}
 
 static int login_with(const char *provider, const json_t *d, bool embed, const auth_login_hooks_t *hooks, char **err);
 
@@ -427,14 +526,23 @@ static int login_with(const char *provider, const json_t *d, bool embed, const a
     json_t *cb = json_get_obj(login, "callback");
     int port = (int)json_get_int(cb, "port", 0);
     char *redirect = value_of(json_get(cb, "redirectUri"));
+    /* bind before building the redirect: a busy preferred port falls back to a free one when allowed */
+    int lfd = -1;
+    if (port) {
+        int bound = port;
+        lfd = listen_port(port, &bound);
+        if (lfd < 0 && json_get_bool(cb, "portFallback", false) && !redirect) lfd = listen_port(0, &bound);
+        if (lfd >= 0) port = bound;
+    }
     if (!redirect)
         redirect = xasprintf("http://%s:%d%s", json_get_str(cb, "hostname") ? json_get_str(cb, "hostname") : "localhost",
                              port, json_get_str(cb, "path") ? json_get_str(cb, "path") : "/callback");
+    bool pkce = json_get_bool(login, "pkce", true);
     unsigned char vb[32];
     rand_bytes(vb, sizeof vb);
     char *verifier = base64url_encode(vb, sizeof vb);
     char *challenge = pkce_challenge(verifier);
-    char *state = rand_hex(16);
+    char *state = str_eq(json_get_str(login, "state"), "uuid") ? uuid_v4() : rand_hex(16);
     /* scopes */
     json_t *scopes = json_get_arr(login, "scopes"), *s;
     const char *sep = json_get_str(login, "scopeSeparator");
@@ -442,7 +550,6 @@ static int login_with(const char *provider, const json_t *d, bool embed, const a
     json_arr_foreach(scopes, i, s) sb_appendf(&sc, "%s%s", i ? (sep ? sep : " ") : "", json_sv(s));
     /* authorize URL exactly like upstream OAuthCodeFlow.generateAuthUrl: URLSearchParams order
      * (standard params, then templated authorizeParams), form encoding (space -> '+') */
-    bool pkce = json_get_bool(login, "pkce", true);
     const char *scope_s = sb_cstr(&sc);
     strvec_t pk = {0}, pv = {0};
 #define PSET(K, V)                                                                                                     \
@@ -505,7 +612,6 @@ static int login_with(const char *provider, const json_t *d, bool embed, const a
     strvec_free(&pk);
     strvec_free(&pv);
     sb_free(&sc);
-    int lfd = port ? listen_port(port) : -1;
     char *launch = NULL;
     if (lfd >= 0 && (str_starts(redirect, "http://localhost:") || str_starts(redirect, "http://127.0.0.1:")))
         launch = xasprintf("http://localhost:%d/launch", port);
@@ -609,18 +715,27 @@ static int login_with(const char *provider, const json_t *d, bool embed, const a
         json_set_str(params, "code", code);
         json_set_str(params, "redirect_uri", redirect);
         if (client_id) json_set_str(params, "client_id", client_id);
-        json_set_str(params, "code_verifier", verifier);
+        char *secret = value_of(json_get(login, "clientSecret"));
+        if (secret) json_set_str(params, "client_secret", secret);
+        free(secret);
+        if (pkce) json_set_str(params, "code_verifier", verifier);
         json_t *resp = NULL;
         if (token_request(tok, params, state, &resp, err) == 0) {
             json_t *c = extract_cred(json_get_obj(login, "credential"), resp, NULL);
+            json_t *ui = json_get_obj(login, "userinfo");
+            if (ui) apply_userinfo(ui, c);
+            if (after_exchange(json_get_str(login, "afterExchange"), provider, c, resp, io, err) == 0) {
+                if (embed) json_set(c, "descriptor", json_clone(d));
+                pthread_mutex_lock(&g_mu);
+                load();
+                json_set(g_store, provider, c);
+                c = NULL;
+                rc = save() == 0 ? 0 : -1;
+                pthread_mutex_unlock(&g_mu);
+                if (rc) *err = xstrdup("failed to save credentials");
+            }
+            json_free(c);
             json_free(resp);
-            if (embed) json_set(c, "descriptor", json_clone(d));
-            pthread_mutex_lock(&g_mu);
-            load();
-            json_set(g_store, provider, c);
-            rc = save() == 0 ? 0 : -1;
-            pthread_mutex_unlock(&g_mu);
-            if (rc) *err = xstrdup("failed to save credentials");
         }
         json_free(params);
     }

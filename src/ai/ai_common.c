@@ -520,7 +520,7 @@ static int on_body(void *ud, const char *data, size_t len) {
 static bool retryable_status(int s) { return s == 408 || s == 409 || s == 425 || s == 429 || s == 500 || s == 502 || s == 503 || s == 504 || s == 520 || s == 522 || s == 524 || s == 529; }
 
 static int stream_post(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
-                       ai_sse_cb sse_cb, http_data_cb raw_cb, void *ud, int *status, char **err) {
+                       ai_sse_cb sse_cb, http_data_cb raw_cb, void *ud, int *status, char **err, ai_post_ex_t *ex) {
     if (!http_headers_get(headers, "Content-Type")) http_headers_add(headers, "Content-Type", "application/json");
     if (sse_cb && !http_headers_get(headers, "Accept")) http_headers_add(headers, "Accept", "text/event-stream");
     int max_retries = opts && opts->max_retries > 0 ? opts->max_retries : 0;
@@ -538,7 +538,7 @@ static int stream_post(const char *url, http_headers_t *headers, const char *bod
                           .headers = headers,
                           .body = body,
                           .body_len = strlen(body),
-                          .idle_timeout_ms = 300000,
+                          .idle_timeout_ms = ex && ex->idle_timeout_ms > 0 ? ex->idle_timeout_ms : 300000,
                           .on_headers = on_hdr,
                           .on_data = on_body,
                           .ud = &c,
@@ -578,6 +578,10 @@ static int stream_post(const char *url, http_headers_t *headers, const char *bod
         if (!transient && c.status == 400 && str_istr(sb_cstr(&c.errbody), "overloaded")) transient = true;
         int64_t delay = 1000LL << attempt;
         if (c.retry_after_ms >= 0) delay = c.retry_after_ms;
+        if (ex) {
+            free(ex->err_body);
+            ex->err_body = rc == 0 ? xstrdup(sb_cstr(&c.errbody)) : NULL;
+        }
         http_resp_free(&resp);
         sse_free(&c.sse);
         sb_free(&c.errbody);
@@ -605,12 +609,17 @@ static int stream_post(const char *url, http_headers_t *headers, const char *bod
 
 int ai_sse_post(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
                 ai_sse_cb on_event, void *ud, int *status, char **err) {
-    return stream_post(url, headers, body, opts, on_event, NULL, ud, status, err);
+    return stream_post(url, headers, body, opts, on_event, NULL, ud, status, err, NULL);
+}
+
+int ai_sse_post_ex(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
+                   ai_sse_cb on_event, void *ud, int *status, char **err, ai_post_ex_t *ex) {
+    return stream_post(url, headers, body, opts, on_event, NULL, ud, status, err, ex);
 }
 
 int ai_stream_post(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
                    http_data_cb on_data, void *ud, int *status, char **err) {
-    return stream_post(url, headers, body, opts, NULL, on_data, ud, status, err);
+    return stream_post(url, headers, body, opts, NULL, on_data, ud, status, err, NULL);
 }
 
 /* ---------- thinking budgets ---------- */

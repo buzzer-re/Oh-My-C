@@ -84,7 +84,10 @@ CORE_OBJ := $(O)/core/core.o $(O)/core/json.o $(O)/core/fs.o $(O)/core/proc.o $(
 NET_OBJ  := $(O)/net/http.o
 T_test_text          := $(CORE_OBJ) $(patsubst src/%.c,$(O)/%.o,$(wildcard src/text/*.c))
 T_test_tui           := $(CORE_OBJ) $(patsubst src/%.c,$(O)/%.o,$(wildcard src/tui/*.c))
-T_test_providers_ag  := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provider_anthropic.o $(O)/ai/provider_google.o
+GOOGLE_OBJ := $(O)/ai/provider_google.o $(O)/ai/google_schema.o $(O)/ai/google_auth.o
+T_test_providers_ag  := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provider_anthropic.o $(GOOGLE_OBJ)
+T_test_providers_google := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(GOOGLE_OBJ) $(O)/ai/google_cca.o \
+                        $(O)/ai/provider_gemini_cli.o $(O)/ai/think_heal.o
 T_test_providers_oai := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provider_openai_completions.o \
                         $(O)/ai/provider_openai_responses.o $(O)/ai/provider_ollama.o
 T_test_http          := $(CORE_OBJ) $(NET_OBJ)
@@ -95,7 +98,7 @@ T_test_editmodes     := $(CORE_OBJ) $(O)/tools/diff.o $(O)/tools/fuzzy.o $(O)/to
 T_tui_demo           := $(T_test_tui)
 T_test_chrome        := $(LIB_OBJ)
 UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
-              test_chrome
+              test_chrome test_providers_google
 
 .SECONDEXPANSION:
 build/tests/%: tests/%.c $$(T_$$*)
