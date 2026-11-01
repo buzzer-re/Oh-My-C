@@ -117,6 +117,8 @@ agent_tool_t *tool_find_new(tool_env_t *env);
 agent_tool_t *tool_ast_edit_new(tool_env_t *env);
 /* finalize a staged ast_edit proposal (xd://resolve / xd://reject) */
 char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_error);
+/* re-render the eval description with the session tool names its bridge can call */
+void eval_set_tool_names(agent_tool_t *t, const json_t *names);
 
 /* agent definitions (bundled + ~/.omc/agent/agents + .omc/agents): owned object name -> {name, description, tools[], model?, body} */
 json_t *agent_defs_load(const char *cwd);

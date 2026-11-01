@@ -464,5 +464,16 @@ void tools_finalize(agent_t *a, const strvec_t *requested) {
     a->tools.n = 0;
     for (size_t i = 0; i < a->all_tools.n; i++)
         if (!a->all_tools.v[i]->hidden) vec_push(&a->tools, a->all_tools.v[i]);
+    /* eval's bridge reaches every session tool: top-level ones, then xd:// devices */
+    agent_tool_t *ev = NULL;
+    json_t *names = json_arr();
+    for (size_t i = 0; i < a->tools.n; i++) {
+        json_push_str(names, a->tools.v[i]->name);
+        if (!strcmp(a->tools.v[i]->name, "eval")) ev = a->tools.v[i];
+    }
+    for (size_t i = 0; i < a->all_tools.n; i++)
+        if (a->all_tools.v[i]->mounted) json_push_str(names, a->all_tools.v[i]->name);
+    if (ev) eval_set_tool_names(ev, names);
+    json_free(names);
     pthread_mutex_unlock(&a->mu);
 }
