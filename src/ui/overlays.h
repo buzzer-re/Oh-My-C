@@ -62,6 +62,22 @@ typedef struct {
 } ui_wizard_step_t;
 void ui_wizard_step_render(const ui_wizard_step_t *s, int width, strvec_t *out);
 
+/* ScrollView (scrollbar "auto") over pre-rendered lines: exactly `height` rows, each truncated (…) to
+ * width, one column narrower plus a muted │ track / accent █ thumb when the lines overflow. *offset is
+ * clamped. */
+void ui_scroll_view(const strvec_t *lines, int height, int *offset, int width, strvec_t *out);
+
+/* TabBar with omp's tab-bar theme: optional bold accent "label:", ` tab ` chips (active bold on
+ * selectedBg, others muted, muted tabs dim) two spaces apart, optional "(⇥ to cycle)" hint; tabs with a
+ * short label collapse to it (farthest from the active tab first) when the row is too wide; wraps. */
+typedef struct {
+    const char *label;
+    const char *short_label; /* NULL = never collapses */
+    bool muted;
+} ui_tab_t;
+void ui_tab_bar_render(const char *label, const ui_tab_t *tabs, size_t n, size_t active, bool show_hint, int width,
+                       strvec_t *out);
+
 /* ---------- setup.c ---------- */
 
 #define UI_SETUP_VERSION 2
@@ -90,8 +106,13 @@ void ui_overlay_hotkeys(ui_t *u);
 /* titled command report (overlays/report-panel.ts): fullscreen page, scrolls, Esc closes; takes `body` */
 void ui_show_report(ui_t *u, const char *title, tui_component_t *body);
 void ui_overlay_login(ui_t *u, bool logout);
-/* ask tool: questions array (upstream ask tool args); answers posted via ui->ask_* */
-void ui_overlay_ask(ui_t *u);
+/* ---------- ask.c ---------- */
+
+/* ask tool dialog in the composer's place (overlays/ask-dialog.ts). `questions` is the tool's questions
+ * array (copied). `done` runs once on the UI thread with the answers object (id -> label | [labels]; a
+ * custom answer is its text; unanswered ids left out; owned by the callee) or NULL when cancelled. */
+typedef void (*ui_ask_done_fn)(void *ud, json_t *answers);
+void ui_ask_dialog_show(ui_t *u, const json_t *questions, ui_ask_done_fn done, void *ud);
 
 /* ---------- login.c ---------- */
 

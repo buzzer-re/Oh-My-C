@@ -297,3 +297,125 @@ void ui_wizard_step_render(const ui_wizard_step_t *s, int width, strvec_t *out) 
     strvec_free(&lines);
     strvec_free(&content);
 }
+
+/* ---------- ScrollView over pre-rendered lines (components/scroll-view.ts, scrollbar "auto") ---------- */
+
+void ui_scroll_view(const strvec_t *lines, int height, int *offset, int width, strvec_t *out) {
+    int total = (int)lines->n;
+    bool bar = total > height && width > 1;
+    int maxoff = MAX(0, total - height);
+    *offset = MAX(0, MIN(*offset, maxoff));
+    int cw = MAX(0, width - (bar ? 1 : 0));
+    int ts = 0, te = height;
+    if (bar) {
+        int size = MAX(1, MIN((height * height) / total, height));
+        ts = maxoff ? (int)lround((double)*offset / maxoff * (height - size)) : 0;
+        te = ts + size;
+    }
+    for (int row = 0; row < height; row++) {
+        int i = *offset + row;
+        const char *src = i < total ? lines->v[i] : "";
+        char *rt = tui_replace_tabs(src);
+        char *tr = tui_truncate_to_width(rt, cw, NULL);
+        free(rt);
+        if (!bar) {
+            strvec_push_own(out, tr);
+            continue;
+        }
+        char *pad = tui_pad_to_width(tr, cw);
+        bool thumb = row >= ts && row < te;
+        char *g = tui_fgs(NULL, thumb ? TUI_TC_ACCENT : TUI_TC_MUTED, thumb ? "\xe2\x96\x88" : "\xe2\x94\x82");
+        strvec_push_own(out, xasprintf("%s%s", pad, g));
+        free(g);
+        free(pad);
+        free(tr);
+    }
+}
+
+/* ---------- TabBar (components/tab-bar.ts with chrome/shared getTabBarTheme) ---------- */
+
+static char *tab_style(int kind, const char *text) {
+    if (kind == 1) { /* active */
+        char *f = tui_fgs(NULL, TUI_TC_TEXT, text), *b = tui_bgs(NULL, TUI_TC_SELECTED_BG, f), *r = tui_bold(b);
+        free(f);
+        free(b);
+        return r;
+    }
+    return tui_fgs(NULL, kind == 2 ? TUI_TC_DIM : TUI_TC_MUTED, text);
+}
+
+static void chunks_clear(strvec_t *v) {
+    for (size_t i = 0; i < v->n; i++) free(v->v[i]);
+    v->n = 0;
+}
+
+void ui_tab_bar_render(const char *label, const ui_tab_t *tabs, size_t n, size_t active, bool show_hint, int width,
+                       strvec_t *out) {
+    int maxw = MAX(1, width);
+    const char **labels = xcalloc(n + 1, sizeof *labels);
+    for (size_t i = 0; i < n; i++) labels[i] = tabs[i].label;
+    strvec_t chunks = {0};
+    for (;;) {
+        chunks_clear(&chunks);
+        if (label && *label) {
+            char *l = xasprintf("%s:", label), *a = tui_fgs(NULL, TUI_TC_ACCENT, l);
+            strvec_push_own(&chunks, tui_bold(a));
+            free(a);
+            free(l);
+            strvec_push(&chunks, "  ");
+        }
+        for (size_t i = 0; i < n; i++) {
+            char *t = xasprintf(" %s ", labels[i]);
+            strvec_push_own(&chunks, tab_style(tabs[i].muted ? 2 : i == active ? 1 : 0, t));
+            free(t);
+            if (i + 1 < n) strvec_push(&chunks, "  ");
+        }
+        if (show_hint) {
+            strvec_push(&chunks, "  ");
+            char *k = ui_key_hint("tab"), *h = xasprintf("(%s to cycle)", k);
+            strvec_push_own(&chunks, tui_fgs(NULL, TUI_TC_DIM, h));
+            free(h);
+            free(k);
+        }
+        int total = 0;
+        for (size_t i = 0; i < chunks.n; i++) total += tui_visible_width(chunks.v[i]);
+        if (total <= maxw) break;
+        /* collapse, farthest from the active tab first, the tabs that have a short label */
+        size_t best = n;
+        for (size_t i = 0; i < n; i++) {
+            if (i == active || !tabs[i].short_label || labels[i] == tabs[i].short_label) continue;
+            size_t d = i > active ? i - active : active - i, bd = best > active ? best - active : active - best;
+            if (best == n || d > bd) best = i;
+        }
+        if (best == n) break;
+        labels[best] = tabs[best].short_label;
+    }
+    sb_t line = SB_INIT;
+    int cur = 0;
+    size_t before = out->n;
+    for (size_t i = 0; i < chunks.n; i++) {
+        int w = tui_visible_width(chunks.v[i]);
+        if (w <= 0) continue;
+        if (w > maxw) {
+            if (cur) {
+                strvec_push(out, sb_cstr(&line));
+                sb_clear(&line);
+                cur = 0;
+            }
+            strvec_push_own(out, tui_truncate_to_width(chunks.v[i], maxw, ""));
+            continue;
+        }
+        if (cur > 0 && cur + w > maxw) {
+            strvec_push(out, sb_cstr(&line));
+            sb_clear(&line);
+            cur = 0;
+        }
+        sb_append(&line, chunks.v[i]);
+        cur += w;
+    }
+    if (cur) strvec_push(out, sb_cstr(&line));
+    if (out->n == before) strvec_push(out, "");
+    sb_free(&line);
+    strvec_free(&chunks);
+    free(labels);
+}

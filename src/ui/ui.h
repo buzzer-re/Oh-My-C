@@ -77,7 +77,6 @@ struct ui {
     pthread_cond_t ask_cv;
     json_t *ask_questions;
     json_t *ask_answers;
-    size_t ask_index;
     bool ask_done;
     tui_select_list_t *picker;
     char *goal_cont; /* pending hidden continuation prompt (goal / advisor) */

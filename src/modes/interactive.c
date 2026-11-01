@@ -327,7 +327,6 @@ static void picker_close(ui_t *u) {
     tui_set_focus(u->tui, &u->editor->base);
 }
 
-static void ask_next(ui_t *u);
 
 /* rebuild the transcript view from the session */
 static void reload_chat(ui_t *u) { ui_chat_rebuild(u); }
@@ -370,14 +369,6 @@ static void on_pick(tui_select_list_t *l, const tui_select_item_t *it, void *ud)
     UNUSED(l);
     int kind = u->picker_kind;
     char *val = xstrdup(it->value);
-    if (kind == 3) {
-        json_t *q = json_at(u->ask_questions, u->ask_index);
-        json_set_str(u->ask_answers, json_get_str(q, "id") ? json_get_str(q, "id") : "answer", val);
-        u->ask_index++;
-        free(val);
-        ask_next(u);
-        return;
-    }
     picker_close(u);
     if (kind == 1) {
         char *err = NULL;
@@ -409,14 +400,6 @@ static void on_pick(tui_select_list_t *l, const tui_select_item_t *it, void *ud)
 static void on_pick_cancel(tui_select_list_t *l, void *ud) {
     ui_t *u = ud;
     UNUSED(l);
-    if (u->picker_kind == 3) {
-        pthread_mutex_lock(&u->mu);
-        json_free(u->ask_answers);
-        u->ask_answers = NULL;
-        u->ask_done = true;
-        pthread_cond_signal(&u->ask_cv);
-        pthread_mutex_unlock(&u->mu);
-    }
     picker_close(u);
 }
 
@@ -438,41 +421,29 @@ static void show_picker(ui_t *u, int kind) {
 }
 
 
-/* ---------- ask bridge (tool thread blocks; UI thread drives pickers) ---------- */
+/* ---------- ask bridge (tool thread blocks; the UI thread runs the ask dialog) ---------- */
 
-static void ask_next(ui_t *u) {
-    if (u->ask_index >= json_len(u->ask_questions)) {
-        picker_close(u);
-        pthread_mutex_lock(&u->mu);
-        u->ask_done = true;
-        pthread_cond_signal(&u->ask_cv);
-        pthread_mutex_unlock(&u->mu);
-        return;
-    }
-    json_t *q = json_at(u->ask_questions, u->ask_index);
-    ensure_picker(u);
-    tui_select_list_clear(u->picker);
-    json_t *opt;
-    json_arr_foreach(json_get_arr(q, "options"), i, opt) {
-        const char *label = json_get_str(opt, "label");
-        tui_select_list_add(u->picker, label, label, json_get_str(opt, "description"));
-    }
-    add_notice(u, "info", json_get_str(q, "question") ? json_get_str(q, "question") : "Question");
-    show_picker(u, 3);
+static void ask_done(void *ud, json_t *answers) {
+    ui_t *u = ud;
+    pthread_mutex_lock(&u->mu);
+    json_free(u->ask_answers);
+    u->ask_answers = answers;
+    u->ask_done = true;
+    pthread_cond_signal(&u->ask_cv);
+    pthread_mutex_unlock(&u->mu);
     tui_request_render(u->tui);
 }
 
 static void ask_start(void *ud) {
     ui_t *u = ud;
-    u->ask_index = 0;
-    ask_next(u);
+    ui_ask_dialog_show(u, u->ask_questions, ask_done, u);
 }
 
 static json_t *ui_ask(void *ud, const json_t *questions) {
     ui_t *u = ud;
     pthread_mutex_lock(&u->mu);
     u->ask_questions = json_clone(questions);
-    u->ask_answers = json_obj();
+    u->ask_answers = NULL;
     u->ask_done = false;
     pthread_mutex_unlock(&u->mu);
     tui_post(u->tui, ask_start, u);
