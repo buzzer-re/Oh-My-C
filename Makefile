@@ -95,11 +95,12 @@ T_test_providers_bedrock := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/a
 T_test_readfmt       := $(CORE_OBJ) $(O)/tools/readfmt.o
 T_test_editmodes     := $(CORE_OBJ) $(O)/tools/diff.o $(O)/tools/fuzzy.o $(O)/tools/patch.o $(O)/tools/sloppy.o \
                         $(O)/text/regex.o $(O)/text/rxbt.o
+T_test_cursor        := $(CORE_OBJ) $(O)/ai/pb.o $(O)/ai/cursor_proto.o
 T_tui_demo           := $(T_test_tui)
 T_test_chrome        := $(LIB_OBJ)
 T_test_toolcards     := $(T_test_tui) $(patsubst src/%.c,$(O)/%.o,$(wildcard src/ui/tools/*.c))
 UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
-              test_chrome test_providers_google test_toolcards
+              test_chrome test_providers_google test_toolcards test_cursor
 
 .SECONDEXPANSION:
 build/tests/%: tests/%.c $$(T_$$*)
