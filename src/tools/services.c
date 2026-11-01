@@ -12,7 +12,11 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
+#if defined(__APPLE__)
+#include <util.h> /* openpty, forkpty */
+#else
 #include <pty.h>
+#endif
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>

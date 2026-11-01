@@ -5,7 +5,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#if defined(__APPLE__)
+#include <util.h> /* openpty, forkpty */
+#else
 #include <pty.h>
+#endif
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <termios.h>

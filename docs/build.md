@@ -133,3 +133,18 @@ exercised by the e2e suite.
 `OMC_VERSION` in `src/core/core.h` (currently `0.1.0`) is reported by `omc --version`,
 `omc_version()` and `omc.pc`. `OMC_API_VERSION` in `include/omc.h` versions the C API. `omc_options_t`
 carries `struct_size` so that new option fields can be added without breaking the ABI.
+
+## Platforms
+
+omc builds on Linux (glibc or musl; GCC or Clang) and macOS (Apple Clang).
+
+- **Build tree per platform:** objects, the embed generator, generated sources and test binaries go to
+  `build/obj/<uname -s>-<uname -m>/`, so one checkout can be shared between machines (e.g. a macOS host
+  and a Linux VM) without one platform picking up the other's objects. `build/omc` is refreshed from the
+  current platform's binary on every `make`.
+- **macOS:** install OpenSSL with Homebrew (`brew install openssl@3`); the Makefile finds the keg-only
+  prefix through `brew --prefix` (override with `make OPENSSL_PREFIX=...`). zlib comes from the SDK. PIE is
+  the linker default; the GNU-only `-z relro/now` flags are not used. `make lib` produces
+  `libomc.0.dylib` with only the `omc_*` symbols exported.
+- **Linux-only interfaces** (`pipe2`, `SOCK_CLOEXEC`/`SOCK_NONBLOCK`, `MSG_NOSIGNAL`, `getrandom`,
+  `execvpe`, `st_mtim`, `<pty.h>`) are provided on macOS by `src/core/compat.h`, included from `core.h`.

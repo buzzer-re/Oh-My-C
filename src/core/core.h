@@ -20,6 +20,8 @@
 #include <string.h>
 #include <sys/types.h>
 
+#include "core/compat.h"
+
 #define OMC_VERSION "0.1.0"
 #define OMC_NAME "omc"
 

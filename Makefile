@@ -1,27 +1,60 @@
-# omc - oh-my-c build
+# omc - oh-my-c build (Linux and macOS)
 CC      ?= cc
 PKG     ?= pkg-config
 OPT     ?= -O2
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+# per-platform build tree: the source dir may be shared between machines (e.g. a macOS host and a
+# Linux VM), so objects and generated tools of one platform must never be picked up by the other
+O       := build/obj/$(UNAME_S)-$(UNAME_M)
+CC_IS_CLANG := $(shell $(CC) --version 2>/dev/null | grep -qi clang && echo 1)
+
 CFLAGS  ?= $(OPT) -g
-CFLAGS  += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-unused-but-set-variable -Wshadow=local \
+CFLAGS  += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-unused-but-set-variable \
            -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIC -Isrc -Iinclude -MMD -MP
+ifneq ($(CC_IS_CLANG),1)
+CFLAGS  += -Wshadow=local
+endif
+
+ifeq ($(UNAME_S),Darwin)
+# Apple ld: PIE is the default; no -z options. OpenSSL comes from Homebrew (keg-only) or pkg-config.
+LDFLAGS += -Wl,-export_dynamic
+OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3 2>/dev/null || brew --prefix openssl 2>/dev/null)
+SSL_PC  := $(if $(OPENSSL_PREFIX),PKG_CONFIG_PATH=$(OPENSSL_PREFIX)/lib/pkgconfig:$$PKG_CONFIG_PATH )
+SSL_CFLAGS := $(shell $(SSL_PC)$(PKG) --cflags openssl 2>/dev/null || { [ -n "$(OPENSSL_PREFIX)" ] && echo -I$(OPENSSL_PREFIX)/include; })
+SSL_LIBS   := $(shell $(SSL_PC)$(PKG) --libs openssl 2>/dev/null || { [ -n "$(OPENSSL_PREFIX)" ] && echo -L$(OPENSSL_PREFIX)/lib; echo -lssl -lcrypto; })
+else
 LDFLAGS += -pie -rdynamic -Wl,-z,relro,-z,now
-LIBS    += $(shell $(PKG) --libs openssl 2>/dev/null || echo -lssl -lcrypto) -lz -lpthread -lm
+SSL_CFLAGS := $(shell $(PKG) --cflags openssl 2>/dev/null)
+SSL_LIBS   := $(shell $(PKG) --libs openssl 2>/dev/null || echo -lssl -lcrypto)
+endif
+CFLAGS  += $(SSL_CFLAGS)
+LIBS    += $(SSL_LIBS) -lz -lpthread -lm
 
 SRC  := $(sort $(wildcard src/*.c src/*/*.c src/ui/tools/*.c))
-OBJ  := $(patsubst src/%.c,build/obj/%.o,$(SRC)) build/obj/embedded.o
+OBJ  := $(patsubst src/%.c,$(O)/%.o,$(SRC)) $(O)/embedded.o
 BIN  := build/omc
 
 all: $(BIN)
 
-$(BIN): $(OBJ)
+$(O)/omc: $(OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
 
+# build/omc is always this platform's binary (refreshed on every make)
+$(BIN): $(O)/omc FORCE
+	@cmp -s $< $@ || cp $< $@
+
+FORCE:
+
 # ---- optional library build: `make lib` -> libomc.a, libomc.so, omc.pc (public API: include/omc.h) ----
-LIB_OBJ    := $(filter-out build/obj/main.o,$(OBJ))
+LIB_OBJ    := $(filter-out $(O)/main.o,$(OBJ))
 LIB_SOVER  := 0
 LIB_STATIC := build/libomc.a
+ifeq ($(UNAME_S),Darwin)
+LIB_SHARED := build/libomc.$(LIB_SOVER).dylib
+else
 LIB_SHARED := build/libomc.so.$(LIB_SOVER)
+endif
 OBJCOPY    ?= objcopy
 
 lib: $(LIB_STATIC) $(LIB_SHARED) build/omc.pc
@@ -32,6 +65,20 @@ build/libomc.syms: include/omc.h
 	@mkdir -p build
 	@grep -o 'OMC_API [^(]*(' $< | sed -E 's/.*[ *]([a-z_0-9]+)\($$/\1/' | sort -u > $@
 
+ifeq ($(UNAME_S),Darwin)
+# Mach-O symbols carry a leading underscore
+build/libomc.exports: build/libomc.syms
+	@sed 's/^/_/' $< > $@
+
+$(LIB_STATIC): $(LIB_OBJ) build/libomc.exports
+	$(LD) -r -exported_symbols_list build/libomc.exports -o build/omc-lib.o $(LIB_OBJ)
+	rm -f $@ && $(AR) rcs $@ build/omc-lib.o
+
+$(LIB_SHARED): $(LIB_OBJ) build/libomc.exports
+	$(CC) -dynamiclib -install_name @rpath/libomc.$(LIB_SOVER).dylib -Wl,-exported_symbols_list,build/libomc.exports \
+	    -o $@ $(LIB_OBJ) $(LIBS)
+	ln -sf libomc.$(LIB_SOVER).dylib build/libomc.dylib
+else
 $(LIB_STATIC): $(LIB_OBJ) build/libomc.syms
 	$(LD) -r -o build/omc-prelink.o $(LIB_OBJ)
 	$(OBJCOPY) --keep-global-symbols=build/libomc.syms build/omc-prelink.o build/omc-lib.o
@@ -44,42 +91,43 @@ $(LIB_SHARED): $(LIB_OBJ) build/libomc.map
 	$(CC) -shared -Wl,-soname,libomc.so.$(LIB_SOVER) -Wl,--version-script=build/libomc.map -Wl,-z,relro,-z,now \
 	    -o $@ $(LIB_OBJ) $(LIBS)
 	ln -sf libomc.so.$(LIB_SOVER) build/libomc.so
+endif
 
 build/omc.pc: Makefile
 	@printf 'prefix=%s\nlibdir=$${prefix}/lib\nincludedir=$${prefix}/include\n\nName: omc\nDescription: oh-my-c coding agent library\nVersion: %s\nLibs: -L$${libdir} -lomc\nLibs.private: %s\nCflags: -I$${includedir}\n' \
 	    '$(PREFIX)' "$$(sed -n 's/.*OMC_VERSION "\(.*\)".*/\1/p' src/core/core.h)" '$(LIBS)' > $@
 
 install-lib: lib
-	install -Dm644 include/omc.h $(DESTDIR)$(PREFIX)/include/omc.h
-	install -Dm644 $(LIB_STATIC) $(DESTDIR)$(PREFIX)/lib/libomc.a
-	install -Dm755 $(LIB_SHARED) $(DESTDIR)$(PREFIX)/lib/libomc.so.$(LIB_SOVER)
-	ln -sf libomc.so.$(LIB_SOVER) $(DESTDIR)$(PREFIX)/lib/libomc.so
-	install -Dm644 build/omc.pc $(DESTDIR)$(PREFIX)/lib/pkgconfig/omc.pc
+	mkdir -p $(DESTDIR)$(PREFIX)/include $(DESTDIR)$(PREFIX)/lib/pkgconfig
+	install -m644 include/omc.h $(DESTDIR)$(PREFIX)/include/omc.h
+	install -m644 $(LIB_STATIC) $(DESTDIR)$(PREFIX)/lib/libomc.a
+	install -m755 $(LIB_SHARED) $(DESTDIR)$(PREFIX)/lib/$(notdir $(LIB_SHARED))
+	ln -sf $(notdir $(LIB_SHARED)) $(DESTDIR)$(PREFIX)/lib/$(if $(filter Darwin,$(UNAME_S)),libomc.dylib,libomc.so)
+	install -m644 build/omc.pc $(DESTDIR)$(PREFIX)/lib/pkgconfig/omc.pc
 
 # embedding example + its check (links the static library only)
 build/examples/embed: examples/embed.c $(LIB_STATIC)
 	@mkdir -p build/examples
 	$(CC) -O2 -Wall -Wextra -Iinclude -o $@ $< $(LIB_STATIC) $(LIBS)
 
-build/obj/%.o: src/%.c
+$(O)/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # Embedded assets (prompts, catalog) via a tiny in-tree generator: no external tools.
-build/embedgen: build-tools/embedgen.c
-	@mkdir -p build
+$(O)/embedgen: build-tools/embedgen.c
+	@mkdir -p $(dir $@)
 	$(CC) -O2 -o $@ $<
 
 EMBED_FILES := $(shell find prompts assets -type f 2>/dev/null | LC_ALL=C sort) README.md $(sort $(wildcard docs/*.md))
-build/embedded.c: build/embedgen $(EMBED_FILES)
-	@./build/embedgen $@ $(EMBED_FILES)
+$(O)/embedded.c: $(O)/embedgen $(EMBED_FILES)
+	@./$(O)/embedgen $@ $(EMBED_FILES)
 
-build/obj/embedded.o: build/embedded.c
+$(O)/embedded.o: $(O)/embedded.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # Unit tests link only the objects they exercise (several stub catalog/auth symbols).
-O := build/obj
 CORE_OBJ := $(O)/core/core.o $(O)/core/json.o $(O)/core/fs.o $(O)/core/proc.o $(O)/core/embed.o $(O)/embedded.o
 NET_OBJ  := $(O)/net/http.o
 T_test_text          := $(CORE_OBJ) $(patsubst src/%.c,$(O)/%.o,$(wildcard src/text/*.c))
@@ -108,21 +156,22 @@ UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_provi
               test_chrome test_providers_google test_toolcards test_cursor test_judgment test_auth test_memory test_outsink
 
 .SECONDEXPANSION:
-build/tests/%: tests/%.c $$(T_$$*)
-	@mkdir -p build/tests
+$(O)/tests/%: tests/%.c $$(T_$$*)
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $< $(T_$*) $(LIBS)
 
-test: $(addprefix build/tests/,$(UNIT_TESTS)) build/examples/embed
-	@set -e; for t in $(UNIT_TESTS); do echo "== $$t"; ./build/tests/$$t >/dev/null || { echo "   FAIL ($$t)"; exit 1; }; echo "   ok"; done
+test: $(addprefix $(O)/tests/,$(UNIT_TESTS)) build/examples/embed $(BIN)
+	@set -e; for t in $(UNIT_TESTS); do echo "== $$t"; ./$(O)/tests/$$t >/dev/null || { echo "   FAIL ($$t)"; exit 1; }; echo "   ok"; done
 	@./tests/e2e/run.sh
 
 install: $(BIN)
-	install -Dm755 $(BIN) $(DESTDIR)$(PREFIX)/bin/omc
+	mkdir -p $(DESTDIR)$(PREFIX)/bin
+	install -m755 $(BIN) $(DESTDIR)$(PREFIX)/bin/omc
 
 PREFIX ?= /usr/local
 
 clean:
 	rm -rf build
 
-.PHONY: all lib install-lib test clean install
+.PHONY: all lib install-lib test clean install FORCE
 -include $(OBJ:.o=.d)
