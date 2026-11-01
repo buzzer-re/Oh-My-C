@@ -100,7 +100,48 @@ void toolcard_break_group(ui_t *u) {
     g_read_group = NULL;
 }
 
+/* tool calls whose arguments are still streaming: id -> pending card (omp draws the call before execution) */
+static hmap_t g_preview;
+
+void toolcard_preview(ui_t *u, const char *id, const char *name, const json_t *args) {
+    if (!id || !*id || !name || !*name || str_eq(name, "read")) return;
+    msgview_t *v = hmap_get(&g_preview, id);
+    if (v && !view_attached(v)) {
+        hmap_del(&g_preview, id);
+        v = NULL;
+    }
+    if (v) {
+        if (args && !json_equal(args, v->args)) {
+            json_free(v->args);
+            v->args = json_clone(args);
+            v->dirty = true;
+        }
+        return;
+    }
+    g_read_group = NULL;
+    v = mv_new(MV_TOOL);
+    v->tool_name = xstrdup(name);
+    v->tool_id = xstrdup(id);
+    v->args = args ? json_clone(args) : json_obj();
+    json_set_bool(state_of(v), "partial", true);
+    add_view(u, v);
+    hmap_put(&g_preview, id, v);
+}
+
 msgview_t *toolcard_start(ui_t *u, const char *id, const char *name, json_t *args) {
+    msgview_t *pv = id ? hmap_get(&g_preview, id) : NULL;
+    if (pv) {
+        hmap_del(&g_preview, id);
+        if (view_attached(pv) && str_eq(pv->tool_name, name)) {
+            json_free(pv->args);
+            pv->args = args;
+            json_set_int(state_of(pv), "startMs", mono_ms());
+            pv->dirty = true;
+            if (tc_wants_tick(name)) live_add(pv);
+            if (str_eq(name, "task") && !g_replaying) hmap_put(&g_bg, id, pv);
+            return pv;
+        }
+    }
     if (str_eq(name, "read") && tc_read_groupable(args)) {
         if (g_read_group && view_attached(g_read_group)) {
             json_t *grp = json_get_arr(state_of(g_read_group), "group");
@@ -280,7 +321,7 @@ void render_tool(msgview_t *v, int width, strvec_t *out) {
             c.elapsed_ms = mono_ms() - start;
         }
         /* only the generic fallback consumes the spinner frame while running (omp animatedPartialResult) */
-        if (tc_wants_tick(v->tool_name) && strcmp(v->tool_name, "bash")) c.spinner = spinner_now();
+        if (start && tc_wants_tick(v->tool_name) && strcmp(v->tool_name, "bash")) c.spinner = spinner_now();
     }
     tc_render(&c, width, out);
 }

@@ -62,6 +62,12 @@ static void ui_apply_partial(void *ud) {
     u->cur_assistant->dirty = true;
     ui_assistant_streamed(u, u->cur_assistant);
     toolcard_note_message(u, p, false);
+    /* omp draws a tool call's card while its arguments stream */
+    json_t *blk;
+    json_arr_foreach(json_get_arr(p, "content"), i, blk) {
+        if (!str_eq(json_get_str(blk, "type"), "toolCall")) continue;
+        toolcard_preview(u, json_get_str(blk, "id"), json_get_str(blk, "name"), json_get(blk, "arguments"));
+    }
     tui_request_render(u->tui);
 }
 
