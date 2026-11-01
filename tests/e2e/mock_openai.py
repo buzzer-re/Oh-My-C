@@ -53,7 +53,9 @@ class H(BaseHTTPRequestHandler):
             kind, _, rest = u.partition(":")
             if "<system-interrupt" in u:
                 kind, rest = "say", "complied with rule"
-            if "<title-request>" in u:  # fork title side request (omp/omc title.generator: fork)
+            if u.startswith("Compress into one routing hint"):  # skill description compression
+                kind, rest = "say", "Use for demo skill test routing"
+            elif "<title-request>" in u:  # fork title side request (omp/omc title.generator: fork)
                 kind, rest = "say", '<title emoji="🧪" code="PARK">Fix flaky park tests</title>'
             elif "You name coding-agent sessions" in sysc:  # title model fallback
                 kind, rest = "say", "<title>Fix flaky park tests</title>"

@@ -1,6 +1,7 @@
 #include "app.h"
 #include "coding/goal.h"
 #include "coding/title.h"
+#include "coding/skilldesc.h"
 #include "coding/advisor.h"
 #include "tools/jobs.h"
 
@@ -674,7 +675,9 @@ void app_rebuild_system_prompt(app_t *a) {
                            .disc = &a->disc,
                            .custom_prompt = a->sys_custom,
                            .append_prompt = a->sys_append,
-                           .subagent = a->opts.subagent};
+                           .subagent = a->opts.subagent,
+                           .skill_desc = skilldesc_render,
+                           .skill_desc_ud = a->skilldesc};
     json_t *blocks = build_system_prompt(&so);
     if (a->plan_mode) {
         json_t *pc = json_obj();
@@ -842,6 +845,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
             free(base);
         }
     }
+    a->skilldesc = skilldesc_new();
     install_agent(a);
     if (json_len(a->session->entries)) load_session_into_agent(a);
     if (!o->subagent) app_goal_restore(a);
@@ -878,6 +882,7 @@ void app_free(app_t *a) {
     advisor_free(a->advisor);
     goal_free(a->goal);
     title_free(a);
+    skilldesc_free(a->skilldesc);
     json_free(a->dcr_sent);
     free(a->dcr_last);
     pthread_mutex_destroy(&a->mu);

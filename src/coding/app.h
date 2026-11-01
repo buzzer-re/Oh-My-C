@@ -63,6 +63,7 @@ struct app {
     char *plan_file; /* local:// path of the current plan */
     struct goal *goal; /* goal mode state (goal.c) */
     struct title_state *title; /* automatic session title (title.c) */
+    struct skilldesc *skilldesc; /* compressed skill descriptions snapshot (skilldesc.c) */
     /* date/cwd reminder injected per request into user turns (never persisted) */
     int64_t dcr_first_ts;
     json_t *dcr_sent; /* "role:ts" -> reminder text the turn was first sent with */

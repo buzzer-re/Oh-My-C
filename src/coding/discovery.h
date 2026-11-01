@@ -56,6 +56,9 @@ typedef struct {
     const char *custom_prompt;        /* --system-prompt */
     const char *append_prompt;        /* --append-system-prompt */
     bool subagent;
+    /* optional: routing hint shown for a skill (compressed description catalog); owned result or NULL */
+    char *(*skill_desc)(void *ud, const char *name, const char *description);
+    void *skill_desc_ud;
 } sysprompt_opts_t;
 
 /* returns owned array of system prompt blocks (strings) */

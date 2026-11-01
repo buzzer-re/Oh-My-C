@@ -551,7 +551,9 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
         if (o->disc->skills.v[i].hide) continue;
         json_t *s = json_obj();
         json_set_str(s, "name", o->disc->skills.v[i].name);
-        json_set_str(s, "description", o->disc->skills.v[i].description);
+        char *hint = o->skill_desc ? o->skill_desc(o->skill_desc_ud, o->disc->skills.v[i].name, o->disc->skills.v[i].description) : NULL;
+        json_set_str(s, "description", hint ? hint : o->disc->skills.v[i].description);
+        free(hint);
         json_push(skills, s);
     }
     for (size_t i = 0; o->disc && i < o->disc->rules.n; i++) {
