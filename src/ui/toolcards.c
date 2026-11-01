@@ -12,6 +12,12 @@
 static msgview_t *g_read_group; /* the read group a run of reads accretes into (omp #lastReadGroup) */
 static VEC(msgview_t *) g_live; /* running cards that repaint on a timer */
 static int g_timer;
+static hmap_t g_bg;       /* tool call id -> card that may receive background job frames (task) */
+static bool g_replaying;  /* history replay: persisted async results are not live */
+
+static bool is_async_state(const json_t *details, const char *state) {
+    return str_eq(json_get_str(json_get_obj(details, "async"), "state"), state);
+}
 
 static json_t *state_of(msgview_t *v) {
     if (!v->msg) v->msg = json_obj();
@@ -130,6 +136,7 @@ msgview_t *toolcard_start(ui_t *u, const char *id, const char *name, json_t *arg
     json_set_bool(state_of(v), "partial", true);
     add_view(u, v);
     if (tc_wants_tick(name)) live_add(v);
+    if (str_eq(name, "task") && id && !g_replaying) hmap_put(&g_bg, id, v);
     return v;
 }
 
@@ -154,15 +161,59 @@ void toolcard_result(ui_t *u, msgview_t *v, const char *id, json_t *result, bool
         v->dirty = true;
         return;
     }
-    json_set(st, "result", result ? result : json_obj());
-    json_set_bool(st, "partial", partial);
+    if (!result) result = json_obj();
+    bool parked = false;
+    if (!partial && !g_replaying && is_async_state(json_get_obj(result, "details"), "running")) {
+        /* a background call returned: the card stays live for its job frames (omp parkAsBackground) */
+        parked = true;
+        json_t *frame = json_get_obj(st, "frame");
+        if (frame) {
+            json_set(result, "details", json_clone(frame));
+            parked = is_async_state(frame, "running");
+            if (is_async_state(frame, "failed")) is_error = true;
+            json_del(st, "frame");
+        }
+    }
+    json_set(st, "result", result);
+    json_set_bool(st, "partial", partial || parked);
+    json_set_bool(st, "parked", parked);
     json_set_bool(st, "isError", is_error);
     if (!partial) {
         json_set_int(st, "endMs", mono_ms());
         v->done = true;
         v->is_error = is_error;
+        if (!parked && v->tool_id) hmap_del(&g_bg, v->tool_id);
     }
     v->dirty = true;
+}
+
+void toolcard_frame(ui_t *u, const char *id, json_t *details) {
+    msgview_t *v = id ? hmap_get(&g_bg, id) : NULL;
+    if (!v || !view_attached(v)) {
+        if (v) hmap_del(&g_bg, id);
+        json_free(details);
+        return;
+    }
+    json_t *st = state_of(v);
+    if (!v->done) { /* the call has not returned yet: its final result picks this frame up */
+        json_set(st, "frame", details);
+        return;
+    }
+    if (!json_get_bool(st, "parked", false)) {
+        json_free(details);
+        return;
+    }
+    json_t *result = json_get_obj(st, "result");
+    json_set(result, "details", details);
+    bool running = is_async_state(details, "running");
+    bool failed = is_async_state(details, "failed");
+    json_set_bool(st, "partial", running);
+    json_set_bool(st, "parked", running);
+    json_set_bool(st, "isError", failed);
+    v->is_error = failed;
+    if (!running) hmap_del(&g_bg, id);
+    v->dirty = true;
+    if (u && u->tui) tui_request_render(u->tui);
 }
 
 /* ---------- rendering ---------- */
@@ -248,7 +299,7 @@ void toolcard_note_message(ui_t *u, const json_t *msg, bool final) {
     g_visible_blocks = final ? 0 : n;
 }
 
-void toolcard_replay(ui_t *u, const json_t *msg) {
+static void replay_msg(ui_t *u, const json_t *msg) {
     const char *role = json_get_str(msg, "role");
     if (str_eq(role, "user")) {
         toolcard_break_group(u);
@@ -280,3 +331,12 @@ void toolcard_replay(ui_t *u, const json_t *msg) {
         hmap_del(&u->tools, id);
     }
 }
+
+void toolcard_replay(ui_t *u, const json_t *msg) {
+    bool was = g_replaying;
+    g_replaying = true;
+    replay_msg(u, msg);
+    g_replaying = was;
+}
+
+void toolcard_set_replaying(bool on) { g_replaying = on; }

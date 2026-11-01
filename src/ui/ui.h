@@ -130,6 +130,11 @@ void toolcard_break_group(ui_t *u);
 void toolcard_note_message(ui_t *u, const json_t *msg, bool final);
 /* transcript rebuild: cards for an assistant message's toolCall blocks, results from toolResult messages */
 void toolcard_replay(ui_t *u, const json_t *msg);
+/* a later result frame of a background call (async task progress); takes `details`. A frame whose
+ * details.async.state is running keeps the card live; completed/failed/cancelled settles it. */
+void toolcard_frame(ui_t *u, const char *id, json_t *details);
+/* history rebuild in progress: persisted background results render settled, not live */
+void toolcard_set_replaying(bool on);
 
 /* statusline.c */
 tui_component_t *ui_status_new(ui_t *u);   /* standalone bottom bar (pi/borderless/claude/rule/field/rail) */

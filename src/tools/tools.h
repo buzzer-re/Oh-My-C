@@ -44,6 +44,9 @@ typedef struct {
 typedef struct {
     /* ask the user; returns owned JSON answer object or NULL if unavailable/cancelled */
     json_t *(*ask)(void *ud, const json_t *questions);
+    /* a tool call that already returned has a new result frame (async task progress): details owned; called
+     * from any thread (the UI posts it to its own) */
+    void (*tool_frame)(void *ud, const char *tool_call_id, json_t *details);
     void *ud;
 } tool_ui_t;
 

@@ -1281,6 +1281,7 @@ void ui_chat_rebuild(ui_t *u) {
     u->pinned_error = NULL;
     hmap_t pending;
     hmap_init(&pending);
+    toolcard_set_replaying(true);
     session_t *s = u->app->session;
     json_t *path = s && s->leaf_id ? session_path_to(s, s->leaf_id) : NULL;
     if (path && json_len(path)) {
@@ -1314,5 +1315,6 @@ void ui_chat_rebuild(ui_t *u) {
     }
     json_free(path);
     hmap_free(&pending, NULL);
+    toolcard_set_replaying(false);
     tui_request_full_render(u->tui);
 }

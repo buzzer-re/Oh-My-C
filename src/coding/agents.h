@@ -18,6 +18,18 @@ void agents_unregister(struct app *a);
 void agents_release_children(struct app *a); /* frees idle subagent sessions `a` spawned */
 const char *agents_id_of(const struct app *a); /* registry id (borrowed) or NULL */
 
+/* ---------- task cards ---------- */
+/* Live omp TaskToolDetails snapshot of one task call ({results, progress[], async:{state,jobId,type}, ...}):
+ * its async spawns update their progress rows (status, current tool, tool/request counts, context) and every
+ * change is pushed to env->ui.tool_frame for the call's transcript card; the last frame is the settled one
+ * (async.state completed/failed). Refcounted: the task tool and each spawn hold a reference. */
+typedef struct task_card task_card_t;
+task_card_t *task_card_new(tool_env_t *env, const char *tool_call_id, json_t *details /* owned */);
+void task_card_release(task_card_t *c);
+json_t *task_card_snapshot(task_card_t *c); /* owned clone */
+void task_card_set_id(task_card_t *c, int index, const char *agent_id, bool primary); /* allocated agent id */
+void task_card_settle(task_card_t *c, int index, const char *status); /* a spawn ended (or failed to start) */
+
 /* ---------- task spawns ---------- */
 typedef struct {
     const char *agent;          /* definition name */
@@ -26,6 +38,8 @@ typedef struct {
     const char *context;
     const char *source_session; /* seance */
     const json_t *model;        /* string or [string] override (seance) */
+    task_card_t *card;          /* progress card this spawn reports into (NULL: none) */
+    int card_index;
 } spawn_spec_t;
 
 /* async spawn: registers the agent and starts a "task" job in env->jobs; returns 0 and the owned agent/job ids */
