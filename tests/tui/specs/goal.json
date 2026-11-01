@@ -1,0 +1,14 @@
+[
+ {"user": "g1"},
+ {"tool": "goal", "args": {"op": "create", "objective": "Ship the release", "token_budget": 50000}, "text": "Goal set",
+  "details": {"op": "create", "goal": {"id": "g1", "objective": "  Ship the release  ", "status": "active", "tokenBudget": 50000, "tokensUsed": 1234, "timeUsedSeconds": 0, "createdAt": 1, "updatedAt": 1}, "remainingTokens": 48766}},
+ {"user": "g2"},
+ {"tool": "goal", "args": {"op": "complete"}, "text": "done",
+  "details": {"op": "complete", "goal": {"id": "g1", "objective": "Ship the release", "status": "complete", "tokensUsed": 23456789, "timeUsedSeconds": 125, "createdAt": 1, "updatedAt": 1}, "completionBudgetReport": "Used 23M tokens\nin 2 minutes"}},
+ {"user": "g3"},
+ {"tool": "goal", "args": {"op": "get"}, "text": "no goal", "details": {"op": "get", "goal": null}},
+ {"user": "g4"},
+ {"tool": "goal", "args": {"op": "resume"}, "text": "Error: nothing to resume", "isError": true, "details": {"op": "resume"}},
+ {"user": "g5"},
+ {"tool": "goal", "args": {"op": "drop"}, "text": "dropped", "details": {"op": "drop", "goal": {"id": "g1", "objective": "Ship", "status": "dropped", "tokenBudget": 1000, "tokensUsed": 1500, "timeUsedSeconds": 3700}}}
+]

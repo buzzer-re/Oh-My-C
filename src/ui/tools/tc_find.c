@@ -63,7 +63,7 @@ static char *render_hit(const json_t *hit, int range_limit) {
         char *sn0 = str_trim(json_get_str(rv[i], "snippet") ? json_get_str(rv[i], "snippet") : "");
         char *src = tc_replace_tabs(sn0);
         char *snip;
-        if (lang) { /* omp isHighlightLanguage: grammars omc lacks come back plain, like syntect plain text */
+        if (lang && strcmp(lang, "text")) { /* omp isHighlightLanguage: grammars omc lacks come back plain, like syntect plain text */
             strvec_t hl = {0};
             tc_highlight(src, lang, &hl);
             snip = strvec_join(&hl, "\n");

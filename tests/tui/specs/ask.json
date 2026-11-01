@@ -1,0 +1,17 @@
+[
+ {"user": "a1"},
+ {"tool": "ask", "args": {"questions": [{"id": "db", "question": "Which **database** should we use?", "options": [{"label": "Postgres", "description": "relational, `mature`"}, {"label": "SQLite"}, {"label": "Redis"}]}]},
+  "text": "User selected: Postgres", "details": {"question": "Which **database** should we use?", "options": ["Postgres", "SQLite", "Redis"], "multi": false, "selectedOptions": ["Postgres"]}},
+ {"user": "a2"},
+ {"tool": "ask", "args": {"questions": [{"id": "a", "question": "Pick features", "options": [{"label": "x"}, {"label": "y"}], "multi": true}, {"id": "b", "question": "Name?", "options": [{"label": "foo"}]}]},
+  "text": "User answers", "details": {"results": [
+    {"id": "a", "question": "Pick features", "options": ["x", "y"], "multi": true, "selectedOptions": ["x", "y"]},
+    {"id": "b", "question": "Name?", "options": ["foo"], "multi": false, "selectedOptions": [], "customInput": "bar\nbaz", "note": "a note"}]}},
+ {"user": "a3"},
+ {"tool": "ask", "args": {"questions": [{"id": "c", "question": "Cancel me?", "options": [{"label": "a"}]}]},
+  "text": "User cancelled", "isError": true, "details": {"question": "Cancel me?", "options": ["a"], "multi": false, "selectedOptions": [], "timedOut": true}},
+ {"user": "a4"},
+ {"tool": "ask", "args": {"questions": [{"id": "c", "question": "x"}]}, "text": "ask is unavailable: no interactive user", "isError": true},
+ {"user": "a5"},
+ {"tool": "ask", "args": {"questions": [{"id": "c", "question": "x"}]}, "text": "chat", "details": {"chatRedirect": true, "questions": ["What *now*?", "Second"]}}
+]

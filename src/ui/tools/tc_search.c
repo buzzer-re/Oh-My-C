@@ -89,7 +89,7 @@ char *tc_style_search_line(const char *line, const char *lang) {
         char *src = tc_replace_tabs(line + g);
         char *gs = tc_fg(TUI_TC_TOOL_OUTPUT, gut);
         char *ss;
-        if (lang && strcmp(lang, "text") && tui_highlight_supported(lang)) {
+        if (lang && strcmp(lang, "text")) { /* known grammar: syntect output (plain for grammars omc lacks) */
             strvec_t hl = {0};
             tui_highlight_code(src, lang, NULL, &hl);
             ss = hl.n ? xstrdup(hl.v[0]) : xstrdup("");
