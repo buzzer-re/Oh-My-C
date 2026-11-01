@@ -520,312 +520,92 @@ static void invalidate_ui(wizard_t *w) {
 }
 
 /* ======================================================================================= */
-/* scene: sign in (scenes/sign-in.ts + overlays/oauth-selector.ts)                          */
+/* scene: sign in (scenes/sign-in.ts, v18.14.2: provider panel, then a login dialog)        */
 /* ======================================================================================= */
 
-#define OAUTH_MAX_VISIBLE 10
-
-typedef struct {
-    tui_tc_t color;
-    char *text;
-} styled_t;
+#define DIALOG_HEAD_ROWS 3
 
 typedef struct {
     scene_t s;
-    /* selector */
-    json_t *providers; /* borrowed array */
-    VEC(size_t) items; /* provider indices after disabled filter */
-    VEC(size_t) vis;   /* indices into items */
-    size_t sel;
-    char *query;
-    int max_visible;
-    char *status_message;
-    /* login */
-    VEC(styled_t) status;
-    char *logging_in;
-    char *auth_url;
-    char *launch_url;
-    bool prompt_open;
-    char *prompt_msg;
-    char *prompt_placeholder;
-    sb_t prompt_buf;
-    bool prompt_secret;
-    bool api_key_mode;
-    /* worker */
-    pthread_mutex_t mu;
-    volatile int abort_flag;
-    char *pasted; /* handed to the worker */
-    bool worker;
-    int refcount; /* scene + worker */
-    bool disposed;
+    ui_oauth_sel_t *sel;
+    ui_login_t *login;
+    int outcome; /* -1 none, UI_LOGIN_SUCCESS / UI_LOGIN_ERROR */
+    char *outcome_name, *outcome_msg;
+    bool signed_in;
 } signin_t;
 
-static void status_clear(signin_t *si) {
-    for (size_t i = 0; i < si->status.n; i++) free(si->status.v[i].text);
-    si->status.n = 0;
-}
-static void status_add(signin_t *si, tui_tc_t c, const char *t) {
-    styled_t s = {c, xstrdup(t)};
-    vec_push(&si->status, s);
-}
-
-static const json_t *prov(const signin_t *si, size_t item) { return json_at(si->providers, si->items.v[item]); }
-
-static bool prov_has_auth(const json_t *p) { return auth_has_credentials(json_get_str(p, "id")); }
-
-static char *prov_source(const json_t *p) {
-    const char *id = json_get_str(p, "id");
-    json_t *list = auth_list(), *e;
-    char *src = NULL;
-    json_arr_foreach(list, i, e) if (str_eq(json_get_str(e, "provider"), id)) src =
-        xstrdup(str_eq(json_get_str(e, "type"), "oauth") ? "login" : "api key");
-    json_free(list);
-    if (!src && auth_has_credentials(id)) src = xstrdup("env");
-    return src;
-}
-
-static void signin_refilter(signin_t *si) {
-    char *keep = NULL;
-    if (si->vis.n && si->sel < si->vis.n) keep = xstrdup(json_get_str(prov(si, si->vis.v[si->sel]), "id"));
-    si->vis.n = 0;
-    size_t n = si->items.n;
-    char **texts = xcalloc(n ? n : 1, sizeof *texts);
-    for (size_t i = 0; i < n; i++) {
-        const json_t *p = prov(si, i);
-        sb_t b = SB_INIT;
-        sb_appendf(&b, "%s %s", json_get_str(p, "name"), json_get_str(p, "id"));
-        char *src = prov_has_auth(p) ? prov_source(p) : NULL;
-        if (src) sb_appendf(&b, " logged in authenticated %s", src);
-        free(src);
-        texts[i] = sb_detach(&b);
-    }
-    size_t *idx = xmalloc((n ? n : 1) * sizeof *idx);
-    size_t m = tui_fuzzy_rank(si->query ? si->query : "", (const char *const *)texts, n, idx);
-    for (size_t i = 0; i < m; i++) vec_push(&si->vis, idx[i]);
-    free(idx);
-    for (size_t i = 0; i < n; i++) free(texts[i]);
-    free(texts);
-    si->sel = 0;
-    free(keep); /* upstream setQuery(value, false): selection resets */
-}
-
-static bool signin_search_enabled(const signin_t *si) { return (int)si->items.n > si->max_visible; }
-
-static void signin_set_max_height(signin_t *si, int lines) {
-    int strict = lines - 1 - 2, relaxed = lines - 1 - 1;
-    int rows = MIN(OAUTH_MAX_VISIBLE, MAX(1, MAX(strict, MIN(relaxed, 3))));
-    si->max_visible = rows;
-}
-
-static void signin_selector_lines(signin_t *si, int width, strvec_t *out) {
-    /* OverlayPanel("Select provider to login") */
-    int inner = MAX(1, width - 4);
-    strvec_t body = {0};
-    int total = (int)si->vis.n, maxv = si->max_visible;
-    int start = 0;
-    if (total > 0 && maxv > 0) {
-        start = (int)si->sel - maxv / 2;
-        start = MAX(0, MIN(start, MAX(0, total - maxv)));
-    }
-    int end = MIN(total, start + maxv);
-    strvec_t rows = {0};
-    for (int i = start; i < end; i++) {
-        const json_t *p = prov(si, si->vis.v[i]);
-        bool selected = (size_t)i == si->sel;
-        sb_t l = SB_INIT;
-        const char *name = json_get_str(p, "name");
-        if (selected) {
-            char *cur = xasprintf("%s ", tui_sym("nav.cursor"));
-            tui_fg(&l, NULL, TUI_TC_ACCENT, cur);
-            free(cur);
-            tui_fg(&l, NULL, TUI_TC_ACCENT, name);
-        } else {
-            sb_appendf(&l, "  %s", name);
-        }
-        if (prov_has_auth(p)) {
-            char *st = xasprintf(" %s logged in", tui_sym("status.enabled"));
-            tui_fg(&l, NULL, TUI_TC_SUCCESS, st);
-            free(st);
-            char *src = prov_source(p);
-            if (src) {
-                char *s2 = xasprintf(" (%s)", src);
-                tui_fg(&l, NULL, TUI_TC_MUTED, s2);
-                free(s2);
-                free(src);
-            }
-        }
-        strvec_push_own(&rows, sb_detach(&l));
-    }
-    int h = (int)rows.n;
-    bool bar = h > 0 && total > h;
-    int cw = MAX(0, inner - (bar ? 1 : 0));
-    int ts = 0, te = h;
-    if (bar) {
-        int size = MAX(1, MIN((h * h) / total, h));
-        int maxoff = MAX(0, total - h);
-        ts = maxoff == 0 ? 0 : (int)lround((double)MIN(start, maxoff) / maxoff * (h - size));
-        te = ts + size;
-    }
-    for (int r = 0; r < h; r++) {
-        char *tr = tui_truncate_to_width(rows.v[r], cw, NULL);
-        if (!bar) {
-            strvec_push_own(&body, tr);
-            continue;
-        }
-        sb_t s = SB_INIT;
-        sb_append(&s, tr);
-        tui_sb_spaces(&s, cw - tui_visible_width(tr));
-        free(tr);
-        bool thumb = r >= ts && r < te;
-        tui_fg(&s, NULL, thumb ? TUI_TC_ACCENT : TUI_TC_MUTED, thumb ? "\xe2\x96\x88" : "\xe2\x94\x82");
-        strvec_push_own(&body, sb_detach(&s));
-    }
-    strvec_free(&rows);
-    if (signin_search_enabled(si) || (si->query && *si->query)) {
-        char *q = si->query ? xstrdup(si->query) : xstrdup("");
-        char *t = str_trim(q);
-        char *line;
-        if (!*t) line = S(TUI_TC_MUTED, "Type to search");
-        else {
-            char *lab = S(TUI_TC_MUTED, "Search: ");
-            line = xasprintf("%s%s\x1b[7m \x1b[27m", lab, si->query);
-            free(lab);
-        }
-        strvec_push_own(&body, tui_truncate_to_width(line, inner, NULL));
-        free(line);
-        free(t);
-        free(q);
-    }
-    if (total == 0) {
-        char *m = S(TUI_TC_MUTED, si->items.n ? "No matching providers" : "No OAuth providers available");
-        strvec_push_own(&body, m);
-    }
-    if (si->status_message) {
-        strvec_push(&body, "");
-        strvec_push_own(&body, S(TUI_TC_WARNING, si->status_message));
-    }
-    strvec_push_own(out, ui_box_top(width, "Select provider to login"));
-    for (size_t i = 0; i < body.n; i++) strvec_push_own(out, ui_box_row(body.v[i], width));
-    strvec_push_own(out, ui_box_bottom(width));
-    strvec_free(&body);
-}
-
-typedef struct {
-    signin_t *si;
-    int width;
-} signin_ctx_t;
-
 static void signin_fit(void *ud, int budget) {
-    signin_ctx_t *c = ud;
-    if (budget >= 0) signin_set_max_height(c->si, budget);
+    signin_t *si = ud;
+    if (budget >= 0) ui_oauth_sel_set_max_height(si->sel, budget);
 }
 
 static void signin_content(void *ud, int width, strvec_t *out) {
-    signin_ctx_t *c = ud;
-    signin_selector_lines(c->si, width, out);
-}
-
-/* code / key prompt: warning message + Input("> ", masked with • for secrets) */
-static void prompt_lines(signin_t *si, int width, strvec_t *tail) {
-    char *pm = S(TUI_TC_WARNING, si->prompt_msg ? si->prompt_msg : "");
-    ui_push_text(tail, pm, width);
-    free(pm);
-    if (si->prompt_placeholder) {
-        char *ph = S(TUI_TC_DIM, si->prompt_placeholder);
-        ui_push_text(tail, ph, width);
-        free(ph);
-    }
-    const char *v = sb_cstr(&si->prompt_buf);
-    sb_t in = SB_INIT;
-    sb_append(&in, "> ");
-    if (si->prompt_secret) {
-        for (const char *p = v; *p; p++)
-            if (((unsigned char)*p & 0xC0) != 0x80) sb_append(&in, "\xe2\x80\xa2");
-    } else {
-        sb_append(&in, v);
-    }
-    sb_append(&in, "\x1b[7m \x1b[27m");
-    strvec_push_own(tail, sb_detach(&in));
-}
-
-static void signin_tail(signin_t *si, int width, strvec_t *tail) {
-    pthread_mutex_lock(&si->mu);
-    if (si->auth_url) {
-        char *k = ui_key_hint("alt+c");
-        char *link = xasprintf("\x1b]8;;%s\x07Open login URL\x1b]8;;\x07", si->auth_url);
-        char *hint = xasprintf("(clipboard copy attempted; %s retries)", k);
-        char *hd = S(TUI_TC_DIM, hint);
-        char *msg = xasprintf("Browser login: %s %s", link, hd);
-        char *line = S(TUI_TC_ACCENT, msg);
-        ui_push_text(tail, line, width);
-        free(line);
-        free(msg);
-        free(hd);
-        free(hint);
-        free(link);
-        free(k);
-        char *ud = S(TUI_TC_DIM, si->auth_url);
-        strvec_t url = {0};
-        tui_wrap_text_with_ansi(ud, MAX(1, width), &url);
-        if (url.n) strvec_push(tail, url.v[0]);
-        if (si->launch_url) {
-            char *lt = xasprintf("Local shortcut (this machine only): %s", si->launch_url);
-            char *ls = S(TUI_TC_DIM, lt);
-            ui_push_text(tail, ls, width);
-            free(ls);
-            free(lt);
-        }
-        if (si->prompt_open) prompt_lines(si, width, tail);
-        if (url.n > 1)
-            for (size_t i = 0; i < url.n; i++) strvec_push(tail, url.v[i]);
-        strvec_free(&url);
-        free(ud);
-    } else if (si->prompt_open) {
-        prompt_lines(si, width, tail);
-    }
-    for (size_t i = 0; i < si->status.n; i++) {
-        char *st = S(si->status.v[i].color, si->status.v[i].text);
-        ui_push_text(tail, st, width);
-        free(st);
-    }
-    pthread_mutex_unlock(&si->mu);
+    signin_t *si = ud;
+    ui_oauth_sel_render(si->sel, width, out);
 }
 
 static void signin_render(scene_t *s, int width, int max_lines, strvec_t *out) {
     signin_t *si = (signin_t *)s;
-    strvec_t intro = {0}, tail = {0}, heading = {0};
-    signin_tail(si, width, &tail);
-    signin_ctx_t ctx = {si, width};
+    if (si->login && !ui_login_active(si->login)) {
+        ui_login_free(si->login);
+        si->login = NULL;
+    }
+    if (si->login) {
+        strvec_t lines = {0};
+        ui_login_render(si->login, width, &lines);
+        if ((int)lines.n <= max_lines) {
+            for (size_t i = 0; i < lines.n; i++) strvec_push(out, lines.v[i]);
+        } else {
+            int head = max_lines >= DIALOG_HEAD_ROWS * 2 ? DIALOG_HEAD_ROWS : 0;
+            for (int i = 0; i < head; i++) strvec_push(out, lines.v[i]);
+            for (size_t i = lines.n - (size_t)(max_lines - head); i < lines.n; i++) strvec_push(out, lines.v[i]);
+        }
+        strvec_free(&lines);
+        return;
+    }
+    strvec_t intro = {0}, status = {0};
+    if (max_lines >= 17 + 2) {
+        strvec_push_own(&intro, S(TUI_TC_MUTED, "Pick a provider to sign in \xe2\x80\x94 you can connect more than one."));
+        strvec_push(&intro, "");
+    }
+    if (si->outcome == UI_LOGIN_SUCCESS) {
+        char *a = xasprintf("%s Signed in to %s", tui_sym("status.success"), si->outcome_name);
+        char *as = S(TUI_TC_SUCCESS, a);
+        ui_push_text(&status, as, width);
+        char *path = omc_agent_path("auth.json");
+        char *b = xasprintf("Credentials saved to %s", path);
+        char *bs = S(TUI_TC_DIM, b);
+        ui_push_text(&status, bs, width);
+        free(a);
+        free(as);
+        free(b);
+        free(bs);
+        free(path);
+    } else if (si->outcome == UI_LOGIN_ERROR) {
+        char *a = xasprintf("Login failed: %s", si->outcome_msg ? si->outcome_msg : "unknown error");
+        char *as = S(TUI_TC_ERROR, a);
+        ui_push_text(&status, as, width);
+        char *k = ui_editor_key("tui.select.cancel");
+        char *b = xasprintf("Choose another provider or press %s to continue.", k);
+        char *bs = S(TUI_TC_DIM, b);
+        ui_push_text(&status, bs, width);
+        free(a);
+        free(as);
+        free(b);
+        free(bs);
+        free(k);
+    }
     ui_wizard_step_t step = {0};
     step.gap = 0;
     step.max_height = max_lines;
-    step.ud = &ctx;
-    if (si->logging_in) {
-        char *h = xasprintf("Signing in to %s", si->logging_in);
-        strvec_push_own(&heading, tui_bold(h));
-        free(h);
-        step.heading = &heading;
-        step.content = NULL;
-        /* async kind: the tail is the content */
-        strvec_t all = {0};
-        for (size_t i = 0; i < heading.n; i++) strvec_push(&all, heading.v[i]);
-        for (size_t i = 0; i < tail.n && (int)all.n < max_lines; i++) strvec_push(&all, tail.v[i]);
-        for (size_t i = 0; i < all.n && (int)i < max_lines; i++) strvec_push(out, all.v[i]);
-        strvec_free(&all);
-    } else {
-        if (max_lines >= 17 + 2) {
-            strvec_push_own(&intro, S(TUI_TC_MUTED, "Pick a provider to sign in \xe2\x80\x94 you can connect more than one."));
-            strvec_push(&intro, "");
-            step.intro = &intro;
-        }
-        step.status = &tail;
-        step.fit = signin_fit;
-        step.content = signin_content;
-        ui_wizard_step_render(&step, width, out);
-    }
+    step.intro = &intro;
+    step.status = &status;
+    step.fit = signin_fit;
+    step.content = signin_content;
+    step.ud = si;
+    ui_wizard_step_render(&step, width, out);
     strvec_free(&intro);
-    strvec_free(&tail);
-    strvec_free(&heading);
+    strvec_free(&status);
 }
 
 static char *signin_subtitle(scene_t *s) {
@@ -835,362 +615,54 @@ static char *signin_subtitle(scene_t *s) {
     return r;
 }
 
-static void signin_release(signin_t *si) {
-    pthread_mutex_lock(&si->mu);
-    int rc = --si->refcount;
-    pthread_mutex_unlock(&si->mu);
-    if (rc > 0) return;
-    status_clear(si);
-    vec_free(&si->status);
-    vec_free(&si->items);
-    vec_free(&si->vis);
-    free(si->query);
-    free(si->status_message);
-    free(si->logging_in);
-    free(si->auth_url);
-    free(si->launch_url);
-    free(si->prompt_msg);
-    free(si->prompt_placeholder);
-    free(si->pasted);
-    sb_free(&si->prompt_buf);
-    pthread_mutex_destroy(&si->mu);
-    free(si);
-}
-
-typedef struct {
-    signin_t *si;
-    char *provider;
-    char *api_key; /* api-key login: entered key */
-    int rc;
-    char *err;
-    tui_t *tui;
-} login_job_t;
-
-static void login_done_ui(void *ud) {
-    login_job_t *j = ud;
-    signin_t *si = j->si;
-    if (!si->disposed) {
-        pthread_mutex_lock(&si->mu);
-        status_clear(si);
-        if (j->rc == 0) {
-            char *a = xasprintf("%s Signed in to %s", tui_sym("status.success"), j->provider);
-            status_add(si, TUI_TC_SUCCESS, a);
-            free(a);
-            char *path = omc_agent_path("auth.json");
-            char *b = xasprintf("Credentials saved to %s", path);
-            status_add(si, TUI_TC_DIM, b);
-            free(b);
-            free(path);
-        } else if (si->abort_flag) {
-            status_add(si, TUI_TC_DIM, "Login cancelled.");
-        } else {
-            char *a = xasprintf("Login failed: %s", j->err ? j->err : "unknown error");
-            status_add(si, TUI_TC_ERROR, a);
-            free(a);
-            char *k = ui_editor_key("tui.select.cancel");
-            char *b = xasprintf("Choose another provider or press %s to continue.", k);
-            status_add(si, TUI_TC_DIM, b);
-            free(b);
-            free(k);
+static void signin_done(void *ud, int outcome, const char *name, const char *err) {
+    signin_t *si = ud;
+    if (outcome != UI_LOGIN_CANCELLED) {
+        si->outcome = outcome;
+        free(si->outcome_name);
+        free(si->outcome_msg);
+        si->outcome_name = xstrdup(name ? name : "");
+        si->outcome_msg = err ? xstrdup(err) : NULL;
+        if (outcome == UI_LOGIN_SUCCESS) {
+            si->signed_in = true;
+            ui_oauth_sel_refresh(si->sel);
         }
-        free(si->auth_url);
-        si->auth_url = NULL;
-        free(si->launch_url);
-        si->launch_url = NULL;
-        free(si->logging_in);
-        si->logging_in = NULL;
-        si->prompt_open = false;
-        si->worker = false;
-        pthread_mutex_unlock(&si->mu);
-        if (j->rc == 0) signin_refilter(si); /* success recreates the selector */
-        if (si->s.w) request_render(si->s.w);
     }
-    signin_release(si);
-    free(j->provider);
-    free(j->api_key);
-    free(j->err);
-    free(j);
-}
-
-static void on_progress_cb(void *ud, const char *msg) {
-    login_job_t *j = ud;
-    signin_t *si = j->si;
-    pthread_mutex_lock(&si->mu);
-    status_add(si, TUI_TC_DIM, msg);
-    pthread_mutex_unlock(&si->mu);
-    if (j->tui) tui_request_render(j->tui);
-}
-
-static void on_auth_cb(void *ud, const char *url, const char *launch, const char *instructions) {
-    login_job_t *j = ud;
-    signin_t *si = j->si;
-    pthread_mutex_lock(&si->mu);
-    free(si->auth_url);
-    si->auth_url = xstrdup(url);
-    free(si->launch_url);
-    si->launch_url = launch && strcmp(launch, url) ? xstrdup(launch) : NULL;
-    free(si->prompt_placeholder);
-    si->prompt_placeholder = NULL;
-    status_clear(si);
-    if (instructions && *instructions) status_add(si, TUI_TC_WARNING, instructions);
-    json_t *d = NULL, *p;
-    json_arr_foreach(si->providers, i, p) if (str_eq(json_get_str(p, "id"), j->provider)) d = p;
-    if (json_get_bool(d, "pasteCode", false)) {
-        status_add(si, TUI_TC_DIM, "Paste the returned code or redirect URL when prompted.");
-        si->prompt_open = true;
-        free(si->prompt_msg);
-        si->prompt_msg = xstrdup("Paste the authorization code (or full redirect URL):");
-        sb_clear(&si->prompt_buf);
-        si->prompt_secret = false;
-    }
-    pthread_mutex_unlock(&si->mu);
-    if (j->tui) {
-        tui_term_copy_osc52(tui_term(j->tui), url, strlen(url));
-        tui_request_render(j->tui);
-    }
-}
-
-static char *poll_code_cb(void *ud) {
-    login_job_t *j = ud;
-    signin_t *si = j->si;
-    pthread_mutex_lock(&si->mu);
-    char *p = si->pasted;
-    si->pasted = NULL;
-    pthread_mutex_unlock(&si->mu);
-    return p;
-}
-
-static void *login_worker(void *ud) {
-    login_job_t *j = ud;
-    if (j->api_key) {
-        j->rc = auth_set_api_key(j->provider, j->api_key);
-        if (j->rc) j->err = xstrdup("failed to save credentials");
-    } else {
-        auth_login_hooks_t h = {0};
-        h.on_auth = on_auth_cb;
-        h.on_progress = on_progress_cb;
-        h.poll_code = poll_code_cb;
-        h.abort = &j->si->abort_flag;
-        h.ud = j;
-        j->rc = auth_login_hooked(j->provider, &h, &j->err);
-    }
-    tui_post(j->tui, login_done_ui, j);
-    return NULL;
-}
-
-static void start_login(signin_t *si, const json_t *p, const char *api_key) {
-    const char *id = json_get_str(p, "id");
-    login_job_t *j = xcalloc(1, sizeof *j);
-    j->si = si;
-    j->provider = xstrdup(id);
-    j->api_key = api_key ? xstrdup(api_key) : NULL;
-    j->tui = si->s.w->u->tui;
-    pthread_mutex_lock(&si->mu);
-    si->refcount++;
-    si->worker = true;
-    si->abort_flag = 0;
-    free(si->logging_in);
-    si->logging_in = xstrdup(id);
-    status_clear(si);
-    status_add(si, TUI_TC_DIM, "Starting OAuth flow\xe2\x80\xa6");
-    pthread_mutex_unlock(&si->mu);
-    pthread_t th;
-    if (pthread_create(&th, NULL, login_worker, j) != 0) {
-        j->rc = -1;
-        j->err = xstrdup("cannot start login thread");
-        login_done_ui(j);
-        return;
-    }
-    pthread_detach(th);
-}
-
-/* best-effort browser launch (omp ctx.openInBrowser) */
-static void open_in_browser(const char *url) {
-    const char *opener = NULL;
-    if (fs_is_file("/usr/bin/xdg-open")) opener = "xdg-open";
-    else if (fs_is_file("/usr/bin/open")) opener = "open";
-    if (!opener) return;
-    pid_t pid = fork();
-    if (pid == 0) {
-        /* double fork so the opener is reparented and never left as a zombie */
-        if (fork() != 0) _exit(0);
-        setsid();
-        int dn = open("/dev/null", O_RDWR);
-        if (dn >= 0) {
-            dup2(dn, 0);
-            dup2(dn, 1);
-            dup2(dn, 2);
-        }
-        execlp(opener, opener, url, (char *)NULL);
-        _exit(127);
-    }
-    if (pid > 0) waitpid(pid, NULL, 0);
-}
-
-static void signin_confirm(signin_t *si) {
-    if (!si->vis.n) return;
-    const json_t *p = prov(si, si->vis.v[si->sel]);
-    const char *kind = json_get_str(json_get_obj(p, "login"), "kind");
-    free(si->status_message);
-    si->status_message = NULL;
-    if (str_eq(kind, "api-key")) {
-        /* API-key providers: prompt for the key, then store it */
-        free(si->logging_in);
-        si->logging_in = xstrdup(json_get_str(p, "id"));
-        si->api_key_mode = true;
-        si->prompt_open = true;
-        free(si->prompt_msg);
-        json_t *lg = json_get_obj(p, "login");
-        const char *pr = json_get_str(lg, "prompt");
-        si->prompt_msg = pr ? xstrdup(pr) : xasprintf("Paste your %s API key", json_get_str(p, "name"));
-        free(si->prompt_placeholder);
-        si->prompt_placeholder = json_get_str(lg, "placeholder") ? xstrdup(json_get_str(lg, "placeholder")) : NULL;
-        si->prompt_secret = false;
-        sb_clear(&si->prompt_buf);
-        status_clear(si);
-        const char *url = json_get_str(lg, "authUrl");
-        free(si->auth_url);
-        si->auth_url = url ? xstrdup(url) : NULL;
-        if (json_get_str(lg, "instructions")) status_add(si, TUI_TC_WARNING, json_get_str(lg, "instructions"));
-        if (url) {
-            tui_term_copy_osc52(tui_term(si->s.w->u->tui), url, strlen(url));
-            open_in_browser(url);
-        }
-        return;
-    }
-    if (!str_eq(kind, "oauth-code")) {
-        status_clear(si);
-        char *a = xasprintf("Login failed: %s sign-in is not supported by omc yet", json_get_str(p, "name"));
-        status_add(si, TUI_TC_ERROR, a);
-        free(a);
-        char *k = ui_editor_key("tui.select.cancel");
-        char *b = xasprintf("Choose another provider or press %s to continue.", k);
-        status_add(si, TUI_TC_DIM, b);
-        free(b);
-        free(k);
-        return;
-    }
-    start_login(si, p, NULL);
+    /* the dialog closes; freed on the next key or render pass */
+    request_render(si->s.w);
 }
 
 static void signin_key(scene_t *s, const tui_key_t *k) {
     signin_t *si = (signin_t *)s;
-    if (si->logging_in) {
-        if (si->prompt_open) {
-            const char *txt = tui_key_text(k);
-            if (tui_key_matches(k, "escape") || tui_key_matches(k, "ctrl+c")) {
-                pthread_mutex_lock(&si->mu);
-                si->prompt_open = false;
-                if (si->api_key_mode) {
-                    si->api_key_mode = false;
-                    free(si->logging_in);
-                    si->logging_in = NULL;
-                    free(si->auth_url);
-                    si->auth_url = NULL;
-                    status_clear(si);
-                    status_add(si, TUI_TC_DIM, "Login cancelled.");
-                } else {
-                    si->abort_flag = 1;
-                }
-                pthread_mutex_unlock(&si->mu);
-            } else if (tui_key_matches(k, "enter")) {
-                char *v = xstrdup(sb_cstr(&si->prompt_buf));
-                if (si->api_key_mode) {
-                    si->api_key_mode = false;
-                    si->prompt_open = false;
-                    json_t *p = NULL, *x;
-                    json_arr_foreach(si->providers, i, x) if (str_eq(json_get_str(x, "id"), si->logging_in)) p = x;
-                    char *t = str_trim(v);
-                    if (p && *t) start_login(si, p, t);
-                    else {
-                        free(si->logging_in);
-                        si->logging_in = NULL;
-                    }
-                    free(t);
-                } else {
-                    pthread_mutex_lock(&si->mu);
-                    free(si->pasted);
-                    si->pasted = xstrdup(v);
-                    si->prompt_open = false;
-                    pthread_mutex_unlock(&si->mu);
-                }
-                free(v);
-            } else if (k->kind == TUI_KEY_PASTE && k->text) {
-                sb_append(&si->prompt_buf, k->text);
-            } else if (tui_kb(k, "tui.editor.deleteCharBackward")) {
-                size_t n = si->prompt_buf.len;
-                while (n > 0 && ((unsigned char)si->prompt_buf.s[n - 1] & 0xC0) == 0x80) n--;
-                if (n > 0) n--;
-                sb_truncate(&si->prompt_buf, n);
-            } else if (tui_key_matches(k, "alt+c")) {
-                if (si->auth_url) tui_term_copy_osc52(tui_term(s->w->u->tui), si->auth_url, strlen(si->auth_url));
-            } else if (k->kind == TUI_KEY_CHAR && txt && *txt) {
-                sb_append(&si->prompt_buf, txt);
-            }
-            return;
+    if (si->login) {
+        ui_login_key(si->login, k);
+        if (!ui_login_active(si->login)) {
+            ui_login_free(si->login);
+            si->login = NULL;
         }
-        if (si->auth_url && (tui_key_matches(k, "alt+c") || (tui_key_text(k) && !strcmp(tui_key_text(k), "c")))) {
-            tui_term_copy_osc52(tui_term(s->w->u->tui), si->auth_url, strlen(si->auth_url));
-            return;
-        }
-        if (tui_key_matches(k, "escape") || tui_key_matches(k, "ctrl+c")) si->abort_flag = 1;
         return;
     }
-    if (tui_kb(k, "tui.select.cancel")) {
+    const char *picked = NULL;
+    int r = ui_oauth_sel_key(si->sel, k, &picked);
+    if (r == UI_SEL_CANCEL) {
         scene_finish(s->w);
-        return;
-    }
-    long n = (long)si->vis.n;
-    if (tui_kb(k, "tui.select.up") && n) {
-        si->sel = (size_t)(((long)si->sel - 1 + n) % n);
-        free(si->status_message);
-        si->status_message = NULL;
-    } else if (tui_kb(k, "tui.select.down") && n) {
-        si->sel = (size_t)(((long)si->sel + 1) % n);
-        free(si->status_message);
-        si->status_message = NULL;
-    } else if (tui_key_matches(k, "pageup") && n) {
-        si->sel = (size_t)MAX(0, (long)si->sel - si->max_visible);
-    } else if (tui_key_matches(k, "pagedown") && n) {
-        si->sel = (size_t)MIN(n - 1, (long)si->sel + si->max_visible);
-    } else if (tui_key_matches(k, "enter") || tui_key_matches(k, "ctrl+j")) {
-        signin_confirm(si);
-    } else if (signin_search_enabled(si)) {
-        const char *before = si->query ? si->query : "";
-        const char *txt = tui_key_text(k);
-        bool printable = k->kind == TUI_KEY_CHAR && txt && *txt;
-        if (!*before && (tui_kb(k, "tui.editor.deleteCharBackward") || (printable && isspace((unsigned char)txt[0])))) return;
-        char *next = NULL;
-        if (printable) next = xasprintf("%s%s", before, txt);
-        else if (tui_kb(k, "tui.editor.deleteCharBackward") && *before) {
-            size_t i = strlen(before) - 1;
-            while (i > 0 && ((unsigned char)before[i] & 0xC0) == 0x80) i--;
-            next = xstrndup(before, i);
-        } else if (tui_kb(k, "tui.editor.deleteWordBackward")) {
-            size_t i = strlen(before);
-            while (i > 0 && before[i - 1] == ' ') i--;
-            while (i > 0 && before[i - 1] != ' ') i--;
-            next = xstrndup(before, i);
-        } else if (tui_kb(k, "tui.editor.deleteToLineStart")) {
-            next = xstrdup("");
-        }
-        if (next && strcmp(next, before)) {
-            free(si->query);
-            si->query = next;
-            free(si->status_message);
-            si->status_message = NULL;
-            signin_refilter(si);
-        } else {
-            free(next);
-        }
+    } else if (r == UI_SEL_PICK && picked) {
+        si->outcome = -1;
+        si->login = ui_login_start(s->w->u, picked, signin_done, si);
     }
 }
 
 static void signin_destroy(scene_t *s) {
     signin_t *si = (signin_t *)s;
-    si->disposed = true;
-    si->abort_flag = 1;
-    signin_release(si);
+    if (si->login) {
+        ui_login_t *l = si->login;
+        si->login = NULL;
+        ui_login_free(l);
+    }
+    ui_oauth_sel_free(si->sel);
+    free(si->outcome_name);
+    free(si->outcome_msg);
+    free(si);
 }
 
 static scene_t *signin_mount(wizard_t *w) {
@@ -1201,19 +673,8 @@ static scene_t *signin_mount(wizard_t *w) {
     si->s.render = signin_render;
     si->s.key = signin_key;
     si->s.destroy = signin_destroy;
-    si->refcount = 1;
-    si->max_visible = OAUTH_MAX_VISIBLE;
-    pthread_mutex_init(&si->mu, NULL);
-    si->providers = auth_oauth_providers();
-    json_t *disabled = settings_get("disabledProviders"), *p;
-    json_arr_foreach(si->providers, i, p) {
-        bool off = !json_get_obj(p, "login"); /* not a login provider (openai, azure) */
-        json_t *d;
-        json_arr_foreach(disabled, k, d) if (str_eq(json_sv(d), json_get_str(p, "id")) ||
-                                             str_eq(json_sv(d), json_get_str(p, "storeCredentialsAs"))) off = true;
-        if (!off) vec_push(&si->items, i);
-    }
-    signin_refilter(si);
+    si->outcome = -1;
+    si->sel = ui_oauth_sel_new(false);
     return &si->s;
 }
 

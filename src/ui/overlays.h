@@ -86,9 +86,35 @@ void ui_overlay_thinking(ui_t *u);
 void ui_overlay_theme(ui_t *u);
 void ui_overlay_settings(ui_t *u);
 void ui_overlay_hotkeys(ui_t *u);
+/* titled command report (overlays/report-panel.ts): fullscreen page, scrolls, Esc closes; takes `body` */
+void ui_show_report(ui_t *u, const char *title, tui_component_t *body);
 void ui_overlay_login(ui_t *u, bool logout);
 /* ask tool: questions array (upstream ask tool args); answers posted via ui->ask_* */
 void ui_overlay_ask(ui_t *u);
+
+/* ---------- login.c ---------- */
+
+enum { UI_SEL_IGNORED, UI_SEL_HANDLED, UI_SEL_PICK, UI_SEL_CANCEL };
+enum { UI_LOGIN_SUCCESS, UI_LOGIN_ERROR, UI_LOGIN_CANCELLED };
+
+/* provider list in a "Select provider to login/logout" panel (overlays/oauth-selector.ts) */
+typedef struct ui_oauth_sel ui_oauth_sel_t;
+ui_oauth_sel_t *ui_oauth_sel_new(bool logout);
+void ui_oauth_sel_free(ui_oauth_sel_t *s);
+void ui_oauth_sel_refresh(ui_oauth_sel_t *s); /* after a credential change */
+void ui_oauth_sel_set_max_height(ui_oauth_sel_t *s, int lines);
+void ui_oauth_sel_render(ui_oauth_sel_t *s, int width, strvec_t *out);
+int ui_oauth_sel_key(ui_oauth_sel_t *s, const tui_key_t *k, const char **picked); /* UI_SEL_*; picked borrowed */
+
+/* "Login to <provider>" dialog running the flow on a worker (overlays/login-dialog.ts). `done` runs on
+ * the UI thread once: success / error (err) / cancelled (Esc). */
+typedef struct ui_login ui_login_t;
+typedef void (*ui_login_done_fn)(void *ud, int outcome, const char *provider_name, const char *err);
+ui_login_t *ui_login_start(ui_t *u, const char *provider, ui_login_done_fn done, void *ud);
+void ui_login_free(ui_login_t *l); /* aborts a running flow */
+bool ui_login_active(const ui_login_t *l);
+void ui_login_render(ui_login_t *l, int width, strvec_t *out);
+bool ui_login_key(ui_login_t *l, const tui_key_t *k);
 
 /* ---------- slash.c ---------- */
 

@@ -422,19 +422,6 @@ static void show_picker(ui_t *u, int kind) {
     tui_overlay_show(u->tui, &u->picker->base, &o);
 }
 
-static void model_picker(ui_t *u) {
-    ensure_picker(u);
-    tui_select_list_clear(u->picker);
-    for (size_t i = 0; i < catalog_count(); i++) {
-        const ai_model_t *m = catalog_at(i);
-        if (!auth_has_credentials(m->provider)) continue;
-        char *v = xasprintf("%s/%s", m->provider, m->id);
-        tui_select_list_add(u->picker, v, v, m->name);
-        free(v);
-    }
-    show_picker(u, 1);
-}
-
 static void session_picker(ui_t *u) {
     ensure_picker(u);
     tui_select_list_clear(u->picker);
@@ -539,6 +526,7 @@ static const struct {
     {"export", "Export session [path]"},      {"copy", "Copy last answer to clipboard"},
     {"fork", "Fork the session here"},        {"clear", "Clear the conversation context in place, keeping the session"},
     {"hotkeys", "Show keyboard shortcuts"},   {"quit", "Exit omc"},
+    {"login", "Login with OAuth provider"},   {"logout", "Logout from OAuth provider"},
     {"exit", "Exit omc"},
 };
 
@@ -626,12 +614,16 @@ static bool handle_command(ui_t *u, const char *line) {
     app_t *a = u->app;
     if (!strcmp(cmd, "quit") || !strcmp(cmd, "exit")) {
         tui_stop(u->tui, 0);
-    } else if (!strcmp(cmd, "help") || !strcmp(cmd, "hotkeys")) {
+    } else if (!strcmp(cmd, "hotkeys")) {
+        ui_overlay_hotkeys(u);
+    } else if (!strcmp(cmd, "login") || !strcmp(cmd, "logout")) {
+        ui_overlay_login(u, !strcmp(cmd, "logout"));
+    } else if (!strcmp(cmd, "help")) {
         sb_t b = SB_INIT;
         sb_append(&b, "Commands:\n");
         for (size_t i = 0; i < ARRAY_LEN(COMMANDS); i++) sb_appendf(&b, "  /%-10s %s\n", COMMANDS[i].name, COMMANDS[i].desc);
         sb_append(&b, "Keys: enter send (steer while running) · alt+enter follow-up/newline · esc interrupt · "
-                      "shift+tab thinking · ctrl+o expand tools · ctrl+t toggle thinking · ctrl+l model · "
+                      "shift+tab thinking · ctrl+o expand tools · ctrl+t toggle thinking · alt+m model · "
                       "ctrl+c clear/exit · ctrl+d exit · !cmd run shell");
         add_notice(u, "info", sb_cstr(&b));
         sb_free(&b);
@@ -647,19 +639,14 @@ static bool handle_command(ui_t *u, const char *line) {
             }
             free(err);
         } else {
-            model_picker(u);
+            ui_overlay_model(u);
         }
     } else if (!strcmp(cmd, "thinking")) {
         ai_effort_t e;
         if (*arg && effort_parse(arg, &e) == 0) {
             app_set_thinking(a, e);
         } else {
-            ensure_picker(u);
-            tui_select_list_clear(u->picker);
-            for (int i = EFFORT_OFF; i <= EFFORT_MAX; i++)
-                if (model_supports_effort(a->model, (ai_effort_t)i))
-                    tui_select_list_add(u->picker, effort_name((ai_effort_t)i), effort_name((ai_effort_t)i), NULL);
-            show_picker(u, 4);
+            ui_overlay_thinking(u);
         }
     } else if (!strcmp(cmd, "plan")) {
         app_set_plan_mode(a, !a->plan_mode);
@@ -1041,7 +1028,7 @@ static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
 
 static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
     ui_t *u = ud;
-    if (tui_overlay_visible(t)) return false;
+    if (tui_overlay_visible(t) || ui_selector_open(u)) return false;
     if (tui_key_matches(k, "escape")) {
         if (u->worker_running) {
             app_abort(u->app);
@@ -1095,8 +1082,8 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
         tui_request_render(t);
         return true;
     }
-    if (tui_key_matches(k, "ctrl+l")) {
-        model_picker(u);
+    if (tui_key_matches(k, "alt+m")) { /* app.model.select */
+        ui_overlay_model(u);
         return true;
     }
     if (tui_key_matches(k, "alt+enter") && u->worker_running) {
