@@ -108,7 +108,8 @@ tail -1 "$T/req.jsonl" | grep -q "Use for demo skill test routing" && echo "   o
 rm -f "$T/agent/config.yml"
 # retry model fallback: a rate-limited model walks retry.fallbackChains
 printf 'retry:\n  fallbackChains:\n    mock/mock-flaky:\n      - mock/mock-2\n' > "$T/agent/config.yml"
-check "retry fallback" "Tool said: fb-ok" "$B" -m mock/mock-flaky -p "bash:echo fb-ok"
+out=$(timeout 60 "$B" -m mock/mock-flaky -p "bash:echo fb-ok" </dev/null 2>&1)
+[[ "$out" == *"Tool said: fb-ok"* && "$out" == *"[warning] Fallback: mock/mock-flaky -> mock/mock-2"* ]] && echo "   ok  retry fallback" || { echo "   FAIL retry fallback: $out"; fail=1; }
 tail -1 "$T/req.jsonl" | grep -q '"model": "mock-2"' && echo "   ok  fallback model used" || { echo "   FAIL fallback model used"; fail=1; }
 rm -f "$T/agent/config.yml"
 grep -q "Project rule: always test." "$T/req.jsonl" && echo "   ok  AGENTS.md in prompt" || { echo "   FAIL AGENTS.md in prompt"; fail=1; }

@@ -584,6 +584,21 @@ static int64_t retry_after_ms(const char *err) {
     return -1;
 }
 
+char *app_fallback_notice_text(const char *fields) {
+    strvec_t f = {0};
+    for (const char *s = fields; s;) {
+        const char *sep = strchr(s, '\x1f');
+        char *t = sep ? xstrndup(s, (size_t)(sep - s)) : xstrdup(s);
+        strvec_push(&f, t);
+        free(t);
+        s = sep ? sep + 1 : NULL;
+    }
+    char *r = f.n >= 4 && *f.v[3] ? xasprintf("Fallback: %s -> %s\n%s", f.v[0], f.v[1], f.v[3])
+                                   : xasprintf("Fallback: %s -> %s", f.n > 0 ? f.v[0] : "", f.n > 1 ? f.v[1] : "");
+    strvec_free(&f);
+    return r;
+}
+
 /* formatRetryFallbackSelector: provider/id plus the configured thinking level */
 static char *current_selector(app_t *a) {
     char *k = mr_model_key(a->model);
@@ -637,7 +652,9 @@ static void apply_fallback(app_t *a, const char *role, const ai_model_t *cand, c
     a->fallback.served = false;
     a->fallback.last_thinking = next;
     app_rebuild_system_prompt(a);
-    notice(a, "warning", "Fallback: %s -> %s\nRequest failed: %s", from, key, err ? err : "provider returned an error without details");
+    /* retry_fallback_applied {from, to, role, reason}: fields separated by \x1f */
+    notice(a, "retry_fallback_applied", "%s\x1f%s\x1f%s\x1fRequest failed: %s", from, key, role,
+           err ? err : "provider returned an error without details");
     free(key);
     free(from);
 }

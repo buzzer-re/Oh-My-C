@@ -99,6 +99,10 @@ struct app {
     pthread_mutex_t mu;
 };
 
+/* app notices beyond info/warning/error: "retry_fallback_applied" (from\x1fto\x1frole\x1freason),
+ * "retry_fallback_succeeded" (model\x1frole), "retry-recovered" (notes, one per line), "title" */
+char *app_fallback_notice_text(const char *fields); /* "Fallback: from -> to\nreason" (owned) */
+
 /* returns NULL and sets *err on failure */
 app_t *app_create(const app_opts_t *o, char **err);
 void app_free(app_t *a);

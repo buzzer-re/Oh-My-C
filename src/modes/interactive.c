@@ -188,6 +188,14 @@ static void post_notice(void *x) {
         uiev_free(e);
         return;
     }
+    if (!strcmp(e->name, "retry_fallback_applied")) {
+        char *m = app_fallback_notice_text(e->out);
+        add_notice(e->u, "warning", m);
+        free(m);
+        tui_request_render(e->u->tui);
+        uiev_free(e);
+        return;
+    }
     if (!strcmp(e->name, "retry_fallback_succeeded")) {
         /* text: "<selector>\x1f<role>" */
         char *sep = strchr(e->out, '\x1f');
