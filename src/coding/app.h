@@ -52,6 +52,14 @@ struct app {
     bool compacting;
     bool title_done;
     int retry_count;
+    int retry_offset; /* agent retry attempts spent before the latest fallback switch (fresh budget) */
+    /* active retry fallback (turn-recovery.ts ActiveRetryFallbackState) */
+    struct {
+        bool active, pinned;
+        char *role;     /* chain key that produced it */
+        char *original; /* selector "provider/id[:level]" of the primary */
+        ai_effort_t original_thinking, last_thinking;
+    } fallback;
     struct ttsr *ttsr;
     struct mcp_manager *mcp;
     bool owns_mcp;

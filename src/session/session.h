@@ -36,6 +36,8 @@ char *session_dir_for_cwd(const char *cwd); /* ~/.omc/agent/sessions/<encoded> (
 /* appends (return the new entry id, borrowed) */
 const char *session_append_message(session_t *s, const json_t *message);
 const char *session_append_model_change(session_t *s, const char *provider_model, const char *role);
+/* model_change with omp's resolvedModelIsFallback flag (retry fallback hops use role "fallback") */
+const char *session_append_model_change_ex(session_t *s, const char *provider_model, const char *role, bool is_fallback);
 const char *session_append_thinking_change(session_t *s, const char *level);
 const char *session_append_compaction(session_t *s, const char *summary, const char *first_kept_id,
                                       int64_t tokens_before, json_t *details);

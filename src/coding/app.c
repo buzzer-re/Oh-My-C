@@ -466,6 +466,8 @@ static char *app_propose_plan(tool_env_t *env, const char *content, bool *is_err
         r = xasprintf("User chose to keep planning. Refine %s and propose again when ready.", url);
     } else {
         free(a->plan_file);
+    free(a->fallback.role);
+    free(a->fallback.original);
         a->plan_file = xstrdup(url);
         app_set_plan_mode(a, false);
         json_t *ctx = json_obj();
@@ -524,6 +526,175 @@ static void hook_after_tool(void *ud, agent_t *ag, const json_t *call, tool_resu
     }
 }
 
+/* ---------- retry model fallback (session/turn-recovery.ts) ---------- */
+
+static bool is_usage_limit(const char *err) {
+    static const char *const pats[] = {"usage limit", "usage_limit", "limit_reached", "quota exceeded", "quota reached",
+                                       "quota_exceeded", "insufficient_quota", "insufficient quota", "resource exhausted",
+                                       "resource_exhausted", "exhausted your capacity", "quota will reset",
+                                       "insufficient balance", "balance exhausted", "out of credits", "spending limit",
+                                       "spending-limit", "out of usage", "access_terminated_error", "402"};
+    for (size_t i = 0; err && i < ARRAY_LEN(pats); i++)
+        if (str_istr(err, pats[i])) return true;
+    return false;
+}
+
+static bool is_abort_error(const char *err) {
+    return err && (str_istr(err, "aborted") || str_istr(err, "cancelled by user") || str_istr(err, "interrupted"));
+}
+
+/* retry-after hints in the error text ("retry after 12s", "retry-after: 30", "try again in 2m"): ms or -1 */
+static int64_t retry_after_ms(const char *err) {
+    if (!err) return -1;
+    static const char *const keys[] = {"retry-after-ms:", "retry after ", "retry-after: ", "retry-after:", "try again in ",
+                                       "retry in ", "reset after ", "resets in "};
+    for (size_t k = 0; k < ARRAY_LEN(keys); k++) {
+        const char *p = str_istr(err, keys[k]);
+        if (!p) continue;
+        p += strlen(keys[k]);
+        char *end;
+        double v = strtod(p, &end);
+        if (end == p || v < 0) continue;
+        while (*end == ' ') end++;
+        double ms = v * 1000;
+        if (k == 0 || !strncasecmp(end, "ms", 2)) ms = v;
+        else if (!strncasecmp(end, "m", 1) && strncasecmp(end, "ms", 2)) ms = v * 60000;
+        else if (!strncasecmp(end, "h", 1)) ms = v * 3600000;
+        return (int64_t)ms;
+    }
+    return -1;
+}
+
+/* formatRetryFallbackSelector: provider/id plus the configured thinking level */
+static char *current_selector(app_t *a) {
+    char *k = mr_model_key(a->model);
+    char *s = mr_selector_with_level(k, a->model->reasoning ? effort_name(a->thinking) : NULL);
+    free(k);
+    return s;
+}
+
+/* the last assistant turn before the failed one carries Anthropic signed thinking from another model */
+static bool signed_thinking_blocks(agent_t *ag, const json_t *failed, const ai_model_t *cand) {
+    json_t *msgs = ag->messages, *last = NULL;
+    for (size_t i = json_len(msgs); i-- > 0;) {
+        json_t *m = json_at(msgs, i);
+        if (m == failed || !str_eq(json_get_str(m, "role"), "assistant")) continue;
+        last = m;
+        break;
+    }
+    if (!last || !str_eq(json_get_str(last, "api"), "anthropic-messages") || !str_eq(cand->api, "anthropic-messages"))
+        return false;
+    if (!str_eq(json_get_str(last, "provider"), cand->provider) || str_eq(json_get_str(last, "model"), cand->id))
+        return false;
+    json_t *b;
+    json_arr_foreach(json_get_arr(last, "content"), i, b) {
+        const char *t = json_get_str(b, "type");
+        const char *sig = json_get_str(b, "thinkingSignature");
+        if ((str_eq(t, "thinking") && sig && *sig) || str_eq(t, "redactedThinking")) return true;
+    }
+    return false;
+}
+
+static void apply_fallback(app_t *a, const char *role, const ai_model_t *cand, const char *level, const char *cur,
+                           const char *err) {
+    ai_effort_t prev = a->thinking, next = a->thinking;
+    if (level && effort_parse(level, &next) != 0) next = a->thinking;
+    char *from = xstrdup(cur);
+    a->model = cand;
+    agent_set_model(a->agent, cand);
+    char *key = mr_model_key(cand);
+    session_append_model_change_ex(a->session, key, "fallback", true);
+    mr_usage_record(key);
+    if (next != a->thinking) app_set_thinking(a, next);
+    if (!a->fallback.active) {
+        a->fallback.active = true;
+        free(a->fallback.role);
+        free(a->fallback.original);
+        a->fallback.role = xstrdup(role);
+        a->fallback.original = xstrdup(from);
+        a->fallback.original_thinking = prev;
+        a->fallback.pinned = false;
+    }
+    a->fallback.last_thinking = next;
+    app_rebuild_system_prompt(a);
+    notice(a, "warning", "Fallback: %s -> %s\nRequest failed: %s", from, key, err ? err : "provider returned an error without details");
+    free(key);
+    free(from);
+}
+
+/* #tryRetryModelFallback: walk the pinned chain, then the current model's own chain */
+static bool try_retry_fallback(app_t *a, agent_t *ag, const char *cur, const json_t *failed, const char *err,
+                               bool same_model_retry) {
+    strvec_t keys = {0};
+    char *own = mr_fallback_chain_key(cur, a->model, NULL);
+    if (a->fallback.active && a->fallback.role) strvec_push(&keys, a->fallback.role);
+    if (own && !strvec_contains(&keys, own)) strvec_push(&keys, own);
+    free(own);
+    mr_pool_t avail = {0};
+    mr_pool_available(&avail, "all");
+    bool done = false;
+    for (size_t k = 0; k < keys.n && !done; k++) {
+        mr_selector_t *c = NULL;
+        size_t n = mr_fallback_candidates(keys.v[k], cur, a->model, false, &c);
+        for (size_t i = 0; i < n; i++) {
+            if (done || mr_selector_suppressed(c[i].raw)) continue;
+            mr_result_t r;
+            const ai_model_t *cand = mr_resolve_value(c[i].raw, &avail, &r) ? r.model : NULL;
+            mr_result_clear(&r);
+            if (!cand) cand = catalog_find(c[i].provider, c[i].id);
+            if (!cand || (cand == a->model && (!c[i].level || !strcmp(c[i].level, effort_name(a->thinking))))) continue;
+            if (same_model_retry && signed_thinking_blocks(ag, failed, cand)) continue;
+            if (a->last_context_tokens > 0 && cand->context_window > 0 && a->last_context_tokens > cand->context_window)
+                continue;
+            if (!mr_provider_available(cand->provider)) continue;
+            apply_fallback(a, keys.v[k], cand, c[i].level, cur, err);
+            done = true;
+        }
+        for (size_t i = 0; i < n; i++) mr_selector_free(&c[i]);
+        free(c);
+    }
+    mr_pool_free(&avail);
+    strvec_free(&keys);
+    return done;
+}
+
+/* #maybeRestoreRetryFallbackPrimary: back to the primary once its cooldown ends (retry.fallbackRevertPolicy) */
+static void maybe_restore_primary(app_t *a) {
+    if (!a->fallback.active || a->fallback.pinned || !a->model) return;
+    if (str_eq(settings_str("retry.fallbackRevertPolicy", "cooldown-expiry"), "never")) return;
+    mr_selector_t orig;
+    if (!mr_parse_selector(a->fallback.original, &orig)) {
+        a->fallback.active = false;
+        return;
+    }
+    char *cur = current_selector(a);
+    bool same = !strcmp(cur, orig.raw);
+    free(cur);
+    if (mr_selector_suppressed(orig.raw)) {
+        mr_selector_free(&orig);
+        return;
+    }
+    if (same) {
+        a->fallback.active = false;
+        mr_selector_free(&orig);
+        return;
+    }
+    const ai_model_t *pm = catalog_find(orig.provider, orig.id);
+    if (pm && mr_provider_available(pm->provider)) {
+        ai_effort_t th = a->thinking == a->fallback.last_thinking ? a->fallback.original_thinking : a->thinking;
+        a->fallback.active = false;
+        a->model = pm;
+        agent_set_model(a->agent, pm);
+        char *key = mr_model_key(pm);
+        session_append_model_change_ex(a->session, key, "fallback", false);
+        mr_usage_record(key);
+        free(key);
+        if (th != a->thinking) app_set_thinking(a, th);
+        app_rebuild_system_prompt(a);
+    }
+    mr_selector_free(&orig);
+}
+
 static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int attempt) {
     app_t *a = ud;
     if (attempt < 0) {
@@ -577,12 +748,50 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
         return false;
     }
     if (!settings_bool("retry.enabled", true)) return false;
+    if (attempt == 0) a->retry_offset = 0;
     int max = (int)settings_int("retry.maxRetries", 10);
-    if (attempt >= max || !is_retryable(err)) return false;
-    int64_t base = settings_int("retry.baseDelayMs", 2000), maxd = settings_int("retry.maxDelayMs", 60000);
-    int64_t delay = base << attempt;
-    if (delay > maxd) delay = maxd;
-    notice(a, "warning", "Retrying (%d/%d) in %llds: %s", attempt + 1, max, (long long)(delay / 1000), err ? err : "error");
+    int saga = attempt - a->retry_offset + 1; /* omp #retryAttempt after its increment */
+    bool exhausted = saga > max;
+    bool retryable = is_retryable(err);
+    bool usage_limit = is_usage_limit(err);
+    /* model fallback: consulted on every failed attempt, retryable or hard (hardErrorFallback) */
+    bool switched = false;
+    if (a->model && !is_abort_error(err) && settings_bool("retry.modelFallback", true) && mr_fallback_admits(usage_limit) &&
+        !(is_overflow(err))) {
+        char *cur = current_selector(a);
+        int64_t hint = retry_after_ms(err);
+        mr_suppress_selector(cur, now_ms() + (hint > 0 ? hint : mr_rate_limit_backoff_ms(err)));
+        bool rate_limited = str_istr(err, "429") || str_eq(mr_rate_limit_reason(err), "RATE_LIMIT_EXCEEDED");
+        bool same_model_retry = retryable && !exhausted && !(settings_bool("retry.rateLimitWalksChain", false) && rate_limited);
+        switched = try_retry_fallback(a, ag, cur, assistant, err, same_model_retry);
+        free(cur);
+    }
+    if (switched) {
+        a->retry_offset = attempt + 1; /* a fallback model gets a fresh retry budget */
+        return true;
+    }
+    if (!retryable) return false;
+    if (exhausted) {
+        notice(a, "error", "Retry budget exhausted after %d %s: %s", saga - 1, saga - 1 == 1 ? "retry" : "retries",
+               err ? err : "error");
+        return false;
+    }
+    int64_t delay = mr_retry_backoff_ms(settings_int("retry.baseDelayMs", 500), saga);
+    const char *reason = mr_rate_limit_reason(err);
+    int64_t hint = retry_after_ms(err);
+    if (hint < 0 && (str_eq(reason, "CONCURRENT_LIMIT") || str_eq(reason, "RATE_LIMIT_EXCEEDED") ||
+                     str_eq(reason, "MODEL_CAPACITY_EXHAUSTED"))) {
+        int64_t rb = mr_rate_limit_backoff_ms(err);
+        if (rb > delay) delay = rb;
+    }
+    if (hint > delay) delay = hint;
+    int64_t maxd = settings_int("retry.maxDelayMs", 5 * 60 * 1000);
+    if (maxd > 0 && delay > maxd) {
+        notice(a, "error", "Provider requested %lldms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
+               (long long)delay, (long long)maxd, err ? err : "error");
+        return false;
+    }
+    notice(a, "warning", "Retrying (%d/%d) in %llds: %s", saga, max, (long long)((delay + 999) / 1000), err ? err : "error");
     int64_t until = mono_ms() + delay;
     while (mono_ms() < until) {
         if (ag->cancel) return false;
@@ -1034,6 +1243,10 @@ int app_set_model(app_t *a, const char *pattern, char **err) {
     }
     a->model = m;
     agent_set_model(a->agent, m);
+    a->fallback.active = false; /* an explicit model change clears fallback ownership */
+    char *uk = mr_model_key(m);
+    mr_usage_record(uk);
+    free(uk);
     if (has_e) app_set_thinking(a, e);
     char *label = app_model_label(a);
     session_append_model_change(a->session, label, NULL);
@@ -1568,6 +1781,7 @@ static void begin_turn_budget(app_t *a, const char *text) {
 
 int app_prompt(app_t *a, const char *text, json_t *images) {
     memory_take_prompt_refresh(a);
+    maybe_restore_primary(a);
     begin_turn_budget(a, text);
     json_t *content = json_arr();
     json_push(content, text_block(text));
@@ -1588,6 +1802,7 @@ int app_prompt(app_t *a, const char *text, json_t *images) {
 }
 
 int app_prompt_hidden(app_t *a, const char *text, const char *custom_type) {
+    maybe_restore_primary(a);
     json_t *msgs = json_arr();
     json_t *gm = app_goal_context_message(a);
     if (gm) json_push(msgs, gm);

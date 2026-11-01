@@ -148,6 +148,9 @@ bool mr_fallback_admits(bool usage_limit);
 int64_t mr_retry_backoff_ms(int64_t base_ms, int attempt);
 /* rate-limit reason heuristics (parseRateLimitReason + calculateRateLimitBackoffMs) */
 int64_t mr_rate_limit_backoff_ms(const char *error_message);
+/* parseRateLimitReason: "QUOTA_EXHAUSTED", "RATE_LIMIT_EXCEEDED", "CONCURRENT_LIMIT",
+ * "MODEL_CAPACITY_EXHAUSTED", "SERVER_ERROR" or "UNKNOWN" (static) */
+const char *mr_rate_limit_reason(const char *error_message);
 
 /* ---------- model usage (MRU) ---------- */
 void mr_usage_record(const char *model_key);

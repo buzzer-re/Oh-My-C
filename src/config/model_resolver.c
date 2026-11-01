@@ -1879,22 +1879,34 @@ int64_t mr_retry_backoff_ms(int64_t base_ms, int attempt) {
     return (int64_t)((double)d * jitter);
 }
 
-int64_t mr_rate_limit_backoff_ms(const char *msg) {
-    if (!msg) return 30 * 60 * 1000;
+const char *mr_rate_limit_reason(const char *msg) {
+    if (!msg) return "UNKNOWN";
     char *l = lower_dup(msg);
-    int64_t r;
-    if (strstr(l, "quota will reset") || strstr(l, "exhausted your capacity")) r = 30 * 60 * 1000;
-    else if (strstr(l, "concurren")) r = 5000;
+    const char *r;
+    if (strstr(l, "quota will reset") || strstr(l, "exhausted your capacity")) r = "QUOTA_EXHAUSTED";
+    else if (strstr(l, "concurrent") || strstr(l, "concurrency")) r = "CONCURRENT_LIMIT";
     else if (strstr(l, "capacity") || strstr(l, "overloaded") || strstr(l, "529") || strstr(l, "503"))
-        r = 45000 + rand() % 30000;
-    else if (strstr(l, "per minute") || strstr(l, "rate limit") || strstr(l, "too many requests")) r = 30000;
+        r = "MODEL_CAPACITY_EXHAUSTED";
+    else if (strstr(l, "per minute") || strstr(l, "rate limit") || strstr(l, "too many requests"))
+        r = "RATE_LIMIT_EXCEEDED";
     else if (strstr(l, "exhausted") || strstr(l, "quota") || strstr(l, "usage limit") || strstr(l, "out of credits") ||
-             strstr(l, "spending limit"))
-        r = 30 * 60 * 1000;
-    else if (strstr(l, "500") || strstr(l, "internal error") || strstr(l, "internal server error")) r = 20000;
-    else r = 5 * 60 * 1000; /* UNKNOWN: noteRetryFallbackCooldown's 5 minutes */
+             strstr(l, "spending limit") || strstr(l, "spending-limit") || strstr(l, "access_terminated_error"))
+        r = "QUOTA_EXHAUSTED";
+    else if (strstr(l, "500") || strstr(l, "internal error") || strstr(l, "internal server error")) r = "SERVER_ERROR";
+    else if (strstr(l, "resource_exhausted") || strstr(l, "resource exhausted")) r = "MODEL_CAPACITY_EXHAUSTED";
+    else r = "UNKNOWN";
     free(l);
     return r;
+}
+
+int64_t mr_rate_limit_backoff_ms(const char *msg) {
+    const char *r = mr_rate_limit_reason(msg);
+    if (str_eq(r, "QUOTA_EXHAUSTED")) return 30 * 60 * 1000;
+    if (str_eq(r, "RATE_LIMIT_EXCEEDED")) return 30000;
+    if (str_eq(r, "CONCURRENT_LIMIT")) return 5000;
+    if (str_eq(r, "MODEL_CAPACITY_EXHAUSTED")) return 45000 + rand() % 30000;
+    if (str_eq(r, "SERVER_ERROR")) return 20000;
+    return 5 * 60 * 1000; /* UNKNOWN: noteRetryFallbackCooldown's 5 minutes */
 }
 
 /* ---------- MRU usage (omp AgentStorage model_usage; JSON here) ---------- */

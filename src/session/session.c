@@ -275,11 +275,16 @@ const char *session_append_message(session_t *s, const json_t *message) {
     return session_append_entry(s, e);
 }
 
-const char *session_append_model_change(session_t *s, const char *pm, const char *role) {
+const char *session_append_model_change_ex(session_t *s, const char *pm, const char *role, bool is_fallback) {
     json_t *e = typed("model_change");
     json_set_str(e, "model", pm);
     if (role) json_set_str(e, "role", role);
+    json_set_bool(e, "resolvedModelIsFallback", is_fallback);
     return session_append_entry(s, e);
+}
+
+const char *session_append_model_change(session_t *s, const char *pm, const char *role) {
+    return session_append_model_change_ex(s, pm, role, false);
 }
 
 const char *session_append_thinking_change(session_t *s, const char *level) {
