@@ -885,6 +885,7 @@ static void handle(rpc_t *r, json_t *cmd) {
     } else if (!strcmp(type, "set_steering_mode") || !strcmp(type, "set_follow_up_mode") || !strcmp(type, "set_interrupt_mode")) {
         const char *key = !strcmp(type, "set_steering_mode") ? "steeringMode" : !strcmp(type, "set_follow_up_mode") ? "followUpMode" : "interruptMode";
         settings_set_runtime(key, json_str(json_get_str(cmd, "mode")));
+        app_sync_queue_modes(a);
         respond(r, id, type, true, NULL, NULL);
     } else {
         respond(r, id, type, false, NULL, "unknown command");

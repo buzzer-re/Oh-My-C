@@ -145,6 +145,9 @@ struct agent {
     char *session_id;
     json_t *steering;   /* queued user messages delivered mid-run */
     json_t *follow_up;  /* queued messages delivered after the run would stop */
+    /* omp steeringMode / followUpMode ("one-at-a-time" default: one queued message per turn; "all") and
+     * interruptMode ("immediate" default: queued steering skips the rest of the turn's tool calls; "wait") */
+    bool steer_all, follow_up_all, interrupt_wait;
     volatile sig_atomic_t cancel;
     volatile sig_atomic_t silent_abort_next; /* abort the next model request as an internal transition */
     bool running;
@@ -182,6 +185,19 @@ void agent_steer(agent_t *a, json_t *msg);      /* owned */
 void agent_follow_up(agent_t *a, json_t *msg);  /* owned */
 void agent_clear_queues(agent_t *a);
 bool agent_is_running(agent_t *a);
+/* A queued message the user typed (role user, not synthetic): the ones queue editing touches. */
+bool agent_msg_user_authored(const json_t *msg);
+/* Display text of a queued message (string content or its first text block; "[Image]" for image-only). Owned. */
+char *agent_queued_text(const json_t *msg);
+/* Texts of the user-authored queued messages (omp getQueuedMessages). */
+void agent_queue_texts(agent_t *a, strvec_t *steering, strvec_t *follow_up);
+/* Remove and return the last user-authored queued message, steering first (omp popLastQueuedMessage). Owned/NULL. */
+json_t *agent_pop_last_queued(agent_t *a);
+/* Remove every user-authored queued message; returns {steering:[...], followUp:[...]} (omp clearQueue). Owned. */
+json_t *agent_take_user_queued(agent_t *a);
+size_t agent_queued_count(agent_t *a);
+/* Start a run that delivers queued messages (steering first, per mode) when idle. -1 if busy or nothing queued. */
+int agent_run_queued(agent_t *a);
 
 /* helpers to build messages (owned) */
 json_t *msg_user_text(const char *text);

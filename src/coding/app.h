@@ -5,6 +5,7 @@
 #include "agent/agent.h"
 #include "config/model_resolver.h"
 #include "coding/discovery.h"
+#include "core/proc.h"
 #include "session/session.h"
 #include "tools/tools.h"
 
@@ -185,6 +186,13 @@ int app_new_session(app_t *a);
 /* user `!cmd` / RPC bash: run, record a bashExecution message (session + context unless exclude); owned message
  * (plus BashResult counters) or NULL when the shell could not start */
 json_t *app_user_bash(app_t *a, const char *cmd, bool exclude);
+/* app_user_bash in two steps: run (streams merged output to on_output, stops when *cancel turns non-zero)
+ * without touching the session, then record the result (session + context unless excluded). */
+json_t *app_user_bash_run(app_t *a, const char *cmd, bool exclude, proc_output_cb on_output, void *ud,
+                          volatile sig_atomic_t *cancel);
+void app_record_bash(app_t *a, const json_t *result);
+/* apply the steeringMode / followUpMode / interruptMode settings to the agent */
+void app_sync_queue_modes(app_t *a);
 int app_switch_session(app_t *a, const char *path, char **err);
 int app_fork_from(app_t *a, const char *entry_id, char **err);
 void app_abort(app_t *a);

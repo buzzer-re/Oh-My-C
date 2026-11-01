@@ -621,10 +621,84 @@ void agent_clear_queues(agent_t *a) {
 
 bool agent_is_running(agent_t *a) { return a->running; }
 
+bool agent_msg_user_authored(const json_t *msg) {
+    return str_eq(json_get_str(msg, "role"), "user") && !json_get_bool(msg, "synthetic", false) &&
+           !str_eq(json_get_str(msg, "attribution"), "agent");
+}
+
+char *agent_queued_text(const json_t *msg) {
+    const json_t *c = json_get(msg, "content");
+    if (json_is_str(c)) return xstrdup(json_sv(c));
+    const json_t *b;
+    bool image = false;
+    json_arr_foreach(c, i, b) {
+        const char *t = json_get_str(b, "type");
+        if (str_eq(t, "text")) return xstrdup(json_get_str(b, "text") ? json_get_str(b, "text") : "");
+        if (str_eq(t, "image")) image = true;
+    }
+    return xstrdup(image ? "[Image]" : "");
+}
+
+void agent_queue_texts(agent_t *a, strvec_t *steering, strvec_t *follow_up) {
+    pthread_mutex_lock(&a->mu);
+    const json_t *m;
+    if (steering) json_arr_foreach(a->steering, i, m) if (agent_msg_user_authored(m)) strvec_push_own(steering, agent_queued_text(m));
+    if (follow_up) json_arr_foreach(a->follow_up, i, m) if (agent_msg_user_authored(m)) strvec_push_own(follow_up, agent_queued_text(m));
+    pthread_mutex_unlock(&a->mu);
+}
+
+json_t *agent_pop_last_queued(agent_t *a) {
+    json_t *out = NULL;
+    pthread_mutex_lock(&a->mu);
+    json_t *queues[2] = {a->steering, a->follow_up};
+    for (int q = 0; q < 2 && !out; q++) {
+        for (size_t i = json_len(queues[q]); i > 0; i--) {
+            if (agent_msg_user_authored(json_at(queues[q], i - 1))) {
+                out = json_arr_remove(queues[q], i - 1);
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&a->mu);
+    return out;
+}
+
+json_t *agent_take_user_queued(agent_t *a) {
+    json_t *r = json_obj();
+    pthread_mutex_lock(&a->mu);
+    json_t *queues[2] = {a->steering, a->follow_up};
+    const char *keys[2] = {"steering", "followUp"};
+    for (int q = 0; q < 2; q++) {
+        json_t *taken = json_arr();
+        for (size_t i = 0; i < json_len(queues[q]);) {
+            if (agent_msg_user_authored(json_at(queues[q], i))) json_push(taken, json_arr_remove(queues[q], i));
+            else i++;
+        }
+        json_set(r, keys[q], taken);
+    }
+    pthread_mutex_unlock(&a->mu);
+    return r;
+}
+
+size_t agent_queued_count(agent_t *a) {
+    pthread_mutex_lock(&a->mu);
+    size_t n = json_len(a->steering) + json_len(a->follow_up);
+    pthread_mutex_unlock(&a->mu);
+    return n;
+}
+
+/* Dequeue per mode: everything ("all") or the head message ("one-at-a-time", omp's default). */
 static json_t *take_queue(agent_t *a, json_t **q) {
     pthread_mutex_lock(&a->mu);
-    json_t *out = *q;
-    *q = json_arr();
+    json_t *out;
+    bool all = q == &a->steering ? a->steer_all : a->follow_up_all;
+    if (all || json_len(*q) <= 1) {
+        out = *q;
+        *q = json_arr();
+    } else {
+        out = json_arr();
+        json_push(out, json_arr_remove(*q, 0));
+    }
     pthread_mutex_unlock(&a->mu);
     if (!json_len(out)) {
         json_free(out);
@@ -960,7 +1034,7 @@ static void execute_tools(agent_t *a, json_t *run_msgs, const json_t *assistant,
             }
             break;
         }
-        if (queue_nonempty(a, a->steering)) {
+        if (!a->interrupt_wait && queue_nonempty(a, a->steering)) {
             for (size_t k = i; k < jobs.n; k++) jobs.v[k]->skip = true;
         }
         bool excl = !jobs.v[i]->tool || jobs.v[i]->tool->exclusive || jobs.v[i]->skip;
@@ -1002,7 +1076,7 @@ static void execute_tools(agent_t *a, json_t *run_msgs, const json_t *assistant,
 
 /* ---------- loop ---------- */
 
-static void run_loop(agent_t *a, json_t *new_messages) {
+static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
     a->running = true;
     a->cancel = 0;
     json_t *run_msgs = json_arr();
@@ -1010,6 +1084,12 @@ static void run_loop(agent_t *a, json_t *new_messages) {
     json_t *m;
     if (new_messages) {
         json_arr_foreach(new_messages, i, m) add_message(a, run_msgs, json_clone(m));
+    }
+    /* steering typed while the run was starting joins its first turn (agent-loop.ts) */
+    json_t *early = poll_steering ? take_queue(a, &a->steering) : NULL;
+    if (early) {
+        json_arr_foreach(early, i, m) add_message(a, run_msgs, json_clone(m));
+        json_free(early);
     }
     int turns = 0;
     int retry_attempt = 0;
@@ -1112,14 +1192,24 @@ int agent_prompt(agent_t *a, json_t *new_messages) {
         json_free(new_messages);
         return -1;
     }
-    run_loop(a, new_messages);
+    run_loop(a, new_messages, true);
     json_free(new_messages);
+    return 0;
+}
+
+int agent_run_queued(agent_t *a) {
+    if (a->running || !a->model) return -1;
+    json_t *q = take_queue(a, &a->steering);
+    if (!q) q = take_queue(a, &a->follow_up);
+    if (!q) return -1;
+    run_loop(a, q, false);
+    json_free(q);
     return 0;
 }
 
 int agent_continue(agent_t *a) {
     if (a->running || !a->model) return -1;
-    run_loop(a, NULL);
+    run_loop(a, NULL, false);
     return 0;
 }
 

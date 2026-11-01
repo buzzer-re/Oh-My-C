@@ -873,10 +873,18 @@ static char *app_after_edit(tool_env_t *env, const char *abs) {
     return lsp_after_write(a->lsp, abs, settings_int("lsp.diagnosticsWaitMs", 3000));
 }
 
+void app_sync_queue_modes(app_t *a) {
+    if (!a || !a->agent) return;
+    a->agent->steer_all = str_eq(settings_str("steeringMode", "one-at-a-time"), "all");
+    a->agent->follow_up_all = str_eq(settings_str("followUpMode", "one-at-a-time"), "all");
+    a->agent->interrupt_wait = str_eq(settings_str("interruptMode", "immediate"), "wait");
+}
+
 static void install_agent(app_t *a) {
     agent_t *ag = agent_new();
     a->agent = ag;
     ag->app = a;
+    app_sync_queue_modes(a);
     ag->max_turns = a->opts.max_turns;
     ag->hooks.prepare_request = hook_prepare;
     ag->hooks.should_retry = hook_should_retry;
@@ -1648,6 +1656,7 @@ int app_compact(app_t *a, const char *instructions, char **err) {
         return -1;
     }
     a->compacting = true;
+    if (!agent_is_running(a->agent)) a->agent->cancel = 0; /* a stale Esc must not cancel this pass */
     int rc = -1;
     json_t *path = session_path_to(a->session, a->session->leaf_id);
     /* find message entries, pick cut point keeping ~keepRecentTokens at a user-message boundary */
@@ -1716,7 +1725,7 @@ int app_compact(app_t *a, const char *instructions, char **err) {
     sb_free(&conv);
     free(sys);
     if (!summary || !*summary) {
-        *err = xstrdup("summarization request failed");
+        *err = xstrdup(a->agent->cancel ? "Compaction cancelled" : "summarization request failed");
         free(summary);
         goto out;
     }
@@ -1927,8 +1936,10 @@ int app_prompt_hidden(app_t *a, const char *text, const char *custom_type) {
     return rc;
 }
 
-json_t *app_user_bash(app_t *a, const char *cmd, bool exclude) {
-    proc_opts_t o = {.cwd = a->cwd, .timeout_ms = 300000, .merge_stderr = true, .new_session = true};
+json_t *app_user_bash_run(app_t *a, const char *cmd, bool exclude, proc_output_cb on_output, void *ud,
+                          volatile sig_atomic_t *cancel) {
+    proc_opts_t o = {.cwd = a->cwd, .timeout_ms = 300000, .merge_stderr = true, .new_session = true,
+                     .cancel = cancel, .on_output = on_output, .ud = ud};
     proc_result_t r;
     if (!cmd || proc_shell(cmd, &o, &r) != 0) return NULL;
     /* omp executeBash without an artifact: sanitized, column-capped, head/tail elided capture */
@@ -1953,19 +1964,32 @@ json_t *app_user_bash(app_t *a, const char *cmd, bool exclude) {
     if (meta) json_set(m, "meta", meta);
     if (exclude) json_set_bool(m, "excludeFromContext", true);
     json_set_int(m, "timestamp", now_ms());
-    if (a->session) session_append_message(a->session, m);
-    if (!exclude) {
-        char *t = out_bash_execution_text(m);
-        agent_append_message(a->agent, msg_user_text(t));
-        free(t);
-    }
-    /* BashResult counters for RPC callers */
+    /* BashResult counters for RPC callers (dropped when recorded) */
     json_set_int(m, "totalLines", sum.total_lines);
     json_set_int(m, "totalBytes", sum.total_bytes);
     json_set_int(m, "outputLines", sum.output_lines);
     json_set_int(m, "outputBytes", sum.output_bytes);
     out_summary_free(&sum);
     proc_result_free(&r);
+    return m;
+}
+
+void app_record_bash(app_t *a, const json_t *result) {
+    json_t *m = json_clone(result);
+    static const char *const counters[] = {"totalLines", "totalBytes", "outputLines", "outputBytes"};
+    for (size_t i = 0; i < ARRAY_LEN(counters); i++) json_del(m, counters[i]);
+    if (a->session) session_append_message(a->session, m);
+    if (!json_get_bool(m, "excludeFromContext", false)) {
+        char *t = out_bash_execution_text(m);
+        agent_append_message(a->agent, msg_user_text(t));
+        free(t);
+    }
+    json_free(m);
+}
+
+json_t *app_user_bash(app_t *a, const char *cmd, bool exclude) {
+    json_t *m = app_user_bash_run(a, cmd, exclude, NULL, NULL, NULL);
+    if (m) app_record_bash(a, m);
     return m;
 }
 

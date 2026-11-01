@@ -90,6 +90,17 @@ struct ui {
     tui_component_t *welcome;
     bool status_row_occupied; /* the working/idle-title row rendered lines this frame */
     json_t *att_images; /* pending composer image attachments [{image, path?, w?, h?}] (attach.c) */
+    /* message queue and background input work (queue.c, modes/interactive.c) */
+    tui_container_t *pending_shell; /* `!`/`$` runs started while streaming (omp pendingShellContainer) */
+    tui_component_t *queue_band;    /* ui_queue_band_new */
+    strvec_t q_steer, q_follow;     /* band snapshot (ui_queue_refresh) */
+    json_t *compaction_queue;       /* [{text, mode: steer|followUp}] typed while compacting / behind a yield compaction */
+    char *yield_compaction;         /* `/compact …` queued with the follow-up key while streaming */
+    strvec_t optimistic;            /* submitted prompts already drawn: their user message_start is not drawn again */
+    int bg_kind;                    /* running maintenance op: 0 none, 1 compaction, 2 handoff */
+    pthread_t bg_thread;
+    struct ui_bash *bash;           /* running `!cmd` */
+    json_t *deferred_bash;          /* `!cmd` results that finished mid-run: recorded at the run's end */
 };
 
 
@@ -174,6 +185,12 @@ char *ui_status_render(ui_t *u, int width, const char *layout); /* box|band|plai
 void ui_hint_record(const char *id);        /* composer hint gesture used ("effort", "agents") */
 char *ui_key_hint(const char *key);         /* "shift+tab" -> "⇧⇥" (active symbol preset) */
 char *ui_double_tap_hint(const char *key);
+
+/* queue.c */
+tui_component_t *ui_queue_band_new(ui_t *u); /* "Steering · N" / "After yield · N" band */
+void ui_queue_refresh(ui_t *u);              /* re-read the agent + compaction queues into the band */
+const char *ui_queue_shorthand(const char *text); /* body after a leading `->` / `=>`, else NULL */
+void ui_split_queued_messages(const char *text, strvec_t *out); /* queue-input.ts splitQueuedMessages */
 
 /* welcome.c */
 tui_component_t *ui_welcome_new(void);
