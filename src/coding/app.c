@@ -210,6 +210,83 @@ static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
     if (tier) o->service_tier = tier;
 }
 
+/* ---------- date/cwd reminder (port of omp session/date-cwd-reminder.ts) ----------
+ * The system prompt stays byte-stable; the volatile date/cwd line rides on the first user turn of each
+ * request. Turns keep the reminder they were first sent with, so the cached prefix never changes; a
+ * changed reminder (new day / new cwd) attaches to the newest unsent user turn instead. */
+static char *dcr_render(app_t *a) {
+    char date[16];
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    strftime(date, sizeof date, "%Y-%m-%d", &tm);
+    json_t *c = json_obj();
+    json_set_str(c, "date", date);
+    json_set_str(c, "cwd", a->cwd);
+    char *r = prompt_render("coding-agent/prompts/system/date-cwd-reminder.md", c);
+    json_free(c);
+    char *trim = str_trim(r ? r : "");
+    free(r);
+    return trim;
+}
+
+static json_t *hook_transform(void *ud, agent_t *ag, const json_t *messages) {
+    app_t *a = ud;
+    UNUSED(ag);
+    if (!settings_bool("dateCwdReminder", true)) return NULL;
+    ssize_t first = -1;
+    json_t *m;
+    json_arr_foreach(messages, i, m) if (str_eq(json_get_str(m, "role"), "user")) {
+        first = (ssize_t)i;
+        break;
+    }
+    if (first < 0) return NULL;
+    char *rem = dcr_render(a);
+    int64_t fts = json_get_int(json_at(messages, (size_t)first), "timestamp", 0);
+    if (!a->dcr_sent || a->dcr_first_ts != fts) { /* new conversation root (new session, compaction, branch) */
+        json_free(a->dcr_sent);
+        a->dcr_sent = json_obj();
+        a->dcr_first_ts = fts;
+        char key[48];
+        snprintf(key, sizeof key, "user:%lld", (long long)fts);
+        json_set_str(a->dcr_sent, key, rem);
+        free(a->dcr_last);
+        a->dcr_last = xstrdup(rem);
+    } else if (!str_eq(a->dcr_last, rem)) {
+        const json_t *last = json_at(messages, json_len(messages) - 1);
+        if (str_eq(json_get_str(last, "role"), "user")) {
+            char key[48];
+            snprintf(key, sizeof key, "user:%lld", (long long)json_get_int(last, "timestamp", 0));
+            if (!json_get(a->dcr_sent, key)) {
+                json_set_str(a->dcr_sent, key, rem);
+                free(a->dcr_last);
+                a->dcr_last = xstrdup(rem);
+            }
+        }
+    }
+    free(rem);
+    json_t *out = json_arr();
+    json_arr_foreach(messages, i, m) {
+        json_t *c = json_clone(m);
+        if (str_eq(json_get_str(m, "role"), "user")) {
+            char key[48];
+            snprintf(key, sizeof key, "user:%lld", (long long)json_get_int(m, "timestamp", 0));
+            const char *r = json_get_str(a->dcr_sent, key);
+            json_t *content = json_get(c, "content");
+            if (r && json_is_str(content)) {
+                char *t = xasprintf("%s\n\n%s", r, json_sv(content));
+                json_set_str(c, "content", t);
+                free(t);
+            } else if (r && json_is_arr(content)) {
+                const json_t *b0 = json_at(content, 0);
+                if (!str_eq(json_get_str(b0, "text"), r)) json_arr_insert(content, 0, text_block(r));
+            }
+        }
+        json_push(out, c);
+    }
+    return out;
+}
+
 static bool is_overflow(const char *err) {
     return err && (str_istr(err, "prompt is too long") || str_istr(err, "context length") || str_istr(err, "maximum context") ||
                    str_istr(err, "context_length_exceeded") || str_istr(err, "too many tokens") ||
@@ -540,6 +617,7 @@ static void install_agent(app_t *a) {
     ag->max_turns = a->opts.max_turns;
     ag->hooks.prepare_request = hook_prepare;
     ag->hooks.should_retry = hook_should_retry;
+    ag->hooks.transform_context = hook_transform;
     ag->hooks.on_stream_delta = hook_stream;
     ag->hooks.after_tool = hook_after_tool;
     ag->hooks.before_tool = hook_before_tool;
@@ -786,6 +864,8 @@ void app_free(app_t *a) {
     free(a->pending_rewind);
     advisor_free(a->advisor);
     goal_free(a->goal);
+    json_free(a->dcr_sent);
+    free(a->dcr_last);
     pthread_mutex_destroy(&a->mu);
     free(a);
 }

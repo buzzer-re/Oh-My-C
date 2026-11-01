@@ -62,6 +62,10 @@ struct app {
     bool checkpoint_pending;    /* checkpoint tool ran; boundary captured at its message_end */
     char *plan_file; /* local:// path of the current plan */
     struct goal *goal; /* goal mode state (goal.c) */
+    /* date/cwd reminder injected per request into user turns (never persisted) */
+    int64_t dcr_first_ts;
+    json_t *dcr_sent; /* "role:ts" -> reminder text the turn was first sent with */
+    char *dcr_last;
     struct advisor *advisor; /* shadow reviewer (advisor.c), NULL when off */
     /* wake an idle session when a background job settles (modes set this; called from the job thread) */
     void (*wake)(void *ud);

@@ -74,6 +74,7 @@ json_t *json_at(const json_t *arr, size_t i);
 void json_push(json_t *arr, json_t *val); /* takes ownership */
 void json_push_str(json_t *arr, const char *s);
 json_t *json_arr_remove(json_t *arr, size_t i); /* returns owned */
+void json_arr_insert(json_t *arr, size_t i, json_t *val); /* takes ownership; i > len appends */
 
 /* type checks */
 static inline bool json_is_str(const json_t *j) { return j && j->type == JSON_STRING; }

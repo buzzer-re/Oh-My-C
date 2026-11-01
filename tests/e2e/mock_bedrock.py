@@ -98,7 +98,7 @@ class H(BaseHTTPRequestHandler):
         blocks = last.get("content", [])
         out = [event("messageStart", {"role": "assistant"})]
         results = [b["toolResult"] for b in blocks if "toolResult" in b]
-        text = "".join(b.get("text", "") for b in blocks if "text" in b)
+        text = "".join(b.get("text", "") for b in blocks if "text" in b and not b.get("text", "").startswith("<system-reminder>"))
         stop = "end_turn"
         if results:
             said = "".join(c.get("text", "") for c in results[0]["content"]).strip()

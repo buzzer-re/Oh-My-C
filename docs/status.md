@@ -29,6 +29,7 @@ This file is the single source of truth for what is implemented; it is updated w
 ## Agent & session
 | Feature | Status | Notes |
 |---|---|---|
+| Date/cwd `<system-reminder>` injected per request into user turns (system prompt stays byte-stable; turns keep the reminder they were first sent with; a changed day/cwd attaches to the newest unsent user turn; setting `dateCwdReminder`) | ✅ | multi-root inheritance across compaction/branches simplified (resets per conversation root) |
 | Agent loop, parallel shared tools / exclusive tools, steering, follow-ups | ✅ | |
 | Session JSONL (title slot, v3 header, tree, branch/fork, resume, continue) | ✅ | |
 | Compaction (auto + `/compact`), auto-retry, context-overflow recovery | ✅ | |

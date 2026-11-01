@@ -244,6 +244,20 @@ json_t *json_arr_remove(json_t *a, size_t i) {
     return v;
 }
 
+void json_arr_insert(json_t *a, size_t i, json_t *v) {
+    if (!json_is_arr(a)) {
+        json_free(v);
+        return;
+    }
+    if (i >= a->u.arr.n) {
+        json_push(a, v);
+        return;
+    }
+    json_push(a, v); /* grow */
+    memmove(a->u.arr.items + i + 1, a->u.arr.items + i, (a->u.arr.n - 1 - i) * sizeof(json_t *));
+    a->u.arr.items[i] = v;
+}
+
 bool json_truthy(const json_t *j) {
     if (!j) return false;
     switch (j->type) {
