@@ -398,5 +398,6 @@ void tc_render(const tc_call_t *c, int width, strvec_t *out) {
     else if (!strcmp(n, "find")) tc_find(c, width, out);
     else if (!strcmp(n, "ast_grep")) tc_ast_grep(c, width, out);
     else if (!strcmp(n, "ast_edit")) tc_ast_edit(c, width, out);
+    else if (!strcmp(n, "debug")) tc_debug(c, width, out);
     else tc_generic(c, width, out);
 }

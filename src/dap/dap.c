@@ -43,6 +43,7 @@ typedef struct {
     json_t *instr_bps;
     json_t *data_bps;
     char *program;
+    int id;               /* omp DebugSessionSnapshot id: debug-N */
 } dsession_t;
 
 struct dap_manager {
@@ -450,6 +451,8 @@ static int start_session(dap_manager_t *m, tool_env_t *env, const json_t *args, 
     pthread_mutex_init(&s->mu, NULL);
     pthread_cond_init(&s->cv, NULL);
     s->adapter = xstrdup(name);
+    static int next_id;
+    s->id = __atomic_add_fetch(&next_id, 1, __ATOMIC_RELAXED);
     s->bps = json_obj();
     s->fn_bps = json_arr();
     s->instr_bps = json_arr();
@@ -555,6 +558,23 @@ static int start_session(dap_manager_t *m, tool_env_t *env, const json_t *args, 
     wait_stop(s, seq0, 5000);
     sb_appendf(b, "Adapter: %s\n", name);
     return 0;
+}
+
+/* omp DebugSessionSnapshot (transcript card's Session section) */
+static json_t *snapshot_json(dsession_t *s, const char *cwd) {
+    json_t *o = json_obj();
+    char id[32];
+    snprintf(id, sizeof id, "debug-%d", s->id);
+    json_set_str(o, "id", id);
+    json_set_str(o, "adapter", s->adapter ? s->adapter : "");
+    pthread_mutex_lock(&s->mu);
+    json_set_str(o, "status", s->terminated ? "terminated" : s->stopped ? "stopped" : "running");
+    if (s->stopped && !s->terminated && s->stop_reason) json_set_str(o, "stopReason", s->stop_reason);
+    pthread_mutex_unlock(&s->mu);
+    json_set_str(o, "cwd", cwd ? cwd : "");
+    if (s->program) json_set_str(o, "program", s->program);
+    json_set_bool(o, "needsConfigurationDone", false);
+    return o;
 }
 
 static int debug_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
@@ -819,6 +839,10 @@ static int debug_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         json_free(res);
     }
 finish:
+    out->details = json_obj();
+    json_set_str(out->details, "action", action);
+    json_set_bool(out->details, "success", !err);
+    if (m->s) json_set(out->details, "snapshot", snapshot_json(m->s, dt->env->cwd));
     pthread_mutex_unlock(&m->mu);
     if (err) {
         if (b.len) tool_result_textf(out, "%s%s", sb_cstr(&b), err);
