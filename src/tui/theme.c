@@ -347,9 +347,23 @@ const char *tui_bg_seq(const tui_theme_t *th, tui_tc_t slot) {
     return slot < TUI_TC__COUNT && th->bg[slot][0] ? th->bg[slot] : "\x1b[49m";
 }
 
+/* upstream wrapForeground: the color is restored after every nested reset (\e[0m / \e[39m) in `text` */
 void tui_fg(sb_t *b, const tui_theme_t *th, tui_tc_t slot, const char *text) {
-    sb_append(b, tui_fg_seq(th, slot));
-    sb_append(b, text ? text : "");
+    const char *seq = tui_fg_seq(th, slot);
+    sb_append(b, seq);
+    const char *p = text ? text : "";
+    if (strstr(p, "\x1b[")) {
+        for (;;) {
+            const char *r0 = strstr(p, "\x1b[0m"), *r39 = strstr(p, "\x1b[39m");
+            const char *r = r0 && (!r39 || r0 < r39) ? r0 : r39;
+            if (!r) break;
+            size_t len = r == r0 ? 4 : 5;
+            sb_appendn(b, p, (size_t)(r - p) + len);
+            sb_append(b, seq);
+            p = r + len;
+        }
+    }
+    sb_append(b, p);
     sb_append(b, "\x1b[39m");
 }
 

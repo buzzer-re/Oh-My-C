@@ -243,7 +243,22 @@ static char *display_value(const sdef_t *d) {
     if (!strcmp(d->type, "boolean")) return xstrdup(json_truthy(v) ? "true" : "false");
     if (!strcmp(d->type, "multiselect")) return multiselect_str(d, v);
     if (!strcmp(d->type, "text") && d->secret) return xstrdup(json_truthy(v) ? "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2" : "");
-    if (!strcmp(d->type, "providerLimits")) return value_str(v);
+    if (!strcmp(d->type, "providerLimits")) { /* formatProviderLimitsValue */
+        strvec_t parts = {0};
+        json_t *e;
+        const char *key;
+        const json_t *ov = json_is_obj(v) ? v : NULL;
+        json_obj_foreach(ov, ki, key, e) {
+            if (!json_is_num(e) || e->u.num.d <= 0) continue;
+            char *n = js_num(e->u.num.d);
+            strvec_push_own(&parts, xasprintf("%s: %s", key, n));
+            free(n);
+        }
+        strvec_sort(&parts);
+        char *r = parts.n ? strvec_join(&parts, ", ") : xstrdup("Unlimited");
+        strvec_free(&parts);
+        return r;
+    }
     char *s = value_str(v);
     if ((!strcmp(d->path, "compaction.thresholdPercent") || !strcmp(d->path, "compaction.thresholdTokens")) &&
         (!*s || !strcmp(s, "-1"))) {
@@ -1273,7 +1288,15 @@ static void render_field(settings_view_t *v, int width, strvec_t *out) {
         strvec_push_own(out, pl);
         int cols = tui_term(v->u->tui)->cols;
         char *pv = ui_settings_status_preview(v->u, cols > 0 ? cols : width);
-        ui_push_text(out, pv, width);
+        /* StyledText wrap: like omp's wrapTextWithAnsi the styles stay open at a wrapped row's end (the
+         * status bar background runs on to the frame) */
+        strvec_t w = {0};
+        ui_push_text(&w, pv, width);
+        for (size_t i = 0; i < w.n; i++) {
+            if (i + 1 < w.n && str_ends(w.v[i], TUI_RESET)) w.v[i][strlen(w.v[i]) - strlen(TUI_RESET)] = 0;
+            strvec_push(out, w.v[i]);
+        }
+        strvec_free(&w);
         free(pv);
     }
     strvec_push(out, "");
@@ -1498,8 +1521,18 @@ static void settings_render(tui_component_t *c, int width, strvec_t *out) {
             render_list(&v->list, inner, v->searching ? "No matching settings" : NULL, &content);
         }
     } else {
-        char *t = S(TUI_TC_DIM, "  No plugins installed");
-        strvec_push_own(&content, t);
+        /* PluginSettingsComponent with no plugins: a "Plugins" panel and install hints */
+        strvec_t body = {0};
+        strvec_push(&body, "");
+        strvec_push_own(&body, S(TUI_TC_MUTED, "No plugins installed"));
+        strvec_push(&body, "");
+        strvec_push_own(&body, S(TUI_TC_DIM, "Install npm plugins:        " UI_APP_NAME " plugin install <package>"));
+        strvec_push_own(&body, S(TUI_TC_DIM, "Install marketplace plugins: " UI_APP_NAME " plugin install <name>@<marketplace>"));
+        strvec_push(&body, "");
+        strvec_push_own(&content, ui_box_top(inner, "Plugins"));
+        for (size_t i = 0; i < body.n; i++) strvec_push_own(&content, ui_box_row(body.v[i], inner));
+        strvec_push_own(&content, ui_box_bottom(inner));
+        strvec_free(&body);
     }
     strvec_push_own(out, ui_box_top(width, "Settings"));
     for (size_t i = 0; i < tabs.n; i++) strvec_push_own(out, ui_box_row(tabs.v[i], width));
