@@ -16,7 +16,7 @@ static const char *DEFAULTS_JSON =
     "\"includeModelInPrompt\":true,"
     "\"retry\":{\"enabled\":true,\"maxRetries\":10,\"baseDelayMs\":2000,\"maxDelayMs\":60000},"
     "\"tools\":{\"approvalMode\":\"yolo\",\"maxTimeout\":0,\"intentTracing\":true,\"outputMaxColumns\":768,"
-    "\"artifactSpillThreshold\":50,\"artifactTailBytes\":20,\"artifactTailLines\":500,\"artifactHeadBytes\":20},"
+    "\"artifactSpillThreshold\":50,\"artifactTailBytes\":20,\"artifactTailLines\":500,\"artifactHeadBytes\":20,\"artifactMaxBytes\":16},"
     "\"bash\":{\"enabled\":true},"
     "\"edit\":{\"mode\":\"hashline\",\"fuzzyMatch\":true,\"fuzzyThreshold\":0.95},"
     "\"read\":{\"defaultLimit\":300},"

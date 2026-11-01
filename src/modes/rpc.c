@@ -827,16 +827,15 @@ static void handle(rpc_t *r, json_t *cmd) {
         session_set_title(a->session, json_get_str(cmd, "name") ? json_get_str(cmd, "name") : json_get_str(cmd, "title"), "user");
         respond(r, id, type, true, NULL, NULL);
     } else if (!strcmp(type, "bash")) {
-        const char *c = json_get_str(cmd, "command");
-        proc_opts_t po = {.cwd = a->cwd, .timeout_ms = 300000, .merge_stderr = true, .new_session = true};
-        proc_result_t pr;
-        if (c && proc_shell(c, &po, &pr) == 0) {
+        json_t *m = app_user_bash(a, json_get_str(cmd, "command"), json_get_bool(cmd, "excludeFromContext", false));
+        if (m) {
             json_t *d = json_obj();
-            json_set_str(d, "output", pr.out);
-            json_set_int(d, "exitCode", pr.exit_code);
-            json_set_bool(d, "cancelled", pr.cancelled);
+            static const char *keys[] = {"output", "exitCode", "cancelled", "truncated", "totalLines", "totalBytes",
+                                         "outputLines", "outputBytes"};
+            for (size_t i = 0; i < ARRAY_LEN(keys); i++)
+                if (json_get(m, keys[i])) json_set(d, keys[i], json_clone(json_get(m, keys[i])));
             respond(r, id, type, true, d, NULL);
-            proc_result_free(&pr);
+            json_free(m);
         } else {
             respond(r, id, type, false, NULL, "command required");
         }

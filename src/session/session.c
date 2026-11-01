@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "session.h"
+#include "tools/outsink.h"
 
 #include "core/fs.h"
 #include "prompt/template.h"
@@ -498,16 +499,9 @@ static json_t *to_llm(const json_t *msg) {
         return json_clone(msg);
     if (!strcmp(role, "bashExecution")) {
         if (json_get_bool(msg, "excludeFromContext", false)) return NULL;
-        sb_t b = SB_INIT;
-        sb_appendf(&b, "Ran `%s`\n", json_get_str(msg, "command") ? json_get_str(msg, "command") : "");
-        const char *out = json_get_str(msg, "output");
-        if (out && *out) sb_appendf(&b, "```\n%s\n```", out);
-        else sb_append(&b, "(no output)");
-        int64_t code = json_get_int(msg, "exitCode", 0);
-        if (code) sb_appendf(&b, "\n\nCommand exited with code %lld", (long long)code);
-        if (json_get_bool(msg, "cancelled", false)) sb_append(&b, "\n\n(command cancelled)");
-        json_t *m = user_text_msg(sb_cstr(&b), json_get_int(msg, "timestamp", now_ms()));
-        sb_free(&b);
+        char *t = out_bash_execution_text(msg); /* omp bashExecutionToText (incl. the meta notice) */
+        json_t *m = user_text_msg(t, json_get_int(msg, "timestamp", now_ms()));
+        free(t);
         return m;
     }
     if (!strcmp(role, "custom") || !strcmp(role, "hookMessage") || !strcmp(role, "fileMention")) {

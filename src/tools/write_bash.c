@@ -11,6 +11,8 @@
 #include "core/fs.h"
 #include "core/proc.h"
 #include "shell.h"
+#include "artifacts.h"
+#include "outsink.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -117,49 +119,28 @@ agent_tool_t *tool_write_new(tool_env_t *env) {
 
 /* ---------- bash ---------- */
 
-#define BASH_MAX_BYTES (50u * 1024)
-#define BASH_MAX_LINES 2000
-
 typedef struct {
     tool_ctx_t *ctx;
-    sb_t buf;
+    out_sink_t *sink;
+    size_t pushed; /* raw bytes fed to the sink */
     int64_t last_emit;
 } bash_stream_t;
 
 static void bash_on_output(void *ud, int stream, const char *data, size_t len) {
     bash_stream_t *s = ud;
     UNUSED(stream);
-    sb_appendn(&s->buf, data, len);
-    if (s->buf.len > 4 * BASH_MAX_BYTES) {
-        /* keep only the tail for live preview */
-        size_t keep = 2 * BASH_MAX_BYTES;
-        memmove(s->buf.s, s->buf.s + s->buf.len - keep, keep);
-        sb_truncate(&s->buf, keep);
-    }
+    out_sink_push(s->sink, data, len);
+    s->pushed += len;
     int64_t now = mono_ms();
-    if (s->ctx->update && now - s->last_emit > 100) {
+    if (s->ctx && s->ctx->update && now - s->last_emit >= 50) {
         s->last_emit = now;
-        bool tr;
-        char *tail = tool_truncate_tail(s->buf.s, s->buf.len, BASH_MAX_BYTES, BASH_MAX_LINES, &tr);
+        char *pv = out_sink_preview(s->sink);
         tool_result_t partial = {0};
-        tool_result_text(&partial, tail);
+        tool_result_text(&partial, pv);
         s->ctx->update(s->ctx, &partial);
         tool_result_free(&partial);
-        free(tail);
+        free(pv);
     }
-}
-
-static char *spill_artifact(tool_env_t *env, const char *data, size_t len) {
-    if (!env->artifacts_dir) {
-        char *base = omc_agent_path("artifacts");
-        env->artifacts_dir = base;
-    }
-    fs_mkdir_p(env->artifacts_dir, 0700);
-    char *id = short_id();
-    char *p = xasprintf("%s/%s.log", env->artifacts_dir, id);
-    fs_write(p, data, len);
-    free(p);
-    return id;
 }
 
 /* leading `cd <dir> && rest` → (dir, rest) when cwd omitted */
@@ -208,9 +189,12 @@ static char *background_notice(const char *jid, double tsec) {
 
 static void background_result(tool_result_t *out, const char *jid, const char *preview, const strvec_t *notices, double tsec) {
     sb_t b = SB_INIT;
-    char *pv = str_trim(preview ? preview : "");
-    if (*pv) sb_appendf(&b, "%s\n\n", pv);
-    free(pv);
+    size_t pl = preview ? strlen(preview) : 0;
+    while (pl && isspace((unsigned char)preview[pl - 1])) pl--;
+    if (pl) {
+        sb_appendn(&b, preview, pl);
+        sb_append(&b, "\n\n");
+    }
     for (size_t i = 0; notices && i < notices->n; i++) sb_appendf(&b, "%s\n", notices->v[i]);
     if (notices && notices->n) sb_putc(&b, '\n');
     char *n = background_notice(jid, tsec);
@@ -228,48 +212,79 @@ static void background_result(tool_result_t *out, const char *jid, const char *p
     else json_set_bool(out->details, "timeoutDisabled", true);
 }
 
-/* completed foreground command -> tool result */
-static void bash_finish(tool_env_t *env, tool_result_t *out, proc_result_t *r, double tsec, const char *cwd, int64_t dur,
-                        const strvec_t *notices) {
-    if (r->spawn_errno && !r->out_len) {
+/* completed foreground command -> tool result (omp BashTool #buildCompletedResult / #throwIfUnfinished) */
+static void bash_finish(tool_env_t *env, tool_result_t *out, proc_result_t *r, bash_stream_t *bs, double tsec, double req_tsec,
+                        int64_t timeout_ms, const char *cwd, int64_t dur, const strvec_t *notices) {
+    if (r->spawn_errno && !r->out_len && !bs->pushed) {
         tool_result_error(out, "Failed to spawn shell: %s", strerror(r->spawn_errno));
         return;
     }
-    char *clean = utf8_sanitize(r->out ? r->out : "", r->out_len);
-    size_t clen = strlen(clean);
-    while (clen && (clean[clen - 1] == '\n')) clean[--clen] = 0;
-    bool truncated;
-    char *shown = tool_truncate_tail(clean, clen, BASH_MAX_BYTES, BASH_MAX_LINES, &truncated);
+    /* output the streaming callbacks did not deliver (e.g. a held-back tail when the shell exits) */
+    if (r->out && r->out_len > bs->pushed && !r->truncated) out_sink_push(bs->sink, r->out + bs->pushed, r->out_len - bs->pushed);
+    bool timed_out = r->timed_out, cancelled = r->cancelled && !r->timed_out;
+    char *tnotice = timed_out ? xasprintf("Command timed out after %lld seconds", (long long)((timeout_ms + 500) / 1000)) : NULL;
+    out_summary_t sum;
+    out_sink_dump(bs->sink, timed_out ? tnotice : cancelled ? "Command cancelled" : NULL, &sum);
+    free(tnotice);
+    char *errn = sum.artifact_error ? xasprintf("\n\n[Full output was not saved completely (artifact %s failed)]", sum.artifact_error)
+                                    : xstrdup("");
+    if (cancelled) {
+        /* omp throws: the local executor output already leads with `[Command cancelled]` */
+        char *msg = str_starts(sum.output, "[Command cancelled]") ? xstrdup(sum.output)
+                    : *sum.output                                 ? xasprintf("%s\n\n[Command aborted]", sum.output)
+                                                                  : xstrdup("Command aborted");
+        tool_result_textf(out, "%s%s", msg, errn);
+        out->is_error = true;
+        free(msg);
+        free(errn);
+        out_summary_free(&sum);
+        return;
+    }
+    int exit_code = r->term_signal ? 128 + r->term_signal : r->exit_code;
+    bool failed = !timed_out && exit_code != 0;
     sb_t b = SB_INIT;
-    if (truncated) {
-        char *id = spill_artifact(env, clean, clen);
-        size_t total_lines = str_count(clean, "\n") + 1, shown_lines = str_count(shown, "\n") + 1;
-        sb_appendf(&b, "[Showing last %zu of %zu lines. Full output: artifact://%s]\n", shown_lines, total_lines, id);
-        free(id);
+    sb_append(&b, *sum.output ? sum.output : "(no output)");
+    bool wall_notice = dur >= 1000;
+    if (wall_notice || (notices && notices->n)) {
+        sb_append(&b, "\n");
+        if (wall_notice) sb_appendf(&b, "\nWall time: %.2f seconds", (double)dur / 1000.0);
+        for (size_t i = 0; notices && i < notices->n; i++)
+            if (notices->v[i] && *notices->v[i]) sb_appendf(&b, "\n%s", notices->v[i]);
     }
-    sb_append(&b, *shown ? shown : "(no output)");
-    if (r->timed_out) sb_appendf(&b, "\n\nCommand timed out after %.0f seconds", tsec);
-    else if (r->cancelled) sb_append(&b, "\n\nCommand aborted");
-    else if (r->exit_code != 0) {
-        if (r->term_signal) sb_appendf(&b, "\n\nCommand terminated by signal %d", r->term_signal);
-        else sb_appendf(&b, "\n\nCommand exited with code %d", r->exit_code);
+    if (failed) sb_appendf(&b, "\n\nCommand exited with code %d", exit_code);
+    if (timed_out) {
+        char *m = tsec > 0 ? xasprintf("Command timed out after %.0f seconds", tsec) : xstrdup("Command timed out");
+        char *lead = xasprintf("[%s]\n", m);
+        if (!str_starts(sum.output, lead)) sb_appendf(&b, "\n\n[%s]", m);
+        free(lead);
+        free(m);
     }
-    for (size_t i = 0; notices && i < notices->n; i++) sb_appendf(&b, "\n\n%s", notices->v[i]);
-    tool_result_text(out, sb_cstr(&b));
-    out->is_error = r->timed_out || r->cancelled || r->exit_code != 0;
+    /* final-defense inline cap (spill threshold + notice slack); reuses the sink's artifact */
+    size_t cap = tool_spill_threshold() + OUT_INLINE_CAP_SLACK_BYTES;
+    char *aid = NULL;
+    if (b.len > cap && !sum.artifact_error)
+        aid = sum.artifact_id ? xstrdup(sum.artifact_id) : artifacts_save(env->artifacts, "bash-original", b.s, b.len);
+    char *text = out_enforce_inline_cap(b.s ? b.s : "", b.len, cap, aid, NULL);
+    free(aid);
+    tool_result_text(out, text);
+    free(text);
+    sb_free(&b);
+    out->is_error = timed_out || failed;
     out->details = json_obj();
-    json_set_int(out->details, "exitCode", r->exit_code);
-    json_set_int(out->details, "durationMs", dur);
-    /* omp BashToolDetails: wall time + effective timeout for the card footer */
-    json_set_int(out->details, "wallTimeMs", dur);
+    json_set_bool(out->details, "wallTimeNoticeEmitted", wall_notice);
     if (tsec > 0) json_set_int(out->details, "timeoutSeconds", (int64_t)tsec);
     else json_set_bool(out->details, "timeoutDisabled", true);
-    if (r->timed_out) json_set_bool(out->details, "timedOut", true);
+    if (req_tsec >= 0 && req_tsec != tsec) json_set_num(out->details, "requestedTimeoutSeconds", req_tsec);
+    json_set_int(out->details, "wallTimeMs", dur);
+    if (failed) json_set_int(out->details, "exitCode", exit_code);
+    if (timed_out) json_set_bool(out->details, "timedOut", true);
+    json_set_int(out->details, "durationMs", dur);
     json_set_str(out->details, "cwd", cwd);
-    if (truncated) json_set_bool(out->details, "truncated", true);
-    sb_free(&b);
-    free(shown);
-    free(clean);
+    json_t *meta = NULL;
+    out_meta_from_summary(&meta, &sum, "tail", 1, 0);
+    if (meta) json_set(out->details, "meta", meta);
+    free(errn);
+    out_summary_free(&sum);
 }
 
 static const char *blank_null(const char *s) {
@@ -392,6 +407,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         goto done;
     }
     double tsec = json_get_num(args, "timeout", 300);
+    double req_tsec = json_get(args, "timeout") ? tsec : -1;
     int64_t max_to = settings_int("tools.maxTimeout", 0);
     if (tsec > 0 && max_to > 0 && tsec > (double)max_to) tsec = (double)max_to;
     if (tsec > 0 && tsec < 1) tsec = 1;
@@ -405,7 +421,16 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         goto done;
     }
 
-    bash_stream_t bs = {.ctx = ctx};
+    /* omp allocates the call's artifact up front (ids advance per call); the sink writes it only on spill */
+    char *art_id = NULL;
+    char *art_path = artifacts_alloc(env->artifacts, "bash", &art_id);
+    out_sink_opts_t so;
+    out_sink_opts_from_settings(&so);
+    so.artifact_path = art_path;
+    so.artifact_id = art_id;
+    bash_stream_t bs = {.ctx = ctx, .sink = out_sink_new(&so)};
+    free(art_path);
+    free(art_id);
     bool persistent = settings_bool("bash.persistent", true);
     if (!pty && persistent) {
         pthread_mutex_lock(&env->mu);
@@ -437,13 +462,12 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             char *jid = jobs_fg_detach(env->jobs, fid);
             if (jid) {
                 if (steered) strvec_push(&notices, "Backgrounded early to handle an incoming message; the command keeps running.");
-                bool tr;
-                char *pv = bs.buf.len ? tool_truncate_tail(bs.buf.s, bs.buf.len, 4096, 20, &tr) : NULL;
+                char *pv = out_sink_preview(bs.sink);
                 background_result(out, jid, pv, &notices, tsec);
                 free(pv);
                 free(jid);
                 free(fid);
-                sb_free(&bs.buf);
+                out_sink_free(bs.sink);
                 goto done;
             }
             jobs_fg_wait(env->jobs, fid, 60000, NULL); /* finished right at the threshold */
@@ -452,7 +476,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         if (!jobs_fg_take(env->jobs, fid, &r, &notice)) {
             tool_result_error(out, "Failed to run command");
             free(fid);
-            sb_free(&bs.buf);
+            out_sink_free(bs.sink);
             goto done;
         }
         if (notice) strvec_push_own(&notices, notice);
@@ -473,8 +497,9 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         int rc = (!pty && persistent) ? shell_run(env->shell, full, cwd, &o, &r) : proc_shell(full, &o, &r);
         if (rc != 0 && !r.spawn_errno) r.spawn_errno = errno ? errno : EIO;
     }
-    sb_free(&bs.buf);
-    bash_finish(env, out, &r, tsec, cwd, mono_ms() - t0, &notices);
+    int64_t dur = mono_ms() - t0;
+    bash_finish(env, out, &r, &bs, tsec, req_tsec, timeout_ms, cwd, dur, &notices);
+    out_sink_free(bs.sink);
     proc_result_free(&r);
 done:
     strvec_free(&notices);

@@ -106,6 +106,9 @@ void app_rebuild_system_prompt(app_t *a);
 int64_t app_compaction_threshold(int64_t window);
 int app_compact(app_t *a, const char *instructions, char **err);
 int app_new_session(app_t *a);
+/* user `!cmd` / RPC bash: run, record a bashExecution message (session + context unless exclude); owned message
+ * (plus BashResult counters) or NULL when the shell could not start */
+json_t *app_user_bash(app_t *a, const char *cmd, bool exclude);
 int app_switch_session(app_t *a, const char *path, char **err);
 int app_fork_from(app_t *a, const char *entry_id, char **err);
 void app_abort(app_t *a);
