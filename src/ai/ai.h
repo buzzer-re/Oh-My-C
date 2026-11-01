@@ -68,6 +68,37 @@ const char *catalog_provider_default_model(const char *provider);
 json_t *catalog_provider_info(const char *provider);   /* borrowed: {id, envVars, defaultModel, ...} */
 json_t *catalog_auth_providers(void);                  /* borrowed array of OAuth login descriptors */
 const ai_model_t *catalog_register(json_t *model_obj); /* takes ownership; for custom/discovered models */
+/* omp's built-in role selector chains (behavior.kdl role-defaults): borrowed {role: [selector, ...]} */
+json_t *catalog_role_defaults(void);
+/* provider usable without credentials (omp #keylessProviders: local, web, ollama, llama.cpp, lm-studio, apple,
+ * plus discovered local servers); its provider info carries "keyless": true */
+bool catalog_provider_keyless(const char *provider);
+/* model usable now: its provider has credentials (auth.json / env / models.yml apiKey) or is keyless */
+bool catalog_model_available(const ai_model_t *m);
+/* omp modelKind(): "chat" (default), "tiny", "image", "tts", "stt", "search", "judge", "embedding", "rerank",
+ * "video" (borrowed string) */
+const char *catalog_model_kind(const ai_model_t *m);
+/* implicit local servers (ollama, llama.cpp, lm-studio; localdisc.c): probe and register their models (keyless,
+ * raw "discovered": true; models a later probe no longer lists get raw "gone": true and stop being available).
+ * force=false is the once-per-process startup refresh (24 h cache in <agent>/local-models.json, llama.cpp always
+ * probed); force=true (hub F5) probes every server. Blocks for at most the probe timeouts (250 ms + 150 ms per
+ * metadata call on loopback). Call from the UI/main thread. Returns the number of models registered. */
+int catalog_discover_local(bool force);
+/* last discovery outcome for an implicit local provider: owned {status: "ok"|"empty"|"cached"|"unavailable",
+ * optional, error?, fetchedAt?} or NULL when never probed (omp ProviderDiscoveryState; the hub hides an
+ * optional provider that is unavailable) */
+json_t *catalog_local_discovery_state(const char *provider);
+
+/* measured model speed (port of omp agent-storage model_perf; <agent>/model-perf.json):
+ * key is "provider/id" (optionally "@tier"); sums decay by half once 256 samples accumulate */
+void model_perf_record(const char *key, int64_t output_tokens, int64_t duration_ms, int64_t ttft_ms);
+/* fold a finished assistant message (provider, model, usage.output, duration, ttft); errors are skipped */
+void model_perf_record_message(const json_t *assistant);
+/* recency-weighted averages: false when the model has no samples; *ttft_ms < 0 when no sample reported one */
+bool model_perf_get(const char *key, double *tps, double *ttft_ms, double *samples);
+/* omp model-browser #perfCell: "1.2s 118t/s" (full), "118t/s" (tps); measured perf first, else the catalog's
+ * estimated raw "tps" as "~118t/s"; "" when unknown. owned */
+char *model_perf_cell(const ai_model_t *m, bool full);
 json_t *model_compat_get(const ai_model_t *m, const char *key); /* override, else api default (borrowed) */
 bool model_compat_bool(const ai_model_t *m, const char *key, bool def);
 const char *model_compat_str(const ai_model_t *m, const char *key);

@@ -80,6 +80,7 @@ static int cmd_models(int argc, char **argv) {
     ai_providers_init();
     catalog_init();
     auth_init();
+    catalog_discover_local(false);
     const char *filter = argc > 0 ? argv[0] : NULL;
     bool all = false;
     for (int i = 0; i < argc; i++)
@@ -88,7 +89,7 @@ static int cmd_models(int argc, char **argv) {
     size_t shown = 0;
     for (size_t i = 0; i < catalog_count(); i++) {
         const ai_model_t *m = catalog_at(i);
-        bool cred = auth_has_credentials(m->provider);
+        bool cred = auth_has_credentials(m->provider) || (json_get_bool(m->raw, "discovered", false) && catalog_model_available(m));
         if (!all && !cred && !filter) continue;
         if (filter && !str_istr(m->id, filter) && !str_istr(m->provider, filter) && !str_istr(m->name, filter)) continue;
         printf("%s %-24s %-48s ctx=%-8lld %s%s\n", cred ? "*" : " ", m->provider, m->id, (long long)m->context_window,

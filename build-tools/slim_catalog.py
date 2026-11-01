@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Developer-only helper: convert upstream omp packages/catalog/src/models.json (v0 layout)
-into omc's compact assets/models.json.z. Not used by the build (the .z asset is committed)."""
+into omc's compact assets/models.json.z. Not used by the build (the .z asset is committed).
+omp >= 18.14 ships the compact v1 catalog: decode it first with decode_catalog_v1.py."""
 import json, sys, collections, zlib
 d = json.load(open(sys.argv[1]))
 allm = [m for p in d.values() for m in p.values()]

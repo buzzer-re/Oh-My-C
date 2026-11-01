@@ -97,6 +97,7 @@ void ui_close_selector(ui_t *u);
 bool ui_selector_open(const ui_t *u);
 
 void ui_overlay_model(ui_t *u); /* modelhub.c: the Models hub */
+void ui_overlay_model_provider(ui_t *u, const char *provider); /* … with that provider's entry preselected */
 void ui_overlay_session(ui_t *u);
 void ui_resume_session(ui_t *u, const char *path); /* interactive.c: switch session + reload transcript */
 void ui_overlay_thinking(ui_t *u);
@@ -110,6 +111,7 @@ void ui_overlay_hotkeys(ui_t *u);
 /* titled command report (overlays/report-panel.ts): fullscreen page, scrolls, Esc closes; takes `body` */
 void ui_show_report(ui_t *u, const char *title, tui_component_t *body);
 void ui_overlay_login(ui_t *u, bool logout);
+void ui_overlay_login_provider(ui_t *u, const char *provider, bool reopen_hub);
 /* ---------- ask.c ---------- */
 
 /* ask tool dialog in the composer's place (overlays/ask-dialog.ts). `questions` is the tool's questions

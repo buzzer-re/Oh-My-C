@@ -862,10 +862,10 @@ static void fill_context(segctx_t *c) {
 }
 
 /* auto-compaction trigger and speculation start, percent of the window (-1 = none) */
-static void compaction_bounds(int64_t window, double *thr, double *spec) {
+static void compaction_bounds(const ai_model_t *m, int64_t window, double *thr, double *spec) {
     *thr = *spec = -1;
     if (window <= 0 || !settings_bool("compaction.enabled", true)) return;
-    int64_t t = app_compaction_threshold(window);
+    int64_t t = app_compaction_threshold(m, window);
     if (t <= 0 || t > window) return;
     *thr = (double)t / window * 100;
     int64_t lead = MIN(32000, MAX(8192, (int64_t)floor(t * 0.125)));
@@ -927,7 +927,7 @@ static char *gauge_fill(int gap, const segctx_t *c, bool embed) {
     int spec_i = -1, thr_i = -1;
     if ((str_eq(mode, "annotated") || str_eq(mode, "embedded")) && c->auto_compact && gap >= 8) {
         double thr, spec;
-        compaction_bounds(c->window, &thr, &spec);
+        compaction_bounds(c->a->model, c->window, &thr, &spec);
         if (thr >= 0) {
 #define CELL(p) MIN(scale - 1, MAX(0, (int)floor((p) / 100 * scale + 0.5)))
             thr_i = CELL(thr);

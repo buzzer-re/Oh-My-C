@@ -666,8 +666,13 @@ void tui_dispatch_key(tui_t *t, const tui_key_t *k) {
         tui_request_render(t);
         return;
     }
-    if (k->kind == TUI_KEY_FOCUS_IN || k->kind == TUI_KEY_FOCUS_OUT || k->kind == TUI_KEY_MOUSE) return;
     tui_component_t *target = t->overlays.n ? t->overlays.v[t->overlays.n - 1].comp : t->focus;
+    if (k->kind == TUI_KEY_MOUSE && target && target->wants_mouse && t->overlays.n) {
+        tui_component_handle_key(target, k);
+        tui_request_render(t);
+        return;
+    }
+    if (k->kind == TUI_KEY_FOCUS_IN || k->kind == TUI_KEY_FOCUS_OUT || k->kind == TUI_KEY_MOUSE) return;
     if (target) tui_component_handle_key(target, k);
     tui_request_render(t);
 }

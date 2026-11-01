@@ -3,6 +3,7 @@
 #define OMC_APP_H
 
 #include "agent/agent.h"
+#include "config/model_resolver.h"
 #include "coding/discovery.h"
 #include "session/session.h"
 #include "tools/tools.h"
@@ -51,6 +52,16 @@ struct app {
     bool compacting;
     bool title_done;
     int retry_count;
+    int retry_offset;
+    strvec_t retry_notes;
+    char *model_role; /* role of the last model change made through a role (Ctrl+P cycle), NULL otherwise */ /* recovery notes of this run's retried attempts, applied when a turn succeeds */ /* agent retry attempts spent before the latest fallback switch (fresh budget) */
+    /* active retry fallback (turn-recovery.ts ActiveRetryFallbackState) */
+    struct {
+        bool active, pinned, served;
+        char *role;     /* chain key that produced it */
+        char *original; /* selector "provider/id[:level]" of the primary */
+        ai_effort_t original_thinking, last_thinking;
+    } fallback;
     struct ttsr *ttsr;
     struct mcp_manager *mcp;
     bool owns_mcp;
@@ -89,6 +100,10 @@ struct app {
     pthread_mutex_t mu;
 };
 
+/* app notices beyond info/warning/error: "retry_fallback_applied" (from\x1fto\x1frole\x1freason),
+ * "retry_fallback_succeeded" (model\x1frole), "retry-recovered" (notes, one per line), "title" */
+char *app_fallback_notice_text(const char *fields); /* "Fallback: from -> to\nreason" (owned) */
+
 /* returns NULL and sets *err on failure */
 app_t *app_create(const app_opts_t *o, char **err);
 void app_free(app_t *a);
@@ -103,7 +118,7 @@ void app_set_thinking(app_t *a, ai_effort_t e);
 void app_set_plan_mode(app_t *a, bool on);
 void app_rebuild_system_prompt(app_t *a);
 /* token count at which context maintenance triggers for a window (omp compaction.threshold* semantics) */
-int64_t app_compaction_threshold(int64_t window);
+int64_t app_compaction_threshold(const ai_model_t *m, int64_t window); /* with compaction.modelThresholds */
 int app_compact(app_t *a, const char *instructions, char **err);
 int app_new_session(app_t *a);
 /* user `!cmd` / RPC bash: run, record a bashExecution message (session + context unless exclude); owned message
@@ -143,6 +158,17 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
 char *app_api_key_for(const ai_model_t *m);
 /* pick a default model: settings modelRoles.default, else first provider with credentials */
 const ai_model_t *app_default_model(void);
+/* cycleOrder setting (default smol, default, slow) */
+strvec_t app_cycle_order(void);
+/* Ctrl+P role cycling (model-controls.ts cycleRoleModels): switches the session model to the next role
+ * model; returns the new role's index in app_cycle_order(), or -1 when one or no role model resolves */
+int app_cycle_role_model(app_t *a, bool backward);
+/* a role's model (resolveModelRoleValue("@role") over its candidate pool) */
+const ai_model_t *app_role_model(const char *role, ai_effort_t *effort_out, bool *has_effort);
+/* first answer from `models` (skipping the session model), then the session model; owned or NULL */
+char *app_complete_first(app_t *a, const mr_pool_t *models, const char *system, const char *user, ai_effort_t effort);
+/* compaction model candidates in attempt order */
+void app_compaction_candidates(app_t *a, mr_pool_t *out);
 /* parse "pattern:effort" */
 const ai_model_t *app_resolve_model_pattern(const char *pattern, ai_effort_t *effort_out, bool *has_effort);
 

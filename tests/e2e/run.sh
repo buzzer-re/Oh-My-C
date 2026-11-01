@@ -16,11 +16,17 @@ providers:
       - id: mock-1
         contextWindow: 100000
         maxTokens: 4096
+      - id: mock-2
+        contextWindow: 100000
+        maxTokens: 4096
+      - id: mock-flaky
+        contextWindow: 100000
+        maxTokens: 4096
 YML
 MOCK_LOG="$T/req.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $PORT & MPID=$!
 trap 'kill $MPID 2>/dev/null; rm -rf "$T"' EXIT
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break; sleep 0.1; done
-export OMC_CODING_AGENT_DIR="$T/agent" MOCK_KEY=x OMC_NO_TITLE=1
+export OMC_CODING_AGENT_DIR="$T/agent" MOCK_KEY=x OMC_NO_TITLE=1 OMC_NO_LOCAL_DISCOVERY=1
 cd "$T/work"
 fail=0
 check() { # name expected-substring command...
@@ -133,8 +139,18 @@ printf 'Project rule: always test.\n' > AGENTS.md
 check "skill url"      "SKILL BODY LINE"  "$B" -m mock/mock-1 -p "read:skill://demo"
 check "unknown skill"  "Unknown skill"    "$B" -m mock/mock-1 -p "read:skill://nope"
 grep -q "Demo skill for tests" "$T/req.jsonl" && echo "   ok  skill in system prompt" || { echo "   FAIL skill in system prompt"; fail=1; }
+# skill hints are compressed on the smol role chain (omp never falls back to the session model)
+printf 'modelRoles:\n  smol: mock/mock-1\n' > "$T/agent/config.yml"
+"$B" -m mock/mock-1 -p "warm hints" >/dev/null 2>&1 </dev/null
 sleep 1; "$B" -m mock/mock-1 -p "hi again" >/dev/null 2>&1 </dev/null
 tail -1 "$T/req.jsonl" | grep -q "Use for demo skill test routing" && echo "   ok  skill hint compressed" || { echo "   FAIL skill hint compressed"; fail=1; }
+rm -f "$T/agent/config.yml"
+# retry model fallback: a rate-limited model walks retry.fallbackChains
+printf 'retry:\n  fallbackChains:\n    mock/mock-flaky:\n      - mock/mock-2\n' > "$T/agent/config.yml"
+out=$(timeout 60 "$B" -m mock/mock-flaky -p "bash:echo fb-ok" </dev/null 2>&1)
+[[ "$out" == *"Tool said: fb-ok"* && "$out" == *"[warning] Fallback: mock/mock-flaky -> mock/mock-2"* ]] && echo "   ok  retry fallback" || { echo "   FAIL retry fallback: $out"; fail=1; }
+tail -1 "$T/req.jsonl" | grep -q '"model": "mock-2"' && echo "   ok  fallback model used" || { echo "   FAIL fallback model used"; fail=1; }
+rm -f "$T/agent/config.yml"
 grep -q "Project rule: always test." "$T/req.jsonl" && echo "   ok  AGENTS.md in prompt" || { echo "   FAIL AGENTS.md in prompt"; fail=1; }
 # TTSR: a stream-triggered rule interrupts, injects and retries
 mkdir -p .omc/rules
@@ -459,4 +475,17 @@ check "pr:// diff list"  "3. new.txt  +0 -0  [renamed]  (renamed from old.txt)" 
 check "issue:// list"    "# Issues in acme/widgets (open, up to 30)"  "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p "read:issue://acme/widgets"
 check "issue:// error"   "issue:// resolution failed: GraphQL: Could not resolve"  "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p "read:issue://acme/widgets/999"
 check "gh needs enable"  "No such tool: xd://github"  env PATH="$ROOT/tests/e2e/bin-gh:$PATH" "$B" -m mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"repo_view\"}"}'
+# implicit local servers (ollama / llama.cpp / LM Studio discovery) against tests/e2e/mock_local.py
+DPORT=$((PORT + 9)); python3 -I "$ROOT/tests/e2e/mock_local.py" $DPORT & DPID=$!
+for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$DPORT) 2>/dev/null && break; sleep 0.1; done
+mkdir -p "$T/dagent"
+DENV=(env -u OMC_NO_LOCAL_DISCOVERY OMC_CODING_AGENT_DIR="$T/dagent" OLLAMA_BASE_URL="http://127.0.0.1:$DPORT/ollama"
+      LLAMA_CPP_BASE_URL="http://127.0.0.1:$DPORT/llama" LM_STUDIO_BASE_URL="http://127.0.0.1:$DPORT/lms/v1")
+check "discover ollama"    "ollama                   qwen3:8b                                         ctx=40960    reasoning"  "${DENV[@]}" "$B" models
+check "discover llama.cpp" "llama.cpp                gemma-local.gguf                                 ctx=16384"  "${DENV[@]}" "$B" models
+check "discover lm-studio" "lm-studio                qwen2.5-vl-7b                                    ctx=12000    vision"  "${DENV[@]}" "$B" models
+check "discovery cache"    '"baseUrl": "http://127.0.0.1:'"$DPORT"'/lms/v1"'  python3 -I -m json.tool "$T/dagent/local-models.json"
+kill $DPID 2>/dev/null
+check "cached when down"   "ollama                   llava:7b"  "${DENV[@]}" "$B" models
+check "perf recorded"      '"mock/mock-1"'  cat "$T/agent/model-perf.json"
 exit $fail

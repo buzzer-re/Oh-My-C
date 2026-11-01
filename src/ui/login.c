@@ -646,6 +646,7 @@ typedef struct {
     ui_oauth_sel_t *sel;
     ui_login_t *login;
     bool logout;
+    char *reopen_hub; /* provider whose Models hub entry reopens after a successful login */
 } login_view_t;
 
 static void login_view_render(tui_component_t *c, int width, strvec_t *out) {
@@ -658,12 +659,15 @@ typedef struct {
     ui_t *u;
     char *msg;
     const char *level;
+    char *reopen; /* reopen the Models hub on this provider */
 } login_close_t;
 
 static void login_view_close_cb(void *ud) {
     login_close_t *c = ud;
     ui_close_selector(c->u); /* destroys the view (and frees the login) */
     if (c->msg) add_notice(c->u, c->level, c->msg);
+    if (c->reopen) ui_overlay_model_provider(c->u, c->reopen);
+    free(c->reopen);
     free(c->msg);
     free(c);
 }
@@ -688,6 +692,7 @@ static void login_view_done(void *ud, int outcome, const char *name, const char 
     c->u = u;
     c->msg = msg;
     c->level = level;
+    if (outcome == UI_LOGIN_SUCCESS && v->reopen_hub) c->reopen = xstrdup(v->reopen_hub);
     tui_post(u->tui, login_view_close_cb, c);
 }
 
@@ -735,6 +740,7 @@ static void login_view_destroy(tui_component_t *c) {
         ui_login_free(v->login);
     }
     ui_oauth_sel_free(v->sel);
+    free(v->reopen_hub);
     free(v);
 }
 
@@ -746,5 +752,20 @@ void ui_overlay_login(ui_t *u, bool logout) {
     v->u = u;
     v->logout = logout;
     v->sel = ui_oauth_sel_new(logout);
+    ui_show_selector(u, &v->base, &v->base);
+}
+
+/* omp #loginThenReopenModelHub: that provider's login dialog in the editor slot; a successful login
+ * reopens the Models hub on the provider */
+void ui_overlay_login_provider(ui_t *u, const char *provider, bool reopen_hub) {
+    login_view_t *v = xcalloc(1, sizeof *v);
+    tui_component_init(&v->base, &LOGIN_VIEW_VT);
+    v->u = u;
+    v->sel = ui_oauth_sel_new(false);
+    if (reopen_hub) v->reopen_hub = xstrdup(provider);
+    char *st = xasprintf("Logging in to %s\xe2\x80\xa6", provider);
+    add_notice(u, "info", st);
+    free(st);
+    v->login = ui_login_start(u, provider, login_view_done, v);
     ui_show_selector(u, &v->base, &v->base);
 }

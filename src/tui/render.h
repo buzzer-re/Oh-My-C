@@ -54,6 +54,7 @@ struct tui_component {
     bool focused;  /* maintained by tui_set_focus */
     bool hidden;   /* hidden components render nothing */
     void *user;    /* free for application use */
+    bool wants_mouse; /* receives SGR mouse reports (TUI_KEY_MOUSE) while it is the top overlay */
 };
 
 void tui_component_init(tui_component_t *c, const tui_component_vt *vt);

@@ -188,6 +188,7 @@ static void apply_custom(json_t *cfg) {
             json_set(pmap, pid, info);
         }
         json_t *info = json_get(pmap, pid);
+        if (info) json_set_bool(info, "modelsYml", true);
         const char *key = json_get_str(pv, "apiKey");
         if (info && key) json_set_str(info, "configApiKey", key);
         if (info && headers) json_set(info, "headers", json_clone(headers));
@@ -332,6 +333,20 @@ json_t *catalog_auth_providers(void) {
     return json_get_arr(g_providers, "auth");
 }
 
+json_t *catalog_role_defaults(void) {
+    catalog_init();
+    return json_get_obj(g_providers, "roleDefaults");
+}
+
+bool catalog_provider_keyless(const char *provider) {
+    return provider && json_get_bool(catalog_provider_info(provider), "keyless", false);
+}
+
+const char *catalog_model_kind(const ai_model_t *m) {
+    const char *k = m ? json_get_str(m->raw, "kind") : NULL;
+    return k && *k ? k : "chat";
+}
+
 const char *catalog_provider_default_model(const char *provider) {
     return json_get_str(catalog_provider_info(provider), "defaultModel");
 }
@@ -416,10 +431,15 @@ extern bool auth_has_credentials(const char *provider) __attribute__((weak));
 
 static bool provider_has_credentials(const char *p) {
     if (auth_has_credentials && auth_has_credentials(p)) return true;
+    if (catalog_provider_keyless(p)) return true;
     char *k = ai_env_api_key(p);
     bool ok = k != NULL;
     free(k);
     return ok;
+}
+
+bool catalog_model_available(const ai_model_t *m) {
+    return m && !json_get_bool(m->raw, "gone", false) && provider_has_credentials(m->provider);
 }
 
 /* Port of catalog compat delegation (rules.json cascade: classes/openai.kdl): openai-class revision 5.6.0 is

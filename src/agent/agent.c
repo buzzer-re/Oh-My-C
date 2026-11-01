@@ -1004,6 +1004,7 @@ static void run_loop(agent_t *a, json_t *new_messages) {
         int ttsr = 0;
         json_t *cursor_results = NULL;
         json_t *assistant = stream_assistant(a, &ttsr, &cursor_results);
+        model_perf_record_message(assistant); /* per-model t/s + TTFT (omp recordModelPerf at message_end) */
         const char *stop = json_get_str(assistant, "stopReason");
         bool failed = stop && (strcmp(stop, "error") == 0 || strcmp(stop, "aborted") == 0);
         if (ttsr && a->hooks.should_retry) {
@@ -1018,13 +1019,15 @@ static void run_loop(agent_t *a, json_t *new_messages) {
                 continue;
             }
             failed = true;
-        } else if (failed && !a->cancel && a->hooks.should_retry &&
-                   a->hooks.should_retry(a->hooks.ud, a, assistant, retry_attempt)) {
-            retry_attempt++;
+        } else if (failed && !a->cancel && a->hooks.should_retry) {
+            /* the failed attempt ends before the retry policy runs (its notices follow it, as in omp) */
             emit_message(a, AGENT_EV_MESSAGE_END, assistant);
-            json_free(assistant);
-            json_free(cursor_results);
-            continue;
+            if (a->hooks.should_retry(a->hooks.ud, a, assistant, retry_attempt)) {
+                retry_attempt++;
+                json_free(assistant);
+                json_free(cursor_results);
+                continue;
+            }
         } else {
             emit_message(a, AGENT_EV_MESSAGE_END, assistant);
         }

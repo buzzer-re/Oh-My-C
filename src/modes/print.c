@@ -44,7 +44,18 @@ static void text_listener(void *ud, const agent_event_t *ev) {
 
 static void notice_stderr(void *ud, const char *level, const char *text) {
     UNUSED(ud);
-    if (!strcmp(level, "info")) return;
+    if (!strcmp(level, "retry-failed")) {
+        const char *f1 = strchr(text, '\x1f'), *f2 = f1 ? strchr(f1 + 1, '\x1f') : NULL;
+        if (f1 && f2) fprintf(stderr, "[error] Retry failed after %d attempts: %s\n", atoi(text), f2 + 1);
+        return;
+    }
+    if (!strcmp(level, "retry_fallback_applied")) {
+        char *m = app_fallback_notice_text(text);
+        fprintf(stderr, "[warning] %s\n", m);
+        free(m);
+        return;
+    }
+    if (strcmp(level, "warning") && strcmp(level, "error")) return;
     fprintf(stderr, "[%s] %s\n", level, text);
 }
 

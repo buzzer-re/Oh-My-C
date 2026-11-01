@@ -170,6 +170,26 @@ static void ui_listener(void *ud, const agent_event_t *ev) {
 
 static void post_notice(void *x);
 
+/* interactive-mode.ts showModelCycleTrack: spacer + the cycleOrder segment track, cleared after 4 s */
+static void model_cycle_clear(void *ud) {
+    ui_t *u = ud;
+    u->model_cycle_timer = 0;
+    tui_container_clear(u->model_cycle);
+    tui_request_render(u->tui);
+}
+
+static void show_model_cycle_track(ui_t *u, int active) {
+    strvec_t order = app_cycle_order();
+    tui_container_clear(u->model_cycle);
+    tui_container_add(u->model_cycle, &tui_spacer_new(1)->base);
+    char *track = ui_segment_track((const char *const *)order.v, order.n, active);
+    tui_container_add(u->model_cycle, &tui_text_new(track, 1, 0)->base);
+    free(track);
+    strvec_free(&order);
+    if (u->model_cycle_timer) tui_remove_timer(u->tui, u->model_cycle_timer);
+    u->model_cycle_timer = tui_add_timer(u->tui, 4000, false, model_cycle_clear, u);
+}
+
 static void ui_notice(void *ud, const char *level, const char *text) {
     ui_t *u = ud;
     uiev_t *e = xcalloc(1, sizeof(*e));
@@ -182,6 +202,41 @@ static void ui_notice(void *ud, const char *level, const char *text) {
 
 static void post_notice(void *x) {
     uiev_t *e = x;
+    if (!strcmp(e->name, "retry-recovered")) {
+        ui_retry_recovered(e->u, e->out);
+        tui_request_render(e->u->tui);
+        uiev_free(e);
+        return;
+    }
+    if (!strcmp(e->name, "retry-failed")) {
+        char *f1 = strchr(e->out, '\x1f'), *f2 = f1 ? strchr(f1 + 1, '\x1f') : NULL;
+        if (f1 && f2) {
+            *f1 = *f2 = 0;
+            ui_retry_failed(e->u, atoi(e->out), f1 + 1, f2 + 1);
+        }
+        tui_request_render(e->u->tui);
+        uiev_free(e);
+        return;
+    }
+    if (!strcmp(e->name, "retry_fallback_applied")) {
+        char *m = app_fallback_notice_text(e->out);
+        add_notice(e->u, "warning", m);
+        free(m);
+        tui_request_render(e->u->tui);
+        uiev_free(e);
+        return;
+    }
+    if (!strcmp(e->name, "retry_fallback_succeeded")) {
+        /* text: "<selector>\x1f<role>" */
+        char *sep = strchr(e->out, '\x1f');
+        if (sep) *sep = 0;
+        char *m = xasprintf("Fallback succeeded on %s", e->out);
+        add_notice(e->u, "info", m);
+        free(m);
+        tui_request_render(e->u->tui);
+        uiev_free(e);
+        return;
+    }
     const char *lvl = !strcmp(e->name, "error") ? "error" : !strcmp(e->name, "warning") ? "warning" : "info";
     /* a generated session title only shows in the status band / working row, as in omp */
     if (strcmp(e->name, "title")) add_notice(e->u, lvl, e->out);
@@ -700,8 +755,8 @@ static bool handle_command(ui_t *u, const char *line) {
         bool on = !strcmp(arg, "on") ? true : !strcmp(arg, "off") ? false : !a->advisor;
         app_set_advisor(a, on);
         char *ml = NULL;
-        const char *role = settings_str("modelRoles.advisor", NULL);
-        ml = role ? xstrdup(role) : app_model_label(a);
+        const ai_model_t *am = a->advisor ? app_role_model("advisor", NULL, NULL) : NULL;
+        ml = am ? mr_model_key(am) : app_model_label(a);
         char *m = on ? xasprintf("Advisor on (%s)", ml) : xstrdup("Advisor off");
         add_notice(u, "info", m);
         free(m);
@@ -1102,6 +1157,13 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
         tui_request_render(t);
         return true;
     }
+    if (tui_key_matches(k, "ctrl+p") || tui_key_matches(k, "shift+ctrl+p")) { /* app.model.cycleForward/Backward */
+        int idx = app_cycle_role_model(u->app, tui_key_matches(k, "shift+ctrl+p"));
+        if (idx < 0) add_notice(u, "info", "Only one role model available");
+        else show_model_cycle_track(u, idx);
+        tui_request_render(t);
+        return true;
+    }
     if (tui_key_matches(k, "alt+m")) { /* app.model.select */
         ui_overlay_model(u);
         return true;
@@ -1156,6 +1218,21 @@ int run_interactive_mode(app_t *a, const char *initial) {
     }
     tui_container_t *root = tui_root(u.tui);
     tui_sym_set_preset(settings_str("symbolPreset", "unicode"));
+    /* config warnings head the header (interactive-mode.ts #buildConfigWarningComponents): retry.fallbackChains
+     * validation (turn-recovery validateRetryFallbackChains) */
+    {
+        strvec_t warns = {0};
+        mr_fallback_validate(&warns);
+        for (size_t i = 0; i < warns.n; i++) {
+            char *t = xasprintf("Warning: %s", warns.v[i]);
+            char *styled = tui_fgs(NULL, TUI_TC_WARNING, t);
+            tui_container_add(root, &tui_text_new(styled, 1, 0)->base);
+            tui_container_add(root, &tui_spacer_new(1)->base);
+            free(styled);
+            free(t);
+        }
+        strvec_free(&warns);
+    }
     /* header: welcome banner between one-row spacers (omp Composer#rebuildHeader) */
     if (!settings_bool("startup.quiet", false)) {
         u.welcome = ui_welcome_new();
@@ -1167,6 +1244,8 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_container_add(root, &u.chat->base);
     u.banner = tui_container_new();
     tui_container_add(root, &u.banner->base);
+    u.model_cycle = tui_container_new();
+    tui_container_add(root, &u.model_cycle->base);
     u.working = ui_working_new(&u);
     tui_container_add(root, u.working);
     u.loader = tui_loader_new(u.tui, "Working…");

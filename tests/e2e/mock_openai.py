@@ -10,6 +10,7 @@ Display commands (used by tests/tui/compare.sh to exercise transcript views):
   - "fail:<status>:<msg>"    reply with an HTTP error (non-retryable for 400/401/403/404)
   - "streamfail:<text>"      stream <text>, then an in-stream error chunk
   - "seq:[[tool, args], ...]" one tool call per turn, in order, then the usual "Tool said:" answer
+  - model "mock-flaky"        every request fails with HTTP 429 (retry fallback chains)
 Eval helper side requests (omc eval completion()/judge()):
   - completion (system "You are a helpful assistant." or a forced `respond` tool) -> "completion says: <prompt>", or a
     `respond` call whose fields echo the prompt (strings) / 42 (numbers) / true (booleans)
@@ -79,6 +80,8 @@ class H(BaseHTTPRequestHandler):
         msgs = body.get("messages", [])
         last = msgs[-1] if msgs else {}
         lu = text_of(last) if last.get("role") == "user" else ""
+        if body.get("model") == "mock-flaky":  # always rate limited (retry fallback chains)
+            lu = "fail:429:Rate limit exceeded for mock-flaky"
         if lu.startswith("fail:"):
             st, _, m = lu[5:].partition(":")
             b = json.dumps({"error": {"message": m or "mock failure", "type": "invalid_request_error", "code": int(st or 400)}}).encode()
