@@ -261,6 +261,15 @@ grep -q '"clientVersion": "cli-2026.09.02-c22c1a3", "clientType": "cli", "stream
     && echo "   ok  cursor client headers" || { echo "   FAIL cursor client headers"; fail=1; }
 grep -q '"requestContext": {"tools": \[[^]]*"write"' "$T/cursor.jsonl" && echo "   ok  cursor request context" || { echo "   FAIL cursor request context"; fail=1; }
 grep -q '"originalRequestId": "[0-9a-f-]\{36\}"' "$T/cursor.jsonl" && echo "   ok  cursor retry original id" || { echo "   FAIL cursor retry original id"; fail=1; }
+# Cursor login hook (deep-control browser login polled with the PKCE verifier) and token refresh, against the mock
+CAUTH=(env HOME="$T" OMC_TEST_CURSOR_API="http://127.0.0.1:$CPORT" OMC_NO_BROWSER=1)
+check "cursor login"    "Logged in to cursor."  "${CAUTH[@]}" "$B" login cursor
+grep -q '"email": "dev@example.com"' "$T/agent/auth.json" && echo "   ok  cursor login email" || { echo "   FAIL cursor login email"; fail=1; }
+grep -q '"verifier": 128' "$T/cursor.jsonl" && echo "   ok  cursor login verifier" || { echo "   FAIL cursor login verifier"; fail=1; }
+python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["cursor"]["expires"]=1; json.dump(d,open(p,"w"))' "$T/agent/auth.json"
+check "cursor refresh"  "plain cursor answer"   "${CAUTH[@]}" "$B" -m "$CM" --no-session -p "hi"
+grep -q '"refresh": {"grant_type": "refresh_token"' "$T/cursor.jsonl" && echo "   ok  cursor refresh request" || { echo "   FAIL cursor refresh request"; fail=1; }
+"$B" logout cursor >/dev/null 2>&1 </dev/null
 cp "$T/models.yml.bak" "$T/agent/models.yml"
 # structured reads: archives, SQLite, PDF, notebooks (fixtures generated with Python's zipfile/tarfile/sqlite3)
 if python3 -I "$ROOT/tests/readfmt_fixtures.py" fx >/dev/null 2>&1; then

@@ -23,6 +23,16 @@ RUNS = {}  # request id -> queue of decoded AgentClientMessage dicts (in seqno o
 PENDING = {}  # request id -> {seqno: bytes}
 NEXT = {}
 FLAKY = {"count": 0}
+ISSUED = set()  # access tokens minted by the login/refresh endpoints
+POLLS = {}
+
+
+def jwt(sub, exp_in):
+    import base64, time as _t
+    enc = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).decode().rstrip("=")
+    tok = enc({"alg": "none"}) + "." + enc({"sub": sub, "exp": int(_t.time()) + exp_in}) + ".sig"
+    ISSUED.add(tok)
+    return tok
 
 
 def log(obj):
@@ -173,9 +183,43 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", "0"))
         return self.rfile.read(n)
 
+    def reply_json(self, status, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_GET(self):
+        # login poll: 404 until the second poll of a uuid, then the token pair
+        if self.path.startswith("/auth/poll?"):
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query)
+            uuid = q.get("uuid", [""])[0]
+            log({"poll": uuid, "verifier": len(q.get("verifier", [""])[0])})
+            with LOCK:
+                POLLS[uuid] = POLLS.get(uuid, 0) + 1
+                n = POLLS[uuid]
+            if n < 2:
+                return self.reply_json(404, {})
+            return self.reply_json(200, {"accessToken": jwt("github|42", 3600), "refreshToken": "refresh-1"})
+        self.reply_json(404, {})
+
     def do_POST(self):
         data = self.body()
-        if self.headers.get("authorization") != "Bearer " + TOKEN:
+        if self.path == "/oauth/token":
+            req = json.loads(data or b"{}")
+            log({"refresh": req})
+            if req.get("refresh_token") != "refresh-1" or req.get("client_id") != "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB":
+                return self.reply_json(401, {"error": "invalid_grant"})
+            return self.reply_json(200, {"access_token": jwt("github|42", 3600)})
+        auth = self.headers.get("authorization") or ""
+        if self.path == "/aiserver.v1.DashboardService/GetMe":
+            if auth[7:] not in ISSUED:
+                return self.reply_json(401, {})
+            return self.reply_json(200, {"authId": "github|42", "email": "dev@example.com"})
+        if auth != "Bearer " + TOKEN and auth[7:] not in ISSUED:
             if self.path.endswith("/BidiAppend"):
                 time.sleep(0.5)  # let the RunSSE 401 settle the run first
             self.send_response(401)

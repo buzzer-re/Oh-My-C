@@ -39,5 +39,13 @@ typedef struct {
 } auth_login_hooks_t;
 int auth_login_hooked(const char *provider, const auth_login_hooks_t *hooks, char **err);
 json_t *auth_oauth_providers(void); /* borrowed array of descriptors with login.kind == oauth-code */
+/* Store an OAuth credential ({type:"oauth", access, refresh, expires, ...}, owned) for provider. */
+int auth_store_credential(const char *provider, json_t *cred);
+
+/* Cursor custom login hook (auth_cursor.c): browser login polled with a PKCE verifier, and token refresh. */
+/* on_msg prints a line (URL block, progress); on_url (optional) receives the bare login URL; *abort stops polling. */
+int auth_cursor_login(void (*on_msg)(void *ud, const char *msg), void (*on_url)(void *ud, const char *url),
+                      volatile int *abort, void *ud, json_t **cred_out, char **err);
+json_t *auth_cursor_refresh(const json_t *entry, char **err); /* owned new credential, NULL + *err on failure */
 
 #endif

@@ -111,7 +111,9 @@ static int cmd_login(int argc, char **argv) {
         fprintf(stderr, "Usage: omc login <provider>\nOAuth providers:\n");
         json_t *arr = auth_oauth_providers(), *d;
         json_arr_foreach(arr, i, d) {
-            if (str_eq(json_get_str(json_get_obj(d, "login"), "kind"), "oauth-code"))
+            json_t *lg = json_get_obj(d, "login");
+            if (str_eq(json_get_str(lg, "kind"), "oauth-code") ||
+                (str_eq(json_get_str(lg, "kind"), "custom") && str_eq(json_get_str(lg, "hook"), "cursor")))
                 fprintf(stderr, "  %-22s %s\n", json_get_str(d, "id"), json_get_str(d, "name") ? json_get_str(d, "name") : "");
         }
         return 2;

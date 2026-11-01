@@ -247,6 +247,13 @@ static int refresh_oauth(const char *provider, json_t *entry, char **err) {
     json_t *d = json_get_obj(entry, "descriptor");
     if (!d) d = descriptor(provider);
     json_t *rf = json_get_obj(d, "refresh");
+    if (rf && str_eq(json_get_str(rf, "kind"), "hook") && str_eq(json_get_str(rf, "hook"), "cursor")) {
+        json_t *c = auth_cursor_refresh(entry, err);
+        if (!c) return -1;
+        json_set(g_store, provider, c);
+        save();
+        return 0;
+    }
     if (!rf || !str_eq(json_get_str(rf, "kind"), "request")) {
         *err = xasprintf("no refresh flow for %s", provider);
         return -1;
@@ -500,7 +507,45 @@ static int login_console(const char *provider, const json_t *d, bool embed, cons
     return login_with(provider, d, embed, &h, err);
 }
 
+/* Cursor's custom login hook lives in auth_cursor.c */
+static bool cursor_hook(const char *provider) {
+    json_t *login = json_get_obj(descriptor(provider), "login");
+    return str_eq(json_get_str(login, "kind"), "custom") && str_eq(json_get_str(login, "hook"), "cursor");
+}
+
+static void console_line(void *ud, const char *msg) {
+    const auth_io_t *io = ud;
+    io->print(io->ud, msg);
+}
+
+static int cursor_login(const char *provider, void (*on_msg)(void *, const char *), void (*on_url)(void *, const char *),
+                        volatile int *abort, void *ud, char **err) {
+    json_t *cred = NULL;
+    if (auth_cursor_login(on_msg, on_url, abort, ud, &cred, err) != 0) return -1;
+    return auth_store_credential(provider, cred);
+}
+
+static void hooks_url(void *ud, const char *url) {
+    const auth_login_hooks_t *h = ud;
+    if (h->on_auth) h->on_auth(h->ud, url, NULL, NULL);
+}
+
+static void hooks_progress(void *ud, const char *msg) {
+    const auth_login_hooks_t *h = ud;
+    if (h->on_progress) h->on_progress(h->ud, msg);
+}
+
+int auth_store_credential(const char *provider, json_t *cred) {
+    pthread_mutex_lock(&g_mu);
+    load();
+    json_set(g_store, provider, cred);
+    int rc = save();
+    pthread_mutex_unlock(&g_mu);
+    return rc;
+}
+
 int auth_login(const char *provider, const auth_io_t *io, char **err) {
+    if (cursor_hook(provider)) return cursor_login(provider, io && io->print ? console_line : NULL, NULL, NULL, (void *)io, err);
     return login_console(provider, descriptor(provider), false, io, err);
 }
 
@@ -509,6 +554,7 @@ int auth_login_descriptor(const char *key, const json_t *d, const auth_io_t *io,
 }
 
 int auth_login_hooked(const char *provider, const auth_login_hooks_t *hooks, char **err) {
+    if (cursor_hook(provider)) return cursor_login(provider, hooks_progress, hooks_url, hooks->abort, (void *)hooks, err);
     return login_with(provider, descriptor(provider), false, hooks, err);
 }
 
