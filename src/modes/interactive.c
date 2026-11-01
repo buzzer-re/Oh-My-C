@@ -350,6 +350,18 @@ static void branch_pick(ui_t *u, const char *entry_id) {
     free(text);
 }
 
+/* resume another session file (session selector) */
+void ui_resume_session(ui_t *u, const char *path) {
+    char *err = NULL;
+    if (app_switch_session(u->app, path, &err) != 0) add_notice(u, "error", err);
+    else {
+        reload_chat(u);
+        add_notice(u, "info", "Session resumed");
+    }
+    free(err);
+    tui_request_render(u->tui);
+}
+
 static void on_pick(tui_select_list_t *l, const tui_select_item_t *it, void *ud) {
     ui_t *u = ud;
     UNUSED(l);
@@ -422,26 +434,6 @@ static void show_picker(ui_t *u, int kind) {
     tui_overlay_show(u->tui, &u->picker->base, &o);
 }
 
-static void session_picker(ui_t *u) {
-    ensure_picker(u);
-    tui_select_list_clear(u->picker);
-    char *dir = session_dir_for_cwd(u->app->cwd);
-    session_list_t l;
-    session_list(dir, &l);
-    for (size_t i = 0; i < l.n; i++) {
-        const char *t = l.v[i].title ? l.v[i].title : l.v[i].first_message ? l.v[i].first_message : "(empty)";
-        char *label = xstrndup(t, strcspn(t, "\n"));
-        char *when = iso8601_from_ms(l.v[i].mtime_ms);
-        char *desc = xasprintf("%.16s · %d msgs", when, l.v[i].message_count);
-        tui_select_list_add(u->picker, l.v[i].path, label, desc);
-        free(desc);
-        free(when);
-        free(label);
-    }
-    session_list_free(&l);
-    free(dir);
-    show_picker(u, 2);
-}
 
 /* ---------- ask bridge (tool thread blocks; UI thread drives pickers) ---------- */
 
@@ -859,7 +851,7 @@ static bool handle_command(ui_t *u, const char *line) {
         tui_container_clear(u->chat);
         add_notice(u, "info", "New session started");
     } else if (!strcmp(cmd, "resume")) {
-        session_picker(u);
+        ui_overlay_session(u);
     } else if (!strcmp(cmd, "compact")) {
         char *err = NULL;
         ui_working_compaction(u, "Compacting context...");
