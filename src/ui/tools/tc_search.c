@@ -12,7 +12,7 @@ static char *search_icon(void) { return tc_fg(TUI_TC_TOOL_TITLE, tc_sym("icon.se
 static void meta_push(strvec_t *m, char *s) { strvec_push_own(m, s); }
 
 /* path arg(s) joined: "a, b" */
-static char *paths_of(const json_t *args) {
+char *tc_paths_of(const json_t *args) {
     const json_t *p = json_get(args, "path");
     if (!p) p = json_get(args, "paths");
     if (json_is_str(p)) return *json_sv(p) ? xstrdup(json_sv(p)) : NULL;
@@ -29,7 +29,7 @@ static char *paths_of(const json_t *args) {
 
 /* ---------- grep ---------- */
 
-static bool is_header(const char *l) {
+bool tc_is_search_header(const char *l) {
     const char *p = l;
     while (*p == '#') p++;
     return p > l && *p == ' ';
@@ -58,7 +58,7 @@ static size_t frame_gutter(const char *l) {
 }
 
 /* language of a `## name#TAG (suffix)` header's file */
-static const char *header_lang(const char *line) {
+const char *tc_search_header_lang(const char *line) {
     const char *rest = line + strspn(line, "#");
     while (*rest == ' ') rest++;
     char *name = xstrdup(rest);
@@ -73,8 +73,8 @@ static const char *header_lang(const char *line) {
 
 /* createSearchLineStyler + createCodeFrameStyler (omp 18.14): headers accent/dim, code-frame rows with a
  * toolOutput gutter and the source highlighted in its file's language */
-static char *style_search_line(const char *line, const char *lang) {
-    if (is_header(line)) {
+char *tc_style_search_line(const char *line, const char *lang) {
+    if (tc_is_search_header(line)) {
         size_t depth = strspn(line, "#");
         const char *rest = line + depth + 1;
         size_t rl = strlen(rest);
@@ -89,7 +89,7 @@ static char *style_search_line(const char *line, const char *lang) {
         char *src = tc_replace_tabs(line + g);
         char *gs = tc_fg(TUI_TC_TOOL_OUTPUT, gut);
         char *ss;
-        if (lang && strcmp(lang, "text") && tui_highlight_supported(lang)) {
+        if (lang && strcmp(lang, "text")) { /* known grammar: syntect output (plain for grammars omc lacks) */
             strvec_t hl = {0};
             tui_highlight_code(src, lang, NULL, &hl);
             ss = hl.n ? xstrdup(hl.v[0]) : xstrdup("");
@@ -110,7 +110,7 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
     const char *pattern = json_get_str(c->args, "pattern");
     if (!c->has_result || c->partial) {
         strvec_t meta = {0};
-        char *ps = paths_of(c->args);
+        char *ps = tc_paths_of(c->args);
         if (ps) meta_push(&meta, xasprintf("in %s", ps));
         free(ps);
         if (json_get(c->args, "case") && !json_get_bool(c->args, "case", true)) strvec_push(&meta, "case:insensitive");
@@ -221,9 +221,9 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
         const json_t *fl = json_get_arr(d, "files");
         if (fl && json_len(fl) == 1 && json_is_str(json_at(fl, 0))) cur = tc_lang_from_path(json_sv(json_at(fl, 0)));
         for (size_t k = 0; k < lines.n; k++) {
-            if (is_header(lines.v[k])) {
+            if (tc_is_search_header(lines.v[k])) {
                 size_t rl = strlen(lines.v[k]);
-                cur = rl && lines.v[k][rl - 1] == '/' ? NULL : header_lang(lines.v[k]);
+                cur = rl && lines.v[k][rl - 1] == '/' ? NULL : tc_search_header_lang(lines.v[k]);
             } else line_lang[k] = cur;
         }
     }
@@ -242,7 +242,7 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
         size_t s = idx.n;
         for (size_t k = gs; k < i; k++) {
             if (strspn(lines.v[k], " \t") == strlen(lines.v[k])) continue;
-            if (c->expanded || is_header(lines.v[k]) || is_match_line(lines.v[k])) vec_push(&idx, k);
+            if (c->expanded || tc_is_search_header(lines.v[k]) || is_match_line(lines.v[k])) vec_push(&idx, k);
         }
         if (idx.n == s) /* compaction left nothing: keep the whole group */
             for (size_t k = gs; k < i; k++)
@@ -258,7 +258,7 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
     for (size_t k = 0; k < idx.n; k++) {
         const char *l = lines.v[idx.v[k]];
         if (is_match_line(l)) total_marked++;
-        if (!is_header(l) && *l) total_fallback++;
+        if (!tc_is_search_header(l) && *l) total_fallback++;
     }
     bool marked = total_marked > 0;
     bool needs_summary = (int)total_lines > budget;
@@ -275,7 +275,7 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
         vis_lines += take;
         for (size_t k = 0; k < take; k++) {
             const char *l = lines.v[idx.v[gstart.v[g] + k]];
-            if (marked ? is_match_line(l) : (!is_header(l) && *l)) vis_matches++;
+            if (marked ? is_match_line(l) : (!tc_is_search_header(l) && *l)) vis_matches++;
         }
     }
     size_t total_matches = marked ? total_marked : MAX((size_t)matches, total_fallback);
@@ -288,7 +288,7 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
         char *cont = tc_fg(TUI_TC_DIM, last ? "   " : "\xe2\x94\x82  ");
         for (size_t k = 0; k < vg_len.v[g]; k++) {
             size_t li = idx.v[vg_start.v[g] + k];
-            char *st = style_search_line(lines.v[li], line_lang[li]);
+            char *st = tc_style_search_line(lines.v[li], line_lang[li]);
             char *rt = tc_replace_tabs(st);
             if (k == 0) strvec_push_own(&rows, xasprintf("%s %s", pre, rt));
             else strvec_push_own(&rows, xasprintf("%s%s", cont, rt));
@@ -329,7 +329,7 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
 
 void tc_glob(const tc_call_t *c, int width, strvec_t *out) {
     const json_t *d = c->details;
-    char *desc = paths_of(c->args);
+    char *desc = tc_paths_of(c->args);
     if (!c->has_result || c->partial) {
         strvec_t meta = {0};
         if (json_get(c->args, "limit")) meta_push(&meta, xasprintf("limit:%lld", (long long)json_get_int(c->args, "limit", 0)));

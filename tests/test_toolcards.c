@@ -147,6 +147,8 @@ static void free_fixture(fixture_t *f) {
     strvec_free(&f->raw);
 }
 
+static void compare_rows(const char *name, fixture_t *fx, size_t start, const strvec_t *got);
+
 /* compare `got` rows with the fixture rows starting at the first row containing `anchor` */
 static void compare(const char *name, const char *anchor, const strvec_t *got) {
     fixture_t f;
@@ -158,10 +160,70 @@ static void compare(const char *name, const char *anchor, const strvec_t *got) {
         free(p);
     }
     CHECK(start != SIZE_MAX, "%s: anchor '%s' not in fixture", name, anchor);
-    if (start == SIZE_MAX) {
-        free_fixture(&f);
-        return;
+    if (start != SIZE_MAX) compare_rows(name, &f, start, got);
+    free_fixture(&f);
+}
+
+static char *stripped_trim(const char *s) {
+    char *p = tui_strip_ansi(s);
+    size_t n = strlen(p);
+    while (n && p[n - 1] == ' ') p[--n] = 0;
+    return p;
+}
+
+/* Replay specs (tests/tui/specs/<name>.json, the transcripts `compare.sh replay` resumed in omp): every tool
+ * entry is rendered at width 120 and compared with the omp capture spec_<name>, each card located by its
+ * first row after the previous card. */
+static void run_spec(const char *name) {
+    char *path = xasprintf("tests/tui/specs/%s.json", name);
+    char *d = fs_read(path, NULL);
+    json_t *spec = d ? json_parse_str(d) : NULL;
+    CHECK(spec != NULL, "spec %s unreadable", path);
+    char *fname = xasprintf("spec_%s", name);
+    fixture_t f;
+    load_fixture(fname, &f);
+    size_t pos = 0;
+    json_t *e;
+    json_arr_foreach(spec, i, e) {
+        const char *tool = json_get_str(e, "tool");
+        if (!tool) continue;
+        json_t *r = json_obj(), *content = json_arr(), *blk = json_obj();
+        json_set_str(blk, "type", "text");
+        json_set_str(blk, "text", json_get_str(e, "text") ? json_get_str(e, "text") : "");
+        json_push(content, blk);
+        json_set(r, "content", content);
+        if (json_get(e, "details")) json_set(r, "details", json_clone(json_get(e, "details")));
+        json_t *args = json_get(e, "args");
+        tc_call_t c = {.name = tool, .args = args, .content = json_get_arr(r, "content"), .details = json_get_obj(r, "details"),
+                       .has_result = true, .is_error = json_get_bool(e, "isError", false), .spinner = -1, .elapsed_ms = -1,
+                       .cwd = "/work", .term_rows = 80};
+        strvec_t out = {0};
+        tc_render(&c, 120, &out);
+        char *anchor = out.n ? stripped_trim(out.v[0]) : xstrdup("");
+        size_t start = SIZE_MAX;
+        for (size_t k = pos; k < f.raw.n && start == SIZE_MAX; k++) {
+            char *p = stripped_trim(f.raw.v[k]);
+            if (*anchor && !strcmp(p, anchor)) start = k;
+            free(p);
+        }
+        CHECK(start != SIZE_MAX, "%s: card %zu '%s' not found in fixture", name, i, anchor);
+        if (start != SIZE_MAX) {
+            compare_rows(fname, &f, start, &out);
+            pos = start + out.n;
+        }
+        free(anchor);
+        strvec_free(&out);
+        json_free(r);
     }
+    free_fixture(&f);
+    json_free(spec);
+    free(fname);
+    free(d);
+    free(path);
+}
+
+static void compare_rows(const char *name, fixture_t *fx, size_t start, const strvec_t *got) {
+    fixture_t f = *fx;
     for (size_t r = 0; r < got->n; r++) {
         CHECK(start + r < f.rows.n, "%s: fixture too short", name);
         if (start + r >= f.rows.n) break;
@@ -186,7 +248,6 @@ static void compare(const char *name, const char *anchor, const strvec_t *got) {
         free(pg);
         vec_free(&have);
     }
-    free_fixture(&f);
 }
 
 static json_t *J(const char *s) {
@@ -295,6 +356,10 @@ int main(void) {
         strvec_free(&rows);
         strvec_free(&out);
     }
+    /* replayed transcripts (tests/tui/specs) against omp captures; lsp1 hover / cells error highlighting differ in
+     * token colors (omc's highlighter vs syntect), so those specs avoid such tokens or are compared via lsp2 only */
+    static const char *const SPECS[] = {"ws", "ask", "goal", "find", "ast", "debug", "task", "wait", "lsp2"};
+    for (size_t i = 0; i < ARRAY_LEN(SPECS); i++) run_spec(SPECS[i]);
     if (failures) fprintf(stderr, "%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

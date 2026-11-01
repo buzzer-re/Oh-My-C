@@ -28,6 +28,7 @@ typedef struct {
     bool exec_started;
     const char *cwd;      /* project dir (path shortening, `cd` prefixes) */
     int term_rows;        /* terminal height (preview windows); 0 = unknown */
+    int64_t now_ms;       /* wall clock for live elapsed facts (0 = now) */
 } tc_call_t;
 
 /* Render one tool call (any tool; falls back to the generic card). Appends lines to `out`. */
@@ -76,6 +77,8 @@ typedef struct {
     const char *description;   /* rendered muted */
     const char *const *meta;   /* rendered dim, joined by sep.dot */
     size_t nmeta;
+    const char *badge;         /* `[badge]` after the description (NULL: none) */
+    tui_tc_t badge_slot;
 } tc_status_line_t;
 char *tc_status_line(const tc_status_line_t *o);
 
@@ -130,10 +133,13 @@ typedef struct {
     tui_tc_t style;        /* applied to each line */
     bool style_plain;      /* don't style */
     bool hint_when_uncapped;
+    int expanded_max;      /* cap while expanded (0 = none) */
 } tc_pane_t;
 void tc_output_pane(const tc_pane_t *p, strvec_t *out);
 /* renderTreeList over pre-rendered single/multi-line items */
 void tc_tree_list(const strvec_t *items, bool expanded, int max_collapsed, const char *item_type, strvec_t *out);
+/* ... with a collapsed row budget (maxCollapsedLines; < 0 = none) */
+void tc_tree_list_ex(const strvec_t *items, bool expanded, int max_collapsed, int max_lines, const char *item_type, strvec_t *out);
 /* wrap header + truncate rows (fitHeaderedRows) */
 void tc_fit_headered(const char *header, strvec_t *rows, int width, strvec_t *out);
 char *tc_error_message(const char *msg);                     /* "✘ Error: msg" */
@@ -153,6 +159,36 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out);
 void tc_glob(const tc_call_t *c, int width, strvec_t *out);
 void tc_todo(const tc_call_t *c, int width, strvec_t *out);
 void tc_generic(const tc_call_t *c, int width, strvec_t *out);
+void tc_tinted_box(const strvec_t *body, int width, tui_tc_t bg_slot, strvec_t *out);
+void tc_mcp(const tc_call_t *c, int width, strvec_t *out);
 void tc_render_diff(const char *diff, const char *path, strvec_t *out);
+void tc_web_search(const tc_call_t *c, int width, strvec_t *out);
+void tc_ast_grep(const tc_call_t *c, int width, strvec_t *out);
+void tc_ast_edit(const tc_call_t *c, int width, strvec_t *out);
+void tc_debug(const tc_call_t *c, int width, strvec_t *out);
+void tc_task(const tc_call_t *c, int width, strvec_t *out);
+void tc_eval(const tc_call_t *c, int width, strvec_t *out);
+void tc_wait(const tc_call_t *c, int width, strvec_t *out);
+void tc_github(const tc_call_t *c, int width, strvec_t *out);
+void tc_lsp(const tc_call_t *c, int width, strvec_t *out);
+
+/* grouped-file-output helpers (tc_search.c) */
+char *tc_paths_of(const json_t *args);                       /* path/paths arg joined ", " (NULL none) */
+bool tc_is_search_header(const char *l);                     /* `# dir/`, `## file#TAG` */
+const char *tc_search_header_lang(const char *line);
+char *tc_style_search_line(const char *line, const char *lang); /* header tint / code-frame highlight */
+void tc_ask(const tc_call_t *c, int width, strvec_t *out);
+void tc_goal(const tc_call_t *c, int width, strvec_t *out);
+void tc_find(const tc_call_t *c, int width, strvec_t *out);
+char *tc_progress_bar(double frac, int width, tui_tc_t filled_slot, tui_tc_t empty_slot);
+char *tc_format_number(double n);                           /* formatNumber: 1.2K, 34K, 5.6M */
+char *tc_italic(const char *s);
+/* wrapPrefixedLine: `prefix` + wrapped content, continuation rows behind `cont` */
+void tc_wrap_prefixed(const char *prefix, const char *cont, const char *content, int width, strvec_t *out);
+
+/* web helpers (tc_web.c) */
+char *tc_url_domain(const char *url);                        /* hostname without www. */
+char *tc_hyperlink(const char *url, const char *text);       /* OSC 8 when the terminal supports it */
+char *tc_format_age(int64_t secs);                           /* "2h ago" ("" for 0) */
 
 #endif

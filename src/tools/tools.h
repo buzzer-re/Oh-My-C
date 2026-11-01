@@ -44,6 +44,9 @@ typedef struct {
 typedef struct {
     /* ask the user; returns owned JSON answer object or NULL if unavailable/cancelled */
     json_t *(*ask)(void *ud, const json_t *questions);
+    /* a tool call that already returned has a new result frame (async task progress): details owned; called
+     * from any thread (the UI posts it to its own) */
+    void (*tool_frame)(void *ud, const char *tool_call_id, json_t *details);
     void *ud;
 } tool_ui_t;
 
@@ -147,5 +150,8 @@ void schema_prop_json(json_t *schema, const char *name, json_t *prop, bool requi
 int hashline_apply(tool_env_t *env, const char *input, tool_result_t *out);
 /* line-numbered rendering used by read & grep */
 void format_hashline_header(sb_t *b, const char *display_path, const char *tag);
+/* omp grouped-file-output display text (details.displayContent) from
+ * [{path, tag?, suffix?, lines: [{line, match, mark?, text}]}] (line 0: verbatim row); grouped = `# dir/` path tree */
+char *grep_display_content(const json_t *files, bool grouped);
 
 #endif

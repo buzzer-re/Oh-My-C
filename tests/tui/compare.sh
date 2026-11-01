@@ -8,6 +8,7 @@
 #   tests/tui/compare.sh shot [name]            capture both panes (plain + ANSI) into $CMP_DIR/<name>.{omp,omc}[.ansi]
 #   tests/tui/compare.sh diff [name]            plain-text diff of the last shot
 #   tests/tui/compare.sh restart [args...]      restart both apps (same mock/agent dirs) with extra CLI args, e.g. -c
+#   tests/tui/compare.sh replay <spec.json>      resume a scripted transcript (tests/tui/mksession.py spec) in both apps
 #   tests/tui/compare.sh stop
 # HOME is a throwaway dir too (no ~/.claude MCP/plugin discovery); omp's update check is off.
 # Env: CMP_DIR (default: $TMPDIR/omc-tuicmp), OMP_BIN (default: omp), CMP_SETUP=1 keeps omp's wizard,
@@ -90,6 +91,16 @@ restart)
     launch "$cols" "$rows" "$@"
     sleep 5
     echo "restarted";;
+replay)
+    tmux kill-session -t "$N-omp" 2>/dev/null; tmux kill-session -t "$N-omc" 2>/dev/null
+    read -r cols rows < "$D/size"
+    workdirs
+    python3 -I "$ROOT/tests/tui/mksession.py" "$1" "$WO" "$D/replay-omp.jsonl"
+    python3 -I "$ROOT/tests/tui/mksession.py" "$1" "$WC" "$D/replay-omc.jsonl"
+    tmux new-session -d -s "$N-omp" -x "$cols" -y "$rows" -c "$WO" "env HOME=$D/home MOCK_KEY=x PI_CODING_AGENT_DIR=$D/omp-agent $OMP -r $D/replay-omp.jsonl"
+    tmux new-session -d -s "$N-omc" -x "$cols" -y "$rows" -c "$WC" "env HOME=$D/home MOCK_KEY=x OMC_CODING_AGENT_DIR=$D/omc-agent $ROOT/build/omc -r $D/replay-omc.jsonl"
+    sleep "${CMP_WAIT:-5}"
+    echo "replayed";;
 keys)
     for s in "$N-omp" "$N-omc"; do tmux send-keys -t $s "$@"; done;;
 shot)
@@ -104,5 +115,5 @@ diff)
 stop)
     tmux kill-session -t $N-omp 2>/dev/null; tmux kill-session -t $N-omc 2>/dev/null
     [ -f "$D/mock.pid" ] && kill "$(cat "$D/mock.pid")" 2>/dev/null; true;;
-*) sed -n '2,17p' "$0"; exit 2;;
+*) sed -n '2,18p' "$0"; exit 2;;
 esac

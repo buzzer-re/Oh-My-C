@@ -810,6 +810,9 @@ static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *a
     out->details = json_obj();
     json_set_str(out->details, "server", b->server->name);
     json_set_str(out->details, "tool", b->tool);
+    json_set_str(out->details, "serverName", b->server->name); /* omp MCPToolDetails */
+    json_set_str(out->details, "mcpToolName", b->tool);
+    if (out->is_error) json_set_bool(out->details, "isError", true);
     json_free(res);
     return 0;
 }
@@ -835,8 +838,9 @@ int mcp_register_tools(mcp_manager_t *m, agent_t *a) {
             if (!json_get(params, "properties")) json_set(params, "properties", json_obj());
             const char *desc = json_get_str(t, "description");
             char *d = xasprintf("%s\n\n(MCP tool `%s` from server `%s`)", desc ? desc : "", tn, s->name);
-            agent_tool_t *at = agent_tool_new(name, json_get_str(t, "title") ? json_get_str(t, "title") : tn, d, params,
-                                              mcp_tool_execute);
+            char *label = xasprintf("%s/%s", s->name, tn); /* omp MCPTool label */
+            agent_tool_t *at = agent_tool_new(name, label, d, params, mcp_tool_execute);
+            free(label);
             bridge_t *b = xcalloc(1, sizeof(*b));
             b->server = s;
             b->tool = xstrdup(tn);

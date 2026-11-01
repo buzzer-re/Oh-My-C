@@ -1,0 +1,18 @@
+[
+ {"user": "a1"},
+ {"tool": "ast_grep", "args": {"pat": "console.log($A)", "path": "src"}, "text": "x",
+  "details": {"matchCount": 4, "fileCount": 2, "filesSearched": 12, "limitReached": false, "scopePath": "src", "cwd": "/w",
+   "displayContent": "# src/\n## a.md\n*3│console.log(x);\n  meta: A=x\n\n## util/\n### b.md\n*10│  console.log(\"hi\", y);\n 11│  return y;\n*20│console.log(z)\n*30│console.log(w)\n*40│console.log(v)"}},
+ {"user": "a2"},
+ {"tool": "ast_grep", "args": {"pat": "foo($$$)"}, "text": "No matches found", "details": {"matchCount": 0, "fileCount": 0, "filesSearched": 3, "limitReached": false, "parseErrors": ["a.ts: parse error"]}},
+ {"user": "a3"},
+ {"tool": "ast_grep", "args": {"pat": "bar"}, "text": "Invalid pattern", "isError": true},
+ {"user": "a4"},
+ {"tool": "ast_edit", "args": {"ops": [{"pat": "console.log($A)\n\t", "out": "logger.info($A)"}], "paths": ["src"]}, "text": "x",
+  "details": {"totalReplacements": 3, "filesTouched": 2, "filesSearched": 10, "applied": false, "limitReached": false, "scopePath": "src", "cwd": "/w",
+   "displayContent": "# src/\n## a.ts (1 replacement)\n-3│console.log(x)\n+3│logger.info(x)\n\n## b.ts (2 replacements)\n-1│console.log(\ty)\n+1│logger.info(y)\n-9│console.log(z)\n+9│logger.info(z)"}},
+ {"user": "a5"},
+ {"tool": "ast_edit", "args": {"ops": [{"pat": "a", "out": "b"}, {"pat": "c", "out": "d"}], "paths": ["x.ts"]}, "text": "none", "details": {"totalReplacements": 0, "filesTouched": 0, "filesSearched": 1, "applied": false, "limitReached": false}},
+ {"user": "a6"},
+ {"tool": "ast_edit", "args": {"ops": [{"pat": "a", "out": "b"}], "paths": ["x.ts"]}, "text": "Error: bad op", "isError": true}
+]

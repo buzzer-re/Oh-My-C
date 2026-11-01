@@ -335,8 +335,117 @@ void tc_generic(const tc_call_t *c, int width, strvec_t *out) {
         free(txt);
         free(raw);
     }
-    /* WidthAwareText(…, paddingX 1, paddingY 1) with the state tint */
-    tui_tc_t bgs = c->partial ? TUI_TC_TOOL_PENDING_BG : c->is_error ? TUI_TC_TOOL_ERROR_BG : TUI_TC_TOOL_SUCCESS_BG;
+    tc_tinted_box(&body, width, c->partial ? TUI_TC_TOOL_PENDING_BG : c->is_error ? TUI_TC_TOOL_ERROR_BG : TUI_TC_TOOL_SUCCESS_BG, out);
+    strvec_free(&body);
+}
+
+/* ---------- MCP tools (tools/mcp.ts renderMCPCall + renderMCPResult inside the custom-tool box) ---------- */
+
+void tc_mcp(const tc_call_t *c, int width, strvec_t *out) {
+    int cw = MAX(1, width - 2);
+    const char *label = c->label;
+    char *derived = NULL;
+    if (!label || !strchr(label, '/')) {
+        const char *s = json_get_str(c->details, "serverName"), *t = json_get_str(c->details, "mcpToolName");
+        if (s && t) label = derived = xasprintf("%s/%s", s, t);
+        else if (!label) label = c->name;
+    }
+    strvec_t body = {0};
+    /* call card until a result replaces it (MCPTool.mergeCallAndResult) */
+    if (!c->has_result) {
+        tc_status_line_t sl = {.icon = TC_ST_PENDING, .spinner = -1, .title = label, .title_slot = -1};
+        strvec_push_own(&body, tc_status_line(&sl));
+    }
+    if (!c->has_result && json_is_obj(c->args) && json_len(c->args) > 0) {
+        int budget = MAX(20, cw - tui_visible_width(tc_sym("tree.last")) - 2);
+        char *pv = tc_json_inline(c->args, budget);
+        if (*pv) {
+            char *a = tc_fg(TUI_TC_DIM, tc_sym("tree.last")), *b = tc_fg(TUI_TC_DIM, pv);
+            strvec_push_own(&body, xasprintf(" %s %s", a, b));
+            free(b);
+            free(a);
+        }
+        free(pv);
+    }
+    if (c->has_result) {
+        bool err = c->is_error || json_get_bool(c->details, "isError", false);
+        const char *s = json_get_str(c->details, "serverName"), *t = json_get_str(c->details, "mcpToolName");
+        char *title = c->details && s && t ? xasprintf("%s/%s", s, t) : xstrdup("MCP");
+        char *ov = !c->partial && !err ? tc_styled_sym("tool.mcp", TUI_TC_ACCENT) : NULL;
+        tc_status_line_t rs = {.icon = c->partial ? (c->spinner >= 0 ? TC_ST_RUNNING : TC_ST_PENDING) : TC_ST_ERROR,
+                               .icon_override = ov, .spinner = c->spinner, .title = title, .title_slot = -1};
+        strvec_push_own(&body, tc_status_line(&rs));
+        free(ov);
+        free(title);
+        if (c->expanded && json_is_obj(c->args) && json_len(c->args) > 0) {
+            strvec_push_own(&body, tc_fg(TUI_TC_DIM, "Args"));
+            bool tr = false;
+            tc_json_tree(c->args, 6, 200, 2000, true, &body, &tr);
+            if (tr) strvec_push_own(&body, tc_fg(TUI_TC_DIM, "\xe2\x80\xa6"));
+            strvec_push(&body, "");
+        }
+        /* text blocks joined by a blank line */
+        sb_t tb = SB_INIT;
+        json_t *blk;
+        json_arr_foreach(c->content, i, blk) {
+            const char *txt = str_eq(json_get_str(blk, "type"), "text") ? json_get_str(blk, "text") : NULL;
+            if (!txt || !*txt) continue;
+            if (tb.len) sb_append(&tb, "\n\n");
+            sb_append(&tb, txt);
+        }
+        char *trimmed = tc_trim_end(sb_cstr(&tb));
+        sb_free(&tb);
+        bool done = false;
+        if (!*trimmed) {
+            strvec_push_own(&body, tc_fg(TUI_TC_DIM, "(no output)"));
+            done = true;
+        } else if ((trimmed[0] == '{' || trimmed[0] == '[') && strlen(trimmed) <= 1024 * 1024) {
+            json_t *j = json_parse_str(trimmed);
+            if (j) {
+                strvec_t tl = {0};
+                bool tr = false;
+                if (c->expanded) tc_json_tree(j, 6, 200, 2000, false, &tl, &tr);
+                else tc_json_tree(j, 2, 6, 60, false, &tl, &tr);
+                if (tl.n) {
+                    for (size_t i = 0; i < tl.n; i++) strvec_push(&body, tl.v[i]);
+                    if (!c->expanded) strvec_push_own(&body, tc_expand_hint());
+                    else if (tr) strvec_push_own(&body, tc_fg(TUI_TC_DIM, "\xe2\x80\xa6"));
+                    done = true;
+                }
+                strvec_free(&tl);
+                json_free(j);
+            }
+        }
+        if (!done) {
+            strvec_t lines = {0}, styled = {0};
+            tc_split_lines(trimmed, &lines);
+            for (size_t i = 0; i < lines.n; i++) {
+                char *n = tc_replace_tabs(lines.v[i]);
+                char *s2 = strstr(n, "\x1b[") ? xstrdup(n) : tc_fg(TUI_TC_TOOL_OUTPUT, n);
+                strvec_push_own(&styled, c->expanded ? s2 : tui_truncate_to_width(s2, cw, NULL));
+                if (!c->expanded) free(s2);
+                free(n);
+            }
+            tc_pane_t pane = {.lines = &styled, .expanded = c->expanded, .collapsed_max = 4, .expanded_max = 12, .style_plain = true,
+                              .hint_when_uncapped = true};
+            tc_output_pane(&pane, &body);
+            strvec_free(&styled);
+            strvec_free(&lines);
+        }
+        free(trimmed);
+    }
+    tui_tc_t bg = !c->has_result || c->partial ? TUI_TC_TOOL_PENDING_BG
+                  : (c->is_error || json_get_bool(c->details, "isError", false)) ? TUI_TC_TOOL_ERROR_BG
+                                                                                  : TUI_TC_TOOL_SUCCESS_BG;
+    tc_tinted_box(&body, width, bg, out);
+    strvec_free(&body);
+    free(derived);
+}
+
+/* WidthAwareText(…, paddingX 1, paddingY 1) with the state tint: the custom/generic tool box */
+void tc_tinted_box(const strvec_t *body_in, int width, tui_tc_t bgs, strvec_t *out) {
+    const strvec_t body = *body_in;
+    int cw = MAX(1, width - 2);
     const char *bg = tui_bg_seq(NULL, bgs);
     strvec_t wrapped = {0};
     for (size_t i = 0; i < body.n; i++) tui_wrap_text_with_ansi(body.v[i], cw, &wrapped);
@@ -370,14 +479,13 @@ void tc_generic(const tc_call_t *c, int width, strvec_t *out) {
     strvec_free(&rows);
     sb_free(&blank);
     strvec_free(&wrapped);
-    strvec_free(&body);
 }
 
 /* ---------- dispatch ---------- */
 
 bool tc_wants_tick(const char *name) {
     /* bash: live elapsed clock; generic cards animate a spinner while running */
-    static const char *quiet[] = {"read", "write", "edit", "grep", "glob", "todo"};
+    static const char *quiet[] = {"read", "write", "edit", "grep", "glob", "todo", "web_search", "ask", "goal", "find", "ast_grep", "ast_edit", "task", "wait"};
     for (size_t i = 0; i < ARRAY_LEN(quiet); i++)
         if (str_eq(name, quiet[i])) return false;
     return true;
@@ -392,5 +500,18 @@ void tc_render(const tc_call_t *c, int width, strvec_t *out) {
     else if (!strcmp(n, "grep")) tc_grep(c, width, out);
     else if (!strcmp(n, "glob")) tc_glob(c, width, out);
     else if (!strcmp(n, "todo")) tc_todo(c, width, out);
+    else if (!strcmp(n, "web_search")) tc_web_search(c, width, out);
+    else if (!strcmp(n, "ask")) tc_ask(c, width, out);
+    else if (!strcmp(n, "goal")) tc_goal(c, width, out);
+    else if (!strcmp(n, "find")) tc_find(c, width, out);
+    else if (!strcmp(n, "ast_grep")) tc_ast_grep(c, width, out);
+    else if (!strcmp(n, "ast_edit")) tc_ast_edit(c, width, out);
+    else if (!strcmp(n, "debug")) tc_debug(c, width, out);
+    else if (!strcmp(n, "task")) tc_task(c, width, out);
+    else if (!strcmp(n, "eval")) tc_eval(c, width, out);
+    else if (!strcmp(n, "wait")) tc_wait(c, width, out);
+    else if (!strncmp(n, "mcp__", 5)) tc_mcp(c, width, out);
+    else if (!strcmp(n, "lsp")) tc_lsp(c, width, out);
+    else if (!strcmp(n, "github") && c->label) tc_github(c, width, out); /* omp: generic unless the tool is registered */
     else tc_generic(c, width, out);
 }

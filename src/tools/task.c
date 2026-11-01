@@ -193,8 +193,8 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         if (json_get(t, "model") && !seance)
             sb_appendf(&errs, "tasks[%zu]: per-call `model` is disabled (task.perCallModel: off)\n", i);
     }
-    json_free(defs);
     if (errs.len) {
+        json_free(defs);
         sb_truncate(&errs, errs.len - 1);
         tool_result_error(out, "%s", errs.s);
         sb_free(&errs);
@@ -204,17 +204,61 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     sb_free(&errs);
 
     if (async_on(env)) {
+        /* omp TaskToolDetails for the card: one pending progress row per spawn, async state running */
+        json_t *details = json_obj(), *progress = json_arr();
+        json_set(details, "projectAgentsDir", json_null());
+        json_set(details, "results", json_arr());
+        json_set_int(details, "totalDurationMs", 0);
+        for (size_t i = 0; i < n; i++) {
+            json_t *t = json_at(tasks, i), *p = json_obj();
+            const char *agent = json_get_str(t, "agent") ? json_get_str(t, "agent") : "task";
+            const char *src = json_get_str(json_get(defs, agent), "source");
+            char *assign = str_trim(json_get_str(t, "task") ? json_get_str(t, "task") : "");
+            json_t *uc = json_obj();
+            json_set_str(uc, "assignment", assign);
+            char *up = prompt_render("coding-agent/prompts/system/subagent-user-prompt.md", uc);
+            json_free(uc);
+            json_set_int(p, "index", (int64_t)i);
+            json_set_str(p, "id", json_get_str(t, "name") ? json_get_str(t, "name") : agent);
+            json_set_str(p, "agent", agent);
+            json_set_str(p, "agentSource", str_eq(src, "bundled") || !src ? "bundled" : strstr(src, env->cwd) ? "project" : "user");
+            json_set_str(p, "status", "pending");
+            json_set_str(p, "task", up);
+            json_set_str(p, "assignment", assign);
+            json_set(p, "recentTools", json_arr());
+            json_set(p, "recentOutput", json_arr());
+            json_set_int(p, "toolCount", 0);
+            json_set_int(p, "requests", 0);
+            json_set_int(p, "tokens", 0);
+            json_set_int(p, "cost", 0);
+            json_set_int(p, "durationMs", 0);
+            json_push(progress, p);
+            free(up);
+            free(assign);
+        }
+        json_set(details, "progress", progress);
+        json_t *as = json_obj();
+        json_set_str(as, "state", "running");
+        json_set_str(as, "jobId", "");
+        json_set_str(as, "type", "task");
+        json_set(details, "async", as);
+        task_card_t *card = task_card_new(env, ctx->tool_call_id, details);
+        json_free(defs);
         json_t *started = json_arr();
         strvec_t agents = {0};
         sb_t fails = SB_INIT;
         size_t nfail = 0;
         for (size_t i = 0; i < n; i++) {
             spawn_spec_t spec = spec_of(json_at(tasks, i), context);
+            spec.card = card;
+            spec.card_index = (int)i;
             char *aid = NULL, *jid = NULL, *err = NULL;
             if (agents_spawn(env, &spec, &aid, &jid, &err) != 0) {
                 sb_appendf(&fails, "%s%s: %s", nfail ? "; " : "", spec.name ? spec.name : spec.agent, err ? err : "failed");
                 nfail++;
+                task_card_settle(card, (int)i, "failed");
             } else {
+                task_card_set_id(card, (int)i, aid, json_len(started) == 0);
                 json_t *e = json_obj();
                 json_set_str(e, "agentId", aid);
                 json_set_str(e, "jobId", jid);
@@ -253,9 +297,9 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             free(fb);
             json_free(c);
             sb_free(&label);
-            out->details = json_obj();
-            json_set(out->details, "async", json_clone(started));
+            out->details = task_card_snapshot(card);
         }
+        task_card_release(card);
         json_free(started);
         strvec_free(&agents);
         sb_free(&fails);
@@ -264,6 +308,7 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     }
 
     /* async disabled: each spawn runs to completion inline */
+    json_free(defs);
     sb_t b = SB_INIT;
     bool any_err = false;
     for (size_t i = 0; i < n; i++) {

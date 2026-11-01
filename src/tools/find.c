@@ -93,6 +93,7 @@ typedef struct {
     char *rel;
     double score;
     double name_score;
+    int64_t nlines; /* lines read (omp FindHit.linesSeen) */
 } cand_t;
 
 typedef struct {
@@ -178,7 +179,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             free(counts);
             continue;
         }
-        cand_t c = {xstrdup(rel), 0, name_bonus};
+        cand_t c = {xstrdup(rel), 0, name_bonus, 0};
         vec_push(&cands, c);
         vec_push(&tf, counts);
     }
@@ -210,6 +211,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         if (!data) continue;
         strvec_t lines = str_split_lines(data, n);
         free(data);
+        cands.v[i].nlines = (int64_t)lines.n;
         VEC(passage_t) local = {0};
         for (size_t s = 0; s < lines.n; s += FIND_WINDOW_LINES / 2) {
             size_t e = MIN(lines.n, s + FIND_WINDOW_LINES);
@@ -315,6 +317,9 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         sb_appendf(&body, "%s  %.2f\n", cands.v[f].rel, ps.v[a].p);
         json_t *h = json_obj();
         json_set_str(h, "rel", cands.v[f].rel);
+        json_set_num(h, "contentScore", ps.v[a].p);
+        json_set_int(h, "linesSeen", cands.v[f].nlines);
+        json_set_bool(h, "truncated", false);
         json_t *ranges = json_arr();
         int shown = 0;
         for (size_t c = a; c < ps.n && shown < 3; c++) {
@@ -326,6 +331,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             json_set_int(r, "start", ps.v[c].start);
             json_set_int(r, "end", ps.v[c].end);
             json_set_num(r, "p", ps.v[c].p);
+            json_set_str(r, "snippet", first);
             json_push(ranges, r);
             free(first);
             shown++;
@@ -351,6 +357,22 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     json_set_num(out->details, "threshold", FIND_TAU);
     json_set(out->details, "hits", hits_j);
     json_set_str(out->details, "coverage", judged ? "complete" : env->complete ? "unavailable" : "lexical");
+    json_t *st = json_obj(); /* omp FindStats (token/cost accounting is not tracked here) */
+    json_set_int(st, "listed", (int64_t)nfiles);
+    json_set_int(st, "requests", requests);
+    json_set_int(st, "failed", failures);
+    json_set_int(st, "unanswered", 0);
+    json_set_int(st, "judged", (int64_t)ps.n);
+    json_set_int(st, "filesRead", (int64_t)nread);
+    json_set_int(st, "fileBytes", (int64_t)bytes_sent);
+    json_set_int(st, "inputTokens", 0);
+    json_set_int(st, "outputTokens", 0);
+    json_set_num(st, "cost", 0);
+    json_set(st, "failures", json_arr());
+    json_set(out->details, "stats", st);
+    json_set_int(out->details, "elapsedMs", mono_ms() - t0);
+    json_set_str(out->details, "cwd", env->cwd);
+    if (patharg) json_set_str(out->details, "scopePath", patharg);
     free(scope);
     free(done);
     sb_free(&body);

@@ -513,6 +513,7 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     chan_send(k->ch, req);
     json_free(req);
 
+    int64_t t0 = mono_ms();
     int64_t deadline = tms ? mono_ms() + tms : 0, escalate_at = 0;
     bool timed_out = false, aborted = false, paused = false;
     json_t *result = NULL;
@@ -598,6 +599,22 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     bool tr;
     char *shown = tool_truncate_tail(sb_cstr(&b), b.len, 50u * 1024, 2000, &tr);
     tool_result_text(out, *shown ? shown : "(no output)");
+    /* omp EvalToolDetails: one cell for the transcript's code-cell card */
+    out->details = json_obj();
+    json_t *cells = json_arr(), *cj = json_obj();
+    json_set_int(cj, "index", 0);
+    if (json_get_str(args, "title")) json_set_str(cj, "title", json_get_str(args, "title"));
+    json_set_str(cj, "code", code);
+    json_set_str(cj, "language", "python");
+    json_set_str(cj, "output", shown);
+    json_set_str(cj, "status", out->is_error ? "error" : "complete");
+    json_set_int(cj, "durationMs", mono_ms() - t0);
+    json_push(cells, cj);
+    json_set(out->details, "cells", cells);
+    json_set_str(out->details, "language", "python");
+    json_t *langs = json_arr();
+    json_push_str(langs, "python");
+    json_set(out->details, "languages", langs);
     free(shown);
     json_t *img;
     json_arr_foreach(json_get_arr(result, "images"), i, img) tool_result_image(out, json_get_str(img, "data"), json_get_str(img, "mimeType"));

@@ -1,0 +1,21 @@
+[
+ {"user": "f1"},
+ {"tool": "find", "args": {"query": "where is the retry logic", "grep_keywords": ["retry", "backoff"]}, "text": "2 hits",
+  "details": {"query": "where is the retry logic", "keywords": ["retry", "backoff", "logic"], "threshold": 0.5, "coverage": "complete", "elapsedMs": 2345, "cwd": "/w",
+   "stats": {"listed": 40, "requests": 2, "failed": 0, "unanswered": 0, "judged": 10, "filesRead": 8, "fileBytes": 1000, "inputTokens": 12345, "outputTokens": 10, "cost": 0.0123, "apiMs": 100, "windowsJudged": 1, "windowsPruned": 0, "mapCards": 0, "failures": []},
+   "hits": [
+    {"rel": "docs/notes.md", "contentScore": 0.91, "linesSeen": 30, "truncated": true, "ranges": [{"start": 3, "end": 5, "p": 0.91, "snippet": "\tRetry with backoff"}]},
+    {"rel": "a.txt", "contentScore": 0.3, "linesSeen": 3, "truncated": false, "ranges": [{"start": 1, "end": 2, "p": 0.3, "snippet": "retry"}, {"start": 5, "end": 5, "p": 0.2, "snippet": "x"}]},
+    {"rel": "b.txt", "contentScore": 0.5, "linesSeen": 3, "truncated": false, "ranges": [{"start": 1, "end": 2, "p": 0.5, "snippet": "b"}]},
+    {"rel": "c.txt", "contentScore": 0.5, "linesSeen": 3, "truncated": false, "ranges": [{"start": 1, "end": 2, "p": 0.5, "snippet": "c"}]},
+    {"rel": "d.txt", "contentScore": 0.5, "linesSeen": 3, "truncated": false, "ranges": [{"start": 1, "end": 2, "p": 0.5, "snippet": "d"}]},
+    {"rel": "e.txt", "contentScore": 0.5, "linesSeen": 3, "truncated": false, "ranges": []},
+    {"rel": "f.txt", "contentScore": 0.5, "linesSeen": 3, "truncated": false, "ranges": []}
+   ]}},
+ {"user": "f2"},
+ {"tool": "find", "args": {"query": "nothing", "grep_keywords": [], "path": "src"}, "text": "0 hits",
+  "details": {"query": "nothing", "keywords": [], "threshold": 0.5, "coverage": "partial", "elapsedMs": 50, "cwd": "/w", "scopePath": "src",
+   "stats": {"listed": 4, "requests": 2, "failed": 1, "unanswered": 0, "judged": 1, "filesRead": 1, "fileBytes": 1, "inputTokens": 0, "outputTokens": 0, "cost": 0, "apiMs": 1, "windowsJudged": 0, "windowsPruned": 0, "mapCards": 0, "failures": ["judge: HTTP 500"]}, "hits": []}},
+ {"user": "f3"},
+ {"tool": "find", "args": {"query": "err", "grep_keywords": []}, "text": "query must not be empty", "isError": true}
+]

@@ -1,0 +1,16 @@
+[
+ {"user": "s1"},
+ {"tool": "web_search", "args": {"query": "zig allocators"}, "text": "[1] Allocators | zig.guide\n    https://zig.guide/standard-library/allocators/\n    The Zig standard library provides a pattern.",
+  "details": {"response": {"provider": "parallel", "answer": "Zig has **no global allocator**.\n\n- page_allocator\n- `FixedBufferAllocator`", "sources": [
+    {"title": "Allocators | zig.guide", "url": "https://zig.guide/standard-library/allocators/", "snippet": "x"},
+    {"title": "Memory & Allocators", "url": "https://www.example.com/mem", "snippet": "y", "ageSeconds": 7200},
+    {"title": "", "url": "https://ziglang.org/doc", "publishedDate": "2025-01-02"},
+    {"title": "Four", "url": "https://four.dev/a"}, {"title": "Five", "url": "https://five.dev/a"}, {"title": "Six", "url": "https://six.dev/a"}
+  ], "usage": {"inputTokens": 10, "outputTokens": 5}}}},
+ {"user": "s2"},
+ {"tool": "web_search", "args": {"query": "nothing"}, "text": "No results", "details": {"response": {"provider": "brave", "sources": []}}},
+ {"user": "s3"},
+ {"tool": "web_search", "args": {"query": "boom"}, "text": "Web search failed", "isError": true, "details": {"response": {"provider": "exa", "sources": []}, "error": "HTTP 500 from provider"}},
+ {"user": "s4"},
+ {"tool": "web_search", "args": {"query": "raw"}, "text": "line one\nline two\n\nline three"}
+]

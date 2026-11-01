@@ -1,0 +1,22 @@
+[
+ {"user": "t1"},
+ {"tool": "task", "args": {"context": "Shared ctx", "tasks": [{"task": "Look at the README and summarize", "solutionSpace": "x", "name": "Ann"}]}, "text": "Spawned agent `Ann` (job `Ann`).",
+  "details": {"projectAgentsDir": null, "results": [], "totalDurationMs": 0, "progress": [{"index": 0, "id": "Ann", "agent": "task", "agentSource": "bundled", "status": "pending", "task": "Complete assignment thoroughly:\n\nLook at the README and summarize", "assignment": "Look at the README and summarize", "recentTools": [], "recentOutput": [], "toolCount": 0, "requests": 0, "tokens": 0, "cost": 0, "durationMs": 0}], "async": {"state": "running", "jobId": "Ann", "type": "task"}}},
+ {"user": "t2"},
+ {"tool": "task", "args": {"context": "## Goal\nFix **bugs**", "tasks": [{"task": "a", "name": "Bob", "agent": "scout"}, {"task": "b", "name": "Cy"}, {"task": "c", "name": "Di"}, {"task": "d", "name": "Ed"}, {"task": "e", "name": "Flo"}]}, "text": "Spawned",
+  "details": {"projectAgentsDir": null, "results": [], "totalDurationMs": 0, "progress": [
+   {"index": 0, "id": "Bob", "agent": "scout", "status": "completed", "assignment": "a", "recentTools": [], "recentOutput": [], "toolCount": 3, "requests": 2, "contextTokens": 1200, "contextWindow": 100000, "cost": 0.0123, "durationMs": 900},
+   {"index": 1, "id": "Cy", "agent": "task", "status": "failed", "assignment": "b", "recentTools": [], "recentOutput": [], "toolCount": 0, "requests": 1, "durationMs": 500},
+   {"index": 2, "id": "Di", "agent": "task", "status": "running", "assignment": "Investigate the flaky test in the park module", "currentTool": "bash", "currentToolArgs": "make test", "recentTools": [], "recentOutput": [], "toolCount": 4, "requests": 3, "contextTokens": 5000, "contextWindow": 100000, "durationMs": 100},
+   {"index": 3, "id": "Ed", "agent": "task", "status": "running", "description": "Reviewing changes", "assignment": "d", "recentTools": [{"tool": "read", "args": "src/a.c"}], "recentOutput": [], "toolCount": 1, "requests": 1, "durationMs": 100},
+   {"index": 4, "id": "Flo", "agent": "task", "status": "pending", "assignment": "e", "recentTools": [], "recentOutput": [], "toolCount": 0, "requests": 0, "durationMs": 0}
+  ], "async": {"state": "running", "jobId": "Bob", "type": "task"}}},
+ {"user": "t3"},
+ {"tool": "task", "args": {"agent": "scout", "task": "Find the config loader"}, "text": "done",
+  "details": {"projectAgentsDir": null, "totalDurationMs": 4200, "results": [
+   {"index": 0, "id": "Gus", "agent": "scout", "task": "Find the config loader", "exitCode": 0, "output": "The loader lives in src/config.c\nline two\nline three\nline four", "durationMs": 4100, "requests": 5, "contextTokens": 9000, "contextWindow": 100000},
+   {"index": 1, "id": "Hal", "agent": "task", "task": "x", "exitCode": 1, "output": "", "error": "model refused", "durationMs": 100, "requests": 1}
+  ]}},
+ {"user": "t4"},
+ {"tool": "task", "args": {"agent": "scout", "task": "Broken"}, "text": "Subagents are unavailable in this context", "isError": true}
+]

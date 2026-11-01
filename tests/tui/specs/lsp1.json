@@ -1,0 +1,50 @@
+[
+ {
+  "user": "l1"
+ },
+ {
+  "tool": "lsp",
+  "args": {
+   "action": "diagnostics",
+   "file": "src/a.ts"
+  },
+  "text": "2 error(s), 1 warning(s):\nsrc/a.ts:3:5 [error] [ts] Cannot find name 'x'. (2304)\nsrc/a.ts:7:1 [error] Unexpected token\nsrc/a.ts:9:2 [warning] [eslint] Unused variable 'y' which is a rather long message that goes past the eighty column limit for sure\nsrc/b.ts:1:1 [hint] extra",
+  "details": {
+   "action": "diagnostics",
+   "success": true
+  }
+ },
+ {
+  "user": "l2"
+ },
+ {
+  "tool": "lsp",
+  "args": {
+   "action": "hover",
+   "file": "src/a.ts",
+   "line": 3,
+   "symbol": "x"
+  },
+  "text": "```typescript\nconst x: number\nlet y = 2\n```\nThe x value.",
+  "details": {
+   "action": "hover",
+   "success": true
+  }
+ },
+ {
+  "user": "l3"
+ },
+ {
+  "tool": "lsp",
+  "args": {
+   "action": "references",
+   "file": "src/a.ts",
+   "line": 3
+  },
+  "text": "4 reference(s):\n  src/a.ts:1:2\n  src/a.ts:4:2\n  src/b.ts:9:1\n  src/c.ts:2:2\n  src/d.ts:2:2",
+  "details": {
+   "action": "references",
+   "success": true
+  }
+ }
+]

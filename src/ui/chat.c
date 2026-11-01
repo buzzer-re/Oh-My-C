@@ -7,6 +7,7 @@
  *   - the working row while the model runs (Loader + shimmer working message)
  *   - transcript replay from the session tree on resume/branch */
 #include "ui/ui.h"
+#include "ui/tools/tc.h"
 
 #include "config/settings.h"
 
@@ -532,6 +533,12 @@ static void render_assistant(msgview_t *v, int width, strvec_t *o) {
 
 static void render_notice(msgview_t *v, int width, strvec_t *o) {
     char *styled;
+    if (str_eq(v->level, "styled")) { /* pre-styled TranscriptStatusBlock rows */
+        strvec_t rows = str_split(v->text, "\n");
+        for (size_t i = 0; i < rows.n; i++) text_rows(o, rows.v[i], width);
+        strvec_free(&rows);
+        return;
+    }
     if (str_eq(v->level, "error")) {
         char *x = xasprintf("Error: %s", v->text);
         styled = fg(TUI_TC_ERROR, x);
@@ -1169,6 +1176,41 @@ void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms) {
 /* ---------------------------------------------------------------------- */
 
 
+/* omp buildAsyncResultBlock: one `• Background job completed [type] id (duration)` row per delivered job */
+void ui_async_result(ui_t *u, const json_t *m) {
+    if (!str_eq(json_get_str(m, "customType"), "async-result")) return;
+    const json_t *jobs = json_get_arr(json_get_obj(m, "details"), "jobs");
+    if (!json_len(jobs)) return;
+    sb_t b = SB_INIT;
+    json_t *j;
+    json_arr_foreach(jobs, i, j) {
+        char *head = xasprintf("%s Background job completed", tui_sym("status.done"));
+        char *type = xasprintf("[%s]", json_get_str(j, "type") ? json_get_str(j, "type") : "job");
+        char *h = fg(TUI_TC_SUCCESS, head), *t = fg(TUI_TC_DIM, type);
+        char *id = fg(TUI_TC_ACCENT, json_get_str(j, "jobId") ? json_get_str(j, "jobId") : "unknown");
+        if (b.len) sb_putc(&b, '\n');
+        sb_appendf(&b, "%s %s %s", h, t, id);
+        if (json_get(j, "durationMs")) {
+            char *du = tc_format_duration(json_get_int(j, "durationMs", 0));
+            char *dp = xasprintf("(%s)", du);
+            char *dd = fg(TUI_TC_DIM, dp);
+            sb_appendf(&b, " %s", dd);
+            free(dd);
+            free(dp);
+            free(du);
+        }
+        free(id);
+        free(t);
+        free(h);
+        free(type);
+        free(head);
+    }
+    msgview_t *v = mv_new(MV_NOTICE);
+    v->level = "styled";
+    v->text = sb_detach(&b);
+    add_view(u, v);
+}
+
 static void replay_message(ui_t *u, const json_t *m, hmap_t *pending) {
     const char *role = json_get_str(m, "role");
     if (str_eq(role, "user")) {
@@ -1179,6 +1221,7 @@ static void replay_message(ui_t *u, const json_t *m, hmap_t *pending) {
             v->text = text;
             if (json_get_bool(m, "synthetic", false)) { /* hidden prompts: goal/advisor continuations, rules */
                 tui_component_destroy(&v->base);
+                ui_async_result(u, m);
                 return;
             }
             v->synthetic = str_eq(json_get_str(m, "attribution"), "agent");
@@ -1257,7 +1300,10 @@ static void replay_entry(ui_t *u, const json_t *e, hmap_t *pending) {
     if (str_eq(t, "message")) {
         replay_message(u, json_get(e, "message"), pending);
     } else if (str_eq(t, "custom_message")) {
-        if (!json_get_bool(e, "display", true)) return;
+        if (!json_get_bool(e, "display", true)) {
+            ui_async_result(u, e);
+            return;
+        }
         msgview_t *v = mv_new(MV_CUSTOM);
         v->msg = json_clone(e);
         json_set_str(v->msg, "role", "custom");
@@ -1281,6 +1327,7 @@ void ui_chat_rebuild(ui_t *u) {
     u->pinned_error = NULL;
     hmap_t pending;
     hmap_init(&pending);
+    toolcard_set_replaying(true);
     session_t *s = u->app->session;
     json_t *path = s && s->leaf_id ? session_path_to(s, s->leaf_id) : NULL;
     if (path && json_len(path)) {
@@ -1314,5 +1361,6 @@ void ui_chat_rebuild(ui_t *u) {
     }
     json_free(path);
     hmap_free(&pending, NULL);
+    toolcard_set_replaying(false);
     tui_request_full_render(u->tui);
 }

@@ -64,12 +64,15 @@ static void split_glob(const char *p, char **base, char **glob) {
 typedef struct {
     uint32_t line;
     bool match;
+    char mark; /* gutter marker overriding match (`-`/`+` for ast_edit), 0 = none */
     char *text;
 } dline_t;
 typedef struct {
     char *path; /* cwd-relative display path */
     char *tag;  /* hashline tag or NULL */
+    char *suffix; /* header suffix (` (2 replacements)`) or NULL */
     VEC(dline_t) lines;
+    bool no_gaps; /* no `│...` rows between non-adjacent lines */
 } dfile_t;
 typedef VEC(dfile_t) dfiles_t;
 
@@ -82,8 +85,12 @@ static void dfile_rows(const dfile_t *f, strvec_t *out) {
     uint32_t last = 0;
     for (size_t i = 0; i < f->lines.n; i++) {
         const dline_t *l = &f->lines.v[i];
-        if (last && l->line > last + 1) strvec_push_own(out, xasprintf("%*s\xe2\x94\x82...", w + 1, ""));
-        char *g = xasprintf("%s%u", l->match ? "*" : "", l->line);
+        if (l->line == 0) { /* verbatim row (ast_grep `  meta: ...`) */
+            strvec_push(out, l->text);
+            continue;
+        }
+        if (last && l->line > last + 1 && !f->no_gaps) strvec_push_own(out, xasprintf("%*s\xe2\x94\x82...", w + 1, ""));
+        char *g = l->mark ? xasprintf("%c%u", l->mark, l->line) : xasprintf("%s%u", l->match ? "*" : "", l->line);
         strvec_push_own(out, xasprintf("%*s\xe2\x94\x82%s", w + 1, g, l->text));
         free(g);
         last = l->line;
@@ -124,6 +131,7 @@ static void pnode_walk(const pnode_t *n, int depth, const dfiles_t *fs, bool *em
         for (int k = 0; k <= depth; k++) sb_putc(&h, '#');
         sb_appendf(&h, " %s", slash ? slash + 1 : f->path);
         if (f->tag) sb_appendf(&h, "#%s", f->tag);
+        if (f->suffix) sb_append(&h, f->suffix);
         strvec_push_own(out, sb_detach(&h));
         dfile_rows(f, out);
     }
@@ -169,6 +177,34 @@ static char *grep_display(const dfiles_t *fs, bool grouped) {
     }
     char *r = strvec_join(&out, "\n");
     strvec_free(&out);
+    return r;
+}
+
+char *grep_display_content(const json_t *files, bool grouped) {
+    dfiles_t fs = {0};
+    json_t *f;
+    json_arr_foreach(files, i, f) {
+        dfile_t df = {.path = xstrdup(json_get_str(f, "path") ? json_get_str(f, "path") : ""), .no_gaps = true};
+        if (json_get_str(f, "tag")) df.tag = xstrdup(json_get_str(f, "tag"));
+        if (json_get_str(f, "suffix")) df.suffix = xstrdup(json_get_str(f, "suffix"));
+        json_t *l;
+        json_arr_foreach(json_get_arr(f, "lines"), k, l) {
+            const char *mk = json_get_str(l, "mark");
+            dline_t dl = {.line = (uint32_t)json_get_int(l, "line", 0), .match = json_get_bool(l, "match", false),
+                          .mark = mk && *mk ? mk[0] : 0, .text = xstrdup(json_get_str(l, "text") ? json_get_str(l, "text") : "")};
+            vec_push(&df.lines, dl);
+        }
+        vec_push(&fs, df);
+    }
+    char *r = grep_display(&fs, grouped);
+    for (size_t k = 0; k < fs.n; k++) {
+        for (size_t m = 0; m < fs.v[k].lines.n; m++) free(fs.v[k].lines.v[m].text);
+        vec_free(&fs.v[k].lines);
+        free(fs.v[k].path);
+        free(fs.v[k].tag);
+        free(fs.v[k].suffix);
+    }
+    vec_free(&fs);
     return r;
 }
 
@@ -299,7 +335,7 @@ static int grep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             const char *text = h->text ? h->text : "";
             sb_appendf(&b, "%c%u%c%s\n", h->is_context ? ' ' : '*', h->line, hashline ? ':' : '|', text);
             if (dfiles.n) {
-                dline_t dl = {h->line, !h->is_context, xstrdup(text)};
+                dline_t dl = {.line = h->line, .match = !h->is_context, .text = xstrdup(text)};
                 vec_push(&dfiles.v[dfiles.n - 1].lines, dl);
             }
             if (hashline) {

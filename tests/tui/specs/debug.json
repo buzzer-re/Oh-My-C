@@ -1,0 +1,9 @@
+[
+ {"user": "d1"},
+ {"tool": "debug", "args": {"action": "launch", "program": "./a.out"}, "text": "Launched\nline2\n\tline3\nline4\nline5",
+  "details": {"action": "launch", "success": true, "snapshot": {"id": "debug-1", "adapter": "gdb", "status": "stopped", "cwd": "/w", "program": "/w/a.out", "stopReason": "entry", "frameName": "main", "source": {"path": "/w/a.c"}, "line": 3, "column": 1, "needsConfigurationDone": true, "exitCode": 0}}},
+ {"user": "d2"},
+ {"tool": "debug", "args": {"action": "set_breakpoint", "file": "a.c", "line": 4}, "text": "Breakpoint set", "details": {"action": "set_breakpoint", "success": true}},
+ {"user": "d3"},
+ {"tool": "debug", "args": {"action": "evaluate", "expression": "x"}, "text": "No active debug session", "isError": true, "details": {"action": "evaluate", "success": false}}
+]

@@ -63,6 +63,12 @@ static void ui_apply_partial(void *ud) {
     u->cur_assistant->dirty = true;
     ui_assistant_streamed(u, u->cur_assistant);
     toolcard_note_message(u, p, false);
+    /* omp draws a tool call's card while its arguments stream */
+    json_t *blk;
+    json_arr_foreach(json_get_arr(p, "content"), i, blk) {
+        if (!str_eq(json_get_str(blk, "type"), "toolCall")) continue;
+        toolcard_preview(u, json_get_str(blk, "id"), json_get_str(blk, "name"), json_get(blk, "arguments"));
+    }
     tui_request_render(u->tui);
 }
 
@@ -71,6 +77,7 @@ static void ui_apply_event(void *ud) {
     ui_t *u = e->u;
     switch (e->type) {
     case AGENT_EV_MESSAGE_END:
+        if (str_eq(json_get_str(e->msg, "role"), "user")) ui_async_result(u, e->msg);
         if (str_eq(json_get_str(e->msg, "role"), "assistant")) {
             ui_apply_partial(u);
             if (!u->cur_assistant) {
@@ -272,6 +279,29 @@ static void job_wake_cb(void *ud) {
     char *t = app_job_results_text(u->app);
     if (t) start_hidden(u, t, "async-result");
     free(t);
+}
+
+/* background job frame for a returned tool call (job thread -> UI thread) */
+typedef struct {
+    ui_t *u;
+    char *id;
+    json_t *details;
+} frame_t;
+
+static void frame_apply(void *p) {
+    frame_t *f = p;
+    toolcard_frame(f->u, f->id, f->details);
+    free(f->id);
+    free(f);
+}
+
+static void ui_tool_frame(void *ud, const char *tool_call_id, json_t *details) {
+    ui_t *u = ud;
+    frame_t *f = xcalloc(1, sizeof *f);
+    f->u = u;
+    f->id = xstrdup(tool_call_id ? tool_call_id : "");
+    f->details = details;
+    tui_post(u->tui, frame_apply, f);
 }
 
 static void ui_wake(void *ud) {
@@ -1161,6 +1191,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     a->wake = ui_wake;
     a->wake_ud = &u;
     a->env->ui.ask = ui_ask;
+    a->env->ui.tool_frame = ui_tool_frame;
     a->env->ui.ud = &u;
     job_t *init_job = NULL;
     if (initial) {
@@ -1185,6 +1216,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     a->notice = NULL;
     a->wake = NULL;
     a->env->ui.ask = NULL;
+    a->env->ui.tool_frame = NULL;
     if (u.picker && tui_overlay_visible(u.tui)) tui_overlay_hide(u.tui, &u.picker->base);
     tui_free(u.tui);
     tui_ac_default_free(ac);

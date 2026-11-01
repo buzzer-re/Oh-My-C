@@ -103,6 +103,8 @@ void add_view(ui_t *u, msgview_t *v);
 /* "info" -> dim status line (consecutive ones update in place), "warning" -> "Warning: …",
  * "error" -> "Error: …"; "Injecting rule: …" becomes a TTSR notice, "Retrying (n/m) in Ns…" the retry row */
 void add_notice(ui_t *u, const char *level, const char *text);
+/* `• Background job completed …` rows for a delivered async-result prompt (no-op for other messages) */
+void ui_async_result(ui_t *u, const json_t *msg);
 void ui_assistant_streamed(ui_t *u, msgview_t *v); /* message_update applied: drive the smooth reveal */
 void ui_assistant_end(ui_t *u, msgview_t *v);      /* message_end: pin a provider error in the banner */
 void ui_tool_started(ui_t *u, const char *tool_call_id); /* tool card added: post-tool text follows */
@@ -130,6 +132,14 @@ void toolcard_break_group(ui_t *u);
 void toolcard_note_message(ui_t *u, const json_t *msg, bool final);
 /* transcript rebuild: cards for an assistant message's toolCall blocks, results from toolResult messages */
 void toolcard_replay(ui_t *u, const json_t *msg);
+/* a later result frame of a background call (async task progress); takes `details`. A frame whose
+ * details.async.state is running keeps the card live; completed/failed/cancelled settles it. */
+void toolcard_frame(ui_t *u, const char *id, json_t *details);
+/* history rebuild in progress: persisted background results render settled, not live */
+void toolcard_set_replaying(bool on);
+/* a tool call streaming in an assistant message: draws (or updates) its pending card before execution;
+ * toolcard_start then adopts that card */
+void toolcard_preview(ui_t *u, const char *id, const char *name, const json_t *args);
 
 /* statusline.c */
 tui_component_t *ui_status_new(ui_t *u);   /* standalone bottom bar (pi/borderless/claude/rule/field/rail) */
