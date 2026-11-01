@@ -96,7 +96,7 @@ void ui_show_selector(ui_t *u, tui_component_t *comp, tui_component_t *focus);
 void ui_close_selector(ui_t *u);
 bool ui_selector_open(const ui_t *u);
 
-void ui_overlay_model(ui_t *u);
+void ui_overlay_model(ui_t *u); /* modelhub.c: the Models hub */
 void ui_overlay_session(ui_t *u);
 void ui_resume_session(ui_t *u, const char *path); /* interactive.c: switch session + reload transcript */
 void ui_overlay_thinking(ui_t *u);

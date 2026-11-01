@@ -1,7 +1,7 @@
 /* overlays.c - selectors and panels opened from the main screen (ports of omp overlays):
  * the editor-slot selector host (SelectorController.showSelector), the thinking-level selector,
- * the fullscreen command-report panel used by /hotkeys (overlays/report-panel.ts + hotkeys-markdown.ts)
- * and the model picker. */
+ * the fullscreen command-report panel used by /hotkeys (overlays/report-panel.ts + hotkeys-markdown.ts).
+ * The Models hub (/model, alt+m) lives in modelhub.c. */
 #include "ui/overlays.h"
 #include "ui/modelbrowser.h"
 #include "ui/ui.h"
@@ -383,79 +383,3 @@ void ui_overlay_hotkeys(ui_t *u) {
     ui_show_report(u, "Keyboard Shortcuts", &m->base);
 }
 
-/* ---------- model picker (/model, alt+m): the model browser in a "Models" panel ---------- */
-
-typedef struct {
-    tui_component_t base;
-    ui_t *u;
-    ui_model_browser_t *b;
-} model_view_t;
-
-static void model_view_render(tui_component_t *c, int width, strvec_t *out) {
-    model_view_t *v = (model_view_t *)c;
-    strvec_t body = {0};
-    int inner = MAX(1, width - 4);
-    char *head = S(TUI_TC_MUTED, "All available models");
-    strvec_push_own(&body, head);
-    ui_model_browser_render(v->b, inner, &body);
-    strvec_push_own(out, ui_box_top(width, "Models"));
-    for (size_t i = 0; i < body.n; i++) strvec_push_own(out, ui_box_row(body.v[i], width));
-    strvec_push_own(out, ui_box_divider(width));
-    char *e = ui_key_hint("enter"), *esc = ui_key_hint("escape");
-    char *up = ui_key_hint("up"), *dn = ui_key_hint("down");
-    char *f = xasprintf("%s select \xc2\xb7 %s/%s navigate \xc2\xb7 type to search \xc2\xb7 %s close", e, up, dn, esc);
-    strvec_push_own(out, ui_box_row(f, width));
-    strvec_push_own(out, ui_box_bottom(width));
-    free(f);
-    free(e);
-    free(esc);
-    free(up);
-    free(dn);
-    strvec_free(&body);
-}
-
-static bool model_view_key(tui_component_t *c, const tui_key_t *k) {
-    model_view_t *v = (model_view_t *)c;
-    int r = ui_model_browser_key(v->b, k);
-    if (r == UI_MB_CANCEL) {
-        ui_close_selector(v->u);
-        return true;
-    }
-    if (r == UI_MB_ACTIVATE) {
-        const ui_model_item_t *it = ui_model_browser_selected(v->b);
-        char *sel = it ? xstrdup(it->selector) : NULL;
-        ui_t *u = v->u;
-        ui_close_selector(u);
-        if (sel) {
-            char *err = NULL;
-            if (app_set_model(u->app, sel, &err) != 0) add_notice(u, "error", err);
-            else settings_set_global("modelRoles.default", json_str(sel)); /* set roles: persists default */
-            free(err);
-            free(sel);
-        }
-        return true;
-    }
-    tui_component_request_render(c);
-    return true;
-}
-
-static void model_view_destroy(tui_component_t *c) {
-    model_view_t *v = (model_view_t *)c;
-    ui_model_browser_free(v->b);
-    free(v);
-}
-
-static const tui_component_vt MODEL_VIEW_VT = {"model-picker", model_view_render, model_view_key, NULL, model_view_destroy};
-
-void ui_overlay_model(ui_t *u) {
-    model_view_t *v = xcalloc(1, sizeof *v);
-    tui_component_init(&v->base, &MODEL_VIEW_VT);
-    v->u = u;
-    v->b = ui_model_browser_new();
-    ui_model_browser_load_available(v->b);
-    v->b->single_pool = v->b->items.n == 1;
-    char *cur = app_model_label(u->app);
-    ui_model_browser_set_current(v->b, cur);
-    free(cur);
-    ui_show_selector(u, &v->base, &v->base);
-}
