@@ -61,4 +61,14 @@ python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["github-c
 check "copilot enterprise" "plain provider answer"  "${XENV[@]}" "$B" -m github-copilot/gemini-2.5-pro --no-session -p hi
 check "copilot ent wire"  "/deny/ghe/chat/completions copilot-developer-cli"  "${XL[@]}" /deny/ghe 'x["path"], h.get("copilot-integration-id")'
 check "copilot denied"    "GitHub Copilot access denied (HTTP 403)"  "${XENV[@]}" COPILOT_INTEGRATION_ID=copilot-chat "$B" -m github-copilot/gemini-2.5-pro --no-session -p hi
+# native judgment APIs as the judge role: TypeSafe System One (env key) and Workers AI Clef ({token, accountId} login)
+JQ='call:eval:{"language":"py","code":"r = await judge({\"text\": \"ok\"}, {\"b\": {\"type\": \"bool\", \"instructions\": \"fine?\"}})\nprint(\"verdict\", r[\"b\"])"}'
+printf 'modelRoles:\n  judge: typesafe/jev-latest\n' > "$T/pagent/config.yml"
+check "typesafe judge"  "verdict {'type': 'bool', 'bool': 0.9}"  "${XENV[@]}" TYPESAFE_API_KEY=ts-key OMC_PROVIDER_URL_REWRITE="https://api.typesafe.ai=$XB/ts,https://api.kilo.ai=$XB/kilo" "$B" -m "kilo/~anthropic/claude-sonnet-latest" --no-session -p "$JQ"
+check "typesafe wire"   "/ts/v1/systemone Bearer ts-key jev-latest {'b': {'type': 'bool', 'instructions': 'fine?'}}"  "${XL[@]}" /ts/ 'x["path"], h.get("authorization"), b.get("model"), b.get("questions")'
+check "workers login"   "Logged in to cloudflare-workers-ai."  bash -c "printf 'wa-tok\nacct7\n' | ${XENV[*]} '$B' login cloudflare-workers-ai"
+printf 'modelRoles:\n  judge: cloudflare-workers-ai/@cf/cloudflare/clef\n' > "$T/pagent/config.yml"
+check "workers judge"   "verdict {'type': 'bool', 'bool': 0.9}"  "${XENV[@]}" OMC_PROVIDER_URL_REWRITE="https://api.cloudflare.com=$XB/cfapi,https://api.kilo.ai=$XB/kilo" "$B" -m "kilo/~anthropic/claude-sonnet-latest" --no-session -p "$JQ"
+check "workers wire"    "/cfapi/client/v4/accounts/acct7/ai/run/@cf/cloudflare/clef Bearer wa-tok clef"  "${XL[@]}" /cfapi/ 'x["path"], h.get("authorization"), b.get("model")'
+rm -f "$T/pagent/config.yml"
 kill $XPID $XAPID 2>/dev/null

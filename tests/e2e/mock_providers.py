@@ -6,7 +6,8 @@ built. Every request is appended to $MOCK_LOG as {method, path, headers (lower-c
 Protocols (chosen by path suffix):
   .../chat/completions  OpenAI Chat Completions SSE      .../responses  OpenAI Responses SSE
   .../messages          Anthropic Messages SSE           .../v1/systemone, .../ai/run/<model>  native judgments
-A user message "bash:<cmd>" gets a bash tool call (chat completions / anthropic), a tool result gets the final text.
+A user message "bash:<cmd>" gets a bash tool call (chat completions / anthropic), "call:<tool>:<json args>" any tool
+(chat completions), a tool result gets the final text.
 Paths under /deny answer 403 to Copilot-Integration-Id copilot-chat (identity fallback test)."""
 import json, os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -99,8 +100,12 @@ class H(BaseHTTPRequestHandler):
         kind, text = last_turn(body)
         if path.endswith("/chat/completions"):
             self.sse_start()
-            if kind == "user" and text.startswith("bash:"):
-                tc = {"index": 0, "id": "call_1", "type": "function", "function": {"name": "bash", "arguments": json.dumps({"command": text[5:]})}}
+            if kind == "user" and text.startswith(("bash:", "call:")):
+                if text.startswith("call:"):
+                    name, _, args = text[5:].partition(":")
+                else:
+                    name, args = "bash", json.dumps({"command": text[5:]})
+                tc = {"index": 0, "id": "call_1", "type": "function", "function": {"name": name, "arguments": args}}
                 self.ev({"choices": [{"index": 0, "delta": {"tool_calls": [tc]}}]})
                 self.ev({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
             else:

@@ -7,6 +7,7 @@
 #include "coding/app.h"
 #include "coding/goal.h"
 #include "coding/judgment.h"
+#include "ai/judgment_native.h"
 #include "config/settings.h"
 #include "core/fs.h"
 #include "tools/jobs.h"
@@ -634,6 +635,26 @@ static bool run_judge(app_t *a, const json_t *state, const json_t *questions, co
             continue;
         }
         compatible = true;
+        if (ai_is_judgment_api(m->api)) {
+            /* native judgment API (TypeSafe System One, OpenRouter Decisions, Workers AI Clef) answers directly */
+            char *nerr = NULL, *nmodel = NULL;
+            json_t *ans = ai_native_judge(m, key, state, questions, images, c1 ? c1 : c2, cost, &nmodel, &nerr);
+            if (ans) {
+                v->answers = ans;
+                v->model = nmodel ? nmodel : xstrdup(label);
+                done = true;
+            } else if (cancelled(c1, c2)) {
+                *err = xstrdup("judgment aborted");
+            } else {
+                free(last_failure);
+                last_failure = nerr ? nerr : xstrdup("unknown error");
+                nerr = NULL;
+            }
+            free(nerr);
+            free(label);
+            free(key);
+            continue;
+        }
         for (int attempt = 0; attempt <= JUDGE_PARSE_RETRIES; attempt++) {
             char *sys = attempt ? judgment_retry_system(system, multi) : xstrdup(system);
             json_t *content;
