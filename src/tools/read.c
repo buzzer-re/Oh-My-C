@@ -34,6 +34,8 @@ typedef struct {
     bool has_sel;
     /* in-memory documents (archive members, PDFs, notebooks): no hashline anchors, no summary */
     bool immutable;
+    /* numbered like hashline but without a snapshot anchor (ssh:// files: written through `write`, never edited) */
+    bool no_anchor;
     const char *entity; /* "file" when NULL */
     /* internal-URL resource (pr://, issue://): omp's buildInMemoryTextResult - whole text when no selector bounds it
      * (within the 50 KB / 3000-line head budget), `[N more lines in resource. Use :X to continue]` after a page */
@@ -365,8 +367,9 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
     text_lines_t t;
     split_text(data, len, &t);
     int64_t total = (int64_t)t.lines.n;
-    bool hashline = !sel->raw && !sel->immutable && str_eq(env->edit_mode, "hashline");
-    bool numbered = hashline || (!sel->raw && settings_bool("readLineNumbers", false));
+    bool hashline = !sel->raw && !sel->immutable && !sel->no_anchor && str_eq(env->edit_mode, "hashline");
+    bool numbered = hashline || (!sel->raw && sel->no_anchor && str_eq(env->edit_mode, "hashline")) ||
+                    (!sel->raw && settings_bool("readLineNumbers", false));
     const char *ent = sel->entity ? sel->entity : "file";
     sb_t b = SB_INIT;
     json_t *details = json_obj();
@@ -941,6 +944,8 @@ static int read_ssh(tool_env_t *env, const char *path, tool_result_t *out) {
             sel.raw = true;
             read_text(&tmp, url, url, data, len, &sel, out);
         } else {
+            /* rendered as lines: a final newline (the bare ssh:// host index) is not an extra row */
+            if (is_dir && len && data[len - 1] == '\n') data[len - 1] = 0;
             tool_result_text(out, data);
         }
         if (is_dir) {
@@ -948,6 +953,7 @@ static int read_ssh(tool_env_t *env, const char *path, tool_result_t *out) {
             json_set_bool(out->details, "isDirectory", true);
         }
     } else {
+        sel.no_anchor = true;
         read_text(env, url, url, data, len, &sel, out);
     }
     free(err);

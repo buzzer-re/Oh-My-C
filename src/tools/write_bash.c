@@ -424,7 +424,7 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         tool_result_error(out, "%s", err);
     } else {
         size_t lines = n ? str_count(content, "\n") + (content[n - 1] != '\n') : 0;
-        tool_result_textf(out, "Wrote %s (%zu lines, %zu bytes)", path, lines, n);
+        tool_result_textf(out, "Successfully wrote %zu bytes to %s", n, path); /* omp handler-written URL result */
         out->details = json_obj();
         json_set_str(out->details, "path", path);
         json_set_int(out->details, "lines", (int64_t)lines);

@@ -377,10 +377,17 @@ static int run_ssh(const target_t *t, const char *remote, const char *in, size_t
         *err = xasprintf("ssh://: %s timed out after %ds", t->name, SSH_TIMEOUT_MS / 1000);
         return -1;
     }
-    if (r->exit_code != 0) {
+    if (r->exit_code == 255) {
+        /* ssh itself failed to connect: omp reports its control-master start (`ssh -M -N -f`) */
         char *e = str_trim(r->err ? r->err : "");
-        *err = xasprintf("ssh://%s: command failed (exit %d)%s%s", t->name, r->exit_code, *e ? ": " : "", e);
+        *err = xasprintf("Failed to start SSH master for %s%s%s%s%s", t->user ? t->user : "", t->user ? "@" : "", t->host,
+                         *e ? ": " : "", e);
         free(e);
+        return -1;
+    }
+    if (r->exit_code != 0) {
+        /* omp ptree NonZeroExitError */
+        *err = xasprintf("Process exited with code %d:\n%s", r->exit_code, r->err ? r->err : "");
         return -1;
     }
     return 0;
@@ -430,9 +437,10 @@ static const char *posix_shell(const target_t *t, char **err) {
         }
         free(e);
         free(remote);
+        bool conn_fail = r.exit_code == 255;
         proc_result_free(&r);
         /* a connection failure (exit 255) will fail the same way for every candidate */
-        if (!h.shell[0] && first_err && strstr(first_err, "exit 255")) break;
+        if (!h.shell[0] && first_err && conn_fail) break;
     }
     if (!h.shell[0]) {
         *err = first_err ? first_err
