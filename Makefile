@@ -149,12 +149,13 @@ T_tui_demo           := $(T_test_tui)
 T_test_chrome        := $(LIB_OBJ)
 T_test_auth          := $(LIB_OBJ)
 T_test_catalog       := $(LIB_OBJ)
+T_test_model_resolver := $(LIB_OBJ)
 T_test_toolcards     := $(T_test_tui) $(patsubst src/%.c,$(O)/%.o,$(wildcard src/ui/tools/*.c)) $(O)/tools/outsink.o
 T_test_outsink       := $(CORE_OBJ) $(O)/tools/outsink.o
 T_test_judgment      := $(CORE_OBJ) $(O)/coding/judgment.o $(O)/prompt/template.o $(O)/text/yaml.o
 T_test_memory        := $(LIB_OBJ)
 UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
-              test_chrome test_providers_google test_toolcards test_cursor test_judgment test_auth test_memory test_outsink test_catalog
+              test_chrome test_providers_google test_toolcards test_cursor test_judgment test_auth test_memory test_outsink test_catalog test_model_resolver
 
 .SECONDEXPANSION:
 $(O)/tests/%: tests/%.c $$(T_$$*)

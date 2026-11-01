@@ -11,8 +11,7 @@
 #include <pthread.h>
 #include <strings.h>
 
-/* provided by the catalog when it carries omp's role-default chains */
-extern json_t *catalog_role_defaults(void) __attribute__((weak));
+/* omp role-default chains come from the catalog (providers.json.z "roleDefaults"); embedded copy below as a fallback */
 
 /* ---------- pools ---------- */
 
@@ -323,7 +322,7 @@ static const char *const *embedded_defaults(const char *key) {
 strvec_t mr_role_priority_defaults(const char *role) {
     strvec_t v = {0};
     const char *key = priority_alias(role);
-    json_t *cat = catalog_role_defaults ? catalog_role_defaults() : NULL;
+    json_t *cat = catalog_role_defaults();
     if (json_is_obj(cat)) {
         json_t *arr = json_get(cat, key), *x;
         json_arr_foreach(arr, i, x) if (json_is_str(x)) push_split(&v, json_sv(x));

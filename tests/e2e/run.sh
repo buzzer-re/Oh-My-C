@@ -16,6 +16,12 @@ providers:
       - id: mock-1
         contextWindow: 100000
         maxTokens: 4096
+      - id: mock-2
+        contextWindow: 100000
+        maxTokens: 4096
+      - id: mock-flaky
+        contextWindow: 100000
+        maxTokens: 4096
 YML
 MOCK_LOG="$T/req.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $PORT & MPID=$!
 trap 'kill $MPID 2>/dev/null; rm -rf "$T"' EXIT
@@ -99,6 +105,11 @@ printf 'modelRoles:\n  smol: mock/mock-1\n' > "$T/agent/config.yml"
 "$B" -m mock/mock-1 -p "warm hints" >/dev/null 2>&1 </dev/null
 sleep 1; "$B" -m mock/mock-1 -p "hi again" >/dev/null 2>&1 </dev/null
 tail -1 "$T/req.jsonl" | grep -q "Use for demo skill test routing" && echo "   ok  skill hint compressed" || { echo "   FAIL skill hint compressed"; fail=1; }
+rm -f "$T/agent/config.yml"
+# retry model fallback: a rate-limited model walks retry.fallbackChains
+printf 'retry:\n  fallbackChains:\n    mock/mock-flaky:\n      - mock/mock-2\n' > "$T/agent/config.yml"
+check "retry fallback" "Tool said: fb-ok" "$B" -m mock/mock-flaky -p "bash:echo fb-ok"
+tail -1 "$T/req.jsonl" | grep -q '"model": "mock-2"' && echo "   ok  fallback model used" || { echo "   FAIL fallback model used"; fail=1; }
 rm -f "$T/agent/config.yml"
 grep -q "Project rule: always test." "$T/req.jsonl" && echo "   ok  AGENTS.md in prompt" || { echo "   FAIL AGENTS.md in prompt"; fail=1; }
 # TTSR: a stream-triggered rule interrupts, injects and retries
