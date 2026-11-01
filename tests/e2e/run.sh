@@ -373,9 +373,18 @@ print(sorted(t["function"]["name"] for t in c[-1]["tools"]) if c else "none")' "
 popd >/dev/null
 # LSP (only when clangd is installed)
 if command -v clangd >/dev/null; then
+    # omp only configures servers whose root markers exist in the cwd (.clangd here)
+    mkdir -p lspw && pushd lspw >/dev/null && : > .clangd
     printf 'static int add(int a, int b) { return a + b; }\nint main(void) { return add(1, 2); }\n' > l.c
-    check "lsp definition"  "l.c:1:12"  "$B" -m mock/mock-1 -p 'call:lsp:{"action":"definition","file":"l.c","line":2,"symbol":"add"}'
-    check "lsp write diags" "undeclared identifier"  "$B" -m mock/mock-1 -p 'write:bad.c:int main(void) { return nope; }'
+    lsp() { echo "call:write:{\"path\":\"xd://lsp\",\"content\":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1")}"; }
+    check "lsp status"      "Language servers: clangd (configured, not started)" "$B" -m mock/mock-1 -p "$(lsp '{"action":"status"}')"
+    check "lsp definition"  $'Found 1 definition(s):\n  l.c:1:12\n    1: static int add'  "$B" -m mock/mock-1 -p "$(lsp '{"action":"definition","file":"l.c","line":2,"symbol":"add"}')"
+    check "lsp symbols"     $'Symbols in l.c:\n\xe2\x9f\xb2 add int (int, int) @ line 1'  "$B" -m mock/mock-1 -p "$(lsp '{"action":"symbols","file":"l.c"}')"
+    check "lsp no symbol"   'LSP error: Symbol "nope" not found on line 2'  "$B" -m mock/mock-1 -p "$(lsp '{"action":"hover","file":"l.c","line":2,"symbol":"nope"}')"
+    check "lsp diagnostics" $'1 error(s):\n# bad.c\n  1:25 [error] [clang] Use of undeclared identifier \'nope\' (undeclared_var_use)' \
+        bash -c "printf 'int main(void) { return nope; }\n' > bad.c; '$B' -m mock/mock-1 -p '$(lsp '{"action":"diagnostics","file":"bad.c"}')'"
+    check "lsp write diags" $'\n\nLSP Diagnostics (1 error(s)):\n# bad2.c\n  1:25 [error] [clang] Use of undeclared identifier'  "$B" -m mock/mock-1 -p 'write:bad2.c:int main(void) { return nope; }'
+    popd >/dev/null
 fi
 # credential shapes from logins -> provider request URL/headers (mock_providers.py)
 source "$ROOT/tests/e2e/providers_transport.sh"
@@ -396,4 +405,16 @@ check "login device saved" '"refresh": "kimi-r1"'         cat "$T/lagent/auth.js
 check "login copilot"      "Logged in to github-copilot." bash -c "printf '\n' | ${LENV[*]} '$B' login github-copilot"
 check "login list"         "openai-codex-device"          "$B" login
 kill $APID 2>/dev/null
+# github tool + pr:// / issue:// through the fake `gh` (tests/e2e/bin-gh: canned acme/widgets data, never GitHub)
+mkdir -p "$T/ghagent" "$T/ghcfg"; cp "$T/agent/models.yml" "$T/ghagent/"; printf 'github:\n  enabled: true\n' > "$T/ghagent/config.yml"
+GENV=(env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST PATH="$ROOT/tests/e2e/bin-gh:$PATH" GH_CONFIG_DIR="$T/ghcfg" OMC_CODING_AGENT_DIR="$T/ghagent")
+check "gh repo_view"     "Default branch: main"  "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"repo_view\",\"repo\":\"acme/widgets\"}"}'
+check "gh search"        "Labels: bug, p1"       "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"search_issues\",\"query\":\"crash\",\"repo\":\"acme/widgets\"}"}'
+check "gh run_watch"     "All jobs passed."      "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"run_watch\",\"run\":\"1001\",\"repo\":\"acme/widgets\"}"}'
+check "gh bad op"        "op must be github operation (was \"nope\")"  "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"nope\"}"}'
+check "pr:// view"       "Review Comments (2)"   "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p "read:pr://acme/widgets/12"
+check "pr:// diff list"  "3. new.txt  +0 -0  [renamed]  (renamed from old.txt)"  "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p "read:pr://acme/widgets/12/diff"
+check "issue:// list"    "# Issues in acme/widgets (open, up to 30)"  "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p "read:issue://acme/widgets"
+check "issue:// error"   "issue:// resolution failed: GraphQL: Could not resolve"  "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p "read:issue://acme/widgets/999"
+check "gh needs enable"  "No such tool: xd://github"  env PATH="$ROOT/tests/e2e/bin-gh:$PATH" "$B" -m mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"repo_view\"}"}'
 exit $fail

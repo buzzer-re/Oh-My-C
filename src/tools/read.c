@@ -35,6 +35,9 @@ typedef struct {
     /* in-memory documents (archive members, PDFs, notebooks): no hashline anchors, no summary */
     bool immutable;
     const char *entity; /* "file" when NULL */
+    /* internal-URL resource (pr://, issue://): omp's buildInMemoryTextResult - whole text when no selector bounds it
+     * (within the 50 KB / 3000-line head budget), `[N more lines in resource. Use :X to continue]` after a page */
+    bool resource;
 } selector_t;
 
 
@@ -455,7 +458,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         vec_free(&runs);
         free(keep);
     } else if (!sel->ranges.n) {
-        int64_t limit = DEFAULT_LIMIT;
+        int64_t limit = sel->resource && len <= 50 * 1024 && total <= 3000 ? MAX(total, 1) : DEFAULT_LIMIT;
         int64_t max_lines = MIN(limit, OUT_DEFAULT_MAX_LINES);
         int64_t budget = page_budget(0, max_lines, numbered), cbytes, sbytes;
         bool stopped;
@@ -469,6 +472,8 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
             const char *tag = edit_store_record(&env->store, abs, data, last >= total ? 0 : 1, last);
             format_hashline_header(&b, display, tag);
         }
+        if (sel->resource && sel->raw && last >= total && !t.trailing_nl && body.len && body.s[body.len - 1] == '\n')
+            sb_truncate(&body, body.len - 1); /* verbatim: no newline the text does not have */
         sb_append(&b, sb_cstr(&body));
         sb_free(&body);
         if (last < total) {
@@ -578,7 +583,10 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         }
         sb_append(&b, sb_cstr(&body));
         sb_free(&body);
-        if (paged && (last_shown < total || pg_stopped)) {
+        if (paged && sel->resource && last_shown < total && !pg_stopped && sel->ranges.v[0].end != 0) {
+            sb_appendf(&b, "%s\n[%lld more lines in %s. Use :%lld to continue]", b.len && b.s[b.len - 1] == '\n' ? "" : "\n",
+                       (long long)(total - last_shown), ent, (long long)(last_shown + 1));
+        } else if (paged && (last_shown < total || pg_stopped)) {
             page_meta(details, rs.v[0].start, total, last_shown - rs.v[0].start + 1, pg_sbytes, pg_cbytes, pg_stopped, pg_budget);
         } else if (cut || (rs.n == 1 && sel->ranges.v[0].end == 0 && last_shown < total && !sel->raw))
             sb_appendf(&b, "\n[%lld more lines in %s. Use :%lld to continue]", (long long)(total - last_shown), ent,
@@ -957,6 +965,31 @@ static void read_virtual(tool_env_t *env, const char *url, const char *text, sel
     read_text(&tmp, url, url, text, strlen(text), sel, out);
 }
 
+/* pr:// and issue:// (github.c renders; selectors page the markdown like any remote resource) */
+static int read_github(tool_env_t *env, const char *path, tool_result_t *out) {
+    char *work = xstrdup(path);
+    selector_t sel;
+    memset(&sel, 0, sizeof sel);
+    strip_sel(work + (str_starts(work, "pr://") ? 5 : 8), &sel);
+    sel.entity = "resource";
+    sel.resource = true;
+    char *content = NULL, *err = NULL;
+    bool markdown = false;
+    if (github_resolve(env, work, &content, &markdown, &err) != 0) tool_result_error(out, "%s", err ? err : "GitHub read failed");
+    else {
+        read_virtual(env, work, content, &sel, out);
+        if (out->details && !out->is_error) {
+            json_del(out->details, "resolvedPath"); /* a remote resource has no fs path */
+            json_set_str(out->details, "contentType", markdown ? "text/markdown" : "text/plain");
+        }
+    }
+    free(content);
+    free(err);
+    free(work);
+    vec_free(&sel.ranges);
+    return 0;
+}
+
 /* omc:// harness docs (port of omp:// docs): README.md and docs/ (*.md) embedded at build time */
 static bool omc_doc_name(const char *embed_name, const char **doc) {
     if (!strcmp(embed_name, "README.md")) {
@@ -1069,7 +1102,7 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         return web_read_url(env, path, ctx->cancel, out);
     }
     if (xdev_read(ctx ? ctx->agent : NULL, path, out)) return 0;
-    if (str_starts(path, "pr://") || str_starts(path, "issue://")) return github_read(env, path, out);
+    if (str_starts(path, "pr://") || str_starts(path, "issue://")) return read_github(env, path, out);
     if (str_starts(path, "ssh://")) return read_ssh(env, path, out);
     if (vurl_is(path)) return vurl_read(env, path, out);
     if (str_starts(path, "omc://")) return read_omc_docs(env, path, out);

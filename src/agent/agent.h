@@ -35,6 +35,10 @@ typedef struct tool_ctx {
     /* stream partial output (tool_execution_update) */
     void (*update)(struct tool_ctx *ctx, const tool_result_t *partial);
     void *app; /* application context (coding-agent session) */
+    /* xd:// dispatch in progress: partial updates of the device are re-wrapped as {xdev: {tool, mode, args, inner}} */
+    void (*xdev_outer_update)(struct tool_ctx *ctx, const tool_result_t *partial);
+    const char *xdev_tool;
+    const json_t *xdev_args;
 } tool_ctx_t;
 
 struct agent_tool {

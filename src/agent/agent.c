@@ -1135,6 +1135,49 @@ static json_t *coerce(const char *type, const json_t *v) {
     return NULL;
 }
 
+/* arktype-style problem text (omp's tool validation): `<path> must be <expected> (was <actual>)` */
+static char *schema_expected(const json_t *schema) {
+    const char *desc = json_get_str(schema, "description");
+    if (desc && *desc) return xstrdup(desc);
+    json_t *en = json_get_arr(schema, "enum");
+    if (en && json_len(en)) {
+        sb_t b = SB_INIT;
+        for (size_t i = 0; i < json_len(en); i++) {
+            if (i) sb_append(&b, i + 1 == json_len(en) ? " or " : ", ");
+            char *j = json_dump(json_at(en, i), 0);
+            sb_append(&b, j);
+            free(j);
+        }
+        return sb_detach(&b);
+    }
+    const char *t = json_get_str(schema, "type");
+    if (!t) return xstrdup("valid");
+    if (!strcmp(t, "number")) return xstrdup("a number");
+    if (!strcmp(t, "integer")) return xstrdup("an integer");
+    if (!strcmp(t, "string")) return xstrdup("a string");
+    if (!strcmp(t, "object")) return xstrdup("an object");
+    if (!strcmp(t, "array")) return xstrdup("an array");
+    return xstrdup(t); /* boolean, null */
+}
+
+static const char *value_domain(const json_t *v) {
+    if (!v || v->type == JSON_NULL) return "null";
+    switch (v->type) {
+    case JSON_STRING: return "a string";
+    case JSON_NUMBER: return "a number";
+    case JSON_BOOL: return "boolean";
+    case JSON_ARRAY: return "an array";
+    default: return "an object";
+    }
+}
+
+static void problem(sb_t *errs, const char *path, const json_t *schema, const char *was) {
+    char *exp = schema_expected(schema);
+    const char *p = *path ? path : "value";
+    sb_appendf(errs, "  - %s: %s must be %s (was %s)\n", *path ? path : "root", p, exp, was);
+    free(exp);
+}
+
 static void validate_node(const json_t *schema, json_t *parent, const char *key, size_t idx, json_t *v, const char *path,
                           sb_t *errs, int depth) {
     if (!json_is_obj(schema) || depth > 32) return;
@@ -1172,7 +1215,7 @@ static void validate_node(const json_t *schema, json_t *parent, const char *key,
             v = c;
         } else {
             json_free(c);
-            sb_appendf(errs, "  - %s: must be %s\n", *path ? path : "root", type);
+            problem(errs, path, schema, value_domain(v));
             return;
         }
     }
@@ -1182,17 +1225,20 @@ static void validate_node(const json_t *schema, json_t *parent, const char *key,
         json_t *e;
         json_arr_foreach(en, i, e) if (json_equal(e, v)) found = true;
         if (!found) {
-            char *allowed = json_dump(en, 0);
-            sb_appendf(errs, "  - %s: must be one of %s\n", *path ? path : "root", allowed);
-            free(allowed);
+            char *was = json_dump(v, 0);
+            problem(errs, path, schema, was);
+            free(was);
         }
     }
     if (json_is_obj(v)) {
         json_t *props = json_get_obj(schema, "properties");
         json_t *req = json_get_arr(schema, "required"), *r;
         json_arr_foreach(req, i, r) {
-            if (json_is_str(r) && !json_get(v, json_sv(r)))
-                sb_appendf(errs, "  - %s%s%s: is required\n", path, *path ? "." : "", json_sv(r));
+            if (json_is_str(r) && !json_get(v, json_sv(r))) {
+                char *cp = *path ? xasprintf("%s.%s", path, json_sv(r)) : xstrdup(json_sv(r));
+                problem(errs, cp, json_get(props, json_sv(r)), "missing");
+                free(cp);
+            }
         }
         const char *k;
         json_t *pv;

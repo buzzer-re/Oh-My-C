@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+"""Dev-only fake GitHub CLI for omc/omp tests. Never contacts GitHub and never runs a real `gh`.
+Answers the exact argv the github tool and the pr:// / issue:// readers issue from canned data for the
+`acme/widgets` repository (and a few error paths). Every invocation is appended to $FAKE_GH_LOG (JSONL:
+argv, cwd, selected env) when set. $FAKE_GH_REMOTE names the bare git repository that backs PR heads
+(headRefOid is read from it with `git rev-parse`)."""
+import base64, json, os, subprocess, sys
+
+argv = sys.argv[1:]
+LOG = os.environ.get("FAKE_GH_LOG") or os.environ.get("TD_CASE_LOG")
+if LOG:
+    entry = {"argv": argv, "cwd": os.getcwd(),
+             "env": {k: os.environ.get(k) for k in ("GH_PROMPT_DISABLED", "GIT_TERMINAL_PROMPT", "LC_MESSAGES", "GIT_EDITOR")}}
+    for i, a in enumerate(argv):
+        if a == "--body-file" and i + 1 < len(argv):
+            try: entry["body"] = open(argv[i + 1]).read()
+            except OSError: entry["body"] = None
+    with open(LOG, "a") as f: f.write(json.dumps(entry) + "\n")
+
+REPO = "acme/widgets"
+URL = "https://github.com/" + REPO
+
+def out(obj):
+    sys.stdout.write(obj if isinstance(obj, str) else json.dumps(obj))
+    sys.stdout.write("\n")
+    sys.exit(0)
+
+def fail(stderr, stdout="", code=1):
+    if stdout: sys.stdout.write(stdout + "\n")
+    sys.stderr.write(stderr + "\n")
+    sys.exit(code)
+
+def opt(name, default=None):
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 < len(argv): return argv[i + 1]
+    return default
+
+def opts(name):
+    return [argv[i + 1] for i, a in enumerate(argv) if a == name and i + 1 < len(argv)]
+
+def fields(obj):
+    want = opt("--json")
+    if not want: return obj
+    keys = want.split(",")
+    bad = [k for k in keys if k not in obj and k not in OPTIONAL_FIELDS]
+    if bad: fail(f'Unknown JSON field: "{bad[0]}"')
+    return {k: obj.get(k) for k in keys if k in obj}
+
+OPTIONAL_FIELDS = {"stateReason", "homepageUrl", "primaryLanguage", "headRepository", "headRepositoryOwner"}
+
+def in_git_repo():
+    d = os.getcwd()
+    while True:
+        if os.path.exists(os.path.join(d, ".git")): return True
+        p = os.path.dirname(d)
+        if p == d: return False
+        d = p
+
+def remote_sha(ref):
+    remote = os.environ.get("FAKE_GH_REMOTE")
+    if not remote: return "0123456789abcdef0123456789abcdef01234567"
+    r = subprocess.run(["git", "--git-dir", remote, "rev-parse", ref], capture_output=True, text=True)
+    return r.stdout.strip() or "0123456789abcdef0123456789abcdef01234567"
+
+USER = lambda login: {"login": login, "name": login.title()}
+
+REPO_DATA = {
+    "nameWithOwner": REPO, "description": "Widgets for\tacme\r\nand friends.", "url": URL,
+    "sshUrl": "git@github.com:acme/widgets.git",
+    "defaultBranchRef": {"name": "main"}, "homepageUrl": "", "forkCount": 3, "isArchived": False, "isFork": False,
+    "primaryLanguage": {"name": "C"}, "repositoryTopics": [{"name": "widgets"}, {"name": "c"}],
+    "stargazerCount": 42, "updatedAt": "2026-10-30T12:00:00Z", "viewerPermission": "ADMIN", "visibility": "PUBLIC",
+}
+
+ISSUES = {
+    7: {"author": USER("alice"), "body": "Widgets\tcrash on start.\r\n\r\nSteps:\n1. run\n", "comments": [
+            {"author": USER("bob"), "body": "Confirmed.", "createdAt": "2026-10-02T10:00:00Z", "url": URL + "/issues/7#issuecomment-1", "isMinimized": False},
+            {"author": USER("spam"), "body": "buy now", "createdAt": "2026-10-02T11:00:00Z", "url": URL + "/issues/7#issuecomment-2", "isMinimized": True, "minimizedReason": "spam"},
+            {"author": None, "body": "", "createdAt": "2026-10-03T09:00:00Z", "isMinimized": False}],
+        "createdAt": "2026-10-01T09:00:00Z", "labels": [{"name": "bug"}, {"name": "p1"}], "number": 7, "state": "OPEN",
+        "stateReason": None, "title": "Crash on start", "updatedAt": "2026-10-03T09:00:00Z", "url": URL + "/issues/7"},
+    8: {"author": USER("carol"), "body": "", "comments": [], "createdAt": "2026-09-01T09:00:00Z", "labels": [],
+        "number": 8, "state": "CLOSED", "stateReason": "COMPLETED", "title": "Docs typo", "updatedAt": "2026-09-02T09:00:00Z",
+        "url": URL + "/issues/8"},
+    10: {"author": USER("erin"), "body": "".join(f"log line {i}\n" for i in range(1, 401)), "comments": [], "createdAt": "2026-09-05T09:00:00Z",
+         "labels": [], "number": 10, "state": "OPEN", "stateReason": None, "title": "Long log", "updatedAt": "2026-09-05T09:00:00Z",
+         "url": URL + "/issues/10"},
+}
+
+def pr_data():
+    return {
+        "author": USER("dave"), "baseRefName": "main", "body": "Adds the frobnicator.\n\nFixes #7", "comments": [
+            {"author": USER("alice"), "body": "LGTM overall", "createdAt": "2026-10-05T10:00:00Z", "url": URL + "/pull/12#issuecomment-9", "isMinimized": False}],
+        "createdAt": "2026-10-04T09:00:00Z",
+        "files": [{"path": "src/frob.c", "additions": 10, "deletions": 2, "changeType": "MODIFIED"},
+                  {"path": "src/frob.h", "additions": 4, "deletions": 0, "changeType": "ADDED"}],
+        "headRefName": "feature/frob", "headRefOid": remote_sha("refs/heads/feature/frob"),
+        "headRepository": {"name": "widgets", "nameWithOwner": REPO}, "headRepositoryOwner": {"login": "acme"},
+        "isCrossRepository": False, "isDraft": False, "labels": [{"name": "enhancement"}], "maintainerCanModify": True,
+        "mergeStateStatus": "CLEAN", "number": 12,
+        "reviews": [{"author": USER("bob"), "body": "Please rename.", "commit": {"oid": "abcdef0123456789abcdef"}, "state": "CHANGES_REQUESTED", "submittedAt": "2026-10-05T11:00:00Z"},
+                    {"author": USER("alice"), "body": "", "state": "APPROVED", "submittedAt": "2026-10-06T11:00:00Z"}],
+        "reviewDecision": "APPROVED", "state": "OPEN", "title": "Add frobnicator", "updatedAt": "2026-10-06T12:00:00Z",
+        "url": URL + "/pull/12",
+    }
+
+PR_REVIEW_COMMENTS = [
+    {"id": 501, "user": USER("bob"), "body": "nit: \tspacing", "created_at": "2026-10-05T11:01:00Z", "path": "src/frob.c",
+     "line": 14, "side": "RIGHT", "html_url": URL + "/pull/12#discussion_r501"},
+    {"id": 502, "user": USER("dave"), "body": "fixed", "created_at": "2026-10-05T12:00:00Z", "path": "src/frob.c",
+     "original_line": 14, "in_reply_to_id": 501, "side": "RIGHT", "html_url": URL + "/pull/12#discussion_r502"},
+]
+
+PR_DIFF = """diff --git a/src/frob.c b/src/frob.c
+index 1111111..2222222 100644
+--- a/src/frob.c
++++ b/src/frob.c
+@@ -1,4 +1,5 @@
+ #include "frob.h"
+-int frob(void) { return 0; }
++int frob(void) {
++    return 1;
++}
+ /* end */
+diff --git a/src/frob.h b/src/frob.h
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/src/frob.h
+@@ -0,0 +1,2 @@
++#pragma once
++int frob(void);
+diff --git a/old.txt b/new.txt
+similarity index 90%
+rename from old.txt
+rename to new.txt
+diff --git a/logo.png b/logo.png
+index 4444444..5555555 100644
+Binary files a/logo.png and b/logo.png differ
+"""
+
+PNG = base64.b64encode(bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000020000000308060000009dd2c3f50000000d49444154789c63f8ff9f8100000500"
+    "01ffa5d9b0e10000000049454e44ae426082")).decode()
+
+CONTENTS = {
+    "README.md": {"type": "file", "encoding": "base64", "size": 27,
+                  "content": base64.encodebytes(b"# Widgets\n\nHello\twidgets.\n").decode(),
+                  "html_url": URL + "/blob/main/README.md"},
+    "logo.png": {"type": "file", "encoding": "base64", "size": len(base64.b64decode(PNG)), "content": PNG,
+                 "html_url": URL + "/blob/main/logo.png"},
+    "data.bin": {"type": "file", "encoding": "base64", "size": 6, "content": base64.b64encode(b"\x00\x01\x02\xff\xfe\x00").decode(),
+                 "html_url": URL + "/blob/main/data.bin"},
+    "big.txt": {"type": "file", "encoding": "none", "size": 2048000, "content": "", "html_url": None},
+    "src": [{"type": "file", "name": "frob.c"}],
+}
+
+def issue_item(n, title, state, user, pr=None, labels=()):
+    it = {"number": n, "title": title, "state": state, "user": {"login": user}, "labels": [{"name": l} for l in labels],
+          "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z",
+          "html_url": URL + ("/pull/" if pr is not None else "/issues/") + str(n),
+          "repository_url": "https://api.github.com/repos/" + REPO}
+    if pr is not None: it["pull_request"] = {"merged_at": pr}
+    return it
+
+RUN_OK = {"id": 1001, "name": "CI", "display_title": "Add frobnicator", "status": "completed", "conclusion": "success",
+          "head_branch": "main", "head_sha": "c0ffee0000000000000000000000000000000001", "created_at": "2026-10-07T10:00:00Z",
+          "updated_at": "2026-10-07T10:05:00Z", "html_url": URL + "/actions/runs/1001"}
+RUN_FAIL = {"id": 1002, "name": "Lint", "display_title": "Add frobnicator", "status": "completed", "conclusion": "failure",
+            "head_branch": "main", "head_sha": "c0ffee0000000000000000000000000000000001", "created_at": "2026-10-07T10:00:00Z",
+            "updated_at": "2026-10-07T10:06:00Z", "html_url": URL + "/actions/runs/1002"}
+JOBS = {
+    1001: [{"id": 9001, "name": "build", "status": "completed", "conclusion": "success", "started_at": "2026-10-07T10:00:10Z",
+            "completed_at": "2026-10-07T10:02:40Z", "html_url": URL + "/actions/runs/1001/job/9001"},
+           {"id": 9002, "name": "test", "status": "completed", "conclusion": "skipped"}],
+    1002: [{"id": 9003, "name": "clang-format", "status": "completed", "conclusion": "failure", "started_at": "2026-10-07T10:00:10Z",
+            "completed_at": "2026-10-07T10:01:00Z", "html_url": URL + "/actions/runs/1002/job/9003"},
+           {"id": 9004, "name": "tidy", "status": "completed", "conclusion": "cancelled", "started_at": "2026-10-07T10:00:10Z",
+            "completed_at": "2026-10-07T10:01:30Z", "html_url": URL + "/actions/runs/1002/job/9004"}],
+}
+JOB_LOGS = {9003: "".join(f"2026-10-07T10:00:{i:02d}Z line {i}\n" for i in range(1, 31)) + "Error: src/frob.c is not formatted\n"}
+
+def api():
+    rest = [a for a in argv[1:]]
+    host = opt("--hostname")
+    path = next((a for a in rest if a.startswith("/")), "")
+    if host and host != "github.com":
+        fail(f"error connecting to {host}")
+    prefix = "/repos/" + REPO
+    if path.startswith("/search/"):
+        q = next((a[2:] for a in opts("-f") if a.startswith("q=")), "")
+        per_page = int(next((a[9:] for a in opts("-F") if a.startswith("per_page=")), "30"))
+        if "INVALID" in q:
+            fail("gh: Validation Failed (HTTP 422)", json.dumps({"message": "Validation Failed", "errors": [
+                {"resource": "Search", "field": "q", "code": "invalid"}], "documentation_url": "https://docs.github.com"}))
+        if "nothing" in q: out({"total_count": 0, "incomplete_results": False, "items": []})
+        kind = path[len("/search/"):]
+        if kind == "issues":
+            if "is:pr" in q:
+                items = [issue_item(12, "Add frobnicator", "open", "dave", pr=None, labels=["enhancement"]),
+                         issue_item(11, "Old change", "closed", "erin", pr="2026-09-01T00:00:00Z")]
+            else:
+                items = [issue_item(7, "Crash on start", "open", "alice", labels=["bug", "p1"]),
+                         issue_item(8, "Docs typo", "closed", "carol")]
+                items[1]["user"] = None
+        elif kind == "code":
+            items = [{"name": "frob.c", "path": "src/frob.c", "sha": "deadbeefcafebabe0123", "html_url": URL + "/blob/main/src/frob.c",
+                      "repository": {"full_name": REPO}, "text_matches": [{"property": "content", "fragment": "int\tfrob(void) {\n  return 1;"}]},
+                     {"name": "x.h", "path": "x.h", "repository": {"full_name": REPO}}]
+        elif kind == "commits":
+            items = [{"sha": "c0ffee0000000000000000000000000000000001", "node_id": "C_1", "html_url": URL + "/commit/c0ffee",
+                      "author": {"login": "dave"}, "commit": {"author": {"name": "Dave", "date": "2026-10-07T09:00:00Z"},
+                                                             "message": "Add frobnicator\n\nLong body"}, "repository": {"full_name": REPO}},
+                     {"sha": "beef", "commit": {"committer": {"name": "Bot", "date": "2026-10-06T09:00:00Z"}, "message": ""}}]
+        else:
+            items = [{"full_name": REPO, "description": "Widgets for acme\nsecond line", "language": "C", "stargazers_count": 42,
+                      "forks_count": 3, "open_issues_count": 5, "archived": False, "fork": False, "private": False,
+                      "visibility": "public", "updated_at": "2026-10-30T12:00:00Z", "html_url": URL, "owner": {"login": "acme"}},
+                     {"full_name": "acme/old", "description": None, "archived": True, "fork": True}]
+        out({"total_count": len(items), "incomplete_results": False, "items": items[:per_page]})
+    if not path.startswith(prefix + "/") and path != prefix:
+        fail("gh: Not Found (HTTP 404)", json.dumps({"message": "Not Found", "documentation_url": "https://docs.github.com/rest", "status": "404"}))
+    sub = path[len(prefix):]
+    if sub.startswith("/contents/"):
+        p = sub[len("/contents/"):]
+        if p not in CONTENTS:
+            fail("gh: Not Found (HTTP 404)", json.dumps({"message": "Not Found", "documentation_url": "https://docs.github.com/rest/repos/contents", "status": "404"}))
+        out(CONTENTS[p])
+    if sub == "/pulls/12/comments":
+        page = next((a[5:] for a in opts("-F") if a.startswith("page=")), "1")
+        out(PR_REVIEW_COMMENTS if page == "1" else [])
+    if sub.startswith("/branches/"):
+        b = sub[len("/branches/"):]
+        if b == "main": out({"name": "main", "commit": {"sha": RUN_OK["head_sha"]}})
+        if b == "nocheck": out({"name": "nocheck", "commit": {"sha": "f00d000000000000000000000000000000000002"}})
+        fail("gh: Branch not found (HTTP 404)", json.dumps({"message": "Branch not found", "status": "404"}))
+    if sub == "/actions/runs":
+        sha = next((a[9:] for a in opts("-F") if a.startswith("head_sha=")), "")
+        if sha == RUN_OK["head_sha"]:
+            runs = [RUN_OK] if os.environ.get("FAKE_GH_RUNS") == "ok" else [RUN_OK, RUN_FAIL]
+            out({"total_count": len(runs), "workflow_runs": runs})
+        out({"total_count": 0, "workflow_runs": []})
+    for run in (RUN_OK, RUN_FAIL):
+        rid = run["id"]
+        if sub == f"/actions/runs/{rid}": out(run)
+        if sub == f"/actions/runs/{rid}/jobs": out({"total_count": len(JOBS[rid]), "jobs": JOBS[rid]})
+    if sub.startswith("/actions/jobs/") and sub.endswith("/logs"):
+        jid = int(sub.split("/")[3])
+        if jid in JOB_LOGS:
+            sys.stdout.write(JOB_LOGS[jid]); sys.exit(0)
+        fail("gh: Not Found (HTTP 404)", json.dumps({"message": "Not Found", "status": "404"}))
+    fail("gh: Not Found (HTTP 404)", json.dumps({"message": "Not Found", "status": "404"}))
+
+def cmd_repo_view():
+    target = argv[2] if len(argv) > 2 and not argv[2].startswith("-") else None
+    if target is None and not in_git_repo():
+        fail("failed to run git: fatal: not a git repository (or any of the parent directories): .git")
+    if target and target.split("/")[-1] == "missing":
+        fail(f"GraphQL: Could not resolve to a Repository with the name '{target}'. (repository)")
+    if target and target.endswith("Fork-Owner/widgets"):
+        out(fields({"nameWithOwner": "Fork-Owner/widgets", "url": "https://github.com/Fork-Owner/widgets",
+                    "sshUrl": os.environ.get("FAKE_GH_FORK", "git@github.com:Fork-Owner/widgets.git")}))
+    if opt("-q") == ".url": out(URL)
+    out(fields(REPO_DATA))
+
+def cmd_issue_view():
+    n = argv[2]
+    if not n.isdigit() or int(n) not in ISSUES:
+        fail(f"GraphQL: Could not resolve to an issue or pull request with the number of {n}. (repository.issue)")
+    out(fields(ISSUES[int(n)]))
+
+def cmd_pr_view():
+    n = argv[2] if len(argv) > 2 and not argv[2].startswith("-") else None
+    if n is None:
+        fail('no pull requests found for branch "main"')
+    if n in ("12", "feature/frob", URL + "/pull/12"):
+        out(fields(pr_data()))
+    if n in ("14", "15"):
+        d = pr_data(); d.update({"number": int(n), "url": URL + "/pull/" + n})
+        if n == "14":
+            d.update({"isCrossRepository": True, "headRepository": {"name": "widgets", "nameWithOwner": "Fork-Owner/widgets"},
+                      "headRepositoryOwner": {"login": "Fork-Owner"}, "maintainerCanModify": False})
+        out(fields(d))
+    if n == "13":
+        d = pr_data(); d.update({"number": 13, "title": "New PR", "isDraft": True, "headRefName": "topic", "url": URL + "/pull/13", "labels": []})
+        out(fields(d))
+    fail(f"GraphQL: Could not resolve to a PullRequest with the number of {n}. (repository.pullRequest)")
+
+def cmd_list(kind):
+    state = opt("--state", "open")
+    if opt("--repo", "").endswith("/empty"): out([])
+    if kind == "issue":
+        items = [{"number": 7, "title": "Crash on start", "state": "OPEN", "author": {"login": "alice"}, "labels": [{"name": "bug"}],
+                  "createdAt": "2026-10-01T09:00:00Z", "updatedAt": "2026-10-03T09:00:00Z", "url": URL + "/issues/7"},
+                 {"number": 9, "title": "", "state": "OPEN", "author": None, "labels": [], "createdAt": "2026-10-04T09:00:00Z", "url": URL + "/issues/9"}]
+    else:
+        items = [{"number": 12, "title": "Add frobnicator", "state": "OPEN", "isDraft": False, "author": {"login": "dave"},
+                  "baseRefName": "main", "headRefName": "feature/frob", "labels": [{"name": "enhancement"}, {"name": "big"}],
+                  "createdAt": "2026-10-04T09:00:00Z", "updatedAt": "2026-10-06T12:00:00Z", "url": URL + "/pull/12"},
+                 {"number": 13, "title": "New PR", "state": "OPEN", "isDraft": True, "author": {"login": "erin"},
+                  "createdAt": "2026-10-08T09:00:00Z", "updatedAt": "2026-10-08T09:00:00Z", "url": URL + "/pull/13"}]
+    if state == "closed": items = []
+    out([{k: v for k, v in it.items() if k in opt("--json", "").split(",")} for it in items])
+
+def main():
+    if not argv: fail("usage: gh <command>")
+    if argv[0] == "api": api()
+    if argv[:2] == ["repo", "view"]: cmd_repo_view()
+    if argv[:2] == ["issue", "view"]: cmd_issue_view()
+    if argv[:2] == ["pr", "view"]: cmd_pr_view()
+    if argv[:2] in (["issue", "list"], ["pr", "list"]): cmd_list(argv[0])
+    if argv[:2] == ["pr", "diff"]:
+        if argv[2] == "12": sys.stdout.write(PR_DIFF); sys.exit(0)
+        fail(f"could not find pull request diff: GraphQL: Could not resolve to a PullRequest with the number of {argv[2]}. (repository.pullRequest)")
+    if argv[:2] == ["pr", "create"]:
+        if opt("--head") == "dup":
+            fail('a pull request for branch "dup" into branch "main" already exists:\n' + URL + "/pull/12")
+        sys.stdout.write("\nCreating pull request for topic into main in acme/widgets\n\n" + URL + "/pull/13\n"); sys.exit(0)
+    if argv[:2] == ["auth", "token"]: fail("no oauth token found for github.com")
+    fail(f"unknown command \"{' '.join(argv[:2])}\" for \"gh\"")
+
+main()

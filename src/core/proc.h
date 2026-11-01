@@ -10,7 +10,7 @@ typedef void (*proc_output_cb)(void *ud, int stream /*1=stdout,2=stderr*/, const
 
 typedef struct {
     const char *cwd;
-    const char *const *env_extra; /* NULL-terminated "K=V" entries added/overriding */
+    const char *const *env_extra; /* NULL-terminated "K=V" entries added/overriding; a bare "K" unsets K */
     const char *stdin_data;       /* NULL => /dev/null */
     size_t stdin_len;
     int64_t timeout_ms;           /* 0 => none */
