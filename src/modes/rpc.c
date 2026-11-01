@@ -1,11 +1,13 @@
 /* rpc mode: JSONL commands on stdin, responses + agent events on stdout (omp RPC protocol subset). */
 #include "modes.h"
+#include "coding/btw.h"
 #include "coding/goal.h"
 
 #include "config/auth.h"
 #include "config/settings.h"
 #include "core/proc.h"
 #include "core/fs.h"
+#include "tools/artifacts.h"
 #include "tools/jobs.h"
 
 #include <errno.h>
@@ -40,6 +42,17 @@ struct rpc {
     json_t *images;
     const char *hidden; /* custom type when the run is a hidden wake-up (async-result) */
     pthread_mutex_t mu;
+    /* /btw (rpc-btw.ts) */
+    pthread_mutex_t btw_mu;
+    btw_store_t *btw_store;
+    char *btw_store_key;          /* session id \x01 artifacts dir the store was opened for */
+    struct rpc_btw_run *btw_running;
+    bool btw_starting;            /* a `btw` between validation and its first checkpoint */
+    char *btw_starting_topic;     /* its recordId (NULL: a new topic) */
+    int btw_epoch;                /* bumped by every cancel and session change */
+    json_t *btw_unsaved;          /* id -> record whose terminal checkpoint failed */
+    pthread_t btw_th;
+    bool btw_th_live;
 };
 
 static void emit(rpc_t *rp, const json_t *j) {
@@ -383,6 +396,295 @@ static json_t *content_with_images(const char *text, json_t *images) {
     return c;
 }
 
+/* ---------- /btw side questions (port of modes/rpc/rpc-btw.ts) ----------
+ * One side question runs at a time against the main session; answers stream as `btw_delta` frames, every
+ * lifecycle change is a full `btw_record` frame, and each turn is checkpointed into the session's BTW history
+ * sidecar so the TUI and RPC hosts read and continue the same topics. */
+
+#define BTW_CANCELLED_WHILE_STARTING "The /btw question was cancelled before it started"
+
+typedef struct rpc_btw_run {
+    rpc_t *r;
+    json_t *record;
+    btw_store_t *store;
+    bool owns_store; /* the store was replaced while this turn ran: the turn frees it */
+    char *question;
+    json_t *history;
+    char *conversation_key;
+    volatile sig_atomic_t cancel;
+} rpc_btw_run_t;
+
+static void btw_emit_record(rpc_t *r, const json_t *record) {
+    json_t *f = json_obj();
+    json_set_str(f, "type", "btw_record");
+    json_set(f, "record", btw_wire_record(record));
+    emit(r, f);
+    json_free(f);
+}
+
+static void btw_notice(rpc_t *r, const char *message) {
+    json_t *j = json_obj();
+    json_set_str(j, "type", "notice");
+    json_set_str(j, "level", "error");
+    json_set_str(j, "message", message);
+    json_set_str(j, "source", "btw-history");
+    emit(r, j);
+    json_free(j);
+}
+
+/* #finish: the turn's terminal state, once; caller holds btw_mu */
+static void btw_finish_locked(rpc_t *r, rpc_btw_run_t *run, const char *status, const char *answer, const char *error) {
+    if (r->btw_running != run) return;
+    r->btw_running = NULL;
+    btw_set_status(run->record, status, answer, error);
+    btw_emit_record(r, run->record);
+    char *err = NULL;
+    if (btw_store_upsert(run->store, run->record, &err) != 0) {
+        if (run->store == r->btw_store) {
+            if (!r->btw_unsaved) r->btw_unsaved = json_obj();
+            json_set(r->btw_unsaved, json_get_str(run->record, "id"), json_clone(run->record));
+        }
+        char *m = xasprintf("Could not save /btw history: %s", err ? err : "write failed");
+        log_msg(LOG_ERROR, "%s", m);
+        btw_notice(r, m);
+        free(m);
+    }
+    free(err);
+}
+
+static void btw_delta(void *ud, const char *delta) {
+    rpc_btw_run_t *run = ud;
+    rpc_t *r = run->r;
+    pthread_mutex_lock(&r->btw_mu);
+    if (r->btw_running == run) {
+        json_t *t = btw_latest_turn(run->record);
+        char *ans = xasprintf("%s%s", json_get_str(t, "answer") ? json_get_str(t, "answer") : "", delta);
+        json_set_str(t, "answer", ans);
+        json_set_int(t, "updatedAt", now_ms());
+        free(ans);
+        json_t *f = json_obj();
+        json_set_str(f, "type", "btw_delta");
+        json_set_str(f, "recordId", json_get_str(run->record, "id"));
+        json_set_str(f, "delta", delta);
+        emit(r, f);
+        json_free(f);
+    }
+    pthread_mutex_unlock(&r->btw_mu);
+}
+
+static void *btw_thread(void *p) {
+    rpc_btw_run_t *run = p;
+    rpc_t *r = run->r;
+    char *reply = NULL, *err = NULL;
+    json_t *assistant = NULL;
+    int rc = btw_run_turn(r->a, run->question, NULL, run->history, run->conversation_key, NULL, btw_delta, run,
+                          &run->cancel, &reply, &assistant, &err);
+    pthread_mutex_lock(&r->btw_mu);
+    if (rc == 0) btw_finish_locked(r, run, "complete", reply, NULL);
+    else btw_finish_locked(r, run, "error", NULL, err ? err : "side question failed");
+    if (run->owns_store) btw_store_free(run->store);
+    pthread_mutex_unlock(&r->btw_mu);
+    json_free(assistant);
+    free(reply);
+    free(err);
+    json_free(run->record);
+    json_free(run->history);
+    free(run->question);
+    free(run->conversation_key);
+    free(run);
+    return NULL;
+}
+
+/* cancel(recordId?): the running or starting question (only topic `record_id` when given); caller holds btw_mu */
+static bool btw_cancel_locked(rpc_t *r, const char *record_id) {
+    rpc_btw_run_t *run = r->btw_running;
+    if (run) {
+        if (record_id && !str_eq(json_get_str(run->record, "id"), record_id)) return false;
+        r->btw_epoch++;
+        btw_finish_locked(r, run, "cancelled", NULL, NULL);
+        run->cancel = 1;
+        return true;
+    }
+    if (!r->btw_starting || (record_id && !str_eq(r->btw_starting_topic, record_id))) return false;
+    r->btw_epoch++;
+    return true;
+}
+
+/* #settleWrites: retry failed terminal checkpoints once; a conflict drops the record with a notice */
+static int btw_settle_locked(rpc_t *r, char **err) {
+    if (!r->btw_unsaved || !r->btw_store) return 0;
+    while (json_len(r->btw_unsaved)) {
+        const char *id = r->btw_unsaved->u.obj.keys[0];
+        char *e = NULL;
+        if (btw_store_retry(r->btw_store, r->btw_unsaved->u.obj.vals[0], &e) == 0 || (e && strstr(e, "conflict"))) {
+            if (e) {
+                char *m = xasprintf("/btw answer %s was not saved: %s; it changed or was removed on disk", id, e);
+                log_msg(LOG_ERROR, "%s", m);
+                btw_notice(r, m);
+                free(m);
+            }
+            free(e);
+            json_del(r->btw_unsaved, id);
+            continue;
+        }
+        *err = xasprintf("/btw history could not be saved: %s. Fix the storage and retry; unsaved answers remain in this "
+                         "session.",
+                         e ? e : "write failed");
+        free(e);
+        return -1;
+    }
+    return 0;
+}
+
+static char *btw_artifacts_dir(app_t *a) {
+    return a->session && a->session->file && a->session->persist ? artifacts_dir_for_session(a->session->file) : NULL;
+}
+
+/* #openStore: the current session's store; `fresh` re-reads it from disk (only while nothing runs here) */
+static btw_store_t *btw_open_store_locked(rpc_t *r, bool fresh, char **err) {
+    app_t *a = r->a;
+    char *dir = btw_artifacts_dir(a);
+    char *key = xasprintf("%s%c%s", a->session ? session_id(a->session) : "", 1, dir ? dir : "");
+    bool same = r->btw_store && str_eq(r->btw_store_key, key);
+    if (same && (!fresh || !dir || (r->btw_unsaved && json_len(r->btw_unsaved)))) {
+        free(key);
+        free(dir);
+        return r->btw_store;
+    }
+    if (!same && r->btw_running) btw_cancel_locked(r, NULL); /* the old session's question must not stream on */
+    btw_store_t *s = btw_store_open(dir, NULL, err);
+    free(dir);
+    if (!s) {
+        free(key);
+        return NULL;
+    }
+    if (r->btw_store) {
+        if (r->btw_running && r->btw_running->store == r->btw_store) r->btw_running->owns_store = true;
+        else btw_store_free(r->btw_store);
+    }
+    r->btw_store = s;
+    free(r->btw_store_key);
+    r->btw_store_key = key;
+    return s;
+}
+
+/* ask(question, recordId?): checkpointed as running, then the turn starts after the response */
+static json_t *btw_ask(rpc_t *r, const char *question, const char *record_id, char **err) {
+    app_t *a = r->a;
+    char *trimmed = str_trim(question ? question : "");
+    json_t *out = NULL;
+    pthread_mutex_lock(&r->btw_mu);
+    if (!*trimmed) {
+        *err = xstrdup("btw requires a non-empty question");
+        goto done;
+    }
+    if (r->btw_starting || r->btw_running) {
+        *err = xstrdup("A /btw question is still running; cancel it first");
+        goto done;
+    }
+    r->btw_starting = true;
+    free(r->btw_starting_topic);
+    r->btw_starting_topic = record_id ? xstrdup(record_id) : NULL;
+    int epoch = r->btw_epoch;
+    if (btw_settle_locked(r, err) != 0) goto starting_done;
+    btw_store_t *store = btw_open_store_locked(r, true, err);
+    if (!store) goto starting_done;
+    if (epoch != r->btw_epoch) {
+        *err = xstrdup(BTW_CANCELLED_WHILE_STARTING);
+        goto starting_done;
+    }
+    json_t *previous = record_id ? btw_store_find(store, record_id) : NULL;
+    if (record_id && !previous) {
+        *err = xasprintf("Unknown /btw topic: %s", record_id);
+        goto starting_done;
+    }
+    if (!a->model) {
+        json_free(previous);
+        *err = xstrdup("No active model available for /btw.");
+        goto starting_done;
+    }
+    if (a->session) session_ensure_on_disk(a->session);
+    btw_begin_t b;
+    btw_begin_turn(trimmed, a->session ? a->session->leaf_id : NULL, previous, NULL, NULL, &b);
+    json_free(previous);
+    char *werr = NULL;
+    if (btw_store_upsert(store, b.record, &werr) != 0) {
+        *err = xasprintf("Could not save /btw history: %s", werr ? werr : "write failed");
+        free(werr);
+        btw_begin_free(&b);
+        goto starting_done;
+    }
+    rpc_btw_run_t *run = xcalloc(1, sizeof *run);
+    run->r = r;
+    run->record = b.record;
+    run->history = b.history;
+    run->conversation_key = b.conversation_key;
+    run->store = store;
+    run->question = xstrdup(trimmed);
+    r->btw_running = run;
+    btw_emit_record(r, run->record);
+    out = btw_wire_record(run->record);
+    if (r->btw_th_live) pthread_join(r->btw_th, NULL); /* the previous turn already finished */
+    r->btw_th_live = false;
+    if (pthread_create(&r->btw_th, NULL, btw_thread, run) == 0) r->btw_th_live = true;
+    else btw_finish_locked(r, run, "error", NULL, "failed to start the /btw thread");
+starting_done:
+    r->btw_starting = false;
+    free(r->btw_starting_topic);
+    r->btw_starting_topic = NULL;
+done:
+    pthread_mutex_unlock(&r->btw_mu);
+    free(trimmed);
+    return out;
+}
+
+/* history(): newest first, re-read from disk when idle; a running topic carries its live partial answer */
+static json_t *btw_history(rpc_t *r, char **err) {
+    pthread_mutex_lock(&r->btw_mu);
+    btw_store_t *s = btw_open_store_locked(r, !r->btw_running && !r->btw_starting, err);
+    json_t *out = NULL;
+    if (s) {
+        json_t *recs = btw_store_records(s), *rec;
+        json_t *keyed = json_obj();
+        json_arr_foreach(recs, i, rec) json_set(keyed, json_get_str(rec, "id"), json_clone(rec));
+        if (r->btw_unsaved && s == r->btw_store) {
+            for (size_t i = 0; i < json_len(r->btw_unsaved); i++)
+                json_set(keyed, r->btw_unsaved->u.obj.keys[i], json_clone(r->btw_unsaved->u.obj.vals[i]));
+        }
+        if (r->btw_running && r->btw_running->store == s)
+            json_set(keyed, json_get_str(r->btw_running->record, "id"), json_clone(r->btw_running->record));
+        json_t *all = json_arr();
+        for (size_t i = 0; i < json_len(keyed); i++) json_push(all, json_clone(keyed->u.obj.vals[i]));
+        /* sort newest first by createdAt, then id */
+        size_t n = json_len(all);
+        for (size_t i = 1; i < n; i++)
+            for (size_t j = i; j > 0; j--) {
+                json_t *x = all->u.arr.items[j - 1], *y = all->u.arr.items[j];
+                int64_t cx = json_get_int(x, "createdAt", 0), cy = json_get_int(y, "createdAt", 0);
+                if (cx > cy || (cx == cy && strcmp(json_get_str(x, "id"), json_get_str(y, "id")) <= 0)) break;
+                all->u.arr.items[j - 1] = y;
+                all->u.arr.items[j] = x;
+            }
+        out = json_arr();
+        json_arr_foreach(all, i, rec) json_push(out, btw_wire_record(rec));
+        json_free(all);
+        json_free(keyed);
+        json_free(recs);
+    }
+    pthread_mutex_unlock(&r->btw_mu);
+    return out;
+}
+
+/* close(): before the session is replaced or the process exits */
+static int btw_close(rpc_t *r, char **err) {
+    pthread_mutex_lock(&r->btw_mu);
+    r->btw_epoch++;
+    btw_cancel_locked(r, NULL);
+    int rc = btw_settle_locked(r, err);
+    pthread_mutex_unlock(&r->btw_mu);
+    return rc;
+}
+
 static void handle(rpc_t *r, json_t *cmd) {
     app_t *a = r->a;
     const char *id = json_get_str(cmd, "id");
@@ -679,22 +981,32 @@ static void handle(rpc_t *r, json_t *cmd) {
             free(err);
         }
     } else if (!strcmp(type, "btw")) {
+        /* Side questions (/btw): answers stream as btw_delta / btw_record frames */
         char *err = NULL;
-        char *ans = app_side_question(a, json_get_str(cmd, "question") ? json_get_str(cmd, "question") : "", &err);
-        if (!ans) respond(r, id, type, false, NULL, err ? err : "side question failed");
+        json_t *rec = btw_ask(r, json_get_str(cmd, "question"), json_get_str(cmd, "recordId"), &err);
+        if (!rec) respond(r, id, type, false, NULL, err ? err : "btw failed");
         else {
-            json_t *rec = json_obj();
-            json_set_str(rec, "type", "btw_record");
-            if (json_get_str(cmd, "recordId")) json_set_str(rec, "recordId", json_get_str(cmd, "recordId"));
-            json_set_str(rec, "question", json_get_str(cmd, "question"));
-            json_set_str(rec, "answer", ans);
-            emit(r, rec);
-            json_free(rec);
             json_t *d = json_obj();
-            json_set_str(d, "answer", ans);
+            json_set(d, "record", rec);
             respond(r, id, type, true, d, NULL);
         }
-        free(ans);
+        free(err);
+    } else if (!strcmp(type, "btw_cancel")) {
+        pthread_mutex_lock(&r->btw_mu);
+        bool c = btw_cancel_locked(r, json_get_str(cmd, "recordId"));
+        pthread_mutex_unlock(&r->btw_mu);
+        json_t *d = json_obj();
+        json_set_bool(d, "cancelled", c);
+        respond(r, id, type, true, d, NULL);
+    } else if (!strcmp(type, "get_btw_history")) {
+        char *err = NULL;
+        json_t *recs = btw_history(r, &err);
+        if (!recs) respond(r, id, type, false, NULL, err ? err : "btw history unavailable");
+        else {
+            json_t *d = json_obj();
+            json_set(d, "records", recs);
+            respond(r, id, type, true, d, NULL);
+        }
         free(err);
     } else if (!strcmp(type, "abort_and_restore_queue")) {
         json_t *d = json_obj();
@@ -756,7 +1068,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         static const char *CMDS[][2] = {{"compact", "Manually compact the session context"}, {"handoff", "Summarize the session into a handoff document and compact in place"},
                                         {"goal", "Toggle goal mode"}, {"plan", "Toggle plan mode"}, {"advisor", "Toggle the advisor"},
                                         {"new", "Start a new session"}, {"fork", "Fork this session"}, {"tree", "Navigate session tree"},
-                                        {"btw", "Ask a side question"}, {"model", "Switch model"}, {"thinking", "Set thinking level"}};
+                                        {"btw", "Ask a side question, or browse this session's BTW history"}, {"model", "Switch model"}, {"thinking", "Set thinking level"}};
         json_t *arr = json_arr();
         for (size_t i = 0; i < ARRAY_LEN(CMDS); i++) {
             json_t *c = json_obj();
@@ -846,22 +1158,27 @@ static void handle(rpc_t *r, json_t *cmd) {
         else respond(r, id, type, false, NULL, err);
         free(err);
     } else if (!strcmp(type, "new_session")) {
+        char *berr = NULL;
         if (r->running) respond(r, id, type, false, NULL, "agent is busy");
+        else if (btw_close(r, &berr) != 0) respond(r, id, type, false, NULL, berr);
         else {
             app_new_session(a);
             respond(r, id, type, true, state_json(a), NULL);
         }
+        free(berr);
     } else if (!strcmp(type, "switch_session") || !strcmp(type, "open_session")) {
         const char *p = json_get_str(cmd, "sessionPath");
         if (!p) p = json_get_str(cmd, "path");
         char *err = NULL;
         if (r->running) respond(r, id, type, false, NULL, "agent is busy");
+        else if (btw_close(r, &err) != 0) respond(r, id, type, false, NULL, err);
         else if (p && app_switch_session(a, p, &err) == 0) respond(r, id, type, true, state_json(a), NULL);
         else respond(r, id, type, false, NULL, err ? err : "sessionPath required");
         free(err);
     } else if (!strcmp(type, "fork") || !strcmp(type, "branch")) {
         char *err = NULL;
-        if (app_fork_from(a, json_get_str(cmd, "entryId"), &err) == 0) respond(r, id, type, true, state_json(a), NULL);
+        if (btw_close(r, &err) != 0) respond(r, id, type, false, NULL, err);
+        else if (app_fork_from(a, json_get_str(cmd, "entryId"), &err) == 0) respond(r, id, type, true, state_json(a), NULL);
         else respond(r, id, type, false, NULL, err);
         free(err);
     } else if (!strcmp(type, "set_session_name") || !strcmp(type, "set_title")) {
@@ -900,6 +1217,7 @@ rpc_t *rpc_attach(app_t *a, rpc_sink_fn sink, void *ud) {
     pthread_mutex_init(&r->filter_mu, NULL);
     pthread_mutex_init(&r->host_mu, NULL);
     pthread_cond_init(&r->host_cv, NULL);
+    pthread_mutex_init(&r->btw_mu, NULL);
     agent_subscribe(a->agent, rpc_listener, r);
     a->notice = notice_rpc;
     a->notice_ud = r;
@@ -946,6 +1264,15 @@ void rpc_detach(rpc_t *r) {
     pthread_t th = r->th;
     pthread_mutex_unlock(&r->mu);
     if (th) pthread_join(th, NULL);
+    char *berr = NULL;
+    btw_close(r, &berr);
+    free(berr);
+    if (r->btw_th_live) pthread_join(r->btw_th, NULL);
+    btw_store_free(r->btw_store);
+    free(r->btw_store_key);
+    free(r->btw_starting_topic);
+    json_free(r->btw_unsaved);
+    pthread_mutex_destroy(&r->btw_mu);
     agent_unsubscribe(a->agent, rpc_listener, r);
     if (a->notice == notice_rpc) {
         a->notice = NULL;

@@ -327,9 +327,11 @@ json_t *oai_strict_schema(const json_t *schema) {
 char *oai_prompt_cache_key(const ai_stream_opts_t *o, size_t max_len, const char *prefix) {
     const char *ret = o->cache_retention ? o->cache_retention : env_get("PI_CACHE_RETENTION");
     if (str_eq(ret, "none")) return NULL;
-    if (str_empty(o->session_id)) return NULL;
-    if (strlen(o->session_id) <= max_len) return xstrdup(o->session_id);
-    char *h = oai_hash36(o->session_id);
+    /* the OpenRouter session id follows the request lineage; the cache key may be pinned to the main session */
+    const char *id = o->prompt_cache_key && strcmp(prefix, "session_") ? o->prompt_cache_key : o->session_id;
+    if (str_empty(id)) return NULL;
+    if (strlen(id) <= max_len) return xstrdup(id);
+    char *h = oai_hash36(id);
     char *r = xasprintf("%s%s", prefix, h);
     free(h);
     return r;

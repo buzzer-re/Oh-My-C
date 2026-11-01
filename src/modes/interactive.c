@@ -320,25 +320,6 @@ static void *retry_main(void *p) {
     return NULL;
 }
 
-typedef struct {
-    ui_t *u;
-    char *q;
-} btw_t;
-
-static void *btw_main(void *p) {
-    btw_t *b = p;
-    char *err = NULL;
-    char *ans = app_side_question(b->u->app, b->q, &err);
-    char *msg = ans ? xasprintf("btw: %s\n%s", b->q, ans) : xasprintf("btw failed: %s", err ? err : "no answer");
-    ui_notice(b->u, ans ? "info" : "error", msg);
-    free(msg);
-    free(ans);
-    free(err);
-    free(b->q);
-    free(b);
-    return NULL;
-}
-
 /* a background job settled while idle: deliver its result as a hidden turn */
 static void job_wake_cb(void *ud) {
     ui_t *u = ud;
@@ -481,6 +462,7 @@ static void branch_pick(ui_t *u, const char *entry_id) {
 
 /* resume another session file (session selector) */
 void ui_resume_session(ui_t *u, const char *path) {
+    ui_btw_dispose(u);
     char *err = NULL;
     if (app_switch_session(u->app, path, &err) != 0) add_notice(u, "error", err);
     else {
@@ -508,6 +490,7 @@ static void on_pick(tui_select_list_t *l, const tui_select_item_t *it, void *ud)
         }
         free(err);
     } else if (kind == 2) {
+        ui_btw_dispose(u);
         char *err = NULL;
         if (app_switch_session(u->app, val, &err) != 0) add_notice(u, "error", err);
         else {
@@ -1315,7 +1298,7 @@ static const struct {
     {"tree", "Navigate the session tree (switch branches)"},
     {"branch", "Rewind to a previous message, keeping the old path as a branch"},
     {"retry", "Retry the last failed agent turn"},
-    {"btw", "Ask a side question without adding it to the context"},
+    {"btw", "Ask a side question, or browse this session's BTW history"},
     {"queue", "Queue a message for after the agent yields"},
     {"handoff", "Summarize the session into a handoff document and compact in place"},
     {"shake", "Drop heavy tool output from the context"},
@@ -1602,15 +1585,9 @@ static bool handle_command(ui_t *u, const char *line) {
             if (pthread_create(&u->worker, NULL, retry_main, u) != 0) u->worker_running = false;
         }
     } else if (!strcmp(cmd, "btw")) {
-        if (!*arg) add_notice(u, "info", "Usage: /btw <question>");
-        else {
-            btw_t *b = xcalloc(1, sizeof(*b));
-            b->u = u;
-            b->q = xstrdup(arg);
-            pthread_t th;
-            if (pthread_create(&th, NULL, btw_main, b) == 0) pthread_detach(th);
-            add_notice(u, "info", "Asking side question…");
-        }
+        /* a question that did not start comes back to an empty editor (runWithDetachedDraft restoreText) */
+        if (!ui_btw_command(u, arg, NULL, NULL) && *arg && tui_editor_is_empty(u->editor))
+            tui_editor_set_text(u->editor, line);
     } else if (!strcmp(cmd, "queue")) {
         if (!*arg) add_notice(u, "info", "Usage: /queue <message>");
         else if (u->worker_running) {
@@ -1642,6 +1619,7 @@ static bool handle_command(ui_t *u, const char *line) {
         } else add_notice(u, "warning", "Could not generate a title");
         free(t);
     } else if (!strcmp(cmd, "delete")) {
+        ui_btw_dispose(u);
         char *path = app_session_file(a) ? xstrdup(app_session_file(a)) : NULL;
         app_new_session(a);
         if (path) unlink(path);
@@ -1721,6 +1699,7 @@ static bool handle_command(ui_t *u, const char *line) {
             add_notice(u, "info", "Context cleared (same session)");
         }
     } else if (!strcmp(cmd, "new")) {
+        ui_btw_dispose(u);
         app_new_session(a);
         ui_new_session_banner(u);
     } else if (!strcmp(cmd, "resume")) {
@@ -1770,6 +1749,7 @@ static bool handle_command(ui_t *u, const char *line) {
             add_notice(u, "info", "Copied last answer to clipboard");
         }
     } else if (!strcmp(cmd, "fork")) {
+        ui_btw_dispose(u);
         char *err = NULL;
         if (app_fork_from(a, NULL, &err) != 0) add_notice(u, "error", err);
         else add_notice(u, "info", "Forked into a new session");
@@ -1889,6 +1869,7 @@ static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
 static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
     ui_t *u = ud;
     if (tui_overlay_visible(t) || ui_selector_open(u)) return false;
+    if (ui_btw_key(u, k)) return true; /* the /btw panel owns Esc while shown; c/f/b act on its answer */
     if (tui_key_matches(k, "escape")) {
         if (u->worker_running) {
             app_abort(u->app);
@@ -2037,6 +2018,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     }
     u.chat = ui_transcript_new(false); /* the welcome banner brings its own trailing spacer */
     tui_container_add(root, &u.chat->base);
+    tui_container_add(root, ui_btw_container_new(&u)); /* omp btwContainer: right below the transcript */
     u.banner = tui_container_new();
     tui_container_add(root, &u.banner->base);
     u.model_cycle = tui_container_new();
@@ -2108,6 +2090,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
         app_abort(a);
         pthread_join(u.worker, NULL);
     }
+    ui_btw_free(&u);
     agent_unsubscribe(a->agent, ui_listener, &u);
     a->notice = NULL;
     a->wake = NULL;

@@ -187,9 +187,29 @@ int app_new_session(app_t *a);
 json_t *app_user_bash(app_t *a, const char *cmd, bool exclude);
 int app_switch_session(app_t *a, const char *path, char **err);
 int app_fork_from(app_t *a, const char *entry_id, char **err);
+/* /btw branch: fork the session at `leaf_id` (which must still be the leaf of `session_id`) and append the side
+ * question and its answer (branchFromBtw). 0, or -1 + *err (owned). */
+int app_branch_from_btw(app_t *a, const char *question, const json_t *images, const json_t *assistant,
+                        const char *leaf_id, const char *session_id, char **err);
 void app_abort(app_t *a);
-/* /btw: answer a side question from the current context without tools; not added to the history (owned) */
-char *app_side_question(app_t *a, const char *question, char **err);
+/* AgentSession.runEphemeralTurn: one side-channel turn on the current model, system prompt, tool catalog and
+ * history (plus `streaming`, the in-flight assistant reply, and the no-tools reminder), never recorded. */
+typedef struct {
+    const char *prompt_text;
+    const json_t *prompt_images;  /* image blocks or NULL */
+    const json_t *history;        /* detached side messages placed before the prompt, or NULL */
+    const char *conversation_key; /* provider lineage of a keyed side conversation; NULL: one-off */
+    const json_t *streaming;      /* snapshot of the streaming assistant message, or NULL */
+    bool dedupe;                  /* dedupeEphemeralReply the reply */
+    size_t reply_max_bytes;       /* with dedupe: byte cap, 0 = unlimited */
+    void (*on_text_delta)(void *ud, const char *delta); /* called on the requesting thread */
+    void *ud;
+    volatile sig_atomic_t *cancel;
+} app_ephemeral_t;
+/* Returns the final assistant message (toolCall blocks dropped, owned) and *reply (owned: trimmed, deduped when
+ * asked), or NULL with *err (owned; "Request was aborted" after a cancel). */
+json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, char **err);
+char *app_dedupe_ephemeral_reply(const char *text, size_t max_bytes); /* owned */
 int app_branch_to(app_t *a, const char *entry_id);  /* move the session leaf and reload context */
 int app_clear_context(app_t *a);                    /* reset boundary: empty context, same session */
 int app_handoff(app_t *a, char **err);              /* handoff document + compact in place */

@@ -147,6 +147,7 @@ typedef struct {
     bool disable_reasoning;
     bool hide_thinking_summary;
     const char *session_id;      /* prompt-cache key / affinity */
+    const char *prompt_cache_key; /* prompt_cache_key when it differs from session_id (side requests); NULL = session_id */
     const char *cache_retention; /* "none" | "short" | "long" (NULL => short) */
     json_t *headers;             /* object of extra headers (borrowed) */
     json_t *tool_choice;         /* "auto" | "none" | "required" | {type:"tool",name} (borrowed) */

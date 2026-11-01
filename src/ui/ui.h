@@ -90,6 +90,7 @@ struct ui {
     tui_component_t *welcome;
     bool status_row_occupied; /* the working/idle-title row rendered lines this frame */
     json_t *att_images; /* pending composer image attachments [{image, path?, w?, h?}] (attach.c) */
+    struct btw_ctl *btw;      /* /btw controller (btw.c), created on first use */
 };
 
 
@@ -174,6 +175,15 @@ char *ui_status_render(ui_t *u, int width, const char *layout); /* box|band|plai
 void ui_hint_record(const char *id);        /* composer hint gesture used ("effort", "agents") */
 char *ui_key_hint(const char *key);         /* "shift+tab" -> "⇧⇥" (active symbol preset) */
 char *ui_double_tap_hint(const char *key);
+
+/* btw.c - /btw side questions: inline answer panel, BTW history, follow-ups, copy, branch */
+tui_component_t *ui_btw_container_new(ui_t *u); /* the inline panel's slot (between transcript and banner) */
+/* /btw <question>: ask (true when it started); an empty question opens the BTW history. `title` heads the
+ * panel instead of `/btw <question>` (side commands); images may be NULL. */
+bool ui_btw_command(ui_t *u, const char *question, const json_t *images, const char *title);
+bool ui_btw_key(ui_t *u, const tui_key_t *k); /* Esc while the panel shows; c/f/b on an empty editor */
+void ui_btw_dispose(ui_t *u);                 /* session switch / fork / exit: cancel, hide, forget */
+void ui_btw_free(ui_t *u);
 
 /* welcome.c */
 tui_component_t *ui_welcome_new(void);

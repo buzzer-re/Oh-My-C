@@ -21,6 +21,8 @@ $MOCK_DELAY (seconds, default 0) is slept between streamed chunks.
 Memory pipeline side requests (memory.backend=local startup):
   - stage-1 extraction (system "Memory-stage-one extractor") -> strict JSON {rollout_summary, rollout_slug, raw_memory}
   - stage-2 consolidation (system "memory-stage-two consolidator") -> {memory_md, memory_summary, skills:[mock-skill]}
+/btw side questions ("<btw>…Question:\n<q>\n</btw>"): <q> may be md:/think:/slow:/streamfail:/fail:, else a fixed
+  markdown answer naming <q>.
 Every request body is appended to $MOCK_LOG (JSONL) for assertions."""
 import json, os, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -80,6 +82,8 @@ class H(BaseHTTPRequestHandler):
         msgs = body.get("messages", [])
         last = msgs[-1] if msgs else {}
         lu = text_of(last) if last.get("role") == "user" else ""
+        if lu.startswith("<btw>") and "\nQuestion:\n" in lu:  # /btw side question: "fail:" applies to its question
+            lu = lu.split("\nQuestion:\n", 1)[1].rsplit("\n</btw>", 1)[0]
         if body.get("model") == "mock-flaky":  # always rate limited (retry fallback chains)
             lu = "fail:429:Rate limit exceeded for mock-flaky"
         if lu.startswith("fail:"):
@@ -148,6 +152,11 @@ class H(BaseHTTPRequestHandler):
             chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
         else:
             u = text_of(last)
+            btw = u.startswith("<btw>") and "\nQuestion:\n" in u
+            if btw:  # /btw side question: the question picks the display command, else a fixed markdown answer
+                u = u.split("\nQuestion:\n", 1)[1].rsplit("\n</btw>", 1)[0]
+                if u.partition(":")[0] not in ("md", "think", "slow", "streamfail"):
+                    u = "say:**Side answer** for `" + u + "`:\n- first point\n- second point"
             if u.startswith("title:") or "Generate" in (body.get("messages", [{}])[0].get("content") or "")[:0]:
                 pass
             kind, _, rest = u.partition(":")

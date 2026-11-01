@@ -244,17 +244,9 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
 
 /* ---------- hooks ---------- */
 
-static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
-    app_t *a = ud;
-    free(ag->api_key);
-    ag->api_key = app_api_key_for(a->model);
-    o->api_key = ag->api_key;
-    if (a->plan_force_tool_choice) { /* plan-mode-decision: the reminder continuation must call a tool */
-        static json_t *required;
-        if (!required) required = json_str("required");
-        o->tool_choice = required;
-        a->plan_force_tool_choice = false;
-    }
+/* per-request options shared by the main loop and side requests (prepareSimpleStreamOptions) */
+static void fill_request_opts(app_t *a, ai_stream_opts_t *o) {
+    UNUSED(a);
     /* omp resolveCacheRetention: explicit setting, else PI_CACHE_RETENTION (long|short|none), else "short" */
     const char *cr = settings_str("providers.cacheRetention", "auto");
     if (!cr || !*cr || str_eq(cr, "auto")) {
@@ -269,6 +261,20 @@ static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
     o->text_verbosity = settings_str("textVerbosity", NULL);
     const char *tier = settings_str("tier.openai", NULL);
     if (tier) o->service_tier = tier;
+}
+
+static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
+    app_t *a = ud;
+    free(ag->api_key);
+    ag->api_key = app_api_key_for(a->model);
+    o->api_key = ag->api_key;
+    if (a->plan_force_tool_choice) { /* plan-mode-decision: the reminder continuation must call a tool */
+        static json_t *required;
+        if (!required) required = json_str("required");
+        o->tool_choice = required;
+        a->plan_force_tool_choice = false;
+    }
+    fill_request_opts(a, o);
 }
 
 /* ---------- date/cwd reminder (port of omp session/date-cwd-reminder.ts) ----------
@@ -1407,37 +1413,170 @@ char *app_after_run(app_t *a, const json_t *run_messages, const char *prev_type,
 
 /* ---------- side questions, branching, maintenance ---------- */
 
-char *app_side_question(app_t *a, const char *question, char **err) {
-    json_t *c = json_obj();
-    json_set_str(c, "question", question);
-    char *q = prompt_render("coding-agent/prompts/system/btw-user.md", c);
-    json_free(c);
+/* dedupeEphemeralReply (session/messages.ts): runs of more than three identical lines collapse to the line and
+ * `[…N×]`; a positive max_bytes bounds the result on a UTF-8 boundary with a `\n[…truncated]` suffix. Owned. */
+char *app_dedupe_ephemeral_reply(const char *text, size_t max_bytes) {
+    if (!text || !*text) return xstrdup(text ? text : "");
+    strvec_t lines = {0};
+    for (const char *p = text;;) {
+        const char *nl = strchr(p, '\n');
+        strvec_push_own(&lines, nl ? xstrndup(p, (size_t)(nl - p)) : xstrdup(p));
+        if (!nl) break;
+        p = nl + 1;
+    }
+    sb_t b = SB_INIT;
+    bool first = true;
+    for (size_t i = 0; i < lines.n;) {
+        size_t j = i + 1;
+        while (j < lines.n && !strcmp(lines.v[j], lines.v[i])) j++;
+        size_t run = j - i;
+        size_t emit = run > 3 ? 1 : run;
+        for (size_t k = 0; k < emit; k++) {
+            if (!first) sb_putc(&b, '\n');
+            sb_append(&b, lines.v[i]);
+            first = false;
+        }
+        if (run > 3) sb_appendf(&b, "\n[\xe2\x80\xa6%zu\xc3\x97]", run);
+        i = j;
+    }
+    strvec_free(&lines);
+    if (!max_bytes || b.len <= max_bytes) return sb_detach(&b);
+    static const char suffix[] = "\n[\xe2\x80\xa6truncated]";
+    size_t cut = max_bytes > sizeof suffix - 1 ? max_bytes - (sizeof suffix - 1) : 0;
+    while (cut > 0 && ((unsigned char)b.s[cut] & 0xc0) == 0x80) cut--;
+    sb_truncate(&b, cut);
+    sb_append(&b, suffix);
+    return sb_detach(&b);
+}
+
+typedef struct {
+    const app_ephemeral_t *e;
+    sb_t text; /* provider reply text so far */
+} eph_ud_t;
+
+static void eph_event(void *ud, const ai_event_t *ev) {
+    eph_ud_t *x = ud;
+    if (ev->type != AI_EV_TEXT_DELTA || !ev->delta) return;
+    size_t n = ev->delta_len ? ev->delta_len : strlen(ev->delta);
+    if (!n) return;
+    sb_appendn(&x->text, ev->delta, n);
+    if (x->e->on_text_delta) {
+        char *d = xstrndup(ev->delta, n);
+        x->e->on_text_delta(x->e->ud, d);
+        free(d);
+    }
+}
+
+/* AgentSession.runEphemeralTurn: a single side-channel turn against the session's current model, system
+ * prompt, tool catalog (kept for the prompt cache; the model is told tools are unavailable and any call is
+ * dropped) and history. Never touches the session or the agent's messages. */
+json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, char **err) {
+    *reply = NULL;
+    *err = NULL;
+    const ai_model_t *model = a->model;
+    if (!model) {
+        *err = xstrdup("No active model on session");
+        return NULL;
+    }
     pthread_mutex_lock(&a->agent->mu);
     json_t *msgs = json_clone(a->agent->messages);
     json_t *sys = json_clone(a->agent->system_prompt);
+    json_t *tools = json_arr();
+    for (size_t i = 0; i < a->agent->tools.n; i++) json_push(tools, agent_tool_wire(a->agent->tools.v[i]));
+    char *main_sid = a->agent->session_id ? xstrdup(a->agent->session_id) : NULL;
     pthread_mutex_unlock(&a->agent->mu);
-    json_push(msgs, msg_user_text(q));
-    free(q);
-    ai_context_t ctx = {.system_prompt = sys, .messages = msgs};
-    ai_stream_opts_t o;
-    ai_stream_opts_init(&o);
-    char *key = app_api_key_for(a->model);
-    o.api_key = key;
-    o.reasoning = model_clamp_effort(a->model, a->thinking);
-    o.disable_reasoning = a->thinking == EFFORT_OFF;
-    volatile sig_atomic_t cancel = 0;
-    o.cancel = &cancel;
-    json_t *r = ai_complete(a->model, &ctx, &o);
-    char *text = NULL;
-    const char *stop = json_get_str(r, "stopReason");
-    if (str_eq(stop, "error") || str_eq(stop, "aborted"))
-        *err = xstrdup(json_get_str(r, "errorMessage") ? json_get_str(r, "errorMessage") : "side question failed");
-    else text = ai_message_text(r);
-    json_free(r);
-    json_free(sys);
+    /* the in-flight streaming reply: its thinking blocks and joined text replace (or follow) the last message */
+    const json_t *st = e->streaming;
+    if (st && str_eq(json_get_str(st, "role"), "assistant") && json_is_arr(json_get(st, "content"))) {
+        json_t *blocks = json_arr(), *blk;
+        sb_t txt = SB_INIT;
+        json_arr_foreach(json_get(st, "content"), i, blk) {
+            const char *t = json_get_str(blk, "type");
+            if (str_eq(t, "thinking")) json_push(blocks, json_clone(blk));
+            else if (str_eq(t, "text") && json_get_str(blk, "text")) sb_append(&txt, json_get_str(blk, "text"));
+        }
+        if (txt.len) json_push(blocks, text_block(sb_cstr(&txt)));
+        sb_free(&txt);
+        if (json_len(blocks)) {
+            json_t *m = json_clone(st);
+            json_set(m, "content", blocks);
+            size_t n = json_len(msgs);
+            if (n && str_eq(json_get_str(json_at(msgs, n - 1), "role"), "assistant")) json_free(json_arr_remove(msgs, n - 1));
+            json_push(msgs, m);
+        } else {
+            json_free(blocks);
+        }
+    }
+    char *reminder = prompt_load("coding-agent/prompts/system/side-channel-no-tools.md");
+    json_t *dev = msg_developer_text(reminder ? reminder : "");
+    json_set_str(dev, "attribution", "agent");
+    json_push(msgs, dev);
+    free(reminder);
+    json_t *h;
+    json_arr_foreach(e->history, i, h) json_push(msgs, json_clone(h));
+    json_t *content = json_arr();
+    json_push(content, text_block(e->prompt_text ? e->prompt_text : ""));
+    json_arr_foreach(e->prompt_images, i, h) json_push(content, json_clone(h));
+    json_t *um = msg_user_content(content);
+    json_set_str(um, "attribution", "agent");
+    json_push(msgs, um);
+    json_t *tx = a->agent->hooks.transform_context ? a->agent->hooks.transform_context(a, a->agent, msgs) : NULL;
+    json_t *wire = ai_transform_messages(tx ? tx : msgs, model);
+    json_free(tx);
     json_free(msgs);
+    ai_context_t ctx = {.system_prompt = sys, .messages = wire, .tools = json_len(tools) ? tools : NULL};
+    ai_stream_opts_t o = a->agent->base_opts;
+    char *key = app_api_key_for(model);
+    o.api_key = key;
+    fill_request_opts(a, &o);
+    /* side requests never share provider conversation state with the main turn; a keyed topic keeps one lineage,
+     * while the prompt-cache key stays the main session's */
+    char *rid = e->conversation_key ? NULL : short_id();
+    char *sid = e->conversation_key ? xasprintf("%s:side:conversation:%s", main_sid ? main_sid : "", e->conversation_key)
+                                    : xasprintf("%s:side:%s", main_sid ? main_sid : "", rid);
+    free(rid);
+    o.session_id = sid;
+    o.prompt_cache_key = main_sid;
+    o.reasoning = model_clamp_effort(model, a->thinking);
+    o.disable_reasoning = a->thinking == EFFORT_OFF;
+    o.cancel = e->cancel;
+    o.on_payload = NULL;
+    o.cursor_exec = NULL;
+    eph_ud_t x = {.e = e};
+    json_t *r = ai_stream(model, &ctx, &o, eph_event, &x);
+    json_free(wire);
+    json_free(tools);
+    json_free(sys);
     free(key);
-    return text;
+    free(sid);
+    free(main_sid);
+    const char *stop = json_get_str(r, "stopReason");
+    bool cancelled = e->cancel && *e->cancel;
+    if (!r || str_eq(stop, "error") || str_eq(stop, "aborted") || cancelled) {
+        const char *em = json_get_str(r, "errorMessage");
+        *err = xstrdup(cancelled || str_eq(stop, "aborted") ? "Request was aborted"
+                       : em && *em                          ? em
+                                                            : "Ephemeral turn failed");
+        json_free(r);
+        sb_free(&x.text);
+        return NULL;
+    }
+    /* text the provider produced but never streamed as deltas */
+    char *full = ai_message_text(r);
+    const char *got = sb_cstr(&x.text);
+    if (e->on_text_delta && full && strlen(full) > x.text.len && !strncmp(full, got, x.text.len))
+        e->on_text_delta(e->ud, full + x.text.len);
+    char *trim = str_trim(full && strlen(full) > x.text.len ? full : got);
+    *reply = e->dedupe ? app_dedupe_ephemeral_reply(trim, e->reply_max_bytes) : xstrdup(trim);
+    free(trim);
+    free(full);
+    sb_free(&x.text);
+    json_t *blocks = json_arr(), *blk;
+    json_arr_foreach(json_get(r, "content"), i, blk) {
+        if (!str_eq(json_get_str(blk, "type"), "toolCall")) json_push(blocks, json_clone(blk));
+    }
+    json_set(r, "content", blocks);
+    return r;
 }
 
 int app_branch_to(app_t *a, const char *entry_id) {
@@ -2022,6 +2161,64 @@ int app_fork_from(app_t *a, const char *entry_id, char **err) {
     app_bind_artifacts(a, old_dir);
     free(old_dir);
     load_session_into_agent(a);
+    return 0;
+}
+
+/* AgentSession.branchFromBtw: a new session file forked at `leaf_id` holding the /btw question and its answer */
+int app_branch_from_btw(app_t *a, const char *question, const json_t *images, const json_t *assistant,
+                        const char *leaf_id, const char *session_id_, char **err) {
+    if (!a->session || !a->session->file || !a->session->persist) {
+        *err = xstrdup("session is not persisted");
+        return -1;
+    }
+    if (!leaf_id || !str_eq(session_id(a->session), session_id_) || !str_eq(a->session->leaf_id, leaf_id)) {
+        *err = xstrdup("session changed since /btw started");
+        return -1;
+    }
+    if (agent_is_running(a->agent)) {
+        *err = xstrdup("Cannot branch /btw while the agent is running");
+        return -1;
+    }
+    agent_clear_queues(a->agent);
+    session_t *ns = session_fork(a->session, leaf_id, a->opts.session_dir);
+    if (!ns) {
+        *err = xstrdup("fork failed");
+        return -1;
+    }
+    char *old_dir = a->env->artifacts && artifacts_dir(a->env->artifacts) ? xstrdup(artifacts_dir(a->env->artifacts)) : NULL;
+    session_free(a->session);
+    a->session = ns;
+    app_bind_artifacts(a, old_dir);
+    free(old_dir);
+    json_t *content = json_arr(), *img;
+    json_push(content, text_block(question));
+    json_arr_foreach(images, i, img) json_push(content, json_clone(img));
+    json_t *um = msg_user_content(content);
+    json_set_str(um, "attribution", "user");
+    session_append_message(a->session, um);
+    json_free(um);
+    /* sanitizeAssistantForReparentedHistory: replay-bound signatures and provider payloads go */
+    json_t *am = json_clone(assistant), *blocks = json_arr(), *blk;
+    json_arr_foreach(json_get(assistant, "content"), i, blk) {
+        const char *t = json_get_str(blk, "type");
+        if (str_eq(t, "redactedThinking") || str_eq(t, "anthropicServerTool")) continue;
+        if (str_eq(t, "thinking")) {
+            json_t *b = json_obj();
+            json_set_str(b, "type", "thinking");
+            json_set_str(b, "thinking", json_get_str(blk, "thinking") ? json_get_str(blk, "thinking") : "");
+            if (json_get(blk, "summary")) json_set(b, "summary", json_clone(json_get(blk, "summary")));
+            if (json_get_bool(blk, "narration", false)) json_set_bool(b, "narration", true);
+            json_push(blocks, b);
+            continue;
+        }
+        json_push(blocks, json_clone(blk));
+    }
+    json_set(am, "content", blocks);
+    json_del(am, "providerPayload");
+    session_append_message(a->session, am);
+    json_free(am);
+    load_session_into_agent(a);
+    advisor_reset(a->advisor);
     return 0;
 }
 
