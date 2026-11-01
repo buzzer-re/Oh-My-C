@@ -499,6 +499,7 @@ static json_t *summary_msg(const char *tpl_path, const char *summary) {
     json_free(ctx);
     json_t *m = user_text_msg(txt, now_ms());
     free(txt);
+    json_set_bool(m, "historyRewrite", true); /* context usage anchors only on turns after this summary */
     return m;
 }
 
