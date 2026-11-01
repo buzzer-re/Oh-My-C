@@ -121,6 +121,8 @@ check "plan approve"   "approved. Plan mode ended"  bash -c "( printf '%s\n' '{\
 # eval (python kernel) when python3 is available
 if command -v python3 >/dev/null; then
     check "eval python"    "Tool said: 42"  "$B" -m mock/mock-1 -p 'call:eval:{"language":"py","code":"6*7"}'
+    # eval helpers: completion/wait, judge, judge_batch (drain/iter/attach/cancel/min_ok), budget, timeouts, xd://eval docs
+    python3 -I "$ROOT/tests/e2e/eval_client.py" "$B" || fail=1
 fi
 # checkpoint / rewind (off by default: checkpoint.enabled)
 printf "checkpoint:\n  enabled: true\n" > "$T/agent/config.yml"

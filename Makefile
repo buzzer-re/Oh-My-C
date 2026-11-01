@@ -99,8 +99,9 @@ T_test_cursor        := $(CORE_OBJ) $(O)/ai/pb.o $(O)/ai/cursor_proto.o
 T_tui_demo           := $(T_test_tui)
 T_test_chrome        := $(LIB_OBJ)
 T_test_toolcards     := $(T_test_tui) $(patsubst src/%.c,$(O)/%.o,$(wildcard src/ui/tools/*.c))
+T_test_judgment      := $(CORE_OBJ) $(O)/coding/judgment.o $(O)/prompt/template.o $(O)/text/yaml.o
 UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
-              test_chrome test_providers_google test_toolcards test_cursor
+              test_chrome test_providers_google test_toolcards test_cursor test_judgment
 
 .SECONDEXPANSION:
 build/tests/%: tests/%.c $$(T_$$*)
