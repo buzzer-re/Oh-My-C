@@ -1171,7 +1171,11 @@ int run_interactive_mode(app_t *a, const char *initial) {
     ui_chrome_setup(&u);
     history_load(u.editor);
     tui_ac_default_t *ac = tui_ac_default_new(a->cwd);
-    for (size_t i = 0; i < ARRAY_LEN(COMMANDS); i++) tui_ac_default_add_command(ac, COMMANDS[i].name, COMMANDS[i].desc);
+    {
+        const char *names[ARRAY_LEN(COMMANDS)], *descs[ARRAY_LEN(COMMANDS)];
+        for (size_t i = 0; i < ARRAY_LEN(COMMANDS); i++) names[i] = COMMANDS[i].name, descs[i] = COMMANDS[i].desc;
+        ui_slash_register(&u, ac, names, descs, ARRAY_LEN(COMMANDS));
+    }
     tui_editor_set_autocomplete(u.editor, tui_ac_default_provider, ac);
     tui_container_add(root, &u.editor->base);
     u.status = ui_status_new(&u);

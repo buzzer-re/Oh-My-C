@@ -1,0 +1,457 @@
+[
+ {
+  "name": "security",
+  "icon": "shield",
+  "description": "Plan, run, inspect, import, and compare OMP-native security scans"
+ },
+ {
+  "name": "settings",
+  "icon": "settings",
+  "description": "Open settings menu"
+ },
+ {
+  "name": "setup",
+  "aliases": [
+   "providers"
+  ],
+  "icon": "gear",
+  "description": "Open provider setup"
+ },
+ {
+  "name": "plan",
+  "icon": "plan",
+  "description": "Toggle plan mode (agent plans before executing)"
+ },
+ {
+  "name": "plan-review",
+  "icon": "plan",
+  "description": "Re-open the plan review for the latest plan (plan mode only)"
+ },
+ {
+  "name": "vibe",
+  "icon": "wave",
+  "description": "Toggle vibe mode (direct persistent fast/good worker sessions; read-only toolset)"
+ },
+ {
+  "name": "goal",
+  "icon": "goal",
+  "description": "Toggle goal mode (persistent autonomous objective for this session)"
+ },
+ {
+  "name": "guided-goal",
+  "icon": "compass",
+  "description": "Have the agent interview you in chat, then set up goal mode"
+ },
+ {
+  "name": "loop",
+  "icon": "loop"
+ },
+ {
+  "name": "queue",
+  "icon": "inbox",
+  "description": "Queue a message for after the agent yields"
+ },
+ {
+  "name": "model",
+  "aliases": [
+   "models"
+  ],
+  "icon": "model",
+  "description": "Switch model for this session"
+ },
+ {
+  "name": "switch",
+  "icon": "swap"
+ },
+ {
+  "name": "fast",
+  "icon": "fast"
+ },
+ {
+  "name": "slow",
+  "icon": "fast"
+ },
+ {
+  "name": "skillful",
+  "icon": "compass",
+  "description": "Toggle listing available skills in the system prompt (session only)"
+ },
+ {
+  "name": "extended-context",
+  "icon": "expand",
+  "description": "Toggle extended context windows"
+ },
+ {
+  "name": "computer",
+  "icon": "computer",
+  "description": "Toggle the native computer-use eval prelude for this session"
+ },
+ {
+  "name": "ratchet",
+  "icon": "loop",
+  "description": "Build (or reuse) an eval for an LLM flow, then hillclimb it unattended"
+ },
+ {
+  "name": "prewalk",
+  "icon": "prewalk",
+  "description": "Arm, restart, or cancel a one-shot model handoff"
+ },
+ {
+  "name": "modelpreset",
+  "icon": "model",
+  "description": "Save and switch model presets (role models + thinking level)"
+ },
+ {
+  "name": "effort",
+  "icon": "gauge"
+ },
+ {
+  "name": "advisor",
+  "icon": "advisor",
+  "description": "Toggle the advisor (a second model that reviews each turn and injects notes)"
+ },
+ {
+  "name": "export",
+  "icon": "export",
+  "description": "Export session to HTML file"
+ },
+ {
+  "name": "trace",
+  "icon": "stats",
+  "description": "Open this session's trace in the stats dashboard"
+ },
+ {
+  "name": "dump",
+  "icon": "clipboard",
+  "description": "Copy session transcript to clipboard (and write LLM request JSON to tmp)"
+ },
+ {
+  "name": "share",
+  "icon": "share",
+  "description": "Share session via an encrypted link (share server or secret gist)"
+ },
+ {
+  "name": "collab",
+  "icon": "broadcast",
+  "description": "Share this session live via a relay"
+ },
+ {
+  "name": "join",
+  "icon": "signIn",
+  "description": "Join a shared collab session"
+ },
+ {
+  "name": "leave",
+  "icon": "signOut",
+  "description": "Leave the collab session"
+ },
+ {
+  "name": "browser",
+  "icon": "globe",
+  "description": "Toggle browser eval-prelude headless vs visible mode"
+ },
+ {
+  "name": "copy",
+  "icon": "copy",
+  "description": "Pick text or code from the conversation to copy"
+ },
+ {
+  "name": "open",
+  "icon": "globe",
+  "description": "Open the last link from the conversation in your browser (or pick one with /copy)"
+ },
+ {
+  "name": "todo",
+  "icon": "todo",
+  "description": "View or modify the agent's todo list"
+ },
+ {
+  "name": "session",
+  "icon": "session",
+  "description": "Session management commands"
+ },
+ {
+  "name": "jobs",
+  "icon": "jobs",
+  "description": "Show async background jobs status"
+ },
+ {
+  "name": "usage",
+  "icon": "gauge",
+  "description": "Show provider usage and limits"
+ },
+ {
+  "name": "stats",
+  "icon": "stats",
+  "description": "Launch the local stats dashboard"
+ },
+ {
+  "name": "changelog",
+  "icon": "news",
+  "description": "Show changelog entries"
+ },
+ {
+  "name": "hotkeys",
+  "icon": "keyboard",
+  "description": "Show all keyboard shortcuts"
+ },
+ {
+  "name": "tools",
+  "icon": "tools",
+  "description": "Show tools currently visible to the agent"
+ },
+ {
+  "name": "context",
+  "icon": "context",
+  "description": "Browse context usage and detailed content"
+ },
+ {
+  "name": "extensions",
+  "aliases": [
+   "status"
+  ],
+  "icon": "extension",
+  "description": "Open Extension Control Center dashboard"
+ },
+ {
+  "name": "agents",
+  "icon": "agents",
+  "description": "Open the agents hub (per-agent model, prewalk, and advisor)"
+ },
+ {
+  "name": "git",
+  "icon": "branch",
+  "description": "Open the git UI (split diff viewer, staging, commit composer)"
+ },
+ {
+  "name": "local",
+  "icon": "pencil",
+  "description": "Open a session local:// file in $EDITOR (picker when no name given)"
+ },
+ {
+  "name": "hub",
+  "aliases": [
+   "subagents"
+  ],
+  "icon": "agents",
+  "description": "Open the live Agent Hub (subagents, including finished ones)"
+ },
+ {
+  "name": "branch",
+  "aliases": [
+   "rewind"
+  ],
+  "icon": "branch",
+  "description": "Rewind to a previous message, keeping the old path as a branch"
+ },
+ {
+  "name": "fork",
+  "icon": "branch",
+  "description": "Fork this session, or open it in a multiplexer pane or window"
+ },
+ {
+  "name": "tree",
+  "icon": "tree",
+  "description": "Navigate session tree (switch branches)"
+ },
+ {
+  "name": "login",
+  "icon": "signIn",
+  "description": "Login with OAuth provider"
+ },
+ {
+  "name": "logout",
+  "icon": "signOut",
+  "description": "Logout from OAuth provider"
+ },
+ {
+  "name": "mcp",
+  "icon": "mcp",
+  "description": "Manage MCP servers (add, list, remove, test)"
+ },
+ {
+  "name": "ssh",
+  "icon": "host",
+  "description": "Manage SSH hosts (add, list, remove)"
+ },
+ {
+  "name": "new",
+  "icon": "plus",
+  "description": "Start a new session"
+ },
+ {
+  "name": "fresh",
+  "icon": "restart",
+  "description": "Reset provider stream state without changing the local transcript"
+ },
+ {
+  "name": "clear",
+  "icon": "eraser",
+  "description": "Clear the conversation context in place, keeping the session"
+ },
+ {
+  "name": "delete",
+  "icon": "trash",
+  "description": "Delete the current session and start a new one"
+ },
+ {
+  "name": "compact",
+  "icon": "compress",
+  "description": "Manually compact the session context"
+ },
+ {
+  "name": "shake",
+  "icon": "vibrate",
+  "description": "Drop heavy content from context (tool results, large blocks)"
+ },
+ {
+  "name": "handoff",
+  "icon": "handoff",
+  "description": "Summarize the session into a handoff document and compact in place"
+ },
+ {
+  "name": "resume",
+  "icon": "history",
+  "description": "Resume a different session"
+ },
+ {
+  "name": "pin",
+  "icon": "pin",
+  "description": "Pin or unpin a session at the top of the resume list"
+ },
+ {
+  "name": "btw",
+  "icon": "question",
+  "description": "Ask a side question, or browse this session's BTW history"
+ },
+ {
+  "name": "tan",
+  "icon": "rocket",
+  "description": "Run a full background agent on tangential work"
+ },
+ {
+  "name": "omfg",
+  "icon": "rule",
+  "description": "Forge a TTSR rule from a complaint to stop a recurring behavior"
+ },
+ {
+  "name": "cleanse",
+  "icon": "stethoscope",
+  "description": "Detect and fix project diagnostics with weighted parallel subagents"
+ },
+ {
+  "name": "retry",
+  "icon": "redo",
+  "description": "Retry the last failed agent turn"
+ },
+ {
+  "name": "debug",
+  "icon": "bug",
+  "description": "Open debug tools selector"
+ },
+ {
+  "name": "memory",
+  "icon": "memory",
+  "description": "Inspect and operate memory maintenance"
+ },
+ {
+  "name": "rename",
+  "icon": "pencil",
+  "description": "Rename the current session (omit title to generate)"
+ },
+ {
+  "name": "move",
+  "icon": "folderMove",
+  "description": "Move the current session to a different directory"
+ },
+ {
+  "name": "wt",
+  "aliases": [
+   "worktree"
+  ],
+  "icon": "folderMove",
+  "description": "Move this session into a new worktree, changes included"
+ },
+ {
+  "name": "add-dir",
+  "icon": "folderPlus",
+  "description": "Add a workspace directory to this session (multi-root)"
+ },
+ {
+  "name": "remove-dir",
+  "icon": "folderMinus",
+  "description": "Remove a workspace directory from this session"
+ },
+ {
+  "name": "dirs",
+  "description": "List this session's workspace directories"
+ },
+ {
+  "name": "exit",
+  "description": "Exit the application"
+ },
+ {
+  "name": "restart",
+  "icon": "restart",
+  "description": "Restart omp with the same launch flags, resuming this session"
+ },
+ {
+  "name": "marketplace",
+  "icon": "cart",
+  "description": "Manage marketplace plugin sources and installed plugins"
+ },
+ {
+  "name": "plugins",
+  "aliases": [
+   "plugin"
+  ],
+  "icon": "package",
+  "description": "View and manage installed plugins"
+ },
+ {
+  "name": "reload-plugins",
+  "icon": "restart",
+  "description": "Reload all plugins (skills, commands, hooks, tools, agents, MCP)"
+ },
+ {
+  "name": "skills",
+  "icon": "skill",
+  "description": "Search, install, and update skills from the skills.omp.sh registry"
+ },
+ {
+  "name": "force",
+  "aliases": [
+   "force:"
+  ],
+  "icon": "hammer",
+  "description": "Force next turn to use a specific tool"
+ },
+ {
+  "name": "live",
+  "icon": "voice",
+  "description": "Start Codex-backed realtime voice mode"
+ },
+ {
+  "name": "record",
+  "icon": "export",
+  "description": "Start or stop recording this screen to a replayable file (omp play)"
+ },
+ {
+  "name": "pause",
+  "icon": "pause",
+  "description": "Freeze all agents (main, subagents, advisor) until resumed"
+ },
+ {
+  "name": "forget-approvals",
+  "icon": "trash",
+  "description": "Forget every file and folder approval Ask and remember has recorded"
+ },
+ {
+  "name": "quit",
+  "aliases": [
+   "q"
+  ],
+  "icon": "power",
+  "description": "Quit the application"
+ }
+]

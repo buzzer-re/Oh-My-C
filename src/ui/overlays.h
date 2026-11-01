@@ -9,6 +9,7 @@
 #define OMC_UI_OVERLAYS_H
 
 #include "tui/components.h"
+#include "tui/editor.h"
 #include "tui/render.h"
 #include "tui/symbols.h"
 
@@ -88,6 +89,11 @@ void ui_overlay_hotkeys(ui_t *u);
 void ui_overlay_login(ui_t *u, bool logout);
 /* ask tool: questions array (upstream ask tool args); answers posted via ui->ask_* */
 void ui_overlay_ask(ui_t *u);
+
+/* ---------- slash.c ---------- */
+
+/* register slash commands for autocomplete in upstream registry order with icons and (live) descriptions */
+void ui_slash_register(ui_t *u, tui_ac_default_t *ac, const char *const *names, const char *const *descs, size_t n);
 
 /* ---------- appearance.c ---------- */
 

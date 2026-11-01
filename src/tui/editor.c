@@ -12,8 +12,14 @@ enum { ACT_NONE, ACT_TYPE, ACT_OTHER };
 /* ---------- autocomplete result ---------- */
 
 void tui_ac_result_add(tui_ac_result_t *r, const char *value, const char *label, const char *description) {
+    tui_ac_result_add_icon(r, value, label, description, NULL);
+}
+
+void tui_ac_result_add_icon(tui_ac_result_t *r, const char *value, const char *label, const char *description,
+                            const char *icon) {
     tui_select_item_t it = {xstrdup(value ? value : ""), label ? xstrdup(label) : NULL,
-                            description && *description ? xstrdup(description) : NULL, NULL, NULL, false};
+                            description && *description ? xstrdup(description) : NULL, icon && *icon ? xstrdup(icon) : NULL,
+                            NULL, false};
     vec_push(&r->items, it);
 }
 
@@ -22,9 +28,48 @@ void tui_ac_result_free(tui_ac_result_t *r) {
         free(r->items.v[i].value);
         free(r->items.v[i].label);
         free(r->items.v[i].description);
+        free(r->items.v[i].icon);
+        free(r->items.v[i].hint);
     }
     vec_free(&r->items);
     r->prefix_len = 0;
+}
+
+/* ---------- slash-command scoring (upstream autocomplete.ts) ---------- */
+
+static bool ac_subsequence(const char *q, const char *t) {
+    size_t ql = strlen(q), tl = strlen(t);
+    if (!ql) return true;
+    if (ql > tl) return false;
+    size_t qi = 0;
+    for (size_t ti = 0; ti < tl && qi < ql; ti++)
+        if (q[qi] == t[ti]) qi++;
+    return qi == ql;
+}
+
+static double ac_subsequence_score(const char *q, const char *t) {
+    if (!*q) return 1;
+    if (!strcmp(t, q)) return 100;
+    if (str_starts(t, q)) return 80;
+    if (strstr(t, q)) return 60;
+    size_t ql = strlen(q), qi = 0;
+    int gaps = 0;
+    long last = -1;
+    for (size_t ti = 0; t[ti] && qi < ql; ti++)
+        if (q[qi] == t[ti]) {
+            if (last >= 0 && (long)ti - last > 1) gaps++;
+            last = (long)ti;
+            qi++;
+        }
+    if (qi != ql) return 0;
+    return MAX(1, 40 - gaps * 5);
+}
+
+static double ac_command_score(const char *q, const char *t) {
+    if (!*q) return 1;
+    if (!strcmp(q, t)) return 1000;
+    if (str_starts(t, q)) return 900;
+    return ac_subsequence(q, t) ? ac_subsequence_score(q, t) : 0;
 }
 
 /* ---------- default provider ---------- */
@@ -37,14 +82,20 @@ tui_ac_default_t *tui_ac_default_new(const char *cwd) {
 }
 
 void tui_ac_default_add_command(tui_ac_default_t *p, const char *name, const char *description) {
+    tui_ac_default_add_command_icon(p, name, description, NULL);
+}
+
+void tui_ac_default_add_command_icon(tui_ac_default_t *p, const char *name, const char *description, const char *icon) {
     strvec_push(&p->commands, name);
     strvec_push(&p->descriptions, description ? description : "");
+    strvec_push(&p->icons, icon ? icon : "");
 }
 
 void tui_ac_default_free(tui_ac_default_t *p) {
     if (!p) return;
     strvec_free(&p->commands);
     strvec_free(&p->descriptions);
+    strvec_free(&p->icons);
     free(p->cwd);
     free(p);
 }
@@ -90,18 +141,46 @@ static bool complete_path(tui_ac_default_t *p, const char *token, size_t token_l
 bool tui_ac_default_provider(void *ud, const char *line_before, bool first_line, bool forced, tui_ac_result_t *out) {
     tui_ac_default_t *p = ud;
     size_t len = strlen(line_before);
-    /* slash commands: "/xyz" alone on the first line */
+    /* slash commands: "/xyz" alone on the first line (upstream buildSlashCommandCompletions ranking:
+     * exact 1000, prefix 900, else subsequence tiers; a description subsequence scores half) */
     if (first_line && line_before[0] == '/' && !strpbrk(line_before, " \t")) {
-        const char *q = line_before + 1;
-        for (size_t i = 0; i < p->commands.n && (int)out->items.n < p->max_items; i++) {
-            if (*q && tui_fuzzy_score(q, p->commands.v[i]) < 0) continue;
-            char *val = xasprintf("/%s ", p->commands.v[i]);
-            char *label = xasprintf("/%s", p->commands.v[i]);
-            tui_ac_result_add(out, val, label, p->descriptions.v[i]);
-            free(val);
-            free(label);
+        char *q = str_lower(line_before + 1);
+        size_t n = p->commands.n;
+        double *score = xcalloc(n ? n : 1, sizeof *score);
+        size_t *order = xcalloc(n ? n : 1, sizeof *order);
+        size_t m = 0;
+        for (size_t i = 0; i < n; i++) {
+            char *ln = str_lower(p->commands.v[i]), *ld = str_lower(p->descriptions.v[i]);
+            double ns = ac_command_score(q, ln);
+            double ds = *ld && ac_subsequence(q, ld) ? ac_subsequence_score(q, ld) * 0.5 : 0;
+            double s = ns > ds ? ns : ds;
+            free(ln);
+            free(ld);
+            if (s <= 0) continue;
+            score[i] = s;
+            order[m++] = i;
         }
+        /* stable sort by score desc */
+        for (size_t a = 1; a < m; a++)
+            for (size_t b = a; b > 0 && score[order[b]] > score[order[b - 1]]; b--) {
+                size_t t = order[b];
+                order[b] = order[b - 1];
+                order[b - 1] = t;
+            }
+        for (size_t k = 0; k < m && (int)out->items.n < p->max_items; k++) {
+            size_t i = order[k];
+            char *val = xasprintf("/%s ", p->commands.v[i]);
+            char *live = p->describe ? p->describe(p->describe_ud, p->commands.v[i]) : NULL;
+            tui_ac_result_add_icon(out, val, p->commands.v[i], live ? live : p->descriptions.v[i],
+                                   i < p->icons.n ? p->icons.v[i] : NULL);
+            free(live);
+            free(val);
+        }
+        free(score);
+        free(order);
+        free(q);
         out->prefix_len = len;
+        out->slash = true;
         return out->items.n > 0;
     }
     /* current token */
@@ -535,9 +614,17 @@ static void refresh_ac(tui_editor_t *ed, bool forced) {
     close_ac(ed);
     ed->ac_list = tui_select_list_new(ed->ac_max_visible);
     ed->ac_list->filter_enabled = false;
+    if (r.slash) {
+        /* SLASH_COMMAND_SELECT_LIST_LAYOUT */
+        ed->ac_list->layout.min_primary = 12;
+        ed->ac_list->layout.max_primary = 32;
+        ed->ac_list->layout.wrap_description = true;
+        ed->ac_list->layout.max_description_rows = 2;
+    }
     ed->ac_list->base.tui = ed->base.tui;
     for (size_t i = 0; i < r.items.n; i++) {
-        tui_select_list_add(ed->ac_list, r.items.v[i].value, r.items.v[i].label, r.items.v[i].description);
+        tui_select_list_add_item(ed->ac_list, r.items.v[i].value, r.items.v[i].label, r.items.v[i].description,
+                                 r.items.v[i].icon, false);
         if (prev_val && !strcmp(prev_val, r.items.v[i].value)) keep_sel = i;
     }
     ed->ac_list->selected = keep_sel;
@@ -1127,7 +1214,7 @@ tui_editor_t *tui_editor_new(void) {
     strvec_push(&ed->lines, "");
     ed->preferred_col = -1;
     ed->hist_index = -1;
-    ed->ac_max_visible = 5;
+    ed->ac_max_visible = 10;
     ed->border_slot = TUI_TC_BORDER;
     return ed;
 }

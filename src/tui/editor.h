@@ -26,9 +26,12 @@
 typedef struct {
     size_t prefix_len; /* bytes before the cursor (current line) replaced by an accepted value */
     VEC(tui_select_item_t) items;
+    bool slash;        /* slash-command completions (popup uses the slash-command layout) */
 } tui_ac_result_t;
 
 void tui_ac_result_add(tui_ac_result_t *r, const char *value, const char *label, const char *description);
+void tui_ac_result_add_icon(tui_ac_result_t *r, const char *value, const char *label, const char *description,
+                            const char *icon);
 void tui_ac_result_free(tui_ac_result_t *r);
 
 /* Provider: fill `out` for the text before the cursor on the current line. `first_line` is
@@ -41,12 +44,17 @@ typedef bool (*tui_autocomplete_fn)(void *ud, const char *line_before, bool firs
 typedef struct {
     strvec_t commands;     /* names without '/' */
     strvec_t descriptions; /* parallel to commands ("" if none) */
+    strvec_t icons;        /* parallel to commands ("" if none) */
+    /* optional live display description (owned result, NULL = static one); matching uses the static one */
+    char *(*describe)(void *ud, const char *name);
+    void *describe_ud;
     char *cwd;             /* NULL = process cwd */
     int max_items;         /* default 50 */
 } tui_ac_default_t;
 
 tui_ac_default_t *tui_ac_default_new(const char *cwd);
 void tui_ac_default_add_command(tui_ac_default_t *p, const char *name, const char *description);
+void tui_ac_default_add_command_icon(tui_ac_default_t *p, const char *name, const char *description, const char *icon);
 void tui_ac_default_free(tui_ac_default_t *p);
 bool tui_ac_default_provider(void *ud, const char *line_before, bool first_line, bool forced, tui_ac_result_t *out);
 
