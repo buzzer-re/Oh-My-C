@@ -1,7 +1,7 @@
 /*
  * walker.h - fast parallel recursive directory walker (ripgrep/ignore-crate style).
  *
- * Honors .gitignore (inside git repos), .ignore (always), .git/info/exclude and the global
+ * Honors .gitignore and .ignore (everywhere, like pi-walker), .git/info/exclude and the global
  * core.excludesFile, including ignore files in ancestor directories up to the repo root (rules
  * that would exclude the walk root itself are dropped, so explicitly walking an ignored dir works).
  * Always skips `.git`. Hidden entries (leading '.') skipped unless include_hidden.

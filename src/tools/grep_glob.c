@@ -7,57 +7,13 @@
 #include "text/search.h"
 #include "text/walker.h"
 
+#include "tools/outsink.h"
+
+#include <ctype.h>
+#include <errno.h>
+#include <math.h>
 #include <sys/stat.h>
 
-#define GREP_FILES_PER_PAGE 20
-#define GREP_PER_FILE_MAX 50
-#define GREP_LINE_MAX 512
-#define GREP_OUTPUT_MAX (50u * 1024)
-
-/* split "a; b; !c" into includes/excludes */
-static void split_paths(const char *spec, strvec_t *inc, strvec_t *exc) {
-    strvec_t parts = str_split(spec ? spec : ".", ";");
-    for (size_t i = 0; i < parts.n; i++) {
-        char *t = str_trim(parts.v[i]);
-        if (!*t) {
-            free(t);
-            continue;
-        }
-        if (t[0] == '!') {
-            strvec_push(exc, t + 1);
-            free(t);
-        } else {
-            strvec_push_own(inc, t);
-        }
-    }
-    if (!inc->n) strvec_push(inc, ".");
-    strvec_free(&parts);
-}
-
-/* split a path into its literal base dir and the glob remainder (from the first magic segment on) */
-static void split_glob(const char *p, char **base, char **glob) {
-    if (!glob_has_magic(p)) {
-        *base = xstrdup(p);
-        *glob = NULL;
-        return;
-    }
-    strvec_t segs = str_split(p, "/");
-    sb_t b = SB_INIT;
-    size_t i = 0;
-    for (; i < segs.n; i++) {
-        if (glob_has_magic(segs.v[i])) break;
-        if (b.len || p[0] == '/') sb_putc(&b, '/');
-        sb_append(&b, segs.v[i]);
-    }
-    sb_t g = SB_INIT;
-    for (size_t k = i; k < segs.n; k++) {
-        if (g.len) sb_putc(&g, '/');
-        sb_append(&g, segs.v[k]);
-    }
-    *base = b.len ? sb_detach(&b) : (sb_free(&b), xstrdup("."));
-    *glob = sb_detach(&g);
-    strvec_free(&segs);
-}
 
 /* ---------- display content (omp grouped-file-output: `# dir/` / `## file#TAG` path tree, `*N│text` rows) ---------- */
 
@@ -73,8 +29,20 @@ typedef struct {
     char *suffix; /* header suffix (` (2 replacements)`) or NULL */
     VEC(dline_t) lines;
     bool no_gaps; /* no `│...` rows between non-adjacent lines */
+    size_t model_end; /* model rendering: output index just past this file's rows */
 } dfile_t;
 typedef VEC(dfile_t) dfiles_t;
+
+/* model rows (omp formatMatchLine): `*N:text` / ` N:text` (hashline) or `*N|text`, `...` between gaps */
+static void dfile_model_rows(const dfile_t *f, bool hl, strvec_t *out) {
+    uint32_t last = 0;
+    for (size_t i = 0; i < f->lines.n; i++) {
+        const dline_t *l = &f->lines.v[i];
+        if (last && l->line > last + 1) strvec_push(out, "...");
+        strvec_push_own(out, xasprintf("%c%u%c%s", l->match ? '*' : ' ', l->line, hl ? ':' : '|', l->text));
+        last = l->line;
+    }
+}
 
 static void dfile_rows(const dfile_t *f, strvec_t *out) {
     int w = 0;
@@ -121,9 +89,10 @@ static void pnode_free(pnode_t *n) {
     free(n);
 }
 
-static void pnode_walk(const pnode_t *n, int depth, const dfiles_t *fs, bool *emitted, strvec_t *out) {
+/* model < 0: display rows; 0/1: model rows (plain / hashline) */
+static void pnode_walk(const pnode_t *n, int depth, dfiles_t *fs, bool *emitted, strvec_t *out, int model) {
     for (size_t i = 0; i < n->files.n; i++) {
-        const dfile_t *f = &fs->v[n->files.v[i]];
+        dfile_t *f = &fs->v[n->files.v[i]];
         if (*emitted && depth == 0) strvec_push(out, "");
         *emitted = true;
         const char *slash = strrchr(f->path, '/');
@@ -133,7 +102,9 @@ static void pnode_walk(const pnode_t *n, int depth, const dfiles_t *fs, bool *em
         if (f->tag) sb_appendf(&h, "#%s", f->tag);
         if (f->suffix) sb_append(&h, f->suffix);
         strvec_push_own(out, sb_detach(&h));
-        dfile_rows(f, out);
+        if (model >= 0) dfile_model_rows(f, model > 0, out);
+        else dfile_rows(f, out);
+        f->model_end = out->n;
     }
     for (size_t i = 0; i < n->dirs.n; i++) {
         const pnode_t *d = n->dirs.v[i];
@@ -150,11 +121,43 @@ static void pnode_walk(const pnode_t *n, int depth, const dfiles_t *fs, bool *em
         sb_appendf(&h, " %s/", sb_cstr(&name));
         strvec_push_own(out, sb_detach(&h));
         sb_free(&name);
-        pnode_walk(d, depth + 1, fs, emitted, out);
+        pnode_walk(d, depth + 1, fs, emitted, out, model);
     }
 }
 
-static char *grep_display(const dfiles_t *fs, bool grouped) {
+/* omp formatFileMatches: grouped path tree or flat blank-separated files; model >= 0 renders model rows
+ * (flat files then carry a `[path#TAG]` hashline header when tagged) and records each file's model_end */
+static strvec_t grep_render(dfiles_t *fs, bool grouped, int model) {
+    strvec_t out = {0};
+    if (!grouped) {
+        for (size_t i = 0; i < fs->n; i++) {
+            if (out.n) strvec_push(&out, "");
+            if (model >= 0) {
+                if (fs->v[i].tag) strvec_push_own(&out, xasprintf("[%s#%s]", fs->v[i].path, fs->v[i].tag));
+                dfile_model_rows(&fs->v[i], model > 0, &out);
+            } else {
+                dfile_rows(&fs->v[i], &out);
+            }
+            fs->v[i].model_end = out.n;
+        }
+    } else {
+        pnode_t *root = xcalloc(1, sizeof *root);
+        for (size_t i = 0; i < fs->n; i++) {
+            strvec_t segs = str_split(fs->v[i].path, "/");
+            pnode_t *n = root;
+            for (size_t k = 0; k + 1 < segs.n; k++)
+                n = pnode_child(n, segs.v[k]);
+            vec_push(&n->files, i);
+            strvec_free(&segs);
+        }
+        bool emitted = false;
+        pnode_walk(root, 0, fs, &emitted, &out, model);
+        pnode_free(root);
+    }
+    return out;
+}
+
+static char *grep_display(dfiles_t *fs, bool grouped) {
     strvec_t out = {0};
     if (!grouped) {
         for (size_t i = 0; i < fs->n; i++) {
@@ -172,7 +175,7 @@ static char *grep_display(const dfiles_t *fs, bool grouped) {
             strvec_free(&segs);
         }
         bool emitted = false;
-        pnode_walk(root, 0, fs, &emitted, &out);
+        pnode_walk(root, 0, fs, &emitted, &out, -1);
         pnode_free(root);
     }
     char *r = strvec_join(&out, "\n");
@@ -208,201 +211,1180 @@ char *grep_display_content(const json_t *files, bool grouped) {
     return r;
 }
 
-static char *scope_display(const char *spec, const char *cwd, tool_env_t *env) {
-    char *abs = tool_resolve_path(env, spec);
-    char *r = !strcmp(abs, cwd) ? xstrdup(".") : path_display(abs, cwd);
+/* ---------- omp path-utils subset: path lists, selectors, search scope ---------- */
+
+/* normalizePathLikeInput: trim + strip one pair of outer double quotes */
+static char *norm_input(const char *s) {
+    char *t = str_trim(s ? s : "");
+    size_t n = strlen(t);
+    if (n > 1 && t[0] == '"' && t[n - 1] == '"') {
+        memmove(t, t + 1, n - 2);
+        t[n - 2] = 0;
+    }
+    return t;
+}
+
+static bool has_glob_chars(const char *s) { return strpbrk(s, "*?[{") != NULL; }
+
+/* formatPathRelativeToCwd: cwd-relative when inside cwd ("." for cwd itself), else absolute */
+static char *rel_cwd(const char *abs, const char *cwd, bool trailing_slash) {
+    char *n = path_normalize(abs);
+    char *r;
+    size_t cl = strlen(cwd);
+    if (!strcmp(n, cwd)) r = xstrdup(".");
+    else if (!strncmp(n, cwd, cl) && (n[cl] == '/' || (cl == 1 && cwd[0] == '/'))) r = xstrdup(n + (cl == 1 ? 1 : cl + 1));
+    else r = xstrdup(n);
+    free(n);
+    if (trailing_slash && strcmp(r, ".") != 0 && !str_ends(r, "/")) {
+        char *t = xasprintf("%s/", r);
+        free(r);
+        r = t;
+    }
+    return r;
+}
+
+/* probeLiteralPathExists: 1 exists, 0 missing, -1 unknown */
+static int probe_literal(tool_env_t *env, const char *p) {
+    char *abs = tool_resolve_path(env, p);
+    struct stat st;
+    int r = lstat(abs, &st) == 0 ? 1 : (errno == ENOENT || errno == ENOTDIR || errno == ENAMETOOLONG) ? 0 : -1;
     free(abs);
     return r;
 }
 
-/* ---------- grep ---------- */
+/* one chunk of read's RANGE_LIST_SRC: `-N` or `L?N((..|-|+)L?N?)?` ending in a digit, '.' or '-' */
+static bool sel_chunk_ok(const char *s, size_t n) {
+    if (!n) return false;
+    size_t i = 0;
+    if (s[0] == '-') {
+        for (i = 1; i < n; i++)
+            if (!isdigit((unsigned char)s[i])) return false;
+        return n > 1;
+    }
+    if (s[i] == 'L' || s[i] == 'l') i++;
+    size_t d = i;
+    while (i < n && isdigit((unsigned char)s[i])) i++;
+    if (i == d) return false;
+    if (i == n) return true;
+    if (s[i] == '.' && i + 1 < n && s[i + 1] == '.') i += 2;
+    else if (s[i] == '-' || s[i] == '+') i++;
+    else return false;
+    if (i < n && (s[i] == 'L' || s[i] == 'l')) i++;
+    while (i < n && isdigit((unsigned char)s[i])) i++;
+    if (i != n) return false;
+    char c = s[n - 1];
+    return isdigit((unsigned char)c) || c == '.' || c == '-';
+}
+
+static bool sel_list_ok(const char *s, size_t n) {
+    size_t st = 0;
+    for (size_t i = 0; i <= n; i++) {
+        if (i == n || s[i] == ',') {
+            if (!sel_chunk_ok(s + st, i - st)) return false;
+            st = i + 1;
+        }
+    }
+    return true;
+}
+
+static bool word_ieq(const char *s, size_t n, const char *w) { return strlen(w) == n && !strncasecmp(s, w, n); }
+
+/* read's splitPathAndSel (folding repeated list colons) */
+static void split_path_sel(const char *raw, char **path, char **sel) {
+    *sel = NULL;
+    const char *colon = strrchr(raw, ':');
+    if (!colon || colon == raw) {
+        *path = xstrdup(raw);
+        return;
+    }
+    const char *cand = colon + 1;
+    size_t cl = strlen(cand);
+    bool list_ok = sel_list_ok(cand, cl);
+    if (!list_ok && !word_ieq(cand, cl, "raw") && !word_ieq(cand, cl, "conflicts") && !word_ieq(cand, cl, "img")) {
+        *path = xstrdup(raw);
+        return;
+    }
+    char *base = xstrndup(raw, (size_t)(colon - raw));
+    char *list = NULL, *raw_suffix = NULL;
+    if (list_ok) {
+        list = xstrdup(cand);
+    } else if (word_ieq(cand, cl, "raw")) {
+        char *ic = strrchr(base, ':');
+        if (ic && ic > base && sel_list_ok(ic + 1, strlen(ic + 1))) {
+            list = xstrdup(ic + 1);
+            raw_suffix = xasprintf(":%s", cand);
+            *ic = 0;
+        }
+    }
+    if (!list) {
+        *path = base;
+        *sel = xstrdup(cand);
+        return;
+    }
+    /* foldRepeatedListColons(minColon 1) */
+    for (;;) {
+        size_t bl = strlen(base);
+        if (!bl || base[bl - 1] != ',') break;
+        char *c = strrchr(base, ':');
+        if (!c || c - base < 1) break;
+        size_t chl = (size_t)(base + bl - 1 - (c + 1));
+        if (!sel_list_ok(c + 1, chl)) break;
+        char *nl = xasprintf("%.*s,%s", (int)chl, c + 1, list);
+        free(list);
+        list = nl;
+        *c = 0;
+    }
+    if (!raw_suffix) {
+        char *ic = strrchr(base, ':');
+        if (ic && ic > base && word_ieq(ic + 1, strlen(ic + 1), "raw")) {
+            *sel = xasprintf("%s:%s", ic + 1, list);
+            *ic = 0;
+            *path = base;
+            free(list);
+            return;
+        }
+    }
+    *path = base;
+    *sel = xasprintf("%s%s", list, raw_suffix ? raw_suffix : "");
+    free(list);
+    free(raw_suffix);
+}
+
+/* splitPathAndSelPreferringLiteral (POSIX: an existing or unprobeable literal keeps the whole path) */
+static void split_path_sel_literal(tool_env_t *env, const char *raw, char **path, char **sel) {
+    split_path_sel(raw, path, sel);
+    if (!*sel) return;
+    if (probe_literal(env, raw) != 0) {
+        free(*path);
+        free(*sel);
+        *path = xstrdup(raw);
+        *sel = NULL;
+    }
+}
+
+typedef struct {
+    int64_t lo, hi; /* hi 0 = open-ended */
+} lrange_t;
+typedef VEC(lrange_t) lranges_t;
+typedef VEC(size_t) sizevec_t;
+
+static int cmp_lrange(const void *a, const void *b) {
+    const lrange_t *x = a, *y = b;
+    return x->lo < y->lo ? -1 : x->lo > y->lo;
+}
+
+/* parseLineRanges(sel, "onward"): false when not a range list; *err set for invalid ranges */
+static bool parse_line_ranges(const char *sel, lranges_t *out, char **err) {
+    strvec_t ch = str_split(sel, ",");
+    bool pin = ch.n > 1, ok = true;
+    for (size_t i = 0; i < ch.n && ok; i++) {
+        const char *s = ch.v[i];
+        size_t k = 0;
+        if (s[k] == 'L' || s[k] == 'l') k++;
+        size_t d = k;
+        while (isdigit((unsigned char)s[k])) k++;
+        if (k == d) { ok = false; break; }
+        int64_t a = strtoll(s + d, NULL, 10);
+        char sep = 0;
+        if (s[k] == '.' && s[k + 1] == '.') { sep = '-'; k += 2; }
+        else if (s[k] == '-' || s[k] == '+') sep = s[k++];
+        bool has_rhs = false;
+        int64_t b = 0;
+        if (sep) {
+            if (s[k] == 'L' || s[k] == 'l') k++;
+            size_t d2 = k;
+            while (isdigit((unsigned char)s[k])) k++;
+            if (k > d2) { has_rhs = true; b = strtoll(s + d2, NULL, 10); }
+        }
+        if (s[k]) { ok = false; break; }
+        if (a < 1) {
+            *err = xstrdup("Line selector 0 is invalid; lines are 1-indexed. Use :1.");
+            ok = false;
+            break;
+        }
+        lrange_t r = {a, 0};
+        if (sep == '+') {
+            if (!has_rhs || b < 1) {
+                *err = xasprintf("Invalid range %lld+%lld: count must be >= 1.", (long long)a, (long long)(has_rhs ? b : 0));
+                ok = false;
+                break;
+            }
+            r.hi = a + b - 1;
+        } else if (sep == '-') {
+            if (has_rhs) {
+                if (b < a) {
+                    *err = xasprintf("Invalid range %lld-%lld: end must be >= start.", (long long)a, (long long)b);
+                    ok = false;
+                    break;
+                }
+                r.hi = b;
+            }
+        } else if (pin) {
+            r.hi = a;
+        }
+        vec_push(out, r);
+    }
+    strvec_free(&ch);
+    if (!ok || !out->n) {
+        out->n = 0;
+        return false;
+    }
+    /* mergeLineRanges */
+    qsort(out->v, out->n, sizeof(lrange_t), cmp_lrange);
+    size_t m = 1;
+    for (size_t i = 1; i < out->n; i++) {
+        lrange_t *last = &out->v[m - 1];
+        if (last->hi == 0) break;
+        if (out->v[i].lo <= last->hi + 1) {
+            if (out->v[i].hi == 0 || out->v[i].hi > last->hi) last->hi = out->v[i].hi;
+            continue;
+        }
+        out->v[m++] = out->v[i];
+    }
+    out->n = m;
+    return true;
+}
+
+static bool in_ranges(int64_t line, const lranges_t *r) {
+    for (size_t i = 0; i < r->n; i++)
+        if (line >= r->v[i].lo && (r->v[i].hi == 0 || line <= r->v[i].hi)) return true;
+    return false;
+}
+
+/* parseSearchPath: base dir + glob from the first segment holding glob characters */
+static void parse_search_path(const char *p, char **base, char **glob) {
+    char *n = str_replace(p, "\\", "/");
+    strvec_t segs = str_split(n, "/");
+    size_t i = 0;
+    while (i < segs.n && !has_glob_chars(segs.v[i])) i++;
+    *glob = NULL;
+    if (i == segs.n) {
+        *base = n;
+        n = NULL;
+    } else if (i == 0) {
+        *base = xstrdup(".");
+        *glob = n;
+        n = NULL;
+    } else {
+        sb_t b = SB_INIT, g = SB_INIT;
+        for (size_t k = 0; k < segs.n; k++) {
+            sb_t *t = k < i ? &b : &g;
+            if (k != 0 && k != i) sb_putc(t, '/');
+            sb_append(t, segs.v[k]);
+        }
+        *base = sb_detach(&b);
+        *glob = sb_detach(&g);
+    }
+    free(n);
+    strvec_free(&segs);
+}
+
+/* parseFindPattern */
+static void parse_find_pattern(const char *p, char **base, char **glob, bool *has_glob, bool *dir_only) {
+    char *n = str_replace(p, "\\", "/");
+    strvec_t segs = str_split(n, "/");
+    size_t i = 0;
+    while (i < segs.n && !has_glob_chars(segs.v[i])) i++;
+    *dir_only = false;
+    if (i == segs.n) {
+        *base = n;
+        *glob = xstrdup("**/*");
+        *has_glob = false;
+        strvec_free(&segs);
+        return;
+    }
+    *has_glob = true;
+    char *g;
+    if (i == 0) {
+        *base = xstrdup(".");
+        g = str_starts(n, "**/") ? xstrdup(n) : xasprintf("**/%s", n);
+    } else {
+        sb_t b = SB_INIT, gb = SB_INIT;
+        for (size_t k = 0; k < segs.n; k++) {
+            sb_t *t = k < i ? &b : &gb;
+            if (k != 0 && k != i) sb_putc(t, '/');
+            sb_append(t, segs.v[k]);
+        }
+        *base = sb_detach(&b);
+        g = sb_detach(&gb);
+    }
+    size_t gl = strlen(g);
+    if (gl && g[gl - 1] == '/') {
+        while (gl && g[gl - 1] == '/') g[--gl] = 0;
+        *dir_only = true;
+    }
+    *glob = g;
+    free(n);
+    strvec_free(&segs);
+}
+
+static char *entry_base(const char *entry, bool find_mode) {
+    char *b, *g;
+    if (find_mode) {
+        bool hg, d;
+        parse_find_pattern(entry, &b, &g, &hg, &d);
+    } else {
+        parse_search_path(entry, &b, &g);
+    }
+    free(g);
+    return b;
+}
+
+/* delimitedPathPartResolves */
+static bool part_resolves(tool_env_t *env, const char *entry, bool find_mode) {
+    if (strstr(entry, "://")) return true;
+    char *peeled, *sel;
+    split_path_sel(entry, &peeled, &sel);
+    char *base = entry_base(peeled, find_mode);
+    char *abs = !strcmp(base, "/") || !*base ? xstrdup(env->cwd) : tool_resolve_path(env, base);
+    struct stat st;
+    bool ok = stat(abs, &st) == 0 || !(errno == ENOENT || errno == ENAMETOOLONG || errno == ENOTDIR);
+    free(abs);
+    free(base);
+    free(peeled);
+    free(sel);
+    return ok;
+}
+
+enum { DL_COMMA, DL_SEMI, DL_WS, DL_MIXED };
+
+static bool is_delim(char c, int mode) {
+    bool ws = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
+    switch (mode) {
+    case DL_COMMA: return c == ',';
+    case DL_SEMI: return c == ';';
+    case DL_WS: return ws;
+    default: return c == ',' || c == ';' || ws;
+    }
+}
+
+static bool has_top_delim(const char *s) {
+    int depth = 0;
+    for (size_t i = 0; s[i]; i++) {
+        if (s[i] == '\\' && s[i + 1]) { i++; continue; }
+        if (s[i] == '{') { depth++; continue; }
+        if (s[i] == '}') { if (depth) depth--; continue; }
+        if (!depth && is_delim(s[i], DL_MIXED)) return true;
+    }
+    return false;
+}
+
+static strvec_t split_top(const char *s, int mode) {
+    strvec_t parts = {0};
+    int depth = 0;
+    size_t st = 0, i = 0;
+    for (; s[i]; i++) {
+        if (s[i] == '\\' && s[i + 1]) { i++; continue; }
+        if (s[i] == '{') { depth++; continue; }
+        if (s[i] == '}') { if (depth) depth--; continue; }
+        if (depth || !is_delim(s[i], mode)) continue;
+        strvec_push_own(&parts, xstrndup(s + st, i - st));
+        st = i + 1;
+    }
+    strvec_push_own(&parts, xstrndup(s + st, strlen(s + st)));
+    return parts;
+}
+
+/* tryDelimitedPathSplit; req: 0 none, 1 some, 2 all */
+static bool try_delim_split(tool_env_t *env, const char *entry, int mode, int req, bool find_mode, strvec_t *out) {
+    strvec_t raw = split_top(entry, mode);
+    bool ok = false;
+    strvec_t parts = {0};
+    if (raw.n >= 2) {
+        for (size_t i = 0; i < raw.n; i++) {
+            char *p = norm_input(raw.v[i]);
+            if (*p) strvec_push_own(&parts, p);
+            else free(p);
+        }
+        ok = parts.n > 0 && !(parts.n < 2 && raw.n == parts.n);
+        if (ok && req) {
+            size_t good = 0;
+            for (size_t i = 0; i < parts.n; i++) good += part_resolves(env, parts.v[i], find_mode);
+            ok = req == 2 ? good == parts.n : good > 0;
+        }
+    }
+    if (ok)
+        for (size_t i = 0; i < parts.n; i++) strvec_push(out, parts.v[i]);
+    strvec_free(&parts);
+    strvec_free(&raw);
+    return ok;
+}
+
+/* splitDelimitedPathEntry (internal-URL lists aside) */
+static bool split_delimited(tool_env_t *env, const char *entry, bool find_mode, strvec_t *out) {
+    if (!has_top_delim(entry) || strstr(entry, "://")) return false;
+    if (probe_literal(env, entry) != 0) return false;
+    char *peeled, *sel;
+    split_path_sel(entry, &peeled, &sel);
+    bool keep = sel && probe_literal(env, peeled) != 0;
+    if (!keep && !has_glob_chars(peeled) && part_resolves(env, entry, find_mode)) keep = true;
+    free(peeled);
+    free(sel);
+    if (keep) return false;
+    return try_delim_split(env, entry, DL_SEMI, 0, find_mode, out) || try_delim_split(env, entry, DL_COMMA, 1, find_mode, out) ||
+           try_delim_split(env, entry, DL_WS, 2, find_mode, out) || try_delim_split(env, entry, DL_MIXED, 2, find_mode, out);
+}
+
+static void expand_entries(tool_env_t *env, const strvec_t *in, bool find_mode, strvec_t *out) {
+    for (size_t i = 0; i < in->n; i++) {
+        char *e = norm_input(in->v[i]);
+        if (!split_delimited(env, e, find_mode, out)) strvec_push(out, e);
+        free(e);
+    }
+}
+
+/* toPathList: a JSON-encoded string array spelled into the string, else the string itself */
+static void path_list(const json_t *v, strvec_t *out) {
+    const char *s = json_is_str(v) ? json_sv(v) : NULL;
+    if (!s) return;
+    char *t = str_trim(s);
+    size_t n = strlen(t);
+    bool done = false;
+    if (n >= 2 && t[0] == '[' && t[n - 1] == ']') {
+        json_t *j = json_parse(t, n, NULL);
+        if (j && json_is_arr(j)) {
+            bool all = true;
+            json_t *e;
+            json_arr_foreach(j, i, e) if (!json_is_str(e)) all = false;
+            if (all) {
+                json_arr_foreach(j, i, e) strvec_push(out, json_sv(e));
+                done = true;
+            }
+        }
+        json_free(j);
+    }
+    free(t);
+    if (!done) strvec_push(out, s);
+}
+
+static bool is_exclusion(tool_env_t *env, const char *entry) {
+    if (entry[0] != '!') return false;
+    char *p, *sel;
+    split_path_sel_literal(env, entry, &p, &sel);
+    bool r = probe_literal(env, p) == 0;
+    free(p);
+    free(sel);
+    return r;
+}
+
+/* ---------- grep (port of omp tools/grep.ts) ---------- */
+
+#define GREP_FILE_LIMIT 20
+#define GREP_MULTI_PER_FILE 20
+#define GREP_SINGLE_FILE 200
+#define GREP_TOTAL_CAP 2000
+#define GREP_MAX_COLUMN 512
+#define GREP_MAX_BYTES (50 * 1024)
+
+typedef struct {
+    uint32_t line;
+    char *text;
+} gctx_t;
+typedef struct {
+    char *abs; /* absolute file path */
+    uint32_t line, column;
+    char *text;
+    bool truncated;
+    VEC(gctx_t) before, after;
+} gmatch_t;
+typedef VEC(gmatch_t) gmatches_t;
+
+typedef struct {
+    char *abs;
+    char *glob;
+    bool bare;
+} gtarget_t;
+
+static void gmatch_free(gmatch_t *m) {
+    free(m->abs);
+    free(m->text);
+    for (size_t i = 0; i < m->before.n; i++) free(m->before.v[i].text);
+    for (size_t i = 0; i < m->after.n; i++) free(m->after.v[i].text);
+    vec_free(&m->before);
+    vec_free(&m->after);
+}
+
+/* run one native-equivalent search and append its matches (context grouped per match) */
+static int grep_run(const char *pattern, const char *root, const char *glob, bool bare, bool icase, bool multiline,
+                    bool gitignore, int before, int after, int max_count, int per_file, const strvec_t *exclude,
+                    gmatches_t *out, bool *limit_reached, char **err) {
+    search_opts_t so = {0};
+    so.pattern = pattern;
+    so.path = root;
+    so.glob = glob;
+    so.glob_anchored = glob && !bare;
+    so.exclude = exclude ? (const char *const *)exclude->v : NULL;
+    so.nexclude = exclude ? exclude->n : 0;
+    so.ignore_case = icase;
+    so.hidden = true;
+    so.no_ignore = !gitignore;
+    so.multiline = multiline;
+    so.context_before = before;
+    so.context_after = after;
+    so.max_count = max_count;
+    so.max_count_per_file = per_file;
+    so.max_columns = GREP_MAX_COLUMN;
+    search_result_t sr;
+    if (search_run(&so, &sr) != 0) {
+        *err = sr.error ? xstrdup(sr.error) : xstrdup("search failed");
+        search_result_free(&sr);
+        return -1;
+    }
+    if (sr.limit_reached) *limit_reached = true;
+    struct stat st;
+    bool root_is_dir = stat(root, &st) == 0 && S_ISDIR(st.st_mode);
+    const char *cur_path = NULL;
+    uint32_t cur_block = UINT32_MAX;
+    size_t start = out->n;
+    VEC(gctx_t) pending = {0};
+    for (size_t i = 0; i < sr.hits.n; i++) {
+        search_hit_t *h = &sr.hits.v[i];
+        bool same = cur_path && !strcmp(cur_path, h->path) && h->block == cur_block;
+        if (!same) {
+            for (size_t k = 0; k < pending.n; k++) free(pending.v[k].text);
+            pending.n = 0;
+            cur_path = h->path;
+            cur_block = h->block;
+        }
+        gmatch_t *m = out->n > start && same && out->v[out->n - 1].text ? &out->v[out->n - 1] : NULL;
+        if (h->is_context) {
+            gctx_t c = {h->line, xstrdup(h->text ? h->text : "")};
+            if (m) vec_push(&m->after, c);
+            else vec_push(&pending, c);
+            continue;
+        }
+        gmatch_t nm = {0};
+        nm.abs = root_is_dir ? path_join(root, h->path) : xstrdup(root);
+        nm.line = h->line;
+        nm.text = xstrdup(h->text ? h->text : "");
+        nm.truncated = h->truncated;
+        nm.column = h->truncated ? h->column : 0;
+        for (size_t k = 0; k < pending.n; k++) vec_push(&nm.before, pending.v[k]);
+        pending.n = 0;
+        vec_push(out, nm);
+    }
+    for (size_t k = 0; k < pending.n; k++) free(pending.v[k].text);
+    vec_free(&pending);
+    search_result_free(&sr);
+    return 0;
+}
+
+typedef struct {
+    char *key;     /* absolute path */
+    size_t count;  /* matches seen */
+    ssize_t list;  /* window list index, -1 outside the page window */
+} gfile_t;
+
+static char *format_capped(const strvec_t *paths) {
+    sb_t b = SB_INIT;
+    for (size_t i = 0; i < paths->n && i < 5; i++) {
+        if (i) sb_append(&b, ", ");
+        sb_append(&b, paths->v[i]);
+    }
+    if (paths->n > 5) sb_appendf(&b, " and %zu more %s", paths->n - 5, paths->n - 5 == 1 ? "file" : "files");
+    return sb_detach(&b);
+}
+
+static int grep_fail(tool_result_t *out, char *msg) {
+    tool_result_error(out, "%s", msg);
+    free(msg);
+    return 0;
+}
 
 static int grep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     UNUSED(ctx);
     const char *pattern = json_get_str(args, "pattern");
-    if (!pattern || strspn(pattern, " \t\r\n") == strlen(pattern)) {
-        tool_result_error(out, "pattern must not be empty");
-        return 0;
+    if (!pattern) pattern = "";
+    if (strspn(pattern, " \t\r\n\v\f") == strlen(pattern)) return grep_fail(out, xstrdup("Pattern must not be empty"));
+    int64_t skip = 0;
+    const json_t *sj = json_get(args, "skip");
+    if (json_is_num(sj)) {
+        double d = json_get_num(args, "skip", 0);
+        if (!isfinite(d) || floor(d) < 0) return grep_fail(out, xstrdup("Skip must be a non-negative number"));
+        skip = (int64_t)floor(d);
     }
     bool case_sensitive = json_get_bool(args, "case", true);
     bool gitignore = json_get_bool(args, "gitignore", true);
-    int64_t skip = json_get_int(args, "skip", 0);
-    if (skip < 0) {
-        tool_result_error(out, "skip must be >= 0");
-        return 0;
-    }
-    strvec_t inc = {0}, exc = {0};
-    split_paths(json_get_str(args, "path"), &inc, &exc);
     bool hashline = str_eq(env->edit_mode, "hashline");
-    sb_t b = SB_INIT;
-    json_t *details = json_obj();
-    json_t *files_j = json_arr();
-    size_t files_seen = 0, files_shown = 0, matches = 0;
-    bool more = false, any_trunc = false;
-    strvec_t missing = {0};
+
+    char *errmsg = NULL;
+    strvec_t scoped = {0}, expanded = {0}, exclusions = {0}, entries = {0}, resolved = {0}, raw_paths = {0},
+             missing = {0}, effective = {0}, exact = {0};
+    VEC(lranges_t) spec_ranges = {0};
+    VEC(gtarget_t) targets = {0};
+    gmatches_t matches = {0};
+    VEC(gfile_t) files = {0};
     dfiles_t dfiles = {0};
-    bool grouped = inc.n > 1;
-    for (size_t pi = 0; pi < inc.n && !more; pi++) {
-        char *spec = xstrdup(inc.v[pi]);
-        /* file:line-range selector */
-        int64_t lo = 0, hi = 0;
-        char *colon = strrchr(spec, ':');
-        if (colon && colon[1] && strspn(colon + 1, "0123456789-") == strlen(colon + 1)) {
-            char *probe = xstrndup(spec, (size_t)(colon - spec));
-            char *pabs = tool_resolve_path(env, probe);
-            if (fs_is_file(pabs)) {
-                lo = strtoll(colon + 1, NULL, 10);
-                const char *dash = strchr(colon + 1, '-');
-                hi = dash ? strtoll(dash + 1, NULL, 10) : lo;
-                *colon = 0;
+    strvec_t model = {0};
+    char *search_path = NULL, *scope_path = NULL, *glob_filter = NULL;
+    bool bare_glob = false, is_dir = false, multi_targets = false;
+    VEC(char *) range_keys = {0};
+    VEC(size_t) range_spec = {0};
+
+    path_list(json_get(args, "path"), &scoped);
+    if (!scoped.n) strvec_push(&scoped, ".");
+    expand_entries(env, &scoped, false, &expanded);
+    for (size_t i = 0; i < expanded.n; i++) {
+        if (is_exclusion(env, expanded.v[i])) strvec_push(&exclusions, expanded.v[i] + 1);
+        else strvec_push(&entries, expanded.v[i]);
+    }
+    if (!entries.n) strvec_push(&entries, ".");
+    /* parsePathSpecs */
+    for (size_t i = 0; i < entries.n; i++) {
+        const char *e = entries.v[i];
+        char *sp, *ss, *lp, *ls;
+        split_path_sel(e, &sp, &ss);
+        split_path_sel_literal(env, e, &lp, &ls);
+        bool literal = ss && !ls;
+        lranges_t rg = {0};
+        if (!literal && ls) {
+            char *rerr = NULL;
+            if (!parse_line_ranges(ls, &rg, &rerr)) {
+                errmsg = rerr ? rerr
+                              : xasprintf("path entry \"%s\" \xe2\x80\x94 only line-range selectors like \":50-100\" are "
+                                          "supported (no \":raw\"/\":conflicts\")",
+                                          e);
+            } else if (has_glob_chars(lp) && probe_literal(env, lp) == 0) {
+                errmsg = xasprintf("Line-range selector requires a single file, not a glob: %s", e);
             }
-            free(pabs);
-            free(probe);
+            strvec_push(&resolved, lp);
+        } else {
+            strvec_push(&resolved, literal ? e : e);
         }
-        char *base, *glob;
-        split_glob(spec, &base, &glob);
-        char *abs = tool_resolve_path(env, base);
-        if (!fs_exists(abs)) {
-            strvec_push(&missing, spec);
+        vec_push(&spec_ranges, rg);
+        free(sp);
+        free(ss);
+        free(lp);
+        free(ls);
+        if (errmsg) goto fail;
+    }
+    /* resolveToolSearchScope */
+    for (size_t i = 0; i < resolved.n; i++) {
+        char *n = norm_input(resolved.v[i]);
+        bool empty = !*n;
+        free(n);
+        if (empty) {
+            errmsg = xstrdup("Search scope entries must be non-empty paths or globs");
+            goto fail;
+        }
+    }
+    expand_entries(env, &resolved, false, &raw_paths);
+    for (size_t i = 0; i < raw_paths.n; i++) {
+        if (!*raw_paths.v[i]) {
+            errmsg = xstrdup("Search scope entries must be non-empty paths or globs");
+            goto fail;
+        }
+        const char *p = raw_paths.v[i];
+        if (!strncasecmp(p, "http://", 7) || !strncasecmp(p, "https://", 8) || !strncasecmp(p, "ftp://", 6) ||
+            !strncasecmp(p, "ws://", 5) || !strncasecmp(p, "wss://", 6)) {
+            errmsg = xasprintf("Cannot search external URL: %s. Use `read` to fetch web content, then search the returned text.", p);
+            goto fail;
+        }
+    }
+    if (raw_paths.n > 1) {
+        for (size_t i = 0; i < raw_paths.n; i++) {
+            char *b = entry_base(raw_paths.v[i], false);
+            char *abs = tool_resolve_path(env, b);
+            struct stat st;
+            bool ok = stat(abs, &st) == 0 || errno != ENOENT;
+            strvec_push(ok ? &effective : &missing, raw_paths.v[i]);
             free(abs);
-            free(base);
-            free(glob);
-            free(spec);
+            free(b);
+        }
+        if (!effective.n) {
+            char *j = strvec_join(&missing, ", ");
+            errmsg = xasprintf("Path not found: %s", j);
+            free(j);
+            goto fail;
+        }
+    } else {
+        for (size_t i = 0; i < raw_paths.n; i++) strvec_push(&effective, raw_paths.v[i]);
+    }
+    /* dedupe (resolveExplicitSearchPaths) */
+    {
+        strvec_t u = {0};
+        for (size_t i = 0; i < effective.n; i++) {
+            bool dup = false;
+            for (size_t k = 0; k < u.n && !dup; k++) dup = !strcmp(u.v[k], effective.v[i]);
+            if (!dup) strvec_push(&u, effective.v[i]);
+        }
+        if (effective.n == 1 || u.n > 0) {
+            strvec_free(&effective);
+            effective = u;
+        }
+    }
+    if (effective.n == 1) {
+        char *b, *g;
+        const char *raw = effective.v[0];
+        if (has_glob_chars(raw) && probe_literal(env, raw) == 1) {
+            b = str_replace(raw, "\\", "/");
+            g = NULL;
+        } else {
+            parse_search_path(raw, &b, &g);
+        }
+        search_path = tool_resolve_path(env, b);
+        glob_filter = g;
+        bare_glob = g && !strchr(raw, '/') && !strchr(raw, '\\');
+        scope_path = rel_cwd(search_path, env->cwd, false);
+        free(b);
+    } else {
+        /* resolveSearchPathItems (fanOutFileItems) */
+        size_t n = effective.n;
+        char **abs = xcalloc(n, sizeof(char *)), **globs = xcalloc(n, sizeof(char *));
+        bool *isfile = xcalloc(n, sizeof(bool));
+        bool all_exact = true, any_glob = false, any_file = false;
+        for (size_t i = 0; i < n; i++) {
+            char *b;
+            const char *raw = effective.v[i];
+            if (has_glob_chars(raw) && probe_literal(env, raw) == 1) {
+                b = str_replace(raw, "\\", "/");
+                globs[i] = NULL;
+            } else {
+                parse_search_path(raw, &b, &globs[i]);
+            }
+            abs[i] = tool_resolve_path(env, b);
+            free(b);
+            struct stat st;
+            isfile[i] = stat(abs[i], &st) == 0 && S_ISREG(st.st_mode);
+            if (globs[i] || !isfile[i]) all_exact = false;
+            if (globs[i]) any_glob = true;
+            if (!globs[i] && isfile[i]) any_file = true;
+        }
+        /* findCommonBasePath */
+        char *common = xstrdup(abs[0]);
+        for (size_t i = 1; i < n; i++) {
+            size_t k = 0, lastsep = 0;
+            const char *a = common, *c = abs[i];
+            while (a[k] && c[k] && a[k] == c[k]) {
+                if (a[k] == '/') lastsep = k;
+                k++;
+            }
+            if ((!a[k] && (c[k] == '/' || !c[k])) || (!c[k] && a[k] == '/')) lastsep = k;
+            common[lastsep] = 0;
+        }
+        if (!*common) {
+            free(common);
+            common = xstrdup("/");
+        }
+        bool common_requested = false;
+        for (size_t i = 0; i < n; i++) common_requested |= !strcmp(abs[i], common);
+        bool demotes = !all_exact && any_file;
+        multi_targets = n > 1 && (!common_requested || demotes || any_glob);
+        if (multi_targets) {
+            for (size_t i = 0; i < n; i++) {
+                gtarget_t t = {xstrdup(abs[i]), globs[i] ? xstrdup(globs[i]) : NULL,
+                               globs[i] && !strchr(effective.v[i], '/') && !strchr(effective.v[i], '\\')};
+                vec_push(&targets, t);
+            }
+        } else if (!all_exact) {
+            /* one walk at the common base with a brace union of per-item globs */
+            strvec_t pats = {0};
+            for (size_t i = 0; i < n; i++) {
+                char *rel = path_relative(common, abs[i]);
+                char *p;
+                if (globs[i]) p = strcmp(rel, ".") ? xasprintf("%s/%s", rel, globs[i]) : xstrdup(globs[i]);
+                else if (!isfile[i]) p = strcmp(rel, ".") ? xasprintf("%s/**/*", rel) : xstrdup("**/*");
+                else p = strcmp(rel, ".") ? xstrdup(rel) : xstrdup(path_basename(abs[i]));
+                bool dup = false;
+                for (size_t k = 0; k < pats.n && !dup; k++) dup = !strcmp(pats.v[k], p);
+                if (!dup) strvec_push(&pats, p);
+                free(p);
+                free(rel);
+            }
+            if (pats.n == 1) glob_filter = xstrdup(pats.v[0]);
+            else if (pats.n > 1) {
+                char *j = strvec_join(&pats, ",");
+                glob_filter = xasprintf("{%s}", j);
+                free(j);
+            }
+            strvec_free(&pats);
+        }
+        if (all_exact)
+            for (size_t i = 0; i < n; i++) strvec_push(&exact, abs[i]);
+        search_path = common;
+        strvec_t sc = {0};
+        for (size_t i = 0; i < n; i++) {
+            char *a = tool_resolve_path(env, effective.v[i]);
+            const char *e = effective.v[i];
+            strvec_push_own(&sc, rel_cwd(a, env->cwd, str_ends(e, "/")));
+            free(a);
+        }
+        scope_path = strvec_join(&sc, ", ");
+        strvec_free(&sc);
+        for (size_t i = 0; i < n; i++) {
+            free(abs[i]);
+            free(globs[i]);
+        }
+        free(abs);
+        free(globs);
+        free(isfile);
+    }
+    {
+        struct stat st;
+        if (stat(search_path, &st) != 0) {
+            errmsg = xasprintf("Path not found: %s%s", scope_path,
+                               raw_paths.n > 1 ? " (`path` list entries must each exist relative to cwd)" : "");
+            goto fail;
+        }
+        is_dir = S_ISDIR(st.st_mode);
+    }
+    /* line-range filters keyed by absolute file */
+    bool has_ranges = false;
+    int64_t range_fetch = 0;
+    for (size_t i = 0; i < spec_ranges.n; i++) {
+        if (!spec_ranges.v[i].n) continue;
+        has_ranges = true;
+        char *a = tool_resolve_path(env, resolved.v[i]);
+        struct stat st;
+        if (stat(a, &st) != 0) {
+            errmsg = xasprintf("Path not found for line-range selector: %s", entries.v[i]);
+            free(a);
+            goto fail;
+        }
+        if (!S_ISREG(st.st_mode)) {
+            errmsg = xasprintf("Line-range selector requires a single file: %s is a directory", entries.v[i]);
+            free(a);
+            goto fail;
+        }
+        vec_push(&range_keys, a);
+        vec_push(&range_spec, i);
+    }
+    bool multi_scope = is_dir || exact.n || multi_targets;
+    int64_t per_file_cap = multi_scope ? GREP_MULTI_PER_FILE : GREP_SINGLE_FILE;
+    for (size_t i = 0; i < spec_ranges.n; i++)
+        for (size_t k = 0; k < spec_ranges.v[i].n; k++) {
+            lrange_t r = spec_ranges.v[i].v[k];
+            range_fetch = MAX(range_fetch, r.hi ? r.hi : r.lo - 1 + per_file_cap + 1);
+        }
+    range_fetch = MIN(range_fetch, (int64_t)4 * 1024 * 1024);
+    int64_t native_per_file = has_ranges ? MAX(per_file_cap + 1, range_fetch) : per_file_cap + 1;
+    int64_t native_max = has_ranges ? ((GREP_TOTAL_CAP + per_file_cap) / (per_file_cap + 1)) * native_per_file : GREP_TOTAL_CAP;
+    if (native_max > INT32_MAX) native_max = INT32_MAX;
+    json_t *cb = settings_get("grep.contextBefore"), *ca = settings_get("grep.contextAfter");
+    int before = json_is_num(cb) ? (int)MAX(0, cb->u.num.d) : 1;
+    int after = json_is_num(ca) ? (int)MAX(0, ca->u.num.d) : 3;
+    bool multiline = strchr(pattern, '\n') || strstr(pattern, "\\n");
+    bool limit_reached = false, total_cap = false;
+    char *serr = NULL;
+    if (exact.n || multi_targets) {
+        size_t nt = exact.n ? exact.n : targets.n;
+        for (size_t t = 0; t < nt; t++) {
+            const char *root = exact.n ? exact.v[t] : targets.v[t].abs;
+            const char *g = exact.n ? NULL : targets.v[t].glob;
+            bool bare = exact.n ? false : targets.v[t].bare;
+            gmatches_t tm = {0};
+            if (grep_run(pattern, root, g, bare, !case_sensitive, multiline, gitignore, before, after, (int)native_max,
+                         (int)native_per_file, &exclusions, &tm, &limit_reached, &serr) != 0) {
+                vec_free(&tm);
+                goto search_err;
+            }
+            if ((int64_t)tm.n >= native_max) total_cap = true;
+            for (size_t k = 0; k < tm.n; k++) {
+                bool dup = false;
+                for (size_t q = 0; q < matches.n && !dup; q++)
+                    dup = matches.v[q].line == tm.v[k].line && !strcmp(matches.v[q].abs, tm.v[k].abs);
+                if (dup) gmatch_free(&tm.v[k]);
+                else vec_push(&matches, tm.v[k]);
+            }
+            vec_free(&tm);
+        }
+    } else {
+        if (grep_run(pattern, search_path, glob_filter, bare_glob, !case_sensitive, multiline, gitignore, before, after,
+                     (int)native_max, (int)native_per_file, &exclusions, &matches, &limit_reached, &serr) != 0)
+            goto search_err;
+        total_cap = (int64_t)matches.n >= native_max;
+    }
+    goto searched;
+search_err:
+    if (!strncasecmp(serr, "regex parse error", 17) || !strncasecmp(serr, "regex error", 11)) {
+        const char *rest = serr + (!strncasecmp(serr, "regex parse error", 17) ? 17 : 11);
+        if (*rest == ':') rest++;
+        while (*rest == ' ' || *rest == '\t' || *rest == '\n') rest++;
+        errmsg = xasprintf("Invalid regex: %s", rest);
+        free(serr);
+    } else {
+        errmsg = serr;
+    }
+    goto fail;
+searched:
+    /* line-range filtering */
+    if (range_keys.n) {
+        size_t w = 0;
+        for (size_t i = 0; i < matches.n; i++) {
+            gmatch_t *m = &matches.v[i];
+            const lranges_t *rg = NULL;
+            for (size_t k = 0; k < range_keys.n && !rg; k++)
+                if (!strcmp(range_keys.v[k], m->abs)) rg = &spec_ranges.v[range_spec.v[k]];
+            if (rg && !in_ranges(m->line, rg)) {
+                gmatch_free(m);
+                continue;
+            }
+            if (rg) {
+                size_t b2 = 0, a2 = 0;
+                for (size_t k = 0; k < m->before.n; k++) {
+                    if (in_ranges(m->before.v[k].line, rg)) m->before.v[b2++] = m->before.v[k];
+                    else free(m->before.v[k].text);
+                }
+                m->before.n = b2;
+                for (size_t k = 0; k < m->after.n; k++) {
+                    if (in_ranges(m->after.v[k].line, rg)) m->after.v[a2++] = m->after.v[k];
+                    else free(m->after.v[k].text);
+                }
+                m->after.n = a2;
+            }
+            matches.v[w++] = *m;
+        }
+        matches.n = w;
+    }
+    /* group by file in encounter order; per-file caps; page window */
+    bool can_page = multi_scope;
+    int64_t win_start = can_page ? skip : 0, win_end = can_page ? skip + GREP_FILE_LIMIT : INT64_MAX;
+    bool per_file_limit = false;
+    strvec_t capped = {0};
+    VEC(sizevec_t) lists = {0};
+    VEC(size_t) mfile = {0}; /* match index -> files index */
+    for (size_t i = 0; i < matches.n; i++) {
+        size_t f = 0;
+        while (f < files.n && strcmp(files.v[f].key, matches.v[i].abs)) f++;
+        if (f == files.n) {
+            gfile_t nf = {matches.v[i].abs, 0, -1};
+            int64_t order = (int64_t)files.n;
+            if (order >= win_start && order < win_end) {
+                nf.list = (ssize_t)lists.n;
+                sizevec_t l = {0};
+                vec_push(&lists, l);
+            }
+            vec_push(&files, nf);
+        }
+        gfile_t *gf = &files.v[f];
+        vec_push(&mfile, f);
+        gf->count++;
+        if ((int64_t)gf->count > per_file_cap) {
+            per_file_limit = true;
+            if ((int64_t)gf->count == per_file_cap + 1 && gf->list >= 0) strvec_push(&capped, gf->key);
             continue;
         }
-        search_opts_t so = {0};
-        so.pattern = pattern;
-        so.path = abs;
-        so.glob = glob;
-        so.exclude = (const char *const *)exc.v;
-        so.nexclude = exc.n;
-        so.ignore_case = !case_sensitive;
-        so.hidden = true;
-        so.no_ignore = !gitignore;
-        so.max_count_per_file = GREP_PER_FILE_MAX;
-        so.max_columns = GREP_LINE_MAX;
-        so.multiline = strstr(pattern, "\\n") != NULL;
-        search_result_t sr;
-        if (search_run(&so, &sr) != 0) {
-            tool_result_error(out, "%s", sr.error ? sr.error : "search failed");
-            search_result_free(&sr);
-            free(abs);
-            free(base);
-            free(glob);
-            free(spec);
-            goto done;
-        }
-        bool is_file = fs_is_file(abs);
-        if (!is_file) grouped = true;
-        const char *cur = NULL;
-        bool skipping = false;
-        for (size_t i = 0; i < sr.hits.n; i++) {
-            search_hit_t *h = &sr.hits.v[i];
-            if (lo && (h->line < (uint32_t)lo || h->line > (uint32_t)hi)) continue;
-            if (!cur || strcmp(cur, h->path) != 0) {
-                cur = h->path;
-                files_seen++;
-                skipping = (int64_t)files_seen <= skip;
-                if (!skipping && files_shown >= GREP_FILES_PER_PAGE) {
-                    more = true;
-                    break;
-                }
-                if (skipping) continue;
-                files_shown++;
-                char *fabs = is_file ? xstrdup(abs) : path_join(abs, h->path);
-                char *disp = path_display(fabs, env->cwd);
-                if (b.len) sb_putc(&b, '\n');
-                dfile_t df = {.path = xstrdup(disp)};
-                if (hashline) {
-                    size_t flen;
-                    char *content = fs_read_limit(fabs, 4u << 20, &flen, NULL);
-                    const char *tag = content ? edit_store_record(&env->store, fabs, content, h->line, h->line) : "????";
-                    sb_appendf(&b, "[%s#%s]\n", disp, tag);
-                    if (content) df.tag = xstrdup(tag);
-                    free(content);
-                } else {
-                    sb_appendf(&b, "%s\n", disp);
-                }
-                json_push_str(files_j, disp);
-                vec_push(&dfiles, df);
-                free(disp);
-                free(fabs);
-            }
-            if (skipping) continue;
-            if (!h->is_context) matches++;
-            if (h->truncated) any_trunc = true;
-            const char *text = h->text ? h->text : "";
-            sb_appendf(&b, "%c%u%c%s\n", h->is_context ? ' ' : '*', h->line, hashline ? ':' : '|', text);
-            if (dfiles.n) {
-                dline_t dl = {.line = h->line, .match = !h->is_context, .text = xstrdup(text)};
-                vec_push(&dfiles.v[dfiles.n - 1].lines, dl);
-            }
-            if (hashline) {
-                /* widen seen range for this snapshot */
-                char *fabs = is_file ? xstrdup(abs) : path_join(abs, h->path);
-                snapshot_t *sn = edit_store_find(&env->store, fabs, NULL);
-                if (sn) {
-                    line_span_t r = {h->line, h->line};
-                    pthread_mutex_lock(&env->store.mu);
-                    if (!(sn->seen.n == 1 && sn->seen.v[0].hi == INT64_MAX)) vec_push(&sn->seen, r);
-                    pthread_mutex_unlock(&env->store.mu);
-                }
-                free(fabs);
-            }
-            if (b.len > GREP_OUTPUT_MAX) {
-                more = true;
-                break;
-            }
-        }
-        if (sr.limit_reached) any_trunc = true;
-        search_result_free(&sr);
-        free(abs);
-        free(base);
-        free(glob);
-        free(spec);
+        if (gf->list >= 0) vec_push(&lists.v[gf->list], i);
     }
-    if (!files_shown) {
-        if (skip && files_seen) sb_appendf(&b, "No more results (skip %lld past %zu matching files)", (long long)skip, files_seen);
-        else sb_append(&b, "No matches found");
-        out->useless = true;
-    } else if (more) {
-        sb_appendf(&b, "\n[More matching files. Use skip: %lld to see the next page]", (long long)(skip + (int64_t)files_shown));
-    }
+    size_t total_files = files.n;
+    char *total_label = total_cap ? xasprintf("%zu+", total_files) : xasprintf("%zu", total_files);
+    int64_t skip_files = can_page ? MIN(skip, (int64_t)total_files) : 0;
+    bool file_limit = can_page && (int64_t)total_files > skip_files + GREP_FILE_LIMIT;
+    size_t selected = 0;
+    for (size_t i = 0; i < lists.n; i++) selected += lists.v[i].n;
+    int64_t next_skip = skip_files + (int64_t)lists.n;
+    char *limit_msg = file_limit ? xasprintf("Showing files %lld-%lld of %s. Use skip=%lld for the next page, or narrow "
+                                             "paths/pattern.",
+                                             (long long)skip_files + 1, (long long)next_skip, total_label, (long long)next_skip)
+                                 : NULL;
+    char *missing_note = NULL;
     if (missing.n) {
-        char *m = strvec_join(&missing, ", ");
-        sb_appendf(&b, "\nSkipped missing paths: %s", m);
-        free(m);
+        char *j = strvec_join(&missing, ", ");
+        missing_note = xasprintf("Skipped missing paths: %s", j);
+        free(j);
     }
-    if (b.len && b.s[b.len - 1] == '\n') sb_truncate(&b, b.len - 1);
-    tool_result_text(out, sb_cstr(&b));
-    json_set_int(details, "matchCount", (int64_t)matches);
-    json_set_int(details, "fileCount", (int64_t)files_shown);
-    json_set(details, "files", files_j);
-    files_j = NULL;
-    json_set_bool(details, "fileLimitReached", more);
-    json_set_bool(details, "truncated", more || any_trunc);
-    if (files_shown) {
+    json_t *details = json_obj();
+    json_set_str(details, "scopePath", scope_path);
+    json_set_str(details, "searchPath", search_path);
+    json_set_str(details, "cwd", env->cwd);
+    if (!selected) {
+        json_set_int(details, "matchCount", 0);
+        json_set_int(details, "fileCount", 0);
+        json_set(details, "files", json_arr());
+        json_set_bool(details, "truncated", false);
+        if (missing.n) {
+            json_t *mp = json_arr();
+            for (size_t k = 0; k < missing.n; k++) json_push_str(mp, missing.v[k]);
+            json_set(details, "missingPaths", mp);
+        }
+        bool past_end = can_page && skip > 0 && total_files > 0 && skip_files >= (int64_t)total_files;
+        sb_t t = SB_INIT;
+        if (past_end) sb_appendf(&t, "No more results (%s files total; skip=%lld is past the end)", total_label, (long long)skip);
+        else sb_append(&t, "No matches found");
+        if (missing_note) sb_appendf(&t, "\n%s", missing_note);
+        tool_result_text(out, sb_cstr(&t));
+        sb_free(&t);
+        out->useless = true;
+        out->details = details;
+        free(total_label);
+        free(limit_msg);
+        free(missing_note);
+        strvec_free(&capped);
+        for (size_t i = 0; i < lists.n; i++) vec_free(&lists.v[i]);
+        vec_free(&lists);
+        vec_free(&mfile);
+        goto cleanup;
+    }
+    /* files in window order, each with its kept matches in order */
+    bool lines_truncated = false;
+    for (size_t li = 0; li < lists.n; li++) {
+        size_t f0 = mfile.v[lists.v[li].v[0]];
+        char *disp = is_dir ? rel_cwd(files.v[f0].key, env->cwd, false) : rel_cwd(search_path, env->cwd, false);
+        dfile_t df = {.path = disp};
+        if (hashline) {
+            size_t flen;
+            char *content = fs_read_limit(files.v[f0].key, 4u << 20, &flen, NULL);
+            if (content) df.tag = xstrdup(edit_store_record(&env->store, files.v[f0].key, content, -1, -1));
+            free(content);
+        }
+        for (size_t k = 0; k < lists.v[li].n; k++) {
+            gmatch_t *m = &matches.v[lists.v[li].v[k]];
+            for (size_t c = 0; c < m->before.n; c++) {
+                dline_t dl = {.line = m->before.v[c].line, .text = xstrdup(m->before.v[c].text)};
+                vec_push(&df.lines, dl);
+            }
+            dline_t ml = {.line = m->line, .match = true,
+                          .text = m->column ? xasprintf("%s [col %u]", m->text, m->column) : xstrdup(m->text)};
+            if (m->truncated) lines_truncated = true;
+            vec_push(&df.lines, ml);
+            for (size_t c = 0; c < m->after.n; c++) {
+                dline_t dl = {.line = m->after.v[c].line, .text = xstrdup(m->after.v[c].text)};
+                vec_push(&df.lines, dl);
+            }
+        }
+        vec_push(&dfiles, df);
+    }
+    bool grouped = is_dir || multi_scope;
+    model = grep_render(&dfiles, grouped, hashline ? 1 : 0);
+    /* hashline: the rows shown become editable anchors (cut lines excluded) */
+    if (hashline) {
+        for (size_t i = 0; i < dfiles.n; i++) {
+            if (!dfiles.v[i].tag) continue;
+            char *abs = tool_resolve_path(env, dfiles.v[i].path);
+            for (size_t k = 0; k < dfiles.v[i].lines.n; k++) {
+                const dline_t *l = &dfiles.v[i].lines.v[k];
+                bool cut = (l->match && l->text && strstr(l->text, " [col ")) ||
+                           (!l->match && str_ends(l->text, "...") && strlen(l->text) >= GREP_MAX_COLUMN - 6);
+                if (cut) continue;
+                snapshot_t *sn = edit_store_find(&env->store, abs, dfiles.v[i].tag);
+                if (!sn) continue;
+                int64_t span = 1;
+                for (const char *p = l->text; (p = strchr(p, '\n')); p++) span++;
+                line_span_t r = {l->line, l->line + span - 1};
+                pthread_mutex_lock(&env->store.mu);
+                if (!(sn->seen.n == 1 && sn->seen.v[0].hi == INT64_MAX)) vec_push(&sn->seen, r);
+                pthread_mutex_unlock(&env->store.mu);
+            }
+            free(abs);
+        }
+    }
+    /* capped files the kept text shows with a full cap of matches */
+    strvec_t capped_disp = {0};
+    VEC(size_t) capped_end = {0};
+    for (size_t i = 0; i < capped.n; i++) {
+        for (size_t d = 0; d < dfiles.n; d++) {
+            size_t f0 = mfile.v[lists.v[d].v[0]];
+            if (!strcmp(files.v[f0].key, capped.v[i]) && (int64_t)lists.v[d].n == per_file_cap) {
+                strvec_push(&capped_disp, dfiles.v[d].path);
+                vec_push(&capped_end, dfiles.v[d].model_end);
+            }
+        }
+    }
+    char *raw = strvec_join(&model, "\n");
+    size_t raw_len = strlen(raw);
+    out_trunc_t tr = {0};
+    char *suffix = NULL;
+    size_t reserved = 0;
+    for (int guard = 0;; guard++) {
+        strvec_t shown = {0};
+        if (suffix) {
+            int64_t kept = tr.truncated ? tr.output_lines : (int64_t)model.n;
+            for (size_t i = 0; i < capped_disp.n; i++)
+                if (!multi_scope || (int64_t)capped_end.v[i] <= kept) strvec_push(&shown, capped_disp.v[i]);
+        } else {
+            for (size_t i = 0; i < capped_disp.n; i++) strvec_push(&shown, capped_disp.v[i]);
+        }
+        char *cap_notice = NULL;
+        if (shown.n) {
+            char *names = format_capped(&shown);
+            cap_notice = multi_scope ? xasprintf("More than %lld matches in %s; grep keeps the first %lld per file when "
+                                                 "searching several. Search one file alone for up to %d.",
+                                                 (long long)per_file_cap, names, (long long)per_file_cap, GREP_SINGLE_FILE)
+                                     : xasprintf("More than %lld matches; grep keeps the first %lld in a file. Add a line "
+                                                 "range (`path:N-M`) or narrow the pattern for the rest.",
+                                                 (long long)per_file_cap, (long long)per_file_cap);
+            free(names);
+        }
+        strvec_free(&shown);
+        sb_t s = SB_INIT;
+        if (limit_msg) sb_appendf(&s, "\n\n%s", limit_msg);
+        if (missing_note) sb_appendf(&s, "\n\n%s", missing_note);
+        if (cap_notice) sb_appendf(&s, "\n\n%s", cap_notice);
+        free(cap_notice);
+        char *ns = sb_detach(&s);
+        if (suffix && strlen(ns) <= reserved) {
+            free(suffix);
+            suffix = ns;
+            break;
+        }
+        free(suffix);
+        suffix = ns;
+        reserved = strlen(suffix);
+        out_trunc_free(&tr);
+        memset(&tr, 0, sizeof tr);
+        out_truncate_head(raw, raw_len, (int64_t)GREP_MAX_BYTES - (int64_t)reserved, INT64_MAX, &tr);
+        if (guard > 8) break;
+    }
+    sb_t text = SB_INIT;
+    sb_appendn(&text, tr.content ? tr.content : "", tr.content ? tr.content_len : 0);
+    sb_append(&text, suffix);
+    tool_result_text(out, sb_cstr(&text));
+    sb_free(&text);
+    /* details (omp GrepToolDetails) */
+    json_set_int(details, "matchCount", (int64_t)selected);
+    json_set_int(details, "fileCount", (int64_t)dfiles.n);
+    json_t *fl = json_arr(), *fm = json_arr();
+    for (size_t i = 0; i < dfiles.n; i++) {
+        json_push_str(fl, dfiles.v[i].path);
+        json_t *o = json_obj();
+        json_set_str(o, "path", dfiles.v[i].path);
+        size_t cnt = 0;
+        for (size_t k = 0; k < dfiles.v[i].lines.n; k++) cnt += dfiles.v[i].lines.v[k].match;
+        json_set_int(o, "count", (int64_t)cnt);
+        json_push(fm, o);
+    }
+    json_set(details, "files", fl);
+    json_set(details, "fileMatches", fm);
+    json_set_bool(details, "truncated", file_limit || per_file_limit || limit_reached || tr.truncated || lines_truncated);
+    if (file_limit) json_set_int(details, "fileLimitReached", GREP_FILE_LIMIT);
+    if (per_file_limit) json_set_int(details, "perFileLimitReached", per_file_cap);
+    {
         char *dc = grep_display(&dfiles, grouped);
         json_set_str(details, "displayContent", dc);
         free(dc);
-    }
-    {
-        strvec_t sc = {0};
-        for (size_t k = 0; k < inc.n; k++) strvec_push_own(&sc, scope_display(inc.v[k], env->cwd, env));
-        char *j = strvec_join(&sc, ", ");
-        json_set_str(details, "scopePath", j);
-        free(j);
-        strvec_free(&sc);
     }
     if (missing.n) {
         json_t *mp = json_arr();
         for (size_t k = 0; k < missing.n; k++) json_push_str(mp, missing.v[k]);
         json_set(details, "missingPaths", mp);
     }
+    if (lines_truncated) json_set_bool(details, "linesTruncated", true);
+    {
+        json_t *meta = NULL;
+        if (tr.truncated) out_meta_from_trunc(&meta, &tr, "head", 0, 0, NULL, 0, 0);
+        if (lines_truncated) out_meta_column_truncated(&meta, GREP_MAX_COLUMN, "bytes", NULL, 0, 0, 0, NULL);
+        if (meta) json_set(details, "meta", meta);
+    }
     out->details = details;
-    details = NULL;
-done:
+    out_trunc_free(&tr);
+    free(suffix);
+    free(raw);
+    strvec_free(&capped_disp);
+    vec_free(&capped_end);
+    free(total_label);
+    free(limit_msg);
+    free(missing_note);
+    strvec_free(&capped);
+    for (size_t i = 0; i < lists.n; i++) vec_free(&lists.v[i]);
+    vec_free(&lists);
+    vec_free(&mfile);
+    goto cleanup;
+fail:
+    tool_result_error(out, "%s", errmsg);
+    free(errmsg);
+cleanup:
+    strvec_free(&model);
     for (size_t k = 0; k < dfiles.n; k++) {
         for (size_t m = 0; m < dfiles.v[k].lines.n; m++) free(dfiles.v[k].lines.v[m].text);
         vec_free(&dfiles.v[k].lines);
@@ -410,12 +1392,31 @@ done:
         free(dfiles.v[k].tag);
     }
     vec_free(&dfiles);
-    json_free(details);
-    json_free(files_j);
-    sb_free(&b);
-    strvec_free(&inc);
-    strvec_free(&exc);
+    for (size_t i = 0; i < matches.n; i++) gmatch_free(&matches.v[i]);
+    vec_free(&matches);
+    vec_free(&files);
+    for (size_t i = 0; i < targets.n; i++) {
+        free(targets.v[i].abs);
+        free(targets.v[i].glob);
+    }
+    vec_free(&targets);
+    for (size_t i = 0; i < spec_ranges.n; i++) vec_free(&spec_ranges.v[i]);
+    vec_free(&spec_ranges);
+    for (size_t i = 0; i < range_keys.n; i++) free(range_keys.v[i]);
+    vec_free(&range_keys);
+    vec_free(&range_spec);
+    free(search_path);
+    free(scope_path);
+    free(glob_filter);
+    strvec_free(&scoped);
+    strvec_free(&expanded);
+    strvec_free(&exclusions);
+    strvec_free(&entries);
+    strvec_free(&resolved);
+    strvec_free(&raw_paths);
     strvec_free(&missing);
+    strvec_free(&effective);
+    strvec_free(&exact);
     return 0;
 }
 
@@ -436,124 +1437,415 @@ agent_tool_t *tool_grep_new(tool_env_t *env) {
     return t;
 }
 
-/* ---------- glob ---------- */
+/* ---------- formatGroupedPaths (pi-utils path-tree): prefix-folded `# dir/` tree of bare names ---------- */
+
+typedef struct gpnode gpnode_t;
+struct gpnode {
+    strvec_t files;
+    strvec_t dir_names;
+    VEC(gpnode_t *) dirs;
+};
+
+static gpnode_t *gpnode_child(gpnode_t *n, const char *name) {
+    for (size_t i = 0; i < n->dirs.n; i++)
+        if (!strcmp(n->dir_names.v[i], name)) return n->dirs.v[i];
+    gpnode_t *c = xcalloc(1, sizeof *c);
+    strvec_push(&n->dir_names, name);
+    vec_push(&n->dirs, c);
+    return c;
+}
+
+static void gpnode_free(gpnode_t *n) {
+    for (size_t i = 0; i < n->dirs.n; i++) gpnode_free(n->dirs.v[i]);
+    strvec_free(&n->files);
+    strvec_free(&n->dir_names);
+    vec_free(&n->dirs);
+    free(n);
+}
+
+static void gpnode_walk(const gpnode_t *n, int depth, strvec_t *out) {
+    for (size_t i = 0; i < n->files.n; i++) strvec_push(out, n->files.v[i]);
+    for (size_t i = 0; i < n->dirs.n; i++) {
+        const gpnode_t *d = n->dirs.v[i];
+        sb_t h = SB_INIT;
+        for (int k = 0; k <= depth; k++) sb_putc(&h, '#');
+        sb_appendf(&h, " %s", n->dir_names.v[i]);
+        while (d->files.n == 0 && d->dirs.n == 1) {
+            sb_appendf(&h, "/%s", d->dir_names.v[0]);
+            d = d->dirs.v[0];
+        }
+        sb_putc(&h, '/');
+        strvec_push_own(out, sb_detach(&h));
+        gpnode_walk(d, depth + 1, out);
+    }
+}
+
+char *format_grouped_paths(const strvec_t *paths) {
+    if (!paths->n) return xstrdup("");
+    gpnode_t *root = xcalloc(1, sizeof *root);
+    for (size_t i = 0; i < paths->n; i++) {
+        char *p = str_replace(paths->v[i], "\\", "/");
+        size_t len = strlen(p);
+        bool is_dir = len && p[len - 1] == '/';
+        if (strstr(p, "://")) {
+            bool dup = false;
+            for (size_t k = 0; k < root->files.n && !dup; k++) dup = !strcmp(root->files.v[k], p);
+            if (!dup) strvec_push(&root->files, p);
+            free(p);
+            continue;
+        }
+        if (is_dir) p[--len] = 0;
+        if (!len) {
+            free(p);
+            continue;
+        }
+        strvec_t segs = str_split(p, "/");
+        size_t ndir = is_dir ? segs.n : segs.n - 1;
+        gpnode_t *n = root;
+        for (size_t k = 0; k < ndir; k++) n = gpnode_child(n, segs.v[k]);
+        if (!is_dir) {
+            bool dup = false;
+            for (size_t k = 0; k < n->files.n && !dup; k++) dup = !strcmp(n->files.v[k], segs.v[segs.n - 1]);
+            if (!dup) strvec_push(&n->files, segs.v[segs.n - 1]);
+        }
+        strvec_free(&segs);
+        free(p);
+    }
+    strvec_t out = {0};
+    gpnode_walk(root, 0, &out);
+    gpnode_free(root);
+    char *r = strvec_join(&out, "\n");
+    strvec_free(&out);
+    return r;
+}
+
+/* ---------- glob (port of omp tools/glob.ts) ---------- */
+
+#define GLOB_MAX_LIMIT 200
 
 typedef struct {
-    char *path;
+    char *path; /* display path (dirs end with '/') */
     int64_t mtime;
-    bool dir;
+    char *key;  /* walk-relative path for tie ordering */
 } gitem_t;
 
-static int cmp_gitem(const void *a, const void *b) {
+static int cmp_gitem_mtime(const void *a, const void *b) {
     const gitem_t *x = a, *y = b;
     if (x->mtime != y->mtime) return x->mtime < y->mtime ? 1 : -1;
-    return strcmp(x->path, y->path);
+    return strcmp(x->key, y->key);
+}
+
+/* JS Number#toString for the clamp notice */
+static char *js_num(double d) {
+    if (d == floor(d) && fabs(d) < 1e21) return xasprintf("%.0f", d);
+    for (int p = 1; p <= 17; p++) {
+        char buf[64];
+        snprintf(buf, sizeof buf, "%.*g", p, d);
+        if (strtod(buf, NULL) == d) return xstrdup(buf);
+    }
+    return xasprintf("%.17g", d);
+}
+
+typedef struct {
+    pthread_mutex_t mu;
+    VEC(gitem_t) items;
+    const char *root;
+    const char *cwd;
+    globset_t *sel;
+    bool dir_only;
+} gwalk_t;
+
+static bool glob_walk_cb(const walk_entry_t *e, void *ud) {
+    gwalk_t *g = ud;
+    if (!globset_match(g->sel, e->path)) return true;
+    int type = e->type;
+    if (g->dir_only && type != WALK_DIR) return true;
+    gitem_t it;
+    it.key = xstrdup(e->path);
+    it.mtime = e->mtime_ms;
+    char *full = path_join(g->root, e->path);
+    it.path = rel_cwd(full, g->cwd, type == WALK_DIR);
+    free(full);
+    pthread_mutex_lock(&g->mu);
+    vec_push(&g->items, it);
+    pthread_mutex_unlock(&g->mu);
+    return true;
 }
 
 static int glob_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     UNUSED(ctx);
-    const char *pspec = json_get_str(args, "path");
-    if (pspec && !*pspec) {
-        tool_result_error(out, "path must not be empty");
-        return 0;
+    char *errmsg = NULL;
+    strvec_t scoped = {0}, expanded = {0}, patterns = {0}, missing = {0}, effective = {0};
+    VEC(gitem_t) items = {0};
+    char *scope_path = NULL;
+    typedef struct {
+        char *abs, *glob;
+        bool has_glob, dir_only;
+    } ttarget_t;
+    VEC(ttarget_t) targets = {0};
+
+    path_list(json_get(args, "path"), &scoped);
+    if (!scoped.n) strvec_push(&scoped, ".");
+    expand_entries(env, &scoped, true, &expanded);
+    for (size_t i = 0; i < expanded.n; i++) {
+        char *n = norm_input(expanded.v[i]);
+        char *r = str_replace(n, "\\", "/");
+        free(n);
+        strvec_push_own(&patterns, r);
     }
+    for (size_t i = 0; i < patterns.n; i++) {
+        const char *p = patterns.v[i];
+        if (*p && strspn(p, "/") == strlen(p)) {
+            errmsg = xstrdup("Searching from root directory '/' is not allowed");
+            goto fail;
+        }
+    }
+    for (size_t i = 0; i < patterns.n; i++)
+        if (!*patterns.v[i]) {
+            errmsg = xstrdup("`path` must contain non-empty globs or paths");
+            goto fail;
+        }
+    if (patterns.n > 1) {
+        for (size_t i = 0; i < patterns.n; i++) {
+            char *b = entry_base(patterns.v[i], true);
+            char *abs = tool_resolve_path(env, b);
+            struct stat st;
+            bool ok = stat(abs, &st) == 0 || errno != ENOENT;
+            strvec_push(ok ? &effective : &missing, patterns.v[i]);
+            free(abs);
+            free(b);
+        }
+        if (!effective.n) {
+            char *j = strvec_join(&missing, ", ");
+            errmsg = xasprintf("Path not found: %s", j);
+            free(j);
+            goto fail;
+        }
+    } else {
+        strvec_push(&effective, patterns.v[0]);
+    }
+    {
+        strvec_t u = {0};
+        for (size_t i = 0; i < effective.n; i++) {
+            bool dup = false;
+            for (size_t k = 0; k < u.n && !dup; k++) dup = !strcmp(u.v[k], effective.v[i]);
+            if (!dup) strvec_push(&u, effective.v[i]);
+        }
+        strvec_free(&effective);
+        effective = u;
+    }
+    bool single = effective.n <= 1;
+    for (size_t i = 0; i < effective.n; i++) {
+        ttarget_t t;
+        char *b;
+        parse_find_pattern(effective.v[i], &b, &t.glob, &t.has_glob, &t.dir_only);
+        t.abs = tool_resolve_path(env, b);
+        free(b);
+        vec_push(&targets, t);
+    }
+    if (single) {
+        scope_path = rel_cwd(targets.v[0].abs, env->cwd, false);
+    } else {
+        strvec_t sc = {0};
+        for (size_t i = 0; i < effective.n; i++) {
+            char *a = tool_resolve_path(env, effective.v[i]);
+            strvec_push_own(&sc, rel_cwd(a, env->cwd, str_ends(effective.v[i], "/")));
+            free(a);
+        }
+        scope_path = strvec_join(&sc, ", ");
+        strvec_free(&sc);
+    }
+    for (size_t i = 0; i < targets.n; i++)
+        if (!strcmp(targets.v[i].abs, "/")) {
+            errmsg = xstrdup("Searching from root directory '/' is not allowed");
+            goto fail;
+        }
+    double req_limit = 200;
+    if (json_is_num(json_get(args, "limit"))) req_limit = json_get_num(args, "limit", 200);
+    if (!isfinite(req_limit) || req_limit <= 0) {
+        errmsg = xstrdup("Limit must be a positive number");
+        goto fail;
+    }
+    int64_t limit = (int64_t)MIN((double)GLOB_MAX_LIMIT, MAX(1.0, floor(req_limit)));
     bool hidden = json_get_bool(args, "hidden", true);
     bool gitignore = json_get_bool(args, "gitignore", true);
-    int64_t req_limit = json_get_int(args, "limit", 200);
-    int64_t limit = req_limit < 1 ? 1 : req_limit > 200 ? 200 : req_limit;
-    strvec_t inc = {0}, exc = {0};
-    split_paths(pspec, &inc, &exc);
-    VEC(gitem_t) items = {0};
-    strvec_t missing = {0};
-    for (size_t pi = 0; pi < inc.n; pi++) {
-        char *base, *glob;
-        split_glob(inc.v[pi], &base, &glob);
-        char *abs = tool_resolve_path(env, base);
+    for (size_t i = 0; i < targets.n; i++) {
+        ttarget_t *t = &targets.v[i];
         struct stat st;
-        if (stat(abs, &st) != 0) {
-            strvec_push(&missing, inc.v[pi]);
-        } else if (S_ISREG(st.st_mode)) {
-            gitem_t g = {path_display(abs, env->cwd), (int64_t)st.st_mtime * 1000, false};
-            vec_push(&items, g);
-        } else {
-            globset_t gs = {0}, xs = {0};
-            if (glob) {
-                char *norm = glob_normalize(glob, !strchr(glob, '/'));
-                globset_add(&gs, norm, 0);
-                free(norm);
-            }
-            for (size_t k = 0; k < exc.n; k++) globset_add(&xs, exc.v[k], 0);
-            walk_opts_t wo = {0};
-            wo.include_hidden = hidden;
-            wo.no_ignore = !gitignore;
-            wo.skip_node_modules = gitignore;
-            wo.types = WALK_FILE | (glob ? 0 : WALK_DIR);
-            wo.include = glob ? &gs : NULL;
-            wo.exclude = exc.n ? &xs : NULL;
-            wo.want_stat = true;
-            if (!glob) wo.max_depth = 0;
-            walk_list_t wl;
-            if (walk_collect(abs, &wo, &wl) == 0) {
-                for (size_t k = 0; k < wl.n; k++) {
-                    char *full = path_join(abs, wl.v[k].path);
-                    char *disp = path_display(full, env->cwd);
-                    gitem_t g = {wl.v[k].type == WALK_DIR ? xasprintf("%s/", disp) : xstrdup(disp), wl.v[k].mtime_ms,
-                                 wl.v[k].type == WALK_DIR};
-                    vec_push(&items, g);
-                    free(disp);
-                    free(full);
+        if (stat(t->abs, &st) != 0) {
+            if (errno == ENOENT || errno == ENAMETOOLONG || errno == ENOTDIR) {
+                if (single) {
+                    errmsg = xasprintf("Path not found: %s", scope_path);
+                    goto fail;
                 }
-                walk_list_free(&wl);
+                continue;
             }
-            globset_free(&gs);
-            globset_free(&xs);
+            errmsg = xasprintf("%s: %s", t->abs, strerror(errno));
+            goto fail;
         }
-        free(abs);
-        free(base);
-        free(glob);
+        if (!t->has_glob && S_ISREG(st.st_mode)) {
+            gitem_t it = {rel_cwd(t->abs, env->cwd, false),
+                          (int64_t)st.st_mtim.tv_sec * 1000 + st.st_mtim.tv_nsec / 1000000, xstrdup("")};
+            vec_push(&items, it);
+            continue;
+        }
+        if (!S_ISDIR(st.st_mode)) {
+            if (single) {
+                errmsg = xasprintf("Path is not a directory: %s", t->abs);
+                goto fail;
+            }
+            continue;
+        }
+        globset_t sel = {0};
+        char *pat = glob_normalize(t->glob, false);
+        globset_add(&sel, pat, GLOB_PATHNAME);
+        gwalk_t g;
+        memset(&g, 0, sizeof g);
+        pthread_mutex_init(&g.mu, NULL);
+        g.root = t->abs;
+        g.cwd = env->cwd;
+        g.sel = &sel;
+        g.dir_only = t->dir_only;
+        walk_opts_t wo = {0};
+        wo.include_hidden = hidden;
+        wo.no_ignore = !gitignore;
+        wo.skip_node_modules = !strstr(pat, "node_modules");
+        wo.types = t->dir_only ? WALK_DIR : (WALK_FILE | WALK_DIR | WALK_SYMLINK);
+        wo.want_stat = true;
+        int db = glob_depth_bound(pat);
+        if (db > 0) wo.max_depth = db;
+        walk(t->abs, &wo, glob_walk_cb, &g);
+        pthread_mutex_destroy(&g.mu);
+        free(pat);
+        globset_free(&sel);
+        /* newest first by millisecond, ties by path; keep the limit */
+        if (g.items.n > 1) qsort(g.items.v, g.items.n, sizeof(gitem_t), cmp_gitem_mtime);
+        for (size_t k = 0; k < g.items.n; k++) {
+            if ((int64_t)k < limit) vec_push(&items, g.items.v[k]);
+            else {
+                free(g.items.v[k].path);
+                free(g.items.v[k].key);
+            }
+        }
+        vec_free(&g.items);
     }
-    if (items.n > 1) qsort(items.v, items.n, sizeof(gitem_t), cmp_gitem);
-    sb_t b = SB_INIT;
-    json_t *files = json_arr();
-    size_t shown = MIN(items.n, (size_t)limit);
-    for (size_t i = 0; i < shown; i++) {
-        sb_appendf(&b, "%s\n", items.v[i].path);
-        json_push_str(files, items.v[i].path);
+    /* merge: dedupe, stable re-sort by mtime */
+    {
+        size_t w = 0;
+        for (size_t i = 0; i < items.n; i++) {
+            bool dup = false;
+            for (size_t k = 0; k < w && !dup; k++) dup = !strcmp(items.v[k].path, items.v[i].path);
+            if (dup) {
+                free(items.v[i].path);
+                free(items.v[i].key);
+                continue;
+            }
+            items.v[w++] = items.v[i];
+        }
+        items.n = w;
+        /* insertion sort keeps equal mtimes in order (JS sort is stable) */
+        for (size_t i = 1; i < items.n; i++) {
+            gitem_t x = items.v[i];
+            size_t k = i;
+            while (k > 0 && items.v[k - 1].mtime < x.mtime) {
+                items.v[k] = items.v[k - 1];
+                k--;
+            }
+            items.v[k] = x;
+        }
     }
+    char *clamp = NULL;
+    if (req_limit > GLOB_MAX_LIMIT) {
+        char *n = js_num(req_limit);
+        clamp = xasprintf("Requested limit %s clamped to the max of %d", n, GLOB_MAX_LIMIT);
+        free(n);
+    }
+    char *missing_note = NULL;
+    if (missing.n) {
+        char *j = strvec_join(&missing, ", ");
+        missing_note = xasprintf("Skipped missing paths: %s", j);
+        free(j);
+    }
+    out->details = json_obj();
+    json_set_str(out->details, "scopePath", scope_path);
     if (!items.n) {
-        sb_append(&b, "No files found matching pattern");
+        json_set_int(out->details, "fileCount", 0);
+        json_set(out->details, "files", json_arr());
+        json_set_bool(out->details, "truncated", false);
+        json_set_str(out->details, "cwd", env->cwd);
+        sb_t t = SB_INIT;
+        sb_append(&t, "No files found matching pattern");
+        if (missing_note) sb_appendf(&t, "\n%s", missing_note);
+        tool_result_text(out, sb_cstr(&t));
+        sb_free(&t);
         out->useless = true;
     } else {
-        if (items.n > shown) sb_appendf(&b, "[%zu more results; narrow the pattern]\n", items.n - shown);
-        if (req_limit > 200) sb_appendf(&b, "Requested limit %lld clamped to the max of 200\n", (long long)req_limit);
+        bool reached = (int64_t)items.n >= limit;
+        size_t shown = reached ? (size_t)limit : items.n;
+        strvec_t paths = {0};
+        json_t *files = json_arr();
+        for (size_t i = 0; i < shown; i++) {
+            strvec_push(&paths, items.v[i].path);
+            json_push_str(files, items.v[i].path);
+        }
+        char *base = format_grouped_paths(&paths);
+        sb_t raw = SB_INIT;
+        sb_append(&raw, base);
+        free(base);
+        if (clamp || missing_note) {
+            sb_append(&raw, "\n\n");
+            if (clamp) sb_append(&raw, clamp);
+            if (clamp && missing_note) sb_putc(&raw, '\n');
+            if (missing_note) sb_append(&raw, missing_note);
+        }
+        out_trunc_t tr = {0};
+        out_truncate_head(raw.s ? raw.s : "", raw.len, 50 * 1024, INT64_MAX, &tr);
+        tool_result_text(out, tr.content ? tr.content : "");
+        json_set_int(out->details, "fileCount", (int64_t)shown);
+        json_set(out->details, "files", files);
+        json_set_bool(out->details, "truncated", reached || tr.truncated);
+        if (reached) json_set_int(out->details, "resultLimitReached", limit);
+        json_set_str(out->details, "cwd", env->cwd);
+        json_t *meta = NULL;
+        if (reached) {
+            int64_t sug = MIN(limit * 2, (int64_t)GLOB_MAX_LIMIT);
+            out_meta_result_limit(&meta, limit, sug > limit ? sug : -1);
+        }
+        if (tr.truncated) out_meta_from_trunc(&meta, &tr, "head", 0, 0, NULL, 0, 0);
+        if (meta) json_set(out->details, "meta", meta);
+        out_trunc_free(&tr);
+        sb_free(&raw);
+        strvec_free(&paths);
     }
     if (missing.n) {
-        char *m = strvec_join(&missing, ", ");
-        sb_appendf(&b, "%sSkipped missing paths: %s", b.len && b.s[b.len - 1] != '\n' ? "\n" : "", m);
-        free(m);
+        json_t *mp = json_arr();
+        for (size_t k = 0; k < missing.n; k++) json_push_str(mp, missing.v[k]);
+        json_set(out->details, "missingPaths", mp);
     }
-    while (b.len && b.s[b.len - 1] == '\n') sb_truncate(&b, b.len - 1);
-    tool_result_text(out, sb_cstr(&b));
-    out->details = json_obj();
-    json_set_int(out->details, "fileCount", (int64_t)shown);
-    json_set(out->details, "files", files);
-    json_set_bool(out->details, "resultLimitReached", items.n > shown);
-    {
-        char *base, *glob;
-        split_glob(inc.v[0], &base, &glob);
-        char *sc = scope_display(base, env->cwd, env);
-        json_set_str(out->details, "scopePath", sc);
-        free(sc);
-        free(base);
-        free(glob);
+    free(clamp);
+    free(missing_note);
+    goto cleanup;
+fail:
+    tool_result_error(out, "%s", errmsg);
+    free(errmsg);
+cleanup:
+    for (size_t i = 0; i < items.n; i++) {
+        free(items.v[i].path);
+        free(items.v[i].key);
     }
-    sb_free(&b);
-    for (size_t i = 0; i < items.n; i++) free(items.v[i].path);
     vec_free(&items);
-    strvec_free(&inc);
-    strvec_free(&exc);
+    for (size_t i = 0; i < targets.n; i++) {
+        free(targets.v[i].abs);
+        free(targets.v[i].glob);
+    }
+    vec_free(&targets);
+    free(scope_path);
+    strvec_free(&scoped);
+    strvec_free(&expanded);
+    strvec_free(&patterns);
     strvec_free(&missing);
+    strvec_free(&effective);
     return 0;
 }
 

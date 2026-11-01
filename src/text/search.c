@@ -566,7 +566,8 @@ static bool file_cb(const walk_entry_t *e, void *ud) {
     return true;
 }
 
-static int cmp_str(const void *a, const void *b) { return walk_path_cmp(*(char *const *)a, *(char *const *)b); }
+/* pi-walker grep sorts hits by path bytes */
+static int cmp_str(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
 int search_run(const search_opts_t *o, search_result_t *out) {
     memset(out, 0, sizeof(*out));
@@ -618,9 +619,10 @@ int search_run(const search_opts_t *o, search_result_t *out) {
     wo.follow_symlinks = o->follow_symlinks;
     wo.types = WALK_FILE;
     wo.threads = o->threads;
+    wo.skip_node_modules = !(o->glob && strstr(o->glob, "node_modules"));
     globset_t inc = {0}, exc = {0};
     if (o->glob && *o->glob) {
-        char *g = glob_normalize(o->glob, true);
+        char *g = glob_normalize(o->glob, !o->glob_anchored);
         globset_add(&inc, g, GLOB_PATHNAME);
         size_t gl = strlen(g);
         while (gl > 0 && g[gl - 1] == '/') g[--gl] = 0;

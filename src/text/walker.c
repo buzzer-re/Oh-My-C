@@ -202,7 +202,7 @@ static void process_dir(walker_t *w, job_t *job) {
         ignore_set_t *set = NULL;
         static const char *const files[] = {".gitignore", ".ignore"};
         for (int i = 0; i < 2; i++) {
-            if (i == 0 && !in_git) continue;
+            /* pi-walker: .gitignore applies everywhere, not only inside a repository */
             size_t len;
             char *data = read_at(dfd, files[i], &len);
             if (!data) continue;

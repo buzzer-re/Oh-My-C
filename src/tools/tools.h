@@ -153,5 +153,7 @@ void format_hashline_header(sb_t *b, const char *display_path, const char *tag);
 /* omp grouped-file-output display text (details.displayContent) from
  * [{path, tag?, suffix?, lines: [{line, match, mark?, text}]}] (line 0: verbatim row); grouped = `# dir/` path tree */
 char *grep_display_content(const json_t *files, bool grouped);
+/* omp formatGroupedPaths: prefix-folded `# dir/` tree of bare names (dirs end with `/`); owned */
+char *format_grouped_paths(const strvec_t *paths);
 
 #endif

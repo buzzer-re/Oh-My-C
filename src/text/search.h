@@ -22,6 +22,7 @@ typedef struct {
     const char *pattern;
     const char *path;     /* file or directory; NULL = "." */
     const char *glob;     /* include filter (omp semantics: `*.ts` matches at any depth; a matched dir selects its files) */
+    bool glob_anchored;   /* glob is relative to path (omp `recursive: false`): `*.ts` matches direct children only */
     const char *const *exclude; /* globs to leave out: no '/' = any depth, leading '/' = anchored to path */
     size_t nexclude;
     const char *type;     /* file type filter ("ts", "py", "c", "rust", ...; unknown = extension) */
