@@ -33,7 +33,11 @@ static double edit_fuzzy_threshold(void) {
 }
 
 static char *pe_resolve(void *ud, const char *display, char **err) {
-    UNUSED(err);
+    /* omp: ssh:// is a handler-written internal URL — edits are refused, `write` replaces the file */
+    if (str_starts(display, "ssh://")) {
+        *err = xasprintf("%s is written through `write`, not edited", display);
+        return NULL;
+    }
     return tool_resolve_path(ud, display);
 }
 
