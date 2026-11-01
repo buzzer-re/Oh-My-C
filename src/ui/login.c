@@ -680,6 +680,8 @@ static void login_view_done(void *ud, int outcome, const char *name, const char 
     } else if (outcome == UI_LOGIN_ERROR) {
         msg = xasprintf("Login failed: %s", err ? err : "unknown error");
         level = "error";
+    } else {
+        msg = xstrdup("Login cancelled"); /* dialog onComplete -> showStatus, replacing "Logging in to ..." */
     }
     /* close on the next loop turn: we may be inside the view's own key handler */
     login_close_t *c = xcalloc(1, sizeof *c);
@@ -717,6 +719,9 @@ static bool login_view_key(tui_component_t *c, const tui_key_t *k) {
             free(id);
             return true;
         }
+        char *st = xasprintf("Logging in to %s\xe2\x80\xa6", picked); /* omp showStatus before the dialog */
+        add_notice(v->u, "info", st);
+        free(st);
         v->login = ui_login_start(v->u, picked, login_view_done, v);
     }
     tui_component_request_render(c);
