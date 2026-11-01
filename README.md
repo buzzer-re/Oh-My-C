@@ -45,4 +45,18 @@ Configuration lives in `~/.omc/agent/` (`config.yml`, `models.yml`, `auth.json`,
 omp's `.omp/` directories; `AGENTS.md`/`CLAUDE.md` and other tools' context files are discovered
 like in omp. Sessions are stored as omp-compatible JSONL under `~/.omc/agent/sessions/`.
 
-See [PARITY.md](PARITY.md) for what is and is not ported yet.
+## Embedding (optional library build)
+
+```sh
+make lib            # -> build/libomc.a, build/libomc.so.0, build/omc.pc  (public API: include/omc.h)
+sudo make install-lib PREFIX=/usr/local
+cc app.c $(pkg-config --cflags --libs omc)        # or: -Iinclude build/libomc.a -lssl -lcrypto -lz -lpthread -lm
+```
+
+The library exports only the `omc_*` API (the static archive is prelinked so internal names never
+clash with the host app). A session speaks the same JSON protocol as `omc --mode rpc`: send commands
+with `omc_send()`, receive responses and agent events through one callback. `omc_prompt()` runs a
+turn synchronously, `omc_register_tool()` adds native tools implemented by the host, and
+`omc_main()` runs the whole CLI/TUI in-process. See `examples/embed.c`.
+
+See [docs/status.md](docs/status.md) for what is and is not implemented yet.

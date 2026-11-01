@@ -1,6 +1,7 @@
-# omp → omc parity
+# omc implementation status
 
-Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 partial · ❌ not yet.
+Status of the port against upstream oh-my-pi (reference: omp v18.13.3). ✅ ported and tested · 🟡 partial · ❌ not yet.
+This file is the single source of truth for what is implemented; it is updated with every change.
 
 ## Runtime & infrastructure
 | Area | Status | Notes |
@@ -59,13 +60,20 @@ Status of the port against upstream oh-my-pi. ✅ ported and tested · 🟡 part
 | ssh:// URLs (ssh.json hosts, ControlMaster, POSIX shell probe, /~ HOME, 1 MiB UTF-8 reads, dir listings, staged byte-exact writes) | 🟡 | read/write/edit ✅; grep over ssh:// ❌ |
 | browser, computer, image_gen, tts | ❌ | |
 
+## Embedding
+| Feature | Status | Notes |
+|---|---|---|
+| Library build (opt-in `make lib`): `libomc.a` (prelinked, only `omc_*` symbols global), `libomc.so.0` (version script), `omc.pc`, `make install-lib` | ✅ | public API `include/omc.h` |
+| API: sessions with options, full RPC protocol via `omc_send` + event callback, blocking `omc_prompt`, abort/wait/busy, host-implemented native tools, `omc_main` (whole CLI/TUI in-process) | ✅ | `examples/embed.c`, checked by `make test` |
+| Per-session configuration (settings/credentials/catalog are process-wide) | ❌ | |
+
 ## Modes & UI
 | Feature | Status |
 |---|---|
 | Print mode (text / json), RPC mode: prompt/steer/follow_up/abort*, queue remove/promote, state, goal, advisor, todos, host tools (set_host_tools ↔ host_tool_call/result/cancel), event filter, tree/navigate/label/branch messages, messages paging, model/thinking cycle, compaction/retry toggles, export_html, handoff, btw, available commands, login providers | ✅ | host URI schemes, subagent streaming, live voice/dictation, predict_word, session lease ❌ |
-| Interactive TUI (streaming markdown, tool cards, editor, autocomplete, pickers, status line, themes) | ✅ |
+| Interactive TUI: functional (streaming markdown, tool output, editor, autocomplete, pickers, slash commands, themes) | ✅ |
+| Interactive TUI: 1:1 visual/behavioral parity with `omp` (verified side by side in tmux against the same mock model) | 🟡 | in progress. Diverges today: welcome screen (gradient logo, block-letter wordmark, version, rotating tips), first-run setup wizard (providers → default model → glyph mode → composer shape → theme), status band (`π > model > path ▶──ctx%──…╎──┃── window`), curved `╰─` composer with right hints, right-aligned session title, bordered tool cards (bash: `$ cmd` / Output / `Wall · Timeout` footer), user/assistant message chrome, model-written session titles with emoji/code, startup skill-description compression, `<system-reminder>` date/cwd injection |
 | Slash commands: help model thinking/effort plan goal guided-goal new clear resume compact handoff session name/rename export copy dump fork tree branch retry btw queue shake delete todo tools context usage skills mcp dirs hotkeys quit/exit | ✅ |
-| Slash commands: help, model, thinking, new, resume, compact, session, name, export, copy, fork, clear, quit | ✅ |
 | ACP mode (`--mode acp`: initialize, session/new/load/list/prompt/cancel/set_mode, streamed message/thought/tool_call/plan/usage updates, session/request_permission for edit/execute tools) | ✅ |
 | collab, share, stats dashboard, Agent Hub, git UI, marketplace/plugins, settings menu, vibe, loop, ratchet, security scans, tan, omfg, cleanse, wt, add-dir, restart | ❌ |
 | OAuth login (generic PKCE flow from omp descriptors) | ✅ | device-code / custom hook providers ❌ |

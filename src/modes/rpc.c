@@ -13,7 +13,26 @@
 #include <unistd.h>
 
 typedef struct {
+    char *id;
+    json_t *result;
+    bool is_error;
+    bool done;
+} hostcall_t;
+
+struct rpc {
     app_t *a;
+    rpc_sink_fn sink; /* NULL => stdout */
+    void *sink_ud;
+    /* event filter: allowed event types; !filter_on => all */
+    pthread_mutex_t filter_mu;
+    strvec_t filter;
+    bool filter_on;
+    /* host tools implemented by the client */
+    pthread_mutex_t host_mu;
+    pthread_cond_t host_cv;
+    VEC(hostcall_t *) host_calls;
+    strvec_t host_tools;
+    uint64_t host_seq;
     pthread_t th;
     bool running;
     char *prompt_id;
@@ -21,9 +40,14 @@ typedef struct {
     json_t *images;
     const char *hidden; /* custom type when the run is a hidden wake-up (async-result) */
     pthread_mutex_t mu;
-} rpc_t;
+};
 
-static void respond(const char *id, const char *cmd, bool ok, json_t *data, const char *err) {
+static void emit(rpc_t *rp, const json_t *j) {
+    if (rp && rp->sink) rp->sink(rp->sink_ud, j);
+    else out_json_line(j);
+}
+
+static void respond(rpc_t *rp, const char *id, const char *cmd, bool ok, json_t *data, const char *err) {
     json_t *r = json_obj();
     if (id) json_set_str(r, "id", id);
     json_set_str(r, "type", "response");
@@ -31,54 +55,38 @@ static void respond(const char *id, const char *cmd, bool ok, json_t *data, cons
     json_set_bool(r, "success", ok);
     if (data) json_set(r, "data", data);
     if (err) json_set_str(r, "error", err);
-    out_json_line(r);
+    emit(rp, r);
     json_free(r);
 }
 
 /* ---------- event filter ---------- */
 
-static pthread_mutex_t g_filter_mu = PTHREAD_MUTEX_INITIALIZER;
-static strvec_t g_filter; /* allowed event types; empty + !g_filter_on => all */
-static bool g_filter_on;
-
-static bool event_allowed(const char *type) {
-    pthread_mutex_lock(&g_filter_mu);
-    bool ok = !g_filter_on || strvec_contains(&g_filter, type ? type : "");
-    pthread_mutex_unlock(&g_filter_mu);
+static bool event_allowed(rpc_t *r, const char *type) {
+    pthread_mutex_lock(&r->filter_mu);
+    bool ok = !r->filter_on || strvec_contains(&r->filter, type ? type : "");
+    pthread_mutex_unlock(&r->filter_mu);
     return ok;
 }
 
 /* ---------- host tools (implemented by the RPC client) ---------- */
 
-typedef struct {
-    char *id;
-    json_t *result;
-    bool is_error;
-    bool done;
-} hostcall_t;
-
-static pthread_mutex_t g_host_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_host_cv = PTHREAD_COND_INITIALIZER;
-static VEC(hostcall_t *) g_host_calls;
-static strvec_t g_host_tools;
-static uint64_t g_host_seq;
-
 static int host_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
+    rpc_t *r = self->ud;
     hostcall_t *hc = xcalloc(1, sizeof(*hc));
-    pthread_mutex_lock(&g_host_mu);
-    hc->id = xasprintf("host-%llu", (unsigned long long)++g_host_seq);
-    vec_push(&g_host_calls, hc);
-    pthread_mutex_unlock(&g_host_mu);
+    pthread_mutex_lock(&r->host_mu);
+    hc->id = xasprintf("host-%llu", (unsigned long long)++r->host_seq);
+    vec_push(&r->host_calls, hc);
+    pthread_mutex_unlock(&r->host_mu);
     json_t *req = json_obj();
     json_set_str(req, "type", "host_tool_call");
     json_set_str(req, "id", hc->id);
     json_set_str(req, "toolCallId", ctx && ctx->tool_call_id ? ctx->tool_call_id : "");
     json_set_str(req, "toolName", self->name);
     json_set(req, "arguments", args ? json_clone(args) : json_obj());
-    out_json_line(req);
+    emit(r, req);
     json_free(req);
     bool cancelled = false;
-    pthread_mutex_lock(&g_host_mu);
+    pthread_mutex_lock(&r->host_mu);
     while (!hc->done) {
         if (ctx && ctx->cancel && *ctx->cancel) {
             cancelled = true;
@@ -91,14 +99,14 @@ static int host_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *
             ts.tv_sec++;
             ts.tv_nsec -= 1000000000L;
         }
-        pthread_cond_timedwait(&g_host_cv, &g_host_mu, &ts);
+        pthread_cond_timedwait(&r->host_cv, &r->host_mu, &ts);
     }
-    for (size_t i = 0; i < g_host_calls.n; i++)
-        if (g_host_calls.v[i] == hc) {
-            g_host_calls.v[i] = g_host_calls.v[--g_host_calls.n];
+    for (size_t i = 0; i < r->host_calls.n; i++)
+        if (r->host_calls.v[i] == hc) {
+            r->host_calls.v[i] = r->host_calls.v[--r->host_calls.n];
             break;
         }
-    pthread_mutex_unlock(&g_host_mu);
+    pthread_mutex_unlock(&r->host_mu);
     if (cancelled) {
         json_t *c = json_obj();
         json_set_str(c, "type", "host_tool_cancel");
@@ -106,7 +114,7 @@ static int host_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *
         json_set_str(c, "id", cid);
         free(cid);
         json_set_str(c, "targetId", hc->id);
-        out_json_line(c);
+        emit(r, c);
         json_free(c);
         tool_result_error(out, "Tool call cancelled");
     } else {
@@ -125,17 +133,17 @@ static int host_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *
     return 0;
 }
 
-static void host_tool_complete(const json_t *cmd) {
+static void host_tool_complete(rpc_t *r, const json_t *cmd) {
     const char *id = json_get_str(cmd, "id");
-    pthread_mutex_lock(&g_host_mu);
-    for (size_t i = 0; i < g_host_calls.n; i++)
-        if (str_eq(g_host_calls.v[i]->id, id)) {
-            g_host_calls.v[i]->result = json_clone(json_get(cmd, "result"));
-            g_host_calls.v[i]->is_error = json_get_bool(cmd, "isError", false);
-            g_host_calls.v[i]->done = true;
+    pthread_mutex_lock(&r->host_mu);
+    for (size_t i = 0; i < r->host_calls.n; i++)
+        if (str_eq(r->host_calls.v[i]->id, id)) {
+            r->host_calls.v[i]->result = json_clone(json_get(cmd, "result"));
+            r->host_calls.v[i]->is_error = json_get_bool(cmd, "isError", false);
+            r->host_calls.v[i]->done = true;
         }
-    pthread_cond_broadcast(&g_host_cv);
-    pthread_mutex_unlock(&g_host_mu);
+    pthread_cond_broadcast(&r->host_cv);
+    pthread_mutex_unlock(&r->host_mu);
 }
 
 /* ---------- session tree ---------- */
@@ -174,9 +182,9 @@ static json_t *session_tree_json(const session_t *s) {
 }
 
 static void rpc_listener(void *ud, const agent_event_t *ev) {
-    UNUSED(ud);
+    rpc_t *r = ud;
     json_t *j = agent_event_to_json(ev);
-    if (!event_allowed(json_get_str(j, "type"))) {
+    if (!event_allowed(r, json_get_str(j, "type"))) {
         json_free(j);
         return;
     }
@@ -184,17 +192,17 @@ static void rpc_listener(void *ud, const agent_event_t *ev) {
         json_set_bool(j, "isTerminal", true);
         json_set_bool(j, "yielded", true);
     }
-    out_json_line(j);
+    emit(r, j);
     json_free(j);
 }
 
 static void notice_rpc(void *ud, const char *level, const char *text) {
-    UNUSED(ud);
+    rpc_t *r = ud;
     json_t *j = json_obj();
     json_set_str(j, "type", "notice");
     json_set_str(j, "level", level);
     json_set_str(j, "message", text);
-    out_json_line(j);
+    emit(r, j);
     json_free(j);
 }
 
@@ -235,7 +243,7 @@ again:;
         if (!cont) break;
         if (!was_cont) {
             json_set_bool(res, "sessionSettled", false);
-            out_json_line(res);
+            emit(r, res);
         }
         was_cont = true;
         before = json_len(r->a->agent->messages);
@@ -244,11 +252,11 @@ again:;
         free(cont);
     }
     json_set_bool(res, "sessionSettled", true);
-    if (!was_cont) out_json_line(res);
+    if (!was_cont) emit(r, res);
     json_free(res);
     json_t *settled = json_obj();
     json_set_str(settled, "type", "session_settled");
-    out_json_line(settled);
+    emit(r, settled);
     json_free(settled);
     pthread_mutex_lock(&r->mu);
     free(r->text);
@@ -339,13 +347,13 @@ static void handle(rpc_t *r, json_t *cmd) {
     const char *id = json_get_str(cmd, "id");
     const char *type = json_get_str(cmd, "type");
     if (!type) {
-        respond(id, "unknown", false, NULL, "missing type");
+        respond(r, id, "unknown", false, NULL, "missing type");
         return;
     }
     if (!strcmp(type, "negotiate_protocol")) {
         json_t *d = json_obj();
         json_set_int(d, "protocolVersion", 1);
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "prompt") || !strcmp(type, "abort_and_prompt")) {
         const char *msg = json_get_str(cmd, "message");
         if (!strcmp(type, "abort_and_prompt")) {
@@ -365,7 +373,7 @@ static void handle(rpc_t *r, json_t *cmd) {
             json_t *m = msg_user_content(content_with_images(msg, json_get_arr(cmd, "images")));
             if (str_eq(behav, "followUp")) agent_follow_up(a->agent, m);
             else agent_steer(a->agent, m);
-            respond(id, type, true, NULL, NULL);
+            respond(r, id, type, true, NULL, NULL);
             return;
         }
         if (r->th) pthread_join(r->th, NULL);
@@ -377,19 +385,19 @@ static void handle(rpc_t *r, json_t *cmd) {
         json_t *imgs = json_get_arr(cmd, "images");
         r->images = imgs ? json_clone(imgs) : NULL;
         pthread_mutex_unlock(&r->mu);
-        respond(id, type, true, NULL, NULL);
+        respond(r, id, type, true, NULL, NULL);
         if (pthread_create(&r->th, NULL, prompt_thread, r) != 0) {
             r->running = false;
-            respond(id, type, false, NULL, "failed to start agent thread");
+            respond(r, id, type, false, NULL, "failed to start agent thread");
         }
     } else if (!strcmp(type, "steer") || !strcmp(type, "follow_up")) {
         json_t *m = msg_user_content(content_with_images(json_get_str(cmd, "message"), json_get_arr(cmd, "images")));
         if (!strcmp(type, "steer")) agent_steer(a->agent, m);
         else agent_follow_up(a->agent, m);
-        respond(id, type, true, NULL, NULL);
+        respond(r, id, type, true, NULL, NULL);
     } else if (!strcmp(type, "abort")) {
         agent_abort(a->agent);
-        respond(id, type, true, NULL, NULL);
+        respond(r, id, type, true, NULL, NULL);
     } else if (!strcmp(type, "goal")) {
         const char *op = json_get_str(cmd, "op");
         char *err = NULL;
@@ -401,21 +409,21 @@ static void handle(rpc_t *r, json_t *cmd) {
         else if (str_eq(op, "drop")) app_goal_drop(a);
         else if (!str_eq(op, "get")) rc = (err = xasprintf("unknown goal op '%s'", op ? op : ""), -1);
         if (rc) {
-            respond(id, type, false, NULL, err ? err : "goal operation failed");
+            respond(r, id, type, false, NULL, err ? err : "goal operation failed");
         } else {
             json_t *d = json_obj();
             json_set(d, "goal", goal_json(app_goal(a)));
             json_set(d, "state", goal_state_json(app_goal(a)));
-            respond(id, type, true, d, NULL);
+            respond(r, id, type, true, d, NULL);
         }
         free(err);
     } else if (!strcmp(type, "host_tool_result")) {
-        host_tool_complete(cmd);
+        host_tool_complete(r, cmd);
     } else if (!strcmp(type, "host_tool_update")) {
         /* partial results are informational for the host UI; nothing to do server-side */
     } else if (!strcmp(type, "set_host_tools")) {
-        for (size_t i = 0; i < g_host_tools.n; i++) agent_remove_tool(a->agent, g_host_tools.v[i]);
-        strvec_free(&g_host_tools);
+        for (size_t i = 0; i < r->host_tools.n; i++) agent_remove_tool(a->agent, r->host_tools.v[i]);
+        strvec_free(&r->host_tools);
         json_t *names = json_arr(), *t;
         json_arr_foreach(json_get_arr(cmd, "tools"), i, t) {
             const char *nm = json_get_str(t, "name");
@@ -427,42 +435,43 @@ static void handle(rpc_t *r, json_t *cmd) {
                                                 params ? json_clone(params) : json_parse_str("{\"type\":\"object\",\"properties\":{}}"),
                                                 host_tool_execute);
             tool->hidden = json_get_bool(t, "hidden", false);
+            tool->ud = r;
             agent_add_tool(a->agent, tool);
-            strvec_push(&g_host_tools, nm);
+            strvec_push(&r->host_tools, nm);
             json_push_str(names, nm);
         }
         app_rebuild_system_prompt(a);
         json_t *d = json_obj();
         json_set(d, "toolNames", names);
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "set_event_filter")) {
-        pthread_mutex_lock(&g_filter_mu);
-        strvec_free(&g_filter);
+        pthread_mutex_lock(&r->filter_mu);
+        strvec_free(&r->filter);
         json_t *ev = json_get(cmd, "events"), *x;
-        g_filter_on = json_is_arr(ev);
-        json_arr_foreach(ev, i, x) if (json_is_str(x)) strvec_push(&g_filter, json_sv(x));
-        pthread_mutex_unlock(&g_filter_mu);
+        r->filter_on = json_is_arr(ev);
+        json_arr_foreach(ev, i, x) if (json_is_str(x)) strvec_push(&r->filter, json_sv(x));
+        pthread_mutex_unlock(&r->filter_mu);
         json_t *d = json_obj();
-        json_set(d, "events", g_filter_on ? json_clone(ev) : json_null());
+        json_set(d, "events", r->filter_on ? json_clone(ev) : json_null());
         json_set_str(d, "messageUpdates", json_get_str(cmd, "messageUpdates") ? json_get_str(cmd, "messageUpdates") : "full");
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "set_todos")) {
         json_t *ph = json_get_arr(cmd, "phases");
         json_free(a->env->todo.phases);
         a->env->todo.phases = ph ? json_clone(ph) : json_arr();
         json_t *d = json_obj();
         json_set(d, "todoPhases", json_clone(a->env->todo.phases));
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "get_tree")) {
         json_t *d = json_obj();
         json_set(d, "tree", session_tree_json(a->session));
         json_set(d, "leafId", a->session->leaf_id ? json_str(a->session->leaf_id) : json_null());
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "navigate_tree")) {
         const char *eid = json_get_str(cmd, "entryId");
         json_t *e = eid ? session_get(a->session, eid) : NULL;
-        if (r->running) respond(id, type, false, NULL, "agent is busy");
-        else if (!e) respond(id, type, false, NULL, "unknown entry");
+        if (r->running) respond(r, id, type, false, NULL, "agent is busy");
+        else if (!e) respond(r, id, type, false, NULL, "unknown entry");
         else {
             json_t *m = json_get(e, "message");
             bool user = str_eq(json_get_str(e, "type"), "message") && str_eq(json_get_str(m, "role"), "user");
@@ -494,16 +503,16 @@ static void handle(rpc_t *r, json_t *cmd) {
             json_t *d = json_obj();
             json_set_bool(d, "cancelled", false);
             if (text) json_set_str(d, "editorText", text);
-            respond(id, type, true, d, NULL);
+            respond(r, id, type, true, d, NULL);
             free(text);
             free(target);
         }
     } else if (!strcmp(type, "set_label")) {
         const char *eid = json_get_str(cmd, "entryId");
-        if (!eid || !session_get(a->session, eid)) respond(id, type, false, NULL, "unknown entry");
+        if (!eid || !session_get(a->session, eid)) respond(r, id, type, false, NULL, "unknown entry");
         else {
             session_append_label(a->session, eid, json_get_str(cmd, "label") ? json_get_str(cmd, "label") : "");
-            respond(id, type, true, NULL, NULL);
+            respond(r, id, type, true, NULL, NULL);
         }
     } else if (!strcmp(type, "get_branch_messages")) {
         json_t *path = session_path_to(a->session, a->session->leaf_id), *e, *arr = json_arr();
@@ -521,14 +530,14 @@ static void handle(rpc_t *r, json_t *cmd) {
         json_free(path);
         json_t *d = json_obj();
         json_set(d, "messages", arr);
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "get_last_assistant_text")) {
         const json_t *last = last_assistant(a->agent->messages);
         json_t *d = json_obj();
         char *t = last ? ai_message_text(last) : NULL;
         json_set(d, "text", t ? json_str(t) : json_null());
         free(t);
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "get_messages_page")) {
         int64_t limit = json_get_int(cmd, "limit", 50);
         if (limit < 1) limit = 1;
@@ -550,14 +559,14 @@ static void handle(rpc_t *r, json_t *cmd) {
         } else json_set(d, "nextCursor", json_null());
         json_set_bool(d, "hasMore", start > 0);
         json_set_int(d, "total", total);
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "get_available_thinking_levels")) {
         json_t *lv = json_arr();
         for (int i = EFFORT_OFF; i <= EFFORT_MAX; i++)
             if (model_supports_effort(a->model, (ai_effort_t)i)) json_push_str(lv, effort_name((ai_effort_t)i));
         json_t *d = json_obj();
         json_set(d, "levels", lv);
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "cycle_thinking_level")) {
         int cur = (int)a->thinking, next = cur;
         for (int k = 1; k <= EFFORT_MAX + 1; k++) {
@@ -570,7 +579,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         app_set_thinking(a, (ai_effort_t)next);
         json_t *d = json_obj();
         json_set_str(d, "level", effort_name(a->thinking));
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "cycle_model")) {
         /* cycle through settings.enabledModels (scoped) or models with credentials */
         json_t *scope = settings_get("enabledModels");
@@ -592,7 +601,7 @@ static void handle(rpc_t *r, json_t *cmd) {
             if (!strcmp(cands.v[i], curl)) at = i + 1;
         char *err = NULL;
         if (cands.n < 2 || app_set_model(a, cands.v[at % cands.n], &err) != 0) {
-            respond(id, type, true, json_null(), NULL);
+            respond(r, id, type, true, json_null(), NULL);
         } else {
             json_t *d = json_obj(), *m = json_obj();
             json_set_str(m, "provider", a->model->provider);
@@ -601,7 +610,7 @@ static void handle(rpc_t *r, json_t *cmd) {
             json_set(d, "model", m);
             json_set_str(d, "thinkingLevel", effort_name(a->thinking));
             json_set_bool(d, "isScoped", json_len(scope) > 0);
-            respond(id, type, true, d, NULL);
+            respond(r, id, type, true, d, NULL);
         }
         free(err);
         free(curl);
@@ -610,39 +619,39 @@ static void handle(rpc_t *r, json_t *cmd) {
         const char *outp = json_get_str(cmd, "outputPath");
         char *html = session_export_html(a->session);
         char *dest = outp ? xstrdup(outp) : xasprintf("omc-session-%s.html", session_short_id(session_id(a->session)));
-        if (fs_write(dest, html, strlen(html)) != 0) respond(id, type, false, NULL, "failed to write export");
+        if (fs_write(dest, html, strlen(html)) != 0) respond(r, id, type, false, NULL, "failed to write export");
         else {
             char *abs = path_abs(dest, a->cwd);
             json_t *d = json_obj();
             json_set_str(d, "path", abs);
-            respond(id, type, true, d, NULL);
+            respond(r, id, type, true, d, NULL);
             free(abs);
         }
         free(dest);
         free(html);
     } else if (!strcmp(type, "handoff")) {
-        if (r->running) respond(id, type, false, NULL, "agent is busy");
+        if (r->running) respond(r, id, type, false, NULL, "agent is busy");
         else {
             char *err = NULL;
-            if (app_handoff(a, &err) != 0) respond(id, type, false, NULL, err ? err : "handoff failed");
-            else respond(id, type, true, json_obj(), NULL);
+            if (app_handoff(a, &err) != 0) respond(r, id, type, false, NULL, err ? err : "handoff failed");
+            else respond(r, id, type, true, json_obj(), NULL);
             free(err);
         }
     } else if (!strcmp(type, "btw")) {
         char *err = NULL;
         char *ans = app_side_question(a, json_get_str(cmd, "question") ? json_get_str(cmd, "question") : "", &err);
-        if (!ans) respond(id, type, false, NULL, err ? err : "side question failed");
+        if (!ans) respond(r, id, type, false, NULL, err ? err : "side question failed");
         else {
             json_t *rec = json_obj();
             json_set_str(rec, "type", "btw_record");
             if (json_get_str(cmd, "recordId")) json_set_str(rec, "recordId", json_get_str(cmd, "recordId"));
             json_set_str(rec, "question", json_get_str(cmd, "question"));
             json_set_str(rec, "answer", ans);
-            out_json_line(rec);
+            emit(r, rec);
             json_free(rec);
             json_t *d = json_obj();
             json_set_str(d, "answer", ans);
-            respond(id, type, true, d, NULL);
+            respond(r, id, type, true, d, NULL);
         }
         free(ans);
         free(err);
@@ -671,7 +680,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         app_abort(a);
         json_set(d, "steering", sr);
         json_set(d, "followUp", fr);
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "remove_queued_message") || !strcmp(type, "promote_queued_message")) {
         const char *msg = json_get_str(cmd, "message");
         bool promote = !strcmp(type, "promote_queued_message");
@@ -694,14 +703,14 @@ static void handle(rpc_t *r, json_t *cmd) {
         pthread_mutex_unlock(&a->agent->mu);
         json_t *d = json_obj();
         json_set_bool(d, promote ? "promoted" : "removed", done);
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "set_auto_compaction") || !strcmp(type, "set_auto_retry")) {
         settings_set_runtime(!strcmp(type, "set_auto_compaction") ? "compaction.enabled" : "retry.enabled",
                              json_bool(json_get_bool(cmd, "enabled", true)));
-        respond(id, type, true, NULL, NULL);
+        respond(r, id, type, true, NULL, NULL);
     } else if (!strcmp(type, "abort_retry") || !strcmp(type, "abort_bash") || !strcmp(type, "abort_branch_summary")) {
         if (!strcmp(type, "abort_retry")) app_abort(a);
-        respond(id, type, true, NULL, NULL);
+        respond(r, id, type, true, NULL, NULL);
     } else if (!strcmp(type, "get_available_commands")) {
         static const char *CMDS[][2] = {{"compact", "Manually compact the session context"}, {"handoff", "Summarize the session into a handoff document and compact in place"},
                                         {"goal", "Toggle goal mode"}, {"plan", "Toggle plan mode"}, {"advisor", "Toggle the advisor"},
@@ -726,7 +735,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         }
         json_t *d = json_obj();
         json_set(d, "commands", arr);
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "get_login_providers")) {
         json_t *arr = json_arr();
         json_t *provs = auth_oauth_providers();
@@ -741,36 +750,36 @@ static void handle(rpc_t *r, json_t *cmd) {
         }
         json_t *d = json_obj();
         json_set(d, "providers", arr);
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "set_advisor")) {
         app_set_advisor(a, json_get_bool(cmd, "enabled", true));
-        respond(id, type, true, NULL, NULL);
+        respond(r, id, type, true, NULL, NULL);
     } else if (!strcmp(type, "get_state")) {
-        respond(id, type, true, state_json(a), NULL);
+        respond(r, id, type, true, state_json(a), NULL);
     } else if (!strcmp(type, "get_messages")) {
         json_t *d = json_obj();
         json_set(d, "messages", json_clone(a->agent->messages));
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "get_entries")) {
         json_t *d = json_obj();
         json_set(d, "entries", json_clone(a->session->entries));
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "set_model")) {
         const char *p = json_get_str(cmd, "provider"), *mid = json_get_str(cmd, "modelId");
         if (!mid) mid = json_get_str(cmd, "model");
         char *pat = p && mid ? xasprintf("%s/%s", p, mid) : xstrdup(mid ? mid : "");
         char *err = NULL;
-        if (app_set_model(a, pat, &err) == 0) respond(id, type, true, state_json(a), NULL);
-        else respond(id, type, false, NULL, err);
+        if (app_set_model(a, pat, &err) == 0) respond(r, id, type, true, state_json(a), NULL);
+        else respond(r, id, type, false, NULL, err);
         free(err);
         free(pat);
     } else if (!strcmp(type, "set_thinking_level")) {
         ai_effort_t e;
         if (effort_parse(json_get_str(cmd, "level"), &e) == 0) {
             app_set_thinking(a, e);
-            respond(id, type, true, NULL, NULL);
+            respond(r, id, type, true, NULL, NULL);
         } else {
-            respond(id, type, false, NULL, "invalid level");
+            respond(r, id, type, false, NULL, "invalid level");
         }
     } else if (!strcmp(type, "get_available_models")) {
         json_t *arr = json_arr();
@@ -787,35 +796,35 @@ static void handle(rpc_t *r, json_t *cmd) {
         }
         json_t *d = json_obj();
         json_set(d, "models", arr);
-        respond(id, type, true, d, NULL);
+        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "compact")) {
         char *err = NULL;
-        if (r->running) respond(id, type, false, NULL, "agent is busy");
-        else if (app_compact(a, json_get_str(cmd, "customInstructions"), &err) == 0) respond(id, type, true, NULL, NULL);
-        else respond(id, type, false, NULL, err);
+        if (r->running) respond(r, id, type, false, NULL, "agent is busy");
+        else if (app_compact(a, json_get_str(cmd, "customInstructions"), &err) == 0) respond(r, id, type, true, NULL, NULL);
+        else respond(r, id, type, false, NULL, err);
         free(err);
     } else if (!strcmp(type, "new_session")) {
-        if (r->running) respond(id, type, false, NULL, "agent is busy");
+        if (r->running) respond(r, id, type, false, NULL, "agent is busy");
         else {
             app_new_session(a);
-            respond(id, type, true, state_json(a), NULL);
+            respond(r, id, type, true, state_json(a), NULL);
         }
     } else if (!strcmp(type, "switch_session") || !strcmp(type, "open_session")) {
         const char *p = json_get_str(cmd, "sessionPath");
         if (!p) p = json_get_str(cmd, "path");
         char *err = NULL;
-        if (r->running) respond(id, type, false, NULL, "agent is busy");
-        else if (p && app_switch_session(a, p, &err) == 0) respond(id, type, true, state_json(a), NULL);
-        else respond(id, type, false, NULL, err ? err : "sessionPath required");
+        if (r->running) respond(r, id, type, false, NULL, "agent is busy");
+        else if (p && app_switch_session(a, p, &err) == 0) respond(r, id, type, true, state_json(a), NULL);
+        else respond(r, id, type, false, NULL, err ? err : "sessionPath required");
         free(err);
     } else if (!strcmp(type, "fork") || !strcmp(type, "branch")) {
         char *err = NULL;
-        if (app_fork_from(a, json_get_str(cmd, "entryId"), &err) == 0) respond(id, type, true, state_json(a), NULL);
-        else respond(id, type, false, NULL, err);
+        if (app_fork_from(a, json_get_str(cmd, "entryId"), &err) == 0) respond(r, id, type, true, state_json(a), NULL);
+        else respond(r, id, type, false, NULL, err);
         free(err);
     } else if (!strcmp(type, "set_session_name") || !strcmp(type, "set_title")) {
         session_set_title(a->session, json_get_str(cmd, "name") ? json_get_str(cmd, "name") : json_get_str(cmd, "title"), "user");
-        respond(id, type, true, NULL, NULL);
+        respond(r, id, type, true, NULL, NULL);
     } else if (!strcmp(type, "bash")) {
         const char *c = json_get_str(cmd, "command");
         proc_opts_t po = {.cwd = a->cwd, .timeout_ms = 300000, .merge_stderr = true, .new_session = true};
@@ -825,33 +834,95 @@ static void handle(rpc_t *r, json_t *cmd) {
             json_set_str(d, "output", pr.out);
             json_set_int(d, "exitCode", pr.exit_code);
             json_set_bool(d, "cancelled", pr.cancelled);
-            respond(id, type, true, d, NULL);
+            respond(r, id, type, true, d, NULL);
             proc_result_free(&pr);
         } else {
-            respond(id, type, false, NULL, "command required");
+            respond(r, id, type, false, NULL, "command required");
         }
     } else if (!strcmp(type, "get_session_stats")) {
-        respond(id, type, true, app_stats(a), NULL);
+        respond(r, id, type, true, app_stats(a), NULL);
     } else if (!strcmp(type, "set_steering_mode") || !strcmp(type, "set_follow_up_mode") || !strcmp(type, "set_interrupt_mode")) {
         const char *key = !strcmp(type, "set_steering_mode") ? "steeringMode" : !strcmp(type, "set_follow_up_mode") ? "followUpMode" : "interruptMode";
         settings_set_runtime(key, json_str(json_get_str(cmd, "mode")));
-        respond(id, type, true, NULL, NULL);
+        respond(r, id, type, true, NULL, NULL);
     } else {
-        respond(id, type, false, NULL, "unknown command");
+        respond(r, id, type, false, NULL, "unknown command");
     }
 }
 
-int run_rpc_mode(app_t *a) {
-    rpc_t r = {.a = a};
-    pthread_mutex_init(&r.mu, NULL);
-    agent_subscribe(a->agent, rpc_listener, NULL);
+rpc_t *rpc_attach(app_t *a, rpc_sink_fn sink, void *ud) {
+    rpc_t *r = xcalloc(1, sizeof(*r));
+    r->a = a;
+    r->sink = sink;
+    r->sink_ud = ud;
+    pthread_mutex_init(&r->mu, NULL);
+    pthread_mutex_init(&r->filter_mu, NULL);
+    pthread_mutex_init(&r->host_mu, NULL);
+    pthread_cond_init(&r->host_cv, NULL);
+    agent_subscribe(a->agent, rpc_listener, r);
     a->notice = notice_rpc;
+    a->notice_ud = r;
     a->wake = rpc_wake;
-    a->wake_ud = &r;
+    a->wake_ud = r;
     json_t *ready = json_parse_str("{\"type\":\"ready\",\"protocolVersion\":1,\"supportedProtocolVersions\":[1],"
                                    "\"maxFrameBytes\":1048576}");
-    out_json_line(ready);
+    emit(r, ready);
     json_free(ready);
+    return r;
+}
+
+void rpc_handle_json(rpc_t *r, json_t *cmd) {
+    if (!json_is_obj(cmd)) respond(r, NULL, "parse", false, NULL, "malformed JSON");
+    else handle(r, cmd);
+}
+
+void rpc_handle_line(rpc_t *r, const char *line) {
+    char *t = str_trim(line);
+    if (*t) {
+        json_t *cmd = json_parse_str(t);
+        rpc_handle_json(r, cmd);
+        json_free(cmd);
+    }
+    free(t);
+}
+
+bool rpc_busy(rpc_t *r) {
+    pthread_mutex_lock(&r->mu);
+    bool b = r->running;
+    pthread_mutex_unlock(&r->mu);
+    return b;
+}
+
+void rpc_detach(rpc_t *r) {
+    if (!r) return;
+    app_t *a = r->a;
+    a->wake = NULL;
+    pthread_mutex_lock(&r->mu);
+    bool running = r->running;
+    pthread_mutex_unlock(&r->mu);
+    if (running) agent_abort(a->agent);
+    pthread_mutex_lock(&r->mu);
+    pthread_t th = r->th;
+    pthread_mutex_unlock(&r->mu);
+    if (th) pthread_join(th, NULL);
+    agent_unsubscribe(a->agent, rpc_listener, r);
+    if (a->notice == notice_rpc) {
+        a->notice = NULL;
+        a->notice_ud = NULL;
+    }
+    for (size_t i = 0; i < r->host_tools.n; i++) agent_remove_tool(a->agent, r->host_tools.v[i]);
+    strvec_free(&r->host_tools);
+    vec_free(&r->host_calls);
+    strvec_free(&r->filter);
+    pthread_mutex_destroy(&r->mu);
+    pthread_mutex_destroy(&r->filter_mu);
+    pthread_mutex_destroy(&r->host_mu);
+    pthread_cond_destroy(&r->host_cv);
+    free(r);
+}
+
+int run_rpc_mode(app_t *a) {
+    rpc_t *r = rpc_attach(a, NULL, NULL);
     sb_t line = SB_INIT;
     char buf[65536];
     for (;;) {
@@ -863,23 +934,20 @@ int run_rpc_mode(app_t *a) {
                 sb_putc(&line, buf[i]);
                 continue;
             }
-            char *t = str_trim(sb_cstr(&line));
+            rpc_handle_line(r, sb_cstr(&line));
             sb_clear(&line);
-            if (*t) {
-                json_t *cmd = json_parse_str(t);
-                if (!json_is_obj(cmd)) respond(NULL, "parse", false, NULL, "malformed JSON");
-                else handle(&r, cmd);
-                json_free(cmd);
-            }
-            free(t);
         }
     }
-    a->wake = NULL;
-    pthread_mutex_lock(&r.mu);
-    pthread_t th = r.th;
-    pthread_mutex_unlock(&r.mu);
+    /* stdin closed: let an in-flight run finish (scripted clients pipe commands then EOF) */
+    pthread_mutex_lock(&r->mu);
+    pthread_t th = r->th;
+    pthread_mutex_unlock(&r->mu);
     if (th) pthread_join(th, NULL);
+    pthread_mutex_lock(&r->mu);
+    r->th = 0;
+    r->running = false;
+    pthread_mutex_unlock(&r->mu);
+    rpc_detach(r);
     sb_free(&line);
-    pthread_mutex_destroy(&r.mu);
     return 0;
 }

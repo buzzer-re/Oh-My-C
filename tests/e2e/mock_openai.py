@@ -16,7 +16,8 @@ def sse(handler, obj):
 def text_of(msg):
     c = msg.get("content")
     if isinstance(c, str): return c
-    if isinstance(c, list): return "".join(p.get("text", "") for p in c if isinstance(p, dict))
+    if isinstance(c, list):  # skip injected <system-reminder> blocks (omp prepends date/cwd)
+        return "".join(p.get("text", "") for p in c if isinstance(p, dict) and not p.get("text", "").startswith("<system-reminder>"))
     return ""
 
 class H(BaseHTTPRequestHandler):

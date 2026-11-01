@@ -4,7 +4,7 @@ PKG     ?= pkg-config
 OPT     ?= -O2
 CFLAGS  ?= $(OPT) -g
 CFLAGS  += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-unused-but-set-variable -Wshadow=local \
-           -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -Isrc -MMD -MP
+           -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIC -Isrc -Iinclude -MMD -MP
 LDFLAGS += -pie -rdynamic -Wl,-z,relro,-z,now
 LIBS    += $(shell $(PKG) --libs openssl 2>/dev/null || echo -lssl -lcrypto) -lz -lpthread -lm
 
@@ -16,6 +16,50 @@ all: $(BIN)
 
 $(BIN): $(OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
+
+# ---- optional library build: `make lib` -> libomc.a, libomc.so, omc.pc (public API: include/omc.h) ----
+LIB_OBJ    := $(filter-out build/obj/main.o,$(OBJ))
+LIB_SOVER  := 0
+LIB_STATIC := build/libomc.a
+LIB_SHARED := build/libomc.so.$(LIB_SOVER)
+OBJCOPY    ?= objcopy
+
+lib: $(LIB_STATIC) $(LIB_SHARED) build/omc.pc
+
+# static: prelink everything into one object, then keep only the public omc_* symbols global so
+# internal names (json_*, sb_*, ...) can never clash with the host application's symbols
+build/libomc.syms: include/omc.h
+	@mkdir -p build
+	@grep -o 'OMC_API [^(]*(' $< | sed -E 's/.*[ *]([a-z_0-9]+)\($$/\1/' | sort -u > $@
+
+$(LIB_STATIC): $(LIB_OBJ) build/libomc.syms
+	$(LD) -r -o build/omc-prelink.o $(LIB_OBJ)
+	$(OBJCOPY) --keep-global-symbols=build/libomc.syms build/omc-prelink.o build/omc-lib.o
+	rm -f $@ && $(AR) rcs $@ build/omc-lib.o
+
+build/libomc.map: build/libomc.syms
+	@{ echo '{ global:'; sed 's/$$/;/' $<; echo 'local: *; };'; } > $@
+
+$(LIB_SHARED): $(LIB_OBJ) build/libomc.map
+	$(CC) -shared -Wl,-soname,libomc.so.$(LIB_SOVER) -Wl,--version-script=build/libomc.map -Wl,-z,relro,-z,now \
+	    -o $@ $(LIB_OBJ) $(LIBS)
+	ln -sf libomc.so.$(LIB_SOVER) build/libomc.so
+
+build/omc.pc: Makefile
+	@printf 'prefix=%s\nlibdir=$${prefix}/lib\nincludedir=$${prefix}/include\n\nName: omc\nDescription: oh-my-c coding agent library\nVersion: %s\nLibs: -L$${libdir} -lomc\nLibs.private: %s\nCflags: -I$${includedir}\n' \
+	    '$(PREFIX)' "$$(sed -n 's/.*OMC_VERSION "\(.*\)".*/\1/p' src/core/core.h)" '$(LIBS)' > $@
+
+install-lib: lib
+	install -Dm644 include/omc.h $(DESTDIR)$(PREFIX)/include/omc.h
+	install -Dm644 $(LIB_STATIC) $(DESTDIR)$(PREFIX)/lib/libomc.a
+	install -Dm755 $(LIB_SHARED) $(DESTDIR)$(PREFIX)/lib/libomc.so.$(LIB_SOVER)
+	ln -sf libomc.so.$(LIB_SOVER) $(DESTDIR)$(PREFIX)/lib/libomc.so
+	install -Dm644 build/omc.pc $(DESTDIR)$(PREFIX)/lib/pkgconfig/omc.pc
+
+# embedding example + its check (links the static library only)
+build/examples/embed: examples/embed.c $(LIB_STATIC)
+	@mkdir -p build/examples
+	$(CC) -O2 -Wall -Wextra -Iinclude -o $@ $< $(LIB_STATIC) $(LIBS)
 
 build/obj/%.o: src/%.c
 	@mkdir -p $(dir $@)
@@ -54,7 +98,7 @@ build/tests/%: tests/%.c $$(T_$$*)
 	@mkdir -p build/tests
 	$(CC) $(CFLAGS) -o $@ $< $(T_$*) $(LIBS)
 
-test: $(addprefix build/tests/,$(UNIT_TESTS))
+test: $(addprefix build/tests/,$(UNIT_TESTS)) build/examples/embed
 	@set -e; for t in $(UNIT_TESTS); do echo "== $$t"; ./build/tests/$$t >/dev/null || { echo "   FAIL ($$t)"; exit 1; }; echo "   ok"; done
 	@./tests/e2e/run.sh
 
@@ -66,5 +110,5 @@ PREFIX ?= /usr/local
 clean:
 	rm -rf build
 
-.PHONY: all test clean install
+.PHONY: all lib install-lib test clean install
 -include $(OBJ:.o=.d)
