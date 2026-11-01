@@ -53,6 +53,7 @@ the reply**, so a test is just a prompt:
 |---|---|
 | `bash:<cmd>`, `write:<path>:<text>`, `read:<path>`, `glob:<pat>`, `grep:<pat>`, `edit:<input>`, `todo:<a,b>` | stream that tool call, then echo the tool result as text (`Tool said: …`) |
 | `call:<tool>:<json args>` | stream an arbitrary tool call |
+| `calls:[[tool, args], …]`, `seq:[[tool, args], …]` | issue the scripted tool calls one per request (multi-step flows such as read → edit, grep → edit) |
 | `say:<text>` | stream text word by word |
 | `md:<fixture>`, `think:<thinking>\|<text>`, `slow:<s>:<text>` | display scenarios used by the TUI harness |
 | `fail:<status>:<msg>`, `streamfail:<text>` | HTTP and in-stream errors |
@@ -90,7 +91,11 @@ throwaway agent dirs. It then compares the **first model request**: the tool lis
 tool's description and parameters, request parameters, the system prompt (diffed into
 `$RD_DIR/sys.diff`) and the messages. The only normalization is the product name (`omp's` →
 `omc's`, `omp://` → `omc://`). `RD_SETUP=<script>` seeds both agent dirs (skills, rules,
-settings, edit modes). Use it after any change to prompts, tools, schemas or discovery.
+settings, edit modes); `RD_WORKSETUP=<script>` runs `<script> <cwd>` before each app's run, so
+files a tool modifies are reseeded for the second app. The tool messages of each app's last request
+are written to `$RD_DIR/tools.{omp,omc}` and diffed (`tool messages: identical`), which is how tool
+result text is checked byte for byte against omp. Use it after any change to prompts, tools, schemas,
+tool output or discovery.
 
 ## TUI parity (`tests/tui/`)
 

@@ -52,9 +52,12 @@ The tool calls of one assistant message run in order, grouped like this:
   are appended in call order, whatever the completion order.
 
 Each call goes through: intent extraction → `before_tool` hook (may block with a reason) → JSON
-Schema validation with light coercion (`schema_validate`; string ↔ number/bool) → `execute` →
-`after_tool` hook. Validation errors return `Validation failed for tool "<name>": ...` with the
-received arguments, as omp does. Unknown tools return `Tool <name> not found`.
+Schema validation (`schema_validate_args`, `agent/validate.c`: a port of omp's
+validateToolArguments with its argument clean-ups — double-encoded keys, null/"null"/rejected ""
+optionals, numeric strings, enum whitespace — up to 5 coercion passes, and omptype's messages such as
+`pattern must be a string (was missing)`) → `execute` → `after_tool` hook. Validation errors return
+`Validation failed for tool "<name>": ...` with the received arguments (2-space indented JSON,
+`{original, normalized}` when something was coerced), as omp does. Unknown tools return `Tool <name> not found`.
 
 ### The intent field `i`
 
