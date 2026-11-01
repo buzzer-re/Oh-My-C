@@ -164,6 +164,7 @@ void tc_ast_grep(const tc_call_t *c, int width, strvec_t *out);
 void tc_ast_edit(const tc_call_t *c, int width, strvec_t *out);
 void tc_debug(const tc_call_t *c, int width, strvec_t *out);
 void tc_task(const tc_call_t *c, int width, strvec_t *out);
+void tc_eval(const tc_call_t *c, int width, strvec_t *out);
 
 /* grouped-file-output helpers (tc_search.c) */
 char *tc_paths_of(const json_t *args);                       /* path/paths arg joined ", " (NULL none) */
