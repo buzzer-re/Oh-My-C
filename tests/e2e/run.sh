@@ -343,9 +343,18 @@ print(sorted(t["function"]["name"] for t in c[-1]["tools"]) if c else "none")' "
 popd >/dev/null
 # LSP (only when clangd is installed)
 if command -v clangd >/dev/null; then
+    # omp only configures servers whose root markers exist in the cwd (.clangd here)
+    mkdir -p lspw && pushd lspw >/dev/null && : > .clangd
     printf 'static int add(int a, int b) { return a + b; }\nint main(void) { return add(1, 2); }\n' > l.c
-    check "lsp definition"  "l.c:1:12"  "$B" -m mock/mock-1 -p 'call:lsp:{"action":"definition","file":"l.c","line":2,"symbol":"add"}'
-    check "lsp write diags" "undeclared identifier"  "$B" -m mock/mock-1 -p 'write:bad.c:int main(void) { return nope; }'
+    lsp() { echo "call:write:{\"path\":\"xd://lsp\",\"content\":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1")}"; }
+    check "lsp status"      "Language servers: clangd (configured, not started)" "$B" -m mock/mock-1 -p "$(lsp '{"action":"status"}')"
+    check "lsp definition"  $'Found 1 definition(s):\n  l.c:1:12\n    1: static int add'  "$B" -m mock/mock-1 -p "$(lsp '{"action":"definition","file":"l.c","line":2,"symbol":"add"}')"
+    check "lsp symbols"     $'Symbols in l.c:\n\xe2\x9f\xb2 add int (int, int) @ line 1'  "$B" -m mock/mock-1 -p "$(lsp '{"action":"symbols","file":"l.c"}')"
+    check "lsp no symbol"   'LSP error: Symbol "nope" not found on line 2'  "$B" -m mock/mock-1 -p "$(lsp '{"action":"hover","file":"l.c","line":2,"symbol":"nope"}')"
+    check "lsp diagnostics" $'1 error(s):\n# bad.c\n  1:25 [error] [clang] Use of undeclared identifier \'nope\' (undeclared_var_use)' \
+        bash -c "printf 'int main(void) { return nope; }\n' > bad.c; '$B' -m mock/mock-1 -p '$(lsp '{"action":"diagnostics","file":"bad.c"}')'"
+    check "lsp write diags" $'\n\nLSP Diagnostics (1 error(s)):\n# bad2.c\n  1:25 [error] [clang] Use of undeclared identifier'  "$B" -m mock/mock-1 -p 'write:bad2.c:int main(void) { return nope; }'
+    popd >/dev/null
 fi
 # credential shapes from logins -> provider request URL/headers (mock_providers.py)
 source "$ROOT/tests/e2e/providers_transport.sh"
