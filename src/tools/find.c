@@ -1,5 +1,6 @@
 /* find tool: behavior/concept search = lexical scan + passage windows + model judge. */
 #include "tools.h"
+#include "prompt/template.h"
 
 #include "core/fs.h"
 #include "text/walker.h"
@@ -365,7 +366,10 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
 }
 
 agent_tool_t *tool_find_new(tool_env_t *env) {
-    char *desc = tool_prompt("find", NULL);
+    /* jfind uses the raw markdown (no render pass: the trailing newline stays); omp:// is served as omc:// */
+    char *raw = prompt_load("coding-agent/prompts/tools/find.md");
+    char *desc = str_replace(raw ? raw : "", "omp://", "omc://");
+    free(raw);
     json_t *s = schema_lit(
         "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"grep_keywords\":{\"type\""
         ":\"array\",\"items\":{\"type\":\"string\"}},\"path\":{\"type\":\"string\"}},\"required\":[\"quer"
