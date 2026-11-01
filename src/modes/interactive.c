@@ -1100,7 +1100,9 @@ static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
         return;
     }
     if (u->worker_running) {
-        agent_steer(u->app->agent, msg_user_text(t));
+        if (attachments) app_steer_attachments(u->app, t, attachments);
+        else agent_steer(u->app->agent, msg_user_text(t));
+        attachments = NULL;
         char *m = xasprintf("Queued (steer): %s", t);
         add_notice(u, "info", m);
         free(m);

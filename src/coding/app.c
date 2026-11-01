@@ -1919,6 +1919,25 @@ int app_prompt_attachments(app_t *a, const char *text, json_t *attachments) {
 
 int app_prompt(app_t *a, const char *text, json_t *images) { return app_prompt_ex(a, text, images, NULL); }
 
+void app_steer_attachments(app_t *a, const char *text, json_t *attachments) {
+    json_t *images = json_arr(), *e;
+    json_arr_foreach(attachments, i, e) {
+        json_t *img = json_get(e, "image");
+        if (!img) continue;
+        json_push(images, json_clone(img));
+        const char *path = json_get_str(e, "path");
+        if (path && *path) agent_steer(a->agent, attachment_notice((int)json_len(images), path));
+    }
+    json_free(attachments);
+    json_t *content = json_arr();
+    json_push(content, text_block(text));
+    json_t *norm = ai_normalize_images(images, a->model), *img;
+    json_arr_foreach(norm, i, img) json_push(content, json_clone(img));
+    json_free(norm);
+    json_free(images);
+    agent_steer(a->agent, msg_user_content(content));
+}
+
 int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
     memory_take_prompt_refresh(a);
     maybe_restore_primary(a);
