@@ -478,93 +478,223 @@ agent_tool_t *tool_todo_new(tool_env_t *env) {
 
 /* ---------- ask ---------- */
 
-static bool label_known(const json_t *opts, const char *s) {
-    json_t *o;
-    json_arr_foreach(opts, i, o) if (str_eq(json_sv(o), s)) return true;
-    return false;
+/* one question's result (omp QuestionResult) from the dialog's rich result, or from the legacy
+ * {id: label | [labels] | custom} answer object */
+static json_t *ask_result(const json_t *q, const json_t *ans) {
+    const char *id = json_get_str(q, "id");
+    json_t *r = json_obj(), *opts = json_arr(), *o;
+    json_set_str(r, "id", id ? id : "");
+    json_set_str(r, "question", json_get_str(q, "question") ? json_get_str(q, "question") : "");
+    json_arr_foreach(json_get_arr(q, "options"), k, o) {
+        const char *l = json_is_str(o) ? json_sv(o) : json_get_str(o, "label");
+        if (l) json_push_str(opts, l);
+    }
+    json_set(r, "options", opts);
+    json_set_bool(r, "multi", json_get_bool(q, "multi", false));
+    const json_t *rich = NULL, *x;
+    json_arr_foreach(json_get_arr(ans, "__results"), k, x) if (str_eq(json_get_str(x, "id"), id)) rich = x;
+    if (rich) {
+        json_set(r, "selectedOptions", json_clone(json_get(rich, "selectedOptions")));
+        static const char *const keys[] = {"customInput", "note", "noteOption", "timedOut"};
+        for (size_t k = 0; k < 4; k++)
+            if (json_get(rich, keys[k])) json_set(r, keys[k], json_clone(json_get(rich, keys[k])));
+        return r;
+    }
+    json_t *sel = json_arr();
+    const json_t *a = json_get(ans, id ? id : "");
+    const char *custom = NULL;
+    json_t *y;
+    if (json_is_arr(a)) {
+        json_arr_foreach(a, k, y) {
+            if (!json_is_str(y)) continue;
+            bool known = false;
+            json_arr_foreach(opts, m, o) known |= str_eq(json_sv(o), json_sv(y));
+            if (known) json_push_str(sel, json_sv(y));
+            else if (!custom) custom = json_sv(y);
+        }
+    } else if (json_is_str(a)) {
+        bool known = false;
+        json_arr_foreach(opts, m, o) known |= str_eq(json_sv(o), json_sv(a));
+        if (known) json_push_str(sel, json_sv(a));
+        else custom = json_sv(a);
+    }
+    json_set(r, "selectedOptions", sel);
+    if (custom) json_set_str(r, "customInput", custom);
+    return r;
 }
 
-/* omp AskToolDetails from the dialog answers ({id: label | [labels] | custom text}): one question's
- * fields inline, several questions as `results` */
-static json_t *ask_details(const json_t *qs, const json_t *ans) {
-    json_t *results = json_arr(), *q;
-    json_arr_foreach(qs, i, q) {
-        const char *id = json_get_str(q, "id");
-        json_t *r = json_obj(), *opts = json_arr(), *sel = json_arr(), *o;
-        json_set_str(r, "id", id ? id : "");
-        json_set_str(r, "question", json_get_str(q, "question") ? json_get_str(q, "question") : "");
-        json_arr_foreach(json_get_arr(q, "options"), k, o) {
-            const char *l = json_is_str(o) ? json_sv(o) : json_get_str(o, "label");
-            if (l) json_push_str(opts, l);
-        }
-        json_set(r, "options", opts);
-        json_set_bool(r, "multi", json_get_bool(q, "multi", false));
-        const json_t *a = json_get(ans, id ? id : "");
-        const char *custom = NULL;
-        if (json_is_arr(a)) {
-            json_t *x;
-            json_arr_foreach(a, k, x) {
-                if (!json_is_str(x)) continue;
-                if (label_known(opts, json_sv(x))) json_push_str(sel, json_sv(x));
-                else if (!custom) custom = json_sv(x);
-            }
-        } else if (json_is_str(a)) {
-            if (label_known(opts, json_sv(a))) json_push_str(sel, json_sv(a));
-            else custom = json_sv(a);
-        }
-        json_set(r, "selectedOptions", sel);
-        if (custom) json_set_str(r, "customInput", custom);
-        json_push(results, r);
+static void indented(sb_t *b, const char *text) {
+    for (const char *p = text;;) {
+        const char *nl = strchr(p, '\n');
+        sb_appendf(b, "\n  %.*s", (int)(nl ? nl - p : (ptrdiff_t)strlen(p)), p);
+        if (!nl) break;
+        p = nl + 1;
     }
-    if (json_len(results) == 1) {
-        json_t *d = json_clone(json_at(results, 0));
-        json_del(d, "id");
-        json_free(results);
-        return d;
+}
+
+/* formatSingleQuestionResponse */
+static char *ask_single_text(const json_t *r) {
+    sb_t b = SB_INIT;
+    json_t *sel = json_get_arr(r, "selectedOptions"), *x;
+    bool multi = json_get_bool(r, "multi", false);
+    const char *custom = json_get_str(r, "customInput"), *note = json_get_str(r, "note"), *on = json_get_str(r, "noteOption");
+    if (json_len(sel)) {
+        sb_append(&b, "User selected: ");
+        if (multi) json_arr_foreach(sel, i, x) sb_appendf(&b, "%s%s", i ? ", " : "", json_sv(x));
+        else sb_append(&b, json_sv(json_at(sel, 0)));
+        if (json_get_bool(r, "timedOut", false)) sb_append(&b, " (auto-selected after timeout)");
     }
-    json_t *d = json_obj();
-    json_set(d, "results", results);
-    return d;
+    if (custom) {
+        if (b.len) sb_putc(&b, '\n');
+        if (strchr(custom, '\n')) {
+            sb_append(&b, "User provided custom input:");
+            indented(&b, custom);
+        } else sb_appendf(&b, "User provided custom input: %s", custom);
+    }
+    if (note && *note) {
+        if (b.len) sb_putc(&b, '\n');
+        char *label = on ? xasprintf("User added note on %s:", on) : xstrdup("User added note:");
+        if (strchr(note, '\n')) {
+            sb_append(&b, label);
+            indented(&b, note);
+        } else sb_appendf(&b, "%s %s", label, note);
+        free(label);
+    }
+    if (!b.len) sb_append(&b, multi ? "User did not select any options" : "User cancelled the selection");
+    return sb_detach(&b);
+}
+
+/* formatQuestionResult */
+static void ask_result_line(sb_t *b, const json_t *r) {
+    const char *id = json_get_str(r, "id"), *custom = json_get_str(r, "customInput"), *note = json_get_str(r, "note"),
+               *on = json_get_str(r, "noteOption");
+    bool multi = json_get_bool(r, "multi", false);
+    char *suffix = note && *note ? (on ? xasprintf(" (note on %s: %s)", on, note) : xasprintf(" (note: %s)", note)) : xstrdup("");
+    json_t *sel = json_get_arr(r, "selectedOptions"), *x;
+    if (!json_len(sel)) {
+        if (custom) sb_appendf(b, "%s: \"%s\"%s", id, custom, suffix);
+        else sb_appendf(b, "%s: %s%s", id, multi ? "[]" : "(cancelled)", suffix);
+        free(suffix);
+        return;
+    }
+    sb_appendf(b, "%s: ", id);
+    if (multi) {
+        sb_putc(b, '[');
+        json_arr_foreach(sel, i, x) sb_appendf(b, "%s%s", i ? ", " : "", json_sv(x));
+        sb_putc(b, ']');
+    } else sb_append(b, json_sv(json_at(sel, 0)));
+    if (custom) sb_appendf(b, " + \"%s\"", custom);
+    if (json_get_bool(r, "timedOut", false)) sb_append(b, " (auto-selected after timeout)");
+    sb_append(b, suffix);
+    free(suffix);
+}
+
+static char *strip_cr(const char *s) {
+    /* sanitizeCarriageReturns: \r\n -> \n, other \r runs -> one space */
+    sb_t b = SB_INIT;
+    for (; s && *s; s++) {
+        if (*s != '\r') {
+            sb_putc(&b, *s);
+            continue;
+        }
+        if (s[1] == '\n') continue;
+        while (s[1] == '\r' && s[2] != '\n') s++;
+        sb_putc(&b, ' ');
+    }
+    return sb_detach(&b);
 }
 
 static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     UNUSED(ctx);
-    json_t *qs = json_get_arr(args, "questions");
-    if (!qs || !json_len(qs)) {
-        tool_result_error(out, "questions must be a non-empty array");
+    json_t *qs = json_get_arr(args, "questions"), *q, *o;
+    if (!env->ui.ask) {
+        tool_result_error(out, "Ask tool requires interactive mode");
         return 0;
     }
-    if (!env->ui.ask) {
-        tool_result_error(out, "ask is unavailable: no interactive user is attached to this session. Proceed with your "
-                               "best judgment and state your assumptions.");
+    /* reserved runtime labels, duplicate ids / labels (omp fails closed with a plain text result) */
+    static const char *const reserved[] = {"Other (type your own)", "Chat about this", "Next \xe2\x86\x92"};
+    json_arr_foreach(qs, i, q) json_arr_foreach(json_get_arr(q, "options"), k, o) {
+        char *l = strip_cr(json_get_str(o, "label"));
+        for (size_t r = 0; r < 3; r++)
+            if (!strcmp(l, reserved[r])) {
+                tool_result_textf(out, "Error: option labels must not collide with reserved runtime labels: %s", l);
+                out->details = json_obj();
+                free(l);
+                return 0;
+            }
+        free(l);
+    }
+    strvec_t ids = {0};
+    json_arr_foreach(qs, i, q) {
+        char *id = strip_cr(json_get_str(q, "id"));
+        for (size_t k = 0; k < ids.n; k++)
+            if (!strcmp(ids.v[k], id)) {
+                tool_result_textf(out, "Error: question ids must be unique: %s", id);
+                out->details = json_obj();
+                free(id);
+                strvec_free(&ids);
+                return 0;
+            }
+        strvec_push_own(&ids, id);
+        strvec_t labels = {0};
+        json_arr_foreach(json_get_arr(q, "options"), k, o) {
+            char *l = strip_cr(json_get_str(o, "label"));
+            for (size_t m = 0; m < labels.n; m++)
+                if (!strcmp(labels.v[m], l)) {
+                    tool_result_textf(out, "Error: option labels must be unique within a question: %s", l);
+                    out->details = json_obj();
+                    free(l);
+                    strvec_free(&labels);
+                    strvec_free(&ids);
+                    return 0;
+                }
+            strvec_push_own(&labels, l);
+        }
+        strvec_free(&labels);
+    }
+    strvec_free(&ids);
+    if (!json_len(qs)) {
+        tool_result_text(out, "Error: questions must not be empty");
+        out->details = json_obj();
         return 0;
     }
     json_t *ans = env->ui.ask(env->ui.ud, qs);
     if (!ans) {
-        tool_result_error(out, "User cancelled the question.");
+        tool_result_error(out, "Ask tool was cancelled by the user");
+        return 0;
+    }
+    json_t *results = json_arr();
+    json_arr_foreach(qs, i, q) json_push(results, ask_result(q, ans));
+    json_free(ans);
+    if (json_len(results) == 1) {
+        json_t *r = json_at(results, 0);
+        if (!json_get_bool(r, "timedOut", false) && !json_get_bool(r, "multi", false) &&
+            !json_len(json_get_arr(r, "selectedOptions")) && !json_get(r, "customInput")) {
+            json_free(results);
+            tool_result_error(out, "Ask tool was cancelled by the user");
+            return 0;
+        }
+        char *text = ask_single_text(r);
+        tool_result_text(out, text);
+        free(text);
+        json_t *d = json_clone(r);
+        json_del(d, "id");
+        out->details = d;
+        json_free(results);
         return 0;
     }
     sb_t b = SB_INIT;
-    json_t *q;
-    json_arr_foreach(qs, i, q) {
-        const char *id = json_get_str(q, "id");
-        json_t *a = json_get(ans, id ? id : "");
-        sb_appendf(&b, "%s: ", id ? id : "answer");
-        if (json_is_arr(a)) {
-            json_t *x;
-            json_arr_foreach(a, k, x) sb_appendf(&b, "%s%s", k ? ", " : "", json_sv(x) ? json_sv(x) : "");
-        } else if (json_is_str(a)) {
-            sb_append(&b, json_sv(a));
-        } else {
-            sb_append(&b, "(no answer)");
-        }
+    sb_append(&b, "User answers:");
+    json_t *r;
+    json_arr_foreach(results, i, r) {
         sb_putc(&b, '\n');
+        ask_result_line(&b, r);
     }
     tool_result_text(out, sb_cstr(&b));
-    out->details = ask_details(qs, ans);
-    json_free(ans);
     sb_free(&b);
+    out->details = json_obj();
+    json_set(out->details, "results", results);
     return 0;
 }
 

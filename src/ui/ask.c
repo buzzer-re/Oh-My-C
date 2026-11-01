@@ -851,6 +851,35 @@ static json_t *build_answers(const ask_view_t *v) {
                 }
         }
     }
+    /* the rich per-question results the ask tool formats (omp AskDialogResult): selected labels, custom
+     * input, the submitted note and the option it sits on, timeout auto-selection */
+    json_t *results = json_arr();
+    for (size_t i = 0; i < v->nq; i++) {
+        const aq_t *q = &v->q[i];
+        const ast_t *s = &v->st[i];
+        json_t *r = json_obj(), *sel = json_arr();
+        json_set_str(r, "id", q->id);
+        if (q->multi || !s->custom)
+            for (size_t k = 0; k < q->nopt; k++)
+                if (q->multi ? label_selected(q, s, k) : s->sel[k]) {
+                    bool dup = false;
+                    json_t *x;
+                    json_arr_foreach(sel, j, x) dup |= str_eq(json_sv(x), q->opts[k].label);
+                    if (!dup) json_push_str(sel, q->opts[k].label);
+                    if (!q->multi) break;
+                }
+        json_set(r, "selectedOptions", sel);
+        if (s->custom) json_set_str(r, "customInput", s->custom);
+        int nopt = -1;
+        const char *note = submitted_note(q, s, &nopt);
+        if (note) {
+            json_set_str(r, "note", note);
+            if (nopt >= 0) json_set_str(r, "noteOption", q->opts[nopt].label);
+        }
+        if (s->timed_out) json_set_bool(r, "timedOut", true);
+        json_push(results, r);
+    }
+    json_set(ans, "__results", results);
     return ans;
 }
 
