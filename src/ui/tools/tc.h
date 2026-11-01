@@ -136,6 +136,8 @@ typedef struct {
 void tc_output_pane(const tc_pane_t *p, strvec_t *out);
 /* renderTreeList over pre-rendered single/multi-line items */
 void tc_tree_list(const strvec_t *items, bool expanded, int max_collapsed, const char *item_type, strvec_t *out);
+/* ... with a collapsed row budget (maxCollapsedLines; < 0 = none) */
+void tc_tree_list_ex(const strvec_t *items, bool expanded, int max_collapsed, int max_lines, const char *item_type, strvec_t *out);
 /* wrap header + truncate rows (fitHeaderedRows) */
 void tc_fit_headered(const char *header, strvec_t *rows, int width, strvec_t *out);
 char *tc_error_message(const char *msg);                     /* "✘ Error: msg" */
@@ -159,6 +161,8 @@ void tc_render_diff(const char *diff, const char *path, strvec_t *out);
 void tc_web_search(const tc_call_t *c, int width, strvec_t *out);
 void tc_ask(const tc_call_t *c, int width, strvec_t *out);
 void tc_goal(const tc_call_t *c, int width, strvec_t *out);
+void tc_find(const tc_call_t *c, int width, strvec_t *out);
+char *tc_progress_bar(double frac, int width, tui_tc_t filled_slot, tui_tc_t empty_slot);
 char *tc_format_number(double n);                           /* formatNumber: 1.2K, 34K, 5.6M */
 char *tc_italic(const char *s);
 /* wrapPrefixedLine: `prefix` + wrapped content, continuation rows behind `cont` */

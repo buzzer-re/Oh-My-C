@@ -615,10 +615,32 @@ void tc_output_pane(const tc_pane_t *p, strvec_t *out) {
     strvec_free(&styled);
 }
 
+static size_t count_rows(const char *s) {
+    size_t n = 1;
+    for (; *s; s++) n += *s == '\n';
+    return n;
+}
+
 void tc_tree_list(const strvec_t *items, bool expanded, int max_collapsed, const char *item_type, strvec_t *out) {
+    tc_tree_list_ex(items, expanded, max_collapsed, -1, item_type, out);
+}
+
+void tc_tree_list_ex(const strvec_t *items, bool expanded, int max_collapsed, int max_lines, const char *item_type, strvec_t *out) {
     size_t shown = expanded ? items->n : MIN(items->n, (size_t)MAX(0, max_collapsed));
+    size_t fitted = 0;
+    if (!expanded && max_lines >= 0) {
+        size_t fit = 0;
+        for (size_t i = 0; i < shown; i++) {
+            size_t cnt = count_rows(items->v[i]);
+            size_t reserve = items->n - (i + 1) > 0 ? 1 : 0;
+            if (fitted + cnt + reserve > (size_t)max_lines) break;
+            fitted += cnt;
+            fit = i + 1;
+        }
+        shown = fit;
+    }
     size_t remaining = items->n - shown;
-    bool summary = !expanded && remaining > 0;
+    bool summary = !expanded && remaining > 0 && (max_lines < 0 || fitted < (size_t)max_lines);
     char *vert = tc_fg(TUI_TC_DIM, tc_sym("tree.vertical"));
     for (size_t i = 0; i < shown; i++) {
         bool last = !summary && i + 1 == shown;
