@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "session.h"
+#include "session/blobs.h"
 #include "tools/outsink.h"
 
 #include "core/fs.h"
@@ -190,7 +191,9 @@ static int write_full(session_t *s) {
     sb_putc(&b, '\n');
     json_t *e;
     json_arr_foreach(s->entries, i, e) {
-        json_dump_sb(&b, e, 0);
+        json_t *pe = session_blobs_externalize(e); /* images live in the blob store, as in omp */
+        json_dump_sb(&b, pe, 0);
+        json_free(pe);
         sb_putc(&b, '\n');
     }
     fs_mkdir_p(s->dir, 0700);
@@ -220,7 +223,9 @@ static void persist_entry(session_t *s, const json_t *e) {
         if (has_assistant) write_full(s);
         return;
     }
-    char *line = json_dump(e, 0);
+    json_t *pe = session_blobs_externalize(e);
+    char *line = json_dump(pe, 0);
+    json_free(pe);
     sb_t b = SB_INIT;
     sb_append(&b, line);
     sb_putc(&b, '\n');
@@ -406,6 +411,7 @@ session_t *session_open(const char *path, char **err) {
         } else if (str_eq(type, "session") && !s->header) {
             s->header = j;
         } else if (s->header) {
+            session_blobs_resolve(j);
             if (str_eq(type, "title_change")) {
                 free(s->title);
                 s->title = xstrdup(json_get_str(j, "title"));
@@ -527,9 +533,18 @@ static void emit_entry(json_t *out, const json_t *e) {
         if (m) json_push(out, m);
     } else if (str_eq(t, "custom_message")) {
         json_t *m = json_obj();
-        json_set_str(m, "role", "user");
+        /* attributed custom messages (image-attachment notices) replay as omp's developer turns */
+        const char *attr = json_get_str(e, "attribution");
+        json_set_str(m, "role", attr ? "developer" : "user");
+        if (attr) json_set_str(m, "attribution", attr);
         json_t *c = json_get(e, "content");
-        json_set(m, "content", c ? json_clone(c) : json_str(""));
+        if (attr && json_is_str(c)) {
+            json_t *arr = json_arr(), *tb = json_obj();
+            json_set_str(tb, "type", "text");
+            json_set_str(tb, "text", json_sv(c));
+            json_push(arr, tb);
+            json_set(m, "content", arr);
+        } else json_set(m, "content", c ? json_clone(c) : json_str(""));
         json_set_int(m, "timestamp", now_ms());
         if (!json_get_bool(e, "display", true)) json_set_bool(m, "synthetic", true);
         if (json_get_str(e, "customType")) json_set_str(m, "customType", json_get_str(e, "customType"));

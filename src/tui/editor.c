@@ -328,9 +328,9 @@ static void set_kill(tui_editor_t *ed, char *k) {
 
 /* ---------- paste markers ---------- */
 
-/* If a known paste marker ends exactly at `col`, return its start; else -1. */
+/* If a known atom (paste marker / chip) ends exactly at `col`, return its start; else -1. */
 static long marker_ending_at(const tui_editor_t *ed, const char *line, size_t col) {
-    if (col == 0 || line[col - 1] != ']') return -1;
+    if (col == 0) return -1;
     for (size_t i = 0; i < ed->pastes.n; i++) {
         const char *m = ed->pastes.v[i].marker;
         size_t ml = strlen(m);
@@ -340,13 +340,49 @@ static long marker_ending_at(const tui_editor_t *ed, const char *line, size_t co
 }
 
 static long marker_starting_at(const tui_editor_t *ed, const char *line, size_t col) {
-    if (line[col] != '[') return -1;
     for (size_t i = 0; i < ed->pastes.n; i++) {
         const char *m = ed->pastes.v[i].marker;
         size_t ml = strlen(m);
         if (!strncmp(line + col, m, ml)) return (long)(col + ml);
     }
     return -1;
+}
+
+static void paste_free(tui_editor_paste_t *p) {
+    free(p->marker);
+    free(p->content);
+    free(p->style);
+}
+
+void tui_editor_insert_atom(tui_editor_t *ed, const char *label, const char *expansion, const char *style) {
+    ed->hist_index = -1;
+    push_undo(ed, ACT_OTHER);
+    tui_editor_paste_t pp = {0, xstrdup(label), xstrdup(expansion), style ? xstrdup(style) : NULL};
+    vec_push(&ed->pastes, pp);
+    insert_raw(ed, label);
+    insert_raw(ed, " "); /* omp insertAtom: `${label} ` */
+    ed->last_action = ACT_OTHER;
+    ed->preferred_col = -1;
+    notify_change(ed);
+}
+
+void tui_editor_set_paste_hook(tui_editor_t *ed, bool (*fn)(void *ud, tui_editor_t *ed, const char *text), void *ud) {
+    ed->paste_hook = fn;
+    ed->paste_hook_ud = ud;
+}
+
+/* paint styled atoms (omp chip style: bold + identity color, then a reset the text coloring re-opens) */
+static char *style_atoms(const tui_editor_t *ed, char *s, bool surface) {
+    for (size_t i = 0; i < ed->pastes.n; i++) {
+        const tui_editor_paste_t *p = &ed->pastes.v[i];
+        if (!p->style || !strstr(s, p->marker)) continue;
+        char *rep = xasprintf("\x1b[1m%s%s%s", p->style, p->marker, surface ? "\x1b[22m\x1b[39m" : "\x1b[0m");
+        char *t = str_replace(s, p->marker, rep);
+        free(rep);
+        free(s);
+        s = t;
+    }
+    return s;
 }
 
 static char *sanitize_paste(const char *text) {
@@ -390,7 +426,7 @@ void tui_editor_paste(tui_editor_t *ed, const char *text) {
         int id = ++ed->paste_counter;
         char *marker = nlines > 10 ? xasprintf("[Paste #%d, +%zu lines]", id, nlines)
                                    : xasprintf("[Paste #%d, %zu chars]", id, nchars);
-        tui_editor_paste_t pp = {id, marker, clean};
+        tui_editor_paste_t pp = {id, marker, clean, NULL};
         vec_push(&ed->pastes, pp);
         insert_raw(ed, marker);
     } else {
@@ -792,6 +828,7 @@ bool tui_editor_handle_key(tui_editor_t *ed, const tui_key_t *k) {
     ed->last_action = ACT_NONE;
 
     if (k->kind == TUI_KEY_PASTE) {
+        if (ed->paste_hook && ed->paste_hook(ed->paste_hook_ud, ed, k->text ? k->text : "")) return true;
         tui_editor_paste(ed, k->text ? k->text : "");
         maybe_trigger_ac(ed);
         return true;
@@ -1090,7 +1127,7 @@ static void composer_render(tui_editor_t *ed, int width, strvec_t *out) {
             }
             sb_append(&d, text);
         }
-        char *disp = sb_detach(&d);
+        char *disp = style_atoms(ed, sb_detach(&d), st->filled_surface);
         char *rendered = st->filled_surface ? xstrdup(disp) : text_colored(ed, disp);
         tui_composer_row_t r = {.ctx = &ctx,
                                 .text = rendered,
@@ -1205,10 +1242,7 @@ static void editor_destroy(tui_component_t *c) {
     free(ed->kill);
     strvec_free(&ed->history);
     free(ed->hist_draft);
-    for (size_t i = 0; i < ed->pastes.n; i++) {
-        free(ed->pastes.v[i].marker);
-        free(ed->pastes.v[i].content);
-    }
+    for (size_t i = 0; i < ed->pastes.n; i++) paste_free(&ed->pastes.v[i]);
     vec_free(&ed->pastes);
     free(ed->placeholder);
     free(ed->gutter);
@@ -1269,10 +1303,7 @@ void tui_editor_clear(tui_editor_t *ed) {
     ed->scroll = 0;
     ed->preferred_col = -1;
     ed->hist_index = -1;
-    for (size_t i = 0; i < ed->pastes.n; i++) {
-        free(ed->pastes.v[i].marker);
-        free(ed->pastes.v[i].content);
-    }
+    for (size_t i = 0; i < ed->pastes.n; i++) paste_free(&ed->pastes.v[i]);
     ed->pastes.n = 0;
     for (size_t i = 0; i < ed->undo.n; i++) snapshot_free(&ed->undo.v[i]);
     ed->undo.n = 0;
