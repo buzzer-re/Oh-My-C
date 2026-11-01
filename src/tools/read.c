@@ -18,7 +18,7 @@
 
 #define READ_MAX_BYTES (50u * 1024)
 #define READ_MAX_LINE_COLS 2000
-#define DEFAULT_LIMIT 300
+#define DEFAULT_LIMIT read_default_limit()
 #define CTX_BEFORE 1
 #define CTX_AFTER 3
 
@@ -36,6 +36,12 @@ typedef struct {
     const char *entity; /* "file" when NULL */
 } selector_t;
 
+
+/* lines shown when no selector bounds the read (`read.defaultLimit`, omp default 300) */
+static int64_t read_default_limit(void) {
+    int64_t n = settings_int("read.defaultLimit", 300);
+    return n > 0 ? n : 300;
+}
 static bool parse_range_chunk(const char *c, lrange_t *r) {
     char *end;
     if (*c == 'L') c++;

@@ -865,15 +865,7 @@ static void fill_context(segctx_t *c) {
 static void compaction_bounds(int64_t window, double *thr, double *spec) {
     *thr = *spec = -1;
     if (window <= 0 || !settings_bool("compaction.enabled", true)) return;
-    int64_t abs_t = settings_int("compaction.thresholdTokens", 0), t;
-    int64_t reserve = MAX((int64_t)floor(window * 0.15), settings_int("compaction.reserveTokens", 16384));
-    if (reserve >= window) reserve = MAX(1, (int64_t)floor(window * 0.15));
-    int64_t budget = MAX(0, MIN(window - 1, window - reserve));
-    if (abs_t > 0) t = abs_t >= window ? budget : MIN(window - 1, abs_t);
-    else {
-        double p = settings_num("compaction.thresholdPercent", -1);
-        t = p > 0 ? MIN(budget, (int64_t)floor(window * MIN(99.0, MAX(1.0, p)) / 100)) : budget;
-    }
+    int64_t t = app_compaction_threshold(window);
     if (t <= 0 || t > window) return;
     *thr = (double)t / window * 100;
     int64_t lead = MIN(32000, MAX(8192, (int64_t)floor(t * 0.125)));

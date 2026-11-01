@@ -32,6 +32,7 @@ This file is the single source of truth for what is implemented; it is updated w
 ## Agent & session
 | Feature | Status | Notes |
 |---|---|---|
+| Settings defaults match omp v18.14.2 (checked against the embedded upstream settings table): read.defaultLimit 300 (now honored), compaction.threshold{Percent,Tokens} -1 = omp reserve-based trigger (shared by auto-compaction and the status-line gauge), lsp.diagnosticsOnEdit off (edits no longer fetch diagnostics), providers.cacheRetention auto (PI_CACHE_RETENTION, else short), web search timeout 60 s (now honored), retry.maxRetries 10, tools.outputMaxColumns 768 / artifact spill 50 KB / tail 20 KB+500 lines / head 20 KB | ✅ | omp's OutputSink spill/column-cap semantics for bash/eval output not yet ported (omc still uses its own tail truncation) |
 | Date/cwd `<system-reminder>` injected per request into user turns (system prompt stays byte-stable; turns keep the reminder they were first sent with; a changed day/cwd attaches to the newest unsent user turn; setting `dateCwdReminder`) | ✅ | multi-root inheritance across compaction/branches simplified (resets per conversation root) |
 | Agent loop, parallel shared tools / exclusive tools, steering, follow-ups | ✅ | |
 | Session JSONL (title slot, v3 header, tree, branch/fork, resume, continue) | ✅ | |

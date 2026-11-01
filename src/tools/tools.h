@@ -65,6 +65,7 @@ typedef struct tool_env {
     const discovery_t *disc;   /* skills/rules for skill:// and rule:// (borrowed) */
     /* called after write/edit lands a file; returns owned text appended to the result (e.g. LSP diagnostics) */
     char *(*after_write)(struct tool_env *env, const char *abs_path);
+    char *(*after_edit)(struct tool_env *env, const char *abs); /* edit-tool variant (lsp.diagnosticsOnEdit) */
     char *local_dir;           /* root for local:// session artifacts */
     /* one-shot model completion (judge role) for tools like find; owned text or NULL */
     char *(*complete)(struct tool_env *env, const char *system, const char *user);

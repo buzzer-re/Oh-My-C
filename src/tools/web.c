@@ -9,6 +9,12 @@
 
 /* ---------- HTML -> markdown ---------- */
 
+
+/* web_search request timeout (`providers.webSearchTimeoutSeconds`, omp default 60s) */
+static int64_t ws_timeout_ms(void) {
+    int64_t s = settings_int("providers.webSearchTimeoutSeconds", 60);
+    return (s > 0 ? s : 60) * 1000;
+}
 static const struct {
     const char *name;
     const char *val;
@@ -445,7 +451,7 @@ static int search_brave(const char *q, int limit, const char *recency, sresults_
     http_headers_add(&h, "X-Subscription-Token", key);
     http_headers_add(&h, "Accept", "application/json");
     http_resp_t r;
-    int rc = http_get(url, &h, 30000, &r);
+    int rc = http_get(url, &h, ws_timeout_ms(), &r);
     http_headers_free(&h);
     free(url);
     if (rc != 0 || r.status != 200) {
@@ -475,7 +481,7 @@ static int search_tavily(const char *q, int limit, const char *recency, sresults
     http_headers_add(&h, "Authorization", auth);
     free(auth);
     http_resp_t r;
-    int rc = http_post_json("https://api.tavily.com/search", &h, body, 30000, &r);
+    int rc = http_post_json("https://api.tavily.com/search", &h, body, ws_timeout_ms(), &r);
     free(body);
     http_headers_free(&h);
     if (rc != 0 || r.status != 200) {
@@ -509,7 +515,7 @@ static int search_exa(const char *q, int limit, const char *recency, sresults_t 
     http_headers_t h = {0};
     http_headers_add(&h, "x-api-key", key);
     http_resp_t r;
-    int rc = http_post_json("https://api.exa.ai/search", &h, body, 30000, &r);
+    int rc = http_post_json("https://api.exa.ai/search", &h, body, ws_timeout_ms(), &r);
     free(body);
     http_headers_free(&h);
     if (rc != 0 || r.status != 200) {
@@ -546,7 +552,7 @@ static int search_ddg(const char *q, int limit, const char *recency, sresults_t 
     http_headers_add(&h, "User-Agent", BROWSER_UA);
     http_headers_add(&h, "Accept", "text/html");
     http_resp_t r;
-    int rc = http_get(url, &h, 30000, &r);
+    int rc = http_get(url, &h, ws_timeout_ms(), &r);
     http_headers_free(&h);
     free(url);
     if (rc != 0 || r.status != 200) {

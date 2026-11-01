@@ -93,6 +93,8 @@ void app_set_thinking(app_t *a, ai_effort_t e);
 /* enter/leave read-only plan mode (rebuilds the system prompt) */
 void app_set_plan_mode(app_t *a, bool on);
 void app_rebuild_system_prompt(app_t *a);
+/* token count at which context maintenance triggers for a window (omp compaction.threshold* semantics) */
+int64_t app_compaction_threshold(int64_t window);
 int app_compact(app_t *a, const char *instructions, char **err);
 int app_new_session(app_t *a);
 int app_switch_session(app_t *a, const char *path, char **err);

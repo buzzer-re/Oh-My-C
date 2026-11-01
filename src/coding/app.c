@@ -205,7 +205,13 @@ static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
     free(ag->api_key);
     ag->api_key = app_api_key_for(a->model);
     o->api_key = ag->api_key;
-    o->cache_retention = settings_str("providers.cacheRetention", "short");
+    /* omp resolveCacheRetention: explicit setting, else PI_CACHE_RETENTION (long|short|none), else "short" */
+    const char *cr = settings_str("providers.cacheRetention", "auto");
+    if (!cr || !*cr || str_eq(cr, "auto")) {
+        const char *env = env_get("PI_CACHE_RETENTION");
+        cr = env && (str_eq(env, "long") || str_eq(env, "short") || str_eq(env, "none")) ? env : "short";
+    }
+    o->cache_retention = cr;
     json_t *tb = settings_get("thinkingBudgets");
     if (json_is_obj(tb)) o->thinking_budgets = tb;
     double temp = settings_num("temperature", NAN);
@@ -537,7 +543,7 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
         return false;
     }
     if (!settings_bool("retry.enabled", true)) return false;
-    int max = (int)settings_int("retry.maxRetries", 3);
+    int max = (int)settings_int("retry.maxRetries", 10);
     if (attempt >= max || !is_retryable(err)) return false;
     int64_t base = settings_int("retry.baseDelayMs", 2000), maxd = settings_int("retry.maxDelayMs", 60000);
     int64_t delay = base << attempt;
@@ -628,6 +634,13 @@ static char *app_after_write(tool_env_t *env, const char *abs) {
     return lsp_after_write(a->lsp, abs, settings_int("lsp.diagnosticsWaitMs", 3000));
 }
 
+/* edits report diagnostics only with lsp.diagnosticsOnEdit (omp default: off) */
+static char *app_after_edit(tool_env_t *env, const char *abs) {
+    app_t *a = env->session;
+    if (!a || !a->lsp || !settings_bool("lsp.diagnosticsOnEdit", false)) return NULL;
+    return lsp_after_write(a->lsp, abs, settings_int("lsp.diagnosticsWaitMs", 3000));
+}
+
 static void install_agent(app_t *a) {
     agent_t *ag = agent_new();
     a->agent = ag;
@@ -660,6 +673,7 @@ static void install_agent(app_t *a) {
         }
         agent_add_tool(ag, tool_lsp_new(a->env, a->lsp));
         a->env->after_write = app_after_write;
+        a->env->after_edit = app_after_edit;
     }
     /* checkpoint/rewind: off by default (checkpoint.enabled); top-level sessions or explicit lists; paired */
     if (!a->opts.no_tools && settings_bool("checkpoint.enabled", false) &&
@@ -1324,17 +1338,25 @@ out:
     return rc;
 }
 
+/* omp's context-maintenance trigger: thresholdTokens (>0) overrides thresholdPercent (>0); both -1 =
+ * legacy reserve-based budget (window - max(15% of window, reserveTokens)) */
+int64_t app_compaction_threshold(int64_t window) {
+    if (window <= 0) return 0;
+    int64_t reserve = MAX((int64_t)floor((double)window * 0.15), settings_int("compaction.reserveTokens", 16384));
+    if (reserve >= window) reserve = MAX(1, (int64_t)floor((double)window * 0.15));
+    int64_t budget = MAX(0, MIN(window - 1, window - reserve));
+    int64_t abs_t = settings_int("compaction.thresholdTokens", -1);
+    if (abs_t > 0) return abs_t >= window ? budget : MIN(window - 1, abs_t);
+    double p = settings_num("compaction.thresholdPercent", -1);
+    return p > 0 ? MIN(budget, (int64_t)floor((double)window * MIN(99.0, MAX(1.0, p)) / 100)) : budget;
+}
+
 static void maybe_auto_compact(app_t *a) {
     if (!settings_bool("compaction.enabled", true) || !a->model) return;
     int64_t window = a->model->context_window;
     if (window <= 0) return;
-    int64_t reserve = settings_int("compaction.reserveTokens", 16384);
-    double pct = settings_num("compaction.thresholdPercent", 85);
-    int64_t thresh = (int64_t)((double)window * pct / 100.0);
-    int64_t abs_t = settings_int("compaction.thresholdTokens", 0);
-    if (abs_t > 0) thresh = abs_t;
-    if (window - reserve < thresh) thresh = window - reserve;
-    if (a->last_context_tokens < thresh) return;
+    int64_t thresh = app_compaction_threshold(window);
+    if (thresh <= 0 || a->last_context_tokens < thresh) return;
     char *err = NULL;
     if (app_compact(a, NULL, &err) != 0) {
         notice(a, "error", "Auto-compaction failed: %s", err ? err : "?");

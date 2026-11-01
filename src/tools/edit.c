@@ -751,8 +751,8 @@ int hashline_apply(tool_env_t *env, const char *input, tool_result_t *out) {
             preview(&b, &nl, lo, hi);
             strvec_free(&nl);
         }
-        if (env->after_write) {
-            char *diag = env->after_write(env, target);
+        if (env->after_edit) {
+            char *diag = env->after_edit(env, target);
             if (diag) {
                 sb_appendf(&b, "%s\n", diag);
                 free(diag);
@@ -842,7 +842,7 @@ static int pe_remote_write(void *ud, const char *abs, const char *data, size_t l
 
 static char *pe_after_write(void *ud, const char *abs) {
     tool_env_t *env = ud;
-    return env->after_write ? env->after_write(env, abs) : NULL;
+    return env->after_edit ? env->after_edit(env, abs) : NULL;
 }
 
 static int edit_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
