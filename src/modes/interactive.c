@@ -1,6 +1,7 @@
 /* interactive mode: TUI chat (port of omp's InteractiveMode, core feature set). */
 #include "modes.h"
 #include "ui/ui.h"
+#include "coding/migrate.h"
 #include "coding/goal.h"
 #include "coding/memory.h"
 #include "mcp/mcp.h"
@@ -524,6 +525,7 @@ static const struct {
     {"fork", "Fork the session here"},        {"clear", "Clear the conversation context in place, keeping the session"},
     {"hotkeys", "Show keyboard shortcuts"},   {"settings", "Open settings menu"},   {"quit", "Exit omc"},
     {"login", "Login with OAuth provider"},   {"logout", "Logout from OAuth provider"},
+    {"migrate", "Copy your omp configuration into omc [--dry-run] [--force] [--no-sessions]"},
     {"exit", "Exit omc"},
 };
 
@@ -647,6 +649,26 @@ static bool handle_command(ui_t *u, const char *line) {
         } else {
             ui_overlay_thinking(u);
         }
+    } else if (!strcmp(cmd, "migrate")) {
+        /* omp -> omc: settings, models, credentials, MCP, skills, rules, agents, themes, sessions, prompt history */
+        migrate_opts_t mo = {.sessions = true};
+        if (strstr(arg, "--dry-run")) mo.dry_run = true;
+        if (strstr(arg, "--force")) mo.force = true;
+        if (strstr(arg, "--no-sessions")) mo.sessions = false;
+        sb_t rep = SB_INIT;
+        char *err = NULL;
+        int rc = omc_migrate(migrate_omp_dir(), omc_agent_dir(), &mo, &rep, &err);
+        if (rc < 0) {
+            add_notice(u, "error", err ? err : "migration failed");
+        } else {
+            if (!mo.dry_run) {
+                auth_reload();
+                sb_append(&rep, "Restart omc to load the migrated settings, models and MCP servers.");
+            }
+            add_notice(u, rc ? "warning" : "info", sb_cstr(&rep));
+        }
+        free(err);
+        sb_free(&rep);
     } else if (!strcmp(cmd, "memory")) {
         memory_cmd_result_t r;
         memory_command(a, arg, &r);

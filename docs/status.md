@@ -77,6 +77,11 @@ This file is the single source of truth for what is implemented; it is updated w
 | ssh:// URLs (ssh.json hosts, ControlMaster, POSIX shell probe, /~ HOME, 1 MiB UTF-8 reads, dir listings, staged byte-exact writes) | 🟡 | read/write/edit ✅; grep over ssh:// ❌ |
 | browser, computer, image_gen, tts | ❌ | |
 
+## Migration from omp
+| Feature | Status | Notes |
+|---|---|---|
+| `/migrate` and `omc migrate [--from DIR] [--dry-run] [--force] [--no-sessions]`: copy omp's agent dir ($PI_CODING_AGENT_DIR or ~/.omp/agent) into omc's — config.yml, models.yml, mcp.json, skills/rules/agents/themes/prompts/memories, sessions (timestamps kept), any other config file; credentials converted from omp's agent.db (`auth_credentials`, newest enabled per provider) into auth.json (0600); prompt history from history.db; omp-internal state (*.db, blobs, cache, natives, logs…) left behind; existing omc files kept unless --force | ✅ | omc-only command (omp has no equivalent); session titles stored only in omp's history.db are not imported |
+
 ## Embedding
 | Feature | Status | Notes |
 |---|---|---|

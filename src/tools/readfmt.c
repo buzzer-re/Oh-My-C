@@ -6401,3 +6401,57 @@ char *rf_pdf_render(const strvec_t *pages, int first, int last, char **err) {
     sb_free(&empty);
     return sb_detach(&b);
 }
+
+/* ---------- structured access (migration of omp's SQLite stores) ---------- */
+
+typedef struct {
+    const sqtab_t *t;
+    json_t *rows;
+} tabjson_t;
+
+static int tabjson_cb(void *ud, sqv_t *row, int64_t rowid) {
+    tabjson_t *j = ud;
+    UNUSED(rowid);
+    json_t *o = json_obj();
+    for (size_t c = 0; c < j->t->cols.n; c++) {
+        const sqv_t *v = &row[c];
+        const char *name = j->t->cols.v[c].name;
+        switch (v->t) {
+        case SV_INT: json_set_int(o, name, v->i); break;
+        case SV_REAL: json_set(o, name, json_num(v->d)); break;
+        case SV_TEXT: json_set(o, name, json_strn(v->s ? v->s : "", v->n)); break;
+        case SV_BLOB: json_set(o, name, json_null()); break; /* blobs are not needed by callers */
+        default: json_set(o, name, json_null()); break;
+        }
+    }
+    json_push(j->rows, o);
+    return 0;
+}
+
+int rf_sqlite_table_json(const char *abs_path, const char *table, json_t **rows, char **err) {
+    *rows = NULL;
+    sqdb_t db;
+    if (sq_open(&db, abs_path, err) != 0) {
+        sq_close(&db);
+        return -1;
+    }
+    sqschemas_t sch;
+    int rc = -1;
+    if (load_schema(&db, &sch, err) == 0) {
+        sqtab_t t;
+        if (load_table(&db, &sch, table, false, &t, err) == 0) {
+            tabjson_t j = {&t, json_arr()};
+            if (tab_scan(&db, &t, tabjson_cb, &j) == 0) {
+                *rows = j.rows;
+                rc = 0;
+            } else {
+                json_free(j.rows);
+                if (!*err) *err = xasprintf("failed to scan table %s", table);
+            }
+            sqtab_free(&t);
+        }
+        schemas_free(&sch);
+    }
+    sq_close(&db);
+    return rc;
+}
