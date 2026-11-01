@@ -30,6 +30,7 @@ typedef struct {
     struct lsp_manager *lsp; /* borrowed shared LSP manager (subagents) */
     bool no_mcp;
     bool allow_no_model; /* interactive: start without a model (pick one with /model or /login) */
+    bool has_ui;                /* interactive UI can answer questions (enables `ask`) */
 } app_opts_t;
 
 typedef struct app app_t;
@@ -117,6 +118,9 @@ const char *app_session_file(app_t *a);
 /* plain title from the title model (title-system.md) for `text`; owned raw reply or NULL */
 char *app_generate_title_from(app_t *a, const char *text);
 char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const char *user, ai_effort_t effort);
+/* child session for subagent `agent_name` (agents dirs); model_override (pattern) and append_prompt are optional */
+app_t *app_subagent_new(app_t *parent, const char *agent_name, const char *model_override, const char *append_prompt,
+                        char **err);
 /* subagent runner (task tool) */
 char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assignment, const char *context,
                        json_t **details, volatile sig_atomic_t *cancel);

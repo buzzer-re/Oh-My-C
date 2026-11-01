@@ -385,15 +385,15 @@ done:
 
 agent_tool_t *tool_grep_new(tool_env_t *env) {
     json_t *ctx = json_obj();
-    json_set_bool(ctx, "hasFind", false);
+    json_set_bool(ctx, "IS_HL_MODE", str_eq(env->edit_mode, "hashline"));
+    json_set_bool(ctx, "hasFind", env->find_enabled);
+    json_set_bool(ctx, "eagerDelegation", tools_eager_delegation(env));
+    json_set_bool(ctx, "scoutAvailable", tools_scout_available());
     char *desc = tool_prompt("grep", ctx);
     json_free(ctx);
-    json_t *s = schema_obj();
-    schema_prop(s, "pattern", "string", "Regex pattern (Rust regex syntax)", true);
-    schema_prop(s, "path", "string", "File, directory or glob; ';'-separated list; '!glob' excludes", false);
-    schema_prop(s, "case", "boolean", "Case-sensitive (default true)", false);
-    schema_prop(s, "gitignore", "boolean", "Respect .gitignore (default true)", false);
-    schema_prop(s, "skip", "number", "File-page offset", false);
+    json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"path\":{\"type\":"
+                           "\"string\"},\"case\":{\"type\":\"boolean\"},\"gitignore\":{\"type\":\"boolean\"},\"skip\":{"
+                           "\"type\":[\"number\",\"null\"]}},\"required\":[\"pattern\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("grep", "Grep", desc, s, grep_execute);
     free(desc);
     t->ud = env;
@@ -522,12 +522,15 @@ static int glob_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
 }
 
 agent_tool_t *tool_glob_new(tool_env_t *env) {
-    char *desc = tool_prompt("glob", NULL);
-    json_t *s = schema_obj();
-    schema_prop(s, "path", "string", "Glob, file or directory; ';'-separated list; '!glob' excludes", false);
-    schema_prop(s, "hidden", "boolean", "Include hidden files (default true)", false);
-    schema_prop(s, "gitignore", "boolean", "Respect .gitignore (default true)", false);
-    schema_prop(s, "limit", "number", "Max results (1-200, default 200)", false);
+    json_t *ctx = json_obj();
+    json_set_bool(ctx, "hasFind", env->find_enabled);
+    json_set_bool(ctx, "eagerDelegation", tools_eager_delegation(env));
+    json_set_bool(ctx, "scoutAvailable", tools_scout_available());
+    char *desc = tool_prompt("glob", ctx);
+    json_free(ctx);
+    json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"hidden\":{\"type\":"
+                           "\"boolean\"},\"gitignore\":{\"type\":\"boolean\"},\"limit\":{\"type\":\"number\"}},"
+                           "\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("glob", "Glob", desc, s, glob_execute);
     free(desc);
     t->ud = env;

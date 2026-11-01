@@ -987,13 +987,19 @@ static void fmt_symbols(sb_t *b, const json_t *syms, int depth, const char *cwd)
     }
 }
 
+/* tool-timeouts.ts resolveLspTimeouts: call = max(20, lsp.requestTimeout), wait = lsp.requestTimeout (10) */
+static double lsp_default_call_sec(void) {
+    double rt = (double)settings_int("lsp.requestTimeout", 10);
+    return rt > 20 ? (rt > 300 ? 300 : rt) : 20;
+}
+
 static int lsp_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     lsp_tool_t *lt = self->ud;
     lsp_manager_t *m = lt->m;
     UNUSED(ctx);
     const char *action = json_get_str(args, "action");
     const char *file = json_get_str(args, "file");
-    double tsec = json_get_num(args, "timeout", 30);
+    double tsec = json_get_num(args, "timeout", lsp_default_call_sec());
     if (tsec < 5) tsec = 5;
     if (tsec > 300) tsec = 300;
     int64_t to = (int64_t)(tsec * 1000);
@@ -1015,6 +1021,43 @@ static int lsp_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
         m->servers = load_servers(m->cwd);
         pthread_mutex_unlock(&m->mu);
         tool_result_text(out, "Language servers stopped; they restart on next use (config re-read).");
+        return 0;
+    }
+    if (!strcmp(action, "capabilities")) {
+        /* lsp/tool.ts: "<server>:\n  capabilities: <json, indented>" per server (file's servers, or all running) */
+        sb_t b = SB_INIT;
+        VEC(lsp_client_t *) list = {0};
+        if (file && *file && strcmp(file, "*") != 0) {
+            char *abs = path_abs(file, lt->env->cwd);
+            char *err = NULL;
+            lsp_client_t *c = client_for(m, abs, true, &err);
+            free(abs);
+            if (!c) {
+                tool_result_text(out, "No language server found for this file");
+                free(err);
+                return 0;
+            }
+            free(err);
+            vec_push(&list, c);
+        } else {
+            pthread_mutex_lock(&m->mu);
+            for (size_t i = 0; i < m->clients.n; i++) vec_push(&list, m->clients.v[i]);
+            pthread_mutex_unlock(&m->mu);
+        }
+        if (!list.n) {
+            tool_result_text(out, "No language servers configured");
+            return 0;
+        }
+        for (size_t i = 0; i < list.n; i++) {
+            char *caps = list.v[i]->caps ? json_dump(list.v[i]->caps, 2) : xstrdup("{}");
+            char *ind = str_replace(caps, "\n", "\n  ");
+            sb_appendf(&b, "%s%s:\n  capabilities: %s", i ? "\n" : "", list.v[i]->name, ind);
+            free(ind);
+            free(caps);
+        }
+        vec_free(&list);
+        tool_result_text(out, b.s);
+        sb_free(&b);
         return 0;
     }
     if (!file || !*file) {
@@ -1348,28 +1391,19 @@ static void lsp_tool_destroy(agent_tool_t *t) { free(t->ud); }
 
 agent_tool_t *tool_lsp_new(tool_env_t *env, lsp_manager_t *m) {
     json_t *ctx = json_obj();
-    json_set_int(ctx, "defaultTimeoutSec", 30);
-    json_set_int(ctx, "defaultWaitSec", 10);
+    json_set_int(ctx, "defaultTimeoutSec", (int64_t)lsp_default_call_sec());
+    json_set_int(ctx, "defaultWaitSec", settings_int("lsp.requestTimeout", 10));
     json_set_int(ctx, "maxTimeoutSec", 300);
     char *desc = tool_prompt("lsp", ctx);
     json_free(ctx);
-    json_t *s = schema_obj();
-    json_t *act = json_obj();
-    json_set_str(act, "type", "string");
-    json_t *en = json_arr();
-    const char *acts[] = {"diagnostics", "definition", "references", "hover", "symbols", "rename", "rename_file",
-                          "code_actions", "type_definition", "implementation", "status", "reload", "request"};
-    for (size_t i = 0; i < ARRAY_LEN(acts); i++) json_push_str(en, acts[i]);
-    json_set(act, "enum", en);
-    schema_prop_json(s, "action", act, true);
-    schema_prop(s, "file", "string", "File path (or glob / \"*\" for workspace forms)", false);
-    schema_prop(s, "line", "number", "1-indexed line", false);
-    schema_prop(s, "symbol", "string", "Symbol text on the line (#N for the Nth match)", false);
-    schema_prop(s, "query", "string", "Workspace symbol query, code-action selector, or LSP method for request", false);
-    schema_prop(s, "new_name", "string", "New name for rename / destination for rename_file", false);
-    schema_prop(s, "apply", "boolean", "Apply edits (rename default true, code_actions default false)", false);
-    schema_prop(s, "timeout", "number", "Seconds (5-300)", false);
-    schema_prop(s, "payload", "string", "JSON params for action=request", false);
+    json_t *s = schema_lit(
+        "{\"type\":\"object\",\"properties\":{\"action\":{\"enum\":[\"diagnostics\",\"definition\",\"references\","
+        "\"hover\",\"symbols\",\"rename\",\"rename_file\",\"code_actions\",\"type_definition\",\"implementation\","
+        "\"status\",\"reload\",\"capabilities\",\"request\"],\"type\":\"string\"},\"file\":{\"type\":\"string\"},"
+        "\"line\":{\"type\":\"number\"},\"symbol\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"},"
+        "\"new_name\":{\"type\":\"string\"},\"apply\":{\"type\":\"boolean\"},\"timeout\":{\"type\":\"number\","
+        "\"minimum\":5,\"maximum\":300,\"description\":\"Timeout in seconds; raises or lowers the default (range "
+        "5\u2013300).\"},\"payload\":{\"type\":\"string\"}},\"required\":[\"action\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("lsp", "LSP", desc, s, lsp_execute);
     free(desc);
     lsp_tool_t *lt = xcalloc(1, sizeof(*lt));

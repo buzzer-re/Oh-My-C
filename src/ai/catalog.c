@@ -4,7 +4,9 @@
 #include "core/fs.h"
 #include "core/proc.h"
 
+#include <ctype.h>
 #include <pthread.h>
+#include <strings.h>
 #include <zlib.h>
 
 static VEC(ai_model_t *) g_models;
@@ -413,4 +415,41 @@ static bool provider_has_credentials(const char *p) {
     bool ok = k != NULL;
     free(k);
     return ok;
+}
+
+/* Port of catalog compat delegation (rules.json cascade: classes/openai.kdl): openai-class revision 5.6.0 is
+ * "gated", >= 6.0.0 "restrained", everything else "eager". Identity comes from the catalog row; custom models
+ * without one are classified from a `gpt-N[.M]` id like upstream's lenient classifier. */
+static void parse_revision(const char *s, int v[3]) {
+    v[0] = v[1] = v[2] = 0;
+    for (int i = 0; i < 3 && s && *s; i++) {
+        if (!isdigit((unsigned char)*s)) break;
+        v[i] = (int)strtol(s, (char **)&s, 10);
+        if (*s != '.') break;
+        s++;
+    }
+}
+
+const char *model_delegation_bias(const ai_model_t *m) {
+    if (!m) return "eager";
+    json_t *ident = m->raw ? json_get_obj(m->raw, "identity") : NULL;
+    const char *cls = json_get_str(ident, "class");
+    const char *rev = json_get_str(ident, "revision");
+    int v[3] = {0, 0, 0};
+    bool have = false;
+    if (cls) {
+        if (rev) parse_revision(rev, v), have = true;
+    } else if (m->id) {
+        const char *id = strrchr(m->id, '/');
+        id = id ? id + 1 : m->id;
+        if (!strncasecmp(id, "gpt-", 4) && isdigit((unsigned char)id[4])) {
+            cls = "openai";
+            parse_revision(id + 4, v);
+            have = true;
+        }
+    }
+    if (!cls || strcmp(cls, "openai") != 0 || !have) return "eager";
+    if (v[0] == 5 && v[1] == 6 && v[2] == 0) return "gated";
+    if (v[0] >= 6) return "restrained";
+    return "eager";
 }

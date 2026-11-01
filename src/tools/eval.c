@@ -249,26 +249,43 @@ static void eval_destroy(agent_tool_t *t) {
     free(st);
 }
 
-agent_tool_t *tool_eval_new(tool_env_t *env) {
-    char *py = find_python();
-    if (!py) return NULL; /* runtime unavailable: tool not offered */
-    free(py);
+/* description context (tools/eval.ts #descriptionOptions): Python only (no JS runtime); subagent `agent`/`workpool`
+ * helpers, eval-defined tools and browser/archive preludes are not implemented, so their conditionals stay off */
+static char *eval_description(const json_t *tool_names) {
     json_t *ctx = json_obj();
     json_set_bool(ctx, "py", true);
     json_set_bool(ctx, "js", false);
     json_set_int(ctx, "timeoutMin", 1);
     json_set_int(ctx, "timeoutMax", 3600);
+    if (json_len(tool_names)) json_set(ctx, "toolNames", json_clone(tool_names));
     char *desc = tool_prompt("eval", ctx);
     json_free(ctx);
-    json_t *s = schema_obj();
-    json_t *lang = json_parse_str("{\"type\":\"string\",\"enum\":[\"py\"],\"description\":\"Runtime\"}");
-    schema_prop_json(s, "language", lang, true);
-    schema_prop(s, "code", "string", "Cell code", true);
-    schema_prop(s, "title", "string", "Short label", false);
-    schema_prop(s, "timeout", "number", "Seconds (default 30, 0 disables)", false);
-    schema_prop(s, "reset", "boolean", "Restart the kernel first", false);
+    return desc;
+}
+
+void eval_set_tool_names(agent_tool_t *t, const json_t *names) {
+    char *d = eval_description(names);
+    free(t->description);
+    t->description = d;
+}
+
+agent_tool_t *tool_eval_new(tool_env_t *env) {
+    char *py = find_python();
+    if (!py) return NULL; /* runtime unavailable: tool not offered */
+    free(py);
+    char *desc = eval_description(NULL);
+    json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"language\":{\"const\":\"py\",\"description\":"
+                           "\"\\\"py\\\": Python with IPython-style magics (not IPython)\"},\"code\":{\"type\":\"string\","
+                           "\"description\":\"Code or standalone % command; top-level await works.\"},\"title\":{\"type\":"
+                           "\"string\",\"description\":\"Short transcript label.\"},\"timeout\":{\"type\":\"number\","
+                           "\"description\":\"Cell deadline in seconds; nonzero values clamp to 1\u20133600; 0 disables it.\"},"
+                           "\"reset\":{\"type\":\"boolean\",\"description\":\"Wipe only this kernel.\"}},\"required\":["
+                           "\"language\",\"code\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("eval", "Eval", desc, s, eval_execute);
     free(desc);
+    t->intent_mode = INTENT_OMIT; /* eval.ts derives the intent from the cell (function intent) */
+    t->examples = schema_lit("[{\"caption\":\"Load a script with spaces without echoing its source\",\"call\":{"
+                             "\"language\":\"py\",\"code\":\"%load \\\"scripts/my setup.py\\\"\"}}]");
     eval_state_t *st = xcalloc(1, sizeof(*st));
     st->env = env;
     st->k.child.in_fd = st->k.child.out_fd = st->k.child.err_fd = -1;

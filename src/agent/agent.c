@@ -76,6 +76,7 @@ agent_tool_t *agent_tool_new(const char *name, const char *label, const char *de
     t->description = xstrdup(description ? description : "");
     t->parameters = params ? params : json_parse_str("{\"type\":\"object\",\"properties\":{}}");
     t->execute = execute;
+    t->intent_mode = INTENT_REQUIRE;
     return t;
 }
 
@@ -85,16 +86,239 @@ void agent_tool_free(agent_tool_t *t) {
     free(t->name);
     free(t->label);
     free(t->description);
+    free(t->summary);
+    json_free(t->examples);
     json_free(t->parameters);
     free(t);
+}
+
+/* ---------- intent field (`i`) ----------
+ * Port of agent-loop.ts injectIntentIntoSchema/extractIntent: every top-level tool schema gets a leading
+ * `i: {type: string, description: "concise intent"}` property (required unless the tool opts for optional/omit);
+ * the harness strips it before validation/execution and reports it on tool_execution_start. */
+
+static int g_intent_tracing = -1; /* -1 = default (on unless PI_NO_INTENT=1) */
+
+void agent_set_intent_tracing(bool on) { g_intent_tracing = on ? 1 : 0; }
+
+bool agent_intent_tracing(void) {
+    if (g_intent_tracing == 0) return false;
+    const char *no = getenv("PI_NO_INTENT");
+    if (no && !strcmp(no, "1")) return false;
+    no = getenv("OMC_NO_INTENT");
+    if (no && !strcmp(no, "1")) return false;
+    return true;
+}
+
+static bool props_have(const json_t *schema, const char *name, int depth) {
+    if (!json_is_obj(schema) || depth > 16) return false;
+    json_t *props = json_get_obj(schema, "properties");
+    if (props && json_get(props, name)) return true;
+    static const char *const UNIONS[] = {"anyOf", "oneOf", "allOf"};
+    for (size_t u = 0; u < 3; u++) {
+        json_t *arr = json_get_arr(schema, UNIONS[u]), *v;
+        json_arr_foreach(arr, i, v) if (props_have(v, name, depth + 1)) return true;
+    }
+    return false;
+}
+
+bool schema_declares_property(const json_t *schema, const char *name) { return props_have(schema, name, 0); }
+
+static json_t *inject_intent(const json_t *schema, int mode, int depth) {
+    json_t *out = json_clone(schema);
+    if (!json_is_obj(out) || depth > 8) return out;
+    json_t *props = json_get_obj(out, "properties");
+    if (!props) {
+        static const char *const UNIONS[] = {"anyOf", "oneOf"};
+        for (size_t u = 0; u < 2; u++) {
+            json_t *arr = json_get_arr(out, UNIONS[u]);
+            if (!arr) continue;
+            for (size_t i = 0; i < json_len(arr); i++) {
+                json_t *alt = json_arr_remove(arr, i);
+                json_arr_insert(arr, i, inject_intent(alt, mode, depth + 1));
+                json_free(alt);
+            }
+            return out;
+        }
+    }
+    json_t *np = json_obj();
+    json_t *ip = json_obj();
+    json_set_str(ip, "type", "string");
+    json_set_str(ip, "description", "concise intent");
+    json_set(np, INTENT_FIELD, ip);
+    const char *k;
+    json_t *v;
+    json_obj_foreach(props, i, k, v) json_set(np, k, json_clone(v));
+    json_set(out, "properties", np); /* replaces in place (keeps key position) or appends */
+    if (mode == INTENT_REQUIRE) {
+        json_t *req = json_get_arr(out, "required");
+        if (req) json_push_str(req, INTENT_FIELD);
+        else {
+            req = json_arr();
+            json_push_str(req, INTENT_FIELD);
+            json_set(out, "required", req);
+        }
+    }
+    return out;
+}
+
+json_t *agent_schema_inject_intent(const json_t *schema, int mode) { return inject_intent(schema, mode, 0); }
+
+/* ---------- tool examples (port of ai/dialect/examples.ts + rendering.ts pyCall) ---------- */
+
+static void py_string(sb_t *b, const char *s) {
+    sb_putc(b, '"');
+    for (; *s; s++) {
+        switch (*s) {
+        case '\\': sb_append(b, "\\\\"); break;
+        case '"': sb_append(b, "\\\""); break;
+        case '\n': sb_append(b, "\\n"); break;
+        case '\r': sb_append(b, "\\r"); break;
+        case '\t': sb_append(b, "\\t"); break;
+        default: sb_putc(b, *s);
+        }
+    }
+    sb_putc(b, '"');
+}
+
+static void py_value(sb_t *b, const json_t *v) {
+    if (!v || json_is_null(v)) sb_append(b, "None");
+    else if (json_is_bool(v)) sb_append(b, v->u.b ? "True" : "False");
+    else if (json_is_num(v)) {
+        char *n = json_dump(v, 0);
+        sb_append(b, n);
+        free(n);
+    } else if (json_is_str(v)) py_string(b, json_sv(v));
+    else if (json_is_arr(v)) {
+        sb_putc(b, '[');
+        json_t *e;
+        json_arr_foreach(v, i, e) {
+            if (i) sb_append(b, ", ");
+            py_value(b, e);
+        }
+        sb_putc(b, ']');
+    } else if (json_is_obj(v)) {
+        sb_putc(b, '{');
+        const char *k;
+        json_t *e;
+        json_obj_foreach(v, i, k, e) {
+            if (i) sb_append(b, ", ");
+            py_string(b, k);
+            sb_append(b, ": ");
+            py_value(b, e);
+        }
+        sb_putc(b, '}');
+    }
+}
+
+static void py_arg_value(sb_t *b, const json_t *v) {
+    const char *s = json_sv(v);
+    if (s && strchr(s, '\n')) {
+        size_t n = strlen(s);
+        bool fence_safe = !strstr(s, "\"\"\"") && s[0] != '"' && s[n - 1] != '"' && s[n - 1] != '\\';
+        if (fence_safe) {
+            sb_appendf(b, "\"\"\"%s\"\"\"", s);
+            return;
+        }
+    }
+    py_value(b, v);
+}
+
+static void render_example_call(sb_t *b, const char *tool, const json_t *args, const char *intent_field) {
+    if (json_len(args) == 1 && json_is_str(args->u.obj.vals[0])) {
+        if (intent_field) sb_appendf(b, "<example %s=\"…\">\n", intent_field);
+        else sb_append(b, "<example>\n");
+        sb_append(b, json_sv(args->u.obj.vals[0]));
+        sb_append(b, "\n</example>");
+        return;
+    }
+    sb_appendf(b, "<example>\n%s(", tool);
+    bool first = true;
+    if (intent_field) {
+        sb_appendf(b, "%s=\"…\"", intent_field);
+        first = false;
+    }
+    const char *k;
+    json_t *v;
+    json_obj_foreach(args, i, k, v) {
+        sb_appendf(b, "%s%s=", first ? "" : ", ", k);
+        py_arg_value(b, v);
+        first = false;
+    }
+    sb_append(b, ")\n</example>");
+}
+
+static char *render_tool_examples(const agent_tool_t *t, const char *intent_field) {
+    if (!json_len(t->examples)) return NULL;
+    sb_t b = SB_INIT;
+    sb_append(&b, "<examples>\n");
+    json_t *ex;
+    json_arr_foreach(t->examples, i, ex) {
+        if (i) sb_putc(&b, '\n');
+        const char *cap = json_get_str(ex, "caption");
+        sb_t head = SB_INIT;
+        if (cap) sb_appendf(&head, "# %s\n", cap);
+        if (json_get(ex, "call")) {
+            sb_append(&b, head.s ? head.s : "");
+            render_example_call(&b, t->name, json_get(ex, "call"), intent_field);
+        } else if (json_get(ex, "good")) {
+            sb_append(&b, head.s ? head.s : "");
+            sb_append(&b, "WRONG:\n");
+            render_example_call(&b, t->name, json_get(ex, "bad"), intent_field);
+            sb_append(&b, "\nRIGHT:\n");
+            render_example_call(&b, t->name, json_get(ex, "good"), intent_field);
+        } else {
+            if (head.len) sb_appendn(&b, head.s, head.len - 1); /* trimEnd */
+            const char *note = json_get_str(ex, "note");
+            if (note) sb_appendf(&b, "\n%s", note);
+        }
+        sb_free(&head);
+    }
+    sb_append(&b, "\n</examples>");
+    return sb_detach(&b);
 }
 
 json_t *agent_tool_wire(const agent_tool_t *t) {
     json_t *o = json_obj();
     json_set_str(o, "name", t->name);
-    json_set_str(o, "description", t->description);
-    json_set(o, "parameters", json_clone(t->parameters));
+    bool intent = agent_intent_tracing() && t->intent_mode != INTENT_OMIT &&
+                  !schema_declares_property(t->parameters, INTENT_FIELD);
+    char *ex = render_tool_examples(t, intent ? INTENT_FIELD : NULL);
+    if (ex) {
+        json_set(o, "description", json_str_own(xasprintf("%s\n\n%s", t->description ? t->description : "", ex)));
+        free(ex);
+    } else {
+        json_set_str(o, "description", t->description);
+    }
+    if (intent)
+        json_set(o, "parameters", inject_intent(t->parameters, t->intent_mode, 0));
+    else
+        json_set(o, "parameters", json_clone(t->parameters));
     return o;
+}
+
+/* Strip a harness `i` from args (unless the schema owns it). Returns the trimmed intent (owned) or NULL;
+ * *too_long is set when the value exceeds INTENT_MAX_LENGTH. */
+static char *extract_intent(const agent_tool_t *tool, json_t *args, size_t *too_long) {
+    *too_long = 0;
+    if (!agent_intent_tracing() || !json_is_obj(args)) return NULL;
+    if (tool && schema_declares_property(tool->parameters, INTENT_FIELD)) return NULL;
+    json_t *iv = json_take(args, INTENT_FIELD);
+    if (!iv) return NULL;
+    char *r = NULL;
+    if (json_is_str(iv)) {
+        char *t = str_trim(json_sv(iv));
+        size_t n = strlen(t);
+        while (n && t[n - 1] == '.') t[--n] = 0; /* /\s*\.+$/ */
+        char *t2 = str_trim(t);
+        free(t);
+        size_t cps = utf8_strlen(t2);
+        if (cps > INTENT_MAX_LENGTH) *too_long = cps;
+        if (*t2) r = t2;
+        else free(t2);
+    }
+    json_free(iv);
+    return r;
 }
 
 /* ---------- messages ---------- */
@@ -191,6 +415,7 @@ json_t *agent_event_to_json(const agent_event_t *ev) {
         json_set_str(o, "toolCallId", ev->tool_call_id);
         json_set_str(o, "toolName", ev->tool_name);
         json_set(o, "args", ev->args ? json_clone(ev->args) : json_obj());
+        if (ev->intent) json_set_str(o, "intent", ev->intent);
         break;
     case AGENT_EV_TOOL_UPDATE:
         json_set_str(o, "toolCallId", ev->tool_call_id);
@@ -501,6 +726,8 @@ typedef struct {
     volatile sig_atomic_t cancel;
     pthread_t th;
     bool skip;
+    char *intent;          /* extracted `i` (owned) */
+    size_t intent_too_long; /* >0: length of an over-long `i` (tool not run) */
 } tool_job_t;
 
 static void tool_update_cb(tool_ctx_t *ctx, const tool_result_t *partial) {
@@ -514,12 +741,18 @@ static void run_tool(tool_job_t *j) {
     agent_t *a = j->a;
     const char *name = json_get_str(j->call, "name");
     const char *id = json_get_str(j->call, "id");
-    agent_event_t st = {.type = AGENT_EV_TOOL_START, .tool_call_id = id, .tool_name = name, .args = j->args};
+    agent_event_t st = {.type = AGENT_EV_TOOL_START, .tool_call_id = id, .tool_name = name, .args = j->args,
+                        .intent = j->intent};
     emit(a, &st);
     if (j->skip) {
         tool_result_error(&j->res, "Skipped due to queued user message.");
     } else if (!j->tool) {
         tool_result_error(&j->res, "Tool %s not found", name ? name : "(null)");
+    } else if (j->intent_too_long) {
+        tool_result_error(&j->res,
+                          "`%s` is a short intent label (at most %d chars); the value you sent is %zu chars. The tool was "
+                          "not run. Put that content in the tool's own parameters and retry with a brief `%s`.",
+                          INTENT_FIELD, INTENT_MAX_LENGTH, j->intent_too_long, INTENT_FIELD);
     } else {
         char *reason = NULL;
         tool_gate_t gate = TOOL_ALLOW;
@@ -571,6 +804,7 @@ static void execute_tools(agent_t *a, json_t *run_msgs, const json_t *assistant,
         j->tool = name ? agent_find_tool(a, name) : NULL;
         json_t *args = json_get(blk, "arguments");
         j->args = json_is_obj(args) ? json_clone(args) : json_obj();
+        j->intent = extract_intent(j->tool, j->args, &j->intent_too_long);
         vec_push(&jobs, j);
     }
     size_t i = 0;
@@ -621,6 +855,7 @@ static void execute_tools(agent_t *a, json_t *run_msgs, const json_t *assistant,
         add_message(a, run_msgs, m);
         tool_result_free(&j->res);
         json_free(j->args);
+        free(j->intent);
         free(j);
     }
     vec_free(&jobs);

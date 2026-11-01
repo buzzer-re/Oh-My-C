@@ -78,8 +78,18 @@ def _phase(title):
 _ns.update({"tool": _Tools(), "read": _read, "write": _write, "env": _env, "log": _log, "phase": _phase})
 
 _MAGIC_PIP = re.compile(r"^\s*%pip\s+(.*)$")
-_MAGIC_LOAD = re.compile(r"^\s*%load\s+(\S+)\s*$")
+_MAGIC_LOAD = re.compile(r"^\s*%load\s+(.+?)\s*$")
+_MAGIC_TIME = re.compile(r"^(\s*)%time\s+(.+)$")
 _BANG = re.compile(r"^(\s*)!(.+)$")
+
+
+def _load_path(arg):
+    """%load argument: a quoted path ("my setup.py") or a bare one."""
+    try:
+        parts = __import__("shlex").split(arg)
+    except ValueError:
+        return arg
+    return parts[0] if len(parts) == 1 else arg
 
 
 def _rewrite(code):
@@ -91,7 +101,15 @@ def _rewrite(code):
             continue
         m = _MAGIC_LOAD.match(line)
         if m:
-            out.append(f"exec(open({m.group(1)!r}).read())")
+            p = _load_path(m.group(1))
+            out.append(f"exec(compile(open({p!r}).read(), {p!r}, 'exec'))")
+            continue
+        m = _MAGIC_TIME.match(line)
+        if m:
+            ind, stmt = m.group(1), m.group(2)
+            out.append(f"{ind}__omc_t0 = __import__('time').perf_counter()")
+            out.append(f"{ind}exec(compile({stmt!r}, '<time>', 'exec'))")
+            out.append(f"{ind}print('Wall time: %.2f ms' % ((__import__('time').perf_counter() - __omc_t0) * 1000))")
             continue
         m = _BANG.match(line)
         if m:

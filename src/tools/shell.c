@@ -74,9 +74,22 @@ static char *sh_quote(const char *s) {
     return sb_detach(&b);
 }
 
+static int run_locked(shell_t *s, const char *cmd, const char *cwd, const proc_opts_t *o, proc_result_t *res);
+
 int shell_run(shell_t *s, const char *cmd, const char *cwd, const proc_opts_t *o, proc_result_t *res) {
     memset(res, 0, sizeof(*res));
     pthread_mutex_lock(&s->mu);
+    return run_locked(s, cmd, cwd, o, res);
+}
+
+int shell_run_try(shell_t *s, const char *cmd, const char *cwd, const proc_opts_t *o, proc_result_t *res) {
+    memset(res, 0, sizeof(*res));
+    if (pthread_mutex_trylock(&s->mu) != 0) return -2;
+    return run_locked(s, cmd, cwd, o, res);
+}
+
+/* runs with s->mu held; releases it */
+static int run_locked(shell_t *s, const char *cmd, const char *cwd, const proc_opts_t *o, proc_result_t *res) {
     if (!s->started && start(s, o) != 0) {
         pthread_mutex_unlock(&s->mu);
         return -1;
@@ -94,8 +107,7 @@ int shell_run(shell_t *s, const char *cmd, const char *cwd, const proc_opts_t *o
             pthread_mutex_unlock(&s->mu);
             return -1;
         }
-        pthread_mutex_unlock(&s->mu);
-        return shell_run(s, cmd, cwd, o, res);
+        return run_locked(s, cmd, cwd, o, res);
     }
     free(script);
     char *marker = xasprintf("\n__OMC_DONE_%s_", s->nonce);

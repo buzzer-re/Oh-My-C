@@ -1,14 +1,17 @@
 #include "discovery.h"
+#include "agent/agent.h"
 
 #include "config/settings.h"
 #include "core/fs.h"
 #include "prompt/template.h"
 #include "text/yaml.h"
 #include "core/embed.h"
+#include "coding/plugins.h"
 
 #include <unistd.h>
 
 #include <ctype.h>
+#include <strings.h>
 #include <sys/utsname.h>
 
 /* ---------- frontmatter (flat YAML subset; nested values kept as strings) ---------- */
@@ -199,27 +202,40 @@ static strvec_t dir_chain(const char *cwd) {
 
 /* ---------- skills ---------- */
 
-static void scan_skills_dir(discovery_t *d, const char *dir) {
+bool discovery_add_skill(discovery_t *d, const char *name, const char *description, const char *path, const char *dir,
+                         bool hide) {
+    for (size_t k = 0; k < d->skills.n; k++)
+        if (!strcmp(d->skills.v[k].name, name)) return false;
+    skill_t s = {xstrdup(name), xstrdup(description ? description : ""), xstrdup(path), xstrdup(dir), hide};
+    vec_push(&d->skills, s);
+    return true;
+}
+
+static void scan_skills_dir_opt(discovery_t *d, const char *dir, bool require_description) {
     dirlist_t dl;
     if (fs_list_dir(dir, &dl) != 0) return;
     for (size_t i = 0; i < dl.n; i++) {
-        if (!dl.v[i].is_dir) continue;
+        if (!dl.v[i].is_dir || dl.v[i].name[0] == '.') continue;
         char *sd = path_join(dir, dl.v[i].name);
         char *sf = path_join(sd, "SKILL.md");
         char *text = read_nonempty(sf);
         if (text) {
             const char *body;
             json_t *fm = frontmatter_parse(text, &body);
-            const char *name = json_get_str(fm, "name");
-            if (!name) name = dl.v[i].name;
-            bool dup = false;
-            for (size_t k = 0; k < d->skills.n; k++)
-                if (!strcmp(d->skills.v[k].name, name)) dup = true;
-            if (!dup) {
-                skill_t s = {xstrdup(name), xstrdup(json_get_str(fm, "description") ? json_get_str(fm, "description") : ""),
-                             xstrdup(sf), xstrdup(sd), json_get_bool(fm, "hide", false)};
-                vec_push(&d->skills, s);
+            json_t *en = json_get(fm, "enabled");
+            const char *raw = json_get_str(fm, "name");
+            char *name = raw ? str_trim(raw) : xstrdup("");
+            if (!*name) {
+                free(name);
+                name = xstrdup(dl.v[i].name);
             }
+            bool has_desc = json_get_str(fm, "description") && *json_get_str(fm, "description");
+            if (!(json_is_bool(en) && !en->u.b) && !(require_description && !has_desc) && !strchr(name, '/') &&
+                !strchr(name, '\\'))
+                discovery_add_skill(d, name, json_get_str(fm, "description"), sf, sd,
+                                    json_get_bool(fm, "hide", false) || json_get_bool(fm, "disableModelInvocation", false) ||
+                                        json_get_bool(fm, "disable-model-invocation", false));
+            free(name);
             json_free(fm);
             free(text);
         }
@@ -227,6 +243,18 @@ static void scan_skills_dir(discovery_t *d, const char *dir) {
         free(sd);
     }
     dirlist_free(&dl);
+}
+
+static void scan_skills_dir(discovery_t *d, const char *dir) { scan_skills_dir_opt(d, dir, false); }
+
+/* omp compareSkillOrder: case-insensitive name, then exact name, then path */
+static int cmp_skill(const void *a, const void *b) {
+    const skill_t *x = a, *y = b;
+    int c = strcasecmp(x->name, y->name);
+    if (c) return c;
+    c = strcmp(x->name, y->name);
+    if (c) return c;
+    return strcmp(x->path, y->path);
 }
 
 /* ---------- rules ---------- */
@@ -243,8 +271,13 @@ static rule_t *add_rule_text(discovery_t *d, char *text, const char *path, const
     const char *body;
     json_t *fm = frontmatter_parse(text, &body);
     rule_t r = {0};
-    const char *nm = json_get_str(fm, "name");
-    r.name = xstrdup(nm ? nm : default_name);
+    json_t *en = json_get(fm, "enabled");
+    if (json_is_bool(en) && !en->u.b) { /* frontmatter-disabled rule */
+        json_free(fm);
+        free(text);
+        return NULL;
+    }
+    r.name = xstrdup(default_name); /* omp names rules after their file, never frontmatter `name` */
     for (size_t k = 0; k < d->rules.n; k++)
         if (!strcmp(d->rules.v[k].name, r.name)) {
             free(r.name);
@@ -254,13 +287,18 @@ static rule_t *add_rule_text(discovery_t *d, char *text, const char *path, const
         }
     r.description = xstrdup(json_get_str(fm, "description") ? json_get_str(fm, "description") : "");
     r.path = xstrdup(path);
-    r.content = str_trim(body);
+    /* omp parseFrontmatter: the body after frontmatter is trimmed; a file without frontmatter is kept
+     * verbatim (CRLF normalized) */
+    if (body != text) r.content = str_trim(body);
+    else r.content = str_replace(text, "\r\n", "\n");
     r.always = json_get_bool(fm, "alwaysApply", false);
     json_t *g = json_get(fm, "globs");
     if (!g) g = json_get(fm, "applyTo");
     if (json_is_arr(g)) {
         json_t *x;
         json_arr_foreach(g, i, x) if (json_is_str(x)) strvec_push(&r.globs, json_sv(x));
+    } else if (json_is_str(g) && *json_sv(g) && !str_ends(path, ".instructions.md")) {
+        strvec_push(&r.globs, json_sv(g)); /* a string glob is one pattern (omp buildRule) */
     } else if (json_is_str(g) && *json_sv(g)) {
         strvec_t parts = str_split(json_sv(g), ",");
         for (size_t i = 0; i < parts.n; i++) {
@@ -270,14 +308,36 @@ static rule_t *add_rule_text(discovery_t *d, char *text, const char *path, const
         }
         strvec_free(&parts);
     }
-    for (size_t i = 0; i < r.globs.n; i++)
+    for (size_t i = 0; str_ends(path, ".instructions.md") && i < r.globs.n; i++)
         if (!strcmp(r.globs.v[i], "*") || !strcmp(r.globs.v[i], "**") || !strcmp(r.globs.v[i], "**/*")) r.always = true;
     const char *tt = json_get_str(fm, "condition");
     if (!tt) tt = json_get_str(fm, "ttsr");
     if (!tt) tt = json_get_str(fm, "ttsrTrigger");
     if (tt) r.ttsr = xstrdup(tt);
+    const char *ckeys[] = {"condition", "ttsr_trigger", "ttsrTrigger"};
+    for (size_t k = 0; k < ARRAY_LEN(ckeys); k++) {
+        json_t *c = json_get(fm, ckeys[k]), *x;
+        if (json_is_str(c) && *json_sv(c)) r.has_condition = true;
+        json_arr_foreach(c, i, x) if (json_is_str(x) && *json_sv(x)) r.has_condition = true;
+        if (c) break;
+    }
     if (json_get_str(fm, "scope")) r.scope = xstrdup(json_get_str(fm, "scope"));
     if (json_get_str(fm, "interruptMode")) r.interrupt_mode = xstrdup(json_get_str(fm, "interruptMode"));
+    json_t *ast = json_get(fm, "astCondition");
+    if (json_is_str(ast)) {
+        char *t = str_trim(json_sv(ast));
+        r.has_ast_condition = *t != 0;
+        free(t);
+    } else if (json_is_arr(ast)) {
+        json_t *x;
+        json_arr_foreach(ast, i, x) if (json_is_str(x) && *json_sv(x)) r.has_ast_condition = true;
+    }
+    const char *q = json_get_str(fm, "question");
+    if (q) {
+        char *t = str_trim(q);
+        r.has_question = *t != 0;
+        free(t);
+    }
     vec_push(&d->rules, r);
     json_free(fm);
     free(text);
@@ -359,23 +419,37 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
         }
     }
     if (!no_rules) {
-        char *u = path_join(agent, "RULES.md");
-        add_rule(d, u, "user-rules");
-        free(u);
-        if (d->rules.n) d->rules.v[d->rules.n - 1].always = true;
-        if (native) {
-            char *p = path_join(native, "RULES.md");
-            size_t before = d->rules.n;
-            add_rule(d, p, "project-rules");
-            if (d->rules.n > before) d->rules.v[d->rules.n - 1].always = true;
-            free(p);
-            char *rd = path_join(native, "rules");
-            scan_rules_dir(d, rd, ".md");
-            free(rd);
+        /* builtin provider (priority 100): project rules/, user rules/, sticky RULES.md files */
+        /* project rules/ come from <cwd>/.omc or <cwd>/.omp only (omp builtin getConfigDirs) */
+        if (strcmp(cwd, home) != 0) {
+            const char *pd[] = {".omc", ".omp"};
+            for (size_t k = 0; k < 2; k++) {
+                char *cd = path_join(cwd, pd[k]);
+                if (fs_is_dir(cd) && dir_nonempty(cd)) {
+                    char *rd = path_join(cd, "rules");
+                    scan_rules_dir(d, rd, ".md");
+                    free(rd);
+                    free(cd);
+                    break;
+                }
+                free(cd);
+            }
         }
         char *ur = path_join(agent, "rules");
         scan_rules_dir(d, ur, ".md");
         free(ur);
+        char *u = path_join(agent, "RULES.md");
+        size_t before = d->rules.n;
+        add_rule(d, u, "RULES");
+        if (d->rules.n > before) d->rules.v[d->rules.n - 1].always = true;
+        free(u);
+        if (native) {
+            char *p = path_join(native, "RULES.md");
+            before = d->rules.n;
+            add_rule(d, p, "RULES@project");
+            if (d->rules.n > before) d->rules.v[d->rules.n - 1].always = true;
+            free(p);
+        }
         char *cur = path_join(cwd, ".cursor/rules");
         scan_rules_dir(d, cur, ".mdc");
         free(cur);
@@ -383,12 +457,16 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
         for (size_t i = 0; i < ARRAY_LEN(legacy); i++) {
             char *p = path_join(cwd, legacy[i]);
             if (fs_is_file(p)) {
-                size_t before = d->rules.n;
+                before = d->rules.n;
                 add_rule(d, p, legacy[i] + 1);
                 if (d->rules.n > before) d->rules.v[d->rules.n - 1].always = true;
             }
             free(p);
         }
+        char *gh = path_join(cwd, ".github/instructions");
+        scan_rules_dir(d, gh, ".instructions.md");
+        free(gh);
+        /* builtin-defaults provider (priority 1): every other source wins a name conflict */
         if (settings_bool("ttsr.builtinRules", true)) {
             const char *pre = "prompts/coding-agent/discovery/builtin-rules/";
             for (size_t i = 0; i < omc_embedded_count; i++) {
@@ -403,33 +481,56 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
                 free(base);
             }
         }
-        char *gh = path_join(cwd, ".github/instructions");
-        scan_rules_dir(d, gh, ".instructions.md");
-        free(gh);
     }
     if (!no_skills) {
-        if (native) {
-            char *p = path_join(native, "skills");
+        /* first wins, in omp provider-priority order: native (.omc/.omp project + agent dir, 100),
+         * Claude project dirs (80), Agent Plugins (75), .agents/.agent (70), Claude Code plugins (70) */
+        for (size_t i = chain.n; i > 0; i--) { /* every ancestor's .omc/.omp skills, closest first */
+            if (!strcmp(chain.v[i - 1], home)) continue;
+            const char *pd[] = {".omc/skills", ".omp/skills"};
+            for (size_t k = 0; k < 2; k++) {
+                char *p = path_join(chain.v[i - 1], pd[k]);
+                scan_skills_dir_opt(d, p, true);
+                free(p);
+            }
+        }
+        char *u = path_join(agent, "skills");
+        scan_skills_dir_opt(d, u, true);
+        free(u);
+        /* Claude provider: user dir (foreign opt-in) then project .claude/skills up to the repo root */
+        if (provider_user_source_enabled("claude") || settings_bool("skills.enableClaudeUser", false)) {
+            char *cd = claude_config_dir();
+            char *p = path_join(cd, "skills");
+            scan_skills_dir(d, p);
+            free(p);
+            free(cd);
+        }
+        for (size_t i = chain.n; i > 0 && settings_bool("skills.enableClaudeProject", true); i--) {
+            if (!strcmp(chain.v[i - 1], home)) continue; /* $HOME/.claude is the user source */
+            char *p = path_join(chain.v[i - 1], ".claude/skills");
             scan_skills_dir(d, p);
             free(p);
         }
+        plugin_roots_t roots;
+        plugin_roots_list(cwd, &roots);
+        plugin_skills_standard(&roots, d);
         for (size_t i = chain.n; i > 0; i--) {
-            const char *dirs[] = {".agents/skills", ".agent/skills", ".claude/skills"};
+            const char *dirs[] = {".agents/skills", ".agent/skills"};
             for (size_t k = 0; k < ARRAY_LEN(dirs); k++) {
                 char *p = path_join(chain.v[i - 1], dirs[k]);
                 scan_skills_dir(d, p);
                 free(p);
             }
         }
-        char *u = path_join(agent, "skills");
-        scan_skills_dir(d, u);
-        free(u);
         const char *uskills[] = {".agents/skills", ".agent/skills"};
         for (size_t i = 0; i < ARRAY_LEN(uskills); i++) {
             char *p = path_join(home, uskills[i]);
             scan_skills_dir(d, p);
             free(p);
         }
+        plugin_skills_legacy(&roots, d);
+        plugin_roots_free(&roots);
+        if (d->skills.n > 1) qsort(d->skills.v, d->skills.n, sizeof(skill_t), cmp_skill);
     }
     free(native);
     strvec_free(&chain);
@@ -476,6 +577,59 @@ const rule_t *discovery_find_rule(const discovery_t *d, const char *name) {
 
 /* ---------- system prompt ---------- */
 
+bool discovery_rule_listed(const rule_t *r) {
+    json_t *disabled = settings_get("ttsr.disabledRules"), *x;
+    json_arr_foreach(disabled, i, x) {
+        if (!json_is_str(x)) continue;
+        char *t = str_trim(json_sv(x));
+        bool hit = *t && !strcmp(t, r->name);
+        free(t);
+        if (hit) return false;
+    }
+    if (r->builtin && !settings_bool("ttsr.builtinRules", true)) return false;
+    bool ttsr = (r->ttsr && *r->ttsr) || r->has_condition || r->has_ast_condition || r->has_question;
+    if (ttsr && settings_bool("ttsr.enabled", true)) return false;
+    return r->always || (r->description && *r->description);
+}
+
+static void push_url_doc(strvec_t *out, const char *name, const char *from, const char *to) {
+    char *rel = xasprintf("coding-agent/prompts/internal-urls/%s.md", name);
+    char *doc = prompt_load(rel);
+    free(rel);
+    if (!doc) return;
+    char *t = str_trim(doc);
+    if (from) {
+        char *r = str_replace(t, from, to);
+        free(t);
+        t = r;
+    }
+    strvec_push_own(out, t);
+    free(doc);
+}
+
+strvec_t internal_url_docs(const sysprompt_url_host_t *h) {
+    /* omp InternalUrlRouter registration order: skill rule memory agent history artifact local proc cfg
+     * ssh security vault issue/pr mr mcp omp. memory/cfg/security/vault/mr have no omc handler. */
+    strvec_t out = {0};
+    if (h->skill_uri_access) push_url_doc(&out, "skill", NULL, NULL);
+    if (h->rule_count > 0) push_url_doc(&out, "rule", NULL, NULL);
+    if (h->has_task) push_url_doc(&out, "agent", NULL, NULL);
+    if (h->has_task) push_url_doc(&out, "history", NULL, NULL);
+    push_url_doc(&out, "artifact", NULL, NULL);
+    push_url_doc(&out, "local", NULL, NULL);
+    if (h->has_task) push_url_doc(&out, "proc", NULL, NULL);
+    char *ssh = which("ssh");
+    if (ssh) push_url_doc(&out, "ssh", NULL, NULL);
+    free(ssh);
+    char *gh = which("gh"); /* omp advertises issue:// / pr:// only when the gh CLI is installed */
+    if (gh) push_url_doc(&out, "issue", NULL, NULL);
+    free(gh);
+    push_url_doc(&out, "mcp", NULL, NULL);
+    push_url_doc(&out, "omp", "`omp://`", "`omc://`");
+    return out;
+}
+
+
 static char *load_override(const char *cwd, const char *name) {
     const char *dirs[] = {".omc", ".omp"};
     for (size_t i = 0; i < 2; i++) {
@@ -509,16 +663,34 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     json_t *info = json_arr();
     for (size_t i = 0; o->tool_names && i < o->tool_names->n; i++) {
         json_push_str(tools, o->tool_names->v[i]);
-        json_set_str(refs, o->tool_names->v[i], o->tool_names->v[i]);
+        const char *ref = o->tool_refs ? json_get_str(o->tool_refs, o->tool_names->v[i]) : NULL;
+        if (!ref) ref = o->tool_names->v[i];
+        json_set_str(refs, o->tool_names->v[i], ref);
         json_t *ti = json_obj();
-        json_set_str(ti, "name", o->tool_names->v[i]);
-        json_set_str(ti, "label", "");
+        json_set_str(ti, "name", ref);
+        const char *lbl = o->tool_labels ? json_get_str(o->tool_labels, o->tool_names->v[i]) : NULL;
+        json_set_str(ti, "label", lbl ? lbl : "");
         json_push(info, ti);
+    }
+    /* xd://-mounted tools count as present for prompt gates and resolve to their xd:// URL */
+    json_t *xe;
+    json_arr_foreach(o->xdev_tools, xi, xe) {
+        const char *n = json_get_str(xe, "name");
+        if (!n || json_get(refs, n)) continue;
+        json_push_str(tools, n);
+        char *u = xasprintf("xd://%s", n);
+        json_set_str(refs, n, u);
+        free(u);
     }
     json_set(data, "tools", tools);
     json_set(data, "toolRefs", refs);
     json_set(data, "toolInfo", info);
     json_set_bool(data, "toolListMode", true);
+    json_set(data, "xdevTools", o->xdev_tools ? json_clone(o->xdev_tools) : json_arr());
+    json_set_str(data, "xdevDocs", o->xdev_docs ? o->xdev_docs : "");
+    json_set_bool(data, "autoQaEnabled", o->auto_qa);
+    json_set_bool(data, "intentTracing", agent_intent_tracing());
+    json_set_str(data, "intentField", agent_intent_tracing() ? INTENT_FIELD : "");
     json_t *env = json_arr();
     struct utsname un;
     if (uname(&un) == 0) {
@@ -558,7 +730,7 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     }
     for (size_t i = 0; o->disc && i < o->disc->rules.n; i++) {
         const rule_t *r = &o->disc->rules.v[i];
-        if (r->ttsr) continue; /* stream-triggered rules are not listed in the prompt */
+        if (!discovery_rule_listed(r)) continue;
         json_t *x = json_obj();
         json_set_str(x, "name", r->name);
         json_set_str(x, "description", r->description);
@@ -572,34 +744,35 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     json_set(data, "rules", rules);
     json_set(data, "alwaysApplyRules", always);
     json_t *urls = json_arr();
-    const char *url_docs[] = {"skill", "rule", "artifact", "agent", "local", "issue", "ssh"};
-    for (size_t i = 0; i < ARRAY_LEN(url_docs); i++) {
-        if (!strcmp(url_docs[i], "skill") && !json_len(skills)) continue;
-        if (!strcmp(url_docs[i], "rule") && !json_len(rules)) continue;
-        if (!strcmp(url_docs[i], "agent") && !(o->tool_names && strvec_contains(o->tool_names, "task"))) continue;
-        if (!strcmp(url_docs[i], "ssh")) {
-            char *ssh = which("ssh");
-            free(ssh);
-            if (!ssh) continue;
-        }
-        char *rel = xasprintf("coding-agent/prompts/internal-urls/%s.md", url_docs[i]);
-        char *doc = prompt_load(rel);
-        free(rel);
-        if (doc) {
-            char *t = str_trim(doc);
-            json_push_str(urls, t);
-            free(t);
-            free(doc);
-        }
-    }
+    sysprompt_url_host_t host = {
+        .skill_uri_access = json_len(skills) > 0,
+        .rule_count = json_len(rules),
+        .has_task = o->tool_names && strvec_contains(o->tool_names, "task"),
+    };
+    strvec_t docs = internal_url_docs(&host);
+    for (size_t i = 0; i < docs.n; i++) json_push_str(urls, docs.v[i]);
+    strvec_free(&docs);
     json_set(data, "internalUrls", urls);
     json_set_str(data, "cwd", o->cwd);
     json_set_str(data, "model", settings_bool("includeModelInPrompt", true) && o->model_name ? o->model_name : "");
-    json_set_str(data, "delegationBias", settings_str("task.delegationBias", "gated"));
-    json_set_int(data, "MAX_CONCURRENCY", settings_int("task.maxConcurrency", 8));
+    /* delegation (sdk.ts buildSystemPrompt options): model catalog bias, task.eager/batch/maxConcurrency, IRC */
+    const char *bias = o->delegation_bias ? o->delegation_bias : "eager";
+    const char *eager = settings_str("task.eager", "default");
+    bool eager_tasks = !str_eq(eager, "default");
+    json_set_str(data, "delegationBias", bias);
+    json_set_bool(data, "eagerTasks", eager_tasks);
+    json_set_bool(data, "eagerTasksAlways", str_eq(eager, "always"));
+    json_set_bool(data, "inlineFirstDelegation", str_eq(bias, "restrained") && !eager_tasks);
+    int64_t maxc = settings_int("task.maxConcurrency", 32);
+    json_set_int(data, "MAX_CONCURRENCY", maxc > 0 ? maxc : 0);
+    json_set_bool(data, "taskBatch", settings_bool("task.batch", true));
+    json_set_bool(data, "taskIrcEnabled", o->irc_enabled);
+    bool scout = true;
+    json_t *dis = settings_get("task.disabledAgents"), *dv;
+    json_arr_foreach(dis, di, dv) if (str_eq(json_sv(dv), "scout")) scout = false;
+    json_set_bool(data, "scoutAvailable", scout);
     json_set_bool(data, "renderMermaid", false);
     json_set_bool(data, "subagent", o->subagent);
-    json_set_bool(data, "taskBatch", false);
     /* personality */
     const char *pers = settings_str("personality", "default");
     char *pfile = load_override(o->cwd, "PERSONALITY.md");

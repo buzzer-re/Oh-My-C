@@ -1,8 +1,12 @@
 /* read tool: files (line selectors, hashline anchors), directories, images, URLs, archives, SQLite, PDF, notebooks. */
 #include "tools.h"
+#include "xdev.h"
+#include "vurl.h"
 
 #include "config/settings.h"
+#include "core/embed.h"
 #include "core/fs.h"
+#include "mcp/mcp.h"
 #include "readfmt.h"
 #include "summary.h"
 #include "web.h"
@@ -817,6 +821,115 @@ static int read_ssh(tool_env_t *env, const char *path, tool_result_t *out) {
     return 0;
 }
 
+/* render a virtual (non-file) text resource honoring line selectors */
+static void read_virtual(tool_env_t *env, const char *url, const char *text, selector_t *sel, tool_result_t *out) {
+    sel->immutable = true;
+    tool_env_t tmp = *env;
+    tmp.edit_mode = "raw";
+    read_text(&tmp, url, url, text, strlen(text), sel, out);
+}
+
+/* omc:// harness docs (port of omp:// docs): README.md and docs/ (*.md) embedded at build time */
+static bool omc_doc_name(const char *embed_name, const char **doc) {
+    if (!strcmp(embed_name, "README.md")) {
+        *doc = embed_name;
+        return true;
+    }
+    if (str_starts(embed_name, "docs/") && str_ends(embed_name, ".md") && !strchr(embed_name + 5, '/')) {
+        *doc = embed_name + 5;
+        return true;
+    }
+    return false;
+}
+
+static int read_omc_docs(tool_env_t *env, const char *path, tool_result_t *out) {
+    char *work = xstrdup(path + strlen("omc://"));
+    selector_t sel;
+    memset(&sel, 0, sizeof sel);
+    strip_sel(work, &sel);
+    char *name = work;
+    while (*name == '/') name++;
+    if (str_starts(name, "docs/")) name += 5;
+    else if (!strcmp(name, "docs")) name += 4;
+    size_t nl = strlen(name);
+    while (nl && name[nl - 1] == '/') name[--nl] = 0;
+    if (strstr(name, "..") || name[0] == '/') {
+        tool_result_error(out, "Invalid omc:// path: %s", path);
+        goto done;
+    }
+    if (!*name) {
+        sb_t b = SB_INIT;
+        size_t count = 0;
+        const char *doc;
+        for (size_t i = 0; i < omc_embedded_count; i++)
+            if (omc_doc_name(omc_embedded[i].name, &doc)) count++;
+        sb_appendf(&b, "# Documentation\n\n%zu files available:\n\n", count);
+        for (size_t i = 0; i < omc_embedded_count; i++)
+            if (omc_doc_name(omc_embedded[i].name, &doc)) sb_appendf(&b, "- [%s](omc://%s)\n", doc, doc);
+        char *listing = sb_detach(&b);
+        read_virtual(env, path, listing, &sel, out);
+        free(listing);
+        goto done;
+    }
+    char *want = str_ends(name, ".md") ? xstrdup(name) : xasprintf("%s.md", name);
+    const char *found = NULL;
+    const char *doc;
+    for (size_t i = 0; i < omc_embedded_count && !found; i++)
+        if (omc_doc_name(omc_embedded[i].name, &doc) && !strcmp(doc, want)) found = omc_embedded[i].name;
+    if (found) {
+        size_t len;
+        const char *data = embed_get(found, &len);
+        read_virtual(env, path, data ? data : "", &sel, out);
+    } else {
+        sb_t sug = SB_INIT;
+        int n = 0;
+        char *stem = xstrndup(want, strlen(want) - 3);
+        for (size_t i = 0; i < omc_embedded_count && n < 5; i++) {
+            if (!omc_doc_name(omc_embedded[i].name, &doc)) continue;
+            char *dstem = xstrndup(doc, strlen(doc) - 3);
+            if (strstr(doc, stem) || strstr(stem, dstem)) sb_appendf(&sug, "%s%s", n++ ? ", " : "", doc);
+            free(dstem);
+        }
+        char *s2 = sb_detach(&sug);
+        if (n) tool_result_error(out, "Documentation file not found: %s\nDid you mean: %s", want, s2);
+        else tool_result_error(out, "Documentation file not found: %s\nUse omc:// to list available files.", want);
+        free(s2);
+        free(stem);
+    }
+    free(want);
+done:
+    free(work);
+    vec_free(&sel.ranges);
+    return 0;
+}
+
+/* mcp://<resource-uri>: read a resource from the connected MCP server that advertises it */
+static int read_mcp(tool_env_t *env, const char *path, tool_result_t *out) {
+    const char *rest = path + strlen("mcp://");
+    char *uri = str_trim(rest);
+    size_t ul = strlen(uri);
+    if (ul && uri[ul - 1] == '/' && !strchr(uri, '/')[1]) uri[ul - 1] = 0; /* host-only form: drop bare "/" */
+    if (!*uri) {
+        tool_result_error(out, "mcp:// URL requires a resource URI: mcp://<resource-uri>");
+        free(uri);
+        return 0;
+    }
+    char *text = NULL, *server = NULL, *err = NULL;
+    if (mcp_read_resource(mcp_default_manager(), uri, &text, &server, &err) != 0) {
+        tool_result_error(out, "%s", err ? err : "MCP resource read failed");
+    } else {
+        tool_result_text(out, text);
+        out->details = json_obj();
+        json_set_str(out->details, "url", path);
+        json_set_str(out->details, "server", server);
+    }
+    free(text);
+    free(server);
+    free(err);
+    free(uri);
+    return 0;
+}
+
 static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     const char *path = json_get_str(args, "path");
@@ -827,8 +940,12 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     if (str_starts(path, "http://") || str_starts(path, "https://")) {
         return web_read_url(env, path, ctx->cancel, out);
     }
+    if (xdev_read(ctx ? ctx->agent : NULL, path, out)) return 0;
     if (str_starts(path, "pr://") || str_starts(path, "issue://")) return github_read(env, path, out);
     if (str_starts(path, "ssh://")) return read_ssh(env, path, out);
+    if (vurl_is(path)) return vurl_read(env, path, out);
+    if (str_starts(path, "omc://")) return read_omc_docs(env, path, out);
+    if (str_starts(path, "mcp://")) return read_mcp(env, path, out);
     char *uerr = NULL;
     char *internal = tool_resolve_internal_url(env, path, &uerr);
     if (uerr) {
@@ -944,8 +1061,8 @@ agent_tool_t *tool_read_new(tool_env_t *env) {
     json_set_bool(ctx, "IS_HL_MODE", str_eq(env->edit_mode, "hashline"));
     char *desc = tool_prompt("read", ctx);
     json_free(ctx);
-    json_t *s = schema_obj();
-    schema_prop(s, "path", "string", "Path or URL to read, with optional :selector suffix", true);
+    json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Local path, "
+                           "internal URI, or URL; selectors inline.\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("read", "Read", desc, s, read_execute);
     free(desc);
     t->ud = env;

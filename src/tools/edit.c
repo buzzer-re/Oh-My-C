@@ -881,45 +881,39 @@ static int edit_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     return rc;
 }
 
-static json_t *str_prop(void) {
-    json_t *p = json_obj();
-    json_set_str(p, "type", "string");
-    return p;
+/* parameter schemas: exact upstream wire schemas (edit/schemas.ts via ArkType), minus the injected `i` */
+static json_t *edit_schema(const char *mode) {
+    if (!strcmp(mode, "replace"))
+        return schema_lit("{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"old_string\":{\"type\":"
+                          "\"string\"},\"new_string\":{\"type\":\"string\"},\"replace_all\":{\"type\":\"boolean\"}},"
+                          "\"required\":[\"path\",\"old_string\",\"new_string\"],\"additionalProperties\":false}");
+    if (!strcmp(mode, "patch"))
+        return schema_lit("{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"edits\":{\"type\":"
+                          "\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"op\":{\"enum\":[\"create\",\"delete\","
+                          "\"update\"],\"type\":\"string\"},\"rename\":{\"type\":\"string\"},\"diff\":{\"type\":\"string\"}},"
+                          "\"additionalProperties\":false}}},\"required\":[\"path\",\"edits\"],\"additionalProperties\":false}");
+    return schema_lit("{\"type\":\"object\",\"properties\":{\"input\":{\"type\":\"string\"}},\"required\":[\"input\"],"
+                      "\"additionalProperties\":false}");
 }
 
-/* parameter schemas mirror omp's edit/schemas.ts (omptype JSON schema: no descriptions) */
-static json_t *edit_schema(const char *mode) {
-    json_t *s = schema_obj();
-    if (!strcmp(mode, "replace")) {
-        schema_prop_json(s, "path", str_prop(), true);
-        schema_prop_json(s, "old_string", str_prop(), true);
-        schema_prop_json(s, "new_string", str_prop(), true);
-        json_t *b = json_obj();
-        json_set_str(b, "type", "boolean");
-        schema_prop_json(s, "replace_all", b, false);
-    } else if (!strcmp(mode, "patch")) {
-        schema_prop_json(s, "path", str_prop(), true);
-        json_t *entry = json_obj(), *props = json_obj(), *op = json_obj(), *en = json_arr();
-        json_push_str(en, "create");
-        json_push_str(en, "delete");
-        json_push_str(en, "update");
-        json_set(op, "enum", en);
-        json_set_str(op, "type", "string");
-        json_set(props, "op", op);
-        json_set(props, "rename", str_prop());
-        json_set(props, "diff", str_prop());
-        json_set_str(entry, "type", "object");
-        json_set(entry, "properties", props);
-        json_t *arr = json_obj();
-        json_set_str(arr, "type", "array");
-        json_set(arr, "items", entry);
-        schema_prop_json(s, "edits", arr, true);
-    } else if (!strcmp(mode, "hashline")) {
-        schema_prop(s, "input", "string", "One or more [PATH#TAG] sections of hashline operations", true);
-    } else {
-        schema_prop_json(s, "input", str_prop(), true);
-    }
-    return s;
+/* edit/index.ts PATCH_EXAMPLES / APPLY_PATCH_EXAMPLES (rendered onto the wire description) */
+static json_t *edit_examples(const char *mode) {
+    if (!strcmp(mode, "patch"))
+        return schema_lit(
+            "[{\"caption\":\"Create\",\"call\":{\"path\":\"hello.txt\",\"edits\":[{\"op\":\"create\",\"diff\":\"Hello\\n\"}]}},"
+            "{\"caption\":\"Update\",\"call\":{\"path\":\"src/app.py\",\"edits\":[{\"op\":\"update\",\"diff\":\"@@ def "
+            "greet():\\n def greet():\\n-print('Hi')\\n+print('Hello')\\n\"}]}},"
+            "{\"caption\":\"Rename\",\"call\":{\"path\":\"src/app.py\",\"edits\":[{\"op\":\"update\",\"rename\":"
+            "\"src/main.py\",\"diff\":\"@@\\n …\\n\"}]}},"
+            "{\"caption\":\"Delete\",\"call\":{\"path\":\"obsolete.txt\",\"edits\":[{\"op\":\"delete\"}]}},"
+            "{\"caption\":\"Multiple entries\",\"note\":\"All entries in one call apply to the top-level `path`; use "
+            "separate calls for different files.\"}]");
+    if (!strcmp(mode, "apply_patch"))
+        return schema_lit("[{\"caption\":\"Apply a combined patch file\",\"call\":{\"input\":\"*** Begin Patch\\n*** Add "
+                          "File: hello.txt\\n+Hello world\\n*** Update File: src/app.py\\n*** Move to: src/main.py\\n@@ "
+                          "def greet():\\n-print(\\\"Hi\\\")\\n+print(\\\"Hello, world!\\\")\\n*** Delete File: "
+                          "obsolete.txt\\n*** End Patch\\n\"}}]");
+    return NULL;
 }
 
 agent_tool_t *tool_edit_new(tool_env_t *env) {
@@ -936,6 +930,7 @@ agent_tool_t *tool_edit_new(tool_env_t *env) {
     free(rel);
     agent_tool_t *t = agent_tool_new("edit", "Edit", desc, edit_schema(mode), edit_execute);
     t->exclusive = true;
+    t->examples = edit_examples(mode);
     free(desc);
     t->ud = env;
     return t;

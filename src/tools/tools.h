@@ -57,6 +57,9 @@ typedef struct tool_env {
     char *edit_mode;           /* "hashline" | "replace" | "patch" | "apply_patch" | "sloppy" */
     char *artifacts_dir;       /* where spilled outputs go */
     int subagent_depth;
+    bool can_prompt_user;      /* a UI can answer `ask` (interactive mode) */
+    bool find_enabled;         /* `find` is part of this session (set by tools_register_builtin) */
+    const char *delegation_bias; /* model delegation bias ("eager"/"gated"/"restrained"; static) */
     void *session;             /* app session (for task tool) */
     struct shell *shell;       /* persistent bash session (lazy) */
     const discovery_t *disc;   /* skills/rules for skill:// and rule:// (borrowed) */
@@ -88,7 +91,11 @@ char *tool_truncate_head(const char *s, size_t len, size_t max_bytes, size_t max
 
 /* builtin registration */
 void tools_register_builtin(agent_t *a, tool_env_t *env, const strvec_t *enabled /* NULL => defaults */);
-const char *const *tools_default_names(void);
+const char *const *tools_default_names(void); /* canonical built-in order (NULL-terminated) */
+/* order tools canonically and mount discoverable ones under xd:// (call after all tools are added) */
+void tools_finalize(agent_t *a, const strvec_t *requested);
+bool tools_scout_available(void);                     /* `scout` not in task.disabledAgents */
+bool tools_eager_delegation(const tool_env_t *env);   /* model delegation bias is "eager" */
 
 /* individual constructors */
 agent_tool_t *tool_read_new(tool_env_t *env);
@@ -110,6 +117,8 @@ agent_tool_t *tool_find_new(tool_env_t *env);
 agent_tool_t *tool_ast_edit_new(tool_env_t *env);
 /* finalize a staged ast_edit proposal (xd://resolve / xd://reject) */
 char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_error);
+/* re-render the eval description with the session tool names its bridge can call */
+void eval_set_tool_names(agent_tool_t *t, const json_t *names);
 
 /* agent definitions (bundled + ~/.omc/agent/agents + .omc/agents): owned object name -> {name, description, tools[], model?, body} */
 json_t *agent_defs_load(const char *cwd);
@@ -125,6 +134,8 @@ char *ssh_quote(const char *s); /* POSIX single-quote */
 /* helpers shared across tools */
 char *tool_prompt(const char *name, const json_t *ctx); /* renders prompts/coding-agent/prompts/tools/<name>.md */
 json_t *schema_obj(void);
+/* parse a JSON schema literal (exact upstream wire schema, minus the injected `i`); aborts if malformed */
+json_t *schema_lit(const char *json);
 void schema_prop(json_t *schema, const char *name, const char *type, const char *desc, bool required);
 void schema_prop_json(json_t *schema, const char *name, json_t *prop, bool required);
 /* edit-engine entry (hashline) used by edit tool and tests; other modes live in patch.h */

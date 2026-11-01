@@ -45,16 +45,31 @@ struct agent_tool {
     bool exclusive;     /* runs alone when several calls arrive in one turn */
     bool hidden;        /* not sent to the model */
     bool lenient_args;  /* skip schema validation errors */
+    bool mounted;       /* presented as an xd://<name> device instead of top-level (implies hidden) */
+    bool discoverable;  /* upstream loadMode "discoverable": mountable under xd:// */
+    int intent_mode;    /* INTENT_* : how the `i` intent field is injected into the wire schema */
+    char *summary;      /* one-line catalog summary (owned, may be NULL) */
+    json_t *examples;   /* [{caption?, call|good+bad|note}] appended to the wire description (owned, may be NULL) */
     /* returns 0; errors are reported via out->is_error */
     int (*execute)(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out);
     void *ud;
     void (*destroy)(agent_tool_t *self);
 };
 
+enum { INTENT_REQUIRE = 0, INTENT_OPTIONAL = 1, INTENT_OMIT = 2 };
+#define INTENT_FIELD "i"
+#define INTENT_MAX_LENGTH 200
+
 agent_tool_t *agent_tool_new(const char *name, const char *label, const char *description, json_t *params,
                              int (*execute)(agent_tool_t *, tool_ctx_t *, const json_t *, tool_result_t *));
 void agent_tool_free(agent_tool_t *t);
-json_t *agent_tool_wire(const agent_tool_t *t); /* {name, description, parameters} */
+json_t *agent_tool_wire(const agent_tool_t *t); /* {name, description, parameters}; injects `i` when intent tracing is on */
+/* intent tracing (upstream tools.intentTracing; PI_NO_INTENT=1 disables injection). Process-wide. */
+void agent_set_intent_tracing(bool on);
+bool agent_intent_tracing(void);
+/* schema with the `i` intent field injected per mode (owned clone) */
+json_t *agent_schema_inject_intent(const json_t *schema, int mode);
+bool schema_declares_property(const json_t *schema, const char *name);
 
 /* ---------- events ---------- */
 typedef enum {
@@ -77,6 +92,7 @@ typedef struct {
     const char *tool_call_id;  /* tool_* */
     const char *tool_name;
     const json_t *args;
+    const char *intent;          /* tool_start: extracted `i` intent (may be NULL) */
     const tool_result_t *result; /* tool_update (partial) / tool_end */
     bool is_error;
     const json_t *tool_results; /* turn_end: array of toolResult messages */

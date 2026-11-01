@@ -10,5 +10,7 @@ shell_t *shell_new(void);
 void shell_free(shell_t *s);
 /* Run `cmd` in the persistent shell with cwd; same result contract as proc_run (merged output). */
 int shell_run(shell_t *s, const char *cmd, const char *cwd, const proc_opts_t *o, proc_result_t *res);
+/* like shell_run, but returns -2 at once when another command holds the shell */
+int shell_run_try(shell_t *s, const char *cmd, const char *cwd, const proc_opts_t *o, proc_result_t *res);
 
 #endif
