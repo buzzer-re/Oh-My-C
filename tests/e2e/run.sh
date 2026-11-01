@@ -47,6 +47,26 @@ TAG=$(timeout 30 "$B" -m mock/mock-1 -p "read:e.txt" </dev/null | grep -o 'e.txt
 check "edit apply"     "[e.txt#"  "$B" -m mock/mock-1 -p "edit:[e.txt#$TAG]\nPUT 2.=2:\n+BETA\nPUT >3:\n+delta"
 check "edit result"    $'alpha\nBETA\ngamma\ndelta'  cat e.txt
 check "edit stale tag" "current tag #"  "$B" -m mock/mock-1 -p "edit:[e.txt#$TAG]\nPUT 1.=1:\n+x"
+# edit modes: apply_patch via config.yml (edit.mode), patch / replace / sloppy via PI_EDIT_VARIANT
+printf 'edit:\n  mode: apply_patch\n' > "$T/agent/config.yml"
+printf 'one\ntwo\nthree\n' > ap.txt; printf 'bye\n' > ap-gone.txt
+check "apply_patch run" "[ap-moved.txt]"  "$B" -m mock/mock-1 -p 'call:edit:{"input":"*** Begin Patch\n*** Update File: ap.txt\n*** Move to: ap-moved.txt\n@@\n one\n-two\n+TWO\n*** Delete File: ap-gone.txt\n*** Add File: ap-new.txt\n+fresh\n*** End Patch"}'
+check "apply_patch out" $'one\nTWO\nthree'  cat ap-moved.txt
+check "apply_patch add" "fresh"  cat ap-new.txt
+[[ ! -e ap.txt && ! -e ap-gone.txt ]] && echo "   ok  apply_patch move/delete" || { echo "   FAIL apply_patch move/delete"; fail=1; }
+grep -q 'stripped-down, file-oriented diff' "$T/req.jsonl" && echo "   ok  apply_patch prompt" || { echo "   FAIL apply_patch prompt"; fail=1; }
+check "apply_patch err" "Failed to find expected lines in ap-moved.txt"  "$B" -m mock/mock-1 -p 'call:edit:{"input":"*** Begin Patch\n*** Update File: ap-moved.txt\n@@\n-missing\n+x\n*** End Patch"}'
+rm -f "$T/agent/config.yml"
+printf 'def greet():\n    print("Hi")\n' > pm.py
+check "patch mode"      '2:    print("Hello")'  env PI_EDIT_VARIANT=patch "$B" -m mock/mock-1 -p 'call:edit:{"path":"pm.py","edits":[{"op":"update","diff":"@@ def greet():\n def greet():\n-    print(\"Hi\")\n+    print(\"Hello\")\n"}]}'
+check "patch result"    'print("Hello")'  cat pm.py
+printf 'alpha = 1\nbeta = 2\n' > rp.txt
+check "replace mode"    "[rp.txt]"  env PI_EDIT_VARIANT=replace "$B" -m mock/mock-1 -p 'call:edit:{"path":"rp.txt","old_string":"beta = 2","new_string":"beta = 3"}'
+check "replace result"  "beta = 3"  cat rp.txt
+check "replace error"   "Could not find a close enough match in rp.txt"  env PI_EDIT_VARIANT=replace "$B" -m mock/mock-1 -p 'call:edit:{"path":"rp.txt","old_string":"gamma = 9","new_string":"x"}'
+printf 'start();\nconst timeout = 1000;\nfinish();\n' > sl.ts
+check "sloppy mode"     "[sl.ts]"  env PI_EDIT_VARIANT=sloppy "$B" -m mock/mock-1 -p 'call:edit:{"input":"*** Edit File: sl.ts\n*** Find\nconst timeout = 1000;\n*** Replace\nconst timeout = 5000;\n*** Find\nfinish();\n*** Insert Before\nlog();\n"}'
+check "sloppy result"   $'start();\nconst timeout = 5000;\nlog();\nfinish();'  cat sl.ts
 check "todo tool"      "Remaining items (2)"  "$B" -m mock/mock-1 -p "todo:first,second"
 # skills + internal URLs + context files
 mkdir -p "$T/agent/skills/demo"
@@ -98,6 +118,8 @@ check "ssh write file" "via ssh"            cat "$T/sub/w.txt"
 STAG=$(env PATH="$ROOT/tests/e2e/bin:$PATH" timeout 30 "$B" -m mock/mock-1 -p "read:ssh://box$T/sub/w.txt" </dev/null | grep -o 'w.txt#[0-9A-F]*' | head -1 | cut -d'#' -f2)
 check "ssh edit"       "w.txt#"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "edit:[ssh://box$T/sub/w.txt#$STAG]\nPUT 1.=1:\n+edited over ssh"
 check "ssh edit file"  "edited over ssh"    cat "$T/sub/w.txt"
+check "ssh replace"    "[ssh://box"  env PI_EDIT_VARIANT=replace PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "call:edit:{\"path\":\"ssh://box$T/sub/w.txt\",\"old_string\":\"edited over ssh\",\"new_string\":\"replaced over ssh\"}"
+check "ssh replace file" "replaced over ssh"  cat "$T/sub/w.txt"
 check "ssh override"   "overrides are not allowed"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" -m mock/mock-1 -p "read:ssh://me@box/etc/hosts"
 rm -f ssh.json
 # goal mode over RPC: hidden context, auto-continuation (stops on no progress), completion, resume pauses

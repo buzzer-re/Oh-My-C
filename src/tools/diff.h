@@ -11,4 +11,13 @@ int64_t diff_first_changed_line(const char *a, const char *b);
 /* counts of added / removed lines */
 void diff_stats(const char *a, const char *b, int64_t *added, int64_t *removed);
 
+/* ---- jsdiff-compatible renderings used by the edit engines (port of omp pi-edit diff_string.rs) ---- */
+/* Numbered diff rows ("+N|text", "-N|text", " N|text", "" gaps) with nearby (context, default 2 when < 0) and
+ * enclosing-bracket context. *first_changed = first changed line in the new text (0 = none). Owned. */
+char *diff_numbered(const char *old_text, const char *new_text, int context, int64_t *first_changed);
+/* Numbered unified hunks ("@@ -a,b +c,d @@" + numbered rows), context default 3 when < 0. Owned. */
+char *diff_numbered_unified(const char *old_text, const char *new_text, int context, int64_t *first_changed);
+/* Compact current-file preview ("N:text" rows, long added runs elided with "…") of a numbered diff. Owned. */
+char *diff_compact_preview(const char *numbered, size_t *added, size_t *removed);
+
 #endif

@@ -54,7 +54,7 @@ typedef struct tool_env {
     todo_state_t todo;
     tool_ui_t ui;
     json_t *settings;          /* borrowed effective settings */
-    char *edit_mode;           /* "hashline" | "replace" | "patch" | "apply_patch" */
+    char *edit_mode;           /* "hashline" | "replace" | "patch" | "apply_patch" | "sloppy" */
     char *artifacts_dir;       /* where spilled outputs go */
     int subagent_depth;
     void *session;             /* app session (for task tool) */
@@ -127,9 +127,8 @@ char *tool_prompt(const char *name, const json_t *ctx); /* renders prompts/codin
 json_t *schema_obj(void);
 void schema_prop(json_t *schema, const char *name, const char *type, const char *desc, bool required);
 void schema_prop_json(json_t *schema, const char *name, json_t *prop, bool required);
-/* edit-engine entry (hashline) used by edit tool and tests */
+/* edit-engine entry (hashline) used by edit tool and tests; other modes live in patch.h */
 int hashline_apply(tool_env_t *env, const char *input, tool_result_t *out);
-int replace_apply(tool_env_t *env, const char *path, const char *old_s, const char *new_s, bool all, tool_result_t *out);
 /* line-numbered rendering used by read & grep */
 void format_hashline_header(sb_t *b, const char *display_path, const char *tag);
 

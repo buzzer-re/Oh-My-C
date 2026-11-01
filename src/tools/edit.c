@@ -4,6 +4,7 @@
 #include "config/settings.h"
 #include "core/fs.h"
 #include "diff.h"
+#include "patch.h"
 #include "prompt/template.h"
 
 #include <ctype.h>
@@ -784,118 +785,87 @@ cleanup:
     return 0;
 }
 
-/* ---------- replace mode ---------- */
+/* ---------- tool ---------- */
 
-static char *normalize_ws_line(const char *s) {
-    char *t = str_trim(s);
-    return t;
+/* edit.fuzzyMatch / PI_EDIT_FUZZY (1/true force on, 0/false off, other text defers to the setting) */
+static bool edit_fuzzy(void) {
+    const char *ev = env_get("PI_EDIT_FUZZY");
+    if (ev && (!strcmp(ev, "1") || !strcmp(ev, "true"))) return true;
+    if (ev && (!strcmp(ev, "0") || !strcmp(ev, "false"))) return false;
+    return settings_bool("edit.fuzzyMatch", true);
 }
 
-int replace_apply(tool_env_t *env, const char *path, const char *old_s, const char *new_s, bool all, tool_result_t *out) {
-    char *abs = tool_resolve_path(env, path);
-    char *display = path_display(abs, env->cwd);
-    size_t len;
-    char *rerr = NULL;
-    char *cur = edit_read(env, abs, &len, &rerr);
-    if (!cur) {
-        if (str_starts(abs, "ssh://")) tool_result_error(out, "%s", rerr ? rerr : "read failed");
-        else tool_result_error(out, "File not found: %s", display);
-        free(rerr);
-        goto done;
+static double edit_fuzzy_threshold(void) {
+    const char *ev = env_get("PI_EDIT_FUZZY_THRESHOLD");
+    if (ev) {
+        char *end;
+        double t = strtod(ev, &end);
+        if (end != ev && t >= 0 && t <= 1) return t;
     }
-    if (!old_s || !*old_s) {
-        tool_result_error(out, "old_string must not be empty (use write to create files)");
-        goto done;
-    }
-    size_t cnt = str_count(cur, old_s);
-    char *next = NULL;
-    if (cnt == 0) {
-        /* whitespace-tolerant line-block match */
-        strvec_t fl = str_split_lines(cur, len), ol = str_split_lines(old_s, strlen(old_s));
-        ssize_t found = -1;
-        size_t matches = 0;
-        for (size_t i = 0; ol.n && i + ol.n <= fl.n; i++) {
-            bool ok = true;
-            for (size_t k = 0; k < ol.n && ok; k++) {
-                char *x = normalize_ws_line(fl.v[i + k]), *y = normalize_ws_line(ol.v[k]);
-                ok = strcmp(x, y) == 0;
-                free(x);
-                free(y);
-            }
-            if (ok) {
-                if (found < 0) found = (ssize_t)i;
-                matches++;
-            }
+    return settings_num("edit.fuzzyThreshold", 0.95);
+}
+
+static char *pe_resolve(void *ud, const char *display, char **err) {
+    UNUSED(err);
+    return tool_resolve_path(ud, display);
+}
+
+static bool pe_remote(void *ud, const char *abs) {
+    UNUSED(ud);
+    return str_starts(abs, "ssh://");
+}
+
+static int pe_remote_read(void *ud, const char *abs, char **data, size_t *len, char **err) {
+    bool is_dir = false;
+    if (ssh_fetch(ud, abs, data, len, &is_dir, err) != 0) {
+        if (*err && (str_istr(*err, "no such file") || str_istr(*err, "not found"))) {
+            free(*err);
+            *err = NULL;
+            return ENOENT;
         }
-        if (matches == 1) {
-            strvec_t nl = {0};
-            for (size_t i = 0; i < (size_t)found; i++) strvec_push(&nl, fl.v[i]);
-            strvec_t ins = str_split_lines(new_s ? new_s : "", strlen(new_s ? new_s : ""));
-            for (size_t i = 0; i < ins.n; i++) strvec_push(&nl, ins.v[i]);
-            for (size_t i = (size_t)found + ol.n; i < fl.n; i++) strvec_push(&nl, fl.v[i]);
-            next = doc_join(&nl, len && cur[len - 1] == '\n', strstr(cur, "\r\n") != NULL);
-            strvec_free(&nl);
-            strvec_free(&ins);
-        }
-        strvec_free(&fl);
-        strvec_free(&ol);
-        if (!next) {
-            if (matches > 1)
-                tool_result_error(out, "old_string matches %zu locations in %s (whitespace-insensitive); add more context",
-                                  matches, display);
-            else
-                tool_result_error(out, "Could not find old_string in %s. It must match exactly, including whitespace.",
-                                  display);
-            goto done;
-        }
-    } else if (cnt > 1 && !all) {
-        tool_result_error(out, "old_string matches %zu locations in %s; provide more context or set replace_all", cnt, display);
-        goto done;
-    } else if (all) {
-        next = str_replace(cur, old_s, new_s ? new_s : "");
-    } else {
-        const char *p = strstr(cur, old_s);
-        sb_t b = SB_INIT;
-        sb_appendn(&b, cur, (size_t)(p - cur));
-        sb_append(&b, new_s ? new_s : "");
-        sb_append(&b, p + strlen(old_s));
-        next = sb_detach(&b);
+        return -1;
     }
-    if (strcmp(next, cur) == 0) {
-        tool_result_error(out, "No changes made to %s: replacement is identical", display);
-        free(next);
-        goto done;
+    if (is_dir) {
+        free(*data);
+        *data = NULL;
+        return EISDIR;
     }
-    char *werr = NULL;
-    int rc = edit_write(env, abs, next, &werr);
-    if (rc != 0) {
-        tool_result_error(out, "Failed to write %s: %s", display, werr ? werr : "write failed");
-        free(werr);
-    } else {
-        edit_store_record(&env->store, abs, next, 0, 0);
-        char *dd = diff_unified(cur, next, display, display, 3);
-        tool_result_textf(out, "Successfully replaced %zu occurrence(s) in %s.", all ? cnt : (size_t)1, display);
-        out->details = json_obj();
-        json_set_str(out->details, "diff", dd);
-        json_set_int(out->details, "firstChangedLine", diff_first_changed_line(cur, next));
-        free(dd);
-    }
-    free(next);
-done:
-    free(cur);
-    free(abs);
-    free(display);
     return 0;
 }
 
-/* ---------- tool ---------- */
+static int pe_remote_write(void *ud, const char *abs, const char *data, size_t len, char **err) {
+    return ssh_store(ud, abs, data, len, err);
+}
+
+static char *pe_after_write(void *ud, const char *abs) {
+    tool_env_t *env = ud;
+    return env->after_write ? env->after_write(env, abs) : NULL;
+}
 
 static int edit_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     UNUSED(ctx);
-    if (str_eq(env->edit_mode, "replace")) {
-        return replace_apply(env, json_get_str(args, "path"), json_get_str(args, "old_string"),
-                             json_get_str(args, "new_string"), json_get_bool(args, "replace_all", false), out);
+    int mode = pe_mode_parse(env->edit_mode);
+    if (mode >= 0) {
+        pe_opts_t o = {.cwd = env->cwd,
+                       .allow_fuzzy = edit_fuzzy(),
+                       .fuzzy_threshold = edit_fuzzy_threshold(),
+                       .resolve = pe_resolve,
+                       .after_write = pe_after_write,
+                       .remote = pe_remote,
+                       .remote_read = pe_remote_read,
+                       .remote_write = pe_remote_write,
+                       .ud = env};
+        pe_result_t r;
+        pthread_mutex_lock(&env->mu);
+        pe_run((pe_mode_t)mode, args, &o, &r);
+        pthread_mutex_unlock(&env->mu);
+        tool_result_text(out, r.text ? r.text : "");
+        out->is_error = r.is_error;
+        out->details = r.details;
+        r.details = NULL;
+        pe_result_free(&r);
+        return 0;
     }
     const char *input = json_get_str(args, "input");
     if (!input) {
@@ -908,27 +878,60 @@ static int edit_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     return rc;
 }
 
+static json_t *str_prop(void) {
+    json_t *p = json_obj();
+    json_set_str(p, "type", "string");
+    return p;
+}
+
+/* parameter schemas mirror omp's edit/schemas.ts (omptype JSON schema: no descriptions) */
+static json_t *edit_schema(const char *mode) {
+    json_t *s = schema_obj();
+    if (!strcmp(mode, "replace")) {
+        schema_prop_json(s, "path", str_prop(), true);
+        schema_prop_json(s, "old_string", str_prop(), true);
+        schema_prop_json(s, "new_string", str_prop(), true);
+        json_t *b = json_obj();
+        json_set_str(b, "type", "boolean");
+        schema_prop_json(s, "replace_all", b, false);
+    } else if (!strcmp(mode, "patch")) {
+        schema_prop_json(s, "path", str_prop(), true);
+        json_t *entry = json_obj(), *props = json_obj(), *op = json_obj(), *en = json_arr();
+        json_push_str(en, "create");
+        json_push_str(en, "delete");
+        json_push_str(en, "update");
+        json_set(op, "enum", en);
+        json_set_str(op, "type", "string");
+        json_set(props, "op", op);
+        json_set(props, "rename", str_prop());
+        json_set(props, "diff", str_prop());
+        json_set_str(entry, "type", "object");
+        json_set(entry, "properties", props);
+        json_t *arr = json_obj();
+        json_set_str(arr, "type", "array");
+        json_set(arr, "items", entry);
+        schema_prop_json(s, "edits", arr, true);
+    } else if (!strcmp(mode, "hashline")) {
+        schema_prop(s, "input", "string", "One or more [PATH#TAG] sections of hashline operations", true);
+    } else {
+        schema_prop_json(s, "input", str_prop(), true);
+    }
+    return s;
+}
+
 agent_tool_t *tool_edit_new(tool_env_t *env) {
+    /* edit.mode (env PI_EDIT_VARIANT pins it); unknown values fall back to hashline */
     const char *mode = settings_str("edit.mode", "hashline");
     const char *ev = env_get("PI_EDIT_VARIANT");
     if (!ev) ev = env_get("OMC_EDIT_VARIANT");
     if (ev) mode = ev;
-    if (strcmp(mode, "replace") != 0) mode = "hashline";
+    if (pe_mode_parse(mode) < 0) mode = "hashline";
     free(env->edit_mode);
     env->edit_mode = xstrdup(mode);
-    json_t *s = schema_obj();
-    char *desc;
-    if (!strcmp(mode, "replace")) {
-        desc = prompt_load_or("crates/pi-edit/replace.md", "Replace exact text in a file.");
-        schema_prop(s, "path", "string", "File to edit", true);
-        schema_prop(s, "old_string", "string", "Exact text to replace", true);
-        schema_prop(s, "new_string", "string", "Replacement text", true);
-        schema_prop(s, "replace_all", "boolean", "Replace every occurrence", false);
-    } else {
-        desc = prompt_load_or("crates/pi-edit/hashline.md", "Hashline patch.");
-        schema_prop(s, "input", "string", "One or more [PATH#TAG] sections of hashline operations", true);
-    }
-    agent_tool_t *t = agent_tool_new("edit", "Edit", desc, s, edit_execute);
+    char *rel = xasprintf("crates/pi-edit/%s.md", mode);
+    char *desc = prompt_load_or(rel, "Edit files.");
+    free(rel);
+    agent_tool_t *t = agent_tool_new("edit", "Edit", desc, edit_schema(mode), edit_execute);
     t->exclusive = true;
     free(desc);
     t->ud = env;
