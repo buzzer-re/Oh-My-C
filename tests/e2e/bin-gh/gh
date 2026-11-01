@@ -83,6 +83,9 @@ ISSUES = {
     8: {"author": USER("carol"), "body": "", "comments": [], "createdAt": "2026-09-01T09:00:00Z", "labels": [],
         "number": 8, "state": "CLOSED", "stateReason": "COMPLETED", "title": "Docs typo", "updatedAt": "2026-09-02T09:00:00Z",
         "url": URL + "/issues/8"},
+    10: {"author": USER("erin"), "body": "".join(f"log line {i}\n" for i in range(1, 401)), "comments": [], "createdAt": "2026-09-05T09:00:00Z",
+         "labels": [], "number": 10, "state": "OPEN", "stateReason": None, "title": "Long log", "updatedAt": "2026-09-05T09:00:00Z",
+         "url": URL + "/issues/10"},
 }
 
 def pr_data():

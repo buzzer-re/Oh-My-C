@@ -2297,6 +2297,7 @@ static void op_run_watch(tool_env_t *env, tool_ctx_t *ctx, const json_t *args, t
     }
     if (!(repo = gh_resolve_repo(env->cwd, explicit_repo, run_repo, &err))) {
         fail(out, err);
+        err = NULL;
         goto done;
     }
     int64_t tail = RUN_WATCH_TAIL_DEFAULT;

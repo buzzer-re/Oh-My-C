@@ -84,6 +84,10 @@ READS = [
     ("pr_badnum", "pr://acme/widgets/abc"),
     ("pr_ghe", "pr://ghe.example.com/acme/widgets/12"),
     ("pr_selector", "pr://12:3-5"),
+    ("issue_long", "issue://acme/widgets/10"),
+    ("issue_long_tail", "issue://acme/widgets/10:350"),
+    ("issue_long_range", "issue://acme/widgets/10:395-420"),
+    ("issue_long_raw", "issue://acme/widgets/10:raw"),
 ]
 
 for name, args in GH:
