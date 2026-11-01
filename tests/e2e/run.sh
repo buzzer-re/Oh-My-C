@@ -336,6 +336,8 @@ if command -v clangd >/dev/null; then
     check "lsp definition"  "l.c:1:12"  "$B" -m mock/mock-1 -p 'call:lsp:{"action":"definition","file":"l.c","line":2,"symbol":"add"}'
     check "lsp write diags" "undeclared identifier"  "$B" -m mock/mock-1 -p 'write:bad.c:int main(void) { return nope; }'
 fi
+# credential shapes from logins -> provider request URL/headers (mock_providers.py)
+source "$ROOT/tests/e2e/providers_transport.sh"
 # provider logins over stdin (omc login) against tests/e2e/mock_auth.py
 APORT=$((PORT + 7)); python3 -I "$ROOT/tests/e2e/mock_auth.py" $APORT & APID=$!
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$APORT) 2>/dev/null && break; sleep 0.1; done

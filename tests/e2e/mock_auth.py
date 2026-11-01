@@ -202,8 +202,8 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, {"orgId": "org_f", "region": "global"})
 
         # ---- API-key validation probes ----
-        if path in ("/xaiapi/v1/models", "/tp/compatible-mode/v1/models"):
-            if self.bearer() == GOOD:
+        if path in ("/xaiapi/v1/models", "/tp/compatible-mode/v1/models", "/qwen/compatible-mode/v1/models"):
+            if self.bearer() in (GOOD, "sk-tp-good"):
                 return self.send(200, {"data": []})
             return self.send(401, {"error": {"message": "Incorrect API key provided", "code": "invalid_api_key"}})
         if path == "/zaiapi/api/coding/paas/v4/chat/completions":
