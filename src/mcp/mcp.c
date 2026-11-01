@@ -649,10 +649,23 @@ static int server_connect(mcp_server_t *s) {
     return 0;
 }
 
-mcp_manager_t *mcp_manager_new(void) { return xcalloc(1, sizeof(mcp_manager_t)); }
+/* the most recently created live manager serves mcp:// reads from tools */
+static pthread_mutex_t g_default_mu = PTHREAD_MUTEX_INITIALIZER;
+static mcp_manager_t *g_default;
+
+mcp_manager_t *mcp_manager_new(void) {
+    mcp_manager_t *m = xcalloc(1, sizeof(mcp_manager_t));
+    pthread_mutex_lock(&g_default_mu);
+    g_default = m;
+    pthread_mutex_unlock(&g_default_mu);
+    return m;
+}
 
 void mcp_manager_free(mcp_manager_t *m) {
     if (!m) return;
+    pthread_mutex_lock(&g_default_mu);
+    if (g_default == m) g_default = NULL;
+    pthread_mutex_unlock(&g_default_mu);
     for (size_t i = 0; i < m->servers.n; i++) server_free(m->servers.v[i]);
     vec_free(&m->servers);
     free(m);
@@ -867,4 +880,163 @@ const char *mcp_config_url(const json_t *cfg) {
     if (json_get_str(cfg, "command")) return NULL;
     const char *u = json_get_str(cfg, "url");
     return u ? u : json_get_str(cfg, "serverUrl");
+}
+
+/* ---------- resources (mcp:// internal URLs; port of internal-urls/mcp-protocol.ts) ---------- */
+
+/* match a URI template ({expr} matches any substring); reports literal chars and expression count */
+static bool template_match(const char *uri, const char *tpl, size_t *literal, size_t *exprs) {
+    *literal = 0;
+    *exprs = 0;
+    const char *u = uri, *t = tpl;
+    const char *star_t = NULL, *star_u = NULL;
+    while (*u) {
+        if (*t == '{') {
+            const char *e = strchr(t, '}');
+            if (!e) return false;
+            star_t = e + 1;
+            star_u = u;
+            t = e + 1;
+            continue;
+        }
+        if (*t && *t == *u) {
+            t++;
+            u++;
+            continue;
+        }
+        if (star_t) {
+            t = star_t;
+            u = ++star_u;
+            continue;
+        }
+        return false;
+    }
+    while (*t == '{') {
+        const char *e = strchr(t, '}');
+        if (!e) return false;
+        t = e + 1;
+    }
+    if (*t) return false;
+    for (const char *p = tpl; *p; p++) {
+        if (*p == '{') {
+            const char *e = strchr(p, '}');
+            if (!e) break;
+            (*exprs)++;
+            p = e;
+        } else {
+            (*literal)++;
+        }
+    }
+    return true;
+}
+
+static json_t *list_all(mcp_server_t *s, const char *method, const char *key) {
+    json_t *all = json_arr();
+    char *cursor = NULL;
+    for (int page = 0; page < 50; page++) {
+        json_t *p = json_obj();
+        if (cursor) json_set_str(p, "cursor", cursor);
+        char *err = NULL;
+        json_t *res = mcp_request(s, method, p, s->timeout_ms, &err);
+        free(err);
+        free(cursor);
+        cursor = NULL;
+        if (!res) break;
+        json_t *items = json_get(res, key), *x;
+        json_arr_foreach(items, i, x) json_push(all, json_clone(x));
+        const char *next = json_get_str(res, "nextCursor");
+        if (next && *next) cursor = xstrdup(next);
+        json_free(res);
+        if (!cursor) break;
+    }
+    free(cursor);
+    return all;
+}
+
+mcp_manager_t *mcp_default_manager(void) {
+    pthread_mutex_lock(&g_default_mu);
+    mcp_manager_t *m = g_default;
+    pthread_mutex_unlock(&g_default_mu);
+    return m;
+}
+
+int mcp_read_resource(mcp_manager_t *m, const char *uri, char **text, char **server, char **err) {
+    *text = NULL;
+    *server = NULL;
+    *err = NULL;
+    if (!m) {
+        *err = xstrdup("No MCP manager available. MCP servers may not be configured.");
+        return -1;
+    }
+    mcp_server_t *target = NULL, *tpl_target = NULL;
+    size_t best_lit = 0, best_expr = 0;
+    bool have_tpl = false;
+    sb_t avail = SB_INIT;
+    for (size_t i = 0; i < m->servers.n; i++) {
+        mcp_server_t *s = m->servers.v[i];
+        if (!s->connected) continue;
+        json_t *res = list_all(s, "resources/list", "resources"), *x;
+        json_arr_foreach(res, k, x) {
+            const char *u = json_get_str(x, "uri");
+            if (!u) continue;
+            sb_appendf(&avail, "  %s (%s)\n", u, s->name);
+            if (!target && !strcmp(u, uri)) target = s;
+        }
+        json_free(res);
+        json_t *tpls = list_all(s, "resources/templates/list", "resourceTemplates");
+        json_arr_foreach(tpls, k, x) {
+            const char *t = json_get_str(x, "uriTemplate");
+            if (!t) continue;
+            sb_appendf(&avail, "  %s (%s, template)\n", t, s->name);
+            size_t lit, ex;
+            if (template_match(uri, t, &lit, &ex) &&
+                (!have_tpl || lit > best_lit || (lit == best_lit && ex < best_expr))) {
+                have_tpl = true;
+                best_lit = lit;
+                best_expr = ex;
+                tpl_target = s;
+            }
+        }
+        json_free(tpls);
+    }
+    if (!target) target = tpl_target;
+    if (!target) {
+        char *list = sb_detach(&avail);
+        size_t ll = strlen(list);
+        if (ll && list[ll - 1] == '\n') list[ll - 1] = 0;
+        *err = xasprintf("No MCP server has resource \"%s\".\n\nAvailable resources:\n%s", uri, *list ? list : "  (none)");
+        free(list);
+        return -1;
+    }
+    char *drop = sb_detach(&avail);
+    free(drop);
+    json_t *p = json_obj();
+    json_set_str(p, "uri", uri);
+    char *rerr = NULL;
+    json_t *res = mcp_request(target, "resources/read", p, target->timeout_ms, &rerr);
+    if (!res) {
+        *err = xasprintf("MCP resource read error: %s", rerr ? rerr : "request failed");
+        free(rerr);
+        return -1;
+    }
+    free(rerr);
+    sb_t b = SB_INIT;
+    int parts = 0;
+    json_t *contents = json_get(res, "contents"), *x;
+    json_arr_foreach(contents, i, x) {
+        const char *t = json_get_str(x, "text");
+        const char *blob = json_get_str(x, "blob");
+        if (!t && !blob) continue;
+        if (parts++) sb_append(&b, "\n---\n");
+        if (t) sb_append(&b, t);
+        else {
+            const char *mt = json_get_str(x, "mimeType");
+            sb_appendf(&b, "[Binary content: %s, base64 length %zu]", mt ? mt : "unknown", strlen(blob));
+        }
+    }
+    json_free(res);
+    if (!parts) sb_append(&b, "(empty resource)");
+    *text = sb_detach(&b);
+    *server = xstrdup(target->name);
+    return 0;
 }

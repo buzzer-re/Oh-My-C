@@ -33,6 +33,12 @@ json_t *mcp_oauth_descriptor(const char *server_url, const json_t *server_cfg, c
 int mcp_oauth_login(const char *server_url, const json_t *server_cfg, const char *www_authenticate, const auth_io_t *io, char **err);
 /* the URL a config entry connects to (url / serverUrl), or NULL for stdio servers */
 const char *mcp_config_url(const json_t *cfg);
+/* The most recently created live manager (NULL if none); used by mcp:// reads. */
+mcp_manager_t *mcp_default_manager(void);
+/* Read an MCP resource by URI from the connected server advertising it (exact URI first, then the
+ * best-matching URI template). Returns 0 with owned *text (text parts joined by "\n---\n") and
+ * *server, or -1 with an owned *err listing the available resources. */
+int mcp_read_resource(mcp_manager_t *m, const char *uri, char **text, char **server, char **err);
 
 /* low-level */
 json_t *mcp_request(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, char **err);

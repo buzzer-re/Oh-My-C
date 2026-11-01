@@ -294,7 +294,8 @@ static param_t *parse_param(lex_t *l, int depth) {
         l->p++;
         sb_t b = SB_INIT;
         while (*l->p && *l->p != q) {
-            if (*l->p == '\\' && l->p[1]) l->p++;
+            /* Handlebars string literals only escape the quote; `\\n` stays literal (helpers unescape it) */
+            if (*l->p == '\\' && l->p[1] == q) l->p++;
             sb_putc(&b, *l->p++);
         }
         if (*l->p == q) l->p++;

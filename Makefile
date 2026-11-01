@@ -70,7 +70,7 @@ build/embedgen: build-tools/embedgen.c
 	@mkdir -p build
 	$(CC) -O2 -o $@ $<
 
-EMBED_FILES := $(shell find prompts assets -type f 2>/dev/null | LC_ALL=C sort)
+EMBED_FILES := $(shell find prompts assets -type f 2>/dev/null | LC_ALL=C sort) README.md $(sort $(wildcard docs/*.md))
 build/embedded.c: build/embedgen $(EMBED_FILES)
 	@./build/embedgen $@ $(EMBED_FILES)
 

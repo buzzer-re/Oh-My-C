@@ -30,6 +30,9 @@ typedef struct {
     char *scope;  /* TTSR scope: "text", "thinking", "tool", "tool:edit(*.rs)", comma-separated */
     char *interrupt_mode; /* always | prose-only | tool-only | never (NULL = setting) */
     bool builtin; /* bundled builtin-defaults rule */
+    bool has_condition;     /* any non-empty `condition` (string or list; omc's TTSR runs string regexes only) */
+    bool has_ast_condition; /* `astCondition` (AST TTSR trigger; omc does not evaluate these) */
+    bool has_question;      /* `question` (judged TTSR trigger) */
 } rule_t;
 
 typedef struct {
@@ -41,6 +44,9 @@ typedef struct {
 void discover_all(const char *cwd, discovery_t *out, bool no_context, bool no_skills, bool no_rules);
 void discovery_free(discovery_t *d);
 const skill_t *discovery_find_skill(const discovery_t *d, const char *name);
+/* add a skill unless one with the same name exists (first wins); copies all strings */
+bool discovery_add_skill(discovery_t *d, const char *name, const char *description, const char *path, const char *dir,
+                         bool hide);
 const rule_t *discovery_find_rule(const discovery_t *d, const char *name);
 
 /* parse "---\nkey: value\n---\nbody" frontmatter; returns owned object (empty if none), *body points into text */
@@ -65,6 +71,22 @@ typedef struct {
     const char *xdev_docs;            /* rendered xd:// device docs/catalog section */
     bool auto_qa;                     /* xd://report_issue automated QA advertised */
 } sysprompt_opts_t;
+
+/* Whether a rule renders in the system prompt (<domain-rules> / <generic-rules>). Rules with a TTSR
+ * trigger (regex `condition`, `astCondition`, `question`) are stream rules while `ttsr.enabled`;
+ * `ttsr.disabledRules` drops a rule entirely (omp capability/rule-buckets.ts bucketRules). */
+bool discovery_rule_listed(const rule_t *r);
+
+/* Session facts the internal-URL listing depends on (omp SchemeHost + handler availability). */
+typedef struct {
+    bool skill_uri_access; /* a skill-reading tool is active and skills exist */
+    size_t rule_count;     /* rulebook rules listed in the prompt */
+    bool has_task;         /* HOOK: agent://, history://, proc:// are listed only while the task tool is
+                            * active (omp lists them unconditionally; gate until omc serves them) */
+} sysprompt_url_host_t;
+
+/* "- " lines for the "# Internal URLs" section in omp registration order (owned) */
+strvec_t internal_url_docs(const sysprompt_url_host_t *h);
 
 /* returns owned array of system prompt blocks (strings) */
 json_t *build_system_prompt(const sysprompt_opts_t *o);
