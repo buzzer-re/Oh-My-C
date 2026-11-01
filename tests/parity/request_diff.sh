@@ -3,7 +3,9 @@
 # mock model through throwaway agent dirs; the product name omp->omc is normalized). Prints tool-set/param differences and a system-prompt diff.
 #   tests/parity/request_diff.sh [prompt] [cwd]
 # Env: RD_DIR (scratch, default $TMPDIR/omc-reqdiff), OMP_BIN (default omp), RD_SETUP=<script> runs
-# `$RD_SETUP <agent-dir>` for both agent dirs before the run (e.g. to add skills/rules/settings).
+# `$RD_SETUP <agent-dir>` for both agent dirs before the run (e.g. to add skills/rules/settings),
+# RD_WORKSETUP=<script> runs `$RD_WORKSETUP <cwd>` before each app's run (reseed files a tool changes).
+# The tool messages of the last request each app sent are written to $RD_DIR/tools.{omp,omc} and diffed.
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 D=${RD_DIR:-${TMPDIR:-/tmp}/omc-reqdiff}
@@ -29,6 +31,7 @@ YML
     [ -n "${RD_SETUP:-}" ] && "$RD_SETUP" "$D/$d"
 done
 run() { # log-name env-var agent-dir binary
+    [ -n "${RD_WORKSETUP:-}" ] && "$RD_WORKSETUP" "$WORK"
     MOCK_LOG="$D/$1.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $port >/dev/null 2>&1 & local mp=$!
     for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null && break; sleep 0.1; done
     (cd "$WORK" && env MOCK_KEY=x OMC_NO_TITLE=1 PI_NO_TITLE=1 "$2=$3" timeout 90 "$4" -p "$PROMPT" </dev/null >"$D/$1.out" 2>&1)
@@ -67,6 +70,16 @@ open(f"{D}/sys.omp", "w").write(prod(txt(a["messages"][0])))
 open(f"{D}/sys.omc", "w").write(txt(b["messages"][0]))
 open(f"{D}/msgs.omp", "w").write(json.dumps(a["messages"][1:], indent=1, ensure_ascii=False))
 open(f"{D}/msgs.omc", "w").write(json.dumps(b["messages"][1:], indent=1, ensure_ascii=False))
+def tools(name):  # tool messages of the last request (the whole conversation so far)
+    rs = [json.loads(l) for l in open(f"{D}/{name}.jsonl")]
+    rs = [r for r in rs if r.get("tools")]
+    ms = [m for m in rs[-1]["messages"] if m.get("role") == "tool"] if rs else []
+    return "".join(f"=== {m.get('tool_call_id', '')}\n{txt(m)}\n" for m in ms)
+open(f"{D}/tools.omp", "w").write(prod(tools("omp")))
+open(f"{D}/tools.omc", "w").write(tools("omc"))
 PY
 diff "$D/sys.omp" "$D/sys.omc" > "$D/sys.diff" && echo "system prompt: identical" || echo "system prompt: differs ($(grep -c '^[<>]' "$D/sys.diff") lines; see $D/sys.diff)"
 diff "$D/msgs.omp" "$D/msgs.omc" > "$D/msgs.diff" && echo "messages: identical" || echo "messages: differ (see $D/msgs.diff)"
+if [ -s "$D/tools.omp" ] || [ -s "$D/tools.omc" ]; then
+    diff "$D/tools.omp" "$D/tools.omc" > "$D/tools.diff" && echo "tool messages: identical" || echo "tool messages: differ (see $D/tools.diff)"
+fi
