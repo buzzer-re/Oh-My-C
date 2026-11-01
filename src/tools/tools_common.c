@@ -1,6 +1,7 @@
 #include "tools.h"
 #include "coding/memory.h"
 #include "jobs.h"
+#include "artifacts.h"
 #include "config/settings.h"
 
 #include "core/fs.h"
@@ -123,7 +124,7 @@ void tool_env_free(tool_env_t *e) {
     edit_store_free(&e->store);
     json_free(e->todo.phases);
     free(e->edit_mode);
-    free(e->artifacts_dir);
+    artifacts_unref(e->artifacts);
     free(e->local_dir);
     shell_free(e->shell);
     jobs_free(e->jobs);
@@ -195,14 +196,8 @@ char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err) {
     } else {
         if (strchr(target, '/') || strstr(target, "..")) *err = xasprintf("Invalid artifact id: %s", target);
         else {
-            char *dir = env->artifacts_dir ? xstrdup(env->artifacts_dir) : omc_agent_path("artifacts");
-            path = xasprintf("%s/%s.log", dir, target);
-            free(dir);
-            if (!fs_is_file(path)) {
-                *err = xasprintf("Artifact not found: %s", target);
-                free(path);
-                path = NULL;
-            }
+            path = artifacts_find(env->artifacts, target);
+            if (!path) *err = xasprintf("Artifact not found: %s", target);
         }
     }
     free(target);

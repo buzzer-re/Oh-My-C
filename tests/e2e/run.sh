@@ -76,6 +76,17 @@ printf 'start();\nconst timeout = 1000;\nfinish();\n' > sl.ts
 check "sloppy mode"     "[sl.ts]"  env PI_EDIT_VARIANT=sloppy "$B" -m mock/mock-1 -p 'call:edit:{"input":"*** Edit File: sl.ts\n*** Find\nconst timeout = 1000;\n*** Replace\nconst timeout = 5000;\n*** Find\nfinish();\n*** Insert Before\nlog();\n"}'
 check "sloppy result"   $'start();\nconst timeout = 5000;\nlog();\nfinish();'  cat sl.ts
 check "todo tool"      "Remaining items (2)"  "$B" -m mock/mock-1 -p "todo:first,second"
+# tool output parity (omp OutputSink): middle elision + session artifact, column cap, sanitizing, exit notice
+LASTMSG='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; m=[x for x in r[-1]["messages"] if x.get("role")=="tool"][-1]; c=m["content"]; print(c if isinstance(c,str) else "".join(b.get("text","") for b in c), end="")'
+"$B" -m mock/mock-1 --session-dir "$T/sink" -p "bash:seq 1 30000" >/dev/null 2>&1 </dev/null
+check "sink elision"   "[Showing lines 1-4720 and 25283-30001 of 30001; 20,562 middle lines (114.9KB) elided. Read artifact://0 for full output]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "sink marker"    "4317"$'\n'"43"$'\n'"[…20562ln elided…]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "sink artifact"  "168894"  bash -c "wc -c < \"\$(ls $T/sink/*/0.bash.log)\""
+"$B" -m mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://0:raw:29999-29999" >/dev/null 2>&1 </dev/null
+check "artifact read"  "29999"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" -m mock/mock-1 --no-session -p "bash:python3 -c \"print('x'*2000)\"; printf 'a\\033[31mb\\rc\\n'; exit 3" >/dev/null 2>&1 </dev/null
+check "sink columns"   "…"$'\n'"ab"$'\n'"c"$'\n\n\n'"Command exited with code 3"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "sink col note"  "[Some lines truncated to 768 bytes]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 # skills + internal URLs + context files
 mkdir -p "$T/agent/skills/demo"
 printf -- '---\nname: demo\ndescription: Demo skill for tests\n---\nSKILL BODY LINE\n' > "$T/agent/skills/demo/SKILL.md"

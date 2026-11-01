@@ -6,6 +6,7 @@
 #include "coding/evalhost.h"
 #include "coding/autolearn.h"
 #include "coding/memory.h"
+#include "tools/artifacts.h"
 #include "tools/jobs.h"
 #include "tools/xdev.h"
 #include "agents.h"
@@ -13,6 +14,7 @@
 #include "config/auth.h"
 #include "config/settings.h"
 #include "core/fs.h"
+#include "core/proc.h"
 #include "coding/ttsr.h"
 #include "dap/dap.h"
 #include "lsp/lsp.h"
@@ -512,9 +514,19 @@ void app_set_plan_mode(app_t *a, bool on) {
     app_rebuild_system_prompt(a);
 }
 
+/* point the tool env at the session's artifact directory (session file minus `.jsonl`) */
+static void app_bind_artifacts(app_t *a, const char *copy_from_dir) {
+    char *dir = artifacts_dir_for_session(a->session ? a->session->file : NULL);
+    if (dir && copy_from_dir && strcmp(copy_from_dir, dir) != 0) artifacts_copy_dir(copy_from_dir, dir);
+    artifacts_unref(a->env->artifacts);
+    a->env->artifacts = artifacts_new(dir);
+    free(dir);
+}
+
 static void hook_after_tool(void *ud, agent_t *ag, const json_t *call, tool_result_t *res) {
     app_t *a = ud;
     UNUSED(ag);
+    tool_postprocess_result(a->env, json_get_str(call, "name"), res);
     char *rem = ttsr_take_tool_reminder(a->ttsr, json_get_str(call, "id"));
     if (rem) {
         tool_result_text(res, rem);
@@ -941,6 +953,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
         app_free(a);
         return NULL;
     }
+    if (!o->subagent) app_bind_artifacts(a, NULL);
     {
         const char *sid = session_id(a->session);
         if (a->session->dir) a->env->local_dir = xasprintf("%s/%s/local", a->session->dir, sid);
@@ -1533,10 +1546,53 @@ int app_prompt_hidden(app_t *a, const char *text, const char *custom_type) {
     return rc;
 }
 
+json_t *app_user_bash(app_t *a, const char *cmd, bool exclude) {
+    proc_opts_t o = {.cwd = a->cwd, .timeout_ms = 300000, .merge_stderr = true, .new_session = true};
+    proc_result_t r;
+    if (!cmd || proc_shell(cmd, &o, &r) != 0) return NULL;
+    /* omp executeBash without an artifact: sanitized, column-capped, head/tail elided capture */
+    out_sink_opts_t so;
+    out_sink_opts_from_settings(&so);
+    out_sink_t *sink = out_sink_new(&so);
+    out_sink_push(sink, r.out ? r.out : "", r.out_len);
+    out_summary_t sum;
+    bool cancelled = r.cancelled || r.timed_out;
+    out_sink_dump(sink, r.timed_out ? "Command timed out after 300 seconds" : r.cancelled ? "Command cancelled" : NULL, &sum);
+    out_sink_free(sink);
+    int code = r.term_signal ? 128 + r.term_signal : r.exit_code;
+    json_t *m = json_obj();
+    json_set_str(m, "role", "bashExecution");
+    json_set_str(m, "command", cmd);
+    json_set_str(m, "output", sum.output);
+    if (!cancelled) json_set_int(m, "exitCode", code);
+    json_set_bool(m, "cancelled", cancelled);
+    json_set_bool(m, "truncated", sum.truncated);
+    json_t *meta = NULL;
+    out_meta_from_summary(&meta, &sum, "tail", 1, 0);
+    if (meta) json_set(m, "meta", meta);
+    if (exclude) json_set_bool(m, "excludeFromContext", true);
+    json_set_int(m, "timestamp", now_ms());
+    if (a->session) session_append_message(a->session, m);
+    if (!exclude) {
+        char *t = out_bash_execution_text(m);
+        agent_append_message(a->agent, msg_user_text(t));
+        free(t);
+    }
+    /* BashResult counters for RPC callers */
+    json_set_int(m, "totalLines", sum.total_lines);
+    json_set_int(m, "totalBytes", sum.total_bytes);
+    json_set_int(m, "outputLines", sum.output_lines);
+    json_set_int(m, "outputBytes", sum.output_bytes);
+    out_summary_free(&sum);
+    proc_result_free(&r);
+    return m;
+}
+
 int app_new_session(app_t *a) {
     session_t *ns = a->opts.no_session ? session_in_memory(a->cwd) : session_create(a->cwd, a->opts.session_dir);
     session_free(a->session);
     a->session = ns;
+    app_bind_artifacts(a, NULL);
     agent_replace_messages(a->agent, json_arr());
     free(a->agent->session_id);
     a->agent->session_id = xstrdup(session_id(ns));
@@ -1558,6 +1614,7 @@ int app_switch_session(app_t *a, const char *path, char **err) {
     if (!s) return -1;
     session_free(a->session);
     a->session = s;
+    app_bind_artifacts(a, NULL);
     free(a->agent->session_id);
     a->agent->session_id = xstrdup(session_id(s));
     load_session_into_agent(a);
@@ -1572,8 +1629,11 @@ int app_fork_from(app_t *a, const char *entry_id, char **err) {
         *err = xstrdup("fork failed");
         return -1;
     }
+    char *old_dir = a->env->artifacts && artifacts_dir(a->env->artifacts) ? xstrdup(artifacts_dir(a->env->artifacts)) : NULL;
     session_free(a->session);
     a->session = ns;
+    app_bind_artifacts(a, old_dir);
+    free(old_dir);
     load_session_into_agent(a);
     return 0;
 }
@@ -1667,6 +1727,9 @@ app_t *app_subagent_new(app_t *parent, const char *agent_name, const char *model
     strvec_free(&tools);
     json_free(defs);
     if (!child) return NULL;
+    /* subagents share the parent's artifact id space and directory (omp adoptArtifactManager) */
+    artifacts_unref(child->env->artifacts);
+    child->env->artifacts = artifacts_ref(parent->env->artifacts);
     child->thinking = parent->thinking;
     child->agent->thinking = parent->thinking;
     return child;

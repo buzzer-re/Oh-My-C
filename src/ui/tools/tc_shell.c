@@ -1,5 +1,6 @@
 /* tc_shell.c - bash tool card (port of omp tools/bash.ts createShellRenderer). */
 #include "ui/tools/tc.h"
+#include "tools/outsink.h"
 
 #include <ctype.h>
 
@@ -283,13 +284,6 @@ static void strip_trailing(char **text, const char *notice) {
 /* remove LLM-facing notices omc appends to bash output so they aren't printed twice */
 static char *strip_bash_notices(const char *raw, const json_t *d) {
     char *t = xstrdup(raw ? raw : "");
-    /* leading "[Showing last N of M lines. Full output: artifact://ID]" */
-    if (str_starts(t, "[Showing ")) {
-        char *nl = strchr(t, '\n');
-        char *rest = xstrdup(nl ? nl + 1 : "");
-        free(t);
-        t = rest;
-    }
     const json_t *as = json_get_obj(d, "async");
     if (as && str_eq(json_get_str(as, "state"), "running")) {
         char *n = xasprintf("Backgrounded as job %s", json_get_str(as, "jobId") ? json_get_str(as, "jobId") : "");
@@ -302,6 +296,12 @@ static char *strip_bash_notices(const char *raw, const json_t *d) {
         }
         free(n);
     }
+    /* the details.meta notice (truncation / column cap / artifact) appended at the message boundary */
+    if (json_get_obj(d, "meta")) {
+        char *st = out_strip_notice(t, json_get_obj(d, "meta"));
+        free(t);
+        t = st;
+    }
     if (json_get(d, "exitCode")) {
         char *n = xasprintf("Command exited with code %lld", (long long)json_get_int(d, "exitCode", 0));
         strip_trailing(&t, n);
@@ -313,7 +313,7 @@ static char *strip_bash_notices(const char *raw, const json_t *d) {
     p = strstr(t, "\n\nCommand terminated by signal ");
     if (p) *p = 0;
     if (str_ends(t, "\n\nCommand aborted")) t[strlen(t) - strlen("\n\nCommand aborted")] = 0;
-    if (json_get(d, "wallTimeMs")) {
+    if (json_get(d, "wallTimeMs") && json_get_bool(d, "wallTimeNoticeEmitted", true)) {
         char *n = xasprintf("Wall time: %.2f seconds", json_get_num(d, "wallTimeMs", 0) / 1000.0);
         strip_trailing(&t, n);
         free(n);
@@ -402,13 +402,16 @@ void tc_bash(const tc_call_t *c, int width, strvec_t *out) {
                       .collapsed_max = MIN(10, tc_preview_window_rows(c->term_rows)), .tail = true, .visual = true,
                       .width = cw, .style = TUI_TC_TOOL_OUTPUT};
     tc_output_pane(&pane, &olines);
-    if (json_get_bool(d, "truncated", false) && !c->expanded) {
-        /* omc marks spilled output; omp shows a styled truncation warning */
-        const char *art = json_get_str(d, "artifactId");
-        char *w = art ? xasprintf("%sTruncated: full output at artifact://%s%s", tc_sym("format.bracketLeft"), art, tc_sym("format.bracketRight"))
-                      : xasprintf("%sOutput truncated%s", tc_sym("format.bracketLeft"), tc_sym("format.bracketRight"));
-        strvec_push_own(&olines, tc_fg(TUI_TC_WARNING, w));
-        free(w);
+    const json_t *meta = json_get_obj(d, "meta");
+    if (meta && (json_get_str(meta, "artifactError") || (json_get_obj(meta, "truncation") && !c->expanded))) {
+        /* omp formatStyledTruncationWarning */
+        char *wt = out_format_warning(meta);
+        if (wt) {
+            char *w = xasprintf("%s%s%s", tc_sym("format.bracketLeft"), wt, tc_sym("format.bracketRight"));
+            strvec_push_own(&olines, tc_fg(TUI_TC_WARNING, w));
+            free(w);
+            free(wt);
+        }
     }
 
     tc_section_t secs[2] = {{.lines = cmd}, {.lines = olines}};
