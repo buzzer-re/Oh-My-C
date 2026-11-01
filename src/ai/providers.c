@@ -17,4 +17,5 @@ void ai_providers_init(void) {
     ai_register_api("ollama-chat", provider_ollama_stream);
     ai_register_api("bedrock-converse-stream", provider_bedrock_stream);
     ai_register_api("cursor-agent", provider_cursor_stream);
+    ai_register_api("devin-agent", provider_devin_stream);
 }

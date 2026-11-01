@@ -271,6 +271,7 @@ json_t *provider_google_stream(const ai_model_t *, const ai_context_t *, const a
 json_t *provider_ollama_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 json_t *provider_bedrock_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 json_t *provider_gemini_cli_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
+json_t *provider_devin_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 json_t *provider_cursor_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 
 #endif
