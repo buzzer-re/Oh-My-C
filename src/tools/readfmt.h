@@ -6,6 +6,7 @@
 #define OMC_READFMT_H
 
 #include "core/core.h"
+#include "core/json.h"
 
 /* "x.zip:inner/path" or "x.db:table?limit=5" split at a recognized extension. */
 typedef struct {
@@ -54,6 +55,10 @@ bool rf_sqlite_sniff(const char *abs_path);
  * query = URL query string ("limit=..&offset=..&order=..&where=.." or "q=SELECT ...").
  * Returns owned output text; *is_error is set when the text is an error message. */
 char *rf_sqlite_read(const char *abs_path, const char *sub, const char *query, bool *is_error);
+
+/* every row of `table` as an array of {column: value} objects (TEXT/INTEGER/REAL; BLOBs become null).
+ * Reads the on-disk file plus its -wal like the reader above. Returns 0, or -1 with *err (owned). */
+int rf_sqlite_table_json(const char *abs_path, const char *table, json_t **rows, char **err);
 
 /* ---------- PDF ---------- */
 /* extract per-page text; returns 0 and fills pages (one string per page) or -1 with *err */

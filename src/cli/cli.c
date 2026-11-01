@@ -2,6 +2,7 @@
 #include "ai/ai.h"
 #include "coding/app.h"
 #include "mcp/mcp.h"
+#include "coding/migrate.h"
 #include "config/auth.h"
 #include "config/settings.h"
 #include "core/fs.h"
@@ -29,6 +30,7 @@ static void usage(FILE *f) {
             "Subcommands:\n"
             "  omc models [filter]                list models (with credentials marked)\n"
             "  omc mcp list|login|logout [name]   MCP servers and their OAuth authorization\n"
+            "  omc migrate [--dry-run|--force]    copy your omp configuration (~/.omp/agent) into omc\n"
             "  omc login [provider]               OAuth login (anthropic, openai-codex, ...)\n"
             "  omc logout <provider>              remove stored credentials\n"
             "  omc auth set <provider> <key>      store an API key; `omc auth list`\n"
@@ -127,6 +129,32 @@ static int cmd_login(int argc, char **argv) {
     if (strcmp(store, provider)) fprintf(stderr, "Logged in to %s (stored as %s).\n", provider, store);
     else fprintf(stderr, "Logged in to %s.\n", provider);
     return 0;
+}
+
+/* omc migrate [--from <omp agent dir>] [--dry-run] [--force] [--no-sessions] */
+static int cmd_migrate(int argc, char **argv) {
+    migrate_opts_t mo = {.sessions = true};
+    const char *from = NULL;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--dry-run")) mo.dry_run = true;
+        else if (!strcmp(argv[i], "--force")) mo.force = true;
+        else if (!strcmp(argv[i], "--no-sessions")) mo.sessions = false;
+        else if (!strcmp(argv[i], "--from") && i + 1 < argc) from = argv[++i];
+        else {
+            fprintf(stderr, "Usage: omc migrate [--from <omp agent dir>] [--dry-run] [--force] [--no-sessions]\n");
+            return 2;
+        }
+    }
+    char *src = from ? path_expand_home(from) : xstrdup(migrate_omp_dir());
+    sb_t rep = SB_INIT;
+    char *err = NULL;
+    int rc = omc_migrate(src, omc_agent_dir(), &mo, &rep, &err);
+    if (rc < 0) fprintf(stderr, "omc: %s\n", err ? err : "migration failed");
+    else fputs(sb_cstr(&rep), stdout);
+    free(err);
+    free(src);
+    sb_free(&rep);
+    return rc < 0 ? 1 : rc;
 }
 
 /* omc mcp list | login <server> | logout <server> */
@@ -360,6 +388,7 @@ int omc_main(int argc, char **argv) {
         if (!strcmp(c, "models")) return cmd_models(argc - 2, argv + 2);
         if (!strcmp(c, "login")) return cmd_login(argc - 2, argv + 2);
         if (!strcmp(c, "mcp")) return cmd_mcp(argc - 2, argv + 2);
+        if (!strcmp(c, "migrate")) return cmd_migrate(argc - 2, argv + 2);
         if (!strcmp(c, "logout")) {
             auth_init();
             return argc > 2 ? (auth_logout(argv[2]) ? 1 : 0) : 2;

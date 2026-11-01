@@ -184,6 +184,35 @@ grep -q "Background job bg_1 has completed" "$T/req.jsonl" && echo "   ok  async
 check "wait nothing"   "Nothing to wait for"  "$B" -m mock/mock-1 -p 'call:wait:{}'
 # automatic session title: fork side request returns a card title
 check "fork title"     "🧪 PARK: Fix flaky park tests"  bash -c "env -u OMC_NO_TITLE '$B' -m mock/mock-1 -p 'bash:echo titled' >/dev/null && '$B' sessions | head -3"
+# omc migrate: a synthetic omp agent dir (SQLite credential/history stores built here, fake secrets)
+OMPD="$T/ompdir"; mkdir -p "$OMPD/skills/demo" "$OMPD/sessions/--x--" "$OMPD/blobs"
+printf 'theme:\n  dark: amethyst\n' > "$OMPD/config.yml"; printf '{"mcpServers":{}}' > "$OMPD/mcp.json"
+printf -- '---\nname: demo\ndescription: d\n---\nbody\n' > "$OMPD/skills/demo/SKILL.md"; echo '{}' > "$OMPD/sessions/--x--/s.jsonl"; echo junk > "$OMPD/blobs/b"
+python3 -I - "$OMPD" <<'PY'
+import sqlite3, sys, json
+d = sys.argv[1]
+a = sqlite3.connect(d + "/agent.db")
+a.execute("CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, credential_type TEXT NOT NULL, data TEXT NOT NULL, disabled_cause TEXT DEFAULT NULL, identity_key TEXT DEFAULT NULL, created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0)")
+a.execute("INSERT INTO auth_credentials (provider, credential_type, data, updated_at) VALUES ('openrouter','api_key',?,1)", (json.dumps({"key": "sk-old"}),))
+a.execute("INSERT INTO auth_credentials (provider, credential_type, data, updated_at) VALUES ('openrouter','api_key',?,2)", (json.dumps({"key": "sk-new"}),))
+a.execute("INSERT INTO auth_credentials (provider, credential_type, data, updated_at, disabled_cause) VALUES ('xai','api_key',?,3,'revoked')", (json.dumps({"key": "x"}),))
+a.execute("INSERT INTO auth_credentials (provider, credential_type, data, updated_at) VALUES ('anthropic','oauth',?,1)", (json.dumps({"access": "at", "refresh": "rt", "expires": 1}),))
+a.commit()
+h = sqlite3.connect(d + "/history.db")
+h.execute("CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, prompt TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL DEFAULT 0, cwd TEXT, session_id TEXT, use_count INTEGER NOT NULL DEFAULT 1)")
+h.executemany("INSERT INTO history (prompt, created_at, cwd) VALUES (?,?,?)", [("second", 20, "/w"), ("first", 10, "/w")])
+h.commit()
+PY
+MIG="$T/migagent"
+check "migrate dry run"   "credentials: would import 2 (anthropic, openrouter)"  env OMC_CODING_AGENT_DIR="$MIG" "$B" migrate --from "$OMPD" --dry-run
+check "migrate run"       "prompt history: imported 2 entries"  env OMC_CODING_AGENT_DIR="$MIG" "$B" migrate --from "$OMPD"
+check "migrate config"    "amethyst"   cat "$MIG/config.yml"
+check "migrate skill"     "body"       cat "$MIG/skills/demo/SKILL.md"
+check "migrate creds"     '"key": "sk-new"'  cat "$MIG/auth.json"
+check "migrate oauth"     '"type": "oauth"'  cat "$MIG/auth.json"
+check "migrate history"   $'"text":"first"'  head -1 "$MIG/prompt-history.jsonl"
+check "migrate no blobs"  "absent"     bash -c "[ -e '$MIG/blobs' ] && echo present || echo absent"
+check "migrate idempotent" "kept omc's existing anthropic, openrouter"  env OMC_CODING_AGENT_DIR="$MIG" "$B" migrate --from "$OMPD"
 # libomc embedding (built by `make test` via `make lib`)
 if [ -x "$ROOT/build/examples/embed" ]; then
     check "lib host tool"  "hello from the host app, Ada"  "$ROOT/build/examples/embed" 'call:greet:{"name":"Ada"}' mock/mock-1
