@@ -1,5 +1,7 @@
 /* task tool: spawn subagents (parallel batch); agent definitions from bundled + user agents dirs */
 #include "tools.h"
+
+#include <ctype.h>
 #include "coding/agents.h"
 
 #include "coding/discovery.h"
@@ -149,8 +151,88 @@ static spawn_spec_t spec_of(const json_t *t, const char *context) {
     return spec;
 }
 
+static bool blank_str(const json_t *v) {
+    const char *s = json_sv(v);
+    if (!s) return true;
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
+    return !*s;
+}
+
+/* omp validateSpawnParams (batch shape, task.file off): the tool takes raw args when the schema rejects them
+ * (lenientArgValidation) and reports these model-facing problems itself */
+static char *spawn_params_problem(const json_t *args) {
+    json_t *tasks = json_get(args, "tasks");
+    if (tasks) {
+        if (!json_is_arr(tasks) || !json_len(tasks)) return xstrdup("Missing `tasks`. Provide at least one task item with `task` or `taskFile`.");
+        if (json_get(args, "task") || json_get(args, "taskFile"))
+            return xstrdup("Top-level `task` or `taskFile` is not part of the batch shape. Put the work in `tasks[]` items.");
+        json_t *it;
+        json_arr_foreach(tasks, i, it) {
+            const char *nm = json_get_str(it, "name");
+            char *label = nm && *nm ? xasprintf("Task %zu (`%s`)", i + 1, nm) : xasprintf("Task %zu", i + 1);
+            char *r = NULL;
+            if (blank_str(json_get(it, "task")))
+                r = xasprintf("%s is missing `task`. Every task needs complete, self-contained instructions.", label);
+            else if (json_get(it, "effort") && !str_eq(json_get_str(it, "effort"), "lo") && !str_eq(json_get_str(it, "effort"), "med") &&
+                     !str_eq(json_get_str(it, "effort"), "hi")) {
+                char *e = json_dump(json_get(it, "effort"), 0);
+                r = xasprintf("%s has an invalid `effort` value %s. Use \"lo\", \"med\", or \"hi\".", label, e);
+                free(e);
+            }
+            free(label);
+            if (r) return r;
+        }
+        strvec_t seen = {0}, shown = {0};
+        json_arr_foreach(tasks, i, it) {
+            char *nm = json_get_str(it, "name") ? str_trim(json_get_str(it, "name")) : xstrdup("");
+            if (!*nm) {
+                free(nm);
+                continue;
+            }
+            char *key = xstrdup(nm);
+            for (char *p = key; *p; p++) *p = (char)tolower((unsigned char)*p);
+            for (size_t k = 0; k < seen.n; k++)
+                if (!strcmp(seen.v[k], key)) {
+                    char *r = !strcmp(shown.v[k], nm)
+                                  ? xasprintf("Duplicate task name `%s`. Provided names must be unique within a call (case-insensitive).", nm)
+                                  : xasprintf("Duplicate task name `%s` / `%s`. Provided names must be unique within a call "
+                                              "(case-insensitive).",
+                                              shown.v[k], nm);
+                    free(key);
+                    free(nm);
+                    strvec_free(&seen);
+                    strvec_free(&shown);
+                    return r;
+                }
+            strvec_push_own(&seen, key);
+            strvec_push_own(&shown, nm);
+        }
+        strvec_free(&seen);
+        strvec_free(&shown);
+        if (blank_str(json_get(args, "context")))
+            return xstrdup("Missing `context`. Provide the shared background for this batch — goal, constraints, and any contract "
+                           "the tasks share.");
+        return NULL;
+    }
+    if (!json_get(args, "task") && !json_get(args, "taskFile"))
+        return xstrdup("Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.");
+    if (blank_str(json_get(args, "task"))) return xstrdup("Missing `task`. Provide complete, self-contained instructions for the agent.");
+    return NULL;
+}
+
 static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
+    char *problem = spawn_params_problem(args);
+    if (problem) {
+        /* createTaskModeError */
+        tool_result_error(out, "%s", problem);
+        out->details = json_obj();
+        json_set(out->details, "projectAgentsDir", json_null());
+        json_set(out->details, "results", json_arr());
+        json_set_int(out->details, "totalDurationMs", 0);
+        free(problem);
+        return 0;
+    }
     if (!env->session) {
         tool_result_error(out, "Subagents are unavailable in this context");
         return 0;
@@ -388,6 +470,7 @@ agent_tool_t *tool_task_new(tool_env_t *env) {
                                   it)
                       : xstrdup(it);
     agent_tool_t *t = agent_tool_new("task", "Task", desc, schema_lit(sch), task_execute);
+    t->lenient_args = true; /* omp lenientArgValidation: execute() reports spawn-shape problems */
     free(it);
     free(sch);
     free(desc);
