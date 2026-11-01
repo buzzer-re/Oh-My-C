@@ -1053,6 +1053,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     ai_providers_init();
     catalog_init();
     auth_init();
+    catalog_discover_local(false); /* implicit local servers (ollama, llama.cpp, LM Studio); once per process */
     app_t *a = xcalloc(1, sizeof(*a));
     pthread_mutex_init(&a->mu, NULL);
     a->opts = *o;

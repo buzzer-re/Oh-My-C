@@ -997,6 +997,7 @@ static void run_loop(agent_t *a, json_t *new_messages) {
         int ttsr = 0;
         json_t *cursor_results = NULL;
         json_t *assistant = stream_assistant(a, &ttsr, &cursor_results);
+        model_perf_record_message(assistant); /* per-model t/s + TTFT (omp recordModelPerf at message_end) */
         const char *stop = json_get_str(assistant, "stopReason");
         bool failed = stop && (strcmp(stop, "error") == 0 || strcmp(stop, "aborted") == 0);
         if (ttsr && a->hooks.should_retry) {

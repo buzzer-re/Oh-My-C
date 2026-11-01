@@ -188,6 +188,7 @@ static void apply_custom(json_t *cfg) {
             json_set(pmap, pid, info);
         }
         json_t *info = json_get(pmap, pid);
+        if (info) json_set_bool(info, "modelsYml", true);
         const char *key = json_get_str(pv, "apiKey");
         if (info && key) json_set_str(info, "configApiKey", key);
         if (info && headers) json_set(info, "headers", json_clone(headers));
@@ -437,7 +438,9 @@ static bool provider_has_credentials(const char *p) {
     return ok;
 }
 
-bool catalog_model_available(const ai_model_t *m) { return m && provider_has_credentials(m->provider); }
+bool catalog_model_available(const ai_model_t *m) {
+    return m && !json_get_bool(m->raw, "gone", false) && provider_has_credentials(m->provider);
+}
 
 /* Port of catalog compat delegation (rules.json cascade: classes/openai.kdl): openai-class revision 5.6.0 is
  * "gated", >= 6.0.0 "restrained", everything else "eager". Identity comes from the catalog row; custom models

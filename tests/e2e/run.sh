@@ -20,7 +20,7 @@ YML
 MOCK_LOG="$T/req.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $PORT & MPID=$!
 trap 'kill $MPID 2>/dev/null; rm -rf "$T"' EXIT
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break; sleep 0.1; done
-export OMC_CODING_AGENT_DIR="$T/agent" MOCK_KEY=x OMC_NO_TITLE=1
+export OMC_CODING_AGENT_DIR="$T/agent" MOCK_KEY=x OMC_NO_TITLE=1 OMC_NO_LOCAL_DISCOVERY=1
 cd "$T/work"
 fail=0
 check() { # name expected-substring command...
@@ -421,4 +421,17 @@ check "pr:// diff list"  "3. new.txt  +0 -0  [renamed]  (renamed from old.txt)" 
 check "issue:// list"    "# Issues in acme/widgets (open, up to 30)"  "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p "read:issue://acme/widgets"
 check "issue:// error"   "issue:// resolution failed: GraphQL: Could not resolve"  "${GENV[@]}" "$B" -m mock/mock-1 --no-session -p "read:issue://acme/widgets/999"
 check "gh needs enable"  "No such tool: xd://github"  env PATH="$ROOT/tests/e2e/bin-gh:$PATH" "$B" -m mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"repo_view\"}"}'
+# implicit local servers (ollama / llama.cpp / LM Studio discovery) against tests/e2e/mock_local.py
+DPORT=$((PORT + 9)); python3 -I "$ROOT/tests/e2e/mock_local.py" $DPORT & DPID=$!
+for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$DPORT) 2>/dev/null && break; sleep 0.1; done
+mkdir -p "$T/dagent"
+DENV=(env -u OMC_NO_LOCAL_DISCOVERY OMC_CODING_AGENT_DIR="$T/dagent" OLLAMA_BASE_URL="http://127.0.0.1:$DPORT/ollama"
+      LLAMA_CPP_BASE_URL="http://127.0.0.1:$DPORT/llama" LM_STUDIO_BASE_URL="http://127.0.0.1:$DPORT/lms/v1")
+check "discover ollama"    "ollama                   qwen3:8b                                         ctx=40960    reasoning"  "${DENV[@]}" "$B" models
+check "discover llama.cpp" "llama.cpp                gemma-local.gguf                                 ctx=16384"  "${DENV[@]}" "$B" models
+check "discover lm-studio" "lm-studio                qwen2.5-vl-7b                                    ctx=12000    vision"  "${DENV[@]}" "$B" models
+check "discovery cache"    '"baseUrl": "http://127.0.0.1:'"$DPORT"'/lms/v1"'  python3 -I -m json.tool "$T/dagent/local-models.json"
+kill $DPID 2>/dev/null
+check "cached when down"   "ollama                   llava:7b"  "${DENV[@]}" "$B" models
+check "perf recorded"      '"mock/mock-1"'  cat "$T/agent/model-perf.json"
 exit $fail
