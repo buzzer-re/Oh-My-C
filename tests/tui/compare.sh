@@ -16,6 +16,8 @@
 #      CMP_NAME (tmux session prefix, default cmp; set a unique one when several harnesses run at once),
 #      CMP_WAIT (seconds to wait after launching, default 6).
 # Without CMP_SETUP both config.yml files start with setupVersion: 2 (both apps past the first-run wizard).
+#      CMP_SPLIT=1 gives each app its own work dir ($D/omp/work, $D/omc/work: tools that modify files don't race),
+#      CMP_SEED=<dir> is copied into the work dir(s) before start.
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 D=${CMP_DIR:-${TMPDIR:-/tmp}/omc-tuicmp}
@@ -42,21 +44,31 @@ YML
     [ -n "${CMP_CONFIG:-}" ] && printf '%b\n' "$CMP_CONFIG" >> "$1/config.yml"
     [ -n "${CMP_SETUP:-}" ] || printf 'setupVersion: 2\n' >> "$1/config.yml"; true
 }
+workdirs() { if [ -n "${CMP_SPLIT:-}" ]; then WO=$D/omp/work; WC=$D/omc/work; else WO=$D/work; WC=$D/work; fi; }
 launch() { # cols rows extra-args...
     local cols=$1 rows=$2; shift 2
-    tmux new-session -d -s "$N-omp" -x "$cols" -y "$rows" -c "$D/work" "env HOME=$D/home MOCK_KEY=x PI_CODING_AGENT_DIR=$D/omp-agent $OMP $*"
-    tmux new-session -d -s "$N-omc" -x "$cols" -y "$rows" -c "$D/work" "env HOME=$D/home MOCK_KEY=x OMC_CODING_AGENT_DIR=$D/omc-agent $ROOT/build/omc $*"
+    workdirs
+    tmux new-session -d -s "$N-omp" -x "$cols" -y "$rows" -c "$WO" "env HOME=$D/home MOCK_KEY=x PI_CODING_AGENT_DIR=$D/omp-agent $OMP $*"
+    tmux new-session -d -s "$N-omc" -x "$cols" -y "$rows" -c "$WC" "env HOME=$D/home MOCK_KEY=x OMC_CODING_AGENT_DIR=$D/omc-agent $ROOT/build/omc $*"
     echo "$cols $rows" > "$D/size"
 }
 case "$cmd" in
 start)
     cols=${1:-120}; rows=${2:-40}
     "$0" stop >/dev/null 2>&1
-    rm -rf "$D"; mkdir -p "$D/work" "$D/home"
-    port=$((30000 + RANDOM % 20000)); echo $port > "$PORT_FILE"
+    rm -rf "$D"; mkdir -p "$D/home"
+    workdirs; mkdir -p "$WO" "$WC"
+    if [ -n "${CMP_SEED:-}" ]; then cp -R "$CMP_SEED/." "$WO/"; [ "$WO" = "$WC" ] || cp -R "$CMP_SEED/." "$WC/"; fi
+    # pick a free port; retry when another harness grabbed it first (the mock exits on EADDRINUSE)
+    for _ in 1 2 3 4 5 6 7 8; do
+        port=$((30000 + RANDOM % 20000))
+        (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null && continue
+        MOCK_LOG="$D/req.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $port > "$D/mock.log" 2>&1 & echo $! > "$D/mock.pid"
+        for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null && break; sleep 0.1; done
+        kill -0 "$(cat "$D/mock.pid")" 2>/dev/null && break
+    done
+    echo $port > "$PORT_FILE"
     mkagent "$D/omp-agent" $port; mkagent "$D/omc-agent" $port
-    MOCK_LOG="$D/req.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $port > "$D/mock.log" 2>&1 & echo $! > "$D/mock.pid"
-    for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null && break; sleep 0.1; done
     launch "$cols" "$rows"
     sleep "${CMP_WAIT:-6}"
     if [ -z "${CMP_SETUP:-}" ]; then

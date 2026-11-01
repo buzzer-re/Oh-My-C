@@ -310,6 +310,11 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     out->details = json_obj();
     json_set_int(out->details, "exitCode", r.exit_code);
     json_set_int(out->details, "durationMs", dur);
+    /* omp BashToolDetails: wall time + effective timeout for the card footer */
+    json_set_int(out->details, "wallTimeMs", dur);
+    if (tsec > 0) json_set_int(out->details, "timeoutSeconds", (int64_t)tsec);
+    else json_set_bool(out->details, "timeoutDisabled", true);
+    if (r.timed_out) json_set_bool(out->details, "timedOut", true);
     json_set_str(out->details, "cwd", cwd);
     if (truncated) json_set_bool(out->details, "truncated", true);
     sb_free(&b);

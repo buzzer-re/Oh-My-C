@@ -118,9 +118,19 @@ void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms);
 void ui_working_compaction(ui_t *u, const char *label);
 void ui_chat_rebuild(ui_t *u); /* replay the transcript from the session tree (resume, branch, reload) */
 
-/* toolcards.c */
+/* toolcards.c - tool cards (MV_TOOL views keep their card state in `msg`) */
 void render_tool(msgview_t *v, int width, strvec_t *out);
 char *args_summary(const char *tool, const json_t *args);
+/* tool_execution_start: creates the card (or joins the current read group); takes `args`. */
+msgview_t *toolcard_start(ui_t *u, const char *id, const char *name, json_t *args);
+/* partial/final result {content, details} for call `id` on card `v`; takes `result`. */
+void toolcard_result(ui_t *u, msgview_t *v, const char *id, json_t *result, bool partial, bool is_error);
+/* a visible text/thinking block, user message or non-read tool ends the current read group */
+void toolcard_break_group(ui_t *u);
+/* streamed/final assistant message: a new visible text/thinking block ends the read group */
+void toolcard_note_message(ui_t *u, const json_t *msg, bool final);
+/* transcript rebuild: cards for an assistant message's toolCall blocks, results from toolResult messages */
+void toolcard_replay(ui_t *u, const json_t *msg);
 
 /* statusline.c */
 tui_component_t *ui_status_new(ui_t *u);   /* standalone bottom bar (pi/borderless/claude/rule/field/rail) */

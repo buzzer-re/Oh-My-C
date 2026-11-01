@@ -59,6 +59,126 @@ static void split_glob(const char *p, char **base, char **glob) {
     strvec_free(&segs);
 }
 
+/* ---------- display content (omp grouped-file-output: `# dir/` / `## file#TAG` path tree, `*N│text` rows) ---------- */
+
+typedef struct {
+    uint32_t line;
+    bool match;
+    char *text;
+} dline_t;
+typedef struct {
+    char *path; /* cwd-relative display path */
+    char *tag;  /* hashline tag or NULL */
+    VEC(dline_t) lines;
+} dfile_t;
+typedef VEC(dfile_t) dfiles_t;
+
+static void dfile_rows(const dfile_t *f, strvec_t *out) {
+    int w = 0;
+    for (size_t i = 0; i < f->lines.n; i++) {
+        char nb[16];
+        w = MAX(w, snprintf(nb, sizeof nb, "%u", f->lines.v[i].line));
+    }
+    uint32_t last = 0;
+    for (size_t i = 0; i < f->lines.n; i++) {
+        const dline_t *l = &f->lines.v[i];
+        if (last && l->line > last + 1) strvec_push_own(out, xasprintf("%*s\xe2\x94\x82...", w + 1, ""));
+        char *g = xasprintf("%s%u", l->match ? "*" : "", l->line);
+        strvec_push_own(out, xasprintf("%*s\xe2\x94\x82%s", w + 1, g, l->text));
+        free(g);
+        last = l->line;
+    }
+}
+
+typedef struct pnode pnode_t;
+struct pnode {
+    strvec_t dir_names;
+    VEC(pnode_t *) dirs;
+    VEC(size_t) files; /* indices into dfiles */
+};
+
+static pnode_t *pnode_child(pnode_t *n, const char *name) {
+    for (size_t i = 0; i < n->dirs.n; i++)
+        if (!strcmp(n->dir_names.v[i], name)) return n->dirs.v[i];
+    pnode_t *c = xcalloc(1, sizeof *c);
+    strvec_push(&n->dir_names, name);
+    vec_push(&n->dirs, c);
+    return c;
+}
+
+static void pnode_free(pnode_t *n) {
+    for (size_t i = 0; i < n->dirs.n; i++) pnode_free(n->dirs.v[i]);
+    strvec_free(&n->dir_names);
+    vec_free(&n->dirs);
+    vec_free(&n->files);
+    free(n);
+}
+
+static void pnode_walk(const pnode_t *n, int depth, const dfiles_t *fs, bool *emitted, strvec_t *out) {
+    for (size_t i = 0; i < n->files.n; i++) {
+        const dfile_t *f = &fs->v[n->files.v[i]];
+        if (*emitted && depth == 0) strvec_push(out, "");
+        *emitted = true;
+        const char *slash = strrchr(f->path, '/');
+        sb_t h = SB_INIT;
+        for (int k = 0; k <= depth; k++) sb_putc(&h, '#');
+        sb_appendf(&h, " %s", slash ? slash + 1 : f->path);
+        if (f->tag) sb_appendf(&h, "#%s", f->tag);
+        strvec_push_own(out, sb_detach(&h));
+        dfile_rows(f, out);
+    }
+    for (size_t i = 0; i < n->dirs.n; i++) {
+        const pnode_t *d = n->dirs.v[i];
+        sb_t name = SB_INIT;
+        sb_append(&name, n->dir_names.v[i]);
+        while (d->files.n == 0 && d->dirs.n == 1) {
+            sb_appendf(&name, "/%s", d->dir_names.v[0]);
+            d = d->dirs.v[0];
+        }
+        if (*emitted) strvec_push(out, "");
+        *emitted = true;
+        sb_t h = SB_INIT;
+        for (int k = 0; k <= depth; k++) sb_putc(&h, '#');
+        sb_appendf(&h, " %s/", sb_cstr(&name));
+        strvec_push_own(out, sb_detach(&h));
+        sb_free(&name);
+        pnode_walk(d, depth + 1, fs, emitted, out);
+    }
+}
+
+static char *grep_display(const dfiles_t *fs, bool grouped) {
+    strvec_t out = {0};
+    if (!grouped) {
+        for (size_t i = 0; i < fs->n; i++) {
+            if (i) strvec_push(&out, "");
+            dfile_rows(&fs->v[i], &out);
+        }
+    } else {
+        pnode_t *root = xcalloc(1, sizeof *root);
+        for (size_t i = 0; i < fs->n; i++) {
+            strvec_t segs = str_split(fs->v[i].path, "/");
+            pnode_t *n = root;
+            for (size_t k = 0; k + 1 < segs.n; k++)
+                if (*segs.v[k]) n = pnode_child(n, segs.v[k]);
+            vec_push(&n->files, i);
+            strvec_free(&segs);
+        }
+        bool emitted = false;
+        pnode_walk(root, 0, fs, &emitted, &out);
+        pnode_free(root);
+    }
+    char *r = strvec_join(&out, "\n");
+    strvec_free(&out);
+    return r;
+}
+
+static char *scope_display(const char *spec, const char *cwd, tool_env_t *env) {
+    char *abs = tool_resolve_path(env, spec);
+    char *r = !strcmp(abs, cwd) ? xstrdup(".") : path_display(abs, cwd);
+    free(abs);
+    return r;
+}
+
 /* ---------- grep ---------- */
 
 static int grep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
@@ -85,6 +205,8 @@ static int grep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     size_t files_seen = 0, files_shown = 0, matches = 0;
     bool more = false, any_trunc = false;
     strvec_t missing = {0};
+    dfiles_t dfiles = {0};
+    bool grouped = inc.n > 1;
     for (size_t pi = 0; pi < inc.n && !more; pi++) {
         char *spec = xstrdup(inc.v[pi]);
         /* file:line-range selector */
@@ -136,6 +258,7 @@ static int grep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             goto done;
         }
         bool is_file = fs_is_file(abs);
+        if (!is_file) grouped = true;
         const char *cur = NULL;
         bool skipping = false;
         for (size_t i = 0; i < sr.hits.n; i++) {
@@ -154,16 +277,19 @@ static int grep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
                 char *fabs = is_file ? xstrdup(abs) : path_join(abs, h->path);
                 char *disp = path_display(fabs, env->cwd);
                 if (b.len) sb_putc(&b, '\n');
+                dfile_t df = {.path = xstrdup(disp)};
                 if (hashline) {
                     size_t flen;
                     char *content = fs_read_limit(fabs, 4u << 20, &flen, NULL);
                     const char *tag = content ? edit_store_record(&env->store, fabs, content, h->line, h->line) : "????";
                     sb_appendf(&b, "[%s#%s]\n", disp, tag);
+                    if (content) df.tag = xstrdup(tag);
                     free(content);
                 } else {
                     sb_appendf(&b, "%s\n", disp);
                 }
                 json_push_str(files_j, disp);
+                vec_push(&dfiles, df);
                 free(disp);
                 free(fabs);
             }
@@ -172,6 +298,10 @@ static int grep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             if (h->truncated) any_trunc = true;
             const char *text = h->text ? h->text : "";
             sb_appendf(&b, "%c%u%c%s\n", h->is_context ? ' ' : '*', h->line, hashline ? ':' : '|', text);
+            if (dfiles.n) {
+                dline_t dl = {h->line, !h->is_context, xstrdup(text)};
+                vec_push(&dfiles.v[dfiles.n - 1].lines, dl);
+            }
             if (hashline) {
                 /* widen seen range for this snapshot */
                 char *fabs = is_file ? xstrdup(abs) : path_join(abs, h->path);
@@ -216,9 +346,34 @@ static int grep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     files_j = NULL;
     json_set_bool(details, "fileLimitReached", more);
     json_set_bool(details, "truncated", more || any_trunc);
+    if (files_shown) {
+        char *dc = grep_display(&dfiles, grouped);
+        json_set_str(details, "displayContent", dc);
+        free(dc);
+    }
+    {
+        strvec_t sc = {0};
+        for (size_t k = 0; k < inc.n; k++) strvec_push_own(&sc, scope_display(inc.v[k], env->cwd, env));
+        char *j = strvec_join(&sc, ", ");
+        json_set_str(details, "scopePath", j);
+        free(j);
+        strvec_free(&sc);
+    }
+    if (missing.n) {
+        json_t *mp = json_arr();
+        for (size_t k = 0; k < missing.n; k++) json_push_str(mp, missing.v[k]);
+        json_set(details, "missingPaths", mp);
+    }
     out->details = details;
     details = NULL;
 done:
+    for (size_t k = 0; k < dfiles.n; k++) {
+        for (size_t m = 0; m < dfiles.v[k].lines.n; m++) free(dfiles.v[k].lines.v[m].text);
+        vec_free(&dfiles.v[k].lines);
+        free(dfiles.v[k].path);
+        free(dfiles.v[k].tag);
+    }
+    vec_free(&dfiles);
     json_free(details);
     json_free(files_j);
     sb_free(&b);
@@ -348,6 +503,15 @@ static int glob_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     json_set_int(out->details, "fileCount", (int64_t)shown);
     json_set(out->details, "files", files);
     json_set_bool(out->details, "resultLimitReached", items.n > shown);
+    {
+        char *base, *glob;
+        split_glob(inc.v[0], &base, &glob);
+        char *sc = scope_display(base, env->cwd, env);
+        json_set_str(out->details, "scopePath", sc);
+        free(sc);
+        free(base);
+        free(glob);
+    }
     sb_free(&b);
     for (size_t i = 0; i < items.n; i++) free(items.v[i].path);
     vec_free(&items);

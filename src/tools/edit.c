@@ -758,8 +758,11 @@ int hashline_apply(tool_env_t *env, const char *input, tool_result_t *out) {
                 free(diag);
             }
         }
-        char *dd = diff_unified(r->old_text, r->new_text, r->display, tdisp, 3);
+        /* renderer-facing diff in omp's numbered shape (`+N|text`), like EditToolDetails.diff */
+        char *dd = diff_numbered(r->old_text, r->new_text, -1, NULL);
+        if (all_diff.len && *dd) sb_append(&all_diff, "\n\n");
         sb_append(&all_diff, dd);
+        if (!json_get_str(details, "path")) json_set_str(details, "path", target);
         json_t *f = json_obj();
         json_set_str(f, "path", target);
         json_set_str(f, "diff", dd);

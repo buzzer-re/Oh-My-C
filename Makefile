@@ -8,7 +8,7 @@ CFLAGS  += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno
 LDFLAGS += -pie -rdynamic -Wl,-z,relro,-z,now
 LIBS    += $(shell $(PKG) --libs openssl 2>/dev/null || echo -lssl -lcrypto) -lz -lpthread -lm
 
-SRC  := $(sort $(wildcard src/*.c src/*/*.c))
+SRC  := $(sort $(wildcard src/*.c src/*/*.c src/ui/tools/*.c))
 OBJ  := $(patsubst src/%.c,build/obj/%.o,$(SRC)) build/obj/embedded.o
 BIN  := build/omc
 
@@ -97,8 +97,9 @@ T_test_editmodes     := $(CORE_OBJ) $(O)/tools/diff.o $(O)/tools/fuzzy.o $(O)/to
                         $(O)/text/regex.o $(O)/text/rxbt.o
 T_tui_demo           := $(T_test_tui)
 T_test_chrome        := $(LIB_OBJ)
+T_test_toolcards     := $(T_test_tui) $(patsubst src/%.c,$(O)/%.o,$(wildcard src/ui/tools/*.c))
 UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
-              test_chrome test_providers_google
+              test_chrome test_providers_google test_toolcards
 
 .SECONDEXPANSION:
 build/tests/%: tests/%.c $$(T_$$*)
