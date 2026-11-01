@@ -80,10 +80,12 @@ static char *cost_pair(const ai_model_t *m) {
 }
 
 /* a catalog row whose contextWindow is null (unknown): no context cell, like omp */
-static bool null_window(const ai_model_t *m) {
-    json_t *cw = m->raw ? json_get(m->raw, "contextWindow") : NULL;
-    return cw && cw->type == JSON_NULL;
+static bool null_field(const ai_model_t *m, const char *key) {
+    json_t *v = m->raw ? json_get(m->raw, key) : NULL;
+    return v && v->type == JSON_NULL;
 }
+
+static bool null_window(const ai_model_t *m) { return null_field(m, "contextWindow"); }
 
 static char *context_cell(const ai_model_t *m) {
     if (m->context_window <= 0 || null_window(m)) return xstrdup("");
@@ -347,7 +349,7 @@ static void detail_lines(const ui_model_browser_t *b, int width, strvec_t *out) 
         strvec_push_own(&facts, xasprintf("%s ctx", n));
         free(n);
     }
-    if (m->max_tokens > 0) {
+    if (m->max_tokens > 0 && !null_field(m, "maxTokens")) {
         char *n = lower_num((double)m->max_tokens);
         strvec_push_own(&facts, xasprintf("%s out", n));
         free(n);
@@ -478,7 +480,7 @@ void ui_model_browser_render(const ui_model_browser_t *b, int width, strvec_t *o
     int input_w = MAX(4, width - tui_visible_width(icon) - 2);
     char *field = xasprintf("> %s", b->query ? b->query : "");
     char *ft = tui_truncate_to_width(field, MAX(1, input_w - 1), "");
-    char *cursor = b->focused ? xstrdup("\x1b[7m \x1b[27m") : xstrdup("");
+    char *cursor = b->focused || b->hub ? xstrdup("\x1b[7m \x1b[27m") : xstrdup("");
     strvec_push_own(out, xasprintf(" %s %s%s", si, ft, cursor));
     free(cursor);
     free(ft);

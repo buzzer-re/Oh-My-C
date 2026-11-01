@@ -245,6 +245,13 @@ static int save_global(void) {
 int settings_set_global(const char *path, json_t *val) {
     ensure();
     pthread_mutex_lock(&g_mu);
+    /* #globalWriteIsNoop: re-setting the persisted value stages no config.yml rewrite */
+    json_t *cur = json_path(g_global, path);
+    if (cur && json_equal(cur, val)) {
+        json_free(val);
+        pthread_mutex_unlock(&g_mu);
+        return 0;
+    }
     set_path(g_global, path, val);
     rebuild();
     int rc = save_global();
@@ -305,8 +312,15 @@ static json_t *parent_obj(json_t *root, const char *parent, bool create) {
 int settings_set_global_entry(const char *parent, const char *key, json_t *val) {
     ensure();
     pthread_mutex_lock(&g_mu);
-    if (val) json_set(parent_obj(g_global, parent, true), key, val);
-    else {
+    if (val) {
+        json_t *o = parent_obj(g_global, parent, false), *cur = o ? json_get(o, key) : NULL;
+        if (cur && json_equal(cur, val)) { /* no-op write: no rewrite */
+            json_free(val);
+            pthread_mutex_unlock(&g_mu);
+            return 0;
+        }
+        json_set(parent_obj(g_global, parent, true), key, val);
+    } else {
         json_t *o = parent_obj(g_global, parent, false);
         if (!o || !json_get(o, key)) {
             pthread_mutex_unlock(&g_mu);

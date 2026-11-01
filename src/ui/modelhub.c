@@ -2847,6 +2847,10 @@ static bool hub_key(tui_component_t *c, const tui_key_t *k) {
     if (printable(k) || changed) h->focus_list = true;
     if (changed) {
         build_sidebar(h);
+        /* #onQueryChanged: a provider scope that just lost its last match falls back to All models */
+        const entry_t *ce = &h->entries.v[h->active];
+        if (hub_query(h) && h->assigning == A_NONE && ce->kind == E_PROVIDER && (ce->locked || match_count(h, ce->provider) == 0))
+            select_all_entry(h);
         free(h->b->empty_text);
         h->b->empty_text = empty_state(h);
     }
