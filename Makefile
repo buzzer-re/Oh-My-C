@@ -91,6 +91,7 @@ T_test_providers_google := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/pr
 T_test_providers_oai := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provider_transport.o $(O)/ai/provider_openai_completions.o \
                         $(O)/ai/provider_openai_responses.o $(O)/ai/provider_ollama.o
 T_test_http          := $(CORE_OBJ) $(NET_OBJ)
+T_test_ws            := $(CORE_OBJ) $(NET_OBJ) $(O)/net/ws.o
 T_test_providers_bedrock := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provider_transport.o $(O)/ai/aws.o $(O)/ai/provider_bedrock.o
 T_test_readfmt       := $(CORE_OBJ) $(O)/tools/readfmt.o
 T_test_editmodes     := $(CORE_OBJ) $(O)/tools/diff.o $(O)/tools/fuzzy.o $(O)/tools/patch.o $(O)/tools/sloppy.o \
