@@ -272,7 +272,7 @@ struct ui_login {
     pthread_mutex_t mu;
     VEC(ditem_t) items;
     /* active input */
-    bool input_open, input_secret, input_is_code;
+    bool input_open, input_secret, input_is_code, manual_pending;
     sb_t input;
     char *pasted;           /* handed to the worker (code paste) */
     char *api_key;          /* entered key (api-key flow) */
@@ -418,7 +418,13 @@ static const json_t *find_provider(const char *id) {
 static void on_progress_cb(void *ud, const char *msg) {
     ui_login_t *l = ud;
     pthread_mutex_lock(&l->mu);
-    if (!l->closed) dpush(l, DI_TEXT, S(TUI_TC_DIM, msg));
+    if (!l->closed) {
+        dpush(l, DI_TEXT, S(TUI_TC_DIM, msg));
+        if (l->manual_pending) { /* onManualCodeInput starts after the first progress report */
+            l->manual_pending = false;
+            show_manual_input(l);
+        }
+    }
     pthread_mutex_unlock(&l->mu);
     request(l);
 }
@@ -428,7 +434,7 @@ static void on_auth_cb(void *ud, const char *url, const char *launch, const char
     pthread_mutex_lock(&l->mu);
     if (!l->closed) {
         show_auth(l, url, instructions, launch);
-        if (json_get_bool(find_provider(l->provider), "pasteCode", false)) show_manual_input(l);
+        l->manual_pending = json_get_bool(find_provider(l->provider), "pasteCode", false);
     }
     pthread_mutex_unlock(&l->mu);
     request(l);
@@ -540,7 +546,7 @@ void ui_login_render(ui_login_t *l, int width, strvec_t *out) {
             } else {
                 sb_append(&in, v);
             }
-            if (l->input_open) sb_append(&in, "\x1b[7m \x1b[27m");
+            if (l->input_open) sb_append(&in, TUI_CURSOR_MARKER); /* focused field: hardware cursor */
             strvec_push_own(&body, tui_truncate_to_width(sb_cstr(&in), inner, NULL));
             sb_free(&in);
         } else if (!*d->text) {

@@ -148,12 +148,14 @@ bool tui_ac_default_provider(void *ud, const char *line_before, bool first_line,
         size_t n = p->commands.n;
         double *score = xcalloc(n ? n : 1, sizeof *score);
         size_t *order = xcalloc(n ? n : 1, sizeof *order);
+        bool *desc_only = xcalloc(n ? n : 1, sizeof *desc_only);
         size_t m = 0;
         for (size_t i = 0; i < n; i++) {
             char *ln = str_lower(p->commands.v[i]), *ld = str_lower(p->descriptions.v[i]);
             double ns = ac_command_score(q, ln);
             double ds = *ld && ac_subsequence(q, ld) ? ac_subsequence_score(q, ld) * 0.5 : 0;
             double s = ns > ds ? ns : ds;
+            desc_only[i] = ns <= 0;
             free(ln);
             free(ld);
             if (s <= 0) continue;
@@ -176,6 +178,8 @@ bool tui_ac_default_provider(void *ud, const char *line_before, bool first_line,
             free(live);
             free(val);
         }
+        if (m) out->first_desc_match = desc_only[order[0]];
+        free(desc_only);
         free(score);
         free(order);
         free(q);
@@ -625,9 +629,12 @@ static void refresh_ac(tui_editor_t *ed, bool forced) {
     for (size_t i = 0; i < r.items.n; i++) {
         tui_select_list_add_item(ed->ac_list, r.items.v[i].value, r.items.v[i].label, r.items.v[i].description,
                                  r.items.v[i].icon, false);
-        if (prev_val && !strcmp(prev_val, r.items.v[i].value)) keep_sel = i;
+        /* upstream creates a fresh list per update: the selection restarts at the top for slash
+         * commands; other completions keep the previously selected value */
+        if (!r.slash && prev_val && !strcmp(prev_val, r.items.v[i].value)) keep_sel = i;
     }
     ed->ac_list->selected = keep_sel;
+    ed->ac_enter_accepts = !r.first_desc_match;
     ed->ac_prefix_len = r.prefix_len;
     free(prev_val);
     tui_ac_result_free(&r);
@@ -763,7 +770,10 @@ bool tui_editor_handle_key(tui_editor_t *ed, const tui_key_t *k) {
             tui_component_request_render(&ed->base);
             return true;
         }
-        if (tui_kb(k, "tui.input.tab") || tui_kb(k, "tui.input.submit")) {
+        if (tui_kb(k, "tui.input.submit") && !ed->ac_enter_accepts) {
+            /* the top suggestion only matched a description: Enter submits the typed text */
+            close_ac(ed);
+        } else if (tui_kb(k, "tui.input.tab") || tui_kb(k, "tui.input.submit")) {
             bool submit = tui_kb(k, "tui.input.submit");
             accept_ac(ed);
             /* like upstream: Enter on a slash-command completion runs the command */

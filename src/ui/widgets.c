@@ -93,9 +93,9 @@ char *ui_box_row(const char *content, int width) {
 
 char *ui_box_divider(int width) {
     sb_t r = SB_INIT, b = SB_INIT;
-    sb_append(&r, tui_sym("boxRound.teeRight"));
+    sb_append(&r, tui_sym("boxSharp.teeRight"));
     sb_repeat(&r, tui_sym("boxRound.horizontal"), MAX(0, width - 2));
-    sb_append(&r, tui_sym("boxRound.teeLeft"));
+    sb_append(&r, tui_sym("boxSharp.teeLeft"));
     paint(&b, sb_cstr(&r));
     sb_free(&r);
     return sb_detach(&b);

@@ -27,6 +27,7 @@ typedef struct {
     size_t prefix_len; /* bytes before the cursor (current line) replaced by an accepted value */
     VEC(tui_select_item_t) items;
     bool slash;        /* slash-command completions (popup uses the slash-command layout) */
+    bool first_desc_match; /* top item matched only by description: Enter submits the raw text */
 } tui_ac_result_t;
 
 void tui_ac_result_add(tui_ac_result_t *r, const char *value, const char *label, const char *description);
@@ -92,6 +93,7 @@ struct tui_editor {
     void *ac_ud;
     tui_select_list_t *ac_list; /* non-NULL while autocomplete is open */
     size_t ac_prefix_len;
+    bool ac_enter_accepts;
     int ac_max_visible;
 
     tui_editor_submit_fn on_submit;
