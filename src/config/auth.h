@@ -6,6 +6,7 @@
 #include "core/json.h"
 
 void auth_init(void);
+void auth_reload(void); /* re-read auth.json (another process may have changed it) */
 void auth_set_runtime_key(const char *provider, const char *key); /* --api-key override */
 /* Resolve a usable key/token for provider (refreshing OAuth if needed). Owned or NULL. */
 char *auth_get_api_key(const char *provider);

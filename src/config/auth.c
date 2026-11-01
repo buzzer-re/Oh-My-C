@@ -47,6 +47,21 @@ void auth_init(void) {
     pthread_mutex_unlock(&g_mu);
 }
 
+void auth_reload(void) {
+    pthread_mutex_lock(&g_mu);
+    load();
+    char *p = auth_path();
+    size_t n;
+    char *s = fs_read(p, &n);
+    json_t *j = s ? json_parse(s, n, NULL) : NULL;
+    json_free(g_store);
+    g_store = json_is_obj(j) ? j : json_obj();
+    if (!json_is_obj(j)) json_free(j);
+    free(s);
+    free(p);
+    pthread_mutex_unlock(&g_mu);
+}
+
 static int save(void) {
     char *p = auth_path();
     char *s = json_dump(g_store, 2);
