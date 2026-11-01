@@ -592,16 +592,18 @@ static int rewind_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *arg
 
 static void add_checkpoint_tools(app_t *a, agent_t *ag) {
     char *d1 = tool_prompt("checkpoint", NULL), *d2 = tool_prompt("rewind", NULL);
-    json_t *s1 = schema_obj();
-    schema_prop(s1, "goal", "string", "What the exploration should establish", true);
+    json_t *s1 = schema_lit("{\"type\":\"object\",\"properties\":{\"goal\":{\"type\":\"string\",\"description\":\"investigati"
+        "on goal\"}},\"required\":[\"goal\"],\"additionalProperties\":false}");
     agent_tool_t *t1 = agent_tool_new("checkpoint", "Checkpoint", d1, s1, checkpoint_execute);
     t1->ud = a;
     t1->exclusive = true;
-    json_t *s2 = schema_obj();
-    schema_prop(s2, "report", "string", "Concise findings to retain", true);
+    t1->intent_mode = INTENT_OMIT; /* checkpoint.ts derives its intent from the goal */
+    json_t *s2 = schema_lit("{\"type\":\"object\",\"properties\":{\"report\":{\"type\":\"string\",\"description\":\"investiga"
+        "tion findings\"}},\"required\":[\"report\"],\"additionalProperties\":false}");
     agent_tool_t *t2 = agent_tool_new("rewind", "Rewind", d2, s2, rewind_execute);
     t2->ud = a;
     t2->exclusive = true;
+    t2->intent_mode = INTENT_OMIT;
     agent_add_tool(ag, t1);
     agent_add_tool(ag, t2);
     free(d1);

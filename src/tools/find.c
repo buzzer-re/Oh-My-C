@@ -366,10 +366,10 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
 
 agent_tool_t *tool_find_new(tool_env_t *env) {
     char *desc = tool_prompt("find", NULL);
-    json_t *s = schema_obj();
-    schema_prop(s, "query", "string", "Plain-language description of the behavior or concept", true);
-    schema_prop_json(s, "grep_keywords", json_parse_str("{\"type\":\"array\",\"items\":{\"type\":\"string\"}}"), true);
-    schema_prop(s, "path", "string", "Directory or file to search (default: workspace root)", false);
+    json_t *s = schema_lit(
+        "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"grep_keywords\":{\"type\""
+        ":\"array\",\"items\":{\"type\":\"string\"}},\"path\":{\"type\":\"string\"}},\"required\":[\"quer"
+        "y\",\"grep_keywords\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("find", "Find", desc, s, find_execute);
     free(desc);
     t->ud = env;

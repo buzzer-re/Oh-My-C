@@ -839,31 +839,43 @@ static void dtool_destroy(agent_tool_t *t) { free(t->ud); }
 
 agent_tool_t *tool_debug_new(tool_env_t *env, dap_manager_t *m) {
     char *desc = tool_prompt("debug", NULL);
-    json_t *s = schema_obj();
-    json_t *act = json_obj();
-    json_set_str(act, "type", "string");
-    json_t *en = json_arr();
-    const char *acts[] = {"launch", "attach", "set_breakpoint", "remove_breakpoint", "set_instruction_breakpoint",
-                          "remove_instruction_breakpoint", "data_breakpoint_info", "set_data_breakpoint",
-                          "remove_data_breakpoint", "continue", "step_over", "step_in", "step_out", "pause", "evaluate",
-                          "stack_trace", "threads", "scopes", "variables", "disassemble", "read_memory", "write_memory",
-                          "modules", "loaded_sources", "custom_request", "output", "terminate", "sessions"};
-    for (size_t i = 0; i < ARRAY_LEN(acts); i++) json_push_str(en, acts[i]);
-    json_set(act, "enum", en);
-    schema_prop_json(s, "action", act, true);
-    schema_prop(s, "program", "string", "Target program path (launch)", false);
-    schema_prop_json(s, "args", json_parse_str("{\"type\":\"array\",\"items\":{\"type\":\"string\"}}"), false);
-    const char *strs[] = {"adapter", "cwd", "file", "function", "name", "condition", "hit_condition", "expression", "context",
-                          "memory_reference", "instruction_reference", "data", "data_id", "command", "host"};
-    for (size_t i = 0; i < ARRAY_LEN(strs); i++) schema_prop(s, strs[i], "string", NULL, false);
-    const char *nums[] = {"line", "frame_id", "scope_id", "variable_ref", "pid", "port", "levels", "instruction_count",
-                          "instruction_offset", "count", "offset", "start_module", "module_count", "timeout"};
-    for (size_t i = 0; i < ARRAY_LEN(nums); i++) schema_prop(s, nums[i], "number", NULL, false);
-    schema_prop_json(s, "access_type", json_parse_str("{\"type\":\"string\",\"enum\":[\"read\",\"write\",\"readWrite\"]}"), false);
-    schema_prop_json(s, "arguments", json_parse_str("{\"type\":\"object\"}"), false);
-    schema_prop(s, "resolve_symbols", "boolean", NULL, false);
-    schema_prop(s, "allow_partial", "boolean", NULL, false);
+    json_t *s = schema_lit(
+        "{\"type\":\"object\",\"properties\":{\"action\":{\"enum\":[\"launch\",\"attach\",\"set_breakpoin"
+        "t\",\"remove_breakpoint\",\"set_instruction_breakpoint\",\"remove_instruction_breakpoint\",\"dat"
+        "a_breakpoint_info\",\"set_data_breakpoint\",\"remove_data_breakpoint\",\"continue\",\"step_over\",\"step_in\",\"step_out\",\"pause\",\"evaluate\",\"stack_trace\",\"threads\",\"scopes\",\"varia"
+        "bles\",\"disassemble\",\"read_memory\",\"write_memory\",\"modules\",\"loaded_sources\",\"custom_"
+        "request\",\"output\",\"terminate\",\"sessions\"],\"type\":\"string\"},\"program\":{\"type\":\"st"
+        "ring\",\"description\":\"debug target path; Delve accepts Go package directories\"},\"args\":{\""
+        "type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"program arguments\"},\"adapte"
+        "r\":{\"type\":\"string\",\"description\":\"configured adapter id (gdb, lldb-dap, debugpy, dlv, r"
+        "dbg, or dap.json entry)\"},\"cwd\":{\"type\":\"string\"},\"file\":{\"type\":\"string\",\"descrip"
+        "tion\":\"source file\"},\"line\":{\"type\":\"number\",\"description\":\"source line\"},\"functio"
+        "n\":{\"type\":\"string\",\"description\":\"function name\"},\"name\":{\"type\":\"string\",\"desc"
+        "ription\":\"variable or data name\"},\"condition\":{\"type\":\"string\",\"description\":\"breakp"
+        "oint condition\"},\"hit_condition\":{\"type\":\"string\"},\"expression\":{\"type\":\"string\",\""
+        "description\":\"expression to evaluate\"},\"context\":{\"type\":\"string\",\"description\":\"eva"
+        "luate context: watch | repl | hover | variables | clipboard\"},\"frame_id\":{\"type\":\"number\""
+        "},\"scope_id\":{\"type\":\"number\",\"description\":\"scope variables reference\"},\"variable_re"
+        "f\":{\"type\":\"number\",\"description\":\"variable reference\"},\"pid\":{\"type\":\"number\",\""
+        "description\":\"process id for attach\"},\"port\":{\"type\":\"number\",\"description\":\"remote "
+        "attach port\"},\"host\":{\"type\":\"string\",\"description\":\"remote attach host\"},\"levels\":"
+        "{\"type\":\"number\",\"description\":\"max stack frames\"},\"memory_reference\":{\"type\":\"stri"
+        "ng\",\"description\":\"memory reference or address\"},\"instruction_reference\":{\"type\":\"stri"
+        "ng\"},\"instruction_count\":{\"type\":\"number\"},\"instruction_offset\":{\"type\":\"number\"},\"count\":{\"type\":\"number\",\"description\":\"bytes to read\"},\"data\":{\"type\":\"string\",\"description\":\"base64 memory payload\"},\"data_id\":{\"type\":\"string\",\"description\":\"dat"
+        "a breakpoint id\"},\"access_type\":{\"enum\":[\"read\",\"write\",\"readWrite\"],\"type\":\"strin"
+        "g\"},\"command\":{\"type\":\"string\",\"description\":\"custom dap request command\"},\"argument"
+        "s\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":true,\"description\":\"custo"
+        "m request arguments\"},\"offset\":{\"type\":\"number\"},\"resolve_symbols\":{\"type\":\"boolean\"},\"allow_partial\":{\"type\":\"boolean\"},\"start_module\":{\"type\":\"number\"},\"module_coun"
+        "t\":{\"type\":\"number\"},\"timeout\":{\"type\":\"number\",\"description\":\"per-request timeout"
+        " seconds\"}},\"required\":[\"action\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("debug", "Debug", desc, s, debug_execute);
+    t->examples = schema_lit(
+        "[{\"caption\":\"Launch and inspect hang\",\"note\":\"1. debug(action: \\\"launch\\\", program: \\\"./my_app\\\")\\n2. debug(action: \\\"set_breakpoint\\\", file: \\\"src/main.c\\\", line: 42)\\n3. debug(action: \\\"continue\\\")\\n4. If the program appears hung: debug(action: \\\"pause\\"
+        "\")\\n5. Inspect state with `threads`, `stack_trace`, `scopes`, and `variables`\"},{\"caption\":"
+        "\"Launch a Python script with debugpy\",\"call\":{\"action\":\"launch\",\"adapter\":\"debugpy\","
+        "\"program\":\"scripts/job.py\",\"args\":[\"--flag\"]}},{\"caption\":\"Raw debugger command throu"
+        "gh repl\",\"call\":{\"action\":\"evaluate\",\"expression\":\"info registers\",\"context\":\"repl"
+        "\"}}]");
     free(desc);
     dtool_t *dt = xcalloc(1, sizeof(*dt));
     dt->env = env;

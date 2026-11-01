@@ -548,13 +548,25 @@ static int astgrep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *ar
 }
 
 agent_tool_t *tool_ast_grep_new(tool_env_t *env) {
-    char *desc = tool_prompt("ast-grep", NULL);
-    json_t *s = schema_obj();
-    schema_prop(s, "pat", "string", "AST pattern ($X one node, $$$X zero-or-more, $_ unbound)", true);
-    schema_prop(s, "path", "string", "File, directory or glob; ';'-separated, '!glob' excludes", false);
-    schema_prop(s, "lang", "string", "Language override (e.g. cpp, ts, py)", false);
-    schema_prop(s, "skip", "number", "Match offset", false);
+    json_t *ctx = json_obj();
+    json_set_bool(ctx, "eagerDelegation", tools_eager_delegation(env));
+    json_set_bool(ctx, "scoutAvailable", tools_scout_available());
+    char *desc = tool_prompt("ast-grep", ctx);
+    json_free(ctx);
+    json_t *s = schema_lit(
+        "{\"type\":\"object\",\"properties\":{\"pat\":{\"type\":\"string\",\"description\":\"ast pattern\"},\"path\":{\"type\":\"string\",\"description\":\"file, directory, glob, or internal URL to sea"
+        "rch; pass several as a semicolon-delimited list (\\\"src; tests\\\"). Omitted -> searches the wo"
+        "rkspace root (\\\".\\\")\"},\"lang\":{\"type\":\"string\",\"description\":\"language override, e"
+        ".g. cpp for ambiguous .h files\"},\"skip\":{\"type\":\"number\",\"description\":\"matches to ski"
+        "p\"}},\"required\":[\"pat\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("ast_grep", "AST Grep", desc, s, astgrep_execute);
+    t->examples = schema_lit(
+        "[{\"caption\":\"Search TypeScript files under src\",\"call\":{\"pat\":\"console.log($$$)\",\"pat"
+        "h\":\"src/**/*.ts\"}},{\"caption\":\"Named imports from a specific package\",\"call\":{\"pat\":\"import { $$$IMPORTS } from \\\"react\\\"\",\"path\":\"src/**/*.ts\"}},{\"caption\":\"Arrow func"
+        "tions assigned to a const\",\"call\":{\"pat\":\"const $NAME = ($$$ARGS) => $BODY\",\"path\":\"sr"
+        "c/utils/**/*.ts\"}},{\"caption\":\"Method call on any object, ignoring method name with `$_`\",\"call\":{\"pat\":\"logger.$_($$$ARGS)\",\"path\":\"src/**/*.ts\"}},{\"caption\":\"Loosest existe"
+        "nce check for a symbol in one file\",\"call\":{\"pat\":\"processItems\",\"path\":\"src/worker.ts"
+        "\"}}]");
     free(desc);
     t->ud = env;
     return t;
@@ -764,13 +776,25 @@ char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_
 
 agent_tool_t *tool_ast_edit_new(tool_env_t *env) {
     char *desc = tool_prompt("ast-edit", NULL);
-    json_t *s = schema_obj();
-    schema_prop_json(s, "ops",
-                     json_parse_str("{\"type\":\"array\",\"minItems\":1,\"items\":{\"type\":\"object\",\"properties\":{"
-                                    "\"pat\":{\"type\":\"string\"},\"out\":{\"type\":\"string\"}},\"required\":[\"pat\",\"out\"]}}"),
-                     true);
-    schema_prop_json(s, "paths", json_parse_str("{\"type\":\"array\",\"minItems\":1,\"items\":{\"type\":\"string\"}}"), true);
+    json_t *s = schema_lit(
+        "{\"type\":\"object\",\"properties\":{\"ops\":{\"type\":\"array\",\"items\":{\"type\":\"object\","
+        "\"properties\":{\"pat\":{\"type\":\"string\",\"description\":\"ast pattern\"},\"out\":{\"type\":"
+        "\"string\",\"description\":\"replacement template\"}},\"required\":[\"pat\",\"out\"],\"additiona"
+        "lProperties\":false},\"minItems\":1,\"description\":\"rewrite ops\"},\"paths\":{\"type\":\"array"
+        "\",\"items\":{\"type\":\"string\",\"description\":\"file, directory, glob, or internal URL to re"
+        "write\"},\"minItems\":1,\"description\":\"files, directories, globs, or internal URLs to rewrite"
+        "\"}},\"required\":[\"ops\",\"paths\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("ast_edit", "AST Edit", desc, s, astedit_execute);
+    t->examples = schema_lit(
+        "[{\"caption\":\"Rename a call site across TypeScript files\",\"call\":{\"ops\":[{\"pat\":\"oldAp"
+        "i($$$ARGS)\",\"out\":\"newApi($$$ARGS)\"}],\"paths\":[\"src/**/*.ts\"]}},{\"caption\":\"Delete m"
+        "atching calls\",\"call\":{\"ops\":[{\"pat\":\"console.log($$$ARGS)\",\"out\":\"\"}],\"paths\":[\"src/**/*.ts\"]}},{\"caption\":\"Rewrite import source path\",\"call\":{\"ops\":[{\"pat\":\"impo"
+        "rt { $$$IMPORTS } from \\\"old-package\\\"\",\"out\":\"import { $$$IMPORTS } from \\\"new-packag"
+        "e\\\"\"}],\"paths\":[\"src/**/*.ts\"]}},{\"caption\":\"Modernize to optional chaining (same meta"
+        "variable enforces identity)\",\"call\":{\"ops\":[{\"pat\":\"$A && $A()\",\"out\":\"$A?.()\"}],\""
+        "paths\":[\"src/**/*.ts\"]}},{\"caption\":\"Swap two arguments using captures\",\"call\":{\"ops\""
+        ":[{\"pat\":\"assertEqual($A, $B)\",\"out\":\"assertEqual($B, $A)\"}],\"paths\":[\"tests/**/*.ts\"]}},{\"caption\":\"Python — convert print calls to logging\",\"call\":{\"ops\":[{\"pat\":\"prin"
+        "t($$$ARGS)\",\"out\":\"logger.info($$$ARGS)\"}],\"paths\":[\"src/**/*.py\"]}}]");
     free(desc);
     t->ud = env;
     t->exclusive = true;
