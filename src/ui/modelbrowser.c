@@ -11,7 +11,9 @@
 #include "tui/symbols.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <math.h>
+#include <strings.h>
 
 #define LIST_ROW_START 2
 #define DETAIL_ROWS 3
@@ -77,8 +79,14 @@ static char *cost_pair(const ai_model_t *m) {
     return r;
 }
 
+/* a catalog row whose contextWindow is null (unknown): no context cell, like omp */
+static bool null_window(const ai_model_t *m) {
+    json_t *cw = m->raw ? json_get(m->raw, "contextWindow") : NULL;
+    return cw && cw->type == JSON_NULL;
+}
+
 static char *context_cell(const ai_model_t *m) {
-    if (m->context_window <= 0) return xstrdup("");
+    if (m->context_window <= 0 || null_window(m)) return xstrdup("");
     char *n = lower_num((double)m->context_window);
     char *icon = xstrdup(tui_sym("icon.context"));
     size_t il = strlen(icon);
@@ -89,6 +97,21 @@ static char *context_cell(const ai_model_t *m) {
     return r;
 }
 
+/* brain-icon intelligence score delivered with the catalog (raw "int") */
+static char *intelligence_cell(const ai_model_t *m) {
+    json_t *v = m && m->raw ? json_get(m->raw, "int") : NULL;
+    if (!json_is_num(v) || !isfinite(v->u.num.d)) return xstrdup("");
+    return xasprintf("%s %.0f", tui_sym("icon.intelligence"), round(v->u.num.d));
+}
+
+/* metaColumnsWidth */
+static int meta_width(const int *w) {
+    int total = 0, count = 0;
+    for (int i = 0; i < 4; i++)
+        if (w[i] > 0) total += w[i], count++;
+    return count ? total + 2 * (count - 1) : 0;
+}
+
 static char *pad_left(const char *s, int w) {
     int miss = w - tui_visible_width(s);
     return miss > 0 ? xasprintf("%*s%s", miss, "", s) : xstrdup(s);
@@ -97,6 +120,7 @@ static char *pad_left(const char *s, int w) {
 ui_model_browser_t *ui_model_browser_new(void) {
     ui_model_browser_t *b = xcalloc(1, sizeof *b);
     b->max_visible = 10;
+    b->hovered = -1;
     b->focused = true;
     b->show_provider = true;
     return b;
@@ -109,12 +133,26 @@ void ui_model_browser_free(ui_model_browser_t *b) {
     vec_free(&b->visible);
     free(b->query);
     free(b->current);
+    for (size_t i = 0; i < b->nroles; i++) {
+        free(b->roles[i].role);
+        free(b->roles[i].label);
+    }
+    free(b->roles);
+    strvec_free(&b->mru);
+    free(b->empty_text);
     free(b);
 }
 
 void ui_model_browser_add(ui_model_browser_t *b, const ai_model_t *m) {
     ui_model_item_t it = {m, xasprintf("%s/%s", m->provider, m->id)};
     vec_push(&b->items, it);
+}
+
+static bool recent_or_role(const ui_model_browser_t *b, const ui_model_item_t *it) {
+    if (strvec_contains(&b->mru, it->selector)) return true;
+    for (size_t i = 0; i < b->nroles; i++)
+        if (b->roles[i].model == it->model) return true;
+    return false;
 }
 
 static void refilter(ui_model_browser_t *b, const char *keep) {
@@ -125,14 +163,22 @@ static void refilter(ui_model_browser_t *b, const char *keep) {
         texts[i] = is_free(b->items.v[i].model) ? xasprintf("%s free", b->items.v[i].selector) : xstrdup(b->items.v[i].selector);
     size_t *idx = xmalloc((n ? n : 1) * sizeof *idx);
     size_t m = tui_fuzzy_rank(b->query ? b->query : "", (const char *const *)texts, n, idx);
-    for (size_t i = 0; i < m; i++) vec_push(&b->visible, idx[i]);
+    /* #insertSeparator: a rule after the leading recent/role-assigned rows */
+    size_t first_other = m;
+    if (b->hub)
+        for (size_t i = 0; i < m && first_other == m; i++)
+            if (!recent_or_role(b, &b->items.v[idx[i]])) first_other = i;
+    for (size_t i = 0; i < m; i++) {
+        if (i == first_other && i > 0) vec_push(&b->visible, UI_MB_SEPARATOR);
+        vec_push(&b->visible, idx[i]);
+    }
     free(idx);
     for (size_t i = 0; i < n; i++) free(texts[i]);
     free(texts);
     b->selected = 0;
     if (keep)
         for (size_t i = 0; i < b->visible.n; i++)
-            if (!strcmp(b->items.v[b->visible.v[i]].selector, keep)) b->selected = i;
+            if (b->visible.v[i] != UI_MB_SEPARATOR && !strcmp(b->items.v[b->visible.v[i]].selector, keep)) b->selected = i;
 }
 
 static void ensure_visible(ui_model_browser_t *b) {
@@ -157,8 +203,38 @@ void ui_model_browser_set_current(ui_model_browser_t *b, const char *selector) {
     free(b->current);
     b->current = selector ? xstrdup(selector) : NULL;
     for (size_t i = 0; i < b->visible.n; i++)
-        if (str_eq(b->items.v[b->visible.v[i]].selector, selector)) b->selected = i;
+        if (b->visible.v[i] != UI_MB_SEPARATOR && str_eq(b->items.v[b->visible.v[i]].selector, selector)) b->selected = i;
     ensure_visible(b);
+}
+
+bool ui_model_browser_select(ui_model_browser_t *b, const char *selector) {
+    for (size_t i = 0; selector && i < b->visible.n; i++)
+        if (b->visible.v[i] != UI_MB_SEPARATOR && !strcmp(b->items.v[b->visible.v[i]].selector, selector)) {
+            b->selected = i;
+            ensure_visible(b);
+            return true;
+        }
+    return false;
+}
+
+void ui_model_browser_set_query(ui_model_browser_t *b, const char *q) {
+    free(b->query);
+    b->query = q && *q ? xstrdup(q) : NULL;
+    refilter(b, NULL);
+    b->window = 0;
+    ensure_visible(b);
+}
+
+void ui_model_browser_set_roles(ui_model_browser_t *b, const ui_role_assign_t *roles, size_t n, const strvec_t *mru) {
+    b->hub = true;
+    b->roles = xcalloc(n ? n : 1, sizeof *b->roles);
+    b->nroles = n;
+    for (size_t i = 0; i < n; i++) {
+        b->roles[i] = roles[i];
+        b->roles[i].role = xstrdup(roles[i].role);
+        b->roles[i].label = xstrdup(roles[i].label);
+    }
+    for (size_t i = 0; mru && i < mru->n; i++) strvec_push(&b->mru, mru->v[i]);
 }
 
 void ui_model_browser_set_max_visible(ui_model_browser_t *b, int rows) {
@@ -167,7 +243,7 @@ void ui_model_browser_set_max_visible(ui_model_browser_t *b, int rows) {
 }
 
 const ui_model_item_t *ui_model_browser_selected(const ui_model_browser_t *b) {
-    if (!b->visible.n || b->selected >= b->visible.n) return NULL;
+    if (!b->visible.n || b->selected >= b->visible.n || b->visible.v[b->selected] == UI_MB_SEPARATOR) return NULL;
     return &b->items.v[b->visible.v[b->selected]];
 }
 
@@ -177,6 +253,13 @@ static void move_sel(ui_model_browser_t *b, int delta, bool wrap) {
     long s = (long)b->selected + delta;
     if (wrap && (delta == 1 || delta == -1)) s = (s % n + n) % n;
     else s = s < 0 ? 0 : s >= n ? n - 1 : s;
+    if (b->visible.v[s] == UI_MB_SEPARATOR) { /* disabled row: keep moving the same way */
+        long d = delta < 0 ? -1 : 1;
+        long t = s + d;
+        if (wrap) t = (t % n + n) % n;
+        if (t < 0 || t >= n) t = s - d;
+        if (t >= 0 && t < n) s = t;
+    }
     b->selected = (size_t)s;
     ensure_visible(b);
 }
@@ -256,7 +339,10 @@ static void detail_lines(const ui_model_browser_t *b, int width, strvec_t *out) 
     const ai_model_t *m = sel->model;
     strvec_t facts = {0};
     strvec_push(&facts, m->name && *m->name ? m->name : m->id);
-    if (m->context_window > 0) {
+    if (json_get_bool(m->raw, "isNew", false)) strvec_push(&facts, "new");
+    if (json_get_bool(m->raw, "isBeta", false)) strvec_push(&facts, "beta");
+    if (json_get_bool(m->raw, "isRecommended", false)) strvec_push(&facts, "recommended");
+    if (m->context_window > 0 && !null_window(m)) {
         char *n = lower_num((double)m->context_window);
         strvec_push_own(&facts, xasprintf("%s ctx", n));
         free(n);
@@ -271,6 +357,44 @@ static void detail_lines(const ui_model_browser_t *b, int width, strvec_t *out) 
     free(cp);
     if (m->reasoning) strvec_push(&facts, "reasoning");
     if (m->input_image) strvec_push(&facts, "vision");
+    char *iq = intelligence_cell(m);
+    if (*iq) strvec_push(&facts, iq);
+    free(iq);
+    {
+        char *key = xasprintf("%s/%s", m->provider, m->id);
+        double tps, ttft;
+        if (model_perf_get(key, &tps, &ttft, NULL)) {
+            strvec_push_own(&facts, tps >= 10 ? xasprintf("~%.0ft/s", round(tps)) : xasprintf("~%.1ft/s", tps));
+            if (ttft >= 0)
+                strvec_push_own(&facts, ttft >= 10000 ? xasprintf("%.0fs ttft", round(ttft / 1000)) : xasprintf("%.1fs ttft", ttft / 1000));
+        } else {
+            json_t *ct = json_get(m->raw, "tps");
+            if (json_is_num(ct) && ct->u.num.d > 0 && isfinite(ct->u.num.d))
+                strvec_push_own(&facts, ct->u.num.d >= 10 ? xasprintf("~%.0ft/s", round(ct->u.num.d)) : xasprintf("~%.1ft/s", ct->u.num.d));
+        }
+        free(key);
+    }
+    {
+        const char *desc = json_get_str(m->raw, "description");
+        if (desc && *desc) {
+            sb_t d = SB_INIT;
+            bool nl = false;
+            for (const char *c = desc; *c; c++) {
+                if (*c == '\r' || *c == '\n') {
+                    if (!nl) sb_putc(&d, ' ');
+                    nl = true;
+                    continue;
+                }
+                nl = false;
+                if (*c == '\t') sb_append(&d, "   ");
+                else sb_putc(&d, *c);
+            }
+            char *t = str_trim(sb_cstr(&d));
+            if (*t) strvec_push(&facts, t);
+            free(t);
+            sb_free(&d);
+        }
+    }
     char *joined = strvec_join(&facts, " \xc2\xb7 ");
     char *l1 = xasprintf("  %s", joined);
     char *l1s = tui_fgs(NULL, TUI_TC_MUTED, l1);
@@ -286,8 +410,28 @@ static void detail_lines(const ui_model_browser_t *b, int width, strvec_t *out) 
         strvec_push_own(&chips, tui_fgs(NULL, TUI_TC_SUCCESS, c));
         free(c);
     }
+    /* hub: formatRoleChip for every assignment holding this model (MODEL_ROLE_IDS order, then custom) */
+    for (size_t i = 0; b->hub && i < b->nroles; i++) {
+        const ui_role_assign_t *ra = &b->roles[i];
+        if (ra->model != m || ra->hidden) continue;
+        char *glyph = thinking_glyph(ra->level);
+        char *suffix = NULL;
+        if (*glyph) {
+            char *g = xasprintf(" %s", glyph);
+            suffix = tui_fgs(NULL, TUI_TC_DIM, g);
+            free(g);
+        } else
+            suffix = xstrdup("");
+        char *body = xasprintf("%s %s", tui_sym(ra->auto_selected ? "status.shadowed" : "status.enabled"), ra->label);
+        char *styled = tui_fgs(NULL, ra->auto_selected ? TUI_TC_DIM : (tui_tc_t)ra->color, body);
+        strvec_push_own(&chips, xasprintf("%s%s", styled, suffix));
+        free(styled);
+        free(body);
+        free(suffix);
+        free(glyph);
+    }
     /* every role resolves to this model when it is the only candidate; configured roles show solid */
-    for (size_t i = 0; i < ARRAY_LEN(CHIP_ROLES); i++) {
+    for (size_t i = 0; !b->hub && i < ARRAY_LEN(CHIP_ROLES); i++) {
         const char *role = CHIP_ROLES[i];
         if (!strcmp(role, "vision") && !m->input_image) continue;
         char *path = xasprintf("modelRoles.%s", role);
@@ -345,29 +489,48 @@ void ui_model_browser_render(const ui_model_browser_t *b, int width, strvec_t *o
     int total = (int)b->visible.n;
     int start = b->window, end = MIN(start + b->max_visible, total);
     if (total == 0) {
-        const char *msg = b->query && *b->query ? "  No matching models" : "  No models available in this scope";
+        const char *msg = b->empty_text ? b->empty_text : b->query && *b->query ? "  No matching models" : "  No models available in this scope";
         char *m = tui_fgs(NULL, TUI_TC_MUTED, msg);
         strvec_push_own(out, tui_truncate_to_width(m, width, NULL));
         free(m);
         for (int i = 1; i < b->max_visible; i++) strvec_push(out, "");
     } else {
-        int ctx_w = 0, cost_w = 0;
+        int ctx_w = 0, cost_w = 0, int_w = 0, perf_w = 0;
+        /* perf / intelligence columns: hub browsers (the setup wizard's has no perf data to show) */
+        int perf_mode = width >= PERF_FULL_MIN_WIDTH ? 2 : width >= PERF_TPS_MIN_WIDTH ? 1 : 0;
+        ((ui_model_browser_t *)b)->window_count = MAX(0, end - start);
         for (int i = start; i < end; i++) {
+            if (b->visible.v[i] == UI_MB_SEPARATOR) continue;
             const ai_model_t *m = b->items.v[b->visible.v[i]].model;
             char *c = context_cell(m), *p = cost_pair(m);
             ctx_w = MAX(ctx_w, tui_visible_width(c));
             cost_w = MAX(cost_w, tui_visible_width(p));
             free(c);
             free(p);
+            if (perf_mode) {
+                char *iq = intelligence_cell(m), *pc = model_perf_cell(m, perf_mode == 2);
+                int_w = MAX(int_w, tui_visible_width(iq));
+                perf_w = MAX(perf_w, tui_visible_width(pc));
+                free(iq);
+                free(pc);
+            }
         }
-        int meta = (ctx_w ? ctx_w : 0) + (cost_w ? cost_w : 0) + (ctx_w && cost_w ? 2 : 0);
-        if (width - 2 - meta < MIN_NAME_WIDTH) cost_w = 0;
-        meta = ctx_w + cost_w + (ctx_w && cost_w ? 2 : 0);
-        if (width - 2 - meta < MIN_NAME_WIDTH) ctx_w = 0;
-        meta = ctx_w + cost_w + (ctx_w && cost_w ? 2 : 0);
+        int cols_w[4] = {int_w, perf_w, ctx_w, cost_w};
+        if (width - 2 - meta_width(cols_w) < MIN_NAME_WIDTH) cost_w = cols_w[3] = 0;
+        if (width - 2 - meta_width(cols_w) < MIN_NAME_WIDTH) ctx_w = cols_w[2] = 0;
+        int meta = meta_width(cols_w);
         strvec_t rows = {0};
         int rw = width - 1;
         for (int i = start; i < end; i++) {
+            if (b->visible.v[i] == UI_MB_SEPARATOR) {
+                sb_t d = SB_INIT;
+                sb_repeat(&d, "\xe2\x94\x80", MAX(0, rw - 4));
+                char *dl = tui_fgs(NULL, TUI_TC_MUTED, sb_cstr(&d));
+                strvec_push_own(&rows, xasprintf("  %s  ", dl));
+                free(dl);
+                sb_free(&d);
+                continue;
+            }
             const ui_model_item_t *it = &b->items.v[b->visible.v[i]];
             bool sel = (size_t)i == b->selected;
             sb_t l = SB_INIT;
@@ -388,7 +551,7 @@ void ui_model_browser_render(const ui_model_browser_t *b, int width, strvec_t *o
                 sb_putc(&l, ' ');
                 tui_fg(&l, NULL, TUI_TC_SUCCESS, tui_sym("status.enabled"));
             }
-            int ncols = (ctx_w > 0) + (cost_w > 0);
+            int ncols = (int_w > 0) + (perf_w > 0) + (ctx_w > 0) + (cost_w > 0);
             int avail = MAX(1, rw - meta - (ncols ? 1 : 0));
             char *left = tui_truncate_to_width(sb_cstr(&l), avail, NULL);
             sb_free(&l);
@@ -399,7 +562,23 @@ void ui_model_browser_render(const ui_model_browser_t *b, int width, strvec_t *o
             if (ncols) {
                 sb_putc(&line, ' ');
                 bool first = true;
+                if (int_w) {
+                    char *c = intelligence_cell(it->model), *pc = pad_left(c, int_w);
+                    tui_fg(&line, NULL, TUI_TC_DIM, pc);
+                    free(pc);
+                    free(c);
+                    first = false;
+                }
+                if (perf_w) {
+                    if (!first) sb_append(&line, "  ");
+                    char *c = model_perf_cell(it->model, perf_mode == 2), *pc = pad_left(c, perf_w);
+                    tui_fg(&line, NULL, TUI_TC_DIM, pc);
+                    free(pc);
+                    free(c);
+                    first = false;
+                }
                 if (ctx_w) {
+                    if (!first) sb_append(&line, "  ");
                     char *c = context_cell(it->model), *pc = pad_left(c, ctx_w);
                     tui_fg(&line, NULL, TUI_TC_DIM, pc);
                     free(pc);
@@ -413,6 +592,12 @@ void ui_model_browser_render(const ui_model_browser_t *b, int width, strvec_t *o
                     free(pc);
                     free(c);
                 }
+            }
+            if (i == b->hovered) {
+                char *band = tui_bgs(NULL, TUI_TC_SELECTED_BG, sb_cstr(&line));
+                sb_clear(&line);
+                sb_append(&line, band);
+                free(band);
             }
             strvec_push_own(&rows, sb_detach(&line));
         }
@@ -456,4 +641,137 @@ void ui_model_browser_load_available(ui_model_browser_t *b) {
         ui_model_browser_add(b, m);
     }
     ui_model_browser_done_adding(b);
+}
+
+int ui_model_browser_mouse(ui_model_browser_t *b, int line, int wheel, bool motion, bool click) {
+    int list_line = line - LIST_ROW_START;
+    int idx = list_line >= 0 && list_line < b->window_count ? b->window + list_line : -1;
+    if (idx >= (int)b->visible.n || (idx >= 0 && b->visible.v[idx] == UI_MB_SEPARATOR)) idx = -1;
+    if (wheel) {
+        int maxoff = MAX(0, (int)b->visible.n - b->max_visible);
+        b->window = MAX(0, MIN(maxoff, b->window + wheel));
+        list_line = line - LIST_ROW_START;
+        idx = list_line >= 0 && list_line < b->window_count ? b->window + list_line : -1;
+        if (idx >= (int)b->visible.n || (idx >= 0 && b->visible.v[idx] == UI_MB_SEPARATOR)) idx = -1;
+        b->hovered = idx;
+        return UI_MB_HANDLED;
+    }
+    if (motion) {
+        b->hovered = idx;
+        return UI_MB_HANDLED;
+    }
+    if (!click || idx < 0) return UI_MB_IGNORED;
+    if ((size_t)idx == b->selected) return UI_MB_ACTIVATE;
+    b->selected = (size_t)idx;
+    ensure_visible(b);
+    return UI_MB_HANDLED;
+}
+
+/* extractVersionNumber */
+static double version_number(const char *id) {
+    size_t n = strlen(id);
+    for (size_t i = 0; i < n; i++) { /* (?:^|[-_])(\d+\.\d+) */
+        if (i && id[i - 1] != '-' && id[i - 1] != '_') continue;
+        size_t j = i;
+        while (j < n && isdigit((unsigned char)id[j])) j++;
+        if (j > i && id[j] == '.' && isdigit((unsigned char)id[j + 1])) return strtod(id + i, NULL);
+    }
+    for (size_t i = 0; i < n; i++) { /* (?:^|[-_])(\d{1,2})-(\d{1,2})(?=-|$) */
+        if (i && id[i - 1] != '-' && id[i - 1] != '_') continue;
+        size_t j = i;
+        while (j < n && isdigit((unsigned char)id[j])) j++;
+        if (j == i || j - i > 2 || id[j] != '-') continue;
+        size_t k = j + 1;
+        while (k < n && isdigit((unsigned char)id[k])) k++;
+        if (k == j + 1 || k - j - 1 > 2 || (id[k] && id[k] != '-')) continue;
+        char buf[16];
+        snprintf(buf, sizeof buf, "%.*s.%.*s", (int)(j - i), id + i, (int)(k - j - 1), id + j + 1);
+        return strtod(buf, NULL);
+    }
+    for (size_t i = 0; i < n; i++) { /* (?:^|[-_])(\d+) */
+        if (i && id[i - 1] != '-' && id[i - 1] != '_') continue;
+        if (isdigit((unsigned char)id[i])) return strtod(id + i, NULL);
+    }
+    return 0;
+}
+
+static const char *date_suffix(const char *id) {
+    size_t n = strlen(id);
+    if (n < 9 || id[n - 9] != '-') return "";
+    for (size_t i = n - 8; i < n; i++)
+        if (!isdigit((unsigned char)id[i])) return "";
+    return id + n - 8;
+}
+
+static const ui_role_assign_t *g_sort_roles;
+static size_t g_sort_nroles;
+static const strvec_t *g_sort_mru;
+
+static int role_rank(const ai_model_t *m) {
+    static const char *const IDS[] = {"default", "smol", "slow", "vision", "plan", "commit", "tiny", "memory",
+                                      "task",    "advisor", "widget", "image", "web", "speech", "dictation", "judge"};
+    size_t i = 0;
+    for (; i < ARRAY_LEN(IDS); i++) {
+        for (size_t k = 0; k < g_sort_nroles; k++)
+            if (!strcmp(g_sort_roles[k].role, IDS[i]) && g_sort_roles[k].model == m) return (int)i;
+    }
+    return (int)i;
+}
+
+static long mru_index(const ai_model_t *m) {
+    char *k = xasprintf("%s/%s", m->provider, m->id);
+    long r = LONG_MAX;
+    for (size_t i = 0; g_sort_mru && i < g_sort_mru->n; i++)
+        if (!strcmp(g_sort_mru->v[i], k)) {
+            r = (long)i;
+            break;
+        }
+    free(k);
+    return r;
+}
+
+/* String.localeCompare approximation: case-insensitive first, then lowercase before uppercase */
+static int locale_cmp(const char *a, const char *b) {
+    int c = strcasecmp(a, b);
+    if (c) return c;
+    return -strcmp(a, b);
+}
+
+static int item_cmp(const void *pa, const void *pb) {
+    const ai_model_t *a = *(const ai_model_t *const *)pa, *b = *(const ai_model_t *const *)pb;
+    int ra = role_rank(a), rb = role_rank(b);
+    if (ra != rb) return ra - rb;
+    long ma = mru_index(a), mb = mru_index(b);
+    if (ma != mb) return ma < mb ? -1 : 1;
+    int pc = locale_cmp(a->provider, b->provider);
+    if (pc) return pc;
+    double pa_ = json_get_num(a->raw, "priority", 9007199254740991.0), pb_ = json_get_num(b->raw, "priority", 9007199254740991.0);
+    if (pa_ != pb_) return pa_ < pb_ ? -1 : 1;
+    double va = version_number(a->id), vb = version_number(b->id);
+    if (va != vb) return vb < va ? -1 : 1;
+    bool la = str_ends(a->id, "-latest"), lb = str_ends(b->id, "-latest");
+    const char *da = date_suffix(a->id), *db = date_suffix(b->id);
+    bool ra_ = la || *da, rb_ = lb || *db;
+    if (ra_ != rb_) return ra_ ? -1 : 1;
+    if (!ra_) return locale_cmp(a->id, b->id);
+    if (la != lb) return la ? -1 : 1;
+    if (*da && *db) return strcmp(db, da);
+    return locale_cmp(a->id, b->id);
+}
+
+void ui_model_sort_items(const ai_model_t **models, size_t n, const ui_role_assign_t *roles, size_t nroles,
+                         const strvec_t *mru) {
+    g_sort_roles = roles;
+    g_sort_nroles = nroles;
+    g_sort_mru = mru;
+    /* stable: insertion order breaks remaining ties */
+    for (size_t i = 1; i < n; i++) {
+        const ai_model_t *x = models[i];
+        size_t j = i;
+        while (j > 0 && item_cmp(&models[j - 1], &x) > 0) {
+            models[j] = models[j - 1];
+            j--;
+        }
+        models[j] = x;
+    }
 }

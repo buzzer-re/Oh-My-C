@@ -118,7 +118,7 @@ void app_set_thinking(app_t *a, ai_effort_t e);
 void app_set_plan_mode(app_t *a, bool on);
 void app_rebuild_system_prompt(app_t *a);
 /* token count at which context maintenance triggers for a window (omp compaction.threshold* semantics) */
-int64_t app_compaction_threshold(int64_t window);
+int64_t app_compaction_threshold(const ai_model_t *m, int64_t window); /* with compaction.modelThresholds */
 int app_compact(app_t *a, const char *instructions, char **err);
 int app_new_session(app_t *a);
 /* user `!cmd` / RPC bash: run, record a bashExecution message (session + context unless exclude); owned message

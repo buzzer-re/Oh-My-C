@@ -13,6 +13,7 @@
 
 #include "config/auth.h"
 #include "config/settings.h"
+#include "config/compaction_point.h"
 #include "config/model_resolver.h"
 #include "core/fs.h"
 #include "core/proc.h"
@@ -1800,22 +1801,13 @@ out:
 
 /* omp's context-maintenance trigger: thresholdTokens (>0) overrides thresholdPercent (>0); both -1 =
  * legacy reserve-based budget (window - max(15% of window, reserveTokens)) */
-int64_t app_compaction_threshold(int64_t window) {
-    if (window <= 0) return 0;
-    int64_t reserve = MAX((int64_t)floor((double)window * 0.15), settings_int("compaction.reserveTokens", 16384));
-    if (reserve >= window) reserve = MAX(1, (int64_t)floor((double)window * 0.15));
-    int64_t budget = MAX(0, MIN(window - 1, window - reserve));
-    int64_t abs_t = settings_int("compaction.thresholdTokens", -1);
-    if (abs_t > 0) return abs_t >= window ? budget : MIN(window - 1, abs_t);
-    double p = settings_num("compaction.thresholdPercent", -1);
-    return p > 0 ? MIN(budget, (int64_t)floor((double)window * MIN(99.0, MAX(1.0, p)) / 100)) : budget;
-}
+int64_t app_compaction_threshold(const ai_model_t *m, int64_t window) { return cp_model_threshold(m, window); }
 
 static void maybe_auto_compact(app_t *a) {
     if (!settings_bool("compaction.enabled", true) || !a->model) return;
     int64_t window = a->model->context_window;
     if (window <= 0) return;
-    int64_t thresh = app_compaction_threshold(window);
+    int64_t thresh = app_compaction_threshold(a->model, window);
     if (thresh <= 0 || a->last_context_tokens < thresh) return;
     char *err = NULL;
     if (app_compact(a, NULL, &err) != 0) {

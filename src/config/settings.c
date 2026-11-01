@@ -39,6 +39,7 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static json_t *g_defaults, *g_global, *g_project, *g_overlay, *g_runtime, *g_effective;
 static char *g_global_path;
 static char *g_project_dir;
+static char *g_cwd;
 
 extern json_t *yaml_parse_file_json(const char *path, char **err) __attribute__((weak));
 extern char *yaml_dump(const json_t *j) __attribute__((weak));
@@ -69,9 +70,18 @@ static json_t *load_file(const char *path) {
 static void rebuild(void) {
     json_free(g_effective);
     g_effective = json_clone(g_defaults);
-    json_t *layers[] = {g_global, g_project, g_overlay, g_runtime};
+    /* projectLayerForMerge: a cleared (null) project model role falls back to the global one */
+    json_t *project = g_project ? json_clone(g_project) : NULL;
+    json_t *proles = json_get_obj(project, "modelRoles");
+    for (size_t i = 0; proles && i < proles->u.obj.n;) {
+        json_t *v = proles->u.obj.vals[i];
+        if (!json_is_str(v) && !json_is_arr(v)) json_del(proles, proles->u.obj.keys[i]);
+        else i++;
+    }
+    json_t *layers[] = {g_global, project, g_overlay, g_runtime};
     for (size_t i = 0; i < ARRAY_LEN(layers); i++)
         if (layers[i]) json_merge(g_effective, layers[i]);
+    json_free(project);
 }
 
 void settings_init(const char *cwd, const strvec_t *overlay_files) {
@@ -101,6 +111,8 @@ void settings_init(const char *cwd, const strvec_t *overlay_files) {
     free(g_project_dir);
     g_project_dir = NULL;
     char *c = cwd ? xstrdup(cwd) : get_cwd();
+    free(g_cwd);
+    g_cwd = xstrdup(c);
     const char *pdirs[] = {".omc", ".omp"};
     for (size_t i = 0; i < ARRAY_LEN(pdirs) && !g_project_dir; i++) {
         char *d = path_join(c, pdirs[i]);
@@ -260,4 +272,86 @@ const char *settings_global_path(void) {
 const char *settings_project_dir(void) {
     ensure();
     return g_project_dir;
+}
+
+/* the json object at a dotted parent path inside `root`, created on demand */
+static json_t *parent_obj(json_t *root, const char *parent, bool create) {
+    strvec_t parts = str_split(parent, ".");
+    json_t *cur = root;
+    for (size_t i = 0; cur && i < parts.n; i++) {
+        json_t *next = json_get(cur, parts.v[i]);
+        if (!json_is_obj(next)) {
+            if (!create) {
+                cur = NULL;
+                break;
+            }
+            next = json_obj();
+            json_set(cur, parts.v[i], next);
+        }
+        cur = next;
+    }
+    strvec_free(&parts);
+    return cur;
+}
+
+int settings_set_global_entry(const char *parent, const char *key, json_t *val) {
+    ensure();
+    pthread_mutex_lock(&g_mu);
+    if (val) json_set(parent_obj(g_global, parent, true), key, val);
+    else {
+        json_t *o = parent_obj(g_global, parent, false);
+        if (!o || !json_get(o, key)) {
+            pthread_mutex_unlock(&g_mu);
+            return 0;
+        }
+        json_del(o, key);
+    }
+    rebuild();
+    int rc = save_global();
+    pthread_mutex_unlock(&g_mu);
+    return rc;
+}
+
+json_t *settings_project(void) {
+    ensure();
+    return g_project;
+}
+
+char *settings_project_config_path(void) {
+    ensure();
+    if (g_project_dir) return path_join(g_project_dir, "config.yml");
+    char *d = path_join(g_cwd ? g_cwd : ".", ".omc");
+    char *p = path_join(d, "config.yml");
+    free(d);
+    return p;
+}
+
+/* omp #saveProjectNow: re-read the project config.yml, set this one entry, write it back */
+int settings_set_project_entry(const char *parent, const char *key, json_t *val) {
+    ensure();
+    pthread_mutex_lock(&g_mu);
+    char *path = settings_project_config_path();
+    json_t *file = load_file(path);
+    if (!file) file = json_obj();
+    if (val) {
+        json_set(parent_obj(file, parent, true), key, json_clone(val));
+        json_set(parent_obj(g_project, parent, true), key, val);
+    } else {
+        json_t *o = parent_obj(file, parent, false);
+        if (o) json_del(o, key);
+        o = parent_obj(g_project, parent, false);
+        if (o) json_del(o, key);
+    }
+    char *dir = path_dirname(path);
+    fs_mkdir_p(dir, 0755);
+    if (!g_project_dir) g_project_dir = xstrdup(dir);
+    free(dir);
+    char *text = yaml_dump ? yaml_dump(file) : json_dump(file, 2);
+    int rc = fs_write_atomic(path, text, strlen(text), 0644);
+    free(text);
+    free(path);
+    json_free(file);
+    rebuild();
+    pthread_mutex_unlock(&g_mu);
+    return rc;
 }

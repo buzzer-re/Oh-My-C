@@ -19,6 +19,14 @@ json_t *settings_effective(void);  /* borrowed merged tree */
 json_t *settings_global(void);     /* borrowed global layer */
 const char *settings_global_path(void);
 const char *settings_project_dir(void); /* <cwd>/.omc or <cwd>/.omp if present, else NULL */
+/* set/delete (val NULL) one key of the object at a dotted parent path (keys may contain dots/slashes) in the
+ * global layer, persisted to config.yml; takes ownership of val */
+int settings_set_global_entry(const char *parent, const char *key, json_t *val);
+json_t *settings_project(void); /* borrowed project layer (null model roles kept: cleared values) */
+char *settings_project_config_path(void); /* <project dir>/config.yml, <cwd>/.omc/config.yml when none (owned) */
+/* omp project writes (setProjectModelRole / clearProjectModelRole store null): one key of the project
+ * config.yml, merged into the re-read file; val NULL deletes; takes ownership of val */
+int settings_set_project_entry(const char *parent, const char *key, json_t *val);
 
 
 #endif
