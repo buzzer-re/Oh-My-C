@@ -25,27 +25,35 @@ int auth_login(const char *provider, const auth_io_t *io, char **err);
  * credential is stored under `key` together with the descriptor so it can refresh itself. */
 int auth_login_descriptor(const char *key, const json_t *descriptor, const auth_io_t *io, char **err);
 
-/* TUI-friendly variant: never reads stdin unless read_stdin; reports the authorize URL through
- * on_auth (launch_url: optional local /launch shortcut), polls poll_code (owned pasted code / redirect URL, or NULL) and stops when *abort != 0.
+/* A question the flow asks (OAuthPrompt): message, optional placeholder ("e.g., ..."), empty answers allowed,
+ * masked entry. */
+typedef struct {
+    const char *message;
+    const char *placeholder;
+    bool allow_empty;
+    bool secret;
+} auth_prompt_t;
+
+/* TUI-friendly variant: never reads stdin unless read_stdin; reports the authorize / verification URL through
+ * on_auth (launch_url: optional local /launch shortcut; instructions: e.g. "Enter code: ABCD-1234" for device
+ * flows), polls poll_code (owned pasted code / redirect URL, or NULL), asks questions through prompt (blocks
+ * the worker; owned answer, NULL = cancelled) and stops when *abort != 0.
  * Runs on the calling (worker) thread; callbacks are invoked on it. */
 typedef struct {
     void (*on_auth)(void *ud, const char *url, const char *launch_url, const char *instructions);
     void (*on_progress)(void *ud, const char *msg);
     char *(*poll_code)(void *ud);
+    char *(*prompt)(void *ud, const auth_prompt_t *p);
     volatile int *abort;
     bool read_stdin;
     void *ud;
     const auth_io_t *legacy_io; /* internal: auth_login's console io */
 } auth_login_hooks_t;
+/* Runs provider's login (oauth-code, device-code, api-key or custom hook) and stores the result under the
+ * provider's storeAs id. Returns 0 on success (an empty optional api key stores nothing), -1 and *err. */
 int auth_login_hooked(const char *provider, const auth_login_hooks_t *hooks, char **err);
-json_t *auth_oauth_providers(void); /* borrowed array of descriptors with login.kind == oauth-code */
-/* Store an OAuth credential ({type:"oauth", access, refresh, expires, ...}, owned) for provider. */
-int auth_store_credential(const char *provider, json_t *cred);
-
-/* Cursor custom login hook (auth_cursor.c): browser login polled with a PKCE verifier, and token refresh. */
-/* on_msg prints a line (URL block, progress); on_url (optional) receives the bare login URL; *abort stops polling. */
-int auth_cursor_login(void (*on_msg)(void *ud, const char *msg), void (*on_url)(void *ud, const char *url),
-                      volatile int *abort, void *ud, json_t **cred_out, char **err);
-json_t *auth_cursor_refresh(const json_t *entry, char **err); /* owned new credential, NULL + *err on failure */
+json_t *auth_oauth_providers(void); /* borrowed array of catalog auth descriptors (login providers have `login`) */
+/* provider id a login stores its credential under (descriptor `storeAs`, e.g. openai-codex-device -> openai-codex) */
+const char *auth_store_id(const char *provider);
 
 #endif

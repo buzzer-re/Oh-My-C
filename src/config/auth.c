@@ -1,10 +1,10 @@
 #define _GNU_SOURCE
 #include "auth.h"
+#include "auth_engine.h"
 
 #include "ai/ai.h"
 #include "ai/aws.h"
 #include "ai/google_auth.h"
-#include "ai/google_cca.h"
 #include "core/fs.h"
 #include "core/proc.h"
 #include "net/http.h"
@@ -104,6 +104,8 @@ json_t *auth_list(void) {
 
 /* ---------- descriptors ---------- */
 
+/* ---------- descriptors ---------- */
+
 static json_t *descriptor(const char *provider) {
     json_t *arr = catalog_auth_providers(), *d;
     json_arr_foreach(arr, i, d) if (str_eq(json_get_str(d, "id"), provider)) return d;
@@ -112,185 +114,23 @@ static json_t *descriptor(const char *provider) {
 
 json_t *auth_oauth_providers(void) { return catalog_auth_providers(); }
 
-/* descriptor value: env overrides first, then the (possibly base64) literal */
-static char *value_of(const json_t *v) {
-    if (!v) return NULL;
-    if (json_is_str(v)) return xstrdup(json_sv(v));
-    json_t *e;
-    json_arr_foreach(json_get_arr(v, "env"), i, e) {
-        const char *ev = json_is_str(e) ? env_get(json_sv(e)) : NULL;
-        char *t = ev ? str_trim(ev) : NULL;
-        if (t && *t) return t;
-        free(t);
-    }
-    const char *val = json_get_str(v, "value");
-    if (!val) return NULL;
-    if (str_eq(json_get_str(v, "encoding"), "base64")) {
-        size_t n;
-        unsigned char *d = base64_decode(val, strlen(val), &n);
-        if (!d) return NULL;
-        char *r = xstrndup((char *)d, n);
-        free(d);
-        return r;
-    }
-    return xstrdup(val);
+const char *auth_store_id(const char *provider) {
+    const char *s = json_get_str(descriptor(provider), "storeAs");
+    return s ? s : provider;
 }
 
-static char *subst(const char *s, const char *state) {
-    char *a = str_replace(s, "{state}", state ? state : "");
-    char *b = str_replace(a, "{claude_code_sdk_version}", "0.60.0");
-    free(a);
-    return b;
-}
-
-/* extract credential fields from token response per descriptor "credential" map */
-static json_t *extract_cred(const json_t *cred_desc, const json_t *resp, const json_t *prev) {
-    json_t *c = json_obj();
-    json_set_str(c, "type", "oauth");
-    const char *k;
-    json_t *v;
-    json_obj_foreach(cred_desc, i, k, v) {
-        const char *path = json_get_str(v, "path");
-        json_t *val = path ? json_path(resp, path) : NULL;
-        if (!val) continue;
-        if (!strcmp(k, "expires")) {
-            double secs = json_is_num(val) ? val->u.num.d : json_is_str(val) ? strtod(json_sv(val), NULL) : 0;
-            const char *mode = json_get_str(v, "mode");
-            int64_t skew = json_get_int(v, "skewMs", 0);
-            int64_t ms = str_eq(mode, "seconds") ? now_ms() + (int64_t)(secs * 1000) : (int64_t)secs;
-            json_set_int(c, "expires", ms - skew);
-        } else if (json_is_str(val)) {
-            json_set_str(c, k, json_sv(val));
-        } else {
-            json_set(c, k, json_clone(val));
-        }
-    }
-    /* keep previous refresh token when the provider doesn't rotate it */
-    if (prev && !json_get(c, "refresh") && json_get_str(prev, "refresh")) json_set_str(c, "refresh", json_get_str(prev, "refresh"));
-    if (prev) {
-        const char *keep[] = {"accountId", "email", "orgId", "orgName", "projectId", "apiEndpoint", "enterpriseUrl"};
-        for (size_t i = 0; i < ARRAY_LEN(keep); i++)
-            if (!json_get(c, keep[i]) && json_get(prev, keep[i])) json_set(c, keep[i], json_clone(json_get(prev, keep[i])));
-    }
-    return c;
-}
-
-static int token_request(const json_t *tok, json_t *params, const char *state, json_t **resp_out, char **err) {
-    char *url = value_of(json_get(tok, "url"));
-    if (!url) {
-        *err = xstrdup("descriptor has no token url");
-        return -1;
-    }
-    /* extra params */
-    const char *k;
-    json_t *v;
-    json_obj_foreach(json_get_obj(tok, "params"), i, k, v) {
-        if (json_is_str(v)) {
-            char *s = subst(json_sv(v), state);
-            json_set_str(params, k, s);
-            free(s);
-        }
-    }
-    http_headers_t h = {0};
-    json_obj_foreach(json_get_obj(tok, "headers"), i, k, v) {
-        if (json_is_str(v)) {
-            char *s = subst(json_sv(v), state);
-            http_headers_add(&h, k, s);
-            free(s);
-        }
-    }
-    bool form = str_eq(json_get_str(tok, "body"), "form");
-    char *body;
-    if (form) {
-        sb_t b = SB_INIT;
-        json_obj_foreach(params, i, k, v) {
-            char *ek = url_encode(k);
-            sb_t vs = SB_INIT;
-            if (json_is_str(v)) sb_append(&vs, json_sv(v));
-            else json_dump_sb(&vs, v, 0);
-            char *ev = url_encode(sb_cstr(&vs));
-            sb_appendf(&b, "%s%s=%s", b.len ? "&" : "", ek, ev);
-            free(ek);
-            free(ev);
-            sb_free(&vs);
-        }
-        body = sb_detach(&b);
-        http_headers_set(&h, "Content-Type", "application/x-www-form-urlencoded");
-    } else {
-        body = json_dump(params, 0);
-        http_headers_set(&h, "Content-Type", "application/json");
-    }
-    http_headers_set(&h, "Accept", "application/json");
-    http_req_t req = {.method = "POST", .url = url, .headers = &h, .body = body, .body_len = strlen(body),
-                      .timeout_ms = json_get_int(tok, "timeoutMs", 30000)};
-    http_resp_t r;
-    int rc = http_request(&req, &r);
-    free(body);
-    free(url);
-    http_headers_free(&h);
-    if (rc != 0 || r.status < 200 || r.status >= 300) {
-        *err = rc != 0 ? xstrdup(r.error ? r.error : "request failed") : ai_extract_error(r.status, r.body);
-        http_resp_free(&r);
-        return -1;
-    }
-    *resp_out = json_parse_str(r.body);
-    http_resp_free(&r);
-    if (!*resp_out) {
-        *err = xstrdup("token endpoint returned invalid JSON");
-        return -1;
-    }
-    return 0;
-}
+/* ---------- refresh ---------- */
 
 static int refresh_oauth(const char *provider, json_t *entry, char **err) {
     /* credentials minted from a runtime descriptor (MCP OAuth) carry it along */
     json_t *d = json_get_obj(entry, "descriptor");
     if (!d) d = descriptor(provider);
-    json_t *rf = json_get_obj(d, "refresh");
-    if (rf && str_eq(json_get_str(rf, "kind"), "hook") && str_eq(json_get_str(rf, "hook"), "cursor")) {
-        json_t *c = auth_cursor_refresh(entry, err);
-        if (!c) return -1;
-        json_set(g_store, provider, c);
-        save();
-        return 0;
-    }
-    if (!rf || !str_eq(json_get_str(rf, "kind"), "request")) {
-        *err = xasprintf("no refresh flow for %s", provider);
-        return -1;
-    }
-    json_t *req;
-    json_arr_foreach(json_get_arr(rf, "require"), i, req) {
-        const char *field = json_sv(req);
-        if (field && !json_truthy(json_get(entry, field))) {
-            *err = xasprintf("%s credentials are missing %s; sign in again", provider, field);
-            return -1;
-        }
-    }
-    const char *rt = json_get_str(entry, "refresh");
-    if (!rt) {
-        *err = xstrdup("no refresh token stored");
-        return -1;
-    }
-    json_t *tok = json_get_obj(rf, "token");
-    json_t *params = json_obj();
-    json_set_str(params, "grant_type", "refresh_token");
-    char *cid = value_of(json_get(json_get_obj(d, "login"), "clientId"));
-    if (cid) json_set_str(params, "client_id", cid);
-    free(cid);
-    char *secret = value_of(json_get(json_get_obj(d, "login"), "clientSecret"));
-    if (secret) json_set_str(params, "client_secret", secret);
-    free(secret);
-    json_set_str(params, "refresh_token", rt);
-    json_t *resp = NULL;
-    int rc = token_request(tok, params, NULL, &resp, err);
-    json_free(params);
-    if (rc) return -1;
-    json_t *cred_desc = json_get_obj(rf, "credential");
-    if (!cred_desc) cred_desc = json_get_obj(json_get_obj(d, "login"), "credential");
-    /* the Google project hooks only carry the stored projectId across refreshes, which extract_cred does */
-    json_t *c = extract_cred(cred_desc, resp, entry);
-    json_free(resp);
-    if (json_get_obj(entry, "descriptor")) json_set(c, "descriptor", json_clone(json_get_obj(entry, "descriptor")));
+    json_t *fresh = NULL;
+    if (auth_refresh_credential(provider, d, entry, &fresh, err) != 0) return -1;
+    /* identity fields the refresh response omits are kept from the stored row */
+    json_t *c = json_clone(entry);
+    json_merge(c, fresh);
+    json_free(fresh);
     json_set(g_store, provider, c);
     save();
     return 0;
@@ -314,6 +154,18 @@ static char *structured_key(const json_t *e) {
     return s;
 }
 
+/* `expiry "jwt-or-never"` (registry/oauth/index.ts normalizeOAuthCredentialExpiry) */
+static int64_t normalized_expiry(const json_t *d, const json_t *e) {
+    int64_t exp = json_get_int(e, "expires", 0);
+    if (!str_eq(json_get_str(d, "expiry"), "jwt-or-never")) return exp;
+    if (exp > 0 && exp < 10000000000LL) exp *= 1000;
+    json_t *p = auth_jwt_payload(json_get_str(e, "access"));
+    json_t *je = json_get(p, "exp");
+    int64_t r = json_is_num(je) ? (int64_t)(je->u.num.d * 1000) - 300000 : MAX(exp, AUTH_NEVER_EXPIRES);
+    json_free(p);
+    return r;
+}
+
 char *auth_get_api_key(const char *provider) {
     pthread_mutex_lock(&g_mu);
     load();
@@ -332,7 +184,9 @@ char *auth_get_api_key(const char *provider) {
                 else r = xstrdup(k);
             }
         } else if (str_eq(type, "oauth")) {
-            int64_t exp = json_get_int(e, "expires", 0);
+            json_t *dd = json_get_obj(e, "descriptor");
+            if (!dd) dd = descriptor(provider);
+            int64_t exp = normalized_expiry(dd, e);
             if (exp && exp - 60000 < now_ms()) {
                 char *err = NULL;
                 if (refresh_oauth(provider, e, &err) != 0) {
@@ -340,10 +194,9 @@ char *auth_get_api_key(const char *provider) {
                     free(err);
                 }
                 e = json_get_obj(g_store, provider);
+                dd = json_get_obj(e, "descriptor") ? json_get_obj(e, "descriptor") : descriptor(provider);
             }
             const char *acc = json_get_str(e, "access");
-            json_t *dd = json_get_obj(e, "descriptor");
-            if (!dd) dd = descriptor(provider);
             if (acc) r = str_eq(json_get_str(dd, "apiKeyFormat"), "structured") ? structured_key(e) : xstrdup(acc);
         }
     }
@@ -368,7 +221,7 @@ bool auth_has_credentials(const char *provider) {
     return ok;
 }
 
-/* ---------- login (oauth-code + PKCE) ---------- */
+/* ---------- oauth-code flow (registry/engine/oauth-code.ts + oauth/callback-server.ts) ---------- */
 
 static char *pkce_challenge(const char *verifier) {
     unsigned char dig[SHA256_DIGEST_LENGTH];
@@ -391,66 +244,6 @@ static int listen_port(int port, int *bound) {
     socklen_t al = sizeof a;
     *bound = getsockname(fd, (struct sockaddr *)&a, &al) == 0 ? ntohs(a.sin_port) : port;
     return fd;
-}
-
-/* bearer GET declared by `userinfo`; failures leave the identity fields unset */
-static void apply_userinfo(const json_t *ui, json_t *cred) {
-    const char *url = json_get_str(ui, "url");
-    const char *acc = json_get_str(cred, "access");
-    if (!url || !acc) return;
-    http_headers_t h = {0};
-    char *bearer = xasprintf("Bearer %s", acc);
-    http_headers_set(&h, "Authorization", bearer);
-    free(bearer);
-    http_resp_t r;
-    if (http_get(url, &h, 30000, &r) == 0 && r.status >= 200 && r.status < 300) {
-        json_t *j = json_parse_str(r.body ? r.body : "");
-        static const char *const fields[] = {"email", "accountId"};
-        for (size_t i = 0; i < ARRAY_LEN(fields); i++) {
-            const char *path = json_get_str(ui, fields[i]);
-            json_t *v = path ? json_path(j, path) : NULL;
-            if (json_is_str(v) && *json_sv(v)) json_set_str(cred, fields[i], json_sv(v));
-            else if (json_is_num(v)) json_set(cred, fields[i], json_str_own(xasprintf("%.0f", v->u.num.d)));
-        }
-        json_free(j);
-    }
-    http_resp_free(&r);
-    http_headers_free(&h);
-}
-
-static void io_progress(void *ud, const char *msg) {
-    const auth_io_t *io = ud;
-    if (io && io->print) io->print(io->ud, msg);
-}
-
-/* after-exchange hooks (registry/hooks/oauth-code.ts) */
-static int after_exchange(const char *hook, const char *provider, json_t *cred, const json_t *raw, const auth_io_t *io,
-                          char **err) {
-    if (!hook) return 0;
-    if (str_eq(hook, "google-gemini-cli-project") || str_eq(hook, "google-antigravity-project")) {
-        const char *rt = json_get_str(raw, "refresh_token");
-        if (!rt || !*rt) {
-            *err = xstrdup("No refresh token received. Please try again.");
-            return -1;
-        }
-        char *project = NULL, *derr = NULL;
-        if (cca_discover_project(provider, json_get_str(cred, "access"), NULL, io_progress, (void *)io, &project, &derr) != 0) {
-            char *vu = cca_extract_validation_url(derr);
-            if (vu) {
-                *err = cca_validation_message(vu, "sign in again", json_get_str(cred, "email"));
-                free(vu);
-                free(derr);
-            } else {
-                *err = derr;
-            }
-            return -1;
-        }
-        json_set_str(cred, "projectId", project);
-        free(project);
-        return 0;
-    }
-    /* other providers' hooks (identity enrichment, key minting) are not ported; the exchanged token is kept */
-    return 0;
 }
 
 static char *query_param(const char *q, const char *name) {
@@ -480,101 +273,47 @@ static void parse_pasted(const char *in, char **code, char **state) {
     } else if (strchr(t, '#')) {
         char *h = strchr(t, '#');
         *code = xstrndup(t, (size_t)(h - t));
-        *state = xstrdup(h + 1);
+        *state = h[1] ? xstrdup(h + 1) : NULL;
     } else {
         *code = xstrdup(t);
     }
     free(t);
 }
 
-static void io_print_auth(void *ud, const char *url, const char *launch, const char *instructions) {
-    (void)ud;
-    (void)url;
-    (void)launch;
-    (void)instructions;
-}
-
-
-static int login_with(const char *provider, const json_t *d, bool embed, const auth_login_hooks_t *hooks, char **err);
-
-static int login_console(const char *provider, const json_t *d, bool embed, const auth_io_t *io, char **err) {
-    auth_login_hooks_t h = {0};
-    h.on_auth = io_print_auth;
-    h.on_progress = io_progress;
-    h.read_stdin = true;
-    h.ud = (void *)io;
-    h.legacy_io = io;
-    return login_with(provider, d, embed, &h, err);
-}
-
-/* Cursor's custom login hook lives in auth_cursor.c */
-static bool cursor_hook(const char *provider) {
-    json_t *login = json_get_obj(descriptor(provider), "login");
-    return str_eq(json_get_str(login, "kind"), "custom") && str_eq(json_get_str(login, "hook"), "cursor");
-}
-
-static void console_line(void *ud, const char *msg) {
-    const auth_io_t *io = ud;
-    io->print(io->ud, msg);
-}
-
-static int cursor_login(const char *provider, void (*on_msg)(void *, const char *), void (*on_url)(void *, const char *),
-                        volatile int *abort, void *ud, char **err) {
-    json_t *cred = NULL;
-    if (auth_cursor_login(on_msg, on_url, abort, ud, &cred, err) != 0) return -1;
-    return auth_store_credential(provider, cred);
-}
-
-static void hooks_url(void *ud, const char *url) {
-    const auth_login_hooks_t *h = ud;
-    if (h->on_auth) h->on_auth(h->ud, url, NULL, NULL);
-}
-
-static void hooks_progress(void *ud, const char *msg) {
-    const auth_login_hooks_t *h = ud;
-    if (h->on_progress) h->on_progress(h->ud, msg);
-}
-
-int auth_store_credential(const char *provider, json_t *cred) {
-    pthread_mutex_lock(&g_mu);
-    load();
-    json_set(g_store, provider, cred);
-    int rc = save();
-    pthread_mutex_unlock(&g_mu);
-    return rc;
-}
-
-int auth_login(const char *provider, const auth_io_t *io, char **err) {
-    if (cursor_hook(provider)) return cursor_login(provider, io && io->print ? console_line : NULL, NULL, NULL, (void *)io, err);
-    return login_console(provider, descriptor(provider), false, io, err);
-}
-
-int auth_login_descriptor(const char *key, const json_t *d, const auth_io_t *io, char **err) {
-    return login_console(key, d, true, io, err);
-}
-
-int auth_login_hooked(const char *provider, const auth_login_hooks_t *hooks, char **err) {
-    if (cursor_hook(provider)) return cursor_login(provider, hooks_progress, hooks_url, hooks->abort, (void *)hooks, err);
-    return login_with(provider, descriptor(provider), false, hooks, err);
-}
-
-static int login_with(const char *provider, const json_t *d, bool embed, const auth_login_hooks_t *hooks, char **err) {
-    const auth_io_t *io = hooks->legacy_io;
-    *err = NULL;
-    json_t *login = json_get_obj(d, "login");
-    if (!login || !str_eq(json_get_str(login, "kind"), "oauth-code")) {
-        *err = xasprintf("%s does not support browser OAuth login in omc; set an API key with `omc auth set %s <key>`",
-                         provider, provider);
-        return -1;
+static void form_append(sb_t *u, const char *s) {
+    for (const unsigned char *c = (const unsigned char *)s; *c; c++) {
+        if (isalnum(*c) || *c == '*' || *c == '-' || *c == '.' || *c == '_') sb_putc(u, (char)*c);
+        else if (*c == ' ') sb_putc(u, '+');
+        else sb_appendf(u, "%%%02X", *c);
     }
-    char *client_id = value_of(json_get(login, "clientId"));
-    char *auth_url = value_of(json_get(login, "authorizeUrl"));
-    json_t *cb = json_get_obj(login, "callback");
+}
+
+static void strip_trailing_slashes(char *s) {
+    if (!s) return;
+    for (size_t n = strlen(s); n > 0 && s[n - 1] == '/';) s[--n] = 0;
+}
+
+int auth_oauth_code_flow(const actx_t *c, const json_t *login, json_t **cred_out, char **err) {
+    const auth_login_hooks_t *hooks = c->h;
+    *cred_out = NULL;
+    char *client_id = json_get(login, "clientId") ? auth_resolve_value(json_get(login, "clientId"), c, err) : NULL;
+    char *client_secret = json_get(login, "clientSecret") ? auth_resolve_value(json_get(login, "clientSecret"), c, err) : NULL;
+    char *base = json_get(login, "baseUrl") ? auth_resolve_value(json_get(login, "baseUrl"), c, err) : NULL;
+    char *authb = json_get(login, "authUrl") ? auth_resolve_value(json_get(login, "authUrl"), c, err) : NULL;
+    char *auth_url_raw = auth_resolve_value(json_get(login, "authorizeUrl"), c, err);
+    strip_trailing_slashes(base);
+    strip_trailing_slashes(authb);
+    const json_t *cb = json_get_obj(login, "callback");
     int port = (int)json_get_int(cb, "port", 0);
-    char *redirect = value_of(json_get(cb, "redirectUri"));
+    int preferred = port;
+    char *redirect = json_get(cb, "redirectUri") ? auth_resolve_value(json_get(cb, "redirectUri"), c, err) : NULL;
+    if (redirect && !*redirect) {
+        free(redirect);
+        redirect = NULL;
+    }
     /* bind before building the redirect: a busy preferred port falls back to a free one when allowed */
     int lfd = -1;
-    if (port) {
+    if (port && !json_get_bool(cb, "manualOnly", false)) {
         int bound = port;
         lfd = listen_port(port, &bound);
         if (lfd < 0 && json_get_bool(cb, "portFallback", false) && !redirect) lfd = listen_port(0, &bound);
@@ -583,20 +322,33 @@ static int login_with(const char *provider, const json_t *d, bool embed, const a
     if (!redirect)
         redirect = xasprintf("http://%s:%d%s", json_get_str(cb, "hostname") ? json_get_str(cb, "hostname") : "localhost",
                              port, json_get_str(cb, "path") ? json_get_str(cb, "path") : "/callback");
+    if (lfd >= 0 && preferred && port != preferred) {
+        char *m = xasprintf("Preferred port %d unavailable, using port %d", preferred, port);
+        actx_progress(c, m);
+        free(m);
+    }
     bool pkce = json_get_bool(login, "pkce", true);
     unsigned char vb[32];
     rand_bytes(vb, sizeof vb);
     char *verifier = base64url_encode(vb, sizeof vb);
     char *challenge = pkce_challenge(verifier);
-    char *state = str_eq(json_get_str(login, "state"), "uuid") ? uuid_v4() : rand_hex(16);
-    /* scopes */
+    const char *smode = json_get_str(login, "state");
+    char *state = str_eq(smode, "none") ? xstrdup("") : str_eq(smode, "uuid") ? uuid_v4() : rand_hex(16);
     json_t *scopes = json_get_arr(login, "scopes"), *s;
     const char *sep = json_get_str(login, "scopeSeparator");
     sb_t sc = SB_INIT;
-    json_arr_foreach(scopes, i, s) sb_appendf(&sc, "%s%s", i ? (sep ? sep : " ") : "", json_sv(s));
-    /* authorize URL exactly like upstream OAuthCodeFlow.generateAuthUrl: URLSearchParams order
-     * (standard params, then templated authorizeParams), form encoding (space -> '+') */
+    json_arr_foreach(scopes, i, s) sb_appendf(&sc, "%s%s", i ? (sep ? sep : " ") : "", json_sv(s) ? json_sv(s) : "");
     const char *scope_s = sb_cstr(&sc);
+    json_t *vars = json_obj();
+    if (client_id) json_set_str(vars, "client_id", client_id);
+    json_set_str(vars, "redirect_uri", redirect);
+    if (*scope_s) json_set_str(vars, "scope", scope_s);
+    json_set_str(vars, "state", state);
+    if (pkce) json_set_str(vars, "code_challenge", challenge);
+    if (base) json_set_str(vars, "base", base);
+    if (authb) json_set_str(vars, "auth", authb);
+    /* authorize URL exactly like upstream generateAuthUrl: URLSearchParams order (standard params, then
+     * templated authorizeParams), form encoding (space -> '+') */
     strvec_t pk = {0}, pv = {0};
 #define PSET(K, V)                                                                                                     \
     do {                                                                                                               \
@@ -613,7 +365,7 @@ static int login_with(const char *provider, const json_t *d, bool embed, const a
         }                                                                                                              \
     } while (0)
     if (json_get_bool(login, "standardAuthorizeParams", true)) {
-        if (client_id) PSET("client_id", client_id);
+        if (client_id && *client_id) PSET("client_id", client_id);
         PSET("response_type", "code");
         PSET("redirect_uri", redirect);
         if (*scope_s) PSET("scope", scope_s);
@@ -621,71 +373,42 @@ static int login_with(const char *provider, const json_t *d, bool embed, const a
             PSET("code_challenge", challenge);
             PSET("code_challenge_method", "S256");
         }
-        PSET("state", state);
+        if (*state) PSET("state", state);
     }
     const char *k;
     json_t *v;
     json_obj_foreach(json_get_obj(login, "authorizeParams"), i, k, v) {
-        const char *tv = json_sv(v) ? json_sv(v) : "";
-        char *t1 = str_replace(tv, "{client_id}", client_id ? client_id : "");
-        char *t2 = str_replace(t1, "{redirect_uri}", redirect);
-        char *t3 = str_replace(t2, "{scope}", scope_s);
-        char *t4 = str_replace(t3, "{state}", state);
-        char *t5 = str_replace(t4, "{code_challenge}", pkce ? challenge : "");
-        PSET(k, t5);
-        free(t1);
-        free(t2);
-        free(t3);
-        free(t4);
-        free(t5);
+        char *t = auth_template(json_sv(v) ? json_sv(v) : "", vars);
+        PSET(k, t);
+        free(t);
     }
 #undef PSET
+    char *auth_url = auth_template(auth_url_raw ? auth_url_raw : "", vars);
     sb_t u = SB_INIT;
     sb_append(&u, auth_url);
-    sb_putc(&u, strchr(auth_url, '?') ? '&' : '?');
+    sb_putc(&u, '?');
     for (size_t q = 0; q < pk.n; q++) {
         if (q) sb_putc(&u, '&');
-        for (int part = 0; part < 2; part++) {
-            const unsigned char *c = (const unsigned char *)(part ? pv.v[q] : pk.v[q]);
-            for (; *c; c++) {
-                if (isalnum(*c) || *c == '*' || *c == '-' || *c == '.' || *c == '_') sb_putc(&u, (char)*c);
-                else if (*c == ' ') sb_putc(&u, '+');
-                else sb_appendf(&u, "%%%02X", *c);
-            }
-            if (!part) sb_putc(&u, '=');
-        }
+        form_append(&u, pk.v[q]);
+        sb_putc(&u, '=');
+        form_append(&u, pv.v[q]);
     }
     strvec_free(&pk);
     strvec_free(&pv);
-    sb_free(&sc);
     char *launch = NULL;
     if (lfd >= 0 && (str_starts(redirect, "http://localhost:") || str_starts(redirect, "http://127.0.0.1:")))
         launch = xasprintf("http://localhost:%d/launch", port);
-    if (io && io->print) {
-        char *m = xasprintf("Open this URL to log in to %s:\n\n%s\n\n%s", json_get_str(d, "name") ? json_get_str(d, "name") : provider,
-                            sb_cstr(&u), json_get_str(login, "instructions") ? json_get_str(login, "instructions") : "");
-        io->print(io->ud, m);
-        free(m);
-    } else if (!io && hooks->on_auth) {
-        hooks->on_auth(hooks->ud, sb_cstr(&u), launch, json_get_str(login, "instructions"));
-        if (hooks->on_progress)
-            hooks->on_progress(hooks->ud, lfd >= 0 ? "Waiting for browser authentication..." : "Waiting for pasted authorization code...");
-    }
-    /* try to open the browser */
-    const char *opener = env_truthy("OMC_NO_BROWSER") ? NULL : which("xdg-open") ? "xdg-open" : which("open") ? "open" : NULL;
-    if (opener) {
-        const char *argv[] = {opener, sb_cstr(&u), NULL};
-        proc_opts_t po = {.timeout_ms = 5000, .new_session = true};
-        proc_result_t pr;
-        if (proc_run(argv, &po, &pr) == 0) proc_result_free(&pr);
-    }
+    bool read_stdin = hooks && hooks->read_stdin;
+    actx_auth(c, sb_cstr(&u), launch, json_get_str(login, "instructions"));
+    actx_progress(c, read_stdin ? "Waiting for the browser redirect (or paste the code / redirect URL and press Enter)..."
+                     : lfd >= 0 ? "Waiting for browser authentication..."
+                                : "Waiting for pasted authorization code...");
     char *code = NULL, *got_state = NULL;
-    if (lfd >= 0 && io && io->print) io->print(io->ud, "Waiting for the browser redirect (or paste the code / redirect URL and press Enter)...");
     int64_t deadline = mono_ms() + 300000;
     sb_t typed = SB_INIT;
     while (!code && mono_ms() < deadline) {
-        if (hooks->abort && *hooks->abort) break;
-        if (hooks->poll_code) {
+        if (actx_aborted(c)) break;
+        if (hooks && hooks->poll_code) {
             char *pasted = hooks->poll_code(hooks->ud);
             if (pasted) {
                 char *t = str_trim(pasted);
@@ -697,14 +420,18 @@ static int login_with(const char *provider, const json_t *d, bool embed, const a
         }
         struct pollfd pf[2];
         int np = 0;
-        pf[np++] = (struct pollfd){hooks->read_stdin ? 0 : -1, POLLIN, 0};
+        pf[np++] = (struct pollfd){read_stdin ? 0 : -1, POLLIN, 0};
         if (lfd >= 0) pf[np++] = (struct pollfd){lfd, POLLIN, 0};
-        int pr = poll(pf, (nfds_t)np, hooks->read_stdin ? 500 : 100);
+        int pr = poll(pf, (nfds_t)np, read_stdin ? 500 : 100);
         if (pr <= 0) continue;
-        if (hooks->read_stdin && (pf[0].revents & POLLIN)) {
+        if (read_stdin && (pf[0].revents & (POLLIN | POLLHUP))) {
             char buf[4096];
             ssize_t n = read(0, buf, sizeof buf);
-            if (n <= 0) break;
+            if (n <= 0) {
+                read_stdin = false; /* stdin closed: keep waiting for the browser */
+                if (lfd < 0) break;
+                continue;
+            }
             sb_appendn(&typed, buf, (size_t)n);
             if (strchr(sb_cstr(&typed), '\n')) {
                 char *t = str_trim(sb_cstr(&typed));
@@ -750,49 +477,209 @@ static int login_with(const char *provider, const json_t *d, bool embed, const a
     free(launch);
     if (lfd >= 0) close(lfd);
     int rc = -1;
+    const json_t *pk_rule = json_get_obj(login, "pasteKey");
     if (!code) {
-        *err = xstrdup(hooks->abort && *hooks->abort ? "Login cancelled" : "login timed out or was cancelled");
-    } else if (got_state && strcmp(got_state, state) != 0) {
+        *err = xstrdup(actx_aborted(c) ? "Login cancelled" : "login timed out or was cancelled");
+    } else if (pk_rule && json_get_str(pk_rule, "prefix") && str_starts(code, json_get_str(pk_rule, "prefix"))) {
+        /* a pasted API key (e.g. OpenRouter sk-or-...) is validated and kept as-is */
+        int st = 0;
+        if (auth_validate_models(c->label, code, json_get_str(pk_rule, "validateUrl"), NULL, c, &st, err) == 0) {
+            json_t *cr = json_obj();
+            json_set_str(cr, "type", "oauth");
+            json_set_str(cr, "access", code);
+            json_set_str(cr, "refresh", "");
+            json_set_int(cr, "expires", AUTH_NEVER_EXPIRES);
+            *cred_out = cr;
+            rc = 0;
+        }
+    } else if (got_state && *state && strcmp(got_state, state) != 0) {
         *err = xstrdup("OAuth state mismatch; aborting");
     } else {
-        json_t *tok = json_get_obj(login, "token");
-        json_t *params = json_obj();
-        json_set_str(params, "grant_type", "authorization_code");
-        json_set_str(params, "code", code);
-        json_set_str(params, "redirect_uri", redirect);
-        if (client_id) json_set_str(params, "client_id", client_id);
-        char *secret = value_of(json_get(login, "clientSecret"));
-        if (secret) json_set_str(params, "client_secret", secret);
-        free(secret);
-        if (pkce) json_set_str(params, "code_verifier", verifier);
-        json_t *resp = NULL;
-        if (token_request(tok, params, state, &resp, err) == 0) {
-            json_t *c = extract_cred(json_get_obj(login, "credential"), resp, NULL);
-            json_t *ui = json_get_obj(login, "userinfo");
-            if (ui) apply_userinfo(ui, c);
-            if (after_exchange(json_get_str(login, "afterExchange"), provider, c, resp, io, err) == 0) {
-                if (embed) json_set(c, "descriptor", json_clone(d));
-                pthread_mutex_lock(&g_mu);
-                load();
-                json_set(g_store, provider, c);
-                c = NULL;
-                rc = save() == 0 ? 0 : -1;
-                pthread_mutex_unlock(&g_mu);
-                if (rc) *err = xstrdup("failed to save credentials");
+        json_t *xv = json_clone(vars);
+        json_set_str(xv, "code", code);
+        json_set_str(xv, "state", got_state && *got_state ? got_state : state);
+        if (pkce) json_set_str(xv, "code_verifier", verifier);
+        if (client_secret) json_set_str(xv, "client_secret", client_secret);
+        json_t *std = json_obj();
+        json_set_str(std, "grant_type", "authorization_code");
+        if (client_id) json_set_str(std, "client_id", client_id);
+        if (client_secret) json_set_str(std, "client_secret", client_secret);
+        json_set_str(std, "code", code);
+        json_set_str(std, "redirect_uri", redirect);
+        if (pkce) json_set_str(std, "code_verifier", verifier);
+        json_t *body = NULL;
+        if (auth_post_token(json_get_obj(login, "token"), std, xv, NULL, c->provider, "token-exchange", c, NULL, &body, err) == 0) {
+            json_t *cr = auth_map_credentials(json_get_obj(login, "credential"), body, c->provider, NULL, err);
+            if (cr) {
+                auth_apply_userinfo(json_get_obj(login, "userinfo"), cr, NULL, xv, c);
+                if (actx_aborted(c)) {
+                    *err = xstrdup("Login cancelled");
+                } else if (auth_after_exchange(json_get_str(login, "afterExchange"), c, "login", &cr, body, NULL, err) == 0) {
+                    *cred_out = cr;
+                    cr = NULL;
+                    rc = 0;
+                }
+                json_free(cr);
             }
-            json_free(c);
-            json_free(resp);
         }
-        json_free(params);
+        json_free(body);
+        json_free(std);
+        json_free(xv);
     }
+    json_free(vars);
     free(code);
     free(got_state);
     free(client_id);
+    free(client_secret);
+    free(base);
+    free(authb);
+    free(auth_url_raw);
     free(auth_url);
     free(redirect);
     free(verifier);
     free(challenge);
     free(state);
+    sb_free(&sc);
     sb_free(&u);
     return rc;
+}
+
+/* ---------- login dispatch (auth/oauth.ts AuthStorage.oauth.login) ---------- */
+
+static int login_run(const char *provider, const json_t *d, bool embed, const auth_login_hooks_t *hooks, char **err) {
+    *err = NULL;
+    if (!d) {
+        *err = xasprintf("Unknown OAuth provider: %s", provider);
+        return -1;
+    }
+    const json_t *login = json_get_obj(d, "login");
+    const char *kind = json_get_str(login, "kind");
+    actx_t c = {provider, json_get_str(d, "name") ? json_get_str(d, "name") : provider, d, hooks};
+    alogin_t r = {0};
+    int rc;
+    if (str_eq(kind, "oauth-code")) rc = auth_oauth_code_flow(&c, login, &r.cred, err);
+    else if (str_eq(kind, "device-code")) rc = auth_device_code_login(&c, &r.cred, err);
+    else if (str_eq(kind, "api-key")) rc = auth_api_key_login(&c, &r.api_key, err);
+    else if (str_eq(kind, "custom")) rc = auth_custom_hook_login(&c, json_get_str(login, "hook"), &r, err);
+    else {
+        *err = xasprintf("%s has no interactive login; set an API key with `omc auth set %s <key>`", provider, provider);
+        rc = -1;
+    }
+    if (rc == 0 && r.cred && str_eq(json_get_str(d, "result"), "api-key")) {
+        r.api_key = xstrdup(json_get_str(r.cred, "access") ? json_get_str(r.cred, "access") : "");
+        json_free(r.cred);
+        r.cred = NULL;
+    }
+    if (rc == 0 && r.api_key) {
+        /* an empty optional key (local servers) stores nothing */
+        if (*r.api_key && auth_set_api_key(provider, r.api_key) != 0) {
+            *err = xstrdup("failed to save credentials");
+            rc = -1;
+        }
+    } else if (rc == 0 && r.cred) {
+        json_set_int(r.cred, "authorizedAt", now_ms());
+        if (embed) json_set(r.cred, "descriptor", json_clone(d));
+        const char *store = json_get_str(d, "storeAs") ? json_get_str(d, "storeAs") : provider;
+        pthread_mutex_lock(&g_mu);
+        load();
+        json_set(g_store, store, r.cred);
+        r.cred = NULL;
+        rc = save() == 0 ? 0 : -1;
+        pthread_mutex_unlock(&g_mu);
+        if (rc) *err = xstrdup("failed to save credentials");
+    }
+    free(r.api_key);
+    json_free(r.cred);
+    if (rc && !*err) *err = xstrdup("login failed");
+    return rc;
+}
+
+/* ---------- console callbacks (omp cli/oauth-terminal.ts runTerminalOAuthLogin) ---------- */
+
+static void con_print(const auth_io_t *io, const char *m) {
+    if (io && io->print) io->print(io->ud, m);
+    else fprintf(stderr, "%s\n", m);
+}
+
+static void con_auth(void *ud, const char *url, const char *launch, const char *instructions) {
+    const auth_io_t *io = ud;
+    sb_t b = SB_INIT;
+    sb_appendf(&b, "\nOpen this URL in your browser:\n%s", url);
+    if (launch && strcmp(launch, url)) sb_appendf(&b, "\nLocal shortcut (this machine only): %s", launch);
+    if (instructions && *instructions) sb_appendf(&b, "\n%s", instructions);
+    sb_append(&b, "\n");
+    con_print(io, sb_cstr(&b));
+    sb_free(&b);
+    char *opener = env_truthy("OMC_NO_BROWSER") ? NULL : which("xdg-open");
+    if (!opener && !env_truthy("OMC_NO_BROWSER")) opener = which("open");
+    if (opener) {
+        const char *argv[] = {opener, url, NULL};
+        proc_opts_t po = {.timeout_ms = 5000, .new_session = true};
+        proc_result_t pr;
+        if (proc_run(argv, &po, &pr) == 0) proc_result_free(&pr);
+        free(opener);
+    }
+}
+
+static void con_progress(void *ud, const char *msg) { con_print(ud, msg); }
+
+/* one line from fd 0 without stdio buffering (the oauth-code paste reader shares the descriptor) */
+static char *read_line_fd0(void) {
+    sb_t b = SB_INIT;
+    char ch;
+    for (;;) {
+        ssize_t n = read(0, &ch, 1);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            if (!b.len) {
+                sb_free(&b);
+                return NULL;
+            }
+            break;
+        }
+        if (ch == '\n') break;
+        sb_putc(&b, ch);
+        if (b.len > 65536) break;
+    }
+    char *t = str_trim(sb_cstr(&b));
+    sb_free(&b);
+    return t;
+}
+
+static char *con_prompt(void *ud, const auth_prompt_t *p) {
+    const auth_io_t *io = ud;
+    char *q = p->placeholder && *p->placeholder ? xasprintf("%s (%s):", p->message, p->placeholder) : xasprintf("%s:", p->message);
+    char *a;
+    if (io && io->prompt) {
+        a = io->prompt(io->ud, q);
+    } else {
+        fprintf(stderr, "%s ", q);
+        fflush(stderr);
+        a = read_line_fd0();
+    }
+    free(q);
+    return a;
+}
+
+static int login_console(const char *provider, const json_t *d, bool embed, const auth_io_t *io, char **err) {
+    auth_login_hooks_t h = {0};
+    h.on_auth = con_auth;
+    h.on_progress = con_progress;
+    h.prompt = con_prompt;
+    h.read_stdin = true;
+    h.ud = (void *)io;
+    h.legacy_io = io;
+    return login_run(provider, d, embed, &h, err);
+}
+
+int auth_login(const char *provider, const auth_io_t *io, char **err) {
+    return login_console(provider, descriptor(provider), false, io, err);
+}
+
+int auth_login_descriptor(const char *key, const json_t *d, const auth_io_t *io, char **err) {
+    return login_console(key, d, true, io, err);
+}
+
+int auth_login_hooked(const char *provider, const auth_login_hooks_t *hooks, char **err) {
+    return login_run(provider, descriptor(provider), false, hooks, err);
 }
