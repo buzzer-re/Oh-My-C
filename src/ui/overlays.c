@@ -328,6 +328,8 @@ static char *hotkeys_markdown(void) {
     HK("ctrl+o");
     act_ = "Toggle tool activity visibility";
     HK("ctrl+shift+o");
+    act_ = "Pick an extension link on screen by its tag";
+    HK("alt+o");
     act_ = "Hide/show a pending ask question";
     HK("alt+h");
     act_ = "Approve a pending tool call";
