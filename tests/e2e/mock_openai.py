@@ -114,12 +114,19 @@ class H(BaseHTTPRequestHandler):
         elif last.get("role") == "user" and lu_all.startswith("State:\n"):
             ans = judge_reply(sysc, lu_all)
             side = ("call", "submit_judgment", {"answer": ans}) if "submit_judgment" in tnames else ("say", ans)
+        # `calls:[[tool, args], ...]` scripts sequential tool calls: each request issues the next call not yet
+        # answered after the scripted user message, then the turn ends with a plain answer
+        ui = max((i for i, m in enumerate(msgs) if m.get("role") == "user" and text_of(m).startswith("calls:")), default=-1)
+        if not side and ui >= 0 and not advisor and (last.get("role") == "tool" or ui == len(msgs) - 1):
+            script = json.loads(text_of(msgs[ui])[6:])
+            done = sum(1 for m in msgs[ui + 1:] if m.get("role") == "tool")
+            side = ("call", script[done][0], script[done][1], f"call_{done + 1}") if done < len(script) else ("say", "script done")
         if side and side[0] == "say":
             chunks.append({**base, "choices": [{"index": 0, "delta": {"content": side[1]}}]})
             chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
         elif side:
             a = json.dumps(side[2])
-            chunks.append({**base, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_s", "type": "function", "function": {"name": side[1], "arguments": a}}]}}]})
+            chunks.append({**base, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": side[3] if len(side) > 3 else "call_s", "type": "function", "function": {"name": side[1], "arguments": a}}]}}]})
             chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
         elif advisor and last.get("role") == "tool":
             chunks.append({**base, "choices": [{"index": 0, "delta": {"content": "noted"}}]})

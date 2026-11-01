@@ -2180,7 +2180,6 @@ static bool block_span(char *const *L, size_t total_sz, const char *path, uint32
             }
             e = i + 1;
         }
-        while (e > n && blank(L[e - 1])) e--;
         *be = (uint32_t)e;
         return true;
     }
@@ -2214,6 +2213,17 @@ static bool block_span(char *const *L, size_t total_sz, const char *path, uint32
             if (opened && depth <= 0) {
                 *be = (uint32_t)i;
                 return true;
+            }
+            if (!opened) {
+                /* a statement that ends before opening any bracket is a single-line node */
+                char *te = trim_end(L[i - 1]);
+                size_t tl = strlen(te);
+                bool ends = tl && (te[tl - 1] == ';' || te[tl - 1] == ',');
+                free(te);
+                if (ends) {
+                    *be = (uint32_t)i;
+                    return true;
+                }
             }
             if (!opened && i > decl + 3) break;
         }
@@ -3647,3 +3657,134 @@ snapshot_t *edit_store_find(edit_store_t *s, const char *abs_path, const char *t
     return r;
 }
 
+
+/* ---------- write-content prefix stripping (prefixes.rs strip_hashline_prefixes + write-content.ts) ---------- */
+
+/* HL_HEADER_RE: ^\s*\[[^#\r\n]+#[0-9a-fA-F]{4}\]\s*$ */
+static bool hl_header_row(const char *line) {
+    const char *p = skip_ws(line);
+    if (*p != '[') return false;
+    p++;
+    const char *start = p;
+    while (*p && *p != '#' && *p != '\r' && *p != '\n') p++;
+    if (p == start || *p != '#') return false;
+    p++;
+    for (int i = 0; i < 4; i++, p++)
+        if (!isxdigit((unsigned char)*p)) return false;
+    if (*p != ']') return false;
+    return *skip_ws(p + 1) == 0;
+}
+
+static bool numbers_count_up_by_one(char *const *L, size_t n) {
+    int64_t prev = -1;
+    for (size_t i = 0; i < n; i++) {
+        const char *l = L[i];
+        if (!*l || is_read_metadata_line(l) || hl_header_row(l)) {
+            prev = -1;
+            continue;
+        }
+        size_t k = hl_prefix_len(l);
+        if (!k) return false;
+        const char *d = l + k - 1;
+        while (d > l && isdigit((unsigned char)d[-1])) d--;
+        uint64_t num = strtoull(d, NULL, 10);
+        if (prev >= 0 && (uint64_t)prev + 1 != num) return false;
+        prev = (int64_t)num;
+    }
+    return true;
+}
+
+/* NULL when unchanged */
+static char *strip_lines_joined(char *const *L, size_t n, const char *text) {
+    size_t non_empty = 0, headers = 0, prefixed = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (!*L[i] || is_read_metadata_line(L[i])) continue;
+        non_empty++;
+        if (hl_header_row(L[i])) {
+            headers++;
+            continue;
+        }
+        if (hl_prefix_len(L[i])) prefixed++;
+    }
+    if (!non_empty) return NULL;
+    size_t content = non_empty - headers;
+    if (!content || prefixed != content || !numbers_count_up_by_one(L, n)) return NULL;
+    sb_t b = SB_INIT;
+    bool first = true, changed = false;
+    for (size_t i = 0; i < n; i++) {
+        if (is_read_metadata_line(L[i]) || hl_header_row(L[i])) {
+            changed = true;
+            continue;
+        }
+        const char *s = L[i];
+        size_t k;
+        while ((k = hl_prefix_len(s)) > 0) s += k;
+        if (s != L[i]) changed = true;
+        if (!first) sb_putc(&b, '\n');
+        sb_append(&b, s);
+        first = false;
+    }
+    if (!changed) {
+        sb_free(&b);
+        return NULL;
+    }
+    char *r = sb_detach(&b);
+    if (text && !strcmp(r, text)) {
+        free(r);
+        return NULL;
+    }
+    return r;
+}
+
+/* LOOSE_HASHLINE_HEADER_RE: ^\s*\[[^#\r\n]+#[^ \t\r\n]*\]\s*$ */
+static bool loose_header_row(const char *line) {
+    const char *p = skip_ws(line);
+    if (*p != '[') return false;
+    p++;
+    const char *start = p;
+    while (*p && *p != '#' && *p != '\r' && *p != '\n') p++;
+    if (p == start || *p != '#') return false;
+    p++;
+    const char *tag = p;
+    while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') p++;
+    /* the greedy tag run must end with `]`, followed only by whitespace */
+    return p > tag && p[-1] == ']' && *skip_ws(p) == 0;
+}
+
+char *hl_strip_write_content(const char *content, bool *stripped) {
+    *stripped = false;
+    /* PLAIN_FIRST_ROW_RE fast path: the first non-empty row starts with a plain content character */
+    const char *p = content;
+    while (*p == '\n') p++;
+    size_t k;
+    while (*p != '\n' && (k = ws_at(p)) > 0) p += k;
+    bool plain = *p && *p != '\n' && !ws_at(p) && !strchr("[>+*-.", *p) && !isdigit((unsigned char)*p) &&
+                 !starts(p, "\xE2\x80\xA6");
+    if (plain) {
+        uint32_t cp;
+        int n = utf8_decode(p, strlen(p), &cp);
+        if (n > 1 && ((cp >= 0x660 && cp <= 0x669) || (cp >= 0xFF10 && cp <= 0xFF19))) plain = false;
+    }
+    if (plain) return xstrdup(content);
+    strvec_t L = split_nl(content);
+    char *r = strip_lines_joined(L.v, L.n, content);
+    if (r) {
+        strvec_free(&L);
+        *stripped = true;
+        return r;
+    }
+    size_t hi = 0;
+    while (hi < L.n && blank(L.v[hi])) hi++;
+    if (hi == L.n || !loose_header_row(L.v[hi])) {
+        strvec_free(&L);
+        return xstrdup(content);
+    }
+    free(L.v[hi]);
+    memmove(L.v + hi, L.v + hi + 1, (L.n - hi - 1) * sizeof(char *));
+    L.n--;
+    r = strip_lines_joined(L.v, L.n, NULL);
+    strvec_free(&L);
+    if (!r) return xstrdup(content);
+    *stripped = true;
+    return r;
+}

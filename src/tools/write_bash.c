@@ -13,18 +13,384 @@
 #include "shell.h"
 #include "artifacts.h"
 #include "outsink.h"
+#include "hashline.h"
+#include "fuzzy.h"
 
 #include <ctype.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 /* ---------- write ---------- */
+
+/* Node's `<CODE>: <description>, <syscall> '<path>'` error text for a failed fs call (libuv descriptions) */
+static char *node_fs_error(int err, const char *syscall, const char *path) {
+    static const struct {
+        int no;
+        const char *code, *desc;
+    } T[] = {{ENOENT, "ENOENT", "no such file or directory"},
+             {EACCES, "EACCES", "permission denied"},
+             {EISDIR, "EISDIR", "illegal operation on a directory"},
+             {ENOTDIR, "ENOTDIR", "not a directory"},
+             {EROFS, "EROFS", "read-only file system"},
+             {ENOSPC, "ENOSPC", "no space left on device"},
+             {EEXIST, "EEXIST", "file already exists"},
+             {EPERM, "EPERM", "operation not permitted"},
+             {ENAMETOOLONG, "ENAMETOOLONG", "name too long"},
+             {ELOOP, "ELOOP", "too many symbolic links encountered"},
+             {EMFILE, "EMFILE", "too many open files"},
+             {EBUSY, "EBUSY", "resource busy or locked"},
+             {ETXTBSY, "ETXTBSY", "text file is busy"},
+             {EINVAL, "EINVAL", "invalid argument"},
+             {EIO, "EIO", "i/o error"},
+             {EDQUOT, "EDQUOT", "disk quota exceeded"},
+             {EFBIG, "EFBIG", "file too large"}};
+    for (size_t i = 0; i < sizeof T / sizeof T[0]; i++)
+        if (T[i].no == err) return xasprintf("%s: %s, %s '%s'", T[i].code, T[i].desc, syscall, path);
+    return xasprintf("%s, %s '%s'", strerror(err), syscall, path);
+}
+
+/* formatPathRelativeToCwd: cwd-relative inside cwd ("." for cwd itself), else absolute */
+static char *rel_to_cwd(const char *abs, const char *cwd) {
+    size_t cl = strlen(cwd);
+    if (!strcmp(abs, cwd)) return xstrdup(".");
+    if (cl == 1 && cwd[0] == '/') return xstrdup(abs[0] == '/' && abs[1] ? abs + 1 : abs);
+    if (!strncmp(abs, cwd, cl) && abs[cl] == '/') return xstrdup(abs + cl + 1);
+    return xstrdup(abs);
+}
+
+/* one chunk of a read line selector: L?N, L?N-[L?M], L?N..[L?M], L?N+K, or a -N tail */
+static bool sel_chunk(const char *s, size_t n) {
+    size_t i = 0;
+    if (n >= 2 && s[0] == '-') {
+        for (i = 1; i < n; i++)
+            if (!isdigit((unsigned char)s[i])) return false;
+        return true;
+    }
+    if (i < n && (s[i] == 'L' || s[i] == 'l')) i++;
+    size_t d = i;
+    while (i < n && isdigit((unsigned char)s[i])) i++;
+    if (i == d) return false;
+    if (i == n) return true;
+    if (s[i] == '+') {
+        i++;
+        size_t k = i;
+        while (i < n && isdigit((unsigned char)s[i])) i++;
+        return i == n && i > k;
+    }
+    if (s[i] == '-') i++;
+    else if (i + 1 < n && s[i] == '.' && s[i + 1] == '.') i += 2;
+    else return false;
+    if (i < n && (s[i] == 'L' || s[i] == 'l')) i++;
+    while (i < n && isdigit((unsigned char)s[i])) i++;
+    return i == n && (isdigit((unsigned char)s[n - 1]) || s[n - 1] == '.' || s[n - 1] == '-');
+}
+
+static bool sel_list(const char *s) {
+    if (!*s) return false;
+    for (const char *p = s;;) {
+        const char *c = strchr(p, ',');
+        size_t n = c ? (size_t)(c - p) : strlen(p);
+        if (!sel_chunk(p, n)) return false;
+        if (!c) return true;
+        p = c + 1;
+    }
+}
+
+/* splitPathAndSel(...).sel for a filesystem path: the trailing read selector, or NULL */
+static char *read_selector_of(const char *path) {
+    const char *colon = strrchr(path, ':');
+    if (!colon || colon == path) return NULL;
+    const char *cand = colon + 1;
+    bool word = !strcasecmp(cand, "raw") || !strcasecmp(cand, "conflicts") || !strcasecmp(cand, "img");
+    if (!word && !sel_list(cand)) return NULL;
+    if (!strcasecmp(cand, "raw")) {
+        /* `path:1-50:raw` */
+        const char *inner = colon;
+        while (inner > path && inner[-1] != ':') inner--;
+        if (inner > path + 1) {
+            char *ic = xstrndup(inner, (size_t)(colon - inner));
+            bool lst = sel_list(ic);
+            if (lst) {
+                char *r = xasprintf("%s:%s", ic, cand);
+                free(ic);
+                return r;
+            }
+            free(ic);
+        }
+    } else if (!word) {
+        /* `path:raw:1-50` */
+        const char *inner = colon;
+        while (inner > path && inner[-1] != ':') inner--;
+        if (inner > path + 1 && (size_t)(colon - inner) == 3 && !strncasecmp(inner, "raw", 3))
+            return xasprintf("%.3s:%s", inner, cand);
+    }
+    return xstrdup(cand);
+}
+
+/* unwrapHashlineHeaderPath: `[PATH]` / `[PATH#XXXX]` -> PATH */
+static char *unwrap_header(const char *p) {
+    size_t n = strlen(p);
+    while (n && isspace((unsigned char)p[n - 1])) n--;
+    if (n < 2 || p[0] != '[' || p[n - 1] != ']') return xstrdup(p);
+    char *inner = xstrndup(p + 1, n - 2);
+    size_t il = strlen(inner);
+    bool tagged = il >= 5 && inner[il - 5] == '#';
+    for (size_t i = il >= 4 ? il - 4 : 0; tagged && i < il; i++) tagged = isxdigit((unsigned char)inner[i]) != 0;
+    if (tagged) inner[il - 5] = 0;
+    if (!*inner || (!tagged && strchr(inner, '#'))) {
+        free(inner);
+        return xstrdup(p);
+    }
+    return inner;
+}
+
+static bool one_edit_away(const char *typo, const char *word) {
+    size_t a = strlen(typo), b = strlen(word);
+    if (!strcmp(typo, word) || (a > b ? a - b : b - a) > 1) return false;
+    size_t c = 0;
+    while (c < a && c < b && typo[c] == word[c]) c++;
+    const char *x = typo + c, *y = word + c;
+    size_t xl = a - c, yl = b - c;
+    if (xl && yl && !strcmp(x + 1, y + 1)) return true;
+    if (xl && !strcmp(x + 1, y)) return true;
+    if (yl && !strcmp(x, y + 1)) return true;
+    return xl >= 2 && yl >= 2 && x[0] == y[1] && x[1] == y[0] && !strcmp(x + 2, y + 2);
+}
+
+/* assertWriteTargetAddressable: URI-like targets no router scheme handles */
+static char *write_target_error(const char *target) {
+    static const char *const KNOWN[] = {"local", "xd", "ssh", "proc", "agent", "history", "artifact", "memory",
+                                        "skill", "rule", "omp", "omc", "mcp", "pr", "issue", "conflict", "jobs", "file"};
+    char *t = str_trim(target);
+    char *msg = NULL;
+    size_t sl = 0;
+    if (isalpha((unsigned char)t[0])) {
+        sl = 1;
+        while (isalnum((unsigned char)t[sl]) || t[sl] == '+' || t[sl] == '.' || t[sl] == '-') sl++;
+    }
+    char *scheme = sl ? xstrndup(t, sl) : NULL;
+    for (char *c = scheme; c && *c; c++) *c = (char)tolower((unsigned char)*c);
+    bool known = false;
+    for (size_t i = 0; scheme && i < sizeof KNOWN / sizeof KNOWN[0]; i++)
+        if (!strcmp(scheme, KNOWN[i])) known = true;
+    if (scheme && t[sl] == ':' && t[sl + 1] == '/' && t[sl + 2] == '/' && known) goto done;
+    if (scheme && t[sl] == '/' && !strcmp(scheme, "xd")) {
+        const char *rest = t + sl;
+        while (*rest == '/') rest++;
+        msg = xasprintf("Unknown URI-like write target '%s'. Did you mean 'xd://%s'? Prefix the path with './' to write it "
+                        "as a filesystem path.",
+                        t, rest);
+        goto done;
+    }
+    if (scheme && t[sl] == ':' && t[sl + 1] == '/') {
+        const char *rest = t + sl + 2;
+        if (*rest == '/') rest++;
+        char *sugg = known || one_edit_away(scheme, "xd") ? xasprintf(" Did you mean '%s://%s'?", known ? scheme : "xd", rest)
+                                                          : xstrdup(" Tool devices use 'xd://<tool>'.");
+        msg = xasprintf("Unknown URI-like write target '%s'.%s Prefix the path with './' to write it as a filesystem path.",
+                        t, sugg);
+        free(sugg);
+    }
+done:
+    free(scheme);
+    free(t);
+    return msg;
+}
+
+/* restore the replaced file's BOM / CRLF convention (write.ts applyTextFileConvention) */
+static char *apply_text_convention(const char *abs, const char *content, bool *crlf_applied, bool *bom_applied) {
+    *crlf_applied = *bom_applied = false;
+    int fd = open(abs, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    char buf[8192];
+    ssize_t n = read(fd, buf, sizeof buf);
+    bool binary = n > 0 && memchr(buf, 0, (size_t)n) != NULL;
+    bool bom = n >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF;
+    bool crlf = false;
+    char prev = 0;
+    while (n > 0 && !binary) {
+        char *lf = memchr(buf, '\n', (size_t)n);
+        if (lf) {
+            crlf = (lf > buf ? lf[-1] : prev) == '\r';
+            break;
+        }
+        prev = buf[n - 1];
+        n = read(fd, buf, sizeof buf);
+    }
+    close(fd);
+    if (binary) return NULL;
+    sb_t b = SB_INIT;
+    bool has_cr = strchr(content, '\r') != NULL;
+    if (bom && *content && !str_starts(content, "\xEF\xBB\xBF")) {
+        sb_append(&b, "\xEF\xBB\xBF");
+        *bom_applied = true;
+    }
+    if (crlf && strchr(content, '\n') && !has_cr) {
+        for (const char *p = content; *p; p++) {
+            if (*p == '\n') sb_append(&b, "\r\n");
+            else sb_putc(&b, *p);
+        }
+        *crlf_applied = true;
+    } else {
+        sb_append(&b, content);
+    }
+    if (!*crlf_applied && !*bom_applied) {
+        sb_free(&b);
+        return NULL;
+    }
+    return sb_detach(&b);
+}
+
+static int write_local(tool_env_t *env, const char *raw_path, const char *raw_content, tool_result_t *out) {
+    char *path = unwrap_header(raw_path);
+    if (!raw_content) {
+        tool_result_error(out, "content is required for %s.", path);
+        free(path);
+        return 0;
+    }
+    bool stripped = false;
+    char *clean = str_eq(env->edit_mode, "hashline") ? hl_strip_write_content(raw_content, &stripped) : xstrdup(raw_content);
+    char *abs = NULL, *display = NULL, *final = NULL;
+    char *terr = write_target_error(path);
+    if (terr) {
+        tool_result_error(out, "%s", terr);
+        free(terr);
+        goto done;
+    }
+    abs = tool_resolve_path(env, path);
+    /* assertNotReadSelectorMisfire */
+    if (strchr(path, ';') && !fs_exists(abs)) {
+        strvec_t segs = str_split(path, ";");
+        bool all = segs.n >= 2;
+        for (size_t i = 0; all && i < segs.n; i++) {
+            char *s = str_trim(segs.v[i]);
+            char *sel = *s ? read_selector_of(s) : NULL;
+            all = sel != NULL;
+            free(sel);
+            free(s);
+        }
+        size_t nseg = segs.n;
+        strvec_free(&segs);
+        if (all) {
+            tool_result_error(out,
+                              "write target '%s' is a semicolon-joined list of %zu read-tool selectors, not a filesystem "
+                              "path — refusing to create it. write creates a single file; issue one read() per path to "
+                              "read these ranges (e.g. read({ path: \"<one path>:<range>\" })).",
+                              path, nseg);
+            goto done;
+        }
+    }
+    if (!*raw_content) {
+        char *sel = read_selector_of(path);
+        if (sel && !fs_exists(abs)) {
+            tool_result_error(out,
+                              "write target '%s' ends with a read-tool selector ':%s' and no such file exists — refusing "
+                              "to create a literal file by that name. If you meant to read it, use read({ path: \"%s\" }). "
+                              "If you truly intend to create this file, pass its contents in `content` (a non-empty write "
+                              "is never blocked).",
+                              path, sel, path);
+            free(sel);
+            goto done;
+        }
+        free(sel);
+    }
+    display = str_starts(path, "local://") ? xstrdup(path) : rel_to_cwd(abs, env->cwd);
+    struct stat st;
+    bool existed = stat(abs, &st) == 0;
+    if (existed && !S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) {
+        const char *kind = S_ISCHR(st.st_mode)    ? "character device"
+                           : S_ISBLK(st.st_mode)  ? "block device"
+                           : S_ISFIFO(st.st_mode) ? "FIFO"
+                           : S_ISSOCK(st.st_mode) ? "socket"
+                                                  : "special file";
+        tool_result_error(out, "Cannot write '%s': it is a %s, not a regular file or directory.", path, kind);
+        goto done;
+    }
+    bool crlf_applied = false, bom_applied = false;
+    char *conv = existed && S_ISREG(st.st_mode) ? apply_text_convention(abs, clean, &crlf_applied, &bom_applied) : NULL;
+    final = conv ? conv : xstrdup(clean);
+    size_t n = strlen(final);
+    {
+        char *dir = path_dirname(abs);
+        fs_mkdir_p(dir, 0755);
+        free(dir);
+    }
+    int fd = open(abs, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+    if (fd < 0) {
+        char *m = node_fs_error(errno, "open", abs);
+        tool_result_error(out, "%s", m);
+        free(m);
+        goto done;
+    }
+    size_t off = 0;
+    int werr = 0;
+    while (off < n) {
+        ssize_t w = write(fd, final + off, n - off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            werr = errno;
+            break;
+        }
+        off += (size_t)w;
+    }
+    if (close(fd) != 0 && !werr) werr = errno;
+    if (werr) {
+        char *m = node_fs_error(werr, "write", abs);
+        tool_result_error(out, "%s", m);
+        free(m);
+        goto done;
+    }
+    /* shebang: chmod a+x */
+    bool made_exec = false;
+    if (str_starts(final, "#!") && !str_starts(final, "#![")) {
+        struct stat s2;
+        if (stat(abs, &s2) == 0) {
+            mode_t cur = s2.st_mode & 07777, nm = cur | 0111;
+            if (nm != cur && chmod(abs, nm) == 0 && stat(abs, &s2) == 0) made_exec = (s2.st_mode & 0111) == 0111;
+        }
+    }
+    sb_t b = SB_INIT;
+    if (str_eq(env->edit_mode, "hashline")) {
+        char *lf = fz_normalize_to_lf(str_starts(final, "\xEF\xBB\xBF") ? final + 3 : final);
+        const char *tag = edit_store_record(&env->store, abs, lf, 0, 0);
+        sb_appendf(&b, "[%s#%s]\n", display, tag);
+        free(lf);
+    }
+    sb_appendf(&b, "Successfully wrote %zu bytes to %s", n, display);
+    if (stripped) sb_append(&b, "\nNote: auto-stripped hashline display prefixes from content before writing.");
+    if (crlf_applied || bom_applied)
+        sb_appendf(&b, "\nNote: kept the replaced file's %s%s%s.", crlf_applied ? "CRLF line endings" : "",
+                   crlf_applied && bom_applied ? " and " : "", bom_applied ? "UTF-8 BOM" : "");
+    if (made_exec) sb_append(&b, "\n[Notice: Made executable via chmod +x]");
+    if (env->after_write) {
+        char *diag = env->after_write(env, abs);
+        if (diag) {
+            sb_appendf(&b, "\n%s", diag);
+            free(diag);
+        }
+    }
+    tool_result_text(out, sb_cstr(&b));
+    sb_free(&b);
+    out->details = json_obj();
+    json_set_str(out->details, "resolvedPath", abs);
+    if (made_exec) json_set_bool(out->details, "madeExecutable", true);
+done:
+    free(final);
+    free(clean);
+    free(abs);
+    free(display);
+    free(path);
+    return 0;
+}
 
 static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     const char *path = json_get_str(args, "path");
-    const char *content = json_get_str(args, "content");
-    if (!path || !*path) {
+    const char *raw_content = json_get_str(args, "content");
+    const char *content = raw_content;
+    if (!path) {
         tool_result_error(out, "path is required");
         return 0;
     }
@@ -51,58 +417,19 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         return 0;
     }
     if (xdev_write(ctx, path, content, out)) return 0;
-    if (str_starts(path, "ssh://")) {
-        char *err = NULL;
-        size_t n = strlen(content);
-        if (ssh_store(env, path, content, n, &err) != 0) {
-            tool_result_error(out, "%s", err);
-        } else {
-            size_t lines = n ? str_count(content, "\n") + (content[n - 1] != '\n') : 0;
-            tool_result_textf(out, "Wrote %s (%zu lines, %zu bytes)", path, lines, n);
-            out->details = json_obj();
-            json_set_str(out->details, "path", path);
-            json_set_int(out->details, "lines", (int64_t)lines);
-        }
-        free(err);
-        return 0;
-    }
-    char *abs = tool_resolve_path(env, path);
-    char *display = str_starts(path, "local://") ? xstrdup(path) : path_display(abs, env->cwd);
-    struct stat st;
-    bool existed = stat(abs, &st) == 0;
-    if (existed && S_ISDIR(st.st_mode)) {
-        tool_result_error(out, "Cannot write '%s': it is a directory", path);
-    } else if (existed && !S_ISREG(st.st_mode)) {
-        tool_result_error(out, "Cannot write '%s': not a regular file", path);
+    if (!str_starts(path, "ssh://")) return write_local(env, path, raw_content, out);
+    char *err = NULL;
+    size_t n = strlen(content);
+    if (ssh_store(env, path, content, n, &err) != 0) {
+        tool_result_error(out, "%s", err);
     } else {
-        size_t n = strlen(content);
-        int rc = fs_write_atomic(abs, content, n, 0644);
-        if (rc != 0) {
-            tool_result_error(out, "Failed to write %s: %s", display, strerror(-rc));
-        } else {
-            size_t lines = n ? str_count(content, "\n") + (content[n - 1] != '\n') : 0;
-            const char *tag = edit_store_record(&env->store, abs, content, 0, 0);
-            sb_t b = SB_INIT;
-            sb_appendf(&b, "%s %s (%zu lines, %zu bytes)\n", existed ? "Overwrote" : "Created", display, lines, n);
-            if (str_eq(env->edit_mode, "hashline")) format_hashline_header(&b, display, tag);
-            if (env->after_write) {
-                char *diag = env->after_write(env, abs);
-                if (diag) {
-                    sb_appendf(&b, "\n%s", diag);
-                    free(diag);
-                }
-            }
-            tool_result_text(out, sb_cstr(&b));
-            sb_free(&b);
-            out->details = json_obj();
-            json_set_str(out->details, "path", abs);
-            json_set_bool(out->details, "created", !existed);
-            json_set_int(out->details, "lines", (int64_t)lines);
-        }
+        size_t lines = n ? str_count(content, "\n") + (content[n - 1] != '\n') : 0;
+        tool_result_textf(out, "Wrote %s (%zu lines, %zu bytes)", path, lines, n);
+        out->details = json_obj();
+        json_set_str(out->details, "path", path);
+        json_set_int(out->details, "lines", (int64_t)lines);
     }
-    free(abs);
-    free(display);
-    UNUSED(ctx);
+    free(err);
     return 0;
 }
 
