@@ -1,5 +1,6 @@
 /* theme.c - color slots, built-in themes, JSON theme loading. */
 #include "tui/theme.h"
+#include "core/embed.h"
 #include "core/fs.h"
 
 static const char *SLOT_NAMES[TUI_TC__COUNT] = {
@@ -262,6 +263,19 @@ tui_theme_t *tui_theme_from_json(const json_t *j, tui_color_mode_t mode, char **
 }
 
 tui_theme_t *tui_theme_builtin(const char *name, tui_color_mode_t mode) {
+    /* upstream omp themes (dark, light and the 100 bundled ones) are embedded verbatim */
+    if (name && *name && !strchr(name, '/') && !strstr(name, "..")) {
+        char *rel = xasprintf("assets/tui/themes/%s.json", name);
+        size_t len = 0;
+        const char *data = embed_get(rel, &len);
+        free(rel);
+        if (data) {
+            json_t *j = json_parse(data, len, NULL);
+            tui_theme_t *t = j ? tui_theme_from_json(j, mode, NULL) : NULL;
+            json_free(j);
+            if (t) return t;
+        }
+    }
     const char *src = str_eq(name, "dark") ? DARK_JSON : str_eq(name, "light") ? LIGHT_JSON : NULL;
     if (!src) return NULL;
     json_t *j = json_parse_str(src);
