@@ -708,7 +708,10 @@ bool xdev_write(tool_ctx_t *ctx, const char *path, const char *content, tool_res
     char *verr = t->lenient_args ? NULL : schema_validate(t->parameters, args);
     if (verr) {
         char *d = render_docs(t, "#", 0);
-        tool_result_error(out, "Invalid args for " XD "%s: %s\n\n%s", name, verr, d);
+        char *argstr = json_dump(args, 2);
+        tool_result_error(out, "Invalid args for " XD "%s: Validation failed for tool \"%s\":\n%s\n\nReceived arguments:\n%s\n\n%s",
+                          name, name, verr, argstr, d);
+        free(argstr);
         free(d);
         free(verr);
         json_free(args);

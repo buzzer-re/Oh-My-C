@@ -33,6 +33,14 @@ check "bash tool"      "Tool said: hello-e2e"            "$B" -m mock/mock-1 -p 
 check "write tool"     "Created a/b.txt"                 "$B" -m mock/mock-1 -p "write:a/b.txt:written by omc"
 check "file content"   "written by omc"                  cat a/b.txt
 check "read hashline"  "1:written by omc"                "$B" -m mock/mock-1 -p "read:a/b.txt"
+# intent field: injected (required) into tool schemas, stripped before execution
+check "intent schema"  '"i": {"type": "string", "description": "concise intent"}'  bash -c "python3 -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; t=[x for x in r if x.get(\"tools\")][-1][\"tools\"][0][\"function\"][\"parameters\"]; print(json.dumps(t[\"properties\"][\"i\"]) if \"i\" in t[\"required\"] else \"no i\")' '$T/req.jsonl' | sed 's/^/\"i\": /'"
+check "intent stripped" "Tool said: hi-intent"           "$B" -m mock/mock-1 -p 'call:bash:{"i":"Checking echo","command":"echo hi-intent"}'
+# xd:// devices: discoverable tools are mounted, listed, documented and dispatched through read/write
+check "xd listing"     "mounted tool devices"             "$B" -m mock/mock-1 -p "read:xd://"
+check "xd docs"        "type Args = {"                    "$B" -m mock/mock-1 -p "read:xd://debug"
+check "xd dispatch"    "Invalid args for xd://lsp: Validation failed" "$B" -m mock/mock-1 -p 'call:write:{"path":"xd://lsp","content":"{\"action\":\"bogus\"}"}'
+check "xd report"      "Noted, thanks!"                   "$B" -m mock/mock-1 -p 'call:write:{"path":"xd://report_issue","content":"read: wrong output"}'
 check "glob tool"      "a/b.txt"                         "$B" -m mock/mock-1 -p "glob:**/*.txt"
 check "grep tool"      "*1:written by omc"               "$B" -m mock/mock-1 -p "grep:written"
 check "plain answer"   "plain answer"                    "$B" -m mock/mock-1 -p "hi"
