@@ -253,7 +253,7 @@ static void build_sidebar(hub_t *h) {
     strvec_t unlocked = {0}, locked = {0};
     for (size_t i = 0; i < catalog_count(); i++) {
         const char *p = catalog_at(i)->provider;
-        bool has = auth_has_credentials(p);
+        bool has = auth_has_credentials(p) || catalog_provider_keyless(p);
         strvec_t *dst = has ? &unlocked : &locked;
         if (!strvec_contains(dst, p)) strvec_push(dst, p);
     }
@@ -1399,7 +1399,7 @@ void ui_overlay_model(ui_t *u) {
     h->follow = true;
     for (size_t i = 0; i < catalog_count(); i++) {
         const ai_model_t *m = catalog_at(i);
-        if (auth_has_credentials(m->provider)) vec_push(&h->available, m);
+        if (auth_has_credentials(m->provider) || catalog_provider_keyless(m->provider)) vec_push(&h->available, m);
     }
     build_sidebar(h);
     build_role_rows(h);

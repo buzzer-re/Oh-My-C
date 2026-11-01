@@ -452,7 +452,7 @@ void ui_model_browser_render(const ui_model_browser_t *b, int width, strvec_t *o
 void ui_model_browser_load_available(ui_model_browser_t *b) {
     for (size_t i = 0; i < catalog_count(); i++) {
         const ai_model_t *m = catalog_at(i);
-        if (!auth_has_credentials(m->provider)) continue;
+        if (!auth_has_credentials(m->provider) && !catalog_provider_keyless(m->provider)) continue;
         ui_model_browser_add(b, m);
     }
     ui_model_browser_done_adding(b);

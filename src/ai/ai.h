@@ -68,6 +68,16 @@ const char *catalog_provider_default_model(const char *provider);
 json_t *catalog_provider_info(const char *provider);   /* borrowed: {id, envVars, defaultModel, ...} */
 json_t *catalog_auth_providers(void);                  /* borrowed array of OAuth login descriptors */
 const ai_model_t *catalog_register(json_t *model_obj); /* takes ownership; for custom/discovered models */
+/* omp's built-in role selector chains (behavior.kdl role-defaults): borrowed {role: [selector, ...]} */
+json_t *catalog_role_defaults(void);
+/* provider usable without credentials (omp #keylessProviders: local, web, ollama, llama.cpp, lm-studio, apple,
+ * plus discovered local servers); its provider info carries "keyless": true */
+bool catalog_provider_keyless(const char *provider);
+/* model usable now: its provider has credentials (auth.json / env / models.yml apiKey) or is keyless */
+bool catalog_model_available(const ai_model_t *m);
+/* omp modelKind(): "chat" (default), "tiny", "image", "tts", "stt", "search", "judge", "embedding", "rerank",
+ * "video" (borrowed string) */
+const char *catalog_model_kind(const ai_model_t *m);
 json_t *model_compat_get(const ai_model_t *m, const char *key); /* override, else api default (borrowed) */
 bool model_compat_bool(const ai_model_t *m, const char *key, bool def);
 const char *model_compat_str(const ai_model_t *m, const char *key);
