@@ -148,6 +148,7 @@ typedef struct {
     const char *token, *base, *integration;
     const char *ids[5];
     int n;
+    bool explicit_id;
 } policy_batch_t;
 
 static void *policy_worker(void *ud) {
@@ -166,7 +167,14 @@ static void *policy_worker(void *ud) {
         http_headers_set(&h, "X-Initiator", "user");
         http_headers_set(&h, "X-Interaction-Type", "chat-policy");
         http_resp_t r;
-        auth_http("POST", url, &h, "{\"state\":\"enabled\"}", 30000, b->c, &r);
+        int rc = auth_http("POST", url, &h, "{\"state\":\"enabled\"}", 30000, b->c, &r);
+        /* wrapFetchForCopilotFallback: a denied default chat identity retries once as the Copilot CLI */
+        if (rc == 0 && !b->explicit_id && str_eq(b->integration, "copilot-chat") &&
+            (r.status == 403 || (r.status == 400 && r.body && strstr(r.body, "\"model_not_supported\"")))) {
+            http_resp_free(&r);
+            http_headers_set(&h, "Copilot-Integration-Id", "copilot-developer-cli");
+            auth_http("POST", url, &h, "{\"state\":\"enabled\"}", 30000, b->c, &r);
+        }
         http_resp_free(&r);
         http_headers_free(&h);
         free(url);
@@ -181,9 +189,11 @@ static void copilot_enable_models(const actx_t *c, const char *token, const char
                                                                          : xasprintf("https://copilot-api.%s", enterprise))
                                : xstrdup("https://api.githubcopilot.com");
     char *integ = trimd(env_get("COPILOT_INTEGRATION_ID"));
+    bool explicit_id = true;
     if (!*integ || strpbrk(integ, "\r\n")) {
         free(integ);
         integ = xstrdup("copilot-chat");
+        explicit_id = false;
     }
     strvec_t ids = {0};
     for (size_t i = 0; i < catalog_count(); i++) {
@@ -197,7 +207,7 @@ static void copilot_enable_models(const actx_t *c, const char *token, const char
         pthread_t th[5];
         int nt = 0;
         for (size_t j = i; j < ids.n && j < i + 5; j++, nt++) {
-            b[nt] = (policy_batch_t){c, token, base, integ, {ids.v[j]}, 1};
+            b[nt] = (policy_batch_t){c, token, base, integ, {ids.v[j]}, 1, explicit_id};
             if (pthread_create(&th[nt], NULL, policy_worker, &b[nt]) != 0) {
                 policy_worker(&b[nt]);
                 th[nt] = 0;
