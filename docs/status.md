@@ -1,6 +1,6 @@
 # omc implementation status
 
-Status of the port against upstream oh-my-pi (reference: omp v18.13.3). ✅ ported and tested · 🟡 partial · ❌ not yet.
+Status of the port against upstream oh-my-pi (reference: omp v18.14.2, see [UPDATE.md](../UPDATE.md) for the pinned upstream commit). ✅ ported and tested · 🟡 partial · ❌ not yet.
 This file is the single source of truth for what is implemented; it is updated with every change.
 
 ## Runtime & infrastructure

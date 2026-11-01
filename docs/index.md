@@ -35,9 +35,6 @@ model can read them through the `omc://` internal URL (`read omc://` lists them,
 opens one), the same way omp serves its own docs through `omp://`. That means these files are also
 model-facing reference material. Keep them factual, and keep them in sync with the code.
 
-The listing works today, but reading a doc returns an empty file until the embed-order bug described
-in [build.md](build.md#embedded-assets) is fixed.
-
 `omc://` drops the `docs/` prefix, so a doc must not share a name with a top-level embedded file.
 That is why this index is `index.md` and not `docs/README.md`, which would collide with the top-level
 `README.md`. Subdirectories of `docs/` are not embedded.
