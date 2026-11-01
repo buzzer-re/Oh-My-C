@@ -655,6 +655,14 @@ static int web_search_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
     }
     if (!used) {
         tool_result_error(out, "Web search failed:\n%s", errs.len ? sb_cstr(&errs) : "no provider available");
+        out->details = json_obj();
+        json_t *resp = json_obj();
+        json_set_str(resp, "provider", "none");
+        json_set(resp, "sources", json_arr());
+        json_set(out->details, "response", resp);
+        char *em = tool_result_joined_text(out);
+        json_set_str(out->details, "error", em);
+        free(em);
         sb_free(&errs);
         return 0;
     }
@@ -672,9 +680,11 @@ static int web_search_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
         json_push(sources, s);
     }
     tool_result_text(out, sb_cstr(&b));
-    out->details = json_obj();
-    json_set_str(out->details, "provider", used);
-    json_set(out->details, "sources", sources);
+    out->details = json_obj(); /* omp SearchRenderDetails: {response: {provider, sources}} */
+    json_t *resp = json_obj();
+    json_set_str(resp, "provider", used);
+    json_set(resp, "sources", sources);
+    json_set(out->details, "response", resp);
     sb_free(&b);
     sb_free(&errs);
     sres_free(&res);

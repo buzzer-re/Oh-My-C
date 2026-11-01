@@ -154,5 +154,11 @@ void tc_glob(const tc_call_t *c, int width, strvec_t *out);
 void tc_todo(const tc_call_t *c, int width, strvec_t *out);
 void tc_generic(const tc_call_t *c, int width, strvec_t *out);
 void tc_render_diff(const char *diff, const char *path, strvec_t *out);
+void tc_web_search(const tc_call_t *c, int width, strvec_t *out);
+
+/* web helpers (tc_web.c) */
+char *tc_url_domain(const char *url);                        /* hostname without www. */
+char *tc_hyperlink(const char *url, const char *text);       /* OSC 8 when the terminal supports it */
+char *tc_format_age(int64_t secs);                           /* "2h ago" ("" for 0) */
 
 #endif
