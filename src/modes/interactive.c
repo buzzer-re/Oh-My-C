@@ -939,29 +939,13 @@ static void run_bang(ui_t *u, const char *line) {
     if (exclude) json_set_bool(v->args, "exclude", true);
     add_view(u, v);
     tui_render_now(u->tui);
-    proc_opts_t o = {.cwd = u->app->cwd, .timeout_ms = 600000, .merge_stderr = true, .new_session = true};
-    proc_result_t r;
-    if (proc_shell(cmd, &o, &r) == 0) {
-        v->output = utf8_sanitize(r.out, r.out_len);
-        v->is_error = r.exit_code != 0;
-        json_set_int(v->args, "exitCode", r.exit_code);
-        json_t *m = json_obj();
-        json_set_str(m, "role", "bashExecution");
-        json_set_str(m, "command", cmd);
-        json_set_str(m, "output", v->output);
-        json_set_int(m, "exitCode", r.exit_code);
-        json_set_bool(m, "cancelled", false);
-        json_set_bool(m, "truncated", false);
-        if (exclude) json_set_bool(m, "excludeFromContext", true);
-        json_set_int(m, "timestamp", now_ms());
-        session_append_message(u->app->session, m);
-        if (!exclude) {
-            char *t = r.out_len ? xasprintf("Ran `%s`\n```\n%s\n```", cmd, v->output) : xasprintf("Ran `%s`\n(no output)", cmd);
-            agent_append_message(u->app->agent, msg_user_text(t));
-            free(t);
-        }
+    json_t *m = app_user_bash(u->app, cmd, exclude);
+    if (m) {
+        v->output = xstrdup(json_get_str(m, "output") ? json_get_str(m, "output") : "");
+        int64_t code = json_get_int(m, "exitCode", 0);
+        v->is_error = json_get_bool(m, "cancelled", false) || code != 0;
+        json_set_int(v->args, "exitCode", code);
         json_free(m);
-        proc_result_free(&r);
     }
     v->done = true;
     v->dirty = true;

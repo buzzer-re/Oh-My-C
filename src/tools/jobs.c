@@ -3,6 +3,8 @@
  * delivered to the agent as a follow-up (or collected by the `wait` tool). */
 #define _GNU_SOURCE
 #include "jobs.h"
+#include "artifacts.h"
+#include "outsink.h"
 
 #include "config/settings.h"
 #include "core/fs.h"
@@ -539,24 +541,36 @@ static void bash_out(void *ud, int stream, const char *data, size_t len) {
     pthread_mutex_unlock(&b->fwd_mu);
 }
 
+/* settled job text: omp's completed-result text plus its meta notice (#extractTextResult), captured
+ * through an OutputSink (sanitized, column-capped, head/tail elided; no artifact) */
 static char *format_bash_result(const bgjob_t *x) {
     const bashx_t *b = x->bash;
     const proc_result_t *r = &b->res;
+    if (b->rc != 0 || r->spawn_errno) return xasprintf("Failed to start: %s", strerror(r->spawn_errno ? r->spawn_errno : EIO));
+    out_sink_opts_t so;
+    out_sink_opts_from_settings(&so);
+    out_sink_t *sink = out_sink_new(&so);
+    out_sink_push(sink, r->out ? r->out : "", r->out_len);
+    char *tn = r->timed_out ? xasprintf("Command timed out after %lld seconds", (long long)((b->timeout_ms + 500) / 1000)) : NULL;
+    out_summary_t sum;
+    out_sink_dump(sink, tn ? tn : r->cancelled ? "Command cancelled" : NULL, &sum);
+    free(tn);
+    out_sink_free(sink);
     sb_t s = SB_INIT;
-    const char *outp = r->out ? r->out : "";
-    size_t n = r->out_len;
-    if (n > 64 * 1024) {
-        sb_appendf(&s, "[%zu bytes of earlier output elided]\n", n - 64 * 1024);
-        outp += n - 64 * 1024;
-        n = 64 * 1024;
+    int code = r->term_signal ? 128 + r->term_signal : r->exit_code;
+    if (r->cancelled && !r->timed_out) {
+        sb_append(&s, *sum.output ? sum.output : "Command aborted");
+    } else {
+        sb_append(&s, *sum.output ? sum.output : "(no output)");
+        if (!r->timed_out && code != 0) sb_appendf(&s, "\n\nCommand exited with code %d", code);
     }
-    sb_appendn(&s, outp, n);
-    if (s.len && s.s[s.len - 1] != '\n') sb_putc(&s, '\n');
-    if (b->rc != 0 || r->spawn_errno) sb_appendf(&s, "Failed to start: %s\n", strerror(r->spawn_errno ? r->spawn_errno : EIO));
-    else if (r->cancelled) sb_append(&s, "Command cancelled\n");
-    else if (r->timed_out) sb_appendf(&s, "Command timed out after %llds\n", (long long)(b->timeout_ms / 1000));
-    else if (r->exit_code != 0) sb_appendf(&s, "Command exited with code %d\n", r->exit_code);
-    if (!r->out_len && !r->exit_code && !r->timed_out && !r->cancelled) sb_append(&s, "(no output)\n");
+    json_t *meta = NULL;
+    out_meta_from_summary(&meta, &sum, "tail", 1, 0);
+    char *n = out_format_notice(meta);
+    sb_append(&s, n);
+    free(n);
+    json_free(meta);
+    out_summary_free(&sum);
     return sb_detach(&s);
 }
 

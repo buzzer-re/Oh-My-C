@@ -58,7 +58,7 @@ typedef struct tool_env {
     tool_ui_t ui;
     json_t *settings;          /* borrowed effective settings */
     char *edit_mode;           /* "hashline" | "replace" | "patch" | "apply_patch" | "sloppy" */
-    char *artifacts_dir;       /* where spilled outputs go */
+    struct artifact_store *artifacts; /* session artifacts (artifact://<id>; shared with subagents; NULL: none) */
     int subagent_depth;
     bool can_prompt_user;      /* a UI can answer `ask` (interactive mode) */
     bool find_enabled;         /* `find` is part of this session (set by tools_register_builtin) */

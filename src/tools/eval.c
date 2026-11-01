@@ -12,6 +12,8 @@
  * (wait(), judge(), drain(), tool.task/wait) pause the cell deadline, which restarts when the call returns. */
 #define _GNU_SOURCE
 #include "tools.h"
+#include "artifacts.h"
+#include "outsink.h"
 
 #include "config/settings.h"
 #include "core/embed.h"
@@ -560,16 +562,55 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     }
     pthread_mutex_unlock(&st->mu);
 
-    sb_t b = SB_INIT;
-    if (restarted) sb_append(&b, "[kernel restarted: previous state was lost]\n");
-    const char *so = json_get_str(result, "stdout");
-    if (so && *so) sb_append(&b, so);
+    /* omp: the cell runtime's own OutputSink (head/tail + column cap) shapes the cell output; a second sink
+     * mirrors the raw stream into the call's `eval` artifact and supplies the truncation meta (summarizeFinal) */
+    out_sink_opts_t so;
+    out_sink_opts_from_settings(&so);
+    out_sink_t *cellsink = out_sink_new(&so);
+    char *art_id = NULL, *art_path = artifacts_alloc(st->env->artifacts, "eval", &art_id);
+    so.artifact_path = art_path;
+    so.artifact_id = art_id;
+    out_sink_t *rawsink = out_sink_new(&so);
+    free(art_path);
+    free(art_id);
+    sb_t stream = SB_INIT;
+    const char *so_out = json_get_str(result, "stdout");
+    if (so_out && *so_out) sb_append(&stream, so_out);
     if (raw) {
-        if (b.len && b.s[b.len - 1] != '\n') sb_putc(&b, '\n');
-        sb_append(&b, raw);
-        if (raw_trunc) sb_append(&b, "\n[raw output truncated]");
+        if (stream.len && stream.s[stream.len - 1] != '\n') sb_putc(&stream, '\n');
+        sb_append(&stream, raw);
+        if (raw_trunc) sb_append(&stream, "\n[raw output truncated]");
     }
     const char *e = json_get_str(result, "error");
+    bool failed = e && !timed_out && !aborted && result;
+    if (failed) {
+        if (stream.len && stream.s[stream.len - 1] != '\n') sb_putc(&stream, '\n');
+        sb_append(&stream, e);
+    }
+    free(raw);
+    out_sink_push(cellsink, stream.s ? stream.s : "", stream.len);
+    out_sink_push(rawsink, stream.s ? stream.s : "", stream.len);
+    sb_free(&stream);
+    out_summary_t cs, rs;
+    out_sink_dump(cellsink, NULL, &cs);
+    out_sink_dump(rawsink, NULL, &rs);
+    out_sink_free(cellsink);
+    out_sink_free(rawsink);
+    char *combined = str_trim(cs.output);
+    size_t clen = strlen(combined);
+    sb_t b = SB_INIT;
+    if (restarted) sb_append(&b, "[kernel restarted: previous state was lost]\n");
+    size_t nimg = json_len(json_get_arr(result, "images"));
+    if (failed) {
+        out->is_error = true;
+        if (clen) sb_appendf(&b, "%s\n\nCommand exited with code 1", combined);
+        else sb_append(&b, "Command exited with code 1");
+    } else if (clen) {
+        sb_append(&b, combined);
+    } else if (!timed_out && !aborted && result) {
+        if (nimg) sb_appendf(&b, "(%zu image%s; no text output)", nimg, nimg == 1 ? "" : "s");
+        else sb_append(&b, "(no output)");
+    }
     if (timed_out) {
         if (b.len && b.s[b.len - 1] != '\n') sb_putc(&b, '\n');
         if (killed)
@@ -587,18 +628,8 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         if (b.len && b.s[b.len - 1] != '\n') sb_putc(&b, '\n');
         sb_append(&b, eof ? "Python kernel exited (state lost); re-run setup." : "Python kernel stopped responding (state lost).");
         out->is_error = true;
-    } else if (e) {
-        if (b.len && b.s[b.len - 1] != '\n') sb_putc(&b, '\n');
-        sb_append(&b, e);
-        out->is_error = true;
     }
-    free(raw);
-    size_t len = b.len;
-    while (len && b.s[len - 1] == '\n') len--;
-    sb_truncate(&b, len);
-    bool tr;
-    char *shown = tool_truncate_tail(sb_cstr(&b), b.len, 50u * 1024, 2000, &tr);
-    tool_result_text(out, *shown ? shown : "(no output)");
+    tool_result_text(out, sb_cstr(&b));
     /* omp EvalToolDetails: one cell for the transcript's code-cell card */
     out->details = json_obj();
     json_t *cells = json_arr(), *cj = json_obj();
@@ -606,7 +637,7 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     if (json_get_str(args, "title")) json_set_str(cj, "title", json_get_str(args, "title"));
     json_set_str(cj, "code", code);
     json_set_str(cj, "language", "python");
-    json_set_str(cj, "output", shown);
+    json_set_str(cj, "output", combined);
     json_set_str(cj, "status", out->is_error ? "error" : "complete");
     json_set_int(cj, "durationMs", mono_ms() - t0);
     json_push(cells, cj);
@@ -615,7 +646,20 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     json_t *langs = json_arr();
     json_push_str(langs, "python");
     json_set(out->details, "languages", langs);
-    free(shown);
+    if (out->is_error) json_set_bool(out->details, "isError", true);
+    /* summarizeFinal: shown = the trimmed cell output; totals add what the raw capture lost */
+    out_summary_t fin = rs;
+    fin.output_lines = clen ? (int64_t)out_count_nl(combined, clen) + 1 : 0;
+    fin.output_bytes = (int64_t)clen;
+    fin.total_lines = fin.output_lines + MAX(0, rs.total_lines - rs.output_lines);
+    fin.total_bytes = fin.output_bytes + MAX(0, rs.total_bytes - rs.output_bytes);
+    fin.elided_bytes = fin.elided_lines = -1;
+    json_t *meta = NULL;
+    out_meta_from_summary(&meta, &fin, "tail", 1, 0);
+    if (meta) json_set(out->details, "meta", meta);
+    free(combined);
+    out_summary_free(&cs);
+    out_summary_free(&rs);
     json_t *img;
     json_arr_foreach(json_get_arr(result, "images"), i, img) tool_result_image(out, json_get_str(img, "data"), json_get_str(img, "mimeType"));
     sb_free(&b);
