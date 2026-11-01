@@ -663,9 +663,11 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     json_t *info = json_arr();
     for (size_t i = 0; o->tool_names && i < o->tool_names->n; i++) {
         json_push_str(tools, o->tool_names->v[i]);
-        json_set_str(refs, o->tool_names->v[i], o->tool_names->v[i]);
+        const char *ref = o->tool_refs ? json_get_str(o->tool_refs, o->tool_names->v[i]) : NULL;
+        if (!ref) ref = o->tool_names->v[i];
+        json_set_str(refs, o->tool_names->v[i], ref);
         json_t *ti = json_obj();
-        json_set_str(ti, "name", o->tool_names->v[i]);
+        json_set_str(ti, "name", ref);
         const char *lbl = o->tool_labels ? json_get_str(o->tool_labels, o->tool_names->v[i]) : NULL;
         json_set_str(ti, "label", lbl ? lbl : "");
         json_push(info, ti);
@@ -753,11 +755,24 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     json_set(data, "internalUrls", urls);
     json_set_str(data, "cwd", o->cwd);
     json_set_str(data, "model", settings_bool("includeModelInPrompt", true) && o->model_name ? o->model_name : "");
-    json_set_str(data, "delegationBias", settings_str("task.delegationBias", "gated"));
-    json_set_int(data, "MAX_CONCURRENCY", settings_int("task.maxConcurrency", 8));
+    /* delegation (sdk.ts buildSystemPrompt options): model catalog bias, task.eager/batch/maxConcurrency, IRC */
+    const char *bias = o->delegation_bias ? o->delegation_bias : "eager";
+    const char *eager = settings_str("task.eager", "default");
+    bool eager_tasks = !str_eq(eager, "default");
+    json_set_str(data, "delegationBias", bias);
+    json_set_bool(data, "eagerTasks", eager_tasks);
+    json_set_bool(data, "eagerTasksAlways", str_eq(eager, "always"));
+    json_set_bool(data, "inlineFirstDelegation", str_eq(bias, "restrained") && !eager_tasks);
+    int64_t maxc = settings_int("task.maxConcurrency", 32);
+    json_set_int(data, "MAX_CONCURRENCY", maxc > 0 ? maxc : 0);
+    json_set_bool(data, "taskBatch", settings_bool("task.batch", true));
+    json_set_bool(data, "taskIrcEnabled", o->irc_enabled);
+    bool scout = true;
+    json_t *dis = settings_get("task.disabledAgents"), *dv;
+    json_arr_foreach(dis, di, dv) if (str_eq(json_sv(dv), "scout")) scout = false;
+    json_set_bool(data, "scoutAvailable", scout);
     json_set_bool(data, "renderMermaid", false);
     json_set_bool(data, "subagent", o->subagent);
-    json_set_bool(data, "taskBatch", false);
     /* personality */
     const char *pers = settings_str("personality", "default");
     char *pfile = load_override(o->cwd, "PERSONALITY.md");

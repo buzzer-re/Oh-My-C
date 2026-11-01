@@ -70,6 +70,9 @@ typedef struct {
     const json_t *xdev_tools;         /* array of {name, summary, dynamic} mounted xd:// devices */
     const char *xdev_docs;            /* rendered xd:// device docs/catalog section */
     bool auto_qa;                     /* xd://report_issue automated QA advertised */
+    const json_t *tool_refs;          /* object: tool name -> name used in prompt references (e.g. edit -> apply_patch) */
+    const char *delegation_bias;      /* model_delegation_bias() of the session model */
+    bool irc_enabled;                 /* `write agent://<id>` peer messaging available */
 } sysprompt_opts_t;
 
 /* Whether a rule renders in the system prompt (<domain-rules> / <generic-rules>). Rules with a TTSR

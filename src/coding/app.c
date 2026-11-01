@@ -683,6 +683,9 @@ static void install_agent(app_t *a) {
 void app_rebuild_system_prompt(app_t *a) {
     strvec_t names = {0};
     json_t *labels = json_obj();
+    json_t *refs = json_obj();
+    /* edit's wire name in apply_patch mode (edit/index.ts customWireName) is how prompts reference it */
+    if (str_eq(a->env->edit_mode, "apply_patch")) json_set_str(refs, "edit", "apply_patch");
     for (size_t i = 0; i < a->agent->tools.n; i++) {
         strvec_push(&names, a->agent->tools.v[i]->name);
         if (a->agent->tools.v[i]->label) json_set_str(labels, a->agent->tools.v[i]->name, a->agent->tools.v[i]->label);
@@ -702,9 +705,13 @@ void app_rebuild_system_prompt(app_t *a) {
                            .tool_labels = labels,
                            .xdev_tools = xdev_tools,
                            .xdev_docs = xdev_docs,
-                           .auto_qa = !a->opts.tools && xdev_autoqa_enabled()};
+                           .auto_qa = !a->opts.tools && xdev_autoqa_enabled(),
+                           .tool_refs = refs,
+                           .delegation_bias = model_delegation_bias(a->model),
+                           .irc_enabled = !a->opts.tools && agent_find_tool(a->agent, "task") != NULL};
     json_t *blocks = build_system_prompt(&so);
     json_free(labels);
+    json_free(refs);
     json_free(xdev_tools);
     free(xdev_docs);
     if (a->plan_mode) {
