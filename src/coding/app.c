@@ -487,6 +487,7 @@ static char *app_propose_plan(tool_env_t *env, const char *content, bool *is_err
     free(a->fallback.role);
     free(a->fallback.original);
     strvec_free(&a->retry_notes);
+    free(a->model_role);
         a->plan_file = xstrdup(url);
         app_set_plan_mode(a, false);
         json_t *ctx = json_obj();
@@ -1284,6 +1285,8 @@ int app_set_model(app_t *a, const char *pattern, char **err) {
     a->model = m;
     agent_set_model(a->agent, m);
     a->fallback.active = false; /* an explicit model change clears fallback ownership */
+    free(a->model_role);
+    a->model_role = NULL;
     char *uk = mr_model_key(m);
     mr_usage_record(uk);
     free(uk);
@@ -1332,6 +1335,71 @@ char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const
     json_free(msgs);
     free(key);
     return text;
+}
+
+strvec_t app_cycle_order(void) {
+    strvec_t v = {0};
+    json_t *c = settings_get("cycleOrder"), *x;
+    if (json_is_arr(c)) {
+        json_arr_foreach(c, i, x) if (json_is_str(x)) strvec_push(&v, json_sv(x));
+    } else {
+        strvec_push(&v, "smol");
+        strvec_push(&v, "default");
+        strvec_push(&v, "slow");
+    }
+    return v;
+}
+
+int app_cycle_role_model(app_t *a, bool backward) {
+    if (!a->model) return -1;
+    strvec_t order = app_cycle_order();
+    mr_pool_t avail = {0};
+    mr_pool_available(&avail, "chat");
+    typedef struct {
+        size_t role;
+        const ai_model_t *m;
+        const char *level;
+        bool explicit_level;
+    } ent_t;
+    VEC(ent_t) es = {0};
+    for (size_t i = 0; i < order.n && avail.n; i++) {
+        char *cur = NULL;
+        const char *v = mr_role_get(order.v[i]);
+        if (!v && !strcmp(order.v[i], "default")) v = cur = mr_model_key(a->model);
+        mr_result_t r = {0};
+        if (v && mr_resolve_value(v, &avail, &r)) vec_push(&es, ((ent_t){i, r.model, r.level, r.explicit_level}));
+        mr_result_clear(&r);
+        free(cur);
+    }
+    int res = -1;
+    if (es.n > 1) {
+        long at = -1;
+        for (size_t i = 0; i < es.n && a->model_role && at < 0; i++)
+            if (!strcmp(order.v[es.v[i].role], a->model_role)) at = es.v[i].m == a->model ? (long)i : -2;
+        if (at < 0)
+            for (size_t i = 0; i < es.n && at < 0; i++)
+                if (es.v[i].m == a->model) at = (long)i;
+        if (at < 0) at = 0;
+        long n = (long)es.n;
+        ent_t nx = es.v[(at + (backward ? -1 : 1) + n) % n];
+        a->model = nx.m;
+        agent_set_model(a->agent, nx.m);
+        a->fallback.active = false;
+        free(a->model_role);
+        a->model_role = xstrdup(order.v[nx.role]);
+        char *k = mr_model_key(nx.m);
+        session_append_model_change(a->session, k, order.v[nx.role]);
+        mr_usage_record(k);
+        free(k);
+        ai_effort_t e;
+        if (nx.explicit_level && nx.level && effort_parse(nx.level, &e) == 0) app_set_thinking(a, e);
+        app_rebuild_system_prompt(a);
+        res = (int)nx.role;
+    }
+    free(es.v);
+    mr_pool_free(&avail);
+    strvec_free(&order);
+    return res;
 }
 
 /* try each model (then the session model) until one answers */

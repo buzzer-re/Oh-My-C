@@ -53,7 +53,8 @@ struct app {
     bool title_done;
     int retry_count;
     int retry_offset;
-    strvec_t retry_notes; /* recovery notes of this run's retried attempts, applied when a turn succeeds */ /* agent retry attempts spent before the latest fallback switch (fresh budget) */
+    strvec_t retry_notes;
+    char *model_role; /* role of the last model change made through a role (Ctrl+P cycle), NULL otherwise */ /* recovery notes of this run's retried attempts, applied when a turn succeeds */ /* agent retry attempts spent before the latest fallback switch (fresh budget) */
     /* active retry fallback (turn-recovery.ts ActiveRetryFallbackState) */
     struct {
         bool active, pinned, served;
@@ -157,6 +158,11 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
 char *app_api_key_for(const ai_model_t *m);
 /* pick a default model: settings modelRoles.default, else first provider with credentials */
 const ai_model_t *app_default_model(void);
+/* cycleOrder setting (default smol, default, slow) */
+strvec_t app_cycle_order(void);
+/* Ctrl+P role cycling (model-controls.ts cycleRoleModels): switches the session model to the next role
+ * model; returns the new role's index in app_cycle_order(), or -1 when one or no role model resolves */
+int app_cycle_role_model(app_t *a, bool backward);
 /* a role's model (resolveModelRoleValue("@role") over its candidate pool) */
 const ai_model_t *app_role_model(const char *role, ai_effort_t *effort_out, bool *has_effort);
 /* first answer from `models` (skipping the session model), then the session model; owned or NULL */

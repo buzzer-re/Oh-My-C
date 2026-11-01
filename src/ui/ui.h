@@ -58,6 +58,8 @@ struct ui {
     tui_t *tui;
     tui_container_t *chat;    /* ui_transcript_new() */
     tui_container_t *banner;  /* pinned error banner, between the transcript and the working row */
+    tui_container_t *model_cycle; /* Ctrl+P role track (modelCycleContainer), cleared after 4 s */
+    int model_cycle_timer;
     tui_component_t *working; /* ui_working_new(): retry countdown / compaction rows (chat.c) */
     tui_editor_t *editor;
     tui_loader_t *loader;     /* the "Working…" row, drawn by the status row (statusline.c) */
@@ -104,6 +106,8 @@ void add_view(ui_t *u, msgview_t *v);
 /* "info" -> dim status line (consecutive ones update in place), "warning" -> "Warning: …",
  * "error" -> "Error: …"; "Injecting rule: …" becomes a TTSR notice, "Retrying (n/m) in Ns…" the retry row */
 void add_notice(ui_t *u, const char *level, const char *text);
+/* chrome/segment-track.ts renderSegmentTrack (modelhub.c); owned */
+char *ui_segment_track(const char *const *labels, size_t n, int active);
 /* `• Background job completed …` rows for a delivered async-result prompt (no-op for other messages) */
 void ui_async_result(ui_t *u, const json_t *msg);
 void ui_retry_recovered(ui_t *u, const char *notes); /* "\n"-separated notes for the failed attempts */

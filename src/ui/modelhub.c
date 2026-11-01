@@ -1412,3 +1412,6 @@ void ui_overlay_model(ui_t *u) {
     tui_set_focus(u->tui, &h->base);
     tui_request_full_render(u->tui);
 }
+
+/* the chrome segment track for other surfaces (Ctrl+P model cycle track in interactive mode) */
+char *ui_segment_track(const char *const *labels, size_t n, int active) { return segment_track(labels, n, active); }
