@@ -41,8 +41,16 @@ check "xd listing"     "mounted tool devices"             "$B" -m mock/mock-1 -p
 check "xd docs"        "type Args = {"                    "$B" -m mock/mock-1 -p "read:xd://debug"
 check "xd dispatch"    "Invalid args for xd://lsp: Validation failed" "$B" -m mock/mock-1 -p 'call:write:{"path":"xd://lsp","content":"{\"action\":\"bogus\"}"}'
 check "xd report"      "Noted, thanks!"                   "$B" -m mock/mock-1 -p 'call:write:{"path":"xd://report_issue","content":"read: wrong output"}'
-check "glob tool"      "a/b.txt"                         "$B" -m mock/mock-1 -p "glob:**/*.txt"
+check "glob tool"      $'Tool said: # a/\nb.txt'          "$B" -m mock/mock-1 -p "glob:**/*.txt"
 check "grep tool"      "*1:written by omc"               "$B" -m mock/mock-1 -p "grep:written"
+# grep / glob result text as omp words it (grouped path tree, errors, empty results)
+check "grep grouped"   $'Tool said: # a/\n## b.txt#'      "$B" -m mock/mock-1 -p "grep:written"
+check "grep file"      $'[a/b.txt#'                      "$B" -m mock/mock-1 -p 'call:grep:{"pattern":"written","path":"a/b.txt:1-5"}'
+check "grep no match"  "Tool said: No matches found"     "$B" -m mock/mock-1 -p 'call:grep:{"pattern":"zzq_none"}'
+check "grep missing"   "Path not found: nope/x"          "$B" -m mock/mock-1 -p 'call:grep:{"pattern":"x","path":"nope/x"}'
+check "grep partial"   "Skipped missing paths: nope"     "$B" -m mock/mock-1 -p 'call:grep:{"pattern":"written","path":"a;nope"}'
+check "glob none"      "No files found matching pattern" "$B" -m mock/mock-1 -p 'call:glob:{"path":"*.zzq"}'
+check "glob limit"     "Requested limit 500 clamped to the max of 200" "$B" -m mock/mock-1 -p 'call:glob:{"path":"a","limit":500}'
 check "plain answer"   "plain answer"                    "$B" -m mock/mock-1 -p "hi"
 check "continue"       "plain answer"                    "$B" -m mock/mock-1 -c -p "again"
 check "json mode"      '"type":"agent_end"'              "$B" -m mock/mock-1 --mode json -p "bash:echo j"

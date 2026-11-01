@@ -102,7 +102,7 @@ static void pnode_walk(const pnode_t *n, int depth, dfiles_t *fs, bool *emitted,
         if (f->tag) sb_appendf(&h, "#%s", f->tag);
         if (f->suffix) sb_append(&h, f->suffix);
         strvec_push_own(out, sb_detach(&h));
-        if (model >= 0) dfile_model_rows(f, model > 0, out);
+        if (model >= 0) dfile_model_rows(f, model > 0 && f->tag, out);
         else dfile_rows(f, out);
         f->model_end = out->n;
     }
@@ -134,7 +134,7 @@ static strvec_t grep_render(dfiles_t *fs, bool grouped, int model) {
             if (out.n) strvec_push(&out, "");
             if (model >= 0) {
                 if (fs->v[i].tag) strvec_push_own(&out, xasprintf("[%s#%s]", fs->v[i].path, fs->v[i].tag));
-                dfile_model_rows(&fs->v[i], model > 0, &out);
+                dfile_model_rows(&fs->v[i], model > 0 && fs->v[i].tag, &out);
             } else {
                 dfile_rows(&fs->v[i], &out);
             }
@@ -1224,8 +1224,9 @@ searched:
         dfile_t df = {.path = disp};
         if (hashline) {
             size_t flen;
-            char *content = fs_read_limit(files.v[f0].key, 4u << 20, &flen, NULL);
-            if (content) df.tag = xstrdup(edit_store_record(&env->store, files.v[f0].key, content, -1, -1));
+            bool over = false;
+            char *content = fs_read_limit(files.v[f0].key, 4u << 20, &flen, &over);
+            if (content && !over && utf8_valid(content, flen)) df.tag = xstrdup(edit_store_record(&env->store, files.v[f0].key, content, -1, -1));
             free(content);
         }
         for (size_t k = 0; k < lists.v[li].n; k++) {
@@ -1592,14 +1593,11 @@ static int glob_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         char *n = norm_input(expanded.v[i]);
         char *r = str_replace(n, "\\", "/");
         free(n);
-        strvec_push_own(&patterns, r);
-    }
-    for (size_t i = 0; i < patterns.n; i++) {
-        const char *p = patterns.v[i];
-        if (*p && strspn(p, "/") == strlen(p)) {
-            errmsg = xstrdup("Searching from root directory '/' is not allowed");
-            goto fail;
+        if (*r && strspn(r, "/") == strlen(r)) { /* the registered glob tool aliases a bare `/` to cwd */
+            free(r);
+            r = xstrdup(".");
         }
+        strvec_push_own(&patterns, r);
     }
     for (size_t i = 0; i < patterns.n; i++)
         if (!*patterns.v[i]) {
