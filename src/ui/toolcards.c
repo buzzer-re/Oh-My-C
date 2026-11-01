@@ -264,6 +264,7 @@ static void fill_call(tc_call_t *c, const char *name, const json_t *args, const 
     memset(c, 0, sizeof *c);
     c->name = name;
     c->label = tool_label(name);
+    tc_tool_label = tool_label;
     c->args = args;
     c->content = result ? json_get_arr(result, "content") : NULL;
     c->details = result ? json_get_obj(result, "details") : NULL;
