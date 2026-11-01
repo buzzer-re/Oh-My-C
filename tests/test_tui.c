@@ -803,7 +803,7 @@ static void test_renderer(void) {
     char *o2 = drain_fd(pfd[0]);
     CHECK(strstr(o2, "line 2!") != NULL);
     CHECK(!strstr(o2, "line one") && !strstr(o2, "line three"));
-    CHECK(str_count(o2, "\x1b[2K") == 1);
+    CHECK(str_count(o2, "\x1b[K") == 1 && !strstr(o2, "\x1b[2K")); /* written, then erased to EOL */
     CHECK(strstr(o2, "\x1b[1A") != NULL); /* moved up one row from the last line */
     CHECK(strlen(o2) < 80);
     free(o2);
@@ -813,7 +813,7 @@ static void test_renderer(void) {
     tui_container_add(tui_root(t), &d->base);
     tui_render_now(t);
     char *o3 = drain_fd(pfd[0]);
-    CHECK(strstr(o3, "\r\n") && strstr(o3, "line four") && !strstr(o3, "line three"));
+    CHECK(strstr(o3, "line four") && !strstr(o3, "line three"));
     free(o3);
     CHECK(tui_prev_lines(t)->n == 4);
 
@@ -826,7 +826,8 @@ static void test_renderer(void) {
     free(o4);
     CHECK(tui_prev_lines(t)->n == 3);
 
-    /* scroll content past the viewport, then change a line in scrollback -> full redraw */
+    /* scroll content past the viewport, then change a line in scrollback: committed history is
+     * never repainted (omp), so no clear and nothing written */
     for (int i = 0; i < 12; i++) {
         char buf[32];
         snprintf(buf, sizeof buf, "extra %d", i);
@@ -838,8 +839,8 @@ static void test_renderer(void) {
     tui_text_set(a, "changed first");
     tui_render_now(t);
     char *o5 = drain_fd(pfd[0]);
-    CHECK(tui_full_redraw_count(t) == fulls + 1);
-    CHECK(strstr(o5, "\x1b[3J") != NULL);
+    CHECK(tui_full_redraw_count(t) == fulls);
+    CHECK(!strstr(o5, "\x1b[3J") && !strstr(o5, "changed first"));
     free(o5);
 
     /* overlay composited over the bottom of the viewport */
@@ -875,14 +876,211 @@ static void test_renderer(void) {
     CHECK(!strstr(o7, "\x1b_pi:c"));
     free(o7);
 
-    /* resize -> full redraw */
+    /* resize -> the screen is repainted from its top row, scrollback is kept (omp `preserve`) */
     tui_term_set_size(tm, 30, 10);
     tui_render_now(t);
-    CHECK(tui_full_redraw_count(t) == fulls + 2);
-    free(drain_fd(pfd[0]));
+    CHECK(tui_full_redraw_count(t) == fulls);
+    char *o8 = drain_fd(pfd[0]);
+    CHECK(strstr(o8, "\x1b[H") && !strstr(o8, "\x1b[3J"));
+    free(o8);
+
+    /* an explicit full request clears screen + scrollback */
+    tui_request_full_render(t);
+    tui_render_now(t);
+    CHECK(tui_full_redraw_count(t) == fulls + 1);
+    char *o9 = drain_fd(pfd[0]);
+    CHECK(strstr(o9, "\x1b[3J") != NULL);
+    free(o9);
 
     /* posted callbacks + timers via run_once */
     tui_free(t);
+    close(pfd[0]);
+}
+
+/* ---------- renderer vs a tiny VT emulator ---------- */
+
+/* Enough of a terminal to replay the renderer's output: printable ASCII (other characters become
+ * '?'), CR/LF with scrolling into a scrollback, CUU/CUD/CUF/CUB/CHA/CUP, ED, EL; SGR, private
+ * modes, OSC and APC strings are ignored. DECAWM is treated as off (the renderer disables it). */
+#define VT_COLS 40
+#define VT_ROWS 10
+typedef struct {
+    char screen[VT_ROWS][VT_COLS + 1];
+    int cx, cy;
+    strvec_t scrollback;
+} vt_t;
+
+static void vt_init(vt_t *v) {
+    memset(v, 0, sizeof *v);
+    for (int r = 0; r < VT_ROWS; r++) memset(v->screen[r], ' ', VT_COLS);
+}
+
+static char *vt_row(const char *row) {
+    char *s = xstrdup(row);
+    size_t n = strlen(s);
+    while (n && s[n - 1] == ' ') s[--n] = 0;
+    return s;
+}
+
+static void vt_lf(vt_t *v) {
+    if (v->cy < VT_ROWS - 1) {
+        v->cy++;
+        return;
+    }
+    char *top = vt_row(v->screen[0]);
+    strvec_push(&v->scrollback, top);
+    free(top);
+    memmove(v->screen[0], v->screen[1], sizeof v->screen[0] * (VT_ROWS - 1));
+    memset(v->screen[VT_ROWS - 1], ' ', VT_COLS);
+}
+
+static void vt_feed(vt_t *v, const char *s) {
+    for (const unsigned char *p = (const unsigned char *)s; *p;) {
+        if (*p == '\r') v->cx = 0, p++;
+        else if (*p == '\n') vt_lf(v), p++;
+        else if (*p == 0x1b && (p[1] == ']' || p[1] == '_')) { /* OSC / APC: to BEL or ST */
+            p += 2;
+            while (*p && *p != 0x07 && !(*p == 0x1b && p[1] == '\\')) p++;
+            p += *p == 0x07 ? 1 : *p ? 2 : 0;
+        } else if (*p == 0x1b && p[1] == '[') {
+            p += 2;
+            bool priv = *p == '?';
+            if (priv) p++;
+            int a[4] = {0, 0, 0, 0}, na = 0;
+            while ((*p >= '0' && *p <= '9') || *p == ';') {
+                if (*p == ';') na = MIN(na + 1, 3);
+                else a[na] = a[na] * 10 + (*p - '0');
+                p++;
+            }
+            char f = (char)*p;
+            if (*p) p++;
+            if (priv) continue;
+            int n1 = a[0] ? a[0] : 1;
+            switch (f) {
+            case 'A': v->cy = MAX(0, v->cy - n1); break;
+            case 'B': v->cy = MIN(VT_ROWS - 1, v->cy + n1); break;
+            case 'C': v->cx = MIN(VT_COLS - 1, v->cx + n1); break;
+            case 'D': v->cx = MAX(0, v->cx - n1); break;
+            case 'G': v->cx = MIN(VT_COLS - 1, n1 - 1); break;
+            case 'H': v->cy = MIN(VT_ROWS - 1, n1 - 1), v->cx = MIN(VT_COLS - 1, (a[1] ? a[1] : 1) - 1); break;
+            case 'J':
+                if (a[0] == 3) strvec_free(&v->scrollback);
+                else if (a[0] == 2) for (int r = 0; r < VT_ROWS; r++) memset(v->screen[r], ' ', VT_COLS);
+                else {
+                    memset(v->screen[v->cy] + v->cx, ' ', VT_COLS - v->cx);
+                    for (int r = v->cy + 1; r < VT_ROWS; r++) memset(v->screen[r], ' ', VT_COLS);
+                }
+                break;
+            case 'K':
+                if (a[0] == 2) memset(v->screen[v->cy], ' ', VT_COLS);
+                else memset(v->screen[v->cy] + v->cx, ' ', VT_COLS - v->cx);
+                break;
+            default: break;
+            }
+        } else if (*p == 0x1b) p += p[1] ? 2 : 1;
+        else {
+            char c = (char)*p;
+            if (*p >= 0x80) { /* one UTF-8 sequence -> '?' */
+                c = '?';
+                p++;
+                while ((*p & 0xc0) == 0x80) p++;
+            } else p++;
+            if (c < 0x20) continue;
+            v->screen[v->cy][v->cx] = c;
+            if (v->cx < VT_COLS - 1) v->cx++;
+        }
+    }
+}
+
+/* the emulated screen shows the frame's last VT_ROWS rows (or the whole frame from row 0) */
+static bool vt_shows_tail(vt_t *v, tui_t *t) {
+    const strvec_t *f = tui_prev_lines(t);
+    int top = MAX(0, (int)f->n - VT_ROWS);
+    bool ok = true;
+    for (int r = 0; r < VT_ROWS; r++) {
+        char *want = (size_t)(top + r) < f->n ? tui_strip_ansi(f->v[top + r]) : xstrdup("");
+        char *got = vt_row(v->screen[r]);
+        if (strcmp(want, got)) {
+            fprintf(stderr, "screen row %d: want \"%s\" got \"%s\"\n", r, want, got);
+            ok = false;
+        }
+        free(want);
+        free(got);
+    }
+    return ok;
+}
+
+static void vt_render(vt_t *v, tui_t *t, int fd) {
+    tui_render_now(t);
+    char *o = drain_fd(fd);
+    vt_feed(v, o);
+    free(o);
+}
+
+static void test_renderer_viewport(void) {
+    int pfd[2];
+    CHECK(pipe(pfd) == 0);
+    fcntl(pfd[0], F_SETFL, O_NONBLOCK);
+    tui_term_t *tm = tui_term_new(-1, pfd[1]);
+    tui_term_set_size(tm, VT_COLS, VT_ROWS);
+    tui_t *t = tui_new(tm);
+    vt_t v;
+    vt_init(&v);
+    tui_text_t *rows[25];
+    for (int i = 0; i < 25; i++) {
+        char buf[32];
+        snprintf(buf, sizeof buf, "row %d", i);
+        rows[i] = tui_text_new(buf, 0, 0);
+        tui_container_add(tui_root(t), &rows[i]->base);
+    }
+    vt_render(&v, t, pfd[0]);
+    CHECK(vt_shows_tail(&v, t));
+    CHECK(v.scrollback.n == 15 && str_eq(v.scrollback.v[14], "row 14"));
+
+    /* an animation above the viewport (same height): nothing is written, no clear */
+    tui_text_set(rows[3], "ROW 3!");
+    tui_render_now(t);
+    char *o = drain_fd(pfd[0]);
+    CHECK(!strstr(o, "ROW") && !strstr(o, "row") && !strstr(o, "\x1b[3J"));
+    vt_feed(&v, o);
+    free(o);
+    CHECK(vt_shows_tail(&v, t));
+
+    /* a block above the viewport grows by one row: the rows on screen do not move */
+    tui_text_set(rows[5], "row 5\nrow 5b");
+    tui_render_now(t);
+    o = drain_fd(pfd[0]);
+    CHECK(!strstr(o, "row"));
+    vt_feed(&v, o);
+    free(o);
+    CHECK(vt_shows_tail(&v, t));
+
+    /* ...shrinks again while three rows stream in at the bottom: those scroll the screen and the
+     * rows they push into scrollback continue it without a gap or duplicate */
+    tui_text_set(rows[5], "row 5");
+    for (int i = 0; i < 3; i++) {
+        char buf[32];
+        snprintf(buf, sizeof buf, "tail %d", i);
+        tui_container_add(tui_root(t), &tui_text_new(buf, 0, 0)->base);
+    }
+    vt_render(&v, t, pfd[0]);
+    CHECK(vt_shows_tail(&v, t));
+    CHECK(v.scrollback.n == 18 && str_eq(v.scrollback.v[17], "row 17"));
+
+    /* a change above plus one on screen: the visible row is rewritten in place */
+    tui_text_set(rows[2], "two");
+    tui_text_set(rows[22], "row 22 edited");
+    vt_render(&v, t, pfd[0]);
+    CHECK(vt_shows_tail(&v, t));
+
+    /* a tall block on screen collapses below the screen top: content is pulled back onto it */
+    for (int i = 12; i < 25; i++) tui_text_set(rows[i], "");
+    vt_render(&v, t, pfd[0]);
+    CHECK(vt_shows_tail(&v, t));
+    CHECK(tui_full_redraw_count(t) == 0);
+
+    tui_free(t);
+    strvec_free(&v.scrollback);
     close(pfd[0]);
 }
 
@@ -916,6 +1114,7 @@ int main(void) {
     test_select();
     test_fuzzy_select();
     test_renderer();
+    test_renderer_viewport();
     test_loop();
     tui_theme_set(NULL);
     tui_keybindings_set_global(NULL);

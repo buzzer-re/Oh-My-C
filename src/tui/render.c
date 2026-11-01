@@ -154,8 +154,14 @@ struct tui {
     bool have_frame;
     bool show_hw_cursor;
     int min_interval;
-    int64_t last_render;
+    int64_t last_render; /* start of the last frame */
+    int last_cost;       /* wall-clock ms the last frame took */
     int render_count, full_count;
+    /* OMC_TUI_DEBUG=<file>: one line per frame (kind, trigger, rows, bytes) */
+    FILE *dbg;
+    const char *frame_kind; /* "diff", "none", "first", "full:<trigger>" */
+    int dbg_first;
+    char *dbg_old, *dbg_new;
 
     /* cross-thread */
     pthread_mutex_t mu;
@@ -194,7 +200,7 @@ tui_t *tui_new(tui_term_t *term) {
     t->term = term ? term : tui_term_new(STDIN_FILENO, STDOUT_FILENO);
     t->root = tui_container_new();
     t->root->base.tui = t;
-    t->min_interval = 16;
+    t->min_interval = 33; /* omp: MIN_RENDER_INTERVAL_MS = 1000 / 30 */
     pthread_mutex_init(&t->mu, NULL);
     t->wake[0] = t->wake[1] = -1;
     if (pipe(t->wake) == 0) {
@@ -207,6 +213,11 @@ tui_t *tui_new(tui_term_t *term) {
     t->next_timer_id = 1;
     t->ui_thread = pthread_self();
     t->ui_thread_set = true;
+    const char *dbg = getenv("OMC_TUI_DEBUG");
+    if (dbg && *dbg) {
+        t->dbg = fopen(dbg, "a");
+        if (t->dbg) setvbuf(t->dbg, NULL, _IOLBF, 0);
+    }
     return t;
 }
 
@@ -223,6 +234,9 @@ void tui_free(tui_t *t) {
     if (t->wake[0] >= 0) close(t->wake[0]);
     if (t->wake[1] >= 0) close(t->wake[1]);
     pthread_mutex_destroy(&t->mu);
+    if (t->dbg) fclose(t->dbg);
+    free(t->dbg_old);
+    free(t->dbg_new);
     tui_term_free(t->term);
     free(t);
 }
@@ -261,6 +275,10 @@ void tui_set_show_hardware_cursor(tui_t *t, bool show) {
 }
 
 void tui_set_min_render_interval(tui_t *t, int ms) { t->min_interval = ms < 0 ? 0 : ms; }
+
+/* Gap between frame starts (omp #scheduleRender): the 30 fps cadence, stretched to twice the last
+ * frame's cost (~50% render duty cycle, capped at 200 ms) so heavy frames cannot busy-loop. */
+static int render_gap(const tui_t *t) { return MAX(t->min_interval, MIN(200, 2 * t->last_cost)); }
 
 const strvec_t *tui_prev_lines(const tui_t *t) { return &t->prev; }
 int tui_render_count(const tui_t *t) { return t->render_count; }
@@ -424,10 +442,68 @@ static void position_cursor(tui_t *t, const cursor_pos_t *cp, int total) {
     }
 }
 
+/* plain-text excerpt of a frame line for the debug log */
+static char *dbg_excerpt(const char *s) {
+    if (!s) return xstrdup("");
+    char *p = tui_strip_ansi(s);
+    if (strlen(p) > 60) p[60] = 0;
+    return p;
+}
+
+static void dbg_note(tui_t *t, const char *kind, int first, const char *old_line, const char *new_line) {
+    t->frame_kind = kind;
+    if (!t->dbg) return;
+    t->dbg_first = first;
+    free(t->dbg_old);
+    free(t->dbg_new);
+    t->dbg_old = old_line ? dbg_excerpt(old_line) : NULL;
+    t->dbg_new = new_line ? dbg_excerpt(new_line) : NULL;
+}
+
+/* omp PAINT_BEGIN / PAINT_END: hide the cursor, open the synchronized update and disable autowrap
+ * while a frame is written (a full-width row never leaves a pending wrap behind). */
+static void paint_begin(tui_t *t) {
+    tui_term_t *tm = t->term;
+    if (!tm->cursor_hidden) tui_term_cursor_show(tm, false);
+    tui_term_sync_begin(tm);
+    tui_term_puts(tm, "\x1b[?7l");
+}
+
+/* One row rewrite at column 0 (omp #lineRewriteSequence): an ASCII row is written, then erased to
+ * the end of the line (no EL when it fills the row: EL there would eat the last cell), so the row
+ * never shows blank on terminals without synchronized output. A row with non-ASCII text is erased
+ * first (the width model can over-count it and leave stale cells). */
+static void write_row(tui_term_t *tm, const char *line, int width) {
+    for (const unsigned char *p = (const unsigned char *)line; *p; p++) {
+        if (*p >= 0x80) {
+            tui_term_puts(tm, "\x1b[0m\x1b[K");
+            tui_term_puts(tm, line);
+            return;
+        }
+    }
+    tui_term_puts(tm, line);
+    if (tui_visible_width(line) < width) tui_term_puts(tm, "\x1b[K");
+}
+
 static void finish_frame(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int width, int height) {
     position_cursor(t, cp, (int)lines->n);
+    tui_term_puts(t->term, "\x1b[?7h");
     tui_term_sync_end(t->term);
+    if (t->dbg) {
+        fprintf(t->dbg, "%lld frame=%d kind=%s bytes=%zu prev=%zu new=%zu vtop=%d first=%d", (long long)mono_ms(),
+                t->render_count, t->frame_kind ? t->frame_kind : "?", t->term->out.len, t->prev.n, lines->n,
+                t->viewport_top, t->dbg_first);
+        if (t->dbg_old || t->dbg_new)
+            fprintf(t->dbg, " old=\"%s\" new=\"%s\"", t->dbg_old ? t->dbg_old : "", t->dbg_new ? t->dbg_new : "");
+        fputc('\n', t->dbg);
+        free(t->dbg_old);
+        free(t->dbg_new);
+        t->dbg_old = t->dbg_new = NULL;
+        t->dbg_first = -1;
+    }
+    t->frame_kind = NULL;
     tui_term_flush(t->term);
+    t->last_cost = (int)(mono_ms() - t->last_render);
     strvec_free(&t->prev);
     t->prev = *lines;
     memset(lines, 0, sizeof *lines);
@@ -437,9 +513,12 @@ static void finish_frame(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int 
     t->render_count++;
 }
 
+/* Write every row: the first frame from where the cursor is, or (clear) after erasing the screen and
+ * scrollback. Clearing is reserved for explicit full requests (session replace, transcript
+ * rebuild): omp's destructive reset (`clearScrollback`). */
 static void full_render(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int width, int height, bool clear) {
     tui_term_t *tm = t->term;
-    tui_term_sync_begin(tm);
+    paint_begin(t);
     if (clear) {
         tui_term_clear_screen(tm, true);
         t->viewport_top = 0;
@@ -458,119 +537,136 @@ static void full_render(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int w
     finish_frame(t, lines, cp, width, height);
 }
 
+/* After a resize, repaint only the screen with the frame's tail (omp's default `preserve` resize
+ * mode): native scrollback keeps what it already holds. */
+static void window_repaint(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int width, int height) {
+    tui_term_t *tm = t->term;
+    int nn = (int)lines->n;
+    paint_begin(t);
+    int top = MAX(0, nn - height);
+    tui_term_puts(tm, "\x1b[H");
+    for (int i = top; i < nn; i++) {
+        if (i > top) tui_term_puts(tm, "\r\n");
+        write_row(tm, lines->v[i], width);
+    }
+    tui_term_puts(tm, "\r\x1b[J");
+    t->viewport_top = top;
+    t->hw_row = MAX(top, nn - 1);
+    finish_frame(t, lines, cp, width, height);
+}
+
+/* Rows above the viewport are committed to native scrollback: they are never repainted (omp's
+ * history rows). When the frame changes up there, find where the rows on screen moved to: the shift
+ * k (new index = old index + k) with the longest run of identical rows from the top of the
+ * viewport, smallest |k| first. 0 when no shift lines up min(3, visible) rows: the visible rows are
+ * then repainted in place. */
+static int align_viewport(const tui_t *t, const strvec_t *lines, int height) {
+    int pn = (int)t->prev.n, nn = (int)lines->n, vt = t->viewport_top;
+    int vis = MIN(height, pn - vt);
+    if (vis <= 0 || vt < 0) return 0;
+    int range = height + abs(nn - pn);
+    int best_k = 0, best_len = -1;
+    for (int d = 0; d <= range && best_len < vis; d++) {
+        for (int sgn = 0; sgn < (d ? 2 : 1); sgn++) {
+            int k = sgn ? -d : d, len = 0;
+            while (len < vis) {
+                int ni = vt + k + len;
+                if (ni < 0 || ni >= nn || strcmp(lines->v[ni], t->prev.v[vt + len])) break;
+                len++;
+            }
+            if (len > best_len) {
+                best_len = len;
+                best_k = k;
+            }
+        }
+    }
+    return best_len >= MIN(3, vis) ? best_k : 0;
+}
+
 static void do_render(tui_t *t) {
     tui_term_t *tm = t->term;
     int width = MAX(1, tm->cols), height = MAX(1, tm->rows);
     strvec_t lines = {0};
+    t->last_render = mono_ms();
     tui_component_render(&t->root->base, width, &lines);
     if (t->overlays.n) composite_overlays(t, &lines, width, height);
     cursor_pos_t cp = extract_cursor(&lines, height);
     normalize_lines(&lines, width);
-    t->last_render = mono_ms();
 
     bool full = t->full_pending;
     t->full_pending = false;
     if (!t->have_frame) {
+        dbg_note(t, "first", 0, NULL, NULL);
         full_render(t, &lines, &cp, width, height, false);
         return;
     }
-    if (full || width != t->prev_width || height != t->prev_height) {
+    if (full) {
+        dbg_note(t, "full:request", 0, NULL, NULL);
         full_render(t, &lines, &cp, width, height, true);
         return;
     }
+    if (width != t->prev_width || height != t->prev_height) {
+        dbg_note(t, width != t->prev_width ? "resize:width" : "resize:height", 0, NULL, NULL);
+        window_repaint(t, &lines, &cp, width, height);
+        return;
+    }
 
-    int nn = (int)lines.n, pn = (int)t->prev.n;
-    int first = -1, last = -1;
+    int nn = (int)lines.n, pn = (int)t->prev.n, vt = t->viewport_top;
+    int first = -1;
     for (int i = 0; i < MAX(nn, pn); i++) {
-        const char *o = i < pn ? t->prev.v[i] : "";
-        const char *n = i < nn ? lines.v[i] : "";
-        if (strcmp(o, n)) {
-            if (first < 0) first = i;
-            last = i;
+        if (i >= nn || i >= pn || strcmp(t->prev.v[i], lines.v[i])) {
+            first = i;
+            break;
         }
     }
-    bool appended = nn > pn;
-    if (appended) {
-        if (first < 0) first = pn;
-        last = nn - 1;
-    }
-    bool append_start = appended && first == pn && first > 0;
-
+    paint_begin(t);
     if (first < 0) {
-        tui_term_sync_begin(tm);
+        dbg_note(t, "none", -1, NULL, NULL);
         finish_frame(t, &lines, &cp, width, height);
         return;
     }
-
-    if (first >= nn) {
-        /* only deletions at the end */
-        int target = MAX(0, nn - 1);
-        int extra = pn - nn;
-        if (extra >= height || target < t->viewport_top) {
-            full_render(t, &lines, &cp, width, height, true);
-            return;
+    int k = 0;
+    if (first < vt) {
+        k = align_viewport(t, &lines, height);
+        dbg_note(t, k ? "above:shift" : "above", first, first < pn ? t->prev.v[first] : NULL,
+                 first < nn ? lines.v[first] : NULL);
+    } else {
+        dbg_note(t, "diff", first, NULL, NULL);
+    }
+    /* base: the new row that belongs on screen row 0. Content that now ends above the screen (a large
+     * collapse) is pulled back onto it; rows scroll only when the frame outgrows the screen. */
+    int base = vt + k;
+    if (nn > 0 && nn - 1 < base) base = MAX(0, nn - height);
+    int cr = MIN(MAX(t->hw_row - vt, 0), height - 1); /* cursor's screen row */
+    int sc = 0;                                       /* rows scrolled into scrollback */
+    for (int j = MAX(0, base); j < nn; j++) {
+        int r = j - base - sc;
+        if (r < height) {
+            int oi = vt + r; /* old row on screen row r */
+            if (oi >= 0 && oi < pn && !strcmp(t->prev.v[oi], lines.v[j])) continue;
+            move_rows(tm, r - cr);
+            tui_term_puts(tm, "\r");
+            cr = r;
+            write_row(tm, lines.v[j], width);
+            continue;
         }
-        tui_term_sync_begin(tm);
-        move_rows(tm, target - t->hw_row);
-        tui_term_puts(tm, "\r");
-        if (nn == 0) {
-            /* clear from the first row down */
-            for (int i = 0; i < extra; i++) {
-                tui_term_puts(tm, "\x1b[2K");
-                if (i < extra - 1) tui_term_puts(tm, "\x1b[1B");
-            }
-            if (extra > 1) tui_term_printf(tm, "\x1b[%dA", extra - 1);
-        } else {
-            tui_term_puts(tm, "\x1b[1B");
-            for (int i = 0; i < extra; i++) {
-                tui_term_puts(tm, "\r\x1b[2K");
-                if (i < extra - 1) tui_term_puts(tm, "\x1b[1B");
-            }
-            tui_term_printf(tm, "\x1b[%dA", extra);
-        }
-        t->hw_row = target;
-        finish_frame(t, &lines, &cp, width, height);
-        return;
+        /* below the screen: append at the bottom row, scrolling the top row into scrollback */
+        move_rows(tm, height - 1 - cr);
+        tui_term_puts(tm, "\r\n");
+        sc++;
+        cr = height - 1;
+        write_row(tm, lines.v[j], width);
     }
-
-    int move_target = append_start ? first - 1 : first;
-    if (first < t->viewport_top || move_target < t->viewport_top) {
-        full_render(t, &lines, &cp, width, height, true);
-        return;
+    /* old rows left on screen below the new frame's end */
+    for (int r = MAX(0, nn - base - sc); sc == 0 && r < height; r++) {
+        int oi = vt + r;
+        if (oi < 0 || oi >= pn) continue;
+        move_rows(tm, r - cr);
+        tui_term_puts(tm, "\r\x1b[2K");
+        cr = r;
     }
-
-    tui_term_sync_begin(tm);
-    int vbottom = t->viewport_top + height - 1;
-    if (move_target > vbottom) {
-        int cur_screen = MIN(MAX(t->hw_row - t->viewport_top, 0), height - 1);
-        int down = height - 1 - cur_screen;
-        if (down > 0) tui_term_printf(tm, "\x1b[%dB", down);
-        int scroll = move_target - vbottom;
-        for (int i = 0; i < scroll; i++) tui_term_puts(tm, "\r\n");
-        t->viewport_top += scroll;
-        t->hw_row = move_target;
-    }
-    move_rows(tm, move_target - t->hw_row);
-    tui_term_puts(tm, append_start ? "\r\n" : "\r");
-
-    int render_end = MIN(last, nn - 1);
-    for (int i = first; i <= render_end; i++) {
-        if (i > first) tui_term_puts(tm, "\r\n");
-        tui_term_puts(tm, "\x1b[2K");
-        tui_term_puts(tm, lines.v[i]);
-    }
-    int final_row = render_end;
-    if (pn > nn) {
-        if (render_end < nn - 1) {
-            tui_term_printf(tm, "\x1b[%dB", nn - 1 - render_end);
-            final_row = nn - 1;
-        }
-        int extra = pn - nn;
-        for (int i = 0; i < extra; i++) tui_term_puts(tm, "\r\n\x1b[2K");
-        tui_term_printf(tm, "\x1b[%dA", extra);
-    }
-    t->hw_row = final_row;
-    if (final_row > t->viewport_top + height - 1) t->viewport_top = final_row - height + 1;
+    t->viewport_top = base + sc;
+    t->hw_row = t->viewport_top + cr;
     finish_frame(t, &lines, &cp, width, height);
 }
 
@@ -804,8 +900,9 @@ static void handle_signal(tui_t *t, int sig) {
         int oc = t->term->cols, orows = t->term->rows;
         tui_term_query_size(t->term);
         if (oc != t->term->cols || orows != t->term->rows) {
+            /* the frame sees the new size and repaints the screen (scrollback is kept, as in omp) */
             tui_component_invalidate(&t->root->base);
-            tui_request_full_render(t);
+            tui_request_render(t);
         }
         return;
     }
@@ -847,7 +944,7 @@ bool tui_run_once(tui_t *t, int timeout_ms) {
     pthread_mutex_unlock(&t->mu);
     if (stop) return false;
     if (npost) to = 0;
-    if (rp) CLAMP_TO(t->last_render + t->min_interval - now);
+    if (rp) CLAMP_TO(t->last_render + render_gap(t) - now);
 #undef CLAMP_TO
 
     struct pollfd fds[3];
@@ -899,7 +996,7 @@ bool tui_run_once(tui_t *t, int timeout_ms) {
 
     now = mono_ms();
     pthread_mutex_lock(&t->mu);
-    bool do_it = t->render_pending && (now - t->last_render >= t->min_interval || t->stop_requested);
+    bool do_it = t->render_pending && (now - t->last_render >= render_gap(t) || t->stop_requested);
     if (do_it) t->render_pending = false;
     stop = t->stop_requested;
     pthread_mutex_unlock(&t->mu);
