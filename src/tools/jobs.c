@@ -593,7 +593,7 @@ static char *bash_body(bgjob_t *x, void *ud, bool *failed) {
     if (b->shell) rc = shell_run_try(b->shell, cmd, b->cwd, &o, &b->res);
     if (rc == -2) {
         b->temp_shell = b->shell != NULL;
-        rc = proc_shell(cmd, &o, &b->res);
+        rc = shell_exec_once(cmd, &o, &b->res);
     }
     b->rc = rc;
     free(rewritten);

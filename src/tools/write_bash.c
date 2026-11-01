@@ -821,7 +821,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
                          .cancel = ctx->cancel,
                          .on_output = bash_on_output,
                          .ud = &bs};
-        int rc = (!pty && persistent) ? shell_run(env->shell, full, cwd, &o, &r) : proc_shell(full, &o, &r);
+        int rc = (!pty && persistent) ? shell_run(env->shell, full, cwd, &o, &r) : shell_exec_once(full, &o, &r);
         if (rc != 0 && !r.spawn_errno) r.spawn_errno = errno ? errno : EIO;
     }
     int64_t dur = mono_ms() - t0;
