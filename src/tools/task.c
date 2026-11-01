@@ -1,5 +1,6 @@
 /* task tool: spawn subagents (parallel batch); agent definitions from bundled + user agents dirs */
 #include "tools.h"
+#include "coding/agents.h"
 
 #include "coding/discovery.h"
 #include "config/settings.h"
@@ -60,23 +61,45 @@ static void scan_agents(json_t *out, const char *dir) {
     dirlist_free(&dl);
 }
 
-/* returns owned object name -> def */
+
+/* Bundled agents in upstream order (task/agents.ts EMBEDDED_AGENT_DEFS): scout, reviewer, security-reviewer, seance
+ * from their markdown; `task` and `sonic` share the task.md body with synthesized frontmatter. Then user agents
+ * (~/.omc/agent/agents) and project agents (.omc/.omp/.claude agents dirs). Returns owned object name -> def. */
 json_t *agent_defs_load(const char *cwd) {
     json_t *out = json_obj();
-    static const char *bundled[] = {"task", "scout", "reviewer", "security-reviewer", "init"};
-    for (size_t i = 0; i < ARRAY_LEN(bundled); i++) {
-        char *rel = xasprintf("coding-agent/prompts/agents/%s.md", bundled[i]);
+    static const char *files[] = {"scout", "reviewer", "security-reviewer", "seance"};
+    for (size_t i = 0; i < ARRAY_LEN(files); i++) {
+        char *rel = xasprintf("coding-agent/prompts/agents/%s.md", files[i]);
         char *t = prompt_load(rel);
         free(rel);
         if (!t) continue;
-        json_t *d = parse_agent_def(t, bundled[i]);
-        if (!json_get_str(d, "description") || !*json_get_str(d, "description")) {
-            json_set_str(d, "description", !strcmp(bundled[i], "task") ? "General-purpose worker with full tool access"
-                                                                         : bundled[i]);
-        }
-        json_set_str(d, "name", bundled[i]);
-        json_set(out, bundled[i], d);
+        json_t *d = parse_agent_def(t, files[i]);
+        json_set_str(d, "source", "bundled");
+        json_set(out, json_get_str(d, "name"), d);
         free(t);
+    }
+    char *body = prompt_load("coding-agent/prompts/agents/task.md");
+    if (body) {
+        static const struct {
+            const char *name, *description, *model, *thinking;
+        } synth[] = {
+            {"task", "General-purpose subagent with full capabilities for delegated multi-step tasks", "@task", NULL},
+            {"sonic", "Low-reasoning agent for strictly mechanical updates or data collection only", "@smol", "medium"},
+        };
+        for (size_t i = 0; i < ARRAY_LEN(synth); i++) {
+            json_t *d = json_obj();
+            json_set_str(d, "name", synth[i].name);
+            json_set_str(d, "description", synth[i].description);
+            json_set(d, "tools", json_arr());
+            json_set_str(d, "model", synth[i].model);
+            if (synth[i].thinking) json_set_str(d, "thinking", synth[i].thinking);
+            char *b = tpl_render(body, NULL);
+            json_set_str(d, "body", b);
+            free(b);
+            json_set_str(d, "source", "bundled");
+            json_set(out, synth[i].name, d);
+        }
+        free(body);
     }
     char *ua = omc_agent_path("agents");
     scan_agents(out, ua);
@@ -90,30 +113,45 @@ json_t *agent_defs_load(const char *cwd) {
     return out;
 }
 
+/* task/read-only-policy.ts: read-only iff the declared tools are a non-empty subset of read-tier tools */
+static bool agent_read_only(const json_t *def) {
+    static const char *const RO[] = {"read",     "wait",  "grep", "glob",   "find",        "web_search",
+                                     "ast_grep", "yield", "ask",  "todo",   "recall",      "reflect",
+                                     "retain",   "memory_edit",   "checkpoint", "rewind"};
+    json_t *tl = json_get_arr(def, "tools"), *t;
+    if (!json_len(tl)) return false;
+    json_arr_foreach(tl, i, t) {
+        bool ok = false;
+        for (size_t k = 0; k < ARRAY_LEN(RO); k++)
+            if (str_eq(json_sv(t), RO[k])) ok = true;
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static bool disabled_agent(const char *name) {
+    json_t *dis = settings_get("task.disabledAgents"), *d;
+    json_arr_foreach(dis, i, d) if (str_eq(json_sv(d), name)) return true;
+    return false;
+}
+
 /* ---------- tool ---------- */
 
-typedef struct {
-    tool_env_t *env;
-    const char *agent;
-    char *name;
-    const char *task;
-    const char *context;
-    volatile sig_atomic_t *cancel;
-    char *result;
-    json_t *details;
-    pthread_t th;
-    bool started;
-} task_job_t;
+static bool async_on(const tool_env_t *env) { return env->jobs && settings_bool("async.enabled", true); }
 
-static void *task_thread(void *p) {
-    task_job_t *j = p;
-    j->result = j->env->run_subagent(j->env, j->agent, j->task, j->context, &j->details, j->cancel);
-    return NULL;
+static spawn_spec_t spec_of(const json_t *t, const char *context) {
+    spawn_spec_t spec = {.agent = json_get_str(t, "agent") ? json_get_str(t, "agent") : "task",
+                         .name = json_get_str(t, "name"),
+                         .task = json_get_str(t, "task"),
+                         .context = context,
+                         .source_session = json_get_str(t, "sourceSession"),
+                         .model = json_get(t, "model")};
+    return spec;
 }
 
 static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
-    if (!env->run_subagent) {
+    if (!env->session) {
         tool_result_error(out, "Subagents are unavailable in this context");
         return 0;
     }
@@ -135,100 +173,179 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         json_free(single);
         return 0;
     }
+    /* validate every item before spawning anything */
     json_t *defs = agent_defs_load(env->cwd);
-    task_job_t *jobs = xcalloc(n, sizeof(task_job_t));
+    sb_t errs = SB_INIT;
     for (size_t i = 0; i < n; i++) {
         json_t *t = json_at(tasks, i);
-        jobs[i].env = env;
-        jobs[i].agent = json_get_str(t, "agent") ? json_get_str(t, "agent") : "task";
-        const char *nm = json_get_str(t, "name");
-        jobs[i].name = nm ? xstrdup(nm) : xasprintf("%s%zu", jobs[i].agent, i + 1);
-        jobs[i].task = json_get_str(t, "task");
-        jobs[i].context = context;
-        jobs[i].cancel = ctx->cancel;
-        if (!jobs[i].task || !*jobs[i].task) {
-            jobs[i].result = xstrdup("Error: empty task");
-            continue;
-        }
-        if (!json_get(defs, jobs[i].agent)) {
-            jobs[i].result = xasprintf("Error: unknown agent type \"%s\"", jobs[i].agent);
-            continue;
-        }
+        const char *agent = json_get_str(t, "agent") ? json_get_str(t, "agent") : "task";
+        const char *task = json_get_str(t, "task");
+        if (!task || !*task) sb_appendf(&errs, "tasks[%zu]: `task` must not be empty\n", i);
+        if (!json_get(defs, agent) || disabled_agent(agent))
+            sb_appendf(&errs, "tasks[%zu]: unknown agent \"%s\"\n", i, agent);
+        if (json_len(json_get_arr(t, "tools")))
+            sb_appendf(&errs, "tasks[%zu]: `tools` (eval-defined tools) are not supported\n", i);
+        bool seance = str_eq(agent, "seance");
+        if (json_get(t, "sourceSession") && !seance)
+            sb_appendf(&errs, "tasks[%zu]: `sourceSession` is only valid with agent \"seance\"\n", i);
+        if (seance && !json_get_str(t, "sourceSession"))
+            sb_appendf(&errs, "tasks[%zu]: agent \"seance\" requires `sourceSession`\n", i);
+        if (json_get(t, "model") && !seance)
+            sb_appendf(&errs, "tasks[%zu]: per-call `model` is disabled (task.perCallModel: off)\n", i);
     }
-    size_t maxc = (size_t)MAX(1, settings_int("task.maxConcurrency", 8));
-    size_t next = 0;
-    while (next < n) {
-        size_t batch_end = MIN(n, next + maxc);
-        for (size_t i = next; i < batch_end; i++) {
-            if (jobs[i].result) continue;
-            if (ctx->update) {
-                tool_result_t pr = {0};
-                tool_result_textf(&pr, "Running %s (%s)…", jobs[i].name, jobs[i].agent);
-                ctx->update(ctx, &pr);
-                tool_result_free(&pr);
+    json_free(defs);
+    if (errs.len) {
+        sb_truncate(&errs, errs.len - 1);
+        tool_result_error(out, "%s", errs.s);
+        sb_free(&errs);
+        json_free(single);
+        return 0;
+    }
+    sb_free(&errs);
+
+    if (async_on(env)) {
+        json_t *started = json_arr();
+        strvec_t agents = {0};
+        sb_t fails = SB_INIT;
+        size_t nfail = 0;
+        for (size_t i = 0; i < n; i++) {
+            spawn_spec_t spec = spec_of(json_at(tasks, i), context);
+            char *aid = NULL, *jid = NULL, *err = NULL;
+            if (agents_spawn(env, &spec, &aid, &jid, &err) != 0) {
+                sb_appendf(&fails, "%s%s: %s", nfail ? "; " : "", spec.name ? spec.name : spec.agent, err ? err : "failed");
+                nfail++;
+            } else {
+                json_t *e = json_obj();
+                json_set_str(e, "agentId", aid);
+                json_set_str(e, "jobId", jid);
+                json_push(started, e);
+                if (!strvec_contains(&agents, spec.agent)) strvec_push(&agents, spec.agent);
             }
-            jobs[i].started = pthread_create(&jobs[i].th, NULL, task_thread, &jobs[i]) == 0;
-            if (!jobs[i].started) task_thread(&jobs[i]);
+            free(aid);
+            free(jid);
+            free(err);
         }
-        for (size_t i = next; i < batch_end; i++)
-            if (jobs[i].started) pthread_join(jobs[i].th, NULL);
-        next = batch_end;
+        size_t ns = json_len(started);
+        if (!ns) {
+            tool_result_error(out, "Failed to start background task job%s: %s", nfail == 1 ? "" : "s",
+                              fails.s ? fails.s : "");
+        } else {
+            sb_t label = SB_INIT;
+            for (size_t i = 0; i < agents.n; i++) sb_appendf(&label, "%s%s", i ? ", " : "", agents.v[i]);
+            json_t *c = json_obj();
+            json_set_bool(c, "mixed", false);
+            json_set_bool(c, "singular", ns == 1);
+            json_set_bool(c, "singleCall", n == 1);
+            json_set_bool(c, "showListing", n > 1);
+            json_set_int(c, "count", (int64_t)ns);
+            json_set_str(c, "agentId", json_get_str(json_at(started, 0), "agentId"));
+            json_set_str(c, "jobId", json_get_str(json_at(started, 0), "jobId"));
+            json_set_str(c, "agentLabel", label.s ? label.s : "");
+            json_set(c, "started", json_clone(started));
+            char *sfs = nfail ? xasprintf(" Failed to schedule %zu spawn%s: %s.", nfail, nfail == 1 ? "" : "s", fails.s)
+                              : xstrdup("");
+            json_set_str(c, "scheduleFailureSummary", sfs);
+            free(sfs);
+            char *fb = prompt_render("coding-agent/prompts/tools/task-spawn-feedback.md", c);
+            char *tr = str_trim(fb);
+            tool_result_text(out, tr);
+            free(tr);
+            free(fb);
+            json_free(c);
+            sb_free(&label);
+            out->details = json_obj();
+            json_set(out->details, "async", json_clone(started));
+        }
+        json_free(started);
+        strvec_free(&agents);
+        sb_free(&fails);
+        json_free(single);
+        return 0;
     }
+
+    /* async disabled: each spawn runs to completion inline */
     sb_t b = SB_INIT;
-    json_t *results = json_arr();
     bool any_err = false;
     for (size_t i = 0; i < n; i++) {
-        sb_appendf(&b, "%s<agent id=\"%s\" type=\"%s\">\n%s\n</agent>\n", i ? "\n" : "", jobs[i].name, jobs[i].agent,
-                   jobs[i].result ? jobs[i].result : "(no output)");
-        json_t *r = jobs[i].details ? jobs[i].details : json_obj();
-        json_set_str(r, "id", jobs[i].name);
-        json_set_str(r, "output", jobs[i].result ? jobs[i].result : "");
-        if (json_get_str(r, "error")) any_err = true;
-        json_push(results, r);
-        free(jobs[i].result);
-        free(jobs[i].name);
+        spawn_spec_t spec = spec_of(json_at(tasks, i), context);
+        bool failed = false;
+        char *r = agents_run_blocking(env, &spec, ctx->cancel, &failed);
+        if (failed) any_err = true;
+        if (b.len) sb_append(&b, "\n\n");
+        sb_append(&b, r ? r : "(no output)");
+        free(r);
     }
-    free(jobs);
-    json_free(defs);
-    json_free(single);
-    tool_result_text(out, sb_cstr(&b));
-    out->details = json_obj();
-    json_set(out->details, "results", results);
+    tool_result_text(out, b.s ? b.s : "");
     out->is_error = any_err && n == 1;
     sb_free(&b);
+    json_free(single);
     return 0;
 }
 
 agent_tool_t *tool_task_new(tool_env_t *env) {
     json_t *defs = agent_defs_load(env->cwd);
+    bool async = async_on(env);
+    bool irc = true; /* `write agent://<id>` peer messaging (agents.c) */
+    bool batch = settings_bool("task.batch", true);
     json_t *ctx = json_obj();
-    json_set_bool(ctx, "batchEnabled", true);
-    json_set_bool(ctx, "asyncEnabled", false);
-    json_set_str(ctx, "defaultAgent", "task");
-    json_set_bool(ctx, "scoutAvailable", json_get(defs, "scout") != NULL);
-    char *desc_base = tool_prompt("task", ctx);
-    json_free(ctx);
-    sb_t d = SB_INIT;
-    sb_append(&d, desc_base);
-    sb_append(&d, "\n\n# Agents\n");
+    json_t *agents = json_arr();
+    bool seance = false;
     const char *k;
     json_t *v;
-    json_obj_foreach(defs, i, k, v) sb_appendf(&d, "- `%s`: %s\n", k, json_get_str(v, "description"));
-    free(desc_base);
+    json_obj_foreach(defs, i, k, v) {
+        if (disabled_agent(k)) continue;
+        json_t *a = json_obj();
+        json_set_str(a, "name", k);
+        json_set_str(a, "description", json_get_str(v, "description") ? json_get_str(v, "description") : "");
+        json_set_bool(a, "readOnly", agent_read_only(v));
+        json_set_bool(a, "blocking", false);
+        json_set_bool(a, "structured", false);
+        json_push(agents, a);
+        if (str_eq(k, "seance") && str_eq(json_get_str(v, "source"), "bundled")) seance = true;
+    }
+    json_set(ctx, "agents", agents);
+    json_set_bool(ctx, "scoutAvailable", tools_scout_available());
+    json_set_bool(ctx, "spawningDisabled", false);
+    json_set_str(ctx, "defaultAgent", "task");
+    json_set_bool(ctx, "batchEnabled", batch);
+    json_set_bool(ctx, "asyncEnabled", async);
+    json_set_bool(ctx, "ircEnabled", irc);
+    /* eval-defined `tools` are not implemented: the conditional stays off (never advertised) */
+    json_set_bool(ctx, "evalToolsEnabled", false);
+    if (seance) {
+        char *sg = prompt_load("coding-agent/prompts/tools/seance-task-guidance.md");
+        json_set_str(ctx, "seanceGuidance", sg ? sg : "");
+        free(sg);
+    }
+    if (async) {
+        json_t *ac = json_obj();
+        json_set_bool(ac, "ircEnabled", irc);
+        json_set_bool(ac, "waitTool", true);
+        char *g = prompt_render("coding-agent/prompts/tools/task-async-contract.md", ac);
+        json_free(ac);
+        json_set_str(ctx, "asyncGuidance", g);
+        free(g);
+    }
+    char *desc = tool_prompt("task", ctx);
+    json_free(ctx);
     json_free(defs);
-    json_t *s = schema_obj();
-    schema_prop(s, "context", "string", "Shared background for every task", true);
-    json_t *tasks = json_parse_str(
-        "{\"type\":\"array\",\"minItems\":1,\"items\":{\"type\":\"object\",\"properties\":{"
-        "\"name\":{\"type\":\"string\",\"description\":\"CamelCase agent name\"},"
-        "\"agent\":{\"type\":\"string\",\"description\":\"Agent type\"},"
-        "\"task\":{\"type\":\"string\",\"description\":\"Self-contained instructions\"},"
-        "\"solutionSpace\":{\"type\":\"string\",\"description\":\"How open-ended the problem is\"}},"
-        "\"required\":[\"task\",\"solutionSpace\"]}}");
-    schema_prop_json(s, "tasks", tasks, true);
-    agent_tool_t *t = agent_tool_new("task", "Task", sb_cstr(&d), s, task_execute);
-    t->lenient_args = true;
-    sb_free(&d);
+    /* upstream task/types.ts createTaskSchema (no isolation, no eval tools; seance widens `model`) */
+    const char *seance_fields = seance ? "\"model\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"array\",\"items\":{"
+                                         "\"type\":\"string\"}}]},\"sourceSession\":{\"type\":\"string\"}"
+                                       : "\"model\":{\"type\":\"string\"}";
+    char *it = xasprintf("{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"solutionSpace\":{\"type\":"
+                         "\"string\"},\"name\":{\"type\":\"string\"},\"agent\":{\"type\":\"string\"},%s},\"required\":["
+                         "\"task\",\"solutionSpace\"],\"additionalProperties\":false}",
+                         seance_fields);
+    char *sch = batch ? xasprintf("{\"type\":\"object\",\"properties\":{\"context\":{\"type\":\"string\"},\"tasks\":{"
+                                  "\"type\":\"array\",\"items\":%s}},\"required\":[\"context\",\"tasks\"],"
+                                  "\"additionalProperties\":false}",
+                                  it)
+                      : xstrdup(it);
+    agent_tool_t *t = agent_tool_new("task", "Task", desc, schema_lit(sch), task_execute);
+    free(it);
+    free(sch);
+    free(desc);
     t->ud = env;
     return t;
 }
