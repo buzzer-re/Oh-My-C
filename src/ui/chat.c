@@ -1168,26 +1168,11 @@ void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms) {
 /* transcript replay                                                       */
 /* ---------------------------------------------------------------------- */
 
-static char *tool_result_display(const char *tool, const json_t *result) {
-    const json_t *det = json_get(result, "details");
-    if (det && (str_eq(tool, "edit") || str_eq(tool, "write"))) {
-        const char *d = json_get_str(det, "diff");
-        if (d && *d) return xstrdup(d);
-    }
-    sb_t b = SB_INIT;
-    const json_t *c = json_get(result, "content"), *p;
-    if (json_is_str(c)) sb_append(&b, json_sv(c));
-    json_arr_foreach(c, i, p) {
-        if (!str_eq(json_get_str(p, "type"), "text")) continue;
-        if (b.len) sb_putc(&b, '\n');
-        sb_append(&b, json_get_str(p, "text") ? json_get_str(p, "text") : "");
-    }
-    return sb_detach(&b);
-}
 
 static void replay_message(ui_t *u, const json_t *m, hmap_t *pending) {
     const char *role = json_get_str(m, "role");
     if (str_eq(role, "user")) {
+        toolcard_break_group(u);
         char *text = ai_message_text(m);
         if (text && *text) {
             msgview_t *v = mv_new(MV_USER);
@@ -1200,6 +1185,7 @@ static void replay_message(ui_t *u, const json_t *m, hmap_t *pending) {
             tui_container_add(u->chat, &v->base);
         } else free(text);
     } else if (str_eq(role, "assistant")) {
+        toolcard_note_message(u, m, true); /* keeps read grouping identical to the live transcript */
         msgview_t *v = mv_new(MV_ASSISTANT);
         v->msg = json_clone(m);
         tui_container_add(u->chat, &v->base);
@@ -1214,12 +1200,11 @@ static void replay_message(ui_t *u, const json_t *m, hmap_t *pending) {
                     after = NULL;
                     tui_container_add(u->chat, &pv->base);
                 }
-                msgview_t *tv = mv_new(MV_TOOL);
-                tv->tool_name = xstrdup(json_get_str(b, "name") ? json_get_str(b, "name") : "");
-                tv->tool_id = xstrdup(json_get_str(b, "id") ? json_get_str(b, "id") : "");
-                tv->args = json_clone(json_get(b, "arguments") ? json_get(b, "arguments") : json_obj());
-                tui_container_add(u->chat, &tv->base);
-                hmap_put(pending, tv->tool_id, tv);
+                const char *tid = json_get_str(b, "id") ? json_get_str(b, "id") : "";
+                json_t *targs = json_get(b, "arguments");
+                msgview_t *tv = toolcard_start(u, tid, json_get_str(b, "name") ? json_get_str(b, "name") : "",
+                                               targs ? json_clone(targs) : json_obj());
+                hmap_put(pending, tid, tv);
                 seen_tool = true;
             } else if (seen_tool) {
                 /* text after a tool call renders below that tool */
@@ -1241,10 +1226,12 @@ static void replay_message(ui_t *u, const json_t *m, hmap_t *pending) {
         const char *id = json_get_str(m, "toolCallId");
         msgview_t *tv = id ? hmap_get(pending, id) : NULL;
         if (tv) {
-            tv->output = tool_result_display(tv->tool_name, m);
-            tv->done = true;
-            tv->is_error = json_get_bool(m, "isError", false);
-            tv->dirty = true;
+            /* same path as a live result: footer facts (wall time, exit) and grouping come from details */
+            json_t *r = json_obj();
+            json_t *content = json_get(m, "content");
+            json_set(r, "content", content ? json_clone(content) : json_arr());
+            if (json_get(m, "details")) json_set(r, "details", json_clone(json_get(m, "details")));
+            toolcard_result(u, tv, id, r, false, json_get_bool(m, "isError", false));
             hmap_del(pending, id);
         }
     } else if (str_eq(role, "bashExecution")) {
