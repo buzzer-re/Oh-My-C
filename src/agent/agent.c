@@ -1,4 +1,5 @@
 #include "agent.h"
+#include "ai/ai_images.h"
 
 #include <errno.h>
 #include <math.h>
@@ -694,14 +695,16 @@ static json_t *stream_assistant(agent_t *a, int *ttsr_abort, json_t **cursor_res
             snapshot = t;
         }
     }
-    ctx_msgs = ai_transform_messages(snapshot, a->model);
-    json_free(snapshot);
-
     json_t *tools = json_arr();
     pthread_mutex_lock(&a->mu);
     for (size_t i = 0; i < a->tools.n; i++) json_push(tools, agent_tool_wire(a->tools.v[i]));
     json_t *sys = json_clone(a->system_prompt);
     pthread_mutex_unlock(&a->mu);
+    /* provider-boundary image policy (omp transformProviderContext): count/byte budgets, STB WebP rewrite,
+     * undecodable images degraded to text; the session history itself is never modified */
+    ai_prepare_context_images(snapshot, a->model, sys, tools);
+    ctx_msgs = ai_transform_messages(snapshot, a->model);
+    json_free(snapshot);
 
     ai_context_t ctx = {.system_prompt = sys, .messages = ctx_msgs, .tools = json_len(tools) ? tools : NULL};
     ai_stream_opts_t opts = a->base_opts;

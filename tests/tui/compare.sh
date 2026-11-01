@@ -5,6 +5,7 @@
 #
 #   tests/tui/compare.sh start [cols] [rows]   start mock + both apps (first-run setup skipped in omp)
 #   tests/tui/compare.sh keys <tmux keys...>    send the same keys to both (e.g. "bash:echo hi" Enter)
+#   tests/tui/compare.sh paste <text>           bracketed-paste <text> into both (a pasted / dropped file path)
 #   tests/tui/compare.sh shot [name]            capture both panes (plain + ANSI) into $CMP_DIR/<name>.{omp,omc}[.ansi]
 #   tests/tui/compare.sh diff [name]            plain-text diff of the last shot
 #   tests/tui/compare.sh restart [args...]      restart both apps (same mock/agent dirs) with extra CLI args, e.g. -c
@@ -15,7 +16,8 @@
 #      CMP_NOMODEL=1 (no models.yml / default model: the no-credentials first screen),
 #      CMP_CONFIG (extra config.yml lines for both, e.g. 'composer:\n  shape: box'),
 #      CMP_NAME (tmux session prefix, default cmp; set a unique one when several harnesses run at once),
-#      CMP_WAIT (seconds to wait after launching, default 6).
+#      CMP_WAIT (seconds to wait after launching, default 6),
+#      CMP_IMAGES=1 (the mock model accepts image input), CMP_CTX (mock context window, default 100000).
 # Without CMP_SETUP both config.yml files start with setupVersion: 2 (both apps past the first-run wizard).
 #      CMP_SPLIT=1 gives each app its own work dir ($D/omp/work, $D/omc/work: tools that modify files don't race),
 #      CMP_SEED=<dir> is copied into the work dir(s) before start, CMP_PATH=<dir> is prepended to both apps' PATH
@@ -39,9 +41,10 @@ providers:
     models:
       - id: mock-1
         name: Mock One
-        contextWindow: 100000
+        contextWindow: ${CMP_CTX:-100000}
         maxTokens: 4096
 YML
+    [ -n "${CMP_IMAGES:-}" ] && printf '        input: [text, image]\n' >> "$1/models.yml"
     printf 'modelRoles:\n  default: mock/mock-1\nstartup:\n  checkUpdate: false\n' > "$1/config.yml"
     [ -n "${CMP_CONFIG:-}" ] && printf '%b\n' "$CMP_CONFIG" >> "$1/config.yml"
     [ -n "${CMP_SETUP:-}" ] || printf 'setupVersion: 2\n' >> "$1/config.yml"; true
@@ -104,6 +107,10 @@ replay)
     echo "replayed";;
 keys)
     for s in "$N-omp" "$N-omc"; do tmux send-keys -t $s "$@"; done;;
+paste)
+    # bracketed paste of the given text into both apps (as a terminal paste / drag-and-drop delivers it)
+    tmux set-buffer -b cmp-paste -- "$*"
+    for s in "$N-omp" "$N-omc"; do tmux paste-buffer -p -b cmp-paste -t $s; done;;
 shot)
     n=${1:-shot}
     for s in omp omc; do
