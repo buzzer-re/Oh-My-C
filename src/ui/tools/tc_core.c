@@ -68,6 +68,14 @@ char *tc_status_line(const tc_status_line_t *o) {
         tc_fg_sb(&b, TUI_TC_MUTED, d);
         free(d);
     }
+    if (o->badge) {
+        char *bl = flatten_nl(o->badge);
+        char *t = xasprintf("%s%s%s", tc_sym("format.bracketLeft"), bl, tc_sym("format.bracketRight"));
+        sb_putc(&b, ' ');
+        tc_fg_sb(&b, o->badge_slot, t);
+        free(t);
+        free(bl);
+    }
     sb_t m = SB_INIT;
     for (size_t i = 0; i < o->nmeta; i++) {
         char *f = flatten_nl(o->meta[i]);
@@ -458,6 +466,34 @@ char *tc_format_count(const char *label, int64_t n) {
     free(p);
     return r;
 }
+
+static char *trim1(double v) {
+    char *s = xasprintf("%.1f", v);
+    size_t n = strlen(s);
+    if (n > 2 && !strcmp(s + n - 2, ".0")) s[n - 2] = 0;
+    return s;
+}
+
+char *tc_format_number(double n) {
+    const char *suf;
+    double d;
+    if (n < 1e3) {
+        if (n == (double)(int64_t)n) return xasprintf("%lld", (long long)n);
+        return xasprintf("%g", n);
+    }
+    if (n < 1e6) d = 1e3, suf = "K";
+    else if (n < 1e9) d = 1e6, suf = "M";
+    else d = 1e9, suf = "B";
+    if (n < d * 10) {
+        char *t = trim1(n / d);
+        char *r = xasprintf("%s%s", t, suf);
+        free(t);
+        return r;
+    }
+    return xasprintf("%.0f%s", (double)(int64_t)(n / d + 0.5), suf);
+}
+
+char *tc_italic(const char *s) { return xasprintf("\x1b[3m%s\x1b[23m", s ? s : ""); }
 
 char *tc_format_duration(int64_t ms) {
     const int64_t SEC = 1000, MIN = 60 * SEC, HOUR = 60 * MIN, DAY = 24 * HOUR;

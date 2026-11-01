@@ -377,7 +377,7 @@ void tc_generic(const tc_call_t *c, int width, strvec_t *out) {
 
 bool tc_wants_tick(const char *name) {
     /* bash: live elapsed clock; generic cards animate a spinner while running */
-    static const char *quiet[] = {"read", "write", "edit", "grep", "glob", "todo", "web_search", "ask"};
+    static const char *quiet[] = {"read", "write", "edit", "grep", "glob", "todo", "web_search", "ask", "goal"};
     for (size_t i = 0; i < ARRAY_LEN(quiet); i++)
         if (str_eq(name, quiet[i])) return false;
     return true;
@@ -394,5 +394,6 @@ void tc_render(const tc_call_t *c, int width, strvec_t *out) {
     else if (!strcmp(n, "todo")) tc_todo(c, width, out);
     else if (!strcmp(n, "web_search")) tc_web_search(c, width, out);
     else if (!strcmp(n, "ask")) tc_ask(c, width, out);
+    else if (!strcmp(n, "goal")) tc_goal(c, width, out);
     else tc_generic(c, width, out);
 }

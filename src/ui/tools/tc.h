@@ -76,6 +76,8 @@ typedef struct {
     const char *description;   /* rendered muted */
     const char *const *meta;   /* rendered dim, joined by sep.dot */
     size_t nmeta;
+    const char *badge;         /* `[badge]` after the description (NULL: none) */
+    tui_tc_t badge_slot;
 } tc_status_line_t;
 char *tc_status_line(const tc_status_line_t *o);
 
@@ -156,6 +158,9 @@ void tc_generic(const tc_call_t *c, int width, strvec_t *out);
 void tc_render_diff(const char *diff, const char *path, strvec_t *out);
 void tc_web_search(const tc_call_t *c, int width, strvec_t *out);
 void tc_ask(const tc_call_t *c, int width, strvec_t *out);
+void tc_goal(const tc_call_t *c, int width, strvec_t *out);
+char *tc_format_number(double n);                           /* formatNumber: 1.2K, 34K, 5.6M */
+char *tc_italic(const char *s);
 /* wrapPrefixedLine: `prefix` + wrapped content, continuation rows behind `cont` */
 void tc_wrap_prefixed(const char *prefix, const char *cont, const char *content, int width, strvec_t *out);
 
