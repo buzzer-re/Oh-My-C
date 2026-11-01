@@ -1,7 +1,8 @@
 /* ui.h - shared state and building blocks of the interactive coding-agent UI (port of omp's
  * packages/tui chat/chrome/status-line/prompt layers). The controller lives in modes/interactive.c;
  * each visual area has its own module here:
- *   chat.c        transcript message views (user, assistant, notices)
+ *   chat.c        transcript (blank-row separated blocks), message views (user, assistant, notices,
+ *                 custom/summary/TTSR), pinned error banner, retry/compaction rows, transcript replay
  *   toolcards.c   tool execution cards
  *   statusline.c  status band / bottom bar, composer wiring, working-row title, key hints
  *   welcome.c     welcome banner (gradient logo + intro, wordmark, version, tip)
@@ -23,14 +24,19 @@
 #include <pthread.h>
 
 
-typedef enum { MV_USER, MV_ASSISTANT, MV_TOOL, MV_NOTICE, MV_BASH } mv_kind_t;
+typedef enum { MV_USER, MV_ASSISTANT, MV_TOOL, MV_NOTICE, MV_BASH, MV_CUSTOM, MV_SUMMARY, MV_TTSR } mv_kind_t;
 
 typedef struct {
     tui_component_t base;
     mv_kind_t kind;
-    json_t *msg;        /* assistant message (owned clone) */
+    json_t *msg;        /* assistant / custom message or summary entry (owned clone) */
     char *text;         /* user/notice text */
-    const char *level;  /* notice level */
+    const char *level;  /* notice level ("info", "warning", "error"); summary kind ("compaction", "branch") */
+    bool synthetic;     /* user: agent-attributed input (dim) */
+    bool streaming;     /* assistant: still receiving deltas */
+    bool error_pinned;  /* assistant: its error is shown in the banner instead of inline */
+    size_t revealed;    /* assistant: smooth streaming reveal position (codepoints of visible text) */
+    int reveal_timer;
     /* tool */
     char *tool_name, *tool_id;
     json_t *args;
@@ -48,11 +54,14 @@ extern ui_t *g_ui; /* the running interactive UI (one per process) */
 struct ui {
     app_t *app;
     tui_t *tui;
-    tui_container_t *chat;
+    tui_container_t *chat;    /* ui_transcript_new() */
+    tui_container_t *banner;  /* pinned error banner, between the transcript and the working row */
+    tui_component_t *working; /* ui_working_new(): retry countdown / compaction rows (chat.c) */
     tui_editor_t *editor;
-    tui_loader_t *loader;
+    tui_loader_t *loader;     /* the "Working…" row, drawn by the status row (statusline.c) */
     tui_component_t *status;
     msgview_t *cur_assistant;
+    msgview_t *pinned_error; /* assistant view whose error the banner shows */
     hmap_t tools; /* toolCallId -> msgview_t* */
     pthread_t worker;
     bool worker_running;
@@ -86,9 +95,27 @@ char *fg(tui_tc_t slot, const char *s); /* owned */
 void push_wrapped(strvec_t *out, const char *text, int width, int indent);
 
 /* chat.c */
+/* transcript container: children render as blocks (blank edge rows trimmed) separated by one blank row;
+ * lead_gap also puts a blank row above the first block */
+tui_container_t *ui_transcript_new(bool lead_gap);
 msgview_t *mv_new(mv_kind_t k);
 void add_view(ui_t *u, msgview_t *v);
+/* "info" -> dim status line (consecutive ones update in place), "warning" -> "Warning: …",
+ * "error" -> "Error: …"; "Injecting rule: …" becomes a TTSR notice, "Retrying (n/m) in Ns…" the retry row */
 void add_notice(ui_t *u, const char *level, const char *text);
+void ui_assistant_streamed(ui_t *u, msgview_t *v); /* message_update applied: drive the smooth reveal */
+void ui_assistant_end(ui_t *u, msgview_t *v);      /* message_end: pin a provider error in the banner */
+void ui_tool_started(ui_t *u, const char *tool_call_id); /* tool card added: post-tool text follows */
+void ui_agent_start(ui_t *u);                 /* agent_start: unpin/clear the banner, start the working row */
+void ui_error_banner_show(ui_t *u, const char *message);
+void ui_error_banner_clear(ui_t *u);
+tui_component_t *ui_working_new(ui_t *u);
+void ui_working_start(ui_t *u);
+void ui_working_stop(ui_t *u);
+void ui_working_set_message(ui_t *u, const char *message);
+void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms);
+void ui_working_compaction(ui_t *u, const char *label);
+void ui_chat_rebuild(ui_t *u); /* replay the transcript from the session tree (resume, branch, reload) */
 
 /* toolcards.c */
 void render_tool(msgview_t *v, int width, strvec_t *out);

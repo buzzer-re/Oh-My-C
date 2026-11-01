@@ -7,6 +7,7 @@
 #   tests/tui/compare.sh keys <tmux keys...>    send the same keys to both (e.g. "bash:echo hi" Enter)
 #   tests/tui/compare.sh shot [name]            capture both panes (plain + ANSI) into $CMP_DIR/<name>.{omp,omc}[.ansi]
 #   tests/tui/compare.sh diff [name]            plain-text diff of the last shot
+#   tests/tui/compare.sh restart [args...]      restart both apps (same mock/agent dirs) with extra CLI args, e.g. -c
 #   tests/tui/compare.sh stop
 # HOME is a throwaway dir too (no ~/.claude MCP/plugin discovery); omp's update check is off.
 # Env: CMP_DIR (default: $TMPDIR/omc-tuicmp), OMP_BIN (default: omp), CMP_SETUP=1 keeps omp's wizard,
@@ -38,6 +39,12 @@ YML
     printf 'modelRoles:\n  default: mock/mock-1\nstartup:\n  checkUpdate: false\n' > "$1/config.yml"
     [ -n "${CMP_CONFIG:-}" ] && printf '%b\n' "$CMP_CONFIG" >> "$1/config.yml"; true
 }
+launch() { # cols rows extra-args...
+    local cols=$1 rows=$2; shift 2
+    tmux new-session -d -s "$N-omp" -x "$cols" -y "$rows" -c "$D/work" "env HOME=$D/home MOCK_KEY=x PI_CODING_AGENT_DIR=$D/omp-agent $OMP $*"
+    tmux new-session -d -s "$N-omc" -x "$cols" -y "$rows" -c "$D/work" "env HOME=$D/home MOCK_KEY=x OMC_CODING_AGENT_DIR=$D/omc-agent $ROOT/build/omc $*"
+    echo "$cols $rows" > "$D/size"
+}
 case "$cmd" in
 start)
     cols=${1:-120}; rows=${2:-40}
@@ -47,8 +54,7 @@ start)
     mkagent "$D/omp-agent" $port; mkagent "$D/omc-agent" $port
     MOCK_LOG="$D/req.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $port > "$D/mock.log" 2>&1 & echo $! > "$D/mock.pid"
     for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null && break; sleep 0.1; done
-    tmux new-session -d -s $N-omp -x "$cols" -y "$rows" -c "$D/work" "env HOME=$D/home MOCK_KEY=x PI_CODING_AGENT_DIR=$D/omp-agent $OMP"
-    tmux new-session -d -s $N-omc -x "$cols" -y "$rows" -c "$D/work" "env HOME=$D/home MOCK_KEY=x OMC_CODING_AGENT_DIR=$D/omc-agent $ROOT/build/omc"
+    launch "$cols" "$rows"
     sleep 6
     if [ -z "${CMP_SETUP:-}" ]; then
         # a fresh omp agent dir opens the 5-step first-run wizard; Esc skips each step
@@ -61,8 +67,14 @@ start)
     for _ in $(seq 40); do tmux capture-pane -p -t $N-omp | grep -q "π >\|╰─" && break; sleep 0.25; done
     sleep 0.5
     echo "started in $D (mock port $port)";;
+restart)
+    tmux kill-session -t "$N-omp" 2>/dev/null; tmux kill-session -t "$N-omc" 2>/dev/null
+    read -r cols rows < "$D/size"
+    launch "$cols" "$rows" "$@"
+    sleep 5
+    echo "restarted";;
 keys)
-    for s in $N-omp $N-omc; do tmux send-keys -t $s "$@"; done;;
+    for s in "$N-omp" "$N-omc"; do tmux send-keys -t $s "$@"; done;;
 shot)
     n=${1:-shot}
     for s in omp omc; do
@@ -75,5 +87,5 @@ diff)
 stop)
     tmux kill-session -t $N-omp 2>/dev/null; tmux kill-session -t $N-omc 2>/dev/null
     [ -f "$D/mock.pid" ] && kill "$(cat "$D/mock.pid")" 2>/dev/null; true;;
-*) sed -n '2,16p' "$0"; exit 2;;
+*) sed -n '2,17p' "$0"; exit 2;;
 esac

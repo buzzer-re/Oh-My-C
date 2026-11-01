@@ -2,6 +2,9 @@
 #include "tui/markdown.h"
 
 #include <ctype.h>
+#include <strings.h>
+
+#include "tui/symbols.h"
 
 #define MD_MAX_DEPTH 8
 #define MD_MAX_COLS 32
@@ -11,7 +14,8 @@
 typedef struct {
     const tui_theme_t *th;
     const tui_md_opts_t *o;
-    char base[512]; /* SGR prefix re-applied after every reset */
+    char base[512];  /* wrapper SGR (heading, link, quote) re-applied after every reset */
+    char deflt[128]; /* default prose style of the component (color, italic), applied to text runs */
 } md_ctx_t;
 
 /* dst->base = src->base + a + b (+ c); keeps src->base unchanged if it would not fit */
@@ -25,300 +29,48 @@ static void ctx_extend(md_ctx_t *dst, const md_ctx_t *src, const char *a, const 
     dst->base[n + la + lb + lc] = 0;
 }
 
+static bool env_is(const char *name, const char *v) {
+    const char *e = getenv(name);
+    return e && !strcasecmp(e, v);
+}
+
+/* OSC 8 policy of upstream terminal-capabilities.ts (shouldEnableHyperlinksByDefault), reduced to the
+ * environment markers: PI_NO/FORCE_HYPERLINKS, the terminal's static capability, tmux >= 3.4 forwarding,
+ * GNU screen never forwarding. */
+bool tui_md_hyperlinks_supported(void) {
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    bool on;
+    if (env_is("PI_NO_HYPERLINKS", "1")) on = false;
+    else if (env_is("PI_FORCE_HYPERLINKS", "1")) on = true;
+    else {
+        static const char *const PROGRAMS[] = {"kitty", "ghostty", "wezterm", "iterm.app", "iterm2", "vscode",
+                                               "alacritty", "otty", "rio", "tern", "monstar"};
+        const char *tp = getenv("TERM_PROGRAM"), *term = getenv("TERM");
+        bool known = getenv("KITTY_WINDOW_ID") || getenv("GHOSTTY_RESOURCES_DIR") || getenv("WEZTERM_PANE") ||
+                     getenv("ITERM_SESSION_ID") || getenv("VSCODE_PID") || getenv("ALACRITTY_WINDOW_ID") ||
+                     (term && strstr(term, "ghostty")) || env_is("TERM", "monstar");
+        for (size_t i = 0; !known && tp && i < ARRAY_LEN(PROGRAMS); i++) known = !strcasecmp(tp, PROGRAMS[i]);
+        on = known;
+        if (on && getenv("STY")) on = false;
+        if (on && getenv("TMUX")) {
+            const char *v = getenv("TERM_PROGRAM_VERSION");
+            int maj = 0, min = 0;
+            on = tp && !strcasecmp(tp, "tmux") && v && sscanf(v, "%d.%d", &maj, &min) >= 1 && (maj > 3 || (maj == 3 && min >= 4));
+        } else if (on && term && (!strncmp(term, "screen", 6) || !strncmp(term, "tmux", 4))) {
+            on = false;
+        }
+    }
+    cached = on;
+    return on;
+}
+
 void tui_md_opts_default(tui_md_opts_t *o) {
     memset(o, 0, sizeof *o);
-    o->hyperlinks = true;
+    o->hyperlinks = tui_md_hyperlinks_supported();
     o->code_indent = 2;
     o->text_slot = -1;
-}
-
-/* ====================================================================== */
-/* syntax highlighting                                                     */
-/* ====================================================================== */
-
-typedef struct {
-    const char *names; /* space separated aliases, padded with spaces */
-    const char *keywords;
-    const char *types;
-    const char *lc1, *lc2;       /* line comment starters */
-    const char *bc_open, *bc_close;
-    bool backtick;               /* `...` strings (multi-line) */
-    bool triple;                 /* """ / ''' strings (multi-line) */
-    bool upper_types;            /* Capitalized identifiers are types */
-    bool single_quote_str;       /* ' starts a string (else char/lifetime handling) */
-} lang_t;
-
-static const lang_t LANGS[] = {
-    {" c h cpp c++ cc cxx hpp hh objc objective-c cuda ",
-     " if else for while do switch case default break continue return goto sizeof typedef struct union enum static "
-     "extern const volatile register inline restrict auto signed unsigned class namespace template typename public "
-     "private protected virtual override final new delete this throw try catch using operator friend constexpr "
-     "nullptr true false NULL include define ifdef ifndef endif pragma noexcept decltype static_cast "
-     "reinterpret_cast const_cast dynamic_cast ",
-     " int char short long float double void bool size_t ssize_t uint8_t uint16_t uint32_t uint64_t int8_t int16_t "
-     "int32_t int64_t uintptr_t intptr_t FILE std string vector map ",
-     "//", NULL, "/*", "*/", false, false, false, true},
-    {" js javascript jsx mjs cjs ts typescript tsx node ",
-     " if else for while do switch case default break continue return function var let const class extends new "
-     "delete typeof instanceof in of this super throw try catch finally async await yield import export from as "
-     "default null undefined true false void static get set interface type enum implements namespace declare "
-     "readonly abstract keyof satisfies ",
-     " string number boolean any unknown never object symbol bigint Promise Array Map Set Record ",
-     "//", NULL, "/*", "*/", true, false, true, true},
-    {" python py py3 python3 ",
-     " if elif else for while break continue return def class lambda try except finally raise with as import from "
-     "global nonlocal pass yield assert del in is not and or None True False async await match case self ",
-     " int str float bool list dict set tuple bytes object type ",
-     "#", NULL, NULL, NULL, false, true, true, true},
-    {" rust rs ",
-     " if else for while loop break continue return fn let mut const static struct enum impl trait type where pub "
-     "use mod crate self Self super match as in ref move unsafe async await dyn true false extern ",
-     " i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 bool char str String Vec Option Result Box ",
-     "//", NULL, "/*", "*/", false, false, true, false},
-    {" go golang ",
-     " if else for range break continue return func var const type struct interface map chan go defer select switch "
-     "case default package import fallthrough goto nil true false iota ",
-     " int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 float32 float64 string bool byte rune error any ",
-     "//", NULL, "/*", "*/", true, false, false, false},
-    {" java kotlin kt scala swift cs csharp c# dart ",
-     " if else for while do switch case default break continue return class interface extends implements new this "
-     "super throw throws try catch finally import package public private protected static final abstract "
-     "synchronized void null true false var val fun let func struct override when is in as object namespace using ",
-     " int long short byte float double boolean char String Integer Object List Map ",
-     "//", NULL, "/*", "*/", false, true, true, true},
-    {" sh bash zsh shell console shellscript fish ksh ",
-     " if then else elif fi for while until do done case esac in function return break continue local export "
-     "readonly declare unset echo exit source alias set shift trap eval exec cd test ",
-     "", "#", NULL, NULL, NULL, false, false, true, false},
-    {" json jsonc json5 ", " true false null ", "", "//", NULL, NULL, NULL, false, false, false, false},
-    {" yaml yml toml ini ", " true false null yes no on off ", "", "#", NULL, NULL, NULL, false, false, true, false},
-    {" sql postgres postgresql mysql sqlite ",
-     " select from where insert into values update set delete create table drop alter index join left right inner "
-     "outer on group by order having limit offset as and or not null is in like between distinct union all case "
-     "when then else end primary key foreign references default exists SELECT FROM WHERE INSERT INTO VALUES "
-     "UPDATE SET DELETE CREATE TABLE DROP ALTER INDEX JOIN LEFT RIGHT INNER OUTER ON GROUP BY ORDER HAVING LIMIT "
-     "OFFSET AS AND OR NOT NULL IS IN LIKE BETWEEN DISTINCT UNION ALL CASE WHEN THEN ELSE END PRIMARY KEY ",
-     " int integer text varchar char boolean float real date timestamp serial bigint INT INTEGER TEXT VARCHAR ",
-     "--", NULL, "/*", "*/", false, false, true, false},
-    {" ruby rb ",
-     " if elsif else unless case when while until for in do end def class module return yield begin rescue ensure "
-     "raise break next redo retry self super nil true false and or not then require attr_accessor lambda proc ",
-     "", "#", NULL, NULL, NULL, false, false, true, true},
-    {" lua ",
-     " if then else elseif end for while do repeat until function local return break in and or not nil true false "
-     "goto ",
-     "", "--", NULL, NULL, NULL, false, false, true, false},
-    {" php ",
-     " if else elseif for foreach while do switch case default break continue return function class new public "
-     "private protected static echo namespace use null true false array fn match ",
-     "", "//", "#", "/*", "*/", false, false, true, true},
-};
-
-static const lang_t *find_lang(const char *lang) {
-    if (!lang || !*lang) return NULL;
-    char key[40];
-    snprintf(key, sizeof key, " %s ", lang);
-    for (char *p = key; *p; p++) *p = (char)tolower((unsigned char)*p);
-    for (size_t i = 0; i < ARRAY_LEN(LANGS); i++)
-        if (strstr(LANGS[i].names, key)) return &LANGS[i];
-    return NULL;
-}
-
-bool tui_highlight_supported(const char *lang) {
-    if (lang && (str_ieq(lang, "diff") || str_ieq(lang, "patch"))) return true;
-    return find_lang(lang) != NULL;
-}
-
-static bool word_in(const char *list, const char *w, size_t n) {
-    if (!list || n == 0 || n > 30) return false;
-    char key[34];
-    key[0] = ' ';
-    memcpy(key + 1, w, n);
-    key[n + 1] = ' ';
-    key[n + 2] = 0;
-    return strstr(list, key) != NULL;
-}
-
-static void colored(sb_t *b, const tui_theme_t *th, tui_tc_t slot, const char *s, size_t n) {
-    sb_append(b, tui_fg_seq(th, slot));
-    sb_appendn(b, s, n);
-    sb_append(b, tui_fg_seq(th, TUI_TC_MD_CODE_BLOCK));
-}
-
-typedef struct {
-    int mode; /* 0 normal, 1 block comment, 2 multi-line string */
-    char delim[4];
-} hl_state_t;
-
-static void highlight_line(const lang_t *L, const char *s, size_t n, hl_state_t *st, const tui_theme_t *th, sb_t *b) {
-    sb_append(b, tui_fg_seq(th, TUI_TC_MD_CODE_BLOCK));
-    size_t i = 0;
-    while (i < n) {
-        if (st->mode == 1) {
-            const char *e = L->bc_close ? strstr(s + i, L->bc_close) : NULL;
-            size_t end = (e && (size_t)(e - s) < n) ? (size_t)(e - s) + strlen(L->bc_close) : n;
-            colored(b, th, TUI_TC_SYNTAX_COMMENT, s + i, end - i);
-            if (end < n || (e && (size_t)(e - s) < n)) st->mode = 0;
-            i = end;
-            continue;
-        }
-        if (st->mode == 2) {
-            size_t dl = strlen(st->delim);
-            size_t j = i;
-            bool closed = false;
-            while (j < n) {
-                if (s[j] == '\\' && j + 1 < n) {
-                    j += 2;
-                    continue;
-                }
-                if (j + dl <= n && !memcmp(s + j, st->delim, dl)) {
-                    j += dl;
-                    closed = true;
-                    break;
-                }
-                j++;
-            }
-            colored(b, th, TUI_TC_SYNTAX_STRING, s + i, j - i);
-            if (closed) st->mode = 0;
-            i = j;
-            continue;
-        }
-        char c = s[i];
-        /* comments */
-        const char *lcs[2] = {L->lc1, L->lc2};
-        bool done = false;
-        for (int k = 0; k < 2 && !done; k++) {
-            if (lcs[k] && !strncmp(s + i, lcs[k], strlen(lcs[k])) &&
-                !(lcs[k][0] == '#' && i > 0 && s[i - 1] == '$')) {
-                colored(b, th, TUI_TC_SYNTAX_COMMENT, s + i, n - i);
-                i = n;
-                done = true;
-            }
-        }
-        if (done) break;
-        if (L->bc_open && !strncmp(s + i, L->bc_open, strlen(L->bc_open))) {
-            st->mode = 1;
-            size_t ol = strlen(L->bc_open);
-            colored(b, th, TUI_TC_SYNTAX_COMMENT, s + i, ol);
-            i += ol;
-            continue;
-        }
-        /* strings */
-        if (L->triple && (c == '"' || c == '\'') && i + 2 < n && s[i + 1] == c && s[i + 2] == c) {
-            st->mode = 2;
-            st->delim[0] = st->delim[1] = st->delim[2] = c;
-            st->delim[3] = 0;
-            colored(b, th, TUI_TC_SYNTAX_STRING, s + i, 3);
-            i += 3;
-            continue;
-        }
-        if (c == '`' && L->backtick) {
-            st->mode = 2;
-            st->delim[0] = '`';
-            st->delim[1] = 0;
-            colored(b, th, TUI_TC_SYNTAX_STRING, s + i, 1);
-            i++;
-            continue;
-        }
-        if (c == '"' || (c == '\'' && L->single_quote_str) || (c == '\'' && !L->single_quote_str && i + 2 < n &&
-                                                                (s[i + 2] == '\'' || (s[i + 1] == '\\' && i + 3 < n)))) {
-            size_t j = i + 1;
-            while (j < n && s[j] != c) {
-                if (s[j] == '\\' && j + 1 < n) j++;
-                j++;
-            }
-            if (j < n) j++;
-            colored(b, th, TUI_TC_SYNTAX_STRING, s + i, j - i);
-            i = j;
-            continue;
-        }
-        if (isdigit((unsigned char)c) || (c == '.' && i + 1 < n && isdigit((unsigned char)s[i + 1]) &&
-                                          (i == 0 || !isalnum((unsigned char)s[i - 1])))) {
-            if (i > 0 && (isalnum((unsigned char)s[i - 1]) || s[i - 1] == '_')) {
-                sb_putc(b, c);
-                i++;
-                continue;
-            }
-            size_t j = i;
-            while (j < n && (isalnum((unsigned char)s[j]) || s[j] == '.' || s[j] == '_')) j++;
-            colored(b, th, TUI_TC_SYNTAX_NUMBER, s + i, j - i);
-            i = j;
-            continue;
-        }
-        if (isalpha((unsigned char)c) || c == '_' || c == '$' || c == '@') {
-            size_t j = i + 1;
-            while (j < n && (isalnum((unsigned char)s[j]) || s[j] == '_' || s[j] == '$' || (s[j] == '-' && L == &LANGS[6])))
-                j++;
-            size_t wl = j - i;
-            size_t k = j;
-            while (k < n && s[k] == ' ') k++;
-            if (word_in(L->keywords, s + i, wl)) colored(b, th, TUI_TC_SYNTAX_KEYWORD, s + i, wl);
-            else if (word_in(L->types, s + i, wl) || (L->upper_types && isupper((unsigned char)c) && wl > 1))
-                colored(b, th, TUI_TC_SYNTAX_TYPE, s + i, wl);
-            else if (k < n && s[k] == '(') colored(b, th, TUI_TC_SYNTAX_FUNCTION, s + i, wl);
-            else if (L == &LANGS[7] && k < n && s[k] == ':') colored(b, th, TUI_TC_SYNTAX_VARIABLE, s + i, wl);
-            else sb_appendn(b, s + i, wl);
-            i = j;
-            continue;
-        }
-        if (strchr("+-*/%=<>!&|^~?:", c)) {
-            colored(b, th, TUI_TC_SYNTAX_OPERATOR, s + i, 1);
-            i++;
-            continue;
-        }
-        if (strchr("(){}[];,.", c)) {
-            colored(b, th, TUI_TC_SYNTAX_PUNCTUATION, s + i, 1);
-            i++;
-            continue;
-        }
-        /* copy one UTF-8 char */
-        uint32_t cp;
-        int k = utf8_decode(s + i, n - i, &cp);
-        sb_appendn(b, s + i, (size_t)k);
-        i += (size_t)k;
-    }
-    sb_append(b, "\x1b[39m");
-}
-
-void tui_highlight_code(const char *code, const char *lang, const tui_theme_t *th, strvec_t *out) {
-    if (!th) th = tui_theme();
-    char *clean = tui_replace_tabs(code ? code : "");
-    strvec_t lines = str_split_lines(clean, strlen(clean));
-    if (!lines.n) strvec_push(&lines, "");
-    bool diff = lang && (str_ieq(lang, "diff") || str_ieq(lang, "patch"));
-    const lang_t *L = diff ? NULL : find_lang(lang);
-    hl_state_t st;
-    memset(&st, 0, sizeof st);
-    for (size_t i = 0; i < lines.n; i++) {
-        const char *s = lines.v[i];
-        sb_t b = SB_INIT;
-        /* drop control chars that could break layout */
-        char *safe = NULL;
-        for (const char *p = s; *p; p++)
-            if ((unsigned char)*p < 0x20) {
-                safe = xstrdup(s);
-                for (char *q = safe; *q; q++)
-                    if ((unsigned char)*q < 0x20) *q = ' ';
-                s = safe;
-                break;
-            }
-        if (diff) {
-            tui_tc_t slot = TUI_TC_MD_CODE_BLOCK;
-            if (s[0] == '+' && !str_starts(s, "+++")) slot = TUI_TC_TOOL_DIFF_ADDED;
-            else if (s[0] == '-' && !str_starts(s, "---")) slot = TUI_TC_TOOL_DIFF_REMOVED;
-            else if (str_starts(s, "@@")) slot = TUI_TC_ACCENT;
-            else slot = TUI_TC_TOOL_DIFF_CONTEXT;
-            tui_fg(&b, th, slot, s);
-        } else if (L) {
-            highlight_line(L, s, strlen(s), &st, th, &b);
-        } else {
-            tui_fg(&b, th, TUI_TC_MD_CODE_BLOCK, s);
-        }
-        free(safe);
-        strvec_push_own(out, sb_detach(&b));
-    }
-    strvec_free(&lines);
-    free(clean);
+    o->bg_slot = -1;
 }
 
 /* ====================================================================== */
@@ -329,9 +81,12 @@ typedef struct {
     bool bold, italic, strike;
 } istyle_t;
 
+/* A text run: outer wrapper styles (heading/link/quote), then the component's default prose style, then the
+ * run's own emphasis. Upstream applies the default style per text run, inside the wrappers. */
 static void emit_style(sb_t *b, const md_ctx_t *c, const istyle_t *s) {
     sb_append(b, TUI_RESET);
     sb_append(b, c->base);
+    sb_append(b, c->deflt);
     if (s->bold) sb_append(b, "\x1b[1m");
     if (s->italic) sb_append(b, "\x1b[3m");
     if (s->strike) sb_append(b, "\x1b[9m");
@@ -400,16 +155,21 @@ static bool closer_cached(scan_cache_t *sc, const char *s, size_t i, size_t n, c
     return r;
 }
 
+static void put_url(sb_t *b, const char *u, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if ((unsigned char)u[i] >= 0x20 && u[i] != 0x7f) sb_putc(b, u[i]);
+}
+
+/* [text](href): link-colored underlined text, then " (href)" in linkUrl color unless the text is the href
+ * (or the address of a mailto: href). OSC 8 wraps both when hyperlinks are on. */
 static void emit_link(const char *text, size_t tn, const char *url, size_t un, const md_ctx_t *c, sb_t *b,
                       istyle_t *st, int depth) {
-    char *u = xstrndup(url, un);
     md_ctx_t lc;
     ctx_extend(&lc, c, tui_fg_seq(c->th, TUI_TC_MD_LINK), "\x1b[4m", "");
-    bool hl = c->o->hyperlinks;
+    bool hl = c->o->hyperlinks && un > 0;
     if (hl) {
         sb_append(b, "\x1b]8;;");
-        for (const char *p = u; *p; p++)
-            if ((unsigned char)*p >= 0x20 && *p != 0x7f) sb_putc(b, *p);
+        put_url(b, url, un);
         sb_append(b, "\a");
     }
     istyle_t ls = *st;
@@ -417,17 +177,25 @@ static void emit_link(const char *text, size_t tn, const char *url, size_t un, c
     if (depth < 3) render_inline(text, tn, &lc, b, depth + 1);
     else sb_appendn(b, text, tn);
     if (hl) sb_append(b, TUI_LINK_CLOSE);
-    emit_style(b, c, st);
-    bool same = tn == un && !memcmp(text, url, un);
-    if (str_starts(u, "mailto:") && tn == un - 7 && !memcmp(text, u + 7, tn)) same = true;
-    if (!hl && !same) {
+    sb_append(b, TUI_RESET);
+    sb_append(b, c->base);
+    bool same = un == 0 || (tn == un && !memcmp(text, url, un));
+    if (un > 7 && !strncmp(url, "mailto:", 7) && tn == un - 7 && !memcmp(text, url + 7, tn)) same = true;
+    if (!same) {
+        sb_putc(b, ' ');
+        if (hl) {
+            sb_append(b, "\x1b]8;;");
+            put_url(b, url, un);
+            sb_append(b, "\a");
+        }
         sb_append(b, tui_fg_seq(c->th, TUI_TC_MD_LINK_URL));
-        sb_append(b, " (");
-        sb_append(b, u);
-        sb_append(b, ")");
-        emit_style(b, c, st);
+        sb_putc(b, '(');
+        put_url(b, url, un);
+        sb_putc(b, ')');
+        sb_append(b, "\x1b[39m");
+        if (hl) sb_append(b, TUI_LINK_CLOSE);
     }
-    free(u);
+    emit_style(b, c, st);
 }
 
 static size_t url_end(const char *s, size_t i, size_t n) {
@@ -445,23 +213,98 @@ static size_t url_end(const char *s, size_t i, size_t n) {
     return j;
 }
 
+/* &amp; &lt; &gt; &quot; &apos; &nbsp; &#N; &#xH; -> characters (upstream normalizeHtmlEntitiesForTerminal) */
+static size_t html_entity(const char *s, size_t n, sb_t *b) {
+    static const struct {
+        const char *name;
+        const char *out;
+    } named[] = {{"amp", "&"}, {"lt", "<"}, {"gt", ">"}, {"quot", "\""}, {"apos", "'"}, {"nbsp", " "}};
+    size_t semi = 1;
+    while (semi < n && semi < 12 && s[semi] != ';') semi++;
+    if (semi >= n || s[semi] != ';' || semi < 2) return 0;
+    for (size_t k = 0; k < ARRAY_LEN(named); k++)
+        if (semi - 1 == strlen(named[k].name) && !strncasecmp(s + 1, named[k].name, semi - 1)) {
+            sb_append(b, named[k].out);
+            return semi + 1;
+        }
+    if (s[1] != '#') return 0;
+    bool hex = s[2] == 'x' || s[2] == 'X';
+    size_t p = hex ? 3 : 2;
+    if (p >= semi) return 0;
+    unsigned long v = 0;
+    for (size_t k = p; k < semi; k++) {
+        int d = hex ? (isxdigit((unsigned char)s[k]) ? (isdigit((unsigned char)s[k]) ? s[k] - '0' : (tolower(s[k]) - 'a' + 10)) : -1)
+                    : (isdigit((unsigned char)s[k]) ? s[k] - '0' : -1);
+        if (d < 0) return 0;
+        v = v * (hex ? 16 : 10) + (unsigned long)d;
+        if (v > 0x10ffff) return 0;
+    }
+    if (v >= 0x20 && !(v >= 0xd800 && v <= 0xdfff)) {
+        char u[8];
+        int k = utf8_encode((uint32_t)v, u);
+        sb_appendn(b, u, (size_t)k);
+    }
+    return semi + 1;
+}
+
+/* html tag at s[0]=='<': returns length of a recognised tag and its lowercase name, else 0 */
+static size_t html_tag(const char *s, size_t n, char *name, size_t cap, bool *closing) {
+    size_t i = 1;
+    *closing = false;
+    if (i < n && s[i] == '/') {
+        *closing = true;
+        i++;
+    }
+    size_t k = 0;
+    while (i < n && isalnum((unsigned char)s[i]) && k + 1 < cap) name[k++] = (char)tolower((unsigned char)s[i++]);
+    name[k] = 0;
+    if (!k) return 0;
+    while (i < n && s[i] != '>' && s[i] != '<' && s[i] != '\n' && i < 400) i++;
+    if (i >= n || s[i] != '>') return 0;
+    return i + 1;
+}
+
 static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, int depth) {
     istyle_t st = {0};
     scan_cache_t sc;
     memset(&sc, 0xff, sizeof sc);
-    emit_style(b, c, &st);
+    /* no leading reset: an enclosing style (a bold table header cell) stays in effect */
+    sb_append(b, c->base);
+    sb_append(b, c->deflt);
+    bool styled = c->base[0] || c->deflt[0];
     size_t i = 0;
+    bool line_start = false; /* after a hard break: drop the next line's leading whitespace */
     while (i < n) {
         char ch = s[i];
+        if (line_start) {
+            line_start = false;
+            while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+            if (i >= n) break;
+            ch = s[i];
+        }
+        if (ch == '\\' && i + 1 < n && s[i + 1] == '\n') { /* backslash hard break */
+            sb_putc(b, '\n');
+            i += 2;
+            line_start = true;
+            continue;
+        }
         if (ch == '\\' && i + 1 < n && is_punct(s[i + 1])) {
             sb_putc(b, s[i + 1]);
             i += 2;
             continue;
         }
         if (ch == '\n') {
+            /* two trailing spaces before the newline = hard break (renders the same) */
             sb_putc(b, '\n');
             i++;
             continue;
+        }
+        if (ch == '&') {
+            size_t k = html_entity(s + i, n - i, b);
+            if (k) {
+                i += k;
+                continue;
+            }
         }
         if (ch == '`') {
             size_t r = 0;
@@ -491,10 +334,19 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
             }
             const char *cs = s + i + r;
             size_t cl = close - (i + r);
-            if (cl >= 2 && cs[0] == ' ' && cs[cl - 1] == ' ') {
+            bool all_space = true;
+            for (size_t q = 0; q < cl; q++)
+                if (cs[q] != ' ' && cs[q] != '\n') all_space = false;
+            if (cl >= 2 && !all_space && (cs[0] == ' ' || cs[0] == '\n') && (cs[cl - 1] == ' ' || cs[cl - 1] == '\n')) {
                 cs++;
                 cl -= 2;
             }
+            /* code spans keep wrapper styles and emphasis but not the default prose style */
+            sb_append(b, TUI_RESET);
+            sb_append(b, c->base);
+            if (st.bold) sb_append(b, "\x1b[1m");
+            if (st.italic) sb_append(b, "\x1b[3m");
+            if (st.strike) sb_append(b, "\x1b[9m");
             sb_append(b, tui_fg_seq(c->th, TUI_TC_MD_CODE));
             for (size_t q = 0; q < cl; q++) sb_putc(b, cs[q] == '\n' ? ' ' : cs[q]);
             emit_style(b, c, &st);
@@ -550,13 +402,13 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
         if (ch == '~' && i + 1 < n && s[i + 1] == '~') {
             char next = i + 2 < n ? s[i + 2] : ' ';
             char prev = i > 0 ? s[i - 1] : ' ';
-            if (st.strike && !isspace((unsigned char)prev)) {
+            if (st.strike && !isspace((unsigned char)prev) && prev != '~' && next != '~') {
                 st.strike = false;
                 emit_style(b, c, &st);
                 i += 2;
                 continue;
             }
-            if (!st.strike && !isspace((unsigned char)next) && closer_cached(&sc, s, i + 2, n, '~', 2)) {
+            if (!st.strike && !isspace((unsigned char)next) && next != '~' && closer_cached(&sc, s, i + 2, n, '~', 2)) {
                 st.strike = true;
                 emit_style(b, c, &st);
                 i += 2;
@@ -590,15 +442,26 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
                     k++;
                 }
                 if (k < n && s[k] == ')') {
-                    size_t ue = us;
+                    size_t u0 = us;
+                    while (u0 < k && s[u0] == ' ') u0++;
+                    size_t ue = u0;
                     while (ue < k && s[ue] != ' ') ue++;
-                    const char *url = s + us;
-                    size_t ul = ue - us;
+                    const char *url = s + u0;
+                    size_t ul = ue - u0;
                     if (ul >= 2 && url[0] == '<' && url[ul - 1] == '>') {
                         url++;
                         ul -= 2;
                     }
-                    emit_link(s + ts, j - ts, url, ul, c, b, &st, depth);
+                    if (ch == '!') {
+                        /* images render as their alt text */
+                        if (depth < 3) {
+                            md_ctx_t ac = *c;
+                            render_inline(s + ts, j - ts, &ac, b, depth + 1);
+                        } else sb_appendn(b, s + ts, j - ts);
+                        emit_style(b, c, &st);
+                    } else {
+                        emit_link(s + ts, j - ts, url, ul, c, b, &st, depth);
+                    }
                     i = k + 1;
                     continue;
                 }
@@ -616,15 +479,75 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
                     i = j + 1;
                     continue;
                 }
+                if (memchr(u, '@', ul) && !memchr(u, ':', ul) && ul > 2) {
+                    char *mu = xasprintf("mailto:%.*s", (int)ul, u);
+                    emit_link(u, ul, mu, strlen(mu), c, b, &st, depth);
+                    free(mu);
+                    i = j + 1;
+                    continue;
+                }
+            }
+            /* inline html: <br> breaks the line, <code>..</code> is a code span, a few layout tags vanish */
+            char name[16];
+            bool closing;
+            size_t tl = html_tag(s + i, n - i, name, sizeof name, &closing);
+            if (tl) {
+                if (!strcmp(name, "br")) {
+                    sb_putc(b, '\n');
+                    i += tl;
+                    line_start = true;
+                    continue;
+                }
+                if (!strcmp(name, "code") && !closing) {
+                    const char *e = NULL;
+                    for (size_t q = i + tl; q + 7 <= n; q++)
+                        if (!strncasecmp(s + q, "</code>", 7)) {
+                            e = s + q;
+                            break;
+                        }
+                    if (e) {
+                        sb_append(b, TUI_RESET);
+                        sb_append(b, c->base);
+                        sb_append(b, tui_fg_seq(c->th, TUI_TC_MD_CODE));
+                        for (const char *q = s + i + tl; q < e;) {
+                            if (*q == '&') {
+                                size_t k = html_entity(q, (size_t)(e - q), b);
+                                if (k) {
+                                    q += k;
+                                    continue;
+                                }
+                            }
+                            sb_putc(b, *q == '\n' ? ' ' : *q);
+                            q++;
+                        }
+                        emit_style(b, c, &st);
+                        i = (size_t)(e - s) + 7;
+                        continue;
+                    }
+                }
+                if (!strcmp(name, "span") || !strcmp(name, "text") || !strcmp(name, "code")) {
+                    i += tl;
+                    continue;
+                }
             }
         }
-        if ((ch == 'h' && (i == 0 || !isalnum((unsigned char)s[i - 1])) &&
-             (!strncmp(s + i, "http://", MIN(7, n - i)) || !strncmp(s + i, "https://", MIN(8, n - i))) && n - i > 8)) {
-            size_t e = url_end(s, i, n);
-            if (e > i + 8) {
-                emit_link(s + i, e - i, s + i, e - i, c, b, &st, depth);
-                i = e;
-                continue;
+        if ((ch == 'h' || ch == 'w' || ch == 'f') && (i == 0 || strchr(" \t\n*_~(", s[i - 1]))) {
+            bool www = n - i > 4 && !strncmp(s + i, "www.", 4);
+            bool sch = (n - i > 8 && (!strncmp(s + i, "http://", 7) || !strncmp(s + i, "https://", 8))) ||
+                       (n - i > 6 && !strncmp(s + i, "ftp://", 6));
+            if (www || sch) {
+                size_t e = url_end(s, i, n);
+                if (e > i + (www ? 5 : 8)) {
+                    if (www) {
+                        char *href = xasprintf("http://%.*s", (int)(e - i), s + i);
+                        emit_link(s + i, e - i, href, strlen(href), c, b, &st, depth);
+                        free(href);
+                    } else {
+                        emit_link(s + i, e - i, s + i, e - i, c, b, &st, depth);
+                    }
+                    i = e;
+                    continue;
+                }
             }
         }
         uint32_t cp;
@@ -633,23 +556,58 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
         else sb_appendn(b, s + i, (size_t)k);
         i += (size_t)k;
     }
-    sb_append(b, TUI_RESET);
+    if (styled || st.bold || st.italic || st.strike || memmem(b->s, b->len, "\x1b[", 2)) sb_append(b, TUI_RESET);
 }
 
 /* ====================================================================== */
-/* blocks                                                                  */
+/* blocks: a line-based lexer producing marked-like block tokens, then the */
+/* upstream Markdown component's per-token layout and spacing rules        */
 /* ====================================================================== */
 
-typedef enum { B_NONE, B_PARA, B_HEADING, B_CODE, B_LIST, B_QUOTE, B_TABLE, B_HR } btype_t;
+typedef enum { T_NONE, T_SPACE, T_PARA, T_HEADING, T_CODE, T_LIST, T_QUOTE, T_TABLE, T_HR, T_HTML } ttype_t;
 
 typedef struct {
     const char *const *v;
     size_t n;
 } lines_t;
 
+typedef struct {
+    ttype_t t;
+    size_t from, to; /* source lines [from, to) */
+    int level;       /* heading level */
+    bool setext;     /* heading: underline on line to-1 */
+    char hrc[8];     /* hr: source glyph */
+    char lang[32];   /* code */
+    size_t strip;    /* code: indent stripped from body lines */
+    bool fenced;     /* code: from/to include the fences (closing fence may be missing) */
+    bool closed;
+} tok_t;
+
+typedef VEC(tok_t) toks_t;
+
+/* one rendered row; literal rows (code bodies with code_indent 0) skip margins and quote borders */
+typedef struct {
+    char *text;
+    bool literal;
+    bool nested; /* list rows already carrying their own indent */
+} row_t;
+
+typedef VEC(row_t) rows_t;
+
+static void rows_push(rows_t *r, char *text, bool literal) {
+    row_t x = {text, literal, false};
+    vec_push(r, x);
+}
+
+static void rows_free(rows_t *r) {
+    for (size_t i = 0; i < r->n; i++) free(r->v[i].text);
+    free(r->v);
+    memset(r, 0, sizeof *r);
+}
+
 static size_t indent_of(const char *s) {
     size_t n = 0;
-    for (; *s == ' ' || *s == '\t'; s++) n += *s == '\t' ? 4 : 1;
+    for (; *s == ' ' || *s == '\t'; s++) n += *s == '\t' ? 4 - (n % 4) : 1;
     return n;
 }
 
@@ -685,29 +643,41 @@ static int heading_level(const char *s) {
     return n;
 }
 
-static bool is_hr(const char *s) {
+/* thematic break: 3+ of one of - * _ ─ ━ ═ = – — (spaces allowed); copies the glyph */
+static bool is_hr(const char *s, char *glyph) {
     if (indent_of(s) > 3) return false;
     s = skip_ws(s);
-    char c = *s;
-    if (c != '-' && c != '*' && c != '_') return false;
-    int cnt = 0;
-    for (; *s; s++) {
-        if (*s == c) cnt++;
-        else if (*s != ' ' && *s != '\t') return false;
+    static const char *const G[] = {"-", "*", "_", "=", "\xe2\x94\x80", "\xe2\x94\x81", "\xe2\x95\x90",
+                                    "\xe2\x80\x93", "\xe2\x80\x94"};
+    for (size_t g = 0; g < ARRAY_LEN(G); g++) {
+        size_t gl = strlen(G[g]);
+        if (strncmp(s, G[g], gl)) continue;
+        int cnt = 0;
+        const char *p = s;
+        while (*p) {
+            if (!strncmp(p, G[g], gl)) {
+                cnt++;
+                p += gl;
+            } else if (*p == ' ' || *p == '\t') p++;
+            else return false;
+        }
+        if (cnt < 3) return false;
+        if (glyph) snprintf(glyph, 8, "%s", G[g]);
+        return true;
     }
-    return cnt >= 3;
+    return false;
 }
 
 static bool is_quote(const char *s) { return indent_of(s) <= 3 && *skip_ws(s) == '>'; }
 
-/* list item: returns marker info; content offset in bytes */
-static bool list_item(const char *s, size_t *indent, bool *ordered, long *num, size_t *content_off, size_t *marker_w) {
+/* list item marker: bullet char ('-', '*', '+') or ordered delimiter ('.', ')') in *kind */
+static bool list_item(const char *s, size_t *indent, char *kind, long *num, size_t *content_off, size_t *content_col) {
     size_t ind = indent_of(s);
     const char *p = skip_ws(s);
-    const char *m = p;
-    bool ord = false;
+    char k;
     long nv = 0;
     if (*p == '-' || *p == '*' || *p == '+') {
+        k = *p;
         p++;
     } else if (isdigit((unsigned char)*p)) {
         int d = 0;
@@ -717,23 +687,34 @@ static bool list_item(const char *s, size_t *indent, bool *ordered, long *num, s
             d++;
         }
         if (*p != '.' && *p != ')') return false;
+        k = *p;
         p++;
-        ord = true;
     } else {
         return false;
     }
     if (*p && *p != ' ' && *p != '\t') return false;
-    if (!ord && is_hr(s)) return false;
-    size_t mw = (size_t)(p - m);
+    if ((k == '-' || k == '*') && is_hr(s, NULL)) return false;
+    size_t mcol = ind + (size_t)(p - skip_ws(s));
     const char *c = p;
-    if (*c == ' ' || *c == '\t') c++;
+    size_t sp = 0;
+    while ((*c == ' ' || *c == '\t') && sp < 5) {
+        c++;
+        sp++;
+    }
+    if (!*c) sp = 1; /* empty item */
+    else if (sp > 4) {
+        c = p + 1;
+        sp = 1;
+    }
     if (indent) *indent = ind;
-    if (ordered) *ordered = ord;
+    if (kind) *kind = k;
     if (num) *num = nv;
     if (content_off) *content_off = (size_t)(c - s);
-    if (marker_w) *marker_w = mw;
+    if (content_col) *content_col = mcol + sp;
     return true;
 }
+
+static void split_cells(const char *s, strvec_t *cells);
 
 static bool is_table_sep(const char *s) {
     s = skip_ws(s);
@@ -746,152 +727,556 @@ static bool is_table_sep(const char *s) {
     return dash && pipe;
 }
 
-static bool is_table_start(const lines_t *L, size_t i) {
-    return i + 1 < L->n && strchr(L->v[i], '|') && is_table_sep(L->v[i + 1]);
+static bool is_table_start(const lines_t *L, size_t i, size_t to) {
+    if (i + 1 >= to || !strchr(L->v[i], '|') || !is_table_sep(L->v[i + 1])) return false;
+    strvec_t h = {0}, d = {0};
+    split_cells(L->v[i], &h);
+    split_cells(L->v[i + 1], &d);
+    bool ok = h.n == d.n && h.n > 0;
+    strvec_free(&h);
+    strvec_free(&d);
+    return ok;
 }
 
-static bool starts_block(const lines_t *L, size_t i) {
+static bool is_html_block(const char *s) {
+    if (indent_of(s) > 3) return false;
+    s = skip_ws(s);
+    if (!strncmp(s, "<!--", 4)) return true;
+    if (*s != '<') return false;
+    static const char *const TAGS[] = {"address", "article", "aside", "blockquote", "details", "div", "dl", "fieldset",
+                                       "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr",
+                                       "main", "nav", "ol", "p", "pre", "section", "summary", "table", "ul", "center"};
+    const char *p = s + 1;
+    if (*p == '/') p++;
+    char name[16];
+    size_t k = 0;
+    while (isalnum((unsigned char)p[k]) && k + 1 < sizeof name) {
+        name[k] = (char)tolower((unsigned char)p[k]);
+        k++;
+    }
+    name[k] = 0;
+    if (!k || (p[k] && p[k] != ' ' && p[k] != '>' && p[k] != '/')) return false;
+    for (size_t t = 0; t < ARRAY_LEN(TAGS); t++)
+        if (!strcmp(name, TAGS[t])) return true;
+    return false;
+}
+
+static bool is_ref_def(const char *s) {
+    if (indent_of(s) > 3) return false;
+    s = skip_ws(s);
+    if (*s != '[' || s[1] == ']') return false;
+    const char *e = strstr(s, "]:");
+    if (!e || memchr(s + 1, '[', (size_t)(e - s - 1))) return false;
+    return *skip_ws(e + 2) != 0;
+}
+
+/* does line i interrupt a paragraph? */
+static bool interrupts_para(const lines_t *L, size_t i, size_t to) {
     const char *s = L->v[i];
-    return is_fence(s, NULL, NULL, NULL) || heading_level(s) || is_hr(s) || is_quote(s) ||
-           list_item(s, NULL, NULL, NULL, NULL, NULL) || is_table_start(L, i);
+    char k;
+    long num;
+    size_t co;
+    if (is_fence(s, NULL, NULL, NULL) || heading_level(s) || is_hr(s, NULL) || is_quote(s) || is_html_block(s))
+        return true;
+    if (list_item(s, NULL, &k, &num, &co, NULL) && indent_of(s) <= 3 && !is_blank(s + co) &&
+        ((k != '.' && k != ')') || num == 1))
+        return true;
+    return is_table_start(L, i, to);
 }
 
-static void render_blocks(const lines_t *L, size_t from, size_t to, int width, const md_ctx_t *c, int depth,
-                          strvec_t *out);
+static void lex_blocks(const lines_t *L, size_t from, size_t to, toks_t *out);
 
-static void push_wrapped(strvec_t *out, const char *s, int width) { tui_wrap_text_with_ansi(s, width, out); }
+static size_t lex_list(const lines_t *L, size_t i, size_t to) {
+    char kind;
+    size_t ccol;
+    list_item(L->v[i], NULL, &kind, NULL, NULL, &ccol);
+    size_t j = i + 1;
+    bool last_para = true;
+    while (j < to) {
+        const char *s = L->v[j];
+        if (is_blank(s)) {
+            size_t k = j;
+            while (k < to && is_blank(L->v[k])) k++;
+            if (k >= to) break;
+            const char *x = L->v[k];
+            size_t xi;
+            char xk;
+            size_t xc;
+            if (indent_of(x) >= ccol) {
+                j = k;
+                last_para = false;
+                continue;
+            }
+            if (list_item(x, &xi, &xk, NULL, NULL, &xc) && xk == kind && xi < ccol) {
+                ccol = xc;
+                j = k + 1;
+                last_para = true;
+                continue;
+            }
+            break;
+        }
+        size_t xi, xc;
+        char xk;
+        if (indent_of(s) < ccol && list_item(s, &xi, &xk, NULL, NULL, &xc)) {
+            if (xk != kind) break;
+            ccol = xc;
+            j++;
+            last_para = true;
+            continue;
+        }
+        if (indent_of(s) >= ccol) {
+            j++;
+            last_para = !is_fence(skip_ws(s), NULL, NULL, NULL);
+            continue;
+        }
+        /* lazy paragraph continuation */
+        if (last_para && !interrupts_para(L, j, to)) {
+            j++;
+            continue;
+        }
+        break;
+    }
+    return j;
+}
 
-static void render_paragraph(const lines_t *L, size_t from, size_t to, int width, const md_ctx_t *c, strvec_t *out) {
+static void lex_blocks(const lines_t *L, size_t from, size_t to, toks_t *out) {
+    size_t i = from;
+    bool any = false, space = false;
+    while (i < to) {
+        const char *s = L->v[i];
+        if (is_blank(s)) {
+            if (any) space = true;
+            i++;
+            continue;
+        }
+        if (space) {
+            tok_t sp = {.t = T_SPACE, .from = i, .to = i};
+            vec_push(out, sp);
+            space = false;
+        }
+        tok_t t;
+        memset(&t, 0, sizeof t);
+        t.from = i;
+        char fch;
+        size_t flen;
+        const char *info;
+        int hl;
+        if (indent_of(s) >= 4 && !any) {
+            /* indented code (only where a paragraph cannot continue) */
+            t.t = T_CODE;
+            t.strip = 4;
+            size_t j = i, last = i;
+            while (j < to && (is_blank(L->v[j]) || indent_of(L->v[j]) >= 4)) {
+                if (!is_blank(L->v[j])) last = j;
+                j++;
+            }
+            t.to = last + 1;
+            i = t.to;
+        } else if (is_fence(s, &fch, &flen, &info)) {
+            t.t = T_CODE;
+            t.fenced = true;
+            t.strip = indent_of(s);
+            size_t ll = 0;
+            while (info[ll] && info[ll] != ' ' && info[ll] != '\t' && info[ll] != '{' && ll < sizeof t.lang - 1) {
+                t.lang[ll] = info[ll];
+                ll++;
+            }
+            t.lang[ll] = 0;
+            size_t j = i + 1;
+            while (j < to) {
+                char c2;
+                size_t l2;
+                const char *inf2;
+                if (is_fence(L->v[j], &c2, &l2, &inf2) && c2 == fch && l2 >= flen && !*inf2) {
+                    t.closed = true;
+                    break;
+                }
+                j++;
+            }
+            t.to = j < to ? j + 1 : j;
+            i = t.to;
+        } else if ((hl = heading_level(s))) {
+            t.t = T_HEADING;
+            t.level = hl;
+            t.to = ++i;
+        } else if (is_hr(s, t.hrc)) {
+            t.t = T_HR;
+            t.to = ++i;
+        } else if (is_quote(s)) {
+            t.t = T_QUOTE;
+            size_t j = i + 1;
+            while (j < to && !is_blank(L->v[j]) &&
+                   (is_quote(L->v[j]) || (!interrupts_para(L, j, to) && !is_ref_def(L->v[j]))))
+                j++;
+            t.to = j;
+            i = j;
+        } else if (list_item(s, NULL, NULL, NULL, NULL, NULL)) {
+            t.t = T_LIST;
+            t.to = lex_list(L, i, to);
+            i = t.to;
+        } else if (is_html_block(s)) {
+            t.t = T_HTML;
+            size_t j = i + 1;
+            while (j < to && !is_blank(L->v[j])) j++;
+            t.to = j;
+            i = j;
+        } else if (!any && is_ref_def(s)) {
+            i++;
+            continue;
+        } else if (is_table_start(L, i, to)) {
+            t.t = T_TABLE;
+            size_t j = i + 2;
+            while (j < to && !is_blank(L->v[j]) && !interrupts_para(L, j, to)) j++;
+            t.to = j;
+            i = j;
+        } else {
+            t.t = T_PARA;
+            size_t j = i + 1;
+            while (j < to && !is_blank(L->v[j])) {
+                const char *x = skip_ws(L->v[j]);
+                /* setext underline: === -> h1, --- -> h2 */
+                if (indent_of(L->v[j]) <= 3 && (*x == '=' || *x == '-')) {
+                    char u = *x;
+                    const char *p = x;
+                    while (*p == u) p++;
+                    if (!*skip_ws(p)) {
+                        t.t = T_HEADING;
+                        t.level = u == '=' ? 1 : 2;
+                        t.setext = true;
+                        j++;
+                        break;
+                    }
+                }
+                if (interrupts_para(L, j, to)) break;
+                j++;
+            }
+            t.to = j;
+            i = j;
+        }
+        vec_push(out, t);
+        any = true;
+    }
+}
+
+/* ---------- rendering ---------- */
+
+static void render_tokens(const lines_t *L, const toks_t *T, int width, const md_ctx_t *c, int depth, rows_t *out);
+static void render_table(const lines_t *L, size_t from, size_t to, int width, ttype_t next, const md_ctx_t *c,
+                         rows_t *out);
+
+/* paragraph source: lines joined with '\n', trailing whitespace dropped; a hard break ("  " or "\" at line
+ * end) becomes "\\\n" so the inline pass drops the next line's indentation */
+static char *para_source(const lines_t *L, size_t from, size_t to) {
     sb_t src = SB_INIT;
     for (size_t i = from; i < to; i++) {
         const char *s = skip_ws(L->v[i]);
         size_t n = strlen(s);
-        bool hard = false;
-        if (n >= 2 && s[n - 1] == ' ' && s[n - 2] == ' ') hard = true;
-        if (n >= 1 && s[n - 1] == '\\') {
+        bool hard = n >= 2 && s[n - 1] == ' ' && s[n - 2] == ' ';
+        size_t bs = 0;
+        while (bs < n && s[n - 1 - bs] == '\\') bs++;
+        if (bs % 2 == 1) {
             hard = true;
             n--;
         }
         while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) n--;
-        if (i > from) sb_putc(&src, '\n');
         sb_appendn(&src, s, n);
-        (void)hard;
+        if (i + 1 < to) sb_append(&src, hard ? "\\\n" : "\n");
     }
-    sb_t b = SB_INIT;
-    render_inline(sb_cstr(&src), src.len, c, &b, 0);
-    push_wrapped(out, sb_cstr(&b), width);
-    sb_free(&b);
-    sb_free(&src);
+    return sb_detach(&src);
 }
 
-static void render_heading(const char *s, int level, int width, const md_ctx_t *c, strvec_t *out) {
-    s = skip_ws(s) + level;
-    s = skip_ws(s);
-    size_t n = strlen(s);
-    /* strip closing #s */
-    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) n--;
-    size_t m = n;
-    while (m > 0 && s[m - 1] == '#') m--;
-    if (m < n && (m == 0 || s[m - 1] == ' ')) n = m;
-    while (n > 0 && s[n - 1] == ' ') n--;
-    md_ctx_t hc;
-    ctx_extend(&hc, c, tui_fg_seq(c->th, TUI_TC_MD_HEADING), "\x1b[1m", level == 1 ? "\x1b[4m" : "");
+static char *inline_str(const char *s, size_t n, const md_ctx_t *c) {
     sb_t b = SB_INIT;
-    if (level >= 3) {
+    render_inline(s, n, c, &b, 0);
+    return sb_detach(&b);
+}
+
+static char *heading_str(const lines_t *L, const tok_t *t, const md_ctx_t *c) {
+    const char *s;
+    size_t n;
+    char *own = NULL;
+    if (t->setext) {
+        own = para_source(L, t->from, t->to - 1);
+        s = own;
+        n = strlen(s);
+    } else {
+        s = skip_ws(skip_ws(L->v[t->from]) + t->level);
+        n = strlen(s);
+        while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) n--;
+        size_t m = n;
+        while (m > 0 && s[m - 1] == '#') m--;
+        if (m < n && (m == 0 || s[m - 1] == ' ')) n = m;
+        while (n > 0 && s[n - 1] == ' ') n--;
+    }
+    md_ctx_t hc;
+    ctx_extend(&hc, c, tui_fg_seq(c->th, TUI_TC_MD_HEADING), "\x1b[1m", t->level == 1 ? "\x1b[4m" : "");
+    sb_t b = SB_INIT;
+    if (t->level >= 3) {
+        sb_append(&b, TUI_RESET);
         sb_append(&b, hc.base);
-        for (int i = 0; i < level; i++) sb_putc(&b, '#');
+        for (int i = 0; i < t->level; i++) sb_putc(&b, '#');
         sb_putc(&b, ' ');
     }
     render_inline(s, n, &hc, &b, 0);
-    push_wrapped(out, sb_cstr(&b), width);
-    sb_free(&b);
+    free(own);
+    return sb_detach(&b);
 }
 
-static void render_code(const lines_t *L, size_t from, size_t to, const char *lang, size_t strip_indent, int width,
-                        const md_ctx_t *c, strvec_t *out) {
+/* fenced/indented code body as rows (highlighted when the language is supported, else verbatim) */
+static void code_rows(const lines_t *L, const tok_t *t, const md_ctx_t *c, rows_t *out) {
+    size_t bf = t->fenced ? t->from + 1 : t->from;
+    size_t bt = t->fenced && t->closed ? t->to - 1 : t->to;
     sb_t code = SB_INIT;
-    for (size_t i = from; i < to; i++) {
+    for (size_t i = bf; i < bt; i++) {
         const char *s = L->v[i];
-        size_t k = 0;
-        while (k < strip_indent && s[k] == ' ') k++;
-        if (i > from) sb_putc(&code, '\n');
+        size_t k = 0, col = 0;
+        while (col < t->strip && (s[k] == ' ' || s[k] == '\t')) {
+            col += s[k] == '\t' ? 4 : 1;
+            k++;
+        }
+        if (i > bf) sb_putc(&code, '\n');
         sb_append(&code, s + k);
     }
-    sb_t b = SB_INIT;
-    sb_append(&b, "```");
-    sb_append(&b, lang);
-    char *border = tui_fgs(c->th, TUI_TC_MD_CODE_BLOCK_BORDER, sb_cstr(&b));
-    char *tb = tui_truncate_to_width(border, width, NULL);
-    strvec_push_own(out, tb);
-    free(border);
-    sb_free(&b);
     strvec_t hl = {0};
-    if (to > from) tui_highlight_code(sb_cstr(&code), lang, c->th, &hl);
-    int ind = MAX(0, MIN(c->o->code_indent, width - 1));
-    int inner = MAX(1, width - ind);
+    if (bt > bf || !t->closed) tui_highlight_code(sb_cstr(&code), t->lang, c->th, &hl);
+    bool literal = c->o->code_indent == 0;
     for (size_t i = 0; i < hl.n; i++) {
-        strvec_t wrapped = {0};
-        if (tui_visible_width(hl.v[i]) <= inner) strvec_push(&wrapped, hl.v[i]);
-        else {
-            /* hard-wrap code by columns (no word wrap) */
-            int total = tui_visible_width(hl.v[i]);
-            for (int col = 0; col < total; col += inner) strvec_push_own(&wrapped, tui_slice_cols(hl.v[i], col, inner));
+        char *line = hl.v[i];
+        hl.v[i] = NULL;
+        if (!literal) {
+            char *x = xasprintf("%*s%s", c->o->code_indent, "", line);
+            free(line);
+            line = x;
         }
-        for (size_t j = 0; j < wrapped.n; j++) {
-            sb_t l = SB_INIT;
-            tui_sb_spaces(&l, ind);
-            sb_append(&l, wrapped.v[j]);
-            strvec_push_own(out, sb_detach(&l));
-        }
-        strvec_free(&wrapped);
+        rows_push(out, line, literal);
     }
     strvec_free(&hl);
-    strvec_push_own(out, tui_fgs(c->th, TUI_TC_MD_CODE_BLOCK_BORDER, "```"));
     sb_free(&code);
 }
 
-static void render_hr(int width, const md_ctx_t *c, strvec_t *out) {
-    sb_t b = SB_INIT;
-    sb_append(&b, tui_fg_seq(c->th, TUI_TC_MD_HR));
-    sb_repeat(&b, BOX_H, MIN(width, 80));
-    sb_append(&b, "\x1b[39m");
-    strvec_push_own(out, sb_detach(&b));
+static char *code_border(const char *lang, const md_ctx_t *c) {
+    char *s = xasprintf("```%s", lang ? lang : "");
+    char *r = tui_fgs(c->th, TUI_TC_MD_CODE_BLOCK_BORDER, s);
+    free(s);
+    return r;
 }
 
-static void render_quote(const lines_t *L, size_t from, size_t to, int width, const md_ctx_t *c, int depth,
-                         strvec_t *out) {
-    strvec_t inner_src = {0};
-    for (size_t i = from; i < to; i++) {
+static char *hr_str(int width, const char *src, const md_ctx_t *c) {
+    const char *def = tui_sym("md.hrChar");
+    if (!def || !*def) def = "\xe2\x94\x80";
+    bool ascii = !strcmp(def, "-");
+    const char *g = def;
+    if (src && *src) {
+        if (!strcmp(src, "=")) g = "=";
+        else if (!strcmp(src, "\xe2\x95\x90")) g = ascii ? "=" : src;
+        else if (!strcmp(src, "\xe2\x94\x81") || !strcmp(src, "\xe2\x94\x80") || !strcmp(src, "\xe2\x80\x93") ||
+                 !strcmp(src, "\xe2\x80\x94"))
+            g = ascii ? "-" : src;
+    }
+    sb_t b = SB_INIT;
+    sb_append(&b, tui_fg_seq(c->th, TUI_TC_MD_HR));
+    sb_repeat(&b, g, MIN(width, 80));
+    sb_append(&b, "\x1b[39m");
+    return sb_detach(&b);
+}
+
+/* blockquote: inner tokens at width-2, trailing blank rows dropped, each styled row wrapped and prefixed with
+ * the quote border; literal code rows pass through unbordered */
+static void render_quote(const lines_t *L, const tok_t *t, int width, const md_ctx_t *c, int depth, rows_t *out) {
+    strvec_t src = {0};
+    for (size_t i = t->from; i < t->to; i++) {
         const char *s = skip_ws(L->v[i]);
         if (*s == '>') {
             s++;
             if (*s == ' ') s++;
+            else if (*s == '\t') s++;
         }
-        strvec_push(&inner_src, s);
+        strvec_push(&src, s);
     }
     md_ctx_t qc;
     ctx_extend(&qc, c, tui_fg_seq(c->th, TUI_TC_MD_QUOTE), "\x1b[3m", "");
-    strvec_t inner = {0};
-    lines_t IL = {(const char *const *)inner_src.v, inner_src.n};
+    qc.deflt[0] = 0; /* quotes replace the default prose style */
     int iw = MAX(1, width - 2);
-    if (depth + 1 < MD_MAX_DEPTH) render_blocks(&IL, 0, IL.n, iw, &qc, depth + 1, &inner);
-    else {
-        for (size_t i = 0; i < inner_src.n; i++) push_wrapped(&inner, inner_src.v[i], iw);
+    rows_t inner = {0};
+    lines_t IL = {(const char *const *)src.v, src.n};
+    if (depth + 1 < MD_MAX_DEPTH) {
+        toks_t T = {0};
+        lex_blocks(&IL, 0, IL.n, &T);
+        render_tokens(&IL, &T, iw, &qc, depth + 1, &inner);
+        free(T.v);
+    } else {
+        for (size_t i = 0; i < src.n; i++) rows_push(&inner, xstrdup(src.v[i]), false);
     }
-    while (inner.n && inner.v[inner.n - 1][0] == 0) free(vec_pop(&inner));
+    while (inner.n && !inner.v[inner.n - 1].text[0]) free(vec_pop(&inner).text);
+    const char *qb = tui_sym("md.quoteBorder");
+    char *border_txt = xasprintf("%s ", qb && *qb ? qb : "\xe2\x96\x8f");
+    char *border = tui_fgs(c->th, TUI_TC_MD_QUOTE_BORDER, border_txt);
+    free(border_txt);
     for (size_t i = 0; i < inner.n; i++) {
-        sb_t b = SB_INIT;
-        tui_fg(&b, c->th, TUI_TC_MD_QUOTE_BORDER, BOX_V " ");
-        sb_append(&b, qc.base);
-        sb_append(&b, inner.v[i]);
-        sb_append(&b, TUI_RESET);
-        strvec_push_own(out, sb_detach(&b));
+        strvec_t w = {0};
+        if (inner.v[i].literal) {
+            tui_wrap_text_with_ansi(inner.v[i].text, iw, &w);
+            if (!w.n) strvec_push(&w, "");
+            for (size_t k = 0; k < w.n; k++) {
+                rows_push(out, w.v[k], true);
+                w.v[k] = NULL;
+            }
+        } else {
+            char *styled = xasprintf("%s%s%s", qc.base, inner.v[i].text, TUI_RESET);
+            tui_wrap_text_with_ansi(styled, iw, &w);
+            free(styled);
+            for (size_t k = 0; k < w.n; k++) rows_push(out, xasprintf("%s%s" TUI_RESET, border, w.v[k]), false);
+        }
+        strvec_free(&w);
     }
-    strvec_free(&inner);
-    strvec_free(&inner_src);
+    free(border);
+    rows_free(&inner);
+    strvec_free(&src);
 }
 
-/* ---------- tables ---------- */
+static void render_list(const lines_t *L, const tok_t *t, int depth, int width, const md_ctx_t *c, rows_t *out);
+
+/* rows of one list item, without the item's bullet/indent (render_list adds those); nested list rows come
+ * back tagged `nested` and already indented */
+static void render_list_item(const lines_t *IL, int depth, int width, int content_width, const md_ctx_t *c,
+                             rows_t *out) {
+    toks_t T = {0};
+    lex_blocks(IL, 0, IL->n, &T);
+    for (size_t k = 0; k < T.n; k++) {
+        const tok_t *t = &T.v[k];
+        switch (t->t) {
+        case T_SPACE: break;
+        case T_LIST: {
+            rows_t nested = {0};
+            if (depth + 1 < MD_MAX_DEPTH) render_list(IL, t, depth + 1, width, c, &nested);
+            for (size_t r = 0; r < nested.n; r++) {
+                nested.v[r].nested = true;
+                vec_push(out, nested.v[r]);
+            }
+            free(nested.v);
+            break;
+        }
+        case T_CODE:
+            rows_push(out, code_border(t->lang, c), false);
+            code_rows(IL, t, c, out);
+            rows_push(out, code_border("", c), false);
+            break;
+        case T_TABLE: render_table(IL, t->from, t->to, content_width, k + 1 < T.n ? T.v[k + 1].t : T_NONE, c, out); break;
+        case T_HEADING: rows_push(out, heading_str(IL, t, c), false); break;
+        case T_HR: rows_push(out, hr_str(content_width, t->hrc, c), false); break;
+        case T_QUOTE: render_quote(IL, t, content_width, c, depth + 1, out); break;
+        default: {
+            char *src = para_source(IL, t->from, t->to);
+            rows_push(out, inline_str(src, strlen(src), c), false);
+            free(src);
+        }
+        }
+    }
+    free(T.v);
+}
+
+/* strip the task-list checkbox ("[ ] " / "[x] ") marked drops from item text */
+static const char *skip_task(const char *s) {
+    if (s[0] == '[' && (s[1] == ' ' || s[1] == 'x' || s[1] == 'X') && s[2] == ']' && (s[3] == ' ' || s[3] == '\t'))
+        return skip_ws(s + 3);
+    return s;
+}
+
+static void push_item_row(rows_t *out, const row_t *line, const char *first, const char *cont, int width) {
+    if (line->literal) {
+        strvec_t w = {0};
+        tui_wrap_text_with_ansi(line->text, MAX(1, width), &w);
+        if (!w.n) strvec_push(&w, "");
+        for (size_t k = 0; k < w.n; k++) {
+            rows_push(out, w.v[k], true);
+            w.v[k] = NULL;
+        }
+        strvec_free(&w);
+        return;
+    }
+    int pw = tui_visible_width(first);
+    strvec_t w = {0};
+    if (pw >= width) {
+        rows_push(out, tui_truncate_to_width(first, width, ""), false);
+        tui_wrap_text_with_ansi(line->text, MAX(1, width), &w);
+        for (size_t k = 0; k < w.n; k++) {
+            rows_push(out, w.v[k], false);
+            w.v[k] = NULL;
+        }
+        strvec_free(&w);
+        return;
+    }
+    tui_wrap_text_with_ansi(line->text, width - pw, &w);
+    if (!w.n) rows_push(out, xstrdup(first), false);
+    for (size_t k = 0; k < w.n; k++) rows_push(out, xasprintf("%s%s", k ? cont : first, w.v[k]), false);
+    strvec_free(&w);
+}
+
+static void render_list(const lines_t *L, const tok_t *t, int depth, int width, const md_ctx_t *c, rows_t *out) {
+    char kind;
+    long start;
+    size_t ccol, coff, ind;
+    list_item(L->v[t->from], &ind, &kind, &start, &coff, &ccol);
+    bool ordered = kind == '.' || kind == ')';
+    char indent[2 * MD_MAX_DEPTH + 1];
+    int il = MIN(2 * depth, 2 * MD_MAX_DEPTH);
+    memset(indent, ' ', (size_t)il);
+    indent[il] = 0;
+    long idx = 0;
+    size_t i = t->from;
+    while (i < t->to) {
+        size_t co, cc, ii;
+        char kk;
+        if (!list_item(L->v[i], &ii, &kk, NULL, &co, &cc) || kk != kind) {
+            i++;
+            continue;
+        }
+        /* item body: first line after the marker, then lines up to the next sibling marker */
+        strvec_t body = {0};
+        strvec_push(&body, skip_task(L->v[i] + co));
+        size_t j = i + 1;
+        while (j < t->to) {
+            const char *s = L->v[j];
+            size_t ji, jc;
+            char jk;
+            if (!is_blank(s) && indent_of(s) < cc && list_item(s, &ji, &jk, NULL, NULL, &jc) && jk == kind) break;
+            size_t k = 0, col = 0;
+            while ((s[k] == ' ' || s[k] == '\t') && col < cc) {
+                col += s[k] == '\t' ? 4 : 1;
+                k++;
+            }
+            strvec_push(&body, s + k);
+            j++;
+        }
+        while (body.n > 1 && is_blank(body.v[body.n - 1])) free(vec_pop(&body));
+        char bullet[24];
+        if (ordered) snprintf(bullet, sizeof bullet, "%ld. ", start + idx);
+        else snprintf(bullet, sizeof bullet, "- ");
+        idx++;
+        int bw = (int)strlen(bullet);
+        char *first = xasprintf("%s%s%s\x1b[39m", indent, tui_fg_seq(c->th, TUI_TC_MD_LIST_BULLET), bullet);
+        char *cont = xasprintf("%s%*s", indent, bw, "");
+        rows_t item = {0};
+        lines_t BL = {(const char *const *)body.v, body.n};
+        render_list_item(&BL, depth, width, MAX(1, width - tui_visible_width(cont)), c, &item);
+        if (!item.n) rows_push(out, xstrdup(first), false);
+        for (size_t q = 0; q < item.n; q++) {
+            if (item.v[q].nested) {
+                vec_push(out, item.v[q]);
+                item.v[q].text = NULL;
+            } else {
+                push_item_row(out, &item.v[q], q == 0 ? first : cont, cont, width);
+            }
+        }
+        rows_free(&item);
+        free(first);
+        free(cont);
+        strvec_free(&body);
+        i = j;
+    }
+}
+
+/* ---------- tables (upstream #renderTable) ---------- */
 
 static void split_cells(const char *s, strvec_t *cells) {
     s = skip_ws(s);
@@ -920,318 +1305,323 @@ static void split_cells(const char *s, strvec_t *cells) {
     sb_free(&cur);
 }
 
-static void table_border(sb_t *b, const int *w, int nc, const char *l, const char *m, const char *r) {
+static int longest_word(const char *s, int cap) {
+    char *plain = tui_strip_ansi(s);
+    int best = 0;
+    for (char *p = plain; *p;) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        char *e = p;
+        while (*e && !isspace((unsigned char)*e)) e++;
+        if (e > p) best = MAX(best, tui_visible_width_n(p, (size_t)(e - p)));
+        p = e;
+    }
+    free(plain);
+    return cap > 0 ? MIN(best, cap) : best;
+}
+
+static int max_line_width(const char *s) {
+    int best = 0;
+    const char *p = s;
+    for (;;) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        best = MAX(best, tui_visible_width_n(p, n));
+        if (!nl) break;
+        p = nl + 1;
+    }
+    return best;
+}
+
+static void wrap_cell(const char *text, int w, strvec_t *out) {
+    strvec_t lines = {0};
+    tui_wrap_text_with_ansi(text, MAX(1, w), &lines);
+    while (lines.n > 1 && !lines.v[lines.n - 1][0]) free(vec_pop(&lines));
+    for (size_t i = 0; i < lines.n; i++) {
+        char *fit = tui_visible_width(lines.v[i]) > MAX(1, w) ? tui_truncate_to_width(lines.v[i], MAX(1, w), NULL)
+                                                               : xstrdup(lines.v[i]);
+        strvec_push_own(out, xasprintf("%s\x1b[22m\x1b[23m\x1b[39m", fit));
+        free(fit);
+    }
+    strvec_free(&lines);
+}
+
+static char *align_cell(const char *text, int w, char align) {
+    int gap = MAX(0, w - tui_visible_width(text));
+    if (!gap) return xstrdup(text);
+    if (align == 'r') return xasprintf("%*s%s", gap, "", text);
+    if (align == 'c') return xasprintf("%*s%s%*s", gap / 2, "", text, gap - gap / 2, "");
+    return xasprintf("%s%*s", text, gap, "");
+}
+
+static void table_rule(sb_t *b, const int *w, int nc, const char *l, const char *m, const char *r) {
+    const char *h = tui_sym("boxSharp.horizontal");
     sb_append(b, l);
     for (int i = 0; i < nc; i++) {
-        sb_repeat(b, BOX_H, w[i] + 2);
+        sb_repeat(b, h, w[i] + 2);
         sb_append(b, i + 1 < nc ? m : r);
     }
 }
 
-static void render_table(const lines_t *L, size_t from, size_t to, int width, const md_ctx_t *c, strvec_t *out) {
+static void render_table(const lines_t *L, size_t from, size_t to, int width, ttype_t next, const md_ctx_t *c,
+                         rows_t *out) {
     strvec_t header = {0}, seps = {0};
     split_cells(L->v[from], &header);
     split_cells(L->v[from + 1], &seps);
     int nc = (int)MIN(header.n, MD_MAX_COLS);
-    char align[MD_MAX_COLS];
-    for (int i = 0; i < nc; i++) {
-        const char *sp = i < (int)seps.n ? seps.v[i] : "";
-        size_t sl = strlen(sp);
-        bool l = sl && sp[0] == ':', r = sl && sp[sl - 1] == ':';
-        align[i] = l && r ? 'c' : r ? 'r' : 'l';
+    if (nc == 0) goto done;
+    int avail_cells = width - (3 * nc + 1);
+    if (avail_cells < nc) {
+        /* too narrow: the raw markdown, wrapped */
+        for (size_t i = from; i < to; i++) {
+            strvec_t w = {0};
+            tui_wrap_text_with_ansi(L->v[i], MAX(1, width), &w);
+            for (size_t k = 0; k < w.n; k++) {
+                rows_push(out, w.v[k], false);
+                w.v[k] = NULL;
+            }
+            strvec_free(&w);
+        }
+        if (next != T_NONE && next != T_SPACE) rows_push(out, xstrdup(""), false);
+        goto done;
     }
-    /* rendered cells: rows[0] = header */
-    size_t nrows = 1 + (to - from - 2);
-    char ***cells = xcalloc(nrows, sizeof(char **));
-    md_ctx_t hc;
-    ctx_extend(&hc, c, "\x1b[1m", "", "");
-    for (size_t r = 0; r < nrows; r++) {
-        strvec_t raw = {0};
-        if (r == 0) {
-            for (size_t i = 0; i < header.n; i++) strvec_push(&raw, header.v[i]);
-        } else split_cells(L->v[from + 1 + r], &raw);
-        cells[r] = xcalloc((size_t)nc, sizeof(char *));
+    {
+        char align[MD_MAX_COLS];
         for (int i = 0; i < nc; i++) {
-            const char *t = i < (int)raw.n ? raw.v[i] : "";
-            sb_t b = SB_INIT;
-            render_inline(t, strlen(t), r == 0 ? &hc : c, &b, 0);
-            cells[r][i] = sb_detach(&b);
+            const char *sp = i < (int)seps.n ? seps.v[i] : "";
+            size_t sl = strlen(sp);
+            bool l = sl && sp[0] == ':', r = sl && sp[sl - 1] == ':';
+            align[i] = l && r ? 'c' : r ? 'r' : 'l';
         }
-        strvec_free(&raw);
-    }
-    int nat[MD_MAX_COLS], w[MD_MAX_COLS];
-    int sum = 0;
-    for (int i = 0; i < nc; i++) {
-        nat[i] = 3;
-        for (size_t r = 0; r < nrows; r++) nat[i] = MAX(nat[i], tui_visible_width(cells[r][i]));
-        sum += nat[i];
-    }
-    int avail = width - (3 * nc + 1);
-    if (avail < nc * 3) {
-        /* too narrow for a grid: render rows as "a | b" lines */
+        size_t nrows = 1 + (to - from - 2);
+        char ***cells = xcalloc(nrows, sizeof(char **));
         for (size_t r = 0; r < nrows; r++) {
-            sb_t b = SB_INIT;
+            strvec_t raw = {0};
+            if (r == 0)
+                for (size_t i = 0; i < header.n; i++) strvec_push(&raw, header.v[i]);
+            else split_cells(L->v[from + 1 + r], &raw);
+            cells[r] = xcalloc((size_t)nc, sizeof(char *));
             for (int i = 0; i < nc; i++) {
-                if (i) sb_append(&b, " | ");
-                sb_append(&b, cells[r][i]);
+                const char *t = i < (int)raw.n ? raw.v[i] : "";
+                cells[r][i] = inline_str(t, strlen(t), c);
             }
-            push_wrapped(out, sb_cstr(&b), width);
-            sb_free(&b);
+            strvec_free(&raw);
         }
-    } else {
-        if (sum <= avail) {
-            for (int i = 0; i < nc; i++) w[i] = nat[i];
+        int nat[MD_MAX_COLS], minw[MD_MAX_COLS], w[MD_MAX_COLS];
+        for (int i = 0; i < nc; i++) {
+            nat[i] = 0;
+            minw[i] = 1;
+            for (size_t r = 0; r < nrows; r++) {
+                nat[i] = MAX(nat[i], max_line_width(cells[r][i]));
+                minw[i] = MAX(minw[i], longest_word(cells[r][i], 30));
+            }
+        }
+        int mincol[MD_MAX_COLS];
+        int min_sum = 0;
+        for (int i = 0; i < nc; i++) min_sum += (mincol[i] = minw[i]);
+        if (min_sum > avail_cells) {
+            int remaining = avail_cells - nc;
+            for (int i = 0; i < nc; i++) mincol[i] = 1;
+            if (remaining > 0) {
+                long tw = 0;
+                for (int i = 0; i < nc; i++) tw += MAX(0, minw[i] - 1);
+                int alloc = 0;
+                for (int i = 0; i < nc; i++) {
+                    int g = tw > 0 ? (int)((double)MAX(0, minw[i] - 1) / (double)tw * remaining) : 0;
+                    mincol[i] += g;
+                    alloc += g;
+                }
+                int left = remaining - alloc;
+                for (int i = 0; left > 0 && i < nc; i++, left--) mincol[i]++;
+            }
+            min_sum = 0;
+            for (int i = 0; i < nc; i++) min_sum += mincol[i];
+        }
+        int total_nat = 3 * nc + 1;
+        for (int i = 0; i < nc; i++) total_nat += nat[i];
+        if (total_nat <= width) {
+            for (int i = 0; i < nc; i++) w[i] = MAX(nat[i], mincol[i]);
         } else {
-            int used = 0;
+            long grow_pot = 0;
+            for (int i = 0; i < nc; i++) grow_pot += MAX(0, nat[i] - mincol[i]);
+            int extra = MAX(0, avail_cells - min_sum);
+            int alloc = 0;
             for (int i = 0; i < nc; i++) {
-                w[i] = MAX(3, (int)((long)avail * nat[i] / sum));
-                w[i] = MIN(w[i], nat[i]);
-                used += w[i];
+                int g = grow_pot > 0 ? (int)((double)MAX(0, nat[i] - mincol[i]) / (double)grow_pot * extra) : 0;
+                w[i] = mincol[i] + g;
+                alloc += w[i];
             }
-            /* hand leftover columns to the widest truncated columns */
-            for (int guard = 0; used < avail && guard < 10000; guard++) {
-                int best = -1;
-                for (int i = 0; i < nc; i++)
-                    if (w[i] < nat[i] && (best < 0 || nat[i] - w[i] > nat[best] - w[best])) best = i;
-                if (best < 0) break;
-                w[best]++;
-                used++;
-            }
-            while (used > avail) {
-                int best = 0;
-                for (int i = 1; i < nc; i++)
-                    if (w[i] > w[best]) best = i;
-                if (w[best] <= 1) break;
-                w[best]--;
-                used--;
+            int remaining = avail_cells - alloc;
+            while (remaining > 0) {
+                bool grew = false;
+                for (int i = 0; i < nc && remaining > 0; i++)
+                    if (w[i] < nat[i]) {
+                        w[i]++;
+                        remaining--;
+                        grew = true;
+                    }
+                if (!grew) break;
             }
         }
-        const char *bc = tui_fg_seq(c->th, TUI_TC_BORDER_MUTED);
+        const char *v = tui_sym("boxSharp.vertical");
         sb_t b = SB_INIT;
-        sb_append(&b, bc);
-        table_border(&b, w, nc, "\xe2\x94\x8c", "\xe2\x94\xac", "\xe2\x94\x90");
-        sb_append(&b, "\x1b[39m");
-        strvec_push_own(out, sb_detach(&b));
+        table_rule(&b, w, nc, tui_sym("boxSharp.topLeft"), tui_sym("boxSharp.teeDown"), tui_sym("boxSharp.topRight"));
+        rows_push(out, sb_detach(&b), false);
+        sb_t sep = SB_INIT;
+        table_rule(&sep, w, nc, tui_sym("boxSharp.teeRight"), tui_sym("boxSharp.cross"), tui_sym("boxSharp.teeLeft"));
         for (size_t r = 0; r < nrows; r++) {
             strvec_t wrapped[MD_MAX_COLS];
             size_t h = 1;
             for (int i = 0; i < nc; i++) {
                 memset(&wrapped[i], 0, sizeof wrapped[i]);
-                tui_wrap_text_with_ansi(cells[r][i], w[i], &wrapped[i]);
+                wrap_cell(cells[r][i], w[i], &wrapped[i]);
                 h = MAX(h, wrapped[i].n);
             }
             for (size_t li = 0; li < h; li++) {
-                sb_append(&b, bc);
-                sb_append(&b, BOX_V);
-                sb_append(&b, "\x1b[39m");
+                sb_append(&b, v);
+                sb_putc(&b, ' ');
                 for (int i = 0; i < nc; i++) {
-                    const char *cell = li < wrapped[i].n ? wrapped[i].v[li] : "";
-                    int cw = tui_visible_width(cell);
-                    int pad = MAX(0, w[i] - cw);
-                    int lp = align[i] == 'r' ? pad : align[i] == 'c' ? pad / 2 : 0;
-                    sb_putc(&b, ' ');
-                    tui_sb_spaces(&b, lp);
-                    sb_append(&b, cell);
-                    sb_append(&b, TUI_RESET);
-                    tui_sb_spaces(&b, pad - lp);
-                    sb_putc(&b, ' ');
-                    sb_append(&b, bc);
-                    sb_append(&b, BOX_V);
-                    sb_append(&b, "\x1b[39m");
+                    if (i) {
+                        sb_putc(&b, ' ');
+                        sb_append(&b, v);
+                        sb_putc(&b, ' ');
+                    }
+                    char *a = align_cell(li < wrapped[i].n ? wrapped[i].v[li] : "", w[i], align[i]);
+                    if (r == 0) {
+                        /* theme.bold(): re-opens bold after every inner bold reset */
+                        sb_append(&b, "\x1b[1m");
+                        for (const char *q = a; *q;) {
+                            if (!strncmp(q, "\x1b[22m", 5) || !strncmp(q, "\x1b[0m", 4)) {
+                                size_t l = q[2] == '2' ? 5 : 4;
+                                sb_appendn(&b, q, l);
+                                sb_append(&b, "\x1b[1m");
+                                q += l;
+                                continue;
+                            }
+                            sb_putc(&b, *q++);
+                        }
+                        sb_append(&b, "\x1b[22m");
+                    } else sb_append(&b, a);
+                    free(a);
                 }
-                strvec_push_own(out, sb_detach(&b));
+                sb_putc(&b, ' ');
+                sb_append(&b, v);
+                rows_push(out, sb_detach(&b), false);
             }
             for (int i = 0; i < nc; i++) strvec_free(&wrapped[i]);
-            if (r == 0) {
-                sb_append(&b, bc);
-                table_border(&b, w, nc, "\xe2\x94\x9c", "\xe2\x94\xbc", "\xe2\x94\xa4");
-                sb_append(&b, "\x1b[39m");
-                strvec_push_own(out, sb_detach(&b));
-            }
+            if (r + 1 < nrows) rows_push(out, xstrdup(sb_cstr(&sep)), false);
         }
-        sb_append(&b, bc);
-        table_border(&b, w, nc, "\xe2\x94\x94", "\xe2\x94\xb4", "\xe2\x94\x98");
-        sb_append(&b, "\x1b[39m");
-        strvec_push_own(out, sb_detach(&b));
+        sb_free(&sep);
+        table_rule(&b, w, nc, tui_sym("boxSharp.bottomLeft"), tui_sym("boxSharp.teeUp"),
+                   tui_sym("boxSharp.bottomRight"));
+        rows_push(out, sb_detach(&b), false);
+        if (next != T_NONE && next != T_SPACE) rows_push(out, xstrdup(""), false);
+        for (size_t r = 0; r < nrows; r++) {
+            for (int i = 0; i < nc; i++) free(cells[r][i]);
+            free(cells[r]);
+        }
+        free(cells);
     }
-    for (size_t r = 0; r < nrows; r++) {
-        for (int i = 0; i < nc; i++) free(cells[r][i]);
-        free(cells[r]);
-    }
-    free(cells);
+done:
     strvec_free(&header);
     strvec_free(&seps);
 }
 
-/* ---------- lists ---------- */
-
-static void render_list(const lines_t *L, size_t from, size_t to, int width, const md_ctx_t *c, int depth,
-                        strvec_t *out) {
-    size_t base_ind;
-    bool ordered;
-    long num;
-    size_t coff, mw;
-    list_item(L->v[from], &base_ind, &ordered, &num, &coff, &mw);
-    long counter = num;
-    size_t i = from;
-    while (i < to) {
-        size_t ind, co, mww;
-        bool ord;
-        long nv;
-        if (!list_item(L->v[i], &ind, &ord, &nv, &co, &mww)) {
-            i++;
+/* html block: comments dropped, <br>/<p> break lines, other tags kept verbatim */
+static void render_html(const lines_t *L, const tok_t *t, const md_ctx_t *c, rows_t *out) {
+    sb_t src = SB_INIT;
+    for (size_t i = t->from; i < t->to; i++) {
+        if (i > t->from) sb_putc(&src, '\n');
+        sb_append(&src, L->v[i]);
+    }
+    char *s = sb_detach(&src);
+    sb_t b = SB_INIT;
+    for (char *p = s; *p;) {
+        if (!strncmp(p, "<!--", 4)) {
+            char *e = strstr(p + 4, "-->");
+            p = e ? e + 3 : p + strlen(p);
             continue;
         }
-        size_t content_col = ind + mww + 1;
-        /* collect item body */
-        strvec_t body = {0};
-        strvec_push(&body, L->v[i] + co);
-        size_t j = i + 1;
-        while (j < to) {
-            const char *s = L->v[j];
-            size_t ji, jc, jm;
-            bool jo;
-            long jn;
-            if (!is_blank(s) && list_item(s, &ji, &jo, &jn, &jc, &jm) && ji <= base_ind + 1) break;
-            /* de-indent continuation lines */
-            size_t k = 0, col = 0;
-            while (s[k] == ' ' && col < content_col) {
-                k++;
-                col++;
+        if (*p == '<') {
+            char name[16];
+            bool closing;
+            size_t tl = html_tag(p, strlen(p), name, sizeof name, &closing);
+            if (tl && (!strcmp(name, "br") || !strcmp(name, "p"))) {
+                if (b.len && b.s[b.len - 1] != '\n') sb_putc(&b, '\n');
+                p += tl;
+                continue;
             }
-            strvec_push(&body, s + k);
-            j++;
         }
-        while (body.n > 1 && is_blank(body.v[body.n - 1])) free(vec_pop(&body));
-        char bullet[24];
-        if (ordered) snprintf(bullet, sizeof bullet, "%ld. ", counter++);
-        else snprintf(bullet, sizeof bullet, "- ");
-        int bw = (int)strlen(bullet);
-        int iw = MAX(1, width - bw);
-        strvec_t rendered = {0};
-        lines_t BL = {(const char *const *)body.v, body.n};
-        if (depth + 1 < MD_MAX_DEPTH) render_blocks(&BL, 0, BL.n, iw, c, depth + 1, &rendered);
-        else
-            for (size_t q = 0; q < body.n; q++) push_wrapped(&rendered, body.v[q], iw);
-        if (!rendered.n) strvec_push(&rendered, "");
-        for (size_t q = 0; q < rendered.n; q++) {
-            sb_t b = SB_INIT;
-            if (q == 0) tui_fg(&b, c->th, TUI_TC_MD_LIST_BULLET, bullet);
-            else tui_sb_spaces(&b, bw);
-            sb_append(&b, rendered.v[q]);
-            strvec_push_own(out, sb_detach(&b));
-        }
-        strvec_free(&rendered);
-        strvec_free(&body);
-        i = j;
+        sb_putc(&b, *p++);
     }
+    strvec_t lines = str_split_lines(sb_cstr(&b), b.len);
+    for (size_t i = 0; i < lines.n; i++) {
+        char *l = lines.v[i];
+        size_t n = strlen(l);
+        while (n > 0 && (l[n - 1] == ' ' || l[n - 1] == '\t')) n--;
+        if (!*skip_ws(l)) rows_push(out, xstrdup(""), false);
+        else rows_push(out, xasprintf(TUI_RESET "%s%s%.*s" TUI_RESET, c->base, c->deflt, (int)n, l), false);
+    }
+    strvec_free(&lines);
+    sb_free(&b);
+    free(s);
 }
 
-static void render_blocks(const lines_t *L, size_t from, size_t to, int width, const md_ctx_t *c, int depth,
-                          strvec_t *out) {
-    size_t i = from;
-    btype_t prev = B_NONE;
-    bool blank_before = false;
-    while (i < to) {
-        const char *s = L->v[i];
-        if (is_blank(s)) {
-            blank_before = true;
-            i++;
-            continue;
+static void render_tokens(const lines_t *L, const toks_t *T, int width, const md_ctx_t *c, int depth, rows_t *out) {
+    for (size_t k = 0; k < T->n; k++) {
+        const tok_t *t = &T->v[k];
+        ttype_t next = k + 1 < T->n ? T->v[k + 1].t : T_NONE;
+        bool gap = next != T_NONE && next != T_SPACE;
+        switch (t->t) {
+        case T_SPACE: rows_push(out, xstrdup(""), false); break;
+        case T_HEADING:
+            rows_push(out, heading_str(L, t, c), false);
+            if (gap) rows_push(out, xstrdup(""), false);
+            break;
+        case T_PARA: {
+            char *src = para_source(L, t->from, t->to);
+            rows_push(out, inline_str(src, strlen(src), c), false);
+            free(src);
+            if (gap && next != T_LIST) rows_push(out, xstrdup(""), false);
+            break;
         }
-        strvec_t tmp = {0};
-        btype_t t;
-        char fch;
-        size_t flen;
-        const char *info;
-        int hl;
-        if (is_fence(s, &fch, &flen, &info)) {
-            t = B_CODE;
-            size_t ind = indent_of(s);
-            char lang[32];
-            size_t ll = 0;
-            while (info[ll] && info[ll] != ' ' && info[ll] != '{' && ll < sizeof lang - 1) {
-                lang[ll] = info[ll];
-                ll++;
-            }
-            lang[ll] = 0;
-            size_t j = i + 1;
-            while (j < to) {
-                char c2;
-                size_t l2;
-                const char *inf2;
-                if (is_fence(L->v[j], &c2, &l2, &inf2) && c2 == fch && l2 >= flen && !*inf2) break;
-                j++;
-            }
-            render_code(L, i + 1, j, lang, ind, width, c, &tmp);
-            i = j < to ? j + 1 : j;
-        } else if ((hl = heading_level(s))) {
-            t = B_HEADING;
-            render_heading(s, hl, width, c, &tmp);
-            i++;
-        } else if (is_hr(s)) {
-            t = B_HR;
-            render_hr(width, c, &tmp);
-            i++;
-        } else if (is_quote(s)) {
-            t = B_QUOTE;
-            size_t j = i;
-            while (j < to && is_quote(L->v[j])) j++;
-            render_quote(L, i, j, width, c, depth, &tmp);
-            i = j;
-        } else if (is_table_start(L, i)) {
-            t = B_TABLE;
-            size_t j = i + 2;
-            while (j < to && !is_blank(L->v[j]) && strchr(L->v[j], '|')) j++;
-            render_table(L, i, j, width, c, &tmp);
-            i = j;
-        } else if (list_item(s, NULL, NULL, NULL, NULL, NULL)) {
-            t = B_LIST;
-            size_t base = indent_of(s);
-            bool first_ordered = false;
-            list_item(s, NULL, &first_ordered, NULL, NULL, NULL);
-            size_t j = i + 1;
-            while (j < to) {
-                const char *x = L->v[j];
-                if (is_blank(x)) {
-                    /* continue only if the next non-blank line is indented or an item */
-                    size_t k = j;
-                    while (k < to && is_blank(L->v[k])) k++;
-                    if (k >= to) break;
-                    if (indent_of(L->v[k]) > base || (list_item(L->v[k], NULL, NULL, NULL, NULL, NULL) &&
-                                                      indent_of(L->v[k]) <= base + 1 && indent_of(L->v[k]) >= base)) {
-                        j = k;
-                        continue;
-                    }
-                    break;
-                }
-                if (indent_of(x) > base) {
-                    j++;
-                    continue;
-                }
-                bool xo;
-                if (list_item(x, NULL, &xo, NULL, NULL, NULL)) {
-                    if (xo != first_ordered) break; /* bullet type change starts a new list */
-                    j++;
-                    continue;
-                }
-                if (starts_block(L, j)) break;
-                j++; /* lazy continuation */
-            }
-            render_list(L, i, j, width, c, depth, &tmp);
-            i = j;
-        } else {
-            t = B_PARA;
-            size_t j = i + 1;
-            while (j < to && !is_blank(L->v[j]) && !starts_block(L, j)) j++;
-            render_paragraph(L, i, j, width, c, &tmp);
-            i = j;
+        case T_CODE:
+            rows_push(out, code_border(t->lang, c), false);
+            code_rows(L, t, c, out);
+            rows_push(out, code_border("", c), false);
+            if (gap) rows_push(out, xstrdup(""), false);
+            break;
+        case T_LIST: {
+            rows_t lr = {0};
+            render_list(L, t, 0, width, c, &lr);
+            for (size_t r = 0; r < lr.n; r++) lr.v[r].nested = true; /* already wrapped */
+            for (size_t r = 0; r < lr.n; r++) vec_push(out, lr.v[r]);
+            free(lr.v);
+            break;
         }
-        if (prev != B_NONE && !(prev == B_PARA && t == B_LIST && !blank_before)) strvec_push(out, "");
-        for (size_t k = 0; k < tmp.n; k++) strvec_push_own(out, tmp.v[k]);
-        free(tmp.v);
-        prev = t;
-        blank_before = false;
+        case T_TABLE: {
+            rows_t tr = {0};
+            render_table(L, t->from, t->to, width, next, c, &tr);
+            for (size_t r = 0; r < tr.n; r++) tr.v[r].nested = true; /* fitted to width already */
+            for (size_t r = 0; r < tr.n; r++) vec_push(out, tr.v[r]);
+            free(tr.v);
+            break;
+        }
+        case T_QUOTE: {
+            rows_t q = {0};
+            render_quote(L, t, width, c, depth, &q);
+            for (size_t r = 0; r < q.n; r++) q.v[r].nested = true; /* wrapped already */
+            for (size_t r = 0; r < q.n; r++) vec_push(out, q.v[r]);
+            free(q.v);
+            if (gap) rows_push(out, xstrdup(""), false);
+            break;
+        }
+        case T_HR:
+            rows_push(out, hr_str(width, t->hrc, c), false);
+            if (gap) rows_push(out, xstrdup(""), false);
+            break;
+        case T_HTML: render_html(L, t, c, out); break;
+        case T_NONE: break;
+        }
     }
 }
 
@@ -1239,7 +1629,31 @@ static void init_ctx(md_ctx_t *c, const tui_md_opts_t *o) {
     memset(c, 0, sizeof *c);
     c->o = o;
     c->th = o->theme ? o->theme : tui_theme();
-    if (o->text_slot >= 0) snprintf(c->base, sizeof c->base, "%s", tui_fg_seq(c->th, (tui_tc_t)o->text_slot));
+    sb_t d = SB_INIT;
+    if (o->text_sgr) sb_append(&d, o->text_sgr);
+    else if (o->text_slot >= 0) sb_append(&d, tui_fg_seq(c->th, (tui_tc_t)o->text_slot));
+    if (o->italic) sb_append(&d, "\x1b[3m");
+    snprintf(c->deflt, sizeof c->deflt, "%s", sb_cstr(&d));
+    sb_free(&d);
+}
+
+/* re-open the line background after every reset that would clear it (upstream bgFill) */
+static char *apply_bg(const char *line, int width, const char *bg) {
+    sb_t b = SB_INIT;
+    sb_append(&b, bg);
+    for (const char *p = line; *p;) {
+        if (!strncmp(p, "\x1b[0m", 4) || !strncmp(p, "\x1b[49m", 5)) {
+            size_t l = p[2] == '0' ? 4 : 5;
+            sb_appendn(&b, p, l);
+            sb_append(&b, bg);
+            p += l;
+            continue;
+        }
+        sb_putc(&b, *p++);
+    }
+    tui_sb_spaces(&b, width - tui_visible_width(line));
+    sb_append(&b, "\x1b[49m");
+    return sb_detach(&b);
 }
 
 void tui_md_render(const char *text, int width, const tui_md_opts_t *opts, strvec_t *out) {
@@ -1249,20 +1663,46 @@ void tui_md_render(const char *text, int width, const tui_md_opts_t *opts, strve
         opts = &def;
     }
     if (width < 1) width = 1;
+    int pad = MAX(0, opts->padding_x);
+    int cw = MAX(1, width - 2 * pad);
     md_ctx_t c;
     init_ctx(&c, opts);
     char *clean = tui_replace_tabs(text ? text : "");
     strvec_t lines = str_split_lines(clean, strlen(clean));
     lines_t L = {(const char *const *)lines.v, lines.n};
-    size_t first = out->n;
-    render_blocks(&L, 0, L.n, width, &c, 0, out);
-    /* clamp pathological cases (prefixes/wide chars wider than tiny widths) */
-    for (size_t i = first; i < out->n; i++) {
-        if (tui_visible_width(out->v[i]) <= width) continue;
-        char *t = tui_truncate_to_width(out->v[i], width, "");
-        free(out->v[i]);
-        out->v[i] = t;
+    toks_t T = {0};
+    lex_blocks(&L, 0, L.n, &T);
+    rows_t rows = {0};
+    render_tokens(&L, &T, cw, &c, 0, &rows);
+    free(T.v);
+    const char *bg = opts->bg_slot >= 0 ? tui_bg_seq(c.th, (tui_tc_t)opts->bg_slot) : NULL;
+    for (size_t i = 0; i < rows.n; i++) {
+        strvec_t w = {0};
+        if (rows.v[i].nested) strvec_push(&w, rows.v[i].text);
+        else tui_wrap_text_with_ansi(rows.v[i].text, cw, &w);
+        for (size_t k = 0; k < w.n; k++) {
+            char *line = w.v[k];
+            if (tui_visible_width(line) > (rows.v[i].literal ? width : cw)) {
+                char *t = tui_truncate_to_width(line, rows.v[i].literal ? width : cw, "");
+                free(line);
+                line = t;
+            }
+            if (!rows.v[i].literal && pad) {
+                char *x = xasprintf("%*s%s", pad, "", line);
+                free(line);
+                line = x;
+            }
+            if (bg) {
+                char *x = apply_bg(line, width, bg);
+                free(line);
+                line = x;
+            }
+            strvec_push_own(out, line);
+            w.v[k] = NULL;
+        }
+        strvec_free(&w);
     }
+    rows_free(&rows);
     strvec_free(&lines);
     free(clean);
 }
@@ -1294,20 +1734,17 @@ static void md_invalidate(tui_component_t *cp) {
 
 static void md_render(tui_component_t *cp, int width, strvec_t *out) {
     tui_markdown_t *m = (tui_markdown_t *)cp;
-    if (!m->text || !*m->text) return;
+    if (!m->text || !*skip_ws(m->text)) return;
     if (!(m->cache_text && m->cache_width == width && !strcmp(m->cache_text, m->text))) {
         md_invalidate(cp);
-        strvec_t lines = {0};
-        tui_md_render(m->text, MAX(1, width - 2 * m->padding_x), &m->opts, &lines);
-        for (int i = 0; i < m->padding_y; i++) strvec_push(&m->cache, "");
-        for (size_t i = 0; i < lines.n; i++) {
-            sb_t b = SB_INIT;
-            tui_sb_spaces(&b, m->padding_x);
-            sb_append(&b, lines.v[i]);
-            strvec_push_own(&m->cache, sb_detach(&b));
-        }
-        for (int i = 0; i < m->padding_y; i++) strvec_push(&m->cache, "");
-        strvec_free(&lines);
+        tui_md_opts_t o = m->opts;
+        o.padding_x = m->padding_x;
+        const char *bg = o.bg_slot >= 0 ? tui_bg_seq(o.theme ? o.theme : tui_theme(), (tui_tc_t)o.bg_slot) : NULL;
+        for (int i = 0; i < m->padding_y; i++)
+            strvec_push_own(&m->cache, bg ? apply_bg("", width, bg) : xstrdup(""));
+        tui_md_render(m->text, width, &o, &m->cache);
+        for (int i = 0; i < m->padding_y; i++)
+            strvec_push_own(&m->cache, bg ? apply_bg("", width, bg) : xstrdup(""));
         m->cache_text = xstrdup(m->text);
         m->cache_width = width;
     }

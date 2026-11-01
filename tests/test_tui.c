@@ -1,5 +1,6 @@
 /* test_tui.c - unit tests for src/tui */
 #include "core/core.h"
+#include "core/fs.h"
 #include "core/json.h"
 #include "tui/ansi.h"
 #include "tui/components.h"
@@ -337,12 +338,13 @@ static void test_markdown(void) {
     strvec_t p = md_plain(doc, 60);
     CHECK(p.n > 10);
     CHECK(has_line(&p, "Title"));
-    CHECK(has_line(&p, "Some bold and italic text with code and a link."));
+    CHECK(has_line(&p, "Some bold and italic text with code and a link"));
+    CHECK(has_line(&p, "(https://example.com)."));
     CHECK(has_line(&p, "- item one"));
     CHECK(has_line(&p, "  - nested"));
     CHECK(has_line(&p, "1. first"));
     CHECK(has_line(&p, "2. second"));
-    CHECK(has_line(&p, "\xe2\x94\x82 quoted text"));
+    CHECK(has_line(&p, "\xe2\x96\x8f quoted text"));
     CHECK(has_line(&p, "```c"));
     CHECK(has_line(&p, "  int main(void) { return 0; }"));
     CHECK(has_line(&p, "\xe2\x94\x8c\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\xac"
@@ -357,6 +359,7 @@ static void test_markdown(void) {
     /* raw output checks: bold SGR, OSC 8 link, keyword coloring */
     tui_md_opts_t o;
     tui_md_opts_default(&o);
+    o.hyperlinks = true;
     strvec_t raw = {0};
     tui_md_render(doc, 60, &o, &raw);
     char *all = strvec_join(&raw, "\n");
@@ -404,6 +407,139 @@ static void test_markdown(void) {
     CHECK_STR(sp, "snake_case_name and a * b * c");
     free(sp);
     free(s);
+}
+
+/* ---------- golden transcript renders (captured from omp v18.13.3 under tmux, titanium theme) ----------
+ * tests/tui/golden/<name>.ansi are `tmux capture-pane -e` cuts (tests/tui/mkgolden.py) of the reference app
+ * rendering tests/tui/fixtures/<name>.md through the mock model. tmux re-encodes SGR, so both sides are
+ * reduced to cells: every visible character tagged with its effective attributes and colors. */
+
+/* one line of cells; `st` carries over between lines (tmux capture) or starts fresh (TUI lines) */
+static char *cells(const char *line, tui_sgr_t *st) {
+    sb_t b = SB_INIT;
+    char key[160] = "", cur[160] = "";
+    size_t n = strlen(line), last_visible = 0;
+    sb_t out = SB_INIT;
+    for (size_t i = 0; i < n;) {
+        if (line[i] == 0x1b) {
+            size_t l = tui_esc_len(line + i, n - i);
+            if (!l) l = 1;
+            tui_sgr_feed(st, line + i, l);
+            i += l;
+            continue;
+        }
+        uint32_t cp;
+        int k = utf8_decode(line + i, n - i, &cp);
+        snprintf(key, sizeof key, "%s%s%s%s%s%s|%s|%s", st->bold ? "b" : "", st->dim ? "d" : "", st->italic ? "i" : "",
+                 st->underline ? "u" : "", st->strike ? "s" : "", st->inverse ? "r" : "", st->fg, st->bg);
+        if (strcmp(key, cur)) {
+            sb_appendf(&b, "{%s}", key);
+            snprintf(cur, sizeof cur, "%s", key);
+        }
+        sb_appendn(&b, line + i, (size_t)k);
+        if (cp != ' ') last_visible = b.len;
+        i += (size_t)k;
+    }
+    sb_appendn(&out, b.s ? b.s : "", last_visible); /* tmux drops trailing blank cells */
+    sb_free(&b);
+    return sb_detach(&out);
+}
+
+static void check_golden(const char *name, const strvec_t *got) {
+    char *path = xasprintf("tests/tui/golden/%s.ansi", name);
+    char *want = fs_read(path, NULL);
+    CHECK(want != NULL);
+    if (!want) {
+        free(path);
+        return;
+    }
+    strvec_t wl = str_split_lines(want, strlen(want));
+    while (wl.n && !wl.v[wl.n - 1][0]) free(vec_pop(&wl));
+    tui_sgr_t ws;
+    tui_sgr_reset(&ws);
+    size_t n = MAX(wl.n, got->n);
+    int bad = 0;
+    for (size_t i = 0; i < n; i++) {
+        char *a = i < wl.n ? cells(wl.v[i], &ws) : xstrdup("<missing>");
+        tui_sgr_t gs;
+        tui_sgr_reset(&gs);
+        char *b = i < got->n ? cells(got->v[i], &gs) : xstrdup("<missing>");
+        if (strcmp(a, b) && bad++ < 3) fprintf(stderr, "golden %s line %zu:\n  want %s\n  got  %s\n", name, i + 1, a, b);
+        CHECK(!strcmp(a, b));
+        free(a);
+        free(b);
+    }
+    strvec_free(&wl);
+    free(want);
+    free(path);
+}
+
+static strvec_t render_fixture(const char *name, tui_md_opts_t *o, int width) {
+    char *path = xasprintf("tests/tui/fixtures/%s.md", name);
+    char *src = fs_read(path, NULL);
+    CHECK(src != NULL);
+    strvec_t out = {0};
+    if (src) {
+        char *t = str_trim(src);
+        tui_md_render(t, width, o, &out);
+        free(t);
+    }
+    free(src);
+    free(path);
+    return out;
+}
+
+static void test_golden(void) {
+    char *err = NULL;
+    tui_theme_t *th = tui_theme_load("titanium", TUI_COLOR_TRUECOLOR, &err);
+    CHECK(th != NULL);
+    free(err);
+    if (!th) return;
+    tui_theme_set(th);
+    /* assistant prose: Markdown(text, 1, 0, theme, undefined, codeBlockIndent 0) */
+    tui_md_opts_t o;
+    tui_md_opts_default(&o);
+    o.hyperlinks = false;
+    o.padding_x = 1;
+    o.code_indent = 0;
+    const char *const names[] = {"basic", "code", "lists"};
+    for (size_t i = 0; i < ARRAY_LEN(names); i++) {
+        strvec_t got = render_fixture(names[i], &o, 100);
+        check_golden(names[i], &got);
+        strvec_free(&got);
+    }
+    /* thinking block (thinkingText, italic, default code indent), a spacer row, then the answer text */
+    strvec_t got = {0};
+    tui_md_opts_t t;
+    tui_md_opts_default(&t);
+    t.hyperlinks = false;
+    t.padding_x = 1;
+    t.text_slot = TUI_TC_THINKING_TEXT;
+    t.italic = true;
+    tui_md_render("Let me consider **this** carefully.\n\nSecond paragraph of thought.", 100, &t, &got);
+    strvec_push(&got, "");
+    tui_md_render("The answer is *42*.", 100, &o, &got);
+    check_golden("think", &got);
+    strvec_free(&got);
+    /* user bubble: Markdown(text, 1, 1) on userMessageBg, prose in the contrast color of the bubble */
+    tui_md_opts_t u;
+    tui_md_opts_default(&u);
+    u.hyperlinks = false;
+    u.padding_x = 1;
+    u.bg_slot = TUI_TC_USER_MESSAGE_BG;
+    u.text_sgr = "\x1b[38;2;229;229;231m";
+    got = (strvec_t){0};
+    strvec_push_own(&got, tui_bgs(tui_theme(), TUI_TC_USER_MESSAGE_BG, "                                        "));
+    tui_md_render("think:Let me consider **this** carefully.\\n\\nSecond paragraph of thought.|The answer is *42*.", 100,
+                  &u, &got);
+    check_golden("user", &got);
+    strvec_free(&got);
+    /* code highlighting by itself: unsupported languages come back verbatim */
+    strvec_t hl = {0};
+    tui_highlight_code("plain text", "no-such-lang", tui_theme(), &hl);
+    CHECK(hl.n == 1 && !strcmp(hl.v[0], "plain text"));
+    strvec_free(&hl);
+    tui_theme_set(NULL);
 }
 
 /* ---------- editor ---------- */
@@ -719,6 +855,7 @@ int main(void) {
     test_ansi();
     test_theme();
     test_markdown();
+    test_golden();
     test_editor();
     test_select();
     test_renderer();

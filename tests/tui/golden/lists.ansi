@@ -1,0 +1,30 @@
+[49m Task list:
+
+ [38;2;0;180;255m- [39mtodo item
+ [38;2;0;180;255m- [39mdone item
+
+ Mixed:
+
+ [38;2;0;180;255m1. [39mFirst ordered
+   [38;2;0;180;255m- [39mnested bullet
+   [38;2;0;180;255m- [39manother
+ [38;2;0;180;255m2. [39mSecond ordered with a long line that will definitely need to wrap because it keeps going on and
+    on past the terminal width limit
+ [38;2;0;180;255m3. [39mTenth
+
+ [38;2;0;180;255m- [39mstar bullet
+ [38;2;0;180;255m- [39mplus bullet
+
+ [1m[38;2;0;180;255m#### H4 heading[0m
+
+ [1m[38;2;0;180;255m##### H5 heading[0m
+
+ [1m[38;2;0;180;255m###### H6 heading[0m
+
+ Line with trailing two spaces
+ hard break and a
+ backslash break.
+
+ Term with <b>html</b> and an image alt text.
+
+ [1;3mbold italic[0m and [1munderscored bold[0m and [3munderscored italic[0m.

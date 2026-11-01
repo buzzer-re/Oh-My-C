@@ -3,11 +3,20 @@
 Scripted behaviour per request (decided from the last message):
   - last message from user  -> stream a tool call (tool chosen by the user text: "bash:<cmd>", "write:<path>:<text>", "read:<path>", "glob:<pat>", "grep:<pat>")
   - last message is a tool result -> stream final text echoing the tool output
+Display commands (used by tests/tui/compare.sh to exercise transcript views):
+  - "md:<name>"              stream tests/tui/fixtures/<name>.md as the answer (small chunks)
+  - "think:<thinking>|<text>" stream reasoning_content deltas, then the text ("\\n" -> newline)
+  - "slow:<secs>:<text>"     wait <secs> (loader visible), then stream <text> slowly
+  - "fail:<status>:<msg>"    reply with an HTTP error (non-retryable for 400/401/403/404)
+  - "streamfail:<text>"      stream <text>, then an in-stream error chunk
+$MOCK_DELAY (seconds, default 0) is slept between streamed chunks.
 Every request body is appended to $MOCK_LOG (JSONL) for assertions."""
-import json, os, sys
+import json, os, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG = os.environ.get("MOCK_LOG")
+DELAY = float(os.environ.get("MOCK_DELAY") or 0)
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tui", "fixtures")
 
 def sse(handler, obj):
     handler.wfile.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
@@ -29,11 +38,22 @@ class H(BaseHTTPRequestHandler):
             with open(LOG, "a") as f: f.write(json.dumps(body) + "\n")
         msgs = body.get("messages", [])
         last = msgs[-1] if msgs else {}
+        lu = text_of(last) if last.get("role") == "user" else ""
+        if lu.startswith("fail:"):
+            st, _, m = lu[5:].partition(":")
+            b = json.dumps({"error": {"message": m or "mock failure", "type": "invalid_request_error", "code": int(st or 400)}}).encode()
+            self.send_response(int(st or 400))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
         chunks = []
+        pace = DELAY
         base = {"id": "c1", "object": "chat.completion.chunk", "model": body.get("model")}
         sysc = text_of(msgs[0]) if msgs and msgs[0].get("role") in ("system", "developer") else ""
         advisor = "peer-shadow" in sysc
@@ -77,6 +97,26 @@ class H(BaseHTTPRequestHandler):
                     chunks.append({**base, "choices": [{"index": 0, "delta": {"content": w + " "}}]})
                 chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
                 name = None
+            elif kind in ("md", "think", "slow", "streamfail"):
+                name = None
+                d = lambda **k: {**base, "choices": [{"index": 0, "delta": k}]}
+                if kind == "md":
+                    with open(os.path.join(FIXTURES, os.path.basename(rest.strip()) + ".md")) as f: text = f.read()
+                elif kind == "think":
+                    th, _, text = rest.partition("|")
+                    th = th.replace("\\n", "\n")
+                    for i in range(0, len(th), 12): chunks.append(d(reasoning_content=th[i:i+12]))
+                    text = text.replace("\\n", "\n")
+                elif kind == "slow":
+                    secs, _, text = rest.partition(":")
+                    time.sleep(float(secs or 1)); pace = max(pace, 0.15)
+                else:
+                    text = rest
+                for i in range(0, len(text), 16): chunks.append(d(content=text[i:i+16]))
+                if kind == "streamfail":
+                    chunks.append({"error": {"message": "mock stream failure", "type": "server_error"}})
+                else:
+                    chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
             elif kind == "edit": name, args = "edit", {"input": rest.replace("\\n", "\n")}
             elif kind == "todo": name, args = "todo", {"op": "init", "items": rest.split(",")}
             else:
@@ -92,7 +132,9 @@ class H(BaseHTTPRequestHandler):
         chunks.append({**base, "choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}})
         def w(b):
             self.wfile.write(b"%x\r\n" % len(b) + b + b"\r\n")
-        for c in chunks: w(b"data: " + json.dumps(c).encode() + b"\n\n")
+        for c in chunks:
+            w(b"data: " + json.dumps(c).encode() + b"\n\n")
+            if pace: self.wfile.flush(); time.sleep(pace)
         w(b"data: [DONE]\n\n")
         self.wfile.write(b"0\r\n\r\n")
         self.wfile.flush()

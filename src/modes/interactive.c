@@ -52,11 +52,13 @@ static void ui_apply_partial(void *ud) {
     if (!u->cur_assistant) {
         u->cur_assistant = mv_new(MV_ASSISTANT);
         u->cur_assistant->msg = json_obj();
+        u->cur_assistant->streaming = true;
         add_view(u, u->cur_assistant);
     }
     json_free(u->cur_assistant->msg);
     u->cur_assistant->msg = p;
     u->cur_assistant->dirty = true;
+    ui_assistant_streamed(u, u->cur_assistant);
     tui_request_render(u->tui);
 }
 
@@ -74,7 +76,7 @@ static void ui_apply_event(void *ud) {
             json_free(u->cur_assistant->msg);
             u->cur_assistant->msg = e->msg;
             e->msg = NULL;
-            u->cur_assistant->dirty = true;
+            ui_assistant_end(u, u->cur_assistant);
             u->cur_assistant = NULL;
         }
         break;
@@ -86,6 +88,7 @@ static void ui_apply_event(void *ud) {
         e->args = NULL;
         hmap_put(&u->tools, e->id, v);
         add_view(u, v);
+        ui_tool_started(u, e->id);
         break;
     }
     case AGENT_EV_TOOL_UPDATE:
@@ -104,15 +107,12 @@ static void ui_apply_event(void *ud) {
         break;
     }
     case AGENT_EV_AGENT_END:
-        tui_loader_stop(u->loader);
-        u->loader->base.hidden = true;
+        ui_working_stop(u);
         ui_chrome_turn(u, false);
         break;
     case AGENT_EV_AGENT_START:
         ui_chrome_turn(u, true);
-        u->loader->base.hidden = false;
-        tui_loader_set_message(u->loader, "Working…");
-        tui_loader_start(u->loader);
+        ui_agent_start(u);
         break;
     default: break;
     }
@@ -325,27 +325,8 @@ static void picker_close(ui_t *u) {
 
 static void ask_next(ui_t *u);
 
-/* rebuild the transcript view from the agent's live context */
-static void reload_chat(ui_t *u) {
-    tui_container_clear(u->chat);
-    hmap_free(&u->tools, NULL);
-    hmap_init(&u->tools);
-    u->cur_assistant = NULL;
-    json_t *m;
-    json_arr_foreach(u->app->agent->messages, i, m) {
-        const char *role = json_get_str(m, "role");
-        if (str_eq(role, "user") && !json_get_bool(m, "synthetic", false)) {
-            msgview_t *v = mv_new(MV_USER);
-            v->text = ai_message_text(m);
-            add_view(u, v);
-        } else if (str_eq(role, "assistant")) {
-            msgview_t *v = mv_new(MV_ASSISTANT);
-            v->msg = json_clone(m);
-            add_view(u, v);
-        }
-    }
-    tui_request_full_render(u->tui);
-}
+/* rebuild the transcript view from the session */
+static void reload_chat(ui_t *u) { ui_chat_rebuild(u); }
 
 /* move the session leaf; a user message is re-opened in the editor (its parent becomes the leaf) */
 static void branch_pick(ui_t *u, const char *entry_id) {
@@ -893,10 +874,14 @@ static bool handle_command(ui_t *u, const char *line) {
         session_picker(u);
     } else if (!strcmp(cmd, "compact")) {
         char *err = NULL;
-        add_notice(u, "info", "Compacting…");
+        ui_working_compaction(u, "Compacting context...");
         tui_render_now(u->tui);
-        if (app_compact(a, *arg ? arg : NULL, &err) != 0) add_notice(u, "error", err ? err : "compaction failed");
-        else add_notice(u, "info", "Context compacted");
+        if (app_compact(a, *arg ? arg : NULL, &err) != 0) {
+            ui_working_stop(u);
+            char *m = xasprintf("Compaction failed: %s", err ? err : "compaction failed");
+            add_notice(u, "error", m);
+            free(m);
+        }
         free(err);
     } else if (!strcmp(cmd, "session")) {
         json_t *st = app_stats(a);
@@ -1165,8 +1150,12 @@ int run_interactive_mode(app_t *a, const char *initial) {
         tui_container_add(root, u.welcome);
         tui_container_add(root, &tui_spacer_new(1)->base);
     }
-    u.chat = tui_container_new();
+    u.chat = ui_transcript_new(false); /* the welcome banner brings its own trailing spacer */
     tui_container_add(root, &u.chat->base);
+    u.banner = tui_container_new();
+    tui_container_add(root, &u.banner->base);
+    u.working = ui_working_new(&u);
+    tui_container_add(root, u.working);
     u.loader = tui_loader_new(u.tui, "Working…");
     u.loader->base.hidden = true;
     tui_container_add(root, ui_status_row_new(&u, &u.loader->base));
@@ -1184,21 +1173,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_set_focus(u.tui, &u.editor->base);
     tui_set_key_hook(u.tui, key_hook, &u);
     /* replay resumed history */
-    json_t *m;
-    json_arr_foreach(a->agent->messages, i, m) {
-        const char *role = json_get_str(m, "role");
-        if (str_eq(role, "user") && json_get_bool(m, "synthetic", false)) {
-            continue;
-        } else if (str_eq(role, "user")) {
-            msgview_t *v = mv_new(MV_USER);
-            v->text = ai_message_text(m);
-            tui_container_add(u.chat, &v->base);
-        } else if (str_eq(role, "assistant")) {
-            msgview_t *v = mv_new(MV_ASSISTANT);
-            v->msg = json_clone(m);
-            tui_container_add(u.chat, &v->base);
-        }
-    }
+    ui_chat_rebuild(&u);
     agent_subscribe(a->agent, ui_listener, &u);
     a->notice = ui_notice;
     a->notice_ud = &u;
