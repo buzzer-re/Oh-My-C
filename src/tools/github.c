@@ -394,9 +394,10 @@ static char *render_diff(tool_env_t *env, const parsed_t *p, char **err) {
     return content;
 }
 
-int github_resolve(tool_env_t *env, const char *url, char **content, char **err) {
+int github_resolve(tool_env_t *env, const char *url, char **content, bool *markdown, char **err) {
     *content = NULL;
     *err = NULL;
+    *markdown = true;
     bool pr = str_starts(url, "pr://");
     const char *scheme = pr ? "pr" : "issue";
     iurl_t u;
@@ -411,6 +412,7 @@ int github_resolve(tool_env_t *env, const char *url, char **content, char **err)
         *content = render_list(env, pr, &p, &e);
         if (!*content) *err = xasprintf("%s:// listing failed: %s", scheme, e);
     } else if (p.kind == P_DIFF) {
+        *markdown = p.diff_mode == 0; /* the file listing is markdown, diff text is text/plain */
         *content = render_diff(env, &p, &e);
         if (!*content) *err = xasprintf("pr:// diff resolution failed: %s", e);
     } else if (!pr) {

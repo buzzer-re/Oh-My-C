@@ -974,8 +974,15 @@ static int read_github(tool_env_t *env, const char *path, tool_result_t *out) {
     sel.entity = "resource";
     sel.resource = true;
     char *content = NULL, *err = NULL;
-    if (github_resolve(env, work, &content, &err) != 0) tool_result_error(out, "%s", err ? err : "GitHub read failed");
-    else read_virtual(env, work, content, &sel, out);
+    bool markdown = false;
+    if (github_resolve(env, work, &content, &markdown, &err) != 0) tool_result_error(out, "%s", err ? err : "GitHub read failed");
+    else {
+        read_virtual(env, work, content, &sel, out);
+        if (out->details && !out->is_error) {
+            json_del(out->details, "resolvedPath"); /* a remote resource has no fs path */
+            json_set_str(out->details, "contentType", markdown ? "text/markdown" : "text/plain");
+        }
+    }
     free(content);
     free(err);
     free(work);

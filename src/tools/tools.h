@@ -132,7 +132,7 @@ void eval_set_tool_names(agent_tool_t *t, const json_t *names);
 json_t *agent_defs_load(const char *cwd);
 
 /* GitHub pr:// and issue:// resources (github.c): rendered markdown (*content, owned) or -1 with *err (owned) */
-int github_resolve(tool_env_t *env, const char *url, char **content, char **err);
+int github_resolve(tool_env_t *env, const char *url, char **content, bool *markdown, char **err);
 /* ssh://[user@]host[:port]/path (ssh.c): remote UTF-8 text (<=1 MiB) or one-level dir listing; bare ssh:// lists hosts */
 int ssh_fetch(tool_env_t *env, const char *url, char **content, size_t *len, bool *is_dir, char **err);
 int ssh_store(tool_env_t *env, const char *url, const char *data, size_t len, char **err);

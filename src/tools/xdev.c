@@ -702,6 +702,7 @@ bool xdev_write(tool_ctx_t *ctx, const char *path, const char *content, tool_res
         char *e = no_such_tool(a, name);
         tool_result_error(out, "%s", e);
         free(e);
+        out->details = xdev_details(name, "execute", NULL, NULL);
         goto done;
     }
     if (help_content(content)) {
@@ -717,6 +718,7 @@ bool xdev_write(tool_ctx_t *ctx, const char *path, const char *content, tool_res
         tool_result_error(out, XD "%s expects a JSON args object as content (%s). Write `?` for docs.", name,
                           perr ? perr : "parse error");
         free(perr);
+        out->details = xdev_details(name, "execute", NULL, NULL);
         goto done;
     }
     free(perr);
@@ -725,6 +727,7 @@ bool xdev_write(tool_ctx_t *ctx, const char *path, const char *content, tool_res
                           json_is_arr(args) ? "array" : json_is_str(args) ? "string" : json_is_num(args) ? "number"
                           : json_is_bool(args) ? "boolean" : "object");
         json_free(args);
+        out->details = xdev_details(name, "execute", NULL, NULL);
         goto done;
     }
     if (json_get(args, INTENT_FIELD) && !schema_declares_property(t->parameters, INTENT_FIELD))
@@ -739,6 +742,7 @@ bool xdev_write(tool_ctx_t *ctx, const char *path, const char *content, tool_res
         free(d);
         free(verr);
         json_free(args);
+        out->details = xdev_details(name, "execute", NULL, NULL);
         goto done;
     }
     /* the ctx is embedded in the agent's job record (update callbacks locate it by address): reuse it */
