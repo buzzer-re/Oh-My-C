@@ -1,0 +1,10 @@
+[
+ {"user": "g1"},
+ {"tool": "github", "args": {"op": "search_issues", "query": "crash on start", "repo": "a/b"}, "text": "#1 Crash on start\n#2 Another\n#3 c\n#4 d\n#5 e\n#6 f\n#7 g\n#8 h\n#9 i\n#10 j\n#11 k\n#12 l"},
+ {"user": "g2"},
+ {"tool": "github", "args": {"op": "pr_checkout", "pr": "https://github.com/a/b/pull/42"}, "text": "Checked out PR #42 into branch pr-42"},
+ {"user": "g3"},
+ {"tool": "github", "args": {"op": "repo_view", "repo": "a/b"}, "text": "HTTP 404\nNot Found", "isError": true},
+ {"user": "g4"},
+ {"tool": "github", "args": {"op": "pr_push", "pr": ["1", "2", "3", "4"]}, "text": ""}
+]

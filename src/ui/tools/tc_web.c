@@ -285,6 +285,168 @@ static void ws_result(const tc_call_t *c, int width, strvec_t *out) {
     free(raw);
 }
 
+/* ---------- github (tools/github.ts; run_watch's workflow view is not ported) ---------- */
+
+static const char *gh_title(const char *op) {
+    static const char *const T[][2] = {{"repo_view", "GitHub Repo"},           {"pr_checkout", "GitHub PR Checkout"},
+                                       {"pr_push", "GitHub PR Push"},          {"search_issues", "GitHub Search Issues"},
+                                       {"search_prs", "GitHub Search PRs"},    {"search_code", "GitHub Search Code"},
+                                       {"search_commits", "GitHub Search Commits"}, {"search_repos", "GitHub Search Repos"},
+                                       {"run_watch", "GitHub Run Watch"}};
+    for (size_t i = 0; i < ARRAY_LEN(T); i++)
+        if (str_eq(op, T[i][0])) return T[i][1];
+    return "GitHub";
+}
+
+static char *gh_issue_id(const char *v) {
+    char *t = str_trim(v ? v : "");
+    if (!*t) {
+        free(t);
+        return NULL;
+    }
+    if (strspn(t, "0123456789") == strlen(t)) {
+        char *r = xasprintf("#%s", t);
+        free(t);
+        return r;
+    }
+    const char *m = strstr(t, "/issues/");
+    if (!m) m = strstr(t, "/pull/");
+    if (m) {
+        m = strchr(m + 1, '/') + 1;
+        size_t n = strspn(m, "0123456789");
+        if (n) {
+            char *r = xasprintf("#%.*s", (int)n, m);
+            free(t);
+            return r;
+        }
+    }
+    char *r = tui_truncate_to_width(t, 40, NULL);
+    free(t);
+    return r;
+}
+
+static void gh_meta(const json_t *a, const char *op, strvec_t *meta) {
+    const char *repo = json_get_str(a, "repo"), *branch = json_get_str(a, "branch"), *q = json_get_str(a, "query");
+    if (str_eq(op, "pr_checkout") || str_eq(op, "pr_push")) {
+        const json_t *pr = json_get(a, "pr");
+        char *id = NULL;
+        if (json_is_str(pr)) id = gh_issue_id(json_sv(pr));
+        else if (json_is_arr(pr)) {
+            strvec_t parts = {0};
+            json_t *x;
+            json_arr_foreach(pr, i, x) {
+                char *p = json_is_str(x) ? gh_issue_id(json_sv(x)) : NULL;
+                if (p) strvec_push_own(&parts, p);
+            }
+            if (parts.n > 3) {
+                char *f = xasprintf("%s, %s, %s, +%zu more", parts.v[0], parts.v[1], parts.v[2], parts.n - 3);
+                id = f;
+            } else if (parts.n) id = strvec_join(&parts, ", ");
+            strvec_free(&parts);
+        }
+        if (id) strvec_push_own(meta, id);
+        else if (branch) strvec_push(meta, branch);
+        if (repo) strvec_push(meta, repo);
+    } else if (str_starts(op ? op : "", "search_")) {
+        if (q) strvec_push_own(meta, tui_truncate_to_width(q, 80, NULL));
+        if (repo && !str_eq(op, "search_repos")) strvec_push(meta, repo);
+    } else if (str_eq(op, "repo_view")) {
+        if (repo) strvec_push(meta, repo);
+        if (branch) strvec_push(meta, branch);
+    } else if (!str_eq(op, "run_watch")) {
+        if (repo) strvec_push(meta, repo);
+    }
+}
+
+void tc_github(const tc_call_t *c, int width, strvec_t *out) {
+    char *op = json_get_str(c->args, "op") ? str_trim(json_get_str(c->args, "op")) : NULL;
+    if (op && !*op) {
+        free(op);
+        op = NULL;
+    }
+    strvec_t meta = {0};
+    gh_meta(c->args, op, &meta);
+    const char *title = gh_title(op);
+    if (!c->has_result) {
+        tc_status_line_t sl = {.icon = c->spinner >= 0 ? TC_ST_RUNNING : TC_ST_PENDING, .spinner = c->spinner, .title = title,
+                               .title_slot = -1, .meta = (const char *const *)meta.v, .nmeta = meta.n};
+        char *h = tc_status_line(&sl);
+        tc_push_wrapped(out, h, width);
+        free(h);
+        strvec_free(&meta);
+        free(op);
+        return;
+    }
+    sb_t tb = SB_INIT;
+    json_t *blk;
+    json_arr_foreach(c->content, i, blk) {
+        const char *t = str_eq(json_get_str(blk, "type"), "text") ? json_get_str(blk, "text") : NULL;
+        if (!t || !*t) continue;
+        if (tb.len) sb_putc(&tb, '\n');
+        sb_append(&tb, t);
+    }
+    bool err = c->is_error, success = !err && tb.len;
+    char *ov = success ? tc_styled_sym("tool.gh", TUI_TC_ACCENT) : NULL;
+    tc_status_line_t sl = {.icon = err ? TC_ST_ERROR : TC_ST_WARNING, .icon_override = ov, .spinner = -1, .title = title,
+                           .title_slot = err ? TUI_TC_ERROR : TUI_TC_ACCENT, .meta = (const char *const *)meta.v, .nmeta = meta.n};
+    char *header = tc_status_line(&sl);
+    if (!tb.len) {
+        char *d = tc_fg(TUI_TC_DIM, err ? "request failed" : "no output");
+        char *all = xasprintf("%s\n%s", header, d);
+        tc_push_wrapped(out, all, width);
+        free(all);
+        free(d);
+    } else {
+        char *txt = tc_replace_tabs(sb_cstr(&tb));
+        strvec_t all = {0};
+        tc_split_lines(txt, &all);
+        size_t s = 0, e = all.n;
+        while (s < e && strspn(all.v[s], " \t") == strlen(all.v[s])) s++;
+        while (e > s && strspn(all.v[e - 1], " \t") == strlen(all.v[e - 1])) e--;
+        if (e - s <= 1 && !err) {
+            if (e > s) {
+                char *b = tc_fg(TUI_TC_TOOL_OUTPUT, all.v[s]);
+                char *j = xasprintf("%s\n%s", header, b);
+                tc_push_wrapped(out, j, width);
+                free(j);
+                free(b);
+            } else tc_push_wrapped(out, header, width);
+        } else {
+            int lw = tc_block_content_width(width, -1, -1);
+            size_t n = e - s, lim = c->expanded ? n : MIN(n, (size_t)10);
+            tc_section_t sec = {0};
+            for (size_t i = s; i < s + lim; i++) {
+                char *col = tc_fg(err ? TUI_TC_ERROR : TUI_TC_TOOL_OUTPUT, all.v[i]);
+                strvec_push_own(&sec.lines, tui_truncate_to_width(col, lw, NULL));
+                free(col);
+            }
+            if (!c->expanded && n > lim) {
+                char *mi = tc_more_items((int64_t)(n - lim), "line");
+                char *hint = tc_expand_hint();
+                char *hp = tui_strip_ansi(hint);
+                char *m = xasprintf("%s %s", mi, hp);
+                strvec_push_own(&sec.lines, tc_fg(TUI_TC_DIM, m));
+                free(m);
+                free(hp);
+                free(hint);
+                free(mi);
+            }
+            tc_block_t blk2 = {.header = header, .state = err ? TC_STATE_ERROR : TC_STATE_SUCCESS, .sections = &sec,
+                               .nsections = sec.lines.n ? 1 : 0, .width = width, .no_bg = true, .pad_left = -1, .pad_right = -1,
+                               .border_slot = err ? TUI_TC_ERROR : TUI_TC_BORDER_MUTED};
+            tc_output_block(&blk2, out);
+            strvec_free(&sec.lines);
+        }
+        strvec_free(&all);
+        free(txt);
+    }
+    sb_free(&tb);
+    free(header);
+    free(ov);
+    strvec_free(&meta);
+    free(op);
+}
+
 void tc_web_search(const tc_call_t *c, int width, strvec_t *out) {
     if (c->has_result) {
         ws_result(c, width, out);

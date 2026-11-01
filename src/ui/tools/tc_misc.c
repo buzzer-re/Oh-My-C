@@ -511,5 +511,6 @@ void tc_render(const tc_call_t *c, int width, strvec_t *out) {
     else if (!strcmp(n, "eval")) tc_eval(c, width, out);
     else if (!strcmp(n, "wait")) tc_wait(c, width, out);
     else if (!strncmp(n, "mcp__", 5)) tc_mcp(c, width, out);
+    else if (!strcmp(n, "github") && c->label) tc_github(c, width, out); /* omp: generic unless the tool is registered */
     else tc_generic(c, width, out);
 }
