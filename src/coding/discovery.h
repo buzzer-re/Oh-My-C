@@ -59,6 +59,11 @@ typedef struct {
     /* optional: routing hint shown for a skill (compressed description catalog); owned result or NULL */
     char *(*skill_desc)(void *ud, const char *name, const char *description);
     void *skill_desc_ud;
+    /* tool presentation (all optional) */
+    const json_t *tool_labels;        /* object: tool name -> label for the Tool Inventory */
+    const json_t *xdev_tools;         /* array of {name, summary, dynamic} mounted xd:// devices */
+    const char *xdev_docs;            /* rendered xd:// device docs/catalog section */
+    bool auto_qa;                     /* xd://report_issue automated QA advertised */
 } sysprompt_opts_t;
 
 /* returns owned array of system prompt blocks (strings) */

@@ -259,6 +259,15 @@ json_t *schema_obj(void) {
     return s;
 }
 
+json_t *schema_lit(const char *json) {
+    json_t *s = json_parse_str(json);
+    if (!s) {
+        fprintf(stderr, "omc: internal error: malformed tool schema literal: %s\n", json);
+        abort();
+    }
+    return s;
+}
+
 void schema_prop_json(json_t *schema, const char *name, json_t *prop, bool required) {
     json_set(json_get(schema, "properties"), name, prop);
     if (required) json_push_str(json_get(schema, "required"), name);
@@ -284,28 +293,170 @@ void format_hashline_header(sb_t *b, const char *display_path, const char *tag) 
 
 /* ---------- registration ---------- */
 
-static const char *const DEFAULT_TOOLS[] = {"read", "write", "edit", "bash", "grep", "glob", "todo", "ask",
-                                            "web_search", "task", "eval", "ast_grep", "ast_edit", "find", NULL};
+/* Built-in tool order (upstream tools/index.ts BUILTIN_TOOLS key order); the request's tool list and the
+ * xd:// device listing follow it. Names omc does not implement are kept so the order stays canonical. */
+static const char *const BUILTIN_ORDER[] = {
+    "read",     "security_scan", "bash",       "edit",    "ast_grep",  "ast_edit", "ask",    "debug",
+    "ida",      "eval",          "github",     "glob",    "grep",      "find",     "lsp",    "checkpoint",
+    "rewind",   "context_notes", "new_context", "task",   "wait",      "todo",     "web_search", "write",
+    "memory_edit", "retain",     "recall",     "reflect", "learn",     "manage_skill", NULL};
 
-const char *const *tools_default_names(void) { return DEFAULT_TOOLS; }
+/* upstream loadMode "discoverable" built-ins (mountable under xd:// unless kept top-level) */
+static const char *const DISCOVERABLE[] = {"security_scan", "ast_grep", "ast_edit", "ask",      "debug",  "ida",
+                                           "github",        "grep",     "lsp",      "checkpoint", "rewind", "todo",
+                                           "web_search",    "memory_edit", "retain", "recall", "reflect", NULL};
+/* discoverable built-ins that stay top-level (xdev.ts XDEV_KEEP_TOP_LEVEL) + the read/write transport */
+static const char *const KEEP_TOP_LEVEL[] = {"todo", "yield", "ask", "grep", "web_search", "read", "write", NULL};
+
+static bool in_list(const char *const *l, const char *n) {
+    for (; *l; l++)
+        if (!strcmp(*l, n)) return true;
+    return false;
+}
+
+const char *const *tools_default_names(void) { return BUILTIN_ORDER; }
+
+static bool setting_on(const char *path, bool def) { return settings_bool(path, def); }
+
+/* upstream resolveBuiltinToolPlan().isToolAllowed for the tools constructed here */
+static bool builtin_allowed(tool_env_t *env, const char *name) {
+    if (!strcmp(name, "bash")) return setting_on("bash.enabled", true);
+    if (!strcmp(name, "todo")) return setting_on("todo.enabled", true);
+    if (!strcmp(name, "glob")) return setting_on("glob.enabled", true);
+    if (!strcmp(name, "grep")) return setting_on("grep.enabled", true);
+    if (!strcmp(name, "ast_grep")) return setting_on("astGrep.enabled", false);
+    if (!strcmp(name, "ast_edit")) return setting_on("astEdit.enabled", true);
+    if (!strcmp(name, "web_search")) return setting_on("web_search.enabled", true);
+    if (!strcmp(name, "ask")) return setting_on("ask.enabled", true) && env->can_prompt_user;
+    if (!strcmp(name, "find")) {
+        /* "auto" needs a native judgment backend (TypeSafe jev / Decisions APIs), which omc lacks */
+        json_t *v = settings_get("find.enabled");
+        if (json_is_bool(v)) return v->u.b;
+        return str_eq(json_sv(v), "on");
+    }
+    if (!strcmp(name, "wait"))
+        return env->jobs && (setting_on("async.enabled", true) || setting_on("launch.enabled", true));
+    if (!strcmp(name, "task"))
+        return env->subagent_depth < (int)settings_int("task.maxRecursionDepth", 2) ||
+               settings_int("task.maxRecursionDepth", 2) < 0;
+    return true;
+}
 
 typedef agent_tool_t *(*tool_ctor)(tool_env_t *);
 static const struct {
     const char *name;
     tool_ctor ctor;
 } CTORS[] = {
-    {"read", tool_read_new},   {"write", tool_write_new}, {"edit", tool_edit_new},
-    {"bash", tool_bash_new},   {"grep", tool_grep_new},   {"glob", tool_glob_new},
-    {"todo", tool_todo_new},   {"ask", tool_ask_new},     {"web_search", tool_web_search_new},
-    {"task", tool_task_new},   {"eval", tool_eval_new},   {"ast_grep", tool_ast_grep_new},
-    {"ast_edit", tool_ast_edit_new}, {"find", tool_find_new}, {"wait", tool_wait_new},
+    {"read", tool_read_new},       {"bash", tool_bash_new},   {"edit", tool_edit_new},
+    {"ast_grep", tool_ast_grep_new}, {"ast_edit", tool_ast_edit_new}, {"ask", tool_ask_new},
+    {"eval", tool_eval_new},       {"glob", tool_glob_new},   {"grep", tool_grep_new},
+    {"find", tool_find_new},       {"task", tool_task_new},   {"wait", tool_wait_new},
+    {"todo", tool_todo_new},       {"web_search", tool_web_search_new}, {"write", tool_write_new},
 };
 
+bool tools_scout_available(void) {
+    json_t *dis = settings_get("task.disabledAgents"), *d;
+    json_arr_foreach(dis, i, d) if (str_eq(json_sv(d), "scout")) return false;
+    return true;
+}
+
+bool tools_eager_delegation(const tool_env_t *env) {
+    return !env->delegation_bias || str_eq(env->delegation_bias, "eager");
+}
+
 void tools_register_builtin(agent_t *a, tool_env_t *env, const strvec_t *enabled) {
+    env->find_enabled = (!enabled || strvec_contains(enabled, "find")) && builtin_allowed(env, "find");
     for (size_t i = 0; i < ARRAY_LEN(CTORS); i++) {
         if (enabled && !strvec_contains(enabled, CTORS[i].name)) continue;
-        if (!strcmp(CTORS[i].name, "wait") && (!env->jobs || !settings_bool("async.enabled", true))) continue;
+        if (!builtin_allowed(env, CTORS[i].name)) continue;
         agent_tool_t *t = CTORS[i].ctor(env);
-        if (t) agent_add_tool(a, t);
+        if (t) {
+            t->discoverable = in_list(DISCOVERABLE, t->name);
+            agent_add_tool(a, t);
+        }
     }
+}
+
+/* upstream tool `label` / `summary` (catalog line for xd:// devices) */
+static const struct {
+    const char *name, *label, *summary;
+} TOOL_META[] = {
+    {"read", "Read", NULL},
+    {"bash", "Bash", NULL},
+    {"edit", "Edit", NULL},
+    {"ast_grep", "AST Grep", "Search code with AST patterns (structural grep)"},
+    {"ast_edit", "AST Edit", "Perform AST-aware code edits (structural refactoring)"},
+    {"ask", "Ask", "Ask the user a clarifying question"},
+    {"debug", "Debug", "Debug a running process with DAP (debugger adapter protocol)"},
+    {"eval", "Eval", NULL},
+    {"github", "GitHub", "Interact with GitHub repositories, files, pull requests, and Actions"},
+    {"glob", "Glob", NULL},
+    {"grep", "Grep", "Search file contents by regex"},
+    {"find", "Find", "Semantic grep: find files and line ranges by describing what they do"},
+    {"lsp", "LSP", "Query LSP (language server) for diagnostics, hover info, and references"},
+    {"checkpoint", "Checkpoint", "Create a git-based checkpoint to save and restore session state"},
+    {"rewind", "Rewind", "Rewind to a previously created checkpoint"},
+    {"task", "Task", NULL},
+    {"wait", "Wait", "Wait for the next result of a background job or service you started, or a reply you asked for"},
+    {"todo", "Todo", "Write a structured todo list to track progress within a session"},
+    {"web_search", "Web Search", NULL},
+    {"write", "Write", NULL},
+};
+
+static void apply_meta(agent_tool_t *t) {
+    for (size_t i = 0; i < ARRAY_LEN(TOOL_META); i++) {
+        if (strcmp(TOOL_META[i].name, t->name) != 0) continue;
+        free(t->label);
+        t->label = xstrdup(TOOL_META[i].label);
+        if (TOOL_META[i].summary && !t->summary) t->summary = xstrdup(TOOL_META[i].summary);
+        return;
+    }
+}
+
+static int order_index(const agent_tool_t *t) {
+    for (int i = 0; BUILTIN_ORDER[i]; i++)
+        if (!strcmp(BUILTIN_ORDER[i], t->name)) return i;
+    return 1000; /* MCP / host / hidden tools keep their relative order after the built-ins */
+}
+
+void tools_finalize(agent_t *a, const strvec_t *requested) {
+    pthread_mutex_lock(&a->mu);
+    for (size_t i = 0; i < a->all_tools.n; i++) apply_meta(a->all_tools.v[i]);
+    /* stable sort all_tools by canonical order */
+    for (size_t i = 1; i < a->all_tools.n; i++) {
+        agent_tool_t *t = a->all_tools.v[i];
+        int k = order_index(t);
+        size_t j = i;
+        while (j > 0 && order_index(a->all_tools.v[j - 1]) > k) {
+            a->all_tools.v[j] = a->all_tools.v[j - 1];
+            j--;
+        }
+        a->all_tools.v[j] = t;
+    }
+    /* xd:// mounting: needs both transport halves; explicitly requested tools stay top-level */
+    bool have_read = false, have_write = false;
+    for (size_t i = 0; i < a->all_tools.n; i++) {
+        agent_tool_t *t = a->all_tools.v[i];
+        if (t->hidden && !t->mounted) continue;
+        if (!strcmp(t->name, "read")) have_read = true;
+        if (!strcmp(t->name, "write")) have_write = true;
+    }
+    bool xdev = settings_bool("tools.xdev", true) && have_read && have_write;
+    for (size_t i = 0; i < a->all_tools.n; i++) {
+        agent_tool_t *t = a->all_tools.v[i];
+        if (t->mounted) {
+            t->mounted = false;
+            t->hidden = false;
+        }
+        if (t->hidden) continue;
+        bool pinned = requested && strvec_contains(requested, t->name);
+        if (xdev && t->discoverable && !pinned && !in_list(KEEP_TOP_LEVEL, t->name)) {
+            t->mounted = true;
+            t->hidden = true;
+        }
+    }
+    a->tools.n = 0;
+    for (size_t i = 0; i < a->all_tools.n; i++)
+        if (!a->all_tools.v[i]->hidden) vec_push(&a->tools, a->all_tools.v[i]);
+    pthread_mutex_unlock(&a->mu);
 }

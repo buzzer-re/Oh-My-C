@@ -73,6 +73,8 @@ bool model_compat_bool(const ai_model_t *m, const char *key, bool def);
 const char *model_compat_str(const ai_model_t *m, const char *key);
 bool model_supports_effort(const ai_model_t *m, ai_effort_t e);
 ai_effort_t model_clamp_effort(const ai_model_t *m, ai_effort_t e);
+/* catalog compat delegationBias for the model: "eager" (default), "gated", "restrained" (static string) */
+const char *model_delegation_bias(const ai_model_t *m);
 
 /* api key from environment for provider (catalog envVars + legacy) */
 char *ai_env_api_key(const char *provider);

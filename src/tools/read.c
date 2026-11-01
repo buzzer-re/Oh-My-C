@@ -1,5 +1,6 @@
 /* read tool: files (line selectors, hashline anchors), directories, images, URLs, archives, SQLite, PDF, notebooks. */
 #include "tools.h"
+#include "xdev.h"
 
 #include "config/settings.h"
 #include "core/fs.h"
@@ -827,6 +828,7 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     if (str_starts(path, "http://") || str_starts(path, "https://")) {
         return web_read_url(env, path, ctx->cancel, out);
     }
+    if (xdev_read(ctx ? ctx->agent : NULL, path, out)) return 0;
     if (str_starts(path, "pr://") || str_starts(path, "issue://")) return github_read(env, path, out);
     if (str_starts(path, "ssh://")) return read_ssh(env, path, out);
     char *uerr = NULL;
@@ -944,8 +946,8 @@ agent_tool_t *tool_read_new(tool_env_t *env) {
     json_set_bool(ctx, "IS_HL_MODE", str_eq(env->edit_mode, "hashline"));
     char *desc = tool_prompt("read", ctx);
     json_free(ctx);
-    json_t *s = schema_obj();
-    schema_prop(s, "path", "string", "Path or URL to read, with optional :selector suffix", true);
+    json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Local path, "
+                           "internal URI, or URL; selectors inline.\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("read", "Read", desc, s, read_execute);
     free(desc);
     t->ud = env;

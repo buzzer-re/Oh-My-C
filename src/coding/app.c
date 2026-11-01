@@ -4,6 +4,7 @@
 #include "coding/skilldesc.h"
 #include "coding/advisor.h"
 #include "tools/jobs.h"
+#include "tools/xdev.h"
 
 #include "config/auth.h"
 #include "config/settings.h"
@@ -641,6 +642,9 @@ static void install_agent(app_t *a) {
     agent_subscribe(ag, on_agent_event, a);
     agent_set_model(ag, a->model);
     ag->thinking = a->thinking;
+    a->env->can_prompt_user = a->opts.has_ui;
+    a->env->delegation_bias = model_delegation_bias(a->model);
+    agent_set_intent_tracing(settings_bool("tools.intentTracing", true));
     if (!a->opts.no_tools) tools_register_builtin(ag, a->env, a->opts.tools);
     if (a->mcp && !a->opts.no_tools) mcp_register_tools(a->mcp, ag);
     bool lsp_ok = !a->opts.no_tools && settings_bool("lsp.enabled", true) &&
@@ -654,8 +658,10 @@ static void install_agent(app_t *a) {
         agent_add_tool(ag, tool_lsp_new(a->env, a->lsp));
         a->env->after_write = app_after_write;
     }
-    if (!a->opts.no_tools && !a->opts.subagent && settings_bool("checkpoint.enabled", true) &&
-        (!a->opts.tools || strvec_contains(a->opts.tools, "checkpoint")))
+    /* checkpoint/rewind: off by default (checkpoint.enabled); top-level sessions or explicit lists; paired */
+    if (!a->opts.no_tools && settings_bool("checkpoint.enabled", false) &&
+        (a->opts.tools ? strvec_contains(a->opts.tools, "checkpoint") || strvec_contains(a->opts.tools, "rewind")
+                       : !a->opts.subagent))
         add_checkpoint_tools(a, ag);
     if (!a->opts.no_tools && settings_bool("debug.enabled", true) && (!a->opts.tools || strvec_contains(a->opts.tools, "debug"))) {
         if (!a->dap) a->dap = dap_manager_new(a->cwd);
@@ -663,12 +669,26 @@ static void install_agent(app_t *a) {
     }
     if (a->opts.subagent && a->opts.subagent_depth >= (int)settings_int("task.maxRecursionDepth", 2))
         agent_remove_tool(ag, "task");
+    /* discoverable (xd://-mountable) tools added outside tools_register_builtin; MCP tools too */
+    for (size_t i = 0; i < ag->all_tools.n; i++) {
+        agent_tool_t *t = ag->all_tools.v[i];
+        if (str_eq(t->name, "lsp") || str_eq(t->name, "debug") || str_eq(t->name, "checkpoint") ||
+            str_eq(t->name, "rewind") || str_starts(t->name, "mcp__"))
+            t->discoverable = true;
+    }
+    tools_finalize(ag, a->opts.tools);
 }
 
 void app_rebuild_system_prompt(app_t *a) {
     strvec_t names = {0};
-    for (size_t i = 0; i < a->agent->tools.n; i++) strvec_push(&names, a->agent->tools.v[i]->name);
+    json_t *labels = json_obj();
+    for (size_t i = 0; i < a->agent->tools.n; i++) {
+        strvec_push(&names, a->agent->tools.v[i]->name);
+        if (a->agent->tools.v[i]->label) json_set_str(labels, a->agent->tools.v[i]->name, a->agent->tools.v[i]->label);
+    }
     char *label = app_model_label(a);
+    json_t *xdev_tools = xdev_entries(a->agent);
+    char *xdev_docs = json_len(xdev_tools) ? xdev_prompt_docs(a->agent) : xstrdup("");
     sysprompt_opts_t so = {.cwd = a->cwd,
                            .model_name = label,
                            .tool_names = &names,
@@ -677,8 +697,15 @@ void app_rebuild_system_prompt(app_t *a) {
                            .append_prompt = a->sys_append,
                            .subagent = a->opts.subagent,
                            .skill_desc = skilldesc_render,
-                           .skill_desc_ud = a->skilldesc};
+                           .skill_desc_ud = a->skilldesc,
+                           .tool_labels = labels,
+                           .xdev_tools = xdev_tools,
+                           .xdev_docs = xdev_docs,
+                           .auto_qa = !a->opts.tools && xdev_autoqa_enabled()};
     json_t *blocks = build_system_prompt(&so);
+    json_free(labels);
+    json_free(xdev_tools);
+    free(xdev_docs);
     if (a->plan_mode) {
         json_t *pc = json_obj();
         json_set_str(pc, "writeToolName", "write");

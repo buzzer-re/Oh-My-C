@@ -94,8 +94,20 @@ static bool is_ws_only(const char *s, size_t n) {
     return true;
 }
 
-/* standalone line + tilde whitespace control */
+/* standalone line + tilde whitespace control. Like Handlebars' WhitespaceControl, standalone detection reads each
+ * neighbour's ORIGINAL text (a newline already consumed by a previous standalone tag still counts), while the
+ * stripping edits the current text. */
+static void apply_whitespace_impl(toks_t *t, char **orig);
 static void apply_whitespace(toks_t *t) {
+    char **orig = xcalloc(t->n ? t->n : 1, sizeof(char *));
+    for (size_t i = 0; i < t->n; i++)
+        if (t->v[i].kind == TK_TEXT) orig[i] = xstrdup(t->v[i].text);
+    apply_whitespace_impl(t, orig);
+    for (size_t i = 0; i < t->n; i++) free(orig[i]);
+    free(orig);
+}
+
+static void apply_whitespace_impl(toks_t *t, char **orig) {
     for (size_t i = 0; i < t->n; i++) {
         tok_t *k = &t->v[i];
         if (k->kind == TK_TEXT) continue;
@@ -115,44 +127,46 @@ static void apply_whitespace(toks_t *t) {
         if (k->kind == TK_VAR) continue;
         /* standalone: previous text ends with "\n<ws>" (or is start) and next begins "<ws>\n" (or end) */
         bool prev_ok, next_ok;
-        size_t prev_cut = 0;
         if (i == 0) {
             prev_ok = true;
         } else if (t->v[i - 1].kind != TK_TEXT) {
             prev_ok = false;
         } else {
-            const char *s = t->v[i - 1].text;
+            const char *s = orig[i - 1];
             const char *nl = strrchr(s, '\n');
             if (nl) {
                 prev_ok = is_ws_only(nl + 1, strlen(nl + 1));
-                prev_cut = (size_t)(nl + 1 - s);
             } else {
                 /* no newline: only standalone if this text is at template start */
                 bool at_start = i - 1 == 0;
                 prev_ok = at_start && is_ws_only(s, strlen(s));
-                prev_cut = 0;
             }
         }
-        const char *ns = NULL;
-        size_t next_cut = 0;
         if (i + 1 >= t->n) {
             next_ok = true;
         } else if (t->v[i + 1].kind != TK_TEXT) {
             next_ok = false;
         } else {
-            ns = t->v[i + 1].text;
+            const char *ns = orig[i + 1];
             const char *nl = strchr(ns, '\n');
-            if (nl) {
-                next_ok = is_ws_only(ns, (size_t)(nl - ns));
-                next_cut = (size_t)(nl - ns) + 1;
-            } else {
-                next_ok = i + 2 >= t->n && is_ws_only(ns, strlen(ns));
-                next_cut = strlen(ns);
-            }
+            if (nl) next_ok = is_ws_only(ns, (size_t)(nl - ns));
+            else next_ok = i + 2 >= t->n && is_ws_only(ns, strlen(ns));
         }
         if (prev_ok && next_ok) {
-            if (i > 0 && t->v[i - 1].kind == TK_TEXT) t->v[i - 1].text[prev_cut] = 0;
-            if (ns) memmove(t->v[i + 1].text, ns + next_cut, strlen(ns + next_cut) + 1);
+            if (i > 0 && t->v[i - 1].kind == TK_TEXT) { /* omitLeft: /[ \t]+$/ on the current text */
+                char *s = t->v[i - 1].text;
+                size_t n = strlen(s);
+                while (n && (s[n - 1] == ' ' || s[n - 1] == '\t')) n--;
+                s[n] = 0;
+            }
+            if (i + 1 < t->n && t->v[i + 1].kind == TK_TEXT) { /* omitRight: /^[ \t]*\r?\n?/ */
+                char *s = t->v[i + 1].text;
+                size_t m = 0;
+                while (s[m] == ' ' || s[m] == '\t') m++;
+                if (s[m] == '\r' && s[m + 1] == '\n') m += 2;
+                else if (s[m] == '\n') m++;
+                memmove(s, s + m, strlen(s + m) + 1);
+            }
         }
     }
 }

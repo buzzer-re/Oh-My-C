@@ -622,7 +622,9 @@ static int web_search_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
         tool_result_error(out, "query is required");
         return 0;
     }
-    int limit = (int)json_get_int(args, "limit", 10);
+    /* `num_search_results` sizes the result set when `limit` is absent (codex/gemini semantics); max_tokens and
+     * temperature only steer LLM-backed providers, which omc does not ship, so they are accepted and unused */
+    int limit = (int)json_get_int(args, "limit", json_get_int(args, "num_search_results", 10));
     if (limit < 1) limit = 1;
     if (limit > 30) limit = 30;
     const char *recency = json_get_str(args, "recency");
@@ -677,19 +679,11 @@ agent_tool_t *tool_web_search_new(tool_env_t *env) {
     json_t *ctx = json_obj();
     char *desc = tool_prompt("web-search", ctx);
     json_free(ctx);
-    json_t *s = schema_obj();
-    schema_prop(s, "query", "string", "Search query", true);
-    json_t *rec = json_obj();
-    json_set_str(rec, "type", "string");
-    json_t *en = json_arr();
-    json_push_str(en, "day");
-    json_push_str(en, "week");
-    json_push_str(en, "month");
-    json_push_str(en, "year");
-    json_set(rec, "enum", en);
-    json_set_str(rec, "description", "Relative time filter");
-    schema_prop_json(s, "recency", rec, false);
-    schema_prop(s, "limit", "number", "Max results to return", false);
+    json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"recency\":{\"enum\":"
+                           "[\"day\",\"week\",\"month\",\"year\"],\"type\":\"string\"},\"limit\":{\"type\":\"number\"},"
+                           "\"max_tokens\":{\"type\":\"number\"},\"temperature\":{\"type\":\"number\"},"
+                           "\"num_search_results\":{\"type\":\"number\"}},\"required\":[\"query\"],"
+                           "\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("web_search", "Web Search", desc, s, web_search_execute);
     free(desc);
     t->ud = env;

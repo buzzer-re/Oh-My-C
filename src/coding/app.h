@@ -30,6 +30,7 @@ typedef struct {
     struct lsp_manager *lsp; /* borrowed shared LSP manager (subagents) */
     bool no_mcp;
     bool allow_no_model; /* interactive: start without a model (pick one with /model or /login) */
+    bool has_ui;                /* interactive UI can answer questions (enables `ask`) */
 } app_opts_t;
 
 typedef struct app app_t;

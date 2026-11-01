@@ -1,4 +1,5 @@
 #include "discovery.h"
+#include "agent/agent.h"
 
 #include "config/settings.h"
 #include "core/fs.h"
@@ -512,13 +513,29 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
         json_set_str(refs, o->tool_names->v[i], o->tool_names->v[i]);
         json_t *ti = json_obj();
         json_set_str(ti, "name", o->tool_names->v[i]);
-        json_set_str(ti, "label", "");
+        const char *lbl = o->tool_labels ? json_get_str(o->tool_labels, o->tool_names->v[i]) : NULL;
+        json_set_str(ti, "label", lbl ? lbl : "");
         json_push(info, ti);
+    }
+    /* xd://-mounted tools count as present for prompt gates and resolve to their xd:// URL */
+    json_t *xe;
+    json_arr_foreach(o->xdev_tools, xi, xe) {
+        const char *n = json_get_str(xe, "name");
+        if (!n || json_get(refs, n)) continue;
+        json_push_str(tools, n);
+        char *u = xasprintf("xd://%s", n);
+        json_set_str(refs, n, u);
+        free(u);
     }
     json_set(data, "tools", tools);
     json_set(data, "toolRefs", refs);
     json_set(data, "toolInfo", info);
     json_set_bool(data, "toolListMode", true);
+    json_set(data, "xdevTools", o->xdev_tools ? json_clone(o->xdev_tools) : json_arr());
+    json_set_str(data, "xdevDocs", o->xdev_docs ? o->xdev_docs : "");
+    json_set_bool(data, "autoQaEnabled", o->auto_qa);
+    json_set_bool(data, "intentTracing", agent_intent_tracing());
+    json_set_str(data, "intentField", agent_intent_tracing() ? INTENT_FIELD : "");
     json_t *env = json_arr();
     struct utsname un;
     if (uname(&un) == 0) {

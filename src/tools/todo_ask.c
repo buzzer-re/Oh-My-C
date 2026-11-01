@@ -301,22 +301,15 @@ static int todo_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
 
 agent_tool_t *tool_todo_new(tool_env_t *env) {
     char *desc = tool_prompt("todo", NULL);
-    json_t *s = schema_obj();
-    json_t *op = json_obj();
-    json_set_str(op, "type", "string");
-    json_t *en = json_arr();
-    const char *ops[] = {"init", "start", "done", "rm", "drop", "block", "unblock", "append", "view"};
-    for (size_t i = 0; i < ARRAY_LEN(ops); i++) json_push_str(en, ops[i]);
-    json_set(op, "enum", en);
-    schema_prop_json(s, "op", op, true);
-    json_t *list = json_parse_str("{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"phase\":{\"type\":"
-                                  "\"string\"},\"items\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},"
-                                  "\"required\":[\"phase\",\"items\"]}}");
-    schema_prop_json(s, "list", list, false);
-    schema_prop(s, "task", "string", "Exact task content", false);
-    schema_prop(s, "phase", "string", "Exact phase name", false);
-    schema_prop_json(s, "items", json_parse_str("{\"type\":\"array\",\"items\":{\"type\":\"string\"}}"), false);
-    schema_prop(s, "reason", "string", "Blocker note", false);
+    json_t *s = schema_lit(
+        "{\"type\":\"object\",\"properties\":{\"op\":{\"enum\":[\"init\",\"start\",\"done\",\"rm\",\"drop\",\"block\","
+        "\"unblock\",\"append\",\"view\"],\"type\":\"string\"},\"list\":{\"type\":\"array\",\"items\":{\"type\":"
+        "\"object\",\"properties\":{\"phase\":{\"type\":\"string\"},\"items\":{\"type\":\"array\",\"items\":{\"type\":"
+        "\"string\"},\"minItems\":1}},\"required\":[\"phase\",\"items\"],\"additionalProperties\":false},"
+        "\"description\":\"phases for init\"},\"task\":{\"type\":\"string\",\"description\":\"verbatim task content\"},"
+        "\"phase\":{\"type\":\"string\"},\"items\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},"
+        "\"description\":\"tasks for flat init or append\"},\"reason\":{\"type\":\"string\",\"description\":"
+        "\"blocker note for block\"}},\"required\":[\"op\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("todo", "Todo", desc, s, todo_execute);
     free(desc);
     t->ud = env;
