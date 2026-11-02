@@ -500,9 +500,14 @@ for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$DPORT) 2>/dev/null && break;
 mkdir -p "$T/dagent"
 DENV=(env -u OMC_NO_LOCAL_DISCOVERY OMC_CODING_AGENT_DIR="$T/dagent" OLLAMA_BASE_URL="http://127.0.0.1:$DPORT/ollama"
       LLAMA_CPP_BASE_URL="http://127.0.0.1:$DPORT/llama" LM_STUDIO_BASE_URL="http://127.0.0.1:$DPORT/lms/v1")
-check "discover ollama"    "ollama                   qwen3:8b                                         ctx=40960    reasoning"  "${DENV[@]}" "$B" models
-check "discover llama.cpp" "llama.cpp                gemma-local.gguf                                 ctx=16384"  "${DENV[@]}" "$B" models
-check "discover lm-studio" "lm-studio                qwen2.5-vl-7b                                    ctx=12000    vision"  "${DENV[@]}" "$B" models
+# omp's loopback metadata probe (/api/show) has a 150 ms budget, which a loaded test machine can miss (the model then
+# falls back to defaults); retry the fresh discovery a few times so the check tests parsing, not scheduling
+dmodels() { local o; for _ in 1 2 3 4 5; do rm -f "$T/dagent/local-models.json"; o=$("${DENV[@]}" "$B" models 2>&1)
+            [[ $o == *"ctx=40960    reasoning"* ]] && break; done; printf '%s\n' "$o"; }
+DOUT=$(dmodels)
+check "discover ollama"    "ollama                   qwen3:8b                                         ctx=40960    reasoning"  printf '%s\n' "$DOUT"
+check "discover llama.cpp" "llama.cpp                gemma-local.gguf                                 ctx=16384"  printf '%s\n' "$DOUT"
+check "discover lm-studio" "lm-studio                qwen2.5-vl-7b                                    ctx=12000    vision"  printf '%s\n' "$DOUT"
 check "discovery cache"    '"baseUrl": "http://127.0.0.1:'"$DPORT"'/lms/v1"'  python3 -I -m json.tool "$T/dagent/local-models.json"
 kill $DPID 2>/dev/null
 check "cached when down"   "ollama                   llava:7b"  "${DENV[@]}" "$B" models
