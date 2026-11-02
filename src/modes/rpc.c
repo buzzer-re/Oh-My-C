@@ -1096,10 +1096,12 @@ static void notice_rpc(void *ud, const char *level, const char *text) {
     if (!strcmp(level, "auto_compaction_start") || !strcmp(level, "auto_compaction_end")) {
         /* compaction.c carries omp's AgentSessionEvent as JSON */
         json_t *j = json_parse(text, strlen(text), NULL);
-        if (json_is_obj(j)) emit(r, j);
-        json_free(j);
+        if (json_is_obj(j)) forward(r, j);
+        else json_free(j);
         return;
     }
+    /* the TUI's compaction progress lines; RPC clients get manual/auto_compaction_* events instead */
+    if (!strcmp(level, "info") && (!strcmp(text, "Compacting context\xe2\x80\xa6") || !strcmp(text, "Context compacted"))) return;
     if (!strcmp(level, "retry-failed")) {
         const char *f1 = strchr(text, '\x1f'), *f2 = f1 ? strchr(f1 + 1, '\x1f') : NULL;
         if (!f1 || !f2) return;
