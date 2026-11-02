@@ -1,0 +1,106 @@
+# Sourced by tests/e2e/run.sh: context maintenance (coding/compaction.c) over RPC against the mocks — the
+# compaction.methodOrder ladder, omp's summary requests, overflow recovery, and provider-native compaction
+# (OpenAI Responses /responses/compact, the Anthropic compaction beta) with its replay on the next turn.
+CPORT=$((PORT + 11))
+MOCK_LOG="$T/cprov.jsonl" python3 -I "$ROOT/tests/e2e/mock_providers.py" $CPORT & CPID=$!
+for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$CPORT) 2>/dev/null && break; sleep 0.1; done
+cagent() { # dir config-yaml: an agent dir with the mock providers and the given config
+    mkdir -p "$1"
+    cat > "$1/models.yml" <<YML
+providers:
+  mock:
+    baseUrl: http://127.0.0.1:$PORT/v1
+    apiKey: MOCK_KEY
+    api: openai-completions
+    models:
+      - id: mock-1
+        contextWindow: 1000000
+        maxTokens: 4096
+  mockr:
+    baseUrl: http://127.0.0.1:$CPORT/v1
+    apiKey: MOCK_KEY
+    api: openai-responses
+    models:
+      - id: mock-r
+        contextWindow: 100000
+        maxTokens: 4096
+        remoteCompaction:
+          enabled: true
+  mocka:
+    baseUrl: http://127.0.0.1:$CPORT
+    apiKey: MOCK_KEY
+    api: anthropic-messages
+    models:
+      - id: mock-a
+        contextWindow: 100000
+        maxTokens: 4096
+        compat:
+          supportsServerCompaction: true
+          bedrockMessagesApi: true
+YML
+    printf '%s\n' "$2" > "$1/config.yml"
+}
+CR=(python3 -I "$ROOT/tests/e2e/rpc_compact.py" "$B")
+BIG1=$(python3 -I -c 'print("say:" + " ".join("alpha%d beta%d gamma" % (i, i * 7) for i in range(4000)))')
+BIG2=$(python3 -I -c 'print("say:" + " ".join("delta%d epsilon%d zeta" % (i, i * 3) for i in range(4000)))')
+# threshold: the post-turn pass runs the soft summary (split turn: history + turn prefix + short summary)
+cagent "$T/cg1" $'modelRoles:\n  default: mock/mock-1\ncompaction:\n  thresholdTokens: 75000\n  asyncEnabled: false\n  methodOrder: [soft]'
+: > "$T/req.jsonl"
+OMC_CODING_AGENT_DIR="$T/cg1" "${CR[@]}" "{\"type\":\"prompt\",\"message\":\"$BIG1\"}" "{\"type\":\"prompt\",\"message\":\"$BIG2\"}" > "$T/cg1.out"
+check "auto compaction start"  '"type": "auto_compaction_start", "reason": "threshold", "action": "context-full"'  cat "$T/cg1.out"
+check "auto compaction result" '"type": "auto_compaction_end", "action": "context-full", "result": {"summary": "plain answer\n\n---\n\n**Turn Context (split turn):**\n\nplain answer", "shortSummary": "plain answer"'  cat "$T/cg1.out"
+check "summary transcript"     $'<conversation>\n\n\nHuman: say:alpha0 beta0 gamma'  python3 -I -c '
+import json, sys
+for l in open(sys.argv[1]):
+    r = json.loads(l)
+    m = r.get("messages") or []
+    if m and "Summarize user" in json.dumps(m[0]) and "alpha0" in json.dumps(m[1]):
+        print(m[1]["content"][0]["text"][:80]); break' "$T/req.jsonl"
+check "compaction entry"       "soft plain answer"  python3 -I -c '
+import glob, json, sys
+for f in glob.glob(sys.argv[1] + "/**/*.jsonl", recursive=True):
+    for l in open(f):
+        e = json.loads(l)
+        if e.get("type") == "compaction": print(e["method"], e["shortSummary"], e["fromExtension"] is False)' "$T/cg1"
+# overflow: the ladder skips handoff, shake finds nothing, the soft summary commits and the turn retries
+cagent "$T/cg2" $'modelRoles:\n  default: mock/mock-1\ncompaction:\n  asyncEnabled: false\n  keepRecentTokens: 10'
+OMC_CODING_AGENT_DIR="$T/cg2" "${CR[@]}" '{"type":"prompt","message":"say:first answer here"}' \
+    '{"type":"prompt","message":"fail:400:prompt is too long: 250000 tokens > 200000 maximum"}' > "$T/cg2.out"
+check "overflow shake"         '"type": "auto_compaction_end", "action": "shake", "aborted": false, "willRetry": false, "skipped": true, "errorMessage": "Auto-shake found nothing eligible to drop; trying the next preferred compaction method."'  cat "$T/cg2.out"
+check "overflow soft"          '"type": "auto_compaction_start", "reason": "overflow", "action": "context-full"'  cat "$T/cg2.out"
+# OpenAI Responses remote compaction: /responses/compact with the native history, replayed next turn
+cagent "$T/cg3" $'modelRoles:\n  default: mockr/mock-r\ncompaction:\n  keepRecentTokens: 10'
+OMC_CODING_AGENT_DIR="$T/cg3" "${CR[@]}" '{"type":"prompt","message":"first question"}' '{"type":"prompt","message":"second question"}' \
+    '{"type":"compact"}' '{"type":"prompt","message":"third question"}' > "$T/cg3.out"
+check "openai compact request" "/v1/responses/compact message,message,message,message"  python3 -I -c '
+import json, sys
+for l in open(sys.argv[1]):
+    r = json.loads(l)
+    if r["path"].endswith("/responses/compact"): print(r["path"], ",".join(i.get("type", "?") for i in r["body"]["input"]))' "$T/cprov.jsonl"
+check "openai compact replay"  "compaction ENC:4"  python3 -I -c '
+import json, sys
+rs = [json.loads(l) for l in open(sys.argv[1])]
+rs = [r for r in rs if r["path"] == "/v1/responses"]
+print(" ".join("%s %s" % (i.get("type"), i.get("encrypted_content")) for i in rs[-1]["body"]["input"] if i.get("type") == "compaction"))' "$T/cprov.jsonl"
+check "openai compact entry"   "remote Remote compaction preserved provider-native history for this session. ENC:4"  python3 -I -c '
+import glob, json, sys
+for f in glob.glob(sys.argv[1] + "/**/*.jsonl", recursive=True):
+    for l in open(f):
+        e = json.loads(l)
+        if e.get("type") == "compaction": print(e["method"], e["summary"], e["preserveData"]["openaiRemoteCompaction"]["compactionItem"]["encrypted_content"])' "$T/cg3"
+# Anthropic compaction beta: `compaction` request param + beta, the signed block replays at the head of the tail
+: > "$T/cprov.jsonl"
+cagent "$T/cg4" $'modelRoles:\n  default: mocka/mock-a\ncompaction:\n  keepRecentTokens: 10'
+OMC_CODING_AGENT_DIR="$T/cg4" "${CR[@]}" '{"type":"prompt","message":"first question"}' '{"type":"prompt","message":"second question"}' \
+    '{"type":"compact"}' '{"type":"prompt","message":"third question"}' > "$T/cg4.out"
+check "anthropic compact request" "summarize True"  python3 -I -c '
+import json, sys
+for l in open(sys.argv[1]):
+    r = json.loads(l)
+    if "compaction" in r["body"]: print(r["body"]["compaction"]["type"], "compact-2026-09-04" in r["headers"].get("anthropic-beta", ""))' "$T/cprov.jsonl"
+check "anthropic compact replay"  "assistant compaction SIG123"  python3 -I -c '
+import json, sys
+rs = [json.loads(l) for l in open(sys.argv[1])]
+m = rs[-1]["body"]["messages"][0]
+print(m["role"], m["content"][0].get("type"), m["content"][0].get("signature"))' "$T/cprov.jsonl"
+kill $CPID 2>/dev/null
