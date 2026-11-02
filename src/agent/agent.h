@@ -222,6 +222,7 @@ int agent_run_queued(agent_t *a);
 /* helpers to build messages (owned) */
 json_t *msg_user_text(const char *text);
 json_t *msg_user_content(json_t *content); /* takes ownership of content array */
+json_t *msg_user_typed(json_t *content);   /* msg_user_content with attribution "user" (input the user typed) */
 json_t *msg_developer_text(const char *text);
 json_t *msg_tool_result(const char *id, const char *name, const tool_result_t *r);
 json_t *text_block(const char *text);

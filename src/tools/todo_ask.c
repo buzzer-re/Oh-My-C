@@ -745,9 +745,15 @@ static char *strip_cr(const char *s) {
     return sb_detach(&b);
 }
 
+/* ToolAbortError: a cancelled ask ends the run (context.abort()) */
+static int ask_cancelled(tool_ctx_t *ctx, tool_result_t *out) {
+    tool_result_error(out, "Ask tool was cancelled by the user");
+    if (ctx && ctx->agent) agent_abort(ctx->agent);
+    return 0;
+}
+
 static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
-    UNUSED(ctx);
     json_t *qs = json_get_arr(args, "questions"), *q, *o;
     if (!env->ui.ask) {
         tool_result_error(out, "Ask tool requires interactive mode");
@@ -801,10 +807,7 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
         return 0;
     }
     json_t *ans = env->ui.ask(env->ui.ud, qs);
-    if (!ans) {
-        tool_result_error(out, "Ask tool was cancelled by the user");
-        return 0;
-    }
+    if (!ans) return ask_cancelled(ctx, out);
     if (json_get_str(ans, "__error")) { /* the host's answer failed validation, or the host went away */
         tool_result_error(out, "%s", json_get_str(ans, "__error"));
         json_free(ans);
@@ -818,8 +821,7 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
         if (!json_get_bool(r, "timedOut", false) && !json_get_bool(r, "multi", false) &&
             !json_len(json_get_arr(r, "selectedOptions")) && !json_get(r, "customInput")) {
             json_free(results);
-            tool_result_error(out, "Ask tool was cancelled by the user");
-            return 0;
+            return ask_cancelled(ctx, out);
         }
         char *text = ask_single_text(r);
         tool_result_text(out, text);

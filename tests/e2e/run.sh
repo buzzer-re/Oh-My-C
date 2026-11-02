@@ -254,6 +254,9 @@ check "plan yolo"      '"tool": "propose"}} Plan approved. Implementing now with
 check "plan yolo into" '--plan-yolo-into requires --plan-yolo' "$B" -m mock/mock-1 --plan-yolo-into mock/mock-1 -p hi
 check "plan yolo model" 'Model "nope/none" not found' "$B" -m mock/mock-1 --plan-yolo --plan-yolo-into nope/none -p hi
 check "rpc btw"        "btw ok"                   python3 -I "$ROOT/tests/e2e/rpc_btw.py" "$B"
+# RPC wire parity (omp modes/rpc): framing v1/v2, messageId + delta, session events, response shapes, async bash,
+# ask / approval dialogs over extension_ui_request
+check "rpc wire"       "rpc wire ok"              python3 -I "$ROOT/tests/e2e/rpc_wire.py" "$B"
 # message queue: steering / follow-ups sent mid-run are delivered one per turn (steeringMode/followUpMode
 # one-at-a-time), steering first; "all" folds the queued steering into one turn
 qrun() { # extra-commands...

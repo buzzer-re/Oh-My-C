@@ -25,6 +25,7 @@ typedef struct {
     json_t *result;
     bool is_error;
     bool done;
+    tool_ctx_t *ctx; /* the waiting tool call (host_tool_update streams into it) */
 } hostcall_t;
 
 struct rpc {
@@ -935,6 +936,7 @@ static int host_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *
     hostcall_t *hc = xcalloc(1, sizeof(*hc));
     pthread_mutex_lock(&r->host_mu);
     hc->id = xasprintf("host-%llu", (unsigned long long)++r->host_seq);
+    hc->ctx = ctx;
     vec_push(&r->host_calls, hc);
     pthread_mutex_unlock(&r->host_mu);
     json_t *req = json_obj();
@@ -991,6 +993,27 @@ static int host_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *
     free(hc->id);
     free(hc);
     return 0;
+}
+
+/* host_tool_update: the host's partial result streams as tool_execution_update (RpcHostToolBridge.handleUpdate) */
+static void host_tool_progress(rpc_t *r, const json_t *cmd) {
+    const char *id = json_get_str(cmd, "id");
+    const json_t *pr = json_get_obj(cmd, "partialResult"), *blk;
+    if (!pr) return;
+    pthread_mutex_lock(&r->host_mu);
+    for (size_t i = 0; i < r->host_calls.n; i++) {
+        hostcall_t *hc = r->host_calls.v[i];
+        if (!str_eq(hc->id, id) || hc->done || !hc->ctx || !hc->ctx->update) continue;
+        tool_result_t part = {0};
+        json_arr_foreach(json_get_arr(pr, "content"), k, blk) {
+            if (str_eq(json_get_str(blk, "type"), "image")) tool_result_image(&part, json_get_str(blk, "data"), json_get_str(blk, "mimeType"));
+            else if (json_get_str(blk, "text")) tool_result_text(&part, json_get_str(blk, "text"));
+        }
+        if (json_get(pr, "details")) part.details = json_clone(json_get(pr, "details"));
+        hc->ctx->update(hc->ctx, &part);
+        tool_result_free(&part);
+    }
+    pthread_mutex_unlock(&r->host_mu);
 }
 
 static void host_tool_complete(rpc_t *r, const json_t *cmd) {
@@ -1194,7 +1217,8 @@ again:;
     json_set_str(res, "type", "prompt_result");
     if (r->prompt_id) json_set_str(res, "id", r->prompt_id);
     json_set_bool(res, "agentInvoked", true);
-    const char *status = str_eq(stop, "aborted") ? "aborted" : str_eq(stop, "error") ? "error" : "completed";
+    /* a run stopped from inside (a cancelled ask, Esc) ends aborted even when its last turn completed */
+    const char *status = str_eq(stop, "aborted") || r->a->agent->cancel ? "aborted" : str_eq(stop, "error") ? "error" : "completed";
     json_set_str(res, "status", status);
     if (!strcmp(status, "error")) {
         json_t *e = json_obj();
@@ -1327,16 +1351,49 @@ static json_t *model_json(const ai_model_t *m) {
     }
     json_set_int(o, "contextWindow", m->context_window);
     json_set_int(o, "maxTokens", m->max_tokens);
-    json_t *compat = json_obj();
-    if (m->compat_defaults) json_merge(compat, m->compat_defaults);
-    if (m->compat) json_merge(compat, m->compat);
-    if (json_len(compat)) json_set(o, "compat", compat);
-    else json_free(compat);
+    json_t *merged = json_obj();
+    if (m->compat_defaults) json_merge(merged, m->compat_defaults);
+    if (m->compat) json_merge(merged, m->compat);
+    if (json_len(merged)) {
+        /* pi-ai's resolved compat key order, then anything else the catalog carries */
+        static const char *const order[] = {
+            "supportsStore", "supportsDeveloperRole", "supportsMultipleSystemMessages", "supportsReasoningEffort",
+            "supportsReasoningParams", "supportsSamplingParams", "supportsPenaltyAndStopParams", "reasoningEffortMap",
+            "supportsUsageInStreaming", "alwaysSendMaxTokens", "disableReasoningOnForcedToolChoice",
+            "disableReasoningOnToolChoice", "disableReasoningWithTools", "supportsToolChoice", "supportsForcedToolChoice",
+            "supportsNamedToolChoice", "maxTokensField", "requiresToolResultName", "requiresAssistantAfterToolResult",
+            "requiresThinkingAsText", "requiresMistralToolIds", "thinkingFormat", "reasoningDisableMode",
+            "omitReasoningEffort", "includeEncryptedReasoning", "filterReasoningHistory", "reasoningContentField",
+            "requiresReasoningContentForToolCalls", "requiresReasoningContentForAllAssistantTurns",
+            "allowsSyntheticReasoningContentForToolCalls", "replayReasoningContent", "qwenPreserveThinking",
+            "qwenTemplateReasoningEffort", "requiresAssistantContentForToolCalls", "supportsPromptCacheBreakpoints",
+            "isOpenRouterHost", "wireModelIdMode", "isVercelGatewayHost", "supportsStrictMode", "toolStrictMode",
+            "toolSchemaFlavor", "streamFirstEventTimeoutMs", "streamIdleTimeoutMs", "stripDeepseekSpecialTokens",
+            "streamMarkupHealingPattern", "reasoningDeltasMayBeCumulative", "emptyLengthFinishIsContextError",
+            "usesOpenAIToolCallIdLimit", "dropThinkingWhenReasoningEffort", "nativeKimiK3Reasoning",
+            "zaiReasoningEffortDialect", "clampOutputToModelMax", "stripImageInput", "rejectRootObjectUnion",
+            "retryWithoutStrictOnGrammarError", "supportsPromptCacheKey"};
+        json_t *compat = json_obj();
+        for (size_t i = 0; i < ARRAY_LEN(order); i++)
+            if (json_get(merged, order[i])) json_set(compat, order[i], json_clone(json_get(merged, order[i])));
+        for (size_t i = 0; i < json_len(merged); i++)
+            if (!json_get(compat, merged->u.obj.keys[i])) json_set(compat, merged->u.obj.keys[i], json_clone(merged->u.obj.vals[i]));
+        json_set(o, "compat", compat);
+    }
+    json_free(merged);
     for (size_t i = 0; json_is_obj(raw) && i < json_len(raw); i++) {
         const char *k = raw->u.obj.keys[i];
         if (json_get(o, k) || !strcmp(k, "compat") || !strcmp(k, "headers")) continue;
         json_set(o, k, json_clone(raw->u.obj.vals[i]));
     }
+    /* catalog defaults every resolved model carries */
+    if (!json_get(o, "identity")) {
+        json_t *idn = json_obj();
+        json_set_str(idn, "class", "unknown");
+        json_set(o, "identity", idn);
+    }
+    if (!json_get(o, "requiresGlyphTokenization")) json_set_bool(o, "requiresGlyphTokenization", false);
+    if (!json_get(o, "supportsComputerUse")) json_set_bool(o, "supportsComputerUse", false);
     return o;
 }
 
@@ -2263,7 +2320,7 @@ static void handle(rpc_t *r, json_t *cmd) {
                     respond(r, id, type, true, NULL, NULL);
                     return;
                 }
-                m = msg_user_content(content_with_images(x, json_get_arr(cmd, "images")));
+                m = msg_user_typed(content_with_images(x, json_get_arr(cmd, "images")));
                 free(x);
             }
             if (str_eq(behav, "followUp")) agent_follow_up(a->agent, m);
@@ -2302,7 +2359,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         /* steer() / followUp(): prompt templates expand (no slash or skill commands) */
         const char *raw = json_get_str(cmd, "message");
         char *x = app_expand_templates(a, raw ? raw : "");
-        json_t *m = msg_user_content(content_with_images(x, json_get_arr(cmd, "images")));
+        json_t *m = msg_user_typed(content_with_images(x, json_get_arr(cmd, "images")));
         free(x);
         if (!strcmp(type, "steer")) agent_steer(a->agent, m);
         else agent_follow_up(a->agent, m);
@@ -2339,6 +2396,7 @@ static void handle(rpc_t *r, json_t *cmd) {
     } else if (!strcmp(type, "host_tool_result")) {
         host_tool_complete(r, cmd);
     } else if (!strcmp(type, "host_tool_update")) {
+        host_tool_progress(r, cmd);
         /* partial results are informational for the host UI; nothing to do server-side */
     } else if (!strcmp(type, "set_host_tools")) {
         json_t *ht;
@@ -2417,8 +2475,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         a->env->todo.phases = ph ? json_clone(ph) : json_arr();
         json_t *ce = json_obj(); /* USER_TODO_EDIT_CUSTOM_TYPE entry */
         json_set(ce, "phases", json_clone(a->env->todo.phases));
-        session_append_custom(a->session, "user-todo-edit", ce);
-        json_free(ce);
+        session_append_custom(a->session, "user-todo-edit", ce); /* takes ce */
         json_t *d = json_obj();
         json_set(d, "todoPhases", json_clone(a->env->todo.phases));
         respond(r, id, type, true, d, NULL);
@@ -2585,7 +2642,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         } else {
             for (size_t i = 0; i < catalog_count() && cands.n < 200; i++) {
                 const ai_model_t *m = catalog_at(i);
-                if (!auth_has_credentials(m->provider)) continue;
+                if (!catalog_model_available(m) || !str_eq(catalog_model_kind(m), "chat")) continue;
                 char *l = xasprintf("%s/%s", m->provider, m->id);
                 strvec_push_own(&cands, l);
             }
@@ -2822,7 +2879,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         json_t *arr = json_arr();
         for (size_t i = 0; i < catalog_count(); i++) {
             const ai_model_t *m = catalog_at(i);
-            if (!catalog_model_available(m)) continue;
+            if (!catalog_model_available(m) || !str_eq(catalog_model_kind(m), "chat")) continue;
             json_push(arr, model_json(m));
         }
         json_t *d = json_obj();
@@ -2913,9 +2970,17 @@ rpc_t *rpc_attach(app_t *a, rpc_sink_fn sink, void *ud) {
     a->wake_ud = r;
     a->session_event = session_event_rpc;
     a->session_event_ud = r;
+    json_t *qsnap = app_queued_messages(a); /* queue_update reports changes from here on */
+    pthread_mutex_lock(&a->mu);
+    json_free(a->queue_snapshot);
+    a->queue_snapshot = qsnap;
+    pthread_mutex_unlock(&a->mu);
     a->env->ui.ask = rpc_ask;
     a->env->ui.approve = rpc_approve;
     a->env->ui.ud = r;
+    json_t *adv = json_obj(); /* the session's advisor runtimes reset at startup */
+    json_set_str(adv, "type", "advisor_cost_changed");
+    forward(r, adv);
     emit_available_commands(r);
     return r;
 }

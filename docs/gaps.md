@@ -57,7 +57,7 @@ Ranked by how soon a user hits the gap in a normal interactive session.
 12. **304 of the 402 settings shown in `/settings` have no effect.** (`tools.approvalMode`, `tools.approval`, `tools.restrictedFolders` and `bash.patterns` now work: WP-10.) (WP-26)
 13. ~~**Default-on agent guards are missing.**~~ Done (WP-12, WP-3): todo reminders + mid-run nudge, empty/unexpected-stop recovery, tool-call loop guard, stream loop guard, magic keywords, `out://`, `cfg://`, `conflict://N`. Remaining: fabricated-result abort (needs in-band tool calling), `todo.eager`, `tasks.todoClearDelay`.
 14. **Compaction: snapcompact, Codex V2 / Bedrock server compaction and prompt-cache warming are missing.** The method ladder, omp's summary requests, auto shake/handoff, OpenAI Responses and Anthropic server compaction, mid-turn/async compaction and pruning landed (WP-13); snapcompact is a follow-up. (WP-13, WP-14)
-15. **`omc acp` starts a TUI instead of ACP mode.** Editors call `omp acp`. RPC/ACP prompts don't run slash commands, RPC message events have no `messageId`, the `ask` tool fails in RPC, and several RPC response shapes differ. (WP-15, WP-16)
+15. **`omc acp` starts a TUI instead of ACP mode.** Editors call `omp acp`. ACP wire shapes differ (WP-16); RPC wire parity landed with WP-15 (remaining: subagent frames, host URI schemes, §6a-b).
 
 ## Prioritized work packages
 
@@ -86,12 +86,12 @@ Every package must:
 | WP | Scope | omc files | Upstream sources |
 |---|---|---|---|
 | WP-6 Editor I/O (done; remaining: Ctrl+G with the ask option list focused opens the composer's editor in omp, `submitAfterPaste` skips the menu, Kitty thumbnails / video chips, the `^model` / `:emoji` / internal-URL completions of the same provider) | Ctrl+G external editor (main editor + ask "Other"); Ctrl+R history search; copy line/prompt (Alt+Shift+L/C); Ctrl+V image paste + image-path paste + attachments; raw paste; large-paste chip/menu; fuzzy project-wide `@` mentions; `#` prompt actions (`#123` → pr:// / issue://) | `src/tui/editor.c`, `src/modes/interactive.c`, `src/ui/ask.c`, `src/tui/term.c`, new `src/ui/histsearch.c` | U/modes/controllers/input-controller.ts, T/overlays/history-search.ts, U/modes/prompt/{attachment-chips,prompt-action-autocomplete}.ts, T/autocomplete.ts |
-| WP-10 Tool approval system (done; remaining: `bash.allowCompoundCommands`, nested `xd://` prompts for an explicit device policy, provider safety checks, extension `tool_approval_*` events, Cursor-bridge approvals, RPC prompts through `extension_ui_request` (WP-15)) | `tools.approvalMode` tiers (always-ask, always-ask-cached "Ask and remember", write, yolo), `tools.approval` per-tool policies, `tools.restrictedFolders`, approval dialog (Ctrl+Enter/Ctrl+Q), remembered grants, `/forget-approvals`, `--approval-mode` / `--auto-approve` / `--yolo` | `src/coding/app.c` (`hook_before_tool`), new `src/ui/approval.c`, `src/modes/acp.c`, `src/cli/cli.c` | U/tools/approval.ts, approval-cache.ts, approval-targets.ts, search-approval-targets.ts; T/overlays/approval-dialog.ts |
+| WP-10 Tool approval system (done; remaining: `bash.allowCompoundCommands`, nested `xd://` prompts for an explicit device policy, provider safety checks, extension `tool_approval_*` events, Cursor-bridge approvals) | `tools.approvalMode` tiers (always-ask, always-ask-cached "Ask and remember", write, yolo), `tools.approval` per-tool policies, `tools.restrictedFolders`, approval dialog (Ctrl+Enter/Ctrl+Q), remembered grants, `/forget-approvals`, `--approval-mode` / `--auto-approve` / `--yolo` | `src/coding/app.c` (`hook_before_tool`), new `src/ui/approval.c`, `src/modes/acp.c`, `src/cli/cli.c` | U/tools/approval.ts, approval-cache.ts, approval-targets.ts, search-approval-targets.ts; T/overlays/approval-dialog.ts |
 | WP-11 Turn-lifecycle signals — **done** (see status.md "Turn-lifecycle signals"); remaining: OSC 99 `p=?` probe and structured Kitty notifications, the OSC 133;A program-status resend (omc writes no OSC 133 zones), `terminal.showProgress` (OSC 9;4), TSP native titles, Tern OSC 1337/OSC 7 session reports, Windows console titles, the desktop ScreenSaver inhibit for `display`/`system`, recap journaling to history.db | Completion/ask/error notifications (OSC 9/777, `*.notify`); terminal title with run state + spinner (`tui.titleState`, `tui.titleSpinner`); OSC 7501 program status; idle recap (`recap.*`); sleep prevention (logind inhibitor); release check | `src/modes/interactive.c`, `src/tui/term.c` (`tui_term_set_title`), `src/coding/title.c`, `src/coding/app.c` | U/modes/controllers/event-controller.ts (`send*Notification`), T/desktop-notify.ts, U/utils/{run-status,title-generator}.ts, U/session/idle-maintenance.ts, U/session/power-assertion-backend.ts |
 | WP-12 Default-on agent guards 🟡 (done: todo reminders + mid-run nudge, unexpected/empty-stop recovery, tool-call + stream loop guards, magic keywords, auto-thinking classifier; open: fabricated-result abort (in-band tool calling), `todo.eager`, `tasks.todoClearDelay` auto-clear, todo-error reminder) | Todo reminders + auto-clear (`todo.reminders`, `remindersMax`, `tasks.todoClearDelay`); unexpected-stop detection; tool-call loop guard / redirect and assistant loop guard (`model.loopGuard.*`); fabricated-result abort; magic keywords (ultrathink/orchestrate/workflow/jevify + hidden notices); auto-thinking classifier. Each must keep `request_diff.sh` clean | `src/coding/app.c` (turn end), `src/agent/agent.c`, `src/modes/interactive.c` (prompt pre-processing) | U/session/{todo-tracker,unexpected-stop-classifier,tool-call-loop-redirect}.ts, U/modes/magic-keywords.ts, U/prompts/system/*-notice.md, U/auto-thinking/* |
 | WP-13 Compaction ladder ✅ (done: `compaction.methodOrder` ladder for manual and automatic passes, omp's prepareCompaction/compact() requests (split turns, short summary, file lists, input windows), all transcript dialects, auto shake (regions, tail protection, artifact offload, persisted) and auto handoff (`handoffSaveToDisk`), OpenAI Responses `/responses/compact` + replay, the Anthropic compaction beta + signed replay, mid-turn, pre-prompt and async (speculative) compaction, supersede/useless/tool-output pruning, dead-end rescue + warnings, per-model thresholds, `auto_compaction_*` events; remaining: snapcompact, Codex V2 streaming compaction, Bedrock Converse (InvokeModel) compaction, anthropic-native speculation, `compaction.remoteEndpoint`, idle compaction, context promotion) | `src/coding/compaction.c`, `src/ai/dialect.c`, `src/ai/provider_{anthropic,openai_responses}.c`, `src/session/session.c` | U/session/{compaction-methods,session-maintenance,compact-modes,session-handoff}.ts, A/compaction/{compaction,shake,pruning,openai,anthropic,bedrock}.ts, packages/ai/src/dialect/*, packages/snapcompact |
 | WP-14 Provider knobs and cache warming | Prompt cache warmer (`providers.cacheWarming`); service tiers `/fast`, `/slow`, `tier.*`, `--service-tier`; `/extended-context` + `extendedContext`; stream first-event/idle timeouts; `providers.maxInFlightRequests`; RPC `set_fast_mode` / `set_slow_mode` / `set_cache_warming` | `src/coding/app.c`, `src/ai/provider_*.c`, `src/ai/ai_common.c`, `src/modes/rpc.c` | U/session/cache-warmer.ts, anthropic-slow-mode.ts, model-controls.ts; U/slash-commands/builtin-modes.ts (fast/slow/extended-context) |
-| WP-15 RPC wire parity | `messageId` + `partial` + start/done/error on message events, delta filter; session events (compaction, retry, model/thinking changed, goal_updated, queue_update, available_commands_update, …); response shapes (set_model, new/switch/open/branch/fork, get_entries leafId/since, get_messages_page cursor, get_session_stats, compact, handoff, btw); full `get_state`; `extension_ui_request`/`_response` so `ask` works; login/logout; async `bash` so `abort_bash` works; protocol v2 + `rpc_chunk`; subagent frames; mark status.md 🟡 | `src/modes/rpc.c`, `src/agent/agent.c` (`agent_event_to_json`), `src/coding/app.c` (structured events beside `notice`), `src/modes/print.c`, `src/tools/todo_ask.c` | U/modes/rpc/{rpc-types,rpc-mode,rpc-session-events,rpc-messages,rpc-compat,rpc-frame}.ts, U/session/agent-session-events.ts |
+| WP-15 RPC wire parity (done: §6a-b; remaining: subagent frames, host URI schemes, fast/slow/cache-warming/session-lease commands, prompt error `httpStatus`/`cost_cap`, `retryErrors`) | `messageId` + `partial` + start/done/error on message events, delta filter; session events (compaction, retry, model/thinking changed, goal_updated, queue_update, available_commands_update, …); response shapes (set_model, new/switch/open/branch/fork, get_entries leafId/since, get_messages_page cursor, get_session_stats, compact, handoff, btw); full `get_state`; `extension_ui_request`/`_response` so `ask` works; login/logout; async `bash` so `abort_bash` works; protocol v2 + `rpc_chunk`; subagent frames; mark status.md 🟡 | `src/modes/rpc.c`, `src/agent/agent.c` (`agent_event_to_json`), `src/coding/app.c` (structured events beside `notice`), `src/modes/print.c`, `src/tools/todo_ask.c` | U/modes/rpc/{rpc-types,rpc-mode,rpc-session-events,rpc-messages,rpc-compat,rpc-frame}.ts, U/session/agent-session-events.ts |
 | WP-16 ACP parity | `omc acp` subcommand; slash commands in `session/prompt`; `session/resume`, `close`, `fork`, `set_config_option`, `_session/steering`; `configOptions` + `config_option_update` / `session_info_update` / `available_commands_update`; `mcpServers` in new/load; tool-call history replay; structured diff/terminal tool content; `usage_update {size,used,cost}`; errors → `end_turn`/`refusal`; fs/terminal/elicitation client bridges | `src/modes/acp.c`, `src/cli/cli.c` | U/modes/acp/{acp-agent,acp-event-mapper,acp-client-bridge}.ts, U/slash-commands/acp-builtins.ts, U/commands/acp.ts |
 | WP-17 CLI flags and subcommands | `--flag=value`; unknown subcommand-shaped words become an error instead of a prompt; `-r` without a value opens the picker; `--restore`, `--export`, `--models`, `--smol/--slow/--plan`, `--hide-thinking`, `--advisor`, `--max-time/--max-cost/--warn-cost`, `--add-dir`, `--no-lsp`, `--skills`, `--system-prompt-template`, `--mode rpc-ui`; `@image` args. Subcommands: commit, completions, token, usage, setup, session, worktree, agents, ttsr, ssh, search. Fill gaps in models/grep/auth/config | `src/cli/cli.c`, `src/main.c` | U/cli/{args,flag-tables}.ts, U/cli-commands.ts, U/commands/*.ts, U/main.ts |
 
@@ -584,45 +584,46 @@ Upstream: `packages/tui/src/overlays/*`, `packages/coding-agent/src/modes/compon
 
 Read `src/modes/rpc.c`, `acp.c`, `print.c`, `src/cli/cli.c`, `agent_event_to_json` (`src/agent/agent.c`);
 probed `build/omc` in RPC (JSONL), ACP (fifo) and every flag/subcommand below against the mock model.
-U = `packages/coding-agent/src`. status.md marks RPC and ACP ✅; both are 🟡 on wire shapes.
+U = `packages/coding-agent/src`. RPC wire parity is WP-15 (done, remaining rows below); ACP is WP-16.
 
 ### 6a. RPC commands (U/modes/rpc/rpc-types.ts, rpc-mode.ts; omc `src/modes/rpc.c:handle`)
 
+Verified against omp v18.14.2 with `tests/parity/rpc_diff.py` (scripts in `tests/parity/rpc_scripts/`); e2e in
+`tests/e2e/rpc_wire.py`.
+
 | Command | omc | Status | Notes |
 |---|---|---|---|
-| negotiate_protocol | handle | 🟡 | upstream accepts only v2 (chunked frames) and replies `{protocolVersion:2}`; omc accepts any, replies 1 |
-| prompt | prompt_thread | 🟡 | **slash commands not executed** (`/compact` goes to the model); no `agentInvoked:false` path; errors lack `httpStatus`/`code`, `retryable` always false |
-| steer, follow_up, promote_queued_message, abort_and_prompt | handle | ✅ | |
-| remove_queued_message, abort_and_restore_queue | handle | 🟡 | text only (no images/`imagesDropped`/`truncated`); `queue` not checked |
-| abort | agent_abort | ✅ | |
-| new_session / switch_session / fork | app_* | 🟡 | return full state instead of `{cancelled}`; ignore `parentSession` / provider+modelId; no `session_busy` |
-| open_session | alias of switch_session | 🟡 | upstream takes `sessionDir` and returns `{cancelled,resumed,sessionId,sessionFile}` |
-| branch | alias of fork | 🟡 | upstream branches in place and returns `{text,cancelled}`; omc forks to a new file |
-| get_state | state_json | 🟡 | missing autoCompactionEnabled, fast/slow mode, usageLimit, tokensPerSecond, queuedMessages(+Count), hasPendingAsyncWork, isSettled, todoPhases, systemPrompt, dumpTools, contextUsage; partial `model` |
-| set_fast_mode / set_slow_mode / set_cache_warming / set_ask_dialog / get_session_lease | — | ❌ | "unknown command" |
-| goal, get_tree, set_thinking_level, get_available_thinking_levels, set_steering/follow_up/interrupt_mode, set_auto_compaction/retry, export_html, navigate_tree, set_label, get_branch_messages, get_last_assistant_text, get_messages, get_login_providers, host_tool_result | handle | ✅ | navigate_tree lacks error codes; summary synchronous |
+| negotiate_protocol | handle | ✅ | only v2: `{protocolVersion:2}`, else `Unsupported RPC protocol version: N` |
+| prompt, abort_and_prompt | prompt_thread | 🟡 | slash / skill / file commands run (WP-4, WP-9); a prompt queued into a live run gets its `prompt_result` at that run's yield; errors lack `httpStatus` / `code: cost_cap`, `retryable` always false; no input gate (an abort does not cancel input accepted before it) |
+| steer, follow_up, promote_queued_message, abort | handle | ✅ | |
+| remove_queued_message | handle | ✅ | `queue` validated, removed `images` returned (`imagesDropped` over the limit) |
+| abort_and_restore_queue | handle | 🟡 | user-authored entries with `images`; no `imagesDropped`/`truncated` fitting |
+| new_session / switch_session / fork / branch | session_change | 🟡 | `{cancelled}` (`branch`: `{text, cancelled}` in a new session file at the entry's parent); fork refuses while busy (`session_busy`); switch takes `provider`+`modelId`; `parentSession` ignored |
+| open_session | session_change | ✅ | newest non-empty session in `sessionDir` or a fresh one there: `{cancelled, resumed, sessionId, sessionFile}` |
+| get_state | state_json | 🟡 | full RpcSessionState; fast/slow mode always off (omc has no service tiers), no `usageLimit`, tools without `examples` |
+| set_fast_mode / set_slow_mode / set_cache_warming / get_session_lease | — | ❌ | "Unknown command" (no service tiers, cache warmer or session leases in omc) |
+| set_ask_dialog | handle | ✅ | the `ask` tool then sends one `ask` dialog |
+| goal, get_tree, set_thinking_level, get_available_thinking_levels, cycle_thinking_level, set_steering/follow_up/interrupt_mode, set_auto_compaction/retry, export_html, get_branch_messages, get_last_assistant_text, get_messages, get_login_providers, host_tool_result, host_tool_update | handle | ✅ | host_tool_update streams as `tool_execution_update` |
+| navigate_tree, set_label | handle | ✅ | `entry_not_found` / `session_busy` codes |
 | get_available_commands | handle | ✅ | registry builtins (aliases, hints, subcommands), then `skill:<name>`, MCP prompt and file commands (WP-9) |
-| get_entries | handle | 🟡 | no `leafId`; `since` ignored |
-| set_todos | handle | 🟡 | not persisted as a user-todo-edit entry |
-| set_host_tools | handle | 🟡 | ignores `loadMode`, `readsSkillUris` |
+| get_entries | handle | ✅ | `{entries, leafId}`, `since` cursor, `unknown_since` |
+| set_todos | handle | ✅ | persisted as a `user-todo-edit` custom entry |
+| set_host_tools | handle | 🟡 | definitions validated like omp; `loadMode`, `readsSkillUris` ignored |
 | set_host_uri_schemes, host_uri_result | — | ❌ | |
-| set_subagent_subscription, get_subagents, get_subagent_messages, cancel_subagent, steer_subagent | — | ❌ | |
-| set_event_filter | handle | 🟡 | echoes `messageUpdates:"delta"` but never applies it |
-| set_model / cycle_model / get_available_models | handle | 🟡 | `set_model` returns state not `Model`; model objects have 5 fields |
-| cycle_thinking_level | handle | 🟡 | cycles non-reasoning models to "off" instead of returning null |
-| compact | app_compact | 🟡 | no `CompactionResult`; refuses while busy |
+| set_subagent_subscription, get_subagents, get_subagent_messages, cancel_subagent, steer_subagent | — | ❌ | needs the omp subagent lifecycle/progress payloads from omc's task runner |
+| set_event_filter | handle | ✅ | validation, `messageUpdates: "delta"` projection |
+| set_model / cycle_model / get_available_models | handle | 🟡 | full `Model` objects (chat models only); compat values come from omc's catalog (a few defaults differ, e.g. `clampOutputToModelMax`), custom reasoning models lack omp's derived `thinking` |
+| compact | app_compact | ✅ | `CompactionResult`; a live run is aborted first; `manual_compaction_start/end` |
 | abort_retry | app_abort | 🟡 | aborts the whole run, not just the retry wait |
-| bash / abort_bash | app_user_bash | 🟡 | **runs synchronously on the stdin reader thread**, so RPC input (incl. `abort_bash`) blocks until it ends |
-| get_session_stats | app_stats | 🟡 | flat fields instead of `tokens{}`; missing toolCalls, totalMessages, premiumRequests, credits |
-| abort_branch_summary | no-op | 🟡 | |
-| set_session_name | session_set_title | 🟡 | accepts empty name |
-| handoff | app_handoff | 🟡 | returns `{}` not `{savedPath}`; ignores `customInstructions` |
-| get_messages_page | handle | 🟡 | upstream: oldest-first, opaque base64 cursor, byte cap, `{messages,nextCursor,totalMessages}`, `session_busy`; omc: newest-first numeric cursor, `{hasMore,total}` |
-| login / get_logout_accounts / logout | — | ❌ | |
-| btw | rpc.c btw_ask | ✅ | |
-| btw_cancel / get_btw_history | rpc.c | ✅ | |
-| extension_ui_response | — | ❌ | |
-| host_tool_update | ignored | 🟡 | not forwarded as `tool_execution_update` |
+| bash / abort_bash | bash_main | ✅ | runs off the reader thread; BashResult with `workingDir` |
+| get_session_stats | session_stats_json | 🟡 | omp shape (`tokens{}`, toolCalls, totalMessages, premiumRequests, contextUsage); omc keeps `!cmd` output in the context as a user message, so it counts as a user message |
+| abort_branch_summary | app_abort_branch_summary | ✅ | |
+| set_session_name | session_set_title | ✅ | |
+| handoff | app_handoff | ✅ | `{}` (`savedPath` only for an auto-triggered handoff) |
+| get_messages_page | handle | ✅ | port of rpc-messages.ts (base64url cursor, byte cap, `stale_cursor`, `session_busy`) |
+| login / get_logout_accounts / logout | login_command | 🟡 | `open_url` / `notify` / `input` dialogs, omp's errors; omc stores one credential per provider (`credentialId` 1, generic labels) |
+| btw, btw_cancel, get_btw_history | rpc.c | ✅ | |
+| extension_ui_response | ui_answer | ✅ | |
 | live_* / dictation_* / predict_word* | — | ⛔ | realtime voice, local STT, local tiny ML models |
 | set_advisor | app_set_advisor | n/a | omc-only |
 
@@ -630,16 +631,18 @@ U = `packages/coding-agent/src`. status.md marks RPC and ACP ✅; both are 🟡 
 
 | Event | Status | Notes |
 |---|---|---|
-| ready | 🟡 | `supportedProtocolVersions:[1]`, no `maxReassembledFrameBytes` |
-| rpc_chunk (v2 framing) | ❌ | frames over 1 MiB written whole |
-| agent_start, turn_start/end, tool_execution_start/update/end, host_tool_call/cancel, prompt_result, session_settled, notice | ✅ | no `resumedToolCallIds`; notice lacks `source` |
-| message_start/update/end | 🟡 | **no `messageId`**; `assistantMessageEvent` lacks `partial` and start/done/error subtypes; delta projection missing |
-| agent_end | 🟡 | `isTerminal`/`yielded` always true; no `awaitingAsyncWork` |
-| tool_stream_update | ❌ | |
-| auto/manual_compaction_start/end, auto_retry_start/end, retry_fallback_applied/succeeded, cache_warming_start/end | ❌ | |
-| model_changed, thinking_level_changed, goal_updated, queue_update, config_warnings_changed, advisor_cost_changed, advisor_yielded, ttsr_triggered, todo_reminder, todo_auto_clear, irc_message | ❌ | |
-| available_commands_update, session_info_update, config_update, command_output, extension_error | ❌ | |
-| extension_ui_request (select/confirm/input/editor/ask/cancel/notify/setStatus/setWidget/setTitle/set_editor_text/open_url) | ❌ | **in RPC the `ask` tool returns "no interactive user"** (`src/tools/todo_ask.c`) |
+| ready | ✅ | `supportedProtocolVersions:[1,2]`, `maxReassembledFrameBytes` |
+| rpc_chunk (v2 framing) | ✅ | v2 frames over 1 MiB as base64 chunks (64 MiB cap); v1: oversized responses become the transport-limit error, other frames are compacted (`agent_end` drops streamed messages) and shrunk like rpc-frame.ts |
+| agent_start, turn_start/end, tool_execution_start/end, host_tool_call/cancel, prompt_result, session_settled, command_output | ✅ | turn_start precedes the run's input messages; no `resumedToolCallIds`; omp emits an ask's first dialog before its `tool_execution_start` (async event delivery), omc after |
+| message_start/update/end | ✅ | `messageId`, `partial`, delta projection; providers' extra block fields (`partialArgs`, `streamIndex`, thinking `summary`, `responseId`) are provider parity, not RPC |
+| agent_end | 🟡 | `isTerminal`/`yielded` always true; no `awaitingAsyncWork`; a run aborted after its tools (cancelled ask) ends without omp's `Interrupted by user` aborted turn (prompt_result still reports `aborted`) |
+| model_changed, thinking_level_changed, goal_updated, queue_update, advisor_cost_changed (startup) | ✅ | omc keeps a thinking level across a non-reasoning model, so switching back to a reasoning model reports it |
+| auto_compaction_start/end, manual_compaction_start/end, auto_retry_start/end, retry_fallback_applied/succeeded | 🟡 | `auto_retry_end` has no `retryErrors` |
+| available_commands_update | ✅ | at startup and after a session change |
+| notice | 🟡 | info/warning/error and `source: btw-history`; no session-persistence notices |
+| extension_ui_request: select/editor/input/ask/cancel/notify/open_url | ✅ | the ask tool (`--mode rpc-ui`) and tool approvals (select with approvalChoiceLabels) answer over the protocol |
+| extension_ui_request: confirm/setStatus/setWidget/setTitle/set_editor_text | ⛔ | only JS extensions send them |
+| tool_stream_update, cache_warming_start/end, config_warnings_changed, advisor_yielded, ttsr_triggered, todo_auto_clear, irc_message, session_info_update, config_update, extension_error | ❌ | (todo_reminder ✅) |
 | host_uri_request/cancel, subagent_lifecycle/progress/event | ❌ | |
 | btw_delta / btw_record | ✅ | |
 | packages/wire (collab GuestFrame/HostFrame, skillshare, stream, tsp) | ⛔ | hosted relay/stream protocols, not RPC |

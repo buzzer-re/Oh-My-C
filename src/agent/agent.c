@@ -375,6 +375,15 @@ json_t *msg_user_content(json_t *content) {
     return m;
 }
 
+json_t *msg_user_typed(json_t *content) {
+    json_t *m = json_obj();
+    json_set_str(m, "role", "user");
+    json_set(m, "content", content);
+    json_set_str(m, "attribution", "user");
+    json_set_int(m, "timestamp", now_ms());
+    return m;
+}
+
 json_t *msg_user_text(const char *text) {
     json_t *c = json_arr();
     json_push(c, text_block(text));
@@ -397,7 +406,9 @@ json_t *msg_tool_result(const char *id, const char *name, const tool_result_t *r
     json_set_str(m, "toolCallId", id);
     json_set_str(m, "toolName", name);
     json_set(m, "content", r->content ? json_clone(r->content) : json_arr());
+    /* a failed call (omp: the tool threw) carries empty details */
     if (r->details) json_set(m, "details", json_clone(r->details));
+    else if (r->is_error) json_set(m, "details", json_obj());
     json_set_bool(m, "isError", r->is_error);
     if (r->useless && !r->is_error) json_set_bool(m, "useless", true);
     json_set_int(m, "timestamp", now_ms());
@@ -423,8 +434,9 @@ const char *agent_event_name(agent_event_type_t t) { return ev_names[t]; }
 static json_t *result_json(const tool_result_t *r) {
     json_t *o = json_obj();
     json_set(o, "content", r && r->content ? json_clone(r->content) : json_arr());
+    /* AgentToolResult {content, details}; the error flag rides on the event (isError) */
     if (r && r->details) json_set(o, "details", json_clone(r->details));
-    if (r && r->is_error) json_set_bool(o, "isError", true);
+    else if (r && r->is_error) json_set(o, "details", json_obj());
     return o;
 }
 
@@ -1240,6 +1252,9 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
         } else {
             emit_message(a, AGENT_EV_MESSAGE_END, assistant);
         }
+        /* the session stamps completedAt on the message_end snapshot it persists; the live history keeps the
+         * provider's message (omp: agent state and the message_end event are separate snapshots) */
+        json_del(assistant, "completedAt");
         retry_attempt = 0;
         pthread_mutex_lock(&a->mu);
         json_push(a->messages, assistant);

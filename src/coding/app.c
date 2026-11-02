@@ -235,6 +235,8 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
     if (ev->type == AGENT_EV_AGENT_START && !a->opts.subagent) power_acquire();
     if (ev->type == AGENT_EV_AGENT_END && !a->opts.subagent) power_release();
     if (ev->type == AGENT_EV_MESSAGE_END && str_eq(json_get_str(ev->message, "role"), "assistant")) {
+        /* completedAt: local completion time stamped by the session at message_end (persisted with the message) */
+        if (ev->message) json_set_int((json_t *)ev->message, "completedAt", now_ms());
         const char *stop = json_get_str(ev->message, "stopReason");
         if (!str_eq(stop, "error") && !str_eq(stop, "aborted")) {
             if (a->retry_saga > 0) { /* closeRetrySaga success */
@@ -2545,7 +2547,7 @@ int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
     json_free(kn);
     json_arr_foreach(notices, i, img) json_push(msgs, json_clone(img));
     json_free(notices);
-    json_push(msgs, msg_user_content(content));
+    json_push(msgs, msg_user_typed(content));
     if (!apply_auto_thinking(a, text)) {
         json_free(msgs);
         return 0;

@@ -17,7 +17,9 @@ Frames are normalized (timestamps, durations, ids, session paths, the agent dir 
 $RD_DIR/{omp,omc}.frames (one pretty JSON per frame); the unified diff is printed. --shape replaces scalar values
 with their type (string values of type/command/method/role/status/... are kept) to compare wire shapes only.
 Env: RD_DIR (default $TMPDIR/omc-rpcdiff), OMP_BIN (default omp), OMC_BIN (default build/omc), RD_ARGS (extra CLI
-args for both, e.g. "--no-session"), RD_TIMEOUT (per wait, default 30 s)."""
+args for both, e.g. "--no-session"), RD_TIMEOUT (per wait, default 30 s), RD_MODE (rpc or rpc-ui), RD_SKIP (frame types left out of the diff,
+e.g. "available_commands_update"), RD_DROP (keys removed everywhere before diffing, e.g. "partial,dumpTools").
+omp's bundled JS `autoresearch` extension widget frames are always left out (JS extensions are out of scope)."""
 import difflib, json, os, queue, random, re, shlex, shutil, socket, subprocess, sys, threading, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -99,7 +101,7 @@ def run(name, binary, envvar):
            "OMC_SKIP_SETUP": "1", "OMP_SKIP_SETUP": "1", "HOME": os.path.join(D, name + "-home")}
     os.makedirs(env["HOME"], exist_ok=True)
     extra = shlex.split(os.environ.get("RD_ARGS", ""))
-    p = subprocess.Popen([binary, "--mode", "rpc", *extra], cwd=work, env=env, stdin=subprocess.PIPE,
+    p = subprocess.Popen([binary, "--mode", os.environ.get("RD_MODE", "rpc"), *extra], cwd=work, env=env, stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, stderr=open(os.path.join(D, name + ".stderr"), "w"))
     frames, q = [], queue.Queue()
     ui_answers = []
@@ -197,10 +199,20 @@ def normalizer(paths):
         return v
     return norm
 
+SKIP = set(filter(None, os.environ.get("RD_SKIP", "").split(",")))
+DROP = set(filter(None, os.environ.get("RD_DROP", "").split(",")))
+
+def drop_keys(v):
+    if isinstance(v, dict): return {k: drop_keys(x) for k, x in v.items() if k not in DROP}
+    if isinstance(v, list): return [drop_keys(x) for x in v]
+    return v
+
 def dump(name, frames, paths):
     norm = normalizer(paths)
     out = []
     for m in frames:
+        if m.get("type") in SKIP or (m.get("method") == "setWidget" and m.get("widgetKey") == "autoresearch"): continue
+        m = drop_keys(m)
         out.append(json.dumps(norm(m), indent=1, ensure_ascii=False, sort_keys=SHAPE))
     with open(os.path.join(D, name + ".frames"), "w") as f:
         f.write("\n".join(out) + "\n")

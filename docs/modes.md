@@ -11,7 +11,7 @@ commands are complete, see [status.md](status.md) (Modes & UI).
 omc [options] [prompt...]           interactive (TUI); prompt optional; @file args inline files
 omc -p [options] <prompt...>        print mode (piped stdin is appended and implies print)
 omc --mode json -p <prompt>         print mode, JSON event lines
-omc --mode rpc                      JSONL RPC on stdin/stdout
+omc --mode rpc                      JSONL RPC on stdin/stdout (--mode rpc-ui: the ask tool asks the client)
 omc --mode acp                      Agent Client Protocol on stdio
 ```
 
@@ -90,36 +90,69 @@ to `async.printWaitMs`.
 
 This is omp's RPC protocol (`modes/rpc/*`). One JSON object per line on stdin, and responses plus
 events on stdout. `rpc_attach()` / `rpc_handle_json()` make the same endpoint embeddable: the library
-uses it ([below](#library-embedding)).
+uses it ([below](#library-embedding)). `--mode rpc-ui` is the same protocol with the `ask` tool enabled
+(its questions go to the client).
 
-On start the endpoint emits `{"type":"ready","protocolVersion":1,...}`. **Commands** carry
-`{"type": "<command>", "id"?: "..."}` and get exactly one response:
+On start the endpoint emits `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],
+"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864}`, then `advisor_cost_changed` and
+`available_commands_update`. **Commands** carry `{"type": "<command>", "id"?: "..."}` and get exactly one
+response (`code` is a machine-readable reason on some errors):
 
 ```json
-{"id":"1","type":"response","command":"prompt","success":true,"data":{...}}
-{"id":"2","type":"response","command":"set_model","success":false,"error":"Unknown model: ..."}
+{"id":"1","type":"response","command":"prompt","success":true}
+{"id":"2","type":"response","command":"set_model","success":false,"error":"Model not found: mock/nope"}
+{"id":"3","type":"response","command":"get_entries","success":false,"error":"Unknown entries cursor: x","code":"unknown_since"}
 ```
 
 | Group | Commands |
 |---|---|
-| Prompting | `prompt`, `steer`, `follow_up`, `abort`, `abort_and_prompt`, `abort_retry`, `abort_bash`, `abort_branch_summary`, `abort_and_restore_queue`, `remove_queued_message`, `promote_queued_message`, `bash`, `btw`, `handoff`, `compact` |
-| State | `get_state`, `get_messages`, `get_messages_page`, `get_entries`, `get_last_assistant_text`, `get_session_stats`, `get_available_commands`, `get_login_providers` |
+| Protocol | `negotiate_protocol` (only v2) |
+| Prompting | `prompt`, `steer`, `follow_up`, `abort`, `abort_and_prompt`, `abort_retry`, `abort_bash`, `abort_branch_summary`, `abort_and_restore_queue`, `remove_queued_message`, `promote_queued_message`, `bash`, `btw`, `btw_cancel`, `handoff`, `compact` |
+| State | `get_state`, `get_messages`, `get_messages_page`, `get_entries`, `get_last_assistant_text`, `get_session_stats`, `get_available_commands`, `get_btw_history` |
 | Model | `set_model`, `cycle_model`, `get_available_models`, `set_thinking_level`, `cycle_thinking_level`, `get_available_thinking_levels` |
-| Session | `new_session`, `open_session`, `switch_session`, `fork`, `branch`, `get_tree`, `navigate_tree`, `get_branch_messages`, `set_label`, `set_title`, `set_session_name`, `export_html` |
-| Behavior | `set_steering_mode`, `set_follow_up_mode`, `set_interrupt_mode`, `set_auto_compaction`, `set_auto_retry`, `set_event_filter`, `set_todos`, `goal`, `set_advisor`, `negotiate_protocol` |
-| Host tools | `set_host_tools`, `host_tool_result`, `host_tool_update` |
+| Session | `new_session`, `open_session`, `switch_session`, `fork`, `branch`, `get_tree`, `navigate_tree`, `get_branch_messages`, `set_label`, `set_session_name`, `export_html` |
+| Behavior | `set_steering_mode`, `set_follow_up_mode`, `set_interrupt_mode`, `set_auto_compaction`, `set_auto_retry`, `set_event_filter`, `set_ask_dialog`, `set_todos`, `goal`, `set_advisor` |
+| Auth | `get_login_providers`, `login`, `get_logout_accounts`, `logout` |
+| Host tools / UI | `set_host_tools`, `host_tool_result`, `host_tool_update`, `extension_ui_response` |
 
-**Events** are agent events in omp's JSON shape, plus RPC frames: `notice`, `prompt_result`
-(end of a prompt), `session_settled`, and host-tool frames. `set_event_filter` restricts which event
-types are sent.
+`prompt`, `bash` and `login` answer off the reader thread, so `abort`, `abort_bash` and
+`extension_ui_response` overtake them. Each accepted prompt gets one `prompt_result` (`agentInvoked`,
+`status`, `sessionSettled`) after its work yields; a prompt sent while a run streams is queued into it and
+reports at that run's yield.
+
+**Events** are agent events in omp's JSON shape. `message_start` / `message_update` / `message_end`
+carry a `messageId` (`msg-N`, shared by one message's frames); `message_update.assistantMessageEvent`
+carries the accumulated `partial`. `set_event_filter {events, messageUpdates: "delta"}` restricts the
+event types and replaces the snapshots with increments (`*_start` carries the opened block, `*_end` the
+block metadata). Session events: `model_changed`, `thinking_level_changed`, `goal_updated`,
+`queue_update`, `auto_compaction_start/end`, `manual_compaction_start/end`, `auto_retry_start/end`,
+`retry_fallback_applied/succeeded`, `todo_reminder`, `available_commands_update`, `notice`, plus
+`command_output`, `prompt_result`, `session_settled`, `btw_delta` / `btw_record` and the host-tool frames.
+
+**Framing.** A line is at most 1 MiB. After `negotiate_protocol {protocolVersion: 2}` larger frames
+are split into `{"type":"rpc_chunk","chunkId","index","count","byteLength","data"}` lines (base64 of
+the UTF-8 JSON, 256 KiB per chunk, 64 MiB per frame). Under v1 an oversized response becomes
+`RPC response exceeded the transport limit`, an `agent_end` drops the messages already streamed, and
+other frames are shrunk (`…[N chars elided for RPC frame]`).
+
+**Dialogs.** Tools that need the user send `{"type":"extension_ui_request","id","method",...}` and
+wait for `{"type":"extension_ui_response","id","value"|"confirmed"|"cancelled"|"answers"}`. The ask
+tool uses `select` (options plus `Other (type your own)`, `optionDetails` for descriptions) and
+`editor` (`promptStyle`), or one `ask` request after `set_ask_dialog {enabled: true}`; tool approvals
+(`tools.approvalMode`) use a `select` with the full prompt as title and `Approve` / `Approve <tool>
+for this session` / grant labels / `Deny`; `login` sends `open_url`, `notify` and `input`. A dialog
+closed by an abort or timeout is followed by a `cancel` request; when stdin closes pending dialogs
+fail.
 
 **Host tools** let the client implement tools. `set_host_tools` registers `{name, description,
 parameters}` definitions. When the model calls one, omc sends
 `{"type":"host_tool_call","id":"host-N","toolCallId","toolName","arguments"}` and blocks that tool
 thread until the client answers `{"type":"host_tool_result","id":"host-N","result":{content,
-details?},"isError":false}`. On abort it sends `host_tool_cancel` with `targetId`.
+details?},"isError":false}` (`host_tool_update` partial results stream as `tool_execution_update`).
+On abort it sends `host_tool_cancel` with `targetId`.
 
 When stdin closes, an in-flight run finishes before exit. Titles are disabled in RPC mode.
+`tests/parity/rpc_diff.py` diffs omp's and omc's frame streams for a scripted session.
 
 ## ACP (`modes/acp.c`)
 
