@@ -31,6 +31,30 @@
 
 /* ---------- shared helpers ---------- */
 
+/* InteractiveMode.restart: replace this process with the launch argv rewritten by restartArgv (execv keeps the
+ * PID and the terminal); prints the failure and returns when the exec fails */
+static void restart_exec(const char *resume) {
+    strvec_t args = launch_restart_argv(resume);
+    char exe[4096];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n <= 0) n = 0;
+    exe[n] = 0;
+    strvec_t argv = {0};
+    strvec_push(&argv, CLI_BIN);
+    for (size_t i = 0; i < args.n; i++) strvec_push(&argv, args.v[i]);
+    vec_push(&argv, NULL);
+    fflush(stdout);
+    fflush(stderr);
+    if (n) execv(exe, argv.v);
+    else execvp(CLI_BIN, argv.v);
+    char *m = xasprintf("Restart exec failed: %s", strerror(errno));
+    cli_err_line(m);
+    free(m);
+    argv.n--;
+    strvec_free(&argv);
+    strvec_free(&args);
+}
+
 void cli_err_line(const char *msg) {
     char *r = cli_red(msg);
     fprintf(stderr, "%s\n", r);
@@ -536,6 +560,7 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     int rc = 0;
     char *cwd = NULL;
     app_t *app = NULL;
+    strvec_t add_dirs = {0};
     sb_t file_text = SB_INIT;
     json_t *images = NULL;
     char *template = NULL;
@@ -776,6 +801,15 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     o.auto_approve = A->auto_approve;
     o.service_tier = A->service_tier;
     o.has_ui = interactive;
+    /* --add-dir + workspace.additionalDirectories (main.ts: the union, CLI first) */
+    if (A->add_dir.n) {
+        for (size_t i = 0; i < A->add_dir.n; i++) strvec_push(&add_dirs, A->add_dir.v[i]);
+        json_t *x;
+        json_arr_foreach(settings_get("workspace.additionalDirectories"), i, x) {
+            if (json_is_str(x) && !strvec_contains(&add_dirs, json_sv(x))) strvec_push(&add_dirs, json_sv(x));
+        }
+        o.add_dirs = &add_dirs;
+    }
     o.rpc_ui = str_eq(A->mode, "rpc-ui"); /* the ask tool asks the client through extension_ui_request (WP-15) */
     if (str_eq(A->mode, "acp")) {
         rc = run_acp_mode(&o);
@@ -877,6 +911,12 @@ static int launch_run(launch_args_t *A, bool force_acp) {
 out2:
     if (app) app_free(app);
     app = NULL;
+    strvec_free(&add_dirs);
+    {
+        char *resume = NULL;
+        if (interactive_restart_requested(&resume)) restart_exec(resume); /* returns only when exec failed */
+        free(resume);
+    }
     free(initial);
     strvec_free(&rest);
     vec_free(&scoped);
@@ -949,6 +989,7 @@ static void crash_handler(int sig) {
 
 int omc_main(int argc, char **argv) {
     proc_ignore_sigpipe();
+    launch_remember_argv(argc, argv);
     if (env_truthy("OMC_DEBUG")) {
         signal(SIGSEGV, crash_handler);
         signal(SIGABRT, crash_handler);

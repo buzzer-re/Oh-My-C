@@ -535,3 +535,40 @@ bool resolve_cli_argv(int argc, char **argv, strvec_t *out, char **err) {
     for (int i = 0; i < argc; i++) strvec_push(out, argv[i]);
     return true;
 }
+
+/* ---------- /restart (flag-tables.ts restartArgv) ---------- */
+
+static int g_proc_argc;
+static char **g_proc_argv;
+
+void launch_remember_argv(int argc, char **argv) {
+    g_proc_argc = argc;
+    g_proc_argv = argv;
+}
+
+strvec_t launch_restart_argv(const char *resume_source) {
+    /* ONE_SHOT_LAUNCH_FLAGS: the relaunch supplies its own session source */
+    static const char *const ONE_SHOT[] = {"--resume", "-r", "--restore", "--session", "--continue", "-c", "--fork",
+                                           "--from-claude", "--from-codex", "--goal", NULL};
+    strvec_t kept = {0};
+    for (int i = 1; i < g_proc_argc; i++) {
+        const char *arg = g_proc_argv[i];
+        if (!strcmp(arg, "--")) break; /* the rest is literal prompt text */
+        if (arg[0] != '-') continue;   /* positional: prompt message, @file, or subcommand */
+        bool consumes = flag_consumes_value(arg, i + 1 < g_proc_argc ? g_proc_argv[i + 1] : NULL);
+        char *flag = str_starts(arg, "--") ? xstrndup(arg, strcspn(arg, "=")) : xstrdup(arg);
+        bool drop = in_list(ONE_SHOT, flag);
+        free(flag);
+        if (drop) {
+            if (consumes) i++;
+            continue;
+        }
+        strvec_push(&kept, arg);
+        if (consumes) strvec_push(&kept, g_proc_argv[++i]);
+    }
+    if (resume_source) {
+        strvec_push(&kept, "--resume");
+        strvec_push(&kept, resume_source);
+    }
+    return kept;
+}

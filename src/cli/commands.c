@@ -32,6 +32,7 @@ const cflag_t LAUNCH_FLAGS[] = {
     {.name = "cwd", .kind = CF_STR, .ch = 0, .desc = "Directory to start in (overrides the launch cwd)"},
     {.name = "mode", .kind = CF_STR, .ch = 0, .desc = "Output mode: text (default), json, rpc, or rpc-ui", .options = MODE_OPTS},
     {.name = "config", .kind = CF_STR, .ch = 0, .desc = "Load an extra config.yml-style overlay for this run (repeatable)", .options = NOOPT, .multiple = true},
+    {.name = "add-dir", .kind = CF_STR, .ch = 0, .desc = "Add a workspace directory beyond the working directory (repeatable)", .options = NOOPT, .multiple = true},
     {.name = "print", .kind = CF_BOOL, .ch = 'p', .desc = "Non-interactive mode: process prompt and exit"},
     {.name = "continue", .kind = CF_BOOL, .ch = 'c', .desc = "Continue previous session"},
     {.name = "resume", .kind = CF_STR, .ch = 'r', .desc = "Resume a session (by ID prefix, path, or picker if omitted)"},

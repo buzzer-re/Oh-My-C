@@ -39,6 +39,9 @@
 #include "session/dump.h"
 #include "coding/advisor.h"
 #include "ui/signals.h"
+#include "session/worktree.h"
+#include "tools/outsink.h"
+#include <sys/stat.h>
 
 static void maybe_plan_approval(ui_t *u, const char *tool, const json_t *result, bool is_error);
 
@@ -730,6 +733,18 @@ char *ui_external_edit(ui_t *u, const char *text, const char *ext, bool *no_edit
         off += (size_t)w;
     }
     close(fd);
+    char *out = NULL;
+    if (ui_editor_on_path(u, ed, path) == 0) {
+        size_t n;
+        out = fs_read(path, &n);
+    }
+    unlink(path);
+    free(path);
+    free(ed);
+    return out;
+}
+
+int ui_editor_on_path(ui_t *u, const char *ed, const char *path) {
     /* a fullscreen page (plan review) gives the alternate screen back to the editor and takes it again
      * after: only that page is repainted, the parked transcript is untouched */
     bool page = tui_alt_screen_active(u->tui);
@@ -753,16 +768,9 @@ char *ui_external_edit(ui_t *u, const char *text, const char *ext, bool *no_edit
     tui_term_query_size(tui_term(u->tui));
     if (page) tui_alt_screen(u->tui, true);
     else tui_request_full_render(u->tui);
-    char *out = NULL;
-    if (pid > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        size_t n;
-        out = fs_read(path, &n);
-    }
-    unlink(path);
-    free(path);
     free(cmd);
-    free(ed);
-    return out;
+    if (pid < 0) return -1;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
 }
 
 /* openInEditor with the default trimTrailingNewline: one trailing "\n" dropped */
@@ -1605,6 +1613,456 @@ static void export_command(ui_t *u, const char *arg) {
     strvec_free(&parts);
 }
 
+/* ---------- workspace and session lifecycle: /fresh, /move, /wt, /restart, /local (WP-21) ---------- */
+
+static VEC(session_wt_t) g_owned_wt; /* worktrees this launch created (onStart or /wt), for worktree.onExit */
+typedef struct {
+    session_wt_t wt;
+    char *fingerprint;
+} wt_exit_plan_t;
+static VEC(wt_exit_plan_t) g_wt_plan; /* removed after the terminal is handed back */
+static size_t g_wt_plan_next;
+static bool g_closing;
+static bool g_restart;
+static char *g_restart_resume;
+
+bool interactive_restart_requested(char **resume) {
+    *resume = g_restart_resume;
+    g_restart_resume = NULL;
+    bool r = g_restart;
+    g_restart = false;
+    return r;
+}
+
+/* handleFreshCommand */
+static void fresh_command(ui_t *u) {
+    int n = app_fresh_session(u->app);
+    if (n < 0) {
+        add_notice(u, "warning", "Wait for the current response to finish or abort it before refreshing provider state.");
+        return;
+    }
+    char *m = xasprintf("Fresh provider session started (%d %s pruned).", n, n == 1 ? "provider state" : "provider states");
+    add_notice(u, "info", m);
+    free(m);
+}
+
+/* #relocateSession: false when nothing moved (same directory, or the move failed and was reported) */
+static bool relocate_session(ui_t *u, const char *path) {
+    app_t *a = u->app;
+    if (!strcmp(path, a->cwd)) return false;
+    char *err = NULL;
+    if (app_move(a, path, &err) != 0) {
+        add_notice(u, "error", err);
+        free(err);
+        return false;
+    }
+    ui_signals_session_title();
+    tui_request_render(u->tui);
+    return true;
+}
+
+typedef struct {
+    ui_t *u;
+    char *path;
+} move_ctx_t;
+
+static void move_present(ui_t *u, const char *path) {
+    char *m = xasprintf("Moved to %s", path);
+    ui_success_line(u, m, false);
+    free(m);
+}
+
+static void move_create_confirmed(void *ud, bool yes) {
+    move_ctx_t *c = ud;
+    if (yes) {
+        if (fs_mkdir_p(c->path, 0755) != 0) {
+            char *m = xasprintf("Failed to create directory: %s", strerror(errno));
+            add_notice(c->u, "error", m);
+            free(m);
+        } else if (relocate_session(c->u, c->path)) {
+            move_present(c->u, c->path);
+        }
+    }
+    free(c->path);
+    free(c);
+}
+
+/* handleMoveCommand with a path */
+static void move_to(ui_t *u, const char *input) {
+    size_t n = strlen(input);
+    char *unquoted = n > 1 && input[0] == '"' && input[n - 1] == '"' ? xstrndup(input + 1, n - 2) : xstrdup(input);
+    if (!*unquoted) {
+        add_notice(u, "error", "Usage: /move <path>");
+        free(unquoted);
+        return;
+    }
+    char *resolved = app_resolve_user_path(u->app, unquoted);
+    free(unquoted);
+    if (!fs_is_dir(resolved)) {
+        char *parent = path_dirname(resolved);
+        bool ok = fs_is_dir(parent);
+        free(parent);
+        if (!ok) {
+            char *m = xasprintf("Cannot create \"%s\": parent directory does not exist", path_basename(resolved));
+            add_notice(u, "error", m);
+            free(m);
+            free(resolved);
+            return;
+        }
+        move_ctx_t *c = xcalloc(1, sizeof *c);
+        c->u = u;
+        c->path = resolved;
+        char *msg = xasprintf("\"%s\" does not exist. Create it?", path_basename(resolved));
+        ui_hook_confirm(u, "Create directory?", msg, move_create_confirmed, c);
+        free(msg);
+        return;
+    }
+    if (relocate_session(u, resolved)) move_present(u, resolved);
+    free(resolved);
+}
+
+static tui_component_t *g_move_ov;
+
+static void move_overlay_done(void *ud, const char *dir) {
+    ui_t *u = ud;
+    char *d = dir ? xstrdup(dir) : NULL;
+    if (g_move_ov) {
+        tui_overlay_hide(u->tui, g_move_ov);
+        tui_component_destroy(g_move_ov);
+        g_move_ov = NULL;
+    }
+    tui_set_focus(u->tui, &u->editor->base);
+    if (d) move_to(u, d);
+    free(d);
+    tui_request_render(u->tui);
+}
+
+static void move_command(ui_t *u, const char *arg) {
+    if (u->worker_running) {
+        add_notice(u, "warning", "Wait for the current response to finish or abort it before moving.");
+        return;
+    }
+    char *t = str_trim(arg);
+    if (*t) move_to(u, t);
+    else if (!g_move_ov) { /* no argument: the path autocomplete overlay */
+        g_move_ov = ui_move_overlay_new(u->app->cwd, move_overlay_done, u);
+        tui_overlay_opts_t o = {TUI_ANCHOR_BOTTOM, 0, 0, 0, 0};
+        tui_overlay_show(u->tui, g_move_ov, &o);
+        tui_request_render(u->tui);
+    }
+    free(t);
+}
+
+typedef struct {
+    ui_t *u;
+    char *branch;
+    bool keep;
+} wt_ctx_t;
+
+static void wt_run_cb(void *ud) {
+    wt_ctx_t *c = ud;
+    ui_t *u = c->u;
+    char *source = xstrdup(u->app->cwd), *err = NULL;
+    session_wt_t wt;
+    int rc = session_wt_create(source, c->branch, c->keep, &wt, &err);
+    ui_working_stop(u);
+    ui_working_set_message(u, NULL);
+    if (rc != 0) {
+        char *m = xasprintf("Worktree creation failed: %s", err);
+        add_notice(u, "error", m);
+        free(m);
+    } else if (!relocate_session(u, wt.path)) {
+        session_wt_free(&wt);
+    } else {
+        int cleaned = 0;
+        char *cerr = NULL;
+        if (wt.kept_changes) cleaned = session_wt_clean_source(source, &cerr);
+        if (cleaned < 0) {
+            char *m = xasprintf("Worktree created, but cleaning source checkout failed: %s", cerr);
+            add_notice(u, "warning", m);
+            free(m);
+        }
+        char *sum = session_wt_summary(&wt, cleaned > 0);
+        ui_success_line(u, sum, false);
+        free(sum);
+        free(cerr);
+        vec_push(&g_owned_wt, wt);
+    }
+    free(err);
+    free(source);
+    free(c->branch);
+    free(c);
+    tui_request_render(u->tui);
+}
+
+/* handleWorktreeCommand: create on the next tick so the "Creating worktree on …" row paints first */
+static void wt_command(ui_t *u, const char *arg, bool keep) {
+    if (u->worker_running) {
+        add_notice(u, "warning", "Wait for the current response to finish or abort it before creating a worktree.");
+        return;
+    }
+    char *t = arg ? str_trim(arg) : xstrdup("");
+    wt_ctx_t *c = xcalloc(1, sizeof *c);
+    c->u = u;
+    c->branch = *t ? xstrdup(t) : session_wt_default_branch();
+    c->keep = keep;
+    free(t);
+    char *m = xasprintf("Creating worktree on %s\xe2\x80\xa6", c->branch);
+    ui_working_set_message(u, m);
+    free(m);
+    ui_working_start(u);
+    tui_add_timer(u->tui, 30, false, wt_run_cb, c);
+}
+
+static void wt_onstart_confirmed(void *ud, bool yes) {
+    if (yes) wt_command(ud, NULL, false);
+}
+
+/* maybeAutoCreateWorktree (worktree.onStart: off | ask | create) for a fresh launch */
+static void wt_onstart_cb(void *ud) {
+    ui_t *u = ud;
+    const char *policy = settings_str("worktree.onStart", "off");
+    if (str_eq(policy, "off") || !session_wt_can_auto_create(u->app->cwd)) return;
+    if (str_eq(policy, "ask"))
+        ui_hook_confirm(u, "Create a worktree for this session?", "Work happens on a new wt/* branch; this checkout stays untouched.",
+                        wt_onstart_confirmed, u);
+    else wt_command(u, NULL, false);
+}
+
+static void wt_exit_next(ui_t *u);
+
+static void wt_exit_confirmed(void *ud, bool yes) {
+    ui_t *u = ud;
+    if (yes) {
+        session_wt_t *w = &g_owned_wt.v[g_wt_plan_next];
+        session_wt_state_t st;
+        char *err = NULL;
+        if (session_wt_snapshot(w, &st, &err) == 0) {
+            wt_exit_plan_t p = {.wt = *w, .fingerprint = xstrdup(st.fingerprint)};
+            memset(w, 0, sizeof *w);
+            vec_push(&g_wt_plan, p);
+        }
+        session_wt_state_free(&st);
+        free(err);
+    }
+    wt_exit_next(u);
+}
+
+/* planWorktreeExit, newest first: a worktree may have been forked from an older owned one */
+static void wt_exit_next(ui_t *u) {
+    const char *policy = settings_str("worktree.onExit", "keep");
+    while (g_wt_plan_next > 0) {
+        session_wt_t *w = &g_owned_wt.v[--g_wt_plan_next];
+        if (!w->path) continue;
+        session_wt_state_t st;
+        char *err = NULL;
+        if (session_wt_snapshot(w, &st, &err) != 0) {
+            add_notice(u, "warning", err);
+            free(err);
+            continue;
+        }
+        const char *action = session_wt_decide_exit(policy, &st);
+        if (str_eq(action, "remove")) {
+            wt_exit_plan_t p = {.wt = *w, .fingerprint = xstrdup(st.fingerprint)};
+            memset(w, 0, sizeof *w);
+            vec_push(&g_wt_plan, p);
+        } else if (str_eq(action, "prompt")) {
+            char *msg = session_wt_exit_message(w, &st);
+            session_wt_state_free(&st);
+            ui_hook_confirm(u, "Remove worktree?", msg, wt_exit_confirmed, u);
+            free(msg);
+            return;
+        }
+        session_wt_state_free(&st);
+    }
+    tui_stop(u->tui, 0);
+}
+
+/* InteractiveMode.shutdown: apply worktree.onExit to this launch's worktrees, then close */
+static void ix_shutdown(ui_t *u) {
+    if (g_closing) {
+        tui_stop(u->tui, 0);
+        return;
+    }
+    g_closing = true;
+    if (str_eq(settings_str("worktree.onExit", "keep"), "keep") || !g_owned_wt.n) {
+        tui_stop(u->tui, 0);
+        return;
+    }
+    if (u->worker_running) app_abort(u->app);
+    g_wt_plan_next = g_owned_wt.n;
+    wt_exit_next(u);
+}
+
+/* removeExitWorktrees, once the terminal is back: kept / failed worktrees are reported on stderr */
+static void wt_exit_remove(void) {
+    for (size_t i = 0; i < g_wt_plan.n; i++) {
+        char *m = session_wt_remove_planned(&g_wt_plan.v[i].wt, g_wt_plan.v[i].fingerprint);
+        if (m) fprintf(stderr, "\x1b[33m%s\x1b[39m\n", m);
+        free(m);
+        session_wt_free(&g_wt_plan.v[i].wt);
+        free(g_wt_plan.v[i].fingerprint);
+    }
+    vec_free(&g_wt_plan);
+    for (size_t i = 0; i < g_owned_wt.n; i++) session_wt_free(&g_owned_wt.v[i]);
+    vec_free(&g_owned_wt);
+}
+
+/* InteractiveMode.restart: close like /exit (no worktree prompts) and relaunch with the same flags, resuming this
+ * session when it is on disk (cli.c restart_exec) */
+static void restart_command(ui_t *u) {
+    app_t *a = u->app;
+    g_restart = true;
+    free(g_restart_resume);
+    g_restart_resume = a->session && a->session->file && a->session->on_disk ? xstrdup(a->session->file) : NULL;
+    tui_stop(u->tui, 0);
+}
+
+/* ---- /local + app.local.open (modes/local-file-editor.ts) ---- */
+
+typedef struct {
+    char *name, *path;
+    int64_t size, mtime;
+} local_file_t;
+typedef VEC(local_file_t) local_files_t;
+
+static void local_walk(const char *root, const char *rel, local_files_t *out, int depth) {
+    if (depth > 32) return;
+    char *dir = *rel ? path_join(root, rel) : xstrdup(root);
+    dirlist_t dl;
+    if (fs_list_dir(dir, &dl) == 0) {
+        for (size_t i = 0; i < dl.n; i++) {
+            char *r = *rel ? xasprintf("%s/%s", rel, dl.v[i].name) : xstrdup(dl.v[i].name);
+            char *p = path_join(root, r);
+            if (dl.v[i].is_dir && !dl.v[i].is_link) local_walk(root, r, out, depth + 1);
+            else if (fs_is_file(p)) {
+                local_file_t f = {.name = xstrdup(r), .path = xstrdup(p), .size = fs_size(p), .mtime = fs_mtime_ms(p)};
+                vec_push(out, f);
+            }
+            free(p);
+            free(r);
+        }
+        dirlist_free(&dl);
+    }
+    free(dir);
+}
+
+static int local_cmp(const void *x, const void *y) {
+    const local_file_t *a = x, *b = y;
+    if (a->mtime != b->mtime) return a->mtime > b->mtime ? -1 : 1;
+    return strcmp(a->name, b->name);
+}
+
+static void local_files_free(local_files_t *l) {
+    for (size_t i = 0; i < l->n; i++) {
+        free(l->v[i].name);
+        free(l->v[i].path);
+    }
+    vec_free(l);
+}
+
+/* locate + validate: realpath inside the local root, a regular file; NULL with *err (owned) */
+static char *local_locate(ui_t *u, const char *name, const char *display, char **err) {
+    const char *root = u->app->env->local_dir;
+    char *rr = root ? path_real(root) : NULL;
+    char *joined = root ? path_join(root, name) : NULL;
+    char *real = joined ? path_real(joined) : NULL;
+    size_t rl = rr ? strlen(rr) : 0;
+    char *out = NULL;
+    struct stat st;
+    if (!real || !rr || strncmp(real, rr, rl) != 0 || (real[rl] != '/' && real[rl] != 0))
+        *err = xasprintf("Local file not found: %s", display);
+    else if (stat(real, &st) != 0) *err = xasprintf("Local file not found: %s", display);
+    else if (S_ISDIR(st.st_mode)) *err = xasprintf("%s is a directory; name a file inside it.", display);
+    else if (!S_ISREG(st.st_mode)) *err = xasprintf("%s is not a regular file.", display);
+    else out = xstrdup(real);
+    free(rr);
+    free(joined);
+    free(real);
+    return out;
+}
+
+static void local_open(ui_t *u, const char *path, const char *url) {
+    char *ed = ui_editor_command();
+    if (!ed) {
+        add_notice(u, "warning", "No editor configured. Set $VISUAL or $EDITOR environment variable.");
+        return;
+    }
+    int code = ui_editor_on_path(u, ed, path);
+    free(ed);
+    char *m = code != 0 ? xasprintf("Editor exited with code %d; %s keeps whatever it saved.", code, url)
+                        : xasprintf("Closed %s in editor.", url);
+    add_notice(u, code != 0 ? "warning" : "info", m);
+    free(m);
+}
+
+typedef struct {
+    ui_t *u;
+    local_files_t files;
+} local_pick_t;
+
+static void local_picked(void *ud, int idx) {
+    local_pick_t *p = ud;
+    if (idx >= 0 && (size_t)idx < p->files.n) {
+        char *url = xasprintf("local://%s", p->files.v[idx].name), *err = NULL;
+        char *path = local_locate(p->u, p->files.v[idx].name, url, &err); /* the listing is stale: re-resolve */
+        if (path) local_open(p->u, path, url);
+        else add_notice(p->u, "error", err);
+        free(path);
+        free(err);
+        free(url);
+    }
+    local_files_free(&p->files);
+    free(p);
+}
+
+/* openLocalFileInEditor: the picker when `target` is blank, else that file */
+static void local_command(ui_t *u, const char *target) {
+    char *ed = ui_editor_command();
+    if (!ed) {
+        add_notice(u, "warning", "No editor configured. Set $VISUAL or $EDITOR environment variable.");
+        return;
+    }
+    free(ed);
+    char *t = str_trim(target ? target : "");
+    if (*t) {
+        bool explicit_url = !strncasecmp(t, "local:/", 7);
+        const char *name = t;
+        if (explicit_url) {
+            name = t + 7;
+            while (*name == '/') name++;
+        }
+        char *display = explicit_url ? xstrdup(t) : xasprintf("local://%s", t), *err = NULL;
+        char *path = local_locate(u, name, display, &err);
+        if (path) local_open(u, path, display);
+        else add_notice(u, "error", err);
+        free(path);
+        free(err);
+        free(display);
+        free(t);
+        return;
+    }
+    free(t);
+    local_pick_t *p = xcalloc(1, sizeof *p);
+    p->u = u;
+    if (u->app->env->local_dir) local_walk(u->app->env->local_dir, "", &p->files, 0);
+    if (!p->files.n) {
+        add_notice(u, "info", "No local:// files in this session yet.");
+        free(p);
+        return;
+    }
+    qsort(p->files.v, p->files.n, sizeof *p->files.v, local_cmp);
+    strvec_t labels = {0}, descs = {0};
+    for (size_t i = 0; i < p->files.n; i++) {
+        strvec_push_own(&labels, xasprintf("local://%s", p->files.v[i].name));
+        strvec_push_own(&descs, out_format_bytes(p->files.v[i].size));
+    }
+    ui_hook_select_desc(u, "Open local:// file in external editor", (const char *const *)labels.v, (const char *const *)descs.v,
+                        labels.n, NULL, local_picked, p);
+    strvec_free(&labels);
+    strvec_free(&descs);
+}
+
 static bool handle_command_inner(ui_t *u, const char *line);
 /* a command may rename, replace or move the session: the terminal title follows */
 static bool handle_command(ui_t *u, const char *line) {
@@ -1631,7 +2089,17 @@ static bool handle_command_inner(ui_t *u, const char *line) {
     bool handled = true;
     app_t *a = u->app;
     if (!strcmp(cmd, "quit") || !strcmp(cmd, "exit")) {
-        tui_stop(u->tui, 0);
+        ix_shutdown(u);
+    } else if (!strcmp(cmd, "fresh")) {
+        fresh_command(u);
+    } else if (!strcmp(cmd, "move")) { /* builtin-lifecycle.ts move handleTui */
+        move_command(u, arg);
+    } else if (!strcmp(cmd, "wt")) {
+        wt_command(u, arg, true);
+    } else if (!strcmp(cmd, "restart")) {
+        restart_command(u);
+    } else if (!strcmp(cmd, "local")) {
+        local_command(u, arg);
     } else if (!strcmp(cmd, "settings")) {
         ui_overlay_settings(u);
     } else if (!strcmp(cmd, "hotkeys")) {
@@ -2125,7 +2593,7 @@ static void on_escape(ui_t *u) {
 static void on_ctrl_c(ui_t *u) {
     int64_t now = mono_ms();
     if (now - u->last_ctrl_c < 500) {
-        tui_stop(u->tui, 0);
+        ix_shutdown(u);
     } else {
         clear_editor_draft(u);
         u->last_ctrl_c = now;
@@ -2271,6 +2739,10 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
         open_external_editor(u);
         return true;
     }
+    if (tui_kb(k, "app.local.open")) { /* openLocalFilePicker: the /local picker */
+        local_command(u, NULL);
+        return true;
+    }
     if (tui_kb(k, "app.display.reset")) { /* resetDisplayAfterAppearanceRefresh */
         tui_component_invalidate(&tui_root(t)->base);
         tui_request_full_render(t);
@@ -2356,7 +2828,7 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
         if (tui_keybindings_key_bound(tui_keybindings_global(), id, "tui.editor.deleteCharForward") &&
             !tui_editor_is_empty(u->editor))
             return false;
-        tui_stop(t, 0);
+        ix_shutdown(u);
         return true;
     }
     if (tui_kb(k, "app.message.dequeue")) {
@@ -2566,6 +3038,9 @@ int run_interactive_mode(app_t *a, const char *initial) {
         }
     }
     if (g_start && g_start->resume_picker) tui_post(u.tui, startup_picker_cb, &u);
+    /* worktree.onStart applies to fresh launches only */
+    if (!a->opts.resume && !a->opts.continue_recent && !a->opts.fork && !(g_start && g_start->resume_picker))
+        tui_post(u.tui, wt_onstart_cb, &u);
     if (g_start && g_start->restore) tui_post(u.tui, restore_cb, &u);
     if (g_start && g_start->notice) add_notice(&u, "info", g_start->notice); /* main.ts notifs */
     /* first-run setup wizard (omp main.ts: stale setupVersion, not resuming, TTY); the welcome intro
@@ -2608,7 +3083,13 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_ac_default_free(ac);
     hmap_free(&u.tools, NULL);
     json_free(u.pending_partial);
-    if (a->session && a->session->file && a->session->on_disk && !g_start_cancelled)
+    if (g_move_ov) {
+        tui_component_destroy(g_move_ov);
+        g_move_ov = NULL;
+    }
+    wt_exit_remove();
+    g_closing = false;
+    if (a->session && a->session->file && a->session->on_disk && !g_start_cancelled && !g_restart)
         fprintf(stderr, "Session saved: %s\nResume with: omc -r %s\n", a->session->file, session_short_id(session_id(a->session)));
     return code;
 }

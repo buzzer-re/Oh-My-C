@@ -34,6 +34,9 @@ typedef struct {
     const char *notice;       /* startup info notice (`Model scope: …`), may be NULL */
 } interactive_start_t;
 int run_interactive_mode_ex(app_t *a, const interactive_start_t *st);
+/* /restart closed the TUI: true once, with *resume = the session file to resume (owned, NULL when the session
+ * never reached disk) */
+bool interactive_restart_requested(char **resume);
 int run_acp_mode(const app_opts_t *base); /* one app per ACP session */
 
 /* shared: thread-safe line writer to stdout */
