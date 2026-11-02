@@ -240,7 +240,7 @@ void iq_handoff(ui_t *u, const char *arg) {
 struct ui_bash {
     ui_t *u;
     char *cmd;
-    bool exclude;
+    bool exclude, python;
     msgview_t *view;
     volatile sig_atomic_t cancel;
     pthread_t th;
@@ -301,37 +301,42 @@ static void bash_done(void *p) {
         if (u->worker_running) {
             if (!u->deferred_bash) u->deferred_bash = json_arr();
             json_push(u->deferred_bash, json_clone(m));
+        } else if (b->python) {
+            app_record_python(u->app, m);
         } else {
             app_record_bash(u->app, m);
         }
     } else {
         v->output = xstrdup("");
         v->is_error = true;
-        add_notice(u, "error", "Bash command failed: Unknown error");
+        add_notice(u, "error", b->python ? "Python execution failed: the eval tool is unavailable" : "Bash command failed: Unknown error");
     }
     v->done = true;
     v->dirty = true;
     json_free(m);
     pthread_mutex_destroy(&b->mu);
     sb_free(&b->live);
+    if (u->bash == b) u->bash = NULL;
+    if (u->python == b) u->python = NULL;
     free(b->cmd);
     free(b);
-    u->bash = NULL;
     tui_request_render(u->tui);
 }
 
 static void *bash_main(void *p) {
     struct ui_bash *b = p;
-    b->result = app_user_bash_run(b->u->app, b->cmd, b->exclude, bash_output, b, &b->cancel);
+    b->result = b->python ? app_user_python_run(b->u->app, b->cmd, b->exclude, &b->cancel)
+                          : app_user_bash_run(b->u->app, b->cmd, b->exclude, bash_output, b, &b->cancel);
     tui_post(b->u->tui, bash_done, b);
     return NULL;
 }
 
-static void run_bang(ui_t *u, const char *cmd, bool exclude) {
+static void run_bang(ui_t *u, const char *cmd, bool exclude, bool python) {
     struct ui_bash *b = xcalloc(1, sizeof *b);
     b->u = u;
     b->cmd = xstrdup(cmd);
     b->exclude = exclude;
+    b->python = python;
     pthread_mutex_init(&b->mu, NULL);
     msgview_t *v = mv_new(MV_BASH);
     v->tool_name = xstrdup("$");
@@ -339,11 +344,13 @@ static void run_bang(ui_t *u, const char *cmd, bool exclude) {
     json_set_str(v->args, "command", cmd);
     json_set_int(v->args, "startMs", mono_ms());
     if (exclude) json_set_bool(v->args, "exclude", true);
+    if (python) json_set_bool(v->args, "python", true);
     b->view = v;
     /* while a run streams, the block waits below the transcript until the next prompt (pendingShellContainer) */
     if (u->worker_running) tui_container_add(u->pending_shell, &v->base);
     else add_view(u, v);
-    u->bash = b;
+    if (python) u->python = b;
+    else u->bash = b;
     b->timer = tui_add_timer(u->tui, 80, true, bash_tick, b);
     if (pthread_create(&b->th, NULL, bash_main, b) != 0) {
         b->th = pthread_self(); /* never joined below: finish inline */
@@ -355,7 +362,8 @@ static void run_bang(ui_t *u, const char *cmd, bool exclude) {
         pthread_mutex_destroy(&b->mu);
         free(b->cmd);
         free(b);
-        u->bash = NULL;
+        if (python) u->python = NULL;
+        else u->bash = NULL;
     }
     tui_request_render(u->tui);
 }
@@ -381,10 +389,38 @@ static void bang(ui_t *u, const char *text) {
             free(k);
             tui_editor_set_text(u->editor, text);
         } else {
-            run_bang(u, cmd, exclude);
+            run_bang(u, cmd, exclude, false);
         }
     }
     free(cmd);
+}
+
+static bool python_mode(const char *t) {
+    size_t n = t[0] == '$' ? (t[1] == '$' ? 2 : 1) : 0;
+    return n && (t[n] == ' ' || t[n] == '\t' || t[n] == '\n' || t[n] == '\r');
+}
+
+/* `$ code` / `$$ code` (CommandController.handlePythonCommand); true when the text was Python input */
+static bool python(ui_t *u, const char *text) {
+    if (!python_mode(text)) return false;
+    bool exclude = text[1] == '$';
+    char *code = str_trim(text + (exclude ? 2 : 1));
+    if (!*code) {
+        free(code);
+        return false;
+    }
+    if (u->python) {
+        char *k = ui_key_hint("escape");
+        char *m = xasprintf("A Python execution is already running. Press %s to cancel it first.", k);
+        add_notice(u, "warning", m);
+        free(m);
+        free(k);
+        tui_editor_set_text(u->editor, text);
+    } else {
+        run_bang(u, code, exclude, true);
+    }
+    free(code);
+    return true;
 }
 
 /* ---------- /queue and `->` / `=>` (InputController#queueForYield) ---------- */
@@ -440,6 +476,7 @@ void iq_submit(ui_t *u, const char *t) {
         bang(u, t);
         return;
     }
+    if (python(u, t)) return;
     if (u->bg_kind) {
         queue_compaction_message(u, t, "steer");
         return;
@@ -537,11 +574,6 @@ static void restore_all(ui_t *u) {
 
 /* ---------- Esc (app.interrupt) ---------- */
 
-static bool python_mode(const char *t) {
-    size_t n = t[0] == '$' ? (t[1] == '$' ? 2 : 1) : 0;
-    return n && (t[n] == ' ' || t[n] == '\t' || t[n] == '\n' || t[n] == '\r');
-}
-
 bool iq_escape(ui_t *u) {
     if (u->bg_kind) { /* abortCompaction / abortHandoff */
         agent_abort(u->app->agent);
@@ -559,9 +591,13 @@ bool iq_escape(ui_t *u) {
     char *txt = tui_editor_get_text(u->editor);
     const char *p = txt ? txt : "";
     while (*p == ' ' || *p == '\t' || *p == '\n') p++;
-    bool mode = *p == '!' || python_mode(p);
+    bool bash_mode = *p == '!', py_mode = python_mode(p);
     free(txt);
-    if (mode) { /* leave bash / python mode */
+    if (!bash_mode && u->python) {
+        u->python->cancel = 1;
+        return true;
+    }
+    if (bash_mode || py_mode) { /* leave bash / python mode */
         tui_editor_set_text(u->editor, "");
         tui_request_render(u->tui);
         return true;
@@ -598,7 +634,10 @@ void iq_user_message_start(ui_t *u, const json_t *msg) {
 bool iq_run_end(ui_t *u) {
     strvec_free(&u->optimistic);
     json_t *m;
-    json_arr_foreach(u->deferred_bash, i, m) app_record_bash(u->app, m);
+    json_arr_foreach(u->deferred_bash, i, m) {
+        if (str_eq(json_get_str(m, "role"), "pythonExecution")) app_record_python(u->app, m);
+        else app_record_bash(u->app, m);
+    }
     json_free(u->deferred_bash);
     u->deferred_bash = NULL;
     if (u->bg_kind) return true;
@@ -638,12 +677,15 @@ bool iq_run_end(ui_t *u) {
 }
 
 void iq_shutdown(ui_t *u) {
-    if (u->bash) {
-        u->bash->cancel = 1;
-        pthread_join(u->bash->th, NULL);
-        json_free(u->bash->result);
-        u->bash = NULL; /* bash_done is still queued on the (stopped) loop; the view is owned by the transcript */
+    struct ui_bash *runs[2] = {u->bash, u->python};
+    for (int i = 0; i < 2; i++) {
+        if (!runs[i]) continue;
+        runs[i]->cancel = 1;
+        pthread_join(runs[i]->th, NULL);
+        json_free(runs[i]->result);
+        runs[i]->result = NULL; /* bash_done is still queued on the (stopped) loop; the view is owned by the transcript */
     }
+    u->bash = u->python = NULL;
     if (u->bg_kind) {
         agent_abort(u->app->agent);
         pthread_join(u->bg_thread, NULL);

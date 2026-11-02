@@ -2036,6 +2036,49 @@ void app_record_bash(app_t *a, const json_t *result) {
     json_free(m);
 }
 
+json_t *app_user_python_run(app_t *a, const char *code, bool exclude, volatile sig_atomic_t *cancel) {
+    agent_tool_t *t = agent_find_tool(a->agent, "eval");
+    if (!t || !t->execute) return NULL;
+    /* the eval tool's shared kernel (omp EvalRunner.executePython uses the session's eval executor) */
+    json_t *args = json_obj();
+    json_set_str(args, "language", "py");
+    json_set_str(args, "code", code);
+    json_set_int(args, "timeout", 0);
+    tool_ctx_t ctx = {.agent = a->agent, .tool_name = "eval", .cancel = cancel, .app = a};
+    tool_result_t r = {0};
+    t->execute(t, &ctx, args, &r);
+    json_free(args);
+    const json_t *cell = json_at(json_get_arr(r.details, "cells"), 0);
+    bool cancelled = cancel && *cancel;
+    json_t *m = json_obj();
+    json_set_str(m, "role", "pythonExecution");
+    json_set_str(m, "code", code);
+    if (cell) json_set_str(m, "output", json_get_str(cell, "output") ? json_get_str(cell, "output") : "");
+    else {
+        char *txt = tool_result_joined_text(&r);
+        json_set_str(m, "output", txt);
+        free(txt);
+    }
+    if (!cancelled) json_set_int(m, "exitCode", r.is_error ? 1 : 0);
+    json_set_bool(m, "cancelled", cancelled);
+    json_set_bool(m, "truncated", false);
+    const json_t *meta = json_get_obj(r.details, "meta");
+    if (meta) json_set(m, "meta", json_clone(meta));
+    if (exclude) json_set_bool(m, "excludeFromContext", true);
+    json_set_int(m, "timestamp", now_ms());
+    tool_result_free(&r);
+    return m;
+}
+
+void app_record_python(app_t *a, const json_t *result) {
+    if (a->session) session_append_message(a->session, result);
+    if (!json_get_bool(result, "excludeFromContext", false)) {
+        char *t = out_python_execution_text(result);
+        agent_append_message(a->agent, msg_user_text(t));
+        free(t);
+    }
+}
+
 json_t *app_user_bash(app_t *a, const char *cmd, bool exclude) {
     json_t *m = app_user_bash_run(a, cmd, exclude, NULL, NULL, NULL);
     if (m) app_record_bash(a, m);

@@ -112,5 +112,7 @@ void out_append_notice(json_t *content, const json_t *meta);
 
 /* bashExecution message -> LLM text (bashExecutionToText) */
 char *out_bash_execution_text(const json_t *msg);
+/* omp pythonExecutionToText: a `$ code` run as the user message the model sees (owned) */
+char *out_python_execution_text(const json_t *msg);
 
 #endif

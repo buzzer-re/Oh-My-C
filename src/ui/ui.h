@@ -101,7 +101,8 @@ struct ui {
     int bg_kind;                    /* running maintenance op: 0 none, 1 compaction, 2 handoff */
     pthread_t bg_thread;
     struct ui_bash *bash;           /* running `!cmd` */
-    json_t *deferred_bash;          /* `!cmd` results that finished mid-run: recorded at the run's end */
+    struct ui_bash *python;         /* running `$ code` */
+    json_t *deferred_bash;          /* `!cmd` / `$ code` results that finished mid-run: recorded at the run's end */
 };
 
 

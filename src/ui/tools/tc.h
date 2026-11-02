@@ -37,11 +37,13 @@ typedef struct {
 void tc_render(const tc_call_t *c, int width, strvec_t *out);
 /* Grouped `read` calls (omp ReadToolGroupComponent): ` ● Read path` or ` • Read (N)` + tree. */
 void tc_render_read_group(const tc_call_t *calls, size_t n, int width, strvec_t *out);
-/* User `!cmd` / `!!cmd` shell run (omp BashExecutionComponent). exit_code < 0: unknown. */
+/* User `!cmd` / `!!cmd` shell run (omp BashExecutionComponent) or `$ code` / `$$ code` Python run
+ * (EvalExecutionComponent). exit_code < 0: unknown. */
 typedef struct {
     const char *command;
     const char *output;
     bool running, cancelled, exclude; /* exclude: `!!` (not sent to the model) */
+    bool python;                      /* `$ code` (omp EvalExecutionComponent): `>>>` + highlighted code */
     int exit_code;
     bool expanded;
     int spinner;

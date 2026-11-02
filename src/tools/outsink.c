@@ -1430,3 +1430,20 @@ char *out_bash_execution_text(const json_t *msg) {
     free(n);
     return sb_detach(&b);
 }
+
+char *out_python_execution_text(const json_t *msg) {
+    sb_t b = SB_INIT;
+    const char *code = json_get_str(msg, "code");
+    sb_appendf(&b, "Ran Python:\n```python\n%s\n```\n", code ? code : "");
+    const char *out = json_get_str(msg, "output");
+    if (out && *out) sb_appendf(&b, "Output:\n```\n%s\n```", out);
+    else sb_append(&b, "(no output)");
+    const json_t *ec = json_get(msg, "exitCode");
+    if (json_get_bool(msg, "cancelled", false)) sb_append(&b, "\n\n(execution cancelled)");
+    else if (json_is_num(ec) && json_get_int(msg, "exitCode", 0) != 0)
+        sb_appendf(&b, "\n\nExecution failed with code %lld", (long long)json_get_int(msg, "exitCode", 0));
+    char *n = out_format_notice(json_get_obj(msg, "meta"));
+    sb_append(&b, n);
+    free(n);
+    return sb_detach(&b);
+}

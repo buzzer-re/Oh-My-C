@@ -191,6 +191,10 @@ json_t *app_user_bash(app_t *a, const char *cmd, bool exclude);
 json_t *app_user_bash_run(app_t *a, const char *cmd, bool exclude, proc_output_cb on_output, void *ud,
                           volatile sig_atomic_t *cancel);
 void app_record_bash(app_t *a, const json_t *result);
+/* `$ code`: run Python in the eval tool's shared kernel (NULL when the eval tool is unavailable), then record
+ * the pythonExecution message like app_record_bash */
+json_t *app_user_python_run(app_t *a, const char *code, bool exclude, volatile sig_atomic_t *cancel);
+void app_record_python(app_t *a, const json_t *result);
 /* apply the steeringMode / followUpMode / interruptMode settings to the agent */
 void app_sync_queue_modes(app_t *a);
 int app_switch_session(app_t *a, const char *path, char **err);

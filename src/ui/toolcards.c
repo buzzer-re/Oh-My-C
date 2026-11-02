@@ -299,6 +299,8 @@ void render_tool(msgview_t *v, int width, strvec_t *out) {
                        .expanded = g_ui && g_ui->expand_tools, .spinner = spinner_now(), .term_rows = term_rows()};
         if (json_get(v->args, "exitCode")) b.exit_code = (int)json_get_int(v->args, "exitCode", 0);
         b.cancelled = json_get_bool(v->args, "cancelled", false);
+        b.python = json_get_bool(v->args, "python", false);
+        if (b.python) b.command = json_get_str(v->args, "code") ? json_get_str(v->args, "code") : b.command;
         /* the execution frame's Loader starts at frame 0 and advances every 80 ms */
         if (json_get(v->args, "startMs")) b.spinner = (int)((mono_ms() - json_get_int(v->args, "startMs", 0)) / 80);
         tc_render_bang(&b, width, out);

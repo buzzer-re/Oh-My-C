@@ -1,6 +1,7 @@
 /* tc_shell.c - bash tool card (port of omp tools/bash.ts createShellRenderer). */
 #include "ui/tools/tc.h"
 #include "tui/symbols.h"
+#include "tui/markdown.h"
 #include "tools/outsink.h"
 
 #include <ctype.h>
@@ -438,17 +439,33 @@ void tc_bash(const tc_call_t *c, int width, strvec_t *out) {
 void tc_render_bang(const tc_bang_t *b, int width, strvec_t *out) {
     /* buildExecutionFrame: bashMode (dim for `!!`) rules around a bold `$ cmd` header, the output pane
      * (leading blank, muted rows, 10-row tail while collapsed) and the status footer */
-    tui_tc_t key = b->exclude ? TUI_TC_DIM : TUI_TC_BASH_MODE;
+    tui_tc_t key = b->exclude ? TUI_TC_DIM : b->python ? TUI_TC_PYTHON_MODE : TUI_TC_BASH_MODE;
     sb_t r = SB_INIT;
     for (int i = 0; i < width; i++) sb_append(&r, tc_sym("boxRound.horizontal"));
     char *rule = tc_fg(key, sb_cstr(&r));
     sb_free(&r);
     strvec_push(out, rule);
-    char *hdr = xasprintf("$ %s", b->command ? b->command : "");
-    char *bold = tc_bold(hdr);
-    char *head = tc_fg(key, bold);
+    char *hdr = NULL, *bold = NULL, *head = NULL;
     strvec_t lines = {0};
-    tc_push_wrapped(&lines, head, MAX(1, width - 2));
+    if (b->python) {
+        /* `>>> ` before the first highlighted code line, a 4-space continuation before the rest */
+        hdr = tc_bold(">>>");
+        bold = tc_fg(key, hdr);
+        head = tc_fg(key, "    ");
+        strvec_t code = {0};
+        tui_highlight_code(b->command ? b->command : "", "python", tui_theme(), &code);
+        for (size_t i = 0; i < code.n; i++) {
+            char *l = xasprintf("%s%s%s", i ? head : bold, i ? "" : " ", code.v[i]);
+            tc_push_wrapped(&lines, l, MAX(1, width - 2));
+            free(l);
+        }
+        strvec_free(&code);
+    } else {
+        hdr = xasprintf("$ %s", b->command ? b->command : "");
+        bold = tc_bold(hdr);
+        head = tc_fg(key, bold);
+        tc_push_wrapped(&lines, head, MAX(1, width - 2));
+    }
     size_t hidden = 0;
     if (b->output && *b->output) {
         strvec_t raw = {0};
