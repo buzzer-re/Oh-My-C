@@ -299,15 +299,64 @@ static char *dcr_render(app_t *a) {
 
 static json_t *hook_transform_locked(app_t *a, const json_t *messages);
 
+/* omp messages.ts wrapSteeringForModel: every steered user message reaches the model inside the
+ * user-interjection envelope (text parts joined, images kept); NULL when there is none */
+static json_t *wrap_steering(const json_t *messages) {
+    json_t *out = NULL, *m;
+    json_arr_foreach(messages, i, m) {
+        if (!str_eq(json_get_str(m, "role"), "user") || !json_get_bool(m, "steering", false)) continue;
+        const json_t *content = json_get(m, "content");
+        sb_t text = SB_INIT;
+        json_t *images = json_arr();
+        bool any = false;
+        if (json_is_str(content)) sb_append(&text, json_sv(content)), any = true;
+        else {
+            const json_t *b;
+            json_arr_foreach(content, k, b) {
+                if (str_eq(json_get_str(b, "type"), "text")) {
+                    if (any) sb_putc(&text, '\n');
+                    sb_append(&text, json_get_str(b, "text") ? json_get_str(b, "text") : "");
+                    any = true;
+                } else if (str_eq(json_get_str(b, "type"), "image")) {
+                    json_push(images, json_clone(b));
+                }
+            }
+        }
+        if (!out) out = json_clone(messages);
+        json_t *w = json_at(out, i);
+        json_del(w, "steering");
+        if (text.len) {
+            json_t *ctx = json_obj();
+            json_set_str(ctx, "message", sb_cstr(&text));
+            char *env = prompt_render("coding-agent/prompts/steering/user-interjection.md", ctx);
+            json_free(ctx);
+            if (json_is_str(content)) json_set_str(w, "content", env ? env : sb_cstr(&text));
+            else {
+                json_t *c = json_arr(), *img;
+                json_push(c, text_block(env ? env : sb_cstr(&text)));
+                json_arr_foreach(images, k, img) json_push(c, json_clone(img));
+                json_set(w, "content", c);
+            }
+            free(env);
+        }
+        json_free(images);
+        sb_free(&text);
+    }
+    return out;
+}
+
 /* the title fork runs the same transform from its own thread: serialize the reminder state */
 static json_t *hook_transform(void *ud, agent_t *ag, const json_t *messages) {
     app_t *a = ud;
     UNUSED(ag);
-    if (!settings_bool("dateCwdReminder", true)) return NULL;
+    json_t *w = wrap_steering(messages);
+    if (!settings_bool("dateCwdReminder", true)) return w;
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&mu);
-    json_t *r = hook_transform_locked(a, messages);
+    json_t *r = hook_transform_locked(a, w ? w : messages);
     pthread_mutex_unlock(&mu);
+    if (!r) return w;
+    json_free(w);
     return r;
 }
 
@@ -879,10 +928,18 @@ static char *app_after_edit(tool_env_t *env, const char *abs) {
     return lsp_after_write(a->lsp, abs, settings_int("lsp.diagnosticsWaitMs", 3000));
 }
 
+void app_sync_queue_modes(app_t *a) {
+    if (!a || !a->agent) return;
+    a->agent->steer_all = str_eq(settings_str("steeringMode", "one-at-a-time"), "all");
+    a->agent->follow_up_all = str_eq(settings_str("followUpMode", "one-at-a-time"), "all");
+    a->agent->interrupt_wait = str_eq(settings_str("interruptMode", "immediate"), "wait");
+}
+
 static void install_agent(app_t *a) {
     agent_t *ag = agent_new();
     a->agent = ag;
     ag->app = a;
+    app_sync_queue_modes(a);
     ag->max_turns = a->opts.max_turns;
     ag->hooks.prepare_request = hook_prepare;
     ag->hooks.should_retry = hook_should_retry;
@@ -1787,6 +1844,7 @@ int app_compact(app_t *a, const char *instructions, char **err) {
         return -1;
     }
     a->compacting = true;
+    if (!agent_is_running(a->agent)) a->agent->cancel = 0; /* a stale Esc must not cancel this pass */
     int rc = -1;
     json_t *path = session_path_to(a->session, a->session->leaf_id);
     /* find message entries, pick cut point keeping ~keepRecentTokens at a user-message boundary */
@@ -1855,7 +1913,7 @@ int app_compact(app_t *a, const char *instructions, char **err) {
     sb_free(&conv);
     free(sys);
     if (!summary || !*summary) {
-        *err = xstrdup("summarization request failed");
+        *err = xstrdup(a->agent->cancel ? "Compaction cancelled" : "summarization request failed");
         free(summary);
         goto out;
     }
@@ -2066,8 +2124,10 @@ int app_prompt_hidden(app_t *a, const char *text, const char *custom_type) {
     return rc;
 }
 
-json_t *app_user_bash(app_t *a, const char *cmd, bool exclude) {
-    proc_opts_t o = {.cwd = a->cwd, .timeout_ms = 300000, .merge_stderr = true, .new_session = true};
+json_t *app_user_bash_run(app_t *a, const char *cmd, bool exclude, proc_output_cb on_output, void *ud,
+                          volatile sig_atomic_t *cancel) {
+    proc_opts_t o = {.cwd = a->cwd, .timeout_ms = 300000, .merge_stderr = true, .new_session = true,
+                     .cancel = cancel, .on_output = on_output, .ud = ud};
     proc_result_t r;
     if (!cmd || proc_shell(cmd, &o, &r) != 0) return NULL;
     /* omp executeBash without an artifact: sanitized, column-capped, head/tail elided capture */
@@ -2092,19 +2152,75 @@ json_t *app_user_bash(app_t *a, const char *cmd, bool exclude) {
     if (meta) json_set(m, "meta", meta);
     if (exclude) json_set_bool(m, "excludeFromContext", true);
     json_set_int(m, "timestamp", now_ms());
-    if (a->session) session_append_message(a->session, m);
-    if (!exclude) {
-        char *t = out_bash_execution_text(m);
-        agent_append_message(a->agent, msg_user_text(t));
-        free(t);
-    }
-    /* BashResult counters for RPC callers */
+    /* BashResult counters for RPC callers (dropped when recorded) */
     json_set_int(m, "totalLines", sum.total_lines);
     json_set_int(m, "totalBytes", sum.total_bytes);
     json_set_int(m, "outputLines", sum.output_lines);
     json_set_int(m, "outputBytes", sum.output_bytes);
     out_summary_free(&sum);
     proc_result_free(&r);
+    return m;
+}
+
+void app_record_bash(app_t *a, const json_t *result) {
+    json_t *m = json_clone(result);
+    static const char *const counters[] = {"totalLines", "totalBytes", "outputLines", "outputBytes"};
+    for (size_t i = 0; i < ARRAY_LEN(counters); i++) json_del(m, counters[i]);
+    if (a->session) session_append_message(a->session, m);
+    if (!json_get_bool(m, "excludeFromContext", false)) {
+        char *t = out_bash_execution_text(m);
+        agent_append_message(a->agent, msg_user_text(t));
+        free(t);
+    }
+    json_free(m);
+}
+
+json_t *app_user_python_run(app_t *a, const char *code, bool exclude, volatile sig_atomic_t *cancel) {
+    agent_tool_t *t = agent_find_tool(a->agent, "eval");
+    if (!t || !t->execute) return NULL;
+    /* the eval tool's shared kernel (omp EvalRunner.executePython uses the session's eval executor) */
+    json_t *args = json_obj();
+    json_set_str(args, "language", "py");
+    json_set_str(args, "code", code);
+    json_set_int(args, "timeout", 0);
+    tool_ctx_t ctx = {.agent = a->agent, .tool_name = "eval", .cancel = cancel, .app = a};
+    tool_result_t r = {0};
+    t->execute(t, &ctx, args, &r);
+    json_free(args);
+    const json_t *cell = json_at(json_get_arr(r.details, "cells"), 0);
+    bool cancelled = cancel && *cancel;
+    json_t *m = json_obj();
+    json_set_str(m, "role", "pythonExecution");
+    json_set_str(m, "code", code);
+    if (cell) json_set_str(m, "output", json_get_str(cell, "output") ? json_get_str(cell, "output") : "");
+    else {
+        char *txt = tool_result_joined_text(&r);
+        json_set_str(m, "output", txt);
+        free(txt);
+    }
+    if (!cancelled) json_set_int(m, "exitCode", r.is_error ? 1 : 0);
+    json_set_bool(m, "cancelled", cancelled);
+    json_set_bool(m, "truncated", false);
+    const json_t *meta = json_get_obj(r.details, "meta");
+    if (meta) json_set(m, "meta", json_clone(meta));
+    if (exclude) json_set_bool(m, "excludeFromContext", true);
+    json_set_int(m, "timestamp", now_ms());
+    tool_result_free(&r);
+    return m;
+}
+
+void app_record_python(app_t *a, const json_t *result) {
+    if (a->session) session_append_message(a->session, result);
+    if (!json_get_bool(result, "excludeFromContext", false)) {
+        char *t = out_python_execution_text(result);
+        agent_append_message(a->agent, msg_user_text(t));
+        free(t);
+    }
+}
+
+json_t *app_user_bash(app_t *a, const char *cmd, bool exclude) {
+    json_t *m = app_user_bash_run(a, cmd, exclude, NULL, NULL, NULL);
+    if (m) app_record_bash(a, m);
     return m;
 }
 

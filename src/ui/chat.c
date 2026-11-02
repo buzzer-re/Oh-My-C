@@ -1232,6 +1232,8 @@ static const tui_component_vt WORKING_VT = {"working", working_render, NULL, NUL
 
 static int working_mode(ui_t *u) { return u->working ? ((working_t *)u->working)->mode : 0; }
 
+bool ui_working_busy(ui_t *u) { return working_mode(u) >= 2; }
+
 tui_component_t *ui_working_new(ui_t *u) {
     working_t *w = xcalloc(1, sizeof *w);
     tui_component_init(&w->base, &WORKING_VT);
@@ -1404,15 +1406,21 @@ static void replay_message(ui_t *u, const json_t *m, hmap_t *pending) {
             toolcard_result(u, tv, id, r, false, json_get_bool(m, "isError", false));
             hmap_del(pending, id);
         }
-    } else if (str_eq(role, "bashExecution")) {
+    } else if (str_eq(role, "bashExecution") || str_eq(role, "pythonExecution")) {
+        bool py = str_eq(role, "pythonExecution");
         msgview_t *v = mv_new(MV_BASH);
-        v->tool_name = xstrdup("bash");
+        v->tool_name = xstrdup(py ? "eval" : "bash");
         v->tool_id = xstrdup("");
         v->args = json_obj();
-        json_set_str(v->args, "command", json_get_str(m, "command") ? json_get_str(m, "command") : "");
+        const char *cmd = json_get_str(m, py ? "code" : "command");
+        json_set_str(v->args, "command", cmd ? cmd : "");
+        if (py) json_set_bool(v->args, "python", true);
+        if (json_get_bool(m, "excludeFromContext", false)) json_set_bool(v->args, "exclude", true);
+        if (json_get_bool(m, "cancelled", false)) json_set_bool(v->args, "cancelled", true);
+        if (json_get(m, "exitCode")) json_set_int(v->args, "exitCode", json_get_int(m, "exitCode", 0));
         v->output = xstrdup(json_get_str(m, "output") ? json_get_str(m, "output") : "");
         v->done = true;
-        v->is_error = json_get_int(m, "exitCode", 0) != 0;
+        v->is_error = json_get_bool(m, "cancelled", false) || json_get_int(m, "exitCode", 0) != 0;
         tui_container_add(u->chat, &v->base);
     } else if (str_eq(role, "custom") || str_eq(role, "hookMessage")) {
         if (!json_get_bool(m, "display", false)) return;

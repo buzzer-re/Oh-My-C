@@ -41,8 +41,8 @@ When status.md and this file disagree, check the code. Several status.md rows ma
 Ranked by how soon a user hits the gap in a normal interactive session.
 
 1. ~~**Plan approval doesn't show the plan.**~~ Done: `xd://propose` opens omp's Plan Review overlay with all five actions, the tier slider, annotations and save & quit (WP-1, see status.md Plan mode).
-2. **Steered and follow-up messages vanish.** Messages delivered while the agent runs never appear in the transcript until a rebuild. There is no pending-queue view and no dequeue, Esc doesn't restore the queue, and follow-up is bound to Alt+Enter instead of Ctrl+Q / Ctrl+Enter. (WP-2)
-3. **`!cmd`, `/compact` and `/handoff` run on the UI thread.** The TUI freezes, Esc is ignored and keys typed meanwhile are garbled. While streaming, `!cmd` is sent to the model as steer text. (WP-2)
+2. ~~**Steered and follow-up messages vanish.**~~ Done (WP-2): queued-messages band, delivered messages drawn, Ctrl+Q / Ctrl+Enter follow-up, Alt+Up dequeue, Esc restore.
+3. ~~**`!cmd`, `/compact` and `/handoff` run on the UI thread.**~~ Done (WP-2): workers with omp's loaders and Esc cancel; `!cmd`/`$ code` deferred while streaming.
 4. **No turn-end, ask or error notifications, and the terminal title never changes.** `completion.notify` and `ask.notify` are on by default in omp. `tui_term_set_title` exists but is never called. (WP-11)
 5. **The `/export` HTML is a placeholder.** It is the markdown transcript inside a `<pre>`, while omp embeds the session in its interactive viewer (`export/html/template.*`). `/dump` lacks `all`/`anon` and the request-JSON sidecar. (WP-4)
 6. **`thinking: auto` turns thinking off.** This happens via `--thinking auto` or `defaultThinkingLevel: auto`. (WP-3)
@@ -78,7 +78,7 @@ Every package must:
 | WP | Scope | omc files | Upstream sources |
 |---|---|---|---|
 | WP-1 Plan review and plan-mode parity (done; remaining: overlay mouse, extension plan-review hooks, mid-stream deferred plan-model switch) | Fullscreen plan review that renders the plan markdown with a Contents sidebar. Five actions: execute in fresh context / compact / keep context (with token count) / refine (feedback to model) / save & quit. Also: tier slider, copy, Ctrl+G edit, `/plan-review`, "Exit plan mode?" confirm with a draft, paused state, `plan.enabled`, `plan.autosave(Dir)`, `modelRoles.plan` switch/restore | `src/coding/app.c` (`app_propose_plan`, `app_set_plan_mode`), new `src/ui/planreview.c`, `src/modes/interactive.c` | T/overlays/plan-review-overlay.ts, plan-toc.ts, plan-save-overlay.ts; U/modes/interactive-mode.ts (`handlePlanModeCommand`, `showPlanReview`, `#approvePlan`, `#exitPlanMode`); U/plan-mode/* |
-| WP-2 Queue and non-blocking input | Render delivered steer/follow-up user messages; pending-messages view; dequeue (Alt+Up); Esc restores the queue to the editor; follow-up on Ctrl+Q / Ctrl+Enter. Move `!cmd`, `!!cmd`, `/compact`, `/handoff` to a worker with Esc cancel. Defer `!cmd` while streaming. `$code` / `$$code` user eval in the shared kernel. Queue `/compact` for the yield while streaming | `src/modes/interactive.c` (`on_submit`, `run_bang`, `ui_apply_event`, `key_hook`), `src/coding/app.c` (`app_user_bash`, `app_compact`, `app_handoff`), `src/ui/chat.c` | U/modes/controllers/input-controller.ts (`handleFollowUp`, `handleDequeue`, `restoreQueuedMessagesToEditor`), interactive-mode.ts (`updatePendingMessagesDisplay`), command-controller.ts (`handleBashCommand`, `handlePythonCommand`, `handleCompactCommand`), U/modes/prompt/queued-messages.ts |
+| WP-2 Queue and non-blocking input ✅ (done: see §2b/§2c; remaining: live `$` output, `/compact` modes are WP-4/WP-13) | Render delivered steer/follow-up user messages; pending-messages view; dequeue (Alt+Up); Esc restores the queue to the editor; follow-up on Ctrl+Q / Ctrl+Enter. Move `!cmd`, `!!cmd`, `/compact`, `/handoff` to a worker with Esc cancel. Defer `!cmd` while streaming. `$code` / `$$code` user eval in the shared kernel. Queue `/compact` for the yield while streaming | `src/modes/interactive.c` (`on_submit`, `run_bang`, `ui_apply_event`, `key_hook`), `src/coding/app.c` (`app_user_bash`, `app_compact`, `app_handoff`), `src/ui/chat.c` | U/modes/controllers/input-controller.ts (`handleFollowUp`, `handleDequeue`, `restoreQueuedMessagesToEditor`), interactive-mode.ts (`updatePendingMessagesDisplay`), command-controller.ts (`handleBashCommand`, `handlePythonCommand`, `handleCompactCommand`), U/modes/prompt/queued-messages.ts |
 | WP-3 Model-facing correctness bugs | Port `out://`, `cfg://`, `conflict://N` (write now refuses unknown schemes; main 44b5fc3). Make `thinking: auto` stop meaning off: resolve it like omp, or to the model default until the WP-12 classifier lands. Verify with `tests/parity/request_diff.sh` / `tool_diff.sh` | `src/tools/write_bash.c`, `src/tools/read.c`, `src/tools/vurl.c`, `src/coding/app.c` (thinking setup), `src/ui/settings.c` | U/internal-urls/{router,out-protocol,cfg-protocol,conflict-protocol}.ts, U/tools/conflict-detect.ts, U/auto-thinking/* |
 | WP-4 Slash-command correctness and shared registry | One registry (name, aliases, subcommands, hints, handler) used by TUI, RPC and ACP. Fix `/advisor` (status/dump), `/compact [soft\|remote\|snapcompact] [focus]`, `/shake [elide\|images\|thinking]`, `/handoff [focus]`, `/resume <id>`, `/effort` errors, `/delete` on in-memory sessions. Add aliases (models, rewind, q, providers, status, subagents, worktree, plugin, force:). Bare `exit`/`quit`/`q`. `/export` with omp's HTML viewer (`export/html/template.*` embedded as assets). `/dump all\|anon` + request-JSON sidecar | `src/modes/interactive.c` (`handle_command`, `COMMANDS[]`), `src/ui/slash.c`, `src/coding/app.c`, `src/session/session.c` (`session_export_html`), `assets/` | U/slash-commands/builtin-*.ts, builtin-registry.ts, helpers/*, U/session/compact-modes.ts, shake-types.ts, session-dump-format.ts, U/export/html/* |
 | WP-5 App keybinding layer | Add the 45 `app.*` actions to the key table. Load `keybindings.yml` (+ legacy .json migration, profile inherit); `/migrate` copies it. Make `key_hook` use `tui_kb()`. Generate `/hotkeys` from the live bindings. Cheap keys: Ctrl+Z suspend, F5/Alt+R retry, Alt+Shift+P plan, Ctrl+C semantics (500 ms, no abort), Ctrl+T status + persist, Ctrl+] jumps, Alt+Y kill ring, Alt+L display reset, Esc-Esc → `doubleEscapeAction`. Fix the false claims in docs/tui.md | `src/tui/keys.c`, `src/tui/editor.c`, `src/modes/interactive.c`, `src/ui/overlays.c` (`hotkeys_markdown`), `src/coding/migrate.c`, docs/tui.md | T/app-keybindings.ts, T/keybindings.ts, T/kill-ring.ts, T/hotkeys-markdown.ts, U/modes/controllers/input-controller.ts |
@@ -192,9 +192,9 @@ omc-only commands (not in omp): `/help`, `/thinking` (omp only has `/effort`), `
 | /fresh | builtin-lifecycle.ts | — | ❌ | reset provider stream state (Codex/Cursor sessions) |
 | /clear | builtin-lifecycle.ts | `app_clear_context` | ✅ | |
 | /delete | builtin-lifecycle.ts | unlink + new | ✅ | (omp also errors "Nothing to delete (in-memory session)"; omc silently starts a new session) |
-| /compact [soft\|remote\|snapcompact] [focus] | builtin-lifecycle.ts, session/compact-modes.ts | `app_compact` | 🟡 | modes missing (**bug: `/compact soft` sends "soft" as summary instructions**); while streaming omp queues the compaction for the yield (`yieldCompaction`), omc runs it immediately; no "Tokens: a -> b (saved n)" summary |
+| /compact [soft\|remote\|snapcompact] [focus] | builtin-lifecycle.ts, session/compact-modes.ts | `app_compact` | 🟡 | modes missing (**bug: `/compact soft` sends "soft" as summary instructions**); follow-up-key `/compact` while streaming waits for the yield (WP-2); no "Tokens: a -> b (saved n)" summary |
 | /shake [elide\|images\|thinking] | builtin-lifecycle.ts, shake-types.ts | `app_shake(n)` | 🟡 | takes a numeric threshold instead of the 3 modes (**bug: `/shake images` → `atoi` = threshold 0**); summary text differs |
-| /handoff [focus] | builtin-lifecycle.ts, command-controller `handleHandoffCommand` | `app_handoff` | 🟡 | focus instructions ignored; no streaming/compacting/"nothing to hand off" guards; no cancellable loader |
+| /handoff [focus] | builtin-lifecycle.ts, command-controller `handleHandoffCommand` | `app_handoff` | 🟡 | focus instructions ignored (guards and the cancellable loader landed in WP-2) |
 | /resume [id] | builtin-lifecycle.ts | `ui_overlay_session` | 🟡 | argument (session id/path) ignored |
 | /pin | builtin-lifecycle.ts | — (Alt+K in picker only) | ❌ | |
 | /btw [q] | builtin-lifecycle.ts, btw-controller.ts, overlays/btw-panel.ts | `src/ui/btw.c` | ✅ | inline streaming panel + history browser ported; image follow-ups missing |
@@ -232,7 +232,7 @@ Non-builtin command sources:
 
 omc's key table (`src/tui/keys.c` `DEFAULTS[]`) has only the 31 `tui.*` editor/select actions. The 45
 `app.*` actions of `packages/tui/src/app-keybindings.ts` are not in it; eight keys are hard-coded in
-`key_hook` (`src/modes/interactive.c`): esc, ctrl+c, ctrl+d, shift+tab, ctrl+o, ctrl+t, alt+m, alt+enter.
+`key_hook` (`src/modes/interactive.c`): esc, ctrl+q/ctrl+enter, alt+up/shift+up, ctrl+c, ctrl+d, shift+tab, ctrl+o, ctrl+t, alt+m.
 `tui_keybindings_load_file` exists but is never called, so **user keybinding overrides are ignored**.
 The `/hotkeys` page (`hotkeys_markdown`, `src/ui/overlays.c`) is a static copy of omp's and lists ~20 keys
 omc does not bind. `docs/tui.md` claims "Ctrl+Z suspends" and that the table includes app actions;
@@ -249,7 +249,7 @@ both are false. Rows marked (tmux) were probed in tmux against the mock model.
 | yankPop (alt+y) | — | ❌ | no kill ring (`kill-ring.ts`) |
 | undo (ctrl+-, ctrl+_) | editor.c | ✅ | |
 | spellingSuggestions (ctrl+.) | — | ⛔ | macOS native spelling |
-| input.newLine (shift+enter, ctrl+j) | editor.c | 🟡 | omc also maps alt+enter, which `key_hook` takes as follow-up while running |
+| input.newLine (shift+enter, ctrl+j) | editor.c | 🟡 | omc also maps alt+enter (`key_hook` no longer takes it as follow-up) |
 | input.submit, input.tab, select.* | editor.c, components.c | ✅ | `/resume` picker ignores pageUp/pageDown |
 | input.copy (ctrl+c with selection) | — | ❌ | editor has no selection |
 | Vim mode (`tui.vimMode`, vim.ts) | — | ❌ | setting shown but inert |
@@ -259,7 +259,7 @@ both are false. Rows marked (tmux) were probed in tmux against the mock model.
 
 | Action (default keys) | omc | Status | Notes |
 |---|---|---|---|
-| app.interrupt (esc) | key_hook | 🟡 | only aborts a running turn; no cancel for idle compaction/handoff, no bash-mode clear, **no double-Esc rewind/tree** (`doubleEscapeAction`), queued messages not restored to the editor |
+| app.interrupt (esc) | `iq_escape` (src/modes/iqueue.c) | 🟡 | cancels compaction/handoff, restores the queue to the editor and aborts a turn, cancels `!`/`$` runs, clears bash/python mode (WP-2); **no double-Esc rewind/tree** (`doubleEscapeAction`, WP-5) |
 | app.clear (ctrl+c) | key_hook | 🟡 | omp: clear, 2nd press within 500 ms exits, never aborts; omc aborts a running turn, 1.5 s window + "Press ctrl+c again" notice |
 | app.exit (ctrl+d) | key_hook | 🟡 | draft not saved for resume |
 | app.suspend (ctrl+z) | — | ❌ | `tui_suspend` exists (render.c) but ISIG is off and the key is unbound |
@@ -275,9 +275,9 @@ both are false. Rows marked (tmux) were probed in tmux against the mock model.
 | app.approval.approve (ctrl+enter, ctrl+q) | — | ❌ | no approval dialog |
 | app.editor.external (ctrl+g) | — | ❌ | ask "Other" prompt shows a ctrl+g hint that does nothing |
 | app.local.open (alt+g) | — | ❌ | |
-| app.message.followUp (ctrl+q, ctrl+enter) | alt+enter | 🟡 | wrong key |
+| app.message.followUp (ctrl+q, ctrl+enter) | `iq_follow_up` | ✅ | WP-2; `/compact` with it while streaming waits for the yield |
 | app.retry (f5, alt+r) | `/retry` only | 🟡 | |
-| app.message.dequeue (alt+up, shift+up) | — | ❌ | no queue view |
+| app.message.dequeue (alt+up, shift+up) | `iq_dequeue` | ✅ | WP-2 |
 | app.clipboard.pasteImage (ctrl+v), pasteTextRaw (ctrl+shift+v) | — | ❌ | no clipboard read, no image attachments |
 | app.clipboard.copyLine (alt+shift+l), copyPrompt (alt+shift+c) | — | ❌ | OSC 52 helper exists |
 | app.agents.hub (alt+a), app.session.observe (ctrl+s) | — | ❌ | no agent hub |
@@ -296,13 +296,13 @@ both are false. Rows marked (tmux) were probed in tmux against the mock model.
 | Plan approval (`xd://propose` → PlanReviewOverlay) | `src/ui/planreview.c` + `ui_plan_approval` | ✅ | cell-identical overlay (tmux), all branches; mouse ❌ |
 | Plan-mode model role switch/restore (`modelRoles.plan`) | `app_plan_apply_model` / exit restore | ✅ | deferred switch while streaming ❌ |
 | /plan toggle + read-only gating | `/plan`, `hook_before_tool` | ✅ | |
-| Submit / steer while streaming | `on_submit` → `agent_steer` | 🟡 | "Queued (steer)" notice instead of the pending-messages view |
-| Pending-messages view (`updatePendingMessagesDisplay`) | — | ❌ | |
-| **Delivered steer/follow-up shown as a user message** | `ui_apply_event` handles only `async-result` user messages | ❌ | (tmux) steered text gets an answer but never appears in the transcript until a rebuild |
-| Esc restores queue to editor | — | ❌ | |
-| `!cmd` / `!!cmd` | `run_bang` | 🟡 | **runs synchronously on the UI thread**: (tmux) spinner freezes, Esc ignored, typed keys garbled; while streaming `!cmd` is sent as steer text |
-| `$code` / `$$code` user eval | — | ❌ | sent to the model as text although omc has the kernel |
-| /compact, /handoff | synchronous on UI thread | 🟡 | UI frozen, not cancellable |
+| Submit / steer while streaming | `iq_submit` | ✅ | WP-2: steering (user-interjection envelope), empty Enter interrupts a turn with queued input, `->`/`=>`/`/queue` list splitting, input typed during compaction queued behind it |
+| Pending-messages view (`updatePendingMessagesDisplay`) | `src/ui/queue.c` | ✅ | WP-2: `Steering · N` / `After yield · N` band, cell-identical (tmux) |
+| **Delivered steer/follow-up shown as a user message** | `iq_user_message_start` | ✅ | WP-2; steeringMode/followUpMode one-at-a-time vs all, interruptMode immediate vs wait |
+| Esc restores queue to editor | `iq_escape` | ✅ | WP-2 |
+| `!cmd` / `!!cmd` | `iqueue.c` worker | ✅ | WP-2: live output, `Running… (⎋ to cancel)`, Esc cancel, "already running" warning, deferred below the transcript while streaming and recorded after the run |
+| `$code` / `$$code` user eval | `iqueue.c` → eval kernel | 🟡 | WP-2: runs in the eval tool's kernel off the UI thread, Esc cancel, pythonExecution messages; output appears when the cell ends (omp streams it live); omp's pasted-shell-prompt exception not ported |
+| /compact, /handoff | `iqueue.c` workers | ✅ | WP-2: omp's loaders, Esc → `Compaction cancelled` / `Handoff cancelled`, input queued behind them, Enter `/compact` mid-run aborts, compacts and resumes (auto-continue) |
 | `@` file mentions | `complete_path` | 🟡 | single-directory prefix listing; omp does fuzzy project-wide search |
 | `#` prompt actions, `#123` → pr:// / issue:// | — | ❌ | advertised in `/hotkeys` |
 | `^model` mentions, `:emoji` completion, internal-URL completion | — | ❌ | |
@@ -571,9 +571,9 @@ floating list; Esc-Esc and Ctrl+R do nothing although `/hotkeys` lists Ctrl+R.
 | handleForkCommand | command-controller.ts | `/fork` | 🟡 | no pane/window placement, no streaming guard |
 | handleMoveCommand, handleWorktreeCommand | command-controller.ts | — | ❌ | |
 | handleRenameCommand | command-controller.ts | `/rename` | ✅ | |
-| handleBashCommand | command-controller.ts | `run_bang` | 🟡 | `!cmd` while the agent runs is sent as a steer instead of deferred to the pending container |
-| handlePythonCommand | command-controller.ts | — | ❌ | `$code` / `$$code` user eval prefix not handled in `on_submit` |
-| handleCompactCommand | command-controller.ts | `/compact` | 🟡 | **bug: `/compact soft` sends "soft" as summary instructions**; no cancel hint |
+| handleBashCommand | command-controller.ts | `iqueue.c` `bang` | ✅ | WP-2 (PTY input forwarding for interactive commands ❌) |
+| handlePythonCommand | command-controller.ts | `iqueue.c` `python` | 🟡 | WP-2; no live output streaming |
+| handleCompactCommand | command-controller.ts | `/compact` | 🟡 | **bug: `/compact soft` sends "soft" as summary instructions**; loader + Esc cancel done (WP-2) |
 | handleShakeCommand | command-controller.ts | `app_shake(atoi(arg))` | 🟡 | **bug: `/shake images` → threshold 0**; no transcript rebuild |
 | handleHandoffCommand | command-controller.ts | `/handoff` | 🟡 | custom instructions dropped |
 | mcp-command-controller | mcp-command-controller.ts (2343) | `mcp_status` | 🟡 | every subcommand missing; `mcp_oauth_login/logout` exist in `src/mcp/oauth.c` |

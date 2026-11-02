@@ -91,6 +91,19 @@ struct ui {
     bool status_row_occupied; /* the working/idle-title row rendered lines this frame */
     json_t *att_images; /* pending composer image attachments [{image, path?, w?, h?}] (attach.c) */
     struct btw_ctl *btw;      /* /btw controller (btw.c), created on first use */
+    /* message queue and background input work (queue.c, modes/interactive.c) */
+    tui_container_t *pending_shell; /* `!`/`$` runs started while streaming (omp pendingShellContainer) */
+    tui_component_t *queue_band;    /* ui_queue_band_new */
+    strvec_t q_steer, q_follow;     /* band snapshot (ui_queue_refresh) */
+    json_t *compaction_queue;       /* [{text, mode: steer|followUp}] typed while compacting / behind a yield compaction */
+    char *yield_compaction;         /* `/compact …` queued with the follow-up key while streaming */
+    char *compact_pending;          /* `/compact` sent with Enter mid-run: runs once the aborted turn unwinds */
+    strvec_t optimistic;            /* submitted prompts already drawn: their user message_start is not drawn again */
+    int bg_kind;                    /* running maintenance op: 0 none, 1 compaction, 2 handoff */
+    pthread_t bg_thread;
+    struct ui_bash *bash;           /* running `!cmd` */
+    struct ui_bash *python;         /* running `$ code` */
+    json_t *deferred_bash;          /* `!cmd` / `$ code` results that finished mid-run: recorded at the run's end */
 };
 
 
@@ -139,6 +152,7 @@ void ui_working_stop(ui_t *u);
 void ui_working_set_message(ui_t *u, const char *message);
 void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms);
 void ui_working_compaction(ui_t *u, const char *label);
+bool ui_working_busy(ui_t *u); /* a retry countdown or compaction row replaces the working/title row */
 void ui_chat_rebuild(ui_t *u); /* replay the transcript from the session tree (resume, branch, reload) */
 
 /* toolcards.c - tool cards (MV_TOOL views keep their card state in `msg`) */
@@ -186,6 +200,11 @@ bool ui_btw_command(ui_t *u, const char *question, const json_t *images, const c
 bool ui_btw_key(ui_t *u, const tui_key_t *k); /* Esc while the panel shows; c/f/b on an empty editor */
 void ui_btw_dispose(ui_t *u);                 /* session switch / fork / exit: cancel, hide, forget */
 void ui_btw_free(ui_t *u);
+/* queue.c */
+tui_component_t *ui_queue_band_new(ui_t *u); /* "Steering · N" / "After yield · N" band */
+void ui_queue_refresh(ui_t *u);              /* re-read the agent + compaction queues into the band */
+const char *ui_queue_shorthand(const char *text); /* body after a leading `->` / `=>`, else NULL */
+void ui_split_queued_messages(const char *text, strvec_t *out); /* queue-input.ts splitQueuedMessages */
 
 /* welcome.c */
 tui_component_t *ui_welcome_new(void);

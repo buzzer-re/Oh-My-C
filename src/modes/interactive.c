@@ -1,5 +1,6 @@
 /* interactive mode: TUI chat (port of omp's InteractiveMode, core feature set). */
 #include "modes.h"
+#include "modes/interactive.h"
 #include "ui/ui.h"
 #include "coding/migrate.h"
 #include "coding/goal.h"
@@ -86,6 +87,9 @@ static void ui_apply_event(void *ud) {
     uiev_t *e = ud;
     ui_t *u = e->u;
     switch (e->type) {
+    case AGENT_EV_MESSAGE_START: /* steered / follow-up / drained user input reaches the transcript */
+        iq_user_message_start(u, e->msg);
+        break;
     case AGENT_EV_MESSAGE_END:
         if (str_eq(json_get_str(e->msg, "role"), "user")) ui_async_result(u, e->msg);
         if (str_eq(json_get_str(e->msg, "role"), "assistant")) {
@@ -126,7 +130,7 @@ static void ui_apply_event(void *ud) {
     }
     case AGENT_EV_AGENT_END:
         ui_working_stop(u);
-        ui_chrome_turn(u, false);
+        if (!u->compact_pending) ui_chrome_turn(u, false); /* a /compact that interrupted the turn resumes it */
         break;
     case AGENT_EV_AGENT_START:
         toolcard_break_group(u);
@@ -160,7 +164,8 @@ static void ui_listener(void *ud, const agent_event_t *ev) {
         if (post) tui_post(u->tui, ui_apply_partial, u);
         return;
     }
-    if (ev->type != AGENT_EV_MESSAGE_END && ev->type != AGENT_EV_TOOL_START && ev->type != AGENT_EV_TOOL_UPDATE &&
+    bool user_start = ev->type == AGENT_EV_MESSAGE_START && agent_msg_user_authored(ev->message);
+    if (!user_start && ev->type != AGENT_EV_MESSAGE_END && ev->type != AGENT_EV_TOOL_START && ev->type != AGENT_EV_TOOL_UPDATE &&
         ev->type != AGENT_EV_TOOL_END && ev->type != AGENT_EV_AGENT_END && ev->type != AGENT_EV_AGENT_START)
         return;
     uiev_t *e = xcalloc(1, sizeof(*e));
@@ -263,6 +268,7 @@ typedef struct {
     char *text;
     const char *hidden; /* custom type of a hidden prompt (goal continuation, advisor), NULL for user input */
     json_t *attachments; /* [{image, path?}] composer image attachments (owned, may be NULL) */
+    bool queued;        /* deliver the agent's queued messages (no new prompt) */
 } job_t;
 
 static void start_hidden(ui_t *u, const char *text, const char *ctype);
@@ -284,8 +290,10 @@ static void worker_done(void *ud) {
     ui_t *u = ud;
     pthread_join(u->worker, NULL);
     u->worker_running = false;
+    iq_flush_deferred(u);
     plan_exec_resume(u);
-    if (u->goal_cont) tui_add_timer(u->tui, 800, false, goal_continue_cb, u);
+    /* deferred `!cmd` results, a pending /compact, queued input left behind by an interrupted run */
+    if (!iq_run_end(u) && u->goal_cont) tui_add_timer(u->tui, 800, false, goal_continue_cb, u);
     tui_request_render(u->tui);
 }
 
@@ -293,7 +301,8 @@ static void *worker_main(void *p) {
     job_t *j = p;
     app_t *a = j->u->app;
     size_t before = json_len(a->agent->messages);
-    if (j->hidden) app_prompt_hidden(a, j->text, j->hidden);
+    if (j->queued) agent_run_queued(a->agent);
+    else if (j->hidden) app_prompt_hidden(a, j->text, j->hidden);
     else app_prompt_attachments(a, j->text, j->attachments);
     json_t *run = json_arr();
     pthread_mutex_lock(&a->agent->mu);
@@ -391,6 +400,7 @@ static void start_prompt_with(ui_t *u, const char *text, json_t *attachments) {
     msgview_t *v = mv_new(MV_USER);
     v->text = xstrdup(text);
     add_view(u, v);
+    strvec_push(&u->optimistic, text); /* its message_start is already drawn */
     job_t *j = xcalloc(1, sizeof(*j));
     j->u = u;
     j->text = xstrdup(text);
@@ -422,6 +432,26 @@ static void ui_plan_restore(ui_t *u) {
         char *m = xasprintf("Plan mode enabled. Plan file: %s", u->app->plan_file);
         add_notice(u, "info", m);
         free(m);
+    }
+}
+
+void ix_start_prompt(ui_t *u, const char *text) { start_prompt(u, text); }
+
+void ix_start_prompt_with(ui_t *u, const char *text, json_t *attachments) { start_prompt_with(u, text, attachments); }
+
+void ix_start_hidden(ui_t *u, const char *text, const char *ctype) { start_hidden(u, text, ctype); }
+
+void ix_start_queued_run(ui_t *u) {
+    if (u->worker_running || !u->app->model) return;
+    job_t *j = xcalloc(1, sizeof(*j));
+    j->u = u;
+    j->text = xstrdup("");
+    j->queued = true;
+    u->worker_running = true;
+    if (pthread_create(&u->worker, NULL, worker_main, j) != 0) {
+        u->worker_running = false;
+        free(j->text);
+        free(j);
     }
 }
 
@@ -1419,7 +1449,7 @@ static bool handle_command(ui_t *u, const char *line) {
         sb_t b = SB_INIT;
         sb_append(&b, "Commands:\n");
         for (size_t i = 0; i < ARRAY_LEN(COMMANDS); i++) sb_appendf(&b, "  /%-10s %s\n", COMMANDS[i].name, COMMANDS[i].desc);
-        sb_append(&b, "Keys: enter send (steer while running) · alt+enter follow-up/newline · esc interrupt · "
+        sb_append(&b, "Keys: enter send (steer while running) · ctrl+q follow-up · alt+up edit queued · esc interrupt · "
                       "shift+tab thinking · ctrl+o expand tools · ctrl+t toggle thinking · alt+m model · "
                       "ctrl+c clear/exit · ctrl+d exit · !cmd run shell");
         add_notice(u, "info", sb_cstr(&b));
@@ -1591,21 +1621,9 @@ static bool handle_command(ui_t *u, const char *line) {
         if (!ui_btw_command(u, arg, NULL, NULL) && *arg && tui_editor_is_empty(u->editor))
             tui_editor_set_text(u->editor, line);
     } else if (!strcmp(cmd, "queue")) {
-        if (!*arg) add_notice(u, "info", "Usage: /queue <message>");
-        else if (u->worker_running) {
-            agent_follow_up(a->agent, msg_user_text(arg));
-            add_notice(u, "info", "Queued for after the agent yields");
-        } else start_prompt(u, arg);
+        iq_queue_command(u, arg);
     } else if (!strcmp(cmd, "handoff")) {
-        char *err = NULL;
-        add_notice(u, "info", "Writing handoff…");
-        tui_render_now(u->tui);
-        if (app_handoff(a, &err) != 0) add_notice(u, "error", err ? err : "handoff failed");
-        else {
-            reload_chat(u);
-            add_notice(u, "info", "Handoff written; context compacted");
-        }
-        free(err);
+        iq_handoff(u, arg);
     } else if (!strcmp(cmd, "shake")) {
         size_t n = app_shake(a, *arg ? (size_t)atoi(arg) : 2000);
         char *m = xasprintf("Elided %zu heavy tool result%s from the context", n, n == 1 ? "" : "s");
@@ -1707,16 +1725,7 @@ static bool handle_command(ui_t *u, const char *line) {
     } else if (!strcmp(cmd, "resume")) {
         ui_overlay_session(u);
     } else if (!strcmp(cmd, "compact")) {
-        char *err = NULL;
-        ui_working_compaction(u, "Compacting context...");
-        tui_render_now(u->tui);
-        if (app_compact(a, *arg ? arg : NULL, &err) != 0) {
-            ui_working_stop(u);
-            char *m = xasprintf("Compaction failed: %s", err ? err : "compaction failed");
-            add_notice(u, "error", m);
-            free(m);
-        }
-        free(err);
+        iq_compact(u, arg);
     } else if (!strcmp(cmd, "session")) {
         json_t *st = app_stats(a);
         char *s = xasprintf("Session %s\nFile: %s\nMessages: %lld user, %lld assistant, %lld tool results\n"
@@ -1763,31 +1772,6 @@ static bool handle_command(ui_t *u, const char *line) {
     return handled;
 }
 
-/* ---------- bash (!cmd) ---------- */
-
-static void run_bang(ui_t *u, const char *line) {
-    bool exclude = line[1] == '!';
-    const char *cmd = line + (exclude ? 2 : 1);
-    msgview_t *v = mv_new(MV_BASH);
-    v->tool_name = xstrdup("$");
-    v->args = json_obj();
-    json_set_str(v->args, "command", cmd);
-    if (exclude) json_set_bool(v->args, "exclude", true);
-    add_view(u, v);
-    tui_render_now(u->tui);
-    json_t *m = app_user_bash(u->app, cmd, exclude);
-    if (m) {
-        v->output = xstrdup(json_get_str(m, "output") ? json_get_str(m, "output") : "");
-        int64_t code = json_get_int(m, "exitCode", 0);
-        v->is_error = json_get_bool(m, "cancelled", false) || code != 0;
-        json_set_int(v->args, "exitCode", code);
-        json_free(m);
-    }
-    v->done = true;
-    v->dirty = true;
-    tui_request_render(u->tui);
-}
-
 /* ---------- prompt history (persisted across sessions) ---------- */
 
 static void history_load(tui_editor_t *ed) {
@@ -1827,43 +1811,26 @@ static void history_append(const char *text, const char *cwd) {
 
 /* ---------- input ---------- */
 
+bool ix_handle_command(ui_t *u, const char *line) { return handle_command(u, line); }
+
+void ix_history_add(ui_t *u, const char *text) {
+    tui_editor_add_history(u->editor, text);
+    history_append(text, u->app->cwd);
+}
+
 static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
     ui_t *u = ud;
     char *t = str_trim(text);
-    if (!*t) {
-        free(t);
-        return;
+    if (*t) {
+        tui_editor_add_history(ed, t);
+        history_append(t, u->app->cwd);
     }
-    tui_editor_add_history(ed, t);
-    history_append(t, u->app->cwd);
-    tui_editor_clear(ed);
     /* staged image attachments: keep the referenced ones, renumbered (compactImageMarkers) */
     char *compacted = NULL;
     json_t *attachments = ui_attach_take(u, t, &compacted);
     free(t);
     t = compacted;
-    if (t[0] == '/' && handle_command(u, t)) {
-        free(t);
-        tui_request_render(u->tui);
-        return;
-    }
-    if (t[0] == '!' && !u->worker_running) {
-        run_bang(u, t);
-        free(t);
-        return;
-    }
-    if (u->worker_running) {
-        if (attachments) app_steer_attachments(u->app, t, attachments);
-        else agent_steer(u->app->agent, msg_user_text(t));
-        attachments = NULL;
-        char *m = xasprintf("Queued (steer): %s", t);
-        add_notice(u, "info", m);
-        free(m);
-    } else {
-        start_prompt_with(u, t, attachments);
-        attachments = NULL;
-    }
-    json_free(attachments);
+    iq_submit(u, t, attachments);
     free(t);
     tui_request_render(u->tui);
 }
@@ -1872,12 +1839,15 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
     ui_t *u = ud;
     if (tui_overlay_visible(t) || ui_selector_open(u)) return false;
     if (ui_btw_key(u, k)) return true; /* the /btw panel owns Esc while shown; c/f/b act on its answer */
-    if (tui_key_matches(k, "escape")) {
-        if (u->worker_running) {
-            app_abort(u->app);
-            return true;
-        }
-        return false;
+    if (tui_key_matches(k, "escape")) return iq_escape(u); /* app.interrupt */
+    if (tui_key_matches(k, "ctrl+q") || tui_key_matches(k, "ctrl+enter")) { /* app.message.followUp */
+        iq_follow_up(u);
+        return true;
+    }
+    if (tui_key_matches(k, "alt+up") || tui_key_matches(k, "shift+up")) { /* app.message.dequeue */
+        iq_dequeue(u);
+        tui_request_render(t);
+        return true;
     }
     if (tui_key_matches(k, "ctrl+c")) {
         if (!tui_editor_is_empty(u->editor)) {
@@ -1946,20 +1916,6 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
         ui_overlay_model(u);
         return true;
     }
-    if (tui_key_matches(k, "alt+enter") && u->worker_running) {
-        char *txt = tui_editor_get_expanded_text(u->editor);
-        char *tt = str_trim(txt);
-        if (*tt) {
-            agent_follow_up(u->app->agent, msg_user_text(tt));
-            char *m = xasprintf("Queued (follow-up): %s", tt);
-            add_notice(u, "info", m);
-            free(m);
-            tui_editor_clear(u->editor);
-        }
-        free(tt);
-        free(txt);
-        return true;
-    }
     return false;
 }
 
@@ -2020,7 +1976,11 @@ int run_interactive_mode(app_t *a, const char *initial) {
     }
     u.chat = ui_transcript_new(false); /* the welcome banner brings its own trailing spacer */
     tui_container_add(root, &u.chat->base);
+    u.pending_shell = tui_container_new();
+    tui_container_add(root, &u.pending_shell->base);
     tui_container_add(root, ui_btw_container_new(&u)); /* omp btwContainer: right below the transcript */
+    u.queue_band = ui_queue_band_new(&u);
+    tui_container_add(root, u.queue_band);
     u.banner = tui_container_new();
     tui_container_add(root, &u.banner->base);
     u.model_cycle = tui_container_new();
@@ -2093,6 +2053,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
         pthread_join(u.worker, NULL);
     }
     ui_btw_free(&u);
+    iq_shutdown(&u);
     agent_unsubscribe(a->agent, ui_listener, &u);
     a->notice = NULL;
     a->wake = NULL;

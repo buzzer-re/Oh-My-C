@@ -509,9 +509,10 @@ static json_t *to_llm(const json_t *msg) {
     if (!role) return NULL;
     if (!strcmp(role, "user") || !strcmp(role, "assistant") || !strcmp(role, "toolResult") || !strcmp(role, "developer"))
         return json_clone(msg);
-    if (!strcmp(role, "bashExecution")) {
+    if (!strcmp(role, "bashExecution") || !strcmp(role, "pythonExecution")) {
         if (json_get_bool(msg, "excludeFromContext", false)) return NULL;
-        char *t = out_bash_execution_text(msg); /* omp bashExecutionToText (incl. the meta notice) */
+        /* omp bashExecutionToText / pythonExecutionToText (incl. the meta notice) */
+        char *t = !strcmp(role, "bashExecution") ? out_bash_execution_text(msg) : out_python_execution_text(msg);
         json_t *m = user_text_msg(t, json_get_int(msg, "timestamp", now_ms()));
         free(t);
         return m;

@@ -1516,7 +1516,7 @@ static void statusrow_render(tui_component_t *c, int width, strvec_t *out) {
         tui_loader_t *l = (tui_loader_t *)r->inner;
         working_row(r->u, l->message ? l->message : "Working\xe2\x80\xa6", width, out);
     }
-    if (out->n == before) {
+    if (out->n == before && !ui_working_busy(r->u)) {
         char *t = ui_title_trailer(r->u);
         if (t) {
             strvec_push(out, "");
@@ -1527,7 +1527,8 @@ static void statusrow_render(tui_component_t *c, int width, strvec_t *out) {
             free(t);
         }
     }
-    r->u->status_row_occupied = out->n > before;
+    /* a retry countdown / compaction row (chat.c working component) stands in the same slot */
+    r->u->status_row_occupied = out->n > before || ui_working_busy(r->u);
 }
 
 static void statusrow_invalidate(tui_component_t *c) {
@@ -1574,8 +1575,10 @@ static char *chrome_border(void *ud, const char *s) {
     const char *p = txt;
     while (*p == ' ' || *p == '\t') p++;
     char *r;
+    size_t py = p[0] == '$' ? (p[1] == '$' ? 2 : 1) : 0; /* `$ ` / `$$ `: the sigil counts once whitespace follows */
+    if (py && !(p[py] == ' ' || p[py] == '\t' || p[py] == '\n' || p[py] == '\r')) py = 0;
     if (*p == '!') r = fgw(TUI_TC_BASH_MODE, s);
-    else if (*p == '$') r = fgw(TUI_TC_PYTHON_MODE, s);
+    else if (py) r = fgw(TUI_TC_PYTHON_MODE, s);
     else {
         const char *title = u->app->session ? u->app->session->title : NULL;
         if (title && *title && settings_bool("statusLine.sessionAccent", true)) r = fg_rgb(tui_session_accent(title, TH()), s);
