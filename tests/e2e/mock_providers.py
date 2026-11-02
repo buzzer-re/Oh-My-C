@@ -11,12 +11,51 @@ A user message "bash:<cmd>" gets a bash tool call (chat completions / anthropic)
 .../images/generations, .../images/edits, .../images: a one-image b64_json answer (HTTP 500 when the body mentions
 "fail"). An Anthropic request forcing a named tool (tool_choice {type: "tool"}) gets a call to it (think: fixed thoughts).
 MOCK_CACHE_TOKENS=<n> reports <n> cache-write tokens on a new Anthropic request and <n> cache-read tokens on a repeated one.
+Anthropic "drop:<mode>:<n>:<text>" (the latest user message): the first <n> requests stream <text> and then drop the
+connection ("stall": silent for $MOCK_STALL_SECS (60), "close": FIN before the last chunk, "rst": TCP reset); later
+requests answer "resumed after drop" (turn recovery checks, tests/e2e/stall.sh).
 Paths under /deny answer 403 to Copilot-Integration-Id copilot-chat (identity fallback test)."""
 import json, os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG = os.environ.get("MOCK_LOG")
 SEEN = set()  # Anthropic request prefixes already "cached" (MOCK_CACHE_TOKENS)
+DROPS = {}  # drop command -> requests dropped so far
+
+
+def latest_user_text(body):
+    for m in reversed(body.get("messages") or []):
+        if m.get("role") != "user":
+            continue
+        c = m.get("content")
+        t = c if isinstance(c, str) else "".join(x.get("text", "") for x in c or [] if isinstance(x, dict))
+        t = t.rsplit("</system-reminder>", 1)[-1].strip()  # omp prepends the date/cwd reminder to the prompt
+        if t and not t.startswith("<system"):
+            return t
+    return ""
+
+
+def drop_connection(handler, mode):
+    import select, socket, struct, time
+    sock = handler.connection
+    if mode == "stall":
+        end = time.time() + float(os.environ.get("MOCK_STALL_SECS") or 60)
+        while time.time() < end:
+            r, _, _ = select.select([sock], [], [], 0.2)
+            try:
+                if r and not sock.recv(1, socket.MSG_PEEK):
+                    break
+            except OSError:
+                break
+    elif mode == "rst":
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    else:
+        sock.shutdown(socket.SHUT_RDWR)
+    handler.close_connection = True
+    try:
+        sock.close()
+    except OSError:
+        pass
 
 
 def text_of(msg):
@@ -161,6 +200,20 @@ class H(BaseHTTPRequestHandler):
             self.ev({"type": "response.completed", "response": {"id": "resp_1", "status": "completed", "output": [done],
                                                                   "usage": {"input_tokens": 5, "output_tokens": 3}}})
             return self.end()
+        dropu = latest_user_text(body)
+        if path.endswith("/messages") and dropu.startswith("drop:"):
+            _, mode, n, dtext = (dropu.split(":", 3) + ["", "", ""])[:4]
+            if DROPS.get(dropu, 0) < int(n or 1):
+                DROPS[dropu] = DROPS.get(dropu, 0) + 1
+                self.sse_start()
+                self.ev({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": [],
+                                                              "usage": {"input_tokens": 5, "output_tokens": 0}}}, "message_start")
+                if dtext:
+                    self.ev({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}, "content_block_start")
+                    self.ev({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": dtext}}, "content_block_delta")
+                return drop_connection(self, mode)
+            if kind == "user":
+                text = "resumed after drop"
         if path.endswith("/messages"):
             self.sse_start()
             usage = {"input_tokens": 5, "output_tokens": 0}
@@ -182,7 +235,8 @@ class H(BaseHTTPRequestHandler):
                 self.ev({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps(args)}}, "content_block_delta")
                 stop = "tool_use"
             else:
-                answer = ("Tool said: " + text.strip()) if kind == "tool" else "plain provider answer"
+                answer = ("Tool said: " + text.strip()) if kind == "tool" else \
+                    "resumed after drop" if text == "resumed after drop" else "plain provider answer"
                 self.ev({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}, "content_block_start")
                 self.ev({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": answer}}, "content_block_delta")
                 stop = "end_turn"

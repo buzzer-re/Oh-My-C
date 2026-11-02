@@ -1335,7 +1335,12 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
             agent_event_t te = {.type = AGENT_EV_TURN_END, .message = assistant, .tool_results = results};
             emit(a, &te);
             json_free(results);
-            if (append) add_message(a, run_msgs, append);
+            if (append) { /* Agent.appendMessage: joins the context without message events (not persisted) */
+                json_push(run_msgs, json_clone(append));
+                pthread_mutex_lock(&a->mu);
+                json_push(a->messages, append);
+                pthread_mutex_unlock(&a->mu);
+            }
             if (a->cancel) break;
             continue;
         }
