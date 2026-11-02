@@ -52,7 +52,7 @@ Ranked by how soon a user hits the gap in a normal interactive session.
    main composer (external editor), Ctrl+R (history search), Alt+P (temporary model), Ctrl+Shift+O, Alt+G,
    Ctrl+Shift+V. Like omp's, `/hotkeys` lists them. (WP-6, WP-19, WP-21, WP-29)
 9. ~~**`/context`, `/session`, `/tools`, `/jobs`, `/todo` are one-line notices instead of omp's panels.**~~ Done (WP-7): context viewer, Session Info overlay with `delete`/`pin`, Available Tools panel, Background Jobs report with `full`/`kill`, the `/todo` verbs, and short reports docked above the editor.
-10. **`/tree` and `/branch` are flat 14-row pickers.** omp has a tree selector (filters, labels, folding) and a rewind selector. (WP-8)
+10. ~~**`/tree` and `/branch` are flat 14-row pickers.**~~ Done (WP-8): omp's session tree selector, fullscreen rewind selector and branch summaries.
 11. **Custom markdown commands and `/skill:<name>` don't work.** This covers `.omp/.claude/.opencode commands/*.md`. RPC `get_available_commands` advertises `skill:<name>` entries that nothing executes. (WP-9)
 12. **304 of the 402 settings shown in `/settings` have no effect.** This includes `tools.approvalMode`, so the TUI never asks for approval even after the user picks "Always ask". (WP-10, WP-26)
 13. ~~**Default-on agent guards are missing.**~~ Done (WP-12, WP-3): todo reminders + mid-run nudge, empty/unexpected-stop recovery, tool-call loop guard, stream loop guard, magic keywords, `out://`, `cfg://`, `conflict://N`. Remaining: fabricated-result abort (needs in-band tool calling), `todo.eager`, `tasks.todoClearDelay`.
@@ -78,7 +78,7 @@ Every package must:
 | WP-4 Slash-command correctness and shared registry (done: registry `src/coding/slashcmd.c` for TUI/RPC/ACP, argument fixes, aliases, bare exit, argument completion + hints, live descriptions; `/export` with omp's HTML document, `/dump` + sidecar + `all\|anon`, `/advisor dump`; remaining: `/advisor configure`, multi-advisor rosters, shake block regions/artifacts, the 46 builtins omc lacks) | One registry (name, aliases, subcommands, hints, handler) used by TUI, RPC and ACP. Fix `/advisor` (status/dump), `/compact [soft\|remote\|snapcompact] [focus]`, `/shake [elide\|images\|thinking]`, `/handoff [focus]`, `/resume <id>`, `/effort` errors, `/delete` on in-memory sessions. Add aliases (models, rewind, q, providers, status, subagents, worktree, plugin, force:). Bare `exit`/`quit`/`q`. `/export` with omp's HTML viewer (`export/html/template.*` embedded as assets). `/dump all\|anon` + request-JSON sidecar | `src/modes/interactive.c` (`handle_command`, `COMMANDS[]`), `src/ui/slash.c`, `src/coding/app.c`, `src/session/session.c` (`session_export_html`), `assets/` | U/slash-commands/builtin-*.ts, builtin-registry.ts, helpers/*, U/session/compact-modes.ts, shake-types.ts, session-dump-format.ts, U/export/html/* |
 | WP-5 App keybinding layer (done; remaining: handlers for selectTemporary, history.search, editor.external in the composer, local.open, tools.toggleVisibility, pasteTextRaw, approval, agent hub — owned by WP-6/10/19/21/22/29; Alt+L background re-probe; draft saved on Ctrl+D) | All `app.*` actions in the key table; `keybindings.yml` (+ legacy .json migration, profile inherit); `/migrate` copies it; `key_hook` via `tui_kb()`; `/hotkeys` from the live bindings; Ctrl+Z, F5/Alt+R, Ctrl+C (500 ms, no abort), Ctrl+T status + persist, Ctrl+] jumps, Alt+Y kill ring, Alt+L, copy line/prompt, Esc-Esc → `doubleEscapeAction` | `src/tui/keys.c`, `src/config/keybindings.c`, `src/tui/editor.c`, `src/modes/interactive.c`, `src/ui/overlays.c` (`ui_hotkeys_markdown`) | T/app-keybindings.ts, T/keybindings.ts, T/kill-ring.ts, T/hotkeys-markdown.ts, U/modes/controllers/input-controller.ts |
 | WP-7 Report panels ✅ (done: report docking, `/context` viewer, `/session` overlay + `delete`/`pin`, `/tools`, `/jobs [full\|kill]`, `/todo` verbs; remaining: tokenizer-exact counts (omc estimates ~4.1 chars/token), snapcompact savings lines, multi-account `/session pin` selector, LSP rows in Session Info, nested subagent job tree, native jobs sheet / detail pane, live todo HUD for `/todo expand\|collapse`, RPC/ACP text handlers (`handle`) for /todo /session /jobs /context /tools) | `/context` viewer (category breakdown, browse content); `/session` info overlay + `delete`/`pin`; `/tools` markdown panel incl. xd:// tools; `/jobs` panel + job tree + `full`/`kill`; `/todo` subcommands; `/advisor status\|dump`. Report-panel inline docking for short reports | `src/modes/interactive.c`, `src/ui/overlays.c` (`ui_show_report`), new `src/ui/context.c`, `src/tools/jobs.c`, `src/tools/todo_ask.c` | T/overlays/context-viewer*.ts, session-info-overlay.ts, jobs-panel.ts, job-tree.ts, report-panel.ts; U/modes/controllers/command-controller.ts, todo-command-controller.ts; U/slash-commands/helpers/context-report.ts |
-| WP-8 Tree and rewind selectors | `/tree` tree selector (glyphs, filters / `treeFilterMode`, labels, search, fold, branch prev/next); rewind selector for `/branch`, `/rewind`, Esc-Esc; optional branch summary prompt (`branchSummary.enabled`) | `src/modes/interactive.c` ("tree"/"branch"), new `src/ui/tree.c`, `src/coding/app.c` | T/overlays/tree-selector.ts, rewind-selector.ts; U/modes/controllers/selector-controller.ts; A/compaction/branch-summarization.ts |
+| WP-8 Tree and rewind selectors ✅ (done; remaining: `ask` re-answer from the tree, Ctrl+G in the custom-instructions editor, model transcript dialects other than xml/anthropic in the summary request, rewind mouse clicks) | `/tree` tree selector (glyphs, filters / `treeFilterMode`, labels, search, fold, branch prev/next); rewind selector for `/branch`, `/rewind`, Esc-Esc; optional branch summary prompt (`branchSummary.enabled`) | `src/modes/interactive.c` ("tree"/"branch"), new `src/ui/tree.c`, `src/coding/app.c` | T/overlays/tree-selector.ts, rewind-selector.ts; U/modes/controllers/selector-controller.ts; A/compaction/branch-summarization.ts |
 | WP-9 Custom and skill commands | Discover `commands/*.md` (omp/Claude/OpenCode, user + project, `commands.enable*`) with `$ARGUMENTS`/frontmatter. `/skill:<name>` invocation + completion (`skills.enableSkillCommands`). MCP prompts as commands. Autocomplete entries. Execution from RPC `prompt` / ACP `session/prompt` (uses the WP-4 registry) | `src/coding/discovery.c`, `src/modes/interactive.c`, `src/ui/slash.c`, `src/tui/editor.c`, `src/modes/rpc.c`, `src/modes/acp.c` | U/capability/slash-command.ts, U/extensibility/{custom-commands,skills.ts,slash-commands.ts}, U/modes/skill-command.ts, U/modes/prompt/skill-tokens.ts, U/discovery/{claude,opencode}.ts |
 
 ### P1 — common, or the default behaviour differs
@@ -179,9 +179,9 @@ omc-only command (not in omp): `/migrate`.
 | /git | builtin-session.ts | — | ❌ | git UI (split diff, staging, commit composer) |
 | /local | builtin-session.ts | — | ❌ | open a `local://` file in $EDITOR |
 | /hub (subagents) | builtin-session.ts, overlays/agent-hub*.ts | — | ❌ | live Agent Hub for subagents |
-| /branch (rewind) | builtin-session.ts | `handle_command` "branch" picker | 🟡 | generic select list instead of omp's user-message selector (`/rewind` alias works) |
+| /branch (rewind) | builtin-session.ts, overlays/rewind-selector.ts | `tc_rewind_open` (src/modes/treectl.c, src/ui/rewind.c) | ✅ | fullscreen transcript replica with the dotted outline, branch strip, filter; `/rewind` alias |
 | /fork [pane\|window\|tab] | builtin-session.ts | `app_fork_from` | 🟡 | no multiplexer placement subcommands; no streaming guard |
-| /tree | builtin-session.ts, overlays/tree-selector.ts | generic picker | 🟡 | flat indented list; omp's tree selector has branch glyphs, filters (`treeFilterMode`), labels |
+| /tree | builtin-session.ts, overlays/tree-selector.ts | `tc_tree_open` (src/modes/treectl.c, src/ui/tree.c) | ✅ | `ask` re-answer from the tree not ported (the leaf moves onto the result) |
 | /login, /logout | builtin-session.ts | `ui_overlay_login` | ✅ | |
 | /mcp [sub] | builtin-session.ts, mcp-command-controller.ts | status notice | 🟡 | 17 subcommands (add wizard, list, remove, test, reauth, unauth, enable, disable, reconnect, reload, resources, prompts, notifications, smithery-*) missing |
 | /ssh [add\|list\|remove] | builtin-lifecycle.ts, ssh-command-controller.ts | — | ❌ | ssh.json host management (ssh:// reads work) |
@@ -279,7 +279,7 @@ The key table (`src/tui/keys.c` `DEFAULTS[]`) holds omp's whole registry: the 32
 | app.agents.hub (alt+a), app.session.observe (ctrl+s) | — | ❌ | no agent hub |
 | app.session.new/tree/fork/resume (unbound by default) | key_hook → `/new`, `/tree`, `/branch`, `/resume` | ✅ | bindable in keybindings.yml |
 | app.session.pin/unpin (alt+k / alt+shift+k), rename/delete in picker | `src/ui/sessions.c` | ✅ | pin/unpin via the table; togglePath/toggleSort/rename/delete keys still hard-coded |
-| app.tree.previousBranch/nextBranch | — | ❌ | `/tree` is a flat list |
+| app.tree.previousBranch/nextBranch (unbound by default) | `move_branch` (src/ui/tree.c) | ✅ | the help line names them once bound |
 | app.plan.toggle (alt+shift+p) | `key_hook` → `/plan` | ✅ | via the table |
 | app.history.search (ctrl+r) | — | ❌ | |
 | app.links.hint (alt+o) | — | ⛔ | extension runtime |
@@ -383,9 +383,9 @@ Model: `modelRoleStorage`, `inlineToolDescriptors`, `includeWorkspaceTree`, `pre
 `providers.anthropic.serverSideFallback`, `advisor.syncBacklog`.
 Interaction: `autoResume`, `startup.showSplash`, `update.channel`, `marketplace.autoUpdate`,
 `session.worktreeScope`, `tui.vimMode`, `tui.vimModeDisplay`, `loop.mode`, `loop.conditionTimeoutMs`,
-`input.bareSlashCommands`, `treeFilterMode`, `composer.predictions`, `spelling.typoDetection`/`autocorrect`
+`input.bareSlashCommands`, `composer.predictions`, `spelling.typoDetection`/`autocorrect`
 (macOS ⛔), `skills.registryUrl`.
-Context: `contextPromotion.enabled`, `extendedContext`, `branchSummary.enabled`,
+Context: `contextPromotion.enabled`, `extendedContext`,
 `compaction.experimentalContextManagement`, `compaction.handoffSaveToDisk`,
 `compaction.remoteStreamingV2Enabled`, `compaction.idleEnabled`, `compaction.idleThresholdTokens`,
 `compaction.idleTimeoutSeconds`, `snapcompact.*` (3), `tools.format`, `ttsr.judge`, `ttsr.contextMode`,
@@ -497,8 +497,8 @@ ast_edit debug eval glob grep find lsp checkpoint rewind task wait todo web_sear
 
 Upstream: `packages/tui/src/overlays/*`, `packages/coding-agent/src/modes/components/*`,
 `packages/coding-agent/src/modes/controllers/*`. Probed in tmux against the mock model: `/session`,
-`/context`, `/usage`, `/jobs`, `/todo`, `/tools` each print one inline notice; `/tree` opens a small
-floating list; Ctrl+R does nothing although `/hotkeys` lists it (as omp does); Esc-Esc opens the flat `/branch` picker.
+`/context`, `/usage`, `/jobs`, `/todo`, `/tools` each print one inline notice; Ctrl+R does nothing although
+`/hotkeys` lists it (as omp does).
 
 ### 5a. Overlays
 
@@ -510,8 +510,8 @@ floating list; Ctrl+R does nothing although `/hotkeys` lists it (as omp does); E
 | ask-dialog | ask-dialog.ts | `ask` tool | `src/ui/ask.c` | ✅ | cell-verified |
 | context-viewer (+format, overview) | context-viewer*.ts | `/context` | `src/ui/context.c` | 🟡 | layout, map, legend, previews, entry view match; token estimates differ slightly (no native tokenizer) |
 | copy-selector + copy-targets | copy-selector.ts, copy-targets.ts | `/copy [code\|cmd\|link]` | last answer via OSC 52 | 🟡 | no picker, no targets; silent when nothing to copy |
-| tree-selector | tree-selector.ts (1794) | `/tree` | `show_picker(5)` | 🟡 | 14-row list; no filters, labels, search, fold, non-message entries |
-| rewind-selector | rewind-selector.ts (1131) | Esc-Esc, `/branch`, `/rewind` | `/branch` generic picker | 🟡 | no transcript outline / sibling strip; Esc-Esc unbound; `/rewind` alias missing |
+| tree-selector | tree-selector.ts (1794) | `/tree` | `src/ui/tree.c` | ✅ | ANSI-identical to omp in tmux (filters, search, labels, empty states, paging) |
+| rewind-selector | rewind-selector.ts (1131) | Esc-Esc, `/branch`, `/rewind` | `src/ui/rewind.c` | ✅ | ANSI-identical to omp (outline, branch strip, filter, expand); mouse wheel scrolls, clicks not handled |
 | jobs-panel + job-tree | jobs-panel.ts, job-tree.ts | `/jobs`, jobs pill | `src/ui/panels.c` | 🟡 | text-mode report ✅ (flat tree: no subagent-owned jobs in omc); the jobs sheet/detail pane is native-only |
 | btw-panel, btw-history(-panel) | btw-*.ts | `/btw` | `src/ui/btw.c` | ✅ | no image paste in follow-ups |
 | session-info-overlay | session-info-overlay.ts | `/session` | `src/ui/panels.c` | 🟡 | overlay ✅ (file/ID/build, provider + auth source, messages, append-only, tokens, cost, MCP); edit rejections, routed models and LSP rows missing |
@@ -719,7 +719,7 @@ the prompt.
 | Overflow recovery | session-maintenance.ts | `app.c` | ✅ | `contextPromotion` ❌ |
 | Pruning (`supersedeReads`, `dropUseless`, on) | compaction/pruning.ts | — | ❌ | `agent.c` sets a `useless` flag nothing consumes |
 | Idle compaction | idle-maintenance.ts | — | ❌ | off by default |
-| Branch summary | compaction/branch-summarization.ts | `rpc.c` navigate only | 🟡 | ad-hoc prompt; no interactive /tree prompt |
+| Branch summary | compaction/branch-summarization.ts | `src/coding/branchsum.c`, `app_navigate_tree` | ✅ | request byte-identical to omp for xml/anthropic models; other dialects (glm, gemini, gemma, kimi, qwen, deepseek, minimax, harmony) fall back to xml; no `session_before_tree` extension hook |
 
 ### 7b. Background systems
 

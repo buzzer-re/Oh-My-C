@@ -242,6 +242,9 @@ rm -f "$T/agent/config.yml"
 # RPC: host-implemented tools, tree navigation, paging
 check "rpc host tool"  "Tool said: host says hi"  python3 -I "$ROOT/tests/e2e/rpc_client.py" "$B"
 check "rpc navigate"   '"editorText": "second"'   python3 -I "$ROOT/tests/e2e/rpc_client.py" "$B"
+# branch summary on navigation (WP-8): omp's branch_summary entry at the new leaf and summarizer request
+check "branch summary entry" $'summary leaf True fromId parent True\nsummary "User explored another conversation branch, then returned here.\\nExploration summary:plain answer"\ndetails {"readFiles": [], "modifiedFiles": []} fromExtension False' python3 -I "$ROOT/tests/e2e/rpc_tree.py" "$B" "$T/req.jsonl"
+check "branch summary request" 'request "<conversation>\n\n\nAssistant: plain answer\n</conversation>\n\nYou MUST create a structured summary' python3 -I "$ROOT/tests/e2e/rpc_tree.py" "$B" "$T/req.jsonl"
 # plan mode without a review surface: xd://propose auto-approves (ACP-without-elicitation semantics)
 check "plan propose"   'Tool said: Plan approved at local://retry-plan.md. Plan mode exited; proceed with the implementation.' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-mode
 check "plan propose dispatch" '"xdev": {"args": {"title": "retry"}, "inner": {"planExists": true, "planFilePath": "local://retry-plan.md", "title": "retry"}, "mode": "execute", "tool": "propose"}' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-mode
