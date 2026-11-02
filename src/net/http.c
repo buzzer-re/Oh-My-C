@@ -824,7 +824,7 @@ static rr_t do_once(const http_req_t *req, const char *url_s, const char *method
         int64_t to_ = idle_to;                                                   \
         if (deadline) to_ = MIN(to_, deadline - mono_ms());                      \
         int fr_ = conn_fill(c, to_, req->cancel);                                \
-        if (fr_ <= 0) { fail_code = fr_; goto body_done; }                       \
+        if (fr_ <= 0) { fail_code = fr_ ? fr_ : -5; goto body_done; }           \
     } while (0)
 
     if (no_body) {
@@ -863,7 +863,7 @@ static rr_t do_once(const http_req_t *req, const char *url_s, const char *method
                 if (deadline) to_ = MIN(to_, deadline - mono_ms());
                 int fr_ = conn_fill(c, to_, req->cancel);
                 if (fr_ == 0 && until_close) break;
-                if (fr_ <= 0) { fail_code = fr_; goto body_done; }
+                if (fr_ <= 0) { fail_code = fr_ ? fr_ : -5; goto body_done; } /* -5: EOF before the body ended */
             }
             size_t k = remaining < 0 ? AVAIL : (size_t)MIN((int64_t)AVAIL, remaining);
             if (sink_write(&sink, c->rbuf + c->rpos, k) != 0) { ok = false; c->rpos += k; goto body_done; }
@@ -883,7 +883,11 @@ body_done:
             resp->aborted = true;
             resp->error = xstrdup("request aborted");
         } else {
-            resp->error = xstrdup(fail_code == -2 ? "timed out reading response body" : "connection closed mid-body");
+            /* a peer close (FIN before the last chunk / Content-Length, or RST) reads as Bun's fetch error, which
+             * omp's turn recovery classifies (isUnexpectedSocketCloseMessage) */
+            resp->error = xstrdup(fail_code == -2 ? "timed out reading response body"
+                                                  : "ECONNRESET: The socket connection was closed unexpectedly. For more "
+                                                    "information, pass `verbose: true` in the second argument to fetch()");
         }
         *keepalive_ok = false;
     }

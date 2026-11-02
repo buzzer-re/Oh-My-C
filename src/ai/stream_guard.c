@@ -137,6 +137,16 @@ typedef struct {
     pthread_cond_t cv;
 } watch_t;
 
+/* the request the watchdog cancelled ends as an error that keeps what streamed so far (omp: the partial output
+ * stays on the failed turn, so turn recovery can continue after committed text) */
+static json_t *stalled_message(const ai_model_t *m, const json_t *partial, const char *msg) {
+    if (!json_is_obj(partial)) return ai_error_message(m, "error", msg);
+    json_t *r = json_clone(partial);
+    json_set_str(r, "stopReason", "error");
+    json_set_str(r, "errorMessage", msg);
+    return r;
+}
+
 static void watch_cb(void *ud, const ai_event_t *ev) {
     watch_t *w = ud;
     pthread_mutex_lock(&w->mu);
@@ -147,7 +157,7 @@ static void watch_cb(void *ud, const ai_event_t *ev) {
     int fired = w->fired;
     pthread_mutex_unlock(&w->mu);
     if (fired && (ev->type == AI_EV_ERROR || ev->type == AI_EV_DONE)) {
-        json_t *m = ai_error_message(w->model, "error", w->msg);
+        json_t *m = stalled_message(w->model, ev->partial, w->msg);
         ai_event_t e2 = {.type = AI_EV_ERROR, .content_index = -1, .partial = m, .reason = "error"};
         if (w->cb) w->cb(w->ud, &e2);
         json_free(m);
@@ -281,8 +291,9 @@ json_t *ai_stream_guarded(ai_stream_fn fn, const ai_model_t *m, const ai_context
         pthread_cond_destroy(&w.cv);
         pthread_mutex_destroy(&w.mu);
         if (fired && !(o->cancel && *o->cancel)) {
+            json_t *e = stalled_message(m, r, fired == 1 ? l.first_msg : l.idle_msg);
             json_free(r);
-            r = ai_error_message(m, "error", fired == 1 ? l.first_msg : l.idle_msg);
+            r = e;
         }
     }
     if (slot >= 0) {

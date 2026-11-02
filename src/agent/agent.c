@@ -1191,6 +1191,44 @@ static void execute_tools(agent_t *a, json_t *run_msgs, const json_t *assistant,
 
 /* ---------- loop ---------- */
 
+/* agent-loop.ts createAbortedToolResult: each tool call of a turn that ended in error/aborted gets a synthetic
+ * result (the call never ran), emitted like a tool execution; the caller adds them to the history */
+static json_t *failed_turn_results(agent_t *a, const json_t *assistant, const json_t *cursor_results) {
+    const char *stop = json_get_str(assistant, "stopReason");
+    const char *err = json_get_str(assistant, "errorMessage");
+    bool aborted = str_eq(stop, "aborted");
+    json_t *out = NULL;
+    json_t *blk;
+    json_arr_foreach(json_get(assistant, "content"), i, blk) {
+        const char *id = json_get_str(blk, "id");
+        if (!str_eq(json_get_str(blk, "type"), "toolCall") || resolved_call(cursor_results, id)) continue;
+        const char *base = aborted ? "Tool execution was aborted"
+                                   : "Tool call was not executed because the provider stream ended with an error before the "
+                                     "tool could run";
+        tool_result_t r = {.content = json_arr(), .details = json_obj(), .is_error = true};
+        char *txt = err ? xasprintf("%s: %s", base, err) : xasprintf("%s.", base);
+        json_push(r.content, text_block(txt));
+        free(txt);
+        json_set_bool(r.details, "__synthetic", true);
+        json_set_str(r.details, "source", aborted ? "assistant_stop_aborted" : "assistant_stop_error");
+        json_set_bool(r.details, "executed", false);
+        if (!aborted && err) json_set_str(r.details, "upstreamError", err);
+        const char *name = json_get_str(blk, "name");
+        agent_event_t st = {.type = AGENT_EV_TOOL_START, .tool_call_id = id, .tool_name = name,
+                            .args = json_get(blk, "arguments")};
+        emit(a, &st);
+        agent_event_t en = {.type = AGENT_EV_TOOL_END, .tool_call_id = id, .tool_name = name, .result = &r, .is_error = true};
+        emit(a, &en);
+        json_t *m = msg_tool_result(id ? id : "", name ? name : "", &r);
+        emit_message(a, AGENT_EV_MESSAGE_START, m);
+        emit_message(a, AGENT_EV_MESSAGE_END, m);
+        if (!out) out = json_arr();
+        json_push(out, m);
+        tool_result_free(&r);
+    }
+    return out;
+}
+
 static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
     a->running = true;
     a->cancel = 0;
@@ -1233,11 +1271,15 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
         }
         const char *stop = json_get_str(assistant, "stopReason");
         bool failed = stop && (strcmp(stop, "error") == 0 || strcmp(stop, "aborted") == 0);
+        json_t *synth = NULL; /* synthetic results of a failed turn's calls: emitted, not yet in the history */
+        int outcome = AGENT_RETRY_NONE;
+        json_t *append = NULL;
         if (ttsr && a->hooks.should_retry) {
             /* stream deliberately aborted by a rule: let the hook inject and retry */
             emit_message(a, AGENT_EV_MESSAGE_END, assistant);
             a->cancel = 0;
-            if (a->hooks.should_retry(a->hooks.ud, a, assistant, -1)) {
+            if (a->hooks.should_retry(a->hooks.ud, a, assistant, -1, &append)) {
+                json_free(append);
                 json_free(assistant);
                 json_free(cursor_results);
                 agent_event_t te = {.type = AGENT_EV_TURN_END, .message = NULL, .tool_results = NULL};
@@ -1248,19 +1290,26 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
         } else if (failed && !a->cancel && a->hooks.should_retry) {
             /* the failed attempt ends before the retry policy runs (its notices follow it, as in omp) */
             emit_message(a, AGENT_EV_MESSAGE_END, assistant);
-            if (a->hooks.should_retry(a->hooks.ud, a, assistant, retry_attempt)) {
+            synth = failed_turn_results(a, assistant, cursor_results);
+            outcome = a->hooks.should_retry(a->hooks.ud, a, assistant, retry_attempt, &append);
+            if (outcome == AGENT_RETRY_REPLAY) {
                 retry_attempt++;
+                json_free(append);
+                json_free(synth);
                 json_free(assistant);
                 json_free(cursor_results);
                 continue;
             }
+            if (outcome == AGENT_RETRY_PRESERVE) retry_attempt++;
         } else {
             emit_message(a, AGENT_EV_MESSAGE_END, assistant);
+            if (failed) synth = failed_turn_results(a, assistant, cursor_results);
         }
+        bool preserved = outcome == AGENT_RETRY_PRESERVE || outcome == AGENT_RETRY_CONTINUE;
         /* the session stamps completedAt on the message_end snapshot it persists; the live history keeps the
          * provider's message (omp: agent state and the message_end event are separate snapshots) */
         json_del(assistant, "completedAt");
-        retry_attempt = 0;
+        if (!preserved) retry_attempt = 0;
         pthread_mutex_lock(&a->mu);
         json_push(a->messages, assistant);
         pthread_mutex_unlock(&a->mu);
@@ -1272,6 +1321,25 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
             json_push(results, json_clone(cr));
             add_message(a, run_msgs, json_clone(cr));
         }
+        json_arr_foreach(synth, i, cr) {
+            json_push(results, json_clone(cr));
+            pthread_mutex_lock(&a->mu);
+            json_push(a->messages, json_clone(cr));
+            pthread_mutex_unlock(&a->mu);
+            json_push(run_msgs, json_clone(cr));
+        }
+        json_free(synth);
+        if (preserved) {
+            /* the failed turn stays in context (its calls carry `executed: false` results) and the run goes on */
+            json_free(cursor_results);
+            agent_event_t te = {.type = AGENT_EV_TURN_END, .message = assistant, .tool_results = results};
+            emit(a, &te);
+            json_free(results);
+            if (append) add_message(a, run_msgs, append);
+            if (a->cancel) break;
+            continue;
+        }
+        json_free(append);
         bool has_tools = false;
         json_t *blk;
         json_arr_foreach(json_get(assistant, "content"), i, blk) {

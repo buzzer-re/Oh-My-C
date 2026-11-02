@@ -1,4 +1,5 @@
 #include "app.h"
+#include "coding/turn_recovery.h"
 #include "coding/autothink.h"
 #include "coding/modelctl.h"
 #include "coding/cachewarm.h"
@@ -655,20 +656,8 @@ static bool is_overflow(const char *err) {
                    str_istr(err, "exceeds the context window") || str_istr(err, "input is too long"));
 }
 
-static bool is_retryable(const char *err);
-bool app_error_retryable(const char *err) { return is_retryable(err); }
-
-static bool is_retryable(const char *err) {
-    if (!err) return false;
-    const char *pats[] = {"overloaded", "rate limit", "rate_limit", "429", "500", "502", "503", "504", "529",
-                          "timed out", "timeout", "connection", "network", "reset", "closed before", "mid-body",
-                          "internal server error", "service unavailable", "bad gateway", "temporarily", "try again",
-                          "stream stall",
-                          "stream ended", "terminated"};
-    for (size_t i = 0; i < ARRAY_LEN(pats); i++)
-        if (str_istr(err, pats[i])) return true;
-    return false;
-}
+/* AIError.retriable over an error text (RPC prompt_result error.retryable) */
+bool app_error_retryable(const char *err) { return err && aie_retriable(aie_classify_text(err, 0, NULL, NULL)); }
 
 static int hook_stream(void *ud, agent_t *ag, const ai_event_t *ev) {
     app_t *a = ud;
@@ -1027,7 +1016,7 @@ static void hook_turn_boundary(void *ud, agent_t *ag, const json_t *assistant) {
     }
 }
 
-static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int attempt) {
+static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int attempt, json_t **append) {
     app_t *a = ud;
     if (attempt < 0 && a->gemini_interrupt > 0) { /* LoopGuards #interruptGeminiHeaderRunaway */
         int n = a->gemini_interrupt;
@@ -1093,12 +1082,37 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
         if (u) billed = json_get_int(u, "input", 0) + json_get_int(u, "cacheRead", 0) + json_get_int(u, "cacheWrite", 0);
         return (cmp_auto(a, CMP_OVERFLOW, true, billed) & CMP_COMMITTED) != 0;
     }
+    /* turn-recovery.ts (agent_end): a tool turn interrupted by a mid-stream transport failure resumes with its
+     * synthetic results; otherwise a retryable error replays the turn unless it already showed text or ran
+     * tools; a transport failure after committed text keeps the partial turn and continues with a reminder */
+    bool committed = !a->text_buffered;
+    bool resolved_stall = tr_resolved_interrupted_tool_turn(assistant, ag->cancel);
+    bool retryable = resolved_stall || tr_is_retryable_error(assistant, committed);
+    if (!retryable) {
+        bool reset = false;
+        bool stall = settings_bool("retry.enabled", true) && tr_committed_text_stall(assistant, committed, ag->cancel, &reset);
+        if (reset) a->stall_continues = 0;
+        if (stall) {
+            if (++a->stall_continues <= TR_STREAM_STALL_CONTINUE_MAX) {
+                LOGI("Stream failed after committed text; continuing with resume reminder (attempt %d): %s",
+                     a->stall_continues, err ? err : "");
+                *append = tr_stream_stall_reminder(a->stall_continues);
+                return AGENT_RETRY_CONTINUE;
+            }
+            LOGW("Stream kept stalling after committed text past retry cap (%d attempts)", a->stall_continues - 1);
+            a->stall_continues = 0;
+        }
+    }
+    /* resolved stream-stall tools and proven-unexecuted calls keep their assistant/result pair */
+    uint32_t eid = aie_classify_message(assistant);
+    bool preserve = resolved_stall || ((aie_retriable(eid) || (eid & AIE_MALFORMED_FUNCTION_CALL)) &&
+                                       tr_unexecuted_tool_calls_replay_safe(assistant, committed, 0));
+    int again = preserve ? AGENT_RETRY_PRESERVE : AGENT_RETRY_REPLAY;
     if (!settings_bool("retry.enabled", true)) return false;
     if (attempt == 0) a->retry_offset = 0;
     int max = (int)settings_int("retry.maxRetries", 10);
     int saga = attempt - a->retry_offset + 1; /* omp #retryAttempt after its increment */
     bool exhausted = saga > max;
-    bool retryable = is_retryable(err);
     bool usage_limit = is_usage_limit(err);
     /* model fallback: consulted on every failed attempt, retryable or hard (hardErrorFallback) */
     bool switched = false;
@@ -1116,7 +1130,7 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
         maybe_thinking_loop_redirect(a, ag, err);
         a->retry_offset = attempt + 1; /* a fallback model gets a fresh retry budget */
         strvec_push(&a->retry_notes, usage_limit ? "rate-limited; switched model; retried" : "switched model; retried");
-        return true;
+        return again;
     }
     if (!retryable) return false;
     if (exhausted) {
@@ -1167,7 +1181,7 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
         if (ag->cancel) return false;
         sleep_ms(50);
     }
-    return true;
+    return again;
 }
 
 /* ---------- checkpoint / rewind ---------- */
@@ -1546,6 +1560,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     pthread_mutex_init(&a->tier_mu, NULL);
     app_slow_hooks_init(a);
     a->opts = *o;
+    a->text_buffered = o->subagent; /* a subagent's streamed text reaches no sink until the run settles */
     if (o->service_tier && !ai_service_tier_intern(o->service_tier) && !str_eq(o->service_tier, "none")) {
         *err = xasprintf("Invalid --service-tier value: \"%s\". Expected one of: none, auto, default, flex, scale, priority, ultrafast.",
                          o->service_tier);
@@ -2760,6 +2775,7 @@ static int run_guarded_inner(app_t *a, json_t *msgs);
 
 /* run state idle: idle cache warming takes over (or streaming warming stops), paid warms are recorded */
 static int run_guarded(app_t *a, json_t *msgs) {
+    a->stall_continues = 0; /* TurnRecovery.resetForNewPrompt */
     int rc = run_guarded_inner(a, msgs);
     cachewarm_settled(a->warmer);
     app_flush_warm_usage(a);

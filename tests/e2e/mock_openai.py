@@ -28,6 +28,12 @@ Memory pipeline side requests (memory.backend=local startup):
 Subagent turns ("Complete assignment thoroughly:\n\n<assignment>") run <assignment> as the script (e.g. slow:3:done).
 Idle recap side turns ("<recap>…") answer a fixed one-line recap.
 /agents architect requests ("Custom agent request:…" containing AGENTSPEC) answer a docs-writer agent spec as JSON.
+Mid-stream connection drops (turn recovery), driven by the latest user message:
+  - "drop:<mode>:<n>:<text>"   the first <n> requests stream <text> (may be empty) and then drop the connection;
+    later requests answer "resumed after drop" (or "Tool said: ..." after a tool result)
+  - "dropcall:<mode>:<n>:<cmd>" the same, but a complete bash tool call (<cmd>) streams before the drop
+  <mode>: "stall" (connection stays open, silent, for $MOCK_STALL_SECS, default 60), "close" (FIN mid-body, no
+  terminating chunk) or "rst" (TCP reset mid-body).
 /btw side questions ("<btw>…Question:\n<q>\n</btw>"): <q> may be md:/think:/slow:/streamfail:/fail:, else a fixed
   markdown answer naming <q>.
 Every request body is appended to $MOCK_LOG (JSONL) for assertions."""
@@ -37,6 +43,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 LOG = os.environ.get("MOCK_LOG")
 DELAY = float(os.environ.get("MOCK_DELAY") or 0)
 FAIL_RETRY_AFTER = os.environ.get("MOCK_FAIL_RETRY_AFTER_MS", "0")
+STALL_SECS = float(os.environ.get("MOCK_STALL_SECS") or 60)
+DROPS = {}  # drop command text -> requests dropped so far
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tui", "fixtures")
 
 def sse(handler, obj):
@@ -116,6 +124,15 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b)
             return
+        dropu = next((text_of(m) for m in reversed(msgs) if m.get("role") == "user" and
+                      not text_of(m).startswith("<system")), "")
+        if dropu.startswith(("drop:", "dropcall:")) and body.get("tools"):
+            kind, mode, n, rest = (dropu.split(":", 3) + ["", "", ""])[:4]
+            if DROPS.get(dropu, 0) < int(n or 1):
+                DROPS[dropu] = DROPS.get(dropu, 0) + 1
+                return self.drop_stream(body, kind, mode, rest)
+            if last.get("role") != "tool":
+                lu = "say:resumed after drop"
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
@@ -174,7 +191,7 @@ class H(BaseHTTPRequestHandler):
                 chunks.append({**base, "choices": [{"index": 0, "delta": {"content": (" " if i else "") + w}}]})
             chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
         else:
-            u = text_of(last)
+            u = lu if lu.startswith("say:resumed after drop") else text_of(last)
             if u.startswith("Complete assignment thoroughly:\n\n"):  # subagent turn: the assignment is the script
                 u = u[len("Complete assignment thoroughly:\n\n"):].strip()
             btw = u.startswith("<btw>") and "\nQuestion:\n" in u
@@ -259,6 +276,45 @@ class H(BaseHTTPRequestHandler):
         w(b"data: [DONE]\n\n")
         self.wfile.write(b"0\r\n\r\n")
         self.wfile.flush()
+
+    def drop_stream(self, body, kind, mode, text):
+        """Stream part of a turn (text, or a complete bash call), then drop the connection per <mode>."""
+        import socket, struct
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        base = {"id": "c1", "object": "chat.completion.chunk", "model": body.get("model")}
+        def w(obj):
+            b = b"data: " + json.dumps(obj).encode() + b"\n\n"
+            self.wfile.write(b"%x\r\n" % len(b) + b + b"\r\n")
+            self.wfile.flush()
+        w({**base, "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}]})
+        if kind == "dropcall":
+            a = json.dumps({"command": text})
+            w({**base, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_drop", "type": "function", "function": {"name": "bash", "arguments": a}}]}}]})
+        else:
+            for i in range(0, len(text), 16):
+                w({**base, "choices": [{"index": 0, "delta": {"content": text[i:i + 16]}}]})
+        time.sleep(0.2)
+        sock = self.connection
+        if mode == "stall":
+            end = time.time() + STALL_SECS
+            while time.time() < end:
+                time.sleep(0.2)
+                try:  # stop once the client gave up (its FIN/RST makes the socket readable)
+                    import select
+                    r, _, _ = select.select([sock], [], [], 0)
+                    if r and not sock.recv(1, socket.MSG_PEEK): break
+                except OSError:
+                    break
+        elif mode == "rst":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        else:
+            sock.shutdown(socket.SHUT_RDWR)
+        self.close_connection = True
+        try: sock.close()
+        except OSError: pass
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 18080

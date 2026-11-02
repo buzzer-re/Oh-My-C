@@ -71,6 +71,9 @@ struct app {
     int retry_count;
     int retry_offset;
     int retry_saga; /* attempt of the last auto_retry_start (0: no retry saga open) */
+    int stall_continues; /* committed-text stream-stall continuations this prompt (turn_recovery.h) */
+    bool text_buffered;  /* streamed text is not committed to an output sink yet (subagents, print-mode text):
+                          * omp setTextOutputCommitted(false), a failed turn's partial text is replay-safe */
     strvec_t retry_notes;
     char *model_role; /* role of the last model change made through a role (Ctrl+P cycle), NULL otherwise */ /* recovery notes of this run's retried attempts, applied when a turn succeeds */ /* agent retry attempts spent before the latest fallback switch (fresh budget) */
     /* active retry fallback (turn-recovery.ts ActiveRetryFallbackState) */

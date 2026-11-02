@@ -829,6 +829,7 @@ json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target) 
     json_t *msg;
     /* pending tool calls awaiting results: ids */
     strvec_t pending_ids = {0}, pending_names = {0};
+    bool pending_aborted = false; /* the pending calls belong to an errored/aborted turn: missing results read "aborted" */
     json_arr_foreach(messages, i, msg) {
         const char *role = json_get_str(msg, "role");
         if (!role) continue;
@@ -842,7 +843,7 @@ json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target) 
                 json_t *c = json_arr();
                 json_t *t = json_obj();
                 json_set_str(t, "type", "text");
-                json_set_str(t, "text", "No result provided");
+                json_set_str(t, "text", pending_aborted ? "aborted" : "No result provided");
                 json_push(c, t);
                 json_set(tr, "content", c);
                 json_set_bool(tr, "isError", true);
@@ -852,15 +853,18 @@ json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target) 
             strvec_free(&pending_ids);
             strvec_free(&pending_names);
             const char *stop = json_get_str(msg, "stopReason");
-            if (stop && (strcmp(stop, "error") == 0 || strcmp(stop, "aborted") == 0)) {
-                /* keep aborted turns only if they produced content; drop tool calls (incomplete) */
-                json_t *c = json_get(msg, "content");
-                bool has_text = false;
+            bool truncated = str_eq(stop, "error") || str_eq(stop, "aborted");
+            pending_aborted = truncated;
+            if (truncated || str_eq(stop, "length")) {
+                /* shouldDropTruncatedThinkingOnlyAssistant: a cut-off turn without text or tool calls is dropped; an
+                 * errored turn keeps its calls, paired with their (synthetic) results or "aborted" */
+                bool keep = false;
                 json_t *blk;
-                json_arr_foreach(c, j, blk) {
-                    if (str_eq(json_get_str(blk, "type"), "text") && !str_empty(json_get_str(blk, "text"))) has_text = true;
+                json_arr_foreach(json_get(msg, "content"), j, blk) {
+                    const char *bt = json_get_str(blk, "type");
+                    if (str_eq(bt, "text") || str_eq(bt, "toolCall")) keep = true;
                 }
-                if (!has_text) continue;
+                if (!keep) continue;
             }
             bool same = target && str_eq(json_get_str(msg, "provider"), target->provider) &&
                         str_eq(json_get_str(msg, "model"), target->id) && str_eq(json_get_str(msg, "api"), target->api);
@@ -892,7 +896,6 @@ json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target) 
                 } else if (str_eq(t, "redactedThinking")) {
                     if (same) json_push(nc, json_clone(blk));
                 } else if (str_eq(t, "toolCall")) {
-                    if (stop && (strcmp(stop, "error") == 0 || strcmp(stop, "aborted") == 0)) continue;
                     json_t *tc = json_clone(blk);
                     if (!same) json_del(tc, "thoughtSignature");
                     json_push(nc, tc);
@@ -953,7 +956,7 @@ json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target) 
                 json_t *c = json_arr();
                 json_t *t = json_obj();
                 json_set_str(t, "type", "text");
-                json_set_str(t, "text", "No result provided");
+                json_set_str(t, "text", pending_aborted ? "aborted" : "No result provided");
                 json_push(c, t);
                 json_set(tr, "content", c);
                 json_set_bool(tr, "isError", true);
@@ -983,7 +986,7 @@ json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target) 
         json_t *c = json_arr();
         json_t *t = json_obj();
         json_set_str(t, "type", "text");
-        json_set_str(t, "text", "No result provided");
+        json_set_str(t, "text", pending_aborted ? "aborted" : "No result provided");
         json_push(c, t);
         json_set(tr, "content", c);
         json_set_bool(tr, "isError", true);

@@ -138,8 +138,11 @@ typedef struct {
      * Return AGENT_STREAM_INTERRUPT to abort the stream and run should_retry(-1) (TTSR, Gemini header runaway), or
      * AGENT_STREAM_ERROR to end the turn as an empty retryable error carrying agent->stream_error (loop guard). */
     int (*on_stream_delta)(void *ud, agent_t *a, const ai_event_t *ev);
-    /* After an assistant message ends with an error; return true to retry the turn. */
-    bool (*should_retry)(void *ud, agent_t *a, const json_t *assistant, int attempt);
+    /* After an assistant message ends with an error (attempt >= 0) or a deliberate stream interrupt (attempt -1):
+     * AGENT_RETRY_NONE ends the run, AGENT_RETRY_REPLAY drops the failed turn and requests again,
+     * AGENT_RETRY_PRESERVE / _CONTINUE keep the failed turn (and the synthetic results of its tool calls) in context
+     * and continue; *append (owned, may stay NULL) is added after the preserved turn (stream-stall reminder). */
+    int (*should_retry)(void *ud, agent_t *a, const json_t *assistant, int attempt, json_t **append);
     /* A tool-loop turn ended and the run continues with another model call (omp onTurnEnd willContinue): the
      * host may rewrite the context (mid-turn compaction); the next request snapshots the messages again. */
     void (*turn_boundary)(void *ud, agent_t *a, const json_t *assistant);
@@ -150,6 +153,10 @@ typedef struct {
     bool (*before_model_call)(void *ud, agent_t *a);
     void *ud;
 } agent_hooks_t;
+
+/* should_retry outcomes; AGENT_RETRY_CONTINUE preserves like AGENT_RETRY_PRESERVE without spending a retry
+ * attempt (committed-text stream-stall continuation) */
+enum { AGENT_RETRY_NONE = 0, AGENT_RETRY_REPLAY = 1, AGENT_RETRY_PRESERVE = 2, AGENT_RETRY_CONTINUE = 3 };
 
 /* ---------- agent ---------- */
 struct agent {

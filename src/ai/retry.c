@@ -355,7 +355,7 @@ static int message_status(const char *msg) {
 }
 
 /* account-level usage/quota limits belong to credential rotation, never to the provider backoff */
-static bool usage_limit_text(const char *msg, int status) {
+bool ai_usage_limit_text(const char *msg, int status) {
     static const char *const pats[] = {
         "usage limit",       "usage_limit",        "limit_reached",         "quota exceeded",    "quota reached",
         "quota_exceeded",    "insufficient_quota", "insufficient quota",    "resource exhausted", "resource_exhausted",
@@ -369,7 +369,7 @@ static bool usage_limit_text(const char *msg, int status) {
 bool ai_provider_retryable_error(const char *message, int status) {
     const char *msg = message ? message : "";
     if (!status) status = message_status(msg);
-    if (usage_limit_text(msg, status)) return false;
+    if (ai_usage_limit_text(msg, status)) return false;
     if (status >= 400 && status < 500 && status != 408 && status != 429) /* ALIYUN_MM_GATEWAY_PATTERN */
         return str_istr(msg, "provided url does not appear to be valid") || str_istr(msg, "download multimodal file timed out");
     static const char *const transient[] = {

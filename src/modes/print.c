@@ -83,6 +83,7 @@ int run_print_mode(app_t *a, const print_opts_t *o) {
     } else {
         agent_subscribe(a->agent, text_listener, &tu);
         a->notice = notice_stderr;
+        a->text_buffered = true; /* setTextOutputCommitted(false): text prints after the run settles */
     }
     int rc = 0;
     guards_disable_stop_reminders(a); /* omp print mode: todo reminders never start extra turns */
