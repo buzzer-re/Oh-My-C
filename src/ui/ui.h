@@ -273,6 +273,11 @@ void ui_left_tap(ui_t *u);                                 /* ← on an empty co
 void ui_agents_init(ui_t *u);                              /* registry listener: badge / HUD / hub / focus refresh */
 void ui_agents_shutdown(ui_t *u);
 size_t ui_background_job_count(ui_t *u);                   /* statusline.c: running jobs outside the subagent badge */
+/* test hooks: pi-utils formatDuration / formatNumber / formatAge (v = ms / n / s), hub cost (v = micro-dollars);
+ * formatMetricColumns of a roster ref; an agent's activity rows */
+char *ui_hub_format(const char *what, int64_t v);
+char *ui_hub_metric_columns(const json_t *ref, const char *age);
+json_t *ui_hub_activity_rows(const json_t *ref, const json_t *messages);
 /* interactive.c: (un)subscribe the transcript's agent-event listener on a session */
 void ix_view_subscribe(ui_t *u, app_t *a, bool on);
 

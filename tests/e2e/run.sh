@@ -343,6 +343,8 @@ rm -f "$T/agent/config.yml"
 if python3 -c 'import pty' 2>/dev/null; then
     check "approval dialog"  "approval ok kinds=permission"  python3 -I "$ROOT/tests/e2e/approval_tui.py" "$B" "bash:echo dialog-ok" '\x11' "Tool said: dialog-ok" --approval-mode always-ask
     check "approval deny key" "approval ok"  python3 -I "$ROOT/tests/e2e/approval_tui.py" "$B" "bash:echo nope" '\x1b' "Tool call denied by user: bash" --approval-mode always-ask
+    # WP-22: badge / hint / HUD, Agent Hub (Alt+A, /hub, ←←), kill/revive, transcript viewer chat, session focus
+    check "agent hub tui" $'hud ok\nhub ok\nactivity ok\nfilter ok\nagents ok\nkill ok\nrevive ok\ntree ok\nclose ok\nslash hub ok\nviewer ok\nchat ok\nviewer close ok\nhub close ok\nleft left ok\nfocus ok\nunfocus ok'  python3 -I "$ROOT/tests/e2e/agenthub_tui.py" "$B"
 fi
 # slash commands (WP-4): one registry behind RPC/ACP advertising and builtin dispatch
 check "acp commands"   "available_commands_update"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo cmds"

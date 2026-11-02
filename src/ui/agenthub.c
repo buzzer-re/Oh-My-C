@@ -2280,3 +2280,44 @@ void ui_agents_shutdown(ui_t *u) {
     free(u->focus_id);
     u->focus_id = NULL;
 }
+
+/* ---------- unit-test hooks (tests/test_agenthub.c) ---------- */
+
+char *ui_hub_format(const char *what, int64_t v) {
+    if (str_eq(what, "duration")) return fmt_duration(v);
+    if (str_eq(what, "number")) return fmt_number(v);
+    if (str_eq(what, "age")) return fmt_age(v);
+    if (str_eq(what, "cost")) return fmt_cost((double)v / 1e6);
+    return NULL;
+}
+
+/* formatMetricColumns of a roster ref's progress (NULL without one); owned */
+char *ui_hub_metric_columns(const json_t *ref, const char *age) {
+    metrics_t m;
+    return row_metrics(ref, &m) ? metric_columns(&m, age) : NULL;
+}
+
+/* one agent's activity rows as [{source, kind, title, summary, status}]: transcript rows, then live rows */
+json_t *ui_hub_activity_rows(const json_t *ref, const json_t *messages) {
+    arows_t live = {0}, tr = {0};
+    live_rows(ref, 1000, &live);
+    transcript_rows(json_get_str(ref, "id"), messages, &tr);
+    json_t *out = json_arr();
+    static const char *const K[] = {"response", "tool", "irc", "lifecycle"}, *const ST[] = {"", "pending", "success", "error", "aborted"};
+    arows_t *src[2] = {&tr, &live};
+    for (int s = 0; s < 2; s++)
+        for (size_t i = 0; i < src[s]->n; i++) {
+            const arow_t *a = &src[s]->v[i];
+            json_t *o = json_obj();
+            json_set_str(o, "source", s ? "live" : "transcript");
+            json_set_str(o, "kind", K[a->kind]);
+            json_set_str(o, "title", arow_title(a));
+            json_set_str(o, "summary", a->summary);
+            json_set_str(o, "status", ST[a->status]);
+            json_push(out, o);
+        }
+    arows_clear(&live), arows_clear(&tr);
+    vec_free(&live);
+    vec_free(&tr);
+    return out;
+}
