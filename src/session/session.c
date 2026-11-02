@@ -111,6 +111,14 @@ session_t *session_create(const char *cwd, const char *session_dir) {
     return s;
 }
 
+session_t *session_create_file(const char *cwd, const char *file) {
+    session_t *s = session_new_base(cwd);
+    s->persist = true;
+    s->dir = path_dirname(file);
+    s->file = xstrdup(file);
+    return s;
+}
+
 void session_free(session_t *s) {
     if (!s) return;
     json_free(s->header);

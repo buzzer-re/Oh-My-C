@@ -22,6 +22,7 @@ typedef struct {
     const char *fork;           /* --fork <id|path> */
     bool continue_recent;       /* -c */
     bool no_session;
+    const char *session_file;   /* persist the session at this path (subagent transcripts); wins over no_session */
     const char *system_prompt;
     const char *append_system_prompt;
     const char *system_prompt_template; /* --system-prompt-template: Handlebars template text replacing the bundled one */
@@ -371,6 +372,9 @@ char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const
 /* child session for subagent `agent_name` (agents dirs); model_override (pattern) and append_prompt are optional */
 app_t *app_subagent_new(app_t *parent, const char *agent_name, const char *model_override, const char *append_prompt,
                         char **err);
+/* … whose transcript persists at `session_file` (`<artifacts>/<id>.jsonl`; NULL = in memory) */
+app_t *app_subagent_new_at(app_t *parent, const char *agent_name, const char *model_override, const char *append_prompt,
+                           const char *session_file, char **err);
 /* subagent runner (task tool) */
 char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assignment, const char *context,
                        json_t **details, volatile sig_atomic_t *cancel);

@@ -6,6 +6,7 @@
 #include "core/fs.h"
 #include "prompt/template.h"
 #include "session/session.h"
+#include "tools/artifacts.h"
 #include "tools/jobs.h"
 
 #include <ctype.h>
@@ -43,6 +44,7 @@ typedef struct aref {
     bool executor_run;     /* the current run is an executor run (task spawn / IRC wake): progress tracks it */
     bool lifecycle_open;   /* a `started` lifecycle frame went out without its terminal one */
     char *gist;            /* hub activity: latest intent or `running <tool>` of the current run */
+    char *session_file;    /* persisted transcript `<artifacts>/<id>.jsonl` (NULL: in memory only) */
     int pins;              /* a UI view holds `app` (session focus): never freed underneath it */
 } aref_t;
 
@@ -307,14 +309,15 @@ static const char *agent_source_of(const aref_t *r) {
 /* SubagentLifecyclePayload */
 static json_t *lifecycle_payload_locked(const aref_t *r, const char *status) {
     json_t *p = json_obj();
-    json_set_str(p, "id", r->id);
+    json_set_str(p, "id", r->id); /* omp executor key order */
     json_set_str(p, "agent", r->agent);
+    if (r->parent_call) json_set_str(p, "parentToolCallId", r->parent_call);
+    json_set_bool(p, "detached", true);
     json_set_str(p, "agentSource", agent_source_of(r));
     if (r->description) json_set_str(p, "description", r->description);
     json_set_str(p, "status", status);
-    if (r->parent_call) json_set_str(p, "parentToolCallId", r->parent_call);
+    if (r->session_file) json_set_str(p, "sessionFile", r->session_file);
     json_set_int(p, "index", r->index);
-    json_set_bool(p, "detached", true);
     return p;
 }
 
@@ -326,9 +329,10 @@ static json_t *progress_payload_locked(const aref_t *r) {
     json_set_str(p, "agentSource", agent_source_of(r));
     json_set_str(p, "task", json_get_str(r->progress, "task") ? json_get_str(r->progress, "task") : "");
     if (r->parent_call) json_set_str(p, "parentToolCallId", r->parent_call);
+    json_set_bool(p, "detached", true);
     if (json_get_str(r->progress, "assignment")) json_set_str(p, "assignment", json_get_str(r->progress, "assignment"));
     json_set(p, "progress", json_clone(r->progress));
-    json_set_bool(p, "detached", true);
+    if (r->session_file) json_set_str(p, "sessionFile", r->session_file);
     return p;
 }
 
@@ -372,6 +376,7 @@ __attribute__((unused)) static void ref_free(aref_t *r) {
     free(r->model);
     free(r->recent_tail);
     free(r->gist);
+    free(r->session_file);
     free(r->id);
     free(r->agent);
     free(r->parent_id);
@@ -620,6 +625,10 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
         r->progress = progress_new_locked(r, prompt, keep_assign);
         if (old && json_get_str(old, "agentSource")) json_set_str(r->progress, "agentSource", json_get_str(old, "agentSource"));
         json_free(old);
+        /* the model the run resolved: its identity and context window (omp sets them before the first request) */
+        if (r->model) json_set_str(r->progress, "resolvedModelIdentity", r->model);
+        if (child->model && child->model->context_window > 0)
+            json_set_int(r->progress, "contextWindow", child->model->context_window);
         free(r->recent_tail);
         r->recent_tail = NULL;
         r->active_ms = 0; /* progress (and its active time) is per executor run */
@@ -854,8 +863,14 @@ static app_t *make_child(spawn_t *sp, char **err) {
         session_free(src);
     }
     char *append = peer_roster_prompt(sp->ref, json_get_str(def, "body"), sp->context, sp->source, model);
-    app_t *child = app_subagent_new(sp->parent, sp->agent, model, append, err);
+    /* the transcript persists next to the parent's artifacts (omp `<artifactsDir>/<id>.jsonl`) */
+    const char *adir = sp->parent && sp->parent->env ? artifacts_dir(sp->parent->env->artifacts) : NULL;
+    char *sfile = adir ? xasprintf("%s/%s.jsonl", adir, sp->ref->id) : NULL;
+    app_t *child = app_subagent_new_at(sp->parent, sp->agent, model, append, sfile, err);
     pthread_mutex_lock(&g_mu);
+    free(sp->ref->session_file);
+    sp->ref->session_file = child ? sfile : NULL;
+    if (!child) free(sfile);
     free(sp->ref->sys_append);
     sp->ref->sys_append = append;
     free(sp->ref->model);
@@ -1562,6 +1577,7 @@ static json_t *ref_json_locked(const aref_t *r) {
         }
     }
     json_set_bool(o, "live", r->app != NULL);
+    if (r->session_file) json_set_str(o, "sessionFile", r->session_file);
     if (r->parent_call) json_set_str(o, "parentToolCallId", r->parent_call);
     if (r->job_id) json_set_str(o, "jobId", r->job_id);
     if (r->progress) {

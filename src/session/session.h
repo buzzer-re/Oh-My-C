@@ -24,6 +24,7 @@ typedef struct {
 /* lifecycle */
 session_t *session_create(const char *cwd, const char *session_dir); /* lazy file creation */
 session_t *session_in_memory(const char *cwd);
+session_t *session_create_file(const char *cwd, const char *file); /* persisted at `file` (lazy, like session_create) */
 session_t *session_open(const char *path, char **err);
 session_t *session_continue_recent(const char *cwd, const char *session_dir); /* NULL if none */
 void session_free(session_t *s);

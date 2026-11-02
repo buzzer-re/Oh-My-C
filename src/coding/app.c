@@ -1564,7 +1564,9 @@ app_t *app_create(const app_opts_t *o, char **err) {
         json_free(cfg);
     }
     /* session */
-    if (o->no_session) {
+    if (o->session_file) {
+        a->session = session_create_file(a->cwd, o->session_file);
+    } else if (o->no_session) {
         a->session = session_in_memory(a->cwd);
     } else if (o->resume) {
         char *path = session_resolve(o->resume, a->cwd);
@@ -3259,7 +3261,13 @@ static void *cancel_watch(void *x) {
 
 app_t *app_subagent_new(app_t *parent, const char *agent_name, const char *model_override, const char *append_prompt,
                         char **err) {
+    return app_subagent_new_at(parent, agent_name, model_override, append_prompt, NULL, err);
+}
+
+app_t *app_subagent_new_at(app_t *parent, const char *agent_name, const char *model_override, const char *append_prompt,
+                           const char *session_file, char **err) {
     app_opts_t o = {0};
+    o.session_file = session_file;
     o.cwd = parent->cwd;
     char *label = app_model_label(parent);
     json_t *defs = agent_defs_load(parent->cwd);

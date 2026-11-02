@@ -259,6 +259,8 @@ check "plan yolo"      '"tool": "propose"}} Plan approved. Implementing now with
 check "plan yolo into" '--plan-yolo-into requires --plan-yolo' "$B" --model mock/mock-1 --plan-yolo-into mock/mock-1 -p hi
 check "plan yolo model" 'Model "nope/none" not found' "$B" --model mock/mock-1 --plan-yolo --plan-yolo-into nope/none -p hi
 check "rpc btw"        "btw ok"                   python3 -I "$ROOT/tests/e2e/rpc_btw.py" "$B"
+# WP-22: RPC subagent frames / commands, persisted subagent transcripts
+check "rpc subagents"  $'level {\'level\': \'events\'}\nstarted task True 0 True\nlisted 1 True running task\nsteer True\nprogress True True slow:2:first answer\nevent True True\ncompleted True\nafter 0\ntranscript 0 True False user True True True\ntail True 0\nreset True 0\ncancel {\'cancelled\': True}\naborted True\ncancel again {\'cancelled\': False}\nlevel off {\'level\': \'off\'}' python3 -I "$ROOT/tests/e2e/rpc_subagents.py" "$B"
 # RPC wire parity (omp modes/rpc): framing v1/v2, messageId + delta, session events, response shapes, async bash,
 # ask / approval dialogs over extension_ui_request
 check "rpc wire"       "rpc wire ok"              python3 -I "$ROOT/tests/e2e/rpc_wire.py" "$B"

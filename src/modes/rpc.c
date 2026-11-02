@@ -1,5 +1,6 @@
 /* rpc mode: JSONL commands on stdin, responses + agent events on stdout (omp RPC protocol subset). */
 #include "modes.h"
+#include "coding/agents.h"
 #include "coding/modelctl.h"
 #include "coding/btw.h"
 #include "coding/goal.h"
@@ -88,6 +89,12 @@ struct rpc {
     volatile int login_abort;
     json_t *waiting;           /* ids (or null) of prompts queued into a live run: prompt_result owed at its yield */
     char *open_dir;            /* open_session: the session dir a fresh session was opened in (opts.session_dir) */
+    /* subagent frames (RpcSubagentRegistry): running snapshots, retained transcripts, stale ids, subscription */
+    pthread_mutex_t sub_mu;
+    json_t *subs;      /* id -> RpcSubagentSnapshot of a running subagent */
+    json_t *sub_files; /* id -> transcript file (newest RPC_SUB_RETAINED) */
+    json_t *sub_stale; /* ids from before the last session change */
+    int sub_level;     /* 0 off, 1 progress, 2 events */
 };
 
 /* ---------- output framing (port of modes/rpc/rpc-frame.ts) ---------- */
@@ -2152,6 +2159,314 @@ static int requested_model(const json_t *cmd, const ai_model_t **out, char **err
     return 0;
 }
 
+
+/* ---------- subagent frames and commands (port of modes/rpc/rpc-subagents.ts) ---------- */
+
+#define RPC_SUB_RETAINED 256
+
+/* insert-or-move `key` to the newest end of an ordered set object, keeping at most `max` entries */
+static void sub_add_pruned(json_t *set, const char *key, json_t *val, size_t max) {
+    json_del(set, key);
+    json_set(set, key, val);
+    while (json_len(set) > max) json_del(set, set->u.obj.keys[0]);
+}
+
+static bool sub_same_owner(const json_t *payload, const json_t *snap) {
+    const char *pa = json_get_str(payload, "parentToolCallId"), *sa = json_get_str(snap, "parentToolCallId");
+    if (pa && sa) return str_eq(pa, sa);
+    const char *pf = json_get_str(payload, "sessionFile"), *sf = json_get_str(snap, "sessionFile");
+    if (pf && sf) return str_eq(pf, sf);
+    return true;
+}
+
+static void sub_frame(rpc_t *r, const char *type, const json_t *payload) {
+    json_t *f = json_obj();
+    json_set_str(f, "type", type);
+    json_set(f, "payload", json_clone(payload));
+    emit(r, f);
+    json_free(f);
+}
+
+/* handleLifecycle / handleProgress / handleEvent, on the reporting agent's thread */
+static void rpc_sub_observe(void *ud, const char *channel, const json_t *payload) {
+    rpc_t *r = ud;
+    pthread_mutex_lock(&r->sub_mu);
+    int level = r->sub_level;
+    bool out = false;
+    if (str_eq(channel, "lifecycle")) {
+        const char *id = json_get_str(payload, "id"), *st = json_get_str(payload, "status");
+        json_t *existing = json_get(r->subs, id);
+        if ((existing && !sub_same_owner(payload, existing)) || (!existing && !str_eq(st, "started"))) {
+            pthread_mutex_unlock(&r->sub_mu);
+            return;
+        }
+        if (str_eq(st, "started")) json_del(r->sub_stale, id);
+        const char *sf = json_get_str(payload, "sessionFile");
+        if (!sf) sf = json_get_str(existing, "sessionFile");
+        json_t *snap = json_obj();
+        json_set_str(snap, "id", id);
+        json_set_int(snap, "index", json_get_int(payload, "index", 0));
+        json_set_str(snap, "agent", json_get_str(payload, "agent"));
+        json_set_str(snap, "agentSource", json_get_str(payload, "agentSource"));
+        const char *desc = json_get_str(payload, "description");
+        if (!desc) desc = json_get_str(existing, "description");
+        if (desc) json_set_str(snap, "description", desc);
+        json_set_str(snap, "status", str_eq(st, "started") ? "running" : st);
+        if (json_get_str(existing, "task")) json_set_str(snap, "task", json_get_str(existing, "task"));
+        if (json_get_str(existing, "assignment")) json_set_str(snap, "assignment", json_get_str(existing, "assignment"));
+        if (sf) json_set_str(snap, "sessionFile", sf);
+        const char *ptc = json_get_str(payload, "parentToolCallId");
+        if (!ptc) ptc = json_get_str(existing, "parentToolCallId");
+        if (ptc) json_set_str(snap, "parentToolCallId", ptc);
+        json_set_int(snap, "lastUpdate", now_ms());
+        if (json_get(existing, "progress")) json_set(snap, "progress", json_clone(json_get(existing, "progress")));
+        if (sf) sub_add_pruned(r->sub_files, id, json_str(sf), RPC_SUB_RETAINED);
+        if (!str_eq(st, "started")) {
+            json_del(r->subs, id);
+            json_free(snap);
+        } else json_set(r->subs, id, snap);
+        out = level > 0;
+    } else if (str_eq(channel, "progress")) {
+        const json_t *pr = json_get(payload, "progress");
+        const char *id = json_get_str(pr, "id");
+        json_t *existing = id ? json_get(r->subs, id) : NULL;
+        if (!id || json_get(r->sub_stale, id) || !existing || !sub_same_owner(payload, existing)) {
+            pthread_mutex_unlock(&r->sub_mu);
+            return;
+        }
+        const char *sf = json_get_str(payload, "sessionFile");
+        if (!sf) sf = json_get_str(existing, "sessionFile");
+        if (sf) sub_add_pruned(r->sub_files, id, json_str(sf), RPC_SUB_RETAINED);
+        json_t *snap = json_obj();
+        json_set_str(snap, "id", id);
+        json_set_int(snap, "index", json_get_int(payload, "index", 0));
+        json_set_str(snap, "agent", json_get_str(payload, "agent"));
+        json_set_str(snap, "agentSource", json_get_str(payload, "agentSource"));
+        const char *desc = json_get_str(pr, "description");
+        if (!desc) desc = json_get_str(existing, "description");
+        if (desc) json_set_str(snap, "description", desc);
+        json_set_str(snap, "status", json_get_str(pr, "status"));
+        if (json_get_str(payload, "task")) json_set_str(snap, "task", json_get_str(payload, "task"));
+        if (json_get_str(payload, "assignment")) json_set_str(snap, "assignment", json_get_str(payload, "assignment"));
+        if (sf) json_set_str(snap, "sessionFile", sf);
+        json_set_int(snap, "lastUpdate", now_ms());
+        const char *ptc = json_get_str(payload, "parentToolCallId");
+        if (!ptc) ptc = json_get_str(existing, "parentToolCallId");
+        if (ptc) json_set_str(snap, "parentToolCallId", ptc);
+        json_set(snap, "progress", json_clone(pr));
+        json_set(r->subs, id, snap);
+        out = level > 0;
+    } else if (str_eq(channel, "event")) {
+        out = level == 2 && !json_get(r->sub_stale, json_get_str(payload, "id"));
+    }
+    pthread_mutex_unlock(&r->sub_mu);
+    if (out)
+        sub_frame(r, str_eq(channel, "lifecycle") ? "subagent_lifecycle" : str_eq(channel, "progress") ? "subagent_progress" : "subagent_event",
+                  payload);
+}
+
+/* session changed: every known subagent is stale (its late frames are dropped) */
+static void rpc_sub_clear(rpc_t *r) {
+    pthread_mutex_lock(&r->sub_mu);
+    const char *k;
+    json_t *v;
+    json_obj_foreach(r->subs, i, k, v) sub_add_pruned(r->sub_stale, k, json_bool(true), RPC_SUB_RETAINED);
+    json_obj_foreach(r->sub_files, i, k, v) sub_add_pruned(r->sub_stale, k, json_bool(true), RPC_SUB_RETAINED);
+    UNUSED(v);
+    json_free(r->subs);
+    json_free(r->sub_files);
+    r->subs = json_obj();
+    r->sub_files = json_obj();
+    pthread_mutex_unlock(&r->sub_mu);
+}
+
+static int sub_cmp(const void *a, const void *b) {
+    const json_t *x = *(const json_t *const *)a, *y = *(const json_t *const *)b;
+    int64_t d = json_get_int(x, "index", 0) - json_get_int(y, "index", 0);
+    if (d) return d < 0 ? -1 : 1;
+    return strcmp(json_get_str(x, "id"), json_get_str(y, "id"));
+}
+
+static json_t *rpc_sub_list(rpc_t *r) {
+    pthread_mutex_lock(&r->sub_mu);
+    size_t n = json_len(r->subs);
+    json_t **v = xcalloc(n + 1, sizeof *v);
+    const char *k;
+    json_t *s;
+    json_obj_foreach(r->subs, i, k, s) v[i] = s;
+    UNUSED(k);
+    qsort(v, n, sizeof *v, sub_cmp);
+    json_t *arr = json_arr();
+    for (size_t i = 0; i < n; i++) json_push(arr, json_clone(v[i]));
+    free(v);
+    pthread_mutex_unlock(&r->sub_mu);
+    return arr;
+}
+
+/* resolveOwnedLiveSubagent: a running subagent this session lists, still running in the registry */
+static bool rpc_sub_owned_live(rpc_t *r, const char *id) {
+    pthread_mutex_lock(&r->sub_mu);
+    json_t *snap = json_get(r->subs, id);
+    const char *st = json_get_str(snap, "status");
+    bool listed = snap && (str_eq(st, "running") || str_eq(st, "pending"));
+    pthread_mutex_unlock(&r->sub_mu);
+    if (!listed) return false;
+    json_t *ref = agents_get(id);
+    bool ok = ref && str_eq(json_get_str(ref, "status"), "running") && json_get_bool(ref, "live", false);
+    json_free(ref);
+    return ok;
+}
+
+/* readRpcSubagentTranscript */
+static json_t *rpc_sub_transcript(const char *file, int64_t from) {
+    int64_t start = from > 0 ? from : 0;
+    size_t size = 0;
+    char *data = fs_read(file, &size);
+    json_t *d = json_obj();
+    json_set_str(d, "sessionFile", file);
+    bool reset = false;
+    if (!data) {
+        json_set_int(d, "fromByte", start);
+        json_set_int(d, "nextByte", start);
+        json_set_bool(d, "reset", false);
+        json_set(d, "entries", json_arr());
+        json_set(d, "messages", json_arr());
+        return d;
+    }
+    if (start > (int64_t)size) start = 0, reset = true;
+    const char *text = data + start;
+    size_t len = size - (size_t)start;
+    size_t complete = 0;
+    for (size_t i = len; i > 0; i--)
+        if (text[i - 1] == '\n') {
+            complete = i;
+            break;
+        }
+    json_t *entries = json_arr(), *messages = json_arr();
+    size_t pos = 0;
+    while (pos < complete) {
+        const char *nl = memchr(text + pos, '\n', complete - pos);
+        size_t ll = (size_t)(nl - (text + pos));
+        json_t *e = ll ? json_parse(text + pos, ll, NULL) : NULL;
+        if (json_is_obj(e)) {
+            if (str_eq(json_get_str(e, "type"), "message") && json_get(e, "message")) json_push(messages, json_clone(json_get(e, "message")));
+            json_push(entries, e);
+        } else json_free(e);
+        pos += ll + 1;
+    }
+    json_set_int(d, "fromByte", start);
+    json_set_int(d, "nextByte", start + (int64_t)complete);
+    json_set_bool(d, "reset", reset);
+    json_set(d, "entries", entries);
+    json_set(d, "messages", messages);
+    free(data);
+    return d;
+}
+
+/* set_subagent_subscription, get_subagents, get_subagent_messages, cancel_subagent, steer_subagent; false when
+ * `type` is none of them */
+static bool rpc_sub_command(rpc_t *r, const json_t *cmd, const char *id, const char *type) {
+    if (str_eq(type, "set_subagent_subscription")) {
+        const char *lv = json_get_str(cmd, "level");
+        int level = str_eq(lv, "off") ? 0 : str_eq(lv, "progress") ? 1 : str_eq(lv, "events") ? 2 : -1;
+        if (level < 0) {
+            json_t *l = json_get(cmd, "level");
+            char *s = !l ? xstrdup("undefined") : json_is_str(l) ? xstrdup(json_sv(l)) : json_dump_js(l);
+            char *m = xasprintf("Invalid subagent subscription level: %s", s);
+            respond(r, id, type, false, NULL, m);
+            free(m), free(s);
+            return true;
+        }
+        pthread_mutex_lock(&r->sub_mu);
+        r->sub_level = level;
+        pthread_mutex_unlock(&r->sub_mu);
+        agents_observe(rpc_sub_observe, r, level == 2);
+        json_t *d = json_obj();
+        json_set_str(d, "level", lv);
+        respond(r, id, type, true, d, NULL);
+        return true;
+    }
+    if (str_eq(type, "get_subagents")) {
+        json_t *d = json_obj();
+        json_set(d, "subagents", rpc_sub_list(r));
+        respond(r, id, type, true, d, NULL);
+        return true;
+    }
+    if (str_eq(type, "get_subagent_messages")) {
+        const json_t *fb = json_get(cmd, "fromByte");
+        if (fb && !json_is_num(fb)) {
+            respond(r, id, type, false, NULL, "fromByte must be a finite number");
+            return true;
+        }
+        const char *sid = json_get_str(cmd, "subagentId"), *sfile = json_get_str(cmd, "sessionFile");
+        char *file = NULL, *err = NULL;
+        pthread_mutex_lock(&r->sub_mu);
+        if (sid && *sid) {
+            const char *f = json_get_str(json_get(r->subs, sid), "sessionFile");
+            if (!f) f = json_sv(json_get(r->sub_files, sid));
+            if (f) file = xstrdup(f);
+            else err = xasprintf("Unknown subagent or session file unavailable: %s", sid);
+        } else if (sfile && *sfile) {
+            bool known = false;
+            const char *k;
+            json_t *v;
+            json_obj_foreach(r->subs, i, k, v) known = known || str_eq(json_get_str(v, "sessionFile"), sfile);
+            json_obj_foreach(r->sub_files, i, k, v) known = known || str_eq(json_sv(v), sfile);
+            UNUSED(k);
+            if (known) file = xstrdup(sfile);
+            else err = xstrdup("Unknown subagent session file");
+        } else err = xstrdup("get_subagent_messages requires subagentId or sessionFile");
+        pthread_mutex_unlock(&r->sub_mu);
+        if (err) respond(r, id, type, false, NULL, err);
+        else respond(r, id, type, true, rpc_sub_transcript(file, fb ? (int64_t)json_get_num(cmd, "fromByte", 0) : 0), NULL);
+        free(file), free(err);
+        return true;
+    }
+    if (str_eq(type, "cancel_subagent") || str_eq(type, "steer_subagent")) {
+        const char *sid = json_get_str(cmd, "subagentId");
+        if (!sid || !*sid) {
+            respond(r, id, type, false, NULL, "`subagentId` must be a non-empty string.");
+            return true;
+        }
+        if (str_eq(type, "cancel_subagent")) {
+            bool cancelled = false;
+            if (rpc_sub_owned_live(r, sid)) {
+                char *err = NULL;
+                cancelled = agents_kill(sid, &err);
+                free(err);
+            }
+            json_t *d = json_obj();
+            json_set_bool(d, "cancelled", cancelled);
+            respond(r, id, type, true, d, NULL);
+            return true;
+        }
+        const char *msg = json_get_str(cmd, "message");
+        char *mt = msg ? str_trim(msg) : NULL;
+        bool empty = !mt || !*mt;
+        free(mt);
+        if (empty) {
+            respond(r, id, type, false, NULL, "`message` is required for steer_subagent.");
+            return true;
+        }
+        if (!rpc_sub_owned_live(r, sid)) {
+            char *m = xasprintf("Subagent not running: %s", sid);
+            respond(r, id, type, false, NULL, m);
+            free(m);
+            return true;
+        }
+        char *err = NULL;
+        if (agents_prompt(sid, msg, &err)) respond(r, id, type, true, NULL, NULL);
+        else {
+            char *m = xasprintf("Subagent refused the message: %s", err ? err : "unknown error");
+            respond(r, id, type, false, NULL, m);
+            free(m);
+        }
+        free(err);
+        return true;
+    }
+    return false;
+}
+
 static void session_change(rpc_t *r, const json_t *cmd, const char *id, const char *type) {
     app_t *a = r->a;
     bool busy = r->running || agent_is_running(a->agent) || a->compacting;
@@ -2262,6 +2577,7 @@ static void session_change(rpc_t *r, const json_t *cmd, const char *id, const ch
         return;
     }
     free(err);
+    if (!json_get_bool(d, "cancelled", false)) rpc_sub_clear(r);
     app_queue_changed(a);
     emit_available_commands(r);
     respond(r, id, type, true, d, NULL);
@@ -2458,6 +2774,8 @@ static void handle(rpc_t *r, json_t *cmd) {
         json_t *d = json_obj();
         json_set(d, "toolNames", names);
         respond(r, id, type, true, d, NULL);
+    } else if (rpc_sub_command(r, cmd, id, type)) {
+        /* subagent commands (rpc-subagents.ts) */
     } else if (!strcmp(type, "set_event_filter")) {
         json_t *ev = json_get(cmd, "events"), *x;
         bool ok = json_is_null(ev) && ev;
@@ -2972,6 +3290,9 @@ rpc_t *rpc_attach(app_t *a, rpc_sink_fn sink, void *ud) {
     pthread_cond_init(&r->ui_cv, NULL);
     pthread_mutex_init(&r->bash_mu, NULL);
     pthread_mutex_init(&r->bg_mu, NULL);
+    pthread_mutex_init(&r->sub_mu, NULL);
+    r->subs = json_obj(), r->sub_files = json_obj(), r->sub_stale = json_obj();
+    agents_observe(rpc_sub_observe, r, false); /* snapshots for get_subagents; frames only once subscribed */
     r->proto = 1;
     json_t *ready = json_obj(), *sv = json_arr();
     json_set_str(ready, "type", "ready");
@@ -3084,6 +3405,9 @@ void rpc_detach(rpc_t *r) {
     free(r->btw_starting_topic);
     json_free(r->btw_unsaved);
     pthread_mutex_destroy(&r->btw_mu);
+    agents_unobserve(rpc_sub_observe, r);
+    json_free(r->subs), json_free(r->sub_files), json_free(r->sub_stale);
+    pthread_mutex_destroy(&r->sub_mu);
     agent_unsubscribe(a->agent, rpc_listener, r);
     if (a->notice == notice_rpc) {
         a->notice = NULL;

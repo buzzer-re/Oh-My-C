@@ -1,0 +1,17 @@
+[
+ {"send": {"id": "q0", "type": "set_subagent_subscription", "level": "bogus"}}, {"wait": "response:q0"},
+ {"send": {"id": "q1", "type": "set_subagent_subscription", "level": "progress"}}, {"wait": "response:q1"},
+ {"send": {"id": "g0", "type": "get_subagents"}}, {"wait": "response:g0"},
+ {"send": {"id": "m0", "type": "get_subagent_messages"}}, {"wait": "response:m0"},
+ {"send": {"id": "m1", "type": "get_subagent_messages", "subagentId": "Nobody"}}, {"wait": "response:m1"},
+ {"send": {"id": "m2", "type": "get_subagent_messages", "sessionFile": "/nowhere.jsonl"}}, {"wait": "response:m2"},
+ {"send": {"id": "m3", "type": "get_subagent_messages", "subagentId": "x", "fromByte": "1"}}, {"wait": "response:m3"},
+ {"send": {"id": "c0", "type": "cancel_subagent"}}, {"wait": "response:c0"},
+ {"send": {"id": "c1", "type": "cancel_subagent", "subagentId": "Nobody"}}, {"wait": "response:c1"},
+ {"send": {"id": "t0", "type": "steer_subagent", "subagentId": "Nobody"}}, {"wait": "response:t0"},
+ {"send": {"id": "t1", "type": "steer_subagent", "subagentId": "Nobody", "message": "hi"}}, {"wait": "response:t1"},
+ {"send": {"id": "p1", "type": "prompt", "message": "call:task:{\"context\":\"ctx\",\"tasks\":[{\"task\":\"say:child done\"}]}"}},
+ {"wait": "subagent_lifecycle"}, {"wait": "subagent_lifecycle"}, {"sleep": 1},
+ {"send": {"id": "g1", "type": "get_subagents"}}, {"wait": "response:g1"},
+ {"wait": "prompt_result:p1"}, {"wait": "session_settled"}
+]
