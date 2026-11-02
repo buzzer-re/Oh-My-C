@@ -1321,10 +1321,10 @@ static void sv_unshift(strvec_t *v, char *s) {
 size_t ui_background_job_count(ui_t *u) {
     app_t *a = ui_view_app(u);
     if (!a || !a->env || !a->env->jobs) return 0;
-    json_t *snap = jobs_snapshot(a->env->jobs), *running = agents_running(), *j;
+    /* every running job of the viewed session's tree (its subagents' managers too: omp shares one manager) */
+    json_t *snap = agents_job_tree(a, 0), *running = agents_running(), *j;
     size_t n = 0;
-    json_arr_foreach(snap, i, j) {
-        if (!str_eq(json_get_str(j, "status"), "running")) continue;
+    json_arr_foreach(json_get_arr(snap, "running"), i, j) {
         const char *aid = json_get_str(j, "agentId");
         bool badge = false;
         json_t *r;

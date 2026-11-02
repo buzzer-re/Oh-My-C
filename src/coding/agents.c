@@ -1827,3 +1827,92 @@ char *agents_parent_of(const char *id) {
     pthread_mutex_unlock(&g_mu);
     return res;
 }
+
+/* getAsyncJobTree: jobs of `root` and of every live subagent below it (each subagent session keeps its own job
+ * manager here, so a job's owner is the agent whose manager holds it); running ones plus the `recent_limit` newest
+ * settled ones, with the owning agents and the ancestors linking them to `root`. Owned. */
+static int job_newest_first(const void *a, const void *b) {
+    int64_t x = json_get_int(*(const json_t *const *)a, "startedAt", 0), y = json_get_int(*(const json_t *const *)b, "startedAt", 0);
+    return x > y ? -1 : x < y;
+}
+
+json_t *agents_job_tree(app_t *root, size_t recent_limit) {
+    json_t *out = json_obj(), *running = json_arr(), *recent_all = json_arr(), *agents = json_arr();
+    const char *root_id = agents_id_of(root);
+    json_set_str(out, "rootId", root_id ? root_id : MAIN_AGENT_ID);
+    /* the managers in the tree: root's, then each live subagent whose lineage reaches root */
+    VEC(app_t *) apps = {0};
+    strvec_t owners = {0};
+    json_t *parents = json_obj();
+    pthread_mutex_lock(&g_mu);
+    for (size_t i = 0; i < g_refs.n; i++) {
+        aref_t *r = g_refs.v[i];
+        if (!r->is_main && r->parent_id) json_set_str(parents, r->id, r->parent_id);
+    }
+    for (size_t i = 0; i < g_refs.n; i++) {
+        aref_t *r = g_refs.v[i];
+        if (r->is_main || r->gone || !r->app || !r->app->env || !r->app->env->jobs) continue;
+        bool below = false;
+        const char *p = r->parent_id;
+        for (int guard = 0; p && guard < 64 && !below; guard++) {
+            if (root_id && str_eq(p, root_id)) below = true;
+            else p = json_get_str(parents, p);
+        }
+        if (!below) continue;
+        r->pins++; /* held while its jobs are read */
+        vec_push(&apps, r->app);
+        strvec_push(&owners, r->id);
+    }
+    pthread_mutex_unlock(&g_mu);
+    for (size_t k = 0; k <= apps.n; k++) {
+        app_t *a = k == 0 ? root : apps.v[k - 1];
+        if (!a || !a->env || !a->env->jobs) continue;
+        json_t *snap = jobs_snapshot(a->env->jobs), *j;
+        json_arr_foreach(snap, i, j) {
+            json_t *c = json_clone(j);
+            if (k > 0) json_set_str(c, "ownerId", owners.v[k - 1]);
+            json_push(str_eq(json_get_str(j, "status"), "running") ? running : recent_all, c);
+        }
+        json_free(snap);
+    }
+    for (size_t k = 0; k < apps.n; k++) agents_unpin(apps.v[k]);
+    vec_free(&apps);
+    strvec_free(&owners);
+    /* newest settled first, capped */
+    size_t n = json_len(recent_all);
+    json_t **v = xcalloc(n + 1, sizeof *v);
+    for (size_t i = 0; i < n; i++) v[i] = json_at(recent_all, i);
+    qsort(v, n, sizeof *v, job_newest_first);
+    json_t *recent = json_arr();
+    for (size_t i = 0; i < n && i < recent_limit; i++) json_push(recent, json_clone(v[i]));
+    free(v);
+    json_free(recent_all);
+    /* agents: every owner and its ancestors below root; a task job's agent links to its owner when unregistered */
+    json_t *seen = json_obj(), *j;
+    for (int pass = 0; pass < 2; pass++) {
+        json_arr_foreach(pass ? recent : running, i, j) {
+            const char *aid = json_get_str(j, "agentId");
+            if (aid && !json_get(parents, aid)) json_set_str(parents, aid, json_get_str(j, "ownerId") ? json_get_str(j, "ownerId") : (root_id ? root_id : MAIN_AGENT_ID));
+        }
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        json_arr_foreach(pass ? recent : running, i, j) {
+            const char *id = json_get_str(j, "ownerId");
+            for (int guard = 0; id && guard < 64 && !(root_id && str_eq(id, root_id)) && !json_get(seen, id); guard++) {
+                json_set_bool(seen, id, true);
+                json_t *ag = json_obj();
+                json_set_str(ag, "id", id);
+                const char *p = json_get_str(parents, id);
+                if (p) json_set_str(ag, "parentId", p);
+                json_push(agents, ag);
+                id = p;
+            }
+        }
+    }
+    json_free(seen);
+    json_free(parents);
+    json_set(out, "running", running);
+    json_set(out, "recent", recent);
+    json_set(out, "agents", agents);
+    return out;
+}

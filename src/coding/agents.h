@@ -87,6 +87,9 @@ bool agents_prompt(const char *id, const char *text, char **err);
 struct app *agents_pin(const char *id);
 void agents_unpin(struct app *a);
 char *agents_parent_of(const char *id); /* owned parent id or NULL */
+/* getAsyncJobTree for /jobs: {rootId, running:[job], recent:[job] (newest `recent_limit` settled), agents:[{id,
+ * parentId?}]}; jobs are jobs_snapshot rows, those of a subagent's own manager carry its `ownerId`. Owned. */
+json_t *agents_job_tree(struct app *root, size_t recent_limit);
 /* registry changes (spawn, status, progress, kill/revive); fn runs on any thread, without registry locks */
 typedef void (*agents_change_fn)(void *ud);
 void agents_listen(agents_change_fn fn, void *ud);

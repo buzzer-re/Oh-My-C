@@ -2,6 +2,7 @@
  * handleJobsCommand, overlays/session-info-overlay.ts, overlays/job-tree.ts, prompt/tools-markdown.ts and the
  * builtin-session.ts `/session` and `/jobs` subcommands). */
 #include "ui/ui.h"
+#include "coding/agents.h"
 #include "ui/tools/tc.h"
 
 #include "config/auth.h"
@@ -492,7 +493,7 @@ void ui_tools_command(ui_t *u) {
     free(md);
 }
 
-/* ---------- /jobs (handleJobsCommand + job-tree.ts; omc jobs have no subagent owner, so the tree is flat) ---------- */
+/* ---------- /jobs (handleJobsCommand + job-tree.ts: the session's jobs and its subagents' as one tree) ---------- */
 
 static char *job_status(const char *st) {
     if (str_eq(st, "running")) return S(TUI_TC_WARNING, "running");
@@ -507,65 +508,208 @@ static char *truncate_label(const char *label, int max) {
     return tui_truncate_to_width(label, max, NULL);
 }
 
-static int job_cmp(const void *pa, const void *pb) {
-    const json_t *a = *(const json_t *const *)pa, *b = *(const json_t *const *)pb;
-    bool ra = str_eq(json_get_str(a, "status"), "running"), rb = str_eq(json_get_str(b, "status"), "running");
-    if (ra != rb) return ra ? -1 : 1;
-    int64_t sa = json_get_int(a, "startedAt", 0), sb2 = json_get_int(b, "startedAt", 0);
-    return sa < sb2 ? -1 : sa > sb2;
+/* job-tree.ts buildJobTree: subagents as nodes under their parents (a task job heads its subagent), jobs under their
+ * owning agent; nodes sorted by subtree size, running first, then start time */
+typedef struct jnode {
+    const json_t *job;
+    const json_t *agent;
+    VEC(struct jnode *) kids;
+    int size;
+    bool running;
+    int64_t start;
+} jnode_t;
+
+typedef struct {
+    const json_t *job, *agent;
+    int depth;
+    bool last, parent;
+    bool rails[64];
+    int nrails;
+} jrow_t;
+
+static int jnode_cmp(const void *pa, const void *pb) {
+    const jnode_t *a = *(const jnode_t *const *)pa, *b = *(const jnode_t *const *)pb;
+    if (a->size != b->size) return b->size - a->size;
+    if (a->running != b->running) return a->running ? -1 : 1;
+    return a->start < b->start ? -1 : a->start > b->start;
+}
+
+static void jnode_settle(jnode_t *n, int depth) {
+    size_t w = 0;
+    for (size_t i = 0; i < n->kids.n; i++) {
+        jnode_t *k = n->kids.v[i];
+        if (depth < 64) jnode_settle(k, depth + 1);
+        if (k->job || k->kids.n) n->kids.v[w++] = k;
+    }
+    n->kids.n = w;
+    qsort(n->kids.v, n->kids.n, sizeof *n->kids.v, jnode_cmp);
+    n->size = 0;
+    n->running = n->job && str_eq(json_get_str(n->job, "status"), "running");
+    n->start = n->job ? json_get_int(n->job, "startedAt", 0) : INT64_MAX;
+    for (size_t i = 0; i < n->kids.n; i++) {
+        jnode_t *k = n->kids.v[i];
+        n->size += 1 + k->size;
+        n->running = n->running || k->running;
+        if (k->start < n->start) n->start = k->start;
+    }
+}
+
+typedef VEC(jrow_t) jrows_t;
+
+static void jnode_flatten(jnode_t *n, int depth, const bool *rails, int nrails, bool last, jrows_t *out) {
+    if (n->job || n->agent) {
+        jrow_t r = {n->job, n->agent, depth, last, n->kids.n > 0, {0}, nrails};
+        memcpy(r.rails, rails, sizeof(bool) * (size_t)nrails);
+        vec_push(out, r);
+    }
+    bool sub[64];
+    int ns = 0;
+    if (depth > 0) {
+        memcpy(sub, rails, sizeof(bool) * (size_t)nrails);
+        ns = nrails;
+        if (ns < 63) sub[ns++] = !last;
+    }
+    for (size_t i = 0; i < n->kids.n && depth < 64; i++) jnode_flatten(n->kids.v[i], depth + 1, sub, ns, i + 1 == n->kids.n, out);
+}
+
+static char *rails_prefix(const bool *rails, int n) {
+    sb_t b = SB_INIT;
+    for (int i = 0; i < n; i++) {
+        if (rails[i]) sb_appendf(&b, "%s  ", tui_sym("tree.vertical"));
+        else sb_append(&b, "   ");
+    }
+    return sb_detach(&b);
+}
+
+static char *jrow_guide(const jrow_t *r) {
+    if (r->depth == 0) return xstrdup("");
+    char *p = rails_prefix(r->rails, r->nrails), *g = xasprintf("%s%s ", p, tui_sym(r->last ? "tree.last" : "tree.branch"));
+    free(p);
+    return g;
+}
+
+static char *jrow_indent(const jrow_t *r) {
+    char *rails = xstrdup("");
+    if (r->depth > 0) {
+        bool tmp[65];
+        memcpy(tmp, r->rails, sizeof(bool) * (size_t)r->nrails);
+        tmp[r->nrails] = !r->last;
+        free(rails);
+        rails = rails_prefix(tmp, r->nrails + 1);
+    }
+    char *s = r->parent ? xasprintf("%s%s ", rails, tui_sym("tree.vertical")) : xasprintf("%s  ", rails);
+    free(rails);
+    return s;
 }
 
 static void jobs_report(ui_t *u, bool full) {
-    json_t *snap = jobs_snapshot(u->app->env->jobs), *x;
-    VEC(json_t *) running = {0};
-    VEC(json_t *) recent = {0};
-    json_arr_foreach(snap, i, x) {
-        if (str_eq(json_get_str(x, "status"), "running")) vec_push(&running, x);
-        else vec_push(&recent, x);
-    }
-    /* the 10 newest settled jobs */
-    qsort(recent.v, recent.n, sizeof *recent.v, job_cmp);
-    size_t skip = recent.n > 10 ? recent.n - 10 : 0;
+    json_t *tree = agents_job_tree(u->app, 10);
+    const json_t *running = json_get_arr(tree, "running"), *recent = json_get_arr(tree, "recent"), *x;
+    const char *root_id = json_get_str(tree, "rootId");
     sb_t b = SB_INIT;
     char *k = S(TUI_TC_DIM, "Running:");
-    sb_appendf(&b, "%s %zu\n", k, running.n);
+    sb_appendf(&b, "%s %zu\n", k, json_len(running));
     free(k);
-    if (!running.n && recent.n == skip) {
+    if (!json_len(running) && !json_len(recent)) {
         char *d = S(TUI_TC_DIM, "No async jobs yet.");
         sb_appendf(&b, "\n%s", d);
         free(d);
     } else {
         sb_putc(&b, '\n');
-        VEC(json_t *) rows = {0};
-        for (size_t i = 0; i < running.n; i++) vec_push(&rows, running.v[i]);
-        for (size_t i = skip; i < recent.n; i++) vec_push(&rows, recent.v[i]);
-        qsort(rows.v, rows.n, sizeof *rows.v, job_cmp);
+        /* buildJobTree */
+        VEC(jnode_t *) all = {0}; /* every node allocated (pruned ones included) */
+        jnode_t *top = xcalloc(1, sizeof *top);
+        vec_push(&all, top);
+        json_t *anodes = json_obj(); /* agent id -> index into nodes */
+        VEC(jnode_t *) nodes = {0};
+        json_arr_foreach(json_get_arr(tree, "agents"), i, x) {
+            if (str_eq(json_get_str(x, "id"), root_id)) continue;
+            jnode_t *n = xcalloc(1, sizeof *n);
+            n->agent = x;
+            json_set_int(anodes, json_get_str(x, "id"), (int64_t)nodes.n);
+            vec_push(&nodes, n);
+            vec_push(&all, n);
+        }
+#define ANODE(id) ((id) && json_get(anodes, id) ? nodes.v[json_get_int(anodes, id, 0)] : NULL)
+        for (int pass = 0; pass < 2; pass++) {
+            json_arr_foreach(pass ? recent : running, i, x) {
+                jnode_t *n = ANODE(json_get_str(x, "agentId"));
+                if (!n) continue;
+                const json_t *held = n->job;
+                if (!held || (!str_eq(json_get_str(held, "status"), "running") &&
+                              (str_eq(json_get_str(x, "status"), "running") || json_get_int(x, "startedAt", 0) > json_get_int(held, "startedAt", 0))))
+                    n->job = x;
+            }
+        }
+        for (size_t i = 0; i < nodes.n; i++) {
+            jnode_t *n = nodes.v[i];
+            const char *pid = json_get_str(n->agent, "parentId");
+            jnode_t *p = ANODE(pid);
+            /* parentNode: a lineage that cycles back to the agent puts it on top */
+            const char *c = pid;
+            for (int guard = 0; p && c && guard < 64; guard++) {
+                if (str_eq(c, json_get_str(n->agent, "id"))) p = NULL;
+                jnode_t *cn = ANODE(c);
+                c = cn ? json_get_str(cn->agent, "parentId") : NULL;
+            }
+            vec_push(p ? &p->kids : &top->kids, n);
+        }
+        for (int pass = 0; pass < 2; pass++) {
+            json_arr_foreach(pass ? recent : running, i, x) {
+                jnode_t *an = ANODE(json_get_str(x, "agentId"));
+                if (an && an->job == x) continue;
+                const char *own = json_get_str(x, "ownerId");
+                jnode_t *o = own && !str_eq(own, root_id) ? ANODE(own) : NULL;
+                jnode_t *n = xcalloc(1, sizeof *n);
+                n->job = x;
+                vec_push(&all, n);
+                vec_push(o ? &o->kids : &top->kids, n);
+            }
+        }
+#undef ANODE
+        jnode_settle(top, 0);
+        jrows_t rows = {0};
+        bool none[1] = {false};
+        for (size_t i = 0; i < top->kids.n; i++) jnode_flatten(top->kids.v[i], 0, none, 0, i + 1 == top->kids.n, &rows);
         int columns = tui_term(u->tui)->cols > 0 ? tui_term(u->tui)->cols : 100;
         int64_t now = now_ms();
         for (size_t i = 0; i < rows.n; i++) {
-            json_t *j = rows.v[i];
+            const jrow_t *r = &rows.v[i];
+            char *g = jrow_guide(r), *guide = S(TUI_TC_DIM, g);
+            free(g);
+            if (!r->job) {
+                char *bid = tui_bold(json_get_str(r->agent, "id"));
+                sb_appendf(&b, "%s%s\n", guide, bid);
+                free(bid), free(guide);
+                continue;
+            }
+            const json_t *j = r->job;
             const char *id = json_get_str(j, "id") ? json_get_str(j, "id") : "";
             int64_t ended = json_get_int(j, "endedAt", 0), started = json_get_int(j, "startedAt", now);
             char *dur = tc_format_duration(MAX(0, (ended ? ended : now) - started));
             char *type = xasprintf("[%s]", json_get_str(j, "type") ? json_get_str(j, "type") : "");
             char *did = S(TUI_TC_DIM, id), *dt = S(TUI_TC_DIM, type), *stt = job_status(json_get_str(j, "status"));
             char *pd = xasprintf("(%s)", dur), *dd = S(TUI_TC_DIM, pd);
-            sb_appendf(&b, "%s %s %s %s\n", did, dt, stt, dd);
-            free(dur), free(type), free(did), free(dt), free(stt), free(pd), free(dd);
+            const char *aid = r->agent ? json_get_str(r->agent, "id") : NULL;
+            char *agent = aid && !str_eq(aid, id) ? tui_bold(aid) : NULL;
+            sb_appendf(&b, "%s%s %s %s %s%s%s\n", guide, did, dt, stt, dd, agent ? " " : "", agent ? agent : "");
+            free(dur), free(type), free(did), free(dt), free(stt), free(pd), free(dd), free(agent), free(guide);
             const char *label = json_get_str(j, "label") ? json_get_str(j, "label") : "";
             const char *text = full && json_get_str(j, "command") ? json_get_str(j, "command") : label;
             if (!strcmp(text, id)) continue;
-            const char *indent = "  ";
+            char *indent = jrow_indent(r);
             char *prefix = S(TUI_TC_DIM, indent);
+            int iw = tui_visible_width(indent);
+            free(indent);
             if (!full) {
-                char *l = truncate_label(text, MAX(24, columns - 22 - 2)), *dl = S(TUI_TC_DIM, l);
+                char *l = truncate_label(text, MAX(24, columns - 22 - iw)), *dl = S(TUI_TC_DIM, l);
                 sb_appendf(&b, "%s%s\n", prefix, dl);
                 free(l), free(dl);
             } else {
                 size_t n = 0;
                 char *san = out_sanitize(text, strlen(text), &n), *rt = tc_replace_tabs(san);
                 strvec_t wl = {0};
-                tui_wrap_text_with_ansi(rt, MAX(1, columns - 4 - 2), &wl);
+                tui_wrap_text_with_ansi(rt, MAX(1, columns - 4 - iw), &wl);
                 for (size_t w = 0; w < wl.n; w++) {
                     char *dl = S(TUI_TC_DIM, wl.v[w]);
                     sb_appendf(&b, "%s%s\n", prefix, dl);
@@ -577,13 +721,18 @@ static void jobs_report(ui_t *u, bool full) {
             free(prefix);
         }
         vec_free(&rows);
+        for (size_t i = 0; i < all.n; i++) {
+            vec_free(&all.v[i]->kids);
+            free(all.v[i]);
+        }
+        vec_free(&all);
+        vec_free(&nodes);
+        json_free(anodes);
         while (b.len && (b.s[b.len - 1] == '\n' || b.s[b.len - 1] == ' ')) b.s[--b.len] = 0;
     }
     ui_show_report(u, "Background Jobs", &tui_text_new(sb_cstr(&b), 0, 0)->base);
     sb_free(&b);
-    vec_free(&running);
-    vec_free(&recent);
-    json_free(snap);
+    json_free(tree);
 }
 
 /* handleJobsKillCommand */
