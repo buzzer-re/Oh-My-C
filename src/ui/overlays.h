@@ -161,6 +161,9 @@ void ui_plan_review_set_annotation_draft(ui_plan_review_t *p, const char *text);
 void ui_plan_review_set_slider(ui_plan_review_t *p, int index);
 bool ui_plan_review_select(ui_plan_review_t *p, const char *label); /* commit like Enter; false if refused */
 
+/* showHookConfirm: `title` box with `message` and Yes / No in the composer's place; cb(yes) runs on the
+ * UI thread after it closed (cancel = No) */
+void ui_hook_confirm(ui_t *u, const char *title, const char *message, void (*cb)(void *ud, bool yes), void *ud);
 /* "Save and quit" path prompt (overlays/plan-save-overlay.ts); done(NULL) on cancel */
 typedef struct ui_plan_save ui_plan_save_t;
 ui_plan_save_t *ui_plan_save_new(const char *suggested, void (*done)(void *ud, const char *path), void *ud);

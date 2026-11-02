@@ -1227,6 +1227,61 @@ static void maybe_plan_approval(ui_t *u, const char *tool, const json_t *result,
     ui_plan_approval(u, path, title);
 }
 
+/* #hasPlanModeDraftContent: the plan path or any local plan file has content */
+static bool plan_has_draft(app_t *a) {
+    strvec_t c = app_plan_list(a);
+    if (a->plan_file && !strvec_contains(&c, a->plan_file)) strvec_push(&c, a->plan_file);
+    bool any = false;
+    for (size_t i = 0; i < c.n && !any; i++) {
+        char *t = app_plan_read(a, c.v[i]);
+        char *tt = t ? str_trim(t) : NULL;
+        any = tt && *tt;
+        free(tt);
+        free(t);
+    }
+    strvec_free(&c);
+    return any;
+}
+
+/* #exitPlanMode({paused: true, interruptActiveTurn: true}) */
+static void plan_exit_confirmed(void *ud, bool yes) {
+    ui_t *u = ud;
+    if (!yes || !u->app->plan_mode) return;
+    if (u->worker_running) app_abort(u->app);
+    app_exit_plan_mode(u->app, true);
+    add_notice(u, "info", "Plan mode paused.");
+    tui_request_render(u->tui);
+}
+
+/* /plan-review: the newest local plan file, aborting a running turn first */
+static void plan_review_command(ui_t *u) {
+    app_t *a = u->app;
+    if (!a->plan_mode) {
+        add_notice(u, "warning", "Plan mode is not active.");
+        return;
+    }
+    const char *no_plan = "No plan to review yet \xe2\x80\x94 write one to a local://<slug>-plan.md file first.";
+    strvec_t plans = app_plan_list(a);
+    char *content = plans.n ? app_plan_read(a, plans.v[0]) : NULL;
+    char *t = content ? str_trim(content) : NULL;
+    if (!t || !*t) {
+        add_notice(u, "warning", no_plan);
+    } else {
+        char *title = app_plan_resolve_title(NULL, content, plans.v[0]);
+        if (u->worker_running) {
+            app_abort(a);
+            free(g_pending_review_path);
+            free(g_pending_review_title);
+            g_pending_review_path = xstrdup(plans.v[0]);
+            g_pending_review_title = xstrdup(title);
+        } else ui_plan_approval(u, plans.v[0], title);
+        free(title);
+    }
+    free(t);
+    free(content);
+    strvec_free(&plans);
+}
+
 static void plan_exec_resume(ui_t *u) {
     if (g_pr.exec_pending && !u->worker_running) plan_start_exec(u);
     if (g_pending_review_path && !u->worker_running) {
@@ -1246,6 +1301,7 @@ static const struct {
     {"help", "Show commands and keys"},       {"model", "Switch model (picker or /model <pattern>)"},
     {"thinking", "Set thinking level"},       {"new", "Start a new session"},
     {"plan", "Toggle read-only plan mode"},
+    {"plan-review", "Re-open the plan review for the latest plan (plan mode only)"},
     {"goal", "Goal mode: /goal <objective> | set | show | pause | resume | drop | budget <N|off>"},
     {"jobs", "Show background jobs status"},
     {"advisor", "Toggle the advisor (a second model that reviews each turn and injects notes)"},
@@ -1432,9 +1488,9 @@ static bool handle_command(ui_t *u, const char *line) {
         memory_cmd_result_free(&r);
     } else if (!strcmp(cmd, "plan")) { /* handlePlanModeCommand */
         if (a->plan_mode) {
-            if (u->worker_running) app_abort(a);
-            app_exit_plan_mode(a, true);
-            add_notice(u, "info", "Plan mode paused.");
+            if (plan_has_draft(a))
+                ui_hook_confirm(u, "Exit plan mode?", "This exits plan mode without approving a plan.", plan_exit_confirmed, u);
+            else plan_exit_confirmed(u, true);
         } else if (a->plan_paused && !*arg) {
             a->plan_paused = false;
             a->plan_has_entered = false;
@@ -1455,6 +1511,8 @@ static bool handle_command(ui_t *u, const char *line) {
             free(m);
             if (*arg) start_prompt(u, arg);
         }
+    } else if (!strcmp(cmd, "plan-review")) { /* openPlanReview */
+        plan_review_command(u);
     } else if (!strcmp(cmd, "goal")) {
         goal_command(u, arg);
     } else if (!strcmp(cmd, "jobs")) {
@@ -1874,6 +1932,11 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
         int idx = app_cycle_role_model(u->app, tui_key_matches(k, "shift+ctrl+p"));
         if (idx < 0) add_notice(u, "info", "Only one role model available");
         else show_model_cycle_track(u, idx);
+        tui_request_render(t);
+        return true;
+    }
+    if (tui_kb(k, "app.plan.toggle") || tui_key_matches(k, "alt+shift+p")) {
+        handle_command(u, "/plan");
         tui_request_render(t);
         return true;
     }

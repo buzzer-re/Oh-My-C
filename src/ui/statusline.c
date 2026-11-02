@@ -554,10 +554,12 @@ static char *render_segment(const char *id, const segctx_t *c) {
     }
     if (str_eq(id, "mode")) {
         const char *pause = sym("icon.pause");
-        if (a->plan_mode) {
-            char *w = with_icon(sym("icon.plan"), "Plan");
-            char *r = accent_fg(c, TUI_TC_ACCENT, w);
+        if (a->plan_mode || a->plan_paused) {
+            char *label = a->plan_paused ? (*pause ? xasprintf("Plan %s", pause) : xstrdup("Plan (paused)")) : xstrdup("Plan");
+            char *w = with_icon(sym("icon.plan"), label);
+            char *r = a->plan_paused ? tui_fgs(NULL, TUI_TC_WARNING, w) : accent_fg(c, TUI_TC_ACCENT, w);
             free(w);
+            free(label);
             return r;
         }
         const goal_t *g = app_goal((app_t *)a);

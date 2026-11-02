@@ -5,6 +5,7 @@
 #include "ui/ui.h"
 
 #include "core/embed.h"
+#include "config/settings.h"
 
 /* SlashCommandIconName -> symbol key (theme-class.ts `get cmd()`) */
 static const char *icon_key(const char *name) {
@@ -55,10 +56,15 @@ static char *live_description(void *ud, const char *name) {
         return m;
     }
     if (!strcmp(name, "plan")) {
-        if (a->plan_mode) return xstrdup("Plan: on");
+        if (!settings_bool("plan.enabled", true)) return xstrdup("Plan: disabled in settings");
+        if (a->plan_mode) {
+            const char *pf = a->plan_file ? strrchr(a->plan_file, '/') : NULL;
+            return pf ? xasprintf("Plan: on (%s)", pf + 1) : xstrdup("Plan: on");
+        }
         if (app_goal(a) && goal_enabled(app_goal(a))) return xstrdup("Plan: blocked by goal mode");
         return xstrdup("Plan: off");
     }
+    if (!strcmp(name, "plan-review")) return xstrdup(a->plan_mode ? "Plan review: available" : "Plan review: plan mode inactive");
     if (!strcmp(name, "goal")) {
         if (a->plan_mode) return xstrdup("Goal: blocked by plan mode");
         return app_goal(a) ? xstrdup(goal_enabled(app_goal(a)) ? "Goal: active" : "Goal: paused") : xstrdup("Goal: off");
