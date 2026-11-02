@@ -8,6 +8,7 @@
  * bar) and `plain-right` (the chip on the claude/rule composers' top rule). */
 #include "ui/ui.h"
 
+#include "coding/modelctl.h"
 #include "config/settings.h"
 #include "core/proc.h"
 #include "tui/color.h"
@@ -562,12 +563,26 @@ static char *render_segment(const char *id, const segctx_t *c) {
                 content = n;
             }
         }
-        if (!compact && *td) {
-            char *tail = xasprintf("%s%s", sym("sep.dot"), td);
-            char *tc = accent_fg(c, TUI_TC_STATUS_LINE_MODEL, tail);
+        /* fast-mode icon and thinking tail trail the model name in its colour */
+        sb_t tail = SB_INIT;
+        if (app_fast_mode_active((app_t *)a) && *sym("icon.fast")) sb_appendf(&tail, " %s", sym("icon.fast"));
+        if (!compact && *td) sb_appendf(&tail, "%s%s", sym("sep.dot"), td);
+        if (tail.len) {
+            char *tc = accent_fg(c, TUI_TC_STATUS_LINE_MODEL, sb_cstr(&tail));
             char *n = xasprintf("%s%s", content, tc);
-            free(content), free(tail), free(tc);
+            free(content), free(tc);
             content = n;
+        }
+        sb_free(&tail);
+        /* Anthropic usage-limit stage (wrap-up allowance or low priority) */
+        char *slow = app_anthropic_slow_label((app_t *)a);
+        if (slow) {
+            char *t = xasprintf("%s%s", sym("sep.dot"), slow);
+            char *w = tui_fgs(NULL, TUI_TC_WARNING, t);
+            char *n = xasprintf("%s%s", content, w);
+            free(content), free(t), free(w);
+            content = n;
+            free(slow);
         }
         free(wi), free(icon), free(td);
         return content;

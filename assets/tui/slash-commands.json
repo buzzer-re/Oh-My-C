@@ -182,6 +182,7 @@
  {
   "name": "fast",
   "icon": "fast",
+  "description": "Toggle fast service (OpenAI service_tier=priority or ultrafast, Anthropic speed=fast, Google priority)",
   "acpDescription": "Toggle fast mode",
   "acpInputHint": "[on|ultra|off|status]",
   "allowArgs": true,
@@ -209,6 +210,7 @@
  {
   "name": "slow",
   "icon": "fast",
+  "description": "Toggle slow mode: flex tier on OpenAI/Google; on Anthropic, continue at low priority after the Claude session limit",
   "acpDescription": "Toggle slow mode",
   "acpInputHint": "[on|off|status]",
   "allowArgs": true,

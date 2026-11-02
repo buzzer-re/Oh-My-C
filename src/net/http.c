@@ -148,6 +148,19 @@ void http_headers_set(http_headers_t *h, const char *name, const char *value) {
     http_headers_add(h, name, value);
 }
 
+void http_headers_del(http_headers_t *h, const char *name) {
+    for (size_t i = 0; i < h->n;) {
+        if (strcasecmp(h->v[i].name, name) == 0) {
+            free(h->v[i].name);
+            free(h->v[i].value);
+            memmove(&h->v[i], &h->v[i + 1], (h->n - i - 1) * sizeof h->v[0]);
+            h->n--;
+        } else {
+            i++;
+        }
+    }
+}
+
 const char *http_headers_get(const http_headers_t *h, const char *name) {
     if (!h) return NULL;
     for (size_t i = 0; i < h->n; i++)

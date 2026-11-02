@@ -99,6 +99,12 @@ static bool match_threshold(json_t *raw, const ai_model_t *m, const char *skip, 
     return found;
 }
 
+bool cp_reaches(const ai_model_t *m, int64_t window) {
+    pair_t p;
+    if (!match_threshold(model_thresholds(), m, NULL, NULL, &p) || p.tokens <= 0) return false;
+    return p.fixed ? p.tokens >= window : p.tokens > window;
+}
+
 static cp_settings_t configured(void) {
     cp_settings_t s;
     s.enabled = settings_bool("compaction.enabled", true);

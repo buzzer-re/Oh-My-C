@@ -4,7 +4,9 @@
  */
 #include "ai/ai_images.h"
 #include "ai/provider_anthropic.h"
+#include "ai/anthropic_slow.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <openssl/evp.h>
 #include <sys/stat.h>
@@ -1485,6 +1487,15 @@ static void strip_private_keys(json_t *msgs) {
     }
 }
 
+/* wantsAnthropicFastMode, unless this endpoint+model rejected fast mode earlier in the session (dropFastMode) */
+static bool wants_fast_mode_raw(const ai_model_t *m, const ai_stream_opts_t *o) {
+    return cflag(m, "fastMode") || (cflag(m, "firstPartyProvider") && str_eq(o->service_tier, "priority"));
+}
+
+static bool wants_fast_mode(const ai_model_t *m, const ai_stream_opts_t *o) {
+    return wants_fast_mode_raw(m, o) && !(o->fast_mode_disabled && o->fast_mode_disabled(o->fast_mode_ud, m));
+}
+
 json_t *anthropic_build_request(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, bool oauth) {
     ai_stream_opts_t defo;
     if (!o) {
@@ -1612,8 +1623,7 @@ json_t *anthropic_build_request(const ai_model_t *m, const ai_context_t *ctx, co
         }
         json_set(p, "stop_sequences", ss);
     }
-    if (cflag(m, "fastMode") || (cflag(m, "firstPartyProvider") && str_eq(o->service_tier, "priority")))
-        json_set_str(p, "speed", "fast");
+    if (wants_fast_mode(m, o)) json_set_str(p, "speed", "fast");
 
     const char *tc_name = NULL;
     const char *tc = map_tool_choice(o->tool_choice, &tc_name);
@@ -1771,7 +1781,7 @@ void anthropic_build_headers(const ai_model_t *m, const ai_stream_opts_t *o, con
     if (oauth)
         claude_code_betas(&betas, has_tools || ro.thinking_enabled, ro.thinking_enabled, cflag(m, "disableStrictTools"),
                           cflag(m, "supportsContextManagement"));
-    if (cflag(m, "fastMode") || (cflag(m, "firstPartyProvider") && str_eq(o->service_tier, "priority"))) beta_add(&betas, BETA_FAST_MODE);
+    if (wants_fast_mode(m, o)) beta_add(&betas, BETA_FAST_MODE);
     if (emits_effort) beta_add(&betas, BETA_EFFORT);
     json_t *cc = resolve_cache_control(m, o, oauth);
     json_t *eb2 = model_compat_get(m, "extendedCacheTtlBeta");
@@ -2232,6 +2242,82 @@ json_t *provider_anthropic_stream(const ai_model_t *m, const ai_context_t *ctx, 
     return provider_anthropic_stream_ex(m, ctx, o, -1, cb, ud);
 }
 
+/* ---------- per-request failure hooks: fast-mode fallback and subscription slow mode ---------- */
+
+typedef struct {
+    const ai_model_t *m;
+    const ai_stream_opts_t *o;
+    char *lane;              /* slow-mode account lane, NULL when slow mode does not apply */
+    bool sent_slow;          /* the attempt carried `anthropic-usage-limit: slow` */
+    bool fast_wanted;        /* the attempt carried `speed: "fast"` */
+    bool fast_unsupported;   /* the endpoint rejected fast mode */
+    bool have_sig;
+    anthropic_slow_signal_t sig; /* slow-mode headers of the latest failed attempt */
+    int64_t wait_since;      /* first capacity wait (ms), -1 none */
+    int attempts;            /* capacity waits taken */
+} anth_hook_t;
+
+static bool fast_dropped(void *ud, const ai_model_t *m) {
+    UNUSED(ud), UNUSED(m);
+    return true;
+}
+
+static bool has_word_ci(const char *s, const char *w) {
+    size_t n = strlen(w);
+    for (const char *p = s; p && *p; p++) {
+        if (strncasecmp(p, w, n)) continue;
+        bool left = p == s || !(isalnum((unsigned char)p[-1]) || p[-1] == '_');
+        bool right = !(isalnum((unsigned char)p[n]) || p[n] == '_');
+        if (left && right) return true;
+    }
+    return false;
+}
+
+/* error/flags.ts matchesFastModeUnsupported */
+static bool fast_mode_unsupported(int status, const char *body) {
+    if (!body) return false;
+    if (status == 400)
+        return str_istr(body, "invalid_request_error") && has_word_ci(body, "speed") && str_istr(body, "not support");
+    return status == 429 && str_istr(body, "rate_limit_error") && str_istr(body, "fast mode");
+}
+
+static void anth_on_headers(void *ud, int status, const http_headers_t *h) {
+    anth_hook_t *k = ud;
+    if (!k->lane) return;
+    anthropic_slow_signal_t sig;
+    bool any = anthropic_slow_parse(h, &sig);
+    if (status >= 200 && status < 300) {
+        k->have_sig = false;
+        if (any) anthropic_slow_observe(k->o->slow_hooks, k->lane, &sig);
+    } else {
+        k->have_sig = any;
+        k->sig = sig;
+    }
+}
+
+static int64_t anth_on_failure(void *ud, int status, const char *body, http_headers_t *headers) {
+    anth_hook_t *k = ud;
+    if (k->fast_wanted && fast_mode_unsupported(status, body)) {
+        k->fast_unsupported = true;
+        return -2;
+    }
+    if (!k->lane || (k->o->cancel && *k->o->cancel)) return -1;
+    bool overloaded = status == 529 || (body && strstr(body, "overloaded_error"));
+    bool capacity = false;
+    int64_t waited = k->wait_since < 0 ? 0 : mono_ms() - k->wait_since;
+    int64_t d = anthropic_slow_on_failure(k->o->slow_hooks, k->lane, status, overloaded, k->have_sig ? &k->sig : NULL, k->sent_slow,
+                                          waited, k->attempts, &capacity);
+    if (d < 0) return -1;
+    if (capacity) {
+        if (k->wait_since < 0) k->wait_since = mono_ms();
+        k->attempts++;
+    }
+    k->sent_slow = anthropic_slow_is_active(k->o->slow_hooks, k->lane);
+    if (k->sent_slow) http_headers_set(headers, "anthropic-usage-limit", "slow");
+    else http_headers_del(headers, "anthropic-usage-limit");
+    return d;
+}
+
 json_t *provider_anthropic_stream_ex(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, int is_oauth,
                                      ai_event_cb cb, void *ud) {
     ai_stream_opts_t defo;
@@ -2254,11 +2340,23 @@ json_t *provider_anthropic_stream_ex(const ai_model_t *m, const ai_context_t *ct
     }
     bool oauth = is_oauth >= 0 ? is_oauth != 0 : anthropic_is_oauth_token(key);
     json_t *result = NULL;
-    for (int attempt = 0; attempt < 2; attempt++) {
-        json_t *params = anthropic_build_request(m, ctx, o, oauth);
+    ai_stream_opts_t lo = *o; /* lo.fast_mode_disabled is pinned once this request drops fast mode */
+    /* subscription slow mode: first-party OAuth requests to the official endpoint only */
+    char *base_url = resolve_base_url(m);
+    anth_hook_t hk = {.m = m, .o = &lo, .wait_since = -1};
+    if (o->slow_hooks && cflag(m, "firstPartyProvider") && oauth && is_official_url(base_url))
+        hk.lane = anthropic_slow_lane_key(key);
+    free(base_url);
+    bool version_retried = false;
+    for (int guard = 0; guard < 4; guard++) {
+        json_t *params = anthropic_build_request(m, ctx, &lo, oauth);
         if (o->on_payload) o->on_payload(o->payload_ud, params);
         http_headers_t h = {0};
-        anthropic_build_headers(m, o, ctx, params, key, oauth, &h);
+        anthropic_build_headers(m, &lo, ctx, params, key, oauth, &h);
+        hk.fast_wanted = json_get_str(params, "speed") != NULL;
+        hk.fast_unsupported = false;
+        hk.sent_slow = hk.lane && anthropic_slow_is_active(o->slow_hooks, hk.lane);
+        if (hk.sent_slow) http_headers_set(&h, "anthropic-usage-limit", "slow");
         char *url = anthropic_request_url(m, oauth);
         char *body = anthropic_serialize_body(params);
         json_free(params);
@@ -2266,11 +2364,20 @@ json_t *provider_anthropic_stream_ex(const ai_model_t *m, const ai_context_t *ct
         anthropic_sse_init(&s, m, oauth, cb, ud);
         int status = 0;
         char *err = NULL;
-        int rc = ai_sse_post(url, &h, body, o, anthropic_sse_event, &s, &status, &err);
+        ai_post_ex_t ex = {.on_headers = anth_on_headers, .on_failure = anth_on_failure, .hook_ud = &hk};
+        int rc = ai_sse_post_ex(url, &h, body, &lo, anthropic_sse_event, &s, &status, &err, &ex);
+        free(ex.err_body);
         free(url);
         free(body);
         http_headers_free(&h);
-        bool retry = oauth && attempt == 0 && rc == -1 && !s.saw_start && adopt_required_version(err);
+        bool retry = oauth && !version_retried && rc == -1 && !s.saw_start && adopt_required_version(err);
+        if (retry) version_retried = true;
+        if (!retry && rc == -1 && !s.saw_start && hk.fast_unsupported && lo.fast_mode_disabled != fast_dropped) {
+            /* fast mode unsupported: drop `speed` for this endpoint+model and resend once */
+            if (o->on_fast_mode_unsupported) o->on_fast_mode_unsupported(o->fast_mode_ud, m);
+            lo.fast_mode_disabled = fast_dropped;
+            retry = true;
+        }
         if (retry) {
             free(err);
             anthropic_sse_free(&s);
@@ -2281,6 +2388,7 @@ json_t *provider_anthropic_stream_ex(const ai_model_t *m, const ai_context_t *ct
         anthropic_sse_free(&s);
         break;
     }
+    free(hk.lane);
     free(env_key);
     return result;
 }

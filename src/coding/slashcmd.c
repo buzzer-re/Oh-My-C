@@ -3,6 +3,7 @@
 
 #include "coding/advisor.h"
 #include "coding/memory.h"
+#include "coding/modelctl.h"
 #include "config/settings.h"
 #include "mcp/mcp.h"
 #include "core/embed.h"
@@ -29,6 +30,9 @@ static void h_rename(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_dirs(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_dump(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_forget_approvals(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_fast(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_slow(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_extended_context(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 
 /* upstream name -> supported subcommands ("*" all, NULL none), TUI handler present, text handler.
  * Subcommands left out are not implemented (their upstream behaviour would be advertised falsely). */
@@ -46,6 +50,9 @@ static const struct {
     {"queue", NULL, true, NULL},
     {"model", NULL, true, h_model},
     {"effort", "*", true, h_effort},
+    {"fast", "*", true, h_fast},
+    {"slow", "*", true, h_slow},
+    {"extended-context", "*", true, h_extended_context},
     {"advisor", "on off status dump", true, h_advisor},
     {"export", NULL, true, NULL},
     {"dump", "*", true, h_dump},
@@ -386,6 +393,38 @@ static void out(slash_rt_t *rt, const char *text) {
 static void usage(slash_rt_t *rt, slash_result_t *res, const char *text) {
     out(rt, text);
     res->failed = true;
+}
+
+static char *lower_trim(const char *args) {
+    char *t = str_trim(args ? args : "");
+    for (char *p = t; *p; p++) *p = (char)tolower((unsigned char)*p);
+    return t;
+}
+
+/* builtin-modes.ts fast / slow / extended-context handle */
+static void h_fast(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    char *arg = lower_trim(c->args);
+    char *m = modelctl_fast_command(rt->app, arg);
+    if (m) out(rt, m);
+    else usage(rt, res, "Usage: /fast [on|ultra|off|status]");
+    free(m);
+    free(arg);
+}
+
+static void h_slow(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    char *arg = lower_trim(c->args);
+    char *m = modelctl_slow_command(rt->app, arg);
+    if (m) out(rt, m);
+    else usage(rt, res, "Usage: /slow [on|off|status]");
+    free(m);
+    free(arg);
+}
+
+static void h_extended_context(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    char *m = modelctl_extended_context_command(c->args);
+    if (m) out(rt, m);
+    else usage(rt, res, "Usage: /extended-context [on|off|status]");
+    free(m);
 }
 
 static void h_model(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {

@@ -51,6 +51,24 @@ static json_t *load_embedded_json(const char *name) {
     return j;
 }
 
+static bool g_extended; /* extendedContext */
+
+/* #resolveContextWindowPolicies for extended off/on (model-registry.ts): the standard window caps a premium
+ * long-context price tier at its input threshold (unless longContextWindowUncapped); the extended one widens to
+ * the advertised maximum. Authoritative windows and pinned overrides keep the catalog window. */
+static void context_tiers(ai_model_t *m) {
+    json_t *r = m->raw;
+    int64_t cw = m->context_window;
+    m->context_window_std = m->context_window_ext = cw;
+    if (m->context_window_pinned || json_get_bool(r, "contextWindowAuthoritative", false) || !json_get(r, "contextWindow"))
+        return;
+    int64_t mx = json_get_int(r, "maxContextWindow", 0);
+    if (mx > 0) m->context_window_ext = MAX(cw, mx);
+    json_t *lc = json_get_obj(json_get_obj(r, "cost"), "longContext");
+    int64_t th = json_get_int(lc, "inputThreshold", 0);
+    if (th > 0 && !json_get_bool(r, "longContextWindowUncapped", false) && cw > th) m->context_window_std = th;
+}
+
 static void fill_model(ai_model_t *m) {
     json_t *r = m->raw;
     m->id = json_get_str(r, "id");
@@ -72,6 +90,8 @@ static void fill_model(ai_model_t *m) {
     m->cost_cache_read = json_get_num(cost, "cacheRead", 0);
     m->cost_cache_write = json_get_num(cost, "cacheWrite", 0);
     m->context_window = json_get_int(r, "contextWindow", 128000);
+    context_tiers(m);
+    m->context_window = g_extended ? m->context_window_ext : m->context_window_std;
     m->max_tokens = json_get_int(r, "maxTokens", 0);
     if (m->max_tokens <= 0) m->max_tokens = MIN(m->context_window, (int64_t)32000);
     m->compat = json_get_obj(r, "compat");
@@ -163,6 +183,7 @@ static void apply_custom(json_t *cfg) {
             const ai_model_t *m = catalog_find(pid, mid);
             if (m) {
                 json_merge(m->raw, mv);
+                if (json_get(mv, "contextWindow")) ((ai_model_t *)m)->context_window_pinned = true;
                 fill_model((ai_model_t *)m);
             }
         }
@@ -477,4 +498,21 @@ const char *model_delegation_bias(const ai_model_t *m) {
     if (v[0] == 5 && v[1] == 6 && v[2] == 0) return "gated";
     if (v[0] >= 6) return "restrained";
     return "eager";
+}
+
+void catalog_apply_context_policy(bool extended, bool (*opt_in)(const ai_model_t *m, int64_t standard)) {
+    catalog_init();
+    g_extended = extended;
+    for (size_t i = 0; i < g_models.n; i++) {
+        ai_model_t *m = g_models.v[i];
+        bool ext = extended || (opt_in && m->context_window_ext > m->context_window_std && opt_in(m, m->context_window_std));
+        m->context_window = ext ? m->context_window_ext : m->context_window_std;
+    }
+}
+
+bool catalog_context_tiers(const ai_model_t *m, int64_t *standard, int64_t *extended) {
+    if (!m || m->context_window_ext <= m->context_window_std) return false;
+    if (standard) *standard = m->context_window_std;
+    if (extended) *extended = m->context_window_ext;
+    return true;
 }

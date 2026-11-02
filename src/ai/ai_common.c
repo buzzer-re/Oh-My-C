@@ -40,6 +40,8 @@ void ai_stream_opts_init(ai_stream_opts_t *o) {
     o->temperature = NAN;
     o->top_p = NAN;
     o->max_retries = 3;
+    o->first_event_timeout_ms = -1;
+    o->idle_timeout_ms = -1;
 }
 
 /* ---------- model compat accessors ---------- */
@@ -385,6 +387,12 @@ json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_str
         ai_stream_opts_init(&def);
         opts = &def;
     }
+    ai_stream_opts_t tiered;
+    if (opts->has_service_tiers) { /* effectiveServiceTier(model): the entry for this model's family */
+        tiered = *opts;
+        tiered.service_tier = ai_resolve_model_service_tier(&opts->service_tiers, model);
+        opts = &tiered;
+    }
     ai_transport_t t;
     char *terr = NULL;
     if (ai_transport_prepare(model, ctx, opts, &t, &terr) != 0) {
@@ -409,7 +417,7 @@ json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_str
         }
         return m;
     }
-    json_t *r = fn(&t.model, ctx, &t.opts, cb, ud);
+    json_t *r = ai_stream_guarded(fn, &t.model, ctx, &t.opts, cb, ud);
     ai_transport_finish(&t, r);
     ai_transport_free(&t);
     return r;
@@ -509,6 +517,7 @@ typedef struct {
     int abort_rc;
     const char *retry_after;
     int64_t retry_after_ms;
+    ai_post_ex_t *ex;
 } sse_ctx_t;
 
 static int on_hdr(void *ud, int status, const http_headers_t *h) {
@@ -516,6 +525,7 @@ static int on_hdr(void *ud, int status, const http_headers_t *h) {
     c->status = status;
     c->ok = status >= 200 && status < 300;
     c->retry_after_ms = -1;
+    if (c->ex && c->ex->on_headers) c->ex->on_headers(c->ex->hook_ud, status, h);
     const char *ra = http_headers_get(h, "retry-after-ms");
     if (ra) c->retry_after_ms = strtoll(ra, NULL, 10);
     else if ((ra = http_headers_get(h, "retry-after"))) {
@@ -563,6 +573,15 @@ static bool copilot_model_not_supported(const char *body) {
 
 static bool retryable_status(int s) { return s == 408 || s == 409 || s == 425 || s == 429 || s == 500 || s == 502 || s == 503 || s == 504 || s == 520 || s == 522 || s == 524 || s == 529; }
 
+/* byte-level read timeout: 300 s, widened so it never fires before the stream watchdog (stream_guard.c) */
+static int64_t http_idle_ms(const ai_stream_opts_t *opts, const ai_post_ex_t *ex) {
+    int64_t t = ex && ex->idle_timeout_ms > 0 ? ex->idle_timeout_ms : 300000;
+    if (opts && (opts->first_event_timeout_ms == 0 || opts->idle_timeout_ms == 0)) return MAX(t, 24LL * 3600 * 1000);
+    if (opts && opts->first_event_timeout_ms > t) t = opts->first_event_timeout_ms;
+    if (opts && opts->idle_timeout_ms > t) t = opts->idle_timeout_ms;
+    return t;
+}
+
 static int stream_post_url(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
                            ai_sse_cb sse_cb, http_data_cb raw_cb, void *ud, int *status, char **err, ai_post_ex_t *ex) {
     if (!http_headers_get(headers, "Content-Type")) http_headers_add(headers, "Content-Type", "application/json");
@@ -577,13 +596,14 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
         c.sse_cb = sse_cb;
         c.raw_cb = raw_cb;
         c.ud = ud;
+        c.ex = ex;
         if (sse_cb) sse_init(&c.sse, (sse_event_cb)sse_cb, ud);
         http_req_t req = {.method = "POST",
                           .url = url,
                           .headers = headers,
                           .body = body,
                           .body_len = strlen(body),
-                          .idle_timeout_ms = ex && ex->idle_timeout_ms > 0 ? ex->idle_timeout_ms : 300000,
+                          .idle_timeout_ms = http_idle_ms(opts, ex),
                           .on_headers = on_hdr,
                           .on_data = on_body,
                           .ud = &c,
@@ -636,6 +656,34 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
                 sb_free(&c.errbody);
                 attempt--;
                 continue;
+            }
+        }
+        /* failure: a caller hook decides first (slow-mode lanes, rejected options) */
+        if (ex && ex->on_failure && !c.got_data) {
+            int64_t d = ex->on_failure(ex->hook_ud, rc == 0 ? c.status : 0, sb_cstr(&c.errbody), headers);
+            if (d >= 0) {
+                http_resp_free(&resp);
+                sse_free(&c.sse);
+                sb_free(&c.errbody);
+                int64_t until = mono_ms() + d;
+                while (mono_ms() < until) {
+                    if (opts && opts->cancel && *opts->cancel) {
+                        *err = xstrdup("Request was aborted");
+                        return -2;
+                    }
+                    sleep_ms(MIN((int64_t)50, MAX((int64_t)1, until - mono_ms())));
+                }
+                attempt--;
+                continue;
+            }
+            if (d == -2) {
+                *err = rc != 0 ? xstrdup(resp.error ? resp.error : "network error") : ai_extract_error(c.status, sb_cstr(&c.errbody));
+                free(ex->err_body);
+                ex->err_body = rc == 0 ? xstrdup(sb_cstr(&c.errbody)) : NULL;
+                http_resp_free(&resp);
+                sse_free(&c.sse);
+                sb_free(&c.errbody);
+                return -1;
             }
         }
         /* failure: decide retry */

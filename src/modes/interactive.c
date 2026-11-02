@@ -34,6 +34,7 @@
 #include "ui/tools/tc.h"
 #include "coding/title.h"
 #include "coding/slashcmd.h"
+#include "coding/modelctl.h"
 #include "session/export_html.h"
 #include "session/dump.h"
 #include "coding/advisor.h"
@@ -1658,6 +1659,20 @@ static bool handle_command_inner(ui_t *u, const char *line) {
             free(lv);
             free(err);
         }
+    } else if (!strcmp(cmd, "fast") || !strcmp(cmd, "slow") || !strcmp(cmd, "extended-context")) {
+        /* builtin-modes.ts fast / slow / extended-context handleTui: refresh the status line, show the reply */
+        char *low = str_trim(arg);
+        for (char *p = low; *p; p++) *p = (char)tolower((unsigned char)*p);
+        char *m = !strcmp(cmd, "fast")   ? modelctl_fast_command(a, low)
+                  : !strcmp(cmd, "slow") ? modelctl_slow_command(a, low)
+                                         : modelctl_extended_context_command(arg);
+        const char *use = !strcmp(cmd, "fast")   ? "Usage: /fast [on|ultra|off|status]"
+                          : !strcmp(cmd, "slow") ? "Usage: /slow [on|off|status]"
+                                                 : "Usage: /extended-context [on|off|status]";
+        add_notice(u, "info", m ? m : use);
+        free(m);
+        free(low);
+        tui_request_render(u->tui);
     } else if (!strcmp(cmd, "migrate")) {
         /* omp -> omc: settings, models, credentials, MCP, skills, rules, agents, themes, sessions, prompt history */
         migrate_opts_t mo = {.sessions = true};

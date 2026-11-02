@@ -49,7 +49,10 @@ typedef struct ai_model {
     bool reasoning;
     bool input_image;
     double cost_input, cost_output, cost_cache_read, cost_cache_write; /* $ per 1M tokens */
-    int64_t context_window;
+    int64_t context_window;     /* effective window (catalog_apply_context_policy) */
+    int64_t context_window_std; /* standard window (premium long-context tier capped) */
+    int64_t context_window_ext; /* extended window (advertised maximum); == std without tiers */
+    bool context_window_pinned; /* a modelOverrides contextWindow fixes the window (no tiers) */
     int64_t max_tokens;
     json_t *compat;     /* per-model compat overrides, borrowed from raw (may be NULL); use model_compat_get */
     json_t *compat_defaults; /* per-api defaults (borrowed, may be NULL) */
@@ -99,6 +102,31 @@ bool model_perf_get(const char *key, double *tps, double *ttft_ms, double *sampl
 /* omp model-browser #perfCell: "1.2s 118t/s" (full), "118t/s" (tps); measured perf first, else the catalog's
  * estimated raw "tps" as "~118t/s"; "" when unknown. owned */
 char *model_perf_cell(const ai_model_t *m, bool full);
+/* ---------- service tiers (service_tier.c; pi-ai types.ts) ----------
+ * Tier names: "auto" "default" "flex" "scale" "priority" "ultrafast" (interned static strings, NULL = omit). */
+typedef struct {
+    const char *openai, *anthropic, *google; /* per-family selection (ServiceTierByFamily) */
+    const char *fireworks; /* request-time only: "priority" with providers.fireworksTier priority */
+} ai_service_tiers_t;
+const char *ai_service_tier_family(const ai_model_t *m); /* "openai" | "anthropic" | "google" | NULL */
+bool ai_service_tier_for_family(const char *family, const char *tier); /* isServiceTierForFamily */
+/* shouldSendServiceTier: the tier goes on the wire as the provider's service-tier field (model may be NULL: the
+ * bare-provider answer) */
+bool ai_should_send_service_tier(const char *tier, const ai_model_t *m);
+bool ai_should_send_service_tier_for(const char *tier, const char *provider, const ai_model_t *m);
+bool ai_realizes_priority_tier(const char *tier, const ai_model_t *m); /* realizesPriorityServiceTier */
+const char *ai_resolve_model_service_tier(const ai_service_tiers_t *tiers, const ai_model_t *m);
+const char *ai_service_tier_intern(const char *tier); /* static copy of a known tier name, else NULL */
+bool ai_fireworks_fast_model_id(const char *id);
+
+/* ---------- context windows (catalog.c; model-registry.ts #applyContextWindowPolicies) ----------
+ * Every catalog model has a standard window (premium long-context tiers capped at their input threshold) and an
+ * extended one (the advertised maximum). `extendedContext` picks extended for all; `opt_in` (may be NULL) opts a
+ * single model in (a compaction.modelThresholds entry past its standard window). Updates context_window in place. */
+void catalog_apply_context_policy(bool extended, bool (*opt_in)(const ai_model_t *m, int64_t standard));
+/* the model's standard/extended windows; false when it has a single window */
+bool catalog_context_tiers(const ai_model_t *m, int64_t *standard, int64_t *extended);
+
 json_t *model_compat_get(const ai_model_t *m, const char *key); /* override, else api default (borrowed) */
 bool model_compat_bool(const ai_model_t *m, const char *key, bool def);
 const char *model_compat_str(const ai_model_t *m, const char *key);
@@ -172,6 +200,22 @@ typedef struct {
     bool copilot_identity_retry;
     const char *copilot_cache_key;      /* borrowed */
     const char *copilot_cache_snapshot; /* cached identity the headers were built from (NULL = none) */
+    /* per-family tiers: when set, ai_stream replaces service_tier with the entry for the request's model */
+    bool has_service_tiers;
+    ai_service_tiers_t service_tiers;
+    /* Anthropic fast mode: an endpoint+model that rejected `speed: "fast"` drops it for the session
+     * (anthropic-state.ts fastModeDisabled); both may be NULL */
+    bool (*fast_mode_disabled)(void *ud, const ai_model_t *m);
+    void (*on_fast_mode_unsupported)(void *ud, const ai_model_t *m);
+    void *fast_mode_ud;
+    /* Anthropic subscription slow mode (anthropic_slow.h; borrowed, may be NULL) */
+    const struct anthropic_slow_hooks *slow_hooks;
+    /* stream watchdog budgets (providers.streamFirstEventTimeoutSeconds / streamIdleTimeoutSeconds):
+     * -1 = provider/env defaults, 0 = disabled */
+    int64_t first_event_timeout_ms;
+    int64_t idle_timeout_ms;
+    /* providers.maxInFlightRequests: per-provider concurrent request caps (borrowed object, may be NULL) */
+    const json_t *max_in_flight;
 } ai_stream_opts_t;
 
 void ai_stream_opts_init(ai_stream_opts_t *o);
@@ -215,14 +259,20 @@ typedef void (*ai_event_cb)(void *ud, const ai_event_t *ev);
 /* Stream a completion. Always returns an owned AssistantMessage (stopReason "error"/"aborted" on failure). */
 json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts, ai_event_cb cb,
                   void *ud);
+/* ai_stream's provider call through the stream watchdog and providers.maxInFlightRequests slots (stream_guard.c);
+ * resolves o's first_event/idle budgets in place */
+typedef json_t *(*ai_stream_fn)(const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts,
+                                ai_event_cb cb, void *ud);
+json_t *ai_stream_guarded(ai_stream_fn fn, const ai_model_t *m, const ai_context_t *ctx, ai_stream_opts_t *o, ai_event_cb cb,
+                          void *ud);
+/* process default for providers.maxInFlightRequests (borrowed; NULL clears) */
+void ai_set_max_in_flight(const json_t *limits);
 /* Non-streaming convenience: returns the final message. */
 json_t *ai_complete(const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts);
 /* Concatenate text blocks of an assistant message (owned). */
 char *ai_message_text(const json_t *msg);
 
 /* ---------- provider plumbing (used by provider implementations) ---------- */
-typedef json_t *(*ai_stream_fn)(const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts,
-                                ai_event_cb cb, void *ud);
 void ai_register_api(const char *api, ai_stream_fn fn);
 ai_stream_fn ai_lookup_api(const char *api);
 
@@ -275,6 +325,13 @@ int ai_sse_post(const char *url, http_headers_t *headers, const char *body, cons
 typedef struct {
     int64_t idle_timeout_ms; /* max silence between received bytes (0 => 300s) */
     char *err_body;          /* out: raw body of the last failed (non-2xx) response, owned (caller frees) */
+    /* response headers of every attempt (success or failure); may be NULL */
+    void (*on_headers)(void *ud, int status, const http_headers_t *h);
+    /* a failed attempt before any content (status 0: network error; body: error body): >= 0 resends after that
+     * many ms (headers may be edited first) without spending a retry, -1 runs the normal retry/error handling,
+     * -2 fails now without retrying; may be NULL */
+    int64_t (*on_failure)(void *ud, int status, const char *body, http_headers_t *headers);
+    void *hook_ud;
 } ai_post_ex_t;
 int ai_sse_post_ex(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
                    ai_sse_cb on_event, void *ud, int *status, char **err, ai_post_ex_t *ex);

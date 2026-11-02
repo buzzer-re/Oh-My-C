@@ -1,5 +1,6 @@
 #include "app.h"
 #include "coding/autothink.h"
+#include "coding/modelctl.h"
 #include "coding/power.h"
 #include "coding/goal.h"
 #include "coding/guards.h"
@@ -365,9 +366,15 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
 
 /* ---------- hooks ---------- */
 
+/* settings-stream-fn.ts timeoutSecondsToMs: < 0 -> provider/env defaults (-1), 0 disables */
+static int64_t timeout_seconds_ms(double v) {
+    if (!isfinite(v) || v < 0) return -1;
+    if (v == 0) return 0;
+    return MAX((int64_t)1, (int64_t)(v * 1000));
+}
+
 /* per-request options shared by the main loop and side requests (prepareSimpleStreamOptions) */
 static void fill_request_opts(app_t *a, ai_stream_opts_t *o) {
-    UNUSED(a);
     /* omp resolveCacheRetention: explicit setting, else PI_CACHE_RETENTION (long|short|none), else "short" */
     const char *cr = settings_str("providers.cacheRetention", "auto");
     if (!cr || !*cr || str_eq(cr, "auto")) {
@@ -380,8 +387,10 @@ static void fill_request_opts(app_t *a, ai_stream_opts_t *o) {
     double temp = settings_num("temperature", NAN);
     if (!isnan(temp)) o->temperature = temp;
     o->text_verbosity = settings_str("textVerbosity", NULL);
-    const char *tier = settings_str("tier.openai", NULL);
-    if (tier) o->service_tier = tier;
+    app_tier_request_opts(a, o);
+    o->slow_hooks = &a->slow_hooks;
+    o->first_event_timeout_ms = timeout_seconds_ms(settings_num("providers.streamFirstEventTimeoutSeconds", -1));
+    o->idle_timeout_ms = timeout_seconds_ms(settings_num("providers.streamIdleTimeoutSeconds", -1));
 }
 
 void app_fill_request_opts(app_t *a, ai_stream_opts_t *o) { fill_request_opts(a, o); }
@@ -1365,6 +1374,11 @@ static void load_session_into_agent(app_t *a) {
             agent_set_model(a->agent, m);
         }
     }
+    /* restoreServiceTiers: the session's latest service_tier_change, else the configured tier.* settings */
+    ai_service_tiers_t tiers;
+    if (sc.has_service_tier) modelctl_tiers_from_json(sc.service_tier, &tiers);
+    else modelctl_tiers_from_settings(&tiers);
+    app_restore_service_tiers(a, &tiers);
     if (sc.thinking && !a->opts.thinking) {
         ai_effort_t e;
         if (str_eq(sc.thinking_configured, "auto")) { /* restoreThinkingLevel(auto): provisional, unresolved */
@@ -1392,7 +1406,19 @@ app_t *app_create(const app_opts_t *o, char **err) {
     catalog_discover_local(false); /* implicit local servers (ollama, llama.cpp, LM Studio); once per process */
     app_t *a = xcalloc(1, sizeof(*a));
     pthread_mutex_init(&a->mu, NULL);
+    pthread_mutex_init(&a->tier_mu, NULL);
+    app_slow_hooks_init(a);
     a->opts = *o;
+    if (o->service_tier && !ai_service_tier_intern(o->service_tier) && !str_eq(o->service_tier, "none")) {
+        *err = xasprintf("Invalid --service-tier value: \"%s\". Expected one of: none, auto, default, flex, scale, priority, ultrafast.",
+                         o->service_tier);
+        app_free(a);
+        return NULL;
+    }
+    if (!o->subagent) {
+        modelctl_apply_context_policy();
+        modelctl_watch_settings();
+    }
     a->cwd = o->cwd ? path_abs(o->cwd, NULL) : get_cwd();
     a->sys_custom = o->system_prompt ? xstrdup(o->system_prompt) : NULL;
     a->sys_append = o->append_system_prompt ? xstrdup(o->append_system_prompt) : NULL;
@@ -1521,7 +1547,19 @@ app_t *app_create(const app_opts_t *o, char **err) {
         a->thinking = autothink_provisional(a->model, &pe) ? pe : EFFORT_OFF;
     }
     install_agent(a);
-    if (json_len(a->session->entries)) load_session_into_agent(a);
+    modelctl_tiers_from_settings(&a->tiers);
+    bool resumed = json_len(a->session->entries) > 0;
+    if (resumed) load_session_into_agent(a);
+    /* sdk.ts initial service tiers: a resolver (subagent tier.subagent) or --service-tier overrides the session's /
+     * configured map and is persisted */
+    bool persist_tiers = o->service_tier || o->service_tiers;
+    if (o->service_tiers) app_restore_service_tiers(a, o->service_tiers);
+    if (o->service_tier) {
+        ai_service_tiers_t t = a->tiers;
+        t.openai = ai_service_tier_intern(o->service_tier);
+        app_restore_service_tiers(a, &t);
+    }
+    if (resumed && persist_tiers) app_append_service_tier_entry(a);
     if (!o->subagent) app_goal_restore(a);
     app_rebuild_system_prompt(a);
     if (!json_len(a->session->entries) && a->session->persist && a->model) {
@@ -1529,6 +1567,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
         session_append_model_change(a->session, label, NULL);
         /* `auto` is not written before the first turn resolves (sdk.ts) */
         if (!a->auto_thinking) session_append_thinking_change(a->session, effort_name(a->thinking));
+        if (persist_tiers || !modelctl_tiers_empty(&a->tiers)) app_append_service_tier_entry(a);
         free(label);
     }
     a->title_done = a->session->title != NULL;
@@ -1586,6 +1625,9 @@ void app_free(app_t *a) {
     json_free(a->dcr_sent);
     free(a->dcr_last);
     json_free(a->job_batch);
+    json_free(a->fast_disabled);
+    free(a->slow_lane);
+    pthread_mutex_destroy(&a->tier_mu);
     pthread_mutex_destroy(&a->mu);
     free(a);
 }
@@ -2851,6 +2893,7 @@ int app_new_session(app_t *a) {
     char *label = app_model_label(a);
     session_append_model_change(ns, label, NULL);
     session_append_thinking_change(ns, effort_name(a->thinking));
+    app_append_service_tier_entry(a);
     free(label);
     a->title_done = false;
     a->total_cost = 0;
@@ -3074,6 +3117,13 @@ app_t *app_subagent_new(app_t *parent, const char *agent_name, const char *model
     o.auto_approve = parent->opts.auto_approve;
     o.subagent_depth = parent->env->subagent_depth + 1;
     o.no_context_files = false;
+    /* tier.subagent: inherit the parent's live per-family tiers (tracks /fast), or one tier for every family */
+    ai_service_tiers_t parent_tiers, child_tiers;
+    pthread_mutex_lock(&parent->tier_mu);
+    parent_tiers = parent->tiers;
+    pthread_mutex_unlock(&parent->tier_mu);
+    modelctl_tiers_for_setting(settings_str("tier.subagent", "inherit"), &parent_tiers, &child_tiers);
+    o.service_tiers = &child_tiers;
     app_t *child = app_create(&o, err);
     free(label);
     free(chosen);

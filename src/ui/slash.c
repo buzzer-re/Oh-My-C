@@ -10,6 +10,7 @@
 #include "coding/slashcmd.h"
 
 #include "coding/advisor.h"
+#include "coding/modelctl.h"
 #include "mcp/mcp.h"
 
 #include <ctype.h>
@@ -112,6 +113,9 @@ static char *live_description(void *ud, const char *name) {
         }
         return xstrdup(a->advisor_enabled ? "Advisor: configured, no model" : "Advisor: off");
     }
+    if (!strcmp(name, "fast")) return modelctl_fast_description(a);
+    if (!strcmp(name, "slow")) return modelctl_slow_description(a);
+    if (!strcmp(name, "extended-context")) return modelctl_extended_context_description();
     if (!strcmp(name, "effort")) /* configuredThinkingLevel(): none for a model without a reasoning dial */
         return xasprintf("Thinking: %s", slash_configured_thinking(a));
     if (!strcmp(name, "clear")) return xstrdup(u->worker_running ? "Clear: unavailable while streaming" : "Clear: drop context, keep session");

@@ -33,6 +33,8 @@ STR = r'("(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`|\'(?:[^\'\\]|\\.)*\')'
 def str_value(src, key, indent=2):
     """Value of `<indent tabs>key: "..."` in a command object body, or None."""
     m = re.search(r'^' + '\t' * indent + key + r': ' + STR, src, re.M)
+    if not m:  # a long value wrapped onto the next line
+        m = re.search(r'^' + '\t' * indent + key + r':\n' + '\t' * (indent + 1) + STR + r',?$', src, re.M)
     return js_string(m.group(1)) if m else None
 
 

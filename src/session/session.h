@@ -75,6 +75,8 @@ typedef struct {
     char *model;         /* "provider/id" */
     char *thinking;      /* level name */
     char *thinking_configured; /* configured selector of the latest thinking entry ("auto"), may be NULL */
+    bool has_service_tier;     /* the path has a service_tier_change entry */
+    json_t *service_tier;      /* its serviceTier ({family: tier} or null), owned, may be NULL */
     int64_t compaction_tokens_before;
 } session_context_t;
 void session_build_context(const session_t *s, session_context_t *out);

@@ -337,24 +337,7 @@ char *oai_prompt_cache_key(const ai_stream_opts_t *o, size_t max_len, const char
     return r;
 }
 
-bool oai_send_service_tier(const ai_model_t *m, const char *tier) {
-    if (str_empty(tier) || str_eq(tier, "auto")) return false;
-    const char *prov = m ? m->provider : NULL;
-    if (m && str_eq(m->api, "openai-codex-responses") && !str_eq(tier, "flex") && !str_eq(tier, "default")) {
-        json_t *adv = json_get_arr(m->raw, "serviceTiers");
-        bool listed = false;
-        json_t *e;
-        json_arr_foreach(adv, i, e) {
-            if (str_eq(json_sv(e), tier)) listed = true;
-        }
-        if (str_eq(tier, "ultrafast")) return listed;
-        if (json_len(adv) > 0) return listed;
-    }
-    if (str_eq(tier, "ultrafast")) return str_eq(prov, "openai");
-    if (str_eq(prov, "openai") || str_eq(prov, "openai-codex")) return true;
-    if (str_eq(prov, "openrouter")) return str_eq(tier, "flex") || str_eq(tier, "scale") || str_eq(tier, "priority");
-    return false;
-}
+bool oai_send_service_tier(const ai_model_t *m, const char *tier) { return ai_should_send_service_tier(tier, m); }
 
 char *oai_image_url(const json_t *img) {
     const char *url = json_get_str(img, "url");

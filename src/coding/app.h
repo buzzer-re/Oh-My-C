@@ -3,6 +3,7 @@
 #define OMC_APP_H
 
 #include "agent/agent.h"
+#include "ai/anthropic_slow.h"
 #include "config/model_resolver.h"
 #include "coding/commands.h"
 #include "coding/discovery.h"
@@ -38,6 +39,8 @@ typedef struct {
     bool rpc_ui;                /* `--mode rpc-ui`: tool UI (ask) over the RPC protocol */
     bool interactive_prompts;   /* ACP client with form elicitation: `ask` only, no other UI behavior */
     bool auto_approve;          /* --auto-approve / --yolo: every approval resolves in yolo mode */
+    const char *service_tier;   /* --service-tier (an OpenAI tier setting value; "none" omits); NULL = not given */
+    const ai_service_tiers_t *service_tiers; /* subagents: the resolved per-family map (tier.subagent) */
 } app_opts_t;
 
 typedef struct app app_t;
@@ -143,6 +146,14 @@ struct app {
     tool_gate_t (*permission_gate)(void *ud, app_t *a, const json_t *call, const json_t *args, bool *client_approved,
                                    char **reason);
     void *permission_gate_ud;
+    /* service tiers, fast/slow mode (modelctl.c) */
+    ai_service_tiers_t tiers;      /* live per-family map (guarded by tier_mu) */
+    pthread_mutex_t tier_mu;
+    json_t *fast_disabled;         /* Anthropic endpoint+model keys whose fast mode was rejected (tier_mu) */
+    char *slow_lane;               /* account lane of the latest Anthropic subscription request (tier_mu) */
+    int64_t wrap_up_hinted;        /* wrap-up window already steered (-1 none) */
+    anthropic_slow_hooks_t slow_hooks;
+    struct cache_warmer *warmer;   /* prompt cache warmer (cachewarm.c), NULL for subagents */
     pthread_mutex_t mu;
 };
 

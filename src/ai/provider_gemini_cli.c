@@ -979,6 +979,9 @@ json_t *provider_gemini_cli_stream(const ai_model_t *m, const ai_context_t *ctx,
 
     json_t *fet = model_compat_get(m, "streamFirstEventTimeoutMs");
     int64_t first_event_ms = json_is_num(fet) && fet->u.num.d > 0 ? (int64_t)fet->u.num.d : DEFAULT_FIRST_EVENT_TIMEOUT_MS;
+    /* streamFirstEventTimeoutMs request option (providers.streamFirstEventTimeoutSeconds); 0 disables */
+    if (o->first_event_timeout_ms > 0) first_event_ms = o->first_event_timeout_ms;
+    else if (o->first_event_timeout_ms == 0) first_event_ms = 24LL * 3600 * 1000;
 
     cca_sse_t s;
     cca_sse_init(&s, m, ctx->tools, cb, ud);

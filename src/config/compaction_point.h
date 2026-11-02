@@ -23,6 +23,8 @@ int64_t cp_threshold_tokens(int64_t window, const cp_settings_t *s);
 /* the trigger for a model on its window (0 when the window is unknown) */
 int64_t cp_model_threshold(const ai_model_t *m, int64_t window);
 
+/* compactionPointReaches: the model's token entry needs more than `window` (opts it into its extended window) */
+bool cp_reaches(const ai_model_t *m, int64_t window);
 /* parseCompactionPointInput: *out_entry owned json (number, "fN", "N%") or NULL for reset; false + *err owned */
 bool cp_parse_input(const char *input, json_t **out_entry, char **err);
 /* the model's own exact entry as editable text (`90k`, `f1500k`, `80%`) or NULL (owned) */

@@ -29,6 +29,7 @@ typedef VEC(http_header_t) http_headers_t;
 
 void http_headers_add(http_headers_t *h, const char *name, const char *value);
 void http_headers_set(http_headers_t *h, const char *name, const char *value);
+void http_headers_del(http_headers_t *h, const char *name); /* case-insensitive, every occurrence */
 const char *http_headers_get(const http_headers_t *h, const char *name); /* case-insensitive */
 void http_headers_free(http_headers_t *h);
 

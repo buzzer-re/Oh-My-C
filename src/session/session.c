@@ -664,6 +664,11 @@ static void build_context_path(const json_t *path, session_context_t *out) {
             free(out->thinking_configured);
             const char *cf = json_get_str(e, "configured");
             out->thinking_configured = cf ? xstrdup(cf) : NULL;
+        } else if (str_eq(t, "service_tier_change")) {
+            out->has_service_tier = true;
+            json_free(out->service_tier);
+            const json_t *st = json_get(e, "serviceTier");
+            out->service_tier = st ? json_clone(st) : NULL;
         } else if (str_eq(t, "reset_boundary")) {
             boundary = (ssize_t)i;
             compaction = -1;
@@ -719,6 +724,7 @@ void session_context_free(session_context_t *c) {
     free(c->model);
     free(c->thinking);
     free(c->thinking_configured);
+    json_free(c->service_tier);
     memset(c, 0, sizeof(*c));
 }
 
