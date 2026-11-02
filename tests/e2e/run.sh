@@ -417,7 +417,7 @@ fi
 # memory block in the next system prompt, memory:// reads; auto-learn manage_skill + private capture turn
 MA="$T/magent"; mkdir -p "$MA" "$T/mwork"
 cp "$T/agent/models.yml" "$MA/models.yml"
-printf 'modelRoles:\n  default: mock/mock-1\nmemory:\n  backend: local\nmemories:\n  minRolloutIdleHours: 0\nautolearn:\n  enabled: true\n  autoContinue: true\n  minToolCalls: 1\n' > "$MA/config.yml"
+printf 'modelRoles:\n  default: mock/mock-1\nmemory:\n  backend: local\nmemories:\n  minRolloutIdleHours: 0\n  stage1LeaseSeconds: 1\n  phase2LeaseSeconds: 1\nautolearn:\n  enabled: true\n  autoContinue: true\n  minToolCalls: 1\n' > "$MA/config.yml"
 MENV=(env OMC_CODING_AGENT_DIR="$MA")
 MROOT="$MA/memories/--$(cd "$T/mwork" && pwd | sed 's#^/##; s#[/:]#-#g')--"
 pushd "$T/mwork" >/dev/null
@@ -427,7 +427,11 @@ check "manage_skill"    'Created managed skill "e2e-skill" (managed-skills/e2e-s
 check "managed SKILL.md" $'---\nname: e2e-skill\ndescription: Use for e2e tests\n---\n\nDo the thing.'  cat "$MA/managed-skills/e2e-skill/SKILL.md"
 check "managed listed"  "Do the thing."         "${MENV[@]}" "$B" -m mock/mock-1 -p "read:skill://e2e-skill"
 check "manage dup"      "already exists"        "${MENV[@]}" "$B" -m mock/mock-1 -p 'call:manage_skill:{"action":"create","name":"e2e-skill","description":"d","body":"b"}'
-# the previous runs are idle rollouts now: a slow prompt keeps this process alive while startup consolidates them
+# the previous runs are idle rollouts now: a slow prompt keeps this process alive while startup consolidates them.
+# Each short -p run above also starts the memory pipeline and is torn down mid-flight; like omp, an aborted phase
+# leaves its lease until it expires, which would block this run's consolidation. Short leases + a 2 s wait make
+# that deterministic (it used to depend on how fast the filesystem under TMPDIR is).
+sleep 2
 check "memory startup"  "done"                  "${MENV[@]}" "$B" -m mock/mock-1 -p "slow:10:done"
 for _ in $(seq 50); do [ -f "$MROOT/memory_summary.md" ] && break; sleep 0.2; done
 check "memory summary"  "MOCK SUMMARY from consolidation"  cat "$MROOT/memory_summary.md"
