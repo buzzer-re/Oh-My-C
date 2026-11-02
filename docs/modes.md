@@ -22,7 +22,7 @@ omc <command> [args]                subcommand (see below)
 Routing (`src/cli/args.c`, port of `cli-commands.ts resolveCliArgv`): a registered command name or alias
 runs it, even behind leading launch flags (`omc --cwd x models` → `models`, launch-only flags dropped);
 omp's plugin verbs (`list`, `remove`, `marketplace add …`) and omp commands omc does not port (`stats`,
-`update`, `plugin`, `commit`, `usage`, `session`, `ttsr`, …) are refused with `error: …` (exit 1) instead of
+`update`, `plugin`, `commit`, `session`, `ttsr`, …) are refused with `error: …` (exit 1) instead of
 reaching the model as a prompt; everything else is the launch command (`omc launch <words>` forces that).
 
 Launch flags (`src/cli/args.c`, port of `cli/args.ts` + `flag-tables.ts`; `--flag=value` everywhere,
@@ -224,7 +224,8 @@ written to a private dup of fd 1, and fd 1 itself is pointed at stderr so stray 
 `session/resume` (no replay), `session/fork`, `session/close`, `session/list` (cwd filter, 50-entry pages with
 `nextCursor`), `session/set_mode`, `session/set_config_option` (`mode`, `model`, `thinking`),
 `session/prompt`, `session/cancel`, and the extension methods `_session/steering` (inject into a running client
-turn, else `promptRequired`), `_omp/sessions/listAll`, `_omp/projects/list`, `_omp/chats/byCwd`. Errors use
+turn, else `promptRequired`), `_omp/sessions/listAll`, `_omp/projects/list`, `_omp/chats/byCwd`, `_omp/usage` (`{reports}`, answered off the
+reader thread). Errors use
 omp's codes: `-32002` for an unknown session, `-32602` for steering validation, `-32603` with
 `data.details` otherwise. Session responses carry `configOptions` and `modes`; 50 ms after them the bootstrap
 updates follow (MCP connect failures, `available_commands_update`, `session_info_update`).
@@ -270,3 +271,22 @@ print) on omc worker threads. Keep it short, and don't free the session from ins
 credentials and the catalog are process-wide. The first session's `agent_dir` wins (it is applied as
 `OMC_CODING_AGENT_DIR`). `examples/embed.c` shows a native tool and the RPC protocol, and the e2e suite
 runs it.
+
+## Provider usage (`omc usage`, `/usage` in RPC / ACP, `get_state.usageLimit`)
+
+`omc usage` (`src/cli/sub_usage.c`, port of `cli/usage-cli.ts`) fetches every stored account's quota report through
+`src/config/usage.c` and prints omp's breakdown: per provider `— N account(s)`, provider notes, one header per account
+(status dot, identity, org / plan, Daybreak, saved resets, `fetched … ago` past 90 s), one row per meter (label, 28-cell
+bar, amounts, reset countdown; `○ … not reported` for a meter another account has), accounts without a report
+(`— no usage data`) and the `capacity:` line. `--json` (raw payloads dropped, `accountsWithoutUsage`, `capacity`),
+`-p <provider>`, `-r` (minimal-reveal masks), `--history [--days N]` (hourly snapshots recorded in
+`<agent>/usage-history.jsonl` whenever a report is fetched), `accounts` (identity keys), `reset` (lists Codex / Claude saved
+resets, `reset <provider>/<credential id>` spends one; the credential id is the account's position in auth.json),
+`invalidate [-p]` and `clients` (empty: omc has no auth broker). Reports are cached 5 minutes per credential in
+`<agent>/usage-cache.json`, shared with the TUI and other omc processes.
+
+Text-mode `/usage` (RPC `prompt`, ACP `session/prompt`) is `helpers/usage-report.ts`: a fenced block per provider with the
+models whose quotas the reports cover, each limit's account, amount, ASCII bar and reset; with no report it prints the
+session tallies. `/usage reset [target]` lists or spends a saved reset. ACP `_omp/usage` answers `{reports}`. RPC
+`get_state` carries `usageLimit` (`{stage: "wrap_up", resetsAtSec?, extraUsage}` or `{stage: "low_priority",
+resetsAtSec, allowanceLeftPercent?}`) while the active Anthropic account is past its limit.
