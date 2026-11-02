@@ -40,7 +40,7 @@ When status.md and this file disagree, check the code. Several status.md rows ma
 
 Ranked by how soon a user hits the gap in a normal interactive session.
 
-1. **Plan approval doesn't show the plan.** `xd://propose` ends in a generic Ask, "Approve plan local://x-plan.md?", with Approve / Keep planning / Other. Feedback typed under "Other" is dropped. omp's options are missing: execute in fresh context / compact / keep context, save & quit, and the tier slider. (WP-1)
+1. ~~**Plan approval doesn't show the plan.**~~ Done: `xd://propose` opens omp's Plan Review overlay with all five actions, the tier slider, annotations and save & quit (WP-1, see status.md Plan mode).
 2. **Steered and follow-up messages vanish.** Messages delivered while the agent runs never appear in the transcript until a rebuild. There is no pending-queue view and no dequeue, Esc doesn't restore the queue, and follow-up is bound to Alt+Enter instead of Ctrl+Q / Ctrl+Enter. (WP-2)
 3. **`!cmd`, `/compact` and `/handoff` run on the UI thread.** The TUI freezes, Esc is ignored and keys typed meanwhile are garbled. While streaming, `!cmd` is sent to the model as steer text. (WP-2)
 4. **No turn-end, ask or error notifications, and the terminal title never changes.** `completion.notify` and `ask.notify` are on by default in omp. `tui_term_set_title` exists but is never called. (WP-11)
@@ -77,7 +77,7 @@ Every package must:
 
 | WP | Scope | omc files | Upstream sources |
 |---|---|---|---|
-| WP-1 Plan review and plan-mode parity | Fullscreen plan review that renders the plan markdown with a Contents sidebar. Five actions: execute in fresh context / compact / keep context (with token count) / refine (feedback to model) / save & quit. Also: tier slider, copy, Ctrl+G edit, `/plan-review`, "Exit plan mode?" confirm with a draft, paused state, `plan.enabled`, `plan.autosave(Dir)`, `modelRoles.plan` switch/restore | `src/coding/app.c` (`app_propose_plan`, `app_set_plan_mode`), new `src/ui/planreview.c`, `src/modes/interactive.c` | T/overlays/plan-review-overlay.ts, plan-toc.ts, plan-save-overlay.ts; U/modes/interactive-mode.ts (`handlePlanModeCommand`, `showPlanReview`, `#approvePlan`, `#exitPlanMode`); U/plan-mode/* |
+| WP-1 Plan review and plan-mode parity (done; remaining: overlay mouse, extension plan-review hooks, mid-stream deferred plan-model switch) | Fullscreen plan review that renders the plan markdown with a Contents sidebar. Five actions: execute in fresh context / compact / keep context (with token count) / refine (feedback to model) / save & quit. Also: tier slider, copy, Ctrl+G edit, `/plan-review`, "Exit plan mode?" confirm with a draft, paused state, `plan.enabled`, `plan.autosave(Dir)`, `modelRoles.plan` switch/restore | `src/coding/app.c` (`app_propose_plan`, `app_set_plan_mode`), new `src/ui/planreview.c`, `src/modes/interactive.c` | T/overlays/plan-review-overlay.ts, plan-toc.ts, plan-save-overlay.ts; U/modes/interactive-mode.ts (`handlePlanModeCommand`, `showPlanReview`, `#approvePlan`, `#exitPlanMode`); U/plan-mode/* |
 | WP-2 Queue and non-blocking input | Render delivered steer/follow-up user messages; pending-messages view; dequeue (Alt+Up); Esc restores the queue to the editor; follow-up on Ctrl+Q / Ctrl+Enter. Move `!cmd`, `!!cmd`, `/compact`, `/handoff` to a worker with Esc cancel. Defer `!cmd` while streaming. `$code` / `$$code` user eval in the shared kernel. Queue `/compact` for the yield while streaming | `src/modes/interactive.c` (`on_submit`, `run_bang`, `ui_apply_event`, `key_hook`), `src/coding/app.c` (`app_user_bash`, `app_compact`, `app_handoff`), `src/ui/chat.c` | U/modes/controllers/input-controller.ts (`handleFollowUp`, `handleDequeue`, `restoreQueuedMessagesToEditor`), interactive-mode.ts (`updatePendingMessagesDisplay`), command-controller.ts (`handleBashCommand`, `handlePythonCommand`, `handleCompactCommand`), U/modes/prompt/queued-messages.ts |
 | WP-3 Model-facing correctness bugs | Port `out://`, `cfg://`, `conflict://N` (write now refuses unknown schemes; main 44b5fc3). Make `thinking: auto` stop meaning off: resolve it like omp, or to the model default until the WP-12 classifier lands. Verify with `tests/parity/request_diff.sh` / `tool_diff.sh` | `src/tools/write_bash.c`, `src/tools/read.c`, `src/tools/vurl.c`, `src/coding/app.c` (thinking setup), `src/ui/settings.c` | U/internal-urls/{router,out-protocol,cfg-protocol,conflict-protocol}.ts, U/tools/conflict-detect.ts, U/auto-thinking/* |
 | WP-4 Slash-command correctness and shared registry | One registry (name, aliases, subcommands, hints, handler) used by TUI, RPC and ACP. Fix `/advisor` (status/dump), `/compact [soft\|remote\|snapcompact] [focus]`, `/shake [elide\|images\|thinking]`, `/handoff [focus]`, `/resume <id>`, `/effort` errors, `/delete` on in-memory sessions. Add aliases (models, rewind, q, providers, status, subagents, worktree, plugin, force:). Bare `exit`/`quit`/`q`. `/export` with omp's HTML viewer (`export/html/template.*` embedded as assets). `/dump all\|anon` + request-JSON sidecar | `src/modes/interactive.c` (`handle_command`, `COMMANDS[]`), `src/ui/slash.c`, `src/coding/app.c`, `src/session/session.c` (`session_export_html`), `assets/` | U/slash-commands/builtin-*.ts, builtin-registry.ts, helpers/*, U/session/compact-modes.ts, shake-types.ts, session-dump-format.ts, U/export/html/* |
@@ -141,8 +141,8 @@ omc-only commands (not in omp): `/help`, `/thinking` (omp only has `/effort`), `
 | /security | builtin-modes.ts | — | ❌ | OMP-native security scans (plan/scan/status/…/disposition); needs scan engine + `security://` |
 | /settings | builtin-modes.ts | `ui_overlay_settings` | ✅ | most settings have no effect, see §3 |
 | /setup (providers) | builtin-modes.ts | — | ❌ | first-run wizard exists (`src/ui/setup.c`) but no command to reopen provider setup |
-| /plan [prompt] | builtin-modes.ts, interactive-mode.ts `handlePlanModeCommand` | `handle_command` "plan" → `app_set_plan_mode` | 🟡 | plain toggle; no `plan.enabled` check, no "Exit plan mode?" confirm when a draft exists, no paused state, no goal/vibe mutual exclusion message parity, no plan-file path in status; approval is a generic 2-option ask (`app_propose_plan`, `src/coding/app.c`) without the plan text — see WP-1 |
-| /plan-review | builtin-modes.ts | — | ❌ | re-open plan review overlay |
+| /plan [prompt] | builtin-modes.ts, interactive-mode.ts `handlePlanModeCommand` | `handle_command` "plan" → `app_enter_plan_mode` / `app_exit_plan_mode` (`src/coding/planmode.c`) | ✅ | enter / "Exit plan mode?" confirm with a draft / paused / disabled, `plan.enabled`, plan-file path in the status and the live description; goal/vibe exclusion messages ❌ |
+| /plan-review | builtin-modes.ts | `plan_review_command` (`src/modes/interactive.c`) | ✅ | newest `local://*plan.md`, aborts a running turn first |
 | /vibe | builtin-modes.ts | — | ❌ | vibe mode (persistent fast/good worker sessions) |
 | /goal | builtin-modes.ts | `goal_command` | ✅ | |
 | /guided-goal | builtin-modes.ts | `handle_command` | ✅ | |
@@ -284,7 +284,7 @@ both are false. Rows marked (tmux) were probed in tmux against the mock model.
 | app.session.new/tree/fork/resume (unbound by default) | slash commands | 🟡 | not bindable without overrides |
 | app.session.pin/unpin (alt+k / alt+shift+k), rename/delete in picker | `src/ui/sessions.c` | ✅ | |
 | app.tree.previousBranch/nextBranch | — | ❌ | `/tree` is a flat list |
-| app.plan.toggle (alt+shift+p) | `/plan` only | 🟡 | |
+| app.plan.toggle (alt+shift+p) | `key_hook` → `/plan` | ✅ | |
 | app.history.search (ctrl+r) | — | ❌ | |
 | app.links.hint (alt+o) | — | ⛔ | extension runtime |
 | app.stt.pushToTalk, app.stt.toggle, app.live.toggle | — | ⛔ | audio stack |
@@ -293,8 +293,8 @@ both are false. Rows marked (tmux) were probed in tmux against the mock model.
 
 | Flow | omc | Status | Notes |
 |---|---|---|---|
-| Plan approval (`xd://propose` → PlanReviewOverlay) | `app_propose_plan` → generic Ask | 🟡 | (tmux) "Approve plan local://demo-plan.md?" with Approve / Keep planning / Other: **no plan text**, refine feedback typed via "Other" is dropped, no compact/keep-context/save/tier options. Approve does end plan mode and queue `plan-mode-approved.md` |
-| Plan-mode model role switch/restore (`modelRoles.plan`) | — | ❌ | |
+| Plan approval (`xd://propose` → PlanReviewOverlay) | `src/ui/planreview.c` + `ui_plan_approval` | ✅ | cell-identical overlay (tmux), all branches; mouse ❌ |
+| Plan-mode model role switch/restore (`modelRoles.plan`) | `app_plan_apply_model` / exit restore | ✅ | deferred switch while streaming ❌ |
 | /plan toggle + read-only gating | `/plan`, `hook_before_tool` | ✅ | |
 | Submit / steer while streaming | `on_submit` → `agent_steer` | 🟡 | "Queued (steer)" notice instead of the pending-messages view |
 | Pending-messages view (`updatePendingMessagesDisplay`) | — | ❌ | |
@@ -477,7 +477,7 @@ ast_edit debug eval glob grep find lsp checkpoint rewind task wait todo web_sear
 | docs placement (`tools.xdevDocs`) | `xdev_prompt_docs` | ✅ | MCP route guidance block ❌; `tools.xdevNotices` ❌ |
 | `xd://report_issue` | `record_issue` | 🟡 | local only; no `dev.autoqaPush.endpoint` push |
 | `xd://resolve`, `xd://reject` | `write_bash.c` | 🟡 | ast_edit only; omp has a generic queueResolveHandler |
-| `xd://propose` | `write_bash.c` → `app_propose_plan` | 🟡 | routed correctly; approval UI is the generic Ask (§5, WP-1) |
+| `xd://propose` | `write_bash.c` → `planmode.c` propose handlers | ✅ | XdevDispatch details, review / auto-approve / plan-yolo handlers |
 
 ### 4c. Internal URL schemes (`internal-urls/router.ts`)
 
@@ -508,8 +508,8 @@ floating list; Esc-Esc and Ctrl+R do nothing although `/hotkeys` lists Ctrl+R.
 
 | Overlay | Upstream | Opened by | omc | Status | Notes |
 |---|---|---|---|---|---|
-| plan-review-overlay + plan-toc | plan-review-overlay.ts (1943 lines), plan-toc.ts | `xd://propose`, `/plan-review` | `app_propose_plan` (`src/coding/app.c`) → generic `env->ui.ask` | 🟡 | **Plan text never shown**; question is "Approve plan local://x-plan.md?" with 2 options. omp: plan rendered with Contents sidebar, 5 actions (execute in fresh context / compact / keep context with token count / refine / save & quit), model-tier slider, delete-section/annotate, copy, external editor. omc always keeps context |
-| plan-save-overlay | plan-save-overlay.ts | "Save plan & quit" | — | ❌ | |
+| plan-review-overlay + plan-toc | plan-review-overlay.ts (1943 lines), plan-toc.ts | `xd://propose`, `/plan-review` | `src/ui/planreview.c` | ✅ | sections, Contents sidebar, delete/undo, annotations, slider, copy, external editor; mouse ❌ |
+| plan-save-overlay | plan-save-overlay.ts | "Save plan & quit" | `ui_plan_save_*` (`src/ui/planreview.c`) | ✅ | tiny-model filename suggestion |
 | approval-dialog | approval-dialog.ts, tools/approval*.ts | tool call under `tools.approvalMode`/`tools.approval` | — (ACP only, `src/modes/acp.c:222`) | ❌ | `/hotkeys` lists "Approve a pending tool call" |
 | ask-dialog | ask-dialog.ts | `ask` tool | `src/ui/ask.c` | ✅ | cell-verified |
 | context-viewer (+format, overview) | context-viewer*.ts | `/context` | notice | 🟡 | two-line notice; its total contradicts its own system/tools estimate line |
@@ -680,7 +680,7 @@ U = `packages/coding-agent/src`. status.md marks RPC and ACP ✅; both are 🟡 
 | --smol / --slow / --plan (role model shortcuts) | ❌ | omc's `--plan-mode` means something else; `-m @role` works |
 | --auto-approve/--yolo, --approval-mode | ❌ | approval system missing |
 | --max-time, --max-cost, --warn-cost | ❌ | omc-only `--max-turns` |
-| --add-dir, --allow-home, --profile, --alias, --from-claude, --from-codex, --no-lsp, --no-pty, --wait-async, --external-thinking, --prewalk*, --plan-yolo*, --provider-session-id, --prompt-cache-key | ❌ | |
+| --add-dir, --allow-home, --profile, --alias, --from-claude, --from-codex, --no-lsp, --no-pty, --wait-async, --external-thinking, --prewalk*, --provider-session-id, --prompt-cache-key | ❌ | |
 | --hook, -e/--extension, --trusted-extension, --no-extensions, --plugin-dir, --no-ui | ⛔ | JS/Bun extension runtime |
 
 ### 6e. CLI subcommands (U/cli-commands.ts, U/commands/*)
