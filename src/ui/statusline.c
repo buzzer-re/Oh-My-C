@@ -373,6 +373,39 @@ static char *git_branch(const char *cwd) {
     return r;
 }
 
+/* resolveWorktreeContext + the path segment's label: NULL unless `cwd` is in a linked worktree (its .git is a file
+ * naming <common>/worktrees/<name> with a commondir); else "<project>" or "<project>/<worktree dir>" (owned) */
+static char *worktree_label(const char *cwd) {
+    char *root = NULL;
+    char *gd = find_git_dir(cwd, &root);
+    char *label = NULL;
+    char *cdf = gd ? path_join(gd, "commondir") : NULL;
+    char *common_rel = cdf ? fs_read_limit(cdf, 4096, NULL, NULL) : NULL;
+    if (gd && root && common_rel) {
+        char *t = str_trim(common_rel);
+        char *common = path_abs(t, gd);
+        free(t);
+        char *primary = !strcmp(path_basename(common), ".git") ? path_dirname(common) : xstrdup(common);
+        const char *base = path_basename(primary);
+        size_t bl = strlen(base);
+        char *project = bl > 4 && str_ends(base, ".git") ? xstrndup(base, bl - 4) : xstrdup(base);
+        if (*project) {
+            char *branch = git_branch(cwd);
+            const char *wt = path_basename(root);
+            label = str_eq(branch, wt) ? xstrdup(project) : xasprintf("%s/%s", project, wt);
+            free(branch);
+        }
+        free(project);
+        free(primary);
+        free(common);
+    }
+    free(common_rel);
+    free(cdf);
+    free(gd);
+    free(root);
+    return label;
+}
+
 static void *git_status_thread(void *arg) {
     char *cwd = arg;
     const char *argv[] = {"git", "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=normal", NULL};
@@ -648,7 +681,15 @@ static char *render_segment(const char *id, const segctx_t *c) {
         free(home_tmp);
         char *pwd = xstrdup(strip ? disp : cwd);
         free(disp);
-        if (seg_bool(c->set, "path", "abbreviate", true)) {
+        /* a linked git worktree (/wt, PR checkouts): the project name, plus the worktree dir when it is not the
+         * branch name (resolveWorktreeContext) */
+        char *wt_label = strip ? worktree_label(cwd) : NULL;
+        bool is_wt = wt_label != NULL;
+        if (is_wt) {
+            free(pwd);
+            pwd = wt_label;
+        }
+        if (!is_wt && seg_bool(c->set, "path", "abbreviate", true)) {
             const char *h = home_dir();
             size_t hl = h ? strlen(h) : 0;
             if (hl > 1 && str_starts(pwd, h) && (pwd[hl] == 0 || pwd[hl] == '/')) {
@@ -672,7 +713,7 @@ static char *render_segment(const char *id, const segctx_t *c) {
             free(pwd);
             pwd = n;
         }
-        char *w = with_icon(scratch && strip ? sym("icon.scratchFolder") : sym("icon.folder"), pwd);
+        char *w = with_icon(is_wt ? sym("icon.worktree") : scratch && strip ? sym("icon.scratchFolder") : sym("icon.folder"), pwd);
         char *r = fgw(TUI_TC_STATUS_LINE_PATH, w);
         free(w), free(pwd);
         return r;

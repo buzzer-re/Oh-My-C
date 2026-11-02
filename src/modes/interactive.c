@@ -1748,6 +1748,7 @@ static void move_command(ui_t *u, const char *arg) {
         g_move_ov = ui_move_overlay_new(u->app->cwd, move_overlay_done, u);
         tui_overlay_opts_t o = {TUI_ANCHOR_BOTTOM, 0, 0, 0, 0};
         tui_overlay_show(u->tui, g_move_ov, &o);
+        tui_overlay_fill_screen(u->tui, g_move_ov); /* bottom of the screen, over a short transcript too */
         tui_request_render(u->tui);
     }
     free(t);
