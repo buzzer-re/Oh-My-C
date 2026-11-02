@@ -157,6 +157,11 @@ printf 'retry:\n  fallbackChains:\n    mock/mock-flaky:\n      - mock/mock-2\n' 
 out=$(timeout 60 "$B" --model mock/mock-flaky -p "bash:echo fb-ok" </dev/null 2>&1)
 [[ "$out" == *"Tool said: fb-ok"* && "$out" == *"[warning] Fallback: mock/mock-flaky -> mock/mock-2"* ]] && echo "   ok  retry fallback" || { echo "   FAIL retry fallback: $out"; fail=1; }
 tail -1 "$T/req.jsonl" | grep -q '"model": "mock-2"' && echo "   ok  fallback model used" || { echo "   FAIL fallback model used"; fail=1; }
+# a plain 503 retries after the exponential base (retry.baseDelayMs), not the 45-75 s capacity window
+# (the transport's own 1 s / 2 s / 4 s retries of each request come on top: ~14 s; the bug added ~1 min)
+printf 'retry:\n  maxRetries: 1\n  baseDelayMs: 10\n' > "$T/agent/config.yml"
+s0=$(date +%s%N); out=$(timeout 40 "$B" --model mock/mock-1 --no-session -p "fail:503:try again later" </dev/null 2>&1); s1=$(date +%s%N)
+(( (s1 - s0) / 1000000 < 30000 )) && [[ "$out" == *"[warning] Retrying (1/1) in 1s: 503 try again later"* ]] && echo "   ok  503 retry backoff" || { echo "   FAIL 503 retry backoff ($(( (s1 - s0) / 1000000 )) ms): $out"; fail=1; }
 rm -f "$T/agent/config.yml"
 grep -q "Project rule: always test." "$T/req.jsonl" && echo "   ok  AGENTS.md in prompt" || { echo "   FAIL AGENTS.md in prompt"; fail=1; }
 # TTSR: a stream-triggered rule interrupts, injects and retries
@@ -343,6 +348,9 @@ check "acp slash"      "agent_message_chunk Workspace directories:"  python3 -I 
 check "rpc slash"      "ok unknown slash goes to the model"  python3 -I "$ROOT/tests/e2e/slash_rpc.py" "$B"
 # workspace and session lifecycle (WP-21): --add-dir, /add-dir, /remove-dir, /dirs, /pin, /fresh, /move, /wt
 check "rpc workspace"  "workspace rpc ok"  python3 -I "$ROOT/tests/e2e/workspace_rpc.py" "$B" "$T/req.jsonl"
+# model switching (WP-19): /switch, /modelpreset, prewalk handoff, in a throwaway agent dir
+mkdir -p "$T/agent-ms" && cp "$T/agent/models.yml" "$T/agent-ms/"
+check "rpc model switch" "ok prewalk session entries"  env OMC_CODING_AGENT_DIR="$T/agent-ms" python3 -I "$ROOT/tests/e2e/model_switch_rpc.py" "$B" "$T/agent-ms" "$T/req.jsonl"
 # custom commands (WP-9): file commands, prompt templates, /skill:, MCP prompts over RPC, ACP and print mode
 check "rpc commands"   "ok empty MCP prompt consumed"  python3 -I "$ROOT/tests/e2e/commands_rpc.py" "$B" "$T/req.jsonl" "$ROOT/tests/e2e/mock_mcp.py"
 check "acp file cmd"   "stop end_turn"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/init"

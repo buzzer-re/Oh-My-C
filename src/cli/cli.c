@@ -778,6 +778,11 @@ static int launch_run(launch_args_t *A, bool force_acp) {
         rc = 1;
         goto out2;
     }
+    if (A->no_prewalk && (A->prewalk || A->prewalk_into)) {
+        fprintf(stderr, "omc: --no-prewalk cannot be combined with --prewalk or --prewalk-into\n");
+        rc = 1;
+        goto out2;
+    }
     app_opts_t o = {0};
     o.cwd = cwd;
     o.model = A->model ? A->model : scoped_model;
@@ -800,6 +805,8 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     o.max_turns = A->max_turns;
     o.auto_approve = A->auto_approve;
     o.service_tier = A->service_tier;
+    o.prewalk = A->no_prewalk ? -1 : (A->prewalk || A->prewalk_into) ? 1 : 0;
+    o.prewalk_into = A->prewalk_into;
     o.has_ui = interactive;
     /* --add-dir + workspace.additionalDirectories (main.ts: the union, CLI first) */
     if (A->add_dir.n) {

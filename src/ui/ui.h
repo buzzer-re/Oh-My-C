@@ -101,6 +101,9 @@ struct ui {
     char *compact_pending;          /* `/compact` sent with Enter mid-run: runs once the aborted turn unwinds */
     strvec_t optimistic;            /* submitted prompts already drawn: their user message_start is not drawn again */
     int bg_kind;                    /* running maintenance op: 0 none, 1 compaction, 2 handoff */
+    /* iq_compact_then: runs once the manual compaction settles (ok: committed or nothing to compact) */
+    void (*after_compact)(ui_t *u, bool ok, void *ud);
+    void *after_compact_ud;
     pthread_t bg_thread;
     struct ui_bash *bash;           /* running `!cmd` */
     struct ui_bash *python;         /* running `$ code` */
@@ -159,6 +162,8 @@ void add_notice(ui_t *u, const char *level, const char *text);
 void ui_open_in_browser(const char *url_or_path); /* openPath: xdg-open/open, detached; OMC_NO_BROWSER skips */
 /* chrome/segment-track.ts renderSegmentTrack (modelhub.c); owned */
 char *ui_segment_track(const char *const *labels, size_t n, int active);
+/* resolveSegmentPalette: up to min(n, 12) distinct theme colors (tui_tc_t) into out[12]; returns the count */
+size_t ui_segment_palette(size_t n, int *out);
 /* `• Background job completed …` rows for a delivered async-result prompt (no-op for other messages) */
 void ui_async_result(ui_t *u, const json_t *msg);
 void ui_retry_recovered(ui_t *u, const char *notes); /* "\n"-separated notes for the failed attempts */

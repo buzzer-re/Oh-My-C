@@ -13,6 +13,8 @@ typedef struct {
     const char *goal;
     bool plan_yolo;
     const char *plan_yolo_into;
+    bool prewalk, no_prewalk;   /* --prewalk / --no-prewalk */
+    const char *prewalk_into;   /* --prewalk-into */
     bool has_max_time, has_warn_cost, has_max_cost;
     double max_time, warn_cost, max_cost;
     const char *api_key, *system_prompt, *system_prompt_template, *append_system_prompt;

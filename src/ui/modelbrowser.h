@@ -7,7 +7,9 @@
 
 typedef struct {
     const ai_model_t *model;
-    char *selector; /* provider/id */
+    char *selector;  /* provider/id, or the virtual `@role` of a quick-role row */
+    char *label;     /* shown in place of the model id (quick-role rows), NULL = model id */
+    int label_color; /* tui_tc_t of the label (ModelBrowserItem.labelColor), -1 = default styling */
 } ui_model_item_t;
 
 typedef struct {
@@ -29,6 +31,9 @@ typedef struct {
     int hovered;     /* visible index under the pointer, -1 none */
     int window_count;
     char *empty_text; /* overrides "No models available in this scope" when set */
+    /* model picker (markOverContext): rows whose context window is below the session's tokens are grayed */
+    bool mark_over_context;
+    int64_t ctx_tokens;
 } ui_model_browser_t;
 
 /* a role resolved to a model (RoleAssignment) with its chip label/color (getRoleInfo) */
@@ -58,6 +63,13 @@ enum { UI_MB_IGNORED, UI_MB_HANDLED, UI_MB_ACTIVATE, UI_MB_CANCEL };
 ui_model_browser_t *ui_model_browser_new(void);
 void ui_model_browser_free(ui_model_browser_t *b);
 void ui_model_browser_add(ui_model_browser_t *b, const ai_model_t *m);
+/* a virtual row (quick role): `selector` and `label` are copied; color -1 = default styling */
+void ui_model_browser_add_labeled(ui_model_browser_t *b, const ai_model_t *m, const char *selector, const char *label,
+                                  int color);
+/* setItems: drop every item (query, roles and MRU stay); re-add, then ui_model_browser_done_adding */
+void ui_model_browser_clear_items(ui_model_browser_t *b);
+/* isOverContext */
+bool ui_model_browser_over_context(const ui_model_browser_t *b, const ui_model_item_t *it);
 void ui_model_browser_done_adding(ui_model_browser_t *b);
 void ui_model_browser_load_available(ui_model_browser_t *b);
 void ui_model_browser_set_current(ui_model_browser_t *b, const char *selector);
@@ -66,6 +78,9 @@ const ui_model_item_t *ui_model_browser_selected(const ui_model_browser_t *b);
 int ui_model_browser_key(ui_model_browser_t *b, const tui_key_t *k); /* UI_MB_* */
 /* search row + blank + max_visible rows + blank + 2 detail rows */
 void ui_model_browser_render(const ui_model_browser_t *b, int width, strvec_t *out);
-char *ui_format_number(double n); /* upstream formatNumber: 4096 -> "4.1K" */
+char *ui_format_number(double n);
+/* modelhub.c buildSessionModelScope: a browser over the available chat models (sortModelItems order) with the
+ * role assignments (chips) and MRU order; call ui_model_browser_done_adding after adjusting it */
+ui_model_browser_t *ui_session_model_browser(void); /* upstream formatNumber: 4096 -> "4.1K" */
 
 #endif

@@ -33,6 +33,7 @@
 #include "ui/modelbrowser.h"
 #include "ui/tools/tc.h"
 #include "coding/title.h"
+#include "coding/modelpreset.h"
 #include "coding/slashcmd.h"
 #include "coding/modelctl.h"
 #include "session/export_html.h"
@@ -214,7 +215,7 @@ static void model_cycle_clear(void *ud) {
     tui_request_render(u->tui);
 }
 
-static void show_model_cycle_track(ui_t *u, int active) {
+void ui_show_model_cycle_track(ui_t *u, int active) {
     strvec_t order = app_cycle_order();
     tui_container_clear(u->model_cycle);
     tui_container_add(u->model_cycle, &tui_spacer_new(1)->base);
@@ -2064,6 +2065,48 @@ static void local_command(ui_t *u, const char *target) {
     strvec_free(&descs);
 }
 
+/* /modelpreset without arguments: "Switch to model preset" selector, then `switch <name>` */
+static void modelpreset_run(ui_t *u, const char *args) {
+    mp_outcome_t o;
+    mp_command(u->app, args, &o);
+    add_notice(u, o.failed || o.usage ? "warning" : "info", o.message);
+    mp_outcome_free(&o);
+    tui_request_render(u->tui);
+}
+
+typedef struct {
+    ui_t *u;
+    strvec_t names;
+} preset_pick_t;
+
+static void modelpreset_picked(void *ud, int index) {
+    preset_pick_t *pp = ud;
+    if (index >= 0 && (size_t)index < pp->names.n) {
+        char *args = xasprintf("switch %s", pp->names.v[index]);
+        modelpreset_run(pp->u, args);
+        free(args);
+    }
+    strvec_free(&pp->names);
+    free(pp);
+}
+
+static void modelpreset_tui(ui_t *u, const char *arg) {
+    if (*arg) {
+        modelpreset_run(u, arg);
+        return;
+    }
+    strvec_t names = mp_names();
+    if (!names.n) {
+        add_notice(u, "info", MP_NO_PRESETS);
+        strvec_free(&names);
+        return;
+    }
+    preset_pick_t *pp = xcalloc(1, sizeof *pp);
+    pp->u = u;
+    pp->names = names;
+    ui_hook_select(u, "Switch to model preset", (const char *const *)pp->names.v, pp->names.n, modelpreset_picked, pp);
+}
+
 static bool handle_command_inner(ui_t *u, const char *line);
 /* a command may rename, replace or move the session: the terminal title follows */
 static bool handle_command(ui_t *u, const char *line) {
@@ -2109,6 +2152,20 @@ static bool handle_command_inner(ui_t *u, const char *line) {
         ui_overlay_login(u, !strcmp(cmd, "logout"));
     } else if (!strcmp(cmd, "model")) {
         ui_overlay_model(u);
+    } else if (!strcmp(cmd, "switch")) { /* builtin-modes.ts switch handleTui */
+        if (!*arg) ui_overlay_model_picker(u);
+        else {
+            char *lv = NULL;
+            const ai_model_t *m = slash_resolve_session_model(arg, &lv);
+            if (!m) {
+                char *e = xasprintf("Unknown model: %s", arg);
+                add_notice(u, "error", e);
+                free(e);
+            } else ui_switch_session_model(u, m, lv);
+            free(lv);
+        }
+    } else if (!strcmp(cmd, "modelpreset")) { /* builtin-modes.ts modelpreset handleTui */
+        modelpreset_tui(u, arg);
     } else if (!strcmp(cmd, "effort")) { /* builtin-modes.ts effort handleTui */
         if (!*arg) {
             if (a->model && a->model->reasoning) ui_overlay_thinking(u);
@@ -2781,10 +2838,14 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
         ui_overlay_model(u);
         return true;
     }
+    if (tui_kb(k, "app.model.selectTemporary")) { /* showModelSelector({temporaryOnly: true}) */
+        ui_overlay_model_picker(u);
+        return true;
+    }
     if (tui_kb(k, "app.model.cycleBackward") || tui_kb(k, "app.model.cycleForward")) {
         int idx = app_cycle_role_model(u->app, tui_kb(k, "app.model.cycleBackward"));
         if (idx < 0) add_notice(u, "info", "Only one role model available");
-        else show_model_cycle_track(u, idx);
+        else ui_show_model_cycle_track(u, idx);
         tui_request_render(t);
         return true;
     }

@@ -5,6 +5,7 @@
 #include "coding/power.h"
 #include "coding/goal.h"
 #include "coding/guards.h"
+#include "coding/prewalk.h"
 #include "coding/keywords.h"
 #include "coding/thinkloop.h"
 #include "coding/title.h"
@@ -267,6 +268,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
     }
     if (ev->type == AGENT_EV_TOOL_END) app_plan_note_tool_end(a, ev->tool_name, ev->result, ev->is_error);
     guards_on_event(a, ev); /* tool-call loop redirect at the turn end, ahead of async results */
+    if (ev->type == AGENT_EV_TURN_END) prewalk_on_turn_end(a, ev);
     if (ev->type == AGENT_EV_TURN_END && a->env && jobs_undelivered(a->env->jobs)) {
         json_t *m = job_results_message(a);
         if (m) agent_steer(a->agent, m);
@@ -331,7 +333,9 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
             }
         }
         const char *ctype = json_get_str(ev->message, "customType");
-        if (role && a->session && ctype && (str_eq(role, "user") || str_eq(role, "developer"))) {
+        if (prewalk_is_plan_nudge(ev->message)) {
+            /* one-run instruction: never returns from persisted history */
+        } else if (role && a->session && ctype && (str_eq(role, "user") || str_eq(role, "developer"))) {
             /* hidden steering (goal context, continuations, budget limits, guard notices) persists as custom_message
              * like omp */
             char *txt = ai_message_text(ev->message);
@@ -1078,19 +1082,15 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
         strvec_free(&a->retry_notes);
         return false;
     }
-    int64_t delay = mr_retry_backoff_ms(settings_int("retry.baseDelayMs", 500), saga);
-    const char *reason = mr_rate_limit_reason(err);
+    double delay = mr_retry_backoff_ms(settings_int("retry.baseDelayMs", 500), saga);
     int64_t hint = retry_after_ms(err);
-    if (hint < 0 && (str_eq(reason, "CONCURRENT_LIMIT") || str_eq(reason, "RATE_LIMIT_EXCEEDED") ||
-                     str_eq(reason, "MODEL_CAPACITY_EXHAUSTED"))) {
-        int64_t rb = mr_rate_limit_backoff_ms(err);
-        if (rb > delay) delay = rb;
-    }
-    if (hint > delay) delay = hint;
+    int64_t window = mr_reason_window_ms(err, mr_error_status(err), usage_limit, hint >= 0);
+    if ((double)window > delay) delay = (double)window;
+    if ((double)hint > delay) delay = (double)hint;
     int64_t maxd = settings_int("retry.maxDelayMs", 5 * 60 * 1000);
-    if (maxd > 0 && delay > maxd) {
-        char *fe = xasprintf("Provider requested %lldms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
-                             (long long)delay, (long long)maxd, err ? err : "error");
+    if (maxd > 0 && delay > (double)maxd) {
+        char *fe = xasprintf("Provider requested %.0fms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
+                             ceil(delay), (long long)maxd, err ? err : "error");
         json_t *ev = json_obj();
         json_set_str(ev, "type", "auto_retry_end");
         json_set_bool(ev, "success", false);
@@ -1106,17 +1106,17 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
         json_set_str(ev, "type", "auto_retry_start");
         json_set_int(ev, "attempt", saga);
         json_set_int(ev, "maxAttempts", max);
-        json_set_int(ev, "delayMs", delay);
+        json_set_num(ev, "delayMs", delay);
         json_set_str(ev, "errorMessage", err ? err : "error");
         if (json_get(assistant, "errorId")) json_set(ev, "errorId", json_clone(json_get(assistant, "errorId")));
         a->retry_saga = saga;
         if (!app_emit(a, ev))
-            notice(a, "warning", "Retrying (%d/%d) in %llds: %s", saga, max, (long long)((delay + 999) / 1000),
+            notice(a, "warning", "Retrying (%d/%d) in %llds: %s", saga, max, (long long)ceil(delay / 1000),
                    err ? err : "error");
     }
     maybe_thinking_loop_redirect(a, ag, err);
     strvec_push(&a->retry_notes, usage_limit ? "rate-limited; waited; retried" : "error; retried");
-    int64_t until = mono_ms() + delay;
+    int64_t until = mono_ms() + (int64_t)ceil(delay);
     while (mono_ms() < until) {
         if (ag->cancel) return false;
         sleep_ms(50);
@@ -1663,6 +1663,10 @@ app_t *app_create(const app_opts_t *o, char **err) {
     }
     a->title_done = a->session->title != NULL;
     if (settings_bool("advisor.enabled", false) && !o->subagent) app_set_advisor(a, true);
+    if (!o->subagent) {
+        a->prewalk = prewalk_new();
+        prewalk_startup(a, o->prewalk, o->prewalk_into, o->resume || o->continue_recent);
+    }
     memory_start(a);
     return a;
 }
@@ -1682,6 +1686,7 @@ void app_free(app_t *a) {
     cmp_free(a); /* join a background speculative compaction */
     autolearn_free(a->autolearn); /* abort a private capture before the session it reads goes away */
     a->autolearn = NULL;
+    prewalk_close(a);
     memory_rt_free(a->memory);   /* cancel + join the memory startup pipeline */
     a->memory = NULL;
     evalhost_shutdown(a->evalhost); /* cancel completions / judge batches before their jobs are joined */
@@ -1751,6 +1756,7 @@ void app_apply_model(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e) {
     a->model = m;
     agent_set_model(a->agent, m);
     a->fallback.active = false; /* an explicit model change clears fallback ownership */
+    prewalk_release_handoff(a);
     free(a->model_role);
     a->model_role = NULL;
     char *uk = mr_model_key(m);
@@ -1859,59 +1865,149 @@ strvec_t app_cycle_order(void) {
     return v;
 }
 
-int app_cycle_role_model(app_t *a, bool backward) {
-    if (!a->model) return -1;
+/* #reapplyThinkingLevel after a model change: keep auto (re-clamped), else the new model's
+ * thinking.defaultLevel, else the level that was effective on the previous model, clamped to the new one
+ * (an unverified ladder stays as it is until the user picks) */
+static void reapply_thinking(app_t *a, const ai_model_t *prev) {
+    if (a->auto_thinking) {
+        app_set_thinking_auto(a);
+        return;
+    }
+    const ai_model_t *m = a->model;
+    if (!m || json_get_bool(m->thinking, "unverified", false)) return;
+    ai_effort_t base = prev ? model_clamp_effort(prev, a->thinking) : a->thinking, d;
+    const char *dl = json_get_str(m->thinking, "defaultLevel");
+    if (dl && effort_parse(dl, &d) == 0) base = d;
+    ai_effort_t eff = base == EFFORT_OFF ? EFFORT_OFF : model_clamp_effort(m, base);
+    if (eff == a->thinking) return;
+    if (prev && eff == model_clamp_effort(prev, a->thinking)) {
+        /* omp already stores the level clamped to the previous model: nothing changes there */
+        a->thinking = eff;
+        a->agent->thinking = eff;
+        return;
+    }
+    app_set_thinking(a, eff);
+}
+
+size_t app_role_cycle(app_t *a, app_role_entry_t **out, int *current) {
+    *out = NULL;
+    if (current) *current = 0;
+    if (!a->model) return 0;
     strvec_t order = app_cycle_order();
     mr_pool_t avail = {0};
     mr_pool_available(&avail, "chat");
-    typedef struct {
-        size_t role;
-        const ai_model_t *m;
-        const char *level;
-        bool explicit_level;
-    } ent_t;
-    VEC(ent_t) es = {0};
+    VEC(app_role_entry_t) es = {0};
     for (size_t i = 0; i < order.n && avail.n; i++) {
         char *cur = NULL;
         const char *v = mr_role_get(order.v[i]);
         if (!v && !strcmp(order.v[i], "default")) v = cur = mr_model_key(a->model);
         mr_result_t r = {0};
-        if (v && mr_resolve_value(v, &avail, &r)) vec_push(&es, ((ent_t){i, r.model, r.level, r.explicit_level}));
+        if (v && mr_resolve_value(v, &avail, &r))
+            vec_push(&es, ((app_role_entry_t){xstrdup(order.v[i]), (int)i, r.model, r.level, r.explicit_level}));
         mr_result_clear(&r);
         free(cur);
     }
-    int res = -1;
-    if (es.n > 1) {
-        long at = -1;
-        for (size_t i = 0; i < es.n && a->model_role && at < 0; i++)
-            if (!strcmp(order.v[es.v[i].role], a->model_role)) at = es.v[i].m == a->model ? (long)i : -2;
-        if (at < 0)
-            for (size_t i = 0; i < es.n && at < 0; i++)
-                if (es.v[i].m == a->model) at = (long)i;
-        if (at < 0) at = 0;
-        long n = (long)es.n;
-        ent_t nx = es.v[(at + (backward ? -1 : 1) + n) % n];
-        const ai_model_t *prev_model = a->model;
-        const char *prev_wire = app_wire_thinking(a);
-        a->model = nx.m;
-        agent_set_model(a->agent, nx.m);
-        app_model_state_changed(a, prev_model, prev_wire);
-        a->fallback.active = false;
-        free(a->model_role);
-        a->model_role = xstrdup(order.v[nx.role]);
-        char *k = mr_model_key(nx.m);
-        session_append_model_change(a->session, k, order.v[nx.role]);
-        mr_usage_record(k);
-        free(k);
-        ai_effort_t e;
-        if (nx.explicit_level && nx.level && effort_parse(nx.level, &e) == 0) app_set_thinking(a, e);
-        app_rebuild_system_prompt(a);
-        res = (int)nx.role;
-    }
-    free(es.v);
+    /* the recorded role counts only while its resolved model is the live one */
+    long at = -1;
+    for (size_t i = 0; i < es.n && a->model_role && at < 0; i++)
+        if (!strcmp(es.v[i].role, a->model_role)) at = es.v[i].model == a->model ? (long)i : -2;
+    if (at < 0)
+        for (size_t i = 0; i < es.n && at < 0; i++)
+            if (es.v[i].model == a->model) at = (long)i;
+    if (at < 0) at = 0;
+    if (current) *current = (int)at;
     mr_pool_free(&avail);
     strvec_free(&order);
+    *out = es.v;
+    return es.n;
+}
+
+void app_role_cycle_free(app_role_entry_t *v, size_t n) {
+    for (size_t i = 0; i < n; i++) free(v[i].role);
+    free(v);
+}
+
+void app_apply_role_entry(app_t *a, const app_role_entry_t *e) {
+    const ai_model_t *prev_model = a->model;
+    const char *prev_wire = app_wire_thinking(a);
+    a->model = e->model;
+    agent_set_model(a->agent, e->model);
+    app_model_state_changed(a, prev_model, prev_wire);
+    a->fallback.active = false;
+    free(a->model_role);
+    a->model_role = xstrdup(e->role);
+    char *k = mr_model_key(e->model);
+    mr_clear_suppressed_selector(k);
+    session_append_model_change(a->session, k, e->role);
+    mr_usage_record(k);
+    free(k);
+    ai_effort_t ef;
+    reapply_thinking(a, prev_model);
+    if (e->explicit_level && e->level && effort_parse(e->level, &ef) == 0) app_set_thinking(a, ef);
+    app_rebuild_system_prompt(a);
+}
+
+int app_cycle_role_model(app_t *a, bool backward) {
+    int at;
+    app_role_entry_t *es;
+    size_t n = app_role_cycle(a, &es, &at);
+    int res = -1;
+    if (n > 1) {
+        const app_role_entry_t *nx = &es[(at + (backward ? -1 : 1) + (long)n) % (long)n];
+        app_apply_role_entry(a, nx);
+        res = nx->order_index;
+    }
+    app_role_cycle_free(es, n);
     return res;
+}
+
+/* resolveTemporaryModelThinkingLevel: the explicit level of a configured role resolving to `m` (static) */
+const char *app_temporary_thinking(const ai_model_t *m) {
+    mr_pool_t avail = {0};
+    mr_pool_available(&avail, "all");
+    const char *lv = NULL;
+    strvec_t roles = mr_known_roles();
+    for (size_t i = 0; i < roles.n && !lv && avail.n; i++) {
+        const char *v = mr_role_get(roles.v[i]);
+        if (!v) continue;
+        mr_result_t r = {0};
+        if (mr_resolve_value(v, &avail, &r) && r.explicit_level && r.level && r.model == m) lv = r.level;
+        mr_result_clear(&r);
+    }
+    strvec_free(&roles);
+    mr_pool_free(&avail);
+    return lv;
+}
+
+int app_set_model_temporary(app_t *a, const ai_model_t *m, const char *level, const char *role, char **err) {
+    char *key = app_api_key_for(m);
+    if (!key && !catalog_provider_keyless(m->provider)) {
+        *err = xasprintf("No API key for %s/%s", m->provider, m->id);
+        return -1;
+    }
+    free(key);
+    const ai_model_t *prev_model = a->model;
+    const char *prev_wire = app_wire_thinking(a);
+    char *k = mr_model_key(m);
+    mr_clear_suppressed_selector(k);
+    a->fallback.active = false;  /* clearActiveRetryFallback */
+    a->model = m;
+    agent_set_model(a->agent, m);
+    free(a->model_role);
+    a->model_role = NULL;
+    session_append_model_change(a->session, k, role ? role : "temporary");
+    if (!role) prewalk_release_handoff(a); /* an explicit selection owns the active model */
+    mr_usage_record(k);
+    free(k);
+    if (str_eq(level, "auto")) app_set_thinking_auto(a);
+    else {
+        ai_effort_t e;
+        if (level && strcmp(level, "inherit") && effort_parse(level, &e) == 0) app_set_thinking(a, e);
+        else reapply_thinking(a, prev_model);
+    }
+    app_rebuild_system_prompt(a);
+    app_model_state_changed(a, prev_model, prev_wire);
+    return 0;
 }
 
 /* try each model (then the session model) until one answers */
@@ -3010,6 +3106,7 @@ int app_new_session(app_t *a) {
     json_free(a->env->todo.phases);
     a->env->todo.phases = json_arr();
     app_goal_restore(a);
+    prewalk_new_session(a);
     return 0;
 }
 

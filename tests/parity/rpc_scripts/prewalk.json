@@ -1,0 +1,12 @@
+[
+ {"send": {"id": "c1", "type": "prompt", "message": "/prewalk mock/mock-2"}}, {"wait": "response:c1"},
+ {"send": {"id": "c2", "type": "prompt", "message": "/prewalk mock/mock-2"}}, {"wait": "response:c2"},
+ {"send": {"id": "p1", "type": "prompt", "message": "seq:[[\"todo\",{\"op\":\"init\",\"items\":[\"a\",\"b\"]}],[\"write\",{\"path\":\"pw.txt\",\"content\":\"hi\"}]]"}},
+ {"wait": "prompt_result:p1"}, {"wait": "session_settled"},
+ {"send": {"id": "s1", "type": "get_state"}}, {"wait": "response:s1"},
+ {"send": {"id": "c3", "type": "prompt", "message": "/prewalk off"}}, {"wait": "response:c3"},
+ {"send": {"id": "c4", "type": "prompt", "message": "/prewalk nosuchmodel"}}, {"wait": "response:c4"},
+ {"send": {"id": "c5", "type": "prompt", "message": "/prewalk restart mock/mock-1 mock/mock-2"}}, {"wait": "response:c5"},
+ {"send": {"id": "c6", "type": "prompt", "message": "/prewalk a b"}}, {"wait": "response:c6"},
+ {"send": {"id": "s2", "type": "get_state"}}, {"wait": "response:s2"}
+]

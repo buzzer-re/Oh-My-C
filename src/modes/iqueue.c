@@ -144,6 +144,13 @@ static void bg_done(void *p) {
     }
     /* a committed (or no-op) manual pass resumes the turn it interrupted (compaction.autoContinue) */
     bool noop = b->err && (str_starts(b->err, "Nothing to compact") || !strcmp(b->err, "Already compacted"));
+    if (b->kind == BG_COMPACT && u->after_compact) {
+        void (*then)(ui_t *, bool, void *) = u->after_compact;
+        void *ud = u->after_compact_ud;
+        u->after_compact = NULL;
+        u->after_compact_ud = NULL;
+        then(u, b->rc == 0 || noop, ud);
+    }
     if (b->resume && (b->rc == 0 || noop) && settings_bool("compaction.autoContinue", true) && !u->worker_running) {
         char *cont = prompt_load("coding-agent/prompts/system/auto-continue.md");
         if (cont) ix_start_hidden(u, cont, "auto-continue");
@@ -222,6 +229,22 @@ void iq_compact(ui_t *u, const char *arg) {
         return;
     }
     compact_now(u, arg, false);
+}
+
+void iq_compact_then(ui_t *u, void (*then)(ui_t *u, bool ok, void *ud), void *ud) {
+    if (u->bg_kind || u->after_compact) {
+        add_notice(u, "error", "Compaction failed: Compaction already in progress");
+        then(u, false, ud);
+        return;
+    }
+    u->after_compact = then;
+    u->after_compact_ud = ud;
+    iq_compact(u, NULL);
+    if (!u->bg_kind && !u->compact_pending && u->after_compact) { /* nothing to compact: switch right away */
+        u->after_compact = NULL;
+        u->after_compact_ud = NULL;
+        then(u, true, ud);
+    }
 }
 
 /* follow-up key while streaming: run the compaction once the agent yields (InteractiveMode.yieldCompaction) */
@@ -745,6 +768,12 @@ void iq_shutdown(ui_t *u) {
     u->yield_compaction = NULL;
     free(u->compact_pending);
     u->compact_pending = NULL;
+    if (u->after_compact) {
+        void (*then)(ui_t *, bool, void *) = u->after_compact;
+        u->after_compact = NULL;
+        then(u, false, u->after_compact_ud);
+        u->after_compact_ud = NULL;
+    }
     strvec_free(&u->optimistic);
     strvec_free(&u->q_steer);
     strvec_free(&u->q_follow);

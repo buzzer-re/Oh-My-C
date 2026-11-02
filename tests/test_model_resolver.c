@@ -165,6 +165,19 @@ int main(void) {
     CHECK(str_eq(mr_rate_limit_reason("429 Too Many Requests"), "RATE_LIMIT_EXCEEDED"));
     CHECK(str_eq(mr_rate_limit_reason("model overloaded"), "MODEL_CAPACITY_EXHAUSTED"));
     CHECK(mr_retry_backoff_ms(500, 1) <= 500 && mr_retry_backoff_ms(500, 10) <= 8000 && mr_retry_backoff_ms(500, 10) >= 6000);
+    CHECK(mr_retry_backoff_ms(10, 1) <= 10 && mr_retry_backoff_ms(10, 1) >= 7.5 && mr_retry_backoff_ms(10, 2) >= 15);
+    /* reason windows (turn-recovery.ts): a plain 503 keeps the exponential base (was a 45-75 s capacity wait) */
+    CHECK(mr_error_status("503 try again later") == 503 && mr_error_status("try again") == 0);
+    CHECK(str_eq(mr_rate_limit_reason("503 try again later"), "MODEL_CAPACITY_EXHAUSTED"));
+    CHECK(mr_reason_window_ms("503 try again later", 503, false, false) == 0);
+    CHECK(mr_reason_window_ms("529 model overloaded", 529, false, false) == 0);
+    CHECK(mr_reason_window_ms("429 model overloaded", 429, false, false) >= 45000);
+    CHECK(mr_reason_window_ms("503 MODEL_CAPACITY_EXHAUSTED", 503, false, false) >= 45000);
+    CHECK(mr_reason_window_ms("503 Resource exhausted", 503, false, false) >= 45000);
+    CHECK(mr_reason_window_ms("429 Too Many Requests", 429, false, false) == 30000);
+    CHECK(mr_reason_window_ms("429 Too Many Requests", 429, false, true) == 0); /* retry-after is authoritative */
+    CHECK(mr_reason_window_ms("too many concurrent requests", 0, false, false) == 5000);
+    CHECK(mr_reason_window_ms("429 usage limit reached", 429, true, false) == 0);
 
     /* online tiny candidates: role primaries, their chains (default chain applied), then the current model */
     set("modelRoles", "{\"default\":\"mock/mock-1\",\"tiny\":\"mock/mock-flaky\"}");

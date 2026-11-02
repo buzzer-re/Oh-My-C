@@ -130,7 +130,7 @@ ui_model_browser_t *ui_model_browser_new(void) {
 
 void ui_model_browser_free(ui_model_browser_t *b) {
     if (!b) return;
-    for (size_t i = 0; i < b->items.n; i++) free(b->items.v[i].selector);
+    ui_model_browser_clear_items(b);
     vec_free(&b->items);
     vec_free(&b->visible);
     free(b->query);
@@ -146,8 +146,30 @@ void ui_model_browser_free(ui_model_browser_t *b) {
 }
 
 void ui_model_browser_add(ui_model_browser_t *b, const ai_model_t *m) {
-    ui_model_item_t it = {m, xasprintf("%s/%s", m->provider, m->id)};
+    ui_model_item_t it = {m, xasprintf("%s/%s", m->provider, m->id), NULL, -1};
     vec_push(&b->items, it);
+}
+
+void ui_model_browser_add_labeled(ui_model_browser_t *b, const ai_model_t *m, const char *selector, const char *label,
+                                  int color) {
+    ui_model_item_t it = {m, xstrdup(selector), label ? xstrdup(label) : NULL, color};
+    vec_push(&b->items, it);
+}
+
+void ui_model_browser_clear_items(ui_model_browser_t *b) {
+    for (size_t i = 0; i < b->items.n; i++) {
+        free(b->items.v[i].selector);
+        free(b->items.v[i].label);
+    }
+    b->items.n = 0;
+    b->visible.n = 0;
+    b->selected = 0;
+    b->window = 0;
+}
+
+bool ui_model_browser_over_context(const ui_model_browser_t *b, const ui_model_item_t *it) {
+    if (!it || !b->mark_over_context || b->ctx_tokens <= 0) return false;
+    return it->model->context_window > 0 && b->ctx_tokens > it->model->context_window;
 }
 
 static bool recent_or_role(const ui_model_browser_t *b, const ui_model_item_t *it) {
@@ -162,7 +184,13 @@ static void refilter(ui_model_browser_t *b, const char *keep) {
     size_t n = b->items.n;
     char **texts = xcalloc(n ? n : 1, sizeof *texts);
     for (size_t i = 0; i < n; i++)
-        texts[i] = is_free(b->items.v[i].model) ? xasprintf("%s free", b->items.v[i].selector) : xstrdup(b->items.v[i].selector);
+    {
+        /* modelSearchText: `${provider}/${id}` (+ " free"); a quick-role row has provider "" and id `@role` */
+        const ui_model_item_t *it = &b->items.v[i];
+        char *base = it->label ? xasprintf("/%s", it->label) : xstrdup(it->selector);
+        texts[i] = is_free(it->model) ? xasprintf("%s free", base) : xstrdup(base);
+        free(base);
+    }
     size_t *idx = xmalloc((n ? n : 1) * sizeof *idx);
     size_t m = tui_fuzzy_rank(b->query ? b->query : "", (const char *const *)texts, n, idx);
     /* #insertSeparator: a rule after the leading recent/role-assigned rows */
@@ -406,6 +434,18 @@ static void detail_lines(const ui_model_browser_t *b, int width, strvec_t *out) 
     free(joined);
     strvec_free(&facts);
 
+    if (ui_model_browser_over_context(b, sel)) {
+        char *t = lower_num((double)b->ctx_tokens), *w = lower_num((double)m->context_window);
+        char *warn = xasprintf("  %s context %s exceeds %s limit \xc2\xb7 compacts with current model, then switches",
+                               tui_sym("status.disabled"), t, w);
+        char *ws = tui_fgs(NULL, TUI_TC_WARNING, warn);
+        strvec_push_own(out, tui_truncate_to_width(ws, width, NULL));
+        free(ws);
+        free(warn);
+        free(t);
+        free(w);
+        return;
+    }
     strvec_t chips = {0};
     if (str_eq(sel->selector, b->current)) {
         char *c = xasprintf("%s current", tui_sym("status.enabled"));
@@ -547,11 +587,19 @@ void ui_model_browser_render(const ui_model_browser_t *b, int width, strvec_t *o
                 tui_fg(&l, NULL, TUI_TC_DIM, pp);
                 free(pp);
             }
-            if (sel) tui_fg(&l, NULL, TUI_TC_ACCENT, it->model->id);
-            else sb_append(&l, it->model->id);
+            const char *name = it->label ? it->label : it->model->id;
+            if (it->label_color >= 0) tui_fg(&l, NULL, (tui_tc_t)it->label_color, name);
+            else if (sel) tui_fg(&l, NULL, TUI_TC_ACCENT, name);
+            else sb_append(&l, name);
             if (str_eq(it->selector, b->current)) {
                 sb_putc(&l, ' ');
                 tui_fg(&l, NULL, TUI_TC_SUCCESS, tui_sym("status.enabled"));
+            }
+            bool over = ui_model_browser_over_context(b, it);
+            if (over) {
+                char *n = lower_num((double)it->model->context_window);
+                sb_appendf(&l, " %s context>%s", tui_sym("status.disabled"), n);
+                free(n);
             }
             int ncols = (int_w > 0) + (perf_w > 0) + (ctx_w > 0) + (cost_w > 0);
             int avail = MAX(1, rw - meta - (ncols ? 1 : 0));
@@ -594,6 +642,23 @@ void ui_model_browser_render(const ui_model_browser_t *b, int width, strvec_t *o
                     free(pc);
                     free(c);
                 }
+            }
+            if (over) {
+                /* gray the whole row but keep the selection cursor */
+                char *plain = tui_strip_ansi(sb_cstr(&line));
+                bool cur = sel && b->focused;
+                size_t pl = cur ? strlen(tui_sym("nav.cursor")) + 1 : 2;
+                if (pl > strlen(plain)) pl = strlen(plain);
+                sb_t g = SB_INIT;
+                if (cur) {
+                    tui_fg(&g, NULL, TUI_TC_ACCENT, tui_sym("nav.cursor"));
+                    sb_putc(&g, ' ');
+                } else
+                    sb_append(&g, "  ");
+                tui_fg(&g, NULL, TUI_TC_DIM, plain + pl);
+                free(plain);
+                sb_free(&line);
+                line = g;
             }
             if (i == b->hovered) {
                 char *band = tui_bgs(NULL, TUI_TC_SELECTED_BG, sb_cstr(&line));

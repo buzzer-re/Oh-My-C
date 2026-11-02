@@ -142,10 +142,17 @@ size_t mr_fallback_validate(strvec_t *out);
 /* selector cooldowns (modelRegistry.suppressSelector / isSelectorSuppressed) */
 void mr_suppress_selector(const char *selector, int64_t until_ms);
 bool mr_selector_suppressed(const char *selector);
+void mr_clear_suppressed_selector(const char *selector); /* clearSuppressedSelector */
 /* retry.fallbackOn admission */
 bool mr_fallback_admits(bool usage_limit);
-/* calculateRetryBackoffDelayMs (capped 8 s, 25% downward jitter) */
-int64_t mr_retry_backoff_ms(int64_t base_ms, int attempt);
+/* calculateRetryBackoffDelayMs (base * 2^(attempt-1) capped 8 s, 25% downward jitter; fractional like omp) */
+double mr_retry_backoff_ms(int64_t base_ms, int attempt);
+/* HTTP status at the head of a provider error message ("503 …"), 0 when absent */
+int mr_error_status(const char *error_message);
+/* the reason-specific wait that raises the backoff (turn-recovery.ts): CONCURRENT_LIMIT / RATE_LIMIT_EXCEEDED, and
+ * MODEL_CAPACITY_EXHAUSTED only for a 429/402 status or 429/capacity/resource-exhausted wording; 0 when the
+ * error is a usage limit, carries a retry-after hint, or no window applies */
+int64_t mr_reason_window_ms(const char *error_message, int status, bool usage_limit, bool has_retry_after);
 /* rate-limit reason heuristics (parseRateLimitReason + calculateRateLimitBackoffMs) */
 int64_t mr_rate_limit_backoff_ms(const char *error_message);
 /* parseRateLimitReason: "QUOTA_EXHAUSTED", "RATE_LIMIT_EXCEEDED", "CONCURRENT_LIMIT",

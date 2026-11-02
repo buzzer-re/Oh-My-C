@@ -65,6 +65,9 @@ def text_of(msg):
         return "".join(p.get("text", "") for p in c if isinstance(p, dict) and not p.get("text", "").startswith("<system-reminder>"))
     return ""
 
+STEER_NUDGES = ("STOP: In NEXT reply", "Continue task now", "Before task complete, verify:")
+
+
 def seq_next(msgs):
     """`seq:[[tool, args], ...]` user prompt: the call after the tool results so far (None when done)."""
     ui = max((i for i, m in enumerate(msgs) if m.get("role") == "user" and text_of(m).startswith("seq:")), default=None)
@@ -82,6 +85,10 @@ class H(BaseHTTPRequestHandler):
         if LOG:
             with open(LOG, "a") as f: f.write(json.dumps(body) + "\n")
         msgs = body.get("messages", [])
+        # hidden steering nudges (prewalk plan/continue/checklist) trail the turn: answer what precedes them
+        while len(msgs) > 1 and msgs[-1].get("role") in ("user", "system", "developer") and \
+                text_of(msgs[-1]).lstrip().startswith(STEER_NUDGES):
+            msgs = msgs[:-1]
         last = msgs[-1] if msgs else {}
         lu = text_of(last) if last.get("role") == "user" else ""
         if lu.startswith("<btw>") and "\nQuestion:\n" in lu:  # /btw side question: "fail:" applies to its question

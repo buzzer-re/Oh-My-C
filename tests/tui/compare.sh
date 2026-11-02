@@ -19,7 +19,9 @@
 #      CMP_WAIT (seconds to wait after launching, default 6), OMC_TUI_DEBUG=<file> (omc's per-frame render log),
 #      MOCK_DELAY (seconds between streamed chunks),
 #      CMP_IMAGES=1 (the mock model accepts image input), CMP_CTX (mock context window, default 100000),
-#      CMP_MODEL_ID (the mock model's id, default mock-1; e.g. gpt-5.2 makes it an OpenAI-family model for /fast).
+#      CMP_MODEL_ID (the mock model's id, default mock-1; e.g. gpt-5.2 makes it an OpenAI-family model for /fast),
+#      CMP_MODELS (extra models.yml lines under the mock provider's models, e.g.
+#      '      - id: mock-2\n        contextWindow: 2000\n        maxTokens: 1024').
 # Without CMP_SETUP both config.yml files start with setupVersion: 2 (both apps past the first-run wizard).
 #      CMP_SPLIT=1 gives each app its own work dir ($D/omp/work, $D/omc/work: tools that modify files don't race),
 #      CMP_SEED=<dir> is copied into the work dir(s) before start, CMP_PATH=<dir> is prepended to both apps' PATH
@@ -48,6 +50,7 @@ providers:
         maxTokens: 4096
 YML
     [ -n "${CMP_IMAGES:-}" ] && printf '        input: [text, image]\n' >> "$1/models.yml"
+    [ -n "${CMP_MODELS:-}" ] && printf '%b\n' "$CMP_MODELS" >> "$1/models.yml"
     printf 'modelRoles:\n  default: mock/%s\nstartup:\n  checkUpdate: false\n' "${CMP_MODEL_ID:-mock-1}" > "$1/config.yml"
     [ -n "${CMP_CONFIG:-}" ] && printf '%b\n' "$CMP_CONFIG" >> "$1/config.yml"
     [ -n "${CMP_SETUP:-}" ] || printf 'setupVersion: 2\n' >> "$1/config.yml"; true
