@@ -92,20 +92,11 @@ static char *live_description(void *ud, const char *name) {
     if (!strcmp(name, "context")) {
         if (!a->model || a->model->context_window <= 0) return xstrdup("Context: unavailable");
         int64_t used = ui_context_used(a), win = a->model->context_window;
-        char g1[48], g2[48];
-        int64_t vals[2] = {used, win};
-        char *outs[2] = {g1, g2};
-        for (int v = 0; v < 2; v++) {
-            char raw[32];
-            snprintf(raw, sizeof raw, "%lld", (long long)vals[v]);
-            size_t l = strlen(raw), o = 0;
-            for (size_t i = 0; i < l; i++) {
-                if (i && (l - i) % 3 == 0) outs[v][o++] = ',';
-                outs[v][o++] = raw[i];
-            }
-            outs[v][o] = 0;
-        }
-        return xasprintf("Context: %.0f%% (%s/%s)", round((double)used / (double)win * 100), g1, g2);
+        char *t = slash_locale_int(used), *w = slash_locale_int(win);
+        char *r = xasprintf("Context: %.0f%% (%s/%s)", round((double)used / (double)win * 100), t, w);
+        free(t);
+        free(w);
+        return r;
     }
     if (!strcmp(name, "goal")) {
         if (a->plan_mode) return xstrdup("Goal: blocked by plan mode");
@@ -123,31 +114,13 @@ static char *live_description(void *ud, const char *name) {
     if (!strcmp(name, "effort")) /* configuredThinkingLevel(): none for a model without a reasoning dial */
         return xasprintf("Thinking: %s", slash_configured_thinking(a));
     if (!strcmp(name, "clear")) return xstrdup(u->worker_running ? "Clear: unavailable while streaming" : "Clear: drop context, keep session");
-    if (!strcmp(name, "compact") || !strcmp(name, "context")) {
+    if (!strcmp(name, "compact")) {
         json_t *st = app_stats(a);
-        int64_t win = json_get_int(st, "contextWindow", 0), tok = json_get_int(st, "contextTokens", 0);
+        int64_t win = json_get_int(st, "contextWindow", 0);
         double pct = json_get_num(st, "contextPercent", 0);
         json_free(st);
-        if (win <= 0) return xstrdup(!strcmp(name, "compact") ? "Compact: context unavailable" : "Context: unavailable");
-        if (!strcmp(name, "compact")) return xasprintf("Compact: context %d%% used", (int)lround(pct));
-        char *t = slash_locale_int(tok), *w = slash_locale_int(win);
-        char *s = xasprintf("Context: %d%% (%s/%s)", (int)lround(pct), t, w);
-        free(t);
-        free(w);
-        return s;
-    }
-    if (!strcmp(name, "todo")) {
-        int pending = 0, progress = 0, done = 0, total = 0;
-        json_t *ph, *t;
-        json_arr_foreach(a->env->todo.phases, i, ph) json_arr_foreach(json_get_arr(ph, "tasks"), k, t) {
-            const char *st = json_get_str(t, "status");
-            total++;
-            if (str_eq(st, "pending")) pending++;
-            else if (str_eq(st, "in_progress")) progress++;
-            else if (str_eq(st, "completed")) done++;
-        }
-        if (!total) return xstrdup("Todos: none");
-        return xasprintf("Todos: %d open (%d in progress, %d done)", pending + progress, progress, done);
+        if (win <= 0) return xstrdup("Compact: context unavailable");
+        return xasprintf("Compact: context %d%% used", (int)lround(pct));
     }
     if (!strcmp(name, "tools")) {
         size_t n = a->agent->tools.n;
