@@ -44,5 +44,13 @@ char *conflict_recover_prefix(const char *raw, char **note);
 char *cfg_resolve(const char *url, json_t **details, char **err);
 /* settings approval UI: the top-level interactive session (omp settingsApproval) */
 bool cfg_settings_approval(const tool_env_t *env);
+/* omp's settings registry (assets/config/settings-registry.json, registry order): borrowed array of
+ * {id, type, tab, order, default?, values?, description?, credential?, env?} */
+const json_t *cfg_registry(void);
+const json_t *cfg_setting(const char *id); /* registry entry or NULL (borrowed) */
+/* Setting.parse for `id` (owned value, or NULL with *err) */
+json_t *cfg_parse(const json_t *setting, const char *text, char **err);
+/* the effective value omp reports: configured layers, else the registry default (borrowed; NULL = undefined) */
+const json_t *cfg_value(const json_t *setting);
 
 #endif

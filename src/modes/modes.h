@@ -9,6 +9,7 @@ typedef struct {
     bool json;             /* --mode json */
     bool print_thoughts;
     bool quiet;
+    const json_t *initial_images; /* @image attachments of messages[0] (borrowed, may be NULL) */
 } print_opts_t;
 
 int run_print_mode(app_t *a, const print_opts_t *o);
@@ -23,6 +24,15 @@ void rpc_handle_line(rpc_t *r, const char *line);
 bool rpc_busy(rpc_t *r);
 void rpc_detach(rpc_t *r); /* aborts a running turn, joins, unsubscribes */
 int run_interactive_mode(app_t *a, const char *initial_prompt);
+/* the launch command's startup inputs (omp runInteractiveMode initialMessage/initialImages/initialMessages) */
+typedef struct {
+    const char *initial;      /* first prompt (@file text + first message, or piped input), may be NULL */
+    json_t *images;           /* its @image attachments (owned; consumed), may be NULL */
+    const strvec_t *more;     /* further positional messages, each its own prompt after the first */
+    bool resume_picker;       /* `--resume` without a value: open the session picker first */
+    bool restore;             /* `--restore`: go on with the resumed session's interrupted turn */
+} interactive_start_t;
+int run_interactive_mode_ex(app_t *a, const interactive_start_t *st);
 int run_acp_mode(const app_opts_t *base); /* one app per ACP session */
 
 /* shared: thread-safe line writer to stdout */

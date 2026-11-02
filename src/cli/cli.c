@@ -1,147 +1,70 @@
-/* cli.c - the omc command line (omc_main): subcommands, flags, mode dispatch. */
-#include "session/export_html.h"
+/* cli.c - the omc command line (omc_main): argv routing (cli-commands.ts resolveCliArgv + pi-utils run), the
+ * launch command (omp main.ts runRootCommand: flags -> settings overrides -> session -> mode) and the omc-only
+ * extra commands (migrate, mcp, export, sessions, logout, glob, bash). */
+#include "cli/args.h"
+#include "cli/cli_int.h"
+
 #include "ai/ai.h"
 #include "coding/app.h"
-#include "mcp/mcp.h"
+#include "coding/costgate.h"
+#include "coding/goal.h"
 #include "coding/migrate.h"
 #include "config/auth.h"
 #include "config/settings.h"
 #include "core/fs.h"
 #include "core/proc.h"
+#include "img/imgpipe.h"
+#include "mcp/mcp.h"
 #include "modes/modes.h"
-#include "coding/goal.h"
+#include "session/export_html.h"
 #include "tools/approval.h"
 #include "tools/tools.h"
 
 #include <errno.h>
-#include <poll.h>
-#include <sys/stat.h>
 #include <execinfo.h>
+#include <poll.h>
+#include <pthread.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
-static void usage(FILE *f) {
-    fprintf(f,
-            "omc %s - oh-my-c coding agent (C rewrite of oh-my-pi)\n\n"
-            "Usage:\n"
-            "  omc [options] [prompt...]          interactive session (prompt optional)\n"
-            "  omc -p [options] <prompt...>       print mode: run and print the final answer\n"
-            "  omc --mode json -p <prompt>        print mode emitting JSON event lines\n"
-            "  omc --mode rpc                     JSONL RPC over stdin/stdout\n"
-            "  omc --mode acp                     Agent Client Protocol (Zed etc.) over stdio\n\n"
-            "Subcommands:\n"
-            "  omc models [filter]                list models (with credentials marked)\n"
-            "  omc mcp list|login|logout [name]   MCP servers and their OAuth authorization\n"
-            "  omc migrate [--dry-run|--force]    copy your omp configuration (~/.omp/agent) into omc\n"
-            "  omc login [provider]               OAuth login (anthropic, openai-codex, ...)\n"
-            "  omc logout <provider>              remove stored credentials\n"
-            "  omc auth set <provider> <key>      store an API key; `omc auth list`\n"
-            "  omc sessions [--all]               list sessions for this directory\n"
-            "  omc export <session> [out.html|md] export a session\n"
-            "  omc config get|set|unset|list|path manage settings (config.yml)\n"
-            "  omc read <path[:sel]>              run the read tool directly\n"
-            "  omc grep <pattern> [path]          run the grep tool directly\n"
-            "  omc glob [pattern]                 run the glob tool directly\n\n"
-            "Options:\n"
-            "  -m, --model <pattern[:effort]>     model (fuzzy, provider/id, or @role)\n"
-            "      --provider <name>              provider\n"
-            "      --api-key <key>                API key for this run\n"
-            "      --thinking <level>             off|minimal|low|medium|high|xhigh|max\n"
-            "  -c, --continue                     continue the most recent session\n"
-            "  -r, --resume <id|path>             resume a session\n"
-            "      --fork <id|path>               fork a session into a new one\n"
-            "      --no-session                   don't persist the session\n"
-            "      --session-dir <dir>            session storage directory\n"
-            "      --cwd <dir>                    working directory\n"
-            "      --tools <a,b,c>                enable only these tools\n"
-            "      --no-tools                     disable all tools\n"
-            "      --system-prompt <text|file>    replace the system prompt\n"
-            "      --append-system-prompt <t|f>   append to the system prompt\n"
-            "      --no-context-files, --no-skills, --no-rules\n"
-            "      --config <file>                extra config overlay (repeatable)\n"
-            "      --print-thoughts               print thinking to stderr in print mode\n"
-            "      --max-turns <n>                stop after n turns\n"
-            "      --plan-mode                    start in read-only plan mode\n"
-            "      --plan-yolo                    read-only plan mode at start, auto-approve the plan on the model's first\n"
-            "                                     propose, then switch to --plan-yolo-into to implement it\n"
-            "      --plan-yolo-into <model>       target model for plan-yolo execution (default the \"smol\" role)\n"
-            "      --goal <objective>             start a fresh interactive session in goal mode\n"
-            "      --auto-approve, --yolo         Auto-approve all tool calls (skip approval prompts)\n"
-            "      --approval-mode <mode>         Override tools.approvalMode for this session\n"
-            "                                     (always-ask|always-ask-cached|write|yolo)\n"
-            "  -v, --version                      print version\n"
-            "  -h, --help                         this help\n",
-            OMC_VERSION);
+/* ---------- shared helpers ---------- */
+
+void cli_err_line(const char *msg) {
+    char *r = cli_red(msg);
+    fprintf(stderr, "%s\n", r);
+    free(r);
 }
 
-static const char *need(int argc, char **argv, int *i) {
-    if (*i + 1 >= argc) {
-        fprintf(stderr, "omc: %s requires a value\n", argv[*i]);
-        exit(2);
-    }
-    return argv[++*i];
+void cli_errf(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    char *m = xvasprintf(fmt, ap);
+    va_end(ap);
+    cli_err_line(m);
+    free(m);
 }
 
-/* ---------- subcommands ---------- */
-
-static int cmd_models(int argc, char **argv) {
+void cli_init_runtime(const strvec_t *configs) {
+    char *cwd = get_cwd();
+    settings_init(cwd, configs);
+    free(cwd);
     ai_providers_init();
     catalog_init();
     auth_init();
-    catalog_discover_local(false);
-    const char *filter = argc > 0 ? argv[0] : NULL;
-    bool all = false;
-    for (int i = 0; i < argc; i++)
-        if (!strcmp(argv[i], "--all")) all = true;
-    if (filter && filter[0] == '-') filter = argc > 1 ? argv[1] : NULL;
-    size_t shown = 0;
-    for (size_t i = 0; i < catalog_count(); i++) {
-        const ai_model_t *m = catalog_at(i);
-        bool cred = auth_has_credentials(m->provider) || (json_get_bool(m->raw, "discovered", false) && catalog_model_available(m));
-        if (!all && !cred && !filter) continue;
-        if (filter && !str_istr(m->id, filter) && !str_istr(m->provider, filter) && !str_istr(m->name, filter)) continue;
-        printf("%s %-24s %-48s ctx=%-8lld %s%s\n", cred ? "*" : " ", m->provider, m->id, (long long)m->context_window,
-               m->reasoning ? "reasoning " : "", m->input_image ? "vision" : "");
-        shown++;
-    }
-    if (!shown) fprintf(stderr, "No models%s. Configure an API key or pass --all.\n", filter ? " match" : " with credentials");
-    return 0;
 }
+
+char *cli_json_pretty(const json_t *j) { return json_dump(j, 2); }
 
 static void io_print(void *ud, const char *msg) {
     UNUSED(ud);
     fprintf(stderr, "%s\n", msg);
 }
 
-static int cmd_login(int argc, char **argv) {
-    ai_providers_init();
-    catalog_init();
-    auth_init();
-    const char *provider = argc > 0 ? argv[0] : NULL;
-    if (!provider) {
-        fprintf(stderr, "Usage: omc login <provider>\nLogin providers:\n");
-        json_t *arr = auth_oauth_providers(), *d;
-        json_arr_foreach(arr, i, d) {
-            if (json_get_obj(d, "login"))
-                fprintf(stderr, "  %-24s %s\n", json_get_str(d, "id"), json_get_str(d, "name") ? json_get_str(d, "name") : "");
-        }
-        return 2;
-    }
-    auth_io_t io = {.print = io_print};
-    char *err = NULL;
-    if (auth_login(provider, &io, &err) != 0) {
-        fprintf(stderr, "omc: login failed: %s\n", err ? err : "?");
-        free(err);
-        return 1;
-    }
-    const char *store = auth_store_id(provider);
-    if (strcmp(store, provider)) fprintf(stderr, "Logged in to %s (stored as %s).\n", provider, store);
-    else fprintf(stderr, "Logged in to %s.\n", provider);
-    return 0;
-}
+/* ---------- omc extras ---------- */
 
 /* omc migrate [--from <omp agent dir>] [--dry-run] [--force] [--no-sessions] */
-static int cmd_migrate(int argc, char **argv) {
+int cmd_migrate_raw(int argc, char **argv) {
     migrate_opts_t mo = {.sessions = true};
     const char *from = NULL;
     for (int i = 0; i < argc; i++) {
@@ -149,6 +72,7 @@ static int cmd_migrate(int argc, char **argv) {
         else if (!strcmp(argv[i], "--force")) mo.force = true;
         else if (!strcmp(argv[i], "--no-sessions")) mo.sessions = false;
         else if (!strcmp(argv[i], "--from") && i + 1 < argc) from = argv[++i];
+        else if (!strncmp(argv[i], "--from=", 7)) from = argv[i] + 7;
         else {
             fprintf(stderr, "Usage: omc migrate [--from <omp agent dir>] [--dry-run] [--force] [--no-sessions]\n");
             return 2;
@@ -167,7 +91,7 @@ static int cmd_migrate(int argc, char **argv) {
 }
 
 /* omc mcp list | login <server> | logout <server> */
-static int cmd_mcp(int argc, char **argv) {
+int cmd_mcp_raw(int argc, char **argv) {
     auth_init();
     char *cwd = get_cwd();
     settings_init(cwd, NULL);
@@ -217,26 +141,16 @@ static int cmd_mcp(int argc, char **argv) {
     return rc;
 }
 
-static int cmd_auth(int argc, char **argv) {
+int cmd_logout_raw(int argc, char **argv) {
     auth_init();
-    if (argc >= 3 && !strcmp(argv[0], "set")) {
-        int rc = auth_set_api_key(argv[1], argv[2]);
-        if (rc) fprintf(stderr, "omc: failed to save: %s\n", strerror(-rc));
-        return rc ? 1 : 0;
+    if (argc < 1) {
+        fprintf(stderr, "Usage: omc logout <provider>\n");
+        return 2;
     }
-    if (argc >= 1 && !strcmp(argv[0], "list")) {
-        json_t *l = auth_list(), *e;
-        json_arr_foreach(l, i, e) printf("%-24s %s%s%s\n", json_get_str(e, "provider"), json_get_str(e, "type"),
-                                         json_get_str(e, "email") ? " " : "", json_get_str(e, "email") ? json_get_str(e, "email") : "");
-        json_free(l);
-        return 0;
-    }
-    if (argc >= 2 && (!strcmp(argv[0], "remove") || !strcmp(argv[0], "logout"))) return auth_logout(argv[1]) ? 1 : 0;
-    fprintf(stderr, "Usage: omc auth set <provider> <key> | list | remove <provider>\n");
-    return 2;
+    return auth_logout(argv[0]) ? 1 : 0;
 }
 
-static int cmd_sessions(int argc, char **argv) {
+int cmd_sessions_raw(int argc, char **argv) {
     bool all = argc > 0 && !strcmp(argv[0], "--all");
     session_list_t l;
     if (all) session_list_all(&l);
@@ -253,8 +167,8 @@ static int cmd_sessions(int argc, char **argv) {
         const char *title = s->title ? s->title : s->first_message ? s->first_message : "(empty)";
         char *t1 = xstrndup(title, strcspn(title, "\n"));
         if (strlen(t1) > 70) strcpy(t1 + 67, "...");
-        printf("%s  %.19s  %3d msgs  %s%s%s\n", session_short_id(s->id), when, s->message_count, t1,
-               all ? "  " : "", all && s->cwd ? s->cwd : "");
+        printf("%s  %.19s  %3d msgs  %s%s%s\n", session_short_id(s->id), when, s->message_count, t1, all ? "  " : "",
+               all && s->cwd ? s->cwd : "");
         free(t1);
         free(when);
     }
@@ -263,108 +177,67 @@ static int cmd_sessions(int argc, char **argv) {
     return 0;
 }
 
-static int cmd_export(int argc, char **argv) {
-    if (argc < 1) {
-        fprintf(stderr, "Usage: omc export <session> [out.html|out.md]\n");
-        return 2;
-    }
+/* `omc export <session> out.md`: the markdown transcript ("Exported to: <path>") */
+static int export_markdown(const char *source, const char *out) {
     char *cwd = get_cwd();
-    char *path = session_resolve(argv[0], cwd);
+    char *path = session_resolve(source, cwd);
     free(cwd);
-    if (!path) {
-        fprintf(stderr, "omc: session not found: %s\n", argv[0]);
-        return 1;
-    }
-    const char *out = argc > 1 ? argv[1] : NULL;
     char *err = NULL;
-    if (!(out && str_ends(out, ".md"))) {
-        /* exportFromFile: omp's HTML export document */
-        char *written = NULL;
-        int rc = export_html_from_file(path, out, &written, &err);
-        free(path);
-        if (rc != 0) {
-            fprintf(stderr, "Error: %s\n", err ? err : "Failed to export session");
-            free(err);
-            return 1;
-        }
-        printf("Exported to: %s\n", written);
-        free(written);
-        return 0;
+    if (!path) {
+        cli_errf("Error: File not found: %s", source);
+        return 1;
     }
     session_t *s = session_open(path, &err);
     free(path);
     if (!s) {
-        fprintf(stderr, "omc: %s\n", err);
+        cli_errf("Error: %s", err ? err : "Failed to export session");
         free(err);
         return 1;
     }
     char *text = session_export_markdown(s);
     int rc = fs_write(out, text, strlen(text));
-    if (rc == 0) printf("%s\n", out);
-    else fprintf(stderr, "omc: write failed: %s\n", strerror(-rc));
+    if (rc == 0) printf("Exported to: %s\n", out);
+    else cli_errf("Error: %s", strerror(-rc));
     free(text);
     session_free(s);
     return rc ? 1 : 0;
 }
 
-static json_t *parse_cli_value(const char *s) {
-    json_t *j = json_parse_str(s);
-    return j ? j : json_str(s);
+static int export_html_print(const char *source, const char *out) {
+    char *cwd = get_cwd();
+    char *path = session_resolve(source, cwd);
+    free(cwd);
+    char *written = NULL, *err = NULL;
+    int rc = export_html_from_file(path ? path : source, out, &written, &err);
+    free(path);
+    if (rc != 0) {
+        cli_errf("Error: %s", err ? err : "Failed to export session");
+        free(err);
+        return 1;
+    }
+    printf("Exported to: %s\n", written);
+    free(written);
+    return 0;
 }
 
-static int cmd_config(int argc, char **argv) {
-    settings_init(NULL, NULL);
-    if (argc < 1 || !strcmp(argv[0], "list")) {
-        bool global = argc > 1 && !strcmp(argv[1], "--scope") && argc > 2 && !strcmp(argv[2], "global");
-        char *s = json_dump(global ? settings_global() : settings_effective(), 2);
-        printf("%s\n", s);
-        free(s);
-        return 0;
+int cmd_export_raw(int argc, char **argv) {
+    if (argc < 1) {
+        fprintf(stderr, "Usage: omc export <session> [out.html|out.md]\n");
+        return 2;
     }
-    if (!strcmp(argv[0], "path")) {
-        printf("%s\n", omc_agent_dir());
-        return 0;
-    }
-    if (!strcmp(argv[0], "get") && argc > 1) {
-        json_t *v = settings_get(argv[1]);
-        if (!v) return 1;
-        if (json_is_str(v)) printf("%s\n", json_sv(v));
-        else {
-            char *s = json_dump(v, 2);
-            printf("%s\n", s);
-            free(s);
-        }
-        return 0;
-    }
-    if (!strcmp(argv[0], "set") && argc > 2) return settings_set_global(argv[1], parse_cli_value(argv[2])) ? 1 : 0;
-    if ((!strcmp(argv[0], "unset") || !strcmp(argv[0], "reset")) && argc > 1) return settings_unset_global(argv[1]) ? 1 : 0;
-    fprintf(stderr, "Usage: omc config list|path|get <key>|set <key> <value>|unset <key>\n");
-    return 2;
+    const char *out = argc > 1 ? argv[1] : NULL;
+    if (out && str_ends(out, ".md")) return export_markdown(argv[0], out);
+    return export_html_print(argv[0], out);
 }
 
-/* run a builtin tool directly: omc read <path> | grep <pattern> [path] | glob <pattern> */
-static int cmd_tool(const char *name, int argc, char **argv) {
+/* run a builtin tool directly: omc glob [pattern] | bash <command> [timeout] */
+static int run_tool(const char *name, json_t *args) {
     settings_init(NULL, NULL);
     char *cwd = get_cwd();
     tool_env_t *env = tool_env_new(cwd);
     free(cwd);
     agent_tool_t *t = !strcmp(name, "read") ? tool_read_new(env) : !strcmp(name, "grep") ? tool_grep_new(env)
                       : !strcmp(name, "bash") ? tool_bash_new(env) : tool_glob_new(env);
-    json_t *args = json_obj();
-    if (!strcmp(name, "read")) {
-        if (argc < 1) { fprintf(stderr, "Usage: omc read <path[:selector]>\n"); return 2; }
-        json_set_str(args, "path", argv[0]);
-    } else if (!strcmp(name, "grep")) {
-        if (argc < 1) { fprintf(stderr, "Usage: omc grep <pattern> [path]\n"); return 2; }
-        json_set_str(args, "pattern", argv[0]);
-        if (argc > 1) json_set_str(args, "path", argv[1]);
-    } else if (!strcmp(name, "bash")) {
-        if (argc < 1) { fprintf(stderr, "Usage: omc bash <command> [timeout-seconds]\n"); return 2; }
-        json_set_str(args, "command", argv[0]);
-        if (argc > 1) json_set_num(args, "timeout", atof(argv[1]));
-    } else {
-        if (argc > 0) json_set_str(args, "path", argv[0]);
-    }
     tool_result_t r = {0};
     tool_ctx_t ctx = {.tool_name = name};
     t->execute(t, &ctx, args, &r);
@@ -380,6 +253,654 @@ static int cmd_tool(const char *name, int argc, char **argv) {
     return rc;
 }
 
+int cmd_glob_raw(int argc, char **argv) {
+    json_t *args = json_obj();
+    if (argc > 0) json_set_str(args, "path", argv[0]);
+    return run_tool("glob", args);
+}
+
+int cmd_bash_raw(int argc, char **argv) {
+    if (argc < 1) {
+        fprintf(stderr, "Usage: omc bash <command> [timeout-seconds]\n");
+        return 2;
+    }
+    json_t *args = json_obj();
+    json_set_str(args, "command", argv[0]);
+    if (argc > 1) json_set_num(args, "timeout", atof(argv[1]));
+    return run_tool("bash", args);
+}
+
+int cmd_version_raw(int argc, char **argv) {
+    UNUSED(argc);
+    UNUSED(argv);
+    printf("%s/%s\n", CLI_BIN, OMC_VERSION);
+    return 0;
+}
+
+/* ---------- launch: @file arguments (cli/file-processor.ts) ---------- */
+
+#define MAX_CLI_TEXT_BYTES (5 * 1024 * 1024)
+#define MAX_CLI_IMAGE_BYTES (25 * 1024 * 1024)
+
+/* resolveReadPath's CLI subset: `~` expansion, then resolved against the cwd */
+static char *resolve_file_arg(const char *arg) {
+    char *e = path_expand_home(arg);
+    if (e[0] == '/') return e;
+    char *cwd = get_cwd();
+    char *abs = path_join(cwd, e);
+    char *norm = path_normalize(abs);
+    free(cwd);
+    free(abs);
+    free(e);
+    return norm;
+}
+
+/* processFileArguments; exits 1 on a missing file like omp */
+static int process_file_args(const strvec_t *files, sb_t *text, json_t **images) {
+    bool auto_resize = settings_bool("images.autoResize", true);
+    for (size_t i = 0; i < files->n; i++) {
+        char *abs = resolve_file_arg(files->v[i]);
+        struct stat st;
+        if (stat(abs, &st) != 0) {
+            cli_errf("Error: File not found: %s", abs);
+            free(abs);
+            return 1;
+        }
+        size_t n = 0;
+        unsigned char head[64];
+        size_t hn = 0;
+        FILE *f = fopen(abs, "rb");
+        if (f) {
+            hn = fread(head, 1, sizeof head, f);
+            fclose(f);
+        }
+        img_meta_t meta;
+        const char *mime = hn && img_sniff((const uint8_t *)head, hn, &meta) ? img_fmt_mime(meta.fmt) : NULL;
+        size_t max = mime ? MAX_CLI_IMAGE_BYTES : MAX_CLI_TEXT_BYTES;
+        if ((size_t)st.st_size > max) {
+            char *b = img_format_bytes((uint64_t)st.st_size);
+            char *w = xasprintf("Warning: Skipping file contents (too large: %s): %s", b, abs);
+            char *y = cli_yellow(w);
+            fprintf(stderr, "%s\n", y);
+            free(y);
+            free(w);
+            sb_appendf(text, "<file name=\"%s\">(skipped: too large, %s)</file>\n", abs, b);
+            free(b);
+            free(abs);
+            continue;
+        }
+        char *buf = fs_read(abs, &n);
+        if (!buf) {
+            if (S_ISDIR(st.st_mode)) {
+                cli_errf("Error: Could not read file %s: EISDIR: illegal operation on a directory, read", abs);
+                free(abs);
+                return 1;
+            }
+            cli_errf("Error: File not found: %s", abs);
+            free(abs);
+            return 1;
+        }
+        if (n == 0) {
+            free(buf);
+            free(abs);
+            continue;
+        }
+        if (mime) {
+            char *note = NULL;
+            json_t *img = json_obj();
+            json_set_str(img, "type", "image");
+            bool done = false;
+            if (auto_resize) {
+                img_resized_t r = {0};
+                char *rerr = NULL;
+                if (img_resize_image((const uint8_t *)buf, n, mime, NULL, &r, &rerr) == 0 && !r.decode_failed) {
+                    note = img_dimension_note(&r);
+                    char *b64 = base64_encode(r.buf, r.len);
+                    json_set_str(img, "data", b64);
+                    json_set_str(img, "mimeType", r.mime);
+                    free(b64);
+                    done = true;
+                }
+                img_resized_free(&r);
+                free(rerr);
+            }
+            if (!done) {
+                char *b64 = base64_encode(buf, n);
+                json_set_str(img, "data", b64);
+                json_set_str(img, "mimeType", mime);
+                free(b64);
+            }
+            if (!*images) *images = json_arr();
+            json_push(*images, img);
+            if (note) sb_appendf(text, "<file name=\"%s\">%s</file>\n", abs, note);
+            else sb_appendf(text, "<file name=\"%s\"></file>\n", abs);
+            free(note);
+        } else {
+            char *t = utf8_sanitize(buf, n);
+            sb_appendf(text, "<file name=\"%s\">\n%s\n</file>\n", abs, t);
+            free(t);
+        }
+        free(buf);
+        free(abs);
+    }
+    return 0;
+}
+
+/* ---------- launch: helpers ---------- */
+
+/* resolvePromptInput-style file read for --system-prompt-template (strict: a missing file fails) */
+static char *load_template_file(const char *path, int *rc) {
+    char *p = path_expand_home(path);
+    size_t n;
+    char *t = fs_read(p, &n);
+    if (!t) {
+        fprintf(stderr, "%s: no such file or directory, open '%s'\n", errno == EISDIR ? "EISDIR" : "ENOENT", path);
+        *rc = 1;
+        free(p);
+        return NULL;
+    }
+    char *tr = str_trim(t);
+    if (!*tr) {
+        cli_errf("Error: System prompt template must not be empty: %s", path);
+        *rc = 1;
+        free(tr);
+        free(t);
+        free(p);
+        return NULL;
+    }
+    free(tr);
+    free(p);
+    return t;
+}
+
+/* exitWithoutTerminal */
+static int exit_without_terminal(void) {
+    cli_err_line("Error: interactive mode requires a terminal, but stdin is not a TTY.");
+    fprintf(stderr, "Pass a prompt (`%s -p \"…\"`), pipe one on stdin, or use `--mode rpc`.\n", CLI_BIN);
+    return 2;
+}
+
+static int session_error(const char *msg, bool hint) {
+    cli_errf("Error: %s", msg);
+    if (hint) {
+        char *h = cli_dim("Run `omc --resume` without an argument to pick from recent sessions, or `omc` to start a new one.");
+        fprintf(stderr, "%s\n", h);
+        free(h);
+    }
+    return 1;
+}
+
+/* readPipedInput: all of stdin when it is not a terminal; NULL when blank */
+static char *read_piped_input(void) {
+    if (isatty(0)) return NULL;
+    struct stat st;
+    if (fstat(0, &st) != 0) return NULL;
+    /* /dev/null and closed stdin read as empty */
+    sb_t sin = SB_INIT;
+    char buf[65536];
+    ssize_t r;
+    bool noticed = false;
+    for (;;) {
+        if (!noticed && S_ISFIFO(st.st_mode)) {
+            struct pollfd pf = {0, POLLIN, 0};
+            if (poll(&pf, 1, 1000) == 0) {
+                char *d = cli_dim("Reading prompt from piped stdin (waiting for EOF; Ctrl+C to abort)…");
+                fprintf(stderr, "%s\n", d);
+                free(d);
+            }
+            noticed = true;
+        }
+        r = read(0, buf, sizeof buf);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        sb_appendn(&sin, buf, (size_t)r);
+    }
+    char *in = sb_detach(&sin);
+    char *t = str_trim(in);
+    bool blank = !*t;
+    free(t);
+    if (blank) {
+        free(in);
+        return NULL;
+    }
+    return in;
+}
+
+/* --max-time: abort the running turn once the wall-clock deadline passes */
+typedef struct {
+    app_t *app;
+    int64_t deadline;
+    volatile bool stop;
+} deadline_t;
+
+static void *deadline_main(void *ud) {
+    deadline_t *d = ud;
+    while (!d->stop) {
+        if (now_ms() >= d->deadline) {
+            app_abort(d->app);
+            break;
+        }
+        sleep_ms(MIN(200, MAX(1, d->deadline - now_ms())));
+    }
+    return NULL;
+}
+
+/* resolve --models patterns (resolveModelScope): models in order, an explicit `:level` kept */
+typedef struct {
+    const ai_model_t *m;
+    ai_effort_t effort;
+    bool has_effort;
+} scoped_t;
+
+/* ---------- launch ---------- */
+
+static bool g_force_setup; /* runRootCommand(..., { forceSetupWizard: true }) */
+
+static int launch_run(launch_args_t *A, bool force_acp) {
+    if (force_acp) A->mode = "acp";
+    if (A->version) {
+        printf("%s\n", OMC_VERSION);
+        return 0;
+    }
+    if (A->cwd) {
+        if (chdir(A->cwd) != 0) {
+            int e = errno;
+            char *launch = get_cwd();
+            const char *code = e == ENOENT ? "ENOENT: no such file or directory" : e == ENOTDIR ? "ENOTDIR: not a directory"
+                               : e == EACCES ? "EACCES: permission denied" : strerror(e);
+            cli_errf("Error: Cannot change working directory to %s: %s, chdir '%s' -> '%s'.%s", A->cwd, code, launch, A->cwd,
+                     e == EACCES || e == EPERM ? " On macOS, grant omc Files & Folders or Full Disk Access permission for "
+                                                  "the target directory."
+                                               : "");
+            free(launch);
+            return 1;
+        }
+    }
+    if (A->export_path) {
+        if (launch_report_invalid(A)) return 2;
+        return export_html_print(A->export_path, A->messages.n ? A->messages.v[0] : NULL);
+    }
+    bool rpc = str_eq(A->mode, "rpc") || str_eq(A->mode, "rpc-ui");
+    if (rpc && A->file_args.n) {
+        cli_err_line("Error: @file arguments are not supported in RPC mode");
+        return 1;
+    }
+    bool protocol = rpc || str_eq(A->mode, "acp");
+    char *piped = protocol ? NULL : read_piped_input();
+    bool stdin_tty = isatty(0);
+    bool auto_print = (piped || !stdin_tty) && !A->print && !A->mode;
+    bool interactive = !A->print && !auto_print && !A->mode;
+    int rc = 0;
+    char *cwd = NULL;
+    app_t *app = NULL;
+    sb_t file_text = SB_INIT;
+    json_t *images = NULL;
+    char *template = NULL;
+    /* validateGoalLaunch / validateRestoreLaunch */
+    if (A->goal) {
+        if (!interactive) {
+            launch_report_usage_error("--goal requires an interactive terminal (not --print or --mode).");
+            rc = 2;
+            goto out;
+        }
+        if (A->continue_recent || A->resume_set || A->fork) {
+            launch_report_usage_error("--goal requires a fresh session (no resume, continue, fork, or import).");
+            rc = 2;
+            goto out;
+        }
+    }
+    if (A->restore) {
+        if (!interactive) {
+            launch_report_usage_error("--restore requires an interactive terminal (not --print or --mode).");
+            rc = 2;
+            goto out;
+        }
+        if (A->continue_recent || A->fork || A->no_session || A->goal) {
+            launch_report_usage_error("--restore resumes one existing session (no continue, fork, import, goal, or "
+                                      "--no-session).");
+            rc = 2;
+            goto out;
+        }
+    }
+    bool needs_arg_prompt = auto_print && !piped;
+    if (needs_arg_prompt && !A->messages.n && !A->file_args.n && !A->unrecognized.n && !A->invalid_values.n) {
+        rc = exit_without_terminal();
+        goto out;
+    }
+    cwd = get_cwd();
+    settings_init(cwd, &A->config);
+    if (A->approval_mode) settings_set_runtime("tools.approvalMode", json_str(A->approval_mode));
+    else if (A->auto_approve) settings_set_runtime("tools.approvalMode", json_str("yolo"));
+    if (A->has_warn_cost) settings_set_runtime("session.warnCost", json_num(A->warn_cost));
+    if (A->has_max_cost) settings_set_runtime("session.maxCost", json_num(A->max_cost));
+    if (A->no_title || protocol) setenv("OMC_NO_TITLE", "1", 1);
+    /* model role overrides from CLI args or env vars (ephemeral) */
+    const char *smol = A->smol ? A->smol : env_get("PI_SMOL_MODEL");
+    const char *slow = A->slow ? A->slow : env_get("PI_SLOW_MODEL");
+    const char *plan = A->plan ? A->plan : env_get("PI_PLAN_MODEL");
+    if (smol) settings_set_runtime("modelRoles.smol", json_str(smol));
+    if (slow) settings_set_runtime("modelRoles.slow", json_str(slow));
+    if (plan) settings_set_runtime("modelRoles.plan", json_str(plan));
+    if (A->hide_thinking) settings_set_runtime("hideThinkingBlock", json_bool(true));
+    if (A->advisor) settings_set_runtime("advisor.enabled", json_bool(true));
+    if (A->no_lsp) settings_set_runtime("lsp.enabled", json_bool(false));
+    if (g_force_setup) { /* `omc setup`: every wizard scene, whatever the stored setupVersion */
+        settings_set_runtime("setupVersion", json_num(0));
+        settings_set_runtime("startup.setupWizard", json_bool(true));
+    }
+    if (A->has_skills && !A->no_skills) {
+        json_t *arr = json_arr();
+        for (size_t i = 0; i < A->skills.n; i++) json_push_str(arr, A->skills.v[i]);
+        settings_set_runtime("skills.includeSkills", arr);
+    }
+    if (A->system_prompt_template) {
+        template = load_template_file(A->system_prompt_template, &rc);
+        if (!template) goto out;
+    }
+    /* --resume without a value opens the session picker */
+    bool picker = A->resume_set && !A->resume && !A->fork && !A->no_session;
+    if (A->no_session && A->resume_set) {
+        rc = session_error("--resume requires session persistence", false);
+        goto out;
+    }
+    if (A->no_session && A->continue_recent) {
+        rc = session_error("--continue requires session persistence", false);
+        goto out;
+    }
+    if (A->fork && A->no_session) {
+        rc = session_error("--fork requires session persistence", false);
+        goto out;
+    }
+    if (picker) {
+        session_list_t l;
+        char *dir = A->session_dir ? xstrdup(A->session_dir) : session_dir_for_cwd(cwd);
+        session_list(dir, &l);
+        free(dir);
+        size_t n = l.n;
+        session_list_free(&l);
+        if (!n) {
+            session_list_all(&l);
+            n = l.n;
+            session_list_free(&l);
+            if (!n) {
+                char *d = cli_dim("No sessions found");
+                printf("%s\n", d);
+                free(d);
+                goto out;
+            }
+        }
+    }
+    const char *resume_path = NULL;
+    char *resolved = NULL;
+    if (A->resume) {
+        resolved = session_resolve(A->resume, cwd);
+        if (!resolved) {
+            char *m = xasprintf("Session \"%s\" not found.", A->resume);
+            rc = session_error(m, true);
+            free(m);
+            goto out;
+        }
+        resume_path = resolved;
+    }
+    /* reportInvalidFlagValues / reportUnrecognizedFlags: exit 2 */
+    {
+        bool inv = launch_report_invalid(A);
+        bool unk = launch_report_unrecognized(A);
+        if (inv || unk) {
+            rc = 2;
+            free(resolved);
+            goto out;
+        }
+    }
+    if (A->restore && (A->messages.n || A->file_args.n)) {
+        launch_report_usage_error("--restore takes no prompt: the session goes on with its interrupted turn.");
+        rc = 2;
+        free(resolved);
+        goto out;
+    }
+    if (A->goal) {
+        if (A->messages.n || A->file_args.n || piped) {
+            launch_report_usage_error("--goal cannot be combined with a positional message, @file, or stdin prompt.");
+            rc = 2;
+        } else if (A->plan_yolo || A->no_tools) {
+            launch_report_usage_error("--goal cannot be combined with --plan-yolo or --no-tools.");
+            rc = 2;
+        } else if (settings_bool("plan.defaultOnStartup", false) && settings_bool("plan.enabled", true)) {
+            launch_report_usage_error("--goal cannot be combined with plan.defaultOnStartup; disable startup plan mode "
+                                      "first.");
+            rc = 2;
+        } else if (!settings_bool("goal.enabled", true)) {
+            launch_report_usage_error("--goal requires goal.enabled to be enabled.");
+            rc = 2;
+        }
+        if (rc) {
+            free(resolved);
+            goto out;
+        }
+    }
+    if (needs_arg_prompt && !A->messages.n && !A->file_args.n) {
+        rc = exit_without_terminal();
+        free(resolved);
+        goto out;
+    }
+    if (A->file_args.n && process_file_args(&A->file_args, &file_text, &images)) {
+        rc = 1;
+        free(resolved);
+        goto out;
+    }
+    /* buildInitialMessage */
+    char *initial = NULL;
+    bool has_ctx = piped || A->file_args.n || images;
+    size_t first_rest = 0;
+    if (has_ctx) {
+        sb_t body = SB_INIT;
+        if (A->file_args.n) sb_append(&body, sb_cstr(&file_text));
+        if (A->messages.n) {
+            sb_append(&body, A->messages.v[0]);
+            first_rest = 1;
+        }
+        if (piped) initial = body.len ? xasprintf("%s\n%s", piped, sb_cstr(&body)) : xstrdup(piped);
+        else if (body.len) initial = xstrdup(sb_cstr(&body));
+        else if (images) initial = xstrdup("");
+        sb_free(&body);
+    }
+    strvec_t rest = {0};
+    for (size_t i = first_rest; i < A->messages.n; i++) strvec_push(&rest, A->messages.v[i]);
+    /* --models: the first scoped model starts a fresh session unless --model or a saved default in scope wins */
+    VEC(scoped_t) scoped = {0};
+    char *scoped_model = NULL;
+    if (A->has_models) {
+        ai_providers_init();
+        catalog_init();
+        auth_init();
+        for (size_t i = 0; i < A->models.n; i++) {
+            if (!*A->models.v[i]) continue;
+            scoped_t s = {0};
+            s.m = app_resolve_model_pattern(A->models.v[i], &s.effort, &s.has_effort);
+            if (!s.m) {
+                char *w = xasprintf("Warning: No models match pattern \"%s\"", A->models.v[i]);
+                char *y = cli_yellow(w);
+                fprintf(stderr, "%s\n", y);
+                free(y);
+                free(w);
+                continue;
+            }
+            bool dup = false;
+            for (size_t k = 0; k < scoped.n; k++) dup |= scoped.v[k].m == s.m;
+            if (!dup) vec_push(&scoped, s);
+        }
+        bool restoring = A->continue_recent || A->resume_set;
+        if (!A->model && scoped.n && !restoring) {
+            const scoped_t *pick = &scoped.v[0];
+            const char *remembered = settings_str("modelRoles.default", NULL);
+            if (remembered) {
+                ai_effort_t re;
+                bool rh;
+                const ai_model_t *rm = app_resolve_model_pattern(remembered, &re, &rh);
+                for (size_t k = 0; k < scoped.n && rm; k++)
+                    if (scoped.v[k].m == rm) pick = &scoped.v[k];
+            }
+            scoped_model = xasprintf("%s/%s", pick->m->provider, pick->m->id);
+            if (!A->thinking && pick->has_effort) A->thinking = effort_name(pick->effort);
+        }
+    }
+    if (A->api_key && !A->model && !scoped_model && !A->has_models) {
+        fprintf(stderr, "%s\n", "--api-key requires a model to be specified via --model, --provider/--model, or --models");
+        rc = 1;
+        goto out2;
+    }
+    app_opts_t o = {0};
+    o.cwd = cwd;
+    o.model = A->model ? A->model : scoped_model;
+    o.provider = A->provider;
+    o.api_key = A->api_key;
+    o.thinking = A->thinking;
+    o.session_dir = A->session_dir;
+    o.resume = resume_path;
+    o.fork = A->fork;
+    o.continue_recent = A->continue_recent;
+    o.no_session = A->no_session;
+    o.system_prompt = A->system_prompt;
+    o.system_prompt_template = template;
+    o.append_system_prompt = A->append_system_prompt;
+    o.tools = A->has_tools ? &A->tools : NULL;
+    o.no_tools = A->no_tools;
+    o.no_context_files = A->no_context_files;
+    o.no_skills = A->no_skills;
+    o.no_rules = A->no_rules;
+    o.max_turns = A->max_turns;
+    o.auto_approve = A->auto_approve;
+    o.has_ui = interactive; /* rpc-ui: omc has no RPC extension-UI channel, so the ask tool stays off */
+    if (str_eq(A->mode, "acp")) {
+        rc = run_acp_mode(&o);
+        goto out2;
+    }
+    bool json = str_eq(A->mode, "json");
+    bool print = !interactive && !rpc;
+    char *err = NULL;
+    o.allow_no_model = interactive && isatty(1); /* omp opens the TUI and lets you /login */
+    app = app_create(&o, &err);
+    if (!app) {
+        fprintf(stderr, "omc: %s\n", err ? err : "failed to start");
+        free(err);
+        rc = 1;
+        goto out2;
+    }
+    costgate_attach(app);
+    if (A->plan_yolo_into && !A->plan_yolo) {
+        fprintf(stderr, "omc: --plan-yolo-into requires --plan-yolo\n");
+        rc = 1;
+        goto out2;
+    }
+    if (A->plan_yolo) {
+        const char *pat = A->plan_yolo_into ? A->plan_yolo_into : "@smol";
+        ai_effort_t e = EFFORT_OFF;
+        bool has_e = false;
+        const ai_model_t *t = app_resolve_model_pattern(pat, &e, &has_e);
+        char *key = t ? app_api_key_for(t) : NULL;
+        if (!t || !key) {
+            if (!t) fprintf(stderr, "omc: Model \"%s\" not found\n", pat);
+            else fprintf(stderr, "omc: No API key for %s/%s\n", t->provider, t->id);
+            free(key);
+            rc = 1;
+            goto out2;
+        }
+        free(key);
+        app->plan_yolo_target = t;
+        app->plan_yolo_thinking = e;
+        app->plan_yolo_has_thinking = has_e;
+    }
+    if (A->plan_mode) app_set_plan_mode(app, true);
+    if (A->goal) {
+        char *gerr = NULL;
+        char *g = str_trim(A->goal);
+        if (app_goal_create(app, g, 0, &gerr) != 0) {
+            fprintf(stderr, "omc: %s\n", gerr);
+            free(gerr);
+            free(g);
+            rc = 2;
+            goto out2;
+        }
+        free(initial);
+        initial = g;
+    }
+    deadline_t dl = {.app = app};
+    pthread_t dlt;
+    bool dl_on = false;
+    if (A->has_max_time) {
+        dl.deadline = now_ms() + (int64_t)(A->max_time * 1000);
+        app_set_deadline(app, dl.deadline);
+        dl_on = pthread_create(&dlt, NULL, deadline_main, &dl) == 0;
+    }
+    if (rpc) {
+        rc = run_rpc_mode(app);
+    } else if (print) {
+        print_opts_t po = {.json = json, .print_thoughts = A->print_thoughts};
+        if (initial) strvec_push(&po.messages, initial);
+        po.initial_images = images;
+        for (size_t i = 0; i < rest.n; i++) strvec_push(&po.messages, rest.v[i]);
+        if (!po.messages.n) {
+            fprintf(stderr, "omc: no prompt given\n");
+            rc = 2;
+        } else {
+            rc = run_print_mode(app, &po);
+        }
+        strvec_free(&po.messages);
+    } else {
+        interactive_start_t st = {.initial = initial, .images = images, .more = &rest, .resume_picker = picker,
+                                  .restore = A->restore};
+        images = NULL; /* owned by the interactive start */
+        rc = run_interactive_mode_ex(app, &st);
+    }
+    if (dl_on) {
+        dl.stop = true;
+        pthread_join(dlt, NULL);
+    }
+out2:
+    if (app) app_free(app);
+    app = NULL;
+    free(initial);
+    strvec_free(&rest);
+    vec_free(&scoped);
+    free(scoped_model);
+    free(resolved);
+out:
+    json_free(images);
+    sb_free(&file_text);
+    free(template);
+    free(piped);
+    free(cwd);
+    http_pool_clear();
+    return rc;
+}
+
+int cmd_launch_setup(void) {
+    g_force_setup = true;
+    unsetenv("OMP_SKIP_SETUP");
+    unsetenv("OMC_SKIP_SETUP");
+    launch_args_t A;
+    launch_parse_args(0, NULL, &A);
+    int rc = launch_run(&A, false);
+    launch_args_free(&A);
+    return rc;
+}
+
+int cli_launch(int argc, char **argv) {
+    launch_args_t A;
+    int rc = launch_parse_args(argc, argv, &A);
+    if (rc == 0) rc = launch_run(&A, false);
+    launch_args_free(&A);
+    return rc;
+}
+
+int cli_acp(int argc, char **argv) {
+    launch_args_t A;
+    int rc = launch_parse_args(argc, argv, &A);
+    if (rc == 0) rc = launch_run(&A, true);
+    launch_args_free(&A);
+    return rc;
+}
+
 /* ---------- main ---------- */
 
 static void crash_handler(int sig) {
@@ -392,7 +913,6 @@ static void crash_handler(int sig) {
     raise(sig);
 }
 
-
 int omc_main(int argc, char **argv) {
     proc_ignore_sigpipe();
     if (env_truthy("OMC_DEBUG")) {
@@ -402,251 +922,35 @@ int omc_main(int argc, char **argv) {
     }
     const char *lp = env_get("OMC_LOG");
     if (lp) log_init(lp, env_truthy("OMC_DEBUG") ? LOG_DEBUG : LOG_INFO);
-    /* subcommands */
-    if (argc > 1) {
-        const char *c = argv[1];
-        if (!strcmp(c, "models")) return cmd_models(argc - 2, argv + 2);
-        if (!strcmp(c, "login")) return cmd_login(argc - 2, argv + 2);
-        if (!strcmp(c, "mcp")) return cmd_mcp(argc - 2, argv + 2);
-        if (!strcmp(c, "migrate")) return cmd_migrate(argc - 2, argv + 2);
-        if (!strcmp(c, "logout")) {
-            auth_init();
-            return argc > 2 ? (auth_logout(argv[2]) ? 1 : 0) : 2;
-        }
-        if (!strcmp(c, "auth")) return cmd_auth(argc - 2, argv + 2);
-        if (!strcmp(c, "sessions")) return cmd_sessions(argc - 2, argv + 2);
-        if (!strcmp(c, "export")) return cmd_export(argc - 2, argv + 2);
-        if (!strcmp(c, "config")) return cmd_config(argc - 2, argv + 2);
-        if (!strcmp(c, "read") || !strcmp(c, "grep") || !strcmp(c, "glob") || !strcmp(c, "bash")) return cmd_tool(c, argc - 2, argv + 2);
-        if (!strcmp(c, "version")) {
-            printf("omc %s\n", OMC_VERSION);
-            return 0;
-        }
-        if (!strcmp(c, "help")) {
-            usage(stdout);
-            return 0;
-        }
-    }
-    app_opts_t o = {0};
-    strvec_t tools = {0}, configs = {0}, prompt_parts = {0};
-    bool print = false, json = false, rpc = false, acp = false, print_thoughts = false, plan_mode = false;
-    const char *mode = NULL;
-    const char *goal = NULL;
-    bool plan_yolo = false;
-    const char *plan_yolo_into = NULL;
-    const char *approval_mode = NULL;
-    for (int i = 1; i < argc; i++) {
-        const char *a = argv[i];
-        if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
-            usage(stdout);
-            return 0;
-        } else if (!strcmp(a, "-v") || !strcmp(a, "--version")) {
-            printf("omc %s\n", OMC_VERSION);
-            return 0;
-        } else if (!strcmp(a, "-p") || !strcmp(a, "--print")) print = true;
-        else if (!strcmp(a, "-m") || !strcmp(a, "--model")) o.model = need(argc, argv, &i);
-        else if (!strcmp(a, "--provider")) o.provider = need(argc, argv, &i);
-        else if (!strcmp(a, "--api-key")) o.api_key = need(argc, argv, &i);
-        else if (!strcmp(a, "--thinking")) o.thinking = need(argc, argv, &i);
-        else if (!strcmp(a, "-c") || !strcmp(a, "--continue")) o.continue_recent = true;
-        else if (!strcmp(a, "-r") || !strcmp(a, "--resume") || !strcmp(a, "--session")) o.resume = need(argc, argv, &i);
-        else if (!strcmp(a, "--fork")) o.fork = need(argc, argv, &i);
-        else if (!strcmp(a, "--no-session")) o.no_session = true;
-        else if (!strcmp(a, "--session-dir")) o.session_dir = need(argc, argv, &i);
-        else if (!strcmp(a, "--cwd")) o.cwd = need(argc, argv, &i);
-        else if (!strcmp(a, "--tools")) {
-            strvec_t parts = str_split(need(argc, argv, &i), ",");
-            for (size_t k = 0; k < parts.n; k++) {
-                char *t = str_trim(parts.v[k]);
-                if (*t) strvec_push_own(&tools, t);
-                else free(t);
-            }
-            strvec_free(&parts);
-            o.tools = &tools;
-        } else if (!strcmp(a, "--no-tools")) o.no_tools = true;
-        else if (!strcmp(a, "--system-prompt")) o.system_prompt = need(argc, argv, &i);
-        else if (!strcmp(a, "--append-system-prompt")) o.append_system_prompt = need(argc, argv, &i);
-        else if (!strcmp(a, "--no-context-files")) o.no_context_files = true;
-        else if (!strcmp(a, "--no-skills")) o.no_skills = true;
-        else if (!strcmp(a, "--no-rules")) o.no_rules = true;
-        else if (!strcmp(a, "--config")) strvec_push(&configs, need(argc, argv, &i));
-        else if (!strcmp(a, "--mode")) mode = need(argc, argv, &i);
-        else if (!strcmp(a, "--print-thoughts")) print_thoughts = true;
-        else if (!strcmp(a, "--max-turns")) o.max_turns = atoi(need(argc, argv, &i));
-        else if (!strcmp(a, "--no-title")) setenv("OMC_NO_TITLE", "1", 1);
-        else if (!strcmp(a, "--plan-mode")) plan_mode = true;
-        else if (!strcmp(a, "--plan-yolo")) plan_yolo = true;
-        else if (!strcmp(a, "--plan-yolo-into")) plan_yolo_into = need(argc, argv, &i);
-        else if (!strncmp(a, "--plan-yolo-into=", 17)) plan_yolo_into = a + 17;
-        else if (!strcmp(a, "--goal")) goal = need(argc, argv, &i);
-        else if (!strcmp(a, "--auto-approve") || !strcmp(a, "--yolo")) o.auto_approve = true;
-        else if (!strcmp(a, "--approval-mode") || !strncmp(a, "--approval-mode=", 16)) {
-            const char *v = a[15] == '=' ? a + 16 : need(argc, argv, &i);
-            if (approval_mode_parse(v) < 0) {
-                char *q = json_quote(v);
-                fprintf(stderr, "%sError: Invalid --approval-mode value: %s. Expected one of: always-ask, always-ask-cached, "
-                                "write, yolo.%s\n",
-                        isatty(2) ? "\x1b[31m" : "", q, isatty(2) ? "\x1b[39m" : "");
-                free(q);
-                return 2;
-            }
-            approval_mode = v;
-        }
-        else if (!strcmp(a, "--")) {
-            for (i++; i < argc; i++) strvec_push(&prompt_parts, argv[i]);
-        } else if (a[0] == '-' && a[1]) {
-            fprintf(stderr, "omc: unknown option %s (see --help)\n", a);
-            return 2;
-        } else {
-            strvec_push(&prompt_parts, a);
-        }
-    }
-    if (mode) {
-        if (!strcmp(mode, "json")) json = true;
-        else if (!strcmp(mode, "rpc")) rpc = true;
-        else if (!strcmp(mode, "acp")) acp = true;
-        else if (strcmp(mode, "text") != 0) {
-            fprintf(stderr, "omc: unsupported mode %s\n", mode);
-            return 2;
-        }
-    }
-    if (o.cwd && chdir(o.cwd) != 0) {
-        fprintf(stderr, "omc: cannot chdir to %s: %s\n", o.cwd, strerror(errno));
-        return 1;
-    }
-    char *cwd = get_cwd();
-    o.cwd = cwd;
-    settings_init(cwd, &configs);
-    /* --approval-mode is a runtime override (not persisted); --auto-approve / --yolo alone reflects yolo in settings
-     * so setup-time checks (the ACP permission gate) see the intent */
-    if (approval_mode) settings_set_runtime("tools.approvalMode", json_str(approval_mode));
-    else if (o.auto_approve) settings_set_runtime("tools.approvalMode", json_str("yolo"));
-    /* @file arguments inline file contents; piped stdin is appended */
-    sb_t prompt = SB_INIT;
-    for (size_t i = 0; i < prompt_parts.n; i++) {
-        const char *p = prompt_parts.v[i];
-        if (p[0] == '@' && fs_is_file(p + 1)) {
-            char *c = fs_read(p + 1, NULL);
-            sb_appendf(&prompt, "%s<file path=\"%s\">\n%s\n</file>", prompt.len ? "\n" : "", p + 1, c ? c : "");
-            free(c);
-        } else {
-            sb_appendf(&prompt, "%s%s", prompt.len ? " " : "", p);
-        }
-    }
-    bool read_stdin = false;
-    if (acp) {
-        int arc = run_acp_mode(&o);
-        free(cwd);
-        return arc;
-    }
-    if (!rpc && !isatty(0)) {
-        struct stat st;
-        if (fstat(0, &st) == 0) {
-            if (!prompt.len) read_stdin = S_ISREG(st.st_mode) || S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode);
-            else if (S_ISREG(st.st_mode)) read_stdin = st.st_size > 0;
-            else if (S_ISFIFO(st.st_mode)) {
-                struct pollfd pf = {0, POLLIN, 0};
-                read_stdin = poll(&pf, 1, 150) > 0;
-            }
-        }
-    }
-    if (read_stdin) {
-        size_t n;
-        char *in = NULL;
-        sb_t sin = SB_INIT;
-        char buf[65536];
-        ssize_t r;
-        while ((r = read(0, buf, sizeof buf)) > 0) sb_appendn(&sin, buf, (size_t)r);
-        in = sb_detach(&sin);
-        n = strlen(in);
-        if (n) {
-            sb_appendf(&prompt, "%s%s", prompt.len ? "\n\n" : "", in);
-            print = true;
-        }
-        free(in);
-    }
-    if (json) print = true;
-    if (rpc) setenv("OMC_NO_TITLE", "1", 1);
-    o.has_ui = !rpc && !print;
+    /* main(): no arguments launches */
+    char *launch_only[] = {"launch"};
+    strvec_t rv = {0};
     char *err = NULL;
-    o.allow_no_model = !print && !rpc && isatty(0) && isatty(1); /* omp opens the TUI and lets you /login */
-    app_t *app = app_create(&o, &err);
-    if (!app) {
-        fprintf(stderr, "omc: %s\n", err ? err : "failed to start");
+    if (argc <= 1) {
+        for (int i = 0; i < 1; i++) strvec_push(&rv, launch_only[i]);
+    } else if (!resolve_cli_argv(argc - 1, argv + 1, &rv, &err)) {
+        fprintf(stderr, "error: %s\n", err);
         free(err);
         return 1;
     }
-    if (plan_yolo_into && !plan_yolo) {
-        fprintf(stderr, "omc: --plan-yolo-into requires --plan-yolo\n");
-        app_free(app);
-        return 1;
-    }
-    if (plan_yolo) {
-        if (goal) {
-            fprintf(stderr, "omc: --goal cannot be combined with --plan-yolo or --no-tools.\n");
-            app_free(app);
-            return 2;
-        }
-        const char *pat = plan_yolo_into ? plan_yolo_into : "@smol";
-        ai_effort_t e = EFFORT_OFF;
-        bool has_e = false;
-        const ai_model_t *t = app_resolve_model_pattern(pat, &e, &has_e);
-        char *key = t ? app_api_key_for(t) : NULL;
-        if (!t || !key) {
-            if (!t) fprintf(stderr, "omc: Model \"%s\" not found\n", pat);
-            else fprintf(stderr, "omc: No API key for %s/%s\n", t->provider, t->id);
-            free(key);
-            app_free(app);
-            return 1;
-        }
-        free(key);
-        app->plan_yolo_target = t;
-        app->plan_yolo_thinking = e;
-        app->plan_yolo_has_thinking = has_e;
-    }
-    if (plan_mode) app_set_plan_mode(app, true);
-    if (goal) {
-        if (print || json || rpc || !isatty(0)) {
-            fprintf(stderr, "omc: --goal requires an interactive terminal (not --print or --mode).\n");
-            app_free(app);
-            return 2;
-        }
-        if (o.resume || o.fork || o.continue_recent || o.no_session) {
-            fprintf(stderr, "omc: --goal requires a fresh session (no resume, continue, fork, or no-session).\n");
-            app_free(app);
-            return 2;
-        }
-        char *gerr = NULL;
-        if (app_goal_create(app, goal, 0, &gerr) != 0) {
-            fprintf(stderr, "omc: %s\n", gerr);
-            free(gerr);
-            app_free(app);
-            return 2;
-        }
-        if (!prompt.len) sb_append(&prompt, goal);
-    }
     int rc;
-    if (rpc) {
-        rc = run_rpc_mode(app);
-    } else if (print) {
-        if (!prompt.len) {
-            fprintf(stderr, "omc: no prompt given\n");
-            rc = 2;
-        } else {
-            print_opts_t po = {.json = json, .print_thoughts = print_thoughts};
-            strvec_push(&po.messages, sb_cstr(&prompt));
-            rc = run_print_mode(app, &po);
-            strvec_free(&po.messages);
-        }
+    const char *id = rv.v[0];
+    if (!strcmp(id, "--help") || !strcmp(id, "-h") || !strcmp(id, "help")) {
+        cli_render_root_help(stdout);
+        rc = 0;
+    } else if (!strcmp(id, "--version") || !strcmp(id, "-v")) {
+        printf("%s/%s\n", CLI_BIN, OMC_VERSION);
+        rc = 0;
     } else {
-        rc = run_interactive_mode(app, prompt.len ? sb_cstr(&prompt) : NULL);
+        const cli_cmd_t *c = cli_find_command(id);
+        if (!c) {
+            fprintf(stderr, "Error: command %s not found\n", id);
+            rc = 1;
+        } else {
+            rc = cli_run_command(c, (int)rv.n, rv.v);
+        }
     }
-    app_free(app);
-    sb_free(&prompt);
-    strvec_free(&tools);
-    strvec_free(&configs);
-    strvec_free(&prompt_parts);
-    free(cwd);
-    http_pool_clear();
+    strvec_free(&rv);
+    fflush(stdout);
     return rc;
 }

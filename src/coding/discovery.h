@@ -63,6 +63,7 @@ typedef struct {
     const strvec_t *tool_names;       /* active tools */
     const discovery_t *disc;
     const char *custom_prompt;        /* --system-prompt */
+    const char *custom_template;      /* --system-prompt-template (template text) */
     const char *append_prompt;        /* --append-system-prompt */
     bool subagent;
     /* optional: routing hint shown for a skill (compressed description catalog); owned result or NULL */

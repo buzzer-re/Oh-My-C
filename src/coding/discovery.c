@@ -4,6 +4,7 @@
 #include "config/settings.h"
 #include "core/fs.h"
 #include "prompt/template.h"
+#include "text/glob.h"
 #include "text/yaml.h"
 #include "core/embed.h"
 #include "coding/plugins.h"
@@ -424,6 +425,8 @@ static void scan_rules_dir(discovery_t *d, const char *dir, const char *ext) {
 
 /* ---------- main discovery ---------- */
 
+static void filter_skills(discovery_t *d);
+
 void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skills, bool no_rules) {
     memset(d, 0, sizeof(*d));
     const char *agent = omc_agent_dir();
@@ -598,6 +601,7 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
         plugin_skills_legacy(&roots, d);
         plugin_roots_free(&roots);
         scan_managed_skills(d);
+        filter_skills(d);
         if (d->skills.n > 1) qsort(d->skills.v, d->skills.n, sizeof(skill_t), cmp_skill);
     }
     free(native);
@@ -713,6 +717,58 @@ static char *load_override(const char *cwd, const char *name) {
     char *c = read_nonempty(p);
     free(p);
     return c;
+}
+
+/* skills.ts loadSkills: `skills.ignoredSkills` drops matching authored skills, `skills.includeSkills` (the
+ * `--skills` flag) keeps only matching ones; managed skills are exempt (Bun.Glob name matching) */
+static bool skill_name_matches(const json_t *patterns, const char *name) {
+    json_t *p;
+    json_arr_foreach(patterns, i, p) if (json_is_str(p) && glob_match(json_sv(p), name, 0)) return true;
+    return false;
+}
+
+static void filter_skills(discovery_t *d) {
+    json_t *inc = settings_get("skills.includeSkills"), *ign = settings_get("skills.ignoredSkills");
+    if (!json_len(inc) && !json_len(ign)) return;
+    size_t w = 0;
+    for (size_t i = 0; i < d->skills.n; i++) {
+        skill_t *s = &d->skills.v[i];
+        bool keep = s->managed || ((!json_len(ign) || !skill_name_matches(ign, s->name)) &&
+                                   (!json_len(inc) || skill_name_matches(inc, s->name)));
+        if (keep) d->skills.v[w++] = *s;
+        else {
+            free(s->name);
+            free(s->description);
+            free(s->path);
+            free(s->dir);
+        }
+    }
+    d->skills.n = w;
+}
+
+/* discoverSystemPromptOverride: project (.omc/.omp) then user (agent dir); a blank template is ignored */
+static void discover_system_override(const char *cwd, char **text, char **templ) {
+    for (int level = 0; level < 2; level++) {
+        const char *dirs[] = {".omc", ".omp"};
+        for (size_t k = 0; k < (level ? 1u : 2u); k++) {
+            char *tp = level ? omc_agent_path("SYSTEM.md") : path_join3(cwd, dirs[k], "SYSTEM.md");
+            char *t = read_nonempty(tp);
+            free(tp);
+            if (t) {
+                *text = t;
+                return;
+            }
+        }
+        for (size_t k = 0; k < (level ? 1u : 2u); k++) {
+            char *tp = level ? omc_agent_path("SYSTEM_TEMPLATE.md") : path_join3(cwd, dirs[k], "SYSTEM_TEMPLATE.md");
+            char *t = read_nonempty(tp);
+            free(tp);
+            if (t) {
+                *templ = t;
+                return;
+            }
+        }
+    }
 }
 
 static char *maybe_file(const char *s) {
@@ -885,10 +941,16 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     }
     json_set_str(data, "appendPrompt", append ? append : "");
     char *custom = maybe_file(o->custom_prompt);
-    if (!custom) custom = load_override(o->cwd, "SYSTEM.md");
+    /* explicit prompt inputs win over discovered SYSTEM.md / SYSTEM_TEMPLATE.md (project level first; at one
+     * level the literal SYSTEM.md wins over the template) */
+    char *templ = o->custom_template && !custom ? xstrdup(o->custom_template) : NULL;
+    if (!custom && !templ) discover_system_override(o->cwd, &custom, &templ);
     json_t *blocks = json_arr();
     char *rendered;
-    if (custom) {
+    if (templ) {
+        rendered = tpl_render(templ, data);
+        free(templ);
+    } else if (custom) {
         json_set_str(data, "customPrompt", custom);
         char *tpl = prompt_load("coding-agent/prompts/system/custom-system-prompt.md");
         rendered = tpl ? tpl_render(tpl, data) : xstrdup(custom);

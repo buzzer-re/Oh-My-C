@@ -1184,6 +1184,7 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
     int retry_attempt = 0;
     int paused_continuations = 0; /* MAX_PAUSED_TURN_CONTINUATIONS (agent-loop.ts) */
     for (;;) {
+        if (a->hooks.before_model_call && a->hooks.before_model_call(a->hooks.ud, a)) break;
         emit_simple(a, AGENT_EV_TURN_START);
         int ttsr = 0;
         json_t *cursor_results = NULL;

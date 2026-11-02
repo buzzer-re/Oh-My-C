@@ -23,6 +23,7 @@ typedef struct {
     bool no_session;
     const char *system_prompt;
     const char *append_system_prompt;
+    const char *system_prompt_template; /* --system-prompt-template: Handlebars template text replacing the bundled one */
     const strvec_t *tools;      /* --tools; NULL => defaults */
     bool no_tools;
     bool no_context_files, no_skills, no_rules;

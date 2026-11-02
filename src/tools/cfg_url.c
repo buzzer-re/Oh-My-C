@@ -624,3 +624,27 @@ done:
     free(val_s);
     return 0;
 }
+
+/* ---------- registry accessors (omc config) ---------- */
+
+const json_t *cfg_registry(void) {
+    load_registry();
+    return g_registry;
+}
+
+const json_t *cfg_setting(const char *id) {
+    load_registry();
+    json_t *e;
+    json_arr_foreach(g_registry, i, e) if (str_eq(json_get_str(e, "id"), id)) return e;
+    return NULL;
+}
+
+json_t *cfg_parse(const json_t *setting, const char *text, char **err) {
+    setting_t s = {json_get_str(setting, "id"), setting};
+    return parse_value(&s, text, err);
+}
+
+const json_t *cfg_value(const json_t *setting) {
+    setting_t s = {json_get_str(setting, "id"), setting};
+    return s_value(&s);
+}

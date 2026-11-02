@@ -1,5 +1,6 @@
 /* print mode: run prompts non-interactively, emitting final text or JSON event lines. */
 #include "modes.h"
+#include "coding/costgate.h"
 #include "coding/guards.h"
 
 #include <pthread.h>
@@ -90,7 +91,7 @@ int run_print_mode(app_t *a, const print_opts_t *o) {
         /* session.prompt: MCP prompt / file / template commands expand (skill commands do not run here) */
         char *x = app_expand_input(a, o->messages.v[i], true);
         if (!x) continue;
-        app_prompt(a, x, NULL);
+        app_prompt(a, x, i == 0 && json_len(o->initial_images) ? json_clone(o->initial_images) : NULL);
         free(x);
         /* advisor notes (and goal continuations when "print" is enabled) extend the run before printing */
         const char *prev = NULL;
@@ -105,6 +106,11 @@ int run_print_mode(app_t *a, const print_opts_t *o) {
             prev = ctype;
             app_prompt_hidden(a, cont, ctype);
             free(cont);
+        }
+        /* a request refused by the cost cap ends the run short of an answer: the refusal is the outcome (exit 3) */
+        if (costgate_take_refusal(a)) {
+            rc = 3;
+            break;
         }
         const json_t *last = last_assistant(a->agent->messages);
         const char *stop = json_get_str(last, "stopReason");

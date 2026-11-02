@@ -137,6 +137,9 @@ typedef struct {
     /* A tool-loop turn ended and the run continues with another model call (omp onTurnEnd willContinue): the
      * host may rewrite the context (mid-turn compaction); the next request snapshots the messages again. */
     void (*turn_boundary)(void *ud, agent_t *a, const json_t *assistant);
+    /* Before each model request of the loop (omp addBeforeModelCall): return true to end the run there, before
+     * the turn opens (cost cap, --max-time deadline). */
+    bool (*before_model_call)(void *ud, agent_t *a);
     void *ud;
 } agent_hooks_t;
 

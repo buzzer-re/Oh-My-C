@@ -8,11 +8,15 @@ const active = await import(`${PKG}/tui/src/theme/active-symbols.ts`);
 const hints = await import(`${PKG}/tui/src/key-hint-format.ts`);
 active.setActiveSymbolTheme({ symbol: (k: string) => symbols.SYMBOL_PRESETS.unicode[k] });
 hints.setKeyHintPlatform("linux");
-await import(`${PKG}/coding-agent/src/config/all-settings.ts`);
+const allSettings = await import(`${PKG}/coding-agent/src/config/all-settings.ts`);
 const reg = await import(`${PKG}/coding-agent/src/config/registry.ts`);
+// `omp config list` order (all-settings.ts orderedSettings) and grouping tab (ui.tab, else "internal")
+const listOrder = new Map(allSettings.orderedSettings().map((s: { id: string }, i: number) => [s.id, i]));
 const out = [];
 for (const s of reg.all()) {
 	const e: Record<string, unknown> = { id: s.id, type: s.type };
+	e.tab = s.ui?.tab ?? "internal";
+	e.order = listOrder.get(s.id) ?? -1;
 	const d = s.definition.default;
 	if (d !== undefined) e.default = d;
 	if (s.enumValues) e.values = s.enumValues;

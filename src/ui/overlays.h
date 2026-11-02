@@ -140,6 +140,9 @@ void ui_overlay_model(ui_t *u); /* modelhub.c: the Models hub */
 void ui_overlay_model_provider(ui_t *u, const char *provider); /* … with that provider's entry preselected */
 void ui_overlay_session(ui_t *u);
 void ui_resume_session(ui_t *u, const char *path); /* interactive.c: switch session + reload transcript */
+/* interactive.c: the session picker closed; when it was opened by `omc --resume` (no value) and nothing was
+ * chosen, the TUI quits like omp's standalone startup picker. True when it handled the close. */
+bool ix_startup_picker_closed(ui_t *u, bool resumed);
 void ui_overlay_thinking(ui_t *u);
 void ui_overlay_theme(ui_t *u);
 /* settings.c: the /settings menu (fullscreen, alternate screen) */

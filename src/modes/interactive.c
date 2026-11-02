@@ -5,6 +5,7 @@
 #include "coding/migrate.h"
 #include "coding/goal.h"
 #include "coding/memory.h"
+#include "coding/restore.h"
 #include "mcp/mcp.h"
 #include "tools/jobs.h"
 #include "prompt/template.h"
@@ -2385,11 +2386,49 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
 
 static void signals_init_cb(void *ud) { ui_signals_init(ud); }
 
+/* launch startup inputs (run_interactive_mode_ex) */
+static const interactive_start_t *g_start;
+static bool g_start_picker; /* the startup session picker is open: Esc quits ("No session selected") */
+static bool g_start_cancelled;
+
 static void initial_prompt_cb(void *ud) {
     job_t *j = ud;
-    start_prompt(j->u, j->text);
+    start_prompt_with(j->u, j->text, j->attachments);
+    j->attachments = NULL;
+    /* further positional messages are prompts of their own after the first (omp awaits each session.prompt) */
+    for (size_t i = 0; g_start && g_start->more && i < g_start->more->n; i++) {
+        char *x = app_expand_templates(j->u->app, g_start->more->v[i]);
+        json_t *content = json_arr();
+        json_push(content, text_block(x));
+        agent_follow_up(j->u->app->agent, msg_user_content(content));
+        free(x);
+    }
+    if (g_start && g_start->more && g_start->more->n) ui_queue_refresh(j->u);
     free(j->text);
     free(j);
+}
+
+/* --restore: go on with the interrupted turn of the resumed session (AgentSession.restoreInterruptedTurn) */
+static void restore_cb(void *ud) {
+    ui_t *u = ud;
+    if (u->worker_running || !app_restore_interrupted_turn(u->app)) return;
+    u->worker_running = true;
+    if (pthread_create(&u->worker, NULL, retry_main, u) != 0) u->worker_running = false;
+}
+
+static void startup_picker_cb(void *ud) {
+    g_start_picker = true;
+    ui_overlay_session(ud);
+}
+
+/* the startup picker closed: Esc (no resume) quits like omp's standalone picker */
+bool ix_startup_picker_closed(ui_t *u, bool resumed) {
+    if (!g_start_picker) return false;
+    g_start_picker = false;
+    if (resumed) return false;
+    g_start_cancelled = true;
+    tui_stop(u->tui, 0);
+    return true;
 }
 
 static void setup_done_cb(void *ud) {
@@ -2502,7 +2541,16 @@ int run_interactive_mode(app_t *a, const char *initial) {
         init_job = xcalloc(1, sizeof(*init_job));
         init_job->u = &u;
         init_job->text = xstrdup(initial);
+        json_t *img;
+        json_arr_foreach(g_start ? g_start->images : NULL, i, img) {
+            if (!init_job->attachments) init_job->attachments = json_arr();
+            json_t *at = json_obj();
+            json_set(at, "image", json_clone(img));
+            json_push(init_job->attachments, at);
+        }
     }
+    if (g_start && g_start->resume_picker) tui_post(u.tui, startup_picker_cb, &u);
+    if (g_start && g_start->restore) tui_post(u.tui, restore_cb, &u);
     /* first-run setup wizard (omp main.ts: stale setupVersion, not resuming, TTY); the welcome intro
      * plays after it instead of at startup */
     if (ui_setup_pending(a->opts.resume || a->opts.continue_recent)) {
@@ -2543,7 +2591,32 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_ac_default_free(ac);
     hmap_free(&u.tools, NULL);
     json_free(u.pending_partial);
-    if (a->session && a->session->file && a->session->on_disk)
+    if (a->session && a->session->file && a->session->on_disk && !g_start_cancelled)
         fprintf(stderr, "Session saved: %s\nResume with: omc -r %s\n", a->session->file, session_short_id(session_id(a->session)));
+    return code;
+}
+
+int run_interactive_mode_ex(app_t *a, const interactive_start_t *st) {
+    interactive_start_t s = *st;
+    strvec_t rest = {0};
+    const char *initial = s.initial;
+    /* without @file / piped context every positional message is its own prompt (omp initialMessages) */
+    if (!initial && s.more && s.more->n) {
+        initial = s.more->v[0];
+        for (size_t i = 1; i < s.more->n; i++) strvec_push(&rest, s.more->v[i]);
+        s.more = &rest;
+    }
+    g_start = &s;
+    g_start_cancelled = false;
+    int code = run_interactive_mode(a, initial);
+    g_start = NULL;
+    json_free(s.images);
+    strvec_free(&rest);
+    if (g_start_cancelled) {
+        /* omp's startup picker ran before the session: nothing was resumed */
+        char *d = tui_fgs(NULL, TUI_TC_DIM, "No session selected");
+        fprintf(stdout, "%s\n", d);
+        free(d);
+    }
     return code;
 }

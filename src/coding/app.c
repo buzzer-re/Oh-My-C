@@ -1184,6 +1184,7 @@ void app_rebuild_system_prompt(app_t *a) {
                            .tool_names = &names,
                            .disc = &a->disc,
                            .custom_prompt = a->sys_custom,
+                           .custom_template = a->opts.subagent ? NULL : a->opts.system_prompt_template,
                            .append_prompt = a->sys_append,
                            .subagent = a->opts.subagent,
                            .skill_desc = skilldesc_render,
