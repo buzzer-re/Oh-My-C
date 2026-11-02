@@ -834,27 +834,3 @@ char *session_export_markdown(const session_t *s) {
     return sb_detach(&b);
 }
 
-static void html_escape(sb_t *b, const char *s) {
-    for (; s && *s; s++) {
-        switch (*s) {
-        case '<': sb_append(b, "&lt;"); break;
-        case '>': sb_append(b, "&gt;"); break;
-        case '&': sb_append(b, "&amp;"); break;
-        case '"': sb_append(b, "&quot;"); break;
-        default: sb_putc(b, *s);
-        }
-    }
-}
-
-char *session_export_html(const session_t *s) {
-    char *md = session_export_markdown(s);
-    sb_t b = SB_INIT;
-    sb_append(&b, "<!doctype html><html><head><meta charset=\"utf-8\"><title>");
-    html_escape(&b, s->title ? s->title : "omc session");
-    sb_append(&b, "</title><style>body{font:14px/1.5 ui-monospace,monospace;max-width:960px;margin:2em auto;padding:0 1em;"
-                  "background:#111;color:#ddd}pre{white-space:pre-wrap;word-wrap:break-word}</style></head><body><pre>");
-    html_escape(&b, md);
-    sb_append(&b, "</pre></body></html>\n");
-    free(md);
-    return sb_detach(&b);
-}

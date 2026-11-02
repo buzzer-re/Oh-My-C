@@ -589,6 +589,31 @@ int export_html_from_file(const char *session_file, const char *output_path, cha
     return rc;
 }
 
+/* buildSessionData(sm): the live header (title slot folded in), entries and leaf */
+static json_t *session_data(const session_t *s) {
+    json_t *header = json_clone(s->header);
+    if (s->title && *s->title) json_set_str(header, "title", s->title);
+    if (s->title_source && *s->title_source) json_set_str(header, "titleSource", s->title_source);
+    json_t *d = json_obj();
+    json_set(d, "header", header_for_export(header));
+    json_free(header);
+    json_set(d, "entries", json_clone(s->entries));
+    json_set(d, "leafId", s->leaf_id ? json_str(s->leaf_id) : json_null());
+    return d;
+}
+
+char *session_export_html(const session_t *s) {
+    json_t *d = session_data(s);
+    if (s->file) {
+        json_t *subs = export_collect_sub_sessions(s->file);
+        if (json_is_obj(subs) && subs->u.obj.n) json_set(d, "subSessions", subs);
+        else json_free(subs);
+    }
+    char *html = export_render_html(d, NULL);
+    json_free(d);
+    return html;
+}
+
 int app_export_html(app_t *a, const char *output_path, bool use_user_themes, char **written_path, char **err) {
     *written_path = NULL;
     const char *file = app_session_file(a);
@@ -601,16 +626,7 @@ int app_export_html(app_t *a, const char *output_path, bool use_user_themes, cha
         styles = export_theme_styles(settings_str("theme.dark", "titanium"), settings_str("theme.light", "light"), err);
         if (!styles) return -1;
     }
-    session_t *s = a->session;
-    /* the header as omp's session manager holds it: the title slot folded in */
-    json_t *header = json_clone(s->header);
-    if (s->title && *s->title) json_set_str(header, "title", s->title);
-    if (s->title_source && *s->title_source) json_set_str(header, "titleSource", s->title_source);
-    json_t *d = json_obj();
-    json_set(d, "header", header_for_export(header));
-    json_free(header);
-    json_set(d, "entries", json_clone(s->entries));
-    json_set(d, "leafId", s->leaf_id ? json_str(s->leaf_id) : json_null());
+    json_t *d = session_data(a->session);
     sb_t sp = SB_INIT;
     json_t *x;
     json_arr_foreach(a->agent->system_prompt, i, x) {

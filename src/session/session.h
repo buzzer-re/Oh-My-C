@@ -94,6 +94,6 @@ char *session_resolve(const char *query, const char *cwd); /* id prefix / path -
 
 /* export */
 char *session_export_markdown(const session_t *s);
-char *session_export_html(const session_t *s);
+char *session_export_html(const session_t *s); /* omp's export document (session/export_html.c) */
 
 #endif
