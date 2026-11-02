@@ -171,10 +171,11 @@ T_test_keybindings   := $(CORE_OBJ) $(O)/tui/keys.o $(O)/config/keybindings.o $(
 T_test_slash         := $(LIB_OBJ)
 T_test_signals       := $(LIB_OBJ)
 T_test_tree          := $(LIB_OBJ)
+T_test_approval      := $(LIB_OBJ)
 UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
               test_chrome test_providers_google test_toolcards test_cursor test_judgment test_auth test_memory test_outsink test_catalog test_model_resolver test_compaction_point \
               test_planreview test_img test_img_jpeg test_img_webp test_btw test_queue test_guards test_keybindings test_slash test_export test_dump test_signals \
-              test_panels test_tree
+              test_panels test_tree test_approval
 
 .SECONDEXPANSION:
 $(O)/tests/%: tests/%.c $$(T_$$*)
