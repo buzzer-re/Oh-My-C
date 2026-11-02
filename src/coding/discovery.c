@@ -867,7 +867,9 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     json_set(data, "additionalWorkspaceRoots", roots);
     json_t *skills = json_arr(), *rules = json_arr(), *always = json_arr();
     bool has_read = o->tool_names && strvec_contains(o->tool_names, "read");
-    for (size_t i = 0; o->disc && has_read && i < o->disc->skills.n; i++) {
+    /* sdk.ts: skills: cfgSkillful ? skills : [] (the `skillful` setting, /skillful session override) */
+    bool skillful = settings_bool("skillful", true);
+    for (size_t i = 0; o->disc && has_read && skillful && i < o->disc->skills.n; i++) {
         if (o->disc->skills.v[i].hide) continue;
         json_t *s = json_obj();
         json_set_str(s, "name", o->disc->skills.v[i].name);

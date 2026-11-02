@@ -95,6 +95,10 @@ json_t *slash_acp_available_commands(app_t *a);
 /* slashmcp.c: /mcp and /ssh text-mode handlers (helpers/mcp.ts handleMcpAcp, helpers/ssh.ts handleSshAcp) */
 void slash_mcp_text(const slash_parsed_t *cmd, slash_rt_t *rt, slash_result_t *res);
 void slash_ssh_text(const slash_parsed_t *cmd, slash_rt_t *rt, slash_result_t *res);
+/* extracmds.c: /changelog, /force, /skillful text-mode handlers */
+void slash_changelog_text(const slash_parsed_t *cmd, slash_rt_t *rt, slash_result_t *res);
+void slash_force_text(const slash_parsed_t *cmd, slash_rt_t *rt, slash_result_t *res);
+void slash_skillful_text(const slash_parsed_t *cmd, slash_rt_t *rt, slash_result_t *res);
 
 /* ---- shared argument parsing / formatting (used by the TUI handlers too) ---- */
 

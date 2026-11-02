@@ -2476,6 +2476,7 @@ static bool handle_command_inner(ui_t *u, const char *line) {
         if (app_fork_from(a, NULL, &err) != 0) add_notice(u, "error", err);
         else add_notice(u, "info", "Forked into a new session");
         free(err);
+    } else if (xc_command(u, cmd, parsed.name, arg)) { /* modes/extractl.c */
     } else {
         handled = false;
     }

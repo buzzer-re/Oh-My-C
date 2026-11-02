@@ -104,6 +104,10 @@ struct app {
     bool plan_yolo_has_thinking, plan_yolo_armed, plan_yolo_done;
     int plan_reminder_count;    /* plan-mode decision reminders since the last ask/propose or user turn */
     bool plan_reminder_awaiting, plan_force_tool_choice;
+    /* /force (setForcedToolChoice): the user-force sequence [named choice, "none"] served one per model request
+     * (extracmds.c); forced_step 0 idle, 1 the named choice next, 2 "none" next */
+    json_t *forced_choice;
+    int forced_step;
     void (*plan_mode_changed)(void *ud); /* plan mode left by an automatic approval (ACP mode update) */
     /* ACP clients with form elicitation confirm a proposed plan (#requestAcpPlanApprovalChoice): true approves,
      * false keeps planning (refine). NULL approves automatically. Uses plan_mode_changed_ud. */

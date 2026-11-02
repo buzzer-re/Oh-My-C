@@ -1183,6 +1183,15 @@ again:;
         slash_result_t sr;
         slash_execute_text(r->a, r->text, rpc_command_output, r, &sr);
         bool invoked = sr.agent_invoked;
+        if (sr.kind == SLASH_PROMPT && sr.prompt) { /* builtinResult.prompt: sent as the prompt (/force <tool> <prompt>) */
+            pthread_mutex_lock(&r->mu);
+            free(r->text);
+            r->text = sr.prompt;
+            sr.prompt = NULL;
+            pthread_mutex_unlock(&r->mu);
+            slash_result_free(&sr);
+            goto again;
+        }
         slash_result_free(&sr);
         json_free(r->images);
         r->images = NULL;

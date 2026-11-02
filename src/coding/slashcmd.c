@@ -59,6 +59,7 @@ static const struct {
     slash_handle_fn handle;
 } OMC[] = {
     {"settings", NULL, true, NULL},
+    {"setup", "*", true, NULL},
     {"plan", NULL, true, NULL},
     {"plan-review", NULL, true, NULL},
     {"goal", "*", true, NULL},
@@ -72,6 +73,7 @@ static const struct {
     {"effort", "*", true, h_effort},
     {"fast", "*", true, h_fast},
     {"slow", "*", true, h_slow},
+    {"skillful", "*", true, slash_skillful_text},
     {"extended-context", "*", true, h_extended_context},
     {"advisor", "on off status dump", true, h_advisor},
     {"export", NULL, true, NULL},
@@ -83,6 +85,7 @@ static const struct {
     {"jobs", "full kill", true, NULL},
     {"hub", NULL, true, NULL},
     {"usage", "*", true, h_usage},
+    {"changelog", "*", true, slash_changelog_text},
     {"hotkeys", NULL, true, NULL},
     {"tools", NULL, true, NULL},
     {"context", NULL, true, NULL},
@@ -114,6 +117,7 @@ static const struct {
     {"restart", NULL, true, NULL},
     {"local", NULL, true, NULL},
     {"skills", NULL, true, NULL},
+    {"force", NULL, true, slash_force_text},
     {"forget-approvals", NULL, false, h_forget_approvals},
     {"quit", NULL, true, NULL},
     {"ssh", "*", true, slash_ssh_text},

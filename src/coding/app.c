@@ -29,6 +29,7 @@
 #include "core/fs.h"
 #include "core/proc.h"
 #include "coding/ttsr.h"
+#include "coding/extracmds.h"
 #include "dap/dap.h"
 #include "lsp/lsp.h"
 #include "tools/gh.h"
@@ -462,6 +463,7 @@ static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
         o->tool_choice = required;
         a->plan_force_tool_choice = false;
     }
+    extracmd_prepare_request(a, o); /* /force */
     fill_request_opts(a, o);
     app_note_provider_state(a);
 }
@@ -1727,6 +1729,7 @@ void app_free(app_t *a) {
     thinkloop_free(a->thinkloop);
     title_free(a);
     skilldesc_free(a->skilldesc);
+    json_free(a->forced_choice);
     json_free(a->dcr_sent);
     free(a->dcr_last);
     json_free(a->job_batch);

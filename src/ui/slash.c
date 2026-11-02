@@ -5,6 +5,7 @@
 #include "ui/overlays.h"
 #include "config/model_resolver.h"
 #include "ui/ui.h"
+#include "modes/interactive.h"
 #include "tools/jobs.h"
 
 #include <math.h>
@@ -135,7 +136,7 @@ static char *live_description(void *ud, const char *name) {
     }
     if (!strcmp(name, "login")) return xstrdup("Login: choose provider");
     if (!strcmp(name, "loop")) return loop_autocomplete_description(u->loop);
-    return NULL;
+    return xc_description(u, name); /* modes/extractl.c */
 }
 
 /* ---------- argument completion + inline hints (builtin-completions.ts) ---------- */

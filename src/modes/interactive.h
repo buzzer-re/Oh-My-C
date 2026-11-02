@@ -64,4 +64,9 @@ void cc_copy_command(ui_t *u, const char *arg); /* /copy [code|cmd|link]: picker
 void cc_open_command(ui_t *u, const char *arg); /* /open [link] */
 void cc_shutdown(ui_t *u);
 
+/* extractl.c (WP-28 commands: /changelog, /setup, /force, /skillful): true when `cmd` (canonical name; `name` as
+ * typed, for usage texts) was handled */
+bool xc_command(ui_t *u, const char *cmd, const char *name, const char *arg);
+char *xc_description(ui_t *u, const char *name); /* getTuiAutocompleteDescription (owned) or NULL */
+
 #endif
