@@ -1,6 +1,6 @@
 /* args.c - launch argv parsing, a port of omp cli/args.ts parseArgs and the flag tables of cli/flag-tables.ts,
  * plus resolveCliArgv (cli-commands.ts). Only the flags omc implements are in the tables; the rest of omp's
- * launch surface (extensions, profiles, prewalk, foreign imports, …) is reported as an unknown flag. */
+ * launch surface (extensions, profiles, foreign imports, …) is reported as an unknown flag. */
 #include "cli/args.h"
 #include "cli/cmd.h"
 #include "cli/cli_int.h"
@@ -13,7 +13,7 @@
 
 static const char *const STRING_FLAGS[] = {
     "--cwd", "--config", "--add-dir", "--mode", "--fork", "--provider", "--model", "--smol", "--slow", "--goal",
-    "--plan", "--plan-yolo-into", "--max-time", "--warn-cost", "--max-cost", "--api-key", "--system-prompt",
+    "--plan", "--plan-yolo-into", "--prewalk-into", "--max-time", "--warn-cost", "--max-cost", "--api-key", "--system-prompt",
     "--system-prompt-template", "--append-system-prompt", "--session-dir", "--models", "--tools", "--thinking",
     "--export", "--skills", "--approval-mode", "--service-tier",
     "--max-turns", /* omc: stop after n turns */
@@ -23,7 +23,7 @@ static const char *const OPTIONAL_FLAGS[] = {"--resume", "-r", "--restore", "--s
 
 static const char *const VALUELESS_FLAGS[] = {
     "--help", "--version", "--continue", "--no-session", "--no-tools", "--no-lsp", "--hide-thinking", "--advisor",
-    "--plan-yolo", "--print", "--print-thoughts", "--no-skills", "--no-rules", "--no-context-files", "--no-title",
+    "--plan-yolo", "--prewalk", "--no-prewalk", "--print", "--print-thoughts", "--no-skills", "--no-rules", "--no-context-files", "--no-title",
     "--auto-approve", "--yolo",
     "--plan-mode", /* omc: start in read-only plan mode */
     NULL};
@@ -186,6 +186,7 @@ static bool set_string(launch_args_t *r, const char *flag, const char *value) {
         r->goal = value; /* trimmed by the caller (goal_create trims) */
     } else if (!strcmp(flag, "--plan")) r->plan = value;
     else if (!strcmp(flag, "--plan-yolo-into")) r->plan_yolo_into = value;
+    else if (!strcmp(flag, "--prewalk-into")) r->prewalk_into = value;
     else if (!strcmp(flag, "--max-time")) {
         if (!parse_max_time(value, &r->max_time)) {
             char *q = js_quote(value);
@@ -277,6 +278,8 @@ static bool set_valueless(launch_args_t *r, const char *a) {
     else if (!strcmp(a, "--hide-thinking")) r->hide_thinking = true;
     else if (!strcmp(a, "--advisor")) r->advisor = true;
     else if (!strcmp(a, "--plan-yolo")) r->plan_yolo = true;
+    else if (!strcmp(a, "--prewalk")) r->prewalk = true;
+    else if (!strcmp(a, "--no-prewalk")) r->no_prewalk = true;
     else if (!strcmp(a, "--print") || !strcmp(a, "-p")) r->print = true;
     else if (!strcmp(a, "--print-thoughts")) r->print_thoughts = true;
     else if (!strcmp(a, "--no-skills")) r->no_skills = true;

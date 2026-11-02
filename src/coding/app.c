@@ -5,6 +5,7 @@
 #include "coding/power.h"
 #include "coding/goal.h"
 #include "coding/guards.h"
+#include "coding/prewalk.h"
 #include "coding/keywords.h"
 #include "coding/thinkloop.h"
 #include "coding/title.h"
@@ -265,6 +266,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
     }
     if (ev->type == AGENT_EV_TOOL_END) app_plan_note_tool_end(a, ev->tool_name, ev->result, ev->is_error);
     guards_on_event(a, ev); /* tool-call loop redirect at the turn end, ahead of async results */
+    if (ev->type == AGENT_EV_TURN_END) prewalk_on_turn_end(a, ev);
     if (ev->type == AGENT_EV_TURN_END && a->env && jobs_undelivered(a->env->jobs)) {
         json_t *m = job_results_message(a);
         if (m) agent_steer(a->agent, m);
@@ -329,7 +331,9 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
             }
         }
         const char *ctype = json_get_str(ev->message, "customType");
-        if (role && a->session && ctype && (str_eq(role, "user") || str_eq(role, "developer"))) {
+        if (prewalk_is_plan_nudge(ev->message)) {
+            /* one-run instruction: never returns from persisted history */
+        } else if (role && a->session && ctype && (str_eq(role, "user") || str_eq(role, "developer"))) {
             /* hidden steering (goal context, continuations, budget limits, guard notices) persists as custom_message
              * like omp */
             char *txt = ai_message_text(ev->message);
@@ -1611,6 +1615,10 @@ app_t *app_create(const app_opts_t *o, char **err) {
     }
     a->title_done = a->session->title != NULL;
     if (settings_bool("advisor.enabled", false) && !o->subagent) app_set_advisor(a, true);
+    if (!o->subagent) {
+        a->prewalk = prewalk_new();
+        prewalk_startup(a, o->prewalk, o->prewalk_into, o->resume || o->continue_recent);
+    }
     memory_start(a);
     return a;
 }
@@ -1630,6 +1638,7 @@ void app_free(app_t *a) {
     cmp_free(a); /* join a background speculative compaction */
     autolearn_free(a->autolearn); /* abort a private capture before the session it reads goes away */
     a->autolearn = NULL;
+    prewalk_close(a);
     memory_rt_free(a->memory);   /* cancel + join the memory startup pipeline */
     a->memory = NULL;
     evalhost_shutdown(a->evalhost); /* cancel completions / judge batches before their jobs are joined */
@@ -1698,6 +1707,7 @@ void app_apply_model(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e) {
     a->model = m;
     agent_set_model(a->agent, m);
     a->fallback.active = false; /* an explicit model change clears fallback ownership */
+    prewalk_release_handoff(a);
     free(a->model_role);
     a->model_role = NULL;
     char *uk = mr_model_key(m);
@@ -1930,6 +1940,7 @@ int app_set_model_temporary(app_t *a, const ai_model_t *m, const char *level, co
     free(a->model_role);
     a->model_role = NULL;
     session_append_model_change(a->session, k, role ? role : "temporary");
+    if (!role) prewalk_release_handoff(a); /* an explicit selection owns the active model */
     mr_usage_record(k);
     free(k);
     if (str_eq(level, "auto")) app_set_thinking_auto(a);
@@ -3039,6 +3050,7 @@ int app_new_session(app_t *a) {
     json_free(a->env->todo.phases);
     a->env->todo.phases = json_arr();
     app_goal_restore(a);
+    prewalk_new_session(a);
     return 0;
 }
 

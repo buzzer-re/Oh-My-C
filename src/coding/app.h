@@ -41,6 +41,8 @@ typedef struct {
     bool auto_approve;          /* --auto-approve / --yolo: every approval resolves in yolo mode */
     const char *service_tier;   /* --service-tier (an OpenAI tier setting value; "none" omits); NULL = not given */
     const ai_service_tiers_t *service_tiers; /* subagents: the resolved per-family map (tier.subagent) */
+    int prewalk;                /* --prewalk / --prewalk-into (1), --no-prewalk (-1), else prewalk.enabled (0) */
+    const char *prewalk_into;   /* --prewalk-into */
 } app_opts_t;
 
 typedef struct app app_t;
@@ -105,6 +107,7 @@ struct app {
     bool (*plan_approval_choice)(void *ud, const char *title, const char *content);
     void *plan_mode_changed_ud;
     struct goal *goal; /* goal mode state (goal.c) */
+    struct prewalk *prewalk; /* one-shot model handoff (prewalk.c); top-level sessions only */
     struct title_state *title; /* automatic session title (title.c) */
     struct skilldesc *skilldesc; /* compressed skill descriptions snapshot (skilldesc.c) */
     /* date/cwd reminder injected per request into user turns (never persisted) */

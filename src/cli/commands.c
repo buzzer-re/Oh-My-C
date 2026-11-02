@@ -20,6 +20,12 @@ const cflag_t LAUNCH_FLAGS[] = {
     {.name = "goal", .kind = CF_STR, .ch = 0,
      .desc = "Start fresh in goal mode (interactive only; bypasses autoResume; no positional prompt, startup plan mode, or "
      "explicit resume)"},
+    {.name = "prewalk", .kind = CF_BOOL, .ch = 0,
+     .desc = "Switch from the active model to a fast/cheap model at the first edit/write after the plan's todo list exists "
+     "(default off; see prewalk.enabled)"},
+    {.name = "no-prewalk", .kind = CF_BOOL, .ch = 0,
+     .desc = "Disable prewalk, including prewalk.auto, even if prewalk.enabled is set"},
+    {.name = "prewalk-into", .kind = CF_STR, .ch = 0, .desc = "Target model for prewalk (default the \"smol\" role)"},
     {.name = "plan-yolo", .kind = CF_BOOL, .ch = 0,
      .desc = "Force read-only plan mode at start, auto-approve the plan on the model's first resolve call, then switch to "
      "--plan-yolo-into to implement it"},

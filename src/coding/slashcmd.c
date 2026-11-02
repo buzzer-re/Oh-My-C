@@ -5,6 +5,7 @@
 #include "coding/memory.h"
 #include "coding/modelctl.h"
 #include "coding/modelpreset.h"
+#include "coding/prewalk.h"
 #include "config/settings.h"
 #include "mcp/mcp.h"
 #include "core/embed.h"
@@ -23,6 +24,7 @@ static void h_model(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_effort(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_switch(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_modelpreset(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_prewalk(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_advisor(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_compact(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_shake(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
@@ -53,6 +55,7 @@ static const struct {
     {"queue", NULL, true, NULL},
     {"model", NULL, true, h_model},
     {"switch", NULL, true, h_switch},
+    {"prewalk", "*", false, h_prewalk},
     {"modelpreset", "*", true, h_modelpreset},
     {"effort", "*", true, h_effort},
     {"fast", "*", true, h_fast},
@@ -500,6 +503,15 @@ static void h_switch(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *re
     }
     free(err);
     free(lv);
+}
+
+/* /prewalk [into] | restart [from] [into] | off */
+static void h_prewalk(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    bool failed = false;
+    char *m = prewalk_command(rt->app, c->args, &failed);
+    if (m && failed) usage(rt, res, m);
+    else out(rt, m);
+    free(m);
 }
 
 /* /modelpreset (runPresetsCommand) */
