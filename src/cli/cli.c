@@ -490,6 +490,7 @@ typedef struct {
     const ai_model_t *m;
     ai_effort_t effort;
     bool has_effort;
+    const char *level; /* the explicit `:level` as written */
 } scoped_t;
 
 /* ---------- launch ---------- */
@@ -717,6 +718,7 @@ static int launch_run(launch_args_t *A, bool force_acp) {
             if (!*A->models.v[i]) continue;
             scoped_t s = {0};
             s.m = app_resolve_model_pattern(A->models.v[i], &s.effort, &s.has_effort);
+            if (s.has_effort && strrchr(A->models.v[i], ':')) s.level = strrchr(A->models.v[i], ':') + 1;
             if (!s.m) {
                 char *w = xasprintf("Warning: No models match pattern \"%s\"", A->models.v[i]);
                 char *y = cli_yellow(w);
@@ -741,7 +743,7 @@ static int launch_run(launch_args_t *A, bool force_acp) {
                     if (scoped.v[k].m == rm) pick = &scoped.v[k];
             }
             scoped_model = xasprintf("%s/%s", pick->m->provider, pick->m->id);
-            if (!A->thinking && pick->has_effort) A->thinking = effort_name(pick->effort);
+            if (!A->thinking && pick->has_effort && pick->level) A->thinking = pick->level;
         }
     }
     if (A->api_key && !A->model && !scoped_model && !A->has_models) {
@@ -847,10 +849,22 @@ static int launch_run(launch_args_t *A, bool force_acp) {
         }
         strvec_free(&po.messages);
     } else {
+        /* buildModelScopeNotification */
+        char *scope_notice = NULL;
+        if (scoped.n && !settings_bool("startup.quiet", false)) {
+            sb_t b = SB_INIT;
+            sb_append(&b, "Model scope: ");
+            for (size_t i = 0; i < scoped.n; i++)
+                sb_appendf(&b, "%s%s%s%s", i ? ", " : "", scoped.v[i].m->id, scoped.v[i].has_effort && scoped.v[i].level ? ":" : "",
+                           scoped.v[i].has_effort && scoped.v[i].level ? scoped.v[i].level : "");
+            sb_append(&b, " (Ctrl+P to cycle)");
+            scope_notice = sb_detach(&b);
+        }
         interactive_start_t st = {.initial = initial, .images = images, .more = &rest, .resume_picker = picker,
-                                  .restore = A->restore};
+                                  .restore = A->restore, .notice = scope_notice};
         images = NULL; /* owned by the interactive start */
         rc = run_interactive_mode_ex(app, &st);
+        free(scope_notice);
     }
     if (dl_on) {
         dl.stop = true;

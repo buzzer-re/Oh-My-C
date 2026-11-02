@@ -2551,6 +2551,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     }
     if (g_start && g_start->resume_picker) tui_post(u.tui, startup_picker_cb, &u);
     if (g_start && g_start->restore) tui_post(u.tui, restore_cb, &u);
+    if (g_start && g_start->notice) add_notice(&u, "info", g_start->notice); /* main.ts notifs */
     /* first-run setup wizard (omp main.ts: stale setupVersion, not resuming, TTY); the welcome intro
      * plays after it instead of at startup */
     if (ui_setup_pending(a->opts.resume || a->opts.continue_recent)) {

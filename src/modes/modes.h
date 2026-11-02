@@ -31,6 +31,7 @@ typedef struct {
     const strvec_t *more;     /* further positional messages, each its own prompt after the first */
     bool resume_picker;       /* `--resume` without a value: open the session picker first */
     bool restore;             /* `--restore`: go on with the resumed session's interrupted turn */
+    const char *notice;       /* startup info notice (`Model scope: …`), may be NULL */
 } interactive_start_t;
 int run_interactive_mode_ex(app_t *a, const interactive_start_t *st);
 int run_acp_mode(const app_opts_t *base); /* one app per ACP session */
