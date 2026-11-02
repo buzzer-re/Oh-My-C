@@ -1094,6 +1094,12 @@ static void notice_rpc(void *ud, const char *level, const char *text) {
         json_free(o);
         return;
     }
+    if (!strcmp(level, "cache_warming_start") || !strcmp(level, "cache_warming_end")) { /* cachewarm.c events */
+        json_t *j = json_parse(text, strlen(text), NULL);
+        if (json_is_obj(j)) forward(r, j);
+        else json_free(j);
+        return;
+    }
     if (!strcmp(level, "auto_compaction_start") || !strcmp(level, "auto_compaction_end")) {
         /* compaction.c carries omp's AgentSessionEvent as JSON */
         json_t *j = json_parse(text, strlen(text), NULL);
@@ -1518,11 +1524,12 @@ static json_t *state_json(rpc_t *r) {
     json_set_bool(s, "isSettled", session_settled(r));
     json_set(s, "queuedMessages", app_queued_messages(a));
     json_set(s, "todoPhases", a->env->todo.phases ? json_clone(a->env->todo.phases) : json_arr());
-    json_set_bool(s, "fastModeEnabled", false);
+    json_set_bool(s, "fastModeEnabled", app_fast_mode_enabled(a));
     json_set(s, "tokensPerSecond", tokens_per_second(a, streaming));
-    json_set_bool(s, "fastModeActive", false);
-    json_set_bool(s, "slowModeSupported", false);
-    json_set_bool(s, "slowModeEnabled", false);
+    json_set_bool(s, "fastModeActive", app_fast_mode_active(a));
+    json_set_bool(s, "slowModeSupported", app_slow_mode_supported(a));
+    json_set_bool(s, "slowModeEnabled", app_slow_mode_enabled(a));
+    if (app_slow_mode_scope(a)) json_set_str(s, "slowModeScope", app_slow_mode_scope(a));
     json_set_int(s, "messageCount", (int64_t)json_len(a->agent->messages));
     pthread_mutex_lock(&a->agent->mu);
     json_set(s, "systemPrompt", json_clone(a->agent->system_prompt));

@@ -10,6 +10,7 @@
 static const char *const MODE_OPTS[] = {"text", "json", "rpc", "acp", "rpc-ui", NULL};
 static const char *const THINKING_OPTS[] = {"off", "minimal", "low", "medium", "high", "xhigh", "max", "auto", NULL};
 static const char *const APPROVAL_OPTS[] = {"always-ask", "always-ask-cached", "write", "yolo", NULL};
+static const char *const SERVICE_TIER_OPTS[] = {"none", "auto", "default", "flex", "scale", "priority", "ultrafast", NULL};
 
 const cflag_t LAUNCH_FLAGS[] = {
     {.name = "model", .kind = CF_STR, .ch = 0, .desc = "Model to use (fuzzy match: \"opus\", \"gpt-5.2\"; exact with a provider: \"openai/gpt-5.2\")"},
@@ -43,6 +44,8 @@ const cflag_t LAUNCH_FLAGS[] = {
     {.name = "no-lsp", .kind = CF_BOOL, .ch = 0, .desc = "Disable LSP tools, formatting, and diagnostics"},
     {.name = "tools", .kind = CF_STR, .ch = 0, .desc = "Comma-separated list of tools to enable (default: all)"},
     {.name = "thinking", .kind = CF_STR, .ch = 0, .desc = "Set thinking level: off, minimal, low, medium, high, xhigh, max, auto", .options = THINKING_OPTS},
+    {.name = "service-tier", .kind = CF_STR, .ch = 0, .desc = "OpenAI service tier for this session (none omits service_tier)",
+     .options = SERVICE_TIER_OPTS},
     {.name = "hide-thinking", .kind = CF_BOOL, .ch = 0, .desc = "Hide thinking blocks in TUI output (display only, does not disable model thinking)"},
     {.name = "advisor", .kind = CF_BOOL, .ch = 0, .desc = "Enable the advisor runtime (passively reviews each turn and injects notes)"},
     {.name = "no-skills", .kind = CF_BOOL, .ch = 0, .desc = "Disable skills discovery and loading"},

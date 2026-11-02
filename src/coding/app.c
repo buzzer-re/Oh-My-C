@@ -392,6 +392,8 @@ static void fill_request_opts(app_t *a, ai_stream_opts_t *o) {
     o->slow_hooks = &a->slow_hooks;
     o->first_event_timeout_ms = timeout_seconds_ms(settings_num("providers.streamFirstEventTimeoutSeconds", -1));
     o->idle_timeout_ms = timeout_seconds_ms(settings_num("providers.streamIdleTimeoutSeconds", -1));
+    const json_t *lim = settings_get("providers.maxInFlightRequests"); /* read once when the request starts */
+    o->max_in_flight = json_is_obj(lim) ? lim : NULL;
 }
 
 void app_fill_request_opts(app_t *a, ai_stream_opts_t *o) { fill_request_opts(a, o); }

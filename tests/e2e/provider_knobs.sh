@@ -21,7 +21,7 @@ KL=(python3 -I "$ROOT/tests/e2e/reqlog.py" "$T/knobs.jsonl")
 kcfg() { printf '%b' "$1" > "$T/kagent/config.yml"; }
 # service tiers on the wire (tier.* settings, --service-tier) and the persisted service_tier_change
 kcfg 'tier:\n  openai: priority\n  google: flex\n'
-check "tier openai"        "plain provider answer"  "${KENV[@]}" "$B" -m openai/gpt-5.2 -p hi
+check "tier openai"        "plain provider answer"  "${KENV[@]}" "$B" --model openai/gpt-5.2 -p hi
 check "tier openai wire"   "priority"  "${KL[@]}" /v1/responses 'b.get("service_tier")' '"tools"'
 # the latest entry of a type in the agent's sessions, as JSON of the named fields
 SESS=(python3 -I -c 'import glob, json, sys
@@ -29,11 +29,11 @@ es = [json.loads(l) for f in sorted(glob.glob(sys.argv[1] + "/sessions/*/*.jsonl
 es = [e for e in es if e.get("type") == sys.argv[2]]
 print(json.dumps({k: es[-1].get(k) for k in sys.argv[3:]}) if es else "none")' "$T/kagent")
 check "tier entry"         '{"serviceTier": {"openai": "priority", "google": "flex"}}'  "${SESS[@]}" service_tier_change serviceTier
-check "service-tier flag"  "plain provider answer"  "${KENV[@]}" "$B" -m openai/gpt-5.2 --service-tier flex --no-session -p hi
+check "service-tier flag"  "plain provider answer"  "${KENV[@]}" "$B" --model openai/gpt-5.2 --service-tier flex --no-session -p hi
 check "service-tier wire"  "flex"  "${KL[@]}" /v1/responses 'b.get("service_tier")' '"tools"'
 check "service-tier bad"   'Error: Invalid --service-tier value: "fastest". Expected one of: none, auto, default, flex, scale, priority, ultrafast.'  "${KENV[@]}" "$B" --service-tier fastest -p hi
 kcfg 'tier:\n  anthropic: priority\n'
-check "tier anthropic"     "plain provider answer"  "${KENV[@]}" "$B" -m anthropic/claude-opus-4-6 --no-session -p hi
+check "tier anthropic"     "plain provider answer"  "${KENV[@]}" "$B" --model anthropic/claude-opus-4-6 --no-session -p hi
 check "tier anthropic wire" "fast True"  "${KL[@]}" /v1/messages 'b.get("speed"), "fast-mode-2026-02-01" in h.get("anthropic-beta", "")' '"tools"'
 # /fast /slow /extended-context and set_fast_mode / set_slow_mode / set_cache_warming over RPC (omp's output)
 kcfg 'modelRoles:\n  default: openai/gpt-5.2\n'
@@ -51,12 +51,15 @@ import json, sys
 rs = [json.loads(l) for l in open(sys.argv[1]) if "opus-4-6" in l]
 rs = [r["body"] for r in rs if r["body"].get("tools")]
 key = lambda b: json.dumps({k: v for k, v in b.items() if k != "max_tokens"}, sort_keys=True)
-warm = [b for b in rs[1:] if key(b) == key(rs[0])]
-print("replays ok" if len(warm) >= 1 and all(b["max_tokens"] < rs[0]["max_tokens"] for b in warm) else f"turns={len(rs)} warm={len(warm)}")' "$T/knobs.jsonl"
+seen, warm = {}, []
+for b in rs:  # a replay is an earlier request again under a smaller output budget
+    if key(b) in seen and b["max_tokens"] < seen[key(b)]: warm.append(b)
+    else: seen.setdefault(key(b), b["max_tokens"])
+print("replays ok" if warm else f"requests={len(rs)} warm=0")' "$T/knobs.jsonl"
 check "cache warm usage"   '{"purpose": "cache-warm", "provider": "anthropic", "model": "claude-opus-4-6"}'  "${SESS[@]}" model_usage purpose provider model
 kill $KPID 2>/dev/null
 # stream watchdog (providers.streamFirstEventTimeoutSeconds) and providers.maxInFlightRequests slots
 printf 'providers:\n  streamFirstEventTimeoutSeconds: 1\n  maxInFlightRequests:\n    mock: 1\nretry:\n  enabled: false\n' > "$T/agent/config.yml"
-check "first-event timeout" "OpenAI completions stream timed out while waiting for the first event"  env OMC_CONFIG_DIR="$T/kroot" "$B" -m mock/mock-1 --no-session -p "slow:3:late"
+check "first-event timeout" "OpenAI completions stream timed out while waiting for the first event"  env OMC_CONFIG_DIR="$T/kroot" "$B" --model mock/mock-1 --no-session -p "slow:3:late"
 check "in-flight slot"     "slot-0"  bash -c "ls '$T'/kroot/run/provider-inflight/*/"
 rm -f "$T/agent/config.yml"

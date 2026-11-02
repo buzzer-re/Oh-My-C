@@ -24,7 +24,7 @@ def reader():
             elif t == "agent_end":
                 state["running"] = False
                 state["last_end"] = time.time()
-            elif t in ("todo_reminder", "notice"):
+            elif t in ("todo_reminder", "notice", "cache_warming_start", "cache_warming_end"):
                 state["events"].append(m)
 
 threading.Thread(target=reader, daemon=True).start()

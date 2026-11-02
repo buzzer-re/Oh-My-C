@@ -443,6 +443,15 @@ static void record_usage(cache_warmer_t *w, const json_t *msg) {
     json_push(w->usage, e);
 }
 
+/* a session event for RPC clients (app notice level = event type, text = JSON; the TUI ignores it); owns ev
+ * only when it is the end event (the start event is reused for the end) */
+static void emit_event(cache_warmer_t *w, json_t *ev) {
+    char *t = json_dump(ev, 0);
+    app_notice(w->a, json_get_str(ev, "type"), "%s", t);
+    free(t);
+    if (str_eq(json_get_str(ev, "type"), "cache_warming_end")) json_free(ev);
+}
+
 /* #refresh, on the warmer thread with w->mu held on entry and exit */
 static void refresh_locked(cache_warmer_t *w) {
     run_t *r = &w->run;
@@ -469,33 +478,49 @@ static void refresh_locked(cache_warmer_t *w) {
     run_t req;
     run_copy(&req, r);
     pthread_mutex_unlock(&w->mu);
+    /* onRefreshStart / onRefreshEnd: RPC cache_warming_start / cache_warming_end session events */
+    json_t *ev = json_obj();
+    json_set_str(ev, "type", "cache_warming_start");
+    json_set_str(ev, "phase", req.idle ? "idle" : "streaming");
+    json_set_str(ev, "provider", req.model->provider);
+    json_set_str(ev, "model", req.model->id);
+    emit_event(w, ev);
     json_t *msg = replay(&req, &w->refresh_cancel);
     run_free(&req);
     pthread_mutex_lock(&w->mu);
+    const char *outcome = "error";
     /* a refresh cancelled or replaced after acceptance was still billed */
-    if (msg && json_get_int(json_get(msg, "usage"), "totalTokens", 0) > 0) record_usage(w, msg);
+    if (msg && json_get_int(json_get(msg, "usage"), "totalTokens", 0) > 0) {
+        record_usage(w, msg);
+        json_set(ev, "usage", json_clone(json_get(msg, "usage")));
+    }
+    const char *stop = NULL;
     if (!r->active || r->gen != gen) {
-        json_free(msg);
-        return;
+        outcome = "aborted";
+    } else if (!msg || str_eq(json_get_str(msg, "stopReason"), "error")) {
+        stop = "refresh failed";
+    } else {
+        json_t *u = json_get(msg, "usage");
+        if (json_get_int(u, "cacheRead", 0) <= 0 || json_get_int(u, "cacheWrite", 0) > 0) {
+            outcome = "miss";
+            stop = "refresh missed the cache";
+        } else {
+            outcome = "hit";
+            stop = mode_stop_reason(r);
+        }
     }
-    if (!msg || str_eq(json_get_str(msg, "stopReason"), "error")) {
-        json_free(msg);
-        stop_locked(w, "refresh failed", NULL);
-        return;
-    }
-    json_t *u = json_get(msg, "usage");
-    bool miss = json_get_int(u, "cacheRead", 0) <= 0 || json_get_int(u, "cacheWrite", 0) > 0;
     json_free(msg);
-    if (miss) {
-        stop_locked(w, "refresh missed the cache", NULL);
-        return;
+    if (stop) stop_locked(w, stop, NULL);
+    else if (!strcmp(outcome, "hit")) {
+        schedule_locked(w);
+        if (!w->run.active) stop = w->reason; /* a safety window ended warming */
     }
-    reason = mode_stop_reason(r);
-    if (reason) {
-        stop_locked(w, reason, NULL);
-        return;
-    }
-    schedule_locked(w);
+    json_set_str(ev, "type", "cache_warming_end");
+    json_set_str(ev, "outcome", outcome);
+    if (stop) json_set_str(ev, "warmingStopReason", stop);
+    pthread_mutex_unlock(&w->mu);
+    emit_event(w, ev);
+    pthread_mutex_lock(&w->mu);
 }
 
 static void *warmer_main(void *arg) {

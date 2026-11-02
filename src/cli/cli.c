@@ -6,6 +6,7 @@
 
 #include "ai/ai.h"
 #include "coding/app.h"
+#include "coding/modelctl.h"
 #include "coding/costgate.h"
 #include "coding/goal.h"
 #include "coding/migrate.h"
@@ -51,6 +52,7 @@ void cli_init_runtime(const strvec_t *configs) {
     free(cwd);
     ai_providers_init();
     catalog_init();
+    modelctl_apply_context_policy(); /* extendedContext windows for listings */
     auth_init();
 }
 
@@ -772,6 +774,7 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     o.no_rules = A->no_rules;
     o.max_turns = A->max_turns;
     o.auto_approve = A->auto_approve;
+    o.service_tier = A->service_tier;
     o.has_ui = interactive;
     o.rpc_ui = str_eq(A->mode, "rpc-ui"); /* the ask tool asks the client through extension_ui_request (WP-15) */
     if (str_eq(A->mode, "acp")) {

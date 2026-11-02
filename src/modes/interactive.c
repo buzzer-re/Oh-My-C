@@ -225,6 +225,7 @@ static void show_model_cycle_track(ui_t *u, int active) {
 
 static void ui_notice(void *ud, const char *level, const char *text) {
     ui_t *u = ud;
+    if (str_starts(level, "cache_warming_")) return; /* event-controller.ts: cache_warming_start/end draw nothing */
     uiev_t *e = xcalloc(1, sizeof(*e));
     e->u = u;
     e->type = (agent_event_type_t)-1;

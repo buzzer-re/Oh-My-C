@@ -15,7 +15,7 @@ static const char *const STRING_FLAGS[] = {
     "--cwd", "--config", "--add-dir", "--mode", "--fork", "--provider", "--model", "--smol", "--slow", "--goal",
     "--plan", "--plan-yolo-into", "--max-time", "--warn-cost", "--max-cost", "--api-key", "--system-prompt",
     "--system-prompt-template", "--append-system-prompt", "--session-dir", "--models", "--tools", "--thinking",
-    "--export", "--skills", "--approval-mode",
+    "--export", "--skills", "--approval-mode", "--service-tier",
     "--max-turns", /* omc: stop after n turns */
     NULL};
 
@@ -252,6 +252,17 @@ static bool set_string(launch_args_t *r, const char *flag, const char *value) {
                                       q));
             free(q);
         }
+    } else if (!strcmp(flag, "--service-tier")) {
+        static const char *const TIERS[] = {"none", "auto", "default", "flex", "scale", "priority", "ultrafast", NULL};
+        if (!in_list(TIERS, value)) { /* flag-tables.ts throws CliUsageError */
+            char *q = js_quote(value);
+            usage_errorf("Invalid --service-tier value: %s. Expected one of: none, auto, default, flex, scale, priority, "
+                         "ultrafast.",
+                         q);
+            free(q);
+            return false;
+        }
+        r->service_tier = value;
     } else if (!strcmp(flag, "--max-turns")) r->max_turns = atoi(value);
     return true;
 }

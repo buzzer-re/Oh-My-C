@@ -40,6 +40,7 @@ typedef struct {
     bool no_rules, no_context_files, no_title;
     bool auto_approve;
     const char *approval_mode;
+    const char *service_tier; /* --service-tier (an OpenAI tier setting value) */
     /* omc extras */
     bool plan_mode;
     int max_turns;

@@ -642,7 +642,8 @@ Verified against omp v18.14.2 with `tests/parity/rpc_diff.py` (scripts in `tests
 | notice | 🟡 | info/warning/error and `source: btw-history`; no session-persistence notices |
 | extension_ui_request: select/editor/input/ask/cancel/notify/open_url | ✅ | the ask tool (`--mode rpc-ui`) and tool approvals (select with approvalChoiceLabels) answer over the protocol |
 | extension_ui_request: confirm/setStatus/setWidget/setTitle/set_editor_text | ⛔ | only JS extensions send them |
-| tool_stream_update, cache_warming_start/end, config_warnings_changed, advisor_yielded, ttsr_triggered, todo_auto_clear, irc_message, session_info_update, config_update, extension_error | ❌ | (todo_reminder ✅) |
+| cache_warming_start/end | `cachewarm.c` → `notice_rpc` | ✅ | omp's fields and outcomes (WP-14; tests/parity/cachewarm_diff.sh) |
+| tool_stream_update, config_warnings_changed, advisor_yielded, ttsr_triggered, todo_auto_clear, irc_message, session_info_update, config_update, extension_error | ❌ | (todo_reminder ✅) |
 | host_uri_request/cancel, subagent_lifecycle/progress/event | ❌ | |
 | btw_delta / btw_record | ✅ | |
 | packages/wire (collab GuestFrame/HostFrame, skillshare, stream, tsp) | ⛔ | hosted relay/stream protocols, not RPC |
