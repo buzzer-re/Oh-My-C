@@ -1212,6 +1212,8 @@ static const tui_component_vt WORKING_VT = {"working", working_render, NULL, NUL
 
 static int working_mode(ui_t *u) { return u->working ? ((working_t *)u->working)->mode : 0; }
 
+bool ui_working_busy(ui_t *u) { return working_mode(u) >= 2; }
+
 tui_component_t *ui_working_new(ui_t *u) {
     working_t *w = xcalloc(1, sizeof *w);
     tui_component_init(&w->base, &WORKING_VT);

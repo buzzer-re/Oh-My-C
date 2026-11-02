@@ -11,7 +11,7 @@ Display commands (used by tests/tui/compare.sh to exercise transcript views):
   - "streamfail:<text>"      stream <text>, then an in-stream error chunk
   - "seq:[[tool, args], ...]" one tool call per turn, in order, then the usual "Tool said:" answer
   - model "mock-flaky"        every request fails with HTTP 429 (retry fallback chains)
-  - a tool-less request (compaction / handoff summary) whose messages mention SLOWSUMMARY answers after 4 s
+  - a compaction summary (tool-less) or handoff-document request whose messages mention SLOWSUMMARY answers after 4 s
 Eval helper side requests (omc eval completion()/judge()):
   - completion (system "You are a helpful assistant." or a forced `respond` tool) -> "completion says: <prompt>", or a
     `respond` call whose fields echo the prompt (strings) / 42 (numbers) / true (booleans)
@@ -104,8 +104,8 @@ class H(BaseHTTPRequestHandler):
         tnames = [t.get("function", {}).get("name") for t in body.get("tools") or []]
         lu_all = text_of(last) if last.get("role") == "user" else ""
         side = None
-        if not tnames and "SLOWSUMMARY" in json.dumps(msgs[1:]):
-            time.sleep(4)  # tool-less side request (compaction/handoff summary) over a SLOWSUMMARY transcript
+        if "SLOWSUMMARY" in json.dumps(msgs[1:]) and (not tnames or "Write a handoff document" in lu):
+            time.sleep(4)  # compaction summary / handoff document request over a SLOWSUMMARY transcript
         if last.get("role") == "user" and sysc.startswith("Memory-stage-one extractor"):
             side = ("say", json.dumps({"rollout_summary": "Mock rollout summary.", "rollout_slug": "Mock Slug!", "raw_memory": "- mock raw memory token_abcdefghij123456"}))
         elif last.get("role") == "user" and "memory-stage-two consolidator" in sysc:

@@ -96,6 +96,7 @@ struct ui {
     strvec_t q_steer, q_follow;     /* band snapshot (ui_queue_refresh) */
     json_t *compaction_queue;       /* [{text, mode: steer|followUp}] typed while compacting / behind a yield compaction */
     char *yield_compaction;         /* `/compact …` queued with the follow-up key while streaming */
+    char *compact_pending;          /* `/compact` sent with Enter mid-run: runs once the aborted turn unwinds */
     strvec_t optimistic;            /* submitted prompts already drawn: their user message_start is not drawn again */
     int bg_kind;                    /* running maintenance op: 0 none, 1 compaction, 2 handoff */
     pthread_t bg_thread;
@@ -149,6 +150,7 @@ void ui_working_stop(ui_t *u);
 void ui_working_set_message(ui_t *u, const char *message);
 void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms);
 void ui_working_compaction(ui_t *u, const char *label);
+bool ui_working_busy(ui_t *u); /* a retry countdown or compaction row replaces the working/title row */
 void ui_chat_rebuild(ui_t *u); /* replay the transcript from the session tree (resume, branch, reload) */
 
 /* toolcards.c - tool cards (MV_TOOL views keep their card state in `msg`) */

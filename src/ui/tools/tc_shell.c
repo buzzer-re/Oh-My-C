@@ -1,5 +1,6 @@
 /* tc_shell.c - bash tool card (port of omp tools/bash.ts createShellRenderer). */
 #include "ui/tools/tc.h"
+#include "tui/symbols.h"
 #include "tools/outsink.h"
 
 #include <ctype.h>
@@ -471,8 +472,14 @@ void tc_render_bang(const tc_bang_t *b, int width, strvec_t *out) {
         strvec_free(&raw);
     }
     if (b->running) {
-        char *sp = tc_fg(key, tc_spinner_frame(b->spinner));
-        char *msg = tc_fg(TUI_TC_MUTED, "Running\xe2\x80\xa6 (Esc to cancel)");
+        /* buildExecutionFrame's Loader: activity spinner frames, `Running… (⎋ to cancel)` */
+        const char *const *frames;
+        size_t nf = tui_sym_spinner("activity", &frames);
+        char *sp = tc_fg(key, nf ? frames[(size_t)(b->spinner < 0 ? 0 : b->spinner) % nf] : "");
+        char *run = xasprintf("Running\xe2\x80\xa6 (%s to cancel)", tc_sym("key.esc"));
+        char *msg = tc_fg(TUI_TC_MUTED, run);
+        free(run);
+        strvec_push(&lines, ""); /* Loader rows start with a blank line */
         strvec_push_own(&lines, xasprintf("%s %s", sp, msg));
         free(msg);
         free(sp);
