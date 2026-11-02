@@ -1430,9 +1430,15 @@ static int bridge_terminal(tool_bridge_t *b, tool_ctx_t *ctx, const tool_termina
         int rc = client_wait(a, cp, slice, cancel);
         if (rc == 1) break;
         if (rc < 0 || (deadline && mono_ms() >= deadline)) {
-            /* never created from our side: kill + release whatever the client creates late */
+            /* abandoned before the client answered: kill + release a terminal it still creates (cleanupLateCreate) */
             bool timed = rc == 0;
-            client_take(a, cp, NULL);
+            json_t *late = client_wait(a, cp, 1000, NULL) == 1 ? client_take(a, cp, NULL) : (client_take(a, cp, NULL), NULL);
+            const char *ltid = json_get_str(late, "terminalId");
+            if (ltid) {
+                json_free(terminal_call(s, "terminal/kill", ltid, 1000));
+                json_free(terminal_call(s, "terminal/release", ltid, 1000));
+            }
+            json_free(late);
             if (timed) res->timed_out = true;
             else res->aborted = true;
             res->output = xstrdup("");
@@ -1956,7 +1962,10 @@ static char *convert_prompt(const json_t *blocks, json_t *images) {
     json_arr_foreach(blocks, i, b) {
         const char *t = json_get_str(b, "type");
         if (str_eq(t, "text")) strvec_push(&parts, json_get_str(b, "text") ? json_get_str(b, "text") : "");
-        else if (str_eq(t, "image")) json_push(images, image_block(json_get_str(b, "data"), json_get_str(b, "mimeType")));
+        else if (str_eq(t, "image")) {
+            if (json_get_str(b, "data") && json_get_str(b, "mimeType"))
+                json_push(images, image_block(json_get_str(b, "data"), json_get_str(b, "mimeType")));
+        }
         else if (str_eq(t, "resource")) {
             json_t *r = json_get(b, "resource");
             const char *text = json_get_str(r, "text"), *blob = json_get_str(r, "blob"), *mime = json_get_str(r, "mimeType");

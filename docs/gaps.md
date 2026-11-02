@@ -57,7 +57,7 @@ Ranked by how soon a user hits the gap in a normal interactive session.
 12. **304 of the 402 settings shown in `/settings` have no effect.** (`tools.approvalMode`, `tools.approval`, `tools.restrictedFolders` and `bash.patterns` now work: WP-10.) (WP-26)
 13. ~~**Default-on agent guards are missing.**~~ Done (WP-12, WP-3): todo reminders + mid-run nudge, empty/unexpected-stop recovery, tool-call loop guard, stream loop guard, magic keywords, `out://`, `cfg://`, `conflict://N`. Remaining: fabricated-result abort (needs in-band tool calling), `todo.eager`, `tasks.todoClearDelay`.
 14. **Compaction: snapcompact, Codex V2 / Bedrock server compaction and prompt-cache warming are missing.** The method ladder, omp's summary requests, auto shake/handoff, OpenAI Responses and Anthropic server compaction, mid-turn/async compaction and pruning landed (WP-13); snapcompact is a follow-up. (WP-13, WP-14)
-15. **`omc acp` starts a TUI instead of ACP mode.** Editors call `omp acp`. ACP wire shapes differ (WP-16); RPC wire parity landed with WP-15 (remaining: subagent frames, host URI schemes, §6a-b).
+15. **RPC wire parity landed with WP-15** (remaining: subagent frames, host URI schemes, §6a-b). ACP is done (WP-16): `omc acp`, the full session lifecycle, config options, the fs / terminal / elicitation bridges and history replay.
 
 ## Prioritized work packages
 
@@ -92,7 +92,7 @@ Every package must:
 | WP-13 Compaction ladder ✅ (done: `compaction.methodOrder` ladder for manual and automatic passes, omp's prepareCompaction/compact() requests (split turns, short summary, file lists, input windows), all transcript dialects, auto shake (regions, tail protection, artifact offload, persisted) and auto handoff (`handoffSaveToDisk`), OpenAI Responses `/responses/compact` + replay, the Anthropic compaction beta + signed replay, mid-turn, pre-prompt and async (speculative) compaction, supersede/useless/tool-output pruning, dead-end rescue + warnings, per-model thresholds, `auto_compaction_*` events; remaining: snapcompact, Codex V2 streaming compaction, Bedrock Converse (InvokeModel) compaction, anthropic-native speculation, `compaction.remoteEndpoint`, idle compaction, context promotion) | `src/coding/compaction.c`, `src/ai/dialect.c`, `src/ai/provider_{anthropic,openai_responses}.c`, `src/session/session.c` | U/session/{compaction-methods,session-maintenance,compact-modes,session-handoff}.ts, A/compaction/{compaction,shake,pruning,openai,anthropic,bedrock}.ts, packages/ai/src/dialect/*, packages/snapcompact |
 | WP-14 Provider knobs and cache warming | Prompt cache warmer (`providers.cacheWarming`); service tiers `/fast`, `/slow`, `tier.*`, `--service-tier`; `/extended-context` + `extendedContext`; stream first-event/idle timeouts; `providers.maxInFlightRequests`; RPC `set_fast_mode` / `set_slow_mode` / `set_cache_warming` | `src/coding/app.c`, `src/ai/provider_*.c`, `src/ai/ai_common.c`, `src/modes/rpc.c` | U/session/cache-warmer.ts, anthropic-slow-mode.ts, model-controls.ts; U/slash-commands/builtin-modes.ts (fast/slow/extended-context) |
 | WP-15 RPC wire parity (done: §6a-b; remaining: subagent frames, host URI schemes, fast/slow/cache-warming/session-lease commands, prompt error `httpStatus`/`cost_cap`, `retryErrors`) | `messageId` + `partial` + start/done/error on message events, delta filter; session events (compaction, retry, model/thinking changed, goal_updated, queue_update, available_commands_update, …); response shapes (set_model, new/switch/open/branch/fork, get_entries leafId/since, get_messages_page cursor, get_session_stats, compact, handoff, btw); full `get_state`; `extension_ui_request`/`_response` so `ask` works; login/logout; async `bash` so `abort_bash` works; protocol v2 + `rpc_chunk`; subagent frames; mark status.md 🟡 | `src/modes/rpc.c`, `src/agent/agent.c` (`agent_event_to_json`), `src/coding/app.c` (structured events beside `notice`), `src/modes/print.c`, `src/tools/todo_ask.c` | U/modes/rpc/{rpc-types,rpc-mode,rpc-session-events,rpc-messages,rpc-compat,rpc-frame}.ts, U/session/agent-session-events.ts |
-| WP-16 ACP parity | `omc acp` subcommand; slash commands in `session/prompt`; `session/resume`, `close`, `fork`, `set_config_option`, `_session/steering`; `configOptions` + `config_option_update` / `session_info_update` / `available_commands_update`; `mcpServers` in new/load; tool-call history replay; structured diff/terminal tool content; `usage_update {size,used,cost}`; errors → `end_turn`/`refusal`; fs/terminal/elicitation client bridges | `src/modes/acp.c`, `src/cli/cli.c` | U/modes/acp/{acp-agent,acp-event-mapper,acp-client-bridge}.ts, U/slash-commands/acp-builtins.ts, U/commands/acp.ts |
+| WP-16 ACP parity ✅ (done, verified with tests/parity/acp_diff.py; remaining: `_omp/usage`, permission-request withdrawal on steering, ask timeouts, command re-advertising after rediscovery, `/mcp reauth`) | `omc acp` subcommand; slash commands in `session/prompt`; `session/resume`, `close`, `fork`, `set_config_option`, `_session/steering`; `configOptions` + `config_option_update` / `session_info_update` / `available_commands_update`; `mcpServers` in new/load; tool-call history replay; structured diff/terminal tool content; `usage_update {size,used,cost}`; errors → `end_turn`/`refusal`; fs/terminal/elicitation client bridges | `src/modes/acp.c`, `src/cli/cli.c` | U/modes/acp/{acp-agent,acp-event-mapper,acp-client-bridge}.ts, U/slash-commands/acp-builtins.ts, U/commands/acp.ts |
 | WP-17 CLI flags and subcommands | **Done:** `--flag=value`, omp's routing (reserved words / unported omp commands error, hoisting, `launch`), strict subcommand parser + omp help pages, `-r` picker, `--restore` (turn only), `--export`, `--models` (startup model), `--smol/--slow/--plan`, `--hide-thinking`, `--advisor`, `--max-time/--max-cost/--warn-cost`, `--no-lsp`, `--skills`, `--system-prompt-template`, `--mode rpc-ui`, `@image` args; commands acp, agents, auth export/import, completions/__complete, config, grep, login, models, read, search, setup (wizard, python), ssh, token, worktree. **Remaining:** `--add-dir` (WP-21), `--restore` subagent revival, `--models` role scoping, commit, usage (WP-24), session pack/unpack/moved/lease, ttsr, setup speech (⛔) | `src/cli/*.c` | U/cli/{args,flag-tables}.ts, U/cli-commands.ts, U/commands/*.ts, U/main.ts |
 
 ### P2 — specific workflows
@@ -584,7 +584,7 @@ Upstream: `packages/tui/src/overlays/*`, `packages/coding-agent/src/modes/compon
 
 Read `src/modes/rpc.c`, `acp.c`, `print.c`, `src/cli/cli.c`, `agent_event_to_json` (`src/agent/agent.c`);
 probed `build/omc` in RPC (JSONL), ACP (fifo) and every flag/subcommand below against the mock model.
-U = `packages/coding-agent/src`. RPC wire parity is WP-15 (done, remaining rows below); ACP is WP-16.
+U = `packages/coding-agent/src`. RPC wire parity is WP-15 (done, remaining rows below); ACP is WP-16 (done; tests/parity/acp_diff.py diffs omp's and omc's ACP transcripts for the same scripted client).
 
 ### 6a. RPC commands (U/modes/rpc/rpc-types.ts, rpc-mode.ts; omc `src/modes/rpc.c:handle`)
 
@@ -651,22 +651,27 @@ Verified against omp v18.14.2 with `tests/parity/rpc_diff.py` (scripts in `tests
 
 | Method / update | Status | Notes |
 |---|---|---|
-| initialize | 🟡 | empty `authMethods`; no `sessionCapabilities.fork/resume/close`, no `_meta.steering`; ignores clientCapabilities |
-| authenticate | 🟡 | accepts any `methodId` |
-| session/new | 🟡 | ignores `mcpServers`; no `configOptions`; no bootstrap `available_commands_update`/`session_info_update` |
-| session/load | 🟡 | replays text only (no tool calls); ignores `mcpServers` |
-| session/list | 🟡 | ignores `cwd`/`cursor`, caps at 100, no `nextCursor` |
-| session/resume, session/fork, session/close, session/set_config_option, _session/steering | ❌ | -32601; sessions leak until EOF |
-| session/set_mode, session/cancel | ✅ | no `config_option_update` |
-| session/prompt | 🟡 | **no slash commands**; model error becomes a JSON-RPC error instead of `end_turn`/`refusal` |
-| _omp/sessions/listAll, _omp/projects/list, _omp/chats/byCwd, _omp/usage | ❌ | |
+| initialize | ✅ | `agent` auth method (+ `terminal` with `clientCapabilities.auth.terminal`), `sessionCapabilities.list/fork/resume/close`, top-level `_meta.steering`; clientCapabilities drive the bridges below |
+| authenticate | ✅ | rejects a `methodId` initialize did not advertise |
+| session/new | ✅ | absolute-cwd check, `configOptions` (mode / model / thinking) + `modes`, client `mcpServers` (config-file MCP is off in ACP like omp's `enableMCP: false`), bootstrap `available_commands_update` + `session_info_update` 50 ms after the response, MCP connect failures as a chunk. The failure text always says "until the client restarts the session" (omc has no `/mcp reauth`) and omc's connect error texts differ |
+| session/load | ✅ | full `#replaySessionHistory`: user / assistant text, thinking, images, tool calls (`tool_call` + `tool_call_update` with structured content), tool results, error-only turns; an already-loaded session checks the cwd and swaps its MCP servers |
+| session/resume, session/fork, session/close | ✅ | fork refuses a session with a prompt in flight; close cancels the session's prompts (`cancelled`) and disposes it |
+| session/list | ✅ | `cwd` filter, cursor paging (50 per page, `nextCursor`), `_meta {messageCount, size}` |
+| session/set_mode, session/set_config_option | ✅ | `current_mode_update` + `config_option_update`; model / thinking push `config_option_update` only on a change; omp's error texts |
+| session/prompt | ✅ | skill commands, builtins (WP-4), residual prompts, file / template / MCP prompt commands; a prompt while one runs cancels it and queues; stop reasons `cancelled` / `max_tokens` / `refusal` (`content filter` / `refusal` errors) / `end_turn`, never a JSON-RPC error for a model error; turn `usage`; end-of-turn `usage_update` + `session_info_update`; config changes during the turn as `config_option_update` (pushed at turn end, not at the instant they happen) |
+| session/cancel | ✅ | also cancels prompts queued behind the running one |
+| _session/steering | ✅ | validation (`Invalid params: …`), `injected` into a live client turn (steering or `_meta.steering.queue: "followUp"`), else `promptRequired` |
+| _omp/sessions/listAll, _omp/projects/list, _omp/chats/byCwd | ✅ | |
+| _omp/usage | ❌ | omc has no provider usage-report API |
 | _omp/extensions(/toggle), speech.models.list | ⛔ | JS extensions, speech |
-| outbound session/request_permission | ✅ | bash + delete/move edits, omp's four options, per-session "always" answers, `$ cmd` content, absolute locations (WP-10); cancel on user steering ❌ |
-| outbound fs/read_text_file, fs/write_text_file, terminal/create, elicitation (ask) | ❌ | unsaved editor buffers and client terminals unused |
-| agent_message_chunk, agent_thought_chunk, user_message_chunk, plan, current_mode_update | ✅ | |
-| tool_call / tool_call_update | 🟡 | no move/delete/fetch kinds; diffs as text not `{type:"diff"}`; no `terminal` content; no in-progress updates |
-| usage_update | 🟡 | **wrong shape**: sends message `usage`; ACP expects `{size,used,cost:{amount,currency}}` |
-| available_commands_update, config_option_update, session_info_update | ❌ | |
+| outbound session/request_permission | 🟡 | bash + delete/move edits, omp's four options, per-session "always" answers, `$ cmd` content, absolute locations (WP-10); sent before the tool card like omp; an abort withdraws it (`$/cancel_request`); withdrawing it when the user steers ❌ |
+| outbound fs/read_text_file, fs/write_text_file | ✅ | read tool (unsaved editor buffers, disk fallback), write and edit tools (session artifacts / internal URLs stay local) |
+| outbound terminal/create, terminal/output, terminal/wait_for_exit, terminal/kill, terminal/release | ✅ | bash runs in the client terminal (`terminal` content, polled output, timeout kill, abort); PTY calls stay local |
+| outbound elicitation/create (form) | ✅ | the `ask` tool (offered only when the client has form elicitation) and plan approval ("Approve and execute" / "Refine plan"); ask timeouts and the usage-reserve confirmer ❌ |
+| agent_message_chunk, agent_thought_chunk, user_message_chunk, plan, current_mode_update | ✅ | message ids per assistant message, narration, the final-text and turn-error fallbacks, todo reminders as `plan` |
+| tool_call / tool_call_update | ✅ | port of acp-event-mapper.ts: titles, kinds (incl. delete / move / fetch / think, `xd://` writes as execute), start content (`$ cmd`, eval cells), in-progress updates, `diff` content from edit results, `terminal` content, images / resources, merged fallback text, locations. Tool `rawOutput` details follow each tool's own (partly different) details |
+| usage_update | ✅ | `{size, used, cost?}` with omc's context-gauge estimate |
+| available_commands_update, config_option_update, session_info_update | ✅ | re-advertising commands after a skills / commands rediscovery ❌ |
 
 ### 6d. CLI flags (U/cli/args.ts, flag-tables.ts; omc `src/cli/args.c`, launch in `src/cli/cli.c`)
 
@@ -702,7 +707,7 @@ the plugin manager omc lacks), omp commands omc does not port error with `is not
 
 | Subcommand | Status | Notes |
 |---|---|---|
-| acp | ✅ | |
+| acp | ✅ | forces ACP mode; `--acp-terminal-auth` opens the TUI instead (the client's terminal auth method) |
 | models | ✅ | ls/find/refresh/`<provider>`, box tables, `--json`, `--kind`, `--config`; no `-e`/`--no-extensions` (⛔) |
 | login | ✅ | numbered picker, prompts on stdin, `Logged in to <name>` + store path |
 | config | ✅ | list (registry order/tabs, credentials redacted), get/set/reset (`--json`, shadowing notes), `--scope`; no `init-xdg` |

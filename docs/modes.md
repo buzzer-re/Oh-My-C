@@ -181,14 +181,40 @@ When stdin closes, an in-flight run finishes before exit. Titles are disabled in
 
 ## ACP (`modes/acp.c`)
 
-This is the Agent Client Protocol for editors such as Zed (omp `modes/acp/*`): JSON-RPC 2.0 over
-newline-delimited JSON on stdio. Methods: `initialize`, `session/new`, `session/load`,
-`session/list`, `session/prompt`, `session/cancel`, `session/set_mode`. Agent output is streamed as
-`session/update` notifications (message and thought chunks, `tool_call` / `tool_call_update`,
-plan, usage). `bash` calls and edits that delete or move a file first ask the client through
-`session/request_permission` (Allow once, Always allow, Reject, Always reject; see
-[tools.md](tools.md#tool-approval)), unless `tools.approvalMode: yolo` is configured explicitly or
-`--auto-approve` is given. Each ACP session is its own `app_t` with its own prompt thread.
+This is the Agent Client Protocol for editors such as Zed (omp `modes/acp/*`, `commands/acp.ts`): JSON-RPC 2.0
+over newline-delimited JSON on stdio. Editors spawn `omc acp` (the same as `omc --mode acp`); with
+`--acp-terminal-auth` (the client's terminal auth method) it opens the interactive TUI instead. Every frame is
+written to a private dup of fd 1, and fd 1 itself is pointed at stderr so stray output cannot corrupt the stream.
+
+**Methods.** `initialize` (records the client capabilities), `authenticate`, `session/new`, `session/load`
+(replays the history: user and assistant messages, thinking, tool calls with their results),
+`session/resume` (no replay), `session/fork`, `session/close`, `session/list` (cwd filter, 50-entry pages with
+`nextCursor`), `session/set_mode`, `session/set_config_option` (`mode`, `model`, `thinking`),
+`session/prompt`, `session/cancel`, and the extension methods `_session/steering` (inject into a running client
+turn, else `promptRequired`), `_omp/sessions/listAll`, `_omp/projects/list`, `_omp/chats/byCwd`. Errors use
+omp's codes: `-32002` for an unknown session, `-32602` for steering validation, `-32603` with
+`data.details` otherwise. Session responses carry `configOptions` and `modes`; 50 ms after them the bootstrap
+updates follow (MCP connect failures, `available_commands_update`, `session_info_update`).
+
+**Sessions.** Each ACP session is its own `app_t`. Prompts run on a chain of worker threads (a prompt that
+arrives while one runs cancels it and queues), so the stdin reader stays free for cancels, steering and the
+client's responses. A turn tries a skill command, then a builtin (output as `agent_message_chunk`), then
+file / template / MCP prompt commands and the model. It ends with `usage_update {size, used, cost}`,
+`session_info_update`, and the response `{stopReason, usage}` (stop reasons: `cancelled`, `max_tokens`,
+`refusal` for content-filter / refusal errors, else `end_turn`). MCP servers come only from the client
+(`mcpServers`, stdio / http / sse); config-file servers are not loaded, as in omp.
+
+**Updates.** Agent events map like acp-event-mapper.ts: message and thought chunks with a message id per
+assistant message, `tool_call` (title, kind, `$ cmd` start content, locations), `tool_call_update` (in-progress
+frames, `diff` content from edit results, `terminal` content, merged result text), `plan` for todo results and
+reminders, `current_mode_update` and `config_option_update` when the mode, model or thinking level changes.
+
+**Client bridges.** When the client advertises them, the read tool reads through `fs/read_text_file` (unsaved
+editor buffers), write and edit write through `fs/write_text_file` (session artifacts stay local), bash runs in
+a client terminal (`terminal/create`, `wait_for_exit`, polled `terminal/output`, `kill` on timeout or abort,
+`release`), and with form elicitation the `ask` tool and plan approval ask through `elicitation/create`.
+Bash and delete/move edits ask through `session/request_permission` first (Allow once / Always allow /
+Reject / Always reject), unless an explicit yolo or `--auto-approve` is set.
 
 ## Library embedding
 

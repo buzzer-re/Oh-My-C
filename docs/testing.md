@@ -78,6 +78,7 @@ Other mocks reach real provider code paths through `OMC_PROVIDER_URL_REWRITE` /
 | `mock_mcp.py`, `mock_mcp_oauth.py` | stdio MCP tool; OAuth-protected streamable-HTTP MCP |
 | `mock_dap.py` | scripted debug adapter |
 | `rpc_client.py`, `acp_client.py`, `eval_client.py` | protocol drivers for RPC, ACP and multi-cell eval sessions |
+| `acp_session.py` | `omc acp` as an editor drives it: session lifecycle (load replay, resume, fork, close), configOptions, steering, refusal, usage, and a fake client advertising fs / terminal / form elicitation for the bridges, plus client `mcpServers` |
 | `editor_io.py` + `fake_editor.sh` | the interactive composer under a pty: Ctrl+G through a scripted `$EDITOR`, Ctrl+R, paste chips and the large-paste menu, raw paste through a fake `xclip`, `#` actions / `#N` refs, `@` mentions (checked in the mock's request log) |
 
 All Python is run with `python3 -I`.
@@ -98,6 +99,22 @@ files a tool modifies are reseeded for the second app. The tool messages of each
 are written to `$RD_DIR/tools.{omp,omc}` and diffed (`tool messages: identical`), which is how tool
 result text is checked byte for byte against omp. Use it after any change to prompts, tools, schemas,
 tool output or discovery.
+
+## ACP parity (`tests/parity/acp_diff.py`)
+
+```sh
+tests/parity/acp_diff.py [scenario ...] [--only omp|omc] [--keep] [--full-commands]
+```
+
+This drives `omp acp` and `omc acp` with the same scripted JSON-RPC client against the same mock (throwaway
+agent dirs and HOME) and diffs every frame each agent sends, in arrival order. A fake client answers
+permission requests and, when a scenario advertises them, `fs/*`, `terminal/*` and `elicitation/create`.
+Ids, timestamps, the work and agent dirs, versions, durations and the product name are normalized; the
+slash-command registry is compared by name. Scenarios: `basic` (initialize, auth, config options, modes,
+list, steering, ext methods, close, error codes), `tools`, `errors` (stop reasons), `load` (replay, resume,
+fork), `bridge`, `elicit`, `steer` (steering into a running turn, cancel), `mcp` (client mcpServers), `edit`
+(diff content), `plan`, `planform` (plan approval with and without form elicitation). Run it after any change
+to `src/modes/acp.c` or to what tools report.
 
 ## TUI parity (`tests/tui/`)
 
