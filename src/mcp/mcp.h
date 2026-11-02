@@ -81,6 +81,9 @@ json_t *mcp_failed(mcp_manager_t *m);
 int mcp_probe(const char *name, const json_t *cfg, int64_t timeout_ms, volatile int *cancel, json_t **info, json_t **tools,
               char **err, bool *auth_required, char **www_auth);
 
+/* the same one-off connection, returning {info, tools, resources, prompts} (owned) or NULL with *err */
+json_t *mcp_probe_catalog(const char *name, const json_t *cfg, int64_t timeout_ms, char **err);
+
 /* ---------- config files (mcp/config-writer.ts; mcpcfg.c) ---------- */
 
 /* getMCPConfigPath: user -> <agent dir>/mcp.json, project -> <cwd>/.omc/mcp.json (owned) */

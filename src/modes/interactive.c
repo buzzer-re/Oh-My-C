@@ -2156,7 +2156,8 @@ static bool handle_command_inner(ui_t *u, const char *line) {
     } else if (!strcmp(cmd, "hotkeys")) {
         ui_overlay_hotkeys(u);
     } else if (!strcmp(cmd, "login") || !strcmp(cmd, "logout")) {
-        ui_overlay_login(u, !strcmp(cmd, "logout"));
+        /* `/login <value>`: the pasted code of a waiting MCP OAuth flow */
+        if (strcmp(cmd, "login") || !*arg || !ui_mcp_manual_input(u, arg)) ui_overlay_login(u, !strcmp(cmd, "logout"));
     } else if (!strcmp(cmd, "model")) {
         ui_overlay_model(u);
     } else if (!strcmp(cmd, "switch")) { /* builtin-modes.ts switch handleTui */
@@ -2381,9 +2382,9 @@ static bool handle_command_inner(ui_t *u, const char *line) {
         add_notice(u, "info", b.len ? sb_cstr(&b) : "No skills discovered.");
         sb_free(&b);
     } else if (!strcmp(cmd, "mcp")) {
-        char *st = a->mcp ? mcp_status(a->mcp) : NULL;
-        add_notice(u, "info", st && *st ? st : "No MCP servers configured.");
-        free(st);
+        ui_mcp_command(u, line);
+    } else if (!strcmp(cmd, "ssh")) {
+        ui_ssh_command(u, line);
     } else if (!strcmp(cmd, "dump")) {
         char *verb, *rest;
         slash_subcommand(arg, &verb, &rest);
@@ -2688,6 +2689,7 @@ static void clear_editor_draft(ui_t *u) {
 
 /* app.interrupt (editor.onEscape) */
 static void on_escape(ui_t *u) {
+    if (ui_mcp_escape(u)) return; /* MCP OAuth wait / running /mcp test */
     if (tc_escape(u)) return; /* abortBranchSummary */
     if (ui_report_dismiss(u)) return; /* dismissCommandReport */
     if (u->focus_id) { /* Esc never interrupts the focused agent: clear the draft, else return to main */
@@ -3175,6 +3177,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     a->env->ui.tool_frame = ui_tool_frame;
     a->env->ui.ud = &u;
     ui_approval_install(&u);
+    ui_mcp_install(&u);
     app_set_plan_review_ui(a, true);
     g_pr.u = &u;
     tui_post(u.tui, signals_init_cb, &u); /* the terminal title / program status claim the terminal first */

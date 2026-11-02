@@ -10,6 +10,7 @@
 #include "prompt/template.h"
 #include "session/session.h"
 #include "text/yaml.h"
+#include "tools/tools.h"
 #include "tui/symbols.h"
 
 #include <unistd.h>
@@ -196,43 +197,12 @@ int cmd_agents(cparse_t *p) {
 
 /* ---------- ssh ---------- */
 
-static char *ssh_config_path(const char *scope) {
-    if (!strcmp(scope, "user")) return path_join(omc_agent_dir(), "ssh.json");
+/* the shared ssh.json writer (tools/ssh.c) */
+static char *cli_ssh_path(const char *scope) {
     char *cwd = get_cwd();
-    char *p = path_join3(cwd, ".omc", "ssh.json");
+    char *p = ssh_config_path(scope, cwd);
     free(cwd);
     return p;
-}
-
-/* readSSHConfigFile: {hosts:{}} when missing; NULL with *err on bad JSON */
-static json_t *ssh_read(const char *path, char **err) {
-    size_t n;
-    char *s = fs_read(path, &n);
-    if (!s) {
-        json_t *c = json_obj();
-        json_set(c, "hosts", json_obj());
-        return c;
-    }
-    char *perr = NULL;
-    json_t *j = json_parse(s, n, &perr);
-    free(s);
-    if (!j) {
-        *err = xasprintf("Failed to parse SSH config file %s: %s", path, perr ? perr : "invalid JSON");
-        free(perr);
-        return NULL;
-    }
-    free(perr);
-    return j;
-}
-
-static int ssh_write(const char *path, const json_t *cfg) {
-    char *dir = path_dirname(path);
-    fs_mkdir_p(dir, 0700);
-    free(dir);
-    char *s = json_dump(cfg, 2);
-    int rc = fs_write_atomic(path, s, strlen(s), 0600);
-    free(s);
-    return rc;
 }
 
 static void ssh_error(const char *msg) {
@@ -271,16 +241,6 @@ static void print_hosts(const json_t *hosts) {
     }
 }
 
-static bool valid_host_name(const char *name, const char **why) {
-    if (!*name) return *why = "Host name cannot be empty", false;
-    if (strlen(name) > 100) return *why = "Host name is too long (max 100 characters)", false;
-    for (const char *c = name; *c; c++)
-        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '_' || *c == '.' ||
-              *c == '-'))
-            return *why = "Host name can only contain letters, numbers, dash, underscore, and dot", false;
-    return true;
-}
-
 int cmd_ssh(cparse_t *p) {
     const char *action = cp_arg(p, "action") ? cp_arg(p, "action") : "list";
     const strvec_t *targets = cp_arg_multi(p, "targets");
@@ -288,8 +248,8 @@ int cmd_ssh(cparse_t *p) {
     const char *scope = cp_str(p, "scope") ? cp_str(p, "scope") : "project";
     settings_init(NULL, NULL);
     if (!strcmp(action, "list")) {
-        char *pp = ssh_config_path("project"), *up = ssh_config_path("user"), *err = NULL;
-        json_t *pc = ssh_read(pp, &err), *uc = err ? NULL : ssh_read(up, &err);
+        char *pp = cli_ssh_path("project"), *up = cli_ssh_path("user"), *err = NULL;
+        json_t *pc = ssh_config_read(pp, &err), *uc = err ? NULL : ssh_config_read(up, &err);
         int rc = 0;
         if (err) {
             ssh_error(err);
@@ -340,7 +300,7 @@ int cmd_ssh(cparse_t *p) {
         free(u);
         return 1;
     }
-    char *path = ssh_config_path(scope), *err = NULL;
+    char *path = cli_ssh_path(scope), *err = NULL;
     int rc = 0;
     if (!strcmp(action, "add")) {
         const char *host = cp_str(p, "host");
@@ -363,27 +323,15 @@ int cmd_ssh(cparse_t *p) {
                 return 1;
             }
         }
-        const char *why = NULL;
-        json_t *cfg = NULL;
-        if (!valid_host_name(name, &why)) err = xstrdup(why);
-        else if (!*host) err = xstrdup("Host address cannot be empty");
-        else if ((cfg = ssh_read(path, &err))) {
-            if (!json_is_obj(json_get(cfg, "hosts"))) json_set(cfg, "hosts", json_obj());
-            if (json_get(json_get(cfg, "hosts"), name)) err = xasprintf("Host \"%s\" already exists in %s", name, path);
-            else {
-                json_t *h = json_obj();
-                json_set_str(h, "host", host);
-                if (cp_str(p, "user")) json_set_str(h, "username", cp_str(p, "user"));
-                if (port) json_set_num(h, "port", (double)pn);
-                if (cp_str(p, "key")) json_set_str(h, "keyPath", cp_str(p, "key"));
-                if (cp_str(p, "desc")) json_set_str(h, "description", cp_str(p, "desc"));
-                if (cp_bool(p, "compat")) json_set_bool(h, "compat", true);
-                json_set(json_get(cfg, "hosts"), name, h);
-                int w = ssh_write(path, cfg);
-                if (w) err = xasprintf("%s", strerror(-w));
-            }
-        }
-        json_free(cfg);
+        json_t *h = json_obj();
+        json_set_str(h, "host", host);
+        if (cp_str(p, "user")) json_set_str(h, "username", cp_str(p, "user"));
+        if (port) json_set_num(h, "port", (double)pn);
+        if (cp_str(p, "key")) json_set_str(h, "keyPath", cp_str(p, "key"));
+        if (cp_str(p, "desc")) json_set_str(h, "description", cp_str(p, "desc"));
+        if (cp_bool(p, "compat")) json_set_bool(h, "compat", true);
+        ssh_config_add(path, name, h, &err);
+        json_free(h);
         if (err) {
             ssh_error(err);
             rc = 1;
@@ -393,14 +341,7 @@ int cmd_ssh(cparse_t *p) {
             free(m);
         }
     } else {
-        json_t *cfg = ssh_read(path, &err);
-        if (cfg && !json_get(json_get(cfg, "hosts"), name)) err = xasprintf("Host \"%s\" not found in %s", name, path);
-        else if (cfg) {
-            json_del(json_get(cfg, "hosts"), name);
-            int w = ssh_write(path, cfg);
-            if (w) err = xasprintf("%s", strerror(-w));
-        }
-        json_free(cfg);
+        ssh_config_remove(path, name, &err);
         if (err) {
             ssh_error(err);
             rc = 1;

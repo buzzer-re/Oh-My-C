@@ -110,6 +110,96 @@ static void load_hosts(const char *cwd, ssh_hosts_t *out) {
     }
 }
 
+/* ---------- ssh.json config files (ssh/config-writer.ts) ---------- */
+
+char *ssh_config_path(const char *scope, const char *cwd) {
+    if (str_eq(scope, "user")) return path_join(omc_agent_dir(), "ssh.json");
+    return path_join3(cwd, ".omc", "ssh.json");
+}
+
+json_t *ssh_config_read(const char *path, char **err) {
+    *err = NULL;
+    size_t n;
+    char *s = fs_read(path, &n);
+    if (!s) {
+        json_t *c = json_obj();
+        json_set(c, "hosts", json_obj());
+        return c;
+    }
+    char *perr = NULL;
+    json_t *j = json_parse(s, n, &perr);
+    free(s);
+    if (!j) {
+        *err = xasprintf("Failed to parse SSH config file %s: %s", path, perr ? perr : "invalid JSON");
+        free(perr);
+        return NULL;
+    }
+    free(perr);
+    return j;
+}
+
+/* writeSSHConfigFile: JSON.stringify(config, null, 2), mode 0600, directory 0700 */
+static int ssh_config_write(const char *path, const json_t *cfg, char **err) {
+    char *dir = path_dirname(path);
+    fs_mkdir_p(dir, 0700);
+    free(dir);
+    char *s = json_dump(cfg, 2);
+    int rc = fs_write_atomic(path, s, strlen(s), 0600);
+    free(s);
+    if (rc) {
+        *err = xasprintf("%s: %s", path, strerror(rc < 0 ? -rc : rc));
+        return -1;
+    }
+    return 0;
+}
+
+const char *ssh_validate_host_name(const char *name) {
+    if (!name || !*name) return "Host name cannot be empty";
+    if (strlen(name) > 100) return "Host name is too long (max 100 characters)";
+    for (const char *c = name; *c; c++)
+        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '_' || *c == '.' || *c == '-'))
+            return "Host name can only contain letters, numbers, dash, underscore, and dot";
+    return NULL;
+}
+
+int ssh_config_add(const char *path, const char *name, const json_t *host, char **err) {
+    *err = NULL;
+    const char *ne = ssh_validate_host_name(name);
+    if (ne) {
+        *err = xstrdup(ne);
+        return -1;
+    }
+    if (!json_get_str(host, "host") || !*json_get_str(host, "host")) {
+        *err = xstrdup("Host address cannot be empty");
+        return -1;
+    }
+    json_t *cfg = ssh_config_read(path, err);
+    if (!cfg) return -1;
+    if (!json_is_obj(json_get(cfg, "hosts"))) json_set(cfg, "hosts", json_obj());
+    int rc = -1;
+    if (json_get(json_get(cfg, "hosts"), name)) *err = xasprintf("Host \"%s\" already exists in %s", name, path);
+    else {
+        json_set(json_get(cfg, "hosts"), name, json_clone(host));
+        rc = ssh_config_write(path, cfg, err);
+    }
+    json_free(cfg);
+    return rc;
+}
+
+int ssh_config_remove(const char *path, const char *name, char **err) {
+    *err = NULL;
+    json_t *cfg = ssh_config_read(path, err);
+    if (!cfg) return -1;
+    int rc = -1;
+    if (!json_get(json_get_obj(cfg, "hosts"), name)) *err = xasprintf("Host \"%s\" not found in %s", name, path);
+    else {
+        json_del(json_get(cfg, "hosts"), name);
+        rc = ssh_config_write(path, cfg, err);
+    }
+    json_free(cfg);
+    return rc;
+}
+
 char *ssh_quote(const char *s) {
     sb_t b = SB_INIT;
     sb_putc(&b, '\'');

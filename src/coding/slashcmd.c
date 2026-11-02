@@ -87,7 +87,7 @@ static const struct {
     {"tree", NULL, true, NULL},
     {"login", NULL, true, NULL},
     {"logout", NULL, true, NULL},
-    {"mcp", NULL, true, NULL},
+    {"mcp", "add list remove test reauth unauth enable disable reconnect reload resources prompts notifications help", true, slash_mcp_text},
     {"new", NULL, true, NULL},
     {"fresh", NULL, true, h_fresh},
     {"clear", NULL, true, NULL},
@@ -112,6 +112,7 @@ static const struct {
     {"skills", NULL, true, NULL},
     {"forget-approvals", NULL, false, h_forget_approvals},
     {"quit", NULL, true, NULL},
+    {"ssh", "*", true, slash_ssh_text},
 };
 
 /* the alias of an upstream command whose target omc lacks never reaches the registry */

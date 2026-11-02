@@ -281,6 +281,13 @@ json_t *ui_hub_activity_rows(const json_t *ref, const json_t *messages);
 /* interactive.c: (un)subscribe the transcript's agent-event listener on a session */
 void ix_view_subscribe(ui_t *u, app_t *a, bool on);
 
+/* mcpcmd.c - /mcp (MCPCommandController) and sshcmd.c - /ssh (SSHCommandController); `text` is the whole line */
+void ui_mcp_command(ui_t *u, const char *text);
+void ui_ssh_command(ui_t *u, const char *text);
+void ui_mcp_install(ui_t *u);                         /* live MCP tool / prompt refresh, mcp.notifications */
+bool ui_mcp_escape(ui_t *u);                          /* Esc: stop an MCP OAuth wait / cancel /mcp test */
+bool ui_mcp_manual_input(ui_t *u, const char *value); /* `/login <value>` for a waiting MCP OAuth flow */
+
 /* welcome.c */
 tui_component_t *ui_welcome_new(void);
 void ui_welcome_play_intro(tui_component_t *w, tui_t *tui);

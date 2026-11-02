@@ -57,6 +57,7 @@ struct mcp_server {
     char *error;
     char *www_auth; /* last 401 challenge (OAuth discovery) */
     int http_status; /* last HTTP error status */
+    bool no_oauth;   /* probe without stored OAuth tokens (config key "_noOAuth") */
     bool connected;  /* transport alive */
     sstate_t state;
     int64_t timeout_ms;
@@ -372,7 +373,7 @@ static int post_data(void *ud, const char *d, size_t n) {
 
 /* Bearer token from a stored MCP OAuth credential unless the config sets Authorization itself */
 static void add_oauth(mcp_server_t *s, http_headers_t *h) {
-    if (http_headers_get(h, "Authorization")) return;
+    if (s->no_oauth || http_headers_get(h, "Authorization")) return;
     char *tok = mcp_oauth_token(s->url);
     if (tok && *tok) {
         char *v = xasprintf("Bearer %s", tok);
@@ -586,6 +587,7 @@ static mcp_server_t *server_new(const char *name, const json_t *cfg) {
     else if (str_eq(type, "http") || str_eq(type, "streamable-http") || (!json_get_str(cfg, "command") && url)) s->transport = T_HTTP;
     else s->transport = T_STDIO;
     if (url) s->url = xstrdup(url);
+    s->no_oauth = json_get_bool(cfg, "_noOAuth", false);
     const char *k;
     json_t *v;
     json_obj_foreach(json_get_obj(cfg, "headers"), i, k, v) if (json_is_str(v)) http_headers_add(&s->headers, k, json_sv(v));
@@ -1378,6 +1380,27 @@ int mcp_probe(const char *name, const json_t *cfg, int64_t timeout_ms, volatile 
     }
     srv_unref(s);
     return rc;
+}
+
+json_t *mcp_probe_catalog(const char *name, const json_t *cfg, int64_t timeout_ms, char **err) {
+    if (err) *err = NULL;
+    json_t *c = json_clone(cfg);
+    expand_tree(c);
+    mcp_server_t *s = server_new(name, c);
+    json_free(c);
+    if (timeout_ms > 0) s->timeout_ms = timeout_ms;
+    json_t *out = NULL;
+    if (server_connect(s) == 0) {
+        out = json_obj();
+        json_set(out, "info", json_clone(s->info));
+        json_set(out, "tools", json_clone(s->tools));
+        json_set(out, "resources", s->resources ? json_clone(s->resources) : json_arr());
+        json_set(out, "prompts", s->prompts ? json_clone(s->prompts) : json_arr());
+    } else if (err) {
+        *err = xstrdup(s->error ? s->error : "connection failed");
+    }
+    srv_unref(s);
+    return out;
 }
 
 /* ---------- tool bridge ---------- */

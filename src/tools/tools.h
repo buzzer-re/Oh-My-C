@@ -189,6 +189,15 @@ int ssh_fetch(tool_env_t *env, const char *url, char **content, size_t *len, boo
 int ssh_store(tool_env_t *env, const char *url, const char *data, size_t len, char **err);
 bool ssh_available(void);
 char *ssh_quote(const char *s); /* POSIX single-quote */
+/* ssh.json host files (ssh/config-writer.ts, shared by `/ssh` and `omc ssh`): user <agent dir>/ssh.json,
+ * project <cwd>/.omc/ssh.json (owned) */
+char *ssh_config_path(const char *scope, const char *cwd);
+/* readSSHConfigFile: {hosts:{}} when missing; NULL with owned *err ("Failed to parse SSH config file …") */
+json_t *ssh_config_read(const char *path, char **err);
+const char *ssh_validate_host_name(const char *name); /* validateHostName: NULL when valid */
+/* addSSHHost / removeSSHHost: 0, or -1 with owned *err carrying upstream's message */
+int ssh_config_add(const char *path, const char *name, const json_t *host, char **err);
+int ssh_config_remove(const char *path, const char *name, char **err);
 
 /* helpers shared across tools */
 char *tool_prompt(const char *name, const json_t *ctx); /* renders prompts/coding-agent/prompts/tools/<name>.md */
