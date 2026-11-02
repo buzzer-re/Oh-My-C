@@ -73,6 +73,9 @@ struct ui {
     msgview_t *cur_assistant;
     msgview_t *pinned_error; /* assistant view whose error the banner shows */
     hmap_t tools; /* toolCallId -> msgview_t* */
+    /* cards settled by a synthetic aborted/error result (a call of a failed turn that never ran); an auto-retry
+     * that supersedes the turn removes them (omp #syntheticFailureCards) */
+    VEC(msgview_t *) synthetic_cards;
     pthread_t worker;
     bool worker_running;
     bool expand_tools;

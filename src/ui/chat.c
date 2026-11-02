@@ -1433,6 +1433,17 @@ void add_notice(ui_t *u, const char *level, const char *text) {
         int at = 0, max = 0;
         long long secs = 0;
         if (sscanf(text, "Retrying (%d/%d) in %llds", &at, &max, &secs) == 3) {
+            /* #handleAutoRetryStart: the retry supersedes the failed turn's never-run calls */
+            for (size_t i = 0; i < u->synthetic_cards.n; i++) {
+                msgview_t *c = u->synthetic_cards.v[i];
+                for (size_t k = 0; k < u->chat->children.n; k++) {
+                    if (u->chat->children.v[k] != &c->base) continue;
+                    tui_container_remove(u->chat, &c->base);
+                    tui_component_destroy(&c->base);
+                    break;
+                }
+            }
+            u->synthetic_cards.n = 0;
             ui_working_retry(u, at, max, secs * 1000);
             return;
         }

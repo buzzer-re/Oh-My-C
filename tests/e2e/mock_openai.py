@@ -32,6 +32,8 @@ Mid-stream connection drops (turn recovery), driven by the latest user message:
   - "drop:<mode>:<n>:<text>"   the first <n> requests stream <text> (may be empty) and then drop the connection;
     later requests answer "resumed after drop" (or "Tool said: ..." after a tool result)
   - "dropcall:<mode>:<n>:<cmd>" the same, but a complete bash tool call (<cmd>) streams before the drop
+  (counted per mock process; $MOCK_DROPS_FROM_HISTORY counts the failed turns kept in the request instead, so two
+  clients can share the mock)
   <mode>: "stall" (connection stays open, silent, for $MOCK_STALL_SECS, default 60), "close" (FIN mid-body, no
   terminating chunk) or "rst" (TCP reset mid-body).
 /btw side questions ("<btw>…Question:\n<q>\n</btw>"): <q> may be md:/think:/slow:/streamfail:/fail:, else a fixed
@@ -128,7 +130,11 @@ class H(BaseHTTPRequestHandler):
                       not text_of(m).startswith("<system")), "")
         if dropu.startswith(("drop:", "dropcall:")) and body.get("tools"):
             kind, mode, n, rest = (dropu.split(":", 3) + ["", "", ""])[:4]
-            if DROPS.get(dropu, 0) < int(n or 1):
+            done = DROPS.get(dropu, 0)
+            if os.environ.get("MOCK_DROPS_FROM_HISTORY"):  # two clients share the mock (tests/tui/compare.sh)
+                ui = max(i for i, m in enumerate(msgs) if m.get("role") == "user" and text_of(m) == dropu)
+                done = sum(1 for m in msgs[ui:] if m.get("role") == "assistant")
+            if done < int(n or 1):
                 DROPS[dropu] = DROPS.get(dropu, 0) + 1
                 return self.drop_stream(body, kind, mode, rest)
             if last.get("role") != "tool":

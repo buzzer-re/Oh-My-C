@@ -145,6 +145,13 @@ static void ui_apply_event(void *ud) {
         v->output = e->out;
         e->out = NULL;
         json_t *pres = e->type == AGENT_EV_TOOL_END && u->app->plan_review_ui ? json_clone(e->result) : NULL;
+        if (e->type == AGENT_EV_TOOL_END) {
+            const json_t *det = json_get_obj(e->result, "details");
+            const char *src = json_get_str(det, "source");
+            if (json_get_bool(det, "__synthetic", false) &&
+                (str_eq(src, "assistant_stop_error") || str_eq(src, "assistant_stop_aborted")))
+                vec_push(&u->synthetic_cards, v);
+        }
         toolcard_result(u, v, e->id, e->result, e->type != AGENT_EV_TOOL_END, e->is_error);
         e->result = NULL;
         if (e->type == AGENT_EV_TOOL_END) hmap_del(&u->tools, e->id);
@@ -161,8 +168,19 @@ static void ui_apply_event(void *ud) {
                         !str_eq(json_get_str(last_assistant(u->app->agent->messages), "stopReason"), "aborted");
         if (!u->compact_pending && !u->async_hold) ui_chrome_turn(u, false); /* a /compact that interrupted the turn resumes it */
         break;
+    case AGENT_EV_TURN_START:
+        /* a failed turn the run continues past (turn recovery: stream-stall continuation, a preserved tool turn, a
+         * retry) stops pinning its error, as omp's agent.continue() agent_start does: it shows inline instead */
+        if (u->pinned_error) {
+            u->pinned_error->error_pinned = false;
+            u->pinned_error->dirty = true;
+            u->pinned_error = NULL;
+            ui_error_banner_clear(u);
+        }
+        break;
     case AGENT_EV_AGENT_START:
         async_wait_end(u); /* a background result woke the run: the row follows this run again */
+        u->synthetic_cards.n = 0;
         toolcard_break_group(u);
         ui_signals_agent_start();
         ui_chrome_turn(u, true);
@@ -212,7 +230,8 @@ static void ui_listener(void *ud, const agent_event_t *ev) {
     }
     bool user_start = ev->type == AGENT_EV_MESSAGE_START && agent_msg_user_authored(ev->message);
     if (!user_start && ev->type != AGENT_EV_MESSAGE_END && ev->type != AGENT_EV_TOOL_START && ev->type != AGENT_EV_TOOL_UPDATE &&
-        ev->type != AGENT_EV_TOOL_END && ev->type != AGENT_EV_AGENT_END && ev->type != AGENT_EV_AGENT_START)
+        ev->type != AGENT_EV_TOOL_END && ev->type != AGENT_EV_AGENT_END && ev->type != AGENT_EV_AGENT_START &&
+        ev->type != AGENT_EV_TURN_START)
         return;
     uiev_t *e = xcalloc(1, sizeof(*e));
     e->u = u;
