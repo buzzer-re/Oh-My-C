@@ -1034,7 +1034,8 @@ void app_rebuild_system_prompt(app_t *a) {
                            .tool_refs = refs,
                            .delegation_bias = model_delegation_bias(a->model),
                            .irc_enabled = !a->opts.tools && agent_find_tool(a->agent, "task") != NULL,
-                           .generated_append = sb_cstr(&gen)};
+                           .generated_append = sb_cstr(&gen),
+                           .tui_transcript = a->opts.has_ui && !a->opts.subagent};
     json_t *blocks = build_system_prompt(&so);
     sb_free(&gen);
     json_free(labels);

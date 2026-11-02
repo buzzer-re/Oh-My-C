@@ -53,8 +53,8 @@ def main(name):
     rs = [r for r in rs if r.get("tools")]
     return rs[0] if rs else None
 a, b = main("omp"), main("omc")
-def prod(s):  # product name only: omp's -> omc's, omp:// -> omc://
-    return s.replace("omp's", "omc's").replace("omp://", "omc://") if isinstance(s, str) else s
+def prod(s):  # product name only: omp's -> omc's, omp:// -> omc://, `cfg://`: omp settings -> omc settings
+    return s.replace("omp's", "omc's").replace("omp://", "omc://").replace("`cfg://`: omp settings", "`cfg://`: omc settings") if isinstance(s, str) else s
 if not a or not b: sys.exit(f"missing request: omp={bool(a)} omc={bool(b)}")
 ta = [t["function"]["name"] for t in a["tools"]]; tb = [t["function"]["name"] for t in b["tools"]]
 print("tools omp:", ta); print("tools omc:", tb)

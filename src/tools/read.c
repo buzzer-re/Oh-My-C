@@ -2,6 +2,7 @@
 #include "tools.h"
 #include "xdev.h"
 #include "vurl.h"
+#include "iurl.h"
 
 #include "config/settings.h"
 #include "core/embed.h"
@@ -356,6 +357,30 @@ static void page_meta(json_t *details, int64_t start_line, int64_t total, int64_
     json_set(details, "meta", m);
 }
 
+/* omp read.ts: a mutable file window registers its complete conflict blocks and carries the warning footer
+ * (in details.notes for a raw read) */
+static void conflict_footer(tool_env_t *env, const char *abs, const selector_t *sel, const strvec_t *all, int64_t first,
+                            int64_t last, sb_t *b, json_t *details) {
+    if (sel->immutable || sel->no_anchor || sel->resource || !abs || abs[0] != '/' || first < 1 || last < first) return;
+    strvec_t win = {.v = all->v + first - 1, .n = (size_t)(last - first + 1)};
+    int count = 0;
+    char *w = conflict_on_read(env, abs, NULL, &win, first, &count);
+    if (!w) return;
+    if (sel->raw) {
+        json_t *notes = json_get_arr(details, "notes");
+        if (!notes) {
+            notes = json_arr();
+            json_set(details, "notes", notes);
+        }
+        json_push_str(notes, w);
+    } else {
+        if (b->len && b->s[b->len - 1] != '\n') sb_putc(b, '\n');
+        sb_appendf(b, "%s\n", w + 1);
+    }
+    json_set_int(details, "conflictCount", count);
+    free(w);
+}
+
 static int read_text(tool_env_t *env, const char *abs, const char *display, const char *data, size_t len,
                      selector_t *sel, tool_result_t *out) {
     text_lines_t t;
@@ -473,6 +498,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
             sb_truncate(&body, body.len - 1); /* verbatim: no newline the text does not have */
         sb_append(&b, sb_cstr(&body));
         sb_free(&body);
+        conflict_footer(env, abs, sel, &t.lines, 1, last, &b, details);
         if (last < total) {
             page_meta(details, 1, total, last, sbytes, cbytes, stopped, budget);
         } else if (total == 0) {
@@ -580,6 +606,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         }
         sb_append(&b, sb_cstr(&body));
         sb_free(&body);
+        if (rs.n == 1) conflict_footer(env, abs, sel, &t.lines, rs.v[0].start, last_shown, &b, details);
         if (paged && sel->resource && last_shown < total && !pg_stopped && sel->ranges.v[0].end != 0) {
             sb_appendf(&b, "%s\n[%lld more lines in %s. Use :%lld to continue]", b.len && b.s[b.len - 1] == '\n' ? "" : "\n",
                        (long long)(total - last_shown), ent, (long long)(last_shown + 1));
@@ -965,6 +992,35 @@ static void read_virtual(tool_env_t *env, const char *url, const char *text, sel
     read_text(&tmp, url, url, text, strlen(text), sel, out);
 }
 
+/* cfg:// (cfg_url.c renders the settings view; selectors page it like any resource) */
+static int read_cfg(tool_env_t *env, const char *path, tool_result_t *out) {
+    char *work = xstrdup(path);
+    selector_t sel;
+    memset(&sel, 0, sizeof sel);
+    strip_sel(work + 6, &sel);
+    sel.entity = "resource";
+    sel.resource = true;
+    char *err = NULL;
+    json_t *det = NULL;
+    char *content = cfg_resolve(work, &det, &err);
+    if (!content) {
+        tool_result_error(out, "%s", err ? err : "cfg:// read failed");
+    } else {
+        read_virtual(env, work, content, &sel, out);
+        if (out->details && !out->is_error) {
+            json_del(out->details, "resolvedPath");
+            json_set_str(out->details, "contentType", "text/plain");
+            json_set(out->details, "cfg", json_clone(json_get(det, "cfg")));
+        }
+    }
+    json_free(det);
+    free(content);
+    free(err);
+    free(work);
+    vec_free(&sel.ranges);
+    return 0;
+}
+
 /* pr:// and issue:// (github.c renders; selectors page the markdown like any remote resource) */
 static int read_github(tool_env_t *env, const char *path, tool_result_t *out) {
     char *work = xstrdup(path);
@@ -1158,6 +1214,8 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     if (str_starts(path, "pr://") || str_starts(path, "issue://")) return read_github(env, path, out);
     if (str_starts(path, "ssh://")) return read_ssh(env, path, out);
     if (vurl_is(path)) return vurl_read(env, path, out);
+    if (!strncasecmp(path, "cfg:/", 5)) return read_cfg(env, path, out);
+    if (iurl_read(env, path, out)) return 0;
     if (str_starts(path, "omc://")) return read_omc_docs(env, path, out);
     if (str_starts(path, "mcp://")) return read_mcp(env, path, out);
     char *uerr = NULL;
@@ -1244,8 +1302,17 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         free(data);
         goto done;
     }
-    if (sel.conflicts) read_conflicts(display, data, out);
-    else read_text(env, abs, display, data, len, &sel, out);
+    if (sel.conflicts) {
+        int count = 0;
+        char *summary = conflict_read_summary(env, abs, NULL, &count);
+        tool_result_text(out, summary);
+        free(summary);
+        out->details = json_obj();
+        json_set_str(out->details, "resolvedPath", abs);
+        json_set_int(out->details, "conflictCount", count);
+    } else {
+        read_text(env, abs, display, data, len, &sel, out);
+    }
     free(data);
 done:
     vec_free(&sel.ranges);

@@ -654,17 +654,19 @@ static void push_url_doc(strvec_t *out, const char *name, const char *from, cons
 }
 
 strvec_t internal_url_docs(const sysprompt_url_host_t *h) {
-    /* omp InternalUrlRouter registration order: skill rule memory agent history artifact local proc cfg
-     * ssh security vault issue/pr mr mcp omp. memory/cfg/security/vault/mr have no omc handler. */
+    /* omp InternalUrlRouter registration order: skill rule memory out agent history artifact local proc cfg
+     * ssh security vault issue/pr mr mcp omp. security/vault/mr have no omc handler. */
     strvec_t out = {0};
     if (h->skill_uri_access) push_url_doc(&out, "skill", NULL, NULL);
     if (h->rule_count > 0) push_url_doc(&out, "rule", NULL, NULL);
     if (h->memory_local) push_url_doc(&out, "memory", NULL, NULL);
+    if (h->out_replies) push_url_doc(&out, "out", NULL, NULL);
     if (h->has_task) push_url_doc(&out, "agent", NULL, NULL);
     if (h->has_task) push_url_doc(&out, "history", NULL, NULL);
     push_url_doc(&out, "artifact", NULL, NULL);
     push_url_doc(&out, "local", NULL, NULL);
     if (h->has_task) push_url_doc(&out, "proc", NULL, NULL);
+    if (h->settings_approval) push_url_doc(&out, "cfg", "omp settings", "omc settings");
     char *ssh = which("ssh");
     if (ssh) push_url_doc(&out, "ssh", NULL, NULL);
     free(ssh);
@@ -796,6 +798,8 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
         .rule_count = json_len(rules),
         .has_task = o->tool_names && strvec_contains(o->tool_names, "task"),
         .memory_local = str_eq(memory_backend(), "local"),
+        .out_replies = settings_configured("out.enabled") ? settings_bool("out.enabled", true) : o->tui_transcript,
+        .settings_approval = o->tui_transcript,
     };
     strvec_t docs = internal_url_docs(&host);
     for (size_t i = 0; i < docs.n; i++) json_push_str(urls, docs.v[i]);

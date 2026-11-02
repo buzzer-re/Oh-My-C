@@ -75,6 +75,7 @@ typedef struct {
     const char *delegation_bias;      /* model_delegation_bias() of the session model */
     bool irc_enabled;                 /* `write agent://<id>` peer messaging available */
     const char *generated_append;     /* memory + auto-learn blocks composed ahead of the user append */
+    bool tui_transcript;              /* top-level interactive TUI session: out:// replies and cfg:// writes reach the user */
 } sysprompt_opts_t;
 
 /* Whether a rule renders in the system prompt (<domain-rules> / <generic-rules>). Rules with a TTSR
@@ -89,6 +90,8 @@ typedef struct {
     bool memory_local;     /* memory.backend=local owns the file-backed memory://root namespace */
     bool has_task;         /* HOOK: agent://, history://, proc:// are listed only while the task tool is
                             * active (omp lists them unconditionally; gate until omc serves them) */
+    bool out_replies;      /* omp outRepliesActive: `out://` writes reach the user */
+    bool settings_approval; /* omp settingsApproval: `cfg://` writes can be approved (top-level TUI session) */
 } sysprompt_url_host_t;
 
 /* "- " lines for the "# Internal URLs" section in omp registration order (owned) */
