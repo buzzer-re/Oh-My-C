@@ -584,6 +584,10 @@ void slash_execute_text(app_t *a, const char *text, slash_output_fn output, void
     slash_parsed_free(&p);
 }
 
+bool slash_invokes_agent(app_t *a, const char *name) {
+    return str_eq(name, "retry") && !agent_is_running(a->agent) && last_turn_failed(a);
+}
+
 void slash_result_free(slash_result_t *res) {
     free(res->prompt);
     memset(res, 0, sizeof *res);

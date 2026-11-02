@@ -780,7 +780,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         pthread_mutex_unlock(&r->mu);
         if (r->slash) {
             json_t *d = json_obj();
-            json_set_bool(d, "agentInvoked", !strcmp(sc->name, "retry"));
+            json_set_bool(d, "agentInvoked", slash_invokes_agent(a, sc->name));
             respond(r, id, type, true, d, NULL);
         } else respond(r, id, type, true, NULL, NULL);
         if (pthread_create(&r->th, NULL, prompt_thread, r) != 0) {

@@ -235,7 +235,8 @@ check "goal resumed paused" '"status":"paused"'  bash -c "( echo '{\"id\":\"s\",
 check "goal complete"  'Status: complete'  bash -c "( echo '{\"id\":\"r\",\"type\":\"goal\",\"op\":\"resume\"}'; sleep 0.5; echo '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"call:goal:{\\\"op\\\":\\\"complete\\\"}\"}'; sleep 3 ) | '$B' -m mock/mock-1 -c --mode rpc"
 rm -f "$T/agent/config.yml"
 # advisor: shadow model reviews the turn, its concern continues the run as an <advisory>
-printf 'advisor:\n  enabled: true\n' > "$T/agent/config.yml"
+# omp resolves the advisor only through the `advisor` role (no fallback to the session model)
+printf 'advisor:\n  enabled: true\nmodelRoles:\n  advisor: mock/mock-1\n' > "$T/agent/config.yml"
 check "advisor note"   "acknowledged advisory"  "$B" -m mock/mock-1 --no-session -p "bash:echo ADVISE_ME"
 rm -f "$T/agent/config.yml"
 # RPC: host-implemented tools, tree navigation, paging
