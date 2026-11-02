@@ -325,6 +325,9 @@ uint32_t aie_classify_message(const json_t *msg) {
     if (!text) text = json_get_str(msg, "errorMessage");
     uint32_t tid = classify_text(text, status, overflow_only, json_get_str(msg, "api"), json_get_str(msg, "provider"));
     uint32_t kinds = ((classified ? existing : 0) | ((tid & AIE_CLASS) ? tid : 0)) & KIND_MASK;
+    /* omp providers throw a premature close as ProviderResponseError kind "incomplete-stream", which attaches
+     * Flag.Transient to the message's errorId; omc's providers carry no errorId, so its wording stands in */
+    if (!classified && text && m(P_PREMATURE_CLOSE, text)) kinds |= AIE_TRANSIENT;
     if (status == 413 && text && token_overflow_evidence(text) && !(tid & AIE_PAYLOAD_REJECTED)) kinds &= ~AIE_PAYLOAD_REJECTED;
     if (text && m(P_LLAMA_PARSE, text)) kinds &= ~(uint32_t)AIE_TRANSIENT;
     if (kinds) return create(kinds);
