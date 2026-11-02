@@ -157,6 +157,11 @@ printf 'retry:\n  fallbackChains:\n    mock/mock-flaky:\n      - mock/mock-2\n' 
 out=$(timeout 60 "$B" --model mock/mock-flaky -p "bash:echo fb-ok" </dev/null 2>&1)
 [[ "$out" == *"Tool said: fb-ok"* && "$out" == *"[warning] Fallback: mock/mock-flaky -> mock/mock-2"* ]] && echo "   ok  retry fallback" || { echo "   FAIL retry fallback: $out"; fail=1; }
 tail -1 "$T/req.jsonl" | grep -q '"model": "mock-2"' && echo "   ok  fallback model used" || { echo "   FAIL fallback model used"; fail=1; }
+# a plain 503 retries after the exponential base (retry.baseDelayMs), not the 45-75 s capacity window
+printf 'retry:\n  maxRetries: 1\n  baseDelayMs: 10\n' > "$T/agent/config.yml"
+s0=$(date +%s%N); out=$(timeout 20 "$B" --model mock/mock-1 --no-session -p "fail:503:try again later" </dev/null 2>&1); s1=$(date +%s%N)
+n503=$(grep -c "fail:503:try again later" "$T/req.jsonl")
+(( (s1 - s0) / 1000000 < 5000 && n503 >= 2 )) && [[ "$out" == *"503 try again later"* ]] && echo "   ok  503 retry backoff" || { echo "   FAIL 503 retry backoff ($(( (s1 - s0) / 1000000 )) ms): $out"; fail=1; }
 rm -f "$T/agent/config.yml"
 grep -q "Project rule: always test." "$T/req.jsonl" && echo "   ok  AGENTS.md in prompt" || { echo "   FAIL AGENTS.md in prompt"; fail=1; }
 # TTSR: a stream-triggered rule interrupts, injects and retries

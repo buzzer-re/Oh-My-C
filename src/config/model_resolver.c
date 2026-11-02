@@ -5,6 +5,7 @@
 #include "config/auth.h"
 #include "config/settings.h"
 #include "core/fs.h"
+#include "text/regex.h"
 
 #include <ctype.h>
 #include <limits.h>
@@ -1869,15 +1870,43 @@ bool mr_fallback_admits(bool usage_limit) {
     return true;
 }
 
-int64_t mr_retry_backoff_ms(int64_t base_ms, int attempt) {
+double mr_retry_backoff_ms(int64_t base_ms, int attempt) {
     if (base_ms < 0) base_ms = 0;
     int sh = attempt > 1 ? attempt - 1 : 0;
-    int64_t d = sh > 20 ? 8000 : base_ms << sh;
-    if (d > 8000) d = 8000;
-    double jitter = 1.0 - ((double)(rand() % 1000) / 1000.0) * 0.25;
-    return (int64_t)((double)d * jitter);
+    double d = sh > 20 ? 8000.0 : (double)base_ms * (double)(1LL << sh);
+    if (d > 8000.0) d = 8000.0;
+    double jitter = 1.0 - ((double)rand() / ((double)RAND_MAX + 1.0)) * 0.25;
+    return d * jitter;
 }
 
+int mr_error_status(const char *msg) {
+    /* provider errors read "<status> <message>" (omp: AssistantMessage.errorStatus) */
+    if (!msg || !isdigit((unsigned char)msg[0]) || !isdigit((unsigned char)msg[1]) || !isdigit((unsigned char)msg[2]))
+        return 0;
+    if (msg[3] && msg[3] != ' ' && msg[3] != ':') return 0;
+    return (msg[0] - '0') * 100 + (msg[1] - '0') * 10 + (msg[2] - '0');
+}
+
+static rx_t *g_capacity_rx;
+static void capacity_rx_init(void) {
+    g_capacity_rx = rx_compile("\\b(?:429|MODEL_CAPACITY_EXHAUSTED|MODEL_CAPACITY_EXCEEDED|resource.?exhausted)\\b", RX_ICASE,
+                               NULL);
+}
+
+int64_t mr_reason_window_ms(const char *msg, int status, bool usage_limit, bool has_retry_after) {
+    /* turn-recovery.ts: transient rate/concurrency caps honor their reason window when the error carries no
+     * parsed retry-after; a capacity reason only for a 429/402 status or explicit capacity wording, so a plain
+     * 503 keeps the exponential base */
+    if (usage_limit || has_retry_after || !msg) return 0;
+    const char *r = mr_rate_limit_reason(msg);
+    bool applies = str_eq(r, "CONCURRENT_LIMIT") || str_eq(r, "RATE_LIMIT_EXCEEDED");
+    if (!applies && str_eq(r, "MODEL_CAPACITY_EXHAUSTED")) {
+        static pthread_once_t once = PTHREAD_ONCE_INIT;
+        pthread_once(&once, capacity_rx_init);
+        applies = status == 429 || status == 402 || (g_capacity_rx && rx_matches(g_capacity_rx, msg));
+    }
+    return applies ? mr_rate_limit_backoff_ms(msg) : 0;
+}
 const char *mr_rate_limit_reason(const char *msg) {
     if (!msg) return "UNKNOWN";
     char *l = lower_dup(msg);

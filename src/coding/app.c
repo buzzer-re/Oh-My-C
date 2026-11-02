@@ -1053,19 +1053,15 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
         strvec_free(&a->retry_notes);
         return false;
     }
-    int64_t delay = mr_retry_backoff_ms(settings_int("retry.baseDelayMs", 500), saga);
-    const char *reason = mr_rate_limit_reason(err);
+    double delay = mr_retry_backoff_ms(settings_int("retry.baseDelayMs", 500), saga);
     int64_t hint = retry_after_ms(err);
-    if (hint < 0 && (str_eq(reason, "CONCURRENT_LIMIT") || str_eq(reason, "RATE_LIMIT_EXCEEDED") ||
-                     str_eq(reason, "MODEL_CAPACITY_EXHAUSTED"))) {
-        int64_t rb = mr_rate_limit_backoff_ms(err);
-        if (rb > delay) delay = rb;
-    }
-    if (hint > delay) delay = hint;
+    int64_t window = mr_reason_window_ms(err, mr_error_status(err), usage_limit, hint >= 0);
+    if ((double)window > delay) delay = (double)window;
+    if ((double)hint > delay) delay = (double)hint;
     int64_t maxd = settings_int("retry.maxDelayMs", 5 * 60 * 1000);
-    if (maxd > 0 && delay > maxd) {
-        char *fe = xasprintf("Provider requested %lldms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
-                             (long long)delay, (long long)maxd, err ? err : "error");
+    if (maxd > 0 && delay > (double)maxd) {
+        char *fe = xasprintf("Provider requested %.0fms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
+                             ceil(delay), (long long)maxd, err ? err : "error");
         json_t *ev = json_obj();
         json_set_str(ev, "type", "auto_retry_end");
         json_set_bool(ev, "success", false);
@@ -1081,17 +1077,17 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
         json_set_str(ev, "type", "auto_retry_start");
         json_set_int(ev, "attempt", saga);
         json_set_int(ev, "maxAttempts", max);
-        json_set_int(ev, "delayMs", delay);
+        json_set_num(ev, "delayMs", delay);
         json_set_str(ev, "errorMessage", err ? err : "error");
         if (json_get(assistant, "errorId")) json_set(ev, "errorId", json_clone(json_get(assistant, "errorId")));
         a->retry_saga = saga;
         if (!app_emit(a, ev))
-            notice(a, "warning", "Retrying (%d/%d) in %llds: %s", saga, max, (long long)((delay + 999) / 1000),
+            notice(a, "warning", "Retrying (%d/%d) in %llds: %s", saga, max, (long long)ceil(delay / 1000),
                    err ? err : "error");
     }
     maybe_thinking_loop_redirect(a, ag, err);
     strvec_push(&a->retry_notes, usage_limit ? "rate-limited; waited; retried" : "error; retried");
-    int64_t until = mono_ms() + delay;
+    int64_t until = mono_ms() + (int64_t)ceil(delay);
     while (mono_ms() < until) {
         if (ag->cancel) return false;
         sleep_ms(50);
