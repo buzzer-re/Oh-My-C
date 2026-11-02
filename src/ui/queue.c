@@ -43,7 +43,7 @@ static void band_render(tui_component_t *c, int width, strvec_t *out) {
     strvec_push(out, "");
     band_group(out, "Steering", &u->q_steer, width);
     band_group(out, "After yield", &u->q_follow, width);
-    char *key = ui_key_hint("alt+up");
+    char *key = ui_editor_key("app.message.dequeue");
     char *hint = xasprintf("  %s %s to edit", tui_sym("tree.hook"), key);
     char *h = fg(TUI_TC_DIM, hint);
     trunc_row(out, h, width);

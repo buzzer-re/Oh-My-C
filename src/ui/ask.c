@@ -472,7 +472,7 @@ static void render_header(ask_view_t *v, int width, int max_title_rows, strvec_t
 
 static char *expand_hint(const ask_view_t *v) {
     if (!v->header_exp && !v->desc_exp) return xstrdup("");
-    char *k = ui_key_hint("ctrl+o"), *r = xasprintf(" \xc2\xb7 %s %s", k, v->expanded ? "collapse" : "expand");
+    char *k = ui_editor_key("app.tools.expand"), *r = xasprintf(" \xc2\xb7 %s %s", k, v->expanded ? "collapse" : "expand");
     free(k);
     return r;
 }
@@ -1034,7 +1034,7 @@ static bool ask_key(tui_component_t *c, const tui_key_t *k) {
         request(v);
         return true;
     }
-    if (tui_key_matches(k, "ctrl+o")) {
+    if (tui_kb(k, "app.tools.expand")) {
         if (!v->hidden && !on_submit_tab(v) && v->nq &&
             (v->expanded || v->header_exp || v->desc_exp)) {
             v->expanded = !v->expanded;
