@@ -1501,6 +1501,33 @@ static void replay_entry(ui_t *u, const json_t *e, hmap_t *pending) {
     }
 }
 
+void ui_chat_replay_into(ui_t *u, tui_container_t *dest, const json_t *entries, size_t *ends) {
+    tui_container_t *live = u->chat;
+    hmap_t tools = u->tools;
+    msgview_t *cur = u->cur_assistant, *pinned = u->pinned_error;
+    msgview_t *group = toolcard_group_swap(NULL);
+    u->chat = dest;
+    hmap_init(&u->tools);
+    u->cur_assistant = NULL;
+    u->pinned_error = NULL;
+    hmap_t pending;
+    hmap_init(&pending);
+    toolcard_set_replaying(true);
+    const json_t *e;
+    json_arr_foreach(entries, i, e) {
+        replay_entry(u, e, &pending);
+        ends[i] = dest->children.n;
+    }
+    toolcard_set_replaying(false);
+    hmap_free(&pending, NULL);
+    hmap_free(&u->tools, NULL);
+    u->tools = tools;
+    u->cur_assistant = cur;
+    u->pinned_error = pinned;
+    u->chat = live;
+    toolcard_group_swap(group);
+}
+
 /* Rebuild the transcript from the session tree (renderSessionContext): the path root..leaf after the last
  * reset boundary; a compaction shows its divider, then the kept tail and everything after it. Without a
  * session file the agent's live context is replayed instead. */

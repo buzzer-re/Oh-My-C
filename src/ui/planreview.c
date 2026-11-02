@@ -1853,16 +1853,19 @@ void ui_plan_save_set_suggested(ui_plan_save_t *s, const char *path) {
     tui_component_request_render(&s->base);
 }
 
-/* ---------- showHookConfirm: HookSelectorComponent with Yes / No in the composer's place ---------- */
+/* ---------- showHookSelector / showHookConfirm: HookSelectorComponent in the composer's place ---------- */
 
 typedef struct {
     tui_component_t base;
     ui_t *u;
     char *title, *message;
+    strvec_t opts;
     int sel;
     bool done;
-    void (*cb)(void *ud, bool yes);
+    void (*cb)(void *ud, int index); /* -1 = cancelled */
     void *ud;
+    void (*yes_cb)(void *ud, bool yes); /* ui_hook_confirm */
+    void *yes_ud;
 } hook_confirm_t;
 
 static void hc_render(tui_component_t *c, int width, strvec_t *out) {
@@ -1871,16 +1874,15 @@ static void hc_render(tui_component_t *c, int width, strvec_t *out) {
     strvec_push_own(out, ui_box_top(width, h->title));
     strvec_push_own(out, ui_box_row("", width));
     strvec_t ml = {0};
-    char *acc = tui_fgs(NULL, TUI_TC_ACCENT, h->message);
-    ui_push_text(&ml, acc, inner);
+    char *acc = tui_fgs(NULL, TUI_TC_ACCENT, h->message ? h->message : "");
+    if (h->message) ui_push_text(&ml, acc, inner);
     free(acc);
     for (size_t i = 0; i < ml.n; i++) strvec_push_own(out, ui_box_row(ml.v[i], width));
     strvec_free(&ml);
     strvec_push_own(out, ui_box_row("", width));
-    static const char *const OPTS[] = {"Yes", "No"};
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < (int)h->opts.n; i++) {
         if (i == h->sel) {
-            char *l = xasprintf("%s %s", tui_sym("nav.cursor"), OPTS[i]);
+            char *l = xasprintf("%s %s", tui_sym("nav.cursor"), h->opts.v[i]);
             char *a = tui_fgs(NULL, TUI_TC_ACCENT, l);
             char *line = xasprintf(" %s", a);
             char *pad = tui_pad_to_width(line, inner);
@@ -1888,7 +1890,7 @@ static void hc_render(tui_component_t *c, int width, strvec_t *out) {
             strvec_push_own(out, ui_box_row(bg, width));
             free(bg), free(pad), free(line), free(a), free(l);
         } else {
-            char *line = xasprintf("   %s", OPTS[i]);
+            char *line = xasprintf("   %s", h->opts.v[i]);
             strvec_push_own(out, ui_box_row(line, width));
             free(line);
         }
@@ -1906,36 +1908,40 @@ static void hc_render(tui_component_t *c, int width, strvec_t *out) {
 
 typedef struct {
     hook_confirm_t *h;
-    bool yes;
+    int index;
 } hc_done_t;
 
 static void hc_finish_posted(void *p) {
     hc_done_t *d = p;
     hook_confirm_t *h = d->h;
-    void (*cb)(void *, bool) = h->cb;
+    void (*cb)(void *, int) = h->cb;
     void *ud = h->ud;
-    bool yes = d->yes;
+    void (*yes_cb)(void *, bool) = h->yes_cb;
+    void *yes_ud = h->yes_ud;
+    int index = d->index;
     ui_close_selector(h->u); /* destroys h */
     free(d);
-    if (cb) cb(ud, yes);
+    if (cb) cb(ud, index);
+    if (yes_cb) yes_cb(yes_ud, index == 0);
 }
 
-static void hc_finish(hook_confirm_t *h, bool yes) {
+static void hc_finish(hook_confirm_t *h, int index) {
     if (h->done) return;
     h->done = true;
     hc_done_t *d = xcalloc(1, sizeof *d);
     d->h = h;
-    d->yes = yes;
+    d->index = index;
     tui_post(h->u->tui, hc_finish_posted, d);
 }
 
 static bool hc_key(tui_component_t *c, const tui_key_t *k) {
     hook_confirm_t *h = (hook_confirm_t *)c;
+    int n = (int)h->opts.n;
     if (h->done) return true;
-    if (tui_kb(k, "tui.select.cancel")) hc_finish(h, false);
-    else if (tui_kb(k, "tui.select.up")) h->sel = (h->sel + 1) % 2;
-    else if (tui_kb(k, "tui.select.down")) h->sel = (h->sel + 1) % 2;
-    else if (tui_kb(k, "tui.select.confirm") || tui_key_matches(k, "enter")) hc_finish(h, h->sel == 0);
+    if (tui_kb(k, "tui.select.cancel")) hc_finish(h, -1);
+    else if (tui_kb(k, "tui.select.up")) h->sel = MAX(0, h->sel - 1);
+    else if (tui_kb(k, "tui.select.down")) h->sel = MIN(n - 1, h->sel + 1);
+    else if (tui_kb(k, "tui.select.confirm") || tui_key_matches(k, "enter")) hc_finish(h, h->sel);
     tui_component_request_render(c);
     return true;
 }
@@ -1944,18 +1950,130 @@ static void hc_destroy(tui_component_t *c) {
     hook_confirm_t *h = (hook_confirm_t *)c;
     free(h->title);
     free(h->message);
+    strvec_free(&h->opts);
     free(h);
 }
 
-static const tui_component_vt HC_VT = {"hook-confirm", hc_render, hc_key, NULL, hc_destroy};
+static const tui_component_vt HC_VT = {"hook-select", hc_render, hc_key, NULL, hc_destroy};
 
-void ui_hook_confirm(ui_t *u, const char *title, const char *message, void (*cb)(void *ud, bool yes), void *ud) {
+static hook_confirm_t *hc_new(ui_t *u, const char *title, const char *message, const char *const *options, size_t n) {
     hook_confirm_t *h = xcalloc(1, sizeof *h);
     tui_component_init(&h->base, &HC_VT);
     h->u = u;
     h->title = xstrdup(title);
-    h->message = xstrdup(message);
+    h->message = message ? xstrdup(message) : NULL;
+    for (size_t i = 0; i < n; i++) strvec_push(&h->opts, options[i]);
+    return h;
+}
+
+void ui_hook_select(ui_t *u, const char *title, const char *const *options, size_t n, void (*cb)(void *ud, int index),
+                    void *ud) {
+    hook_confirm_t *h = hc_new(u, title, NULL, options, n);
     h->cb = cb;
     h->ud = ud;
+    ui_show_selector(u, &h->base, &h->base);
+}
+
+void ui_hook_confirm(ui_t *u, const char *title, const char *message, void (*cb)(void *ud, bool yes), void *ud) {
+    static const char *const OPTS[] = {"Yes", "No"};
+    hook_confirm_t *h = hc_new(u, title, message, OPTS, 2);
+    h->yes_cb = cb;
+    h->yes_ud = ud;
+    ui_show_selector(u, &h->base, &h->base);
+}
+
+/* ---------- showHookEditor: HookEditorComponent (hook style) in the composer's place ---------- */
+
+typedef struct {
+    tui_component_t base;
+    ui_t *u;
+    char *title;
+    tui_editor_t *ed;
+    bool done;
+    void (*cb)(void *ud, const char *text);
+    void *ud;
+} hook_editor_t;
+
+static void he_render(tui_component_t *c, int width, strvec_t *out) {
+    hook_editor_t *h = (hook_editor_t *)c;
+    int inner = MAX(1, width - 4);
+    strvec_t body = {0};
+    strvec_push(&body, ""); /* FormField spaceBeforeControl */
+    h->ed->base.focused = h->base.focused;
+    tui_component_render(&h->ed->base, inner, &body);
+    strvec_push(&body, ""); /* spaceAfterControl */
+    char *fu1 = ui_key_hint("ctrl+q"), *fu2 = ui_key_hint("ctrl+enter");
+    char *intr = ui_editor_key("app.interrupt"), *ext = ui_editor_key("app.editor.external");
+    if (!*intr) free(intr), intr = ui_key_hint("escape");
+    if (!*ext) free(ext), ext = ui_key_hint("ctrl+g");
+    char *hint = xasprintf("%s/%s submit  %s cancel  %s external editor", fu1, fu2, intr, ext);
+    strvec_push_own(&body, tui_fgs(NULL, TUI_TC_DIM, hint)); /* formTheme.hint */
+    strvec_push(&body, "");
+    strvec_push_own(out, ui_box_top(width, h->title));
+    for (size_t i = 0; i < body.n; i++) strvec_push_own(out, ui_box_row(body.v[i], width));
+    strvec_push_own(out, ui_box_bottom(width));
+    free(hint), free(fu1), free(fu2), free(intr), free(ext);
+    strvec_free(&body);
+}
+
+typedef struct {
+    hook_editor_t *h;
+    char *text;
+} he_done_t;
+
+static void he_finish_posted(void *p) {
+    he_done_t *d = p;
+    void (*cb)(void *, const char *) = d->h->cb;
+    void *ud = d->h->ud;
+    ui_close_selector(d->h->u); /* destroys h */
+    if (cb) cb(ud, d->text);
+    free(d->text);
+    free(d);
+}
+
+static void he_finish(hook_editor_t *h, char *text) {
+    if (h->done) {
+        free(text);
+        return;
+    }
+    h->done = true;
+    he_done_t *d = xcalloc(1, sizeof *d);
+    d->h = h;
+    d->text = text;
+    tui_post(h->u->tui, he_finish_posted, d);
+}
+
+static bool he_key(tui_component_t *c, const tui_key_t *k) {
+    hook_editor_t *h = (hook_editor_t *)c;
+    if (h->done) return true;
+    if (tui_kb(k, "app.message.followUp")) he_finish(h, tui_editor_get_text(h->ed));
+    else if (tui_kb(k, "app.interrupt")) he_finish(h, NULL);
+    else tui_component_handle_key(&h->ed->base, k);
+    tui_component_request_render(c);
+    return true;
+}
+
+static void he_destroy(tui_component_t *c) {
+    hook_editor_t *h = (hook_editor_t *)c;
+    tui_component_destroy(&h->ed->base);
+    free(h->title);
+    free(h);
+}
+
+static const tui_component_vt HE_VT = {"hook-editor", he_render, he_key, NULL, he_destroy};
+
+void ui_hook_editor(ui_t *u, const char *title, void (*cb)(void *ud, const char *text), void *ud) {
+    hook_editor_t *h = xcalloc(1, sizeof *h);
+    tui_component_init(&h->base, &HE_VT);
+    h->u = u;
+    h->title = xstrdup(title);
+    h->cb = cb;
+    h->ud = ud;
+    h->ed = tui_editor_new();
+    h->ed->disable_submit = true;
+    int rows = u->tui ? tui_term(u->tui)->rows : 40;
+    h->ed->max_height = MAX(3, (rows > 0 ? rows : 40) - 12);
+    if (u->editor) snprintf(h->ed->text_fg, sizeof h->ed->text_fg, "%s", u->editor->text_fg);
+    h->ed->base.tui = u->tui;
     ui_show_selector(u, &h->base, &h->base);
 }

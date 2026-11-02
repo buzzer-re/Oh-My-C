@@ -419,3 +419,118 @@ void ui_tab_bar_render(const char *label, const ui_tab_t *tabs, size_t n, size_t
     strvec_free(&chunks);
     free(labels);
 }
+
+/* ---------- single-line Input (components/input.ts) ---------- */
+
+static size_t in_prev_cp(const char *s, size_t i) {
+    if (!i) return 0;
+    i--;
+    while (i > 0 && ((unsigned char)s[i] & 0xc0) == 0x80) i--;
+    return i;
+}
+
+static size_t in_next_cp(const char *s, size_t n, size_t i) {
+    if (i >= n) return n;
+    i++;
+    while (i < n && ((unsigned char)s[i] & 0xc0) == 0x80) i++;
+    return i;
+}
+
+static void in_delete(ui_input_t *in, size_t a, size_t b) {
+    if (b <= a) return;
+    memmove(in->v.s + a, in->v.s + b, in->v.len - b + 1);
+    in->v.len -= b - a;
+    in->cur = a;
+}
+
+static void in_insert(ui_input_t *in, const char *t) {
+    sb_t n = SB_INIT;
+    sb_appendn(&n, in->v.s ? in->v.s : "", in->cur);
+    for (const char *p = t; *p; p++) sb_putc(&n, *p == '\n' || *p == '\r' || *p == '\t' ? ' ' : *p);
+    size_t cur = n.len;
+    if (in->v.s) sb_append(&n, in->v.s + in->cur);
+    sb_free(&in->v);
+    in->v = n;
+    in->cur = cur;
+}
+
+static bool in_is_word(char ch) { return isalnum((unsigned char)ch) || ((unsigned char)ch & 0x80) || ch == '_'; }
+
+static size_t in_word_left(const char *s, size_t i) {
+    while (i > 0 && !in_is_word(s[i - 1])) i--;
+    while (i > 0 && in_is_word(s[i - 1])) i--;
+    return i;
+}
+
+static size_t in_word_right(const char *s, size_t n, size_t i) {
+    while (i < n && !in_is_word(s[i])) i++;
+    while (i < n && in_is_word(s[i])) i++;
+    return i;
+}
+
+const char *ui_input_value(const ui_input_t *in) { return in->v.s ? in->v.s : ""; }
+
+void ui_input_set(ui_input_t *in, const char *s) {
+    sb_free(&in->v);
+    sb_append(&in->v, s ? s : "");
+    in->cur = in->v.len;
+}
+
+void ui_input_free(ui_input_t *in) {
+    sb_free(&in->v);
+    in->cur = 0;
+}
+
+bool ui_input_key(ui_input_t *in, const tui_key_t *k) {
+    const char *s = in->v.s ? in->v.s : "";
+    size_t n = in->v.len;
+    if (k->kind == TUI_KEY_PASTE && k->text) {
+        in_insert(in, k->text);
+        return true;
+    }
+    const char *t = tui_key_text(k);
+    if (t && *t && (unsigned char)*t >= 0x20) {
+        in_insert(in, t);
+        return true;
+    }
+    if (tui_kb(k, "tui.editor.deleteCharBackward")) in_delete(in, in_prev_cp(s, in->cur), in->cur);
+    else if (tui_kb(k, "tui.editor.deleteCharForward")) in_delete(in, in->cur, in_next_cp(s, n, in->cur));
+    else if (tui_kb(k, "tui.editor.deleteWordBackward")) in_delete(in, in_word_left(s, in->cur), in->cur);
+    else if (tui_kb(k, "tui.editor.deleteWordForward")) in_delete(in, in->cur, in_word_right(s, n, in->cur));
+    else if (tui_kb(k, "tui.editor.deleteToLineStart")) in_delete(in, 0, in->cur);
+    else if (tui_kb(k, "tui.editor.deleteToLineEnd")) in_delete(in, in->cur, n);
+    else if (tui_kb(k, "tui.editor.cursorWordLeft")) in->cur = in_word_left(s, in->cur);
+    else if (tui_kb(k, "tui.editor.cursorWordRight")) in->cur = in_word_right(s, n, in->cur);
+    else if (tui_kb(k, "tui.editor.cursorLeft")) in->cur = in_prev_cp(s, in->cur);
+    else if (tui_kb(k, "tui.editor.cursorRight")) in->cur = in_next_cp(s, n, in->cur);
+    else if (tui_kb(k, "tui.editor.cursorLineStart")) in->cur = 0;
+    else if (tui_kb(k, "tui.editor.cursorLineEnd")) in->cur = n;
+    else return false;
+    return true;
+}
+
+char *ui_input_render(const ui_input_t *in, const char *prompt, int width, bool focused) {
+    int avail = width - tui_visible_width(prompt);
+    if (avail <= 0) return tui_truncate_to_width(prompt, MAX(0, width), "");
+    const char *s = in->v.s ? in->v.s : "";
+    /* window the value around the cursor: the cursor cell (a trailing space at the end) stays visible */
+    char *before_all = xstrndup(s, in->cur);
+    int bw = tui_visible_width(before_all);
+    size_t after_cur = in_next_cp(s, in->v.len, in->cur);
+    char *at = in->cur < in->v.len ? xstrndup(s + in->cur, after_cur - in->cur) : xstrdup(" ");
+    int aw = MAX(1, tui_visible_width(at));
+    int skip = MAX(0, bw + aw - avail);
+    char *before = tui_slice_cols(before_all, skip, bw - skip);
+    int rem = MAX(0, avail - tui_visible_width(before) - aw);
+    char *after = tui_slice_cols(in->cur < in->v.len ? s + after_cur : "", 0, rem);
+    sb_t b = SB_INIT;
+    sb_append(&b, prompt);
+    sb_append(&b, before);
+    if (focused) sb_append(&b, TUI_CURSOR_MARKER);
+    sb_appendf(&b, "\x1b[7m%s\x1b[27m", at);
+    sb_append(&b, after);
+    int used = tui_visible_width(before) + aw + tui_visible_width(after);
+    tui_sb_spaces(&b, MAX(0, avail - used));
+    free(before_all), free(at), free(before), free(after);
+    return sb_detach(&b);
+}

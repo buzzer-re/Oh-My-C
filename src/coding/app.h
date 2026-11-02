@@ -215,6 +215,20 @@ int app_switch_session(app_t *a, const char *path, char **err);
 int app_fork_from(app_t *a, const char *entry_id, char **err);
 /* /btw branch: fork the session at `leaf_id` (which must still be the leaf of `session_id`) and append the side
  * question and its answer (branchFromBtw). 0, or -1 + *err (owned). */
+/* AgentSession.navigateTree: move the leaf to `target_id` in the same session file. A user request
+ * rewinds past itself (leaf = its parent, its text in *editor_text); other custom messages likewise;
+ * any other entry becomes the leaf. With `summarize`, the abandoned branch (old leaf back to the common
+ * ancestor) is summarized by the current model (branch-summary prompt, or `custom_instructions`) and a
+ * branch_summary entry is recorded at the new position. Blocking (run off the UI thread when summarizing).
+ * Returns 0 ok, 1 aborted (app_abort_branch_summary), -1 error (*err owned). */
+typedef struct {
+    char *editor_text;   /* owned, NULL when none */
+    bool summarized;     /* a branch_summary entry was written */
+    bool moved;          /* the leaf changed (false: already there) */
+} app_nav_result_t;
+int app_navigate_tree(app_t *a, const char *target_id, bool summarize, const char *custom_instructions,
+                      app_nav_result_t *out, char **err);
+void app_abort_branch_summary(app_t *a);
 int app_branch_from_btw(app_t *a, const char *question, const json_t *images, const json_t *assistant,
                         const char *leaf_id, const char *session_id, char **err);
 void app_abort(app_t *a);

@@ -871,39 +871,20 @@ static void handle(rpc_t *r, json_t *cmd) {
         if (r->running) respond(r, id, type, false, NULL, "agent is busy");
         else if (!e) respond(r, id, type, false, NULL, "unknown entry");
         else {
-            json_t *m = json_get(e, "message");
-            bool user = str_eq(json_get_str(e, "type"), "message") && str_eq(json_get_str(m, "role"), "user");
-            char *text = user ? ai_message_text(m) : NULL;
-            char *target = user ? (json_get_str(e, "parentId") ? xstrdup(json_get_str(e, "parentId")) : NULL) : xstrdup(eid);
-            if (json_get_bool(cmd, "summarize", false) && a->session->leaf_id) {
-                /* summarize the abandoned branch so the new path keeps its gist */
-                json_t *path = session_path_to(a->session, a->session->leaf_id), *pe;
-                sb_t conv = SB_INIT;
-                json_arr_foreach(path, i, pe) {
-                    if (!str_eq(json_get_str(pe, "type"), "message")) continue;
-                    char *t = ai_message_text(json_get(pe, "message"));
-                    sb_appendf(&conv, "%s: %.2000s\n", json_get_str(json_get(pe, "message"), "role"), t);
-                    free(t);
-                }
-                const char *ci = json_get_str(cmd, "customInstructions");
-                char *sum = app_complete_text(a, NULL, ci ? ci : "Summarize this conversation branch concisely for later reference.", sb_cstr(&conv), EFFORT_OFF);
-                char *from = xstrdup(a->session->leaf_id);
-                app_branch_to(a, target);
-                if (sum && *sum) session_append_branch_summary(a->session, from, sum);
-                app_branch_to(a, a->session->leaf_id);
-                free(from);
-                free(sum);
-                sb_free(&conv);
-                json_free(path);
-            } else {
-                app_branch_to(a, target);
+            app_nav_result_t nav;
+            char *err = NULL;
+            int rc = app_navigate_tree(a, eid, json_get_bool(cmd, "summarize", false), json_get_str(cmd, "customInstructions"),
+                                       &nav, &err);
+            if (rc < 0) respond(r, id, type, false, NULL, err);
+            else {
+                json_t *d = json_obj();
+                if (nav.editor_text) json_set_str(d, "editorText", nav.editor_text);
+                json_set_bool(d, "cancelled", rc == 1);
+                if (rc == 1) json_set_bool(d, "aborted", true);
+                respond(r, id, type, true, d, NULL);
             }
-            json_t *d = json_obj();
-            json_set_bool(d, "cancelled", false);
-            if (text) json_set_str(d, "editorText", text);
-            respond(r, id, type, true, d, NULL);
-            free(text);
-            free(target);
+            free(nav.editor_text);
+            free(err);
         }
     } else if (!strcmp(type, "set_label")) {
         const char *eid = json_get_str(cmd, "entryId");
@@ -1130,6 +1111,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         respond(r, id, type, true, NULL, NULL);
     } else if (!strcmp(type, "abort_retry") || !strcmp(type, "abort_bash") || !strcmp(type, "abort_branch_summary")) {
         if (!strcmp(type, "abort_retry")) app_abort(a);
+        if (!strcmp(type, "abort_branch_summary")) app_abort_branch_summary(a);
         respond(r, id, type, true, NULL, NULL);
     } else if (!strcmp(type, "get_available_commands")) {
         /* buildAvailableSlashCommands: builtins with a text-mode handler (skill commands are not

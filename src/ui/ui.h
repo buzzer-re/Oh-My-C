@@ -156,6 +156,11 @@ void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms);
 void ui_working_compaction(ui_t *u, const char *label);
 bool ui_working_busy(ui_t *u); /* a retry countdown or compaction row replaces the working/title row */
 void ui_chat_rebuild(ui_t *u); /* replay the transcript from the session tree (resume, branch, reload) */
+/* replay transcript entries (message / custom_message, one path) into `dest`, a container apart from the
+ * live transcript (rewind selector replica); ends[i] receives dest's child count after entries[i] */
+void ui_chat_replay_into(ui_t *u, tui_container_t *dest, const json_t *entries, size_t *ends);
+/* toolcards.c: the open read group (omp #lastReadGroup); returns the previous one */
+msgview_t *toolcard_group_swap(msgview_t *group);
 
 /* toolcards.c - tool cards (MV_TOOL views keep their card state in `msg`) */
 void render_tool(msgview_t *v, int width, strvec_t *out);

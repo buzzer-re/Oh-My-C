@@ -6,6 +6,7 @@
 #include "coding/keywords.h"
 #include "coding/thinkloop.h"
 #include "coding/title.h"
+#include "coding/branchsum.h"
 #include "coding/skilldesc.h"
 #include "coding/advisor.h"
 #include "coding/evalhost.h"
@@ -1764,6 +1765,176 @@ int app_branch_to(app_t *a, const char *entry_id) {
     load_session_into_agent(a);
     if (!entry_id) agent_replace_messages(a->agent, json_arr());
     advisor_reset(a->advisor);
+    return 0;
+}
+
+/* ---------- tree navigation (AgentSession.navigateTree + generateBranchSummary) ---------- */
+
+static volatile sig_atomic_t g_branch_summary_cancel;
+
+void app_abort_branch_summary(app_t *a) {
+    UNUSED(a);
+    g_branch_summary_cancel = 1;
+}
+
+static bool is_user_request_entry(const json_t *e) {
+    const char *t = json_get_str(e, "type");
+    const json_t *m = str_eq(t, "message") ? json_get(e, "message") : e;
+    const char *role = str_eq(t, "message") ? json_get_str(m, "role") : str_eq(t, "custom_message") ? "custom" : NULL;
+    if (str_eq(role, "user")) return true;
+    const char *ct = json_get_str(m, "customType");
+    return str_eq(role, "custom") && (str_eq(ct, "skill-prompt") || str_eq(ct, "collab-prompt")) &&
+           str_eq(json_get_str(m, "attribution"), "user");
+}
+
+static char *content_text(const json_t *content) {
+    if (json_is_str(content)) return xstrdup(json_sv(content));
+    sb_t b = SB_INIT;
+    const json_t *blk;
+    json_arr_foreach(content, i, blk) if (str_eq(json_get_str(blk, "type"), "text"))
+        sb_append(&b, json_get_str(blk, "text") ? json_get_str(blk, "text") : "");
+    return sb_detach(&b);
+}
+
+/* generateBranchSummary: 0 ok (*summary, *details owned), 1 aborted, -1 error */
+static int branch_summary(app_t *a, const json_t *entries, const char *custom, char **summary, json_t **details,
+                          char **err) {
+    const ai_model_t *m = a->model;
+    int64_t window = m->context_window > 0 ? m->context_window : 128000;
+    json_t *ops = NULL;
+    char *prompt = branchsum_prompt(entries, window - settings_int("branchSummary.reserveTokens", 16384), custom, &ops);
+    if (!prompt) {
+        json_free(ops);
+        *summary = xstrdup("No content to summarize");
+        *details = NULL;
+        return 0;
+    }
+    char *sys = prompt_load_or("agent/compaction/prompts/summarization-system.md", "Summarize.");
+    json_t *sysarr = json_arr();
+    json_push_str(sysarr, sys);
+    json_t *msgs = json_arr();
+    json_push(msgs, msg_user_text(prompt));
+    ai_context_t ctx = {.system_prompt = sysarr, .messages = msgs};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    char *key = app_api_key_for(m);
+    o.api_key = key;
+    o.max_tokens = 2048;
+    o.disable_reasoning = true;
+    o.cancel = &g_branch_summary_cancel;
+    json_t *r = ai_complete(m, &ctx, &o);
+    const char *stop = json_get_str(r, "stopReason");
+    int rc = 0;
+    if (str_eq(stop, "aborted") || g_branch_summary_cancel) rc = 1;
+    else if (str_eq(stop, "error")) {
+        const char *em = json_get_str(r, "errorMessage");
+        *err = xstrdup(em && *em ? em : "Summarization failed");
+        rc = -1;
+    } else if (str_eq(stop, "length")) {
+        *err = xstrdup("Summarization failed: model output ended incomplete (stopReason: length)");
+        rc = -1;
+    } else {
+        sb_t text = SB_INIT;
+        const json_t *blk;
+        bool first = true;
+        json_arr_foreach(json_get_arr(r, "content"), i, blk) {
+            if (!str_eq(json_get_str(blk, "type"), "text")) continue;
+            if (!first) sb_putc(&text, '\n');
+            sb_append(&text, json_get_str(blk, "text") ? json_get_str(blk, "text") : "");
+            first = false;
+        }
+        json_t *rf = NULL, *mf = NULL;
+        *summary = branchsum_finish(sb_cstr(&text), ops, &rf, &mf);
+        *details = json_obj();
+        json_set(*details, "readFiles", rf);
+        json_set(*details, "modifiedFiles", mf);
+        sb_free(&text);
+    }
+    json_free(r);
+    json_free(sysarr);
+    json_free(msgs);
+    json_free(ops);
+    free(key);
+    free(sys);
+    free(prompt);
+    return rc;
+}
+
+int app_navigate_tree(app_t *a, const char *target_id, bool summarize, const char *custom, app_nav_result_t *out,
+                      char **err) {
+    memset(out, 0, sizeof *out);
+    *err = NULL;
+    if (!a->session) {
+        *err = xstrdup("No session");
+        return -1;
+    }
+    if (agent_is_running(a->agent)) {
+        *err = xstrdup("Cannot switch branches while the agent is running.");
+        return -1;
+    }
+    json_t *target = session_get(a->session, target_id);
+    if (!target) {
+        *err = xasprintf("Entry %s not found", target_id);
+        return -1;
+    }
+    bool user_target = str_eq(json_get_str(target, "type"), "message") &&
+                       str_eq(json_get_str(json_get(target, "message"), "role"), "user");
+    char *old_leaf = a->session->leaf_id ? xstrdup(a->session->leaf_id) : NULL;
+    if (str_eq(target_id, old_leaf) && !user_target) {
+        free(old_leaf);
+        return 0;
+    }
+    if (summarize && !a->model) {
+        free(old_leaf);
+        *err = xstrdup("No model available for summarization");
+        return -1;
+    }
+    char *summary = NULL;
+    json_t *details = NULL;
+    json_t *entries = branchsum_collect(a->session, old_leaf, target_id, NULL);
+    if (summarize && json_len(entries)) {
+        g_branch_summary_cancel = 0;
+        int rc = branch_summary(a, entries, custom, &summary, &details, err);
+        g_branch_summary_cancel = 0;
+        if (rc != 0) {
+            json_free(entries);
+            free(old_leaf);
+            return rc;
+        }
+    }
+    json_free(entries);
+    free(old_leaf);
+    /* the new leaf: a user request (or another non-skill custom message) rewinds past itself */
+    const char *new_leaf;
+    const char *ttype = json_get_str(target, "type");
+    if (is_user_request_entry(target)) {
+        new_leaf = json_get_str(target, "parentId");
+        const json_t *m = str_eq(ttype, "message") ? json_get(target, "message") : target;
+        out->editor_text = content_text(json_get(m, "content"));
+    } else if (str_eq(ttype, "custom_message") && !str_eq(json_get_str(target, "customType"), "skill-prompt")) {
+        new_leaf = json_get_str(target, "parentId");
+        out->editor_text = content_text(json_get(target, "content"));
+    } else new_leaf = target_id;
+    char *leaf = new_leaf ? xstrdup(new_leaf) : NULL;
+    if (leaf) session_branch(a->session, leaf);
+    else session_reset_leaf(a->session);
+    if (summary) {
+        json_t *e = json_obj();
+        json_set_str(e, "type", "branch_summary");
+        json_set_str(e, "fromId", leaf ? leaf : "root");
+        json_set_str(e, "summary", summary);
+        if (details) json_set(e, "details", details);
+        details = NULL;
+        session_append_entry(a->session, e);
+        out->summarized = true;
+    }
+    json_free(details);
+    free(summary);
+    free(leaf);
+    load_session_into_agent(a);
+    if (!a->session->leaf_id) agent_replace_messages(a->agent, json_arr());
+    advisor_reset(a->advisor);
+    out->moved = true;
     return 0;
 }
 

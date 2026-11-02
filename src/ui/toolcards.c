@@ -95,6 +95,12 @@ static void live_add(msgview_t *v) {
 
 /* ---------- events ---------- */
 
+msgview_t *toolcard_group_swap(msgview_t *group) {
+    msgview_t *old = g_read_group;
+    g_read_group = group;
+    return old;
+}
+
 void toolcard_break_group(ui_t *u) {
     UNUSED(u);
     g_read_group = NULL;

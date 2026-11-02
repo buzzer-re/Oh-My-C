@@ -78,6 +78,44 @@ typedef struct {
 void ui_tab_bar_render(const char *label, const ui_tab_t *tabs, size_t n, size_t active, bool show_hint, int width,
                        strvec_t *out);
 
+/* single-line Input (components/input.ts): value + byte cursor; the cursor cell renders inverted */
+typedef struct {
+    sb_t v;
+    size_t cur;
+} ui_input_t;
+const char *ui_input_value(const ui_input_t *in);
+void ui_input_set(ui_input_t *in, const char *s); /* cursor to the end */
+void ui_input_free(ui_input_t *in);
+bool ui_input_key(ui_input_t *in, const tui_key_t *k); /* editing keys; false when not handled */
+/* prompt + windowed value + inverted cursor cell, padded to width; the cursor marker when focused. Owned */
+char *ui_input_render(const ui_input_t *in, const char *prompt, int width, bool focused);
+
+/* ---------- tree.c: /tree session tree selector (overlays/tree-selector.ts) ---------- */
+
+typedef struct {
+    /* Enter (summarize false) / Shift+Enter (summarize true) on an entry */
+    void (*on_select)(void *ud, const char *entry_id, bool summarize);
+    void (*on_cancel)(void *ud);
+    /* Shift+L label edit saved; label NULL removes it */
+    void (*on_label)(void *ud, const char *entry_id, const char *label);
+    void *ud;
+} ui_tree_cb_t;
+/* `entries`: the session's entries (borrowed for the component's lifetime); `filter_mode` one of
+ * default / no-tools / user-only / labeled-only / all (treeFilterMode). Callbacks run on the UI thread. */
+tui_component_t *ui_tree_selector_new(const json_t *entries, const char *leaf_id, int term_rows,
+                                      const char *filter_mode, const ui_tree_cb_t *cb);
+
+/* ---------- rewind.c: Esc-Esc / /branch rewind selector (overlays/rewind-selector.ts) ---------- */
+
+typedef struct {
+    void (*on_select)(void *ud, const char *entry_id); /* rewind to that entry */
+    void (*on_cancel)(void *ud);
+    void *ud;
+} ui_rewind_cb_t;
+/* fullscreen transcript replica of the current branch with a dotted outline on the target; NULL when the
+ * branch has no rewind target */
+tui_component_t *ui_rewind_selector_new(ui_t *u, const ui_rewind_cb_t *cb);
+
 /* ---------- setup.c ---------- */
 
 #define UI_SETUP_VERSION 2
@@ -182,6 +220,11 @@ bool ui_plan_review_select(ui_plan_review_t *p, const char *label); /* commit li
 /* showHookConfirm: `title` box with `message` and Yes / No in the composer's place; cb(yes) runs on the
  * UI thread after it closed (cancel = No) */
 void ui_hook_confirm(ui_t *u, const char *title, const char *message, void (*cb)(void *ud, bool yes), void *ud);
+/* showHookSelector: `title` box with the options; cb(index) on the UI thread after it closed (-1 = cancelled) */
+void ui_hook_select(ui_t *u, const char *title, const char *const *options, size_t n, void (*cb)(void *ud, int index),
+                    void *ud);
+/* showHookEditor (hook style): multi-line editor, Ctrl+Q/Ctrl+Enter submits, Esc cancels; cb(text or NULL) */
+void ui_hook_editor(ui_t *u, const char *title, void (*cb)(void *ud, const char *text), void *ud);
 /* "Save and quit" path prompt (overlays/plan-save-overlay.ts); done(NULL) on cancel */
 typedef struct ui_plan_save ui_plan_save_t;
 ui_plan_save_t *ui_plan_save_new(const char *suggested, void (*done)(void *ud, const char *path), void *ud);
