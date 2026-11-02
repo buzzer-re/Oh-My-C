@@ -83,6 +83,11 @@ static void flush_compaction_queue(ui_t *u) {
 
 bool iq_busy(ui_t *u) { return u->bg_kind != 0; }
 
+void iq_hold(ui_t *u, bool on) {
+    u->bg_kind = on ? 3 : 0;
+    if (!on) flush_compaction_queue(u);
+}
+
 /* ---------- /compact and /handoff off the UI thread ---------- */
 
 enum { BG_COMPACT = 1, BG_HANDOFF = 2 };

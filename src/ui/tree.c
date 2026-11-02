@@ -74,6 +74,7 @@ typedef struct tree_sel {
     int max_rows;
     ui_input_t search;
     /* label editor */
+    bool dirty; /* filter/search changed: rows recompute lazily on the next access (TreeView) */
     bool labeling;
     size_t label_node;
     ui_input_t label_in;
@@ -761,7 +762,7 @@ static size_t nearest_visible(tree_sel_t *t, size_t key) {
     return t->rows.v[t->vis.v[t->vis.n - 1]].node;
 }
 
-static void apply_filter(tree_sel_t *t) {
+static void refilter(tree_sel_t *t) {
     t->vis.n = 0;
     for (size_t i = 0; i < t->nodes.n; i++) t->vis_of[i] = -1;
     /* the query splits on whitespace, every token must fuzzy-match */
@@ -781,16 +782,29 @@ static void apply_filter(tree_sel_t *t) {
     if (t->sel != NONE) t->anchor = t->sel;
 }
 
+static void ensure(tree_sel_t *t) {
+    if (!t->dirty) return;
+    t->dirty = false;
+    refilter(t);
+}
+
+static void apply_filter(tree_sel_t *t) { t->dirty = true; }
+
 static void set_selected(tree_sel_t *t, size_t key) {
+    ensure(t);
     size_t r = nearest_visible(t, key);
     t->sel = r;
     if (r != NONE) t->anchor = r;
     else if (key != NONE) t->anchor = key;
 }
 
-static ssize_t sel_index(const tree_sel_t *t) { return t->sel == NONE ? -1 : t->vis_of[t->sel]; }
+static ssize_t sel_index(tree_sel_t *t) {
+    ensure(t);
+    return t->sel == NONE ? -1 : t->vis_of[t->sel];
+}
 
 static void set_index(tree_sel_t *t, ssize_t i) {
+    ensure(t);
     if (!t->vis.n) {
         set_selected(t, NONE);
         return;
@@ -800,6 +814,7 @@ static void set_index(tree_sel_t *t, ssize_t i) {
 }
 
 static void move_sel(tree_sel_t *t, ssize_t delta, bool wrap) {
+    ensure(t);
     ssize_t n = (ssize_t)t->vis.n;
     if (!n) return;
     ssize_t next = MAX(0, sel_index(t)) + delta;
@@ -827,6 +842,7 @@ static void move_turn(tree_sel_t *t, int dir) {
 /* app.tree.previousBranch / nextBranch: every visible branch head in rendered order, a filtered head
  * standing in by its first visible descendant */
 static void move_branch(tree_sel_t *t, int dir) {
+    ensure(t);
     if (t->sel == NONE) return;
     size_t nn = t->nodes.n;
     size_t *first_vis = xmalloc((nn ? nn : 1) * sizeof *first_vis);
@@ -998,6 +1014,7 @@ static char *row_body(tree_sel_t *t, size_t node, bool selected) {
 }
 
 static void render_list(tree_sel_t *t, int width, strvec_t *out) {
+    ensure(t);
     size_t total = t->rows.n;
     if (!t->vis.n) {
         char *s;
@@ -1143,6 +1160,7 @@ static void tree_render(tui_component_t *c, int width, strvec_t *out) {
 static bool kb_interrupt(const tui_key_t *k) { return tui_kb(k, "app.interrupt"); }
 
 static void edit_label(tree_sel_t *t) {
+    ensure(t);
     if (t->sel == NONE) return;
     t->labeling = true;
     t->label_node = t->sel;
@@ -1179,9 +1197,11 @@ static bool tree_key(tui_component_t *c, const tui_key_t *k) {
     else if (tui_kb(k, "tui.select.pageUp") || tui_key_matches(k, "left")) move_sel(t, -t->max_rows, false);
     else if (tui_kb(k, "tui.select.pageDown") || tui_key_matches(k, "right")) move_sel(t, t->max_rows, false);
     else if (tui_key_matches(k, "shift+enter") || tui_key_matches(k, "ctrl+j")) {
+        ensure(t);
         if (t->sel != NONE && t->cb.on_select) t->cb.on_select(t->cb.ud, t->nodes.v[t->sel].id, true);
         return true;
     } else if (tui_key_matches(k, "enter")) {
+        ensure(t);
         if (t->sel != NONE && t->cb.on_select) t->cb.on_select(t->cb.ud, t->nodes.v[t->sel].id, false);
         return true;
     } else if (kb_interrupt(k)) {

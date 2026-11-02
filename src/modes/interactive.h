@@ -28,5 +28,13 @@ void iq_handoff(ui_t *u, const char *arg);            /* /handoff */
 void iq_queue_command(ui_t *u, const char *text);     /* /queue <message> and the `->` / `=>` shorthand */
 bool iq_busy(ui_t *u);                                /* a compaction/handoff runs (input queues behind it) */
 void iq_shutdown(ui_t *u);                            /* cancel and join background work */
+/* hold typed input behind other background work (branch summary) like a compaction; release delivers it */
+void iq_hold(ui_t *u, bool on);
+
+/* treectl.c (SelectorController.showTreeSelector / showUserMessageSelector) */
+void tc_tree_open(ui_t *u);   /* /tree: session tree selector, optional branch summary */
+void tc_rewind_open(ui_t *u); /* /branch, /rewind, doubleEscapeAction: fullscreen rewind selector */
+bool tc_escape(ui_t *u);      /* app.interrupt while a branch summary runs: abort it */
+void tc_shutdown(ui_t *u);    /* join a running branch summary */
 
 #endif

@@ -485,38 +485,9 @@ void ix_start_queued_run(ui_t *u) {
 
 /* ---------- pickers ---------- */
 
-static void picker_close(ui_t *u) {
-    if (u->picker) tui_overlay_hide(u->tui, &u->picker->base);
-    u->picker_kind = 0;
-    json_free(u->picker_data);
-    u->picker_data = NULL;
-    tui_set_focus(u->tui, &u->editor->base);
-}
-
 
 /* rebuild the transcript view from the session */
 static void reload_chat(ui_t *u) { ui_chat_rebuild(u); }
-
-/* move the session leaf; a user message is re-opened in the editor (its parent becomes the leaf) */
-static void branch_pick(ui_t *u, const char *entry_id) {
-    app_t *a = u->app;
-    json_t *e = session_get(a->session, entry_id);
-    if (!e) return;
-    json_t *msg = json_get(e, "message");
-    bool user = str_eq(json_get_str(e, "type"), "message") && str_eq(json_get_str(msg, "role"), "user");
-    char *text = user ? ai_message_text(msg) : NULL;
-    const char *target = user ? json_get_str(e, "parentId") : entry_id;
-    char *tgt = target ? xstrdup(target) : NULL;
-    if (app_branch_to(a, tgt) != 0) {
-        add_notice(u, "warning", "Cannot switch branches while the agent is running.");
-    } else {
-        reload_chat(u);
-        if (text) tui_editor_set_text(u->editor, text);
-        add_notice(u, "info", user ? "Branched: edit and resend the message to continue on a new branch" : "Switched branch");
-    }
-    free(tgt);
-    free(text);
-}
 
 /* resume another session file (session selector) */
 void ui_resume_session(ui_t *u, const char *path) {
@@ -530,63 +501,6 @@ void ui_resume_session(ui_t *u, const char *path) {
     }
     free(err);
     tui_request_render(u->tui);
-}
-
-static void on_pick(tui_select_list_t *l, const tui_select_item_t *it, void *ud) {
-    ui_t *u = ud;
-    UNUSED(l);
-    int kind = u->picker_kind;
-    char *val = xstrdup(it->value);
-    picker_close(u);
-    if (kind == 1) {
-        char *err = NULL;
-        if (app_set_model(u->app, val, &err) != 0) add_notice(u, "error", err);
-        else {
-            char *m = xasprintf("Model: %s", val);
-            add_notice(u, "info", m);
-            free(m);
-        }
-        free(err);
-    } else if (kind == 2) {
-        ui_btw_dispose(u);
-        char *err = NULL;
-        if (app_switch_session(u->app, val, &err) != 0) add_notice(u, "error", err);
-        else {
-            reload_chat(u);
-            add_notice(u, "info", "Session resumed");
-        }
-        free(err);
-    } else if (kind == 4) {
-        ai_effort_t e;
-        if (effort_parse(val, &e) == 0) app_set_thinking(u->app, e);
-    } else if (kind == 5) {
-        branch_pick(u, val);
-    }
-    free(val);
-    tui_request_render(u->tui);
-}
-
-static void on_pick_cancel(tui_select_list_t *l, void *ud) {
-    ui_t *u = ud;
-    UNUSED(l);
-    picker_close(u);
-}
-
-static void ensure_picker(ui_t *u) {
-    if (!u->picker) {
-        u->picker = tui_select_list_new(10);
-        u->picker->on_select = on_pick;
-        u->picker->on_cancel = on_pick_cancel;
-        u->picker->ud = u;
-    }
-}
-
-static void show_picker(ui_t *u, int kind) {
-    ensure_picker(u);
-    u->picker_kind = kind;
-    tui_select_list_set_filter(u->picker, NULL);
-    tui_overlay_opts_t o = {TUI_ANCHOR_BOTTOM, -80, 14, 0, 1};
-    tui_overlay_show(u->tui, &u->picker->base, &o);
 }
 
 
@@ -1674,49 +1588,10 @@ static bool handle_command_inner(ui_t *u, const char *line) {
             start_hidden(u, k, "guided-goal");
             free(k);
         }
-    } else if (!strcmp(cmd, "tree") || !strcmp(cmd, "branch")) {
-        if (u->worker_running) {
-            add_notice(u, "warning", "Cannot switch branches while the agent is running.");
-        } else {
-            bool tree = !strcmp(cmd, "tree");
-            ensure_picker(u);
-            tui_select_list_clear(u->picker);
-            json_t *list = tree ? json_clone(a->session->entries) : session_path_to(a->session, a->session->leaf_id);
-            json_t *e;
-            size_t shown = 0;
-            json_arr_foreach(list, i, e) {
-                if (!str_eq(json_get_str(e, "type"), "message")) continue;
-                json_t *m = json_get(e, "message");
-                const char *role = json_get_str(m, "role");
-                if (!str_eq(role, "user") && !(tree && str_eq(role, "assistant"))) continue;
-                if (json_get_bool(m, "synthetic", false)) continue;
-                int depth = 0;
-                for (const char *pid = json_get_str(e, "parentId"); pid && depth < 64; depth++) {
-                    json_t *pe = session_get(a->session, pid);
-                    pid = pe ? json_get_str(pe, "parentId") : NULL;
-                }
-                char *t = ai_message_text(m);
-                if (!*t) {
-                    sb_t tb = SB_INIT;
-                    json_t *blk;
-                    json_arr_foreach(json_get_arr(m, "content"), k, blk) if (str_eq(json_get_str(blk, "type"), "toolCall"))
-                        sb_appendf(&tb, "%s[%s]", tb.len ? " " : "", json_get_str(blk, "name"));
-                    free(t);
-                    t = sb_detach(&tb);
-                }
-                for (char *q = t; *q; q++)
-                    if (*q == '\n') *q = ' ';
-                bool on_path = a->session->leaf_id && !strcmp(json_get_str(e, "id"), a->session->leaf_id);
-                char *label = xasprintf("%*s%s %.70s", tree ? MIN(depth / 2, 20) : 0, "", str_eq(role, "user") ? ">" : "<", t);
-                tui_select_list_add(u->picker, json_get_str(e, "id"), label, on_path ? "(current)" : NULL);
-                free(label);
-                free(t);
-                shown++;
-            }
-            json_free(list);
-            if (!shown) add_notice(u, "info", tree ? "No entries in session" : "No messages to branch from");
-            else show_picker(u, 5);
-        }
+    } else if (!strcmp(cmd, "tree")) {
+        tc_tree_open(u);
+    } else if (!strcmp(cmd, "branch") || !strcmp(cmd, "rewind")) {
+        tc_rewind_open(u);
     } else if (!strcmp(cmd, "retry")) {
         if (u->worker_running) add_notice(u, "warning", "The agent is already running.");
         else {
@@ -2022,6 +1897,7 @@ static void clear_editor_draft(ui_t *u) {
 
 /* app.interrupt (editor.onEscape) */
 static void on_escape(ui_t *u) {
+    if (tc_escape(u)) return; /* abortBranchSummary */
     if (ui_report_dismiss(u)) return; /* dismissCommandReport */
     if (iq_escape(u)) return; /* maintenance / turn abort (queue back to the editor), bash or python mode */
     char *text = tui_editor_get_text(u->editor);
@@ -2406,6 +2282,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
         pthread_join(u.worker, NULL);
     }
     ui_btw_free(&u);
+    tc_shutdown(&u);
     iq_shutdown(&u);
     agent_unsubscribe(a->agent, ui_listener, &u);
     a->notice = NULL;

@@ -340,9 +340,6 @@ static void render_children(rewind_t *r, tui_container_t *c, size_t from, size_t
         strvec_t raw = {0}, rows = {0};
         tui_component_render(c->children.v[i], w, &raw);
         size_t a = 0, b = raw.n;
-        while (a < b && blank_row(raw.v[a])) a++;
-        while (b > a && blank_row(raw.v[b - 1])) b--;
-        if (a < b) strvec_push(&rows, "");
         for (size_t k = a; k < b; k++) {
             sb_t o = SB_INIT;
             for (const char *p = raw.v[k]; *p;) {
@@ -357,6 +354,18 @@ static void render_children(rewind_t *r, tui_container_t *c, size_t from, size_t
             strvec_push_own(&rows, sb_detach(&o));
         }
         strvec_free(&raw);
+        if (getenv("OMC_REWIND_DEBUG")) {
+            FILE *f = fopen(getenv("OMC_REWIND_DEBUG"), "a");
+            if (f) {
+                fprintf(f, "child %zu (%zu rows)\n", i, rows.n);
+                for (size_t k = 0; k < rows.n; k++) {
+                    char *j = json_quote(rows.v[k]);
+                    fprintf(f, "  %s\n", j);
+                    free(j);
+                }
+                fclose(f);
+            }
+        }
         vec_push(out, rows);
     }
     r->u->expand_tools = saved;
