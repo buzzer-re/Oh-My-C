@@ -69,7 +69,9 @@ def text_of(msg):
     if isinstance(c, str): return c
     if isinstance(c, list):  # skip injected <system-reminder> blocks (omp prepends date/cwd)
         t = "".join(p.get("text", "") for p in c if isinstance(p, dict) and not p.get("text", "").startswith("<system-reminder>"))
-        return re.sub(r'^(?:<file name="[^"]*">.*?</file>\n)+', "", t, flags=re.S)  # CLI @file attachments lead the prompt
+        # `attach:<prompt>` after CLI @file attachments: drop the leading <file> blocks so <prompt> is the command
+        m = re.match(r'^(?:<file name="[^"]*">.*?</file>\n)+attach:', t, flags=re.S)
+        return t[m.end():] if m else t
     return ""
 
 STEER_NUDGES = ("STOP: In NEXT reply", "Continue task now", "Before task complete, verify:")
