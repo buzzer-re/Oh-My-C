@@ -442,7 +442,6 @@ json_t *agent_event_to_json(const agent_event_t *ev) {
     case AGENT_EV_MESSAGE_START:
     case AGENT_EV_MESSAGE_END: json_set(o, "message", json_clone(ev->message)); break;
     case AGENT_EV_MESSAGE_UPDATE: {
-        json_set(o, "message", json_clone(ev->message));
         if (ev->ai) {
             json_t *ae = json_obj();
             json_set_str(ae, "type", ai_event_name(ev->ai->type));
@@ -451,8 +450,11 @@ json_t *agent_event_to_json(const agent_event_t *ev) {
             if (ev->ai->type == AI_EV_TEXT_END) json_set_str(ae, "content", json_get_str(ev->ai->block, "text"));
             if (ev->ai->type == AI_EV_THINKING_END) json_set_str(ae, "content", json_get_str(ev->ai->block, "thinking"));
             if (ev->ai->type == AI_EV_TOOLCALL_END) json_set(ae, "toolCall", json_clone(ev->ai->block));
+            /* omp: the accumulated snapshot rides along as `partial` (RPC "delta" projection drops it) */
+            if (ev->message) json_set(ae, "partial", json_clone(ev->message));
             json_set(o, "assistantMessageEvent", ae);
         }
+        json_set(o, "message", json_clone(ev->message)); /* omp key order: assistantMessageEvent, message */
         break;
     }
     case AGENT_EV_TOOL_START:
@@ -639,18 +641,24 @@ void agent_append_message(agent_t *a, json_t *msg) {
 void agent_abort(agent_t *a) { a->cancel = 1; }
 void agent_abort_next_silently(agent_t *a) { a->silent_abort_next = 1; }
 
+void agent_queue_changed(agent_t *a) {
+    if (a->hooks.queue_changed) a->hooks.queue_changed(a->hooks.ud, a);
+}
+
 void agent_steer(agent_t *a, json_t *msg) {
     /* omp AgentSession.steer: user input delivered mid-run is marked so the model sees it as an interjection */
     if (agent_msg_user_authored(msg)) json_set_bool(msg, "steering", true);
     pthread_mutex_lock(&a->mu);
     json_push(a->steering, msg);
     pthread_mutex_unlock(&a->mu);
+    agent_queue_changed(a);
 }
 
 void agent_follow_up(agent_t *a, json_t *msg) {
     pthread_mutex_lock(&a->mu);
     json_push(a->follow_up, msg);
     pthread_mutex_unlock(&a->mu);
+    agent_queue_changed(a);
 }
 
 void agent_clear_queues(agent_t *a) {
@@ -660,6 +668,7 @@ void agent_clear_queues(agent_t *a) {
     a->steering = json_arr();
     a->follow_up = json_arr();
     pthread_mutex_unlock(&a->mu);
+    agent_queue_changed(a);
 }
 
 bool agent_is_running(agent_t *a) { return a->running; }
@@ -779,6 +788,7 @@ static json_t *take_queue(agent_t *a, json_t **q) {
         json_free(out);
         return NULL;
     }
+    agent_queue_changed(a);
     return out;
 }
 
@@ -1171,11 +1181,17 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
     json_t *run_msgs = json_arr();
     emit_simple(a, AGENT_EV_AGENT_START);
     json_t *m;
+    /* agent-loop.ts runLoop: the first turn opens before its input messages are emitted */
+    bool turn_open = false;
+    json_t *early = poll_steering ? take_queue(a, &a->steering) : NULL;
+    if (json_len(new_messages) || early) {
+        emit_simple(a, AGENT_EV_TURN_START);
+        turn_open = true;
+    }
     if (new_messages) {
         json_arr_foreach(new_messages, i, m) add_message(a, run_msgs, json_clone(m));
     }
     /* steering typed while the run was starting joins its first turn (agent-loop.ts) */
-    json_t *early = poll_steering ? take_queue(a, &a->steering) : NULL;
     if (early) {
         json_arr_foreach(early, i, m) add_message(a, run_msgs, json_clone(m));
         json_free(early);
@@ -1184,7 +1200,8 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
     int retry_attempt = 0;
     int paused_continuations = 0; /* MAX_PAUSED_TURN_CONTINUATIONS (agent-loop.ts) */
     for (;;) {
-        emit_simple(a, AGENT_EV_TURN_START);
+        if (!turn_open) emit_simple(a, AGENT_EV_TURN_START);
+        turn_open = false;
         int ttsr = 0;
         json_t *cursor_results = NULL;
         json_t *assistant = stream_assistant(a, &ttsr, &cursor_results);

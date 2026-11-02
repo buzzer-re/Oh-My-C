@@ -805,6 +805,11 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
         tool_result_error(out, "Ask tool was cancelled by the user");
         return 0;
     }
+    if (json_get_str(ans, "__error")) { /* the host's answer failed validation, or the host went away */
+        tool_result_error(out, "%s", json_get_str(ans, "__error"));
+        json_free(ans);
+        return 0;
+    }
     json_t *results = json_arr();
     json_arr_foreach(qs, i, q) json_push(results, ask_result(q, ans));
     json_free(ans);

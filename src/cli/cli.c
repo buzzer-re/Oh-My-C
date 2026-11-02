@@ -504,6 +504,7 @@ int omc_main(int argc, char **argv) {
     if (mode) {
         if (!strcmp(mode, "json")) json = true;
         else if (!strcmp(mode, "rpc")) rpc = true;
+        else if (!strcmp(mode, "rpc-ui")) rpc = o.rpc_ui = true;
         else if (!strcmp(mode, "acp")) acp = true;
         else if (strcmp(mode, "text") != 0) {
             fprintf(stderr, "omc: unsupported mode %s\n", mode);

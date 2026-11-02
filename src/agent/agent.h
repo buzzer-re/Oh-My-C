@@ -137,6 +137,8 @@ typedef struct {
     /* A tool-loop turn ended and the run continues with another model call (omp onTurnEnd willContinue): the
      * host may rewrite the context (mid-turn compaction); the next request snapshots the messages again. */
     void (*turn_boundary)(void *ud, agent_t *a, const json_t *assistant);
+    /* The steering / follow-up queue changed (enqueue, delivery, clear). Called without agent locks held. */
+    void (*queue_changed)(void *ud, agent_t *a);
     void *ud;
 } agent_hooks_t;
 
@@ -196,6 +198,7 @@ void agent_abort_next_silently(agent_t *a);
 void agent_steer(agent_t *a, json_t *msg);      /* owned */
 void agent_follow_up(agent_t *a, json_t *msg);  /* owned */
 void agent_clear_queues(agent_t *a);
+void agent_queue_changed(agent_t *a); /* run hooks.queue_changed (after an external queue edit) */
 bool agent_is_running(agent_t *a);
 /* A queued message the user typed (role user, not synthetic): the ones queue editing touches. */
 bool agent_msg_user_authored(const json_t *msg);

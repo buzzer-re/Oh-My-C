@@ -157,6 +157,8 @@ void sleep_ms(int64_t ms);
 /* ---------- random / ids ---------- */
 void rand_bytes(void *buf, size_t n);
 char *uuid_v4(void);
+/* pi-utils Snowflake.next(): 42-bit ms since 2015-01-01 << 22 | a random-seeded 22-bit sequence, 16 hex chars */
+char *snowflake_next(void);
 char *uuid_v7(void);
 char *rand_hex(size_t nbytes);
 char *short_id(void); /* 8 hex chars */

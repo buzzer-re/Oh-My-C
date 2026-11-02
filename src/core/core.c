@@ -749,6 +749,24 @@ void sleep_ms(int64_t ms) {
 
 /* ---------- random / ids ---------- */
 
+char *snowflake_next(void) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static uint32_t seq;
+    static bool seeded;
+    pthread_mutex_lock(&mu);
+    if (!seeded) {
+        unsigned char r[4] = {0};
+        rand_bytes(r, sizeof r);
+        seq = ((uint32_t)r[0] | (uint32_t)r[1] << 8 | (uint32_t)r[2] << 16 | (uint32_t)r[3] << 24) & 0x3fffff;
+        seeded = true;
+    }
+    seq = (seq + 1) & 0x3fffff;
+    uint64_t dt = (uint64_t)(now_ms() - 1420070400000LL);
+    uint64_t v = (dt << 22) | seq;
+    pthread_mutex_unlock(&mu);
+    return xasprintf("%016llx", (unsigned long long)v);
+}
+
 void rand_bytes(void *buf, size_t n) {
     unsigned char *p = buf;
     while (n) {

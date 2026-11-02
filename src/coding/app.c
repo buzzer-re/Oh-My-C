@@ -109,6 +109,86 @@ void app_notice(app_t *a, const char *level, const char *fmt, ...) {
     free(s);
 }
 
+/* ---------- structured session events (AgentSessionEvent) ---------- */
+
+bool app_emit(app_t *a, json_t *ev) {
+    bool taken = a && a->session_event;
+    if (taken) a->session_event(a->session_event_ud, ev);
+    json_free(ev);
+    return taken;
+}
+
+const char *app_wire_thinking(app_t *a) {
+    if (!a->model || !a->model->reasoning) return NULL;
+    return effort_name(model_clamp_effort(a->model, a->thinking));
+}
+
+/* model_changed / thinking_level_changed after a model or thinking mutation (only for real changes) */
+void app_model_state_changed(app_t *a, const ai_model_t *prev_model, const char *prev_thinking) {
+    if (!a->session_event) return;
+    if (prev_model != a->model) {
+        json_t *e = json_obj();
+        json_set_str(e, "type", "model_changed");
+        app_emit(a, e);
+    }
+    const char *now = app_wire_thinking(a);
+    if (!str_eq(now, prev_thinking) || (!now) != (!prev_thinking)) {
+        json_t *e = json_obj();
+        json_set_str(e, "type", "thinking_level_changed");
+        if (now) json_set_str(e, "thinkingLevel", now);
+        if (a->auto_thinking) json_set_str(e, "configured", "auto");
+        app_emit(a, e);
+    }
+}
+
+json_t *app_queued_messages(app_t *a) {
+    json_t *o = json_obj(), *st = json_arr(), *fu = json_arr(), *m;
+    pthread_mutex_lock(&a->agent->mu);
+    json_arr_foreach(a->agent->steering, i, m) if (agent_msg_user_authored(m)) {
+        char *t = ai_message_text(m);
+        json_push_str(st, t);
+        free(t);
+    }
+    json_arr_foreach(a->agent->follow_up, i, m) if (agent_msg_user_authored(m)) {
+        char *t = ai_message_text(m);
+        json_push_str(fu, t);
+        free(t);
+    }
+    pthread_mutex_unlock(&a->agent->mu);
+    json_set(o, "steering", st);
+    json_set(o, "followUp", fu);
+    json_set_int(o, "liveSteered", 0);
+    return o;
+}
+
+void app_queue_changed(app_t *a) {
+    if (!a->session_event) return;
+    json_t *snap = app_queued_messages(a);
+    pthread_mutex_lock(&a->mu);
+    bool same = a->queue_snapshot && json_equal(a->queue_snapshot, snap);
+    if (!same) {
+        json_free(a->queue_snapshot);
+        a->queue_snapshot = json_clone(snap);
+    }
+    pthread_mutex_unlock(&a->mu);
+    if (same) {
+        json_free(snap);
+        return;
+    }
+    json_t *e = json_obj();
+    json_set_str(e, "type", "queue_update");
+    json_set(e, "steering", json_clone(json_get(snap, "steering")));
+    json_set(e, "followUp", json_clone(json_get(snap, "followUp")));
+    json_set_int(e, "liveSteered", 0);
+    json_free(snap);
+    app_emit(a, e);
+}
+
+static void hook_queue_changed(void *ud, agent_t *ag) {
+    UNUSED(ag);
+    app_queue_changed(ud);
+}
+
 static void maybe_title(app_t *a);
 
 /* a background job settled: running sessions pick it up at the next turn boundary, idle ones are woken */
@@ -157,6 +237,14 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
     if (ev->type == AGENT_EV_MESSAGE_END && str_eq(json_get_str(ev->message, "role"), "assistant")) {
         const char *stop = json_get_str(ev->message, "stopReason");
         if (!str_eq(stop, "error") && !str_eq(stop, "aborted")) {
+            if (a->retry_saga > 0) { /* closeRetrySaga success */
+                json_t *e = json_obj();
+                json_set_str(e, "type", "auto_retry_end");
+                json_set_bool(e, "success", true);
+                json_set_int(e, "attempt", a->retry_saga);
+                a->retry_saga = 0;
+                app_emit(a, e);
+            }
             if (a->retry_notes.n) {
                 char *notes = strvec_join(&a->retry_notes, "\n");
                 notice(a, "retry-recovered", "%s", notes);
@@ -701,8 +789,11 @@ static void apply_fallback(app_t *a, const char *role, const ai_model_t *cand, c
     ai_effort_t prev = a->thinking, next = a->thinking;
     if (level && effort_parse(level, &next) != 0) next = a->thinking;
     char *from = xstrdup(cur);
+    const ai_model_t *prev_model = a->model;
+    const char *prev_wire = app_wire_thinking(a);
     a->model = cand;
     agent_set_model(a->agent, cand);
+    app_model_state_changed(a, prev_model, prev_wire);
     char *key = mr_model_key(cand);
     session_append_model_change_ex(a->session, key, "fallback", true);
     mr_usage_record(key);
@@ -787,8 +878,11 @@ static void maybe_restore_primary(app_t *a) {
     if (pm && mr_provider_available(pm->provider)) {
         ai_effort_t th = a->thinking == a->fallback.last_thinking ? a->fallback.original_thinking : a->thinking;
         a->fallback.active = false;
+        const ai_model_t *prev_model = a->model;
+        const char *prev_wire = app_wire_thinking(a);
         a->model = pm;
         agent_set_model(a->agent, pm);
+        app_model_state_changed(a, prev_model, prev_wire);
         char *key = mr_model_key(pm);
         session_append_model_change_ex(a->session, key, "fallback", false);
         mr_usage_record(key);
@@ -900,6 +994,7 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
     if (exhausted) {
         /* closeRetrySaga failure: the final turn reads "Retry budget exhausted …", superseded attempts hide,
          * then "Retry failed after N attempts: <error>" (fields: attempts \x1f final turn error \x1f error) */
+        a->retry_saga = 0;
         notice(a, "retry-failed", "%d\x1fRetry budget exhausted after %d %s: %s\x1f%s", saga - 1, saga - 1,
                saga - 1 == 1 ? "retry" : "retries", err ? err : "error", err ? err : "Unknown error");
         strvec_free(&a->retry_notes);
@@ -916,11 +1011,31 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
     if (hint > delay) delay = hint;
     int64_t maxd = settings_int("retry.maxDelayMs", 5 * 60 * 1000);
     if (maxd > 0 && delay > maxd) {
-        notice(a, "error", "Provider requested %lldms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
-               (long long)delay, (long long)maxd, err ? err : "error");
+        char *fe = xasprintf("Provider requested %lldms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
+                             (long long)delay, (long long)maxd, err ? err : "error");
+        json_t *ev = json_obj();
+        json_set_str(ev, "type", "auto_retry_end");
+        json_set_bool(ev, "success", false);
+        json_set_int(ev, "attempt", saga);
+        json_set_str(ev, "finalError", fe);
+        a->retry_saga = 0;
+        if (!app_emit(a, ev)) notice(a, "error", "%s", fe);
+        free(fe);
         return false;
     }
-    notice(a, "warning", "Retrying (%d/%d) in %llds: %s", saga, max, (long long)((delay + 999) / 1000), err ? err : "error");
+    {
+        json_t *ev = json_obj();
+        json_set_str(ev, "type", "auto_retry_start");
+        json_set_int(ev, "attempt", saga);
+        json_set_int(ev, "maxAttempts", max);
+        json_set_int(ev, "delayMs", delay);
+        json_set_str(ev, "errorMessage", err ? err : "error");
+        if (json_get(assistant, "errorId")) json_set(ev, "errorId", json_clone(json_get(assistant, "errorId")));
+        a->retry_saga = saga;
+        if (!app_emit(a, ev))
+            notice(a, "warning", "Retrying (%d/%d) in %llds: %s", saga, max, (long long)((delay + 999) / 1000),
+                   err ? err : "error");
+    }
     maybe_thinking_loop_redirect(a, ag, err);
     strvec_push(&a->retry_notes, usage_limit ? "rate-limited; waited; retried" : "error; retried");
     int64_t until = mono_ms() + delay;
@@ -1108,6 +1223,7 @@ static void install_agent(app_t *a) {
     ag->hooks.before_tool = hook_before_tool;
     ag->hooks.approve_tool = hook_approve_tool;
     ag->hooks.turn_boundary = hook_turn_boundary;
+    ag->hooks.queue_changed = hook_queue_changed;
     ag->hooks.ud = a;
     free(ag->session_id);
     ag->session_id = a->session ? xstrdup(session_id(a->session)) : uuid_v7();
@@ -1115,6 +1231,7 @@ static void install_agent(app_t *a) {
     agent_set_model(ag, a->model);
     ag->thinking = a->thinking;
     a->env->can_prompt_user = a->opts.has_ui;
+    a->env->ask_ui = a->opts.rpc_ui;
     a->env->delegation_bias = model_delegation_bias(a->model);
     agent_set_intent_tracing(settings_bool("tools.intentTracing", true));
     if (!a->opts.no_tools) tools_register_builtin(ag, a->env, a->opts.tools);
@@ -1416,6 +1533,8 @@ app_t *app_create(const app_opts_t *o, char **err) {
 
 void app_free(app_t *a) {
     if (!a) return;
+    json_free(a->queue_snapshot);
+    a->queue_snapshot = NULL;
     agents_unregister(a);
     cmp_free(a); /* join a background speculative compaction */
     autolearn_free(a->autolearn); /* abort a private capture before the session it reads goes away */
@@ -1473,6 +1592,15 @@ int app_set_model(app_t *a, const char *pattern, char **err) {
         *err = xasprintf("Unknown model: %s", pattern);
         return -1;
     }
+    app_apply_model(a, m, has_e, e);
+    return 0;
+}
+
+void app_use_model(app_t *a, const ai_model_t *m) { app_apply_model(a, m, false, EFFORT_OFF); }
+
+void app_apply_model(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e) {
+    const ai_model_t *prev_model = a->model;
+    const char *prev_wire = app_wire_thinking(a);
     a->model = m;
     agent_set_model(a->agent, m);
     a->fallback.active = false; /* an explicit model change clears fallback ownership */
@@ -1487,15 +1615,24 @@ int app_set_model(app_t *a, const char *pattern, char **err) {
     session_append_model_change(a->session, label, NULL);
     free(label);
     app_rebuild_system_prompt(a);
-    return 0;
+    app_model_state_changed(a, prev_model, prev_wire);
 }
 
 void app_set_thinking(app_t *a, ai_effort_t e) {
+    const char *prev_wire = app_wire_thinking(a);
+    bool was_auto = a->auto_thinking;
     a->auto_thinking = false;
     a->auto_resolved = -1;
     a->thinking = e;
     a->agent->thinking = e;
     session_append_thinking_change(a->session, effort_name(e));
+    if (was_auto && str_eq(prev_wire, app_wire_thinking(a)) && a->session_event) {
+        /* leaving auto is a change even when the effort stays (model-controls.ts isChanging) */
+        json_t *ev = json_obj();
+        json_set_str(ev, "type", "thinking_level_changed");
+        if (app_wire_thinking(a)) json_set_str(ev, "thinkingLevel", app_wire_thinking(a));
+        app_emit(a, ev);
+    } else app_model_state_changed(a, a->model, prev_wire);
 }
 
 void app_set_thinking_auto(app_t *a) {
@@ -1507,8 +1644,14 @@ void app_set_thinking_auto(app_t *a) {
     a->auto_resolved = -1;
     a->thinking = prov;
     a->agent->thinking = prov;
-    if (!was || prev != prov)
+    if (!was || prev != prov) {
         session_append_thinking_change_ex(a->session, a->model && a->model->reasoning ? effort_name(prov) : NULL, "auto");
+        json_t *ev = json_obj();
+        json_set_str(ev, "type", "thinking_level_changed");
+        if (app_wire_thinking(a)) json_set_str(ev, "thinkingLevel", app_wire_thinking(a));
+        json_set_str(ev, "configured", "auto");
+        app_emit(a, ev);
+    }
 }
 
 bool app_set_thinking_level(app_t *a, const char *level) {
@@ -1601,8 +1744,11 @@ int app_cycle_role_model(app_t *a, bool backward) {
         if (at < 0) at = 0;
         long n = (long)es.n;
         ent_t nx = es.v[(at + (backward ? -1 : 1) + n) % n];
+        const ai_model_t *prev_model = a->model;
+        const char *prev_wire = app_wire_thinking(a);
         a->model = nx.m;
         agent_set_model(a->agent, nx.m);
+        app_model_state_changed(a, prev_model, prev_wire);
         a->fallback.active = false;
         free(a->model_role);
         a->model_role = xstrdup(order.v[nx.role]);
@@ -2184,6 +2330,22 @@ int64_t app_compaction_threshold(const ai_model_t *m, int64_t window) { return c
 /* post-turn context maintenance (pruning + the compaction.methodOrder ladder; coding/compaction.c) */
 static void maybe_auto_compact(app_t *a) { cmp_after_turn(a); }
 
+json_t *app_compaction_result(app_t *a) {
+    json_t *path = session_path_to(a->session, a->session->leaf_id), *e, *last = NULL;
+    json_arr_foreach(path, i, e) if (str_eq(json_get_str(e, "type"), "compaction")) last = e;
+    json_t *r = json_obj();
+    if (last) {
+        json_set_str(r, "summary", json_get_str(last, "summary") ? json_get_str(last, "summary") : "");
+        if (json_get_str(last, "shortSummary")) json_set_str(r, "shortSummary", json_get_str(last, "shortSummary"));
+        json_set_str(r, "firstKeptEntryId", json_get_str(last, "firstKeptEntryId") ? json_get_str(last, "firstKeptEntryId") : "");
+        json_set_int(r, "tokensBefore", json_get_int(last, "tokensBefore", 0));
+        if (json_get(last, "details")) json_set(r, "details", json_clone(json_get(last, "details")));
+        if (json_get(last, "preserveData")) json_set(r, "preserveData", json_clone(json_get(last, "preserveData")));
+    }
+    json_free(path);
+    return r;
+}
+
 /* ---------- prompting ---------- */
 
 /* omp `@path` mentions: inline existing files (bounded) after the prompt text */
@@ -2283,6 +2445,16 @@ static bool apply_auto_thinking(app_t *a, const char *text) {
     a->thinking = e;
     a->agent->thinking = e;
     if (changed) session_append_thinking_change_ex(a->session, effort_name(e), "auto");
+    if (a->session_event) { /* applyAutoThinkingLevel: thinking_level_changed {configured: auto, resolved} */
+        json_t *ev = json_obj();
+        json_set_str(ev, "type", "thinking_level_changed");
+        if (app_wire_thinking(a)) {
+            json_set_str(ev, "thinkingLevel", app_wire_thinking(a));
+            json_set_str(ev, "configured", "auto");
+            json_set_str(ev, "resolved", app_wire_thinking(a));
+        } else json_set_str(ev, "configured", "auto");
+        app_emit(a, ev);
+    }
     return true;
 }
 

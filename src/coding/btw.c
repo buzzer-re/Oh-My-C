@@ -59,25 +59,6 @@ char *btw_copy_text(const json_t *record) {
     return blank(a) ? NULL : xstrdup(a);
 }
 
-/* Snowflake.next(): 16 hex chars, (ms since 2015-01-01) << 22 | a 22-bit sequence with a random start */
-static char *snowflake_next(void) {
-    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-    static uint32_t seq;
-    static bool seeded;
-    pthread_mutex_lock(&mu);
-    if (!seeded) {
-        rand_bytes(&seq, sizeof seq);
-        seeded = true;
-    }
-    seq = (seq + 1) & 0x3fffff;
-    uint64_t s = seq;
-    pthread_mutex_unlock(&mu);
-    int64_t dt = now_ms() - 1420070400000LL;
-    if (dt < 0) dt = 0;
-    if (dt > (int64_t)((1ULL << 42) - 1)) dt = (int64_t)((1ULL << 42) - 1);
-    return xasprintf("%016llx", (unsigned long long)(((uint64_t)dt << 22) | s));
-}
-
 static json_t *new_turn(const char *question, const json_t *images, int64_t now) {
     json_t *t = json_obj();
     json_set_str(t, "question", question);

@@ -34,6 +34,7 @@ typedef struct {
     bool no_mcp;
     bool allow_no_model; /* interactive: start without a model (pick one with /model or /login) */
     bool has_ui;                /* interactive UI can answer questions (enables `ask`) */
+    bool rpc_ui;                /* `--mode rpc-ui`: tool UI (ask) over the RPC protocol */
     bool auto_approve;          /* --auto-approve / --yolo: every approval resolves in yolo mode */
 } app_opts_t;
 
@@ -59,6 +60,7 @@ struct app {
     bool title_done;
     int retry_count;
     int retry_offset;
+    int retry_saga; /* attempt of the last auto_retry_start (0: no retry saga open) */
     strvec_t retry_notes;
     char *model_role; /* role of the last model change made through a role (Ctrl+P cycle), NULL otherwise */ /* recovery notes of this run's retried attempts, applied when a turn succeeds */ /* agent retry attempts spent before the latest fallback switch (fresh budget) */
     /* active retry fallback (turn-recovery.ts ActiveRetryFallbackState) */
@@ -118,6 +120,12 @@ struct app {
     volatile bool ttsr_interrupting;
     app_notice_fn notice;
     void *notice_ud;
+    /* structured session events beyond the agent's own (omp AgentSessionEvent: model_changed,
+     * thinking_level_changed, goal_updated, queue_update, auto/manual_compaction_*, auto_retry_*); RPC sets it.
+     * Called from any thread with a borrowed event. */
+    void (*session_event)(void *ud, const json_t *ev);
+    void *session_event_ud;
+    json_t *queue_snapshot; /* last queue_update {steering, followUp} sent (coalescing) */
     /* `auto` thinking (autothink.c): per-turn classification; `thinking` holds the provisional/resolved effort */
     bool auto_thinking;
     int auto_resolved;      /* last classified effort, -1 before the first turn */
@@ -136,6 +144,20 @@ struct app {
 /* app notices beyond info/warning/error: "retry_fallback_applied" (from\x1fto\x1frole\x1freason),
  * "retry_fallback_succeeded" (model\x1frole), "retry-recovered" (notes, one per line), "title" */
 char *app_fallback_notice_text(const char *fields); /* "Fallback: from -> to\nreason" (owned) */
+/* hand a structured session event (owned) to app->session_event; true when a listener took it (the caller then
+ * skips the plain-text notice the TUI renders for the same transition) */
+bool app_emit(app_t *a, json_t *ev);
+/* thinkingLevel as omp reports it: NULL (undefined) without a reasoning model, else the clamped effort name */
+const char *app_wire_thinking(app_t *a);
+/* model_changed / thinking_level_changed after a model mutation (prev_thinking = app_wire_thinking before) */
+void app_model_state_changed(app_t *a, const struct ai_model *prev_model, const char *prev_thinking);
+/* select an exact catalog model like an explicit /model pick (session entry, thinking re-clamp, events) */
+void app_use_model(app_t *a, const struct ai_model *m);
+void app_apply_model(app_t *a, const struct ai_model *m, bool has_effort, ai_effort_t effort);
+/* queue_update when the displayable steering / follow-up queue differs from the last one sent */
+void app_queue_changed(app_t *a);
+/* AgentSession.getQueuedMessages(): owned {steering: [text], followUp: [text], liveSteered: 0} */
+json_t *app_queued_messages(app_t *a);
 
 /* returns NULL and sets *err on failure */
 app_t *app_create(const app_opts_t *o, char **err);
@@ -222,6 +244,8 @@ void app_rebuild_system_prompt(app_t *a);
 /* token count at which context maintenance triggers for a window (omp compaction.threshold* semantics) */
 int64_t app_compaction_threshold(const ai_model_t *m, int64_t window); /* with compaction.modelThresholds */
 int app_compact(app_t *a, const char *instructions, char **err);
+/* CompactionResult of the latest compaction entry on the current path (owned; {} when none) */
+json_t *app_compaction_result(app_t *a);
 /* manual /compact with a mode (NULL, "soft", "remote", "snapcompact": compact-modes.ts) */
 int app_compact_mode(app_t *a, const char *mode, const char *instructions, char **err);
 int app_new_session(app_t *a);

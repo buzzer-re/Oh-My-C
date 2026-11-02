@@ -912,24 +912,7 @@ static void js_pretty(sb_t *b, const json_t *j, int level) {
 
 /* ---------- tmp names ---------- */
 
-/* Snowflake.next(): 42-bit ms since 2015-01-01 << 22 | a random-seeded 22-bit sequence, 16 hex chars */
-static char *snowflake(void) {
-    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-    static uint32_t seq;
-    static bool seeded;
-    pthread_mutex_lock(&mu);
-    if (!seeded) {
-        unsigned char r[4] = {0};
-        rand_bytes(r, sizeof r);
-        seq = ((uint32_t)r[0] | (uint32_t)r[1] << 8 | (uint32_t)r[2] << 16 | (uint32_t)r[3] << 24) & 0x3fffff;
-        seeded = true;
-    }
-    seq = (seq + 1) & 0x3fffff;
-    uint64_t dt = (uint64_t)(now_ms() - 1420070400000LL);
-    uint64_t v = (dt << 22) | seq;
-    pthread_mutex_unlock(&mu);
-    return xasprintf("%016llx", (unsigned long long)v);
-}
+static char *snowflake(void) { return snowflake_next(); }
 
 static char *tmp_path(const char *stem, const char *ext) {
     const char *dir = getenv("TMPDIR");

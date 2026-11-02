@@ -243,7 +243,7 @@ static bool builtin_allowed(tool_env_t *env, const char *name) {
     if (!strcmp(name, "ast_grep")) return setting_on("astGrep.enabled", false);
     if (!strcmp(name, "ast_edit")) return setting_on("astEdit.enabled", true);
     if (!strcmp(name, "web_search")) return setting_on("web_search.enabled", true);
-    if (!strcmp(name, "ask")) return setting_on("ask.enabled", true) && env->can_prompt_user;
+    if (!strcmp(name, "ask")) return setting_on("ask.enabled", true) && (env->can_prompt_user || env->ask_ui);
     if (!strcmp(name, "find")) {
         /* "auto" needs a native judgment backend (TypeSafe jev / Decisions APIs), which omc lacks */
         json_t *v = settings_get("find.enabled");

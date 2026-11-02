@@ -68,6 +68,7 @@ typedef struct tool_env {
     struct artifact_store *artifacts; /* session artifacts (artifact://<id>; shared with subagents; NULL: none) */
     int subagent_depth;
     bool can_prompt_user;      /* a UI can answer `ask` (interactive mode) */
+    bool ask_ui;               /* `--mode rpc-ui`: the RPC client answers `ask` (tool UI over the protocol) */
     bool find_enabled;         /* `find` is part of this session (set by tools_register_builtin) */
     const char *delegation_bias; /* model delegation bias ("eager"/"gated"/"restrained"; static) */
     void *session;             /* app session (for task tool) */

@@ -88,7 +88,19 @@ static void persist(app_t *a, const char *mode) {
     session_append_entry(a->session, e);
 }
 
+/* goal_updated {goal, state} (runtime.ts #commitState) */
+static void emit_updated(app_t *a) {
+    if (!a->session_event) return;
+    json_t *e = json_obj();
+    json_set_str(e, "type", "goal_updated");
+    json_set(e, "goal", goal_json(a->goal));
+    if (a->goal && a->goal->present) json_set(e, "state", goal_state_json(a->goal));
+    app_emit(a, e);
+}
+
 static void emit(app_t *a) {
+    emit_updated(a);
+    if (a->session_event) return;
     if (a->notice) {
         /* surfaces goal changes to the UI as a structured notice */
         goal_t *g = a->goal;
@@ -116,7 +128,10 @@ static bool flush(app_t *a, int64_t tokens) {
     g->updated = now;
     bool flipped = g->budget && g->used >= g->budget && !strcmp(g->status, "active");
     if (flipped) snprintf(g->status, sizeof g->status, "budget-limited");
-    if (tokens > 0 || flipped) persist(a, "goal");
+    if (tokens > 0 || flipped) {
+        persist(a, "goal");
+        emit_updated(a);
+    }
     if (strcmp(g->status, "budget-limited")) g->budget_reported = false;
     return flipped;
 }
@@ -368,12 +383,24 @@ void app_goal_drop(app_t *a) {
     goal_t *g = G(a);
     if (!g->present) return;
     flush(a, 0);
+    if (a->session_event) { /* dropGoal: goal_updated {goal: dropped, state: {enabled: false, goal: dropped}} */
+        snprintf(g->status, sizeof g->status, "dropped");
+        g->updated = now_ms();
+        bool was = g->enabled;
+        g->enabled = false;
+        json_t *e = json_obj();
+        json_set_str(e, "type", "goal_updated");
+        json_set(e, "goal", goal_json(g));
+        json_set(e, "state", goal_state_json(g));
+        g->enabled = was;
+        app_emit(a, e);
+    }
     g->present = g->enabled = g->exiting = false;
     snprintf(g->status, sizeof g->status, "dropped");
     g->wall_last = 0;
     persist(a, "none");
     sync_tool(a);
-    emit(a);
+    if (!a->session_event) emit(a);
 }
 
 int app_goal_complete(app_t *a, char **err) {

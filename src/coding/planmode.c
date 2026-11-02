@@ -372,8 +372,11 @@ void app_enter_plan_mode(app_t *a, const char *plan_file) {
 
 /* setModelTemporary: switch without touching settings (model_change role "temporary") */
 static void set_model_temporary(app_t *a, const ai_model_t *m, bool has_thinking, ai_effort_t thinking) {
+    const ai_model_t *prev_model = a->model;
+    const char *prev_wire = app_wire_thinking(a);
     a->model = m;
     agent_set_model(a->agent, m);
+    app_model_state_changed(a, prev_model, prev_wire);
     char *label = app_model_label(a);
     session_append_model_change(a->session, label, "temporary");
     free(label);
@@ -596,8 +599,11 @@ void app_role_model_cycle_free(app_role_model_t *v, size_t n) {
 }
 
 void app_apply_role_model(app_t *a, const app_role_model_t *e) {
+    const ai_model_t *prev_model = a->model;
+    const char *prev_wire = app_wire_thinking(a);
     a->model = e->model;
     agent_set_model(a->agent, e->model);
+    app_model_state_changed(a, prev_model, prev_wire);
     char *label = app_model_label(a);
     session_append_model_change(a->session, label, e->role);
     free(label);
@@ -790,8 +796,11 @@ static char *propose_yolo(tool_env_t *env, const char *title, bool *is_error, js
     a->env->propose_plan = NULL;
     const ai_model_t *target = a->plan_yolo_target;
     a->plan_yolo_target = NULL;
+    const ai_model_t *prev_model = a->model;
+    const char *prev_wire = app_wire_thinking(a);
     a->model = target;
     agent_set_model(a->agent, target);
+    app_model_state_changed(a, prev_model, prev_wire);
     char *label = app_model_label(a);
     session_append_model_change(a->session, label, NULL);
     free(label);
