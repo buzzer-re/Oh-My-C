@@ -660,9 +660,8 @@ static void plan_review_hide(ui_t *u) {
     g_pr.open = false;
     tui_component_t *c = ui_plan_review_component(g_pr.ov);
     tui_overlay_hide(u->tui, c);
-    tui_term_puts(tui_term(u->tui), "\x1b[?1049l");
+    tui_alt_screen(u->tui, false); /* the parked transcript resumes as it was */
     tui_set_focus(u->tui, &u->editor->base);
-    tui_request_full_render(u->tui);
     tui_component_destroy(c);
     g_pr.ov = NULL;
 }
@@ -1191,10 +1190,9 @@ static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) 
     free(content);
     g_pr.open = true;
     /* fullscreen overlay on the alternate screen */
-    tui_term_puts(tui_term(u->tui), "\x1b[?1049h");
+    tui_alt_screen(u->tui, true);
     tui_overlay_opts_t oo = {TUI_ANCHOR_TOP, 0, 0, 0, 0};
     tui_overlay_show(u->tui, ui_plan_review_component(g_pr.ov), &oo);
-    tui_request_full_render(u->tui);
 }
 
 /* tool_execution_end of `write xd://propose` in review mode: the XdevDispatch inner carries
