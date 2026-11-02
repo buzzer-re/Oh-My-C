@@ -1,5 +1,6 @@
 #include "app.h"
 #include "coding/autothink.h"
+#include "coding/power.h"
 #include "coding/goal.h"
 #include "coding/guards.h"
 #include "coding/keywords.h"
@@ -137,6 +138,9 @@ static json_t *job_results_message(app_t *a) {
 static void on_agent_event(void *ud, const agent_event_t *ev) {
     app_t *a = ud;
     if (ev->type == AGENT_EV_AGENT_START) strvec_free(&a->retry_notes);
+    /* power.sleepPrevention: held while a run is in flight (subagents run inside the parent's run) */
+    if (ev->type == AGENT_EV_AGENT_START && !a->opts.subagent) power_acquire();
+    if (ev->type == AGENT_EV_AGENT_END && !a->opts.subagent) power_release();
     if (ev->type == AGENT_EV_MESSAGE_END && str_eq(json_get_str(ev->message, "role"), "assistant")) {
         const char *stop = json_get_str(ev->message, "stopReason");
         if (!str_eq(stop, "error") && !str_eq(stop, "aborted")) {
