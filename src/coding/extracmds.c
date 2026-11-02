@@ -21,7 +21,7 @@ static bool tool_active(app_t *a, const char *name) {
 }
 
 /* buildNamedToolChoice */
-static json_t *named_choice(const ai_model_t *m, const char *tool) {
+json_t *extracmd_named_choice(const ai_model_t *m, const char *tool) {
     if (!m || !m->api) return NULL;
     const char *api = m->api;
     json_t *c = NULL;
@@ -51,7 +51,7 @@ int extracmd_force_tool(app_t *a, const char *tool, char **err) {
         *err = xasprintf("Tool \"%s\" is not currently active.", tool);
         return -1;
     }
-    json_t *c = named_choice(a->model, tool);
+    json_t *c = extracmd_named_choice(a->model, tool);
     if (!c || !json_is_obj(c)) {
         json_free(c);
         *err = xstrdup("Current model does not support forcing a specific tool.");

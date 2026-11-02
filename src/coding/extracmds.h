@@ -10,6 +10,8 @@
 /* setForcedToolChoice: 0, or -1 with *err (owned): `Tool "x" is not currently active.` /
  * `Current model does not support forcing a specific tool.` */
 int extracmd_force_tool(app_t *a, const char *tool, char **err);
+/* utils/tool-choice.ts buildNamedToolChoice (owned; NULL when the model cannot force a named tool) */
+json_t *extracmd_named_choice(const ai_model_t *m, const char *tool);
 /* hook_prepare: serve the next tool choice of a pending /force sequence */
 void extracmd_prepare_request(app_t *a, ai_stream_opts_t *o);
 /* `Force: N active tools` / `Force: no active tools` (owned) */

@@ -473,31 +473,6 @@ static bool external_thinking_active(app_t *a) {
     return t && !t->hidden;
 }
 
-/* utils/tool-choice.ts buildNamedToolChoice (owned, NULL when the model can't force a named tool) */
-static json_t *named_tool_choice(const ai_model_t *m, const char *tool) {
-    const char *api = m && m->api ? m->api : "";
-    json_t *c = NULL;
-    if (str_eq(api, "anthropic-messages") || str_eq(api, "bedrock-converse-stream")) {
-        c = json_obj();
-        json_set_str(c, "type", "tool");
-    } else if (str_eq(api, "openai-codex-responses") || str_eq(api, "openai-responses") || str_eq(api, "openai-completions") ||
-               str_eq(api, "azure-openai-responses") || str_eq(api, "openrouter")) {
-        if (!model_compat_bool(m, "supportsToolChoice", true) || !model_compat_bool(m, "supportsForcedToolChoice", true))
-            return NULL;
-        c = json_obj();
-        json_set_str(c, "type", "function");
-    } else if (str_eq(api, "ollama-chat")) {
-        c = json_obj();
-        json_set_str(c, "type", "function");
-    } else if (str_eq(api, "google-generative-ai") || str_eq(api, "google-gemini-cli") || str_eq(api, "google-vertex")) {
-        return json_str("required");
-    } else {
-        return NULL;
-    }
-    json_set_str(c, "name", tool);
-    return c;
-}
-
 /* session-tools reconcileThinkTool: the private scratchpad follows externalThinking and the active model */
 static void think_reconcile(app_t *a) {
     if (!a->agent || a->opts.no_tools) return;
@@ -521,7 +496,7 @@ static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
         if (a->think_force) { /* the "external-thinking" tool choice: once, on the turn's first request */
             static __thread json_t *forced;
             json_free(forced);
-            forced = named_tool_choice(a->model, "think");
+            forced = extracmd_named_choice(a->model, "think");
             if (forced) o->tool_choice = forced;
         }
     }
@@ -2922,7 +2897,7 @@ int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
     json_free(kn);
     json_arr_foreach(notices, i, img) json_push(msgs, json_clone(img));
     json_free(notices);
-    a->think_force = true; /* consumed by the first request of this turn */
+    a->think_force = a->forced_step == 0; /* the turn's first request (a pending /force directive wins) */
     /* the pending xd:// mount delta rides with the next user prompt, right before it */
     json_t *xn = xdnotice_take(a);
     if (xn) json_push(msgs, xn);
