@@ -249,7 +249,10 @@ static void post_notice(void *x) {
         uiev_free(e);
         return;
     }
-    const char *lvl = !strcmp(e->name, "error") ? "error" : !strcmp(e->name, "warning") ? "warning" : "info";
+    const char *lvl = !strcmp(e->name, "error")           ? "error"
+                      : !strcmp(e->name, "warning")       ? "warning"
+                      : !strcmp(e->name, "todo-reminder") ? "todo-reminder" /* TodoReminderComponent card */
+                                                          : "info";
     /* a generated session title only shows in the status band / working row, as in omp */
     if (strcmp(e->name, "title")) add_notice(e->u, lvl, e->out);
     tui_request_render(e->u->tui);
