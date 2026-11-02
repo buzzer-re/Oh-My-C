@@ -1506,6 +1506,7 @@ static void replay_entry(ui_t *u, const json_t *e, hmap_t *pending) {
  * session file the agent's live context is replayed instead. */
 void ui_chat_rebuild(ui_t *u) {
     tui_container_clear(u->chat);
+    ui_report_clear(u);
     hmap_free(&u->tools, NULL);
     hmap_init(&u->tools);
     u->cur_assistant = NULL;

@@ -320,6 +320,7 @@ struct job {
     char *result;
     sb_t output;
     bool done, delivered, failed, hidden, attached, cancelled, quiet;
+    bool killed; /* jobs_cancel: settles as cancelled and is never delivered (AsyncJobManager.cancel) */
     volatile sig_atomic_t cancel;
     pthread_t th;
     bool joinable;
@@ -442,7 +443,7 @@ static void *job_thread(void *p) {
     x->cancelled = x->cancel != 0;
     x->ended = now_ms();
     x->done = true;
-    if (x->quiet) {
+    if (x->quiet || x->killed) {
         x->delivered = true;
         x->delivered_at = x->ended;
     }
@@ -826,6 +827,7 @@ bool jobs_cancel(jobs_t *j, const char *id) {
         if (x->done || x->attached || (x->hidden && !id)) continue;
         if (!id || str_eq(x->id, id)) {
             x->cancel = 1;
+            x->killed = true;
             found = true;
         }
     }
@@ -847,6 +849,7 @@ static json_t *job_json(const bgjob_t *x, bool full) {
     json_set_int(o, "startedAt", x->started);
     if (x->done) json_set_int(o, "endedAt", x->ended);
     if (x->agent_id) json_set_str(o, "agentId", x->agent_id);
+    if (x->bash && x->bash->cmd) json_set_str(o, "command", x->bash->cmd);
     if (full) {
         if (x->done) json_set_str(o, "result", x->result ? x->result : "");
         if (!x->done && x->output.len) json_set_str(o, "output", sb_cstr((sb_t *)&x->output));

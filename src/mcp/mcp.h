@@ -24,6 +24,7 @@ char *mcp_instructions(mcp_manager_t *m);
 /* Human-readable status lines (owned). */
 char *mcp_status(mcp_manager_t *m);
 size_t mcp_server_count(mcp_manager_t *m);
+json_t *mcp_connected(mcp_manager_t *m); /* connected servers [{name, tools}] in config order (owned) */
 
 /* OAuth for remote servers (oauth.c). Credentials are stored as "mcp:<url>" in auth.json. */
 char *mcp_oauth_key(const char *url);

@@ -284,6 +284,147 @@ static json_t *apply_entry(json_t *phases, const char *op, const json_t *args, s
     return phases;
 }
 
+/* ---------- /todo helpers (applyOpsToPhases, Markdown round-trip) ---------- */
+
+json_t *todo_apply_op(const json_t *phases, const char *op, const json_t *args, strvec_t *errors) {
+    json_t *next = json_is_arr(phases) ? json_clone(phases) : json_arr();
+    next = apply_entry(next, op, args, errors);
+    normalize(next);
+    return next;
+}
+
+static const char *status_marker(const char *st) {
+    if (str_eq(st, "in_progress")) return "/";
+    if (str_eq(st, "completed")) return "x";
+    if (str_eq(st, "abandoned")) return "-";
+    if (str_eq(st, "blocked")) return "!";
+    return " ";
+}
+
+char *todo_phases_to_markdown(const json_t *phases) {
+    if (!json_len(phases)) return xstrdup("# Todos\n");
+    sb_t b = SB_INIT;
+    json_t *p, *t;
+    json_arr_foreach(phases, i, p) {
+        if (i) sb_putc(&b, '\n');
+        sb_appendf(&b, "# %s\n", json_get_str(p, "name") ? json_get_str(p, "name") : "");
+        json_arr_foreach(json_get(p, "tasks"), k, t) {
+            const char *st = json_get_str(t, "status"), *blocker = json_get_str(t, "blocker");
+            sb_appendf(&b, "- [%s] %s", status_marker(st), json_get_str(t, "content") ? json_get_str(t, "content") : "");
+            if (str_eq(st, "blocked") && blocker && *blocker) sb_appendf(&b, " <!-- blocker: %s -->", blocker);
+            sb_putc(&b, '\n');
+        }
+    }
+    return sb_detach(&b);
+}
+
+static bool is_sp(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v'; }
+
+json_t *todo_markdown_to_phases(const char *md, strvec_t *errors) {
+    json_t *phases = json_arr(), *cur = NULL;
+    strvec_t lines = str_split_lines(md, strlen(md));
+    for (size_t ln = 0; ln < lines.n; ln++) {
+        char *tr = str_trim(lines.v[ln]);
+        if (!*tr) {
+            free(tr);
+            continue;
+        }
+        const char *p = tr;
+        size_t h = 0;
+        while (p[h] == '#') h++;
+        if (h >= 1 && h <= 6 && is_sp(p[h])) { /* ^#{1,6}\s+(.+?)\s*$ */
+            char *name = str_trim(p + h);
+            if (*name) {
+                cur = json_obj();
+                json_set_str(cur, "name", name);
+                json_set(cur, "tasks", json_arr());
+                json_push(phases, cur);
+                free(name);
+                free(tr);
+                continue;
+            }
+            free(name);
+        }
+        /* ^[-*+]\s*\\?\[(.?)\\?\]\s+(.+?)\s*$ */
+        const char *q = p;
+        bool task = false;
+        char marker[8] = "";
+        const char *content = NULL;
+        if (*q == '-' || *q == '*' || *q == '+') {
+            q++;
+            while (is_sp(*q)) q++;
+            if (*q == '\\') q++;
+            if (*q == '[') {
+                q++;
+                const char *m = q;
+                size_t ml = 0;
+                if (*m && *m != ']' && !(*m == '\\' && m[1] == ']')) {
+                    uint32_t cp;
+                    ml = (size_t)utf8_decode(m, strlen(m), &cp);
+                }
+                q = m + ml;
+                if (*q == '\\') q++;
+                if (*q == ']' && is_sp(q[1])) {
+                    q++;
+                    while (is_sp(*q)) q++;
+                    if (*q) {
+                        task = true;
+                        snprintf(marker, sizeof marker, "%.*s", (int)ml, m);
+                        content = q;
+                    }
+                }
+            }
+        }
+        if (!task) {
+            strvec_push_own(errors, xasprintf("Line %zu: unrecognized syntax \"%s\"", ln + 1, tr));
+            free(tr);
+            continue;
+        }
+        const char *st = !strcmp(marker, " ") || !*marker ? "pending"
+                         : !strcmp(marker, "x") || !strcmp(marker, "X") ? "completed"
+                         : !strcmp(marker, "/") || !strcmp(marker, ">") ? "in_progress"
+                         : !strcmp(marker, "-") || !strcmp(marker, "~") ? "abandoned"
+                         : !strcmp(marker, "!") ? "blocked" : NULL;
+        if (!st) {
+            strvec_push_own(errors, xasprintf("Line %zu: unknown status marker \"[%s]\" (use [ ], [x], [/], [-], [!])", ln + 1, marker));
+            free(tr);
+            continue;
+        }
+        if (!cur) {
+            cur = json_obj();
+            json_set_str(cur, "name", "Todos");
+            json_set(cur, "tasks", json_arr());
+            json_push(phases, cur);
+        }
+        char *raw = str_trim(content);
+        json_t *t = json_obj();
+        const char *cm = strstr(raw, "<!--");
+        size_t rl = strlen(raw);
+        if (!strcmp(st, "blocked") && cm && rl >= 3 && !strcmp(raw + rl - 3, "-->")) {
+            const char *in = cm + 4;
+            while (is_sp(*in)) in++;
+            if (!strncmp(in, "blocker:", 8)) {
+                char *before = xstrndup(raw, (size_t)(cm - raw)), *bt = str_trim(before);
+                char *note = xstrndup(in + 8, (size_t)(raw + rl - 3 - (in + 8))), *nt = str_trim(note);
+                json_set_str(t, "content", bt);
+                json_set_str(t, "status", st);
+                json_set_str(t, "blocker", nt);
+                free(before), free(bt), free(note), free(nt);
+            }
+        }
+        if (!json_get(t, "content")) {
+            json_set_str(t, "content", raw);
+            json_set_str(t, "status", st);
+        }
+        json_push(json_get(cur, "tasks"), t);
+        free(raw);
+        free(tr);
+    }
+    strvec_free(&lines);
+    normalize(phases);
+    return phases;
+}
+
 static char *format_summary(json_t *phases, strvec_t *errors, bool readonly) {
     size_t total = 0, closed = 0, blocked = 0, open = 0;
     json_t *p, *t;

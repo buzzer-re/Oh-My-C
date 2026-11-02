@@ -124,6 +124,7 @@ typedef struct {
     tui_component_t *comp;
     tui_overlay_opts_t opts;
     tui_component_t *prev_focus;
+    bool fill;
 } overlay_t;
 
 typedef struct {
@@ -312,6 +313,12 @@ void tui_overlay_show(tui_t *t, tui_component_t *c, const tui_overlay_opts_t *op
     tui_request_render(t);
 }
 
+void tui_overlay_fill_screen(tui_t *t, tui_component_t *c) {
+    for (size_t i = 0; i < t->overlays.n; i++)
+        if (t->overlays.v[i].comp == c) t->overlays.v[i].fill = true;
+    tui_request_render(t);
+}
+
 void tui_overlay_hide(tui_t *t, tui_component_t *c) {
     for (size_t i = 0; i < t->overlays.n; i++) {
         if (t->overlays.v[i].comp != c) continue;
@@ -369,7 +376,7 @@ static void composite_overlays(tui_t *t, strvec_t *lines, int width, int height)
         }
         int off = MAX(0, o->opts.offset_y);
         /* region: last `vh` rows of content (padding content when shorter than the overlay) */
-        int need = oh + off;
+        int need = o->fill ? height : oh + off;
         while ((int)lines->n < need && (int)lines->n < height) strvec_push(lines, "");
         int vh = MIN(height, (int)lines->n);
         int vstart = (int)lines->n - vh;

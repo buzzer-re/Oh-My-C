@@ -97,6 +97,9 @@ typedef struct {
  * The TUI does not take ownership. */
 void tui_overlay_show(tui_t *t, tui_component_t *c, const tui_overlay_opts_t *opts);
 void tui_overlay_hide(tui_t *t, tui_component_t *c);
+/* anchor overlay `c` against the full terminal height (content shorter than the screen is padded first), like
+ * omp's overlays over a short transcript */
+void tui_overlay_fill_screen(tui_t *t, tui_component_t *c);
 bool tui_overlay_visible(const tui_t *t);
 
 /* ---------- TUI ---------- */

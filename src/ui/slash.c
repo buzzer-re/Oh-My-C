@@ -3,6 +3,9 @@
  * offered. */
 #include "ui/overlays.h"
 #include "ui/ui.h"
+#include "tools/jobs.h"
+
+#include <math.h>
 
 #include "coding/slashcmd.h"
 
@@ -59,6 +62,42 @@ static char *live_description(void *ud, const char *name) {
         return xstrdup("Plan: off");
     }
     if (!strcmp(name, "plan-review")) return xstrdup(a->plan_mode ? "Plan review: available" : "Plan review: plan mode inactive");
+    if (!strcmp(name, "todo")) { /* the session todo state */
+        size_t pending = 0, active = 0, done = 0, total = 0;
+        json_t *p, *t;
+        pthread_mutex_lock(&a->env->mu);
+        json_arr_foreach(a->env->todo.phases, i, p) json_arr_foreach(json_get(p, "tasks"), k, t) {
+            const char *st = json_get_str(t, "status");
+            total++;
+            pending += str_eq(st, "pending");
+            active += str_eq(st, "in_progress");
+            done += str_eq(st, "completed");
+        }
+        pthread_mutex_unlock(&a->env->mu);
+        if (!total) return xstrdup("Todos: none");
+        return xasprintf("Todos: %zu open (%zu in progress, %zu done)", pending + active, active, done);
+    }
+    if (!strcmp(name, "jobs")) {
+        json_t *snap = jobs_snapshot(a->env->jobs), *x;
+        size_t running = 0, recent = 0;
+        json_arr_foreach(snap, i, x) {
+            if (str_eq(json_get_str(x, "status"), "running")) running++;
+            else recent++;
+        }
+        json_free(snap);
+        if (recent > 5) recent = 5;
+        if (!running && !recent) return xstrdup("Jobs: none");
+        return xasprintf("Jobs: %zu running, %zu recent", running, recent);
+    }
+    if (!strcmp(name, "context")) {
+        if (!a->model || a->model->context_window <= 0) return xstrdup("Context: unavailable");
+        int64_t used = ui_context_used(a), win = a->model->context_window;
+        char *t = slash_locale_int(used), *w = slash_locale_int(win);
+        char *r = xasprintf("Context: %.0f%% (%s/%s)", round((double)used / (double)win * 100), t, w);
+        free(t);
+        free(w);
+        return r;
+    }
     if (!strcmp(name, "goal")) {
         if (a->plan_mode) return xstrdup("Goal: blocked by plan mode");
         return app_goal(a) ? xstrdup(goal_enabled(app_goal(a)) ? "Goal: active" : "Goal: paused") : xstrdup("Goal: off");
@@ -75,31 +114,13 @@ static char *live_description(void *ud, const char *name) {
     if (!strcmp(name, "effort")) /* configuredThinkingLevel(): none for a model without a reasoning dial */
         return xasprintf("Thinking: %s", slash_configured_thinking(a));
     if (!strcmp(name, "clear")) return xstrdup(u->worker_running ? "Clear: unavailable while streaming" : "Clear: drop context, keep session");
-    if (!strcmp(name, "compact") || !strcmp(name, "context")) {
+    if (!strcmp(name, "compact")) {
         json_t *st = app_stats(a);
-        int64_t win = json_get_int(st, "contextWindow", 0), tok = json_get_int(st, "contextTokens", 0);
+        int64_t win = json_get_int(st, "contextWindow", 0);
         double pct = json_get_num(st, "contextPercent", 0);
         json_free(st);
-        if (win <= 0) return xstrdup(!strcmp(name, "compact") ? "Compact: context unavailable" : "Context: unavailable");
-        if (!strcmp(name, "compact")) return xasprintf("Compact: context %d%% used", (int)lround(pct));
-        char *t = slash_locale_int(tok), *w = slash_locale_int(win);
-        char *s = xasprintf("Context: %d%% (%s/%s)", (int)lround(pct), t, w);
-        free(t);
-        free(w);
-        return s;
-    }
-    if (!strcmp(name, "todo")) {
-        int pending = 0, progress = 0, done = 0, total = 0;
-        json_t *ph, *t;
-        json_arr_foreach(a->env->todo.phases, i, ph) json_arr_foreach(json_get_arr(ph, "tasks"), k, t) {
-            const char *st = json_get_str(t, "status");
-            total++;
-            if (str_eq(st, "pending")) pending++;
-            else if (str_eq(st, "in_progress")) progress++;
-            else if (str_eq(st, "completed")) done++;
-        }
-        if (!total) return xstrdup("Todos: none");
-        return xasprintf("Todos: %d open (%d in progress, %d done)", pending + progress, progress, done);
+        if (win <= 0) return xstrdup("Compact: context unavailable");
+        return xasprintf("Compact: context %d%% used", (int)lround(pct));
     }
     if (!strcmp(name, "tools")) {
         size_t n = a->agent->tools.n;

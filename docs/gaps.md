@@ -51,7 +51,7 @@ Ranked by how soon a user hits the gap in a normal interactive session.
    `keybindings.yml` overrides, `/hotkeys` from the live table), but these keys still do nothing: Ctrl+G in the
    main composer (external editor), Ctrl+R (history search), Alt+P (temporary model), Ctrl+Shift+O, Alt+G,
    Ctrl+Shift+V. Like omp's, `/hotkeys` lists them. (WP-6, WP-19, WP-21, WP-29)
-9. **`/context`, `/session`, `/tools`, `/jobs`, `/todo` are one-line notices instead of omp's panels.** `/jobs kill` and the `/todo` subcommands are missing, and `/context` numbers don't add up. (WP-7)
+9. ~~**`/context`, `/session`, `/tools`, `/jobs`, `/todo` are one-line notices instead of omp's panels.**~~ Done (WP-7): context viewer, Session Info overlay with `delete`/`pin`, Available Tools panel, Background Jobs report with `full`/`kill`, the `/todo` verbs, and short reports docked above the editor.
 10. **`/tree` and `/branch` are flat 14-row pickers.** omp has a tree selector (filters, labels, folding) and a rewind selector. (WP-8)
 11. **Custom markdown commands and `/skill:<name>` don't work.** This covers `.omp/.claude/.opencode commands/*.md`. RPC `get_available_commands` advertises `skill:<name>` entries that nothing executes. (WP-9)
 12. **304 of the 402 settings shown in `/settings` have no effect.** This includes `tools.approvalMode`, so the TUI never asks for approval even after the user picks "Always ask". (WP-10, WP-26)
@@ -77,7 +77,7 @@ Every package must:
 | WP-3 Model-facing correctness bugs ✅ (done: out://, cfg://, conflict://N, `thinking: auto`) | Port `out://`, `cfg://`, `conflict://N` (write now refuses unknown schemes; main 44b5fc3). Make `thinking: auto` stop meaning off: resolve it like omp, or to the model default until the WP-12 classifier lands. Verify with `tests/parity/request_diff.sh` / `tool_diff.sh` | `src/tools/write_bash.c`, `src/tools/read.c`, `src/tools/vurl.c`, `src/coding/app.c` (thinking setup), `src/ui/settings.c` | U/internal-urls/{router,out-protocol,cfg-protocol,conflict-protocol}.ts, U/tools/conflict-detect.ts, U/auto-thinking/* |
 | WP-4 Slash-command correctness and shared registry (done: registry `src/coding/slashcmd.c` for TUI/RPC/ACP, argument fixes, aliases, bare exit, argument completion + hints, live descriptions; `/export` with omp's HTML document, `/dump` + sidecar + `all\|anon`, `/advisor dump`; remaining: `/advisor configure`, multi-advisor rosters, shake block regions/artifacts, the 46 builtins omc lacks) | One registry (name, aliases, subcommands, hints, handler) used by TUI, RPC and ACP. Fix `/advisor` (status/dump), `/compact [soft\|remote\|snapcompact] [focus]`, `/shake [elide\|images\|thinking]`, `/handoff [focus]`, `/resume <id>`, `/effort` errors, `/delete` on in-memory sessions. Add aliases (models, rewind, q, providers, status, subagents, worktree, plugin, force:). Bare `exit`/`quit`/`q`. `/export` with omp's HTML viewer (`export/html/template.*` embedded as assets). `/dump all\|anon` + request-JSON sidecar | `src/modes/interactive.c` (`handle_command`, `COMMANDS[]`), `src/ui/slash.c`, `src/coding/app.c`, `src/session/session.c` (`session_export_html`), `assets/` | U/slash-commands/builtin-*.ts, builtin-registry.ts, helpers/*, U/session/compact-modes.ts, shake-types.ts, session-dump-format.ts, U/export/html/* |
 | WP-5 App keybinding layer (done; remaining: handlers for selectTemporary, history.search, editor.external in the composer, local.open, tools.toggleVisibility, pasteTextRaw, approval, agent hub — owned by WP-6/10/19/21/22/29; Alt+L background re-probe; draft saved on Ctrl+D) | All `app.*` actions in the key table; `keybindings.yml` (+ legacy .json migration, profile inherit); `/migrate` copies it; `key_hook` via `tui_kb()`; `/hotkeys` from the live bindings; Ctrl+Z, F5/Alt+R, Ctrl+C (500 ms, no abort), Ctrl+T status + persist, Ctrl+] jumps, Alt+Y kill ring, Alt+L, copy line/prompt, Esc-Esc → `doubleEscapeAction` | `src/tui/keys.c`, `src/config/keybindings.c`, `src/tui/editor.c`, `src/modes/interactive.c`, `src/ui/overlays.c` (`ui_hotkeys_markdown`) | T/app-keybindings.ts, T/keybindings.ts, T/kill-ring.ts, T/hotkeys-markdown.ts, U/modes/controllers/input-controller.ts |
-| WP-7 Report panels | `/context` viewer (category breakdown, browse content); `/session` info overlay + `delete`/`pin`; `/tools` markdown panel incl. xd:// tools; `/jobs` panel + job tree + `full`/`kill`; `/todo` subcommands; `/advisor status\|dump`. Report-panel inline docking for short reports | `src/modes/interactive.c`, `src/ui/overlays.c` (`ui_show_report`), new `src/ui/context.c`, `src/tools/jobs.c`, `src/tools/todo_ask.c` | T/overlays/context-viewer*.ts, session-info-overlay.ts, jobs-panel.ts, job-tree.ts, report-panel.ts; U/modes/controllers/command-controller.ts, todo-command-controller.ts; U/slash-commands/helpers/context-report.ts |
+| WP-7 Report panels ✅ (done: report docking, `/context` viewer, `/session` overlay + `delete`/`pin`, `/tools`, `/jobs [full\|kill]`, `/todo` verbs; remaining: tokenizer-exact counts (omc estimates ~4.1 chars/token), snapcompact savings lines, multi-account `/session pin` selector, LSP rows in Session Info, nested subagent job tree, native jobs sheet / detail pane, live todo HUD for `/todo expand\|collapse`, RPC/ACP text handlers (`handle`) for /todo /session /jobs /context /tools) | `/context` viewer (category breakdown, browse content); `/session` info overlay + `delete`/`pin`; `/tools` markdown panel incl. xd:// tools; `/jobs` panel + job tree + `full`/`kill`; `/todo` subcommands; `/advisor status\|dump`. Report-panel inline docking for short reports | `src/modes/interactive.c`, `src/ui/overlays.c` (`ui_show_report`), new `src/ui/context.c`, `src/tools/jobs.c`, `src/tools/todo_ask.c` | T/overlays/context-viewer*.ts, session-info-overlay.ts, jobs-panel.ts, job-tree.ts, report-panel.ts; U/modes/controllers/command-controller.ts, todo-command-controller.ts; U/slash-commands/helpers/context-report.ts |
 | WP-8 Tree and rewind selectors | `/tree` tree selector (glyphs, filters / `treeFilterMode`, labels, search, fold, branch prev/next); rewind selector for `/branch`, `/rewind`, Esc-Esc; optional branch summary prompt (`branchSummary.enabled`) | `src/modes/interactive.c` ("tree"/"branch"), new `src/ui/tree.c`, `src/coding/app.c` | T/overlays/tree-selector.ts, rewind-selector.ts; U/modes/controllers/selector-controller.ts; A/compaction/branch-summarization.ts |
 | WP-9 Custom and skill commands | Discover `commands/*.md` (omp/Claude/OpenCode, user + project, `commands.enable*`) with `$ARGUMENTS`/frontmatter. `/skill:<name>` invocation + completion (`skills.enableSkillCommands`). MCP prompts as commands. Autocomplete entries. Execution from RPC `prompt` / ACP `session/prompt` (uses the WP-4 registry) | `src/coding/discovery.c`, `src/modes/interactive.c`, `src/ui/slash.c`, `src/tui/editor.c`, `src/modes/rpc.c`, `src/modes/acp.c` | U/capability/slash-command.ts, U/extensibility/{custom-commands,skills.ts,slash-commands.ts}, U/modes/skill-command.ts, U/modes/prompt/skill-tokens.ts, U/discovery/{claude,opencode}.ts |
 
@@ -165,15 +165,15 @@ omc-only command (not in omp): `/migrate`.
 | /browser | builtin-collaboration.ts | — | ⛔ | browser eval prelude (Chromium/CDP, puppeteer) |
 | /copy | builtin-collaboration.ts, overlays/copy-selector.ts | copies last answer | 🟡 | omp opens a picker of text/code blocks from the conversation |
 | /open | builtin-collaboration.ts | — | ❌ | open last link in browser |
-| /todo [sub] | builtin-session.ts, todo-command-controller.ts | prints list | 🟡 | subcommands edit/copy/expand/collapse/export/import/append/start/done/drop/rm missing |
-| /session [info\|delete\|pin] | builtin-session.ts, session-info-overlay.ts | info notice | 🟡 | plain notice instead of info overlay; `delete`, `pin` subcommands missing |
-| /jobs [full\|kill] | builtin-session.ts, jobs-panel.ts | one-line-per-job notice | 🟡 | no jobs panel/job tree, no `full`, no `kill` |
+| /todo [sub] | builtin-session.ts, todo-command-controller.ts | `src/ui/todocmd.c` | 🟡 | every verb ported (`user_todo_edit` entry + developer reminder); `expand`/`collapse` only record the flag (no live todo HUD yet) |
+| /session [info\|delete\|pin] | builtin-session.ts, session-info-overlay.ts | `src/ui/panels.c` | 🟡 | Session Info overlay, `delete` (confirm → selector), `pin`; omc keeps one credential per provider, so `pin` lists it as text instead of omp's account selector; no LSP rows; `Build:` is the running version (entries are not stamped) |
+| /jobs [full\|kill] | builtin-session.ts, jobs-panel.ts | `src/ui/panels.c` | ✅ | Background Jobs report (`Running:` count, job rows, labels / `full` commands), `kill <id>\|all`; omc jobs have no subagent owners, so the job tree is flat; the native jobs sheet is ⛔ (text mode only) |
 | /usage [show\|reset] | builtin-session.ts, usage-dashboard.ts | token/cost notice | 🟡 | **different feature**: omp shows provider rate-limit usage/quotas per credential + reset selector; omc prints session token totals |
 | /stats | builtin-session.ts, packages/stats | — | ❌ | local stats dashboard (HTTP server + web UI over session files) |
 | /changelog [full\|last N] | builtin-session.ts | — | ❌ | needs an embedded CHANGELOG |
 | /hotkeys | builtin-session.ts | `ui_overlay_hotkeys` | ✅ | |
-| /tools | builtin-session.ts, command-controller `handleToolsCommand` | notice | 🟡 | omp shows an "Available Tools" markdown panel incl. xd:// tools |
-| /context | builtin-session.ts, overlays/context-viewer*.ts | one-line notice | 🟡 | omp opens a fullscreen context viewer (breakdown by category, browse content) |
+| /tools | builtin-session.ts, command-controller `handleToolsCommand` | `ui_tools_command` | ✅ | Available Tools markdown table incl. `xd://` devices |
+| /context | builtin-session.ts, overlays/context-viewer*.ts | `src/ui/context.c` | 🟡 | full viewer (summary, occupancy map, legend, category previews, entry pages); counts are omc's ~4.1 chars/token estimate (omp: native tokenizer); snapcompact savings lines missing |
 | /extensions (status) | builtin-session.ts | — | ❌ | Extension Control Center (skills/rules/MCP/hooks/tools inventory; JS extensions part ⛔) |
 | /agents | builtin-session.ts, overlays/agents-hub.ts | — | ❌ | per-agent model/prewalk/advisor hub |
 | /git | builtin-session.ts | — | ❌ | git UI (split diff, staging, commit composer) |
@@ -508,13 +508,13 @@ floating list; Ctrl+R does nothing although `/hotkeys` lists it (as omp does); E
 | plan-save-overlay | plan-save-overlay.ts | "Save plan & quit" | `ui_plan_save_*` (`src/ui/planreview.c`) | ✅ | tiny-model filename suggestion |
 | approval-dialog | approval-dialog.ts, tools/approval*.ts | tool call under `tools.approvalMode`/`tools.approval` | — (ACP only, `src/modes/acp.c:222`) | ❌ | `/hotkeys` lists "Approve a pending tool call" |
 | ask-dialog | ask-dialog.ts | `ask` tool | `src/ui/ask.c` | ✅ | cell-verified |
-| context-viewer (+format, overview) | context-viewer*.ts | `/context` | notice | 🟡 | two-line notice; its total contradicts its own system/tools estimate line |
+| context-viewer (+format, overview) | context-viewer*.ts | `/context` | `src/ui/context.c` | 🟡 | layout, map, legend, previews, entry view match; token estimates differ slightly (no native tokenizer) |
 | copy-selector + copy-targets | copy-selector.ts, copy-targets.ts | `/copy [code\|cmd\|link]` | last answer via OSC 52 | 🟡 | no picker, no targets; silent when nothing to copy |
 | tree-selector | tree-selector.ts (1794) | `/tree` | `show_picker(5)` | 🟡 | 14-row list; no filters, labels, search, fold, non-message entries |
 | rewind-selector | rewind-selector.ts (1131) | Esc-Esc, `/branch`, `/rewind` | `/branch` generic picker | 🟡 | no transcript outline / sibling strip; Esc-Esc unbound; `/rewind` alias missing |
-| jobs-panel + job-tree | jobs-panel.ts, job-tree.ts | `/jobs`, jobs pill | notice | 🟡 | no tree, `Running:` count, `full`, `kill`, detail pane |
+| jobs-panel + job-tree | jobs-panel.ts, job-tree.ts | `/jobs`, jobs pill | `src/ui/panels.c` | 🟡 | text-mode report ✅ (flat tree: no subagent-owned jobs in omc); the jobs sheet/detail pane is native-only |
 | btw-panel, btw-history(-panel) | btw-*.ts | `/btw` | `src/ui/btw.c` | ✅ | no image paste in follow-ups |
-| session-info-overlay | session-info-overlay.ts | `/session` | notice | 🟡 | missing provider/auth section, tool calls, edit rejections, LSP/MCP servers; `delete`/`pin` subs |
+| session-info-overlay | session-info-overlay.ts | `/session` | `src/ui/panels.c` | 🟡 | overlay ✅ (file/ID/build, provider + auth source, messages, append-only, tokens, cost, MCP); edit rejections, routed models and LSP rows missing |
 | usage-dashboard / usage-display / usage-row | usage-*.ts | `/usage`; per-turn row (`display.showTokenUsage`) | token totals notice | 🟡/❌ | different feature (provider quotas + heatmap); no provider usage fetchers in `src/`; per-turn row ❌ |
 | reset-usage-selector | reset-usage-selector.ts | `/usage reset` | — | ❌ | |
 | history-search | history-search.ts | Ctrl+R | — | ❌ | history already loaded (`history_load`) |
@@ -524,7 +524,7 @@ floating list; Ctrl+R does nothing although `/hotkeys` lists it (as omp does); E
 | agents-hub | agents-hub.ts | `/agents` | — | ❌ | |
 | agent-transcript-viewer | agent-transcript-viewer.ts | agent hub | — | ❌ | |
 | running-subagent-badge | running-subagent-badge.ts | status line | `statusline.c` `subagents` segment returns NULL | ❌ | |
-| report-panel | report-panel.ts | `/tools`, `/jobs full`, `/advisor status`, `/changelog`, `/hotkeys`, `/memory` | `ui_show_report` (`src/ui/overlays.c`) | 🟡 | always fullscreen (omp docks short reports inline); only `/hotkeys`, `/memory` use it |
+| report-panel | report-panel.ts | `/tools`, `/jobs full`, `/advisor status`, `/changelog`, `/hotkeys`, `/memory` | `src/ui/report.c` | ✅ | docks above the editor when it fits (Esc dismisses), else a full-screen page; used by `/tools`, `/jobs`, `/advisor status`, `/hotkeys`, `/memory` |
 | pause-screen | pause-screen.ts | `/pause` | — | ❌ | |
 | error-banner | error-banner.ts | provider error | `ui_error_banner_show` (`src/ui/chat.c`) | ✅ | |
 | cleanse-panel, omfg-panel | *.ts | `/cleanse`, `/omfg` | — | ❌ | TTSR engine exists (`src/coding/ttsr.c`) |
@@ -553,11 +553,11 @@ floating list; Ctrl+R does nothing although `/hotkeys` lists it (as omp does); E
 
 | Handler | Upstream | omc | Status | Notes |
 |---|---|---|---|---|
-| handleSessionCommand / handleContextCommand / handleUsageCommand / handleJobsCommand / handleToolsCommand | command-controller.ts | `handle_command` notices | 🟡 | see overlays above |
+| handleSessionCommand / handleContextCommand / handleUsageCommand / handleJobsCommand / handleToolsCommand | command-controller.ts | `src/ui/panels.c`, `context.c` | 🟡 | session/context/jobs/tools ported (see overlays above); `/usage` is WP-24 |
 | handleHotkeysCommand | command-controller.ts | `ui_overlay_hotkeys` | ✅ | built from the live bindings (`ui_hotkeys_markdown`), identical to omp with defaults and with user overrides; rows for actions without a handler yet (Ctrl+R, Alt+P, Ctrl+Shift+O, Alt+O, approve) stay, as in omp |
 | handleExportCommand | command-controller.ts | `/export` | 🟡 | placeholder HTML (see §1); no open-in-browser |
 | handleDumpCommand / All / Anon | command-controller.ts | `/dump` | 🟡 | no LLM-request JSON sidecar; no `all`/`anon` |
-| handleAdvisorStatus/Dump, showAdvisorConfigure | command-controller.ts | `/advisor` | 🟡 | **bug: any argument other than on/off toggles the advisor** (`/advisor status` switches it) |
+| handleAdvisorStatus/Dump, showAdvisorConfigure | command-controller.ts | `/advisor` | 🟡 | `status` report (docks like any command report) and `dump [raw]` ported (WP-4/WP-7); `configure` missing |
 | handleDebugTranscriptCommand / showDebugSelector | command-controller.ts | — | ❌ | |
 | handleShareCommand, handleTraceCommand | command-controller.ts | — | ⛔ | hosted share / stats web dashboard |
 | handleChangelogCommand | command-controller.ts | — | ❌ | |
@@ -574,7 +574,7 @@ floating list; Ctrl+R does nothing although `/hotkeys` lists it (as omp does); E
 | handleHandoffCommand | command-controller.ts | `/handoff` | 🟡 | custom instructions dropped |
 | mcp-command-controller | mcp-command-controller.ts (2343) | `mcp_status` | 🟡 | every subcommand missing; `mcp_oauth_login/logout` exist in `src/mcp/oauth.c` |
 | ssh-command-controller | ssh-command-controller.ts | — | ❌ | `src/tools/ssh.c` already reads `ssh.json` |
-| todo-command-controller | todo-command-controller.ts | read-only notice | 🟡 | all subcommands missing |
+| todo-command-controller | todo-command-controller.ts | `src/ui/todocmd.c` | ✅ | all verbs; `expand`/`collapse` wait for the live todo HUD |
 | live-command-controller | live-command-controller.ts | — | ⛔ | realtime voice audio I/O |
 | cleanse / omfg / tan controllers | *.ts | — | ❌ | |
 | tool-call-block | tool-call-block.ts | `toolcard_start` | ✅ | `out://` reply writes draw as assistant prose (tc_misc.c) |

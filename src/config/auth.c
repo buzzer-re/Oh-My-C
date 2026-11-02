@@ -221,6 +221,14 @@ char *auth_get_api_key(const char *provider) {
     return r;
 }
 
+bool auth_has_runtime_key(const char *provider) {
+    pthread_mutex_lock(&g_mu);
+    load();
+    bool ok = hmap_get(&g_runtime, provider) != NULL;
+    pthread_mutex_unlock(&g_mu);
+    return ok;
+}
+
 bool auth_has_credentials(const char *provider) {
     pthread_mutex_lock(&g_mu);
     load();
