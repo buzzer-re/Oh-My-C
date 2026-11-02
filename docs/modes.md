@@ -1,29 +1,54 @@
 # Run modes
 
-`omc_main()` (`src/cli/cli.c`, omp `cli.ts`/`main.ts`) parses flags and runs a subcommand, or it
-creates one `app_t` and hands it to a mode in `src/modes/`. Every mode drives the same session
-runtime ([agent.md](agent.md)). They differ only in how input arrives and how events leave. For which
-commands are complete, see [status.md](status.md) (Modes & UI).
+`omc_main()` (`src/cli/cli.c`, omp `cli.ts`/`main.ts`) routes argv to a subcommand or to the launch
+command, which creates one `app_t` and hands it to a mode in `src/modes/`. Every mode drives the same
+session runtime ([agent.md](agent.md)). They differ only in how input arrives and how events leave. For
+which commands are complete, see [status.md](status.md) (Modes & UI).
 
 ## Command line
 
+`omc --help` and `omc <command> --help` print omp's help layout (USAGE / ARGUMENTS / FLAGS / EXAMPLES /
+COMMANDS, then the environment and tool notes) listing only what omc implements.
+
 ```
-omc [options] [prompt...]           interactive (TUI); prompt optional; @file args inline files
-omc -p [options] <prompt...>        print mode (piped stdin is appended and implies print)
+omc [flags] [messages...]           interactive (TUI); each message is its own prompt; @file / @image args
+omc -p [flags] <messages...>        print mode (piped stdin leads the first prompt; no TTY implies print)
 omc --mode json -p <prompt>         print mode, JSON event lines
-omc --mode rpc                      JSONL RPC on stdin/stdout
-omc --mode acp                      Agent Client Protocol on stdio
+omc --mode rpc | rpc-ui             JSONL RPC on stdin/stdout
+omc acp | --mode acp                Agent Client Protocol on stdio
+omc <command> [args]                subcommand (see below)
 ```
 
-Options: `-m/--model <pattern[:effort]|@role>`, `--provider`, `--api-key`, `--thinking`,
-`-c/--continue`, `-r/--resume <id|path>`, `--fork`, `--no-session`, `--session-dir`, `--cwd`,
-`--tools a,b`, `--no-tools`, `--system-prompt`, `--append-system-prompt`, `--no-context-files`,
-`--no-skills`, `--no-rules`, `--config <file>` (repeatable settings overlay), `--print-thoughts`,
-`--max-turns`, `--plan-mode`, `--goal <objective>`, `-v`, `-h`.
+Routing (`src/cli/args.c`, port of `cli-commands.ts resolveCliArgv`): a registered command name or alias
+runs it, even behind leading launch flags (`omc --cwd x models` → `models`, launch-only flags dropped);
+omp's plugin verbs (`list`, `remove`, `marketplace add …`) and omp commands omc does not port (`stats`,
+`update`, `plugin`, `commit`, `usage`, `session`, `ttsr`, …) are refused with `error: …` (exit 1) instead of
+reaching the model as a prompt; everything else is the launch command (`omc launch <words>` forces that).
 
-Subcommands: `models [filter]`, `login [provider]`, `logout`, `auth set|list|remove`,
-`mcp list|login|logout`, `sessions [--all]`, `export <session> [out.html|md]`,
-`config get|set|unset|list|path`, and direct tool runs: `read`, `grep`, `glob`, `bash`.
+Launch flags (`src/cli/args.c`, port of `cli/args.ts` + `flag-tables.ts`; `--flag=value` everywhere,
+`--` ends options): `--model`, `--smol/--slow/--plan` (or `PI_SMOL_MODEL`/`PI_SLOW_MODEL`/`PI_PLAN_MODEL`;
+runtime `modelRoles` overrides), `--models a,b` (scope: the first in-scope model starts a fresh session,
+explicit `:level` honored), `--provider`, `--api-key`, `--thinking`, `--goal`, `--plan-yolo[-into]`,
+`--system-prompt`, `--system-prompt-template <file>` (Handlebars, replaces the bundled template; a project or
+agent-dir `SYSTEM_TEMPLATE.md` is discovered like `SYSTEM.md`), `--append-system-prompt`, `--cwd`, `--mode`,
+`--config` (repeatable), `-p`, `-c`, `-r/--resume [id|path]` (no value: the session picker; Esc prints
+`No session selected`), `--restore <session>` (resume, then go on with the interrupted turn:
+`src/coding/restore.c`), `--session-dir`, `--no-session`, `--fork`, `--tools`, `--no-tools`, `--no-lsp`,
+`--hide-thinking`, `--advisor`, `--skills <globs>` (`skills.includeSkills`), `--no-skills`, `--no-rules`,
+`--no-context-files`, `--export <session> [out]`, `--no-title`, `--print-thoughts`, `--max-time 600|10m|1h`
+(runs stop at the deadline), `--warn-cost` / `--max-cost` (`session.warnCost` / `session.maxCost`:
+`src/coding/costgate.c`; a refused request ends print mode with exit 3), `--auto-approve`/`--yolo`,
+`--approval-mode`. omc extras (not in the help): `--plan-mode`, `--max-turns`. Unknown flags and bad enum
+values exit 2 with omp's `Error: …` lines.
+
+Commands (`src/cli/commands.c`; parsed by `src/cli/cmd.c`, a port of pi-utils `Command.parse` over
+node:util `parseArgs` strict mode, with its `error: … / USAGE / Run \`omc <cmd> --help\`` reports):
+`acp`, `agents unpack`, `auth export|import`, `completions bash|zsh|fish` (+ hidden `__complete`),
+`config list|get|set|reset|path` (`--json`, `--scope global|project`), `grep`, `login [provider]`,
+`models [ls|find|refresh|<provider>]` (`--json`, `--kind`), `read`, `search` (`q`, `web-search`), `setup
+[python]` (no component: the first-run wizard), `ssh add|remove|list`, `token <provider>`, `worktree
+list|clear|add` (`wt`), `migrate`. Hidden omc extras: `mcp list|login|logout`, `export <session> [out]`,
+`sessions`, `logout`, `glob`, `bash`, `version`.
 
 ## Interactive (`modes/interactive.c`)
 

@@ -34,10 +34,12 @@ omc "fix the failing test"          # interactive with an initial prompt
 omc -p "summarize src/"             # print mode
 omc --mode json -p "..."            # JSON event stream
 omc --mode rpc                      # JSONL RPC over stdin/stdout (omp protocol)
-omc -c                              # continue the last session;  -r <id> resumes one
+omc -c                              # continue the last session;  -r <id> resumes one, -r alone picks
+omc --model=opus @shot.png "why?"   # pick a model; @file / @image arguments join the first prompt
 omc login anthropic                 # OAuth (Claude Pro/Max, ChatGPT/Codex, ...)
-omc models opus                     # list models
-omc read src/main.c                 # run the read tool directly (also: grep, glob)
+omc models opus                     # list available models (also: models find <text>, --json)
+omc read src/main.c                 # what the read tool returns (also: grep, search)
+omc --help                          # every flag and command (omc <command> --help for one)
 ```
 
 Configuration lives in `~/.omc/agent/` (`config.yml`, `models.yml`, `auth.json`, `mcp.json`,

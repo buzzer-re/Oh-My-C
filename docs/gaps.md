@@ -93,7 +93,7 @@ Every package must:
 | WP-14 Provider knobs and cache warming | Prompt cache warmer (`providers.cacheWarming`); service tiers `/fast`, `/slow`, `tier.*`, `--service-tier`; `/extended-context` + `extendedContext`; stream first-event/idle timeouts; `providers.maxInFlightRequests`; RPC `set_fast_mode` / `set_slow_mode` / `set_cache_warming` | `src/coding/app.c`, `src/ai/provider_*.c`, `src/ai/ai_common.c`, `src/modes/rpc.c` | U/session/cache-warmer.ts, anthropic-slow-mode.ts, model-controls.ts; U/slash-commands/builtin-modes.ts (fast/slow/extended-context) |
 | WP-15 RPC wire parity | `messageId` + `partial` + start/done/error on message events, delta filter; session events (compaction, retry, model/thinking changed, goal_updated, queue_update, available_commands_update, …); response shapes (set_model, new/switch/open/branch/fork, get_entries leafId/since, get_messages_page cursor, get_session_stats, compact, handoff, btw); full `get_state`; `extension_ui_request`/`_response` so `ask` works; login/logout; async `bash` so `abort_bash` works; protocol v2 + `rpc_chunk`; subagent frames; mark status.md 🟡 | `src/modes/rpc.c`, `src/agent/agent.c` (`agent_event_to_json`), `src/coding/app.c` (structured events beside `notice`), `src/modes/print.c`, `src/tools/todo_ask.c` | U/modes/rpc/{rpc-types,rpc-mode,rpc-session-events,rpc-messages,rpc-compat,rpc-frame}.ts, U/session/agent-session-events.ts |
 | WP-16 ACP parity | `omc acp` subcommand; slash commands in `session/prompt`; `session/resume`, `close`, `fork`, `set_config_option`, `_session/steering`; `configOptions` + `config_option_update` / `session_info_update` / `available_commands_update`; `mcpServers` in new/load; tool-call history replay; structured diff/terminal tool content; `usage_update {size,used,cost}`; errors → `end_turn`/`refusal`; fs/terminal/elicitation client bridges | `src/modes/acp.c`, `src/cli/cli.c` | U/modes/acp/{acp-agent,acp-event-mapper,acp-client-bridge}.ts, U/slash-commands/acp-builtins.ts, U/commands/acp.ts |
-| WP-17 CLI flags and subcommands | `--flag=value`; unknown subcommand-shaped words become an error instead of a prompt; `-r` without a value opens the picker; `--restore`, `--export`, `--models`, `--smol/--slow/--plan`, `--hide-thinking`, `--advisor`, `--max-time/--max-cost/--warn-cost`, `--add-dir`, `--no-lsp`, `--skills`, `--system-prompt-template`, `--mode rpc-ui`; `@image` args. Subcommands: commit, completions, token, usage, setup, session, worktree, agents, ttsr, ssh, search. Fill gaps in models/grep/auth/config | `src/cli/cli.c`, `src/main.c` | U/cli/{args,flag-tables}.ts, U/cli-commands.ts, U/commands/*.ts, U/main.ts |
+| WP-17 CLI flags and subcommands | **Done:** `--flag=value`, omp's routing (reserved words / unported omp commands error, hoisting, `launch`), strict subcommand parser + omp help pages, `-r` picker, `--restore` (turn only), `--export`, `--models` (startup model), `--smol/--slow/--plan`, `--hide-thinking`, `--advisor`, `--max-time/--max-cost/--warn-cost`, `--no-lsp`, `--skills`, `--system-prompt-template`, `--mode rpc-ui`, `@image` args; commands acp, agents, auth export/import, completions/__complete, config, grep, login, models, read, search, setup (wizard, python), ssh, token, worktree. **Remaining:** `--add-dir` (WP-21), `--restore` subagent revival, `--models` notice/role scoping, commit, usage (WP-24), session pack/unpack/moved/lease, ttsr, setup speech (⛔) | `src/cli/*.c` | U/cli/{args,flag-tables}.ts, U/cli-commands.ts, U/commands/*.ts, U/main.ts |
 
 ### P2 — specific workflows
 
@@ -665,42 +665,58 @@ U = `packages/coding-agent/src`. status.md marks RPC and ACP ✅; both are 🟡 
 | usage_update | 🟡 | **wrong shape**: sends message `usage`; ACP expects `{size,used,cost:{amount,currency}}` |
 | available_commands_update, config_option_update, session_info_update | ❌ | |
 
-### 6d. CLI flags (U/cli/args.ts, flag-tables.ts; omc `src/cli/cli.c:omc_main`)
+### 6d. CLI flags (U/cli/args.ts, flag-tables.ts; omc `src/cli/args.c`, launch in `src/cli/cli.c`)
+
+WP-17 ported parseArgs: one flag table (string / optional-value / value-less flags), `--flag=value`, `--`,
+`@file` args (quotes stripped), unknown flags and invalid enum values reported after the launch checks with
+omp's `Error: …` + `Run \`omc --help\`` lines (exit 2). Messages after the first are prompts of their own.
 
 | Flag | Status | Notes |
 |---|---|---|
-| `--flag=value` syntax | ❌ | `--model=x` → "unknown option"; omp's own help uses this form |
-| --model, --provider, --api-key, --thinking, --cwd, --config, --session-dir, --system-prompt, --append-system-prompt, --tools, --no-tools, --no-session, --no-context-files, --no-skills, --no-rules, --no-title, --print-thoughts, -p/--print, -c/--continue, --fork, --goal, --mode text/json/rpc/acp, -h, -v, piped stdin | ✅ | |
-| -r/--resume/--session | 🟡 | value required; omp opens a picker without one |
-| @file arguments | 🟡 | always inlined as text; images not attached; quotes not stripped |
-| --restore, --mode rpc-ui, --models, --export, --hide-thinking, --advisor, --service-tier, --system-prompt-template, --skills | ❌ | several have settings behind them already |
-| --smol / --slow / --plan (role model shortcuts) | ❌ | omc's `--plan-mode` means something else; `-m @role` works |
-| --auto-approve/--yolo, --approval-mode | ✅ | runtime override like omp; an invalid mode exits 2 with omp's error |
-| --max-time, --max-cost, --warn-cost | ❌ | omc-only `--max-turns` |
-| --add-dir, --allow-home, --profile, --alias, --from-claude, --from-codex, --no-lsp, --no-pty, --wait-async, --external-thinking, --prewalk*, --provider-session-id, --prompt-cache-key | ❌ | |
+| `--flag=value` syntax | ✅ | |
+| --model, --provider, --api-key, --thinking, --cwd, --config, --session-dir, --system-prompt, --append-system-prompt, --tools, --no-tools, --no-session, --no-context-files, --no-skills, --no-rules, --no-title, --print-thoughts, -p/--print, -c/--continue, --fork, --goal, --mode text/json/rpc/acp, -h, -v, piped stdin | ✅ | omp's `--goal` / `--cwd` / `--api-key` / no-TTY errors; `-m` is gone like in omp |
+| -r/--resume/--session | ✅ | no value: the session picker at startup (Esc → `No session selected`); `Session "x" not found.` + hint; omc's picker overlays the fresh TUI instead of running before it |
+| @file arguments | ✅ | text files as `<file name=…>`, images attached (resized, dimension note), missing → `Error: File not found` (exit 1), oversized skipped; no markit document conversion, no video contact sheets |
+| --restore | 🟡 | resumes, then appends interrupted tool results + the abort record and retries (`src/coding/restore.c`); interrupted subagents are not revived (task/restore.ts) |
+| --mode rpc-ui | 🟡 | accepted, runs RPC; no extension-UI channel (the ask tool stays off) |
+| --models | 🟡 | scope picks the startup model (saved default when in scope, explicit `:level`); no `Model scope:` notice, Ctrl+P still cycles roles (as omp 18.14.2), scope not applied to role resolution |
+| --export, --hide-thinking, --advisor, --no-lsp, --skills, --system-prompt-template, --smol/--slow/--plan (+ PI_*_MODEL) | ✅ | runtime overrides like omp; `SYSTEM_TEMPLATE.md` discovery |
+| --max-time | 🟡 | deadline aborts the running turn and stops new requests; print mode does not wait for background jobs (no `--wait-async`) |
+| --max-cost, --warn-cost | ✅ | `src/coding/costgate.c` (warn once, refuse the next request, print exit 3); subagents count through the parent's total |
+| --auto-approve/--yolo, --approval-mode | ✅ | |
+| omc extras --plan-mode, --max-turns | n/a | not in `--help` |
+| --add-dir | ❌ | needs the multi-root workspace (WP-21) |
+| --service-tier, --allow-home, --profile, --alias, --from-claude, --from-codex, --no-pty, --wait-async, --external-thinking, --prewalk*, --provider-session-id, --prompt-cache-key | ❌ | reported as unknown flags |
 | --hook, -e/--extension, --trusted-extension, --no-extensions, --plugin-dir, --no-ui | ⛔ | JS/Bun extension runtime |
+| print mode `Working...` stderr line | ❌ | omp writes it before the first text-mode turn (`src/modes/print.c`) |
 
-### 6e. CLI subcommands (U/cli-commands.ts, U/commands/*)
+### 6e. CLI subcommands (U/cli-commands.ts, U/commands/*; omc `src/cli/commands.c` + `sub_*.c`)
 
-Unknown subcommand-shaped words (`token`, `stats`, `commit`, `setup`, …) start the TUI with the word as
-the prompt.
+Routing ports resolveCliArgv: subcommands behind leading flags are hoisted, omp's reserved plugin verbs
+error (`error: \`omc list\` is not a top-level command. Run \`omc launch list\` …`, without omp's pointer to
+the plugin manager omc lacks), omp commands omc does not port error with `is not available in omc` (exit 1),
+`omc launch …` forces a prompt. Strict parsing, help pages and usage errors port pi-utils/cli.ts.
 
 | Subcommand | Status | Notes |
 |---|---|---|
-| acp | ❌ | **`omc acp` starts an interactive session with prompt "acp"**; only `--mode acp` works (editor integrations call `omp acp`) |
-| models | 🟡 | no ls/find/refresh/`<provider>`, `--json`, `--kind`; `--help` taken as a filter |
-| login | 🟡 | no picker without a provider |
-| config | 🟡 | no `init-xdg`, `--json`, `--scope project` |
-| read | ✅ | |
-| grep | 🟡 | no -g/-l/-C/-f/-c/--no-gitignore; `--help` taken as pattern |
-| auth | 🟡 | upstream is export/import JSON; omc has set/list/remove |
-| commit, completions/__complete, token, usage, setup, session (pack/unpack/moved/lease), worktree/wt, agents, ttsr, ssh, search/q/web-search | ❌ | |
-| stats | ❌ | local dashboard server |
-| gc, shell, ps, find, compress, toks, render, play, anonymize, images, grievances, git, cleanse, gallery, bench, if-bench, dry-balance, auth-broker, auth-gateway | ❌ | low impact |
+| acp | ✅ | |
+| models | ✅ | ls/find/refresh/`<provider>`, box tables, `--json`, `--kind`, `--config`; no `-e`/`--no-extensions` (⛔) |
+| login | ✅ | numbered picker, prompts on stdin, `Logged in to <name>` + store path |
+| config | ✅ | list (registry order/tabs, credentials redacted), get/set/reset (`--json`, shadowing notes), `--scope`; no `init-xdg` |
+| read, grep, search/q/web-search | ✅ | grep through `src/text/search.c`; search renders the web_search card (web engines only; `--model web/<engine>`) |
+| auth | ✅ | export/import JSON (one credential per provider in auth.json) |
+| token | ✅ | `--list`/`--account` over the single stored OAuth credential; `--force-refresh` ignored |
+| completions, __complete | ✅ | bash/zsh/fish from the command table (`_omc_*` functions) |
+| agents unpack | ✅ | byte-identical files |
+| ssh | ✅ | |
+| setup | 🟡 | no component: the first-run wizard; `python` probe; `speech` ⛔ |
+| worktree/wt | 🟡 | list/clear/add over ~/.omc/wt; add is a plain `git worktree add` (no clone-first backends) |
+| session (pack/unpack/moved/lease), ttsr, commit, usage | ❌ | refused; usage needs WP-24's fetchers, commit the agentic commit pipeline |
+| stats, gc, shell, ps, find, compress, toks, render, play, anonymize, images, grievances, git, cleanse, gallery, bench, if-bench, dry-balance, auth-broker, auth-gateway | ❌ | refused |
 | plugin/plugins/install, update | ⛔ | npm/Bun packages, self-update of the npm distribution |
 | share, join, collab, clip, stream, skill/skills | ⛔ | hosted relay/stream/Skillshare services |
-| say, predict, tiny-models, browser-relay, launch | ⛔ | local TTS/ML runtimes, Chrome CDP relay, internal |
-| omc-only: mcp, migrate, logout, sessions, export, glob, bash, version, help | n/a | |
+| say, predict, tiny-models, browser-relay | ⛔ | local TTS/ML runtimes, Chrome CDP relay |
+| omc-only: migrate (listed), mcp, logout, sessions, export, glob, bash, version | n/a | hidden from `--help` except migrate |
 
 ## 7. Compaction and background systems
 
