@@ -6,13 +6,13 @@
 make                 # build/omc (parallel builds with -j work)
 make test            # unit tests + e2e suite (needs python3 for the mock servers)
 make lib             # optional: build/libomc.a, build/libomc.so.0, build/omc.pc
-make install PREFIX=/usr/local        # installs bin/omc
-make install-lib PREFIX=/usr/local    # installs include/omc.h, lib/libomc.{a,so*}, lib/pkgconfig/omc.pc
+make install         # installs ~/.local/bin/omc (PREFIX defaults to $HOME/.local)
+make install-lib     # installs PREFIX/include/omc.h, PREFIX/lib/libomc.{a,so*}, PREFIX/lib/pkgconfig/omc.pc
 make clean
 ```
 
 Variables: `CC`, `OPT` (default `-O2`), `CFLAGS` (default `$(OPT) -g`), `PKG` (pkg-config),
-`PREFIX`, `DESTDIR`, `OBJCOPY`.
+`PREFIX` (default `$HOME/.local`; use `sudo make install PREFIX=/usr/local` for a system-wide install), `DESTDIR`, `OBJCOPY`.
 
 The build must stay free of warnings. On the shared development filesystem, file timestamps can be
 skewed, so use `make -B -j8` to force a full rebuild (see [AGENTS.md](../AGENTS.md)).

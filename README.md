@@ -22,7 +22,7 @@ omp's prompts (system prompt, tool descriptions, compaction, rules) are embedded
 ```sh
 make            # -> build/omc  (needs a C11 compiler, OpenSSL and zlib headers)
 make test       # unit tests + end-to-end tests against a local mock model server
-sudo make install PREFIX=/usr/local
+make install    # -> ~/.local/bin/omc  (system-wide: sudo make install PREFIX=/usr/local)
 ```
 
 ## Use
@@ -49,7 +49,7 @@ like in omp. Sessions are stored as omp-compatible JSONL under `~/.omc/agent/ses
 
 ```sh
 make lib            # -> build/libomc.a, build/libomc.so.0, build/omc.pc  (public API: include/omc.h)
-sudo make install-lib PREFIX=/usr/local
+make install-lib    # -> ~/.local/{include,lib}  (system-wide: sudo make install-lib PREFIX=/usr/local)
 cc app.c $(pkg-config --cflags --libs omc)        # or: -Iinclude build/libomc.a -lssl -lcrypto -lz -lpthread -lm
 ```
 

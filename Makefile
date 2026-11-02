@@ -189,7 +189,8 @@ install: $(BIN)
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
 	install -m755 $(BIN) $(DESTDIR)$(PREFIX)/bin/omc
 
-PREFIX ?= /usr/local
+# per-user install like omp's (~/.local/bin/omc); `make install PREFIX=/usr/local` (with sudo) for a system-wide one
+PREFIX ?= $(HOME)/.local
 
 clean:
 	rm -rf build
