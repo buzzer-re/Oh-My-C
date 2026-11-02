@@ -1257,6 +1257,7 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
         }
         if (has_tools) {
             paused_continuations = 0;
+            if (a->hooks.turn_boundary && !a->cancel) a->hooks.turn_boundary(a->hooks.ud, a, assistant);
             continue;
         }
         /* non-terminal stop (stopDetails.type pause_turn): re-sample so the provider continues the turn */

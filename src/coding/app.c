@@ -7,6 +7,7 @@
 #include "coding/thinkloop.h"
 #include "coding/title.h"
 #include "coding/branchsum.h"
+#include "coding/compaction.h"
 #include "coding/skilldesc.h"
 #include "coding/advisor.h"
 #include "coding/evalhost.h"
@@ -89,6 +90,16 @@ const char *app_session_file(app_t *a) { return a->session ? a->session->file : 
 
 static void notice(app_t *a, const char *level, const char *fmt, ...) PRINTF_LIKE(3, 4);
 static void notice(app_t *a, const char *level, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    char *s = xvasprintf(fmt, ap);
+    va_end(ap);
+    LOGI("[%s] %s", level, s);
+    if (a->notice) a->notice(a->notice_ud, level, s);
+    free(s);
+}
+
+void app_notice(app_t *a, const char *level, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     char *s = xvasprintf(fmt, ap);
@@ -282,6 +293,8 @@ static void fill_request_opts(app_t *a, ai_stream_opts_t *o) {
     const char *tier = settings_str("tier.openai", NULL);
     if (tier) o->service_tier = tier;
 }
+
+void app_fill_request_opts(app_t *a, ai_stream_opts_t *o) { fill_request_opts(a, o); }
 
 static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
     app_t *a = ud;
@@ -786,6 +799,12 @@ static void maybe_restore_primary(app_t *a) {
     mr_selector_free(&orig);
 }
 
+/* maintainContextMidRun between tool-loop turns */
+static void hook_turn_boundary(void *ud, agent_t *ag, const json_t *assistant) {
+    UNUSED(ag);
+    cmp_mid_turn(ud, assistant);
+}
+
 static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int attempt) {
     app_t *a = ud;
     if (attempt < 0 && a->gemini_interrupt > 0) { /* LoopGuards #interruptGeminiHeaderRunaway */
@@ -846,12 +865,11 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
     json_t *fl;
     json_arr_foreach(json_get(assistant, "errorFlags"), fi, fl) flagged = flagged || str_eq(json_sv(fl), "contextOverflow");
     if ((flagged || is_overflow(err)) && attempt == 0 && !a->compacting) {
-        notice(a, "warning", "Context overflow; compacting and retrying");
-        char *cerr = NULL;
-        if (app_compact(a, NULL, &cerr) == 0) return true;
-        notice(a, "error", "Compaction failed: %s", cerr ? cerr : "?");
-        free(cerr);
-        return false;
+        /* overflow recovery: the method ladder with a retry of the failed turn (session-maintenance.ts) */
+        int64_t billed = 0;
+        const json_t *u = json_get_obj(assistant, "usage");
+        if (u) billed = json_get_int(u, "input", 0) + json_get_int(u, "cacheRead", 0) + json_get_int(u, "cacheWrite", 0);
+        return (cmp_auto(a, CMP_OVERFLOW, true, billed) & CMP_COMMITTED) != 0;
     }
     if (!settings_bool("retry.enabled", true)) return false;
     if (attempt == 0) a->retry_offset = 0;
@@ -1089,6 +1107,7 @@ static void install_agent(app_t *a) {
     ag->hooks.after_tool = hook_after_tool;
     ag->hooks.before_tool = hook_before_tool;
     ag->hooks.approve_tool = hook_approve_tool;
+    ag->hooks.turn_boundary = hook_turn_boundary;
     ag->hooks.ud = a;
     free(ag->session_id);
     ag->session_id = a->session ? xstrdup(session_id(a->session)) : uuid_v7();
@@ -1239,6 +1258,8 @@ static void load_session_into_agent(app_t *a) {
     }
     session_context_free(&sc);
 }
+
+void app_reload_context(app_t *a) { load_session_into_agent(a); }
 
 app_t *app_create(const app_opts_t *o, char **err) {
     *err = NULL;
@@ -2044,17 +2065,6 @@ int app_clear_context(app_t *a) {
     return 0;
 }
 
-int app_handoff(app_t *a, const char *focus, char **err) {
-    /* renderHandoffPrompt: the document prompt with the optional `additionalFocus` block */
-    json_t *ctx = json_obj();
-    if (focus && *focus) json_set_str(ctx, "additionalFocus", focus);
-    char *doc = prompt_render("agent/compaction/prompts/handoff-document.md", ctx);
-    json_free(ctx);
-    int rc = app_compact(a, doc, err);
-    free(doc);
-    return rc;
-}
-
 int app_retry(app_t *a, char **err) {
     pthread_mutex_lock(&a->agent->mu);
     json_t *msgs = a->agent->messages;
@@ -2070,161 +2080,6 @@ int app_retry(app_t *a, char **err) {
     }
     a->retry_count = 0;
     return agent_continue(a->agent);
-}
-
-/* rough token estimate for shake accounting (omp counts with its tokenizer) */
-static int64_t shake_tokens(const char *s) { return s ? ((int64_t)strlen(s) + 3) / 4 : 0; }
-
-static int64_t shake_content_tokens(const json_t *content) {
-    if (json_is_str(content)) return shake_tokens(json_sv(content));
-    int64_t n = 0;
-    json_t *b;
-    json_arr_foreach(content, i, b) {
-        const char *t = json_get_str(b, "type");
-        if (str_eq(t, "text")) n += shake_tokens(json_get_str(b, "text"));
-        else if (str_eq(t, "thinking")) n += shake_tokens(json_get_str(b, "thinking"));
-        else if (str_eq(t, "image")) n += 1200; /* estimateImageTokens-style flat cost */
-        else {
-            char *d = json_dump(b, 0);
-            n += shake_tokens(d);
-            free(d);
-        }
-    }
-    return n;
-}
-
-/* the current branch root..leaf as borrowed entries, starting at the latest compaction's kept boundary */
-static json_t *shake_branch(app_t *a) {
-    json_t *chain = json_arr(); /* ids leaf..root */
-    for (const char *id = a->session->leaf_id; id;) {
-        json_t *e = session_get(a->session, id);
-        if (!e) break;
-        json_push_str(chain, id);
-        id = json_get_str(e, "parentId");
-    }
-    /* reverse to root..leaf and cut at the compaction boundary */
-    json_t *ids = json_arr();
-    size_t n = json_len(chain), start = 0;
-    for (size_t i = n; i > 0; i--) json_push_str(ids, json_sv(json_at(chain, i - 1)));
-    json_free(chain);
-    const char *boundary = NULL;
-    for (size_t i = n; i > 0 && !boundary; i--) {
-        json_t *e = session_get(a->session, json_sv(json_at(ids, i - 1)));
-        if (str_eq(json_get_str(e, "type"), "compaction")) boundary = json_get_str(e, "firstKeptEntryId");
-    }
-    for (size_t i = 0; boundary && i < n; i++)
-        if (str_eq(json_sv(json_at(ids, i)), boundary)) start = i;
-    json_t *out = json_arr();
-    for (size_t i = start; i < n; i++) json_push_str(out, json_sv(json_at(ids, i)));
-    json_free(ids);
-    return out;
-}
-
-void app_shake(app_t *a, const char *mode, app_shake_result_t *r) {
-    memset(r, 0, sizeof *r);
-    r->mode = str_eq(mode, "images") ? "images" : str_eq(mode, "thinking") ? "thinking" : "elide";
-    if (!a->session) return;
-    json_t *ids = shake_branch(a);
-    size_t n = json_len(ids);
-    if (!strcmp(r->mode, "elide")) {
-        /* collectShakeRegions with AGGRESSIVE_SHAKE_CONFIG: whole tool results outside the newest ~4000
-         * tokens (skill results protected, pruned ones skipped) become "[shaken ~N tokens]" */
-        int64_t *after = xcalloc(n ? n : 1, sizeof *after), acc = 0;
-        for (size_t i = n; i > 0; i--) {
-            after[i - 1] = acc;
-            json_t *e = session_get(a->session, json_sv(json_at(ids, i - 1)));
-            acc += shake_content_tokens(json_get(json_get(e, "message"), "content"));
-        }
-        for (size_t i = 0; i < n; i++) {
-            json_t *e = session_get(a->session, json_sv(json_at(ids, i)));
-            json_t *m = json_get(e, "message");
-            if (!str_eq(json_get_str(e, "type"), "message") || !str_eq(json_get_str(m, "role"), "toolResult")) continue;
-            bool useless = json_get_bool(m, "useless", false) && !json_get_bool(m, "isError", false);
-            if (!useless && after[i] < 4000) continue;
-            if (json_get(m, "prunedAt") || str_eq(json_get_str(m, "toolName"), "skill")) continue;
-            int64_t tok = 0;
-            json_t *b, *keep = json_arr();
-            json_arr_foreach(json_get_arr(m, "content"), k, b) {
-                if (str_eq(json_get_str(b, "type"), "text")) tok += shake_tokens(json_get_str(b, "text"));
-                else json_push(keep, json_clone(b));
-            }
-            if (tok <= 0) {
-                json_free(keep);
-                continue;
-            }
-            char *ph = xasprintf("[shaken ~%lld tokens]", (long long)tok);
-            json_t *c = json_arr();
-            json_push(c, text_block(ph));
-            json_arr_foreach(keep, k, b) json_push(c, json_clone(b));
-            json_free(keep);
-            json_set(m, "content", c);
-            r->tool_results_dropped++;
-            r->tokens_freed += MAX(0, tok - shake_tokens(ph));
-            free(ph);
-        }
-        free(after);
-    } else {
-        bool images = !strcmp(r->mode, "images");
-        for (size_t i = 0; i < n; i++) {
-            json_t *e = session_get(a->session, json_sv(json_at(ids, i)));
-            const char *type = json_get_str(e, "type");
-            json_t *owner = str_eq(type, "message") ? json_get(e, "message") : str_eq(type, "custom_message") && images ? e : NULL;
-            if (!owner || !json_is_arr(json_get(owner, "content"))) continue;
-            if (!images && !str_eq(json_get_str(owner, "role"), "assistant")) continue;
-            int64_t before = shake_content_tokens(json_get(owner, "content"));
-            json_t *b, *kept = json_arr();
-            int dropped = 0;
-            json_arr_foreach(json_get_arr(owner, "content"), k, b) {
-                const char *bt = json_get_str(b, "type");
-                bool drop = images ? str_eq(bt, "image") : (str_eq(bt, "thinking") || str_eq(bt, "redactedThinking"));
-                if (drop) dropped++;
-                else json_push(kept, json_clone(b));
-            }
-            if (!dropped) {
-                json_free(kept);
-                continue;
-            }
-            if (images && !json_len(kept) && owner == e) json_push(kept, text_block("[image removed]"));
-            json_set(owner, "content", kept);
-            r->tokens_freed += MAX(0, before - shake_content_tokens(json_get(owner, "content")));
-            if (images) r->images_dropped += dropped;
-            else r->thinking_dropped += dropped;
-        }
-    }
-    json_free(ids);
-    if (r->tool_results_dropped + r->images_dropped + r->thinking_dropped == 0) {
-        r->tokens_freed = 0;
-        return;
-    }
-    session_rewrite(a->session);
-    load_session_into_agent(a);
-    advisor_reset(a->advisor);
-}
-
-/* shake-types.ts formatShakeSummary */
-char *app_shake_summary(const app_shake_result_t *r) {
-    if (!strcmp(r->mode, "images")) {
-        int n = r->images_dropped;
-        return n == 0 ? xstrdup("No images found in this session.") : xasprintf("Dropped %d image%s from this session.", n, n == 1 ? "" : "s");
-    }
-    if (!strcmp(r->mode, "thinking")) {
-        int n = r->thinking_dropped;
-        if (n == 0) return xstrdup("No thinking blocks found in this session.");
-        char *freed = r->tokens_freed > 0 ? xasprintf(" (~%lld tokens freed)", (long long)r->tokens_freed) : xstrdup("");
-        char *s = xasprintf("Dropped %d thinking block%s from this session%s.", n, n == 1 ? "" : "s", freed);
-        free(freed);
-        return s;
-    }
-    sb_t b = SB_INIT;
-    if (r->tool_results_dropped > 0) sb_appendf(&b, "%d tool result%s", r->tool_results_dropped, r->tool_results_dropped == 1 ? "" : "s");
-    if (r->blocks_dropped > 0) sb_appendf(&b, "%s%d block%s", b.len ? " + " : "", r->blocks_dropped, r->blocks_dropped == 1 ? "" : "s");
-    if (!b.len) {
-        sb_free(&b);
-        return xstrdup("Nothing to shake.");
-    }
-    char *s = xasprintf("Shook %s (~%lld tokens freed).", sb_cstr(&b), (long long)r->tokens_freed);
-    sb_free(&b);
-    return s;
 }
 
 /* session-maintenance.ts resolveCompactionModelCandidates: the model's compactionModel target, the
@@ -2321,180 +2176,12 @@ static void maybe_title(app_t *a) {
     title_apply(a);
 }
 
-/* ---------- compaction ---------- */
-
-static int64_t estimate_tokens(const json_t *msg) {
-    char *s = json_dump(json_get(msg, "content"), 0);
-    int64_t n = (int64_t)strlen(s) / 4 + 4;
-    free(s);
-    return n;
-}
-
-static void serialize_for_summary(sb_t *b, const json_t *msg) {
-    const char *role = json_get_str(msg, "role");
-    json_t *c = json_get(msg, "content");
-    if (str_eq(role, "user")) sb_append(b, "[User]: ");
-    else if (str_eq(role, "assistant")) sb_append(b, "[Assistant]: ");
-    else if (str_eq(role, "toolResult")) sb_appendf(b, "[Tool result %s]: ", json_get_str(msg, "toolName"));
-    else sb_appendf(b, "[%s]: ", role ? role : "message");
-    if (json_is_str(c)) {
-        sb_append(b, json_sv(c));
-    } else {
-        json_t *blk;
-        json_arr_foreach(c, i, blk) {
-            const char *t = json_get_str(blk, "type");
-            if (str_eq(t, "text")) {
-                const char *tx = json_get_str(blk, "text");
-                size_t n = strlen(tx);
-                if (str_eq(role, "toolResult") && n > 4000) sb_appendf(b, "%.2000s\n…[%zu chars elided]…\n%s", tx, n - 4000, tx + n - 2000);
-                else sb_append(b, tx);
-            } else if (str_eq(t, "toolCall")) {
-                char *args = json_dump(json_get(blk, "arguments"), 0);
-                if (strlen(args) > 2000) args[2000] = 0;
-                sb_appendf(b, "\n<tool_call name=\"%s\">%s</tool_call>", json_get_str(blk, "name"), args);
-                free(args);
-            } else if (str_eq(t, "image")) {
-                sb_append(b, "[image]");
-            }
-        }
-    }
-    sb_append(b, "\n\n");
-}
-
-int app_compact(app_t *a, const char *instructions, char **err) {
-    if (a->compacting) {
-        *err = xstrdup("compaction already running");
-        return -1;
-    }
-    a->compacting = true;
-    if (!agent_is_running(a->agent)) a->agent->cancel = 0; /* a stale Esc must not cancel this pass */
-    int rc = -1;
-    json_t *path = session_path_to(a->session, a->session->leaf_id);
-    /* find message entries, pick cut point keeping ~keepRecentTokens at a user-message boundary */
-    int64_t keep = settings_int("compaction.keepRecentTokens", 20000);
-    ssize_t cut = -1;
-    int64_t acc = 0;
-    size_t n = json_len(path);
-    for (size_t i = n; i > 0; i--) {
-        json_t *e = json_at(path, i - 1);
-        if (!str_eq(json_get_str(e, "type"), "message")) continue;
-        json_t *m = json_get(e, "message");
-        acc += estimate_tokens(m);
-        if (acc >= keep && str_eq(json_get_str(m, "role"), "user")) {
-            cut = (ssize_t)(i - 1);
-            break;
-        }
-    }
-    /* previous compaction summary on path */
-    const char *prev_summary = NULL;
-    ssize_t prev_idx = -1;
-    for (size_t i = 0; i < n; i++)
-        if (str_eq(json_get_str(json_at(path, i), "type"), "compaction")) {
-            prev_summary = json_get_str(json_at(path, i), "summary");
-            prev_idx = (ssize_t)i;
-        }
-    if (cut < 0) {
-        /* keep only the last user turn */
-        for (size_t i = n; i > 0 && cut < 0; i--) {
-            json_t *e = json_at(path, i - 1);
-            if (str_eq(json_get_str(e, "type"), "message") && str_eq(json_get_str(json_get(e, "message"), "role"), "user") &&
-                (ssize_t)(i - 1) > prev_idx)
-                cut = (ssize_t)(i - 1);
-        }
-    }
-    if (cut <= prev_idx + 1) {
-        /* ManualCompactionNoOpError texts */
-        *err = xstrdup(n && str_eq(json_get_str(json_at(path, n - 1), "type"), "compaction") ? "Already compacted"
-                                                                                              : "Nothing to compact (session too small)");
-        goto out;
-    }
-    sb_t conv = SB_INIT;
-    sb_append(&conv, "<conversation>\n");
-    size_t from = prev_idx >= 0 ? (size_t)prev_idx + 1 : 0;
-    for (size_t i = from; i < (size_t)cut; i++) {
-        json_t *e = json_at(path, i);
-        if (str_eq(json_get_str(e, "type"), "message")) serialize_for_summary(&conv, json_get(e, "message"));
-    }
-    sb_append(&conv, "</conversation>\n\n");
-    if (prev_summary) {
-        sb_appendf(&conv, "<previous-summary>\n%s\n</previous-summary>\n\n", prev_summary);
-        char *p = prompt_load_or("agent/compaction/prompts/compaction-update-summary.md", "Update the summary.");
-        sb_append(&conv, p);
-        free(p);
-    } else {
-        char *p = prompt_load_or("agent/compaction/prompts/compaction-summary.md", "Summarize the conversation.");
-        sb_append(&conv, p);
-        free(p);
-    }
-    if (instructions && *instructions) sb_appendf(&conv, "\n\nAdditional focus: %s", instructions);
-    char *sys = prompt_load_or("agent/compaction/prompts/summarization-system.md", "Summarize.");
-    notice(a, "info", "Compacting context…");
-    mr_pool_t cands = {0};
-    app_compaction_candidates(a, &cands);
-    char *summary = NULL;
-    for (size_t i = 0; i < cands.n && !summary && !a->agent->cancel; i++)
-        summary = app_complete_text(a, cands.v[i], sys, sb_cstr(&conv), EFFORT_LOW);
-    mr_pool_free(&cands);
-    sb_free(&conv);
-    free(sys);
-    if (!summary || !*summary) {
-        *err = xstrdup(a->agent->cancel ? "Compaction cancelled" : "summarization request failed");
-        free(summary);
-        goto out;
-    }
-    const char *first_kept = json_get_str(json_at(path, (size_t)cut), "id");
-    session_append_compaction(a->session, summary, first_kept, a->last_context_tokens, NULL);
-    free(summary);
-    load_session_into_agent(a);
-    a->last_context_tokens = 0;
-    notice(a, "info", "Context compacted");
-    rc = 0;
-out:
-    json_free(path);
-    a->compacting = false;
-    return rc;
-}
-
-/* compact-modes.ts: a one-off method order for a manual /compact. omc has only the local summary
- * ("soft"); "remote" falls through to it as omp does when server compaction is unavailable, and
- * snapcompact (bitmap archives) is not implemented. */
-int app_compact_mode(app_t *a, const char *mode, const char *instructions, char **err) {
-    if (str_eq(mode, "snapcompact")) {
-        if (!a->model) {
-            *err = xstrdup("No model selected");
-            return -1;
-        }
-        if (!a->model->input_image) {
-            notice(a, "warning", "snapcompact needs a vision-capable model (%s is text-only)", a->model->id);
-            *err = xasprintf("snapcompact cannot run locally: %s is text-only.", a->model->id);
-        } else {
-            *err = xstrdup("snapcompact is not implemented in omc.");
-        }
-        return -1;
-    }
-    if (str_eq(mode, "remote") && a->model &&
-        (str_eq(a->model->api, "openai-responses") || str_eq(a->model->api, "openai-codex-responses") ||
-         str_eq(a->model->api, "anthropic-messages")))
-        notice(a, "warning", "remote compaction is unavailable for %s; trying the next preferred method", a->model->id);
-    return app_compact(a, instructions, err);
-}
-
 /* omp's context-maintenance trigger: thresholdTokens (>0) overrides thresholdPercent (>0); both -1 =
  * legacy reserve-based budget (window - max(15% of window, reserveTokens)) */
 int64_t app_compaction_threshold(const ai_model_t *m, int64_t window) { return cp_model_threshold(m, window); }
 
-static void maybe_auto_compact(app_t *a) {
-    if (!settings_bool("compaction.enabled", true) || !a->model) return;
-    int64_t window = a->model->context_window;
-    if (window <= 0) return;
-    int64_t thresh = app_compaction_threshold(a->model, window);
-    if (thresh <= 0 || a->last_context_tokens < thresh) return;
-    char *err = NULL;
-    if (app_compact(a, NULL, &err) != 0) {
-        notice(a, "error", "Auto-compaction failed: %s", err ? err : "?");
-        free(err);
-    }
-}
+/* post-turn context maintenance (pruning + the compaction.methodOrder ladder; coding/compaction.c) */
+static void maybe_auto_compact(app_t *a) { cmp_after_turn(a); }
 
 /* ---------- prompting ---------- */
 

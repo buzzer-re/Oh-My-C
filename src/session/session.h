@@ -43,6 +43,14 @@ const char *session_append_thinking_change(session_t *s, const char *level);
 const char *session_append_thinking_change_ex(session_t *s, const char *level, const char *configured);
 const char *session_append_compaction(session_t *s, const char *summary, const char *first_kept_id,
                                       int64_t tokens_before, json_t *details);
+/* appendCompaction with every optional field (NULL / -1 / false omit it); clones details and preserve_data */
+typedef struct {
+    const char *summary, *short_summary, *first_kept_id, *method, *replay_through_id;
+    int64_t tokens_before, tokens_after;
+    const json_t *details, *preserve_data;
+    bool from_extension;
+} session_compaction_t;
+const char *session_append_compaction_ex(session_t *s, const session_compaction_t *c);
 const char *session_append_branch_summary(session_t *s, const char *from_id, const char *summary);
 const char *session_append_custom(session_t *s, const char *custom_type, json_t *data);
 const char *session_append_custom_message(session_t *s, const char *custom_type, const char *content, bool display);
@@ -70,6 +78,13 @@ typedef struct {
     int64_t compaction_tokens_before;
 } session_context_t;
 void session_build_context(const session_t *s, session_context_t *out);
+/* the same over an explicit root..leaf entry array (projections over a pending entry) */
+void session_build_context_for(const json_t *path, session_context_t *out);
+/* convertToLlm for a persisted message (custom roles: bash/python execution, hook messages); owned or NULL */
+json_t *session_message_to_llm(const json_t *msg);
+/* the provider replay payload of a compaction entry: {type:"openaiResponsesHistory", provider, items}
+ * (*openai_history set) or {type:"anthropicCompaction", ...}; owned or NULL */
+json_t *session_compaction_payload(const json_t *compaction, bool *openai_history);
 void session_context_free(session_context_t *c);
 
 /* new branch file containing only root..leaf path */

@@ -1189,6 +1189,66 @@ void ui_retry_failed(ui_t *u, int attempts, const char *final_error, const char 
     free(m);
 }
 
+void add_notice(ui_t *u, const char *level, const char *text);
+
+/* event-controller.ts #handleAutoCompactionStart / #handleAutoCompactionEnd (the event JSON from compaction.c) */
+static void auto_compaction_event(ui_t *u, bool start, const char *text) {
+    json_t *ev = json_parse(text, strlen(text), NULL);
+    if (!json_is_obj(ev)) {
+        json_free(ev);
+        return;
+    }
+    const char *action = json_get_str(ev, "action");
+    const char *label = str_eq(action, "remote")        ? "Auto server compaction"
+                        : str_eq(action, "handoff")     ? "Auto-handoff"
+                        : str_eq(action, "shake")       ? "Auto-shake"
+                        : str_eq(action, "snapcompact") ? "Auto-snapcompact"
+                                                        : "Auto context-full maintenance";
+    if (start) {
+        const char *reason = json_get_str(ev, "reason");
+        const char *pre = str_eq(reason, "overflow")     ? "Context overflow detected, "
+                          : str_eq(reason, "incomplete") ? "Response incomplete, "
+                          : str_eq(reason, "idle")       ? "Idle "
+                                                         : "";
+        char *l = xasprintf("%s%s\xe2\x80\xa6", pre, label);
+        ui_working_compaction(u, l);
+        free(l);
+        json_free(ev);
+        return;
+    }
+    if (u->worker_running) ui_working_start(u);
+    else ui_working_stop(u);
+    const char *em = json_get_str(ev, "errorMessage");
+    bool skipped = json_get_bool(ev, "skipped", false);
+    if (json_get_bool(ev, "aborted", false)) {
+        char *m = xasprintf("%s cancelled", label);
+        add_notice(u, "info", m);
+        free(m);
+    } else if (str_eq(action, "shake")) {
+        if (em) {
+            if (!skipped) ui_chat_rebuild(u);
+            add_notice(u, "warning", em);
+        } else if (!skipped) {
+            ui_chat_rebuild(u);
+            add_notice(u, "info", "Auto-shake completed");
+        }
+    } else if (json_get_obj(ev, "result")) {
+        ui_chat_rebuild(u);
+    } else if (em) {
+        add_notice(u, "warning", em);
+    } else if (str_eq(action, "handoff")) {
+        ui_chat_rebuild(u);
+        add_notice(u, "info", "Auto-handoff completed");
+    } else if (!skipped) {
+        char *m = xasprintf("%s failed; continuing without maintenance", str_eq(action, "remote") ? "Auto server compaction"
+                                                                         : str_eq(action, "snapcompact") ? "Auto-snapcompact maintenance"
+                                                                                                        : "Auto context-full maintenance");
+        add_notice(u, "warning", m);
+        free(m);
+    }
+    json_free(ev);
+}
+
 /* showStatus / showWarning / showError. Consecutive status lines update in place instead of stacking. */
 void add_notice(ui_t *u, const char *level, const char *text) {
     if (!strcmp(level, "todo-reminder")) {
@@ -1216,6 +1276,10 @@ void add_notice(ui_t *u, const char *level, const char *text) {
             ui_working_retry(u, at, max, secs * 1000);
             return;
         }
+    }
+    if (!strcmp(level, "auto_compaction_start") || !strcmp(level, "auto_compaction_end")) {
+        auto_compaction_event(u, !strcmp(level, "auto_compaction_start"), text);
+        return;
     }
     bool status = strcmp(level, "warning") && strcmp(level, "error");
     if (status && !strcmp(text, "Compacting context\xe2\x80\xa6")) {

@@ -7,6 +7,7 @@
  */
 #include "ai/provider_openai.h"
 
+#include <ctype.h>
 #include <math.h>
 
 enum { V_OPENAI = 0, V_AZURE = 1, V_CODEX = 2 };
@@ -322,6 +323,22 @@ json_t *oair_convert_input(const ai_model_t *m, const ai_context_t *ctx, int var
     json_arr_foreach(msgs, idx, msg) {
         const char *role = json_get_str(msg, "role");
         if (str_eq(role, "user") || str_eq(role, "developer")) {
+            /* a remote compaction's replacement history replays verbatim for its own provider
+             * (getOpenAIResponsesHistoryItems on a compaction summary) */
+            const json_t *pp = json_get_obj(msg, "providerPayload");
+            const char *pprov = json_get_str(pp, "provider");
+            if (str_eq(json_get_str(pp, "type"), "openaiResponsesHistory") && json_is_arr(json_get(pp, "items")) &&
+                (!pprov || str_eq(pprov, m->provider))) {
+                json_t *it;
+                json_arr_foreach(json_get(pp, "items"), k, it) {
+                    if (!json_is_obj(it)) continue;
+                    json_t *c = json_clone(it);
+                    if (str_eq(json_get_str(c, "type"), "function_call") || str_eq(json_get_str(c, "type"), "custom_tool_call"))
+                        if (json_get_str(c, "call_id")) strvec_push(&known, json_get_str(c, "call_id"));
+                    json_push(out, c);
+                }
+                continue;
+            }
             json_t *c = input_content(m, json_get(msg, "content"));
             if (json_len(c) == 0) {
                 json_free(c);
@@ -1328,4 +1345,136 @@ json_t *provider_openai_responses_stream(const ai_model_t *m, const ai_context_t
     http_headers_free(&h);
     json_free(body);
     return msg;
+}
+
+/* ====================================================================== */
+/* remote compaction (agent compaction/openai.ts V1)                       */
+/* ====================================================================== */
+
+/* resolveOpenAiCompactEndpoint */
+static char *compact_endpoint(const ai_model_t *m) {
+    const json_t *rc = json_get_obj(m->raw, "remoteCompaction");
+    const char *ep = json_get_str(rc, "endpoint");
+    const char *api = json_get_str(rc, "api") ? json_get_str(rc, "api") : m->api;
+    if (ep && *ep) return xstrdup(ep);
+    if (str_eq(m->provider, "openai-codex") || str_eq(api, "openai-codex-responses")) {
+        char *base = xstrdup(m->base_url && *m->base_url ? m->base_url : CODEX_BASE_URL);
+        size_t n = strlen(base);
+        while (n && base[n - 1] == '/') base[--n] = 0;
+        const char *codex = strstr(base, "/codex");
+        bool ends_codex = codex && (!codex[6] || (codex[6] == '/' && codex[7] == 'v' && isdigit((unsigned char)codex[8])));
+        char *r = ends_codex ? xasprintf("%s/responses/compact", base) : xasprintf("%s/codex/responses/compact", base);
+        free(base);
+        return r;
+    }
+    char *base = xstrdup(m->base_url && *m->base_url ? m->base_url : "https://api.openai.com/v1");
+    size_t n = strlen(base);
+    if (n && base[n - 1] == '/') base[--n] = 0;
+    char *r = str_ends(base, "/v1") ? xasprintf("%s/responses/compact", base) : xasprintf("%s/v1/responses/compact", base);
+    free(base);
+    return r;
+}
+
+static const char *http_status_text(int st) {
+    switch (st) {
+    case 400: return "Bad Request";
+    case 401: return "Unauthorized";
+    case 403: return "Forbidden";
+    case 404: return "Not Found";
+    case 408: return "Request Timeout";
+    case 413: return "Payload Too Large";
+    case 422: return "Unprocessable Entity";
+    case 429: return "Too Many Requests";
+    case 500: return "Internal Server Error";
+    case 502: return "Bad Gateway";
+    case 503: return "Service Unavailable";
+    case 504: return "Gateway Timeout";
+    default: return "";
+    }
+}
+
+/* shouldKeepOpenAiCompactOutputItem */
+static bool keep_compact_item(const json_t *it) {
+    const char *t = json_get_str(it, "type");
+    if (str_eq(t, "compaction") || str_eq(t, "compaction_summary")) return true;
+    return str_eq(t, "message") && (str_eq(json_get_str(it, "role"), "assistant") || str_eq(json_get_str(it, "role"), "user"));
+}
+
+json_t *ai_openai_remote_compact(const ai_model_t *m, const char *api_key, const json_t *messages, const json_t *previous,
+                                 const char *instructions, const char *session_id, volatile sig_atomic_t *cancel, char **err,
+                                 int *status) {
+    *err = NULL;
+    if (status) *status = 0;
+    const json_t *rc = json_get_obj(m->raw, "remoteCompaction");
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    o.api_key = api_key;
+    o.session_id = session_id;
+    o.cancel = cancel;
+    ai_context_t ctx = {.messages = (json_t *)messages};
+    int variant = variant_of(m) == V_AZURE ? V_AZURE : V_OPENAI;
+    json_t *input = json_arr(), *it;
+    json_arr_foreach(previous, i, it) json_push(input, json_clone(it));
+    json_t *conv = oair_convert_input(m, &ctx, variant);
+    json_arr_foreach(conv, i, it) {
+        json_t *c = json_clone(it);
+        /* stripOpenAIResponsesOutputOnlyStatusesForReplay */
+        if (!str_eq(json_get_str(c, "type"), "message") || !str_eq(json_get_str(c, "role"), "assistant")) json_del(c, "status");
+        json_push(input, c);
+    }
+    json_free(conv);
+    json_t *body = json_obj();
+    const char *model = json_get_str(rc, "model") ? json_get_str(rc, "model")
+                        : json_get_str(m->raw, "requestModelId") ? json_get_str(m->raw, "requestModelId")
+                                                                 : m->id;
+    json_set_str(body, "model", model);
+    json_set(body, "input", input);
+    json_set_str(body, "instructions", instructions ? instructions : "");
+    char *key = oai_prompt_cache_key(&o, 64, "pc_");
+    if (key) json_set(body, "prompt_cache_key", json_str_own(key));
+    http_headers_t h = {0};
+    json_t *out = NULL;
+    if (!build_headers(&h, m, &o, body, err)) goto done;
+    http_headers_set(&h, "Content-Type", "application/json");
+    http_headers_set(&h, "Accept", "application/json");
+    char *url = compact_endpoint(m);
+    char *payload = json_dump(body, 0);
+    http_req_t req = {.method = "POST", .url = url, .headers = &h, .body = payload, .body_len = strlen(payload),
+                      .timeout_ms = 300000, .cancel = cancel};
+    http_resp_t resp = {0};
+    int hr = http_request(&req, &resp);
+    if (status) *status = resp.status;
+    if (cancel && *cancel) *err = xstrdup("Remote compaction aborted");
+    else if (hr != 0 || resp.error) *err = xasprintf("Remote compaction failed: %s", resp.error ? resp.error : "request failed");
+    else if (resp.status < 200 || resp.status >= 300) {
+        LOGW("OpenAI remote compaction failed: %s %d %.500s", url, resp.status, resp.body ? resp.body : "");
+        *err = xasprintf("Remote compaction failed (%d %s)", resp.status, http_status_text(resp.status));
+    } else {
+        json_t *data = json_parse(resp.body ? resp.body : "", resp.body_len, NULL);
+        json_t *hist = json_arr(), *item = NULL;
+        json_arr_foreach(json_get_arr(data, "output"), i, it) {
+            if (!json_is_obj(it) || !keep_compact_item(it)) continue;
+            json_push(hist, json_clone(it));
+        }
+        json_arr_foreach(hist, i, it) {
+            const char *t = json_get_str(it, "type");
+            if ((str_eq(t, "compaction") && json_get_str(it, "encrypted_content")) || str_eq(t, "compaction_summary")) item = it;
+        }
+        if (!item) {
+            *err = xstrdup("Remote compaction response missing compaction item");
+            json_free(hist);
+        } else {
+            out = json_obj();
+            json_set(out, "compactionItem", json_clone(item));
+            json_set(out, "replacementHistory", hist);
+        }
+        json_free(data);
+    }
+    http_resp_free(&resp);
+    free(payload);
+    free(url);
+done:
+    http_headers_free(&h);
+    json_free(body);
+    return out;
 }

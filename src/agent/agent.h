@@ -134,6 +134,9 @@ typedef struct {
     int (*on_stream_delta)(void *ud, agent_t *a, const ai_event_t *ev);
     /* After an assistant message ends with an error; return true to retry the turn. */
     bool (*should_retry)(void *ud, agent_t *a, const json_t *assistant, int attempt);
+    /* A tool-loop turn ended and the run continues with another model call (omp onTurnEnd willContinue): the
+     * host may rewrite the context (mid-turn compaction); the next request snapshots the messages again. */
+    void (*turn_boundary)(void *ud, agent_t *a, const json_t *assistant);
     void *ud;
 } agent_hooks_t;
 

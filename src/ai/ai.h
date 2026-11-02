@@ -163,6 +163,10 @@ typedef struct {
     void (*on_payload)(void *ud, const json_t *payload);
     void *payload_ud;
     const ai_cursor_exec_t *cursor_exec; /* cursor-agent tool bridge (borrowed, may be NULL) */
+    /* Anthropic on-demand compaction request {instructions, filesDueBefore?} (borrowed, may be NULL): the request
+     * carries `compaction` + the compaction beta; the result has stopDetails {type:"compaction"} and providerPayload
+     * {type:"anthropicCompaction", provider, content, signature, toolChanges?} */
+    json_t *anthropic_compaction;
     /* GitHub Copilot identity fallback (set by the transport layer): a denied default chat identity (403, or 400
      * model_not_supported) is retried once as the Copilot CLI and the working identity remembered per key */
     bool copilot_identity_retry;
@@ -288,6 +292,13 @@ void ai_apply_headers(http_headers_t *h, const ai_model_t *m, const ai_stream_op
 /* Normalize history for a target model: drops/converts foreign thinking, synthesizes missing tool results,
  * strips images if model lacks image input, drops errored/aborted assistant turns. Returns owned array. */
 json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target);
+/* OpenAI Responses remote compaction (agent compaction/openai.ts requestOpenAiRemoteCompaction): POST
+ * <base>/responses/compact {model, input, instructions, prompt_cache_key?} with `messages` (LLM messages) encoded as
+ * Responses input after `previous` (a prior replacementHistory, borrowed, may be NULL). Owned
+ * {replacementHistory, compactionItem}, or NULL + *err (owned) and *status (HTTP status, 0 when none). */
+json_t *ai_openai_remote_compact(const ai_model_t *m, const char *api_key, const json_t *messages, const json_t *previous,
+                                 const char *instructions, const char *session_id, volatile sig_atomic_t *cancel, char **err,
+                                 int *status);
 
 /* Default reasoning token budget for effort levels (token-budget providers). */
 int64_t ai_thinking_budget(const ai_model_t *m, ai_effort_t e, const json_t *custom_budgets);

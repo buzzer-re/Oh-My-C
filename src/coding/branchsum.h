@@ -22,11 +22,17 @@ char *branchsum_prompt(const json_t *entries, int64_t token_budget, const char *
  * arrays) receive the sorted file lists. Owned. */
 char *branchsum_finish(const char *model_text, const json_t *fileops, json_t **read_files, json_t **modified_files);
 
-/* serializeConversation of LLM messages in the model's transcript dialect: the legacy text transcript of the
- * "xml" dialect (`Human:` / `Assistant:`, `<invoke>` calls, `<tool_response>` results) or of "anthropic"
- * (`<function_calls>` / `<function_results>`). Owned. */
+/* serializeConversationForSummary of LLM messages in a transcript dialect (ai/dialect.h); thinking is dropped
+ * for the anthropic dialect (classifier-cot-extraction). Owned. */
 char *branchsum_serialize(const json_t *messages, const char *dialect);
-/* preferredDialect: "anthropic" for Claude-class models, otherwise "xml" (the other dialects are not ported) */
+/* preferredDialect for a catalog identity class, else the id's class (ai/dialect.h) */
 const char *branchsum_dialect(const char *model_class, const char *model_id);
+
+/* compaction/utils.ts helpers shared with compaction.c: extractFileOpsFromMessage into {read, written, edited},
+ * stripReadSelector (owned), and computeFileLists + upsertFileOperations (owned; *read_files / *modified_files
+ * owned sorted arrays) */
+void branchsum_extract_ops(const json_t *msg, json_t *ops);
+char *branchsum_strip_read_selector(const char *path);
+char *branchsum_upsert_files(const char *summary, const json_t *fileops, json_t **read_files, json_t **modified_files);
 
 #endif

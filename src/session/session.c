@@ -322,6 +322,21 @@ const char *session_append_compaction(session_t *s, const char *summary, const c
     return session_append_entry(s, e);
 }
 
+const char *session_append_compaction_ex(session_t *s, const session_compaction_t *c) {
+    json_t *e = typed("compaction");
+    json_set_str(e, "summary", c->summary ? c->summary : "");
+    if (c->short_summary) json_set_str(e, "shortSummary", c->short_summary);
+    json_set_str(e, "firstKeptEntryId", c->first_kept_id ? c->first_kept_id : "");
+    json_set_int(e, "tokensBefore", c->tokens_before);
+    if (c->tokens_after >= 0) json_set_int(e, "tokensAfter", c->tokens_after);
+    if (c->method) json_set_str(e, "method", c->method);
+    if (c->replay_through_id) json_set_str(e, "providerReplayThroughEntryId", c->replay_through_id);
+    if (c->details) json_set(e, "details", json_clone(c->details));
+    json_set_bool(e, "fromExtension", c->from_extension);
+    if (c->preserve_data) json_set(e, "preserveData", json_clone(c->preserve_data));
+    return session_append_entry(s, e);
+}
+
 const char *session_append_branch_summary(session_t *s, const char *from_id, const char *summary) {
     json_t *e = typed("branch_summary");
     json_set_str(e, "fromId", from_id ? from_id : "root");
@@ -518,6 +533,9 @@ static json_t *summary_msg(const char *tpl_path, const char *summary) {
 }
 
 /* convert a persisted message to an LLM message (custom roles) or NULL to skip */
+static json_t *to_llm(const json_t *msg);
+json_t *session_message_to_llm(const json_t *msg) { return to_llm(msg); }
+
 static json_t *to_llm(const json_t *msg) {
     const char *role = json_get_str(msg, "role");
     if (!role) return NULL;
@@ -578,11 +596,55 @@ static void emit_entry(json_t *out, const json_t *e) {
     }
 }
 
+/* the replay payload a compaction entry carries for its provider (session-context.ts
+ * getOpenAiRemoteCompactionPayload / compaction/anthropic.ts getAnthropicCompactionPayload); owned or NULL */
+json_t *session_compaction_payload(const json_t *compaction, bool *openai_history) {
+    *openai_history = false;
+    const json_t *pd = json_get_obj(compaction, "preserveData");
+    const json_t *oa = json_get_obj(pd, "openaiRemoteCompaction");
+    if (oa && json_get_str(oa, "provider") && *json_get_str(oa, "provider") && json_is_arr(json_get(oa, "replacementHistory"))) {
+        json_t *p = json_obj();
+        json_set_str(p, "type", "openaiResponsesHistory");
+        json_set_str(p, "provider", json_get_str(oa, "provider"));
+        json_set(p, "items", json_clone(json_get(oa, "replacementHistory")));
+        *openai_history = true;
+        return p;
+    }
+    const json_t *an = json_get_obj(pd, "anthropicCompaction");
+    if (an && json_get_str(an, "provider") && *json_get_str(an, "provider") && json_get_str(an, "content") &&
+        *json_get_str(an, "content")) {
+        json_t *p = json_clone(an);
+        json_del(p, "model");
+        json_del(p, "usedTokens");
+        json_t *o = json_obj();
+        json_set_str(o, "type", "anthropicCompaction");
+        const char *k;
+        json_t *v;
+        json_obj_foreach(p, i, k, v) json_set(o, k, json_clone(v));
+        json_free(p);
+        return o;
+    }
+    return NULL;
+}
+
+static void build_context_path(const json_t *path, session_context_t *out);
+
 void session_build_context(const session_t *s, session_context_t *out) {
     memset(out, 0, sizeof(*out));
     out->messages = json_arr();
     if (!s->leaf_id) return;
     json_t *path = session_path_to(s, s->leaf_id);
+    build_context_path(path, out);
+    json_free(path);
+}
+
+void session_build_context_for(const json_t *path, session_context_t *out) {
+    memset(out, 0, sizeof(*out));
+    out->messages = json_arr();
+    build_context_path(path, out);
+}
+
+static void build_context_path(const json_t *path, session_context_t *out) {
     size_t n = json_len(path);
     ssize_t boundary = -1, compaction = -1;
     for (size_t i = 0; i < n; i++) {
@@ -612,17 +674,40 @@ void session_build_context(const session_t *s, session_context_t *out) {
     if (compaction >= 0) {
         json_t *c = json_at(path, (size_t)compaction);
         out->compaction_tokens_before = json_get_int(c, "tokensBefore", 0);
-        json_push(out->messages, summary_msg("agent/compaction/prompts/compaction-summary-context.md", json_get_str(c, "summary")));
+        /* convertToLlm compactionSummary: a handoff document renders through handoff-summary-context */
+        json_t *sm = summary_msg(str_eq(json_get_str(c, "method"), "handoff") ? "agent/compaction/prompts/handoff-summary-context.md"
+                                                                               : "agent/compaction/prompts/compaction-summary-context.md",
+                                 json_get_str(c, "summary"));
+        bool openai_history = false;
+        json_t *payload = session_compaction_payload(c, &openai_history);
+        if (payload) json_set(sm, "providerPayload", payload);
+        json_push(out->messages, sm);
         const char *first_kept = json_get_str(c, "firstKeptEntryId");
+        const char *replay_through = json_get_str(c, "providerReplayThroughEntryId");
         ssize_t kept = -1;
         for (size_t i = start; first_kept && i < (size_t)compaction; i++)
             if (str_eq(json_get_str(json_at(path, i), "id"), first_kept)) kept = (ssize_t)i;
-        if (kept >= 0)
+        if (openai_history) {
+            /* the replacement history carries the kept turns; only entries after a partial (snapshot) replay
+             * point replay normally */
+            ssize_t through = -1;
+            for (size_t i = start; replay_through && i < (size_t)compaction; i++)
+                if (str_eq(json_get_str(json_at(path, i), "id"), replay_through)) through = (ssize_t)i;
+            if (through >= 0)
+                for (size_t i = (size_t)through + 1; i < (size_t)compaction; i++) emit_entry(out->messages, json_at(path, i));
+        } else if (kept >= 0) {
             for (size_t i = (size_t)kept; i < (size_t)compaction; i++) emit_entry(out->messages, json_at(path, i));
+        } else if (first_kept && !*first_kept && replay_through) {
+            /* an empty kept tail: turns appended after the summarized snapshot replay */
+            ssize_t snap = -1;
+            for (size_t i = start; i < (size_t)compaction; i++)
+                if (str_eq(json_get_str(json_at(path, i), "id"), replay_through)) snap = (ssize_t)i;
+            if (snap >= 0)
+                for (size_t i = (size_t)snap + 1; i < (size_t)compaction; i++) emit_entry(out->messages, json_at(path, i));
+        }
         start = (size_t)compaction + 1;
     }
     for (size_t i = start; i < n; i++) emit_entry(out->messages, json_at(path, i));
-    json_free(path);
 }
 
 void session_context_free(session_context_t *c) {

@@ -324,6 +324,12 @@ int app_cycle_role_model(app_t *a, bool backward);
 const ai_model_t *app_role_model(const char *role, ai_effort_t *effort_out, bool *has_effort);
 /* first answer from `models` (skipping the session model), then the session model; owned or NULL */
 char *app_complete_first(app_t *a, const mr_pool_t *models, const char *system, const char *user, ai_effort_t effort);
+/* helpers shared with compaction.c: a notice through a->notice, the agent context rebuilt from the session
+ * (load_session_into_agent), and the per-request options of the live loop (prepareSimpleStreamOptions) */
+void app_notice(app_t *a, const char *level, const char *fmt, ...) PRINTF_LIKE(3, 4);
+void app_reload_context(app_t *a);
+void app_fill_request_opts(app_t *a, ai_stream_opts_t *o);
+
 /* compaction model candidates in attempt order */
 void app_compaction_candidates(app_t *a, mr_pool_t *out);
 /* parse "pattern:effort" */
