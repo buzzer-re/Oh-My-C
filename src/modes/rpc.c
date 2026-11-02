@@ -199,6 +199,22 @@ static void rpc_listener(void *ud, const agent_event_t *ev) {
 static void notice_rpc(void *ud, const char *level, const char *text) {
     rpc_t *r = ud;
     if (!strcmp(level, "retry-recovered")) return;
+    if (!strcmp(level, "todo-reminder")) { /* {type:"todo_reminder", todos, attempt, maxAttempts} */
+        json_t *j = json_parse(text, strlen(text), NULL);
+        if (!json_is_obj(j)) {
+            json_free(j);
+            return;
+        }
+        json_t *o = json_obj();
+        json_set_str(o, "type", "todo_reminder");
+        const char *k;
+        json_t *v;
+        json_obj_foreach(j, i, k, v) json_set(o, k, json_clone(v));
+        json_free(j);
+        emit(r, o);
+        json_free(o);
+        return;
+    }
     if (!strcmp(level, "retry-failed")) {
         const char *f1 = strchr(text, '\x1f'), *f2 = f1 ? strchr(f1 + 1, '\x1f') : NULL;
         if (!f1 || !f2) return;
@@ -609,18 +625,32 @@ static void handle(rpc_t *r, json_t *cmd) {
         json_set(d, "levels", lv);
         respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "cycle_thinking_level")) {
-        int cur = (int)a->thinking, next = cur;
-        for (int k = 1; k <= EFFORT_MAX + 1; k++) {
-            int c = (cur + k) % (EFFORT_MAX + 1);
-            if (model_supports_effort(a->model, (ai_effort_t)c)) {
-                next = c;
-                break;
+        /* cycleThinkingLevel: off -> auto -> supported efforts -> off */
+        if (!a->model || !a->model->reasoning) {
+            respond(r, id, type, true, json_null(), NULL);
+        } else {
+            bool auto_ok = !json_get_bool(a->model->thinking, "unverified", false);
+            if (a->auto_thinking) {
+                int e = EFFORT_MINIMAL;
+                while (e <= EFFORT_MAX && !model_supports_effort(a->model, (ai_effort_t)e)) e++;
+                app_set_thinking(a, e > EFFORT_MAX ? EFFORT_OFF : (ai_effort_t)e);
+            } else if (a->thinking == EFFORT_OFF && auto_ok) {
+                app_set_thinking_auto(a);
+            } else {
+                int cur = (int)a->thinking, next = cur;
+                for (int k = 1; k <= EFFORT_MAX + 1; k++) {
+                    int c = (cur + k) % (EFFORT_MAX + 1);
+                    if (model_supports_effort(a->model, (ai_effort_t)c)) {
+                        next = c;
+                        break;
+                    }
+                }
+                app_set_thinking(a, (ai_effort_t)next);
             }
+            json_t *d = json_obj();
+            json_set_str(d, "level", a->auto_thinking ? "auto" : effort_name(a->thinking));
+            respond(r, id, type, true, d, NULL);
         }
-        app_set_thinking(a, (ai_effort_t)next);
-        json_t *d = json_obj();
-        json_set_str(d, "level", effort_name(a->thinking));
-        respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "cycle_model")) {
         /* cycle through settings.enabledModels (scoped) or models with credentials */
         json_t *scope = settings_get("enabledModels");
@@ -816,9 +846,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         free(err);
         free(pat);
     } else if (!strcmp(type, "set_thinking_level")) {
-        ai_effort_t e;
-        if (effort_parse(json_get_str(cmd, "level"), &e) == 0) {
-            app_set_thinking(a, e);
+        if (app_set_thinking_level(a, json_get_str(cmd, "level"))) {
             respond(r, id, type, true, NULL, NULL);
         } else {
             respond(r, id, type, false, NULL, "invalid level");

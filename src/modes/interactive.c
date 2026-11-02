@@ -1454,9 +1454,7 @@ static bool handle_command(ui_t *u, const char *line) {
             ui_overlay_model(u);
         }
     } else if (!strcmp(cmd, "thinking")) {
-        ai_effort_t e;
-        if (*arg && effort_parse(arg, &e) == 0) {
-            app_set_thinking(a, e);
+        if (*arg && app_set_thinking_level(a, arg)) {
         } else {
             ui_overlay_thinking(u);
         }
@@ -1923,13 +1921,24 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
         return true;
     }
     if (tui_key_matches(k, "shift+tab")) {
+        /* cycleThinkingLevel: off -> auto -> minimal..max -> off (auto skipped for an unverified ladder) */
         app_t *a = u->app;
-        ai_effort_t e = a->thinking;
-        for (int i = 0; i <= EFFORT_MAX; i++) {
-            e = (ai_effort_t)((e + 1) % (EFFORT_MAX + 1));
-            if (model_supports_effort(a->model, e)) break;
+        if (!a->model || !a->model->reasoning) return true;
+        bool auto_ok = !json_get_bool(a->model->thinking, "unverified", false);
+        if (a->auto_thinking) {
+            ai_effort_t e = EFFORT_MINIMAL;
+            while (e <= EFFORT_MAX && !model_supports_effort(a->model, e)) e++;
+            app_set_thinking(a, e > EFFORT_MAX ? EFFORT_OFF : e);
+        } else if (a->thinking == EFFORT_OFF && auto_ok) {
+            app_set_thinking_auto(a);
+        } else {
+            ai_effort_t e = a->thinking;
+            for (int i = 0; i <= EFFORT_MAX; i++) {
+                e = (ai_effort_t)((e + 1) % (EFFORT_MAX + 1));
+                if (model_supports_effort(a->model, e)) break;
+            }
+            app_set_thinking(a, e);
         }
-        app_set_thinking(a, e);
         ui_hint_record("effort");
         tui_request_render(t);
         return true;
