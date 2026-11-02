@@ -32,7 +32,8 @@ static void test_registry(void) {
     CHECK(slash_lookup("rewind") == slash_lookup("branch"));
     CHECK(slash_lookup("q") == slash_lookup("quit"));
     CHECK(!slash_lookup("help") && !slash_lookup("thinking") && !slash_lookup("name"));
-    CHECK(!slash_lookup("providers") && !slash_lookup("security")); /* never advertise what omc lacks */
+    CHECK(slash_lookup("providers") == slash_lookup("setup") && !slash_lookup("security")); /* never advertise what omc lacks */
+    CHECK(!slash_lookup("ratchet") && !slash_lookup("omfg") && !slash_lookup("debug") && !slash_lookup("pause"));
     CHECK(slash_lookup("migrate") && str_eq(slash_at(slash_count() - 1)->name, "migrate"));
     const slash_cmd_t *a = slash_lookup("advisor");
     bool configure = false;
