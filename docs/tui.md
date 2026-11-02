@@ -49,6 +49,9 @@ renders (the streaming reply from its last Markdown block on, a running tool car
 group, the welcome banner while its intro plays): held rows never scroll into scrollback; when the
 frame outgrows the screen they are clipped and the screen shows the frame's tail (omp: an unfinalized
 block never retires; the viewport shows its tail), and they are written to scrollback once they settle.
+When a scrolled frame shrinks so its last row would end above the screen bottom (an autocomplete list,
+picker or tall block going away), the rows above are pulled back down so the composer stays on the
+last screen row, as omp's bottom-anchored viewport does (they are also still in scrollback).
 Frames are framed like omp's paints (cursor hidden, `CSI ?2026` synchronized output, autowrap off,
 each row written then erased to its end). Clearing screen and scrollback is reserved for explicit
 full requests (`tui_request_full_render`: session replaced, transcript rebuilt, thinking visibility
