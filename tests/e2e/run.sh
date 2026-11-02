@@ -22,6 +22,13 @@ providers:
       - id: mock-flaky
         contextWindow: 100000
         maxTokens: 4096
+      - id: mock-think
+        contextWindow: 100000
+        maxTokens: 4096
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [low, medium, high, xhigh]
 YML
 MOCK_LOG="$T/req.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $PORT & MPID=$!
 trap 'kill $MPID 2>/dev/null; rm -rf "$T"' EXIT
@@ -496,4 +503,32 @@ check "discovery cache"    '"baseUrl": "http://127.0.0.1:'"$DPORT"'/lms/v1"'  py
 kill $DPID 2>/dev/null
 check "cached when down"   "ollama                   llava:7b"  "${DENV[@]}" "$B" models
 check "perf recorded"      '"mock/mock-1"'  cat "$T/agent/model-perf.json"
+# default-on agent guards and auto thinking (WP-3 / WP-12); request_diff.sh checks the same scenarios against omp
+REQS='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])][int(sys.argv[2]):]; r=[x for x in r if x.get("tools") or len(sys.argv)>3]
+def t(m):
+    c=m.get("content"); return c if isinstance(c,str) else "".join(b.get("text","") for b in c or [])
+print(len(r)); [print(x.get("reasoning_effort","-"), "|".join(t(m) for m in x["messages"][1:])) for x in r]'
+mark() { wc -l < "$T/req.jsonl"; }
+n=$(mark); "$B" -m mock/mock-1 --no-session -p 'say:ok ultrathink and `orchestrate`' >/dev/null 2>&1 </dev/null
+check "ultrathink notice" "<system-notice>"$'\n'"Multi-step reasoning"  python3 -I -c "$REQS" "$T/req.jsonl" $n
+out=$(python3 -I -c "$REQS" "$T/req.jsonl" $n); [[ "$out" != *"orchestration request"* ]] && echo "   ok  keyword in code span" || { echo "   FAIL keyword in code span"; fail=1; }
+n=$(mark); "$B" -m mock/mock-1 --no-session -p 'say:' >/dev/null 2>&1 </dev/null
+check "empty stop retry" "Stopped without actionable output; task incomplete."  python3 -I -c "$REQS" "$T/req.jsonl" $n
+n=$(mark); "$B" -m mock/mock-1 --no-session -p 'calls:[["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}]]' >/dev/null 2>&1 </dev/null
+check "tool-call loop guard" 'You called `bash` 5 consecutive times with identical arguments:'  python3 -I -c "$REQS" "$T/req.jsonl" $n
+check "todo reminder (rpc)" '"type": "todo_reminder", "todos": [{"content": "alpha", "status": "in_progress"}, {"content": "beta", "status": "pending"}], "attempt": 1, "maxAttempts": 3'  python3 -I "$ROOT/tests/parity/rpc_drive.py" "$B" "todo:alpha,beta" 1
+n=$(mark); "$B" -m mock/mock-think --thinking auto --no-session -p 'say:medium sized change' >/dev/null 2>&1 </dev/null
+check "auto thinking judge" $'2\nlow State:\n<request>say:medium sized change</request>'  python3 -I -c "$REQS" "$T/req.jsonl" $n all
+check "auto thinking level" "medium <system-reminder>"  python3 -I -c "$REQS" "$T/req.jsonl" $n
+n=$(mark); "$B" -m mock/mock-think --thinking auto --no-session -p 'say:please ultrathink' >/dev/null 2>&1 </dev/null
+check "ultrathink max level" "xhigh <system-notice>"  python3 -I -c "$REQS" "$T/req.jsonl" $n
+n=$(mark); "$B" -m mock/mock-1 --no-session -p 'think:abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij |never' >/dev/null 2>&1 </dev/null
+check "thinking loop redirect" 'reason="thinking_loop_detected"'  python3 -I -c "$REQS" "$T/req.jsonl" $n
+# internal URLs: out:// (on when configured), cfg:// view, conflict:// without a registered block
+printf 'out:\n  enabled: true\n' > "$T/agent/config.yml"
+n=$(mark); "$B" -m mock/mock-1 --no-session -p 'calls:[["write",{"path":"out://","content":"halfway there"}]]' >/dev/null 2>&1 </dev/null
+check "out:// write"  "Shown to the user."  python3 -I -c "$REQS" "$T/req.jsonl" $n
+rm -f "$T/agent/config.yml"
+check "cfg:// read"   "maxRetries: 10"  "$B" -m mock/mock-1 --no-session -p "read:cfg://retry"
+check "conflict:// unknown"  "Conflict #1 not found: it was resolved"  "$B" -m mock/mock-1 --no-session -p "read:conflict://1"
 exit $fail

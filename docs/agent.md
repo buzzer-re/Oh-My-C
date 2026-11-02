@@ -78,10 +78,10 @@ in `app.c`:
 |---|---|
 | `transform_context` | date/cwd `<system-reminder>` injection (below) |
 | `prepare_request` | resolve the API key per request (OAuth refresh), cache retention (`providers.cacheRetention` / `PI_CACHE_RETENTION`), thinking budgets, temperature, text verbosity, OpenAI service tier |
-| `on_stream_delta` | TTSR matching; returning non-zero aborts the stream |
+| `on_stream_delta` | TTSR matching and the stream loop guard (`thinkloop.c`): sees deltas, block starts, thinking ends and a final `AI_EV_DONE`; `AGENT_STREAM_INTERRUPT` aborts the stream and runs `should_retry(-1)` (TTSR, Gemini header runaway), `AGENT_STREAM_ERROR` ends the turn as an empty retryable error carrying `agent->stream_error` (thinking loop) |
 | `before_tool` | plan-mode gating (read-only working tree) |
 | `after_tool` | central output post-processing and artifact spill (`tool_postprocess_result`, [tools.md](tools.md)), TTSR tool reminders |
-| `should_retry` | TTSR injection (`attempt == -1`), overflow → compaction, transient error backoff ([ai.md](ai.md#retries-and-fallback)) |
+| `should_retry` | TTSR injection and the Gemini tool-call reminder (`attempt == -1`), overflow → compaction, transient error backoff ([ai.md](ai.md#retries-and-fallback)); a retried `Thinking loop detected` turn gets the `thinking-loop-redirect` notice |
 
 omp's user-facing extension system (TypeScript hooks, custom tools and commands under
 `extensibility/`) is not ported. Host programs add tools through the RPC `set_host_tools` command or
@@ -108,6 +108,40 @@ Other entry points: `app_set_model`, `app_set_thinking`, `app_compact`, `app_new
 `app_switch_session`, `app_fork_from`, `app_branch_to`, `app_clear_context`, `app_handoff`,
 `app_retry`, `app_shake` (elide large tool results from the live context), `app_side_question`
 (`/btw`: answer from context, no tools, not added to history) and `app_user_bash` (`!cmd`).
+
+## Auto thinking, magic keywords and agent guards
+
+These ports of omp's AgentSession behaviour are on by default and keep the model requests identical to omp's
+(verified with `tests/parity/request_diff.sh`; `RD_MODE=rpc` drives `--mode rpc` for the session
+continuations print mode suppresses).
+
+- **`thinking: auto`** (`coding/autothink.c`; omp `auto-thinking/classifier.ts`, `model-controls.ts`). `app->auto_thinking`
+  keeps a provisional effort (the model's `thinking.defaultLevel`, else high, clamped below max) until the first user
+  turn. `app_prompt` then classifies the prompt (`tiny_preprocess`, the `level` question of
+  `prompts/coding-agent/prompts/judge/auto-thinking.json` narrowed to the model's ladder, `providers.autoThinkingMaxEffort`
+  ceiling) through `evalhost_judge` with a 4 s budget, or jumps to the model's max on `ultrathink`. Failures keep the
+  last classified level. Resolutions are persisted as `thinking_level_change {configured: "auto"}`; an abort during
+  classification drops the prompt (`abort_gen`). `app_set_thinking_level("auto")` / `app_set_thinking_auto` serve
+  `/thinking`, the selector, Shift+Tab and RPC.
+- **Magic keywords** (`coding/keywords.c`; omp `modes/magic-keywords.ts`, `markdown-prose.ts`). `keywords_notices`
+  turns standalone prose `ultrathink` / `orchestrate` / `jevify` (never inside code fences, code spans or XML/HTML
+  sections) into hidden developer messages (`attribution: user`, `customType: <id>-notice`) placed ahead of the user
+  message, when the keyword's tools are enabled (active tools plus mounted xd:// devices). `workflowz` is recognised
+  but not injected: its notice teaches eval `agent()`/`workpool()`, which omc lacks.
+- **Guards** (`coding/guards.c`). `guards_on_event` runs the cross-turn tool-call loop guard at each turn end
+  (`model.toolCallLoopGuard.*`; the redirect is steered in and persisted as a `tool-call-loop-redirect`
+  custom_message) and counts mutating tool results for the todo tracker; `guards_mid_run_nudge` steers the hidden
+  `mid-run-todo-nudge`. After every run `app_prompt` / `app_prompt_hidden` call `guards_after_run`, which may append a
+  hidden developer message and continue the agent: the empty-stop retry (`empty-stop-retry.md`, 3 attempts), the
+  unexpected-stop retry (`features.unexpectedStopDetection`: mechanical for signed-thinking-only stops, smart judges
+  text stops with `judge/unexpected-stop.json`), and the stop-time todo reminder (`todo.reminders`, `remindersMax`,
+  skipped when the reply waits for the user, while async jobs run, in plan mode and in print mode; surfaced as the
+  TUI's todo-reminder notice card and RPC `todo_reminder`).
+- **Stream loop guard** (`coding/thinkloop.c`; omp `ai/utils/thinking-loop.ts`, `stream-guards.ts`). Exact suffix cycles
+  for every guarded model, plus near-duplicate and low-information paragraph heuristics for Gemini/DeepSeek/Grok;
+  Claude is never guarded. A hit ends the turn as a retryable `Thinking loop detected` error, and the retry carries
+  `thinking-loop-redirect`. A Gemini stream with 36 planning headers and no tool call is interrupted and re-sampled
+  with `gemini-tool-call-reminder`.
 
 ## Sessions (`src/session/session.c`)
 
