@@ -341,6 +341,8 @@ fi
 check "acp commands"   "available_commands_update"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo cmds"
 check "acp slash"      "agent_message_chunk Workspace directories:"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/dirs"
 check "rpc slash"      "ok unknown slash goes to the model"  python3 -I "$ROOT/tests/e2e/slash_rpc.py" "$B"
+# workspace and session lifecycle (WP-21): --add-dir, /add-dir, /remove-dir, /dirs, /pin, /fresh, /move, /wt
+check "rpc workspace"  "workspace rpc ok"  python3 -I "$ROOT/tests/e2e/workspace_rpc.py" "$B" "$T/req.jsonl"
 # custom commands (WP-9): file commands, prompt templates, /skill:, MCP prompts over RPC, ACP and print mode
 check "rpc commands"   "ok empty MCP prompt consumed"  python3 -I "$ROOT/tests/e2e/commands_rpc.py" "$B" "$T/req.jsonl" "$ROOT/tests/e2e/mock_mcp.py"
 check "acp file cmd"   "stop end_turn"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/init"

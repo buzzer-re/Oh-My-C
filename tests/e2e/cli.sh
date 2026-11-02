@@ -18,6 +18,7 @@ check "cli unported cmd"  'error: `omc stats` is not available in omc'  "$B" sta
 check "cli -- literal"    "Tool said: --dash"    "$B" --model mock/mock-1 --no-session -p -- "bash:echo --dash"
 check "cli version"       "omc/"                 "$B" --version
 check "cli root help"     $'COMMANDS\n  acp '    "$B" --help
+check "cli add-dir help"  "--add-dir=<value>                 Add a workspace directory beyond the working directory (repeatable)"  "$B" --help
 check "cli cmd help"      $'Get the API key or OAuth token for a provider\n\nUSAGE\n  $ omc token PROVIDER [FLAGS]'  "$B" token --help
 check "cli missing arg"   $'error: Missing required argument: provider\n\nUSAGE\n  $ omc token PROVIDER [FLAGS]\n\nRun `omc token --help` for details.'  "$B" token
 check "cli bool value"    "error: Option '--raw' does not take an argument"  "$B" token x --raw=1
