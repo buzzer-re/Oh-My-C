@@ -1920,12 +1920,67 @@ void ix_history_add(ui_t *u, const char *text) {
     history_append(text, u->app->cwd);
 }
 
+/* input-controller.ts #resolveBareSlashCommand: a bare command word (no leading `/`) as the whole
+ * submission. `exit`/`quit`/`q` (any case) quit in an empty session (input.bareExitOnEmptySession);
+ * with input.bareSlashCommands any command name or alias runs, and once the session has messages a
+ * first Enter only arms it (*confirm). Returns the "/word" to run (owned) or NULL. */
+static char *bare_slash_command(ui_t *u, const char *raw, const char *armed, bool *confirm) {
+    *confirm = false;
+    if (!raw || !*raw || raw[0] == '/' || json_len(u->att_images)) return NULL;
+    for (const char *p = raw; *p; p++)
+        if (isspace((unsigned char)*p)) return NULL;
+    bool empty = !u->worker_running && json_len(u->app->agent->messages) == 0;
+    char *folded = xstrdup(raw);
+    for (char *p = folded; *p; p++) *p = (char)tolower((unsigned char)*p);
+    char *out = NULL;
+    if (empty && (!strcmp(folded, "exit") || !strcmp(folded, "quit") || !strcmp(folded, "q")) &&
+        settings_bool("input.bareExitOnEmptySession", true)) {
+        out = xasprintf("/%s", folded);
+    } else if (settings_bool("input.bareSlashCommands", false)) {
+        const char *tok = slash_lookup(raw) ? raw : slash_lookup(folded) ? folded : NULL;
+        if (tok) {
+            out = xasprintf("/%s", tok);
+            *confirm = !empty && !str_eq(armed, raw);
+        }
+    }
+    free(folded);
+    return out;
+}
+
+static char *g_armed_bare; /* bare word held for a confirming second Enter */
+static char *g_armed_bare_session;
+
 static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
     ui_t *u = ud;
     char *t = str_trim(text);
     if (*t) {
         tui_editor_add_history(ed, t);
         history_append(t, u->app->cwd);
+    }
+    {
+        const char *sid = session_id(u->app->session);
+        char *armed = g_armed_bare && str_eq(g_armed_bare_session, sid) ? g_armed_bare : NULL;
+        g_armed_bare = NULL;
+        free(g_armed_bare_session);
+        g_armed_bare_session = NULL;
+        bool confirm = false;
+        char *bare = bare_slash_command(u, text, armed, &confirm);
+        free(armed);
+        if (bare && confirm) {
+            g_armed_bare = xstrdup(t);
+            g_armed_bare_session = xstrdup(sid);
+            tui_editor_set_text(ed, t);
+            char *m = xasprintf("Press Enter again to run %s; add a leading space to send \"%s\" as a message", bare, t);
+            add_notice(u, "info", m);
+            free(m);
+            free(bare);
+            free(t);
+            return;
+        }
+        if (bare) {
+            free(t);
+            t = bare;
+        }
     }
     /* staged image attachments: keep the referenced ones, renumbered (compactImageMarkers) */
     char *compacted = NULL;

@@ -306,6 +306,10 @@ fi
 # ACP (Agent Client Protocol): permission request answered by the test client
 check "acp prompt"     "tool_call_update completed acp-ok"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo acp-ok"
 check "acp reject"     "tool_call_update failed The user rejected"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo no" reject_once
+# slash commands (WP-4): one registry behind RPC/ACP advertising and builtin dispatch
+check "acp commands"   "available_commands_update"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo cmds"
+check "acp slash"      "agent_message_chunk Workspace directories:"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/dirs"
+check "rpc slash"      "ok unknown slash goes to the model"  python3 -I "$ROOT/tests/e2e/slash_rpc.py" "$B"
 # Amazon Bedrock ConverseStream against a mock that verifies SigV4 independently and speaks event-stream
 BPORT=$((PORT + 1))
 MOCK_LOG="$T/bedrock.jsonl" MOCK_BEDROCK_BEARER=br-token python3 -I "$ROOT/tests/e2e/mock_bedrock.py" $BPORT & BPID=$!

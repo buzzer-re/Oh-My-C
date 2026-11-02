@@ -550,6 +550,18 @@ static char *render_segment(const char *id, const segctx_t *c) {
         }
         char *wi = with_icon(icon, name);
         char *content = accent_fg(c, TUI_TC_STATUS_LINE_MODEL, wi);
+        if (a->advisor_enabled) {
+            /* modelAdvisorBadge: success while an advisor runs; a configured advisor without a model is
+             * dim, with the closed eye (nothing will review the turn) */
+            const char *ai = a->advisor ? sym("icon.advisor") : *sym("icon.advisorClosed") ? sym("icon.advisorClosed") : sym("icon.advisor");
+            if (*ai) {
+                char *sp = xasprintf(" %s", ai);
+                char *badge = tui_fgs(NULL, a->advisor ? TUI_TC_SUCCESS : TUI_TC_DIM, sp);
+                char *n = xasprintf("%s%s", content, badge);
+                free(content), free(badge), free(sp);
+                content = n;
+            }
+        }
         if (!compact && *td) {
             char *tail = xasprintf("%s%s", sym("sep.dot"), td);
             char *tc = accent_fg(c, TUI_TC_STATUS_LINE_MODEL, tail);

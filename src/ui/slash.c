@@ -6,7 +6,10 @@
 
 #include "coding/slashcmd.h"
 
+#include "coding/advisor.h"
+
 #include <ctype.h>
+#include <math.h>
 #include "config/settings.h"
 
 /* SlashCommandIconName -> symbol key (theme-class.ts `get cmd()`) */
@@ -60,6 +63,49 @@ static char *live_description(void *ud, const char *name) {
         if (a->plan_mode) return xstrdup("Goal: blocked by plan mode");
         return app_goal(a) ? xstrdup(goal_enabled(app_goal(a)) ? "Goal: active" : "Goal: paused") : xstrdup("Goal: off");
     }
+    if (!strcmp(name, "advisor")) {
+        if (a->advisor) {
+            json_t *st = advisor_stats(a->advisor), *m = json_get(st, "model");
+            char *s = m ? xasprintf("Advisor: on (%s/%s)", json_get_str(m, "provider"), json_get_str(m, "id")) : xstrdup("Advisor: off");
+            json_free(st);
+            return s;
+        }
+        return xstrdup(a->advisor_enabled ? "Advisor: configured, no model" : "Advisor: off");
+    }
+    if (!strcmp(name, "effort")) /* configuredThinkingLevel(): none for a model without a reasoning dial */
+        return xasprintf("Thinking: %s", a->model && a->model->reasoning ? effort_name(a->thinking) : "model default");
+    if (!strcmp(name, "clear")) return xstrdup(u->worker_running ? "Clear: unavailable while streaming" : "Clear: drop context, keep session");
+    if (!strcmp(name, "compact") || !strcmp(name, "context")) {
+        json_t *st = app_stats(a);
+        int64_t win = json_get_int(st, "contextWindow", 0), tok = json_get_int(st, "contextTokens", 0);
+        double pct = json_get_num(st, "contextPercent", 0);
+        json_free(st);
+        if (win <= 0) return xstrdup(!strcmp(name, "compact") ? "Compact: context unavailable" : "Context: unavailable");
+        if (!strcmp(name, "compact")) return xasprintf("Compact: context %d%% used", (int)lround(pct));
+        char *t = slash_locale_int(tok), *w = slash_locale_int(win);
+        char *s = xasprintf("Context: %d%% (%s/%s)", (int)lround(pct), t, w);
+        free(t);
+        free(w);
+        return s;
+    }
+    if (!strcmp(name, "todo")) {
+        int pending = 0, progress = 0, done = 0, total = 0;
+        json_t *ph, *t;
+        json_arr_foreach(a->env->todo.phases, i, ph) json_arr_foreach(json_get_arr(ph, "tasks"), k, t) {
+            const char *st = json_get_str(t, "status");
+            total++;
+            if (str_eq(st, "pending")) pending++;
+            else if (str_eq(st, "in_progress")) progress++;
+            else if (str_eq(st, "completed")) done++;
+        }
+        if (!total) return xstrdup("Todos: none");
+        return xasprintf("Todos: %d open (%d in progress, %d done)", pending + progress, progress, done);
+    }
+    if (!strcmp(name, "tools")) {
+        size_t n = a->agent->tools.n;
+        return n ? xasprintf("Tools: %zu active / %zu available", n, n) : xstrdup("Tools: none available");
+    }
+    if (!strcmp(name, "login")) return xstrdup("Login: choose provider");
     return NULL;
 }
 
