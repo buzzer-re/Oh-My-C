@@ -41,7 +41,7 @@ check "cli @image wire"   '"type": "image_url"'  cat "$T/req.jsonl"
 # --system-prompt-template replaces the bundled template
 printf 'CUSTOM TEMPLATE for {{cwd}}\n' > "$T/tpl.md"
 : > "$T/req.jsonl"
-check "cli template"      "plain answer"         "$B" --model mock/mock-1 --no-session --system-prompt-template "$T/tpl.md" -p "say:x"
+check "cli template"      "tplok"                "$B" --model mock/mock-1 --no-session --system-prompt-template "$T/tpl.md" -p "say:tplok"
 check "cli template wire" "CUSTOM TEMPLATE for $T/work"  cat "$T/req.jsonl"
 check "cli template miss" "ENOENT: no such file or directory, open '$T/none.md'"  "$B" --system-prompt-template "$T/none.md" -p x
 # --export (exportFromFile)
