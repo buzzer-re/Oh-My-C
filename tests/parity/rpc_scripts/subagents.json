@@ -10,8 +10,9 @@
  {"send": {"id": "c1", "type": "cancel_subagent", "subagentId": "Nobody"}}, {"wait": "response:c1"},
  {"send": {"id": "t0", "type": "steer_subagent", "subagentId": "Nobody"}}, {"wait": "response:t0"},
  {"send": {"id": "t1", "type": "steer_subagent", "subagentId": "Nobody", "message": "hi"}}, {"wait": "response:t1"},
- {"send": {"id": "p1", "type": "prompt", "message": "call:task:{\"context\":\"ctx\",\"tasks\":[{\"task\":\"say:child done\"}]}"}},
- {"wait": "subagent_lifecycle"}, {"wait": "subagent_lifecycle"}, {"sleep": 1},
+ {"send": {"id": "p1", "type": "prompt", "message": "call:task:{\"context\":\"ctx\",\"tasks\":[{\"task\":\"slow:3:child done\"}]}"}},
+ {"wait": "subagent_lifecycle"}, {"sleep": 1},
  {"send": {"id": "g1", "type": "get_subagents"}}, {"wait": "response:g1"},
- {"wait": "prompt_result:p1"}, {"wait": "session_settled"}
+ {"wait": "subagent_lifecycle"}, {"sleep": 1},
+ {"send": {"id": "g2", "type": "get_subagents"}}, {"wait": "response:g2"}
 ]

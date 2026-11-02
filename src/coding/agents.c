@@ -45,6 +45,7 @@ typedef struct aref {
     bool lifecycle_open;   /* a `started` lifecycle frame went out without its terminal one */
     char *gist;            /* hub activity: latest intent or `running <tool>` of the current run */
     char *session_file;    /* persisted transcript `<artifacts>/<id>.jsonl` (NULL: in memory only) */
+    json_t *model_override; /* progress.modelOverride: the spawn's model patterns (agent definition or request) */
     int pins;              /* a UI view holds `app` (session focus): never freed underneath it */
 } aref_t;
 
@@ -377,6 +378,7 @@ __attribute__((unused)) static void ref_free(aref_t *r) {
     free(r->recent_tail);
     free(r->gist);
     free(r->session_file);
+    json_free(r->model_override);
     free(r->id);
     free(r->agent);
     free(r->parent_id);
@@ -601,7 +603,6 @@ static json_t *progress_new_locked(const aref_t *r, const char *task, const char
     json_set_int(p, "tokens", 0);
     json_set_int(p, "cost", 0);
     json_set_int(p, "durationMs", 0);
-    if (r->model) json_set_str(p, "resolvedModel", r->model);
     return p;
 }
 
@@ -626,9 +627,11 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
         if (old && json_get_str(old, "agentSource")) json_set_str(r->progress, "agentSource", json_get_str(old, "agentSource"));
         json_free(old);
         /* the model the run resolved: its identity and context window (omp sets them before the first request) */
-        if (r->model) json_set_str(r->progress, "resolvedModelIdentity", r->model);
+        if (r->model_override) json_set(r->progress, "modelOverride", json_clone(r->model_override));
         if (child->model && child->model->context_window > 0)
             json_set_int(r->progress, "contextWindow", child->model->context_window);
+        if (r->model) json_set_str(r->progress, "resolvedModelIdentity", r->model);
+        if (r->model) json_set_str(r->progress, "resolvedModel", r->model);
         free(r->recent_tail);
         r->recent_tail = NULL;
         r->active_ms = 0; /* progress (and its active time) is per executor run */
@@ -844,6 +847,22 @@ static app_t *make_child(spawn_t *sp, char **err) {
     json_t *def = json_get(defs, sp->agent);
     json_t *msgs = NULL;
     char *model = sp->model ? xstrdup(sp->model) : NULL;
+    {
+        const char *pat = model ? model : json_get_str(def, "model");
+        json_t *mo = NULL;
+        if (pat && *pat) { /* role aliases (`@task`) expand to their configured patterns */
+            strvec_t parts = mr_configured_patterns(pat);
+            if (parts.n) {
+                mo = json_arr();
+                for (size_t i = 0; i < parts.n; i++) json_push_str(mo, parts.v[i]);
+            }
+            strvec_free(&parts);
+        }
+        pthread_mutex_lock(&g_mu);
+        json_free(sp->ref->model_override);
+        sp->ref->model_override = mo;
+        pthread_mutex_unlock(&g_mu);
+    }
     if (sp->source) {
         char *file = session_resolve(sp->source, sp->env->cwd);
         session_t *src = file ? session_open(file, err) : NULL;
@@ -875,6 +894,11 @@ static app_t *make_child(spawn_t *sp, char **err) {
     sp->ref->sys_append = append;
     free(sp->ref->model);
     sp->ref->model = child && child->model ? xasprintf("%s/%s", child->model->provider, child->model->id) : NULL;
+    /* a role alias with no configured patterns (`@task` on the default role) reports the model it resolved to */
+    if (child && sp->ref->model && !sp->ref->model_override && (model || json_get_str(def, "model"))) {
+        sp->ref->model_override = json_arr();
+        json_push_str(sp->ref->model_override, sp->ref->model);
+    }
     pthread_mutex_unlock(&g_mu);
     free(model);
     json_free(defs);
