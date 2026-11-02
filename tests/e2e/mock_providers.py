@@ -8,11 +8,13 @@ Protocols (chosen by path suffix):
   .../messages          Anthropic Messages SSE           .../v1/systemone, .../ai/run/<model>  native judgments
 A user message "bash:<cmd>" gets a bash tool call (chat completions / anthropic), "read:<path>" a read call (anthropic), "call:<tool>:<json args>" any tool
 (chat completions), a tool result gets the final text.
+MOCK_CACHE_TOKENS=<n> reports <n> cache-write tokens on a new Anthropic request and <n> cache-read tokens on a repeated one.
 Paths under /deny answer 403 to Copilot-Integration-Id copilot-chat (identity fallback test)."""
 import json, os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG = os.environ.get("MOCK_LOG")
+SEEN = set()  # Anthropic request prefixes already "cached" (MOCK_CACHE_TOKENS)
 
 
 def text_of(msg):
@@ -145,7 +147,13 @@ class H(BaseHTTPRequestHandler):
             return self.end()
         if path.endswith("/messages"):
             self.sse_start()
-            self.ev({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": [], "usage": {"input_tokens": 5, "output_tokens": 0}}}, "message_start")
+            usage = {"input_tokens": 5, "output_tokens": 0}
+            cache = int(os.environ.get("MOCK_CACHE_TOKENS", "0"))
+            if cache:  # prompt-cache warming: a replayed prefix reads the entry the first request wrote
+                key = json.dumps([body.get("system"), body.get("tools"), body.get("messages")], sort_keys=True)
+                usage["cache_read_input_tokens" if key in SEEN else "cache_creation_input_tokens"] = cache
+                SEEN.add(key)
+            self.ev({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": [], "usage": usage}}, "message_start")
             if kind == "user" and text.startswith(("bash:", "read:")):
                 tool, args = ("bash", {"command": text[5:]}) if text.startswith("bash:") else ("read", {"path": text[5:]})
                 self.ev({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": tool, "input": {}}}, "content_block_start")

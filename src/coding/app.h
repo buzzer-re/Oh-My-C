@@ -373,6 +373,8 @@ void app_notice(app_t *a, const char *level, const char *fmt, ...) PRINTF_LIKE(3
 void app_reload_context(app_t *a);
 void app_fill_request_opts(app_t *a, ai_stream_opts_t *o);
 
+/* record paid cache-warm requests (cachewarm.c) as model_usage entries; call from the session's own thread */
+void app_flush_warm_usage(app_t *a);
 /* compaction model candidates in attempt order */
 void app_compaction_candidates(app_t *a, mr_pool_t *out);
 /* parse "pattern:effort" */

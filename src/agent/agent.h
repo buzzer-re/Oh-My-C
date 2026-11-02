@@ -128,6 +128,9 @@ typedef struct {
     json_t *(*transform_context)(void *ud, agent_t *a, const json_t *messages);
     /* Fill per-request stream options (api key refresh etc). */
     void (*prepare_request)(void *ud, agent_t *a, ai_stream_opts_t *opts);
+    /* the request about to be streamed (model, final provider context and options), e.g. to arm the prompt-cache
+     * warmer; borrowed for the call */
+    void (*on_request)(void *ud, agent_t *a, const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts);
     /* Inspect stream events (deltas, block starts, thinking ends, and AI_EV_DONE once the stream finished).
      * Return AGENT_STREAM_INTERRUPT to abort the stream and run should_retry(-1) (TTSR, Gemini header runaway), or
      * AGENT_STREAM_ERROR to end the turn as an empty retryable error carrying agent->stream_error (loop guard). */

@@ -48,6 +48,10 @@ char *modelctl_fast_description(app_t *a); /* getTuiAutocompleteDescription */
 char *modelctl_slow_description(app_t *a);
 char *modelctl_extended_context_description(void);
 
+/* RPC set_fast_mode / set_slow_mode / set_cache_warming: *handled false for other commands; on failure *err
+ * (owned) is set and NULL returned; else the response data (owned) */
+json_t *modelctl_rpc(app_t *a, const char *type, const json_t *cmd, bool *handled, char **err);
+
 /* re-apply the context-window policy (extendedContext + compaction.modelThresholds opt-ins) to the catalog */
 void modelctl_apply_context_policy(void);
 void modelctl_watch_settings(void); /* re-apply it whenever settings change (once per process) */

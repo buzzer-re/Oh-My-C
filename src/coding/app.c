@@ -1,6 +1,7 @@
 #include "app.h"
 #include "coding/autothink.h"
 #include "coding/modelctl.h"
+#include "coding/cachewarm.h"
 #include "coding/power.h"
 #include "coding/goal.h"
 #include "coding/guards.h"
@@ -395,8 +396,33 @@ static void fill_request_opts(app_t *a, ai_stream_opts_t *o) {
 
 void app_fill_request_opts(app_t *a, ai_stream_opts_t *o) { fill_request_opts(a, o); }
 
+/* #recordCacheWarmUsage: paid warm requests as off-transcript model_usage entries (session totals include them) */
+void app_flush_warm_usage(app_t *a) {
+    json_t *u = cachewarm_take_usage(a->warmer), *e;
+    json_arr_foreach(u, i, e) {
+        a->total_cost += json_get_num(json_get(json_get(e, "usage"), "cost"), "total", 0);
+        if (!a->session) continue;
+        json_t *entry = json_obj();
+        json_set_str(entry, "type", "model_usage");
+        const char *k;
+        json_t *v;
+        json_obj_foreach(e, j, k, v) json_set(entry, k, json_clone(v));
+        session_append_entry(a->session, entry);
+    }
+    json_free(u);
+}
+
+static void hook_on_request(void *ud, agent_t *ag, const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o) {
+    UNUSED(ag);
+    app_t *a = ud;
+    cachewarm_start(a->warmer, m, ctx, o); /* every main-loop request owns the warmer */
+}
+
+static void warm_settings_changed(void *ud) { cachewarm_mode_changed(((app_t *)ud)->warmer); }
+
 static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
     app_t *a = ud;
+    app_flush_warm_usage(a);
     free(ag->api_key);
     ag->api_key = app_api_key_for(a->model);
     o->api_key = ag->api_key;
@@ -1230,6 +1256,7 @@ static void install_agent(app_t *a) {
     app_sync_queue_modes(a);
     ag->max_turns = a->opts.max_turns;
     ag->hooks.prepare_request = hook_prepare;
+    ag->hooks.on_request = hook_on_request;
     ag->hooks.should_retry = hook_should_retry;
     ag->hooks.transform_context = hook_transform;
     ag->hooks.on_stream_delta = hook_stream;
@@ -1418,6 +1445,9 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (!o->subagent) {
         modelctl_apply_context_policy();
         modelctl_watch_settings();
+        /* prompt-cache warmer for the main agent loop only (spawned sessions opt out) */
+        a->warmer = cachewarm_new(a);
+        settings_on_change(warm_settings_changed, a);
     }
     a->cwd = o->cwd ? path_abs(o->cwd, NULL) : get_cwd();
     a->sys_custom = o->system_prompt ? xstrdup(o->system_prompt) : NULL;
@@ -1580,6 +1610,13 @@ void app_free(app_t *a) {
     if (!a) return;
     json_free(a->queue_snapshot);
     a->queue_snapshot = NULL;
+    if (a->warmer) {
+        settings_off_change(warm_settings_changed, a);
+        cachewarm_stop(a->warmer); /* stop a refresh before the session state it reads goes away */
+        app_flush_warm_usage(a);
+        cachewarm_free(a->warmer);
+        a->warmer = NULL;
+    }
     agents_unregister(a);
     cmp_free(a); /* join a background speculative compaction */
     autolearn_free(a->autolearn); /* abort a private capture before the session it reads goes away */
@@ -2462,7 +2499,17 @@ static void begin_turn_budget(app_t *a, const char *text) {
 
 /* run the agent, then the settle passes in omp's agent_end order: empty/unexpected-stop retries, the plan-mode
  * decision reminder, the stop-time todo reminder; each may append a hidden message and continue the agent */
+static int run_guarded_inner(app_t *a, json_t *msgs);
+
+/* run state idle: idle cache warming takes over (or streaming warming stops), paid warms are recorded */
 static int run_guarded(app_t *a, json_t *msgs) {
+    int rc = run_guarded_inner(a, msgs);
+    cachewarm_settled(a->warmer);
+    app_flush_warm_usage(a);
+    return rc;
+}
+
+static int run_guarded_inner(app_t *a, json_t *msgs) {
     int rc = agent_prompt(a->agent, msgs);
     while (rc == 0 && !a->agent->cancel) {
         int rec = guards_stop_recovery(a);

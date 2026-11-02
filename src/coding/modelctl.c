@@ -457,3 +457,52 @@ char *modelctl_extended_context_command(const char *args) {
     free(arg);
     return r;
 }
+
+/* ---------- RPC (rpc-mode.ts set_fast_mode / set_slow_mode / set_cache_warming) ---------- */
+
+json_t *modelctl_rpc(app_t *a, const char *type, const json_t *cmd, bool *handled, char **err) {
+    *handled = true;
+    if (!strcmp(type, "set_fast_mode")) {
+        bool enabled = json_truthy(json_get(cmd, "enabled"));
+        bool supported = app_set_fast_mode(a, enabled);
+        if (enabled && !supported) {
+            *err = xstrdup("Fast mode is unavailable for the current model.");
+            return NULL;
+        }
+        json_t *d = json_obj();
+        json_set_bool(d, "enabled", app_fast_mode_enabled(a));
+        json_set_bool(d, "active", app_fast_mode_active(a));
+        return d;
+    }
+    if (!strcmp(type, "set_slow_mode")) {
+        const json_t *en = json_get(cmd, "enabled");
+        if (!json_is_bool(en)) { /* a truthy non-boolean must not flip a persisted global setting */
+            *err = xstrdup("set_slow_mode requires boolean enabled");
+            return NULL;
+        }
+        bool supported = app_set_slow_mode(a, en->u.b);
+        if (en->u.b && !supported) {
+            *err = xstrdup("Slow mode is unavailable for the current model.");
+            return NULL;
+        }
+        json_t *d = json_obj();
+        json_set_bool(d, "enabled", app_slow_mode_enabled(a));
+        return d;
+    }
+    if (!strcmp(type, "set_cache_warming")) {
+        const char *mode = json_get_str(cmd, "mode");
+        if (!str_eq(mode, "off") && !str_eq(mode, "streaming") && !str_eq(mode, "idle")) {
+            char *v = json_dump_js(json_get(cmd, "mode"));
+            *err = xasprintf("Invalid cache warming mode: %s", json_is_str(json_get(cmd, "mode")) ? mode : json_get(cmd, "mode") ? v : "undefined");
+            free(v);
+            return NULL;
+        }
+        /* setCacheWarmingMode: a session override, never written to config.yml */
+        settings_set_runtime("providers.cacheWarming", json_str(mode));
+        json_t *d = json_obj();
+        json_set_str(d, "mode", settings_str("providers.cacheWarming", "idle"));
+        return d;
+    }
+    *handled = false;
+    return NULL;
+}

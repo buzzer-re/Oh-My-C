@@ -572,7 +572,10 @@ json_t *google_build_request(const ai_model_t *m, const ai_context_t *ctx, const
         }
         json_set(body, "safetySettings", ss);
     }
-    if (str_eq(m->provider, "google") && (str_eq(o->service_tier, "flex") || str_eq(o->service_tier, "priority")))
+    /* stream.ts google-generative-ai mapping: the budget-thinking branch does not forward serviceTier (thinking off
+     * and thinkingLevel models do) */
+    bool budget_thinking = th.enabled && th.has_budget && !th.level && !str_eq(m->api, "google-vertex");
+    if (str_eq(m->provider, "google") && !budget_thinking && ai_should_send_service_tier_for(o->service_tier, "google", NULL))
         json_set_str(body, "serviceTier", o->service_tier);
 
     json_t *gen = json_obj();

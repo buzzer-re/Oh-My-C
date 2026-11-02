@@ -898,6 +898,7 @@ static json_t *stream_assistant(agent_t *a, int *ttsr_abort, json_t **cursor_res
         a->silent_abort_next = 0;
         a->cancel = 1;
     }
+    if (a->hooks.on_request) a->hooks.on_request(a->hooks.ud, a, a->model, &ctx, &opts);
     json_t *msg = ai_stream(a->model, &ctx, &opts, on_ai_event, &s);
     if (silent && str_eq(json_get_str(msg, "stopReason"), "aborted")) {
         /* SILENT_ABORT_MARKER + AIError.create(AIError.Flag.SilentAbort) */

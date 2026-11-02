@@ -180,7 +180,10 @@ static void apply_custom(json_t *cfg) {
         const char *mid;
         json_t *mv;
         json_obj_foreach(ov, k2, mid, mv) {
-            const ai_model_t *m = catalog_find(pid, mid);
+            /* direct index lookup: this runs inside catalog_init's pthread_once (catalog_find would re-enter it) */
+            char *okey = xasprintf("%s\x1f%s", pid, mid);
+            const ai_model_t *m = hmap_get(&g_index, okey);
+            free(okey);
             if (m) {
                 json_merge(m->raw, mv);
                 if (json_get(mv, "contextWindow")) ((ai_model_t *)m)->context_window_pinned = true;

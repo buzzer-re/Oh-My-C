@@ -1,5 +1,6 @@
 /* rpc mode: JSONL commands on stdin, responses + agent events on stdout (omp RPC protocol subset). */
 #include "modes.h"
+#include "coding/modelctl.h"
 #include "coding/btw.h"
 #include "coding/goal.h"
 #include "coding/slashcmd.h"
@@ -2266,6 +2267,16 @@ static void handle(rpc_t *r, json_t *cmd) {
     if (!type) {
         respond(r, id, "undefined", false, NULL, "Unknown command: undefined");
         return;
+    }
+    { /* set_fast_mode / set_slow_mode / set_cache_warming (modelctl.c) */
+        char *err = NULL;
+        bool handled = false;
+        json_t *d = modelctl_rpc(a, type, cmd, &handled, &err);
+        if (handled) {
+            respond(r, id, type, !err, d, err);
+            free(err);
+            return;
+        }
     }
     if (!strcmp(type, "negotiate_protocol")) {
         const json_t *pv = json_get(cmd, "protocolVersion");
