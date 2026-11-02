@@ -384,6 +384,9 @@ if python3 -c 'import pty' 2>/dev/null; then
     check "agent hub tui" $'hud ok\nhub ok\nactivity ok\nfilter ok\nagents ok\nkill ok\nrevive ok\ntree ok\nclose ok\nslash hub ok\nviewer ok\nchat ok\nviewer close ok\nhub close ok\nleft left ok\nfocus ok\nunfocus ok'  python3 -I "$ROOT/tests/e2e/agenthub_tui.py" "$B"
     # WP-22b: "Waiting for background job …" row, Esc stops waiting, /agents hub (strips, enable/disable -> config.yml)
     check "agents tui" $'waiting ok\ndelivered ok\nwaiting again ok\nstop waiting ok\nfolded ok\nagents ok\nstrip ok\nmodel strip ok\nback ok\ntoggle ok\nconfig True\nenable ok\nclose ok'  python3 -I "$ROOT/tests/e2e/agents_tui.py" "$B" "$T/agent"
+    # WP-29: inline images per protocol, cache-miss marker, Ctrl+Shift+O tool activity, tui.mouse capture
+    mkdir -p "$T/agent-disp" "$T/disp" && cp "$T/agent/models.yml" "$T/agent-disp/"
+    check "display tui" $'kitty transmit once ok\nkitty placement ok\ncache miss ok\nkitty placeholders ok\nsixel ok\niterm2 ok\nfallback text ok\nhide tool activity ok\nexpand while hidden ok\nshow tool activity ok\nmouse capture ok'  env OMC_CODING_AGENT_DIR="$T/agent-disp" python3 -I "$ROOT/tests/e2e/display_tui.py" "$B" "$T/disp"
 fi
 # slash commands (WP-4): one registry behind RPC/ACP advertising and builtin dispatch
 check "acp commands"   "available_commands_update"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo cmds"
