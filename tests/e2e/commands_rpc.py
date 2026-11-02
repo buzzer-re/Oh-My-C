@@ -25,7 +25,7 @@ mcp_json = os.path.join(agent, "mcp.json")
 with open(mcp_json, "w") as f:
     json.dump({"mcpServers": {"mockmcp": {"command": "python3", "args": ["-I", mock_mcp]}}}, f)
 
-p = subprocess.Popen([omc, "-m", "mock/mock-1", "--mode", "rpc"], cwd=proj, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+p = subprocess.Popen([omc, "--model", "mock/mock-1", "--mode", "rpc"], cwd=proj, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                      stderr=subprocess.DEVNULL, text=True)
 frames = []
 lock = threading.Lock()

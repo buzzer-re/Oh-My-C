@@ -21,7 +21,7 @@ if pid == 0:
     env = dict(os.environ, TERM="xterm-256color", OMC_SKIP_SETUP="1", PI_NO_DESKTOP_NOTIFY="1")
     for k in ("TMUX", "STY", "ZELLIJ", "TERM_PROGRAM"):
         env.pop(k, None)
-    os.execvpe(omc, [omc, "-m", "mock/mock-1", "--no-session", *extra, prompt], env)
+    os.execvpe(omc, [omc, "--model", "mock/mock-1", "--no-session", *extra, prompt], env)
 
 raw = b""
 

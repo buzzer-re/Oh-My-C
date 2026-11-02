@@ -4,7 +4,7 @@ checks each tool result.  usage: eval_client.py <omc> ; prints "ok <name>" / "FA
 import json, subprocess, sys, threading, time
 
 omc = sys.argv[1]
-p = subprocess.Popen([omc, "-m", "mock/mock-1", "--mode", "rpc"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+p = subprocess.Popen([omc, "--model", "mock/mock-1", "--mode", "rpc"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                      text=True)
 results, done = [], {}
 lock = threading.Lock()

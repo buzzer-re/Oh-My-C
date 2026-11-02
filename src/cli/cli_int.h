@@ -6,6 +6,9 @@
 
 #include <stdarg.h>
 
+/* omp commands ported so far (the others are refused by resolve_cli_argv) */
+#define OMC_CLI_WORKTREE 1
+
 /* launch (cli.c) */
 int cli_launch(int argc, char **argv);
 int cli_acp(int argc, char **argv);

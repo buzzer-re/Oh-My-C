@@ -5,7 +5,7 @@ exits non-zero on the first failure."""
 import json, subprocess, sys, threading, time
 
 omc = sys.argv[1]
-p = subprocess.Popen([omc, "-m", "mock/mock-1", "--mode", "rpc"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+p = subprocess.Popen([omc, "--model", "mock/mock-1", "--mode", "rpc"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                      stderr=subprocess.DEVNULL, text=True)
 frames = []
 lock = threading.Lock()

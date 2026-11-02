@@ -5,18 +5,18 @@ MOCK_LOG="$T/devin.jsonl" MOCK_DEVIN_KEY=devin-test-key python3 -I "$ROOT/tests/
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$DPORT) 2>/dev/null && break; sleep 0.1; done
 DVENV=(env HOME="$T" DEVIN_API_KEY=devin-test-key OMC_PROVIDER_URL_REWRITE="https://server.codeium.com=http://127.0.0.1:$DPORT")
 mkdir -p "$T/devin"
-check "devin text"      "plain devin answer"   "${DVENV[@]}" "$B" -m devin/swe-1-6 --no-session -p "hi"
-check "devin tool"      "Tool said: dv-e2e"    "${DVENV[@]}" "$B" -m devin/swe-1-6 --session-dir "$T/devin" -p "bash:echo dv-e2e"
+check "devin text"      "plain devin answer"   "${DVENV[@]}" "$B" --model devin/swe-1-6 --no-session -p "hi"
+check "devin tool"      "Tool said: dv-e2e"    "${DVENV[@]}" "$B" --model devin/swe-1-6 --session-dir "$T/devin" -p "bash:echo dv-e2e"
 check "devin end error" "Devin stream error resource_exhausted: quota exceeded [details: exa.QuotaInfo: {\"reason\":\"mock\"}]" \
-    "${DVENV[@]}" "$B" -m devin/swe-1-6 --no-session -p "fail"
+    "${DVENV[@]}" "$B" --model devin/swe-1-6 --no-session -p "fail"
 check "devin auth 401"  "Devin auth error 401 Unauthorized: invalid api key" \
     env HOME="$T" DEVIN_API_KEY=wrong OMC_PROVIDER_URL_REWRITE="https://server.codeium.com=http://127.0.0.1:$DPORT" \
-    "$B" -m devin/swe-1-6 --no-session -p "hi"
-check "devin json"      '"toolName":"bash"'    "${DVENV[@]}" "$B" -m devin/swe-1-6 --no-session --mode json -p "bash:echo j"
+    "$B" --model devin/swe-1-6 --no-session -p "hi"
+check "devin json"      '"toolName":"bash"'    "${DVENV[@]}" "$B" --model devin/swe-1-6 --no-session --mode json -p "bash:echo j"
 # router model (compat.modelRouter): AssignModel first, then chat with the assigned uid + assignment JWT
 mkdir -p "$T/devin-agent"
 printf 'providers:\n  devin:\n    baseUrl: https://server.codeium.com\n    api: devin-agent\n    models:\n      - id: adaptive\n        compat:\n          modelRouter: true\n' > "$T/devin-agent/models.yml"
-check "devin router"    '"upstreamModel":"MODEL_ACTUAL"'  "${DVENV[@]}" OMC_CODING_AGENT_DIR="$T/devin-agent" "$B" -m devin/adaptive --no-session --mode json -p "hi"
+check "devin router"    '"upstreamModel":"MODEL_ACTUAL"'  "${DVENV[@]}" OMC_CODING_AGENT_DIR="$T/devin-agent" "$B" --model devin/adaptive --no-session --mode json -p "hi"
 # request shape: identity metadata, user JWT, Cascade request type/planner mode, tool choice, configuration
 python3 -I - "$T/devin.jsonl" <<'PY' && echo "   ok  devin request shape" || { echo "   FAIL devin request shape"; fail=1; }
 import json, sys

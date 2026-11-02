@@ -4,7 +4,7 @@ Usage: plan_rpc.py <omc> [extra omc args...]. Prints assistant texts, tool resul
 import json, subprocess, sys, threading, time
 
 PLAN = "# Retry plan\n\n## Steps\n\n1. Add retry.\n"
-p = subprocess.Popen([sys.argv[1], "-m", "mock/mock-1", "--mode", "rpc", *sys.argv[2:]], stdin=subprocess.PIPE,
+p = subprocess.Popen([sys.argv[1], "--model", "mock/mock-1", "--mode", "rpc", *sys.argv[2:]], stdin=subprocess.PIPE,
                      stdout=subprocess.PIPE, text=True)
 done = {}
 

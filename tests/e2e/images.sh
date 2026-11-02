@@ -47,7 +47,7 @@ icheck() { # name want cmd...  (runs in the image work dir)
     if [[ "$out" == *"$want"* ]]; then echo "   ok  $name"; else echo "   FAIL $name: got: ${out:0:400}"; fail=1; fi
 }
 : > "$T/req.jsonl"
-icheck "img read"          "plain answer"  "${IENV[@]}" "$B" -m mock/vision-1 --no-session -p "read:shot.png"
+icheck "img read"          "plain answer"  "${IENV[@]}" "$B" --model mock/vision-1 --no-session -p "read:shot.png"
 # the tool text and the image the model receives: decodable, 1568x882, within omp's 500 KiB budget
 icheck "img read note"     "Read image file [image/png] (displayed as image/" python3 -I -c '
 import json, sys
@@ -62,13 +62,13 @@ r = [json.loads(l) for l in open(sys.argv[1])][-1]
 u = [p["image_url"]["url"] for m in r["messages"] for p in (m["content"] if isinstance(m["content"], list) else []) if p.get("type") == "image_url"][-1]
 raw = base64.b64decode(u.split(",", 1)[1]); im = Image.open(io.BytesIO(raw)); im.load()
 print("%dx%d %s" % (im.size[0], im.size[1], "ok" if len(raw) <= 500 * 1024 else "too big"))' "$T/req.jsonl"
-icheck "img undecodable"   "broken.png is not a decodable image/png image: Image: decode failed"  "${IENV[@]}" "$B" -m mock/vision-1 --no-session -p "read:broken.png"
-icheck "img magic only"    "1:plain text in a .png"  "${IENV[@]}" "$B" -m mock/vision-1 --no-session -p "read:fake.png"
-icheck "img text model"    "Image metadata:"  env OMC_CODING_AGENT_DIR="$T/agent" OMC_NO_TITLE=1 "$B" -m mock/mock-1 --no-session -p "read:$T/iwork/shot.png"
+icheck "img undecodable"   "broken.png is not a decodable image/png image: Image: decode failed"  "${IENV[@]}" "$B" --model mock/vision-1 --no-session -p "read:broken.png"
+icheck "img magic only"    "1:plain text in a .png"  "${IENV[@]}" "$B" --model mock/vision-1 --no-session -p "read:fake.png"
+icheck "img text model"    "Image metadata:"  env OMC_CODING_AGENT_DIR="$T/agent" OMC_NO_TITLE=1 "$B" --model mock/mock-1 --no-session -p "read:$T/iwork/shot.png"
 # images.autoResize off: the read result carries the raw 2600x1500 noise PNG (> 10 MB base64); the Anthropic
 # provider clamps it under 90% of the 10 MiB per-image cap before the request leaves (prepareAnthropicImageContext)
 printf 'images:\n  autoResize: false\n' > "$T/iagent/config.yml"
-icheck "img anthropic"     "Tool said: Read image file [image/png]"  "${IENV[@]}" "$B" -m mockant/claude-mock --no-session -p "read:noise.png"
+icheck "img anthropic"     "Tool said: Read image file [image/png]"  "${IENV[@]}" "$B" --model mockant/claude-mock --no-session -p "read:noise.png"
 icheck "img anthropic cap" "clamped ok" python3 -I -c '
 import json, sys, base64, io
 from PIL import Image
@@ -80,6 +80,6 @@ s = imgs[-1]; n = len(s["data"]); im = Image.open(io.BytesIO(base64.b64decode(s[
 print("clamped ok" if n <= int(10 * 1024 * 1024 * 0.9) and max(im.size) <= 8000 else "too big %d" % n, im.size, s["media_type"])' "$T/img-prov.jsonl"
 rm -f "$T/iagent/config.yml"
 # a persisted session keeps images in the blob store and resolves them on resume
-icheck "img blob persist"  "blob:sha256:"  bash -c "OMC_CODING_AGENT_DIR='$T/iagent' OMC_NO_TITLE=1 '$B' -m mock/vision-1 -p 'read:shot.png' >/dev/null; grep -ho 'blob:sha256:[0-9a-f]*' '$T'/iagent/sessions/*/*.jsonl | head -1"
-icheck "img blob resume"   "image_url ok" bash -c ": > '$T/req.jsonl'; OMC_CODING_AGENT_DIR='$T/iagent' OMC_NO_TITLE=1 '$B' -m mock/vision-1 -c -p 'hi' >/dev/null; grep -q 'data:image/[a-z]*;base64,' '$T/req.jsonl' && echo 'image_url ok'"
+icheck "img blob persist"  "blob:sha256:"  bash -c "OMC_CODING_AGENT_DIR='$T/iagent' OMC_NO_TITLE=1 '$B' --model mock/vision-1 -p 'read:shot.png' >/dev/null; grep -ho 'blob:sha256:[0-9a-f]*' '$T'/iagent/sessions/*/*.jsonl | head -1"
+icheck "img blob resume"   "image_url ok" bash -c ": > '$T/req.jsonl'; OMC_CODING_AGENT_DIR='$T/iagent' OMC_NO_TITLE=1 '$B' --model mock/vision-1 -c -p 'hi' >/dev/null; grep -q 'data:image/[a-z]*;base64,' '$T/req.jsonl' && echo 'image_url ok'"
 kill $IPID 2>/dev/null
