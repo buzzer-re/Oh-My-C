@@ -1112,6 +1112,15 @@ int dump_zip_write(const char *path, const char *const *names, const char *const
 
 /* ---------- archives ---------- */
 
+json_t *dump_session_header(const session_t *s) {
+    json_t *h = s && s->header ? json_clone(s->header) : NULL;
+    if (h && s->title && *s->title) {
+        json_set_str(h, "title", s->title);
+        if (s->title_source) json_set_str(h, "titleSource", s->title_source);
+    }
+    return h;
+}
+
 void dump_archive_free(dump_archive_t *ar) {
     free(ar->path);
     strvec_free(&ar->files);
@@ -1286,10 +1295,12 @@ int app_dump_archive(app_t *a, bool anon, dump_archive_t *out, char **err) {
     } else {
         anon_t *an = anon_new();
         sb_t b = SB_INIT;
-        if (a->session && a->session->header) {
-            char *line = anon_entry_line(an, a->session->header);
+        json_t *hdr = dump_session_header(a->session);
+        if (hdr) {
+            char *line = anon_entry_line(an, hdr);
             sb_append(&b, line);
             free(line);
+            json_free(hdr);
         }
         json_t *e;
         json_arr_foreach(a->session ? a->session->entries : NULL, i, e) {
@@ -1323,10 +1334,12 @@ int app_dump_archive(app_t *a, bool anon, dump_archive_t *out, char **err) {
             strvec_free(&parts);
             sb_t body = SB_INIT;
             session_t *s = subs.v[i].s;
-            if (s->header) {
-                char *line = anon_entry_line(an, s->header);
+            json_t *sh = dump_session_header(s);
+            if (sh) {
+                char *line = anon_entry_line(an, sh);
                 sb_append(&body, line);
                 free(line);
+                json_free(sh);
             }
             json_arr_foreach(s->entries, k, e) {
                 char *line = anon_entry_line(an, e);

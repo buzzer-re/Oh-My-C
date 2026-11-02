@@ -777,9 +777,10 @@ char *anon_command(anon_t *a, const char *value) {
 static json_t *field(anon_t *a, rule_t rule, const json_t *value, const json_t *parent, const char *key, bool from_tool);
 static json_t *strct(anon_t *a, const json_t *object, bool from_tool);
 
-static void set_placeholder_key(anon_t *a, json_t *out, const char *key, json_t *v) {
+/* out[this.placeholder(key)] = this.#opaque(value): the key is tokenized before the value */
+static void opaque_under_placeholder(anon_t *a, json_t *out, const char *key, const json_t *value) {
     char *k = anon_placeholder(a, key);
-    json_set(out, k, v);
+    json_set(out, k, opaque(a, value));
     free(k);
 }
 
@@ -824,7 +825,7 @@ static json_t *arg_value(anon_t *a, const json_t *value, const char *key, const 
         json_obj_foreach(value, i, k, v) {
             if (in_list(ANON_OPAQUE_ARG_KEYS, k)) json_set(out, k, opaque(a, v));
             else if (schema_has(spec, k, false) || !strcmp(k, "i") || !strcmp(k, "intent")) json_set(out, k, arg_value(a, v, k, spec));
-            else set_placeholder_key(a, out, k, opaque(a, v));
+            else opaque_under_placeholder(a, out, k, v);
         }
         return out;
     }
@@ -862,7 +863,7 @@ static json_t *content_block(anon_t *a, const json_t *block, bool from_tool) {
     json_t *v;
     json_obj_foreach(block, i, k, v) {
         rule_t r = in_list(allowed, k) ? field_rule(k) : R_NONE;
-        if (r == R_NONE) set_placeholder_key(a, out, k, opaque(a, v));
+        if (r == R_NONE) opaque_under_placeholder(a, out, k, v);
         else if (!strcmp(k, "type")) json_set(out, k, json_clone(v));
         else json_set(out, k, field(a, r, v, block, k, from_tool && !str_eq(type, "toolCall")));
     }
@@ -881,7 +882,7 @@ static json_t *execution_log(anon_t *a, const json_t *data) {
         else if (!strcmp(k, "startedAt")) json_set(out, k, field(a, R_TIME, v, data, k, true));
         else if (!strcmp(k, "args")) json_set(out, k, tool_args(a, v, data));
         else if (!strcmp(k, "intent")) json_set(out, k, field(a, R_LABEL, v, data, k, true));
-        else set_placeholder_key(a, out, k, opaque(a, v));
+        else opaque_under_placeholder(a, out, k, v);
     }
     return out;
 }
@@ -907,7 +908,7 @@ static json_t *runtime_stamp(anon_t *a, const json_t *stamp) {
     json_t *v;
     json_obj_foreach(stamp, i, k, v) {
         const char *s = json_sv(v);
-        if (!s) set_placeholder_key(a, out, k, opaque(a, v));
+        if (!s) opaque_under_placeholder(a, out, k, v);
         else if (!strcmp(k, "version")) json_set(out, k, is_version(s) ? json_str(s) : json_take_str(anon_placeholder(a, s)));
         else if (!strcmp(k, "commit")) {
             size_t n = strlen(s);
@@ -915,7 +916,7 @@ static json_t *runtime_stamp(anon_t *a, const json_t *stamp) {
             for (size_t j = 0; hex && j < n; j++) hex = isdigit((unsigned char)s[j]) || (s[j] >= 'a' && s[j] <= 'f');
             json_set(out, k, hex ? json_str(s) : json_take_str(anon_placeholder(a, s)));
         } else if (!strcmp(k, "branch") || !strcmp(k, "diff") || !strcmp(k, "label")) json_set(out, k, json_take_str(anon_placeholder(a, s)));
-        else set_placeholder_key(a, out, k, opaque(a, v));
+        else opaque_under_placeholder(a, out, k, v);
     }
     return out;
 }
@@ -1062,7 +1063,7 @@ static json_t *strct(anon_t *a, const json_t *object, bool from_tool) {
     json_t *v;
     json_obj_foreach(object, i, k, v) {
         rule_t r = field_rule(k);
-        if (r == R_NONE) set_placeholder_key(a, out, k, opaque(a, v));
+        if (r == R_NONE) opaque_under_placeholder(a, out, k, v);
         else json_set(out, k, field(a, r, v, object, k, from_tool));
     }
     return out;

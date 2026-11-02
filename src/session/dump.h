@@ -8,6 +8,7 @@
 #define OMC_SESSION_DUMP_H
 
 #include "coding/app.h"
+#include "session/session.h"
 
 /* ---- formatting (pure) ---- */
 
@@ -28,6 +29,9 @@ char *dump_history_markdown(const json_t *messages);
 char *dump_tool_inventory(agent_tool_t *const *tools, size_t ntools);
 /* formatDuration (pi-utils) (owned) */
 char *dump_format_duration(double ms);
+
+/* the session header as omp's loader yields it (title slot folded in: title/titleSource) (owned) */
+json_t *dump_session_header(const session_t *s);
 
 /* ---- archives ---- */
 
