@@ -271,6 +271,8 @@ static void post_notice(void *x) {
     const char *lvl = !strcmp(e->name, "error")           ? "error"
                       : !strcmp(e->name, "warning")       ? "warning"
                       : !strcmp(e->name, "todo-reminder") ? "todo-reminder" /* TodoReminderComponent card */
+                      : !strcmp(e->name, "auto_compaction_start") ? "auto_compaction_start" /* compaction.c events */
+                      : !strcmp(e->name, "auto_compaction_end")   ? "auto_compaction_end"
                                                           : "info";
     /* a generated session title only shows in the status band / working row, as in omp */
     if (strcmp(e->name, "title")) add_notice(e->u, lvl, e->out);

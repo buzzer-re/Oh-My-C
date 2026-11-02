@@ -883,6 +883,19 @@ static void render_custom(msgview_t *v, int width, strvec_t *o) {
     free(label);
 }
 
+/* Number.prototype.toLocaleString (en-US): 1234567 -> 1,234,567 */
+static void locale_number(char *buf, size_t n, int64_t v) {
+    char raw[32];
+    snprintf(raw, sizeof raw, "%lld", (long long)(v < 0 ? -v : v));
+    size_t len = strlen(raw), k = 0;
+    if (v < 0 && k + 1 < n) buf[k++] = '-';
+    for (size_t i = 0; i < len && k + 2 < n; i++) {
+        if (i && (len - i) % 3 == 0) buf[k++] = ',';
+        buf[k++] = raw[i];
+    }
+    buf[k] = 0;
+}
+
 /* compaction / branch summary: a centered divider; Ctrl+O expands the summary into a box */
 static void render_summary(msgview_t *v, int width, strvec_t *o) {
     char label[160];
@@ -890,14 +903,28 @@ static void render_summary(msgview_t *v, int width, strvec_t *o) {
     if (branch) {
         snprintf(label, sizeof label, "%s branch", tui_sym("icon.branch"));
     } else {
+        /* COMPACTION_METHOD_LABELS; legacy / extension entries read "compacted" */
+        const char *method = json_get_str(v->msg, "method");
+        const char *name = str_eq(method, "remote")        ? "remote-compacted"
+                           : str_eq(method, "soft")        ? "soft-compacted"
+                           : str_eq(method, "handoff")     ? "handed-off"
+                           : str_eq(method, "snapcompact") ? "snap-compacted"
+                           : str_eq(method, "shake")       ? "shaken"
+                                                           : "compacted";
         int64_t before = json_get_int(v->msg, "tokensBefore", 0), after = json_get_int(v->msg, "tokensAfter", -1);
-        snprintf(label, sizeof label, "%s compacted", tui_sym("icon.camera"));
+        snprintf(label, sizeof label, "%s %s", tui_sym("icon.camera"), name);
         if (after >= 0 && before > 0) {
             char a[24], b[24];
             format_number(a, sizeof a, before);
             format_number(b, sizeof b, after);
             size_t l = strlen(label);
             snprintf(label + l, sizeof label - l, "%s%s\xe2\x86\x92%s", tui_sym("sep.dot"), a, b);
+        }
+        if (json_get_str(v->msg, "warning")) {
+            char *w = fg(TUI_TC_WARNING, tui_sym("icon.warning"));
+            size_t l = strlen(label);
+            snprintf(label + l, sizeof label - l, " %s", w);
+            free(w);
         }
     }
     char *dot = trim_dup(tui_sym("sep.dot"));
@@ -932,9 +959,18 @@ static void render_summary(msgview_t *v, int width, strvec_t *o) {
         char *md;
         if (branch) md = xasprintf("**Branch summary**\n\n%s", summary ? summary : "");
         else {
-            int64_t before = json_get_int(v->msg, "tokensBefore", 0);
-            md = before > 0 ? xasprintf("**Compacted from %lld tokens**\n\n%s", (long long)before, summary ? summary : "")
-                            : xasprintf("**Compacted context**\n\n%s", summary ? summary : "");
+            /* compactionDetailMarkdown */
+            int64_t before = json_get_int(v->msg, "tokensBefore", 0), after = json_get_int(v->msg, "tokensAfter", -1);
+            char b[32], a[32];
+            locale_number(b, sizeof b, before);
+            locale_number(a, sizeof a, after);
+            char *line = before > 0 ? (after >= 0 ? xasprintf("Compacted from %s to %s tokens", b, a) : xasprintf("Compacted from %s tokens", b))
+                                    : (after >= 0 ? xasprintf("Compacted to %s tokens", a) : xstrdup("Compacted context"));
+            const char *warning = json_get_str(v->msg, "warning");
+            char *wn = warning ? xasprintf("\n\n%s **Warning:** %s", tui_sym("icon.warning"), warning) : xstrdup("");
+            md = xasprintf("**%s**%s\n\n%s", line, wn, summary ? summary : "");
+            free(line);
+            free(wn);
         }
         tui_md_opts_t mo;
         tui_md_opts_default(&mo);
@@ -1216,7 +1252,8 @@ static void auto_compaction_event(ui_t *u, bool start, const char *text) {
         json_free(ev);
         return;
     }
-    if (u->worker_running) ui_working_start(u);
+    /* a mid-turn pass hands the row back to the running turn; a post-turn pass ends it */
+    if (u->worker_running && u->app && agent_is_running(u->app->agent)) ui_working_start(u);
     else ui_working_stop(u);
     const char *em = json_get_str(ev, "errorMessage");
     bool skipped = json_get_bool(ev, "skipped", false);
@@ -1779,7 +1816,7 @@ void ui_chat_replay_into(ui_t *u, tui_container_t *dest, const json_t *entries, 
 }
 
 /* Rebuild the transcript from the session tree (renderSessionContext): the path root..leaf after the last
- * reset boundary; a compaction shows its divider, then the kept tail and everything after it. Without a
+ * reset boundary; a compaction shows the kept tail, its divider, then everything after it. Without a
  * session file the agent's live context is replayed instead. */
 void ui_chat_rebuild(ui_t *u) {
     tui_container_clear(u->chat);
@@ -1804,17 +1841,36 @@ void ui_chat_rebuild(ui_t *u) {
             } else if (str_eq(t, "compaction")) compaction = (ssize_t)i;
         }
         if (compaction >= 0) {
+            /* the collapsed display transcript: the kept tail from its first user-initiated turn, then the
+             * divider at the chronological compaction point, then everything after it */
             json_t *c = json_at(path, (size_t)compaction);
+            const char *first_kept = json_get_str(c, "firstKeptEntryId");
+            const char *through = json_get_str(c, "providerReplayThroughEntryId");
+            ssize_t retained = -1;
+            for (size_t i = start; first_kept && *first_kept && i < (size_t)compaction && retained < 0; i++)
+                if (str_eq(json_get_str(json_at(path, i), "id"), first_kept)) retained = (ssize_t)i;
+            for (size_t i = start; retained < 0 && first_kept && !*first_kept && through && i < (size_t)compaction; i++)
+                if (str_eq(json_get_str(json_at(path, i), "id"), through)) retained = (ssize_t)i + 1;
+            if (retained >= 0 && retained < compaction) {
+                size_t from = (size_t)retained;
+                for (size_t i = (size_t)retained; i < (size_t)compaction; i++) {
+                    const json_t *e = json_at(path, i);
+                    const char *t = json_get_str(e, "type");
+                    const char *role = json_get_str(json_get(e, "message"), "role");
+                    bool turn = str_eq(t, "branch_summary") ||
+                                (str_eq(t, "custom_message") && str_eq(json_get_str(e, "attribution"), "user")) ||
+                                (str_eq(t, "message") && (str_eq(role, "user") || str_eq(role, "bashExecution")));
+                    if (turn) {
+                        from = i;
+                        break;
+                    }
+                }
+                for (size_t k = from; k < (size_t)compaction; k++) replay_entry(u, json_at(path, k), &pending);
+            }
             msgview_t *v = mv_new(MV_SUMMARY);
             v->level = "compaction";
             v->msg = json_clone(c);
             tui_container_add(u->chat, &v->base);
-            const char *first_kept = json_get_str(c, "firstKeptEntryId");
-            for (size_t i = start; first_kept && i < (size_t)compaction; i++)
-                if (str_eq(json_get_str(json_at(path, i), "id"), first_kept)) {
-                    for (size_t k = i; k < (size_t)compaction; k++) replay_entry(u, json_at(path, k), &pending);
-                    break;
-                }
             start = (size_t)compaction + 1;
         }
         for (size_t i = start; i < n; i++) replay_entry(u, json_at(path, i), &pending);
