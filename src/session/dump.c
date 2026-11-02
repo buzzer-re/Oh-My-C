@@ -943,13 +943,51 @@ static char *tmp_path(const char *stem, const char *ext) {
 
 /* ---------- llm request ---------- */
 
+/* the resolved Model object in omp's field order (id, name, api, provider, baseUrl, reasoning, input, cost,
+ * contextWindow, maxTokens, compat, then any other catalog fields); omp's derived `identity`,
+ * `requiresGlyphTokenization`, `supportsComputerUse` and the full per-api compat table are not modelled */
+static json_t *dump_model_json(const ai_model_t *m) {
+    json_t *o = json_obj();
+    json_set_str(o, "id", m->id);
+    json_set_str(o, "name", m->name ? m->name : m->id);
+    json_set_str(o, "api", m->api);
+    json_set_str(o, "provider", m->provider);
+    if (m->base_url) json_set_str(o, "baseUrl", m->base_url);
+    json_set_bool(o, "reasoning", m->reasoning);
+    json_t *in = json_get(m->raw, "input");
+    if (in) json_set(o, "input", json_clone(in));
+    else {
+        in = json_arr();
+        json_push_str(in, "text");
+        if (m->input_image) json_push_str(in, "image");
+        json_set(o, "input", in);
+    }
+    json_t *cost = json_obj();
+    json_set_num(cost, "input", m->cost_input);
+    json_set_num(cost, "output", m->cost_output);
+    json_set_num(cost, "cacheRead", m->cost_cache_read);
+    json_set_num(cost, "cacheWrite", m->cost_cache_write);
+    json_set(o, "cost", cost);
+    json_set_int(o, "contextWindow", m->context_window);
+    json_set_int(o, "maxTokens", m->max_tokens);
+    if (m->compat_defaults || m->compat) {
+        json_t *c = m->compat_defaults ? json_clone(m->compat_defaults) : json_obj();
+        if (m->compat) json_merge(c, m->compat);
+        json_set(o, "compat", c);
+    }
+    const char *k;
+    json_t *v;
+    json_obj_foreach(m->raw, i, k, v) if (!json_get(o, k)) json_set(o, k, json_clone(v));
+    return o;
+}
+
 /* #formatLlmRequestJson: the request context at the convertToLlm boundary */
 static char *llm_request_json(app_t *a) {
     agent_t *ag = a->agent;
     json_t *p = json_obj();
     pthread_mutex_lock(&ag->mu);
     const ai_model_t *m = ag->model ? ag->model : a->model;
-    json_set(p, "model", m && m->raw ? json_clone(m->raw) : json_null());
+    json_set(p, "model", m ? dump_model_json(m) : json_null());
     const char *tl = thinking_level(m, a->thinking);
     json_set(p, "thinkingLevel", tl ? json_str(tl) : json_null());
     json_set(p, "serviceTier", json_null());
