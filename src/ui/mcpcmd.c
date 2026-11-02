@@ -312,10 +312,18 @@ static void res_event_ui(void *p) {
     free(ev);
 }
 
+static void late_connect_ui(void *ud);
+
 static void cb_tools(void *ud, const char *server) {
     UNUSED(server);
     ui_t *u = ud;
     post(u, P_SYNC, NULL, NULL);
+}
+
+static void cb_connected(void *ud, const char *server) {
+    UNUSED(server);
+    ui_t *u = ud;
+    tui_post(u->tui, late_connect_ui, u);
 }
 
 static void prompts_ui(void *ud) {
@@ -348,9 +356,68 @@ static void notif_setting_changed(void *ud) {
 
 static void install_callbacks(ui_t *u) {
     if (!u->app->mcp) return;
-    mcp_callbacks_t cb = {cb_tools, cb_prompts, cb_resource, u};
+    mcp_callbacks_t cb = {cb_tools, cb_prompts, cb_resource, cb_connected, u};
     mcp_set_callbacks(u->app->mcp, &cb);
     mcp_set_notifications(u->app->mcp, settings_bool("mcp.notifications", false));
+}
+
+/* formatMCPConnectionStatusMessage over the manager's servers (#handleMcpConnectionStatusEvent's status) */
+static void connection_status(ui_t *u) {
+    mcp_manager_t *m = u->app->mcp;
+    if (!m || settings_bool("startup.quiet", false)) return;
+    json_t *names = mcp_server_names(m), *n;
+    sb_t pend = SB_INIT, conn = SB_INIT, fail = SB_INIT;
+    int np = 0, nc = 0, nf = 0;
+    json_t *failed = mcp_failed(m);
+    json_arr_foreach(names, i, n) {
+        const char *nm = json_sv(n);
+        mcp_state_t st = mcp_server_state(m, nm);
+        if (st == MCP_CONNECTED) sb_appendf(&conn, "%s%s", nc++ ? ", " : "", nm);
+        else if (st == MCP_CONNECTING) sb_appendf(&pend, "%s%s", np++ ? ", " : "", nm);
+        else {
+            json_t *e;
+            const char *err = "failed";
+            json_arr_foreach(failed, k, e) if (str_eq(json_get_str(e, "name"), nm)) err = json_get_str(e, "error");
+            json_t *c = mcp_server_config(m, nm);
+            char *src = c && json_get_str(c, "_source") ? tc_shorten_path(json_get_str(c, "_source")) : NULL;
+            char *flat = xstrdup(err ? err : "failed");
+            for (char *q = flat; *q; q++)
+                if (*q == '\n' || *q == '\r' || *q == '\t') *q = ' ';
+            sb_appendf(&fail, "%s%s%s%s%s: %s", nf++ ? "; " : "", nm, src ? " [config: " : "", src ? src : "", src ? "]" : "", flat);
+            free(flat);
+            free(src);
+            json_free(c);
+        }
+    }
+    char *msg = NULL;
+    if (np) {
+        if (!nc && !nf) msg = xasprintf("Connecting to MCP servers: %s…", sb_cstr(&pend));
+        else {
+            sb_t b = SB_INIT;
+            if (nc) sb_appendf(&b, "Connected: %s.", sb_cstr(&conn));
+            if (nf) sb_appendf(&b, "%sFailed: %s.", b.len ? " " : "", sb_cstr(&fail));
+            sb_appendf(&b, " Still connecting: %s…", sb_cstr(&pend));
+            msg = sb_detach(&b);
+        }
+    } else if (nf) {
+        msg = nc ? xasprintf("MCP finished with failures. Connected: %s. Failed: %s", sb_cstr(&conn), sb_cstr(&fail))
+                 : xasprintf("MCP %s failed to connect: %s", nf == 1 ? "server" : "servers", sb_cstr(&fail));
+    } else if (nc) {
+        msg = xasprintf("Connected to MCP %s: %s.", nc == 1 ? "server" : "servers", sb_cstr(&conn));
+    }
+    if (msg) add_notice(u, "info", msg);
+    free(msg);
+    sb_free(&pend), sb_free(&conn), sb_free(&fail);
+    json_free(names);
+    json_free(failed);
+}
+
+static bool g_startup_phase = true; /* the connection status line follows startup connections only */
+
+static void late_connect_ui(void *ud) {
+    ui_t *u = ud;
+    sync_tools(u);
+    if (g_startup_phase) connection_status(u);
 }
 
 void ui_mcp_install(ui_t *u) {
@@ -362,7 +429,7 @@ void ui_mcp_install(ui_t *u) {
         settings_on_change(notif_setting_changed, NULL);
     }
     /* servers that finished connecting after the startup window: bind their tools now */
-    if (u->app->mcp) sync_tools(u);
+    if (u->app->mcp) tui_post(u->tui, late_connect_ui, u); /* after the startup transcript is drawn */
 }
 
 /* the session's manager, created on first use like omp's always-present MCPManager (NULL: MCP off) */
@@ -1275,7 +1342,7 @@ static void connect_enabled(ui_t *u, mcp_manager_t *m, const char *name, const c
     json_t *all = mcp_discover_config(cwd);
     json_t *c = json_get_obj(all, name);
     if (c) {
-        mcp_state_t st = mcp_connect_server(m, name, c, startup_window());
+        mcp_state_t st = mcp_connect_server(m, name, c, 30000); /* connectServers settles */
         json_t *errs = json_arr();
         if (st == MCP_DISCONNECTED) {
             json_t *f = mcp_failed(m), *e;
@@ -1849,6 +1916,7 @@ static const char *after_verb(const char *text) {
 }
 
 void ui_mcp_command(ui_t *u, const char *text) {
+    g_startup_phase = false;
     char *tt = str_trim(text);
     strvec_t parts = commands_parse_args(tt);
     char *sub = parts.n > 1 ? xstrdup(parts.v[1]) : NULL;

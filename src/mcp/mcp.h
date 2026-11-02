@@ -26,6 +26,7 @@ typedef struct {
     void (*tools_changed)(void *ud, const char *server);   /* a server connected late, or its tool list changed */
     void (*prompts_changed)(void *ud, const char *server); /* prompts/list_changed refreshed the catalog */
     void (*resource_updated)(void *ud, const char *server, const char *uri); /* a subscribed resource changed */
+    void (*connected)(void *ud, const char *server); /* a server finished connecting after its caller stopped waiting */
     void *ud;
 } mcp_callbacks_t;
 

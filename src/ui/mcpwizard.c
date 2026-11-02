@@ -434,9 +434,11 @@ static void wiz_content(wiz_t *w, int width, strvec_t *out) {
         slot_gap(out);
         for (int i = 0; i < w->nch; i++) {
             bool sel = i == w->sel;
-            char *pre = sel ? S(TUI_TC_ACCENT, tui_sym("nav.cursor")) : NULL;
+            char *cur = xasprintf("%s ", tui_sym("nav.cursor"));
+            char *pre = sel ? S(TUI_TC_ACCENT, cur) : NULL;
+            free(cur);
             char *lab = sel ? S(TUI_TC_ACCENT, w->ch[i].label) : xstrdup(w->ch[i].label);
-            char *row = sel ? xasprintf("%s %s", pre, lab) : xasprintf("  %s", lab);
+            char *row = sel ? xasprintf("%s%s", pre, lab) : xasprintf("  %s", lab);
             push_wrapped_rows(out, row, width);
             if (w->ch[i].desc && !sel) {
                 char *d = S(TUI_TC_DIM, w->ch[i].desc), *dr = xasprintf("    %s", d);

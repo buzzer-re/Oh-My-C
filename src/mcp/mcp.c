@@ -929,7 +929,14 @@ static void *conn_thread(void *p) {
     pthread_mutex_unlock(&m->mu);
     if (late) {
         /* nobody waits any more: the job is ours; announce a late connection */
-        if (rc == 0) fire_tools_changed(s);
+        if (rc == 0) {
+            pthread_mutex_lock(&m->mu);
+            mcp_callbacks_t cb = m->cb;
+            bool live = !m->closing && !s->closing;
+            pthread_mutex_unlock(&m->mu);
+            if (live && cb.connected) cb.connected(cb.ud, s->name);
+            else fire_tools_changed(s);
+        }
         srv_unref(s);
         free(j);
         bg_leave(m);
