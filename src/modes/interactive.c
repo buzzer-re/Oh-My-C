@@ -33,6 +33,7 @@
 #include "ui/modelbrowser.h"
 #include "ui/tools/tc.h"
 #include "coding/title.h"
+#include "coding/agents.h"
 #include "coding/modelpreset.h"
 #include "coding/slashcmd.h"
 #include "coding/modelctl.h"
@@ -206,6 +207,12 @@ static void ui_listener(void *ud, const agent_event_t *ev) {
 }
 
 static void post_notice(void *x);
+
+void ix_view_subscribe(ui_t *u, app_t *a, bool on) {
+    if (!a || !a->agent) return;
+    if (on) agent_subscribe(a->agent, ui_listener, u);
+    else agent_unsubscribe(a->agent, ui_listener, u);
+}
 
 /* interactive-mode.ts showModelCycleTrack: spacer + the cycleOrder segment track, cleared after 4 s */
 static void model_cycle_clear(void *ud) {
@@ -2263,6 +2270,8 @@ static bool handle_command_inner(ui_t *u, const char *line) {
         goal_command(u, arg);
     } else if (!strcmp(cmd, "jobs")) {
         ui_jobs_command(u, arg);
+    } else if (!strcmp(cmd, "hub")) { /* builtin-session.ts hub: the live Agent Hub on its Activity tab */
+        ui_agent_hub_open(u, true, false, false);
     } else if (!strcmp(cmd, "advisor")) { /* builtin-collaboration.ts advisor handleTui */
         char *verb, *rest;
         slash_subcommand(arg, &verb, &rest);
@@ -2567,8 +2576,66 @@ static char *bare_slash_command(ui_t *u, const char *raw, const char *armed, boo
 static char *g_armed_bare; /* bare word held for a confirming second Enter */
 static char *g_armed_bare_session;
 
+/* viewer-scoped commands a focused subagent view runs on its own session (FOCUSED_VIEW_COMMANDS); the rest need main */
+static bool focused_view_command(const char *name, const char *args) {
+    if (str_eq(name, "jobs")) return !*args || str_eq(args, "full");
+    if (str_eq(name, "usage")) return !*args || str_eq(args, "show");
+    return str_eq(name, "effort") || str_eq(name, "export");
+}
+
+/* #submitToFocusedSession: the editor is a plain chat box for the focused subagent */
+static void focused_submit(ui_t *u, tui_editor_t *ed, const char *text) {
+    char *t = str_trim(text);
+    if (!*t) {
+        if (agent_is_running(u->view->agent)) agent_abort(u->view->agent);
+        free(t);
+        return;
+    }
+    if (*t == '/' || *t == '!' || *t == '$') {
+        slash_parsed_t p;
+        bool viewer = false;
+        if (*t == '/' && slash_parse(t, &p)) {
+            const slash_cmd_t *c = slash_lookup(p.name);
+            viewer = c && focused_view_command(c->name, p.args ? p.args : "");
+            slash_parsed_free(&p);
+        }
+        if (viewer) {
+            tui_editor_add_history(ed, t);
+            app_t *main_app = u->app;
+            u->app = u->view; /* the command acts on the viewed session */
+            handle_command(u, t);
+            u->app = main_app;
+            free(t);
+            tui_request_render(u->tui);
+            return;
+        }
+        char *ll = ui_double_tap_hint("left");
+        char *m = xasprintf("Only /btw, /effort, /export, /jobs, /model, /switch, /usage run here; other commands run in the main "
+                            "session — press %s to return first",
+                            ll);
+        add_notice(u, "info", m);
+        free(m), free(ll);
+        tui_editor_set_text(ed, text);
+        free(t);
+        tui_request_render(u->tui);
+        return;
+    }
+    tui_editor_add_history(ed, t);
+    char *err = NULL;
+    if (!agents_prompt(u->focus_id, t, &err)) {
+        add_notice(u, "error", err ? err : "prompt failed");
+        free(err);
+    }
+    free(t);
+    tui_request_render(u->tui);
+}
+
 static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
     ui_t *u = ud;
+    if (u->focus_id && u->view) {
+        focused_submit(u, ed, text);
+        return;
+    }
     char *t = str_trim(text);
     if (*t) {
         tui_editor_add_history(ed, t);
@@ -2623,6 +2690,13 @@ static void clear_editor_draft(ui_t *u) {
 static void on_escape(ui_t *u) {
     if (tc_escape(u)) return; /* abortBranchSummary */
     if (ui_report_dismiss(u)) return; /* dismissCommandReport */
+    if (u->focus_id) { /* Esc never interrupts the focused agent: clear the draft, else return to main */
+        if (!tui_editor_is_empty(u->editor)) {
+            tui_editor_clear(u->editor);
+            tui_request_render(u->tui);
+        } else ui_unfocus(u, "Returned to main session");
+        return;
+    }
     if (iq_escape(u)) return; /* maintenance / turn abort (queue back to the editor), bash or python mode */
     char *text = tui_editor_get_text(u->editor);
     char *tt = str_trim(text);
@@ -2814,6 +2888,22 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
         return true;
     }
     if (tui_focus(t) != &u->editor->base) return false;
+
+    /* the hub keys (app.agents.hub, app.session.observe) open the Agent Hub */
+    if (tui_kb(k, "app.agents.hub") || tui_kb(k, "app.session.observe")) {
+        ui_agent_hub_open(u, false, false, false);
+        return true;
+    }
+    /* onLeftAtStart: plain ← on an empty composer feeds the ←← gesture (hub from main, back to main when focused) */
+    if (k->kind == TUI_KEY_LEFT && !k->mods) {
+        char *txt = tui_editor_get_text(u->editor), *tt = str_trim(txt);
+        bool empty = !*tt;
+        free(txt), free(tt);
+        if (empty) {
+            ui_left_tap(u);
+            return true;
+        }
+    }
 
     /* CustomEditor action keys, in its precedence order */
     if (tui_kb(k, "app.clipboard.pasteImage")) {
@@ -3034,6 +3124,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_container_add(root, &u.chat->base);
     u.pending_shell = tui_container_new();
     tui_container_add(root, &u.pending_shell->base);
+    tui_container_add(root, ui_subagent_hud_new(&u)); /* omp subagentContainer: pinned running-agent list */
     tui_container_add(root, ui_btw_container_new(&u)); /* omp btwContainer: right below the transcript */
     tui_container_add(root, ui_report_slot_new(&u));    /* omp reportContainer: short command reports dock here */
     u.queue_band = ui_queue_band_new(&u);
@@ -3075,6 +3166,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
         free(m);
     }
     agent_subscribe(a->agent, ui_listener, &u);
+    ui_agents_init(&u);
     a->notice = ui_notice;
     a->notice_ud = &u;
     a->wake = ui_wake;
@@ -3132,7 +3224,8 @@ int run_interactive_mode(app_t *a, const char *initial) {
     ui_btw_free(&u);
     tc_shutdown(&u);
     iq_shutdown(&u);
-    agent_unsubscribe(a->agent, ui_listener, &u);
+    ui_agents_shutdown(&u);
+    agent_unsubscribe(u.app->agent, ui_listener, &u);
     a->notice = NULL;
     a->wake = NULL;
     a->env->ui.ask = NULL;

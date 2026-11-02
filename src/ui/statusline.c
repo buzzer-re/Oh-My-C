@@ -8,7 +8,9 @@
  * bar) and `plain-right` (the chip on the claude/rule composers' top rule). */
 #include "ui/ui.h"
 
+#include "coding/agents.h"
 #include "coding/modelctl.h"
+#include "tools/jobs.h"
 #include "config/settings.h"
 #include "core/proc.h"
 #include "tui/color.h"
@@ -225,8 +227,19 @@ void ui_hint_record(const char *id) {
 /* resolveComposerHint: `<key>` accent + dim italic label */
 static char *composer_hint(void *ud) {
     ui_t *u = ud;
+    size_t running = 0;
+    agents_counts(&running, NULL);
+    if (running && !u->focus_id && hint_uses("agents") < 3) { /* the ←← gesture opens the agent hub */
+        char *key = ui_double_tap_hint("left");
+        char *k = fgw(TUI_TC_ACCENT, key);
+        char *r = xasprintf("%s %s\x1b[3mto see %zu running %s\x1b[23m\x1b[39m", k, tui_fg_seq(TH(), TUI_TC_DIM), running,
+                            running == 1 ? "agent" : "agents");
+        free(k);
+        free(key);
+        return r;
+    }
     if (hint_uses("effort") >= 3) return NULL;
-    if (json_len(u->app->agent->messages) > 0) return NULL;
+    if (json_len(ui_view_app(u)->agent->messages) > 0) return NULL;
     char *key = ui_key_hint("shift+tab");
     char *k = fgw(TUI_TC_ACCENT, key);
     char *r = xasprintf("%s %s\x1b[3mto change thinking effort\x1b[23m\x1b[39m", k, tui_fg_seq(TH(), TUI_TC_DIM));
@@ -549,6 +562,13 @@ static uint32_t brand_rgb(const segctx_t *c, bool working, bool visible) {
 static char *render_segment(const char *id, const segctx_t *c) {
     const app_t *a = c->a;
     if (str_eq(id, "pi")) {
+        if (c->u && c->u->focus_id) { /* focused subagent: ghost + its id */
+            const char *g = sym("icon.ghost");
+            char *t = *g ? xasprintf("%s %s", g, c->u->focus_id) : xstrdup(c->u->focus_id);
+            char *r = fgw(TUI_TC_WARNING, t);
+            free(t);
+            return r;
+        }
         int64_t el = turn_elapsed();
         bool vis = strvec_contains(&c->set->left, "pi") || strvec_contains(&c->set->right, "pi");
         uint32_t rgb = brand_rgb(c, el >= 0, vis);
@@ -1251,9 +1271,9 @@ static bool is_ctx_seg(const char *id) { return str_eq(id, "context_pct") || str
 static void build_ctx(segctx_t *c, ui_t *u, const sl_settings_t *set) {
     memset(c, 0, sizeof *c);
     c->u = u;
-    c->a = u->app;
+    c->a = ui_view_app(u);
     c->set = set;
-    c->title = u->app->session ? u->app->session->title : NULL;
+    c->title = u->app->session ? u->app->session->title : NULL; /* the session title stays the main one */
     if (c->title && !*c->title) c->title = NULL;
     c->accent = c->title && settings_bool("statusLine.sessionAccent", true);
     if (c->accent) c->accent_rgb = tui_session_accent(c->title, TH());
@@ -1269,6 +1289,8 @@ static int group_width(const int *w, int n, int cap, int sepw) {
     return s + (n - 1) * (sepw + 2) + 2 + cap;
 }
 
+static bool g_focus_render; /* rendering the bar of a focused subagent view (dimmed; caps stay bright) */
+
 static char *render_group(strvec_t *parts, bool left, const sepdef_t *sd, bool transparent, const char *bg, const char *fgt,
                           const char *sepc, const char *band_cap) {
     if (!parts->n) return xstrdup("");
@@ -1277,8 +1299,9 @@ static char *render_group(strvec_t *parts, bool left, const sepdef_t *sd, bool t
     char prefix[64];
     if (str_starts(bg, "\x1b[48;")) snprintf(prefix, sizeof prefix, "\x1b[38;%s", bg + 5);
     else snprintf(prefix, sizeof prefix, "%s", bg); /* "\x1b[49m": no fill to borrow */
-    char *cap_text = *cap ? xasprintf("%s%s\x1b[0m", prefix, cap) : xstrdup("");
-    char *open = left && band_cap && *band_cap ? xasprintf("%s%s\x1b[0m", prefix, band_cap) : xstrdup("");
+    const char *undim = g_focus_render ? "\x1b[22m" : "";
+    char *cap_text = *cap ? xasprintf("%s%s%s\x1b[0m", prefix, undim, cap) : xstrdup("");
+    char *open = left && band_cap && *band_cap ? xasprintf("%s%s%s\x1b[0m", prefix, undim, band_cap) : xstrdup("");
     char *joiner = xasprintf(" %s%s%s ", sepc, sep, fgt);
     char *joined = strvec_join(parts, joiner);
     char *content = xasprintf("%s%s %s \x1b[0m", bg, fgt, joined);
@@ -1287,12 +1310,39 @@ static char *render_group(strvec_t *parts, bool left, const sepdef_t *sd, bool t
     return r;
 }
 
+static void sv_unshift(strvec_t *v, char *s) {
+    strvec_push_own(v, s);
+    memmove(&v->v[1], &v->v[0], sizeof(char *) * (v->n - 1));
+    v->v[0] = s;
+}
+
+/* runningBackgroundJobCount: running jobs of the viewed session outside the subagent badge (a task job counts only
+ * until its agent shows as running) */
+size_t ui_background_job_count(ui_t *u) {
+    app_t *a = ui_view_app(u);
+    if (!a || !a->env || !a->env->jobs) return 0;
+    json_t *snap = jobs_snapshot(a->env->jobs), *running = agents_running(), *j;
+    size_t n = 0;
+    json_arr_foreach(snap, i, j) {
+        if (!str_eq(json_get_str(j, "status"), "running")) continue;
+        const char *aid = json_get_str(j, "agentId");
+        bool badge = false;
+        json_t *r;
+        json_arr_foreach(running, k, r) if (str_eq(json_get_str(r, "id"), aid) && str_eq(json_get_str(j, "type"), "task")) badge = true;
+        if (!badge) n++;
+    }
+    json_free(snap);
+    json_free(running);
+    return n;
+}
+
 static char *render_status(ui_t *u, int width, layout_t layout) {
     sl_settings_t set;
     load_settings(&set);
     bool plain = layout != L_BOX && layout != L_BAND;
     segctx_t c;
     build_ctx(&c, u, &set);
+    g_focus_render = u->focus_id != NULL;
     sepdef_t sd = get_sep(set.separator, plain);
     bool transparent_layout = layout == L_PLAIN_FULL || layout == L_PLAIN_LEFT;
     const char *bg = transparent_layout || settings_bool("statusLine.transparent", false) ? "\x1b[49m" : tui_bg_seq(TH(), TUI_TC_STATUS_LINE_BG);
@@ -1333,6 +1383,24 @@ static char *render_status(ui_t *u, int width, layout_t layout) {
                 w++;
             }
             p->n = ids->n = w;
+        }
+    }
+    if (layout != L_PLAIN_LEFT) {
+        /* live-work badges lead the right group: background jobs, then running subagents in front */
+        size_t agents = 0;
+        agents_counts(&agents, NULL);
+        size_t jobs = ui_background_job_count(u);
+        if (jobs) {
+            char *t = xasprintf("%s %zu", sym("icon.job"), jobs);
+            sv_unshift(&right, fgw(TUI_TC_STATUS_LINE_SUBAGENTS, t));
+            sv_unshift(&rids, xstrdup("jobs"));
+            free(t);
+        }
+        if (agents) {
+            char *t = xasprintf("%s %zu", sym("icon.agents"), agents);
+            sv_unshift(&right, fgw(TUI_TC_STATUS_LINE_SUBAGENTS, t));
+            sv_unshift(&rids, xstrdup("subagent-badge"));
+            free(t);
         }
     }
     int W = MAX(0, width);
@@ -1445,6 +1513,13 @@ static char *render_status(ui_t *u, int width, layout_t layout) {
     free(lg), free(rg);
     strvec_free(&left), strvec_free(&right), strvec_free(&lids), strvec_free(&rids);
     free_settings(&set);
+    g_focus_render = false;
+    if (u->focus_id && *res) { /* #dimWhileFocusProxied: re-open faint after every full reset */
+        char *body = str_replace(res, "\x1b[0m", "\x1b[0m\x1b[2m");
+        free(res);
+        res = xasprintf("\x1b[2m%s\x1b[22m", body);
+        free(body);
+    }
     return res;
 }
 
@@ -1663,9 +1738,14 @@ static char *chrome_border(void *ud, const char *s) {
     else {
         const char *title = u->app->session ? u->app->session->title : NULL;
         if (title && *title && settings_bool("statusLine.sessionAccent", true)) r = fg_rgb(tui_session_accent(title, TH()), s);
-        else r = fgw((tui_tc_t)(TUI_TC_THINKING_OFF + (int)effective_effort(u->app)), s);
+        else r = fgw((tui_tc_t)(TUI_TC_THINKING_OFF + (int)effective_effort(ui_view_app(u))), s);
     }
     free(txt);
+    if (u->view) { /* focused subagent view: the borrowed session's outline is faint */
+        char *d = xasprintf("\x1b[2m%s\x1b[22m", r);
+        free(r);
+        r = d;
+    }
     return r;
 }
 

@@ -428,7 +428,7 @@ void agents_release_children(app_t *a) {
             vec_push(&kill, r->app);
             r->app = NULL;
         }
-        r->gone = r->gone || !r->app;
+        r->gone = r->gone || !r->app || r->pins; /* a viewed session goes once its view lets go */
     }
     pthread_mutex_unlock(&g_mu);
     for (size_t i = 0; i < kill.n; i++) app_free(kill.v[i]);
@@ -1554,9 +1554,7 @@ static json_t *ref_json_locked(const aref_t *r) {
     if (r->parent_call) json_set_str(o, "parentToolCallId", r->parent_call);
     if (r->job_id) json_set_str(o, "jobId", r->job_id);
     if (r->progress) {
-        json_t *p = json_clone(r->progress);
-        if (r->executor_run && r->running) json_set_int(p, "durationMs", r->active_ms + now_ms() - r->run_started);
-        json_set(o, "progress", p);
+        json_set(o, "progress", json_clone(r->progress)); /* durationMs as of the last progress update */
     }
     return o;
 }

@@ -1828,8 +1828,9 @@ void ui_chat_rebuild(ui_t *u) {
     hmap_t pending;
     hmap_init(&pending);
     toolcard_set_replaying(true);
-    session_t *s = u->app->session;
-    json_t *path = s && s->leaf_id ? session_path_to(s, s->leaf_id) : NULL;
+    session_t *s = ui_view_app(u)->session; /* a focused subagent view replays its session */
+    /* a focused subagent's session grows on its job thread: replay a locked copy of its messages instead */
+    json_t *path = !u->view && s && s->leaf_id ? session_path_to(s, s->leaf_id) : NULL;
     if (path && json_len(path)) {
         size_t n = json_len(path), start = 0;
         ssize_t compaction = -1;
@@ -1875,14 +1876,21 @@ void ui_chat_rebuild(ui_t *u) {
         }
         for (size_t i = start; i < n; i++) replay_entry(u, json_at(path, i), &pending);
     } else {
+        agent_t *ag = ui_view_app(u)->agent;
+        pthread_mutex_lock(&ag->mu);
+        json_t *msgs = json_clone(ag->messages);
+        pthread_mutex_unlock(&ag->mu);
         json_t *m;
-        json_arr_foreach(u->app->agent->messages, i, m) replay_message(u, m, &pending);
+        json_arr_foreach(msgs, i, m) replay_message(u, m, &pending);
+        json_free(msgs);
     }
     json_free(path);
     hmap_free(&pending, NULL);
     toolcard_set_replaying(false);
-    ui_signals_session_title(); /* resume / switch / branch: the title follows the session */
-    ui_recap_invalidate();
-    ui_signals_session_start();
+    if (!u->view) {
+        ui_signals_session_title(); /* resume / switch / branch: the title follows the session */
+        ui_recap_invalidate();
+        ui_signals_session_start();
+    }
     tui_request_full_render(u->tui);
 }

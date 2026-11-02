@@ -77,6 +77,7 @@ static const struct {
     {"todo", "*", true, NULL},
     {"session", "info delete pin", true, NULL},
     {"jobs", "full kill", true, NULL},
+    {"hub", NULL, true, NULL},
     {"usage", NULL, true, NULL},
     {"hotkeys", NULL, true, NULL},
     {"tools", NULL, true, NULL},

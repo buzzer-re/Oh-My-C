@@ -108,7 +108,18 @@ struct ui {
     struct ui_bash *bash;           /* running `!cmd` */
     struct ui_bash *python;         /* running `$ code` */
     json_t *deferred_bash;          /* `!cmd` / `$ code` results that finished mid-run: recorded at the run's end */
+    /* session focus (agenthub.c, SessionFocusController): the view shows a subagent's live session */
+    app_t *view;                    /* pinned subagent session the transcript/status line show; NULL = main */
+    char *focus_id;                 /* its registry id */
+    struct agent_hub *hub;          /* open Agent Hub overlay (agenthub.c) */
+    tui_component_t *subagent_hud;  /* "Subagents · N running" block above the editor */
+    int64_t last_left_tap;          /* ←← double-tap detector (LEFT_DOUBLE_TAP_*) */
+    int left_taps;
+    bool agents_dirty;              /* registry changed: badge / HUD / hub refresh pending (posted once) */
 };
+
+/* the session the view shows: the focused subagent's, else the main one */
+static inline app_t *ui_view_app(const ui_t *u) { return u->view ? u->view : u->app; }
 
 
 /* attach.c - composer image attachments (pasted / dropped image paths, clipboard images, chips band) */
@@ -250,6 +261,20 @@ tui_component_t *ui_queue_band_new(ui_t *u); /* "Steering · N" / "After yield �
 void ui_queue_refresh(ui_t *u);              /* re-read the agent + compaction queues into the band */
 const char *ui_queue_shorthand(const char *text); /* body after a leading `->` / `=>`, else NULL */
 void ui_split_queued_messages(const char *text, strvec_t *out); /* queue-input.ts splitQueuedMessages */
+
+/* agenthub.c - subagent HUD, Agent Hub (/hub, Alt+A, ←←), transcript viewer, session focus */
+tui_component_t *ui_subagent_hud_new(ui_t *u);   /* "Subagents · N running" block (display.pinnedAgents) */
+/* open the hub (Agents, or the Activity tab); `require_content`: stay closed without subagents (←←);
+ * `arm_close`: the opening ←← also arms the hub's own ←← close */
+void ui_agent_hub_open(ui_t *u, bool activity, bool require_content, bool arm_close);
+bool ui_focus_agent(ui_t *u, const char *id, char **err); /* view a subagent's live session (revives it) */
+void ui_unfocus(ui_t *u, const char *status);              /* back to main; `status` (may be NULL) is shown */
+void ui_left_tap(ui_t *u);                                 /* ← on an empty composer (double tap gesture) */
+void ui_agents_init(ui_t *u);                              /* registry listener: badge / HUD / hub / focus refresh */
+void ui_agents_shutdown(ui_t *u);
+size_t ui_background_job_count(ui_t *u);                   /* statusline.c: running jobs outside the subagent badge */
+/* interactive.c: (un)subscribe the transcript's agent-event listener on a session */
+void ix_view_subscribe(ui_t *u, app_t *a, bool on);
 
 /* welcome.c */
 tui_component_t *ui_welcome_new(void);
