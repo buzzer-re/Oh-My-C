@@ -114,7 +114,7 @@ Every package must:
 | WP | Scope | omc files | Upstream sources |
 |---|---|---|---|
 | WP-27 Remaining tools | generate_image, remote tts, security_scan + `security://` + `/security`, hindsight memory backend (retain/recall/reflect), `mr://`, `attachment://`, think, yield + `task.structured`, task isolation / outputSchema / perCallModel, eval `agent()` / workpool | `src/tools/*`, `src/coding/memory.c`, `src/tools/task.c` | U/tools/{image-gen,tts,security-scan,think,yield}.ts, U/hindsight/*, U/internal-urls/{mr,attachment,security}-protocol.ts, U/task/* |
-| WP-28 Extra commands | `/omfg` (on top of `src/coding/ttsr.c`), `/tan`, `/cleanse`, `/vibe`, `/ratchet`, `/changelog` (embed CHANGELOG), `/debug` selector, `/record`, `/pause`, `/force`, `/skillful`, `/setup` reopen, marketplace/plugins install (git-based; JS parts ⛔), stats aggregation | `src/modes/interactive.c`, `src/coding/*` | U/slash-commands/builtin-*.ts, U/modes/controllers/{omfg,tan,cleanse}-*.ts, U/vibe/*, U/ratchet/*, U/extensibility/plugins/* |
+| WP-28 Extra commands | done: `/changelog`, `/setup`, `/force`, `/skillful` (status.md). Remaining: `/omfg` (on top of `src/coding/ttsr.c`; needs runEphemeralTurn, the omfg panel and rule validation against the history), `/tan`, `/cleanse`, `/vibe`, `/ratchet` (needs eval preludes), `/debug` selector, `/record` (+ `omc play`), `/pause` (pause screen + agent freeze), marketplace/plugins install (git-based; JS parts ⛔), stats aggregation, `startup.changelogMode`, re-queueing a `/force` choice after an aborted request | `src/modes/interactive.c`, `src/coding/*` | U/slash-commands/builtin-*.ts, U/modes/controllers/{omfg,tan,cleanse}-*.ts, U/vibe/*, U/ratchet/*, U/extensibility/plugins/* |
 | WP-29 Rich rendering and display options | Mermaid / SVG / inline images (kitty/iTerm/sixel, `terminal.showImages`), table auto-graph, reactions, `display.collapseCompacted`, `display.hideToolActivity` (Ctrl+Shift+O), cache-miss marker, `tui.hyperlinks`, `tui.mouse`, `tui.tight`, vim mode, composer token rate | `src/tui/markdown.c`, `src/ui/chat.c`, `src/tui/term.c`, `src/tui/editor.c` | T/{kitty-graphics,sixel,vim,latex-block}.ts, T/charts/*, T/chat/*, U/auto-graph/* |
 
 Out of scope (⛔) and not packaged: JS/TS extensions, hooks and custom tools; the eval JS kernel;
@@ -137,7 +137,7 @@ omc-only command (not in omp): `/migrate`.
 |---|---|---|---|---|
 | /security | builtin-modes.ts | — | ❌ | OMP-native security scans (plan/scan/status/…/disposition); needs scan engine + `security://` |
 | /settings | builtin-modes.ts | `ui_overlay_settings` | ✅ | most settings have no effect, see §3 |
-| /setup (providers) | builtin-modes.ts | — | ❌ | first-run wizard exists (`src/ui/setup.c`) but no command to reopen provider setup |
+| /setup (providers) [providers] | builtin-modes.ts, setup/lazy.ts runProviderSetupWizard | `ui_setup_run_providers` (`src/ui/setup.c`), `src/modes/extractl.c` | ✅ | sign-in scene only, setupVersion untouched, no welcome intro; TUI only (no text handler, like omp) |
 | /plan [prompt] | builtin-modes.ts, interactive-mode.ts `handlePlanModeCommand` | `handle_command` "plan" → `app_enter_plan_mode` / `app_exit_plan_mode` (`src/coding/planmode.c`) | ✅ | enter / "Exit plan mode?" confirm with a draft / paused / disabled, `plan.enabled`, plan-file path in the status and the live description; goal/vibe exclusion messages ❌ |
 | /plan-review | builtin-modes.ts | `plan_review_command` (`src/modes/interactive.c`) | ✅ | newest `local://*plan.md`, aborts a running turn first |
 | /vibe | builtin-modes.ts | — | ❌ | vibe mode (persistent fast/good worker sessions) |
@@ -149,10 +149,10 @@ omc-only command (not in omp): `/migrate`.
 | /switch | builtin-modes.ts | `ui_overlay_model_picker`, `h_switch` | ✅ | picker without args, model-id / `@role` argument completion; `--models` scope not used (WP-19) |
 | /fast | builtin-modes.ts | `src/coding/modelctl.c` (`modelctl_fast_command`), TUI `handle_command`, text handler `h_fast` | ✅ | on/ultra/off/status/toggle per model family, omp's replies and `Fast: <state>` autocomplete; status-line fast badge (WP-14) |
 | /slow | builtin-modes.ts | `modelctl_slow_command`, `h_slow` | ✅ | flex tier on OpenAI/Google; `providers.anthropic.slowMode` + subscription low-priority lanes on Anthropic (WP-14) |
-| /skillful | builtin-modes.ts | — | ❌ | session toggle for skill listing in prompt (`skillful` setting unread too) |
+| /skillful [on\|off\|status] | builtin-modes.ts, agent-session.ts setSkillful | `extracmd_set_skillful` (`src/coding/extracmds.c`) | ✅ | session-only override; empty session rebuilds the prompt, mid-session enable appends the hidden `skillful-notice` (at once, not deferred to the next turn); the `skillful` setting drops `<skills>` from the system prompt |
 | /extended-context | builtin-modes.ts | `modelctl_extended_context_command`, `h_extended_context` | ✅ | persists `extendedContext`, re-applies the catalog context-window tiers (WP-14) |
 | /computer | builtin-modes.ts | — | ⛔ | native computer-use eval prelude (platform screen/input automation) |
-| /ratchet | builtin-modes.ts | — | ❌ | eval hill-climb kickoff (low priority) |
+| /ratchet | builtin-modes.ts | — | ❌ | eval hill-climb kickoff; needs the ratchet eval prelude (omc's eval kernel has no preludes) |
 | /prewalk | builtin-modes.ts, session/prewalk.ts | `src/coding/prewalk.c` | ✅ | `[into]`, `restart [from] [into]`, `off`; `prewalk.auto` (judge classifier) ❌ |
 | /modelpreset | builtin-modes.ts | `src/coding/modelpreset.c` | ✅ | list/save/switch/delete + the "Switch to model preset" selector; config.yml byte-identical |
 | /effort | builtin-modes.ts | `handle_command` "effort", `slash_resolve_effort` | ✅ | live level list (incl. `auto`) in the dropdown and ghost hint, omp's errors and status texts |
@@ -170,7 +170,7 @@ omc-only command (not in omp): `/migrate`.
 | /jobs [full\|kill] | builtin-session.ts, jobs-panel.ts | `src/ui/panels.c` | ✅ | Background Jobs report (`Running:` count, job rows, labels / `full` commands), `kill <id>\|all`; omc jobs have no subagent owners, so the job tree is flat; the native jobs sheet is ⛔ (text mode only) |
 | /usage [show\|reset] | builtin-session.ts, usage-dashboard.ts | `src/ui/usage.c` | ✅ | dashboard, Details, reset picker, `/usage reset <target>`; text form for RPC/ACP (WP-24) |
 | /stats | builtin-session.ts, packages/stats | — | ❌ | local stats dashboard (HTTP server + web UI over session files) |
-| /changelog [full\|last N] | builtin-session.ts | — | ❌ | needs an embedded CHANGELOG |
+| /changelog [full\|last [N]] | builtin-session.ts, utils/changelog.ts | `src/coding/changelog.c`, `src/modes/extractl.c` | ✅ | omp 18.14.2's CHANGELOG embedded (`assets/CHANGELOG.md.z`); panels and texts identical in compare.sh; text over RPC/ACP |
 | /hotkeys | builtin-session.ts | `ui_overlay_hotkeys` | ✅ | |
 | /tools | builtin-session.ts, command-controller `handleToolsCommand` | `ui_tools_command` | ✅ | Available Tools markdown table incl. `xd://` devices |
 | /context | builtin-session.ts, overlays/context-viewer*.ts | `src/ui/context.c` | 🟡 | full viewer (summary, occupancy map, legend, category previews, entry pages); counts are omc's ~4.1 chars/token estimate (omp: native tokenizer); snapcompact savings lines missing |
@@ -210,7 +210,7 @@ omc-only command (not in omp): `/migrate`.
 | /restart | builtin-lifecycle.ts | `restart_command` + cli.c `restart_exec` | ✅ | execv of /proc/self/exe with restartArgv (one-shot selectors and positionals dropped, `--resume <file>` when on disk) |
 | /marketplace, /plugins (plugin), /reload-plugins | builtin-marketplace.ts | — | ❌ | plugin sources/install (git-based, portable for skills/commands/MCP/agents); JS extension parts ⛔ |
 | /skills [search\|install\|installed\|update] | builtin-skills.ts | lists discovered skills | 🟡 | **different feature**: omp searches/installs from the skills.omp.sh registry |
-| /force <tool> (force:) | builtin-control.ts | — | ❌ | force next turn's tool_choice |
+| /force <tool> [prompt] (force:) | builtin-control.ts, agent-session.ts setForcedToolChoice, utils/tool-choice.ts | `extracmd_force_tool` / `extracmd_prepare_request` (`src/coding/extracmds.c`) | 🟡 | [named, "none"] served one per request (identical on the wire); not re-queued after an aborted/failed request |
 | /live | builtin-control.ts | — | ⛔ | Codex realtime voice (audio capture/playback) |
 | /record | builtin-control.ts | — | ❌ | record screen to replayable file (`omp play`) |
 | /pause | builtin-control.ts, overlays/pause-screen.ts | — | ❌ | freeze all agents |
@@ -524,7 +524,7 @@ Upstream: `packages/tui/src/overlays/*`, `packages/coding-agent/src/modes/compon
 | agents-hub | agents-hub.ts | `/agents` | — | ❌ | WP-22 remainder |
 | agent-transcript-viewer | agent-transcript-viewer.ts | agent hub | `src/ui/agenthub.c` | ✅ | in-memory transcript replay, message box (revive + steer/prompt), stats, j/k/g/G/PgUp/PgDn, Ctrl+O expands its cards |
 | running-subagent-badge | running-subagent-badge.ts | status line | `statusline.c` (`👥 N` + `⚙ N` jobs badge) | ✅ | |
-| report-panel | report-panel.ts | `/tools`, `/jobs full`, `/advisor status`, `/changelog`, `/hotkeys`, `/memory` | `src/ui/report.c` | ✅ | docks above the editor when it fits (Esc dismisses), else a full-screen page; used by `/tools`, `/jobs`, `/advisor status`, `/hotkeys`, `/memory` |
+| report-panel | report-panel.ts | `/tools`, `/jobs full`, `/advisor status`, `/changelog`, `/hotkeys`, `/memory` | `src/ui/report.c` | ✅ | docks above the editor when it fits (Esc dismisses), else a full-screen page; used by `/tools`, `/jobs`, `/advisor status`, `/changelog`, `/hotkeys`, `/memory` |
 | pause-screen | pause-screen.ts | `/pause` | — | ❌ | |
 | error-banner | error-banner.ts | provider error | `ui_error_banner_show` (`src/ui/chat.c`) | ✅ | |
 | cleanse-panel, omfg-panel | *.ts | `/cleanse`, `/omfg` | — | ❌ | TTSR engine exists (`src/coding/ttsr.c`) |

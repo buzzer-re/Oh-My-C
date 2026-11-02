@@ -72,6 +72,7 @@ matching line in [AGENTS.md](AGENTS.md) — every time an update pass is finishe
    | Welcome tips (`assets/tui/tips.txt`) | `cp "$UP/packages/tui/src/prompt/tips.txt" assets/tui/tips.txt` |
    | Settings table (`assets/tui/settings-ui.json`) | `build-tools/extract_settings.sh "$UP" > assets/tui/settings-ui.json` |
    | Slash commands (`assets/tui/slash-commands.json`) | `python3 build-tools/extract_slash_commands.py "$UP" > assets/tui/slash-commands.json` |
+   | `/changelog` (`assets/CHANGELOG.md.z`, zlib) | `python3 -c 'import sys,zlib; open("assets/CHANGELOG.md.z","wb").write(zlib.compress(open(sys.argv[1],"rb").read(),9))' "$UP/packages/coding-agent/CHANGELOG.md"` (the released file: its newest `## [x.y.z]` heading must be the target version; tests/test_extracmds.c checks the top entry) |
 
    After refreshing the settings table, compare its defaults with `src/config/settings.c` (omc's
    defaults must equal omp's — see the "Settings defaults" row in [docs/status.md](docs/status.md)).
