@@ -29,7 +29,12 @@ bool iq_escape(ui_t *u);                              /* app.interrupt; false wh
 void iq_flush_deferred(ui_t *u);                      /* record `!`/`$` results that finished mid-run */
 bool iq_run_end(ui_t *u);                             /* a run's worker finished; true if it started follow-on work */
 void iq_user_message_start(ui_t *u, const json_t *msg); /* user message_start: draw it, refresh the band */
+/* interactive-mode.ts showModelCycleTrack: the cycleOrder segment track above the composer for 4 s */
+void ui_show_model_cycle_track(ui_t *u, int active);
 void iq_compact(ui_t *u, const char *arg);            /* /compact [instructions] (Enter) */
+/* handleCompactCommand(..., onBeforeFlush): compact with the current model, then then(u, ok, ud) on the UI thread
+ * (ok: the compaction committed or there was nothing to compact; false when it failed, was cancelled or busy) */
+void iq_compact_then(ui_t *u, void (*then)(ui_t *u, bool ok, void *ud), void *ud);
 void iq_handoff(ui_t *u, const char *arg);            /* /handoff */
 void iq_queue_command(ui_t *u, const char *text);     /* /queue <message> and the `->` / `=>` shorthand */
 bool iq_busy(ui_t *u);                                /* a compaction/handoff runs (input queues behind it) */

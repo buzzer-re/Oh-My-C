@@ -42,7 +42,15 @@ void ui_push_text(strvec_t *out, const char *text, int width) {
 
 /* ---------- box chrome ---------- */
 
-static void paint(sb_t *b, const char *s) { tui_fg(b, NULL, TUI_TC_BORDER, s); }
+static int g_box_tone = -1; /* overlay-box `color` (border + title), -1 = border / accent */
+
+int ui_box_tone(int tc) {
+    int prev = g_box_tone;
+    g_box_tone = tc;
+    return prev;
+}
+
+static void paint(sb_t *b, const char *s) { tui_fg(b, NULL, g_box_tone >= 0 ? (tui_tc_t)g_box_tone : TUI_TC_BORDER, s); }
 
 char *ui_box_top(int width, const char *title) {
     const char *h = tui_sym("boxRound.horizontal");
@@ -64,7 +72,7 @@ char *ui_box_top(int width, const char *title) {
     sb_append(&r, h);
     paint(&b, sb_cstr(&r));
     sb_clear(&r);
-    char *acc = tui_fgs(NULL, TUI_TC_ACCENT, shown);
+    char *acc = tui_fgs(NULL, g_box_tone >= 0 ? (tui_tc_t)g_box_tone : TUI_TC_ACCENT, shown);
     char *bold = tui_bold(acc);
     sb_append(&b, bold);
     free(bold);

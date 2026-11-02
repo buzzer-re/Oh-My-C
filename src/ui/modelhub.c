@@ -688,18 +688,26 @@ static void build_role_rows(hub_t *h) {
 }
 
 /* chrome/segment-track.ts renderSegmentTrack */
-static char *segment_track(const char *const *labels, size_t n, int active) {
+/* resolveSegmentPalette: up to `n` (at most 12) distinct theme colors in candidate order */
+size_t ui_segment_palette(size_t n, int *out) {
     static const tui_tc_t CAND[] = {TUI_TC_ACCENT,        TUI_TC_SUCCESS,      TUI_TC_WARNING,       TUI_TC_ERROR,
                                     TUI_TC_MD_CODE,       TUI_TC_MD_LINK,      TUI_TC_SYNTAX_STRING, TUI_TC_SYNTAX_KEYWORD,
                                     TUI_TC_SYNTAX_FUNCTION, TUI_TC_SYNTAX_NUMBER, TUI_TC_SYNTAX_OPERATOR, TUI_TC_SYNTAX_VARIABLE};
-    tui_tc_t pal[ARRAY_LEN(CAND)];
     size_t np = 0;
     for (size_t i = 0; i < ARRAY_LEN(CAND) && np < n; i++) {
         bool dup = false;
         for (size_t k = 0; k < np; k++)
-            if (!strcmp(tui_fg_seq(NULL, pal[k]), tui_fg_seq(NULL, CAND[i]))) dup = true;
-        if (!dup) pal[np++] = CAND[i];
+            if (!strcmp(tui_fg_seq(NULL, (tui_tc_t)out[k]), tui_fg_seq(NULL, CAND[i]))) dup = true;
+        if (!dup) out[np++] = (int)CAND[i];
     }
+    return np;
+}
+
+static char *segment_track(const char *const *labels, size_t n, int active) {
+    int pali[12];
+    size_t np = ui_segment_palette(n, pali);
+    tui_tc_t pal[12];
+    for (size_t i = 0; i < np; i++) pal[i] = (tui_tc_t)pali[i];
     if (!np) pal[np++] = TUI_TC_ACCENT;
     char *thin = S(TUI_TC_STATUS_LINE_SEP, tui_sym("sep.powerlineThin"));
     sb_t t = SB_INIT;
@@ -2670,6 +2678,32 @@ void ui_overlay_model_provider(ui_t *u, const char *provider) {
 }
 
 void ui_overlay_model(ui_t *u) { ui_overlay_model_provider(u, NULL); }
+
+/* buildSessionModelScope (model-browser.ts): available chat models sorted like sortModelItems, with the role
+ * assignments (chips, search affinity) and the MRU order of the hub */
+ui_model_browser_t *ui_session_model_browser(void) {
+    hub_t h = {0};
+    load_available(&h);
+    h.mru = mr_usage_order();
+    reload_roles(&h);
+    ui_role_assign_t *ra = xcalloc(h.roles.n + 1, sizeof *ra);
+    for (size_t i = 0; i < h.roles.n; i++) {
+        ra[i].role = h.roles.v[i].role;
+        ra[i].model = h.roles.v[i].model;
+    }
+    ui_model_sort_items(h.available.v, h.available.n, ra, h.roles.n, &h.mru);
+    free(ra);
+    ui_model_browser_t *b = ui_model_browser_new();
+    browser_roles(&h, b);
+    for (size_t i = 0; i < h.available.n; i++)
+        if (!strcmp(model_kind(h.available.v[i]), "chat")) ui_model_browser_add(b, h.available.v[i]);
+    roles_free(&h);
+    vec_free(&h.roles);
+    vec_free(&h.available);
+    strvec_free(&h.known);
+    strvec_free(&h.mru);
+    return b;
+}
 
 /* the chrome segment track for other surfaces (Ctrl+P model cycle track in interactive mode) */
 char *ui_segment_track(const char *const *labels, size_t n, int active) { return segment_track(labels, n, active); }

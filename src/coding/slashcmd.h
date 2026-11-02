@@ -78,6 +78,9 @@ char *slash_format_description(const char *description, char *(*key_fmt)(const c
  * builtin with a text handler matched (the caller sends the text as a prompt). */
 void slash_execute_text(app_t *a, const char *text, slash_output_fn output, void *ud, slash_result_t *res);
 void slash_result_free(slash_result_t *res);
+/* resolveSessionModelSelector (/switch, /prewalk): fuzzy ids, provider/id, @role, `:level`; the explicit level
+ * selector in *level (owned or NULL) */
+const ai_model_t *slash_resolve_session_model(const char *selector, char **level);
 /* whether running builtin `name` now starts an agent turn (/retry after a failed turn): RPC's agentInvoked */
 bool slash_invokes_agent(app_t *a, const char *name);
 

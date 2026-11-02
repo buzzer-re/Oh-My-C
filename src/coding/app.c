@@ -1806,59 +1806,123 @@ strvec_t app_cycle_order(void) {
     return v;
 }
 
-int app_cycle_role_model(app_t *a, bool backward) {
-    if (!a->model) return -1;
+size_t app_role_cycle(app_t *a, app_role_entry_t **out, int *current) {
+    *out = NULL;
+    if (current) *current = 0;
+    if (!a->model) return 0;
     strvec_t order = app_cycle_order();
     mr_pool_t avail = {0};
     mr_pool_available(&avail, "chat");
-    typedef struct {
-        size_t role;
-        const ai_model_t *m;
-        const char *level;
-        bool explicit_level;
-    } ent_t;
-    VEC(ent_t) es = {0};
+    VEC(app_role_entry_t) es = {0};
     for (size_t i = 0; i < order.n && avail.n; i++) {
         char *cur = NULL;
         const char *v = mr_role_get(order.v[i]);
         if (!v && !strcmp(order.v[i], "default")) v = cur = mr_model_key(a->model);
         mr_result_t r = {0};
-        if (v && mr_resolve_value(v, &avail, &r)) vec_push(&es, ((ent_t){i, r.model, r.level, r.explicit_level}));
+        if (v && mr_resolve_value(v, &avail, &r))
+            vec_push(&es, ((app_role_entry_t){xstrdup(order.v[i]), (int)i, r.model, r.level, r.explicit_level}));
         mr_result_clear(&r);
         free(cur);
     }
-    int res = -1;
-    if (es.n > 1) {
-        long at = -1;
-        for (size_t i = 0; i < es.n && a->model_role && at < 0; i++)
-            if (!strcmp(order.v[es.v[i].role], a->model_role)) at = es.v[i].m == a->model ? (long)i : -2;
-        if (at < 0)
-            for (size_t i = 0; i < es.n && at < 0; i++)
-                if (es.v[i].m == a->model) at = (long)i;
-        if (at < 0) at = 0;
-        long n = (long)es.n;
-        ent_t nx = es.v[(at + (backward ? -1 : 1) + n) % n];
-        const ai_model_t *prev_model = a->model;
-        const char *prev_wire = app_wire_thinking(a);
-        a->model = nx.m;
-        agent_set_model(a->agent, nx.m);
-        app_model_state_changed(a, prev_model, prev_wire);
-        a->fallback.active = false;
-        free(a->model_role);
-        a->model_role = xstrdup(order.v[nx.role]);
-        char *k = mr_model_key(nx.m);
-        session_append_model_change(a->session, k, order.v[nx.role]);
-        mr_usage_record(k);
-        free(k);
-        ai_effort_t e;
-        if (nx.explicit_level && nx.level && effort_parse(nx.level, &e) == 0) app_set_thinking(a, e);
-        app_rebuild_system_prompt(a);
-        res = (int)nx.role;
-    }
-    free(es.v);
+    /* the recorded role counts only while its resolved model is the live one */
+    long at = -1;
+    for (size_t i = 0; i < es.n && a->model_role && at < 0; i++)
+        if (!strcmp(es.v[i].role, a->model_role)) at = es.v[i].model == a->model ? (long)i : -2;
+    if (at < 0)
+        for (size_t i = 0; i < es.n && at < 0; i++)
+            if (es.v[i].model == a->model) at = (long)i;
+    if (at < 0) at = 0;
+    if (current) *current = (int)at;
     mr_pool_free(&avail);
     strvec_free(&order);
+    *out = es.v;
+    return es.n;
+}
+
+void app_role_cycle_free(app_role_entry_t *v, size_t n) {
+    for (size_t i = 0; i < n; i++) free(v[i].role);
+    free(v);
+}
+
+void app_apply_role_entry(app_t *a, const app_role_entry_t *e) {
+    const ai_model_t *prev_model = a->model;
+    const char *prev_wire = app_wire_thinking(a);
+    a->model = e->model;
+    agent_set_model(a->agent, e->model);
+    app_model_state_changed(a, prev_model, prev_wire);
+    a->fallback.active = false;
+    free(a->model_role);
+    a->model_role = xstrdup(e->role);
+    char *k = mr_model_key(e->model);
+    mr_clear_suppressed_selector(k);
+    session_append_model_change(a->session, k, e->role);
+    mr_usage_record(k);
+    free(k);
+    ai_effort_t ef;
+    if (e->explicit_level && e->level && effort_parse(e->level, &ef) == 0) app_set_thinking(a, ef);
+    app_rebuild_system_prompt(a);
+}
+
+int app_cycle_role_model(app_t *a, bool backward) {
+    int at;
+    app_role_entry_t *es;
+    size_t n = app_role_cycle(a, &es, &at);
+    int res = -1;
+    if (n > 1) {
+        const app_role_entry_t *nx = &es[(at + (backward ? -1 : 1) + (long)n) % (long)n];
+        app_apply_role_entry(a, nx);
+        res = nx->order_index;
+    }
+    app_role_cycle_free(es, n);
     return res;
+}
+
+/* resolveTemporaryModelThinkingLevel: the explicit level of a configured role resolving to `m` (static) */
+const char *app_temporary_thinking(const ai_model_t *m) {
+    mr_pool_t avail = {0};
+    mr_pool_available(&avail, "all");
+    const char *lv = NULL;
+    strvec_t roles = mr_known_roles();
+    for (size_t i = 0; i < roles.n && !lv && avail.n; i++) {
+        const char *v = mr_role_get(roles.v[i]);
+        if (!v) continue;
+        mr_result_t r = {0};
+        if (mr_resolve_value(v, &avail, &r) && r.explicit_level && r.level && r.model == m) lv = r.level;
+        mr_result_clear(&r);
+    }
+    strvec_free(&roles);
+    mr_pool_free(&avail);
+    return lv;
+}
+
+int app_set_model_temporary(app_t *a, const ai_model_t *m, const char *level, const char *role, char **err) {
+    char *key = app_api_key_for(m);
+    if (!key && !catalog_provider_keyless(m->provider)) {
+        *err = xasprintf("No API key for %s/%s", m->provider, m->id);
+        return -1;
+    }
+    free(key);
+    const ai_model_t *prev_model = a->model;
+    const char *prev_wire = app_wire_thinking(a);
+    char *k = mr_model_key(m);
+    mr_clear_suppressed_selector(k);
+    a->fallback.active = false;  /* clearActiveRetryFallback */
+    a->model = m;
+    agent_set_model(a->agent, m);
+    free(a->model_role);
+    a->model_role = NULL;
+    session_append_model_change(a->session, k, role ? role : "temporary");
+    mr_usage_record(k);
+    free(k);
+    if (str_eq(level, "auto")) app_set_thinking_auto(a);
+    else {
+        ai_effort_t e;
+        if (level && strcmp(level, "inherit") && effort_parse(level, &e) == 0) app_set_thinking(a, e);
+        else if (a->auto_thinking) app_set_thinking_auto(a);
+    }
+    app_rebuild_system_prompt(a);
+    app_model_state_changed(a, prev_model, prev_wire);
+    return 0;
 }
 
 /* try each model (then the session model) until one answers */

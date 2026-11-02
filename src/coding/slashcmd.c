@@ -4,6 +4,7 @@
 #include "coding/advisor.h"
 #include "coding/memory.h"
 #include "coding/modelctl.h"
+#include "coding/modelpreset.h"
 #include "config/settings.h"
 #include "mcp/mcp.h"
 #include "core/embed.h"
@@ -20,6 +21,8 @@
 
 static void h_model(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_effort(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_switch(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_modelpreset(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_advisor(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_compact(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_shake(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
@@ -49,6 +52,8 @@ static const struct {
     {"guided-goal", NULL, true, NULL},
     {"queue", NULL, true, NULL},
     {"model", NULL, true, h_model},
+    {"switch", NULL, true, h_switch},
+    {"modelpreset", "*", true, h_modelpreset},
     {"effort", "*", true, h_effort},
     {"fast", "*", true, h_fast},
     {"slow", "*", true, h_slow},
@@ -386,6 +391,22 @@ char *slash_advisor_status_text(app_t *a) {
 
 /* ---------- text-mode handlers ---------- */
 
+/* resolveSessionModelSelector: a model + its explicit `:level` selector (owned or NULL) */
+const ai_model_t *slash_resolve_session_model(const char *selector, char **level) {
+    *level = NULL;
+    char *t = str_trim(selector ? selector : "");
+    ai_effort_t e;
+    bool has_e = false;
+    const ai_model_t *m = *t ? app_resolve_model_pattern(t, &e, &has_e) : NULL;
+    if (m) {
+        const char *colon = strrchr(t, ':');
+        if (colon && str_eq(colon + 1, "auto")) *level = xstrdup("auto");
+        else if (has_e) *level = xstrdup(effort_name(e));
+    }
+    free(t);
+    return m;
+}
+
 static void out(slash_rt_t *rt, const char *text) {
     if (rt->output && text && *text) rt->output(rt->ud, text);
 }
@@ -446,6 +467,48 @@ static void h_model(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res
     char *m = a->model ? xasprintf("Current model: %s/%s", a->model->provider, a->model->id) : xstrdup("No model is currently selected.");
     out(rt, m);
     free(m);
+}
+
+/* /switch (builtin-modes.ts handle): session-only model, never persisted */
+static void h_switch(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    app_t *a = rt->app;
+    if (!*c->args) {
+        char *m = a->model ? xasprintf("Current model: %s/%s", a->model->provider, a->model->id)
+                           : xstrdup("No model is currently selected.");
+        out(rt, m);
+        free(m);
+        return;
+    }
+    char *lv = NULL;
+    const ai_model_t *m = slash_resolve_session_model(c->args, &lv);
+    if (!m) {
+        char *u = xasprintf("Unknown model: %s", c->args);
+        usage(rt, res, u);
+        free(u);
+        free(lv);
+        return;
+    }
+    char *err = NULL;
+    if (app_set_model_temporary(a, m, lv, NULL, &err) != 0) {
+        char *u = xasprintf("Failed to switch model: %s", err);
+        usage(rt, res, u);
+        free(u);
+    } else {
+        char *o = xasprintf("Session-only model: %s/%s.", m->provider, m->id);
+        out(rt, o);
+        free(o);
+    }
+    free(err);
+    free(lv);
+}
+
+/* /modelpreset (runPresetsCommand) */
+static void h_modelpreset(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    mp_outcome_t o;
+    mp_command(rt->app, c->args, &o);
+    if (o.usage) usage(rt, res, o.message);
+    else out(rt, o.message);
+    mp_outcome_free(&o);
 }
 
 static void h_effort(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {

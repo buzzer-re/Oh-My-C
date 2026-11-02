@@ -1855,6 +1855,13 @@ void mr_suppress_selector(const char *selector, int64_t until_ms) {
     pthread_mutex_unlock(&g_sup_mu);
 }
 
+void mr_clear_suppressed_selector(const char *selector) {
+    pthread_mutex_lock(&g_sup_mu);
+    long i = rank_of(&g_sup_keys, selector, false);
+    if (i >= 0) g_sup_until.v[i] = 0;
+    pthread_mutex_unlock(&g_sup_mu);
+}
+
 bool mr_selector_suppressed(const char *selector) {
     pthread_mutex_lock(&g_sup_mu);
     long i = rank_of(&g_sup_keys, selector, false);

@@ -14,6 +14,7 @@
 #include "tui/symbols.h"
 
 typedef struct ui ui_t;
+struct ai_model;
 
 /* ---------- widgets.c ---------- */
 
@@ -29,6 +30,8 @@ char *ui_box_top(int width, const char *title);
 char *ui_box_row(const char *content, int width);
 char *ui_box_divider(int width);
 char *ui_box_bottom(int width);
+/* overlay-box `color`: recolor border and title of the ui_box_* calls that follow (-1 resets); returns the previous */
+int ui_box_tone(int tc);
 
 /* brand mark (PI_LOGO) with the omp diagonal gradient + optional shine. Lines appended (owned). */
 extern const char *const UI_PI_LOGO[5];
@@ -137,6 +140,11 @@ void ui_close_selector(ui_t *u);
 bool ui_selector_open(const ui_t *u);
 
 void ui_overlay_model(ui_t *u); /* modelhub.c: the Models hub */
+/* modelpicker.c: the session-only model picker (Alt+P, `/switch`) */
+void ui_overlay_model_picker(ui_t *u);
+/* switchSessionModel: session-only switch (compacting first when the transcript exceeds the model's window);
+ * `level` an explicit thinking selector or NULL (the role's explicit level for that model, else kept) */
+void ui_switch_session_model(ui_t *u, const struct ai_model *m, const char *level);
 void ui_overlay_model_provider(ui_t *u, const char *provider); /* … with that provider's entry preselected */
 void ui_overlay_session(ui_t *u);
 void ui_resume_session(ui_t *u, const char *path); /* interactive.c: switch session + reload transcript */

@@ -142,6 +142,7 @@ size_t mr_fallback_validate(strvec_t *out);
 /* selector cooldowns (modelRegistry.suppressSelector / isSelectorSuppressed) */
 void mr_suppress_selector(const char *selector, int64_t until_ms);
 bool mr_selector_suppressed(const char *selector);
+void mr_clear_suppressed_selector(const char *selector); /* clearSuppressedSelector */
 /* retry.fallbackOn admission */
 bool mr_fallback_admits(bool usage_limit);
 /* calculateRetryBackoffDelayMs (base * 2^(attempt-1) capped 8 s, 25% downward jitter; fractional like omp) */

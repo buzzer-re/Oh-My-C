@@ -363,6 +363,25 @@ strvec_t app_cycle_order(void);
 /* Ctrl+P role cycling (model-controls.ts cycleRoleModels): switches the session model to the next role
  * model; returns the new role's index in app_cycle_order(), or -1 when one or no role model resolves */
 int app_cycle_role_model(app_t *a, bool backward);
+/* getRoleModelCycle: cycleOrder roles that resolve over the available chat models (owned array, free with
+ * app_role_cycle_free) and, in *current, the live one's index (recorded role while its model is live, else
+ * the first entry running the session model, else 0) */
+typedef struct {
+    char *role;
+    int order_index; /* index in app_cycle_order() */
+    const ai_model_t *model;
+    const char *level; /* static or NULL */
+    bool explicit_level;
+} app_role_entry_t;
+size_t app_role_cycle(app_t *a, app_role_entry_t **out, int *current);
+void app_role_cycle_free(app_role_entry_t *v, size_t n);
+/* applyRoleModel: the role's model (model_change role = the role) and its explicit thinking level */
+void app_apply_role_entry(app_t *a, const app_role_entry_t *e);
+/* setModelTemporary: session-only switch (model_change role "temporary" unless `role`), never persisted;
+ * `level` an explicit thinking selector or NULL (keep / re-clamp). -1 + *err "No API key for p/id" */
+int app_set_model_temporary(app_t *a, const ai_model_t *m, const char *level, const char *role, char **err);
+/* resolveTemporaryModelThinkingLevel: explicit level of a configured role that resolves to `m` (static) */
+const char *app_temporary_thinking(const ai_model_t *m);
 /* a role's model (resolveModelRoleValue("@role") over its candidate pool) */
 const ai_model_t *app_role_model(const char *role, ai_effort_t *effort_out, bool *has_effort);
 /* first answer from `models` (skipping the session model), then the session model; owned or NULL */
