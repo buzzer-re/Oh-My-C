@@ -139,6 +139,9 @@ typedef struct {
     void (*turn_boundary)(void *ud, agent_t *a, const json_t *assistant);
     /* The steering / follow-up queue changed (enqueue, delivery, clear). Called without agent locks held. */
     void (*queue_changed)(void *ud, agent_t *a);
+    /* Before each model request of the loop (omp addBeforeModelCall): return true to end the run there, before
+     * the turn opens (cost cap, --max-time deadline). */
+    bool (*before_model_call)(void *ud, agent_t *a);
     void *ud;
 } agent_hooks_t;
 

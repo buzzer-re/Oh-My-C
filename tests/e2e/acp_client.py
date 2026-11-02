@@ -7,7 +7,7 @@ import sys
 omc, prompt = sys.argv[1], sys.argv[2]
 decision = sys.argv[3] if len(sys.argv) > 3 else "allow_once"
 extra = sys.argv[4:]  # more omc flags (e.g. --yolo)
-p = subprocess.Popen([omc, "-m", "mock/mock-1", "--mode", "acp", *extra], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+p = subprocess.Popen([omc, "--model", "mock/mock-1", "--mode", "acp", *extra], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
 
 def send(o):

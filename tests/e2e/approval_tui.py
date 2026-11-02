@@ -2,7 +2,7 @@
 """Drive the interactive approval dialog under a pty (WP-10).
 
 usage: approval_tui.py <omc> <prompt> <key> <expect> [extra omc args...]
-Starts `omc -m mock/mock-1 --no-session <extra args> <prompt>`, waits for the "Allow tool:" dialog, sends <key>
+Starts `omc --model mock/mock-1 --no-session <extra args> <prompt>`, waits for the "Allow tool:" dialog, sends <key>
 (escapes decoded, e.g. '\\x11' for Ctrl+Q, '\\x1b' for Esc) once the dialog armed, then waits for
 <expect> in the screen text. Prints "approval ok" plus the run-status kind it saw, or what it got instead."""
 import os
@@ -21,7 +21,7 @@ if pid == 0:
     env = dict(os.environ, TERM="xterm-256color", OMC_SKIP_SETUP="1", PI_NO_DESKTOP_NOTIFY="1")
     for k in ("TMUX", "STY", "ZELLIJ", "TERM_PROGRAM"):
         env.pop(k, None)
-    os.execvpe(omc, [omc, "-m", "mock/mock-1", "--no-session", *extra, prompt], env)
+    os.execvpe(omc, [omc, "--model", "mock/mock-1", "--no-session", *extra, prompt], env)
 
 raw = b""
 

@@ -5,7 +5,7 @@ Prints "btw ok" when every check passes, else the first failure."""
 import glob, json, os, subprocess, sys, threading, time
 
 omc = sys.argv[1]
-p = subprocess.Popen([omc, "-m", "mock/mock-1", "--mode", "rpc"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+p = subprocess.Popen([omc, "--model", "mock/mock-1", "--mode", "rpc"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 frames, lock = [], threading.Lock()
 
 

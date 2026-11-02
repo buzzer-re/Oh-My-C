@@ -572,7 +572,9 @@ static bool sess_key(tui_component_t *c, const tui_key_t *k) {
         return true;
     }
     if (tui_kb(k, "tui.select.cancel")) {
+        ui_t *u = v->u;
         sess_close(v);
+        ix_startup_picker_closed(u, false); /* `omc --resume` with no session chosen quits */
         return true;
     }
     long n = (long)v->vis.n;
@@ -627,6 +629,7 @@ static bool sess_key(tui_component_t *c, const tui_key_t *k) {
         char *path = xstrdup(v->all.v[v->vis.v[v->sel]].path);
         ui_t *u = v->u;
         sess_close(v);
+        ix_startup_picker_closed(u, true);
         ui_resume_session(u, path);
         free(path);
         return true;

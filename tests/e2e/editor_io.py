@@ -23,7 +23,7 @@ for k in ("VISUAL", "WAYLAND_DISPLAY", "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"
     env.pop(k, None)
 pid, fd = pty.fork()
 if pid == 0:
-    os.execve(omc, [omc, "-m", "mock/mock-1", "--no-session"], env)
+    os.execve(omc, [omc, "--model", "mock/mock-1", "--no-session"], env)
 out = bytearray()
 
 

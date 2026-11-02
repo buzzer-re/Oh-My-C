@@ -13,7 +13,7 @@ fails = []
 
 class Rpc:
     def __init__(self, *args):
-        self.p = subprocess.Popen([B, "-m", "mock/mock-1", "--no-session", *args], stdin=subprocess.PIPE,
+        self.p = subprocess.Popen([B, "--model", "mock/mock-1", "--no-session", *args], stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.frames, self.lock, self.ui = [], threading.Lock(), []
         self.raw = []

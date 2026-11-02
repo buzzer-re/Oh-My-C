@@ -11,18 +11,18 @@ GLENV=(env -u GITLAB_DUO_NAMESPACE_ID -u GITLAB_DUO_PROJECT_ID -u GITLAB_DUO_PRO
        OMC_PROVIDER_URL_REWRITE="https://gitlab.com=http://127.0.0.1:$GLPORT/gl,https://cloud.gitlab.com=http://127.0.0.1:$GLPORT/cgl")
 GLA=gitlab-duo-agent/claude_sonnet_4_6_vertex
 pushd "$T/glwork" >/dev/null
-check "duo anthropic"     "plain duo answer"   "${GLENV[@]}" "$B" -m gitlab-duo/duo-chat-sonnet-4-6 --no-session -p "hi"
-check "duo responses"     "plain duo answer"   "${GLENV[@]}" "$B" -m gitlab-duo/duo-chat-gpt-5-codex --no-session -p "hi"
-check "duo completions"   "plain duo answer"   "${GLENV[@]}" "$B" -m gitlab-duo/duo-chat-gpt-5-mini --no-session -p "hi"
-check "duo tool"          "Tool said: duo-e2e" "${GLENV[@]}" "$B" -m gitlab-duo/duo-chat-sonnet-4-6 --no-session -p "bash:echo duo-e2e"
+check "duo anthropic"     "plain duo answer"   "${GLENV[@]}" "$B" --model gitlab-duo/duo-chat-sonnet-4-6 --no-session -p "hi"
+check "duo responses"     "plain duo answer"   "${GLENV[@]}" "$B" --model gitlab-duo/duo-chat-gpt-5-codex --no-session -p "hi"
+check "duo completions"   "plain duo answer"   "${GLENV[@]}" "$B" --model gitlab-duo/duo-chat-gpt-5-mini --no-session -p "hi"
+check "duo tool"          "Tool said: duo-e2e" "${GLENV[@]}" "$B" --model gitlab-duo/duo-chat-sonnet-4-6 --no-session -p "bash:echo duo-e2e"
 check "duo bad token"     "Failed to get GitLab Duo direct access token: 401" \
                           env HOME="$T" GITLAB_TOKEN=wrong OMC_PROVIDER_URL_REWRITE="https://gitlab.com=http://127.0.0.1:$GLPORT/gl" \
-                          "$B" -m gitlab-duo/duo-chat-gpt-5-mini --no-session -p "hi"
-check "duo-agent text"    "plain workflow answer" "${GLENV[@]}" "$B" -m "$GLA" --no-session -p "hi"
-check "duo-agent tool"    "Tool said: wf-e2e"     "${GLENV[@]}" "$B" -m "$GLA" --no-session -p "bash:echo wf-e2e"
-check "duo-agent pause"   "part two"              "${GLENV[@]}" "$B" -m "$GLA" --no-session -p "pause"
+                          "$B" --model gitlab-duo/duo-chat-gpt-5-mini --no-session -p "hi"
+check "duo-agent text"    "plain workflow answer" "${GLENV[@]}" "$B" --model "$GLA" --no-session -p "hi"
+check "duo-agent tool"    "Tool said: wf-e2e"     "${GLENV[@]}" "$B" --model "$GLA" --no-session -p "bash:echo wf-e2e"
+check "duo-agent pause"   "part two"              "${GLENV[@]}" "$B" --model "$GLA" --no-session -p "pause"
 check "duo-agent reject"  "GitLab Duo Workflow closed the session with HTTP 403 (WebSocket 4403): nope" \
-                          "${GLENV[@]}" "$B" -m "$GLA" --no-session -p "reject"
+                          "${GLENV[@]}" "$B" --model "$GLA" --no-session -p "reject"
 popd >/dev/null
 GLL="$T/gitlab.jsonl"
 grep -q '"path": "/cgl/ai/v1/proxy/anthropic/v1/messages?beta=true", "auth": "Bearer duo-direct-tok", "headers": {[^}]*"x-gitlab-realm": "saas"' "$GLL" \

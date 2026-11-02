@@ -1077,6 +1077,8 @@ static bool needs_quote(const char *s, size_t n) {
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)s[i];
         if (c < 0x20 || c == 0x7F) return true;
+        /* Bun's YAML.stringify quotes flow indicators and quote characters anywhere in a scalar */
+        if (strchr(",[]{}'`\"", c)) return true;
         if (c == ':' && i + 1 < n && (s[i + 1] == ' ' || s[i + 1] == '\t')) return true;
         if (c == '#' && i > 0 && (s[i - 1] == ' ' || s[i - 1] == '\t')) return true;
         if (c == 0xC2 && i + 1 < n && ((unsigned char)s[i + 1] == 0x85 || (unsigned char)s[i + 1] == 0xA0)) return true;
