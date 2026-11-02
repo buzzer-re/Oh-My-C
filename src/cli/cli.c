@@ -1,4 +1,5 @@
 /* cli.c - the omc command line (omc_main): subcommands, flags, mode dispatch. */
+#include "session/export_html.h"
 #include "ai/ai.h"
 #include "coding/app.h"
 #include "mcp/mcp.h"
@@ -270,7 +271,22 @@ static int cmd_export(int argc, char **argv) {
         fprintf(stderr, "omc: session not found: %s\n", argv[0]);
         return 1;
     }
+    const char *out = argc > 1 ? argv[1] : NULL;
     char *err = NULL;
+    if (!(out && str_ends(out, ".md"))) {
+        /* exportFromFile: omp's HTML export document */
+        char *written = NULL;
+        int rc = export_html_from_file(path, out, &written, &err);
+        free(path);
+        if (rc != 0) {
+            fprintf(stderr, "Error: %s\n", err ? err : "Failed to export session");
+            free(err);
+            return 1;
+        }
+        printf("Exported to: %s\n", written);
+        free(written);
+        return 0;
+    }
     session_t *s = session_open(path, &err);
     free(path);
     if (!s) {
@@ -278,14 +294,10 @@ static int cmd_export(int argc, char **argv) {
         free(err);
         return 1;
     }
-    const char *out = argc > 1 ? argv[1] : NULL;
-    bool md = out && str_ends(out, ".md");
-    char *text = md ? session_export_markdown(s) : session_export_html(s);
-    char *dest = out ? xstrdup(out) : xasprintf("omc-session-%s.html", session_short_id(session_id(s)));
-    int rc = fs_write(dest, text, strlen(text));
-    if (rc == 0) printf("%s\n", dest);
+    char *text = session_export_markdown(s);
+    int rc = fs_write(out, text, strlen(text));
+    if (rc == 0) printf("%s\n", out);
     else fprintf(stderr, "omc: write failed: %s\n", strerror(-rc));
-    free(dest);
     free(text);
     session_free(s);
     return rc ? 1 : 0;
