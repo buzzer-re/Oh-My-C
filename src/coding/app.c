@@ -1417,6 +1417,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
 void app_free(app_t *a) {
     if (!a) return;
     agents_unregister(a);
+    cmp_free(a); /* join a background speculative compaction */
     autolearn_free(a->autolearn); /* abort a private capture before the session it reads goes away */
     a->autolearn = NULL;
     memory_rt_free(a->memory);   /* cancel + join the memory startup pipeline */
@@ -2377,6 +2378,7 @@ int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
         json_free(msgs);
         return 0;
     }
+    cmp_before_prompt(a, msgs); /* the pending prompt may push the context over the trigger */
     int rc = run_guarded(a, msgs);
     if (rc == 0) {
         maybe_title(a);

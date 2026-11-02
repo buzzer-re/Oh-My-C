@@ -24,6 +24,11 @@ void cmp_after_turn(app_t *a);
 /* maintainContextMidRun: called between tool-loop turns (the agent continues) */
 void cmp_mid_turn(app_t *a, const json_t *assistant);
 
+/* runPrePromptCompactionIfNeeded: the pending prompt (`pending` messages) pushes the context over the trigger */
+void cmp_before_prompt(app_t *a, const json_t *pending);
+/* cancel and join a background speculation (app teardown) */
+void cmp_free(app_t *a);
+
 /* resolveCompactionMethodOrder of compaction.methodOrder (owned strings) */
 strvec_t cmp_method_order(void);
 /* canUseRemoteCompaction for omc's transports (OpenAI Responses V1, Anthropic compaction beta) */

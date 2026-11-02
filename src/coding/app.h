@@ -55,6 +55,7 @@ struct app {
     double total_cost;
     int64_t last_context_tokens;
     bool compacting;
+    struct cmp_spec *cmp_spec; /* background speculative compaction run (compaction.c), NULL when idle */
     bool title_done;
     int retry_count;
     int retry_offset;

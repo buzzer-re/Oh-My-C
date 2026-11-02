@@ -475,7 +475,10 @@ static char *joined_text(const json_t *msg) {
     return sb_detach(&b);
 }
 
-static bool cancelled(app_t *a) { return a->agent->cancel != 0; }
+/* the cancel flag of the running pass: the live turn's, or a background speculation's own */
+static __thread volatile sig_atomic_t *tl_cancel;
+static volatile sig_atomic_t *cancel_ptr(app_t *a) { return tl_cancel ? tl_cancel : &a->agent->cancel; }
+static bool cancelled(app_t *a) { return *cancel_ptr(a) != 0; }
 
 /* one summarization oneshot: owned text, NULL + *err (owned) on failure; *status the HTTP status if known */
 static char *oneshot(app_t *a, const ai_model_t *m, const char *system, const char *user, int64_t max_tokens,
@@ -492,7 +495,7 @@ static char *oneshot(app_t *a, const ai_model_t *m, const char *system, const ch
     o.max_tokens = max_tokens;
     compaction_effort(a, m, &o);
     o.session_id = a->agent->session_id;
-    o.cancel = &a->agent->cancel;
+    o.cancel = cancel_ptr(a);
     json_t *r = ai_complete(m, &ctx, &o);
     char *text = NULL;
     const char *stop = json_get_str(r, "stopReason");
@@ -648,6 +651,8 @@ static char *short_summary(app_t *a, const ai_model_t *m, const json_t *recent, 
     return out;
 }
 
+static void spec_cancel(app_t *a);
+
 /* ---------- results ---------- */
 
 typedef struct {
@@ -790,7 +795,7 @@ static bool anthropic_compact(app_t *a, const ai_model_t *m, const prep_t *p, co
     compaction_effort(a, m, &o);
     o.disable_reasoning = false;
     o.session_id = a->agent->session_id;
-    o.cancel = &a->agent->cancel;
+    o.cancel = cancel_ptr(a);
     o.on_payload = NULL;
     o.cursor_exec = NULL;
     o.tool_choice = NULL;
@@ -859,7 +864,7 @@ static bool openai_compact(app_t *a, const ai_model_t *m, const prep_t *p, resul
         instr = load_prompt("summarization-system");
     }
     char *key = app_api_key_for(m);
-    json_t *out = ai_openai_remote_compact(m, key, msgs, prev_hist, instr, a->agent->session_id, &a->agent->cancel, err,
+    json_t *out = ai_openai_remote_compact(m, key, msgs, prev_hist, instr, a->agent->session_id, cancel_ptr(a), err,
                                            &r->status);
     free(key);
     free(instr);
@@ -1015,9 +1020,10 @@ static bool compact_candidates(app_t *a, prep_t *p, const char *instructions, bo
     return ok;
 }
 
-/* #projectCompactionContextTokens: the context a pending compaction entry would rebuild */
+/* #projectCompactionContextTokens: the context a pending compaction entry would rebuild on the current branch */
 static int64_t project_after(app_t *a, const prep_t *p, const result_t *r, const char *method) {
-    json_t *path = json_clone(p->path);
+    UNUSED(p);
+    json_t *path = a->session && a->session->leaf_id ? session_path_to(a->session, a->session->leaf_id) : json_arr();
     json_t *e = json_obj();
     json_set_str(e, "type", "compaction");
     json_set_str(e, "id", "projection");
@@ -1586,19 +1592,34 @@ char *app_shake_summary(const app_shake_result_t *r) {
 
 /* ---------- handoff ---------- */
 
-/* SessionHandoff.generateDocument: a cache-friendly side request over the live context. NULL + *err on failure;
- * NULL without *err for an empty auto-triggered document. */
-static char *handoff_document(app_t *a, const char *focus, bool auto_triggered, char **err) {
+typedef struct {
+    json_t *sys, *tools, *wire;
+    char *sid, *main_sid;
+} handoff_req_t;
+
+static void handoff_req_free(handoff_req_t *h) {
+    json_free(h->sys);
+    json_free(h->tools);
+    json_free(h->wire);
+    free(h->sid);
+    free(h->main_sid);
+    memset(h, 0, sizeof *h);
+}
+
+/* the handoff request built through the live turn's pipeline (context hooks run on the calling thread) */
+static bool handoff_build(app_t *a, const char *focus, handoff_req_t *h, char **err) {
+    memset(h, 0, sizeof *h);
     const ai_model_t *model = a->model;
     if (!model) {
         *err = xstrdup("No model selected for handoff");
-        return NULL;
+        return false;
     }
     char *key = app_api_key_for(model);
-    if ((!key || !*key) && !catalog_provider_keyless(model->provider)) {
-        free(key);
+    bool keyed = key && *key;
+    free(key);
+    if (!keyed && !catalog_provider_keyless(model->provider)) {
         *err = xasprintf("No API key for %s", model->provider);
-        return NULL;
+        return false;
     }
     json_t *ctx = json_obj();
     if (focus && *focus) json_set_str(ctx, "additionalFocus", focus);
@@ -1606,31 +1627,39 @@ static char *handoff_document(app_t *a, const char *focus, bool auto_triggered, 
     json_free(ctx);
     pthread_mutex_lock(&a->agent->mu);
     json_t *msgs = json_clone(a->agent->messages);
-    json_t *sys = json_clone(a->agent->system_prompt);
-    json_t *tools = json_arr();
-    for (size_t i = 0; i < a->agent->tools.n; i++) json_push(tools, agent_tool_wire(a->agent->tools.v[i]));
-    char *main_sid = a->agent->session_id ? xstrdup(a->agent->session_id) : NULL;
+    h->sys = json_clone(a->agent->system_prompt);
+    h->tools = json_arr();
+    for (size_t i = 0; i < a->agent->tools.n; i++) json_push(h->tools, agent_tool_wire(a->agent->tools.v[i]));
+    h->main_sid = a->agent->session_id ? xstrdup(a->agent->session_id) : NULL;
     pthread_mutex_unlock(&a->agent->mu);
     json_push(msgs, user_text(prompt ? prompt : "", "agent"));
     free(prompt);
     json_t *tx = a->agent->hooks.transform_context ? a->agent->hooks.transform_context(a->agent->hooks.ud, a->agent, msgs) : NULL;
     json_t *snap = tx ? tx : msgs;
-    ai_prepare_context_images(snap, model, sys, tools);
-    json_t *wire = ai_transform_messages(snap, model);
+    ai_prepare_context_images(snap, model, h->sys, h->tools);
+    h->wire = ai_transform_messages(snap, model);
     json_free(tx);
     json_free(msgs);
-    ai_context_t c = {.system_prompt = sys, .messages = wire, .tools = json_len(tools) ? tools : NULL};
+    char *rid = short_id();
+    h->sid = xasprintf("%s:side:%s", h->main_sid ? h->main_sid : "", rid);
+    free(rid);
+    return true;
+}
+
+/* SessionHandoff.generateDocument's request: owned text, NULL + *err on failure; NULL without *err for an empty
+ * auto-triggered document */
+static char *handoff_exec(app_t *a, handoff_req_t *h, bool auto_triggered, char **err) {
+    const ai_model_t *model = a->model;
+    ai_context_t c = {.system_prompt = h->sys, .messages = h->wire, .tools = json_len(h->tools) ? h->tools : NULL};
     ai_stream_opts_t o = a->agent->base_opts;
+    char *key = app_api_key_for(model);
     o.api_key = key;
     app_fill_request_opts(a, &o);
-    char *rid = short_id();
-    char *sid = xasprintf("%s:side:%s", main_sid ? main_sid : "", rid);
-    free(rid);
-    o.session_id = sid;
-    o.prompt_cache_key = main_sid;
+    o.session_id = h->sid;
+    o.prompt_cache_key = h->main_sid;
     compaction_effort(a, model, &o);
     o.disable_reasoning = false;
-    o.cancel = &a->agent->cancel;
+    o.cancel = cancel_ptr(a);
     o.on_payload = NULL;
     o.cursor_exec = NULL;
     json_t *none = json_str("none"), *autoc = json_str("auto");
@@ -1662,15 +1691,10 @@ static char *handoff_document(app_t *a, const char *focus, bool auto_triggered, 
         }
     }
     json_free(r);
-    json_free(wire);
-    json_free(sys);
-    json_free(tools);
-    free(sid);
-    free(main_sid);
     free(key);
     if (text && auto_triggered && settings_bool("compaction.handoffSaveToDisk", false) && a->env && a->env->artifacts &&
         artifacts_dir(a->env->artifacts)) {
-        /* handoff-<ISO timestamp with : and . as ->.md in the session artifacts dir */
+        /* handoff-<ISO timestamp with : and . as -> .md in the session artifacts dir */
         char *iso = iso8601_now();
         for (char *q = iso; *q; q++)
             if (*q == ':' || *q == '.') *q = '-';
@@ -1680,6 +1704,14 @@ static char *handoff_document(app_t *a, const char *focus, bool auto_triggered, 
         free(body), free(path), free(iso);
     }
     return text;
+}
+
+static char *handoff_document(app_t *a, const char *focus, bool auto_triggered, char **err) {
+    handoff_req_t h;
+    if (!handoff_build(a, focus, &h, err)) return NULL;
+    char *doc = handoff_exec(a, &h, auto_triggered, err);
+    handoff_req_free(&h);
+    return doc;
 }
 
 /* handoffSummaryFromDocument */
@@ -1713,6 +1745,7 @@ int app_handoff(app_t *a, const char *focus, char **err) {
         *err = xstrdup("Nothing to hand off (no messages yet)");
         return -1;
     }
+    spec_cancel(a);
     a->compacting = true;
     if (!agent_is_running(a->agent)) a->agent->cancel = 0;
     prep_t p;
@@ -1813,6 +1846,7 @@ int app_compact_mode(app_t *a, const char *mode, const char *instructions, char 
         *err = xstrdup("compaction already running");
         return -1;
     }
+    spec_cancel(a); /* a manual pass supersedes background speculation */
     a->compacting = true;
     if (!agent_is_running(a->agent)) a->agent->cancel = 0; /* a stale Esc must not cancel this pass */
     int rc = manual(a, mode, instructions, err);
@@ -1924,6 +1958,243 @@ static void stamp_warning(app_t *a, const char *warning) {
     vec_free(&ents);
 }
 
+/* ---------- async (speculative) compaction ---------- */
+
+#define SPECULATION_LEAD_MIN_TOKENS 8192
+#define SPECULATION_LEAD_MAX_TOKENS 32000
+
+struct cmp_spec {
+    app_t *a;
+    pthread_t th;
+    volatile sig_atomic_t cancel;
+    volatile int done; /* the thread finished (armed or failed) */
+    bool armed, native_failed, joined;
+    char *method; /* remote | handoff | soft */
+    char *snapshot_leaf;
+    int64_t ctx_at_start;
+    prep_t prep;
+    handoff_req_t hreq;
+    result_t result;
+};
+
+/* resolveSpeculationLeadTokens */
+static int64_t spec_lead(int64_t threshold) {
+    return MIN(SPECULATION_LEAD_MAX_TOKENS, MAX(SPECULATION_LEAD_MIN_TOKENS, (int64_t)floor((double)threshold * 0.125)));
+}
+
+static bool async_enabled(void) {
+    return settings_bool("compaction.enabled", true) && settings_bool("compaction.asyncEnabled", true);
+}
+
+/* resolveSpeculationMethod: the first available configured method when it is an LLM one; local methods
+ * (shake, snapcompact) are instant and are not speculated. Anthropic-native compaction replays the live
+ * turn's transformed prefix, which a background thread cannot rebuild, so it is not speculated in omc. */
+static const char *spec_method(app_t *a, bool skip_remote) {
+    const ai_model_t *m = a->model;
+    strvec_t methods = cmp_method_order();
+    const char *out = NULL;
+    for (size_t i = 0; i < methods.n; i++) {
+        const char *c = methods.v[i];
+        if (str_eq(c, "remote")) {
+            if (skip_remote || !remote_usable(m)) continue;
+            out = (remote_endpoint_set() || openai_v1(m)) ? "remote" : NULL;
+            break;
+        }
+        if (str_eq(c, "snapcompact")) {
+            if (m && m->input_image) break; /* local: nothing to speculate */
+            continue;
+        }
+        if (str_eq(c, "handoff") || str_eq(c, "soft")) out = str_eq(c, "handoff") ? "handoff" : "soft";
+        break;
+    }
+    strvec_free(&methods);
+    return out;
+}
+
+static void *spec_main(void *arg) {
+    struct cmp_spec *sp = arg;
+    tl_cancel = &sp->cancel;
+    char *err = NULL;
+    bool ok;
+    if (str_eq(sp->method, "handoff")) {
+        char *doc = handoff_exec(sp->a, &sp->hreq, true, &err);
+        ok = doc != NULL;
+        if (ok) handoff_result(&sp->prep, doc, &sp->result);
+        free(doc);
+    } else {
+        ok = compact_candidates(sp->a, &sp->prep, NULL, str_eq(sp->method, "remote"), false, &sp->result, &err);
+        if (!ok && sp->result.native_error) sp->native_failed = true;
+        if (!ok) result_free(&sp->result);
+    }
+    free(err);
+    sp->armed = ok && !sp->cancel;
+    __atomic_store_n(&sp->done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void spec_free(struct cmp_spec *sp) {
+    if (!sp) return;
+    sp->cancel = 1;
+    if (!sp->joined) pthread_join(sp->th, NULL);
+    prep_free(&sp->prep);
+    handoff_req_free(&sp->hreq);
+    result_free(&sp->result);
+    free(sp->method);
+    free(sp->snapshot_leaf);
+    free(sp);
+}
+
+/* cancelSpeculation */
+static void spec_cancel(app_t *a) {
+    spec_free(a->cmp_spec);
+    a->cmp_spec = NULL;
+}
+
+void cmp_free(app_t *a) { spec_cancel(a); }
+
+static bool spec_done(const struct cmp_spec *sp) { return __atomic_load_n(&sp->done, __ATOMIC_ACQUIRE) != 0; }
+
+/* #startSpeculationRun: the branch snapshot is prepared here; only the model requests run in the background */
+static void spec_start(app_t *a, int64_t ctx, const char *method) {
+    struct cmp_spec *sp = xcalloc(1, sizeof *sp);
+    sp->a = a;
+    if (prepare(a, a->model, &sp->prep) != 0 || !a->session->leaf_id) {
+        prep_free(&sp->prep);
+        free(sp);
+        return;
+    }
+    if (str_eq(method, "handoff")) {
+        char *focus = prompt_render("agent/compaction/prompts/auto-handoff-threshold-focus.md", NULL), *err = NULL;
+        bool ok = handoff_build(a, focus, &sp->hreq, &err);
+        free(focus);
+        free(err);
+        if (!ok) {
+            prep_free(&sp->prep);
+            free(sp);
+            return;
+        }
+    }
+    sp->method = xstrdup(method);
+    sp->snapshot_leaf = xstrdup(a->session->leaf_id);
+    sp->ctx_at_start = ctx;
+    if (pthread_create(&sp->th, NULL, spec_main, sp) != 0) {
+        prep_free(&sp->prep);
+        handoff_req_free(&sp->hreq);
+        free(sp->method);
+        free(sp->snapshot_leaf);
+        free(sp);
+        return;
+    }
+    a->cmp_spec = sp;
+}
+
+/* index of an entry id on the current branch (entries borrowed), -1 when absent */
+static ssize_t branch_index(json_t **ents, size_t n, const char *id) {
+    for (size_t i = 0; id && i < n; i++)
+        if (str_eq(json_get_str(ents[i], "id"), id)) return (ssize_t)i;
+    return -1;
+}
+
+/* #armedSpeculationValid */
+static bool spec_valid(app_t *a, struct cmp_spec *sp, int64_t trigger) {
+    const ai_model_t *m = a->model;
+    if (!m || !sp->armed) return false;
+    const json_t *oa = json_get_obj(sp->result.preserve, "openaiRemoteCompaction");
+    if (oa && !(str_eq(json_get_str(oa, "provider"), m->provider) && responses_api(m->api) && cmp_remote_supported(m))) return false;
+    entvec_t ents = {0};
+    branch_entries(a, &ents);
+    ssize_t leaf = branch_index(ents.v, ents.n, sp->snapshot_leaf);
+    bool ok = leaf >= 0;
+    for (size_t i = (size_t)(leaf + 1); ok && i < ents.n; i++) {
+        const char *t = json_get_str(ents.v[i], "type");
+        if (str_eq(t, "compaction") || str_eq(t, "reset_boundary")) ok = false;
+    }
+    bool grew = ok && (size_t)leaf + 1 < ents.n;
+    bool native_anthropic = json_get(sp->result.preserve, "anthropicCompaction") != NULL;
+    if (ok && grew && branch_index(ents.v, ents.n, sp->result.first_kept) < 0 &&
+        !(native_anthropic && str_eq(sp->result.first_kept, "")))
+        ok = false;
+    vec_free(&ents);
+    if (!ok) return false;
+    free(sp->result.replay_through);
+    sp->result.replay_through = (oa || (native_anthropic && grew)) ? xstrdup(sp->snapshot_leaf) : NULL;
+    int64_t projected = project_after(a, NULL, &sp->result, sp->method);
+    int64_t now = branch_tokens(a);
+    int64_t baseline = MAX(MAX(now, sp->ctx_at_start), MAX(sp->result.tokens_before, trigger));
+    if (projected >= baseline) return false;
+    if (grew && !native_anthropic) {
+        int64_t band = (int64_t)floor((double)threshold_for(m) * RECOVERY_BAND);
+        if (projected > band) return false;
+        int64_t stored = stored_context_tokens(a);
+        if (stored > 0 && projected >= stored) return false;
+        if (trigger > 0 && projected >= trigger) return false;
+    }
+    return true;
+}
+
+/* #claimArmedSpeculation: an in-flight run is aborted; an armed result is returned when still valid (owned) */
+static struct cmp_spec *spec_claim(app_t *a, int64_t trigger) {
+    struct cmp_spec *sp = a->cmp_spec;
+    if (!sp) return NULL;
+    a->cmp_spec = NULL;
+    if (!spec_done(sp) || !sp->armed || !settings_bool("compaction.asyncEnabled", true) || !spec_valid(a, sp, trigger)) {
+        spec_free(sp);
+        return NULL;
+    }
+    pthread_join(sp->th, NULL);
+    sp->joined = true;
+    return sp;
+}
+
+/* maybeStartSpeculativeCompaction: inside [threshold - lead, threshold) a background run prepares the summary */
+static void spec_maybe_start(app_t *a, int64_t ctx) {
+    const ai_model_t *m = a->model;
+    if (!m || m->context_window <= 0 || !async_enabled() || a->compacting || !a->session) return;
+    int64_t th = threshold_for(m);
+    if (ctx >= th || th - ctx > spec_lead(th)) return;
+    struct cmp_spec *sp = a->cmp_spec;
+    bool skip_remote = sp && spec_done(sp) && sp->native_failed;
+    if (sp) {
+        if (!spec_done(sp)) return; /* one run at a time */
+        if (sp->armed) {
+            /* refresh on growth: a fresh cut reclaims more once the kept tail grew past the keep budget */
+            int64_t growth = ctx - sp->ctx_at_start;
+            int64_t budget = MAX(settings_int("compaction.keepRecentTokens", 20000), SPECULATION_LEAD_MIN_TOKENS);
+            if ((growth <= budget || json_get(sp->result.preserve, "anthropicCompaction")) && spec_valid(a, sp, 0)) return;
+        }
+        spec_cancel(a);
+    }
+    const char *method = spec_method(a, skip_remote);
+    if (method) spec_start(a, ctx, method);
+}
+
+/* deferThresholdCompactionToSpeculation: within the grace band above the threshold a live run absorbs the
+ * pass; true while deferral is in effect */
+static bool spec_defer(app_t *a, int64_t ctx) {
+    const ai_model_t *m = a->model;
+    if (!m || m->context_window <= 0 || !async_enabled() || a->compacting || !a->session) return false;
+    struct cmp_spec *sp = a->cmp_spec;
+    bool skip_remote = sp && spec_done(sp) && sp->native_failed;
+    const char *method = spec_method(a, skip_remote);
+    if (!method) return false;
+    int64_t th = threshold_for(m);
+    int64_t grace = MIN(th + spec_lead(th), m->context_window - SPECULATION_LEAD_MIN_TOKENS);
+    if (ctx >= grace) return false;
+    if (sp) {
+        if (!spec_done(sp)) return true; /* still summarizing in the background */
+        if (sp->armed) {
+            if (!spec_valid(a, sp, 0)) {
+                spec_cancel(a);
+                return false;
+            }
+            return false; /* ready: the real pass splices it in now */
+        }
+        spec_cancel(a); /* failed: a fresh run */
+    }
+    spec_start(a, ctx, method);
+    return a->cmp_spec != NULL;
+}
+
 /* ---------- automatic ---------- */
 
 static bool method_usable(const char *m, cmp_reason_t reason, const ai_model_t *model) {
@@ -2018,6 +2289,31 @@ int cmp_auto(app_t *a, cmp_reason_t reason, bool will_retry, int64_t trigger) {
         const char *m = methods.v[idx];
         if (!method_usable(m, reason, a->model)) continue;
         picked_any = true;
+        /* an armed background speculation supplies this pass's summary (snapcompact is local and never waits) */
+        struct cmp_spec *armed = str_eq(m, "snapcompact") ? NULL : spec_claim(a, trigger);
+        if (armed) {
+            const char *action = str_eq(armed->method, "remote") ? "remote" : str_eq(armed->method, "handoff") ? "handoff" : "context-full";
+            emit_start(a, reason, action);
+            result_t *r = &armed->result;
+            r->tokens_before = MAX(MAX(r->tokens_before, trigger > 0 ? trigger : 0), branch_tokens(a));
+            commit(a, &armed->prep, r, armed->method);
+            flags |= CMP_REWRITTEN;
+            bool progress = true;
+            if (will_retry) {
+                drop_failed_tail(a, reason);
+                progress = has_progress(a, PROGRESS_RETRY_FIT) || rescue_dead_end(a, from_shake, PROGRESS_RETRY_FIT, &flags);
+            } else if (reason != CMP_IDLE) {
+                progress = has_progress(a, PROGRESS_HEADROOM) || rescue_dead_end(a, from_shake, PROGRESS_HEADROOM, &flags);
+            }
+            char *warning = progress ? NULL : dead_end_warning(a, "clear large tool output");
+            if (warning) stamp_warning(a, warning);
+            emit_end(a, action, "ok", NULL, will_retry, r);
+            if (warning) app_notice(a, "warning", "%s", warning);
+            free(warning);
+            spec_free(armed);
+            flags |= progress ? CMP_COMMITTED : CMP_BLOCKED;
+            break;
+        }
         if (str_eq(m, "shake")) {
             if (auto_shake(a, reason, will_retry, trigger, &flags) == 1) {
                 from_shake = true;
@@ -2421,7 +2717,30 @@ void cmp_after_turn(app_t *a) {
     if (window <= 0) return;
     int64_t th = threshold_for(a->model);
     int64_t ctx = MAX(a->last_context_tokens, stored_context_tokens(a));
-    if (th <= 0 || ctx <= th) return;
+    if (th <= 0) return;
+    if (ctx <= th) {
+        spec_maybe_start(a, ctx);
+        return;
+    }
+    if (spec_defer(a, ctx)) return; /* a background speculation absorbs the blocking summarization */
+    cmp_auto(a, CMP_THRESHOLD, false, ctx);
+}
+
+void cmp_before_prompt(app_t *a, const json_t *pending) {
+    if (!a->session || !a->model || a->compacting || a->model->context_window <= 0) return;
+    if (!settings_bool("compaction.enabled", true)) return;
+    strvec_t methods = cmp_method_order();
+    size_t nm = methods.n;
+    strvec_free(&methods);
+    if (!nm) return;
+    int64_t th = threshold_for(a->model);
+    int64_t ctx = stored_context_tokens(a) + messages_tokens(pending);
+    if (th <= 0) return;
+    if (ctx <= th) {
+        spec_maybe_start(a, ctx);
+        return;
+    }
+    if (spec_defer(a, ctx)) return;
     cmp_auto(a, CMP_THRESHOLD, false, ctx);
 }
 
@@ -2438,6 +2757,11 @@ void cmp_mid_turn(app_t *a, const json_t *assistant) {
     int64_t billed = usage_context_tokens(json_get_obj(assistant, "usage"));
     int64_t ctx = MAX(billed, stored_context_tokens(a));
     int64_t th = threshold_for(a->model);
-    if (th <= 0 || ctx <= th) return;
+    if (th <= 0) return;
+    if (ctx <= th) {
+        spec_maybe_start(a, ctx);
+        return;
+    }
+    if (spec_defer(a, ctx)) return;
     cmp_auto(a, CMP_THRESHOLD, false, ctx);
 }
