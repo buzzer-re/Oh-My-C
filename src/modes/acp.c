@@ -960,9 +960,15 @@ static void bootstrap_updates(asess_t *s) {
     usleep(BOOTSTRAP_RACE_GUARD_MS * 1000);
     json_t *c;
     json_arr_foreach(s->mcp_chunks, i, c) {
-        char *t = xasprintf("MCP server \"%s\" failed to connect: %s. Its tools are unavailable until the client restarts the "
-                            "session.",
-                            json_get_str(c, "name"), json_get_str(c, "error"));
+        /* http/sse servers can be repaired with /mcp reauth */
+        const char *tr = json_get_str(c, "transport");
+        bool oauth_capable = str_eq(tr, "http") || str_eq(tr, "sse");
+        char *recovery = oauth_capable ? xasprintf("until it is reauthorized (/mcp reauth %s) or the client restarts the session",
+                                                   json_get_str(c, "name"))
+                                       : xstrdup("until the client restarts the session");
+        char *t = xasprintf("MCP server \"%s\" failed to connect: %s. Its tools are unavailable %s.", json_get_str(c, "name"),
+                            json_get_str(c, "error"), recovery);
+        free(recovery);
         json_t *u = json_obj(), *cc = json_obj();
         json_set_str(u, "sessionUpdate", "agent_message_chunk");
         json_set_str(cc, "type", "text");

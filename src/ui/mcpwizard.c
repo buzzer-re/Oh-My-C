@@ -45,6 +45,7 @@ typedef struct wiz {
     bool closed;
     step_t step;
     kind_t kind;
+    int phase; /* the heading's phase (async steps name theirs) */
     int sel;
     int attempt;
     char *validation;
@@ -197,9 +198,9 @@ static void choice_step(wiz_t *w, const char *title, tui_tc_t tone, const char *
 }
 
 static void async_step(wiz_t *w, int phase, const char *title, tui_tc_t tone) {
-    UNUSED(phase);
     clear_step(w);
     w->kind = K_ASYNC;
+    w->phase = phase;
     w->title = xstrdup(title);
     w->tone = tone;
 }
@@ -382,7 +383,7 @@ static void slot_gap(strvec_t *out) {
 
 static void wiz_content(wiz_t *w, int width, strvec_t *out) {
     /* heading */
-    char *ph = xasprintf("  %d/%d", step_phase(w->step) + 1, PH_COUNT);
+    char *ph = xasprintf("  %d/%d", (w->kind == K_ASYNC ? w->phase : step_phase(w->step)) + 1, PH_COUNT);
     char *t1 = S(w->tone, w->title ? w->title : ""), *t2 = S(TUI_TC_DIM, ph), *head = xasprintf("%s%s", t1, t2);
     push_wrapped_rows(out, head, width);
     free(ph), free(t1), free(t2), free(head);
