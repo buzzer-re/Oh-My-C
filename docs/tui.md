@@ -317,3 +317,32 @@ without Kitty Unicode placeholders), video contact-sheet attachments, chip hyper
   directories +10), best 100 by score, depth, path; `@dir/query` scopes to that directory; a bare `@`, paths
   outside the cwd and searches without hits list the directory. Files insert with a trailing space, paths
   with spaces are quoted (`@"docs/my notes.md" `), directories keep completing.
+
+## Inline images and display options (`tui/termcaps.c`)
+
+Ports of omp's terminal-capabilities.ts image/hyperlink policy, kitty-graphics.ts, sixel.ts and components/image.ts:
+
+- **Protocol:** Kitty for kitty/ghostty/wezterm/warp/otty/rio/tern/monstar (and `screen`/`ghostty` TERMs on a TTY),
+  iTerm2 for iTerm2, none for VS Code/Alacritty; `PI_FORCE_IMAGE_PROTOCOL` overrides; Kitty is dropped inside tmux
+  without `allow-passthrough`, under Paseo and Herdr. A DA1 reply with attribute 4 or an XTSMGRAPHICS geometry upgrades
+  an unknown terminal to SIXEL (not inside tmux). Cell size comes from CSI 16 t, DEC 2048 in-band resize reports or iTerm2
+  `ReportCellSize` (default 9x18); a change re-renders every image.
+- **Image rows (`tui_image_render`):** fit into `width-2` columns and `tui.maxInlineImageColumns/Rows` (100 / 20, at most 60%
+  of the screen). Kitty transmits each image id once (`a=t`, 4096-byte chunks) through a queue the renderer writes before
+  the frame; terminals with Unicode placeholders get a text grid of U+10EEEE cells, others `rows-1` reserved rows and a last
+  row `ESC 7 CUU a=p ESC 8`. iTerm2 and SIXEL use the same reserved-row shape. Image rows skip width fitting and are
+  written after `CSI 2K` (SIXEL / iTerm2 also erase the rows they paint over). A destructive repaint sends Kitty's
+  delete-all and transmits the live images again.
+- **SIXEL encoder:** decode with `src/img`, resize (premultiplied when translucent), composite partial alpha over the
+  terminal background, median-cut palette (256 colors), Floyd-Steinberg dithering, icy_sixel's band layout, whole 6 px bands.
+- **Transcript:** grouped `read` images draw in the assistant block that issued the call (omp setToolResultImages), other
+  tools' images below their card; without a protocol the text fallbacks are omp's (`[Image: image/png]`,
+  `[Image: [image/png] 48x24]` in generic cards).
+- **Display options:** `tui.hyperlinks` (off/auto/always over the detected OSC 8 support), `tui.tight` (Text, Markdown,
+  WidthAwareText and Loader drop a padding column; boxed cards and notices keep theirs), `display.hideToolActivity` /
+  Ctrl+Shift+O (tool activity views render no rows), `display.collapseCompacted`, `display.cacheMissMarker`
+  (`────────── ⊘ cache miss · 51K tokens` after the turn), `composer.tokenRate` (`coding/tokrate.c`, docked before the band
+  title on the working row and idle), `tui.mouse` (`CSI ?1000;1003;1006 h`; hover band and click-to-focus on the subagent HUD).
+
+Not ported: the inline-image budget (`tui.maxInlineImages` demotion and purges), re-anchoring/cropping of image blocks clipped
+at the screen top, OSC 11 background detection, image fallback hyperlinks, vim mode, charts, reactions, Mermaid, SVG and LaTeX.

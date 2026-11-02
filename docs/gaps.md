@@ -47,10 +47,8 @@ Ranked by how soon a user hits the gap in a normal interactive session.
 5. ~~**The `/export` HTML is a placeholder; `/dump` lacks `all`/`anon` and the request-JSON sidecar.**~~ Done (WP-4): omp's HTML export document, `/dump` sidecar and `all`/`anon` archives.
 6. ~~**`thinking: auto` turns thinking off.**~~ Done (WP-3): `auto` keeps a provisional level and classifies each user turn through the judge role chain like omp.
 7. ~~**Slash-command argument bugs.**~~ Done (WP-4): shared registry, omp's argument parsing for `/advisor` `/compact` `/shake` `/handoff` `/resume` `/effort` `/delete` `/clear`, aliases `/models` `/rewind` `/q`, bare `exit`/`quit`/`q`. Aliases of commands omc lacks (`/providers`, `/status`, `/subagents`, `/worktree`, `/plugin`, `/force:`) arrive with those commands.
-8. **Some bound app keys have no handler yet.** The keybinding layer is done (WP-5: all `app.*` actions,
-   `keybindings.yml` overrides, `/hotkeys` from the live table), but these keys still do nothing:
-   Ctrl+Shift+O. Like omp's, `/hotkeys` lists them. Ctrl+G, Ctrl+R and Ctrl+Shift+V are done (WP-6),
-   Alt+P (session model picker) in WP-19, Alt+G (the `/local` picker) in WP-21. (WP-29)
+8. ~~**Some bound app keys have no handler yet.**~~ Done: the keybinding layer (WP-5), Ctrl+G, Ctrl+R and
+   Ctrl+Shift+V (WP-6), Alt+P (WP-19), Alt+G (WP-21) and Ctrl+Shift+O (WP-29, tool activity visibility).
 9. ~~**`/context`, `/session`, `/tools`, `/jobs`, `/todo` are one-line notices instead of omp's panels.**~~ Done (WP-7): context viewer, Session Info overlay with `delete`/`pin`, Available Tools panel, Background Jobs report with `full`/`kill`, the `/todo` verbs, and short reports docked above the editor.
 10. ~~**`/tree` and `/branch` are flat 14-row pickers.**~~ Done (WP-8): omp's session tree selector, fullscreen rewind selector and branch summaries.
 11. ~~**Custom markdown commands and `/skill:<name>` don't work.**~~ Done (WP-9): file commands from every omp provider, prompt templates, `/skill:<name>` (leading or mid-prompt, chips, skill transcript card), MCP prompt commands, in the TUI, RPC, ACP and print mode. Remaining: the bundled TS commands `/review` and `/green`.
@@ -115,7 +113,7 @@ Every package must:
 |---|---|---|---|
 | WP-27 Remaining tools 🟡 (done: `xd://` mount notices + MCP route guidance, think, generate_image, `mr://`, `attachment://`; remaining: remote tts, security_scan + `security://` + `/security`, hindsight memory backend, yield + `task.structured`, task isolation / outputSchema / perCallModel, eval `agent()` / workpool) | generate_image, remote tts, security_scan + `security://` + `/security`, hindsight memory backend (retain/recall/reflect), `mr://`, `attachment://`, think, yield + `task.structured`, task isolation / outputSchema / perCallModel, eval `agent()` / workpool | `src/tools/*`, `src/coding/memory.c`, `src/tools/task.c` | U/tools/{image-gen,tts,security-scan,think,yield}.ts, U/hindsight/*, U/internal-urls/{mr,attachment,security}-protocol.ts, U/task/* |
 | WP-28 Extra commands | done: `/changelog`, `/setup`, `/force`, `/skillful` (status.md). Remaining: `/omfg` (on top of `src/coding/ttsr.c`; needs runEphemeralTurn, the omfg panel and rule validation against the history), `/tan`, `/cleanse`, `/vibe`, `/ratchet` (needs eval preludes), `/debug` selector, `/record` (+ `omc play`), `/pause` (pause screen + agent freeze), marketplace/plugins install (git-based; JS parts ⛔), stats aggregation, `startup.changelogMode`, re-queueing a `/force` choice after an aborted request | `src/modes/interactive.c`, `src/coding/*` | U/slash-commands/builtin-*.ts, U/modes/controllers/{omfg,tan,cleanse}-*.ts, U/vibe/*, U/ratchet/*, U/extensibility/plugins/* |
-| WP-29 Rich rendering and display options | Mermaid / SVG / inline images (kitty/iTerm/sixel, `terminal.showImages`), table auto-graph, reactions, `display.collapseCompacted`, `display.hideToolActivity` (Ctrl+Shift+O), cache-miss marker, `tui.hyperlinks`, `tui.mouse`, `tui.tight`, vim mode, composer token rate | `src/tui/markdown.c`, `src/ui/chat.c`, `src/tui/term.c`, `src/tui/editor.c` | T/{kitty-graphics,sixel,vim,latex-block}.ts, T/charts/*, T/chat/*, U/auto-graph/* |
+| WP-29 Rich rendering and display options (done: `display.collapseCompacted`, `display.hideToolActivity` + Ctrl+Shift+O, `display.cacheMissMarker`, `tui.hyperlinks`, `tui.tight`, `composer.tokenRate`, inline images (`terminal.showImages`: Kitty transmit-once + Unicode placeholders / direct placement, iTerm2, from-scratch SIXEL encoder, DA1 / XTSMGRAPHICS / CSI 16 t / DEC 2048 probes), `tui.mouse` (capture, HUD hover band, click-to-focus); remaining: the inline-image budget (`tui.maxInlineImages`, demotion + purge), Kitty placement re-anchoring / SIXEL cropping for blocks clipped at the screen top, OSC 11 background for SIXEL compositing, image fallback links, mouse targets on live task cards and extension links, vim mode, table auto-graph (needs omp's chart planner + an SVG rasterizer), reactions, Mermaid (omp's 13.5k-line native ASCII renderer), SVG figures (resvg), LaTeX blocks (latex-block.ts / latex-to-unicode.ts)) | Mermaid / SVG / inline images (kitty/iTerm/sixel, `terminal.showImages`), table auto-graph, reactions, `display.collapseCompacted`, `display.hideToolActivity` (Ctrl+Shift+O), cache-miss marker, `tui.hyperlinks`, `tui.mouse`, `tui.tight`, vim mode, composer token rate | `src/tui/markdown.c`, `src/ui/chat.c`, `src/tui/term.c`, `src/tui/editor.c` | T/{kitty-graphics,sixel,vim,latex-block}.ts, T/charts/*, T/chat/*, U/auto-graph/* |
 
 Out of scope (⛔) and not packaged: JS/TS extensions, hooks and custom tools; the eval JS kernel;
 collab/share/stream (hosted); the skills.omp.sh registry; browser and computer use; STT, live voice,
@@ -249,7 +247,7 @@ The key table (`src/tui/keys.c` `DEFAULTS[]`) holds omp's whole registry: the 32
 | input.newLine (shift+enter, ctrl+j) | editor.c | ✅ | alt+enter, ctrl+enter (unless bound to submit), shift+backspace / shift+delete are hard-coded fallbacks as upstream |
 | input.submit, input.tab, select.* | editor.c, components.c | ✅ | `/resume` picker ignores pageUp/pageDown |
 | input.copy (ctrl+c with selection) | — | ❌ | editor has no selection |
-| Vim mode (`tui.vimMode`, vim.ts) | — | ❌ | setting shown but inert |
+| Vim mode (`tui.vimMode`, vim.ts) | — | ❌ | setting shown but inert (WP-29 remaining) |
 | User overrides (keybindings.yml, legacy .json migration, profile inherit) | `src/config/keybindings.c` | ✅ | = omp (overrides in `/hotkeys`, migrated YAML byte-identical); `/migrate` copies the files. Profile inherit is implemented (`kbcfg_load_merged`) but omc has no profiles to call it with |
 
 ### 2b. App actions (`packages/tui/src/app-keybindings.ts`)
@@ -267,7 +265,7 @@ The key table (`src/tui/keys.c` `DEFAULTS[]`) holds omp's whole registry: the 32
 | app.model.select (alt+m) | `ui_overlay_model` | ✅ | |
 | app.model.selectTemporary (alt+p) | `ui_overlay_model_picker` | ✅ | pressing it again inside the picker toggles task mode |
 | app.tools.expand (ctrl+o) | key_hook | ✅ | |
-| app.tools.toggleVisibility (ctrl+shift+o) | — | ❌ | |
+| app.tools.toggleVisibility (ctrl+shift+o) | `ui_toggle_tool_activity` | ✅ | WP-29: tool cards, read groups, TTSR / todo notices, job rows and read images hide; `Tool activity: hidden/visible` (persisted); Ctrl+O while hidden says how to show it |
 | app.ask.hide (alt+h) | ask.c | ✅ | via the table; ask expansion uses `app.tools.expand` |
 | app.approval.approve (ctrl+enter, ctrl+q) | `ui/approval.c` | ✅ | approves the pending tool call (armed 500 ms after the dialog mounts) |
 | app.editor.external (ctrl+g) | `open_external_editor`, ask prompts, hook editor | ✅ | WP-6: `getEditorCommand` / `openInEditor` (`.omp.md`, trailing newline trimmed, "No editor configured…" warning); ask "Other"/note prompts and the hook editor via `editDialogExternally` (tmux = omp) |
@@ -343,9 +341,9 @@ user who never opens `/settings` (default-on behaviour omc lacks) versus switche
 | `recap.enabled` (on), `recap.idleSeconds` (240) | idle recap message after inactivity | ✅ (not journaled: no history.db) |
 | `tui.titleState` (on), `tui.titleSpinner`, `terminal.programStatus` (on) | terminal title shows run state + spinner; OSC 7501 program status | ✅ |
 | `compaction.methodOrder` ([remote, snapcompact, handoff, shake, soft]), `compaction.midTurnEnabled`, `compaction.asyncEnabled`, `compaction.supersedeReads`, `compaction.dropUseless` (all on) | multi-method compaction ladder, mid-turn and async compaction, stale-read supersession, uneventful-result elision | ✅ snapcompact is passed over (not implemented) |
-| `display.collapseCompacted` (on) | compacted history collapses in the transcript | ❌ |
-| `tui.renderMermaid`, `tui.renderSvg`, `tui.reactions` (on), `tui.autoGraph` (auto) | mermaid/SVG rendering, agent reactions, table charts | ❌ |
-| `terminal.showImages` (on), `images.autoResize` (on), `images.describeForTextModels` (on) | inline images (kitty/iTerm/sixel), resize before send, describe images for text-only models | ❌ |
+| `display.collapseCompacted` (on) | compacted history collapses in the transcript | ✅ WP-29: off replays the whole path with a divider per compaction (superseded summaries elided like omp) |
+| `tui.renderMermaid`, `tui.renderSvg`, `tui.reactions` (on), `tui.autoGraph` (auto) | mermaid/SVG rendering, agent reactions, table charts | ❌ (WP-29 remaining; the system prompt does not advertise them) |
+| `terminal.showImages` (on), `images.autoResize` (on), `images.describeForTextModels` (on) | inline images (kitty/iTerm/sixel), resize before send, describe images for text-only models | 🟡 inline images ✅ (WP-29, see status.md); `images.describeForTextModels` ❌ |
 | `edit.recoverInlineEdits`, `edit.blockAutoGenerated` (on) | recovers edit payloads pasted inline; refuses to edit generated files | ❌ |
 | `lsp.lazy`, `lsp.shared` (on) | lazy server start, shared servers across sessions | 🟡 servers start on first use like the default; not switchable; no cross-session sharing (`lsp.diagnosticsDeduplicate` is now read) |
 | `shellMinimizer.enabled` (on) | compresses noisy shell output (`[raw output: artifact://N]`) | ❌ (also in status.md) |
@@ -371,10 +369,9 @@ user who never opens `/settings` (default-on behaviour omc lacks) versus switche
 
 ### 3b. Switches that do nothing in omc (default off / opt-in; feature missing)
 
-Appearance: `composer.tokenRate`, `images.blockImages`, `tui.resizeScrollback`, `tui.completeScrollback`,
-`terminal.showProgress`, `tui.textSizing`, `tui.codexResetFireworks`, `tui.hyperlinks`, `tui.mouse`,
-`tui.tight`, `display.shimmer`, `display.pinnedAgents`, `display.subagentLivePreview`,
-`display.hideToolActivity`, `display.showTokenUsage`, `display.showTurnTime`, `display.cacheMissMarker`,
+Appearance: `images.blockImages`, `tui.resizeScrollback`, `tui.completeScrollback`,
+`terminal.showProgress`, `tui.textSizing`, `tui.codexResetFireworks`, `display.shimmer`, `display.pinnedAgents`,
+`display.subagentLivePreview`, `display.showTokenUsage`, `display.showTurnTime`,
 `display.advisorCollapsedLines`, `tui.imeSafeCursor`, `task.showResolvedModelBadge`.
 Model: `modelRoleStorage`, `inlineToolDescriptors`, `includeWorkspaceTree`, `prewalk.auto`, `prewalk.autoTarget`,
 `images.urls.*` (6), `expandThinkingBlocks`, `omitThinking`, `externalThinking`,
