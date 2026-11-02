@@ -2,7 +2,7 @@
 """Drive the interactive approval dialog under a pty (WP-10).
 
 usage: approval_tui.py <omc> <prompt> <key> <expect> [extra omc args...]
-Starts `omc -m mock/mock-1 --no-session <extra args> <prompt>`, waits for the "Allow tool:" dialog, sends <key>
+Starts `omc --model mock/mock-1 --no-session <extra args> <prompt>`, waits for the "Allow tool:" dialog, sends <key>
 (escapes decoded, e.g. '\\x11' for Ctrl+Q, '\\x1b' for Esc) once the dialog armed, then waits for
 <expect> in the screen text. Prints "approval ok" plus the run-status kind it saw, or what it got instead."""
 import os
