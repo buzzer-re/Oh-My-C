@@ -407,6 +407,8 @@ static const struct {
     {"azure-openai-responses", "AZURE_OPENAI_API_KEY"},
     {"jina", "JINA_API_KEY"},
     {"brave", "BRAVE_API_KEY"},
+    {"tavily", "TAVILY_API_KEY"},
+    {"perplexity", "PERPLEXITY_API_KEY"},
     {"tinyfish", "TINYFISH_API_KEY"},
     {"firecrawl", "FIRECRAWL_API_KEY"},
     {"anthropic", "ANTHROPIC_OAUTH_TOKEN"},

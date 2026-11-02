@@ -439,6 +439,21 @@ void sres_add(sresults_t *v, const char *t, const char *u, const char *s) {
 }
 
 
+/* engine requests honor OMC_PROVIDER_URL_REWRITE (test hook: the suite never reaches real search endpoints) */
+static int ws_post_json(const char *url, const http_headers_t *h, const char *body, int64_t timeout_ms, http_resp_t *r) {
+    char *u = ai_rewrite_url(url);
+    int rc = http_post_json(u, h, body, timeout_ms, r);
+    free(u);
+    return rc;
+}
+
+static int ws_get(const char *url, const http_headers_t *h, int64_t timeout_ms, http_resp_t *r) {
+    char *u = ai_rewrite_url(url);
+    int rc = http_get(u, h, timeout_ms, r);
+    free(u);
+    return rc;
+}
+
 /* ---------- Parallel (omp providers/parallel.ts): keyless public MCP, or the REST API with PARALLEL_API_KEY ---------- */
 
 static const int RECENCY_DAYS_N[4] = {1, 7, 30, 365};
@@ -550,7 +565,7 @@ int ws_search_parallel(const char *q, int limit, const char *recency, sresults_t
     char *body = json_dump(b, 0);
     json_free(b);
     http_resp_t r;
-    int rc = http_post_json(url, &h, body, ws_timeout_ms(), &r);
+    int rc = ws_post_json(url, &h, body, ws_timeout_ms(), &r);
     free(body);
     http_headers_free(&h);
     if (rc != 0) {
@@ -619,7 +634,7 @@ int ws_search_brave(const char *q, int limit, const char *recency, sresults_t *o
     http_headers_add(&h, "X-Subscription-Token", key);
     http_headers_add(&h, "Accept", "application/json");
     http_resp_t r;
-    int rc = http_get(url, &h, ws_timeout_ms(), &r);
+    int rc = ws_get(url, &h, ws_timeout_ms(), &r);
     http_headers_free(&h);
     free(url);
     if (rc != 0 || r.status != 200) {
@@ -649,7 +664,7 @@ int ws_search_tavily(const char *q, int limit, const char *recency, sresults_t *
     http_headers_add(&h, "Authorization", auth);
     free(auth);
     http_resp_t r;
-    int rc = http_post_json("https://api.tavily.com/search", &h, body, ws_timeout_ms(), &r);
+    int rc = ws_post_json("https://api.tavily.com/search", &h, body, ws_timeout_ms(), &r);
     free(body);
     http_headers_free(&h);
     if (rc != 0 || r.status != 200) {
@@ -683,7 +698,7 @@ int ws_search_exa(const char *q, int limit, const char *recency, sresults_t *out
     http_headers_t h = {0};
     http_headers_add(&h, "x-api-key", key);
     http_resp_t r;
-    int rc = http_post_json("https://api.exa.ai/search", &h, body, ws_timeout_ms(), &r);
+    int rc = ws_post_json("https://api.exa.ai/search", &h, body, ws_timeout_ms(), &r);
     free(body);
     http_headers_free(&h);
     if (rc != 0 || r.status != 200) {
@@ -720,7 +735,7 @@ int ws_search_ddg(const char *q, int limit, const char *recency, sresults_t *out
     http_headers_add(&h, "User-Agent", BROWSER_UA);
     http_headers_add(&h, "Accept", "text/html");
     http_resp_t r;
-    int rc = http_get(url, &h, ws_timeout_ms(), &r);
+    int rc = ws_get(url, &h, ws_timeout_ms(), &r);
     http_headers_free(&h);
     free(url);
     if (rc != 0 || r.status != 200) {

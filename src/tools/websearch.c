@@ -2855,7 +2855,7 @@ char *ws_execute(const json_t *args, const char *model_sel, const ai_model_t *se
         vec_free(&exp);
         exp = x;
     }
-    char *sys = prompt_render("coding-agent/prompts/system/web-search.md", NULL);
+    char *sys = prompt_load("coding-agent/prompts/system/web-search.md"); /* raw text import, like omp */
     int64_t secs = settings_int("providers.webSearchTimeoutSeconds", 60);
     ws_params_t p = {.query = query,
                      .recency = json_get_str(args, "recency"),
