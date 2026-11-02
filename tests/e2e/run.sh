@@ -558,4 +558,25 @@ check "out:// write"  "Shown to the user."  python3 -I -c "$REQS" "$T/req.jsonl"
 rm -f "$T/agent/config.yml"
 check "cfg:// read"   "maxRetries: 10"  "$B" -m mock/mock-1 --no-session -p "read:cfg://retry"
 check "conflict:// unknown"  "Conflict #1 not found: it was resolved"  "$B" -m mock/mock-1 --no-session -p "read:conflict://1"
+# turn-lifecycle signals (WP-11): terminal title + run state, OSC 7501, completion / error notifications, under a pty
+if script --version 2>/dev/null | grep -q util-linux; then
+    tui_signals() { # out-file prompt env...
+        local out=$1 prompt=$2; shift 2
+        rm -f "$T/sig.fifo"; mkfifo "$T/sig.fifo"
+        env -u TMUX -u STY -u ZELLIJ -u TERM_PROGRAM -u KITTY_WINDOW_ID -u WEZTERM_PANE -u GHOSTTY_RESOURCES_DIR \
+            -u LC_TERMINAL -u HERDR_PANE_ID -u CMUX_SURFACE_ID TERM=xterm-256color PI_NO_DESKTOP_NOTIFY=1 OMC_SKIP_SETUP=1 "$@" \
+            timeout 30 script -qfec "$B -m mock/mock-1 --no-session '$prompt'" "$out" < "$T/sig.fifo" >/dev/null 2>&1 &
+        local pid=$!
+        exec 7>"$T/sig.fifo"
+        for _ in $(seq 150); do grep -qa $'7501;state=\\(done\\|error\\)' "$out" 2>/dev/null && break; sleep 0.1; done
+        sleep 0.3; printf '\004' >&7; exec 7>&-
+        wait $pid 2>/dev/null
+    }
+    tui_signals "$T/sig1.out" "bash:echo signals"
+    check "turn signals"  "signals ok"  python3 -I "$ROOT/tests/e2e/signals_check.py" "$T/sig1.out" turn
+    printf 'error:\n  notify: "on"\n' > "$T/agent/config.yml"
+    tui_signals "$T/sig2.out" "fail:400:bad things" TERM_PROGRAM=WezTerm
+    rm -f "$T/agent/config.yml"
+    check "error signals" "signals ok"  python3 -I "$ROOT/tests/e2e/signals_check.py" "$T/sig2.out" error
+fi
 exit $fail
