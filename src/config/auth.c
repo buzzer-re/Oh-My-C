@@ -221,6 +221,37 @@ char *auth_get_api_key(const char *provider) {
     return r;
 }
 
+json_t *auth_get_credential_raw(const char *provider) {
+    pthread_mutex_lock(&g_mu);
+    load();
+    json_t *e = json_get_obj(g_store, provider);
+    json_t *r = e ? json_clone(e) : NULL;
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+
+json_t *auth_get_credential(const char *provider) {
+    pthread_mutex_lock(&g_mu);
+    load();
+    json_t *e = json_get_obj(g_store, provider);
+    if (e && str_eq(json_get_str(e, "type"), "oauth")) {
+        json_t *dd = json_get_obj(e, "descriptor");
+        if (!dd) dd = descriptor(provider);
+        int64_t exp = normalized_expiry(dd, e);
+        if (exp && exp - 60000 < now_ms()) {
+            char *err = NULL;
+            if (refresh_oauth(provider, e, &err) != 0) {
+                LOGW("oauth refresh for %s failed: %s", provider, err ? err : "?");
+                free(err);
+            }
+            e = json_get_obj(g_store, provider);
+        }
+    }
+    json_t *r = e ? json_clone(e) : NULL;
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+
 bool auth_has_runtime_key(const char *provider) {
     pthread_mutex_lock(&g_mu);
     load();

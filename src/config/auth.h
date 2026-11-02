@@ -11,6 +11,10 @@ void auth_set_runtime_key(const char *provider, const char *key); /* --api-key o
 /* Resolve a usable key/token for provider (refreshing OAuth if needed). Owned or NULL. */
 char *auth_get_api_key(const char *provider);
 bool auth_has_credentials(const char *provider);
+/* the stored auth.json entry for provider (owned clone) or NULL; auth_get_credential refreshes an OAuth token
+ * that is about to expire first (like auth_get_api_key) */
+json_t *auth_get_credential(const char *provider);
+json_t *auth_get_credential_raw(const char *provider);
 bool auth_has_runtime_key(const char *provider); /* --api-key override set */
 int auth_set_api_key(const char *provider, const char *key);
 int auth_logout(const char *provider);
