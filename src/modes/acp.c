@@ -955,6 +955,21 @@ static void push_available_commands(asess_t *s) {
     notify_update(s->id, u);
 }
 
+/* MCP prompts/list_changed: the prompt catalog changed, re-advertise the palette
+ * (subscribeCommandMetadataChanged -> #emitAvailableCommandsUpdate) */
+static void acp_mcp_prompts_changed(void *ud, const char *server) {
+    UNUSED(server);
+    push_available_commands(ud);
+}
+
+static void acp_mcp_callbacks(asess_t *s) {
+    if (!s->mcp) return;
+    mcp_callbacks_t cb = {0};
+    cb.prompts_changed = acp_mcp_prompts_changed;
+    cb.ud = s;
+    mcp_set_callbacks(s->mcp, &cb);
+}
+
 /* #emitBootstrapUpdates: MCP startup failures, commands, session info (behind the bootstrap race guard) */
 static void bootstrap_updates(asess_t *s) {
     usleep(BOOTSTRAP_RACE_GUARD_MS * 1000);
@@ -1763,6 +1778,7 @@ static int reconfigure_mcp(asess_t *s, const json_t *servers, char **err) {
     mcp_manager_t *old = s->mcp;
     app->mcp = m;
     s->mcp = m;
+    acp_mcp_callbacks(s);
     if (m && !app->opts.no_tools) {
         mcp_register_tools(m, ag);
         for (size_t i = 0; i < ag->all_tools.n; i++)
@@ -1811,6 +1827,7 @@ static asess_t *open_record(acp_t *a, const char *cwd, const char *resume, const
     s->tool_args = json_obj();
     s->held = json_obj();
     s->id = xstrdup(session_id(app->session));
+    acp_mcp_callbacks(s);
     app->plan_mode_changed = acp_plan_mode_changed;
     app->plan_mode_changed_ud = s;
     if (caps_form(a)) {
