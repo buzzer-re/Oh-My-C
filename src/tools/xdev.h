@@ -29,6 +29,8 @@ char *xdev_prompt_docs(agent_t *a);
 /* read handler: returns true when `path` is an xd:// URL (result filled). */
 bool xdev_read(agent_t *a, const char *path, tool_result_t *out);
 /* write handler: returns true when `path` is an xd:// device URL handled here (result filled). */
+/* a mounted device or active top-level tool by name (borrowed), NULL when none */
+agent_tool_t *xdev_resolve_tool(agent_t *a, const char *name);
 bool xdev_write(tool_ctx_t *ctx, const char *path, const char *content, tool_result_t *out);
 
 /* Whether automated QA (`xd://report_issue`) is enabled (dev.autoqa + consent, PI_AUTO_QA). */

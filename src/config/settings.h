@@ -11,6 +11,7 @@ const char *settings_str(const char *path, const char *def);
 int64_t settings_int(const char *path, int64_t def);
 double settings_num(const char *path, double def);
 bool settings_bool(const char *path, bool def);
+bool settings_is_configured(const char *path); /* set in a config layer (not only the built-in default) */
 void settings_set_runtime(const char *path, json_t *val); /* in-memory override (takes ownership) */
 int settings_set_global(const char *path, json_t *val);   /* persist to config.yml (takes ownership) */
 void settings_unset_runtime(const char *path);           /* drop an in-memory override */

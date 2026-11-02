@@ -185,6 +185,16 @@ bool settings_bool(const char *path, bool def) {
     return def;
 }
 
+bool settings_is_configured(const char *path) {
+    ensure();
+    pthread_mutex_lock(&g_mu);
+    json_t *layers[] = {g_global, g_project, g_overlay, g_runtime};
+    bool r = false;
+    for (size_t i = 0; i < ARRAY_LEN(layers) && !r; i++) r = layers[i] && json_path(layers[i], path) != NULL;
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+
 /* set by dotted path creating intermediate objects */
 static void set_path(json_t *root, const char *path, json_t *val) {
     strvec_t parts = str_split(path, ".");

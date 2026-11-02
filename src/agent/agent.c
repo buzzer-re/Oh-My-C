@@ -730,6 +730,35 @@ size_t agent_queued_count(agent_t *a) {
     return n;
 }
 
+size_t agent_steering_count(agent_t *a) {
+    pthread_mutex_lock(&a->mu);
+    size_t n = json_len(a->steering);
+    pthread_mutex_unlock(&a->mu);
+    return n;
+}
+
+void agent_prioritize_steering(agent_t *a, size_t from) {
+    pthread_mutex_lock(&a->mu);
+    size_t n = json_len(a->steering);
+    for (size_t i = from, at = 0; i < n; i++, at++) json_arr_insert(a->steering, at, json_arr_remove(a->steering, i));
+    pthread_mutex_unlock(&a->mu);
+}
+
+bool agent_steering_has(agent_t *a, const json_t *msg) {
+    pthread_mutex_lock(&a->mu);
+    bool r = false;
+    for (size_t i = 0; i < json_len(a->steering) && !r; i++) r = json_at(a->steering, i) == msg;
+    pthread_mutex_unlock(&a->mu);
+    return r;
+}
+
+const json_t *agent_steering_at(agent_t *a, size_t i) {
+    pthread_mutex_lock(&a->mu);
+    const json_t *m = json_at(a->steering, i);
+    pthread_mutex_unlock(&a->mu);
+    return m;
+}
+
 /* Dequeue per mode: everything ("all") or the head message ("one-at-a-time", omp's default). */
 static json_t *take_queue(agent_t *a, json_t **q) {
     pthread_mutex_lock(&a->mu);
@@ -925,6 +954,10 @@ static void run_tool(tool_job_t *j) {
                 tool_result_error(&j->res, "Validation failed for tool \"%s\":\n%s\n\nReceived arguments:\n%s", name, verr, recv);
                 free(recv);
                 free(verr);
+            } else if (a->hooks.approve_tool &&
+                       a->hooks.approve_tool(a->hooks.ud, a, j->call, j->args, &reason) == TOOL_BLOCK) {
+                free(recv);
+                tool_result_error(&j->res, "%s", reason ? reason : "Tool call was blocked");
             } else {
                 free(recv);
                 j->ctx.agent = a;

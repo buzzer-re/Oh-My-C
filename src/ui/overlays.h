@@ -176,6 +176,13 @@ void ui_overlay_login_provider(ui_t *u, const char *provider, bool reopen_hub);
 typedef void (*ui_ask_done_fn)(void *ud, json_t *answers);
 void ui_ask_dialog_show(ui_t *u, const json_t *questions, ui_ask_done_fn done, void *ud);
 
+/* ---------- approval.c ---------- */
+
+/* tool approval prompt in the composer's place (overlays/approval-dialog.ts): installs the tool env's `approve`
+ * bridge (tool threads block until the dialog answers); shutdown denies a waiting call once the UI loop ends */
+void ui_approval_install(ui_t *u);
+void ui_approval_shutdown(ui_t *u);
+
 /* ---------- planreview.c ---------- */
 
 /* fullscreen plan review (overlays/plan-review-overlay.ts): the plan rendered by section, a Contents

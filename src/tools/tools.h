@@ -42,12 +42,18 @@ typedef struct {
 } todo_state_t;
 
 /* ---------- UI callbacks (interactive mode supplies these; NULL in print/rpc) ---------- */
+struct approval_prompt;
 typedef struct {
     /* ask the user; returns owned JSON answer object or NULL if unavailable/cancelled */
     json_t *(*ask)(void *ud, const json_t *questions);
     /* a tool call that already returned has a new result frame (async task progress): details owned; called
      * from any thread (the UI posts it to its own) */
     void (*tool_frame)(void *ud, const char *tool_call_id, json_t *details);
+    /* tool approval prompt (overlays/approval-dialog.ts) for call `tool_call_id`; `status` is formatApprovalPrompt
+     * (the blocked run status). Blocks the calling tool thread; returns an approval_answer_kind_t (tools/approval.h)
+     * with *grant / *always set for a grant answer. `cancel` aborts the wait (deny). NULL: no UI can answer. */
+    int (*approve)(void *ud, const char *tool_call_id, const char *tool_name, const char *status,
+                   const struct approval_prompt *prompt, int *grant, bool *always, volatile sig_atomic_t *cancel);
     void *ud;
 } tool_ui_t;
 

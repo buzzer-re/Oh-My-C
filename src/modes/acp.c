@@ -4,6 +4,7 @@
 
 #include "config/settings.h"
 #include "core/fs.h"
+#include "tools/approval.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -19,7 +20,7 @@ typedef struct {
     bool running;
     json_t *prompt_req_id;
     json_t *prompt_content;
-    bool always_allow;
+    json_t *decisions; /* permission cache key -> "allow_always" | "reject_always" (#acpPermissionDecisions) */
 } asess_t;
 
 typedef struct {
@@ -199,53 +200,158 @@ static void acp_listener(void *ud, const agent_event_t *ev) {
     }
 }
 
-/* permission gate for mutating tools (client decides) */
-static tool_gate_t (*g_prev_before)(void *, agent_t *, const json_t *, char **);
+/* #wrapToolForAcpPermission (session/session-tools.ts + acp-permission-gate.ts): bash, and edit payloads that
+ * delete or move a file, ask the client through session/request_permission; "Always allow" / "Always reject"
+ * persist per session and permission cache key */
+static const char *const PERMISSION_OPTIONS =
+    "[{\"optionId\":\"allow_once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"},"
+    "{\"optionId\":\"allow_always\",\"name\":\"Always allow\",\"kind\":\"allow_always\"},"
+    "{\"optionId\":\"reject_once\",\"name\":\"Reject\",\"kind\":\"reject_once\"},"
+    "{\"optionId\":\"reject_always\",\"name\":\"Always reject\",\"kind\":\"reject_always\"}]";
 
-static tool_gate_t acp_before_tool(void *ud, agent_t *ag, const json_t *call, char **reason) {
-    app_t *app = ud;
-    asess_t *s = NULL;
-    acp_t *a = NULL;
-    /* find our session by app */
-    extern acp_t *g_acp;
-    a = g_acp;
-    pthread_mutex_lock(&a->mu);
-    for (size_t i = 0; i < a->sessions.n; i++)
-        if (a->sessions.v[i]->app == app) s = a->sessions.v[i];
-    pthread_mutex_unlock(&a->mu);
-    if (g_prev_before) {
-        tool_gate_t g = g_prev_before(ud, ag, call, reason);
-        if (g == TOOL_BLOCK) return g;
+/* #isExplicitAutoApproveMode: --auto-approve, or a configured (not defaulted) tools.approvalMode of yolo */
+static bool explicit_auto_approve(app_t *app) {
+    return app->opts.auto_approve ||
+           (settings_is_configured("tools.approvalMode") && str_eq(settings_str("tools.approvalMode", "yolo"), "yolo"));
+}
+
+/* extractPermissionLocations: absolute editor locations of the explicit paths, else the call's path arguments */
+static json_t *permission_locations(app_t *app, const json_t *args, const strvec_t *paths) {
+    json_t *out = json_arr();
+    strvec_t seen = {0};
+    strvec_t cand = {0};
+    if (paths->n) {
+        for (size_t i = 0; i < paths->n; i++) strvec_push(&cand, paths->v[i]);
+    } else if (json_is_obj(args)) {
+        const char *keys1[] = {"path", "file"};
+        for (size_t i = 0; i < 2; i++)
+            if (json_get_str(args, keys1[i])) strvec_push(&cand, json_get_str(args, keys1[i]));
+        json_t *e;
+        json_arr_foreach(json_get_arr(args, "paths"), i, e) if (json_is_str(e)) strvec_push(&cand, json_sv(e));
+        const char *keys2[] = {"oldPath", "newPath", "from", "to", "source", "destination"};
+        for (size_t i = 0; i < ARRAY_LEN(keys2); i++)
+            if (json_get_str(args, keys2[i])) strvec_push(&cand, json_get_str(args, keys2[i]));
     }
+    for (size_t i = 0; i < cand.n; i++) {
+        if (!*cand.v[i] || strstr(cand.v[i], "://")) continue;
+        char *abs = path_abs(cand.v[i], app->cwd);
+        if (!strvec_contains(&seen, abs)) {
+            json_t *l = json_obj();
+            json_set_str(l, "path", abs);
+            json_push(out, l);
+            strvec_push(&seen, abs);
+        }
+        free(abs);
+    }
+    strvec_free(&cand);
+    strvec_free(&seen);
+    return out;
+}
+
+static tool_gate_t acp_permission_gate(void *ud, app_t *app, const json_t *call, const json_t *args, bool *client_approved,
+                                       char **reason) {
+    asess_t *s = ud;
+    acp_t *a = s->acp;
     const char *name = json_get_str(call, "name");
-    const char *kind = tool_kind(name);
-    if (!s || s->always_allow || !(str_eq(kind, "edit") || str_eq(kind, "execute"))) return TOOL_ALLOW;
-    if (str_eq(settings_str("tools.approvalMode", "yolo"), "yolo") && !settings_bool("acp.askPermission", true)) return TOOL_ALLOW;
+    if (!approval_acp_tool_gated(name)) return TOOL_ALLOW;
+    /* default-config sessions still ask for executable calls even though the schema defaults to yolo; explicit
+     * yolo is an intentional opt-in (a non-allow tools.approval.<tool> keeps the gate) */
+    if (!str_eq(name, "bash") && explicit_auto_approve(app)) {
+        json_t *pol = json_get(settings_get("tools.approval"), name);
+        if (!json_truthy(pol) || (json_is_str(pol) && !strcmp(json_sv(pol), "allow"))) return TOOL_ALLOW;
+    }
+    approval_call_t c = {app->env, app->agent, name, args};
+    char *restricted = approval_restricted_reason(&c, settings_get("tools.restrictedFolders"), app->cwd);
+    bool cacheable = restricted == NULL; /* a restricted call is approved per call */
+    free(restricted);
+    if (str_eq(name, "bash")) {
+        approval_ctx_t ctx;
+        approval_ctx_from_settings(&ctx, app->opts.auto_approve, app->session ? session_id(app->session) : NULL, app->cwd);
+        if (ctx.mode == AMODE_YOLO && !explicit_auto_approve(app)) ctx.mode = AMODE_ALWAYS_ASK;
+        ctx.use_grants = ctx.mode == AMODE_ALWAYS_ASK_CACHED;
+        approval_resolved_t r;
+        approval_resolve(&c, &ctx, &r);
+        if (r.policy == APOL_DENY) {
+            *reason = approval_deny_error(&r, name);
+            approval_resolved_free(&r);
+            return TOOL_BLOCK;
+        }
+        bool allow = r.policy == APOL_ALLOW;
+        cacheable = !r.override; /* a critical command or explicit pattern stays per-call */
+        approval_resolved_free(&r);
+        if (allow) return TOOL_ALLOW;
+    }
+    char *title = NULL, *cache_key = NULL;
+    strvec_t paths = {0};
+    if (!approval_acp_intent(app->env, name, args, &title, &cache_key, &paths)) {
+        strvec_free(&paths);
+        return TOOL_ALLOW;
+    }
+    tool_gate_t g = TOOL_ALLOW;
+    const char *persisted = cacheable ? json_get_str(s->decisions, cache_key) : NULL;
+    if (str_eq(persisted, "allow_always")) {
+        *client_approved = true;
+        goto out;
+    }
+    if (str_eq(persisted, "reject_always")) {
+        *reason = xstrdup("Tool call rejected by user (preference)");
+        g = TOOL_BLOCK;
+        goto out;
+    }
+    if (app->agent->cancel) {
+        *reason = xstrdup("Permission request cancelled");
+        g = TOOL_BLOCK;
+        goto out;
+    }
     json_t *p = json_obj();
     json_set_str(p, "sessionId", s->id);
     json_t *tc = json_obj();
     json_set_str(tc, "toolCallId", json_get_str(call, "id"));
-    char *t = tool_title(name, json_get(call, "arguments"));
-    json_set_str(tc, "title", t);
-    free(t);
-    json_set_str(tc, "kind", kind);
-    json_set(tc, "rawInput", json_clone(json_get(call, "arguments")));
+    json_set_str(tc, "title", title);
+    if (str_eq(name, "bash")) json_set_str(tc, "kind", "execute");
+    json_set_str(tc, "status", "pending");
+    json_set(tc, "rawInput", args ? json_clone(args) : json_obj());
+    const char *cmd = str_eq(name, "bash") ? json_get_str(args, "command") : NULL;
+    if (cmd && *cmd) {
+        char *t = xasprintf("$ %s", cmd);
+        json_t *content = json_arr(), *item = json_obj(), *inner = json_obj();
+        json_set_str(item, "type", "content");
+        json_set_str(inner, "type", "text");
+        json_set_str(inner, "text", t);
+        json_set(item, "content", inner);
+        json_push(content, item);
+        json_set(tc, "content", content);
+        free(t);
+    }
+    json_set(tc, "locations", permission_locations(app, args, &paths));
     json_set(p, "toolCall", tc);
-    json_set(p, "options", json_parse_str("[{\"optionId\":\"allow_once\",\"name\":\"Allow\",\"kind\":\"allow_once\"},"
-                                          "{\"optionId\":\"allow_always\",\"name\":\"Always allow\",\"kind\":\"allow_always\"},"
-                                          "{\"optionId\":\"reject_once\",\"name\":\"Reject\",\"kind\":\"reject_once\"}]"));
+    json_set(p, "options", json_parse_str(PERMISSION_OPTIONS));
     json_t *r = client_request(a, "session/request_permission", p, 30 * 60 * 1000);
     json_t *outcome = json_get(r, "outcome");
     const char *oc = json_get_str(outcome, "outcome");
     const char *opt = json_get_str(outcome, "optionId");
-    tool_gate_t g = TOOL_ALLOW;
-    if (!r || str_eq(oc, "cancelled") || str_starts(opt ? opt : "", "reject")) {
-        *reason = xstrdup("The user rejected this tool call.");
+    if (!r || !str_eq(oc, "selected") || app->agent->cancel) {
+        *reason = xstrdup("Permission request cancelled");
         g = TOOL_BLOCK;
-    } else if (str_eq(opt, "allow_always")) {
-        s->always_allow = true;
+    } else if (!str_eq(opt, "allow_once") && !str_eq(opt, "allow_always") && !str_eq(opt, "reject_once") &&
+               !str_eq(opt, "reject_always")) {
+        *reason = xasprintf("Tool permission response used unknown option ID: %s", opt ? opt : "undefined");
+        g = TOOL_BLOCK;
+    } else {
+        if (cacheable && (str_eq(opt, "allow_always") || str_eq(opt, "reject_always")))
+            json_set_str(s->decisions, cache_key, opt);
+        if (str_starts(opt, "reject")) {
+            *reason = xasprintf("Tool call rejected by user (%s)", name);
+            g = TOOL_BLOCK;
+        } else {
+            *client_approved = true;
+        }
     }
     json_free(r);
+out:
+    free(title);
+    free(cache_key);
+    strvec_free(&paths);
     return g;
 }
 
@@ -281,12 +387,13 @@ static asess_t *open_session(acp_t *a, const char *cwd, const char *resume, char
     asess_t *s = xcalloc(1, sizeof(*s));
     s->app = app;
     s->acp = a;
+    s->decisions = json_obj();
     s->id = xstrdup(session_id(app->session));
     app->plan_mode_changed = acp_plan_mode_changed;
     app->plan_mode_changed_ud = s;
     agent_subscribe(app->agent, acp_listener, s);
-    g_prev_before = app->agent->hooks.before_tool;
-    app->agent->hooks.before_tool = acp_before_tool;
+    app->permission_gate = acp_permission_gate;
+    app->permission_gate_ud = s;
     pthread_mutex_lock(&a->mu);
     vec_push(&a->sessions, s);
     pthread_mutex_unlock(&a->mu);
@@ -561,6 +668,7 @@ int run_acp_mode(const app_opts_t *base) {
         if (s->running) app_abort(s->app);
         if (s->th) pthread_join(s->th, NULL);
         app_free(s->app);
+        json_free(s->decisions);
         free(s->id);
         free(s);
     }

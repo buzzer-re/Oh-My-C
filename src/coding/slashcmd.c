@@ -7,6 +7,7 @@
 #include "core/embed.h"
 #include "session/dump.h"
 #include "session/session.h"
+#include "tools/approval.h"
 
 #include <ctype.h>
 #include <strings.h>
@@ -26,6 +27,7 @@ static void h_memory(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_rename(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_dirs(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_dump(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_forget_approvals(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 
 /* upstream name -> supported subcommands ("*" all, NULL none), TUI handler present, text handler.
  * Subcommands left out are not implemented (their upstream behaviour would be advertised falsely). */
@@ -74,6 +76,7 @@ static const struct {
     {"dirs", NULL, false, h_dirs},
     {"exit", NULL, true, NULL},
     {"skills", NULL, true, NULL},
+    {"forget-approvals", NULL, false, h_forget_approvals},
     {"quit", NULL, true, NULL},
 };
 
@@ -576,6 +579,14 @@ static void h_dirs(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res)
     char *m = xasprintf("Workspace directories:\n  %s (working directory)", rt->app->cwd);
     out(rt, m);
     free(m);
+}
+
+/* builtin-control.ts forget-approvals: clearApprovalGrants (the shared file and every session tier) */
+static void h_forget_approvals(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    (void)c;
+    (void)res;
+    approval_grants_clear();
+    out(rt, "Remembered approvals forgotten; the next read or write asks again.");
 }
 
 /* builtin-collaboration.ts dump handle: transcript (+ the LLM request sidecar path) or an archive report */
