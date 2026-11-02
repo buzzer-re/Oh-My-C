@@ -225,7 +225,35 @@ not advertised in the description.
   RFC 9728 resource metadata → RFC 8414/OIDC metadata → RFC 7591 dynamic registration (or a
   configured client) → authorization code + PKCE with the RFC 8707 `resource` indicator, through the
   shared login engine. Credentials are stored in `auth.json` under `mcp:<server url>` and refreshed
-  automatically. Managed with `omc mcp list|login|logout`.
+  automatically. Managed with `omc mcp list|login|logout` and `/mcp reauth|unauth`.
+- `mcp.enableProjectConfig` (on) gates every project-level source; a server named in the user
+  `mcp.json` `disabledServers` list or set `enabled: false` is not connected.
+- Manager (`mcp.c`): servers are refcounted and named by the tool bridges, so `/mcp reload`,
+  `reconnect`, `enable`/`disable` replace connections without invalidating tools in flight. Per
+  server it keeps the initialize capabilities and serverInfo, the tool / prompt / resource / template
+  catalogs, the connection state (connecting, connected, disconnected) and the subscribed URIs. A
+  server still connecting after the startup window keeps connecting; its tools bind when it is ready.
+- Server notifications: `notifications/tools/list_changed`, `prompts/list_changed` and
+  `resources/list_changed` re-list that catalog (on a worker thread); prompt changes show up in the
+  MCP prompt commands immediately (ACP re-sends `available_commands_update`). With
+  `mcp.notifications` on, every connected server that supports `resources.subscribe` is subscribed to
+  its resources, and `notifications/resources/updated` for a subscribed URI is debounced
+  (`mcp.notificationDebounceMs`) and delivered to the TUI session as omp's `[MCP notification] N
+  resource(s) updated: …` user message (a follow-up while a turn runs, else a new turn).
+- Config files (`mcpcfg.c`, port of `mcp/config-writer.ts`): the user file is `<agent dir>/mcp.json`,
+  the project file `<cwd>/.omc/mcp.json`; atomic writes with `$schema` first; server-name and
+  config validation with omp's messages. `/mcp add` (wizard or quick add), `remove`, `enable`,
+  `disable`, `unauth` and `reauth` write them. omc keeps OAuth credentials url-keyed, so a signed-in
+  server is saved without an `auth` block.
+- `/mcp` in the TUI is `src/ui/mcpcmd.c` (+ the add wizard, `mcpwizard.c`); RPC/ACP use the text
+  handlers in `src/coding/slashmcp.c` (one-off connections for `test`/`resources`/`prompts`).
+
+## SSH hosts (`ssh.json`)
+
+`tools/ssh.c` owns the `ssh.json` writer (`ssh_config_*`, port of `ssh/config-writer.ts`): user
+`<agent dir>/ssh.json`, project `<cwd>/.omc/ssh.json`. `/ssh add|list|remove` (TUI: `ui/sshcmd.c`;
+RPC/ACP: `coding/slashmcp.c`) and `omc ssh` share it; `ssh://` reads the same files plus the legacy
+`ssh.json` / `.ssh.json` in the project root (listed as read-only "Discovered" hosts).
 
 ## LSP client (`src/lsp/lsp.c`)
 
