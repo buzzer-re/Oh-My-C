@@ -1225,7 +1225,7 @@ again:;
         json_set_str(e, "message", json_get_str(last, "errorMessage") ? json_get_str(last, "errorMessage") : "error");
         json_set_str(e, "provider", json_get_str(last, "provider"));
         json_set_str(e, "model", json_get_str(last, "model"));
-        json_set_bool(e, "retryable", false);
+        json_set_bool(e, "retryable", app_error_retryable(json_get_str(last, "errorMessage")));
         json_set(res, "error", e);
     }
     /* goal mode: keep going with hidden continuation turns while the goal is active and making progress */

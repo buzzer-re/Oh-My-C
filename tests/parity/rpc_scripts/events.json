@@ -1,0 +1,10 @@
+[
+ {"setup": "printf 'retry:\\n  maxRetries: 1\\n  baseDelayMs: 10\\ncompaction:\\n  keepRecentTokens: 1\\n' >> config.yml"},
+ {"send": {"id": "p1", "type": "prompt", "message": "fail:503:try again later"}}, {"wait": "prompt_result:p1"}, {"wait": "session_settled"},
+ {"send": {"id": "p2", "type": "prompt", "message": "say:first answer"}}, {"wait": "prompt_result:p2"}, {"wait": "session_settled"},
+ {"send": {"id": "p3", "type": "prompt", "message": "say:second answer"}}, {"wait": "prompt_result:p3"}, {"wait": "session_settled"},
+ {"send": {"id": "c1", "type": "compact"}}, {"wait": "response:c1"},
+ {"send": {"id": "c2", "type": "compact"}}, {"wait": "response:c2"},
+ {"send": {"id": "g1", "type": "goal", "op": "create", "objective": "ship it"}}, {"wait": "response:g1"},
+ {"send": {"id": "g2", "type": "goal", "op": "drop"}}, {"wait": "response:g2"}
+]

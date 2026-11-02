@@ -543,6 +543,9 @@ static bool is_overflow(const char *err) {
                    str_istr(err, "exceeds the context window") || str_istr(err, "input is too long"));
 }
 
+static bool is_retryable(const char *err);
+bool app_error_retryable(const char *err) { return is_retryable(err); }
+
 static bool is_retryable(const char *err) {
     if (!err) return false;
     const char *pats[] = {"overloaded", "rate limit", "rate_limit", "429", "500", "502", "503", "504", "529",

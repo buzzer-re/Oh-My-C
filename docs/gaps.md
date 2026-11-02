@@ -594,7 +594,7 @@ Verified against omp v18.14.2 with `tests/parity/rpc_diff.py` (scripts in `tests
 | Command | omc | Status | Notes |
 |---|---|---|---|
 | negotiate_protocol | handle | ✅ | only v2: `{protocolVersion:2}`, else `Unsupported RPC protocol version: N` |
-| prompt, abort_and_prompt | prompt_thread | 🟡 | slash / skill / file commands run (WP-4, WP-9); a prompt queued into a live run gets its `prompt_result` at that run's yield; errors lack `httpStatus` / `code: cost_cap`, `retryable` always false; no input gate (an abort does not cancel input accepted before it) |
+| prompt, abort_and_prompt | prompt_thread | 🟡 | slash / skill / file commands run (WP-4, WP-9); a prompt queued into a live run gets its `prompt_result` at that run's yield; errors lack `httpStatus` (omc keeps no provider status on the message) and `code: cost_cap`; a prompt sent during a retry backoff is queued (omp rejects it as "Agent is already processing"); no input gate (an abort does not cancel input accepted before it) |
 | steer, follow_up, promote_queued_message, abort | handle | ✅ | |
 | remove_queued_message | handle | ✅ | `queue` validated, removed `images` returned (`imagesDropped` over the limit) |
 | abort_and_restore_queue | handle | 🟡 | user-authored entries with `images`; no `imagesDropped`/`truncated` fitting |
