@@ -305,7 +305,9 @@ static agent_tool_t *resolve_tool(agent_t *a, const char *name) {
 agent_tool_t *xdev_resolve_tool(agent_t *a, const char *name) { return resolve_tool(a, name); }
 
 /* MCP/extension tools carry third-party metadata (`dynamic`): their summaries are capped. */
-static bool tool_is_builtin(const agent_tool_t *t) { return !str_starts(t->name, "mcp__"); }
+static bool tool_is_builtin(const agent_tool_t *t) {
+    return !str_starts(t->name, "mcp__") && !str_eq(t->name, "generate_image") && !str_eq(t->name, "tts");
+}
 
 /* summary, else first non-empty description line, else label/name */
 static char *tool_summary(const agent_tool_t *t) {

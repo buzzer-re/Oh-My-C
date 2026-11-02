@@ -17,6 +17,7 @@
 #include "coding/autolearn.h"
 #include "coding/memory.h"
 #include "coding/xdnotice.h"
+#include "coding/imagegen.h"
 #include "tools/approval.h"
 #include "tools/artifacts.h"
 #include "tools/jobs.h"
@@ -1420,6 +1421,10 @@ static void install_agent(app_t *a) {
     if (!a->opts.no_tools) autolearn_register_tools(a, ag);
     if (!a->opts.no_tools && settings_bool("externalThinking", false) && think_supported(a->model))
         agent_add_tool(ag, tool_think_new());
+    /* settings-gated custom tools: generate_image (honors an explicit tool list) */
+    if (!a->opts.no_tools && !a->opts.subagent && settings_bool("generate_image.enabled", false) &&
+        (!a->opts.tools || strvec_contains(a->opts.tools, "generate_image")))
+        agent_add_tool(ag, imagegen_tool_new(a));
     /* discoverable (xd://-mountable) tools added outside tools_register_builtin; MCP tools too */
     for (size_t i = 0; i < ag->all_tools.n; i++) {
         agent_tool_t *t = ag->all_tools.v[i];

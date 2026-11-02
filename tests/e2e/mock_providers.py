@@ -8,7 +8,8 @@ Protocols (chosen by path suffix):
   .../messages          Anthropic Messages SSE           .../v1/systemone, .../ai/run/<model>  native judgments
 A user message "bash:<cmd>" gets a bash tool call (chat completions / anthropic), "read:<path>" a read call (anthropic), "call:<tool>:<json args>" any tool
 (chat completions), a tool result gets the final text.
-An Anthropic request forcing a named tool (tool_choice {type: "tool"}) gets a call to it (think: fixed thoughts).
+.../images/generations, .../images/edits, .../images: a one-image b64_json answer (HTTP 500 when the body mentions
+"fail"). An Anthropic request forcing a named tool (tool_choice {type: "tool"}) gets a call to it (think: fixed thoughts).
 MOCK_CACHE_TOKENS=<n> reports <n> cache-write tokens on a new Anthropic request and <n> cache-read tokens on a repeated one.
 Paths under /deny answer 403 to Copilot-Integration-Id copilot-chat (identity fallback test)."""
 import json, os, sys
@@ -101,6 +102,12 @@ class H(BaseHTTPRequestHandler):
                     answers[qid] = {"type": "score", "score": 2, "probabilities": {"2": 1}, "confidence": 1}
             res = {"model": body.get("model"), "answers": answers, "usage": {"input_tokens": 10, "output_tokens": 2}}
             return self.reply(200, {"result": res, "success": True, "errors": []} if "/ai/run/" in path else res)
+        if path.endswith("/images/generations") or path.endswith("/images/edits") or path.endswith("/images"):
+            # image generation (openai-images / openrouter-images): one 4x3 PNG, or an error for prompts asking for it
+            if "fail" in json.dumps(body):
+                return self.reply(500, {"error": {"message": "image backend down"}})
+            png = "iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAAEElEQVR4nGP4z8AARww4OQD1MQv1NXv7ggAAAABJRU5ErkJggg=="
+            return self.reply(200, {"created": 1, "data": [{"b64_json": png}], "usage": {"input_tokens": 12, "output_tokens": 34}})
         if path.endswith("/responses/compact"):
             # OpenAI remote compaction: the retained user turns plus an opaque compaction item
             users = [i for i in body.get("input") or [] if i.get("type") == "message" and i.get("role") == "user"]
@@ -135,6 +142,14 @@ class H(BaseHTTPRequestHandler):
                 self.ev({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}})
             self.chunk(b"data: [DONE]\n\n")
             return self.end()
+        if path.endswith("/responses") and any(t.get("type") == "image_generation" for t in body.get("tools") or []):
+            # hosted image generation over a Responses carrier: a non-streaming image_generation_call
+            png = "iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAAEElEQVR4nGP4z8AARww4OQD1MQv1NXv7ggAAAABJRU5ErkJggg=="
+            tool = body["tools"][0]
+            return self.reply(200, {"id": "resp_img", "output": [
+                {"type": "image_generation_call", "result": png, "size": tool.get("size", "1024x1024"), "quality": "high"},
+                {"type": "message", "content": [{"type": "output_text", "text": "Here is the image."}]}],
+                "tools": [{"type": "image_generation", "model": "gpt-image-2-2026"}], "usage": {"input_tokens": 7, "output_tokens": 9}})
         if path.endswith("/responses"):
             self.sse_start()
             item = {"type": "message", "id": "msg_1", "role": "assistant", "status": "in_progress", "content": []}
