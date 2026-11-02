@@ -389,7 +389,13 @@ static void paste_image_path(ui_t *u, const char *path) {
     struct stat st;
     if (stat(abs, &st) != 0) {
         if (try_clipboard_image(u)) goto out;
-        char *disp = path_display(abs, NULL);
+        /* untrusted terminal input: control chars dropped, home as ~, bounded to 80 columns */
+        char *home = path_display(path, NULL);
+        sb_t cl = SB_INIT;
+        for (const char *p = home; *p; p++) sb_putc(&cl, (unsigned char)*p < 0x20 || *p == 0x7f ? ' ' : *p);
+        free(home);
+        char *disp = tui_truncate_to_width(sb_cstr(&cl), 80, NULL);
+        sb_free(&cl);
         char *m = over_ssh() ? xasprintf("Image not found at %s. Over SSH this path is local to your terminal — paste the "
                                          "image directly (clipboard image-paste shortcut) to send its bytes.",
                                          disp)
@@ -457,7 +463,7 @@ static bool paste_hook(void *ud, tui_editor_t *ed, const char *text) {
 /* handleImagePaste (app.clipboard.pasteImage, ctrl+v): image, else the clipboard text (an image path attaches) */
 bool ui_attach_paste_clipboard(ui_t *u) {
     if (over_ssh()) {
-        add_notice(u, "info", "Clipboard image paste reads the remote host clipboard over SSH; paste with your terminal instead");
+        add_notice(u, "info", "Clipboard here belongs to the SSH host \u2014 use your terminal's paste shortcut to paste from your machine");
         return false;
     }
     if (try_clipboard_image(u)) return true;
