@@ -115,6 +115,16 @@ restartArgv (one-shot session selectors and positionals dropped, `--resume <sess
 session is on disk). `/local [name]` and Alt+G (`app.local.open`) open a `local://` file in $VISUAL/$EDITOR,
 with a picker when no name is given.
 
+Subagent visibility (WP-22, `src/ui/agenthub.c`): the status line counts running subagents (`👥 N`) and
+other running jobs (`⚙ N`), the empty composer hints `←← to see N running agents`, and a "Subagents · N
+running" block lists the running ones above the working row. Alt+A / Ctrl+S, `/hub` (Activity tab) and ←← on
+an empty composer open the Agent Hub. Enter on a roster row focuses the main view on that agent's live session:
+`u->view` holds the pinned child `app_t`, the transcript listener and the chat follow it, Enter in the composer
+prompts the agent (`agents_prompt`: steer while it runs, else a new turn), an empty Enter interrupts it,
+`/jobs` `/effort` `/export` `/usage` act on it and other commands answer with omp's "Only /btw, … run here"
+status; Esc (empty composer) or ←← return to main. Enter on an Activity row opens the transcript viewer, whose
+message box prompts the agent the same way.
+
 ## Print and JSON (`modes/print.c`)
 
 This ports `print-mode.ts`. It runs the prompt(s) to completion. Text mode prints the final assistant
@@ -189,6 +199,15 @@ parameters}` definitions. When the model calls one, omc sends
 thread until the client answers `{"type":"host_tool_result","id":"host-N","result":{content,
 details?},"isError":false}` (`host_tool_update` partial results stream as `tool_execution_update`).
 On abort it sends `host_tool_cancel` with `targetId`.
+
+**Subagents** (port of `rpc-subagents.ts`). The registry of running subagents fills from the start;
+`set_subagent_subscription {level: off|progress|events}` turns on `subagent_lifecycle` /
+`subagent_progress` frames (`events` adds `subagent_event` with every child agent event). `get_subagents`
+lists running snapshots (`{id, index, agent, agentSource, status, task, assignment, sessionFile,
+lastUpdate, parentToolCallId, progress}`); `get_subagent_messages {subagentId | sessionFile, fromByte?}`
+reads the persisted transcript (`{sessionFile, fromByte, nextByte, reset, entries, messages}`, complete
+lines only); `cancel_subagent` kills a running one (`{cancelled}`), `steer_subagent` steers it like the
+Agent Hub chat. A session change marks every known subagent stale.
 
 When stdin closes, an in-flight run finishes before exit. Titles are disabled in RPC mode.
 `tests/parity/rpc_diff.py` diffs omp's and omc's frame streams for a scripted session.

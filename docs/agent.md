@@ -402,6 +402,20 @@ tools are exclusive and mountable as `xd://` devices.
   `agent://all`) sends a message, an idle agent wakes to answer, and `wait` collects replies.
   Outputs are readable at `agent://<id>`, transcripts at `history://<id>`, and running agents at
   `proc://`.
+- **Registry for the UI and RPC** (WP-22): every spawn keeps an omp `AgentProgress` of its current
+  executor run (task spawn, IRC wake or a chat prompt from the hub: status, current tool, recent tools
+  and output, request/tool/token counts, context, cost, active time, resolved model, `modelOverride`).
+  `agents_list()` returns omp `AgentRecordLike` rows (status `running` / `idle` / `parked` (session
+  released) / `aborted` (killed)); `agents_kill` aborts and tombstones an agent, `agents_revive`
+  (ensureLive) reopens a killed one or rebuilds a parked one from its transcript, `agents_prompt` revives
+  and steers a running turn or starts a turn of an idle agent (a quiet job: nothing is delivered to the
+  parent), `agents_pin` keeps a session alive while the UI views it. `agents_listen` notifies the UI of
+  every change (coalesced on the UI loop); `agents_observe` feeds the RPC subagent channels with omp's
+  `SubagentLifecyclePayload` / `SubagentProgressPayload` / `{id, event}`. `agents_job_tree` collects the
+  jobs of a session and every subagent below it for `/jobs` and the jobs badge (each omc session has its
+  own job manager; omp shares one).
+- **Transcripts** of subagents persist next to the parent's artifacts as `<artifacts>/<id>.jsonl`
+  (`app_subagent_new_at`, `session_create_file`), like omp; RPC `get_subagent_messages` reads them.
 - **Jobs** (`tools/jobs.c`, port of `async/` AsyncJobManager): async bash (`async: true`), bash
   auto-backgrounded after `bash.autoBackground.*` thresholds, task jobs, and service watchers.
   Settled results go to the owning agent as an `async-result` follow-up, or wake an idle session

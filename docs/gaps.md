@@ -103,7 +103,7 @@ Every package must:
 | WP-19 Model switching (done: `/switch` + Alt+P picker incl. quick roles / task mode / over-context compact-first, `/switch` argument completion, Ctrl+P cycle (WP-5 key, #reapplyThinkingLevel), `/modelpreset` (shared with the hub presets), prewalk (`/prewalk`, `prewalk.enabled/into/from`, `--prewalk[-into]`/`--no-prewalk`), retry fallback chains + hub `f` (earlier), the 503 retry-backoff bug (turn level); remaining: omp's transport retry layer (`fetchWithRetry` 6 × 500 ms·2ⁿ + replay-safe provider retry, see ai.md), `prewalk.auto`/`autoTarget` (judge classifier), `--models` scope in the picker/presets, xd:// device writes as prewalk triggers (no approval tier recorded)) | `/switch` + Alt+P temporary model picker; Ctrl+P / Shift+Ctrl+P role cycle with cycle track; `/modelpreset` + hub presets; prewalk (`/prewalk`, `prewalk.*`); retry fallback chains (`retry.*`, hub `f`) | `src/ui/modelhub.c`, `src/modes/interactive.c`, `src/coding/app.c` | T/overlays/model-picker.ts, model-hub.ts; U/modes/controllers/input-controller.ts (`cycleRoleModel`); U/session/{prewalk,retry-fallback-chains,role-models}.ts |
 | WP-20 Conversation utilities | `/copy` picker + `code\|cmd\|link` targets; `/btw` streaming panel, follow-up and history browser; `/open` | `src/modes/interactive.c`, new `src/ui/copysel.c`, `src/ui/btw.c` | T/overlays/{copy-selector,copy-targets,btw-panel,btw-history-panel}.ts, U/modes/controllers/btw-controller.ts, U/session/btw-history.ts |
 | WP-21 Workspace and session lifecycle | **Done:** `/move` (+ overlay, create-directory confirm; session file, artifacts and `local://` root move to the new bucket, settings/discovery/commands/prompt re-scoped), `/wt` (+ `worktree.cleanSource/onStart/onExit/base`, shared `src/session/worktree.c` with `omc worktree` and the github tool), `/add-dir` / `/remove-dir` / multi-root `/dirs` + `--add-dir` + `workspace.additionalDirectories` (session header, `<workspace-roots>`, per-root context files, forwarded to subagents), `/restart` (execv with restartArgv), `/fresh`, `/pin`, `/local` + Alt+G, linked-worktree status-line path. **Remaining:** clone-first worktree backends (`worktree.clone`, `isolation.backend`: always a plain checkout), the per-root workspace tree / nested AGENTS.md list (omc has no workspace tree), `/fresh`'s provider-state count is omc's per-endpoint estimate, ACP `session/new` additionalDirectories (WP-16) | `src/coding/app.c`, `src/session/session.c`, `src/session/worktree.c`, `src/modes/interactive.c`, `src/ui/move.c` | U/slash-commands/builtin-lifecycle.ts, U/session/session-worktree.ts, T/overlays/move-overlay.ts, U/modes/local-file-editor.ts |
-| WP-22 Subagent visibility | `/hub` agent hub (roster, chat view, revive, kill), `/agents`, running-subagent badge in the status line, agent transcript viewer, session focus (←←), live job widgets (`async.widgets`) | `src/ui/statusline.c`, new `src/ui/agenthub.c`, `src/coding/agents.c`, `src/tools/jobs.c` | T/overlays/{agent-hub*,agents-hub,agent-transcript-viewer,running-subagent-badge}.ts, U/modes/controllers/session-focus-controller.ts, U/job-widgets/* |
+| WP-22 Subagent visibility (done: running-subagent badge + background-jobs badge in the status line, `←← to see N running agents` composer hint, the pinned "Subagents · N running" HUD (`display.pinnedAgents`, `display.subagentLivePreview`), the Agent Hub (`/hub` / `/subagents`, Alt+A / Ctrl+S, ←←: Agents roster with Flat/By parent, inspector, Activity log with follow/filter/scope/search, `r` revive, `x` kill), the transcript viewer (chat with an agent), session focus (Enter on a roster row; Esc / ←← back; viewer-scoped `/jobs`, `/effort`, `/export`, `/usage`), RPC subagent frames and commands, persisted subagent transcripts `<artifacts>/<id>.jsonl`, the nested `/jobs` tree; remaining: `/agents` (agent definitions hub: per-agent model/prewalk/advisor, enable/disable, New agent), live job widgets (`async.widgets`, U/job-widgets/*), the `<id>.md` output artifact (the inspector's Output line), mouse in the hub (wheel/hover/click), `/btw` `/model` `/switch` in a focused view, the transcript viewer's Ctrl+O expansion) | `/hub` agent hub (roster, chat view, revive, kill), `/agents`, running-subagent badge in the status line, agent transcript viewer, session focus (←←), live job widgets (`async.widgets`) | `src/ui/statusline.c`, new `src/ui/agenthub.c`, `src/coding/agents.c`, `src/tools/jobs.c` | T/overlays/{agent-hub*,agents-hub,agent-transcript-viewer,running-subagent-badge}.ts, U/modes/controllers/session-focus-controller.ts, U/job-widgets/* |
 | WP-23 Loop mode | `/loop [count\|duration] [--while\|--until cmd] [prompt]`, `loop.*`, Esc suspends | `src/modes/interactive.c`, `src/coding/app.c` | U/slash-commands/builtin-modes.ts (loop), U/modes/{loop-limit,loop-condition}.ts |
 | WP-24 Provider usage | `/usage` provider quota dashboard + `/usage reset` selector; per-provider usage fetchers; per-turn usage row (`display.showTokenUsage`, `display.showTurnTime`) | `src/modes/interactive.c`, `src/config/auth*.c`, `src/ui/chat.c` | T/overlays/{usage-dashboard,usage-display,usage-row,reset-usage-selector}.ts, U/slash-commands/helpers/usage-report.ts |
 | WP-25 Web search providers | Search through logged-in providers (anthropic, openai, gemini, codex, xai, perplexity, kimi, zai), SearXNG (`searxng.endpoint`), `providers.fetch` | `src/tools/web.c` | U/web/search/{index,providers/*}.ts |
@@ -175,10 +175,10 @@ omc-only command (not in omp): `/migrate`.
 | /tools | builtin-session.ts, command-controller `handleToolsCommand` | `ui_tools_command` | ✅ | Available Tools markdown table incl. `xd://` devices |
 | /context | builtin-session.ts, overlays/context-viewer*.ts | `src/ui/context.c` | 🟡 | full viewer (summary, occupancy map, legend, category previews, entry pages); counts are omc's ~4.1 chars/token estimate (omp: native tokenizer); snapcompact savings lines missing |
 | /extensions (status) | builtin-session.ts | — | ❌ | Extension Control Center (skills/rules/MCP/hooks/tools inventory; JS extensions part ⛔) |
-| /agents | builtin-session.ts, overlays/agents-hub.ts | — | ❌ | per-agent model/prewalk/advisor hub |
+| /agents | builtin-session.ts, overlays/agents-hub.ts | — | ❌ | per-agent model/prewalk/advisor hub (WP-22 remainder) |
 | /git | builtin-session.ts | — | ❌ | git UI (split diff, staging, commit composer) |
 | /local [name] (Alt+G) | builtin-session.ts, modes/local-file-editor.ts | `local_command` (interactive.c) | ✅ | picker (newest first, sizes), `local://` URL or bare name, root containment, editor exit status; cell-identical in compare.sh |
-| /hub (subagents) | builtin-session.ts, overlays/agent-hub*.ts | — | ❌ | live Agent Hub for subagents |
+| /hub (subagents) | builtin-session.ts, overlays/agent-hub*.ts | `ui_agent_hub_open` (`src/ui/agenthub.c`) | ✅ | opens on the Activity tab like omp; Alt+A / Ctrl+S / ←← open the Agents tab (WP-22) |
 | /branch (rewind) | builtin-session.ts, overlays/rewind-selector.ts | `tc_rewind_open` (src/modes/treectl.c, src/ui/rewind.c) | ✅ | fullscreen transcript replica with the dotted outline, branch strip, filter; `/rewind` alias |
 | /fork [pane\|window\|tab] | builtin-session.ts | `app_fork_from` | 🟡 | no multiplexer placement subcommands; no streaming guard |
 | /tree | builtin-session.ts, overlays/tree-selector.ts | `tc_tree_open` (src/modes/treectl.c, src/ui/tree.c) | ✅ | `ask` re-answer from the tree not ported (the leaf moves onto the result) |
@@ -278,7 +278,7 @@ The key table (`src/tui/keys.c` `DEFAULTS[]`) holds omp's whole registry: the 32
 | app.clipboard.pasteImage (ctrl+v) | `ui_attach_paste_clipboard` | ✅ | |
 | app.clipboard.pasteTextRaw (ctrl+shift+v) | `ui_attach_paste_raw` | ✅ | WP-6: clipboard text inline, no chip; "No text in clipboard to paste raw", SSH notice |
 | app.clipboard.copyLine (alt+shift+l), copyPrompt (alt+shift+c) | key_hook, OSC 52 | ✅ | = omp "Copied line: …" / "Copied: …" (30-char preview) |
-| app.agents.hub (alt+a), app.session.observe (ctrl+s) | — | ❌ | no agent hub |
+| app.agents.hub (alt+a), app.session.observe (ctrl+s) | `key_hook` → `ui_agent_hub_open` | ✅ | both open (and close) the Agent Hub; ←← on an empty composer too (WP-22) |
 | app.session.new/tree/fork/resume (unbound by default) | key_hook → `/new`, `/tree`, `/branch`, `/resume` | ✅ | bindable in keybindings.yml |
 | app.session.pin/unpin (alt+k / alt+shift+k), rename/delete in picker | `src/ui/sessions.c` | ✅ | pin/unpin via the table; togglePath/toggleSort/rename/delete keys still hard-coded |
 | app.tree.previousBranch/nextBranch (unbound by default) | `move_branch` (src/ui/tree.c) | ✅ | the help line names them once bound |
@@ -317,7 +317,7 @@ The key table (`src/tui/keys.c` `DEFAULTS[]`) holds omp's whole registry: the 32
 | Turn-end / error / ask desktop notification | `src/tui/notify.c`, `src/ui/signals.c` | ✅ | OSC 9 / OSC 99 line / BEL + D-Bus, multiplexer routing |
 | Composer predictions | — | ❌ | default off |
 | /btw panel (branch/copy/follow-up keys) | `src/ui/btw.c` | ✅ | |
-| Session focus (view a subagent, ←←) | — | ❌ | |
+| Session focus (view a subagent, ←←) | `src/ui/agenthub.c` (`ui_focus_agent`) | 🟡 | Enter on a roster row views the agent's live session (transcript, status line `👻 <id>`, faint outline); the composer prompts it; Esc / ←← return; `/btw`, `/model`, `/switch` are not retargeted (WP-22) |
 | Extension UI (hook selector/input/editor/widgets) | — | ⛔ | JS extension runtime |
 | Abort marker after Esc | — | 🟡 | no "aborted" line seen; not compared against omp |
 
@@ -350,7 +350,7 @@ user who never opens `/settings` (default-on behaviour omc lacks) versus switche
 | `lsp.lazy`, `lsp.shared` (on) | lazy server start, shared servers across sessions | 🟡 servers start on first use like the default; not switchable; no cross-session sharing (`lsp.diagnosticsDeduplicate` is now read) |
 | `shellMinimizer.enabled` (on) | compresses noisy shell output (`[raw output: artifact://N]`) | ❌ (also in status.md) |
 | `tools.abortOnFabricatedResult` (on) | aborts a turn whose text fabricates a tool result | ❌ only applies to in-band (owned-dialect, `tools.format`) tool calling, which omc does not implement; native tool calling never fabricates in-band results |
-| `async.widgets` (on) | live job widgets above the editor | ❌ |
+| `async.widgets` (on) | live job widgets above the editor | ❌ (WP-22 remainder) |
 | `mcp.enableProjectConfig` (on), `mcp.renderMarkdownResults` (on) | project `.mcp.json` opt-out; markdown MCP results | 🟡 project config always loaded; not switchable |
 | `skills.enableSkillCommands` (on), `commands.enableClaudeProject`/`enableOpencodeProject` (on) | `/skill:<name>` and file-based custom commands | ✅ (WP-9, §1) |
 | `skillful` (on) | skills listed in system prompt (session-toggleable) | 🟡 always listed; not switchable |
@@ -520,10 +520,10 @@ Upstream: `packages/tui/src/overlays/*`, `packages/coding-agent/src/modes/compon
 | history-search | history-search.ts | Ctrl+R | `src/ui/histsearch.c` | ✅ | WP-6 |
 | mcp-add-wizard | mcp-add-wizard.ts (1912) | `/mcp add` | — | ❌ | |
 | theme-selector | theme-selector.ts | settings theme submenu | `src/ui/settings.c` | 🟡 | live preview ok; no swatches/current dot/"Apply ⏎"; `ui_overlay_theme` declared in `overlays.h` but never defined |
-| agent-hub, agent-activity, session-observer-registry | agent-hub*.ts | `/hub` | — | ❌ | subagents exist but no roster/chat/revive/kill |
-| agents-hub | agents-hub.ts | `/agents` | — | ❌ | |
-| agent-transcript-viewer | agent-transcript-viewer.ts | agent hub | — | ❌ | |
-| running-subagent-badge | running-subagent-badge.ts | status line | `statusline.c` `subagents` segment returns NULL | ❌ | |
+| agent-hub, agent-activity, session-observer-registry | agent-hub*.ts | `/hub` | `src/ui/agenthub.c` | ✅ | roster (frozen ranks, Flat / By parent tree), inspector, Activity tab, r/x, `/` filters, Tab narrow details; no mouse; no Output line (no `<id>.md` artifact) |
+| agents-hub | agents-hub.ts | `/agents` | — | ❌ | WP-22 remainder |
+| agent-transcript-viewer | agent-transcript-viewer.ts | agent hub | `src/ui/agenthub.c` | ✅ | in-memory transcript replay, message box (revive + steer/prompt), stats, j/k/g/G/PgUp/PgDn; Ctrl+O does not expand the cards |
+| running-subagent-badge | running-subagent-badge.ts | status line | `statusline.c` (`👥 N` + `⚙ N` jobs badge) | ✅ | |
 | report-panel | report-panel.ts | `/tools`, `/jobs full`, `/advisor status`, `/changelog`, `/hotkeys`, `/memory` | `src/ui/report.c` | ✅ | docks above the editor when it fits (Esc dismisses), else a full-screen page; used by `/tools`, `/jobs`, `/advisor status`, `/hotkeys`, `/memory` |
 | pause-screen | pause-screen.ts | `/pause` | — | ❌ | |
 | error-banner | error-banner.ts | provider error | `ui_error_banner_show` (`src/ui/chat.c`) | ✅ | |
@@ -610,7 +610,7 @@ Verified against omp v18.14.2 with `tests/parity/rpc_diff.py` (scripts in `tests
 | set_todos | handle | ✅ | persisted as a `user-todo-edit` custom entry |
 | set_host_tools | handle | 🟡 | definitions validated like omp; `loadMode`, `readsSkillUris` ignored |
 | set_host_uri_schemes, host_uri_result | — | ❌ | |
-| set_subagent_subscription, get_subagents, get_subagent_messages, cancel_subagent, steer_subagent | — | ❌ | needs the omp subagent lifecycle/progress payloads from omc's task runner |
+| set_subagent_subscription, get_subagents, get_subagent_messages, cancel_subagent, steer_subagent | `rpc_sub_command` (rpc.c) | ✅ | RpcSubagentRegistry port; transcripts read from the persisted `<artifacts>/<id>.jsonl` (tests/parity/rpc_scripts/subagents.json) |
 | set_event_filter | handle | ✅ | validation, `messageUpdates: "delta"` projection |
 | set_model / cycle_model / get_available_models | handle | 🟡 | full `Model` objects (chat models only); compat values come from omc's catalog (a few defaults differ, e.g. `clampOutputToModelMax`), custom reasoning models lack omp's derived `thinking` |
 | compact | app_compact | ✅ | `CompactionResult`; a live run is aborted first; `manual_compaction_start/end` |
@@ -644,7 +644,8 @@ Verified against omp v18.14.2 with `tests/parity/rpc_diff.py` (scripts in `tests
 | extension_ui_request: confirm/setStatus/setWidget/setTitle/set_editor_text | ⛔ | only JS extensions send them |
 | cache_warming_start/end | `cachewarm.c` → `notice_rpc` | ✅ | omp's fields and outcomes (WP-14; tests/parity/cachewarm_diff.sh) |
 | tool_stream_update, config_warnings_changed, advisor_yielded, ttsr_triggered, todo_auto_clear, irc_message, session_info_update, config_update, extension_error | ❌ | (todo_reminder ✅) |
-| host_uri_request/cancel, subagent_lifecycle/progress/event | ❌ | |
+| subagent_lifecycle/progress/event | ✅ | omp payload shapes and key order; progress frames are per event (omp coalesces at 150 ms) |
+| host_uri_request/cancel | ❌ | |
 | btw_delta / btw_record | ✅ | |
 | packages/wire (collab GuestFrame/HostFrame, skillshare, stream, tsp) | ⛔ | hosted relay/stream protocols, not RPC |
 
@@ -773,7 +774,7 @@ the plugin manager omc lacks), omp commands omc does not port error with `is not
 | Custom markdown commands, skill commands | custom-commands, skill-command.ts | `src/coding/commands.c` | ✅ | §1 (bundled TS `/review`, `/green` ❌) |
 | Plugins / marketplace | extensibility/plugins | `plugins.c` (Claude plugin skills and commands) | 🟡 | install/update, plugin MCP ❌ |
 | Worktrees (`/wt`, `task.isolation`) | session-worktree.ts | `src/session/worktree.c` | 🟡 | `/wt` + `worktree.onStart/onExit/cleanSource/base` done; task isolation ❌ |
-| Job widgets / activity | job-widgets/, activity/ | — | ❌ | |
+| Job widgets / activity | job-widgets/, activity/ | `src/ui/agenthub.c` (activity) | 🟡 | activity index ✅ (from in-memory transcripts); job widgets ❌ |
 | Secrets obfuscation | secrets/ | — | ❌ | off by default |
 | IRC / agent messaging, checkpoints | irc/bus.ts, checkpoint.ts | `agents.c`, `app.c` | ✅ | |
 | Hooks (`.claude/hooks`, `.omp` hooks) | extensibility/hooks | — | ⛔ | omp loads only `.ts`/`.js` hook modules under Bun |
