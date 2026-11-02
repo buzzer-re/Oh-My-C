@@ -31,7 +31,7 @@ Idle recap side turns ("<recap>…") answer a fixed one-line recap.
 /btw side questions ("<btw>…Question:\n<q>\n</btw>"): <q> may be md:/think:/slow:/streamfail:/fail:, else a fixed
   markdown answer naming <q>.
 Every request body is appended to $MOCK_LOG (JSONL) for assertions."""
-import json, os, sys, time
+import json, os, re, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG = os.environ.get("MOCK_LOG")
@@ -68,7 +68,8 @@ def text_of(msg):
     c = msg.get("content")
     if isinstance(c, str): return c
     if isinstance(c, list):  # skip injected <system-reminder> blocks (omp prepends date/cwd)
-        return "".join(p.get("text", "") for p in c if isinstance(p, dict) and not p.get("text", "").startswith("<system-reminder>"))
+        t = "".join(p.get("text", "") for p in c if isinstance(p, dict) and not p.get("text", "").startswith("<system-reminder>"))
+        return re.sub(r'^(?:<file name="[^"]*">.*?</file>\n)+', "", t, flags=re.S)  # CLI @file attachments lead the prompt
     return ""
 
 STEER_NUDGES = ("STOP: In NEXT reply", "Continue task now", "Before task complete, verify:")

@@ -681,7 +681,7 @@ static void push_url_doc(strvec_t *out, const char *name, const char *from, cons
 
 strvec_t internal_url_docs(const sysprompt_url_host_t *h) {
     /* omp InternalUrlRouter registration order: skill rule memory out agent history artifact local proc cfg
-     * ssh security vault issue/pr mr mcp omp. security/vault/mr have no omc handler. */
+     * ssh security vault issue/pr mr mcp omp. security/vault have no omc handler. */
     strvec_t out = {0};
     if (h->skill_uri_access) push_url_doc(&out, "skill", NULL, NULL);
     if (h->rule_count > 0) push_url_doc(&out, "rule", NULL, NULL);
@@ -699,6 +699,9 @@ strvec_t internal_url_docs(const sysprompt_url_host_t *h) {
     char *gh = which("gh"); /* omp advertises issue:// / pr:// only when the gh CLI is installed */
     if (gh) push_url_doc(&out, "issue", NULL, NULL);
     free(gh);
+    char *glab = which("glab"); /* mr:// only when the glab CLI is installed */
+    if (glab) push_url_doc(&out, "mr", NULL, NULL);
+    free(glab);
     push_url_doc(&out, "mcp", NULL, NULL);
     push_url_doc(&out, "omp", "`omp://`", "`omc://`");
     return out;

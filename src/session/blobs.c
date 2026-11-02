@@ -147,3 +147,14 @@ json_t *session_blobs_externalize(const json_t *entry) {
 }
 
 void session_blobs_resolve(json_t *entry) { walk(entry, NULL, false); }
+
+char *session_blob_put_display(const char *b64, const char *mime) {
+    char *ref = b64 ? put_blob(b64, mime) : NULL;
+    if (!ref) return NULL;
+    char *dir = blobs_dir();
+    char *path = path_join(dir, ref + strlen(BLOB_PREFIX));
+    const char *ext = mime_ext(mime);
+    char *r = ext ? xasprintf("%s.%s", path, ext) : xstrdup(path);
+    free(path), free(dir), free(ref);
+    return r;
+}

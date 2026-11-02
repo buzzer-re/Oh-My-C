@@ -112,6 +112,8 @@ typedef struct tool_env {
     /* called after write/edit lands a file; returns owned text appended to the result (e.g. LSP diagnostics) */
     char *(*after_write)(struct tool_env *env, const char *abs_path);
     char *(*after_edit)(struct tool_env *env, const char *abs); /* edit-tool variant (lsp.diagnosticsOnEdit) */
+    /* getImageAttachments: the latest image attachments [{label, uri, sourcePath}] (owned; NULL callback = none) */
+    json_t *(*image_attachments)(struct tool_env *env);
     char *local_dir;           /* root for local:// session artifacts */
     /* one judgment through the judge role chain (find): normalized questions {id: {type, instructions}}; owned
      * answers keyed by id or NULL with *err (owned); usage accumulates [input, output, cost] (set by app) */

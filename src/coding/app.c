@@ -1628,6 +1628,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     a->env->settings = settings_effective();
     a->env->subagent_depth = o->subagent_depth;
     a->env->session = a;
+    app_bind_image_attachments(a); /* attachment://N */
     if (!o->subagent) agents_register_main(a);
     a->env->run_subagent = app_run_subagent;
     a->env->judge = app_tool_judge;

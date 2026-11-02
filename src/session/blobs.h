@@ -8,5 +8,7 @@
 json_t *session_blobs_externalize(const json_t *entry);
 /* replace `blob:sha256:<hex>` image payloads in a loaded entry with their base64 (in place) */
 void session_blobs_resolve(json_t *entry);
+/* putBlobSync: store a base64 image and return its display path (`<blobs>/<sha256>.<ext>`; owned, NULL on failure) */
+char *session_blob_put_display(const char *b64, const char *mime);
 
 #endif

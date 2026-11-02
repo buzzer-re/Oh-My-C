@@ -58,6 +58,20 @@ check "glob tool"      $'Tool said: # a/\nb.txt'          "$B" --model mock/mock
 check "grep tool"      "*1:written by omc"               "$B" --model mock/mock-1 -p "grep:written"
 # grep / glob result text as omp words it (grouped path tree, errors, empty results)
 check "grep grouped"   $'Tool said: # a/\n## b.txt#'      "$B" --model mock/mock-1 -p "grep:written"
+# mr:// (WP-27): GitLab MR diffs through a fake glab (tests/e2e/bin-glab)
+GLP="$ROOT/tests/e2e/bin-glab:$PATH"
+check "mr listing"     $'Tool said: # Merge Request Diff: gitlab.example.com/grp/sub/proj!7 (2 files)\n\n1. src/app.c  +1 -0  [modified]\n   mr://gitlab.example.com/grp/sub/proj/7/diff/1' env PATH="$GLP" "$B" --model mock/mock-1 -p "read:mr://7/diff"
+check "mr slice"       $'Tool said: diff --git a/docs/old.md b/docs/new.md\nsimilarity index 90%' env PATH="$GLP" "$B" --model mock/mock-1 -p "read:mr://gitlab.example.com/grp/sub/proj/7/diff/2"
+check "mr range"       "mr:// diff resolution failed: mr://gitlab.example.com/grp/sub/proj/7/diff/5 is out of range; MR has 2 files." env PATH="$GLP" "$B" --model mock/mock-1 -p "read:mr://7/diff/5"
+check "mr auth"        'mr:// diff resolution failed: GitLab CLI is not authenticated. Run `glab auth login`.' env PATH="$GLP" "$B" --model mock/mock-1 -p "read:mr://9/diff"
+check "mr invalid"     "Invalid mr:// URL. Expected mr://<iid>/diff" env PATH="$GLP" "$B" --model mock/mock-1 -p "read:mr://bad"
+# attachment:// (WP-27): the image file behind the prompt's Image #N
+check "attachment none" "Available attachment URIs: none. Use one of the listed attachment URIs"  "$B" --model mock/mock-1 -p "read:attachment://1"
+mkdir -p "$T/agent-img" && sed 's/^\(      - id: mock-1\)$/\1\n        input: [text, image]/' "$T/agent/models.yml" > "$T/agent-img/models.yml"
+python3 -c 'import base64,sys; open(sys.argv[1],"wb").write(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAAE0lEQVR4nGP4z8DAwMDAwMDAAAAZ8QH/yX2e9AAAAABJRU5ErkJggg=="))' "$T/work/red.png"
+check "attachment read" "Tool said: Read image file [image/"  env OMC_CODING_AGENT_DIR="$T/agent-img" "$B" --model mock/mock-1 -p "read:attachment://1" @red.png
+check "attachment list" "Available attachment URIs: attachment://1."  env OMC_CODING_AGENT_DIR="$T/agent-img" "$B" --model mock/mock-1 -p "read:attachment://3" @red.png
+rm -f "$T/work/red.png"
 check "grep file"      $'[a/b.txt#'                      "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"written","path":"a/b.txt:1-5"}'
 check "grep no match"  "Tool said: No matches found"     "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"zzq_none"}'
 check "grep missing"   "Path not found: nope/x"          "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"x","path":"nope/x"}'

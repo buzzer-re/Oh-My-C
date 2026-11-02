@@ -190,6 +190,12 @@ void app_queue_changed(app_t *a);
 /* AgentSession.getQueuedMessages(): owned {steering: [text], followUp: [text], liveSteered: 0} */
 json_t *app_queued_messages(app_t *a);
 
+/* getImageAttachments (imgattach.c): the newest user/developer message (or `ask` result) with images as
+ * [{label "Image #N", uri "attachment://N", mimeType, sourcePath}] (owned); app_bind_image_attachments wires it
+ * into the tools' env for attachment:// */
+json_t *app_image_attachments(app_t *a);
+void app_bind_image_attachments(app_t *a);
+
 /* returns NULL and sets *err on failure */
 app_t *app_create(const app_opts_t *o, char **err);
 void app_free(app_t *a);

@@ -59,6 +59,24 @@ char *tool_resolve_path(tool_env_t *env, const char *p) {
 
 char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err) {
     *err = NULL;
+    if (str_starts(url, "attachment://")) { /* attachment-protocol.ts: the image file behind `attachment://N` */
+        char *uri = xstrndup(url, strcspn(url, "?#"));
+        json_t *list = env->image_attachments ? env->image_attachments(env) : NULL, *e;
+        char *path = NULL;
+        sb_t avail = SB_INIT;
+        json_arr_foreach(list, i, e) {
+            if (!path && str_eq(json_get_str(e, "uri"), uri)) path = xstrdup(json_get_str(e, "sourcePath"));
+            sb_appendf(&avail, "%s%s", avail.len ? ", " : "", json_get_str(e, "uri"));
+        }
+        if (!path)
+            *err = xasprintf("Could not resolve image attachment '%s'. Available attachment URIs: %s. Use one of the listed "
+                             "attachment URIs, or attach an image first when none are available.",
+                             uri, avail.len ? avail.s : "none");
+        sb_free(&avail);
+        json_free(list);
+        free(uri);
+        return path;
+    }
     if (str_starts(url, "memory://")) { /* file-backed project memory (coding/memory.c) */
         const char *colon = strchr(url + 9, ':');
         char *u = colon ? xstrndup(url, (size_t)(colon - url)) : xstrdup(url);
