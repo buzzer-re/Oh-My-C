@@ -27,6 +27,7 @@ Memory pipeline side requests (memory.backend=local startup):
   - stage-2 consolidation (system "memory-stage-two consolidator") -> {memory_md, memory_summary, skills:[mock-skill]}
 Subagent turns ("Complete assignment thoroughly:\n\n<assignment>") run <assignment> as the script (e.g. slow:3:done).
 Idle recap side turns ("<recap>…") answer a fixed one-line recap.
+/agents architect requests ("Custom agent request:…" containing AGENTSPEC) answer a docs-writer agent spec as JSON.
 /btw side questions ("<btw>…Question:\n<q>\n</btw>"): <q> may be md:/think:/slow:/streamfail:/fail:, else a fixed
   markdown answer naming <q>.
 Every request body is appended to $MOCK_LOG (JSONL) for assertions."""
@@ -187,6 +188,9 @@ class H(BaseHTTPRequestHandler):
                 kind, rest = "say", "Use for demo skill test routing"
             elif "<title-request>" in u:  # fork title side request (omp/omc title.generator: fork)
                 kind, rest = "say", '<title emoji="🧪" code="PARK">Fix flaky park tests</title>'
+            elif u.startswith("Custom agent request:") and "AGENTSPEC" in u:  # /agents architect (agent-creation-user.md)
+                kind, rest = "say", json.dumps({"identifier": "docs-writer", "whenToUse": "Use this agent when docs need writing.",
+                                                "systemPrompt": "You write docs.\nKeep them short."})
             elif u.startswith("<recap>"):  # idle recap side turn (recap-user.md)
                 kind, rest = "say", "Recap: goal is fixing the flaky park tests; next, rerun the suite."
             elif "You name coding-agent sessions" in sysc:  # title model fallback

@@ -543,9 +543,19 @@ static char *parse_spec(hub_t *h, const char *raw) {
         char *t = str_trim(inner);
         free(inner);
         j = json_parse_str(t);
+        if (!j) { /* JSON.parse's (JavaScriptCore) message for the extracted text */
+            const char *p = t;
+            while (*p && isspace((unsigned char)*p)) p++;
+            size_t n = 0;
+            while (p[n] && (isalnum((unsigned char)p[n]) || p[n] == '_' || p[n] == '$')) n++;
+            char *e = !*p                              ? xstrdup("JSON Parse error: Unexpected EOF")
+                      : n && !isdigit((unsigned char)*p) ? xasprintf("JSON Parse error: Unexpected identifier \"%.*s\"", (int)n, p)
+                                                         : xasprintf("JSON Parse error: Unrecognized token '%c'", *p);
+            free(t);
+            return e;
+        }
         free(t);
     }
-    if (!j) return xstrdup("Model output is not valid JSON");
     if (!json_is_obj(j)) {
         json_free(j);
         return xstrdup("Model output is not a JSON object");
