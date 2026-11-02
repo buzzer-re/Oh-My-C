@@ -150,6 +150,8 @@ static int mp_delete(const char *name) {
     json_t *g = json_get(settings_global(), "modelPresets");
     if (json_is_obj(g) && json_get(g, name)) {
         settings_set_global_entry("modelPresets", name, NULL);
+        json_t *left = json_get(settings_global(), "modelPresets");
+        if (json_is_obj(left) && !json_len(left)) settings_unset_global("modelPresets"); /* omp drops the empty map */
         return owned_preset(name) ? 2 : 0;
     }
     return owned_preset(name) ? 2 : 1;

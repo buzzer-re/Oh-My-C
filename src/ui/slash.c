@@ -1,7 +1,9 @@
 /* slash.c - slash-command autocomplete metadata: upstream registry order, type-indicator icons and
  * (live) descriptions from the shared registry (coding/slashcmd.c). Only commands omc implements are
  * offered. */
+#include "ui/modelbrowser.h"
 #include "ui/overlays.h"
+#include "config/model_resolver.h"
 #include "ui/ui.h"
 #include "tools/jobs.h"
 
@@ -153,6 +155,50 @@ static char *sub_remainder(const slash_sub_t *sub, size_t typed) {
     return h;
 }
 
+/* buildModelSelectorCompletions (/switch): `@` lists configured role aliases (cycle order first), anything else the
+ * session scope as `provider/id` ranked like the Alt+P picker; a typed `:level` suffix is kept and re-appended */
+static void model_selector_completions(const char *arg, tui_ac_result_t *out) {
+    const char *colon = strchr(arg, ':');
+    const char *suffix = colon ? colon : "";
+    char *query = colon ? xstrndup(arg, (size_t)(colon - arg)) : xstrdup(arg);
+    if (query[0] == '@') {
+        char *lower = lower_dup(query);
+        strvec_t roles = app_cycle_order(), known = mr_known_roles();
+        for (size_t i = 0; i < known.n; i++)
+            if (!strvec_contains(&roles, known.v[i])) strvec_push(&roles, known.v[i]);
+        for (size_t i = 0; i < roles.n; i++) {
+            const char *configured = mr_role_get(roles.v[i]);
+            if (!configured) continue;
+            char *alias = xasprintf("@%s", roles.v[i]), *la = lower_dup(alias);
+            if (strstr(la, lower)) {
+                char *val = xasprintf("%s%s ", alias, suffix);
+                tui_ac_result_add(out, val, alias, configured);
+                strvec_push(&out->ghosts, "");
+                free(val);
+            }
+            free(la);
+            free(alias);
+        }
+        strvec_free(&roles);
+        strvec_free(&known);
+        free(lower);
+    } else {
+        ui_model_browser_t *b = ui_session_model_browser();
+        ui_model_browser_done_adding(b);
+        if (*query) ui_model_browser_set_query(b, query);
+        for (size_t i = 0; i < b->visible.n; i++) {
+            if (b->visible.v[i] == UI_MB_SEPARATOR) continue;
+            const ui_model_item_t *it = &b->items.v[b->visible.v[i]];
+            char *val = xasprintf("%s%s ", it->selector, suffix);
+            tui_ac_result_add(out, val, it->selector, it->model->name ? it->model->name : it->model->id);
+            strvec_push(&out->ghosts, "");
+            free(val);
+        }
+        ui_model_browser_free(b);
+    }
+    free(query);
+}
+
 static int slash_args(void *ud, const char *name, const char *arg, tui_ac_result_t *out) {
     ui_t *u = ud;
     const slash_cmd_t *c = slash_lookup(name);
@@ -162,6 +208,10 @@ static int slash_args(void *ud, const char *name, const char *arg, tui_ac_result
         if (!isspace((unsigned char)*p)) blank = false;
     if (!c->allow_args) return blank ? -1 : 0;
     if (strchr(arg, ' ')) return 0; /* past the subcommand */
+    if (!strcmp(c->name, "switch")) {
+        model_selector_completions(arg, out);
+        return out->items.n ? 1 : 0;
+    }
     char *low = lower_dup(arg);
     if (!strcmp(c->name, "effort")) { /* buildEffortArgumentCompletions: the live selector list */
         strvec_t lv = {0};

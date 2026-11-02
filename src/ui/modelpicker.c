@@ -311,6 +311,7 @@ void ui_overlay_model_picker(ui_t *u) {
     g_open = p;
     tui_overlay_opts_t o = {TUI_ANCHOR_BOTTOM, 0, 0, 0, 0};
     tui_overlay_show(u->tui, &p->base, &o);
+    tui_overlay_fill_screen(u->tui, &p->base); /* bottom-center against the full terminal, over a short transcript */
     tui_set_focus(u->tui, &p->base);
     tui_request_render(u->tui);
 }

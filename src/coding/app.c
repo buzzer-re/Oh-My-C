@@ -1806,6 +1806,23 @@ strvec_t app_cycle_order(void) {
     return v;
 }
 
+/* #reapplyThinkingLevel after a model change: keep auto (re-clamped), else the new model's
+ * thinking.defaultLevel, else the level that was effective on the previous model, clamped to the new one
+ * (an unverified ladder stays as it is until the user picks) */
+static void reapply_thinking(app_t *a, const ai_model_t *prev) {
+    if (a->auto_thinking) {
+        app_set_thinking_auto(a);
+        return;
+    }
+    const ai_model_t *m = a->model;
+    if (!m || json_get_bool(m->thinking, "unverified", false)) return;
+    ai_effort_t base = prev ? model_clamp_effort(prev, a->thinking) : a->thinking, d;
+    const char *dl = json_get_str(m->thinking, "defaultLevel");
+    if (dl && effort_parse(dl, &d) == 0) base = d;
+    ai_effort_t eff = base == EFFORT_OFF ? EFFORT_OFF : model_clamp_effort(m, base);
+    if (eff != a->thinking) app_set_thinking(a, eff);
+}
+
 size_t app_role_cycle(app_t *a, app_role_entry_t **out, int *current) {
     *out = NULL;
     if (current) *current = 0;
@@ -1859,6 +1876,7 @@ void app_apply_role_entry(app_t *a, const app_role_entry_t *e) {
     mr_usage_record(k);
     free(k);
     ai_effort_t ef;
+    reapply_thinking(a, prev_model);
     if (e->explicit_level && e->level && effort_parse(e->level, &ef) == 0) app_set_thinking(a, ef);
     app_rebuild_system_prompt(a);
 }
@@ -1918,7 +1936,7 @@ int app_set_model_temporary(app_t *a, const ai_model_t *m, const char *level, co
     else {
         ai_effort_t e;
         if (level && strcmp(level, "inherit") && effort_parse(level, &e) == 0) app_set_thinking(a, e);
-        else if (a->auto_thinking) app_set_thinking_auto(a);
+        else reapply_thinking(a, prev_model);
     }
     app_rebuild_system_prompt(a);
     app_model_state_changed(a, prev_model, prev_wire);
