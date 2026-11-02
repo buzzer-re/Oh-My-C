@@ -48,9 +48,9 @@ Ranked by how soon a user hits the gap in a normal interactive session.
 6. ~~**`thinking: auto` turns thinking off.**~~ Done (WP-3): `auto` keeps a provisional level and classifies each user turn through the judge role chain like omp.
 7. ~~**Slash-command argument bugs.**~~ Done (WP-4): shared registry, omp's argument parsing for `/advisor` `/compact` `/shake` `/handoff` `/resume` `/effort` `/delete` `/clear`, aliases `/models` `/rewind` `/q`, bare `exit`/`quit`/`q`. Aliases of commands omc lacks (`/providers`, `/status`, `/subagents`, `/worktree`, `/plugin`, `/force:`) arrive with those commands.
 8. **Some bound app keys have no handler yet.** The keybinding layer is done (WP-5: all `app.*` actions,
-   `keybindings.yml` overrides, `/hotkeys` from the live table), but these keys still do nothing: Alt+P
-   (temporary model), Ctrl+Shift+O, Alt+G. Like omp's, `/hotkeys` lists them. Ctrl+G, Ctrl+R and Ctrl+Shift+V
-   are done (WP-6). (WP-19, WP-21, WP-29)
+   `keybindings.yml` overrides, `/hotkeys` from the live table), but these keys still do nothing:
+   Ctrl+Shift+O, Alt+G. Like omp's, `/hotkeys` lists them. Ctrl+G, Ctrl+R and Ctrl+Shift+V are done (WP-6);
+   Alt+P (session model picker) is done (WP-19). (WP-21, WP-29)
 9. ~~**`/context`, `/session`, `/tools`, `/jobs`, `/todo` are one-line notices instead of omp's panels.**~~ Done (WP-7): context viewer, Session Info overlay with `delete`/`pin`, Available Tools panel, Background Jobs report with `full`/`kill`, the `/todo` verbs, and short reports docked above the editor.
 10. ~~**`/tree` and `/branch` are flat 14-row pickers.**~~ Done (WP-8): omp's session tree selector, fullscreen rewind selector and branch summaries.
 11. ~~**Custom markdown commands and `/skill:<name>` don't work.**~~ Done (WP-9): file commands from every omp provider, prompt templates, `/skill:<name>` (leading or mid-prompt, chips, skill transcript card), MCP prompt commands, in the TUI, RPC, ACP and print mode. Remaining: the bundled TS commands `/review` and `/green`.
@@ -100,7 +100,7 @@ Every package must:
 | WP | Scope | omc files | Upstream sources |
 |---|---|---|---|
 | WP-18 MCP and SSH management | `/mcp add` wizard, list, remove, test, reauth, unauth, enable, disable, reconnect, reload, resources, prompts, notifications (`mcp.enableProjectConfig`, `mcp.notifications`, `mcp.renderMarkdownResults`); `/ssh add\|list\|remove` | `src/mcp/mcp.c`, `src/mcp/oauth.c`, `src/modes/interactive.c`, new `src/ui/mcpwizard.c`, `src/tools/ssh.c` | U/modes/controllers/{mcp-command-controller,ssh-command-controller}.ts, T/overlays/mcp-add-wizard.ts, U/slash-commands/helpers/{mcp,ssh}.ts |
-| WP-19 Model switching | `/switch` + Alt+P temporary model picker; Ctrl+P / Shift+Ctrl+P role cycle with cycle track; `/modelpreset` + hub presets; prewalk (`/prewalk`, `prewalk.*`); retry fallback chains (`retry.*`, hub `f`) | `src/ui/modelhub.c`, `src/modes/interactive.c`, `src/coding/app.c` | T/overlays/model-picker.ts, model-hub.ts; U/modes/controllers/input-controller.ts (`cycleRoleModel`); U/session/{prewalk,retry-fallback-chains,role-models}.ts |
+| WP-19 Model switching (done: `/switch` + Alt+P picker incl. quick roles / task mode / over-context compact-first, `/switch` argument completion, Ctrl+P cycle (WP-5 key, #reapplyThinkingLevel), `/modelpreset` (shared with the hub presets), prewalk (`/prewalk`, `prewalk.enabled/into/from`, `--prewalk[-into]`/`--no-prewalk`), retry fallback chains + hub `f` (earlier), the 503 retry-backoff bug; remaining: `prewalk.auto`/`autoTarget` (judge classifier), `--models` scope in the picker/presets, xd:// device writes as prewalk triggers (no approval tier recorded)) | `/switch` + Alt+P temporary model picker; Ctrl+P / Shift+Ctrl+P role cycle with cycle track; `/modelpreset` + hub presets; prewalk (`/prewalk`, `prewalk.*`); retry fallback chains (`retry.*`, hub `f`) | `src/ui/modelhub.c`, `src/modes/interactive.c`, `src/coding/app.c` | T/overlays/model-picker.ts, model-hub.ts; U/modes/controllers/input-controller.ts (`cycleRoleModel`); U/session/{prewalk,retry-fallback-chains,role-models}.ts |
 | WP-20 Conversation utilities | `/copy` picker + `code\|cmd\|link` targets; `/btw` streaming panel, follow-up and history browser; `/open` | `src/modes/interactive.c`, new `src/ui/copysel.c`, `src/ui/btw.c` | T/overlays/{copy-selector,copy-targets,btw-panel,btw-history-panel}.ts, U/modes/controllers/btw-controller.ts, U/session/btw-history.ts |
 | WP-21 Workspace and session lifecycle | `/move`, `/wt` + `worktree.*`, `/add-dir` / `/remove-dir` / multi-root `/dirs`, `/restart`, `/fresh`, `/pin`, `/local` + Alt+G | `src/coding/app.c`, `src/session/session.c`, `src/modes/interactive.c` | U/slash-commands/builtin-lifecycle.ts, U/session/session-worktree.ts, T/overlays/move-overlay.ts, U/modes/local-file-editor.ts |
 | WP-22 Subagent visibility | `/hub` agent hub (roster, chat view, revive, kill), `/agents`, running-subagent badge in the status line, agent transcript viewer, session focus (←←), live job widgets (`async.widgets`) | `src/ui/statusline.c`, new `src/ui/agenthub.c`, `src/coding/agents.c`, `src/tools/jobs.c` | T/overlays/{agent-hub*,agents-hub,agent-transcript-viewer,running-subagent-badge}.ts, U/modes/controllers/session-focus-controller.ts, U/job-widgets/* |
@@ -146,15 +146,15 @@ omc-only command (not in omp): `/migrate`.
 | /loop | builtin-modes.ts, loop-limit.ts, loop-condition.ts | — | ❌ | re-submit prompt after every yield, count/duration/`--while`/`--until` |
 | /queue | builtin-modes.ts | `handle_command` | ✅ | |
 | /model (models) | builtin-modes.ts | `ui_overlay_model` / `app_set_model` | ✅ | `/models` alias; omp's `/model` takes no arguments (picker only), so `/model <pattern>` goes to the model like omp |
-| /switch | builtin-modes.ts | — | ❌ | session-only (temporary) model switch, `alt+p` |
+| /switch | builtin-modes.ts | `ui_overlay_model_picker`, `h_switch` | ✅ | picker without args, model-id / `@role` argument completion; `--models` scope not used (WP-19) |
 | /fast | builtin-modes.ts | `src/coding/modelctl.c` (`modelctl_fast_command`), TUI `handle_command`, text handler `h_fast` | ✅ | on/ultra/off/status/toggle per model family, omp's replies and `Fast: <state>` autocomplete; status-line fast badge (WP-14) |
 | /slow | builtin-modes.ts | `modelctl_slow_command`, `h_slow` | ✅ | flex tier on OpenAI/Google; `providers.anthropic.slowMode` + subscription low-priority lanes on Anthropic (WP-14) |
 | /skillful | builtin-modes.ts | — | ❌ | session toggle for skill listing in prompt (`skillful` setting unread too) |
 | /extended-context | builtin-modes.ts | `modelctl_extended_context_command`, `h_extended_context` | ✅ | persists `extendedContext`, re-applies the catalog context-window tiers (WP-14) |
 | /computer | builtin-modes.ts | — | ⛔ | native computer-use eval prelude (platform screen/input automation) |
 | /ratchet | builtin-modes.ts | — | ❌ | eval hill-climb kickoff (low priority) |
-| /prewalk | builtin-modes.ts, session/prewalk.ts | — | ❌ | one-shot model handoff at first edit (`prewalk.*` unread) |
-| /modelpreset | builtin-modes.ts | — | ❌ | save/switch role-model presets (Models hub presets also missing) |
+| /prewalk | builtin-modes.ts, session/prewalk.ts | `src/coding/prewalk.c` | ✅ | `[into]`, `restart [from] [into]`, `off`; `prewalk.auto` (judge classifier) ❌ |
+| /modelpreset | builtin-modes.ts | `src/coding/modelpreset.c` | ✅ | list/save/switch/delete + the "Switch to model preset" selector; config.yml byte-identical |
 | /effort | builtin-modes.ts | `handle_command` "effort", `slash_resolve_effort` | ✅ | live level list (incl. `auto`) in the dropdown and ghost hint, omp's errors and status texts |
 | /advisor | builtin-collaboration.ts | `handle_command` "advisor" | 🟡 | on/off/toggle texts, `status` report (single advisor + no-model roster), status-line badge; `dump [raw]` (copies the advisor history like omp); `configure` (advisor-config overlay) missing; one advisor only |
 | /export [--themes] [path] | builtin-collaboration.ts, export/html/* | `app_export_html` (`src/session/export_html.c`, `trace.c`) | ✅ | omp's document: template.html.txt with the hosted viewer pinned to 18.14.2, base64 session data (header, entries, leaf, system prompt, tools, sub-sessions, trace port of stats/trace.ts), `--themes` CSS; byte-identical to `omp --export` on the test fixtures; also `omc export <file>` and RPC `export_html`; opens the file with xdg-open/open like openPath |
@@ -265,7 +265,7 @@ The key table (`src/tui/keys.c` `DEFAULTS[]`) holds omp's whole registry: the 32
 | app.thinking.toggle (ctrl+t) | key_hook | ✅ | status "Thinking blocks: hidden/visible", persists `hideThinkingBlock`, "Thinking is off — …" gate |
 | app.model.cycleForward/Backward (ctrl+p / shift+ctrl+p) | `app_cycle_role_model` | ✅ | role cycle + cycle track |
 | app.model.select (alt+m) | `ui_overlay_model` | ✅ | |
-| app.model.selectTemporary (alt+p) | — | ❌ | |
+| app.model.selectTemporary (alt+p) | `ui_overlay_model_picker` | ✅ | pressing it again inside the picker toggles task mode |
 | app.tools.expand (ctrl+o) | key_hook | ✅ | |
 | app.tools.toggleVisibility (ctrl+shift+o) | — | ❌ | |
 | app.ask.hide (alt+h) | ask.c | ✅ | via the table; ask expansion uses `app.tools.expand` |
@@ -376,7 +376,7 @@ Appearance: `composer.tokenRate`, `images.blockImages`, `tui.resizeScrollback`, 
 `tui.tight`, `display.shimmer`, `display.pinnedAgents`, `display.subagentLivePreview`,
 `display.hideToolActivity`, `display.showTokenUsage`, `display.showTurnTime`, `display.cacheMissMarker`,
 `display.advisorCollapsedLines`, `tui.imeSafeCursor`, `task.showResolvedModelBadge`.
-Model: `modelRoleStorage`, `inlineToolDescriptors`, `includeWorkspaceTree`, `prewalk.*` (5),
+Model: `modelRoleStorage`, `inlineToolDescriptors`, `includeWorkspaceTree`, `prewalk.auto`, `prewalk.autoTarget`,
 `images.urls.*` (6), `expandThinkingBlocks`, `omitThinking`, `externalThinking`,
 `providers.autoThinkingMaxEffort`, `minP`, `presencePenalty`, `repetitionPenalty`,
 `tier.advisor`, `retry.waitForUsageReset`, `retry.modelFallback`,
@@ -528,13 +528,13 @@ Upstream: `packages/tui/src/overlays/*`, `packages/coding-agent/src/modes/compon
 | pause-screen | pause-screen.ts | `/pause` | — | ❌ | |
 | error-banner | error-banner.ts | provider error | `ui_error_banner_show` (`src/ui/chat.c`) | ✅ | |
 | cleanse-panel, omfg-panel | *.ts | `/cleanse`, `/omfg` | — | ❌ | TTSR engine exists (`src/coding/ttsr.c`) |
-| hook-selector / hook-input / hook-editor | hook-*.ts | extension `ctx.ui.*`; internal confirms | — | ⛔/❌ | ⛔ as extension API; internal uses (`/move`, `/modelpreset`, skill install) ❌ with their commands |
+| hook-selector / hook-input / hook-editor | hook-*.ts | extension `ctx.ui.*`; internal confirms | — | ⛔/❌ | ⛔ as extension API; internal uses (`/move`, skill install) ❌ with their commands; `/modelpreset` uses the hook selector (WP-19) |
 | bordered-loader | bordered-loader.ts | `/share`, hook UI | — | ⛔ | used only by out-of-scope flows |
 | plugin-selector | plugin-selector.ts | `/marketplace`, `/plugins` | — | ❌ | |
 | plugin-settings | plugin-settings.ts | `/settings` Plugins tab | `settings.c` | 🟡 | always "No plugins installed" even with discovered Claude plugins; suggests `omc plugin install`, which does not exist |
 | advisor-config | advisor-config.ts | `/advisor configure` | — | ❌ | |
 | model-hub, hub-frame, model-browser | model-hub.ts … | `/model`, Alt+M | `src/ui/modelhub.c`, `modelbrowser.c` | ✅/🟡 | gaps in status.md (presets, fallback chains, custom roles, F5, mouse) |
-| model-picker | model-picker.ts | Alt+P, `/switch` | — | ❌ | Alt+P is bound (`app.model.selectTemporary`) but has no handler |
+| model-picker | model-picker.ts | Alt+P, `/switch` | `src/ui/modelpicker.c` | ✅ | cell-identical (plain + ANSI) in session, `@` quick-role and task modes; `--models` scope ❌ |
 | thinking-selector | thinking-selector.ts | `/thinking`, `/effort` | `ui_overlay_thinking` | ✅ | |
 | settings-selector | settings-selector.ts | `/settings` | `src/ui/settings.c` | ✅ | most settings inert (§3) |
 | session-selector | session-selector.ts | `/resume` | `src/ui/sessions.c` | ✅ | |
@@ -696,7 +696,7 @@ omp's `Error: …` + `Run \`omc --help\`` lines (exit 2). Messages after the fir
 | --auto-approve/--yolo, --approval-mode | ✅ | |
 | omc extras --plan-mode, --max-turns | n/a | not in `--help` |
 | --add-dir | ❌ | needs the multi-root workspace (WP-21) |
-| --allow-home, --profile, --alias, --from-claude, --from-codex, --no-pty, --wait-async, --external-thinking, --prewalk*, --provider-session-id, --prompt-cache-key | ❌ | reported as unknown flags |
+| --allow-home, --profile, --alias, --from-claude, --from-codex, --no-pty, --wait-async, --external-thinking, --provider-session-id, --prompt-cache-key | ❌ | reported as unknown flags |
 | --hook, -e/--extension, --trusted-extension, --no-extensions, --plugin-dir, --no-ui | ⛔ | JS/Bun extension runtime |
 | print mode `Working...` stderr line | ❌ | omp writes it before the first text-mode turn (`src/modes/print.c`) |
 
@@ -767,7 +767,7 @@ the plugin manager omc lacks), omp commands omc does not port error with `is not
 | Magic keywords (ultrathink/orchestrate/workflow/jevify) | modes/magic-keywords.ts | `keywords.c` | 🟡 | `workflowz` notice withheld (eval agent()/workpool() missing) |
 | Sleep prevention | power-assertion-backend.ts | `src/coding/power.c` | ✅ | `systemd-inhibit` / `caffeinate` children; no ScreenSaver inhibit |
 | Session cost caps (`--max-cost`, warn) | session/settings.ts | — | ❌ | |
-| Prewalk / auto-prewalk, speculation | session/prewalk.ts, speculation/ | — | ❌ | off by default |
+| Prewalk / auto-prewalk, speculation | session/prewalk.ts, speculation/ | `src/coding/prewalk.c` | 🟡 | prewalk ✅ (WP-19); auto-prewalk and speculation ❌ (off by default) |
 | Telemetry OTLP export | telemetry-export*.ts | — | ❌ | only with `OTEL_*` env |
 | Stats (packages/stats) | packages/stats | — | ❌ | aggregation portable; the bundled web dashboard is the large part |
 | Custom markdown commands, skill commands | custom-commands, skill-command.ts | `src/coding/commands.c` | ✅ | §1 (bundled TS `/review`, `/green` ❌) |
