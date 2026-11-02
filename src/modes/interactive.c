@@ -1925,7 +1925,7 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
     if (tui_key_matches(k, "ctrl+t")) {
         u->hide_thinking = !u->hide_thinking;
         for (size_t i = 0; i < tui_container_count(u->chat); i++) tui_component_invalidate(u->chat->children.v[i]);
-        tui_request_render(t);
+        tui_request_full_render(t); /* omp resetDisplay: the change applies to rows in scrollback too */
         return true;
     }
     if (tui_key_matches(k, "ctrl+p") || tui_key_matches(k, "shift+ctrl+p")) { /* app.model.cycleForward/Backward */

@@ -1592,9 +1592,8 @@ static void close_hub(hub_t *h) {
     ui_t *u = h->u;
     tui_overlay_hide(u->tui, &h->base);
     tui_term_puts(tui_term(u->tui), MOUSE_OFF);
-    tui_term_puts(tui_term(u->tui), "\x1b[?1049l");
+    tui_alt_screen(u->tui, false);
     tui_set_focus(u->tui, &u->editor->base);
-    tui_request_full_render(u->tui);
     tui_component_destroy(&h->base);
 }
 
@@ -2905,12 +2904,11 @@ void ui_overlay_model_provider(ui_t *u, const char *provider) {
         if (h->entries.v[i].kind == E_PROVIDER && str_eq(h->entries.v[i].provider, provider)) h->active = i;
     rebuild_browser(h);
     h->b->focused = false;
-    tui_term_puts(tui_term(u->tui), "\x1b[?1049h");
+    tui_alt_screen(u->tui, true);
     tui_term_puts(tui_term(u->tui), MOUSE_ON);
     tui_overlay_opts_t o = {TUI_ANCHOR_TOP, 0, 0, 0, 0};
     tui_overlay_show(u->tui, &h->base, &o);
     tui_set_focus(u->tui, &h->base);
-    tui_request_full_render(u->tui);
 }
 
 void ui_overlay_model(ui_t *u) { ui_overlay_model_provider(u, NULL); }

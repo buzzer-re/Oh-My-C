@@ -1378,8 +1378,7 @@ static void complete(wizard_t *w) {
     settings_set_global("setupVersion", json_int(UI_SETUP_VERSION));
     tui_t *t = w->u->tui;
     tui_overlay_hide(t, &w->base);
-    tui_term_puts(tui_term(t), "\x1b[?1049l");
-    tui_request_full_render(t);
+    tui_alt_screen(t, false);
     g_wizard = NULL;
     void (*done)(void *) = w->done;
     void *ud = w->done_ud;
@@ -1399,9 +1398,8 @@ void ui_setup_run(ui_t *u, void (*done)(void *ud), void *ud) {
     w->phase = w->nscenes ? PH_SPLASH : PH_OUTRO;
     w->phase_start = mono_ms();
     g_wizard = w;
-    tui_term_puts(tui_term(u->tui), "\x1b[?1049h");
+    tui_alt_screen(u->tui, true);
     tui_overlay_opts_t o = {TUI_ANCHOR_TOP, 0, 0, 0, 0};
     tui_overlay_show(u->tui, &w->base, &o);
-    tui_request_full_render(u->tui);
     w->timer = tui_add_timer(u->tui, TICK_MS, true, tick, w);
 }

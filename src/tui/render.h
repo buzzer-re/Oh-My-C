@@ -144,6 +144,17 @@ int tui_run(tui_t *t);
 bool tui_run_once(tui_t *t, int timeout_ms);
 /* Render immediately (UI thread). */
 void tui_render_now(tui_t *t);
+/* Called by a component while it renders: frame rows from `row` on (absolute, i.e. the output's
+ * length when the component starts) may still change, so they are kept out of native scrollback.
+ * When they would scroll off the screen they are clipped instead (the screen shows the frame's tail)
+ * and written to scrollback once no hold covers them. omp: unfinalized transcript blocks never retire
+ * into history. */
+void tui_hold_history(tui_t *t, size_t row);
+/* Enter/leave the alternate screen for a fullscreen page (omp: fullscreen overlays borrow it). The
+ * normal screen's frame is parked and resumes untouched on exit (the terminal restores that screen);
+ * a full render requested meanwhile is applied to the normal screen when the page closes. */
+void tui_alt_screen(tui_t *t, bool on);
+bool tui_alt_screen_active(const tui_t *t);
 /* Feed raw input bytes as if read from the terminal (tests / embedding). */
 void tui_feed_input(tui_t *t, const char *data, size_t n);
 /* Dispatch one decoded key (global hook -> focused component). */

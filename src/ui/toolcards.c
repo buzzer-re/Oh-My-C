@@ -100,6 +100,8 @@ void toolcard_break_group(ui_t *u) {
     g_read_group = NULL;
 }
 
+bool toolcard_group_open(const msgview_t *v) { return v && v == g_read_group; }
+
 /* tool calls whose arguments are still streaming: id -> pending card (omp draws the call before execution) */
 static hmap_t g_preview;
 

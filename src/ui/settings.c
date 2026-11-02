@@ -1571,10 +1571,9 @@ static void settings_render(tui_component_t *c, int width, strvec_t *out) {
 static void settings_close(settings_view_t *v) {
     ui_t *u = v->u;
     tui_overlay_hide(u->tui, &v->base);
-    tui_term_puts(tui_term(u->tui), "\x1b[?1049l");
+    tui_alt_screen(u->tui, false);
     tui_set_focus(u->tui, &u->editor->base);
     ui_chrome_setup(u);
-    tui_request_full_render(u->tui);
     tui_component_destroy(&v->base);
 }
 
@@ -1734,11 +1733,10 @@ void ui_overlay_settings(ui_t *u) {
     v->u = u;
     v->list.max_visible = 10;
     switch_tab(v, 0);
-    tui_term_puts(tui_term(u->tui), "\x1b[?1049h");
+    tui_alt_screen(u->tui, true);
     tui_overlay_opts_t o = {TUI_ANCHOR_TOP, 0, 0, 0, 0};
     tui_overlay_show(u->tui, &v->base, &o);
     tui_set_focus(u->tui, &v->base);
-    tui_request_full_render(u->tui);
 }
 
 /* ---------- test hooks ---------- */

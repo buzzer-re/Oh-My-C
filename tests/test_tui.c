@@ -1017,6 +1017,21 @@ static void vt_render(vt_t *v, tui_t *t, int fd) {
     free(o);
 }
 
+/* a block that may still change while `active`: its rows stay out of scrollback */
+typedef struct {
+    tui_component_t base;
+    int n;
+    bool active;
+} held_t;
+
+static void held_render(tui_component_t *c, int width, strvec_t *out) {
+    held_t *h = (held_t *)c;
+    if (h->active) tui_hold_history(c->tui, out->n);
+    for (int i = 0; i < h->n; i++) strvec_push_own(out, xasprintf("held %d", i));
+}
+
+static const tui_component_vt HELD_VT = {"held", held_render, NULL, NULL, NULL};
+
 static void test_renderer_viewport(void) {
     int pfd[2];
     CHECK(pipe(pfd) == 0);
@@ -1078,7 +1093,41 @@ static void test_renderer_viewport(void) {
     vt_render(&v, t, pfd[0]);
     CHECK(vt_shows_tail(&v, t));
     CHECK(tui_full_redraw_count(t) == 0);
+    tui_free(t);
+    strvec_free(&v.scrollback);
 
+    /* held rows (an unsettled block) never reach scrollback; the screen shows the frame's tail and
+     * the block enters scrollback whole once it settles */
+    tm = tui_term_new(-1, pfd[1]);
+    tui_term_set_size(tm, VT_COLS, VT_ROWS);
+    t = tui_new(tm);
+    vt_init(&v);
+    for (int i = 0; i < 5; i++) {
+        char buf[32];
+        snprintf(buf, sizeof buf, "row %d", i);
+        tui_container_add(tui_root(t), &tui_text_new(buf, 0, 0)->base);
+    }
+    held_t *hb = xcalloc(1, sizeof *hb);
+    tui_component_init(&hb->base, &HELD_VT);
+    hb->n = 20;
+    hb->active = true;
+    tui_container_add(tui_root(t), &hb->base);
+    vt_render(&v, t, pfd[0]);
+    CHECK(vt_shows_tail(&v, t));
+    CHECK(v.scrollback.n == 5 && str_eq(v.scrollback.v[4], "row 4"));
+    hb->n = 23;
+    vt_render(&v, t, pfd[0]);
+    CHECK(vt_shows_tail(&v, t));
+    CHECK(v.scrollback.n == 5);
+    hb->active = false;
+    vt_render(&v, t, pfd[0]);
+    CHECK(vt_shows_tail(&v, t));
+    CHECK(v.scrollback.n == 18 && str_eq(v.scrollback.v[5], "held 0") && str_eq(v.scrollback.v[17], "held 12"));
+    hb->n = 25; /* settled rows scroll out as usual */
+    vt_render(&v, t, pfd[0]);
+    CHECK(vt_shows_tail(&v, t));
+    CHECK(v.scrollback.n == 20 && str_eq(v.scrollback.v[19], "held 14"));
+    CHECK(tui_full_redraw_count(t) == 0);
     tui_free(t);
     strvec_free(&v.scrollback);
     close(pfd[0]);

@@ -150,6 +150,8 @@ msgview_t *toolcard_start(ui_t *u, const char *id, const char *name, json_t *arg
 void toolcard_result(ui_t *u, msgview_t *v, const char *id, json_t *result, bool partial, bool is_error);
 /* a visible text/thinking block, user message or non-read tool ends the current read group */
 void toolcard_break_group(ui_t *u);
+/* the read group later reads still join (omp: a ReadToolGroup is unfinalized until the run breaks) */
+bool toolcard_group_open(const msgview_t *v);
 /* streamed/final assistant message: a new visible text/thinking block ends the read group */
 void toolcard_note_message(ui_t *u, const json_t *msg, bool final);
 /* transcript rebuild: cards for an assistant message's toolCall blocks, results from toolResult messages */

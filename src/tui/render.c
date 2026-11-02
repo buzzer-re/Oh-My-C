@@ -2,6 +2,7 @@
 #include "tui/render.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
@@ -151,7 +152,18 @@ struct tui {
     int prev_width, prev_height;
     int hw_row;       /* content row the terminal cursor is on */
     int viewport_top; /* content row shown on screen row 0 (may be negative) */
+    int committed;    /* rows [0, committed) are in native scrollback; [committed, viewport_top) are held off
+                         screen (an unsettled block's head, omp's live-tail clipping) */
+    int hold;         /* this frame's first row that may still change (tui_hold_history), INT_MAX: none */
     bool have_frame;
+    /* fullscreen pages on the alternate screen (tui_alt_screen): the normal screen's renderer state is
+     * parked meanwhile and restored on exit, so leaving repaints nothing (the terminal restores it) */
+    bool alt, alt_full;
+    struct {
+        strvec_t prev;
+        int viewport_top, committed, hw_row, width, height;
+        bool have_frame;
+    } normal;
     bool show_hw_cursor;
     int min_interval;
     int64_t last_render; /* start of the last frame */
@@ -200,6 +212,7 @@ tui_t *tui_new(tui_term_t *term) {
     t->term = term ? term : tui_term_new(STDIN_FILENO, STDOUT_FILENO);
     t->root = tui_container_new();
     t->root->base.tui = t;
+    t->hold = INT_MAX;
     t->min_interval = 33; /* omp: MIN_RENDER_INTERVAL_MS = 1000 / 30 */
     pthread_mutex_init(&t->mu, NULL);
     t->wake[0] = t->wake[1] = -1;
@@ -228,6 +241,7 @@ void tui_free(tui_t *t) {
     vec_free(&t->overlays);
     tui_component_destroy(&t->root->base);
     strvec_free(&t->prev);
+    strvec_free(&t->normal.prev);
     tui_keydec_free(&t->dec);
     vec_free(&t->timers);
     vec_free(&t->posted);
@@ -513,27 +527,61 @@ static void finish_frame(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int 
     t->render_count++;
 }
 
+/* erase the rows below the cursor's (the cursor may sit in the last column of a full row, where ED 0
+ * would also erase that cell); only used when a row below exists */
+#define ERASE_BELOW "\x1b[1B\r\x1b[J\x1b[1A"
+
+/* Write rows [from, to) one per screen row starting at the cursor's row (column 0 after the first).
+ * Rows past the bottom scroll the screen, pushing its top rows into native scrollback. */
+static void write_run(tui_t *t, const strvec_t *lines, int from, int to, bool *any, int width) {
+    for (int i = from; i < to; i++) {
+        if (*any) tui_term_puts(t->term, "\r\n");
+        write_row(t->term, lines->v[i], width);
+        *any = true;
+    }
+}
+
+/* The frame rows to write so held rows (tui_hold_history) never reach scrollback: [0, h) and the
+ * screen's worth of tail when the rows between would scroll out, else everything. Starts at screen row
+ * `r0`, updates viewport_top / committed / hw_row. */
+static void write_from_top(tui_t *t, const strvec_t *lines, int c, int r0, int width, int height) {
+    int nn = (int)lines->n, h = MIN(MAX(t->hold, c), nn);
+    int cs = MAX(c, 0);
+    bool any = false;
+    int written;
+    if (nn - height > h) { /* held rows would scroll out: skip them, show the tail */
+        write_run(t, lines, cs, h, &any, width);
+        write_run(t, lines, nn - height, nn, &any, width);
+        written = (h - cs) + height;
+        t->viewport_top = nn - height;
+        t->committed = h;
+    } else {
+        write_run(t, lines, cs, nn, &any, width);
+        written = nn - cs;
+        int scrolled = MAX(0, r0 + written - height);
+        t->viewport_top = cs - r0 + scrolled;
+        t->committed = t->viewport_top;
+    }
+    if (r0 + written < height) tui_term_puts(t->term, ERASE_BELOW);
+    t->hw_row = MAX(t->viewport_top, nn - 1);
+}
+
 /* Write every row: the first frame from where the cursor is, or (clear) after erasing the screen and
  * scrollback. Clearing is reserved for explicit full requests (session replace, transcript
  * rebuild): omp's destructive reset (`clearScrollback`). */
 static void full_render(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int width, int height, bool clear) {
     tui_term_t *tm = t->term;
     paint_begin(t);
+    int r0;
     if (clear) {
         tui_term_clear_screen(tm, true);
-        t->viewport_top = 0;
         t->full_count++;
+        r0 = 0;
     } else {
         tui_term_puts(tm, "\r");
-        t->viewport_top = -t->start_screen_row;
+        r0 = t->start_screen_row;
     }
-    for (size_t i = 0; i < lines->n; i++) {
-        if (i) tui_term_puts(tm, "\r\n");
-        tui_term_puts(tm, lines->v[i]);
-    }
-    int last = MAX(0, (int)lines->n - 1);
-    t->hw_row = last;
-    if (last > t->viewport_top + height - 1) t->viewport_top = last - height + 1;
+    write_from_top(t, lines, -r0, r0, width, height);
     finish_frame(t, lines, cp, width, height);
 }
 
@@ -545,12 +593,11 @@ static void window_repaint(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, in
     paint_begin(t);
     int top = MAX(0, nn - height);
     tui_term_puts(tm, "\x1b[H");
-    for (int i = top; i < nn; i++) {
-        if (i > top) tui_term_puts(tm, "\r\n");
-        write_row(tm, lines->v[i], width);
-    }
-    tui_term_puts(tm, "\r\x1b[J");
+    bool any = false;
+    write_run(t, lines, top, nn, &any, width);
+    if (nn - top < height) tui_term_puts(tm, ERASE_BELOW);
     t->viewport_top = top;
+    t->committed = MIN(t->committed, top);
     t->hw_row = MAX(top, nn - 1);
     finish_frame(t, lines, cp, width, height);
 }
@@ -588,8 +635,15 @@ static void do_render(tui_t *t) {
     int width = MAX(1, tm->cols), height = MAX(1, tm->rows);
     strvec_t lines = {0};
     t->last_render = mono_ms();
+    t->hold = INT_MAX;
     tui_component_render(&t->root->base, width, &lines);
     if (t->overlays.n) composite_overlays(t, &lines, width, height);
+    if (t->alt && (int)lines.n > height) { /* the alternate screen shows the frame's last screenful */
+        size_t drop = lines.n - (size_t)height;
+        for (size_t i = 0; i < drop; i++) free(lines.v[i]);
+        memmove(lines.v, lines.v + drop, (size_t)height * sizeof *lines.v);
+        lines.n = (size_t)height;
+    }
     cursor_pos_t cp = extract_cursor(&lines, height);
     normalize_lines(&lines, width);
 
@@ -599,6 +653,15 @@ static void do_render(tui_t *t) {
         dbg_note(t, "first", 0, NULL, NULL);
         full_render(t, &lines, &cp, width, height, false);
         return;
+    }
+    if (full && t->alt) {
+        /* never erase scrollback from the alternate screen: repaint it, and reset the normal screen
+         * when the page closes (an appearance change must reach the transcript too) */
+        t->alt_full = true;
+        tui_term_puts(tm, "\x1b[H\x1b[2J");
+        strvec_free(&t->prev);
+        t->viewport_top = t->committed = t->hw_row = 0;
+        full = false;
     }
     if (full) {
         dbg_note(t, "full:request", 0, NULL, NULL);
@@ -611,7 +674,7 @@ static void do_render(tui_t *t) {
         return;
     }
 
-    int nn = (int)lines.n, pn = (int)t->prev.n, vt = t->viewport_top;
+    int nn = (int)lines.n, pn = (int)t->prev.n, vt = t->viewport_top, c = t->committed;
     int first = -1;
     for (int i = 0; i < MAX(nn, pn); i++) {
         if (i >= nn || i >= pn || strcmp(t->prev.v[i], lines.v[i])) {
@@ -619,26 +682,39 @@ static void do_render(tui_t *t) {
             break;
         }
     }
-    paint_begin(t);
-    if (first < 0) {
-        dbg_note(t, "none", -1, NULL, NULL);
-        finish_frame(t, &lines, &cp, width, height);
-        return;
-    }
     int k = 0;
-    if (first < vt) {
+    if (first >= 0 && first < vt) {
         k = align_viewport(t, &lines, height);
+        if (first < c) c = MAX(0, c + k); /* the committed rows moved with the change above them */
         dbg_note(t, k ? "above:shift" : "above", first, first < pn ? t->prev.v[first] : NULL,
                  first < nn ? lines.v[first] : NULL);
     } else {
-        dbg_note(t, "diff", first, NULL, NULL);
+        dbg_note(t, first >= 0 ? "diff" : "none", first, NULL, NULL);
     }
-    /* base: the new row that belongs on screen row 0. Content that now ends above the screen (a large
-     * collapse) is pulled back onto it; rows scroll only when the frame outgrows the screen. */
+    /* base: the new row that belongs on screen row 0 (old rows on screen stay put). Content that now
+     * ends above the screen (a large collapse) is pulled back onto it. */
     int base = vt + k;
     if (nn > 0 && nn - 1 < base) base = MAX(0, nn - height);
+    if (base < c) c = base; /* rows pulled back on screen are live again */
+    /* screen top s1 and commit point c1: rows above s1 leave the screen; only rows above the hold
+     * may enter scrollback, held ones in between stay hidden until they settle (omp: unfinalized
+     * transcript blocks never retire; the viewport shows their tail) */
+    int s1 = nn - base > height ? nn - height : base;
+    if (c >= 0 && c < s1 && nn - c <= height) s1 = c;
+    int c1 = MAX(c, MIN(s1, MAX(t->hold, c)));
+    if (c1 < s1) s1 = MAX(c1, nn - height);
+    paint_begin(t);
     int cr = MIN(MAX(t->hw_row - vt, 0), height - 1); /* cursor's screen row */
-    int sc = 0;                                       /* rows scrolled into scrollback */
+    if (c != base || c1 != s1) {
+        /* hidden rows before or after this frame: rewrite from the screen's top row (no clear) */
+        int r0 = c < 0 ? MIN(-c, height - 1) : 0;
+        move_rows(tm, r0 - cr);
+        tui_term_puts(tm, "\r");
+        write_from_top(t, &lines, c, r0, width, height);
+        finish_frame(t, &lines, &cp, width, height);
+        return;
+    }
+    int sc = 0; /* rows scrolled into scrollback */
     for (int j = MAX(0, base); j < nn; j++) {
         int r = j - base - sc;
         if (r < height) {
@@ -666,8 +742,50 @@ static void do_render(tui_t *t) {
         cr = r;
     }
     t->viewport_top = base + sc;
+    t->committed = t->viewport_top;
     t->hw_row = t->viewport_top + cr;
     finish_frame(t, &lines, &cp, width, height);
+}
+
+void tui_alt_screen(tui_t *t, bool on) {
+    if (on == t->alt) return;
+    t->alt = on;
+    if (on) {
+        tui_term_puts(t->term, "\x1b[?1049h\x1b[H\x1b[2J");
+        t->normal.prev = t->prev;
+        memset(&t->prev, 0, sizeof t->prev);
+        t->normal.viewport_top = t->viewport_top;
+        t->normal.committed = t->committed;
+        t->normal.hw_row = t->hw_row;
+        t->normal.width = t->prev_width;
+        t->normal.height = t->prev_height;
+        t->normal.have_frame = t->have_frame;
+        t->viewport_top = t->committed = t->hw_row = 0;
+        t->prev_width = MAX(1, t->term->cols);
+        t->prev_height = MAX(1, t->term->rows);
+        t->have_frame = true;
+        t->alt_full = false;
+    } else {
+        tui_term_puts(t->term, "\x1b[?1049l");
+        strvec_free(&t->prev);
+        t->prev = t->normal.prev;
+        memset(&t->normal.prev, 0, sizeof t->normal.prev);
+        t->viewport_top = t->normal.viewport_top;
+        t->committed = t->normal.committed;
+        t->hw_row = t->normal.hw_row;
+        t->prev_width = t->normal.width;
+        t->prev_height = t->normal.height;
+        t->have_frame = t->normal.have_frame;
+        if (t->alt_full) t->full_pending = true;
+        t->alt_full = false;
+    }
+    tui_request_render(t);
+}
+
+bool tui_alt_screen_active(const tui_t *t) { return t->alt; }
+
+void tui_hold_history(tui_t *t, size_t row) {
+    if (t && row < (size_t)t->hold) t->hold = (int)row;
 }
 
 void tui_render_now(tui_t *t) {

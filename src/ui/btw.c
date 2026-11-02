@@ -1643,10 +1643,9 @@ static hist_t *hist_show(btw_ctl_t *c) {
     if (h_count(h)) h_set_selected(h, json_get_str(json_at(h->records, 0), "id"));
     if (h_count(h) == 1) h->focus = 1;
     c->hist = h;
-    tui_term_puts(tui_term(c->u->tui), "\x1b[?1049h");
+    tui_alt_screen(c->u->tui, true);
     tui_overlay_opts_t o = {TUI_ANCHOR_TOP, 0, 0, 0, 0};
     tui_overlay_show(c->u->tui, &h->base, &o);
-    tui_request_full_render(c->u->tui);
     return h;
 }
 
@@ -1661,7 +1660,7 @@ static void hist_close(btw_ctl_t *c) {
     c->hist = NULL;
     ui_t *u = c->u;
     tui_overlay_hide(u->tui, &h->base);
-    tui_term_puts(tui_term(u->tui), "\x1b[?1049l");
+    tui_alt_screen(u->tui, false);
     tui_set_focus(u->tui, &u->editor->base);
     tui_component_destroy(&h->base);
     btw_req_t *r = c->active;
@@ -1669,5 +1668,5 @@ static void hist_close(btw_ctl_t *c) {
         panel_set_answer(&r->panel, json_get_str(btw_latest_turn(r->record), "answer"));
         c->visible = true;
     }
-    tui_request_full_render(u->tui);
+    tui_request_render(u->tui);
 }

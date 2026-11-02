@@ -77,6 +77,8 @@ static bool plain_blank(const char *s) {
     return true;
 }
 
+static int mv_unsettled_from(tui_component_t *c, const strvec_t *rows, size_t a, size_t b);
+
 static void transcript_render(tui_component_t *cp, int width, strvec_t *out) {
     transcript_t *t = (transcript_t *)cp;
     bool any = false;
@@ -90,6 +92,10 @@ static void transcript_render(tui_component_t *cp, int width, strvec_t *out) {
         while (b > a && plain_blank(rows.v[b - 1])) b--;
         if (a < b) {
             if (any || t->lead_gap) strvec_push(out, "");
+            /* a block that can still change stays out of native scrollback (omp: unfinalized blocks
+             * never retire into history) */
+            int unsettled = mv_unsettled_from(ch, &rows, a, b);
+            if (unsettled >= 0) tui_hold_history(cp->tui, out->n + (size_t)unsettled);
             for (size_t k = a; k < b; k++) {
                 strvec_push_own(out, rows.v[k]);
                 rows.v[k] = NULL;
@@ -873,6 +879,20 @@ static void mv_destroy(tui_component_t *c) {
 }
 
 static const tui_component_vt MV_VT = {"message", mv_render, NULL, mv_invalidate, mv_destroy};
+
+/* First row of a transcript block (its kept rows [a, b)) that may still change, or -1 when it is
+ * settled: a running tool card or an open read group as a whole; a streaming assistant message from
+ * its last block on (rows above the last blank row are finished Markdown blocks, omp's stable
+ * prefix that streams into history while the answer continues). */
+static int mv_unsettled_from(tui_component_t *c, const strvec_t *rows, size_t a, size_t b) {
+    if (c->vt != &MV_VT) return -1;
+    msgview_t *v = (msgview_t *)c;
+    if (v->kind == MV_TOOL || v->kind == MV_BASH) return !v->done || toolcard_group_open(v) ? 0 : -1;
+    if (v->kind != MV_ASSISTANT || (!v->streaming && !v->reveal_timer)) return -1;
+    for (size_t i = b; i > a; i--)
+        if (plain_blank(rows->v[i - 1])) return (int)(i - a);
+    return 0;
+}
 
 msgview_t *mv_new(mv_kind_t k) {
     msgview_t *v = xcalloc(1, sizeof(*v));

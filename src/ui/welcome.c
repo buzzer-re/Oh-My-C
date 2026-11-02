@@ -427,6 +427,8 @@ static void render_lines(welcome_t *w, int width, strvec_t *out) {
 static void welcome_render(tui_component_t *c, int width, strvec_t *out) {
     welcome_t *w = (welcome_t *)c;
     bool animating = w->anim_start != 0;
+    /* omp: the header retires to native history only after the intro settles */
+    if (animating) tui_hold_history(c->tui ? c->tui : w->tui, out->n);
     if (!animating && w->cache_w == width) {
         for (size_t i = 0; i < w->cache.n; i++) strvec_push(out, w->cache.v[i]);
         return;

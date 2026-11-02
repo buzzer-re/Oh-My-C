@@ -188,9 +188,9 @@ static void report_render(tui_component_t *c, int width, strvec_t *out) {
 static void report_close(report_t *r) {
     ui_t *u = r->u;
     tui_overlay_hide(u->tui, &r->base);
-    if (r->fullscreen) tui_term_puts(tui_term(u->tui), "\x1b[?1049l");
+    if (r->fullscreen) tui_alt_screen(u->tui, false);
     tui_set_focus(u->tui, &u->editor->base);
-    tui_request_full_render(u->tui);
+    tui_request_render(u->tui);
     tui_component_destroy(&r->base);
 }
 
@@ -229,10 +229,9 @@ void ui_show_report(ui_t *u, const char *title, tui_component_t *body) {
     r->body = body;
     /* fullscreen page on the alternate screen (the text-mode report that does not fit inline) */
     r->fullscreen = true;
-    tui_term_puts(tui_term(u->tui), "\x1b[?1049h");
+    tui_alt_screen(u->tui, true);
     tui_overlay_opts_t o = {TUI_ANCHOR_TOP, 0, 0, 0, 0};
     tui_overlay_show(u->tui, &r->base, &o);
-    tui_request_full_render(u->tui);
 }
 
 /* ---------- /hotkeys (hotkeys-markdown.ts) ---------- */
