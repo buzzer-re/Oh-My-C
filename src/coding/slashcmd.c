@@ -5,9 +5,11 @@
 #include "coding/memory.h"
 #include "config/settings.h"
 #include "core/embed.h"
+#include "session/dump.h"
 #include "session/session.h"
 
 #include <ctype.h>
+#include <strings.h>
 #include <math.h>
 #include <pthread.h>
 
@@ -23,6 +25,7 @@ static void h_retry(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_memory(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_rename(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_dirs(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_dump(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 
 /* upstream name -> supported subcommands ("*" all, NULL none), TUI handler present, text handler.
  * Subcommands left out are not implemented (their upstream behaviour would be advertised falsely). */
@@ -42,7 +45,7 @@ static const struct {
     {"effort", "*", true, h_effort},
     {"advisor", "on off status dump", true, h_advisor},
     {"export", NULL, true, NULL},
-    {"dump", NULL, true, NULL},
+    {"dump", "*", true, h_dump},
     {"copy", NULL, true, NULL},
     {"todo", NULL, true, NULL},
     {"session", NULL, true, NULL},
@@ -444,6 +447,10 @@ static void h_advisor(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *r
         char *s = slash_advisor_status_text(rt->app);
         out(rt, s);
         free(s);
+    } else if (!strcmp(verb, "dump")) {
+        char *h = app_advisor_history_text(rt->app, strcasecmp(rest, "raw") != 0);
+        out(rt, h ? h : "Advisor is not active for this session.");
+        free(h);
     } else if (!strcmp(verb, "configure"))
         out(rt, "/advisor configure opens an interactive editor and is only available in the interactive TUI.");
     else usage(rt, res, "Usage: /advisor [on|off|status|dump [raw]|configure]");
@@ -569,6 +576,45 @@ static void h_dirs(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res)
     char *m = xasprintf("Workspace directories:\n  %s (working directory)", rt->app->cwd);
     out(rt, m);
     free(m);
+}
+
+/* builtin-collaboration.ts dump handle: transcript (+ the LLM request sidecar path) or an archive report */
+static void h_dump(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    char *verb, *rest;
+    slash_subcommand(c->args, &verb, &rest);
+    if (!strcmp(verb, "all") || !strcmp(verb, "anon")) {
+        dump_archive_t ar;
+        char *err = NULL;
+        int rc = app_dump_archive(rt->app, !strcmp(verb, "anon"), &ar, &err);
+        if (rc == 0) out(rt, "No messages to dump yet.");
+        else if (rc < 0) {
+            char *m = xasprintf("Failed to write session dump: %s", err ? err : "Unknown error");
+            usage(rt, res, m);
+            free(m);
+        } else {
+            char *r = dump_archive_report(&ar);
+            out(rt, r);
+            free(r);
+            dump_archive_free(&ar);
+        }
+        free(err);
+    } else if (*verb) {
+        usage(rt, res, "Usage: /dump [all|anon]");
+    } else {
+        char *text = app_format_session_text(rt->app);
+        if (!text || !*text) out(rt, "No messages to dump yet.");
+        else {
+            char *err = NULL, *side = app_dump_llm_request(rt->app, &err);
+            char *m = side ? xasprintf("%s\n\nLLM request JSON: %s\nThis file persists on disk and may contain raw context/secrets \xe2\x80\x94 treat accordingly.", text, side) : xstrdup(text);
+            out(rt, m);
+            free(m);
+            free(side);
+            free(err);
+        }
+        free(text);
+    }
+    free(verb);
+    free(rest);
 }
 
 void slash_execute_text(app_t *a, const char *text, slash_output_fn output, void *ud, slash_result_t *res) {

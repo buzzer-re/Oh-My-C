@@ -24,6 +24,7 @@
 
 #include <pthread.h>
 #include <ctype.h>
+#include <strings.h>
 #include <math.h>
 #include <dirent.h>
 #include <errno.h>
@@ -33,6 +34,7 @@
 #include "coding/title.h"
 #include "coding/slashcmd.h"
 #include "session/export_html.h"
+#include "session/dump.h"
 #include "coding/advisor.h"
 
 static void maybe_plan_approval(ui_t *u, const char *tool, const json_t *result, bool is_error);
@@ -1626,6 +1628,16 @@ static bool handle_command(ui_t *u, const char *line) {
         else if (!strcmp(verb, "on")) add_notice(u, "info", slash_advisor_set(a, 1));
         else if (!strcmp(verb, "off")) add_notice(u, "info", slash_advisor_set(a, 0));
         else if (!strcmp(verb, "status")) advisor_status_report(u);
+        else if (!strcmp(verb, "dump")) { /* handleAdvisorDumpCommand */
+            char *h = app_advisor_history_text(a, strcasecmp(rest, "raw") != 0);
+            if (!h) add_notice(u, "error", "Advisor is not active for this session.");
+            else if (!*h) add_notice(u, "error", "Advisor has no history yet.");
+            else {
+                tui_term_copy_osc52(tui_term(u->tui), h, strlen(h));
+                add_notice(u, "info", "Advisor history copied to clipboard");
+            }
+            free(h);
+        }
         else add_notice(u, "info", "Usage: /advisor [on|off|status|dump [raw]|configure]");
         free(verb);
         free(rest);
@@ -1792,12 +1804,44 @@ static bool handle_command(ui_t *u, const char *line) {
     } else if (!strcmp(cmd, "dump")) {
         char *verb, *rest;
         slash_subcommand(arg, &verb, &rest);
-        if (*verb) add_notice(u, "info", "Usage: /dump [all|anon]");
-        else {
-            char *md = session_export_markdown(a->session);
-            tui_term_copy_osc52(tui_term(u->tui), md, strlen(md));
-            free(md);
-            add_notice(u, "info", "Session copied to clipboard");
+        if (!strcmp(verb, "all") || !strcmp(verb, "anon")) { /* #writeDumpArchive */
+            dump_archive_t ar;
+            char *err = NULL;
+            int rc = app_dump_archive(a, !strcmp(verb, "anon"), &ar, &err);
+            if (rc == 0) add_notice(u, "error", "No messages to dump yet.");
+            else if (rc < 0) {
+                char *m = xasprintf("Failed to write session dump: %s", err ? err : "Unknown error");
+                add_notice(u, "error", m);
+                free(m);
+            } else {
+                tui_term_copy_osc52(tui_term(u->tui), ar.path, strlen(ar.path));
+                char *r = dump_archive_report(&ar);
+                char *m = xasprintf("%s\nArchive path copied to clipboard", r);
+                add_notice(u, "info", m);
+                free(m);
+                free(r);
+                dump_archive_free(&ar);
+            }
+            free(err);
+        } else if (*verb) add_notice(u, "info", "Usage: /dump [all|anon]");
+        else { /* handleDumpCommand */
+            char *text = app_format_session_text(a);
+            if (!text || !*text) add_notice(u, "error", "No messages to dump yet.");
+            else {
+                char *err = NULL, *side = app_dump_llm_request(a, &err);
+                char *doc = side ? xasprintf("%s\n\n---\nLLM request JSON: %s\nThis file persists on disk and may contain raw context/secrets \xe2\x80\x94 treat accordingly.", text, side) : xstrdup(text);
+                tui_term_copy_osc52(tui_term(u->tui), doc, strlen(doc));
+                sb_t st = SB_INIT;
+                sb_append(&st, "Session copied to clipboard");
+                if (side) sb_appendf(&st, "\nLLM request JSON: %s", side);
+                if (err) sb_appendf(&st, "\nLLM request JSON unavailable: %s", err);
+                add_notice(u, "info", sb_cstr(&st));
+                sb_free(&st);
+                free(doc);
+                free(side);
+                free(err);
+            }
+            free(text);
         }
         free(verb);
         free(rest);
