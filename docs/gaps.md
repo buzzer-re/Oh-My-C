@@ -52,10 +52,10 @@ Ranked by how soon a user hits the gap in a normal interactive session.
    - `/shake images` runs with threshold 0.
    - `/handoff <focus>` and `/resume <id>` ignore their argument.
    - Aliases `/models`, `/rewind`, `/q`, `/providers` are missing. (WP-4)
-8. **No app keybinding layer.**
-   - These keys do nothing: Ctrl+Z, Ctrl+G (external editor), Ctrl+R (history search), Ctrl+P (role cycle), Alt+P, F5, Esc-Esc (rewind).
-   - `keybindings.yml` overrides are ignored.
-   - `/hotkeys` advertises about 20 unbound keys. (WP-5, WP-6)
+8. **Some bound app keys have no handler yet.** The keybinding layer is done (WP-5: all `app.*` actions,
+   `keybindings.yml` overrides, `/hotkeys` from the live table), but these keys still do nothing: Ctrl+G in the
+   main composer (external editor), Ctrl+R (history search), Alt+P (temporary model), Ctrl+Shift+O, Alt+G,
+   Ctrl+Shift+V. Like omp's, `/hotkeys` lists them. (WP-6, WP-19, WP-21, WP-29)
 9. **`/context`, `/session`, `/tools`, `/jobs`, `/todo` are one-line notices instead of omp's panels.** `/jobs kill` and the `/todo` subcommands are missing, and `/context` numbers don't add up. (WP-7)
 10. **`/tree` and `/branch` are flat 14-row pickers.** omp has a tree selector (filters, labels, folding) and a rewind selector. (WP-8)
 11. **Custom markdown commands and `/skill:<name>` don't work.** This covers `.omp/.claude/.opencode commands/*.md`. RPC `get_available_commands` advertises `skill:<name>` entries that nothing executes. (WP-9)
@@ -81,7 +81,7 @@ Every package must:
 | WP-2 Queue and non-blocking input ✅ (done: see §2b/§2c; remaining: live `$` output, `/compact` modes are WP-4/WP-13) | Render delivered steer/follow-up user messages; pending-messages view; dequeue (Alt+Up); Esc restores the queue to the editor; follow-up on Ctrl+Q / Ctrl+Enter. Move `!cmd`, `!!cmd`, `/compact`, `/handoff` to a worker with Esc cancel. Defer `!cmd` while streaming. `$code` / `$$code` user eval in the shared kernel. Queue `/compact` for the yield while streaming | `src/modes/interactive.c` (`on_submit`, `run_bang`, `ui_apply_event`, `key_hook`), `src/coding/app.c` (`app_user_bash`, `app_compact`, `app_handoff`), `src/ui/chat.c` | U/modes/controllers/input-controller.ts (`handleFollowUp`, `handleDequeue`, `restoreQueuedMessagesToEditor`), interactive-mode.ts (`updatePendingMessagesDisplay`), command-controller.ts (`handleBashCommand`, `handlePythonCommand`, `handleCompactCommand`), U/modes/prompt/queued-messages.ts |
 | WP-3 Model-facing correctness bugs ✅ (done: out://, cfg://, conflict://N, `thinking: auto`) | Port `out://`, `cfg://`, `conflict://N` (write now refuses unknown schemes; main 44b5fc3). Make `thinking: auto` stop meaning off: resolve it like omp, or to the model default until the WP-12 classifier lands. Verify with `tests/parity/request_diff.sh` / `tool_diff.sh` | `src/tools/write_bash.c`, `src/tools/read.c`, `src/tools/vurl.c`, `src/coding/app.c` (thinking setup), `src/ui/settings.c` | U/internal-urls/{router,out-protocol,cfg-protocol,conflict-protocol}.ts, U/tools/conflict-detect.ts, U/auto-thinking/* |
 | WP-4 Slash-command correctness and shared registry | One registry (name, aliases, subcommands, hints, handler) used by TUI, RPC and ACP. Fix `/advisor` (status/dump), `/compact [soft\|remote\|snapcompact] [focus]`, `/shake [elide\|images\|thinking]`, `/handoff [focus]`, `/resume <id>`, `/effort` errors, `/delete` on in-memory sessions. Add aliases (models, rewind, q, providers, status, subagents, worktree, plugin, force:). Bare `exit`/`quit`/`q`. `/export` with omp's HTML viewer (`export/html/template.*` embedded as assets). `/dump all\|anon` + request-JSON sidecar | `src/modes/interactive.c` (`handle_command`, `COMMANDS[]`), `src/ui/slash.c`, `src/coding/app.c`, `src/session/session.c` (`session_export_html`), `assets/` | U/slash-commands/builtin-*.ts, builtin-registry.ts, helpers/*, U/session/compact-modes.ts, shake-types.ts, session-dump-format.ts, U/export/html/* |
-| WP-5 App keybinding layer | Add the 45 `app.*` actions to the key table. Load `keybindings.yml` (+ legacy .json migration, profile inherit); `/migrate` copies it. Make `key_hook` use `tui_kb()`. Generate `/hotkeys` from the live bindings. Cheap keys: Ctrl+Z suspend, F5/Alt+R retry, Alt+Shift+P plan, Ctrl+C semantics (500 ms, no abort), Ctrl+T status + persist, Ctrl+] jumps, Alt+Y kill ring, Alt+L display reset, Esc-Esc → `doubleEscapeAction`. Fix the false claims in docs/tui.md | `src/tui/keys.c`, `src/tui/editor.c`, `src/modes/interactive.c`, `src/ui/overlays.c` (`hotkeys_markdown`), `src/coding/migrate.c`, docs/tui.md | T/app-keybindings.ts, T/keybindings.ts, T/kill-ring.ts, T/hotkeys-markdown.ts, U/modes/controllers/input-controller.ts |
+| WP-5 App keybinding layer (done; remaining: handlers for selectTemporary, history.search, editor.external in the composer, local.open, tools.toggleVisibility, pasteTextRaw, approval, agent hub — owned by WP-6/10/19/21/22/29; Alt+L background re-probe; draft saved on Ctrl+D) | All `app.*` actions in the key table; `keybindings.yml` (+ legacy .json migration, profile inherit); `/migrate` copies it; `key_hook` via `tui_kb()`; `/hotkeys` from the live bindings; Ctrl+Z, F5/Alt+R, Ctrl+C (500 ms, no abort), Ctrl+T status + persist, Ctrl+] jumps, Alt+Y kill ring, Alt+L, copy line/prompt, Esc-Esc → `doubleEscapeAction` | `src/tui/keys.c`, `src/config/keybindings.c`, `src/tui/editor.c`, `src/modes/interactive.c`, `src/ui/overlays.c` (`ui_hotkeys_markdown`) | T/app-keybindings.ts, T/keybindings.ts, T/kill-ring.ts, T/hotkeys-markdown.ts, U/modes/controllers/input-controller.ts |
 | WP-7 Report panels | `/context` viewer (category breakdown, browse content); `/session` info overlay + `delete`/`pin`; `/tools` markdown panel incl. xd:// tools; `/jobs` panel + job tree + `full`/`kill`; `/todo` subcommands; `/advisor status\|dump`. Report-panel inline docking for short reports | `src/modes/interactive.c`, `src/ui/overlays.c` (`ui_show_report`), new `src/ui/context.c`, `src/tools/jobs.c`, `src/tools/todo_ask.c` | T/overlays/context-viewer*.ts, session-info-overlay.ts, jobs-panel.ts, job-tree.ts, report-panel.ts; U/modes/controllers/command-controller.ts, todo-command-controller.ts; U/slash-commands/helpers/context-report.ts |
 | WP-8 Tree and rewind selectors | `/tree` tree selector (glyphs, filters / `treeFilterMode`, labels, search, fold, branch prev/next); rewind selector for `/branch`, `/rewind`, Esc-Esc; optional branch summary prompt (`branchSummary.enabled`) | `src/modes/interactive.c` ("tree"/"branch"), new `src/ui/tree.c`, `src/coding/app.c` | T/overlays/tree-selector.ts, rewind-selector.ts; U/modes/controllers/selector-controller.ts; A/compaction/branch-summarization.ts |
 | WP-9 Custom and skill commands | Discover `commands/*.md` (omp/Claude/OpenCode, user + project, `commands.enable*`) with `$ARGUMENTS`/frontmatter. `/skill:<name>` invocation + completion (`skills.enableSkillCommands`). MCP prompts as commands. Autocomplete entries. Execution from RPC `prompt` / ACP `session/prompt` (uses the WP-4 registry) | `src/coding/discovery.c`, `src/modes/interactive.c`, `src/ui/slash.c`, `src/tui/editor.c`, `src/modes/rpc.c`, `src/modes/acp.c` | U/capability/slash-command.ts, U/extensibility/{custom-commands,skills.ts,slash-commands.ts}, U/modes/skill-command.ts, U/modes/prompt/skill-tokens.ts, U/discovery/{claude,opencode}.ts |
@@ -230,61 +230,60 @@ Non-builtin command sources:
 
 ## 2. Keybindings and interactive flows
 
-omc's key table (`src/tui/keys.c` `DEFAULTS[]`) has only the 31 `tui.*` editor/select actions. The 45
-`app.*` actions of `packages/tui/src/app-keybindings.ts` are not in it; eight keys are hard-coded in
-`key_hook` (`src/modes/interactive.c`): esc, ctrl+q/ctrl+enter, alt+up/shift+up, ctrl+c, ctrl+d, shift+tab, ctrl+o, ctrl+t, alt+m.
-`tui_keybindings_load_file` exists but is never called, so **user keybinding overrides are ignored**.
-The `/hotkeys` page (`hotkeys_markdown`, `src/ui/overlays.c`) is a static copy of omp's and lists ~20 keys
-omc does not bind. `docs/tui.md` claims "Ctrl+Z suspends" and that the table includes app actions;
-both are false. Rows marked (tmux) were probed in tmux against the mock model.
+The key table (`src/tui/keys.c` `DEFAULTS[]`) holds omp's whole registry: the 32 `tui.*` actions of
+`keybindings.ts` and the 45 `app.*` actions of `app-keybindings.ts`, same defaults and order. `key_hook`
+(`src/modes/interactive.c`) dispatches every app action through `tui_kb()` (WP-5). User overrides load from
+`keybindings.yml` / `.yaml` / legacy `keybindings.json` in the agent dir (`src/config/keybindings.c`), and
+`/hotkeys` is generated from the live table. Rows marked (tmux) were probed in tmux against the mock model;
+"= omp" means compared side by side with `tests/tui/compare.sh`.
 
 ### 2a. Editor / input / select actions (`packages/tui/src/keybindings.ts`)
 
 | Action (keys) | omc | Status | Notes |
 |---|---|---|---|
 | cursor up/down/left/right, word left/right, line start/end, pageUp/Down | `src/tui/editor.c` | ✅ | history on first/last line works |
-| jumpForward (ctrl+]) / jumpBackward (ctrl+alt+]) | defined in keys.c, not handled | ❌ | (tmux) ctrl+] then `t` inserts `t` |
+| jumpForward (ctrl+]) / jumpBackward (ctrl+alt+]) | editor.c `jump_to_char` | ✅ | = omp. In tmux omp does not decode the legacy `ESC ^]` encoding of ctrl+alt+] (it types the target); omc does |
 | deleteChar/Word Backward/Forward, deleteToLineStart/End | editor.c | ✅ | |
-| yank (ctrl+y) | single kill slot | 🟡 | consecutive kills not merged |
-| yankPop (alt+y) | — | ❌ | no kill ring (`kill-ring.ts`) |
+| yank (ctrl+y) / yankPop (alt+y) | editor.c kill ring (60 entries) | ✅ | = omp: consecutive kills accumulate (prepend backward / append forward), line joins kill `\n`, alt+y only right after a yank |
 | undo (ctrl+-, ctrl+_) | editor.c | ✅ | |
 | spellingSuggestions (ctrl+.) | — | ⛔ | macOS native spelling |
-| input.newLine (shift+enter, ctrl+j) | editor.c | 🟡 | omc also maps alt+enter (`key_hook` no longer takes it as follow-up) |
+| input.newLine (shift+enter, ctrl+j) | editor.c | ✅ | alt+enter, ctrl+enter (unless bound to submit), shift+backspace / shift+delete are hard-coded fallbacks as upstream |
 | input.submit, input.tab, select.* | editor.c, components.c | ✅ | `/resume` picker ignores pageUp/pageDown |
 | input.copy (ctrl+c with selection) | — | ❌ | editor has no selection |
 | Vim mode (`tui.vimMode`, vim.ts) | — | ❌ | setting shown but inert |
-| User overrides (keybindings.yml, legacy .json migration, profile inherit) | — | ❌ | `/migrate` does not copy keybindings either |
+| User overrides (keybindings.yml, legacy .json migration, profile inherit) | `src/config/keybindings.c` | ✅ | = omp (overrides in `/hotkeys`, migrated YAML byte-identical); `/migrate` copies the files. Profile inherit is implemented (`kbcfg_load_merged`) but omc has no profiles to call it with |
 
 ### 2b. App actions (`packages/tui/src/app-keybindings.ts`)
 
 | Action (default keys) | omc | Status | Notes |
 |---|---|---|---|
-| app.interrupt (esc) | `iq_escape` (src/modes/iqueue.c) | 🟡 | cancels compaction/handoff, restores the queue to the editor and aborts a turn, cancels `!`/`$` runs, clears bash/python mode (WP-2); **no double-Esc rewind/tree** (`doubleEscapeAction`, WP-5) |
-| app.clear (ctrl+c) | key_hook | 🟡 | omp: clear, 2nd press within 500 ms exits, never aborts; omc aborts a running turn, 1.5 s window + "Press ctrl+c again" notice |
-| app.exit (ctrl+d) | key_hook | 🟡 | draft not saved for resume |
-| app.suspend (ctrl+z) | — | ❌ | `tui_suspend` exists (render.c) but ISIG is off and the key is unbound |
-| app.display.reset (alt+l) | — | ❌ | |
-| app.thinking.cycle (shift+tab) | key_hook | ✅ | no "model does not support thinking" status |
-| app.thinking.toggle (ctrl+t) | key_hook | 🟡 | no status line; `hideThinkingBlock` not saved |
-| app.model.cycleForward/Backward (ctrl+p / shift+ctrl+p) | — | ❌ | role cycle + cycle track |
+| app.interrupt (esc) | `on_escape` → `iq_escape` | ✅ | WP-2 abort/queue restore/bash/python, then a draft resets the window and Esc-Esc (500 ms) on an empty editor runs `doubleEscapeAction` (rewind → `/branch`, tree → `/tree`, none); = omp ("No messages to branch from"). The selectors themselves are WP-8 |
+| app.clear (ctrl+c) | `on_ctrl_c` | ✅ | = omp: clears (draft kept in Up history, `composer.recallClearedDrafts`), 2nd press within 500 ms exits, never aborts |
+| app.exit (ctrl+d) | key_hook | 🟡 | forward-deletes with a draft when the key is also `deleteCharForward`; draft not saved for resume |
+| app.suspend (ctrl+z) | `tui_suspend` | ✅ | SIGSTOP to the process group like omp; "Failed to suspend: …" on refusal |
+| app.display.reset (alt+l) | key_hook | 🟡 | full repaint; omp also re-probes the terminal background (OSC 11) |
+| app.thinking.cycle (shift+tab) | key_hook | ✅ | off → auto → efforts (WP-3); "Current model does not support thinking" |
+| app.thinking.toggle (ctrl+t) | key_hook | ✅ | status "Thinking blocks: hidden/visible", persists `hideThinkingBlock`, "Thinking is off — …" gate |
+| app.model.cycleForward/Backward (ctrl+p / shift+ctrl+p) | `app_cycle_role_model` | ✅ | role cycle + cycle track |
 | app.model.select (alt+m) | `ui_overlay_model` | ✅ | |
 | app.model.selectTemporary (alt+p) | — | ❌ | |
 | app.tools.expand (ctrl+o) | key_hook | ✅ | |
 | app.tools.toggleVisibility (ctrl+shift+o) | — | ❌ | |
-| app.ask.hide (alt+h) | ask.c | ✅ | hard-coded |
+| app.ask.hide (alt+h) | ask.c | ✅ | via the table; ask expansion uses `app.tools.expand` |
 | app.approval.approve (ctrl+enter, ctrl+q) | — | ❌ | no approval dialog |
 | app.editor.external (ctrl+g) | — | ❌ | ask "Other" prompt shows a ctrl+g hint that does nothing |
 | app.local.open (alt+g) | — | ❌ | |
 | app.message.followUp (ctrl+q, ctrl+enter) | `iq_follow_up` | ✅ | WP-2; `/compact` with it while streaming waits for the yield |
-| app.retry (f5, alt+r) | `/retry` only | 🟡 | |
+| app.retry (f5, alt+r) | `retry_key` → `/retry` | ✅ | = omp "Nothing to retry" |
 | app.message.dequeue (alt+up, shift+up) | `iq_dequeue` | ✅ | WP-2 |
-| app.clipboard.pasteImage (ctrl+v), pasteTextRaw (ctrl+shift+v) | — | ❌ | no clipboard read, no image attachments |
-| app.clipboard.copyLine (alt+shift+l), copyPrompt (alt+shift+c) | — | ❌ | OSC 52 helper exists |
+| app.clipboard.pasteImage (ctrl+v) | `ui_attach_paste_clipboard` | ✅ | |
+| app.clipboard.pasteTextRaw (ctrl+shift+v) | — | ❌ | WP-6 |
+| app.clipboard.copyLine (alt+shift+l), copyPrompt (alt+shift+c) | key_hook, OSC 52 | ✅ | = omp "Copied line: …" / "Copied: …" (30-char preview) |
 | app.agents.hub (alt+a), app.session.observe (ctrl+s) | — | ❌ | no agent hub |
-| app.session.new/tree/fork/resume (unbound by default) | slash commands | 🟡 | not bindable without overrides |
-| app.session.pin/unpin (alt+k / alt+shift+k), rename/delete in picker | `src/ui/sessions.c` | ✅ | |
+| app.session.new/tree/fork/resume (unbound by default) | key_hook → `/new`, `/tree`, `/branch`, `/resume` | ✅ | bindable in keybindings.yml |
+| app.session.pin/unpin (alt+k / alt+shift+k), rename/delete in picker | `src/ui/sessions.c` | ✅ | pin/unpin via the table; togglePath/toggleSort/rename/delete keys still hard-coded |
 | app.tree.previousBranch/nextBranch | — | ❌ | `/tree` is a flat list |
-| app.plan.toggle (alt+shift+p) | `key_hook` → `/plan` | ✅ | |
+| app.plan.toggle (alt+shift+p) | `key_hook` → `/plan` | ✅ | via the table |
 | app.history.search (ctrl+r) | — | ❌ | |
 | app.links.hint (alt+o) | — | ⛔ | extension runtime |
 | app.stt.pushToTalk, app.stt.toggle, app.live.toggle | — | ⛔ | audio stack |
@@ -358,7 +357,8 @@ user who never opens `/settings` (default-on behaviour omc lacks) versus switche
 | `skillful` (on) | skills listed in system prompt (session-toggleable) | 🟡 always listed; not switchable |
 | `plan.enabled` (on), `goal.statusInFooter` (on), `title.refreshOnReplan` (on) | plan mode can be disabled; goal in footer; retitle on replan | ❌ |
 | `task.speculativeLaunch`, `task.completionProbe`, `task.softRequestBudget` (200) + notice | subagent launch/probing/budget behaviour | ❌ |
-| `composer.recallClearedDrafts` (on), `input.bareExitOnEmptySession` (on), `emojiAutocomplete` (on), `doubleEscapeAction` (rewind), `autocompleteMaxVisible` (10), `paste.largeMenuThreshold` (100), `spelling.autocomplete` (auto) | editor conveniences (see §2) | ❌ |
+| `composer.recallClearedDrafts` (on), `doubleEscapeAction` (rewind) | Ctrl+C keeps the cleared draft in Up history; Esc-Esc action | ✅ (WP-5) |
+| `input.bareExitOnEmptySession` (on), `emojiAutocomplete` (on), `autocompleteMaxVisible` (10), `paste.largeMenuThreshold` (100), `spelling.autocomplete` (auto) | editor conveniences (see §2) | ❌ |
 | `features.unexpectedStopDetection` (mechanical) | detects/continues unexpected model stops | ✅ (mechanical + smart; plus the empty-stop retry) |
 | `power.sleepPrevention` (idle) | prevents system sleep while running | ❌ (Linux: `systemd-inhibit`; macOS `caffeinate`) |
 | `startup.checkUpdate` (on), `startup.changelogMode` (summary) | update check + changelog on start | ❌ |
@@ -500,7 +500,7 @@ ast_edit debug eval glob grep find lsp checkpoint rewind task wait todo web_sear
 Upstream: `packages/tui/src/overlays/*`, `packages/coding-agent/src/modes/components/*`,
 `packages/coding-agent/src/modes/controllers/*`. Probed in tmux against the mock model: `/session`,
 `/context`, `/usage`, `/jobs`, `/todo`, `/tools` each print one inline notice; `/tree` opens a small
-floating list; Esc-Esc and Ctrl+R do nothing although `/hotkeys` lists Ctrl+R.
+floating list; Ctrl+R does nothing although `/hotkeys` lists it (as omp does); Esc-Esc opens the flat `/branch` picker.
 
 ### 5a. Overlays
 
@@ -536,7 +536,7 @@ floating list; Esc-Esc and Ctrl+R do nothing although `/hotkeys` lists Ctrl+R.
 | plugin-settings | plugin-settings.ts | `/settings` Plugins tab | `settings.c` | 🟡 | always "No plugins installed" even with discovered Claude plugins; suggests `omc plugin install`, which does not exist |
 | advisor-config | advisor-config.ts | `/advisor configure` | — | ❌ | |
 | model-hub, hub-frame, model-browser | model-hub.ts … | `/model`, Alt+M | `src/ui/modelhub.c`, `modelbrowser.c` | ✅/🟡 | gaps in status.md (presets, fallback chains, custom roles, F5, mouse) |
-| model-picker | model-picker.ts | Alt+P, `/switch` | — | ❌ | Alt+P listed in `/hotkeys`, unbound |
+| model-picker | model-picker.ts | Alt+P, `/switch` | — | ❌ | Alt+P is bound (`app.model.selectTemporary`) but has no handler |
 | thinking-selector | thinking-selector.ts | `/thinking`, `/effort` | `ui_overlay_thinking` | ✅ | |
 | settings-selector | settings-selector.ts | `/settings` | `src/ui/settings.c` | ✅ | most settings inert (§3) |
 | session-selector | session-selector.ts | `/resume` | `src/ui/sessions.c` | ✅ | |
@@ -556,7 +556,7 @@ floating list; Esc-Esc and Ctrl+R do nothing although `/hotkeys` lists Ctrl+R.
 | Handler | Upstream | omc | Status | Notes |
 |---|---|---|---|---|
 | handleSessionCommand / handleContextCommand / handleUsageCommand / handleJobsCommand / handleToolsCommand | command-controller.ts | `handle_command` notices | 🟡 | see overlays above |
-| handleHotkeysCommand | command-controller.ts | `ui_overlay_hotkeys` | ✅ | advertises keys omc does not bind: Ctrl+R, Ctrl+P, Alt+P, Alt+Shift+P, Ctrl+Shift+O, Alt+O, approve |
+| handleHotkeysCommand | command-controller.ts | `ui_overlay_hotkeys` | ✅ | built from the live bindings (`ui_hotkeys_markdown`), identical to omp with defaults and with user overrides; rows for actions without a handler yet (Ctrl+R, Alt+P, Ctrl+Shift+O, Alt+O, approve) stay, as in omp |
 | handleExportCommand | command-controller.ts | `/export` | 🟡 | placeholder HTML (see §1); no open-in-browser |
 | handleDumpCommand / All / Anon | command-controller.ts | `/dump` | 🟡 | no LLM-request JSON sidecar; no `all`/`anon` |
 | handleAdvisorStatus/Dump, showAdvisorConfigure | command-controller.ts | `/advisor` | 🟡 | **bug: any argument other than on/off toggles the advisor** (`/advisor status` switches it) |
