@@ -1,0 +1,2 @@
+{"type": "session", "version": 3, "id": "adv", "timestamp": "2026-11-01T12:00:03.000Z", "cwd": "/work"}
+{"type": "message", "id": "a0000", "parentId": null, "timestamp": "2026-11-01T12:00:03.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "note"}], "model": "adv-1", "timestamp": 1793534403000}}

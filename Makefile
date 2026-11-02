@@ -160,6 +160,7 @@ T_test_memory        := $(LIB_OBJ)
 T_test_planreview    := $(LIB_OBJ)
 T_test_btw           := $(LIB_OBJ)
 T_test_queue         := $(LIB_OBJ)
+T_test_export        := $(LIB_OBJ)
 T_test_img           := $(CORE_OBJ) $(CODEC_OBJ)
 T_test_img_jpeg      := $(CORE_OBJ) $(CODEC_OBJ)
 T_test_img_webp      := $(CORE_OBJ) $(CODEC_OBJ)
@@ -168,7 +169,7 @@ T_test_keybindings   := $(CORE_OBJ) $(O)/tui/keys.o $(O)/config/keybindings.o $(
 T_test_slash         := $(LIB_OBJ)
 UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
               test_chrome test_providers_google test_toolcards test_cursor test_judgment test_auth test_memory test_outsink test_catalog test_model_resolver test_compaction_point \
-              test_planreview test_img test_img_jpeg test_img_webp test_btw test_queue test_guards test_keybindings test_slash
+              test_planreview test_img test_img_jpeg test_img_webp test_btw test_queue test_guards test_keybindings test_slash test_export
 
 .SECONDEXPANSION:
 $(O)/tests/%: tests/%.c $$(T_$$*)

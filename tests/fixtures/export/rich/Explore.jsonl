@@ -1,0 +1,4 @@
+{"type": "session", "version": 3, "id": "sub1", "timestamp": "2026-11-01T12:00:01.600Z", "cwd": "/work"}
+{"type": "session_init", "id": "i0", "parentId": null, "timestamp": "2026-11-01T12:00:01.600Z", "agent": "explore", "resolvedModel": "mock/mock-1"}
+{"type": "message", "id": "e0000", "parentId": null, "timestamp": "2026-11-01T12:00:01.600Z", "message": {"role": "user", "content": "explore", "timestamp": 1793534401600}}
+{"type": "message", "id": "e0001", "parentId": "e0000", "timestamp": "2026-11-01T12:00:02.500Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "found it"}], "provider": "mock", "model": "mock-1", "usage": {"input": 100, "output": 20, "cacheRead": 5, "cacheWrite": 0, "totalTokens": 125, "cost": {"input": 0.16666666666666666, "output": 0.16666666666666666, "cacheRead": 0.16666666666666666, "cacheWrite": 0, "total": 0.5}}, "stopReason": "stop", "timestamp": 1793534401700, "duration": 800}}
