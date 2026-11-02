@@ -231,7 +231,8 @@ int cmd_token(cparse_t *p) {
         json_free(store);
         for (size_t i = 0; i < catalog_count(); i++) {
             const char *pr = catalog_at(i)->provider;
-            if (strvec_contains(&active, pr)) continue;
+            /* the registry's key sources: models.yml providers are not registry providers */
+            if (strvec_contains(&active, pr) || json_get_str(catalog_provider_info(pr), "configApiKey")) continue;
             char *ek = ai_env_api_key(pr);
             if (ek) strvec_push(&active, pr);
             free(ek);

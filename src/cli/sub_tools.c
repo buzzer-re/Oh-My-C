@@ -67,6 +67,8 @@ int cmd_grep(cparse_t *p) {
         free(abs);
         return 1;
     }
+    if (files && r.limit_reached) /* the native search stops at the limit: only the listed files counted */
+        r.total_matches = r.files_with_matches = r.files_searched = (uint32_t)r.hits.n;
     line = xasprintf("Total matches: %u", r.total_matches);
     put_green(line);
     free(line);
