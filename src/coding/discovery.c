@@ -837,9 +837,7 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     json_t *cf = json_arr();
     for (size_t i = 0; o->disc && !o->subagent && i < o->disc->files.n; i++) {
         json_t *f = json_obj();
-        char *disp = path_display(o->disc->files.v[i].path, NULL);
-        json_set_str(f, "path", disp);
-        free(disp);
+        json_set_str(f, "path", o->disc->files.v[i].path); /* absolute, as omp renders it */
         json_set_str(f, "content", o->disc->files.v[i].content);
         json_push(cf, f);
     }
@@ -852,16 +850,11 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
         for (size_t i = 0; i < extra.files.n; i++) {
             bool dup = false;
             json_t *f;
-            json_arr_foreach(cf, k, f) {
-                char *disp = path_display(extra.files.v[i].path, NULL);
-                dup |= str_eq(json_get_str(f, "path"), disp) || str_eq(json_get_str(f, "content"), extra.files.v[i].content);
-                free(disp);
-            }
+            json_arr_foreach(cf, k, f) dup |= str_eq(json_get_str(f, "path"), extra.files.v[i].path) ||
+                                             str_eq(json_get_str(f, "content"), extra.files.v[i].content);
             if (dup) continue;
             json_t *nf = json_obj();
-            char *disp = path_display(extra.files.v[i].path, NULL);
-            json_set_str(nf, "path", disp);
-            free(disp);
+            json_set_str(nf, "path", extra.files.v[i].path);
             json_set_str(nf, "content", extra.files.v[i].content);
             json_push(cf, nf);
         }
