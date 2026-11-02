@@ -459,35 +459,37 @@ void iq_queue_command(ui_t *u, const char *text) {
 
 /* ---------- Enter ---------- */
 
-void iq_submit(ui_t *u, const char *t) {
+void iq_submit(ui_t *u, const char *t, json_t *attachments) {
     app_sync_queue_modes(u->app);
-    if (!*t) {
+    if (!*t && !json_len(attachments)) {
+        json_free(attachments);
         /* empty submit while streaming with queued input: interrupt the turn; the queue is delivered next */
         if (u->worker_running && agent_queued_count(u->app->agent)) app_abort(u->app);
         return;
     }
+    /* `->` / `=>`, slash commands and `!` / `$` runs are handled locally (staged images are dropped) */
     const char *body = ui_queue_shorthand(t);
-    if (body) {
-        iq_queue_command(u, body);
-        return;
-    }
-    if (t[0] == '/' && ix_handle_command(u, t)) return;
-    if (t[0] == '!') {
-        bang(u, t);
-        return;
-    }
-    if (python(u, t)) return;
-    if (u->bg_kind) {
-        queue_compaction_message(u, t, "steer");
+    bool local = true;
+    if (body) iq_queue_command(u, body);
+    else if (t[0] == '/' && ix_handle_command(u, t)) {
+    } else if (t[0] == '!') bang(u, t);
+    else if (!python(u, t)) local = false;
+    if (!local && u->bg_kind) queue_compaction_message(u, t, "steer"); /* text-only behind a compaction */
+    if (local || u->bg_kind) {
+        json_free(attachments);
         return;
     }
     if (u->worker_running) {
-        agent_steer(u->app->agent, msg_user_text(t));
+        if (json_len(attachments)) app_steer_attachments(u->app, t, attachments);
+        else {
+            json_free(attachments);
+            agent_steer(u->app->agent, msg_user_text(t));
+        }
         ui_queue_refresh(u);
         return;
     }
     flush_pending_shell(u);
-    ix_start_prompt(u, t);
+    ix_start_prompt_with(u, t, attachments);
 }
 
 /* ---------- follow-up key (InputController.handleFollowUp) ---------- */
@@ -631,8 +633,7 @@ void iq_user_message_start(ui_t *u, const json_t *msg) {
     ui_queue_refresh(u);
 }
 
-bool iq_run_end(ui_t *u) {
-    strvec_free(&u->optimistic);
+void iq_flush_deferred(ui_t *u) {
     json_t *m;
     json_arr_foreach(u->deferred_bash, i, m) {
         if (str_eq(json_get_str(m, "role"), "pythonExecution")) app_record_python(u->app, m);
@@ -640,7 +641,12 @@ bool iq_run_end(ui_t *u) {
     }
     json_free(u->deferred_bash);
     u->deferred_bash = NULL;
-    if (u->bg_kind) return true;
+}
+
+bool iq_run_end(ui_t *u) {
+    strvec_free(&u->optimistic);
+    iq_flush_deferred(u);
+    if (u->bg_kind || u->worker_running) return true; /* e.g. an approved plan's execution turn already started */
     if (u->compact_pending) {
         char *instr = u->compact_pending;
         u->compact_pending = NULL;

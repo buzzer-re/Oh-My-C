@@ -290,6 +290,7 @@ static void worker_done(void *ud) {
     ui_t *u = ud;
     pthread_join(u->worker, NULL);
     u->worker_running = false;
+    iq_flush_deferred(u);
     plan_exec_resume(u);
     /* deferred `!cmd` results, a pending /compact, queued input left behind by an interrupted run */
     if (!iq_run_end(u) && u->goal_cont) tui_add_timer(u->tui, 800, false, goal_continue_cb, u);
@@ -454,6 +455,8 @@ static void ui_plan_restore(ui_t *u) {
 }
 
 void ix_start_prompt(ui_t *u, const char *text) { start_prompt(u, text); }
+
+void ix_start_prompt_with(ui_t *u, const char *text, json_t *attachments) { start_prompt_with(u, text, attachments); }
 
 void ix_start_hidden(ui_t *u, const char *text, const char *ctype) { start_hidden(u, text, ctype); }
 
