@@ -484,6 +484,7 @@ void agent_free(agent_t *a) {
     json_free(a->follow_up);
     free(a->api_key);
     free(a->session_id);
+    free(a->stream_error);
     pthread_mutex_destroy(&a->mu);
     pthread_mutex_destroy(&a->ev_mu);
     free(a);
@@ -675,10 +676,13 @@ static void on_ai_event(void *ud, const ai_event_t *ev) {
     if (ev->type == AI_EV_DONE || ev->type == AI_EV_ERROR) return; /* message_end emitted by caller */
     agent_event_t ae = {.type = AGENT_EV_MESSAGE_UPDATE, .message = ev->partial, .ai = ev};
     emit(a, &ae);
-    if (a->hooks.on_stream_delta && (ev->type == AI_EV_TEXT_DELTA || ev->type == AI_EV_THINKING_DELTA ||
-                                     ev->type == AI_EV_TOOLCALL_DELTA)) {
-        if (a->hooks.on_stream_delta(a->hooks.ud, a, ev)) {
-            s->abort_requested = 1;
+    if (a->hooks.on_stream_delta && !s->abort_requested &&
+        (ev->type == AI_EV_TEXT_DELTA || ev->type == AI_EV_THINKING_DELTA || ev->type == AI_EV_TOOLCALL_DELTA ||
+         ev->type == AI_EV_TEXT_START || ev->type == AI_EV_THINKING_START || ev->type == AI_EV_THINKING_END ||
+         ev->type == AI_EV_TOOLCALL_START)) {
+        int r = a->hooks.on_stream_delta(a->hooks.ud, a, ev);
+        if (r) {
+            s->abort_requested = r;
             a->cancel = 1;
         }
     }
@@ -732,6 +736,13 @@ static json_t *stream_assistant(agent_t *a, int *ttsr_abort, json_t **cursor_res
     }
     if (silent) a->cancel = 0; /* internal transition: later side requests must not inherit the abort */
     if (!s.started) emit_message(a, AGENT_EV_MESSAGE_START, msg);
+    if (!s.abort_requested && a->hooks.on_stream_delta) { /* the finished stream (loop guard flush) */
+        const char *st = json_get_str(msg, "stopReason");
+        if (!str_eq(st, "error") && !str_eq(st, "aborted")) {
+            ai_event_t done = {.type = AI_EV_DONE, .content_index = -1, .partial = msg, .reason = st};
+            s.abort_requested = a->hooks.on_stream_delta(a->hooks.ud, a, &done) == AGENT_STREAM_ERROR ? AGENT_STREAM_ERROR : 0;
+        }
+    }
     *ttsr_abort = s.abort_requested;
     *cursor_results = s.cursor_results;
     json_free(ctx_msgs);
@@ -1020,6 +1031,14 @@ static void run_loop(agent_t *a, json_t *new_messages) {
         json_t *cursor_results = NULL;
         json_t *assistant = stream_assistant(a, &ttsr, &cursor_results);
         model_perf_record_message(assistant); /* per-model t/s + TTFT (omp recordModelPerf at message_end) */
+        if (ttsr == AGENT_STREAM_ERROR) {
+            /* the stream guard cut the response off: an empty, retryable error turn (thinking-loop guard) */
+            json_set(assistant, "content", json_arr());
+            json_set_str(assistant, "stopReason", "error");
+            json_set_str(assistant, "errorMessage", a->stream_error ? a->stream_error : "Stream aborted by guard");
+            a->cancel = 0;
+            ttsr = 0;
+        }
         const char *stop = json_get_str(assistant, "stopReason");
         bool failed = stop && (strcmp(stop, "error") == 0 || strcmp(stop, "aborted") == 0);
         if (ttsr && a->hooks.should_retry) {

@@ -3,6 +3,7 @@
 #include "coding/goal.h"
 #include "coding/guards.h"
 #include "coding/keywords.h"
+#include "coding/thinkloop.h"
 #include "coding/title.h"
 #include "coding/skilldesc.h"
 #include "coding/advisor.h"
@@ -166,6 +167,8 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
     autolearn_on_event(a->autolearn, ev);
     if (ev->type == AGENT_EV_TURN_START || ev->type == AGENT_EV_MESSAGE_START) {
         if (ev->type == AGENT_EV_TURN_START || str_eq(json_get_str(ev->message, "role"), "assistant")) ttsr_reset(a->ttsr);
+        if (ev->type == AGENT_EV_MESSAGE_START && str_eq(json_get_str(ev->message, "role"), "assistant"))
+            thinkloop_reset(a->thinkloop, a->model);
     }
     if (ev->type == AGENT_EV_TURN_END && a->pending_rewind && a->checkpoint_index > 0) {
         /* cut the context back to the checkpoint and retain only the report */
@@ -376,6 +379,7 @@ static bool is_retryable(const char *err) {
     const char *pats[] = {"overloaded", "rate limit", "rate_limit", "429", "500", "502", "503", "504", "529",
                           "timed out", "timeout", "connection", "network", "reset", "closed before", "mid-body",
                           "internal server error", "service unavailable", "bad gateway", "temporarily", "try again",
+                          "stream stall",
                           "stream ended", "terminated"};
     for (size_t i = 0; i < ARRAY_LEN(pats); i++)
         if (str_istr(err, pats[i])) return true;
@@ -384,12 +388,48 @@ static bool is_retryable(const char *err) {
 
 static int hook_stream(void *ud, agent_t *ag, const ai_event_t *ev) {
     app_t *a = ud;
-    UNUSED(ag);
-    if (ttsr_on_event(a->ttsr, ev)) {
+    if (ev->type != AI_EV_DONE && ttsr_on_event(a->ttsr, ev)) {
         a->ttsr_interrupting = true;
-        return 1;
+        return AGENT_STREAM_INTERRUPT;
     }
-    return 0;
+    switch (thinkloop_on_event(a->thinkloop, ev)) {
+    case THINKLOOP_LOOP:
+        free(ag->stream_error);
+        ag->stream_error = xstrdup(thinkloop_error(a->thinkloop));
+        return AGENT_STREAM_ERROR;
+    case THINKLOOP_GEMINI_HEADERS: /* interrupt; should_retry(-1) discards the turn and reminds the model */
+        a->gemini_interrupt = thinkloop_header_count(a->thinkloop);
+        a->ttsr_interrupting = true;
+        return AGENT_STREAM_INTERRUPT;
+    default: return AGENT_STREAM_CONTINUE;
+    }
+}
+
+/* hidden agent-attributed custom message: live context (developer) + persisted custom_message entry */
+static void append_custom_notice(app_t *a, agent_t *ag, const char *type, const char *content, json_t *details) {
+    json_t *m = msg_developer_text(content);
+    json_set_str(m, "attribution", "agent");
+    json_set_str(m, "customType", type);
+    json_set_bool(m, "display", false);
+    agent_append_message(ag, m);
+    if (a->session) {
+        json_t *e = json_obj();
+        json_set_str(e, "type", "custom_message");
+        json_set_str(e, "customType", type);
+        json_set_str(e, "content", content);
+        json_set_bool(e, "display", false);
+        if (details) json_set(e, "details", details);
+        json_set_str(e, "attribution", "agent");
+        session_append_entry(a->session, e);
+    } else json_free(details);
+}
+
+/* a thinking/response loop retried into identical context loops again: the retry carries the redirect */
+static void maybe_thinking_loop_redirect(app_t *a, agent_t *ag, const char *err) {
+    if (!str_starts(err ? err : "", "Thinking loop detected") || !settings_bool("model.loopGuard.enabled", true)) return;
+    char *t = prompt_load("coding-agent/prompts/system/thinking-loop-redirect.md");
+    append_custom_notice(a, ag, "thinking-loop-redirect", t ? t : "", NULL);
+    free(t);
 }
 
 static bool cmd_mutates(const char *cmd) {
@@ -682,6 +722,21 @@ static void maybe_restore_primary(app_t *a) {
 
 static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int attempt) {
     app_t *a = ud;
+    if (attempt < 0 && a->gemini_interrupt > 0) { /* LoopGuards #interruptGeminiHeaderRunaway */
+        int n = a->gemini_interrupt;
+        a->gemini_interrupt = 0;
+        a->ttsr_interrupting = false;
+        notice(a, "warning", "Interrupted %d planning headers with no tool call; reminded the model to issue one.", n);
+        json_t *ctx = json_obj();
+        json_set_int(ctx, "count", n);
+        char *txt = prompt_render("coding-agent/prompts/system/gemini-tool-call-reminder.md", ctx);
+        json_free(ctx);
+        json_t *det = json_obj();
+        json_set_int(det, "headers", n);
+        append_custom_notice(a, ag, "gemini-tool-call-reminder", txt ? txt : "", det);
+        free(txt);
+        return true;
+    }
     if (attempt < 0) {
         json_t *names = NULL;
         char *inj = ttsr_take_interrupt(a->ttsr, &names);
@@ -752,6 +807,7 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
         free(cur);
     }
     if (switched) {
+        maybe_thinking_loop_redirect(a, ag, err);
         a->retry_offset = attempt + 1; /* a fallback model gets a fresh retry budget */
         strvec_push(&a->retry_notes, usage_limit ? "rate-limited; switched model; retried" : "switched model; retried");
         return true;
@@ -781,6 +837,7 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
         return false;
     }
     notice(a, "warning", "Retrying (%d/%d) in %llds: %s", saga, max, (long long)((delay + 999) / 1000), err ? err : "error");
+    maybe_thinking_loop_redirect(a, ag, err);
     strvec_push(&a->retry_notes, usage_limit ? "rate-limited; waited; retried" : "error; retried");
     int64_t until = mono_ms() + delay;
     while (mono_ms() < until) {
@@ -1090,6 +1147,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     }
     a->thinking = eff;
     a->guards = guards_new();
+    a->thinkloop = thinkloop_new();
     /* environment & discovery */
     a->env = tool_env_new(a->cwd);
     a->env->jobs = jobs_new();
@@ -1226,6 +1284,7 @@ void app_free(app_t *a) {
     advisor_free(a->advisor);
     goal_free(a->goal);
     guards_free(a->guards);
+    thinkloop_free(a->thinkloop);
     title_free(a);
     skilldesc_free(a->skilldesc);
     json_free(a->dcr_sent);

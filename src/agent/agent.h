@@ -113,6 +113,7 @@ typedef void (*agent_listener_fn)(void *ud, const agent_event_t *ev);
 
 /* ---------- hooks ---------- */
 typedef enum { TOOL_ALLOW, TOOL_BLOCK } tool_gate_t;
+enum { AGENT_STREAM_CONTINUE = 0, AGENT_STREAM_INTERRUPT = 1, AGENT_STREAM_ERROR = 2 };
 typedef struct {
     /* Called before executing a tool call. Return TOOL_BLOCK and set *reason (owned) to refuse. */
     tool_gate_t (*before_tool)(void *ud, agent_t *a, const json_t *tool_call, char **reason);
@@ -122,7 +123,9 @@ typedef struct {
     json_t *(*transform_context)(void *ud, agent_t *a, const json_t *messages);
     /* Fill per-request stream options (api key refresh etc). */
     void (*prepare_request)(void *ud, agent_t *a, ai_stream_opts_t *opts);
-    /* Inspect streaming text; return non-zero to abort the stream (TTSR). */
+    /* Inspect stream events (deltas, block starts, thinking ends, and AI_EV_DONE once the stream finished).
+     * Return AGENT_STREAM_INTERRUPT to abort the stream and run should_retry(-1) (TTSR, Gemini header runaway), or
+     * AGENT_STREAM_ERROR to end the turn as an empty retryable error carrying agent->stream_error (loop guard). */
     int (*on_stream_delta)(void *ud, agent_t *a, const ai_event_t *ev);
     /* After an assistant message ends with an error; return true to retry the turn. */
     bool (*should_retry)(void *ud, agent_t *a, const json_t *assistant, int attempt);
@@ -153,6 +156,7 @@ struct agent {
     int64_t tool_timeout_ms;
     void *app;                 /* application pointer passed to tools */
     pthread_mutex_t ev_mu;     /* serializes event delivery from tool threads */
+    char *stream_error;        /* errorMessage for an AGENT_STREAM_ERROR abort (owned, set by the hook) */
 };
 
 agent_t *agent_new(void);

@@ -116,6 +116,8 @@ struct app {
     int auto_resolved;      /* last classified effort, -1 before the first turn */
     int abort_gen;          /* bumped by app_abort: a prompt superseded during auto-thinking setup is dropped */
     struct guards *guards;  /* loop guard, todo reminders, stop recovery (guards.c) */
+    struct thinkloop *thinkloop; /* stream loop guard of the current assistant stream (thinkloop.c) */
+    int gemini_interrupt;   /* planning headers counted when the Gemini header guard interrupted the stream */
     pthread_mutex_t mu;
 };
 
