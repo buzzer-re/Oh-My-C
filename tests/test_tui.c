@@ -11,6 +11,7 @@
 #include "tui/render.h"
 #include "tui/term.h"
 #include "tui/theme.h"
+#include "tui/symbols.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -1253,8 +1254,165 @@ static void test_kill_ring_jump(void) {
     tui_component_destroy(&ed->base);
 }
 
+/* ---------- WP-6: prompt actions, GitHub refs, @ mentions, text attachments ---------- */
+
+static char *g_action, *g_action_prefix;
+static void on_action(tui_editor_t *ed, const char *action, const char *prefix, void *ud) {
+    free(g_action), free(g_action_prefix);
+    g_action = xstrdup(action);
+    g_action_prefix = xstrdup(prefix);
+    if (!strcmp(action, "undo")) tui_editor_undo_past_transient(ed, prefix);
+    else if (!strcmp(action, "cursor-message-start")) tui_editor_move_to_message_start(ed);
+}
+
+static tui_ac_default_t *wp6_provider(tui_editor_t *ed) {
+    tui_ac_default_t *p = tui_ac_default_new(NULL);
+    tui_ac_default_add_action(p, "copy-line", "Copy current line", "Alt+\xe2\x87\xa7L", "copy line clipboard current");
+    tui_ac_default_add_action(p, "copy-prompt", "Copy whole prompt", "Alt+\xe2\x87\xa7" "C", "copy prompt clipboard message");
+    tui_ac_default_add_action(p, "undo", "Undo", "Ctrl+-/Ctrl+_", "undo revert edit history");
+    tui_ac_default_add_action(p, "cursor-message-start", "Move cursor to message start", "Current message",
+                              "move cursor message start beginning prompt first top");
+    tui_editor_set_autocomplete(ed, tui_ac_default_provider, p);
+    ed->on_action = on_action;
+    return p;
+}
+
+static bool g_large_taken;
+static bool large_hook(void *ud, tui_editor_t *ed, const char *text, size_t lines) {
+    g_large_taken = true;
+    tui_editor_insert_text_attachment(ed, text, NULL, "\x1b[31m");
+    return true;
+}
+
+static void test_wp6_editor(void) {
+    /* undo coalescing (#insertCharacter): a whitespace chunk and the word after it are separate units */
+    tui_editor_t *ed = tui_editor_new();
+    feed(ed, "hello");
+    feed(ed, " ");
+    feed(ed, "bar");
+    feed(ed, "\x1f");
+    check_text(ed, "hello ");
+    feed(ed, "\x1f");
+    check_text(ed, "hello");
+    tui_component_destroy(&ed->base);
+
+    /* # prompt actions: ranked list, accept runs the action; undo removes the transient token first */
+    ed = tui_editor_new();
+    tui_ac_default_t *p = wp6_provider(ed);
+    feed(ed, "hello");
+    feed(ed, " world");
+    feed(ed, " #");
+    CHECK(tui_editor_autocomplete_open(ed));
+    CHECK(ed->ac_list && tui_select_list_visible_count(ed->ac_list) == 4);
+    feed(ed, "und");
+    const tui_select_item_t *it = tui_select_list_selected(ed->ac_list);
+    CHECK(it && !strcmp(it->label, "Undo"));
+    feed(ed, "\r");
+    CHECK(g_action && !strcmp(g_action, "undo") && !strcmp(g_action_prefix, "#und"));
+    check_text(ed, "hello world");
+    feed(ed, " #cop");
+    it = tui_select_list_selected(ed->ac_list);
+    CHECK(it && !strcmp(it->label, "Copy current line"));
+    feed(ed, "\r");
+    CHECK(!strcmp(g_action, "copy-line") && !strcmp(g_action_prefix, "#cop"));
+    check_text(ed, "hello world ");
+    feed(ed, "#zzzzq"); /* nothing matches: no popup */
+    CHECK(!tui_editor_autocomplete_open(ed));
+    tui_editor_clear(ed);
+
+    /* #123 -> pr:// / issue:// (both kinds; a qualifier keeps one) */
+    feed(ed, "see #123");
+    CHECK(ed->ac_list && tui_select_list_visible_count(ed->ac_list) == 2);
+    it = tui_select_list_selected(ed->ac_list);
+    CHECK(it && !strcmp(it->label, "PR #123"));
+    feed(ed, "\x1b[B\r"); /* down, enter */
+    check_text(ed, "see issue://123 ");
+    tui_editor_clear(ed);
+    feed(ed, "fix pr #7");
+    CHECK(ed->ac_list && tui_select_list_visible_count(ed->ac_list) == 1);
+    feed(ed, "\r");
+    check_text(ed, "fix pr://7 ");
+    tui_editor_clear(ed);
+    feed(ed, "owner/repo#12"); /* embedded hash: no GitHub ref; the action menu does not match `12` either */
+    it = ed->ac_list ? tui_select_list_selected(ed->ac_list) : NULL;
+    CHECK(!it || strcmp(it->label, "PR #12"));
+    tui_ac_default_free(p);
+    tui_component_destroy(&ed->base);
+
+    /* @ mentions: fuzzy project-wide, scopes, listing, quoting */
+    char *root = fs_mktempdir("omc-at-");
+    const char *files[] = {"src/parser/lexer.c", "src/parser/parser.c", "src/main.c", "docs/my notes.md", "scripts/run.sh",
+                           "packages/app/scripts/deploy.sh", "build/out.o", ".hidden/x.txt", "README.md"};
+    for (size_t i = 0; i < ARRAY_LEN(files); i++) {
+        char *f = path_join(root, files[i]), *d = path_dirname(f);
+        fs_mkdir_p(d, 0755);
+        fs_write(f, "x", 1);
+        free(f), free(d);
+    }
+    char *gi = path_join(root, ".gitignore");
+    fs_write(gi, "build/\n", 7);
+    free(gi);
+    tui_ac_result_t r;
+    memset(&r, 0, sizeof r);
+    CHECK(tui_ac_at_suggestions(root, "@par", &r));
+    CHECK(r.items.n == 2 && !strcmp(r.items.v[0].label, "parser/") && !strcmp(r.items.v[0].value, "@src/parser/") &&
+          !strcmp(r.items.v[0].description, "src/parser"));
+    CHECK(r.items.n == 2 && !strcmp(r.items.v[1].value, "@src/parser/parser.c "));
+    CHECK(r.prefix_len == 4);
+    tui_ac_result_free(&r);
+    memset(&r, 0, sizeof r);
+    CHECK(tui_ac_at_suggestions(root, "@scri", &r)); /* equal scores: the shallower path first */
+    CHECK(r.items.n == 2 && !strcmp(r.items.v[0].description, "scripts") &&
+          !strcmp(r.items.v[1].description, "packages/app/scripts"));
+    tui_ac_result_free(&r);
+    memset(&r, 0, sizeof r);
+    CHECK(tui_ac_at_suggestions(root, "@out", &r) == false); /* gitignored */
+    tui_ac_result_free(&r);
+    memset(&r, 0, sizeof r);
+    CHECK(tui_ac_at_suggestions(root, "@my", &r));
+    CHECK(r.items.n == 1 && !strcmp(r.items.v[0].value, "@\"docs/my notes.md\" "));
+    tui_ac_result_free(&r);
+    memset(&r, 0, sizeof r);
+    CHECK(tui_ac_at_suggestions(root, "@", &r)); /* bare @: the cwd listing, directories first, dot entries kept */
+    CHECK(r.items.n >= 4 && !strcmp(r.items.v[0].label, ".hidden/") && !strcmp(r.items.v[r.items.n - 1].label, "README.md"));
+    tui_ac_result_free(&r);
+    memset(&r, 0, sizeof r);
+    CHECK(tui_ac_at_suggestions(root, "@src/", &r)); /* scoped, empty query: dirs first, shallow first */
+    CHECK(r.items.n == 4 && !strcmp(r.items.v[0].value, "@src/parser/") && !strcmp(r.items.v[1].value, "@src/main.c "));
+    tui_ac_result_free(&r);
+    CHECK(tui_ac_at_prefix_start("look at @src/ma") == 8);
+    CHECK(tui_ac_at_prefix_start("x=@a") == 2);
+    CHECK(tui_ac_at_prefix_start("mail@host") == -1);
+    CHECK(tui_ac_at_prefix_start("see @\"docs/my no") == 4);
+    char *rm = xasprintf("rm -rf '%s'", root);
+    CHECK(system(rm) == 0);
+    free(rm), free(root);
+
+    /* large paste: the host hook takes a marker-sized paste and stages a text attachment chip */
+    ed = tui_editor_new();
+    tui_editor_set_large_paste_hook(ed, large_hook, NULL);
+    sb_t big = SB_INIT;
+    for (int i = 1; i <= 12; i++) sb_appendf(&big, "line %d\n", i);
+    tui_editor_paste(ed, "short");
+    CHECK(!g_large_taken);
+    tui_editor_paste(ed, sb_cstr(&big));
+    CHECK(g_large_taken && ed->texts.n == 1 && ed->texts.v[0].line_count == 13);
+    char *label = xasprintf("short%s #1 ", tui_sym("chip.paste"));
+    check_text(ed, label);
+    free(label);
+    char *exp = tui_editor_get_expanded_text(ed);
+    CHECK(str_starts(exp, "shortline 1\n") && strstr(exp, "line 12\n"));
+    free(exp);
+    tui_editor_clear(ed);
+    CHECK(ed->texts.n == 0 && ed->text_counter == 0);
+    sb_free(&big);
+    tui_component_destroy(&ed->base);
+    free(g_action), free(g_action_prefix);
+}
+
 int main(void) {
     test_keys();
+    test_wp6_editor();
     test_app_keybindings();
     test_kill_ring_jump();
     test_ansi();

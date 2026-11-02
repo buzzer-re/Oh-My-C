@@ -33,12 +33,20 @@ typedef struct {
     bool args;         /* slash-command argument completions (Enter applies without submitting) */
     strvec_t ghosts;   /* per item: ghost text shown after the cursor while it is selected ("" = none) */
     bool first_desc_match; /* top item matched only by description: Enter submits the raw text */
+    strvec_t actions;  /* per item: prompt action id ("" = a plain completion); see tui_editor_t.on_action */
 } tui_ac_result_t;
 
 void tui_ac_result_add(tui_ac_result_t *r, const char *value, const char *label, const char *description);
 void tui_ac_result_add_icon(tui_ac_result_t *r, const char *value, const char *label, const char *description,
                             const char *icon);
 void tui_ac_result_free(tui_ac_result_t *r);
+/* a `#` prompt action row: accepting it removes the typed `#query` (kept for "undo") and runs the action */
+void tui_ac_result_add_action(tui_ac_result_t *r, const char *label, const char *description, const char *action);
+
+/* `#` prompt action (prompt-action-autocomplete.ts PromptActionDefinition) */
+typedef struct {
+    char *id, *label, *description, *keywords; /* keywords space-joined */
+} tui_ac_action_t;
 
 /* Provider: fill `out` for the text before the cursor on the current line. `first_line` is
  * true when every line above the cursor's is blank (the line starts the submitted prompt). `forced` is
@@ -64,7 +72,8 @@ typedef struct {
     char *(*inline_hint)(void *ud, const char *cmd, const char *arg_text);
     void *args_ud;
     char *cwd;             /* NULL = process cwd */
-    int max_items;         /* default 50 */
+    int max_items;         /* default 50 (slash commands) */
+    VEC(tui_ac_action_t) actions; /* `#` prompt actions, in definition order */
 } tui_ac_default_t;
 
 tui_ac_default_t *tui_ac_default_new(const char *cwd);
@@ -76,6 +85,16 @@ void tui_ac_default_add_command_icon(tui_ac_default_t *p, const char *name, cons
 void tui_ac_default_add_command_hint(tui_ac_default_t *p, const char *name, const char *description, const char *icon,
                                      const char *hint);
 void tui_ac_default_add_alias(tui_ac_default_t *p, const char *command, const char *alias);
+void tui_ac_default_add_action(tui_ac_default_t *p, const char *id, const char *label, const char *description,
+                               const char *keywords);
+/* `@` completions for the token before the cursor (`@`, `@"…`): fuzzy project-wide search (port of omp's
+ * CombinedAutocompleteProvider + the native fuzzyFind scorer), the directory listing for `@`, `@dir/` scopes
+ * and paths outside the cwd. Values carry the trailing space a file accept inserts. */
+bool tui_ac_at_suggestions(const char *cwd, const char *at_token, tui_ac_result_t *out);
+/* start of the live `@` token in `text` (extractAtFilePrefix), or -1 */
+long tui_ac_at_prefix_start(const char *text);
+/* Tab on a plain path token: the listing of its directory (#getFileSuggestions) */
+bool tui_ac_path_suggestions(const char *cwd, const char *token, tui_ac_result_t *out);
 void tui_ac_default_free(tui_ac_default_t *p);
 /* ghost hint for the text before the cursor (provider-level getInlineHint); owned or NULL */
 char *tui_ac_default_inline_hint(void *ud, const char *line_before, bool first_line);
@@ -152,6 +171,11 @@ struct tui_editor {
     /* inline ghost hint for the text before the cursor (end of line only); owned result or NULL */
     char *(*hint_fn)(void *ud, const char *line_before, bool first_line);
     void *hint_ud;
+
+    strvec_t ac_actions;   /* prompt action id per list item ("" = plain completion) */
+    /* runs an accepted `#` prompt action; `prefix` is the typed `#query` */
+    void (*on_action)(tui_editor_t *ed, const char *action, const char *prefix, void *ud);
+    void *action_ud;
 
     tui_editor_submit_fn on_submit;
     tui_editor_change_fn on_change;

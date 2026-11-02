@@ -34,7 +34,14 @@ void tui_ac_result_free(tui_ac_result_t *r) {
     }
     vec_free(&r->items);
     strvec_free(&r->ghosts);
+    strvec_free(&r->actions);
     r->prefix_len = 0;
+}
+
+void tui_ac_result_add_action(tui_ac_result_t *r, const char *label, const char *description, const char *action) {
+    while (r->actions.n < r->items.n) strvec_push(&r->actions, "");
+    tui_ac_result_add(r, label, label, description);
+    strvec_push(&r->actions, action);
 }
 
 /* ---------- slash-command scoring (upstream autocomplete.ts) ---------- */
@@ -170,46 +177,93 @@ void tui_ac_default_free(tui_ac_default_t *p) {
     strvec_free(&p->descriptions);
     strvec_free(&p->icons);
     strvec_free(&p->hints);
+    for (size_t i = 0; i < p->actions.n; i++) {
+        free(p->actions.v[i].id), free(p->actions.v[i].label);
+        free(p->actions.v[i].description), free(p->actions.v[i].keywords);
+    }
+    vec_free(&p->actions);
     free(p->cwd);
     free(p);
 }
 
-static bool complete_path(tui_ac_default_t *p, const char *token, size_t token_len, bool at, tui_ac_result_t *out) {
-    /* token excludes the '@' */
-    char *tok = xstrndup(token, token_len);
-    const char *slash = strrchr(tok, '/');
-    char *dir_part = slash ? xstrndup(tok, (size_t)(slash - tok) + 1) : xstrdup("");
-    const char *base = slash ? slash + 1 : tok;
-    char *cwd = p->cwd ? xstrdup(p->cwd) : get_cwd();
-    char *dir_abs;
-    if (!*dir_part) dir_abs = xstrdup(cwd ? cwd : ".");
-    else dir_abs = path_abs(dir_part, cwd ? cwd : ".");
-    dirlist_t dl = {0};
-    bool ok = false;
-    if (fs_list_dir(dir_abs, &dl) == 0) {
-        /* directories first, then files; prefix match (case-insensitive) */
-        for (int pass = 0; pass < 2; pass++) {
-            for (size_t i = 0; i < dl.n && (int)out->items.n < p->max_items; i++) {
-                dirent_info_t *e = &dl.v[i];
-                if ((pass == 0) != e->is_dir) continue;
-                if (e->name[0] == '.' && base[0] != '.') continue;
-                if (strncasecmp(e->name, base, strlen(base)) != 0) continue;
-                char *val = xasprintf("%s%s%s%s", at ? "@" : "", dir_part, e->name, e->is_dir ? "/" : "");
-                char *label = xasprintf("%s%s", e->name, e->is_dir ? "/" : "");
-                tui_ac_result_add(out, val, label, NULL);
-                free(val);
-                free(label);
+void tui_ac_default_add_action(tui_ac_default_t *p, const char *id, const char *label, const char *description,
+                               const char *keywords) {
+    tui_ac_action_t a = {xstrdup(id), xstrdup(label), xstrdup(description ? description : ""),
+                         xstrdup(keywords ? keywords : "")};
+    vec_push(&p->actions, a);
+}
+
+/* ---------- `#` prompt actions and GitHub references (prompt-action-autocomplete.ts, github-ref-autocomplete.ts) ---------- */
+
+static bool gh_boundary(char c) { return isspace((unsigned char)c) || c == '"' || c == '\'' || c == '`' || c == '(' || c == '<' || c == '='; }
+
+/* getGithubRefSuggestions: a standalone `#<number>` (optionally `pr|pull|issue #<number>`) ending the text */
+static bool github_ref(const char *t, tui_ac_result_t *out) {
+    size_t n = strlen(t), d = n;
+    while (d > 0 && isdigit((unsigned char)t[d - 1])) d--;
+    if (d == n || d == 0 || t[d - 1] != '#' || t[d] == '0') return false;
+    size_t h = d - 1;
+    const char *num = t + d;
+    /* qualifier form (the leftmost match): `<word><ws>#N`, the word at a boundary */
+    size_t ws = h;
+    while (ws > 0 && isspace((unsigned char)t[ws - 1])) ws--;
+    int qual = 0; /* 1 pr, 2 issue */
+    size_t start = h;
+    if (ws < h) {
+        static const char *const words[] = {"pr", "pull", "issue"};
+        for (size_t i = 0; i < 3 && !qual; i++) {
+            size_t wl = strlen(words[i]);
+            if (ws < wl || strncasecmp(t + ws - wl, words[i], wl)) continue;
+            size_t ws0 = ws - wl;
+            if (ws0 == 0 || gh_boundary(t[ws0 - 1])) {
+                qual = i == 2 ? 2 : 1;
+                start = ws0;
             }
         }
-        ok = out->items.n > 0;
-        out->prefix_len = token_len + (at ? 1 : 0);
     }
-    dirlist_free(&dl);
-    free(dir_abs);
-    free(cwd);
-    free(dir_part);
-    free(tok);
-    return ok;
+    if (!qual && h > 0 && !gh_boundary(t[h - 1])) return false;
+    static const struct {
+        const char *scheme, *label, *desc;
+    } KINDS[] = {{"pr", "PR", "GitHub pull request"}, {"issue", "Issue", "GitHub issue"}};
+    for (int k = 0; k < 2; k++) {
+        if (qual && qual != k + 1) continue;
+        char *value = xasprintf("%s://%s ", KINDS[k].scheme, num), *label = xasprintf("%s #%s", KINDS[k].label, num);
+        tui_ac_result_add(out, value, label, KINDS[k].desc);
+        free(value), free(label);
+    }
+    out->prefix_len = n - start;
+    return true;
+}
+
+/* getPromptActionPrefix + the ranked action list */
+static bool prompt_actions(const tui_ac_default_t *p, const char *t, tui_ac_result_t *out) {
+    const char *hash = strrchr(t, '#');
+    if (!hash || !p->actions.n || strpbrk(hash + 1, " \t\r\n\v\f")) return false;
+    char *q = str_lower(hash + 1);
+    size_t n = p->actions.n, m = 0;
+    size_t *order = xcalloc(n, sizeof *order);
+    double *score = xcalloc(n, sizeof *score);
+    for (size_t i = 0; i < n; i++) {
+        const tui_ac_action_t *a = &p->actions.v[i];
+        char *s = xasprintf("%s %s %s", a->label, a->description, a->keywords), *ls = str_lower(s);
+        if (ac_subsequence(q, ls)) {
+            score[i] = ac_subsequence_score(q, ls);
+            order[m++] = i;
+        }
+        free(s), free(ls);
+    }
+    for (size_t a = 1; a < m; a++) /* stable, score descending */
+        for (size_t b = a; b > 0 && score[order[b]] > score[order[b - 1]]; b--) {
+            size_t tmp = order[b];
+            order[b] = order[b - 1];
+            order[b - 1] = tmp;
+        }
+    for (size_t k = 0; k < m; k++)
+        tui_ac_result_add_action(out, p->actions.v[order[k]].label, p->actions.v[order[k]].description,
+                                 p->actions.v[order[k]].id);
+    if (m) out->prefix_len = strlen(hash);
+    free(order), free(score), free(q);
+    return m > 0;
 }
 
 static bool mid_prompt_skill_matches(const char *q, const char *lname, const char *ldesc) {
@@ -373,13 +427,18 @@ bool tui_ac_default_provider(void *ud, const char *line_before, bool first_line,
             }
         }
     }
-    /* current token */
+    /* PromptActionAutocompleteProvider order: GitHub `#N` refs, `#` prompt actions (not inside slash-command
+     * arguments, where the base provider's `@` mentions come first), then `@` file mentions */
+    bool slash_args = lead >= 0 && !text_before_lead && strchr(line_before + lead, ' ');
+    long at = tui_ac_at_prefix_start(line_before);
+    if (slash_args && at >= 0 && tui_ac_at_suggestions(p->cwd, line_before + at, out)) return true;
+    if (github_ref(line_before, out)) return true;
+    if (!slash_args && prompt_actions(p, line_before, out)) return true;
+    if (at >= 0) return tui_ac_at_suggestions(p->cwd, line_before + at, out);
+    /* Tab: complete the path token before the cursor */
     size_t s = len;
     while (s > 0 && line_before[s - 1] != ' ' && line_before[s - 1] != '\t') s--;
-    const char *tok = line_before + s;
-    size_t tl = len - s;
-    if (tl > 0 && tok[0] == '@') return complete_path(p, tok + 1, tl - 1, true, out);
-    if (forced && tl > 0) return complete_path(p, tok, tl, false, out);
+    if (forced && s < len) return tui_ac_path_suggestions(p->cwd, line_before + s, out);
     return false;
 }
 
@@ -523,6 +582,7 @@ static void close_ac(tui_editor_t *ed) {
     ed->ac_list = NULL;
     ed->ac_args = false;
     strvec_free(&ed->ac_ghosts);
+    strvec_free(&ed->ac_actions);
 }
 
 /* raw insertion of text (may contain '\n') at the cursor */
@@ -981,9 +1041,6 @@ static void refresh_ac(tui_editor_t *ed, bool forced) {
         close_ac(ed);
         return;
     }
-    size_t keep_sel = 0;
-    const tui_select_item_t *prev = ed->ac_list ? tui_select_list_selected(ed->ac_list) : NULL;
-    char *prev_val = prev ? xstrdup(prev->value) : NULL;
     close_ac(ed);
     ed->ac_list = tui_select_list_new(ed->ac_max_visible);
     ed->ac_list->filter_enabled = false;
@@ -995,19 +1052,16 @@ static void refresh_ac(tui_editor_t *ed, bool forced) {
         ed->ac_list->layout.max_description_rows = 2;
     }
     ed->ac_list->base.tui = ed->base.tui;
-    for (size_t i = 0; i < r.items.n; i++) {
+    /* upstream creates a fresh list per update (#createAutocompleteList): the selection restarts at the top */
+    for (size_t i = 0; i < r.items.n; i++)
         tui_select_list_add_item(ed->ac_list, r.items.v[i].value, r.items.v[i].label, r.items.v[i].description,
                                  r.items.v[i].icon, false);
-        /* upstream creates a fresh list per update: the selection restarts at the top for slash
-         * commands; other completions keep the previously selected value */
-        if (!r.slash && prev_val && !strcmp(prev_val, r.items.v[i].value)) keep_sel = i;
-    }
     for (size_t i = 0; i < r.items.n; i++) strvec_push(&ed->ac_ghosts, i < r.ghosts.n ? r.ghosts.v[i] : "");
+    for (size_t i = 0; i < r.items.n; i++) strvec_push(&ed->ac_actions, i < r.actions.n ? r.actions.v[i] : "");
     ed->ac_args = r.args;
-    ed->ac_list->selected = keep_sel;
+    ed->ac_list->selected = 0;
     ed->ac_enter_accepts = !r.first_desc_match;
     ed->ac_prefix_len = r.prefix_len;
-    free(prev_val);
     tui_ac_result_free(&r);
 }
 
@@ -1028,10 +1082,11 @@ static void maybe_trigger_ac(tui_editor_t *ed) {
             trig = true;
         free(before);
     }
-    if (!trig) {
-        size_t s = ed->cc;
-        while (s > 0 && line[s - 1] != ' ' && line[s - 1] != '\t') s--;
-        if (s < ed->cc && line[s] == '@') trig = true;
+    if (!trig) { /* an `@` file token, or a `#` prompt action / reference (`#[^\s#]*$`) */
+        char *before = xstrndup(line, ed->cc);
+        const char *hash = strrchr(before, '#');
+        trig = tui_ac_at_prefix_start(before) >= 0 || (hash && !strpbrk(hash + 1, " \t\r\n\v\f"));
+        free(before);
     }
     if (trig) refresh_ac(ed, false);
 }
@@ -1040,6 +1095,24 @@ static void accept_ac(tui_editor_t *ed) {
     const tui_select_item_t *it = ed->ac_list ? tui_select_list_selected(ed->ac_list) : NULL;
     if (!it) {
         close_ac(ed);
+        return;
+    }
+    size_t sel = ed->ac_list->selected;
+    const char *action = sel < ed->ac_actions.n ? ed->ac_actions.v[sel] : "";
+    if (*action) { /* `#` prompt action: drop the typed `#query` (undo keeps it for undoPastTransientText), run it */
+        char *act = xstrdup(action);
+        size_t start = ed->cc - MIN(ed->ac_prefix_len, ed->cc);
+        char *prefix = xstrndup(cur_line(ed) + start, ed->cc - start);
+        if (strcmp(act, "undo")) {
+            char *line = cur_line(ed);
+            set_line(ed, ed->cl, xasprintf("%.*s%s", (int)start, line, line + ed->cc));
+            ed->cc = start;
+        }
+        close_ac(ed);
+        notify_change(ed);
+        if (ed->on_action) ed->on_action(ed, act, prefix, ed->action_ud);
+        free(prefix);
+        free(act);
         return;
     }
     char *val = xstrdup(it->value);
@@ -1201,10 +1274,12 @@ static void jump_to_char(tui_editor_t *ed, const char *ch, int dir) {
     }
 }
 
-static void insert_typed(tui_editor_t *ed, const char *text) {
-    bool space = text[0] == ' ' && !text[1];
-    if (space) ed->last_action = ACT_NONE;
-    push_undo(ed, ACT_TYPE);
+static void insert_typed(tui_editor_t *ed, const char *text, int prev_last) {
+    /* #insertCharacter undo coalescing: consecutive word typing is one undo unit; a chunk with whitespace
+     * records its own state and the next word starts a new unit */
+    bool word = !strpbrk(text, " \t\r\n\v\f");
+    if (!word || prev_last != ACT_TYPE) push_undo(ed, ACT_OTHER);
+    ed->last_action = word ? ACT_TYPE : ACT_NONE;
     insert_raw(ed, text);
     ed->hist_index = -1;
 }
@@ -1410,7 +1485,7 @@ bool tui_editor_handle_key(tui_editor_t *ed, const tui_key_t *k) {
         tui_component_request_render(&ed->base);
         return true;
     } else if (tui_key_text(k) && k->kind == TUI_KEY_CHAR) {
-        insert_typed(ed, tui_key_text(k));
+        insert_typed(ed, tui_key_text(k), prev_last);
         retrigger = true;
     } else {
         ed->last_action = prev_last;

@@ -2167,6 +2167,55 @@ static void copy_editor_text(ui_t *u, bool line) {
     free(text);
 }
 
+/* formatKeyHints(keys of `action`): every bound key, "/"-joined */
+static char *action_keys_hint(const char *action) {
+    const strvec_t *v = tui_keybindings_get(tui_keybindings_global(), action);
+    sb_t b = SB_INIT;
+    for (size_t i = 0; v && i < v->n; i++) {
+        char *h = ui_key_hint(v->v[i]);
+        sb_appendf(&b, "%s%s", i ? "/" : "", h);
+        free(h);
+    }
+    return sb_detach(&b);
+}
+
+/* `#` prompt actions (createPromptActionAutocompleteProvider), run after the editor removed the typed `#query` */
+static void on_prompt_action(tui_editor_t *ed, const char *action, const char *prefix, void *ud) {
+    ui_t *u = ud;
+    if (!strcmp(action, "copy-line")) copy_editor_text(u, true);
+    else if (!strcmp(action, "copy-prompt")) copy_editor_text(u, false);
+    else if (!strcmp(action, "undo")) tui_editor_undo_past_transient(ed, prefix);
+    else if (!strcmp(action, "cursor-message-end")) tui_editor_move_to_message_end(ed);
+    else if (!strcmp(action, "cursor-message-start")) tui_editor_move_to_message_start(ed);
+    else if (!strcmp(action, "cursor-line-start")) tui_editor_move_to_line_start(ed);
+    else if (!strcmp(action, "cursor-line-end")) tui_editor_move_to_line_end(ed);
+    tui_request_render(u->tui);
+}
+
+static void register_prompt_actions(ui_t *u, tui_ac_default_t *ac) {
+    static const struct {
+        const char *id, *label, *keys, *desc, *keywords;
+    } ACTIONS[] = {
+        {"copy-line", "Copy current line", "app.clipboard.copyLine", NULL, "copy line clipboard current"},
+        {"copy-prompt", "Copy whole prompt", "app.clipboard.copyPrompt", NULL, "copy prompt clipboard message"},
+        {"undo", "Undo", "tui.editor.undo", NULL, "undo revert edit history"},
+        {"cursor-message-end", "Move cursor to message end", NULL, "Current message",
+         "move cursor message end prompt last bottom"},
+        {"cursor-message-start", "Move cursor to message start", NULL, "Current message",
+         "move cursor message start beginning prompt first top"},
+        {"cursor-line-start", "Move cursor to line start", "tui.editor.cursorLineStart", NULL,
+         "move cursor line start beginning home"},
+        {"cursor-line-end", "Move cursor to line end", "tui.editor.cursorLineEnd", NULL, "move cursor line end"},
+    };
+    for (size_t i = 0; i < ARRAY_LEN(ACTIONS); i++) {
+        char *desc = ACTIONS[i].keys ? action_keys_hint(ACTIONS[i].keys) : xstrdup(ACTIONS[i].desc);
+        tui_ac_default_add_action(ac, ACTIONS[i].id, ACTIONS[i].label, desc, ACTIONS[i].keywords);
+        free(desc);
+    }
+    u->editor->on_action = on_prompt_action;
+    u->editor->action_ud = u;
+}
+
 /* app.retry (handleRetry): retry a failed last turn, else "Nothing to retry" */
 static void retry_key(ui_t *u) {
     if (u->worker_running) return;
@@ -2415,6 +2464,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     history_load(u.editor);
     tui_ac_default_t *ac = tui_ac_default_new(a->cwd);
     ui_slash_register(&u, ac);
+    register_prompt_actions(&u, ac);
     tui_editor_set_inline_hint(u.editor, tui_ac_default_inline_hint, ac);
     tui_editor_set_autocomplete(u.editor, tui_ac_default_provider, ac);
     tui_editor_set_token_hook(u.editor, skill_chip_hook, &u);
