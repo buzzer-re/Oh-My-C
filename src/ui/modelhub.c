@@ -17,6 +17,7 @@
 #include "ui/overlays.h"
 #include "ui/ui.h"
 
+#include "coding/modelpreset.h"
 #include "config/auth.h"
 #include "config/compaction_point.h"
 #include "config/model_resolver.h"
@@ -324,28 +325,6 @@ static strvec_t chain_of(const char *key) {
 
 /* ---------- presets (config/model-presets.ts) ---------- */
 
-static bool valid_name(const char *n) {
-    if (!n || !isalpha((unsigned char)n[0])) return false;
-    for (const char *p = n; *p; p++)
-        if (!isalnum((unsigned char)*p) && *p != '_' && *p != '-') return false;
-    return true;
-}
-
-/* getOwnedModelPreset: the whole entry from the highest layer defining it (project, then global) */
-static json_t *owned_preset(const char *name, const char **source) {
-    json_t *p = json_get(json_get(settings_project(), "modelPresets"), name);
-    if (p && !json_is_null(p)) {
-        if (source) *source = "project";
-        return p;
-    }
-    p = json_get(json_get(settings_global(), "modelPresets"), name);
-    if (p && !json_is_null(p)) {
-        if (source) *source = "global";
-        return p;
-    }
-    return NULL;
-}
-
 static int cmp_locale(const void *a, const void *b) {
     const char *x = *(char *const *)a, *y = *(char *const *)b;
     int c = strcasecmp(x, y);
@@ -353,92 +332,6 @@ static int cmp_locale(const void *a, const void *b) {
 }
 
 static int cmp_code_unit(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
-
-static strvec_t preset_names(void) {
-    strvec_t v = {0};
-    json_t *all = settings_get("modelPresets"), *x;
-    const char *k;
-    json_obj_foreach(all, i, k, x) if (owned_preset(k, NULL)) strvec_push(&v, k);
-    (void)x;
-    qsort(v.v, v.n, sizeof *v.v, cmp_locale);
-    return v;
-}
-
-/* parseModelPreset: roles (borrowed json obj) + level (static or NULL); false + *why when malformed */
-static bool parse_preset(json_t *raw, json_t **roles_out, const char **level_out, const char **why) {
-    *roles_out = NULL;
-    *level_out = NULL;
-    if (!json_is_obj(raw)) {
-        *why = "it is not a mapping";
-        return false;
-    }
-    json_t *roles = json_get(raw, "modelRoles");
-    if (!json_is_obj(roles)) {
-        *why = "`modelRoles` is missing or not a mapping";
-        return false;
-    }
-    const char *k;
-    json_t *v;
-    json_obj_foreach(roles, i, k, v) {
-        char *t = json_is_str(v) ? str_trim(json_sv(v)) : NULL;
-        bool ok = t && *t;
-        free(t);
-        if (!ok) {
-            *why = "a role is not a model selector";
-            return false;
-        }
-    }
-    json_t *lv = json_get(raw, "defaultThinkingLevel");
-    if (lv) {
-        const char *l = json_is_str(lv) ? mr_parse_level(json_sv(lv), true) : NULL;
-        if (!l || !strcmp(l, "inherit") || !strcmp(l, "off")) {
-            *why = "`defaultThinkingLevel` is not a thinking level";
-            return false;
-        }
-        *level_out = l;
-    }
-    *roles_out = roles;
-    return true;
-}
-
-/* settings.getModelRoles(): effective role -> selector (owned obj) */
-static json_t *effective_roles(void) {
-    json_t *out = json_obj();
-    json_t *roles = settings_get("modelRoles"), *v;
-    const char *k;
-    json_obj_foreach(roles, i, k, v) {
-        const char *s = mr_role_get(k);
-        if (s && *s) json_set_str(out, k, s);
-    }
-    (void)v;
-    return out;
-}
-
-/* findActiveModelPreset (owned or NULL) */
-static char *active_preset(void) {
-    strvec_t names = preset_names();
-    json_t *roles = effective_roles();
-    const char *thinking = settings_str("defaultThinkingLevel", "high");
-    char *found = NULL;
-    for (size_t i = 0; i < names.n && !found; i++) {
-        json_t *pr;
-        const char *lv, *why;
-        if (!parse_preset(owned_preset(names.v[i], NULL), &pr, &lv, &why)) continue;
-        if (lv && strcmp(lv, thinking)) continue;
-        if (json_len(pr) != json_len(roles)) continue;
-        bool eq = true;
-        const char *k;
-        json_t *v;
-        json_obj_foreach(pr, j, k, v) {
-            const char *e = json_get_str(roles, k);
-            if (!e || strcmp(e, json_sv(v))) eq = false;
-        }
-        if (eq) found = xstrdup(names.v[i]);
-    }
-    json_free(roles);
-    strvec_free(&names);
-    return found;
-}
 
 /* ---------- sidebar ---------- */
 
@@ -911,10 +804,10 @@ static void render_role_tabs(hub_t *h, int width, strvec_t *out) {
     static const char *const TABS[] = {"all", "chat", "kinds"};
     char *track = segment_track(TABS, 3, h->role_tab), *ak = hints2("alt+left", "alt+right");
     char *rl = S(TUI_TC_DIM, "Roles:"), *akd = S(TUI_TC_DIM, ak);
-    strvec_t names = preset_names();
+    strvec_t names = mp_names();
     char *preset = xstrdup("");
     if (names.n) {
-        char *active = active_preset();
+        char *active = mp_active();
         char *cl = hints2("ctrl+left", "ctrl+right");
         char *keys;
         if (hub_query(h)) keys = xstrdup(cl);
@@ -1310,7 +1203,7 @@ static char *footer_hint(hub_t *h) {
                           ud, left, alr, cancel);
         }
     } else if (e->kind == E_ROLES) {
-        strvec_t presets = preset_names();
+        strvec_t presets = mp_names();
         if (!h->focus_list) {
             char *cl = hints2("ctrl+left", "ctrl+right");
             char *pr = presets.n ? xasprintf(" \xc2\xb7 %s preset", cl) : xstrdup("");
@@ -2084,164 +1977,29 @@ static void open_fallback_thinking_strip(hub_t *h, const char *key, int idx, con
 
 /* ---------- presets ---------- */
 
-static strvec_t preset_role_union(json_t *effective, json_t *preset) {
-    strvec_t v = {0};
-    const char *k;
-    json_t *x;
-    json_obj_foreach(effective, i, k, x) if (!strvec_contains(&v, k)) strvec_push(&v, k);
-    json_obj_foreach(preset, j, k, x) if (!strvec_contains(&v, k)) strvec_push(&v, k);
-    (void)x;
-    return v;
-}
-
-/* saveModelPreset + modelPresetSavedMessage */
+/* saveModelPreset + modelPresetSavedMessage (coding/modelpreset.c) */
 static void save_preset(hub_t *h, const char *name) {
-    json_t *preset = json_obj();
-    json_set(preset, "modelRoles", effective_roles());
-    json_set_str(preset, "defaultThinkingLevel", settings_str("defaultThinkingLevel", "high"));
-    settings_set_global_entry("modelPresets", name, preset);
-    const char *src = NULL;
-    owned_preset(name, &src);
-    char *msg = src && !strcmp(src, "project")
-                    ? xasprintf("Saved model preset \"%s\" to the global config, but the project config still defines a preset of the "
-                                "same name, which takes precedence",
-                                name)
-                    : xasprintf("Saved model preset \"%s\"", name);
+    char *msg = mp_save(name);
     add_notice(h->u, "info", msg);
     free(msg);
 }
 
-/* applyModelPreset + formatModelPresetSwitch */
+/* applyModelPreset + formatModelPresetSwitch (coding/modelpreset.c) */
 static void apply_preset(hub_t *h, const char *name) {
-    ui_t *u = h->u;
-    json_t *roles;
-    const char *plevel, *why;
-    json_t *raw = owned_preset(name, NULL);
-    char *msg = NULL;
     bool clean = false;
-    if (!raw) {
-        msg = xasprintf("Preset not found: %s", name);
-        add_notice(u, "warning", msg);
-        free(msg);
-        return;
-    }
-    if (!parse_preset(raw, &roles, &plevel, &why)) {
-        msg = xasprintf("Preset \"%s\" is malformed: %s", name, why);
-        add_notice(u, "warning", msg);
-        free(msg);
-        return;
-    }
-    roles = json_clone(roles);
-    mr_pool_t cands = {0};
-    mr_pool_available(&cands, "chat");
-    const char *pdef = json_get_str(roles, "default");
-    if (pdef) {
-        mr_result_t r;
-        bool ok = mr_resolve_value(pdef, &cands, &r);
-        mr_result_clear(&r);
-        if (!ok) msg = xasprintf("Preset \"%s\" not applied: default model `%s` is not available", name, pdef);
-    } else if (!mr_pick_default_available(&cands))
-        msg = xasprintf("Preset \"%s\" not applied: no model with configured credentials is available", name);
-    if (msg) {
-        add_notice(u, "warning", msg);
-        free(msg);
-        json_free(roles);
-        mr_pool_free(&cands);
-        return;
-    }
-    /* writePresetRoles */
-    json_t *eff = effective_roles();
-    strvec_t all = preset_role_union(eff, roles);
-    bool proj = project_storage();
-    for (size_t i = 0; i < all.n; i++) {
-        const char *v = json_get_str(roles, all.v[i]);
-        if (proj) {
-            char *pv = layer_role(settings_project(), all.v[i]);
-            if (v) settings_set_project_entry("modelRoles", all.v[i], json_str(v));
-            else if (pv) settings_set_project_entry("modelRoles", all.v[i], json_null());
-            free(pv);
-        } else {
-            char *gv = layer_role(settings_global(), all.v[i]);
-            if (v) {
-                if (!gv || strcmp(gv, v)) settings_set_global_entry("modelRoles", all.v[i], json_str(v));
-            } else if (gv)
-                settings_set_global_entry("modelRoles", all.v[i], NULL);
-            free(gv);
-        }
-    }
-    if (plevel && !str_eq(json_get_str(settings_global(), "defaultThinkingLevel"), plevel))
-        settings_set_global("defaultThinkingLevel", json_str(plevel));
-    /* roles another layer still decides */
-    json_t *after = effective_roles();
-    strvec_t un = preset_role_union(after, roles);
-    qsort(un.v, un.n, sizeof *un.v, cmp_locale);
-    sb_t shadow = SB_INIT;
-    for (size_t i = 0; i < un.n; i++) {
-        const char *ex = json_get_str(roles, un.v[i]), *ac = json_get_str(after, un.v[i]);
-        if ((!ex && !ac) || (ex && ac && !strcmp(ex, ac))) continue;
-        char *pv = layer_role(settings_project(), un.v[i]);
-        const char *src = pv ? "project config" : "global config";
-        free(pv);
-        sb_appendf(&shadow, "%s%s: %s from %s (preset: %s)", shadow.len ? "; " : "", un.v[i], ac ? ac : "(unset)", src,
-                   ex ? ex : "(unset)");
-    }
-    /* resolveLiveDefault */
-    const char *dv = mr_role_get("default");
-    const char *tl = plevel ? plevel : mr_parse_level(settings_str("defaultThinkingLevel", "high"), true);
-    const ai_model_t *model = NULL;
-    char *fail = NULL;
-    if (!dv) {
-        model = mr_pick_default_available(&cands);
-        if (!model) fail = xstrdup("no model with configured credentials is available");
-    } else {
-        mr_result_t r;
-        if (mr_resolve_value(dv, &cands, &r)) {
-            model = r.model;
-            if (r.explicit_level) tl = r.level;
-        } else
-            fail = xasprintf("default model `%s` is not available", dv);
-        mr_result_clear(&r);
-    }
-    if (!fail) {
-        char *k = mr_model_key(model), *err = NULL;
-        if (app_set_model(u->app, k, &err) != 0) fail = err;
-        else {
-            mr_usage_record(k);
-            ai_effort_t e;
-            if (tl && strcmp(tl, "inherit") && effort_parse(tl, &e) == 0) app_set_thinking(u->app, e);
-            char *th = tl ? xasprintf(" \xc2\xb7 %s", tl) : xstrdup("");
-            if (shadow.len) msg = xasprintf("Switched to preset \"%s\" (%s%s); still set elsewhere: %s", name, k, th, sb_cstr(&shadow));
-            else {
-                msg = xasprintf("Switched to preset \"%s\" (%s%s)", name, k, th);
-                clean = true;
-            }
-            free(th);
-        }
-        free(k);
-    }
-    if (fail) {
-        msg = xasprintf("Preset \"%s\" roles saved, but the model was not switched: %s", name, fail);
-        free(fail);
-    }
-    add_notice(u, clean ? "info" : "warning", msg);
+    char *msg = mp_apply(h->u->app, name, &clean, NULL, NULL);
+    add_notice(h->u, clean ? "info" : "warning", msg);
     free(msg);
-    sb_free(&shadow);
-    strvec_free(&un);
-    strvec_free(&all);
-    json_free(after);
-    json_free(eff);
-    json_free(roles);
-    mr_pool_free(&cands);
 }
 
 /* #switchPreset: previous/next saved preset, wrapping */
 static void switch_preset(hub_t *h, int delta) {
-    strvec_t names = preset_names();
+    strvec_t names = mp_names();
     if (!names.n) {
         strvec_free(&names);
         return;
     }
-    char *active = active_preset();
+    char *active = mp_active();
     const char *base = h->preset_cursor && (!active || h->preset_cursor_rev == h->revision) ? h->preset_cursor : active;
     long cur = -1;
     for (size_t i = 0; base && i < names.n; i++)
@@ -2342,7 +2100,7 @@ static void submit_name(hub_t *h) {
             close_strip(h);
             refresh_after_mutation(h);
         }
-    } else if (valid_name(v)) {
+    } else if (mp_valid_name(v)) {
         if (h->name_purpose == N_PRESET) {
             close_strip(h);
             save_preset(h, v);
