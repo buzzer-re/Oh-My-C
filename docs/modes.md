@@ -36,8 +36,16 @@ through `app_t.wake`.
 
 If no model is configured on a terminal, the TUI still starts so that `/login` and `/model` can fix
 it, as omp does. A fresh agent dir shows the setup wizard (`OMC_SKIP_SETUP`/`OMP_SKIP_SETUP`,
-`startup.setupWizard`). Slash commands come from omp's registry metadata, and only the commands omc
-implements are offered. `!cmd` / `!!cmd` run shell commands as user bash (`app_user_bash`), recorded
+`startup.setupWizard`). Slash commands come from one registry (`src/coding/slashcmd.c`, omp's
+builtin-*.ts metadata filtered to what omc implements): `/name args` or `/name:args`, aliases
+(`/models`, `/rewind`, `/q`), commands without allowArgs fall through to the model when given
+arguments, and bare `exit`/`quit`/`q` quit an empty session (`input.bareExitOnEmptySession`;
+`input.bareSlashCommands` extends this to every command with an Enter-twice confirm). RPC `prompt`
+and ACP `session/prompt` run the builtins that have a text-mode handler (model, effort, advisor,
+compact, shake, handoff, retry, memory, rename, dirs): RPC answers `{"agentInvoked":false}` and emits
+`command_output` frames, ACP streams the output as `agent_message_chunk` and ends the turn;
+`get_available_commands` and ACP's `available_commands_update` (sent after session/new and
+session/load) list exactly those. `!cmd` / `!!cmd` run shell commands as user bash (`app_user_bash`), recorded
 as `bashExecution` messages (with `!!` they are kept out of the model's context).
 
 ## Print and JSON (`modes/print.c`)

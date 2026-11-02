@@ -46,12 +46,7 @@ Ranked by how soon a user hits the gap in a normal interactive session.
 4. **No turn-end, ask or error notifications, and the terminal title never changes.** `completion.notify` and `ask.notify` are on by default in omp. `tui_term_set_title` exists but is never called. (WP-11)
 5. **The `/export` HTML is a placeholder.** It is the markdown transcript inside a `<pre>`, while omp embeds the session in its interactive viewer (`export/html/template.*`). `/dump` lacks `all`/`anon` and the request-JSON sidecar. (WP-4)
 6. ~~**`thinking: auto` turns thinking off.**~~ Done (WP-3): `auto` keeps a provisional level and classifies each user turn through the judge role chain like omp.
-7. **Slash-command argument bugs.**
-   - `/advisor status` toggles the advisor.
-   - `/compact soft` sends "soft" as summary instructions.
-   - `/shake images` runs with threshold 0.
-   - `/handoff <focus>` and `/resume <id>` ignore their argument.
-   - Aliases `/models`, `/rewind`, `/q`, `/providers` are missing. (WP-4)
+7. ~~**Slash-command argument bugs.**~~ Done (WP-4): shared registry, omp's argument parsing for `/advisor` `/compact` `/shake` `/handoff` `/resume` `/effort` `/delete` `/clear`, aliases `/models` `/rewind` `/q`, bare `exit`/`quit`/`q`. Aliases of commands omc lacks (`/providers`, `/status`, `/subagents`, `/worktree`, `/plugin`, `/force:`) arrive with those commands.
 8. **Some bound app keys have no handler yet.** The keybinding layer is done (WP-5: all `app.*` actions,
    `keybindings.yml` overrides, `/hotkeys` from the live table), but these keys still do nothing: Ctrl+G in the
    main composer (external editor), Ctrl+R (history search), Alt+P (temporary model), Ctrl+Shift+O, Alt+G,
@@ -80,7 +75,7 @@ Every package must:
 | WP-1 Plan review and plan-mode parity (done; remaining: overlay mouse, extension plan-review hooks, mid-stream deferred plan-model switch) | Fullscreen plan review that renders the plan markdown with a Contents sidebar. Five actions: execute in fresh context / compact / keep context (with token count) / refine (feedback to model) / save & quit. Also: tier slider, copy, Ctrl+G edit, `/plan-review`, "Exit plan mode?" confirm with a draft, paused state, `plan.enabled`, `plan.autosave(Dir)`, `modelRoles.plan` switch/restore | `src/coding/app.c` (`app_propose_plan`, `app_set_plan_mode`), new `src/ui/planreview.c`, `src/modes/interactive.c` | T/overlays/plan-review-overlay.ts, plan-toc.ts, plan-save-overlay.ts; U/modes/interactive-mode.ts (`handlePlanModeCommand`, `showPlanReview`, `#approvePlan`, `#exitPlanMode`); U/plan-mode/* |
 | WP-2 Queue and non-blocking input ✅ (done: see §2b/§2c; remaining: live `$` output, `/compact` modes are WP-4/WP-13) | Render delivered steer/follow-up user messages; pending-messages view; dequeue (Alt+Up); Esc restores the queue to the editor; follow-up on Ctrl+Q / Ctrl+Enter. Move `!cmd`, `!!cmd`, `/compact`, `/handoff` to a worker with Esc cancel. Defer `!cmd` while streaming. `$code` / `$$code` user eval in the shared kernel. Queue `/compact` for the yield while streaming | `src/modes/interactive.c` (`on_submit`, `run_bang`, `ui_apply_event`, `key_hook`), `src/coding/app.c` (`app_user_bash`, `app_compact`, `app_handoff`), `src/ui/chat.c` | U/modes/controllers/input-controller.ts (`handleFollowUp`, `handleDequeue`, `restoreQueuedMessagesToEditor`), interactive-mode.ts (`updatePendingMessagesDisplay`), command-controller.ts (`handleBashCommand`, `handlePythonCommand`, `handleCompactCommand`), U/modes/prompt/queued-messages.ts |
 | WP-3 Model-facing correctness bugs ✅ (done: out://, cfg://, conflict://N, `thinking: auto`) | Port `out://`, `cfg://`, `conflict://N` (write now refuses unknown schemes; main 44b5fc3). Make `thinking: auto` stop meaning off: resolve it like omp, or to the model default until the WP-12 classifier lands. Verify with `tests/parity/request_diff.sh` / `tool_diff.sh` | `src/tools/write_bash.c`, `src/tools/read.c`, `src/tools/vurl.c`, `src/coding/app.c` (thinking setup), `src/ui/settings.c` | U/internal-urls/{router,out-protocol,cfg-protocol,conflict-protocol}.ts, U/tools/conflict-detect.ts, U/auto-thinking/* |
-| WP-4 Slash-command correctness and shared registry | One registry (name, aliases, subcommands, hints, handler) used by TUI, RPC and ACP. Fix `/advisor` (status/dump), `/compact [soft\|remote\|snapcompact] [focus]`, `/shake [elide\|images\|thinking]`, `/handoff [focus]`, `/resume <id>`, `/effort` errors, `/delete` on in-memory sessions. Add aliases (models, rewind, q, providers, status, subagents, worktree, plugin, force:). Bare `exit`/`quit`/`q`. `/export` with omp's HTML viewer (`export/html/template.*` embedded as assets). `/dump all\|anon` + request-JSON sidecar | `src/modes/interactive.c` (`handle_command`, `COMMANDS[]`), `src/ui/slash.c`, `src/coding/app.c`, `src/session/session.c` (`session_export_html`), `assets/` | U/slash-commands/builtin-*.ts, builtin-registry.ts, helpers/*, U/session/compact-modes.ts, shake-types.ts, session-dump-format.ts, U/export/html/* |
+| WP-4 Slash-command correctness and shared registry (done: registry `src/coding/slashcmd.c` for TUI/RPC/ACP, argument fixes, aliases, bare exit, argument completion + hints, live descriptions; remaining: `/export` viewer and `/dump all\|anon` + sidecar (in progress), `/advisor dump`/`configure`) | One registry (name, aliases, subcommands, hints, handler) used by TUI, RPC and ACP. Fix `/advisor` (status/dump), `/compact [soft\|remote\|snapcompact] [focus]`, `/shake [elide\|images\|thinking]`, `/handoff [focus]`, `/resume <id>`, `/effort` errors, `/delete` on in-memory sessions. Add aliases (models, rewind, q, providers, status, subagents, worktree, plugin, force:). Bare `exit`/`quit`/`q`. `/export` with omp's HTML viewer (`export/html/template.*` embedded as assets). `/dump all\|anon` + request-JSON sidecar | `src/modes/interactive.c` (`handle_command`, `COMMANDS[]`), `src/ui/slash.c`, `src/coding/app.c`, `src/session/session.c` (`session_export_html`), `assets/` | U/slash-commands/builtin-*.ts, builtin-registry.ts, helpers/*, U/session/compact-modes.ts, shake-types.ts, session-dump-format.ts, U/export/html/* |
 | WP-5 App keybinding layer (done; remaining: handlers for selectTemporary, history.search, editor.external in the composer, local.open, tools.toggleVisibility, pasteTextRaw, approval, agent hub — owned by WP-6/10/19/21/22/29; Alt+L background re-probe; draft saved on Ctrl+D) | All `app.*` actions in the key table; `keybindings.yml` (+ legacy .json migration, profile inherit); `/migrate` copies it; `key_hook` via `tui_kb()`; `/hotkeys` from the live bindings; Ctrl+Z, F5/Alt+R, Ctrl+C (500 ms, no abort), Ctrl+T status + persist, Ctrl+] jumps, Alt+Y kill ring, Alt+L, copy line/prompt, Esc-Esc → `doubleEscapeAction` | `src/tui/keys.c`, `src/config/keybindings.c`, `src/tui/editor.c`, `src/modes/interactive.c`, `src/ui/overlays.c` (`ui_hotkeys_markdown`) | T/app-keybindings.ts, T/keybindings.ts, T/kill-ring.ts, T/hotkeys-markdown.ts, U/modes/controllers/input-controller.ts |
 | WP-7 Report panels | `/context` viewer (category breakdown, browse content); `/session` info overlay + `delete`/`pin`; `/tools` markdown panel incl. xd:// tools; `/jobs` panel + job tree + `full`/`kill`; `/todo` subcommands; `/advisor status\|dump`. Report-panel inline docking for short reports | `src/modes/interactive.c`, `src/ui/overlays.c` (`ui_show_report`), new `src/ui/context.c`, `src/tools/jobs.c`, `src/tools/todo_ask.c` | T/overlays/context-viewer*.ts, session-info-overlay.ts, jobs-panel.ts, job-tree.ts, report-panel.ts; U/modes/controllers/command-controller.ts, todo-command-controller.ts; U/slash-commands/helpers/context-report.ts |
 | WP-8 Tree and rewind selectors | `/tree` tree selector (glyphs, filters / `treeFilterMode`, labels, search, fold, branch prev/next); rewind selector for `/branch`, `/rewind`, Esc-Esc; optional branch summary prompt (`branchSummary.enabled`) | `src/modes/interactive.c` ("tree"/"branch"), new `src/ui/tree.c`, `src/coding/app.c` | T/overlays/tree-selector.ts, rewind-selector.ts; U/modes/controllers/selector-controller.ts; A/compaction/branch-summarization.ts |
@@ -129,12 +124,14 @@ local TTS and tiny models; IDA; macOS spelling; npm self-update.
 ## 1. Slash commands
 
 Upstream registry: `packages/coding-agent/src/slash-commands/builtin-*.ts` (87 commands, in this order:
-modes, collaboration, session, lifecycle, marketplace, skills, control). omc: `COMMANDS[]` +
-`handle_command()` in `src/modes/interactive.c`; autocomplete metadata from
-`assets/tui/slash-commands.json` via `src/ui/slash.c` (only commands omc implements are offered).
-An unknown `/word` falls through and is sent to the model as a prompt.
+modes, collaboration, session, lifecycle, marketplace, skills, control). omc: one registry, `src/coding/slashcmd.c`, built from
+`assets/tui/slash-commands.json` (build-tools/extract_slash_commands.py: names, aliases, icons,
+descriptions, ACP copy, inline hints, subcommands, allowArgs, handle/handleTui) filtered to what omc
+implements (commands and subcommands). TUI handlers: `handle_command()` in `src/modes/interactive.c`;
+text-mode handlers (RPC `prompt`, ACP `session/prompt`, TUI fallback) in slashcmd.c; autocomplete in
+`src/ui/slash.c`. An unknown `/word`, or args to a command without allowArgs, go to the model.
 
-omc-only commands (not in omp): `/help`, `/thinking` (omp only has `/effort`), `/name`, `/migrate`.
+omc-only command (not in omp): `/migrate`.
 
 | Command (aliases) | Upstream | omc | Status | Notes |
 |---|---|---|---|---|
@@ -148,7 +145,7 @@ omc-only commands (not in omp): `/help`, `/thinking` (omp only has `/effort`), `
 | /guided-goal | builtin-modes.ts | `handle_command` | ✅ | |
 | /loop | builtin-modes.ts, loop-limit.ts, loop-condition.ts | — | ❌ | re-submit prompt after every yield, count/duration/`--while`/`--until` |
 | /queue | builtin-modes.ts | `handle_command` | ✅ | |
-| /model (models) | builtin-modes.ts | `ui_overlay_model` / `app_set_model` | 🟡 | `/models` alias missing (`@role` and `:level` selectors work) |
+| /model (models) | builtin-modes.ts | `ui_overlay_model` / `app_set_model` | ✅ | `/models` alias; omp's `/model` takes no arguments (picker only), so `/model <pattern>` goes to the model like omp |
 | /switch | builtin-modes.ts | — | ❌ | session-only (temporary) model switch, `alt+p` |
 | /fast | builtin-modes.ts | — | ❌ | priority/ultrafast service tier toggle |
 | /slow | builtin-modes.ts | — | ❌ | flex tier / Anthropic low priority |
@@ -158,8 +155,8 @@ omc-only commands (not in omp): `/help`, `/thinking` (omp only has `/effort`), `
 | /ratchet | builtin-modes.ts | — | ❌ | eval hill-climb kickoff (low priority) |
 | /prewalk | builtin-modes.ts, session/prewalk.ts | — | ❌ | one-shot model handoff at first edit (`prewalk.*` unread) |
 | /modelpreset | builtin-modes.ts | — | ❌ | save/switch role-model presets (Models hub presets also missing) |
-| /effort | builtin-modes.ts | alias → `/thinking` | 🟡 | invalid level opens the selector instead of an error; no "Thinking set to X." status; no-reasoning-model message missing |
-| /advisor | builtin-collaboration.ts | `handle_command` "advisor" | 🟡 | on/off toggle only; **bug: any other argument toggles** (`/advisor status` switches it); `status`, `dump`, `configure` (advisor-config overlay) missing |
+| /effort | builtin-modes.ts | `handle_command` "effort", `slash_resolve_effort` | ✅ | live level list (incl. `auto`) in the dropdown and ghost hint, omp's errors and status texts |
+| /advisor | builtin-collaboration.ts | `handle_command` "advisor" | 🟡 | on/off/toggle texts, `status` report (single advisor + no-model roster), status-line badge; `dump [raw]` (WP-4 helper) and `configure` (advisor-config overlay) missing; one advisor only |
 | /export [path] | builtin-collaboration.ts | `session_export_html/markdown` | 🟡 | placeholder HTML: `session_export_html` wraps the markdown transcript in a `<pre>`; omp embeds the session JSON in its interactive viewer (`export/html/template.{html.txt,css,js}`, 137 KB of static assets, portable) |
 | /trace | builtin-collaboration.ts | — | ❌ | opens trace in stats dashboard (depends on /stats) |
 | /dump [all\|anon] | builtin-collaboration.ts | `session_export_markdown` + OSC 52 | 🟡 | no `all`/`anon` subcommands, does not write the LLM request JSON to tmp, format differs from `session-dump-format.ts` |
@@ -182,7 +179,7 @@ omc-only commands (not in omp): `/help`, `/thinking` (omp only has `/effort`), `
 | /git | builtin-session.ts | — | ❌ | git UI (split diff, staging, commit composer) |
 | /local | builtin-session.ts | — | ❌ | open a `local://` file in $EDITOR |
 | /hub (subagents) | builtin-session.ts, overlays/agent-hub*.ts | — | ❌ | live Agent Hub for subagents |
-| /branch (rewind) | builtin-session.ts | `handle_command` "branch" picker | 🟡 | `/rewind` alias missing; generic select list instead of omp's user-message selector |
+| /branch (rewind) | builtin-session.ts | `handle_command` "branch" picker | 🟡 | generic select list instead of omp's user-message selector (`/rewind` alias works) |
 | /fork [pane\|window\|tab] | builtin-session.ts | `app_fork_from` | 🟡 | no multiplexer placement subcommands; no streaming guard |
 | /tree | builtin-session.ts, overlays/tree-selector.ts | generic picker | 🟡 | flat indented list; omp's tree selector has branch glyphs, filters (`treeFilterMode`), labels |
 | /login, /logout | builtin-session.ts | `ui_overlay_login` | ✅ | |
@@ -190,12 +187,12 @@ omc-only commands (not in omp): `/help`, `/thinking` (omp only has `/effort`), `
 | /ssh [add\|list\|remove] | builtin-lifecycle.ts, ssh-command-controller.ts | — | ❌ | ssh.json host management (ssh:// reads work) |
 | /new | builtin-lifecycle.ts | `app_new_session` | ✅ | |
 | /fresh | builtin-lifecycle.ts | — | ❌ | reset provider stream state (Codex/Cursor sessions) |
-| /clear | builtin-lifecycle.ts | `app_clear_context` | ✅ | |
-| /delete | builtin-lifecycle.ts | unlink + new | ✅ | (omp also errors "Nothing to delete (in-memory session)"; omc silently starts a new session) |
-| /compact [soft\|remote\|snapcompact] [focus] | builtin-lifecycle.ts, session/compact-modes.ts | `app_compact` | 🟡 | modes missing (**bug: `/compact soft` sends "soft" as summary instructions**); follow-up-key `/compact` while streaming waits for the yield (WP-2); no "Tokens: a -> b (saved n)" summary |
-| /shake [elide\|images\|thinking] | builtin-lifecycle.ts, shake-types.ts | `app_shake(n)` | 🟡 | takes a numeric threshold instead of the 3 modes (**bug: `/shake images` → `atoi` = threshold 0**); summary text differs |
-| /handoff [focus] | builtin-lifecycle.ts, command-controller `handleHandoffCommand` | `app_handoff` | 🟡 | focus instructions ignored (guards and the cancellable loader landed in WP-2) |
-| /resume [id] | builtin-lifecycle.ts | `ui_overlay_session` | 🟡 | argument (session id/path) ignored |
+| /clear | builtin-lifecycle.ts | `app_clear_context` | ✅ | `✔ Context reset — N messages dropped; session continues.` and the streaming warning |
+| /delete | builtin-lifecycle.ts | unlink + new | ✅ | in-memory error and `✔ Session deleted` like omp |
+| /compact [soft\|remote\|snapcompact] [focus] | builtin-lifecycle.ts, session/compact-modes.ts | `app_compact_mode` | 🟡 | parseCompactArgs (modes, focus, snapcompact focus error); soft = omc's summary pass, remote falls back to it (omp's "remote compaction is unavailable" warning on native routes), snapcompact errors (text-only message as omp; not implemented for vision models); the autocomplete offers only `soft`; no-op texts `Nothing to compact (session too small)` / `Already compacted`; server compaction / snapcompact are WP-13 |
+| /shake [elide\|images\|thinking] | builtin-lifecycle.ts, shake-types.ts | `app_shake(mode)` | 🟡 | 3 modes, omp's parse error and formatShakeSummary, branch rewritten on disk; elide drops whole tool results outside the newest ~4000 tokens (`[shaken ~N tokens]`, skill results protected) but not fenced/XML blocks and saves no recovery artifact; token counts are estimates |
+| /handoff [focus] | builtin-lifecycle.ts, command-controller `handleHandoffCommand` | `app_handoff(focus)` | ✅ | focus rendered into the handoff prompt (`additionalFocus`); guards and loader from WP-2 |
+| /resume [id] | builtin-lifecycle.ts | `ui_overlay_session` / `session_resolve` | ✅ | `/resume <id\|path>` resumes or errors `Session "x" not found`; `@claude`/`@codex` foreign imports not offered |
 | /pin | builtin-lifecycle.ts | — (Alt+K in picker only) | ❌ | |
 | /btw [q] | builtin-lifecycle.ts, btw-controller.ts, overlays/btw-panel.ts | `src/ui/btw.c` | ✅ | inline streaming panel + history browser ported; image follow-ups missing |
 | /tan | builtin-lifecycle.ts, tan-command-controller.ts | — | ❌ | background agent for tangential work |
@@ -208,8 +205,8 @@ omc-only commands (not in omp): `/help`, `/thinking` (omp only has `/effort`), `
 | /move <dir> | builtin-lifecycle.ts | — | ❌ | move session to another cwd |
 | /wt (worktree) | builtin-lifecycle.ts, session/session-worktree.ts | — | ❌ | move session into a new git worktree |
 | /add-dir, /remove-dir | builtin-lifecycle.ts | — | ❌ | multi-root workspaces |
-| /dirs | builtin-lifecycle.ts | prints cwd | 🟡 | single root only |
-| /exit, /quit (q) | builtin-lifecycle.ts, builtin-control.ts | `tui_stop` | 🟡 | `/q` alias missing |
+| /dirs | builtin-lifecycle.ts | text handler | 🟡 | omp's `Workspace directories:` text; single root only |
+| /exit, /quit (q) | builtin-lifecycle.ts, builtin-control.ts | `tui_stop` | ✅ | `/q` alias; bare `exit`/`quit`/`q` on an empty session |
 | /restart | builtin-lifecycle.ts | — | ❌ | re-exec with same flags, resume session |
 | /marketplace, /plugins (plugin), /reload-plugins | builtin-marketplace.ts | — | ❌ | plugin sources/install (git-based, portable for skills/commands/MCP/agents); JS extension parts ⛔ |
 | /skills [search\|install\|installed\|update] | builtin-skills.ts | lists discovered skills | 🟡 | **different feature**: omp searches/installs from the skills.omp.sh registry |
@@ -224,7 +221,7 @@ Non-builtin command sources:
 | Source | Upstream | omc | Status | Notes |
 |---|---|---|---|---|
 | Custom prompt commands (`commands/*.md` in .omp/.claude/.opencode, user + project; `$ARGUMENTS`) | capability/slash-command.ts, extensibility/custom-commands, discovery/* | — | ❌ | `commands.enable*` settings unread; omc only copies them in `migrate.c` |
-| Skill commands `/skill:<name>` | modes/skill-command.ts, extensibility/skills.ts | — | ❌ | **RPC `get_available_commands` advertises `skill:<name>` entries but nothing expands them** (`src/modes/rpc.c`) |
+| Skill commands `/skill:<name>` | modes/skill-command.ts, extensibility/skills.ts | — | ❌ | not advertised over RPC/ACP until something expands them |
 | MCP prompts as commands | mcp/* | — | ❌ | |
 | Extension/plugin commands (JS) | extensibility/extensions | — | ⛔ | Bun/JS runtime |
 

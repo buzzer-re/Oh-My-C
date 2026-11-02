@@ -125,7 +125,12 @@ The editor ports omp's `editor-component.ts`: word motion, an emacs kill ring (`
 consecutive kills accumulate, Ctrl+Y yanks, Alt+Y cycles older entries right after a yank),
 character jump (Ctrl+] / Ctrl+Alt+] then a character), undo (200 steps), history,
 large-paste markers (`[Paste #N, +L lines]`), slash-command and `@file` autocomplete with omp's
-ranking, and Enter-runs-command semantics. Its frame is drawn by a composer style, one of omp's 8
+ranking, and Enter-runs-command semantics. Slash completion also matches aliases (the alias is the
+row), completes arguments (`tui_ac_default_t.args`: subcommands, the live `/effort` levels) and paints
+dim ghost text after an end-of-line cursor (`tui_editor_ghost`: the selected item's remainder +
+usage, else the command's inline hint); Enter on an argument completion applies it and submits only
+when the argument is already fully typed (`#selectedSlashArgumentIsAlreadyTyped`). The metadata comes
+from the shared registry (`src/coding/slashcmd.c`) through `src/ui/slash.c`. Its frame is drawn by a composer style, one of omp's 8
 shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, `rail`
 (`composer.shape`).
 
