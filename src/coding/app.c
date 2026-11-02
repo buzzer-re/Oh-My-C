@@ -23,6 +23,7 @@
 #include "tools/gh.h"
 #include "mcp/mcp.h"
 #include "prompt/template.h"
+#include "ai/ai_images.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -211,7 +212,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
             }
         }
         const char *ctype = json_get_str(ev->message, "customType");
-        if (role && a->session && ctype && str_eq(role, "user")) {
+        if (role && a->session && ctype && (str_eq(role, "user") || str_eq(role, "developer"))) {
             /* hidden steering (goal context, continuations, budget limits) persists as custom_message like omp */
             char *txt = ai_message_text(ev->message);
             const json_t *det = json_get(ev->message, "details");
@@ -222,6 +223,8 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
                 json_set_str(e, "content", txt);
                 json_set_bool(e, "display", false);
                 json_set(e, "details", json_clone(det));
+                const char *attr = json_get_str(ev->message, "attribution");
+                if (attr) json_set_str(e, "attribution", attr);
                 session_append_entry(a->session, e);
             } else session_append_custom_message(a->session, ctype, txt, false);
             free(txt);
@@ -1813,7 +1816,68 @@ static void begin_turn_budget(app_t *a, const char *text) {
     a->turn_output_baseline = __atomic_load_n(&a->output_tokens, __ATOMIC_SEQ_CST);
 }
 
-int app_prompt(app_t *a, const char *text, json_t *images) {
+/* renderAttachmentSourceNotice: the hidden custom message naming the file behind `[Image #index]` */
+static json_t *attachment_notice(int index, const char *path) {
+    json_t *c = json_obj();
+    char idx[16];
+    snprintf(idx, sizeof idx, "%d", index);
+    json_set_str(c, "index", idx);
+    json_set_str(c, "path", path);
+    char *r = prompt_render("coding-agent/prompts/system/image-attachment.md", c);
+    json_free(c);
+    char *t = str_trim(r ? r : "");
+    free(r);
+    json_t *m = msg_developer_text(t); /* custom messages reach the model as developer turns (convertMessageToLlm) */
+    free(t);
+    json_set_bool(m, "synthetic", true);
+    json_set_str(m, "customType", "image-attachment");
+    json_set_str(m, "attribution", "user");
+    json_t *d = json_obj();
+    json_set_int(d, "index", index);
+    json_set_str(d, "path", path);
+    json_set(m, "details", d);
+    return m;
+}
+
+int app_prompt_attachments(app_t *a, const char *text, json_t *attachments) {
+    json_t *images = json_arr(), *notices = json_arr(), *e;
+    json_arr_foreach(attachments, i, e) {
+        json_t *img = json_get(e, "image");
+        if (!img) continue;
+        json_push(images, json_clone(img));
+        const char *path = json_get_str(e, "path");
+        if (path && *path) json_push(notices, attachment_notice((int)json_len(images), path));
+    }
+    json_free(attachments);
+    if (!json_len(images)) {
+        json_free(images);
+        images = NULL;
+    }
+    return app_prompt_ex(a, text, images, notices);
+}
+
+int app_prompt(app_t *a, const char *text, json_t *images) { return app_prompt_ex(a, text, images, NULL); }
+
+void app_steer_attachments(app_t *a, const char *text, json_t *attachments) {
+    json_t *images = json_arr(), *e;
+    json_arr_foreach(attachments, i, e) {
+        json_t *img = json_get(e, "image");
+        if (!img) continue;
+        json_push(images, json_clone(img));
+        const char *path = json_get_str(e, "path");
+        if (path && *path) agent_steer(a->agent, attachment_notice((int)json_len(images), path));
+    }
+    json_free(attachments);
+    json_t *content = json_arr();
+    json_push(content, text_block(text));
+    json_t *norm = ai_normalize_images(images, a->model), *img;
+    json_arr_foreach(norm, i, img) json_push(content, json_clone(img));
+    json_free(norm);
+    json_free(images);
+    agent_steer(a->agent, msg_user_content(content));
+}
+
+int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
     app_plan_note_user_turn(a);
     app_plan_yolo_arm(a);
     memory_take_prompt_refresh(a);
@@ -1822,14 +1886,18 @@ int app_prompt(app_t *a, const char *text, json_t *images) {
     json_t *content = json_arr();
     json_push(content, text_block(text));
     add_mentions(a, text, content);
-    json_t *img;
-    json_arr_foreach(images, i, img) json_push(content, json_clone(img));
+    /* normalizeModelContextImages: every attached image is resized / re-encoded for the active model */
+    json_t *norm = ai_normalize_images(images, a->model), *img;
+    json_arr_foreach(norm, i, img) json_push(content, json_clone(img));
+    json_free(norm);
     json_free(images);
     json_t *msgs = json_arr();
     json_t *pr = app_plan_reference_message(a);
     if (pr) json_push(msgs, pr);
     json_t *gm = app_goal_context_message(a);
     if (gm) json_push(msgs, gm);
+    json_arr_foreach(notices, i, img) json_push(msgs, json_clone(img));
+    json_free(notices);
     json_push(msgs, msg_user_content(content));
     int rc = agent_prompt(a->agent, msgs);
     rc = app_plan_settle(a, rc);

@@ -69,10 +69,13 @@ typedef struct {
     size_t cl, cc;
 } tui_editor_snapshot_t;
 
+/* An atomic token in the buffer: a large-paste marker or an attachment chip ("📷 #1"). It moves and
+ * deletes as one unit and expands to `content` on submit; `style` (optional SGR) paints it in the composer. */
 typedef struct {
     int id;
     char *marker;
     char *content;
+    char *style;
 } tui_editor_paste_t;
 
 struct tui_editor {
@@ -88,6 +91,9 @@ struct tui_editor {
     char *hist_draft;
     VEC(tui_editor_paste_t) pastes;
     int paste_counter;
+    /* bracketed-paste interceptor (image paths, empty pastes): return true when it consumed the text */
+    bool (*paste_hook)(void *ud, tui_editor_t *ed, const char *text);
+    void *paste_hook_ud;
 
     tui_autocomplete_fn ac_fn;
     void *ac_ud;
@@ -131,6 +137,9 @@ char *tui_editor_get_text(const tui_editor_t *ed);            /* owned, raw (mar
 char *tui_editor_get_expanded_text(const tui_editor_t *ed);   /* owned, paste markers expanded */
 void tui_editor_insert_text(tui_editor_t *ed, const char *text); /* at cursor, one undo step */
 void tui_editor_paste(tui_editor_t *ed, const char *text);       /* same path as bracketed paste */
+/* insert an atomic token at the cursor (one undo step); expands to `expansion` on submit */
+void tui_editor_insert_atom(tui_editor_t *ed, const char *label, const char *expansion, const char *style);
+void tui_editor_set_paste_hook(tui_editor_t *ed, bool (*fn)(void *ud, tui_editor_t *ed, const char *text), void *ud);
 bool tui_editor_is_empty(const tui_editor_t *ed);
 void tui_editor_clear(tui_editor_t *ed);
 void tui_editor_undo(tui_editor_t *ed);

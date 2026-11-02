@@ -12,6 +12,8 @@
 #include "artifacts.h"
 #include "summary.h"
 #include "web.h"
+#include "ai/ai_images.h"
+#include "img/imgpipe.h"
 
 #include <errno.h>
 
@@ -176,14 +178,6 @@ static char *split_path_sel(tool_env_t *env, const char *in, selector_t *sel) {
     return r;
 }
 
-static const char *mime_for(const char *path) {
-    const char *e = path_ext(path);
-    if (!strcasecmp(e, ".png")) return "image/png";
-    if (!strcasecmp(e, ".jpg") || !strcasecmp(e, ".jpeg")) return "image/jpeg";
-    if (!strcasecmp(e, ".gif")) return "image/gif";
-    if (!strcasecmp(e, ".webp")) return "image/webp";
-    return NULL;
-}
 
 static char *fmt_bytes(int64_t n) {
     if (n < 1024) return xasprintf("%lldB", (long long)n);
@@ -1097,6 +1091,59 @@ static int read_mcp(tool_env_t *env, const char *path, tool_result_t *out) {
     return 0;
 }
 
+/* Images are recognized by their magic bytes, never the extension (omp parseImageMetadata), and enter the
+ * model context through the shared pipeline: size cap, full decode check, resize/re-encode for the model
+ * (images.autoResize), "Read image file [mime] (displayed as ...)" note. Text-only models get metadata.
+ * Returns false when the file is not an image. */
+static bool read_image(tool_ctx_t *ctx, const char *abs, const char *display, int64_t size, tool_result_t *out) {
+    size_t hn = 0;
+    char *head = fs_read_limit(abs, 256u << 10, &hn, NULL);
+    img_meta_t meta;
+    bool is_img = head && img_sniff((const uint8_t *)head, hn, &meta);
+    free(head);
+    if (!is_img) return false;
+    const char *mime = img_fmt_mime(meta.fmt);
+    const ai_model_t *model = ctx && ctx->agent ? ctx->agent->model : NULL;
+    if (model && !model->input_image) {
+        char *fb = img_format_bytes((uint64_t)size);
+        char *dims = meta.w && meta.h ? xasprintf("%dx%d", meta.w, meta.h) : xstrdup("unknown");
+        char *ch = meta.channels ? xasprintf("%d", meta.channels) : xstrdup("unknown");
+        tool_result_textf(out,
+                          "Image metadata:\n- MIME: %s\n- Bytes: %lld (%s)\n- Dimensions: %s\n- Channels: %s\n- Alpha: %s\n\n"
+                          "To analyze the image, read `%s?q=<question>` \u2014 the question is answered by a vision model and "
+                          "returned as text.",
+                          mime, (long long)size, fb, dims, ch, meta.has_alpha == 1 ? "yes" : meta.has_alpha == 0 ? "no" : "unknown",
+                          display);
+        free(fb), free(dims), free(ch);
+        return true;
+    }
+    if (size > (int64_t)IMG_MAX_INPUT_BYTES) {
+        char *a = img_format_bytes((uint64_t)size), *b = img_format_bytes(IMG_MAX_INPUT_BYTES);
+        tool_result_error(out, "Image file too large: %s exceeds %s limit.", a, b);
+        free(a), free(b);
+        return true;
+    }
+    size_t n = 0;
+    char *data = fs_read_limit(abs, IMG_MAX_INPUT_BYTES + 1, &n, NULL);
+    if (!data) {
+        tool_result_error(out, "Cannot read %s: %s", display, strerror(errno));
+        return true;
+    }
+    img_loaded_t l;
+    char *err = NULL;
+    if (img_load_input((const uint8_t *)data, n, mime, abs, "Read image file", settings_bool("images.autoResize", true),
+                       ai_model_lacks_webp(model) ? 1 : 0, &l, &err) < 0) {
+        tool_result_error(out, "%s", err);
+    } else {
+        tool_result_text(out, l.text_note);
+        tool_result_image(out, l.data, l.mime);
+        img_loaded_free(&l);
+    }
+    free(err);
+    free(data);
+    return true;
+}
+
 static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     const char *path = json_get_str(args, "path");
@@ -1164,23 +1211,7 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         tool_result_error(out, "Cannot read '%s': it is a %s, not a regular file or directory.", path, kind);
         goto done;
     }
-    const char *mime = mime_for(abs);
-    if (mime && !sel.raw) {
-        size_t n;
-        char *data = fs_read_limit(abs, 20u << 20, &n, NULL);
-        if (!data) {
-            tool_result_error(out, "Cannot read %s: %s", display, strerror(errno));
-            goto done;
-        }
-        char *b64 = base64_encode(data, n);
-        char *sz = fmt_bytes((int64_t)n);
-        tool_result_textf(out, "Read image file [%s] (%s)", mime, sz);
-        tool_result_image(out, b64, mime);
-        free(sz);
-        free(b64);
-        free(data);
-        goto done;
-    }
+    if (!sel.raw && read_image(ctx, abs, display, (int64_t)st.st_size, out)) goto done;
     if (!strcasecmp(path_ext(abs), ".pdf") && !sel.raw) {
         size_t plen = 0;
         char *pdata = fs_read_limit(abs, 256u << 20, &plen, NULL);

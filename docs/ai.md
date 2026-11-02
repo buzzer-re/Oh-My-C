@@ -210,3 +210,28 @@ paths at local mocks (see [testing.md](testing.md)).
 4. Add `tests/test_providers_*.c` cases (recorded streams) and, where a login or URL shape matters,
    a mock under `tests/e2e/`.
 5. Update [status.md](status.md) and this file.
+
+## Images at the provider boundary
+
+Every request runs omp's image policy before the provider converts messages (`agent.c` →
+`ai_prepare_context_images`, `ai/ai_images.c`):
+
+1. **Count budget** (`clampProviderContextImages`): images in user/developer/tool-result messages past the
+   host's `image-count-budget` are dropped oldest first (Anthropic 90, 600 on the official API / 100 for
+   Claude < 4.6; OpenAI 200; Codex 200 / 2,000 official; Google 200; Antigravity 60, 20 for Claude; Bedrock 90;
+   Cursor 60 / 20; OpenRouter 90; xAI 60; unknown hosts 5; a model's own `imageCountBudget` wins). A message
+   left without content becomes `[image omitted: provider image limit]`.
+2. **STB WebP rewrite** for llama.cpp-backed servers (Ollama, LM Studio, `imageInputDecoder: stb`): WebP history
+   is re-encoded, or replaced by `[image omitted: WebP could not be decoded for this model]`.
+3. **Undecodable images** (full decode, verdicts cached by payload hash) become
+   `[image omitted: undecodable <mime> data (<reason>)]` so one bad payload cannot poison every later request.
+4. **Byte budget** (`clampProviderContextImageBytes`) on budgeted hosts (official Anthropic 120 MB inline within
+   the 128 MB body limit, keeping the newest user / tool-result images; Codex 24 MB; DeepSeek 40 MiB).
+
+The Anthropic provider then applies Claude's per-image contract (`prepareAnthropicImageContext`): any image over
+8000 px per side (2000 px when a request carries more than 20 images) or over 90% of the 10 MiB base64 cap is
+re-encoded (PNG or JPEG q85, the smaller) up to four times, shrinking by the overshoot; compat
+`maxImageDimension` / `maxImagePayloadBytes` override the limits and Claude on Antigravity uses 5 MiB. Images
+entering the context are already normalized (read tool, composer attachments, RPC/ACP prompt images:
+`ai_normalize_images` = `normalizeModelContextImages`): fit within 1568 px, at least 200 px on the short edge,
+smallest of PNG / JPEG / WebP under 500 KiB with omp's quality and scale ladders (`img/imgpipe.c`).

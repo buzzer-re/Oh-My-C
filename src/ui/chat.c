@@ -143,13 +143,55 @@ static void fg_on_bg(tui_tc_t fgslot, tui_tc_t bgslot, char out[48]) {
 
 static void render_user(msgview_t *v, int width, strvec_t *o) {
     char sgr[48];
-    tui_markdown_t *m = tui_markdown_new(v->text, 1, 1);
+    /* display-only collapse: `[Image #N, WxH]` markers show as the composer's `📷 #N` chips */
+    char *shown = ui_collapse_image_markers(v->text, NULL);
+    tui_markdown_t *m = tui_markdown_new(shown, 1, 1);
     if (v->synthetic) snprintf(sgr, sizeof sgr, "%s", tui_fg_seq(TH(), TUI_TC_DIM));
     else fg_on_bg(TUI_TC_USER_MESSAGE_TEXT, TUI_TC_USER_MESSAGE_BG, sgr);
     m->opts.text_sgr = sgr;
     m->opts.bg_slot = TUI_TC_USER_MESSAGE_BG;
+    size_t first = o->n;
     tui_component_render(&m->base, width, o);
     tui_component_destroy(&m->base);
+    /* chips keep their identity color (userBubbleColor renderReference), the bubble fg resumes after */
+    if (strcmp(shown, v->text) && !v->synthetic) {
+        for (int n = 1; n <= 64; n++) {
+            char *label = ui_chip_label(n);
+            bool any = false;
+            for (size_t i = first; i < o->n; i++) any |= strstr(o->v[i], label) != NULL;
+            if (any) {
+                char *c = ui_attachment_sgr(n);
+                size_t ll = strlen(label);
+                for (size_t i = first; i < o->n; i++) {
+                    if (!strstr(o->v[i], label)) continue;
+                    sb_t b = SB_INIT;
+                    for (const char *p = o->v[i]; *p;) {
+                        const char *hit = strstr(p, label);
+                        if (!hit) {
+                            sb_append(&b, p);
+                            break;
+                        }
+                        sb_appendn(&b, p, (size_t)(hit - p));
+                        p = hit + ll;
+                        /* the bubble fg resumes only where prose follows (padding keeps the chip color, as in omp) */
+                        bool prose = false;
+                        for (const char *q = p; *q && !prose;) {
+                            if (*q == '\x1b') {
+                                while (*q && !isalpha((unsigned char)*q) && *q != 'm') q++;
+                                if (*q) q++;
+                            } else prose = *q++ != ' ';
+                        }
+                        sb_appendf(&b, "%s\x1b[1m%s\x1b[22m%s", c, label, prose ? sgr : "");
+                    }
+                    free(o->v[i]);
+                    o->v[i] = sb_detach(&b);
+                }
+                free(c);
+            }
+            free(label);
+        }
+    }
+    free(shown);
 }
 
 /* thinking-display.ts canonicalizeMessage: empty when only dots/ellipses/whitespace */

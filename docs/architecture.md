@@ -159,6 +159,8 @@ usually because Bun, npm packages or Rust crates provide it in omp.
 | `text/search.c` | `crates/pi-natives` grep |
 | `text/yaml.c`, `config/yaml_file.c` | YAML parser used by `utils/src/yaml-config.ts` and frontmatter |
 | `text/fuzzy.c` | fzf-style scorer (omc-only; exercised by tests, not used at runtime) |
+| `img/img.c`, `png.c`, `jpeg.c`, `gif.c`, `webp.c`, `webp_enc.c`, `vp8*.c` | `Bun.Image` (libpng / libjpeg-turbo / giflib / libwebp inside Bun): from-scratch bounds-checked decoders (PNG all color types + Adam7, JPEG baseline/progressive, GIF first frame, WebP VP8/VP8L/ALPH), encoders (PNG, baseline JPEG, lossy WebP), separable resampling; header sniffing = `utils/src/mime.ts` `parseImageMetadata` |
+| `img/imgpipe.c` | `coding-agent/src/utils/image-resize.ts` (`resizeImage`, `formatDimensionNote`), `utils/image-loading.ts` (`loadImageInput`), `tui/src/chat/image-loading.ts` (`imageDecodeFailureReason`, size limits) |
 | `prompt/template.c` | `utils/src/template.ts` (Handlebars) + `utils/src/prompt.ts` (format pass) |
 
 ### AI layer (`packages/ai`, `packages/catalog`)
@@ -182,6 +184,7 @@ usually because Bun, npm packages or Rust crates provide it in omp.
 | `ai/provider_transport.c` | `registry/{cloudflare-ai-gateway,muse-code,snowflake}.ts` prepareModel/prepareRequest, provider branches of `openai-shared.ts`, `github-copilot-headers.ts` |
 | `ai/think_heal.c` | `ai/src/dialect/{thinking,fenced-thinking}.ts` |
 | `ai/judgment_native.c` | `ai/src/judgment/{native,systemone}.ts` |
+| `ai/ai_images.c` | `ai/src/providers/anthropic-images.ts`, `coding-agent/src/session/provider-image-budget.ts`, `utils/image-loading.ts` (`normalizeModelContextImages`, STB WebP rewrite), `tui/src/chat/image-loading.ts` (`modelLacksWebpSupport`), catalog `image-count-budget` / `inline-image-byte-budget` / `request-body-byte-limit` rules |
 | `config/auth.c`, `auth_engine.c`, `auth_custom.c` | `ai/src/auth-storage.ts`, `registry/engine/*`, `registry/oauth/*`, `registry/hooks/*`, `registry/api-key-validation.ts` |
 
 ### Agent and coding agent (`packages/agent`, `packages/coding-agent`)
@@ -202,6 +205,7 @@ usually because Bun, npm packages or Rust crates provide it in omp.
 | `coding/agents.c` | `registry/agent-registry.ts`, `irc/*`, `task/*` spawn paths |
 | `coding/evalhost.c`, `judgment.c` | `eval/*-bridge.ts`, `ai/src/judgment/text.ts` |
 | `session/session.c` | `session/session-manager.ts`, `session-title-slot.ts`, `session-context.ts` |
+| `session/blobs.c` | `session/blob-store.ts`, `session-persistence.ts` (image externalization), `session-loader.ts` (blob resolution) |
 | `config/settings.c` | `coding-agent/src/config/settings.ts` (defaults subset; full table in `assets/tui/settings-ui.json`) |
 | `tools/*` | `coding-agent/src/tools/*.ts` (per-tool table in [tools.md](tools.md)) |
 | `tools/patch.c`, `sloppy.c`, `fuzzy.c`, `diff.c` | `crates/pi-edit` (replace/patch/apply_patch/sloppy, fuzzy ladder) |

@@ -89,8 +89,22 @@ struct ui {
     /* chrome (welcome.c / statusline.c) */
     tui_component_t *welcome;
     bool status_row_occupied; /* the working/idle-title row rendered lines this frame */
+    json_t *att_images; /* pending composer image attachments [{image, path?, w?, h?}] (attach.c) */
 };
 
+
+/* attach.c - composer image attachments (pasted / dropped image paths, clipboard images, chips band) */
+tui_component_t *ui_attach_band_new(ui_t *u); /* also installs the editor paste hook */
+bool ui_attach_paste_clipboard(ui_t *u);      /* app.clipboard.pasteImage (ctrl+v) */
+/* Drop unreferenced attachments, renumber `[Image #N...]` markers densely; returns the kept entries
+ * ([{image, path?}], NULL when none) and the rewritten text (owned). Clears the pending list. */
+json_t *ui_attach_take(ui_t *u, const char *text, char **out_text);
+void ui_attach_clear(ui_t *u);
+bool ui_extract_image_paths(const char *text, strvec_t *out);
+char *ui_attachment_sgr(int n);
+char *ui_chip_label(int n);
+/* `[Image #N, WxH]` markers as chips; `reset` (may be NULL: plain labels) resumes the surrounding color */
+char *ui_collapse_image_markers(const char *text, const char *reset);
 
 /* theme helpers */
 const tui_theme_t *TH(void);

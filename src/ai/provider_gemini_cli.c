@@ -5,6 +5,7 @@
  *
  * The api key is the structured OAuth credential `{"token","projectId",...}` produced by auth.c.
  */
+#include "ai/ai_images.h"
 #include "ai/provider_google.h"
 
 #include "ai/google_cca.h"
@@ -373,6 +374,8 @@ json_t *gemini_cli_build_request(const ai_model_t *m, const ai_context_t *ctx, c
     }
 
     json_t *transformed = ai_transform_messages(ctx->messages, m);
+    /* Claude behind Antigravity is Vertex Anthropic: 8000 px and a 5 MB base64 cap per image (compat rules) */
+    if (anthropic && str_eq(m->provider, "google-antigravity")) ai_anthropic_prepare_images(transformed, m);
     json_t *contents = google_convert_messages(m, transformed);
     json_free(transformed);
     json_t *req = json_obj();

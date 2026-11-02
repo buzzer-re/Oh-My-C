@@ -12,6 +12,7 @@
 #include "core/proc.h"
 #include "tui/color.h"
 #include "tui/composer.h"
+#include "img/img.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -854,22 +855,150 @@ static int64_t estimate_context(const app_t *a) {
     return (int64_t)((double)chars / 4.1);
 }
 
+/* estimateImageTokens on the OpenAI-compatible wire rule (32px patches, `original`: 6000px edge, 10000 patch
+ * budget, x1.2) from the header dimensions; an unreadable header bills as 65535x65535 */
+static int64_t image_tokens(const char *b64) {
+    int w = 65535, h = 65535;
+    if (b64 && *b64) {
+        size_t take = MIN(strlen(b64), (size_t)(4 * ((64 * 1024 + 2) / 3)));
+        size_t n = 0;
+        unsigned char *hd = base64_decode(b64, take - take % 4, &n);
+        img_meta_t m;
+        if (hd && img_sniff(hd, n, &m) && m.w > 0 && m.h > 0) w = m.w, h = m.h;
+        free(hd);
+    }
+    double lw = MAX(w, h);
+    if (lw > 6000) {
+        double sc = 6000 / lw;
+        w = (int)MAX(1.0, floor(w * sc + 0.5));
+        h = (int)MAX(1.0, floor(h * sc + 0.5));
+    }
+    int64_t patches = (int64_t)((w + 31) / 32) * ((h + 31) / 32);
+    if (patches > 10000) {
+        double shrink = sqrt(32.0 * 32.0 * 10000 / ((double)w * h));
+        double sw = w * shrink / 32, sh = h * shrink / 32;
+        double adj = shrink * MIN(floor(sw) / sw, floor(sh) / sh);
+        int64_t rw = (int64_t)floor(w * adj), rh = (int64_t)floor(h * adj);
+        patches = rw <= 0 || rh <= 0 ? 10000 : MIN((int64_t)10000, ((rw + 31) / 32) * ((rh + 31) / 32));
+    }
+    return (int64_t)ceil(patches * 1.2);
+}
+
+/* rough token count of transcript messages (text at ~4.1 chars/token, images by patches) */
+static int64_t estimate_messages(const json_t *msgs, size_t from) {
+    size_t chars = 0;
+    int64_t img = 0;
+    for (size_t i = from; i < json_len(msgs); i++) {
+        const json_t *m = json_at(msgs, i), *c = json_get(m, "content"), *b;
+        if (json_is_str(c)) chars += strlen(json_sv(c));
+        json_arr_foreach(c, k, b) {
+            const char *t = json_get_str(b, "type");
+            if (str_eq(t, "image")) img += image_tokens(json_get_str(b, "data"));
+            else if (str_eq(t, "toolCall")) {
+                char *a = json_dump(json_get(b, "arguments"), 0);
+                chars += strlen(a) + (json_get_str(b, "name") ? strlen(json_get_str(b, "name")) : 0);
+                free(a);
+            } else {
+                const char *x = json_get_str(b, "text") ? json_get_str(b, "text") : json_get_str(b, "thinking");
+                if (x) chars += strlen(x);
+            }
+        }
+    }
+    return (int64_t)((double)chars / 4.1) + img;
+}
+
+static int64_t prompt_tokens(const json_t *usage) {
+    if (json_get(usage, "contextTokens")) return MAX(0, json_get_int(usage, "contextTokens", 0));
+    return json_get_int(usage, "input", 0) + json_get_int(usage, "cacheRead", 0) + json_get_int(usage, "cacheWrite", 0);
+}
+
+/* omp SessionStats.getContextBreakdown: the newest successful assistant turn after the last history rewrite
+ * (compaction / branch summary) anchors on its provider-reported prompt tokens, and the messages after it are
+ * estimated; without an anchor, system prompt + tools + every message are estimated. Never negative. */
+static int64_t context_used(app_t *a) {
+    agent_t *ag = a->agent;
+    static size_t memo_n = (size_t)-1;
+    static const void *memo_last, *memo_model;
+    static int64_t memo_used;
+    pthread_mutex_lock(&ag->mu);
+    json_t *msgs = ag->messages;
+    size_t n = json_len(msgs), floor_i = 0;
+    const void *last = n ? (const void *)json_at(msgs, n - 1) : NULL;
+    if (n == memo_n && last == memo_last && memo_model == (const void *)a->model) {
+        pthread_mutex_unlock(&ag->mu);
+        return memo_used;
+    }
+    int64_t floor_ts = 0;
+    for (size_t i = n; i-- > 0;)
+        if (json_get_bool(json_at(msgs, i), "historyRewrite", false)) {
+            floor_i = i + 1;
+            floor_ts = json_get_int(json_at(msgs, i), "timestamp", 0);
+            break;
+        }
+    int64_t used = -1;
+    for (size_t i = n; i-- > floor_i;) {
+        const json_t *m = json_at(msgs, i);
+        if (!str_eq(json_get_str(m, "role"), "assistant")) continue;
+        const char *stop = json_get_str(m, "stopReason");
+        if (str_eq(stop, "error") || str_eq(stop, "aborted")) continue;
+        if (json_get_int(m, "timestamp", 0) < floor_ts) continue; /* kept from before the rewrite */
+        int64_t pt = prompt_tokens(json_get(m, "usage"));
+        if (pt <= 0) continue;
+        used = pt + estimate_messages(msgs, i + 1);
+        break;
+    }
+    /* unanchored: -(message estimate + 1), so the system prompt / tools part is added fresh every frame */
+    if (used < 0) used = -1 - estimate_messages(msgs, 0);
+    pthread_mutex_unlock(&ag->mu);
+    memo_n = n, memo_last = last, memo_model = a->model;
+    memo_used = used;
+    return used;
+}
+
 static void fill_context(segctx_t *c) {
     app_t *a = c->a;
     c->window = a->model ? a->model->context_window : 0;
-    int64_t used = a->last_context_tokens > 0 ? a->last_context_tokens : estimate_context(a);
+    int64_t used = context_used(a);
+    if (used < 0) used = estimate_context(a) + (-used - 1);
     c->ctx_tokens = used;
     c->pct = c->window > 0 ? (double)used / (double)c->window * 100 : -1;
     c->auto_compact = settings_bool("compaction.enabled", true);
 }
 
 /* auto-compaction trigger and speculation start, percent of the window (-1 = none) */
+/* resolveSpeculationMethod: the first available method of compaction.methodOrder; local methods (snapcompact
+ * on a model that takes images, shake) are instant, so nothing is speculated */
+static bool speculates(const ai_model_t *m) {
+    static const char *const def[] = {"remote", "snapcompact", "handoff", "shake", "soft"};
+    json_t *order = settings_get("compaction.methodOrder");
+    size_t n = json_is_arr(order) ? json_len(order) : 5;
+    for (size_t i = 0; i < n; i++) {
+        const char *c = json_is_arr(order) ? json_sv(json_at(order, i)) : def[i];
+        if (!c) continue;
+        if (!strcmp(c, "remote")) {
+            bool native = m && settings_bool("compaction.remoteEnabled", true) &&
+                          (str_eq(m->api, "openai-responses") || str_eq(m->api, "openai-codex-responses") ||
+                           str_eq(m->api, "azure-openai-responses") ||
+                           (str_eq(m->provider, "anthropic") && str_eq(m->api, "anthropic-messages")));
+            if (native || !str_empty(settings_str("compaction.remoteEndpoint", ""))) return true;
+        } else if (!strcmp(c, "snapcompact")) {
+            if (m && m->input_image && !model_compat_bool(m, "stripImageInput", false)) return false;
+        } else if (!strcmp(c, "shake")) {
+            return false;
+        } else if (!strcmp(c, "handoff") || !strcmp(c, "soft")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void compaction_bounds(const ai_model_t *m, int64_t window, double *thr, double *spec) {
     *thr = *spec = -1;
     if (window <= 0 || !settings_bool("compaction.enabled", true)) return;
     int64_t t = app_compaction_threshold(m, window);
     if (t <= 0 || t > window) return;
     *thr = (double)t / window * 100;
+    if (!speculates(m)) return;
     int64_t lead = MIN(32000, MAX(8192, (int64_t)floor(t * 0.125)));
     *spec = (double)MAX(0, t - lead) / window * 100;
 }

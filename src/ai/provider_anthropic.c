@@ -2,6 +2,7 @@
  * provider_anthropic.c - Anthropic Messages API streaming provider (api "anthropic-messages").
  * Port of packages/ai/src/providers/anthropic.ts (+ anthropic-identity.ts, claude-code-fingerprint.ts).
  */
+#include "ai/ai_images.h"
 #include "ai/provider_anthropic.h"
 
 #include <math.h>
@@ -1496,6 +1497,7 @@ json_t *anthropic_build_request(const ai_model_t *m, const ai_context_t *ctx, co
     }
 
     json_t *transformed = ai_transform_messages(ctx->messages, m);
+    ai_anthropic_prepare_images(transformed, m); /* Claude's image contract: 8000 px, 10 MB base64 */
     json_t *msgs = convert_messages(m, transformed, oauth, thinking_on);
     json_free(transformed);
 

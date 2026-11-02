@@ -130,12 +130,14 @@ $(O)/embedded.o: $(O)/embedded.c
 # Unit tests link only the objects they exercise (several stub catalog/auth symbols).
 CORE_OBJ := $(O)/core/core.o $(O)/core/json.o $(O)/core/fs.o $(O)/core/proc.o $(O)/core/embed.o $(O)/embedded.o
 NET_OBJ  := $(O)/net/http.o
+CODEC_OBJ := $(patsubst src/%.c,$(O)/%.o,$(wildcard src/img/*.c))
+IMG_OBJ  := $(O)/ai/ai_images.o $(CODEC_OBJ)
 T_test_text          := $(CORE_OBJ) $(patsubst src/%.c,$(O)/%.o,$(wildcard src/text/*.c))
 T_test_tui           := $(CORE_OBJ) $(patsubst src/%.c,$(O)/%.o,$(wildcard src/tui/*.c))
 GOOGLE_OBJ := $(O)/ai/provider_google.o $(O)/ai/google_schema.o $(O)/ai/google_auth.o
-T_test_providers_ag  := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provider_transport.o $(O)/ai/provider_anthropic.o $(GOOGLE_OBJ)
+T_test_providers_ag  := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provider_transport.o $(O)/ai/provider_anthropic.o $(GOOGLE_OBJ) $(IMG_OBJ)
 T_test_providers_google := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provider_transport.o $(GOOGLE_OBJ) $(O)/ai/google_cca.o \
-                        $(O)/ai/provider_gemini_cli.o $(O)/ai/think_heal.o
+                        $(O)/ai/provider_gemini_cli.o $(O)/ai/think_heal.o $(IMG_OBJ)
 T_test_providers_oai := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provider_transport.o $(O)/ai/provider_openai_completions.o \
                         $(O)/ai/provider_openai_responses.o $(O)/ai/provider_ollama.o
 T_test_http          := $(CORE_OBJ) $(NET_OBJ)
@@ -156,9 +158,12 @@ T_test_outsink       := $(CORE_OBJ) $(O)/tools/outsink.o
 T_test_judgment      := $(CORE_OBJ) $(O)/coding/judgment.o $(O)/prompt/template.o $(O)/text/yaml.o
 T_test_memory        := $(LIB_OBJ)
 T_test_planreview    := $(LIB_OBJ)
+T_test_img           := $(CORE_OBJ) $(CODEC_OBJ)
+T_test_img_jpeg      := $(CORE_OBJ) $(CODEC_OBJ)
+T_test_img_webp      := $(CORE_OBJ) $(CODEC_OBJ)
 UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
               test_chrome test_providers_google test_toolcards test_cursor test_judgment test_auth test_memory test_outsink test_catalog test_model_resolver test_compaction_point \
-              test_planreview
+              test_planreview test_img test_img_jpeg test_img_webp
 
 .SECONDEXPANSION:
 $(O)/tests/%: tests/%.c $$(T_$$*)

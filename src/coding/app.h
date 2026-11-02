@@ -124,6 +124,13 @@ void app_free(app_t *a);
 
 /* run a prompt to completion (blocking). images: array of image blocks or NULL. */
 int app_prompt(app_t *a, const char *text, json_t *images);
+/* app_prompt plus hidden notices (owned array of messages, may be NULL) placed before the user message */
+int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices);
+/* composer attachments [{image, path?}] (owned): images normalized for the model, a hidden
+ * image-attachment notice naming each source file (omp renderAttachmentSourceNotice) */
+int app_prompt_attachments(app_t *a, const char *text, json_t *attachments);
+/* steer a running agent with a composer submission and its attachments (owned) */
+void app_steer_attachments(app_t *a, const char *text, json_t *attachments);
 /* run a hidden prompt (not shown in transcripts), e.g. goal continuations; custom_type tags the session entry */
 int app_prompt_hidden(app_t *a, const char *text, const char *custom_type);
 int app_set_model(app_t *a, const char *pattern, char **err);

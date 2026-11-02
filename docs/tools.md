@@ -199,3 +199,15 @@ reader thread handles events. The e2e suite runs it against a scripted adapter
 4. Add a card renderer in `src/ui/tools/` ([tui.md](tui.md)), an e2e check in
    `tests/e2e/run.sh`, and a request-parity check if the wire changes.
 5. Update [status.md](status.md) and this file.
+
+### Images in `read`
+
+Images are recognized by magic bytes (PNG, JPEG, GIF, WebP), never by extension (a `.png` holding text reads
+as text). Files over 20 MB fail with `Image file too large: <size> exceeds 20.0MB limit.`; an image that does not
+decode fails with `<path> is not a decodable <mime> image: Image: decode failed`. Otherwise the image is
+normalized for the model when `images.autoResize` is on (default) and the result is the text note
+`Read image file [<mime>]`, ` (displayed as <mime>)` when re-encoded, and on a size change
+`[Image: original WxH, displayed at wxh. Multiply coordinates by S to map to original image.]`, followed by the
+image block. Models without image input get `Image metadata:` (MIME, bytes, dimensions, channels, alpha)
+instead. SVG rasterization (`:img`), HEIC/AVIF via ffmpeg, video frames and `?q=` image questions are not
+implemented.

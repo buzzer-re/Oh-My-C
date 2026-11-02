@@ -262,6 +262,7 @@ typedef struct {
     ui_t *u;
     char *text;
     const char *hidden; /* custom type of a hidden prompt (goal continuation, advisor), NULL for user input */
+    json_t *attachments; /* [{image, path?}] composer image attachments (owned, may be NULL) */
 } job_t;
 
 static void start_hidden(ui_t *u, const char *text, const char *ctype);
@@ -293,7 +294,7 @@ static void *worker_main(void *p) {
     app_t *a = j->u->app;
     size_t before = json_len(a->agent->messages);
     if (j->hidden) app_prompt_hidden(a, j->text, j->hidden);
-    else app_prompt(a, j->text, NULL);
+    else app_prompt_attachments(a, j->text, j->attachments);
     json_t *run = json_arr();
     pthread_mutex_lock(&a->agent->mu);
     for (size_t i = before; i < json_len(a->agent->messages); i++) json_push(run, json_clone(json_at(a->agent->messages, i)));
@@ -392,7 +393,10 @@ static void start_hidden(ui_t *u, const char *text, const char *ctype) {
     }
 }
 
-static void start_prompt(ui_t *u, const char *text) {
+static void start_prompt_with(ui_t *u, const char *text, json_t *attachments);
+static void start_prompt(ui_t *u, const char *text) { start_prompt_with(u, text, NULL); }
+
+static void start_prompt_with(ui_t *u, const char *text, json_t *attachments) {
     if (!u->app->model) { /* omp AgentSession.prompt: "No model selected." */
         char *agent_dir = omc_agent_path("");
         char *m = xasprintf("No model selected.\n\nUse /login, set an API key environment variable, or create %s/models.yml\n\n"
@@ -409,10 +413,12 @@ static void start_prompt(ui_t *u, const char *text) {
     job_t *j = xcalloc(1, sizeof(*j));
     j->u = u;
     j->text = xstrdup(text);
+    j->attachments = attachments;
     u->worker_running = true;
     if (pthread_create(&u->worker, NULL, worker_main, j) != 0) {
         u->worker_running = false;
         add_notice(u, "error", "failed to start agent thread");
+        json_free(j->attachments);
         free(j->text);
         free(j);
     }
@@ -1849,6 +1855,11 @@ static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
     tui_editor_add_history(ed, t);
     history_append(t, u->app->cwd);
     tui_editor_clear(ed);
+    /* staged image attachments: keep the referenced ones, renumbered (compactImageMarkers) */
+    char *compacted = NULL;
+    json_t *attachments = ui_attach_take(u, t, &compacted);
+    free(t);
+    t = compacted;
     if (t[0] == '/' && handle_command(u, t)) {
         free(t);
         tui_request_render(u->tui);
@@ -1860,13 +1871,17 @@ static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
         return;
     }
     if (u->worker_running) {
-        agent_steer(u->app->agent, msg_user_text(t));
+        if (attachments) app_steer_attachments(u->app, t, attachments);
+        else agent_steer(u->app->agent, msg_user_text(t));
+        attachments = NULL;
         char *m = xasprintf("Queued (steer): %s", t);
         add_notice(u, "info", m);
         free(m);
     } else {
-        start_prompt(u, t);
+        start_prompt_with(u, t, attachments);
+        attachments = NULL;
     }
+    json_free(attachments);
     free(t);
     tui_request_render(u->tui);
 }
@@ -1897,6 +1912,10 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
             u->last_ctrl_c = now;
             add_notice(u, "info", "Press ctrl+c again to exit");
         }
+        return true;
+    }
+    if (tui_key_matches(k, "ctrl+v")) { /* app.clipboard.pasteImage */
+        ui_attach_paste_clipboard(u);
         return true;
     }
     if (tui_key_matches(k, "ctrl+d") && tui_editor_is_empty(u->editor)) {
@@ -2027,8 +2046,9 @@ int run_interactive_mode(app_t *a, const char *initial) {
     u.loader = tui_loader_new(u.tui, "Working…");
     u.loader->base.hidden = true;
     tui_container_add(root, ui_status_row_new(&u, &u.loader->base));
-    tui_container_add(root, ui_editor_gap_new(&u));
     u.editor = tui_editor_new();
+    tui_container_add(root, ui_attach_band_new(&u)); /* attachment chips, between the status row and the gap */
+    tui_container_add(root, ui_editor_gap_new(&u));
     tui_editor_set_on_submit(u.editor, on_submit, &u);
     ui_chrome_setup(&u);
     history_load(u.editor);

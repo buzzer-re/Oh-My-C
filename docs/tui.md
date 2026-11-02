@@ -147,3 +147,25 @@ same in omc.
 
 Treat any visible difference from omp as a bug. When omp is updated, re-run the harness against
 the new version and refresh the captures. See [testing.md](testing.md).
+
+## Image attachments (`ui/attach.c`)
+
+Ports of omp's input-controller image paste flow and `prompt/{composer-attachments,attachment-chips}.ts`:
+
+- A bracketed paste (or drag and drop) whose text is one or more image paths (`.png .jpg .jpeg .gif .webp`;
+  absolute, `~/`, `./`, `file://`, quoted or shell-escaped; a whole-text path with spaces such as macOS
+  screenshot names) attaches each image instead of inserting the text. An empty bracketed paste and `ctrl+v`
+  (`app.clipboard.pasteImage`) read an image from the clipboard (`wl-paste` / `xclip` / `osascript`), falling
+  back to the clipboard text; clipboard images are saved as `local://pasted-image-<hash>.<ext>`.
+- Each attachment is normalized for the model (`images.autoResize`) and the buffer gets an atomic chip
+  `📷 #N` (bold, identity color from omp's six-color palette) that expands to `[Image #N, WxH]` on submit.
+  Referenced attachments draw as 14x6 rounded cards (`📷 #N` title, centered icon, `WxH` caption) between the
+  status row and the editor gap.
+- On submit, unreferenced attachments are dropped and markers renumbered (`compactImageMarkers`); each image
+  with a file behind it sends the hidden `image-attachment` notice (`prompts/system/image-attachment.md`) as a
+  developer turn before the user message. User bubbles show `[Image #N, ...]` markers as chips.
+- Errors follow omp: `Image not found at <path>` (with the SSH hint), `Pasted path is not a supported image`,
+  `Image file too large: ...`, `Failed to read pasted image path`, `Clipboard is empty`.
+
+Not ported: Kitty-graphics thumbnails inside the cards (the icon fallback is what omp shows in terminals
+without Kitty Unicode placeholders), video contact-sheet attachments, chip hyperlinks.
