@@ -177,7 +177,9 @@ json_t *kbcfg_load_dir(const char *agent_dir, bool write_back, char **path_out) 
         cfg = kbcfg_migrate_names(raw, &migrated);
         if (write_back && (migrated || strcmp(wb, read))) {
             json_t *o = ordered(cfg);
-            char *text = json_len(o) ? yaml_dump(o) : xstrdup("{}\n");
+            char *text = json_len(o) ? yaml_dump(o) : xstrdup("{}");
+            size_t tl = strlen(text);
+            if (tl && text[tl - 1] == '\n') text[tl - 1] = 0; /* stringifyYamlConfig: no final newline */
             if (fs_write(wb, text, strlen(text)) == 0) persisted = wb;
             free(text);
             json_free(o);

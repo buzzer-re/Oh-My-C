@@ -1609,7 +1609,7 @@ static bool handle_command(ui_t *u, const char *line) {
                 shown++;
             }
             json_free(list);
-            if (!shown) add_notice(u, "info", "No messages yet.");
+            if (!shown) add_notice(u, "info", tree ? "No entries in session" : "No messages to branch from");
             else show_picker(u, 5);
         }
     } else if (!strcmp(cmd, "retry")) {
