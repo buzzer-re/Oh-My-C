@@ -13,6 +13,7 @@
 #include "coding/app.h"
 #include "coding/goal.h"
 #include "coding/loop.h"
+#include "coding/tokrate.h"
 #include "core/fs.h"
 #include "tui/ansi.h"
 #include "tui/components.h"
@@ -77,6 +78,7 @@ struct ui {
     bool expand_tools;
     bool hide_thinking;
     bool hide_tool_activity;  /* display.hideToolActivity (app.tools.toggleVisibility) */
+    tokrate_t tokrate;        /* generation tok/s of the main session (composer.tokenRate) */
     int64_t last_ctrl_c;      /* app.clear double-press window (500 ms) */
     int64_t last_escape;      /* app.interrupt double-press window (doubleEscapeAction) */
     /* coalesced streaming updates */

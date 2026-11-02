@@ -184,6 +184,21 @@ static char *result_display(const char *tool, const tool_result_t *r) {
 
 static void ui_listener(void *ud, const agent_event_t *ev) {
     ui_t *u = ud;
+    /* meter generation per session (AgentSession tokenRate): message start / streamed deltas / billed end */
+    if (ev->message && str_eq(json_get_str(ev->message, "role"), "assistant")) {
+        if (ev->type == AGENT_EV_MESSAGE_START) {
+            tokrate_begin(&u->tokrate, json_get_num(ev->message, "timestamp", (double)now_ms()));
+        } else if (ev->type == AGENT_EV_MESSAGE_UPDATE && ev->ai &&
+                   (ev->ai->type == AI_EV_TEXT_DELTA || ev->ai->type == AI_EV_THINKING_DELTA ||
+                    ev->ai->type == AI_EV_TOOLCALL_DELTA) && ev->ai->delta) {
+            tokrate_push(&u->tokrate, ev->ai->delta, ev->ai->delta_len, (double)now_ms());
+        } else if (ev->type == AGENT_EV_MESSAGE_END) {
+            const json_t *dur = json_get(ev->message, "duration");
+            double end = json_is_num(dur) ? json_get_num(ev->message, "timestamp", 0) + json_get_num(ev->message, "duration", 0)
+                                          : (double)now_ms();
+            tokrate_end(&u->tokrate, json_get_num(json_get_obj(ev->message, "usage"), "output", 0), end);
+        }
+    }
     if (ev->type == AGENT_EV_MESSAGE_UPDATE) {
         json_t *c = json_clone(ev->message);
         pthread_mutex_lock(&u->mu);
@@ -3234,6 +3249,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     u.app = a;
     u.hide_thinking = settings_bool("hideThinkingBlock", false);
     u.hide_tool_activity = settings_bool("display.hideToolActivity", false);
+    tokrate_init(&u.tokrate);
     tui_hyperlinks_apply_setting(settings_str("tui.hyperlinks", "auto")); /* applyHyperlinkSetting */
     tui_set_terminal_background_light(str_eq(tui_detect_theme_name(), "light"));
     kbcfg_init_global(); /* KeybindingsManager.create(): agent-dir keybindings.yml (+ legacy .json migration) */
@@ -3391,6 +3407,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_ac_default_free(ac);
     hmap_free(&u.tools, NULL);
     json_free(u.pending_partial);
+    tokrate_destroy(&u.tokrate);
     if (g_move_ov) {
         tui_component_destroy(g_move_ov);
         g_move_ov = NULL;

@@ -1,7 +1,6 @@
 /* termcaps.c - hyperlink policy, image protocols and inline image rendering (see termcaps.h). */
 #include "tui/termcaps.h"
 
-#include "config/settings.h"
 #include "core/fs.h"
 #include "core/proc.h"
 #include "img/img.h"
@@ -741,10 +740,10 @@ int tui_image_lift(const char *line) {
 
 /* ---------- Image component ---------- */
 
-tui_image_opts_t tui_image_default_opts(int viewport_rows) {
+tui_image_opts_t tui_image_default_opts(int viewport_rows, int max_cols_setting, int max_rows_setting) {
     tui_image_opts_t o = {0};
-    o.max_cols = (int)settings_num("tui.maxInlineImageColumns", 100);
-    int setting = MAX(0, (int)settings_num("tui.maxInlineImageRows", 20));
+    o.max_cols = max_cols_setting;
+    int setting = MAX(0, max_rows_setting);
     int frac = viewport_rows > 0 ? viewport_rows * 6 / 10 : 0;
     if (setting == 0) o.max_rows = frac;
     else if (frac > 0) o.max_rows = MIN(setting, frac);

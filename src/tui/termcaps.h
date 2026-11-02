@@ -75,8 +75,9 @@ typedef struct {
     int max_cols; /* 0: no cap (beyond the width) */
     int max_rows; /* 0: no cap */
 } tui_image_opts_t;
-/* resolveImageOptions: tui.maxInlineImageColumns / tui.maxInlineImageRows against the viewport height */
-tui_image_opts_t tui_image_default_opts(int viewport_rows);
+/* resolveImageOptions: tui.maxInlineImageColumns / tui.maxInlineImageRows (defaults 100 / 20; rows 0 = 60% of
+ * the viewport) against the viewport height */
+tui_image_opts_t tui_image_default_opts(int viewport_rows, int max_cols_setting, int max_rows_setting);
 /* Image.render: the rows of one inline image at `width` columns (graphics when a protocol is active,
  * else the text fallback colored by `fallback_sgr`). `key` names the logical image so repaints reuse
  * its Kitty id. A needed Kitty transmit is queued (tui_image_take_pending). */

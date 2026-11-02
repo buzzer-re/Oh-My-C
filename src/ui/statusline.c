@@ -1587,7 +1587,7 @@ tui_component_t *ui_status_new(ui_t *u) {
 /* ---------- working / idle status row and the editor top gap ---------- */
 
 /* band composer: the title docks right-aligned, dim italic, on the working row */
-char *ui_title_trailer(ui_t *u) {
+static char *title_only(ui_t *u) {
     if (!str_eq(composer_shape(), "band")) return NULL;
     const char *t = u->app->session ? u->app->session->title : NULL;
     if (!t || !*t) return NULL;
@@ -1595,6 +1595,29 @@ char *ui_title_trailer(ui_t *u) {
     char *r = xasprintf("\x1b[2;3m%s\x1b[23;22m", s);
     free(s);
     return r;
+}
+
+/* #tokenRateLabel: `⚡ 12.3 tok/s` (dim), live while streaming, the last reading between turns */
+static char *token_rate_label(ui_t *u) {
+    if (!settings_bool("composer.tokenRate", false)) return NULL;
+    double rate = tokrate_rate(&u->tokrate, (double)now_ms());
+    if (rate < 0) return NULL;
+    char *t = xasprintf("%s %.1f tok/s", tui_sym("icon.throughput"), rate);
+    char *r = fg(TUI_TC_DIM, t);
+    free(t);
+    return r;
+}
+
+/* #workingRowTrailer: the tok/s readout, then the band-mode title */
+char *ui_title_trailer(ui_t *u) {
+    char *rate = token_rate_label(u), *title = title_only(u);
+    if (rate && title) {
+        char *r = xasprintf("%s  %s", rate, title);
+        free(rate);
+        free(title);
+        return r;
+    }
+    return rate ? rate : title;
 }
 
 typedef struct {

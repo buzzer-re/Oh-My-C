@@ -677,7 +677,9 @@ static const tui_component_vt MV_VT;
 bool ui_inline_images(void) { return settings_bool("terminal.showImages", true) && tui_image_protocol() != TUI_IMG_NONE; }
 
 void ui_image_rows(const char *b64, const char *mime, const char *key, int width, strvec_t *out) {
-    tui_image_opts_t io = tui_image_default_opts(g_ui && g_ui->tui ? tui_term(g_ui->tui)->rows : 0);
+    tui_image_opts_t io = tui_image_default_opts(g_ui && g_ui->tui ? tui_term(g_ui->tui)->rows : 0,
+                                                 (int)settings_num("tui.maxInlineImageColumns", 100),
+                                                 (int)settings_num("tui.maxInlineImageRows", 20));
     char sgr[48];
     snprintf(sgr, sizeof sgr, "%s", tui_fg_seq(TH(), TUI_TC_TOOL_OUTPUT));
     tui_image_render(b64, mime, key, NULL, width, &io, sgr, out);
@@ -2178,6 +2180,20 @@ void ui_chat_rebuild(ui_t *u) {
     json_free(path);
     hmap_free(&pending, NULL);
     toolcard_set_replaying(false);
+    if (!u->view && !u->worker_running) { /* #reseedTokenRate: the last completed turn after a history swap */
+        agent_t *ag = u->app->agent;
+        double out = 0, dur = 0;
+        pthread_mutex_lock(&ag->mu);
+        for (size_t i = json_len(ag->messages); i-- > 0;) {
+            const json_t *m = json_at(ag->messages, i);
+            if (!str_eq(json_get_str(m, "role"), "assistant") || !json_is_num(json_get(m, "duration"))) continue;
+            out = json_get_num(json_get_obj(m, "usage"), "output", 0);
+            dur = json_get_num(m, "duration", 0);
+            break;
+        }
+        pthread_mutex_unlock(&ag->mu);
+        tokrate_seed(&u->tokrate, out, dur);
+    }
     if (!u->view) {
         ui_signals_session_title(); /* resume / switch / branch: the title follows the session */
         ui_recap_invalidate();
