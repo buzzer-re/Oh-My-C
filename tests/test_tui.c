@@ -178,7 +178,7 @@ static void test_keys(void) {
 
     /* keybindings: defaults + JSON override */
     tui_keybindings_t *kb = tui_keybindings_new();
-    n = tui_keys_decode_all("\x1b\r", 2, k, 8);
+    n = tui_keys_decode_all("\n", 1, k, 8); /* ctrl+j; alt+enter is the editor's hard-coded fallback */
     CHECK(tui_keybindings_matches(kb, &k[0], "tui.input.newLine"));
     CHECK(!tui_keybindings_matches(kb, &k[0], "tui.input.submit"));
     tui_key_free(&k[0]);
@@ -1153,8 +1153,97 @@ static void test_loop(void) {
     close(pfd[0]);
 }
 
+/* app.* registry, user overrides, fallback keys (app-keybindings.ts KeybindingsManager) */
+static bool kb_has(tui_keybindings_t *kb, const char *action, const char *chord) {
+    const strvec_t *v = tui_keybindings_get(kb, action);
+    return v && strvec_contains(v, chord);
+}
+
+static void test_app_keybindings(void) {
+    tui_keybindings_t *kb = tui_keybindings_new();
+    CHECK(tui_keybindings_action_count() >= 77);
+    CHECK_STR(tui_keybindings_action_at(0), "tui.editor.cursorUp");
+    CHECK(kb_has(kb, "app.retry", "f5") && kb_has(kb, "app.retry", "alt+r"));
+    CHECK(kb_has(kb, "app.model.cycleBackward", "ctrl+shift+p"));
+    CHECK(kb_has(kb, "app.message.followUp", "ctrl+q") && kb_has(kb, "app.message.followUp", "ctrl+enter"));
+    CHECK(kb_has(kb, "app.message.dequeue", "shift+up"));
+    CHECK(tui_keybindings_get(kb, "app.session.new")->n == 0); /* unbound by default */
+    CHECK(!kb_has(kb, "tui.input.newLine", "alt+enter"));     /* upstream: shift+enter, ctrl+j */
+    CHECK(tui_keybindings_key_bound(kb, "ctrl+d", "tui.editor.deleteCharForward"));
+
+    /* user config replaces an action's keys; ids are lowercased like omp's normalizeKeyId */
+    json_t *cfg = json_parse_str("{\"app.retry\": [], \"app.thinking.toggle\": \"CTRL+Y\", \"app.exit\": [\"ctrl+d\", \"ctrl+x\"],"
+                                 " \"app.plan.toggle\": \"ctrl+q\", \"app.clear\": 5, \"my.action\": \"alt+z\"}");
+    tui_keybindings_set_user(kb, cfg);
+    json_free(cfg);
+    CHECK(tui_keybindings_get(kb, "app.retry")->n == 0);
+    CHECK(kb_has(kb, "app.thinking.toggle", "ctrl+y") && !kb_has(kb, "app.thinking.toggle", "ctrl+t"));
+    CHECK(kb_has(kb, "app.exit", "ctrl+x"));
+    CHECK(kb_has(kb, "app.clear", "ctrl+c")); /* a non-string value is ignored */
+    CHECK(kb_has(kb, "my.action", "alt+z"));
+    /* ctrl+q claimed by another action drops out of the follow-up defaults; ctrl+enter stays */
+    CHECK(!kb_has(kb, "app.message.followUp", "ctrl+q") && kb_has(kb, "app.message.followUp", "ctrl+enter"));
+    CHECK(kb_has(kb, "app.message.dequeue", "shift+up"));
+    tui_key_t k[2];
+    size_t n = tui_keys_decode_all("\x11", 1, k, 2); /* ctrl+q */
+    CHECK(n == 1 && tui_keybindings_matches(kb, &k[0], "app.plan.toggle") &&
+          !tui_keybindings_matches(kb, &k[0], "app.message.followUp"));
+    tui_key_free(&k[0]);
+    tui_keybindings_free(kb);
+}
+
+/* emacs kill ring, yank-pop and character jump (editor.ts + kill-ring.ts) */
+static void test_kill_ring_jump(void) {
+    tui_editor_t *ed = tui_editor_new();
+    feed(ed, "one two three");
+    feed(ed, "\x17\x17"); /* ctrl+w twice: the kills accumulate into one entry */
+    check_text(ed, "one ");
+    CHECK(ed->kills.n == 1);
+    CHECK_STR(ed->kills.v[0], "two three");
+    feed(ed, "X ");
+    feed(ed, "\x17"); /* a new entry after typing */
+    CHECK(ed->kills.n == 2);
+    feed(ed, "\x19"); /* ctrl+y yanks the newest */
+    check_text(ed, "one X ");
+    feed(ed, "\x1b" "y"); /* alt+y swaps it for the older entry */
+    check_text(ed, "one two three");
+    feed(ed, "\x1b" "y"); /* and cycles back */
+    check_text(ed, "one X ");
+    feed(ed, "a\x1b" "y"); /* yank-pop only right after a yank */
+    check_text(ed, "one X a");
+    /* ctrl+k at the end of a line kills the newline (joins), appended to a preceding forward kill */
+    tui_editor_set_text(ed, "ab\ncd");
+    feed(ed, "\x1b[A\x05"); /* up, end */
+    feed(ed, "\x0b");
+    check_text(ed, "abcd");
+    CHECK_STR(ed->kills.v[ed->kills.n - 1], "\n");
+
+    /* jump: ctrl+] then a character moves to its next occurrence; ctrl+alt+] backwards */
+    tui_editor_set_text(ed, "alpha beta\ngamma");
+    feed(ed, "\x1b[A\x01"); /* up, ctrl+a */
+    feed(ed, "\x1d" "b");
+    CHECK(ed->cl == 0 && ed->cc == 6);
+    feed(ed, "\x1d" "g"); /* across lines */
+    CHECK(ed->cl == 1 && ed->cc == 0);
+    feed(ed, "\x1b\x1d" "a"); /* backwards from line 1 col 0 reaches line 0 */
+    CHECK(ed->cl == 0 && ed->cc == 9);
+    feed(ed, "\x1d" "z"); /* no match: cursor stays */
+    CHECK(ed->cl == 0 && ed->cc == 9);
+    feed(ed, "\x1d\x1d" "q"); /* the jump key again cancels; q is typed */
+    check_text(ed, "alpha betqa\ngamma");
+    /* alt+enter is upstream's hard-coded newline fallback */
+    tui_editor_set_text(ed, "x");
+    feed(ed, "\x1b\r");
+    check_text(ed, "x\n");
+    tui_editor_remember_draft(ed);
+    CHECK(ed->history.n && str_eq(ed->history.v[ed->history.n - 1], "x\n"));
+    tui_component_destroy(&ed->base);
+}
+
 int main(void) {
     test_keys();
+    test_app_keybindings();
+    test_kill_ring_jump();
     test_ansi();
     test_theme();
     test_markdown();

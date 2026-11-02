@@ -164,9 +164,10 @@ T_test_img           := $(CORE_OBJ) $(CODEC_OBJ)
 T_test_img_jpeg      := $(CORE_OBJ) $(CODEC_OBJ)
 T_test_img_webp      := $(CORE_OBJ) $(CODEC_OBJ)
 T_test_guards        := $(LIB_OBJ)
+T_test_keybindings   := $(CORE_OBJ) $(O)/tui/keys.o $(O)/config/keybindings.o $(O)/text/yaml.o
 UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
               test_chrome test_providers_google test_toolcards test_cursor test_judgment test_auth test_memory test_outsink test_catalog test_model_resolver test_compaction_point \
-              test_planreview test_img test_img_jpeg test_img_webp test_btw test_queue test_guards
+              test_planreview test_img test_img_jpeg test_img_webp test_btw test_queue test_guards test_keybindings
 
 .SECONDEXPANSION:
 $(O)/tests/%: tests/%.c $$(T_$$*)
