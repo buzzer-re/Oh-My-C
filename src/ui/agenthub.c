@@ -1985,12 +1985,13 @@ static void set_notice(hub_t *h, char *owned) {
 }
 
 static void activate(hub_t *h, const json_t *ref) {
+    ui_t *u = h->u; /* hub_close frees h */
     set_notice(h, NULL);
     char *id = xstrdup(json_get_str(ref, "id")), *err = NULL;
-    if (ui_focus_agent(h->u, id, &err)) hub_close(h);
+    if (ui_focus_agent(u, id, &err)) hub_close(h);
     else set_notice(h, err);
     free(id);
-    tui_request_render(h->u->tui);
+    tui_request_render(u->tui);
 }
 
 static void revive_selected(hub_t *h) {

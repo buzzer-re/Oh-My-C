@@ -250,6 +250,10 @@ static json_t *job_results_message(app_t *a) {
 static void on_agent_event(void *ud, const agent_event_t *ev) {
     app_t *a = ud;
     if (ev->type == AGENT_EV_AGENT_START) strvec_free(&a->retry_notes);
+    if ((ev->type == AGENT_EV_AGENT_START || ev->type == AGENT_EV_TURN_START) && a->rewind_graveyard) {
+        json_free(a->rewind_graveyard);
+        a->rewind_graveyard = NULL;
+    }
     /* power.sleepPrevention: held while a run is in flight (subagents run inside the parent's run) */
     if (ev->type == AGENT_EV_AGENT_START && !a->opts.subagent) power_acquire();
     if (ev->type == AGENT_EV_AGENT_END && !a->opts.subagent) power_release();
@@ -301,7 +305,10 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
         /* cut the context back to the checkpoint and retain only the report */
         pthread_mutex_lock(&a->agent->mu);
         json_t *msgs = a->agent->messages;
-        while ((int64_t)json_len(msgs) > a->checkpoint_index) json_free(json_arr_remove(msgs, json_len(msgs) - 1));
+        /* the cut includes this turn's assistant message, which ev->message (and the listeners after this one,
+         * e.g. RPC) still read: park the removed messages instead of freeing them during the event */
+        if (!a->rewind_graveyard) a->rewind_graveyard = json_arr();
+        while ((int64_t)json_len(msgs) > a->checkpoint_index) json_push(a->rewind_graveyard, json_arr_remove(msgs, json_len(msgs) - 1));
         pthread_mutex_unlock(&a->agent->mu);
         json_t *ctx = json_obj();
         json_set_str(ctx, "report", a->pending_rewind);
@@ -1761,6 +1768,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
 
 void app_free(app_t *a) {
     if (!a) return;
+    json_free(a->rewind_graveyard);
     xdnotice_free(a);
     json_free(a->queue_snapshot);
     a->queue_snapshot = NULL;

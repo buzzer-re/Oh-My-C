@@ -178,6 +178,18 @@ Parallel suites and omp comparisons have OOM-killed it, so when more than one bu
   scripts must stay executable).
 - `#ifdef __APPLE__` code never compiles on Linux, so run `build-tools/check_apple.sh` after touching it.
 
+## Sanitizer runs (ASan + UBSan)
+
+glibc lets some heap overflows and use-after-frees run without crashing, so they can pass every test on Linux and still crash on macOS. That happened on 2026-11-02 with `/settings` (options overflow), the Agent Hub (use after `hub_close`) and an RPC turn-end rewind (freed event message). Before a release or after memory-heavy changes, build a sanitized copy in a separate worktree (it uses ~2.6 GB) and run both suites:
+```sh
+git worktree add --detach ../omc-asan main && cd ../omc-asan
+LDFLAGS="-fsanitize=address,undefined" make -B -j3 OPT="-O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
+export ASAN_OPTIONS=detect_leaks=0:halt_on_error=0:log_path=$PWD/san/asan UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=0:log_path=$PWD/san/ubsan
+mkdir -p san && ./tests/e2e/run.sh            # unit tests: build build/obj/<plat>/tests/test_* the same way and run each
+ls san/                                       # must be empty
+```
+Keep `halt_on_error=0` and the `log_path` settings. Otherwise the first finding aborts each run and is printed into the test output, failing hundreds of checks and hiding later findings. At `-O1`, GCC also prints a few known false-positive warnings (a NULL format string in `xvasprintf`/`sb_vappendf`, and `memmem` in `highlight.c`).
+
 ## Image pipeline
 
 - `tests/test_img.c`, `test_img_jpeg.c`, `test_img_webp.c`: codecs against Pillow-decoded references generated

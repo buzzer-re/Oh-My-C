@@ -107,7 +107,16 @@ static void load_defs(void) {
     g_defs = xcalloc(json_len(ss) + 1, sizeof *g_defs);
     json_t *s;
     json_arr_foreach(ss, i, s) {
+        /* a skipped definition leaves its slot for the next one: release its options and start from zero, or
+         * nopt carries over and the next definition writes past its own options array */
         sdef_t *d = &g_defs[g_ndefs];
+        for (size_t k = 0; k < d->nopt; k++) {
+            free(d->opts[k].value);
+            free(d->opts[k].label);
+            free(d->opts[k].description);
+        }
+        free(d->opts);
+        memset(d, 0, sizeof *d);
         d->path = json_get_str(s, "path");
         d->schema = json_get_str(s, "schemaType");
         d->type = json_get_str(s, "type");

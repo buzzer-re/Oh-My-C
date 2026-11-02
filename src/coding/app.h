@@ -93,6 +93,8 @@ struct app {
     int64_t checkpoint_index;   /* agent message count at checkpoint (0 = none) */
     char *checkpoint_entry;     /* session entry id of the checkpoint tool result */
     char *pending_rewind;       /* report waiting for turn end */
+    json_t *rewind_graveyard;   /* messages a rewind cut during TURN_END; freed at the next turn/run start
+                                 * (the event and later listeners still point at the turn's assistant) */
     bool checkpoint_pending;    /* checkpoint tool ran; boundary captured at its message_end */
     char *plan_file; /* plan-mode state planFilePath (local://PLAN.md or the agent's local://<slug>-plan.md) */
     bool plan_paused, plan_has_entered, plan_reentry;

@@ -2594,7 +2594,7 @@ static int64_t prune_stale(app_t *a) {
         collect_useless(ents.v, ents.n, start, &c, &u);
         for (size_t i = 0; i < u.n; i++) vec_push(&c, u.v[i]);
         vec_free(&u);
-        qsort(c.v, c.n, sizeof *c.v, cmp_cand);
+        if (c.n > 1) qsort(c.v, c.n, sizeof *c.v, cmp_cand);
     }
     int64_t saved = 0;
     if (c.n) {
