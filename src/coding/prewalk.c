@@ -434,7 +434,7 @@ static const ai_model_t *resolve_cmd(const char *sel, char **level, char **msg) 
     *level = NULL;
     const ai_model_t *m = slash_resolve_session_model(sel, level);
     if (!m) {
-        *msg = xasprintf("Model \"%s\" not found", sel);
+        *msg = xasprintf("Model \"%s\" not found. Run \"omc models\" to see available models.", sel); /* resolveCliModel */
         return NULL;
     }
     char *key = app_api_key_for(m);

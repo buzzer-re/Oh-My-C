@@ -1830,7 +1830,14 @@ static void reapply_thinking(app_t *a, const ai_model_t *prev) {
     const char *dl = json_get_str(m->thinking, "defaultLevel");
     if (dl && effort_parse(dl, &d) == 0) base = d;
     ai_effort_t eff = base == EFFORT_OFF ? EFFORT_OFF : model_clamp_effort(m, base);
-    if (eff != a->thinking) app_set_thinking(a, eff);
+    if (eff == a->thinking) return;
+    if (prev && eff == model_clamp_effort(prev, a->thinking)) {
+        /* omp already stores the level clamped to the previous model: nothing changes there */
+        a->thinking = eff;
+        a->agent->thinking = eff;
+        return;
+    }
+    app_set_thinking(a, eff);
 }
 
 size_t app_role_cycle(app_t *a, app_role_entry_t **out, int *current) {

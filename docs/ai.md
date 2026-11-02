@@ -227,8 +227,15 @@ There are two levels:
    classified. Context overflow (by message text, or a provider `errorFlags: ["contextOverflow"]`)
    runs the compaction ladder with a retry of the turn (see [agent.md](agent.md#compaction-srccodingcompactionc));
    a pass that cannot make progress ends the turn instead of retrying. Otherwise retryable errors are retried up to
-   `retry.maxRetries` (10) with exponential backoff (`retry.baseDelayMs` 2000, capped at
-   `retry.maxDelayMs` 60000), showing a countdown notice. `retry.enabled: false` turns this off.
+   `retry.maxRetries` (10). The wait is omp's turn-recovery rule: `retry.baseDelayMs` (500) doubled per attempt,
+   capped at 8 s, with up to 25% downward jitter (`mr_retry_backoff_ms`, fractional ms like omp's `delayMs`). A
+   reason window raises it only when the error carries no parsed retry-after and is not a usage limit
+   (`mr_reason_window_ms`): 5 s for concurrency caps, 30 s for rate limits, and 45–75 s for model capacity only
+   with a 429/402 status or `429` / `MODEL_CAPACITY_EXHAUSTED` / `MODEL_CAPACITY_EXCEEDED` / resource-exhausted
+   wording (a plain 503 or 529 keeps the exponential base). A provider retry-after wins when longer; a wait above
+   `retry.maxDelayMs` (5 min) fails fast. `retry.enabled: false` turns this off.
+3. **Model fallback** (`try_retry_fallback` in `app.c`, chains in `config/model_resolver.c`): `retry.fallbackChains`
+   is walked on retryable and hard errors (see [status.md](status.md), "Retry model fallback").
 
 Before the transport retry decision, a provider hook (`ai_post_ex_t.on_failure`) may resend the
 request itself or fail it at once. Anthropic uses it for:
@@ -246,9 +253,6 @@ request itself or fail it at once. Anthropic uses it for:
   wrapping up · resets …`) and the model is steered once per wrap-up window
   (`anthropic-usage-wrap-up.md`). omp's sibling-account health gate before auto-accept is not ported
   (omc does not rotate Claude accounts).
-
-omp's retry-fallback model chains (switch to another model after failures) are not implemented. See
-[status.md](status.md).
 
 ## Transports (`src/net/`)
 
