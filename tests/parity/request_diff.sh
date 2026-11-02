@@ -4,7 +4,9 @@
 #   tests/parity/request_diff.sh [prompt] [cwd]
 # Env: RD_DIR (scratch, default $TMPDIR/omc-reqdiff), OMP_BIN (default omp), RD_SETUP=<script> runs
 # `$RD_SETUP <agent-dir>` for both agent dirs before the run (e.g. to add skills/rules/settings),
-# RD_WORKSETUP=<script> runs `$RD_WORKSETUP <cwd>` before each app's run (reseed files a tool changes).
+# RD_WORKSETUP=<script> runs `$RD_WORKSETUP <cwd>` before each app's run (reseed files a tool changes),
+# RD_MODE=rpc drives `--mode rpc` (tests/parity/rpc_drive.py) instead of `-p`, so session continuations print
+# mode suppresses (todo reminders) reach the mock; the RPC events (todo_reminder, notice) land in $RD_DIR/<app>.out.
 # The tool messages of the last request each app sent are written to $RD_DIR/tools.{omp,omc} and diffed.
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -34,7 +36,11 @@ run() { # log-name env-var agent-dir binary
     [ -n "${RD_WORKSETUP:-}" ] && "$RD_WORKSETUP" "$WORK"
     MOCK_LOG="$D/$1.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $port >/dev/null 2>&1 & local mp=$!
     for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null && break; sleep 0.1; done
-    (cd "$WORK" && env MOCK_KEY=x OMC_NO_TITLE=1 PI_NO_TITLE=1 "$2=$3" timeout 90 "$4" -p "$PROMPT" </dev/null >"$D/$1.out" 2>&1)
+    if [ "${RD_MODE:-print}" = rpc ]; then # session continuations print mode suppresses (todo reminders)
+        (cd "$WORK" && env MOCK_KEY=x OMC_NO_TITLE=1 PI_NO_TITLE=1 "$2=$3" timeout 150 python3 -I "$ROOT/tests/parity/rpc_drive.py" "$4" "$PROMPT" >"$D/$1.out" 2>&1)
+    else
+        (cd "$WORK" && env MOCK_KEY=x OMC_NO_TITLE=1 PI_NO_TITLE=1 "$2=$3" timeout 90 "$4" -p "$PROMPT" </dev/null >"$D/$1.out" 2>&1)
+    fi
     kill $mp 2>/dev/null; wait $mp 2>/dev/null
 }
 run omp PI_CODING_AGENT_DIR "$D/ompa" "${OMP_BIN:-omp}"
