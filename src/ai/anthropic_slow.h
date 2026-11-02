@@ -11,6 +11,7 @@
 #define OMC_ANTHROPIC_SLOW_H
 
 #include "core/core.h"
+#include "core/json.h"
 #include "net/http.h"
 
 typedef struct {
@@ -53,6 +54,9 @@ bool anthropic_slow_stop(const char *lane, const char *reason); /* reason: "user
 int64_t anthropic_slow_active_resets_at(const char *lane);       /* epoch seconds, -1 when not active */
 /* formatUsageLimitLabel of the lane's status (owned), NULL outside wrap-up and low priority */
 char *anthropic_slow_label(const char *lane, bool low_priority);
+/* AnthropicSlowModeController.status: the lane's UsageLimitState ({stage: "low_priority", resetsAtSec,
+ * allowanceLeftPercent?} | {stage: "wrap_up", resetsAtSec?, extraUsage}), owned; NULL outside both stages */
+json_t *anthropic_slow_status(const char *lane, bool low_priority);
 /* wrapUpHintKey: window epoch when the model should be told to wrap up, -1 otherwise */
 int64_t anthropic_slow_wrap_up_hint_key(const char *lane, bool low_priority);
 /* formatSlowModeResetClock (owned) */

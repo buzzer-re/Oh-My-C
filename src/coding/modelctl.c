@@ -312,6 +312,14 @@ char *app_anthropic_slow_label(app_t *a) {
     return r;
 }
 
+json_t *app_usage_limit_state(app_t *a) {
+    if (!a->model || !str_eq(a->model->provider, "anthropic")) return NULL;
+    char *lane = lane_copy(a);
+    json_t *r = lane ? anthropic_slow_status(lane, str_eq(settings_str("providers.anthropic.slowMode", "off"), "auto")) : NULL;
+    free(lane);
+    return r;
+}
+
 /* ---------- slow-mode hooks (SettingsStreamSlowModeContext) ---------- */
 
 static bool hook_low_priority(void *ud) {

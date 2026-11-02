@@ -16,8 +16,6 @@ bool ui_usage_dashboard_open(void);
 /* the classic per-account report the dashboard's Details view shows (owned, "\n"-joined lines) */
 char *ui_usage_detail(const json_t *reports, double now, int width, const char *active_provider, const json_t *identity,
                       const json_t *selectors, const json_t *unavailable);
-/* getUsageReportingModelSelectors: sorted "provider/model" of available models the reports map to (owned) */
-json_t *ui_usage_model_selectors(const json_t *reports);
 /* per-local-day {day, cost, requests} of the assistant requests in the session files under sessions_dir (the
  * activity heatmap's input; owned array, oldest first) */
 void ui_usage_load_activity(const char *sessions_dir, json_t **points_out);

@@ -1041,49 +1041,6 @@ char *ui_usage_detail(const json_t *reports, double now, int width, const char *
     return s;
 }
 
-/* getUsageReportingModelSelectors: available models whose provider reports map to a quantitative usage scope */
-static bool codex_spark(const char *id) { return id && !strcmp(id, "gpt-5.3-codex-spark"); }
-
-json_t *ui_usage_model_selectors(const json_t *reports) {
-    strvec_t sel = {0};
-    for (size_t i = 0; i < catalog_count(); i++) {
-        const ai_model_t *m = catalog_at(i);
-        if (!catalog_model_available(m)) continue;
-        bool hit = false;
-        json_t *r;
-        json_arr_foreach(reports, k, r) {
-            if (!str_eq(json_get_str(r, "provider"), m->provider) || hit) continue;
-            json_t *l;
-            json_arr_foreach(json_get_arr(r, "limits"), q, l) {
-                const json_t *sc = json_get_obj(l, "scope");
-                const char *lid = json_get_str(l, "id");
-                bool scoped;
-                if (str_eq(m->provider, "anthropic")) {
-                    const char *tier = json_get_str(sc, "tier");
-                    scoped = json_get_bool(sc, "shared", false) || (tier && str_istr(m->id, tier));
-                } else if (str_eq(m->provider, "zai"))
-                    scoped = lid && (str_starts(lid, "zai:requests:") || str_starts(lid, "zai:tokens:") || str_starts(lid, "zai:credits:"));
-                else if (str_eq(m->provider, "openai-codex")) {
-                    bool plan = str_eq(lid, "openai-codex:primary") || str_eq(lid, "openai-codex:secondary") || str_eq(lid, "openai-codex:spend-cap");
-                    scoped = codex_spark(m->id) ? (lid && str_starts(lid, "openai-codex:spark:")) : plan;
-                } else scoped = json_get_bool(sc, "shared", false) || str_eq(json_get_str(sc, "modelId"), m->id);
-                double f;
-                const char *st = json_get_str(l, "status");
-                if (scoped && (str_eq(st, "exhausted") || usage_used_fraction(l, &f))) hit = true;
-            }
-        }
-        if (!hit) continue;
-        char *s = xasprintf("%s/%s", m->provider, m->id);
-        if (!strvec_contains(&sel, s)) strvec_push(&sel, s);
-        free(s);
-    }
-    strvec_sort(&sel);
-    json_t *out = json_arr();
-    for (size_t i = 0; i < sel.n; i++) json_push_str(out, sel.v[i]);
-    strvec_free(&sel);
-    return out;
-}
-
 /* ============================================================================================
  * Dashboard component
  * ============================================================================================ */
@@ -1469,7 +1426,7 @@ static const strvec_t *dash_detail_lines(dash_t *d, int inner) {
     if (d->detail_w != inner) {
         strvec_free(&d->detail_cache);
         const char *prov = d->u->app->model ? d->u->app->model->provider : NULL;
-        json_t *id = usage_active_identity(prov), *sel = ui_usage_model_selectors(d->reports);
+        json_t *id = usage_active_identity(prov), *sel = usage_model_selectors(d->reports);
         char *s = ui_usage_detail(d->reports, (double)now_ms(), inner, prov, id, sel, d->unavailable);
         d->detail_cache = str_split(s, "\n");
         free(s);

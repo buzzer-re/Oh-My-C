@@ -117,7 +117,11 @@ char *usage_fmt_compact(double n);
 char *usage_one_line(const char *s);
 
 /* `/usage` text outside the TUI (slash-commands/helpers/usage-report.ts renderUsageReports), owned */
-char *usage_report_text(const json_t *reports, int64_t now, const char *active_provider, const json_t *active_identity);
+char *usage_report_text(const json_t *reports, int64_t now, const char *active_provider, const json_t *active_identity,
+                        const json_t *selectors);
+/* getUsageReportingModelSelectors: sorted "provider/model" of the available models the reports map to a
+ * quantitative usage scope (owned array) */
+json_t *usage_model_selectors(const json_t *reports);
 /* the fallback when no provider reported (session-manager tallies): stats {input, output, cacheRead, cacheWrite,
  * totalTokens, premiumRequests, cost} */
 char *usage_session_text(const json_t *stats);

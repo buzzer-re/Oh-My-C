@@ -493,6 +493,30 @@ char *anthropic_slow_label(const char *lane, bool lp) {
     return r;
 }
 
+json_t *anthropic_slow_status(const char *lane, bool lp) {
+    pthread_mutex_lock(&g_mu);
+    lane_t *l = lane_get(lane);
+    int64_t now = wall_ms();
+    json_t *r = NULL;
+    int64_t resets = lp && lane_is_active(l, now) ? l->phase.resets_at : -1;
+    if (resets >= 0) {
+        r = json_obj();
+        json_set_str(r, "stage", "low_priority");
+        json_set_int(r, "resetsAtSec", resets);
+        if (l->budget_utilization >= 0) json_set_int(r, "allowanceLeftPercent", MIN(100, MAX(0, 100 - lround(l->budget_utilization * 100))));
+    } else {
+        wrap_up_t *w = current_wrap(l, now);
+        if (w) {
+            r = json_obj();
+            json_set_str(r, "stage", "wrap_up");
+            if (w->resets_at >= 0) json_set_int(r, "resetsAtSec", w->resets_at);
+            json_set_bool(r, "extraUsage", w->extra_usage);
+        }
+    }
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+
 int64_t anthropic_slow_wrap_up_hint_key(const char *lane, bool lp) {
     pthread_mutex_lock(&g_mu);
     lane_t *l = lane_get(lane);

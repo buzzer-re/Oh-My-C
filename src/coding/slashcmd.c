@@ -755,7 +755,9 @@ char *slash_usage_report_text(app_t *a) {
     if (json_len(reports) > 0) {
         const char *prov = a && a->model ? a->model->provider : NULL;
         json_t *id = usage_active_identity(prov);
-        r = usage_report_text(reports, now_ms(), prov, id);
+        json_t *sel = usage_model_selectors(reports);
+        r = usage_report_text(reports, now_ms(), prov, id, sel);
+        json_free(sel);
         json_free(id);
     } else {
         json_t *st = app_stats(a);

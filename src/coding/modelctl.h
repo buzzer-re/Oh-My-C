@@ -36,6 +36,7 @@ bool app_slow_mode_enabled(app_t *a);
 bool app_set_slow_mode(app_t *a, bool enabled);
 const char *app_slow_mode_scope(app_t *a); /* "session" | "global" | NULL */
 char *app_anthropic_slow_label(app_t *a);  /* status-line usage-limit label (owned) or NULL */
+json_t *app_usage_limit_state(app_t *a);    /* getUsageLimitState: RPC get_state.usageLimit (owned) or NULL */
 
 void app_slow_hooks_init(app_t *a);
 int64_t app_anthropic_wrap_up_key(app_t *a); /* wrap-up window to steer the model about once, -1 none */

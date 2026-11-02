@@ -905,6 +905,49 @@ char *usage_one_line(const char *s) {
     return r;
 }
 
+/* getUsageReportingModelSelectors: available models whose provider reports map to a quantitative usage scope */
+static bool codex_spark(const char *id) { return id && !strcmp(id, "gpt-5.3-codex-spark"); }
+
+json_t *usage_model_selectors(const json_t *reports) {
+    strvec_t sel = {0};
+    for (size_t i = 0; i < catalog_count(); i++) {
+        const ai_model_t *m = catalog_at(i);
+        if (!catalog_model_available(m)) continue;
+        bool hit = false;
+        json_t *r;
+        json_arr_foreach(reports, k, r) {
+            if (!str_eq(json_get_str(r, "provider"), m->provider) || hit) continue;
+            json_t *l;
+            json_arr_foreach(json_get_arr(r, "limits"), q, l) {
+                const json_t *sc = json_get_obj(l, "scope");
+                const char *lid = json_get_str(l, "id");
+                bool scoped;
+                if (str_eq(m->provider, "anthropic")) {
+                    const char *tier = json_get_str(sc, "tier");
+                    scoped = json_get_bool(sc, "shared", false) || (tier && str_istr(m->id, tier));
+                } else if (str_eq(m->provider, "zai"))
+                    scoped = lid && (str_starts(lid, "zai:requests:") || str_starts(lid, "zai:tokens:") || str_starts(lid, "zai:credits:"));
+                else if (str_eq(m->provider, "openai-codex")) {
+                    bool plan = str_eq(lid, "openai-codex:primary") || str_eq(lid, "openai-codex:secondary") || str_eq(lid, "openai-codex:spend-cap");
+                    scoped = codex_spark(m->id) ? (lid && str_starts(lid, "openai-codex:spark:")) : plan;
+                } else scoped = json_get_bool(sc, "shared", false) || str_eq(json_get_str(sc, "modelId"), m->id);
+                double f;
+                const char *st = json_get_str(l, "status");
+                if (scoped && (str_eq(st, "exhausted") || usage_used_fraction(l, &f))) hit = true;
+            }
+        }
+        if (!hit) continue;
+        char *s = xasprintf("%s/%s", m->provider, m->id);
+        if (!strvec_contains(&sel, s)) strvec_push(&sel, s);
+        free(s);
+    }
+    strvec_sort(&sel);
+    json_t *out = json_arr();
+    for (size_t i = 0; i < sel.n; i++) json_push_str(out, sel.v[i]);
+    strvec_free(&sel);
+    return out;
+}
+
 /* ---------- /usage text (ACP / non-TUI) ---------- */
 
 static const char *meta_str(const json_t *r, const char *k) {
@@ -1026,7 +1069,8 @@ static char *ascii_bar(bool has, double f) {
 
 static int cmp_str(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
-char *usage_report_text(const json_t *reports, int64_t now, const char *active_provider, const json_t *active_identity) {
+char *usage_report_text(const json_t *reports, int64_t now, const char *active_provider, const json_t *active_identity,
+                        const json_t *selectors) {
     json_t *disp = usage_collapse_shared(reports), *r;
     double latest = -INFINITY;
     json_arr_foreach(disp, i, r) latest = MAX(latest, json_get_num(r, "fetchedAt", 0));
@@ -1045,6 +1089,18 @@ char *usage_report_text(const json_t *reports, int64_t now, const char *active_p
         char *name = usage_provider_name(prov);
         sb_appendf(&b, "\n\n%s", name);
         free(name);
+        char *pfx = xasprintf("%s/", prov);
+        bool any_model = false;
+        json_t *sel;
+        json_arr_foreach(selectors, si, sel) {
+            if (!str_starts(json_sv(sel), pfx)) continue;
+            if (!any_model) sb_append(&b, "\n  Models with usage data");
+            any_model = true;
+            char *o = usage_one_line(json_sv(sel));
+            sb_appendf(&b, "\n    %s", o);
+            free(o);
+        }
+        free(pfx);
         json_t *peers = json_arr();
         json_arr_foreach(disp, i, r) if (str_eq(json_get_str(r, "provider"), prov)) json_push(peers, json_clone(r));
         strvec_t notes = {0};

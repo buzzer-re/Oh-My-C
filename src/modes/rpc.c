@@ -1537,6 +1537,8 @@ static json_t *state_json(rpc_t *r) {
     json_set_bool(s, "slowModeSupported", app_slow_mode_supported(a));
     json_set_bool(s, "slowModeEnabled", app_slow_mode_enabled(a));
     if (app_slow_mode_scope(a)) json_set_str(s, "slowModeScope", app_slow_mode_scope(a));
+    json_t *ul = app_usage_limit_state(a);
+    if (ul) json_set(s, "usageLimit", ul);
     json_set_int(s, "messageCount", (int64_t)json_len(a->agent->messages));
     pthread_mutex_lock(&a->agent->mu);
     json_set(s, "systemPrompt", json_clone(a->agent->system_prompt));

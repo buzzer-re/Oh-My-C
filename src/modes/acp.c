@@ -8,6 +8,7 @@
 #include "ai/ai_images.h"
 #include "config/model_resolver.h"
 #include "config/settings.h"
+#include "config/usage.h"
 #include "core/fs.h"
 #include "mcp/mcp.h"
 #include "tools/approval.h"
@@ -2528,9 +2529,25 @@ static int64_t clamp_limit(const json_t *params, int64_t lo, int64_t hi, int64_t
     return (int64_t)MAX((double)lo, MIN((double)hi, d));
 }
 
+/* `_omp/usage`: every account's provider usage report (fetchUsageReports), answered off the reader thread */
+static void *usage_ext_thread(void *arg) {
+    json_t *id = arg, *r = json_obj();
+    json_set(r, "reports", usage_fetch_reports(NULL));
+    reply(id, r);
+    json_free(id);
+    return NULL;
+}
+
 /* extMethod: `_session/steering` and the omp session-browser helpers */
 static void handle_ext(acp_t *a, const char *method, const json_t *id, const json_t *params) {
     if (!strcmp(method, STEERING_METHOD)) return handle_steering(a, id, params);
+    if (!strcmp(method, "_omp/usage")) {
+        pthread_t t;
+        json_t *idc = json_clone(id);
+        if (pthread_create(&t, NULL, usage_ext_thread, idc) == 0) pthread_detach(t);
+        else usage_ext_thread(idc);
+        return;
+    }
     if (!strcmp(method, "_omp/sessions/listAll") || !strcmp(method, "_omp/chats/byCwd")) {
         bool by_cwd = !strcmp(method, "_omp/chats/byCwd");
         const char *cwd = json_get_str(params, "cwd");
