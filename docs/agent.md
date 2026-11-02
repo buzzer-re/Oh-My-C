@@ -16,7 +16,9 @@ loop:
   assistant = stream_assistant()        # transform_context → prepare_request → ai_stream
   message_end(assistant)
   if TTSR aborted the stream → should_retry(-1) injects the rule, restart the turn
-  if error/aborted and should_retry(attempt) → retry the turn
+  if error/aborted: each tool call gets a synthetic never-ran result (emitted now, added below), then
+    should_retry(attempt) → REPLAY: drop the turn and request again
+                          → PRESERVE / CONTINUE: keep the turn + results (+ the hook's reminder), continue
   run tool calls (see below) → toolResult messages
   turn_end
   stop if error, aborted, or max_turns reached
@@ -33,6 +35,12 @@ agent_end(messages added in this run)
   `Skipped due to queued user message.`. **Follow-ups** (`agent_follow_up`) are delivered only
   when the run would otherwise stop. Modes expose these as RPC `steer` / `follow_up`, and the TUI
   queues them from the composer.
+- **Failed turns** (agent-loop.ts `createAbortedToolResult`): every tool call of a turn that ended in error or
+  aborted gets a synthetic error result (`Tool call was not executed because the provider stream ended with an error
+  before the tool could run: <error>` / `Tool execution was aborted: <error>`, details `{__synthetic, source:
+  assistant_stop_error|assistant_stop_aborted, executed: false, upstreamError}`), emitted as a tool execution. The
+  request transform keeps an errored turn's calls paired with these results (or `aborted`), so turn recovery can
+  continue a preserved turn without re-running anything.
 - **Abort** (`agent_abort`) sets `agent->cancel`, which providers, tools, HTTP and retry waits
   poll. Pending tool calls get `Tool execution was aborted`.
 - **Events** (`agent_event_t`, serialized by `agent_event_to_json` in omp's shape): `agent_start`,
@@ -81,7 +89,7 @@ in `app.c`:
 | `on_stream_delta` | TTSR matching and the stream loop guard (`thinkloop.c`): sees deltas, block starts, thinking ends and a final `AI_EV_DONE`; `AGENT_STREAM_INTERRUPT` aborts the stream and runs `should_retry(-1)` (TTSR, Gemini header runaway), `AGENT_STREAM_ERROR` ends the turn as an empty retryable error carrying `agent->stream_error` (thinking loop) |
 | `before_tool` | plan-mode gating (read-only working tree) |
 | `after_tool` | central output post-processing and artifact spill (`tool_postprocess_result`, [tools.md](tools.md)), TTSR tool reminders |
-| `should_retry` | TTSR injection and the Gemini tool-call reminder (`attempt == -1`), overflow → compaction, transient error backoff ([ai.md](ai.md#retries-and-fallback)); a retried `Thinking loop detected` turn gets the `thinking-loop-redirect` notice |
+| `should_retry` | TTSR injection and the Gemini tool-call reminder (`attempt == -1`), overflow → compaction, turn recovery and transient error backoff ([ai.md](ai.md#retries-and-fallback)); returns `AGENT_RETRY_NONE`, `_REPLAY` (drop the failed turn), `_PRESERVE` (keep it with its synthetic tool results, spends a retry attempt) or `_CONTINUE` (keep it and add `*append`, the stream-stall reminder); a retried `Thinking loop detected` turn gets the `thinking-loop-redirect` notice |
 
 omp's user-facing extension system (TypeScript hooks, custom tools and commands under
 `extensibility/`) is not ported. Host programs add tools through the RPC `set_host_tools` command or

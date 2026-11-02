@@ -763,6 +763,7 @@ the plugin manager omc lacks), omp commands omc does not port error with `is not
 | Terminal title + OSC 7501 program status | utils/run-status.ts, title-generator.ts | `src/ui/signals.c` | ✅ | no OSC 133;A resend (omc writes no OSC 133 zones), no TSP/Tern/Windows paths |
 | Update check | main.ts | — | ⛔ | inert: no release feed for omc; setting hidden |
 | Auto-thinking classifier | auto-thinking/classifier.ts | `autothink.c` | ✅ | on-device bucket question ⛔ |
+| Turn recovery after mid-stream drops (stall-continue reminder, preserved tool turns, replay rules) | session/turn-recovery.ts, error/flags.ts | `turn_recovery.c` | 🟡 | reasonless-abort resumption, malformed-function-call continuation (`malformed-function-call-retry.md`), message `errorId` ❌ |
 | Todo reminders, unexpected-stop detection, tool-call loop redirect, fabricated-result abort, loop guard | session/todo-tracker.ts, unexpected-stop-classifier.ts, tool-call-loop-redirect.ts, stream-guards.ts, ai/utils/thinking-loop.ts | `guards.c`, `thinkloop.c` | 🟡 | fabricated-result abort needs in-band tool calling (not implemented) |
 | Magic keywords (ultrathink/orchestrate/workflow/jevify) | modes/magic-keywords.ts | `keywords.c` | 🟡 | `workflowz` notice withheld (eval agent()/workpool() missing) |
 | Sleep prevention | power-assertion-backend.ts | `src/coding/power.c` | ✅ | `systemd-inhibit` / `caffeinate` children; no ScreenSaver inhibit |

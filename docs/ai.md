@@ -239,8 +239,27 @@ There are two levels:
      chat completions / Responses, Anthropic and Ollama (`accept_empty_response` turns it off).
    Once data has streamed, nothing is retried here. The e2e mock answers retryable `fail:` statuses with
    `retry-after-ms: 0` (`MOCK_FAIL_RETRY_AFTER_MS`) so these retries are immediate in the suite.
-2. **Turn** (`hook_should_retry` in `app.c`): an assistant message that ended in error is
-   classified. Context overflow (by message text, or a provider `errorFlags: ["contextOverflow"]`)
+2. **Turn** (`hook_should_retry` in `app.c`, predicates in `coding/turn_recovery.c`): an assistant message that
+   ended in error is classified with omp's `AIError.classifyMessage` / `retriable` (flags.ts patterns verbatim;
+   usage-limit wording and the rate-limit reason stay the transport's approximations; omc's own connection wording
+   from `net/http.c` counts as transient, and a premature stream close stands in for the `incomplete-stream` errorId
+   omp's providers attach). Turn recovery (turn-recovery.ts) then decides:
+   - `isRetryableError`: never replays a turn whose text was already shown (committed), or one with images, server
+     tools or tool calls, unless every call is paired with a synthetic `executed: false` result and the error is
+     retriable; replayed turns are dropped from the context. Text is not committed for subagents and print-mode text
+     output (`app->text_buffered`, omp `setTextOutputCommitted(false)`), so their partial text replays.
+   - A tool turn interrupted by a mid-stream transport failure (`classifyResolvedInterruptedToolTurn`: idle stall,
+     HTTP/2 reset, premature close, truncated envelope) and any retriable failure whose calls never ran keep the
+     failed turn and its synthetic results (`AGENT_RETRY_PRESERVE`): the next request shows the model its calls did
+     not run.
+   - `handleCommittedTextStreamStall`: a socket close, Codex steer rejection or mid-stream transport failure after
+     text was shown keeps the partial turn, appends the hidden `stream-stall-continue.md` developer message (attempt
+     n/3; `Agent.appendMessage`, so no message event and not persisted) and continues at once; at most 3 per prompt
+     (`STREAM_STALL_CONTINUE_MAX_RETRIES`), then the error stays. `retry.enabled: false` turns it off.
+   - A drop before any output is retried by the transport (item 1).
+   Reasonless aborts, malformed-function-call and empty/unexpected-stop continuations, credential rotation and
+   the Fireworks/usage-limit paths of omp's recovery are not part of this.
+   Beyond that: context overflow (by message text, or a provider `errorFlags: ["contextOverflow"]`)
    runs the compaction ladder with a retry of the turn (see [agent.md](agent.md#compaction-srccodingcompactionc));
    a pass that cannot make progress ends the turn instead of retrying. Otherwise retryable errors are retried up to
    `retry.maxRetries` (10). The wait is omp's turn-recovery rule: `retry.baseDelayMs` (500) doubled per attempt,
@@ -275,7 +294,7 @@ request itself or fail it at once. Anthropic uses it for:
 
 | Transport | Implementation | Used by |
 |---|---|---|
-| HTTP/1.1 client | `net/http.c`: TLS via OpenSSL with hostname/IP verification, keep-alive pool (16), chunked and gzip decoding, `HTTP(S)_PROXY`/`NO_PROXY` (CONNECT for TLS), redirects, connect/idle/total timeouts, cancellation, body caps (64 MB buffered by default) | everything |
+| HTTP/1.1 client | `net/http.c`: TLS via OpenSSL with hostname/IP verification, keep-alive pool (16), chunked and gzip decoding, a peer close (FIN before the last chunk / Content-Length, or RST) mid-body fails at once with Bun's `ECONNRESET: The socket connection was closed unexpectedly. …` (a silent connection is the stream watchdog's; `SO_KEEPALIVE` with the kernel's timers, as omp sets no TCP keepalive itself), `HTTP(S)_PROXY`/`NO_PROXY` (CONNECT for TLS), redirects, connect/idle/total timeouts, cancellation, body caps (64 MB buffered by default) | everything |
 | SSE | `sse_parser_t` in `net/http.c`; `ai_sse_post` adds retries | Anthropic, OpenAI, Google, Copilot, ... |
 | NDJSON / raw stream | `ai_stream_post` | Ollama |
 | WebSocket (RFC 6455) | `net/ws.c`: masked client frames, fragmentation, ping/pong, close echo, 16 MiB message cap, wss via CONNECT proxy | GitLab Duo agent |
