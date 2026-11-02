@@ -586,6 +586,8 @@ static void emit_entry(json_t *out, const json_t *e) {
         if (skill) {
             json_set_bool(m, "display", true);
             if (json_get(e, "details")) json_set(m, "details", json_clone(json_get(e, "details")));
+        } else if (str_eq(json_get_str(e, "customType"), "xdev-mount-notice") && json_get(e, "details")) {
+            json_set(m, "details", json_clone(json_get(e, "details"))); /* announced-mount replay (xdnotice.c) */
         }
         json_t *c = json_get(e, "content");
         if (attr && json_is_str(c)) {

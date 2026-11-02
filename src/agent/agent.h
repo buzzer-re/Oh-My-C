@@ -54,6 +54,8 @@ struct agent_tool {
     int intent_mode;    /* INTENT_* : how the `i` intent field is injected into the wire schema */
     char *summary;      /* one-line catalog summary (owned, may be NULL) */
     json_t *examples;   /* [{caption?, call|good+bad|note}] appended to the wire description (owned, may be NULL) */
+    /* MCP ownership (omp MCPTool mcpServerName / mcpToolName) for the xd:// route guidance; owned, NULL otherwise */
+    char *mcp_server, *mcp_tool;
     /* returns 0; errors are reported via out->is_error */
     int (*execute)(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out);
     void *ud;

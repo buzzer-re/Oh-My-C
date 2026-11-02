@@ -25,6 +25,14 @@ json_t *xdev_entries(agent_t *a);
 char *xdev_listing(agent_t *a);
 /* Mounted-device section for the system prompt under tools.xdevDocs (owned; "" when nothing). */
 char *xdev_prompt_docs(agent_t *a);
+/* the same, without catalog lines for `listed_elsewhere` (renderXdevPromptDocs; may be NULL) */
+char *xdev_prompt_docs_ex(agent_t *a, const strvec_t *listed_elsewhere);
+/* inlined docs of the named mounted devices under the prompt-doc policy (xdevDocsFor; owned, "" when none) */
+char *xdev_docs_for(agent_t *a, const strvec_t *names);
+/* "## MCP Tool Routes" guidance for mounted MCP tools (mcp-xdev-guidance.md, projectMountedMCPXdevGuidance);
+ * owned, NULL when no MCP tool is mounted. routed_catalog (may be NULL) receives the routed tools whose route
+ * line carries their catalog summary (no catalog line of their own). */
+char *xdev_mcp_route_guidance(agent_t *a, strvec_t *routed_catalog);
 
 /* read handler: returns true when `path` is an xd:// URL (result filled). */
 bool xdev_read(agent_t *a, const char *path, tool_result_t *out);

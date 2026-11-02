@@ -4,6 +4,7 @@
 
 #include "config/settings.h"
 #include "core/fs.h"
+#include "prompt/template.h"
 #include "tools.h"
 
 #include <ctype.h>
@@ -439,9 +440,9 @@ static bool should_inline(const agent_tool_t *t, const char *mode) {
     return false;
 }
 
-char *xdev_prompt_docs(agent_t *a) {
+/* planXdevPromptDocs: inlined docs sections, then catalog entries ({name: summary}, presentation order) */
+static void plan_docs(agent_t *a, sb_t *sections, json_t *catalog) {
     const char *mode = settings_str("tools.xdevDocs", "catalog");
-    sb_t sections = SB_INIT, catalog = SB_INIT;
     size_t used = 0;
     for (size_t i = 0; i < a->all_tools.n; i++) {
         agent_tool_t *t = a->all_tools.v[i];
@@ -452,19 +453,31 @@ char *xdev_prompt_docs(agent_t *a) {
             size_t n = strlen(docs); /* JS length is UTF-16 units; bytes are a conservative bound */
             if (n <= DOCS_PER_DEVICE_CAP && used + n <= DOCS_TOTAL_BUDGET) {
                 used += n;
-                if (sections.len) sb_append(&sections, "\n\n");
-                sb_append(&sections, docs);
+                if (sections->len) sb_append(sections, "\n\n");
+                sb_append(sections, docs);
                 free(docs);
                 continue;
             }
             free(docs);
         }
-        char *sum = catalog_summary(t, cap);
-        sb_appendf(&catalog, "- " XD "%s — %s\n", t->name, sum);
-        free(sum);
+        json_set(catalog, t->name, json_str_own(catalog_summary(t, cap)));
     }
-    if (!catalog.len) {
-        sb_free(&catalog);
+}
+
+/* renderXdevPromptDocs: devices in `listed_elsewhere` get no catalog line (the MCP route guidance lists them) */
+char *xdev_prompt_docs_ex(agent_t *a, const strvec_t *listed_elsewhere) {
+    sb_t sections = SB_INIT, lines = SB_INIT;
+    json_t *catalog = json_obj();
+    plan_docs(a, &sections, catalog);
+    const char *k;
+    json_t *v;
+    json_obj_foreach(catalog, i, k, v) {
+        if (listed_elsewhere && strvec_contains(listed_elsewhere, k)) continue;
+        sb_appendf(&lines, "- " XD "%s — %s\n", k, json_sv(v));
+    }
+    json_free(catalog);
+    if (!lines.len) {
+        sb_free(&lines);
         return sb_detach(&sections);
     }
     sb_t out = SB_INIT;
@@ -473,11 +486,115 @@ char *xdev_prompt_docs(agent_t *a) {
         sb_append(&out, "\n\n");
     }
     sb_append(&out, "## Additional devices (docs on demand)\n");
-    sb_append(&out, catalog.s);
+    sb_append(&out, lines.s);
     sb_append(&out, "\nRead " XD "<tool> for full docs + JSON schema before first use.");
     sb_free(&sections);
-    sb_free(&catalog);
+    sb_free(&lines);
     return sb_detach(&out);
+}
+
+char *xdev_prompt_docs(agent_t *a) { return xdev_prompt_docs_ex(a, NULL); }
+
+/* xdevDocsFor: inlined docs of the named mounted devices under the prompt-doc policy */
+char *xdev_docs_for(agent_t *a, const strvec_t *names) {
+    const char *mode = settings_str("tools.xdevDocs", "catalog");
+    sb_t sections = SB_INIT;
+    size_t used = 0;
+    for (size_t k = 0; names && k < names->n; k++) {
+        agent_tool_t *t = NULL;
+        for (size_t i = 0; i < a->all_tools.n && !t; i++)
+            if (a->all_tools.v[i]->mounted && str_eq(a->all_tools.v[i]->name, names->v[k])) t = a->all_tools.v[i];
+        if (!t || !should_inline(t, mode)) continue;
+        char *docs = render_docs(t, "##", tool_is_builtin(t) ? 0 : EXTERNAL_DESCRIPTION_CAP);
+        size_t n = strlen(docs);
+        if (n <= DOCS_PER_DEVICE_CAP && used + n <= DOCS_TOTAL_BUDGET) {
+            used += n;
+            if (sections.len) sb_append(&sections, "\n\n");
+            sb_append(&sections, docs);
+        }
+        free(docs);
+    }
+    return sb_detach(&sections);
+}
+
+/* formatMCPXdevGuidanceLabel: JSON.stringify with backtick, U+2028 and U+2029 escaped */
+static char *route_label(const char *name) {
+    sb_t q = SB_INIT;
+    json_js_quote_sb(&q, name, strlen(name));
+    char *enc = sb_detach(&q);
+    sb_t b = SB_INIT;
+    for (const char *p = enc; *p; p++) {
+        if (*p == '`') sb_append(&b, "\\u0060");
+        else if (!strncmp(p, "\xe2\x80\xa8", 3)) sb_append(&b, "\\u2028"), p += 2;
+        else if (!strncmp(p, "\xe2\x80\xa9", 3)) sb_append(&b, "\\u2029"), p += 2;
+        else sb_putc(&b, *p);
+    }
+    free(enc);
+    return sb_detach(&b);
+}
+
+static size_t js_len(const char *s) { /* UTF-16 length */
+    size_t u = 0;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++)
+        if ((*p & 0xC0) != 0x80) u += *p >= 0xF0 ? 2 : 1;
+    return u;
+}
+
+#define MCP_ROUTE_DATA_BUDGET 4000
+#define MCP_ROUTE_MAX_MAPPINGS 64
+
+char *xdev_mcp_route_guidance(agent_t *a, strvec_t *routed_catalog) {
+    sb_t sec = SB_INIT;
+    json_t *catalog = json_obj();
+    plan_docs(a, &sec, catalog);
+    sb_free(&sec);
+    json_t *tools = json_arr();
+    size_t remaining = MCP_ROUTE_DATA_BUDGET, n = 0;
+    bool omitted = false, catalog_only = false;
+    for (size_t i = 0; i < a->all_tools.n; i++) {
+        agent_tool_t *t = a->all_tools.v[i];
+        if (!t->mounted || !t->mcp_server || !t->mcp_tool) continue;
+        size_t raw = js_len(t->mcp_tool) + strlen(XD) + js_len(t->name);
+        if (n >= MCP_ROUTE_MAX_MAPPINGS || raw > remaining) {
+            omitted = true;
+            continue;
+        }
+        char *label = route_label(t->mcp_tool);
+        char *path = xasprintf(XD "%s", t->name);
+        size_t len = js_len(label) + js_len(path);
+        if (len > remaining) {
+            omitted = true;
+            free(label);
+            free(path);
+            continue;
+        }
+        remaining -= len;
+        n++;
+        json_t *e = json_obj();
+        json_set(e, "mcpToolName", json_str_own(label));
+        json_set(e, "path", json_str_own(path));
+        const char *summary = json_get_str(catalog, t->name);
+        if (summary) {
+            json_set_str(e, "summary", summary);
+            catalog_only = true;
+            if (routed_catalog) strvec_push(routed_catalog, t->name);
+        }
+        json_push(tools, e);
+    }
+    json_free(catalog);
+    if (!n && !omitted) {
+        json_free(tools);
+        return NULL;
+    }
+    json_t *ctx = json_obj();
+    json_set(ctx, "tools", tools);
+    json_set_bool(ctx, "hasCatalogOnlyTools", catalog_only);
+    json_set_bool(ctx, "hasOmittedTools", omitted);
+    char *r = prompt_render("coding-agent/prompts/system/mcp-xdev-guidance.md", ctx);
+    json_free(ctx);
+    char *t = str_trim(r);
+    free(r);
+    return t;
 }
 
 /* ---------- report_issue (automated QA) ---------- */

@@ -91,6 +91,8 @@ void agent_tool_free(agent_tool_t *t) {
     free(t->label);
     free(t->description);
     free(t->summary);
+    free(t->mcp_server);
+    free(t->mcp_tool);
     json_free(t->examples);
     json_free(t->parameters);
     free(t);

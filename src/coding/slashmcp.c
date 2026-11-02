@@ -3,6 +3,7 @@
  * test / resources / prompts, and the reauth flow presented as text. The Smithery registry subcommands are not
  * ported (left out of the help text). */
 #include "coding/slashcmd.h"
+#include "coding/xdnotice.h"
 
 #include "coding/commands.h"
 #include "config/settings.h"
@@ -512,6 +513,7 @@ static void reauth_cmd(const char *rest, slash_rt_t *rt, slash_result_t *res) {
                 mcp_sync_tools(a->mcp, a->agent);
                 tools_finalize(a->agent, a->opts.tools);
                 app_rebuild_system_prompt(a);
+                xdnotice_sync(a, NULL);
             }
         }
         char *done = xasprintf("✓ Reauthorized \"%s\" (%s config).%s", name, scope, suffix);

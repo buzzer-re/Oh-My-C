@@ -126,6 +126,7 @@ struct app {
     struct evalhost *evalhost; /* eval helpers' host state: completion handles, judge batches (evalhost.c) */
     struct memory_rt *memory;  /* memory backend runtime: prompt snapshot + startup pipeline (memory.c) */
     struct autolearn *autolearn; /* auto-learn controller + private capture runs (autolearn.c) */
+    struct xdnotice *xdnotice;   /* xd:// mount-delta notices (xdnotice.c) */
     int64_t output_tokens;     /* cumulative assistant output tokens (atomic; eval `budget`) */
     /* `+Nk` / `+Nk!` per-turn budget directive of the latest user prompt (0 = none) */
     int64_t turn_budget_total;

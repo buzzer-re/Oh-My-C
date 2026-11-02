@@ -1,5 +1,6 @@
 /* autolearn.c - experimental auto-learn: managed skills, `learn` / `manage_skill`, controller + capture. */
 #include "autolearn.h"
+#include "coding/xdnotice.h"
 
 #include "coding/app.h"
 #include "coding/goal.h"
@@ -452,6 +453,7 @@ void autolearn_reconcile(app_t *a) {
     tools_finalize(a->agent, a->opts.tools);
     memory_start(a);
     app_rebuild_system_prompt(a);
+    xdnotice_sync(a, NULL);
 }
 
 char *autolearn_instructions(agent_t *ag) {

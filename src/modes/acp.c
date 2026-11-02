@@ -3,6 +3,7 @@
  * commands/acp.ts. Every ACP session is its own app_t; prompts run on a per-session worker thread chain
  * while the stdin reader keeps dispatching (cancel, steering, client responses). */
 #include "coding/slashcmd.h"
+#include "coding/xdnotice.h"
 #include "modes.h"
 
 #include "ai/ai_images.h"
@@ -1787,6 +1788,7 @@ static int reconfigure_mcp(asess_t *s, const json_t *servers, char **err) {
     }
     tools_finalize(ag, app->opts.tools);
     app_rebuild_system_prompt(app);
+    xdnotice_sync(app, NULL);
     if (old) mcp_manager_free(old);
     json_t *f;
     json_arr_foreach(failed, i, f) json_push(s->mcp_chunks, json_clone(f));

@@ -9,6 +9,7 @@
  * to the UI through tui_post. omc keeps MCP OAuth credentials url-keyed in auth.json ("mcp:<url>"), so a
  * signed-in server needs no `auth` block in mcp.json. The Smithery registry subcommands are not ported. */
 #include "ui/mcpint.h"
+#include "coding/xdnotice.h"
 
 #include "coding/commands.h"
 #include "config/settings.h"
@@ -253,6 +254,14 @@ static void sync_tools(ui_t *u) {
     mcp_sync_tools(a->mcp, a->agent);
     tools_finalize(a->agent, a->opts.tools);
     app_rebuild_system_prompt(a);
+    char *xn;
+    xdnotice_sync(a, &xn);
+    if (xn) { /* emitted while the refresh runs, ahead of the command's own result */
+        char *m = xasprintf("xdev: %s", xn);
+        add_notice(u, "info", m);
+        free(m);
+        free(xn);
+    }
     tui_request_render(u->tui);
 }
 

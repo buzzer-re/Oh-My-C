@@ -386,7 +386,7 @@ check "rpc commands"   "ok empty MCP prompt consumed"  python3 -I "$ROOT/tests/e
 # MCP and SSH management (WP-18): /mcp and /ssh over RPC (text mode) and in the TUI (wizard, test, cancel)
 check "rpc mcp/ssh"    "ok mcp rpc done"  python3 -I "$ROOT/tests/e2e/mcp_rpc.py" "$B" "$ROOT/tests/e2e/mock_mcp.py"
 if python3 -c 'import pty' 2>/dev/null; then
-    check "tui mcp/ssh"  "mcp tui ok"  python3 -I "$ROOT/tests/e2e/mcp_tui.py" "$B" "$ROOT/tests/e2e/mock_mcp.py"
+    check "tui mcp/ssh"  "mcp tui ok"  python3 -I "$ROOT/tests/e2e/mcp_tui.py" "$B" "$ROOT/tests/e2e/mock_mcp.py" "$T/req.jsonl"
 fi
 check "acp file cmd"   "stop end_turn"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/init"
 grep -q "synthesize findings into one AGENTS.md" "$T/req.jsonl" && echo "   ok  acp /init expanded" || { echo "   FAIL acp /init expanded"; fail=1; }

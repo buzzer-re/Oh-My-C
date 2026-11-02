@@ -292,6 +292,14 @@ static void post_notice(void *x) {
         uiev_free(e);
         return;
     }
+    if (!strcmp(e->name, "xdev")) { /* event-controller #handleNotice: `${source}: ${message}` as a status line */
+        char *m = xasprintf("xdev: %s", e->out);
+        add_notice(e->u, "info", m);
+        free(m);
+        tui_request_render(e->u->tui);
+        uiev_free(e);
+        return;
+    }
     const char *lvl = !strcmp(e->name, "error")           ? "error"
                       : !strcmp(e->name, "warning")       ? "warning"
                       : !strcmp(e->name, "todo-reminder") ? "todo-reminder" /* TodoReminderComponent card */

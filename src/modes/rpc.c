@@ -1214,8 +1214,10 @@ static void notice_rpc(void *ud, const char *level, const char *text) {
     }
     json_t *j = json_obj();
     json_set_str(j, "type", "notice");
-    json_set_str(j, "level", level);
+    bool xdev = !strcmp(level, "xdev"); /* emitNotice("info", …, "xdev") */
+    json_set_str(j, "level", xdev ? "info" : level);
     json_set_str(j, "message", text);
+    if (xdev) json_set_str(j, "source", "xdev");
     emit(r, j);
     json_free(j);
 }

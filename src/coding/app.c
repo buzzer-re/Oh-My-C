@@ -16,6 +16,7 @@
 #include "coding/evalhost.h"
 #include "coding/autolearn.h"
 #include "coding/memory.h"
+#include "coding/xdnotice.h"
 #include "tools/approval.h"
 #include "tools/artifacts.h"
 #include "tools/jobs.h"
@@ -1393,7 +1394,17 @@ void app_rebuild_system_prompt(app_t *a) {
     if (al) sb_appendf(&gen, "%s%s", gen.len ? "\n\n" : "", al);
     free(mem);
     free(al);
-    char *xdev_docs = json_len(xdev_tools) ? xdev_prompt_docs(a->agent) : xstrdup("");
+    /* mounted MCP route guidance (a routed tool carries its catalog summary on the route line, no catalog line),
+     * then the connected servers' instructions */
+    strvec_t routed = {0};
+    char *routes = xdev_mcp_route_guidance(a->agent, &routed);
+    if (routes) sb_appendf(&gen, "%s%s", gen.len ? "\n\n" : "", routes);
+    free(routes);
+    char *mi = a->mcp ? mcp_instructions(a->mcp) : NULL;
+    if (mi && *mi) sb_appendf(&gen, "%s%s", gen.len ? "\n\n" : "", mi);
+    free(mi);
+    char *xdev_docs = json_len(xdev_tools) ? xdev_prompt_docs_ex(a->agent, &routed) : xstrdup("");
+    strvec_free(&routed);
     strvec_t roots = {0};
     if (a->session) roots = session_additional_dirs(a->session);
     sysprompt_opts_t so = {.cwd = a->cwd,
@@ -1442,15 +1453,16 @@ void app_rebuild_system_prompt(app_t *a) {
         free(pm);
         json_free(pc);
     }
-    char *mi = a->mcp ? mcp_instructions(a->mcp) : NULL;
-    if (mi && *mi) json_push_str(blocks, mi);
-    free(mi);
+    /* xdevCatalogNames: the mounted devices count as delivered when block 0 carries the xd:// section */
+    const char *b0 = json_sv(json_at(blocks, 0));
+    xdnotice_base_rebuilt(a, !a->sys_custom && b0 && strstr(b0, "xd://") && xdev_mounted_count(a->agent) > 0);
     agent_set_system_prompt_parts(a->agent, blocks);
     free(label);
     strvec_free(&names);
 }
 
 static void load_session_into_agent(app_t *a) {
+    xdnotice_reset_announced(a); /* the replaced transcript's notices no longer apply */
     session_context_t sc;
     session_build_context(a->session, &sc);
     agent_replace_messages(a->agent, sc.messages);
@@ -1675,6 +1687,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (resumed && persist_tiers) app_append_service_tier_entry(a);
     if (!o->subagent) app_goal_restore(a);
     app_rebuild_system_prompt(a);
+    xdnotice_init(a);
     if (!json_len(a->session->entries) && a->session->persist && a->model) {
         char *label = app_model_label(a);
         session_append_model_change(a->session, label, NULL);
@@ -1695,6 +1708,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
 
 void app_free(app_t *a) {
     if (!a) return;
+    xdnotice_free(a);
     json_free(a->queue_snapshot);
     a->queue_snapshot = NULL;
     if (a->warmer) {
@@ -2845,6 +2859,9 @@ int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
     json_free(kn);
     json_arr_foreach(notices, i, img) json_push(msgs, json_clone(img));
     json_free(notices);
+    /* the pending xd:// mount delta rides with the next user prompt, right before it */
+    json_t *xn = xdnotice_take(a);
+    if (xn) json_push(msgs, xn);
     json_push(msgs, msg_user_typed(content));
     if (!apply_auto_thinking(a, text)) {
         json_free(msgs);
@@ -3140,6 +3157,7 @@ int app_new_session(app_t *a) {
     free(a->plan_reference_path);
     a->plan_reference_path = NULL;
     agent_replace_messages(a->agent, json_arr());
+    xdnotice_reset_announced(a);
     free(a->agent->session_id);
     a->agent->session_id = xstrdup(session_id(ns));
     char *label = app_model_label(a);

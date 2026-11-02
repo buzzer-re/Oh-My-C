@@ -1536,8 +1536,13 @@ static void bridge_destroy(agent_tool_t *t) {
     free(b);
 }
 
+static int tool_name_cmp(const void *x, const void *y) {
+    return strcmp((*(agent_tool_t *const *)x)->name, (*(agent_tool_t *const *)y)->name);
+}
+
 int mcp_register_tools(mcp_manager_t *m, agent_t *a) {
     int count = 0;
+    VEC(agent_tool_t *) out = {0};
     srv_vec_t v;
     snapshot(m, &v);
     for (size_t i = 0; i < v.n; i++) {
@@ -1567,7 +1572,9 @@ int mcp_register_tools(mcp_manager_t *m, agent_t *a) {
             at->ud = b;
             at->destroy = bridge_destroy;
             at->lenient_args = true;
-            agent_add_tool(a, at);
+            at->mcp_server = xstrdup(s->name);
+            at->mcp_tool = xstrdup(tn);
+            vec_push(&out, at);
             free(d);
             free(name);
             count++;
@@ -1575,6 +1582,10 @@ int mcp_register_tools(mcp_manager_t *m, agent_t *a) {
         json_free(tools);
     }
     snap_free(&v);
+    /* sortMCPToolsByName: a stable total order independent of connection sequence (prompt-cache stability) */
+    if (out.n > 1) qsort(out.v, out.n, sizeof(out.v[0]), tool_name_cmp);
+    for (size_t i = 0; i < out.n; i++) agent_add_tool(a, out.v[i]);
+    free(out.v);
     return count;
 }
 
@@ -1594,21 +1605,57 @@ int mcp_sync_tools(mcp_manager_t *m, agent_t *a) {
     return n;
 }
 
+/* sdk.ts: the "## MCP Server Instructions" append part, servers sorted by name (getServerInstructions),
+ * each capped at MAX_MCP_INSTRUCTIONS_LENGTH (4000 UTF-16 units) */
+/* byte length of the longest prefix of s within max UTF-16 units (JS String.slice(0, max), whole code points) */
+static size_t utf16_prefix_bytes(const char *s, size_t max) {
+    size_t units = 0, i = 0;
+    while (s[i]) {
+        unsigned char c = (unsigned char)s[i];
+        size_t len = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+        size_t u = c >= 0xF0 ? 2 : 1;
+        if (units + u > max) break;
+        units += u;
+        i++;
+        for (size_t k = 1; k < len && ((unsigned char)s[i] & 0xC0) == 0x80; k++) i++;
+    }
+    return i;
+}
+
+static int str_ptr_cmp(const void *x, const void *y) { return strcmp(*(char *const *)x, *(char *const *)y); }
+
 char *mcp_instructions(mcp_manager_t *m) {
-    sb_t b = SB_INIT;
+    strvec_t names = {0};
+    json_t *by = json_obj();
     srv_vec_t v;
     snapshot(m, &v);
     for (size_t i = 0; i < v.n; i++) {
         mcp_server_t *s = v.v[i];
         if (!ready(s)) continue;
         pthread_mutex_lock(&s->mu);
-        if (s->instructions && *s->instructions) {
-            if (!b.len) sb_append(&b, "# MCP Server Instructions\n");
-            sb_appendf(&b, "\n## %s\n%s\n", s->name, s->instructions);
+        if (s->instructions && *s->instructions && !json_get(by, s->name)) {
+            strvec_push(&names, s->name);
+            json_set_str(by, s->name, s->instructions);
         }
         pthread_mutex_unlock(&s->mu);
     }
     snap_free(&v);
+    if (!names.n) {
+        json_free(by);
+        strvec_free(&names);
+        return xstrdup("");
+    }
+    qsort(names.v, names.n, sizeof(names.v[0]), str_ptr_cmp);
+    sb_t b = SB_INIT;
+    sb_append(&b, "## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are "
+                  "server-controlled and may not be verified.");
+    for (size_t i = 0; i < names.n; i++) {
+        const char *text = json_get_str(by, names.v[i]);
+        size_t cut = utf16_prefix_bytes(text, 4000);
+        sb_appendf(&b, "\n\n### %s\n%.*s%s", names.v[i], (int)cut, text, text[cut] ? "\n[truncated]" : "");
+    }
+    json_free(by);
+    strvec_free(&names);
     return sb_detach(&b);
 }
 
