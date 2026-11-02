@@ -283,11 +283,9 @@ static void res_flush(void *ud) {
     sb_append(&b, "\nUse read(path=\"mcp://<uri>\") to inspect if relevant.");
     json_free(items);
     if (u->worker_running) {
-        json_t *m = msg_user_text(sb_cstr(&b));
-        json_set_str(m, "attribution", "agent");
-        agent_follow_up(u->app->agent, m);
+        agent_follow_up(u->app->agent, msg_user_text(sb_cstr(&b))); /* drawn when the run delivers it */
     } else if (u->app->model) {
-        ix_start_hidden(u, sb_cstr(&b), "mcp-notification");
+        ix_start_prompt(u, sb_cstr(&b)); /* the yield queue's idle flush: a visible user turn */
     }
     sb_free(&b);
 }
