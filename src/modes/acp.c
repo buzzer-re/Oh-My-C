@@ -63,6 +63,7 @@ struct asess {
     json_t *tool_args;       /* toolCallId -> args (toolArgsById) */
     json_t *held;            /* toolCallId -> tool_call notification waiting for the permission gate */
     char *last_error;        /* latest error notice of the running turn */
+    char *cfg_sent;          /* configOptions the client last saw (config_option_update / a response) */
     tool_bridge_t bridge;
     bool closed;
 };
@@ -742,7 +743,7 @@ static json_t *raw_output(const tool_result_t *r) {
 /* tool_execution_end -> tool_call_update (+ plan for todo) */
 static void tool_end_updates(const char *sid, const char *id, const char *name, const json_t *args, json_t *result,
                              bool is_error, const char *cwd) {
-    json_t *res = diff_content(result), *rc = result_content(result), *x;
+    json_t *res = diff_content(result), *rc = result_content(result);
     while (json_len(rc)) json_push(res, json_arr_remove(rc, 0));
     json_free(rc);
     json_t *content = merge_content(start_content(name, args), res);
@@ -768,7 +769,6 @@ static void tool_end_updates(const char *sid, const char *id, const char *name, 
         json_set(pl, "entries", entries);
         notify_update(sid, pl);
     }
-    UNUSED(x);
 }
 
 /* extractAssistantMessageText */
@@ -902,16 +902,14 @@ static json_t *config_options(asess_t *s) {
 }
 
 static void push_config_update(asess_t *s) {
-    json_t *u = json_obj();
+    json_t *u = json_obj(), *opts = config_options(s);
     json_set_str(u, "sessionUpdate", "config_option_update");
-    json_set(u, "configOptions", config_options(s));
-    notify_update(s->id, u);
-}
-
-static void push_mode_update(asess_t *s) {
-    json_t *u = json_obj();
-    json_set_str(u, "sessionUpdate", "current_mode_update");
-    json_set_str(u, "currentModeId", mode_id(s));
+    char *d = json_dump(opts, 0);
+    pthread_mutex_lock(&s->mu);
+    free(s->cfg_sent);
+    s->cfg_sent = d;
+    pthread_mutex_unlock(&s->mu);
+    json_set(u, "configOptions", opts);
     notify_update(s->id, u);
 }
 
@@ -921,6 +919,24 @@ static char *config_snapshot(asess_t *s) {
     json_free(c);
     return d;
 }
+
+/* a model / thinking / mode change the client was not told about yet (AgentSession lifetime events) */
+static void push_config_if_changed(asess_t *s, const char *before) {
+    char *cur = config_snapshot(s);
+    pthread_mutex_lock(&s->mu);
+    bool told = str_eq(cur, s->cfg_sent);
+    pthread_mutex_unlock(&s->mu);
+    if (!str_eq(cur, before) && !told) push_config_update(s);
+    free(cur);
+}
+
+static void push_mode_update(asess_t *s) {
+    json_t *u = json_obj();
+    json_set_str(u, "sessionUpdate", "current_mode_update");
+    json_set_str(u, "currentModeId", mode_id(s));
+    notify_update(s->id, u);
+}
+
 
 static void push_session_info(asess_t *s, const char *updated_at) {
     json_t *u = json_obj();
@@ -1490,10 +1506,6 @@ static int bridge_terminal(tool_bridge_t *b, tool_ctx_t *ctx, const tool_termina
 
 /* ---------- elicitation (createAcpExtensionUiContext) ---------- */
 
-typedef struct {
-    asess_t *s;
-} elicit_after_t;
-
 static void flush_all_held(void *ud) {
     asess_t *s = ud;
     pthread_mutex_lock(&s->mu);
@@ -1863,13 +1875,25 @@ static json_t *stop_result(const char *reason, const turn_t *t) {
     return r;
 }
 
-/* #beginCancelCleanup: answer `cancelled` right away and abort the run */
-static void cancel_turn(turn_t *t) {
-    asess_t *s = t->s;
+/* #beginCancelCleanup: answer `cancelled` right away (the caller aborts the run). `only` limits it to that turn
+ * (the implicit cancel of a new prompt), NULL cancels every accepted turn (session/cancel, close). The turns are
+ * marked under the lock (their threads free them) and answered after it. */
+static void cancel_turns(asess_t *s, const turn_t *only) {
+    json_t *ids = json_arr(), *results = json_arr();
     pthread_mutex_lock(&s->mu);
-    t->cancel_requested = true;
+    for (size_t i = 0; i < s->turns.n; i++) {
+        turn_t *t = s->turns.v[i];
+        if (only && t != only) continue;
+        t->cancel_requested = true;
+        if (t->settled) continue;
+        t->settled = true;
+        json_push(ids, json_clone(t->req_id));
+        json_push(results, stop_result("cancelled", t));
+    }
     pthread_mutex_unlock(&s->mu);
-    settle(t, stop_result("cancelled", t));
+    for (size_t i = 0; i < json_len(ids); i++) reply(json_at(ids, i), json_clone(json_at(results, i)));
+    json_free(ids);
+    json_free(results);
 }
 
 static double session_cost(app_t *a) {
@@ -1961,9 +1985,7 @@ static char *convert_prompt(const json_t *blocks, json_t *images) {
 static void builtin_side_effects(asess_t *s, const char *title_before, const char *cfg_before) {
     const char *title = s->app->session ? s->app->session->title : NULL;
     if (!str_eq(title ? title : "", title_before ? title_before : "")) push_session_info(s, NULL); /* notifyTitleChanged */
-    char *cfg = config_snapshot(s);
-    if (!str_eq(cfg, cfg_before)) push_config_update(s);
-    free(cfg);
+    push_config_if_changed(s, cfg_before);
 }
 
 
@@ -2051,9 +2073,7 @@ static void *turn_main(void *ud) {
                 notify_update(s->id, chunk("agent_message_chunk", em, mid));
                 free(mid);
             }
-            char *cfg = config_snapshot(s); /* model_changed / thinking_level_changed during the turn */
-            if (!str_eq(cfg, cfg_before)) push_config_update(s);
-            free(cfg);
+            push_config_if_changed(s, cfg_before); /* model_changed / thinking_level_changed during the turn */
             end_of_turn_updates(s);
             settle(t, stop_result(stop_reason(last, t->cancel_requested), t));
         }
@@ -2329,11 +2349,8 @@ static void close_record(acp_t *a, asess_t *s) {
     pthread_mutex_unlock(&a->mu);
     pthread_mutex_lock(&s->mu);
     s->closed = true;
-    VEC(turn_t *) turns = {0};
-    for (size_t i = 0; i < s->turns.n; i++) vec_push(&turns, s->turns.v[i]);
     pthread_mutex_unlock(&s->mu);
-    for (size_t i = 0; i < turns.n; i++) cancel_turn(turns.v[i]);
-    vec_free(&turns);
+    cancel_turns(s, NULL);
     app_abort(s->app);
     if (s->has_th) pthread_join(s->th, NULL);
     app_free(s->app);
@@ -2344,6 +2361,7 @@ static void close_record(acp_t *a, asess_t *s) {
     json_free(s->mcp_chunks);
     free(s->live_id);
     free(s->last_error);
+    free(s->cfg_sent);
     free(s->id);
     pthread_mutex_destroy(&s->mu);
     free(s);
@@ -2552,7 +2570,7 @@ static void handle_prompt(acp_t *a, const json_t *id, const json_t *params) {
     pthread_mutex_unlock(&s->mu);
     /* a prompt while the previous turn still runs stops that turn first (the client pressed stop or sent anew) */
     if (active) {
-        cancel_turn(active);
+        cancel_turns(s, active);
         app_abort(s->app);
     }
     pthread_t th;
@@ -2570,12 +2588,7 @@ static void handle_prompt(acp_t *a, const json_t *id, const json_t *params) {
 
 /* session/cancel: stop everything accepted on the session */
 static void handle_cancel(asess_t *s) {
-    pthread_mutex_lock(&s->mu);
-    VEC(turn_t *) turns = {0};
-    for (size_t i = 0; i < s->turns.n; i++) vec_push(&turns, s->turns.v[i]);
-    pthread_mutex_unlock(&s->mu);
-    for (size_t i = 0; i < turns.n; i++) cancel_turn(turns.v[i]);
-    vec_free(&turns);
+    cancel_turns(s, NULL);
     app_abort(s->app);
 }
 

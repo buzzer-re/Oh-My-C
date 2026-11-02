@@ -4,7 +4,7 @@ and diff the normalized transcripts (every frame the agent sends, in arrival ord
 
     tests/parity/acp_diff.py [scenario ...] [--only omc|omp] [--keep] [--raw]
 
-Scenarios (default: all): basic, tools, errors, load, bridge, elicit, steer, mcp.
+Scenarios (default: all): basic, tools, errors, load, bridge, elicit, steer, mcp, edit, plan, planform.
 The fake client answers session/request_permission (allow_once), and, when the scenario advertises the
 capabilities, fs/read_text_file (from an in-memory "unsaved buffer" map, else disk), fs/write_text_file (disk),
 terminal/* (a local subprocess) and elicitation/create (accepts the first option).
@@ -347,8 +347,40 @@ def sc_mcp(c):
     prompt(c, sid, "call:mcp__mock_echo_text:" + json.dumps({"text": "via mcp"}))
 
 
+def sc_edit(c):
+    init(c, {"fs": {"readTextFile": True, "writeTextFile": True}})
+    sid = new(c)
+    with open(os.path.join(c.work, "e.txt"), "w") as f:
+        f.write("one\ntwo\nthree\n")
+    prompt(c, sid, "call:edit:" + json.dumps({"path": "e.txt", "old_string": "two", "new_string": "TWO"}))
+    prompt(c, sid, "call:edit:" + json.dumps({"path": "e.txt", "old_string": "missing", "new_string": "x"}))
+
+
+PLAN_SEQ = "seq:" + json.dumps([["write", {"path": "local://PLAN.md", "content": "# Ship it\n\n1. step one\n2. step two\n"}],
+                                 ["write", {"path": "xd://propose", "content": "Ship it"}]])
+
+
+def sc_plan(c):
+    init(c)
+    sid = new(c)
+    c.call("session/set_mode", {"sessionId": sid, "modeId": "plan"})
+    prompt(c, sid, PLAN_SEQ)
+
+
+def sc_planform(c):
+    init(c, {"elicitation": {"form": {}}})
+    sid = new(c)
+    c.call("session/set_mode", {"sessionId": sid, "modeId": "plan"})
+    c.elicit_answer = lambda p: {"action": "accept", "content": {"value": "Refine plan"}}
+    prompt(c, sid, PLAN_SEQ)
+    c.elicit_answer = None
+    prompt(c, sid, PLAN_SEQ)
+
+
 SCENARIOS = {"basic": sc_basic, "tools": sc_tools, "errors": sc_errors, "load": sc_load, "bridge": sc_bridge,
-             "elicit": sc_elicit, "steer": sc_steer, "mcp": sc_mcp}
+             "elicit": sc_elicit, "steer": sc_steer, "mcp": sc_mcp, "edit": sc_edit, "plan": sc_plan,
+             "planform": sc_planform}
+SCENARIO_CONFIG = {"edit": "edit:\n  mode: replace\n"}
 
 # ---------------- normalization ----------------
 
@@ -396,7 +428,7 @@ def normalize(app, lines, work):
     return out
 
 
-def setup(app, port):
+def setup(app, port, name=""):
     a = os.path.join(D, app + "a")
     shutil.rmtree(a, ignore_errors=True)
     os.makedirs(a)
@@ -413,11 +445,11 @@ def setup(app, port):
         maxTokens: 4096
 """)
     with open(os.path.join(a, "config.yml"), "w") as f:
-        f.write("modelRoles:\n  default: mock/mock-1\n")
+        f.write("modelRoles:\n  default: mock/mock-1\n" + SCENARIO_CONFIG.get(name, ""))
 
 
 def run(app, name, port):
-    setup(app, port)
+    setup(app, port, name)
     work = os.path.join(D, "work")
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)

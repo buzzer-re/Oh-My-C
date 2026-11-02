@@ -316,6 +316,13 @@ check "acp reject"     "tool_call_update failed Tool call rejected by user (bash
 check "acp permission" "permission echo acp-title"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo acp-title"
 check "acp yolo"       "tool_call_update completed acp-yolo"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo acp-yolo" reject_once --yolo
 check "acp forget"     "Remembered approvals forgotten; the next read or write asks again."  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/forget-approvals"
+# ACP parity (WP-16): `omc acp`, session lifecycle (load replay / resume / fork / close), configOptions, steering,
+# stop reasons, usage_update, and the fs / terminal / elicitation client bridges and client mcpServers
+timeout 120 python3 -I "$ROOT/tests/e2e/acp_session.py" "$B" "$ROOT/tests/e2e/mock_mcp.py" > "$T/acp_session.out" 2>&1 </dev/null
+for c in init configOptions bootstrap "fs read" "fs write" terminal usage_update "turn usage" "steering idle" \
+         set_config_option refusal "fork close" "load replay" resume elicitation "mcp servers"; do
+    check "acp $c" "ok $c" cat "$T/acp_session.out"
+done
 # tool approval (WP-10): tools.approvalMode tiers, tools.approval policies, restricted folders, CLI flags
 check "approval no ui" 'Tool "bash" requires approval but no interactive UI available.'  "$B" --model mock/mock-1 --no-session --approval-mode always-ask -p "bash:echo x"
 check "approval write" "Successfully wrote 3 bytes to ap.txt"  "$B" --model mock/mock-1 --no-session --approval-mode=write -p "write:ap.txt:abc"

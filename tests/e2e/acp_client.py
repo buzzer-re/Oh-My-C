@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Minimal ACP client for e2e tests: spawns `omc --mode acp`, runs one prompt, prints observed updates."""
 import json
+import os
 import subprocess
 import sys
 
@@ -30,7 +31,8 @@ def wait(req_id):
             elif kind == "tool_call":
                 print("tool_call", u["kind"], u["title"], u["status"])
             elif kind == "tool_call_update":
-                print("tool_call_update", u["status"], u["content"][0]["content"]["text"].strip()[:200])
+                texts = [c["content"]["text"] for c in u.get("content", []) if c.get("type") == "content" and c["content"].get("type") == "text"]
+                print("tool_call_update", u["status"], (texts[-1] if texts else "").strip()[:200])
             else:
                 print(kind)
         elif m.get("method") == "session/request_permission":
@@ -42,7 +44,7 @@ def wait(req_id):
 
 r = wait(send({"id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {}}}) or 1)
 print("init", json.dumps(r["result"]["agentCapabilities"]["promptCapabilities"]))
-send({"id": 2, "method": "session/new", "params": {"cwd": ".", "mcpServers": []}})
+send({"id": 2, "method": "session/new", "params": {"cwd": os.getcwd(), "mcpServers": []}})
 r = wait(2)
 sid = r["result"]["sessionId"]
 print("session", r["result"]["modes"]["currentModeId"])
