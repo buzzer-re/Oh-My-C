@@ -309,7 +309,24 @@ if [ -x "$ROOT/build/examples/embed" ]; then
 fi
 # ACP (Agent Client Protocol): permission request answered by the test client
 check "acp prompt"     "tool_call_update completed acp-ok"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo acp-ok"
-check "acp reject"     "tool_call_update failed The user rejected"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo no" reject_once
+check "acp reject"     "tool_call_update failed Tool call rejected by user (bash)"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo no" reject_once
+check "acp permission" "permission echo acp-title"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo acp-title"
+check "acp yolo"       "tool_call_update completed acp-yolo"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo acp-yolo" reject_once --yolo
+check "acp forget"     "Remembered approvals forgotten; the next read or write asks again."  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/forget-approvals"
+# tool approval (WP-10): tools.approvalMode tiers, tools.approval policies, restricted folders, CLI flags
+check "approval no ui" 'Tool "bash" requires approval but no interactive UI available.'  "$B" -m mock/mock-1 --no-session --approval-mode always-ask -p "bash:echo x"
+check "approval write" "Successfully wrote 3 bytes to ap.txt"  "$B" -m mock/mock-1 --no-session --approval-mode=write -p "write:ap.txt:abc"
+check "approval yolo"  "Tool said: yolo-ok"  "$B" -m mock/mock-1 --no-session --approval-mode always-ask --yolo -p "bash:echo yolo-ok"
+check "approval flag"  'Invalid --approval-mode value: "nope". Expected one of: always-ask, always-ask-cached, write, yolo.'  "$B" --approval-mode nope -p x
+check "approval cached" 'Tool "read" requires approval'  "$B" -m mock/mock-1 --no-session --approval-mode always-ask-cached -p "read:ap.txt"
+printf 'tools:\n  approval:\n    bash: deny\n  restrictedFolders: ["a"]\n' > "$T/agent/config.yml"
+check "approval deny"  'To allow: remove "tools.approval.bash: deny" from config.'  "$B" -m mock/mock-1 --no-session -p "bash:echo x"
+check "approval restricted" "A restricted folder (tools.restrictedFolders) asks in every approval mode."  "$B" -m mock/mock-1 --no-session -p "read:a/b.txt"
+rm -f "$T/agent/config.yml"
+if python3 -c 'import pty' 2>/dev/null; then
+    check "approval dialog"  "approval ok kinds=permission"  python3 -I "$ROOT/tests/e2e/approval_tui.py" "$B" "bash:echo dialog-ok" '\x11' "Tool said: dialog-ok" --approval-mode always-ask
+    check "approval deny key" "approval ok"  python3 -I "$ROOT/tests/e2e/approval_tui.py" "$B" "bash:echo nope" '\x1b' "Tool call denied by user: bash" --approval-mode always-ask
+fi
 # slash commands (WP-4): one registry behind RPC/ACP advertising and builtin dispatch
 check "acp commands"   "available_commands_update"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo cmds"
 check "acp slash"      "agent_message_chunk Workspace directories:"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/dirs"

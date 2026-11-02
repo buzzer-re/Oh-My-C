@@ -10,6 +10,7 @@
 #include "core/proc.h"
 #include "modes/modes.h"
 #include "coding/goal.h"
+#include "tools/approval.h"
 #include "tools/tools.h"
 
 #include <errno.h>
@@ -65,6 +66,9 @@ static void usage(FILE *f) {
             "                                     propose, then switch to --plan-yolo-into to implement it\n"
             "      --plan-yolo-into <model>       target model for plan-yolo execution (default the \"smol\" role)\n"
             "      --goal <objective>             start a fresh interactive session in goal mode\n"
+            "      --auto-approve, --yolo         Auto-approve all tool calls (skip approval prompts)\n"
+            "      --approval-mode <mode>         Override tools.approvalMode for this session\n"
+            "                                     (always-ask|always-ask-cached|write|yolo)\n"
             "  -v, --version                      print version\n"
             "  -h, --help                         this help\n",
             OMC_VERSION);
@@ -430,6 +434,7 @@ int omc_main(int argc, char **argv) {
     const char *goal = NULL;
     bool plan_yolo = false;
     const char *plan_yolo_into = NULL;
+    const char *approval_mode = NULL;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
@@ -474,6 +479,19 @@ int omc_main(int argc, char **argv) {
         else if (!strcmp(a, "--plan-yolo-into")) plan_yolo_into = need(argc, argv, &i);
         else if (!strncmp(a, "--plan-yolo-into=", 17)) plan_yolo_into = a + 17;
         else if (!strcmp(a, "--goal")) goal = need(argc, argv, &i);
+        else if (!strcmp(a, "--auto-approve") || !strcmp(a, "--yolo")) o.auto_approve = true;
+        else if (!strcmp(a, "--approval-mode") || !strncmp(a, "--approval-mode=", 16)) {
+            const char *v = a[15] == '=' ? a + 16 : need(argc, argv, &i);
+            if (approval_mode_parse(v) < 0) {
+                char *q = json_quote(v);
+                fprintf(stderr, "%sError: Invalid --approval-mode value: %s. Expected one of: always-ask, always-ask-cached, "
+                                "write, yolo.%s\n",
+                        isatty(2) ? "\x1b[31m" : "", q, isatty(2) ? "\x1b[39m" : "");
+                free(q);
+                return 2;
+            }
+            approval_mode = v;
+        }
         else if (!strcmp(a, "--")) {
             for (i++; i < argc; i++) strvec_push(&prompt_parts, argv[i]);
         } else if (a[0] == '-' && a[1]) {
@@ -499,6 +517,10 @@ int omc_main(int argc, char **argv) {
     char *cwd = get_cwd();
     o.cwd = cwd;
     settings_init(cwd, &configs);
+    /* --approval-mode is a runtime override (not persisted); --auto-approve / --yolo alone reflects yolo in settings
+     * so setup-time checks (the ACP permission gate) see the intent */
+    if (approval_mode) settings_set_runtime("tools.approvalMode", json_str(approval_mode));
+    else if (o.auto_approve) settings_set_runtime("tools.approvalMode", json_str("yolo"));
     /* @file arguments inline file contents; piped stdin is appended */
     sb_t prompt = SB_INIT;
     for (size_t i = 0; i < prompt_parts.n; i++) {

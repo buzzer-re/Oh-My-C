@@ -34,6 +34,7 @@ typedef struct {
     bool no_mcp;
     bool allow_no_model; /* interactive: start without a model (pick one with /model or /login) */
     bool has_ui;                /* interactive UI can answer questions (enables `ask`) */
+    bool auto_approve;          /* --auto-approve / --yolo: every approval resolves in yolo mode */
 } app_opts_t;
 
 typedef struct app app_t;
@@ -123,6 +124,11 @@ struct app {
     struct guards *guards;  /* loop guard, todo reminders, stop recovery (guards.c) */
     struct thinkloop *thinkloop; /* stream loop guard of the current assistant stream (thinkloop.c) */
     int gemini_interrupt;   /* planning headers counted when the Gemini header guard interrupted the stream */
+    /* outermost permission gate (ACP client permission, omp #wrapToolForAcpPermission), run before the approval
+     * gate: TOOL_BLOCK with *reason, or TOOL_ALLOW with *client_approved when the client approved this call */
+    tool_gate_t (*permission_gate)(void *ud, app_t *a, const json_t *call, const json_t *args, bool *client_approved,
+                                   char **reason);
+    void *permission_gate_ud;
     pthread_mutex_t mu;
 };
 

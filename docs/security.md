@@ -28,9 +28,21 @@ the trust boundaries are, and how secrets are handled.
 A coding agent runs model-chosen commands with the user's privileges. omc follows omp's model here:
 
 - Tools (`bash`, `write`, `edit`, `eval`, `ssh://` writes, MCP tools) run **as the user, with no
-  sandbox and no per-call approval**. omp's approval modes (`tools.approvalMode`) are not
-  implemented, so omc behaves like omp's default (`yolo`). The editor-facing ACP mode asks the
-  client for permission before edit and execute tools (`session/request_permission`).
+  sandbox**. Per-call approval follows omp (`tools/approval.c`, see [tools.md](tools.md#tool-approval)):
+  `tools.approvalMode` defaults to `yolo` (every tier runs), `always-ask` / `always-ask-cached` /
+  `write` prompt for the higher tiers, `tools.approval.<tool>: allow | prompt | deny` overrides every
+  mode, `bash.patterns` and the built-in critical bash patterns (`rm -rf /`, `curl … | sh`, `mkfs`, …)
+  force a prompt outside yolo, and `tools.restrictedFolders` asks before every action that touches
+  those folders, in every mode. Where no UI can answer (print mode, RPC, subagents) a prompt becomes
+  a refusal the model sees. The approval gate is a convenience, not a sandbox: a command the user
+  approves runs with full privileges, and the tier of a shell command is not proven by analysis.
+- Remembered approvals (`always-ask-cached`): "this session" grants live in memory;
+  "Remember across sessions" grants are written to `<agentDir>/approval-cache.json` (mode 0600,
+  flock-serialized; omp uses SQLite `approval-cache.db`). Keys pin the capability tier and the
+  symlink-resolved target, so a read grant never authorizes a write and `/a/foo` never covers
+  `/a/foobar`. `/forget-approvals` clears both tiers.
+- The editor-facing ACP mode asks the client (`session/request_permission`) before `bash` and before
+  edits that delete or move a file, as omp does; only an explicit `yolo` (or `--auto-approve`) skips it.
 - **Plan mode is a workflow guard, not a security boundary.** It blocks writes outside `local://`
   and refuses bash commands that *look* state-changing (pattern list in `coding/app.c`), but it
   cannot prove a command harmless.

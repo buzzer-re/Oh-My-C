@@ -2376,6 +2376,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     a->env->ui.ask = ui_ask;
     a->env->ui.tool_frame = ui_tool_frame;
     a->env->ui.ud = &u;
+    ui_approval_install(&u);
     app_set_plan_review_ui(a, true);
     g_pr.u = &u;
     tui_post(u.tui, signals_init_cb, &u); /* the terminal title / program status claim the terminal first */
@@ -2403,6 +2404,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
         pthread_cond_broadcast(&u.ask_cv);
     }
     pthread_mutex_unlock(&u.mu);
+    ui_approval_shutdown(&u); /* likewise for a call waiting on an approval prompt: denied */
     ui_signals_dispose();
     if (u.worker_running) {
         app_abort(a);

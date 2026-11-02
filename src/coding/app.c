@@ -12,6 +12,7 @@
 #include "coding/evalhost.h"
 #include "coding/autolearn.h"
 #include "coding/memory.h"
+#include "tools/approval.h"
 #include "tools/artifacts.h"
 #include "tools/jobs.h"
 #include "tools/xdev.h"
@@ -1008,6 +1009,73 @@ void app_sync_queue_modes(app_t *a) {
     a->agent->interrupt_wait = str_eq(settings_str("interruptMode", "immediate"), "wait");
 }
 
+/* the extension wrapper's approval gate (extensibility/extensions/wrapper.ts execute): resolve against the
+ * validated input, deny, or prompt through the UI (requestApproval) and remember what the answer covers */
+static tool_gate_t hook_approve_tool(void *ud, agent_t *ag, const json_t *call, const json_t *args, char **reason) {
+    app_t *a = ud;
+    const char *name = json_get_str(call, "name");
+    if (!name) return TOOL_ALLOW;
+    bool client_approved = false;
+    if (a->permission_gate && a->permission_gate(a->permission_gate_ud, a, call, args, &client_approved, reason) == TOOL_BLOCK)
+        return TOOL_BLOCK;
+    const char *sid = a->session ? session_id(a->session) : NULL;
+    approval_ctx_t ctx;
+    approval_ctx_from_settings(&ctx, a->opts.auto_approve, sid, a->cwd);
+    approval_call_t c = {a->env, ag, name, args};
+    approval_resolved_t r;
+    approval_resolve(&c, &ctx, &r);
+    tool_gate_t gate = TOOL_ALLOW;
+    char *scope_subject = NULL, *scope_key = NULL;
+    strvec_t targets = {0};
+    if (r.policy == APOL_DENY) {
+        *reason = approval_deny_error(&r, name);
+        gate = TOOL_BLOCK;
+        goto done;
+    }
+    if (r.policy != APOL_PROMPT || client_approved) goto done;
+    /* only a prompt always-ask-cached itself raised can be remembered by target; otherwise a prompt the mode
+     * raised can be approved for the rest of the session */
+    bool grantable = ctx.use_grants && r.source == ASRC_MODE;
+    if (grantable) approval_cache_targets(&c, &targets);
+    bool cache_targets = grantable && targets.n > 0;
+    bool scoped = !cache_targets && approval_session_scope(&r, name, &scope_subject, &scope_key);
+    if (scoped && approval_session_has(sid, scope_key)) goto done;
+    if (!a->env->ui.approve) {
+        if (r.source == ASRC_RESTRICTION)
+            *reason = xasprintf("Tool \"%s\" requires approval but no interactive UI available.\nReason: %s\nA restricted "
+                                "folder (tools.restrictedFolders) asks in every approval mode.",
+                                name, r.reason ? r.reason : "");
+        else
+            *reason = xasprintf("Tool \"%s\" requires approval but no interactive UI available.\nOptions:\n  1. Set "
+                                "tools.approvalMode: yolo in /settings\n  2. Add tools.approval.%s: allow to config\n  3. "
+                                "Use an interactive UI to approve the tool call",
+                                name, name);
+        gate = TOOL_BLOCK;
+        goto done;
+    }
+    approval_prompt_t p;
+    approval_prompt_build(&c, r.reason, scoped ? scope_subject : NULL, cache_targets, &p);
+    char *status = approval_format_prompt(&c, r.reason);
+    int grant = 0;
+    bool always = false;
+    int answer = a->env->ui.approve(a->env->ui.ud, json_get_str(call, "id"), name, status, &p, &grant, &always, &ag->cancel);
+    free(status);
+    if (answer == APPROVE_SESSION && scoped) approval_session_grant(sid, scope_key);
+    else if (answer == APPROVE_GRANT && grant >= 0 && (size_t)grant < p.ngrants)
+        approval_record_grant(&c, sid, r.tier, p.grants[grant].folder, always);
+    else if (answer != APPROVE_ONCE) {
+        *reason = xasprintf("Tool call denied by user: %s", name);
+        gate = TOOL_BLOCK;
+    }
+    approval_prompt_free(&p);
+done:
+    strvec_free(&targets);
+    free(scope_subject);
+    free(scope_key);
+    approval_resolved_free(&r);
+    return gate;
+}
+
 static void install_agent(app_t *a) {
     agent_t *ag = agent_new();
     a->agent = ag;
@@ -1020,6 +1088,7 @@ static void install_agent(app_t *a) {
     ag->hooks.on_stream_delta = hook_stream;
     ag->hooks.after_tool = hook_after_tool;
     ag->hooks.before_tool = hook_before_tool;
+    ag->hooks.approve_tool = hook_approve_tool;
     ag->hooks.ud = a;
     free(ag->session_id);
     ag->session_id = a->session ? xstrdup(session_id(a->session)) : uuid_v7();
@@ -3135,6 +3204,7 @@ app_t *app_subagent_new(app_t *parent, const char *agent_name, const char *model
     if (tools.n) o.tools = &tools;
     o.no_session = true;
     o.subagent = true;
+    o.auto_approve = parent->opts.auto_approve;
     o.subagent_depth = parent->env->subagent_depth + 1;
     o.no_context_files = false;
     app_t *child = app_create(&o, err);

@@ -301,6 +301,8 @@ static agent_tool_t *resolve_tool(agent_t *a, const char *name) {
     return NULL;
 }
 
+agent_tool_t *xdev_resolve_tool(agent_t *a, const char *name) { return resolve_tool(a, name); }
+
 /* MCP/extension tools carry third-party metadata (`dynamic`): their summaries are capped. */
 static bool tool_is_builtin(const agent_tool_t *t) { return !str_starts(t->name, "mcp__"); }
 

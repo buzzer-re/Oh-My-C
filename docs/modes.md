@@ -127,8 +127,10 @@ This is the Agent Client Protocol for editors such as Zed (omp `modes/acp/*`): J
 newline-delimited JSON on stdio. Methods: `initialize`, `session/new`, `session/load`,
 `session/list`, `session/prompt`, `session/cancel`, `session/set_mode`. Agent output is streamed as
 `session/update` notifications (message and thought chunks, `tool_call` / `tool_call_update`,
-plan, usage). Edit and execute tools first ask the client through `session/request_permission`
-(allow once, always allow, reject). Each ACP session is its own `app_t` with its own prompt thread.
+plan, usage). `bash` calls and edits that delete or move a file first ask the client through
+`session/request_permission` (Allow once, Always allow, Reject, Always reject; see
+[tools.md](tools.md#tool-approval)), unless `tools.approvalMode: yolo` is configured explicitly or
+`--auto-approve` is given. Each ACP session is its own `app_t` with its own prompt thread.
 
 ## Library embedding
 

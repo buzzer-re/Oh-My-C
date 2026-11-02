@@ -114,9 +114,9 @@ updates). Timers (`tui_add_timer`) drive spinners, smooth streaming reveal and l
   forward-delete row and an exit row.
 - Not handled yet although bound (as in omp they still appear in `/hotkeys`): `app.model.selectTemporary`,
   `app.tools.toggleVisibility`, `app.history.search`, `app.editor.external` (main composer),
-  `app.local.open`, `app.clipboard.pasteTextRaw`, `app.approval.approve`, `app.agents.hub`,
+  `app.local.open`, `app.clipboard.pasteTextRaw`, `app.agents.hub`,
   `app.session.observe`, `app.tree.*`, `app.links.hint` and the speech actions; see
-  [gaps.md](gaps.md) §2b.
+  [gaps.md](gaps.md) §2b. `app.approval.approve` is handled by the approval dialog (`ui/approval.c`).
 - Non-tty file descriptors are supported (tests): probes are skipped and the size defaults to 80×24.
 - `notify.c`: terminal identity (omp `detectTerminalId`, including the tmux client query) and desktop
   notifications in omp's order: Herdr / cmux CLIs, tmux DCS passthrough + BEL, Zellij, else the terminal's
@@ -194,6 +194,7 @@ shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, 
 | `settings.c` | `/settings` from omp's own registry dump (`assets/tui/settings-ui.json`) | `overlays/settings-selector.ts`, `components/settings-list.ts` |
 | `btw.c` | `/btw`: inline answer panel below the transcript (streams Markdown, Esc cancels then closes, `c` copy, `f` follow up, `b` branch), fullscreen BTW history (topic list + answer pane, follow-up composer, copy, cancel), the controller (session moves dispose it) | `controllers/btw-controller.ts`, `overlays/btw-panel.ts`, `overlays/btw-history-panel.ts` |
 | `ask.c` | the `ask` tool's dialog in the composer's place | `overlays/ask-dialog.ts`, `hook-editor.ts` |
+| `approval.c` | the tool-approval prompt in the composer's place: `Allow tool: <t>` panel, details (accent, one clipped row each, 8 rows then a scrollbar; `app.tools.expand` swaps in the full prompt wrapped, PgUp/PgDn scroll), choices (`☐ Remember across sessions` toggle + grants, `Approve` / `Approve Once`, `Approve <t> for this session`, `Deny`), key-hint footer; `app.approval.approve` (Ctrl+Enter / Ctrl+Q) approves, Esc denies, Enter and the approve key arm 500 ms after mount; the composer stays beneath it and takes typing: a draft turns Deny into `Deny and send message`, and the message sent with Enter is queued as steering (delivered first) and denies the call; the bridge blocks the tool thread (one dialog at a time; an abort or UI exit denies); the call reads as blocked (`kind=permission`) in the title / OSC 7501 and Warp gets `permission_request` / `permission_replied` | `overlays/approval-dialog.ts`, `controllers/extension-ui-controller.ts` (`showCollabAwareApproval`) |
 | `overlays.c` | selector host, thinking selector, `/hotkeys` markdown | `overlays/thinking-selector.ts`, `hotkeys-markdown.ts` |
 | `report.c` | command reports: docked in the report slot (between the `/btw` panel and the banner) when the box fits the rows above the chrome below it (measured from the last frame, omp's `commandReportRows`), else a focused full-screen page on the alternate screen; Esc dismisses the docked one; transcript resets drop both. Also the full-screen sheet host for `/context` | `overlays/report-panel.ts`, `controllers/command-controller.ts` (`showCommandReport`) |
 | `context.c` | `/context` viewer: Overview (summary, occupancy map, legend) → category previews → entry page | `overlays/context-viewer*.ts`, `chrome/context-*.ts`, `session/context-view.ts` |

@@ -119,6 +119,9 @@ enum { AGENT_STREAM_CONTINUE = 0, AGENT_STREAM_INTERRUPT = 1, AGENT_STREAM_ERROR
 typedef struct {
     /* Called before executing a tool call. Return TOOL_BLOCK and set *reason (owned) to refuse. */
     tool_gate_t (*before_tool)(void *ud, agent_t *a, const json_t *tool_call, char **reason);
+    /* Called once the arguments validated, right before the tool runs (omp's approval gate inside the wrapped
+     * `execute`): `args` are the normalized arguments. Return TOOL_BLOCK and set *reason (owned) to refuse. */
+    tool_gate_t (*approve_tool)(void *ud, agent_t *a, const json_t *tool_call, const json_t *args, char **reason);
     /* Called after a tool finished; may modify the result. */
     void (*after_tool)(void *ud, agent_t *a, const json_t *tool_call, tool_result_t *res);
     /* Transform the message list right before an LLM call (compaction, injections). Return owned array or NULL. */
@@ -202,6 +205,11 @@ json_t *agent_pop_last_queued(agent_t *a);
 /* Remove every user-authored queued message; returns {steering:[...], followUp:[...]} (omp clearQueue). Owned. */
 json_t *agent_take_user_queued(agent_t *a);
 size_t agent_queued_count(agent_t *a);
+size_t agent_steering_count(agent_t *a);
+/* omp agent.prioritizeSteering: move steering[from..] (messages queued after a snapshot) to the queue head */
+void agent_prioritize_steering(agent_t *a, size_t from);
+bool agent_steering_has(agent_t *a, const json_t *msg); /* `msg` (by identity) is still queued */
+const json_t *agent_steering_at(agent_t *a, size_t i);  /* borrowed identity token; NULL past the end */
 /* Start a run that delivers queued messages (steering first, per mode) when idle. -1 if busy or nothing queued. */
 int agent_run_queued(agent_t *a);
 

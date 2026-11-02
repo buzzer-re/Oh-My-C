@@ -169,6 +169,7 @@ static char *g_warp_prompt; /* Warp bridge activePrompt */
 typedef struct {
     char *id;
     char *msg;
+    const char *kind; /* "question" | "permission" */
 } blocker_t;
 
 static struct {
@@ -540,10 +541,27 @@ void ui_signals_tool_start(const char *tool_call_id, const char *tool_name, cons
     }
     char *msg = qs.n ? strvec_join(&qs, " ") : NULL;
     strvec_free(&qs);
-    blocker_t b = {xstrdup(tool_call_id), msg};
+    blocker_t b = {xstrdup(tool_call_id), msg, "question"};
     vec_push(&S.blockers, b);
     ui_signals_run_status(RUN_BLOCKED, "question", msg);
 }
+
+void ui_signals_approval_requested(const char *tool_call_id, const char *tool_name, const char *msg) {
+    json_t *e = warp_event("permission_request");
+    json_set_str(e, "tool_name", tool_name ? tool_name : "");
+    char *summary = xasprintf("omp wants to run %s", tool_name ? tool_name : "");
+    json_set_str(e, "summary", summary);
+    free(summary);
+    warp_emit(e);
+    if (!tool_call_id) return;
+    for (size_t i = 0; i < S.blockers.n; i++)
+        if (str_eq(S.blockers.v[i].id, tool_call_id)) return;
+    blocker_t b = {xstrdup(tool_call_id), msg ? xstrdup(msg) : NULL, "permission"};
+    vec_push(&S.blockers, b);
+    ui_signals_run_status(RUN_BLOCKED, "permission", msg);
+}
+
+void ui_signals_approval_resolved(void) { warp_emit(warp_event("permission_replied")); }
 
 void ui_signals_tool_end(const char *tool_call_id, const char *tool_name) {
     json_t *tc = warp_event("tool_complete");
@@ -556,7 +574,7 @@ void ui_signals_tool_end(const char *tool_call_id, const char *tool_name) {
         memmove(&S.blockers.v[i], &S.blockers.v[i + 1], (S.blockers.n - i - 1) * sizeof S.blockers.v[0]);
         S.blockers.n--;
         /* back to `working` only when the last outstanding blocking prompt resolves */
-        if (S.blockers.n) ui_signals_run_status(RUN_BLOCKED, "question", S.blockers.v[0].msg);
+        if (S.blockers.n) ui_signals_run_status(RUN_BLOCKED, S.blockers.v[0].kind, S.blockers.v[0].msg);
         else ui_signals_run_status(RUN_WORKING, NULL, NULL);
         return;
     }
