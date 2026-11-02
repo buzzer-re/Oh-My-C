@@ -41,7 +41,6 @@ static struct {
     int timer;          /* pending auto-submit */
     step_t step;
     char *step_prompt, *step_action;
-    int tick;           /* 1 s status-line refresh for a duration budget */
     cond_job_t *job;    /* the live evaluation */
     VEC(cond_job_t *) jobs; /* every evaluation not yet joined */
     bool compacting;    /* a loop.mode=compact iteration waits for its compaction */
@@ -59,17 +58,10 @@ static void abort_condition(void) {
     g.job = NULL;
 }
 
-static void tick_cb(void *ud) { tui_request_render(((ui_t *)ud)->tui); }
-
-/* #syncLoopModeStatus */
+/* #syncLoopModeStatus (a duration budget's "left" is recomputed whenever the status line renders; like omp,
+ * nothing repaints an idle screen just for it) */
 static void sync_status(ui_t *u) {
     u->loop = g.st.enabled ? &g.st : NULL;
-    bool ticking = g.st.enabled && g.st.limit.kind == LOOP_LIMIT_DURATION;
-    if (ticking && !g.tick) g.tick = tui_add_timer(u->tui, 1000, true, tick_cb, u);
-    else if (!ticking && g.tick) {
-        tui_remove_timer(u->tui, g.tick);
-        g.tick = 0;
-    }
     tui_request_render(u->tui);
 }
 
@@ -320,15 +312,8 @@ char *lp_command(ui_t *u, const char *args) {
     return prompt;
 }
 
-char *lp_autocomplete_description(ui_t *u) {
-    (void)u;
-    return loop_autocomplete_description(&g.st);
-}
-
 void lp_shutdown(ui_t *u) {
     cancel_auto_submit(u);
-    if (g.tick) tui_remove_timer(u->tui, g.tick);
-    g.tick = 0;
     abort_condition();
     for (size_t i = 0; i < g.jobs.n; i++) {
         g.jobs.v[i]->cancel = 1;

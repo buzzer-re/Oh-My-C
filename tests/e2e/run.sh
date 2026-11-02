@@ -647,4 +647,8 @@ fi
 # editor I/O (WP-6) under a pty: Ctrl+G, Ctrl+R, paste chip / menu, raw paste, `#` actions and refs, `@` mentions
 mkdir -p "$T/eio"
 check "editor io" "editor io ok"  python3 -I "$ROOT/tests/e2e/editor_io.py" "$B" "$T/req.jsonl" "$ROOT/tests/e2e/fake_editor.sh" "$T/eio"
+# /loop (WP-23: count budget, --until / --while conditions, Esc pause) and /copy picker, /copy targets, /open (WP-20)
+mkdir -p "$T/lc"
+check "loop mode" "loop ok"  python3 -I "$ROOT/tests/e2e/loop_copy_tui.py" "$B" "$T/req.jsonl" "$T/lc" loop
+check "copy + open" "copy ok"  python3 -I "$ROOT/tests/e2e/loop_copy_tui.py" "$B" "$T/req.jsonl" "$T/lc" copy
 exit $fail

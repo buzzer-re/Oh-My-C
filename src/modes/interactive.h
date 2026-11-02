@@ -57,7 +57,6 @@ bool lp_enabled(ui_t *u);
 void lp_set_prompt(ui_t *u, const char *prompt); /* setLoopPrompt (loop mode on only) */
 bool lp_escape(ui_t *u);                         /* app.interrupt with loop mode on: abort the turn, pause */
 bool lp_run_end(ui_t *u);                        /* a run ended idle: schedule the next iteration; true when loop mode is on */
-char *lp_autocomplete_description(ui_t *u);      /* /loop's live description (owned) */
 void lp_shutdown(ui_t *u);
 
 /* copyctl.c (builtin-collaboration.ts copy / open, SelectorController.showCopySelector) */
