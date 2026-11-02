@@ -744,6 +744,7 @@ void ui_resume_session(ui_t *u, const char *path) {
     char *err = NULL;
     if (app_switch_session(u->app, path, &err) != 0) add_notice(u, "error", err);
     else {
+        toolcard_frames_reset();
         reload_chat(u);
         add_notice(u, "info", "Session resumed");
         ui_plan_restore(u);

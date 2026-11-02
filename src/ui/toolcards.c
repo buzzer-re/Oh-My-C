@@ -14,6 +14,34 @@ static VEC(msgview_t *) g_live; /* running cards that repaint on a timer */
 static int g_timer;
 static hmap_t g_bg;       /* tool call id -> card that may receive background job frames (task) */
 static bool g_replaying;  /* history replay: persisted async results are not live */
+/* latest background-job frame per returned call, keyed "<session id>\x1f<call id>" (omp AgentSession
+ * #activeToolExecutionUpdates): a returned call's persisted result is only its "running" snapshot, so a transcript
+ * rebuild replays the newest frame instead. Keyed by session, so a /new or switched session never sees them. */
+static json_t *g_frames;
+#define FRAMES_MAX 256
+
+static char *frame_key(ui_t *u, const char *id) {
+    const char *sid = u && u->app && u->app->session ? session_id(u->app->session) : "";
+    return xasprintf("%s\x1f%s", sid ? sid : "", id);
+}
+
+static void frame_remember(ui_t *u, const char *id, const json_t *details) {
+    if (!id || u->view) return; /* main-session cards only */
+    if (!g_frames) g_frames = json_obj();
+    char *k = frame_key(u, id);
+    json_del(g_frames, k);
+    while (json_len(g_frames) >= FRAMES_MAX) json_del(g_frames, g_frames->u.obj.keys[0]);
+    json_set(g_frames, k, json_clone(details));
+    free(k);
+}
+
+static const json_t *frame_lookup(ui_t *u, const char *id) {
+    if (!g_frames || !id || u->view) return NULL;
+    char *k = frame_key(u, id);
+    const json_t *f = json_get(g_frames, k);
+    free(k);
+    return f;
+}
 
 static bool is_async_state(const json_t *details, const char *state) {
     return str_eq(json_get_str(json_get_obj(details, "async"), "state"), state);
@@ -212,7 +240,15 @@ void toolcard_result(ui_t *u, msgview_t *v, const char *id, json_t *result, bool
     }
     if (!result) result = json_obj();
     bool parked = false;
-    if (!partial && !g_replaying && is_async_state(json_get_obj(result, "details"), "running")) {
+    const json_t *latest = !partial && g_replaying && is_async_state(json_get_obj(result, "details"), "running")
+                               ? frame_lookup(u, id)
+                               : NULL;
+    if (latest) { /* a rebuild: the job's newest frame supersedes the persisted "running" snapshot */
+        json_set(result, "details", json_clone(latest));
+        parked = is_async_state(latest, "running");
+        if (is_async_state(latest, "failed")) is_error = true;
+        if (parked && id) hmap_put(&g_bg, id, v); /* later frames keep landing on the rebuilt card */
+    } else if (!partial && !g_replaying && is_async_state(json_get_obj(result, "details"), "running")) {
         /* a background call returned: the card stays live for its job frames (omp parkAsBackground) */
         parked = true;
         json_t *frame = json_get_obj(st, "frame");
@@ -237,6 +273,7 @@ void toolcard_result(ui_t *u, msgview_t *v, const char *id, json_t *result, bool
 }
 
 void toolcard_frame(ui_t *u, const char *id, json_t *details) {
+    frame_remember(u, id, details);
     msgview_t *v = id ? hmap_get(&g_bg, id) : NULL;
     if (!v || !view_attached(v)) {
         if (v) hmap_del(&g_bg, id);
@@ -395,3 +432,8 @@ void toolcard_replay(ui_t *u, const json_t *msg) {
 }
 
 void toolcard_set_replaying(bool on) { g_replaying = on; }
+
+void toolcard_frames_reset(void) {
+    json_free(g_frames);
+    g_frames = NULL;
+}

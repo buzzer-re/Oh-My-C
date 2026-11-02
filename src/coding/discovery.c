@@ -687,11 +687,11 @@ strvec_t internal_url_docs(const sysprompt_url_host_t *h) {
     if (h->rule_count > 0) push_url_doc(&out, "rule", NULL, NULL);
     if (h->memory_local) push_url_doc(&out, "memory", NULL, NULL);
     if (h->out_replies) push_url_doc(&out, "out", NULL, NULL);
-    if (h->has_task) push_url_doc(&out, "agent", NULL, NULL);
-    if (h->has_task) push_url_doc(&out, "history", NULL, NULL);
+    push_url_doc(&out, "agent", NULL, NULL);
+    push_url_doc(&out, "history", NULL, NULL);
     push_url_doc(&out, "artifact", NULL, NULL);
     push_url_doc(&out, "local", NULL, NULL);
-    if (h->has_task) push_url_doc(&out, "proc", NULL, NULL);
+    push_url_doc(&out, "proc", NULL, NULL);
     if (h->settings_approval) push_url_doc(&out, "cfg", "omp settings", "omc settings");
     char *ssh = which("ssh");
     if (ssh) push_url_doc(&out, "ssh", NULL, NULL);
@@ -897,7 +897,6 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     sysprompt_url_host_t host = {
         .skill_uri_access = json_len(skills) > 0,
         .rule_count = json_len(rules),
-        .has_task = o->tool_names && strvec_contains(o->tool_names, "task"),
         .memory_local = str_eq(memory_backend(), "local"),
         .out_replies = settings_configured("out.enabled") ? settings_bool("out.enabled", true) : o->tui_transcript,
         .settings_approval = o->tui_transcript,

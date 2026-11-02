@@ -116,7 +116,7 @@ json_t *agent_defs_load(const char *cwd) {
 }
 
 /* task/read-only-policy.ts: read-only iff the declared tools are a non-empty subset of read-tier tools */
-static bool agent_read_only(const json_t *def) {
+bool agent_def_read_only(const json_t *def) {
     static const char *const RO[] = {"read",     "wait",  "grep", "glob",   "find",        "web_search",
                                      "ast_grep", "yield", "ask",  "todo",   "recall",      "reflect",
                                      "retain",   "memory_edit",   "checkpoint", "rewind"};
@@ -505,7 +505,7 @@ agent_tool_t *tool_task_new(tool_env_t *env) {
         json_t *a = json_obj();
         json_set_str(a, "name", k);
         json_set_str(a, "description", json_get_str(v, "description") ? json_get_str(v, "description") : "");
-        json_set_bool(a, "readOnly", agent_read_only(v));
+        json_set_bool(a, "readOnly", agent_def_read_only(v));
         json_set_bool(a, "blocking", false);
         json_set_bool(a, "structured", false);
         json_push(agents, a);

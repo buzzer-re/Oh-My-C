@@ -226,6 +226,7 @@ void toolcard_replay(ui_t *u, const json_t *msg);
 void toolcard_frame(ui_t *u, const char *id, json_t *details);
 /* history rebuild in progress: persisted background results render settled, not live */
 void toolcard_set_replaying(bool on);
+void toolcard_frames_reset(void); /* a session switch drops the cached background-job frames */
 /* a tool call streaming in an assistant message: draws (or updates) its pending card before execution;
  * toolcard_start then adopts that card */
 void toolcard_preview(ui_t *u, const char *id, const char *name, const json_t *args);

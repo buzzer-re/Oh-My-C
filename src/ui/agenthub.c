@@ -9,6 +9,7 @@
  *
  * The registry (coding/agents.c) is process-global; its change listener posts one coalesced refresh to the UI loop. */
 #include "ui/ui.h"
+#include "ui/tools/tc.h"
 
 #include "coding/agents.h"
 #include "config/settings.h"
@@ -1666,9 +1667,18 @@ static void detail_panel(hub_t *h, int width, int rows, strvec_t *out) {
     }
     SECTION("Changes", 0);
     {
-        char *d = S(TUI_TC_DIM, "Shared workspace · per-agent LoC not attributable");
+        char *d = S(TUI_TC_DIM, json_get_bool(ref, "readOnly", false) ? "Read-only · 0 LoC"
+                                                                        : "Shared workspace · per-agent LoC not attributable");
         ADD(d);
         free(d);
+    }
+    if (json_get_str(ref, "outputPath")) { /* the `<id>.md` output artifact (addWrapped, two rows) */
+        char *sp = tc_shorten_path(json_get_str(ref, "outputPath")), *l = xasprintf("Output %s", sp), *one = one_line(l);
+        strvec_t w = {0};
+        tui_wrap_text_with_ansi(one, MAX(1, width), &w);
+        for (size_t i = 0; i < w.n && i < 2; i++) ADD(w.v[i]);
+        strvec_free(&w);
+        free(sp), free(l), free(one);
     }
     if ((int)L.n < rows) strvec_push(&L, "");
     if ((int)L.n < rows) {

@@ -92,8 +92,6 @@ typedef struct {
     bool skill_uri_access; /* a skill-reading tool is active and skills exist */
     size_t rule_count;     /* rulebook rules listed in the prompt */
     bool memory_local;     /* memory.backend=local owns the file-backed memory://root namespace */
-    bool has_task;         /* HOOK: agent://, history://, proc:// are listed only while the task tool is
-                            * active (omp lists them unconditionally; gate until omc serves them) */
     bool out_replies;      /* omp outRepliesActive: `out://` writes reach the user */
     bool settings_approval; /* omp settingsApproval: `cfg://` writes can be approved (top-level TUI session) */
 } sysprompt_url_host_t;

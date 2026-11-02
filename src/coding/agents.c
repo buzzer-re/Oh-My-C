@@ -45,6 +45,8 @@ typedef struct aref {
     bool lifecycle_open;   /* a `started` lifecycle frame went out without its terminal one */
     char *gist;            /* hub activity: latest intent or `running <tool>` of the current run */
     char *session_file;    /* persisted transcript `<artifacts>/<id>.jsonl` (NULL: in memory only) */
+    char *output_path;     /* published output artifact `<artifacts>/<id>.md` (NULL: none written yet) */
+    bool read_only;        /* its definition is read-only (hub "Read-only · 0 LoC") */
     json_t *model_override; /* progress.modelOverride: the spawn's model patterns (agent definition or request) */
     int pins;              /* a UI view holds `app` (session focus): never freed underneath it */
 } aref_t;
@@ -382,6 +384,7 @@ __attribute__((unused)) static void ref_free(aref_t *r) {
     free(r->recent_tail);
     free(r->gist);
     free(r->session_file);
+    free(r->output_path);
     json_free(r->model_override);
     free(r->id);
     free(r->agent);
@@ -738,6 +741,28 @@ static char *run_turn(aref_t *r, app_t *child, const char *prompt, volatile sig_
     return run_turn_ex(r, child, prompt, cancel, aborted, error, true, NULL);
 }
 
+/* task/executor.ts finalize: the run's output lands in `<artifactsDir>/<id>.md` next to its transcript — always for
+ * the spawn's own run, for a follow-up turn only when it is a successful, non-empty reply the user or the spawner
+ * asked for (publishMessageResult) */
+static void publish_output(aref_t *r, const char *text, bool initial, bool ok) {
+    if (!initial && (!ok || !text || !*text)) return;
+    pthread_mutex_lock(&g_mu);
+    char *path = r->session_file && str_ends(r->session_file, ".jsonl")
+                     ? xasprintf("%.*s.md", (int)(strlen(r->session_file) - 6), r->session_file)
+                     : NULL;
+    pthread_mutex_unlock(&g_mu);
+    if (!path) return;
+    const char *t = text ? text : "";
+    if (fs_write(path, t, strlen(t)) != 0) {
+        free(path);
+        return;
+    }
+    pthread_mutex_lock(&g_mu);
+    free(r->output_path);
+    r->output_path = path;
+    pthread_mutex_unlock(&g_mu);
+}
+
 static char *fmt_duration(int64_t ms) {
     if (ms < 1000) return xasprintf("%lldms", (long long)ms);
     int64_t s = ms / 1000;
@@ -869,7 +894,7 @@ static char *peer_roster_prompt(aref_t *self, const char *agent_body, const char
         json_set_str(p, "displayName", r->is_main ? "main" : r->agent);
         json_set_str(p, "kind", r->is_main ? "main" : "sub");
         json_set_str(p, "status", ref_live_running(r) ? "running" : "idle");
-        if (r->activity) json_set_str(p, "activity", r->activity);
+        if (r->gist) json_set_str(p, "activity", r->gist); /* AgentRegistry.setActivity: the progress gist */
         json_push(peers, p);
         shown++;
     }
@@ -934,6 +959,7 @@ static app_t *make_child(spawn_t *sp, char **err) {
         session_free(src);
     }
     char *append = peer_roster_prompt(sp->ref, json_get_str(def, "body"), sp->context, sp->source, model);
+    bool ro = agent_def_read_only(def);
     /* the transcript persists next to the parent's artifacts (omp `<artifactsDir>/<id>.jsonl`) */
     const char *adir = sp->parent && sp->parent->env ? artifacts_dir(sp->parent->env->artifacts) : NULL;
     char *sfile = adir ? xasprintf("%s/%s.jsonl", adir, sp->ref->id) : NULL;
@@ -944,6 +970,7 @@ static app_t *make_child(spawn_t *sp, char **err) {
     if (!child) free(sfile);
     free(sp->ref->sys_append);
     sp->ref->sys_append = append;
+    sp->ref->read_only = ro;
     free(sp->ref->model);
     sp->ref->model = child && child->model ? xasprintf("%s/%s", child->model->provider, child->model->id) : NULL;
     /* a role alias with no configured patterns (`@task` on the default role) reports the model it resolved to */
@@ -1017,6 +1044,7 @@ static char *task_body_run(bgjob_t *job, void *ud, bool *failed) {
     char *text = run_turn_ex(r, child, up, cancel, &aborted, &error, true, sp->task);
     free(up);
     permit_release();
+    publish_output(r, text, true, !aborted && !error);
     const char *status = aborted ? "aborted" : error ? "failed" : "completed";
     *failed = aborted || error;
     char *sum = render_summary(r->id, sp->agent, status, mono_ms() - t0, text, error, aborted);
@@ -1200,6 +1228,7 @@ static char *wake_body(bgjob_t *job, void *ud, bool *failed) {
     int64_t t0 = mono_ms();
     char *text = run_turn(w->ref, w->child, w->text, job_cancel_flag(job), &aborted, &error);
     *failed = aborted || error;
+    if (w->to_spawner) publish_output(w->ref, text, false, !aborted && !error);
     char *res;
     if (w->to_spawner) {
         char *sum = render_summary(w->ref->id, w->ref->agent, aborted ? "aborted" : error ? "failed" : "completed", mono_ms() - t0,
@@ -1658,6 +1687,8 @@ static json_t *ref_json_locked(const aref_t *r) {
     }
     json_set_bool(o, "live", r->app != NULL);
     if (r->session_file) json_set_str(o, "sessionFile", r->session_file);
+    if (r->output_path) json_set_str(o, "outputPath", r->output_path);
+    if (r->read_only) json_set_bool(o, "readOnly", true);
     if (r->parent_call) json_set_str(o, "parentToolCallId", r->parent_call);
     if (r->job_id) json_set_str(o, "jobId", r->job_id);
     if (r->progress) {
@@ -1822,6 +1853,7 @@ static char *chat_body(bgjob_t *job, void *ud, bool *failed) {
     char *error = NULL;
     char *text = run_turn_ex(c->ref, c->child, c->text, job_cancel_flag(job), &aborted, &error, true, NULL);
     *failed = aborted || error;
+    publish_output(c->ref, text, false, !aborted && !error);
     free(text);
     free(error);
     return xstrdup("");

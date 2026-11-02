@@ -1,0 +1,6 @@
+[
+ {"send": {"id": "q1", "type": "set_subagent_subscription", "level": "lifecycle"}}, {"wait": "response:q1"},
+ {"send": {"id": "p1", "type": "prompt", "message": "call:task:{\"context\":\"ctx\",\"tasks\":[{\"task\":\"call:task:{\\\"context\\\":\\\"inner\\\",\\\"tasks\\\":[{\\\"task\\\":\\\"slow:2:grand done\\\"}]}\"},{\"task\":\"slow:1:sibling done\"}]}"}},
+ {"wait": "prompt_result:p1"},
+ {"wait": "session_settled"}
+]
