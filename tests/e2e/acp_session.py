@@ -15,7 +15,7 @@ WORK = os.getcwd()
 
 class Client:
     def __init__(self, caps):
-        self.p = subprocess.Popen([OMC, "acp", "-m", "mock/mock-1"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        self.p = subprocess.Popen([OMC, "acp", "--model", "mock/mock-1"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL)
         self.buf, self.frames, self.next_id, self.caps = b"", [], 0, caps
         self.buffers, self.terms = {}, {}
