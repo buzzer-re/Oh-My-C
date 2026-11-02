@@ -614,6 +614,10 @@ static char *ui_external_edit(ui_t *u, const char *text, const char *ext, bool *
     char *path = xasprintf("%s%s", tmpl, ext ? ext : ".md");
     rename(tmpl, path);
     fs_write(path, text, strlen(text));
+    /* a fullscreen page (plan review) gives the alternate screen back to the editor and takes it again
+     * after: only that page is repainted, the parked transcript is untouched */
+    bool page = tui_alt_screen_active(u->tui);
+    if (page) tui_alt_screen(u->tui, false);
     tui_term_stop(tui_term(u->tui));
     tui_term_set_loop_active(false);
     char *cmd = xasprintf("%s \"$1\"", ed);
@@ -628,8 +632,8 @@ static char *ui_external_edit(ui_t *u, const char *text, const char *ext, bool *
     tui_term_set_loop_active(true);
     tui_term_start(tui_term(u->tui));
     tui_term_query_size(tui_term(u->tui));
-    if (tui_overlay_visible(u->tui) && g_pr.open) tui_term_puts(tui_term(u->tui), "\x1b[?1049h");
-    tui_request_full_render(u->tui);
+    if (page) tui_alt_screen(u->tui, true);
+    else tui_request_full_render(u->tui);
     char *out = NULL;
     if (pid > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
         size_t n;

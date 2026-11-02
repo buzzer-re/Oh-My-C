@@ -57,9 +57,11 @@ clears to tests, and `OMC_TUI_DEBUG=<file>` logs one line per frame (kind: first
 resize, first changed row, viewport top, bytes written, old/new excerpt of the changed row).
 
 Fullscreen pages (`/settings`, `/resume`, the Models hub, `/hotkeys`, the setup wizard, the BTW
-history) borrow the alternate screen through `tui_alt_screen(tui, on)`: the normal screen's frame is
+history, plan review) borrow the alternate screen through `tui_alt_screen(tui, on)`: the normal screen's frame is
 parked meanwhile and resumes untouched on exit (the terminal restores that screen, nothing is
-repainted); a full render requested while a page is open applies to the normal screen when it closes.
+repainted); a full render requested while a page is open applies to the normal screen when it closes. An external editor
+opened from a page (`$VISUAL`/`$EDITOR`) gets the normal screen back meanwhile; only the page is
+repainted after it.
 
 A focused component may emit `TUI_CURSOR_MARKER` (an APC sequence) where the hardware cursor should
 sit (for IMEs). The renderer strips it and parks the cursor there. Renders are coalesced and
