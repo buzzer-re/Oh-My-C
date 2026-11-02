@@ -293,15 +293,64 @@ static char *dcr_render(app_t *a) {
 
 static json_t *hook_transform_locked(app_t *a, const json_t *messages);
 
+/* omp messages.ts wrapSteeringForModel: every steered user message reaches the model inside the
+ * user-interjection envelope (text parts joined, images kept); NULL when there is none */
+static json_t *wrap_steering(const json_t *messages) {
+    json_t *out = NULL, *m;
+    json_arr_foreach(messages, i, m) {
+        if (!str_eq(json_get_str(m, "role"), "user") || !json_get_bool(m, "steering", false)) continue;
+        const json_t *content = json_get(m, "content");
+        sb_t text = SB_INIT;
+        json_t *images = json_arr();
+        bool any = false;
+        if (json_is_str(content)) sb_append(&text, json_sv(content)), any = true;
+        else {
+            const json_t *b;
+            json_arr_foreach(content, k, b) {
+                if (str_eq(json_get_str(b, "type"), "text")) {
+                    if (any) sb_putc(&text, '\n');
+                    sb_append(&text, json_get_str(b, "text") ? json_get_str(b, "text") : "");
+                    any = true;
+                } else if (str_eq(json_get_str(b, "type"), "image")) {
+                    json_push(images, json_clone(b));
+                }
+            }
+        }
+        if (!out) out = json_clone(messages);
+        json_t *w = json_at(out, i);
+        json_del(w, "steering");
+        if (text.len) {
+            json_t *ctx = json_obj();
+            json_set_str(ctx, "message", sb_cstr(&text));
+            char *env = prompt_render("coding-agent/prompts/steering/user-interjection.md", ctx);
+            json_free(ctx);
+            if (json_is_str(content)) json_set_str(w, "content", env ? env : sb_cstr(&text));
+            else {
+                json_t *c = json_arr(), *img;
+                json_push(c, text_block(env ? env : sb_cstr(&text)));
+                json_arr_foreach(images, k, img) json_push(c, json_clone(img));
+                json_set(w, "content", c);
+            }
+            free(env);
+        }
+        json_free(images);
+        sb_free(&text);
+    }
+    return out;
+}
+
 /* the title fork runs the same transform from its own thread: serialize the reminder state */
 static json_t *hook_transform(void *ud, agent_t *ag, const json_t *messages) {
     app_t *a = ud;
     UNUSED(ag);
-    if (!settings_bool("dateCwdReminder", true)) return NULL;
+    json_t *w = wrap_steering(messages);
+    if (!settings_bool("dateCwdReminder", true)) return w;
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&mu);
-    json_t *r = hook_transform_locked(a, messages);
+    json_t *r = hook_transform_locked(a, w ? w : messages);
     pthread_mutex_unlock(&mu);
+    if (!r) return w;
+    json_free(w);
     return r;
 }
 

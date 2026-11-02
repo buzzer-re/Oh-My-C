@@ -10,6 +10,7 @@
 #include "modes/interactive.h"
 
 #include "config/settings.h"
+#include "prompt/template.h"
 
 #include <pthread.h>
 
@@ -88,6 +89,7 @@ enum { BG_COMPACT = 1, BG_HANDOFF = 2 };
 typedef struct {
     ui_t *u;
     int kind;
+    bool resume; /* the compaction interrupted a live turn: resume it afterwards */
     char *instructions;
     int rc;
     char *err;
@@ -118,13 +120,30 @@ static void bg_done(void *p) {
             free(m);
         }
     } else {
-        /* the transcript was rebuilt around the handoff divider ("Context compacted") */
+        /* the transcript was rebuilt around the handoff divider ("Context compacted"); renderInitialMessages
+         * reports the compaction count */
+        size_t n = 0;
+        json_t *e;
+        json_arr_foreach(u->app->session->entries, i, e) if (str_eq(json_get_str(e, "type"), "compaction")) n++;
+        if (n) {
+            char *c = n == 1 ? xstrdup("Session compacted 1 time") : xasprintf("Session compacted %zu times", n);
+            status(u, c);
+            free(c);
+        }
         char *t = xasprintf("%s Context handed off and compacted in place", tui_sym("status.success"));
         char *s = fg(TUI_TC_ACCENT, t);
         tui_container_add(u->chat, &tui_text_new(s, 1, 1)->base);
         free(s);
         free(t);
     }
+    /* a committed (or no-op) manual pass resumes the turn it interrupted (compaction.autoContinue) */
+    bool noop = b->err && !strcmp(b->err, "Nothing to compact");
+    if (b->resume && (b->rc == 0 || noop) && settings_bool("compaction.autoContinue", true) && !u->worker_running) {
+        char *cont = prompt_load("coding-agent/prompts/system/auto-continue.md");
+        if (cont) ix_start_hidden(u, cont, "auto-continue");
+        free(cont);
+    }
+    if (b->resume && !u->worker_running) ui_chrome_turn(u, false);
     free(b->instructions);
     free(b->err);
     free(b);
@@ -141,10 +160,11 @@ static void *bg_main(void *p) {
     return NULL;
 }
 
-static void bg_start(ui_t *u, int kind, const char *instructions) {
+static void bg_start(ui_t *u, int kind, const char *instructions, bool resume) {
     bg_t *b = xcalloc(1, sizeof *b);
     b->u = u;
     b->kind = kind;
+    b->resume = resume;
     b->instructions = instructions && *instructions ? xstrdup(instructions) : NULL;
     u->bg_kind = kind;
     ui_working_compaction(u, kind == BG_COMPACT ? "Compacting context..." : "Generating handoff\xe2\x80\xa6");
@@ -164,7 +184,7 @@ static size_t message_entries(ui_t *u) {
     return n;
 }
 
-static void compact_now(ui_t *u, const char *instructions) {
+static void compact_now(ui_t *u, const char *instructions, bool resume) {
     if (u->bg_kind) {
         add_notice(u, "error", "Compaction failed: Compaction already in progress");
         return;
@@ -173,7 +193,7 @@ static void compact_now(ui_t *u, const char *instructions) {
         add_notice(u, "warning", "Nothing to compact (no messages yet)");
         return;
     }
-    bg_start(u, BG_COMPACT, instructions);
+    bg_start(u, BG_COMPACT, instructions, resume);
 }
 
 void iq_compact(ui_t *u, const char *arg) {
@@ -184,7 +204,7 @@ void iq_compact(ui_t *u, const char *arg) {
         app_abort(u->app);
         return;
     }
-    compact_now(u, arg);
+    compact_now(u, arg, false);
 }
 
 /* follow-up key while streaming: run the compaction once the agent yields (InteractiveMode.yieldCompaction) */
@@ -210,7 +230,7 @@ void iq_handoff(ui_t *u, const char *arg) {
         add_notice(u, "warning", "Nothing to hand off (no messages yet)");
         return;
     }
-    bg_start(u, BG_HANDOFF, NULL);
+    bg_start(u, BG_HANDOFF, NULL, false);
 }
 
 /* ---------- `!cmd` off the UI thread (CommandController.handleBashCommand) ---------- */
@@ -585,9 +605,10 @@ bool iq_run_end(ui_t *u) {
     if (u->compact_pending) {
         char *instr = u->compact_pending;
         u->compact_pending = NULL;
-        compact_now(u, instr);
+        compact_now(u, instr, true);
         free(instr);
         if (u->bg_kind) return true;
+        ui_chrome_turn(u, false);
     }
     strvec_t st = {0}, fu = {0};
     agent_queue_texts(u->app->agent, &st, &fu);
@@ -606,7 +627,7 @@ bool iq_run_end(ui_t *u) {
         free(u->yield_compaction);
         u->yield_compaction = NULL;
         ui_queue_refresh(u);
-        compact_now(u, instr);
+        compact_now(u, instr, false);
         free(instr);
         if (u->bg_kind) return true;
         flush_compaction_queue(u);

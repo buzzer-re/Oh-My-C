@@ -599,6 +599,8 @@ void agent_abort(agent_t *a) { a->cancel = 1; }
 void agent_abort_next_silently(agent_t *a) { a->silent_abort_next = 1; }
 
 void agent_steer(agent_t *a, json_t *msg) {
+    /* omp AgentSession.steer: user input delivered mid-run is marked so the model sees it as an interjection */
+    if (agent_msg_user_authored(msg)) json_set_bool(msg, "steering", true);
     pthread_mutex_lock(&a->mu);
     json_push(a->steering, msg);
     pthread_mutex_unlock(&a->mu);

@@ -130,7 +130,7 @@ static void ui_apply_event(void *ud) {
     }
     case AGENT_EV_AGENT_END:
         ui_working_stop(u);
-        ui_chrome_turn(u, false);
+        if (!u->compact_pending) ui_chrome_turn(u, false); /* a /compact that interrupted the turn resumes it */
         break;
     case AGENT_EV_AGENT_START:
         toolcard_break_group(u);
@@ -454,6 +454,8 @@ static void ui_plan_restore(ui_t *u) {
 }
 
 void ix_start_prompt(ui_t *u, const char *text) { start_prompt(u, text); }
+
+void ix_start_hidden(ui_t *u, const char *text, const char *ctype) { start_hidden(u, text, ctype); }
 
 void ix_start_queued_run(ui_t *u) {
     if (u->worker_running || !u->app->model) return;

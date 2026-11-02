@@ -10,6 +10,7 @@
 void ix_start_prompt(ui_t *u, const char *text);      /* draw the user message, start a run */
 bool ix_handle_command(ui_t *u, const char *line);    /* built-in slash command; false if unknown */
 void ix_start_queued_run(ui_t *u);                    /* run that delivers the agent's queued messages */
+void ix_start_hidden(ui_t *u, const char *text, const char *ctype); /* synthetic prompt (not drawn) */
 void ix_history_add(ui_t *u, const char *text);       /* editor + persisted prompt history */
 
 /* iqueue.c */
