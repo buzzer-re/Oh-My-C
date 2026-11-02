@@ -9,12 +9,15 @@
 #include "core/embed.h"
 #include "session/dump.h"
 #include "session/session.h"
+#include "session/worktree.h"
 #include "tools/approval.h"
 
 #include <ctype.h>
 #include <strings.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdarg.h>
+#include <sys/stat.h>
 
 /* ---------- what omc implements ---------- */
 
@@ -33,6 +36,12 @@ static void h_forget_approvals(const slash_parsed_t *, slash_rt_t *, slash_resul
 static void h_fast(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_slow(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_extended_context(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_fresh(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_pin(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_move(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_wt(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_add_dir(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_remove_dir(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 
 /* upstream name -> supported subcommands ("*" all, NULL none), TUI handler present, text handler.
  * Subcommands left out are not implemented (their upstream behaviour would be advertised falsely). */
@@ -71,18 +80,26 @@ static const struct {
     {"logout", NULL, true, NULL},
     {"mcp", NULL, true, NULL},
     {"new", NULL, true, NULL},
+    {"fresh", NULL, true, h_fresh},
     {"clear", NULL, true, NULL},
     {"delete", NULL, true, NULL},
     {"compact", "soft", true, h_compact},
     {"shake", "*", true, h_shake},
     {"handoff", NULL, true, h_handoff},
     {"resume", NULL, true, NULL},
+    {"pin", NULL, false, h_pin},
     {"btw", NULL, true, NULL},
     {"retry", NULL, true, h_retry},
     {"memory", "view stats diagnose queue sync clear reset enqueue rebuild", true, h_memory},
     {"rename", NULL, true, h_rename},
+    {"move", NULL, true, h_move},
+    {"wt", NULL, true, h_wt},
+    {"add-dir", NULL, false, h_add_dir},
+    {"remove-dir", NULL, false, h_remove_dir},
     {"dirs", NULL, false, h_dirs},
     {"exit", NULL, true, NULL},
+    {"restart", NULL, true, NULL},
+    {"local", NULL, true, NULL},
     {"skills", NULL, true, NULL},
     {"forget-approvals", NULL, false, h_forget_approvals},
     {"quit", NULL, true, NULL},
@@ -144,6 +161,7 @@ static void registry_init(void) {
         }
         /* /resume: omc has no foreign-session (@claude/@codex) import */
         if (!strcmp(c->name, "resume")) c->inline_hint = "[session id]";
+        if (!strcmp(c->name, "restart")) c->description = "Restart omc with the same launch flags, resuming this session";
         vec_push(&g_reg, c);
     }
     /* omc-only commands */
@@ -616,9 +634,173 @@ static void h_rename(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *re
 static void h_dirs(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
     (void)c;
     (void)res;
-    char *m = xasprintf("Workspace directories:\n  %s (working directory)", rt->app->cwd);
+    char *m = app_workspace_dirs_text(rt->app, NULL);
     out(rt, m);
     free(m);
+}
+
+/* ---------- builtin-lifecycle.ts: fresh, pin, move, wt, add-dir, remove-dir ---------- */
+
+static void outf(slash_rt_t *rt, slash_result_t *res, bool failed, const char *fmt, ...) PRINTF_LIKE(4, 5);
+static void outf(slash_rt_t *rt, slash_result_t *res, bool failed, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    char *m = xvasprintf(fmt, ap);
+    va_end(ap);
+    out(rt, m);
+    if (failed) res->failed = true;
+    free(m);
+}
+
+static void h_fresh(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    (void)c;
+    int n = app_fresh_session(rt->app);
+    if (n < 0) out(rt, "Wait for the current response to finish or abort it before refreshing provider state.");
+    else outf(rt, res, false, "Fresh provider session started (%d %s pruned).", n, n == 1 ? "provider state" : "provider states");
+}
+
+static void h_pin(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    char *id = NULL;
+    if (*c->args) {
+        char *path = session_resolve(c->args, rt->app->cwd);
+        session_t *s = path ? session_open(path, NULL) : NULL;
+        if (s) id = xstrdup(session_id(s));
+        session_free(s);
+        free(path);
+        if (!id) {
+            outf(rt, res, true, "Session \"%s\" not found.", c->args);
+            return;
+        }
+    } else if (rt->app->session && session_id(rt->app->session)) {
+        id = xstrdup(session_id(rt->app->session));
+    } else {
+        usage(rt, res, "No active session to pin.");
+        return;
+    }
+    char *err = NULL;
+    int r = session_pin_toggle(id, &err);
+    if (r < 0) usage(rt, res, err);
+    else out(rt, r ? "Session pinned to the top of the resume list." : "Session unpinned.");
+    free(err);
+    free(id);
+}
+
+/* an existing directory or a usage message (owned) */
+static char *check_dir(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) return xasprintf("Directory does not exist: %s", path);
+    if (!S_ISDIR(st.st_mode)) return xasprintf("Not a directory: %s", path);
+    return NULL;
+}
+
+static void h_move(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    app_t *a = rt->app;
+    if (agent_is_running(a->agent)) {
+        usage(rt, res, "Cannot move while streaming.");
+        return;
+    }
+    if (!*c->args) {
+        usage(rt, res, "Usage: /move <path>");
+        return;
+    }
+    char *path = app_resolve_user_path(a, c->args);
+    char *bad = check_dir(path), *err = NULL;
+    if (bad) usage(rt, res, bad);
+    else if (app_move(a, path, &err) != 0) usage(rt, res, err);
+    else outf(rt, res, false, "Moved to %s.", a->cwd);
+    free(bad);
+    free(err);
+    free(path);
+}
+
+static void h_wt(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    app_t *a = rt->app;
+    if (agent_is_running(a->agent)) {
+        usage(rt, res, "Cannot create a worktree while streaming.");
+        return;
+    }
+    char *branch = *c->args ? xstrdup(c->args) : session_wt_default_branch();
+    char *source = xstrdup(a->cwd), *err = NULL;
+    session_wt_t wt;
+    if (session_wt_create(source, branch, true, &wt, &err) != 0) {
+        outf(rt, res, true, "Worktree creation failed: %s", err);
+    } else if (app_move(a, wt.path, &err) != 0) {
+        usage(rt, res, err);
+    } else {
+        char *cerr = NULL;
+        int cleaned = session_wt_clean_source(source, &cerr);
+        if (cleaned < 0) outf(rt, res, false, "Warning: Worktree created, but cleaning source checkout failed: %s", cerr);
+        char *sum = session_wt_summary(&wt, cleaned > 0);
+        out(rt, sum);
+        free(sum);
+        free(cerr);
+    }
+    session_wt_free(&wt);
+    free(err);
+    free(source);
+    free(branch);
+}
+
+static void h_add_dir(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    app_t *a = rt->app;
+    if (agent_is_running(a->agent)) {
+        usage(rt, res, "Cannot add a directory while streaming.");
+        return;
+    }
+    if (!*c->args) {
+        char *m = app_workspace_dirs_text(a, "Usage: /add-dir <path>");
+        usage(rt, res, m);
+        free(m);
+        return;
+    }
+    char *path = app_resolve_user_path(a, c->args);
+    char *bad = check_dir(path), *added = NULL, *err = NULL;
+    if (bad) usage(rt, res, bad);
+    else {
+        int r = app_add_workspace_dir(a, path, &added, &err);
+        if (r < 0) usage(rt, res, err);
+        else if (r == 0) outf(rt, res, false, "Already in the workspace: %s", path);
+        else {
+            char *note = xasprintf("Added %s.", added);
+            char *m = app_workspace_dirs_text(a, note);
+            out(rt, m);
+            free(m);
+            free(note);
+        }
+    }
+    free(added);
+    free(err);
+    free(bad);
+    free(path);
+}
+
+static void h_remove_dir(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    app_t *a = rt->app;
+    if (agent_is_running(a->agent)) {
+        usage(rt, res, "Cannot remove a directory while streaming.");
+        return;
+    }
+    if (!*c->args) {
+        usage(rt, res, "Usage: /remove-dir <path>");
+        return;
+    }
+    char *path = app_resolve_user_path(a, c->args);
+    if (!strcmp(path, a->cwd)) {
+        usage(rt, res, "Cannot remove the working directory; use /move to change it.");
+        free(path);
+        return;
+    }
+    char *removed = NULL;
+    if (app_remove_workspace_dir(a, path, &removed) == 0) outf(rt, res, false, "Not a workspace directory: %s", path);
+    else {
+        char *note = xasprintf("Removed %s.", removed);
+        char *m = app_workspace_dirs_text(a, note);
+        out(rt, m);
+        free(m);
+        free(note);
+    }
+    free(removed);
+    free(path);
 }
 
 /* builtin-control.ts forget-approvals: clearApprovalGrants (the shared file and every session tier) */

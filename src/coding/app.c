@@ -36,7 +36,9 @@
 #include "ai/ai_images.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <math.h>
+#include <unistd.h>
 
 /* ---------- model resolution (config/model_resolver.c) ---------- */
 
@@ -422,6 +424,28 @@ static void hook_on_request(void *ud, agent_t *ag, const ai_model_t *m, const ai
 
 static void warm_settings_changed(void *ud) { cachewarm_mode_changed(((app_t *)ud)->warmer); }
 
+/* the provider session state a request to the current model keeps (omp providerSessionState keys: per-endpoint
+ * strict-tools / reasoning fallbacks, Responses chains, the Codex and Anthropic anchors, Antigravity, Duo
+ * Workflow); /fresh prunes them and reports how many there were */
+static void app_note_provider_state(app_t *a) {
+    const ai_model_t *m = a->model;
+    if (!m || !m->api) return;
+    char *key = NULL;
+    if (str_eq(m->api, "openai-completions"))
+        key = xasprintf("openai-completions:%s:%s:%s", m->provider, m->base_url ? m->base_url : "", m->id);
+    else if (str_eq(m->api, "openai-responses") || str_eq(m->api, "azure-openai-responses"))
+        key = xasprintf("openai-responses:%s", m->provider);
+    else if (str_eq(m->api, "openai-codex-responses")) key = xstrdup("openai-codex");
+    else if (str_eq(m->api, "anthropic-messages")) key = xasprintf("anthropic:%s:%s", m->base_url ? m->base_url : "", m->id);
+    else if (str_eq(m->provider, "google-antigravity")) key = xstrdup("google-antigravity-session-state");
+    else if (str_eq(m->api, "gitlab-duo-workflow")) key = xasprintf("gitlab-duo-workflow:%s", m->provider);
+    if (!key) return;
+    pthread_mutex_lock(&a->mu);
+    if (!strvec_contains(&a->provider_states, key)) strvec_push(&a->provider_states, key);
+    pthread_mutex_unlock(&a->mu);
+    free(key);
+}
+
 static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
     app_t *a = ud;
     app_flush_warm_usage(a);
@@ -435,6 +459,7 @@ static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
         a->plan_force_tool_choice = false;
     }
     fill_request_opts(a, o);
+    app_note_provider_state(a);
 }
 
 /* ---------- date/cwd reminder (port of omp session/date-cwd-reminder.ts) ----------
@@ -1350,7 +1375,10 @@ void app_rebuild_system_prompt(app_t *a) {
     free(mem);
     free(al);
     char *xdev_docs = json_len(xdev_tools) ? xdev_prompt_docs(a->agent) : xstrdup("");
+    strvec_t roots = {0};
+    if (a->session) roots = session_additional_dirs(a->session);
     sysprompt_opts_t so = {.cwd = a->cwd,
+                           .additional_roots = &roots,
                            .model_name = label,
                            .tool_names = &names,
                            .disc = &a->disc,
@@ -1370,6 +1398,7 @@ void app_rebuild_system_prompt(app_t *a) {
                            .generated_append = sb_cstr(&gen),
                            .tui_transcript = a->opts.has_ui && !a->opts.subagent};
     json_t *blocks = build_system_prompt(&so);
+    strvec_free(&roots);
     sb_free(&gen);
     json_free(labels);
     json_free(refs);
@@ -1573,6 +1602,25 @@ app_t *app_create(const app_opts_t *o, char **err) {
         if (sc.model) a->model = catalog_resolve(sc.model);
         session_context_free(&sc);
     }
+    /* workspace roots: --add-dir / workspace.additionalDirectories (a subagent: its parent's), merged with the
+     * ones the session header restored (sdk.ts configuredDirs) */
+    {
+        strvec_t conf = {0};
+        if (o->add_dirs) {
+            for (size_t i = 0; i < o->add_dirs->n; i++) strvec_push(&conf, o->add_dirs->v[i]);
+        } else {
+            json_t *x;
+            json_arr_foreach(settings_get("workspace.additionalDirectories"), i, x) if (json_is_str(x)) strvec_push(&conf, json_sv(x));
+        }
+        if (conf.n) {
+            strvec_t merged = session_additional_dirs(a->session);
+            for (size_t i = 0; i < conf.n; i++)
+                if (!strvec_contains(&merged, conf.v[i])) strvec_push(&merged, conf.v[i]);
+            session_set_additional_dirs(a->session, &merged);
+            strvec_free(&merged);
+        }
+        strvec_free(&conf);
+    }
     if (!a->model) a->model = app_default_model();
     if (!a->model && !o->allow_no_model) {
         *err = xstrdup("No model available. Set an API key (e.g. ANTHROPIC_API_KEY or OPENAI_API_KEY), run `omc login`, "
@@ -1678,6 +1726,7 @@ void app_free(app_t *a) {
     json_free(a->fast_disabled);
     free(a->slow_lane);
     pthread_mutex_destroy(&a->tier_mu);
+    strvec_free(&a->provider_states);
     pthread_mutex_destroy(&a->mu);
     free(a);
 }
@@ -3184,7 +3233,10 @@ app_t *app_subagent_new(app_t *parent, const char *agent_name, const char *model
     pthread_mutex_unlock(&parent->tier_mu);
     modelctl_tiers_for_setting(settings_str("tier.subagent", "inherit"), &parent_tiers, &child_tiers);
     o.service_tiers = &child_tiers;
+    strvec_t roots = session_additional_dirs(parent->session); /* forwarded to subagents (ToolSession) */
+    o.add_dirs = &roots;
     app_t *child = app_create(&o, err);
+    strvec_free(&roots);
     free(label);
     free(chosen);
     strvec_free(&tools);
@@ -3233,4 +3285,103 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
     parent->total_cost += child->total_cost;
     app_free(child);
     return text;
+}
+
+/* ---------- workspace and session lifecycle (WP-21) ---------- */
+
+int app_fresh_session(app_t *a) {
+    if (agent_is_running(a->agent)) return -1;
+    pthread_mutex_lock(&a->mu);
+    int n = (int)a->provider_states.n;
+    strvec_free(&a->provider_states);
+    memset(&a->provider_states, 0, sizeof a->provider_states);
+    pthread_mutex_unlock(&a->mu);
+    /* a fresh provider session id: prompt-cache keys and server-side conversations start over */
+    free(a->agent->session_id);
+    a->agent->session_id = uuid_v7();
+    return n;
+}
+
+char *app_resolve_user_path(app_t *a, const char *p) {
+    const char *s = p ? p : "";
+    /* expandPath: a stray leading ':' before a path shape, an '@' before an absolute / ~ path, file:// */
+    if (s[0] == ':' && (s[1] == '/' || s[1] == '~' || str_starts(s + 1, "./") || str_starts(s + 1, "../"))) s++;
+    if (s[0] == '@' && (s[1] == '/' || s[1] == '~')) s++;
+    if (str_starts(s, "file://")) s += 7;
+    bool slashes = *s != 0;
+    for (const char *q = s; *q; q++) slashes &= *q == '/';
+    if (slashes) return xstrdup(a->cwd);
+    return path_abs(s, a->cwd);
+}
+
+char *app_workspace_dirs_text(app_t *a, const char *note) {
+    sb_t b = SB_INIT;
+    if (note) sb_appendf(&b, "%s\n", note);
+    sb_appendf(&b, "Workspace directories:\n  %s (working directory)", a->cwd);
+    strvec_t roots = session_additional_dirs(a->session);
+    for (size_t i = 0; i < roots.n; i++) sb_appendf(&b, "\n  %s", roots.v[i]);
+    strvec_free(&roots);
+    return sb_detach(&b);
+}
+
+int app_add_workspace_dir(app_t *a, const char *dir, char **resolved, char **err) {
+    int rc = session_add_workspace_dir(a->session, dir, resolved, err);
+    if (rc > 0) app_rebuild_system_prompt(a); /* refreshBaseSystemPrompt */
+    return rc;
+}
+
+int app_remove_workspace_dir(app_t *a, const char *dir, char **resolved) {
+    int rc = session_remove_workspace_dir(a->session, dir, resolved);
+    if (rc > 0) app_rebuild_system_prompt(a);
+    return rc;
+}
+
+/* applyCwdChange: everything derived from the working directory follows it */
+static void app_apply_cwd(app_t *a, const char *cwd) {
+    free(a->cwd);
+    a->cwd = xstrdup(cwd);
+    free(a->env->cwd);
+    a->env->cwd = xstrdup(cwd);
+    settings_reload_for_cwd(cwd);
+    a->env->settings = settings_effective();
+    discovery_free(&a->disc);
+    discover_all(cwd, &a->disc, a->opts.no_context_files, a->opts.no_skills, a->opts.no_rules);
+    a->env->disc = &a->disc;
+    ttsr_free(a->ttsr);
+    a->ttsr = ttsr_new(&a->disc);
+    if (!a->opts.subagent) {
+        commands_free(&a->file_cmds);
+        commands_load(cwd, &a->file_cmds);
+        prompt_templates_free(&a->prompt_tpls);
+        prompt_templates_load(cwd, &a->prompt_tpls);
+        app_bind_artifacts(a, NULL);
+    }
+    app_bind_local(a);
+    app_rebuild_system_prompt(a);
+}
+
+int app_move(app_t *a, const char *dir, char **err) {
+    *err = NULL;
+    char *target = path_abs(dir, a->cwd);
+    char *prev = xstrdup(a->cwd);
+    int rc = -1;
+    char *merr = NULL;
+    if (session_move(a->session, target, &merr) != 0) {
+        *err = xasprintf("Move failed: %s", merr ? merr : "unknown error");
+        goto out;
+    }
+    if (chdir(target) != 0) {
+        *err = xasprintf("Cannot change working directory to %s: %s", target, strerror(errno));
+        char *rerr = NULL;
+        session_move(a->session, prev, &rerr); /* nothing committed: the session goes back */
+        free(rerr);
+        goto out;
+    }
+    app_apply_cwd(a, target);
+    rc = 0;
+out:
+    free(merr);
+    free(target);
+    free(prev);
+    return rc;
 }

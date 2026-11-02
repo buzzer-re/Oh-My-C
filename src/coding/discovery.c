@@ -843,7 +843,35 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
         json_set_str(f, "content", o->disc->files.v[i].content);
         json_push(cf, f);
     }
+    /* each additional workspace root contributes its own context files (AGENTS.md, ...), deduped against the
+     * ones already loaded (system-prompt.ts loadProjectContextFiles per root + dedupeContainedContextFiles) */
+    for (size_t r = 0; o->additional_roots && o->disc && !o->subagent && r < o->additional_roots->n; r++) {
+        if (str_eq(o->additional_roots->v[r], o->cwd)) continue;
+        discovery_t extra;
+        discover_all(o->additional_roots->v[r], &extra, false, true, true);
+        for (size_t i = 0; i < extra.files.n; i++) {
+            bool dup = false;
+            json_t *f;
+            json_arr_foreach(cf, k, f) {
+                char *disp = path_display(extra.files.v[i].path, NULL);
+                dup |= str_eq(json_get_str(f, "path"), disp) || str_eq(json_get_str(f, "content"), extra.files.v[i].content);
+                free(disp);
+            }
+            if (dup) continue;
+            json_t *nf = json_obj();
+            char *disp = path_display(extra.files.v[i].path, NULL);
+            json_set_str(nf, "path", disp);
+            free(disp);
+            json_set_str(nf, "content", extra.files.v[i].content);
+            json_push(cf, nf);
+        }
+        discovery_free(&extra);
+    }
     json_set(data, "contextFiles", cf);
+    json_t *roots = json_arr();
+    for (size_t r = 0; o->additional_roots && r < o->additional_roots->n; r++)
+        if (!str_eq(o->additional_roots->v[r], o->cwd)) json_push_str(roots, o->additional_roots->v[r]);
+    json_set(data, "additionalWorkspaceRoots", roots);
     json_t *skills = json_arr(), *rules = json_arr(), *always = json_arr();
     bool has_read = o->tool_names && strvec_contains(o->tool_names, "read");
     for (size_t i = 0; o->disc && has_read && i < o->disc->skills.n; i++) {

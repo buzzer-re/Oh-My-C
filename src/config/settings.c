@@ -84,28 +84,8 @@ static void rebuild(void) {
     json_free(project);
 }
 
-void settings_init(const char *cwd, const strvec_t *overlay_files) {
-    pthread_mutex_lock(&g_mu);
-    if (!g_defaults) g_defaults = json_parse_str(DEFAULTS_JSON);
-    const char *names[] = {"config.yml", "config.yaml", "settings.json"};
-    free(g_global_path);
-    g_global_path = NULL;
-    json_free(g_global);
-    g_global = NULL;
-    for (size_t i = 0; i < ARRAY_LEN(names) && !g_global; i++) {
-        char *p = omc_agent_path(names[i]);
-        g_global = load_file(p);
-        if (g_global || i == 0) {
-            free(g_global_path);
-            g_global_path = xstrdup(p);
-        }
-        free(p);
-    }
-    if (!g_global) g_global = json_obj();
-    if (str_ends(g_global_path, "settings.json")) {
-        free(g_global_path);
-        g_global_path = omc_agent_path("config.yml");
-    }
+/* the project layer (<cwd>/.omc or <cwd>/.omp config files); caller holds g_mu */
+static void load_project(const char *cwd) {
     json_free(g_project);
     g_project = json_obj();
     free(g_project_dir);
@@ -132,6 +112,31 @@ void settings_init(const char *cwd, const strvec_t *overlay_files) {
         free(d);
     }
     free(c);
+}
+
+void settings_init(const char *cwd, const strvec_t *overlay_files) {
+    pthread_mutex_lock(&g_mu);
+    if (!g_defaults) g_defaults = json_parse_str(DEFAULTS_JSON);
+    const char *names[] = {"config.yml", "config.yaml", "settings.json"};
+    free(g_global_path);
+    g_global_path = NULL;
+    json_free(g_global);
+    g_global = NULL;
+    for (size_t i = 0; i < ARRAY_LEN(names) && !g_global; i++) {
+        char *p = omc_agent_path(names[i]);
+        g_global = load_file(p);
+        if (g_global || i == 0) {
+            free(g_global_path);
+            g_global_path = xstrdup(p);
+        }
+        free(p);
+    }
+    if (!g_global) g_global = json_obj();
+    if (str_ends(g_global_path, "settings.json")) {
+        free(g_global_path);
+        g_global_path = omc_agent_path("config.yml");
+    }
+    load_project(cwd);
     json_free(g_overlay);
     g_overlay = json_obj();
     if (overlay_files) {
@@ -146,6 +151,16 @@ void settings_init(const char *cwd, const strvec_t *overlay_files) {
         }
     }
     if (!g_runtime) g_runtime = json_obj();
+    rebuild();
+    pthread_mutex_unlock(&g_mu);
+}
+
+static void ensure(void);
+
+void settings_reload_for_cwd(const char *cwd) {
+    ensure();
+    pthread_mutex_lock(&g_mu);
+    load_project(cwd);
     rebuild();
     pthread_mutex_unlock(&g_mu);
 }

@@ -79,6 +79,7 @@ typedef struct {
     bool irc_enabled;                 /* `write agent://<id>` peer messaging available */
     const char *generated_append;     /* memory + auto-learn blocks composed ahead of the user append */
     bool tui_transcript;              /* top-level interactive TUI session: out:// replies and cfg:// writes reach the user */
+    const strvec_t *additional_roots; /* multi-root workspace: extra roots beyond cwd (<workspace-roots>, their context files) */
 } sysprompt_opts_t;
 
 /* Whether a rule renders in the system prompt (<domain-rules> / <generic-rules>). Rules with a TTSR

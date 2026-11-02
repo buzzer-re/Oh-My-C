@@ -41,6 +41,8 @@ typedef struct {
     bool auto_approve;          /* --auto-approve / --yolo: every approval resolves in yolo mode */
     const char *service_tier;   /* --service-tier (an OpenAI tier setting value; "none" omits); NULL = not given */
     const ai_service_tiers_t *service_tiers; /* subagents: the resolved per-family map (tier.subagent) */
+    const strvec_t *add_dirs;   /* extra workspace roots (--add-dir + workspace.additionalDirectories; a subagent
+                                 * gets its parent's); NULL => workspace.additionalDirectories */
 } app_opts_t;
 
 typedef struct app app_t;
@@ -154,6 +156,7 @@ struct app {
     int64_t wrap_up_hinted;        /* wrap-up window already steered (-1 none) */
     anthropic_slow_hooks_t slow_hooks;
     struct cache_warmer *warmer;   /* prompt cache warmer (cachewarm.c), NULL for subagents */
+    strvec_t provider_states; /* provider session-state keys requests created since the last /fresh (under mu) */
     pthread_mutex_t mu;
 };
 
@@ -322,6 +325,21 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
 char *app_dedupe_ephemeral_reply(const char *text, size_t max_bytes); /* owned */
 int app_branch_to(app_t *a, const char *entry_id);  /* move the session leaf and reload context */
 int app_clear_context(app_t *a);                    /* reset boundary: empty context, same session */
+/* AgentSession.freshSession: rotate the provider session id and drop provider stream state; -1 while streaming,
+ * else the number of provider states pruned */
+int app_fresh_session(app_t *a);
+/* /move: relocate the session to `dir` (an existing directory) and re-scope the process, settings, discovery,
+ * commands and the system prompt to it (InteractiveMode.applyCwdChange). 0, or -1 with *err (owned); a failure
+ * leaves the session where it was */
+int app_move(app_t *a, const char *dir, char **err);
+/* multi-root workspace edits applied to the live session (system prompt refreshed) */
+int app_add_workspace_dir(app_t *a, const char *dir, char **resolved, char **err); /* session_add_workspace_dir */
+int app_remove_workspace_dir(app_t *a, const char *dir, char **resolved);          /* session_remove_workspace_dir */
+/* formatWorkspaceDirectories: "Workspace directories:\n  <cwd> (working directory)\n  <extra>..." with an
+ * optional leading note line (owned) */
+char *app_workspace_dirs_text(app_t *a, const char *note);
+/* resolveToCwd for a user-typed path (~, absolute, "/" = cwd) (owned) */
+char *app_resolve_user_path(app_t *a, const char *p);
 int app_handoff(app_t *a, const char *focus, char **err); /* handoff document (+ focus instructions) + compact in place */
 int app_retry(app_t *a, char **err);                /* drop a failed last assistant turn and continue (blocking) */
 /* /shake (shake-types.ts ShakeResult): mode "elide" | "images" | "thinking"; rewrites the branch on disk */

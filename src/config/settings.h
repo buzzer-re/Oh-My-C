@@ -6,6 +6,8 @@
 #include "core/json.h"
 
 void settings_init(const char *cwd, const strvec_t *overlay_files);
+/* Settings.reloadForCwd: re-read only the project layer for `cwd` (session moved to another directory) */
+void settings_reload_for_cwd(const char *cwd);
 json_t *settings_get(const char *path);              /* borrowed effective value or NULL */
 const char *settings_str(const char *path, const char *def);
 int64_t settings_int(const char *path, int64_t def);
