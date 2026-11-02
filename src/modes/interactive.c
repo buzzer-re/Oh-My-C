@@ -2204,6 +2204,7 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
     }
     if (tui_kb(k, "app.suspend")) {
         int rc = tui_suspend(t);
+        if (rc >= 0) ui_signals_resumed(); /* the shell prompt meanwhile dropped working / blocked records */
         if (rc < 0) {
             char *m = xasprintf("Failed to suspend: %s", strerror(-rc));
             add_notice(u, "error", m);

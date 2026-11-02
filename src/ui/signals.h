@@ -33,6 +33,8 @@ void ui_signals_dispose(void);
 void ui_signals_session_title(void);
 /* setRunStatus; kind ("question" | "permission") and msg only for blocked / error */
 void ui_signals_run_status(run_state_t state, const char *kind, const char *msg);
+/* back from a suspend (Ctrl+Z / fg): re-send an idle / working / blocked record */
+void ui_signals_resumed(void);
 /* the settings may have changed (tui.titleState, tui.titleSpinner, terminal.programStatus) */
 void ui_signals_settings_changed(void);
 

@@ -313,6 +313,14 @@ void ui_signals_session_title(void) {
     emit_title();
 }
 
+/* resendProgramStatus: `done` and `error` survive a shell prompt, so only the others are reported again */
+void ui_signals_resumed(void) {
+    if (S.status == RUN_DONE || S.status == RUN_ERROR) return;
+    free(S.reported);
+    S.reported = NULL;
+    report();
+}
+
 void ui_signals_settings_changed(void) {
     if (!S.u || S.disposed) return;
     const char *style = norm_style(settings_str("tui.titleSpinner", "braille"));
