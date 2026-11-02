@@ -604,9 +604,15 @@ static void ask_start(void *ud) {
     ui_ask_dialog_show(u, u->ask_questions, ask_done, u);
 }
 
+static bool g_ask_closed; /* the UI loop ended (hang-up, exit): no dialog can answer any more (under u->mu) */
+
 static json_t *ui_ask(void *ud, const json_t *questions) {
     ui_t *u = ud;
     pthread_mutex_lock(&u->mu);
+    if (g_ask_closed) {
+        pthread_mutex_unlock(&u->mu);
+        return NULL;
+    }
     u->ask_questions = json_clone(questions);
     u->ask_answers = NULL;
     u->ask_done = false;
@@ -2425,6 +2431,15 @@ int run_interactive_mode(app_t *a, const char *initial) {
         if (init_job) tui_post(u.tui, initial_prompt_cb, init_job);
     }
     int code = tui_run(u.tui);
+    /* a tool thread waiting on the ask dialog would block the worker join forever once the loop is gone
+     * (terminal closed mid-question): answer it as cancelled */
+    pthread_mutex_lock(&u.mu);
+    g_ask_closed = true;
+    if (u.ask_questions && !u.ask_done) {
+        u.ask_done = true;
+        pthread_cond_broadcast(&u.ask_cv);
+    }
+    pthread_mutex_unlock(&u.mu);
     ui_signals_dispose();
     if (u.worker_running) {
         app_abort(a);

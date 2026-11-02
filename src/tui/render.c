@@ -1088,7 +1088,10 @@ bool tui_run_once(tui_t *t, int timeout_ms) {
             int sig;
             while ((sig = tui_term_read_signal()) > 0) handle_signal(t, sig);
         }
-        if (in_i >= 0 && (fds[in_i].revents & (POLLIN | POLLHUP | POLLERR))) {
+        if (in_i >= 0 && (fds[in_i].revents & POLLNVAL)) { /* input fd gone: poll would return at once forever */
+            t->input_eof = true;
+            tui_stop(t, 0);
+        } else if (in_i >= 0 && (fds[in_i].revents & (POLLIN | POLLHUP | POLLERR))) {
             char buf[65536];
             ssize_t r = read(t->term->in_fd, buf, sizeof buf);
             if (r > 0) tui_keydec_feed(&t->dec, buf, (size_t)r);
