@@ -1991,3 +1991,77 @@ void ui_mcp_command(ui_t *u, const char *text) {
     strvec_free(&parts);
     free(tt);
 }
+
+/* ---------- argument completion (builtin-completions.ts buildMcpArgumentCompletions) ---------- */
+
+static int ci_cmp(const void *a, const void *b) { return strcasecmp(*(char *const *)a, *(char *const *)b); }
+
+static void add_unique(strvec_t *v, const char *s) {
+    if (!strvec_contains(v, s)) strvec_push(v, s);
+}
+
+int ui_mcp_complete(ui_t *u, const char *arg, tui_ac_result_t *out) {
+    const char *sp = strchr(arg, ' ');
+    char *raw = xstrndup(arg, (size_t)(sp - arg)), *low = xstrdup(raw);
+    for (char *c = low; *c; c++) *c = (char)tolower((unsigned char)*c);
+    static const char *const SUBS[] = {"enable", "disable", "test", "remove", "reconnect", "reauth", "unauth"};
+    bool ok = false;
+    for (size_t i = 0; i < ARRAY_LEN(SUBS); i++) ok = ok || !strcmp(low, SUBS[i]);
+    int rc = 0;
+    if (!ok) goto out;
+    char *prefix = xstrdup(sp + 1);
+    for (char *c = prefix; *c; c++) *c = (char)tolower((unsigned char)*c);
+    const char *cwd = u->app->cwd;
+    char *up = mcp_config_path("user", cwd), *pp = mcp_config_path("project", cwd);
+    json_t *uc = mcp_config_read(up, NULL), *pc = mcp_config_read(pp, NULL);
+    strvec_t names = {0}, labels = {0}, values = {0};
+    const char *k;
+    json_t *v;
+    if (!strcmp(low, "remove")) { /* config-file entries only; user-only names get --scope user */
+        json_obj_foreach(json_get_obj(pc, "mcpServers"), i, k, v) add_unique(&names, k);
+        json_obj_foreach(json_get_obj(uc, "mcpServers"), i, k, v) add_unique(&names, k);
+        qsort(names.v, names.n, sizeof(char *), ci_cmp);
+        for (size_t i = 0; i < names.n; i++) {
+            if (strncasecmp(names.v[i], prefix, strlen(prefix))) continue;
+            bool proj = json_get(json_get_obj(pc, "mcpServers"), names.v[i]) != NULL;
+            strvec_push_own(&values, proj ? xasprintf("%s %s ", raw, names.v[i]) : xasprintf("%s %s --scope user ", raw, names.v[i]));
+            strvec_push_own(&labels, proj ? xstrdup(names.v[i]) : xasprintf("%s (user)", names.v[i]));
+        }
+    } else { /* collectMcpServerNames */
+        bool dis_only = !strcmp(low, "enable") || !strcmp(low, "disable");
+        bool dis_cfg = dis_only || !strcmp(low, "unauth");
+        json_t *x;
+        if (dis_only) json_arr_foreach(json_get_arr(uc, "disabledServers"), i, x) if (json_is_str(x)) add_unique(&names, json_sv(x));
+        for (int pass = 0; pass < 2; pass++)
+            json_obj_foreach(json_get_obj(pass ? pc : uc, "mcpServers"), i, k, v) {
+                bool off = json_is_bool(json_get(v, "enabled")) && !json_get_bool(v, "enabled", true);
+                if (dis_cfg || !off) add_unique(&names, k);
+            }
+        json_t *rt = mcp_server_names(u->app->mcp);
+        json_arr_foreach(rt, i, x) add_unique(&names, json_sv(x));
+        json_free(rt);
+        qsort(names.v, names.n, sizeof(char *), ci_cmp);
+        for (size_t i = 0; i < names.n; i++) {
+            if (strncasecmp(names.v[i], prefix, strlen(prefix))) continue;
+            strvec_push_own(&values, xasprintf("%s %s ", raw, names.v[i]));
+            strvec_push(&labels, names.v[i]);
+        }
+    }
+    for (size_t i = 0; i < values.n; i++) {
+        tui_ac_result_add(out, values.v[i], labels.v[i], "");
+        strvec_push(&out->ghosts, "");
+    }
+    rc = values.n ? 1 : 0;
+    strvec_free(&names);
+    strvec_free(&labels);
+    strvec_free(&values);
+    json_free(uc);
+    json_free(pc);
+    free(up);
+    free(pp);
+    free(prefix);
+out:
+    free(raw);
+    free(low);
+    return rc;
+}

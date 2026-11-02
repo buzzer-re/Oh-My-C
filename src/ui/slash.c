@@ -207,6 +207,7 @@ static int slash_args(void *ud, const char *name, const char *arg, tui_ac_result
     for (const char *p = arg; *p; p++)
         if (!isspace((unsigned char)*p)) blank = false;
     if (!c->allow_args) return blank ? -1 : 0;
+    if (!strcmp(c->name, "mcp") && strchr(arg, ' ')) return ui_mcp_complete(u, arg, out); /* server names */
     if (strchr(arg, ' ')) return 0; /* past the subcommand */
     if (!strcmp(c->name, "switch")) {
         model_selector_completions(arg, out);

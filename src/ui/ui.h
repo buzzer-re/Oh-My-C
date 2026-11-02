@@ -287,6 +287,8 @@ void ui_ssh_command(ui_t *u, const char *text);
 void ui_mcp_install(ui_t *u);                         /* live MCP tool / prompt refresh, mcp.notifications */
 bool ui_mcp_escape(ui_t *u);                          /* Esc: stop an MCP OAuth wait / cancel /mcp test */
 bool ui_mcp_manual_input(ui_t *u, const char *value); /* `/login <value>` for a waiting MCP OAuth flow */
+/* buildMcpArgumentCompletions past the subcommand ("<sub> <name prefix>"): 1 when items were added, else 0 */
+int ui_mcp_complete(ui_t *u, const char *arg, tui_ac_result_t *out);
 
 /* welcome.c */
 tui_component_t *ui_welcome_new(void);
