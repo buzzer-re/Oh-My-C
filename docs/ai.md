@@ -233,7 +233,10 @@ There are two levels:
    (`mr_reason_window_ms`): 5 s for concurrency caps, 30 s for rate limits, and 45–75 s for model capacity only
    with a 429/402 status or `429` / `MODEL_CAPACITY_EXHAUSTED` / `MODEL_CAPACITY_EXCEEDED` / resource-exhausted
    wording (a plain 503 or 529 keeps the exponential base). A provider retry-after wins when longer; a wait above
-   `retry.maxDelayMs` (5 min) fails fast. `retry.enabled: false` turns this off.
+   `retry.maxDelayMs` (5 min) fails fast. `retry.enabled: false` turns this off. Not ported: omp's transport layer
+   under each turn attempt (pi-utils `fetchWithRetry`: 6 attempts at 500 ms·2ⁿ capped at 60 s for OpenAI-family
+   streams, then one replay-safe provider-error retry after 500 ms), so omc sends 4 requests per attempt where omp
+   sends 12.
 3. **Model fallback** (`try_retry_fallback` in `app.c`, chains in `config/model_resolver.c`): `retry.fallbackChains`
    is walked on retryable and hard errors (see [status.md](status.md), "Retry model fallback").
 
