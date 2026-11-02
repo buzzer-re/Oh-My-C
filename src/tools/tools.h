@@ -122,6 +122,8 @@ typedef struct tool_env {
     /* spawn a subagent: returns owned final text; used by task tool (set by app) */
     char *(*run_subagent)(struct tool_env *env, const char *agent_name, const char *assignment, const char *context,
                           json_t **out_details, volatile sig_atomic_t *cancel);
+    /* the session's active model and session id (owned, may be NULL) for web_search's `web/hosted` (set by app) */
+    const struct ai_model *(*active_model)(struct tool_env *env, char **session_id);
     struct jobs *jobs;         /* async background jobs (owned; NULL disables async) */
     struct conflict_history *conflicts; /* conflict:// blocks registered by read (owned, lazy; iurl.h) */
     /* eval kernel helpers that reach the session (completion/judge/judge_batch/budget/...; see coding/evalhost.h):

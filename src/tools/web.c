@@ -1,5 +1,6 @@
-/* web.c - URL reading (HTML -> markdown) and the web_search tool with a provider chain. */
+/* web.c - URL reading (HTML -> markdown) and the scraping/API search engines of web_search (websearch.c). */
 #include "web.h"
+#include "websearch.h"
 
 #include "config/settings.h"
 #include "core/fs.h"
@@ -12,7 +13,7 @@
 
 
 /* web_search request timeout (`providers.webSearchTimeoutSeconds`, omp default 60s) */
-static int64_t ws_timeout_ms(void) {
+int64_t ws_timeout_ms(void) {
     int64_t s = settings_int("providers.webSearchTimeoutSeconds", 60);
     return (s > 0 ? s : 60) * 1000;
 }
@@ -421,13 +422,8 @@ int web_read_url(tool_env_t *env, const char *url_in, volatile sig_atomic_t *can
 
 /* ---------- web search ---------- */
 
-typedef struct {
-    char *title, *url, *snippet; /* snippet "" = none */
-    char *date;                  /* publishedDate or NULL */
-} sresult_t;
-typedef VEC(sresult_t) sresults_t;
 
-static void sres_free(sresults_t *v) {
+void sres_free(sresults_t *v) {
     for (size_t i = 0; i < v->n; i++) {
         free(v->v[i].title);
         free(v->v[i].url);
@@ -437,7 +433,7 @@ static void sres_free(sresults_t *v) {
     vec_free(v);
 }
 
-static void sres_add(sresults_t *v, const char *t, const char *u, const char *s) {
+void sres_add(sresults_t *v, const char *t, const char *u, const char *s) {
     sresult_t r = {xstrdup(t ? t : ""), xstrdup(u ? u : ""), xstrdup(s ? s : ""), NULL};
     vec_push(v, r);
 }
@@ -449,7 +445,7 @@ static const int RECENCY_DAYS_N[4] = {1, 7, 30, 365};
 static const char *const RECENCY_NAMES[4] = {"day", "week", "month", "year"};
 
 /* recencyAfterDate: UTC YYYY-MM-DD */
-static char *recency_after_date(const char *recency) {
+char *ws_recency_after_date(const char *recency) {
     for (int i = 0; i < 4; i++)
         if (str_eq(recency, RECENCY_NAMES[i])) {
             time_t t = time(NULL) - (time_t)RECENCY_DAYS_N[i] * 86400;
@@ -463,7 +459,7 @@ static char *recency_after_date(const char *recency) {
 }
 
 /* the JSON-RPC response of an MCP POST answered as JSON or as an SSE stream */
-static json_t *mcp_response_json(const char *body, const char *ctype) {
+json_t *mcp_response_json(const char *body, const char *ctype) {
     if (!ctype || !strstr(ctype, "text/event-stream")) return json_parse_str(body);
     json_t *last = NULL;
     for (const char *p = body; p && *p;) {
@@ -504,9 +500,9 @@ static void parallel_sources(const json_t *payload, int limit, sresults_t *out) 
     }
 }
 
-static int search_parallel(const char *q, int limit, const char *recency, sresults_t *out, char **err) {
+int ws_search_parallel(const char *q, int limit, const char *recency, sresults_t *out, char **err) {
     const char *key = env_get("PARALLEL_API_KEY");
-    char *after = recency ? recency_after_date(recency) : NULL;
+    char *after = recency ? ws_recency_after_date(recency) : NULL;
     http_headers_t h = {0};
     char *ua = xasprintf("omc/%s", OMC_VERSION);
     http_headers_add(&h, "User-Agent", ua);
@@ -611,7 +607,7 @@ static int search_parallel(const char *q, int limit, const char *recency, sresul
     return ret;
 }
 
-static int search_brave(const char *q, int limit, const char *recency, sresults_t *out, char **err) {
+int ws_search_brave(const char *q, int limit, const char *recency, sresults_t *out, char **err) {
     const char *key = env_get("BRAVE_API_KEY");
     if (!key) return -2;
     char *eq = url_encode(q);
@@ -639,7 +635,7 @@ static int search_brave(const char *q, int limit, const char *recency, sresults_
     return 0;
 }
 
-static int search_tavily(const char *q, int limit, const char *recency, sresults_t *out, char **err) {
+int ws_search_tavily(const char *q, int limit, const char *recency, sresults_t *out, char **err) {
     const char *key = env_get("TAVILY_API_KEY");
     if (!key) return -2;
     json_t *b = json_obj();
@@ -669,7 +665,7 @@ static int search_tavily(const char *q, int limit, const char *recency, sresults
     return 0;
 }
 
-static int search_exa(const char *q, int limit, const char *recency, sresults_t *out, char **err) {
+int ws_search_exa(const char *q, int limit, const char *recency, sresults_t *out, char **err) {
     const char *key = env_get("EXA_API_KEY");
     if (!key) return -2;
     UNUSED(recency);
@@ -714,7 +710,7 @@ static int search_exa(const char *q, int limit, const char *recency, sresults_t 
 }
 
 /* DuckDuckGo HTML frontend scraper (credential-free) */
-static int search_ddg(const char *q, int limit, const char *recency, sresults_t *out, char **err) {
+int ws_search_ddg(const char *q, int limit, const char *recency, sresults_t *out, char **err) {
     char *eq = url_encode(q);
     const char *df = !recency ? "" : !strcmp(recency, "day") ? "&df=d" : !strcmp(recency, "week") ? "&df=w"
                                    : !strcmp(recency, "month") ? "&df=m" : "&df=y";
@@ -783,22 +779,8 @@ static int search_ddg(const char *q, int limit, const char *recency, sresults_t 
     return 0;
 }
 
-typedef int (*search_fn)(const char *, int, const char *, sresults_t *, char **);
-static const struct {
-    const char *name;
-    search_fn fn;
-    int def_n, max_n; /* clampNumResults bounds */
-    const char *label;
-} PROVIDERS[] = {
-    {"parallel", search_parallel, 10, 40, "Parallel"},
-    {"brave", search_brave, 10, 20, "Brave"},
-    {"tavily", search_tavily, 5, 20, "Tavily"},
-    {"exa", search_exa, 10, 25, "Exa"},
-    {"duckduckgo", search_ddg, 10, 30, "DuckDuckGo"},
-};
-
 /* /\s+/g -> " ", trimmed */
-static char *collapse_spaces(const char *s) {
+char *ws_collapse_spaces(const char *s) {
     sb_t b = SB_INIT;
     bool sp = false;
     for (; *s; s++) {
@@ -813,7 +795,7 @@ static char *collapse_spaces(const char *s) {
 }
 
 /* omp formatAge */
-static char *format_age(int64_t age) {
+char *ws_format_age(int64_t age) {
     if (!age) return xstrdup("");
     int64_t mins = age / 60, hours = mins / 60, days = hours / 24, weeks = days / 7, months = days / 30;
     if (age < 0) { /* Math.floor of negatives: never > 0 */
@@ -828,7 +810,7 @@ static char *format_age(int64_t age) {
 }
 
 /* JS `new Date(s)` for ISO dates (date-only = UTC, date-time without zone = local); false when unparseable */
-static bool parse_js_date(const char *s, int64_t *ms_out) {
+bool ws_parse_js_date(const char *s, int64_t *ms_out) {
     int Y, M, D, h = 0, m = 0, sec = 0, n = 0;
     if (sscanf(s, "%4d-%2d-%2d%n", &Y, &M, &D, &n) != 3 || n != 10) return false;
     const char *p = s + 10;
@@ -867,7 +849,7 @@ static bool parse_js_date(const char *s, int64_t *ms_out) {
 }
 
 /* omp truncate(str, 240): UTF-16 length, `…` */
-static char *truncate_utf16(const char *s, size_t max) {
+char *ws_truncate(const char *s, size_t max) {
     size_t units = 0, len = strlen(s);
     for (size_t i = 0; i < len;) {
         unsigned char c = (unsigned char)s[i];
@@ -887,132 +869,4 @@ static char *truncate_utf16(const char *s, size_t max) {
         i += k;
     }
     return xasprintf("%.*s\xe2\x80\xa6", (int)i, s);
-}
-
-static const char *provider_label(const char *name) {
-    for (size_t i = 0; i < ARRAY_LEN(PROVIDERS); i++)
-        if (!strcmp(PROVIDERS[i].name, name)) return PROVIDERS[i].label;
-    return name;
-}
-
-static int web_search_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
-    const char *q = json_get_str(args, "query");
-    /* `num_search_results` (else `limit`) sizes the result set per provider (clampNumResults); max_tokens and
-     * temperature only steer LLM-backed providers, which omc does not ship, so they are accepted and unused */
-    double want = json_get_num(args, "num_search_results", json_get_num(args, "limit", 0));
-    const char *recency = json_get_str(args, "recency");
-    const char *pref = settings_str("providers.webSearch", NULL);
-    if (pref && (!*pref || !strcmp(pref, "auto"))) pref = NULL;
-    strvec_t fail_ids = {0}, fail_msgs = {0};
-    sresults_t res = {0};
-    const char *used = NULL;
-    for (int pass = 0; pass < 2 && !used; pass++) {
-        for (size_t i = 0; i < ARRAY_LEN(PROVIDERS) && !used; i++) {
-            if (pass == 0 && (!pref || strcmp(pref, PROVIDERS[i].name) != 0)) continue;
-            if (pass == 1 && pref && strcmp(pref, PROVIDERS[i].name) == 0) continue;
-            if (ctx->cancel && *ctx->cancel) break;
-            int n = !want || isnan(want) ? PROVIDERS[i].def_n : (int)MIN((double)PROVIDERS[i].max_n, MAX(1.0, want));
-            char *err = NULL;
-            int rc = PROVIDERS[i].fn(q, n, recency, &res, &err);
-            if (rc == 0 && res.n) used = PROVIDERS[i].name;
-            else if (rc != -2) {
-                strvec_push(&fail_ids, PROVIDERS[i].name);
-                strvec_push_own(&fail_msgs, err ? err : xasprintf("%s returned no renderable search content.", PROVIDERS[i].name));
-                err = NULL;
-                sres_free(&res);
-            }
-            free(err);
-        }
-    }
-    if (!used) {
-        char *msg;
-        if (!fail_ids.n) msg = xstrdup("No web search model configured.");
-        else if (fail_ids.n == 1) msg = xstrdup(fail_msgs.v[0]);
-        else {
-            sb_t b = SB_INIT;
-            sb_append(&b, "All web search providers failed: ");
-            for (size_t i = 0; i < fail_ids.n; i++) sb_appendf(&b, "%s%s: %s", i ? "; " : "", fail_ids.v[i], fail_msgs.v[i]);
-            msg = sb_detach(&b);
-        }
-        tool_result_textf(out, "Error: %s", msg);
-        out->details = json_obj();
-        json_t *resp = json_obj();
-        json_set_str(resp, "provider", fail_ids.n ? fail_ids.v[fail_ids.n - 1] : "none");
-        json_set(resp, "sources", json_arr());
-        json_set(out->details, "response", resp);
-        json_set_str(out->details, "error", msg);
-        free(msg);
-        strvec_free(&fail_ids);
-        strvec_free(&fail_msgs);
-        return 0;
-    }
-    /* formatForLLM: fallback note, then `[N] title (age)\n    url\n    snippet` */
-    sb_t b = SB_INIT;
-    if (fail_ids.n) {
-        sb_append(&b, "Note: answered by ");
-        sb_append(&b, provider_label(used));
-        sb_append(&b, " after ");
-        for (size_t i = 0; i < fail_ids.n; i++) {
-            char *reason = collapse_spaces(fail_msgs.v[i]);
-            size_t rl = strlen(reason);
-            if (rl && reason[rl - 1] == '.') reason[rl - 1] = 0;
-            char *tr = truncate_utf16(reason, 240);
-            sb_appendf(&b, "%s%s failed (%s)", i ? " and " : "", provider_label(fail_ids.v[i]), tr);
-            free(tr);
-            free(reason);
-        }
-    }
-    json_t *sources = json_arr();
-    int64_t now = (int64_t)time(NULL) * 1000;
-    for (size_t i = 0; i < res.n; i++) {
-        const sresult_t *r = &res.v[i];
-        int64_t ms;
-        bool has_age = r->date && parse_js_date(r->date, &ms);
-        int64_t age = has_age ? (now - ms) / 1000 - ((now - ms) % 1000 < 0 ? 1 : 0) : 0;
-        char *ag = has_age ? format_age(age) : xstrdup("");
-        const char *shown = *ag ? ag : r->date;
-        if (b.len) sb_putc(&b, '\n');
-        sb_appendf(&b, "[%zu] %s", i + 1, r->title);
-        if (shown && *shown) sb_appendf(&b, " (%s)", shown);
-        sb_appendf(&b, "\n    %s", r->url);
-        if (*r->snippet) {
-            char *t = truncate_utf16(r->snippet, 240);
-            sb_appendf(&b, "\n    %s", t);
-            free(t);
-        }
-        free(ag);
-        json_t *s = json_obj();
-        json_set_str(s, "title", r->title);
-        json_set_str(s, "url", r->url);
-        if (*r->snippet) json_set_str(s, "snippet", r->snippet);
-        if (r->date) json_set_str(s, "publishedDate", r->date);
-        if (has_age) json_set_int(s, "ageSeconds", age);
-        json_push(sources, s);
-    }
-    tool_result_text(out, sb_cstr(&b));
-    out->details = json_obj(); /* omp SearchRenderDetails: {response: {provider, sources}} */
-    json_t *resp = json_obj();
-    json_set_str(resp, "provider", used);
-    json_set(resp, "sources", sources);
-    json_set(out->details, "response", resp);
-    sb_free(&b);
-    strvec_free(&fail_ids);
-    strvec_free(&fail_msgs);
-    sres_free(&res);
-    return 0;
-}
-
-agent_tool_t *tool_web_search_new(tool_env_t *env) {
-    json_t *ctx = json_obj();
-    char *desc = tool_prompt("web-search", ctx);
-    json_free(ctx);
-    json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"recency\":{\"enum\":"
-                           "[\"day\",\"week\",\"month\",\"year\"],\"type\":\"string\"},\"limit\":{\"type\":\"number\"},"
-                           "\"max_tokens\":{\"type\":\"number\"},\"temperature\":{\"type\":\"number\"},"
-                           "\"num_search_results\":{\"type\":\"number\"}},\"required\":[\"query\"],"
-                           "\"additionalProperties\":false}");
-    agent_tool_t *t = agent_tool_new("web_search", "Web Search", desc, s, web_search_execute);
-    free(desc);
-    t->ud = env;
-    return t;
 }

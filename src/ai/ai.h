@@ -134,6 +134,10 @@ bool model_supports_effort(const ai_model_t *m, ai_effort_t e);
 ai_effort_t model_clamp_effort(const ai_model_t *m, ai_effort_t e);
 /* catalog compat delegationBias for the model: "eager" (default), "gated", "restrained" (static string) */
 const char *model_delegation_bias(const ai_model_t *m);
+/* catalog `webSearch` grounding of a chat model ("anthropic" | "gemini" | "openai" | "codex" | "xai" | "openrouter")
+ * or NULL, and its `webSearchModel` (cheaper same-provider search swap) or NULL; static/borrowed strings */
+const char *model_web_search(const ai_model_t *m);
+const char *model_web_search_model(const ai_model_t *m);
 
 /* per-api compat defaults (borrowed, may be NULL) */
 json_t *catalog_api_defaults(const char *api);

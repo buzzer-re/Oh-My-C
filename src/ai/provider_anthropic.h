@@ -30,6 +30,12 @@ char *anthropic_request_url(const ai_model_t *m, bool oauth);
 /* Serialize params compactly; patches the Claude Code billing-header `cch` attestation when present. Owned. */
 char *anthropic_serialize_body(const json_t *params);
 
+/* Hosted web search request (omp web/search/providers/anthropic.ts callSearch): fills `h`, sets *url_out (owned)
+ * and returns the body (owned). temperature NAN = unset. */
+char *anthropic_search_request(const ai_model_t *m, const char *key, const char *query, const char *system_prompt,
+                               int64_t max_tokens, double temperature, const char *session_id, http_headers_t *h,
+                               char **url_out);
+
 /* Claude Code CLI version used on the OAuth wire (env PI_AI_CLAUDE_CODE_VERSION > adopted > pinned). */
 const char *anthropic_claude_code_version(void);
 

@@ -2419,3 +2419,121 @@ json_t *provider_anthropic_stream_ex(const ai_model_t *m, const ai_context_t *ct
     anthropic_attempt_t at = {m, ctx, o, is_oauth};
     return ai_replay_safe_stream(anthropic_attempt, &at, o, cb, ud, true, 0);
 }
+
+/* ---------- hosted web search (coding-agent web/search/providers/anthropic.ts callSearch) ---------- */
+
+char *anthropic_search_request(const ai_model_t *m, const char *key, const char *query, const char *system_prompt,
+                               int64_t max_tokens, double temperature, const char *session_id, http_headers_t *h,
+                               char **url_out) {
+    bool oauth = anthropic_is_oauth_token(key);
+    /* buildAnthropicAuthConfig: the model's base URL, else ANTHROPIC_BASE_URL, else the default */
+    char *base = normalize_base_url(m->base_url);
+    if (!base) base = normalize_base_url(getenv("ANTHROPIC_BASE_URL"));
+    if (!base) base = xstrdup(DEFAULT_BASE_URL);
+    bool official = is_official_url(base);
+    *url_out = xasprintf("%s/v1/messages?beta=true", base);
+
+    /* buildAnthropicSearchHeaders -> buildAnthropicHeaders({extraBetas: [web-search], stream: false}) */
+    strvec_t betas = {0};
+    if (oauth) claude_code_betas(&betas, true, true, false, true);
+    beta_add(&betas, "web-search-2025-03-05");
+    char *beta_hdr = strvec_join(&betas, ",");
+    strvec_free(&betas);
+    http_headers_t caller = {0};
+    ai_apply_headers(&caller, m, NULL);
+    const char *in_ua = http_headers_get(&caller, "User-Agent");
+    const char *in_auth = http_headers_get(&caller, "Authorization");
+    const char *in_key = http_headers_get(&caller, "X-Api-Key");
+    for (size_t i = 0; i < caller.n; i++) {
+        const char *k = caller.v[i].name;
+        if (is_enforced(k) || (oauth && is_stainless(k))) continue;
+        http_headers_set(h, k, caller.v[i].value);
+    }
+    http_headers_set(h, "Accept", "application/json");
+    if (oauth) {
+        http_headers_set(h, "Content-Type", "application/json");
+        char *ua = (in_ua && strncasecmp(in_ua, "claude-cli", 10) == 0)
+                       ? xstrdup(in_ua)
+                       : xasprintf("claude-cli/%s (external, cli)", anthropic_claude_code_version());
+        http_headers_set(h, "User-Agent", ua);
+        free(ua);
+        for (size_t i = 0; i < ARRAY_LEN(STAINLESS_KEYS); i++) http_headers_set(h, STAINLESS_KEYS[i], stainless_value(i));
+        http_headers_set(h, "anthropic-beta", beta_hdr);
+        http_headers_set(h, "anthropic-dangerous-direct-browser-access", "true");
+        http_headers_set(h, "anthropic-version", "2023-06-01");
+        char *bearer = xasprintf("Bearer %s", key ? key : "");
+        http_headers_set(h, "Authorization", bearer);
+        free(bearer);
+        http_headers_set(h, "x-app", "cli");
+        http_headers_set(h, "Connection", "keep-alive");
+        if (in_key) http_headers_set(h, "X-Api-Key", in_key);
+    } else {
+        if (!official) {
+            char *bearer = in_auth ? xstrdup(in_auth)
+                                   : (key && strcmp(key, AI_NO_AUTH_SENTINEL) != 0 ? xasprintf("Bearer %s", key) : NULL);
+            if (bearer) http_headers_set(h, "Authorization", bearer);
+            free(bearer);
+        }
+        http_headers_set(h, "Connection", "keep-alive");
+        http_headers_set(h, "Content-Type", "application/json");
+        http_headers_set(h, "anthropic-dangerous-direct-browser-access", "true");
+        http_headers_set(h, "x-app", "cli");
+        http_headers_set(h, "anthropic-version", "2023-06-01");
+        if (in_ua) http_headers_set(h, "User-Agent", in_ua);
+        http_headers_set(h, "anthropic-beta", beta_hdr);
+        if (official) {
+            if (in_auth) http_headers_set(h, "Authorization", in_auth);
+            http_headers_set(h, "X-Api-Key", in_key ? in_key : (key ? key : ""));
+        } else if (in_key) {
+            http_headers_set(h, "X-Api-Key", in_key);
+        }
+    }
+    free(beta_hdr);
+    http_headers_free(&caller);
+    free(base);
+
+    json_t *body = json_obj();
+    json_set_str(body, "model", m->id);
+    json_set_int(body, "max_tokens", max_tokens > 0 ? max_tokens : 4096);
+    json_t *msgs = json_arr(), *um = json_obj();
+    json_set_str(um, "role", "user");
+    json_set_str(um, "content", query);
+    json_push(msgs, um);
+    json_set(body, "messages", msgs);
+    json_t *tools = json_arr(), *tool = json_obj();
+    json_set_str(tool, "type", "web_search_20250305");
+    json_set_str(tool, "name", "web_search");
+    json_push(tools, tool);
+    json_set(body, "tools", tools);
+    /* resolveAnthropicMetadataUserId(sessionId, isOAuth, sessionId): API keys forward the session id verbatim */
+    json_t *md = json_obj();
+    if (session_id && *session_id) json_set_str(md, "user_id", session_id);
+    char *uid = resolve_metadata_user_id(md, oauth, session_id);
+    json_free(md);
+    if (uid) {
+        json_t *meta = json_obj();
+        json_set_str(meta, "user_id", uid);
+        json_set(body, "metadata", meta);
+        free(uid);
+    }
+    if (!isnan(temperature) && cflag(m, "supportsSamplingParams")) json_set_num(body, "temperature", temperature);
+    /* buildSystemBlocks: the Claude Code fingerprint and the extra instruction only on OAuth requests */
+    json_t *sys = json_arr();
+    if (oauth && cflag(m, "injectClaudeCodeInstruction")) {
+        char *billing = billing_header_text("");
+        json_push(sys, text_block(billing));
+        free(billing);
+        json_t *id = text_block(CLAUDE_CODE_SYSTEM_INSTRUCTION);
+        json_t *e = json_obj();
+        json_set_str(e, "type", "ephemeral");
+        json_set(id, "cache_control", e);
+        json_push(sys, id);
+    }
+    if (oauth) json_push(sys, text_block("You are a helpful AI assistant with web search capabilities."));
+    if (system_prompt && !str_blank(system_prompt)) json_push(sys, text_block(system_prompt));
+    if (json_len(sys)) json_set(body, "system", sys);
+    else json_free(sys);
+    char *s = anthropic_serialize_body(body);
+    json_free(body);
+    return s;
+}

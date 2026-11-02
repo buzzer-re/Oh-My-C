@@ -92,6 +92,14 @@ char *app_model_label(app_t *a) {
 
 const char *app_session_file(app_t *a) { return a->session ? a->session->file : NULL; }
 
+/* tool_env active_model: web_search's `web/hosted` searches through the session model */
+static const ai_model_t *app_tool_active_model(tool_env_t *env, char **session_id) {
+    app_t *a = env->session;
+    if (!a) return NULL;
+    if (session_id) *session_id = a->agent && a->agent->session_id ? xstrdup(a->agent->session_id) : NULL;
+    return a->model;
+}
+
 /* ---------- persistence listener ---------- */
 
 static void notice(app_t *a, const char *level, const char *fmt, ...) PRINTF_LIKE(3, 4);
@@ -1548,6 +1556,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (!o->subagent) agents_register_main(a);
     a->env->run_subagent = app_run_subagent;
     a->env->judge = app_tool_judge;
+    a->env->active_model = app_tool_active_model;
     a->evalhost = evalhost_new(a);
     a->env->eval_bridge = app_eval_bridge;
     discover_all(a->cwd, &a->disc, o->no_context_files, o->no_skills, o->no_rules);

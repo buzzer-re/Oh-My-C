@@ -503,6 +503,51 @@ const char *model_delegation_bias(const ai_model_t *m) {
     return "eager";
 }
 
+/* catalog compat cascade `web-search` / `web-search-model` (classes/{anthropic,gemini,openai,xai}.kdl and
+ * providers/{anthropic,google,google-antigravity,openai-codex,openrouter,xai,xai-oauth}.kdl; provider rules run after
+ * the class rules). A model's own `webSearch` / `webSearchModel` field wins. */
+static bool class_rev(const ai_model_t *m, const char *cls, int major) {
+    json_t *ident = m->raw ? json_get_obj(m->raw, "identity") : NULL;
+    if (!str_eq(json_get_str(ident, "class"), cls)) return false;
+    if (major <= 0) return true;
+    const char *rev = json_get_str(ident, "revision");
+    if (!rev) return false;
+    int v[3];
+    parse_revision(rev, v);
+    return v[0] >= major;
+}
+
+const char *model_web_search(const ai_model_t *m) {
+    if (!m) return NULL;
+    const char *own = m->raw ? json_get_str(m->raw, "webSearch") : NULL;
+    if (own) return own;
+    const char *r = NULL;
+    if (class_rev(m, "anthropic", 4) && str_eq(m->api, "anthropic-messages")) r = "anthropic";
+    if (class_rev(m, "gemini", 2) && (str_eq(m->api, "google-generative-ai") || str_eq(m->api, "google-gemini-cli")))
+        r = "gemini";
+    if (class_rev(m, "openai", 5) && str_eq(m->api, "openai-responses")) r = "openai";
+    const char *p = m->provider ? m->provider : "";
+    if (!strcmp(p, "anthropic")) r = "anthropic";
+    else if (!strcmp(p, "google") || !strcmp(p, "google-antigravity")) r = "gemini";
+    else if (!strcmp(p, "openai-codex")) r = "codex";
+    else if (!strcmp(p, "openrouter")) r = "openrouter";
+    else if (!strcmp(p, "xai") || !strcmp(p, "xai-oauth")) r = "xai";
+    return r;
+}
+
+const char *model_web_search_model(const ai_model_t *m) {
+    if (!m) return NULL;
+    const char *own = m->raw ? json_get_str(m->raw, "webSearchModel") : NULL;
+    if (own) return own;
+    if (class_rev(m, "anthropic", 4) && str_eq(m->api, "anthropic-messages")) return "claude-haiku-4-5";
+    if (class_rev(m, "gemini", 2) && (str_eq(m->api, "google-generative-ai") || str_eq(m->api, "google-gemini-cli")))
+        return "gemini-2.5-flash";
+    if (class_rev(m, "openai", 5) && (str_eq(m->api, "openai-responses") || str_eq(m->api, "openai-codex-responses")))
+        return "gpt-6-luna";
+    if (class_rev(m, "xai", 0)) return "grok-4.5";
+    return NULL;
+}
+
 void catalog_apply_context_policy(bool extended, bool (*opt_in)(const ai_model_t *m, int64_t standard)) {
     catalog_init();
     g_extended = extended;

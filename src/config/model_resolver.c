@@ -120,7 +120,7 @@ bool mr_role_accepts(const char *role, const ai_model_t *m) {
     if (str_eq(role, "tiny") || str_eq(role, "memory")) return str_eq(k, "tiny") || str_eq(k, "chat");
     if (str_eq(role, "image")) return str_eq(k, "image");
     if (str_eq(role, "web"))
-        return str_eq(k, "search") || (str_eq(k, "chat") && m->raw && json_get(m->raw, "webSearch"));
+        return str_eq(k, "search") || (str_eq(k, "chat") && model_web_search(m));
     if (str_eq(role, "speech")) return str_eq(k, "tts");
     if (str_eq(role, "dictation")) return str_eq(k, "stt");
     if (str_eq(role, "judge")) return str_eq(k, "judge") || str_eq(k, "tiny") || str_eq(k, "chat");

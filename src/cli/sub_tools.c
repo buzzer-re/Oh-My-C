@@ -6,6 +6,7 @@
 #include "core/fs.h"
 #include "text/search.h"
 #include "tools/tools.h"
+#include "tools/websearch.h"
 #include "tui/theme.h"
 #include "ui/tools/tc.h"
 
@@ -177,19 +178,19 @@ int cmd_search(cparse_t *p) {
     }
     cli_init_runtime(NULL);
     const char *model = cp_str(p, "model");
-    /* web/<engine> catalog selectors pin the search engine; omc searches through web engines only */
-    if (model) settings_set_runtime("providers.webSearch", json_str(str_starts(model, "web/") ? model + 4 : model));
     char *cwd = get_cwd();
-    tool_env_t *env = tool_env_new(cwd);
-    agent_tool_t *t = tool_web_search_new(env);
     json_t *args = json_obj();
     json_set_str(args, "query", query);
     if (cp_str(p, "recency")) json_set_str(args, "recency", cp_str(p, "recency"));
     long long limit;
     if (cp_int(p, "limit", &limit)) json_set_num(args, "limit", (double)limit);
+    /* runSearchQuery: the web role chain, or the `--model` selector as an explicit candidate */
     tool_result_t r = {0};
-    tool_ctx_t ctx = {.tool_name = "web_search", .tool_call_id = "omc-search"};
-    t->execute(t, &ctx, args, &r);
+    bool is_error = false;
+    char *text = ws_execute(args, model, NULL, NULL, NULL, &r.details, &is_error);
+    tool_result_text(&r, text);
+    free(text);
+    r.is_error = is_error;
     int width = 100;
     struct winsize ws;
     if (isatty(1) && ioctl(1, TIOCGWINSZ, &ws) == 0 && ws.ws_col) width = ws.ws_col;
@@ -212,8 +213,6 @@ int cmd_search(cparse_t *p) {
     int rc = r.is_error || json_get_str(r.details, "error") ? 1 : 0;
     tool_result_free(&r);
     json_free(args);
-    agent_tool_free(t);
-    tool_env_free(env);
     free(cwd);
     free(query);
     return rc;
