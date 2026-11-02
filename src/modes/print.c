@@ -1,5 +1,6 @@
 /* print mode: run prompts non-interactively, emitting final text or JSON event lines. */
 #include "modes.h"
+#include "coding/guards.h"
 
 #include <pthread.h>
 #include <unistd.h>
@@ -44,6 +45,7 @@ static void text_listener(void *ud, const agent_event_t *ev) {
 
 static void notice_stderr(void *ud, const char *level, const char *text) {
     UNUSED(ud);
+    if (!strcmp(level, "todo-reminder")) return;
     if (!strcmp(level, "retry-failed")) {
         const char *f1 = strchr(text, '\x1f'), *f2 = f1 ? strchr(f1 + 1, '\x1f') : NULL;
         if (f1 && f2) fprintf(stderr, "[error] Retry failed after %d attempts: %s\n", atoi(text), f2 + 1);
@@ -82,6 +84,7 @@ int run_print_mode(app_t *a, const print_opts_t *o) {
         a->notice = notice_stderr;
     }
     int rc = 0;
+    guards_disable_stop_reminders(a); /* omp print mode: todo reminders never start extra turns */
     for (size_t i = 0; i < o->messages.n; i++) {
         size_t before = json_len(a->agent->messages);
         app_prompt(a, o->messages.v[i], NULL);

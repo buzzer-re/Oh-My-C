@@ -39,6 +39,8 @@ const char *session_append_model_change(session_t *s, const char *provider_model
 /* model_change with omp's resolvedModelIsFallback flag (retry fallback hops use role "fallback") */
 const char *session_append_model_change_ex(session_t *s, const char *provider_model, const char *role, bool is_fallback);
 const char *session_append_thinking_change(session_t *s, const char *level);
+/* omp appendThinkingLevelChange(level, configured): NULL writes null; configured "auto" marks auto thinking */
+const char *session_append_thinking_change_ex(session_t *s, const char *level, const char *configured);
 const char *session_append_compaction(session_t *s, const char *summary, const char *first_kept_id,
                                       int64_t tokens_before, json_t *details);
 const char *session_append_branch_summary(session_t *s, const char *from_id, const char *summary);
@@ -63,6 +65,7 @@ typedef struct {
     json_t *messages;
     char *model;         /* "provider/id" */
     char *thinking;      /* level name */
+    char *thinking_configured; /* configured selector of the latest thinking entry ("auto"), may be NULL */
     int64_t compaction_tokens_before;
 } session_context_t;
 void session_build_context(const session_t *s, session_context_t *out);

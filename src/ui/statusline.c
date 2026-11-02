@@ -453,6 +453,13 @@ static ai_effort_t effective_effort(const app_t *a) {
 static char *thinking_display(const segctx_t *c) {
     const app_t *a = c->a;
     if (!seg_bool(c->set, "model", "showThinkingLevel", true) || !a->model || !a->model->reasoning) return xstrdup("");
+    if (a->auto_thinking) { /* pending: "<autoPending> auto"; once a turn is classified: the resolved level */
+        if (a->auto_resolved < 0) return xasprintf("%s auto", sym("thinking.autoPending"));
+        char key[48];
+        snprintf(key, sizeof key, "thinking.%s", effort_name((ai_effort_t)a->auto_resolved));
+        const char *d = sym(key);
+        return xstrdup(*d ? d : effort_name((ai_effort_t)a->auto_resolved));
+    }
     if (a->thinking == EFFORT_OFF) return xasprintf("%s off", sym("status.disabled"));
     char key[48];
     snprintf(key, sizeof key, "thinking.%s", effort_name(a->thinking));

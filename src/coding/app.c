@@ -1,5 +1,9 @@
 #include "app.h"
+#include "coding/autothink.h"
 #include "coding/goal.h"
+#include "coding/guards.h"
+#include "coding/keywords.h"
+#include "coding/thinkloop.h"
 #include "coding/title.h"
 #include "coding/skilldesc.h"
 #include "coding/advisor.h"
@@ -151,16 +155,20 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
         }
     }
     if (ev->type == AGENT_EV_TOOL_END) app_plan_note_tool_end(a, ev->tool_name, ev->result, ev->is_error);
+    guards_on_event(a, ev); /* tool-call loop redirect at the turn end, ahead of async results */
     if (ev->type == AGENT_EV_TURN_END && a->env && jobs_undelivered(a->env->jobs)) {
         json_t *m = job_results_message(a);
         if (m) agent_steer(a->agent, m);
     }
+    guards_mid_run_nudge(a, ev);
     app_goal_on_event(a, ev);
     title_on_event(a, ev);
     if (a->advisor) advisor_on_event(a->advisor, ev);
     autolearn_on_event(a->autolearn, ev);
     if (ev->type == AGENT_EV_TURN_START || ev->type == AGENT_EV_MESSAGE_START) {
         if (ev->type == AGENT_EV_TURN_START || str_eq(json_get_str(ev->message, "role"), "assistant")) ttsr_reset(a->ttsr);
+        if (ev->type == AGENT_EV_MESSAGE_START && str_eq(json_get_str(ev->message, "role"), "assistant"))
+            thinkloop_reset(a->thinkloop, a->model);
     }
     if (ev->type == AGENT_EV_TURN_END && a->pending_rewind && a->checkpoint_index > 0) {
         /* cut the context back to the checkpoint and retain only the report */
@@ -213,17 +221,18 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
         }
         const char *ctype = json_get_str(ev->message, "customType");
         if (role && a->session && ctype && (str_eq(role, "user") || str_eq(role, "developer"))) {
-            /* hidden steering (goal context, continuations, budget limits) persists as custom_message like omp */
+            /* hidden steering (goal context, continuations, budget limits, guard notices) persists as custom_message
+             * like omp */
             char *txt = ai_message_text(ev->message);
             const json_t *det = json_get(ev->message, "details");
-            if (det) { /* async-result job rows */
+            const char *attr = json_get_str(ev->message, "attribution");
+            if (det || attr) { /* async-result job rows, guard details, attribution */
                 json_t *e = json_obj();
                 json_set_str(e, "type", "custom_message");
                 json_set_str(e, "customType", ctype);
                 json_set_str(e, "content", txt);
                 json_set_bool(e, "display", false);
-                json_set(e, "details", json_clone(det));
-                const char *attr = json_get_str(ev->message, "attribution");
+                if (det) json_set(e, "details", json_clone(det));
                 if (attr) json_set_str(e, "attribution", attr);
                 session_append_entry(a->session, e);
             } else session_append_custom_message(a->session, ctype, txt, false);
@@ -425,6 +434,7 @@ static bool is_retryable(const char *err) {
     const char *pats[] = {"overloaded", "rate limit", "rate_limit", "429", "500", "502", "503", "504", "529",
                           "timed out", "timeout", "connection", "network", "reset", "closed before", "mid-body",
                           "internal server error", "service unavailable", "bad gateway", "temporarily", "try again",
+                          "stream stall",
                           "stream ended", "terminated"};
     for (size_t i = 0; i < ARRAY_LEN(pats); i++)
         if (str_istr(err, pats[i])) return true;
@@ -433,12 +443,48 @@ static bool is_retryable(const char *err) {
 
 static int hook_stream(void *ud, agent_t *ag, const ai_event_t *ev) {
     app_t *a = ud;
-    UNUSED(ag);
-    if (ttsr_on_event(a->ttsr, ev)) {
+    if (ev->type != AI_EV_DONE && ttsr_on_event(a->ttsr, ev)) {
         a->ttsr_interrupting = true;
-        return 1;
+        return AGENT_STREAM_INTERRUPT;
     }
-    return 0;
+    switch (thinkloop_on_event(a->thinkloop, ev)) {
+    case THINKLOOP_LOOP:
+        free(ag->stream_error);
+        ag->stream_error = xstrdup(thinkloop_error(a->thinkloop));
+        return AGENT_STREAM_ERROR;
+    case THINKLOOP_GEMINI_HEADERS: /* interrupt; should_retry(-1) discards the turn and reminds the model */
+        a->gemini_interrupt = thinkloop_header_count(a->thinkloop);
+        a->ttsr_interrupting = true;
+        return AGENT_STREAM_INTERRUPT;
+    default: return AGENT_STREAM_CONTINUE;
+    }
+}
+
+/* hidden agent-attributed custom message: live context (developer) + persisted custom_message entry */
+static void append_custom_notice(app_t *a, agent_t *ag, const char *type, const char *content, json_t *details) {
+    json_t *m = msg_developer_text(content);
+    json_set_str(m, "attribution", "agent");
+    json_set_str(m, "customType", type);
+    json_set_bool(m, "display", false);
+    agent_append_message(ag, m);
+    if (a->session) {
+        json_t *e = json_obj();
+        json_set_str(e, "type", "custom_message");
+        json_set_str(e, "customType", type);
+        json_set_str(e, "content", content);
+        json_set_bool(e, "display", false);
+        if (details) json_set(e, "details", details);
+        json_set_str(e, "attribution", "agent");
+        session_append_entry(a->session, e);
+    } else json_free(details);
+}
+
+/* a thinking/response loop retried into identical context loops again: the retry carries the redirect */
+static void maybe_thinking_loop_redirect(app_t *a, agent_t *ag, const char *err) {
+    if (!str_starts(err ? err : "", "Thinking loop detected") || !settings_bool("model.loopGuard.enabled", true)) return;
+    char *t = prompt_load("coding-agent/prompts/system/thinking-loop-redirect.md");
+    append_custom_notice(a, ag, "thinking-loop-redirect", t ? t : "", NULL);
+    free(t);
 }
 
 static bool cmd_mutates(const char *cmd) {
@@ -731,6 +777,21 @@ static void maybe_restore_primary(app_t *a) {
 
 static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int attempt) {
     app_t *a = ud;
+    if (attempt < 0 && a->gemini_interrupt > 0) { /* LoopGuards #interruptGeminiHeaderRunaway */
+        int n = a->gemini_interrupt;
+        a->gemini_interrupt = 0;
+        a->ttsr_interrupting = false;
+        notice(a, "warning", "Interrupted %d planning headers with no tool call; reminded the model to issue one.", n);
+        json_t *ctx = json_obj();
+        json_set_int(ctx, "count", n);
+        char *txt = prompt_render("coding-agent/prompts/system/gemini-tool-call-reminder.md", ctx);
+        json_free(ctx);
+        json_t *det = json_obj();
+        json_set_int(det, "headers", n);
+        append_custom_notice(a, ag, "gemini-tool-call-reminder", txt ? txt : "", det);
+        free(txt);
+        return true;
+    }
     if (attempt < 0) {
         json_t *names = NULL;
         char *inj = ttsr_take_interrupt(a->ttsr, &names);
@@ -801,6 +862,7 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
         free(cur);
     }
     if (switched) {
+        maybe_thinking_loop_redirect(a, ag, err);
         a->retry_offset = attempt + 1; /* a fallback model gets a fresh retry budget */
         strvec_push(&a->retry_notes, usage_limit ? "rate-limited; switched model; retried" : "switched model; retried");
         return true;
@@ -830,6 +892,7 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
         return false;
     }
     notice(a, "warning", "Retrying (%d/%d) in %llds: %s", saga, max, (long long)((delay + 999) / 1000), err ? err : "error");
+    maybe_thinking_loop_redirect(a, ag, err);
     strvec_push(&a->retry_notes, usage_limit ? "rate-limited; waited; retried" : "error; retried");
     int64_t until = mono_ms() + delay;
     while (mono_ms() < until) {
@@ -1034,7 +1097,8 @@ void app_rebuild_system_prompt(app_t *a) {
                            .tool_refs = refs,
                            .delegation_bias = model_delegation_bias(a->model),
                            .irc_enabled = !a->opts.tools && agent_find_tool(a->agent, "task") != NULL,
-                           .generated_append = sb_cstr(&gen)};
+                           .generated_append = sb_cstr(&gen),
+                           .tui_transcript = a->opts.has_ui && !a->opts.subagent};
     json_t *blocks = build_system_prompt(&so);
     sb_free(&gen);
     json_free(labels);
@@ -1082,7 +1146,14 @@ static void load_session_into_agent(app_t *a) {
     }
     if (sc.thinking && !a->opts.thinking) {
         ai_effort_t e;
-        if (effort_parse(sc.thinking, &e) == 0) {
+        if (str_eq(sc.thinking_configured, "auto")) { /* restoreThinkingLevel(auto): provisional, unresolved */
+            a->auto_thinking = true;
+            a->auto_resolved = -1;
+            a->thinking = autothink_provisional(a->model, &e) ? e : EFFORT_OFF;
+            a->agent->thinking = a->thinking;
+        } else if (effort_parse(sc.thinking, &e) == 0) {
+            a->auto_thinking = false;
+            a->auto_resolved = -1;
             a->thinking = e;
             a->agent->thinking = e;
         }
@@ -1123,16 +1194,24 @@ app_t *app_create(const app_opts_t *o, char **err) {
         }
     }
     if (o->api_key && (a->model || o->provider)) auth_set_runtime_key(a->model ? a->model->provider : o->provider, o->api_key);
+    a->auto_resolved = -1;
     if (o->thinking) {
-        if (effort_parse(o->thinking, &eff) != 0 && strcmp(o->thinking, "auto") != 0) {
+        if (!strcmp(o->thinking, "auto")) a->auto_thinking = true;
+        else if (effort_parse(o->thinking, &eff) != 0) {
             *err = xasprintf("Invalid thinking level: %s", o->thinking);
             app_free(a);
             return NULL;
         }
         has_eff = true;
     }
-    if (!has_eff) effort_parse(settings_str("defaultThinkingLevel", "high"), &eff);
+    if (!has_eff) {
+        const char *dl = settings_str("defaultThinkingLevel", "high");
+        if (str_eq(dl, "auto")) a->auto_thinking = true;
+        else effort_parse(dl, &eff);
+    }
     a->thinking = eff;
+    a->guards = guards_new();
+    a->thinkloop = thinkloop_new();
     /* environment & discovery */
     a->env = tool_env_new(a->cwd);
     a->env->jobs = jobs_new();
@@ -1210,6 +1289,10 @@ app_t *app_create(const app_opts_t *o, char **err) {
     a->skilldesc = skilldesc_new();
     a->memory = memory_rt_new();
     if (!o->subagent) a->autolearn = autolearn_new(a);
+    if (a->auto_thinking) { /* keep auto pending until the first turn while exposing a valid wire effort */
+        ai_effort_t pe;
+        a->thinking = autothink_provisional(a->model, &pe) ? pe : EFFORT_OFF;
+    }
     install_agent(a);
     if (json_len(a->session->entries)) load_session_into_agent(a);
     if (!o->subagent) app_goal_restore(a);
@@ -1217,7 +1300,8 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (!json_len(a->session->entries) && a->session->persist && a->model) {
         char *label = app_model_label(a);
         session_append_model_change(a->session, label, NULL);
-        session_append_thinking_change(a->session, effort_name(a->thinking));
+        /* `auto` is not written before the first turn resolves (sdk.ts) */
+        if (!a->auto_thinking) session_append_thinking_change(a->session, effort_name(a->thinking));
         free(label);
     }
     a->title_done = a->session->title != NULL;
@@ -1263,6 +1347,8 @@ void app_free(app_t *a) {
     free(a->pending_rewind);
     advisor_free(a->advisor);
     goal_free(a->goal);
+    guards_free(a->guards);
+    thinkloop_free(a->thinkloop);
     title_free(a);
     skilldesc_free(a->skilldesc);
     json_free(a->dcr_sent);
@@ -1289,6 +1375,7 @@ int app_set_model(app_t *a, const char *pattern, char **err) {
     mr_usage_record(uk);
     free(uk);
     if (has_e) app_set_thinking(a, e);
+    else if (a->auto_thinking) app_set_thinking_auto(a); /* #reapplyThinkingLevel keeps auto, re-clamped */
     char *label = app_model_label(a);
     session_append_model_change(a->session, label, NULL);
     free(label);
@@ -1297,12 +1384,39 @@ int app_set_model(app_t *a, const char *pattern, char **err) {
 }
 
 void app_set_thinking(app_t *a, ai_effort_t e) {
+    a->auto_thinking = false;
+    a->auto_resolved = -1;
     a->thinking = e;
     a->agent->thinking = e;
     session_append_thinking_change(a->session, effort_name(e));
 }
 
+void app_set_thinking_auto(app_t *a) {
+    ai_effort_t pe;
+    ai_effort_t prov = autothink_provisional(a->model, &pe) ? pe : EFFORT_OFF;
+    bool was = a->auto_thinking;
+    ai_effort_t prev = a->thinking;
+    a->auto_thinking = true;
+    a->auto_resolved = -1;
+    a->thinking = prov;
+    a->agent->thinking = prov;
+    if (!was || prev != prov)
+        session_append_thinking_change_ex(a->session, a->model && a->model->reasoning ? effort_name(prov) : NULL, "auto");
+}
+
+bool app_set_thinking_level(app_t *a, const char *level) {
+    if (str_eq(level, "auto")) {
+        app_set_thinking_auto(a);
+        return true;
+    }
+    ai_effort_t e;
+    if (!level || effort_parse(level, &e) != 0) return false;
+    app_set_thinking(a, e);
+    return true;
+}
+
 void app_abort(app_t *a) {
+    __atomic_add_fetch(&a->abort_gen, 1, __ATOMIC_SEQ_CST);
     agent_abort(a->agent);
     app_goal_on_abort(a);
 }
@@ -2013,6 +2127,42 @@ static void begin_turn_budget(app_t *a, const char *text) {
     a->turn_output_baseline = __atomic_load_n(&a->output_tokens, __ATOMIC_SEQ_CST);
 }
 
+/* run the agent, then the settle passes in omp's agent_end order: empty/unexpected-stop retries, the plan-mode
+ * decision reminder, the stop-time todo reminder; each may append a hidden message and continue the agent */
+static int run_guarded(app_t *a, json_t *msgs) {
+    int rc = agent_prompt(a->agent, msgs);
+    while (rc == 0 && !a->agent->cancel) {
+        int rec = guards_stop_recovery(a);
+        if (rec == 1) {
+            rc = agent_continue(a->agent);
+            continue;
+        }
+        if (rec == 2) break; /* a capped empty stop is terminal: no reminder restarts it */
+        size_t before = json_len(a->agent->messages);
+        rc = app_plan_settle(a, rc);
+        if (rc != 0 || json_len(a->agent->messages) != before) continue; /* the plan reminder ran a turn */
+        if (!guards_todo_reminder(a)) break;
+        rc = agent_continue(a->agent);
+    }
+    return rc;
+}
+
+/* applyAutoThinkingLevel: classify this user turn; false when an abort superseded the prompt meanwhile */
+static bool apply_auto_thinking(app_t *a, const char *text) {
+    if (!a->auto_thinking) return true;
+    int gen = __atomic_load_n(&a->abort_gen, __ATOMIC_SEQ_CST);
+    ai_effort_t e;
+    bool ok = autothink_resolve(a, text, &e);
+    if (__atomic_load_n(&a->abort_gen, __ATOMIC_SEQ_CST) != gen) return false;
+    if (!ok || !a->auto_thinking) return true;
+    bool changed = a->thinking != e;
+    a->auto_resolved = (int)e;
+    a->thinking = e;
+    a->agent->thinking = e;
+    if (changed) session_append_thinking_change_ex(a->session, effort_name(e), "auto");
+    return true;
+}
+
 /* renderAttachmentSourceNotice: the hidden custom message naming the file behind `[Image #index]` */
 static json_t *attachment_notice(int index, const char *path) {
     json_t *c = json_obj();
@@ -2080,6 +2230,7 @@ int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
     memory_take_prompt_refresh(a);
     maybe_restore_primary(a);
     begin_turn_budget(a, text);
+    guards_reset_cycle(a);
     json_t *content = json_arr();
     json_push(content, text_block(text));
     add_mentions(a, text, content);
@@ -2093,11 +2244,18 @@ int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
     if (pr) json_push(msgs, pr);
     json_t *gm = app_goal_context_message(a);
     if (gm) json_push(msgs, gm);
+    /* magic keywords: hidden user-attributed notices ride ahead of the prompt (and its attachment notices) */
+    json_t *kn = keywords_notices(a, text), *k;
+    json_arr_foreach(kn, i, k) json_push(msgs, json_clone(k));
+    json_free(kn);
     json_arr_foreach(notices, i, img) json_push(msgs, json_clone(img));
     json_free(notices);
     json_push(msgs, msg_user_content(content));
-    int rc = agent_prompt(a->agent, msgs);
-    rc = app_plan_settle(a, rc);
+    if (!apply_auto_thinking(a, text)) {
+        json_free(msgs);
+        return 0;
+    }
+    int rc = run_guarded(a, msgs);
     if (rc == 0) {
         maybe_title(a);
         maybe_auto_compact(a);
@@ -2118,8 +2276,8 @@ int app_prompt_hidden(app_t *a, const char *text, const char *custom_type) {
         a->job_batch = NULL;
     }
     json_push(msgs, m);
-    int rc = agent_prompt(a->agent, msgs);
-    rc = app_plan_settle(a, rc);
+    guards_reset_cycle(a);
+    int rc = run_guarded(a, msgs);
     if (rc == 0) maybe_auto_compact(a);
     return rc;
 }
@@ -2473,6 +2631,8 @@ app_t *app_subagent_new(app_t *parent, const char *agent_name, const char *model
     child->env->artifacts = artifacts_ref(parent->env->artifacts);
     child->thinking = parent->thinking;
     child->agent->thinking = parent->thinking;
+    child->auto_thinking = parent->auto_thinking;
+    child->auto_resolved = parent->auto_resolved;
     return child;
 }
 

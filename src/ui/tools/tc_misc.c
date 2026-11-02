@@ -5,6 +5,7 @@
 #include <ctype.h>
 
 #include "tui/ansi.h"
+#include "tui/markdown.h"
 
 /* ---------- todo ---------- */
 
@@ -491,10 +492,59 @@ bool tc_wants_tick(const char *name) {
     return true;
 }
 
+/* omp chat/reply-write.ts: text the agent sends to out:// is drawn as assistant prose, not a tool card */
+static void reply_prose(const char *text, int width, strvec_t *out) {
+    tui_md_opts_t mo;
+    tui_md_opts_default(&mo);
+    mo.padding_x = 1;
+    mo.code_indent = 0;
+    char *t = tc_trim_end(text ? text : "");
+    const char *s = t;
+    while (*s == '\n' || *s == ' ' || *s == '\t' || *s == '\r') s++;
+    if (*s) tui_md_render(s, width, &mo, out);
+    free(t);
+}
+
+/* isReplyWrite: a `write` whose target is an out:// URL (scheme case-insensitive, single-slash alias ok) */
+static bool reply_write(const tc_call_t *c) {
+    const char *p = json_get_str(c->args, "path");
+    if (!p) p = json_get_str(c->args, "file_path");
+    return p && !strncasecmp(p, "out:/", 5);
+}
+
 void tc_render(const tc_call_t *c, int width, strvec_t *out) {
     const char *n = c->name ? c->name : "";
-    if (!strcmp(n, "bash")) tc_bash(c, width, out);
-    else if (!strcmp(n, "read")) tc_read(c, width, out);
+    if (!strcmp(n, "write") && reply_write(c)) {
+        reply_prose(json_get_str(c->args, "content"), width, out);
+        if (c->has_result && !c->partial && c->is_error) {
+            /* the failed reply shows its error under the text */
+            sb_t e = SB_INIT;
+            const json_t *b;
+            json_arr_foreach(c->content, i, b) if (json_get_str(b, "text")) sb_appendf(&e, "%s%s", e.len ? "\n" : "", json_get_str(b, "text"));
+            if (out->n) strvec_push(out, "");
+            strvec_t lines = {0};
+            tc_split_lines(sb_cstr(&e), &lines);
+            for (size_t i = 0; i < lines.n; i++) {
+                char *red = tc_fg(TUI_TC_ERROR, lines.v[i]);
+                strvec_push_own(out, xasprintf(" %s", red));
+                free(red);
+            }
+            strvec_free(&lines);
+            sb_free(&e);
+        }
+        return;
+    }
+    if (!strcmp(n, "bash")) {
+        tc_bash(c, width, out);
+        /* replies the command wrote to out:// draw as prose blocks after the call */
+        const json_t *r;
+        json_arr_foreach(json_get_arr(c->details, "replies"), i, r) if (json_sv(r)) {
+            strvec_push(out, "");
+            reply_prose(json_sv(r), width, out);
+        }
+        return;
+    }
+    if (!strcmp(n, "read")) tc_read(c, width, out);
     else if (!strcmp(n, "write")) tc_write(c, width, out);
     else if (!strcmp(n, "edit")) tc_edit(c, width, out);
     else if (!strcmp(n, "grep")) tc_grep(c, width, out);

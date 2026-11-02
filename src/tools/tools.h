@@ -82,6 +82,7 @@ typedef struct tool_env {
     char *(*run_subagent)(struct tool_env *env, const char *agent_name, const char *assignment, const char *context,
                           json_t **out_details, volatile sig_atomic_t *cancel);
     struct jobs *jobs;         /* async background jobs (owned; NULL disables async) */
+    struct conflict_history *conflicts; /* conflict:// blocks registered by read (owned, lazy; iurl.h) */
     /* eval kernel helpers that reach the session (completion/judge/judge_batch/budget/...; see coding/evalhost.h):
      * owned value or NULL with *err (owned). cell = calling cell serial, cancel = this call's abort flag. */
     json_t *(*eval_bridge)(struct tool_env *env, const char *name, const json_t *args, int64_t cell,

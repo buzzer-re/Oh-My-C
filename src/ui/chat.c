@@ -776,6 +776,8 @@ static void render_summary(msgview_t *v, int width, strvec_t *o) {
 }
 
 /* MessageNoticeComponent for TTSR (TtsrNotificationComponent): inverse warning box, padding 1 */
+static void notice_box(const strvec_t *body, int width, strvec_t *o);
+
 static void render_ttsr(msgview_t *v, int width, strvec_t *o) {
     strvec_t rules = {0};
     for (const char *p = v->text; p && *p;) {
@@ -811,9 +813,17 @@ static void render_ttsr(msgview_t *v, int width, strvec_t *o) {
         }
     }
     strvec_push(&body, "");
+    notice_box(&body, width, o);
+    strvec_free(&body);
+    free(header);
+    strvec_free(&rules);
+}
+
+/* MessageNoticeComponent box: inverse(fg(warning)) rows, padding 1 */
+static void notice_box(const strvec_t *body, int width, strvec_t *o) {
     const char *warn = tui_fg_seq(TH(), TUI_TC_WARNING);
-    for (size_t i = 0; i < body.n; i++) {
-        char *x = xasprintf(" %s", body.v[i]);
+    for (size_t i = 0; i < body->n; i++) {
+        char *x = xasprintf(" %s", body->v[i]);
         char *p = tui_pad_to_width(x, width);
         /* inverse(fg(warning, row)): resets inside the row keep the box colors */
         sb_t r = SB_INIT;
@@ -833,9 +843,36 @@ static void render_ttsr(msgview_t *v, int width, strvec_t *o) {
         free(p);
         free(x);
     }
+}
+
+/* TodoReminderComponent: "<warning> N incomplete todos - reminder a/b" and the open items in italics */
+static void render_todo_reminder(msgview_t *v, int width, strvec_t *o) {
+    json_t *todos = json_get_arr(v->msg, "todos"), *t;
+    size_t n = json_len(todos);
+    char *header = xasprintf("%s %zu incomplete %s - reminder %lld/%lld", tui_sym("icon.warning"), n, n == 1 ? "todo" : "todos",
+                             (long long)json_get_int(v->msg, "attempt", 0), (long long)json_get_int(v->msg, "maxAttempts", 0));
+    strvec_t body = {0};
+    int cw = MAX(1, width - 2);
+    strvec_push(&body, "");
+    tui_wrap_text_with_ansi(header, cw, &body);
+    strvec_push(&body, "");
+    sb_t list = SB_INIT;
+    json_arr_foreach(todos, i, t) {
+        if (i) sb_putc(&list, '\n');
+        sb_appendf(&list, "  %s %s", tui_sym("checkbox.unchecked"), json_get_str(t, "content") ? json_get_str(t, "content") : "");
+    }
+    strvec_t lines = str_split_lines(sb_cstr(&list), list.len);
+    for (size_t i = 0; i < lines.n; i++) {
+        char *it = tui_italic(lines.v[i]);
+        tui_wrap_text_with_ansi(it, cw, &body);
+        free(it);
+    }
+    strvec_free(&lines);
+    sb_free(&list);
+    strvec_push(&body, "");
+    notice_box(&body, width, o);
     strvec_free(&body);
     free(header);
-    strvec_free(&rules);
 }
 
 static void mv_render(tui_component_t *c, int width, strvec_t *out) {
@@ -856,6 +893,7 @@ static void mv_render(tui_component_t *c, int width, strvec_t *out) {
     case MV_CUSTOM: render_custom(v, width, o); break;
     case MV_SUMMARY: render_summary(v, width, o); break;
     case MV_TTSR: render_ttsr(v, width, o); break;
+    case MV_TODO: render_todo_reminder(v, width, o); break;
     }
     v->cache_w = width;
     v->dirty = false;
@@ -973,6 +1011,17 @@ void ui_retry_failed(ui_t *u, int attempts, const char *final_error, const char 
 
 /* showStatus / showWarning / showError. Consecutive status lines update in place instead of stacking. */
 void add_notice(ui_t *u, const char *level, const char *text) {
+    if (!strcmp(level, "todo-reminder")) {
+        json_t *j = json_parse(text, strlen(text), NULL);
+        if (!json_is_obj(j)) {
+            json_free(j);
+            return;
+        }
+        msgview_t *v = mv_new(MV_TODO);
+        v->msg = j;
+        add_view(u, v);
+        return;
+    }
     if (!strcmp(level, "warning") && str_starts(text, "Injecting rule: ")) {
         msgview_t *v = mv_new(MV_TTSR);
         v->text = xstrdup(text + strlen("Injecting rule: "));

@@ -1716,9 +1716,7 @@ static void apply_change(settings_view_t *v, const char *path) {
         !strcmp(path, "colorBlindMode"))
         ui_apply_appearance();
     if (!strcmp(path, "defaultThinkingLevel")) {
-        ai_effort_t e;
-        const char *lv = get_str(path, "high");
-        if (strcmp(lv, "auto") && effort_parse(lv, &e) == 0) app_set_thinking(u->app, e);
+        app_set_thinking_level(u->app, get_str(path, "high"));
     }
     if (!strcmp(path, "hideThinkingBlock")) u->hide_thinking = get_bool(path, false);
     if (!strcmp(path, "autolearn.enabled") || !strcmp(path, "memory.backend")) autolearn_reconcile(u->app);

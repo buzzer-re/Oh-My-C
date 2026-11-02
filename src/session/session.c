@@ -298,6 +298,15 @@ const char *session_append_thinking_change(session_t *s, const char *level) {
     return session_append_entry(s, e);
 }
 
+const char *session_append_thinking_change_ex(session_t *s, const char *level, const char *configured) {
+    json_t *e = typed("thinking_level_change");
+    if (level) json_set_str(e, "thinkingLevel", level);
+    else json_set(e, "thinkingLevel", json_null());
+    if (configured) json_set_str(e, "configured", configured);
+    else json_set(e, "configured", json_null());
+    return session_append_entry(s, e);
+}
+
 const char *session_append_compaction(session_t *s, const char *summary, const char *first_kept_id, int64_t before,
                                       json_t *details) {
     json_t *e = typed("compaction");
@@ -576,6 +585,9 @@ void session_build_context(const session_t *s, session_context_t *out) {
             free(out->thinking);
             const char *lv = json_get_str(e, "thinkingLevel");
             out->thinking = xstrdup(lv ? lv : "off");
+            free(out->thinking_configured);
+            const char *cf = json_get_str(e, "configured");
+            out->thinking_configured = cf ? xstrdup(cf) : NULL;
         } else if (str_eq(t, "reset_boundary")) {
             boundary = (ssize_t)i;
             compaction = -1;
@@ -604,6 +616,7 @@ void session_context_free(session_context_t *c) {
     json_free(c->messages);
     free(c->model);
     free(c->thinking);
+    free(c->thinking_configured);
     memset(c, 0, sizeof(*c));
 }
 

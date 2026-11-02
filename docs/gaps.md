@@ -45,7 +45,7 @@ Ranked by how soon a user hits the gap in a normal interactive session.
 3. ~~**`!cmd`, `/compact` and `/handoff` run on the UI thread.**~~ Done (WP-2): workers with omp's loaders and Esc cancel; `!cmd`/`$ code` deferred while streaming.
 4. **No turn-end, ask or error notifications, and the terminal title never changes.** `completion.notify` and `ask.notify` are on by default in omp. `tui_term_set_title` exists but is never called. (WP-11)
 5. **The `/export` HTML is a placeholder.** It is the markdown transcript inside a `<pre>`, while omp embeds the session in its interactive viewer (`export/html/template.*`). `/dump` lacks `all`/`anon` and the request-JSON sidecar. (WP-4)
-6. **`thinking: auto` turns thinking off.** This happens via `--thinking auto` or `defaultThinkingLevel: auto`. (WP-3)
+6. ~~**`thinking: auto` turns thinking off.**~~ Done (WP-3): `auto` keeps a provisional level and classifies each user turn through the judge role chain like omp.
 7. **Slash-command argument bugs.**
    - `/advisor status` toggles the advisor.
    - `/compact soft` sends "soft" as summary instructions.
@@ -60,7 +60,7 @@ Ranked by how soon a user hits the gap in a normal interactive session.
 10. **`/tree` and `/branch` are flat 14-row pickers.** omp has a tree selector (filters, labels, folding) and a rewind selector. (WP-8)
 11. **Custom markdown commands and `/skill:<name>` don't work.** This covers `.omp/.claude/.opencode commands/*.md`. RPC `get_available_commands` advertises `skill:<name>` entries that nothing executes. (WP-9)
 12. **304 of the 402 settings shown in `/settings` have no effect.** This includes `tools.approvalMode`, so the TUI never asks for approval even after the user picks "Always ask". (WP-10, WP-26)
-13. **Default-on agent guards are missing.** Todo reminders, unexpected-stop detection, the tool-call loop guard, fabricated-result abort and magic keywords (`ultrathink` …) are absent. The `out://` reply channel and `cfg://` are missing too; their writes are now refused. (WP-12, WP-3)
+13. ~~**Default-on agent guards are missing.**~~ Done (WP-12, WP-3): todo reminders + mid-run nudge, empty/unexpected-stop recovery, tool-call loop guard, stream loop guard, magic keywords, `out://`, `cfg://`, `conflict://N`. Remaining: fabricated-result abort (needs in-band tool calling), `todo.eager`, `tasks.todoClearDelay`.
 14. **Compaction is a single summary pass.** No method ladder, server-side compaction, mid-turn/async compaction, stale-read pruning or prompt-cache warming. (WP-13, WP-14)
 15. **`omc acp` starts a TUI instead of ACP mode.** Editors call `omp acp`. RPC/ACP prompts don't run slash commands, RPC message events have no `messageId`, the `ask` tool fails in RPC, and several RPC response shapes differ. (WP-15, WP-16)
 
@@ -79,7 +79,7 @@ Every package must:
 |---|---|---|---|
 | WP-1 Plan review and plan-mode parity (done; remaining: overlay mouse, extension plan-review hooks, mid-stream deferred plan-model switch) | Fullscreen plan review that renders the plan markdown with a Contents sidebar. Five actions: execute in fresh context / compact / keep context (with token count) / refine (feedback to model) / save & quit. Also: tier slider, copy, Ctrl+G edit, `/plan-review`, "Exit plan mode?" confirm with a draft, paused state, `plan.enabled`, `plan.autosave(Dir)`, `modelRoles.plan` switch/restore | `src/coding/app.c` (`app_propose_plan`, `app_set_plan_mode`), new `src/ui/planreview.c`, `src/modes/interactive.c` | T/overlays/plan-review-overlay.ts, plan-toc.ts, plan-save-overlay.ts; U/modes/interactive-mode.ts (`handlePlanModeCommand`, `showPlanReview`, `#approvePlan`, `#exitPlanMode`); U/plan-mode/* |
 | WP-2 Queue and non-blocking input ✅ (done: see §2b/§2c; remaining: live `$` output, `/compact` modes are WP-4/WP-13) | Render delivered steer/follow-up user messages; pending-messages view; dequeue (Alt+Up); Esc restores the queue to the editor; follow-up on Ctrl+Q / Ctrl+Enter. Move `!cmd`, `!!cmd`, `/compact`, `/handoff` to a worker with Esc cancel. Defer `!cmd` while streaming. `$code` / `$$code` user eval in the shared kernel. Queue `/compact` for the yield while streaming | `src/modes/interactive.c` (`on_submit`, `run_bang`, `ui_apply_event`, `key_hook`), `src/coding/app.c` (`app_user_bash`, `app_compact`, `app_handoff`), `src/ui/chat.c` | U/modes/controllers/input-controller.ts (`handleFollowUp`, `handleDequeue`, `restoreQueuedMessagesToEditor`), interactive-mode.ts (`updatePendingMessagesDisplay`), command-controller.ts (`handleBashCommand`, `handlePythonCommand`, `handleCompactCommand`), U/modes/prompt/queued-messages.ts |
-| WP-3 Model-facing correctness bugs | Port `out://`, `cfg://`, `conflict://N` (write now refuses unknown schemes; main 44b5fc3). Make `thinking: auto` stop meaning off: resolve it like omp, or to the model default until the WP-12 classifier lands. Verify with `tests/parity/request_diff.sh` / `tool_diff.sh` | `src/tools/write_bash.c`, `src/tools/read.c`, `src/tools/vurl.c`, `src/coding/app.c` (thinking setup), `src/ui/settings.c` | U/internal-urls/{router,out-protocol,cfg-protocol,conflict-protocol}.ts, U/tools/conflict-detect.ts, U/auto-thinking/* |
+| WP-3 Model-facing correctness bugs ✅ (done: out://, cfg://, conflict://N, `thinking: auto`) | Port `out://`, `cfg://`, `conflict://N` (write now refuses unknown schemes; main 44b5fc3). Make `thinking: auto` stop meaning off: resolve it like omp, or to the model default until the WP-12 classifier lands. Verify with `tests/parity/request_diff.sh` / `tool_diff.sh` | `src/tools/write_bash.c`, `src/tools/read.c`, `src/tools/vurl.c`, `src/coding/app.c` (thinking setup), `src/ui/settings.c` | U/internal-urls/{router,out-protocol,cfg-protocol,conflict-protocol}.ts, U/tools/conflict-detect.ts, U/auto-thinking/* |
 | WP-4 Slash-command correctness and shared registry | One registry (name, aliases, subcommands, hints, handler) used by TUI, RPC and ACP. Fix `/advisor` (status/dump), `/compact [soft\|remote\|snapcompact] [focus]`, `/shake [elide\|images\|thinking]`, `/handoff [focus]`, `/resume <id>`, `/effort` errors, `/delete` on in-memory sessions. Add aliases (models, rewind, q, providers, status, subagents, worktree, plugin, force:). Bare `exit`/`quit`/`q`. `/export` with omp's HTML viewer (`export/html/template.*` embedded as assets). `/dump all\|anon` + request-JSON sidecar | `src/modes/interactive.c` (`handle_command`, `COMMANDS[]`), `src/ui/slash.c`, `src/coding/app.c`, `src/session/session.c` (`session_export_html`), `assets/` | U/slash-commands/builtin-*.ts, builtin-registry.ts, helpers/*, U/session/compact-modes.ts, shake-types.ts, session-dump-format.ts, U/export/html/* |
 | WP-5 App keybinding layer | Add the 45 `app.*` actions to the key table. Load `keybindings.yml` (+ legacy .json migration, profile inherit); `/migrate` copies it. Make `key_hook` use `tui_kb()`. Generate `/hotkeys` from the live bindings. Cheap keys: Ctrl+Z suspend, F5/Alt+R retry, Alt+Shift+P plan, Ctrl+C semantics (500 ms, no abort), Ctrl+T status + persist, Ctrl+] jumps, Alt+Y kill ring, Alt+L display reset, Esc-Esc → `doubleEscapeAction`. Fix the false claims in docs/tui.md | `src/tui/keys.c`, `src/tui/editor.c`, `src/modes/interactive.c`, `src/ui/overlays.c` (`hotkeys_markdown`), `src/coding/migrate.c`, docs/tui.md | T/app-keybindings.ts, T/keybindings.ts, T/kill-ring.ts, T/hotkeys-markdown.ts, U/modes/controllers/input-controller.ts |
 | WP-7 Report panels | `/context` viewer (category breakdown, browse content); `/session` info overlay + `delete`/`pin`; `/tools` markdown panel incl. xd:// tools; `/jobs` panel + job tree + `full`/`kill`; `/todo` subcommands; `/advisor status\|dump`. Report-panel inline docking for short reports | `src/modes/interactive.c`, `src/ui/overlays.c` (`ui_show_report`), new `src/ui/context.c`, `src/tools/jobs.c`, `src/tools/todo_ask.c` | T/overlays/context-viewer*.ts, session-info-overlay.ts, jobs-panel.ts, job-tree.ts, report-panel.ts; U/modes/controllers/command-controller.ts, todo-command-controller.ts; U/slash-commands/helpers/context-report.ts |
@@ -93,7 +93,7 @@ Every package must:
 | WP-6 Editor I/O | Ctrl+G external editor (main editor + ask "Other"); Ctrl+R history search; copy line/prompt (Alt+Shift+L/C); Ctrl+V image paste + image-path paste + attachments; raw paste; large-paste chip/menu; fuzzy project-wide `@` mentions; `#` prompt actions (`#123` → pr:// / issue://) | `src/tui/editor.c`, `src/modes/interactive.c`, `src/ui/ask.c`, `src/tui/term.c`, new `src/ui/histsearch.c` | U/modes/controllers/input-controller.ts, T/overlays/history-search.ts, U/modes/prompt/{attachment-chips,prompt-action-autocomplete}.ts, T/autocomplete.ts |
 | WP-10 Tool approval system | `tools.approvalMode` tiers (always-ask, ask-and-remember, write, yolo), `tools.approval` per-tool policies, `tools.restrictedFolders`, approval dialog (Ctrl+Enter/Ctrl+Q), remembered grants, `/forget-approvals`, `--approval-mode` / `--auto-approve` / `--yolo` | `src/coding/app.c` (`hook_before_tool`), new `src/ui/approval.c`, `src/modes/acp.c`, `src/cli/cli.c` | U/tools/approval.ts, approval-cache.ts, approval-targets.ts, search-approval-targets.ts; T/overlays/approval-dialog.ts |
 | WP-11 Turn-lifecycle signals | Completion/ask/error notifications (OSC 9/777, `*.notify`); terminal title with run state + spinner (`tui.titleState`, `tui.titleSpinner`); OSC 7501 program status; idle recap (`recap.*`); sleep prevention (logind inhibitor); release check | `src/modes/interactive.c`, `src/tui/term.c` (`tui_term_set_title`), `src/coding/title.c`, `src/coding/app.c` | U/modes/controllers/event-controller.ts (`send*Notification`), T/desktop-notify.ts, U/utils/{run-status,title-generator}.ts, U/session/idle-maintenance.ts, U/session/power-assertion-backend.ts |
-| WP-12 Default-on agent guards | Todo reminders + auto-clear (`todo.reminders`, `remindersMax`, `tasks.todoClearDelay`); unexpected-stop detection; tool-call loop guard / redirect and assistant loop guard (`model.loopGuard.*`); fabricated-result abort; magic keywords (ultrathink/orchestrate/workflow/jevify + hidden notices); auto-thinking classifier. Each must keep `request_diff.sh` clean | `src/coding/app.c` (turn end), `src/agent/agent.c`, `src/modes/interactive.c` (prompt pre-processing) | U/session/{todo-tracker,unexpected-stop-classifier,tool-call-loop-redirect}.ts, U/modes/magic-keywords.ts, U/prompts/system/*-notice.md, U/auto-thinking/* |
+| WP-12 Default-on agent guards 🟡 (done: todo reminders + mid-run nudge, unexpected/empty-stop recovery, tool-call + stream loop guards, magic keywords, auto-thinking classifier; open: fabricated-result abort (in-band tool calling), `todo.eager`, `tasks.todoClearDelay` auto-clear, todo-error reminder) | Todo reminders + auto-clear (`todo.reminders`, `remindersMax`, `tasks.todoClearDelay`); unexpected-stop detection; tool-call loop guard / redirect and assistant loop guard (`model.loopGuard.*`); fabricated-result abort; magic keywords (ultrathink/orchestrate/workflow/jevify + hidden notices); auto-thinking classifier. Each must keep `request_diff.sh` clean | `src/coding/app.c` (turn end), `src/agent/agent.c`, `src/modes/interactive.c` (prompt pre-processing) | U/session/{todo-tracker,unexpected-stop-classifier,tool-call-loop-redirect}.ts, U/modes/magic-keywords.ts, U/prompts/system/*-notice.md, U/auto-thinking/* |
 | WP-13 Compaction ladder | `compaction.methodOrder` (remote → snapcompact → handoff → shake → soft); shake/handoff as automatic methods (shake regions, tail protection, artifact offload, persisted); server-side compaction (OpenAI Responses, Anthropic, Bedrock); mid-turn + async compaction; pruning (`supersedeReads`, `dropUseless`); `handoffSaveToDisk`; per-model thresholds. snapcompact can be a follow-up package | `src/coding/app.c` (`app_compact`, auto-compaction, `app_shake`, `app_handoff`), `src/session/session.c`, `src/ai/provider_anthropic.c`, `src/ai/provider_openai_responses.c`, `src/ai/provider_bedrock.c` | U/session/{compaction-methods,session-maintenance,compact-modes}.ts, A/compaction/{compaction,shake,pruning,openai,anthropic,bedrock}.ts, packages/snapcompact |
 | WP-14 Provider knobs and cache warming | Prompt cache warmer (`providers.cacheWarming`); service tiers `/fast`, `/slow`, `tier.*`, `--service-tier`; `/extended-context` + `extendedContext`; stream first-event/idle timeouts; `providers.maxInFlightRequests`; RPC `set_fast_mode` / `set_slow_mode` / `set_cache_warming` | `src/coding/app.c`, `src/ai/provider_*.c`, `src/ai/ai_common.c`, `src/modes/rpc.c` | U/session/cache-warmer.ts, anthropic-slow-mode.ts, model-controls.ts; U/slash-commands/builtin-modes.ts (fast/slow/extended-context) |
 | WP-15 RPC wire parity | `messageId` + `partial` + start/done/error on message events, delta filter; session events (compaction, retry, model/thinking changed, goal_updated, queue_update, available_commands_update, …); response shapes (set_model, new/switch/open/branch/fork, get_entries leafId/since, get_messages_page cursor, get_session_stats, compact, handoff, btw); full `get_state`; `extension_ui_request`/`_response` so `ask` works; login/logout; async `bash` so `abort_bash` works; protocol v2 + `rpc_chunk`; subagent frames; mark status.md 🟡 | `src/modes/rpc.c`, `src/agent/agent.c` (`agent_event_to_json`), `src/coding/app.c` (structured events beside `notice`), `src/modes/print.c`, `src/tools/todo_ask.c` | U/modes/rpc/{rpc-types,rpc-mode,rpc-session-events,rpc-messages,rpc-compat,rpc-frame}.ts, U/session/agent-session-events.ts |
@@ -310,7 +310,7 @@ both are false. Rows marked (tmux) were probed in tmux against the mock model.
 | Bare `exit`/`quit`/`q` on an empty session | — | ❌ | sent to the model |
 | Large paste | `[Paste #n …]` marker | 🟡 | no attachment chip / attach-as-file menu |
 | Image paste, image-path paste | — | ❌ | |
-| Todo reminders, todo auto-clear, live todo panel | — | ❌ | |
+| Todo reminders, todo auto-clear, live todo panel | — | 🟡 | stop-time reminders (TodoReminderComponent notice card) ✅; auto-clear and live panel ❌ |
 | Auto-compaction loader, retry countdown, TTSR notice | string-matched notices → working row | ✅ | |
 | Retry fallback events | — | ❌ | |
 | Smooth streaming / tool-args reveal | `chat.c`, `ui_apply_partial` | ✅ | |
@@ -338,9 +338,9 @@ user who never opens `/settings` (default-on behaviour omc lacks) versus switche
 | Setting (default) | What omp does by default | omc |
 |---|---|---|
 | `tools.approvalMode` (yolo) + `tools.approval` ({}) + `tools.restrictedFolders` | Approval tiers (always-ask, ask-and-remember, write, yolo), per-tool allow/prompt/deny, approval dialog | ❌ only ACP reads `approvalMode`; TUI never asks. Users who set "Always ask" get yolo silently |
-| `magicKeywords.*` (on) | "ultrathink" / "orchestrate" / "workflow" / "jevify" in a prompt raise thinking and attach hidden notices (`modes/magic-keywords.ts`) | ❌ |
-| `model.loopGuard.*`, `model.toolCallLoopGuard.enabled` (on) | detects repeated assistant output / identical tool-call loops and steers | ❌ |
-| `todo.reminders` (on), `todo.remindersMax` (3), `todo.eager` | reminds the model of unfinished todos at stop; eager todo creation | ❌ |
+| `magicKeywords.*` (on) | "ultrathink" / "orchestrate" / "workflow" / "jevify" in a prompt raise thinking and attach hidden notices (`modes/magic-keywords.ts`) | 🟡 notices ✅ (`src/coding/keywords.c`); `workflowz` notice withheld (teaches unimplemented eval `agent()`/`workpool()`); editor gradient ❌ |
+| `model.loopGuard.*`, `model.toolCallLoopGuard.enabled` (on) | detects repeated assistant output / identical tool-call loops and steers | ✅ (`guards.c`, `thinkloop.c`) |
+| `todo.reminders` (on), `todo.remindersMax` (3), `todo.eager` | reminds the model of unfinished todos at stop; eager todo creation | 🟡 reminders ✅; `todo.eager` ❌ |
 | `completion.notify` / `ask.notify` (on), `error.notify` | desktop/terminal notification when a turn ends or ask waits | ❌ |
 | `recap.enabled` (on), `recap.idleSeconds` (240) | idle recap message after inactivity | ❌ |
 | `tui.titleState` (on), `tui.titleSpinner`, `terminal.programStatus` (on) | terminal title shows run state + spinner; OSC 7501 program status | ❌ |
@@ -351,7 +351,7 @@ user who never opens `/settings` (default-on behaviour omc lacks) versus switche
 | `edit.recoverInlineEdits`, `edit.blockAutoGenerated` (on) | recovers edit payloads pasted inline; refuses to edit generated files | ❌ |
 | `lsp.lazy`, `lsp.shared` (on) | lazy server start, shared servers across sessions | 🟡 servers start on first use like the default; not switchable; no cross-session sharing (`lsp.diagnosticsDeduplicate` is now read) |
 | `shellMinimizer.enabled` (on) | compresses noisy shell output (`[raw output: artifact://N]`) | ❌ (also in status.md) |
-| `tools.abortOnFabricatedResult` (on) | aborts a turn whose text fabricates a tool result | ❌ |
+| `tools.abortOnFabricatedResult` (on) | aborts a turn whose text fabricates a tool result | ❌ only applies to in-band (owned-dialect, `tools.format`) tool calling, which omc does not implement; native tool calling never fabricates in-band results |
 | `async.widgets` (on) | live job widgets above the editor | ❌ |
 | `mcp.enableProjectConfig` (on), `mcp.renderMarkdownResults` (on) | project `.mcp.json` opt-out; markdown MCP results | 🟡 project config always loaded; not switchable |
 | `skills.enableSkillCommands` (on), `commands.enableClaudeProject`/`enableOpencodeProject` (on) | `/skill:<name>` and file-based custom commands | ❌ (see §1) |
@@ -359,7 +359,7 @@ user who never opens `/settings` (default-on behaviour omc lacks) versus switche
 | `plan.enabled` (on), `goal.statusInFooter` (on), `title.refreshOnReplan` (on) | plan mode can be disabled; goal in footer; retitle on replan | ❌ |
 | `task.speculativeLaunch`, `task.completionProbe`, `task.softRequestBudget` (200) + notice | subagent launch/probing/budget behaviour | ❌ |
 | `composer.recallClearedDrafts` (on), `input.bareExitOnEmptySession` (on), `emojiAutocomplete` (on), `doubleEscapeAction` (rewind), `autocompleteMaxVisible` (10), `paste.largeMenuThreshold` (100), `spelling.autocomplete` (auto) | editor conveniences (see §2) | ❌ |
-| `features.unexpectedStopDetection` (mechanical) | detects/continues unexpected model stops | ❌ |
+| `features.unexpectedStopDetection` (mechanical) | detects/continues unexpected model stops | ✅ (mechanical + smart; plus the empty-stop retry) |
 | `power.sleepPrevention` (idle) | prevents system sleep while running | ❌ (Linux: `systemd-inhibit`; macOS `caffeinate`) |
 | `startup.checkUpdate` (on), `startup.changelogMode` (summary) | update check + changelog on start | ❌ |
 | `providers.cacheWarming` (idle) | keeps prompt cache warm while idle | ❌ |
@@ -430,9 +430,7 @@ ast_edit debug eval glob grep find lsp checkpoint rewind task wait todo web_sear
 (+ github on main).
 
 **Bug found by probing:**
-- **`thinking: auto` turns thinking off.** `--thinking auto`, or `defaultThinkingLevel: auto`, fails
-  `effort_parse` and leaves `eff = EFFORT_OFF` (`src/coding/app.c`, app setup). omp runs its
-  auto-thinking classifier instead.
+- ~~**`thinking: auto` turns thinking off.**~~ Fixed (WP-3): `auto` resolves like omp (`src/coding/autothink.c`).
 
 ### 4a. Tools
 
@@ -446,7 +444,7 @@ ast_edit debug eval glob grep find lsp checkpoint rewind task wait todo web_sear
 | glob, grep | glob.ts, grep.ts | `grep_glob.c` | ✅ | result text ported on main (context lines, grouped tree, pages) |
 | find | jfind/* | `find.c` | ✅ | jfind cascade with judge waves ported on main |
 | ast_grep, ast_edit | ast-grep.ts, ast-edit.ts | `astgrep.c` | 🟡 | token-tree matcher, not tree-sitter |
-| ask, todo, wait, goal | ask.ts, todo.ts, wait.ts, goals/ | `todo_ask.c`, `write_bash.c`, `goal.c` | ✅ | todo reminders missing (§7) |
+| ask, todo, wait, goal | ask.ts, todo.ts, wait.ts, goals/ | `todo_ask.c`, `write_bash.c`, `goal.c` | ✅ | todo reminders ✅ (`guards.c`); auto-clear ❌ |
 | task | task/* | `task.c`, `agents.c` | 🟡 | no isolation/worktrees, `outputSchema`, `perCallModel`, `speculativeLaunch`, `completionProbe`, soft request budget |
 | web_search | web/search/* (~30 providers) | `web.c` | 🟡 | 5 providers (parallel, brave, tavily, exa, duckduckgo); omp also searches through the user's logged-in providers (anthropic, openai, gemini, codex, xai, perplexity, kimi, zai, searxng …) |
 | lsp | lsp/* | `src/lsp/lsp.c` | ✅ | ported on main (byte-identical text, tests/parity/lsp_parity.sh) |
@@ -490,9 +488,9 @@ ast_edit debug eval glob grep find lsp checkpoint rewind task wait todo web_sear
 | memory:// | `memory_url_resolve` | 🟡 | local backend only |
 | pr://, issue:// | `github.c` via gh (main) | ✅ | |
 | ssh:// | `ssh.c` | 🟡 | grep over ssh:// missing |
-| out:// | — | ❌ | `out.enabled` default on; write refuses it as an unknown URI-like target |
-| cfg:// | — | ❌ | write refuses it |
-| conflict:// | `:conflicts` selector only | 🟡 | `conflict://N` read/write missing |
+| out:// | `out_url.c` | ✅ | write-only reply channel, bash redirects, `out.enabled` (unset: interactive TUI only) |
+| cfg:// | `cfg_url.c` | 🟡 | tree/namespace/setting views over omp's registry; approved writes in the TUI; no env provenance layer |
+| conflict:// | `conflict.c` | ✅ | blocks registered by `read`, `:conflicts` index, `conflict://N[/side]` read/write, `conflict://*` |
 | mr:// | — | ❌ | GitLab MRs via `glab` |
 | attachment:// | — | ❌ | |
 | security://, vault:// | — | ❌ | off by default |
@@ -581,7 +579,7 @@ floating list; Esc-Esc and Ctrl+R do nothing although `/hotkeys` lists Ctrl+R.
 | todo-command-controller | todo-command-controller.ts | read-only notice | 🟡 | all subcommands missing |
 | live-command-controller | live-command-controller.ts | — | ⛔ | realtime voice audio I/O |
 | cleanse / omfg / tan controllers | *.ts | — | ❌ | |
-| tool-call-block | tool-call-block.ts | `toolcard_start` | 🟡 | `out://` reply-write block missing (no `out://` scheme in omc) |
+| tool-call-block | tool-call-block.ts | `toolcard_start` | ✅ | `out://` reply writes draw as assistant prose (tc_misc.c) |
 
 ## 6. RPC, ACP and CLI
 
@@ -734,9 +732,9 @@ the prompt.
 | Turn-end / ask / error notifications | event-controller.ts, tui/desktop-notify.ts | — | ❌ | default on |
 | Terminal title + OSC 7501 program status | utils/run-status.ts, title-generator.ts | `tui_term_set_title` never called | ❌ | |
 | Update check | main.ts | — | ❌ | npm self-update ⛔, but a release check is portable |
-| Auto-thinking classifier | auto-thinking/classifier.ts | — | ❌ | plus the `auto` → off bug above |
-| Todo reminders, unexpected-stop detection, tool-call loop redirect, fabricated-result abort, loop guard | session/todo-tracker.ts, unexpected-stop-classifier.ts, tool-call-loop-redirect.ts | — | ❌ | all default on |
-| Magic keywords (ultrathink/orchestrate/workflow/jevify) | modes/magic-keywords.ts | — | ❌ | default on |
+| Auto-thinking classifier | auto-thinking/classifier.ts | `autothink.c` | ✅ | on-device bucket question ⛔ |
+| Todo reminders, unexpected-stop detection, tool-call loop redirect, fabricated-result abort, loop guard | session/todo-tracker.ts, unexpected-stop-classifier.ts, tool-call-loop-redirect.ts, stream-guards.ts, ai/utils/thinking-loop.ts | `guards.c`, `thinkloop.c` | 🟡 | fabricated-result abort needs in-band tool calling (not implemented) |
+| Magic keywords (ultrathink/orchestrate/workflow/jevify) | modes/magic-keywords.ts | `keywords.c` | 🟡 | `workflowz` notice withheld (eval agent()/workpool() missing) |
 | Sleep prevention | power-assertion-backend.ts | — | ❌ | Linux: logind inhibitor |
 | Session cost caps (`--max-cost`, warn) | session/settings.ts | — | ❌ | |
 | Prewalk / auto-prewalk, speculation | session/prewalk.ts, speculation/ | — | ❌ | off by default |

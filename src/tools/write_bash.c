@@ -4,6 +4,7 @@
 #include "xdev.h"
 #include "services.h"
 #include "vurl.h"
+#include "iurl.h"
 #include "coding/agents.h"
 #include "prompt/template.h"
 
@@ -161,8 +162,9 @@ static bool one_edit_away(const char *typo, const char *word) {
 
 /* assertWriteTargetAddressable: URI-like targets no router scheme handles */
 static char *write_target_error(const char *target) {
-    static const char *const KNOWN[] = {"local", "xd", "ssh", "proc", "agent", "history", "artifact", "memory",
-                                        "skill", "rule", "omp", "omc", "mcp", "pr", "issue", "conflict", "jobs", "file"};
+    static const char *const KNOWN[] = {"local", "xd",  "ssh",   "proc",     "agent", "history", "artifact",
+                                        "memory", "skill", "rule", "omp", "omc", "mcp", "pr",
+                                        "issue", "conflict", "jobs", "file", "out", "cfg"};
     char *t = str_trim(target);
     char *msg = NULL;
     size_t sl = 0;
@@ -395,6 +397,7 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         return 0;
     }
     if (vurl_is(path)) return vurl_write(env, path, content, out);
+    if (iurl_write(env, path, content, out)) return 0;
     if (!content) content = "";
     if (!strcmp(path, "xd://resolve") || !strcmp(path, "xd://reject")) {
         bool err = false;
@@ -763,6 +766,13 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         goto done;
     }
 
+    /* `cmd > out://`: replies reach the user only from a foreground run */
+    strvec_t reply_files = {0};
+    char *redirected = out_redirect_rewrite(env, full, &reply_files);
+    if (redirected) {
+        free(full);
+        full = redirected;
+    }
     /* omp allocates the call's artifact up front (ids advance per call); the sink writes it only on spill */
     char *art_id = NULL;
     char *art_path = artifacts_alloc(env->artifacts, "bash", &art_id);
@@ -810,6 +820,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
                 free(jid);
                 free(fid);
                 out_sink_free(bs.sink);
+                out_redirect_discard(&reply_files);
                 goto done;
             }
             jobs_fg_wait(env->jobs, fid, 60000, NULL); /* finished right at the threshold */
@@ -819,6 +830,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             tool_result_error(out, "Failed to run command");
             free(fid);
             out_sink_free(bs.sink);
+            out_redirect_discard(&reply_files);
             goto done;
         }
         if (notice) strvec_push_own(&notices, notice);
@@ -841,6 +853,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     }
     int64_t dur = mono_ms() - t0;
     bash_finish(env, out, &r, &bs, tsec, req_tsec, timeout_ms, cwd, dur, &notices);
+    out_redirect_collect(&reply_files, out);
     out_sink_free(bs.sink);
     proc_result_free(&r);
 done:

@@ -377,3 +377,23 @@ int settings_set_project_entry(const char *parent, const char *key, json_t *val)
     pthread_mutex_unlock(&g_mu);
     return rc;
 }
+
+/* omp Settings.getProvenance (no env layer): the highest layer holding a non-null value at `path` */
+const char *settings_provenance(const char *path) {
+    ensure();
+    pthread_mutex_lock(&g_mu);
+    const char *r = "default";
+    const json_t *layers[] = {g_runtime, g_overlay, g_project, g_global};
+    static const char *const names[] = {"runtime", "overlay", "project", "global"};
+    for (size_t i = 0; i < ARRAY_LEN(layers); i++) {
+        const json_t *v = layers[i] ? json_path(layers[i], path) : NULL;
+        if (v && !json_is_null(v)) {
+            r = names[i];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+
+bool settings_configured(const char *path) { return strcmp(settings_provenance(path), "default") != 0; }

@@ -112,6 +112,13 @@ struct app {
     volatile bool ttsr_interrupting;
     app_notice_fn notice;
     void *notice_ud;
+    /* `auto` thinking (autothink.c): per-turn classification; `thinking` holds the provisional/resolved effort */
+    bool auto_thinking;
+    int auto_resolved;      /* last classified effort, -1 before the first turn */
+    int abort_gen;          /* bumped by app_abort: a prompt superseded during auto-thinking setup is dropped */
+    struct guards *guards;  /* loop guard, todo reminders, stop recovery (guards.c) */
+    struct thinkloop *thinkloop; /* stream loop guard of the current assistant stream (thinkloop.c) */
+    int gemini_interrupt;   /* planning headers counted when the Gemini header guard interrupted the stream */
     pthread_mutex_t mu;
 };
 
@@ -136,6 +143,10 @@ void app_steer_attachments(app_t *a, const char *text, json_t *attachments);
 int app_prompt_hidden(app_t *a, const char *text, const char *custom_type);
 int app_set_model(app_t *a, const char *pattern, char **err);
 void app_set_thinking(app_t *a, ai_effort_t e);
+/* `auto`: classify each user turn (provisional level until the first); persists configured "auto" */
+void app_set_thinking_auto(app_t *a);
+/* parse "auto" or an effort name and apply it; false for an unknown level */
+bool app_set_thinking_level(app_t *a, const char *level);
 /* ---------- plan mode (planmode.c) ---------- */
 /* enter/leave read-only plan mode (mode_change entries, system prompt rebuild) */
 void app_set_plan_mode(app_t *a, bool on);

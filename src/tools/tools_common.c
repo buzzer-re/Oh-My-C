@@ -7,6 +7,7 @@
 #include "core/fs.h"
 #include "prompt/template.h"
 #include "shell.h"
+#include "iurl.h"
 
 /* ---------- env ---------- */
 
@@ -30,6 +31,7 @@ void tool_env_free(tool_env_t *e) {
     free(e->local_dir);
     shell_free(e->shell);
     jobs_free(e->jobs);
+    conflict_history_free(e->conflicts);
     pthread_mutex_destroy(&e->mu);
     free(e);
 }

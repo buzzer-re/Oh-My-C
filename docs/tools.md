@@ -98,6 +98,9 @@ from omp's `prompts/internal-urls/*.md`, listing only what the session can serve
 | `mcp://<resource-uri>` | `read.c`, `mcp.c` | MCP resource read (the server owning the URI answers) | `mcp-protocol.ts` |
 | `pr://[owner/repo/]N[/diff[/i\|all]]`, `issue://[owner/repo/]N` | `tools/github.c` | GitHub REST; repo defaults to the cwd's github.com remote; token from `GITHUB_TOKEN`, `GH_TOKEN` or `gh` | `issue-pr-protocol.ts` |
 | `ssh://[user@]host[:port]/path` | `tools/ssh.c` | remote UTF-8 text (≤1 MiB) and directory listings through OpenSSH (ControlMaster, `BatchMode=yes`, hosts from `ssh.json`); byte-exact staged writes; read/write/edit | `ssh-protocol.ts` |
+| `out://` | `out_url.c` (`iurl.h`) | write-only mid-turn reply to the user (`Shown to the user.`; ≤64 KiB; `cmd > out://` redirects in bash become `details.replies`); on where `out.enabled` says, unset = top-level interactive TUI only; never for subagents | `out-protocol.ts` |
+| `cfg://[namespace\|setting][/save]` | `cfg_url.c` | settings view over omp's registry (`assets/config/settings-registry.json`): tree, namespace, setting detail with source; writes need the top-level TUI and the user's approval (runtime override, `/save` → config.yml) | `cfg-protocol.ts` |
+| `conflict://N[/ours\|theirs\|base]`, `conflict://*` | `conflict.c` | git conflict blocks registered by `read` (window footer, `<path>:conflicts` index); `write` splices the block (`@ours`/`@theirs`/`@base`/`@both`) | `conflict-protocol.ts` |
 | `omc://[doc]` | `read.c` | the embedded README and `docs/*.md` (omp's `omp://`) | `omp-protocol.ts` |
 | `xd://…` | `xdev.c` | tool devices (above) | `xd-protocol.ts` |
 | `http(s)://…` | `tools/web.c` | page as reader markdown, `:raw` for the original | `tools/read.ts` URL path |

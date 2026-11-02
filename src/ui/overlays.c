@@ -58,6 +58,7 @@ static const struct {
     const char *value, *label, *desc;
 } THINKING_META[] = {
     {"off", "off", "No reasoning"},
+    {"auto", "auto", "Auto-detect per prompt"},
     {"minimal", "min", "Very brief reasoning (~1k tokens)"},
     {"low", "low", "Light reasoning (~2k tokens)"},
     {"medium", "medium", "Moderate reasoning (~8k tokens)"},
@@ -68,10 +69,10 @@ static const struct {
 
 static void thinking_pick(tui_select_list_t *l, const tui_select_item_t *it, void *ud) {
     ui_t *u = ud;
-    ai_effort_t e;
-    bool ok = effort_parse(it->value, &e) == 0;
+    char *level = xstrdup(it->value);
     ui_close_selector(u); /* frees `it` */
-    if (ok) app_set_thinking(u->app, e);
+    app_set_thinking_level(u->app, level);
+    free(level);
     tui_request_render(u->tui);
 }
 
@@ -87,17 +88,20 @@ void ui_overlay_thinking(ui_t *u) {
         return;
     }
     ui_panel_t *p = ui_panel_new("Thinking Level");
-    size_t n = 0;
-    for (int i = EFFORT_OFF; i <= EFFORT_MAX; i++)
-        if (i == EFFORT_OFF || model_supports_effort(a->model, (ai_effort_t)i)) n++;
-    tui_select_list_t *l = tui_select_list_new((int)n);
-    for (int i = EFFORT_OFF; i <= EFFORT_MAX; i++) {
-        if (i != EFFORT_OFF && !model_supports_effort(a->model, (ai_effort_t)i)) continue;
-        const char *name = effort_name((ai_effort_t)i);
+    /* getAvailableEffortSelectors: off, auto (never for an unverified ladder), then the supported efforts */
+    bool auto_ok = !json_get_bool(a->model->thinking, "unverified", false);
+    strvec_t levels = {0};
+    strvec_push(&levels, "off");
+    if (auto_ok) strvec_push(&levels, "auto");
+    for (int i = EFFORT_MINIMAL; i <= EFFORT_MAX; i++)
+        if (model_supports_effort(a->model, (ai_effort_t)i)) strvec_push(&levels, effort_name((ai_effort_t)i));
+    tui_select_list_t *l = tui_select_list_new((int)levels.n);
+    for (size_t i = 0; i < levels.n; i++)
         for (size_t k = 0; k < ARRAY_LEN(THINKING_META); k++)
-            if (!strcmp(THINKING_META[k].value, name)) tui_select_list_add(l, name, THINKING_META[k].label, THINKING_META[k].desc);
-    }
-    tui_select_list_select_value(l, effort_name(a->thinking));
+            if (!strcmp(THINKING_META[k].value, levels.v[i]))
+                tui_select_list_add(l, levels.v[i], THINKING_META[k].label, THINKING_META[k].desc);
+    strvec_free(&levels);
+    tui_select_list_select_value(l, a->auto_thinking ? "auto" : effort_name(a->thinking));
     l->on_select = thinking_pick;
     l->on_cancel = selector_cancel;
     l->ud = u;

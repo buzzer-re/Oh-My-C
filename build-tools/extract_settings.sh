@@ -3,6 +3,8 @@
 # conditions) into assets/tui/settings-ui.json.
 #
 # Usage: build-tools/extract_settings.sh <omp checkout matching `omp --version`> > assets/tui/settings-ui.json
+#        build-tools/extract_settings.sh <omp checkout> --registry > assets/config/settings-registry.json
+#        (--registry: every registered setting with type/default/values/env/credential, for cfg://)
 #
 # Runs the upstream TypeScript registry with the bun runtime embedded in the installed omp binary
 # (BUN_BE_BUN=1): workspace packages are symlinked into <checkout>/node_modules, npm dependencies are
@@ -12,6 +14,8 @@
 set -eu
 UP=$(cd "$1" && pwd)
 HERE=$(cd "$(dirname "$0")" && pwd)/settings-dump
+SCRIPT=dump.ts
+[ "${2:-}" = --registry ] && SCRIPT=registry.ts
 NM=$UP/node_modules
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -27,7 +31,7 @@ done
 for _ in $(seq 100); do
     rc=0
     env -i PATH="$PATH" HOME="$TMP/home" PI_CODING_AGENT_DIR="$TMP/agent" UPSTREAM_PACKAGES="$UP/packages" BUN_BE_BUN=1 \
-        omp "$HERE/dump.ts" > "$TMP/out.json" 2> "$TMP/err.txt" || rc=$?
+        omp "$HERE/$SCRIPT" > "$TMP/out.json" 2> "$TMP/err.txt" || rc=$?
     [ $rc = 0 ] && { cat "$TMP/out.json"; exit 0; }
     exp=$(grep -o "export '[^']*' not found in '[^']*'" "$TMP/err.txt" | head -1 || true)
     if [ -n "$exp" ]; then
