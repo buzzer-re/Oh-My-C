@@ -118,6 +118,12 @@ updates). Timers (`tui_add_timer`) drive spinners, smooth streaming reveal and l
   `app.session.observe`, `app.tree.*`, `app.links.hint` and the speech actions; see
   [gaps.md](gaps.md) §2b.
 - Non-tty file descriptors are supported (tests): probes are skipped and the size defaults to 80×24.
+- `notify.c`: terminal identity (omp `detectTerminalId`, including the tmux client query) and desktop
+  notifications in omp's order: Herdr / cmux CLIs, tmux DCS passthrough + BEL, Zellij, else the terminal's
+  protocol (OSC 9, OSC 99 single line, BEL), plus the `notify-send` / `gdbus` toast for BEL terminals in a
+  Linux desktop session. Writes are flushed at once (omp `writeTerminalSequence`).
+- A hang-up (SIGHUP, or EOF / EIO / POLLNVAL on the input fd) stops the loop; a tool thread still waiting on
+  the ask dialog is answered as cancelled so the exit never blocks on it.
 
 ### Editor and composer (`editor.c`, `composer.c`)
 
@@ -179,6 +185,7 @@ shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, 
 | `ask.c` | the `ask` tool's dialog in the composer's place | `overlays/ask-dialog.ts`, `hook-editor.ts` |
 | `overlays.c` | selector host, thinking selector, `/hotkeys` report page | `overlays/{thinking-selector,report-panel}.ts`, `hotkeys-markdown.ts` |
 | `planreview.c` | fullscreen Plan Review (sections, Contents sidebar, delete/undo, annotations, options, model-tier slider) and the "Save and quit" path prompt | `overlays/{plan-review-overlay,plan-toc,plan-save-overlay}.ts`, `chrome/overlay-box.ts` split frame |
+| `signals.c`, `recap.c` | terminal title with run state and spinner (CSI 22/23;2t title stack), OSC 7501 program status, completion / error / ask notifications, Warp OSC 777 events, the idle recap row | `utils/title-generator.ts`, `utils/run-status.ts`, `controllers/event-controller.ts`, `modes/warp-events.ts`, `session/idle-maintenance.ts`, `chat/recap-notice.ts` |
 | `appearance.c`, `widgets.c`, `slash.c` | theme/glyph/color-blind state, box chrome and key hints, slash-command metadata | `theme/theme.ts`, `chrome/overlay-box.ts`, `slash-commands/builtin-*.ts` |
 
 Tool card renderers in `src/ui/tools/` are pure functions from a `tc_call_t` snapshot (args, result
