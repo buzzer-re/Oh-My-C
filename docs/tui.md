@@ -106,14 +106,14 @@ updates). Timers (`tui_add_timer`) drive spinners, smooth streaming reveal and l
   profile over the default profile's bindings (read only); omc has no profiles yet, so nothing passes
   an inherited dir.
 - `key_hook` (`modes/interactive.c`) dispatches every app action through `tui_kb()`: first the global
-  listeners (`app.thinking.toggle`, `app.history.search`, `app.editor.external`, `app.display.reset`,
-  `app.tools.expand`), then, while the composer has focus, `CustomEditor.handleInput`'s order (paste image,
+  listeners (`app.thinking.toggle`, `app.history.search`, `app.editor.external`, `app.local.open` (the `/local`
+  picker), `app.display.reset`, `app.tools.expand`), then, while the composer has focus, `CustomEditor.handleInput`'s order (paste image,
   raw paste, suspend, model select / role cycle, thinking cycle, interrupt, clear, exit, dequeue, copy
   prompt, plan, session actions, follow-up, copy line, retry). `/hotkeys` (`ui_hotkeys_markdown`) is built
   from the live table like omp's `buildHotkeysMarkdown`: unbound actions read `Disabled`, and exit keys
   split into a forward-delete row and an exit row.
 - Not handled yet although bound (as in omp they still appear in `/hotkeys`): `app.model.selectTemporary`,
-  `app.tools.toggleVisibility`, `app.local.open`, `app.agents.hub`,
+  `app.tools.toggleVisibility`, `app.agents.hub`,
   `app.session.observe`, `app.tree.*`, `app.links.hint` and the speech actions; see
   [gaps.md](gaps.md) §2b. `app.approval.approve` is handled by the approval dialog (`ui/approval.c`).
 - Non-tty file descriptors are supported (tests): probes are skipped and the size defaults to 80×24.
@@ -203,6 +203,7 @@ shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, 
 | `overlays.c` | selector host, thinking selector, `/hotkeys` markdown | `overlays/thinking-selector.ts`, `hotkeys-markdown.ts` |
 | `report.c` | command reports: docked in the report slot (between the `/btw` panel and the banner) when the box fits the rows above the chrome below it (measured from the last frame, omp's `commandReportRows`), else a focused full-screen page on the alternate screen; Esc dismisses the docked one; transcript resets drop both. Also the full-screen sheet host for `/context` | `overlays/report-panel.ts`, `controllers/command-controller.ts` (`showCommandReport`) |
 | `context.c` | `/context` viewer: Overview (summary, occupancy map, legend) → category previews → entry page | `overlays/context-viewer*.ts`, `chrome/context-*.ts`, `session/context-view.ts` |
+| `move.c` | `/move` overlay: `Path:` input over a live directory list (children of the cwd sorted with an approximation of localeCompare, or a case-insensitive filter of the typed prefix's directory in readdir order, 15 shown), Tab fills the highlighted path, Enter confirms it (else the typed path), Esc cancels; shown bottom-anchored over the full screen | `overlays/move-overlay.ts`, `modes/move-directory-source.ts` |
 | `panels.c`, `todocmd.c` | `/session` info overlay (bottom-anchored over the full screen) + `delete`/`pin`, `/tools`, `/jobs [full\|kill]`, `/todo` verbs | `overlays/session-info-overlay.ts`, `job-tree.ts`, `prompt/tools-markdown.ts`, `controllers/todo-command-controller.ts` |
 | `tree.c` | `/tree` session tree selector: TreeView projection (branch-point connectors, compacted linear chains, shared gutter offset), filters, fuzzy search, labels, branch jumps; filtering is lazy like TreeView (applied on the next render/navigation) | `overlays/tree-selector.ts`, `components/tree-view.ts` |
 | `rewind.c` | fullscreen rewind page (alternate screen): the branch replayed through `ui_chat_replay_into` into its own container, rows exactly as each view draws them (tool cards keep the Box padding the live transcript strips), dotted outline, sibling-branch strip with a 160 ms eased camera slide, word filter | `overlays/rewind-selector.ts`, `chat/transcript-outline.ts`, `chat/transcript-browser.ts` |

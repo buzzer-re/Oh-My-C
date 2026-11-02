@@ -67,7 +67,7 @@ builtin-*.ts metadata filtered to what omc implements): `/name args` or `/name:a
 arguments, and bare `exit`/`quit`/`q` quit an empty session (`input.bareExitOnEmptySession`;
 `input.bareSlashCommands` extends this to every command with an Enter-twice confirm). RPC `prompt`
 and ACP `session/prompt` run the builtins that have a text-mode handler (model, effort, advisor,
-compact, shake, handoff, retry, memory, rename, dirs): RPC answers `{"agentInvoked":false}` and emits
+compact, shake, handoff, retry, memory, rename, fresh, pin, move, wt, add-dir, remove-dir, dirs): RPC answers `{"agentInvoked":false}` and emits
 `command_output` frames, ACP streams the output as `agent_message_chunk` and ends the turn;
 `get_available_commands` and ACP's `available_commands_update` (sent after session/new and
 session/load) list those builtins, then (first name wins, builtin aliases reserved) `skill:<name>` for every
@@ -100,6 +100,20 @@ invocation first (RPC/ACP), builtins, then MCP prompt commands, file commands an
 (`-p`) expands MCP/file/template commands but, like omp, does not run skills. `!cmd` / `!!cmd` run shell
 commands as user bash (`app_user_bash`), recorded as `bashExecution` messages (with `!!` they are kept out of
 the model's context).
+
+Workspace and session lifecycle (WP-21): the session's roots are its cwd plus the header's
+`additionalDirectories` (`--add-dir`, `workspace.additionalDirectories`, `/add-dir`, `/remove-dir`; listed by
+`/dirs`, rendered in the system prompt's `<workspace-roots>` with each root's context files). `/move [dir]` and
+`/wt [branch]` relocate the session (`app_move`: session file, artifacts and `local://` root to the new cwd's
+session bucket, then `chdir` and a re-scope of project settings, discovery, file commands and the system
+prompt; a failure moves the session back). In the TUI `/move` without an argument opens the directory overlay
+and offers to create a missing directory; `/wt` creates the worktree on the next tick so the `Creating worktree
+on …` row paints, and the worktrees a launch created are offered for removal on exit per `worktree.onExit`
+(planned in the TUI, removed after the terminal is handed back, messages on stderr). `worktree.onStart` runs on
+fresh launches only. `/restart` closes the TUI like `/exit` and `cli.c` execs `/proc/self/exe` with omp's
+restartArgv (one-shot session selectors and positionals dropped, `--resume <session file>` appended when the
+session is on disk). `/local [name]` and Alt+G (`app.local.open`) open a `local://` file in $VISUAL/$EDITOR,
+with a picker when no name is given.
 
 ## Print and JSON (`modes/print.c`)
 

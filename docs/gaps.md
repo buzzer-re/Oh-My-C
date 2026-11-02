@@ -49,8 +49,8 @@ Ranked by how soon a user hits the gap in a normal interactive session.
 7. ~~**Slash-command argument bugs.**~~ Done (WP-4): shared registry, omp's argument parsing for `/advisor` `/compact` `/shake` `/handoff` `/resume` `/effort` `/delete` `/clear`, aliases `/models` `/rewind` `/q`, bare `exit`/`quit`/`q`. Aliases of commands omc lacks (`/providers`, `/status`, `/subagents`, `/worktree`, `/plugin`, `/force:`) arrive with those commands.
 8. **Some bound app keys have no handler yet.** The keybinding layer is done (WP-5: all `app.*` actions,
    `keybindings.yml` overrides, `/hotkeys` from the live table), but these keys still do nothing: Alt+P
-   (temporary model), Ctrl+Shift+O, Alt+G. Like omp's, `/hotkeys` lists them. Ctrl+G, Ctrl+R and Ctrl+Shift+V
-   are done (WP-6). (WP-19, WP-21, WP-29)
+   (temporary model), Ctrl+Shift+O. Like omp's, `/hotkeys` lists them. Ctrl+G, Ctrl+R and Ctrl+Shift+V
+   are done (WP-6), Alt+G (the `/local` picker) in WP-21. (WP-19, WP-29)
 9. ~~**`/context`, `/session`, `/tools`, `/jobs`, `/todo` are one-line notices instead of omp's panels.**~~ Done (WP-7): context viewer, Session Info overlay with `delete`/`pin`, Available Tools panel, Background Jobs report with `full`/`kill`, the `/todo` verbs, and short reports docked above the editor.
 10. ~~**`/tree` and `/branch` are flat 14-row pickers.**~~ Done (WP-8): omp's session tree selector, fullscreen rewind selector and branch summaries.
 11. ~~**Custom markdown commands and `/skill:<name>` don't work.**~~ Done (WP-9): file commands from every omp provider, prompt templates, `/skill:<name>` (leading or mid-prompt, chips, skill transcript card), MCP prompt commands, in the TUI, RPC, ACP and print mode. Remaining: the bundled TS commands `/review` and `/green`.
@@ -102,7 +102,7 @@ Every package must:
 | WP-18 MCP and SSH management | `/mcp add` wizard, list, remove, test, reauth, unauth, enable, disable, reconnect, reload, resources, prompts, notifications (`mcp.enableProjectConfig`, `mcp.notifications`, `mcp.renderMarkdownResults`); `/ssh add\|list\|remove` | `src/mcp/mcp.c`, `src/mcp/oauth.c`, `src/modes/interactive.c`, new `src/ui/mcpwizard.c`, `src/tools/ssh.c` | U/modes/controllers/{mcp-command-controller,ssh-command-controller}.ts, T/overlays/mcp-add-wizard.ts, U/slash-commands/helpers/{mcp,ssh}.ts |
 | WP-19 Model switching | `/switch` + Alt+P temporary model picker; Ctrl+P / Shift+Ctrl+P role cycle with cycle track; `/modelpreset` + hub presets; prewalk (`/prewalk`, `prewalk.*`); retry fallback chains (`retry.*`, hub `f`) | `src/ui/modelhub.c`, `src/modes/interactive.c`, `src/coding/app.c` | T/overlays/model-picker.ts, model-hub.ts; U/modes/controllers/input-controller.ts (`cycleRoleModel`); U/session/{prewalk,retry-fallback-chains,role-models}.ts |
 | WP-20 Conversation utilities | `/copy` picker + `code\|cmd\|link` targets; `/btw` streaming panel, follow-up and history browser; `/open` | `src/modes/interactive.c`, new `src/ui/copysel.c`, `src/ui/btw.c` | T/overlays/{copy-selector,copy-targets,btw-panel,btw-history-panel}.ts, U/modes/controllers/btw-controller.ts, U/session/btw-history.ts |
-| WP-21 Workspace and session lifecycle | `/move`, `/wt` + `worktree.*`, `/add-dir` / `/remove-dir` / multi-root `/dirs`, `/restart`, `/fresh`, `/pin`, `/local` + Alt+G | `src/coding/app.c`, `src/session/session.c`, `src/modes/interactive.c` | U/slash-commands/builtin-lifecycle.ts, U/session/session-worktree.ts, T/overlays/move-overlay.ts, U/modes/local-file-editor.ts |
+| WP-21 Workspace and session lifecycle | **Done:** `/move` (+ overlay, create-directory confirm; session file, artifacts and `local://` root move to the new bucket, settings/discovery/commands/prompt re-scoped), `/wt` (+ `worktree.cleanSource/onStart/onExit/base`, shared `src/session/worktree.c` with `omc worktree` and the github tool), `/add-dir` / `/remove-dir` / multi-root `/dirs` + `--add-dir` + `workspace.additionalDirectories` (session header, `<workspace-roots>`, per-root context files, forwarded to subagents), `/restart` (execv with restartArgv), `/fresh`, `/pin`, `/local` + Alt+G, linked-worktree status-line path. **Remaining:** clone-first worktree backends (`worktree.clone`, `isolation.backend`: always a plain checkout), the per-root workspace tree / nested AGENTS.md list (omc has no workspace tree), `/fresh`'s provider-state count is omc's per-endpoint estimate, ACP `session/new` additionalDirectories (WP-16) | `src/coding/app.c`, `src/session/session.c`, `src/session/worktree.c`, `src/modes/interactive.c`, `src/ui/move.c` | U/slash-commands/builtin-lifecycle.ts, U/session/session-worktree.ts, T/overlays/move-overlay.ts, U/modes/local-file-editor.ts |
 | WP-22 Subagent visibility | `/hub` agent hub (roster, chat view, revive, kill), `/agents`, running-subagent badge in the status line, agent transcript viewer, session focus (←←), live job widgets (`async.widgets`) | `src/ui/statusline.c`, new `src/ui/agenthub.c`, `src/coding/agents.c`, `src/tools/jobs.c` | T/overlays/{agent-hub*,agents-hub,agent-transcript-viewer,running-subagent-badge}.ts, U/modes/controllers/session-focus-controller.ts, U/job-widgets/* |
 | WP-23 Loop mode | `/loop [count\|duration] [--while\|--until cmd] [prompt]`, `loop.*`, Esc suspends | `src/modes/interactive.c`, `src/coding/app.c` | U/slash-commands/builtin-modes.ts (loop), U/modes/{loop-limit,loop-condition}.ts |
 | WP-24 Provider usage | `/usage` provider quota dashboard + `/usage reset` selector; per-provider usage fetchers; per-turn usage row (`display.showTokenUsage`, `display.showTurnTime`) | `src/modes/interactive.c`, `src/config/auth*.c`, `src/ui/chat.c` | T/overlays/{usage-dashboard,usage-display,usage-row,reset-usage-selector}.ts, U/slash-commands/helpers/usage-report.ts |
@@ -177,7 +177,7 @@ omc-only command (not in omp): `/migrate`.
 | /extensions (status) | builtin-session.ts | — | ❌ | Extension Control Center (skills/rules/MCP/hooks/tools inventory; JS extensions part ⛔) |
 | /agents | builtin-session.ts, overlays/agents-hub.ts | — | ❌ | per-agent model/prewalk/advisor hub |
 | /git | builtin-session.ts | — | ❌ | git UI (split diff, staging, commit composer) |
-| /local | builtin-session.ts | — | ❌ | open a `local://` file in $EDITOR |
+| /local [name] (Alt+G) | builtin-session.ts, modes/local-file-editor.ts | `local_command` (interactive.c) | ✅ | picker (newest first, sizes), `local://` URL or bare name, root containment, editor exit status; cell-identical in compare.sh |
 | /hub (subagents) | builtin-session.ts, overlays/agent-hub*.ts | — | ❌ | live Agent Hub for subagents |
 | /branch (rewind) | builtin-session.ts, overlays/rewind-selector.ts | `tc_rewind_open` (src/modes/treectl.c, src/ui/rewind.c) | ✅ | fullscreen transcript replica with the dotted outline, branch strip, filter; `/rewind` alias |
 | /fork [pane\|window\|tab] | builtin-session.ts | `app_fork_from` | 🟡 | no multiplexer placement subcommands; no streaming guard |
@@ -186,14 +186,14 @@ omc-only command (not in omp): `/migrate`.
 | /mcp [sub] | builtin-session.ts, mcp-command-controller.ts | status notice | 🟡 | 17 subcommands (add wizard, list, remove, test, reauth, unauth, enable, disable, reconnect, reload, resources, prompts, notifications, smithery-*) missing |
 | /ssh [add\|list\|remove] | builtin-lifecycle.ts, ssh-command-controller.ts | — | ❌ | ssh.json host management (ssh:// reads work) |
 | /new | builtin-lifecycle.ts | `app_new_session` | ✅ | |
-| /fresh | builtin-lifecycle.ts | — | ❌ | reset provider stream state (Codex/Cursor sessions) |
+| /fresh | builtin-lifecycle.ts | `app_fresh_session` | ✅ | new provider session id; the pruned count is omc's estimate of omp's providerSessionState keys (completions per endpoint+model, Responses per provider, Codex, Anthropic, Antigravity, Duo Workflow) |
 | /clear | builtin-lifecycle.ts | `app_clear_context` | ✅ | `✔ Context reset — N messages dropped; session continues.` and the streaming warning |
 | /delete | builtin-lifecycle.ts | unlink + new | ✅ | in-memory error and `✔ Session deleted` like omp |
 | /compact [soft\|remote\|snapcompact] [focus] | builtin-lifecycle.ts, session/compact-modes.ts | `app_compact_mode` (`compaction.c`) | 🟡 | parseCompactArgs (modes, focus, snapcompact focus error); the mode overrides `compaction.methodOrder` (soft, remote → soft); remote runs OpenAI Responses / Anthropic server compaction where the route supports it (else omp's "remote compaction is unavailable" warning); snapcompact errors (text-only message as omp; not implemented for vision models); the autocomplete offers only `soft`; no-op texts `Nothing to compact (session too small)` / `Already compacted`; the RPC `compact` response carries no result data |
 | /shake [elide\|images\|thinking] | builtin-lifecycle.ts, shake-types.ts | `app_shake(mode)` | 🟡 | 3 modes, omp's parse error and formatShakeSummary, branch rewritten on disk; elide drops whole tool results outside the newest ~4000 tokens (`[shaken ~N tokens]`, skill results protected) but not fenced/XML blocks and saves no recovery artifact; token counts are estimates |
 | /handoff [focus] | builtin-lifecycle.ts, command-controller `handleHandoffCommand` | `app_handoff(focus)` | ✅ | focus rendered into the handoff prompt (`additionalFocus`); guards and loader from WP-2 |
 | /resume [id] | builtin-lifecycle.ts | `ui_overlay_session` / `session_resolve` | ✅ | `/resume <id\|path>` resumes or errors `Session "x" not found`; `@claude`/`@codex` foreign imports not offered |
-| /pin | builtin-lifecycle.ts | — (Alt+K in picker only) | ❌ | |
+| /pin [session id] | builtin-lifecycle.ts, session/session-pins.ts | `session_pin_toggle` | ✅ | `<agent>/session-pins.json` under a file lock; the picker's 📌 |
 | /btw [q] | builtin-lifecycle.ts, btw-controller.ts, overlays/btw-panel.ts | `src/ui/btw.c` | ✅ | inline streaming panel + history browser ported; image follow-ups missing |
 | /tan | builtin-lifecycle.ts, tan-command-controller.ts | — | ❌ | background agent for tangential work |
 | /omfg | builtin-lifecycle.ts, omfg-controller.ts | — | ❌ | forge a TTSR rule from a complaint |
@@ -202,12 +202,12 @@ omc-only command (not in omp): `/migrate`.
 | /debug | builtin-lifecycle.ts | — | ❌ | debug tools selector |
 | /memory | builtin-lifecycle.ts | `memory_command` | ✅ | local backend; `mm *` only for hindsight (❌ backend) |
 | /rename [title] | builtin-lifecycle.ts | `handle_command` | ✅ | |
-| /move <dir> | builtin-lifecycle.ts | — | ❌ | move session to another cwd |
-| /wt (worktree) | builtin-lifecycle.ts, session/session-worktree.ts | — | ❌ | move session into a new git worktree |
-| /add-dir, /remove-dir | builtin-lifecycle.ts | — | ❌ | multi-root workspaces |
-| /dirs | builtin-lifecycle.ts | text handler | 🟡 | omp's `Workspace directories:` text; single root only |
+| /move [dir] | builtin-lifecycle.ts, overlays/move-overlay.ts | `app_move`, `src/ui/move.c` | ✅ | overlay, `Create directory?` confirm, `✔ Moved to …`; text mode for RPC/ACP; cell-identical in compare.sh |
+| /wt [branch] (worktree) | builtin-lifecycle.ts, session/session-worktree.ts | `session_wt_create` + `app_move` | 🟡 | changes carried over (dirty, staged, untracked + the source index); always a plain checkout (no clone backends), so the summary always says `checked out` |
+| /add-dir, /remove-dir | builtin-lifecycle.ts | `app_add/remove_workspace_dir` | ✅ | session header `additionalDirectories`; the system prompt refreshes |
+| /dirs | builtin-lifecycle.ts | text handler | ✅ | every root |
 | /exit, /quit (q) | builtin-lifecycle.ts, builtin-control.ts | `tui_stop` | ✅ | `/q` alias; bare `exit`/`quit`/`q` on an empty session |
-| /restart | builtin-lifecycle.ts | — | ❌ | re-exec with same flags, resume session |
+| /restart | builtin-lifecycle.ts | `restart_command` + cli.c `restart_exec` | ✅ | execv of /proc/self/exe with restartArgv (one-shot selectors and positionals dropped, `--resume <file>` when on disk) |
 | /marketplace, /plugins (plugin), /reload-plugins | builtin-marketplace.ts | — | ❌ | plugin sources/install (git-based, portable for skills/commands/MCP/agents); JS extension parts ⛔ |
 | /skills [search\|install\|installed\|update] | builtin-skills.ts | lists discovered skills | 🟡 | **different feature**: omp searches/installs from the skills.omp.sh registry |
 | /force <tool> (force:) | builtin-control.ts | — | ❌ | force next turn's tool_choice |
@@ -271,7 +271,7 @@ The key table (`src/tui/keys.c` `DEFAULTS[]`) holds omp's whole registry: the 32
 | app.ask.hide (alt+h) | ask.c | ✅ | via the table; ask expansion uses `app.tools.expand` |
 | app.approval.approve (ctrl+enter, ctrl+q) | `ui/approval.c` | ✅ | approves the pending tool call (armed 500 ms after the dialog mounts) |
 | app.editor.external (ctrl+g) | `open_external_editor`, ask prompts, hook editor | ✅ | WP-6: `getEditorCommand` / `openInEditor` (`.omp.md`, trailing newline trimmed, "No editor configured…" warning); ask "Other"/note prompts and the hook editor via `editDialogExternally` (tmux = omp) |
-| app.local.open (alt+g) | — | ❌ | |
+| app.local.open (alt+g) | `key_hook` → `local_command` | ✅ | the `/local` picker |
 | app.message.followUp (ctrl+q, ctrl+enter) | `iq_follow_up` | ✅ | WP-2; `/compact` with it while streaming waits for the yield |
 | app.retry (f5, alt+r) | `retry_key` → `/retry` | ✅ | = omp "Nothing to retry" |
 | app.message.dequeue (alt+up, shift+up) | `iq_dequeue` | ✅ | WP-2 |
@@ -400,7 +400,7 @@ Tools: `speechgen.enabled`, `generate_image.enabled`, `ratchet.enabled`, `vault.
 `security.enabled`, `todo.remindersMax`, `tasks.todoClearDelay`,
 `images.questionTimeoutMs`, `tools.speculativeExecution.*`, `async.printWake`,
 `tools.xdevNotices`, `mcp.notifications`, `dev.autoqaPush.endpoint`.
-Tasks: `task.isolation.*`, `isolation.backend`, `worktree.*` (10 total), `task.file`, `task.structured`,
+Tasks: `task.isolation.*`, `isolation.backend`, `worktree.clone` (omc: always a plain checkout; `worktree.cleanSource/onStart/onExit/base` are read since WP-21), `task.file`, `task.structured`,
 `task.enableEffort`, `task.perCallModel`, `task.perCallModelAllow`, `task.enableLsp`, `task.maxRuntimeMs`,
 `task.maxEffort`, `task.prewalk`, `plan.autosave`, `plan.autosaveDir`, `title.refreshAfterPrompts`.
 Providers: `providers.antigravityEndpoint`, `providers.fetch`,
@@ -540,7 +540,7 @@ Upstream: `packages/tui/src/overlays/*`, `packages/coding-agent/src/modes/compon
 | session-selector | session-selector.ts | `/resume` | `src/ui/sessions.c` | ✅ | |
 | oauth-selector, login-dialog | *.ts | `/login`, `/logout` | `src/ui/login.c` | ✅ | |
 | logout-account-selector, session-account-selector | *.ts | multi-account `/logout`, `/session` | — | ❌ | omc stores one credential per provider |
-| move-overlay | move-overlay.ts | `/move` | — | ❌ | |
+| move-overlay | move-overlay.ts | `/move` | `src/ui/move.c` | ✅ | localeCompare approximated (punctuation < digits < letters, case-folded) |
 | composer-shape-preview | composer-shape-preview.ts | settings, setup | `ui_composer_preview` | ✅ | |
 | snapcompact-shape-preview | snapcompact-shape-preview.ts | settings | — | ❌ | |
 | codex-reset-fireworks | codex-reset-fireworks.ts | Codex quota reset | — | ❌ | low impact; needs usage reports |
@@ -695,7 +695,7 @@ omp's `Error: …` + `Run \`omc --help\`` lines (exit 2). Messages after the fir
 | --max-cost, --warn-cost | ✅ | `src/coding/costgate.c` (warn once, refuse the next request, print exit 3); subagents count through the parent's total |
 | --auto-approve/--yolo, --approval-mode | ✅ | |
 | omc extras --plan-mode, --max-turns | n/a | not in `--help` |
-| --add-dir | ❌ | needs the multi-root workspace (WP-21) |
+| --add-dir | ✅ | repeatable; merged with `workspace.additionalDirectories` and the resumed session's roots |
 | --allow-home, --profile, --alias, --from-claude, --from-codex, --no-pty, --wait-async, --external-thinking, --prewalk*, --provider-session-id, --prompt-cache-key | ❌ | reported as unknown flags |
 | --hook, -e/--extension, --trusted-extension, --no-extensions, --plugin-dir, --no-ui | ⛔ | JS/Bun extension runtime |
 | print mode `Working...` stderr line | ❌ | omp writes it before the first text-mode turn (`src/modes/print.c`) |
@@ -772,7 +772,7 @@ the plugin manager omc lacks), omp commands omc does not port error with `is not
 | Stats (packages/stats) | packages/stats | — | ❌ | aggregation portable; the bundled web dashboard is the large part |
 | Custom markdown commands, skill commands | custom-commands, skill-command.ts | `src/coding/commands.c` | ✅ | §1 (bundled TS `/review`, `/green` ❌) |
 | Plugins / marketplace | extensibility/plugins | `plugins.c` (Claude plugin skills and commands) | 🟡 | install/update, plugin MCP ❌ |
-| Worktrees (`/wt`, `task.isolation`) | session-worktree.ts | — | ❌ | |
+| Worktrees (`/wt`, `task.isolation`) | session-worktree.ts | `src/session/worktree.c` | 🟡 | `/wt` + `worktree.onStart/onExit/cleanSource/base` done; task isolation ❌ |
 | Job widgets / activity | job-widgets/, activity/ | — | ❌ | |
 | Secrets obfuscation | secrets/ | — | ❌ | off by default |
 | IRC / agent messaging, checkpoints | irc/bus.ts, checkpoint.ts | `agents.c`, `app.c` | ✅ | |
