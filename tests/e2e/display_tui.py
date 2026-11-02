@@ -4,11 +4,11 @@ off) on a resumed transcript with a grouped read image and a generic tool image,
 (display.cacheMissMarker), Ctrl+Shift+O (display.hideToolActivity) and Ctrl+O while tool activity is hidden.
 Escape shapes are omp v18.14.2's, captured under `script`.
 
-usage: display_tui.py <omc> <work dir>   (agent dir from OMC_CODING_AGENT_DIR, like tests/e2e/run.sh)
+usage: display_tui.py <omc> <work dir> <kitty|other|keys>   (agent dir from OMC_CODING_AGENT_DIR, like tests/e2e/run.sh)
 Prints one "<step> ok" line per step, or "<step> FAIL: ..." and exits 1."""
 import base64, json, os, pty, re, select, struct, subprocess, sys, time, zlib
 
-omc, work = sys.argv[1], sys.argv[2]
+omc, work, group = sys.argv[1], sys.argv[2], sys.argv[3]
 root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ANSI = re.compile(r"\x1b\[[0-9;?<>=:]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[PX^_][\s\S]*?\x1b\\|\x1b.")
 
@@ -104,31 +104,34 @@ def run(proto, keys=(), expect=(), settle=4.5, extra_env=None, config=None):
 
 def check(name, ok, detail=""):
     if not ok:
-        print(name, "FAIL:", detail[-1500:])
+        print(name, "FAIL:", detail[-1500:], flush=True)
         sys.exit(1)
-    print(name, "ok")
+    print(name, "ok", flush=True)
 
 
-out = run("kitty", config="display:\n  cacheMissMarker: true\n")
-tx = re.findall(r"\x1b_Ga=t,f=100,q=2,i=(\d+);iVBOR", out)
-pl = re.findall(r"\x1b7\x1b\[19A\x1b_Ga=p,q=2,C=1,i=(\d+),p=(\d+),c=80,r=20\x1b\\\x1b8", out)
-check("kitty transmit once", len(set(tx)) == 2 and len(tx) == 2, repr(tx))
-check("kitty placement", len(pl) >= 2 and set(i for i, _ in pl) == set(tx), repr(pl))
-check("cache miss", re.search(r"cache miss \S* 51K tokens", ANSI.sub("", out)) is not None, ANSI.sub("", out))
-out = run("kitty", extra_env={"PI_KITTY_PLACEHOLDERS": "1"})
-check("kitty placeholders", re.search(r"\x1b_Ga=p,U=1,q=2,i=(\d+),p=\1,c=80,r=20\x1b\\\x1b\[38;2;\d+;\d+;\d+m\x1b\[58:2::", out)
-      is not None and "\U0010eeee̅̅" in out, out[:500])
-out = run("sixel")
-check("sixel", re.search(r"\x1b7\x1b\[19A\x1bP9;1;0q\"1;1;720;360#0;2;", out) is not None, out[:500])
-out = run("iterm2")
-check("iterm2", "\x1b7\x1b[19A\x1b]1337;File=inline=1;width=80;height=20:iVBOR" in out, out[:500])
-out = run("off")
-plain = ANSI.sub("", out)
-check("fallback text", "[Image: image/png]" in plain and "[Image: [image/png] 48x24]" in plain, plain)
-out = run("off", keys=["\x1b[111;6u", "\x0f", "\x1b[111;6u"])
-plain = ANSI.sub("", out)
-check("hide tool activity", "Tool activity: hidden" in plain, plain)
-check("expand while hidden", "Tool activity is hidden — show it with" in plain and "or /settings before expanding" in plain, plain)
-check("show tool activity", "Tool activity: visible" in plain, plain)
-out = run("off", config="tui:\n  mouse: true\n")
-check("mouse capture", "\x1b[?1000h\x1b[?1003h\x1b[?1006h" in out, out[:400])
+if group == "kitty":
+    out = run("kitty", config="display:\n  cacheMissMarker: true\n")
+    tx = re.findall(r"\x1b_Ga=t,f=100,q=2,i=(\d+);iVBOR", out)
+    pl = re.findall(r"\x1b7\x1b\[19A\x1b_Ga=p,q=2,C=1,i=(\d+),p=(\d+),c=80,r=20\x1b\\\x1b8", out)
+    check("kitty transmit once", len(set(tx)) == 2 and len(tx) == 2, repr(tx))
+    check("kitty placement", len(pl) >= 2 and set(i for i, _ in pl) == set(tx), repr(pl))
+    check("cache miss", re.search(r"cache miss \S* 51K tokens", ANSI.sub("", out)) is not None, ANSI.sub("", out))
+    out = run("kitty", extra_env={"PI_KITTY_PLACEHOLDERS": "1"})
+    check("kitty placeholders", re.search(r"\x1b_Ga=p,U=1,q=2,i=(\d+),p=\1,c=80,r=20\x1b\\\x1b\[38;2;\d+;\d+;\d+m\x1b\[58:2::", out)
+          is not None and "\U0010eeee̅̅" in out, out[:500])
+if group == "other":
+    out = run("sixel")
+    check("sixel", re.search(r"\x1b7\x1b\[19A\x1bP9;1;0q\"1;1;720;360#0;2;", out) is not None, out[:500])
+    out = run("iterm2")
+    check("iterm2", "\x1b7\x1b[19A\x1b]1337;File=inline=1;width=80;height=20:iVBOR" in out, out[:500])
+    out = run("off")
+    plain = ANSI.sub("", out)
+    check("fallback text", "[Image: image/png]" in plain and "[Image: [image/png] 48x24]" in plain, plain)
+if group == "keys":
+    out = run("off", keys=["\x1b[111;6u", "\x0f", "\x1b[111;6u"])
+    plain = ANSI.sub("", out)
+    check("hide tool activity", "Tool activity: hidden" in plain, plain)
+    check("expand while hidden", "Tool activity is hidden — show it with" in plain and "or /settings before expanding" in plain, plain)
+    check("show tool activity", "Tool activity: visible" in plain, plain)
+    out = run("off", config="tui:\n  mouse: true\n")
+    check("mouse capture", "\x1b[?1000h\x1b[?1003h\x1b[?1006h" in out, out[:400])
