@@ -14,7 +14,7 @@ XENV=(env -u CLOUDFLARE_ACCOUNT_ID -u CLOUDFLARE_GATEWAY_ID -u CLOUDFLARE_AI_GAT
       OMC_PROVIDER_URL_REWRITE="https://gateway.ai.cloudflare.com=$XB/cf,https://api.meta.ai=$XB/meta,https://acme-prod.snowflakecomputing.com=$XB/sf,https://qwen-custom.example=$XB/qwen,https://token-plan-sgp.xiaomimimo.com=$XB/xmtp,https://api.kilo.ai=$XB/kilo,https://api.individual.githubcopilot.com=$XB/capi,https://copilot-api.ghe.example.com=$XB/deny/ghe")
 XL=(python3 -I "$ROOT/tests/e2e/reqlog.py" "$T/prov.jsonl")
 # Cloudflare AI Gateway: {token, accountId, gatewayId} -> account/gateway URL, cf-aig-authorization, namespace routes
-check "cf gateway login"  "Logged in to cloudflare-ai-gateway."  bash -c "printf 'cf-tok\nacct1\ngw1\n' | ${XENV[*]} '$B' login cloudflare-ai-gateway"
+check "cf gateway login"  "Logged in to Cloudflare AI Gateway"  bash -c "printf 'cf-tok\nacct1\ngw1\n' | ${XENV[*]} '$B' login cloudflare-ai-gateway"
 check "cf anthropic route" "plain provider answer"  "${XENV[@]}" "$B" --model cloudflare-ai-gateway/anthropic/claude-sonnet-4.5 --no-session -p hi
 check "cf anthropic wire"  "/cf/v1/acct1/gw1/anthropic/v1/messages Bearer cf-tok None None claude-sonnet-4-5" \
     "${XL[@]}" /cf/ 'x["path"], h.get("cf-aig-authorization"), h.get("authorization"), h.get("x-api-key"), b.get("model")' claude-sonnet-4-5
@@ -25,7 +25,7 @@ check "cf workers route"  "plain provider answer"  "${XENV[@]}" "$B" --model "cl
 check "cf workers wire"   "/cf/v1/acct1/gw1/compat/chat/completions workers-ai/@cf/google/gemma-4-26b-a4b-it" "${XL[@]}" /cf/ 'x["path"], b.get("model")' gemma
 check "cf no gateway"     "Cloudflare AI Gateway ID is required"  "${XENV[@]}" CLOUDFLARE_ACCOUNT_ID=acct9 "$B" --model cloudflare-ai-gateway/openai/gpt-5.1 --api-key plain-tok --no-session -p hi
 # Muse Code: device login mints the key bundle; requests send the minted key + x-api-version
-check "muse login"        "Logged in to muse-code."  bash -c "${XENV[*]} '$B' login muse-code </dev/null"
+check "muse login"        "Logged in to Muse Code (Subscription)"  bash -c "${XENV[*]} '$B' login muse-code </dev/null"
 check "muse chat"         "plain provider answer"  "${XENV[@]}" "$B" --model muse-code/muse-spark-1.3 --no-session -p hi
 check "muse wire"         "/meta/v1/responses Bearer muse-key 1.0.0"  "${XL[@]}" /meta/ 'x["path"], h.get("authorization"), h.get("x-api-version")'
 # Snowflake: structured OAuth key -> account URL replaces the placeholder origin
@@ -35,7 +35,7 @@ check "snowflake chat"    "plain provider answer"  "${XENV[@]}" "$B" --model sno
 check "snowflake wire"    "/sf/api/v2/cortex/v1/messages Bearer sf-at"  "${XL[@]}" /sf/ 'x["path"], h.get("authorization")'
 check "snowflake pat env" "Snowflake account is required"  "${XENV[@]}" SNOWFLAKE_PAT=pat-1 "$B" --model snowflake/claude-opus-4-6 --api-key " " --no-session -p hi
 # QwenCloud Token Plan: custom region base URL rides in the JSON key
-check "token plan login"  "Logged in to alibaba-token-plan."  bash -c "printf '3\nhttps://qwen-custom.example/compatible-mode/v1\nsk-tp-good\n\n' | ${XENV[*]} '$B' login alibaba-token-plan"
+check "token plan login"  "Logged in to QwenCloud Token Plan"  bash -c "printf '3\nhttps://qwen-custom.example/compatible-mode/v1\nsk-tp-good\n\n' | ${XENV[*]} '$B' login alibaba-token-plan"
 check "token plan chat"   "plain provider answer"  "${XENV[@]}" "$B" --model alibaba-token-plan/qwen3.7-max --no-session -p hi
 check "token plan wire"   "/qwen/compatible-mode/v1/chat/completions Bearer sk-tp-good"  "${XL[@]}" /qwen/ 'x["path"], h.get("authorization")'
 check "token plan bad"    "Invalid QwenCloud Token Plan credential"  "${XENV[@]}" "$B" --model alibaba-token-plan/qwen3.7-max --api-key not-a-key --no-session -p hi
@@ -43,11 +43,11 @@ check "token plan bad"    "Invalid QwenCloud Token Plan credential"  "${XENV[@]}
 printf '{"version":1,"credentials":[{"provider":"xiaomi","credential":{"type":"api_key","key":"tp-xm-key"}}]}' | "${XENV[@]}" "$B" auth import - >/dev/null 2>&1
 check "xiaomi tp chat"    "plain provider answer"  "${XENV[@]}" "$B" --model xiaomi/mimo-v2-flash --no-session -p hi
 check "xiaomi tp wire"    "/xmtp/v1/chat/completions Bearer tp-xm-key"  "${XL[@]}" /xmtp/ 'x["path"], h.get("authorization")'
-check "kilo login"        "Logged in to kilo."  bash -c "${XENV[*]} '$B' login kilo </dev/null"
+check "kilo login"        "Logged in to Kilo Gateway"  bash -c "${XENV[*]} '$B' login kilo </dev/null"
 check "kilo chat"         "plain provider answer"  "${XENV[@]}" "$B" --model "kilo/~anthropic/claude-sonnet-latest" --no-session -p hi
 check "kilo wire"         "/kilo/api/gateway/chat/completions Bearer kilo-tok"  "${XL[@]}" /kilo/ 'x["path"], h.get("authorization")'
 # GitHub Copilot: discovered plan endpoint, identity headers, initiator per turn, enterprise CLI identity + fallback
-check "copilot login"     "Logged in to github-copilot."  bash -c "printf '\n' | ${XENV[*]} '$B' login github-copilot"
+check "copilot login"     "Logged in to GitHub Copilot"  bash -c "printf '\n' | ${XENV[*]} '$B' login github-copilot"
 check "copilot claude"    "Tool said: cp-e2e"  "${XENV[@]}" "$B" --model github-copilot/claude-haiku-4.5 --no-session -p "bash:echo cp-e2e"
 check "copilot user turn" "/capi/v1/messages Bearer gho_test copilot-chat user conversation-user None None" \
     bash -c "python3 -I -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; x=[x for x in r if \"/capi/\" in x[\"path\"]][-2]; h=x[\"headers\"]; print(x[\"path\"], h.get(\"authorization\"), h.get(\"copilot-integration-id\"), h.get(\"x-initiator\"), h.get(\"x-interaction-type\"), h.get(\"x-api-key\"), h.get(\"anthropic-beta\"))' '$T/prov.jsonl'"
@@ -66,7 +66,7 @@ JQ='call:eval:{"language":"py","code":"r = await judge({\"text\": \"ok\"}, {\"b\
 printf 'modelRoles:\n  judge: typesafe/jev-latest\n' > "$T/pagent/config.yml"
 check "typesafe judge"  "verdict {'type': 'bool', 'bool': 0.9}"  "${XENV[@]}" TYPESAFE_API_KEY=ts-key OMC_PROVIDER_URL_REWRITE="https://api.typesafe.ai=$XB/ts,https://api.kilo.ai=$XB/kilo" "$B" --model "kilo/~anthropic/claude-sonnet-latest" --no-session -p "$JQ"
 check "typesafe wire"   "/ts/v1/systemone Bearer ts-key jev-latest {'b': {'type': 'bool', 'instructions': 'fine?'}}"  "${XL[@]}" /ts/ 'x["path"], h.get("authorization"), b.get("model"), b.get("questions")'
-check "workers login"   "Logged in to cloudflare-workers-ai."  bash -c "printf 'wa-tok\nacct7\n' | ${XENV[*]} '$B' login cloudflare-workers-ai"
+check "workers login"   "Logged in to Cloudflare Workers AI"  bash -c "printf 'wa-tok\nacct7\n' | ${XENV[*]} '$B' login cloudflare-workers-ai"
 printf 'modelRoles:\n  judge: cloudflare-workers-ai/@cf/cloudflare/clef\n' > "$T/pagent/config.yml"
 check "workers judge"   "verdict {'type': 'bool', 'bool': 0.9}"  "${XENV[@]}" OMC_PROVIDER_URL_REWRITE="https://api.cloudflare.com=$XB/cfapi,https://api.kilo.ai=$XB/kilo" "$B" --model "kilo/~anthropic/claude-sonnet-latest" --no-session -p "$JQ"
 check "workers wire"    "/cfapi/client/v4/accounts/acct7/ai/run/@cf/cloudflare/clef Bearer wa-tok clef"  "${XL[@]}" /cfapi/ 'x["path"], h.get("authorization"), b.get("model")'

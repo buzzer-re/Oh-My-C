@@ -424,7 +424,7 @@ grep -q '"requestContext": {"tools": \[[^]]*"write"' "$T/cursor.jsonl" && echo "
 grep -q '"originalRequestId": "[0-9a-f-]\{36\}"' "$T/cursor.jsonl" && echo "   ok  cursor retry original id" || { echo "   FAIL cursor retry original id"; fail=1; }
 # Cursor login hook (deep-control browser login polled with the PKCE verifier) and token refresh, against the mock
 CAUTH=(env HOME="$T" OMC_TEST_CURSOR_API="http://127.0.0.1:$CPORT" OMC_NO_BROWSER=1)
-check "cursor login"    "Logged in to cursor."  "${CAUTH[@]}" "$B" login cursor
+check "cursor login"    "Logged in to Cursor (Claude, GPT, etc.)"  "${CAUTH[@]}" "$B" login cursor
 grep -q '"email": "dev@example.com"' "$T/agent/auth.json" && echo "   ok  cursor login email" || { echo "   FAIL cursor login email"; fail=1; }
 grep -q '"verifier": 128' "$T/cursor.jsonl" && echo "   ok  cursor login verifier" || { echo "   FAIL cursor login verifier"; fail=1; }
 python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["cursor"]["expires"]=1; json.dump(d,open(p,"w"))' "$T/agent/auth.json"
@@ -515,6 +515,7 @@ source "$ROOT/tests/e2e/providers_devin.sh"
 source "$ROOT/tests/e2e/providers_gitlab.sh"
 source "$ROOT/tests/e2e/images.sh"
 source "$ROOT/tests/e2e/compaction.sh"
+source "$ROOT/tests/e2e/cli.sh"
 # provider logins over stdin (omc login) against tests/e2e/mock_auth.py
 APORT=$((PORT + 7)); python3 -I "$ROOT/tests/e2e/mock_auth.py" $APORT & APID=$!
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$APORT) 2>/dev/null && break; sleep 0.1; done
@@ -522,13 +523,13 @@ AB="http://127.0.0.1:$APORT"
 mkdir -p "$T/lagent"
 LENV=(env OMC_CODING_AGENT_DIR="$T/lagent" OMC_NO_BROWSER=1 OMC_AUTH_POLL_SCALE_MS=20 KIMI_CODE_OAUTH_HOST="$AB/kimi"
       OMC_AUTH_URL_REWRITE="https://api.x.ai=$AB/xaiapi,https://github.com=$AB/gh,https://api.github.com=$AB/ghapi,https://api.individual.githubcopilot.com=$AB/capi")
-check "login api key"      "Logged in to xai."            bash -c "printf 'good-key\n' | ${LENV[*]} '$B' login xai"
+check "login api key"      "Logged in to xAI API"          bash -c "printf 'good-key\n' | ${LENV[*]} '$B' login xai"
 check "login key stored"   '"key": "good-key"'            cat "$T/lagent/auth.json"
 check "login key rejected" "xAI API key validation failed (401)"  bash -c "printf 'bad\n' | ${LENV[*]} '$B' login xai"
 check "login device code"  "Enter code: ABCD-1234"        bash -c "${LENV[*]} '$B' login kimi-code </dev/null"
 check "login device saved" '"refresh": "kimi-r1"'         cat "$T/lagent/auth.json"
-check "login copilot"      "Logged in to github-copilot." bash -c "printf '\n' | ${LENV[*]} '$B' login github-copilot"
-check "login list"         "openai-codex-device"          "$B" login
+check "login copilot"      "Logged in to GitHub Copilot" bash -c "printf '\n' | ${LENV[*]} '$B' login github-copilot"
+check "login list"         "ChatGPT Plus/Pro (Codex, headless/device)"          "$B" login
 kill $APID 2>/dev/null
 # github tool + pr:// / issue:// through the fake `gh` (tests/e2e/bin-gh: canned acme/widgets data, never GitHub)
 mkdir -p "$T/ghagent" "$T/ghcfg"; cp "$T/agent/models.yml" "$T/ghagent/"; printf 'github:\n  enabled: true\n' > "$T/ghagent/config.yml"
