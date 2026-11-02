@@ -73,7 +73,7 @@ static char *live_description(void *ud, const char *name) {
         return xstrdup(a->advisor_enabled ? "Advisor: configured, no model" : "Advisor: off");
     }
     if (!strcmp(name, "effort")) /* configuredThinkingLevel(): none for a model without a reasoning dial */
-        return xasprintf("Thinking: %s", a->model && a->model->reasoning ? effort_name(a->thinking) : "model default");
+        return xasprintf("Thinking: %s", slash_configured_thinking(a));
     if (!strcmp(name, "clear")) return xstrdup(u->worker_running ? "Clear: unavailable while streaming" : "Clear: drop context, keep session");
     if (!strcmp(name, "compact") || !strcmp(name, "context")) {
         json_t *st = app_stats(a);
@@ -146,7 +146,7 @@ static int slash_args(void *ud, const char *name, const char *arg, tui_ac_result
             for (size_t k = 0; k < c->nsubs; k++)
                 if (!strcmp(c->subs[k].name, lv.v[i])) desc = c->subs[k].description;
             char *val = xasprintf("%s ", lv.v[i]);
-            char *d = !strcmp(lv.v[i], effort_name(u->app->thinking)) ? xasprintf("%s (current)", desc) : xstrdup(desc);
+            char *d = !strcmp(lv.v[i], slash_configured_thinking(u->app)) ? xasprintf("%s (current)", desc) : xstrdup(desc);
             tui_ac_result_add(out, val, lv.v[i], d);
             strvec_push(&out->ghosts, "");
             free(d);

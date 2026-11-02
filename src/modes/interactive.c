@@ -1408,14 +1408,6 @@ static void goal_command(ui_t *u, const char *arg) {
 
 static void tui_slash_output(void *ud, const char *text) { add_notice(ud, "info", text); }
 
-/* sessionManager.getEntries().filter(type === "message").length */
-static size_t session_message_count(app_t *a) {
-    size_t n = 0;
-    json_t *e;
-    json_arr_foreach(a->session->entries, i, e) if (str_eq(json_get_str(e, "type"), "message")) n++;
-    return n;
-}
-
 /* command-controller.ts handleAdvisorStatusCommand (one advisor; no quota lines) */
 static void advisor_status_report(ui_t *u) {
     app_t *a = u->app;
