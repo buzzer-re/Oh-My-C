@@ -2395,6 +2395,8 @@ static bool handle_command_inner(ui_t *u, const char *line) {
         goal_command(u, arg);
     } else if (!strcmp(cmd, "jobs")) {
         ui_jobs_command(u, arg);
+    } else if (!strcmp(cmd, "agents")) { /* builtin-session.ts agents: the agent-definitions hub */
+        ui_agents_hub_open(u);
     } else if (!strcmp(cmd, "hub")) { /* builtin-session.ts hub: the live Agent Hub on its Activity tab */
         ui_agent_hub_open(u, true, false, false);
     } else if (!strcmp(cmd, "advisor")) { /* builtin-collaboration.ts advisor handleTui */

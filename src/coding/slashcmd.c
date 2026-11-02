@@ -83,6 +83,7 @@ static const struct {
     {"todo", "*", true, NULL},
     {"session", "info delete pin", true, NULL},
     {"jobs", "full kill", true, NULL},
+    {"agents", NULL, true, NULL},
     {"hub", NULL, true, NULL},
     {"usage", "*", true, h_usage},
     {"changelog", "*", true, slash_changelog_text},

@@ -223,6 +223,7 @@ void ui_close_selector(ui_t *u);
 bool ui_selector_open(const ui_t *u);
 
 void ui_overlay_model(ui_t *u); /* modelhub.c: the Models hub */
+void ui_agents_hub_open(ui_t *u); /* agentshub.c: the /agents hub (agent definitions) */
 /* modelpicker.c: the session-only model picker (Alt+P, `/switch`) */
 void ui_overlay_model_picker(ui_t *u);
 /* switchSessionModel: session-only switch (compacting first when the transcript exceeds the model's window);

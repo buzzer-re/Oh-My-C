@@ -35,6 +35,29 @@ static json_t *parse_agent_def(const char *text, const char *fallback_name) {
     }
     json_set(d, "tools", tl);
     if (json_get_str(fm, "model")) json_set_str(d, "model", json_get_str(fm, "model"));
+    else if (json_is_arr(json_get(fm, "model"))) { /* parseModelList: a list joins like a comma pattern list */
+        strvec_t v = {0};
+        json_t *x;
+        json_arr_foreach(json_get(fm, "model"), i, x) if (json_is_str(x) && *json_sv(x)) strvec_push(&v, json_sv(x));
+        if (v.n) {
+            char *j = strvec_join(&v, ",");
+            json_set_str(d, "model", j);
+            free(j);
+        }
+        strvec_free(&v);
+    }
+    /* prewalk / advisor: true = the default target, a string = a custom model pattern (parseAgentFields) */
+    static const char *const FLAGS[] = {"prewalk", "advisor"};
+    for (size_t i = 0; i < ARRAY_LEN(FLAGS); i++) {
+        json_t *v = json_get(fm, FLAGS[i]);
+        if (json_is_bool(v)) json_set_bool(d, FLAGS[i], v->u.b);
+        else if (json_is_str(v)) {
+            char *t = str_trim(json_sv(v));
+            if (str_eq(t, "true") || str_eq(t, "false")) json_set_bool(d, FLAGS[i], str_eq(t, "true"));
+            else if (*t) json_set_str(d, FLAGS[i], t);
+            free(t);
+        }
+    }
     if (json_get_str(fm, "thinking-level")) json_set_str(d, "thinking", json_get_str(fm, "thinking-level"));
     char *b = tpl_render(body, NULL);
     json_set_str(d, "body", b);
