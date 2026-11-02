@@ -7,6 +7,7 @@
  *   - the working row while the model runs (Loader + shimmer working message)
  *   - transcript replay from the session tree on resume/branch */
 #include "ui/ui.h"
+#include "ui/signals.h"
 #include "ui/tools/tc.h"
 
 #include "config/settings.h"
@@ -1546,5 +1547,6 @@ void ui_chat_rebuild(ui_t *u) {
     json_free(path);
     hmap_free(&pending, NULL);
     toolcard_set_replaying(false);
+    ui_signals_session_title(); /* resume / switch / branch: the title follows the session */
     tui_request_full_render(u->tui);
 }

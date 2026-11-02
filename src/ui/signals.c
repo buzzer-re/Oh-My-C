@@ -1,0 +1,480 @@
+/* signals.c - terminal title run state, OSC 7501 program status and turn notifications (see signals.h). */
+#include "ui/signals.h"
+
+#include "config/settings.h"
+#include "tui/ansi.h"
+#include "tui/notify.h"
+#include "ui/ui.h"
+
+#include <ctype.h>
+
+/* Plain π, not the nerd-font glyph: window/tab titles render in the OS UI font */
+#define DEFAULT_TITLE "\xcf\x80"
+#define SPINNER_INTERVAL_MS 80
+#define MSG_MAX_BYTES 2048
+
+static const char *const BRAILLE[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+static const char *const PULSE[] = {"○", "◔", "◑", "◕", "●", "◕", "◑", "◔"};
+static const char *const DOTS[] = {"⠁", "⠂", "⠄", "⠠", "⠐", "⠈"};
+static const char *const LINE[] = {"-", "\\", "|", "/"};
+
+size_t ui_title_spinner_frames(const char *style, const char *const **frames) {
+    if (str_eq(style, "pulse")) return *frames = PULSE, ARRAY_LEN(PULSE);
+    if (str_eq(style, "dots")) return *frames = DOTS, ARRAY_LEN(DOTS);
+    if (str_eq(style, "line")) return *frames = LINE, ARRAY_LEN(LINE);
+    return *frames = BRAILLE, ARRAY_LEN(BRAILLE);
+}
+
+static const char *norm_style(const char *s) {
+    return str_eq(s, "pulse") || str_eq(s, "dots") || str_eq(s, "line") ? s : "braille";
+}
+
+/* JS String.prototype.trim whitespace (ASCII + the common Unicode spaces) */
+static size_t ws_len(const char *p) {
+    unsigned char c = (unsigned char)*p;
+    if (c == ' ' || (c >= 0x09 && c <= 0x0d)) return 1;
+    if (c == 0xc2 && (unsigned char)p[1] == 0xa0) return 2;
+    if (c == 0xef && (unsigned char)p[1] == 0xbb && (unsigned char)p[2] == 0xbf) return 3;
+    if (c == 0xe2 && (unsigned char)p[1] == 0x80 &&
+        (((unsigned char)p[2] >= 0x80 && (unsigned char)p[2] <= 0x8a) || (unsigned char)p[2] == 0xa8 ||
+         (unsigned char)p[2] == 0xa9 || (unsigned char)p[2] == 0xaf))
+        return 3;
+    if (c == 0xe3 && (unsigned char)p[1] == 0x80 && (unsigned char)p[2] == 0x80) return 3;
+    return 0;
+}
+
+static char *js_trim(const char *s) {
+    while (*s) {
+        size_t n = ws_len(s);
+        if (!n) break;
+        s += n;
+    }
+    size_t end = 0, i = 0, len = strlen(s);
+    while (i < len) {
+        size_t n = ws_len(s + i);
+        if (n) i += n;
+        else {
+            int k = utf8_decode(s + i, len - i, &(uint32_t){0});
+            i += k;
+            end = i;
+        }
+    }
+    return xstrndup(s, end);
+}
+
+/* sanitizeTerminalTitlePart: drop U+0000–U+001F and U+007F–U+009F, trim; NULL when nothing remains */
+char *ui_title_sanitize(const char *s) {
+    if (!s) return NULL;
+    sb_t b = SB_INIT;
+    size_t len = strlen(s);
+    for (size_t i = 0; i < len;) {
+        uint32_t cp;
+        int k = utf8_decode(s + i, len - i, &cp);
+        if (!(cp < 0x20 || (cp >= 0x7f && cp <= 0x9f))) sb_appendn(&b, s + i, (size_t)k);
+        i += (size_t)k;
+    }
+    char *raw = sb_detach(&b);
+    char *t = js_trim(raw);
+    free(raw);
+    if (!*t) {
+        free(t);
+        return NULL;
+    }
+    return t;
+}
+
+/* buildTerminalTitleWithState */
+char *ui_title_compose(const char *label, run_state_t state, int frame, bool enabled, const char *style, bool static_host) {
+    if (!enabled) return label ? xasprintf(DEFAULT_TITLE ": %s", label) : xstrdup(DEFAULT_TITLE);
+    const char *const *frames;
+    size_t n = ui_title_spinner_frames(style, &frames);
+    const char *sep = state == RUN_WORKING ? (static_host ? ":" : frames[(size_t)frame % n])
+                      : state == RUN_BLOCKED ? "!"
+                                             : ">";
+    return label ? xasprintf(DEFAULT_TITLE " %s %s", sep, label) : xasprintf(DEFAULT_TITLE " %s", sep);
+}
+
+/* sanitizeText (control characters but \t \n, ANSI sequences) + whitespace runs collapsed + trim, capped at the
+ * protocol's decoded `msg` limit (truncateLineBytes: head + "…"), base64; NULL when nothing printable remains */
+static char *encode_msg(const char *text) {
+    if (!text || !*text) return NULL;
+    char *plain = strchr(text, '\x1b') ? tui_strip_ansi(text) : xstrdup(text);
+    sb_t b = SB_INIT;
+    bool space = false;
+    size_t len = strlen(plain);
+    for (size_t i = 0; i < len;) {
+        uint32_t cp;
+        int k = utf8_decode(plain + i, len - i, &cp);
+        bool ctrl = (cp <= 0x08) || (cp >= 0x0b && cp <= 0x1f) || (cp >= 0x7f && cp <= 0x9f);
+        size_t w = ws_len(plain + i);
+        if (ctrl) {
+            i += (size_t)k;
+            continue;
+        }
+        if (w) {
+            space = true;
+            i += w;
+            continue;
+        }
+        if (space && b.len) sb_putc(&b, ' ');
+        space = false;
+        sb_appendn(&b, plain + i, (size_t)k);
+        i += (size_t)k;
+    }
+    free(plain);
+    char *line = sb_detach(&b);
+    if (!*line) {
+        free(line);
+        return NULL;
+    }
+    if (strlen(line) > MSG_MAX_BYTES) {
+        size_t cut = MSG_MAX_BYTES - 3;
+        while (cut > 0 && ((unsigned char)line[cut] & 0xc0) == 0x80) cut--;
+        char *t = xasprintf("%.*s…", (int)cut, line);
+        free(line);
+        line = t;
+    }
+    char *r = base64_encode(line, strlen(line));
+    free(line);
+    return r;
+}
+
+static const char *state_name(run_state_t s) {
+    switch (s) {
+    case RUN_WORKING: return "working";
+    case RUN_BLOCKED: return "blocked";
+    case RUN_DONE: return "done";
+    case RUN_ERROR: return "error";
+    default: return "idle";
+    }
+}
+
+/* run-status.ts formatReport */
+char *ui_program_status_report(run_state_t state, const char *kind, const char *msg) {
+    sb_t b = SB_INIT;
+    sb_appendf(&b, "\x1b]7501;state=%s", state_name(state));
+    if (state == RUN_BLOCKED) sb_appendf(&b, ":kind=%s", kind ? kind : "question");
+    sb_append(&b, ":app=" TUI_NOTIFY_APP_NAME);
+    char *m = state == RUN_BLOCKED || state == RUN_ERROR ? encode_msg(msg) : NULL;
+    if (m) sb_appendf(&b, ":msg=%s", m);
+    free(m);
+    sb_append(&b, "\x1b\\");
+    return sb_detach(&b);
+}
+
+/* ---------- runtime ---------- */
+
+typedef struct {
+    char *id;
+    char *msg;
+} blocker_t;
+
+static struct {
+    ui_t *u;
+    bool claimed, disposed;
+    /* title */
+    char *label;
+    run_state_t title_state;
+    int frame;
+    int timer;
+    char *last_title;
+    const char *style;
+    /* program status */
+    run_state_t status;
+    char *kind, *msg;
+    char *reported;
+    VEC(blocker_t) blockers;
+    json_t *ended; /* the last agent_end's messages, not yet settled */
+} S = {.style = "braille"};
+
+static tui_term_t *term(void) {
+    if (!S.u || !S.u->tui) return NULL;
+    tui_term_t *t = tui_term(S.u->tui);
+    return t && t->is_tty ? t : NULL;
+}
+
+static void write_seq(const char *seq) {
+    tui_term_t *t = term();
+    if (!t) return;
+    tui_term_puts(t, seq);
+    tui_term_flush(t);
+}
+
+static bool title_state_enabled(void) { return settings_bool("tui.titleState", true); }
+static bool program_status_enabled(void) { return settings_bool("terminal.programStatus", true); }
+static bool static_host(void) {
+#ifdef __linux__
+    return env_get("WSL_DISTRO_NAME") || env_get("WSL_INTEROP");
+#else
+    return false;
+#endif
+}
+
+/* writeTerminalTitle: the sink every title write funnels through (teardown latch, TTY gate, dedupe) */
+static void write_title(const char *title) {
+    if (S.disposed || !S.claimed || !term()) return;
+    char *next = ui_title_sanitize(title);
+    if (!next) next = xstrdup(DEFAULT_TITLE);
+    if (S.last_title && !strcmp(next, S.last_title)) {
+        free(next);
+        return;
+    }
+    char *seq = xasprintf("\x1b]0;%s\x07", next);
+    write_seq(seq);
+    free(seq);
+    free(S.last_title);
+    S.last_title = next;
+}
+
+static void emit_title(void) {
+    char *t = ui_title_compose(S.label, S.title_state, S.frame, title_state_enabled(), S.style, static_host());
+    write_title(t);
+    free(t);
+}
+
+static void spinner_tick(void *ud) {
+    (void)ud;
+    const char *const *frames;
+    size_t n = ui_title_spinner_frames(S.style, &frames);
+    S.frame = (int)((size_t)(S.frame + 1) % n);
+    emit_title();
+}
+
+static void stop_spinner(void) {
+    if (S.timer && S.u) tui_remove_timer(S.u->tui, S.timer);
+    S.timer = 0;
+}
+
+static void start_spinner(void) {
+    if (static_host() || S.disposed || S.timer || !term()) return;
+    S.timer = tui_add_timer(S.u->tui, SPINNER_INTERVAL_MS, true, spinner_tick, NULL);
+}
+
+/* setTerminalTitleState */
+static void set_title_state(run_state_t st) {
+    S.title_state = st;
+    if (st == RUN_WORKING && title_state_enabled()) start_spinner();
+    else stop_spinner();
+    emit_title();
+}
+
+/* run-status.ts report / clear */
+static void report(void) {
+    if (S.disposed || !program_status_enabled() || !term()) return;
+    char *next = ui_program_status_report(S.status, S.kind, S.msg);
+    if (S.reported && !strcmp(next, S.reported)) {
+        free(next);
+        return;
+    }
+    write_seq(next);
+    free(S.reported);
+    S.reported = next;
+}
+
+static void clear_report(void) {
+    if (!S.reported) return;
+    free(S.reported);
+    S.reported = NULL;
+    write_seq("\x1b]7501;state=clear\x1b\\");
+}
+
+void ui_signals_run_status(run_state_t state, const char *kind, const char *msg) {
+    S.status = state;
+    free(S.kind);
+    free(S.msg);
+    S.kind = kind ? xstrdup(kind) : NULL;
+    S.msg = msg ? xstrdup(msg) : NULL;
+    set_title_state(state == RUN_WORKING ? RUN_WORKING : state == RUN_BLOCKED ? RUN_BLOCKED : RUN_IDLE);
+    report();
+}
+
+/* getFallbackTerminalTitle: the resolved cwd's basename (none for the root) */
+static char *cwd_label(const char *cwd) {
+    if (!cwd || !*cwd) return NULL;
+    char *r = realpath(cwd, NULL);
+    char *p = r ? r : xstrdup(cwd);
+    size_t n = strlen(p);
+    while (n > 1 && p[n - 1] == '/') p[--n] = 0;
+    const char *base = strrchr(p, '/');
+    base = base ? base + 1 : p;
+    char *out = *base ? ui_title_sanitize(base) : NULL;
+    free(p);
+    return out;
+}
+
+void ui_signals_session_title(void) {
+    if (!S.u) return;
+    app_t *a = S.u->app;
+    char *name = ui_title_sanitize(a && a->session ? a->session->title : NULL);
+    free(S.label);
+    S.label = name ? name : cwd_label(a ? a->cwd : NULL);
+    emit_title();
+}
+
+void ui_signals_settings_changed(void) {
+    if (!S.u || S.disposed) return;
+    const char *style = norm_style(settings_str("tui.titleSpinner", "braille"));
+    bool restyled = strcmp(style, S.style) != 0;
+    if (restyled) {
+        S.style = style;
+        S.frame = 0;
+        stop_spinner();
+    }
+    if (S.title_state == RUN_WORKING && title_state_enabled()) start_spinner();
+    else stop_spinner();
+    emit_title();
+    if (program_status_enabled()) report();
+    else clear_report();
+}
+
+static void settings_changed_cb(void *ud) {
+    (void)ud;
+    ui_signals_settings_changed();
+}
+
+/* settings listener: may run on any thread, hop to the UI thread */
+static void on_settings_change(void *ud) {
+    ui_t *u = ud;
+    if (u && u->tui) tui_post(u->tui, settings_changed_cb, NULL);
+}
+
+void ui_signals_init(ui_t *u) {
+    S.u = u;
+    settings_on_change(on_settings_change, u);
+    if (term()) write_seq("\x1b[22;2t"); /* pushTerminalTitle */
+    S.claimed = true;
+    S.disposed = false;
+    S.style = norm_style(settings_str("tui.titleSpinner", "braille"));
+    /* setTerminalTitleStateEnabled: emits before the session label is known (`π >`) */
+    if (S.title_state == RUN_WORKING && title_state_enabled()) start_spinner();
+    emit_title();
+    report(); /* setProgramStatusEnabled */
+    ui_signals_session_title();
+}
+
+void ui_signals_dispose(void) {
+    if (!S.u || S.disposed) return;
+    settings_off_change(on_settings_change, S.u);
+    stop_spinner();
+    S.disposed = true;
+    free(S.last_title);
+    S.last_title = NULL;
+    clear_report();
+    if (term()) write_seq("\x1b]0;\x07\x1b[23;2t"); /* popTerminalTitle */
+    free(S.label);
+    free(S.kind);
+    free(S.msg);
+    S.label = S.kind = S.msg = NULL;
+    for (size_t i = 0; i < S.blockers.n; i++) {
+        free(S.blockers.v[i].id);
+        free(S.blockers.v[i].msg);
+    }
+    free(S.blockers.v);
+    memset(&S.blockers, 0, sizeof S.blockers);
+    json_free(S.ended);
+    S.ended = NULL;
+}
+
+/* ---------- agent events ---------- */
+
+void ui_signals_agent_start(void) {
+    json_free(S.ended);
+    S.ended = NULL;
+    ui_signals_run_status(RUN_WORKING, NULL, NULL);
+}
+
+void ui_signals_tool_start(const char *tool_call_id, const char *tool_name, const json_t *args) {
+    if (!str_eq(tool_name, "ask") || !tool_call_id) return;
+    /* #blockingPrompt: the questions joined by a space */
+    strvec_t qs = {0};
+    json_t *q;
+    json_arr_foreach(json_get_arr(args, "questions"), i, q) {
+        const char *t = json_get_str(q, "question");
+        if (t) strvec_push(&qs, t);
+    }
+    char *msg = qs.n ? strvec_join(&qs, " ") : NULL;
+    strvec_free(&qs);
+    blocker_t b = {xstrdup(tool_call_id), msg};
+    vec_push(&S.blockers, b);
+    ui_signals_run_status(RUN_BLOCKED, "question", msg);
+}
+
+void ui_signals_tool_end(const char *tool_call_id) {
+    for (size_t i = 0; i < S.blockers.n; i++) {
+        if (!str_eq(S.blockers.v[i].id, tool_call_id)) continue;
+        free(S.blockers.v[i].id);
+        free(S.blockers.v[i].msg);
+        memmove(&S.blockers.v[i], &S.blockers.v[i + 1], (S.blockers.n - i - 1) * sizeof S.blockers.v[0]);
+        S.blockers.n--;
+        /* back to `working` only when the last outstanding blocking prompt resolves */
+        if (S.blockers.n) ui_signals_run_status(RUN_BLOCKED, "question", S.blockers.v[0].msg);
+        else ui_signals_run_status(RUN_WORKING, NULL, NULL);
+        return;
+    }
+}
+
+static const json_t *sig_last_assistant(const json_t *msgs) {
+    for (size_t i = json_len(msgs); i-- > 0;) {
+        const json_t *m = json_at(msgs, i);
+        if (str_eq(json_get_str(m, "role"), "assistant")) return m;
+    }
+    return NULL;
+}
+
+/* Warp's structured CLI-agent protocol drives native completion UX: no second legacy toast */
+static bool warp_protocol_active(void) {
+    const char *v = env_get("WARP_CLI_AGENT_PROTOCOL_VERSION");
+    return v && atof(v) >= 1;
+}
+
+static void notify(const char *title, const char *body, const char *type, const char *urgency) {
+    tui_term_t *t = S.u && S.u->tui ? tui_term(S.u->tui) : NULL;
+    tui_notification_t n = {title, body, type, urgency};
+    tui_notify_send(t, &n);
+}
+
+static const char *session_title(void) {
+    const char *t = S.u && S.u->app && S.u->app->session ? S.u->app->session->title : NULL;
+    return t && *t ? t : TUI_NOTIFY_APP_NAME;
+}
+
+void ui_signals_run_settled(const json_t *run_messages, bool interrupted) {
+    for (size_t i = 0; i < S.blockers.n; i++) {
+        free(S.blockers.v[i].id);
+        free(S.blockers.v[i].msg);
+    }
+    S.blockers.n = 0;
+    /* #settledRunStatus */
+    const json_t *last = sig_last_assistant(run_messages);
+    const char *stop = last ? json_get_str(last, "stopReason") : NULL;
+    if (interrupted) ui_signals_run_status(RUN_IDLE, NULL, NULL);
+    else if (str_eq(stop, "error")) ui_signals_run_status(RUN_ERROR, NULL, json_get_str(last, "errorMessage"));
+    else if (!last || str_eq(stop, "aborted")) ui_signals_run_status(RUN_IDLE, NULL, NULL);
+    else ui_signals_run_status(RUN_DONE, NULL, NULL);
+    if (interrupted) return;
+    /* sendErrorNotification */
+    if (!warp_protocol_active() && str_eq(settings_str("error.notify", "off"), "on") && str_eq(stop, "error"))
+        notify(session_title(), "Stopped with error", "error", NULL);
+    /* sendCompletionNotification */
+    if (!str_eq(settings_str("completion.notify", "on"), "off") && !warp_protocol_active() && !str_eq(stop, "aborted") &&
+        !str_eq(stop, "error"))
+        notify(session_title(), "Complete", "completion", NULL);
+}
+
+void ui_signals_agent_end(const json_t *run_messages) {
+    json_free(S.ended);
+    S.ended = run_messages ? json_clone(run_messages) : json_arr();
+}
+
+void ui_signals_settle(void) {
+    if (!S.ended) return;
+    json_t *m = S.ended;
+    S.ended = NULL;
+    ui_signals_run_settled(m, false);
+    json_free(m);
+}
+
+void ui_signals_ask_waiting(void) {
+    if (str_eq(settings_str("ask.notify", "on"), "off")) return;
+    notify(TUI_NOTIFY_APP_NAME, "Waiting for input", "ask", "normal");
+}

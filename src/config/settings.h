@@ -27,6 +27,9 @@ char *settings_project_config_path(void); /* <project dir>/config.yml, <cwd>/.om
 /* omp project writes (setProjectModelRole / clearProjectModelRole store null): one key of the project
  * config.yml, merged into the re-read file; val NULL deletes; takes ownership of val */
 int settings_set_project_entry(const char *parent, const char *key, json_t *val);
+/* Setting.listen: fn(ud) runs after every runtime/global set or unset, on the writing thread */
+void settings_on_change(void (*fn)(void *ud), void *ud);
+void settings_off_change(void (*fn)(void *ud), void *ud);
 /* layer that supplies `path` (omp SettingProvenance without the env layer): "runtime" | "overlay" | "project" |
  * "global" | "default" (static string) */
 const char *settings_provenance(const char *path);

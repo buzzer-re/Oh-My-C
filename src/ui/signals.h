@@ -1,0 +1,60 @@
+/*
+ * signals.h - turn-lifecycle signals of the interactive UI (ports of omp utils/title-generator.ts terminal
+ * title runtime, utils/run-status.ts OSC 7501 program status and modes/controllers/event-controller.ts
+ * send{Completion,Error}Notification / tools/ask.ts #sendAskNotification).
+ *
+ * Terminal title: `π <sep> <label>` where label is the session name, else the cwd basename, and the separator
+ * carries the run state: `>` idle (your turn), an 80 ms spinner while working (`tui.titleSpinner`: braille,
+ * pulse, dots, line; a static `:` under WSL), `!` when the agent waits on you; `π: label` with
+ * `tui.titleState` off. The shell's title is pushed (CSI 22;2t) when the UI claims the terminal and popped
+ * (OSC 0 clear + CSI 23;2t) at teardown. Writes are deduplicated and only go to a TTY.
+ *
+ * Program status (`terminal.programStatus`): `ESC]7501;state=<idle|working|blocked|done|error>[:kind=…]
+ * :app=omc[:msg=<base64>]ESC\`, repeated statuses write nothing, `state=clear` at teardown or when the
+ * setting turns off.
+ *
+ * Everything here runs on the UI thread.
+ */
+#ifndef OMC_UI_SIGNALS_H
+#define OMC_UI_SIGNALS_H
+
+#include "core/core.h"
+#include "core/json.h"
+
+typedef struct ui ui_t;
+
+typedef enum { RUN_IDLE, RUN_WORKING, RUN_BLOCKED, RUN_DONE, RUN_ERROR } run_state_t;
+
+/* pushTerminalTitle + initTerminalTitleState + initProgramStatus + the first session title */
+void ui_signals_init(ui_t *u);
+/* disposeTerminalTitleState + disposeProgramStatus + popTerminalTitle (UI teardown) */
+void ui_signals_dispose(void);
+/* setSessionTerminalTitle from the live session name / cwd (rename, new session, resume, title generated) */
+void ui_signals_session_title(void);
+/* setRunStatus; kind ("question" | "permission") and msg only for blocked / error */
+void ui_signals_run_status(run_state_t state, const char *kind, const char *msg);
+/* the settings may have changed (tui.titleState, tui.titleSpinner, terminal.programStatus) */
+void ui_signals_settings_changed(void);
+
+/* agent events (event-controller.ts): agent_start -> working; an `ask` tool call blocks on a question until
+ * its tool_execution_end */
+void ui_signals_agent_start(void);
+void ui_signals_tool_start(const char *tool_call_id, const char *tool_name, const json_t *args);
+void ui_signals_tool_end(const char *tool_call_id);
+/* the run settled (its last agent_end): run status done/error/idle from the run's messages, then the error
+ * and completion notifications (`error.notify`, `completion.notify`) */
+void ui_signals_run_settled(const json_t *run_messages, bool interrupted);
+/* agent_end keeps its messages; the worker's end settles the run with them (continuations of one prompt —
+ * stop recoveries, plan reminders — are non-terminal settles in omp) */
+void ui_signals_agent_end(const json_t *run_messages);
+void ui_signals_settle(void);
+/* the ask tool is waiting for an answer (`ask.notify`) */
+void ui_signals_ask_waiting(void);
+
+/* pure helpers (tests) */
+char *ui_title_compose(const char *label, run_state_t state, int frame, bool enabled, const char *style, bool static_host);
+char *ui_program_status_report(run_state_t state, const char *kind, const char *msg);
+char *ui_title_sanitize(const char *s); /* control characters dropped, trimmed; NULL when empty */
+size_t ui_title_spinner_frames(const char *style, const char *const **frames);
+
+#endif

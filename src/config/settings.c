@@ -209,12 +209,47 @@ static void del_path(json_t *root, const char *path) {
     strvec_free(&parts);
 }
 
+/* change listeners (omp Setting.listen): called after a write, outside the lock, on the writing thread */
+#define MAX_LISTENERS 8
+static struct {
+    void (*fn)(void *ud);
+    void *ud;
+} g_listeners[MAX_LISTENERS];
+static size_t g_nlisteners;
+
+void settings_on_change(void (*fn)(void *ud), void *ud) {
+    pthread_mutex_lock(&g_mu);
+    if (g_nlisteners < MAX_LISTENERS) g_listeners[g_nlisteners++] = (typeof(g_listeners[0])){fn, ud};
+    pthread_mutex_unlock(&g_mu);
+}
+
+void settings_off_change(void (*fn)(void *ud), void *ud) {
+    pthread_mutex_lock(&g_mu);
+    for (size_t i = 0; i < g_nlisteners; i++) {
+        if (g_listeners[i].fn != fn || g_listeners[i].ud != ud) continue;
+        memmove(&g_listeners[i], &g_listeners[i + 1], (g_nlisteners - i - 1) * sizeof g_listeners[0]);
+        g_nlisteners--;
+        break;
+    }
+    pthread_mutex_unlock(&g_mu);
+}
+
+static void notify_change(void) {
+    typeof(g_listeners[0]) copy[MAX_LISTENERS];
+    pthread_mutex_lock(&g_mu);
+    size_t n = g_nlisteners;
+    memcpy(copy, g_listeners, n * sizeof copy[0]);
+    pthread_mutex_unlock(&g_mu);
+    for (size_t i = 0; i < n; i++) copy[i].fn(copy[i].ud);
+}
+
 void settings_set_runtime(const char *path, json_t *val) {
     ensure();
     pthread_mutex_lock(&g_mu);
     set_path(g_runtime, path, val);
     rebuild();
     pthread_mutex_unlock(&g_mu);
+    notify_change();
 }
 
 void settings_unset_runtime(const char *path) {
@@ -223,6 +258,7 @@ void settings_unset_runtime(const char *path) {
     del_path(g_runtime, path);
     rebuild();
     pthread_mutex_unlock(&g_mu);
+    notify_change();
 }
 
 /* Bun's YAML.stringify (omp stringifyYamlConfig) ends the document without a trailing newline */
@@ -256,6 +292,7 @@ int settings_set_global(const char *path, json_t *val) {
     rebuild();
     int rc = save_global();
     pthread_mutex_unlock(&g_mu);
+    notify_change();
     return rc;
 }
 
@@ -266,6 +303,7 @@ int settings_unset_global(const char *path) {
     rebuild();
     int rc = save_global();
     pthread_mutex_unlock(&g_mu);
+    notify_change();
     return rc;
 }
 

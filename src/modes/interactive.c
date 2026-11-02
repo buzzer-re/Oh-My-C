@@ -36,6 +36,7 @@
 #include "session/export_html.h"
 #include "session/dump.h"
 #include "coding/advisor.h"
+#include "ui/signals.h"
 
 static void maybe_plan_approval(ui_t *u, const char *tool, const json_t *result, bool is_error);
 
@@ -114,6 +115,7 @@ static void ui_apply_event(void *ud) {
         }
         break;
     case AGENT_EV_TOOL_START: {
+        ui_signals_tool_start(e->id, e->name, e->args);
         msgview_t *v = toolcard_start(u, e->id, e->name, e->args ? e->args : json_obj());
         e->args = NULL;
         hmap_put(&u->tools, e->id, v);
@@ -131,16 +133,19 @@ static void ui_apply_event(void *ud) {
         toolcard_result(u, v, e->id, e->result, e->type != AGENT_EV_TOOL_END, e->is_error);
         e->result = NULL;
         if (e->type == AGENT_EV_TOOL_END) hmap_del(&u->tools, e->id);
+        if (e->type == AGENT_EV_TOOL_END) ui_signals_tool_end(e->id);
         if (pres) maybe_plan_approval(u, e->name, pres, e->is_error);
         json_free(pres);
         break;
     }
     case AGENT_EV_AGENT_END:
+        ui_signals_agent_end(e->msg); /* settled when the worker ends (worker_done) */
         ui_working_stop(u);
         if (!u->compact_pending) ui_chrome_turn(u, false); /* a /compact that interrupted the turn resumes it */
         break;
     case AGENT_EV_AGENT_START:
         toolcard_break_group(u);
+        ui_signals_agent_start();
         ui_chrome_turn(u, true);
         ui_agent_start(u);
         break;
@@ -179,6 +184,7 @@ static void ui_listener(void *ud, const agent_event_t *ev) {
     e->u = u;
     e->type = ev->type;
     if (ev->message) e->msg = json_clone(ev->message);
+    if (ev->type == AGENT_EV_AGENT_END && ev->messages) e->msg = json_clone(ev->messages);
     if (ev->tool_call_id) e->id = xstrdup(ev->tool_call_id);
     if (ev->tool_name) e->name = xstrdup(ev->tool_name);
     if (ev->args) e->args = json_clone(ev->args);
@@ -267,6 +273,7 @@ static void post_notice(void *x) {
                                                           : "info";
     /* a generated session title only shows in the status band / working row, as in omp */
     if (strcmp(e->name, "title")) add_notice(e->u, lvl, e->out);
+    else ui_signals_session_title();
     tui_request_render(e->u->tui);
     uiev_free(e);
 }
@@ -300,6 +307,7 @@ static void worker_done(void *ud) {
     ui_t *u = ud;
     pthread_join(u->worker, NULL);
     u->worker_running = false;
+    ui_signals_settle();
     iq_flush_deferred(u);
     plan_exec_resume(u);
     /* deferred `!cmd` results, a pending /compact, queued input left behind by an interrupted run */
@@ -593,6 +601,7 @@ static void ask_done(void *ud, json_t *answers) {
 
 static void ask_start(void *ud) {
     ui_t *u = ud;
+    ui_signals_ask_waiting();
     ui_ask_dialog_show(u, u->ask_questions, ask_done, u);
 }
 
@@ -1505,7 +1514,15 @@ static void export_command(ui_t *u, const char *arg) {
     strvec_free(&parts);
 }
 
+static bool handle_command_inner(ui_t *u, const char *line);
+/* a command may rename, replace or move the session: the terminal title follows */
 static bool handle_command(ui_t *u, const char *line) {
+    bool r = handle_command_inner(u, line);
+    ui_signals_session_title();
+    return r;
+}
+
+static bool handle_command_inner(ui_t *u, const char *line) {
     /* executeBuiltinSlashCommand: name or alias from the shared registry; a command that takes no
      * arguments does not match when some are given (the text goes to the model) */
     slash_parsed_t parsed;
@@ -2284,6 +2301,8 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
     return false;
 }
 
+static void signals_init_cb(void *ud) { ui_signals_init(ud); }
+
 static void initial_prompt_cb(void *ud) {
     job_t *j = ud;
     start_prompt(j->u, j->text);
@@ -2391,6 +2410,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     a->env->ui.ud = &u;
     app_set_plan_review_ui(a, true);
     g_pr.u = &u;
+    tui_post(u.tui, signals_init_cb, &u); /* the terminal title / program status claim the terminal first */
     job_t *init_job = NULL;
     if (initial) {
         init_job = xcalloc(1, sizeof(*init_job));
@@ -2406,6 +2426,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
         if (init_job) tui_post(u.tui, initial_prompt_cb, init_job);
     }
     int code = tui_run(u.tui);
+    ui_signals_dispose();
     if (u.worker_running) {
         app_abort(a);
         pthread_join(u.worker, NULL);
