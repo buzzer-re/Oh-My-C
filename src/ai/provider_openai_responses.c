@@ -331,8 +331,21 @@ json_t *oair_convert_input(const ai_model_t *m, const ai_context_t *ctx, int var
                 (!pprov || str_eq(pprov, m->provider))) {
                 json_t *it;
                 json_arr_foreach(json_get(pp, "items"), k, it) {
-                    if (!json_is_obj(it)) continue;
-                    json_t *c = json_clone(it);
+                    /* sanitizeOpenAIResponsesHistoryItemsForReplay: item ids dropped (computer calls keep theirs),
+                     * reasoning reduced to its replayable fields, output-only statuses stripped */
+                    if (!json_is_obj(it) || str_eq(json_get_str(it, "type"), "item_reference")) continue;
+                    json_t *c;
+                    if (str_eq(json_get_str(it, "type"), "reasoning")) {
+                        c = json_obj();
+                        json_set_str(c, "type", "reasoning");
+                        if (json_is_arr(json_get(it, "summary"))) json_set(c, "summary", json_clone(json_get(it, "summary")));
+                        if (json_is_arr(json_get(it, "content"))) json_set(c, "content", json_clone(json_get(it, "content")));
+                        if (json_get(it, "encrypted_content")) json_set(c, "encrypted_content", json_clone(json_get(it, "encrypted_content")));
+                    } else {
+                        c = json_clone(it);
+                        if (!str_eq(json_get_str(it, "type"), "computer_call")) json_del(c, "id");
+                        json_del(c, "status");
+                    }
                     if (str_eq(json_get_str(c, "type"), "function_call") || str_eq(json_get_str(c, "type"), "custom_tool_call"))
                         if (json_get_str(c, "call_id")) strvec_push(&known, json_get_str(c, "call_id"));
                     json_push(out, c);
@@ -1417,9 +1430,16 @@ json_t *ai_openai_remote_compact(const ai_model_t *m, const char *api_key, const
     json_arr_foreach(previous, i, it) json_push(input, json_clone(it));
     json_t *conv = oair_convert_input(m, &ctx, variant);
     json_arr_foreach(conv, i, it) {
-        json_t *c = json_clone(it);
-        /* stripOpenAIResponsesOutputOnlyStatusesForReplay */
-        if (!str_eq(json_get_str(c, "type"), "message") || !str_eq(json_get_str(c, "role"), "assistant")) json_del(c, "status");
+        json_t *c;
+        if (!json_get_str(it, "type") && json_get_str(it, "role")) {
+            /* native history items are typed messages */
+            c = json_obj();
+            json_set_str(c, "type", "message");
+            const char *k;
+            json_t *v;
+            json_obj_foreach(it, x, k, v) json_set(c, k, json_clone(v));
+        } else c = json_clone(it);
+        json_del(c, "status"); /* stripOpenAIResponsesOutputOnlyStatusesForReplay */
         json_push(input, c);
     }
     json_free(conv);
@@ -1436,7 +1456,7 @@ json_t *ai_openai_remote_compact(const ai_model_t *m, const char *api_key, const
     json_t *out = NULL;
     if (!build_headers(&h, m, &o, body, err)) goto done;
     http_headers_set(&h, "Content-Type", "application/json");
-    http_headers_set(&h, "Accept", "application/json");
+    http_headers_set(&h, "Accept", "*/*");
     char *url = compact_endpoint(m);
     char *payload = json_dump(body, 0);
     http_req_t req = {.method = "POST", .url = url, .headers = &h, .body = payload, .body_len = strlen(payload),

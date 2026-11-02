@@ -97,7 +97,24 @@ class H(BaseHTTPRequestHandler):
                     answers[qid] = {"type": "score", "score": 2, "probabilities": {"2": 1}, "confidence": 1}
             res = {"model": body.get("model"), "answers": answers, "usage": {"input_tokens": 10, "output_tokens": 2}}
             return self.reply(200, {"result": res, "success": True, "errors": []} if "/ai/run/" in path else res)
+        if path.endswith("/responses/compact"):
+            # OpenAI remote compaction: the retained user turns plus an opaque compaction item
+            users = [i for i in body.get("input") or [] if i.get("type") == "message" and i.get("role") == "user"]
+            out = users[-1:] + [{"type": "compaction", "id": "cmp_1", "encrypted_content": "ENC:%d" % len(body.get("input") or [])}]
+            return self.reply(200, {"id": "resp_c", "object": "response.compaction", "output": out,
+                                    "usage": {"input_tokens": 1234, "output_tokens": 56}})
         kind, text = last_turn(body)
+        if path.endswith("/messages") and body.get("compaction") is not None:
+            # Anthropic on-demand compaction: a signed compaction block, stop_reason "compaction"
+            self.sse_start()
+            self.ev({"type": "message_start", "message": {"id": "m1", "role": "assistant", "model": body.get("model"), "content": [],
+                                                          "usage": {"input_tokens": 900, "output_tokens": 0}}}, "message_start")
+            self.ev({"type": "content_block_start", "index": 0, "content_block": {"type": "compaction", "content": "Native summary of the session.",
+                                                                                  "signature": "SIG123"}}, "content_block_start")
+            self.ev({"type": "content_block_stop", "index": 0}, "content_block_stop")
+            self.ev({"type": "message_delta", "delta": {"stop_reason": "compaction"}, "usage": {"output_tokens": 40}}, "message_delta")
+            self.ev({"type": "message_stop"}, "message_stop")
+            return self.end()
         if path.endswith("/chat/completions"):
             self.sse_start()
             if kind == "user" and text.startswith(("bash:", "call:")):
