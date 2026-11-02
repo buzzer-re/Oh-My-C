@@ -31,7 +31,7 @@ providers:
           efforts: [low, medium, high, xhigh]
 YML
 MOCK_LOG="$T/req.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $PORT & MPID=$!
-trap 'kill $MPID 2>/dev/null; rm -rf "$T"' EXIT
+trap 'kill $(jobs -p) $MPID 2>/dev/null; rm -rf "$T"' EXIT
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break; sleep 0.1; done
 export OMC_CODING_AGENT_DIR="$T/agent" MOCK_KEY=x OMC_NO_TITLE=1 OMC_NO_LOCAL_DISCOVERY=1
 cd "$T/work"
@@ -343,7 +343,7 @@ rm -rf .omc/commands
 # Amazon Bedrock ConverseStream against a mock that verifies SigV4 independently and speaks event-stream
 BPORT=$((PORT + 1))
 MOCK_LOG="$T/bedrock.jsonl" MOCK_BEDROCK_BEARER=br-token python3 -I "$ROOT/tests/e2e/mock_bedrock.py" $BPORT & BPID=$!
-trap 'kill $MPID $BPID 2>/dev/null; rm -rf "$T"' EXIT
+trap 'kill $(jobs -p) $MPID $BPID 2>/dev/null; rm -rf "$T"' EXIT
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$BPORT) 2>/dev/null && break; sleep 0.1; done
 cp "$T/agent/models.yml" "$T/models.yml.bak"
 printf '  amazon-bedrock:\n    baseUrl: http://127.0.0.1:%s\n' $BPORT >> "$T/agent/models.yml"
@@ -364,7 +364,7 @@ cp "$T/models.yml.bak" "$T/agent/models.yml"
 # Assist (google-gemini-cli / google-antigravity) with a stored OAuth credential, against a local mock; no real creds.
 GPORT=$((PORT + 2))
 MOCK_LOG="$T/google.jsonl" python3 -I "$ROOT/tests/e2e/mock_google.py" $GPORT & GPID=$!
-trap 'kill $MPID $BPID $GPID 2>/dev/null; rm -rf "$T"' EXIT
+trap 'kill $(jobs -p) $MPID $BPID $GPID 2>/dev/null; rm -rf "$T"' EXIT
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$GPORT) 2>/dev/null && break; sleep 0.1; done
 printf '  google-vertex:\n    baseUrl: http://127.0.0.1:%s\n  google-gemini-cli:\n    baseUrl: http://127.0.0.1:%s\n  google-antigravity:\n    baseUrl: http://127.0.0.1:%s\n' \
     $GPORT $GPORT $GPORT >> "$T/agent/models.yml"
@@ -399,7 +399,7 @@ if [ -f "$T/auth.json.bak" ]; then mv "$T/auth.json.bak" "$T/agent/auth.json"; e
 # Cursor agent (Connect + protobuf over HTTP/1.1: RunSSE stream + BidiAppend unary appends, exec channel, KV blobs)
 CPORT=$((PORT + 3))
 MOCK_LOG="$T/cursor.jsonl" MOCK_CURSOR_TOKEN=cur-token python3 -I "$ROOT/tests/e2e/mock_cursor.py" $CPORT & CPID=$!
-trap 'kill $MPID $BPID $GPID $CPID 2>/dev/null; rm -rf "$T"' EXIT
+trap 'kill $(jobs -p) $MPID $BPID $GPID $CPID 2>/dev/null; rm -rf "$T"' EXIT
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$CPORT) 2>/dev/null && break; sleep 0.1; done
 printf '  cursor:\n    baseUrl: http://127.0.0.1:%s\n' $CPORT >> "$T/agent/models.yml"
 CENV=(env HOME="$T" CURSOR_ACCESS_TOKEN=cur-token)

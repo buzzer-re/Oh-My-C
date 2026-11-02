@@ -1,9 +1,9 @@
 # Sourced by tests/e2e/run.sh: context maintenance (coding/compaction.c) over RPC against the mocks — the
 # compaction.methodOrder ladder, omp's summary requests, overflow recovery, and provider-native compaction
 # (OpenAI Responses /responses/compact, the Anthropic compaction beta) with its replay on the next turn.
-CPORT=$((PORT + 11))
-MOCK_LOG="$T/cprov.jsonl" python3 -I "$ROOT/tests/e2e/mock_providers.py" $CPORT & CPID=$!
-for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$CPORT) 2>/dev/null && break; sleep 0.1; done
+CMPORT=$((PORT + 11))
+MOCK_LOG="$T/cprov.jsonl" python3 -I "$ROOT/tests/e2e/mock_providers.py" $CMPORT & CMPID=$!
+for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$CMPORT) 2>/dev/null && break; sleep 0.1; done
 cagent() { # dir config-yaml: an agent dir with the mock providers and the given config
     mkdir -p "$1"
     cat > "$1/models.yml" <<YML
@@ -17,7 +17,7 @@ providers:
         contextWindow: 1000000
         maxTokens: 4096
   mockr:
-    baseUrl: http://127.0.0.1:$CPORT/v1
+    baseUrl: http://127.0.0.1:$CMPORT/v1
     apiKey: MOCK_KEY
     api: openai-responses
     models:
@@ -27,7 +27,7 @@ providers:
         remoteCompaction:
           enabled: true
   mocka:
-    baseUrl: http://127.0.0.1:$CPORT
+    baseUrl: http://127.0.0.1:$CMPORT
     apiKey: MOCK_KEY
     api: anthropic-messages
     models:
@@ -112,4 +112,4 @@ import json, sys
 rs = [json.loads(l) for l in open(sys.argv[1])]
 m = rs[-1]["body"]["messages"][0]
 print(m["role"], m["content"][0].get("type"), m["content"][0].get("signature"))' "$T/cprov.jsonl"
-kill $CPID 2>/dev/null
+kill $CMPID 2>/dev/null
