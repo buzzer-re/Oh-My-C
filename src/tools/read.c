@@ -392,7 +392,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
     const char *ent = sel->entity ? sel->entity : "file";
     sb_t b = SB_INIT;
     json_t *details = json_obj();
-    g_col_max = sel->raw ? 0 : settings_int("tools.outputMaxColumns", 768);
+    g_col_max = sel->raw || sel->resource ? 0 : settings_int("tools.outputMaxColumns", 768); /* buildInMemoryTextResult keeps lines whole */
     g_col_first = g_col_last = 0;
     json_set_str(details, "resolvedPath", abs);
     int64_t seen_lo = -1, seen_hi = -1;
@@ -480,9 +480,10 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         vec_free(&runs);
         free(keep);
     } else if (!sel->ranges.n) {
-        int64_t limit = sel->resource && len <= 50 * 1024 && total <= 3000 ? MAX(total, 1) : DEFAULT_LIMIT;
+        /* an in-memory resource has no default line limit: truncateHead's 50 KB / 3000-line budget pages it */
+        int64_t limit = sel->resource ? MAX(total, 1) : DEFAULT_LIMIT;
         int64_t max_lines = MIN(limit, OUT_DEFAULT_MAX_LINES);
-        int64_t budget = page_budget(0, max_lines, numbered), cbytes, sbytes;
+        int64_t budget = sel->resource ? (int64_t)READ_MAX_BYTES : page_budget(0, max_lines, numbered), cbytes, sbytes;
         bool stopped;
         int64_t got = collect_window(&t.lines, 0, max_lines, budget, limit, &cbytes, &sbytes, &stopped);
         if (got == 0 && total > 0) got = 1; /* oversized first line: keep omc's capped single-line page */
