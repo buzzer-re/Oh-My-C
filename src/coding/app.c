@@ -1808,7 +1808,7 @@ static int branch_summary(app_t *a, const json_t *entries, const char *custom, c
     if (!prompt) {
         json_free(ops);
         *summary = xstrdup("No content to summarize");
-        *details = NULL;
+        *details = json_parse_str("{\"readFiles\":[],\"modifiedFiles\":[]}");
         return 0;
     }
     char *sys = prompt_load_or("agent/compaction/prompts/summarization-system.md", "Summarize.");

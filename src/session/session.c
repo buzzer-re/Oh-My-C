@@ -566,7 +566,9 @@ static void emit_entry(json_t *out, const json_t *e) {
         if (json_get_str(e, "customType")) json_set_str(m, "customType", json_get_str(e, "customType"));
         json_push(out, m);
     } else if (str_eq(t, "branch_summary")) {
-        json_push(out, summary_msg("agent/compaction/prompts/branch-summary-context.md", json_get_str(e, "summary")));
+        json_t *bm = summary_msg("agent/compaction/prompts/branch-summary-context.md", json_get_str(e, "summary"));
+        json_del(bm, "historyRewrite"); /* only a compaction floors the context gauge (getContextBreakdown) */
+        json_push(out, bm);
     }
 }
 

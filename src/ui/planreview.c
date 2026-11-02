@@ -2048,6 +2048,7 @@ static bool he_key(tui_component_t *c, const tui_key_t *k) {
     if (h->done) return true;
     if (tui_kb(k, "app.message.followUp")) he_finish(h, tui_editor_get_text(h->ed));
     else if (tui_kb(k, "app.interrupt")) he_finish(h, NULL);
+    else if (tui_key_matches(k, "enter")) tui_editor_insert_text(h->ed, "\n"); /* hook style: Enter is a newline */
     else tui_component_handle_key(&h->ed->base, k);
     tui_component_request_render(c);
     return true;
@@ -2062,6 +2063,17 @@ static void he_destroy(tui_component_t *c) {
 
 static const tui_component_vt HE_VT = {"hook-editor", he_render, he_key, NULL, he_destroy};
 
+/* getEditorTheme(): borderMuted frame, accent */
+static char *he_border(void *ud, const char *s) {
+    UNUSED(ud);
+    return tui_fgs(NULL, TUI_TC_BORDER_MUTED, s);
+}
+
+static char *he_accent(void *ud, const char *s) {
+    UNUSED(ud);
+    return tui_fgs(NULL, TUI_TC_ACCENT, s);
+}
+
 void ui_hook_editor(ui_t *u, const char *title, void (*cb)(void *ud, const char *text), void *ud) {
     hook_editor_t *h = xcalloc(1, sizeof *h);
     tui_component_init(&h->base, &HE_VT);
@@ -2071,6 +2083,8 @@ void ui_hook_editor(ui_t *u, const char *title, void (*cb)(void *ud, const char 
     h->ud = ud;
     h->ed = tui_editor_new();
     h->ed->disable_submit = true;
+    tui_editor_set_composer(h->ed, "box"); /* the Editor's default border style, not the composer shape */
+    tui_editor_set_chrome_colors(h->ed, he_border, he_accent, NULL, NULL);
     int rows = u->tui ? tui_term(u->tui)->rows : 40;
     h->ed->max_height = MAX(3, (rows > 0 ? rows : 40) - 12);
     if (u->editor) snprintf(h->ed->text_fg, sizeof h->ed->text_fg, "%s", u->editor->text_fg);

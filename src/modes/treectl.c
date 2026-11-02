@@ -106,14 +106,8 @@ static void navigate(ui_t *u, bool summarize, const char *custom) {
     }
 }
 
-static void custom_done(void *ud, const char *text) {
-    ui_t *u = ud;
-    if (!text) { /* cancelled: back to the summary choice */
-        summary_prompt(u);
-        return;
-    }
-    navigate(u, true, text);
-}
+/* a cancelled editor leaves the summary already chosen, so omp summarizes with the default prompt */
+static void custom_done(void *ud, const char *text) { navigate((ui_t *)ud, true, text); }
 
 static void summary_choice(void *ud, int index) {
     ui_t *u = ud;
