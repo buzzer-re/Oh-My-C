@@ -216,13 +216,29 @@ metadata server). Both have process-wide caches.
 
 There are two levels:
 
-1. **Transport** (`ai_sse_post_ex`, `ai_stream_post`): a request that fails *before any response
-   data arrived* with a network error, a retryable status (408, 409, 425, 429, 500, 502–504, 520,
-   522, 524, 529) or a 400 "overloaded" body is retried up to
-   `opts.max_retries` (default 3), with backoff `1s << attempt` or the server's `retry-after-ms` /
-   `Retry-After` (seconds or HTTP date). A server delay above `max_retry_delay_ms` (default 60 s)
-   fails immediately with the delay in the message. Once data has streamed, nothing is retried
-   here.
+1. **Transport** (`ai_sse_post_ex`, `ai_stream_post`, policies in `ai.h` `AI_RETRY_*`, helpers in `ai/retry.c`): a
+   request that fails *before any response data arrived* is retried per provider like omp:
+   - OpenAI chat completions / Responses / Azure (`postOpenAIStream` → pi-utils `fetchWithRetry`): 6 attempts at
+     500 ms·2ⁿ for network errors and 408/429/5xx; a LiteLLM concurrency-admission 429 (`rate_limit_type:
+     max_parallel_requests`) fails at once. Chat completions then retries one replay-safe provider error after
+     500 ms (another 6 attempts) unless `max_http_attempts` (omp `maxHttpAttempts`; memory requests use 3) is set;
+     Azure Responses also gets that one retry. So a plain 503 costs 12 requests / ~31.5 s per turn attempt.
+   - Anthropic (anthropic.ts provider loop, client retries pinned to 0): 10 retries of provider-retryable errors
+     (`isProviderRetryableError`: 408/429/5xx and transient wording, never usage limits or other 4xx) after
+     min(0.5 s·2ⁿ, 8 s) with up to 25% jitter; a header retry-after wins when longer, one above `retry.maxDelayMs`
+     fails at once (11 requests / ~48 s for a plain 503).
+   - Codex SSE: 6 attempts at 500 ms·(n+1), 5 min cap. Ollama: 5 attempts at 2 s / 5 s / 10 s, llama.cpp tool-call
+     parse 500s fail at once. Bedrock: fetchWithRetry defaults (5 attempts). Gemini CLI: 4 attempts at 1 s·2ⁿ on the
+     last endpoint. Google generative AI / Vertex: no transport retries (one request).
+   - fetchWithRetry delays use the server hint (`extractRetryHint`: retry-after-ms, Retry-After, x-ratelimit-reset*,
+     then body text such as "Please retry in 250ms", `"retryDelay"`, "try again in 5 min", "reset after 1h2m3s");
+     a hint above the cap returns the response unretried. A final HTTP error whose headers carry retry timing gets
+     omp's ` retry-after-ms=N` suffix (read by the turn level).
+   - Replay-safe stream retries (`ai_replay_safe_stream`, omp `withReplaySafeStreamRetry`): pre-output events of a
+     discarded attempt never reach the agent; benign empty completions are retried twice (500 ms, 1 s) for OpenAI
+     chat completions / Responses, Anthropic and Ollama (`accept_empty_response` turns it off).
+   Once data has streamed, nothing is retried here. The e2e mock answers retryable `fail:` statuses with
+   `retry-after-ms: 0` (`MOCK_FAIL_RETRY_AFTER_MS`) so these retries are immediate in the suite.
 2. **Turn** (`hook_should_retry` in `app.c`): an assistant message that ended in error is
    classified. Context overflow (by message text, or a provider `errorFlags: ["contextOverflow"]`)
    runs the compaction ladder with a retry of the turn (see [agent.md](agent.md#compaction-srccodingcompactionc));
@@ -233,10 +249,8 @@ There are two levels:
    (`mr_reason_window_ms`): 5 s for concurrency caps, 30 s for rate limits, and 45–75 s for model capacity only
    with a 429/402 status or `429` / `MODEL_CAPACITY_EXHAUSTED` / `MODEL_CAPACITY_EXCEEDED` / resource-exhausted
    wording (a plain 503 or 529 keeps the exponential base). A provider retry-after wins when longer; a wait above
-   `retry.maxDelayMs` (5 min) fails fast. `retry.enabled: false` turns this off. Not ported: omp's transport layer
-   under each turn attempt (pi-utils `fetchWithRetry`: 6 attempts at 500 ms·2ⁿ capped at 60 s for OpenAI-family
-   streams, then one replay-safe provider-error retry after 500 ms), so omc sends 4 requests per attempt where omp
-   sends 12.
+   `retry.maxDelayMs` (5 min) fails fast. `retry.enabled: false` turns this off. The transport retries of item 1 run under every turn attempt, as in
+   omp.
 3. **Model fallback** (`try_retry_fallback` in `app.c`, chains in `config/model_resolver.c`): `retry.fallbackChains`
    is walked on retryable and hard errors (see [status.md](status.md), "Retry model fallback").
 
