@@ -5,7 +5,7 @@ prioritized gap list. [status.md](status.md) records what agents ported. This fi
 upstream side instead, so it also covers features nobody had listed.
 
 - **Upstream reference:** omp v18.14.2 (`7efd772`), the pin in [../UPDATE.md](../UPDATE.md).
-- **omc reference:** main at `41f5226`.
+- **omc reference:** audited at main `41f5226`. The WP rows, the top-15 list and the sections were updated by each work package through the 2026-11-02 pause (see status.md "Current state").
 - **Method:** each category was enumerated from the upstream sources named in its section. Each item was
   checked in omc's code, and cheap cases were probed with `build/omc` against `tests/e2e/mock_openai.py`
   using throwaway agent dirs (no real models).
@@ -23,10 +23,7 @@ upstream side instead, so it also covers features nobody had listed.
 Anything that is plain HTTP, files, git or a subprocess is in scope, even when omp happens to implement it
 in TS.
 
-When status.md and this file disagree, check the code. Several status.md rows marked ✅ are 🟡 here:
-- the RPC and ACP wire shapes;
-- the "Slash commands" row, where many commands are one-line notices that stand in for omp overlays;
-- compaction, which is a single summary pass.
+When status.md and this file disagree, check the code. The original audit found several status.md ✅ rows that were really 🟡: the RPC/ACP wire shapes, the slash commands, and compaction. WP-4, WP-13, WP-15 and WP-16 have since reworked all three. Their remaining gaps are in each WP row.
 
 ## Contents
 

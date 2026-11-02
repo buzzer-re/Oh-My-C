@@ -157,6 +157,26 @@ To refresh one: reproduce the screen with `compare.sh`, capture omp with `shot`,
   `make test` guards it without omp.
 - Never use real credentials or the user's agent dir. Always use a temp `OMC_CODING_AGENT_DIR` /
   `PI_CODING_AGENT_DIR`.
+- Never let a test reach a real endpoint. Route every provider, search and usage URL to a mock
+  (`OMC_PROVIDER_URL_REWRITE` or the per-provider base URLs).
+- In e2e shell scripts, give every mock its own PID/port variable names. `run.sh` sources its sub-scripts
+  into one shell, so a reused name (`CPID`) leaks a mock past the `EXIT` trap. The traps also kill
+  `$(jobs -p)` as a backstop.
+
+## Running several builds or agents on one machine
+
+The dev VM has 7.7 GB RAM, a 4 GB swap file that a reboot drops (`sudo swapon /swap`), and a RAM-backed `/tmp`.
+Parallel suites and omp comparisons have OOM-killed it, so when more than one build or agent runs at once:
+- Put temp files on disk: `export TMPDIR=/home/neo.guest/omc-scratch/tmp/<name>`.
+- Build with `make -B -j3`. `-B` is needed because the shared filesystem has clock skew.
+- Run the full suite one at a time: `flock -o /home/neo.guest/omc-scratch/test.lock make test`. The `-o`
+  matters: without it the mocks the suite spawns inherit the lock fd, and an orphaned mock holds the
+  lock forever.
+- Keep at most one tmux omc/omp comparison alive, and kill it right after the capture. Never
+  `pkill` by pattern; another run's mocks may match.
+- `sed -i` here resets file modes to 0600, so restore them from git afterwards (`run.sh` and the e2e
+  scripts must stay executable).
+- `#ifdef __APPLE__` code never compiles on Linux, so run `build-tools/check_apple.sh` after touching it.
 
 ## Image pipeline
 

@@ -4,6 +4,25 @@ Status of the port against upstream oh-my-pi (reference: omp v18.14.2, see [UPDA
 This file is the single source of truth for what is implemented; it is updated with every change.
 [gaps.md](gaps.md) audits omp's full user-facing surface against omc and lists the missing pieces as prioritized work packages. Keep both in sync when a gap closes.
 
+## Current state (development paused 2026-11-02)
+
+Development is paused while the user tests omc day to day. Work resumes from user-reported gaps, not from the package list.
+
+**Merged into `main`, each with a green full suite.** All P0–P2 packages from gaps.md are on main, with their recorded leftovers:
+- WP-1 to WP-25, plus WP-22b.
+- The parts of WP-27, WP-28 and WP-29 listed below.
+- The mid-stream connection-drop recovery (§7b).
+- The cross-cutting fixes: macOS build check, e2e lock/mock leak, transport retries.
+
+**Not started or partial (see each WP row in gaps.md for detail):**
+- WP-26: settings honesty. The "304 of 402 inert" count in gaps.md predates most packages and needs a recount.
+- WP-27: `security_scan` / `security://` / `/security`, the hindsight memory backend, remote `tts` (needs a decision: omp advertises on-device voices) and `yield` (structured subagents).
+- WP-28: `/pause`, `/debug`, `/stats`, startup release notes, `/omfg`, `/tan`, `/cleanse`, `/vibe`, `/record` + `omc play`, and git-based plugins. The `/pause` gate and pause screen exist as **unmerged WIP** on branch `worktree-agent-aaedb39d4b55bc911` (worktree `.claude/worktrees/agent-aaedb39d4b55bc911`, commit `25035f1`). It is not built into main, so nothing half-done ships.
+- WP-29: vim mode, table charts, reactions, Mermaid/SVG/LaTeX (separate packages), and the image cache cap and cropping.
+- Also open: snapcompact; live job widgets (`async.widgets`); 14 of 22 usage fetchers; several web search engines and query directives; tokenizer-exact token counts (omc estimates ~4 chars/token); `commit` / `session pack` / `ttsr` CLI subcommands; Bedrock / Codex server-side compaction.
+
+**How to resume:** read AGENTS.md and "Running several builds or agents on one machine" in docs/testing.md. Build with `make -B -j3`. Run tests with `flock -o /home/neo.guest/omc-scratch/test.lock make test`. Run `build-tools/check_apple.sh` after touching `__APPLE__` code.
+
 ## Runtime & infrastructure
 | Area | Status | Notes |
 |---|---|---|

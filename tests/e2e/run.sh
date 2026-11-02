@@ -628,14 +628,15 @@ for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$DPORT) 2>/dev/null && break;
 mkdir -p "$T/dagent"
 DENV=(env -u OMC_NO_LOCAL_DISCOVERY OMC_CODING_AGENT_DIR="$T/dagent" OLLAMA_BASE_URL="http://127.0.0.1:$DPORT/ollama"
       LLAMA_CPP_BASE_URL="http://127.0.0.1:$DPORT/llama" LM_STUDIO_BASE_URL="http://127.0.0.1:$DPORT/lms/v1")
-# omp's loopback metadata probe (/api/show) has a 150 ms budget, which a loaded test machine can miss (the model then
-# falls back to defaults); retry the fresh discovery a few times so the check tests parsing, not scheduling
+# omp's loopback metadata probes (ollama /api/show, LM Studio /api/v0/models) have 150-250 ms budgets, which a loaded
+# test machine can miss (the model then falls back to defaults); retry the fresh discovery until every provider's
+# detail probe landed, so the checks test parsing, not scheduling
 # `models --json` rows as "provider id ctx=N [reasoning] [vision]"
 mrows() { python3 -I -c 'import json,sys
 for m in json.load(sys.stdin)["models"]:
     print(m["provider"], m["id"], "ctx=%s" % m["contextWindow"], *(["reasoning"] if m["reasoning"] else []), *(["vision"] if "image" in m["input"] else []))'; }
 dmodels() { local o; for _ in 1 2 3 4 5; do rm -f "$T/dagent/local-models.json"; o=$("${DENV[@]}" "$B" models --json 2>/dev/null | mrows)
-            [[ $o == *"ctx=40960 reasoning"* ]] && break; done; printf '%s\n' "$o"; }
+            [[ $o == *"ctx=40960 reasoning"* && $o == *"qwen2.5-vl-7b ctx=12000"* && $o == *"ctx=16384"* ]] && break; done; printf '%s\n' "$o"; }
 DOUT=$(dmodels)
 check "discover ollama"    "ollama qwen3:8b ctx=40960 reasoning"  printf '%s\n' "$DOUT"
 check "discover llama.cpp" "llama.cpp gemma-local.gguf ctx=16384"  printf '%s\n' "$DOUT"
