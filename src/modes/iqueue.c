@@ -498,7 +498,9 @@ void iq_queue_command(ui_t *u, const char *text) {
 
 /* ---------- Enter ---------- */
 
-void iq_submit(ui_t *u, const char *t, json_t *attachments) {
+void iq_submit(ui_t *u, const char *t, json_t *attachments) { iq_submit_mode(u, t, attachments, false); }
+
+void iq_submit_mode(ui_t *u, const char *t, json_t *attachments, bool loop_body) {
     app_sync_queue_modes(u->app);
     if (!*t && !json_len(attachments)) {
         json_free(attachments);
@@ -514,6 +516,7 @@ void iq_submit(ui_t *u, const char *t, json_t *attachments) {
     } else if (ix_side_file_command(u, t)) {
     } else if (ix_is_skill_command(u, t)) {
         /* /skill:<name>: Enter steers like free text; behind a compaction it queues as typed */
+        lp_set_prompt(u, t);
         if (u->bg_kind) {
             queue_compaction_message(u, t, "steer");
             json_free(attachments);
@@ -521,7 +524,10 @@ void iq_submit(ui_t *u, const char *t, json_t *attachments) {
         return;
     } else if (t[0] == '!') bang(u, t);
     else if (!python(u, t)) local = false;
-    if (!local && u->bg_kind) queue_compaction_message(u, t, "steer"); /* text-only behind a compaction */
+    if (!local && u->bg_kind) {
+        queue_compaction_message(u, t, "steer"); /* text-only behind a compaction */
+        if (loop_body) lp_set_prompt(u, t);
+    }
     if (local || u->bg_kind) {
         json_free(attachments);
         return;
@@ -535,10 +541,13 @@ void iq_submit(ui_t *u, const char *t, json_t *attachments) {
             json_free(attachments);
             agent_steer(u->app->agent, msg_user_text(x));
         }
+        if (x && loop_body) lp_set_prompt(u, t);
         free(x);
         ui_queue_refresh(u);
         return;
     }
+    /* while loop mode is on, an idle prompt becomes the loop prompt (armed before the run starts) */
+    lp_set_prompt(u, t);
     flush_pending_shell(u);
     ix_start_prompt_with(u, t, attachments);
 }
@@ -636,6 +645,7 @@ bool iq_escape(ui_t *u) {
         agent_abort(u->app->agent);
         return true;
     }
+    if (lp_escape(u)) return true; /* loop mode: Esc suspends the loop (and aborts the live turn) */
     if (u->worker_running) {
         restore_all(u);
         app_abort(u->app);

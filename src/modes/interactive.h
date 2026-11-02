@@ -23,6 +23,9 @@ void ix_invoke_skill(ui_t *u, const char *text, json_t *attachments, bool follow
 /* iqueue.c */
 /* Enter (text already trimmed and taken from the editor; attachments: staged images [{image, path?}], owned) */
 void iq_submit(ui_t *u, const char *text, json_t *attachments);
+/* ... `loop_body`: the inline prompt of `/loop … <prompt>` (submittedMode "loop": it becomes the loop prompt
+ * even when it steers a running turn or queues behind a compaction) */
+void iq_submit_mode(ui_t *u, const char *text, json_t *attachments, bool loop_body);
 void iq_follow_up(ui_t *u);                           /* app.message.followUp (ctrl+q / ctrl+enter) */
 void iq_dequeue(ui_t *u);                             /* app.message.dequeue (alt+up / shift+up) */
 bool iq_escape(ui_t *u);                              /* app.interrupt; false when Esc has nothing to do here */
@@ -47,6 +50,15 @@ void tc_tree_open(ui_t *u);   /* /tree: session tree selector, optional branch s
 void tc_rewind_open(ui_t *u); /* /branch, /rewind, doubleEscapeAction: fullscreen rewind selector */
 bool tc_escape(ui_t *u);      /* app.interrupt while a branch summary runs: abort it */
 void tc_shutdown(ui_t *u);    /* join a running branch summary */
+
+/* loopctl.c (InteractiveMode loop mode: /loop, setLoopPrompt, pauseLoop, the auto-resubmit) */
+char *lp_command(ui_t *u, const char *args);     /* handleLoopCommand: toggle; the inline prompt (owned) or NULL */
+bool lp_enabled(ui_t *u);
+void lp_set_prompt(ui_t *u, const char *prompt); /* setLoopPrompt (loop mode on only) */
+bool lp_escape(ui_t *u);                         /* app.interrupt with loop mode on: abort the turn, pause */
+bool lp_run_end(ui_t *u);                        /* a run ended idle: schedule the next iteration; true when loop mode is on */
+char *lp_autocomplete_description(ui_t *u);      /* /loop's live description (owned) */
+void lp_shutdown(ui_t *u);
 
 /* copyctl.c (builtin-collaboration.ts copy / open, SelectorController.showCopySelector) */
 void cc_copy_command(ui_t *u, const char *arg); /* /copy [code|cmd|link]: picker or the latest target */

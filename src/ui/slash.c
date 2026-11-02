@@ -134,6 +134,7 @@ static char *live_description(void *ud, const char *name) {
         return n ? xasprintf("Tools: %zu active / %zu available", n, n) : xstrdup("Tools: none available");
     }
     if (!strcmp(name, "login")) return xstrdup("Login: choose provider");
+    if (!strcmp(name, "loop")) return loop_autocomplete_description(u->loop);
     return NULL;
 }
 

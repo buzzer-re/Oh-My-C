@@ -330,7 +330,8 @@ static void worker_done(void *ud) {
     iq_flush_deferred(u);
     plan_exec_resume(u);
     /* deferred `!cmd` results, a pending /compact, queued input left behind by an interrupted run */
-    if (!iq_run_end(u) && u->goal_cont) tui_add_timer(u->tui, 800, false, goal_continue_cb, u);
+    /* the input waiter re-arms: loop mode re-submits its prompt, else a goal continuation may follow */
+    if (!iq_run_end(u) && !lp_run_end(u) && u->goal_cont) tui_add_timer(u->tui, 800, false, goal_continue_cb, u);
     tui_request_render(u->tui);
 }
 
@@ -2468,6 +2469,10 @@ static bool handle_command_inner(ui_t *u, const char *line) {
         cc_copy_command(u, arg);
     } else if (!strcmp(cmd, "open")) {
         cc_open_command(u, arg);
+    } else if (!strcmp(cmd, "loop")) {
+        char *prompt = lp_command(u, arg);
+        if (prompt) iq_submit_mode(u, prompt, NULL, true); /* the first iteration runs through the normal submit flow */
+        free(prompt);
     } else if (!strcmp(cmd, "fork")) {
         ui_btw_dispose(u);
         char *err = NULL;
@@ -3223,6 +3228,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     ui_btw_free(&u);
     tc_shutdown(&u);
     cc_shutdown(&u);
+    lp_shutdown(&u);
     iq_shutdown(&u);
     ui_agents_shutdown(&u);
     agent_unsubscribe(u.app->agent, ui_listener, &u);

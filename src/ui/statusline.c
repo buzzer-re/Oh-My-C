@@ -664,6 +664,25 @@ static char *render_segment(const char *id, const segctx_t *c) {
             free(w);
             return r;
         }
+        const loop_state_t *lp = c->u ? c->u->loop : NULL;
+        if (lp && lp->enabled) { /* /loop: state, budget left, condition */
+            const char *icon = lp->paused && *pause ? pause : sym("icon.loop");
+            char *label = loop_status_label(lp);
+            sb_t b = SB_INIT;
+            char *w = with_icon(icon, label);
+            sb_append(&b, w);
+            char *limit = loop_format_limit(&lp->limit, mono_ms());
+            if (limit) sb_appendf(&b, " %s", limit);
+            if (lp->has_cond) {
+                char *cs = loop_summarize_condition(&lp->cond, 40);
+                sb_appendf(&b, " %s", cs);
+                free(cs);
+            }
+            char *r = fgw(lp->paused ? TUI_TC_WARNING : TUI_TC_CUSTOM_MESSAGE_LABEL, sb_cstr(&b));
+            sb_free(&b);
+            free(w), free(label), free(limit);
+            return r;
+        }
         return NULL;
     }
     if (str_eq(id, "path")) {

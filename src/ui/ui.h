@@ -12,6 +12,7 @@
 
 #include "coding/app.h"
 #include "coding/goal.h"
+#include "coding/loop.h"
 #include "core/fs.h"
 #include "tui/ansi.h"
 #include "tui/components.h"
@@ -116,6 +117,7 @@ struct ui {
     int64_t last_left_tap;          /* ←← double-tap detector (LEFT_DOUBLE_TAP_*) */
     int left_taps;
     bool agents_dirty;              /* registry changed: badge / HUD / hub refresh pending (posted once) */
+    struct loop_state *loop;        /* /loop mode while enabled (modes/loopctl.c), NULL when off */
 };
 
 /* the session the view shows: the focused subagent's, else the main one */
