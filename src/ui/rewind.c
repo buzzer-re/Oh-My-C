@@ -24,14 +24,10 @@
 #define SLIDE_MS 160
 #define FAST_SCROLL 5
 
-typedef struct {
-    char *entry_id, *turn_id;
-    bool user;
-    size_t start, end;
-} target_t;
-
-typedef VEC(target_t) targets_t;
-typedef VEC(strvec_t) rows_t; /* rendered rows per transcript child */
+typedef ui_tx_target_t target_t;
+typedef ui_tx_targets_t targets_t;
+typedef ui_tx_rows_t rows_t;
+typedef ui_tx_composed_t composed_t;
 typedef VEC(size_t) idxv_t;
 
 typedef struct {
@@ -67,28 +63,31 @@ typedef struct {
     bool filtering;
     ui_input_t filter;
     rows_t main_rows; /* main rows of the last frame (filter haystack) */
-    /* scroll view */
-    int offset;
-    char *anchor_id;
-    int anchor_start, anchor_end, anchor_w, anchor_h, anchor_total;
+    ui_tx_view_t view;
     bool done;
 } rewind_t;
 
 static char *S(tui_tc_t slot, const char *s) { return tui_fgs(NULL, slot, s); }
 
-static void rows_free(rows_t *r) {
+void ui_tx_rows_free(ui_tx_rows_t *r) {
     for (size_t i = 0; i < r->n; i++) strvec_free(&r->v[i]);
     vec_free(r);
 }
 
-static void targets_free(targets_t *t) {
-    for (size_t i = 0; i < t->n; i++) free(t->v[i].entry_id), free(t->v[i].turn_id);
+void ui_tx_targets_free(ui_tx_targets_t *t) {
+    for (size_t i = 0; i < t->n; i++) {
+        free(t->v[i].entry_id), free(t->v[i].turn_id);
+        vec_free(&t->v[i].ents);
+    }
     vec_free(t);
 }
 
+#define rows_free ui_tx_rows_free
+#define targets_free ui_tx_targets_free
+
 /* ---------- entries ---------- */
 
-static bool is_transcript_entry(const json_t *e) {
+bool ui_tx_is_transcript_entry(const json_t *e) {
     const char *t = json_get_str(e, "type");
     return str_eq(t, "message") || str_eq(t, "custom_message");
 }
@@ -98,7 +97,7 @@ static bool user_initiator(const json_t *m) {
     return (str_eq(ct, "skill-prompt") || str_eq(ct, "collab-prompt")) && str_eq(json_get_str(m, "attribution"), "user");
 }
 
-static bool is_user_request(const json_t *e) {
+bool ui_tx_is_user_request(const json_t *e) {
     const char *t = json_get_str(e, "type");
     if (str_eq(t, "message")) {
         const json_t *m = json_get(e, "message");
@@ -131,7 +130,7 @@ static bool is_user_turn(const json_t *e) {
         free(t);
         return any;
     }
-    return is_user_request(e);
+    return ui_tx_is_user_request(e);
 }
 
 /* userTurnLabel: the prompt text on one line */
@@ -153,11 +152,11 @@ static char *user_turn_label(const json_t *e) {
 }
 
 /* appendOutlineEntries: replay `entries` into `c`, returning the selectable targets */
-static void replay(rewind_t *r, tui_container_t *c, const json_t *entries, targets_t *out) {
+void ui_tx_replay(ui_t *u, tui_container_t *c, const json_t *entries, ui_tx_targets_t *out) {
     size_t n = json_len(entries);
     size_t *ends = xmalloc((n ? n : 1) * sizeof *ends);
-    ui_chat_replay_into(r->u, c, entries, ends);
-    size_t before = 0;
+    size_t before = c->children.n;
+    ui_chat_replay_into(u, c, entries, ends);
     for (size_t i = 0; i < n; i++) {
         const json_t *e = json_at(entries, i);
         size_t after = ends[i];
@@ -166,9 +165,11 @@ static void replay(rewind_t *r, tui_container_t *c, const json_t *entries, targe
             prev) {
             free(prev->entry_id);
             prev->entry_id = xstrdup(json_get_str(e, "id"));
+            vec_push(&prev->ents, i);
             if (after > prev->end) prev->end = after;
         } else if (before < after) {
-            target_t t = {xstrdup(json_get_str(e, "id")), xstrdup(json_get_str(e, "id")), is_user_turn(e), before, after};
+            target_t t = {xstrdup(json_get_str(e, "id")), xstrdup(json_get_str(e, "id")), is_user_turn(e), before, after, {0}};
+            vec_push(&t.ents, i);
             vec_push(out, t);
         }
         before = after;
@@ -177,12 +178,12 @@ static void replay(rewind_t *r, tui_container_t *c, const json_t *entries, targe
 }
 
 /* recentTranscriptEntries: the tail from a user-request boundary within the last 600 entries */
-static json_t *recent_entries(const json_t *entries) {
+json_t *ui_tx_recent_entries(const json_t *entries) {
     size_t n = json_len(entries);
     size_t from = 0;
     if (n > RECENT_LIMIT)
         for (size_t i = n - RECENT_LIMIT; i > 0; i--)
-            if (is_user_request(json_at(entries, i))) {
+            if (ui_tx_is_user_request(json_at(entries, i))) {
                 from = i;
                 break;
             }
@@ -196,7 +197,7 @@ static void load_main(rewind_t *r, const json_t *entries) {
     targets_free(&r->targets);
     memset(&r->targets, 0, sizeof r->targets);
     r->main = tui_container_new();
-    replay(r, r->main, entries, &r->targets);
+    ui_tx_replay(r->u, r->main, entries, &r->targets);
     free(r->visible);
     r->visible = NULL;
 }
@@ -243,7 +244,7 @@ static json_t *sibling_paths(rewind_t *r, const char *entry_id, strvec_t *roots)
         json_t *path = json_arr();
         const json_t *node = e;
         for (size_t guard = 0; node && guard <= json_len(s->entries); guard++) {
-            if (is_transcript_entry(node)) json_push(path, json_clone(node));
+            if (ui_tx_is_transcript_entry(node)) json_push(path, json_clone(node));
             const json_t *last = NULL, *c;
             json_arr_foreach(s->entries, k, c) if (str_eq(json_get_str(c, "parentId"), json_get_str(node, "id"))) last = c;
             node = last;
@@ -269,7 +270,7 @@ static strip_t *strip_columns(rewind_t *r) {
         column_t *c = xcalloc(1, sizeof *c);
         c->root_id = xstrdup(roots.v[i]);
         c->c = tui_container_new();
-        replay(r, c->c, p, &c->targets);
+        ui_tx_replay(r->u, c->c, p, &c->targets);
         const json_t *e;
         json_arr_foreach(p, k, e) if (!c->label && is_user_turn(e)) {
             char *l = user_turn_label(e);
@@ -330,9 +331,9 @@ static bool blank_row(const char *s) {
 }
 
 /* rendered rows of each child at `w` columns as the component draws them (prompt zone marks dropped) */
-static void render_children(rewind_t *r, tui_container_t *c, size_t from, size_t to, int w, rows_t *out) {
-    bool saved = r->u->expand_tools;
-    r->u->expand_tools = r->expanded;
+void ui_tx_render_children(ui_t *u, bool expanded, tui_container_t *c, size_t from, size_t to, int w, ui_tx_rows_t *out) {
+    bool saved = u->expand_tools;
+    u->expand_tools = expanded;
     for (size_t i = from; i < to && i < c->children.n; i++) {
         strvec_t raw = {0}, rows = {0};
         tui_component_render(c->children.v[i], w, &raw);
@@ -370,10 +371,12 @@ static void render_children(rewind_t *r, tui_container_t *c, size_t from, size_t
         }
         vec_push(out, rows);
     }
-    r->u->expand_tools = saved;
+    u->expand_tools = saved;
 }
 
-static bool target_visible(const rows_t *rows, size_t base, const target_t *t) {
+#define render_children(r, ...) ui_tx_render_children((r)->u, (r)->expanded, __VA_ARGS__)
+
+bool ui_tx_target_visible(const ui_tx_rows_t *rows, size_t base, const ui_tx_target_t *t) {
     for (size_t i = t->start; i < t->end; i++) {
         if (i < base || i - base >= rows->n) continue;
         const strvec_t *cr = &rows->v[i - base];
@@ -383,31 +386,44 @@ static bool target_visible(const rows_t *rows, size_t base, const target_t *t) {
     return false;
 }
 
-static char *outline_rule(const char *left, const char *right, int inner) {
+/* outlineRule: dotted rule with rounded corners; a caption sits bold at the right end */
+static char *outline_rule(const char *left, const char *right, int inner, tui_tc_t tc, const char *caption) {
+    char *label = caption && *caption ? xasprintf(" %s ", caption) : xstrdup("");
     sb_t b = SB_INIT;
     sb_append(&b, left);
-    sb_repeat(&b, tui_sym("boxDotted.horizontal"), MAX(0, inner + 2));
-    sb_append(&b, right);
-    char *r = S(TUI_TC_ACCENT, sb_cstr(&b));
+    sb_repeat(&b, tui_sym("boxDotted.horizontal"), MAX(0, inner + 2 - tui_visible_width(label)));
+    char *head = S(tc, sb_cstr(&b));
+    char *lab = *label ? S(tc, label) : xstrdup(""), *bl = *label ? tui_bold(lab) : xstrdup("");
+    char *tail = S(tc, right);
+    char *r = xasprintf("%s%s%s", head, bl, tail);
     sb_free(&b);
+    free(label), free(head), free(lab), free(bl), free(tail);
     return r;
 }
 
-typedef struct {
-    strvec_t lines;
-    int sel_start, sel_end;
-} composed_t;
+void ui_tx_outline_rows(const strvec_t *rows, size_t from, size_t to, int inner, tui_tc_t tc, const char *caption,
+                        strvec_t *out) {
+    char *vert = S(tc, tui_sym("boxDotted.vertical"));
+    strvec_push_own(out, outline_rule(tui_sym("boxRound.topLeft"), tui_sym("boxRound.topRight"), inner, tc, caption));
+    for (size_t k = from; k < to && k < rows->n; k++) {
+        char *tr = tui_truncate_to_width(rows->v[k], inner, NULL), *pad = tui_pad_to_width(tr, inner);
+        strvec_push_own(out, xasprintf("%s %s %s", vert, inner > 0 ? pad : "", vert));
+        free(tr), free(pad);
+    }
+    strvec_push_own(out, outline_rule(tui_sym("boxRound.bottomLeft"), tui_sym("boxRound.bottomRight"), inner, tc, NULL));
+    free(vert);
+}
 
 /* composeOutlineColumn over rows[from, to) (rows indexed from `base`) */
-static void compose(const rows_t *rows, size_t base, size_t from, size_t to, const target_t *targets, ssize_t sel,
-                    int col_w, const strvec_t *header, composed_t *out) {
+void ui_tx_compose(const ui_tx_rows_t *rows, size_t base, size_t from, size_t to, const ui_tx_target_t *targets,
+                   ssize_t sel, int col_w, const strvec_t *header, tui_tc_t tc, const char *caption,
+                   ui_tx_composed_t *out) {
     int inner = MAX(10, col_w - 4);
     memset(out, 0, sizeof *out);
     out->sel_start = out->sel_end = -1;
     if (header)
         for (size_t i = 0; i < header->n; i++) strvec_push(&out->lines, header->v[i]);
     const target_t *t = sel >= 0 ? &targets[sel] : NULL;
-    char *vert = S(TUI_TC_ACCENT, tui_sym("boxDotted.vertical"));
     for (size_t idx = from; idx < to; idx++) {
         if (t && idx == t->start && t->end <= to) {
             strvec_t seg = {0};
@@ -419,13 +435,7 @@ static void compose(const rows_t *rows, size_t base, size_t from, size_t to, con
             while (tail > head && blank_row(seg.v[tail - 1])) tail--;
             for (size_t k = 0; k < head; k++) strvec_push(&out->lines, "");
             out->sel_start = (int)out->lines.n;
-            strvec_push_own(&out->lines, outline_rule(tui_sym("boxRound.topLeft"), tui_sym("boxRound.topRight"), inner));
-            for (size_t k = head; k < tail; k++) {
-                char *tr = tui_truncate_to_width(seg.v[k], inner, NULL), *pad = tui_pad_to_width(tr, inner);
-                strvec_push_own(&out->lines, xasprintf("%s %s %s", vert, pad, vert));
-                free(tr), free(pad);
-            }
-            strvec_push_own(&out->lines, outline_rule(tui_sym("boxRound.bottomLeft"), tui_sym("boxRound.bottomRight"), inner));
+            ui_tx_outline_rows(&seg, head, tail, inner, tc, caption, &out->lines);
             out->sel_end = (int)out->lines.n;
             for (size_t k = tail; k < seg.n; k++) strvec_push(&out->lines, "");
             strvec_free(&seg);
@@ -437,8 +447,10 @@ static void compose(const rows_t *rows, size_t base, size_t from, size_t to, con
         for (size_t k = 0; k < cr->n; k++)
             strvec_push_own(&out->lines, *cr->v[k] ? xasprintf("  %s", cr->v[k]) : xstrdup(""));
     }
-    free(vert);
 }
+
+#define compose(rows, base, from, to, targets, sel, col_w, header, out) \
+    ui_tx_compose(rows, base, from, to, targets, sel, col_w, header, TUI_TC_ACCENT, NULL, out)
 
 /* positionRail: `… ○ ◉ ○ …` centred */
 static char *position_rail(size_t count, size_t active, bool more_left, bool more_right, int width) {
@@ -611,20 +623,75 @@ static char *header_line(void) {
 }
 
 /* the scroll view's reveal of the outlined range (margin 1, nearest) when its identity or geometry changed */
-static void reveal(rewind_t *r, const char *id, int start, int end, int width, int height, int total) {
+static void reveal(ui_tx_view_t *v, const char *id, int start, int end, int width, int height, int total) {
     if (!id || start < 0 || end <= start) return;
-    if (r->anchor_id && str_eq(r->anchor_id, id) && r->anchor_start == start && r->anchor_end == end && r->anchor_w == width &&
-        r->anchor_h == height && r->anchor_total == total)
+    if (v->anchor_id && str_eq(v->anchor_id, id) && v->anchor_start == start && v->anchor_end == end && v->anchor_w == width &&
+        v->anchor_h == height && v->anchor_total == total)
         return;
     int b = MAX(0, start - 1), y = MIN(total, end + 1);
     int maxoff = MAX(0, total - height);
-    r->offset = MAX(0, MIN(r->offset, maxoff));
-    if (b < r->offset) r->offset = b;
-    else if (y > r->offset + height) r->offset = MAX(b, y - 1) - height + 1;
-    r->offset = MAX(0, MIN(r->offset, maxoff));
-    free(r->anchor_id);
-    r->anchor_id = xstrdup(id);
-    r->anchor_start = start, r->anchor_end = end, r->anchor_w = width, r->anchor_h = height, r->anchor_total = total;
+    v->offset = MAX(0, MIN(v->offset, maxoff));
+    if (b < v->offset) v->offset = b;
+    else if (y > v->offset + height) v->offset = MAX(b, y - 1) - height + 1;
+    v->offset = MAX(0, MIN(v->offset, maxoff));
+    free(v->anchor_id);
+    v->anchor_id = xstrdup(id);
+    v->anchor_start = start, v->anchor_end = end, v->anchor_w = width, v->anchor_h = height, v->anchor_total = total;
+}
+
+void ui_tx_view_free(ui_tx_view_t *v) {
+    free(v->anchor_id);
+    memset(v, 0, sizeof *v);
+}
+
+int ui_tx_body_height(int term_rows) { return MAX(3, term_rows - 2 - 3); }
+
+void ui_tx_frame(ui_tx_view_t *v, int width, int term_rows, const char *header, const char *footer, const strvec_t *body,
+                 const char *anchor, int sel_start, int sel_end, strvec_t *out) {
+    int content_w = MAX(1, width - 1);
+    int body_h = ui_tx_body_height(term_rows);
+    reveal(v, anchor, sel_start, sel_end, content_w, body_h, (int)body->n);
+    sb_t rule = SB_INIT;
+    sb_repeat(&rule, tui_sym("boxRound.horizontal"), MAX(1, width));
+    char *border = S(TUI_TC_BORDER, sb_cstr(&rule));
+    sb_free(&rule);
+    char *ht = tui_truncate_to_width(header, MAX(0, width - 1), NULL), *ft = tui_truncate_to_width(footer, MAX(0, width - 1), NULL);
+    strvec_push(out, border);
+    strvec_push_own(out, xasprintf(" %s", ht));
+    strvec_push(out, border);
+    ui_scroll_view(body, body_h, &v->offset, width, out);
+    strvec_push_own(out, xasprintf(" %s", ft));
+    strvec_push(out, border);
+    free(border), free(ht), free(ft);
+}
+
+bool ui_tx_scroll_key(ui_tx_view_t *v, int term_rows, const tui_key_t *k) {
+    int page = MAX(1, MAX(3, term_rows - 5) - 1);
+    if (tui_key_matches(k, "shift+up")) v->offset -= FAST_SCROLL;
+    else if (tui_key_matches(k, "shift+down")) v->offset += FAST_SCROLL;
+    else if (tui_key_matches(k, "pageup")) v->offset -= page;
+    else if (tui_key_matches(k, "pagedown")) v->offset += page;
+    else if (tui_key_matches(k, "home")) v->offset = 0;
+    else if (tui_key_matches(k, "end")) v->offset = INT_MAX / 2;
+    else return false;
+    v->offset = MAX(0, v->offset);
+    return true;
+}
+
+bool ui_tx_mouse(ui_tx_view_t *v, const tui_key_t *k, int *row, int *col) {
+    const char *t = k->text;
+    if (!t || strncmp(t, "\x1b[<", 3)) return false;
+    int b = 0, x = 0, y = 0;
+    char fin = 0;
+    if (sscanf(t + 3, "%d;%d;%d%c", &b, &x, &y, &fin) < 3) return false;
+    if ((b & 64) && !(b & 2)) {
+        v->offset = MAX(0, v->offset + ((b & 1) ? 3 : -3));
+        return false;
+    }
+    if (fin != 'M' || (b & ~(4 | 8 | 16)) != 0) return false; /* left press only */
+    if (row) *row = y - 1;
+    if (col) *col = x - 1;
+    return true;
 }
 
 static int term_rows(rewind_t *r) {
@@ -642,7 +709,7 @@ static void rewind_render(tui_component_t *c, int width, strvec_t *out) {
     /* adopt visibility: a selection that shows nothing moves to the nearest item that does */
     free(r->visible);
     r->visible = xcalloc(MAX(1, r->targets.n), sizeof *r->visible);
-    for (size_t i = 0; i < r->targets.n; i++) r->visible[i] = target_visible(&r->main_rows, 0, &r->targets.v[i]);
+    for (size_t i = 0; i < r->targets.n; i++) r->visible[i] = ui_tx_target_visible(&r->main_rows, 0, &r->targets.v[i]);
     if (r->targets.n && !r->visible[r->selected]) {
         ssize_t pick = -1;
         for (ssize_t i = (ssize_t)r->selected - 1; i >= 0 && pick < 0; i--)
@@ -682,7 +749,7 @@ static void rewind_render(tui_component_t *c, int width, strvec_t *out) {
                 for (size_t x = 0; x < r->main_rows.v[k].n; x++) strvec_push(&copy, r->main_rows.v[k].v[x]);
                 vec_push(&frows, copy);
             }
-            target_t nt = {NULL, NULL, t->user, start, frows.n};
+            target_t nt = {NULL, NULL, t->user, start, frows.n, {0}};
             vec_push(&ft, nt);
             if (m.v[i] == r->selected) fsel = (ssize_t)i;
         }
@@ -757,7 +824,7 @@ static void rewind_render(tui_component_t *c, int width, strvec_t *out) {
                     free(r->sib_visible);
                     r->nsib_visible = col->targets.n;
                     r->sib_visible = xcalloc(MAX(1, col->targets.n), sizeof *r->sib_visible);
-                    for (size_t k = 0; k < col->targets.n; k++) r->sib_visible[k] = target_visible(&crow, 0, &col->targets.v[k]);
+                    for (size_t k = 0; k < col->targets.n; k++) r->sib_visible[k] = ui_tx_target_visible(&crow, 0, &col->targets.v[k]);
                 }
                 strvec_t hdr = {0};
                 column_header(r, i + 1, count, col->label, col_w, &hdr);
@@ -833,23 +900,9 @@ static void rewind_render(tui_component_t *c, int width, strvec_t *out) {
     free(updown), free(lr), free(kenter), free(cancel);
 
     /* TranscriptBrowser frame: rule, header, rule, body viewport, footer, rule */
-    int height = term_rows(r);
-    int body_h = MAX(3, height - 2 - 3);
-    reveal(r, anchor, sel_start, sel_end, content_w, body_h, (int)body.n);
-    free(anchor);
-    sb_t rule = SB_INIT;
-    sb_repeat(&rule, tui_sym("boxRound.horizontal"), MAX(1, width));
-    char *border = S(TUI_TC_BORDER, sb_cstr(&rule));
-    sb_free(&rule);
     char *hdr = header_line();
-    char *ht = tui_truncate_to_width(hdr, MAX(0, width - 1), NULL), *ft = tui_truncate_to_width(footer, MAX(0, width - 1), NULL);
-    strvec_push(out, border);
-    strvec_push_own(out, xasprintf(" %s", ht));
-    strvec_push(out, border);
-    ui_scroll_view(&body, body_h, &r->offset, width, out);
-    strvec_push_own(out, xasprintf(" %s", ft));
-    strvec_push(out, border);
-    free(border), free(hdr), free(ht), free(ft), free(footer);
+    ui_tx_frame(&r->view, width, term_rows(r), hdr, footer, &body, anchor, sel_start, sel_end, out);
+    free(anchor), free(hdr), free(footer);
     strvec_free(&body);
 }
 
@@ -867,25 +920,9 @@ static void finish_cancel(rewind_t *r) {
     if (r->cb.on_cancel) r->cb.on_cancel(r->cb.ud);
 }
 
-static bool scroll_key(rewind_t *r, const tui_key_t *k) {
-    int page = MAX(1, MAX(3, term_rows(r) - 5) - 1);
-    if (tui_key_matches(k, "shift+up")) r->offset -= FAST_SCROLL;
-    else if (tui_key_matches(k, "shift+down")) r->offset += FAST_SCROLL;
-    else if (tui_key_matches(k, "pageup")) r->offset -= page;
-    else if (tui_key_matches(k, "pagedown")) r->offset += page;
-    else if (tui_key_matches(k, "home")) r->offset = 0;
-    else if (tui_key_matches(k, "end")) r->offset = INT_MAX / 2;
-    else return false;
-    r->offset = MAX(0, r->offset);
-    return true;
-}
+static bool scroll_key(rewind_t *r, const tui_key_t *k) { return ui_tx_scroll_key(&r->view, term_rows(r), k); }
 
-static void mouse(rewind_t *r, const tui_key_t *k) {
-    const char *t = k->text;
-    if (!t || strncmp(t, "\x1b[<", 3)) return;
-    int b = atoi(t + 3);
-    if ((b & 64) && !(b & 2)) r->offset = MAX(0, r->offset + ((b & 1) ? 3 : -3));
-}
+static void mouse(rewind_t *r, const tui_key_t *k) { ui_tx_mouse(&r->view, k, NULL, NULL); }
 
 static void filter_key(rewind_t *r, const tui_key_t *k) {
     if (tui_kb(k, "tui.select.cancel") || tui_key_matches(k, "escape")) r->filtering = false;
@@ -963,7 +1000,7 @@ static void rewind_destroy(tui_component_t *c) {
     rows_free(&r->main_rows);
     free(r->visible);
     free(r->sib_visible);
-    free(r->anchor_id);
+    ui_tx_view_free(&r->view);
     ui_input_free(&r->filter);
     json_free(r->entries);
     free(r);
@@ -977,7 +1014,7 @@ tui_component_t *ui_rewind_selector_new(ui_t *u, const ui_rewind_cb_t *cb) {
     json_t *path = session_path_to(s, s->leaf_id);
     json_t *entries = json_arr();
     const json_t *e;
-    json_arr_foreach(path, i, e) if (is_transcript_entry(e)) json_push(entries, json_clone(e));
+    json_arr_foreach(path, i, e) if (ui_tx_is_transcript_entry(e)) json_push(entries, json_clone(e));
     json_free(path);
     if (!json_len(entries)) {
         json_free(entries);
@@ -989,7 +1026,7 @@ tui_component_t *ui_rewind_selector_new(ui_t *u, const ui_rewind_cb_t *cb) {
     r->u = u;
     if (cb) r->cb = *cb;
     r->entries = entries;
-    json_t *tail = recent_entries(entries);
+    json_t *tail = ui_tx_recent_entries(entries);
     r->truncated = json_len(tail) < json_len(entries);
     load_main(r, tail);
     json_free(tail);

@@ -121,6 +121,86 @@ typedef struct {
  * branch has no rewind target */
 tui_component_t *ui_rewind_selector_new(ui_t *u, const ui_rewind_cb_t *cb);
 
+/* The shared engine of the fullscreen transcript selectors (rewind, /copy): chat/transcript-outline.ts and
+ * chat/transcript-browser.ts. Entries are session transcript entries (`message` / `custom_message`). */
+typedef struct {
+    char *entry_id, *turn_id; /* resolves to entry_id (extended over folded tool results); opened by turn_id */
+    bool user;                /* isUserTurnEntry */
+    size_t start, end;        /* transcript-container children rendered by the turn */
+    VEC(size_t) ents;         /* indices (into the replayed entries) of the turn and its folded tool results */
+} ui_tx_target_t;
+typedef VEC(ui_tx_target_t) ui_tx_targets_t;
+typedef VEC(strvec_t) ui_tx_rows_t; /* rendered rows per transcript child */
+typedef struct {
+    strvec_t lines;
+    int sel_start, sel_end;
+} ui_tx_composed_t;
+/* scroll view of a TranscriptBrowser: offset plus the last revealed anchor */
+typedef struct {
+    int offset;
+    char *anchor_id;
+    int anchor_start, anchor_end, anchor_w, anchor_h, anchor_total;
+} ui_tx_view_t;
+
+bool ui_tx_is_transcript_entry(const json_t *e);
+bool ui_tx_is_user_request(const json_t *e);
+/* the current branch's transcript entries (owned), NULL when the session has none */
+json_t *ui_tx_branch_entries(ui_t *u);
+/* recentTranscriptEntries: the tail from a user-request boundary within the last 600 entries (owned) */
+json_t *ui_tx_recent_entries(const json_t *entries);
+/* appendOutlineEntries: replay `entries` into `c`, appending the selectable targets */
+void ui_tx_replay(ui_t *u, tui_container_t *c, const json_t *entries, ui_tx_targets_t *out);
+void ui_tx_targets_free(ui_tx_targets_t *t);
+void ui_tx_rows_free(ui_tx_rows_t *r);
+/* prompt-zone-free rows of c's children [from, to) at width w (tool output expanded when `expanded`) */
+void ui_tx_render_children(ui_t *u, bool expanded, tui_container_t *c, size_t from, size_t to, int w, ui_tx_rows_t *out);
+bool ui_tx_target_visible(const ui_tx_rows_t *rows, size_t base, const ui_tx_target_t *t);
+/* outlineRows: rows wrapped in the dotted outline in `tc`, `caption` (may be NULL) bold in the top rule */
+void ui_tx_outline_rows(const strvec_t *rows, size_t from, size_t to, int inner, tui_tc_t tc, const char *caption,
+                        strvec_t *out);
+/* composeOutlineColumn over rows[from, to) (rows indexed from `base`), outlining targets[sel] (sel < 0: none) */
+void ui_tx_compose(const ui_tx_rows_t *rows, size_t base, size_t from, size_t to, const ui_tx_target_t *targets,
+                   ssize_t sel, int col_w, const strvec_t *header, tui_tc_t tc, const char *caption,
+                   ui_tx_composed_t *out);
+void ui_tx_view_free(ui_tx_view_t *v);
+/* TranscriptBrowser frame: rule, ` header`, rule, body viewport (anchor revealed), ` footer`, rule */
+void ui_tx_frame(ui_tx_view_t *v, int width, int term_rows, const char *header, const char *footer, const strvec_t *body,
+                 const char *anchor, int sel_start, int sel_end, strvec_t *out);
+int ui_tx_body_height(int term_rows);
+/* ScrollView keys (shift+arrows, page up/down, home/end); false when not a scroll key */
+bool ui_tx_scroll_key(ui_tx_view_t *v, int term_rows, const tui_key_t *k);
+/* SGR mouse: wheel scrolls the view; returns true and the 0-based frame cell of a left press in *row / *col */
+bool ui_tx_mouse(ui_tx_view_t *v, const tui_key_t *k, int *row, int *col);
+
+/* ---------- copysel.c: /copy picker (overlays/copy-selector.ts, copy-targets.ts) ---------- */
+
+typedef struct {
+    /* the picked text and its label ("assistant message", "bash command", "link · docs", ...) */
+    void (*on_pick)(void *ud, const char *content, const char *label);
+    void (*on_open)(void *ud, const char *href, const char *label); /* `o` / ↗ open on a link block */
+    void (*on_cancel)(void *ud);
+    void *ud;
+} ui_copy_cb_t;
+/* fullscreen picker over the current branch; NULL when nothing can be copied */
+tui_component_t *ui_copy_selector_new(ui_t *u, const ui_copy_cb_t *cb);
+
+/* copy-targets.ts over agent messages (assistant markdown and bash/eval tool calls). Owned results; NULL
+ * when the transcript has none. */
+typedef struct {
+    char *kind; /* "code" | "quote" */
+    char *lang; /* code: info string */
+    char *text;
+} ui_md_block_t;
+typedef VEC(ui_md_block_t) ui_md_blocks_t;
+void ui_md_extract_blocks(const char *text, ui_md_blocks_t *out); /* extractBlocks */
+void ui_md_blocks_free(ui_md_blocks_t *b);
+/* extractLinks: http(s) links the renderer draws, deduplicated by href (labels[i] names hrefs[i]) */
+void ui_md_extract_links(const char *text, strvec_t *hrefs, strvec_t *labels);
+char *ui_copy_last_code(const json_t *messages);
+/* *kind: "bash" or "eval" */
+char *ui_copy_last_command(const json_t *messages, const char **kind);
+char *ui_copy_last_link(const json_t *messages);
+
 /* ---------- setup.c ---------- */
 
 #define UI_SETUP_VERSION 2
