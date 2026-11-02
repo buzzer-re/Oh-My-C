@@ -385,6 +385,8 @@ void ui_signals_agent_start(void) {
 
 void ui_signals_tool_start(const char *tool_call_id, const char *tool_name, const json_t *args) {
     if (!str_eq(tool_name, "ask") || !tool_call_id) return;
+    /* AskTool.execute sends its notification before the UI handles the call's tool_execution_start */
+    ui_signals_ask_waiting();
     /* #blockingPrompt: the questions joined by a space */
     strvec_t qs = {0};
     json_t *q;

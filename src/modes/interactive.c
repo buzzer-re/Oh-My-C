@@ -601,7 +601,6 @@ static void ask_done(void *ud, json_t *answers) {
 
 static void ask_start(void *ud) {
     ui_t *u = ud;
-    ui_signals_ask_waiting();
     ui_ask_dialog_show(u, u->ask_questions, ask_done, u);
 }
 
