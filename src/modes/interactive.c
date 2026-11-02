@@ -32,6 +32,7 @@
 #include "ui/tools/tc.h"
 #include "coding/title.h"
 #include "coding/slashcmd.h"
+#include "session/export_html.h"
 #include "coding/advisor.h"
 
 static void maybe_plan_approval(ui_t *u, const char *tool, const json_t *result, bool is_error);
@@ -1469,33 +1470,35 @@ static void advisor_status_report(ui_t *u) {
 
 /* command-controller.ts handleExportCommand + export/html/args.ts parseExportArgs */
 static void export_command(ui_t *u, const char *arg) {
-    app_t *a = u->app;
     strvec_t parts = {0};
     char *argdup = xstrdup(arg), *save = NULL;
     for (char *t = strtok_r(argdup, " \t\n", &save); t; t = strtok_r(NULL, " \t\n", &save)) strvec_push(&parts, t);
     free(argdup);
     const char *out = NULL;
     size_t paths = 0;
-    for (size_t i = 0; i < parts.n; i++)
-        if (strcmp(parts.v[i], "--themes")) out = paths++ ? out : parts.v[i];
+    bool themes = false;
+    for (size_t i = 0; i < parts.n; i++) {
+        if (!strcmp(parts.v[i], "--themes")) themes = true;
+        else if (!paths++) out = parts.v[i];
+    }
     if (paths > 1) {
         add_notice(u, "error", "Failed to export session: Usage: /export [--themes] [path]");
     } else if (out && (!strcmp(out, "--copy") || !strcmp(out, "clipboard") || !strcmp(out, "copy"))) {
         add_notice(u, "warning", "Use /dump to copy the session to clipboard.");
-    } else if (!app_session_file(a)) {
-        add_notice(u, "error", "Failed to export session: Cannot export in-memory session to HTML");
     } else {
-        char *text = session_export_html(a->session);
-        char *base = xstrdup(path_basename(app_session_file(a)));
-        if (str_ends(base, ".jsonl")) base[strlen(base) - 6] = 0;
-        char *dest = out ? xstrdup(out) : xasprintf("omp-session-%s.html", base);
-        int rc = fs_write(dest, text, strlen(text));
-        char *m = rc ? xasprintf("Failed to export session: %s", strerror(-rc)) : xasprintf("Session exported to: %s", dest);
-        add_notice(u, rc ? "error" : "info", m);
-        free(m);
-        free(dest);
-        free(base);
-        free(text);
+        char *written = NULL, *err = NULL;
+        if (app_export_html(u->app, out, themes, &written, &err) != 0) {
+            char *m = xasprintf("Failed to export session: %s", err ? err : "Unknown error");
+            add_notice(u, "error", m);
+            free(m);
+        } else {
+            char *m = xasprintf("Session exported to: %s", written);
+            add_notice(u, "info", m);
+            free(m);
+            ui_open_in_browser(written);
+        }
+        free(written);
+        free(err);
     }
     strvec_free(&parts);
 }

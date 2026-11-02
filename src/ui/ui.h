@@ -135,6 +135,7 @@ void add_view(ui_t *u, msgview_t *v);
 /* "info" -> dim status line (consecutive ones update in place), "warning" -> "Warning: …",
  * "error" -> "Error: …"; "Injecting rule: …" becomes a TTSR notice, "Retrying (n/m) in Ns…" the retry row */
 void add_notice(ui_t *u, const char *level, const char *text);
+void ui_open_in_browser(const char *url_or_path); /* openPath: xdg-open/open, detached; OMC_NO_BROWSER skips */
 /* chrome/segment-track.ts renderSegmentTrack (modelhub.c); owned */
 char *ui_segment_track(const char *const *labels, size_t n, int active);
 /* `• Background job completed …` rows for a delivered async-result prompt (no-op for other messages) */

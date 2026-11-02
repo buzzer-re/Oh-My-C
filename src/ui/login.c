@@ -320,8 +320,8 @@ static void request(ui_login_t *l) {
     if (l->u && l->u->tui) tui_request_render(l->u->tui);
 }
 
-/* best-effort browser launch (omp ctx.openInBrowser) */
-static void open_in_browser(const char *url) {
+/* best-effort browser launch (omp ctx.openInBrowser / utils/open.ts openPath) */
+void ui_open_in_browser(const char *url) {
     if (env_truthy("OMC_NO_BROWSER")) return;
     const char *opener = which("xdg-open") ? "xdg-open" : which("open") ? "open" : NULL;
     if (!opener) return;
@@ -371,7 +371,7 @@ static void show_auth(ui_login_t *l, const char *url, const char *instructions, 
         dpush(l, DI_TEXT, S(TUI_TC_WARNING, instructions));
     }
     if (l->u && l->u->tui) tui_term_copy_osc52(tui_term(l->u->tui), url, strlen(url));
-    open_in_browser(url);
+    ui_open_in_browser(url);
 }
 
 static void open_input(ui_login_t *l, bool secret, bool code) {

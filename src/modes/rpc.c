@@ -3,6 +3,7 @@
 #include "coding/btw.h"
 #include "coding/goal.h"
 #include "coding/slashcmd.h"
+#include "session/export_html.h"
 
 #include "config/auth.h"
 #include "config/settings.h"
@@ -1027,19 +1028,17 @@ static void handle(rpc_t *r, json_t *cmd) {
         free(curl);
         strvec_free(&cands);
     } else if (!strcmp(type, "export_html")) {
-        const char *outp = json_get_str(cmd, "outputPath");
-        char *html = session_export_html(a->session);
-        char *dest = outp ? xstrdup(outp) : xasprintf("omc-session-%s.html", session_short_id(session_id(a->session)));
-        if (fs_write(dest, html, strlen(html)) != 0) respond(r, id, type, false, NULL, "failed to write export");
+        /* session.exportToHtml(outputPath): the path as written */
+        char *written = NULL, *err = NULL;
+        if (app_export_html(a, json_get_str(cmd, "outputPath"), false, &written, &err) != 0)
+            respond(r, id, type, false, NULL, err ? err : "export failed");
         else {
-            char *abs = path_abs(dest, a->cwd);
             json_t *d = json_obj();
-            json_set_str(d, "path", abs);
+            json_set_str(d, "path", written);
             respond(r, id, type, true, d, NULL);
-            free(abs);
         }
-        free(dest);
-        free(html);
+        free(written);
+        free(err);
     } else if (!strcmp(type, "handoff")) {
         if (r->running) respond(r, id, type, false, NULL, "agent is busy");
         else {
