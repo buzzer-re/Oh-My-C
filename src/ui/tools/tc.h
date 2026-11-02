@@ -113,6 +113,8 @@ void tc_split_lines(const char *s, strvec_t *out);           /* split on \n (kee
 char *tc_replace_tabs(const char *s);
 char *tc_trim_end(const char *s);
 char *tc_sanitize_line(const char *s);                        /* tabs->spaces, CR overwrite, ctrl chars */
+/* mcp.renderMarkdownResults (setMcpRenderMarkdownResults): non-JSON MCP text results render as Markdown */
+extern bool tc_mcp_markdown;
 char *tc_shorten_path(const char *p);                         /* $HOME -> ~ */
 char *tc_rel_path(const char *p, const char *cwd);            /* cwd-relative when inside, else shortened */
 const char *tc_lang_from_path(const char *p);                 /* highlight language id or NULL */

@@ -348,6 +348,7 @@ static ui_t *g_install_ui;
 
 static void notif_setting_changed(void *ud) {
     UNUSED(ud);
+    tc_mcp_markdown = settings_bool("mcp.renderMarkdownResults", true);
     ui_t *u = g_install_ui;
     if (u && u->app->mcp) mcp_set_notifications(u->app->mcp, settings_bool("mcp.notifications", false));
 }
@@ -420,6 +421,7 @@ static void late_connect_ui(void *ud) {
 
 void ui_mcp_install(ui_t *u) {
     g_install_ui = u;
+    tc_mcp_markdown = settings_bool("mcp.renderMarkdownResults", true);
     install_callbacks(u);
     static bool listening;
     if (!listening) {

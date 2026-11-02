@@ -342,6 +342,8 @@ void tc_generic(const tc_call_t *c, int width, strvec_t *out) {
 
 /* ---------- MCP tools (tools/mcp.ts renderMCPCall + renderMCPResult inside the custom-tool box) ---------- */
 
+bool tc_mcp_markdown = true;
+
 void tc_mcp(const tc_call_t *c, int width, strvec_t *out) {
     int cw = MAX(1, width - 2);
     const char *label = c->label;
@@ -397,8 +399,26 @@ void tc_mcp(const tc_call_t *c, int width, strvec_t *out) {
         char *trimmed = tc_trim_end(sb_cstr(&tb));
         sb_free(&tb);
         bool done = false;
+        bool is_json = false;
+        if ((trimmed[0] == '{' || trimmed[0] == '[') && strlen(trimmed) <= 1024 * 1024) {
+            json_t *probe = json_parse_str(trimmed);
+            is_json = probe != NULL;
+            json_free(probe);
+        }
         if (!*trimmed) {
             strvec_push_own(&body, tc_fg(TUI_TC_DIM, "(no output)"));
+            done = true;
+        } else if (!is_json && tc_mcp_markdown) {
+            /* renderMarkdownMCPResult: Markdown in the toolOutput color, then the 4 / 12 row output pane */
+            tui_md_opts_t mo;
+            tui_md_opts_default(&mo);
+            mo.text_slot = TUI_TC_TOOL_OUTPUT;
+            strvec_t md = {0};
+            tui_md_render(trimmed, cw, &mo, &md);
+            tc_pane_t pane = {.lines = &md, .expanded = c->expanded, .collapsed_max = 4, .expanded_max = 12, .style_plain = true,
+                              .hint_when_uncapped = true};
+            tc_output_pane(&pane, &body);
+            strvec_free(&md);
             done = true;
         } else if ((trimmed[0] == '{' || trimmed[0] == '[') && strlen(trimmed) <= 1024 * 1024) {
             json_t *j = json_parse_str(trimmed);
