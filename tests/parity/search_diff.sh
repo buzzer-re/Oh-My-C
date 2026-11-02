@@ -5,7 +5,8 @@
 #   tests/parity/search_diff.sh [selector ...]      (default: one selector per backend)
 # Throwaway HOME/agent dirs and fake keys only; real endpoints are never reached: built-in providers are re-pointed
 # with models.yml baseUrl overrides, SearXNG through SEARXNG_ENDPOINT, Kimi through MOONSHOT_SEARCH_BASE_URL.
-# Env: OMP_BIN (default omp), OMC_BIN (default build/omc), SD_DIR (default $TMPDIR/omc-searchdiff), SD_QUERY.
+# A selector "-" runs the web role chain (no --model). Env: OMP_BIN (default omp), OMC_BIN (default build/omc), SD_DIR
+# (default $TMPDIR/omc-searchdiff), SD_QUERY, SD_CONFIG (config.yml text; @M@ = mock URL), SD_SEARXNG (SearXNG path).
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OMP=${OMP_BIN:-omp}
@@ -40,14 +41,15 @@ providers:
   xai:
     baseUrl: $M/xai/v1
 YML
+        printf "%s\n" "${SD_CONFIG:-}" | sed "s#@M@#$M#g" > "$A/config.yml"
         : > "$D/mock.jsonl"
         bin=$OMC
         [[ $side == omp ]] && bin=$OMP
         (cd "$D/$side-work" && env HOME="$D/$side-home" PI_CODING_AGENT_DIR="$A" OMC_CODING_AGENT_DIR="$A" \
             OMP_SKIP_SETUP=1 OMC_SKIP_SETUP=1 OMC_NO_LOCAL_DISCOVERY=1 NO_COLOR=1 \
             ANTHROPIC_API_KEY=sk-ant-api-fake OPENAI_API_KEY=sk-fake GEMINI_API_KEY=g-fake XAI_API_KEY=x-fake \
-            MOONSHOT_SEARCH_API_KEY=k-fake MOONSHOT_SEARCH_BASE_URL="$M/kimi/coding/v1/search" SEARXNG_ENDPOINT="$M/searx" \
-            timeout 60 "$bin" search --model "$sel" "$Q" >"$D/$side.out" 2>&1)
+            MOONSHOT_SEARCH_API_KEY=k-fake MOONSHOT_SEARCH_BASE_URL="$M/kimi/coding/v1/search" SEARXNG_ENDPOINT="$M${SD_SEARXNG:-/searx}" \
+            timeout 60 "$bin" search $([[ $sel != - ]] && echo --model "$sel") "$Q" >"$D/$side.out" 2>&1)
         python3 -I - "$D/mock.jsonl" > "$D/$side.req" <<'PY'
 import json, re, sys
 for line in open(sys.argv[1]):

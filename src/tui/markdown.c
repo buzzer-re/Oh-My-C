@@ -965,11 +965,13 @@ static void render_table(const lines_t *L, size_t from, size_t to, int width, tt
                          rows_t *out);
 
 /* paragraph source: lines joined with '\n', trailing whitespace dropped; a hard break ("  " or "\" at line
- * end) becomes "\\\n" so the inline pass drops the next line's indentation */
+ * end) becomes "\\\n" so the inline pass drops the next line's indentation. Like marked, a soft-wrapped
+ * continuation line keeps its leading whitespace (web_search's "    url" result lines). */
 static char *para_source(const lines_t *L, size_t from, size_t to) {
     sb_t src = SB_INIT;
+    bool prev_hard = false;
     for (size_t i = from; i < to; i++) {
-        const char *s = skip_ws(L->v[i]);
+        const char *s = i == from || prev_hard ? skip_ws(L->v[i]) : L->v[i];
         size_t n = strlen(s);
         bool hard = n >= 2 && s[n - 1] == ' ' && s[n - 2] == ' ';
         size_t bs = 0;
@@ -981,6 +983,7 @@ static char *para_source(const lines_t *L, size_t from, size_t to) {
         while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) n--;
         sb_appendn(&src, s, n);
         if (i + 1 < to) sb_append(&src, hard ? "\\\n" : "\n");
+        prev_hard = hard;
     }
     return sb_detach(&src);
 }

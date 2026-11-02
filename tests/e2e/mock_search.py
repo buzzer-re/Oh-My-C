@@ -14,7 +14,8 @@ Routes (by path):
   .../web_search_prime/mcp            Z.AI MCP (initialize, notifications/initialized, tools/call)
   .../search?q=...                    SearXNG JSON;  .../config  SearXNG engine list
   .../mcp (parallel)                  Parallel MCP tools/call
-A query containing FAIL<status> makes the backend answer that HTTP status ("FAIL401", "FAIL500")."""
+A query containing FAIL<status> makes the backend answer that HTTP status ("FAIL401", "FAIL500"); any path under
+/fail/ answers 500."""
 import json, os, re, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -77,6 +78,8 @@ class H(BaseHTTPRequestHandler):
                                     "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body}) + "\n")
         path = urlparse(self.path).path
         q = query_of(self.path, body) or ""
+        if path.startswith("/fail/"):
+            return self.send(500, json.dumps({"error": {"message": "mock outage", "type": "mock_error"}}))
         m = re.search(r"FAIL(\d{3})", q)
         if m and not path.endswith("/config"):
             return self.send(int(m.group(1)), json.dumps({"error": {"message": "mock failure " + m.group(1), "type": "mock_error"}}))
