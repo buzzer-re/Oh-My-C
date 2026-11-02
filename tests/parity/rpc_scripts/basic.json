@@ -1,0 +1,7 @@
+[
+ {"send": {"id": "s0", "type": "get_state"}}, {"wait": "response:s0"},
+ {"send": {"id": "p1", "type": "prompt", "message": "say:hello world"}}, {"wait": "prompt_result:p1"}, {"wait": "session_settled"},
+ {"send": {"id": "p2", "type": "prompt", "message": "bash:echo hi"}}, {"wait": "prompt_result:p2"}, {"wait": "session_settled"},
+ {"send": {"id": "s1", "type": "get_session_stats"}}, {"wait": "response:s1"},
+ {"send": {"id": "e1", "type": "get_entries"}}, {"wait": "response:e1"}
+]
