@@ -238,6 +238,34 @@ static const char *const TOKEN_EXAMPLES[] = {
     "# List Anthropic OAuth accounts\n  omc token anthropic --list",
     "# Get the 2nd Anthropic OAuth account's token\n  omc token anthropic --account 2", NULL};
 
+static const char *const USAGE_ACTIONS[] = {"invalidate", "clients", "accounts", "reset", NULL};
+static const carg_t USAGE_ARGS[] = {
+    {"action", "Optional subcommand to execute", false, false, USAGE_ACTIONS},
+    {.name = "target", .desc = "Saved reset to spend with `reset`: <provider>/<credential id> as `omc usage reset` lists it"},
+    {0}};
+static const cflag_t USAGE_FLAGS[] = {
+    {.name = "json", .kind = CF_BOOL, .ch = 'j', .desc = "Output usage reports as JSON", .options = NOOPT, .multiple = false, .def = "false"},
+    {.name = "provider", .kind = CF_STR, .ch = 'p', .desc = "Only show usage for this provider id (e.g. anthropic)"},
+    {.name = "redact", .kind = CF_BOOL, .ch = 'r', .desc = "Redact account emails/ids (shortest unique prefix) for sharing screenshots", .options = NOOPT,
+     .multiple = false, .def = "false"},
+    {.name = "history", .kind = CF_BOOL, .ch = 0, .desc = "Show recorded usage-limit history (hourly snapshots) instead of a live snapshot", .options = NOOPT,
+     .multiple = false, .def = "false"},
+    {.name = "days", .kind = CF_INT, .ch = 'd', .desc = "History window in days (with --history or clients)", .def = "7"},
+    {0}};
+static const char *const USAGE_EXAMPLES[] = {
+    "# Detailed per-account usage breakdown across all providers\n  omc usage",
+    "# Only Anthropic accounts\n  omc usage --provider anthropic",
+    "# Redact account identifiers for screenshots\n  omc usage --redact",
+    "# Machine-readable output\n  omc usage --json",
+    "# Usage-limit trend over the last 30 days\n  omc usage --history --days 30",
+    "# Per-client token burn (which machine/app spent what) over the last 30 days\n  omc usage clients --days 30",
+    "# OAuth identity keys for task.agentAccountPools (no tokens)\n  omc usage accounts",
+    "# Saved Codex and Claude rate-limit resets per account, with each account's credential id\n  omc usage reset",
+    "# Spend one saved reset on a listed account\n  omc usage reset codex/3",
+    "# Invalidate cached usage reports for all providers\n  omc usage invalidate",
+    "# Invalidate cached usage reports for a specific provider\n  omc usage invalidate --provider anthropic",
+    NULL};
+
 #ifdef OMC_CLI_TTSR
 static const char *const TTSR_ACTIONS[] = {"test", "list", "scan", NULL};
 static const char *const TTSR_SOURCES[] = {"text", "thinking", "tool", NULL};
@@ -324,6 +352,8 @@ static const cli_cmd_t COMMANDS[] = {
     {.name = "read", .desc = "Show what the read tool will return for a path, URL, or internal URI", .aliases = NULL, .hidden = false, .flags = NULL, .args = READ_ARGS,
      .examples = READ_EXAMPLES, .run = cmd_read},
     {.name = "ssh", .desc = "Manage SSH host configurations", .aliases = NULL, .hidden = false, .flags = SSH_FLAGS, .args = SSH_ARGS, .examples = NULL, .run = cmd_ssh},
+    {.name = "usage", .desc = "Show provider usage limits for every authenticated account", .aliases = NULL, .hidden = false, .flags = USAGE_FLAGS,
+     .args = USAGE_ARGS, .examples = USAGE_EXAMPLES, .run = cmd_usage},
     {.name = "token", .desc = "Get the API key or OAuth token for a provider", .aliases = NULL, .hidden = false, .flags = TOKEN_FLAGS, .args = TOKEN_ARGS, .examples = TOKEN_EXAMPLES,
      .run = cmd_token},
 #ifdef OMC_CLI_TTSR

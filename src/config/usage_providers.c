@@ -166,10 +166,10 @@ static char *claude_api_base(const char *base) {
     return r;
 }
 
-static void claude_headers(http_headers_t *h, const char *token) {
+static void claude_headers(http_headers_t *h, const char *token, const char *beta) {
     http_headers_set(h, "accept", "application/json, text/plain, */*");
     http_headers_set(h, "accept-encoding", "gzip, compress, deflate, br");
-    http_headers_set(h, "anthropic-beta", CLAUDE_USAGE_BETAS);
+    http_headers_set(h, "anthropic-beta", beta);
     http_headers_set(h, "content-type", "application/json");
     http_headers_set(h, "connection", "keep-alive");
     char *ua = xasprintf("claude-cli/%s (external, cli)", anthropic_claude_code_version());
@@ -466,11 +466,573 @@ static json_t *claude_fetch_payload(const char *url, const http_headers_t *h, co
     return last;
 }
 
+/* ---------- Claude saved resets (usage/claude-reset.ts: Cedar grants, Juniper session reset) ---------- */
+
+static bool re_match(const char *s, size_t max, bool upper_ok) {
+    size_t n = s ? strlen(s) : 0;
+    if (n < 1 || n > max) return false;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || (upper_ok && c >= 'A' && c <= 'Z')))
+            return false;
+    }
+    return true;
+}
+
+/* optionalString: 0 absent, 1 value (*out owned), -1 invalid */
+static int opt_str(const json_t *v, char **out) {
+    *out = NULL;
+    if (!v || json_is_null(v)) return 0;
+    if (!json_is_str(v)) return -1;
+    char *t = str_trim(json_sv(v));
+    if (!*t) {
+        free(t);
+        return -1;
+    }
+    *out = t;
+    return 1;
+}
+
+static int opt_iso(const json_t *v, char **out) {
+    char *s;
+    int r = opt_str(v, &s);
+    *out = NULL;
+    if (r <= 0) return r;
+    double ms;
+    bool ok = trace_parse_iso_ms(s, &ms);
+    free(s);
+    if (!ok) return -1;
+    *out = iso8601_from_ms((int64_t)ms);
+    return 1;
+}
+
+static char *reset_window_id(const json_t *v) {
+    if (!json_is_str(v) || !re_match(json_sv(v), 80, false)) return NULL;
+    const char *s = json_sv(v);
+    if (!strcmp(s, "five_hour")) return xstrdup("anthropic:5h");
+    if (!strcmp(s, "seven_day")) return xstrdup("anthropic:7d");
+    if (!strcmp(s, "seven_day_opus")) return xstrdup("anthropic:7d:opus");
+    if (!strcmp(s, "seven_day_sonnet")) return xstrdup("anthropic:7d:sonnet");
+    return xasprintf("anthropic:reset:%s", s);
+}
+
+static json_t *window_list(const json_t *v) {
+    if (!json_is_arr(v)) return NULL;
+    json_t *out = json_arr(), *x;
+    strvec_t seen = {0};
+    json_arr_foreach(v, i, x) {
+        char *id = reset_window_id(x);
+        if (!id) {
+            json_free(out);
+            strvec_free(&seen);
+            return NULL;
+        }
+        if (!strvec_contains(&seen, id)) {
+            strvec_push(&seen, id);
+            json_push_str(out, id);
+        }
+        free(id);
+    }
+    strvec_free(&seen);
+    return out;
+}
+
+static bool is_int(const json_t *v) { return json_is_num(v) && v->u.num.d == floor(v->u.num.d); }
+
+/* parseCedarGrant -> credit-ready grant {id, label?, remainingCount, grantedAt?, expiresAt?, clears, paused, usableNow,
+ * requiresLimit, usedFractions, blocking} or NULL */
+static json_t *cedar_grant(const json_t *g) {
+    if (!json_is_obj(g) || !re_match(json_get_str(g, "id"), 40, false)) return NULL;
+    const json_t *left = json_get(g, "resets_left"), *total = json_get(g, "resets_total");
+    if (!is_int(left) || left->u.num.d < 0) return NULL;
+    if (total && (!is_int(total) || total->u.num.d < 0)) return NULL;
+    const json_t *lab = json_get(g, "label");
+    char *label = NULL;
+    if (lab && !json_is_null(lab)) {
+        if (!json_is_str(lab)) return NULL;
+        label = str_trim(json_sv(lab));
+    }
+    char *granted, *expires;
+    int rg = opt_iso(json_get(g, "starts_at"), &granted), re = opt_iso(json_get(g, "ends_at"), &expires);
+    json_t *clears = window_list(json_get(g, "clears")), *blocking = window_list(json_get(g, "blocking"));
+    json_t *used = json_obj();
+    bool used_ok = true;
+    const json_t *pu = json_get(g, "percent_used");
+    if (pu) {
+        if (!json_is_obj(pu)) used_ok = false;
+        else {
+            const char *k;
+            json_t *v;
+            json_obj_foreach(pu, i, k, v) {
+                json_t *ks = json_str(k);
+                char *id = reset_window_id(ks);
+                json_free(ks);
+                if (!id || !is_int(v) || v->u.num.d < 0 || v->u.num.d > 100) {
+                    free(id);
+                    used_ok = false;
+                    break;
+                }
+                json_set_num(used, id, v->u.num.d / 100);
+                free(id);
+            }
+        }
+    }
+    const json_t *paused = json_get(g, "paused"), *usable = json_get(g, "usable_now"), *req = json_get(g, "use_requires_limit");
+    bool bad = rg < 0 || re < 0 || !clears || !blocking || !used_ok || (paused && !json_is_bool(paused)) ||
+               (usable && !json_is_bool(usable)) || (req && !json_is_bool(req));
+    if (bad) {
+        free(label), free(granted), free(expires);
+        json_free(clears), json_free(blocking), json_free(used);
+        return NULL;
+    }
+    json_t *o = json_obj();
+    json_set_str(o, "id", json_get_str(g, "id"));
+    if (label && *label) json_set_str(o, "label", label);
+    json_set_num(o, "remainingCount", left->u.num.d);
+    if (granted) json_set_str(o, "grantedAt", granted);
+    if (expires) json_set_str(o, "expiresAt", expires);
+    json_set(o, "clears", clears);
+    json_set_bool(o, "paused", paused ? paused->u.b : false);
+    json_set_bool(o, "usableNow", usable ? usable->u.b : false);
+    json_set_bool(o, "requiresLimit", req ? req->u.b : true);
+    json_set(o, "usedFractions", used);
+    json_set(o, "blocking", blocking);
+    free(label), free(granted), free(expires);
+    return o;
+}
+
+/* parseCedarStatus: 1 status (owned), 0 null, -1 malformed */
+static int cedar_status(const json_t *v, json_t **out) {
+    *out = NULL;
+    if (!v || json_is_null(v)) return 0;
+    if (!json_is_obj(v) || !json_is_bool(json_get(v, "eligible"))) return -1;
+    char *reason, *cooldown;
+    int rr = opt_str(json_get(v, "ineligible_reason"), &reason), rc = opt_iso(json_get(v, "cooldown_until"), &cooldown);
+    bool bad = rr < 0 || rc < 0 || (json_get(v, "at_limit") && !json_is_bool(json_get(v, "at_limit"))) ||
+               (json_get(v, "grants") && !json_is_arr(json_get(v, "grants")));
+    json_t *ex = json_get(v, "exhausted") ? window_list(json_get(v, "exhausted")) : NULL;
+    if (json_get(v, "exhausted") && !ex) bad = true;
+    json_free(ex);
+    json_t *grants = json_arr(), *g;
+    json_arr_foreach(json_get_arr(v, "grants"), i, g) {
+        json_t *x = bad ? NULL : cedar_grant(g);
+        if (!x) {
+            bad = true;
+            break;
+        }
+        json_push(grants, x);
+    }
+    const json_t *ng = json_get(v, "next_grant_id");
+    if (ng && !json_is_null(ng) && (!json_is_str(ng) || !re_match(json_sv(ng), 40, false))) bad = true;
+    if (bad) {
+        free(reason), free(cooldown);
+        json_free(grants);
+        return -1;
+    }
+    json_t *st = json_obj();
+    json_set_bool(st, "eligible", json_get_bool(v, "eligible", false));
+    if (reason) json_set_str(st, "reason", reason);
+    json_set(st, "grants", grants);
+    if (json_is_str(ng)) {
+        json_t *x;
+        json_arr_foreach(grants, i, x) if (str_eq(json_get_str(x, "id"), json_sv(ng))) {
+            json_set_str(st, "nextGrantId", json_sv(ng));
+            break;
+        }
+    }
+    if (cooldown) json_set_str(st, "cooldownUntil", cooldown);
+    free(reason), free(cooldown);
+    *out = st;
+    return 1;
+}
+
+static int juniper_status(const json_t *v, json_t **out) {
+    *out = NULL;
+    if (!v || json_is_null(v)) return 0;
+    if (!json_is_obj(v) || !json_is_bool(json_get(v, "eligible"))) return -1;
+    char *reason, *next, *weekly;
+    int a = opt_str(json_get(v, "ineligible_reason"), &reason), b = opt_iso(json_get(v, "next_available_at"), &next),
+        c = opt_iso(json_get(v, "weekly_resets_at"), &weekly);
+    const json_t *arm = json_get(v, "arm"), *rpw = json_get(v, "resets_per_week");
+    bool bad = a < 0 || b < 0 || c < 0 || (json_get(v, "available") && !json_is_bool(json_get(v, "available"))) ||
+               (arm && !json_is_null(arm) && !str_eq(json_sv(arm), "control") && !str_eq(json_sv(arm), "reset")) ||
+               (rpw && (!is_int(rpw) || rpw->u.num.d < 0));
+    if (bad) {
+        free(reason), free(next), free(weekly);
+        return -1;
+    }
+    json_t *st = json_obj();
+    json_set_bool(st, "eligible", json_get_bool(v, "eligible", false));
+    if (reason) json_set_str(st, "reason", reason);
+    if (str_eq(json_sv(arm), "control") || str_eq(json_sv(arm), "reset")) json_set_str(st, "arm", json_sv(arm));
+    json_set_bool(st, "available", json_get_bool(v, "available", false));
+    if (next) json_set_str(st, "nextAvailableAt", next);
+    if (weekly) json_set_str(st, "weeklyResetsAt", weekly);
+    free(reason), free(next), free(weekly);
+    *out = st;
+    return 1;
+}
+
+static void list_tail(json_t *l, const char *org, const char *base) {
+    if (org) json_set_str(l, "orgId", org);
+    if (base) json_set_str(l, "baseUrl", base);
+}
+
+static json_t *cedar_list(const json_t *st, const char *org, const char *base) {
+    double now = (double)now_ms(), cd = 0;
+    const char *cu = json_get_str(st, "cooldownUntil"), *next = json_get_str(st, "nextGrantId");
+    bool cooldown = cu && trace_parse_iso_ms(cu, &cd) && cd > now, eligible = json_get_bool(st, "eligible", false);
+    int64_t avail = 0;
+    const json_t *selected = NULL, *g;
+    json_t *credits = json_arr();
+    json_arr_foreach(json_get_arr(st, "grants"), i, g) {
+        double exp;
+        bool expired = json_get_str(g, "expiresAt") && trace_parse_iso_ms(json_get_str(g, "expiresAt"), &exp) && exp <= now;
+        bool sel = str_eq(json_get_str(g, "id"), next);
+        double left = json_get_num(g, "remainingCount", 0);
+        bool usable = eligible && sel && json_get_bool(g, "usableNow", false) && !json_get_bool(g, "paused", false) && !expired &&
+                      !cooldown && left > 0;
+        const char *status = expired ? "expired" : left == 0 ? "redeemed" : json_get_bool(g, "paused", false) ? "paused" : usable ? "available" : "unavailable";
+        if (!expired && left > 0) avail += (int64_t)left;
+        json_t *c = json_obj();
+        json_set_str(c, "id", json_get_str(g, "id"));
+        json_set_str(c, "title", json_get_str(g, "label") ? json_get_str(g, "label") : "Claude limit reset");
+        json_set_str(c, "program", "cedar_ember");
+        json_set_num(c, "remainingCount", left);
+        json_set_bool(c, "usable", usable);
+        json_set_bool(c, "requiresLimit", json_get_bool(g, "requiresLimit", true));
+        json_set(c, "clears", json_clone(json_get(g, "clears")));
+        json_set(c, "blocking", json_clone(json_get(g, "blocking")));
+        json_set(c, "usedFractions", json_clone(json_get(g, "usedFractions")));
+        if (json_get_str(g, "grantedAt")) json_set_str(c, "grantedAt", json_get_str(g, "grantedAt"));
+        if (json_get_str(g, "expiresAt")) json_set_str(c, "expiresAt", json_get_str(g, "expiresAt"));
+        json_set_str(c, "status", status);
+        json_push(credits, c);
+        if (sel) selected = c;
+    }
+    json_t *l = json_obj();
+    json_set_int(l, "availableCount", avail);
+    json_set_num(l, "redeemableCount", selected && json_get_bool(selected, "usable", false) ? json_get_num(selected, "remainingCount", 0) : 0);
+    if (next && eligible) json_set_str(l, "nextCreditId", next);
+    json_set_bool(l, "eligible", eligible);
+    if (json_get_str(st, "reason")) json_set_str(l, "reason", json_get_str(st, "reason"));
+    else if (cooldown) json_set_str(l, "reason", "cooldown");
+    if (cu) json_set_str(l, "cooldownUntil", cu);
+    json_set(l, "credits", credits);
+    list_tail(l, org, base);
+    return l;
+}
+
+static json_t *juniper_list(const json_t *st, const char *org, const char *base) {
+    bool reset_arm = str_eq(json_get_str(st, "arm"), "reset"), st_eligible = json_get_bool(st, "eligible", false);
+    bool eligible = st_eligible && reset_arm, usable = eligible && json_get_bool(st, "available", false);
+    const char *reason = json_get_str(st, "reason");
+    if (!reason) reason = !st_eligible ? "ineligible" : !reset_arm ? "control" : !json_get_bool(st, "available", false) ? "unavailable" : NULL;
+    json_t *credits = json_arr();
+    if (reset_arm) {
+        json_t *c = json_obj();
+        json_set_str(c, "id", "juniper_tide");
+        json_set_str(c, "title", "Claude session limit reset");
+        json_set_str(c, "program", "juniper_tide");
+        json_set_int(c, "remainingCount", usable ? 1 : 0);
+        json_set_bool(c, "usable", usable);
+        json_set_bool(c, "requiresLimit", true);
+        json_t *cl = json_arr();
+        json_push_str(cl, "anthropic:5h");
+        json_set(c, "clears", cl);
+        json_set(c, "blocking", json_arr());
+        json_set(c, "usedFractions", json_obj());
+        if (json_get_str(st, "weeklyResetsAt")) json_set_str(c, "expiresAt", json_get_str(st, "weeklyResetsAt"));
+        json_set_str(c, "status", usable ? "available" : "unavailable");
+        json_push(credits, c);
+    }
+    json_t *l = json_obj();
+    json_set_int(l, "availableCount", usable ? 1 : 0);
+    json_set_int(l, "redeemableCount", usable ? 1 : 0);
+    if (eligible) json_set_str(l, "nextCreditId", "juniper_tide");
+    json_set_bool(l, "eligible", eligible);
+    if (reason) json_set_str(l, "reason", reason);
+    if (!usable && json_get_str(st, "nextAvailableAt")) json_set_str(l, "cooldownUntil", json_get_str(st, "nextAvailableAt"));
+    json_set(l, "credits", credits);
+    list_tail(l, org, base);
+    return l;
+}
+
+static const char *safe_org(const char *org) {
+    static __thread char buf[160];
+    if (!org) return NULL;
+    char *t = str_trim(org);
+    bool ok = re_match(t, 128, true);
+    snprintf(buf, sizeof buf, "%s", t);
+    free(t);
+    return ok ? buf : NULL;
+}
+
+/* parseClaudeResetCreditsFromUsagePayload */
+static json_t *claude_resets_from_payload(const json_t *payload, const char *org_in, const char *base) {
+    if (!json_is_obj(payload)) return NULL;
+    const char *org = safe_org(org_in);
+    json_t *cedar = NULL, *st;
+    if (json_is_obj(json_get(payload, "cedar_ember"))) {
+        if (cedar_status(json_get(payload, "cedar_ember"), &st) <= 0) return NULL;
+        cedar = cedar_list(st, org, base);
+        json_free(st);
+        if (json_get_int(cedar, "availableCount", 0) > 0 || json_get_str(cedar, "nextCreditId")) return cedar;
+    }
+    if (json_is_obj(json_get(payload, "juniper_tide"))) {
+        json_free(cedar);
+        if (juniper_status(json_get(payload, "juniper_tide"), &st) <= 0) return NULL;
+        json_t *l = juniper_list(st, org, base);
+        json_free(st);
+        return l;
+    }
+    return cedar;
+}
+
+static bool claude_envelope(const json_t *p) {
+    static const char *const keys[] = {"five_hour", "seven_day", "limits", "extra_usage", "spend"};
+    for (size_t i = 0; i < ARRAY_LEN(keys); i++)
+        if (json_get(p, keys[i])) return true;
+    return false;
+}
+
+/* discoverStatus: 1 answered (*status may be NULL; *base_out owned), 0 failed */
+static int claude_discover(const char *token, const char *base_url, const char *query, const char *field, bool juniper,
+                           json_t **status, char **base_out, int *rate_limited) {
+    *status = NULL;
+    *base_out = NULL;
+    char *api = claude_api_base(base_url), *configured = xasprintf("%s/api/oauth", api);
+    free(api);
+    const char *cands[2] = {configured, strcmp(configured, CLAUDE_OAUTH_BASE) ? CLAUDE_OAUTH_BASE : NULL};
+    http_headers_t h = {0};
+    claude_headers(&h, token, "oauth-2025-04-20");
+    usage_params_t p = {.timeout_ms = 5000};
+    int result = 0;
+    for (int i = 0; i < 2 && cands[i]; i++) {
+        char *url = xasprintf("%s/usage?%s", cands[i], query);
+        http_resp_t r;
+        int rc = uhttp("GET", url, &h, NULL, &p, &r);
+        free(url);
+        if (rc != 0) {
+            http_resp_free(&r);
+            break;
+        }
+        if (r.status < 200 || r.status >= 300) {
+            if (r.status == 429 && rate_limited) *rate_limited = 1;
+            bool absent = r.status == 404 || r.status == 405 || r.status == 410 || r.status == 501;
+            http_resp_free(&r);
+            if (absent && strcmp(cands[i], CLAUDE_OAUTH_BASE)) continue;
+            break;
+        }
+        json_t *pl = resp_json(&r);
+        http_resp_free(&r);
+        if (!json_is_obj(pl)) {
+            json_free(pl);
+            break;
+        }
+        if (json_get(pl, field)) {
+            int ok = juniper ? juniper_status(json_get(pl, field), status) : cedar_status(json_get(pl, field), status);
+            json_free(pl);
+            if (ok < 0) break;
+            *base_out = xstrdup(cands[i]);
+            result = 1;
+            break;
+        }
+        bool env = claude_envelope(pl);
+        json_free(pl);
+        if (env) {
+            *base_out = xstrdup(cands[i]);
+            result = 1;
+            break;
+        }
+        if (!strcmp(cands[i], CLAUDE_OAUTH_BASE)) break;
+    }
+    http_headers_free(&h);
+    free(configured);
+    return result;
+}
+
+/* resolveOrganization: owned org id or NULL (*code set) */
+static char *claude_org(const char *token, const char *org_in, const char *base_url, const char **code, int *status) {
+    *code = NULL;
+    *status = 0;
+    if (org_in && *org_in) {
+        const char *s = safe_org(org_in);
+        if (s) return xstrdup(s);
+        *code = "organization_unavailable";
+        return NULL;
+    }
+    char *api = claude_api_base(base_url), *url = xasprintf("%s/api/oauth/profile", api);
+    free(api);
+    http_headers_t h = {0};
+    claude_headers(&h, token, "oauth-2025-04-20");
+    usage_params_t p = {.timeout_ms = 5000};
+    http_resp_t r;
+    char *org = NULL;
+    if (uhttp("GET", url, &h, NULL, &p, &r) != 0) *code = "organization_unavailable";
+    else {
+        *status = r.status;
+        json_t *pl = resp_json(&r);
+        if (r.status < 200 || r.status >= 300) *code = r.status == 401 || r.status == 403 ? "auth_error" : "organization_unavailable";
+        else {
+            const char *c = json_get_str(json_get_obj(pl, "organization"), "uuid");
+            if (!c) c = json_get_str(pl, "organization_uuid");
+            const char *s = safe_org(c);
+            if (s) org = xstrdup(s);
+            else *code = "organization_unavailable";
+        }
+        json_free(pl);
+    }
+    http_resp_free(&r);
+    http_headers_free(&h);
+    free(url);
+    return org;
+}
+
+json_t *usage_claude_list_resets(const char *token, const char *org_in, const char *base_url, bool *rate_limited) {
+    const char *org = safe_org(org_in);
+    char *orgc = org ? xstrdup(org) : NULL;
+    json_t *st = NULL, *list = NULL;
+    char *base = NULL;
+    int rl = 0;
+    if (!claude_discover(token, base_url, "cedar_ember=1&skip_spend=1", "cedar_ember", false, &st, &base, &rl)) goto done;
+    json_t *cedar = NULL;
+    if (st) {
+        cedar = cedar_list(st, orgc, base);
+        json_free(st);
+        st = NULL;
+        if (json_get_int(cedar, "availableCount", 0) > 0 || json_get_str(cedar, "nextCreditId")) {
+            list = cedar;
+            goto resolve;
+        }
+    }
+    char *jbase = NULL;
+    int answered = claude_discover(token, base_url, "at_wall=1&skip_spend=1", "juniper_tide", true, &st, &jbase, &rl);
+    if (answered && st) {
+        json_free(cedar);
+        list = juniper_list(st, orgc, jbase);
+        json_free(st);
+    } else if (cedar && answered) list = cedar;
+    else if (answered) {
+        json_free(cedar);
+        list = json_obj();
+        json_set_int(list, "availableCount", 0);
+        json_set_int(list, "redeemableCount", 0);
+        json_set_bool(list, "eligible", false);
+        json_set(list, "credits", json_arr());
+        if (orgc) json_set_str(list, "orgId", orgc);
+        json_set_str(list, "baseUrl", jbase);
+    } else json_free(cedar);
+    free(jbase);
+resolve:
+    if (list && !json_get_str(list, "orgId") && json_len(json_get_arr(list, "credits")) > 0) {
+        const char *code;
+        int status;
+        char *o = claude_org(token, NULL, json_get_str(list, "baseUrl") ? json_get_str(list, "baseUrl") : base_url, &code, &status);
+        if (o) json_set_str(list, "orgId", o);
+        free(o);
+    }
+done:
+    if (rate_limited) *rate_limited = rl != 0;
+    free(base);
+    free(orgc);
+    return list;
+}
+
+json_t *usage_claude_consume_reset(const char *token, const char *org_in, const char *base_url, const json_t *credit) {
+    json_t *out = json_obj();
+    const char *program = json_get_str(credit, "program"), *id = json_get_str(credit, "id");
+    bool cedar = str_eq(program, "cedar_ember"), juniper = str_eq(program, "juniper_tide");
+#define FAIL(c, st)                                                                                                    \
+    do {                                                                                                               \
+        json_set_bool(out, "ok", false);                                                                               \
+        json_set_str(out, "code", c);                                                                                  \
+        json_set_int(out, "status", st);                                                                               \
+        return out;                                                                                                    \
+    } while (0)
+    if (!cedar && !juniper) FAIL("unknown_program", 0);
+    double exp, left = json_get_num(credit, "remainingCount", -1);
+    const char *es = json_get_str(credit, "expiresAt");
+    if (!json_get_bool(credit, "usable", false) || !is_int(json_get(credit, "remainingCount")) || left <= 0 ||
+        (es && (!trace_parse_iso_ms(es, &exp) || exp <= (double)now_ms()))) {
+        json_set_str(out, "reason", "credit_not_usable");
+        FAIL("unavailable", 0);
+    }
+    if ((cedar && !re_match(id, 40, false)) || (juniper && !str_eq(id, "juniper_tide"))) FAIL("invalid_credit", 0);
+    const char *code;
+    int ostatus;
+    char *org = claude_org(token, org_in, base_url, &code, &ostatus);
+    if (!org) FAIL(code ? code : "organization_unavailable", ostatus);
+    json_t *body = json_obj();
+    if (cedar) {
+        json_set_str(body, "program", "cedar_ember");
+        json_set_str(body, "grant_id", id);
+        char *rid = uuid_v4();
+        json_set_str(body, "request_id", rid);
+        free(rid);
+    } else json_set_str(body, "program", "juniper_tide");
+    char *bs = json_dump(body, 0), *api = claude_api_base(base_url), *eo = url_encode(org);
+    char *url = xasprintf("%s/api/organizations/%s/reset_rate_limits", api, eo);
+    free(api), free(eo), free(org);
+    json_free(body);
+    http_headers_t h = {0};
+    claude_headers(&h, token, "oauth-2025-04-20");
+    usage_params_t p = {.timeout_ms = 25000};
+    http_resp_t r;
+    int rc = uhttp("POST", url, &h, bs, &p, &r);
+    free(url), free(bs);
+    http_headers_free(&h);
+    if (rc != 0) {
+        http_resp_free(&r);
+        FAIL("network_error", 0);
+    }
+    int status = r.status;
+    json_t *pl = resp_json(&r);
+    http_resp_free(&r);
+    if (status < 200 || status >= 300) {
+        char c[32];
+        if (status == 401 || status == 403) snprintf(c, sizeof c, "auth_error");
+        else if (status == 429) snprintf(c, sizeof c, "rate_limited");
+        else snprintf(c, sizeof c, "http_%d", status);
+        json_free(pl);
+        FAIL(c, status);
+    }
+    char *result = NULL, *reason = NULL;
+    int rr = json_is_obj(pl) ? opt_str(json_get(pl, "result"), &result) : -1;
+    int rs = json_is_obj(pl) ? opt_str(json_get(pl, "reason"), &reason) : 0;
+    json_t *cleared = NULL;
+    bool malformed = rr <= 0 || rs < 0;
+    if (!malformed && json_get(pl, "cleared")) {
+        cleared = window_list(json_get(pl, "cleared"));
+        if (!cleared) malformed = true;
+    } else if (!malformed && !strcmp(result, "reset")) {
+        if (juniper) {
+            cleared = json_arr();
+            json_push_str(cleared, "anthropic:5h");
+        } else cleared = json_clone(json_get(credit, "clears"));
+    }
+    json_free(pl);
+    if (malformed) {
+        free(result), free(reason);
+        json_free(cleared);
+        FAIL("malformed_response", status);
+    }
+    const char *c = !strcmp(result, "already_used") ? "already_redeemed" : !strcmp(result, "not_limited") ? "nothing_to_reset" : result;
+    json_set_bool(out, "ok", !strcmp(result, "reset"));
+    json_set_str(out, "code", c);
+    json_set_int(out, "status", status);
+    if (cleared) json_set(out, "cleared", cleared);
+    if (reason) json_set_str(out, "reason", reason);
+    free(result), free(reason);
+    return out;
+#undef FAIL
+}
+
 static json_t *claude_fetch(const usage_params_t *p, bool *rejected) {
     const char *token = claude_token(p->cred);
     if (!token) return NULL;
     http_headers_t h = {0};
-    claude_headers(&h, token);
+    claude_headers(&h, token, CLAUDE_USAGE_BETAS);
     char *api = claude_api_base(p->base_url);
     char *configured = xasprintf("%s/api/oauth", api);
     free(api);
@@ -496,10 +1058,26 @@ static json_t *claude_fetch(const usage_params_t *p, bool *rejected) {
     if (payload && base) {
         char *endpoint = xasprintf("%s/usage", base);
         report = claude_parse(payload, p->cred, endpoint);
+        json_t *resets = claude_resets_from_payload(payload, cstr(p->cred, "orgId"), base);
+        if (!resets) resets = usage_claude_list_resets(token, cstr(p->cred, "orgId"), p->base_url, NULL);
+        bool inventory = resets && (json_get_int(resets, "availableCount", 0) > 0 || json_get_str(resets, "nextCreditId") ||
+                                    json_len(json_get_arr(resets, "credits")) > 0);
+        if (!report && inventory) {
+            report = report_new("anthropic", now_ms());
+            json_t *md = json_obj();
+            json_set_str(md, "endpoint", endpoint);
+            const char *pa, *pe;
+            claude_identity(payload, &pa, &pe);
+            if (pa) json_set_str(md, "accountId", pa);
+            if (pe) json_set_str(md, "email", pe);
+            json_set(report, "metadata", md);
+            json_set(report, "raw", json_clone(payload));
+        }
         free(endpoint);
         if (report) {
             json_t *md = json_get_obj(report, "metadata");
-            const char *acc = json_get_str(md, "accountId"), *email = json_get_str(md, "email");
+            const char *acc = json_get_str(md, "accountId") ? json_get_str(md, "accountId") : cstr(p->cred, "accountId");
+            const char *email = json_get_str(md, "email") ? json_get_str(md, "email") : cstr(p->cred, "email");
             char *pacc = NULL, *pemail = NULL;
             if (!acc || !email) { /* fetchProfile */
                 char *url = xasprintf("%s/profile", base);
@@ -517,11 +1095,24 @@ static json_t *claude_fetch(const usage_params_t *p, bool *rejected) {
                 http_resp_free(&r);
                 free(url);
             }
-            if (!acc && pacc) json_set_str(md, "accountId", pacc);
-            if (!email && pemail) json_set_str(md, "email", pemail);
-            free(pacc);
-            free(pemail);
+            if (resets) {
+                json_t *rc = json_clone(resets);
+                const char *org = json_get_str(resets, "orgId");
+                json_del(rc, "orgId");
+                json_del(rc, "baseUrl");
+                json_del(rc, "report");
+                json_set(report, "resetCredits", rc);
+                if (org) json_set_str(md, "orgId", org);
+            } else if (json_get_obj(p->previous, "resetCredits")) {
+                json_set(report, "resetCredits", json_clone(json_get_obj(p->previous, "resetCredits")));
+            }
+            char *a2 = acc ? xstrdup(acc) : pacc ? xstrdup(pacc) : NULL, *e2 = email ? xstrdup(email) : pemail ? xstrdup(pemail) : NULL;
+            if (a2) json_set_str(md, "accountId", a2);
+            if (e2) json_set_str(md, "email", e2);
+            if (cstr(p->cred, "orgId")) json_set_str(md, "orgId", cstr(p->cred, "orgId"));
+            free(a2), free(e2), free(pacc), free(pemail);
         }
+        json_free(resets);
     }
     json_free(payload);
     free(configured);
@@ -1273,6 +1864,23 @@ const usage_provider_t usage_provider_copilot = {"github-copilot", copilot_suppo
  * Google Gemini CLI (usage/gemini.ts)
  * ============================================================================================ */
 
+/* quotaTierFor("google-gemini-cli", model) */
+static const char *gemini_tier(const char *model) {
+    static const char *const flash3[] = {"gemini-3-flash-preview", "gemini-3-flash", "gemini-3.5-flash", NULL};
+    static const char *const flash[] = {"gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash", NULL};
+    static const char *const pro[] = {"gemini-2.5-pro", "gemini-3-pro-preview", "gemini-3.1-pro-preview", "gemini-3-pro",
+                                      "gemini-3.1-pro", "gemini-pro-agent", "gemini-1.5-pro", NULL};
+    for (int i = 0; flash3[i]; i++)
+        if (!strcmp(model, flash3[i])) return "3-Flash";
+    for (int i = 0; flash[i]; i++)
+        if (!strcmp(model, flash[i])) return "Flash";
+    for (int i = 0; pro[i]; i++)
+        if (!strcmp(model, pro[i])) return "Pro";
+    if (strstr(model, "flash")) return "Flash";
+    if (strstr(model, "pro")) return "Pro";
+    return NULL;
+}
+
 static bool gemini_supports(const usage_params_t *p) {
     return str_eq(json_get_str(p->cred, "type"), "oauth") && cstr(p->cred, "accessToken");
 }
@@ -1360,6 +1968,7 @@ static json_t *gemini_fetch(const usage_params_t *p, bool *rejected) {
             if (cstr(p->cred, "accountId")) json_set_str(s, "accountId", cstr(p->cred, "accountId"));
             if (project) json_set_str(s, "projectId", project);
             if (model) json_set_str(s, "modelId", model);
+            if (model && gemini_tier(model)) json_set_str(s, "tier", gemini_tier(model));
             json_set_str(s, "windowId", json_get_str(w, "id"));
             json_push(limits, limit_new(id, label, s, w, amount, NULL));
             free(id);

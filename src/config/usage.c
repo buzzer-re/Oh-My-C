@@ -7,6 +7,7 @@
 
 #include "ai/ai.h"
 #include "config/auth.h"
+#include "core/fs.h"
 #include "session/trace.h"
 #include "tools/outsink.h"
 
@@ -79,14 +80,117 @@ typedef struct {
     bool rejected;
 } ureq_t;
 
+/* usageCacheIdentity */
+char *usage_account_key(const json_t *cred) {
+    sb_t b = SB_INIT;
+    sb_append(&b, json_get_str(cred, "type") ? json_get_str(cred, "type") : "api_key");
+    char *acc = json_get_str(cred, "accountId") ? str_trim(json_get_str(cred, "accountId")) : xstrdup("");
+    char *em_t = json_get_str(cred, "email") ? str_trim(json_get_str(cred, "email")) : xstrdup(""), *em = str_lower(em_t);
+    char *org = json_get_str(cred, "orgId") ? str_trim(json_get_str(cred, "orgId")) : xstrdup("");
+    char *proj = json_get_str(cred, "projectId") ? str_trim(json_get_str(cred, "projectId")) : xstrdup("");
+    char *ent_t = json_get_str(cred, "enterpriseUrl") ? str_trim(json_get_str(cred, "enterpriseUrl")) : xstrdup(""), *ent = str_lower(ent_t);
+    if (*acc) sb_appendf(&b, "|account:%s", acc);
+    if (*em) sb_appendf(&b, "|email:%s", em);
+    if (*org) sb_appendf(&b, "|org:%s", org);
+    if (*proj) sb_appendf(&b, "|project:%s", proj);
+    if (*ent) sb_appendf(&b, "|enterprise:%s", ent);
+    if (!*acc && !*em && !*org) {
+        const char *sec = json_get_str(cred, "apiKey");
+        if (!sec || !*sec) sec = json_get_str(cred, "refreshToken");
+        if (!sec || !*sec) sec = json_get_str(cred, "accessToken");
+        if (sec && *sec) {
+            char *t = str_trim(sec);
+            sb_appendf(&b, "|secret:%llx", (unsigned long long)hash_xx64(t, strlen(t), 0));
+            free(t);
+        } else sb_append(&b, "|anonymous");
+    }
+    free(acc), free(em_t), free(em), free(org), free(proj), free(ent_t), free(ent);
+    return sb_detach(&b);
+}
+
 static char *cache_key(const char *provider, const json_t *cred) {
-    const char *tok = json_get_str(cred, "accessToken");
-    if (!tok) tok = json_get_str(cred, "apiKey");
-    const char *who = json_get_str(cred, "accountId");
-    if (!who) who = json_get_str(cred, "email");
-    uint64_t h = tok ? hash_fnv1a(tok, strlen(tok)) : 0;
-    return xasprintf("%s|%s|%s|%016llx", provider, json_get_str(cred, "type"), who ? who : "",
-                     (unsigned long long)(who ? 0 : h));
+    char *id = usage_account_key(cred);
+    char *k = xasprintf("%s|%s", provider, id);
+    free(id);
+    return k;
+}
+
+/* ---------- history (usage-history.jsonl: one row per account, limit and hour) ---------- */
+
+static void record_history(const char *provider, const json_t *cred, const json_t *report) {
+    json_t *limits = json_get_arr(report, "limits"), *l;
+    if (json_len(limits) == 0) return;
+    double at = json_get_num(report, "fetchedAt", 0);
+    if (!(at > 0)) at = (double)now_ms();
+    char *key = usage_account_key(cred);
+    const json_t *md = json_get_obj(report, "metadata");
+    sb_t b = SB_INIT;
+    json_arr_foreach(limits, i, l) {
+        json_t *e = json_obj();
+        json_set_num(e, "recordedAt", at);
+        json_set_str(e, "provider", provider);
+        json_set_str(e, "accountKey", key);
+        const char *email = json_get_str(cred, "email") ? json_get_str(cred, "email") : json_get_str(md, "email");
+        const char *acc = json_get_str(cred, "accountId") ? json_get_str(cred, "accountId")
+                          : json_get_str(json_get_obj(l, "scope"), "accountId") ? json_get_str(json_get_obj(l, "scope"), "accountId")
+                                                                               : json_get_str(md, "accountId");
+        if (email) json_set_str(e, "email", email);
+        if (acc) json_set_str(e, "accountId", acc);
+        json_set_str(e, "limitId", json_get_str(l, "id") ? json_get_str(l, "id") : "");
+        json_set_str(e, "label", json_get_str(l, "label") ? json_get_str(l, "label") : "");
+        const char *wl = json_get_str(json_get_obj(l, "window"), "label");
+        if (!wl) wl = json_get_str(json_get_obj(l, "scope"), "windowId");
+        if (wl) json_set_str(e, "windowLabel", wl);
+        double f;
+        if (usage_used_fraction(l, &f)) json_set_num(e, "usedFraction", f);
+        if (json_get_str(l, "status")) json_set_str(e, "status", json_get_str(l, "status"));
+        json_t *ra = json_get(json_get_obj(l, "window"), "resetsAt");
+        if (json_is_num(ra)) json_set(e, "resetsAt", json_clone(ra));
+        json_dump_sb(&b, e, 0);
+        sb_putc(&b, '\n');
+        json_free(e);
+    }
+    char *path = omc_agent_path("usage-history.jsonl");
+    fs_append(path, b.s, b.len);
+    free(path);
+    sb_free(&b);
+    free(key);
+}
+
+json_t *usage_history(const char *provider, int64_t since) {
+    char *path = omc_agent_path("usage-history.jsonl");
+    size_t n = 0;
+    char *text = fs_read(path, &n);
+    free(path);
+    json_t *out = json_arr();
+    for (char *line = text, *next; line && *line; line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        json_t *e = json_parse_str(line);
+        const char *p = json_get_str(e, "provider");
+        if (!json_is_obj(e) || !p || json_get_num(e, "recordedAt", 0) < (double)since || (provider && strcasecmp(p, provider))) {
+            json_free(e);
+            continue;
+        }
+        /* one row per (provider, account, limit, hour): the latest snapshot of the bucket wins */
+        int64_t bucket = (int64_t)floor(json_get_num(e, "recordedAt", 0) / 3600000.0);
+        bool replaced = false;
+        for (size_t i = json_len(out); i-- > 0 && !replaced;) {
+            json_t *o = json_at(out, i);
+            if (str_eq(json_get_str(o, "provider"), p) && str_eq(json_get_str(o, "accountKey"), json_get_str(e, "accountKey")) &&
+                str_eq(json_get_str(o, "limitId"), json_get_str(e, "limitId"))) {
+                if ((int64_t)floor(json_get_num(o, "recordedAt", 0) / 3600000.0) == bucket) {
+                    json_free(json_arr_remove(out, i));
+                    json_arr_insert(out, i, e);
+                    replaced = true;
+                }
+                break;
+            }
+        }
+        if (!replaced) json_push(out, e);
+    }
+    free(text);
+    return out;
 }
 
 /* #collectUsageRequests over omc's single credential per provider */
@@ -156,6 +260,58 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static VEC(centry_t) g_cache;
 static json_t *g_last; /* newest aggregate snapshot */
 
+static void cache_clear_mem(void) {
+    for (size_t i = 0; i < g_cache.n; i++) {
+        free(g_cache.v[i].key);
+        free(g_cache.v[i].provider);
+        json_free(g_cache.v[i].report);
+    }
+    g_cache.n = 0;
+}
+
+/* the cache is shared with other omc processes through <agent>/usage-cache.json (omp keeps it in agent.db) */
+static void cache_load(void) {
+    cache_clear_mem();
+    char *path = omc_agent_path("usage-cache.json");
+    size_t n = 0;
+    char *text = fs_read(path, &n);
+    free(path);
+    json_t *j = text ? json_parse(text, n, NULL) : NULL;
+    free(text);
+    const char *k;
+    json_t *v;
+    if (json_is_obj(j)) json_obj_foreach(j, i, k, v) {
+            if (!json_is_obj(v) || !json_get_str(v, "provider")) continue;
+            centry_t c = {.key = xstrdup(k), .provider = xstrdup(json_get_str(v, "provider")),
+                          .report = json_is_obj(json_get(v, "report")) ? json_clone(json_get(v, "report")) : NULL,
+                          .expires_at = json_get_int(v, "expiresAt", 0), .retry_after = json_get_int(v, "retryAfter", 0)};
+            vec_push(&g_cache, c);
+        }
+    json_free(j);
+}
+
+static void cache_save(void) {
+    json_t *j = json_obj();
+    int64_t now = now_ms();
+    for (size_t i = 0; i < g_cache.n; i++) {
+        centry_t *c = &g_cache.v[i];
+        /* last-good reports are kept for a day */
+        if (!c->report && c->retry_after <= now) continue;
+        if (c->report && json_get_num(c->report, "fetchedAt", 0) < now - 86400000.0 && c->retry_after <= now) continue;
+        json_t *e = json_obj();
+        json_set_str(e, "provider", c->provider);
+        if (c->report) json_set(e, "report", json_clone(c->report));
+        json_set_int(e, "expiresAt", c->expires_at);
+        json_set_int(e, "retryAfter", c->retry_after);
+        json_set(j, c->key, e);
+    }
+    char *path = omc_agent_path("usage-cache.json"), *s = json_dump(j, 0);
+    fs_write_atomic(path, s, strlen(s), 0600);
+    free(path);
+    free(s);
+    json_free(j);
+}
+
 static centry_t *cache_find(const char *key) {
     for (size_t i = 0; i < g_cache.n; i++)
         if (!strcmp(g_cache.v[i].key, key)) return &g_cache.v[i];
@@ -190,6 +346,7 @@ json_t *usage_fetch_reports(const char *provider) {
     VEC(pthread_t) th = {0};
     VEC(size_t) th_idx = {0};
     pthread_mutex_lock(&g_mu);
+    cache_load();
     for (size_t i = 0; i < reqs.n; i++) {
         centry_t *c = cache_find(reqs.v[i].key);
         if (c && c->report && c->expires_at > now) {
@@ -211,6 +368,7 @@ json_t *usage_fetch_reports(const char *provider) {
     for (size_t i = 0; i < th.n; i++) pthread_join(th.v[i], NULL);
     now = now_ms();
     pthread_mutex_lock(&g_mu);
+    if (th_idx.n) cache_load();
     for (size_t k = 0; k < th_idx.n; k++) {
         ureq_t *r = &reqs.v[th_idx.v[k]];
         centry_t *c = cache_find(r->key);
@@ -219,6 +377,7 @@ json_t *usage_fetch_reports(const char *provider) {
             c = &g_cache.v[g_cache.n - 1];
         }
         if (r->report) {
+            record_history(r->provider, r->cred, r->report);
             json_free(c->report);
             c->report = json_clone(r->report);
             c->expires_at = now + USAGE_REPORT_TTL_MS;
@@ -233,6 +392,7 @@ json_t *usage_fetch_reports(const char *provider) {
             if (c->report) r->report = json_clone(c->report); /* last-good retention */
         }
     }
+    if (th_idx.n) cache_save();
     json_t *out = json_arr();
     for (size_t i = 0; i < reqs.n; i++) {
         if (reqs.v[i].report) json_push(out, reqs.v[i].report);
@@ -255,6 +415,7 @@ json_t *usage_fetch_reports(const char *provider) {
 
 void usage_invalidate(const char *provider) {
     pthread_mutex_lock(&g_mu);
+    cache_load();
     for (size_t i = 0; i < g_cache.n;) {
         centry_t *c = &g_cache.v[i];
         if (!provider || !strcasecmp(c->provider, provider)) {
@@ -264,6 +425,7 @@ void usage_invalidate(const char *provider) {
             g_cache.v[i] = g_cache.v[--g_cache.n];
         } else i++;
     }
+    cache_save();
     pthread_mutex_unlock(&g_mu);
 }
 

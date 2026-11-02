@@ -434,7 +434,7 @@ static const char *const OMP_ONLY_COMMANDS[] = {
     "auth-broker", "auth-gateway", "anonymize", "bench", "browser-relay", "cleanse", "collab", "compress",
     "dry-balance", "find", "gc", "gallery", "git", "grievances", "images", "img", "if-bench", "install", "join",
     "plugin", "plugins", "predict", "ps", "say", "clip", "play", "share", "shell", "render", "skill", "skills",
-    "stats", "stream", "update", "tiny-models", "toks", "commit", "usage",
+    "stats", "stream", "update", "tiny-models", "toks", "commit",
 #ifndef OMC_CLI_SESSION
     "session",
 #endif

@@ -50,6 +50,12 @@ json_t *usage_fetch_reports(const char *provider);
 void usage_invalidate(const char *provider);
 /* newest snapshot from usage_fetch_reports without a network call (owned clone), NULL before the first fetch */
 json_t *usage_cached_reports(void);
+/* usageCacheIdentity of a UsageCredential (owned) */
+char *usage_account_key(const json_t *cred);
+/* recorded usage-limit snapshots (usage-history.jsonl, one per account / limit / hour), oldest first; provider may
+ * be NULL. Owned [{recordedAt, provider, accountKey, email?, accountId?, limitId, label, windowLabel?,
+ * usedFraction?, status?, resetsAt?}] */
+json_t *usage_history(const char *provider, int64_t since_ms);
 /* test seam: forget everything */
 void usage_reset_cache(void);
 
@@ -132,5 +138,16 @@ char *usage_reset_account_line(const json_t *account);         /* formatResetUsa
 const json_t *usage_resolve_reset_target(const json_t *accounts, const char *arg, const char *command, char **err);
 char *usage_describe_redeem(const json_t *outcome, const char *label); /* describeRedeemOutcome, owned */
 const char *usage_reset_provider_label(const char *provider);    /* "Codex" / "Claude" / provider */
+/* listResetCredits for one provider ("openai-codex" / "anthropic"), owned */
+json_t *usage_list_reset_credits_for(const char *provider, const char *active_provider);
+/* claude-reset.ts (usage_providers.c): listClaudeResetCredits -> owned {availableCount, redeemableCount,
+ * nextCreditId?, eligible, reason?, cooldownUntil?, credits, orgId?, baseUrl?} or NULL when discovery failed;
+ * consumeClaudeResetCredit -> owned {ok, code, status, cleared?, reason?} */
+json_t *usage_claude_list_resets(const char *token, const char *org_id, const char *base_url, bool *rate_limited);
+json_t *usage_claude_consume_reset(const char *token, const char *org_id, const char *base_url, const json_t *credit);
+/* openai-codex-reset.ts / openai-codex-base-url.ts (usage_providers.c) */
+json_t *usage_codex_list_resets(const char *token, const char *acc, const char *base_url, int64_t timeout_ms);
+json_t *usage_codex_consume_reset(const char *token, const char *acc, const char *base_url, const char *credit_id);
+char *usage_codex_base_url(const char *base);
 
 #endif
