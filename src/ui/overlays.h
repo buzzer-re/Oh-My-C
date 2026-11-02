@@ -209,6 +209,9 @@ int ui_setup_pending(bool resuming);
 /* show the wizard (fullscreen overlay); `done` runs on the UI thread once it finished (after the outro) */
 void ui_setup_run(ui_t *u, void (*done)(void *ud), void *ud);
 bool ui_setup_active(void);
+/* /setup [providers] (runProviderSetupWizard): the providers scene only, without advancing setupVersion or
+ * replaying the welcome intro */
+void ui_setup_run_providers(ui_t *u);
 
 /* ---------- overlays.c ---------- */
 

@@ -60,6 +60,7 @@ struct wizard {
     int timer;
     void (*done)(void *ud);
     void *done_ud;
+    bool no_mark; /* runProviderSetupWizard: markComplete false (setupVersion untouched) */
 };
 
 static wizard_t *g_wizard;
@@ -1375,7 +1376,7 @@ static void complete(wizard_t *w) {
     if (w->timer) tui_remove_timer(w->u->tui, w->timer);
     w->timer = 0;
     unmount_scene(w);
-    settings_set_global("setupVersion", json_int(UI_SETUP_VERSION));
+    if (!w->no_mark) settings_set_global("setupVersion", json_int(UI_SETUP_VERSION));
     tui_t *t = w->u->tui;
     tui_overlay_hide(t, &w->base);
     tui_alt_screen(t, false);
@@ -1386,15 +1387,17 @@ static void complete(wizard_t *w) {
     if (done) done(ud);
 }
 
-void ui_setup_run(ui_t *u, void (*done)(void *ud), void *ud) {
+static void setup_start(ui_t *u, bool providers_only, void (*done)(void *ud), void *ud) {
     wizard_t *w = xcalloc(1, sizeof *w);
     tui_component_init(&w->base, &WIZARD_VT);
     w->u = u;
     w->done = done;
     w->done_ud = ud;
+    w->no_mark = providers_only;
     int stored = (int)settings_int("setupVersion", 0);
     for (size_t i = 0; i < ARRAY_LEN(SCENES); i++)
-        if (SCENES[i].min_version > stored) w->scenes[w->nscenes++] = &SCENES[i];
+        if (providers_only ? str_eq(SCENES[i].id, "providers") : SCENES[i].min_version > stored)
+            w->scenes[w->nscenes++] = &SCENES[i];
     w->phase = w->nscenes ? PH_SPLASH : PH_OUTRO;
     w->phase_start = mono_ms();
     g_wizard = w;
@@ -1402,4 +1405,11 @@ void ui_setup_run(ui_t *u, void (*done)(void *ud), void *ud) {
     tui_overlay_opts_t o = {TUI_ANCHOR_TOP, 0, 0, 0, 0};
     tui_overlay_show(u->tui, &w->base, &o);
     w->timer = tui_add_timer(u->tui, TICK_MS, true, tick, w);
+}
+
+void ui_setup_run(ui_t *u, void (*done)(void *ud), void *ud) { setup_start(u, false, done, ud); }
+
+void ui_setup_run_providers(ui_t *u) {
+    if (g_wizard) return;
+    setup_start(u, true, NULL, NULL);
 }
