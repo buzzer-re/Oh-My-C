@@ -22,6 +22,7 @@ $MOCK_DELAY (seconds, default 0) is slept between streamed chunks.
 Memory pipeline side requests (memory.backend=local startup):
   - stage-1 extraction (system "Memory-stage-one extractor") -> strict JSON {rollout_summary, rollout_slug, raw_memory}
   - stage-2 consolidation (system "memory-stage-two consolidator") -> {memory_md, memory_summary, skills:[mock-skill]}
+Idle recap side turns ("<recap>…") answer a fixed one-line recap.
 /btw side questions ("<btw>…Question:\n<q>\n</btw>"): <q> may be md:/think:/slow:/streamfail:/fail:, else a fixed
   markdown answer naming <q>.
 Every request body is appended to $MOCK_LOG (JSONL) for assertions."""
@@ -169,6 +170,8 @@ class H(BaseHTTPRequestHandler):
                 kind, rest = "say", "Use for demo skill test routing"
             elif "<title-request>" in u:  # fork title side request (omp/omc title.generator: fork)
                 kind, rest = "say", '<title emoji="🧪" code="PARK">Fix flaky park tests</title>'
+            elif u.startswith("<recap>"):  # idle recap side turn (recap-user.md)
+                kind, rest = "say", "Recap: goal is fixing the flaky park tests; next, rerun the suite."
             elif "You name coding-agent sessions" in sysc:  # title model fallback
                 kind, rest = "say", "<title>Fix flaky park tests</title>"
             if advisor:
