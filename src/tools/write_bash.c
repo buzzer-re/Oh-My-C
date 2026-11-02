@@ -245,7 +245,7 @@ static char *apply_text_convention(const char *abs, const char *content, bool *c
     return sb_detach(&b);
 }
 
-static int write_local(tool_env_t *env, const char *raw_path, const char *raw_content, tool_result_t *out) {
+static int write_local(tool_env_t *env, tool_ctx_t *ctx, const char *raw_path, const char *raw_content, tool_result_t *out) {
     char *path = unwrap_header(raw_path);
     if (!raw_content) {
         tool_result_error(out, "content is required for %s.", path);
@@ -311,9 +311,36 @@ static int write_local(tool_env_t *env, const char *raw_path, const char *raw_co
         goto done;
     }
     bool crlf_applied = false, bom_applied = false;
-    char *conv = existed && S_ISREG(st.st_mode) ? apply_text_convention(abs, clean, &crlf_applied, &bom_applied) : NULL;
+    /* an ACP editor that advertises fs.writeTextFile owns editor-visible files (routeWriteThroughBridge): the write
+     * goes as given (its buffer keeps its own line endings); OMP-owned artifacts (internal URLs, local://) stay local */
+    bool bridged = env->bridge && env->bridge->write_text && !strstr(path, "://") &&
+                   !(env->local_dir && str_starts(abs, env->local_dir));
+    char *conv = !bridged && existed && S_ISREG(st.st_mode) ? apply_text_convention(abs, clean, &crlf_applied, &bom_applied) : NULL;
     final = conv ? conv : xstrdup(clean);
     size_t n = strlen(final);
+    if (ctx && ctx->update) { /* emitWriteProgress */
+        tool_result_t pr = {0};
+        tool_result_textf(&pr, "Writing %zu bytes to %s...", n, display);
+        pr.details = json_obj();
+        json_set_str(pr.details, "resolvedPath", abs);
+        ctx->update(ctx, &pr);
+        tool_result_free(&pr);
+    }
+    if (bridged) {
+        char *berr = NULL;
+        if (env->bridge->write_text(env->bridge, abs, final, &berr) != 0) {
+            tool_result_error(out, "%s", berr ? berr : "write failed");
+            free(berr);
+            goto done;
+        }
+        /* the client may have transformed the text (format on save): what is on disk now is what callers see */
+        char *back = fs_read(abs, NULL);
+        if (back) {
+            free(final);
+            final = back;
+        }
+        goto written;
+    }
     {
         char *dir = path_dirname(abs);
         fs_mkdir_p(dir, 0755);
@@ -344,6 +371,7 @@ static int write_local(tool_env_t *env, const char *raw_path, const char *raw_co
         free(m);
         goto done;
     }
+written:;
     /* shebang: chmod a+x */
     bool made_exec = false;
     if (str_starts(final, "#!") && !str_starts(final, "#![")) {
@@ -435,7 +463,7 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         return 0;
     }
     if (xdev_write(ctx, path, content, out)) return 0;
-    if (!str_starts(path, "ssh://")) return write_local(env, path, raw_content, out);
+    if (!str_starts(path, "ssh://")) return write_local(env, ctx, path, raw_content, out);
     char *err = NULL;
     size_t n = strlen(content);
     if (ssh_store(env, path, content, n, &err) != 0) {
@@ -783,6 +811,53 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     bash_stream_t bs = {.ctx = ctx, .sink = out_sink_new(&so)};
     free(art_path);
     free(art_id);
+    /* the client terminal (an ACP client advertising `terminal`) shows a live terminal card in the editor; it wins
+     * over auto-backgrounding. PTY runs need the local terminal UI. */
+    if (!pty && env->bridge && env->bridge->run_terminal) {
+        strvec_t targs = {0};
+        const char *nologin = env_get("PI_BASH_NO_LOGIN");
+        if (!nologin || !*nologin) nologin = env_get("CLAUDE_BASH_NO_LOGIN");
+        if (!nologin || !*nologin) strvec_push(&targs, "-l");
+        strvec_push(&targs, "-c");
+        const char *sprefix = env_get("PI_SHELL_PREFIX");
+        if (!sprefix || !*sprefix) sprefix = env_get("CLAUDE_CODE_SHELL_PREFIX");
+        strvec_push_own(&targs, sprefix && *sprefix ? xasprintf("%s %s", sprefix, full) : xstrdup(full));
+        char *shell = NULL;
+        const char *sp = settings_str("shellPath", NULL);
+        const char *ushell = env_get("SHELL");
+        if (sp && *sp) shell = xstrdup(sp);
+        else if (ushell && (strstr(ushell, "bash") || strstr(ushell, "zsh")) && fs_is_exec(ushell)) shell = xstrdup(ushell);
+        else shell = xstrdup(proc_shell_path());
+        tool_terminal_req_t req = {.command = shell, .args = &targs, .cwd = cwd, .timeout_ms = timeout_ms, .output_limit = 51200};
+        tool_terminal_res_t tr = {.exit_code = -1};
+        char *terr = NULL;
+        int64_t tt0 = mono_ms();
+        int trc = env->bridge->run_terminal(env->bridge, ctx, &req, &tr, &terr);
+        int64_t tdur = mono_ms() - tt0;
+        free(shell);
+        strvec_free(&targs);
+        if (trc != 0) {
+            tool_result_error(out, "%s", terr ? terr : "terminal failed");
+            free(terr);
+            free(tr.output);
+            out_sink_free(bs.sink);
+            out_redirect_discard(&reply_files);
+            goto done;
+        }
+        proc_result_t r = {0};
+        r.out = tr.output ? tr.output : xstrdup("");
+        r.out_len = strlen(r.out);
+        r.timed_out = tr.timed_out;
+        r.cancelled = tr.aborted;
+        r.exit_code = tr.exit_code >= 0 ? tr.exit_code : 0;
+        if (tr.signaled && tr.exit_code < 0) r.term_signal = 9; /* null exit code with a signal: 137 */
+        if (tr.truncated) strvec_push(&notices, "(output truncated)");
+        bash_finish(env, out, &r, &bs, tsec, req_tsec, timeout_ms, cwd, tdur, &notices);
+        out_redirect_collect(&reply_files, out);
+        out_sink_free(bs.sink);
+        proc_result_free(&r);
+        goto done;
+    }
     bool persistent = settings_bool("bash.persistent", true);
     if (!pty && persistent) {
         pthread_mutex_lock(&env->mu);

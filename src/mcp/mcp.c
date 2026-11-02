@@ -900,6 +900,20 @@ json_t *mcp_connected(mcp_manager_t *m) {
     return out;
 }
 
+json_t *mcp_failed(mcp_manager_t *m) {
+    json_t *out = json_arr();
+    for (size_t i = 0; m && i < m->servers.n; i++) {
+        mcp_server_t *s = m->servers.v[i];
+        if (!s->error) continue;
+        json_t *o = json_obj();
+        json_set_str(o, "name", s->name);
+        json_set_str(o, "error", s->error);
+        json_set_str(o, "transport", s->transport == T_STDIO ? "stdio" : s->transport == T_HTTP ? "http" : "sse");
+        json_push(out, o);
+    }
+    return out;
+}
+
 const char *mcp_config_url(const json_t *cfg) {
     if (json_get_str(cfg, "command")) return NULL;
     const char *u = json_get_str(cfg, "url");

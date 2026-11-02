@@ -57,6 +57,39 @@ typedef struct {
     void *ud;
 } tool_ui_t;
 
+/* ---------- client bridge (session/client-bridge.ts) ----------
+ * An ACP client that advertises fs / terminal capabilities serves file reads and writes from its editor buffers
+ * and runs bash in its own terminals. NULL members (or a NULL env->bridge) mean local I/O. */
+typedef struct {
+    const char *command;     /* shell binary */
+    const strvec_t *args;    /* its arguments (shell flags + the command line) */
+    const strvec_t *env;     /* "NAME=value" */
+    const char *cwd;
+    int64_t timeout_ms;      /* 0 = none */
+    int64_t output_limit;    /* outputByteLimit */
+} tool_terminal_req_t;
+
+typedef struct {
+    char *output;            /* owned */
+    bool truncated;
+    bool exited;             /* exit status known */
+    int exit_code;           /* -1 = none */
+    bool signaled;           /* terminated by a signal (exit code 137) */
+    bool timed_out, aborted;
+} tool_terminal_res_t;
+
+typedef struct tool_bridge {
+    /* fs/read_text_file: the editor's text for `abs` (owned), or NULL with *err (owned) */
+    char *(*read_text)(struct tool_bridge *b, const char *abs, char **err);
+    /* fs/write_text_file: 0, or -1 with *err (owned) */
+    int (*write_text)(struct tool_bridge *b, const char *abs, const char *content, char **err);
+    /* terminal/create + wait/output/kill/release: runs the command in a client terminal, reporting the terminal id
+     * and polled output through ctx->update. 0, or -1 with *err (owned) when the client failed */
+    int (*run_terminal)(struct tool_bridge *b, struct tool_ctx *ctx, const tool_terminal_req_t *req,
+                        tool_terminal_res_t *res, char **err);
+    void *ud;
+} tool_bridge_t;
+
 /* ---------- environment shared by all tools of a session ---------- */
 typedef struct tool_env {
     char *cwd;
@@ -68,7 +101,8 @@ typedef struct tool_env {
     struct artifact_store *artifacts; /* session artifacts (artifact://<id>; shared with subagents; NULL: none) */
     int subagent_depth;
     bool can_prompt_user;      /* a UI can answer `ask` (interactive mode) */
-    bool ask_ui;               /* `--mode rpc-ui`: the RPC client answers `ask` (tool UI over the protocol) */
+    bool ask_ui;               /* the protocol client answers `ask`: `--mode rpc-ui`, or an ACP client with form elicitation */
+    tool_bridge_t *bridge;     /* client bridge (ACP; borrowed, NULL = local I/O) */
     bool find_enabled;         /* `find` is part of this session (set by tools_register_builtin) */
     const char *delegation_bias; /* model delegation bias ("eager"/"gated"/"restrained"; static) */
     void *session;             /* app session (for task tool) */

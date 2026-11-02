@@ -1236,7 +1236,7 @@ static void install_agent(app_t *a) {
     agent_set_model(ag, a->model);
     ag->thinking = a->thinking;
     a->env->can_prompt_user = a->opts.has_ui;
-    a->env->ask_ui = a->opts.rpc_ui;
+    a->env->ask_ui = a->opts.rpc_ui || a->opts.interactive_prompts;
     a->env->delegation_bias = model_delegation_bias(a->model);
     agent_set_intent_tracing(settings_bool("tools.intentTracing", true));
     if (!a->opts.no_tools) tools_register_builtin(ag, a->env, a->opts.tools);

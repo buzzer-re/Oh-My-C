@@ -1303,6 +1303,25 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         free(data);
         goto done;
     }
+    /* ACP bridge first: the editor's in-memory buffer is the source of truth (routeReadThroughBridge);
+     * a failed client read falls back to disk */
+    if (!sel.conflicts && env->bridge && env->bridge->read_text) {
+        char *berr = NULL;
+        char *btext = env->bridge->read_text(env->bridge, abs, &berr);
+        if (btext) {
+            read_text(env, abs, display, btext, strlen(btext), &sel, out);
+            json_t *meta = json_get_obj(out->details, "meta");
+            if (meta) {
+                json_del(meta, "pagedSource");
+                if (!json_len(meta)) json_del(out->details, "meta");
+            }
+            free(btext);
+            free(data);
+            goto done;
+        }
+        LOGW("ACP fs readTextFile failed; falling back to disk: %s: %s", abs, berr ? berr : "");
+        free(berr);
+    }
     if (sel.conflicts) {
         int count = 0;
         char *summary = conflict_read_summary(env, abs, NULL, &count);

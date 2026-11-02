@@ -68,6 +68,19 @@ static int pe_remote_write(void *ud, const char *abs, const char *data, size_t l
     return ssh_store(ud, abs, data, len, err);
 }
 
+/* editor-visible files go through an ACP client that advertises fs.writeTextFile; session artifacts stay local */
+static int pe_bridge_write(void *ud, const char *abs, const char *data, size_t len, char **err) {
+    tool_env_t *env = ud;
+    UNUSED(len);
+    if (!env->bridge || !env->bridge->write_text || (env->local_dir && str_starts(abs, env->local_dir))) return 1;
+    char *e = NULL;
+    if (env->bridge->write_text(env->bridge, abs, data, &e) != 0) {
+        *err = e ? e : xstrdup("write failed");
+        return -1;
+    }
+    return 0;
+}
+
 static char *pe_after_write(void *ud, const char *abs) {
     tool_env_t *env = ud;
     return env->after_edit ? env->after_edit(env, abs) : NULL;
@@ -92,6 +105,7 @@ static int edit_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
                    .remote = pe_remote,
                    .remote_read = pe_remote_read,
                    .remote_write = pe_remote_write,
+                   .bridge_write = pe_bridge_write,
                    .ud = env,
                    .store = &env->store,
                    .enforce_seen = settings_bool("edit.enforceSeenLines", true),

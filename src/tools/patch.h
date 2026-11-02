@@ -24,6 +24,9 @@ typedef struct {
     bool (*remote)(void *ud, const char *abs_path);
     int (*remote_read)(void *ud, const char *abs_path, char **data, size_t *len, char **err);
     int (*remote_write)(void *ud, const char *abs_path, const char *data, size_t len, char **err);
+    /* ACP client bridge (routeWriteThroughBridge) for creates / updates: 0 written, -1 failed (*err owned),
+     * 1 not routed (local write). NULL = always local. */
+    int (*bridge_write)(void *ud, const char *abs_path, const char *data, size_t len, char **err);
     void *ud;
     /* hashline mode: the session edit store (edit_store_t *), edit.enforceSeenLines, display column cap */
     void *store;

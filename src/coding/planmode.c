@@ -537,6 +537,24 @@ static char *propose_auto(tool_env_t *env, const char *title, bool *is_error, js
         *is_error = true;
         return err;
     }
+    if (a->plan_approval_choice && !a->plan_approval_choice(a->plan_mode_changed_ud, rt, content)) {
+        /* refine: plan mode stays active and targets the plan just reviewed */
+        if (!str_eq(a->plan_file, path)) app_set_plan_file(a, path);
+        char *nerr = NULL;
+        char *norm = app_plan_normalize_title(rt, &nerr);
+        char *r = xasprintf("Plan refinement requested. Update the plan file, then write %s to xd://propose again when ready.",
+                            norm ? norm : rt);
+        *details = json_obj();
+        json_set_str(*details, "planFilePath", path);
+        json_set_str(*details, "title", rt);
+        json_set_bool(*details, "planExists", true);
+        free(norm);
+        free(nerr);
+        free(path);
+        free(content);
+        free(rt);
+        return r;
+    }
     app_set_plan_reference(a, path);
     a->plan_reference_sent = false;
     a->plan_mode = false;

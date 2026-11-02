@@ -36,6 +36,7 @@ typedef struct {
     bool allow_no_model; /* interactive: start without a model (pick one with /model or /login) */
     bool has_ui;                /* interactive UI can answer questions (enables `ask`) */
     bool rpc_ui;                /* `--mode rpc-ui`: tool UI (ask) over the RPC protocol */
+    bool interactive_prompts;   /* ACP client with form elicitation: `ask` only, no other UI behavior */
     bool auto_approve;          /* --auto-approve / --yolo: every approval resolves in yolo mode */
 } app_opts_t;
 
@@ -96,6 +97,9 @@ struct app {
     int plan_reminder_count;    /* plan-mode decision reminders since the last ask/propose or user turn */
     bool plan_reminder_awaiting, plan_force_tool_choice;
     void (*plan_mode_changed)(void *ud); /* plan mode left by an automatic approval (ACP mode update) */
+    /* ACP clients with form elicitation confirm a proposed plan (#requestAcpPlanApprovalChoice): true approves,
+     * false keeps planning (refine). NULL approves automatically. Uses plan_mode_changed_ud. */
+    bool (*plan_approval_choice)(void *ud, const char *title, const char *content);
     void *plan_mode_changed_ud;
     struct goal *goal; /* goal mode state (goal.c) */
     struct title_state *title; /* automatic session title (title.c) */

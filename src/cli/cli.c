@@ -908,11 +908,27 @@ int cli_launch(int argc, char **argv) {
     return rc;
 }
 
+/* commands/acp.ts + modes/acp/terminal-auth.ts: ACP mode, unless the client's terminal auth method
+ * (--acp-terminal-auth) asks the same command to open the interactive TUI (any --mode is dropped) */
 int cli_acp(int argc, char **argv) {
+    bool terminal_auth = false;
+    for (int i = 0; i < argc; i++) terminal_auth |= !strcmp(argv[i], "--acp-terminal-auth");
+    char **av = xcalloc((size_t)argc + 1, sizeof(char *));
+    int ac = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--acp-terminal-auth")) continue;
+        if (terminal_auth && !strcmp(argv[i], "--mode")) {
+            i++;
+            continue;
+        }
+        if (terminal_auth && !strncmp(argv[i], "--mode=", 7)) continue;
+        av[ac++] = argv[i];
+    }
     launch_args_t A;
-    int rc = launch_parse_args(argc, argv, &A);
-    if (rc == 0) rc = launch_run(&A, true);
+    int rc = launch_parse_args(ac, av, &A);
+    if (rc == 0) rc = launch_run(&A, !terminal_auth);
     launch_args_free(&A);
+    free(av);
     return rc;
 }
 

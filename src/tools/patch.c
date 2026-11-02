@@ -3267,6 +3267,11 @@ static int write_file(const pe_opts_t *o, const staged_t *s, char **err) {
         const char *content = s->persisted ? s->persisted : "";
         return o->remote_write(o->ud, s->abs, content, strlen(content), err) != 0 ? -1 : 0;
     }
+    if (o->bridge_write && s->op != OP_DELETE && !s->move_abs) {
+        const char *content = s->persisted ? s->persisted : "";
+        int rc = o->bridge_write(o->ud, s->abs, content, strlen(content), err);
+        if (rc <= 0) return rc;
+    }
     if (s->op == OP_DELETE) {
         if (unlink(s->abs) != 0) {
             *err = xasprintf("%s (os error %d)", strerror(errno), errno);
