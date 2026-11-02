@@ -1,0 +1,15 @@
+[
+  {"user": "Set up the project skeleton"},
+  {"say": "I'll start by looking at the layout."},
+  {"tool": "read", "args": {"path": "README.md"}, "text": "# Demo\nA demo project."},
+  {"say": "The README describes a demo project. I will add a src directory next."},
+  {"user": "Now add a build script"},
+  {"tool": "bash", "args": {"command": "echo build > build.sh"}, "text": ""},
+  {"say": "Added build.sh with a placeholder build step."},
+  {"parent": "00001006"},
+  {"user": "Actually, write a Makefile instead"},
+  {"say": "Sure, a Makefile is a better fit for this project."},
+  {"label": "makefile-path"},
+  {"user": "And add a test target"},
+  {"say": "Added a test target that runs the unit tests."}
+]

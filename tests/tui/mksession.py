@@ -11,6 +11,11 @@ spec: a JSON list of entries, in order:
   {"tool": "name", "args": {...}, "text": "result text", "details": {...}, "isError": false,
    "images": [{"data": b64, "mimeType": "image/png"}]}  one tool call + its result
   {"tools": [ {tool entry}, ... ]}                   several calls in one assistant message
+  {"parent": "00001003"}                             continue from that entry (a new branch); entry ids
+                                                     are "%08x" % (0x1000 + n) for the n-th entry (the
+                                                     model_change root is 00001001)
+  {"label": "name", "target": "00001003"}            a label entry (target defaults to the last entry)
+  {"entry": {...}}                                   any raw entry (type and fields as written)
 """
 import json, sys, uuid
 
@@ -39,7 +44,13 @@ def main():
                 "model": "mock-1", "usage": usage, "stopReason": stop, "timestamp": ms}
     k = 0
     for e in spec:
-        if "user" in e:
+        if "parent" in e:
+            parent = e["parent"]
+        elif "label" in e:
+            add({"type": "label", "targetId": e.get("target", parent), "label": e["label"]})
+        elif "entry" in e:
+            add(dict(e["entry"]))
+        elif "user" in e:
             add({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": e["user"]}], "timestamp": ms}})
         elif "say" in e:
             add({"type": "message", "message": assistant([{"type": "text", "text": e["say"]}], "stop")})
