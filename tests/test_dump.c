@@ -267,6 +267,20 @@ static int inventory_from_request(const char *path) {
 
 int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "inventory")) return inventory_from_request(argv[2]);
+    if (argc >= 5 && !strcmp(argv[1], "zip") && argc % 2 == 1) { /* zip <out> (<member> <file>)... */
+        size_t n = (size_t)(argc - 3) / 2;
+        const char **names = xcalloc(n, sizeof *names), **data = xcalloc(n, sizeof *data);
+        size_t *lens = xcalloc(n, sizeof *lens);
+        for (size_t i = 0; i < n; i++) {
+            names[i] = argv[3 + 2 * i];
+            data[i] = fs_read(argv[4 + 2 * i], &lens[i]);
+            if (!data[i]) return 2;
+        }
+        char *err = NULL;
+        int rc = dump_zip_write(argv[2], names, data, lens, n, &err);
+        if (rc) fprintf(stderr, "%s\n", err);
+        return rc ? 2 : 0;
+    }
     if (argc == 3) {
         char *err = NULL;
         session_t *s = session_open(argv[2], &err);
