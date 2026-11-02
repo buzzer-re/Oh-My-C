@@ -2074,6 +2074,30 @@ char *app_job_results_text(app_t *a) {
     return txt;
 }
 
+json_t *app_fold_job_results(app_t *a) {
+    if (!a->env || !a->env->jobs) return NULL;
+    json_t *m = job_results_message(a);
+    if (!m) return NULL;
+    if (a->session) { /* persisted like a delivered batch (on_agent_event's hidden custom_message entry) */
+        char *txt = ai_message_text(m);
+        json_t *e = json_obj();
+        json_set_str(e, "type", "custom_message");
+        json_set_str(e, "customType", "async-result");
+        json_set_str(e, "content", txt);
+        json_set_bool(e, "display", false);
+        if (json_get(m, "details")) json_set(e, "details", json_clone(json_get(m, "details")));
+        session_append_entry(a->session, e);
+        free(txt);
+    }
+    json_t *view = json_clone(m);
+    agent_append_message(a->agent, m);
+    return view;
+}
+
+bool app_pending_async_work(app_t *a) {
+    return a && a->env && a->env->jobs && (jobs_running(a->env->jobs) > 0 || jobs_undelivered(a->env->jobs) > 0);
+}
+
 char *app_after_run(app_t *a, const json_t *run_messages, const char *prev_type, const char *mode, const char **custom_type) {
     *custom_type = NULL;
     /* print mode has no idle wake-up: finish outstanding background jobs before the final answer */

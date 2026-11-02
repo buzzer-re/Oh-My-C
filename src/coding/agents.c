@@ -614,6 +614,30 @@ static json_t *progress_new_locked(const aref_t *r, const char *task, const char
     return p;
 }
 
+/* task/executor.ts quiescence barrier: a subagent's run completes only after the background jobs it owns settle.
+ * Each settled batch is folded into the run as an async-result follow-up turn (the session's own delivery), so the
+ * run's answer is the last turn after every result; a turn that ends stopped (abort) or the caller's cancel ends
+ * the wait (teardown reaps the jobs). */
+static void settle_owned_jobs(app_t *child, volatile sig_atomic_t *cancel) {
+    jobs_t *jobs = child->env ? child->env->jobs : NULL;
+    if (!jobs) return;
+    for (;;) {
+        if (cancel && *cancel) return;
+        const char *stop = json_get_str(last_assistant(child->agent->messages), "stopReason");
+        if (str_eq(stop, "aborted")) return;
+        if (jobs_undelivered(jobs) > 0) {
+            char *t = app_job_results_text(child);
+            if (t) {
+                app_prompt_hidden(child, t, "async-result");
+                free(t);
+            }
+            continue;
+        }
+        if (!jobs_running(jobs)) return;
+        jobs_wait_any(jobs, cancel, 500);
+    }
+}
+
 /* run one prompt on a child session; returns the last assistant text (owned). `executor`: a task spawn or IRC wake
  * run (lifecycle + progress are reported); a user chat turn from the hub (agents_prompt) is not. */
 static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile sig_atomic_t *cancel, bool *aborted, char **error,
@@ -655,6 +679,7 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
     bool watching = cancel && pthread_create(&wt, NULL, cancel_watch, &w) == 0;
     agent_subscribe(child->agent, on_child_event, r);
     app_prompt(child, prompt, NULL);
+    settle_owned_jobs(child, cancel);
     agent_unsubscribe(child->agent, on_child_event, r);
     w.done = 1;
     if (watching) pthread_join(wt, NULL);

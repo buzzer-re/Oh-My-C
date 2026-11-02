@@ -99,6 +99,8 @@ static void ui_apply_partial(void *ud) {
     tui_request_render(u->tui);
 }
 
+static void async_wait_end(ui_t *u);
+
 static void ui_apply_event(void *ud) {
     uiev_t *e = ud;
     ui_t *u = e->u;
@@ -153,9 +155,13 @@ static void ui_apply_event(void *ud) {
     case AGENT_EV_AGENT_END:
         ui_signals_agent_end(e->msg); /* settled when the worker ends (worker_done) */
         ui_working_stop(u);
-        if (!u->compact_pending) ui_chrome_turn(u, false); /* a /compact that interrupted the turn resumes it */
+        /* a run that only waits on background jobs keeps its activity window (markActivityEnd runs at the settle) */
+        u->async_hold = !u->view && app_pending_async_work(u->app) &&
+                        !str_eq(json_get_str(last_assistant(u->app->agent->messages), "stopReason"), "aborted");
+        if (!u->compact_pending && !u->async_hold) ui_chrome_turn(u, false); /* a /compact that interrupted the turn resumes it */
         break;
     case AGENT_EV_AGENT_START:
+        async_wait_end(u); /* a background result woke the run: the row follows this run again */
         toolcard_break_group(u);
         ui_signals_agent_start();
         ui_chrome_turn(u, true);
@@ -322,7 +328,87 @@ static void goal_continue_cb(void *ud) {
     bool busy = u->worker_running || (draft && *draft) || u->picker_kind;
     free(draft);
     if (!busy) start_hidden(u, c, u->cont_type ? u->cont_type : "goal-continuation");
+    else if (u->async_hold && !u->worker_running) {
+        ui_chrome_turn(u, false);
+        u->async_hold = false;
+    }
     free(c);
+}
+
+/* ---------- waiting on background work (event-controller.ts #showAsyncWait / stopAwaitingAsyncWork) ---------- */
+
+/* formatAsyncWaitLabel: the job ids the working row lists before collapsing the rest to `+N` */
+static char *async_wait_label(app_t *a) {
+    json_t *snap = jobs_snapshot(a->env->jobs), *j;
+    strvec_t ids = {0};
+    json_arr_foreach(snap, i, j) if (str_eq(json_get_str(j, "status"), "running")) strvec_push(&ids, json_get_str(j, "id"));
+    json_free(snap);
+    char *s;
+    if (!ids.n) s = xstrdup("Waiting for background work");
+    else if (ids.n == 1) s = xasprintf("Waiting for background job %s", ids.v[0]);
+    else {
+        sb_t b = SB_INIT;
+        for (size_t i = 0; i < ids.n && i < 3; i++) sb_appendf(&b, "%s%s", i ? ", " : "", ids.v[i]);
+        if (ids.n > 3) sb_appendf(&b, " +%zu", ids.n - 3);
+        s = xasprintf("Waiting for %zu background jobs: %s", ids.n, sb_cstr(&b));
+        sb_free(&b);
+    }
+    strvec_free(&ids);
+    return s;
+}
+
+static void async_wait_end(ui_t *u) {
+    if (!u->async_wait) return;
+    u->async_wait = false;
+    if (u->async_wait_timer) tui_remove_timer(u->tui, u->async_wait_timer);
+    u->async_wait_timer = 0;
+    ui_working_set_message(u, NULL);
+    if (!u->worker_running) {
+        ui_working_stop(u);
+        if (u->async_hold) ui_chrome_turn(u, false);
+        u->async_hold = false;
+    }
+}
+
+/* the label is live: a job cancelled without a wake leaves the row at once; the settle watch tears it down */
+static void async_wait_tick(void *ud) {
+    ui_t *u = ud;
+    if (!u->async_wait || u->worker_running) return;
+    if (!app_pending_async_work(u->app)) {
+        async_wait_end(u);
+        return;
+    }
+    char *l = async_wait_label(u->app);
+    ui_working_set_message(u, l);
+    free(l);
+}
+
+static void async_wait_begin(ui_t *u) {
+    if (u->view || !app_pending_async_work(u->app)) return;
+    const char *stop = json_get_str(last_assistant(u->app->agent->messages), "stopReason");
+    if (str_eq(stop, "aborted")) return;
+    u->async_wait = true;
+    char *l = async_wait_label(u->app);
+    ui_working_set_message(u, l);
+    free(l);
+    ui_working_start(u);
+    if (!u->async_wait_timer) u->async_wait_timer = tui_add_timer(u->tui, 250, true, async_wait_tick, u);
+}
+
+/* Esc while only background work can resume the run: later results land in context for the next prompt instead of
+ * starting a turn, and the jobs keep running */
+static bool async_wait_stop(ui_t *u) {
+    if (!u->async_wait || u->worker_running) return false;
+    u->wake_suppressed = true;
+    async_wait_end(u);
+    size_t running = jobs_running(u->app->env->jobs);
+    if (running > 0) {
+        char *m = xasprintf("Stopped waiting \xc2\xb7 %zu background %s still running (/jobs)", running, running == 1 ? "job" : "jobs");
+        add_notice(u, "info", m);
+        free(m);
+    }
+    tui_request_render(u->tui);
+    return true;
 }
 
 static void plan_exec_resume(ui_t *u);
@@ -330,12 +416,18 @@ static void worker_done(void *ud) {
     ui_t *u = ud;
     pthread_join(u->worker, NULL);
     u->worker_running = false;
+    u->wake_suppressed = false; /* a turn ended on its own since the interrupt */
     ui_signals_settle();
     iq_flush_deferred(u);
     plan_exec_resume(u);
     /* deferred `!cmd` results, a pending /compact, queued input left behind by an interrupted run */
     /* the input waiter re-arms: loop mode re-submits its prompt, else a goal continuation may follow */
     if (!iq_run_end(u) && !lp_run_end(u) && u->goal_cont) tui_add_timer(u->tui, 800, false, goal_continue_cb, u);
+    else if (!u->worker_running && !u->goal_cont) async_wait_begin(u);
+    if (u->async_hold && !u->async_wait && !u->worker_running && !u->goal_cont) {
+        ui_chrome_turn(u, false);
+        u->async_hold = false;
+    }
     tui_request_render(u->tui);
 }
 
@@ -385,6 +477,15 @@ static void job_wake_cb(void *ud) {
     bool typing = draft && *draft;
     free(draft);
     if (typing) return;
+    if (u->wake_suppressed) { /* the user stopped waiting: fold the results in without a turn */
+        json_t *m = app_fold_job_results(u->app);
+        if (m) {
+            ui_async_result(u, m);
+            json_free(m);
+            tui_request_render(u->tui);
+        }
+        return;
+    }
     char *t = app_job_results_text(u->app);
     if (t) start_hidden(u, t, "async-result");
     free(t);
@@ -417,9 +518,22 @@ static void ui_tool_frame(void *ud, const char *tool_call_id, const char *tool_n
     tui_post(u->tui, frame_apply, f);
 }
 
+/* jobs settling together deliver as one batch (omp's idle flush runs as a scheduled post-prompt task) */
+static int g_wake_timer;
+
+static void job_wake_flush(void *ud) {
+    g_wake_timer = 0;
+    job_wake_cb(ud);
+}
+
+static void job_wake_schedule(void *ud) {
+    ui_t *u = ud;
+    if (!g_wake_timer) g_wake_timer = tui_add_timer(u->tui, 100, false, job_wake_flush, u);
+}
+
 static void ui_wake(void *ud) {
     ui_t *u = ud;
-    tui_post(u->tui, job_wake_cb, u);
+    tui_post(u->tui, job_wake_schedule, u);
 }
 
 static void start_hidden(ui_t *u, const char *text, const char *ctype) {
@@ -2703,6 +2817,7 @@ static void on_escape(ui_t *u) {
         return;
     }
     if (iq_escape(u)) return; /* maintenance / turn abort (queue back to the editor), bash or python mode */
+    if (async_wait_stop(u)) return;
     char *text = tui_editor_get_text(u->editor);
     char *tt = str_trim(text);
     if (*tt) {

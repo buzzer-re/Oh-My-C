@@ -361,6 +361,11 @@ char *app_shake_summary(const app_shake_result_t *r); /* formatShakeSummary (own
 char *app_generate_title(app_t *a);                 /* owned or NULL */
 bool app_set_advisor(app_t *a, bool on);           /* returns whether an advisor is now active */
 char *app_job_results_text(app_t *a); /* settled background jobs as the async-result notice (owned) or NULL */
+/* a user interrupt ended the wait on background jobs: settled results fold into context without a turn (the next
+ * prompt sees them; omp #recordWithoutTurn). Returns a clone of the recorded message for the transcript, or NULL. */
+json_t *app_fold_job_results(app_t *a);
+/* hasPendingAsyncWork: a background job is running or a settled one is not yet delivered */
+bool app_pending_async_work(app_t *a);
 /* after a run: hidden follow-up prompt (owned) from the advisor or goal mode, or NULL; *custom_type names it.
  * prev_type is the custom type of the run that just ended (NULL for a user prompt). */
 char *app_after_run(app_t *a, const json_t *run_messages, const char *prev_type, const char *mode, const char **custom_type);

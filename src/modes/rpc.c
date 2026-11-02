@@ -1120,9 +1120,7 @@ static void rpc_project_messages(json_t *frame) {
 }
 
 /* hasPendingAsyncWork: a background job still running or a settled one not yet delivered can wake the session */
-static bool rpc_pending_async_work(app_t *a) {
-    return a->env && a->env->jobs && (jobs_running(a->env->jobs) > 0 || jobs_undelivered(a->env->jobs) > 0);
-}
+static bool rpc_pending_async_work(app_t *a) { return app_pending_async_work(a); }
 
 static void rpc_listener(void *ud, const agent_event_t *ev) {
     rpc_t *r = ud;

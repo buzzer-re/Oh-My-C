@@ -118,6 +118,11 @@ struct ui {
     int left_taps;
     bool agents_dirty;              /* registry changed: badge / HUD / hub refresh pending (posted once) */
     struct loop_state *loop;        /* /loop mode while enabled (modes/loopctl.c), NULL when off */
+    /* the run ended while background jobs can still wake it: the working row names the wait (omp #showAsyncWait) */
+    bool async_wait;
+    bool async_hold;                /* agent_end kept the status-line activity window open for that wait */
+    int async_wait_timer;
+    bool wake_suppressed;           /* Esc ended that wait: settled results fold into context without a turn */
 };
 
 /* the session the view shows: the focused subagent's, else the main one */
