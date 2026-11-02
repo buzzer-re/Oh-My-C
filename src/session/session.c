@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "session.h"
 #include "session/blobs.h"
+#include "session/trace.h"
 #include "tools/outsink.h"
 
 #include "core/fs.h"
@@ -678,6 +679,9 @@ static void build_context_path(const json_t *path, session_context_t *out) {
         json_t *sm = summary_msg(str_eq(json_get_str(c, "method"), "handoff") ? "agent/compaction/prompts/handoff-summary-context.md"
                                                                                : "agent/compaction/prompts/compaction-summary-context.md",
                                  json_get_str(c, "summary"));
+        double ts;
+        if (json_get_str(c, "timestamp") && trace_parse_iso_ms(json_get_str(c, "timestamp"), &ts))
+            json_set_int(sm, "timestamp", (int64_t)ts); /* the summary carries the compaction's commit time */
         bool openai_history = false;
         json_t *payload = session_compaction_payload(c, &openai_history);
         if (payload) json_set(sm, "providerPayload", payload);

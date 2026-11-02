@@ -52,7 +52,12 @@ typedef struct {
     const char *stop_reason; /* mapped, static string */
     char *error;             /* stream error / refusal message (owned) */
     VEC(anthropic_block_t) blocks;
+    json_t *compaction;   /* streamed `compaction` block as an anthropicCompaction payload (owned) */
+    bool compaction_stop; /* stop_reason "compaction" */
 } anthropic_sse_t;
+
+/* supportsAnthropicCompaction: model policy (compat.supportsServerCompaction) and the model's route */
+bool anthropic_compaction_supported(const ai_model_t *m);
 
 void anthropic_sse_init(anthropic_sse_t *s, const ai_model_t *m, bool oauth, ai_event_cb cb, void *ud);
 /* ai_sse_cb-compatible. Returns 1 after message_stop (stream complete), 2 on an in-stream error frame. */

@@ -45,6 +45,7 @@
 #define BETA_INTERLEAVED "interleaved-thinking-2025-05-14"
 #define BETA_FAST_MODE "fast-mode-2026-02-01"
 #define BETA_EFFORT "effort-2025-11-24"
+#define BETA_COMPACTION "compact-2026-09-04"
 #define BETA_CLAUDE_CODE "claude-code-20250219"
 
 /* ======================================================================
@@ -1242,8 +1243,47 @@ static json_t *wire_msg(const char *role, json_t *content) {
     return p;
 }
 
-static json_t *convert_messages(const ai_model_t *m, const json_t *msgs, bool oauth, bool thinking_enabled) {
+static char *resolve_base_url(const ai_model_t *m);
+
+/* supportsAnthropicCompaction (anthropic-compaction.ts) for the model's own route */
+bool anthropic_compaction_supported(const ai_model_t *m) {
+    if (!cflag(m, "supportsServerCompaction")) return false;
+    const json_t *rc = json_get_obj(m->raw, "remoteCompaction");
+    if (rc && json_get(rc, "enabled") && !json_get_bool(rc, "enabled", true)) return false;
+    char *route = resolve_base_url(m);
+    bool official = is_official_url(route);
+    bool ok = false;
+    if (cflag(m, "bedrockMessagesApi")) ok = true;
+    else if (official || (route && (strstr(route, "aiplatform.googleapis.com") || strstr(route, ".services.ai.azure.com"))))
+        ok = cflag(m, "firstPartyProvider") || str_eq(m->provider, "google-vertex") || json_get_bool(rc, "enabled", false);
+    free(route);
+    return ok;
+}
+
+/* a compaction summary replays as the provider's native `compaction` block (compactionBlockParam) */
+static json_t *compaction_replay_block(const ai_model_t *m, const json_t *msg) {
+    const json_t *pp = json_get_obj(msg, "providerPayload");
+    if (!str_eq(json_get_str(pp, "type"), "anthropicCompaction") || !str_eq(json_get_str(pp, "provider"), m->provider)) return NULL;
+    const char *content = json_get_str(pp, "content");
+    if (!content || !*content || !json_get_str(pp, "signature")) return NULL;
+    json_t *b = json_obj();
+    json_set_str(b, "type", "compaction");
+    json_set_str(b, "content", content);
+    json_set_str(b, "signature", json_get_str(pp, "signature"));
+    if (json_get_str(pp, "encryptedContent")) json_set_str(b, "encrypted_content", json_get_str(pp, "encryptedContent"));
+    if (json_is_arr(json_get(pp, "toolChanges"))) json_set(b, "tool_changes", json_clone(json_get(pp, "toolChanges")));
+    return b;
+}
+
+static json_t *wire_msg(const char *role, json_t *content);
+
+static json_t *convert_messages(const ai_model_t *m, const json_t *msgs, bool oauth, bool thinking_enabled, bool replay,
+                                bool compaction_request) {
     json_t *params = json_arr();
+    /* harness file metadata queued behind a replayed compaction block: it lands before the first message created
+     * after the summary, or at the end */
+    char *pending_files = NULL;
+    int64_t pending_after = 0;
     size_t n = json_len(msgs);
     bool pads = thinking_enabled && cflag(m, "requiresThinkingPresence");
     long window_start = -1;
@@ -1270,6 +1310,23 @@ static json_t *convert_messages(const ai_model_t *m, const json_t *msgs, bool oa
     for (size_t i = 0; i < n; i++) {
         json_t *msg = json_at(msgs, i);
         const char *role = json_get_str(msg, "role");
+        if (pending_files && json_get_int(msg, "timestamp", 0) > pending_after && !str_eq(role, "toolResult")) {
+            json_push(params, wire_msg("user", json_str(pending_files)));
+            free(pending_files);
+            pending_files = NULL;
+        }
+        json_t *cblock = replay && (str_eq(role, "user") || str_eq(role, "developer")) ? compaction_replay_block(m, msg) : NULL;
+        if (cblock) {
+            json_t *c = json_arr();
+            json_push(c, cblock);
+            json_push(params, wire_msg("assistant", c));
+            const json_t *pp = json_get_obj(msg, "providerPayload");
+            const char *ft = json_get_str(pp, "filesText");
+            free(pending_files);
+            pending_files = ft && *ft ? xstrdup(ft) : NULL;
+            pending_after = json_get_int(msg, "timestamp", 0);
+            continue;
+        }
         if (str_eq(role, "user") || str_eq(role, "developer")) {
             json_t *c = json_get(msg, "content");
             json_t *content;
@@ -1326,6 +1383,10 @@ static json_t *convert_messages(const ai_model_t *m, const json_t *msgs, bool oa
             json_push(params, wire_msg("user", results));
         }
     }
+    if (pending_files) {
+        json_push(params, wire_msg("user", json_str(pending_files)));
+        free(pending_files);
+    }
     /* developer -> mid-conversation system upgrade */
     if (cflag(m, "supportsMidConversationSystem")) {
         for (size_t i = json_len(params); i > 0; i--) {
@@ -1347,6 +1408,16 @@ static json_t *convert_messages(const ai_model_t *m, const json_t *msgs, bool oa
             if (follows_user && last_or_asst && compat) json_set_str(p, "role", "system");
         }
     }
+    /* a replayed compaction block opens the assistant response it was produced in */
+    for (size_t i = json_len(params); i-- > 1;) {
+        json_t *cur = json_at(params, i - 1), *next = json_at(params, i);
+        json_t *cc = json_get(cur, "content"), *nc = json_get(next, "content");
+        if (!str_eq(json_get_str(cur, "role"), "assistant") || !str_eq(json_get_str(next, "role"), "assistant") || !json_is_arr(cc) ||
+            json_len(cc) != 1 || !str_eq(json_get_str(json_at(cc, 0), "type"), "compaction") || !json_is_arr(nc))
+            continue;
+        json_arr_insert(nc, 0, json_clone(json_at(cc, 0)));
+        json_free(json_arr_remove(params, i - 1));
+    }
     /* repair adjacent assistants */
     for (size_t i = json_len(params); i > 1; i--) {
         if (str_eq(json_get_str(json_at(params, i - 1), "role"), "assistant") &&
@@ -1361,6 +1432,7 @@ static json_t *convert_messages(const ai_model_t *m, const json_t *msgs, bool oa
             params = na;
         }
     }
+    if (compaction_request) return params; /* the request ends inside the conversation */
     size_t np = json_len(params);
     if (np > 0 && str_eq(json_get_str(json_at(params, np - 1), "role"), "assistant"))
         json_push(params, wire_msg("user", json_str("Continue.")));
@@ -1486,8 +1558,10 @@ json_t *anthropic_build_request(const ai_model_t *m, const ai_context_t *ctx, co
     const char *ttype = thinking ? json_get_str(thinking, "type") : NULL;
     bool thinking_on = str_eq(ttype, "adaptive") || str_eq(ttype, "enabled");
 
+    bool compaction_ok = anthropic_compaction_supported(m);
+    const json_t *comp_req = compaction_ok ? o->anthropic_compaction : NULL;
     json_t *context_mgmt = NULL;
-    if (cflag(m, "supportsContextManagement") && !is_vertex_raw_predict(base) && thinking_on) {
+    if (!comp_req && cflag(m, "supportsContextManagement") && !is_vertex_raw_predict(base) && thinking_on) {
         context_mgmt = json_obj();
         json_t *edits = json_arr(), *e = json_obj();
         json_set_str(e, "type", "clear_thinking_20251015");
@@ -1498,7 +1572,7 @@ json_t *anthropic_build_request(const ai_model_t *m, const ai_context_t *ctx, co
 
     json_t *transformed = ai_transform_messages(ctx->messages, m);
     ai_anthropic_prepare_images(transformed, m); /* Claude's image contract: 8000 px, 10 MB base64 */
-    json_t *msgs = convert_messages(m, transformed, oauth, thinking_on);
+    json_t *msgs = convert_messages(m, transformed, oauth, thinking_on, compaction_ok, comp_req != NULL);
     json_free(transformed);
 
     apply_head_caching(system, tools, cc);
@@ -1513,6 +1587,13 @@ json_t *anthropic_build_request(const ai_model_t *m, const ai_context_t *ctx, co
     json_set_int(p, "max_tokens", ro.max_tokens > 0 ? MIN(limit, ro.max_tokens) : limit);
     if (thinking) json_set(p, "thinking", thinking);
     if (context_mgmt) json_set(p, "context_management", context_mgmt);
+    if (comp_req) {
+        json_t *c = json_obj();
+        json_set_str(c, "type", "summarize");
+        const char *instr = json_get_str(comp_req, "instructions");
+        if (instr && *instr) json_set_str(c, "instructions", instr);
+        json_set(p, "compaction", c);
+    }
     if (oc_effort && cflag(m, "supportsOutputEffort") && !is_vertex_raw_predict(base)) {
         json_t *oc = json_obj();
         json_set_str(oc, "effort", oc_effort);
@@ -1523,7 +1604,7 @@ json_t *anthropic_build_request(const ai_model_t *m, const ai_context_t *ctx, co
     bool sampling = cflag(m, "supportsSamplingParams") && (!ttype || !strcmp(ttype, "disabled"));
     if (sampling && !isnan(o->temperature)) json_set_num(p, "temperature", o->temperature);
     if (sampling && !isnan(o->top_p)) json_set_num(p, "top_p", o->top_p);
-    if (json_is_arr(o->stop_sequences) && json_len(o->stop_sequences) > 0) {
+    if (!comp_req && json_is_arr(o->stop_sequences) && json_len(o->stop_sequences) > 0) {
         json_t *ss = json_arr(), *it;
         json_arr_foreach(o->stop_sequences, i, it) {
             if (json_len(ss) >= STOP_SEQUENCES_MAX) break;
@@ -1538,7 +1619,7 @@ json_t *anthropic_build_request(const ai_model_t *m, const ai_context_t *ctx, co
     const char *tc = map_tool_choice(o->tool_choice, &tc_name);
     if (tc) {
         json_t *t = json_obj();
-        if ((!strcmp(tc, "any") || !strcmp(tc, "tool")) && !cflag(m, "supportsForcedToolChoice")) {
+        if ((!strcmp(tc, "any") || !strcmp(tc, "tool")) && (comp_req || !cflag(m, "supportsForcedToolChoice"))) {
             json_set_str(t, "type", "auto");
         } else {
             json_set_str(t, "type", tc);
@@ -1714,6 +1795,14 @@ void anthropic_build_headers(const ai_model_t *m, const ai_stream_opts_t *o, con
     }
     json_t *oc = json_get_obj(params, "output_config");
     if (json_is_bool(eb) && eb->u.b && oc && json_get_str(oc, "effort")) beta_add(&betas, BETA_EFFORT);
+    /* the compaction beta: an on-demand compaction request or a replayed signed compaction block */
+    if (!is_vertex_raw_predict(base_url) && anthropic_compaction_supported(m)) {
+        bool replays = json_get(params, "compaction") != NULL;
+        const json_t *pm, *pb;
+        json_arr_foreach(json_get(params, "messages"), i, pm) json_arr_foreach(json_get_arr(pm, "content"), k, pb) if (
+            str_eq(json_get_str(pb, "type"), "compaction") && json_get_str(pb, "signature")) replays = true;
+        if (replays) beta_add(&betas, BETA_COMPACTION);
+    }
     char *beta_hdr = strvec_join(&betas, ",");
     strvec_free(&betas);
 
@@ -1861,6 +1950,8 @@ void anthropic_sse_init(anthropic_sse_t *s, const ai_model_t *m, bool oauth, ai_
 }
 
 void anthropic_sse_free(anthropic_sse_t *s) {
+    json_free(s->compaction);
+    s->compaction = NULL;
     for (size_t i = 0; i < s->blocks.n; i++) sb_free(&s->blocks.v[i].sig);
     vec_free(&s->blocks);
     free(s->error);
@@ -1943,6 +2034,19 @@ static void on_block_start(anthropic_sse_t *s, const json_t *ev) {
         blk.kind = 3;
         aib_redacted_thinking(&s->b, json_get_str(cb, "data"));
         blk.ci = aib_block_count(&s->b) - 1;
+    } else if (str_eq(ty, "compaction")) {
+        /* complete at content_block_start; held until the stop reason confirms compaction */
+        const char *content = json_get_str(cb, "content");
+        if (content && *content) {
+            json_free(s->compaction);
+            s->compaction = json_obj();
+            json_set_str(s->compaction, "type", "anthropicCompaction");
+            json_set_str(s->compaction, "provider", s->model->provider);
+            json_set_str(s->compaction, "content", content);
+            if (json_get_str(cb, "signature")) json_set_str(s->compaction, "signature", json_get_str(cb, "signature"));
+            if (json_get_str(cb, "encrypted_content")) json_set_str(s->compaction, "encryptedContent", json_get_str(cb, "encrypted_content"));
+            if (json_is_arr(json_get(cb, "tool_changes"))) json_set(s->compaction, "toolChanges", json_clone(json_get(cb, "tool_changes")));
+        }
     } else if (str_eq(ty, "tool_use")) {
         blk.kind = 4;
         aib_toolcall_start(&s->b, json_get_str(cb, "id"), decode_tool_name(s->model, json_get_str(cb, "name"), s->oauth));
@@ -2013,6 +2117,7 @@ static void on_message_delta(anthropic_sse_t *s, const json_t *ev) {
     if (raw) {
         s->stop_reason = anthropic_map_stop_reason(raw);
         s->saw_terminal = true;
+        if (!strcmp(raw, "compaction")) s->compaction_stop = true;
     }
     if (str_eq(s->stop_reason, "error") && !s->error) {
         json_t *sd = d ? json_get_obj(d, "stop_details") : NULL;
@@ -2108,6 +2213,13 @@ json_t *anthropic_sse_finish(anthropic_sse_t *s, int rc, const char *err) {
     else if (!s->saw_start) msg = aib_finish(&s->b, "error", "Anthropic stream ended before message_start");
     else if (!s->saw_terminal) msg = aib_finish(&s->b, "error", "Anthropic stream ended before message_stop");
     else msg = aib_finish(&s->b, s->stop_reason, NULL);
+    if (s->compaction_stop && str_eq(json_get_str(msg, "stopReason"), "stop")) {
+        /* on-demand compaction ends with no ordinary assistant content */
+        json_t *sd = json_obj();
+        json_set_str(sd, "type", "compaction");
+        json_set(msg, "stopDetails", sd);
+        if (s->compaction) json_set(msg, "providerPayload", json_clone(s->compaction));
+    }
     return msg;
 }
 

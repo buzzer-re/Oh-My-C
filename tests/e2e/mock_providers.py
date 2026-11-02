@@ -82,6 +82,7 @@ class H(BaseHTTPRequestHandler):
             with open(LOG, "a") as f:
                 f.write(json.dumps({"method": "POST", "path": path, "headers": {k.lower(): v for k, v in self.headers.items()},
                                     "body": body}) + "\n")
+        path = path.split("?")[0]  # routing ignores query strings (omp's Anthropic client adds ?beta=true)
         if path.startswith("/deny") and self.headers.get("Copilot-Integration-Id") == "copilot-chat":
             return self.reply(403, {"error": {"message": "integration not allowed", "code": "forbidden"}})
         if path.endswith("/v1/systemone") or "/ai/run/" in path:

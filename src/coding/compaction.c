@@ -2,6 +2,7 @@
 #include "coding/compaction.h"
 
 #include "ai/dialect.h"
+#include "ai/provider_anthropic.h"
 #include "coding/advisor.h"
 #include "coding/branchsum.h"
 #include "config/compaction_point.h"
@@ -240,17 +241,9 @@ static bool openai_v1(const ai_model_t *m) {
     return str_eq(api, "openai-responses") || str_eq(api, "openai-codex-responses");
 }
 
-/* supportsAnthropicCompaction (default routes) */
-static bool anthropic_native(const ai_model_t *m) {
-    if (!str_eq(m->api, "anthropic-messages")) return false;
-    const json_t *sc = model_compat_get(m, "supportsServerCompaction");
-    if (!json_is_bool(sc) || !sc->u.b) return false;
-    const json_t *rc = json_get_obj(m->raw, "remoteCompaction");
-    if (rc && json_get(rc, "enabled") && !json_get_bool(rc, "enabled", true)) return false;
-    const json_t *fp = model_compat_get(m, "firstPartyProvider");
-    if (str_eq(m->provider, "google-vertex") || (json_is_bool(fp) && fp->u.b) || json_get_bool(rc, "enabled", false)) return true;
-    return false;
-}
+/* shouldUseAnthropicNativeCompaction: the Anthropic Messages compaction beta (Bedrock Converse compaction through
+ * InvokeModel is not implemented) */
+static bool anthropic_native(const ai_model_t *m) { return str_eq(m->api, "anthropic-messages") && anthropic_compaction_supported(m); }
 
 bool cmp_remote_supported(const ai_model_t *m) {
     if (!m || !settings_bool("compaction.remoteEnabled", true)) return false;
