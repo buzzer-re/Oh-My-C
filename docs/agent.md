@@ -100,7 +100,7 @@ builds the system prompt. Its listener (`on_agent_event`) then:
 - delivers settled background jobs as steering (`async-result`);
 - applies checkpoint/rewind cuts.
 
-After `agent_prompt()` returns, `app_prompt()` runs title generation and auto-compaction. The modes
+After `agent_prompt()` returns, `app_prompt()` runs title generation and post-turn context maintenance. The modes
 then call `app_after_run()`, which may return a hidden follow-up prompt (async job results, an
 advisor continuation, or a goal continuation) that the mode runs with `app_prompt_hidden()`.
 
@@ -174,23 +174,60 @@ assistant message, and then the whole session is written at once.
 - **Listing / resume**: `session_list` (one project) and `session_list_all`; `-c` continues the
   newest one for the cwd; `-r <id-prefix|path>` resumes. Export to Markdown/HTML lives here too.
 
-### Compaction
+### Compaction (`src/coding/compaction.c`)
 
-`app_compact()` ports omp's summarization compaction:
+Context maintenance ports omp's `session-maintenance.ts`, `compaction-methods.ts`, `session-handoff.ts`
+and `agent/compaction/{compaction,shake,pruning,openai,anthropic}.ts`. Token counts are local
+chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp does.
 
-1. Walking back from the leaf, keep about `compaction.keepRecentTokens` (20,000, estimated as
-   chars/4) and cut at a user-message boundary.
-2. Serialize the older messages into `<conversation>`. With a previous summary, use
-   `compaction-update-summary.md`, otherwise `compaction-summary.md`, plus optional `/compact`
-   instructions.
-3. Summarize with `modelRoles.compaction` (else the session model) at low effort.
-4. Append a `compaction` entry and reload the context.
+- **Preparation** (`prepareCompaction`): the branch after the latest readable compaction (or reset
+  boundary) is cut with omp's `findCutPoint`: the oldest suffix fitting `compaction.keepRecentTokens`
+  (shrunk to the recovery band under the trigger and by the billed/estimated ratio), cut only at
+  user/assistant/custom turns, so a cut inside a turn is a *split turn*. File operations
+  (read/write/edit tool calls plus the previous summary's lists) become the `<files>` section.
+- **Soft summary** (`compact()`): the summarized messages are serialized in the summarizer's transcript
+  dialect (`src/ai/dialect.c`: xml, anthropic, glm, gemini, gemma, kimi, qwen3, deepseek, minimax,
+  harmony, hermes; shared with branch summaries) into omp's `<conversation>` /
+  `<previous-summary>` prompt with `summarization-system.md`, `maxTokens = min(0.8 × reserve, 16384)`
+  and the session thinking level. A split turn adds a turn-prefix summary; a short summary
+  (`compaction-short-summary.md`) labels the entry. Oversized histories are folded through
+  input-budget windows. Candidates follow `app_compaction_candidates()` (the model's compaction
+  target, the session model, chat roles, the largest window).
+- **Provider-native ("remote")**: OpenAI Responses `POST …/responses/compact` (provider `openai`, or a
+  model with `remoteCompaction.enabled`) stores `preserveData.openaiRemoteCompaction`
+  (`replacementHistory`, `compactionItem`) whose items replay verbatim on later requests; the Anthropic
+  compaction beta (`compat.supportsServerCompaction` on a supported route) sends `compaction:
+  {type: "summarize", instructions}` with `compact-2026-09-04`, keeps the signed block in
+  `preserveData.anthropicCompaction` and replays it as a `compaction` block at the head of the kept
+  tail. A native failure falls through to the next method.
+- **Method ladder** (`compaction.methodOrder`, default remote → snapcompact → handoff → shake → soft):
+  manual `/compact` uses remote/soft (a `/compact <mode>` overrides the order); automatic passes
+  (`cmp_auto`) run the first usable method and fall through on failure or when a pass would not reduce
+  the context. Handoff is skipped for overflow; snapcompact is not implemented (explicit
+  `/compact snapcompact` reports it, the ladder passes over it). Shake elides tool results and large
+  fenced/XML regions outside a protected recent tail into an `artifact://` and falls back when the
+  context stays above the recovery band. Handoff generates the document over the live context
+  (`tool_choice: none`, `auto-handoff-threshold-focus.md`; `compaction.handoffSaveToDisk` writes
+  `handoff-<time>.md` to the session artifacts) and commits it with `method: "handoff"`, rendered
+  through `handoff-summary-context.md`.
+- **Triggers**: after each turn (`cmp_after_turn`: stale-read supersession and useless-result elision
+  with `compaction.supersedeReads` / `dropUseless`, tool-output pruning, then the threshold), between
+  tool-loop turns (`cmp_mid_turn`, `compaction.midTurnEnabled`, through the agent's `turn_boundary`
+  hook), before a prompt (`cmp_before_prompt`), and on context overflow (every attempt, with a retry
+  of the failed turn). With `compaction.asyncEnabled`, a background thread prepares the summary or
+  handoff document inside `[threshold − lead, threshold)` and a threshold pass in the grace band
+  defers to it; the armed result is committed by the next pass when still valid for the branch.
+- **Dead ends**: when preparation finds nothing or a commit leaves no headroom (or no retry fit), a
+  rescue elides inside the kept tail, then drops images; otherwise omp's dead-end warning is shown
+  and stamped on the compaction entry.
+- **Commit**: `session_append_compaction_ex()` writes omp's entry fields (`shortSummary`,
+  `tokensAfter`, `method`, `providerReplayThroughEntryId`, `details`, `fromExtension`, `preserveData`),
+  the context is rebuilt and `auto_compaction_start` / `auto_compaction_end` events (omp's shapes) go to
+  RPC and the TUI.
 
-Auto-compaction runs after a prompt when the last context size reaches the threshold computed by
-`app_compaction_threshold()`: `compaction.thresholdTokens` or `compaction.thresholdPercent` if set,
-else omp's reserve-based budget (`window - max(15% of window, compaction.reserveTokens)`). The
-status-line gauge uses the same threshold. A context-overflow error triggers one compaction and a
-retry. `app_handoff()` (`/handoff`) writes a handoff document and compacts in place.
+`app_compaction_threshold()` gives the trigger (`compaction.thresholdTokens`, `thresholdPercent`,
+per-model `compaction.modelThresholds`, else the reserve-based budget); the status-line gauge uses the
+same value. `app_handoff()` (`/handoff`) commits a handoff document the same way.
 
 ## System prompt assembly (`src/coding/discovery.c`)
 

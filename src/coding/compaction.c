@@ -250,10 +250,9 @@ bool cmp_remote_supported(const ai_model_t *m) {
     return openai_v1(m) || anthropic_native(m);
 }
 
-static bool remote_endpoint_set(void) {
-    const char *e = settings_str("compaction.remoteEndpoint", NULL);
-    return e && *e;
-}
+/* compaction.remoteEndpoint (requestRemoteCompaction's generic summarizer endpoint) is not implemented: the
+ * setting does not make `remote` usable */
+static bool remote_endpoint_set(void) { return false; }
 
 /* canUseRemoteCompaction */
 static bool remote_usable(const ai_model_t *m) { return remote_endpoint_set() || cmp_remote_supported(m); }

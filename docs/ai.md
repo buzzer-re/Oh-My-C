@@ -109,6 +109,21 @@ Points worth knowing per provider:
   results are inserted after the assistant message. GitLab Duo agent turns end with a `runMCPTool`
   action (a normal tool call answered on the same socket), and `pause_turn` stops are re-sampled by
   the loop up to 8 times.
+- **Server-side compaction** (driven by `coding/compaction.c`): `ai_openai_remote_compact()` posts the
+  Responses `/responses/compact` request (`<base>/v1/responses/compact`, or `remoteCompaction.endpoint`)
+  with the history encoded as Responses input; a user message whose `providerPayload` is
+  `{type: "openaiResponsesHistory", provider, items}` replays those items (ids and output statuses
+  stripped) for the same provider. `ai_stream_opts_t.anthropic_compaction` turns an Anthropic request
+  into an on-demand compaction (`compaction: {type: "summarize", instructions}`, no `context_management`,
+  no stop sequences, the `compact-2026-09-04` beta); the streamed `compaction` block comes back as
+  `stopDetails {type: "compaction"}` + `providerPayload {type: "anthropicCompaction", …}`, and a summary
+  message carrying that payload replays as a `compaction` block opening the following assistant turn
+  (its `filesText` queued as a user turn before the first newer message). `anthropic_compaction_supported()`
+  is omp's `supportsAnthropicCompaction` for the model's own route. Bedrock Converse compaction (an
+  InvokeModel side request) and the Codex V2 streaming compaction are not implemented.
+- **Transcript dialects** (`dialect.c`): each dialect's `renderTranscript` and
+  `serializeConversationForSummary`, used for compaction and branch-summary input (not for in-band tool
+  calls).
 - **Leaked reasoning markup** (`<think>`, `<thinking>`, `<scratchpad>`, Gemini thinking fences,
   Gemma/Harmony channels) is re-routed into thinking blocks by `think_heal.c` for the Cloud Code
   Assist wire.
@@ -175,7 +190,8 @@ There are two levels:
    here.
 2. **Turn** (`hook_should_retry` in `app.c`): an assistant message that ended in error is
    classified. Context overflow (by message text, or a provider `errorFlags: ["contextOverflow"]`)
-   triggers one compaction and a retry. Otherwise retryable errors are retried up to
+   runs the compaction ladder with a retry of the turn (see [agent.md](agent.md#compaction-srccodingcompactionc));
+   a pass that cannot make progress ends the turn instead of retrying. Otherwise retryable errors are retried up to
    `retry.maxRetries` (10) with exponential backoff (`retry.baseDelayMs` 2000, capped at
    `retry.maxDelayMs` 60000), showing a countdown notice. `retry.enabled: false` turns this off.
 
