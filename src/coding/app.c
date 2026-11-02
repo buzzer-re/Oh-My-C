@@ -465,12 +465,66 @@ static void app_note_provider_state(app_t *a) {
     free(key);
 }
 
+/* externalThinking with the `think` tool present on a model that can suppress native reasoning */
+static bool external_thinking_active(app_t *a) {
+    if (!settings_bool("externalThinking", false) || !think_supported(a->model)) return false;
+    agent_tool_t *t = agent_find_tool(a->agent, "think");
+    return t && !t->hidden;
+}
+
+/* utils/tool-choice.ts buildNamedToolChoice (owned, NULL when the model can't force a named tool) */
+static json_t *named_tool_choice(const ai_model_t *m, const char *tool) {
+    const char *api = m && m->api ? m->api : "";
+    json_t *c = NULL;
+    if (str_eq(api, "anthropic-messages") || str_eq(api, "bedrock-converse-stream")) {
+        c = json_obj();
+        json_set_str(c, "type", "tool");
+    } else if (str_eq(api, "openai-codex-responses") || str_eq(api, "openai-responses") || str_eq(api, "openai-completions") ||
+               str_eq(api, "azure-openai-responses") || str_eq(api, "openrouter")) {
+        if (!model_compat_bool(m, "supportsToolChoice", true) || !model_compat_bool(m, "supportsForcedToolChoice", true))
+            return NULL;
+        c = json_obj();
+        json_set_str(c, "type", "function");
+    } else if (str_eq(api, "ollama-chat")) {
+        c = json_obj();
+        json_set_str(c, "type", "function");
+    } else if (str_eq(api, "google-generative-ai") || str_eq(api, "google-gemini-cli") || str_eq(api, "google-vertex")) {
+        return json_str("required");
+    } else {
+        return NULL;
+    }
+    json_set_str(c, "name", tool);
+    return c;
+}
+
+/* session-tools reconcileThinkTool: the private scratchpad follows externalThinking and the active model */
+static void think_reconcile(app_t *a) {
+    if (!a->agent || a->opts.no_tools) return;
+    bool want = settings_bool("externalThinking", false) && think_supported(a->model);
+    agent_tool_t *t = agent_find_tool(a->agent, "think");
+    if (want == (t != NULL)) return;
+    if (want) agent_add_tool(a->agent, tool_think_new());
+    else agent_remove_tool(a->agent, "think");
+    tools_finalize(a->agent, a->opts.tools);
+}
+
 static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
     app_t *a = ud;
     app_flush_warm_usage(a);
     free(ag->api_key);
     ag->api_key = app_api_key_for(a->model);
     o->api_key = ag->api_key;
+    if (external_thinking_active(a)) { /* sdk.ts: forceReasoningOff while the scratchpad replaces reasoning */
+        o->force_reasoning_off = true;
+        o->disable_reasoning = true;
+        if (a->think_force) { /* the "external-thinking" tool choice: once, on the turn's first request */
+            static __thread json_t *forced;
+            json_free(forced);
+            forced = named_tool_choice(a->model, "think");
+            if (forced) o->tool_choice = forced;
+        }
+    }
+    a->think_force = false;
     if (a->plan_force_tool_choice) { /* plan-mode-decision: the reminder continuation must call a tool */
         static json_t *required;
         if (!required) required = json_str("required");
@@ -1364,6 +1418,8 @@ static void install_agent(app_t *a) {
     /* todos are parent-owned bookkeeping, stripped from subagents (task/executor.ts isParentOwnedTool) */
     if (a->opts.subagent) agent_remove_tool(ag, "todo");
     if (!a->opts.no_tools) autolearn_register_tools(a, ag);
+    if (!a->opts.no_tools && settings_bool("externalThinking", false) && think_supported(a->model))
+        agent_add_tool(ag, tool_think_new());
     /* discoverable (xd://-mountable) tools added outside tools_register_builtin; MCP tools too */
     for (size_t i = 0; i < ag->all_tools.n; i++) {
         agent_tool_t *t = ag->all_tools.v[i];
@@ -1375,6 +1431,7 @@ static void install_agent(app_t *a) {
 }
 
 void app_rebuild_system_prompt(app_t *a) {
+    think_reconcile(a); /* model / externalThinking changes rebuild the prompt */
     strvec_t names = {0};
     json_t *labels = json_obj();
     json_t *refs = json_obj();
@@ -2859,6 +2916,7 @@ int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
     json_free(kn);
     json_arr_foreach(notices, i, img) json_push(msgs, json_clone(img));
     json_free(notices);
+    a->think_force = true; /* consumed by the first request of this turn */
     /* the pending xd:// mount delta rides with the next user prompt, right before it */
     json_t *xn = xdnotice_take(a);
     if (xn) json_push(msgs, xn);

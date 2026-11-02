@@ -554,6 +554,18 @@ void tc_render(const tc_call_t *c, int width, strvec_t *out) {
         }
         return;
     }
+    if (!strcmp(n, "think")) { /* thinkToolRenderer: inline Markdown(thoughts, 1, 0) in thinkingText italic, no result */
+        const char *t = json_get_str(c->args, "thoughts");
+        if (t && *t) {
+            tui_md_opts_t mo;
+            tui_md_opts_default(&mo);
+            mo.padding_x = 1;
+            mo.text_slot = TUI_TC_THINKING_TEXT;
+            mo.italic = true;
+            tui_md_render(t, width, &mo, out);
+        }
+        return;
+    }
     if (!strcmp(n, "bash")) {
         tc_bash(c, width, out);
         /* replies the command wrote to out:// draw as prose blocks after the call */

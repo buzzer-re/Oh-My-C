@@ -8,6 +8,7 @@ Protocols (chosen by path suffix):
   .../messages          Anthropic Messages SSE           .../v1/systemone, .../ai/run/<model>  native judgments
 A user message "bash:<cmd>" gets a bash tool call (chat completions / anthropic), "read:<path>" a read call (anthropic), "call:<tool>:<json args>" any tool
 (chat completions), a tool result gets the final text.
+An Anthropic request forcing a named tool (tool_choice {type: "tool"}) gets a call to it (think: fixed thoughts).
 MOCK_CACHE_TOKENS=<n> reports <n> cache-write tokens on a new Anthropic request and <n> cache-read tokens on a repeated one.
 Paths under /deny answer 403 to Copilot-Integration-Id copilot-chat (identity fallback test)."""
 import json, os, sys
@@ -154,7 +155,13 @@ class H(BaseHTTPRequestHandler):
                 usage["cache_read_input_tokens" if key in SEEN else "cache_creation_input_tokens"] = cache
                 SEEN.add(key)
             self.ev({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": [], "usage": usage}}, "message_start")
-            if kind == "user" and text.startswith(("bash:", "read:")):
+            forced = body.get("tool_choice") or {}
+            if kind == "user" and forced.get("type") == "tool":  # a forced named tool (the think scratchpad)
+                args = {"thoughts": "Weighing **one** option.\nThen answering."} if forced.get("name", "").lstrip("_") == "think" else {}
+                self.ev({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_f", "name": forced["name"], "input": {}}}, "content_block_start")
+                self.ev({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps(args)}}, "content_block_delta")
+                stop = "tool_use"
+            elif kind == "user" and text.startswith(("bash:", "read:")):
                 tool, args = ("bash", {"command": text[5:]}) if text.startswith("bash:") else ("read", {"path": text[5:]})
                 self.ev({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": tool, "input": {}}}, "content_block_start")
                 self.ev({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps(args)}}, "content_block_delta")

@@ -340,6 +340,7 @@ json_t *agent_tool_wire(const agent_tool_t *t) {
         json_set(o, "parameters", inject_intent(t->parameters, t->intent_mode, 0));
     else
         json_set(o, "parameters", json_clone(t->parameters));
+    if (t->strict) json_set_bool(o, "strict", true);
     return o;
 }
 

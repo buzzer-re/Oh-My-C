@@ -108,6 +108,7 @@ struct app {
      * (extracmds.c); forced_step 0 idle, 1 the named choice next, 2 "none" next */
     json_t *forced_choice;
     int forced_step;
+    bool think_force; /* externalThinking: the next request forces the `think` scratchpad (once per user turn) */
     void (*plan_mode_changed)(void *ud); /* plan mode left by an automatic approval (ACP mode update) */
     /* ACP clients with form elicitation confirm a proposed plan (#requestAcpPlanApprovalChoice): true approves,
      * false keeps planning (refine). NULL approves automatically. Uses plan_mode_changed_ud. */

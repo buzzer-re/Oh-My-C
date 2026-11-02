@@ -19,6 +19,8 @@
 #      CMP_WAIT (seconds to wait after launching, default 6), OMC_TUI_DEBUG=<file> (omc's per-frame render log),
 #      MOCK_DELAY (seconds between streamed chunks),
 #      CMP_IMAGES=1 (the mock model accepts image input), CMP_CTX (mock context window, default 100000),
+#      CMP_API (the mock provider's api, default openai-completions) with CMP_MOCK (mock script in tests/e2e, default
+#      mock_openai.py; e.g. CMP_API=anthropic-messages CMP_MOCK=mock_providers.py),
 #      CMP_MODEL_ID (the mock model's id, default mock-1; e.g. gpt-5.2 makes it an OpenAI-family model for /fast),
 #      CMP_MODELS (extra models.yml lines under the mock provider's models, e.g.
 #      '      - id: mock-2\n        contextWindow: 2000\n        maxTokens: 1024').
@@ -44,7 +46,7 @@ providers:
   mock:
     baseUrl: http://127.0.0.1:$2/v1
     apiKey: MOCK_KEY
-    api: openai-completions
+    api: ${CMP_API:-openai-completions}
     models:
       - id: ${CMP_MODEL_ID:-mock-1}
         name: Mock One
@@ -79,7 +81,7 @@ start)
     for _ in 1 2 3 4 5 6 7 8; do
         port=$((30000 + RANDOM % 20000))
         (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null && continue
-        MOCK_LOG="$D/req.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $port > "$D/mock.log" 2>&1 & echo $! > "$D/mock.pid"
+        MOCK_LOG="$D/req.jsonl" python3 -I "$ROOT/tests/e2e/${CMP_MOCK:-mock_openai.py}" $port > "$D/mock.log" 2>&1 & echo $! > "$D/mock.pid"
         for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null && break; sleep 0.1; done
         kill -0 "$(cat "$D/mock.pid")" 2>/dev/null && break
     done

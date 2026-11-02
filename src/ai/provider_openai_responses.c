@@ -606,7 +606,9 @@ static json_t *build_codex(const ai_model_t *m, const ai_context_t *ctx, const a
     json_set_bool(p, "store", false);
     /* reasoning */
     const char *effort = NULL;
-    if (o->disable_reasoning) {
+    if (o->force_reasoning_off) {
+        effort = "none"; /* codexReasoningControls: reasoningOff */
+    } else if (o->disable_reasoning) {
         if (m->reasoning && str_eq(model_compat_str(m, "reasoningDisableMode"), "none-effort")) effort = "none";
         else effort = json_sv(json_at(json_get_arr(m->thinking, "efforts"), 0));
         if (effort && !str_eq(effort, "none")) effort = oai_effort_wire(m, NULL, effort);
@@ -723,8 +725,14 @@ json_t *oair_build_request(const ai_model_t *m, const ai_context_t *ctx, const a
         json_del(p, "tool_choice");
     oai_policy_t pol;
     oai_policy_resolve(&pol, m, o, json_get(p, "tool_choice"), json_len(json_get(p, "tools")) > 0);
-    apply_reasoning(p, m, &pol, o);
-    apply_reasoning_mode(p, m);
+    if (o->force_reasoning_off) { /* applyResponsesCompatPolicy forceReasoningOff; no reasoningMode */
+        json_t *r = json_obj();
+        json_set_str(r, "effort", "none");
+        json_set(p, "reasoning", r);
+    } else {
+        apply_reasoning(p, m, &pol, o);
+        apply_reasoning_mode(p, m);
+    }
     json_t *routing = model_compat_bool(m, "isOpenRouterHost", false) ? oai_cget(m, NULL, "openRouterRouting") : NULL;
     if (json_is_obj(routing)) json_set(p, "provider", json_clone(routing));
     return p;

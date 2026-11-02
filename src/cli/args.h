@@ -19,7 +19,7 @@ typedef struct {
     double max_time, warn_cost, max_cost;
     const char *api_key, *system_prompt, *system_prompt_template, *append_system_prompt;
     const char *thinking;
-    bool hide_thinking, advisor;
+    bool hide_thinking, advisor, external_thinking;
     bool continue_recent;
     bool resume_set;        /* --resume / -r / --session / --restore given */
     const char *resume;     /* NULL with resume_set = open the picker */

@@ -51,6 +51,7 @@ struct agent_tool {
     bool lenient_args;  /* skip schema validation errors */
     bool mounted;       /* presented as an xd://<name> device instead of top-level (implies hidden) */
     bool discoverable;  /* upstream loadMode "discoverable": mountable under xd:// */
+    bool strict;        /* upstream `strict = true`: providers send the schema in strict mode */
     int intent_mode;    /* INTENT_* : how the `i` intent field is injected into the wire schema */
     char *summary;      /* one-line catalog summary (owned, may be NULL) */
     json_t *examples;   /* [{caption?, call|good+bad|note}] appended to the wire description (owned, may be NULL) */

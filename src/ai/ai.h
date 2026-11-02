@@ -177,6 +177,9 @@ typedef struct {
     double top_p;                /* NAN => unset */
     ai_effort_t reasoning;       /* EFFORT_OFF => no thinking */
     bool disable_reasoning;
+    /* forceReasoningOff (external-thinking scratchpad): implies disable_reasoning; the Responses APIs send
+     * reasoning {effort: "none"} whatever the model's disable mode */
+    bool force_reasoning_off;
     bool hide_thinking_summary;
     const char *session_id;      /* prompt-cache key / affinity */
     const char *prompt_cache_key; /* prompt_cache_key when it differs from session_id (side requests); NULL = session_id */

@@ -55,6 +55,9 @@ const cflag_t LAUNCH_FLAGS[] = {
      .options = SERVICE_TIER_OPTS},
     {.name = "hide-thinking", .kind = CF_BOOL, .ch = 0, .desc = "Hide thinking blocks in TUI output (display only, does not disable model thinking)"},
     {.name = "advisor", .kind = CF_BOOL, .ch = 0, .desc = "Enable the advisor runtime (passively reviews each turn and injects notes)"},
+    {.name = "external-thinking", .kind = CF_BOOL, .ch = 0,
+     .desc = "Use a private scratchpad while disabling supported GPT, Claude, and Gemini reasoning (at your own risk: providers "
+             "have flagged this request shape as abuse)"},
     {.name = "no-skills", .kind = CF_BOOL, .ch = 0, .desc = "Disable skills discovery and loading"},
     {.name = "skills", .kind = CF_STR, .ch = 0, .desc = "Comma-separated glob patterns to filter skills (e.g., git-*,docker)"},
     {.name = "no-rules", .kind = CF_BOOL, .ch = 0, .desc = "Disable rules discovery and loading"},

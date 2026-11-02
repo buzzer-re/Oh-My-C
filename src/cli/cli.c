@@ -611,6 +611,7 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     if (plan) settings_set_runtime("modelRoles.plan", json_str(plan));
     if (A->hide_thinking) settings_set_runtime("hideThinkingBlock", json_bool(true));
     if (A->advisor) settings_set_runtime("advisor.enabled", json_bool(true));
+    if (A->external_thinking) settings_set_runtime("externalThinking", json_bool(true)); /* ephemeral */
     if (A->no_lsp) settings_set_runtime("lsp.enabled", json_bool(false));
     if (g_force_setup) { /* `omc setup`: every wizard scene, whatever the stored setupVersion */
         settings_set_runtime("setupVersion", json_num(0));

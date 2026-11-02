@@ -22,7 +22,7 @@ static const char *const STRING_FLAGS[] = {
 static const char *const OPTIONAL_FLAGS[] = {"--resume", "-r", "--restore", "--session", NULL};
 
 static const char *const VALUELESS_FLAGS[] = {
-    "--help", "--version", "--continue", "--no-session", "--no-tools", "--no-lsp", "--hide-thinking", "--advisor",
+    "--help", "--version", "--continue", "--no-session", "--no-tools", "--no-lsp", "--hide-thinking", "--advisor", "--external-thinking",
     "--plan-yolo", "--prewalk", "--no-prewalk", "--print", "--print-thoughts", "--no-skills", "--no-rules", "--no-context-files", "--no-title",
     "--auto-approve", "--yolo",
     "--plan-mode", /* omc: start in read-only plan mode */
@@ -277,6 +277,7 @@ static bool set_valueless(launch_args_t *r, const char *a) {
     else if (!strcmp(a, "--no-lsp")) r->no_lsp = true;
     else if (!strcmp(a, "--hide-thinking")) r->hide_thinking = true;
     else if (!strcmp(a, "--advisor")) r->advisor = true;
+    else if (!strcmp(a, "--external-thinking")) r->external_thinking = true;
     else if (!strcmp(a, "--plan-yolo")) r->plan_yolo = true;
     else if (!strcmp(a, "--prewalk")) r->prewalk = true;
     else if (!strcmp(a, "--no-prewalk")) r->no_prewalk = true;

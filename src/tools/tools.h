@@ -177,6 +177,10 @@ agent_tool_t *tool_eval_new(tool_env_t *env); /* NULL if no Python */
 agent_tool_t *tool_ast_grep_new(tool_env_t *env);
 agent_tool_t *tool_find_new(tool_env_t *env);
 agent_tool_t *tool_ast_edit_new(tool_env_t *env);
+/* the private `think` scratchpad (externalThinking); think_supported: the model's transport can suppress native
+ * reasoning (think.ts supportsExternalThinking) */
+agent_tool_t *tool_think_new(void);
+bool think_supported(const ai_model_t *m);
 /* finalize a staged ast_edit proposal (xd://resolve / xd://reject) */
 char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_error);
 /* re-render the eval description with the session tool names its bridge can call */
