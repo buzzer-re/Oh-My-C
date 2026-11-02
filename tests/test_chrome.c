@@ -236,7 +236,13 @@ static void test_band_welcome(ui_t *u) {
     load_fixture("band120.omp.ansi", &want);
     tui_component_t *w = ui_welcome_new();
     ui_welcome_set_tip(w, "Psst, omp has a natural habitat \xf0\x9f\x90\xa6 [tern](https://scl.so/tern)");
-    u->app->last_context_tokens = 7600; /* omp's tokenizer estimate of its default request: 8% */
+    /* a fresh session: system prompt + tools estimated at 4.1 chars/token; 7600 tokens is omp's count of its
+     * default request (8%) */
+    char *sys = xmalloc(31161);
+    memset(sys, 'x', 31160);
+    sys[31160] = 0;
+    agent_set_system_prompt(u->app->agent, sys);
+    free(sys);
     render_screen(u, w, 120, &got);
     CHECK(got.n == want.n, "band120: %zu rows, want %zu", got.n, want.n);
     for (size_t i = 0; i < MIN(got.n, want.n); i++)
@@ -253,7 +259,9 @@ static void test_titled(ui_t *u) {
     load_fixture("titled120.omp.ansi", &want);
     free(u->app->session->title);
     u->app->session->title = xstrdup("\xf0\x9f\xa7\xaa PARK: Fix flaky park tests");
-    u->app->last_context_tokens = 120;
+    json_push(u->app->agent->messages,
+              json_parse_str("{\"role\":\"assistant\",\"stopReason\":\"stop\",\"timestamp\":2,\"content\":[],"
+                             "\"usage\":{\"input\":100,\"output\":20,\"cacheRead\":0,\"cacheWrite\":0}}"));
     json_push(u->app->agent->messages, json_parse_str("{\"role\":\"user\",\"content\":\"x\"}"));
     render_screen(u, NULL, 120, &got);
     CHECK(got.n == want.n, "titled120: %zu rows, want %zu", got.n, want.n);
