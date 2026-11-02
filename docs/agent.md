@@ -416,6 +416,30 @@ tools are exclusive and mountable as `xd://` devices.
   own job manager; omp shares one).
 - **Transcripts** of subagents persist next to the parent's artifacts as `<artifacts>/<id>.jsonl`
   (`app_subagent_new_at`, `session_create_file`), like omp; RPC `get_subagent_messages` reads them.
+  The run's output lands beside it as `<artifacts>/<id>.md` (executor finalize: always for the spawn's
+  own run, for a follow-up only when it is a successful, non-empty reply the user or the spawner asked
+  for); the hub inspector's Output row shows it.
+- **Waiting on background work** (WP-22b, task/executor.ts quiescence barrier + agent-session.ts
+  `#hasPendingAsyncWake`): a subagent's run completes only after the jobs it owns settle; each settled
+  batch is folded into its run as an `async-result` follow-up turn, so its answer is the last turn
+  after every result (`settle_owned_jobs`). The main session's run that ends while jobs can still wake
+  it is a scheduling pause: RPC reports `agent_end {isTerminal: false, yielded: true,
+  awaitingAsyncWork: true}` and `prompt_result {sessionSettled: false}`, the wake run reports no
+  `prompt_result` and its terminal `agent_end` emits `session_settled`; the TUI keeps the working row
+  ("Waiting for background job <id>" / "Waiting for N background jobs: a, b, c +N") and the status-line
+  activity window open, Esc ends the wait ("Stopped waiting · N background jobs still running (/jobs)")
+  and later results fold into context without starting a turn until a turn ends on its own. Job
+  wakes that land together deliver as one batch (100 ms coalescing).
+- **Task result advisories** (task/index.ts `composeSpawnAdvisory`): a call that resolves ≥2 items to the
+  generic `task`/`sonic` agents gets the `Tip:` specialization nudge (scout hint while scout is
+  spawnable); a call with ≥2 async siblings gets the `Coordinate:` line (peer messaging on, spawn
+  capacity left). Before returning, the call reports `Spawned agent `<id>`...` / `Spawned N agents...`;
+  afterwards its card frames carry omp's texts (`Running background task <id>...`, `Running agent
+  <id>...`, `Background task <id> complete.` / `failed.`), forwarded to RPC as `tool_execution_update`.
+- **Subagent sessions** carry no personality block (sdk.ts passes `personality: "none"` for subagents),
+  no `todo` tool (parent-owned bookkeeping) and no `lsp` unless `task.enableLsp`; the peer roster lists
+  `main` / agent-type display names with kind `main` / `sub`, running before idle, and the progress gist
+  as activity. `agent://`, `history://` and `proc://` are always listed in the internal-URL docs.
 - **Jobs** (`tools/jobs.c`, port of `async/` AsyncJobManager): async bash (`async: true`), bash
   auto-backgrounded after `bash.autoBackground.*` thresholds, task jobs, and service watchers.
   Settled results go to the owning agent as an `async-result` follow-up, or wake an idle session
