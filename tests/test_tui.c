@@ -1093,6 +1093,19 @@ static void test_renderer_viewport(void) {
     vt_render(&v, t, pfd[0]);
     CHECK(vt_shows_tail(&v, t));
     CHECK(tui_full_redraw_count(t) == 0);
+
+    /* a few rows at the bottom of a scrolled frame go away (an autocomplete list closes): the frame's
+     * tail moves back down to the last screen row instead of floating above blank rows */
+    tui_text_t *popup = tui_text_new("p1\np2\np3\np4", 0, 0);
+    for (int i = 12; i < 25; i++) tui_text_set(rows[i], "x");
+    tui_container_add(tui_root(t), &popup->base);
+    vt_render(&v, t, pfd[0]);
+    CHECK(vt_shows_tail(&v, t));
+    tui_container_remove(tui_root(t), &popup->base);
+    tui_component_destroy(&popup->base);
+    vt_render(&v, t, pfd[0]);
+    CHECK(vt_shows_tail(&v, t));
+    CHECK(tui_full_redraw_count(t) == 0);
     tui_free(t);
     strvec_free(&v.scrollback);
 

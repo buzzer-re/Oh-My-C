@@ -692,9 +692,10 @@ static void do_render(tui_t *t) {
         dbg_note(t, first >= 0 ? "diff" : "none", first, NULL, NULL);
     }
     /* base: the new row that belongs on screen row 0 (old rows on screen stay put). Content that now
-     * ends above the screen (a large collapse) is pulled back onto it. */
+     * ends above the screen bottom (a collapse, an autocomplete list or picker closing under a scrolled
+     * frame) is pulled back down so the frame's tail sits on the last row, as omp's viewport does. */
     int base = vt + k;
-    if (nn > 0 && nn - 1 < base) base = MAX(0, nn - height);
+    if (nn > 0 && base > 0 && nn - base < height) base = MAX(0, nn - height);
     if (base < c) c = base; /* rows pulled back on screen are live again */
     /* screen top s1 and commit point c1: rows above s1 leave the screen; only rows above the hold
      * may enter scrollback, held ones in between stay hidden until they settle (omp: unfinalized
