@@ -62,6 +62,15 @@ for f in glob.glob(sys.argv[1] + "/**/*.jsonl", recursive=True):
     for l in open(f):
         e = json.loads(l)
         if e.get("type") == "compaction": print(e["method"], e["shortSummary"], e["fromExtension"] is False)' "$T/cg1"
+# the default ladder at the threshold: remote is unavailable, so auto-handoff writes the document (saved to the
+# session artifacts with compaction.handoffSaveToDisk) and commits it as a handoff compaction
+cagent "$T/cg5" $'modelRoles:\n  default: mock/mock-1\ncompaction:\n  thresholdTokens: 75000\n  asyncEnabled: false\n  handoffSaveToDisk: true'
+OMC_CODING_AGENT_DIR="$T/cg5" "${CR[@]}" "{\"type\":\"prompt\",\"message\":\"$BIG1\"}" "{\"type\":\"prompt\",\"message\":\"$BIG2\"}" > "$T/cg5.out"
+check "auto handoff"           '"type": "auto_compaction_end", "action": "handoff", "result": {"summary": "plain answer"'  cat "$T/cg5.out"
+check "handoff saved"          "plain answer"  python3 -I -c '
+import glob, sys
+fs = glob.glob(sys.argv[1] + "/**/handoff-*.md", recursive=True)
+print(open(fs[0]).read() if fs else "no handoff file")' "$T/cg5"
 # overflow: the ladder skips handoff, shake finds nothing, the soft summary commits and the turn retries
 cagent "$T/cg2" $'modelRoles:\n  default: mock/mock-1\ncompaction:\n  asyncEnabled: false\n  keepRecentTokens: 10'
 OMC_CODING_AGENT_DIR="$T/cg2" "${CR[@]}" '{"type":"prompt","message":"say:first answer here"}' \
