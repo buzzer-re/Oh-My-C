@@ -608,4 +608,7 @@ if script --version 2>/dev/null | grep -q util-linux; then
     rm -f "$T/agent/config.yml"
     check "error signals" "signals ok"  python3 -I "$ROOT/tests/e2e/signals_check.py" "$T/sig2.out" error
 fi
+# editor I/O (WP-6) under a pty: Ctrl+G, Ctrl+R, paste chip / menu, raw paste, `#` actions and refs, `@` mentions
+mkdir -p "$T/eio"
+check "editor io" "editor io ok"  python3 -I "$ROOT/tests/e2e/editor_io.py" "$B" "$T/req.jsonl" "$ROOT/tests/e2e/fake_editor.sh" "$T/eio"
 exit $fail
