@@ -600,3 +600,39 @@ void plugin_skills_legacy(const plugin_roots_t *roots, discovery_t *d) {
         json_free(market);
     }
 }
+
+void plugin_commands_each(const plugin_roots_t *roots, plugin_cmd_fn fn, void *ud) {
+    /* claude-plugins loadSlashCommands: allowedRoots(ctx, "other") (standard roots allowed, invalid ones not),
+     * resolvePluginDir(manifestKeys: commands, slash-commands; fallback commands/, includeFallback false) */
+    bool user_enabled = provider_user_source_enabled("claude-plugins") || provider_user_source_enabled("claude");
+    for (size_t r = 0; r < roots->n; r++) {
+        const plugin_root_t *root = &roots->v[r];
+        if (!user_enabled && !root->project && root->from_claude) continue;
+        char *real_root, *pname;
+        root_kind_t kind = classify_root(root->path, &real_root, &pname);
+        free(real_root);
+        free(pname);
+        if (kind == ROOT_INVALID) continue;
+        char *mp = path_join(root->path, ".claude-plugin/plugin.json");
+        json_t *manifest = read_json_file(mp);
+        free(mp);
+        strvec_t configured = {0};
+        manifest_paths(manifest, "commands", &configured);
+        if (!configured.n) manifest_paths(manifest, "slash-commands", &configured);
+        strvec_t dirs = {0};
+        if (!configured.n) {
+            strvec_push_own(&dirs, path_join(root->path, "commands"));
+        } else {
+            for (size_t i = 0; i < configured.n; i++) {
+                char *abs = path_abs(configured.v[i], root->path);
+                bool inside = !strcmp(abs, root->path) || (str_starts(abs, root->path) && abs[strlen(root->path)] == '/');
+                if (inside && !strvec_contains(&dirs, abs)) strvec_push(&dirs, abs);
+                free(abs);
+            }
+        }
+        for (size_t i = 0; i < dirs.n; i++) fn(ud, dirs.v[i], root->plugin, root->project);
+        strvec_free(&dirs);
+        strvec_free(&configured);
+        json_free(manifest);
+    }
+}

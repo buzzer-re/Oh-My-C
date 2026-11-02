@@ -235,8 +235,13 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
                 json_t *e = json_obj();
                 json_set_str(e, "type", "custom_message");
                 json_set_str(e, "customType", ctype);
-                json_set_str(e, "content", txt);
-                json_set_bool(e, "display", false);
+                const json_t *mc = json_get(ev->message, "content"), *blk;
+                bool has_image = false;
+                json_arr_foreach(mc, bi, blk) has_image |= str_eq(json_get_str(blk, "type"), "image");
+                /* a user-invoked skill with attachments keeps its content blocks */
+                if (has_image && str_eq(ctype, "skill-prompt")) json_set(e, "content", json_clone(mc));
+                else json_set_str(e, "content", txt);
+                json_set_bool(e, "display", json_get_bool(ev->message, "display", false));
                 if (det) json_set(e, "details", json_clone(det));
                 if (attr) json_set_str(e, "attribution", attr);
                 session_append_entry(a->session, e);
@@ -1230,6 +1235,10 @@ app_t *app_create(const app_opts_t *o, char **err) {
     a->evalhost = evalhost_new(a);
     a->env->eval_bridge = app_eval_bridge;
     discover_all(a->cwd, &a->disc, o->no_context_files, o->no_skills, o->no_rules);
+    if (!o->subagent) { /* discoverSlashCommands / discoverPromptTemplates (top-level sessions take user input) */
+        commands_load(a->cwd, &a->file_cmds);
+        prompt_templates_load(a->cwd, &a->prompt_tpls);
+    }
     a->env->disc = &a->disc;
     a->ttsr = ttsr_new(&a->disc);
     if (o->mcp) {
@@ -1339,6 +1348,8 @@ void app_free(app_t *a) {
     if (a->owns_lsp) lsp_manager_free(a->lsp);
     dap_manager_free(a->dap);
     discovery_free(&a->disc);
+    commands_free(&a->file_cmds);
+    prompt_templates_free(&a->prompt_tpls);
     free(a->cwd);
     free(a->sys_custom);
     free(a->sys_append);
@@ -2610,6 +2621,157 @@ int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
         json_free(msgs);
         return 0;
     }
+    int rc = run_guarded(a, msgs);
+    if (rc == 0) {
+        maybe_title(a);
+        maybe_auto_compact(a);
+    }
+    return rc;
+}
+
+/* ---------- non-builtin slash commands ---------- */
+
+/* the MCP prompt command (buildMCPPromptCommands entry, owned) named by "/<name> ..." */
+static json_t *mcp_command_for(app_t *a, const char *text, char **args) {
+    *args = NULL;
+    if (!a->mcp || !text || text[0] != '/') return NULL;
+    char *name;
+    if (!commands_parse_invocation(text, &name, args)) return NULL;
+    json_t *all = mcp_prompt_commands(a->mcp), *c, *hit = NULL;
+    json_arr_foreach(all, i, c) if (!hit && str_eq(json_get_str(c, "name"), name)) hit = json_clone(c);
+    json_free(all);
+    free(name);
+    if (!hit) {
+        free(*args);
+        *args = NULL;
+    }
+    return hit;
+}
+
+bool app_is_mcp_prompt_command(app_t *a, const char *text) {
+    char *args;
+    json_t *c = mcp_command_for(a, text, &args);
+    free(args);
+    json_free(c);
+    return c != NULL;
+}
+
+char *app_expand_input(app_t *a, const char *text, bool mcp) {
+    char *cur = xstrdup(text ? text : "");
+    if (cur[0] == '/' && mcp) {
+        /* #tryExecuteCustomCommand: `key=value` args become the prompt's arguments; a failure or empty
+         * result consumes the input */
+        char *args;
+        json_t *c = mcp_command_for(a, cur, &args);
+        if (c) {
+            strvec_t av = commands_parse_args(args);
+            json_t *pa = json_obj();
+            for (size_t i = 0; i < av.n; i++) {
+                const char *eq = strchr(av.v[i], '=');
+                if (!eq || eq == av.v[i]) continue;
+                char *k = xstrndup(av.v[i], (size_t)(eq - av.v[i]));
+                json_set_str(pa, k, eq + 1);
+                free(k);
+            }
+            strvec_free(&av);
+            char *err = NULL;
+            char *r = mcp_run_prompt(a->mcp, json_get_str(c, "server"), json_get_str(c, "prompt"), pa, &err);
+            if (err) notice(a, "error", "Extension \"custom-command:%s\" error: %s", json_get_str(c, "name"), err);
+            free(err);
+            free(args);
+            json_free(c);
+            free(cur);
+            if (!r || !*r) {
+                free(r);
+                return NULL;
+            }
+            cur = r;
+        }
+    }
+    if (cur[0] == '/') {
+        char *r = commands_expand(&a->file_cmds, cur);
+        if (r) {
+            free(cur);
+            cur = r;
+        }
+    }
+    char *t = prompt_templates_expand(&a->prompt_tpls, cur);
+    if (t) {
+        free(cur);
+        cur = t;
+    }
+    return cur;
+}
+
+char *app_expand_templates(app_t *a, const char *text) {
+    char *t = prompt_templates_expand(&a->prompt_tpls, text);
+    return t ? t : xstrdup(text ? text : "");
+}
+
+const skill_t *app_skill_command(app_t *a, const char *text, skill_invocation_t *inv) {
+    memset(inv, 0, sizeof *inv);
+    if (!settings_bool("skills.enableSkillCommands", true)) return NULL;
+    if (!skill_parse_invocation(text, inv)) return NULL;
+    const skill_t *s = discovery_find_skill(&a->disc, inv->name);
+    if (!s) skill_invocation_free(inv);
+    return s;
+}
+
+json_t *app_skill_message(app_t *a, const char *text, json_t *images, char **err) {
+    *err = NULL;
+    skill_invocation_t inv;
+    const skill_t *s = app_skill_command(a, text, &inv);
+    if (!s) {
+        json_free(images);
+        return NULL;
+    }
+    char *message;
+    json_t *details;
+    if (skill_build_user_prompt(s, &inv, &message, &details, err) != 0) {
+        skill_invocation_free(&inv);
+        json_free(images);
+        return NULL;
+    }
+    json_t *content = json_arr();
+    json_push(content, text_block(message));
+    json_t *norm = ai_normalize_images(images, a->model), *img;
+    json_arr_foreach(norm, i, img) json_push(content, json_clone(img));
+    json_free(norm);
+    json_free(images);
+    json_t *m = msg_user_content(content);
+    json_set_str(m, "customType", "skill-prompt");
+    json_set_bool(m, "display", true);
+    json_set(m, "details", details);
+    json_set_str(m, "attribution", "user");
+    free(message);
+    skill_invocation_free(&inv);
+    return m;
+}
+
+int app_prompt_skill(app_t *a, json_t *msg) {
+    app_plan_note_user_turn(a);
+    app_plan_yolo_arm(a);
+    memory_take_prompt_refresh(a);
+    maybe_restore_primary(a);
+    guards_reset_cycle(a);
+    char *text = ai_message_text(msg);
+    const char *args = json_get_str(json_get(msg, "details"), "args");
+    json_t *msgs = json_arr();
+    json_t *pr = app_plan_reference_message(a);
+    if (pr) json_push(msgs, pr);
+    json_t *gm = app_goal_context_message(a);
+    if (gm) json_push(msgs, gm);
+    /* magic keywords read the skill's user args (#dispatchCustomPrompt) */
+    json_t *kn = keywords_notices(a, args ? args : ""), *k;
+    json_arr_foreach(kn, i, k) json_push(msgs, json_clone(k));
+    json_free(kn);
+    json_push(msgs, msg);
+    if (!apply_auto_thinking(a, text)) {
+        free(text);
+        json_free(msgs);
+        return 0;
+    }
+    free(text);
     int rc = run_guarded(a, msgs);
     if (rc == 0) {
         maybe_title(a);

@@ -41,6 +41,13 @@ mcp_manager_t *mcp_default_manager(void);
  * *server, or -1 with an owned *err listing the available resources. */
 int mcp_read_resource(mcp_manager_t *m, const char *uri, char **text, char **server, char **err);
 
+/* buildMCPPromptCommands: [{name: "<server>:<prompt>", description, server, prompt}] for every connected
+ * server's prompts/list catalog (owned) */
+json_t *mcp_prompt_commands(mcp_manager_t *m);
+/* executePrompt: prompts/get with `args` (owned object, may be NULL); the text / resource-text parts of
+ * every message joined by blank lines (owned), or NULL (*err set on a request failure) */
+char *mcp_run_prompt(mcp_manager_t *m, const char *server, const char *prompt, json_t *args, char **err);
+
 /* low-level */
 json_t *mcp_request(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, char **err);
 char *mcp_tool_name(const char *server, const char *tool); /* owned */

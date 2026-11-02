@@ -551,8 +551,14 @@ static void emit_entry(json_t *out, const json_t *e) {
         json_t *m = json_obj();
         /* attributed custom messages (image-attachment notices) replay as omp's developer turns */
         const char *attr = json_get_str(e, "attribution");
-        json_set_str(m, "role", attr ? "developer" : "user");
+        /* isUserInvokedSkillPrompt: a /skill: invocation replays as the user's own turn */
+        bool skill = str_eq(json_get_str(e, "customType"), "skill-prompt") && str_eq(attr, "user");
+        json_set_str(m, "role", attr && !skill ? "developer" : "user");
         if (attr) json_set_str(m, "attribution", attr);
+        if (skill) {
+            json_set_bool(m, "display", true);
+            if (json_get(e, "details")) json_set(m, "details", json_clone(json_get(e, "details")));
+        }
         json_t *c = json_get(e, "content");
         if (attr && json_is_str(c)) {
             json_t *arr = json_arr(), *tb = json_obj();

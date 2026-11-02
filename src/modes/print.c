@@ -87,7 +87,11 @@ int run_print_mode(app_t *a, const print_opts_t *o) {
     guards_disable_stop_reminders(a); /* omp print mode: todo reminders never start extra turns */
     for (size_t i = 0; i < o->messages.n; i++) {
         size_t before = json_len(a->agent->messages);
-        app_prompt(a, o->messages.v[i], NULL);
+        /* session.prompt: MCP prompt / file / template commands expand (skill commands do not run here) */
+        char *x = app_expand_input(a, o->messages.v[i], true);
+        if (!x) continue;
+        app_prompt(a, x, NULL);
+        free(x);
         /* advisor notes (and goal continuations when "print" is enabled) extend the run before printing */
         const char *prev = NULL;
         for (int guard = 0; guard < 50; guard++) {

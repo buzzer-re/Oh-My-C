@@ -4,6 +4,7 @@
 #include "coding/advisor.h"
 #include "coding/memory.h"
 #include "config/settings.h"
+#include "mcp/mcp.h"
 #include "core/embed.h"
 #include "session/dump.h"
 #include "session/session.h"
@@ -639,6 +640,22 @@ void slash_result_free(slash_result_t *res) {
     memset(res, 0, sizeof *res);
 }
 
+static void append_command(json_t *arr, strvec_t *seen, const char *name, const char *desc, const char *hint,
+                           const char *source) {
+    if (!name || strvec_contains(seen, name)) return;
+    strvec_push(seen, name);
+    json_t *o = json_obj();
+    json_set_str(o, "name", name);
+    json_set_str(o, "description", desc ? desc : "");
+    if (hint) {
+        json_t *in = json_obj();
+        json_set_str(in, "hint", hint);
+        json_set(o, "input", in);
+    }
+    json_set_str(o, "source", source);
+    json_push(arr, o);
+}
+
 json_t *slash_available_commands(app_t *a) {
     (void)a;
     json_t *arr = json_arr();
@@ -675,6 +692,37 @@ json_t *slash_available_commands(app_t *a) {
         json_set_str(o, "source", "builtin");
         json_push(arr, o);
     }
+    if (!a) return arr;
+    /* appendCommand: first name wins; builtin aliases are reserved too */
+    strvec_t seen = {0};
+    for (size_t i = 0; i < slash_count(); i++) {
+        const slash_cmd_t *c = g_reg.v[i];
+        if (!c->handle) continue;
+        strvec_push(&seen, c->name);
+        for (size_t k = 0; k < c->aliases.n; k++) strvec_push(&seen, c->aliases.v[k]);
+    }
+#define APPEND(NAME, DESC, HINT, SOURCE) append_command(arr, &seen, NAME, DESC, HINT, SOURCE)
+    if (settings_bool("skills.enableSkillCommands", true)) {
+        for (size_t i = 0; i < a->disc.skills.n; i++) {
+            const skill_t *s = &a->disc.skills.v[i];
+            char *name = xasprintf("skill:%s", s->name);
+            char *desc = s->description && *s->description ? xstrdup(s->description) : xasprintf("Run %s skill", s->name);
+            APPEND(name, desc, "arguments", "skill");
+            free(desc);
+            free(name);
+        }
+    }
+    if (a->mcp) {
+        json_t *mc = mcp_prompt_commands(a->mcp), *c;
+        json_arr_foreach(mc, i, c) APPEND(json_get_str(c, "name"), json_get_str(c, "description"), "arguments", "mcp_prompt");
+        json_free(mc);
+    }
+    for (size_t i = 0; i < a->file_cmds.n; i++) {
+        const file_cmd_t *f = &a->file_cmds.v[i];
+        APPEND(f->name, f->description, f->argument_hint, "file");
+    }
+#undef APPEND
+    strvec_free(&seen);
     return arr;
 }
 

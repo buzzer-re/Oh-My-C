@@ -670,6 +670,9 @@ bool agent_msg_user_authored(const json_t *msg) {
 }
 
 char *agent_queued_text(const json_t *msg) {
+    /* a queued /skill: invocation shows its chip text (queueChipText), never the expanded skill body */
+    const char *chip = json_get_str(json_get(msg, "details"), "prompt");
+    if (chip && str_eq(json_get_str(msg, "customType"), "skill-prompt")) return xstrdup(chip);
     const json_t *c = json_get(msg, "content");
     if (json_is_str(c)) return xstrdup(json_sv(c));
     const json_t *b;

@@ -34,4 +34,9 @@ void plugin_skills_standard(const plugin_roots_t *roots, discovery_t *d);
 /* Legacy Claude Code plugin skills (`skills/` + manifest-declared dirs) for non-standard roots */
 void plugin_skills_legacy(const plugin_roots_t *roots, discovery_t *d);
 
+/* claude-plugins slash-command sources: for each admitted root, every commands dir (or single .md file)
+ * named by the manifest's `commands` / `slash-commands`, else <root>/commands; `plugin` prefixes names */
+typedef void (*plugin_cmd_fn)(void *ud, const char *path, const char *plugin, bool project);
+void plugin_commands_each(const plugin_roots_t *roots, plugin_cmd_fn fn, void *ud);
+
 #endif

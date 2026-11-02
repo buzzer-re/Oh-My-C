@@ -4,6 +4,7 @@
 
 #include "agent/agent.h"
 #include "config/model_resolver.h"
+#include "coding/commands.h"
 #include "coding/discovery.h"
 #include "core/proc.h"
 #include "session/session.h"
@@ -43,6 +44,8 @@ struct app {
     session_t *session;
     tool_env_t *env;
     discovery_t disc;
+    file_cmds_t file_cmds;     /* `commands/<name>.md` slash commands + bundled /init (commands.c) */
+    prompt_tpls_t prompt_tpls; /* prompts/<name>.md templates */
     const ai_model_t *model;
     ai_effort_t thinking;
     char *cwd;
@@ -140,6 +143,24 @@ int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices);
 int app_prompt_attachments(app_t *a, const char *text, json_t *attachments);
 /* steer a running agent with a composer submission and its attachments (owned) */
 void app_steer_attachments(app_t *a, const char *text, json_t *attachments);
+/* ---------- non-builtin slash commands (AgentSession.prompt expansion, skill commands) ---------- */
+/* #tryExecuteCustomCommand (MCP prompt commands `<server>:<prompt> key=value`), expandSlashCommand (file
+ * commands), expandPromptTemplate. Returns the text to send (owned; a copy of `text` when nothing matched),
+ * or NULL when a command consumed the input (an MCP prompt that produced no text). `mcp` false skips MCP
+ * prompt commands (UI-thread previews). */
+char *app_expand_input(app_t *a, const char *text, bool mcp);
+/* steer()/followUp(): only prompt templates expand (owned) */
+char *app_expand_templates(app_t *a, const char *text);
+/* the MCP prompt command named by "/<name> ..." exists */
+bool app_is_mcp_prompt_command(app_t *a, const char *text);
+/* ["skill:<name>" ...] are runnable (skills.enableSkillCommands) and `text` invokes a loaded skill: the skill
+ * (borrowed) and the parsed invocation (owned, free with skill_invocation_free); NULL otherwise */
+const skill_t *app_skill_command(app_t *a, const char *text, skill_invocation_t *inv);
+/* the user-invoked `skill-prompt` custom message for `text` (owned; images appended to its content), or
+ * NULL with *err ("Failed to load skill" cause) */
+json_t *app_skill_message(app_t *a, const char *text, json_t *images, char **err);
+/* promptCustomMessage for a skill message (owned): runs the turn (blocking) */
+int app_prompt_skill(app_t *a, json_t *msg);
 /* run a hidden prompt (not shown in transcripts), e.g. goal continuations; custom_type tags the session entry */
 int app_prompt_hidden(app_t *a, const char *text, const char *custom_type);
 int app_set_model(app_t *a, const char *pattern, char **err);

@@ -348,7 +348,38 @@ static void *prompt_thread(void *ud) {
         }
     }
     slash_result_t sr = {0};
-    if (sb_cstr(&text)[0] == '/') slash_execute_text(s->app, sb_cstr(&text), acp_command_output, s, &sr);
+    /* #tryRunSkillCommand first, then executeAcpBuiltinSlashCommand, then session.prompt (which expands MCP
+     * prompt, file and template commands) */
+    json_t *skill_msg = NULL;
+    {
+        skill_invocation_t inv;
+        if (app_skill_command(s->app, sb_cstr(&text), &inv)) {
+            skill_invocation_free(&inv);
+            char *serr = NULL;
+            skill_msg = app_skill_message(s->app, sb_cstr(&text), json_len(images) ? json_clone(images) : NULL, &serr);
+            if (!skill_msg) {
+                reply_err(s->prompt_req_id, -32603, serr ? serr : "Failed to load skill");
+                free(serr);
+                json_free(images);
+                sb_free(&text);
+                json_free(s->prompt_req_id);
+                json_free(s->prompt_content);
+                s->prompt_req_id = NULL;
+                s->prompt_content = NULL;
+                s->running = false;
+                return NULL;
+            }
+        }
+    }
+    char *expanded = NULL;
+    if (!skill_msg && sb_cstr(&text)[0] == '/') slash_execute_text(s->app, sb_cstr(&text), acp_command_output, s, &sr);
+    if (!skill_msg && sr.kind != SLASH_CONSUMED) {
+        expanded = app_expand_input(s->app, sb_cstr(&text), true);
+        if (!expanded) { /* consumed by a custom command: no model call */
+            sr.kind = SLASH_CONSUMED;
+            sr.agent_invoked = false;
+        }
+    }
     if (sr.kind == SLASH_CONSUMED && !sr.agent_invoked) {
         /* a local builtin: the turn ends without a model call */
         json_free(images);
@@ -364,8 +395,12 @@ static void *prompt_thread(void *ud) {
         slash_result_free(&sr);
         return NULL;
     }
-    if (sr.kind == SLASH_CONSUMED) json_free(images);
-    else app_prompt(s->app, sb_cstr(&text), json_len(images) ? images : (json_free(images), NULL));
+    if (skill_msg) {
+        json_free(images);
+        app_prompt_skill(s->app, skill_msg);
+    } else if (sr.kind == SLASH_CONSUMED) json_free(images);
+    else app_prompt(s->app, expanded, json_len(images) ? images : (json_free(images), NULL));
+    free(expanded);
     slash_result_free(&sr);
     sb_free(&text);
     const json_t *last = last_assistant(s->app->agent->messages);

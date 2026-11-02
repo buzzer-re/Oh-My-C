@@ -44,6 +44,7 @@ struct rpc {
     json_t *images;
     const char *hidden; /* custom type when the run is a hidden wake-up (async-result) */
     bool slash;         /* the prompt is a builtin slash command (executeAcpBuiltinSlashCommand) */
+    json_t *skill_msg;  /* the prompt invokes a skill (dispatchRpcSkillPrompt): its built custom message */
     pthread_mutex_t mu;
     /* /btw (rpc-btw.ts) */
     pthread_mutex_t btw_mu;
@@ -312,7 +313,35 @@ again:;
             return NULL;
         }
     } else if (r->hidden) app_prompt_hidden(r->a, r->text, r->hidden);
-    else app_prompt(r->a, r->text, r->images);
+    else if (r->skill_msg) {
+        json_t *m = r->skill_msg;
+        r->skill_msg = NULL;
+        app_prompt_skill(r->a, m);
+    } else {
+        /* AgentSession.prompt: custom (MCP prompt) / file commands / prompt templates expand first */
+        char *x = app_expand_input(r->a, r->text, true);
+        if (!x) { /* consumed locally: prompt_result agentInvoked false (completeLocal) */
+            json_free(r->images);
+            r->images = NULL;
+            json_t *res = json_obj();
+            json_set_str(res, "type", "prompt_result");
+            if (r->prompt_id) json_set_str(res, "id", r->prompt_id);
+            json_set_bool(res, "agentInvoked", false);
+            json_set_str(res, "status", "completed");
+            emit(r, res);
+            json_free(res);
+            pthread_mutex_lock(&r->mu);
+            free(r->text);
+            r->text = NULL;
+            free(r->prompt_id);
+            r->prompt_id = NULL;
+            r->running = false;
+            pthread_mutex_unlock(&r->mu);
+            return NULL;
+        }
+        app_prompt(r->a, x, r->images);
+        free(x);
+    }
     r->images = NULL;
     const json_t *last = last_assistant(r->a->agent->messages);
     const char *stop = json_get_str(last, "stopReason");
@@ -756,11 +785,36 @@ static void handle(rpc_t *r, json_t *cmd) {
                 usleep(100 * 1000);
             }
         }
+        /* dispatchRpcSkillPrompt: a runnable /skill: invocation is read before the command is acknowledged */
+        json_t *skill_msg = NULL;
+        {
+            skill_invocation_t inv;
+            if (app_skill_command(a, msg, &inv)) {
+                skill_invocation_free(&inv);
+                char *serr = NULL;
+                json_t *imgs = json_get_arr(cmd, "images");
+                skill_msg = app_skill_message(a, msg, imgs ? json_clone(imgs) : NULL, &serr);
+                if (!skill_msg) {
+                    respond(r, id, type, false, NULL, serr ? serr : "Failed to load skill");
+                    free(serr);
+                    return;
+                }
+            }
+        }
         pthread_mutex_lock(&r->mu);
         if (r->running) {
             pthread_mutex_unlock(&r->mu);
             const char *behav = json_get_str(cmd, "streamingBehavior");
-            json_t *m = msg_user_content(content_with_images(msg, json_get_arr(cmd, "images")));
+            json_t *m = skill_msg;
+            if (!m) {
+                char *x = app_expand_input(a, msg ? msg : "", true);
+                if (!x) {
+                    respond(r, id, type, true, NULL, NULL);
+                    return;
+                }
+                m = msg_user_content(content_with_images(x, json_get_arr(cmd, "images")));
+                free(x);
+            }
             if (str_eq(behav, "followUp")) agent_follow_up(a->agent, m);
             else agent_steer(a->agent, m);
             respond(r, id, type, true, NULL, NULL);
@@ -773,9 +827,10 @@ static void handle(rpc_t *r, json_t *cmd) {
         r->text = xstrdup(msg ? msg : "");
         r->prompt_id = id ? xstrdup(id) : NULL;
         json_t *imgs = json_get_arr(cmd, "images");
-        r->images = imgs ? json_clone(imgs) : NULL;
-        slash_parsed_t sp;
-        const slash_cmd_t *sc = slash_parse(r->text, &sp) ? slash_lookup(sp.name) : NULL;
+        r->images = imgs && !skill_msg ? json_clone(imgs) : NULL;
+        r->skill_msg = skill_msg;
+        slash_parsed_t sp = {0};
+        const slash_cmd_t *sc = !skill_msg && slash_parse(r->text, &sp) ? slash_lookup(sp.name) : NULL;
         if (sp.name) slash_parsed_free(&sp);
         r->slash = sc && sc->handle;
         pthread_mutex_unlock(&r->mu);
@@ -789,7 +844,11 @@ static void handle(rpc_t *r, json_t *cmd) {
             respond(r, id, type, false, NULL, "failed to start agent thread");
         }
     } else if (!strcmp(type, "steer") || !strcmp(type, "follow_up")) {
-        json_t *m = msg_user_content(content_with_images(json_get_str(cmd, "message"), json_get_arr(cmd, "images")));
+        /* steer() / followUp(): prompt templates expand (no slash or skill commands) */
+        const char *raw = json_get_str(cmd, "message");
+        char *x = app_expand_templates(a, raw ? raw : "");
+        json_t *m = msg_user_content(content_with_images(x, json_get_arr(cmd, "images")));
+        free(x);
         if (!strcmp(type, "steer")) agent_steer(a->agent, m);
         else agent_follow_up(a->agent, m);
         respond(r, id, type, true, NULL, NULL);
@@ -1114,8 +1173,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         if (!strcmp(type, "abort_branch_summary")) app_abort_branch_summary(a);
         respond(r, id, type, true, NULL, NULL);
     } else if (!strcmp(type, "get_available_commands")) {
-        /* buildAvailableSlashCommands: builtins with a text-mode handler (skill commands are not
-         * advertised: nothing executes `/skill:<name>` yet) */
+        /* buildAvailableSlashCommands: builtins with a text-mode handler, skill, MCP prompt and file commands */
         json_t *arr = slash_available_commands(a);
         json_t *d = json_obj();
         json_set(d, "commands", arr);

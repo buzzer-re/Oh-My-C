@@ -40,6 +40,7 @@ struct mcp_server {
     VEC(pending_t *) pending;
     int64_t next_id;
     json_t *tools;      /* tools/list result array */
+    json_t *prompts;    /* prompts/list result array (servers advertising the prompts capability), or NULL */
     char *instructions;
     char *error;
     char *www_auth; /* last 401 challenge (OAuth discovery) */
@@ -544,6 +545,7 @@ static void server_free(mcp_server_t *s) {
     if (s->reader_started) pthread_join(s->reader, NULL);
     json_free(s->cfg);
     json_free(s->tools);
+    json_free(s->prompts);
     http_headers_free(&s->headers);
     free(s->name);
     free(s->url);
@@ -557,6 +559,8 @@ static void server_free(mcp_server_t *s) {
     pthread_cond_destroy(&s->cv);
     free(s);
 }
+
+static json_t *list_all(mcp_server_t *s, const char *method, const char *key);
 
 static int server_connect(mcp_server_t *s) {
     char *err = NULL;
@@ -623,6 +627,7 @@ static int server_connect(mcp_server_t *s) {
     }
     if (json_get_str(init, "instructions") && json_get_bool(s->cfg, "instructions", true))
         s->instructions = xstrdup(json_get_str(init, "instructions"));
+    bool has_prompts = json_get(json_get(init, "capabilities"), "prompts") != NULL; /* serverSupportsPrompts */
     s->connected = true;
     json_free(init);
     notify(s, "notifications/initialized");
@@ -646,6 +651,8 @@ static int server_connect(mcp_server_t *s) {
         if (!cursor) break;
     }
     free(cursor);
+    /* #loadServerResourcesAndPrompts: best-effort prompt catalog (MCP prompts become slash commands) */
+    if (has_prompts) s->prompts = list_all(s, "prompts/list", "prompts");
     return 0;
 }
 
@@ -1056,4 +1063,73 @@ int mcp_read_resource(mcp_manager_t *m, const char *uri, char **text, char **ser
     *text = sb_detach(&b);
     *server = xstrdup(target->name);
     return 0;
+}
+
+/* ---------- prompts as slash commands (sdk.ts buildMCPPromptCommands) ---------- */
+
+json_t *mcp_prompt_commands(mcp_manager_t *m) {
+    json_t *out = json_arr();
+    for (size_t i = 0; m && i < m->servers.n; i++) {
+        mcp_server_t *s = m->servers.v[i];
+        if (!s->connected) continue;
+        json_t *p;
+        json_arr_foreach(s->prompts, k, p) {
+            const char *pn = json_get_str(p, "name");
+            if (!pn) continue;
+            json_t *c = json_obj();
+            char *name = xasprintf("%s:%s", s->name, pn);
+            json_set_str(c, "name", name);
+            free(name);
+            const char *d = json_get_str(p, "description");
+            char *desc = d ? xstrdup(d) : xasprintf("MCP prompt from %s", s->name);
+            json_set_str(c, "description", desc);
+            free(desc);
+            json_set_str(c, "server", s->name);
+            json_set_str(c, "prompt", pn);
+            json_push(out, c);
+        }
+    }
+    return out;
+}
+
+char *mcp_run_prompt(mcp_manager_t *m, const char *server, const char *prompt, json_t *args, char **err) {
+    *err = NULL;
+    mcp_server_t *s = NULL;
+    for (size_t i = 0; m && i < m->servers.n && !s; i++)
+        if (m->servers.v[i]->connected && !strcmp(m->servers.v[i]->name, server)) s = m->servers.v[i];
+    if (!s) {
+        json_free(args);
+        return NULL; /* executePrompt: no connection, no result */
+    }
+    json_t *p = json_obj();
+    json_set_str(p, "name", prompt);
+    if (args && json_len(args)) json_set(p, "arguments", args);
+    else json_free(args);
+    json_t *res = mcp_request(s, "prompts/get", p, s->timeout_ms, err);
+    if (!res) return NULL;
+    sb_t b = SB_INIT;
+    int parts = 0;
+    json_t *msg;
+    json_arr_foreach(json_get_arr(res, "messages"), i, msg) {
+        json_t *content = json_get(msg, "content");
+        json_t *one = NULL;
+        if (json_is_obj(content)) {
+            one = json_arr();
+            json_push(one, json_clone(content));
+            content = one;
+        }
+        json_t *item;
+        json_arr_foreach(content, k, item) {
+            const char *t = json_get_str(item, "type");
+            const char *text = NULL;
+            if (str_eq(t, "text")) text = json_get_str(item, "text");
+            else if (str_eq(t, "resource")) text = json_get_str(json_get(item, "resource"), "text");
+            if (!text || (str_eq(t, "resource") && !*text)) continue;
+            if (parts++) sb_append(&b, "\n\n");
+            sb_append(&b, text);
+        }
+        json_free(one);
+    }
+    json_free(res);
+    return sb_detach(&b);
 }

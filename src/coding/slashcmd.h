@@ -82,8 +82,9 @@ void slash_result_free(slash_result_t *res);
 bool slash_invokes_agent(app_t *a, const char *name);
 
 /* buildAvailableSlashCommands (RPC `get_available_commands` / `available_commands_update`):
- * [{name, aliases?, description, input?:{hint}, subcommands?, source:"builtin"}] for builtins with a
- * text handler (owned) */
+ * [{name, aliases?, description, input?:{hint}, subcommands?, source}] for builtins with a text handler
+ * ("builtin"), then `skill:<name>` ("skill", skills.enableSkillCommands), MCP prompts ("mcp_prompt") and
+ * file commands ("file"); the first name wins and builtin aliases are reserved (owned) */
 json_t *slash_available_commands(app_t *a);
 /* toAcpAvailableCommands: [{name, description, input?}] (owned) */
 json_t *slash_acp_available_commands(app_t *a);
