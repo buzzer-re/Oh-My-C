@@ -327,7 +327,7 @@ static void hs_render(tui_component_t *c, int width, strvec_t *out) {
     hs_t *h = (hs_t *)c;
     strvec_push(out, "");
     /* the panel holds focus, so the nested Input paints its own (inverse) cursor cell */
-    strvec_push_own(out, ui_input_render(&h->input, "> ", width, false, false));
+    strvec_push_own(out, ui_input_render(&h->input, "> ", width, false));
     strvec_push(out, "");
     hs_render_list(h, width, out);
     strvec_push(out, "");

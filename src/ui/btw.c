@@ -1420,7 +1420,7 @@ static void hist_render(tui_component_t *cp, int width, strvec_t *out) {
             free(tr);
         }
         char *prompt = sfg(TUI_TC_ACCENT, "Follow up: ");
-        strvec_push_own(&composer, ui_input_render(&h->input, prompt, inner, true, c->u->editor->use_terminal_cursor));
+        strvec_push_own(&composer, ui_input_render_hw(&h->input, prompt, inner, true, c->u->editor->use_terminal_cursor));
         free(prompt);
     }
     int body_h = MAX(h->composing ? 0 : 1, height - chrome - (int)composer.n);

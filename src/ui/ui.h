@@ -123,25 +123,11 @@ char *ui_chip_label(int n);
 /* `[Image #N, WxH]` markers as chips; `reset` (may be NULL: plain labels) resumes the surrounding color */
 char *ui_collapse_image_markers(const char *text, const char *reset);
 
-/* input.c - single-line text input (components/input.ts) */
-typedef struct {
-    sb_t v;
-    size_t cur; /* byte offset */
-} ui_input_t;
-/* editing keys; true when handled (Enter / Escape / Up / Down are left to the caller) */
-bool ui_input_key(ui_input_t *in, const tui_key_t *k);
-void ui_input_insert(ui_input_t *in, const char *t); /* at the cursor; newlines/tabs become spaces */
-void ui_input_set(ui_input_t *in, const char *t);
-const char *ui_input_value(const ui_input_t *in);
-void ui_input_free(ui_input_t *in);
-/* `prompt` + the value windowed around the cursor cell, padded to width; owned */
-char *ui_input_render(const ui_input_t *in, const char *prompt, int width, bool focused, bool hw_cursor);
-
-/* hooksel.c - showHookSelector: options (label + optional description) in the composer's place; `cb` gets the
- * chosen index, -1 on cancel. `help` replaces the default controls hint (NULL = default). Title lines after the
- * first are accent detail rows. */
-void ui_hook_select(ui_t *u, const char *title, const char *const *labels, const char *const *descs, size_t n,
-                    const char *help, void (*cb)(void *ud, int choice), void *ud);
+/* hooksel.c - showHookSelector with option descriptions and a custom helpText (ui_hook_select in planreview.c
+ * covers plain label lists): options in the composer's place; `cb` gets the chosen index, -1 on cancel. `help`
+ * replaces the default controls hint (NULL = default). Title lines after the first are accent detail rows. */
+void ui_hook_select_desc(ui_t *u, const char *title, const char *const *labels, const char *const *descs, size_t n,
+                         const char *help, void (*cb)(void *ud, int choice), void *ud);
 
 /* histsearch.c - Ctrl+R prompt history search (overlays/history-search.ts) over prompt-history.jsonl */
 void ui_history_search(ui_t *u);

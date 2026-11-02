@@ -106,15 +106,14 @@ updates). Timers (`tui_add_timer`) drive spinners, smooth streaming reveal and l
   profile over the default profile's bindings (read only); omc has no profiles yet, so nothing passes
   an inherited dir.
 - `key_hook` (`modes/interactive.c`) dispatches every app action through `tui_kb()`: first the global
-  listeners (`app.thinking.toggle`, `app.display.reset`, `app.tools.expand`), then, while the
-  composer has focus, `CustomEditor.handleInput`'s order (paste image, suspend, model select / role
-  cycle, thinking cycle, interrupt, clear, exit, dequeue, copy prompt, plan, session actions,
-  follow-up, copy line, retry). `/hotkeys` (`ui_hotkeys_markdown`) is built from the live table like
-  omp's `buildHotkeysMarkdown`: unbound actions read `Disabled`, and exit keys split into a
-  forward-delete row and an exit row.
+  listeners (`app.thinking.toggle`, `app.history.search`, `app.editor.external`, `app.display.reset`,
+  `app.tools.expand`), then, while the composer has focus, `CustomEditor.handleInput`'s order (paste image,
+  raw paste, suspend, model select / role cycle, thinking cycle, interrupt, clear, exit, dequeue, copy
+  prompt, plan, session actions, follow-up, copy line, retry). `/hotkeys` (`ui_hotkeys_markdown`) is built
+  from the live table like omp's `buildHotkeysMarkdown`: unbound actions read `Disabled`, and exit keys
+  split into a forward-delete row and an exit row.
 - Not handled yet although bound (as in omp they still appear in `/hotkeys`): `app.model.selectTemporary`,
-  `app.tools.toggleVisibility`, `app.history.search`, `app.editor.external` (main composer),
-  `app.local.open`, `app.clipboard.pasteTextRaw`, `app.agents.hub`,
+  `app.tools.toggleVisibility`, `app.local.open`, `app.agents.hub`,
   `app.session.observe`, `app.tree.*`, `app.links.hint` and the speech actions; see
   [gaps.md](gaps.md) §2b. `app.approval.approve` is handled by the approval dialog (`ui/approval.c`).
 - Non-tty file descriptors are supported (tests): probes are skipped and the size defaults to 80×24.
@@ -129,9 +128,11 @@ updates). Timers (`tui_add_timer`) drive spinners, smooth streaming reveal and l
 
 The editor ports omp's `editor-component.ts`: word motion, an emacs kill ring (`kill-ring.ts`:
 consecutive kills accumulate, Ctrl+Y yanks, Alt+Y cycles older entries right after a yank),
-character jump (Ctrl+] / Ctrl+Alt+] then a character), undo (200 steps), history,
-large-paste markers (`[Paste #N, +L lines]`), slash-command and `@file` autocomplete with omp's
-ranking, and Enter-runs-command semantics. Slash completion also matches aliases (the alias is the
+character jump (Ctrl+] / Ctrl+Alt+] then a character), undo (200 steps; omp's `#insertCharacter`
+coalescing: a run of word characters is one step, a whitespace chunk and the word after it start new ones),
+history, large-paste markers (`[Paste #N, +L lines]`, kept for editors without a host hook such as the ask
+prompt), slash-command, `@file` and `#` autocomplete with omp's ranking (each refresh is a fresh list: the
+selection restarts at the top), and Enter-runs-command semantics. Slash completion also matches aliases (the alias is the
 row), completes arguments (`tui_ac_default_t.args`: subcommands, the live `/effort` levels) and paints
 dim ghost text after an end-of-line cursor (`tui_editor_ghost`: the selected item's remainder +
 usage, else the command's inline hint); Enter on an argument completion applies it and submits only
@@ -195,6 +196,8 @@ shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, 
 | `btw.c` | `/btw`: inline answer panel below the transcript (streams Markdown, Esc cancels then closes, `c` copy, `f` follow up, `b` branch), fullscreen BTW history (topic list + answer pane, follow-up composer, copy, cancel), the controller (session moves dispose it) | `controllers/btw-controller.ts`, `overlays/btw-panel.ts`, `overlays/btw-history-panel.ts` |
 | `ask.c` | the `ask` tool's dialog in the composer's place | `overlays/ask-dialog.ts`, `hook-editor.ts` |
 | `approval.c` | the tool-approval prompt in the composer's place: `Allow tool: <t>` panel, details (accent, one clipped row each, 8 rows then a scrollbar; `app.tools.expand` swaps in the full prompt wrapped, PgUp/PgDn scroll), choices (`☐ Remember across sessions` toggle + grants, `Approve` / `Approve Once`, `Approve <t> for this session`, `Deny`), key-hint footer; `app.approval.approve` (Ctrl+Enter / Ctrl+Q) approves, Esc denies, Enter and the approve key arm 500 ms after mount; the composer stays beneath it and takes typing: a draft turns Deny into `Deny and send message`, and the message sent with Enter is queued as steering (delivered first) and denies the call; the bridge blocks the tool thread (one dialog at a time; an abort or UI exit denies); the call reads as blocked (`kind=permission`) in the title / OSC 7501 and Warp gets `permission_request` / `permission_replied` | `overlays/approval-dialog.ts`, `controllers/extension-ui-controller.ts` (`showCollabAwareApproval`) |
+| `histsearch.c` | Ctrl+R prompt history search over `prompt-history.jsonl` | `overlays/history-search.ts`, `session/history-storage.ts` |
+| `hooksel.c`, `attach.c` | hook selector with option descriptions (the large-paste menu); attachment chips and band, image / large / raw paste | `overlays/hook-selector.ts`, `prompt/attachment-chips.ts`, `controllers/input-controller.ts` |
 | `overlays.c` | selector host, thinking selector, `/hotkeys` markdown | `overlays/thinking-selector.ts`, `hotkeys-markdown.ts` |
 | `report.c` | command reports: docked in the report slot (between the `/btw` panel and the banner) when the box fits the rows above the chrome below it (measured from the last frame, omp's `commandReportRows`), else a focused full-screen page on the alternate screen; Esc dismisses the docked one; transcript resets drop both. Also the full-screen sheet host for `/context` | `overlays/report-panel.ts`, `controllers/command-controller.ts` (`showCommandReport`) |
 | `context.c` | `/context` viewer: Overview (summary, occupancy map, legend) → category previews → entry page | `overlays/context-viewer*.ts`, `chrome/context-*.ts`, `session/context-view.ts` |
@@ -250,3 +253,42 @@ Ports of omp's input-controller image paste flow and `prompt/{composer-attachmen
 
 Not ported: Kitty-graphics thumbnails inside the cards (the icon fallback is what omp shows in terminals
 without Kitty Unicode placeholders), video contact-sheet attachments, chip hyperlinks.
+
+## Editor I/O (WP-6)
+
+- **External editor (Ctrl+G, `app.editor.external`)**: `ui_external_edit` (`modes/interactive.c`) ports
+  `getEditorCommand` (trimmed `$VISUAL`, else `$EDITOR`) and `openInEditor`: the text goes to
+  `$TMPDIR/omc-editor-XXXXXXXXXX<ext>`, `sh -c '<editor> "$1"' sh <file>` runs with the pane's stdio while the
+  TUI is stopped (a fullscreen page hands the alternate screen back first), a zero exit reads the file back,
+  and one trailing newline is trimmed unless the caller keeps it (plan files). The composer sends its expanded
+  text (chips expanded) as `.omp.md` and warns `No editor configured. Set $VISUAL or $EDITOR environment
+  variable.`; the ask dialog's "Other" / note prompts and the hook editor use `ui_dialog_external_edit`
+  (`.md`, silent without an editor, like `editDialogExternally`).
+- **History search (Ctrl+R, `ui/histsearch.c`)**: `overlays/history-search.ts` in the composer's place
+  (OverlayPanel `History`: the search Input with its inverse cursor cell, up to 10 rows centered on the
+  selection with a scrollbar column, query tokens in the accent color, the `pickerAge` flush right, the
+  `↑/↓ navigate · ⏎ select · ⎋ cancel` hints). omp's SQLite `HistoryStorage` is replaced by
+  `prompt-history.jsonl` folded the same way: one row per `normalizePrompt` form with its latest
+  submission's time and cwd, newest first; a query keeps rows containing every token (letters/digits,
+  case-insensitive), at most 100. Enter puts the prompt in the composer, Esc cancels.
+- **Large pastes (`ui/attach.c`)**: a marker-sized paste (> 10 lines or > 1000 chars) in the composer becomes a
+  text-attachment chip `📄 #N` (`tui_editor_insert_text_attachment`, numbered per draft, palette offset 2)
+  whose card in the attachment band shows the first 4 rows x 12 cells and `+N lines` / `N chars`; it expands
+  to the pasted text on submit. From `paste.largeMenuThreshold` lines (default 100, 0 = off) the large-paste
+  menu opens first (`ui_hook_select_desc`, `ui/hooksel.c`): `Attach as a wrapped block` (`<attachment>` …
+  `</attachment>` behind the chip), `Attach as local file` (`local://paste-N.md` in the session's local
+  root, `Saved N pasted lines to local://paste-N.md`) or `Paste inline` / Esc (the chip).
+- **Raw paste (Ctrl+Shift+V)**: the clipboard text (`pbpaste` / `wl-paste` / `xclip`) inserted as typed, no
+  chip or marker; `No text in clipboard to paste raw`, and the SSH clipboard notice over SSH.
+- **`#` prompt actions and GitHub references**: `#query` lists omp's seven actions (copy line / prompt,
+  undo, cursor to message or line start / end) ranked by `subsequenceScore` over label, key hint and
+  keywords; accepting removes the typed token and runs the action (`tui_editor_t.on_action`; undo uses
+  `undoPastTransientText`). A standalone `#123` (or `pr #123` / `issue #123`) offers `PR #123` / `Issue #123`
+  and inserts `pr://123 ` / `issue://123 `.
+- **`@` mentions (`tui/atmention.c`)**: ports `extractAtFilePrefix`, `#getFileSuggestions`,
+  `#getFuzzyFileSuggestions` and the native `fuzzyFind` scorer: a project-wide gitignore-aware walk (hidden
+  entries kept, `.git` / `node_modules` skipped, symlinked directories followed, 1.5 s deadline, reused for
+  2 s) scored by file name (exact / prefix / substring / fuzzy, by path when the query has a `/`,
+  directories +10), best 100 by score, depth, path; `@dir/query` scopes to that directory; a bare `@`, paths
+  outside the cwd and searches without hits list the directory. Files insert with a trailing space, paths
+  with spaces are quoted (`@"docs/my notes.md" `), directories keep completing.

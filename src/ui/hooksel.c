@@ -131,8 +131,8 @@ static void hook_sel_destroy(tui_component_t *c) {
 
 static const tui_component_vt HOOK_SEL_VT = {"hook-selector", hook_sel_render, hook_sel_key, NULL, hook_sel_destroy};
 
-void ui_hook_select(ui_t *u, const char *title, const char *const *labels, const char *const *descs, size_t n,
-                    const char *help, void (*cb)(void *ud, int choice), void *ud) {
+void ui_hook_select_desc(ui_t *u, const char *title, const char *const *labels, const char *const *descs, size_t n,
+                         const char *help, void (*cb)(void *ud, int choice), void *ud) {
     hook_sel_t *h = xcalloc(1, sizeof *h);
     tui_component_init(&h->base, &HOOK_SEL_VT);
     h->u = u;

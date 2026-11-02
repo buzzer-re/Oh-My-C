@@ -2049,7 +2049,13 @@ static bool he_key(tui_component_t *c, const tui_key_t *k) {
     if (tui_kb(k, "app.message.followUp")) he_finish(h, tui_editor_get_text(h->ed));
     else if (tui_kb(k, "app.interrupt")) he_finish(h, NULL);
     else if (tui_key_matches(k, "enter")) tui_editor_insert_text(h->ed, "\n"); /* hook style: Enter is a newline */
-    else tui_component_handle_key(&h->ed->base, k);
+    else if (tui_kb(k, "app.editor.external")) { /* #openExternalEditor via editDialogExternally */
+        char *cur = tui_editor_get_expanded_text(h->ed);
+        char *r = ui_dialog_external_edit(h->u, cur);
+        if (r && !h->done) tui_editor_set_text(h->ed, r);
+        free(r);
+        free(cur);
+    } else tui_component_handle_key(&h->ed->base, k);
     tui_component_request_render(c);
     return true;
 }

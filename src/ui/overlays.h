@@ -89,6 +89,8 @@ void ui_input_free(ui_input_t *in);
 bool ui_input_key(ui_input_t *in, const tui_key_t *k); /* editing keys; false when not handled */
 /* prompt + windowed value + inverted cursor cell, padded to width; the cursor marker when focused. Owned */
 char *ui_input_render(const ui_input_t *in, const char *prompt, int width, bool focused);
+/* … with the hardware cursor (useTerminalCursor): the cursor cell is drawn plain */
+char *ui_input_render_hw(const ui_input_t *in, const char *prompt, int width, bool focused, bool hw_cursor);
 
 /* ---------- tree.c: /tree session tree selector (overlays/tree-selector.ts) ---------- */
 

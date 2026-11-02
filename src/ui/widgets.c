@@ -510,6 +510,10 @@ bool ui_input_key(ui_input_t *in, const tui_key_t *k) {
 }
 
 char *ui_input_render(const ui_input_t *in, const char *prompt, int width, bool focused) {
+    return ui_input_render_hw(in, prompt, width, focused, false);
+}
+
+char *ui_input_render_hw(const ui_input_t *in, const char *prompt, int width, bool focused, bool hw_cursor) {
     int avail = width - tui_visible_width(prompt);
     if (avail <= 0) return tui_truncate_to_width(prompt, MAX(0, width), "");
     const char *s = in->v.s ? in->v.s : "";
@@ -527,7 +531,8 @@ char *ui_input_render(const ui_input_t *in, const char *prompt, int width, bool 
     sb_append(&b, prompt);
     sb_append(&b, before);
     if (focused) sb_append(&b, TUI_CURSOR_MARKER);
-    sb_appendf(&b, "\x1b[7m%s\x1b[27m", at);
+    if (hw_cursor) sb_append(&b, at); /* the terminal draws its own cursor (Input #cursorCell) */
+    else sb_appendf(&b, "\x1b[7m%s\x1b[27m", at);
     sb_append(&b, after);
     int used = tui_visible_width(before) + aw + tui_visible_width(after);
     tui_sb_spaces(&b, MAX(0, avail - used));

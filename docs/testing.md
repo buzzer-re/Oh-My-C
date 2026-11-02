@@ -78,6 +78,7 @@ Other mocks reach real provider code paths through `OMC_PROVIDER_URL_REWRITE` /
 | `mock_mcp.py`, `mock_mcp_oauth.py` | stdio MCP tool; OAuth-protected streamable-HTTP MCP |
 | `mock_dap.py` | scripted debug adapter |
 | `rpc_client.py`, `acp_client.py`, `eval_client.py` | protocol drivers for RPC, ACP and multi-cell eval sessions |
+| `editor_io.py` + `fake_editor.sh` | the interactive composer under a pty: Ctrl+G through a scripted `$EDITOR`, Ctrl+R, paste chips and the large-paste menu, raw paste through a fake `xclip`, `#` actions / `#N` refs, `@` mentions (checked in the mock's request log) |
 
 All Python is run with `python3 -I`.
 
@@ -110,7 +111,7 @@ tool output or discovery.
 
 Environment knobs: `CMP_DIR`, `OMP_BIN`, `CMP_SETUP=1` (keep omp's wizard), `CMP_NOMODEL=1`,
 `CMP_CONFIG` (extra config.yml lines), `CMP_SPLIT=1` (separate work dirs), `CMP_SEED`, `CMP_NAME`,
-`CMP_WAIT`. Use the omp version that `omp --version` reports, and re-check captures when it changes.
+`CMP_WAIT`, `CMP_ENV` (extra environment for both apps, e.g. `EDITOR=tests/e2e/fake_editor.sh` for Ctrl+G). Use the omp version that `omp --version` reports, and re-check captures when it changes.
 
 ## Golden captures
 

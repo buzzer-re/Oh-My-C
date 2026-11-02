@@ -546,7 +546,7 @@ static bool large_paste_hook(void *ud, tui_editor_t *ed, const char *text, size_
     m->lines = lines;
     char *title = xasprintf("Pasted %zu lines", lines);
     char *esc = ui_editor_key("tui.select.cancel"), *help = xasprintf("%s to paste inline", esc);
-    ui_hook_select(u, title, labels, descs, 3, help, paste_menu_done, m);
+    ui_hook_select_desc(u, title, labels, descs, 3, help, paste_menu_done, m);
     free(title), free(esc), free(help);
     return true;
 }
