@@ -2465,13 +2465,9 @@ static bool handle_command_inner(ui_t *u, const char *line) {
     } else if (!strcmp(cmd, "export")) {
         export_command(u, arg);
     } else if (!strcmp(cmd, "copy")) {
-        const json_t *last = last_assistant(a->agent->messages);
-        if (last) {
-            char *t = ai_message_text(last);
-            tui_term_copy_osc52(tui_term(u->tui), t, strlen(t));
-            free(t);
-            add_notice(u, "info", "Copied last answer to clipboard");
-        }
+        cc_copy_command(u, arg);
+    } else if (!strcmp(cmd, "open")) {
+        cc_open_command(u, arg);
     } else if (!strcmp(cmd, "fork")) {
         ui_btw_dispose(u);
         char *err = NULL;
@@ -3226,6 +3222,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     }
     ui_btw_free(&u);
     tc_shutdown(&u);
+    cc_shutdown(&u);
     iq_shutdown(&u);
     ui_agents_shutdown(&u);
     agent_unsubscribe(u.app->agent, ui_listener, &u);

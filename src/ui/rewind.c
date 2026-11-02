@@ -1008,7 +1008,7 @@ static void rewind_destroy(tui_component_t *c) {
 
 static const tui_component_vt REWIND_VT = {"rewind-selector", rewind_render, rewind_key, NULL, rewind_destroy};
 
-tui_component_t *ui_rewind_selector_new(ui_t *u, const ui_rewind_cb_t *cb) {
+json_t *ui_tx_branch_entries(ui_t *u) {
     session_t *s = u->app->session;
     if (!s || !s->leaf_id) return NULL;
     json_t *path = session_path_to(s, s->leaf_id);
@@ -1020,6 +1020,12 @@ tui_component_t *ui_rewind_selector_new(ui_t *u, const ui_rewind_cb_t *cb) {
         json_free(entries);
         return NULL;
     }
+    return entries;
+}
+
+tui_component_t *ui_rewind_selector_new(ui_t *u, const ui_rewind_cb_t *cb) {
+    json_t *entries = ui_tx_branch_entries(u);
+    if (!entries) return NULL;
     rewind_t *r = xcalloc(1, sizeof *r);
     tui_component_init(&r->base, &REWIND_VT);
     r->base.wants_mouse = true;

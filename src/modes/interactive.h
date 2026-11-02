@@ -48,4 +48,9 @@ void tc_rewind_open(ui_t *u); /* /branch, /rewind, doubleEscapeAction: fullscree
 bool tc_escape(ui_t *u);      /* app.interrupt while a branch summary runs: abort it */
 void tc_shutdown(ui_t *u);    /* join a running branch summary */
 
+/* copyctl.c (builtin-collaboration.ts copy / open, SelectorController.showCopySelector) */
+void cc_copy_command(ui_t *u, const char *arg); /* /copy [code|cmd|link]: picker or the latest target */
+void cc_open_command(ui_t *u, const char *arg); /* /open [link] */
+void cc_shutdown(ui_t *u);
+
 #endif
