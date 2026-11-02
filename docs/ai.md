@@ -32,6 +32,22 @@ models without image input, and drops errored or aborted assistant turns
   in omp's format. `apiKey` is an env var name or a literal. `catalog_register()` adds discovered
   models at runtime.
 - `catalog_resolve(pattern)` accepts `provider/id`, a bare id or a fuzzy substring.
+- Context-window tiers (omp `model-registry.ts #applyContextWindowPolicies`): every row has a standard
+  window (a premium long-context price tier, `cost.longContext.inputThreshold`, caps it unless
+  `longContextWindowUncapped`) and an extended one (the advertised `maxContextWindow`).
+  `catalog_apply_context_policy()` sets `context_window` to the extended window when `extendedContext`
+  is on, or for one model whose `compaction.modelThresholds` entry reaches past its standard window
+  (`cp_reaches`); `modelctl.c` re-applies it on every settings change. Authoritative windows and
+  models.yml `modelOverrides` with a `contextWindow` keep one window. Matches omp for all 688 rows of
+  openai / anthropic / amazon-bedrock / google with both settings.
+- Service tiers (`service_tier.c`, omp `pi-ai/types.ts`): `ai_service_tier_family()` (openai /
+  anthropic / google, OpenRouter by identity class, Claude on any `anthropic-messages` host, OpenAI-id
+  relays), `ai_should_send_service_tier()` (the wire gate per provider: OpenAI and Codex (advertised
+  `serviceTiers`), OpenRouter flex/scale/priority, Google flex/priority, Vertex/Fireworks priority,
+  never `auto`) and `ai_realizes_priority_tier()` (Anthropic direct → `speed: "fast"` + the fast-mode
+  beta). A request carries the session's per-family map (`opts.service_tiers`); `ai_stream()` picks
+  the entry for the request's model (Fireworks: `providers.fireworksTier`). The google-generative-ai
+  budget-thinking path does not forward `serviceTier`, like omp.
 
 ### Model selection and roles
 
@@ -60,8 +76,27 @@ token budgets for budget-style APIs (overridable with the `thinkingBudgets` sett
 
 1. runs `ai_transport_prepare()` (`provider_transport.c`), the provider-owned shaping step that
    turns structured credentials into the bearer, base URL and headers (see below);
-2. looks up the function by `model->api` and calls it;
+2. looks up the function by `model->api` and calls it through `ai_stream_guarded()`
+   (`stream_guard.c`, below);
 3. lets the transport post-process the result (`ai_transport_finish`).
+
+`ai_stream_guarded()` wraps every provider call:
+
+- **Stream watchdog** (omp `register-builtins.ts forwardStream` + `idle-iterator.ts`): no semantic
+  event (anything but `start`) within the first-event budget, or silence longer than the idle budget
+  afterwards, cancels the request locally and ends it as an error with the provider's message
+  (`Anthropic stream timed out while waiting for the first event`, `OpenAI completions stream stalled
+  while waiting for the next event`, `Provider stream …`). Budgets: `opts.first_event_timeout_ms` /
+  `idle_timeout_ms` (settings `providers.streamFirstEventTimeoutSeconds` / `streamIdleTimeoutSeconds`,
+  -1 auto, 0 off), else `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` / `PI_STREAM_IDLE_TIMEOUT_MS` (OpenAI-family
+  APIs and Ollama prefer `PI_OPENAI_STREAM_*`), else the model's compat `streamIdleTimeoutMs` /
+  `streamFirstEventTimeoutMs`, else 300 s; the first-event budget never undercuts the idle one.
+  Cloud Code Assist keeps its own first-event watchdog (it fails over between endpoints); Cursor and
+  GitLab Duo have none. The byte-level HTTP read timeout is widened so it never fires first.
+- **In-flight caps** (`providers.maxInFlightRequests`, `{provider: n}`): a request holds one of `n`
+  slot files under `<config root>/run/provider-inflight/<sha256(provider)>/` with `flock`, so the cap
+  is shared by every local omc process with that config root; a lock dies with its process (omp uses
+  heartbeat lease directories for the same contract).
 
 `ai_complete()` is the non-streaming wrapper used for one-shot side requests: titles, compaction
 summaries, judges, the advisor and memory extraction.
@@ -194,6 +229,23 @@ There are two levels:
    a pass that cannot make progress ends the turn instead of retrying. Otherwise retryable errors are retried up to
    `retry.maxRetries` (10) with exponential backoff (`retry.baseDelayMs` 2000, capped at
    `retry.maxDelayMs` 60000), showing a countdown notice. `retry.enabled: false` turns this off.
+
+Before the transport retry decision, a provider hook (`ai_post_ex_t.on_failure`) may resend the
+request itself or fail it at once. Anthropic uses it for:
+
+- **Fast-mode fallback** (omp `anthropic-state.ts`): a 400 rejecting `speed` or a 429 fast-mode
+  entitlement error before any content drops `speed` + the fast-mode beta, resends once, and remembers
+  the endpoint+model for the session (the `/fast` badge then goes away); `/fast on` re-arms it.
+- **Subscription slow mode** (`anthropic_slow.c`, omp `anthropic-slow-mode.ts` both halves): only for
+  first-party OAuth requests to `api.anthropic.com`. Per account lane (process-wide), response headers
+  track the wrap-up allowance (`anthropic-ratelimit-unified-grace-*`) and the slow-lane offer; with
+  `providers.anthropic.slowMode: auto` (`/slow on`) a session-limit 429 offering `treatment` enters the
+  lane and requests carry `anthropic-usage-limit: slow` until the limit resets; `slot_busy` / 529 become
+  jittered server-paced waits within the max-wait budget; weekly/budget/off/ineligible/wall end it with
+  omp's notices. The status line shows the lane label (`low priority until …`, `limit reached ·
+  wrapping up · resets …`) and the model is steered once per wrap-up window
+  (`anthropic-usage-wrap-up.md`). omp's sibling-account health gate before auto-accept is not ported
+  (omc does not rotate Claude accounts).
 
 omp's retry-fallback model chains (switch to another model after failures) are not implemented. See
 [status.md](status.md).

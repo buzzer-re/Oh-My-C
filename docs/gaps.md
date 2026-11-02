@@ -56,7 +56,7 @@ Ranked by how soon a user hits the gap in a normal interactive session.
 11. ~~**Custom markdown commands and `/skill:<name>` don't work.**~~ Done (WP-9): file commands from every omp provider, prompt templates, `/skill:<name>` (leading or mid-prompt, chips, skill transcript card), MCP prompt commands, in the TUI, RPC, ACP and print mode. Remaining: the bundled TS commands `/review` and `/green`.
 12. **304 of the 402 settings shown in `/settings` have no effect.** (`tools.approvalMode`, `tools.approval`, `tools.restrictedFolders` and `bash.patterns` now work: WP-10.) (WP-26)
 13. ~~**Default-on agent guards are missing.**~~ Done (WP-12, WP-3): todo reminders + mid-run nudge, empty/unexpected-stop recovery, tool-call loop guard, stream loop guard, magic keywords, `out://`, `cfg://`, `conflict://N`. Remaining: fabricated-result abort (needs in-band tool calling), `todo.eager`, `tasks.todoClearDelay`.
-14. **Compaction: snapcompact, Codex V2 / Bedrock server compaction and prompt-cache warming are missing.** The method ladder, omp's summary requests, auto shake/handoff, OpenAI Responses and Anthropic server compaction, mid-turn/async compaction and pruning landed (WP-13); snapcompact is a follow-up. (WP-13, WP-14)
+14. **Compaction: snapcompact and Codex V2 / Bedrock server compaction are missing.** The method ladder, omp's summary requests, auto shake/handoff, OpenAI Responses and Anthropic server compaction, mid-turn/async compaction and pruning landed (WP-13); prompt-cache warming landed (WP-14); snapcompact is a follow-up. (WP-13)
 15. **RPC wire parity landed with WP-15** (remaining: subagent frames, host URI schemes, §6a-b). ACP is done (WP-16): `omc acp`, the full session lifecycle, config options, the fs / terminal / elicitation bridges and history replay.
 
 ## Prioritized work packages
@@ -90,8 +90,8 @@ Every package must:
 | WP-11 Turn-lifecycle signals — **done** (see status.md "Turn-lifecycle signals"); remaining: OSC 99 `p=?` probe and structured Kitty notifications, the OSC 133;A program-status resend (omc writes no OSC 133 zones), `terminal.showProgress` (OSC 9;4), TSP native titles, Tern OSC 1337/OSC 7 session reports, Windows console titles, the desktop ScreenSaver inhibit for `display`/`system`, recap journaling to history.db | Completion/ask/error notifications (OSC 9/777, `*.notify`); terminal title with run state + spinner (`tui.titleState`, `tui.titleSpinner`); OSC 7501 program status; idle recap (`recap.*`); sleep prevention (logind inhibitor); release check | `src/modes/interactive.c`, `src/tui/term.c` (`tui_term_set_title`), `src/coding/title.c`, `src/coding/app.c` | U/modes/controllers/event-controller.ts (`send*Notification`), T/desktop-notify.ts, U/utils/{run-status,title-generator}.ts, U/session/idle-maintenance.ts, U/session/power-assertion-backend.ts |
 | WP-12 Default-on agent guards 🟡 (done: todo reminders + mid-run nudge, unexpected/empty-stop recovery, tool-call + stream loop guards, magic keywords, auto-thinking classifier; open: fabricated-result abort (in-band tool calling), `todo.eager`, `tasks.todoClearDelay` auto-clear, todo-error reminder) | Todo reminders + auto-clear (`todo.reminders`, `remindersMax`, `tasks.todoClearDelay`); unexpected-stop detection; tool-call loop guard / redirect and assistant loop guard (`model.loopGuard.*`); fabricated-result abort; magic keywords (ultrathink/orchestrate/workflow/jevify + hidden notices); auto-thinking classifier. Each must keep `request_diff.sh` clean | `src/coding/app.c` (turn end), `src/agent/agent.c`, `src/modes/interactive.c` (prompt pre-processing) | U/session/{todo-tracker,unexpected-stop-classifier,tool-call-loop-redirect}.ts, U/modes/magic-keywords.ts, U/prompts/system/*-notice.md, U/auto-thinking/* |
 | WP-13 Compaction ladder ✅ (done: `compaction.methodOrder` ladder for manual and automatic passes, omp's prepareCompaction/compact() requests (split turns, short summary, file lists, input windows), all transcript dialects, auto shake (regions, tail protection, artifact offload, persisted) and auto handoff (`handoffSaveToDisk`), OpenAI Responses `/responses/compact` + replay, the Anthropic compaction beta + signed replay, mid-turn, pre-prompt and async (speculative) compaction, supersede/useless/tool-output pruning, dead-end rescue + warnings, per-model thresholds, `auto_compaction_*` events; remaining: snapcompact, Codex V2 streaming compaction, Bedrock Converse (InvokeModel) compaction, anthropic-native speculation, `compaction.remoteEndpoint`, idle compaction, context promotion) | `src/coding/compaction.c`, `src/ai/dialect.c`, `src/ai/provider_{anthropic,openai_responses}.c`, `src/session/session.c` | U/session/{compaction-methods,session-maintenance,compact-modes,session-handoff}.ts, A/compaction/{compaction,shake,pruning,openai,anthropic,bedrock}.ts, packages/ai/src/dialect/*, packages/snapcompact |
-| WP-14 Provider knobs and cache warming | Prompt cache warmer (`providers.cacheWarming`); service tiers `/fast`, `/slow`, `tier.*`, `--service-tier`; `/extended-context` + `extendedContext`; stream first-event/idle timeouts; `providers.maxInFlightRequests`; RPC `set_fast_mode` / `set_slow_mode` / `set_cache_warming` | `src/coding/app.c`, `src/ai/provider_*.c`, `src/ai/ai_common.c`, `src/modes/rpc.c` | U/session/cache-warmer.ts, anthropic-slow-mode.ts, model-controls.ts; U/slash-commands/builtin-modes.ts (fast/slow/extended-context) |
-| WP-15 RPC wire parity (done: §6a-b; remaining: subagent frames, host URI schemes, fast/slow/cache-warming/session-lease commands, prompt error `httpStatus`/`cost_cap`, `retryErrors`) | `messageId` + `partial` + start/done/error on message events, delta filter; session events (compaction, retry, model/thinking changed, goal_updated, queue_update, available_commands_update, …); response shapes (set_model, new/switch/open/branch/fork, get_entries leafId/since, get_messages_page cursor, get_session_stats, compact, handoff, btw); full `get_state`; `extension_ui_request`/`_response` so `ask` works; login/logout; async `bash` so `abort_bash` works; protocol v2 + `rpc_chunk`; subagent frames; mark status.md 🟡 | `src/modes/rpc.c`, `src/agent/agent.c` (`agent_event_to_json`), `src/coding/app.c` (structured events beside `notice`), `src/modes/print.c`, `src/tools/todo_ask.c` | U/modes/rpc/{rpc-types,rpc-mode,rpc-session-events,rpc-messages,rpc-compat,rpc-frame}.ts, U/session/agent-session-events.ts |
+| WP-14 Provider knobs and cache warming ✅ (done; remaining: `tier.advisor` / `task.agentServiceTierOverrides`, the cache-warming extension hook, the Anthropic slow-mode sibling-account gate, `usage.cttl` tier adoption, the model hub's "Opens … window" confirmation) | Prompt cache warmer (`providers.cacheWarming`); service tiers `/fast`, `/slow`, `tier.*`, `--service-tier`; `/extended-context` + `extendedContext`; stream first-event/idle timeouts; `providers.maxInFlightRequests`; RPC `set_fast_mode` / `set_slow_mode` / `set_cache_warming` | `src/coding/app.c`, `src/ai/provider_*.c`, `src/ai/ai_common.c`, `src/modes/rpc.c` | U/session/cache-warmer.ts, anthropic-slow-mode.ts, model-controls.ts; U/slash-commands/builtin-modes.ts (fast/slow/extended-context) |
+| WP-15 RPC wire parity (done: §6a-b; remaining: subagent frames, host URI schemes, session-lease command, prompt error `httpStatus`/`cost_cap`, `retryErrors`) | `messageId` + `partial` + start/done/error on message events, delta filter; session events (compaction, retry, model/thinking changed, goal_updated, queue_update, available_commands_update, …); response shapes (set_model, new/switch/open/branch/fork, get_entries leafId/since, get_messages_page cursor, get_session_stats, compact, handoff, btw); full `get_state`; `extension_ui_request`/`_response` so `ask` works; login/logout; async `bash` so `abort_bash` works; protocol v2 + `rpc_chunk`; subagent frames; mark status.md 🟡 | `src/modes/rpc.c`, `src/agent/agent.c` (`agent_event_to_json`), `src/coding/app.c` (structured events beside `notice`), `src/modes/print.c`, `src/tools/todo_ask.c` | U/modes/rpc/{rpc-types,rpc-mode,rpc-session-events,rpc-messages,rpc-compat,rpc-frame}.ts, U/session/agent-session-events.ts |
 | WP-16 ACP parity ✅ (done, verified with tests/parity/acp_diff.py; remaining: `_omp/usage`, permission-request withdrawal on steering, ask timeouts, command re-advertising after rediscovery, `/mcp reauth`) | `omc acp` subcommand; slash commands in `session/prompt`; `session/resume`, `close`, `fork`, `set_config_option`, `_session/steering`; `configOptions` + `config_option_update` / `session_info_update` / `available_commands_update`; `mcpServers` in new/load; tool-call history replay; structured diff/terminal tool content; `usage_update {size,used,cost}`; errors → `end_turn`/`refusal`; fs/terminal/elicitation client bridges | `src/modes/acp.c`, `src/cli/cli.c` | U/modes/acp/{acp-agent,acp-event-mapper,acp-client-bridge}.ts, U/slash-commands/acp-builtins.ts, U/commands/acp.ts |
 | WP-17 CLI flags and subcommands | **Done:** `--flag=value`, omp's routing (reserved words / unported omp commands error, hoisting, `launch`), strict subcommand parser + omp help pages, `-r` picker, `--restore` (turn only), `--export`, `--models` (startup model), `--smol/--slow/--plan`, `--hide-thinking`, `--advisor`, `--max-time/--max-cost/--warn-cost`, `--no-lsp`, `--skills`, `--system-prompt-template`, `--mode rpc-ui`, `@image` args; commands acp, agents, auth export/import, completions/__complete, config, grep, login, models, read, search, setup (wizard, python), ssh, token, worktree. **Remaining:** `--add-dir` (WP-21), `--restore` subagent revival, `--models` role scoping, commit, usage (WP-24), session pack/unpack/moved/lease, ttsr, setup speech (⛔) | `src/cli/*.c` | U/cli/{args,flag-tables}.ts, U/cli-commands.ts, U/commands/*.ts, U/main.ts |
 
@@ -147,10 +147,10 @@ omc-only command (not in omp): `/migrate`.
 | /queue | builtin-modes.ts | `handle_command` | ✅ | |
 | /model (models) | builtin-modes.ts | `ui_overlay_model` / `app_set_model` | ✅ | `/models` alias; omp's `/model` takes no arguments (picker only), so `/model <pattern>` goes to the model like omp |
 | /switch | builtin-modes.ts | — | ❌ | session-only (temporary) model switch, `alt+p` |
-| /fast | builtin-modes.ts | — | ❌ | priority/ultrafast service tier toggle |
-| /slow | builtin-modes.ts | — | ❌ | flex tier / Anthropic low priority |
+| /fast | builtin-modes.ts | `src/coding/modelctl.c` (`modelctl_fast_command`), TUI `handle_command`, text handler `h_fast` | ✅ | on/ultra/off/status/toggle per model family, omp's replies and `Fast: <state>` autocomplete; status-line fast badge (WP-14) |
+| /slow | builtin-modes.ts | `modelctl_slow_command`, `h_slow` | ✅ | flex tier on OpenAI/Google; `providers.anthropic.slowMode` + subscription low-priority lanes on Anthropic (WP-14) |
 | /skillful | builtin-modes.ts | — | ❌ | session toggle for skill listing in prompt (`skillful` setting unread too) |
-| /extended-context | builtin-modes.ts | — | ❌ | 1M-context toggle (`extendedContext` unread) |
+| /extended-context | builtin-modes.ts | `modelctl_extended_context_command`, `h_extended_context` | ✅ | persists `extendedContext`, re-applies the catalog context-window tiers (WP-14) |
 | /computer | builtin-modes.ts | — | ⛔ | native computer-use eval prelude (platform screen/input automation) |
 | /ratchet | builtin-modes.ts | — | ❌ | eval hill-climb kickoff (low priority) |
 | /prewalk | builtin-modes.ts, session/prewalk.ts | — | ❌ | one-shot model handoff at first edit (`prewalk.*` unread) |
@@ -362,7 +362,7 @@ user who never opens `/settings` (default-on behaviour omc lacks) versus switche
 | `power.sleepPrevention` (idle) | prevents system sleep while running | ✅ (Linux `systemd-inhibit` logind inhibitor; macOS `caffeinate`; no desktop ScreenSaver inhibit) |
 | `startup.checkUpdate` (on), `update.channel` | update check on start | ⛔ inert and hidden from /settings: omp asks its build service / npm for a newer omp and advises `omp update`; omc has no release feed or self-update (omp skips the check for source checkouts too) |
 | `startup.changelogMode` (summary) | changelog on start | ❌ |
-| `providers.cacheWarming` (idle) | keeps prompt cache warm while idle | ❌ |
+| `providers.cacheWarming` (idle) | keeps prompt cache warm while idle | ✅ (`src/coding/cachewarm.c`, WP-14) |
 | `exa.enabled` (on), `fetch.enabled` (on), `archive.enabled`, `out.enabled`, `browser.enabled`, `ida.enabled` (on) | tool availability (see §4) | ❌ tools absent, switches inert |
 | `eval.py`/`eval.js`/`eval.autoProvision`/`eval.tools.enabled` (on), `python.kernelMode` (session) | eval backends | 🟡 Python only, hard-wired |
 | `statusLine.showHookStatus` (on) | hook statuses in the status line | ❌ (no hooks) |
@@ -378,8 +378,8 @@ Appearance: `composer.tokenRate`, `images.blockImages`, `tui.resizeScrollback`, 
 `display.advisorCollapsedLines`, `tui.imeSafeCursor`, `task.showResolvedModelBadge`.
 Model: `modelRoleStorage`, `inlineToolDescriptors`, `includeWorkspaceTree`, `prewalk.*` (5),
 `images.urls.*` (6), `expandThinkingBlocks`, `omitThinking`, `externalThinking`,
-`providers.autoThinkingMaxEffort`, `minP`, `presencePenalty`, `repetitionPenalty`, `tier.anthropic`,
-`tier.google`, `tier.subagent`, `tier.advisor`, `retry.waitForUsageReset`, `retry.modelFallback`,
+`providers.autoThinkingMaxEffort`, `minP`, `presencePenalty`, `repetitionPenalty`,
+`tier.advisor`, `retry.waitForUsageReset`, `retry.modelFallback`,
 `retry.fallbackOn`, `retry.rateLimitWalksChain`, `retry.usageAwareFallback`, `retry.usageReservePct`,
 `retry.usageReservePolicy`, `retry.fallbackChains`, `retry.fallbackRevertPolicy`,
 `providers.anthropic.serverSideFallback`, `advisor.syncBacklog`.
@@ -387,7 +387,7 @@ Interaction: `autoResume`, `startup.showSplash`, `update.channel`, `marketplace.
 `session.worktreeScope`, `tui.vimMode`, `tui.vimModeDisplay`, `loop.mode`, `loop.conditionTimeoutMs`,
 `input.bareSlashCommands`, `composer.predictions`, `spelling.typoDetection`/`autocorrect`
 (macOS ⛔), `skills.registryUrl`.
-Context: `contextPromotion.enabled`, `extendedContext`,
+Context: `contextPromotion.enabled`,
 `compaction.experimentalContextManagement`,
 `compaction.remoteStreamingV2Enabled`, `compaction.idleEnabled`, `compaction.idleThresholdTokens`,
 `compaction.idleTimeoutSeconds`, `snapcompact.*` (3), `tools.format`, `ttsr.judge`, `ttsr.contextMode`,
@@ -403,12 +403,11 @@ Tools: `speechgen.enabled`, `generate_image.enabled`, `ratchet.enabled`, `vault.
 Tasks: `task.isolation.*`, `isolation.backend`, `worktree.*` (10 total), `task.file`, `task.structured`,
 `task.enableEffort`, `task.perCallModel`, `task.perCallModelAllow`, `task.enableLsp`, `task.maxRuntimeMs`,
 `task.maxEffort`, `task.prewalk`, `plan.autosave`, `plan.autosaveDir`, `title.refreshAfterPrompts`.
-Providers: `providers.maxInFlightRequests`, `providers.antigravityEndpoint`, `providers.fetch`,
-`codexResets.autoRedeem`, `claudeResets.autoRedeem`, `searxng.endpoint`, `providers.fireworksTier`,
+Providers: `providers.antigravityEndpoint`, `providers.fetch`,
+`codexResets.autoRedeem`, `claudeResets.autoRedeem`, `searxng.endpoint`,
 `providers.kimiApiFormat`, `providers.openaiWebsockets`, `providers.openaiLiveSteering`,
 `providers.muse-code.storeResponses`, `providers.openai-codex.daybreak`, `providers.openrouterVariant`,
-`provider.appendOnlyContext`, `providers.streamFirstEventTimeoutSeconds`,
-`providers.streamIdleTimeoutSeconds`, `secrets.enabled`.
+`provider.appendOnlyContext`, `secrets.enabled`.
 
 ### 3c. Settings of out-of-scope subsystems (⛔, hide in `/settings` or label as unsupported)
 
@@ -600,8 +599,9 @@ Verified against omp v18.14.2 with `tests/parity/rpc_diff.py` (scripts in `tests
 | abort_and_restore_queue | handle | 🟡 | user-authored entries with `images`; no `imagesDropped`/`truncated` fitting |
 | new_session / switch_session / fork / branch | session_change | 🟡 | `{cancelled}` (`branch`: `{text, cancelled}` in a new session file at the entry's parent); fork refuses while busy (`session_busy`); switch takes `provider`+`modelId`; `parentSession` ignored |
 | open_session | session_change | ✅ | newest non-empty session in `sessionDir` or a fresh one there: `{cancelled, resumed, sessionId, sessionFile}` |
-| get_state | state_json | 🟡 | full RpcSessionState; fast/slow mode always off (omc has no service tiers), no `usageLimit`, tools without `examples` |
-| set_fast_mode / set_slow_mode / set_cache_warming / get_session_lease | — | ❌ | "Unknown command" (no service tiers, cache warmer or session leases in omc) |
+| get_state | state_json | 🟡 | full RpcSessionState (fast/slow fields from `modelctl.h`, WP-14); no `usageLimit`, tools without `examples` |
+| set_fast_mode / set_slow_mode / set_cache_warming | `modelctl_rpc` | ✅ | omp's data and error texts (WP-14; tests/e2e/tiers_rpc.py) |
+| get_session_lease | — | ❌ | "Unknown command" (no session leases in omc) |
 | set_ask_dialog | handle | ✅ | the `ask` tool then sends one `ask` dialog |
 | goal, get_tree, set_thinking_level, get_available_thinking_levels, cycle_thinking_level, set_steering/follow_up/interrupt_mode, set_auto_compaction/retry, export_html, get_branch_messages, get_last_assistant_text, get_messages, get_login_providers, host_tool_result, host_tool_update | handle | ✅ | host_tool_update streams as `tool_execution_update` |
 | navigate_tree, set_label | handle | ✅ | `entry_not_found` / `session_busy` codes |
@@ -688,13 +688,14 @@ omp's `Error: …` + `Run \`omc --help\`` lines (exit 2). Messages after the fir
 | --restore | 🟡 | resumes, then appends interrupted tool results + the abort record and retries (`src/coding/restore.c`); interrupted subagents are not revived (task/restore.ts) |
 | --mode rpc-ui | 🟡 | accepted, runs RPC; no extension-UI channel (the ask tool stays off) |
 | --models | 🟡 | scope picks the startup model (saved default when in scope, explicit `:level`) and shows omp's `Model scope: … (Ctrl+P to cycle)` notice; Ctrl+P cycles roles (as omp 18.14.2); the scope is not applied to role / `--model` resolution |
+| --service-tier | ✅ | OpenAI tier override, persisted as `service_tier_change` (WP-14) |
 | --export, --hide-thinking, --advisor, --no-lsp, --skills, --system-prompt-template, --smol/--slow/--plan (+ PI_*_MODEL) | ✅ | runtime overrides like omp; `SYSTEM_TEMPLATE.md` discovery |
 | --max-time | 🟡 | deadline aborts the running turn and stops new requests; print mode does not wait for background jobs (no `--wait-async`) |
 | --max-cost, --warn-cost | ✅ | `src/coding/costgate.c` (warn once, refuse the next request, print exit 3); subagents count through the parent's total |
 | --auto-approve/--yolo, --approval-mode | ✅ | |
 | omc extras --plan-mode, --max-turns | n/a | not in `--help` |
 | --add-dir | ❌ | needs the multi-root workspace (WP-21) |
-| --service-tier, --allow-home, --profile, --alias, --from-claude, --from-codex, --no-pty, --wait-async, --external-thinking, --prewalk*, --provider-session-id, --prompt-cache-key | ❌ | reported as unknown flags |
+| --allow-home, --profile, --alias, --from-claude, --from-codex, --no-pty, --wait-async, --external-thinking, --prewalk*, --provider-session-id, --prompt-cache-key | ❌ | reported as unknown flags |
 | --hook, -e/--extension, --trusted-extension, --no-extensions, --plugin-dir, --no-ui | ⛔ | JS/Bun extension runtime |
 | print mode `Working...` stderr line | ❌ | omp writes it before the first text-mode turn (`src/modes/print.c`) |
 
@@ -755,7 +756,7 @@ the plugin manager omc lacks), omp commands omc does not port error with `is not
 
 | System | Upstream | omc | Status | Notes |
 |---|---|---|---|---|
-| Prompt cache warmer (`providers.cacheWarming` idle) | session/cache-warmer.ts | — | ❌ | cost impact |
+| Prompt cache warmer (`providers.cacheWarming` idle) | session/cache-warmer.ts | `src/coding/cachewarm.c` | ✅ | omp's timing, economics, phases and stop reasons; replays verified against omp (tests/parity/cachewarm_diff.sh); extension `cache_warming_decision` and `usage.cttl` tier adoption ❌ |
 | Idle recap (`recap.enabled`, 240 s) | idle-maintenance.ts | `src/ui/recap.c` | ✅ | not journaled to history.db |
 | Turn-end / ask / error notifications | event-controller.ts, tui/desktop-notify.ts | `src/tui/notify.c`, `src/ui/signals.c` | ✅ | no OSC 99 `p=?` probe (single-line OSC 99 like omp before it answers) |
 | Terminal title + OSC 7501 program status | utils/run-status.ts, title-generator.ts | `src/ui/signals.c` | ✅ | no OSC 133;A resend (omc writes no OSC 133 zones), no TSP/Tern/Windows paths |

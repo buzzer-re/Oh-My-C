@@ -137,7 +137,9 @@ row), completes arguments (`tui_ac_default_t.args`: subcommands, the live `/effo
 dim ghost text after an end-of-line cursor (`tui_editor_ghost`: the selected item's remainder +
 usage, else the command's inline hint); Enter on an argument completion applies it and submits only
 when the argument is already fully typed (`#selectedSlashArgumentIsAlreadyTyped`). The metadata comes
-from the shared registry (`src/coding/slashcmd.c`) through `src/ui/slash.c`, followed by MCP prompt
+from the shared registry (`src/coding/slashcmd.c`) through `src/ui/slash.c` (live descriptions such as
+`Fast: on`, `Slow mode: off`, `Extended context: off` replace the static text like omp's
+`getTuiAutocompleteDescription`), followed by MCP prompt
 commands (`… (bundled)`), `skill:<name>` commands, file commands (✎, `<hint> - <description>` and the hint as
 ghost text while no argument is typed) and prompt templates. `skill:` commands collapse into one
 `/skill:` namespace row (`N skills`) until the query commits to the namespace or a bare name / hyphen
@@ -185,7 +187,7 @@ shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, 
 | Module | Shows | omp source |
 |---|---|---|
 | `welcome.c` | gradient π logo with a 3 s intro sweep, half-block wordmark, version, weighted tip from `tips.txt` | `prompt/welcome.ts` |
-| `statusline.c` | status band / bottom bar in every preset and layout (`box`, `band`, `plain-*`), context gauge with the compaction threshold, model/thinking/cost/VCS segments, brand spinner and turn timer, composer hints | `status-line/*`, `prompt/composer-hints.ts` |
+| `statusline.c` | status band / bottom bar in every preset and layout (`box`, `band`, `plain-*`), context gauge with the compaction threshold, model/thinking/cost/VCS segments (the model segment carries the fast-mode `icon.fast` badge when a fast tier is realized and the warning-coloured Anthropic usage-limit label), brand spinner and turn timer, composer hints | `status-line/*`, `prompt/composer-hints.ts` |
 | `chat.c` | transcript container (blank-row separated blocks), user bubbles, assistant prose and thinking, notices, custom/summary/TTSR messages, pinned error banner, working row, retry/compaction rows, replay from the session tree on resume and branch | `chat/*`, `chrome/*` |
 | `toolcards.c` + `tools/tc_*.c` | tool execution cards: bash, read (grouped), write, edit diffs, grep/glob trees, todo, ask, goal, find, ast, debug, task (live async progress), eval cells, wait, MCP, lsp, web_search, generic fallback. Ctrl+O expands | `chat/tool-execution.ts`, `read-tool-group.ts`, `tui/src/tools/*`, `render/*` |
 | `setup.c` | first-run wizard: splash, sign in, default model, glyph preset, composer shape, theme, outro. Writes `setupVersion: 2` | `setup/*` |

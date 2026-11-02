@@ -135,14 +135,14 @@ IMG_OBJ  := $(O)/ai/ai_images.o $(CODEC_OBJ)
 T_test_text          := $(CORE_OBJ) $(patsubst src/%.c,$(O)/%.o,$(wildcard src/text/*.c))
 T_test_tui           := $(CORE_OBJ) $(patsubst src/%.c,$(O)/%.o,$(wildcard src/tui/*.c)) $(O)/text/walker.o $(O)/text/glob.o
 GOOGLE_OBJ := $(O)/ai/provider_google.o $(O)/ai/google_schema.o $(O)/ai/google_auth.o
-T_test_providers_ag  := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provider_transport.o $(O)/ai/provider_anthropic.o $(GOOGLE_OBJ) $(IMG_OBJ)
-T_test_providers_google := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provider_transport.o $(GOOGLE_OBJ) $(O)/ai/google_cca.o \
+T_test_providers_ag  := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/stream_guard.o $(O)/ai/service_tier.o $(O)/ai/provider_transport.o $(O)/ai/provider_anthropic.o $(O)/ai/anthropic_slow.o $(GOOGLE_OBJ) $(IMG_OBJ)
+T_test_providers_google := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/stream_guard.o $(O)/ai/service_tier.o $(O)/ai/provider_transport.o $(GOOGLE_OBJ) $(O)/ai/google_cca.o \
                         $(O)/ai/provider_gemini_cli.o $(O)/ai/think_heal.o $(IMG_OBJ)
-T_test_providers_oai := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provider_transport.o $(O)/ai/provider_openai_completions.o \
+T_test_providers_oai := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/stream_guard.o $(O)/ai/service_tier.o $(O)/ai/provider_transport.o $(O)/ai/provider_openai_completions.o \
                         $(O)/ai/provider_openai_responses.o $(O)/ai/provider_ollama.o
 T_test_http          := $(CORE_OBJ) $(NET_OBJ)
 T_test_ws            := $(CORE_OBJ) $(NET_OBJ) $(O)/net/ws.o
-T_test_providers_bedrock := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/provider_transport.o $(O)/ai/aws.o $(O)/ai/provider_bedrock.o
+T_test_providers_bedrock := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/stream_guard.o $(O)/ai/service_tier.o $(O)/ai/provider_transport.o $(O)/ai/aws.o $(O)/ai/provider_bedrock.o
 T_test_readfmt       := $(CORE_OBJ) $(O)/tools/readfmt.o
 T_test_editmodes     := $(CORE_OBJ) $(O)/tools/diff.o $(O)/tools/fuzzy.o $(O)/tools/patch.o $(O)/tools/sloppy.o $(O)/tools/hashline.o \
                         $(O)/text/regex.o $(O)/text/rxbt.o
@@ -174,10 +174,11 @@ T_test_tree          := $(LIB_OBJ)
 T_test_approval      := $(LIB_OBJ)
 T_test_commands      := $(LIB_OBJ)
 T_test_compaction    := $(LIB_OBJ)
+T_test_tiers         := $(LIB_OBJ)
 UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
               test_chrome test_providers_google test_toolcards test_cursor test_judgment test_auth test_memory test_outsink test_catalog test_model_resolver test_compaction_point \
               test_planreview test_img test_img_jpeg test_img_webp test_btw test_queue test_guards test_keybindings test_slash test_commands test_export test_dump test_signals \
-              test_panels test_tree test_approval test_compaction
+              test_panels test_tree test_approval test_compaction test_tiers
 
 .SECONDEXPANSION:
 $(O)/tests/%: tests/%.c $$(T_$$*)

@@ -935,8 +935,19 @@ static void maybe_restore_primary(app_t *a) {
 
 /* maintainContextMidRun between tool-loop turns */
 static void hook_turn_boundary(void *ud, agent_t *ag, const json_t *assistant) {
-    UNUSED(ag);
+    app_t *a = ud;
     cmp_mid_turn(ud, assistant);
+    /* #steerAnthropicWrapUp: once per wrap-up window, tell the model to checkpoint when nothing (low priority, extra
+     * usage) carries the work past the allowance */
+    if (app_anthropic_wrap_up_key(a) >= 0) {
+        char *txt = prompt_render("coding-agent/prompts/system/anthropic-usage-wrap-up.md", NULL);
+        json_t *m = msg_developer_text(txt ? txt : "");
+        json_set_str(m, "attribution", "agent");
+        json_set_str(m, "customType", "anthropic-usage-wrap-up");
+        json_set_bool(m, "display", false);
+        agent_steer(ag, m);
+        free(txt);
+    }
 }
 
 static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int attempt) {

@@ -1,0 +1,17 @@
+{"command": "set_fast_mode", "data": {"active": true, "enabled": true}, "error": null, "success": true}
+{"command": "set_fast_mode", "data": {"active": false, "enabled": false}, "error": null, "success": true}
+{"command": "set_slow_mode", "data": null, "error": "set_slow_mode requires boolean enabled", "success": false}
+{"command": "set_slow_mode", "data": {"enabled": true}, "error": null, "success": true}
+{"command": "set_slow_mode", "data": {"enabled": false}, "error": null, "success": true}
+{"command": "set_cache_warming", "data": null, "error": "Invalid cache warming mode: bogus", "success": false}
+{"command": "set_cache_warming", "data": {"mode": "streaming"}, "error": null, "success": true}
+/fast status -> command_output: Fast mode is off.
+/fast on -> command_output: Fast mode enabled.
+/fast -> command_output: Fast mode disabled.
+/fast bogus -> command_output: Usage: /fast [on|ultra|off|status]
+/slow status -> command_output: Slow mode is off.
+/slow on -> command_output: Slow mode on: requests use the flex tier (lower cost, higher latency).
+/slow -> command_output: Slow mode off.
+/extended-context status -> command_output: Extended context is off.
+/extended-context on -> command_output: Extended context enabled.
+/extended-context off -> command_output: Extended context disabled.
