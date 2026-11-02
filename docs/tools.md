@@ -106,6 +106,60 @@ from omp's `prompts/internal-urls/*.md`, listing only what the session can serve
 | `http(s)://…` | `tools/web.c` | page as reader markdown, `:raw` for the original | `tools/read.ts` URL path |
 | `file://…` | `tool_resolve_path` | plain path | |
 
+## Tool approval
+
+`tools/approval.c` ports omp's `tools/approval.ts`, `approval-cache.ts`, `approval-targets.ts`,
+`search-approval-targets.ts`, every tool's `approval` / `formatApprovalDetails` / `approvalCacheTargets`
+declaration and the bash approval patterns. The gate itself is `hook_approve_tool` in `coding/app.c`
+(omp's `ExtensionToolWrapper.execute`): the agent loop calls it through the `approve_tool` hook once the
+arguments validated, right before the tool runs, so the user approves exactly what executes.
+
+**Resolution** (`approval_resolve`, omp `resolveApproval`): the tool's own decision (tier `read` /
+`write` / `exec`, optional policy, override, reason, policy key), then the user's
+`tools.approval.<tool>` (`allow` / `prompt` / `deny`, case-folded), then the mode
+(`tools.approvalMode`: `always-ask` and `always-ask-cached` approve read, `write` read+write, `yolo`
+everything; default `yolo`), then `tools.restrictedFolders`, which turns any non-deny result into a
+per-call prompt. In yolo a tool's override prompt (critical bash) is ignored; a tool's own deny
+(`skill://` writes: "`<scheme>:// URLs are read-only`") and a user deny win everywhere.
+`--auto-approve` / `--yolo` force yolo; `--approval-mode <mode>` is a runtime override.
+
+| Tool | Tier |
+|---|---|
+| `read` | read (an `ssh://` path, or a legacy PDF image member `x.pdf:page2.png`: exec) |
+| `write` | the target's write tier: plain path write, `local://`/`agent://`/`out://` read, `cfg://`/`conflict://`/`vault://` write, `proc://`/`ssh://` exec, `xd://<device>` the device's own tier under policy key `<device>` (`resolve`/`reject`/`propose` read, `report_issue` write), other registered schemes deny |
+| `edit`, `ast_edit` | the strictest write tier over every target (and move destination) |
+| `bash` | exec; `bash.patterns` (`*` globs: `allow` must match the whole command without shell control, `deny`/`prompt` any segment), the critical patterns (`rm -rf /`, `sudo rm`, `curl … \| sh`, `mkfs`, `dd of=/dev/…`, fork bomb, `reboot`, `nc -e`, …) |
+| `grep`, `glob`, `ast_grep`, `find` | read (exec when a path names `ssh://`) |
+| `github`, `debug`, `lsp` | read for their read-only ops/actions, else exec (`lsp`: write) |
+| `goal` (`get`), `learn` (project scope, no local backend), `todo`, `ask`, `wait`, `checkpoint`, `rewind`, `web_search` | read |
+| `goal`, `learn` (global / skill / local backend), `manage_skill`, MCP tools | write |
+| `eval`, `task` and any tool that declares nothing | exec |
+
+**Prompting**: a call that resolves to `prompt` asks through `tool_env.ui.approve` (the TUI dialog,
+`ui/approval.c`). Without a UI (print mode, RPC, subagents) it fails with omp's text
+(`Tool "<t>" requires approval but no interactive UI available.` + options, or the restricted-folder
+variant); a deny is `Tool "<t>" is blocked by user policy.` / `… by tool policy.\nReason: …`; a user
+denial is `Tool call denied by user: <t>`. A prompt the mode raised can be approved "for this session"
+(key = subject + tier). In `always-ask-cached`, a call with cache targets (the file, folder or search
+tree it touches; public `http(s)` reads have none) offers grants instead: *Approve Directory* (the one
+folder covering every target, listed in the prompt: up to 24 entries, 200 scanned), *Approve File* /
+*Approve*, each "for this session" or, with the *Remember across sessions* toggle, in
+`<agentDir>/approval-cache.json`. A grant covers its tier and the tiers below; a folder grant covers the
+folder's own entries, never subfolders; a recursive search has its own tree key. `/forget-approvals`
+clears every grant.
+
+**ACP** (`modes/acp.c`, omp `#wrapToolForAcpPermission`): `bash` (resolved with `always-ask` unless the
+yolo mode was configured explicitly or `--auto-approve` given) and edits that delete or move a file ask
+the client with `session/request_permission` (`Allow once` / `Always allow` / `Reject` /
+`Always reject`, title = the command's first 80 chars, `rawInput`, `$ <cmd>` content, absolute
+locations); "always" answers persist per session and cache key; a client approval also satisfies the
+inner gate. Rejections read `Tool call rejected by user (<t>)` (or `(preference)`).
+
+Not ported: `bash.allowCompoundCommands` (per-segment `&&` chains), nested `xd://` dispatch prompts for
+an explicit device policy, provider safety checks (computer use), extension `tool_approval_*` events,
+the Cursor bridge's own approval path, RPC `extension_ui_request` prompts (RPC has no UI: prompts fail
+like print mode; WP-15).
+
 ## Output capture and artifacts (`tools/outsink.c`, `tools/artifacts.c`)
 
 These port omp's `OutputSink` (`tui/src/tools/streaming-output.ts`), `output-meta.ts` and
