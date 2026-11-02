@@ -281,6 +281,8 @@ check "plan yolo model" 'Model "nope/none" not found' "$B" --model mock/mock-1 -
 check "rpc btw"        "btw ok"                   python3 -I "$ROOT/tests/e2e/rpc_btw.py" "$B"
 # WP-22: RPC subagent frames / commands, persisted subagent transcripts
 check "rpc subagents"  $'level {\'level\': \'events\'}\nstarted task True 0 True\nlisted 1 True running task\nsteer True\nprogress True True slow:2:first answer\nevent True True\ncompleted True\nafter 0\ntranscript 0 True False user True True True\ntail True 0\nreset True 0\ncancel {\'cancelled\': True}\naborted True\ncancel again {\'cancelled\': False}\nlevel off {\'level\': \'off\'}' python3 -I "$ROOT/tests/e2e/rpc_subagents.py" "$B"
+# WP-22b: parent waits on background subagents (awaitingAsyncWork, deferred session_settled), nested settle, advisories, <id>.md
+check "rpc async wait" $'advisories True True\nfirst end False True\nprompt_result False\ndelivery True custom True agent background job delivery completed\nlast end True True\nwake prompt_results 0\nnested waited True\noutput md True True\nsubagent request True True True True'  python3 -I "$ROOT/tests/e2e/rpc_async_wait.py" "$B" "$T/req.jsonl"
 # RPC wire parity (omp modes/rpc): framing v1/v2, messageId + delta, session events, response shapes, async bash,
 # ask / approval dialogs over extension_ui_request
 check "rpc wire"       "rpc wire ok"              python3 -I "$ROOT/tests/e2e/rpc_wire.py" "$B"
@@ -365,6 +367,8 @@ if python3 -c 'import pty' 2>/dev/null; then
     check "approval deny key" "approval ok"  python3 -I "$ROOT/tests/e2e/approval_tui.py" "$B" "bash:echo nope" '\x1b' "Tool call denied by user: bash" --approval-mode always-ask
     # WP-22: badge / hint / HUD, Agent Hub (Alt+A, /hub, ←←), kill/revive, transcript viewer chat, session focus
     check "agent hub tui" $'hud ok\nhub ok\nactivity ok\nfilter ok\nagents ok\nkill ok\nrevive ok\ntree ok\nclose ok\nslash hub ok\nviewer ok\nchat ok\nviewer close ok\nhub close ok\nleft left ok\nfocus ok\nunfocus ok'  python3 -I "$ROOT/tests/e2e/agenthub_tui.py" "$B"
+    # WP-22b: "Waiting for background job …" row, Esc stops waiting, /agents hub (strips, enable/disable -> config.yml)
+    check "agents tui" $'waiting ok\ndelivered ok\nwaiting again ok\nstop waiting ok\nfolded ok\nagents ok\nstrip ok\nmodel strip ok\nback ok\ntoggle ok\nconfig True\nenable ok\nclose ok'  python3 -I "$ROOT/tests/e2e/agents_tui.py" "$B" "$T/agent"
 fi
 # slash commands (WP-4): one registry behind RPC/ACP advertising and builtin dispatch
 check "acp commands"   "available_commands_update"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo cmds"
