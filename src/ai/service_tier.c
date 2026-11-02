@@ -2,8 +2,23 @@
  * resolveModelServiceTier, shouldSendServiceTier, realizesPriorityServiceTier). */
 #include "ai.h"
 
+#include <ctype.h>
+#include <strings.h>
+
+/* the catalog's identity class; custom models.yml rows carry none, so their id is classified like omp's
+ * classifyModel does for the families that matter here (gpt-* / o<N> / codex, claude, gemini) */
 static const char *identity_class(const ai_model_t *m) {
-    return m && m->raw ? json_get_str(json_get_obj(m->raw, "identity"), "class") : NULL;
+    if (!m) return NULL;
+    const char *c = m->raw ? json_get_str(json_get_obj(m->raw, "identity"), "class") : NULL;
+    if (c || !m->id) return c;
+    const char *id = strrchr(m->id, '/');
+    id = id ? id + 1 : m->id;
+    if (!strncasecmp(id, "gpt-", 4) || !strncasecmp(id, "codex", 5) ||
+        ((id[0] == 'o' || id[0] == 'O') && isdigit((unsigned char)id[1])))
+        return "openai";
+    if (!strncasecmp(id, "claude", 6)) return "anthropic";
+    if (!strncasecmp(id, "gemini", 6)) return "gemini";
+    return NULL;
 }
 
 static bool openai_tier_api(const char *api) {
