@@ -788,7 +788,7 @@ static void viewer_render(tui_component_t *c, int width, strvec_t *out) {
     json_t *ref = agents_get(v->id);
     const char *dot = sym("sep.dot");
     strvec_t header = {0}, footer = {0};
-    char *h1 = xasprintf("Agent Hub%s%s", dot, v->id);
+    char *h1 = xasprintf("Agent Hub %s %s", dot, v->id);
     strvec_push_own(&header, S(TUI_TC_ACCENT, h1));
     free(h1);
     if (ref) {
@@ -797,7 +797,7 @@ static void viewer_render(tui_component_t *c, int width, strvec_t *out) {
         put(&b, tui_bold(v->id));
         sb_putc(&b, ' ');
         put(&b, viewer_status_badge(json_get_str(ref, "status")));
-        char *kt = parent ? xasprintf(" sub%sof %s", dot, parent) : xstrdup(" sub");
+        char *kt = parent ? xasprintf(" sub %s of %s", dot, parent) : xstrdup(" sub");
         put(&b, S(TUI_TC_DIM, kt));
         free(kt);
         if (v->model) {
@@ -1306,8 +1306,8 @@ static void summary_lines(hub_t *h, int width, strvec_t *out) {
     bool first = true;
     for (int s = 0; s < 4; s++) {
         if (!counts[s]) continue;
-        putc_s(&hd, TUI_TC_DIM, dot);
-        UNUSED(first);
+        if (first) putc_s(&hd, TUI_TC_DIM, dot); /* the counts themselves join with a plain separator */
+        else sb_append(&hd, dot);
         first = false;
         put(&hd, status_glyph(ST[s]));
         sb_putc(&hd, ' ');
@@ -1882,6 +1882,7 @@ static void open_chat(hub_t *h, const char *id) {
     v->ed->max_height = 4;
     if (h->u->editor) snprintf(v->ed->text_fg, sizeof v->ed->text_fg, "%s", h->u->editor->text_fg);
     v->ed->base.tui = h->u->tui;
+    v->ed->base.focused = true; /* the viewer routes keys to it: draw its caret */
     tui_editor_set_on_submit(v->ed, viewer_submit, v);
     viewer_reload(v);
     v->timer = tui_add_timer(h->u->tui, 250, true, viewer_tick, v);
@@ -2194,10 +2195,8 @@ bool ui_focus_agent(ui_t *u, const char *id, char **err) {
     ix_view_subscribe(u, child, true);
     set_working(u, child);
     ui_chat_rebuild(u);
-    char *esc = ui_key_hint("escape"), *ll = ui_double_tap_hint("left");
-    char *m = xasprintf("Viewing agent %s — %s returns to main, %s hops to parent", id, esc, ll);
-    add_notice(u, "info", m);
-    free(m), free(esc), free(ll);
+    /* omp's "Viewing agent <id> — ⎋ returns to main, ←← hops to parent" status never reaches the rebuilt
+     * transcript (showStatus lands before the replay settles), so nothing is added here */
     tui_request_render(u->tui);
     return true;
 }
@@ -2212,7 +2211,7 @@ void ui_unfocus(ui_t *u, const char *status) {
     ix_view_subscribe(u, u->app, true);
     set_working(u, u->app);
     ui_chat_rebuild(u);
-    if (status) add_notice(u, "info", status);
+    UNUSED(status); /* omp's "Returned to main session" status is not visible after the rebuild either */
     tui_request_render(u->tui);
 }
 

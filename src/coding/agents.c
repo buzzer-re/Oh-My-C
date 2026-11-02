@@ -42,6 +42,7 @@ typedef struct aref {
     bool killed;           /* released as an `aborted` tombstone (hub x / cancel_subagent) */
     bool executor_run;     /* the current run is an executor run (task spawn / IRC wake): progress tracks it */
     bool lifecycle_open;   /* a `started` lifecycle frame went out without its terminal one */
+    char *gist;            /* hub activity: latest intent or `running <tool>` of the current run */
     int pins;              /* a UI view holds `app` (session focus): never freed underneath it */
 } aref_t;
 
@@ -331,12 +332,17 @@ static json_t *progress_payload_locked(const aref_t *r) {
     return p;
 }
 
-/* the registry's progress copy: durationMs is the executor's active time */
+/* the registry's progress copy: durationMs is the executor's active time; the activity gist follows */
 static void progress_touch_locked(aref_t *r) {
     if (!r->progress) return;
     int64_t now = now_ms();
     json_set_int(r->progress, "durationMs", r->active_ms + (r->executor_run && r->running ? now - r->run_started : 0));
     r->last_activity = now;
+    const char *li = json_get_str(r->progress, "lastIntent"), *ct = json_get_str(r->progress, "currentTool");
+    if (li || ct) {
+        free(r->gist);
+        r->gist = li ? xstrdup(li) : xasprintf("running %s", ct);
+    }
 }
 
 static aref_t *find_locked(const char *id) {
@@ -365,6 +371,7 @@ __attribute__((unused)) static void ref_free(aref_t *r) {
     free(r->sys_append);
     free(r->model);
     free(r->recent_tail);
+    free(r->gist);
     free(r->id);
     free(r->agent);
     free(r->parent_id);
@@ -533,6 +540,7 @@ static void on_child_event(void *ud, const agent_event_t *ev) {
         recent_output_locked(r);
         progress = true;
     }
+    if (r->progress && r->executor_run && ev->type == AGENT_EV_TURN_START) progress = true;
     if (ev->type == AGENT_EV_TOOL_START || ev->type == AGENT_EV_TURN_START) {
         free(r->activity);
         r->activity = ev->type == AGENT_EV_TOOL_START && ev->tool_name ? xasprintf("running %s", ev->tool_name) : xstrdup("thinking");
@@ -614,6 +622,7 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
         json_free(old);
         free(r->recent_tail);
         r->recent_tail = NULL;
+        r->active_ms = 0; /* progress (and its active time) is per executor run */
         r->lifecycle_open = true;
         if (has_observers()) lc = lifecycle_payload_locked(r, "started");
     }
@@ -658,6 +667,8 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
     r->running = false;
     r->executor_run = false;
     r->last_activity = now;
+    free(r->gist);
+    r->gist = NULL;
     r->cancel = NULL;
     r->aborted = *aborted;
     free(r->activity);
@@ -1540,7 +1551,7 @@ static json_t *ref_json_locked(const aref_t *r) {
     json_set_str(o, "status", ref_status_locked(r));
     json_set_int(o, "createdAt", r->started_at);
     json_set_int(o, "lastActivity", r->last_activity ? r->last_activity : r->started_at);
-    if (r->activity) json_set_str(o, "activity", r->activity);
+    if (r->gist && r->running) json_set_str(o, "activity", r->gist);
     json_set_str(o, "agent", r->agent);
     if (r->model) json_set_str(o, "model", r->model);
     if (r->app) {
@@ -1554,7 +1565,10 @@ static json_t *ref_json_locked(const aref_t *r) {
     if (r->parent_call) json_set_str(o, "parentToolCallId", r->parent_call);
     if (r->job_id) json_set_str(o, "jobId", r->job_id);
     if (r->progress) {
-        json_set(o, "progress", json_clone(r->progress)); /* durationMs as of the last progress update */
+        json_t *p = json_clone(r->progress);
+        /* a running executor's active time as of now (omp reports it as of its last coalesced progress tick) */
+        if (r->executor_run && r->running) json_set_int(p, "durationMs", r->active_ms + now_ms() - r->run_started);
+        json_set(o, "progress", p);
     }
     return o;
 }
@@ -1710,7 +1724,7 @@ static char *chat_body(bgjob_t *job, void *ud, bool *failed) {
     chat_t *c = ud;
     bool aborted;
     char *error = NULL;
-    char *text = run_turn_ex(c->ref, c->child, c->text, job_cancel_flag(job), &aborted, &error, false, NULL);
+    char *text = run_turn_ex(c->ref, c->child, c->text, job_cancel_flag(job), &aborted, &error, true, NULL);
     *failed = aborted || error;
     free(text);
     free(error);
