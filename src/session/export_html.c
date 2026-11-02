@@ -12,6 +12,8 @@
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <zlib.h>
 
 #define EXPORT_APP_NAME "omc"
@@ -558,8 +560,14 @@ char *export_default_name(const char *session_file) {
     return xasprintf(EXPORT_APP_NAME "-session-%.*s.html", (int)n, base);
 }
 
+/* Bun.write: created 0666 under the umask (fs_write uses 0644) */
 static int write_out(const char *path, const char *html, char **err) {
-    int rc = fs_write(path, html, strlen(html));
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+    int rc = fd < 0 ? -errno : 0;
+    if (fd >= 0) {
+        rc = fs_write(path, html, strlen(html));
+        close(fd);
+    }
     if (rc) *err = xasprintf("%s: %s", path, strerror(-rc));
     return rc ? -1 : 0;
 }
