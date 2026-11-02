@@ -17,6 +17,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define INNER_COLS 12
 #define INNER_ROWS 4
@@ -287,7 +288,6 @@ static bool run_capture(const char *const *argv, char **out, size_t *len) {
 
 /* readImageFromClipboard: wl-paste (Wayland), xclip (X11), osascript (macOS) */
 static bool clipboard_image(char **data, size_t *len) {
-    static const char *const mimes[] = {"image/png", "image/jpeg", "image/gif", "image/webp"};
     if (getenv("TERMUX_VERSION")) return false;
 #ifdef __APPLE__
     char *tmp = xasprintf("%s/omc-clip-%d.png", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());
@@ -308,6 +308,7 @@ static bool clipboard_image(char **data, size_t *len) {
     *data = NULL;
     return false;
 #else
+    static const char *const mimes[] = {"image/png", "image/jpeg", "image/gif", "image/webp"};
     if (getenv("WAYLAND_DISPLAY") && have_cmd("wl-paste")) {
         const char *lt[] = {"wl-paste", "--list-types", NULL};
         char *types = NULL;

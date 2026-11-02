@@ -148,3 +148,7 @@ omc builds on Linux (glibc or musl; GCC or Clang) and macOS (Apple Clang).
   `libomc.0.dylib` with only the `omc_*` symbols exported.
 - **Linux-only interfaces** (`pipe2`, `SOCK_CLOEXEC`/`SOCK_NONBLOCK`, `MSG_NOSIGNAL`, `getrandom`,
   `execvpe`, `st_mtim`, `<pty.h>`) are provided on macOS by `src/core/compat.h`, included from `core.h`.
+- **Checking the macOS branches from Linux:** `#ifdef __APPLE__` code never compiles in a Linux build, so a
+  missing include there only fails on a Mac. `build-tools/check_apple.sh` compiles those branches
+  syntax-only with `-D__APPLE__` (implicit declarations are errors, unused variables warnings); run it
+  after touching any `__APPLE__` code.
