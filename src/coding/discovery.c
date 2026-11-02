@@ -142,6 +142,25 @@ char *find_repo_root(const char *cwd) {
     return NULL;
 }
 
+strvec_t discovery_project_ancestors(const char *cwd) {
+    strvec_t out = {0};
+    const char *home = home_dir();
+    char *root = find_repo_root(cwd);
+    char *cur = xstrdup(cwd);
+    for (;;) {
+        if (strcmp(cur, home) != 0) strvec_push(&out, cur);
+        if (!strcmp(cur, root ? root : home)) break;
+        char *parent = path_dirname(cur);
+        bool top = !strcmp(parent, cur);
+        free(cur);
+        cur = parent;
+        if (top) break;
+    }
+    free(cur);
+    free(root);
+    return out;
+}
+
 static char *read_nonempty(const char *path) {
     if (!fs_is_file(path)) return NULL;
     size_t n;
@@ -559,15 +578,18 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
         plugin_roots_t roots;
         plugin_roots_list(cwd, &roots);
         plugin_skills_standard(&roots, d);
-        for (size_t i = chain.n; i > 0; i--) {
-            const char *dirs[] = {".agents/skills", ".agent/skills"};
+        /* agents.ts getProjectPathCandidates: cwd up to the repo root (else home, else /), home skipped */
+        strvec_t walk = discovery_project_ancestors(cwd);
+        for (size_t i = 0; i < walk.n; i++) {
+            const char *dirs[] = {".agent/skills", ".agents/skills"};
             for (size_t k = 0; k < ARRAY_LEN(dirs); k++) {
-                char *p = path_join(chain.v[i - 1], dirs[k]);
+                char *p = path_join(walk.v[i], dirs[k]);
                 scan_skills_dir(d, p);
                 free(p);
             }
         }
-        const char *uskills[] = {".agents/skills", ".agent/skills"};
+        strvec_free(&walk);
+        const char *uskills[] = {".agent/skills", ".agents/skills"};
         for (size_t i = 0; i < ARRAY_LEN(uskills); i++) {
             char *p = path_join(home, uskills[i]);
             scan_skills_dir(d, p);

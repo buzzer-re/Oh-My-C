@@ -25,7 +25,7 @@
 #include <pthread.h>
 
 
-typedef enum { MV_USER, MV_ASSISTANT, MV_TOOL, MV_NOTICE, MV_BASH, MV_CUSTOM, MV_SUMMARY, MV_TTSR, MV_TODO } mv_kind_t;
+typedef enum { MV_USER, MV_ASSISTANT, MV_TOOL, MV_NOTICE, MV_BASH, MV_CUSTOM, MV_SUMMARY, MV_TTSR, MV_TODO, MV_SKILL } mv_kind_t;
 
 typedef struct {
     tui_component_t base;

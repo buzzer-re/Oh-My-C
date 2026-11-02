@@ -41,7 +41,8 @@ void tui_ac_result_add_icon(tui_ac_result_t *r, const char *value, const char *l
 void tui_ac_result_free(tui_ac_result_t *r);
 
 /* Provider: fill `out` for the text before the cursor on the current line. `first_line` is
- * true when the cursor is on the buffer's first line. `forced` is true for Tab. Return
+ * true when every line above the cursor's is blank (the line starts the submitted prompt). `forced` is
+ * true for Tab. Return
  * true if there are suggestions. Accepting a value ending in '/' keeps completion open. */
 typedef bool (*tui_autocomplete_fn)(void *ud, const char *line_before, bool first_line, bool forced,
                                     tui_ac_result_t *out);
@@ -51,6 +52,7 @@ typedef struct {
     strvec_t commands;     /* names without '/' */
     strvec_t descriptions; /* parallel to commands ("" if none) */
     strvec_t icons;        /* parallel to commands ("" if none) */
+    strvec_t hints;        /* parallel to commands: argument hint ("" if none), shown as "<hint> - <description>" */
     /* optional live display description (owned result, NULL = static one); matching uses the static one */
     char *(*describe)(void *ud, const char *name);
     void *describe_ud;
@@ -68,6 +70,11 @@ typedef struct {
 tui_ac_default_t *tui_ac_default_new(const char *cwd);
 void tui_ac_default_add_command(tui_ac_default_t *p, const char *name, const char *description);
 void tui_ac_default_add_command_icon(tui_ac_default_t *p, const char *name, const char *description, const char *icon);
+/* a command with an argument hint (NULL = none). Commands named `skill:<name>` collapse into one `/skill:`
+ * namespace row until the query commits to it (or a bare name breaks out), and are the only completions
+ * offered for a mid-prompt `/token` (collapseSkillNamespace / buildMidPromptSkillCompletions). */
+void tui_ac_default_add_command_hint(tui_ac_default_t *p, const char *name, const char *description, const char *icon,
+                                     const char *hint);
 void tui_ac_default_add_alias(tui_ac_default_t *p, const char *command, const char *alias);
 void tui_ac_default_free(tui_ac_default_t *p);
 /* ghost hint for the text before the cursor (provider-level getInlineHint); owned or NULL */
@@ -111,6 +118,13 @@ struct tui_editor {
     /* bracketed-paste interceptor (image paths, empty pastes): return true when it consumed the text */
     bool (*paste_hook)(void *ud, tui_editor_t *ed, const char *text);
     void *paste_hook_ud;
+    /* completed-token collapse (CustomEditor #collapseSkillTokens): in `line` of the buffer `text`, the first
+     * token at or after byte `from` to turn into an atom (span, label, expansion, style: owned); false when
+     * none. A token that ends the last line is still being typed and stays literal. */
+    bool (*token_fn)(void *ud, const char *text, const char *line, size_t from, size_t *start, size_t *end, char **label,
+                     char **expansion, char **style);
+    void *token_ud;
+    bool collapsing;
 
     tui_autocomplete_fn ac_fn;
     void *ac_ud;
@@ -162,6 +176,10 @@ void tui_editor_paste(tui_editor_t *ed, const char *text);       /* same path as
 /* insert an atomic token at the cursor (one undo step); expands to `expansion` on submit */
 void tui_editor_insert_atom(tui_editor_t *ed, const char *label, const char *expansion, const char *style);
 void tui_editor_set_paste_hook(tui_editor_t *ed, bool (*fn)(void *ud, tui_editor_t *ed, const char *text), void *ud);
+void tui_editor_set_token_hook(tui_editor_t *ed,
+                               bool (*fn)(void *ud, const char *text, const char *line, size_t from, size_t *start, size_t *end,
+                                          char **label, char **expansion, char **style),
+                               void *ud);
 bool tui_editor_is_empty(const tui_editor_t *ed);
 void tui_editor_clear(tui_editor_t *ed);
 void tui_editor_undo(tui_editor_t *ed);

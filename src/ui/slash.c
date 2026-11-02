@@ -10,6 +10,7 @@
 #include "coding/slashcmd.h"
 
 #include "coding/advisor.h"
+#include "mcp/mcp.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -256,7 +257,23 @@ static char *slash_inline_hint(void *ud, const char *name, const char *arg) {
     return NULL;
 }
 
+/* argument hints show on one line (replaceTabs, CR/LF -> space) */
+static char *one_line_hint(const char *h) {
+    if (!h || !*h) return NULL;
+    sb_t b = SB_INIT;
+    for (const char *p = h; *p; p++) {
+        if (*p == '\t') sb_append(&b, "   ");
+        else if (*p == '\r' || *p == '\n') {
+            while (p[1] == '\r' || p[1] == '\n') p++;
+            sb_putc(&b, ' ');
+        } else sb_putc(&b, *p);
+    }
+    return sb_detach(&b);
+}
+
 void ui_slash_register(ui_t *u, tui_ac_default_t *ac) {
+    /* #buildPendingSlashCommands (builtins, MCP prompt commands, `skill:<name>`), then the file commands and
+     * the prompt templates no earlier command (or alias) names (#rebuildSlashCommandAutocomplete) */
     for (size_t i = 0; i < slash_count(); i++) {
         const slash_cmd_t *c = slash_at(i);
         char *d = slash_format_description(c->description, ui_key_hint);
@@ -265,6 +282,42 @@ void ui_slash_register(ui_t *u, tui_ac_default_t *ac) {
         for (size_t k = 0; k < c->aliases.n; k++) tui_ac_default_add_alias(ac, c->name, c->aliases.v[k]);
         free(icon);
         free(d);
+    }
+    app_t *a = u->app;
+    if (a && a->mcp) {
+        char *icon = command_icon("mcp");
+        json_t *mc = mcp_prompt_commands(a->mcp), *c;
+        json_arr_foreach(mc, i, c) {
+            char *d = xasprintf("%s (bundled)", json_get_str(c, "description"));
+            tui_ac_default_add_command_icon(ac, json_get_str(c, "name"), d, icon);
+            free(d);
+        }
+        json_free(mc);
+        free(icon);
+    }
+    if (a && settings_bool("skills.enableSkillCommands", true)) {
+        char *icon = command_icon("skill");
+        for (size_t i = 0; i < a->disc.skills.n; i++) {
+            char *n = xasprintf("skill:%s", a->disc.skills.v[i].name);
+            tui_ac_default_add_command_icon(ac, n, a->disc.skills.v[i].description, icon);
+            free(n);
+        }
+        free(icon);
+    }
+    if (a) {
+        char *icon = command_icon("prompt");
+        for (size_t i = 0; i < a->file_cmds.n; i++) {
+            const file_cmd_t *f = &a->file_cmds.v[i];
+            char *h = one_line_hint(f->argument_hint);
+            tui_ac_default_add_command_hint(ac, f->name, f->description, icon, h);
+            free(h);
+        }
+        for (size_t i = 0; i < a->prompt_tpls.n; i++) {
+            const prompt_tpl_t *t = &a->prompt_tpls.v[i];
+            if (strvec_contains(&ac->commands, t->name) || strvec_contains(&ac->alias_names, t->name)) continue;
+            tui_ac_default_add_command_icon(ac, t->name, t->description, icon);
+        }
+        free(icon);
     }
     ac->describe = live_description;
     ac->describe_ud = u;

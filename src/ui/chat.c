@@ -201,6 +201,184 @@ static void render_user(msgview_t *v, int width, strvec_t *o) {
     free(shown);
 }
 
+/* ---------- user-invoked skill (chat/skill-message.ts SkillMessageComponent) ---------- */
+
+/* theme.bgFill: `bg` re-armed after resets, padded to `width` */
+static char *bg_fill(const char *line, int width, const char *bg) {
+    sb_t b = SB_INIT;
+    sb_append(&b, bg);
+    for (const char *p = line; *p;) {
+        if (!strncmp(p, "\x1b[0m", 4) || !strncmp(p, "\x1b[49m", 5)) {
+            size_t l = p[2] == '0' ? 4 : 5;
+            sb_appendn(&b, p, l);
+            sb_append(&b, bg);
+            p += l;
+            continue;
+        }
+        sb_putc(&b, *p++);
+    }
+    tui_sb_spaces(&b, width - tui_visible_width(line));
+    sb_append(&b, "\x1b[49m");
+    return sb_detach(&b);
+}
+
+/* skillChipStyle: bold customMessageLabel over customMessageBg, then `restore` */
+static char *skill_chip(const char *label, const char *restore) {
+    const tui_theme_t *th = TH();
+    return xasprintf("%s%s\x1b[1m%s\x1b[22m%s", tui_bg_seq(th, TUI_TC_CUSTOM_MESSAGE_BG), tui_fg_seq(th, TUI_TC_CUSTOM_MESSAGE_LABEL),
+                     label, restore);
+}
+
+/* the rendered prompt's text blocks joined by newlines (#extractText) */
+static char *skill_prompt_text(const json_t *msg) {
+    const json_t *c = json_get(msg, "content");
+    if (json_is_str(c)) return xstrdup(json_sv(c));
+    sb_t b = SB_INIT;
+    const json_t *blk;
+    bool first = true;
+    json_arr_foreach(c, i, blk) {
+        if (!str_eq(json_get_str(blk, "type"), "text")) continue;
+        if (!first) sb_putc(&b, '\n');
+        sb_append(&b, json_get_str(blk, "text") ? json_get_str(blk, "text") : "");
+        first = false;
+    }
+    return sb_detach(&b);
+}
+
+/* SkillCallout: rows inside a Box(1, 1) on userMessageBg with the skill-colored rail on the left */
+static void skill_callout(const strvec_t *rows, int width, strvec_t *o) {
+    const tui_theme_t *th = TH();
+    const char *bg = tui_bg_seq(th, TUI_TC_USER_MESSAGE_BG);
+    int inner = MAX(1, width - 1);
+    char *rail_fg = fg(TUI_TC_CUSTOM_MESSAGE_LABEL, tui_sym("skill.rail"));
+    char *rail = xasprintf("%s%s\x1b[49m", bg, rail_fg);
+    free(rail_fg);
+    strvec_t all = {0};
+    strvec_push(&all, "");
+    for (size_t i = 0; i < rows->n; i++) {
+        char *x = xasprintf(" %s", rows->v[i]);
+        strvec_push_own(&all, x);
+    }
+    strvec_push(&all, "");
+    for (size_t i = 0; i < all.n; i++) {
+        char *f = bg_fill(all.v[i], inner, bg);
+        strvec_push_own(o, xasprintf("%s%s", rail, f));
+        free(f);
+    }
+    strvec_free(&all);
+    free(rail);
+}
+
+static void skill_markdown(const char *text, int width, const char *sgr, strvec_t *out) {
+    tui_md_opts_t mo;
+    tui_md_opts_default(&mo);
+    mo.text_sgr = sgr;
+    mo.bg_slot = TUI_TC_USER_MESSAGE_BG;
+    tui_md_render(text, width, &mo, out);
+}
+
+static void render_skill(msgview_t *v, int width, strvec_t *o) {
+    const json_t *det = json_get(v->msg, "details");
+    char *name = json_get_str(det, "name") ? str_trim(json_get_str(det, "name")) : xstrdup("");
+    if (!*name) {
+        free(name);
+        name = xstrdup("unknown");
+    }
+    const char *args = json_get_str(det, "args");
+    char *prompt = json_get_str(det, "prompt") ? xstrdup(json_get_str(det, "prompt"))
+                   : args                       ? xasprintf("/skill:%s %s", name, args)
+                                                : xasprintf("/skill:%s", name);
+    char *label = xasprintf("%s %s", tui_sym("icon.extensionSkill"), name);
+    /* collapseSkillTokens (display only): just the invoked skill's token becomes its chip */
+    sb_t disp = SB_INIT;
+    if (skill_tokens_allowed(prompt)) {
+        size_t pos = 0, s, e;
+        char *nm;
+        while (skill_token_next(prompt, pos, &s, &e, &nm)) {
+            sb_appendn(&disp, prompt + pos, s - pos);
+            sb_append(&disp, strcmp(nm, name) ? "" : label);
+            if (strcmp(nm, name)) sb_appendn(&disp, prompt + s, e - s);
+            free(nm);
+            pos = e;
+        }
+        sb_append(&disp, prompt + pos);
+    } else sb_append(&disp, prompt);
+    const char *display = sb_cstr(&disp);
+    size_t ll = strlen(label);
+    bool leading = str_starts(display, label) && (!display[ll] || isspace((unsigned char)display[ll]));
+    char sgr[48];
+    fg_on_bg(TUI_TC_USER_MESSAGE_TEXT, TUI_TC_USER_MESSAGE_BG, sgr);
+    char *restore = xasprintf("%s%s", sgr, tui_bg_seq(TH(), TUI_TC_USER_MESSAGE_BG));
+    bool expanded = g_ui && g_ui->expand_tools;
+    int cw = MAX(1, width - 3); /* rail + Box padding */
+    /* header: the chip, then the muted prompt size */
+    char *chip = skill_chip(label, restore);
+    sb_t hb = SB_INIT;
+    sb_append(&hb, chip);
+    if (json_get(det, "lineCount")) {
+        int64_t lc = json_get_int(det, "lineCount", 0);
+        char *cnt = xasprintf("%lld %s", (long long)lc, lc == 1 ? "line" : "lines");
+        char *m = fg(TUI_TC_MUTED, cnt);
+        sb_appendf(&hb, "  %s", m);
+        free(m);
+        free(cnt);
+    }
+    free(chip);
+    strvec_t rows = {0};
+    if (!leading) {
+        /* inline: a plain user bubble with the chip, the callout below it once expanded */
+        msgview_t tmp = {0};
+        tmp.text = (char *)display;
+        size_t first = o->n;
+        render_user(&tmp, width, o);
+        char *styled = skill_chip(label, restore);
+        for (size_t i = first; i < o->n; i++) {
+            if (!strstr(o->v[i], label)) continue;
+            sb_t b = SB_INIT;
+            for (const char *p = o->v[i]; *p;) {
+                const char *hit = strstr(p, label);
+                if (!hit) {
+                    sb_append(&b, p);
+                    break;
+                }
+                sb_appendn(&b, p, (size_t)(hit - p));
+                sb_append(&b, styled);
+                p = hit + ll;
+            }
+            free(o->v[i]);
+            o->v[i] = sb_detach(&b);
+        }
+        free(styled);
+        if (expanded) tui_wrap_text_with_ansi(sb_cstr(&hb), cw, &rows);
+    } else {
+        tui_wrap_text_with_ansi(sb_cstr(&hb), cw, &rows);
+        char *body = str_trim(display + ll);
+        if (*body) {
+            strvec_push(&rows, "");
+            skill_markdown(body, cw, sgr, &rows);
+        }
+        free(body);
+    }
+    if (expanded && (leading || rows.n)) { /* #promptSection */
+        char *text = skill_prompt_text(v->msg);
+        if (*text) {
+            strvec_push(&rows, "");
+            strvec_push_own(&rows, fg(TUI_TC_MUTED, "prompt"));
+            strvec_push(&rows, "");
+            skill_markdown(text, cw, sgr, &rows);
+        }
+        free(text);
+    }
+    if (rows.n) skill_callout(&rows, width, o);
+    strvec_free(&rows);
+    free(restore);
+    sb_free(&hb);
+    sb_free(&disp);
+    free(label);
+    free(prompt);
+    free(name);
+}
+
 /* thinking-display.ts canonicalizeMessage: empty when only dots/ellipses/whitespace */
 static bool canonical_nonempty(const char *s) {
     if (!s) return false;
@@ -895,6 +1073,7 @@ static void mv_render(tui_component_t *c, int width, strvec_t *out) {
     case MV_SUMMARY: render_summary(v, width, o); break;
     case MV_TTSR: render_ttsr(v, width, o); break;
     case MV_TODO: render_todo_reminder(v, width, o); break;
+    case MV_SKILL: render_skill(v, width, o); break;
     }
     v->cache_w = width;
     v->dirty = false;
@@ -971,7 +1150,7 @@ void ui_retry_recovered(ui_t *u, const char *notes) {
         tui_component_t *c = u->chat->children.v[i];
         if (c->vt != &MV_VT) continue;
         msgview_t *mv = (msgview_t *)c;
-        if (mv->kind == MV_USER) break;
+        if (mv->kind == MV_USER || mv->kind == MV_SKILL) break;
         if (mv->kind != MV_ASSISTANT || mv->retry_note || !str_eq(json_get_str(mv->msg, "stopReason"), "error")) continue;
         mv->retry_note = xstrdup(v.v[--k]);
         mv->error_pinned = false;
@@ -990,7 +1169,7 @@ void ui_retry_failed(ui_t *u, int attempts, const char *final_error, const char 
         tui_component_t *c = u->chat->children.v[i];
         if (c->vt != &MV_VT) continue;
         msgview_t *mv = (msgview_t *)c;
-        if (mv->kind == MV_USER) break;
+        if (mv->kind == MV_USER || mv->kind == MV_SKILL) break;
         if (mv->kind != MV_ASSISTANT || mv->retry_note || !str_eq(json_get_str(mv->msg, "stopReason"), "error")) continue;
         if (!last) {
             last = mv;
@@ -1392,7 +1571,12 @@ void ui_async_result(ui_t *u, const json_t *m) {
 
 static void replay_message(ui_t *u, const json_t *m, hmap_t *pending) {
     const char *role = json_get_str(m, "role");
-    if (str_eq(role, "user")) {
+    if (str_eq(role, "user") && str_eq(json_get_str(m, "customType"), "skill-prompt") && json_get_bool(m, "display", false)) {
+        toolcard_break_group(u);
+        msgview_t *v = mv_new(MV_SKILL);
+        v->msg = json_clone(m);
+        tui_container_add(u->chat, &v->base);
+    } else if (str_eq(role, "user")) {
         toolcard_break_group(u);
         char *text = ai_message_text(m);
         if (text && *text) {
@@ -1489,7 +1673,9 @@ static void replay_entry(ui_t *u, const json_t *e, hmap_t *pending) {
             ui_async_result(u, e);
             return;
         }
-        msgview_t *v = mv_new(MV_CUSTOM);
+        bool skill = str_eq(json_get_str(e, "customType"), "skill-prompt");
+        if (skill) toolcard_break_group(u);
+        msgview_t *v = mv_new(skill ? MV_SKILL : MV_CUSTOM);
         v->msg = json_clone(e);
         json_set_str(v->msg, "role", "custom");
         tui_container_add(u->chat, &v->base);

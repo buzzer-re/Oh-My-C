@@ -54,6 +54,8 @@ const rule_t *discovery_find_rule(const discovery_t *d, const char *name);
 json_t *frontmatter_parse(const char *text, const char **body);
 
 char *find_repo_root(const char *cwd); /* nearest dir with .git, or NULL */
+/* getProjectPathCandidates' walk: cwd up to the repo root (else home, else /), home itself skipped (owned) */
+strvec_t discovery_project_ancestors(const char *cwd);
 
 typedef struct {
     const char *cwd;

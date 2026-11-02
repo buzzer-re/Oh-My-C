@@ -13,6 +13,12 @@ bool ix_handle_command(ui_t *u, const char *line);    /* built-in slash command;
 void ix_start_queued_run(ui_t *u);                    /* run that delivers the agent's queued messages */
 void ix_start_hidden(ui_t *u, const char *text, const char *ctype); /* synthetic prompt (not drawn) */
 void ix_history_add(ui_t *u, const char *text);       /* editor + persisted prompt history */
+/* #runSideFileCommand: a `side: true` file command answers as a /btw side question; false otherwise */
+bool ix_side_file_command(ui_t *u, const char *text);
+bool ix_is_skill_command(ui_t *u, const char *text);  /* isKnownSkillCommand */
+/* #invokeSkillCommand: build the skill-prompt message and run it (or queue it as a steer / follow-up while
+ * streaming); a skill that fails to load reports "Failed to load skill: ..." and restores the draft */
+void ix_invoke_skill(ui_t *u, const char *text, json_t *attachments, bool follow_up);
 
 /* iqueue.c */
 /* Enter (text already trimmed and taken from the editor; attachments: staged images [{image, path?}], owned) */

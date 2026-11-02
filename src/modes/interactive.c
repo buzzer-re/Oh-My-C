@@ -287,6 +287,8 @@ typedef struct {
     const char *hidden; /* custom type of a hidden prompt (goal continuation, advisor), NULL for user input */
     json_t *attachments; /* [{image, path?}] composer image attachments (owned, may be NULL) */
     bool queued;        /* deliver the agent's queued messages (no new prompt) */
+    json_t *skill_msg;  /* a /skill: invocation's built message (owned), run instead of `text` */
+    bool expand;        /* `text` names an MCP prompt command: expand it on the worker (prompts/get) */
 } job_t;
 
 static void start_hidden(ui_t *u, const char *text, const char *ctype);
@@ -322,7 +324,13 @@ static void *worker_main(void *p) {
     size_t before = json_len(a->agent->messages);
     if (j->queued) agent_run_queued(a->agent);
     else if (j->hidden) app_prompt_hidden(a, j->text, j->hidden);
-    else app_prompt_attachments(a, j->text, j->attachments);
+    else if (j->skill_msg) app_prompt_skill(a, j->skill_msg);
+    else if (j->expand) {
+        char *x = app_expand_input(a, j->text, true);
+        if (x) app_prompt_attachments(a, x, j->attachments);
+        else json_free(j->attachments);
+        free(x);
+    } else app_prompt_attachments(a, j->text, j->attachments);
     json_t *run = json_arr();
     pthread_mutex_lock(&a->agent->mu);
     for (size_t i = before; i < json_len(a->agent->messages); i++) json_push(run, json_clone(json_at(a->agent->messages, i)));
@@ -416,13 +424,22 @@ static void start_prompt_with(ui_t *u, const char *text, json_t *attachments) {
         free(agent_dir);
         return;
     }
-    msgview_t *v = mv_new(MV_USER);
-    v->text = xstrdup(text);
-    add_view(u, v);
-    strvec_push(&u->optimistic, text); /* its message_start is already drawn */
+    /* session.prompt expands file commands and prompt templates (drawn expanded, like the transcript row
+     * omp reconciles); an MCP prompt command expands on the worker (prompts/get) and draws on message_start */
+    bool mcp = app_is_mcp_prompt_command(u->app, text);
+    char *expanded = mcp ? xstrdup(text) : app_expand_input(u->app, text, false);
+    text = expanded;
+    if (!mcp) {
+        msgview_t *v = mv_new(MV_USER);
+        v->text = xstrdup(text);
+        add_view(u, v);
+        strvec_push(&u->optimistic, text); /* its message_start is already drawn */
+    }
     job_t *j = xcalloc(1, sizeof(*j));
     j->u = u;
     j->text = xstrdup(text);
+    j->expand = mcp;
+    free(expanded);
     j->attachments = attachments;
     u->worker_running = true;
     if (pthread_create(&u->worker, NULL, worker_main, j) != 0) {
@@ -460,6 +477,99 @@ static void ui_plan_restore(ui_t *u) {
         char *m = xasprintf("Plan mode enabled. Plan file: %s", u->app->plan_file);
         add_notice(u, "info", m);
         free(m);
+    }
+}
+
+/* CustomEditor #collapseSkillTokens: a completed `/skill:<name>` token for a registered skill becomes the
+ * `✦ <name>` chip (skillChipStyle) that expands back to the token on submit */
+static bool skill_chip_hook(void *ud, const char *text, const char *line, size_t from, size_t *s, size_t *e, char **label,
+                            char **expansion, char **style) {
+    ui_t *u = ud;
+    if (!strstr(line + from, "/skill:") || !skill_tokens_allowed(text) || !settings_bool("skills.enableSkillCommands", true))
+        return false;
+    char *name;
+    while (skill_token_next(line, from, s, e, &name)) {
+        if (discovery_find_skill(&u->app->disc, name)) {
+            const tui_theme_t *th = tui_theme();
+            *label = xasprintf("%s %s", tui_sym("icon.extensionSkill"), name);
+            *expansion = xasprintf("/skill:%s", name);
+            *style = xasprintf("%s%s", tui_bg_seq(th, TUI_TC_CUSTOM_MESSAGE_BG), tui_fg_seq(th, TUI_TC_CUSTOM_MESSAGE_LABEL));
+            free(name);
+            return true;
+        }
+        free(name);
+        from = *e;
+    }
+    return false;
+}
+
+bool ix_side_file_command(ui_t *u, const char *text) {
+    char *name, *args;
+    if (!commands_parse_invocation(text, &name, &args)) return false;
+    const file_cmd_t *f = commands_find(&u->app->file_cmds, name);
+    bool side = f && f->side && !app_is_mcp_prompt_command(u->app, text) && !ix_is_skill_command(u, text);
+    if (side) {
+        char *q = commands_render(f->content, args);
+        char *a = str_trim(args);
+        char *title = *a ? xasprintf("/%s %s", f->name, a) : xasprintf("/%s", f->name);
+        ui_btw_command(u, q, NULL, title);
+        free(title);
+        free(a);
+        free(q);
+    }
+    free(name);
+    free(args);
+    return side;
+}
+
+bool ix_is_skill_command(ui_t *u, const char *text) {
+    skill_invocation_t inv;
+    if (!app_skill_command(u->app, text, &inv)) return false;
+    skill_invocation_free(&inv);
+    return true;
+}
+
+void ix_invoke_skill(ui_t *u, const char *text, json_t *attachments, bool follow_up) {
+    json_t *images = NULL, *e;
+    json_arr_foreach(attachments, i, e) {
+        json_t *img = json_get(e, "image");
+        if (!img) continue;
+        if (!images) images = json_arr();
+        json_push(images, json_clone(img));
+    }
+    json_free(attachments);
+    char *err = NULL;
+    json_t *m = app_skill_message(u->app, text, images, &err);
+    if (!m) { /* invokeSkillCommandFromText: the draft comes back with the error */
+        if (tui_editor_is_empty(u->editor)) tui_editor_set_text(u->editor, text);
+        char *msg = xasprintf("Failed to load skill: %s", err ? err : "unknown error");
+        add_notice(u, "error", msg);
+        free(msg);
+        free(err);
+        return;
+    }
+    if (u->worker_running) { /* promptCustomMessage while streaming: queued as a steer / follow-up */
+        if (follow_up) agent_follow_up(u->app->agent, m);
+        else agent_steer(u->app->agent, m);
+        ui_queue_refresh(u);
+        return;
+    }
+    if (!u->app->model) {
+        json_free(m);
+        start_prompt(u, text); /* reports "No model selected." */
+        return;
+    }
+    job_t *j = xcalloc(1, sizeof(*j));
+    j->u = u;
+    j->text = xstrdup(text);
+    j->skill_msg = m;
+    u->worker_running = true;
+    if (pthread_create(&u->worker, NULL, worker_main, j) != 0) {
+        u->worker_running = false;
+        add_notice(u, "error", "failed to start agent thread");
+        json_free(j->skill_msg);
+        free(j->text);
+        free(j);
     }
 }
 
@@ -2226,6 +2336,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     ui_slash_register(&u, ac);
     tui_editor_set_inline_hint(u.editor, tui_ac_default_inline_hint, ac);
     tui_editor_set_autocomplete(u.editor, tui_ac_default_provider, ac);
+    tui_editor_set_token_hook(u.editor, skill_chip_hook, &u);
     tui_container_add(root, &u.editor->base);
     u.status = ui_status_new(&u);
     tui_container_add(root, u.status);

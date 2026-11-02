@@ -302,27 +302,16 @@ void commands_load(const char *cwd, file_cmds_t *out) {
     }
     if (!list_setting_has("disabledProviders", "agents")) {
         /* project walk-up (cwd .. repo root, else home), skipping home; then ~/.agent[s] */
-        char *root = find_repo_root(cwd);
-        char *cur = xstrdup(cwd);
-        for (;;) {
-            if (strcmp(cur, home) != 0) {
-                const char *bd[] = {".agent", ".agents"};
-                for (size_t k = 0; k < 2; k++) {
-                    char *d = path_join3(cur, bd[k], "commands");
-                    load_flat(out, d, "Agent Dirs (.agent/.agents)", "project", NULL, false);
-                    free(d);
-                }
-            }
-            if (!strcmp(cur, root ? root : home)) break;
-            char *parent = path_dirname(cur);
-            bool top = !strcmp(parent, cur);
-            free(cur);
-            cur = parent;
-            if (top) break;
-        }
-        free(cur);
-        free(root);
         const char *bd[] = {".agent", ".agents"};
+        strvec_t walk = discovery_project_ancestors(cwd);
+        for (size_t i = 0; i < walk.n; i++) {
+            for (size_t k = 0; k < 2; k++) {
+                char *d = path_join3(walk.v[i], bd[k], "commands");
+                load_flat(out, d, "Agent Dirs (.agent/.agents)", "project", NULL, false);
+                free(d);
+            }
+        }
+        strvec_free(&walk);
         for (size_t k = 0; k < 2; k++) {
             char *d = path_join3(home, bd[k], "commands");
             load_flat(out, d, "Agent Dirs (.agent/.agents)", "user", NULL, false);

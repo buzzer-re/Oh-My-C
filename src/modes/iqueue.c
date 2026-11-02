@@ -488,6 +488,14 @@ void iq_submit(ui_t *u, const char *t, json_t *attachments) {
     bool local = true;
     if (body) iq_queue_command(u, body);
     else if (t[0] == '/' && ix_handle_command(u, t)) {
+    } else if (ix_side_file_command(u, t)) {
+    } else if (ix_is_skill_command(u, t)) {
+        /* /skill:<name>: Enter steers like free text; behind a compaction it queues as typed */
+        if (u->bg_kind) {
+            queue_compaction_message(u, t, "steer");
+            json_free(attachments);
+        } else ix_invoke_skill(u, t, attachments, false);
+        return;
     } else if (t[0] == '!') bang(u, t);
     else if (!python(u, t)) local = false;
     if (!local && u->bg_kind) queue_compaction_message(u, t, "steer"); /* text-only behind a compaction */
@@ -496,11 +504,15 @@ void iq_submit(ui_t *u, const char *t, json_t *attachments) {
         return;
     }
     if (u->worker_running) {
-        if (json_len(attachments)) app_steer_attachments(u->app, t, attachments);
+        /* session.prompt(..., steer): custom / file / template commands expand before queueing */
+        char *x = app_expand_input(u->app, t, true);
+        if (!x) json_free(attachments);
+        else if (json_len(attachments)) app_steer_attachments(u->app, x, attachments);
         else {
             json_free(attachments);
-            agent_steer(u->app->agent, msg_user_text(t));
+            agent_steer(u->app->agent, msg_user_text(x));
         }
+        free(x);
         ui_queue_refresh(u);
         return;
     }
@@ -527,8 +539,12 @@ void iq_follow_up(ui_t *u) {
         compact_on_yield(u, t);
     } else if (t[0] == '/' && ix_handle_command(u, t)) {
         /* handled */
+    } else if (ix_is_skill_command(u, t)) {
+        ix_invoke_skill(u, t, NULL, true);
     } else if (u->worker_running) {
-        agent_follow_up(u->app->agent, msg_user_text(t));
+        char *x = app_expand_input(u->app, t, true);
+        if (x) agent_follow_up(u->app->agent, msg_user_text(x));
+        free(x);
         ui_queue_refresh(u);
     } else {
         ix_start_prompt(u, t);
@@ -627,6 +643,14 @@ bool iq_escape(ui_t *u) {
 
 void iq_user_message_start(ui_t *u, const json_t *msg) {
     if (!agent_msg_user_authored(msg)) return;
+    if (str_eq(json_get_str(msg, "customType"), "skill-prompt")) { /* SkillMessageComponent */
+        toolcard_break_group(u);
+        msgview_t *v = mv_new(MV_SKILL);
+        v->msg = json_clone(msg);
+        add_view(u, v);
+        ui_queue_refresh(u);
+        return;
+    }
     char *text = agent_queued_text(msg);
     bool drawn = false;
     for (size_t i = 0; i < u->optimistic.n; i++) {

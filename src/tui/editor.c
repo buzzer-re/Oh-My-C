@@ -87,10 +87,74 @@ void tui_ac_default_add_command(tui_ac_default_t *p, const char *name, const cha
 }
 
 void tui_ac_default_add_command_icon(tui_ac_default_t *p, const char *name, const char *description, const char *icon) {
+    tui_ac_default_add_command_hint(p, name, description, icon, NULL);
+}
+
+void tui_ac_default_add_command_hint(tui_ac_default_t *p, const char *name, const char *description, const char *icon,
+                                     const char *hint) {
     strvec_push(&p->commands, name);
     strvec_push(&p->descriptions, description ? description : "");
     strvec_push(&p->icons, icon ? icon : "");
+    strvec_push(&p->hints, hint ? hint : "");
 }
+
+/* ---------- skill namespace (autocomplete.ts) ---------- */
+
+#define SKILL_NS "skill:"
+
+static bool is_skill_cmd(const char *name) { return str_starts(name, SKILL_NS); }
+
+/* commandBreakoutTier: exact / leading-prefix tier */
+static double breakout_tier(const char *q, const char *t) {
+    if (!strcmp(q, t)) return 1000;
+    if (str_starts(t, q)) return 900;
+    return 0;
+}
+
+/* skillBareNameBreakoutTier: the bare name or one of its hyphen-delimited segments starts with the query */
+static double skill_breakout_tier(const char *q, const char *bare) {
+    size_t ql = strlen(q), bl = strlen(bare);
+    if (!ql) return 0;
+    if (!strcmp(q, bare)) return 1000;
+    if (str_starts(bare, q)) return 900;
+    size_t s = 0;
+    while (s < bl) {
+        while (s < bl && bare[s] != '-') s++;
+        s++;
+        if (s >= bl) break;
+        if (!strncmp(bare + s, q, ql)) {
+            size_t e = s;
+            while (e < bl && bare[e] != '-') e++;
+            return ql == e - s ? 1000 : 900;
+        }
+    }
+    return 0;
+}
+
+/* findLeadingSlashCommandStart / findTrailingSlashCommandStart (/(?:^|\s)\/([^\s/]*)$/) */
+static long leading_slash_start(const char *s) {
+    size_t i = 0;
+    while (s[i] && isspace((unsigned char)s[i])) i++;
+    return s[i] == '/' ? (long)i : -1;
+}
+
+static long trailing_slash_start(const char *s) {
+    size_t n = strlen(s), i = n;
+    while (i > 0 && !isspace((unsigned char)s[i - 1]) && s[i - 1] != '/') i--;
+    if (i == 0 || s[i - 1] != '/') return -1;
+    size_t slash = i - 1;
+    if (slash > 0 && !isspace((unsigned char)s[slash - 1])) return -1;
+    return (long)slash;
+}
+
+static bool blank_span(const char *s, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (!isspace((unsigned char)s[i])) return false;
+    return true;
+}
+
+/* midPromptSkillTokenMatches */
+static bool mid_prompt_skill_matches(const char *q, const char *lname, const char *ldesc);
 
 void tui_ac_default_add_alias(tui_ac_default_t *p, const char *command, const char *alias) {
     strvec_push(&p->alias_names, alias);
@@ -104,6 +168,7 @@ void tui_ac_default_free(tui_ac_default_t *p) {
     strvec_free(&p->commands);
     strvec_free(&p->descriptions);
     strvec_free(&p->icons);
+    strvec_free(&p->hints);
     free(p->cwd);
     free(p);
 }
@@ -146,78 +211,157 @@ static bool complete_path(tui_ac_default_t *p, const char *token, size_t token_l
     return ok;
 }
 
+static bool mid_prompt_skill_matches(const char *q, const char *lname, const char *ldesc) {
+    if (str_starts(SKILL_NS, q)) return true;
+    if (str_starts(q, SKILL_NS)) return ac_command_score(q, lname) > 0 || (*ldesc && ac_command_score(q, ldesc) > 0);
+    return is_skill_cmd(lname) && skill_breakout_tier(q, lname + strlen(SKILL_NS)) > 0;
+}
+
+/* buildSlashCommandCompletions over the registered commands (collapseSkillNamespace applied unless `mid`,
+ * which keeps skills only: buildMidPromptSkillCompletions). Items insert "/<name> " ("/skill:" for the
+ * namespace row). */
+static void slash_completions(tui_ac_default_t *p, const char *q, bool mid, tui_ac_result_t *out) {
+    size_t n = p->commands.n;
+    /* collapseSkillNamespace */
+    bool collapse = !mid && !str_starts(q, SKILL_NS);
+    bool approaches = str_starts(SKILL_NS, q);
+    double command_tier = 0;
+    size_t skill_count = 0;
+    const char *skill_icon = NULL;
+    if (collapse && !approaches) {
+        for (size_t i = 0; i < n && command_tier < 1000; i++) {
+            if (is_skill_cmd(p->commands.v[i])) continue;
+            char *ln = str_lower(p->commands.v[i]);
+            command_tier = MAX(command_tier, breakout_tier(q, ln));
+            free(ln);
+            for (size_t k = 0; k < p->alias_names.n; k++) {
+                if (strcmp(p->alias_targets.v[k], p->commands.v[i])) continue;
+                char *la = str_lower(p->alias_names.v[k]);
+                command_tier = MAX(command_tier, breakout_tier(q, la));
+                free(la);
+            }
+        }
+    }
+    /* candidate rows: registered commands, then the namespace row (index n) */
+    double *score = xcalloc(n + 1, sizeof *score);
+    size_t *order = xcalloc(n + 1, sizeof *order);
+    bool *desc_only = xcalloc(n + 1, sizeof *desc_only);
+    int *alias_hit = xcalloc(n + 1, sizeof *alias_hit);
+    size_t m = 0;
+    for (size_t i = 0; i < n; i++) {
+        const char *name = p->commands.v[i];
+        bool skill = is_skill_cmd(name);
+        char *ln = str_lower(name), *ld = str_lower(p->descriptions.v[i]);
+        bool keep = true;
+        if (mid) keep = skill && mid_prompt_skill_matches(q, ln, ld);
+        else if (collapse && skill) {
+            skill_count++;
+            if (!skill_icon && i < p->icons.n) skill_icon = p->icons.v[i];
+            keep = !approaches && skill_breakout_tier(q, ln + strlen(SKILL_NS)) > command_tier;
+        }
+        alias_hit[i] = -1;
+        if (!keep) {
+            free(ln);
+            free(ld);
+            continue;
+        }
+        double ns = !*q && skill ? 950
+                    : skill      ? MAX(ac_command_score(q, ln), skill_breakout_tier(q, ln + strlen(SKILL_NS)))
+                                 : ac_command_score(q, ln);
+        double ds = *ld && ac_subsequence(q, ld) ? ac_subsequence_score(q, ld) * 0.5 : 0;
+        double s = ns > ds ? ns : ds;
+        desc_only[i] = ns <= 0;
+        free(ln);
+        free(ld);
+        /* aliases: a better alias hit shows the alias as the row (and accepts the command) */
+        for (size_t k = 0; *q && !mid && k < p->alias_names.n; k++) {
+            if (strcmp(p->alias_targets.v[k], name)) continue;
+            char *la = str_lower(p->alias_names.v[k]);
+            double as = ac_command_score(q, la);
+            free(la);
+            if (as <= 0) continue;
+            desc_only[i] = false;
+            if (as > s) {
+                s = as;
+                alias_hit[i] = (int)k;
+            }
+        }
+        if (s <= 0) continue;
+        score[i] = s;
+        order[m++] = i;
+    }
+    bool group = collapse && skill_count && approaches;
+    if (group) { /* the `/skill:` namespace row, scored like a skill command */
+        score[n] = !*q ? 950 : ac_command_score(q, SKILL_NS);
+        char *ds = xasprintf("%zu skill%s", skill_count, skill_count == 1 ? "" : "s");
+        double d = ac_subsequence(q, ds) && *q ? ac_subsequence_score(q, ds) * 0.5 : 0;
+        free(ds);
+        if (d > score[n]) score[n] = d;
+        alias_hit[n] = -1;
+        if (score[n] > 0) order[m++] = n;
+    }
+    /* stable sort by score desc */
+    for (size_t a = 1; a < m; a++)
+        for (size_t b = a; b > 0 && score[order[b]] > score[order[b - 1]]; b--) {
+            size_t t = order[b];
+            order[b] = order[b - 1];
+            order[b - 1] = t;
+        }
+    for (size_t k = 0; k < m && (int)out->items.n < p->max_items; k++) {
+        size_t i = order[k];
+        if (i == n) {
+            char *d = xasprintf("%zu skill%s", skill_count, skill_count == 1 ? "" : "s");
+            tui_ac_result_add_icon(out, "/" SKILL_NS, SKILL_NS, d, skill_icon);
+            free(d);
+            continue;
+        }
+        const char *shown = alias_hit[i] >= 0 ? p->alias_names.v[alias_hit[i]] : p->commands.v[i];
+        char *val = xasprintf("/%s ", shown);
+        char *live = p->describe ? p->describe(p->describe_ud, p->commands.v[i]) : NULL;
+        const char *desc = live ? live : p->descriptions.v[i];
+        const char *hint = i < p->hints.n ? p->hints.v[i] : "";
+        char *full = *hint ? (*desc ? xasprintf("%s - %s", hint, desc) : xstrdup(hint)) : xstrdup(desc);
+        tui_ac_result_add_icon(out, val, shown, full, i < p->icons.n ? p->icons.v[i] : NULL);
+        free(full);
+        free(live);
+        free(val);
+    }
+    if (m) out->first_desc_match = order[0] < n && desc_only[order[0]];
+    free(desc_only);
+    free(alias_hit);
+    free(score);
+    free(order);
+}
+
 bool tui_ac_default_provider(void *ud, const char *line_before, bool first_line, bool forced, tui_ac_result_t *out) {
     tui_ac_default_t *p = ud;
     size_t len = strlen(line_before);
-    /* slash commands: "/xyz" alone on the first line (upstream buildSlashCommandCompletions ranking:
-     * exact 1000, prefix 900, else subsequence tiers; a description subsequence scores half) */
-    if (first_line && line_before[0] == '/' && !strpbrk(line_before, " \t")) {
-        char *q = str_lower(line_before + 1);
-        size_t n = p->commands.n;
-        double *score = xcalloc(n ? n : 1, sizeof *score);
-        size_t *order = xcalloc(n ? n : 1, sizeof *order);
-        bool *desc_only = xcalloc(n ? n : 1, sizeof *desc_only);
-        int *alias_hit = xcalloc(n ? n : 1, sizeof *alias_hit);
-        size_t m = 0;
-        for (size_t i = 0; i < n; i++) {
-            char *ln = str_lower(p->commands.v[i]), *ld = str_lower(p->descriptions.v[i]);
-            double ns = ac_command_score(q, ln);
-            double ds = *ld && ac_subsequence(q, ld) ? ac_subsequence_score(q, ld) * 0.5 : 0;
-            double s = ns > ds ? ns : ds;
-            desc_only[i] = ns <= 0;
-            free(ln);
-            free(ld);
-            /* aliases: a better alias hit shows the alias as the row (and accepts the command) */
-            alias_hit[i] = -1;
-            for (size_t k = 0; *q && k < p->alias_names.n; k++) {
-                if (strcmp(p->alias_targets.v[k], p->commands.v[i])) continue;
-                char *la = str_lower(p->alias_names.v[k]);
-                double as = ac_command_score(q, la);
-                free(la);
-                if (as <= 0) continue;
-                desc_only[i] = false;
-                if (as > s) {
-                    s = as;
-                    alias_hit[i] = (int)k;
-                }
+    /* slash commands (CombinedAutocompleteProvider.getSuggestions): a leading `/token` of the submitted
+     * prompt completes command names (upstream buildSlashCommandCompletions ranking: exact 1000, prefix 900,
+     * else subsequence tiers; a description subsequence scores half); a `/token` after prompt text looks up
+     * skills only */
+    long lead = leading_slash_start(line_before), trail = trailing_slash_start(line_before);
+    bool text_before_trail = trail >= 0 && (!first_line || !blank_span(line_before, (size_t)trail));
+    bool text_before_lead = lead >= 0 && !first_line;
+    long start = text_before_trail ? trail : text_before_lead ? -1 : lead;
+    if (start >= 0) {
+        const char *cmd_text = line_before + start;
+        const char *sp = strchr(cmd_text, ' ');
+        bool mid = text_before_trail;
+        if (!sp) {
+            char *q = str_lower(cmd_text + 1);
+            slash_completions(p, q, mid, out);
+            free(q);
+            if (out->items.n) {
+                out->prefix_len = len - (size_t)start;
+                out->slash = true;
+                return true;
             }
-            if (s <= 0) continue;
-            score[i] = s;
-            order[m++] = i;
-        }
-        /* stable sort by score desc */
-        for (size_t a = 1; a < m; a++)
-            for (size_t b = a; b > 0 && score[order[b]] > score[order[b - 1]]; b--) {
-                size_t t = order[b];
-                order[b] = order[b - 1];
-                order[b - 1] = t;
-            }
-        for (size_t k = 0; k < m && (int)out->items.n < p->max_items; k++) {
-            size_t i = order[k];
-            const char *shown = alias_hit[i] >= 0 ? p->alias_names.v[alias_hit[i]] : p->commands.v[i];
-            char *val = xasprintf("/%s ", shown);
-            char *live = p->describe ? p->describe(p->describe_ud, p->commands.v[i]) : NULL;
-            tui_ac_result_add_icon(out, val, shown, live ? live : p->descriptions.v[i],
-                                   i < p->icons.n ? p->icons.v[i] : NULL);
-            free(live);
-            free(val);
-        }
-        if (m) out->first_desc_match = desc_only[order[0]];
-        free(desc_only);
-        free(alias_hit);
-        free(score);
-        free(order);
-        free(q);
-        out->prefix_len = len;
-        out->slash = true;
-        return out->items.n > 0;
-    }
-    /* "/cmd args": the command's argument completions first, then path completion */
-    if (first_line && line_before[0] == '/' && p->args) {
-        size_t sp = strcspn(line_before, " \t");
-        if (line_before[sp]) {
-            char *cmd = xstrndup(line_before + 1, sp - 1);
-            const char *arg = line_before + sp + 1;
+            if (!mid && start == lead && !strchr(cmd_text + 1, '/')) return false;
+        } else if (!mid && p->args) {
+            /* "/cmd args": the command's argument completions first, then path completion */
+            char *cmd = xstrndup(cmd_text + 1, (size_t)(sp - cmd_text - 1));
+            const char *arg = sp + 1;
             int r = p->args(p->args_ud, cmd, arg, out);
             free(cmd);
             if (r < 0) return false;
@@ -240,11 +384,22 @@ bool tui_ac_default_provider(void *ud, const char *line_before, bool first_line,
 
 char *tui_ac_default_inline_hint(void *ud, const char *line_before, bool first_line) {
     tui_ac_default_t *p = ud;
-    if (!p || !p->inline_hint || !first_line || line_before[0] != '/') return NULL;
+    if (!p || !first_line || line_before[0] != '/') return NULL;
     size_t sp = strcspn(line_before, " \t");
     if (!line_before[sp]) return NULL;
     char *cmd = xstrndup(line_before + 1, sp - 1);
-    char *h = p->inline_hint(p->args_ud, cmd, line_before + sp + 1);
+    const char *arg = line_before + sp + 1;
+    /* the first command with this name owns the hint: a registered argument hint (buildStaticInlineHint:
+     * shown while no argument is typed), else the builtin's own hint logic */
+    char *h = NULL;
+    bool owned = false;
+    for (size_t i = 0; i < p->commands.n && !owned; i++) {
+        if (strcmp(p->commands.v[i], cmd)) continue;
+        owned = true;
+        if (i < p->hints.n && *p->hints.v[i]) h = blank_span(arg, strlen(arg)) ? xstrdup(p->hints.v[i]) : NULL;
+        else if (p->inline_hint) h = p->inline_hint(p->args_ud, cmd, arg);
+    }
+    if (!owned && p->inline_hint) h = p->inline_hint(p->args_ud, cmd, arg);
     free(cmd);
     return h;
 }
@@ -253,7 +408,52 @@ char *tui_ac_default_inline_hint(void *ud, const char *line_before, bool first_l
 
 static char *cur_line(tui_editor_t *ed) { return ed->lines.v[ed->cl]; }
 
+static void push_undo(tui_editor_t *ed, int action);
+
+/* collapseToAtom for every completed token the host recognizes (skill chips) */
+static void collapse_tokens(tui_editor_t *ed) {
+    if (!ed->token_fn || ed->collapsing) return;
+    ed->collapsing = true;
+    char *text = NULL;
+    for (size_t i = 0; i < ed->lines.n; i++) {
+        size_t from = 0;
+        for (;;) {
+            if (!text) {
+                sb_t b = SB_INIT;
+                for (size_t k = 0; k < ed->lines.n; k++) sb_appendf(&b, "%s%s", k ? "\n" : "", ed->lines.v[k]);
+                text = sb_detach(&b);
+            }
+            const char *line = ed->lines.v[i];
+            size_t s, e;
+            char *label = NULL, *exp = NULL, *style = NULL;
+            if (!ed->token_fn(ed->token_ud, text, line, from, &s, &e, &label, &exp, &style)) break;
+            size_t len = strlen(line);
+            if (e > len || s >= e || (e == len && i + 1 == ed->lines.n)) {
+                free(label);
+                free(exp);
+                free(style);
+                break;
+            }
+            push_undo(ed, ACT_OTHER);
+            tui_editor_paste_t pp = {0, label, exp, style};
+            vec_push(&ed->pastes, pp);
+            size_t ll = strlen(label);
+            char *nl = xasprintf("%.*s%s%s", (int)s, line, label, line + e);
+            if (ed->cl == i && ed->cc > s) ed->cc = ed->cc >= e ? ed->cc - (e - s) + ll : s + ll;
+            free(ed->lines.v[i]);
+            ed->lines.v[i] = nl;
+            ed->last_action = ACT_NONE;
+            from = s + ll;
+            free(text);
+            text = NULL;
+        }
+    }
+    free(text);
+    ed->collapsing = false;
+}
+
 static void notify_change(tui_editor_t *ed) {
+    collapse_tokens(ed);
     if (ed->on_change) ed->on_change(ed, ed->cb_ud);
     tui_component_request_render(&ed->base);
 }
@@ -454,12 +654,23 @@ void tui_editor_set_paste_hook(tui_editor_t *ed, bool (*fn)(void *ud, tui_editor
     ed->paste_hook_ud = ud;
 }
 
+void tui_editor_set_token_hook(tui_editor_t *ed,
+                               bool (*fn)(void *ud, const char *text, const char *line, size_t from, size_t *start, size_t *end,
+                                          char **label, char **expansion, char **style),
+                               void *ud) {
+    ed->token_fn = fn;
+    ed->token_ud = ud;
+}
+
 /* paint styled atoms (omp chip style: bold + identity color, then a reset the text coloring re-opens) */
 static char *style_atoms(const tui_editor_t *ed, char *s, bool surface) {
     for (size_t i = 0; i < ed->pastes.n; i++) {
         const tui_editor_paste_t *p = &ed->pastes.v[i];
         if (!p->style || !strstr(s, p->marker)) continue;
-        char *rep = xasprintf("\x1b[1m%s%s%s", p->style, p->marker, surface ? "\x1b[22m\x1b[39m" : "\x1b[0m");
+        /* a pill (style with a background, skill chips) restores the default background too */
+        bool pill = strstr(p->style, "[48") != NULL;
+        char *rep = xasprintf("\x1b[1m%s%s%s", p->style, p->marker,
+                              surface ? (pill ? "\x1b[22m\x1b[39m\x1b[49m" : "\x1b[22m\x1b[39m") : "\x1b[0m");
         char *t = str_replace(s, p->marker, rep);
         free(rep);
         free(s);
@@ -719,12 +930,19 @@ static void history_nav(tui_editor_t *ed, int dir) {
 
 /* ---------- autocomplete ---------- */
 
+/* #hasOnlyWhitespaceBeforeCursorLine: the cursor's line starts the submitted prompt */
+static bool lines_above_blank(const tui_editor_t *ed) {
+    for (size_t i = 0; i < ed->cl; i++)
+        if (!blank_span(ed->lines.v[i], strlen(ed->lines.v[i]))) return false;
+    return true;
+}
+
 static void refresh_ac(tui_editor_t *ed, bool forced) {
     if (!ed->ac_fn) return;
     char *before = xstrndup(cur_line(ed), ed->cc);
     tui_ac_result_t r;
     memset(&r, 0, sizeof r);
-    bool ok = ed->ac_fn(ed->ac_ud, before, ed->cl == 0, forced, &r);
+    bool ok = ed->ac_fn(ed->ac_ud, before, lines_above_blank(ed), forced, &r);
     free(before);
     if (!ok || !r.items.n || r.prefix_len > ed->cc) {
         tui_ac_result_free(&r);
@@ -769,7 +987,15 @@ static void maybe_trigger_ac(tui_editor_t *ed) {
     }
     const char *line = cur_line(ed);
     bool trig = false;
-    if (ed->cl == 0 && line[0] == '/') trig = true; /* command names, then their arguments */
+    bool above_blank = lines_above_blank(ed);
+    if (above_blank && leading_slash_start(line) >= 0) trig = true; /* command names, then their arguments */
+    if (!trig) { /* #isInMidPromptSkillSlashContext: a `/token` after prompt text looks up skills */
+        char *before = xstrndup(line, ed->cc);
+        long t = trailing_slash_start(before);
+        if (t >= 0 && !(above_blank && leading_slash_start(before) >= 0) && (!above_blank || !blank_span(before, (size_t)t)))
+            trig = true;
+        free(before);
+    }
     if (!trig) {
         size_t s = ed->cc;
         while (s > 0 && line[s - 1] != ' ' && line[s - 1] != '\t') s--;
@@ -793,6 +1019,7 @@ static void accept_ac(tui_editor_t *ed) {
     set_line(ed, ed->cl, nl);
     close_ac(ed);
     if (str_ends(val, "/")) refresh_ac(ed, true);
+    else if (!strcmp(val, "/" SKILL_NS)) refresh_ac(ed, false); /* the namespace row reopens on the skills */
     free(val);
     ed->last_action = ACT_OTHER;
     notify_change(ed);
@@ -995,7 +1222,7 @@ bool tui_editor_handle_key(tui_editor_t *ed, const tui_key_t *k) {
             bool submit = tui_kb(k, "tui.input.submit");
             accept_ac(ed);
             /* like upstream: Enter on a slash-command completion runs the command */
-            if (submit && ed->cl == 0 && !ed->ac_list) {
+            if (submit && lines_above_blank(ed) && !ed->ac_list) {
                 char *line = cur_line(ed);
                 size_t n = line ? strlen(line) : 0;
                 while (n && line[n - 1] == ' ') n--;
@@ -1587,7 +1814,7 @@ char *tui_editor_ghost(tui_editor_t *ed) {
         return sel < ed->ac_ghosts.n && *ed->ac_ghosts.v[sel] ? xstrdup(ed->ac_ghosts.v[sel]) : NULL;
     }
     if (!ed->hint_fn) return NULL;
-    char *h = ed->hint_fn(ed->hint_ud, line, ed->cl == 0);
+    char *h = ed->hint_fn(ed->hint_ud, line, lines_above_blank(ed));
     if (h && !*h) {
         free(h);
         h = NULL;
