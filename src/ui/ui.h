@@ -40,6 +40,9 @@ typedef struct {
     char *retry_note;   /* assistant: failed attempt recovered by a retry ("switched model; retried") */
     size_t revealed;    /* assistant: smooth streaming reveal position (codepoints of visible text) */
     int reveal_timer;
+    bool activity;      /* tool activity (cards, read groups, TTSR / todo notices, job rows): hidden by
+                         * display.hideToolActivity (omp ToolActivityComponent) */
+    int64_t cache_miss; /* assistant: prompt tokens reprocessed after a cache invalidation (0 = no marker) */
     /* tool */
     char *tool_name, *tool_id;
     json_t *args;
@@ -72,6 +75,7 @@ struct ui {
     bool worker_running;
     bool expand_tools;
     bool hide_thinking;
+    bool hide_tool_activity;  /* display.hideToolActivity (app.tools.toggleVisibility) */
     int64_t last_ctrl_c;      /* app.clear double-press window (500 ms) */
     int64_t last_escape;      /* app.interrupt double-press window (doubleEscapeAction) */
     /* coalesced streaming updates */
@@ -200,6 +204,11 @@ void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms);
 void ui_working_compaction(ui_t *u, const char *label);
 bool ui_working_busy(ui_t *u); /* a retry countdown or compaction row replaces the working/title row */
 void ui_chat_rebuild(ui_t *u); /* replay the transcript from the session tree (resume, branch, reload) */
+/* detectCacheInvalidation(prev usage, current usage): reprocessed prompt tokens, 0 = no invalidation */
+int64_t ui_detect_cache_invalidation(const json_t *prev, const json_t *cur);
+char *ui_cache_miss_divider(int64_t tokens, int width); /* the marker's rule row (owned) */
+void ui_toggle_tool_activity(ui_t *u);                  /* app.tools.toggleVisibility */
+void ui_set_tool_activity_hidden(ui_t *u, bool hidden); /* display.hideToolActivity changed */
 /* replay transcript entries (message / custom_message, one path) into `dest`, a container apart from the
  * live transcript (rewind selector replica); ends[i] receives dest's child count after entries[i] */
 void ui_chat_replay_into(ui_t *u, tui_container_t *dest, const json_t *entries, size_t *ends);

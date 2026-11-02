@@ -1724,6 +1724,11 @@ static void apply_change(settings_view_t *v, const char *path) {
         app_set_thinking_level(u->app, get_str(path, "high"));
     }
     if (!strcmp(path, "hideThinkingBlock")) u->hide_thinking = get_bool(path, false);
+    if (!strcmp(path, "display.hideToolActivity")) ui_set_tool_activity_hidden(u, get_bool(path, false));
+    /* usage rows, cache-miss markers and the compacted-history collapse are baked in at build time */
+    if (!strcmp(path, "display.cacheMissMarker") || !strcmp(path, "display.collapseCompacted") ||
+        !strcmp(path, "display.showTokenUsage") || !strcmp(path, "display.showTurnTime"))
+        ui_chat_rebuild(u);
     if (!strcmp(path, "autolearn.enabled") || !strcmp(path, "memory.backend")) autolearn_reconcile(u->app);
     ui_chrome_setup(u);
     tui_request_full_render(u->tui);

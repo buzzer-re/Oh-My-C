@@ -3011,7 +3011,22 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
         tui_request_full_render(t);
         return true;
     }
+    if (tui_kb(k, "app.tools.toggleVisibility")) {
+        ui_toggle_tool_activity(u);
+        return true;
+    }
     if (tui_kb(k, "app.tools.expand")) {
+        if (u->hide_tool_activity) { /* toggleToolOutputExpansion while tool activity is hidden */
+            char *key = ui_editor_key("app.tools.toggleVisibility");
+            char *hint = *key ? xasprintf("%s or /settings", key) : xstrdup("/settings");
+            char *msg = xasprintf("Tool activity is hidden \xe2\x80\x94 show it with %s before expanding", hint);
+            add_notice(u, "info", msg);
+            free(msg);
+            free(hint);
+            free(key);
+            tui_request_render(t);
+            return true;
+        }
         u->expand_tools = !u->expand_tools;
         add_notice(u, "info", u->expand_tools ? "Tool output expansion: enabled" : "Tool output expansion: disabled");
         for (size_t i = 0; i < tui_container_count(u->chat); i++) tui_component_invalidate(u->chat->children.v[i]);
@@ -3217,6 +3232,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     g_ui = &u;
     u.app = a;
     u.hide_thinking = settings_bool("hideThinkingBlock", false);
+    u.hide_tool_activity = settings_bool("display.hideToolActivity", false);
     kbcfg_init_global(); /* KeybindingsManager.create(): agent-dir keybindings.yml (+ legacy .json migration) */
     pthread_mutex_init(&u.mu, NULL);
     pthread_cond_init(&u.ask_cv, NULL);

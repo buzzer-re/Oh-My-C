@@ -671,7 +671,7 @@ void ui_assistant_streamed(ui_t *u, msgview_t *v) {
 static const char *const THINKING_FRAMES[] = {"\xe2\x9c\xbb", "\xe2\x9c\xbc", "\xe2\x9d\x89", "\xe2\x9d\x8a",
                                               "\xe2\x9c\xba", "\xe2\x9c\xb9", "\xe2\x9c\xb8", "\xe2\x9c\xb6"};
 
-static void render_assistant(msgview_t *v, int width, strvec_t *o) {
+static void render_assistant_body(msgview_t *v, int width, strvec_t *o) {
     json_t *content = json_get(v->msg, "content");
     bool hide = g_ui && g_ui->hide_thinking;
     json_t *shown = NULL;
@@ -764,6 +764,41 @@ static void render_assistant(msgview_t *v, int width, strvec_t *o) {
         const char *err = json_get_str(v->msg, "errorMessage");
         strvec_push(o, "");
         error_block_rows(o, err && *err ? err : "Error", width, g_ui && g_ui->expand_tools ? (size_t)-1 : 8, false);
+    }
+}
+
+/* CacheInvalidationMarkerComponent (MessageDividerComponent): a short dim rule and a muted label surrounded
+ * by blank rows, `────────── ⊘ cache miss · 50.9K tokens` */
+char *ui_cache_miss_divider(int64_t tokens, int width) {
+    char num[24];
+    format_number(num, sizeof num, tokens);
+    const char *icon = tui_sym("icon.cacheMiss");
+    char *head = icon && *icon ? xasprintf("%s cache miss", icon) : xstrdup("cache miss");
+    char *dot = trim_dup(tui_sym("sep.dot"));
+    char *label = tokens > 0 ? xasprintf("%s %s %s tokens", head, dot, num) : xstrdup(head);
+    free(dot);
+    free(head);
+    width = MAX(1, width);
+    int rule_w = MIN(10, width - tui_visible_width(label) - 1);
+    char *painted = fg(TUI_TC_MUTED, label);
+    free(label);
+    if (rule_w < 1) return painted; /* truncateWhenNarrow: false keeps the bare label */
+    sb_t r = SB_INIT;
+    sb_repeat(&r, tui_sym("tree.horizontal"), rule_w);
+    char *rule = fg(TUI_TC_DIM, sb_cstr(&r));
+    sb_free(&r);
+    char *line = xasprintf("%s %s", rule, painted);
+    free(rule);
+    free(painted);
+    return line;
+}
+
+static void render_assistant(msgview_t *v, int width, strvec_t *o) {
+    render_assistant_body(v, width, o);
+    if (v->cache_miss > 0 && !v->streaming) { /* the marker slot trails the message's rows */
+        strvec_push(o, "");
+        strvec_push_own(o, ui_cache_miss_divider(v->cache_miss, width));
+        strvec_push(o, "");
     }
 }
 
@@ -1093,6 +1128,7 @@ static void render_todo_reminder(msgview_t *v, int width, strvec_t *o) {
 
 static void mv_render(tui_component_t *c, int width, strvec_t *out) {
     msgview_t *v = (msgview_t *)c;
+    if (v->activity && g_ui && g_ui->hide_tool_activity) return; /* ToolActivityComponent hidden: no rows */
     bool animated = v->kind == MV_ASSISTANT && v->streaming && g_ui && g_ui->hide_thinking;
     if (!v->dirty && v->cache_w == width && !animated) {
         for (size_t i = 0; i < v->cache.n; i++) strvec_push(out, v->cache.v[i]);
@@ -1154,12 +1190,29 @@ msgview_t *mv_new(mv_kind_t k) {
     tui_component_init(&v->base, &MV_VT);
     v->kind = k;
     v->dirty = true;
+    v->activity = k == MV_TOOL || k == MV_TTSR || k == MV_TODO;
     return v;
 }
 
 void add_view(ui_t *u, msgview_t *v) {
     tui_container_add(u->chat, &v->base);
     tui_request_render(u->tui);
+}
+
+/* display.hideToolActivity: tool activity blocks stay mounted and render no rows while hidden; showing them
+ * again collapses tool output (toggleToolActivityVisibility). The change applies to scrollback too. */
+void ui_set_tool_activity_hidden(ui_t *u, bool hidden) {
+    u->hide_tool_activity = hidden;
+    if (!hidden) u->expand_tools = false;
+    for (size_t i = 0; i < tui_container_count(u->chat); i++) tui_component_invalidate(u->chat->children.v[i]);
+    tui_request_full_render(u->tui);
+}
+
+void ui_toggle_tool_activity(ui_t *u) {
+    bool hidden = !u->hide_tool_activity;
+    settings_set_global("display.hideToolActivity", json_bool(hidden));
+    ui_set_tool_activity_hidden(u, hidden);
+    add_notice(u, "info", hidden ? "Tool activity: hidden" : "Tool activity: visible");
 }
 
 static msgview_t *last_view(ui_t *u) {
@@ -1439,10 +1492,74 @@ static void collect_post_tool(const json_t *msg) {
     }
 }
 
+/* ---------- cache-miss marker (display.cacheMissMarker, cache-invalidation-marker.ts) ---------- */
+
+#define MIN_CACHE_FOOTPRINT 2048
+static json_t *g_last_usage; /* lastAssistantUsage: the newest assistant usage that touched the prompt */
+
+/* detectCacheInvalidation: tokens the cold turn reprocessed after a warm cache went cold, else 0 */
+int64_t ui_detect_cache_invalidation(const json_t *prev, const json_t *cur) {
+    if (!prev || !cur) return 0;
+    if (json_get_num(prev, "cacheRead", 0) < MIN_CACHE_FOOTPRINT) return 0;
+    if (json_get_num(cur, "cacheRead", 0) > 0) return 0;
+    if (json_get_num(cur, "cacheWrite", 0) <= 0) return 0;
+    double reprocessed = json_get_num(cur, "cacheWrite", 0) + json_get_num(cur, "input", 0);
+    if (reprocessed < MIN_CACHE_FOOTPRINT) return 0;
+    return (int64_t)reprocessed;
+}
+
+/* an assistant message's usage arrived (live message_end or replay): mark the turn when it lost the cache
+ * (unless a compaction / model / plan-mode change explains the miss), then remember the usage */
+static void cache_usage_seen(msgview_t *v, const json_t *msg, bool explained) {
+    const json_t *us = json_get_obj(msg, "usage");
+    if (!us || json_get_num(us, "cacheRead", 0) + json_get_num(us, "cacheWrite", 0) + json_get_num(us, "input", 0) <= 0)
+        return;
+    if (!explained && settings_bool("display.cacheMissMarker", false))
+        v->cache_miss = ui_detect_cache_invalidation(g_last_usage, us);
+    json_free(g_last_usage);
+    g_last_usage = json_clone(us);
+}
+
+/* buildSessionContext's transcript reset tracking (cacheMissExplainedAt): a compaction, a model change or a
+ * plan-mode transition explains the next assistant turn's cache miss, as does a model switch between turns */
+static struct {
+    bool pending_reset;
+    bool plan;
+    char *last_model;
+} g_rt;
+
+static void rt_reset(void) {
+    free(g_rt.last_model);
+    memset(&g_rt, 0, sizeof g_rt);
+}
+
+static void rt_entry(const json_t *e) {
+    const char *t = json_get_str(e, "type");
+    if (str_eq(t, "compaction") || str_eq(t, "model_change")) g_rt.pending_reset = true;
+    else if (str_eq(t, "mode_change")) {
+        bool plan = str_eq(json_get_str(e, "mode"), "plan");
+        if (plan != g_rt.plan) g_rt.pending_reset = true;
+        g_rt.plan = plan;
+    }
+}
+
+static bool rt_message(const json_t *m) {
+    if (!str_eq(json_get_str(m, "role"), "assistant")) return false;
+    char *model = xasprintf("%s/%s", json_get_str(m, "provider") ? json_get_str(m, "provider") : "undefined",
+                            json_get_str(m, "model") ? json_get_str(m, "model") : "undefined");
+    bool changed = g_rt.last_model && strcmp(g_rt.last_model, model) != 0;
+    free(g_rt.last_model);
+    g_rt.last_model = model;
+    bool explained = g_rt.pending_reset || changed;
+    g_rt.pending_reset = false;
+    return explained;
+}
+
 void ui_assistant_end(ui_t *u, msgview_t *v) {
     v->streaming = false;
     reveal_stop(v);
     collect_post_tool(v->msg);
+    cache_usage_seen(v, v->msg, false);
     v->dirty = true;
     const char *stop = json_get_str(v->msg, "stopReason");
     const char *err = json_get_str(v->msg, "errorMessage");
@@ -1668,6 +1785,7 @@ void ui_async_result(ui_t *u, const json_t *m) {
     msgview_t *v = mv_new(MV_NOTICE);
     v->level = "styled";
     v->text = sb_detach(&b);
+    v->activity = true; /* buildAsyncResultBlock wraps its rows in a ToolActivityContainer */
     add_view(u, v);
 }
 
@@ -1742,6 +1860,7 @@ static void replay_message(ui_t *u, const json_t *m, hmap_t *pending) {
         toolcard_note_message(u, m, true); /* keeps read grouping identical to the live transcript */
         msgview_t *v = mv_new(MV_ASSISTANT);
         v->msg = json_clone(m);
+        cache_usage_seen(v, m, rt_message(m));
         tui_container_add(u->chat, &v->base);
         const json_t *content = json_get(m, "content"), *b;
         bool seen_tool = false;
@@ -1818,6 +1937,7 @@ static void replay_message(ui_t *u, const json_t *m, hmap_t *pending) {
 
 static void replay_entry(ui_t *u, const json_t *e, hmap_t *pending) {
     const char *t = json_get_str(e, "type");
+    rt_entry(e);
     if (str_eq(t, "message")) {
         replay_message(u, json_get(e, "message"), pending);
     } else if (str_eq(t, "custom_message")) {
@@ -1839,6 +1959,39 @@ static void replay_entry(ui_t *u, const json_t *e, hmap_t *pending) {
     }
 }
 
+/* display.collapseCompacted off (buildSessionContext transcript && !collapseCompactedHistory): every path entry
+ * in chronological order, reset boundaries included; each compaction draws its divider where it fired, and
+ * the ones a newer compaction replaced carry omp's superseded summary */
+static void replay_full_history(ui_t *u, const json_t *path, hmap_t *pending) {
+    size_t n = json_len(path);
+    const char *latest = NULL;
+    for (size_t i = 0; i < n; i++)
+        if (str_eq(json_get_str(json_at(path, i), "type"), "compaction")) latest = json_get_str(json_at(path, i), "id");
+    for (size_t i = 0; i < n; i++) {
+        const json_t *e = json_at(path, i);
+        if (!str_eq(json_get_str(e, "type"), "compaction")) {
+            replay_entry(u, e, pending);
+            continue;
+        }
+        rt_entry(e);
+        const json_t *next = i + 1 < n ? json_at(path, i + 1) : NULL;
+        if (next && str_eq(json_get_str(next, "type"), "compaction") && str_eq(json_get_str(e, "method"), "snapcompact") &&
+            str_eq(json_get_str(next, "method"), "snapcompact") &&
+            str_eq(json_get_str(next, "parentId"), json_get_str(e, "id")) &&
+            str_eq(json_get_str(next, "firstKeptEntryId"), json_get_str(e, "firstKeptEntryId")) &&
+            json_get_num(next, "tokensBefore", -1) == json_get_num(e, "tokensBefore", -2))
+            continue; /* an immediate frame-rescue replacement is the same compaction point */
+        msgview_t *v = mv_new(MV_SUMMARY);
+        v->level = "compaction";
+        v->msg = json_clone(e);
+        if (!str_eq(json_get_str(e, "id"), latest)) {
+            json_set_str(v->msg, "summary", "[Superseded compaction summary elided after a newer compaction]");
+            json_set_str(v->msg, "shortSummary", "Superseded compaction elided");
+        }
+        tui_container_add(u->chat, &v->base);
+    }
+}
+
 void ui_chat_replay_into(ui_t *u, tui_container_t *dest, const json_t *entries, size_t *ends) {
     tui_container_t *live = u->chat;
     hmap_t tools = u->tools;
@@ -1851,12 +2004,20 @@ void ui_chat_replay_into(ui_t *u, tui_container_t *dest, const json_t *entries, 
     hmap_t pending;
     hmap_init(&pending);
     toolcard_set_replaying(true);
+    json_t *live_usage = g_last_usage; /* the replica keeps its own cache-miss tracking */
+    g_last_usage = NULL;
+    typeof(g_rt) live_rt = g_rt;
+    memset(&g_rt, 0, sizeof g_rt);
     const json_t *e;
     json_arr_foreach(entries, i, e) {
         replay_entry(u, e, &pending);
         ends[i] = dest->children.n;
     }
     flush_pending_usage(u);
+    rt_reset();
+    g_rt = live_rt;
+    json_free(g_last_usage);
+    g_last_usage = live_usage;
     toolcard_set_replaying(false);
     hmap_free(&pending, NULL);
     hmap_free(&u->tools, NULL);
@@ -1868,8 +2029,9 @@ void ui_chat_replay_into(ui_t *u, tui_container_t *dest, const json_t *entries, 
 }
 
 /* Rebuild the transcript from the session tree (renderSessionContext): the path root..leaf after the last
- * reset boundary; a compaction shows the kept tail, its divider, then everything after it. Without a
- * session file the agent's live context is replayed instead. */
+ * reset boundary; a compaction shows the kept tail, its divider, then everything after it (with
+ * display.collapseCompacted off: the whole path, a divider at each compaction). Without a session file the
+ * agent's live context is replayed instead. */
 void ui_chat_rebuild(ui_t *u) {
     tui_container_clear(u->chat);
     ui_report_clear(u);
@@ -1883,7 +2045,12 @@ void ui_chat_rebuild(ui_t *u) {
     session_t *s = ui_view_app(u)->session; /* a focused subagent view replays its session */
     /* a focused subagent's session grows on its job thread: replay a locked copy of its messages instead */
     json_t *path = !u->view && s && s->leaf_id ? session_path_to(s, s->leaf_id) : NULL;
-    if (path && json_len(path)) {
+    json_free(g_last_usage);
+    g_last_usage = NULL;
+    rt_reset();
+    if (path && json_len(path) && !settings_bool("display.collapseCompacted", true)) {
+        replay_full_history(u, path, &pending);
+    } else if (path && json_len(path)) {
         size_t n = json_len(path), start = 0;
         ssize_t compaction = -1;
         for (size_t i = 0; i < n; i++) {
@@ -1918,8 +2085,14 @@ void ui_chat_rebuild(ui_t *u) {
                         break;
                     }
                 }
+                for (size_t k = (size_t)retained; k < from; k++) { /* hidden entries still feed reset tracking */
+                    const json_t *e = json_at(path, k);
+                    rt_entry(e);
+                    if (str_eq(json_get_str(e, "type"), "message")) rt_message(json_get(e, "message"));
+                }
                 for (size_t k = from; k < (size_t)compaction; k++) replay_entry(u, json_at(path, k), &pending);
             }
+            rt_entry(c); /* the first post-compaction turn, not a kept one, carries the explained miss */
             msgview_t *v = mv_new(MV_SUMMARY);
             v->level = "compaction";
             v->msg = json_clone(c);
