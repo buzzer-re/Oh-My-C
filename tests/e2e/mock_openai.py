@@ -22,6 +22,7 @@ $MOCK_DELAY (seconds, default 0) is slept between streamed chunks.
 Memory pipeline side requests (memory.backend=local startup):
   - stage-1 extraction (system "Memory-stage-one extractor") -> strict JSON {rollout_summary, rollout_slug, raw_memory}
   - stage-2 consolidation (system "memory-stage-two consolidator") -> {memory_md, memory_summary, skills:[mock-skill]}
+Subagent turns ("Complete assignment thoroughly:\n\n<assignment>") run <assignment> as the script (e.g. slow:3:done).
 Idle recap side turns ("<recap>…") answer a fixed one-line recap.
 /btw side questions ("<btw>…Question:\n<q>\n</btw>"): <q> may be md:/think:/slow:/streamfail:/fail:, else a fixed
   markdown answer naming <q>.
@@ -163,6 +164,8 @@ class H(BaseHTTPRequestHandler):
             chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
         else:
             u = text_of(last)
+            if u.startswith("Complete assignment thoroughly:\n\n"):  # subagent turn: the assignment is the script
+                u = u[len("Complete assignment thoroughly:\n\n"):].strip()
             btw = u.startswith("<btw>") and "\nQuestion:\n" in u
             if btw:  # /btw side question: the question picks the display command, else a fixed markdown answer
                 u = u.split("\nQuestion:\n", 1)[1].rsplit("\n</btw>", 1)[0]

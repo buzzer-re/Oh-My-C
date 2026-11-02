@@ -67,4 +67,34 @@ char *agents_history(const char *id, char **err);              /* history://[<id
 json_t *agents_running(void);
 bool agents_cancel(const char *id); /* proc://<id>/kill for an agent */
 
+/* ---------- Agent Hub, session focus, status badge, RPC subagent frames ---------- */
+/* Roster in registration order (Main and agents released with their session left out), each an omp AgentRecordLike:
+ * {id, displayName, kind:"sub", parentId?, status: running|idle|parked|aborted, createdAt, lastActivity, activity?,
+ *  agent, model?, thinking?, reasoning?, contextWindow?, live, parentToolCallId?, jobId?, progress?: AgentProgress}.
+ * Owned. */
+json_t *agents_list(void);
+json_t *agents_get(const char *id);                     /* one listed ref (owned) or NULL */
+void agents_counts(size_t *running, size_t *inspectable); /* running subagents / listed subagents */
+json_t *agents_messages(const char *id);                /* transcript messages (owned clone) or NULL */
+/* `x`: abort a running turn and release the agent as an `aborted` tombstone; false + *err (owned) when unknown */
+bool agents_kill(const char *id, char **err);
+/* ensureLive: reopen a killed agent, rebuild a parked one from its transcript; false + *err (owned) */
+bool agents_revive(const char *id, char **err);
+/* prompt(text, steer): revive, then steer a running turn or start a turn of the idle agent (not delivered to its
+ * parent); false + *err (owned) */
+bool agents_prompt(const char *id, const char *text, char **err);
+/* a live subagent session held by a view (session focus) is not freed until agents_unpin; NULL when not live */
+struct app *agents_pin(const char *id);
+void agents_unpin(struct app *a);
+char *agents_parent_of(const char *id); /* owned parent id or NULL */
+/* registry changes (spawn, status, progress, kill/revive); fn runs on any thread, without registry locks */
+typedef void (*agents_change_fn)(void *ud);
+void agents_listen(agents_change_fn fn, void *ud);
+void agents_unlisten(agents_change_fn fn, void *ud);
+/* RPC subagent channels: "lifecycle" (SubagentLifecyclePayload), "progress" (SubagentProgressPayload) and, when
+ * `events`, "event" ({id, event}); payload borrowed for the call. Any thread. */
+typedef void (*agents_observe_fn)(void *ud, const char *channel, const json_t *payload);
+void agents_observe(agents_observe_fn fn, void *ud, bool events);
+void agents_unobserve(agents_observe_fn fn, void *ud);
+
 #endif

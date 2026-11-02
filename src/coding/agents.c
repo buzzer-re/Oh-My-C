@@ -29,6 +29,20 @@ typedef struct aref {
     volatile sig_atomic_t *cancel; /* running job's cancel flag */
     task_card_t *card;             /* progress card of the spawning task call (first run only) */
     int card_idx;
+    /* Agent Hub / RPC observability (omp AgentRef + observer AgentProgress) */
+    json_t *progress;      /* AgentProgress of the latest executor run (owned) */
+    char *description;     /* spawn description (NULL = none) */
+    char *parent_call;     /* spawning task call id */
+    char *sys_append;      /* system prompt append the session was built with (revive) */
+    char *model;           /* resolved "provider/id" */
+    char *recent_tail;     /* streamed text tail behind progress.recentOutput */
+    int index;             /* spawn index within its task call */
+    int64_t last_activity; /* ms */
+    int64_t active_ms;     /* executor run time of finished runs */
+    bool killed;           /* released as an `aborted` tombstone (hub x / cancel_subagent) */
+    bool executor_run;     /* the current run is an executor run (task spawn / IRC wake): progress tracks it */
+    bool lifecycle_open;   /* a `started` lifecycle frame went out without its terminal one */
+    int pins;              /* a UI view holds `app` (session focus): never freed underneath it */
 } aref_t;
 
 /* ---------- task cards ---------- */
@@ -119,12 +133,10 @@ void task_card_settle(task_card_t *c, int index, const char *status) {
     pthread_mutex_unlock(&c->mu);
 }
 
-/* one subagent event folded into its progress row; returns true when the row changed */
-static bool card_on_event(task_card_t *c, int idx, int64_t started, const agent_event_t *ev, int64_t context_window) {
+/* one subagent event folded into an AgentProgress row (task card row or the registry's copy); true when it changed */
+static bool row_on_event(json_t *row, int64_t started, const agent_event_t *ev, int64_t context_window) {
     bool changed = false;
-    pthread_mutex_lock(&c->mu);
-    json_t *row = card_row_locked(c, idx);
-    if (row) {
+    {
         if (ev->type == AGENT_EV_TOOL_START && ev->tool_name) {
             json_set_str(row, "currentTool", ev->tool_name);
             static const char *const KEYS[] = {"path", "command", "pattern", "query", "url", "file", "op"};
@@ -134,6 +146,7 @@ static bool card_on_event(task_card_t *c, int idx, int64_t started, const agent_
             else json_del(row, "currentToolArgs");
             if (ev->intent) json_set_str(row, "currentToolIntent", ev->intent);
             else json_del(row, "currentToolIntent");
+            if (ev->intent) json_set_str(row, "lastIntent", ev->intent);
             json_set_int(row, "currentToolStartMs", now_ms());
             json_set_int(row, "toolCount", json_get_int(row, "toolCount", 0) + 1);
             changed = true;
@@ -143,6 +156,8 @@ static bool card_on_event(task_card_t *c, int idx, int64_t started, const agent_
             json_set_str(e, "tool", ev->tool_name);
             if (json_get_str(row, "currentToolArgs")) json_set_str(e, "args", json_get_str(row, "currentToolArgs"));
             if (json_get_str(row, "currentToolIntent")) json_set_str(e, "intent", json_get_str(row, "currentToolIntent"));
+            if (ev->is_error) json_set_bool(e, "isError", true);
+            json_set_int(e, "endMs", now_ms());
             json_t *nr = json_arr();
             json_push(nr, e);
             json_t *x;
@@ -167,8 +182,15 @@ static bool card_on_event(task_card_t *c, int idx, int64_t started, const agent_
             json_set_num(row, "cost", json_get_num(row, "cost", 0) + cost);
             changed = true;
         }
-        if (changed) json_set_int(row, "durationMs", now_ms() - started);
+        if (changed && started) json_set_int(row, "durationMs", now_ms() - started);
     }
+    return changed;
+}
+
+static bool card_on_event(task_card_t *c, int idx, int64_t started, const agent_event_t *ev, int64_t context_window) {
+    pthread_mutex_lock(&c->mu);
+    json_t *row = card_row_locked(c, idx);
+    bool changed = row && row_on_event(row, started, ev, context_window);
     pthread_mutex_unlock(&c->mu);
     return changed;
 }
@@ -185,6 +207,137 @@ static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 static VEC(aref_t *) g_refs;
 static uint64_t g_msg_seq;
 static int g_permits_used;
+
+/* ---------- change listeners (Agent Hub, status badge) and observers (RPC subagent frames) ---------- */
+
+typedef struct {
+    agents_change_fn fn;
+    void *ud;
+} listener_t;
+typedef struct {
+    agents_observe_fn fn;
+    void *ud;
+    bool events;
+} observer_t;
+static pthread_mutex_t g_lmu = PTHREAD_MUTEX_INITIALIZER; /* guards the two lists; never held with g_mu */
+static VEC(listener_t) g_listeners;
+static VEC(observer_t) g_observers;
+static volatile int g_event_observers;
+
+void agents_listen(agents_change_fn fn, void *ud) {
+    pthread_mutex_lock(&g_lmu);
+    vec_push(&g_listeners, ((listener_t){fn, ud}));
+    pthread_mutex_unlock(&g_lmu);
+}
+
+void agents_unlisten(agents_change_fn fn, void *ud) {
+    pthread_mutex_lock(&g_lmu);
+    for (size_t i = 0; i < g_listeners.n; i++)
+        if (g_listeners.v[i].fn == fn && g_listeners.v[i].ud == ud) {
+            g_listeners.v[i] = g_listeners.v[--g_listeners.n];
+            break;
+        }
+    pthread_mutex_unlock(&g_lmu);
+}
+
+void agents_observe(agents_observe_fn fn, void *ud, bool events) {
+    pthread_mutex_lock(&g_lmu);
+    for (size_t i = 0; i < g_observers.n; i++)
+        if (g_observers.v[i].fn == fn && g_observers.v[i].ud == ud) {
+            if (g_observers.v[i].events != events) g_event_observers += events ? 1 : -1;
+            g_observers.v[i].events = events;
+            pthread_mutex_unlock(&g_lmu);
+            return;
+        }
+    vec_push(&g_observers, ((observer_t){fn, ud, events}));
+    if (events) g_event_observers++;
+    pthread_mutex_unlock(&g_lmu);
+}
+
+void agents_unobserve(agents_observe_fn fn, void *ud) {
+    pthread_mutex_lock(&g_lmu);
+    for (size_t i = 0; i < g_observers.n; i++)
+        if (g_observers.v[i].fn == fn && g_observers.v[i].ud == ud) {
+            if (g_observers.v[i].events) g_event_observers--;
+            g_observers.v[i] = g_observers.v[--g_observers.n];
+            break;
+        }
+    pthread_mutex_unlock(&g_lmu);
+}
+
+/* called without g_mu held */
+static void notify_change(void) {
+    pthread_mutex_lock(&g_lmu);
+    size_t n = g_listeners.n;
+    listener_t *copy = n ? xmalloc(n * sizeof *copy) : NULL;
+    if (n) memcpy(copy, g_listeners.v, n * sizeof *copy);
+    pthread_mutex_unlock(&g_lmu);
+    for (size_t i = 0; i < n; i++) copy[i].fn(copy[i].ud);
+    free(copy);
+}
+
+/* hand `payload` (owned) to every observer of `channel` ("lifecycle", "progress", "event"); without g_mu */
+static void emit_obs(const char *channel, json_t *payload) {
+    if (!payload) return;
+    bool ev = str_eq(channel, "event");
+    pthread_mutex_lock(&g_lmu);
+    size_t n = g_observers.n;
+    observer_t *copy = n ? xmalloc(n * sizeof *copy) : NULL;
+    if (n) memcpy(copy, g_observers.v, n * sizeof *copy);
+    pthread_mutex_unlock(&g_lmu);
+    for (size_t i = 0; i < n; i++)
+        if (!ev || copy[i].events) copy[i].fn(copy[i].ud, channel, payload);
+    free(copy);
+    json_free(payload);
+}
+
+static bool has_observers(void) {
+    pthread_mutex_lock(&g_lmu);
+    bool any = g_observers.n > 0;
+    pthread_mutex_unlock(&g_lmu);
+    return any;
+}
+
+static const char *agent_source_of(const aref_t *r) {
+    const char *s = json_get_str(r->progress, "agentSource");
+    return s ? s : "bundled";
+}
+
+/* SubagentLifecyclePayload */
+static json_t *lifecycle_payload_locked(const aref_t *r, const char *status) {
+    json_t *p = json_obj();
+    json_set_str(p, "id", r->id);
+    json_set_str(p, "agent", r->agent);
+    json_set_str(p, "agentSource", agent_source_of(r));
+    if (r->description) json_set_str(p, "description", r->description);
+    json_set_str(p, "status", status);
+    if (r->parent_call) json_set_str(p, "parentToolCallId", r->parent_call);
+    json_set_int(p, "index", r->index);
+    json_set_bool(p, "detached", true);
+    return p;
+}
+
+/* SubagentProgressPayload */
+static json_t *progress_payload_locked(const aref_t *r) {
+    json_t *p = json_obj();
+    json_set_int(p, "index", r->index);
+    json_set_str(p, "agent", r->agent);
+    json_set_str(p, "agentSource", agent_source_of(r));
+    json_set_str(p, "task", json_get_str(r->progress, "task") ? json_get_str(r->progress, "task") : "");
+    if (r->parent_call) json_set_str(p, "parentToolCallId", r->parent_call);
+    if (json_get_str(r->progress, "assignment")) json_set_str(p, "assignment", json_get_str(r->progress, "assignment"));
+    json_set(p, "progress", json_clone(r->progress));
+    json_set_bool(p, "detached", true);
+    return p;
+}
+
+/* the registry's progress copy: durationMs is the executor's active time */
+static void progress_touch_locked(aref_t *r) {
+    if (!r->progress) return;
+    int64_t now = now_ms();
+    json_set_int(r->progress, "durationMs", r->active_ms + (r->executor_run && r->running ? now - r->run_started : 0));
+    r->last_activity = now;
+}
 
 static aref_t *find_locked(const char *id) {
     for (size_t i = 0; i < g_refs.n; i++)
@@ -206,6 +359,12 @@ static aref_t *find_app_locked(const app_t *a) {
 
 __attribute__((unused)) static void ref_free(aref_t *r) {
     task_card_release(r->card);
+    json_free(r->progress);
+    free(r->description);
+    free(r->parent_call);
+    free(r->sys_append);
+    free(r->model);
+    free(r->recent_tail);
     free(r->id);
     free(r->agent);
     free(r->parent_id);
@@ -264,7 +423,7 @@ void agents_release_children(app_t *a) {
         aref_t *r = g_refs.v[i];
         if (r->spawner != a) continue;
         r->spawner = NULL;
-        if (r->app && r->owned && !r->running) {
+        if (r->app && r->owned && !r->running && !r->pins) {
             if (!r->transcript) r->transcript = json_clone(r->app->agent->messages);
             vec_push(&kill, r->app);
             r->app = NULL;
@@ -274,6 +433,7 @@ void agents_release_children(app_t *a) {
     pthread_mutex_unlock(&g_mu);
     for (size_t i = 0; i < kill.n; i++) app_free(kill.v[i]);
     vec_free(&kill);
+    notify_change();
 }
 
 /* ---------- names ---------- */
@@ -334,25 +494,62 @@ static void permit_release(void) {
 
 /* ---------- running a subagent ---------- */
 
+/* recentOutput: the last 8 non-empty lines of the run's latest assistant text, newest first */
+static void recent_output_locked(aref_t *r) {
+    json_t *out = json_arr();
+    strvec_t lines = str_split(r->recent_tail ? r->recent_tail : "", "\n");
+    for (size_t i = lines.n; i > 0 && json_len(out) < 8; i--) {
+        char *t = str_trim(lines.v[i - 1]);
+        if (*t) json_push_str(out, lines.v[i - 1]);
+        free(t);
+    }
+    strvec_free(&lines);
+    json_set(r->progress, "recentOutput", out);
+}
+
 static void on_child_event(void *ud, const agent_event_t *ev) {
     aref_t *r = ud;
+    bool progress = false;
+    json_t *pp = NULL, *evp = NULL;
     if (ev->type == AGENT_EV_TOOL_START || ev->type == AGENT_EV_TOOL_END || ev->type == AGENT_EV_MESSAGE_END) {
         pthread_mutex_lock(&g_mu);
         task_card_t *card = card_retain(r->card);
         int idx = r->card_idx;
         int64_t started = r->run_started;
         int64_t win = r->app && r->app->model ? r->app->model->context_window : 0;
+        if (r->progress && r->executor_run && row_on_event(r->progress, 0, ev, win)) progress = true;
         pthread_mutex_unlock(&g_mu);
         if (card) {
             if (card_on_event(card, idx, started, ev, win)) card_emit(card);
             task_card_release(card);
         }
     }
-    if (ev->type != AGENT_EV_TOOL_START && ev->type != AGENT_EV_TURN_START) return;
     pthread_mutex_lock(&g_mu);
-    free(r->activity);
-    r->activity = ev->type == AGENT_EV_TOOL_START && ev->tool_name ? xasprintf("running %s", ev->tool_name) : xstrdup("thinking");
+    if (r->progress && r->executor_run && ev->message && str_eq(json_get_str(ev->message, "role"), "assistant") &&
+        (ev->type == AGENT_EV_MESSAGE_START || ev->type == AGENT_EV_MESSAGE_END)) {
+        /* replaceRecentOutputFromContent / resetRecentOutput */
+        free(r->recent_tail);
+        r->recent_tail = ev->type == AGENT_EV_MESSAGE_END ? ai_message_text(ev->message) : NULL;
+        recent_output_locked(r);
+        progress = true;
+    }
+    if (ev->type == AGENT_EV_TOOL_START || ev->type == AGENT_EV_TURN_START) {
+        free(r->activity);
+        r->activity = ev->type == AGENT_EV_TOOL_START && ev->tool_name ? xasprintf("running %s", ev->tool_name) : xstrdup("thinking");
+    }
+    r->last_activity = now_ms();
+    if (progress) progress_touch_locked(r);
+    bool observed = has_observers();
+    if (progress && observed) pp = progress_payload_locked(r);
+    if (g_event_observers > 0) {
+        evp = json_obj();
+        json_set_str(evp, "id", r->id);
+        json_set(evp, "event", agent_event_to_json(ev));
+    }
     pthread_mutex_unlock(&g_mu);
+    if (pp) emit_obs("progress", pp);
+    if (evp) emit_obs("event", evp);
+    if (progress || ev->type == AGENT_EV_TOOL_START || ev->type == AGENT_EV_TURN_START) notify_change();
 }
 
 typedef struct {
@@ -373,16 +570,57 @@ static void *cancel_watch(void *p) {
     return NULL;
 }
 
-/* run one prompt on a child session; returns the last assistant text (owned) */
-static char *run_turn(aref_t *r, app_t *child, const char *prompt, volatile sig_atomic_t *cancel, bool *aborted, char **error) {
+/* a fresh AgentProgress for an executor run of `r` (task = the prompt the run was given) */
+static json_t *progress_new_locked(const aref_t *r, const char *task, const char *assignment) {
+    json_t *p = json_obj();
+    json_set_int(p, "index", r->index);
+    json_set_str(p, "id", r->id);
+    json_set_str(p, "agent", r->agent);
+    json_set_str(p, "agentSource", agent_source_of(r));
+    json_set_str(p, "status", "running");
+    json_set_str(p, "task", task ? task : "");
+    if (assignment) json_set_str(p, "assignment", assignment);
+    if (r->description) json_set_str(p, "description", r->description);
+    json_set(p, "recentTools", json_arr());
+    json_set(p, "recentOutput", json_arr());
+    json_set_int(p, "toolCount", 0);
+    json_set_int(p, "requests", 0);
+    json_set_int(p, "tokens", 0);
+    json_set_int(p, "cost", 0);
+    json_set_int(p, "durationMs", 0);
+    if (r->model) json_set_str(p, "resolvedModel", r->model);
+    return p;
+}
+
+/* run one prompt on a child session; returns the last assistant text (owned). `executor`: a task spawn or IRC wake
+ * run (lifecycle + progress are reported); a user chat turn from the hub (agents_prompt) is not. */
+static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile sig_atomic_t *cancel, bool *aborted, char **error,
+                         bool executor, const char *assignment) {
     *aborted = false;
     *error = NULL;
+    json_t *lc = NULL;
     pthread_mutex_lock(&g_mu);
     r->running = true;
     r->run_started = now_ms();
+    r->last_activity = r->run_started;
     r->cancel = cancel;
+    r->executor_run = executor;
+    if (executor) {
+        if (!r->model && child->model) r->model = xasprintf("%s/%s", child->model->provider, child->model->id);
+        json_t *old = r->progress;
+        const char *keep_assign = assignment ? assignment : NULL;
+        r->progress = progress_new_locked(r, prompt, keep_assign);
+        if (old && json_get_str(old, "agentSource")) json_set_str(r->progress, "agentSource", json_get_str(old, "agentSource"));
+        json_free(old);
+        free(r->recent_tail);
+        r->recent_tail = NULL;
+        r->lifecycle_open = true;
+        if (has_observers()) lc = lifecycle_payload_locked(r, "started");
+    }
     strvec_free(&r->owed);
     pthread_mutex_unlock(&g_mu);
+    if (lc) emit_obs("lifecycle", lc);
+    notify_change();
     pthread_t wt;
     watch_t w = {cancel, child->agent, 0};
     bool watching = cancel && pthread_create(&wt, NULL, cancel_watch, &w) == 0;
@@ -396,8 +634,30 @@ static char *run_turn(aref_t *r, app_t *child, const char *prompt, volatile sig_
     const char *stop = json_get_str(last, "stopReason");
     *aborted = str_eq(stop, "aborted") || (cancel && *cancel);
     if (str_eq(stop, "error") && json_get_str(last, "errorMessage")) *error = xstrdup(json_get_str(last, "errorMessage"));
+    json_t *pp = NULL;
+    lc = NULL;
     pthread_mutex_lock(&g_mu);
+    int64_t now = now_ms();
+    if (executor) {
+        r->active_ms += now - r->run_started;
+        const char *st = *aborted || r->killed ? "aborted" : *error ? "failed" : "completed";
+        if (r->progress) {
+            json_set_str(r->progress, "status", st);
+            json_del(r->progress, "currentTool");
+            json_del(r->progress, "currentToolArgs");
+            json_del(r->progress, "currentToolIntent");
+            json_del(r->progress, "currentToolStartMs");
+            json_set_int(r->progress, "durationMs", r->active_ms);
+        }
+        if (has_observers()) {
+            pp = progress_payload_locked(r);
+            lc = lifecycle_payload_locked(r, st);
+        }
+        r->lifecycle_open = false;
+    }
     r->running = false;
+    r->executor_run = false;
+    r->last_activity = now;
     r->cancel = NULL;
     r->aborted = *aborted;
     free(r->activity);
@@ -412,7 +672,14 @@ static char *run_turn(aref_t *r, app_t *child, const char *prompt, volatile sig_
     free(trim);
     pthread_cond_broadcast(&g_cv);
     pthread_mutex_unlock(&g_mu);
+    if (pp) emit_obs("progress", pp);
+    if (lc) emit_obs("lifecycle", lc);
+    notify_change();
     return text;
+}
+
+static char *run_turn(aref_t *r, app_t *child, const char *prompt, volatile sig_atomic_t *cancel, bool *aborted, char **error) {
+    return run_turn_ex(r, child, prompt, cancel, aborted, error, true, NULL);
 }
 
 static char *fmt_duration(int64_t ms) {
@@ -577,7 +844,12 @@ static app_t *make_child(spawn_t *sp, char **err) {
     }
     char *append = peer_roster_prompt(sp->ref, json_get_str(def, "body"), sp->context, sp->source, model);
     app_t *child = app_subagent_new(sp->parent, sp->agent, model, append, err);
-    free(append);
+    pthread_mutex_lock(&g_mu);
+    free(sp->ref->sys_append);
+    sp->ref->sys_append = append;
+    free(sp->ref->model);
+    sp->ref->model = child && child->model ? xasprintf("%s/%s", child->model->provider, child->model->id) : NULL;
+    pthread_mutex_unlock(&g_mu);
     free(model);
     json_free(defs);
     if (child && msgs) {
@@ -638,7 +910,7 @@ static char *task_body_run(bgjob_t *job, void *ud, bool *failed) {
     }
     bool aborted;
     char *error = NULL;
-    char *text = run_turn(r, child, up, cancel, &aborted, &error);
+    char *text = run_turn_ex(r, child, up, cancel, &aborted, &error, true, sp->task);
     free(up);
     permit_release();
     const char *status = aborted ? "aborted" : error ? "failed" : "completed";
@@ -691,11 +963,32 @@ static aref_t *new_ref(tool_env_t *env, const spawn_spec_t *spec, char **err) {
     r->started_at = now_ms();
     r->card = card_retain(spec->card);
     r->card_idx = spec->card_index;
+    r->index = spec->card_index;
+    r->last_activity = r->started_at;
+    if (spec->card) r->parent_call = xstrdup(spec->card->call_id);
+    /* the pending progress row the task call announced (agentSource, task, assignment) */
+    if (spec->card) {
+        pthread_mutex_lock(&spec->card->mu);
+        json_t *row = card_row_locked(spec->card, spec->card_index);
+        r->progress = row ? json_clone(row) : NULL;
+        pthread_mutex_unlock(&spec->card->mu);
+    }
+    if (!r->progress) {
+        json_t *uc = json_obj();
+        json_set_str(uc, "assignment", spec->task ? spec->task : "");
+        char *up = prompt_render("coding-agent/prompts/system/subagent-user-prompt.md", uc);
+        json_free(uc);
+        r->progress = progress_new_locked(r, up, spec->task);
+        json_set_str(r->progress, "status", "pending");
+        free(up);
+    }
+    json_set_str(r->progress, "id", id);
     vec_push(&g_refs, r);
     if (spec->card) task_card_set_id(spec->card, spec->card_index, id, false);
     pthread_mutex_unlock(&g_mu);
     free(base);
     UNUSED(err);
+    notify_change();
     return r;
 }
 
@@ -828,7 +1121,7 @@ static char *wake_body(bgjob_t *job, void *ud, bool *failed) {
 static void deliver(const char *from, const char *to, const char *body, const char **outcome) {
     pthread_mutex_lock(&g_mu);
     aref_t *r = find_locked(to);
-    if (!r || !r->app || r->gone) {
+    if (!r || !r->app || r->gone || r->killed) {
         pthread_mutex_unlock(&g_mu);
         *outcome = NULL;
         return;
@@ -1224,4 +1517,285 @@ bool agents_cancel(const char *id) {
     }
     pthread_mutex_unlock(&g_mu);
     return ok;
+}
+
+/* ---------- Agent Hub / session focus / RPC (omp AgentRegistry + AgentLifecycleManager subset) ---------- */
+
+static const char *ref_status_locked(const aref_t *r) {
+    if (r->killed) return "aborted";
+    if (r->running) return "running";
+    if (!r->app) return "parked";
+    return "idle";
+}
+
+/* listed refs: every subagent of the live roster (Main and refs released with their session excluded) */
+static bool listed_locked(const aref_t *r) { return !r->is_main && !r->gone; }
+
+static json_t *ref_json_locked(const aref_t *r) {
+    json_t *o = json_obj();
+    json_set_str(o, "id", r->id);
+    json_set_str(o, "displayName", r->agent);
+    json_set_str(o, "kind", "sub");
+    if (r->parent_id) json_set_str(o, "parentId", r->parent_id);
+    json_set_str(o, "status", ref_status_locked(r));
+    json_set_int(o, "createdAt", r->started_at);
+    json_set_int(o, "lastActivity", r->last_activity ? r->last_activity : r->started_at);
+    if (r->activity) json_set_str(o, "activity", r->activity);
+    json_set_str(o, "agent", r->agent);
+    if (r->model) json_set_str(o, "model", r->model);
+    if (r->app) {
+        json_set_str(o, "thinking", effort_name(r->app->thinking));
+        if (r->app->model) {
+            json_set_bool(o, "reasoning", r->app->model->reasoning);
+            json_set_int(o, "contextWindow", r->app->model->context_window);
+        }
+    }
+    json_set_bool(o, "live", r->app != NULL);
+    if (r->parent_call) json_set_str(o, "parentToolCallId", r->parent_call);
+    if (r->job_id) json_set_str(o, "jobId", r->job_id);
+    if (r->progress) {
+        json_t *p = json_clone(r->progress);
+        if (r->executor_run && r->running) json_set_int(p, "durationMs", r->active_ms + now_ms() - r->run_started);
+        json_set(o, "progress", p);
+    }
+    return o;
+}
+
+json_t *agents_list(void) {
+    json_t *arr = json_arr();
+    pthread_mutex_lock(&g_mu);
+    for (size_t i = 0; i < g_refs.n; i++)
+        if (listed_locked(g_refs.v[i])) json_push(arr, ref_json_locked(g_refs.v[i]));
+    pthread_mutex_unlock(&g_mu);
+    return arr;
+}
+
+json_t *agents_get(const char *id) {
+    pthread_mutex_lock(&g_mu);
+    aref_t *r = id ? find_locked(id) : NULL;
+    json_t *o = r && listed_locked(r) ? ref_json_locked(r) : NULL;
+    pthread_mutex_unlock(&g_mu);
+    return o;
+}
+
+void agents_counts(size_t *running, size_t *inspectable) {
+    size_t run = 0, all = 0;
+    pthread_mutex_lock(&g_mu);
+    for (size_t i = 0; i < g_refs.n; i++) {
+        aref_t *r = g_refs.v[i];
+        if (!listed_locked(r)) continue;
+        all++;
+        if (str_eq(ref_status_locked(r), "running")) run++;
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (running) *running = run;
+    if (inspectable) *inspectable = all;
+}
+
+json_t *agents_messages(const char *id) {
+    json_t *out = NULL;
+    pthread_mutex_lock(&g_mu);
+    aref_t *r = id ? find_any_locked(id) : NULL;
+    if (r && !r->is_main) {
+        if (r->app) {
+            pthread_mutex_lock(&r->app->agent->mu);
+            out = json_clone(r->app->agent->messages);
+            pthread_mutex_unlock(&r->app->agent->mu);
+        } else if (r->transcript) {
+            out = json_clone(r->transcript);
+        }
+    }
+    pthread_mutex_unlock(&g_mu);
+    return out;
+}
+
+static char *unknown_agent(const char *id) {
+    return xasprintf("Unknown agent \"%s\" — it was never registered or has been released. If a transcript exists, read "
+                     "history://%s.",
+                     id ? id : "", id ? id : "");
+}
+
+bool agents_kill(const char *id, char **err) {
+    *err = NULL;
+    pthread_mutex_lock(&g_mu);
+    aref_t *r = id ? find_locked(id) : NULL;
+    if (!r || r->is_main) {
+        pthread_mutex_unlock(&g_mu);
+        *err = unknown_agent(id);
+        return false;
+    }
+    bool was = r->killed;
+    r->killed = true;
+    r->last_activity = now_ms();
+    if (r->running) {
+        if (r->cancel) *r->cancel = 1;
+        else if (r->app) agent_abort(r->app->agent);
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (!was) notify_change();
+    return true;
+}
+
+/* ensureLive: a killed agent reopens, a parked one (session released) is rebuilt from its transcript */
+bool agents_revive(const char *id, char **err) {
+    *err = NULL;
+    pthread_mutex_lock(&g_mu);
+    aref_t *r = id ? find_locked(id) : NULL;
+    if (!r || r->is_main) {
+        pthread_mutex_unlock(&g_mu);
+        *err = unknown_agent(id);
+        return false;
+    }
+    if (r->killed && r->running) {
+        pthread_mutex_unlock(&g_mu);
+        *err = xasprintf("Agent \"%s\" is still shutting down after its kill; retry once it has stopped.", r->id);
+        return false;
+    }
+    if (r->app) {
+        bool changed = r->killed;
+        r->killed = false;
+        if (changed) r->last_activity = now_ms();
+        pthread_mutex_unlock(&g_mu);
+        if (changed) notify_change();
+        return true;
+    }
+    app_t *spawner = r->spawner;
+    char *agent = xstrdup(r->agent), *append = r->sys_append ? xstrdup(r->sys_append) : NULL;
+    char *model = r->model ? xstrdup(r->model) : NULL;
+    json_t *msgs = r->transcript ? json_clone(r->transcript) : NULL;
+    pthread_mutex_unlock(&g_mu);
+    if (!spawner) {
+        *err = xasprintf("Agent \"%s\" was killed and cannot be revived (no reviver registered). Read history://%s for what it did.",
+                         id, id);
+        free(agent), free(append), free(model), json_free(msgs);
+        return false;
+    }
+    app_t *child = app_subagent_new(spawner, agent, model, append, err);
+    if (child && msgs) {
+        json_t *m;
+        json_arr_foreach(msgs, i, m) agent_append_message(child->agent, json_clone(m));
+    }
+    free(agent), free(append), free(model), json_free(msgs);
+    if (!child) return false;
+    pthread_mutex_lock(&g_mu);
+    r = find_locked(id);
+    if (!r || r->app) {
+        pthread_mutex_unlock(&g_mu);
+        app_free(child);
+        if (!r) *err = xasprintf("Agent \"%s\" changed before its persisted session could attach.", id);
+        return r != NULL;
+    }
+    r->app = child;
+    r->owned = true;
+    r->killed = false;
+    r->last_activity = now_ms();
+    json_free(r->transcript);
+    r->transcript = NULL;
+    pthread_mutex_unlock(&g_mu);
+    notify_change();
+    return true;
+}
+
+typedef struct {
+    aref_t *ref;
+    app_t *child;
+    char *text;
+} chat_t;
+
+static void chat_free(void *p) {
+    chat_t *c = p;
+    free(c->text);
+    free(c);
+}
+
+static char *chat_body(bgjob_t *job, void *ud, bool *failed) {
+    chat_t *c = ud;
+    bool aborted;
+    char *error = NULL;
+    char *text = run_turn_ex(c->ref, c->child, c->text, job_cancel_flag(job), &aborted, &error, false, NULL);
+    *failed = aborted || error;
+    free(text);
+    free(error);
+    return xstrdup("");
+}
+
+/* session.prompt(text, {streamingBehavior: "steer"}) on a subagent: revive it, then steer a running turn or start an
+ * idle one (the user's own message: the reply stays in the agent's transcript, nothing is delivered to its parent) */
+bool agents_prompt(const char *id, const char *text, char **err) {
+    *err = NULL;
+    if (!agents_revive(id, err)) return false;
+    pthread_mutex_lock(&g_mu);
+    aref_t *r = find_locked(id);
+    if (!r || !r->app) {
+        pthread_mutex_unlock(&g_mu);
+        *err = xasprintf("Subagent not running: %s", id);
+        return false;
+    }
+    app_t *app = r->app;
+    if (r->running || agent_is_running(app->agent)) {
+        pthread_mutex_unlock(&g_mu);
+        agent_steer(app->agent, msg_user_text(text));
+        return true;
+    }
+    app_t *spawner = r->spawner;
+    if (!spawner || !spawner->env || !spawner->env->jobs) {
+        pthread_mutex_unlock(&g_mu);
+        *err = xasprintf("Subagent not running: %s", id);
+        return false;
+    }
+    chat_t *c = xcalloc(1, sizeof *c);
+    c->ref = r;
+    c->child = app;
+    c->text = xstrdup(text);
+    r->running = true; /* claimed before the job thread starts */
+    char *rid = xstrdup(r->id);
+    pthread_mutex_unlock(&g_mu);
+    char *jid = jobs_start(spawner->env->jobs, "task", rid, rid, rid, false, chat_body, c, chat_free);
+    jobs_set_quiet(spawner->env->jobs, jid);
+    free(jid);
+    free(rid);
+    notify_change();
+    return true;
+}
+
+app_t *agents_pin(const char *id) {
+    pthread_mutex_lock(&g_mu);
+    aref_t *r = id ? find_locked(id) : NULL;
+    app_t *a = r && !r->is_main && r->app ? r->app : NULL;
+    if (a) r->pins++;
+    pthread_mutex_unlock(&g_mu);
+    return a;
+}
+
+void agents_unpin(app_t *a) {
+    if (!a) return;
+    app_t *kill = NULL;
+    pthread_mutex_lock(&g_mu);
+    for (size_t i = 0; i < g_refs.n; i++) {
+        aref_t *r = g_refs.v[i];
+        if (r->app != a || r->pins <= 0) continue;
+        r->pins--;
+        /* its spawner released it while a view held it: finish the release now */
+        if (!r->pins && !r->spawner && r->owned && !r->running) {
+            if (!r->transcript) r->transcript = json_clone(a->agent->messages);
+            r->app = NULL;
+            r->gone = true;
+            kill = a;
+        }
+        break;
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (kill) {
+        app_free(kill);
+        notify_change();
+    }
+}
+
+char *agents_parent_of(const char *id) {
+    char *res = NULL;
+    pthread_mutex_lock(&g_mu);
+    aref_t *r = id ? find_locked(id) : NULL;
+    if (r && r->parent_id) res = xstrdup(r->parent_id);
+    pthread_mutex_unlock(&g_mu);
+    return res;
 }
