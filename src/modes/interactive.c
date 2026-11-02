@@ -2222,6 +2222,10 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
         ui_attach_paste_clipboard(u);
         return true;
     }
+    if (tui_kb(k, "app.clipboard.pasteTextRaw")) {
+        ui_attach_paste_raw(u);
+        return true;
+    }
     if (tui_kb(k, "app.suspend")) {
         int rc = tui_suspend(t);
         if (rc >= 0) ui_signals_resumed(); /* the shell prompt meanwhile dropped working / blocked records */

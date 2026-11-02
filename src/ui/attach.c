@@ -32,6 +32,12 @@ char *ui_attachment_sgr(int n) {
     return xasprintf("\x1b[38;2;%d;%d;%dm", c[0], c[1], c[2]);
 }
 
+/* attachmentSgr("paste", n): the paste palette starts two entries further on */
+char *ui_paste_attachment_sgr(int n) {
+    const uint8_t *c = PALETTE[(size_t)(n + 2) % 6];
+    return xasprintf("\x1b[38;2;%d;%d;%dm", c[0], c[1], c[2]);
+}
+
 /* chipLabel("image", n) */
 char *ui_chip_label(int n) { return xasprintf("%s #%d", tui_sym("chip.image"), n); }
 
@@ -460,6 +466,107 @@ static bool paste_hook(void *ud, tui_editor_t *ed, const char *text) {
     return true;
 }
 
+/* ---------- large pastes: text-attachment chips and the large-paste menu ---------- */
+
+/* editor.insertTextAttachment: `📄 #N` chip in the buffer, a card in the band, `expansion` (NULL = text) on submit */
+static void insert_text_chip(ui_t *u, const char *text, const char *expansion) {
+    char *sgr = ui_paste_attachment_sgr(u->editor->text_counter + 1);
+    tui_editor_insert_text_attachment(u->editor, text, expansion, sgr);
+    free(sgr);
+    tui_request_render(u->tui);
+}
+
+typedef struct {
+    ui_t *u;
+    char *text;
+    size_t lines;
+} paste_menu_t;
+
+static int g_paste_counter; /* InputController #pasteCounter */
+
+/* #attachPasteAsFile: save to the session's local:// root, reference `local://paste-N.md` */
+static void attach_paste_as_file(ui_t *u, const char *text, size_t lines) {
+    const char *root = u->app->env ? u->app->env->local_dir : NULL;
+    char *name = NULL, *path = NULL;
+    bool ok = false;
+    if (root && fs_mkdir_p(root, 0755) == 0) {
+        do {
+            free(name), free(path);
+            name = xasprintf("paste-%d.md", ++g_paste_counter);
+            path = path_join(root, name);
+        } while (fs_exists(path));
+        ok = fs_write(path, text, strlen(text)) == 0;
+    }
+    if (ok) {
+        char *ref = xasprintf("local://%s ", name);
+        tui_editor_insert_text(u->editor, ref);
+        char *m = xasprintf("Saved %zu pasted lines to local://%s", lines, name);
+        add_notice(u, "info", m);
+        free(m), free(ref);
+    } else {
+        insert_text_chip(u, text, NULL);
+        add_notice(u, "error", "Failed to save paste to a file — attached as a text chip instead");
+    }
+    free(name), free(path);
+}
+
+static void paste_menu_done(void *ud, int choice) {
+    paste_menu_t *m = ud;
+    ui_t *u = m->u;
+    if (choice == 0) { /* wrapPasteInAttachmentBlock */
+        char *wrapped = xasprintf("<attachment>\n%s\n</attachment>", m->text);
+        insert_text_chip(u, m->text, wrapped);
+        free(wrapped);
+    } else if (choice == 1) {
+        attach_paste_as_file(u, m->text, m->lines);
+    } else { /* "Paste inline" and Esc both stage the text-attachment chip */
+        insert_text_chip(u, m->text, NULL);
+    }
+    tui_request_render(u->tui);
+    free(m->text);
+    free(m);
+}
+
+/* handleLargePaste: below paste.largeMenuThreshold lines the paste becomes a chip, otherwise the menu decides */
+static bool large_paste_hook(void *ud, tui_editor_t *ed, const char *text, size_t lines) {
+    ui_t *u = ud;
+    if (ed != u->editor) return false;
+    double threshold = settings_num("paste.largeMenuThreshold", 100);
+    if (!(threshold > 0) || (double)lines < threshold) {
+        insert_text_chip(u, text, NULL);
+        return true;
+    }
+    static const char *const labels[] = {"Attach as a wrapped block", "Attach as local file", "Paste inline"};
+    static const char *const descs[] = {"Wrap the text in <attachment> tags, collapsed to a marker",
+                                        "Save the text to a local://paste file",
+                                        "Collapse the text to an inline paste marker"};
+    paste_menu_t *m = xcalloc(1, sizeof *m);
+    m->u = u;
+    m->text = xstrdup(text);
+    m->lines = lines;
+    char *title = xasprintf("Pasted %zu lines", lines);
+    char *esc = ui_editor_key("tui.select.cancel"), *help = xasprintf("%s to paste inline", esc);
+    ui_hook_select(u, title, labels, descs, 3, help, paste_menu_done, m);
+    free(title), free(esc), free(help);
+    return true;
+}
+
+/* handleClipboardTextRawPaste (app.clipboard.pasteTextRaw): the clipboard text inserted as typed, no marker */
+void ui_attach_paste_raw(ui_t *u) {
+    if (over_ssh()) {
+        add_notice(u, "info", "Clipboard here belongs to the SSH host — use your terminal's paste shortcut to paste from your machine");
+        return;
+    }
+    char *text = clipboard_text();
+    if (text && *text) {
+        tui_editor_insert_text(u->editor, text);
+        tui_request_render(u->tui);
+    } else {
+        add_notice(u, "info", "No text in clipboard to paste raw");
+    }
+    free(text);
+}
+
 /* handleImagePaste (app.clipboard.pasteImage, ctrl+v): image, else the clipboard text (an image path attaches) */
 bool ui_attach_paste_clipboard(ui_t *u) {
     if (over_ssh()) {
@@ -604,19 +711,44 @@ static void border_row(sb_t *row, const char *sgr, const char *caption, bool top
     sb_append(row, "\x1b[39m");
 }
 
+/* `needle` occurs in `text` not followed by another digit (`📷 #1` must not match `📷 #10`) */
+static bool token_in(const char *text, const char *needle) {
+    size_t n = strlen(needle);
+    for (const char *p = strstr(text, needle); p; p = strstr(p + 1, needle))
+        if (!isdigit((unsigned char)p[n])) return true;
+    return false;
+}
+
+/* one 14x6 chip card: rounded border in the identity color, title / caption inset, 4 interior rows of 12 cells */
+static void card_rows(sb_t rows[6], int x, const char *sgr, const char *title, const char *caption,
+                      char *const interior[INNER_ROWS]) {
+    for (int r = 0; r < 6; r++) {
+        if (x > 0) sb_appendf(&rows[r], "%*s", CARD_GAP, "");
+        if (r == 0) border_row(&rows[r], sgr, title, true);
+        else if (r == 5) border_row(&rows[r], sgr, caption, false);
+        else {
+            sb_appendf(&rows[r], "%s%s\x1b[39m", sgr, tui_sym("boxRound.vertical"));
+            sb_append(&rows[r], interior[r - 1]);
+            sb_appendf(&rows[r], "%s%s\x1b[39m", sgr, tui_sym("boxRound.vertical"));
+        }
+    }
+}
+
 static void band_render(tui_component_t *c, int width, strvec_t *out) {
     ui_t *u = c->user;
-    if (!pending_count(u)) return;
-    char *text = tui_editor_get_text(u->editor);
+    tui_editor_t *ed = u->editor;
+    if (!pending_count(u) && !ed->texts.n) return;
+    char *text = tui_editor_get_text(ed);
     sb_t rows[6] = {SB_INIT, SB_INIT, SB_INIT, SB_INIT, SB_INIT, SB_INIT};
     int x = 0, cards = 0;
-    for (int i = 0; i < pending_count(u); i++) {
+    bool full = false;
+    for (int i = 0; i < pending_count(u) && !full; i++) {
         int num = i + 1;
         char *label = ui_chip_label(num);
-        bool referenced = strstr(text, label) != NULL;
+        bool referenced = token_in(text, label);
         if (!referenced) { /* also an expanded marker typed / restored into the buffer */
             char *mk = xasprintf("[Image #%d", num);
-            referenced = strstr(text, mk) != NULL;
+            referenced = token_in(text, mk);
             free(mk);
         }
         if (!referenced) {
@@ -625,6 +757,7 @@ static void band_render(tui_component_t *c, int width, strvec_t *out) {
         }
         if (x + CARD_COLS > width) {
             free(label);
+            full = true;
             break;
         }
         const json_t *e = json_at(u->att_images, (size_t)i);
@@ -634,20 +767,39 @@ static void band_render(tui_component_t *c, int width, strvec_t *out) {
         const char *icon = tui_sym("chip.image");
         int pad = INNER_COLS - tui_visible_width(icon);
         char *muted = fg(TUI_TC_MUTED, icon);
-        for (int r = 0; r < 6; r++) {
-            if (x > 0) sb_appendf(&rows[r], "%*s", CARD_GAP, "");
-            if (r == 0) border_row(&rows[r], sgr, label, true);
-            else if (r == 5) border_row(&rows[r], sgr, caption, false);
-            else {
-                sb_appendf(&rows[r], "%s%s\x1b[39m", sgr, tui_sym("boxRound.vertical"));
-                if (r == 2) sb_appendf(&rows[r], "%*s%s%*s", pad / 2, "", muted, pad - pad / 2, "");
-                else sb_appendf(&rows[r], "%*s", INNER_COLS, "");
-                sb_appendf(&rows[r], "%s%s\x1b[39m", sgr, tui_sym("boxRound.vertical"));
-            }
-        }
+        char *interior[INNER_ROWS];
+        for (int r = 0; r < INNER_ROWS; r++)
+            interior[r] = r == 1 ? xasprintf("%*s%s%*s", pad / 2, "", muted, pad - pad / 2, "")
+                                 : xasprintf("%*s", INNER_COLS, "");
+        card_rows(rows, x, sgr, label, caption, interior);
+        for (int r = 0; r < INNER_ROWS; r++) free(interior[r]);
         x += (x > 0 ? CARD_GAP : 0) + CARD_COLS;
         cards++;
         free(muted), free(sgr), free(caption), free(label);
+    }
+    /* text pastes: the leading 4 rows x 12 cells, muted; `+N lines` or `N chars` */
+    for (size_t i = 0; i < ed->texts.n && !full; i++) {
+        const tui_editor_text_att_t *t = &ed->texts.v[i];
+        if (!token_in(text, t->label)) continue;
+        if (x + CARD_COLS > width) break;
+        char *caption = t->line_count > 1 ? xasprintf("+%zu lines", t->line_count) : xasprintf("%zu chars", t->char_count);
+        char *sgr = ui_paste_attachment_sgr(t->n);
+        char *interior[INNER_ROWS];
+        const char *p = t->content;
+        for (int r = 0; r < INNER_ROWS; r++) {
+            const char *nl = p ? strchr(p, '\n') : NULL;
+            char *line = p ? (nl ? xstrndup(p, (size_t)(nl - p)) : xstrdup(p)) : xstrdup("");
+            p = p && nl ? nl + 1 : NULL;
+            char *tabs = tui_replace_tabs(line), *cut = tui_truncate_to_width(tabs, INNER_COLS, NULL);
+            char *m = fg(TUI_TC_MUTED, cut);
+            interior[r] = xasprintf("%s%*s", m, MAX(0, INNER_COLS - tui_visible_width(cut)), "");
+            free(line), free(tabs), free(cut), free(m);
+        }
+        card_rows(rows, x, sgr, t->label, caption, interior);
+        for (int r = 0; r < INNER_ROWS; r++) free(interior[r]);
+        x += (x > 0 ? CARD_GAP : 0) + CARD_COLS;
+        cards++;
+        free(sgr), free(caption);
     }
     free(text);
     for (int r = 0; r < 6; r++) {
@@ -663,5 +815,6 @@ tui_component_t *ui_attach_band_new(ui_t *u) {
     tui_component_init(c, &BAND_VT);
     c->user = u;
     tui_editor_set_paste_hook(u->editor, paste_hook, u);
+    tui_editor_set_large_paste_hook(u->editor, large_paste_hook, u);
     return c;
 }

@@ -100,6 +100,15 @@ typedef struct {
     char *style;
 } tui_editor_paste_t;
 
+/* A staged text paste (CustomEditor.pendingTexts): its chip label (`📄 #N`) sits in the buffer as an atom; the
+ * composer attachment band shows a card for each one still referenced. */
+typedef struct {
+    int n;
+    char *label;
+    char *content;
+    size_t line_count, char_count;
+} tui_editor_text_att_t;
+
 struct tui_editor {
     tui_component_t base;
     strvec_t lines; /* always >= 1 line */
@@ -125,6 +134,12 @@ struct tui_editor {
                      char **expansion, char **style);
     void *token_ud;
     bool collapsing;
+    /* onLargePaste: a marker-sized paste (> 10 lines or > 1000 chars, sanitized); true = the host took it and
+     * the editor inserts nothing (no `[Paste #N]` marker, no undo step) */
+    bool (*large_paste_hook)(void *ud, tui_editor_t *ed, const char *text, size_t line_count);
+    void *large_paste_ud;
+    VEC(tui_editor_text_att_t) texts; /* staged text attachments, reset with the draft (clearDraft) */
+    int text_counter;
 
     tui_autocomplete_fn ac_fn;
     void *ac_ud;
@@ -180,6 +195,19 @@ void tui_editor_set_token_hook(tui_editor_t *ed,
                                bool (*fn)(void *ud, const char *text, const char *line, size_t from, size_t *start, size_t *end,
                                           char **label, char **expansion, char **style),
                                void *ud);
+void tui_editor_set_large_paste_hook(tui_editor_t *ed,
+                                     bool (*fn)(void *ud, tui_editor_t *ed, const char *text, size_t line_count),
+                                     void *ud);
+/* insertTextAttachment: stage `content` as text attachment #N, N = text_counter + 1 (label `<chip.paste> #N`,
+ * painted with the SGR `style`), and insert the atom; it expands to `expansion` (NULL = the content) on submit.
+ * Returns N. */
+int tui_editor_insert_text_attachment(tui_editor_t *ed, const char *content, const char *expansion, const char *style);
+/* undoPastTransientText: drop `transient` just before the cursor plus the undo snapshots it produced, then undo */
+void tui_editor_undo_past_transient(tui_editor_t *ed, const char *transient);
+void tui_editor_move_to_message_start(tui_editor_t *ed);
+void tui_editor_move_to_message_end(tui_editor_t *ed);
+void tui_editor_move_to_line_start(tui_editor_t *ed);
+void tui_editor_move_to_line_end(tui_editor_t *ed);
 bool tui_editor_is_empty(const tui_editor_t *ed);
 void tui_editor_clear(tui_editor_t *ed);
 void tui_editor_undo(tui_editor_t *ed);

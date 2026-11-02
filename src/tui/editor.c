@@ -2,6 +2,7 @@
  * autocomplete. */
 #include "tui/editor.h"
 #include "core/fs.h"
+#include "tui/symbols.h"
 
 #include <ctype.h>
 
@@ -662,6 +663,31 @@ void tui_editor_set_token_hook(tui_editor_t *ed,
     ed->token_ud = ud;
 }
 
+void tui_editor_set_large_paste_hook(tui_editor_t *ed,
+                                     bool (*fn)(void *ud, tui_editor_t *ed, const char *text, size_t line_count),
+                                     void *ud) {
+    ed->large_paste_hook = fn;
+    ed->large_paste_ud = ud;
+}
+
+static void texts_clear(tui_editor_t *ed) {
+    for (size_t i = 0; i < ed->texts.n; i++) {
+        free(ed->texts.v[i].label);
+        free(ed->texts.v[i].content);
+    }
+    ed->texts.n = 0;
+    ed->text_counter = 0;
+}
+
+int tui_editor_insert_text_attachment(tui_editor_t *ed, const char *content, const char *expansion, const char *style) {
+    int n = ++ed->text_counter;
+    tui_editor_text_att_t t = {n, xasprintf("%s #%d", tui_sym("chip.paste"), n), xstrdup(content),
+                               1 + str_count(content, "\n"), utf8_strlen(content)};
+    vec_push(&ed->texts, t);
+    tui_editor_insert_atom(ed, t.label, expansion ? expansion : content, style);
+    return n;
+}
+
 /* paint styled atoms (omp chip style: bold + identity color, then a reset the text coloring re-opens) */
 static char *style_atoms(const tui_editor_t *ed, char *s, bool surface) {
     for (size_t i = 0; i < ed->pastes.n; i++) {
@@ -714,6 +740,12 @@ void tui_editor_paste(tui_editor_t *ed, const char *text) {
     }
     size_t nlines = 1 + str_count(clean, "\n");
     size_t nchars = utf8_strlen(clean);
+    /* the host may take a marker-sized paste (large-paste menu / text-attachment chip) */
+    if ((nlines > 10 || nchars > 1000) && ed->large_paste_hook &&
+        ed->large_paste_hook(ed->large_paste_ud, ed, clean, nlines)) {
+        free(clean);
+        return;
+    }
     ed->hist_index = -1;
     push_undo(ed, ACT_OTHER);
     if (nlines > 10 || nchars > 1000) {
@@ -1706,6 +1738,8 @@ static void editor_destroy(tui_component_t *c) {
     free(ed->hist_draft);
     for (size_t i = 0; i < ed->pastes.n; i++) paste_free(&ed->pastes.v[i]);
     vec_free(&ed->pastes);
+    texts_clear(ed);
+    vec_free(&ed->texts);
     free(ed->placeholder);
     free(ed->gutter);
     free(ed);
@@ -1756,6 +1790,60 @@ void tui_editor_insert_text(tui_editor_t *ed, const char *text) {
     notify_change(ed);
 }
 
+/* #matchesTransientUndoSnapshot: a snapshot taken while `transient` was being typed at `start` */
+static bool transient_snapshot(const tui_editor_t *ed, const tui_editor_snapshot_t *s, const char *transient,
+                               size_t start, const char *before, const char *after) {
+    if (s->cl != ed->cl || s->lines.n != ed->lines.n) return false;
+    if (s->cc < start || s->cc - start >= strlen(transient)) return false;
+    for (size_t i = 0; i < s->lines.n; i++)
+        if (i != ed->cl && strcmp(s->lines.v[i], ed->lines.v[i])) return false;
+    char *want = xasprintf("%s%.*s%s", before, (int)(s->cc - start), transient, after);
+    bool ok = !strcmp(s->lines.v[s->cl], want);
+    free(want);
+    return ok;
+}
+
+void tui_editor_undo_past_transient(tui_editor_t *ed, const char *transient) {
+    size_t tl = strlen(transient);
+    const char *line = cur_line(ed);
+    if (!tl || ed->cc < tl || strncmp(line + ed->cc - tl, transient, tl)) {
+        tui_editor_undo(ed);
+        return;
+    }
+    size_t start = ed->cc - tl;
+    char *before = xstrndup(line, start), *after = xstrdup(line + ed->cc);
+    ed->hist_index = -1;
+    ed->last_action = ACT_NONE;
+    ed->preferred_col = -1;
+    set_line(ed, ed->cl, xasprintf("%s%s", before, after));
+    ed->cc = start;
+    while (ed->undo.n && transient_snapshot(ed, &ed->undo.v[ed->undo.n - 1], transient, start, before, after)) {
+        snapshot_free(&ed->undo.v[ed->undo.n - 1]);
+        ed->undo.n--;
+    }
+    free(before);
+    free(after);
+    if (!ed->undo.n) {
+        notify_change(ed);
+        return;
+    }
+    tui_editor_undo(ed);
+}
+
+static void move_to(tui_editor_t *ed, size_t line, bool end) {
+    ed->last_action = ACT_NONE;
+    close_ac(ed);
+    ed->cl = line;
+    ed->cc = end ? strlen(cur_line(ed)) : 0;
+    ed->preferred_col = -1;
+    notify_change(ed);
+}
+
+void tui_editor_move_to_message_start(tui_editor_t *ed) { move_to(ed, 0, false); }
+void tui_editor_move_to_message_end(tui_editor_t *ed) { move_to(ed, ed->lines.n - 1, true); }
+void tui_editor_move_to_line_start(tui_editor_t *ed) { move_to(ed, ed->cl, false); }
+void tui_editor_move_to_line_end(tui_editor_t *ed) { move_to(ed, ed->cl, true); }
+
 void tui_editor_remember_draft(tui_editor_t *ed) {
     char *t = tui_editor_get_text(ed);
     char *tt = str_trim(t);
@@ -1779,6 +1867,7 @@ void tui_editor_clear(tui_editor_t *ed) {
     ed->hist_index = -1;
     for (size_t i = 0; i < ed->pastes.n; i++) paste_free(&ed->pastes.v[i]);
     ed->pastes.n = 0;
+    texts_clear(ed);
     for (size_t i = 0; i < ed->undo.n; i++) snapshot_free(&ed->undo.v[i]);
     ed->undo.n = 0;
     ed->last_action = ACT_NONE;
