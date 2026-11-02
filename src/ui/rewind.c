@@ -322,17 +322,14 @@ static void slide_to(rewind_t *r, size_t variant) {
 
 /* ---------- rows and outline composition (transcript-outline.ts) ---------- */
 
+/* `!/\S/.test(row)` on the raw row: escape sequences count as content, so a padded bubble row is not blank */
 static bool blank_row(const char *s) {
-    char *p = tui_strip_ansi(s);
-    bool b = true;
-    for (char *q = p; *q; q++)
-        if (!isspace((unsigned char)*q)) b = false;
-    free(p);
-    return b;
+    for (; *s; s++)
+        if (!isspace((unsigned char)*s)) return false;
+    return true;
 }
 
-/* rendered rows of each child at `w` columns: the transcript's blank separator row, then its rows (prompt
- * zone marks dropped) */
+/* rendered rows of each child at `w` columns as the component draws them (prompt zone marks dropped) */
 static void render_children(rewind_t *r, tui_container_t *c, size_t from, size_t to, int w, rows_t *out) {
     bool saved = r->u->expand_tools;
     r->u->expand_tools = r->expanded;
@@ -354,16 +351,21 @@ static void render_children(rewind_t *r, tui_container_t *c, size_t from, size_t
             strvec_push_own(&rows, sb_detach(&o));
         }
         strvec_free(&raw);
-        if (getenv("OMC_REWIND_DEBUG")) {
-            FILE *f = fopen(getenv("OMC_REWIND_DEBUG"), "a");
-            if (f) {
-                fprintf(f, "child %zu (%zu rows)\n", i, rows.n);
-                for (size_t k = 0; k < rows.n; k++) {
-                    char *j = json_quote(rows.v[k]);
-                    fprintf(f, "  %s\n", j);
-                    free(j);
-                }
-                fclose(f);
+        /* ToolExecutionComponent pads its card with a plain blank row above and below (Box(0, 1)); the live
+         * transcript strips those edges, the replica keeps them. Read groups have no padding. */
+        tui_component_t *ch = c->children.v[i];
+        if (str_eq(ch->vt->name, "message") && rows.n) {
+            msgview_t *v = (msgview_t *)ch;
+            if ((v->kind == MV_TOOL || v->kind == MV_BASH) && !str_eq(v->tool_name, "read")) {
+                size_t lo = 0, hi = rows.n;
+                while (lo < hi && !*rows.v[lo]) lo++;
+                while (hi > lo && !*rows.v[hi - 1]) hi--;
+                strvec_t padded = {0};
+                strvec_push(&padded, "");
+                for (size_t k = lo; k < hi; k++) strvec_push(&padded, rows.v[k]);
+                strvec_push(&padded, "");
+                strvec_free(&rows);
+                rows = padded;
             }
         }
         vec_push(out, rows);

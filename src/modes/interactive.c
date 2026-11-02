@@ -1590,7 +1590,7 @@ static bool handle_command_inner(ui_t *u, const char *line) {
         }
     } else if (!strcmp(cmd, "tree")) {
         tc_tree_open(u);
-    } else if (!strcmp(cmd, "branch") || !strcmp(cmd, "rewind")) {
+    } else if (!strcmp(cmd, "branch")) { /* also /rewind (registry alias) */
         tc_rewind_open(u);
     } else if (!strcmp(cmd, "retry")) {
         if (u->worker_running) add_notice(u, "warning", "The agent is already running.");
