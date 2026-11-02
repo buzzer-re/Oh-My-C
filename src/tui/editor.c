@@ -32,6 +32,7 @@ void tui_ac_result_free(tui_ac_result_t *r) {
         free(r->items.v[i].hint);
     }
     vec_free(&r->items);
+    strvec_free(&r->ghosts);
     r->prefix_len = 0;
 }
 
@@ -91,8 +92,15 @@ void tui_ac_default_add_command_icon(tui_ac_default_t *p, const char *name, cons
     strvec_push(&p->icons, icon ? icon : "");
 }
 
+void tui_ac_default_add_alias(tui_ac_default_t *p, const char *command, const char *alias) {
+    strvec_push(&p->alias_names, alias);
+    strvec_push(&p->alias_targets, command);
+}
+
 void tui_ac_default_free(tui_ac_default_t *p) {
     if (!p) return;
+    strvec_free(&p->alias_names);
+    strvec_free(&p->alias_targets);
     strvec_free(&p->commands);
     strvec_free(&p->descriptions);
     strvec_free(&p->icons);
@@ -149,6 +157,7 @@ bool tui_ac_default_provider(void *ud, const char *line_before, bool first_line,
         double *score = xcalloc(n ? n : 1, sizeof *score);
         size_t *order = xcalloc(n ? n : 1, sizeof *order);
         bool *desc_only = xcalloc(n ? n : 1, sizeof *desc_only);
+        int *alias_hit = xcalloc(n ? n : 1, sizeof *alias_hit);
         size_t m = 0;
         for (size_t i = 0; i < n; i++) {
             char *ln = str_lower(p->commands.v[i]), *ld = str_lower(p->descriptions.v[i]);
@@ -158,6 +167,20 @@ bool tui_ac_default_provider(void *ud, const char *line_before, bool first_line,
             desc_only[i] = ns <= 0;
             free(ln);
             free(ld);
+            /* aliases: a better alias hit shows the alias as the row (and accepts the command) */
+            alias_hit[i] = -1;
+            for (size_t k = 0; *q && k < p->alias_names.n; k++) {
+                if (strcmp(p->alias_targets.v[k], p->commands.v[i])) continue;
+                char *la = str_lower(p->alias_names.v[k]);
+                double as = ac_command_score(q, la);
+                free(la);
+                if (as <= 0) continue;
+                desc_only[i] = false;
+                if (as > s) {
+                    s = as;
+                    alias_hit[i] = (int)k;
+                }
+            }
             if (s <= 0) continue;
             score[i] = s;
             order[m++] = i;
@@ -171,21 +194,39 @@ bool tui_ac_default_provider(void *ud, const char *line_before, bool first_line,
             }
         for (size_t k = 0; k < m && (int)out->items.n < p->max_items; k++) {
             size_t i = order[k];
-            char *val = xasprintf("/%s ", p->commands.v[i]);
+            const char *shown = alias_hit[i] >= 0 ? p->alias_names.v[alias_hit[i]] : p->commands.v[i];
+            char *val = xasprintf("/%s ", shown);
             char *live = p->describe ? p->describe(p->describe_ud, p->commands.v[i]) : NULL;
-            tui_ac_result_add_icon(out, val, p->commands.v[i], live ? live : p->descriptions.v[i],
+            tui_ac_result_add_icon(out, val, shown, live ? live : p->descriptions.v[i],
                                    i < p->icons.n ? p->icons.v[i] : NULL);
             free(live);
             free(val);
         }
         if (m) out->first_desc_match = desc_only[order[0]];
         free(desc_only);
+        free(alias_hit);
         free(score);
         free(order);
         free(q);
         out->prefix_len = len;
         out->slash = true;
         return out->items.n > 0;
+    }
+    /* "/cmd args": the command's argument completions first, then path completion */
+    if (first_line && line_before[0] == '/' && p->args) {
+        size_t sp = strcspn(line_before, " \t");
+        if (line_before[sp]) {
+            char *cmd = xstrndup(line_before + 1, sp - 1);
+            const char *arg = line_before + sp + 1;
+            int r = p->args(p->args_ud, cmd, arg, out);
+            free(cmd);
+            if (r < 0) return false;
+            if (r > 0 && out->items.n) {
+                out->prefix_len = strlen(arg);
+                out->args = true;
+                return true;
+            }
+        }
     }
     /* current token */
     size_t s = len;
@@ -195,6 +236,17 @@ bool tui_ac_default_provider(void *ud, const char *line_before, bool first_line,
     if (tl > 0 && tok[0] == '@') return complete_path(p, tok + 1, tl - 1, true, out);
     if (forced && tl > 0) return complete_path(p, tok, tl, false, out);
     return false;
+}
+
+char *tui_ac_default_inline_hint(void *ud, const char *line_before, bool first_line) {
+    tui_ac_default_t *p = ud;
+    if (!p || !p->inline_hint || !first_line || line_before[0] != '/') return NULL;
+    size_t sp = strcspn(line_before, " \t");
+    if (!line_before[sp]) return NULL;
+    char *cmd = xstrndup(line_before + 1, sp - 1);
+    char *h = p->inline_hint(p->args_ud, cmd, line_before + sp + 1);
+    free(cmd);
+    return h;
 }
 
 /* ---------- helpers ---------- */
@@ -268,6 +320,8 @@ void tui_editor_undo(tui_editor_t *ed) {
 static void close_ac(tui_editor_t *ed) {
     if (ed->ac_list) tui_component_destroy(&ed->ac_list->base);
     ed->ac_list = NULL;
+    ed->ac_args = false;
+    strvec_free(&ed->ac_ghosts);
 }
 
 /* raw insertion of text (may contain '\n') at the cursor */
@@ -698,6 +752,8 @@ static void refresh_ac(tui_editor_t *ed, bool forced) {
          * commands; other completions keep the previously selected value */
         if (!r.slash && prev_val && !strcmp(prev_val, r.items.v[i].value)) keep_sel = i;
     }
+    for (size_t i = 0; i < r.items.n; i++) strvec_push(&ed->ac_ghosts, i < r.ghosts.n ? r.ghosts.v[i] : "");
+    ed->ac_args = r.args;
     ed->ac_list->selected = keep_sel;
     ed->ac_enter_accepts = !r.first_desc_match;
     ed->ac_prefix_len = r.prefix_len;
@@ -713,11 +769,7 @@ static void maybe_trigger_ac(tui_editor_t *ed) {
     }
     const char *line = cur_line(ed);
     bool trig = false;
-    if (ed->cl == 0 && line[0] == '/') {
-        trig = true;
-        for (size_t i = 0; i < ed->cc; i++)
-            if (line[i] == ' ' || line[i] == '\t') trig = false;
-    }
+    if (ed->cl == 0 && line[0] == '/') trig = true; /* command names, then their arguments */
     if (!trig) {
         size_t s = ed->cc;
         while (s > 0 && line[s - 1] != ' ' && line[s - 1] != '\t') s--;
@@ -915,6 +967,30 @@ bool tui_editor_handle_key(tui_editor_t *ed, const tui_key_t *k) {
         if (tui_kb(k, "tui.input.submit") && !ed->ac_enter_accepts) {
             /* the top suggestion only matched a description: Enter submits the typed text */
             close_ac(ed);
+        } else if (tui_kb(k, "tui.input.submit") && ed->ac_args) {
+            /* #selectedSlashArgumentIsAlreadyTyped: Enter submits a fully typed argument (unless its
+             * usage still names a required `<arg>`), otherwise it applies the completion only */
+            const tui_select_item_t *it = tui_select_list_selected(ed->ac_list);
+            const char *gh = it && ed->ac_list->selected < ed->ac_ghosts.n ? ed->ac_ghosts.v[ed->ac_list->selected] : "";
+            size_t pl = MIN(ed->ac_prefix_len, ed->cc);
+            char *typed = xstrndup(cur_line(ed) + ed->cc - pl, pl);
+            char *tt = str_trim(typed), *vt = it ? str_trim(it->value) : xstrdup("");
+            bool required = false;
+            int depth = 0;
+            for (const char *g = gh; *g; g++) {
+                if (*g == '[') depth++;
+                else if (*g == ']' && depth) depth--;
+                else if (*g == '<' && !depth) required = true;
+            }
+            bool done = it && *tt && !strcmp(tt, vt) && !required && strlen(cur_line(ed)) == ed->cc;
+            free(typed);
+            free(tt);
+            free(vt);
+            if (done) close_ac(ed);
+            else {
+                accept_ac(ed);
+                return true;
+            }
         } else if (tui_kb(k, "tui.input.tab") || tui_kb(k, "tui.input.submit")) {
             bool submit = tui_kb(k, "tui.input.submit");
             accept_ac(ed);
@@ -1190,6 +1266,8 @@ static void composer_render(tui_editor_t *ed, int width, strvec_t *out) {
         ph = NULL;
     }
     int phw = ph ? tui_visible_width(ph) : 0;
+    /* dim ghost text after an end-of-line cursor (slash-command argument hints) */
+    char *ghost = !ph && c->focused ? tui_editor_ghost(ed) : NULL;
 
     for (int vi = ed->scroll; vi < ed->scroll + vis; vi++) {
         const seg_t *sg = &segs.v[vi];
@@ -1228,6 +1306,14 @@ static void composer_render(tui_editor_t *ed, int width, strvec_t *out) {
                     sb_appendn(&d, text, cpos);
                     sb_append(&d, TUI_CURSOR_MARKER);
                     sb_append(&d, after);
+                    if (!*after && ghost && avail > 0) {
+                        char *g = tui_truncate_to_width(ghost, avail, NULL);
+                        char *gd = tui_fgs(NULL, TUI_TC_DIM, g);
+                        sb_append(&d, gd);
+                        dw += tui_visible_width(g);
+                        free(gd);
+                        free(g);
+                    }
                 }
             } else if (*after) {
                 size_t nx = next_char(text, cpos);
@@ -1256,6 +1342,13 @@ static void composer_render(tui_editor_t *ed, int width, strvec_t *out) {
                     tui_sb_spaces(&d, avail - phw);
                     sb_append(&d, ph);
                     dw += avail;
+                } else if (ghost && avail > 0) {
+                    char *g = tui_truncate_to_width(ghost, avail, NULL);
+                    char *gd = tui_fgs(NULL, TUI_TC_DIM, g);
+                    sb_append(&d, gd);
+                    dw += tui_visible_width(g);
+                    free(gd);
+                    free(g);
                 }
                 if (dw > lcw && px > 0) overflow = dw - lcw;
             }
@@ -1285,6 +1378,7 @@ static void composer_render(tui_editor_t *ed, int width, strvec_t *out) {
     if (row) strvec_push_own(out, row);
     free(top);
     free(ph);
+    free(ghost);
     free(g_first);
     free(g_cont);
     vec_free(&segs);
@@ -1476,6 +1570,29 @@ void tui_editor_set_autocomplete(tui_editor_t *ed, tui_autocomplete_fn fn, void 
     ed->ac_fn = fn;
     ed->ac_ud = ud;
     close_ac(ed);
+}
+
+void tui_editor_set_inline_hint(tui_editor_t *ed, char *(*fn)(void *ud, const char *line_before, bool first_line), void *ud) {
+    ed->hint_fn = fn;
+    ed->hint_ud = ud;
+}
+
+/* editor.ts #getInlineHint: the selected completion's hint while the list is open, else the
+ * provider's hint for the text before the cursor; only at the end of the line */
+char *tui_editor_ghost(tui_editor_t *ed) {
+    const char *line = cur_line(ed);
+    if (ed->cc != strlen(line)) return NULL;
+    if (ed->ac_list) {
+        size_t sel = ed->ac_list->selected;
+        return sel < ed->ac_ghosts.n && *ed->ac_ghosts.v[sel] ? xstrdup(ed->ac_ghosts.v[sel]) : NULL;
+    }
+    if (!ed->hint_fn) return NULL;
+    char *h = ed->hint_fn(ed->hint_ud, line, ed->cl == 0);
+    if (h && !*h) {
+        free(h);
+        h = NULL;
+    }
+    return h;
 }
 
 void tui_editor_set_placeholder(tui_editor_t *ed, const char *text) {

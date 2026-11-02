@@ -378,7 +378,7 @@ static void y_value(yctx_t *y, const json_t *v, bool after_key, int depth) {
     }
 }
 
-static char *bun_yaml_stringify(const json_t *v) {
+char *bun_yaml_stringify(const json_t *v) {
     sb_t b = SB_INIT;
     yctx_t y = {&b, 0, 0};
     y_value(&y, v, false, 0);

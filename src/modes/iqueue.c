@@ -7,6 +7,7 @@
  * queued-messages band (ui/queue.c) until the agent delivers them, when their user message_start draws
  * them in the transcript. `!cmd`, /compact and /handoff run on their own threads so the UI keeps
  * painting and Esc cancels them; input typed meanwhile queues behind the compaction. */
+#include "coding/slashcmd.h"
 #include "modes/interactive.h"
 
 #include "config/settings.h"
@@ -137,7 +138,7 @@ static void bg_done(void *p) {
         free(t);
     }
     /* a committed (or no-op) manual pass resumes the turn it interrupted (compaction.autoContinue) */
-    bool noop = b->err && !strcmp(b->err, "Nothing to compact");
+    bool noop = b->err && (str_starts(b->err, "Nothing to compact") || !strcmp(b->err, "Already compacted"));
     if (b->resume && (b->rc == 0 || noop) && settings_bool("compaction.autoContinue", true) && !u->worker_running) {
         char *cont = prompt_load("coding-agent/prompts/system/auto-continue.md");
         if (cont) ix_start_hidden(u, cont, "auto-continue");
@@ -155,7 +156,18 @@ static void bg_done(void *p) {
 static void *bg_main(void *p) {
     bg_t *b = p;
     app_t *a = b->u->app;
-    b->rc = b->kind == BG_COMPACT ? app_compact(a, b->instructions, &b->err) : app_handoff(a, &b->err);
+    if (b->kind == BG_COMPACT) {
+        /* `/compact [soft|remote|snapcompact] [focus]` (already validated by the slash handler) */
+        const char *mode = NULL;
+        char *focus = NULL, *perr = NULL;
+        if (!slash_parse_compact_args(b->instructions, &mode, &focus, &perr)) {
+            b->err = perr;
+            b->rc = -1;
+        } else b->rc = app_compact_mode(a, mode, focus, &b->err);
+        free(focus);
+    } else {
+        b->rc = app_handoff(a, b->instructions, &b->err); /* focus instructions */
+    }
     tui_post(b->u->tui, bg_done, b);
     return NULL;
 }
@@ -216,7 +228,6 @@ static void compact_on_yield(ui_t *u, const char *text) {
 }
 
 void iq_handoff(ui_t *u, const char *arg) {
-    UNUSED(arg);
     if (u->worker_running) {
         add_notice(u, "warning", "Wait for the current response to finish or abort it before handing off.");
         return;
@@ -230,7 +241,7 @@ void iq_handoff(ui_t *u, const char *arg) {
         add_notice(u, "warning", "Nothing to hand off (no messages yet)");
         return;
     }
-    bg_start(u, BG_HANDOFF, NULL, false);
+    bg_start(u, BG_HANDOFF, arg, false);
 }
 
 /* ---------- `!cmd` off the UI thread (CommandController.handleBashCommand) ---------- */

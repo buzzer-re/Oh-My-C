@@ -70,6 +70,8 @@ agent_tool_t *agent_tool_new(const char *name, const char *label, const char *de
                              int (*execute)(agent_tool_t *, tool_ctx_t *, const json_t *, tool_result_t *));
 void agent_tool_free(agent_tool_t *t);
 json_t *agent_tool_wire(const agent_tool_t *t); /* {name, description, parameters}; injects `i` when intent tracing is on */
+/* examples as JSDoc `@example` lines (ai dialect renderToolExamplesJsdoc; /dump tool inventory); owned or NULL */
+char *agent_tool_examples_jsdoc(const agent_tool_t *t);
 /* intent tracing (upstream tools.intentTracing; PI_NO_INTENT=1 disables injection). Process-wide. */
 void agent_set_intent_tracing(bool on);
 bool agent_intent_tracing(void);

@@ -204,6 +204,11 @@ static int write_full(session_t *s) {
     return rc;
 }
 
+int session_rewrite(session_t *s) {
+    if (!s->persist || !s->on_disk) return 0;
+    return write_full(s);
+}
+
 int session_ensure_on_disk(session_t *s) {
     if (!s->persist || s->on_disk) return 0;
     return write_full(s);

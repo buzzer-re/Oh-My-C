@@ -30,6 +30,8 @@ typedef struct {
     size_t prefix_len; /* bytes before the cursor (current line) replaced by an accepted value */
     VEC(tui_select_item_t) items;
     bool slash;        /* slash-command completions (popup uses the slash-command layout) */
+    bool args;         /* slash-command argument completions (Enter applies without submitting) */
+    strvec_t ghosts;   /* per item: ghost text shown after the cursor while it is selected ("" = none) */
     bool first_desc_match; /* top item matched only by description: Enter submits the raw text */
 } tui_ac_result_t;
 
@@ -52,6 +54,13 @@ typedef struct {
     /* optional live display description (owned result, NULL = static one); matching uses the static one */
     char *(*describe)(void *ud, const char *name);
     void *describe_ud;
+    strvec_t alias_names, alias_targets; /* alias -> command name */
+    /* argument completions for "/cmd <arg text>" (first line): 1 items added, 0 none (path completion
+     * may follow on Tab), -1 suppress completion (command takes no arguments) */
+    int (*args)(void *ud, const char *cmd, const char *arg_text, tui_ac_result_t *out);
+    /* ghost hint after the cursor for "/cmd <arg text>" (owned or NULL) */
+    char *(*inline_hint)(void *ud, const char *cmd, const char *arg_text);
+    void *args_ud;
     char *cwd;             /* NULL = process cwd */
     int max_items;         /* default 50 */
 } tui_ac_default_t;
@@ -59,7 +68,10 @@ typedef struct {
 tui_ac_default_t *tui_ac_default_new(const char *cwd);
 void tui_ac_default_add_command(tui_ac_default_t *p, const char *name, const char *description);
 void tui_ac_default_add_command_icon(tui_ac_default_t *p, const char *name, const char *description, const char *icon);
+void tui_ac_default_add_alias(tui_ac_default_t *p, const char *command, const char *alias);
 void tui_ac_default_free(tui_ac_default_t *p);
+/* ghost hint for the text before the cursor (provider-level getInlineHint); owned or NULL */
+char *tui_ac_default_inline_hint(void *ud, const char *line_before, bool first_line);
 bool tui_ac_default_provider(void *ud, const char *line_before, bool first_line, bool forced, tui_ac_result_t *out);
 
 /* ---------- editor ---------- */
@@ -105,7 +117,12 @@ struct tui_editor {
     tui_select_list_t *ac_list; /* non-NULL while autocomplete is open */
     size_t ac_prefix_len;
     bool ac_enter_accepts;
+    bool ac_args;          /* the open list completes a slash-command argument */
+    strvec_t ac_ghosts;    /* ghost text per list item */
     int ac_max_visible;
+    /* inline ghost hint for the text before the cursor (end of line only); owned result or NULL */
+    char *(*hint_fn)(void *ud, const char *line_before, bool first_line);
+    void *hint_ud;
 
     tui_editor_submit_fn on_submit;
     tui_editor_change_fn on_change;
@@ -158,6 +175,8 @@ char *tui_editor_current_line(const tui_editor_t *ed);
 void tui_editor_set_on_submit(tui_editor_t *ed, tui_editor_submit_fn fn, void *ud);
 void tui_editor_set_on_change(tui_editor_t *ed, tui_editor_change_fn fn);
 void tui_editor_set_autocomplete(tui_editor_t *ed, tui_autocomplete_fn fn, void *ud);
+void tui_editor_set_inline_hint(tui_editor_t *ed, char *(*fn)(void *ud, const char *line_before, bool first_line), void *ud);
+char *tui_editor_ghost(tui_editor_t *ed); /* the ghost text shown after the cursor now (owned) or NULL */
 void tui_editor_set_placeholder(tui_editor_t *ed, const char *text);
 bool tui_editor_autocomplete_open(const tui_editor_t *ed);
 /* Composer chrome: render through the named composer shape (box, band, claude, pi, borderless,

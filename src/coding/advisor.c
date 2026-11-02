@@ -149,18 +149,23 @@ static int advise_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *arg
 
 /* ---------- lifecycle ---------- */
 
-static void build_agent(advisor_t *ad) {
-    app_t *a = ad->app;
-    agent_t *ag = agent_new();
+/* resolveAdvisorRoleSelection: the model the `@advisor` role alias resolves to, NULL when none */
+const ai_model_t *advisor_role_model(void) {
     const ai_model_t *m = NULL;
-    /* resolveAdvisorRoleSelection: modelRoles.advisor, else a configured slow, else the slow chain */
     mr_pool_t avail = {0};
     mr_pool_available(&avail, "chat");
     mr_result_t r;
     if (mr_resolve_value("@advisor", &avail, &r)) m = r.model;
     mr_result_clear(&r);
     mr_pool_free(&avail);
-    if (!m) m = a->model;
+    return m;
+}
+
+static void build_agent(advisor_t *ad) {
+    app_t *a = ad->app;
+    agent_t *ag = agent_new();
+    const ai_model_t *m = advisor_role_model();
+    if (!m) m = a->model; /* app_set_advisor only builds an advisor once the role resolves */
     agent_set_model(ag, m);
     ag->thinking = model_clamp_effort(m, a->thinking);
     ad->env = tool_env_new(a->cwd);
@@ -375,4 +380,52 @@ void advisor_reset(advisor_t *ad) {
     ad->last_count = json_len(ad->app->agent->messages);
     sb_clear(&ad->pending);
     pthread_mutex_unlock(&ad->mu);
+}
+
+json_t *advisor_stats(advisor_t *ad) {
+    json_t *o = json_obj();
+    int64_t in = 0, out = 0, cr = 0, cw = 0, ctx = 0, user = 0, asst = 0, total = 0;
+    double cost = 0;
+    const ai_model_t *m = ad && ad->ag ? ad->ag->model : NULL;
+    if (ad && ad->ag) {
+        pthread_mutex_lock(&ad->ag->mu);
+        json_t *msg;
+        json_arr_foreach(ad->ag->messages, i, msg) {
+            const char *role = json_get_str(msg, "role");
+            total++;
+            if (str_eq(role, "user")) user++;
+            if (!str_eq(role, "assistant")) continue;
+            asst++;
+            json_t *u = json_get(msg, "usage");
+            in += json_get_int(u, "input", 0);
+            out += json_get_int(u, "output", 0);
+            cr += json_get_int(u, "cacheRead", 0);
+            cw += json_get_int(u, "cacheWrite", 0);
+            cost += json_get_num(json_get(u, "cost"), "total", 0);
+            int64_t t = json_get_int(u, "totalTokens", 0);
+            if (t > 0) ctx = t;
+        }
+        pthread_mutex_unlock(&ad->ag->mu);
+    }
+    if (m) {
+        json_t *mm = json_obj();
+        json_set_str(mm, "provider", m->provider);
+        json_set_str(mm, "id", m->id);
+        json_set(o, "model", mm);
+    }
+    json_set_int(o, "contextTokens", ctx);
+    json_set_int(o, "contextWindow", m ? m->context_window : 0);
+    json_t *ms = json_obj();
+    json_set_int(ms, "user", user);
+    json_set_int(ms, "assistant", asst);
+    json_set_int(ms, "total", total);
+    json_set(o, "messages", ms);
+    json_t *tk = json_obj();
+    json_set_int(tk, "input", in);
+    json_set_int(tk, "output", out);
+    json_set_int(tk, "cacheRead", cr);
+    json_set_int(tk, "cacheWrite", cw);
+    json_set(o, "tokens", tk);
+    json_set_num(o, "cost", cost);
+    return o;
 }

@@ -2,6 +2,7 @@
 #include "modes.h"
 #include "coding/btw.h"
 #include "coding/goal.h"
+#include "coding/slashcmd.h"
 
 #include "config/auth.h"
 #include "config/settings.h"
@@ -41,6 +42,7 @@ struct rpc {
     char *text;
     json_t *images;
     const char *hidden; /* custom type when the run is a hidden wake-up (async-result) */
+    bool slash;         /* the prompt is a builtin slash command (executeAcpBuiltinSlashCommand) */
     pthread_mutex_t mu;
     /* /btw (rpc-btw.ts) */
     pthread_mutex_t btw_mu;
@@ -276,11 +278,39 @@ static void notice_rpc(void *ud, const char *level, const char *text) {
     json_free(j);
 }
 
+static void rpc_command_output(void *ud, const char *text) {
+    json_t *o = json_obj();
+    json_set_str(o, "type", "command_output");
+    json_set_str(o, "text", text);
+    emit(ud, o);
+    json_free(o);
+}
+
 static void *prompt_thread(void *p) {
     rpc_t *r = p;
 again:;
     size_t before = json_len(r->a->agent->messages);
-    if (r->hidden) app_prompt_hidden(r->a, r->text, r->hidden);
+    if (r->slash) {
+        /* builtin: output as command_output frames; only an agent-invoking one (/retry) reports a
+         * prompt_result (the prompt response already said agentInvoked) */
+        r->slash = false;
+        slash_result_t sr;
+        slash_execute_text(r->a, r->text, rpc_command_output, r, &sr);
+        bool invoked = sr.agent_invoked;
+        slash_result_free(&sr);
+        json_free(r->images);
+        r->images = NULL;
+        if (!invoked) {
+            pthread_mutex_lock(&r->mu);
+            free(r->text);
+            r->text = NULL;
+            free(r->prompt_id);
+            r->prompt_id = NULL;
+            r->running = false;
+            pthread_mutex_unlock(&r->mu);
+            return NULL;
+        }
+    } else if (r->hidden) app_prompt_hidden(r->a, r->text, r->hidden);
     else app_prompt(r->a, r->text, r->images);
     r->images = NULL;
     const json_t *last = last_assistant(r->a->agent->messages);
@@ -743,8 +773,16 @@ static void handle(rpc_t *r, json_t *cmd) {
         r->prompt_id = id ? xstrdup(id) : NULL;
         json_t *imgs = json_get_arr(cmd, "images");
         r->images = imgs ? json_clone(imgs) : NULL;
+        slash_parsed_t sp;
+        const slash_cmd_t *sc = slash_parse(r->text, &sp) ? slash_lookup(sp.name) : NULL;
+        if (sp.name) slash_parsed_free(&sp);
+        r->slash = sc && sc->handle;
         pthread_mutex_unlock(&r->mu);
-        respond(r, id, type, true, NULL, NULL);
+        if (r->slash) {
+            json_t *d = json_obj();
+            json_set_bool(d, "agentInvoked", !strcmp(sc->name, "retry"));
+            respond(r, id, type, true, d, NULL);
+        } else respond(r, id, type, true, NULL, NULL);
         if (pthread_create(&r->th, NULL, prompt_thread, r) != 0) {
             r->running = false;
             respond(r, id, type, false, NULL, "failed to start agent thread");
@@ -1006,7 +1044,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         if (r->running) respond(r, id, type, false, NULL, "agent is busy");
         else {
             char *err = NULL;
-            if (app_handoff(a, &err) != 0) respond(r, id, type, false, NULL, err ? err : "handoff failed");
+            if (app_handoff(a, json_get_str(cmd, "customInstructions"), &err) != 0) respond(r, id, type, false, NULL, err ? err : "handoff failed");
             else respond(r, id, type, true, json_obj(), NULL);
             free(err);
         }
@@ -1095,27 +1133,9 @@ static void handle(rpc_t *r, json_t *cmd) {
         if (!strcmp(type, "abort_retry")) app_abort(a);
         respond(r, id, type, true, NULL, NULL);
     } else if (!strcmp(type, "get_available_commands")) {
-        static const char *CMDS[][2] = {{"compact", "Manually compact the session context"}, {"handoff", "Summarize the session into a handoff document and compact in place"},
-                                        {"goal", "Toggle goal mode"}, {"plan", "Toggle plan mode"}, {"advisor", "Toggle the advisor"},
-                                        {"new", "Start a new session"}, {"fork", "Fork this session"}, {"tree", "Navigate session tree"},
-                                        {"btw", "Ask a side question, or browse this session's BTW history"}, {"model", "Switch model"}, {"thinking", "Set thinking level"}};
-        json_t *arr = json_arr();
-        for (size_t i = 0; i < ARRAY_LEN(CMDS); i++) {
-            json_t *c = json_obj();
-            json_set_str(c, "name", CMDS[i][0]);
-            json_set_str(c, "description", CMDS[i][1]);
-            json_set_str(c, "source", "builtin");
-            json_push(arr, c);
-        }
-        for (size_t i = 0; i < a->disc.skills.n; i++) {
-            json_t *c = json_obj();
-            char *nm = xasprintf("skill:%s", a->disc.skills.v[i].name);
-            json_set_str(c, "name", nm);
-            free(nm);
-            if (a->disc.skills.v[i].description) json_set_str(c, "description", a->disc.skills.v[i].description);
-            json_set_str(c, "source", "skill");
-            json_push(arr, c);
-        }
+        /* buildAvailableSlashCommands: builtins with a text-mode handler (skill commands are not
+         * advertised: nothing executes `/skill:<name>` yet) */
+        json_t *arr = slash_available_commands(a);
         json_t *d = json_obj();
         json_set(d, "commands", arr);
         respond(r, id, type, true, d, NULL);

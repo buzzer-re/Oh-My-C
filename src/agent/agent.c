@@ -228,15 +228,9 @@ static void py_arg_value(sb_t *b, const json_t *v) {
     py_value(b, v);
 }
 
-static void render_example_call(sb_t *b, const char *tool, const json_t *args, const char *intent_field) {
-    if (json_len(args) == 1 && json_is_str(args->u.obj.vals[0])) {
-        if (intent_field) sb_appendf(b, "<example %s=\"…\">\n", intent_field);
-        else sb_append(b, "<example>\n");
-        sb_append(b, json_sv(args->u.obj.vals[0]));
-        sb_append(b, "\n</example>");
-        return;
-    }
-    sb_appendf(b, "<example>\n%s(", tool);
+/* rendering.ts pyCall: name(key=value, ...) */
+static void py_call(sb_t *b, const char *tool, const json_t *args, const char *intent_field) {
+    sb_appendf(b, "%s(", tool);
     bool first = true;
     if (intent_field) {
         sb_appendf(b, "%s=\"…\"", intent_field);
@@ -249,7 +243,53 @@ static void render_example_call(sb_t *b, const char *tool, const json_t *args, c
         py_arg_value(b, v);
         first = false;
     }
-    sb_append(b, ")\n</example>");
+    sb_putc(b, ')');
+}
+
+/* examples.ts renderToolExamplesJsdoc: `@example "caption"` + the call (bare sole string payload) */
+static void jsdoc_call(sb_t *b, const char *tool, const json_t *args) {
+    if (json_len(args) == 1 && json_is_str(args->u.obj.vals[0])) sb_append(b, json_sv(args->u.obj.vals[0]));
+    else py_call(b, tool, args, NULL);
+}
+
+char *agent_tool_examples_jsdoc(const agent_tool_t *t) {
+    if (!json_len(t->examples)) return NULL;
+    sb_t b = SB_INIT;
+    json_t *ex;
+    json_arr_foreach(t->examples, i, ex) {
+        if (i) sb_putc(&b, '\n');
+        const char *cap = json_get_str(ex, "caption");
+        if (cap) {
+            char *q = json_quote(cap);
+            sb_appendf(&b, "@example %s", q);
+            free(q);
+        } else sb_append(&b, "@example");
+        if (json_get(ex, "call")) {
+            sb_putc(&b, '\n');
+            jsdoc_call(&b, t->name, json_get(ex, "call"));
+        } else if (json_get(ex, "good")) {
+            sb_append(&b, "\nWRONG:\n");
+            jsdoc_call(&b, t->name, json_get(ex, "bad"));
+            sb_append(&b, "\nRIGHT:\n");
+            jsdoc_call(&b, t->name, json_get(ex, "good"));
+        } else if (json_get_str(ex, "note") && *json_get_str(ex, "note")) {
+            sb_appendf(&b, "\n%s", json_get_str(ex, "note"));
+        }
+    }
+    return sb_detach(&b);
+}
+
+static void render_example_call(sb_t *b, const char *tool, const json_t *args, const char *intent_field) {
+    if (json_len(args) == 1 && json_is_str(args->u.obj.vals[0])) {
+        if (intent_field) sb_appendf(b, "<example %s=\"…\">\n", intent_field);
+        else sb_append(b, "<example>\n");
+        sb_append(b, json_sv(args->u.obj.vals[0]));
+        sb_append(b, "\n</example>");
+        return;
+    }
+    sb_append(b, "<example>\n");
+    py_call(b, tool, args, intent_field);
+    sb_append(b, "\n</example>");
 }
 
 static char *render_tool_examples(const agent_tool_t *t, const char *intent_field) {

@@ -24,12 +24,15 @@
 
 #include <pthread.h>
 #include <ctype.h>
+#include <math.h>
 #include <dirent.h>
 #include <errno.h>
 #include <sys/wait.h>
 #include "ui/modelbrowser.h"
 #include "ui/tools/tc.h"
 #include "coding/title.h"
+#include "coding/slashcmd.h"
+#include "coding/advisor.h"
 
 static void maybe_plan_approval(ui_t *u, const char *tool, const json_t *result, bool is_error);
 
@@ -420,15 +423,21 @@ static void start_prompt_with(ui_t *u, const char *text, json_t *attachments) {
 }
 
 /* #runNewSessionFlow: reset the transcript and present `✔ New session started` */
-static void ui_new_session_banner(ui_t *u) {
-    tui_container_clear(u->chat);
-    char *l = xasprintf("%s New session started", tui_sym("status.success"));
+/* `✔ <label>` in accent (Text padded 1,1), as #runNewSessionFlow / handleResetContextCommand present
+ * it; `clear` resets the transcript first */
+static void ui_success_line(ui_t *u, const char *label, bool clear) {
+    if (clear) tui_container_clear(u->chat);
+    char *l = xasprintf("%s %s", tui_sym("status.success"), label);
     char *t = tui_fgs(NULL, TUI_TC_ACCENT, l);
     tui_container_add(u->chat, &tui_text_new(t, 1, 1)->base);
     free(t);
     free(l);
     tui_request_full_render(u->tui);
 }
+
+static void ui_session_banner(ui_t *u, const char *label) { ui_success_line(u, label, true); }
+
+static void ui_new_session_banner(ui_t *u) { ui_session_banner(u, "New session started"); }
 
 /* #reconcileModeFromSession: re-enter plan mode recorded in the session (#enterPlanMode's status) */
 static void ui_plan_restore(ui_t *u) {
@@ -1320,44 +1329,6 @@ static void plan_exec_resume(ui_t *u) {
 
 /* ---------- slash commands ---------- */
 
-static const struct {
-    const char *name, *desc;
-} COMMANDS[] = {
-    {"help", "Show commands and keys"},       {"model", "Switch model (picker or /model <pattern>)"},
-    {"thinking", "Set thinking level"},       {"new", "Start a new session"},
-    {"plan", "Toggle read-only plan mode"},
-    {"plan-review", "Re-open the plan review for the latest plan (plan mode only)"},
-    {"goal", "Goal mode: /goal <objective> | set | show | pause | resume | drop | budget <N|off>"},
-    {"jobs", "Show background jobs status"},
-    {"advisor", "Toggle the advisor (a second model that reviews each turn and injects notes)"},
-    {"guided-goal", "Have the agent interview you, then set up goal mode [rough objective]"},
-    {"tree", "Navigate the session tree (switch branches)"},
-    {"branch", "Rewind to a previous message, keeping the old path as a branch"},
-    {"retry", "Retry the last failed agent turn"},
-    {"btw", "Ask a side question, or browse this session's BTW history"},
-    {"queue", "Queue a message for after the agent yields"},
-    {"handoff", "Summarize the session into a handoff document and compact in place"},
-    {"shake", "Drop heavy tool output from the context"},
-    {"rename", "Rename the session (omit title to generate)"},
-    {"delete", "Delete the current session and start a new one"},
-    {"todo", "Show the agent's todo list"},
-    {"tools", "Show tools visible to the agent"},
-    {"context", "Show context usage"},
-    {"skills", "List discovered skills"},
-    {"mcp", "Show MCP server status"},
-    {"dirs", "List workspace directories"},
-    {"effort", "Set thinking level (alias of /thinking)"},
-    {"usage", "Show token usage and cost"},
-    {"dump", "Copy the session transcript to the clipboard"},
-    {"resume", "Resume a previous session"},  {"compact", "Compact the context [instructions]"},
-    {"session", "Show session info"},         {"name", "Set session title"},
-    {"export", "Export session [path]"},      {"copy", "Copy last answer to clipboard"},
-    {"fork", "Fork the session here"},        {"clear", "Clear the conversation context in place, keeping the session"},
-    {"hotkeys", "Show keyboard shortcuts"},   {"settings", "Open settings menu"},   {"quit", "Exit omc"},
-    {"login", "Login with OAuth provider"},   {"logout", "Logout from OAuth provider"},
-    {"migrate", "Copy your omp configuration into omc [--dry-run] [--force] [--no-sessions]"},
-    {"exit", "Exit omc"},
-};
 
 static void goal_show(ui_t *u) {
     const goal_t *g = app_goal(u->app);
@@ -1435,10 +1406,123 @@ static void goal_command(ui_t *u, const char *arg) {
     free(sub);
 }
 
+static void tui_slash_output(void *ud, const char *text) { add_notice(ud, "info", text); }
+
+/* sessionManager.getEntries().filter(type === "message").length */
+static size_t session_message_count(app_t *a) {
+    size_t n = 0;
+    json_t *e;
+    json_arr_foreach(a->session->entries, i, e) if (str_eq(json_get_str(e, "type"), "message")) n++;
+    return n;
+}
+
+/* command-controller.ts handleAdvisorStatusCommand (one advisor; no quota lines) */
+static void advisor_status_report(ui_t *u) {
+    app_t *a = u->app;
+    sb_t b = SB_INIT;
+    char *title;
+#define DIMS(x_) tui_fgs(NULL, TUI_TC_DIM, x_)
+    if (!a->advisor_enabled) {
+        title = xstrdup("Advisor Status");
+        sb_append(&b, "Advisor is disabled.");
+    } else if (!a->advisor) { /* roster view: configured, nothing live */
+        title = xstrdup("Advisor Status (1 advisors)");
+        char *g = DIMS("\xe2\x97\x8b"), *nm = tui_bold("default"), *lb = DIMS("[no model]");
+        sb_appendf(&b, "%s %s %s", g, nm, lb);
+        free(g);
+        free(nm);
+        free(lb);
+    } else {
+        title = xstrdup("Advisor Status");
+        json_t *st = advisor_stats(a->advisor), *m = json_get(st, "model"), *ms = json_get(st, "messages"), *tk = json_get(st, "tokens");
+        char *g = tui_fgs(NULL, TUI_TC_SUCCESS, "\xe2\x97\x8f"), *lb = DIMS("[running]");
+        sb_appendf(&b, "%s default %s\n\n", g, lb);
+        free(g);
+        free(lb);
+#define SECTION(t_) do { char *h_ = tui_bold(t_); sb_appendf(&b, "%s\n", h_); free(h_); } while (0)
+#define ROW(l_, v_) do { char *d_ = DIMS(l_), *v2_ = (v_); sb_appendf(&b, "%s %s\n", d_, v2_); free(d_); free(v2_); } while (0)
+        if (m) {
+            SECTION("Provider");
+            ROW("Model:", xasprintf("%s/%s", json_get_str(m, "provider"), json_get_str(m, "id")));
+        }
+        sb_putc(&b, '\n');
+        SECTION("Messages");
+        ROW("User:", slash_locale_int(json_get_int(ms, "user", 0)));
+        ROW("Assistant:", slash_locale_int(json_get_int(ms, "assistant", 0)));
+        ROW("Total:", slash_locale_int(json_get_int(ms, "total", 0)));
+        sb_putc(&b, '\n');
+        SECTION("Context");
+        int64_t ct = json_get_int(st, "contextTokens", 0), cw = json_get_int(st, "contextWindow", 0);
+        char *cts = slash_locale_int(ct), *cws = slash_locale_int(cw);
+        if (cw > 0) ROW("Tokens:", xasprintf("%s / %s (%d%%)", cts, cws, (int)lround(100.0 * (double)ct / (double)cw)));
+        else ROW("Tokens:", xstrdup(cts));
+        free(cts);
+        free(cws);
+        sb_putc(&b, '\n');
+        SECTION("Spend");
+        ROW("Input:", slash_locale_int(json_get_int(tk, "input", 0)));
+        ROW("Output:", slash_locale_int(json_get_int(tk, "output", 0)));
+        if (json_get_int(tk, "cacheRead", 0) > 0) ROW("Cache Read:", slash_locale_int(json_get_int(tk, "cacheRead", 0)));
+        if (json_get_num(st, "cost", 0) > 0) ROW("Cost:", xasprintf("$%.4f", json_get_num(st, "cost", 0)));
+#undef ROW
+#undef SECTION
+        json_free(st);
+        while (b.len && b.s[b.len - 1] == '\n') b.s[--b.len] = 0;
+    }
+#undef DIMS
+    ui_show_report(u, title, &tui_text_new(sb_cstr(&b), 0, 0)->base);
+    free(title);
+    sb_free(&b);
+}
+
+/* command-controller.ts handleExportCommand + export/html/args.ts parseExportArgs */
+static void export_command(ui_t *u, const char *arg) {
+    app_t *a = u->app;
+    strvec_t parts = {0};
+    char *argdup = xstrdup(arg), *save = NULL;
+    for (char *t = strtok_r(argdup, " \t\n", &save); t; t = strtok_r(NULL, " \t\n", &save)) strvec_push(&parts, t);
+    free(argdup);
+    const char *out = NULL;
+    size_t paths = 0;
+    for (size_t i = 0; i < parts.n; i++)
+        if (strcmp(parts.v[i], "--themes")) out = paths++ ? out : parts.v[i];
+    if (paths > 1) {
+        add_notice(u, "error", "Failed to export session: Usage: /export [--themes] [path]");
+    } else if (out && (!strcmp(out, "--copy") || !strcmp(out, "clipboard") || !strcmp(out, "copy"))) {
+        add_notice(u, "warning", "Use /dump to copy the session to clipboard.");
+    } else if (!app_session_file(a)) {
+        add_notice(u, "error", "Failed to export session: Cannot export in-memory session to HTML");
+    } else {
+        char *text = session_export_html(a->session);
+        char *base = xstrdup(path_basename(app_session_file(a)));
+        if (str_ends(base, ".jsonl")) base[strlen(base) - 6] = 0;
+        char *dest = out ? xstrdup(out) : xasprintf("omp-session-%s.html", base);
+        int rc = fs_write(dest, text, strlen(text));
+        char *m = rc ? xasprintf("Failed to export session: %s", strerror(-rc)) : xasprintf("Session exported to: %s", dest);
+        add_notice(u, rc ? "error" : "info", m);
+        free(m);
+        free(dest);
+        free(base);
+        free(text);
+    }
+    strvec_free(&parts);
+}
+
 static bool handle_command(ui_t *u, const char *line) {
-    char *cmd = xstrndup(line + 1, strcspn(line + 1, " \t"));
-    const char *arg = line + 1 + strlen(cmd);
-    while (*arg == ' ' || *arg == '\t') arg++;
+    /* executeBuiltinSlashCommand: name or alias from the shared registry; a command that takes no
+     * arguments does not match when some are given (the text goes to the model) */
+    slash_parsed_t parsed;
+    const slash_cmd_t *sc = slash_match(line, &parsed);
+    if (!sc) return false;
+    if (!sc->tui) { /* text-mode handler adapted to the TUI: output becomes status lines */
+        slash_result_t res;
+        slash_execute_text(u->app, line, tui_slash_output, u, &res);
+        slash_result_free(&res);
+        slash_parsed_free(&parsed);
+        return true;
+    }
+    const char *cmd = sc->name;
+    const char *arg = parsed.args;
     bool handled = true;
     app_t *a = u->app;
     if (!strcmp(cmd, "quit") || !strcmp(cmd, "exit")) {
@@ -1449,33 +1533,27 @@ static bool handle_command(ui_t *u, const char *line) {
         ui_overlay_hotkeys(u);
     } else if (!strcmp(cmd, "login") || !strcmp(cmd, "logout")) {
         ui_overlay_login(u, !strcmp(cmd, "logout"));
-    } else if (!strcmp(cmd, "help")) {
-        sb_t b = SB_INIT;
-        sb_append(&b, "Commands:\n");
-        for (size_t i = 0; i < ARRAY_LEN(COMMANDS); i++) sb_appendf(&b, "  /%-10s %s\n", COMMANDS[i].name, COMMANDS[i].desc);
-        sb_append(&b, "Keys: enter send (steer while running) · ctrl+q follow-up · alt+up edit queued · esc interrupt · "
-                      "shift+tab thinking · ctrl+o expand tools · ctrl+t toggle thinking · alt+m model · "
-                      "ctrl+c clear/exit · ctrl+d exit · !cmd run shell");
-        add_notice(u, "info", sb_cstr(&b));
-        sb_free(&b);
     } else if (!strcmp(cmd, "model")) {
-        if (*arg) {
-            char *err = NULL;
-            if (app_set_model(a, arg, &err) != 0) add_notice(u, "error", err);
+        ui_overlay_model(u);
+    } else if (!strcmp(cmd, "effort")) { /* builtin-modes.ts effort handleTui */
+        if (!*arg) {
+            if (a->model && a->model->reasoning) ui_overlay_thinking(u);
             else {
-                char *ml = app_model_label(a), *m = xasprintf("Model: %s", ml);
+                char *m = slash_no_thinking_message(a);
                 add_notice(u, "info", m);
                 free(m);
-                free(ml);
             }
+        } else {
+            char *lv = NULL, *err = NULL;
+            if (slash_resolve_effort(a, arg, &lv, &err) != 0) add_notice(u, "error", err);
+            else {
+                app_set_thinking_level(a, lv);
+                char *m = xasprintf("Thinking set to %s.", lv);
+                add_notice(u, "info", m);
+                free(m);
+            }
+            free(lv);
             free(err);
-        } else {
-            ui_overlay_model(u);
-        }
-    } else if (!strcmp(cmd, "thinking")) {
-        if (*arg && app_set_thinking_level(a, arg)) {
-        } else {
-            ui_overlay_thinking(u);
         }
     } else if (!strcmp(cmd, "migrate")) {
         /* omp -> omc: settings, models, credentials, MCP, skills, rules, agents, themes, sessions, prompt history */
@@ -1546,16 +1624,16 @@ static bool handle_command(ui_t *u, const char *line) {
         add_notice(u, "info", b.len ? sb_cstr(&b) : "No background jobs.");
         sb_free(&b);
         json_free(snap);
-    } else if (!strcmp(cmd, "advisor")) {
-        bool on = !strcmp(arg, "on") ? true : !strcmp(arg, "off") ? false : !a->advisor;
-        app_set_advisor(a, on);
-        char *ml = NULL;
-        const ai_model_t *am = a->advisor ? app_role_model("advisor", NULL, NULL) : NULL;
-        ml = am ? mr_model_key(am) : app_model_label(a);
-        char *m = on ? xasprintf("Advisor on (%s)", ml) : xstrdup("Advisor off");
-        add_notice(u, "info", m);
-        free(m);
-        free(ml);
+    } else if (!strcmp(cmd, "advisor")) { /* builtin-collaboration.ts advisor handleTui */
+        char *verb, *rest;
+        slash_subcommand(arg, &verb, &rest);
+        if (!*verb || !strcmp(verb, "toggle")) add_notice(u, "info", slash_advisor_set(a, -1));
+        else if (!strcmp(verb, "on")) add_notice(u, "info", slash_advisor_set(a, 1));
+        else if (!strcmp(verb, "off")) add_notice(u, "info", slash_advisor_set(a, 0));
+        else if (!strcmp(verb, "status")) advisor_status_report(u);
+        else add_notice(u, "info", "Usage: /advisor [on|off|status|dump [raw]|configure]");
+        free(verb);
+        free(rest);
     } else if (!strcmp(cmd, "guided-goal")) {
         if (a->plan_mode) add_notice(u, "warning", "Goal mode is blocked while plan mode is active. Exit plan mode first (/plan).");
         else if (app_goal(a)) add_notice(u, "info", "A goal already exists. Use /goal to manage it, or /goal drop to start over.");
@@ -1626,28 +1704,42 @@ static bool handle_command(ui_t *u, const char *line) {
         iq_queue_command(u, arg);
     } else if (!strcmp(cmd, "handoff")) {
         iq_handoff(u, arg);
-    } else if (!strcmp(cmd, "shake")) {
-        size_t n = app_shake(a, *arg ? (size_t)atoi(arg) : 2000);
-        char *m = xasprintf("Elided %zu heavy tool result%s from the context", n, n == 1 ? "" : "s");
-        add_notice(u, "info", m);
-        free(m);
+    } else if (!strcmp(cmd, "shake")) { /* command-controller.ts handleShakeCommand */
+        char *err = NULL;
+        const char *mode = slash_parse_shake_mode(arg, &err);
+        if (!mode) add_notice(u, "warning", err);
+        else {
+            app_shake_result_t r;
+            app_shake(a, mode, &r);
+            if (r.tool_results_dropped + r.blocks_dropped + r.images_dropped + r.thinking_dropped == 0) {
+                add_notice(u, "info", "Nothing to shake.");
+            } else {
+                reload_chat(u);
+                char *m = app_shake_summary(&r);
+                add_notice(u, "info", m);
+                free(m);
+            }
+        }
+        free(err);
     } else if (!strcmp(cmd, "rename")) {
         char *t = *arg ? xstrdup(arg) : app_generate_title(a);
-        if (t) {
-            session_set_title(a->session, t, *arg ? "user" : "auto");
-            char *m = xasprintf("Session renamed: %s", t);
+        if (t && *t) {
+            session_set_title(a->session, t, "user");
+            char *m = xasprintf("Session renamed to \"%s\".", t);
             add_notice(u, "info", m);
             free(m);
-        } else add_notice(u, "warning", "Could not generate a title");
+        } else add_notice(u, "info", "Could not generate a session title. Use /rename <title> to set one.");
         free(t);
-    } else if (!strcmp(cmd, "delete")) {
-        ui_btw_dispose(u);
-        char *path = app_session_file(a) ? xstrdup(app_session_file(a)) : NULL;
-        app_new_session(a);
-        if (path) unlink(path);
-        free(path);
-        tui_container_clear(u->chat);
-        add_notice(u, "info", "Session deleted; new session started");
+    } else if (!strcmp(cmd, "delete")) { /* handleDeleteCommand */
+        if (!app_session_file(a)) add_notice(u, "error", "Nothing to delete (in-memory session)");
+        else {
+            ui_btw_dispose(u);
+            char *path = xstrdup(app_session_file(a));
+            app_new_session(a);
+            unlink(path);
+            free(path);
+            ui_session_banner(u, "Session deleted");
+        }
     } else if (!strcmp(cmd, "todo")) {
         json_t *ph, *t;
         sb_t b = SB_INIT;
@@ -1702,32 +1794,49 @@ static bool handle_command(ui_t *u, const char *line) {
         char *st = a->mcp ? mcp_status(a->mcp) : NULL;
         add_notice(u, "info", st && *st ? st : "No MCP servers configured.");
         free(st);
-    } else if (!strcmp(cmd, "dirs")) {
-        add_notice(u, "info", a->cwd);
-    } else if (!strcmp(cmd, "effort")) {
-        char *l = xasprintf("/thinking %s", arg);
-        handle_command(u, l);
-        free(l);
     } else if (!strcmp(cmd, "dump")) {
-        char *md = session_export_markdown(a->session);
-        tui_term_copy_osc52(tui_term(u->tui), md, strlen(md));
-        free(md);
-        add_notice(u, "info", "Copied session transcript to clipboard");
-    } else if (!strcmp(cmd, "clear")) {
-        if (u->worker_running || app_clear_context(a) != 0) add_notice(u, "warning", "Wait for the agent to finish first.");
+        char *verb, *rest;
+        slash_subcommand(arg, &verb, &rest);
+        if (*verb) add_notice(u, "info", "Usage: /dump [all|anon]");
         else {
-            tui_container_clear(u->chat);
-            tui_request_full_render(u->tui);
-            add_notice(u, "info", "Context cleared (same session)");
+            char *md = session_export_markdown(a->session);
+            tui_term_copy_osc52(tui_term(u->tui), md, strlen(md));
+            free(md);
+            add_notice(u, "info", "Session copied to clipboard");
+        }
+        free(verb);
+        free(rest);
+    } else if (!strcmp(cmd, "clear")) { /* handleResetContextCommand */
+        size_t dropped = json_len(a->agent->messages);
+        if (u->worker_running || app_clear_context(a) != 0)
+            add_notice(u, "warning", "Wait for the current response to finish or abort it before resetting the context.");
+        else {
+            char *m = xasprintf("Context reset \xe2\x80\x94 %zu %s dropped; session continues.", dropped, dropped == 1 ? "message" : "messages");
+            ui_session_banner(u, m);
+            free(m);
         }
     } else if (!strcmp(cmd, "new")) {
         ui_btw_dispose(u);
         app_new_session(a);
-        ui_new_session_banner(u);
+        ui_session_banner(u, "New session started");
     } else if (!strcmp(cmd, "resume")) {
-        ui_overlay_session(u);
-    } else if (!strcmp(cmd, "compact")) {
-        iq_compact(u, arg);
+        if (!*arg) ui_overlay_session(u);
+        else {
+            char *path = session_resolve(arg, a->cwd);
+            if (!path) {
+                char *m = xasprintf("Session \"%s\" not found", arg);
+                add_notice(u, "error", m);
+                free(m);
+            } else ui_resume_session(u, path);
+            free(path);
+        }
+    } else if (!strcmp(cmd, "compact")) { /* builtin-lifecycle.ts compact handleTui + handleCompactCommand */
+        const char *mode;
+        char *focus, *err = NULL;
+        if (!slash_parse_compact_args(arg, &mode, &focus, &err)) add_notice(u, "warning", err);
+        else iq_compact(u, arg); /* the worker parses the mode/focus again (iqueue.c bg_main) */
+        free(focus);
+        free(err);
     } else if (!strcmp(cmd, "session")) {
         json_t *st = app_stats(a);
         char *s = xasprintf("Session %s\nFile: %s\nMessages: %lld user, %lld assistant, %lld tool results\n"
@@ -1742,17 +1851,8 @@ static bool handle_command(ui_t *u, const char *line) {
         add_notice(u, "info", s);
         free(s);
         json_free(st);
-    } else if (!strcmp(cmd, "name")) {
-        if (*arg) session_set_title(a->session, arg, "user");
     } else if (!strcmp(cmd, "export")) {
-        char *text = str_ends(arg, ".md") ? session_export_markdown(a->session) : session_export_html(a->session);
-        char *dest = *arg ? xstrdup(arg) : xasprintf("omc-session-%s.html", session_short_id(session_id(a->session)));
-        int rc = fs_write(dest, text, strlen(text));
-        char *m = rc ? xasprintf("Export failed: %s", strerror(-rc)) : xasprintf("Exported to %s", dest);
-        add_notice(u, rc ? "error" : "info", m);
-        free(m);
-        free(dest);
-        free(text);
+        export_command(u, arg);
     } else if (!strcmp(cmd, "copy")) {
         const json_t *last = last_assistant(a->agent->messages);
         if (last) {
@@ -1770,7 +1870,7 @@ static bool handle_command(ui_t *u, const char *line) {
     } else {
         handled = false;
     }
-    free(cmd);
+    slash_parsed_free(&parsed);
     return handled;
 }
 
@@ -2169,11 +2269,8 @@ int run_interactive_mode(app_t *a, const char *initial) {
     ui_chrome_setup(&u);
     history_load(u.editor);
     tui_ac_default_t *ac = tui_ac_default_new(a->cwd);
-    {
-        const char *names[ARRAY_LEN(COMMANDS)], *descs[ARRAY_LEN(COMMANDS)];
-        for (size_t i = 0; i < ARRAY_LEN(COMMANDS); i++) names[i] = COMMANDS[i].name, descs[i] = COMMANDS[i].desc;
-        ui_slash_register(&u, ac, names, descs, ARRAY_LEN(COMMANDS));
-    }
+    ui_slash_register(&u, ac);
+    tui_editor_set_inline_hint(u.editor, tui_ac_default_inline_hint, ac);
     tui_editor_set_autocomplete(u.editor, tui_ac_default_provider, ac);
     tui_container_add(root, &u.editor->base);
     u.status = ui_status_new(&u);

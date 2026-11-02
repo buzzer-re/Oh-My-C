@@ -32,4 +32,7 @@ int judgment_index_of_word(const char *text, const char *needle);
 int judgment_parse_score(const char *text, int levels); /* -1 when absent */
 int judgment_parse_yes_no(const char *text);            /* 1 yes, 0 no, -1 neither */
 
+/* Bun YAML.stringify(value, null, 2) output (owned); shared with the /dump tool-call args */
+char *bun_yaml_stringify(const json_t *v);
+
 #endif

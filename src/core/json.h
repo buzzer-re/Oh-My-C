@@ -95,6 +95,12 @@ char *json_dump(const json_t *j, int indent); /* indent 0 => compact */
 void json_dump_sb(sb_t *b, const json_t *j, int indent);
 void json_escape_sb(sb_t *b, const char *s, size_t len); /* writes quoted string */
 char *json_quote(const char *s);
+/* byte-exact JavaScript JSON.stringify(value) (compact; JS number formatting and string escaping,
+ * U+2028/2029 raw, duplicate keys collapsed like JSON.parse) */
+char *json_dump_js(const json_t *j);
+void json_dump_js_sb(sb_t *b, const json_t *j);
+void json_js_quote_sb(sb_t *b, const char *s, size_t len); /* JSON.stringify(string) */
+void json_js_num_sb(sb_t *b, double d);                    /* String(number) for finite values */
 
 /* object merge (deep): copies entries from src into dst */
 void json_merge(json_t *dst, const json_t *src);

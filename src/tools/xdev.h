@@ -14,6 +14,8 @@
 
 /* Simplified TypeScript rendering of a JSON schema (port of ai/utils/schema/typescript.ts). Owned. */
 char *json_schema_to_ts(const json_t *schema);
+/* harmony: OpenAI-Harmony flavor (`//` comments, `,` delimiters, no indentation; ai jsonSchemaToTypeScript style) */
+char *json_schema_to_ts_style(const json_t *schema, bool harmony);
 
 /* Number of mounted devices on an agent. */
 size_t xdev_mounted_count(agent_t *a);

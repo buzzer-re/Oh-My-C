@@ -1,4 +1,5 @@
 /* acp.c - Agent Client Protocol (JSON-RPC 2.0 over NDJSON stdio) for editor integration (Zed, ...). */
+#include "coding/slashcmd.h"
 #include "modes.h"
 
 #include "config/settings.h"
@@ -303,6 +304,29 @@ static json_t *modes_json(asess_t *s) {
     return m;
 }
 
+/* #emitCommandOutput: builtin output as an agent message chunk */
+static void acp_command_output(void *ud, const char *text) {
+    asess_t *s = ud;
+    json_t *u = json_obj();
+    json_set_str(u, "sessionUpdate", "agent_message_chunk");
+    json_t *c = json_obj();
+    json_set_str(c, "type", "text");
+    json_set_str(c, "text", text);
+    json_set(u, "content", c);
+    char *mid = uuid_v4();
+    json_set_str(u, "messageId", mid);
+    free(mid);
+    notify_update(s->id, u);
+}
+
+/* available_commands_update: the builtins ACP can drive */
+static void acp_send_available_commands(asess_t *s) {
+    json_t *u = json_obj();
+    json_set_str(u, "sessionUpdate", "available_commands_update");
+    json_set(u, "availableCommands", slash_acp_available_commands(s->app));
+    notify_update(s->id, u);
+}
+
 static void *prompt_thread(void *ud) {
     asess_t *s = ud;
     sb_t text = SB_INIT;
@@ -323,7 +347,26 @@ static void *prompt_thread(void *ud) {
             sb_appendf(&text, "\n@%s", json_get_str(blk, "uri") ? json_get_str(blk, "uri") : "");
         }
     }
-    app_prompt(s->app, sb_cstr(&text), json_len(images) ? images : (json_free(images), NULL));
+    slash_result_t sr = {0};
+    if (sb_cstr(&text)[0] == '/') slash_execute_text(s->app, sb_cstr(&text), acp_command_output, s, &sr);
+    if (sr.kind == SLASH_CONSUMED && !sr.agent_invoked) {
+        /* a local builtin: the turn ends without a model call */
+        json_free(images);
+        sb_free(&text);
+        json_t *r = json_obj();
+        json_set_str(r, "stopReason", "end_turn");
+        reply(s->prompt_req_id, r);
+        json_free(s->prompt_req_id);
+        json_free(s->prompt_content);
+        s->prompt_req_id = NULL;
+        s->prompt_content = NULL;
+        s->running = false;
+        slash_result_free(&sr);
+        return NULL;
+    }
+    if (sr.kind == SLASH_CONSUMED) json_free(images);
+    else app_prompt(s->app, sb_cstr(&text), json_len(images) ? images : (json_free(images), NULL));
+    slash_result_free(&sr);
     sb_free(&text);
     const json_t *last = last_assistant(s->app->agent->messages);
     const char *stop = json_get_str(last, "stopReason");
@@ -412,6 +455,7 @@ static void handle(acp_t *a, json_t *msg) {
         if (!strcmp(method, "session/new")) json_set_str(r, "sessionId", s->id);
         json_set(r, "modes", modes_json(s));
         reply(id, r);
+        acp_send_available_commands(s);
     } else if (!strcmp(method, "session/list")) {
         session_list_t l;
         session_list_all(&l);

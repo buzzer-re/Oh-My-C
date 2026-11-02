@@ -825,3 +825,157 @@ char *json_dump(const json_t *j, int indent) {
     dump(&b, j, indent, 0);
     return sb_detach(&b);
 }
+
+/* ---------- JavaScript JSON.stringify ---------- */
+
+/* ECMAScript Number::toString(10): shortest round-trip digits, fixed notation for exponents in
+ * [-7, 21), exponent form ("1e-7", "1.5e+21") otherwise; -0 prints as "0" */
+void json_js_num_sb(sb_t *b, double d) {
+    if (!isfinite(d)) {
+        sb_append(b, "null");
+        return;
+    }
+    if (d == 0) {
+        sb_putc(b, '0');
+        return;
+    }
+    if (d < 0) {
+        sb_putc(b, '-');
+        d = -d;
+    }
+    char e[48];
+    for (int prec = 0; prec <= 16; prec++) {
+        snprintf(e, sizeof e, "%.*e", prec, d);
+        if (strtod(e, NULL) == d) break;
+    }
+    /* e = "D[.DDD]e[+-]XX" */
+    char digits[24];
+    size_t k = 0;
+    const char *p = e;
+    for (; *p && *p != 'e'; p++)
+        if (*p >= '0' && *p <= '9' && k < sizeof digits - 1) digits[k++] = *p;
+    digits[k] = 0;
+    while (k > 1 && digits[k - 1] == '0') digits[--k] = 0;
+    int n = (*p == 'e' ? atoi(p + 1) : 0) + 1; /* value = 0.digits * 10^n */
+    if ((int)k <= n && n <= 21) {
+        sb_append(b, digits);
+        for (int i = (int)k; i < n; i++) sb_putc(b, '0');
+    } else if (0 < n && n <= 21) {
+        sb_appendn(b, digits, (size_t)n);
+        sb_putc(b, '.');
+        sb_append(b, digits + n);
+    } else if (-6 < n && n <= 0) {
+        sb_append(b, "0.");
+        for (int i = 0; i < -n; i++) sb_putc(b, '0');
+        sb_append(b, digits);
+    } else {
+        sb_putc(b, digits[0]);
+        if (k > 1) {
+            sb_putc(b, '.');
+            sb_append(b, digits + 1);
+        }
+        sb_appendf(b, "e%c%d", n - 1 >= 0 ? '+' : '-', abs(n - 1));
+    }
+}
+
+/* JSON.stringify string quoting: only '"', '\\' and C0 controls are escaped (lone surrogates as \udxxx);
+ * U+2028/U+2029 stay raw; bytes that are not UTF-8 become U+FFFD as a JS string decoded from them would */
+void json_js_quote_sb(sb_t *b, const char *s, size_t len) {
+    static const char hx[] = "0123456789abcdef";
+    sb_putc(b, '"');
+    size_t i = 0;
+    while (i < len) {
+        size_t start = i;
+        while (i < len) {
+            unsigned char c = (unsigned char)s[i];
+            if (c < 0x20 || c == '"' || c == '\\' || c >= 0x80) break;
+            i++;
+        }
+        if (i > start) sb_appendn(b, s + start, i - start);
+        if (i >= len) break;
+        unsigned char c = (unsigned char)s[i];
+        if (c >= 0x80) {
+            /* surrogate code point stored as 3-byte UTF-8 (WTF-8, from a "\udxxx" escape) */
+            if (c == 0xED && i + 2 < len && ((unsigned char)s[i + 1] & 0xE0) == 0xA0 && ((unsigned char)s[i + 2] & 0xC0) == 0x80) {
+                unsigned cp = 0xD000u | (((unsigned)s[i + 1] & 0x3Fu) << 6) | ((unsigned)s[i + 2] & 0x3Fu);
+                sb_appendf(b, "\\u%04x", cp);
+                i += 3;
+                continue;
+            }
+            uint32_t cp;
+            int n = utf8_decode(s + i, len - i, &cp);
+            if (n <= 1) sb_append(b, "\xef\xbf\xbd");
+            else sb_appendn(b, s + i, (size_t)n);
+            i += n <= 1 ? 1 : (size_t)n;
+            continue;
+        }
+        i++;
+        switch (c) {
+        case '"': sb_append(b, "\\\""); break;
+        case '\\': sb_append(b, "\\\\"); break;
+        case '\n': sb_append(b, "\\n"); break;
+        case '\r': sb_append(b, "\\r"); break;
+        case '\t': sb_append(b, "\\t"); break;
+        case '\b': sb_append(b, "\\b"); break;
+        case '\f': sb_append(b, "\\f"); break;
+        default: {
+            char u[7] = {'\\', 'u', '0', '0', hx[c >> 4], hx[c & 15], 0};
+            sb_append(b, u);
+        }
+        }
+    }
+    sb_putc(b, '"');
+}
+
+static void dump_js(sb_t *b, const json_t *j) {
+    if (!j) {
+        sb_append(b, "null");
+        return;
+    }
+    switch (j->type) {
+    case JSON_NULL: sb_append(b, "null"); break;
+    case JSON_BOOL: sb_append(b, j->u.b ? "true" : "false"); break;
+    case JSON_NUMBER:
+        if (j->is_int && j->u.num.i <= 9007199254740992LL && j->u.num.i >= -9007199254740992LL)
+            sb_appendf(b, "%lld", (long long)j->u.num.i);
+        else json_js_num_sb(b, j->is_int ? (double)j->u.num.i : j->u.num.d);
+        break;
+    case JSON_STRING: json_js_quote_sb(b, j->u.str.s, j->u.str.len); break;
+    case JSON_ARRAY:
+        sb_putc(b, '[');
+        for (size_t i = 0; i < j->u.arr.n; i++) {
+            if (i) sb_putc(b, ',');
+            dump_js(b, j->u.arr.items[i]);
+        }
+        sb_putc(b, ']');
+        break;
+    case JSON_OBJECT: {
+        /* JSON.parse keeps a duplicated key at its first position with the last value */
+        sb_putc(b, '{');
+        bool first = true;
+        for (size_t i = 0; i < j->u.obj.n; i++) {
+            bool dup = false;
+            for (size_t k = 0; k < i && !dup; k++) dup = !strcmp(j->u.obj.keys[k], j->u.obj.keys[i]);
+            if (dup) continue;
+            const json_t *v = j->u.obj.vals[i];
+            for (size_t k = i + 1; k < j->u.obj.n; k++)
+                if (!strcmp(j->u.obj.keys[k], j->u.obj.keys[i])) v = j->u.obj.vals[k];
+            if (!first) sb_putc(b, ',');
+            first = false;
+            json_js_quote_sb(b, j->u.obj.keys[i], strlen(j->u.obj.keys[i]));
+            sb_putc(b, ':');
+            dump_js(b, v);
+        }
+        sb_putc(b, '}');
+        break;
+    }
+    }
+}
+
+void json_dump_js_sb(sb_t *b, const json_t *j) { dump_js(b, j); }
+
+char *json_dump_js(const json_t *j) {
+    sb_t b = SB_INIT;
+    dump_js(&b, j);
+    return sb_detach(&b);
+}

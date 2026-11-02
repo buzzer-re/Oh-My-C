@@ -96,7 +96,8 @@ struct app {
     int64_t dcr_first_ts;
     json_t *dcr_sent; /* "role:ts" -> reminder text the turn was first sent with */
     char *dcr_last;
-    struct advisor *advisor; /* shadow reviewer (advisor.c), NULL when off */
+    struct advisor *advisor; /* shadow reviewer (advisor.c), NULL when off or no advisor model */
+    bool advisor_enabled;    /* the session's advisor setting (active only with a model for the 'advisor' role) */
     struct evalhost *evalhost; /* eval helpers' host state: completion handles, judge batches (evalhost.c) */
     struct memory_rt *memory;  /* memory backend runtime: prompt snapshot + startup pipeline (memory.c) */
     struct autolearn *autolearn; /* auto-learn controller + private capture runs (autolearn.c) */
@@ -193,6 +194,8 @@ void app_rebuild_system_prompt(app_t *a);
 /* token count at which context maintenance triggers for a window (omp compaction.threshold* semantics) */
 int64_t app_compaction_threshold(const ai_model_t *m, int64_t window); /* with compaction.modelThresholds */
 int app_compact(app_t *a, const char *instructions, char **err);
+/* manual /compact with a mode (NULL, "soft", "remote", "snapcompact": compact-modes.ts) */
+int app_compact_mode(app_t *a, const char *mode, const char *instructions, char **err);
 int app_new_session(app_t *a);
 /* user `!cmd` / RPC bash: run, record a bashExecution message (session + context unless exclude); owned message
  * (plus BashResult counters) or NULL when the shell could not start */
@@ -235,11 +238,18 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
 char *app_dedupe_ephemeral_reply(const char *text, size_t max_bytes); /* owned */
 int app_branch_to(app_t *a, const char *entry_id);  /* move the session leaf and reload context */
 int app_clear_context(app_t *a);                    /* reset boundary: empty context, same session */
-int app_handoff(app_t *a, char **err);              /* handoff document + compact in place */
+int app_handoff(app_t *a, const char *focus, char **err); /* handoff document (+ focus instructions) + compact in place */
 int app_retry(app_t *a, char **err);                /* drop a failed last assistant turn and continue (blocking) */
-size_t app_shake(app_t *a, size_t min_chars);       /* elide large tool results from the live context; returns count */
+/* /shake (shake-types.ts ShakeResult): mode "elide" | "images" | "thinking"; rewrites the branch on disk */
+typedef struct {
+    const char *mode;
+    int tool_results_dropped, blocks_dropped, images_dropped, thinking_dropped;
+    int64_t tokens_freed;
+} app_shake_result_t;
+void app_shake(app_t *a, const char *mode, app_shake_result_t *out);
+char *app_shake_summary(const app_shake_result_t *r); /* formatShakeSummary (owned) */
 char *app_generate_title(app_t *a);                 /* owned or NULL */
-void app_set_advisor(app_t *a, bool on);
+bool app_set_advisor(app_t *a, bool on);           /* returns whether an advisor is now active */
 char *app_job_results_text(app_t *a); /* settled background jobs as the async-result notice (owned) or NULL */
 /* after a run: hidden follow-up prompt (owned) from the advisor or goal mode, or NULL; *custom_type names it.
  * prev_type is the custom type of the run that just ended (NULL for a user prompt). */

@@ -199,7 +199,7 @@ bool ui_login_key(ui_login_t *l, const tui_key_t *k);
 /* ---------- slash.c ---------- */
 
 /* register slash commands for autocomplete in upstream registry order with icons and (live) descriptions */
-void ui_slash_register(ui_t *u, tui_ac_default_t *ac, const char *const *names, const char *const *descs, size_t n);
+void ui_slash_register(ui_t *u, tui_ac_default_t *ac); /* commands, aliases, hints from coding/slashcmd.c */
 
 /* ---------- appearance.c ---------- */
 

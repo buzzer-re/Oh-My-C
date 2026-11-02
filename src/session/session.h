@@ -51,6 +51,7 @@ const char *session_append_reset_boundary(session_t *s);
 const char *session_append_entry(session_t *s, json_t *entry); /* generic: sets id/parentId/timestamp */
 void session_set_title(session_t *s, const char *title, const char *source);
 int session_ensure_on_disk(session_t *s);
+int session_rewrite(session_t *s); /* rewriteEntries: rewrite the whole file after in-place entry edits */
 
 /* tree navigation */
 json_t *session_get(const session_t *s, const char *id); /* borrowed */

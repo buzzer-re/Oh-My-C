@@ -21,6 +21,7 @@
 typedef struct {
     const json_t *defs;
     int depth;
+    bool harmony; /* OpenAI-Harmony style: `//` comments, `,` delimiters, no indentation */
 } ts_ctx_t;
 
 static void ts_convert(sb_t *b, const json_t *node, ts_ctx_t *c, const char *pad);
@@ -56,7 +57,23 @@ static void ts_join_union(sb_t *b, strvec_t *parts) {
     strvec_free(&uniq);
 }
 
-static void ts_description(sb_t *body, const char *desc, const char *pad) {
+static void ts_description(sb_t *body, const char *desc, const char *pad, bool harmony) {
+    if (harmony) {
+        for (const char *p = desc;;) {
+            const char *nl = strchr(p, '\n');
+            size_t n = nl ? (size_t)(nl - p) : strlen(p);
+            sb_t l = SB_INIT;
+            sb_appendf(&l, "%s// ", pad);
+            sb_appendn(&l, p, n);
+            while (l.len && (l.s[l.len - 1] == ' ' || l.s[l.len - 1] == '\t' || l.s[l.len - 1] == '\r')) l.s[--l.len] = 0;
+            sb_append(body, sb_cstr(&l));
+            sb_putc(body, '\n');
+            sb_free(&l);
+            if (!nl) break;
+            p = nl + 1;
+        }
+        return;
+    }
     char *safe = str_replace(desc, "*/", "* /");
     if (!strchr(safe, '\n')) {
         sb_appendf(body, "%s/** %s */\n", pad, safe);
@@ -107,7 +124,8 @@ static void ts_array(sb_t *b, const json_t *node, ts_ctx_t *c, const char *pad) 
 static void ts_object(sb_t *b, const json_t *node, ts_ctx_t *c, const char *pad) {
     json_t *props = json_get_obj(node, "properties");
     json_t *additional = json_get(node, "additionalProperties");
-    char *child_pad = xasprintf("%s  ", pad);
+    char *child_pad = xasprintf("%s%s", pad, c->harmony ? "" : "  ");
+    const char *delim = c->harmony ? "," : ";";
     sb_t body = SB_INIT;
     size_t count = 0;
     if (props) {
@@ -116,15 +134,15 @@ static void ts_object(sb_t *b, const json_t *node, ts_ctx_t *c, const char *pad)
         json_t *v;
         json_obj_foreach(props, i, k, v) {
             const char *d = json_get_str(v, "description");
-            if (json_is_obj(v) && d && *d) ts_description(&body, d, child_pad);
+            if (json_is_obj(v) && d && *d) ts_description(&body, d, child_pad, c->harmony);
             bool required = false;
             json_t *r;
             json_arr_foreach(req, j, r) if (str_eq(json_sv(r), k)) required = true;
             char *val = ts_str(v, c, child_pad);
-            if (safe_key(k)) sb_appendf(&body, "%s%s%s: %s;\n", child_pad, k, required ? "" : "?", val);
+            if (safe_key(k)) sb_appendf(&body, "%s%s%s: %s%s\n", child_pad, k, required ? "" : "?", val, delim);
             else {
                 char *q = json_quote(k);
-                sb_appendf(&body, "%s%s%s: %s;\n", child_pad, q, required ? "" : "?", val);
+                sb_appendf(&body, "%s%s%s: %s%s\n", child_pad, q, required ? "" : "?", val, delim);
                 free(q);
             }
             free(val);
@@ -147,7 +165,7 @@ static void ts_object(sb_t *b, const json_t *node, ts_ctx_t *c, const char *pad)
     }
     if (json_is_obj(additional)) {
         char *inner = ts_str(additional, c, child_pad);
-        sb_appendf(&body, "%s[key: string]: %s;\n", child_pad, inner);
+        sb_appendf(&body, "%s[key: string]: %s%s\n", child_pad, inner, delim);
         free(inner);
     }
     sb_append(b, "{\n");
@@ -247,8 +265,11 @@ static void ts_convert(sb_t *b, const json_t *node, ts_ctx_t *c, const char *pad
     c->depth--;
 }
 
-char *json_schema_to_ts(const json_t *schema) {
+char *json_schema_to_ts(const json_t *schema) { return json_schema_to_ts_style(schema, false); }
+
+char *json_schema_to_ts_style(const json_t *schema, bool harmony) {
     ts_ctx_t c = {0};
+    c.harmony = harmony;
     if (json_is_obj(schema)) {
         c.defs = json_get_obj(schema, "$defs");
         if (!c.defs) c.defs = json_get_obj(schema, "definitions");
