@@ -53,7 +53,7 @@ Ranked by how soon a user hits the gap in a normal interactive session.
    Ctrl+Shift+V. Like omp's, `/hotkeys` lists them. (WP-6, WP-19, WP-21, WP-29)
 9. ~~**`/context`, `/session`, `/tools`, `/jobs`, `/todo` are one-line notices instead of omp's panels.**~~ Done (WP-7): context viewer, Session Info overlay with `delete`/`pin`, Available Tools panel, Background Jobs report with `full`/`kill`, the `/todo` verbs, and short reports docked above the editor.
 10. ~~**`/tree` and `/branch` are flat 14-row pickers.**~~ Done (WP-8): omp's session tree selector, fullscreen rewind selector and branch summaries.
-11. **Custom markdown commands and `/skill:<name>` don't work.** This covers `.omp/.claude/.opencode commands/*.md`. RPC `get_available_commands` advertises `skill:<name>` entries that nothing executes. (WP-9)
+11. ~~**Custom markdown commands and `/skill:<name>` don't work.**~~ Done (WP-9): file commands from every omp provider, prompt templates, `/skill:<name>` (leading or mid-prompt, chips, skill transcript card), MCP prompt commands, in the TUI, RPC, ACP and print mode. Remaining: the bundled TS commands `/review` and `/green`.
 12. **304 of the 402 settings shown in `/settings` have no effect.** This includes `tools.approvalMode`, so the TUI never asks for approval even after the user picks "Always ask". (WP-10, WP-26)
 13. ~~**Default-on agent guards are missing.**~~ Done (WP-12, WP-3): todo reminders + mid-run nudge, empty/unexpected-stop recovery, tool-call loop guard, stream loop guard, magic keywords, `out://`, `cfg://`, `conflict://N`. Remaining: fabricated-result abort (needs in-band tool calling), `todo.eager`, `tasks.todoClearDelay`.
 14. **Compaction is a single summary pass.** No method ladder, server-side compaction, mid-turn/async compaction, stale-read pruning or prompt-cache warming. (WP-13, WP-14)
@@ -79,7 +79,7 @@ Every package must:
 | WP-5 App keybinding layer (done; remaining: handlers for selectTemporary, history.search, editor.external in the composer, local.open, tools.toggleVisibility, pasteTextRaw, approval, agent hub — owned by WP-6/10/19/21/22/29; Alt+L background re-probe; draft saved on Ctrl+D) | All `app.*` actions in the key table; `keybindings.yml` (+ legacy .json migration, profile inherit); `/migrate` copies it; `key_hook` via `tui_kb()`; `/hotkeys` from the live bindings; Ctrl+Z, F5/Alt+R, Ctrl+C (500 ms, no abort), Ctrl+T status + persist, Ctrl+] jumps, Alt+Y kill ring, Alt+L, copy line/prompt, Esc-Esc → `doubleEscapeAction` | `src/tui/keys.c`, `src/config/keybindings.c`, `src/tui/editor.c`, `src/modes/interactive.c`, `src/ui/overlays.c` (`ui_hotkeys_markdown`) | T/app-keybindings.ts, T/keybindings.ts, T/kill-ring.ts, T/hotkeys-markdown.ts, U/modes/controllers/input-controller.ts |
 | WP-7 Report panels ✅ (done: report docking, `/context` viewer, `/session` overlay + `delete`/`pin`, `/tools`, `/jobs [full\|kill]`, `/todo` verbs; remaining: tokenizer-exact counts (omc estimates ~4.1 chars/token), snapcompact savings lines, multi-account `/session pin` selector, LSP rows in Session Info, nested subagent job tree, native jobs sheet / detail pane, live todo HUD for `/todo expand\|collapse`, RPC/ACP text handlers (`handle`) for /todo /session /jobs /context /tools) | `/context` viewer (category breakdown, browse content); `/session` info overlay + `delete`/`pin`; `/tools` markdown panel incl. xd:// tools; `/jobs` panel + job tree + `full`/`kill`; `/todo` subcommands; `/advisor status\|dump`. Report-panel inline docking for short reports | `src/modes/interactive.c`, `src/ui/overlays.c` (`ui_show_report`), new `src/ui/context.c`, `src/tools/jobs.c`, `src/tools/todo_ask.c` | T/overlays/context-viewer*.ts, session-info-overlay.ts, jobs-panel.ts, job-tree.ts, report-panel.ts; U/modes/controllers/command-controller.ts, todo-command-controller.ts; U/slash-commands/helpers/context-report.ts |
 | WP-8 Tree and rewind selectors ✅ (done; remaining: `ask` re-answer from the tree, Ctrl+G in the custom-instructions editor, model transcript dialects other than xml/anthropic in the summary request, rewind mouse clicks) | `/tree` tree selector (glyphs, filters / `treeFilterMode`, labels, search, fold, branch prev/next); rewind selector for `/branch`, `/rewind`, Esc-Esc; optional branch summary prompt (`branchSummary.enabled`) | `src/modes/interactive.c` ("tree"/"branch"), new `src/ui/tree.c`, `src/coding/app.c` | T/overlays/tree-selector.ts, rewind-selector.ts; U/modes/controllers/selector-controller.ts; A/compaction/branch-summarization.ts |
-| WP-9 Custom and skill commands | Discover `commands/*.md` (omp/Claude/OpenCode, user + project, `commands.enable*`) with `$ARGUMENTS`/frontmatter. `/skill:<name>` invocation + completion (`skills.enableSkillCommands`). MCP prompts as commands. Autocomplete entries. Execution from RPC `prompt` / ACP `session/prompt` (uses the WP-4 registry) | `src/coding/discovery.c`, `src/modes/interactive.c`, `src/ui/slash.c`, `src/tui/editor.c`, `src/modes/rpc.c`, `src/modes/acp.c` | U/capability/slash-command.ts, U/extensibility/{custom-commands,skills.ts,slash-commands.ts}, U/modes/skill-command.ts, U/modes/prompt/skill-tokens.ts, U/discovery/{claude,opencode}.ts |
+| WP-9 Custom and skill commands ✅ (done; remaining: bundled TS `/review`, `/green`; MCP `prompts/list_changed` refresh; skill chip OSC 8 links) | Discover `commands/*.md` (omp/Claude/OpenCode, user + project, `commands.enable*`) with `$ARGUMENTS`/frontmatter. `/skill:<name>` invocation + completion (`skills.enableSkillCommands`). MCP prompts as commands. Autocomplete entries. Execution from RPC `prompt` / ACP `session/prompt` (uses the WP-4 registry) | `src/coding/discovery.c`, `src/modes/interactive.c`, `src/ui/slash.c`, `src/tui/editor.c`, `src/modes/rpc.c`, `src/modes/acp.c` | U/capability/slash-command.ts, U/extensibility/{custom-commands,skills.ts,slash-commands.ts}, U/modes/skill-command.ts, U/modes/prompt/skill-tokens.ts, U/discovery/{claude,opencode}.ts |
 
 ### P1 — common, or the default behaviour differs
 
@@ -220,9 +220,11 @@ Non-builtin command sources:
 
 | Source | Upstream | omc | Status | Notes |
 |---|---|---|---|---|
-| Custom prompt commands (`commands/*.md` in .omp/.claude/.opencode, user + project; `$ARGUMENTS`) | capability/slash-command.ts, extensibility/custom-commands, discovery/* | — | ❌ | `commands.enable*` settings unread; omc only copies them in `migrate.c` |
-| Skill commands `/skill:<name>` | modes/skill-command.ts, extensibility/skills.ts | — | ❌ | not advertised over RPC/ACP until something expands them |
-| MCP prompts as commands | mcp/* | — | ❌ | |
+| Custom prompt commands (`commands/<name>.md`: native .omc/.omp + agent dir, Claude Code (user opt-in, project, nested `dir:name`), Claude Code plugins (`plugin:name`), `.agent[s]` walk-up + home, Codex, OpenCode; bundled `/init`) | capability/slash-command.ts, extensibility/slash-commands.ts, discovery/{builtin,claude,claude-plugins,agents,codex,opencode}.ts, task/commands.ts | `src/coding/commands.c`, `app_expand_input` | ✅ | provider priority + first-name-wins, `commands.enable{Claude,Opencode}{User,Project}`, `disabledProviders`, `disabledExtensions` (`slash-command:<name>`); frontmatter `description` / first line, `argument-hint`, `side: true` (→ /btw), Codex/OpenCode `name`; `$1` `$@` `$ARGUMENTS` `$@[s:l]` + template render + appended args; TUI rows with ✎ and hint ghost text; RPC/ACP/print expansion; request parity verified with request_diff.sh (print + RPC). omp extension-package (`omp-plugins`) command roots ❌ (omc has no omp extension packages) |
+| Prompt templates (`prompts/<name>.md`, user + project) | config/prompt-templates.ts | `src/coding/commands.c` | ✅ | `(user:sub)` / `(project)` description suffix, autocomplete after file commands, expanded in prompt/steer/follow-up |
+| Skill commands `/skill:<name>` | modes/skill-command.ts, extensibility/skills.ts, tui prompt/skill-tokens.ts, chat/skill-message.ts | `app_skill_message`, `app_prompt_skill`, `ix_invoke_skill`, `render_skill` (`src/ui/chat.c`) | ✅ | leading and mid-prompt tokens (allowsSkillTokens), omp's user-invocation prompt as a user-attributed `skill-prompt` custom message (session entry identical), keyword notices from the args, steer/follow-up queueing with the chip text, `Failed to load skill:` errors; TUI: `/skill:` namespace row + bare-name breakout, mid-prompt skill popup, composer chips, callout/inline transcript card with Ctrl+O prompt; RPC (`dispatchRpcSkillPrompt`) and ACP (`#tryRunSkillCommand`) run them; advertised as `skill:<name>`. Chips are not OSC 8 links to SKILL.md; skill images get no vision-description notice |
+| MCP prompts as commands | sdk.ts buildMCPPromptCommands, mcp/client.ts | `mcp_prompt_commands`, `mcp_run_prompt` | ✅ | `/<server>:<prompt> key=value`, `prompts/get` text + resource text joined by blank lines, empty result consumed; TUI rows `… (bundled)` with the MCP icon; RPC `mcp_prompt` source. `notifications/prompts/list_changed` refresh ❌ (the catalog is read at connect) |
+| Bundled TS commands `/review`, `/green` | extensibility/custom-commands/bundled/{review,ci-green} | — | ❌ | interactive code review / CI-green loop; they also outrank skill breakout in the `/` popup (`/rev`) |
 | Extension/plugin commands (JS) | extensibility/extensions | — | ⛔ | Bun/JS runtime |
 
 ## 2. Keybindings and interactive flows
@@ -302,7 +304,7 @@ The key table (`src/tui/keys.c` `DEFAULTS[]`) holds omp's whole registry: the 32
 | `@` file mentions | `complete_path` | 🟡 | single-directory prefix listing; omp does fuzzy project-wide search |
 | `#` prompt actions, `#123` → pr:// / issue:// | — | ❌ | advertised in `/hotkeys` |
 | `^model` mentions, `:emoji` completion, internal-URL completion | — | ❌ | |
-| `/skill:<name>` invocation + completion | — | ❌ | |
+| `/skill:<name>` invocation + completion | `ix_invoke_skill`, `src/tui/editor.c` (namespace row, mid-prompt popup, chips) | ✅ | see §1 (WP-9) |
 | Bare `exit`/`quit`/`q` on an empty session | — | ❌ | sent to the model |
 | Large paste | `[Paste #n …]` marker | 🟡 | no attachment chip / attach-as-file menu |
 | Image paste, image-path paste | — | ❌ | |
@@ -350,7 +352,7 @@ user who never opens `/settings` (default-on behaviour omc lacks) versus switche
 | `tools.abortOnFabricatedResult` (on) | aborts a turn whose text fabricates a tool result | ❌ only applies to in-band (owned-dialect, `tools.format`) tool calling, which omc does not implement; native tool calling never fabricates in-band results |
 | `async.widgets` (on) | live job widgets above the editor | ❌ |
 | `mcp.enableProjectConfig` (on), `mcp.renderMarkdownResults` (on) | project `.mcp.json` opt-out; markdown MCP results | 🟡 project config always loaded; not switchable |
-| `skills.enableSkillCommands` (on), `commands.enableClaudeProject`/`enableOpencodeProject` (on) | `/skill:<name>` and file-based custom commands | ❌ (see §1) |
+| `skills.enableSkillCommands` (on), `commands.enableClaudeProject`/`enableOpencodeProject` (on) | `/skill:<name>` and file-based custom commands | ✅ (WP-9, §1) |
 | `skillful` (on) | skills listed in system prompt (session-toggleable) | 🟡 always listed; not switchable |
 | `plan.enabled` (on), `goal.statusInFooter` (on), `title.refreshOnReplan` (on) | plan mode can be disabled; goal in footer; retitle on replan | ❌ |
 | `task.speculativeLaunch`, `task.completionProbe`, `task.softRequestBudget` (200) + notice | subagent launch/probing/budget behaviour | ❌ |
@@ -400,8 +402,7 @@ Tools: `speechgen.enabled`, `generate_image.enabled`, `ratchet.enabled`, `vault.
 `tools.xdevNotices`, `mcp.notifications`, `dev.autoqaPush.endpoint`.
 Tasks: `task.isolation.*`, `isolation.backend`, `worktree.*` (10 total), `task.file`, `task.structured`,
 `task.enableEffort`, `task.perCallModel`, `task.perCallModelAllow`, `task.enableLsp`, `task.maxRuntimeMs`,
-`task.maxEffort`, `task.prewalk`, `plan.autosave`, `plan.autosaveDir`, `title.refreshAfterPrompts`,
-`commands.enableClaudeUser`, `commands.enableOpencodeUser`.
+`task.maxEffort`, `task.prewalk`, `plan.autosave`, `plan.autosaveDir`, `title.refreshAfterPrompts`.
 Providers: `providers.maxInFlightRequests`, `providers.antigravityEndpoint`, `providers.fetch`,
 `codexResets.autoRedeem`, `claudeResets.autoRedeem`, `searxng.endpoint`, `providers.fireworksTier`,
 `providers.kimiApiFormat`, `providers.openaiWebsockets`, `providers.openaiLiveSteering`,
@@ -600,7 +601,7 @@ U = `packages/coding-agent/src`. status.md marks RPC and ACP ✅; both are 🟡 
 | get_state | state_json | 🟡 | missing autoCompactionEnabled, fast/slow mode, usageLimit, tokensPerSecond, queuedMessages(+Count), hasPendingAsyncWork, isSettled, todoPhases, systemPrompt, dumpTools, contextUsage; partial `model` |
 | set_fast_mode / set_slow_mode / set_cache_warming / set_ask_dialog / get_session_lease | — | ❌ | "unknown command" |
 | goal, get_tree, set_thinking_level, get_available_thinking_levels, set_steering/follow_up/interrupt_mode, set_auto_compaction/retry, export_html, navigate_tree, set_label, get_branch_messages, get_last_assistant_text, get_messages, get_login_providers, host_tool_result | handle | ✅ | navigate_tree lacks error codes; summary synchronous |
-| get_available_commands | handle | 🟡 | 11 hard-coded builtins + `skill:<name>` (not executable); no aliases/hints/subcommands |
+| get_available_commands | handle | ✅ | registry builtins (aliases, hints, subcommands), then `skill:<name>`, MCP prompt and file commands (WP-9) |
 | get_entries | handle | 🟡 | no `leafId`; `since` ignored |
 | set_todos | handle | 🟡 | not persisted as a user-todo-edit entry |
 | set_host_tools | handle | 🟡 | ignores `loadMode`, `readsSkillUris` |
@@ -738,8 +739,8 @@ the prompt.
 | Prewalk / auto-prewalk, speculation | session/prewalk.ts, speculation/ | — | ❌ | off by default |
 | Telemetry OTLP export | telemetry-export*.ts | — | ❌ | only with `OTEL_*` env |
 | Stats (packages/stats) | packages/stats | — | ❌ | aggregation portable; the bundled web dashboard is the large part |
-| Custom markdown commands, skill commands | custom-commands, skill-command.ts | — | ❌ | §1 |
-| Plugins / marketplace | extensibility/plugins | `plugins.c` (Claude plugin skills) | 🟡 | install/update, plugin MCP/commands ❌ |
+| Custom markdown commands, skill commands | custom-commands, skill-command.ts | `src/coding/commands.c` | ✅ | §1 (bundled TS `/review`, `/green` ❌) |
+| Plugins / marketplace | extensibility/plugins | `plugins.c` (Claude plugin skills and commands) | 🟡 | install/update, plugin MCP ❌ |
 | Worktrees (`/wt`, `task.isolation`) | session-worktree.ts | — | ❌ | |
 | Job widgets / activity | job-widgets/, activity/ | — | ❌ | |
 | Secrets obfuscation | secrets/ | — | ❌ | off by default |

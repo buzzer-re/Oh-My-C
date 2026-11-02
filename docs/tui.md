@@ -136,7 +136,18 @@ row), completes arguments (`tui_ac_default_t.args`: subcommands, the live `/effo
 dim ghost text after an end-of-line cursor (`tui_editor_ghost`: the selected item's remainder +
 usage, else the command's inline hint); Enter on an argument completion applies it and submits only
 when the argument is already fully typed (`#selectedSlashArgumentIsAlreadyTyped`). The metadata comes
-from the shared registry (`src/coding/slashcmd.c`) through `src/ui/slash.c`. Its frame is drawn by a composer style, one of omp's 8
+from the shared registry (`src/coding/slashcmd.c`) through `src/ui/slash.c`, followed by MCP prompt
+commands (`… (bundled)`), `skill:<name>` commands, file commands (✎, `<hint> - <description>` and the hint as
+ghost text while no argument is typed) and prompt templates. `skill:` commands collapse into one
+`/skill:` namespace row (`N skills`) until the query commits to the namespace or a bare name / hyphen
+segment out-ranks every other command (`collapseSkillNamespace`); accepting the row reopens the popup on
+the skills. A `/token` after prompt text (`fix it /co`) completes skills only and replaces just the token
+(`buildMidPromptSkillCompletions`). The editor's token hook (`tui_editor_set_token_hook`) turns a completed
+`/skill:<name>` token of a registered skill into an atomic `✦ name` chip (skillChipStyle) that expands back on
+submit. A submitted skill renders as `SkillMessageComponent` (`MV_SKILL` in `src/ui/chat.c`): a callout with
+the skill rail, chip and line count when the token led the draft, else a user bubble with the chip; Ctrl+O
+adds the rendered skill prompt. A `side: true` file command opens the /btw panel titled `/<name> args`.
+Its frame is drawn by a composer style, one of omp's 8
 shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, `rail`
 (`composer.shape`).
 

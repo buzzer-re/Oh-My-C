@@ -45,8 +45,36 @@ and ACP `session/prompt` run the builtins that have a text-mode handler (model, 
 compact, shake, handoff, retry, memory, rename, dirs): RPC answers `{"agentInvoked":false}` and emits
 `command_output` frames, ACP streams the output as `agent_message_chunk` and ends the turn;
 `get_available_commands` and ACP's `available_commands_update` (sent after session/new and
-session/load) list exactly those. `!cmd` / `!!cmd` run shell commands as user bash (`app_user_bash`), recorded
-as `bashExecution` messages (with `!!` they are kept out of the model's context).
+session/load) list those builtins, then (first name wins, builtin aliases reserved) `skill:<name>` for every
+skill (`skills.enableSkillCommands`, hint `arguments`), MCP prompt commands (`<server>:<prompt>`,
+source `mcp_prompt`) and file commands (source `file`, hint from `argument-hint`).
+
+Non-builtin commands (`src/coding/commands.c`, port of omp's slash-command capability,
+extensibility/slash-commands.ts and config/prompt-templates.ts):
+- **File commands** are `commands/<name>.md` from the providers in omp's priority order: native
+  (`<cwd>/.omc|.omp/commands`, then `<agentDir>/commands`), Claude Code (`~/.claude/commands` when
+  `commands.enableClaudeUser` or the `claude` provider is opted in; `<cwd>/.claude/commands` unless
+  `commands.enableClaudeProject: false`; recursive, nested files also as `dir:name`), installed Claude Code
+  plugins (`<plugin>:<name>`), `.agent[s]/commands` (walk up to the repo root, then `~/`), Codex
+  (`.codex/commands`), OpenCode (`.opencode/commands`, `~/.config/opencode/commands` opt-in), and the
+  bundled `/init`. Frontmatter: `description` (else the first body line, 60 characters), `argument-hint`
+  / `argumentHint`, `side: true`; Codex/OpenCode honour `name` (and, like omp, take the description from
+  the body). `disabledProviders` and `disabledExtensions: [slash-command:<name>]` apply. The body expands
+  with `$1`…, `$@`, `$ARGUMENTS`, `$@[start:len]`, then the template engine (`{{arguments}}`, `{{arg N}}`);
+  arguments are appended after a blank line when the body has no placeholder.
+- **Prompt templates** are `<agentDir>/prompts/**/<name>.md` and `<cwd>/.omc|.omp/prompts`; they expand the
+  same way after file commands (and also in RPC `steer`/`follow_up`).
+- **MCP prompts** of connected servers (`prompts/list`) run as `/<server>:<prompt> key=value …`
+  (`prompts/get`; text and resource text parts joined by blank lines; an empty result consumes the input).
+- **`/skill:<name> args`** (or a `/skill:<name>` token after prompt text) sends omp's user-invocation prompt
+  (`prompts/skills/user-invocation.md`) as a `skill-prompt` custom message attributed to the user (the model
+  sees a user turn; the session stores `custom_message` with `details {name, path, args, prompt, lineCount}`).
+
+AgentSession.prompt's order is kept everywhere: TUI Enter, RPC `prompt` and ACP `session/prompt` try a skill
+invocation first (RPC/ACP), builtins, then MCP prompt commands, file commands and templates; print mode
+(`-p`) expands MCP/file/template commands but, like omp, does not run skills. `!cmd` / `!!cmd` run shell
+commands as user bash (`app_user_bash`), recorded as `bashExecution` messages (with `!!` they are kept out of
+the model's context).
 
 ## Print and JSON (`modes/print.c`)
 
