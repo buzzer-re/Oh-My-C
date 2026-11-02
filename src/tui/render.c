@@ -705,7 +705,10 @@ static void do_render(tui_t *t) {
     if (c1 < s1) s1 = MAX(c1, nn - height);
     paint_begin(t);
     int cr = MIN(MAX(t->hw_row - vt, 0), height - 1); /* cursor's screen row */
-    if (c != base || c1 != s1) {
+    /* held rows hidden between the commit point and the screen, unchanged by this frame (nothing commits,
+     * the screen top stays): diff the screen in place, like omp's live viewport over a pinned frontier */
+    bool hidden_steady = c != base && s1 == base && c1 == c && nn - base <= height;
+    if (!hidden_steady && (c != base || c1 != s1)) {
         /* hidden rows before or after this frame: rewrite from the screen's top row (no clear) */
         int r0 = c < 0 ? MIN(-c, height - 1) : 0;
         move_rows(tm, r0 - cr);
@@ -742,7 +745,7 @@ static void do_render(tui_t *t) {
         cr = r;
     }
     t->viewport_top = base + sc;
-    t->committed = t->viewport_top;
+    t->committed = hidden_steady ? c : t->viewport_top;
     t->hw_row = t->viewport_top + cr;
     finish_frame(t, &lines, &cp, width, height);
 }

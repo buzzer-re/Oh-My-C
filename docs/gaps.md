@@ -197,7 +197,7 @@ omc-only commands (not in omp): `/help`, `/thinking` (omp only has `/effort`), `
 | /handoff [focus] | builtin-lifecycle.ts, command-controller `handleHandoffCommand` | `app_handoff` | 🟡 | focus instructions ignored; no streaming/compacting/"nothing to hand off" guards; no cancellable loader |
 | /resume [id] | builtin-lifecycle.ts | `ui_overlay_session` | 🟡 | argument (session id/path) ignored |
 | /pin | builtin-lifecycle.ts | — (Alt+K in picker only) | ❌ | |
-| /btw [q] | builtin-lifecycle.ts, btw-controller.ts, overlays/btw-panel.ts | detached thread → notice | 🟡 | omp shows a live BTW panel and a history browser (`/btw` without args) |
+| /btw [q] | builtin-lifecycle.ts, btw-controller.ts, overlays/btw-panel.ts | `src/ui/btw.c` | ✅ | inline streaming panel + history browser ported; image follow-ups missing |
 | /tan | builtin-lifecycle.ts, tan-command-controller.ts | — | ❌ | background agent for tangential work |
 | /omfg | builtin-lifecycle.ts, omfg-controller.ts | — | ❌ | forge a TTSR rule from a complaint |
 | /cleanse | builtin-lifecycle.ts, cleanse-command-controller.ts | — | ❌ | diagnostics fixing with parallel subagents |
@@ -318,7 +318,7 @@ both are false. Rows marked (tmux) were probed in tmux against the mock model.
 | **Terminal title (OSC 0)** | `tui_term_set_title` never called | ❌ | |
 | **Turn-end / error / ask desktop notification** | — | ❌ | `completion.notify`/`ask.notify` default on |
 | Composer predictions | — | ❌ | default off |
-| /btw panel (branch/copy/follow-up keys) | notice | 🟡 | |
+| /btw panel (branch/copy/follow-up keys) | `src/ui/btw.c` | ✅ | |
 | Session focus (view a subagent, ←←) | — | ❌ | |
 | Extension UI (hook selector/input/editor/widgets) | — | ⛔ | JS extension runtime |
 | Abort marker after Esc | — | 🟡 | no "aborted" line seen; not compared against omp |
@@ -517,7 +517,7 @@ floating list; Esc-Esc and Ctrl+R do nothing although `/hotkeys` lists Ctrl+R.
 | tree-selector | tree-selector.ts (1794) | `/tree` | `show_picker(5)` | 🟡 | 14-row list; no filters, labels, search, fold, non-message entries |
 | rewind-selector | rewind-selector.ts (1131) | Esc-Esc, `/branch`, `/rewind` | `/branch` generic picker | 🟡 | no transcript outline / sibling strip; Esc-Esc unbound; `/rewind` alias missing |
 | jobs-panel + job-tree | jobs-panel.ts, job-tree.ts | `/jobs`, jobs pill | notice | 🟡 | no tree, `Running:` count, `full`, `kill`, detail pane |
-| btw-panel, btw-history(-panel) | btw-*.ts | `/btw` | detached thread → notice | 🟡 | answer not streamed; no panel, follow-up or history |
+| btw-panel, btw-history(-panel) | btw-*.ts | `/btw` | `src/ui/btw.c` | ✅ | no image paste in follow-ups |
 | session-info-overlay | session-info-overlay.ts | `/session` | notice | 🟡 | missing provider/auth section, tool calls, edit rejections, LSP/MCP servers; `delete`/`pin` subs |
 | usage-dashboard / usage-display / usage-row | usage-*.ts | `/usage`; per-turn row (`display.showTokenUsage`) | token totals notice | 🟡/❌ | different feature (provider quotas + heatmap); no provider usage fetchers in `src/`; per-turn row ❌ |
 | reset-usage-selector | reset-usage-selector.ts | `/usage reset` | — | ❌ | |
@@ -622,8 +622,8 @@ U = `packages/coding-agent/src`. status.md marks RPC and ACP ✅; both are 🟡 
 | handoff | app_handoff | 🟡 | returns `{}` not `{savedPath}`; ignores `customInstructions` |
 | get_messages_page | handle | 🟡 | upstream: oldest-first, opaque base64 cursor, byte cap, `{messages,nextCursor,totalMessages}`, `session_busy`; omc: newest-first numeric cursor, `{hasMore,total}` |
 | login / get_logout_accounts / logout | — | ❌ | |
-| btw | app_side_question | 🟡 | synchronous, no `btw_delta`, `{answer}` instead of `{record}`, flat `btw_record` |
-| btw_cancel / get_btw_history | — | ❌ | |
+| btw | rpc.c btw_ask | ✅ | |
+| btw_cancel / get_btw_history | rpc.c | ✅ | |
 | extension_ui_response | — | ❌ | |
 | host_tool_update | ignored | 🟡 | not forwarded as `tool_execution_update` |
 | live_* / dictation_* / predict_word* | — | ⛔ | realtime voice, local STT, local tiny ML models |
@@ -644,7 +644,7 @@ U = `packages/coding-agent/src`. status.md marks RPC and ACP ✅; both are 🟡 
 | available_commands_update, session_info_update, config_update, command_output, extension_error | ❌ | |
 | extension_ui_request (select/confirm/input/editor/ask/cancel/notify/setStatus/setWidget/setTitle/set_editor_text/open_url) | ❌ | **in RPC the `ask` tool returns "no interactive user"** (`src/tools/todo_ask.c`) |
 | host_uri_request/cancel, subagent_lifecycle/progress/event | ❌ | |
-| btw_delta / btw_record | 🟡 | record only, wrong shape |
+| btw_delta / btw_record | ✅ | |
 | packages/wire (collab GuestFrame/HostFrame, skillshare, stream, tsp) | ⛔ | hosted relay/stream protocols, not RPC |
 
 ### 6c. ACP (U/modes/acp/*, slash-commands/acp-builtins.ts; omc `src/modes/acp.c`)

@@ -40,14 +40,31 @@ Loader, SelectList). The multi-line editor is in `editor.c`.
    output (`CSI ?2026 h/l`) when the terminal supports it, then flushes in one `write`.
 
 Rendering is **inline**, without the alternate screen: the transcript scrolls into the terminal's
-native scrollback, as in omp. When a change lands above the visible viewport (already in
-scrollback) or the width changes, the TUI clears the screen and scrollback and redraws everything
-(`tui_full_redraw_count` exposes this to tests). Fullscreen pages (`/settings`, `/resume`, the Models
-hub, `/hotkeys`, the setup wizard) switch to the alternate screen themselves.
+native scrollback, as in omp. Rows above the screen are **committed history** (omp's retired history
+batches): they are never repainted, so a change up there (a block re-wrapping, a card updating, a read
+group's count) never clears the terminal. The renderer re-aligns the rows still on screen
+(`align_viewport`: the shift that lines the old visible rows up with the new frame) and rewrites only
+the screen rows that differ. A block that can still change calls `tui_hold_history(tui, row)` while it
+renders (the streaming reply from its last Markdown block on, a running tool card, the open read
+group, the welcome banner while its intro plays): held rows never scroll into scrollback; when the
+frame outgrows the screen they are clipped and the screen shows the frame's tail (omp: an unfinalized
+block never retires; the viewport shows its tail), and they are written to scrollback once they settle.
+Frames are framed like omp's paints (cursor hidden, `CSI ?2026` synchronized output, autowrap off,
+each row written then erased to its end). Clearing screen and scrollback is reserved for explicit
+full requests (`tui_request_full_render`: session replaced, transcript rebuilt, thinking visibility
+toggled); a resize repaints only the screen with the frame's tail. `tui_full_redraw_count` exposes the
+clears to tests, and `OMC_TUI_DEBUG=<file>` logs one line per frame (kind: first/diff/above/none/full/
+resize, first changed row, viewport top, bytes written, old/new excerpt of the changed row).
+
+Fullscreen pages (`/settings`, `/resume`, the Models hub, `/hotkeys`, the setup wizard, the BTW
+history) borrow the alternate screen through `tui_alt_screen(tui, on)`: the normal screen's frame is
+parked meanwhile and resumes untouched on exit (the terminal restores that screen, nothing is
+repainted); a full render requested while a page is open applies to the normal screen when it closes.
 
 A focused component may emit `TUI_CURSOR_MARKER` (an APC sequence) where the hardware cursor should
 sit (for IMEs). The renderer strips it and parks the cursor there. Renders are coalesced and
-throttled (16 ms by default).
+throttled like omp's (`MIN_RENDER_INTERVAL_MS`, 30 fps), backing off to twice the last frame's cost
+(at most 200 ms) when frames get expensive.
 
 **Threading:** everything runs on the UI thread except `tui_request_render()`, `tui_post()` (run a
 function on the UI thread) and `tui_stop()`. The agent worker thread never touches components. It
@@ -119,6 +136,7 @@ shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, 
 | `modelhub.c`, `modelbrowser.c` | Models hub (`/model`, Alt+M): roles, providers, model browser, persistence to `modelRoles.*` | `overlays/model-hub.ts`, `hub-frame.ts`, `model-browser.ts` |
 | `sessions.c` | `/resume` selector: search, all projects, pins, rename, delete | `overlays/session-selector.ts` |
 | `settings.c` | `/settings` from omp's own registry dump (`assets/tui/settings-ui.json`) | `overlays/settings-selector.ts`, `components/settings-list.ts` |
+| `btw.c` | `/btw`: inline answer panel below the transcript (streams Markdown, Esc cancels then closes, `c` copy, `f` follow up, `b` branch), fullscreen BTW history (topic list + answer pane, follow-up composer, copy, cancel), the controller (session moves dispose it) | `controllers/btw-controller.ts`, `overlays/btw-panel.ts`, `overlays/btw-history-panel.ts` |
 | `ask.c` | the `ask` tool's dialog in the composer's place | `overlays/ask-dialog.ts`, `hook-editor.ts` |
 | `overlays.c` | selector host, thinking selector, `/hotkeys` report page | `overlays/{thinking-selector,report-panel}.ts`, `hotkeys-markdown.ts` |
 | `planreview.c` | fullscreen Plan Review (sections, Contents sidebar, delete/undo, annotations, options, model-tier slider) and the "Save and quit" path prompt | `overlays/{plan-review-overlay,plan-toc,plan-save-overlay}.ts`, `chrome/overlay-box.ts` split frame |
