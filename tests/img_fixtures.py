@@ -315,6 +315,37 @@ photo(17, 9, 5).save(P("webp_small_lossy.webp"), quality=60)
 pil_ref("webp_small_lossy", Image.open(P("webp_small_lossy.webp")))
 full = open(P("webp_lossy.webp"), "rb").read()
 open(P("bad_webp_trunc.webp"), "wb").write(full[: len(full) // 2])
+# encoder variants: fastest / slowest lossy search, lossless without and with every tool
+big.save(P("webp_lossy_m0.webp"), quality=75, method=0)
+pil_ref("webp_lossy_m0", Image.open(P("webp_lossy_m0.webp")))
+big.save(P("webp_lossy_m6.webp"), quality=90, method=6)
+pil_ref("webp_lossy_m6", Image.open(P("webp_lossy_m6.webp")))
+rgba.save(P("webp_lossy_alpha_aq.webp"), quality=70, alpha_quality=40, method=6)
+pil_ref("webp_lossy_alpha_aq", Image.open(P("webp_lossy_alpha_aq.webp")))
+big.save(P("webp_lossless_q0.webp"), lossless=True, quality=0, method=0)
+pil_ref("webp_lossless_q0", Image.open(P("webp_lossless_q0.webp")))
+from PIL import ImageDraw as _D
+shot = Image.new("RGB", (320, 200), (250, 250, 250))
+_d = _D.Draw(shot)
+_d.rectangle([0, 0, 60, 200], fill=(40, 44, 52))
+for i in range(18):
+    _d.text((70, 4 + 11 * i), "line %d: value = %d;" % (i, rnd.randrange(10 ** 6)), fill=(rnd.randrange(160), 30, rnd.randrange(200)))
+_d.ellipse([230, 120, 300, 190], fill=(250, 180, 60))
+shot.paste(photo(80, 60, 4), (230, 20))
+shot.save(P("webp_lossless_m6.webp"), lossless=True, quality=100, method=6)
+pil_ref("webp_lossless_m6", Image.open(P("webp_lossless_m6.webp")))
+shot.save(P("webp_meta.webp"), quality=80, icc_profile=b"\0" * 40, exif=b"Exif\0\0MM\0*\0\0\0\x08\0\0", xmp=b"<x:xmpmeta/>")
+pil_ref("webp_meta", Image.open(P("webp_meta.webp")))
+# animation: the reference is Pillow's first (composited) frame
+fr = []
+for k in range(3):
+    f = Image.new("RGBA", (64, 48), (0, 0, 0, 0))
+    _D.Draw(f).ellipse([10 + 8 * k, 6, 40 + 8 * k, 40], fill=(200, 40 * k, 90, 255))
+    fr.append(f)
+fr[0].save(P("webp_anim.webp"), save_all=True, append_images=fr[1:], duration=80, loop=0, lossless=True)
+pil_ref("webp_anim", Image.open(P("webp_anim.webp")))
+fr[0].save(P("webp_anim_lossy.webp"), save_all=True, append_images=fr[1:], duration=80, loop=0, quality=70)
+pil_ref("webp_anim_lossy", Image.open(P("webp_anim_lossy.webp")))
 
 # Raw source rasters for encoder round trips (decoded by the C side's own decoder and by Pillow)
 for name, im in (("src_photo", photo(160, 120, 21)), ("src_ui", None)):
