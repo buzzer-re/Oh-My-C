@@ -110,8 +110,24 @@ size_t ui_settings_def_count(void);
 void ui_overlay_hotkeys(ui_t *u);
 /* /hotkeys markdown built from the live keybindings (buildHotkeysMarkdown); owned */
 char *ui_hotkeys_markdown(void);
-/* titled command report (overlays/report-panel.ts): fullscreen page, scrolls, Esc closes; takes `body` */
+/* ---------- report.c ---------- */
+/* titled read-only command report (overlays/report-panel.ts, CommandController.showCommandReport); takes `body`.
+ * Docks above the editor when it fits there (Esc dismisses), else a focused full-screen page that scrolls. */
 void ui_show_report(ui_t *u, const char *title, tui_component_t *body);
+void ui_show_markdown_report(ui_t *u, const char *title, const char *markdown);
+tui_component_t *ui_report_slot_new(ui_t *u); /* the docking slot (omp reportContainer) */
+int ui_report_rows(ui_t *u);                  /* commandReportRows: screen rows above the chrome below the slot; -1 unknown */
+bool ui_report_dismiss(ui_t *u);              /* Esc: drop the docked report; false when none */
+void ui_report_clear(ui_t *u);                /* transcript/session reset: drop the docked report and any sheet */
+/* focused full-screen page on the alternate screen (#showFullscreenSheet); takes `c`, closing any previous */
+void ui_show_sheet(ui_t *u, tui_component_t *c);
+void ui_close_sheet(ui_t *u);
+/* ---------- panels.c / context.c / todocmd.c (WP-7 command panels) ---------- */
+void ui_context_command(ui_t *u);                 /* /context viewer */
+void ui_session_command(ui_t *u, const char *arg); /* /session [info|delete|pin [account]] */
+void ui_tools_command(ui_t *u);                   /* /tools */
+void ui_jobs_command(ui_t *u, const char *arg);   /* /jobs [full|kill <id>|kill all] */
+void ui_todo_command(ui_t *u, const char *arg);   /* /todo [verb ...] */
 void ui_overlay_login(ui_t *u, bool logout);
 void ui_overlay_login_provider(ui_t *u, const char *provider, bool reopen_hub);
 /* ---------- ask.c ---------- */
