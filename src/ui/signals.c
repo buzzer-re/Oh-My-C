@@ -164,6 +164,8 @@ char *ui_program_status_report(run_state_t state, const char *kind, const char *
 
 /* ---------- runtime ---------- */
 
+static char *g_warp_prompt; /* Warp bridge activePrompt */
+
 typedef struct {
     char *id;
     char *msg;
@@ -352,6 +354,7 @@ void ui_signals_init(ui_t *u) {
     report(); /* setProgramStatusEnabled */
     ui_signals_session_title();
     ui_recap_init(u);
+    ui_signals_session_start();
 }
 
 void ui_signals_dispose(void) {
@@ -376,6 +379,132 @@ void ui_signals_dispose(void) {
     memset(&S.blockers, 0, sizeof S.blockers);
     json_free(S.ended);
     S.ended = NULL;
+    free(g_warp_prompt);
+    g_warp_prompt = NULL;
+}
+
+/* ---------- Warp CLI-agent events (modes/warp-events.ts) ---------- */
+
+/* Warp negotiated its structured CLI-agent OSC protocol; it then drives native completion UX itself */
+static bool warp_protocol_active(void) {
+    const char *v = env_get("WARP_CLI_AGENT_PROTOCOL_VERSION");
+    return v && atof(v) >= 1;
+}
+
+
+/* truncateEventText: the first 200 code points */
+static char *event_text(const char *s) {
+    size_t i = 0, n = 0, len = strlen(s ? s : "");
+    while (i < len && n < 200) {
+        uint32_t cp;
+        i += (size_t)utf8_decode(s + i, len - i, &cp);
+        n++;
+    }
+    return xstrndup(s ? s : "", i);
+}
+
+/* `\x1b]777;notify;warp://cli-agent;<json>\x07`, the envelope after the event's own fields; DCS-wrapped under
+ * tmux, with an outer BEL for the attention-worthy events */
+static void warp_emit(json_t *ev) {
+    if (!warp_protocol_active() || !S.u || S.disposed) {
+        json_free(ev);
+        return;
+    }
+    app_t *a = S.u->app;
+    const char *cwd = a && a->cwd ? a->cwd : "";
+    json_set_int(ev, "v", 1);
+    json_set_str(ev, "agent", "omp"); /* Warp resolves the agent through CLIAgent.command_prefix() */
+    json_set_str(ev, "session_id", a && a->session ? session_id(a->session) : "");
+    json_set_str(ev, "cwd", cwd);
+    const char *base = strrchr(cwd, '/');
+    json_set_str(ev, "project", base ? base + 1 : cwd);
+    json_set_str(ev, "plugin_version", OMC_VERSION);
+    char *body = json_dump(ev, 0);
+    char *osc = xasprintf("\x1b]777;notify;warp://cli-agent;%s\x07", body);
+    if (!tui_inside_tmux()) write_seq(osc);
+    else {
+        const char *name = json_get_str(ev, "event");
+        bool ring = str_eq(name, "stop") || str_eq(name, "stop_failure") || str_eq(name, "permission_request") ||
+                    str_eq(name, "question_asked");
+        char *w = tui_wrap_tmux_passthrough(osc);
+        if (ring) {
+            char *r = xasprintf("%s\x07", w);
+            free(w);
+            w = r;
+        }
+        write_seq(w);
+        free(w);
+    }
+    free(osc);
+    free(body);
+    json_free(ev);
+}
+
+static json_t *warp_event(const char *name) {
+    json_t *e = json_obj();
+    json_set_str(e, "event", name);
+    return e;
+}
+
+void ui_signals_session_start(void) {
+    free(g_warp_prompt);
+    g_warp_prompt = NULL;
+    warp_emit(warp_event("session_start"));
+}
+
+void ui_signals_user_message(const json_t *msg) {
+    if (!str_eq(json_get_str(msg, "role"), "user") || json_get_bool(msg, "synthetic", false) ||
+        str_eq(json_get_str(msg, "attribution"), "agent"))
+        return;
+    const json_t *c = json_get(msg, "content");
+    sb_t b = SB_INIT;
+    if (json_is_str(c)) sb_append(&b, json_sv(c));
+    json_t *blk;
+    json_arr_foreach(json_is_arr(c) ? c : NULL, i, blk) if (str_eq(json_get_str(blk, "type"), "text")) sb_append(&b, json_get_str(blk, "text") ? json_get_str(blk, "text") : "");
+    free(g_warp_prompt);
+    g_warp_prompt = event_text(sb_cstr(&b));
+    sb_free(&b);
+    json_t *e = warp_event("prompt_submit");
+    json_set_str(e, "query", g_warp_prompt);
+    warp_emit(e);
+}
+
+static bool silent_abort(const json_t *m) { return str_eq(json_get_str(m, "errorMessage"), "__omp.silent_abort__"); }
+static bool user_interrupt(const json_t *m) { return str_eq(json_get_str(m, "errorMessage"), "Interrupted by user"); }
+
+/* lastAssistantStop */
+static void warp_stop(const json_t *msgs) {
+    json_t *e = NULL;
+    for (size_t i = json_len(msgs); i-- > 0 && !e;) {
+        const json_t *m = json_at(msgs, i);
+        if (!str_eq(json_get_str(m, "role"), "assistant")) continue;
+        sb_t t = SB_INIT;
+        json_t *blk;
+        json_arr_foreach(json_get_arr(m, "content"), k, blk) if (str_eq(json_get_str(blk, "type"), "text")) sb_append(&t, json_get_str(blk, "text") ? json_get_str(blk, "text") : "");
+        const char *stop = json_get_str(m, "stopReason"), *err = json_get_str(m, "errorMessage");
+        char *response = t.len ? xstrdup(sb_cstr(&t)) : NULL;
+        sb_free(&t);
+        if (!response && err && *err && !silent_abort(m) &&
+            (str_eq(stop, "error") || (str_eq(stop, "aborted") && !user_interrupt(m))))
+            response = xstrdup(err);
+        const char *ev = "stop", *etype = NULL;
+        if (str_eq(stop, "error")) ev = "stop_failure", etype = "error";
+        else if (str_eq(stop, "aborted") && !silent_abort(m) && !user_interrupt(m) && err && *err)
+            ev = "stop_failure", etype = "aborted";
+        e = warp_event(ev);
+        if (g_warp_prompt) json_set_str(e, "query", g_warp_prompt);
+        char *r = event_text(response ? response : "");
+        json_set_str(e, "response", r);
+        free(r);
+        free(response);
+        if (etype) json_set_str(e, "error_type", etype);
+    }
+    if (!e) {
+        e = warp_event("stop");
+        if (g_warp_prompt) json_set_str(e, "query", g_warp_prompt);
+        json_set_str(e, "response", "");
+    }
+    warp_emit(e);
 }
 
 /* ---------- agent events ---------- */
@@ -391,6 +520,9 @@ void ui_signals_tool_start(const char *tool_call_id, const char *tool_name, cons
     if (!str_eq(tool_name, "ask") || !tool_call_id) return;
     /* AskTool.execute sends its notification before the UI handles the call's tool_execution_start */
     ui_signals_ask_waiting();
+    json_t *qa = warp_event("question_asked");
+    json_set_str(qa, "summary", "Waiting for your answer");
+    warp_emit(qa);
     /* #blockingPrompt: the questions joined by a space */
     strvec_t qs = {0};
     json_t *q;
@@ -405,7 +537,10 @@ void ui_signals_tool_start(const char *tool_call_id, const char *tool_name, cons
     ui_signals_run_status(RUN_BLOCKED, "question", msg);
 }
 
-void ui_signals_tool_end(const char *tool_call_id) {
+void ui_signals_tool_end(const char *tool_call_id, const char *tool_name) {
+    json_t *tc = warp_event("tool_complete");
+    json_set_str(tc, "tool_name", tool_name ? tool_name : "");
+    warp_emit(tc);
     for (size_t i = 0; i < S.blockers.n; i++) {
         if (!str_eq(S.blockers.v[i].id, tool_call_id)) continue;
         free(S.blockers.v[i].id);
@@ -427,11 +562,6 @@ static const json_t *sig_last_assistant(const json_t *msgs) {
     return NULL;
 }
 
-/* Warp's structured CLI-agent protocol drives native completion UX: no second legacy toast */
-static bool warp_protocol_active(void) {
-    const char *v = env_get("WARP_CLI_AGENT_PROTOCOL_VERSION");
-    return v && atof(v) >= 1;
-}
 
 static void notify(const char *title, const char *body, const char *type, const char *urgency) {
     tui_term_t *t = S.u && S.u->tui ? tui_term(S.u->tui) : NULL;
@@ -477,6 +607,7 @@ void ui_signals_settle(void) {
     json_t *m = S.ended;
     S.ended = NULL;
     ui_signals_run_settled(m, false);
+    warp_stop(m);
     ui_recap_settled(m);
     json_free(m);
 }

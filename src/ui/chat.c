@@ -1549,5 +1549,6 @@ void ui_chat_rebuild(ui_t *u) {
     toolcard_set_replaying(false);
     ui_signals_session_title(); /* resume / switch / branch: the title follows the session */
     ui_recap_invalidate();
+    ui_signals_session_start();
     tui_request_full_render(u->tui);
 }

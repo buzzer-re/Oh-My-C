@@ -40,7 +40,7 @@ void ui_signals_settings_changed(void);
  * its tool_execution_end */
 void ui_signals_agent_start(void);
 void ui_signals_tool_start(const char *tool_call_id, const char *tool_name, const json_t *args);
-void ui_signals_tool_end(const char *tool_call_id);
+void ui_signals_tool_end(const char *tool_call_id, const char *tool_name);
 /* the run settled (its last agent_end): run status done/error/idle from the run's messages, then the error
  * and completion notifications (`error.notify`, `completion.notify`) */
 void ui_signals_run_settled(const json_t *run_messages, bool interrupted);
@@ -48,6 +48,11 @@ void ui_signals_run_settled(const json_t *run_messages, bool interrupted);
  * stop recoveries, plan reminders — are non-terminal settles in omp) */
 void ui_signals_agent_end(const json_t *run_messages);
 void ui_signals_settle(void);
+/* Warp CLI-agent events (WARP_CLI_AGENT_PROTOCOL_VERSION >= 1): `\x1b]777;notify;warp://cli-agent;{json}\x07`
+ * for session_start (also after a session switch), prompt_submit (user-authored message_start), question_asked,
+ * tool_complete and the run's stop / stop_failure */
+void ui_signals_session_start(void);
+void ui_signals_user_message(const json_t *msg);
 /* the ask tool is waiting for an answer (`ask.notify`) */
 void ui_signals_ask_waiting(void);
 

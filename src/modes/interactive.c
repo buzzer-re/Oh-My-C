@@ -96,6 +96,7 @@ static void ui_apply_event(void *ud) {
     ui_t *u = e->u;
     switch (e->type) {
     case AGENT_EV_MESSAGE_START: /* steered / follow-up / drained user input reaches the transcript */
+        ui_signals_user_message(e->msg);
         iq_user_message_start(u, e->msg);
         break;
     case AGENT_EV_MESSAGE_END:
@@ -133,7 +134,7 @@ static void ui_apply_event(void *ud) {
         toolcard_result(u, v, e->id, e->result, e->type != AGENT_EV_TOOL_END, e->is_error);
         e->result = NULL;
         if (e->type == AGENT_EV_TOOL_END) hmap_del(&u->tools, e->id);
-        if (e->type == AGENT_EV_TOOL_END) ui_signals_tool_end(e->id);
+        if (e->type == AGENT_EV_TOOL_END) ui_signals_tool_end(e->id, e->name);
         if (pres) maybe_plan_approval(u, e->name, pres, e->is_error);
         json_free(pres);
         break;
