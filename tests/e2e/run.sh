@@ -270,6 +270,7 @@ check "fork title"     "🧪 PARK: Fix flaky park tests"  bash -c "env -u OMC_NO
 # omc migrate: a synthetic omp agent dir (SQLite credential/history stores built here, fake secrets)
 OMPD="$T/ompdir"; mkdir -p "$OMPD/skills/demo" "$OMPD/sessions/--x--" "$OMPD/blobs"
 printf 'theme:\n  dark: amethyst\n' > "$OMPD/config.yml"; printf '{"mcpServers":{}}' > "$OMPD/mcp.json"
+printf 'app.retry: alt+r\n' > "$OMPD/keybindings.yml"
 printf -- '---\nname: demo\ndescription: d\n---\nbody\n' > "$OMPD/skills/demo/SKILL.md"; echo '{}' > "$OMPD/sessions/--x--/s.jsonl"; echo junk > "$OMPD/blobs/b"
 python3 -I - "$OMPD" <<'PY'
 import sqlite3, sys, json
@@ -291,6 +292,7 @@ check "migrate dry run"   "credentials: would import 2 (anthropic, openrouter)" 
 check "migrate run"       "prompt history: imported 2 entries"  env OMC_CODING_AGENT_DIR="$MIG" "$B" migrate --from "$OMPD"
 check "migrate config"    "amethyst"   cat "$MIG/config.yml"
 check "migrate skill"     "body"       cat "$MIG/skills/demo/SKILL.md"
+check "migrate keybindings" "app.retry: alt+r"  cat "$MIG/keybindings.yml"
 check "migrate creds"     '"key": "sk-new"'  cat "$MIG/auth.json"
 check "migrate oauth"     '"type": "oauth"'  cat "$MIG/auth.json"
 check "migrate history"   $'"text":"first"'  head -1 "$MIG/prompt-history.jsonl"

@@ -242,6 +242,7 @@ void ui_show_report(ui_t *u, const char *title, tui_component_t *body) {
 
 static void hk_row(sb_t *b, const char *keys, const char *action) { sb_appendf(b, "| %s | %s |\n", keys, action); }
 
+/* formatKeyHints of a key list, in backticks (markdownPart) */
 static char *hk_keys(const char *const *keys, size_t n) {
     sb_t b = SB_INIT;
     sb_putc(&b, '`');
@@ -254,6 +255,13 @@ static char *hk_keys(const char *const *keys, size_t n) {
     return sb_detach(&b);
 }
 
+/* an action's effective keys; `Disabled` when unbound */
+static char *hk_act(const char *action) {
+    const strvec_t *v = tui_keybindings_get(tui_keybindings_global(), action);
+    if (!v || !v->n) return xstrdup("`Disabled`");
+    return hk_keys((const char *const *)v->v, v->n);
+}
+
 #define HK(...)                                                                                                        \
     do {                                                                                                               \
         static const char *const ks_[] = {__VA_ARGS__};                                                                \
@@ -262,9 +270,18 @@ static char *hk_keys(const char *const *keys, size_t n) {
         free(k_);                                                                                                      \
     } while (0)
 
-static char *hotkeys_markdown(void) {
+#define HA(ACTION, TEXT)                                                                                               \
+    do {                                                                                                               \
+        char *k_ = hk_act(ACTION);                                                                                     \
+        hk_row(&b, k_, TEXT);                                                                                          \
+        free(k_);                                                                                                      \
+    } while (0)
+
+/* buildHotkeysMarkdown over the live bindings (hotkeys-markdown.ts) */
+char *ui_hotkeys_markdown(void) {
     sb_t b = SB_INIT;
     const char *act_;
+    tui_keybindings_t *kb = tui_keybindings_global();
     char *up = ui_key_hint("up");
     sb_append(&b, "**Navigation**\n| Key | Action |\n|-----|--------|\n");
     char *nav = xasprintf("Move cursor / browse history (%s when empty)", up);
@@ -296,69 +313,66 @@ static char *hotkeys_markdown(void) {
     HK("ctrl+u");
     act_ = "Delete to end of line";
     HK("ctrl+k");
-    act_ = "Copy current line";
-    HK("alt+shift+l");
-    act_ = "Copy whole prompt";
-    HK("alt+shift+c");
+    HA("app.clipboard.copyLine", "Copy current line");
+    HA("app.clipboard.copyPrompt", "Copy whole prompt");
     sb_append(&b, "\n**Other**\n| Key | Action |\n|-----|--------|\n");
     act_ = "Path completion / accept autocomplete";
     HK("tab");
-    act_ = "Cancel autocomplete / interrupt active work";
-    HK("escape");
-    act_ = "Clear editor (first) / exit (second)";
-    HK("ctrl+c");
-    act_ = "Delete char forward (with draft) / exit (empty prompt)";
-    HK("ctrl+d");
-    act_ = "Suspend to background";
-    HK("ctrl+z");
-    act_ = "Reset terminal display";
-    HK("alt+l");
-    act_ = "Cycle thinking level";
-    HK("shift+tab");
-    act_ = "Cycle role models (slow/default/smol)";
-    HK("ctrl+p");
-    act_ = "Cycle role models (backward)";
-    HK("shift+ctrl+p");
-    act_ = "Select model (temporary)";
-    HK("alt+p");
-    act_ = "Select model (set roles)";
-    HK("alt+m");
-    act_ = "Toggle plan mode";
-    HK("alt+shift+p");
-    act_ = "Search prompt history";
-    HK("ctrl+r");
-    act_ = "Toggle tool output expansion";
-    HK("ctrl+o");
-    act_ = "Toggle tool activity visibility";
-    HK("ctrl+shift+o");
-    act_ = "Pick an extension link on screen by its tag";
-    HK("alt+o");
-    act_ = "Hide/show a pending ask question";
-    HK("alt+h");
-    act_ = "Approve a pending tool call";
-    HK("ctrl+enter", "ctrl+q");
-    act_ = "Toggle thinking block visibility";
-    HK("ctrl+t");
-    act_ = "Edit message in external editor";
-    HK("ctrl+g");
-    act_ = "Open a local:// file in external editor";
-    HK("alt+g");
-    act_ = "Retry last failed assistant turn";
-    HK("f5", "alt+r");
-    act_ = "Paste image or text from clipboard";
-    HK("ctrl+v");
+    HA("app.interrupt", "Cancel autocomplete / interrupt active work");
+    HA("app.clear", "Clear editor (first) / exit (second)");
     {
-        char *k = hk_keys((const char *const[]){"space"}, 1);
-        char *row = xasprintf("Hold %s", k);
-        hk_row(&b, row, "Speech-to-text (push-to-talk): hold to record, release to transcribe");
-        free(row);
+        /* exit keys split by role: one that also forward-deletes (readline ^D) does so with a draft */
+        const strvec_t *ex = tui_keybindings_get(kb, "app.exit");
+        strvec_t del = {0}, quit = {0};
+        for (size_t i = 0; ex && i < ex->n; i++)
+            strvec_push(tui_keybindings_key_bound(kb, ex->v[i], "tui.editor.deleteCharForward") ? &del : &quit, ex->v[i]);
+        if (del.n) {
+            char *k = hk_keys((const char *const *)del.v, del.n);
+            hk_row(&b, k, "Delete char forward (with draft) / exit (empty prompt)");
+            free(k);
+        }
+        if (quit.n || !del.n) {
+            char *k = quit.n ? hk_keys((const char *const *)quit.v, quit.n) : xstrdup("`Disabled`");
+            hk_row(&b, k, "Exit");
+            free(k);
+        }
+        strvec_free(&del);
+        strvec_free(&quit);
+    }
+    HA("app.suspend", "Suspend to background");
+    HA("app.display.reset", "Reset terminal display");
+    HA("app.thinking.cycle", "Cycle thinking level");
+    HA("app.model.cycleForward", "Cycle role models (slow/default/smol)");
+    HA("app.model.cycleBackward", "Cycle role models (backward)");
+    HA("app.model.selectTemporary", "Select model (temporary)");
+    HA("app.model.select", "Select model (set roles)");
+    HA("app.plan.toggle", "Toggle plan mode");
+    HA("app.history.search", "Search prompt history");
+    HA("app.tools.expand", "Toggle tool output expansion");
+    HA("app.tools.toggleVisibility", "Toggle tool activity visibility");
+    HA("app.links.hint", "Pick an extension link on screen by its tag");
+    HA("app.ask.hide", "Hide/show a pending ask question");
+    HA("app.approval.approve", "Approve a pending tool call");
+    HA("app.thinking.toggle", "Toggle thinking block visibility");
+    HA("app.editor.external", "Edit message in external editor");
+    HA("app.local.open", "Open a local:// file in external editor");
+    HA("app.retry", "Retry last failed assistant turn");
+    HA("app.clipboard.pasteImage", "Paste image or text from clipboard");
+    {
+        const strvec_t *ptt = tui_keybindings_get(kb, "app.stt.pushToTalk");
+        char *k = hk_act("app.stt.pushToTalk");
+        if (ptt && ptt->n) {
+            char *row = xasprintf("Hold %s", k);
+            hk_row(&b, row, "Speech-to-text (push-to-talk): hold to record, release to transcribe");
+            free(row);
+        } else {
+            hk_row(&b, k, "Speech-to-text (push-to-talk) (disabled)");
+        }
         free(k);
     }
-    act_ = "Start/stop live voice mode (/live)";
-    HK("ctrl+l");
+    HA("app.live.toggle", "Start/stop live voice mode (/live)");
     {
-        char *a = hk_keys((const char *const[]){"alt+a"}, 1), *s = hk_keys((const char *const[]){"ctrl+s"}, 1),
-             *l = hk_keys((const char *const[]){"left"}, 1);
+        char *a = hk_act("app.agents.hub"), *s = hk_act("app.session.observe"), *l = hk_keys((const char *const[]){"left"}, 1);
         char *row = xasprintf("%s / %s / double-tap %s (empty editor)", a, s, l);
         hk_row(&b, row, "Open the agent hub");
         free(row);
@@ -380,7 +394,7 @@ static char *hotkeys_markdown(void) {
 }
 
 void ui_overlay_hotkeys(ui_t *u) {
-    char *md = hotkeys_markdown();
+    char *md = ui_hotkeys_markdown();
     tui_markdown_t *m = tui_markdown_new(md, 0, 0);
     free(md);
     ui_show_report(u, "Keyboard Shortcuts", &m->base);

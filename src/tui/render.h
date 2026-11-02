@@ -159,8 +159,9 @@ bool tui_alt_screen_active(const tui_t *t);
 void tui_feed_input(tui_t *t, const char *data, size_t n);
 /* Dispatch one decoded key (global hook -> focused component). */
 void tui_dispatch_key(tui_t *t, const tui_key_t *k);
-/* Suspend (ctrl+z): restore terminal, SIGTSTP self, then resume and redraw. */
-void tui_suspend(tui_t *t);
+/* Suspend (ctrl+z): restore the terminal, SIGSTOP the foreground process group, then resume and
+ * redraw. Returns 0, or -errno when the stop signal was refused (the TUI is back either way). */
+int tui_suspend(tui_t *t);
 
 /* Introspection (tests): previous frame lines and the hardware cursor row. */
 const strvec_t *tui_prev_lines(const tui_t *t);

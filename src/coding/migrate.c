@@ -1,7 +1,8 @@
 /* migrate.c - `/migrate` / `omc migrate`: bring an existing omp setup over to omc.
  *
  * omp keeps its configuration in ~/.omp/agent (or $PI_CODING_AGENT_DIR). Everything there that is
- * configuration — config.yml, models.yml, mcp.json, lsp.json, ssh.json, AGENTS.md/RULES.md/SYSTEM.md,
+ * configuration — config.yml, models.yml, keybindings.yml (or a legacy keybindings.json, migrated on the
+ * first omc start), mcp.json, lsp.json, ssh.json, AGENTS.md/RULES.md/SYSTEM.md,
  * skills/, rules/, agents/, commands/, prompts/, themes/, managed-skills/, memories/, sessions/ (omp's
  * JSONL format is omc's) and any other file — is copied as-is into omc's agent dir. omp-internal
  * state is left behind: its SQLite stores (*.db), caches, native modules, logs and runtime dirs.

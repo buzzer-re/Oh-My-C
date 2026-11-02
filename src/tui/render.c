@@ -992,19 +992,15 @@ void tui_shutdown(tui_t *t) {
     t->started = false;
 }
 
-void tui_suspend(tui_t *t) {
-    if (!t->started) return;
+int tui_suspend(tui_t *t) {
+    if (!t->started) return 0;
     move_below_content(t);
     tui_term_stop(t->term);
     tui_term_set_loop_active(false);
-    struct sigaction dfl, old;
-    memset(&dfl, 0, sizeof dfl);
-    dfl.sa_handler = SIG_DFL;
-    sigemptyset(&dfl.sa_mask);
-    sigaction(SIGTSTP, &dfl, &old);
-    raise(SIGTSTP);
-    /* resumed */
-    sigaction(SIGTSTP, &old, NULL);
+    /* SIGSTOP to the whole foreground process group (omp handleCtrlZ): launcher shims and pipeline
+     * peers sharing the group stop too, so the shell sees the job as stopped */
+    int rc = kill(0, SIGSTOP) == 0 ? 0 : -errno;
+    /* resumed (or the signal was refused) */
     tui_term_set_loop_active(true);
     tui_term_start(t->term);
     tui_term_query_size(t->term);
@@ -1014,6 +1010,7 @@ void tui_suspend(tui_t *t) {
     int row = query_cursor_row(t);
     t->start_screen_row = row > 0 ? MIN(row - 1, t->term->rows - 1) : 0;
     tui_request_render(t);
+    return rc;
 }
 
 static void handle_signal(tui_t *t, int sig) {

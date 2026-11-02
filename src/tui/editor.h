@@ -4,9 +4,12 @@
  * Keys (via the global keybindings, tui.editor.* / tui.input.*): arrows, ctrl+b/f,
  * alt+b/f / ctrl+left/right (word), home/end/ctrl+a/e, backspace/delete/ctrl+d,
  * ctrl+w / alt+backspace (delete word back), alt+d (word forward), ctrl+u / ctrl+k,
- * ctrl+y (yank last kill), ctrl+- / ctrl+_ (undo), enter (submit), shift+enter /
- * alt+enter / ctrl+j (newline), tab (autocomplete), up/down (history on the first/last
- * visual line when the buffer is empty or while browsing history), page up/down.
+ * ctrl+y (yank) / alt+y (yank-pop) over an emacs kill ring (consecutive kills accumulate),
+ * ctrl+] / ctrl+alt+] (jump to the next typed character forward / backward), ctrl+- / ctrl+_
+ * (undo), enter (submit), shift+enter / ctrl+j (newline; alt+enter, ctrl+enter and legacy
+ * shift+enter encodings are hard-coded newline fallbacks like upstream), tab (autocomplete),
+ * up/down (history on the first/last visual line when the buffer is empty or while browsing
+ * history), page up/down.
  *
  * Large pastes (> 10 lines or > 1000 chars) are collapsed into "[Paste #N, +L lines]" /
  * "[Paste #N, C chars]" markers that delete atomically and expand on submit.
@@ -85,7 +88,9 @@ struct tui_editor {
     int preferred_col;
     VEC(tui_editor_snapshot_t) undo;
     int last_action;
-    char *kill;
+    strvec_t kills;   /* kill ring (kill-ring.ts), most recent last, at most 60 entries */
+    int kill_state;   /* previous key's kill/yank chaining: 0 none, 1 kill, 2 yank */
+    int jump_mode;    /* character jump awaiting its target: 0 none, 1 forward, -1 backward */
     strvec_t history; /* oldest first */
     int hist_index;   /* -1 = editing draft */
     char *hist_draft;
@@ -144,6 +149,12 @@ bool tui_editor_is_empty(const tui_editor_t *ed);
 void tui_editor_clear(tui_editor_t *ed);
 void tui_editor_undo(tui_editor_t *ed);
 void tui_editor_add_history(tui_editor_t *ed, const char *text);
+/* Push a non-blank draft onto the in-memory up/down history (Editor.rememberDraft). */
+void tui_editor_remember_draft(tui_editor_t *ed);
+/* Submit the buffer as Enter would (history, clear, on_submit). */
+void tui_editor_submit(tui_editor_t *ed);
+/* Owned copy of the line the cursor is on. */
+char *tui_editor_current_line(const tui_editor_t *ed);
 void tui_editor_set_on_submit(tui_editor_t *ed, tui_editor_submit_fn fn, void *ud);
 void tui_editor_set_on_change(tui_editor_t *ed, tui_editor_change_fn fn);
 void tui_editor_set_autocomplete(tui_editor_t *ed, tui_autocomplete_fn fn, void *ud);

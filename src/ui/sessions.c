@@ -446,7 +446,7 @@ static void sess_render(tui_component_t *c, int width, strvec_t *out) {
     char *del = ui_key_hint("delete"), *bs = ui_key_hint("backspace"), *f2 = ui_key_hint("f2");
     const session_info_t *cur = v->vis.n ? &v->all.v[v->vis.v[v->sel]] : NULL;
     bool unpin = cur && is_pinned(v, cur->id);
-    char *pk = ui_key_hint(unpin ? "alt+shift+k" : "alt+k");
+    char *pk = ui_editor_key(unpin ? "app.session.unpin" : "app.session.pin");
     char *hint = xasprintf("[%s/%s delete \xc2\xb7 %s rename \xc2\xb7 %s %s \xc2\xb7 %s select \xc2\xb7 %s %s \xc2\xb7 %s cancel]", del, bs,
                            f2, pk, unpin ? "unpin" : "pin", e, tab, v->all_projects ? "current folder" : "all projects", esc);
     free(del);
@@ -590,9 +590,9 @@ static bool sess_key(tui_component_t *c, const tui_key_t *k) {
         tui_component_request_render(c);
         return true;
     }
-    if (n && (tui_key_matches(k, "alt+k") || tui_key_matches(k, "alt+shift+k"))) {
+    if (n && (tui_kb(k, "app.session.pin") || tui_kb(k, "app.session.unpin"))) {
         const session_info_t *s = &v->all.v[v->vis.v[v->sel]];
-        bool want = tui_key_matches(k, "alt+k");
+        bool want = tui_kb(k, "app.session.pin");
         if (s->id && want != is_pinned(v, s->id)) {
             char *id = xstrdup(s->id);
             pins_load(v);
