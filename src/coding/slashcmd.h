@@ -100,6 +100,10 @@ void slash_ssh_text(const slash_parsed_t *cmd, slash_rt_t *rt, slash_result_t *r
 
 /* parseSubcommand: split "<verb> <rest>" on the first whitespace, verb lowercased (both owned) */
 void slash_subcommand(const char *args, char **verb, char **rest);
+/* `/usage` outside the TUI: provider usage reports (or the session tallies when none reported), and
+ * `/usage reset [target]` (listing / spending a saved reset); owned */
+char *slash_usage_report_text(app_t *a);
+char *slash_usage_reset_text(app_t *a, const char *arg);
 
 /* compact-modes.ts parseCompactArgs: mode NULL/"soft"/"remote"/"snapcompact" (static), instructions owned
  * or NULL; returns false with *err (owned) for a rejected combination */

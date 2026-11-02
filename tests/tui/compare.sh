@@ -26,7 +26,9 @@
 #      CMP_SPLIT=1 gives each app its own work dir ($D/omp/work, $D/omc/work: tools that modify files don't race),
 #      CMP_SEED=<dir> is copied into the work dir(s) before start, CMP_PATH=<dir> is prepended to both apps' PATH
 #      (e.g. tests/e2e/bin-gh for the fake `gh` the github tool needs),
-#      CMP_ENV="VAR=value ..." extra environment for both apps (e.g. a scripted fake EDITOR for Ctrl+G).
+#      CMP_ENV="VAR=value ..." extra environment for both apps (e.g. a scripted fake EDITOR for Ctrl+G),
+#      CMP_PROVIDERS (extra models.yml provider entries for both, e.g. '  anthropic:\n    baseUrl: http://…/v1'),
+#      CMP_AUTH=<file> (an `auth export` document imported into both agent dirs before launch, e.g. mock OAuth logins).
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 D=${CMP_DIR:-${TMPDIR:-/tmp}/omc-tuicmp}
@@ -51,6 +53,7 @@ providers:
 YML
     [ -n "${CMP_IMAGES:-}" ] && printf '        input: [text, image]\n' >> "$1/models.yml"
     [ -n "${CMP_MODELS:-}" ] && printf '%b\n' "$CMP_MODELS" >> "$1/models.yml"
+    [ -n "${CMP_PROVIDERS:-}" ] && printf '%b\n' "$CMP_PROVIDERS" >> "$1/models.yml"
     printf 'modelRoles:\n  default: mock/%s\nstartup:\n  checkUpdate: false\n' "${CMP_MODEL_ID:-mock-1}" > "$1/config.yml"
     [ -n "${CMP_CONFIG:-}" ] && printf '%b\n' "$CMP_CONFIG" >> "$1/config.yml"
     [ -n "${CMP_SETUP:-}" ] || printf 'setupVersion: 2\n' >> "$1/config.yml"; true
@@ -82,6 +85,10 @@ start)
     done
     echo $port > "$PORT_FILE"
     mkagent "$D/omp-agent" $port; mkagent "$D/omc-agent" $port
+    if [ -n "${CMP_AUTH:-}" ]; then
+        (cd "$D" && env HOME=$D/home PI_CODING_AGENT_DIR=$D/omp-agent $OMP auth import "$CMP_AUTH" >/dev/null 2>&1)
+        (cd "$D" && env HOME=$D/home OMC_CODING_AGENT_DIR=$D/omc-agent "$ROOT/build/omc" auth import "$CMP_AUTH" >/dev/null 2>&1)
+    fi
     launch "$cols" "$rows"
     sleep "${CMP_WAIT:-6}"
     if [ -z "${CMP_SETUP:-}" ]; then

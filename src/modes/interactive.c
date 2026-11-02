@@ -41,6 +41,7 @@
 #include "session/dump.h"
 #include "coding/advisor.h"
 #include "ui/signals.h"
+#include "ui/usage.h"
 #include "session/worktree.h"
 #include "tools/outsink.h"
 #include <sys/stat.h>
@@ -2368,14 +2369,7 @@ static bool handle_command_inner(ui_t *u, const char *line) {
     } else if (!strcmp(cmd, "context")) {
         ui_context_command(u);
     } else if (!strcmp(cmd, "usage")) {
-        json_t *st = app_stats(a);
-        char *m = xasprintf("Usage: %lld in · %lld out · %lld cache read · %lld cache write · $%.4f",
-                            (long long)json_get_int(st, "input", 0), (long long)json_get_int(st, "output", 0),
-                            (long long)json_get_int(st, "cacheRead", 0), (long long)json_get_int(st, "cacheWrite", 0),
-                            json_get_num(st, "cost", 0));
-        add_notice(u, "info", m);
-        free(m);
-        json_free(st);
+        ui_usage_command(u, arg);
     } else if (!strcmp(cmd, "skills")) {
         sb_t b = SB_INIT;
         for (size_t i = 0; i < a->disc.skills.n; i++)

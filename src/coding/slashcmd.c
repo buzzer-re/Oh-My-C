@@ -7,6 +7,7 @@
 #include "coding/modelpreset.h"
 #include "coding/prewalk.h"
 #include "config/settings.h"
+#include "config/usage.h"
 #include "mcp/mcp.h"
 #include "core/embed.h"
 #include "session/dump.h"
@@ -47,6 +48,7 @@ static void h_move(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_wt(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_add_dir(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_remove_dir(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_usage(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 
 /* upstream name -> supported subcommands ("*" all, NULL none), TUI handler present, text handler.
  * Subcommands left out are not implemented (their upstream behaviour would be advertised falsely). */
@@ -80,7 +82,7 @@ static const struct {
     {"session", "info delete pin", true, NULL},
     {"jobs", "full kill", true, NULL},
     {"hub", NULL, true, NULL},
-    {"usage", NULL, true, NULL},
+    {"usage", "*", true, h_usage},
     {"hotkeys", NULL, true, NULL},
     {"tools", NULL, true, NULL},
     {"context", NULL, true, NULL},
@@ -708,6 +710,87 @@ static void h_rename(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *re
         free(m);
     }
     free(t);
+}
+
+/* builtin-session.ts usage.handle: helpers/usage-report.ts buildUsageReportText, or the reset listing / spend */
+char *slash_usage_reset_text(app_t *a, const char *arg) {
+    const char *prov = a && a->model ? a->model->provider : NULL;
+    json_t *st = usage_list_reset_credits(prov), *accounts = usage_reset_accounts(st);
+    json_free(st);
+    char *r;
+    char *t = str_trim(arg ? arg : "");
+    if (json_len(accounts) == 0) r = xstrdup("No provider accounts found. Use /login to add one.");
+    else if (!*t) {
+        sb_t b = SB_INIT;
+        sb_append(&b, "Saved rate-limit resets:");
+        json_t *ac;
+        json_arr_foreach(accounts, i, ac) {
+            char *l = usage_reset_account_line(ac);
+            sb_appendf(&b, "\n%s", l);
+            free(l);
+        }
+        sb_append(&b, "\n\nSpend one with `/usage reset <provider>/<credential id>` or `/usage reset <provider>/active`.");
+        r = sb_detach(&b);
+    } else {
+        char *err = NULL;
+        const json_t *acc = usage_resolve_reset_target(accounts, t, "/usage reset", &err);
+        if (!acc) r = err, err = NULL;
+        else {
+            json_t *o = usage_redeem_reset_credit(json_get_obj(acc, "target"));
+            char *m = usage_describe_redeem(o, json_get_str(acc, "label"));
+            r = usage_one_line(m);
+            free(m);
+            json_free(o);
+        }
+        free(err);
+    }
+    free(t);
+    json_free(accounts);
+    return r;
+}
+
+char *slash_usage_report_text(app_t *a) {
+    json_t *reports = usage_fetch_reports(NULL);
+    char *r;
+    if (json_len(reports) > 0) {
+        const char *prov = a && a->model ? a->model->provider : NULL;
+        json_t *id = usage_active_identity(prov);
+        r = usage_report_text(reports, now_ms(), prov, id);
+        json_free(id);
+    } else {
+        json_t *st = app_stats(a);
+        json_t *x = json_obj();
+        int64_t in = json_get_int(st, "input", 0), o = json_get_int(st, "output", 0), cr = json_get_int(st, "cacheRead", 0),
+                cw = json_get_int(st, "cacheWrite", 0);
+        json_set_int(x, "input", in);
+        json_set_int(x, "output", o);
+        json_set_int(x, "cacheRead", cr);
+        json_set_int(x, "cacheWrite", cw);
+        json_set_int(x, "totalTokens", in + o + cr + cw);
+        json_set_int(x, "premiumRequests", json_get_int(st, "premiumRequests", 0));
+        json_set_num(x, "cost", json_get_num(st, "cost", 0));
+        r = usage_session_text(x);
+        json_free(x);
+        json_free(st);
+    }
+    json_free(reports);
+    return r;
+}
+
+static void h_usage(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    char *verb, *rest;
+    slash_subcommand(c->args, &verb, &rest);
+    if (!*verb || (!strcmp(verb, "show") && !*rest)) {
+        char *m = slash_usage_report_text(rt->app);
+        out(rt, m);
+        free(m);
+    } else if (!strcmp(verb, "reset")) {
+        char *m = slash_usage_reset_text(rt->app, rest);
+        out(rt, m);
+        free(m);
+    } else usage(rt, res, "Usage: /usage [show|reset [provider/credential-id|provider/active]]");
+    free(verb);
+    free(rest);
 }
 
 static void h_dirs(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
