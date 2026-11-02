@@ -57,8 +57,10 @@ for name in ("model", "effort", "advisor", "compact", "shake", "handoff", "retry
 for name in ("settings", "quit", "help", "thinking"):
     if name in cmds:
         fail("advertised TUI-only/unknown command " + name)
-if any(c.get("source") != "builtin" for c in cmds.values()):
-    fail("non-builtin command advertised")
+if any(c.get("source") not in ("builtin", "skill", "file", "mcp_prompt") for c in cmds.values()):
+    fail("unknown command source advertised")
+if cmds.get("init", {}).get("source") != "file":  # the bundled /init file command
+    fail("bundled /init not advertised")
 if cmds["model"].get("aliases") != ["models"]:
     fail("model aliases")
 if cmds["compact"]["input"]["hint"] != "[soft] [focus]":

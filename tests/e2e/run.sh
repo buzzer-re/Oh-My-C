@@ -314,6 +314,15 @@ check "acp reject"     "tool_call_update failed The user rejected"  python3 -I "
 check "acp commands"   "available_commands_update"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo cmds"
 check "acp slash"      "agent_message_chunk Workspace directories:"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/dirs"
 check "rpc slash"      "ok unknown slash goes to the model"  python3 -I "$ROOT/tests/e2e/slash_rpc.py" "$B"
+# custom commands (WP-9): file commands, prompt templates, /skill:, MCP prompts over RPC, ACP and print mode
+check "rpc commands"   "ok empty MCP prompt consumed"  python3 -I "$ROOT/tests/e2e/commands_rpc.py" "$B" "$T/req.jsonl" "$ROOT/tests/e2e/mock_mcp.py"
+check "acp file cmd"   "stop end_turn"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/init"
+grep -q "synthesize findings into one AGENTS.md" "$T/req.jsonl" && echo "   ok  acp /init expanded" || { echo "   FAIL acp /init expanded"; fail=1; }
+mkdir -p .omc/commands
+printf -- '---\ndescription: Print cmd\n---\nPrinted $1 and $2\n' > .omc/commands/pc.md
+check "print file cmd" "plain answer"  "$B" -m mock/mock-1 -p "/pc one two"
+grep -q "Printed one and two" "$T/req.jsonl" && echo "   ok  print /pc expanded" || { echo "   FAIL print /pc expanded"; fail=1; }
+rm -rf .omc/commands
 # Amazon Bedrock ConverseStream against a mock that verifies SigV4 independently and speaks event-stream
 BPORT=$((PORT + 1))
 MOCK_LOG="$T/bedrock.jsonl" MOCK_BEDROCK_BEARER=br-token python3 -I "$ROOT/tests/e2e/mock_bedrock.py" $BPORT & BPID=$!

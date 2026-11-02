@@ -1927,6 +1927,20 @@ void ix_history_add(ui_t *u, const char *text) {
  * submission. `exit`/`quit`/`q` (any case) quit in an empty session (input.bareExitOnEmptySession);
  * with input.bareSlashCommands any command name or alias runs, and once the session has messages a
  * first Enter only arms it (*confirm). Returns the "/word" to run (owned) or NULL. */
+/* #isKnownNonBuiltinSlashCommandToken: a skill, file, MCP prompt or prompt-template command name */
+static bool known_command_token(ui_t *u, const char *tok) {
+    app_t *a = u->app;
+    if (str_starts(tok, "skill:") && settings_bool("skills.enableSkillCommands", true) && discovery_find_skill(&a->disc, tok + 6))
+        return true;
+    if (commands_find(&a->file_cmds, tok)) return true;
+    for (size_t i = 0; i < a->prompt_tpls.n; i++)
+        if (!strcmp(a->prompt_tpls.v[i].name, tok)) return true;
+    char *slash = xasprintf("/%s", tok);
+    bool mcp = app_is_mcp_prompt_command(a, slash);
+    free(slash);
+    return mcp;
+}
+
 static char *bare_slash_command(ui_t *u, const char *raw, const char *armed, bool *confirm) {
     *confirm = false;
     if (!raw || !*raw || raw[0] == '/' || json_len(u->att_images)) return NULL;
@@ -1940,7 +1954,9 @@ static char *bare_slash_command(ui_t *u, const char *raw, const char *armed, boo
         settings_bool("input.bareExitOnEmptySession", true)) {
         out = xasprintf("/%s", folded);
     } else if (settings_bool("input.bareSlashCommands", false)) {
-        const char *tok = slash_lookup(raw) ? raw : slash_lookup(folded) ? folded : NULL;
+        const char *tok = slash_lookup(raw) || known_command_token(u, raw) ? raw
+                          : slash_lookup(folded) || known_command_token(u, folded) ? folded
+                                                                                   : NULL;
         if (tok) {
             out = xasprintf("/%s", tok);
             *confirm = !empty && !str_eq(armed, raw);
