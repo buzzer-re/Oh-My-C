@@ -1802,7 +1802,8 @@ bool agents_prompt(const char *id, const char *text, char **err) {
     r->running = true; /* claimed before the job thread starts */
     char *rid = xstrdup(r->id);
     pthread_mutex_unlock(&g_mu);
-    char *jid = jobs_start(spawner->env->jobs, "task", rid, rid, rid, false, chat_body, c, chat_free);
+    /* the user's own turn on the agent: no background job of its parent (hidden, never delivered) */
+    char *jid = jobs_start(spawner->env->jobs, "task", rid, rid, rid, true, chat_body, c, chat_free);
     jobs_set_quiet(spawner->env->jobs, jid);
     free(jid);
     free(rid);

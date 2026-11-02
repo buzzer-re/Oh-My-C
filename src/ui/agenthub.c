@@ -870,7 +870,10 @@ static void viewer_render(tui_component_t *c, int width, strvec_t *out) {
         strvec_push_own(&body, xasprintf(" %s", ph));
         free(ph);
     } else {
+        bool main_expand = v->u->expand_tools; /* the viewer's own Ctrl+O state drives its cards */
+        v->u->expand_tools = v->expanded;
         tui_component_render(&v->body->base, content_w, &body);
+        v->u->expand_tools = main_expand;
     }
     int height = tui_term(v->u->tui)->rows > 0 ? tui_term(v->u->tui)->rows : 40;
     int chrome = (int)header.n + (int)footer.n + (frame_w > 0 ? 3 : 0);
@@ -940,6 +943,7 @@ static bool viewer_key(tui_component_t *c, const tui_key_t *k) {
     }
     if (tui_kb(k, "app.tools.expand")) {
         v->expanded = !v->expanded;
+        for (size_t i = 0; i < tui_container_count(v->body); i++) tui_component_invalidate(v->body->children.v[i]);
         tui_request_render(v->u->tui);
         return true;
     }
