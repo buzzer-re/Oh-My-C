@@ -1330,13 +1330,17 @@ json_t *oair_stream_finish(oair_stream_t *s, int rc, const char *terr) {
 /* entry point                                                             */
 /* ====================================================================== */
 
-json_t *provider_openai_responses_stream(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o,
-                                         ai_event_cb cb, void *ud) {
-    ai_stream_opts_t def;
-    if (!o) {
-        ai_stream_opts_init(&def);
-        o = &def;
-    }
+typedef struct {
+    const ai_model_t *m;
+    const ai_context_t *ctx;
+    const ai_stream_opts_t *o;
+} oair_attempt_t;
+
+static json_t *oair_stream_once(void *self, ai_event_cb cb, void *ud) {
+    oair_attempt_t *at = self;
+    const ai_model_t *m = at->m;
+    const ai_context_t *ctx = at->ctx;
+    const ai_stream_opts_t *o = at->o;
     json_t *body = oair_build_request(m, ctx, o);
     if (o->on_payload) o->on_payload(o->payload_ud, body);
     http_headers_t h = {0};
@@ -1358,6 +1362,23 @@ json_t *provider_openai_responses_stream(const ai_model_t *m, const ai_context_t
     http_headers_free(&h);
     json_free(body);
     return msg;
+}
+
+/* streamOpenAIResponses / streamAzureOpenAIResponses / the Codex SSE transport: 6 transport attempts
+ * (postOpenAIStream, or Codex's 500 ms*(n+1) within a 5 min budget); Responses retries benign empty completions,
+ * Azure one replay-safe provider error */
+json_t *provider_openai_responses_stream(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o,
+                                         ai_event_cb cb, void *ud) {
+    ai_stream_opts_t lo;
+    if (o) lo = *o;
+    else ai_stream_opts_init(&lo);
+    int v = variant_of(m);
+    lo.retry_policy = v == V_CODEX ? AI_RETRY_CODEX : AI_RETRY_OPENAI;
+    lo.max_retries = 5;
+    if (v == V_CODEX) lo.max_retry_delay_ms = 5 * 60 * 1000; /* CODEX_RATE_LIMIT_BUDGET_MS */
+    oair_attempt_t at = {m, ctx, &lo};
+    if (v == V_CODEX) return oair_stream_once(&at, cb, ud);
+    return ai_replay_safe_stream(oair_stream_once, &at, &lo, cb, ud, v == V_OPENAI, v == V_AZURE ? 1 : 0);
 }
 
 /* ====================================================================== */

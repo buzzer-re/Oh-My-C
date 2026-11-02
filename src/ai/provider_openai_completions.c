@@ -1465,13 +1465,17 @@ json_t *oaic_stream_finish(oaic_stream_t *s, int rc, const char *terr) {
 /* entry point                                                             */
 /* ====================================================================== */
 
-json_t *provider_openai_completions_stream(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o,
-                                           ai_event_cb cb, void *ud) {
-    ai_stream_opts_t def;
-    if (!o) {
-        ai_stream_opts_init(&def);
-        o = &def;
-    }
+typedef struct {
+    const ai_model_t *m;
+    const ai_context_t *ctx;
+    const ai_stream_opts_t *o;
+} oaic_attempt_t;
+
+static json_t *oaic_stream_once(void *self, ai_event_cb cb, void *ud) {
+    oaic_attempt_t *at = self;
+    const ai_model_t *m = at->m;
+    const ai_context_t *ctx = at->ctx;
+    const ai_stream_opts_t *o = at->o;
     char *key = oai_bearer_key(m, o);
     json_t *body = oaic_build_request(m, ctx, o);
     if (o->on_payload) o->on_payload(o->payload_ud, body);
@@ -1515,4 +1519,17 @@ json_t *provider_openai_completions_stream(const ai_model_t *m, const ai_context
     json_free(body);
     free(key);
     return msg;
+}
+
+/* streamOpenAICompletions: postOpenAIStream's 6 transport attempts (or maxHttpAttempts), retried once more after a
+ * replay-safe provider error unless maxHttpAttempts is set, and up to twice after a benign empty completion */
+json_t *provider_openai_completions_stream(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o,
+                                           ai_event_cb cb, void *ud) {
+    ai_stream_opts_t lo;
+    if (o) lo = *o;
+    else ai_stream_opts_init(&lo);
+    lo.retry_policy = AI_RETRY_OPENAI;
+    lo.max_retries = (lo.max_http_attempts > 0 ? lo.max_http_attempts : 6) - 1;
+    oaic_attempt_t at = {m, ctx, &lo};
+    return ai_replay_safe_stream(oaic_stream_once, &at, &lo, cb, ud, true, lo.max_http_attempts > 0 ? 0 : 1);
 }

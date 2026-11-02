@@ -2318,7 +2318,7 @@ static int64_t anth_on_failure(void *ud, int status, const char *body, http_head
     return d;
 }
 
-json_t *provider_anthropic_stream_ex(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, int is_oauth,
+static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, int is_oauth,
                                      ai_event_cb cb, void *ud) {
     ai_stream_opts_t defo;
     if (!o) {
@@ -2341,6 +2341,9 @@ json_t *provider_anthropic_stream_ex(const ai_model_t *m, const ai_context_t *ct
     bool oauth = is_oauth >= 0 ? is_oauth != 0 : anthropic_is_oauth_token(key);
     json_t *result = NULL;
     ai_stream_opts_t lo = *o; /* lo.fast_mode_disabled is pinned once this request drops fast mode */
+    /* the provider loop owns transport retries (PROVIDER_MAX_RETRIES, calculateAnthropicRetryDelayMs) */
+    lo.retry_policy = AI_RETRY_ANTHROPIC;
+    lo.max_retries = 10;
     /* subscription slow mode: first-party OAuth requests to the official endpoint only */
     char *base_url = resolve_base_url(m);
     anth_hook_t hk = {.m = m, .o = &lo, .wait_since = -1};
@@ -2391,4 +2394,28 @@ json_t *provider_anthropic_stream_ex(const ai_model_t *m, const ai_context_t *ct
     free(hk.lane);
     free(env_key);
     return result;
+}
+
+typedef struct {
+    const ai_model_t *m;
+    const ai_context_t *ctx;
+    const ai_stream_opts_t *o;
+    int is_oauth;
+} anthropic_attempt_t;
+
+static json_t *anthropic_attempt(void *self, ai_event_cb cb, void *ud) {
+    anthropic_attempt_t *at = self;
+    return anthropic_stream_once(at->m, at->ctx, at->o, at->is_oauth, cb, ud);
+}
+
+/* streamAnthropic: benign empty completions are retried (twice) before they reach the agent loop */
+json_t *provider_anthropic_stream_ex(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, int is_oauth,
+                                     ai_event_cb cb, void *ud) {
+    ai_stream_opts_t defo;
+    if (!o) {
+        ai_stream_opts_init(&defo);
+        o = &defo;
+    }
+    anthropic_attempt_t at = {m, ctx, o, is_oauth};
+    return ai_replay_safe_stream(anthropic_attempt, &at, o, cb, ud, true, 0);
 }

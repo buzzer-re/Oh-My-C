@@ -399,6 +399,9 @@ static void fill_request_opts(app_t *a, ai_stream_opts_t *o) {
     o->slow_hooks = &a->slow_hooks;
     o->first_event_timeout_ms = timeout_seconds_ms(settings_num("providers.streamFirstEventTimeoutSeconds", -1));
     o->idle_timeout_ms = timeout_seconds_ms(settings_num("providers.streamIdleTimeoutSeconds", -1));
+    /* settings-stream-fn.ts maxRetryDelayMs: retry.maxDelayMs caps a provider's server-directed transport wait */
+    int64_t max_delay = settings_int("retry.maxDelayMs", 5 * 60 * 1000);
+    o->max_retry_delay_ms = max_delay > 0 ? max_delay : -1;
     const json_t *lim = settings_get("providers.maxInFlightRequests"); /* read once when the request starts */
     o->max_in_flight = json_is_obj(lim) ? lim : NULL;
 }
@@ -793,7 +796,7 @@ static bool is_abort_error(const char *err) {
 /* retry-after hints in the error text ("retry after 12s", "retry-after: 30", "try again in 2m"): ms or -1 */
 static int64_t retry_after_ms(const char *err) {
     if (!err) return -1;
-    static const char *const keys[] = {"retry-after-ms:", "retry after ", "retry-after: ", "retry-after:", "try again in ",
+    static const char *const keys[] = {"retry-after-ms:", "retry-after-ms=", "retry after ", "retry-after: ", "retry-after:", "try again in ",
                                        "retry in ", "reset after ", "resets in "};
     for (size_t k = 0; k < ARRAY_LEN(keys); k++) {
         const char *p = str_istr(err, keys[k]);
@@ -804,7 +807,7 @@ static int64_t retry_after_ms(const char *err) {
         if (end == p || v < 0) continue;
         while (*end == ' ') end++;
         double ms = v * 1000;
-        if (k == 0 || !strncasecmp(end, "ms", 2)) ms = v;
+        if (k <= 1 || !strncasecmp(end, "ms", 2)) ms = v;
         else if (!strncasecmp(end, "m", 1) && strncasecmp(end, "ms", 2)) ms = v * 60000;
         else if (!strncasecmp(end, "h", 1)) ms = v * 3600000;
         return (int64_t)ms;

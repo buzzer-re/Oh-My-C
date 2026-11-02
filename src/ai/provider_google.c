@@ -916,6 +916,9 @@ json_t *provider_google_stream(const ai_model_t *m, const ai_context_t *ctx, con
         http_headers_free(&h);
         return msg;
     }
+    ai_stream_opts_t go = *o; /* google-shared.ts fetches once: no transport retries */
+    go.max_retries = 0;
+    o = &go;
     json_t *params = google_build_request(m, ctx, o);
     if (o->on_payload) o->on_payload(o->payload_ud, params);
     char *body = json_dump(params, 0);

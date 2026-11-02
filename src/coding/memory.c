@@ -1298,6 +1298,8 @@ static char *mem_complete(const ai_model_t *m, const char *system, const char *u
     o.reasoning = model_clamp_effort(m, effort);
     o.session_id = session_id;
     o.cancel = cancel;
+    /* chat-completions owns its transient retries in the HTTP transport (memories/index.ts maxHttpAttempts) */
+    if (str_eq(m->api, "openai-completions")) o.max_http_attempts = 3;
     json_t *r = ai_complete(m, &ctx, &o);
     char *text = NULL;
     const char *stop = json_get_str(r, "stopReason");

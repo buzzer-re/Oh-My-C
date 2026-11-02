@@ -184,8 +184,11 @@ typedef struct {
     json_t *thinking_budgets;    /* {minimal:..,low:..} (borrowed) */
     json_t *metadata;            /* (borrowed) */
     json_t *stop_sequences;      /* array (borrowed) */
-    int64_t max_retry_delay_ms;  /* 0 => 60000 */
-    int max_retries;             /* transient retries inside provider (default 3) */
+    int64_t max_retry_delay_ms;  /* omp maxRetryDelayMs (retry.maxDelayMs): 0 => 60000, < 0 => no cap */
+    int max_retries;             /* transport retries (set per provider from its AI_RETRY_* policy) */
+    int retry_policy;            /* AI_RETRY_* transport policy (set by the provider) */
+    int max_http_attempts;       /* omp maxHttpAttempts (openai-completions): total transport attempts, 0 = default */
+    bool accept_empty_response;  /* omp acceptEmptyResponse: no empty-completion retry */
     volatile sig_atomic_t *cancel;
     /* debug: called with the request JSON before sending (may be NULL) */
     void (*on_payload)(void *ud, const json_t *payload);
@@ -315,7 +318,34 @@ json_t *ai_usage_new(void);
 void ai_usage_compute_cost(const ai_model_t *m, json_t *usage);
 json_t *ai_error_message(const ai_model_t *m, const char *stop_reason, const char *err); /* owned */
 
-/* Streaming POST with SSE parsing + retry on transient errors (429/5xx/overloaded/network).
+/* ---------- transport retries (pi-utils fetch-retry.ts, anthropic-client.ts, empty-completion-retry.ts) ----------
+ * ai_sse_post / ai_stream_post retry a request that failed before any response data arrived, following
+ * opts->retry_policy with opts->max_retries retries:
+ *   AI_RETRY_FETCH       fetchWithRetry: network errors and 408/429/5xx, 500 ms·2^n (bedrock; 4 retries)
+ *   AI_RETRY_OPENAI      fetchWithRetry + LiteLLM concurrency-admission 429s fail at once (postOpenAIStream; 5)
+ *   AI_RETRY_OLLAMA      fetchWithRetry with 2 s / 5 s / 10 s, llama.cpp tool-call parse 500s fail at once (4)
+ *   AI_RETRY_CODEX       fetchWithRetry with 500 ms·(n+1) (5)
+ *   AI_RETRY_GEMINI_CLI  fetchWithRetry with 1 s·2^n
+ *   AI_RETRY_ANTHROPIC   the anthropic.ts provider loop: provider-retryable errors, min(0.5 s·2^n, 8 s) with up
+ *                        to 25% jitter, a header retry-after wins when longer (10)
+ * fetchWithRetry delays use the server hint (headers, then body text) when present; a hint above the cap
+ * (opts->max_retry_delay_ms for anthropic / gemini-cli, else 60 s) fails at once. A final HTTP error whose
+ * headers carry retry timing gets omp's " retry-after-ms=N" suffix. */
+enum { AI_RETRY_FETCH, AI_RETRY_OPENAI, AI_RETRY_OLLAMA, AI_RETRY_CODEX, AI_RETRY_GEMINI_CLI, AI_RETRY_ANTHROPIC };
+/* extractRetryHint: server-suggested delay from headers (may be NULL) and/or an error body (may be NULL); -1 none */
+int64_t ai_extract_retry_hint(const http_headers_t *h, const char *body);
+/* getRetryAfterMsFromHeaders: the longest of retry-after-ms / retry-after / x-ratelimit-reset(-ms); -1 none */
+int64_t ai_retry_after_from_headers(const http_headers_t *h);
+/* isProviderRetryableError over a finished error message (+ HTTP status, 0 = unknown) */
+bool ai_provider_retryable_error(const char *message, int status);
+/* withReplaySafeStreamRetry: runs `once` again while no meaningful output was emitted, after a benign empty
+ * completion (retry_empty, 2 retries at 500 ms·2^n) or a provider-retryable error (max_error_retries at
+ * 500 ms·2^n). Pre-output events of a discarded attempt never reach cb. */
+typedef json_t *(*ai_attempt_fn)(void *self, ai_event_cb cb, void *ud); /* one provider attempt */
+json_t *ai_replay_safe_stream(ai_attempt_fn once, void *self, const ai_stream_opts_t *o, ai_event_cb cb, void *ud,
+                              bool retry_empty, int max_error_retries);
+
+/* Streaming POST with SSE parsing + retry on transient errors (see the transport retry policies above).
  * on_event returns non-zero to abort. Returns 0 on success (2xx stream consumed);
  * otherwise sets *err (owned) and *status. */
 typedef int (*ai_sse_cb)(void *ud, const char *event, const char *data, size_t len);

@@ -158,11 +158,31 @@ out=$(timeout 60 "$B" --model mock/mock-flaky -p "bash:echo fb-ok" </dev/null 2>
 [[ "$out" == *"Tool said: fb-ok"* && "$out" == *"[warning] Fallback: mock/mock-flaky -> mock/mock-2"* ]] && echo "   ok  retry fallback" || { echo "   FAIL retry fallback: $out"; fail=1; }
 tail -1 "$T/req.jsonl" | grep -q '"model": "mock-2"' && echo "   ok  fallback model used" || { echo "   FAIL fallback model used"; fail=1; }
 # a plain 503 retries after the exponential base (retry.baseDelayMs), not the 45-75 s capacity window
-# (the transport's own 1 s / 2 s / 4 s retries of each request come on top: ~14 s; the bug added ~1 min)
+# (the transport's own retries of each request come on top; the mock's retry-after-ms: 0 makes them immediate)
 printf 'retry:\n  maxRetries: 1\n  baseDelayMs: 10\n' > "$T/agent/config.yml"
 s0=$(date +%s%N); out=$(timeout 40 "$B" --model mock/mock-1 --no-session -p "fail:503:try again later" </dev/null 2>&1); s1=$(date +%s%N)
 (( (s1 - s0) / 1000000 < 30000 )) && [[ "$out" == *"[warning] Retrying (1/1) in 1s: 503 try again later"* ]] && echo "   ok  503 retry backoff" || { echo "   FAIL 503 retry backoff ($(( (s1 - s0) / 1000000 )) ms): $out"; fail=1; }
+# transport retries like omp (postOpenAIStream + withReplaySafeStreamRetry): 6 attempts, then one replay-safe
+# provider retry after 500 ms = 12 requests per turn attempt; a 400 is sent once
+printf 'retry:\n  enabled: false\n' > "$T/agent/config.yml"
+s0=$(date +%s%N); out=$(timeout 30 "$B" --model mock/mock-1 --no-session -p "fail:503:transport-probe" </dev/null 2>&1); s1=$(date +%s%N)
+n=$(grep -c "fail:503:transport-probe" "$T/req.jsonl")
+(( n == 12 && (s1 - s0) / 1000000 >= 450 )) && [[ "$out" == *"503 transport-probe"* ]] && echo "   ok  transport retries (12 requests)" || { echo "   FAIL transport retries: $n requests in $(( (s1 - s0) / 1000000 )) ms: $out"; fail=1; }
+timeout 30 "$B" --model mock/mock-1 --no-session -p "fail:400:transport-once" </dev/null >/dev/null 2>&1
+n=$(grep -c "fail:400:transport-once" "$T/req.jsonl")
+(( n == 1 )) && echo "   ok  400 not retried" || { echo "   FAIL 400 not retried: $n requests"; fail=1; }
 rm -f "$T/agent/config.yml"
+# without a header hint the delay comes from the body text ("Please retry in 100ms"): 5 x 100 ms + 500 ms + 5 x 100 ms
+TR_PORT=$((20000 + RANDOM % 20000)); [[ $TR_PORT == "$PORT" ]] && TR_PORT=$((TR_PORT + 1))
+mkdir -p "$T/agent-tr"
+sed "s#127.0.0.1:$PORT/#127.0.0.1:$TR_PORT/#" "$T/agent/models.yml" > "$T/agent-tr/models.yml"
+printf 'retry:\n  enabled: false\n' > "$T/agent-tr/config.yml"
+MOCK_FAIL_RETRY_AFTER_MS=none MOCK_LOG="$T/req-tr.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $TR_PORT & TR_MPID=$!
+for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$TR_PORT) 2>/dev/null && break; sleep 0.1; done
+s0=$(date +%s%N); out=$(OMC_CODING_AGENT_DIR="$T/agent-tr" timeout 30 "$B" --model mock/mock-1 --no-session -p "fail:503:Please retry in 100ms" </dev/null 2>&1); s1=$(date +%s%N)
+n=$(grep -c "Please retry in 100ms" "$T/req-tr.jsonl"); ms=$(( (s1 - s0) / 1000000 ))
+(( n == 12 && ms >= 1400 && ms < 8000 )) && echo "   ok  transport retry hint from the body" || { echo "   FAIL transport retry hint: $n requests in $ms ms: $out"; fail=1; }
+kill $TR_MPID 2>/dev/null; wait $TR_MPID 2>/dev/null
 grep -q "Project rule: always test." "$T/req.jsonl" && echo "   ok  AGENTS.md in prompt" || { echo "   FAIL AGENTS.md in prompt"; fail=1; }
 # TTSR: a stream-triggered rule interrupts, injects and retries
 mkdir -p .omc/rules

@@ -19,6 +19,9 @@ Eval helper side requests (omc eval completion()/judge()):
     first option), yes/no = YES when the state contains "yes", score = first digit in the state (else 0); a state
     containing SLOWJUDGE answers after 1.5 s, FAILJUDGE answers gibberish (unparseable even on retries)
 $MOCK_DELAY (seconds, default 0) is slept between streamed chunks.
+$MOCK_FAIL_RETRY_AFTER_MS (default "0"): `retry-after-ms` header on retryable "fail:" replies (408/429/5xx) so the
+  transport's own retries (6 x 500 ms*2^n per attempt, like omp) don't slow the suite; "none" omits it (real backoff).
+  A header of 0 is a retry-now hint: it never reaches the error message (omp's retry-after-ms= suffix needs > 0).
 Memory pipeline side requests (memory.backend=local startup):
   - stage-1 extraction (system "Memory-stage-one extractor") -> strict JSON {rollout_summary, rollout_slug, raw_memory}
   - stage-2 consolidation (system "memory-stage-two consolidator") -> {memory_md, memory_summary, skills:[mock-skill]}
@@ -32,6 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG = os.environ.get("MOCK_LOG")
 DELAY = float(os.environ.get("MOCK_DELAY") or 0)
+FAIL_RETRY_AFTER = os.environ.get("MOCK_FAIL_RETRY_AFTER_MS", "0")
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tui", "fixtures")
 
 def sse(handler, obj):
@@ -99,7 +103,10 @@ class H(BaseHTTPRequestHandler):
         if lu.startswith("fail:"):
             st, _, m = lu[5:].partition(":")
             b = json.dumps({"error": {"message": m or "mock failure", "type": "invalid_request_error", "code": int(st or 400)}}).encode()
-            self.send_response(int(st or 400))
+            code = int(st or 400)
+            self.send_response(code)
+            if (code >= 500 or code in (408, 429)) and FAIL_RETRY_AFTER != "none":
+                self.send_header("retry-after-ms", FAIL_RETRY_AFTER)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(b)))
             self.end_headers()

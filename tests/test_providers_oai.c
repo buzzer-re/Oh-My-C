@@ -780,7 +780,121 @@ static void test_strict_schema(void) {
     sb_free(&deep);
 }
 
+/* ---------- transport retry helpers (fetch-retry.ts, retry-after.ts, retryable.ts) ---------- */
+
+static void test_retry_hints(void) {
+    http_headers_t h = {0};
+    CHECK(ai_extract_retry_hint(NULL, NULL) == -1);
+    http_headers_set(&h, "retry-after-ms", "0");
+    CHECK(ai_extract_retry_hint(&h, NULL) == 0); /* retry now */
+    CHECK(ai_retry_after_from_headers(&h) == -1); /* no " retry-after-ms=" suffix for a non-positive hint */
+    http_headers_set(&h, "retry-after-ms", "1500");
+    CHECK(ai_extract_retry_hint(&h, NULL) == 1500);
+    CHECK(ai_retry_after_from_headers(&h) == 1500);
+    http_headers_free(&h);
+    http_headers_set(&h, "retry-after", "2");
+    http_headers_set(&h, "x-ratelimit-reset-ms", "7000");
+    CHECK(ai_extract_retry_hint(&h, NULL) == 2000);       /* first header source wins */
+    CHECK(ai_retry_after_from_headers(&h) == 7000);       /* longest header timing */
+    http_headers_free(&h);
+    CHECK(ai_extract_retry_hint(NULL, "Please retry in 250ms") == 250);
+    CHECK(ai_extract_retry_hint(NULL, "{\"retryDelay\": \"34.5s\"}") == 34500);
+    CHECK(ai_extract_retry_hint(NULL, "Rate limited, try again in ~5 min.") == 300000);
+    CHECK(ai_extract_retry_hint(NULL, "Your quota will reset after 1h2m3s") == 3723000);
+    CHECK(ai_extract_retry_hint(NULL, "Resets in 2hr 15min") == 8100000);
+    CHECK(ai_extract_retry_hint(NULL, "limit will reset in 3 days") == 3 * 86400000LL);
+    CHECK(ai_extract_retry_hint(NULL, "429 slow down retry-after-ms=98497") == 98497);
+    CHECK(ai_extract_retry_hint(NULL, "try again in 2s, or reset after 10s") == 10000); /* longest wins */
+    CHECK(ai_extract_retry_hint(NULL, "retry-after: 0") == 0);
+    CHECK(ai_extract_retry_hint(NULL, "try again later") == -1);
+    /* isProviderRetryableError */
+    CHECK(ai_provider_retryable_error("503 try again later", 0));
+    CHECK(ai_provider_retryable_error("429 Rate limit exceeded for mock-flaky", 0));
+    CHECK(ai_provider_retryable_error("connection closed before response", 0));
+    CHECK(!ai_provider_retryable_error("400 bad things", 0));
+    CHECK(!ai_provider_retryable_error("401 invalid api key", 0));
+    CHECK(!ai_provider_retryable_error("429 You exceeded your current quota: insufficient_quota", 0));
+    CHECK(!ai_provider_retryable_error("content_filter blocked", 0));
+}
+
+typedef struct {
+    const ai_model_t *m;
+    int calls;
+    const char *const *script; /* per attempt: NULL = empty stop, "!<msg>" = error, else text */
+} fake_attempt_t;
+
+static json_t *fake_attempt(void *self, ai_event_cb cb, void *ud) {
+    fake_attempt_t *f = self;
+    const char *step = f->script[f->calls++];
+    ai_builder_t b;
+    aib_init(&b, f->m, cb, ud);
+    aib_start(&b);
+    json_t *msg;
+    if (step && step[0] == '!') msg = aib_finish(&b, "error", step + 1);
+    else {
+        if (step) aib_text_delta(&b, step, strlen(step));
+        msg = aib_finish(&b, "stop", NULL);
+    }
+    aib_free(&b);
+    return msg;
+}
+
+static void test_replay_safe(void) {
+    tmodel_t t;
+    model_init(&t, "{\"id\":\"m1\",\"api\":\"openai-completions\",\"provider\":\"test\",\"compat\":{}}");
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    /* a retryable provider error before any output is replayed once; the consumer sees one clean attempt */
+    const char *s1[] = {"!503 try again later", "hello"};
+    fake_attempt_t f = {&t.m, 0, s1};
+    evlog_t l = {0};
+    int64_t t0 = mono_ms();
+    json_t *msg = ai_replay_safe_stream(fake_attempt, &f, &o, on_ev, &l, true, 1);
+    CHECK(f.calls == 2 && mono_ms() - t0 >= 450);
+    CHECK_STR(json_get_str(msg, "stopReason"), "stop");
+    CHECK(l.counts[AI_EV_START] == 1 && l.counts[AI_EV_ERROR] == 0 && l.counts[AI_EV_DONE] == 1);
+    CHECK_STR(sb_cstr(&l.text), "hello");
+    json_free(msg);
+    evlog_free(&l);
+    /* the budget is one retry: a second failure surfaces */
+    const char *s2[] = {"!503 a", "!503 b"};
+    f = (fake_attempt_t){&t.m, 0, s2};
+    memset(&l, 0, sizeof l);
+    msg = ai_replay_safe_stream(fake_attempt, &f, &o, on_ev, &l, true, 1);
+    CHECK(f.calls == 2 && l.counts[AI_EV_START] == 1 && l.counts[AI_EV_ERROR] == 1);
+    CHECK_STR(json_get_str(msg, "errorMessage"), "503 b");
+    json_free(msg);
+    evlog_free(&l);
+    /* terminal 4xx errors are never replayed */
+    const char *s3[] = {"!400 bad request"};
+    f = (fake_attempt_t){&t.m, 0, s3};
+    memset(&l, 0, sizeof l);
+    msg = ai_replay_safe_stream(fake_attempt, &f, &o, on_ev, &l, true, 1);
+    CHECK(f.calls == 1 && l.counts[AI_EV_ERROR] == 1);
+    json_free(msg);
+    evlog_free(&l);
+    /* a benign empty completion is retried; acceptEmptyResponse turns that off */
+    const char *s4[] = {NULL, "late"};
+    f = (fake_attempt_t){&t.m, 0, s4};
+    memset(&l, 0, sizeof l);
+    msg = ai_replay_safe_stream(fake_attempt, &f, &o, on_ev, &l, true, 0);
+    CHECK(f.calls == 2 && l.counts[AI_EV_START] == 1);
+    CHECK_STR(sb_cstr(&l.text), "late");
+    json_free(msg);
+    evlog_free(&l);
+    o.accept_empty_response = true;
+    f = (fake_attempt_t){&t.m, 0, s4};
+    memset(&l, 0, sizeof l);
+    msg = ai_replay_safe_stream(fake_attempt, &f, &o, on_ev, &l, true, 0);
+    CHECK(f.calls == 1 && l.counts[AI_EV_DONE] == 1);
+    json_free(msg);
+    evlog_free(&l);
+    json_free(t.raw);
+}
+
 int main(void) {
+    test_retry_hints();
+    test_replay_safe();
     test_completions_request();
     test_completions_mistral();
     test_completions_dialects();

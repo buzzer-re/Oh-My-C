@@ -39,7 +39,7 @@ void ai_stream_opts_init(ai_stream_opts_t *o) {
     memset(o, 0, sizeof(*o));
     o->temperature = NAN;
     o->top_p = NAN;
-    o->max_retries = 3;
+    o->max_retries = 4; /* fetchWithRetry: 5 attempts */
     o->first_event_timeout_ms = -1;
     o->idle_timeout_ms = -1;
 }
@@ -515,8 +515,7 @@ typedef struct {
     ai_sse_cb sse_cb;
     void *ud;
     int abort_rc;
-    const char *retry_after;
-    int64_t retry_after_ms;
+    http_headers_t hdrs; /* headers of a failed (non-2xx) attempt: retry hints */
     ai_post_ex_t *ex;
 } sse_ctx_t;
 
@@ -524,26 +523,9 @@ static int on_hdr(void *ud, int status, const http_headers_t *h) {
     sse_ctx_t *c = ud;
     c->status = status;
     c->ok = status >= 200 && status < 300;
-    c->retry_after_ms = -1;
     if (c->ex && c->ex->on_headers) c->ex->on_headers(c->ex->hook_ud, status, h);
-    const char *ra = http_headers_get(h, "retry-after-ms");
-    if (ra) c->retry_after_ms = strtoll(ra, NULL, 10);
-    else if ((ra = http_headers_get(h, "retry-after"))) {
-        char *end;
-        double secs = strtod(ra, &end);
-        if (end != ra) {
-            c->retry_after_ms = (int64_t)(secs * 1000);
-        } else {
-            /* HTTP-date form */
-            struct tm tm;
-            memset(&tm, 0, sizeof tm);
-            if (strptime(ra, "%a, %d %b %Y %H:%M:%S", &tm)) {
-                int64_t when = (int64_t)timegm(&tm) * 1000;
-                int64_t d = when - now_ms();
-                c->retry_after_ms = d > 0 ? d : 0;
-            }
-        }
-    }
+    if (!c->ok && h)
+        for (size_t i = 0; i < h->n; i++) http_headers_add(&c->hdrs, h->v[i].name, h->v[i].value);
     return 0;
 }
 
@@ -571,7 +553,6 @@ static bool copilot_model_not_supported(const char *body) {
     return r;
 }
 
-static bool retryable_status(int s) { return s == 408 || s == 409 || s == 425 || s == 429 || s == 500 || s == 502 || s == 503 || s == 504 || s == 520 || s == 522 || s == 524 || s == 529; }
 
 /* byte-level read timeout: 300 s, widened so it never fires before the stream watchdog (stream_guard.c) */
 static int64_t http_idle_ms(const ai_stream_opts_t *opts, const ai_post_ex_t *ex) {
@@ -582,12 +563,71 @@ static int64_t http_idle_ms(const ai_stream_opts_t *opts, const ai_post_ex_t *ex
     return t;
 }
 
+/* transport retry policies (ai.h AI_RETRY_*) */
+static int64_t policy_default_delay(int policy, int attempt) {
+    static const int64_t ollama[] = {2000, 5000, 10000}; /* OLLAMA_RETRY_DELAYS_MS */
+    int n = MIN(attempt, 30);
+    switch (policy) {
+    case AI_RETRY_OLLAMA: return ollama[MIN(attempt, 2)];
+    case AI_RETRY_CODEX: return 500LL * (attempt + 1);     /* CODEX_RETRY_DELAY_MS * (attempt + 1) */
+    case AI_RETRY_GEMINI_CLI: return 1000LL << n;          /* BASE_DELAY_MS * 2 ** attempt */
+    default: return 500LL << n;                            /* fetchWithRetry: 500 ms * 2 ** attempt */
+    }
+}
+
+/* calculateAnthropicRetryDelayMs: min(0.5 s * 2^n, 8 s) with up to 25% downward jitter */
+static int64_t anthropic_backoff_ms(int attempt) {
+    double secs = MIN(0.5 * (double)(1LL << MIN(attempt, 30)), 8.0);
+    double jitter = 1 - ((double)rand() / ((double)RAND_MAX + 1)) * 0.25;
+    return (int64_t)(secs * jitter * 1000);
+}
+
+/* LiteLLM concurrency-admission 429 (`rate_limit_type: max_parallel_requests`): session recovery owns it */
+static bool admission_rejection(const http_headers_t *h, const char *body) {
+    const char *t = http_headers_get(h, "rate_limit_type");
+    if (t) {
+        while (*t == ' ') t++;
+        size_t n = strlen(t);
+        while (n && t[n - 1] == ' ') n--;
+        if (n == strlen("max_parallel_requests") && !strncmp(t, "max_parallel_requests", n)) return true;
+    }
+    const char *p = body ? strstr(body, "\"rate_limit_type\"") : NULL;
+    if (!p) return false;
+    p += strlen("\"rate_limit_type\"");
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p++ != ':') return false;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    return !strncmp(p, "\"max_parallel_requests\"", strlen("\"max_parallel_requests\""));
+}
+
+/* formatErrorMessageWithRetryAfter: a final HTTP error carries the header timing as " retry-after-ms=N" */
+static char *with_retry_after(char *msg, const http_headers_t *h) {
+    if (!msg || strstr(msg, "retry-after-ms=")) return msg;
+    int64_t ms = ai_retry_after_from_headers(h);
+    if (ms < 0) return msg;
+    char *r = xasprintf("%s retry-after-ms=%lld", msg, (long long)ms);
+    free(msg);
+    return r;
+}
+
+static void ctx_reset(sse_ctx_t *c, http_resp_t *resp) {
+    http_resp_free(resp);
+    sse_free(&c->sse);
+    sb_free(&c->errbody);
+    http_headers_free(&c->hdrs);
+}
+
 static int stream_post_url(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
                            ai_sse_cb sse_cb, http_data_cb raw_cb, void *ud, int *status, char **err, ai_post_ex_t *ex) {
     if (!http_headers_get(headers, "Content-Type")) http_headers_add(headers, "Content-Type", "application/json");
     if (sse_cb && !http_headers_get(headers, "Accept")) http_headers_add(headers, "Accept", "text/event-stream");
     int max_retries = opts && opts->max_retries > 0 ? opts->max_retries : 0;
-    int64_t max_delay = opts && opts->max_retry_delay_ms ? opts->max_retry_delay_ms : 60000;
+    int policy = opts ? opts->retry_policy : AI_RETRY_FETCH;
+    /* the per-delay cap: maxRetryDelayMs for anthropic / gemini-cli, fetchWithRetry's 60 s default elsewhere */
+    int64_t max_delay = 60000;
+    if ((policy == AI_RETRY_ANTHROPIC || policy == AI_RETRY_GEMINI_CLI || policy == AI_RETRY_CODEX) && opts &&
+        opts->max_retry_delay_ms)
+        max_delay = opts->max_retry_delay_ms;
     *err = NULL;
     *status = 0;
     const char *identity_retry = NULL; /* Copilot identity the one-shot denial retry switched to */
@@ -618,9 +658,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
         bool cancelled = opts && opts->cancel && *opts->cancel;
         if (cancelled) {
             *err = xstrdup("Request was aborted");
-            http_resp_free(&resp);
-            sse_free(&c.sse);
-            sb_free(&c.errbody);
+            ctx_reset(&c, &resp);
             return -2;
         }
         if (identity_retry && opts->copilot_cache_key && rc == 0)
@@ -632,9 +670,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
                 *err = xstrdup(resp.error);
                 ret = -1;
             }
-            http_resp_free(&resp);
-            sse_free(&c.sse);
-            sb_free(&c.errbody);
+            ctx_reset(&c, &resp);
             return ret;
         }
         /* GitHub Copilot client-identity denial (wrapFetchForCopilotFallback): retry once as the other surface */
@@ -651,9 +687,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
                      str_eq(alt, "copilot-chat") ? "CLI" : "chat", c.status, str_eq(alt, "copilot-chat") ? alt : "the Copilot CLI");
                 http_headers_set(headers, "Copilot-Integration-Id", alt);
                 identity_retry = alt;
-                http_resp_free(&resp);
-                sse_free(&c.sse);
-                sb_free(&c.errbody);
+                ctx_reset(&c, &resp);
                 attempt--;
                 continue;
             }
@@ -662,9 +696,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
         if (ex && ex->on_failure && !c.got_data) {
             int64_t d = ex->on_failure(ex->hook_ud, rc == 0 ? c.status : 0, sb_cstr(&c.errbody), headers);
             if (d >= 0) {
-                http_resp_free(&resp);
-                sse_free(&c.sse);
-                sb_free(&c.errbody);
+                ctx_reset(&c, &resp);
                 int64_t until = mono_ms() + d;
                 while (mono_ms() < until) {
                     if (opts && opts->cancel && *opts->cancel) {
@@ -678,30 +710,43 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
             }
             if (d == -2) {
                 *err = rc != 0 ? xstrdup(resp.error ? resp.error : "network error") : ai_extract_error(c.status, sb_cstr(&c.errbody));
+                if (rc == 0) *err = with_retry_after(*err, &c.hdrs);
                 free(ex->err_body);
                 ex->err_body = rc == 0 ? xstrdup(sb_cstr(&c.errbody)) : NULL;
-                http_resp_free(&resp);
-                sse_free(&c.sse);
-                sb_free(&c.errbody);
+                ctx_reset(&c, &resp);
                 return -1;
             }
         }
-        /* failure: decide retry */
-        bool transient = (rc != 0 && !c.got_data) || retryable_status(c.status);
-        char *msg = rc != 0 ? xstrdup(resp.error ? resp.error : "network error")
-                            : ai_extract_error(c.status, sb_cstr(&c.errbody));
-        /* overloaded errors embedded in body */
-        if (!transient && c.status == 400 && str_istr(sb_cstr(&c.errbody), "overloaded")) transient = true;
-        int64_t delay = 1000LL << attempt;
-        if (c.retry_after_ms >= 0) delay = c.retry_after_ms;
+        /* failure: decide retry (fetchWithRetry / the anthropic.ts provider loop) */
+        const char *ebody = sb_cstr(&c.errbody);
+        bool http_fail = rc == 0;
+        char *msg = !http_fail ? xstrdup(resp.error ? resp.error : "network error") : ai_extract_error(c.status, ebody);
+        bool retry;
+        int64_t delay;
+        if (policy == AI_RETRY_ANTHROPIC) {
+            retry = !c.got_data && (!http_fail || ai_provider_retryable_error(msg, c.status));
+            int64_t backoff = anthropic_backoff_ms(attempt), hdr = http_fail ? ai_retry_after_from_headers(&c.hdrs) : -1;
+            if (retry && hdr >= 0 && max_delay > 0 && hdr > max_delay) retry = false; /* over-cap hint: surface now */
+            delay = hdr >= 0 ? MAX(hdr, backoff) : backoff;
+        } else {
+            retry = !c.got_data && (!http_fail || c.status >= 500 || c.status == 408 || c.status == 429);
+            if (retry && http_fail && policy == AI_RETRY_OPENAI && admission_rejection(&c.hdrs, ebody)) retry = false;
+            if (retry && http_fail && policy == AI_RETRY_OLLAMA && c.status >= 500 &&
+                (str_istr(ebody, "failed to parse tool call arguments as json") ||
+                 str_istr(ebody, "[json.exception.parse_error.101]")))
+                retry = false;
+            int64_t hint = http_fail ? ai_extract_retry_hint(&c.hdrs, ebody) : -1;
+            if (retry && hint >= 0 && max_delay >= 0 && hint > max_delay) retry = false; /* caller deals with it */
+            delay = hint >= 0 ? hint : policy_default_delay(policy, attempt);
+            if (max_delay >= 0) delay = MIN(delay, max_delay);
+        }
+        if (http_fail) msg = with_retry_after(msg, &c.hdrs);
         if (ex) {
             free(ex->err_body);
-            ex->err_body = rc == 0 ? xstrdup(sb_cstr(&c.errbody)) : NULL;
+            ex->err_body = http_fail ? xstrdup(ebody) : NULL;
         }
-        http_resp_free(&resp);
-        sse_free(&c.sse);
-        sb_free(&c.errbody);
-        if (opts && opts->copilot_cache_key && rc == 0 && (c.status == 401 || c.status == 403)) {
+        ctx_reset(&c, &resp);
+        if (opts && opts->copilot_cache_key && http_fail && (c.status == 401 || c.status == 403)) {
             /* http-inspector.ts rewriteCopilotError */
             free(msg);
             msg = xstrdup(c.status == 401
@@ -713,14 +758,9 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
                                 "default (COPILOT_INTEGRATION_ID overrides it) and retries a denied default-identity request once as "
                                 "the Copilot CLI (copilot-developer-cli). If both identities are denied, ask your org admin to allow "
                                 "one of them; if you pinned an identity, try the other.");
-            transient = false;
+            retry = false;
         }
-        if (!transient || attempt >= max_retries || c.got_data || (max_delay > 0 && delay > max_delay)) {
-            if (max_delay > 0 && delay > max_delay && transient && attempt < max_retries) {
-                char *m2 = xasprintf("%s (server requested retry in %llds)", msg, (long long)(delay / 1000));
-                free(msg);
-                msg = m2;
-            }
+        if (!retry || attempt >= max_retries) {
             *err = msg;
             return -1;
         }
@@ -732,7 +772,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
                 *err = xstrdup("Request was aborted");
                 return -2;
             }
-            sleep_ms(50);
+            sleep_ms(MIN((int64_t)50, MAX((int64_t)1, until - mono_ms())));
         }
     }
 }

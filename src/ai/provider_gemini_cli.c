@@ -999,6 +999,7 @@ json_t *provider_gemini_cli_stream(const ai_model_t *m, const ai_context_t *ctx,
             }
             ai_stream_opts_t ro = *o;
             ro.max_retries = attempt == 0 && last ? MAX_RETRIES : 0;
+            ro.retry_policy = AI_RETRY_GEMINI_CLI;
             ro.max_retry_delay_ms = o->max_retry_delay_ms ? o->max_retry_delay_ms : RATE_LIMIT_BUDGET_MS;
             ai_post_ex_t ex = {.idle_timeout_ms = first_event_ms};
             int status = 0;

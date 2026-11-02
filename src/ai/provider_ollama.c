@@ -323,13 +323,17 @@ json_t *ollama_stream_finish(ollama_stream_t *s, int rc, const char *terr) {
     return msg;
 }
 
-json_t *provider_ollama_stream(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o,
-                               ai_event_cb cb, void *ud) {
-    ai_stream_opts_t def;
-    if (!o) {
-        ai_stream_opts_init(&def);
-        o = &def;
-    }
+typedef struct {
+    const ai_model_t *m;
+    const ai_context_t *ctx;
+    const ai_stream_opts_t *o;
+} ollama_attempt_t;
+
+static json_t *ollama_stream_once(void *self, ai_event_cb cb, void *ud) {
+    ollama_attempt_t *at = self;
+    const ai_model_t *m = at->m;
+    const ai_context_t *ctx = at->ctx;
+    const ai_stream_opts_t *o = at->o;
     json_t *body = ollama_build_request(m, ctx, o);
     if (o->on_payload) o->on_payload(o->payload_ud, body);
     char *base = ollama_base(m);
@@ -356,4 +360,17 @@ json_t *provider_ollama_stream(const ai_model_t *m, const ai_context_t *ctx, con
     free(base);
     json_free(body);
     return msg;
+}
+
+/* streamOllama: fetchWithRetry at 2 s / 5 s / 10 s (llama.cpp tool-call parse 500s are not retried), and up to two
+ * retries of an EOS-only completion */
+json_t *provider_ollama_stream(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o,
+                               ai_event_cb cb, void *ud) {
+    ai_stream_opts_t lo;
+    if (o) lo = *o;
+    else ai_stream_opts_init(&lo);
+    lo.retry_policy = AI_RETRY_OLLAMA;
+    lo.max_retries = 4;
+    ollama_attempt_t at = {m, ctx, &lo};
+    return ai_replay_safe_stream(ollama_stream_once, &at, &lo, cb, ud, true, 0);
 }
