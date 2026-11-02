@@ -330,6 +330,7 @@ void ui_signals_settings_changed(void) {
 static void settings_changed_cb(void *ud) {
     (void)ud;
     ui_signals_settings_changed();
+    ui_recap_refresh();
 }
 
 /* settings listener: may run on any thread, hop to the UI thread */
@@ -350,11 +351,13 @@ void ui_signals_init(ui_t *u) {
     emit_title();
     report(); /* setProgramStatusEnabled */
     ui_signals_session_title();
+    ui_recap_init(u);
 }
 
 void ui_signals_dispose(void) {
     if (!S.u || S.disposed) return;
     settings_off_change(on_settings_change, S.u);
+    ui_recap_dispose();
     stop_spinner();
     S.disposed = true;
     free(S.last_title);
@@ -378,6 +381,7 @@ void ui_signals_dispose(void) {
 /* ---------- agent events ---------- */
 
 void ui_signals_agent_start(void) {
+    ui_recap_invalidate();
     json_free(S.ended);
     S.ended = NULL;
     ui_signals_run_status(RUN_WORKING, NULL, NULL);
@@ -473,6 +477,7 @@ void ui_signals_settle(void) {
     json_t *m = S.ended;
     S.ended = NULL;
     ui_signals_run_settled(m, false);
+    ui_recap_settled(m);
     json_free(m);
 }
 

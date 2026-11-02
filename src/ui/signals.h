@@ -51,6 +51,14 @@ void ui_signals_settle(void);
 /* the ask tool is waiting for an answer (`ask.notify`) */
 void ui_signals_ask_waiting(void);
 
+/* recap.c - the idle recap (`recap.enabled`, `recap.idleSeconds`) */
+void ui_recap_init(ui_t *u);
+void ui_recap_settled(const json_t *run_messages); /* a run settled: arm the recap of this stretch */
+void ui_recap_invalidate(void);                    /* new activity / session transition */
+void ui_recap_refresh(void);                       /* settings or blockers changed */
+void ui_recap_dispose(void);                       /* teardown: cancels and waits for an in-flight request */
+bool ui_recap_generated(const json_t *messages);   /* priorMessageWasGenerated */
+
 /* pure helpers (tests) */
 char *ui_title_compose(const char *label, run_state_t state, int frame, bool enabled, const char *style, bool static_host);
 char *ui_program_status_report(run_state_t state, const char *kind, const char *msg);

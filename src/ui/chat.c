@@ -1548,5 +1548,6 @@ void ui_chat_rebuild(ui_t *u) {
     hmap_free(&pending, NULL);
     toolcard_set_replaying(false);
     ui_signals_session_title(); /* resume / switch / branch: the title follows the session */
+    ui_recap_invalidate();
     tui_request_full_render(u->tui);
 }
