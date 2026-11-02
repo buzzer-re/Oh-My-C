@@ -311,7 +311,40 @@ static bool write_xdev(const tc_call_t *c, const char *raw, int width, strvec_t 
     size_t nl = strcspn(nm, "/?#");
     if (!nl || nm[nl]) return false; /* bare xd:// and xd://<tool>/<topic> keep the write card */
     char *name = xstrndup(nm, nl);
-    if (!strcmp(name, "report_issue") || !strcmp(name, "resolve") || !strcmp(name, "reject") || !strcmp(name, "propose")) {
+    bool resolution = !strcmp(name, "resolve") || !strcmp(name, "reject") || !strcmp(name, "propose");
+    if (resolution && !c->has_result) {
+        /* renderResolutionDeviceCall: nothing until the path settles, then `⏳ Propose: <first line>` */
+        const char *content = json_get_str(c->args, "content");
+        if (content) {
+            char *t = str_trim(content);
+            char *nl2 = strchr(t, '\n');
+            if (nl2) *nl2 = 0;
+            char *body = tc_replace_tabs(t), *desc = *body ? tui_truncate_to_width(body, 72, "") : NULL;
+            const char *title = !strcmp(name, "propose") ? "Propose" : !strcmp(name, "reject") ? "Reject" : "Resolve";
+            tc_status_line_t sl = {.icon = TC_ST_PENDING, .spinner = -1, .title = title, .title_slot = -1, .description = desc};
+            strvec_push_own(out, tc_status_line(&sl));
+            free(desc);
+            free(body);
+            free(t);
+        }
+        free(name);
+        return true;
+    }
+    if (resolution && !strcmp(name, "propose") && json_get_obj(c->details, "xdev")) {
+        /* no propose renderer: renderDefaultToolExecution(label "propose", the dispatch args, the result text) */
+        const json_t *xd = json_get_obj(c->details, "xdev");
+        json_t *empty = json_obj();
+        tc_call_t ic = *c;
+        ic.name = name;
+        ic.label = name;
+        ic.args = json_get_obj(xd, "args") ? json_get_obj(xd, "args") : empty;
+        ic.details = json_get_obj(xd, "inner");
+        tc_generic(&ic, width, out);
+        json_free(empty);
+        free(name);
+        return true;
+    }
+    if (!strcmp(name, "report_issue") || resolution) {
         free(name);
         return false;
     }

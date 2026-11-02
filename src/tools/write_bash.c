@@ -404,16 +404,31 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         free(r);
         return 0;
     }
-    if (!strcmp(path, "xd://propose")) {
+    if (!strcmp(path, "xd://propose")) { /* resolve.ts dispatchResolutionDevice */
         if (!env->propose_plan) {
-            tool_result_error(out, "xd://propose is only available in plan mode");
+            tool_result_error(out, "No plan is awaiting approval \xe2\x80\x94 xd://propose only accepts a plan title while plan mode is active.");
             return 0;
         }
+        char *title = str_trim(content);
         bool err = false;
-        char *r = env->propose_plan(env, content, &err);
+        json_t *inner = NULL;
+        char *r = env->propose_plan(env, title, &err, &inner);
         tool_result_text(out, r ? r : "");
         out->is_error = err;
+        if (!err) { /* XdevDispatch {tool, mode, args, inner} on the write details */
+            json_t *x = json_obj(), *xa = json_obj();
+            json_set_str(x, "tool", "propose");
+            json_set_str(x, "mode", "execute");
+            json_set_str(xa, "title", title);
+            json_set(x, "args", xa);
+            if (inner) json_set(x, "inner", inner);
+            inner = NULL;
+            out->details = json_obj();
+            json_set(out->details, "xdev", x);
+        }
+        json_free(inner);
         free(r);
+        free(title);
         return 0;
     }
     if (xdev_write(ctx, path, content, out)) return 0;

@@ -73,7 +73,21 @@ struct app {
     char *checkpoint_entry;     /* session entry id of the checkpoint tool result */
     char *pending_rewind;       /* report waiting for turn end */
     bool checkpoint_pending;    /* checkpoint tool ran; boundary captured at its message_end */
-    char *plan_file; /* local:// path of the current plan */
+    char *plan_file; /* plan-mode state planFilePath (local://PLAN.md or the agent's local://<slug>-plan.md) */
+    bool plan_paused, plan_has_entered, plan_reentry;
+    bool plan_review_ui;        /* xd://propose opens a review (TUI) instead of approving automatically */
+    char *plan_reference_path;  /* approved plan re-injected (plan-mode-reference.md) after history rewrites */
+    bool plan_reference_sent;
+    const ai_model_t *plan_prev_model; /* the model before the `plan` role took over (restored on exit) */
+    ai_effort_t plan_prev_thinking;
+    bool plan_prev_set;
+    const ai_model_t *plan_yolo_target; /* --plan-yolo: hand-off model once the plan is proposed */
+    ai_effort_t plan_yolo_thinking;
+    bool plan_yolo_has_thinking, plan_yolo_armed, plan_yolo_done;
+    int plan_reminder_count;    /* plan-mode decision reminders since the last ask/propose or user turn */
+    bool plan_reminder_awaiting, plan_force_tool_choice;
+    void (*plan_mode_changed)(void *ud); /* plan mode left by an automatic approval (ACP mode update) */
+    void *plan_mode_changed_ud;
     struct goal *goal; /* goal mode state (goal.c) */
     struct title_state *title; /* automatic session title (title.c) */
     struct skilldesc *skilldesc; /* compressed skill descriptions snapshot (skilldesc.c) */
@@ -114,8 +128,48 @@ int app_prompt(app_t *a, const char *text, json_t *images);
 int app_prompt_hidden(app_t *a, const char *text, const char *custom_type);
 int app_set_model(app_t *a, const char *pattern, char **err);
 void app_set_thinking(app_t *a, ai_effort_t e);
-/* enter/leave read-only plan mode (rebuilds the system prompt) */
+/* ---------- plan mode (planmode.c) ---------- */
+/* enter/leave read-only plan mode (mode_change entries, system prompt rebuild) */
 void app_set_plan_mode(app_t *a, bool on);
+void app_enter_plan_mode(app_t *a, const char *plan_file); /* NULL: the reference path / local://PLAN.md */
+void app_exit_plan_mode(app_t *a, bool paused);
+void app_plan_apply_model(app_t *a); /* switch to modelRoles.plan (interactive plan entry) */
+void app_set_plan_file(app_t *a, const char *plan_file);   /* promote a reviewed plan into plan-mode state */
+void app_set_plan_review_ui(app_t *a, bool on);
+/* restore plan mode from the session's last mode_change (resume / switch): 1 plan, 2 paused, 0 none */
+int app_plan_restore_from_session(app_t *a);
+void app_exit_plan_mode_silently(app_t *a);
+bool app_plan_should_start(app_t *a); /* plan.defaultOnStartup applies to this (fresh) session */
+void app_set_plan_reference(app_t *a, const char *path);
+json_t *app_plan_reference_message(app_t *a); /* hidden plan-mode-reference prompt once per rewrite, or NULL */
+char *app_plan_path(app_t *a, const char *url);  /* on-disk path (owned) */
+char *app_plan_read(app_t *a, const char *url);  /* owned content or NULL */
+int app_plan_write(app_t *a, const char *url, const char *content);
+strvec_t app_plan_list(app_t *a);                 /* local:// plan files (name ends in plan.md), newest first */
+int app_plan_resolve(app_t *a, const char *supplied, char **path, char **content, char **title, char **err);
+char *app_plan_normalize_title(const char *title, char **err);
+char *app_plan_resolve_title(const char *supplied, const char *content, const char *path);
+char *app_plan_humanize_title(const char *title);
+char *app_plan_save_file_name(const char *title);
+char *app_plan_autosave(app_t *a, const char *title, const char *content, char **err); /* path, NULL if off */
+char *app_plan_approved_prompt(app_t *a, const char *path, const char *content, bool preserved);
+int app_prompt_synthetic(app_t *a, const char *text); /* hidden agent-attributed developer prompt (blocking) */
+/* plan-mode decision enforcement (#enforcePlanModeDecisionAtSettle): after a run that ended in plain text,
+ * append the decision reminder and continue with tool_choice "required" (at most 3 times) */
+int app_plan_settle(app_t *a, int rc);
+void app_plan_yolo_arm(app_t *a); /* --plan-yolo: enter the plan phase before the first prompt */
+void app_plan_note_tool_end(app_t *a, const char *tool, const tool_result_t *res, bool is_error);
+void app_plan_note_user_turn(app_t *a);
+typedef struct {
+    char *role;
+    const ai_model_t *model;
+    ai_effort_t thinking;
+    bool explicit_thinking;
+} app_role_model_t;
+/* configured role models in cycleOrder (smol, default, slow); *current = the active one's index */
+size_t app_role_model_cycle(app_t *a, app_role_model_t **out, int *current);
+void app_role_model_cycle_free(app_role_model_t *v, size_t n);
+void app_apply_role_model(app_t *a, const app_role_model_t *e);
 void app_rebuild_system_prompt(app_t *a);
 /* token count at which context maintenance triggers for a window (omp compaction.threshold* semantics) */
 int64_t app_compaction_threshold(const ai_model_t *m, int64_t window); /* with compaction.modelThresholds */
@@ -146,6 +200,8 @@ const char *app_session_file(app_t *a);
 /* run a one-shot completion with no tools (titles, summaries) */
 /* plain title from the title model (title-system.md) for `text`; owned raw reply or NULL */
 char *app_generate_title_from(app_t *a, const char *text);
+/* same with a custom system prompt (NULL = title-system.md); owned raw reply or NULL */
+char *app_generate_title_with(app_t *a, const char *text, const char *system_prompt);
 char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const char *user, ai_effort_t effort);
 /* child session for subagent `agent_name` (agents dirs); model_override (pattern) and append_prompt are optional */
 app_t *app_subagent_new(app_t *parent, const char *agent_name, const char *model_override, const char *append_prompt,

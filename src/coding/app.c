@@ -149,6 +149,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
             }
         }
     }
+    if (ev->type == AGENT_EV_TOOL_END) app_plan_note_tool_end(a, ev->tool_name, ev->result, ev->is_error);
     if (ev->type == AGENT_EV_TURN_END && a->env && jobs_undelivered(a->env->jobs)) {
         json_t *m = job_results_message(a);
         if (m) agent_steer(a->agent, m);
@@ -245,6 +246,12 @@ static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
     free(ag->api_key);
     ag->api_key = app_api_key_for(a->model);
     o->api_key = ag->api_key;
+    if (a->plan_force_tool_choice) { /* plan-mode-decision: the reminder continuation must call a tool */
+        static json_t *required;
+        if (!required) required = json_str("required");
+        o->tool_choice = required;
+        a->plan_force_tool_choice = false;
+    }
     /* omp resolveCacheRetention: explicit setting, else PI_CACHE_RETENTION (long|short|none), else "short" */
     const char *cr = settings_str("providers.cacheRetention", "auto");
     if (!cr || !*cr || str_eq(cr, "auto")) {
@@ -444,86 +451,16 @@ static tool_gate_t hook_before_tool(void *ud, agent_t *ag, const json_t *call, c
     return TOOL_ALLOW;
 }
 
-static char *app_propose_plan(tool_env_t *env, const char *content, bool *is_error) {
-    app_t *a = env->session;
-    *is_error = false;
-    if (!a->plan_mode) {
-        *is_error = true;
-        return xstrdup("Not in plan mode.");
+/* local:// root of the current session */
+static void app_bind_local(app_t *a) {
+    const char *sid = session_id(a->session);
+    free(a->env->local_dir);
+    if (a->session->dir) a->env->local_dir = xasprintf("%s/%s/local", a->session->dir, sid);
+    else {
+        char *base = omc_agent_path("local");
+        a->env->local_dir = xasprintf("%s/%s", base, sid);
+        free(base);
     }
-    char *slug = str_trim(content);
-    char *nl = strchr(slug, '\n');
-    if (nl) *nl = 0;
-    for (char *p = slug; *p; p++)
-        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '-')) *p = '-';
-    char *url = xasprintf("local://%s-plan.md", slug);
-    char *abs = tool_resolve_path(env, url);
-    size_t n;
-    char *plan = fs_read(abs, &n);
-    if (!plan) {
-        *is_error = true;
-        char *r = xasprintf("Plan file %s not found; write it first, then propose the same slug.", url);
-        free(url);
-        free(abs);
-        free(slug);
-        return r;
-    }
-    bool approved = true;
-    if (env->ui.ask) {
-        json_t *qs = json_parse_str("[{\"id\":\"plan\",\"question\":\"Approve the plan?\",\"options\":["
-                                    "{\"label\":\"Approve and execute\"},{\"label\":\"Keep planning\"}]}]");
-        char *q = xasprintf("Approve plan %s?", url);
-        json_set_str(json_at(qs, 0), "question", q);
-        free(q);
-        json_t *ans = env->ui.ask(env->ui.ud, qs);
-        approved = ans && str_eq(json_get_str(ans, "plan"), "Approve and execute");
-        json_free(ans);
-        json_free(qs);
-    }
-    char *r;
-    if (!approved) {
-        r = xasprintf("User chose to keep planning. Refine %s and propose again when ready.", url);
-    } else {
-        free(a->plan_file);
-    free(a->fallback.role);
-    free(a->fallback.original);
-    strvec_free(&a->retry_notes);
-    free(a->model_role);
-        a->plan_file = xstrdup(url);
-        app_set_plan_mode(a, false);
-        json_t *ctx = json_obj();
-        json_set_bool(ctx, "contextPreserved", true);
-        json_set_str(ctx, "planFilePath", url);
-        json_set_str(ctx, "planContent", plan);
-        json_t *tl = json_arr();
-        for (size_t i = 0; i < a->agent->tools.n; i++) json_push_str(tl, a->agent->tools.v[i]->name);
-        json_set(ctx, "tools", tl);
-        char *msg = prompt_render("coding-agent/prompts/system/plan-mode-approved.md", ctx);
-        json_free(ctx);
-        json_t *m = msg_user_text(msg);
-        json_set_bool(m, "synthetic", true);
-        agent_follow_up(a->agent, m);
-        free(msg);
-        notice(a, "info", "Plan approved: %s — executing", url);
-        r = xasprintf("Plan %s approved. Plan mode ended; full tool access restored. Execute it now.", url);
-    }
-    free(plan);
-    free(url);
-    free(abs);
-    free(slug);
-    return r;
-}
-
-void app_set_plan_mode(app_t *a, bool on) {
-    a->plan_mode = on;
-    a->env->propose_plan = on ? app_propose_plan : NULL;
-    if (a->session) {
-        json_t *e = json_obj();
-        json_set_str(e, "type", "mode_change");
-        json_set_str(e, "mode", on ? "plan" : "none");
-        session_append_entry(a->session, e);
-    }
-    app_rebuild_system_prompt(a);
 }
 
 /* point the tool env at the session's artifact directory (session file minus `.jsonl`) */
@@ -1047,8 +984,11 @@ void app_rebuild_system_prompt(app_t *a) {
         json_set_bool(pc, "taskAvailable", agent_find_tool(a->agent, "task") != NULL);
         json_set_bool(pc, "scoutAvailable", agent_find_tool(a->agent, "task") != NULL);
         json_set_bool(pc, "isHashlineEditMode", str_eq(a->env->edit_mode, "hashline"));
-        json_set_bool(pc, "planExists", a->plan_file != NULL);
+        char *pabs = a->plan_file ? app_plan_path(a, a->plan_file) : NULL;
+        json_set_bool(pc, "planExists", pabs && fs_exists(pabs));
+        free(pabs);
         if (a->plan_file) json_set_str(pc, "planFilePath", a->plan_file);
+        json_set_bool(pc, "reentry", a->plan_reentry);
         char *pm = prompt_render("coding-agent/prompts/system/plan-mode-active.md", pc);
         json_push_str(blocks, pm);
         free(pm);
@@ -1200,15 +1140,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
         return NULL;
     }
     if (!o->subagent) app_bind_artifacts(a, NULL);
-    {
-        const char *sid = session_id(a->session);
-        if (a->session->dir) a->env->local_dir = xasprintf("%s/%s/local", a->session->dir, sid);
-        else {
-            char *base = omc_agent_path("local");
-            a->env->local_dir = xasprintf("%s/%s", base, sid);
-            free(base);
-        }
-    }
+    app_bind_local(a);
     a->skilldesc = skilldesc_new();
     a->memory = memory_rt_new();
     if (!o->subagent) a->autolearn = autolearn_new(a);
@@ -1223,7 +1155,6 @@ app_t *app_create(const app_opts_t *o, char **err) {
         free(label);
     }
     a->title_done = a->session->title != NULL;
-    if (settings_bool("plan.defaultOnStartup", false) && !o->subagent) app_set_plan_mode(a, true);
     if (settings_bool("advisor.enabled", false) && !o->subagent) app_set_advisor(a, true);
     memory_start(a);
     return a;
@@ -1257,6 +1188,11 @@ void app_free(app_t *a) {
     free(a->sys_custom);
     free(a->sys_append);
     free(a->plan_file);
+    free(a->plan_reference_path);
+    free(a->fallback.role);
+    free(a->fallback.original);
+    strvec_free(&a->retry_notes);
+    free(a->model_role);
     free(a->checkpoint_entry);
     free(a->pending_rewind);
     advisor_free(a->advisor);
@@ -1617,10 +1553,13 @@ void app_compaction_candidates(app_t *a, mr_pool_t *out) {
 
 /* ---------- title ---------- */
 
-char *app_generate_title_from(app_t *a, const char *text) {
+char *app_generate_title_from(app_t *a, const char *text) { return app_generate_title_with(a, text, NULL); }
+
+char *app_generate_title_with(app_t *a, const char *text, const char *system_prompt) {
     if (!text || !*text) return NULL;
-    char *sys = prompt_load_or("coding-agent/prompts/system/title-system.md",
-                               "Generate a concise 3-6 word title for this conversation. Output only the title.");
+    char *sys = system_prompt ? xstrdup(system_prompt)
+                              : prompt_load_or("coding-agent/prompts/system/title-system.md",
+                                               "Generate a concise 3-6 word title for this conversation. Output only the title.");
     /* title-generator.ts getTitleModels: tiny/commit/smol role primaries + their retry chains, then
      * the session model and its own chain */
     static const char *const roles[] = {"tiny", "commit", "smol"};
@@ -1875,6 +1814,8 @@ static void begin_turn_budget(app_t *a, const char *text) {
 }
 
 int app_prompt(app_t *a, const char *text, json_t *images) {
+    app_plan_note_user_turn(a);
+    app_plan_yolo_arm(a);
     memory_take_prompt_refresh(a);
     maybe_restore_primary(a);
     begin_turn_budget(a, text);
@@ -1885,10 +1826,13 @@ int app_prompt(app_t *a, const char *text, json_t *images) {
     json_arr_foreach(images, i, img) json_push(content, json_clone(img));
     json_free(images);
     json_t *msgs = json_arr();
+    json_t *pr = app_plan_reference_message(a);
+    if (pr) json_push(msgs, pr);
     json_t *gm = app_goal_context_message(a);
     if (gm) json_push(msgs, gm);
     json_push(msgs, msg_user_content(content));
     int rc = agent_prompt(a->agent, msgs);
+    rc = app_plan_settle(a, rc);
     if (rc == 0) {
         maybe_title(a);
         maybe_auto_compact(a);
@@ -1910,6 +1854,7 @@ int app_prompt_hidden(app_t *a, const char *text, const char *custom_type) {
     }
     json_push(msgs, m);
     int rc = agent_prompt(a->agent, msgs);
+    rc = app_plan_settle(a, rc);
     if (rc == 0) maybe_auto_compact(a);
     return rc;
 }
@@ -1961,6 +1906,11 @@ int app_new_session(app_t *a) {
     session_free(a->session);
     a->session = ns;
     app_bind_artifacts(a, NULL);
+    app_bind_local(a);
+    /* newSession: plan reference back to the default, unsent */
+    a->plan_reference_sent = false;
+    free(a->plan_reference_path);
+    a->plan_reference_path = NULL;
     agent_replace_messages(a->agent, json_arr());
     free(a->agent->session_id);
     a->agent->session_id = xstrdup(session_id(ns));
@@ -1983,6 +1933,7 @@ int app_switch_session(app_t *a, const char *path, char **err) {
     session_free(a->session);
     a->session = s;
     app_bind_artifacts(a, NULL);
+    app_bind_local(a);
     free(a->agent->session_id);
     a->agent->session_id = xstrdup(session_id(s));
     load_session_into_agent(a);

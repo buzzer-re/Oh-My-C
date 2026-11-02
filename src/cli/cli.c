@@ -60,6 +60,9 @@ static void usage(FILE *f) {
             "      --print-thoughts               print thinking to stderr in print mode\n"
             "      --max-turns <n>                stop after n turns\n"
             "      --plan-mode                    start in read-only plan mode\n"
+            "      --plan-yolo                    read-only plan mode at start, auto-approve the plan on the model's first\n"
+            "                                     propose, then switch to --plan-yolo-into to implement it\n"
+            "      --plan-yolo-into <model>       target model for plan-yolo execution (default the \"smol\" role)\n"
             "      --goal <objective>             start a fresh interactive session in goal mode\n"
             "  -v, --version                      print version\n"
             "  -h, --help                         this help\n",
@@ -413,6 +416,8 @@ int omc_main(int argc, char **argv) {
     bool print = false, json = false, rpc = false, acp = false, print_thoughts = false, plan_mode = false;
     const char *mode = NULL;
     const char *goal = NULL;
+    bool plan_yolo = false;
+    const char *plan_yolo_into = NULL;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
@@ -453,6 +458,9 @@ int omc_main(int argc, char **argv) {
         else if (!strcmp(a, "--max-turns")) o.max_turns = atoi(need(argc, argv, &i));
         else if (!strcmp(a, "--no-title")) setenv("OMC_NO_TITLE", "1", 1);
         else if (!strcmp(a, "--plan-mode")) plan_mode = true;
+        else if (!strcmp(a, "--plan-yolo")) plan_yolo = true;
+        else if (!strcmp(a, "--plan-yolo-into")) plan_yolo_into = need(argc, argv, &i);
+        else if (!strncmp(a, "--plan-yolo-into=", 17)) plan_yolo_into = a + 17;
         else if (!strcmp(a, "--goal")) goal = need(argc, argv, &i);
         else if (!strcmp(a, "--")) {
             for (i++; i < argc; i++) strvec_push(&prompt_parts, argv[i]);
@@ -533,6 +541,34 @@ int omc_main(int argc, char **argv) {
         fprintf(stderr, "omc: %s\n", err ? err : "failed to start");
         free(err);
         return 1;
+    }
+    if (plan_yolo_into && !plan_yolo) {
+        fprintf(stderr, "omc: --plan-yolo-into requires --plan-yolo\n");
+        app_free(app);
+        return 1;
+    }
+    if (plan_yolo) {
+        if (goal) {
+            fprintf(stderr, "omc: --goal cannot be combined with --plan-yolo or --no-tools.\n");
+            app_free(app);
+            return 2;
+        }
+        const char *pat = plan_yolo_into ? plan_yolo_into : "@smol";
+        ai_effort_t e = EFFORT_OFF;
+        bool has_e = false;
+        const ai_model_t *t = app_resolve_model_pattern(pat, &e, &has_e);
+        char *key = t ? app_api_key_for(t) : NULL;
+        if (!t || !key) {
+            if (!t) fprintf(stderr, "omc: Model \"%s\" not found\n", pat);
+            else fprintf(stderr, "omc: No API key for %s/%s\n", t->provider, t->id);
+            free(key);
+            app_free(app);
+            return 1;
+        }
+        free(key);
+        app->plan_yolo_target = t;
+        app->plan_yolo_thinking = e;
+        app->plan_yolo_has_thinking = has_e;
     }
     if (plan_mode) app_set_plan_mode(app, true);
     if (goal) {

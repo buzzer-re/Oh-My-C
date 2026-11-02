@@ -261,6 +261,15 @@ static asess_t *find_session(acp_t *a, const char *id) {
     return r;
 }
 
+/* plan approved by xd://propose (no elicitation surface: approved automatically): report the mode change */
+static void acp_plan_mode_changed(void *ud) {
+    asess_t *s = ud;
+    json_t *u = json_obj();
+    json_set_str(u, "sessionUpdate", "current_mode_update");
+    json_set_str(u, "currentModeId", s->app->plan_mode ? "plan" : "default");
+    notify_update(s->id, u);
+}
+
 static asess_t *open_session(acp_t *a, const char *cwd, const char *resume, char **err) {
     app_opts_t o = *a->base;
     o.cwd = cwd;
@@ -272,6 +281,8 @@ static asess_t *open_session(acp_t *a, const char *cwd, const char *resume, char
     s->app = app;
     s->acp = a;
     s->id = xstrdup(session_id(app->session));
+    app->plan_mode_changed = acp_plan_mode_changed;
+    app->plan_mode_changed_ud = s;
     agent_subscribe(app->agent, acp_listener, s);
     g_prev_before = app->agent->hooks.before_tool;
     app->agent->hooks.before_tool = acp_before_tool;
@@ -284,8 +295,11 @@ static asess_t *open_session(acp_t *a, const char *cwd, const char *resume, char
 static json_t *modes_json(asess_t *s) {
     json_t *m = json_obj();
     json_set_str(m, "currentModeId", s->app->plan_mode ? "plan" : "default");
-    json_set(m, "availableModes", json_parse_str("[{\"id\":\"default\",\"name\":\"Default\",\"description\":\"Full tool access\"},"
-                                                 "{\"id\":\"plan\",\"name\":\"Plan\",\"description\":\"Read-only planning\"}]"));
+    json_t *modes = json_parse_str("[{\"id\":\"default\",\"name\":\"Default\",\"description\":\"Standard ACP headless mode\"}]");
+    if (settings_bool("plan.enabled", true))
+        json_push(modes, json_parse_str("{\"id\":\"plan\",\"name\":\"Plan\",\"description\":\"Read-only planning mode that drafts a "
+                                        "plan to a markdown file before any code changes\"}"));
+    json_set(m, "availableModes", modes);
     return m;
 }
 
@@ -451,7 +465,14 @@ static void handle(acp_t *a, json_t *msg) {
             reply_err(id, -32602, "unknown session");
             return;
         }
-        app_set_plan_mode(s->app, str_eq(json_get_str(params, "modeId"), "plan"));
+        const char *mid = json_get_str(params, "modeId");
+        if (!str_eq(mid, "default") && !(str_eq(mid, "plan") && settings_bool("plan.enabled", true))) {
+            char *m = xasprintf("Unsupported ACP mode: %s", mid ? mid : "");
+            reply_err(id, -32603, m);
+            free(m);
+            return;
+        }
+        app_set_plan_mode(s->app, str_eq(mid, "plan"));
         json_t *u = json_obj();
         json_set_str(u, "sessionUpdate", "current_mode_update");
         json_set_str(u, "currentModeId", s->app->plan_mode ? "plan" : "default");

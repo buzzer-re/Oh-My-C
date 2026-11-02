@@ -120,6 +120,53 @@ void ui_overlay_login_provider(ui_t *u, const char *provider, bool reopen_hub);
 typedef void (*ui_ask_done_fn)(void *ud, json_t *answers);
 void ui_ask_dialog_show(ui_t *u, const json_t *questions, ui_ask_done_fn done, void *ud);
 
+/* ---------- planreview.c ---------- */
+
+/* fullscreen plan review (overlays/plan-review-overlay.ts): the plan rendered by section, a Contents
+ * sidebar, section deletes/undo and annotations, the approval options and an optional model-tier slider */
+typedef struct ui_plan_review ui_plan_review_t;
+typedef struct {
+    const char *prompt_title;          /* "Plan mode - next step" */
+    const char *const *options;
+    size_t noptions;
+    const int *disabled;               /* indices into options that render dimmed and cannot be picked */
+    size_t ndisabled;
+    const char *help_text;             /* trailing footer hint (the cancel hint) */
+    int initial_index;
+    const char *slider_caption;        /* model-tier slider ("continue with"); nsegments 0 = none */
+    const char *const *segment_labels;
+    const char *const *segment_details;
+    size_t nsegments;
+    int slider_index;
+    const char *external_editor_label; /* "Ctrl+G" */
+    const json_t *annotation_state;    /* PlanReviewAnnotationState to restore (borrowed) */
+} ui_plan_review_opts_t;
+typedef struct {
+    void (*on_pick)(void *ud, const char *label); /* never a disabled option; input locks afterwards */
+    void (*on_cancel)(void *ud);
+    void (*on_copy)(void *ud, const char *content);          /* NULL: no copy key */
+    void (*on_external_editor)(void *ud);                     /* NULL: no editor key */
+    void (*on_annotation_editor)(void *ud, const char *draft); /* answer with ui_plan_review_set_annotation_draft */
+    void (*on_plan_edited)(void *ud, const char *content);    /* after an in-overlay delete / undo */
+    void (*on_feedback)(void *ud, const char *feedback);      /* Refine feedback markdown ("" = none) */
+    void (*on_annotation_state)(void *ud, const json_t *state);
+    void (*on_slider)(void *ud, int index);
+    void *ud;
+} ui_plan_review_cb_t;
+ui_plan_review_t *ui_plan_review_new(tui_t *tui, const char *plan, const ui_plan_review_opts_t *o,
+                                     const ui_plan_review_cb_t *cb);
+tui_component_t *ui_plan_review_component(ui_plan_review_t *p);
+void ui_plan_review_set_plan(ui_plan_review_t *p, const char *plan); /* external-editor round trip */
+void ui_plan_review_set_annotation_draft(ui_plan_review_t *p, const char *text);
+void ui_plan_review_set_slider(ui_plan_review_t *p, int index);
+bool ui_plan_review_select(ui_plan_review_t *p, const char *label); /* commit like Enter; false if refused */
+
+/* "Save and quit" path prompt (overlays/plan-save-overlay.ts); done(NULL) on cancel */
+typedef struct ui_plan_save ui_plan_save_t;
+ui_plan_save_t *ui_plan_save_new(const char *suggested, void (*done)(void *ud, const char *path), void *ud);
+tui_component_t *ui_plan_save_component(ui_plan_save_t *s);
+void ui_plan_save_set_suggested(ui_plan_save_t *s, const char *path);
+
 /* ---------- login.c ---------- */
 
 enum { UI_SEL_IGNORED, UI_SEL_HANDLED, UI_SEL_PICK, UI_SEL_CANCEL };

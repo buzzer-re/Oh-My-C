@@ -595,6 +595,7 @@ void agent_append_message(agent_t *a, json_t *msg) {
 }
 
 void agent_abort(agent_t *a) { a->cancel = 1; }
+void agent_abort_next_silently(agent_t *a) { a->silent_abort_next = 1; }
 
 void agent_steer(agent_t *a, json_t *msg) {
     pthread_mutex_lock(&a->mu);
@@ -715,7 +716,18 @@ static json_t *stream_assistant(agent_t *a, int *ttsr_abort, json_t **cursor_res
     /* Cursor runs its tools through exec frames mid-stream; they execute here as local tools */
     ai_cursor_exec_t bridge = {.run = cursor_bridge_run, .result = cursor_bridge_result, .ud = &s};
     if (a->model->api && strcmp(a->model->api, "cursor-agent") == 0 && !opts.cursor_exec) opts.cursor_exec = &bridge;
+    bool silent = a->silent_abort_next;
+    if (silent) {
+        a->silent_abort_next = 0;
+        a->cancel = 1;
+    }
     json_t *msg = ai_stream(a->model, &ctx, &opts, on_ai_event, &s);
+    if (silent && str_eq(json_get_str(msg, "stopReason"), "aborted")) {
+        /* SILENT_ABORT_MARKER + AIError.create(AIError.Flag.SilentAbort) */
+        json_set_str(msg, "errorMessage", "__omp.silent_abort__");
+        json_set_int(msg, "errorId", 33558528);
+    }
+    if (silent) a->cancel = 0; /* internal transition: later side requests must not inherit the abort */
     if (!s.started) emit_message(a, AGENT_EV_MESSAGE_START, msg);
     *ttsr_abort = s.abort_requested;
     *cursor_results = s.cursor_results;
@@ -1082,6 +1094,7 @@ static void run_loop(agent_t *a, json_t *new_messages) {
         break;
     }
     agent_event_t ee = {.type = AGENT_EV_AGENT_END, .messages = run_msgs};
+    a->silent_abort_next = 0;
     a->running = false;
     emit(a, &ee);
     json_free(run_msgs);

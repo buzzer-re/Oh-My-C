@@ -121,6 +121,7 @@ shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, 
 | `settings.c` | `/settings` from omp's own registry dump (`assets/tui/settings-ui.json`) | `overlays/settings-selector.ts`, `components/settings-list.ts` |
 | `ask.c` | the `ask` tool's dialog in the composer's place | `overlays/ask-dialog.ts`, `hook-editor.ts` |
 | `overlays.c` | selector host, thinking selector, `/hotkeys` report page | `overlays/{thinking-selector,report-panel}.ts`, `hotkeys-markdown.ts` |
+| `planreview.c` | fullscreen Plan Review (sections, Contents sidebar, delete/undo, annotations, options, model-tier slider) and the "Save and quit" path prompt | `overlays/{plan-review-overlay,plan-toc,plan-save-overlay}.ts`, `chrome/overlay-box.ts` split frame |
 | `appearance.c`, `widgets.c`, `slash.c` | theme/glyph/color-blind state, box chrome and key hints, slash-command metadata | `theme/theme.ts`, `chrome/overlay-box.ts`, `slash-commands/builtin-*.ts` |
 
 Tool card renderers in `src/ui/tools/` are pure functions from a `tc_call_t` snapshot (args, result

@@ -75,8 +75,9 @@ typedef struct tool_env {
      * answers keyed by id or NULL with *err (owned); usage accumulates [input, output, cost] (set by app) */
     json_t *(*judge)(struct tool_env *env, const json_t *state, const json_t *questions, volatile sig_atomic_t *cancel,
                      double usage[3], char **err);
-    /* write to xd://propose (plan approval); returns owned result text, sets *is_error */
-    char *(*propose_plan)(struct tool_env *env, const char *content, bool *is_error);
+    /* write to xd://propose (plan approval) with the trimmed plan title; returns owned result text, sets
+     * *is_error and *details (owned PlanApprovalDetails {planFilePath, title, planExists} or NULL) */
+    char *(*propose_plan)(struct tool_env *env, const char *title, bool *is_error, json_t **details);
     /* spawn a subagent: returns owned final text; used by task tool (set by app) */
     char *(*run_subagent)(struct tool_env *env, const char *agent_name, const char *assignment, const char *context,
                           json_t **out_details, volatile sig_atomic_t *cancel);

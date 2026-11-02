@@ -1071,7 +1071,7 @@ static void composer_render(tui_editor_t *ed, int width, strvec_t *out) {
             } else {
                 sb_appendn(&d, text, cpos);
                 sb_append(&d, TUI_CURSOR_MARKER);
-                sb_append(&d, "\x1b[7m \x1b[0m");
+                sb_append(&d, ed->eol_cursor ? ed->eol_cursor : "\x1b[7m \x1b[0m");
                 dw += 1;
                 int avail = MAX(0, lcw - dw);
                 if (ph && avail - phw >= PLACEHOLDER_MIN_GAP) {

@@ -267,18 +267,46 @@ such as `🧪 FLAKY: Fix flaky park tests`. This reuses the prompt cache. Low-si
 
 ## Plan mode
 
-`--plan-mode`, `/plan`, `plan.defaultOnStartup` or the API option enable it. The system prompt gains
-`plan-mode-active.md`, and the `before_tool` hook enforces a read-only working tree:
+`src/coding/planmode.c` holds the state; the TUI flow is in `src/modes/interactive.c` and the review
+overlay in `src/ui/planreview.c`. `/plan`, `plan.defaultOnStartup` (fresh interactive sessions only),
+omc's `--plan-mode` flag, ACP `session/set_mode` or the API option enter it. Entering appends a
+`mode_change` entry (`plan`, `data.planFilePath`, default `local://PLAN.md`) and, interactively,
+switches to the `plan` role model (restored on exit). Resuming re-enters the mode recorded by the last
+`mode_change` on the branch. The system prompt gains `plan-mode-active.md`, and the `before_tool` hook
+enforces a read-only working tree:
 
 - `write` only to `local://…` or `xd://propose`;
 - `edit` only on `local://` files;
 - `bash` commands that look state-changing (rm, mv, git commit/push/checkout, package installs,
   `sed -i`, redirections to files, ...) are refused.
 
-Plans live under `local://<slug>-plan.md` (the session's `local/` dir). Writing the plan path to
-`xd://propose` asks the user through the `ask` dialog (approved automatically when no UI can
-answer). On "Approve and execute", plan mode is switched off and the agent continues with
-`plan-mode-approved.md`.
+A plan turn that ends in plain text gets the decision reminder (a developer message) and one more
+turn with `tool_choice: required`, at most three times before a user turn, `ask` or a proposal.
+
+**Proposal.** The agent writes `local://<slug>-plan.md`, then writes the slug to `xd://propose`. The
+plan is resolved like omp's `resolveApprovedPlan` (supplied slug, a state plan the scan cannot see,
+`local://*plan.md` newest first, the state plan) and the write result carries
+`details.xdev = {tool: "propose", mode: "execute", args: {title}, inner: {planFilePath, title, planExists}}`.
+What happens next depends on the host:
+
+- **TUI** (`plan_review_ui`): the result is `Plan ready for review.` and the next model request is
+  aborted as an internal transition (`agent_abort_next_silently`: the empty aborted message is stamped
+  `__omp.silent_abort__`). Once the run settles the reviewed path is promoted into the plan state and
+  the Plan Review overlay opens on the alternate screen. Its choices: *Approve and execute* (new
+  session, local artifacts copied, plan rewritten there), *Approve and compact context* (compaction
+  with `plan-mode-compact-instructions.md`), *Approve and keep context* (disabled above 95% usage),
+  *Refine plan* (the annotation/deletion feedback becomes the next prompt) and *Save and quit* (path
+  prompt, write, exit plan mode, new session). Approvals exit plan mode, apply the slider's role model,
+  autosave (`plan.autosave`), name an unnamed session after the plan and run the hidden
+  `plan-mode-approved.md` developer prompt; the overlay stays up (`— submitting…`) until then.
+- **No review surface** (print, RPC, ACP): approved at once (`Plan approved at …`), the plan becomes
+  the reference, ACP reports `current_mode_update`.
+- **`--plan-yolo`**: the plan phase is armed before the first prompt; the first proposal autosaves,
+  leaves plan mode, switches to `--plan-yolo-into` (default `@smol`) and steers `plan-yolo-handoff.md`.
+
+After approval the plan file is the session's plan reference: `plan-mode-reference.md` is injected
+(hidden) once per history rewrite (new session, compaction) unless the approval prompt already carried
+it.
 
 ## Checkpoint and rewind
 

@@ -146,6 +146,7 @@ struct agent {
     json_t *steering;   /* queued user messages delivered mid-run */
     json_t *follow_up;  /* queued messages delivered after the run would stop */
     volatile sig_atomic_t cancel;
+    volatile sig_atomic_t silent_abort_next; /* abort the next model request as an internal transition */
     bool running;
     json_t *streaming_message; /* borrowed while streaming */
     int max_turns;             /* 0 => unlimited */
@@ -173,6 +174,10 @@ int agent_prompt(agent_t *a, json_t *new_messages);
 /* Continue from current history without new messages (e.g., retry/resume). */
 int agent_continue(agent_t *a);
 void agent_abort(agent_t *a);
+/* Abort the next model request of the running loop as an expected internal transition (omp
+ * markPlanInternalAbortPending + abort): the aborted assistant message is stamped with
+ * errorMessage "__omp.silent_abort__" so no abort line renders. */
+void agent_abort_next_silently(agent_t *a);
 void agent_steer(agent_t *a, json_t *msg);      /* owned */
 void agent_follow_up(agent_t *a, json_t *msg);  /* owned */
 void agent_clear_queues(agent_t *a);

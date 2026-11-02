@@ -122,6 +122,7 @@ struct tui_editor {
     char text_fg[32];    /* foreground escape for typed text ("" = terminal default) */
     int theme_padding_x; /* theme's editor padding request (-1 = unset) */
     bool use_terminal_cursor; /* park the hardware cursor instead of drawing a cursor cell */
+    const char *eol_cursor;   /* one-column end-of-line caret glyph (theme inputCursor); NULL = reverse-video cell */
 };
 
 tui_editor_t *tui_editor_new(void);

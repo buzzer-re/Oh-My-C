@@ -61,6 +61,11 @@ static void notice_stderr(void *ud, const char *level, const char *text) {
 
 int run_print_mode(app_t *a, const print_opts_t *o) {
     text_ud_t tu = {.print_thoughts = o->print_thoughts};
+    /* plan.defaultOnStartup needs a review surface; the headless plan flow is --plan-yolo */
+    if (!a->plan_mode && !a->plan_yolo_target && app_plan_should_start(a))
+        fputs("Note: plan.defaultOnStartup is ignored in print mode (no interactive surface to review the plan). Use "
+              "--plan-yolo for a headless plan flow.\n",
+              stderr);
     if (o->json) {
         agent_subscribe(a->agent, json_listener, NULL);
         json_t *hdr = json_obj();

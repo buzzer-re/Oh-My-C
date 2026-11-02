@@ -20,6 +20,7 @@ catalog or auth symbols and run without the rest of the program.
 | `test_tui` | ANSI width/slicing, components, editor, keys, fuzzy, markdown, renderer; golden markdown/thinking/user-bubble captures from omp (`tests/tui/golden`) |
 | `test_chrome` | welcome banner and status band against omp captures (`tests/fixtures/chrome`) |
 | `test_toolcards` | tool card renderers against omp captures (`tests/fixtures/toolcards`) |
+| `test_planreview` | plan review overlay against an omp capture (`tests/fixtures/planreview`), section delete/undo feedback, annotations, option commit |
 | `test_outsink` | OutputSink/output-meta port against strings captured from omp 18.14.2 |
 | `test_providers_ag` | Anthropic and Google request shaping, recorded SSE streams |
 | `test_providers_oai` | Chat Completions, Responses (Azure, Codex), Ollama |
@@ -120,6 +121,7 @@ model, 120 columns unless noted):
   (`test_tui`)
 - `tests/fixtures/chrome/*.ansi`: welcome and status band (`test_chrome`)
 - `tests/fixtures/toolcards/*`: tool cards (`test_toolcards`)
+- `tests/fixtures/planreview/`: plan review overlay and its plan (`test_planreview`)
 
 To refresh one: reproduce the screen with `compare.sh`, capture omp with `shot`, cut it with
 `mkgolden.py`, and confirm that omc's rendering matches before committing.

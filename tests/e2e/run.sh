@@ -181,9 +181,8 @@ kill $OPID $LPID 2>/dev/null; rm -f "$T/agent/mcp.json"
 # persistent bash: state survives across calls in one session
 check "bash persists"  "FOO=kept"  bash -c "( printf '%s\n' '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"bash:export FOO=kept\"}'; sleep 2; printf '%s\n' '{\"id\":\"2\",\"type\":\"prompt\",\"message\":\"bash:echo FOO=\$FOO\"}'; sleep 2 ) | '$B' -m mock/mock-1 --mode rpc"
 check "bash exit code" "exited with code 3"  "$B" bash 'exit 3'
-# plan mode: read-only gating, local:// plan, xd://propose approval (auto-approved without a UI)
+# plan mode: read-only gating (approval checks below)
 check "plan blocks"    "working tree is read-only"  "$B" -m mock/mock-1 --plan-mode -p "write:real.txt:x"
-check "plan approve"   "approved. Plan mode ended"  bash -c "( printf '%s\n' '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"call:write:{\\\"path\\\":\\\"local://p-plan.md\\\",\\\"content\\\":\\\"# P\\\"}\"}'; sleep 2; printf '%s\n' '{\"id\":\"2\",\"type\":\"prompt\",\"message\":\"call:write:{\\\"path\\\":\\\"xd://propose\\\",\\\"content\\\":\\\"p\\\"}\"}'; sleep 3 ) | '$B' -m mock/mock-1 --plan-mode --mode rpc"
 # eval (python kernel) when python3 is available
 if command -v python3 >/dev/null; then
     check "eval python"    "Tool said: 42"  "$B" -m mock/mock-1 -p 'call:eval:{"language":"py","code":"6*7"}'
@@ -235,6 +234,14 @@ rm -f "$T/agent/config.yml"
 # RPC: host-implemented tools, tree navigation, paging
 check "rpc host tool"  "Tool said: host says hi"  python3 -I "$ROOT/tests/e2e/rpc_client.py" "$B"
 check "rpc navigate"   '"editorText": "second"'   python3 -I "$ROOT/tests/e2e/rpc_client.py" "$B"
+# plan mode without a review surface: xd://propose auto-approves (ACP-without-elicitation semantics)
+check "plan propose"   'Tool said: Plan approved at local://retry-plan.md. Plan mode exited; proceed with the implementation.' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-mode
+check "plan propose dispatch" '"xdev": {"args": {"title": "retry"}, "inner": {"planExists": true, "planFilePath": "local://retry-plan.md", "title": "retry"}, "mode": "execute", "tool": "propose"}' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-mode
+check "plan propose off" 'No plan is awaiting approval' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B"
+# --plan-yolo: plan phase first, approved on the first propose, then implemented on the hand-off model
+check "plan yolo"      '"tool": "propose"}} Plan approved. Implementing now with mock-1.' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-yolo --plan-yolo-into mock/mock-1
+check "plan yolo into" '--plan-yolo-into requires --plan-yolo' "$B" -m mock/mock-1 --plan-yolo-into mock/mock-1 -p hi
+check "plan yolo model" 'Model "nope/none" not found' "$B" -m mock/mock-1 --plan-yolo --plan-yolo-into nope/none -p hi
 # async jobs: background bash delivered as a follow-up; wait with nothing running returns at once
 : > "$T/req.jsonl"
 check "async bash"     "Backgrounded as job bg_1"  bash -c "'$B' -m mock/mock-1 --mode json -p 'call:bash:{\"command\":\"sleep 1; echo bgdone\",\"async\":true}' | grep -o 'Backgrounded as job bg_1'"

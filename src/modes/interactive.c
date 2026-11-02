@@ -21,6 +21,15 @@
 #include "tui/theme.h"
 
 #include <pthread.h>
+#include <ctype.h>
+#include <dirent.h>
+#include <errno.h>
+#include <sys/wait.h>
+#include "ui/modelbrowser.h"
+#include "ui/tools/tc.h"
+#include "coding/title.h"
+
+static void maybe_plan_approval(ui_t *u, const char *tool, const json_t *result, bool is_error);
 
 /* ---------- agent events -> UI ---------- */
 
@@ -107,9 +116,12 @@ static void ui_apply_event(void *ud) {
         free(v->output);
         v->output = e->out;
         e->out = NULL;
+        json_t *pres = e->type == AGENT_EV_TOOL_END && u->app->plan_review_ui ? json_clone(e->result) : NULL;
         toolcard_result(u, v, e->id, e->result, e->type != AGENT_EV_TOOL_END, e->is_error);
         e->result = NULL;
         if (e->type == AGENT_EV_TOOL_END) hmap_del(&u->tools, e->id);
+        if (pres) maybe_plan_approval(u, e->name, pres, e->is_error);
+        json_free(pres);
         break;
     }
     case AGENT_EV_AGENT_END:
@@ -266,10 +278,12 @@ static void goal_continue_cb(void *ud) {
     free(c);
 }
 
+static void plan_exec_resume(ui_t *u);
 static void worker_done(void *ud) {
     ui_t *u = ud;
     pthread_join(u->worker, NULL);
     u->worker_running = false;
+    plan_exec_resume(u);
     if (u->goal_cont) tui_add_timer(u->tui, 800, false, goal_continue_cb, u);
     tui_request_render(u->tui);
 }
@@ -404,6 +418,26 @@ static void start_prompt(ui_t *u, const char *text) {
     }
 }
 
+/* #runNewSessionFlow: reset the transcript and present `✔ New session started` */
+static void ui_new_session_banner(ui_t *u) {
+    tui_container_clear(u->chat);
+    char *l = xasprintf("%s New session started", tui_sym("status.success"));
+    char *t = tui_fgs(NULL, TUI_TC_ACCENT, l);
+    tui_container_add(u->chat, &tui_text_new(t, 1, 1)->base);
+    free(t);
+    free(l);
+    tui_request_full_render(u->tui);
+}
+
+/* #reconcileModeFromSession: re-enter plan mode recorded in the session (#enterPlanMode's status) */
+static void ui_plan_restore(ui_t *u) {
+    if (app_plan_restore_from_session(u->app) == 1) {
+        char *m = xasprintf("Plan mode enabled. Plan file: %s", u->app->plan_file);
+        add_notice(u, "info", m);
+        free(m);
+    }
+}
+
 /* ---------- pickers ---------- */
 
 static void picker_close(ui_t *u) {
@@ -446,6 +480,7 @@ void ui_resume_session(ui_t *u, const char *path) {
     else {
         reload_chat(u);
         add_notice(u, "info", "Session resumed");
+        ui_plan_restore(u);
     }
     free(err);
     tui_request_render(u->tui);
@@ -542,6 +577,665 @@ static json_t *ui_ask(void *ud, const json_t *questions) {
     u->ask_questions = NULL;
     pthread_mutex_unlock(&u->mu);
     return ans;
+}
+
+/* ---------- plan approval (InteractiveMode.handlePlanApproval / #approvePlan / #savePlanAndQuit) ---------- */
+
+#define PLAN_SAVE_AND_QUIT "Save and quit"
+#define PLAN_KEEP_CONTEXT_INDEX 2
+#define PLAN_KEEP_DISABLE_PERCENT 95.0
+
+typedef struct {
+    ui_t *u;
+    ui_plan_review_t *ov;
+    bool open, committed;
+    char *path, *title, *edited, *feedback, *keep_label, *ann_key, *choice;
+    app_role_model_t *cycle;
+    size_t ncycle;
+    int start_tier, sel_tier;
+    bool slider;
+    bool exec_pending; /* approval waiting for the aborted run to finish */
+    ui_plan_save_t *save;
+    char *save_content;
+} plan_review_t;
+
+static plan_review_t g_pr;
+static char *g_pending_review_path, *g_pending_review_title;
+
+typedef struct {
+    ui_t *u;
+    char *label;
+} pr_choice_t;
+
+static json_t *g_plan_ann; /* resolved plan path -> PlanReviewAnnotationState */
+
+static void plan_status(ui_t *u, const char *text) { add_notice(u, "info", text); }
+
+/* $VISUAL / $EDITOR on a temp file with the TUI stopped (utils/external-editor.ts openInEditor); owned
+ * result, NULL when unchanged / failed */
+static char *ui_external_edit(ui_t *u, const char *text, const char *ext, bool *no_editor) {
+    const char *ed = getenv("VISUAL");
+    if (!ed || !*ed) ed = getenv("EDITOR");
+    *no_editor = !ed || !*ed;
+    if (*no_editor) return NULL;
+    char tmpl[] = "/tmp/omc-edit-XXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0) return NULL;
+    close(fd);
+    char *path = xasprintf("%s%s", tmpl, ext ? ext : ".md");
+    rename(tmpl, path);
+    fs_write(path, text, strlen(text));
+    tui_term_stop(tui_term(u->tui));
+    tui_term_set_loop_active(false);
+    char *cmd = xasprintf("%s \"$1\"", ed);
+    const char *argv[] = {"/bin/sh", "-c", cmd, "sh", path, NULL};
+    pid_t pid = fork();
+    int status = -1;
+    if (pid == 0) {
+        execv("/bin/sh", (char *const *)argv);
+        _exit(127);
+    }
+    if (pid > 0) waitpid(pid, &status, 0);
+    tui_term_set_loop_active(true);
+    tui_term_start(tui_term(u->tui));
+    tui_term_query_size(tui_term(u->tui));
+    if (tui_overlay_visible(u->tui) && g_pr.open) tui_term_puts(tui_term(u->tui), "\x1b[?1049h");
+    tui_request_full_render(u->tui);
+    char *out = NULL;
+    if (pid > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        size_t n;
+        out = fs_read(path, &n);
+    }
+    unlink(path);
+    free(path);
+    free(cmd);
+    return out;
+}
+
+static void plan_review_free_state(void) {
+    free(g_pr.path);
+    free(g_pr.title);
+    free(g_pr.edited);
+    free(g_pr.feedback);
+    free(g_pr.keep_label);
+    free(g_pr.ann_key);
+    free(g_pr.choice);
+    app_role_model_cycle_free(g_pr.cycle, g_pr.ncycle);
+    ui_t *u = g_pr.u;
+    memset(&g_pr, 0, sizeof g_pr);
+    g_pr.u = u;
+}
+
+static void plan_review_hide(ui_t *u) {
+    if (!g_pr.open) return;
+    g_pr.open = false;
+    tui_component_t *c = ui_plan_review_component(g_pr.ov);
+    tui_overlay_hide(u->tui, c);
+    tui_term_puts(tui_term(u->tui), "\x1b[?1049l");
+    tui_set_focus(u->tui, &u->editor->base);
+    tui_request_full_render(u->tui);
+    tui_component_destroy(c);
+    g_pr.ov = NULL;
+}
+
+static void pr_cb_copy(void *ud, const char *content) {
+    ui_t *u = ud;
+    tui_term_copy_osc52(tui_term(u->tui), content, strlen(content));
+    plan_status(u, "Copied plan to clipboard");
+}
+
+static void pr_cb_external(void *ud) {
+    ui_t *u = ud;
+    char *abs = app_plan_path(u->app, g_pr.path);
+    size_t n;
+    char *cur = fs_read(abs, &n);
+    if (!cur) {
+        char *m = xasprintf("Plan file not found at %s", g_pr.path);
+        add_notice(u, "error", m);
+        free(m);
+        free(abs);
+        return;
+    }
+    bool none = false;
+    const char *ext = path_ext(abs);
+    char *r = ui_external_edit(u, cur, *ext ? ext : ".md", &none);
+    if (none) add_notice(u, "warning", "No editor configured. Set $VISUAL or $EDITOR environment variable.");
+    else if (r) {
+        fs_write_atomic(abs, r, strlen(r), 0644);
+        if (g_pr.ov) ui_plan_review_set_plan(g_pr.ov, r);
+        plan_status(u, "Plan updated in external editor.");
+    }
+    free(r);
+    free(cur);
+    free(abs);
+}
+
+static void pr_cb_annotation_editor(void *ud, const char *draft) {
+    ui_t *u = ud;
+    bool none = false;
+    char *r = ui_external_edit(u, draft, ".md", &none);
+    if (none) add_notice(u, "warning", "No editor configured. Set $VISUAL or $EDITOR environment variable.");
+    else if (r && g_pr.ov) {
+        size_t n = strlen(r);
+        if (n && r[n - 1] == '\n') r[n - 1] = 0; /* trimTrailingNewline */
+        ui_plan_review_set_annotation_draft(g_pr.ov, r);
+    }
+    free(r);
+}
+
+static void pr_cb_edited(void *ud, const char *content) {
+    ui_t *u = ud;
+    free(g_pr.edited);
+    g_pr.edited = xstrdup(content);
+    app_plan_write(u->app, g_pr.path, content);
+}
+
+static void pr_cb_feedback(void *ud, const char *fb) {
+    (void)ud;
+    free(g_pr.feedback);
+    g_pr.feedback = xstrdup(fb);
+}
+
+static void pr_cb_ann_state(void *ud, const json_t *st) {
+    (void)ud;
+    if (!g_plan_ann) g_plan_ann = json_obj();
+    if (json_len(json_get(st, "annotations")) > 0) json_set(g_plan_ann, g_pr.ann_key, json_clone(st));
+    else json_del(g_plan_ann, g_pr.ann_key);
+}
+
+static void pr_cb_slider(void *ud, int index) {
+    (void)ud;
+    g_pr.sel_tier = index;
+}
+
+/* ----- approve ----- */
+
+typedef struct {
+    ui_t *u;
+    char *path, *title, *content;
+    bool preserve, compact;
+    app_role_model_t *exec; /* borrowed from g_pr.cycle copy below (owned fields) */
+    app_role_model_t exec_copy;
+    bool has_exec;
+} plan_exec_t;
+
+static void post_status(ui_t *u, const char *text) { ui_notice(u, "info", text); }
+
+static void plan_exec_clear_chat(void *ud) { ui_new_session_banner(ud); }
+
+static void plan_exec_hide(void *ud) {
+    ui_t *u = ud;
+    plan_review_hide(u);
+    plan_review_free_state();
+    tui_request_render(u->tui);
+}
+
+static void copy_dir(const char *from, const char *to) {
+    DIR *d = opendir(from);
+    if (!d) return;
+    fs_mkdir_p(to, 0700);
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char *s = path_join(from, de->d_name), *t = path_join(to, de->d_name);
+        if (fs_is_dir(s)) copy_dir(s, t);
+        else if (fs_is_file(s)) {
+            size_t n;
+            char *c = fs_read(s, &n);
+            if (c) fs_write_atomic(t, c, n, 0644);
+            free(c);
+        }
+        free(s);
+        free(t);
+    }
+    closedir(d);
+}
+
+static void *plan_exec_main(void *p) {
+    plan_exec_t *x = p;
+    ui_t *u = x->u;
+    app_t *a = u->app;
+    /* #exitPlanMode({silent: true}) */
+    app_exit_plan_mode(a, false);
+    if (!x->preserve) {
+        /* handleClearCommand + copyLocalArtifacts + rewrite the plan into the new local root */
+        char *old_local = a->env->local_dir ? xstrdup(a->env->local_dir) : NULL;
+        app_new_session(a);
+        tui_post(u->tui, plan_exec_clear_chat, u);
+        if (old_local && a->env->local_dir) copy_dir(old_local, a->env->local_dir);
+        free(old_local);
+        app_plan_write(a, x->path, x->content);
+    } else if (x->compact) {
+        json_t *ctx = json_obj();
+        json_set_str(ctx, "planFilePath", x->path);
+        char *instr = prompt_render("coding-agent/prompts/system/plan-mode-compact-instructions.md", ctx);
+        json_free(ctx);
+        app_set_plan_reference(a, x->path);
+        char *err = NULL;
+        if (app_compact(a, instr, &err) != 0) {
+            char *m = xasprintf("Compaction failed: %s", err ? err : "compaction failed");
+            ui_notice(u, "error", m);
+            free(m);
+        }
+        free(err);
+        free(instr);
+    }
+    app_set_plan_reference(a, x->path);
+    char *aerr = NULL;
+    char *saved = app_plan_autosave(a, x->title, x->content, &aerr);
+    if (saved) {
+        char *sp = tc_shorten_path(saved), *m = xasprintf("Saved plan to %s.", sp);
+        post_status(u, m);
+        free(m);
+        free(sp);
+    } else if (aerr) {
+        char *m = xasprintf("Failed to autosave plan: %s", aerr);
+        ui_notice(u, "warning", m);
+        free(m);
+    }
+    free(saved);
+    free(aerr);
+    if (x->has_exec) { /* #applyPlanExecutionModel */
+        app_apply_role_model(a, &x->exec_copy);
+        char *m = xasprintf("Continuing with %s: %s", x->exec_copy.role,
+                            x->exec_copy.model->name && *x->exec_copy.model->name ? x->exec_copy.model->name : x->exec_copy.model->id);
+        post_status(u, m);
+        free(m);
+    }
+    /* seed an auto name from the plan title when the session has none */
+    char *seeded = app_plan_humanize_title(x->title);
+    if (*seeded && a->session && !a->session->title) session_set_title(a->session, seeded, "auto");
+    free(seeded);
+    a->plan_reference_sent = true; /* markPlanReferenceSent: the synthetic prompt carries the plan */
+    char *prompt = app_plan_approved_prompt(a, x->path, x->content, x->preserve);
+    tui_post(u->tui, plan_exec_hide, u);
+    size_t before = json_len(a->agent->messages);
+    app_prompt_synthetic(a, prompt);
+    free(prompt);
+    json_t *run = json_arr();
+    pthread_mutex_lock(&a->agent->mu);
+    for (size_t i = before; i < json_len(a->agent->messages); i++) json_push(run, json_clone(json_at(a->agent->messages, i)));
+    pthread_mutex_unlock(&a->agent->mu);
+    const char *ctype = NULL;
+    char *cont = app_after_run(a, run, "plan-approved", "interactive", &ctype);
+    json_free(run);
+    free(u->goal_cont);
+    u->goal_cont = cont;
+    u->cont_type = ctype;
+    tui_post(u->tui, worker_done, u);
+    free(x->path);
+    free(x->title);
+    free(x->content);
+    free(x->exec_copy.role);
+    free(x);
+    return NULL;
+}
+
+static void plan_start_exec(ui_t *u) {
+    g_pr.exec_pending = false;
+    app_t *a = u->app;
+    const char *choice = g_pr.choice;
+    char *content = g_pr.edited ? xstrdup(g_pr.edited) : app_plan_read(a, g_pr.path);
+    if (g_pr.edited) app_plan_write(a, g_pr.path, g_pr.edited);
+    if (!content) {
+        char *m = xasprintf("Plan file not found at %s", g_pr.path);
+        add_notice(u, "error", m);
+        free(m);
+        plan_review_hide(u);
+        plan_review_free_state();
+        return;
+    }
+    plan_exec_t *x = xcalloc(1, sizeof *x);
+    x->u = u;
+    x->path = xstrdup(g_pr.path);
+    x->title = xstrdup(g_pr.title);
+    x->content = content;
+    x->preserve = strcmp(choice, "Approve and execute") != 0;
+    x->compact = !strcmp(choice, "Approve and compact context");
+    /* the tier is applied only when the slider was shown and moved off the model that already runs */
+    /* the model #exitPlanMode restores: the pre-plan one when the plan role took over */
+    const ai_model_t *rm = a->plan_prev_set ? a->plan_prev_model : a->model;
+    ai_effort_t rt = a->plan_prev_set ? a->plan_prev_thinking : a->thinking;
+    int restored = -1;
+    for (size_t i = 0; i < g_pr.ncycle && restored < 0; i++)
+        if (g_pr.cycle[i].model == rm && (!g_pr.cycle[i].explicit_thinking || g_pr.cycle[i].thinking == rt)) restored = (int)i;
+    if (g_pr.slider && g_pr.sel_tier != restored && g_pr.sel_tier >= 0 && (size_t)g_pr.sel_tier < g_pr.ncycle) {
+        x->has_exec = true;
+        x->exec_copy = g_pr.cycle[g_pr.sel_tier];
+        x->exec_copy.role = xstrdup(g_pr.cycle[g_pr.sel_tier].role);
+    }
+    if (g_plan_ann) json_del(g_plan_ann, g_pr.ann_key);
+    u->worker_running = true;
+    if (pthread_create(&u->worker, NULL, plan_exec_main, x) != 0) {
+        u->worker_running = false;
+        add_notice(u, "error", "failed to start agent thread");
+        free(x->path), free(x->title), free(x->content), free(x->exec_copy.role), free(x);
+        plan_review_hide(u);
+        plan_review_free_state();
+    }
+}
+
+/* ----- save and quit ----- */
+
+static void plan_save_done_now(ui_t *u, const char *path);
+
+static void plan_save_done_posted(void *p) {
+    pr_choice_t *c = p;
+    plan_save_done_now(c->u, c->label);
+    free(c->label);
+    free(c);
+}
+
+/* the prompt is torn down by the answer: finish outside its key handler */
+static void plan_save_done(void *ud, const char *path) {
+    ui_t *u = ud;
+    pr_choice_t *c = xcalloc(1, sizeof *c);
+    c->u = u;
+    c->label = path ? xstrdup(path) : NULL;
+    tui_post(u->tui, plan_save_done_posted, c);
+}
+
+/* #promptPlanSavePath: a tiny-model topic (plan-filename.md) for the suggested name */
+typedef struct {
+    ui_t *u;
+    char *excerpt;
+    int gen;
+    char *result;
+} plan_name_job_t;
+
+static int g_plan_save_gen;
+
+static void plan_name_apply(void *p) {
+    plan_name_job_t *j = p;
+    if (j->result && g_pr.save && j->gen == g_plan_save_gen) {
+        char *fn = app_plan_save_file_name(j->result);
+        ui_plan_save_set_suggested(g_pr.save, fn);
+        free(fn);
+        tui_request_render(j->u->tui);
+    }
+    free(j->result);
+    free(j->excerpt);
+    free(j);
+}
+
+static void *plan_name_main(void *p) {
+    plan_name_job_t *j = p;
+    char *sys = prompt_render("coding-agent/prompts/system/plan-filename.md", NULL);
+    char *raw = app_generate_title_with(j->u->app, j->excerpt, sys);
+    j->result = raw ? title_normalize(raw) : NULL;
+    free(raw);
+    free(sys);
+    tui_post(j->u->tui, plan_name_apply, j);
+    return NULL;
+}
+
+static void plan_save_done_now(ui_t *u, const char *path) {
+    tui_component_t *c = ui_plan_save_component(g_pr.save);
+    tui_overlay_hide(u->tui, c);
+    tui_set_focus(u->tui, &u->editor->base);
+    char *sel = path ? xstrdup(path) : NULL;
+    char *content = g_pr.save_content;
+    g_pr.save_content = NULL;
+    tui_component_destroy(c);
+    g_pr.save = NULL;
+    app_t *a = u->app;
+    if (sel && content) {
+        char *dest = path_abs(sel, a->cwd);
+        char *sp = tc_shorten_path(dest);
+        if (fs_write_atomic(dest, content, strlen(content), 0644) != 0) {
+            char *m = xasprintf("Failed to save plan to %s: %s", sp, strerror(errno));
+            add_notice(u, "error", m);
+            free(m);
+        } else {
+            app_exit_plan_mode(a, false);
+            if (g_plan_ann && g_pr.ann_key) json_del(g_plan_ann, g_pr.ann_key);
+            app_new_session(a);
+            ui_new_session_banner(u);
+            char *m = xasprintf("Saved plan to %s.", sp);
+            plan_status(u, m);
+            free(m);
+        }
+        free(sp);
+        free(dest);
+    }
+    free(sel);
+    free(content);
+    plan_review_free_state();
+    tui_request_render(u->tui);
+}
+
+static void plan_save_and_quit(ui_t *u) {
+    char *content = g_pr.edited ? xstrdup(g_pr.edited) : app_plan_read(u->app, g_pr.path);
+    if (!content) {
+        char *m = xasprintf("Plan file not found at %s", g_pr.path);
+        add_notice(u, "error", m);
+        free(m);
+        plan_review_free_state();
+        return;
+    }
+    char *suggested = app_plan_save_file_name(g_pr.title);
+    g_pr.save_content = content;
+    g_pr.save = ui_plan_save_new(suggested, plan_save_done, u);
+    free(suggested);
+    /* excerpt: the first 6 non-empty trimmed lines */
+    sb_t ex = SB_INIT;
+    int taken = 0;
+    strvec_t lines = str_split(content, "\n");
+    for (size_t i = 0; i < lines.n && taken < 6; i++) {
+        char *t = str_trim(lines.v[i]);
+        if (*t) {
+            if (ex.len) sb_putc(&ex, '\n');
+            sb_append(&ex, t);
+            taken++;
+        }
+        free(t);
+    }
+    strvec_free(&lines);
+    if (ex.len) {
+        plan_name_job_t *j = xcalloc(1, sizeof *j);
+        j->u = u;
+        j->excerpt = sb_detach(&ex);
+        j->gen = ++g_plan_save_gen;
+        pthread_t th;
+        if (pthread_create(&th, NULL, plan_name_main, j) == 0) pthread_detach(th);
+        else {
+            free(j->excerpt);
+            free(j);
+        }
+    }
+    sb_free(&ex);
+    tui_overlay_opts_t o = {TUI_ANCHOR_BOTTOM, 0, 0, 0, 0};
+    tui_overlay_show(u->tui, ui_plan_save_component(g_pr.save), &o);
+    tui_request_render(u->tui);
+}
+
+/* ----- the choice ----- */
+
+static void pr_finish(ui_t *u, const char *choice) {
+    free(g_pr.choice);
+    g_pr.choice = choice ? xstrdup(choice) : NULL;
+    if (!choice) {
+        plan_review_hide(u);
+        plan_review_free_state();
+        return;
+    }
+    if (!strcmp(choice, PLAN_SAVE_AND_QUIT)) {
+        plan_review_hide(u);
+        plan_save_and_quit(u);
+        return;
+    }
+    if (!strcmp(choice, "Approve and execute") || !strcmp(choice, "Approve and compact context") ||
+        str_eq(choice, g_pr.keep_label)) {
+        /* the overlay stays up ("— submitting…") until the execution prompt is queued */
+        if (u->worker_running) g_pr.exec_pending = true;
+        else plan_start_exec(u);
+        return;
+    }
+    if (!strcmp(choice, "Refine plan")) {
+        char *fb = g_pr.feedback ? xstrdup(g_pr.feedback) : xstrdup("");
+        char *t = str_trim(fb);
+        bool has = *t;
+        free(t);
+        char *key = g_pr.ann_key ? xstrdup(g_pr.ann_key) : NULL;
+        plan_review_hide(u);
+        plan_review_free_state();
+        if (has) {
+            if (g_plan_ann && key) json_del(g_plan_ann, key);
+            if (u->worker_running) agent_follow_up(u->app->agent, msg_user_text(fb));
+            else start_prompt(u, fb);
+        } else plan_status(u, "Refine plan: enter a follow-up prompt.");
+        free(key);
+        free(fb);
+        return;
+    }
+    plan_review_hide(u);
+    plan_review_free_state();
+}
+
+/* the overlay may be torn down by the choice: finish on the next loop turn, outside its key handler */
+static void pr_finish_posted(void *p) {
+    pr_choice_t *c = p;
+    pr_finish(c->u, c->label);
+    free(c->label);
+    free(c);
+}
+
+static void pr_post_finish(ui_t *u, const char *label) {
+    pr_choice_t *c = xcalloc(1, sizeof *c);
+    c->u = u;
+    c->label = label ? xstrdup(label) : NULL;
+    tui_post(u->tui, pr_finish_posted, c);
+}
+
+static void pr_cb_pick(void *ud, const char *label) { pr_post_finish(ud, label); }
+static void pr_cb_cancel(void *ud) { pr_post_finish(ud, NULL); }
+
+static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) {
+    app_t *a = u->app;
+    if (!a->plan_mode) {
+        add_notice(u, "warning", "Plan mode is not active.");
+        return;
+    }
+    const char *path = plan_path && *plan_path ? plan_path : a->plan_file ? a->plan_file : "local://PLAN.md";
+    char *content = app_plan_read(a, path);
+    if (!content) {
+        char *m = xasprintf("Plan file not found at %s", path);
+        add_notice(u, "error", m);
+        free(m);
+        return;
+    }
+    if (g_pr.open || g_pr.save) {
+        free(content);
+        return;
+    }
+    plan_review_free_state();
+    g_pr.u = u;
+    g_pr.path = xstrdup(path);
+    g_pr.title = xstrdup(title ? title : "plan");
+    /* promote the reviewed path into plan-mode state (the next planning turn targets it) */
+    app_set_plan_file(a, path);
+    g_pr.ann_key = app_plan_path(a, path);
+
+    /* "Approve and keep context (~tokens / window)", disabled above 95% */
+    int64_t window = a->model ? a->model->context_window : 0;
+    int64_t used = a->last_context_tokens;
+    bool keep_disabled = false;
+    if (window > 0) {
+        char *t = ui_format_number((double)MAX(0, used)), *w = ui_format_number((double)window);
+        for (char *q = t; *q; q++) *q = (char)tolower((unsigned char)*q);
+        for (char *q = w; *q; q++) *q = (char)tolower((unsigned char)*q);
+        g_pr.keep_label = xasprintf("Approve and keep context (~%s / %s)", t, w);
+        free(t);
+        free(w);
+        keep_disabled = 100.0 * (double)used / (double)window > PLAN_KEEP_DISABLE_PERCENT;
+    } else g_pr.keep_label = xstrdup("Approve and keep context");
+    const char *options[] = {"Approve and execute", "Approve and compact context", g_pr.keep_label, "Refine plan",
+                             PLAN_SAVE_AND_QUIT};
+    int disabled[] = {PLAN_KEEP_CONTEXT_INDEX};
+
+    /* model-tier slider over the role models, starting on `default`; hidden with fewer than two */
+    int current = 0;
+    g_pr.ncycle = app_role_model_cycle(a, &g_pr.cycle, &current);
+    int def = -1;
+    for (size_t i = 0; i < g_pr.ncycle; i++)
+        if (!strcmp(g_pr.cycle[i].role, "default")) def = (int)i;
+    g_pr.start_tier = def >= 0 ? def : current;
+    g_pr.sel_tier = g_pr.start_tier;
+    g_pr.slider = g_pr.ncycle > 1;
+    const char **labels = xcalloc(MAX(1, g_pr.ncycle), sizeof *labels), **details = xcalloc(MAX(1, g_pr.ncycle), sizeof *details);
+    for (size_t i = 0; i < g_pr.ncycle; i++) {
+        labels[i] = g_pr.cycle[i].role;
+        details[i] = g_pr.cycle[i].model->name && *g_pr.cycle[i].model->name ? g_pr.cycle[i].model->name : g_pr.cycle[i].model->id;
+    }
+    char *cancel = ui_editor_key("tui.select.cancel"), *help = xasprintf("%s cancel", cancel);
+    char *edkey = ui_editor_key("app.editor.external");
+    ui_plan_review_opts_t o = {.prompt_title = "Plan mode - next step",
+                               .options = options,
+                               .noptions = ARRAY_LEN(options),
+                               .disabled = disabled,
+                               .ndisabled = keep_disabled ? 1 : 0,
+                               .help_text = help,
+                               .initial_index = 0,
+                               .slider_caption = "continue with",
+                               .segment_labels = labels,
+                               .segment_details = details,
+                               .nsegments = g_pr.slider ? g_pr.ncycle : 0,
+                               .slider_index = g_pr.start_tier,
+                               .external_editor_label = *edkey ? edkey : NULL,
+                               .annotation_state = g_plan_ann ? json_get(g_plan_ann, g_pr.ann_key) : NULL};
+    ui_plan_review_cb_t cb = {.on_pick = pr_cb_pick,
+                              .on_cancel = pr_cb_cancel,
+                              .on_copy = pr_cb_copy,
+                              .on_external_editor = pr_cb_external,
+                              .on_annotation_editor = pr_cb_annotation_editor,
+                              .on_plan_edited = pr_cb_edited,
+                              .on_feedback = pr_cb_feedback,
+                              .on_annotation_state = pr_cb_ann_state,
+                              .on_slider = pr_cb_slider,
+                              .ud = u};
+    g_pr.ov = ui_plan_review_new(u->tui, content, &o, &cb);
+    free(edkey);
+    free(help);
+    free(cancel);
+    free(labels);
+    free(details);
+    free(content);
+    g_pr.open = true;
+    /* fullscreen overlay on the alternate screen */
+    tui_term_puts(tui_term(u->tui), "\x1b[?1049h");
+    tui_overlay_opts_t oo = {TUI_ANCHOR_TOP, 0, 0, 0, 0};
+    tui_overlay_show(u->tui, ui_plan_review_component(g_pr.ov), &oo);
+    tui_request_full_render(u->tui);
+}
+
+/* tool_execution_end of `write xd://propose` in review mode: the XdevDispatch inner carries
+ * PlanApprovalDetails (event-controller.ts) */
+static void maybe_plan_approval(ui_t *u, const char *tool, const json_t *result, bool is_error) {
+    if (is_error || !str_eq(tool, "write")) return;
+    const json_t *x = json_get(json_get(result, "details"), "xdev");
+    if (!str_eq(json_get_str(x, "tool"), "propose") || !str_eq(json_get_str(x, "mode"), "execute")) return;
+    const json_t *in = json_get(x, "inner");
+    const char *path = json_get_str(in, "planFilePath"), *title = json_get_str(in, "title");
+    if (!path || !title || !json_is_bool(json_get(in, "planExists"))) return;
+    if (u->worker_running) { /* the aborted turn settles first (#abortPlanApprovalTurnSilently awaits it) */
+        free(g_pending_review_path);
+        free(g_pending_review_title);
+        g_pending_review_path = xstrdup(path);
+        g_pending_review_title = xstrdup(title);
+        return;
+    }
+    ui_plan_approval(u, path, title);
+}
+
+static void plan_exec_resume(ui_t *u) {
+    if (g_pr.exec_pending && !u->worker_running) plan_start_exec(u);
+    if (g_pending_review_path && !u->worker_running) {
+        char *p = g_pending_review_path, *t = g_pending_review_title;
+        g_pending_review_path = g_pending_review_title = NULL;
+        ui_plan_approval(u, p, t);
+        free(p);
+        free(t);
+    }
 }
 
 /* ---------- slash commands ---------- */
@@ -736,11 +1430,31 @@ static bool handle_command(ui_t *u, const char *line) {
             add_notice(u, r.level, r.text);
         }
         memory_cmd_result_free(&r);
-    } else if (!strcmp(cmd, "plan")) {
-        app_set_plan_mode(a, !a->plan_mode);
-        add_notice(u, "info", a->plan_mode ? "Plan mode on: read-only exploration; the agent proposes a plan for approval."
-                                           : "Plan mode off.");
-        if (*arg && a->plan_mode) start_prompt(u, arg);
+    } else if (!strcmp(cmd, "plan")) { /* handlePlanModeCommand */
+        if (a->plan_mode) {
+            if (u->worker_running) app_abort(a);
+            app_exit_plan_mode(a, true);
+            add_notice(u, "info", "Plan mode paused.");
+        } else if (a->plan_paused && !*arg) {
+            a->plan_paused = false;
+            a->plan_has_entered = false;
+            if (a->session) {
+                json_t *e = json_obj();
+                json_set_str(e, "type", "mode_change");
+                json_set_str(e, "mode", "none");
+                session_append_entry(a->session, e);
+            }
+            add_notice(u, "info", "Plan mode disabled.");
+        } else if (!settings_bool("plan.enabled", true)) {
+            add_notice(u, "warning", "Plan mode is disabled. Enable it in settings (plan.enabled).");
+        } else {
+            app_enter_plan_mode(a, NULL);
+            app_plan_apply_model(a);
+            char *m = xasprintf("Plan mode enabled. Plan file: %s", a->plan_file);
+            add_notice(u, "info", m);
+            free(m);
+            if (*arg) start_prompt(u, arg);
+        }
     } else if (!strcmp(cmd, "goal")) {
         goal_command(u, arg);
     } else if (!strcmp(cmd, "jobs")) {
@@ -944,8 +1658,7 @@ static bool handle_command(ui_t *u, const char *line) {
         }
     } else if (!strcmp(cmd, "new")) {
         app_new_session(a);
-        tui_container_clear(u->chat);
-        add_notice(u, "info", "New session started");
+        ui_new_session_banner(u);
     } else if (!strcmp(cmd, "resume")) {
         ui_overlay_session(u);
     } else if (!strcmp(cmd, "compact")) {
@@ -1270,6 +1983,14 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_set_key_hook(u.tui, key_hook, &u);
     /* replay resumed history */
     ui_chat_rebuild(&u);
+    if (json_len(a->session->entries)) ui_plan_restore(&u);
+    if (!a->plan_mode && !a->plan_yolo_target && app_plan_should_start(a)) { /* #applyPlanModeDefault */
+        app_enter_plan_mode(a, NULL);
+        app_plan_apply_model(a);
+        char *m = xasprintf("Plan mode enabled. Plan file: %s", a->plan_file);
+        add_notice(&u, "info", m);
+        free(m);
+    }
     agent_subscribe(a->agent, ui_listener, &u);
     a->notice = ui_notice;
     a->notice_ud = &u;
@@ -1278,6 +1999,13 @@ int run_interactive_mode(app_t *a, const char *initial) {
     a->env->ui.ask = ui_ask;
     a->env->ui.tool_frame = ui_tool_frame;
     a->env->ui.ud = &u;
+    app_set_plan_review_ui(a, true);
+    {
+        const strvec_t *ek = tui_keybindings_get(tui_keybindings_global(), "app.editor.external");
+        static const char *const CTRL_G[] = {"ctrl+g", NULL};
+        if (!ek) tui_keybindings_define(tui_keybindings_global(), "app.editor.external", CTRL_G);
+    }
+    g_pr.u = &u;
     job_t *init_job = NULL;
     if (initial) {
         init_job = xcalloc(1, sizeof(*init_job));
@@ -1302,6 +2030,9 @@ int run_interactive_mode(app_t *a, const char *initial) {
     a->wake = NULL;
     a->env->ui.ask = NULL;
     a->env->ui.tool_frame = NULL;
+    app_set_plan_review_ui(a, false);
+    if (g_pr.open) plan_review_hide(&u);
+    plan_review_free_state();
     if (u.picker && tui_overlay_visible(u.tui)) tui_overlay_hide(u.tui, &u.picker->base);
     tui_free(u.tui);
     tui_ac_default_free(ac);
