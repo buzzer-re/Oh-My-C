@@ -1,6 +1,11 @@
 /* components.c - Text, TruncatedText, Box, Spacer, Loader, SelectList */
 #include "tui/components.h"
 
+static bool g_tight;
+void tui_set_tight(bool on) { g_tight = on; }
+bool tui_tight(void) { return g_tight; }
+int tui_padding_x(int base) { return g_tight ? MAX(0, base - 1) : base; }
+
 #include "tui/fuzzy.h"
 #include "tui/symbols.h"
 

@@ -21,6 +21,10 @@ typedef struct {
 } tui_text_t;
 
 tui_text_t *tui_text_new(const char *text, int padding_x, int padding_y);
+/* tui.tight (setTuiTight / getPaddingX): components that honor it drop one column of horizontal padding */
+void tui_set_tight(bool on);
+bool tui_tight(void);
+int tui_padding_x(int base);
 void tui_text_set(tui_text_t *t, const char *text);
 void tui_text_set_bg(tui_text_t *t, int slot);
 

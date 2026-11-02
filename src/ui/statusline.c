@@ -1682,11 +1682,12 @@ static void working_row(ui_t *u, const char *message, int width, strvec_t *out) 
     }
     char *msg = shimmer(message, low, mid, high);
     sb_t b = SB_INIT;
-    sb_putc(&b, ' ');
+    int pad = tui_padding_x(1); /* the Loader's paddingX (tui.tight) */
+    tui_sb_spaces(&b, pad);
     sb_append(&b, spin);
     sb_putc(&b, ' ');
     sb_append(&b, msg);
-    int body_w = 1 + tui_visible_width(frame) + 1 + tui_visible_width(message);
+    int body_w = pad + tui_visible_width(frame) + 1 + tui_visible_width(message);
     char *trailer = ui_title_trailer(u);
     if (trailer) {
         int gap = width - body_w - tui_visible_width(trailer);

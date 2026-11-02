@@ -46,9 +46,10 @@ static const char *expand_key_hint(void) {
 /* "Text" component (pi-tui Text with paddingX 1, paddingY 0): styled text wrapped at width-2, each row
  * indented by one column */
 static void text_rows(strvec_t *out, const char *styled, int width) {
+    int pad = tui_padding_x(1); /* tui.tight drops the column */
     strvec_t w = {0};
-    tui_wrap_text_with_ansi(styled, MAX(1, width - 2), &w);
-    for (size_t i = 0; i < w.n; i++) strvec_push_own(out, xasprintf(" %s", w.v[i]));
+    tui_wrap_text_with_ansi(styled, MAX(1, width - 2 * pad), &w);
+    for (size_t i = 0; i < w.n; i++) strvec_push_own(out, xasprintf("%*s%s", pad, "", w.v[i]));
     strvec_free(&w);
 }
 
@@ -506,7 +507,7 @@ static char *thinking_display(const char *raw) {
 static void md_rows(strvec_t *o, const char *text, int width, bool thinking) {
     tui_md_opts_t mo;
     tui_md_opts_default(&mo);
-    mo.padding_x = 1;
+    mo.padding_x = tui_padding_x(1);
     if (thinking) {
         mo.text_slot = TUI_TC_THINKING_TEXT;
         mo.italic = true;
@@ -518,7 +519,8 @@ static void md_rows(strvec_t *o, const char *text, int width, bool thinking) {
 
 /* chrome/error-block.ts formatErrorBlock: rows for a WidthAwareText(paddingX 1) */
 static void error_block_rows(strvec_t *o, const char *message, int width, size_t max_rows, bool banner) {
-    int cw = MAX(1, width - 2);
+    int pad = tui_padding_x(1);
+    int cw = MAX(1, width - 2 * pad);
     int ww = MAX(1, cw - 2);
     char *clean = tui_replace_tabs(message ? message : "");
     strvec_t src = str_split_lines(clean, strlen(clean));
@@ -561,7 +563,7 @@ static void error_block_rows(strvec_t *o, const char *message, int width, size_t
     for (size_t i = 0; i < rows.n; i++) {
         strvec_t w = {0};
         tui_wrap_text_with_ansi(rows.v[i], cw, &w);
-        for (size_t k = 0; k < w.n; k++) strvec_push_own(o, xasprintf(" %s", w.v[k]));
+        for (size_t k = 0; k < w.n; k++) strvec_push_own(o, xasprintf("%*s%s", pad, "", w.v[k]));
         strvec_free(&w);
     }
     strvec_free(&rows);
@@ -728,7 +730,7 @@ static void tool_image_rows(msgview_t *v, int width, strvec_t *o) {
             } else {
                 char *t = xasprintf("[Image: %s]", mime);
                 char *c = fg(TUI_TC_TOOL_OUTPUT, t);
-                strvec_push_own(o, xasprintf(" %s", c));
+                text_rows(o, c, width);
                 free(c);
                 free(t);
             }
