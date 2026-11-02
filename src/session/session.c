@@ -608,6 +608,12 @@ void session_context_free(session_context_t *c) {
 
 session_t *session_fork(const session_t *s, const char *leaf_id, const char *session_dir) {
     session_t *n = session_create(session_cwd(s), session_dir ? session_dir : s->dir);
+    if (s->title) { /* the fork keeps the session name (createBranchedSession / fork) */
+        n->title = xstrdup(s->title);
+        n->title_source = xstrdup(s->title_source ? s->title_source : "auto");
+        json_set_str(n->header, "title", n->title);
+        json_set_str(n->header, "titleSource", n->title_source);
+    }
     json_set_str(n->header, "parentSession", session_id(s));
     json_t *path = session_path_to(s, leaf_id ? leaf_id : s->leaf_id);
     json_t *e;

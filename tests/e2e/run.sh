@@ -242,6 +242,7 @@ check "plan propose off" 'No plan is awaiting approval' python3 -I "$ROOT/tests/
 check "plan yolo"      '"tool": "propose"}} Plan approved. Implementing now with mock-1.' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-yolo --plan-yolo-into mock/mock-1
 check "plan yolo into" '--plan-yolo-into requires --plan-yolo' "$B" -m mock/mock-1 --plan-yolo-into mock/mock-1 -p hi
 check "plan yolo model" 'Model "nope/none" not found' "$B" -m mock/mock-1 --plan-yolo --plan-yolo-into nope/none -p hi
+check "rpc btw"        "btw ok"                   python3 -I "$ROOT/tests/e2e/rpc_btw.py" "$B"
 # async jobs: background bash delivered as a follow-up; wait with nothing running returns at once
 : > "$T/req.jsonl"
 check "async bash"     "Backgrounded as job bg_1"  bash -c "'$B' -m mock/mock-1 --mode json -p 'call:bash:{\"command\":\"sleep 1; echo bgdone\",\"async\":true}' | grep -o 'Backgrounded as job bg_1'"

@@ -2216,6 +2216,10 @@ int app_branch_from_btw(app_t *a, const char *question, const json_t *images, co
     json_set(am, "content", blocks);
     json_del(am, "providerPayload");
     session_append_message(a->session, am);
+    json_t *u = json_get(am, "usage");
+    int64_t ctx = json_get_int(u, "input", 0) + json_get_int(u, "cacheRead", 0) + json_get_int(u, "cacheWrite", 0) +
+                  json_get_int(u, "output", 0);
+    a->last_context_tokens = ctx > 0 ? ctx : 0; /* the branched answer's usage is the context gauge */
     json_free(am);
     load_session_into_agent(a);
     advisor_reset(a->advisor);
