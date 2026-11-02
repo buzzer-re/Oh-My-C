@@ -79,6 +79,7 @@ struct ui {
     bool hide_thinking;
     bool hide_tool_activity;  /* display.hideToolActivity (app.tools.toggleVisibility) */
     tokrate_t tokrate;        /* generation tok/s of the main session (composer.tokenRate) */
+    char *hover_id;           /* tui.mouse: agent whose HUD rows carry the hover band */
     int64_t last_ctrl_c;      /* app.clear double-press window (500 ms) */
     int64_t last_escape;      /* app.interrupt double-press window (doubleEscapeAction) */
     /* coalesced streaming updates */
@@ -288,7 +289,8 @@ const char *ui_queue_shorthand(const char *text); /* body after a leading `->` /
 void ui_split_queued_messages(const char *text, strvec_t *out); /* queue-input.ts splitQueuedMessages */
 
 /* agenthub.c - subagent HUD, Agent Hub (/hub, Alt+A, ←←), transcript viewer, session focus */
-tui_component_t *ui_subagent_hud_new(ui_t *u);   /* "Subagents · N running" block (display.pinnedAgents) */
+tui_component_t *ui_subagent_hud_new(ui_t *u);
+const char *ui_hud_agent_at(int frame_row); /* agent id drawn on a frame row of the HUD (tui.mouse), or NULL */   /* "Subagents · N running" block (display.pinnedAgents) */
 /* open the hub (Agents, or the Activity tab); `require_content`: stay closed without subagents (←←);
  * `arm_close`: the opening ←← also arms the hub's own ←← close */
 void ui_agent_hub_open(ui_t *u, bool activity, bool require_content, bool arm_close);

@@ -107,6 +107,8 @@ bool tui_overlay_visible(const tui_t *t);
 tui_t *tui_new(tui_term_t *term);
 void tui_free(tui_t *t); /* restores terminal, destroys root tree */
 tui_term_t *tui_term(tui_t *t);
+/* frame row shown on 1-based screen row `screen_row` (mouse reports), or -1 outside the frame */
+int tui_frame_row_at(tui_t *t, int screen_row);
 tui_container_t *tui_root(tui_t *t);
 
 void tui_set_focus(tui_t *t, tui_component_t *c);

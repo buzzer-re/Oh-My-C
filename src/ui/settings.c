@@ -1727,6 +1727,11 @@ static void apply_change(settings_view_t *v, const char *path) {
     if (!strcmp(path, "hideThinkingBlock")) u->hide_thinking = get_bool(path, false);
     if (!strcmp(path, "display.hideToolActivity")) ui_set_tool_activity_hidden(u, get_bool(path, false));
     if (!strcmp(path, "tui.hyperlinks")) tui_hyperlinks_apply_setting(get_str(path, "auto"));
+    if (!strcmp(path, "tui.mouse")) {
+        tui_term_set_mouse_capture(tui_term(u->tui), get_bool(path, false));
+        free(u->hover_id); /* a disabled capture clears the band (and the cached target) */
+        u->hover_id = NULL;
+    }
     if (!strcmp(path, "tui.tight") || !strcmp(path, "tui.hyperlinks") || !strcmp(path, "terminal.showImages")) {
         if (!strcmp(path, "tui.tight")) tui_set_tight(get_bool(path, false));
         tui_component_invalidate(&tui_root(u->tui)->base); /* rows rebuilt with the new padding / links / images */

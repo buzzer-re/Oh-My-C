@@ -37,6 +37,7 @@ typedef struct tui_term {
     bool focus_events;
     bool cursor_hidden;
     bool sync_output; /* use CSI ?2026 synchronized output (default true) */
+    bool mouse_capture; /* tui.mouse: SGR any-motion reporting on the normal screen */
     sb_t out;
 } tui_term_t;
 
@@ -82,6 +83,10 @@ void tui_term_kitty_pop(tui_term_t *t);             /* CSI < u */
 void tui_term_sync_begin(tui_term_t *t);
 void tui_term_sync_end(tui_term_t *t);
 void tui_term_set_title(tui_term_t *t, const char *title);
+/* tui.mouse inline click capture: MOUSE_TRACKING_ON / OFF now (when started) and across stop/start */
+void tui_term_set_mouse_capture(tui_term_t *t, bool on);
+#define TUI_MOUSE_ON "\x1b[?1000h\x1b[?1003h\x1b[?1006h"
+#define TUI_MOUSE_OFF "\x1b[?1006l\x1b[?1003l\x1b[?1000l"
 /* OSC 52 clipboard copy (base64 payload). */
 void tui_term_copy_osc52(tui_term_t *t, const char *text, size_t n);
 void tui_term_clear_screen(tui_term_t *t, bool scrollback);

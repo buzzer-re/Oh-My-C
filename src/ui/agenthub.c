@@ -701,9 +701,69 @@ static void hud_lines(ui_t *u, int columns, strvec_t *out) {
     UNUSED(u);
 }
 
+/* click targets of the last HUD render (composer #lastClickSpans): frame row -> agent id */
+static size_t g_hud_base;
+static strvec_t g_hud_ids;
+
 static void hud_render(tui_component_t *c, int width, strvec_t *out) {
     hud_t *h = (hud_t *)c;
+    size_t base = out->n;
     hud_lines(h->u, width, out);
+    g_hud_base = base;
+    strvec_free(&g_hud_ids);
+    json_t *all = agents_list(), *running = json_arr(), *r;
+    json_arr_foreach(all, i, r) if (hud_member(r)) json_push(running, json_clone(r));
+    json_free(all);
+    /* rows: blank, title, then one row per listed agent (+ its live-preview row) */
+    bool preview = settings_bool("display.subagentLivePreview", false);
+    size_t ai = 0;
+    for (size_t i = base; i < out->n; i++) {
+        size_t k = i - base;
+        const char *id = NULL;
+        if (k >= 2 && ai < json_len(running)) {
+            id = json_get_str(json_at(running, ai), "id");
+            if (!preview || (k - 2) % 2 == 1) ai++;
+        }
+        strvec_push(&g_hud_ids, id ? id : "");
+    }
+    json_free(running);
+    const char *hover = h->u->hover_id;
+    if (!hover) return;
+    for (size_t i = base; i < out->n; i++) { /* #paintHoverBand: selectedBg over the hovered agent's rows */
+        if (!str_eq(g_hud_ids.v[i - base], hover)) continue;
+        sb_t s = SB_INIT;
+        const char *bg = tui_bg_seq(TH(), TUI_TC_SELECTED_BG);
+        sb_append(&s, bg);
+        for (const char *p = out->v[i]; *p;) {
+            size_t l = 0;
+            if (p[0] == '\x1b' && p[1] == '[') { /* drop nested background opens; re-arm after resets */
+                const char *e = p + 2;
+                while (*e && !(*e >= 0x40 && *e <= 0x7e)) e++;
+                if (*e == 'm') {
+                    l = (size_t)(e - p) + 1;
+                    bool bgopen = (p[2] == '4' && p[3] >= '0' && p[3] <= '8' && p[4] != '9') || (p[2] == '1' && p[3] == '0');
+                    if (!strncmp(p, "\x1b[49m", 5) || !strncmp(p, "\x1b[0m", 4)) {
+                        sb_appendn(&s, p, l);
+                        sb_append(&s, bg);
+                    } else if (!bgopen) {
+                        sb_appendn(&s, p, l);
+                    }
+                    p += l;
+                    continue;
+                }
+            }
+            sb_putc(&s, *p++);
+        }
+        sb_append(&s, "\x1b[49m");
+        free(out->v[i]);
+        out->v[i] = sb_detach(&s);
+    }
+}
+
+const char *ui_hud_agent_at(int frame_row) {
+    if (frame_row < (int)g_hud_base || frame_row >= (int)(g_hud_base + g_hud_ids.n)) return NULL;
+    const char *id = g_hud_ids.v[frame_row - (int)g_hud_base];
+    return *id ? id : NULL;
 }
 
 static const tui_component_vt HUD_VT = {"subagent-hud", hud_render, NULL, NULL, NULL};

@@ -912,6 +912,12 @@ static void run_timers(tui_t *t, int64_t now) {
 
 /* ---------- input & lifecycle ---------- */
 
+int tui_frame_row_at(tui_t *t, int screen_row) {
+    if (screen_row < 1 || screen_row > t->term->rows) return -1;
+    int row = t->viewport_top + screen_row - 1;
+    return row >= 0 && row < (int)t->prev.n ? row : -1;
+}
+
 void tui_dispatch_key(tui_t *t, const tui_key_t *k) {
     if (k->kind == TUI_KEY_RESPONSE) {
         bool changed = false;

@@ -1492,7 +1492,7 @@ static const char *const MOUSE_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1000l";
 static void close_hub(hub_t *h) {
     ui_t *u = h->u;
     tui_overlay_hide(u->tui, &h->base);
-    tui_term_puts(tui_term(u->tui), MOUSE_OFF);
+    if (!tui_term(u->tui)->mouse_capture) tui_term_puts(tui_term(u->tui), MOUSE_OFF); /* tui.mouse keeps it */
     tui_alt_screen(u->tui, false);
     tui_set_focus(u->tui, &u->editor->base);
     tui_component_destroy(&h->base);

@@ -179,6 +179,15 @@ void tui_term_start(tui_term_t *t) {
         t->kitty_queried = true;
     }
     tui_term_cursor_show(t, false);
+    if (t->mouse_capture && t->is_tty) tui_term_puts(t, TUI_MOUSE_ON);
+    tui_term_flush(t);
+}
+
+void tui_term_set_mouse_capture(tui_term_t *t, bool on) {
+    if (t->mouse_capture == on) return;
+    t->mouse_capture = on;
+    if (!t->started || !t->is_tty) return;
+    tui_term_puts(t, on ? TUI_MOUSE_ON : TUI_MOUSE_OFF);
     tui_term_flush(t);
 }
 
@@ -193,6 +202,7 @@ void tui_term_stop(tui_term_t *t) {
     }
     tui_term_bracketed_paste(t, false);
     if (t->focus_events) tui_term_focus_events(t, false);
+    if (t->mouse_capture && t->is_tty) tui_term_puts(t, TUI_MOUSE_OFF);
     extern bool g_inband;
     if (g_inband) {
         tui_term_puts(t, "\x1b[?2048l");

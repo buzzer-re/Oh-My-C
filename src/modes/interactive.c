@@ -3000,9 +3000,35 @@ static void retry_key(ui_t *u) {
     handle_command(u, "/retry");
 }
 
+/* #handleInlineMouse (tui.mouse): pointer motion moves the hover band over a HUD agent row, a left click
+ * focuses that agent; every SGR report is consumed so mouse bytes never reach the editor */
+static bool inline_mouse(ui_t *u, const tui_key_t *k) {
+    if (!k->text || !settings_bool("tui.mouse", false)) return false;
+    int b, x, y;
+    char fin = 0;
+    if (sscanf(k->text, "\x1b[<%d;%d;%d%c", &b, &x, &y, &fin) != 4) return false;
+    int row = tui_frame_row_at(u->tui, y);
+    const char *id = row >= 0 ? ui_hud_agent_at(row) : NULL;
+    bool motion = (b & 32) != 0;
+    if (motion) {
+        if (!str_eq(id, u->hover_id)) {
+            free(u->hover_id);
+            u->hover_id = id ? xstrdup(id) : NULL;
+            tui_request_render(u->tui);
+        }
+    } else if (fin == 'M' && (b & 3) == 0 && !(b & 64) && id) {
+        char *err = NULL, *target = xstrdup(id);
+        if (!ui_focus_agent(u, target, &err) && err) add_notice(u, "error", err);
+        free(err);
+        free(target);
+    }
+    return true;
+}
+
 static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
     ui_t *u = ud;
     if (tui_overlay_visible(t) || ui_selector_open(u)) return false;
+    if (k->kind == TUI_KEY_MOUSE) return inline_mouse(u, k);
     if (ui_btw_key(u, k)) return true; /* the /btw panel owns Esc while shown; c/f/b act on its answer */
 
     /* global listeners: they act on the transcript, whatever holds focus */
@@ -3264,6 +3290,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
         return 1;
     }
     tui_container_t *root = tui_root(u.tui);
+    tui_term_set_mouse_capture(tui_term(u.tui), settings_bool("tui.mouse", false));
     tui_sym_set_preset(settings_str("symbolPreset", "unicode"));
     /* config warnings head the header (interactive-mode.ts #buildConfigWarningComponents): retry.fallbackChains
      * validation (turn-recovery validateRetryFallbackChains) */
@@ -3409,6 +3436,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     hmap_free(&u.tools, NULL);
     json_free(u.pending_partial);
     tokrate_destroy(&u.tokrate);
+    free(u.hover_id);
     if (g_move_ov) {
         tui_component_destroy(g_move_ov);
         g_move_ov = NULL;
