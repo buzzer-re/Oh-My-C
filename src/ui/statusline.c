@@ -1476,7 +1476,7 @@ static void working_row(ui_t *u, const char *message, int width, strvec_t *out) 
     bool accent = title && *title && settings_bool("statusLine.sessionAccent", true);
     char mb[32], db[32];
     const char *low = tui_fg_seq(TH(), TUI_TC_DIM), *mid = tui_fg_seq(TH(), TUI_TC_MUTED), *high = tui_fg_seq(TH(), TUI_TC_ACCENT);
-    char *key = ui_key_hint("escape");
+    char *key = ui_editor_key("app.interrupt");
     char *frame = xasprintf(" %s", key);
     free(key);
     char *spin;

@@ -665,10 +665,8 @@ size_t tui_keys_decode_all(const char *data, size_t n, tui_key_t *out, size_t ma
 
 /* ---------- keybindings ---------- */
 
-struct tui_keybindings {
-    hmap_t map; /* action -> strvec_t* of canonical chords */
-};
-
+/* Default chords in upstream registry order: TUI_KEYBINDINGS (keybindings.ts), then the app actions
+ * of KEYBINDINGS (app-keybindings.ts). The order is also the order of a migrated keybindings.yml. */
 static const struct {
     const char *action;
     const char *chords[6];
@@ -685,7 +683,7 @@ static const struct {
     {"tui.editor.jumpBackward", {"ctrl+alt+]"}},
     {"tui.editor.pageUp", {"pageup"}},
     {"tui.editor.pageDown", {"pagedown"}},
-    {"tui.editor.deleteCharBackward", {"backspace", "shift+backspace"}},
+    {"tui.editor.deleteCharBackward", {"backspace"}},
     {"tui.editor.deleteCharForward", {"delete", "ctrl+d"}},
     {"tui.editor.deleteWordBackward", {"ctrl+w", "alt+backspace", "ctrl+backspace", "super+alt+backspace"}},
     {"tui.editor.deleteWordForward", {"alt+delete", "alt+d", "ctrl+delete", "super+alt+delete", "super+alt+d"}},
@@ -694,7 +692,8 @@ static const struct {
     {"tui.editor.yank", {"ctrl+y"}},
     {"tui.editor.yankPop", {"alt+y"}},
     {"tui.editor.undo", {"ctrl+-", "ctrl+_"}},
-    {"tui.input.newLine", {"shift+enter", "alt+enter", "ctrl+j"}},
+    {"tui.editor.spellingSuggestions", {"ctrl+."}},
+    {"tui.input.newLine", {"shift+enter", "ctrl+j"}},
     {"tui.input.submit", {"enter"}},
     {"tui.input.tab", {"tab"}},
     {"tui.input.copy", {"ctrl+c"}},
@@ -704,6 +703,65 @@ static const struct {
     {"tui.select.pageDown", {"pagedown"}},
     {"tui.select.confirm", {"enter"}},
     {"tui.select.cancel", {"escape", "ctrl+c"}},
+    {"app.interrupt", {"escape"}},
+    {"app.clear", {"ctrl+c"}},
+    {"app.exit", {"ctrl+d"}},
+    {"app.suspend", {"ctrl+z"}},
+    {"app.display.reset", {"alt+l"}},
+    {"app.thinking.cycle", {"shift+tab"}},
+    {"app.thinking.toggle", {"ctrl+t"}},
+    {"app.model.cycleForward", {"ctrl+p"}},
+    {"app.model.cycleBackward", {"shift+ctrl+p"}},
+    {"app.model.select", {"alt+m"}},
+    {"app.model.selectTemporary", {"alt+p"}},
+    {"app.tools.expand", {"ctrl+o"}},
+    {"app.tools.toggleVisibility", {"ctrl+shift+o"}},
+    {"app.ask.hide", {"alt+h"}},
+    {"app.approval.approve", {"ctrl+enter", "ctrl+q"}},
+    {"app.editor.external", {"ctrl+g"}},
+    {"app.local.open", {"alt+g"}},
+    {"app.message.followUp", {"ctrl+q", "ctrl+enter"}},
+    {"app.retry", {"f5", "alt+r"}},
+    {"app.message.dequeue", {"alt+up", "shift+up"}},
+#ifdef __APPLE__
+    {"app.clipboard.pasteImage", {"ctrl+v", "super+v"}}, /* getDefaultPasteImageKeys("darwin") */
+#else
+    {"app.clipboard.pasteImage", {"ctrl+v"}},
+#endif
+    {"app.clipboard.pasteTextRaw", {"ctrl+shift+v", "alt+shift+v"}},
+    {"app.clipboard.copyLine", {"alt+shift+l"}},
+    {"app.clipboard.copyPrompt", {"alt+shift+c"}},
+    {"app.session.new", {NULL}},
+    {"app.session.tree", {NULL}},
+    {"app.session.fork", {NULL}},
+    {"app.session.resume", {NULL}},
+    {"app.agents.hub", {"alt+a"}},
+    {"app.session.observe", {"ctrl+s"}},
+    {"app.session.togglePath", {"ctrl+p"}},
+    {"app.session.toggleSort", {"ctrl+s"}},
+    {"app.session.rename", {"ctrl+r"}},
+    {"app.session.delete", {"ctrl+d"}},
+    {"app.session.deleteNoninvasive", {"ctrl+backspace"}},
+    {"app.session.pin", {"alt+k"}},
+    {"app.session.unpin", {"alt+shift+k"}},
+    {"app.tree.previousBranch", {NULL}},
+    {"app.tree.nextBranch", {NULL}},
+    {"app.plan.toggle", {"alt+shift+p"}},
+    {"app.history.search", {"ctrl+r"}},
+    {"app.links.hint", {"alt+o"}},
+    {"app.stt.pushToTalk", {"space"}},
+    {"app.stt.toggle", {NULL}},
+    {"app.live.toggle", {"ctrl+l"}},
+};
+
+size_t tui_keybindings_action_count(void) { return ARRAY_LEN(DEFAULTS); }
+const char *tui_keybindings_action_at(size_t i) { return i < ARRAY_LEN(DEFAULTS) ? DEFAULTS[i].action : NULL; }
+
+struct tui_keybindings {
+    hmap_t defaults; /* action -> strvec_t* of canonical default chords */
+    strvec_t order;  /* defined actions, definition order */
+    json_t *user;    /* user overrides {"action": "chord" | ["chord", ...]} (object, owned) */
+    hmap_t map;      /* action -> strvec_t* of effective canonical chords */
 };
 
 static void free_sv(void *p) {
@@ -712,9 +770,89 @@ static void free_sv(void *p) {
     free(v);
 }
 
-static void set_action(tui_keybindings_t *kb, const char *action, strvec_t *chords) {
-    strvec_t *old = hmap_put(&kb->map, action, chords);
-    if (old) free_sv(old);
+/* Canonical chord for a user-supplied key id: omp lowercases ids before matching (normalizeKeyId), so
+ * "ctrl+A" binds ctrl+a, not ctrl+shift+a. */
+static bool user_canonical(const char *spec, char *buf, size_t cap) {
+    char *low = str_lower(spec);
+    bool ok = tui_key_canonical(low, buf, cap);
+    free(low);
+    return ok;
+}
+
+/* Effective chords from a user value (string or string array); NULL when the value is neither. */
+static strvec_t *user_keys(const json_t *val) {
+    if (!json_is_str(val) && !json_is_arr(val)) return NULL;
+    strvec_t *v = xcalloc(1, sizeof *v);
+    char c[64];
+    if (json_is_str(val)) {
+        if (user_canonical(json_sv(val), c, sizeof c)) strvec_push(v, c);
+        return v;
+    }
+    json_t *it;
+    json_arr_foreach(val, j, it) {
+        if (!json_is_str(it)) { /* omp ignores arrays with non-string members entirely */
+            free_sv(v);
+            return NULL;
+        }
+        if (user_canonical(json_sv(it), c, sizeof c) && !strvec_contains(v, c)) strvec_push(v, c);
+    }
+    return v;
+}
+
+/* app.message.followUp / app.message.dequeue default fallback keys (Windows Terminal ctrl+q, macOS
+ * Terminal.app shift+up) are dropped when the user bound that key to another known action
+ * (app-keybindings.ts getKeys / userBindingClaimsKey). */
+static const char *fallback_key(const char *action) {
+    if (!strcmp(action, "app.message.followUp")) return "ctrl+q";
+    if (!strcmp(action, "app.message.dequeue")) return "shift+up";
+    return NULL;
+}
+
+static bool user_claims(const tui_keybindings_t *kb, const char *key, const char *except) {
+    const char *name;
+    json_t *val;
+    json_obj_foreach(kb->user, i, name, val) {
+        if (!strcmp(name, except) || !hmap_get(&kb->defaults, name)) continue;
+        strvec_t *v = user_keys(val);
+        bool hit = v && strvec_contains(v, key);
+        if (v) free_sv(v);
+        if (hit) return true;
+    }
+    return false;
+}
+
+static void rebuild(tui_keybindings_t *kb) {
+    hmap_free(&kb->map, free_sv);
+    hmap_init(&kb->map);
+    for (size_t i = 0; i < kb->order.n; i++) {
+        const char *a = kb->order.v[i];
+        strvec_t *v = user_keys(json_get(kb->user, a));
+        if (!v) {
+            const strvec_t *d = hmap_get(&kb->defaults, a);
+            v = xcalloc(1, sizeof *v);
+            for (size_t j = 0; d && j < d->n; j++) strvec_push(v, d->v[j]);
+            const char *fb = fallback_key(a);
+            if (fb && strvec_contains(v, fb) && user_claims(kb, fb, a)) {
+                strvec_t keep = {0};
+                for (size_t j = 0; j < v->n; j++)
+                    if (strcmp(v->v[j], fb)) strvec_push(&keep, v->v[j]);
+                strvec_free(v);
+                *v = keep;
+            }
+        }
+        hmap_put(&kb->map, a, v);
+    }
+    /* user entries for actions nobody defined still resolve (applications may look them up) */
+    const char *name;
+    json_t *val;
+    json_obj_foreach(kb->user, i, name, val) {
+        if (hmap_get(&kb->defaults, name)) continue;
+        strvec_t *v = user_keys(val);
+        if (v) {
+            strvec_t *old = hmap_put(&kb->map, name, v);
+            if (old) free_sv(old);
+        }
+    }
 }
 
 void tui_keybindings_define(tui_keybindings_t *kb, const char *action, const char *const *chords) {
@@ -723,25 +861,50 @@ void tui_keybindings_define(tui_keybindings_t *kb, const char *action, const cha
         char c[64];
         if (tui_key_canonical(chords[i], c, sizeof c) && !strvec_contains(v, c)) strvec_push(v, c);
     }
-    set_action(kb, action, v);
+    strvec_t *old = hmap_put(&kb->defaults, action, v);
+    if (old) free_sv(old);
+    else strvec_push(&kb->order, action);
+    rebuild(kb);
 }
 
 tui_keybindings_t *tui_keybindings_new(void) {
     tui_keybindings_t *kb = xcalloc(1, sizeof *kb);
+    hmap_init(&kb->defaults);
     hmap_init(&kb->map);
+    kb->user = json_obj();
     for (size_t i = 0; i < ARRAY_LEN(DEFAULTS); i++) {
-        const char *list[7] = {0};
-        for (size_t j = 0; j < 6 && DEFAULTS[i].chords[j]; j++) list[j] = DEFAULTS[i].chords[j];
-        tui_keybindings_define(kb, DEFAULTS[i].action, list);
+        strvec_t *v = xcalloc(1, sizeof *v);
+        for (size_t j = 0; j < 6 && DEFAULTS[i].chords[j]; j++) {
+            char c[64];
+            if (tui_key_canonical(DEFAULTS[i].chords[j], c, sizeof c) && !strvec_contains(v, c)) strvec_push(v, c);
+        }
+        hmap_put(&kb->defaults, DEFAULTS[i].action, v);
+        strvec_push(&kb->order, DEFAULTS[i].action);
     }
+    rebuild(kb);
     return kb;
 }
 
 void tui_keybindings_free(tui_keybindings_t *kb) {
     if (!kb) return;
     hmap_free(&kb->map, free_sv);
+    hmap_free(&kb->defaults, free_sv);
+    strvec_free(&kb->order);
+    json_free(kb->user);
     free(kb);
 }
+
+void tui_keybindings_set_user(tui_keybindings_t *kb, const json_t *cfg) {
+    json_free(kb->user);
+    kb->user = json_obj();
+    const char *name;
+    json_t *val;
+    if (json_is_obj(cfg)) json_obj_foreach(cfg, i, name, val) if (json_is_str(val) || json_is_arr(val))
+        json_set(kb->user, name, json_clone(val));
+    rebuild(kb);
+}
+
+const json_t *tui_keybindings_user(const tui_keybindings_t *kb) { return kb->user; }
 
 int tui_keybindings_load_json(tui_keybindings_t *kb, const json_t *obj) {
     if (!json_is_obj(obj)) return 0;
@@ -749,23 +912,11 @@ int tui_keybindings_load_json(tui_keybindings_t *kb, const json_t *obj) {
     const char *key;
     json_t *val;
     json_obj_foreach(obj, i, key, val) {
-        strvec_t *v = xcalloc(1, sizeof *v);
-        char c[64];
-        if (json_is_str(val)) {
-            if (tui_key_canonical(json_sv(val), c, sizeof c)) strvec_push(v, c);
-        } else if (json_is_arr(val)) {
-            json_t *it;
-            json_arr_foreach(val, j, it) {
-                if (json_is_str(it) && tui_key_canonical(json_sv(it), c, sizeof c) && !strvec_contains(v, c))
-                    strvec_push(v, c);
-            }
-        } else {
-            free_sv(v);
-            continue;
-        }
-        set_action(kb, key, v);
+        if (!json_is_str(val) && !json_is_arr(val)) continue;
+        json_set(kb->user, key, json_clone(val));
         changed++;
     }
+    rebuild(kb);
     return changed;
 }
 
@@ -783,6 +934,15 @@ int tui_keybindings_load_file(tui_keybindings_t *kb, const char *path) {
 
 const strvec_t *tui_keybindings_get(const tui_keybindings_t *kb, const char *action) {
     return hmap_get(&kb->map, action);
+}
+
+bool tui_keybindings_key_bound(const tui_keybindings_t *kb, const char *chord, const char *action) {
+    const strvec_t *v = hmap_get(&kb->map, action);
+    char c[64];
+    if (!v || !tui_key_canonical(chord, c, sizeof c)) return false;
+    for (size_t i = 0; i < v->n; i++)
+        if (canon_matches(c, v->v[i])) return true;
+    return false;
 }
 
 bool tui_keybindings_matches(const tui_keybindings_t *kb, const tui_key_t *k, const char *action) {

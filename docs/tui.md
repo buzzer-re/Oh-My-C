@@ -49,6 +49,9 @@ renders (the streaming reply from its last Markdown block on, a running tool car
 group, the welcome banner while its intro plays): held rows never scroll into scrollback; when the
 frame outgrows the screen they are clipped and the screen shows the frame's tail (omp: an unfinalized
 block never retires; the viewport shows its tail), and they are written to scrollback once they settle.
+When a scrolled frame shrinks so its last row would end above the screen bottom (an autocomplete list,
+picker or tall block going away), the rows above are pulled back down so the composer stays on the
+last screen row, as omp's bottom-anchored viewport does (they are also still in scrollback).
 Frames are framed like omp's paints (cursor hidden, `CSI ?2026` synchronized output, autowrap off,
 each row written then erased to its end). Clearing screen and scrollback is reserved for explicit
 full requests (`tui_request_full_render`: session replaced, transcript rebuilt, thinking visibility
@@ -80,18 +83,47 @@ updates). Timers (`tui_add_timer`) drive spinners, smooth streaming reveal and l
   kitty reply, xterm `modifyOtherKeys` mode 2 is used instead).
 - Signals (SIGWINCH, SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGTSTP, SIGCONT) arrive through a self-pipe.
   When a terminating signal arrives outside the loop, the handler restores the terminal itself
-  (async-signal-safe) and re-raises. An `atexit` hook restores it too. Ctrl+Z suspends and redraws
-  on resume.
+  (async-signal-safe) and re-raises. An `atexit` hook restores it too. ISIG is off, so Ctrl+Z
+  arrives as a key: `app.suspend` calls `tui_suspend`, which restores the terminal, stops the
+  foreground process group with SIGSTOP (omp `handleCtrlZ`) and starts a fresh frame on SIGCONT.
 - The key decoder handles UTF-8, C0 controls, CSI/SS3 with xterm modifiers, kitty CSI-u (with text
   and event types), modifyOtherKeys, Alt via an ESC prefix, bracketed paste, focus, and terminal
   replies. A lone ESC is held for `TUI_ESC_TIMEOUT_MS`. Key ids (`ctrl+c`, `alt+enter`,
-  `shift+tab`) are matched against the keybinding table (`tui.editor.*`, `tui.input.*`, app actions),
-  which mirrors omp's `keybindings.ts`.
+  `shift+tab`) are matched against the keybinding table.
+
+### Keybindings (`keys.c`, `config/keybindings.c`)
+
+- The table holds omp's whole registry in upstream order: the 32 `tui.editor.*` / `tui.input.*` /
+  `tui.select.*` actions of `keybindings.ts` and the 45 `app.*` actions of `app-keybindings.ts`, with
+  the same default chords (`app.session.new/tree/fork/resume`, `app.tree.*` and `app.stt.toggle` are
+  unbound). User overrides replace an action's chords; ids are lowercased like omp's
+  `normalizeKeyId`. When the user binds Ctrl+Q or Shift+Up to another action, it drops out of the
+  `app.message.followUp` / `app.message.dequeue` defaults (omp `getFallbackKey`).
+- `kbcfg_init_global` (interactive start) loads `keybindings.yml` from the agent dir, else
+  `keybindings.yaml`, else the legacy `keybindings.json` (JSONC). Legacy names (`interrupt`,
+  `cursorUp`, `selectModel`, ...) are renamed; a renamed config or one read from the .json is written
+  back as `keybindings.yml` in registry order, byte-identical to omp's. `kbcfg_load_merged` layers a
+  profile over the default profile's bindings (read only); omc has no profiles yet, so nothing passes
+  an inherited dir.
+- `key_hook` (`modes/interactive.c`) dispatches every app action through `tui_kb()`: first the global
+  listeners (`app.thinking.toggle`, `app.display.reset`, `app.tools.expand`), then, while the
+  composer has focus, `CustomEditor.handleInput`'s order (paste image, suspend, model select / role
+  cycle, thinking cycle, interrupt, clear, exit, dequeue, copy prompt, plan, session actions,
+  follow-up, copy line, retry). `/hotkeys` (`ui_hotkeys_markdown`) is built from the live table like
+  omp's `buildHotkeysMarkdown`: unbound actions read `Disabled`, and exit keys split into a
+  forward-delete row and an exit row.
+- Not handled yet although bound (as in omp they still appear in `/hotkeys`): `app.model.selectTemporary`,
+  `app.tools.toggleVisibility`, `app.history.search`, `app.editor.external` (main composer),
+  `app.local.open`, `app.clipboard.pasteTextRaw`, `app.approval.approve`, `app.agents.hub`,
+  `app.session.observe`, `app.tree.*`, `app.links.hint` and the speech actions; see
+  [gaps.md](gaps.md) §2b.
 - Non-tty file descriptors are supported (tests): probes are skipped and the size defaults to 80×24.
 
 ### Editor and composer (`editor.c`, `composer.c`)
 
-The editor ports omp's `editor-component.ts`: word motion, kill/yank, undo (200 steps), history,
+The editor ports omp's `editor-component.ts`: word motion, an emacs kill ring (`kill-ring.ts`:
+consecutive kills accumulate, Ctrl+Y yanks, Alt+Y cycles older entries right after a yank),
+character jump (Ctrl+] / Ctrl+Alt+] then a character), undo (200 steps), history,
 large-paste markers (`[Paste #N, +L lines]`), slash-command and `@file` autocomplete with omp's
 ranking, and Enter-runs-command semantics. Its frame is drawn by a composer style, one of omp's 8
 shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, `rail`

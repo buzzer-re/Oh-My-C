@@ -97,20 +97,32 @@ size_t tui_keys_decode_all(const char *data, size_t n, tui_key_t *out, size_t ma
 
 /* ---------- keybindings ---------- */
 /*
- * Action id -> list of chords. Defaults follow upstream (tui.editor.*, tui.input.*,
- * tui.select.*). User overrides come from a JSON object {"action": "chord" | ["chord", ...]};
- * an empty array disables the action. Applications may define more actions.
+ * Action id -> list of chords (KeybindingsManager of omp's keybindings.ts + app-keybindings.ts).
+ * Defaults are upstream's registry: tui.editor.*, tui.input.*, tui.select.* and the app.* actions
+ * (unbound ones such as app.session.new have no chords). User overrides are an object
+ * {"action": "chord" | ["chord", ...]} that replaces an action's defaults; an empty array disables it.
+ * The app.message.followUp (ctrl+q) / app.message.dequeue (shift+up) fallback keys drop out of the
+ * defaults when the user bound that key to another action. File loading, legacy names and profile
+ * inheritance live in config/keybindings.c. Applications may define more actions.
  */
 typedef struct tui_keybindings tui_keybindings_t;
 
-tui_keybindings_t *tui_keybindings_new(void); /* pre-populated with TUI defaults */
+tui_keybindings_t *tui_keybindings_new(void); /* pre-populated with the upstream defaults */
 void tui_keybindings_free(tui_keybindings_t *kb);
+/* Upstream action ids in registry order (also the key order of a written keybindings.yml). */
+size_t tui_keybindings_action_count(void);
+const char *tui_keybindings_action_at(size_t i);
 /* Define/replace default chords for an action (NULL-terminated list). */
 void tui_keybindings_define(tui_keybindings_t *kb, const char *action, const char *const *chords);
-/* Apply user overrides; returns number of actions changed. Unknown actions are kept too. */
+/* Replace the user overrides (non string/array values are ignored). */
+void tui_keybindings_set_user(tui_keybindings_t *kb, const json_t *cfg);
+const json_t *tui_keybindings_user(const tui_keybindings_t *kb); /* borrowed object */
+/* Merge user overrides; returns number of actions changed. Unknown actions are kept too. */
 int tui_keybindings_load_json(tui_keybindings_t *kb, const json_t *obj);
 int tui_keybindings_load_file(tui_keybindings_t *kb, const char *path); /* -1 on error */
 bool tui_keybindings_matches(const tui_keybindings_t *kb, const tui_key_t *k, const char *action);
+/* Is `chord` one of the action's keys (matchesCanonical)? */
+bool tui_keybindings_key_bound(const tui_keybindings_t *kb, const char *chord, const char *action);
 const strvec_t *tui_keybindings_get(const tui_keybindings_t *kb, const char *action); /* canonical chords */
 /* Process-wide bindings used by built-in components (lazily created). */
 tui_keybindings_t *tui_keybindings_global(void);

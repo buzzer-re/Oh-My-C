@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "config/auth.h"
+#include "config/keybindings.h"
 #include "config/settings.h"
 #include "core/fs.h"
 #include "core/proc.h"
@@ -1608,7 +1609,7 @@ static bool handle_command(ui_t *u, const char *line) {
                 shown++;
             }
             json_free(list);
-            if (!shown) add_notice(u, "info", "No messages yet.");
+            if (!shown) add_notice(u, "info", tree ? "No entries in session" : "No messages to branch from");
             else show_picker(u, 5);
         }
     } else if (!strcmp(cmd, "retry")) {
@@ -1836,50 +1837,182 @@ static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
     tui_request_render(u->tui);
 }
 
+/* ---------- app keybindings (input-controller.ts setupKeyHandlers + CustomEditor.handleInput) ---------- */
+
+/* InteractiveMode.clearEditor: a cleared draft stays reachable with Up (composer.recallClearedDrafts) */
+static void clear_editor_draft(ui_t *u) {
+    if (settings_bool("composer.recallClearedDrafts", true)) tui_editor_remember_draft(u->editor);
+    tui_editor_clear(u->editor);
+    ui_attach_clear(u);
+    tui_request_render(u->tui);
+}
+
+/* app.interrupt (editor.onEscape) */
+static void on_escape(ui_t *u) {
+    if (iq_escape(u)) return; /* maintenance / turn abort (queue back to the editor), bash or python mode */
+    char *text = tui_editor_get_text(u->editor);
+    char *tt = str_trim(text);
+    if (*tt) {
+        u->last_escape = 0; /* Esc never destroys a draft */
+    } else {
+        /* double Esc on an empty editor: doubleEscapeAction (rewind selector by default, or the tree) */
+        const char *action = settings_str("doubleEscapeAction", "rewind");
+        if (str_eq(action, "branch")) action = "rewind"; /* legacy value */
+        if (!str_eq(action, "none")) {
+            int64_t now = mono_ms();
+            if (now - u->last_escape < 500) {
+                handle_command(u, str_eq(action, "tree") ? "/tree" : "/branch");
+                u->last_escape = 0;
+                tui_request_render(u->tui);
+            } else {
+                u->last_escape = now;
+            }
+        }
+    }
+    free(tt);
+    free(text);
+}
+
+/* app.clear (handleCtrlC): clear the draft; a second press within 500 ms exits. Never aborts a turn. */
+static void on_ctrl_c(ui_t *u) {
+    int64_t now = mono_ms();
+    if (now - u->last_ctrl_c < 500) {
+        tui_stop(u->tui, 0);
+    } else {
+        clear_editor_draft(u);
+        u->last_ctrl_c = now;
+    }
+}
+
+/* app.thinking.toggle (toggleThinkingBlockVisibility) */
+static void toggle_thinking_blocks(ui_t *u) {
+    app_t *a = u->app;
+    if (a->thinking == EFFORT_OFF) {
+        bool seen = false; /* reasoning already streamed unlocks the toggle even with thinking off */
+        pthread_mutex_lock(&a->agent->mu);
+        json_t *m, *blk;
+        json_arr_foreach(a->agent->messages, i, m) {
+            if (!str_eq(json_get_str(m, "role"), "assistant")) continue;
+            json_arr_foreach(json_get_arr(m, "content"), j, blk) if (str_eq(json_get_str(blk, "type"), "thinking")) seen = true;
+        }
+        pthread_mutex_unlock(&a->agent->mu);
+        if (!seen) {
+            add_notice(u, "info", "Thinking is off \xe2\x80\x94 enable thinking to show blocks");
+            return;
+        }
+    }
+    u->hide_thinking = !u->hide_thinking;
+    settings_set_global("hideThinkingBlock", json_bool(u->hide_thinking));
+    for (size_t i = 0; i < tui_container_count(u->chat); i++) tui_component_invalidate(u->chat->children.v[i]);
+    tui_request_full_render(u->tui); /* resetDisplay: already-scrolled rows re-render too */
+    add_notice(u, "info", u->hide_thinking ? "Thinking blocks: hidden" : "Thinking blocks: visible");
+}
+
+/* app.clipboard.copyLine / copyPrompt (handleCopyCurrentLine / handleCopyPrompt) */
+static void copy_editor_text(ui_t *u, bool line) {
+    char *text = line ? tui_editor_current_line(u->editor) : tui_editor_get_text(u->editor);
+    if (!*text) {
+        add_notice(u, "info", "Nothing to copy");
+        free(text);
+        return;
+    }
+    tui_term_copy_osc52(tui_term(u->tui), text, strlen(text));
+    sb_t pv = SB_INIT; /* sanitizeText, then the first 30 characters */
+    size_t chars = 0;
+    for (const char *p = text; *p;) {
+        unsigned char c = (unsigned char)*p;
+        int n = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
+        if (c >= 0x20 && c != 0x7f) {
+            if (chars < 30) sb_appendn(&pv, p, (size_t)n);
+            chars++;
+        } else if (c == '\n' || c == '\t') {
+            if (chars < 30) sb_putc(&pv, (char)c);
+            chars++;
+        }
+        for (int i = 0; i < n && *p; i++) p++;
+    }
+    char *m = xasprintf("%s%s%s", line ? "Copied line: " : "Copied: ", sb_cstr(&pv), chars > 30 ? "..." : "");
+    add_notice(u, "info", m);
+    free(m);
+    sb_free(&pv);
+    free(text);
+}
+
+/* app.retry (handleRetry): retry a failed last turn, else "Nothing to retry" */
+static void retry_key(ui_t *u) {
+    if (u->worker_running) return;
+    app_t *a = u->app;
+    pthread_mutex_lock(&a->agent->mu);
+    size_t n = json_len(a->agent->messages);
+    json_t *last = n ? json_at(a->agent->messages, n - 1) : NULL;
+    bool failed = last && str_eq(json_get_str(last, "role"), "assistant") &&
+                  (str_eq(json_get_str(last, "stopReason"), "error") || str_eq(json_get_str(last, "stopReason"), "aborted"));
+    pthread_mutex_unlock(&a->agent->mu);
+    if (!failed) {
+        add_notice(u, "info", "Nothing to retry");
+        return;
+    }
+    tui_editor_clear(u->editor);
+    handle_command(u, "/retry");
+}
+
 static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
     ui_t *u = ud;
     if (tui_overlay_visible(t) || ui_selector_open(u)) return false;
     if (ui_btw_key(u, k)) return true; /* the /btw panel owns Esc while shown; c/f/b act on its answer */
-    if (tui_key_matches(k, "escape")) return iq_escape(u); /* app.interrupt */
-    if (tui_key_matches(k, "ctrl+q") || tui_key_matches(k, "ctrl+enter")) { /* app.message.followUp */
-        iq_follow_up(u);
+
+    /* global listeners: they act on the transcript, whatever holds focus */
+    if (tui_kb(k, "app.thinking.toggle")) {
+        toggle_thinking_blocks(u);
         return true;
     }
-    if (tui_key_matches(k, "alt+up") || tui_key_matches(k, "shift+up")) { /* app.message.dequeue */
-        iq_dequeue(u);
+    if (tui_kb(k, "app.display.reset")) { /* resetDisplayAfterAppearanceRefresh */
+        tui_component_invalidate(&tui_root(t)->base);
+        tui_request_full_render(t);
+        return true;
+    }
+    if (tui_kb(k, "app.tools.expand")) {
+        u->expand_tools = !u->expand_tools;
+        add_notice(u, "info", u->expand_tools ? "Tool output expansion: enabled" : "Tool output expansion: disabled");
+        for (size_t i = 0; i < tui_container_count(u->chat); i++) tui_component_invalidate(u->chat->children.v[i]);
         tui_request_render(t);
         return true;
     }
-    if (tui_key_matches(k, "ctrl+c")) {
-        if (!tui_editor_is_empty(u->editor)) {
-            tui_editor_clear(u->editor);
-            return true;
-        }
-        if (u->worker_running) {
-            app_abort(u->app);
-            return true;
-        }
-        int64_t now = mono_ms();
-        if (now - u->last_ctrl_c < 1500) {
-            tui_stop(t, 0);
-        } else {
-            u->last_ctrl_c = now;
-            add_notice(u, "info", "Press ctrl+c again to exit");
-        }
-        return true;
-    }
-    if (tui_key_matches(k, "ctrl+v")) { /* app.clipboard.pasteImage */
+    if (tui_focus(t) != &u->editor->base) return false;
+
+    /* CustomEditor action keys, in its precedence order */
+    if (tui_kb(k, "app.clipboard.pasteImage")) {
         ui_attach_paste_clipboard(u);
         return true;
     }
-    if (tui_key_matches(k, "ctrl+d") && tui_editor_is_empty(u->editor)) {
-        tui_stop(t, 0);
+    if (tui_kb(k, "app.suspend")) {
+        int rc = tui_suspend(t);
+        if (rc < 0) {
+            char *m = xasprintf("Failed to suspend: %s", strerror(-rc));
+            add_notice(u, "error", m);
+            free(m);
+        }
         return true;
     }
-    if (tui_key_matches(k, "shift+tab")) {
+    if (tui_kb(k, "app.model.select")) {
+        ui_overlay_model(u);
+        return true;
+    }
+    if (tui_kb(k, "app.model.cycleBackward") || tui_kb(k, "app.model.cycleForward")) {
+        int idx = app_cycle_role_model(u->app, tui_kb(k, "app.model.cycleBackward"));
+        if (idx < 0) add_notice(u, "info", "Only one role model available");
+        else show_model_cycle_track(u, idx);
+        tui_request_render(t);
+        return true;
+    }
+    if (tui_kb(k, "app.thinking.cycle")) {
         /* cycleThinkingLevel: off -> auto -> minimal..max -> off (auto skipped for an unverified ladder) */
+        ui_hint_record("effort");
         app_t *a = u->app;
-        if (!a->model || !a->model->reasoning) return true;
+        if (!a->model || !a->model->reasoning) {
+            add_notice(u, "info", "Current model does not support thinking");
+            return true;
+        }
         bool auto_ok = !json_get_bool(a->model->thinking, "unverified", false);
         if (a->auto_thinking) {
             ai_effort_t e = EFFORT_MINIMAL;
@@ -1895,37 +2028,63 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
             }
             app_set_thinking(a, e);
         }
-        ui_hint_record("effort");
         tui_request_render(t);
         return true;
     }
-    if (tui_key_matches(k, "ctrl+o")) {
-        u->expand_tools = !u->expand_tools;
-        add_notice(u, "info", u->expand_tools ? "Tool output expansion: enabled" : "Tool output expansion: disabled");
-        for (size_t i = 0; i < tui_container_count(u->chat); i++) tui_component_invalidate(u->chat->children.v[i]);
+    if (tui_kb(k, "app.interrupt") && !tui_editor_autocomplete_open(u->editor)) {
+        on_escape(u);
+        return true;
+    }
+    if (tui_kb(k, "app.clear")) {
+        on_ctrl_c(u);
+        return true;
+    }
+    if (tui_kb(k, "app.exit")) {
+        char id[64];
+        tui_key_id(k, id, sizeof id);
+        /* the readline ^D overlap: with a draft the key deletes forward instead */
+        if (tui_keybindings_key_bound(tui_keybindings_global(), id, "tui.editor.deleteCharForward") &&
+            !tui_editor_is_empty(u->editor))
+            return false;
+        tui_stop(t, 0);
+        return true;
+    }
+    if (tui_kb(k, "app.message.dequeue")) {
+        iq_dequeue(u);
         tui_request_render(t);
         return true;
     }
-    if (tui_key_matches(k, "ctrl+t")) {
-        u->hide_thinking = !u->hide_thinking;
-        for (size_t i = 0; i < tui_container_count(u->chat); i++) tui_component_invalidate(u->chat->children.v[i]);
-        tui_request_full_render(t); /* omp resetDisplay: the change applies to rows in scrollback too */
+    if (tui_kb(k, "app.clipboard.copyPrompt")) {
+        copy_editor_text(u, false);
         return true;
     }
-    if (tui_key_matches(k, "ctrl+p") || tui_key_matches(k, "shift+ctrl+p")) { /* app.model.cycleForward/Backward */
-        int idx = app_cycle_role_model(u->app, tui_key_matches(k, "shift+ctrl+p"));
-        if (idx < 0) add_notice(u, "info", "Only one role model available");
-        else show_model_cycle_track(u, idx);
-        tui_request_render(t);
-        return true;
-    }
-    if (tui_kb(k, "app.plan.toggle") || tui_key_matches(k, "alt+shift+p")) {
+    /* custom key handlers (plan mode, session actions, follow-up, copy line) keep precedence over retry */
+    if (tui_kb(k, "app.plan.toggle")) {
         handle_command(u, "/plan");
         tui_request_render(t);
         return true;
     }
-    if (tui_key_matches(k, "alt+m")) { /* app.model.select */
-        ui_overlay_model(u);
+    static const char *const SESSION_KEYS[][2] = {{"app.session.new", "/new"},
+                                                  {"app.session.tree", "/tree"},
+                                                  {"app.session.fork", "/branch"},
+                                                  {"app.session.resume", "/resume"}};
+    for (size_t i = 0; i < ARRAY_LEN(SESSION_KEYS); i++)
+        if (tui_kb(k, SESSION_KEYS[i][0])) {
+            handle_command(u, SESSION_KEYS[i][1]);
+            tui_request_render(t);
+            return true;
+        }
+    if (tui_kb(k, "app.message.followUp")) {
+        iq_follow_up(u);
+        return true;
+    }
+    if (tui_kb(k, "app.clipboard.copyLine")) {
+        copy_editor_text(u, true);
+        return true;
+    }
+    if (tui_kb(k, "app.retry")) {
+        retry_key(u);
+        tui_request_render(t);
         return true;
     }
     return false;
@@ -1953,6 +2112,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     g_ui = &u;
     u.app = a;
     u.hide_thinking = settings_bool("hideThinkingBlock", false);
+    kbcfg_init_global(); /* KeybindingsManager.create(): agent-dir keybindings.yml (+ legacy .json migration) */
     pthread_mutex_init(&u.mu, NULL);
     pthread_cond_init(&u.ask_cv, NULL);
     hmap_init(&u.tools);
@@ -2039,11 +2199,6 @@ int run_interactive_mode(app_t *a, const char *initial) {
     a->env->ui.tool_frame = ui_tool_frame;
     a->env->ui.ud = &u;
     app_set_plan_review_ui(a, true);
-    {
-        const strvec_t *ek = tui_keybindings_get(tui_keybindings_global(), "app.editor.external");
-        static const char *const CTRL_G[] = {"ctrl+g", NULL};
-        if (!ek) tui_keybindings_define(tui_keybindings_global(), "app.editor.external", CTRL_G);
-    }
     g_pr.u = &u;
     job_t *init_job = NULL;
     if (initial) {

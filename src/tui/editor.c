@@ -317,13 +317,42 @@ static char *delete_range(tui_editor_t *ed, size_t fl, size_t fc, size_t tl, siz
     return sb_detach(&killed);
 }
 
-static void set_kill(tui_editor_t *ed, char *k) {
+/* ---------- kill ring (kill-ring.ts) ---------- */
+
+enum { KILL_NONE, KILL_KILL, KILL_YANK };
+#define KILL_RING_MAX 60
+
+/* Record killed text (owned). A kill right after another kill accumulates into the newest entry:
+ * prepended for backward deletions, appended for forward ones. */
+static void record_kill(tui_editor_t *ed, char *k, bool backward, int prev_state) {
     if (!k || !*k) {
         free(k);
         return;
     }
-    free(ed->kill);
-    ed->kill = k;
+    if (prev_state == KILL_KILL && ed->kills.n) {
+        char *last = ed->kills.v[ed->kills.n - 1];
+        ed->kills.v[ed->kills.n - 1] = backward ? xasprintf("%s%s", k, last) : xasprintf("%s%s", last, k);
+        free(last);
+        free(k);
+    } else {
+        strvec_push_own(&ed->kills, k);
+        if (ed->kills.n > KILL_RING_MAX) {
+            free(ed->kills.v[0]);
+            memmove(ed->kills.v, ed->kills.v + 1, (ed->kills.n - 1) * sizeof(char *));
+            ed->kills.n--;
+        }
+    }
+    ed->kill_state = KILL_KILL;
+}
+
+static const char *kill_peek(const tui_editor_t *ed) { return ed->kills.n ? ed->kills.v[ed->kills.n - 1] : NULL; }
+
+/* move the newest entry to the front (yank-pop cycling) */
+static void kill_rotate(tui_editor_t *ed) {
+    if (ed->kills.n < 2) return;
+    char *last = ed->kills.v[ed->kills.n - 1];
+    memmove(ed->kills.v + 1, ed->kills.v, (ed->kills.n - 1) * sizeof(char *));
+    ed->kills.v[0] = last;
 }
 
 /* ---------- paste markers ---------- */
@@ -759,9 +788,23 @@ static void delete_forward(tui_editor_t *ed) {
     free(delete_range(ed, ed->cl, ed->cc, ed->cl, to));
 }
 
-static void delete_word_backward(tui_editor_t *ed) {
+/* join with the previous line (cursor at column 0), recording the newline as a backward kill */
+static void kill_join_previous(tui_editor_t *ed, int prev) {
+    if (ed->cl == 0) return;
+    push_undo(ed, ACT_OTHER);
+    record_kill(ed, delete_range(ed, ed->cl - 1, strlen(ed->lines.v[ed->cl - 1]), ed->cl, 0), true, prev);
+}
+
+/* join with the next line (cursor at the end), recording the newline as a forward kill */
+static void kill_join_next(tui_editor_t *ed, int prev) {
+    if (ed->cl + 1 >= ed->lines.n) return;
+    push_undo(ed, ACT_OTHER);
+    record_kill(ed, delete_range(ed, ed->cl, strlen(cur_line(ed)), ed->cl + 1, 0), false, prev);
+}
+
+static void delete_word_backward(tui_editor_t *ed, int prev) {
     if (ed->cc == 0) {
-        delete_backward(ed);
+        kill_join_previous(ed, prev);
         return;
     }
     push_undo(ed, ACT_OTHER);
@@ -769,19 +812,82 @@ static void delete_word_backward(tui_editor_t *ed) {
     long ms = marker_ending_at(ed, cur_line(ed), ed->cc);
     if (ms >= 0) ed->cc = (size_t)ms;
     else word_left(ed);
-    set_kill(ed, delete_range(ed, ed->cl, ed->cc, ed->cl, end));
+    record_kill(ed, delete_range(ed, ed->cl, ed->cc, ed->cl, end), true, prev);
 }
 
-static void delete_word_forward(tui_editor_t *ed) {
+static void delete_word_forward(tui_editor_t *ed, int prev) {
     const char *l = cur_line(ed);
     if (ed->cc >= strlen(l)) {
-        delete_forward(ed);
+        kill_join_next(ed, prev);
         return;
     }
     push_undo(ed, ACT_OTHER);
     long me = marker_starting_at(ed, l, ed->cc);
     size_t to = me >= 0 ? (size_t)me : word_right_pos(l, ed->cc);
-    set_kill(ed, delete_range(ed, ed->cl, ed->cc, ed->cl, to));
+    record_kill(ed, delete_range(ed, ed->cl, ed->cc, ed->cl, to), false, prev);
+}
+
+/* Remove the newest kill-ring entry if it sits right before the cursor (#deleteYankedText). */
+static bool delete_yanked(tui_editor_t *ed) {
+    const char *y = kill_peek(ed);
+    if (!y) return false;
+    strvec_t parts = str_split(y, "\n");
+    bool ok = false;
+    size_t k = parts.n ? parts.n : 1;
+    if (ed->cl + 1 >= k) {
+        size_t sl = ed->cl - (k - 1), sc = 0;
+        if (k == 1) {
+            size_t yl = strlen(y);
+            ok = ed->cc >= yl && !memcmp(cur_line(ed) + ed->cc - yl, y, yl);
+            sc = ok ? ed->cc - yl : 0;
+        } else {
+            const char *first = ed->lines.v[sl], *lastp = parts.v[k - 1];
+            size_t fl = strlen(first), pl = strlen(parts.v[0]);
+            ok = fl >= pl && !strcmp(first + fl - pl, parts.v[0]) && ed->cc == strlen(lastp) &&
+                 !memcmp(cur_line(ed), lastp, ed->cc);
+            for (size_t i = 1; ok && i + 1 < k; i++) ok = !strcmp(ed->lines.v[sl + i], parts.v[i]);
+            sc = ok ? fl - pl : 0;
+        }
+        if (ok) free(delete_range(ed, sl, sc, ed->cl, ed->cc));
+    }
+    strvec_free(&parts);
+    return ok;
+}
+
+/* ---------- character jump ---------- */
+
+/* Jump to the next (dir 1) / previous (dir -1) occurrence of `ch`, searching across lines and skipping
+ * the cursor position (#jumpToChar); no match leaves the cursor in place. */
+static void jump_to_char(tui_editor_t *ed, const char *ch, int dir) {
+    size_t chl = strlen(ch);
+    if (!chl) return;
+    for (long li = (long)ed->cl; li >= 0 && li < (long)ed->lines.n; li += dir) {
+        const char *line = ed->lines.v[li];
+        size_t n = strlen(line);
+        bool cur = (size_t)li == ed->cl;
+        long found = -1;
+        if (dir > 0) {
+            size_t from = cur ? ed->cc + 1 : 0;
+            if (from <= n) {
+                const char *p = strstr(line + from, ch);
+                if (p) found = p - line;
+            }
+        } else {
+            /* JS lastIndexOf(ch, cursorCol - 1): a negative start searches from 0 */
+            long from = cur ? (long)ed->cc - 1 : (long)n;
+            if (from < 0) from = 0;
+            for (long i = MIN(from, (long)n - (long)chl); i >= 0; i--)
+                if (!memcmp(line + i, ch, chl)) {
+                    found = i;
+                    break;
+                }
+        }
+        if (found >= 0) {
+            ed->cl = (size_t)li;
+            ed->cc = (size_t)found;
+            return;
+        }
+    }
 }
 
 static void insert_typed(tui_editor_t *ed, const char *text) {
@@ -823,6 +929,25 @@ bool tui_editor_handle_key(tui_editor_t *ed, const tui_key_t *k) {
         }
     }
 
+    int prev_kill = ed->kill_state;
+    ed->kill_state = KILL_NONE;
+
+    /* character jump mode: the next printable key is the target; the jump keys cancel; any other
+     * key cancels and is handled normally */
+    if (ed->jump_mode) {
+        int dir = ed->jump_mode;
+        ed->jump_mode = 0;
+        if (tui_kb(k, "tui.editor.jumpForward") || tui_kb(k, "tui.editor.jumpBackward")) return true;
+        const char *jt = tui_key_text(k);
+        if (k->kind == TUI_KEY_CHAR && jt && *jt) {
+            close_ac(ed);
+            jump_to_char(ed, jt, dir);
+            ed->preferred_col = -1;
+            tui_component_request_render(&ed->base);
+            return true;
+        }
+    }
+
     bool changed = true, moved = false, retrigger = false;
     int prev_last = ed->last_action;
     ed->last_action = ACT_NONE;
@@ -840,45 +965,61 @@ bool tui_editor_handle_key(tui_editor_t *ed, const tui_key_t *k) {
     } else if (tui_kb(k, "tui.input.submit")) {
         do_submit(ed);
         return true;
-    } else if (tui_kb(k, "tui.input.newLine")) {
+    } else if (tui_kb(k, "tui.input.newLine") || tui_key_matches(k, "alt+enter") ||
+               (tui_key_matches(k, "ctrl+enter") && !tui_kb(k, "tui.input.submit"))) {
+        /* alt+enter / ctrl+enter are upstream's hard-coded newline fallbacks */
         push_undo(ed, ACT_OTHER);
         insert_raw(ed, "\n");
         close_ac(ed);
     } else if (tui_kb(k, "tui.input.tab")) {
         if (ed->ac_fn) refresh_ac(ed, true);
         changed = false;
-    } else if (tui_kb(k, "tui.editor.deleteCharBackward")) {
-        delete_backward(ed);
-        retrigger = true;
-    } else if (tui_kb(k, "tui.editor.deleteCharForward")) {
-        delete_forward(ed);
-        retrigger = true;
-    } else if (tui_kb(k, "tui.editor.deleteWordBackward")) {
-        delete_word_backward(ed);
-        retrigger = true;
-    } else if (tui_kb(k, "tui.editor.deleteWordForward")) {
-        delete_word_forward(ed);
-        retrigger = true;
-    } else if (tui_kb(k, "tui.editor.deleteToLineStart")) {
-        if (ed->cc == 0) delete_backward(ed);
-        else {
-            push_undo(ed, ACT_OTHER);
-            set_kill(ed, delete_range(ed, ed->cl, 0, ed->cl, ed->cc));
-        }
-        retrigger = true;
     } else if (tui_kb(k, "tui.editor.deleteToLineEnd")) {
         size_t n = strlen(cur_line(ed));
-        if (ed->cc >= n) delete_forward(ed);
+        if (ed->cc >= n) kill_join_next(ed, prev_kill);
         else {
             push_undo(ed, ACT_OTHER);
-            set_kill(ed, delete_range(ed, ed->cl, ed->cc, ed->cl, n));
+            record_kill(ed, delete_range(ed, ed->cl, ed->cc, ed->cl, n), false, prev_kill);
         }
         retrigger = true;
-    } else if (tui_kb(k, "tui.editor.yank")) {
-        if (ed->kill) {
+    } else if (tui_kb(k, "tui.editor.deleteToLineStart")) {
+        if (ed->cc == 0) kill_join_previous(ed, prev_kill);
+        else {
             push_undo(ed, ACT_OTHER);
-            insert_raw(ed, ed->kill);
+            record_kill(ed, delete_range(ed, ed->cl, 0, ed->cl, ed->cc), true, prev_kill);
+        }
+        retrigger = true;
+    } else if (tui_kb(k, "tui.editor.deleteWordBackward")) {
+        delete_word_backward(ed, prev_kill);
+        retrigger = true;
+    } else if (tui_kb(k, "tui.editor.deleteWordForward")) {
+        delete_word_forward(ed, prev_kill);
+        retrigger = true;
+    } else if (tui_kb(k, "tui.editor.yank")) {
+        if (kill_peek(ed)) {
+            push_undo(ed, ACT_OTHER);
+            insert_raw(ed, kill_peek(ed));
+            ed->kill_state = KILL_YANK;
         } else changed = false;
+    } else if (tui_kb(k, "tui.editor.yankPop")) {
+        /* only right after a yank: swap the yanked text for the next older entry */
+        if (prev_kill == KILL_YANK && ed->kills.n > 1) {
+            push_undo(ed, ACT_OTHER);
+            if (delete_yanked(ed)) {
+                kill_rotate(ed);
+                insert_raw(ed, kill_peek(ed));
+            }
+            ed->kill_state = KILL_YANK;
+        } else changed = false;
+    } else if (tui_kb(k, "tui.editor.deleteCharBackward") || tui_key_matches(k, "shift+backspace")) {
+        delete_backward(ed);
+        retrigger = true;
+    } else if (tui_kb(k, "tui.editor.deleteCharForward") || tui_key_matches(k, "shift+delete")) {
+        delete_forward(ed);
+        retrigger = true;
+    } else if (tui_kb(k, "tui.editor.jumpForward") || tui_kb(k, "tui.editor.jumpBackward")) {
+        ed->jump_mode = tui_kb(k, "tui.editor.jumpForward") ? 1 : -1;
+        changed = false;
     } else if (tui_kb(k, "tui.editor.cursorLeft")) {
         if (ed->cc > 0) {
             long ms = marker_ending_at(ed, cur_line(ed), ed->cc);
@@ -1239,7 +1380,7 @@ static void editor_destroy(tui_component_t *c) {
     strvec_free(&ed->lines);
     for (size_t i = 0; i < ed->undo.n; i++) snapshot_free(&ed->undo.v[i]);
     vec_free(&ed->undo);
-    free(ed->kill);
+    strvec_free(&ed->kills);
     strvec_free(&ed->history);
     free(ed->hist_draft);
     for (size_t i = 0; i < ed->pastes.n; i++) paste_free(&ed->pastes.v[i]);
@@ -1293,6 +1434,18 @@ void tui_editor_insert_text(tui_editor_t *ed, const char *text) {
     ed->preferred_col = -1;
     notify_change(ed);
 }
+
+void tui_editor_remember_draft(tui_editor_t *ed) {
+    char *t = tui_editor_get_text(ed);
+    char *tt = str_trim(t);
+    if (*tt) tui_editor_add_history(ed, t);
+    free(tt);
+    free(t);
+}
+
+void tui_editor_submit(tui_editor_t *ed) { do_submit(ed); }
+
+char *tui_editor_current_line(const tui_editor_t *ed) { return xstrdup(ed->lines.v[ed->cl]); }
 
 bool tui_editor_is_empty(const tui_editor_t *ed) { return ed->lines.n == 1 && ed->lines.v[0][0] == 0; }
 

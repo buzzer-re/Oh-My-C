@@ -108,6 +108,8 @@ void ui_overlay_settings(ui_t *u);
 char *ui_settings_status_preview(ui_t *u, int cols);
 size_t ui_settings_def_count(void);
 void ui_overlay_hotkeys(ui_t *u);
+/* /hotkeys markdown built from the live keybindings (buildHotkeysMarkdown); owned */
+char *ui_hotkeys_markdown(void);
 /* titled command report (overlays/report-panel.ts): fullscreen page, scrolls, Esc closes; takes `body` */
 void ui_show_report(ui_t *u, const char *title, tui_component_t *body);
 void ui_overlay_login(ui_t *u, bool logout);

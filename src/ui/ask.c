@@ -472,13 +472,13 @@ static void render_header(ask_view_t *v, int width, int max_title_rows, strvec_t
 
 static char *expand_hint(const ask_view_t *v) {
     if (!v->header_exp && !v->desc_exp) return xstrdup("");
-    char *k = ui_key_hint("ctrl+o"), *r = xasprintf(" \xc2\xb7 %s %s", k, v->expanded ? "collapse" : "expand");
+    char *k = ui_editor_key("app.tools.expand"), *r = xasprintf(" \xc2\xb7 %s %s", k, v->expanded ? "collapse" : "expand");
     free(k);
     return r;
 }
 
 static char *footer_text(ask_view_t *v, const char *indicator) {
-    char *hide = ui_key_hint("alt+h"), *esc = ui_editor_key("tui.select.cancel");
+    char *hide = ui_editor_key("app.ask.hide"), *esc = ui_editor_key("tui.select.cancel");
     char *cancel = xasprintf("%s cancel \xc2\xb7 %s hide", esc, hide);
     char *enter = ui_key_hint("enter"), *updown = key2("up", "down"), *exp = expand_hint(v), *r;
     if (guard_blocks(v)) {
@@ -665,7 +665,7 @@ static const char *submit_body(ask_view_t *v, int width, int rows, strvec_t *out
 }
 
 static void render_hidden(ask_view_t *v, int width, strvec_t *out) {
-    char *hide = ui_key_hint("alt+h"), *enter = ui_key_hint("enter"), *esc = ui_editor_key("tui.select.cancel");
+    char *hide = ui_editor_key("app.ask.hide"), *enter = ui_key_hint("enter"), *esc = ui_editor_key("tui.select.cancel");
     bool blocked = guard_blocks(v);
     char *show = blocked ? xstrdup(hide) : xasprintf("%s/%s", hide, enter);
     sb_t h = SB_INIT;
@@ -1029,12 +1029,12 @@ static bool ask_key(tui_component_t *c, const tui_key_t *k) {
         finish(v, NULL);
         return true;
     }
-    if (tui_key_matches(k, "alt+h")) {
+    if (tui_kb(k, "app.ask.hide")) {
         v->hidden = !v->hidden;
         request(v);
         return true;
     }
-    if (tui_key_matches(k, "ctrl+o")) {
+    if (tui_kb(k, "app.tools.expand")) {
         if (!v->hidden && !on_submit_tab(v) && v->nq &&
             (v->expanded || v->header_exp || v->desc_exp)) {
             v->expanded = !v->expanded;

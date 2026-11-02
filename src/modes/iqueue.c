@@ -382,7 +382,7 @@ static void bang(ui_t *u, const char *text) {
     char *cmd = str_trim(text + (exclude ? 2 : 1));
     if (*cmd) {
         if (u->bash) {
-            char *k = ui_key_hint("escape");
+            char *k = ui_editor_key("app.interrupt");
             char *m = xasprintf("A bash command is already running. Press %s to cancel it first.", k);
             add_notice(u, "warning", m);
             free(m);
@@ -410,7 +410,7 @@ static bool python(ui_t *u, const char *text) {
         return false;
     }
     if (u->python) {
-        char *k = ui_key_hint("escape");
+        char *k = ui_editor_key("app.interrupt");
         char *m = xasprintf("A Python execution is already running. Press %s to cancel it first.", k);
         add_notice(u, "warning", m);
         free(m);

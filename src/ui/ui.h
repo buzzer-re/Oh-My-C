@@ -71,7 +71,8 @@ struct ui {
     bool worker_running;
     bool expand_tools;
     bool hide_thinking;
-    int64_t last_ctrl_c;
+    int64_t last_ctrl_c;      /* app.clear double-press window (500 ms) */
+    int64_t last_escape;      /* app.interrupt double-press window (doubleEscapeAction) */
     /* coalesced streaming updates */
     pthread_mutex_t mu;
     json_t *pending_partial;

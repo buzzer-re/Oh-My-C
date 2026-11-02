@@ -692,9 +692,10 @@ static void do_render(tui_t *t) {
         dbg_note(t, first >= 0 ? "diff" : "none", first, NULL, NULL);
     }
     /* base: the new row that belongs on screen row 0 (old rows on screen stay put). Content that now
-     * ends above the screen (a large collapse) is pulled back onto it. */
+     * ends above the screen bottom (a collapse, an autocomplete list or picker closing under a scrolled
+     * frame) is pulled back down so the frame's tail sits on the last row, as omp's viewport does. */
     int base = vt + k;
-    if (nn > 0 && nn - 1 < base) base = MAX(0, nn - height);
+    if (nn > 0 && base > 0 && nn - base < height) base = MAX(0, nn - height);
     if (base < c) c = base; /* rows pulled back on screen are live again */
     /* screen top s1 and commit point c1: rows above s1 leave the screen; only rows above the hold
      * may enter scrollback, held ones in between stay hidden until they settle (omp: unfinalized
@@ -992,19 +993,15 @@ void tui_shutdown(tui_t *t) {
     t->started = false;
 }
 
-void tui_suspend(tui_t *t) {
-    if (!t->started) return;
+int tui_suspend(tui_t *t) {
+    if (!t->started) return 0;
     move_below_content(t);
     tui_term_stop(t->term);
     tui_term_set_loop_active(false);
-    struct sigaction dfl, old;
-    memset(&dfl, 0, sizeof dfl);
-    dfl.sa_handler = SIG_DFL;
-    sigemptyset(&dfl.sa_mask);
-    sigaction(SIGTSTP, &dfl, &old);
-    raise(SIGTSTP);
-    /* resumed */
-    sigaction(SIGTSTP, &old, NULL);
+    /* SIGSTOP to the whole foreground process group (omp handleCtrlZ): launcher shims and pipeline
+     * peers sharing the group stop too, so the shell sees the job as stopped */
+    int rc = kill(0, SIGSTOP) == 0 ? 0 : -errno;
+    /* resumed (or the signal was refused) */
     tui_term_set_loop_active(true);
     tui_term_start(t->term);
     tui_term_query_size(t->term);
@@ -1014,6 +1011,7 @@ void tui_suspend(tui_t *t) {
     int row = query_cursor_row(t);
     t->start_screen_row = row > 0 ? MIN(row - 1, t->term->rows - 1) : 0;
     tui_request_render(t);
+    return rc;
 }
 
 static void handle_signal(tui_t *t, int sig) {
