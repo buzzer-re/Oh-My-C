@@ -389,22 +389,76 @@ static char *truncate_result(const char *s) {
     return xasprintf("%.*s\n\n[... %zu more characters truncated]", (int)cut, s, cps - TOOL_RESULT_MAX_CHARS);
 }
 
-static void join_text_blocks(const json_t *content, sb_t *b, const char *type, const char *field, const char *sep) {
+
+static void xml_attr(sb_t *b, const char *s) {
+    for (; *s; s++) {
+        if (*s == '&') sb_append(b, "&amp;");
+        else if (*s == '"') sb_append(b, "&quot;");
+        else if (*s == '<') sb_append(b, "&lt;");
+        else if (*s == '>') sb_append(b, "&gt;");
+        else sb_putc(b, *s);
+    }
+}
+
+static void xml_text(sb_t *b, const char *s) {
+    for (; *s; s++) {
+        if (*s == '&') sb_append(b, "&amp;");
+        else if (*s == '<') sb_append(b, "&lt;");
+        else if (*s == '>') sb_append(b, "&gt;");
+        else sb_putc(b, *s);
+    }
+}
+
+/* renderInvoke without declared arg shapes: every value as JSON */
+static void render_invoke(sb_t *b, const json_t *call) {
+    sb_append(b, "<invoke name=\"");
+    xml_attr(b, json_get_str(call, "name") ? json_get_str(call, "name") : "");
+    sb_append(b, "\">");
+    const char *key;
+    const json_t *v;
+    json_obj_foreach(json_get_obj(call, "arguments"), i, key, v) {
+        char *js = json_dump(v, 0);
+        sb_append(b, "<parameter name=\"");
+        xml_attr(b, key);
+        sb_appendf(b, "\">%s</parameter>", js ? js : "null");
+        free(js);
+    }
+    sb_append(b, "</invoke>");
+}
+
+/* messageContentText: text blocks, images as [Image: mime] */
+static void content_text(const json_t *content, sb_t *b) {
     if (json_is_str(content)) {
         sb_append(b, json_sv(content));
         return;
     }
     const json_t *blk;
-    bool first = true;
     json_arr_foreach(content, i, blk) {
-        if (!str_eq(json_get_str(blk, "type"), type)) continue;
-        if (!first && sep) sb_append(b, sep);
-        sb_append(b, json_get_str(blk, field) ? json_get_str(blk, field) : "");
-        first = false;
+        const char *t = json_get_str(blk, "type");
+        if (str_eq(t, "text") && json_get_str(blk, "text")) sb_append(b, json_get_str(blk, "text"));
+        else if (str_eq(t, "image")) {
+            const char *mime = json_get_str(blk, "mimeType");
+            if (mime && *mime) sb_appendf(b, "[Image: %s]", mime);
+            else sb_append(b, "[Image]");
+        }
     }
 }
 
-char *branchsum_serialize(const json_t *messages) {
+const char *branchsum_dialect(const char *model_class, const char *model_id) {
+    const char *c = model_class;
+    if (!c || !*c) {
+        char *low = xstrdup(model_id ? model_id : "");
+        for (char *p = low; *p; p++) *p = (char)tolower((unsigned char)*p);
+        bool claude = strstr(low, "claude") != NULL;
+        free(low);
+        return claude ? "anthropic" : "xml";
+    }
+    return str_eq(c, "anthropic") ? "anthropic" : "xml";
+}
+
+/* serializeConversation with a dialect: the legacy text transcript (`Human:` / `Assistant:` segments) */
+char *branchsum_serialize(const json_t *messages, const char *dialect) {
+    bool anthropic = str_eq(dialect, "anthropic");
     /* useless, non-error tool results are dropped along with their calls */
     strvec_t useless = {0};
     const json_t *m;
@@ -413,66 +467,86 @@ char *branchsum_serialize(const json_t *messages) {
             !json_get_bool(m, "isError", false) && json_get_str(m, "toolCallId"))
             strvec_push(&useless, json_get_str(m, "toolCallId"));
     }
-    strvec_t parts = {0};
-    json_arr_foreach(messages, i, m) {
+    sb_t out = SB_INIT;
+    size_t n = json_len(messages);
+    for (size_t i = 0; i < n;) {
+        m = json_at(messages, i);
         const char *role = json_get_str(m, "role");
-        sb_t b = SB_INIT;
-        if (str_eq(role, "user")) {
-            join_text_blocks(json_get(m, "content"), &b, "text", "text", NULL);
-            if (b.len) strvec_push_own(&parts, xasprintf("[User]: %s", sb_cstr(&b)));
-        } else if (str_eq(role, "assistant")) {
-            sb_t think = SB_INIT, calls = SB_INIT;
-            bool any_text = false, any_think = false;
+        if (str_eq(role, "assistant")) {
+            sb_t text = SB_INIT, think = SB_INIT, calls = SB_INIT;
             const json_t *blk;
+            size_t ncalls = 0, kept = 0;
+            bool any_think = false;
             json_arr_foreach(json_get_arr(m, "content"), k, blk) {
                 const char *t = json_get_str(blk, "type");
-                if (str_eq(t, "text")) {
-                    if (any_text) sb_putc(&b, '\n');
-                    sb_append(&b, json_get_str(blk, "text") ? json_get_str(blk, "text") : "");
-                    any_text = true;
-                } else if (str_eq(t, "thinking")) {
+                if (!(str_eq(t, "toolCall") && json_get_str(blk, "id") && strvec_contains(&useless, json_get_str(blk, "id"))))
+                    kept++;
+                if (str_eq(t, "text")) sb_append(&text, json_get_str(blk, "text") ? json_get_str(blk, "text") : "");
+                else if (str_eq(t, "thinking")) {
                     if (any_think) sb_putc(&think, '\n');
                     sb_append(&think, json_get_str(blk, "thinking") ? json_get_str(blk, "thinking") : "");
                     any_think = true;
                 } else if (str_eq(t, "toolCall")) {
                     if (json_get_str(blk, "id") && strvec_contains(&useless, json_get_str(blk, "id"))) continue;
-                    if (calls.len) sb_append(&calls, "; ");
-                    sb_appendf(&calls, "%s(", json_get_str(blk, "name") ? json_get_str(blk, "name") : "");
-                    const char *key;
-                    const json_t *v;
-                    bool first = true;
-                    json_obj_foreach(json_get_obj(blk, "arguments"), a, key, v) {
-                        char *js = json_dump(v, 0);
-                        sb_appendf(&calls, "%s%s=%s", first ? "" : ", ", key, js ? js : "null");
-                        free(js);
-                        first = false;
-                    }
-                    sb_putc(&calls, ')');
+                    if (ncalls++) sb_putc(&calls, '\n');
+                    render_invoke(&calls, blk);
                 }
             }
-            if (any_think) strvec_push_own(&parts, xasprintf("[Think]: %s", sb_cstr(&think)));
-            if (any_text) strvec_push_own(&parts, xasprintf("[Assistant]: %s", sb_cstr(&b)));
-            if (calls.len) strvec_push_own(&parts, xasprintf("[Tool Call]: %s", sb_cstr(&calls)));
-            sb_free(&think);
-            sb_free(&calls);
-        } else if (str_eq(role, "toolResult")) {
-            if (!(json_get_str(m, "toolCallId") && strvec_contains(&useless, json_get_str(m, "toolCallId")))) {
-                join_text_blocks(json_get(m, "content"), &b, "text", "text", NULL);
-                if (b.len) {
-                    char *t = truncate_result(sb_cstr(&b));
-                    strvec_push_own(&parts, xasprintf("[Tool Result]: %s", t));
-                    free(t);
+            if (kept) { /* an assistant left with no blocks is dropped */
+                sb_append(&out, "\n\nAssistant: ");
+                if (think.len) sb_appendf(&out, "<thinking>\n%s\n</thinking>", sb_cstr(&think));
+                sb_append(&out, sb_cstr(&text));
+                if (ncalls) {
+                    if (anthropic) sb_appendf(&out, "<function_calls>\n%s\n</function_calls>", sb_cstr(&calls));
+                    else sb_append(&out, sb_cstr(&calls));
                 }
             }
+            sb_free(&text), sb_free(&think), sb_free(&calls);
+            i++;
+            continue;
         }
-        sb_free(&b);
+        if (str_eq(role, "toolResult")) {
+            /* a run of results: one Human segment */
+            sb_t body = SB_INIT;
+            size_t k = 0;
+            for (; i < n && str_eq(json_get_str(json_at(messages, i), "role"), "toolResult"); i++) {
+                const json_t *r = json_at(messages, i);
+                if (json_get_str(r, "toolCallId") && strvec_contains(&useless, json_get_str(r, "toolCallId"))) continue;
+                sb_t t = SB_INIT;
+                const json_t *blk;
+                json_arr_foreach(json_get_arr(r, "content"), x, blk) if (str_eq(json_get_str(blk, "type"), "text"))
+                    sb_append(&t, json_get_str(blk, "text") ? json_get_str(blk, "text") : "");
+                if (!t.len) {
+                    sb_free(&t);
+                    continue;
+                }
+                char *tr = truncate_result(sb_cstr(&t));
+                sb_free(&t);
+                if (k++) sb_putc(&body, '\n');
+                if (anthropic) {
+                    bool err = json_get_bool(r, "isError", false);
+                    sb_appendf(&body, "<%s>\n<tool_name>", err ? "error" : "result");
+                    xml_text(&body, json_get_str(r, "toolName") ? json_get_str(r, "toolName") : "");
+                    sb_appendf(&body, "</tool_name>\n<%s>%s</%s>\n</%s>", err ? "stderr" : "stdout", tr, err ? "stderr" : "stdout",
+                               err ? "error" : "result");
+                } else sb_appendf(&body, "<tool_response>\n%s\n</tool_response>", tr);
+                free(tr);
+            }
+            if (k) {
+                if (anthropic) sb_appendf(&out, "\n\nHuman: <function_results>\n%s\n</function_results>", sb_cstr(&body));
+                else sb_appendf(&out, "\n\nHuman: %s", sb_cstr(&body));
+            }
+            sb_free(&body);
+            continue;
+        }
+        sb_t text = SB_INIT;
+        content_text(json_get(m, "content"), &text);
+        if (str_eq(role, "developer")) {
+            if (text.len) sb_appendf(&out, "%s%s", out.len ? "\n\n" : "", sb_cstr(&text));
+        } else sb_appendf(&out, "\n\nHuman: %s", sb_cstr(&text));
+        sb_free(&text);
+        i++;
     }
-    sb_t out = SB_INIT;
-    for (size_t i = 0; i < parts.n; i++) {
-        if (i) sb_append(&out, "\n\n");
-        sb_append(&out, parts.v[i]);
-    }
-    strvec_free(&parts);
     strvec_free(&useless);
     /* a closing/opening conversation or previous-summary tag in the content must not end the envelope */
     char *raw = sb_detach(&out);
@@ -501,7 +575,7 @@ char *branchsum_serialize(const json_t *messages) {
     return sb_detach(&esc);
 }
 
-char *branchsum_prompt(const json_t *entries, int64_t budget, const char *custom, json_t **fileops) {
+char *branchsum_prompt(const json_t *entries, int64_t budget, const char *custom, const char *dialect, json_t **fileops) {
     json_t *ops = json_obj();
     json_set(ops, "read", json_arr());
     json_set(ops, "written", json_arr());
@@ -546,7 +620,7 @@ char *branchsum_prompt(const json_t *entries, int64_t budget, const char *custom
     json_t *msgs = json_arr();
     for (size_t i = json_len(rev); i-- > 0;) json_push(msgs, json_clone(json_at(rev, i)));
     json_free(rev);
-    char *conv = branchsum_serialize(msgs);
+    char *conv = branchsum_serialize(msgs, dialect);
     json_free(msgs);
     char *instructions = custom && *custom ? xstrdup(custom) : prompt_render("agent/compaction/prompts/branch-summary.md", NULL);
     char *out = xasprintf("<conversation>\n%s\n</conversation>\n\n%s", conv, instructions ? instructions : "");

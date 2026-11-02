@@ -15,13 +15,18 @@ json_t *branchsum_collect(const session_t *s, const char *old_leaf, const char *
 /* prepareBranchEntries + the summarizer prompt: newest-first within `token_budget` (0 = unlimited),
  * serialized into `<conversation>…</conversation>` followed by `custom` or the branch-summary prompt.
  * NULL when there is nothing to summarize. *fileops (owned) receives {read, written, edited} arrays. */
-char *branchsum_prompt(const json_t *entries, int64_t token_budget, const char *custom, json_t **fileops);
+char *branchsum_prompt(const json_t *entries, int64_t token_budget, const char *custom, const char *dialect,
+                       json_t **fileops);
 
 /* the stored summary: preamble + model text + the <files> section; *read_files / *modified_files (owned
  * arrays) receive the sorted file lists. Owned. */
 char *branchsum_finish(const char *model_text, const json_t *fileops, json_t **read_files, json_t **modified_files);
 
-/* dialect-less serializeConversation of LLM messages ([User]: / [Assistant]: / [Tool Call]: / ...). Owned. */
-char *branchsum_serialize(const json_t *messages);
+/* serializeConversation of LLM messages in the model's transcript dialect: the legacy text transcript of the
+ * "xml" dialect (`Human:` / `Assistant:`, `<invoke>` calls, `<tool_response>` results) or of "anthropic"
+ * (`<function_calls>` / `<function_results>`). Owned. */
+char *branchsum_serialize(const json_t *messages, const char *dialect);
+/* preferredDialect: "anthropic" for Claude-class models, otherwise "xml" (the other dialects are not ported) */
+const char *branchsum_dialect(const char *model_class, const char *model_id);
 
 #endif

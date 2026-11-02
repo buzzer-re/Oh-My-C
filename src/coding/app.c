@@ -1802,7 +1802,9 @@ static int branch_summary(app_t *a, const json_t *entries, const char *custom, c
     const ai_model_t *m = a->model;
     int64_t window = m->context_window > 0 ? m->context_window : 128000;
     json_t *ops = NULL;
-    char *prompt = branchsum_prompt(entries, window - settings_int("branchSummary.reserveTokens", 16384), custom, &ops);
+    const json_t *identity = m->raw ? json_get_obj(m->raw, "identity") : NULL;
+    const char *dialect = branchsum_dialect(identity ? json_get_str(identity, "class") : NULL, m->id);
+    char *prompt = branchsum_prompt(entries, window - settings_int("branchSummary.reserveTokens", 16384), custom, dialect, &ops);
     if (!prompt) {
         json_free(ops);
         *summary = xstrdup("No content to summarize");
@@ -1925,6 +1927,7 @@ int app_navigate_tree(app_t *a, const char *target_id, bool summarize, const cha
         json_set_str(e, "summary", summary);
         if (details) json_set(e, "details", details);
         details = NULL;
+        json_set_bool(e, "fromExtension", false); /* the default summarizer (no extension hook) */
         session_append_entry(a->session, e);
         out->summarized = true;
     }
@@ -1934,6 +1937,21 @@ int app_navigate_tree(app_t *a, const char *target_id, bool summarize, const cha
     load_session_into_agent(a);
     if (!a->session->leaf_id) agent_replace_messages(a->agent, json_arr());
     advisor_reset(a->advisor);
+    /* the context gauge follows the new branch: its last assistant usage */
+    a->last_context_tokens = 0;
+    pthread_mutex_lock(&a->agent->mu);
+    for (size_t i = json_len(a->agent->messages); i-- > 0;) {
+        const json_t *msg = json_at(a->agent->messages, i);
+        if (!str_eq(json_get_str(msg, "role"), "assistant")) continue;
+        const json_t *u = json_get(msg, "usage");
+        int64_t ctx = json_get_int(u, "input", 0) + json_get_int(u, "cacheRead", 0) + json_get_int(u, "cacheWrite", 0) +
+                      json_get_int(u, "output", 0);
+        if (ctx > 0) {
+            a->last_context_tokens = ctx;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&a->agent->mu);
     out->moved = true;
     return 0;
 }
