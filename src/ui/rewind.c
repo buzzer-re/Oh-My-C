@@ -353,7 +353,8 @@ void ui_tx_render_children(ui_t *u, bool expanded, tui_container_t *c, size_t fr
         }
         strvec_free(&raw);
         /* ToolExecutionComponent pads its card with a plain blank row above and below (Box(0, 1)); the live
-         * transcript strips those edges, the replica keeps them. Read groups have no padding. */
+         * transcript strips those edges, the replica keeps them. Read groups have no padding, and a user
+         * `!cmd` / `$ code` run (BashExecutionComponent: border, content, border) none either. */
         tui_component_t *ch = c->children.v[i];
         if (str_eq(ch->vt->name, "message") && rows.n) {
             msgview_t *v = (msgview_t *)ch;
@@ -361,10 +362,11 @@ void ui_tx_render_children(ui_t *u, bool expanded, tui_container_t *c, size_t fr
                 size_t lo = 0, hi = rows.n;
                 while (lo < hi && !*rows.v[lo]) lo++;
                 while (hi > lo && !*rows.v[hi - 1]) hi--;
+                bool pad = v->kind == MV_TOOL;
                 strvec_t padded = {0};
-                strvec_push(&padded, "");
+                if (pad) strvec_push(&padded, "");
                 for (size_t k = lo; k < hi; k++) strvec_push(&padded, rows.v[k]);
-                strvec_push(&padded, "");
+                if (pad) strvec_push(&padded, "");
                 strvec_free(&rows);
                 rows = padded;
             }
