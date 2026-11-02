@@ -104,6 +104,8 @@ static void ui_apply_event(void *ud) {
     ui_t *u = e->u;
     switch (e->type) {
     case AGENT_EV_MESSAGE_START: /* steered / follow-up / drained user input reaches the transcript */
+        if (str_eq(json_get_str(e->msg, "role"), "user") && !str_eq(json_get_str(e->msg, "attribution"), "agent"))
+            ui_usage_turn_start(json_get_num(e->msg, "timestamp", 0));
         ui_signals_user_message(e->msg);
         iq_user_message_start(u, e->msg);
         break;
@@ -120,6 +122,7 @@ static void ui_apply_event(void *ud) {
             e->msg = NULL;
             ui_assistant_end(u, u->cur_assistant);
             toolcard_note_message(u, u->cur_assistant->msg, true);
+            ui_usage_row_live(u, u->cur_assistant->msg);
             u->cur_assistant = NULL;
         }
         break;

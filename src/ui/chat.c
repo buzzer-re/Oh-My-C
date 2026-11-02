@@ -9,6 +9,7 @@
 #include "ui/ui.h"
 #include "ui/signals.h"
 #include "ui/tools/tc.h"
+#include "ui/usage.h"
 
 #include "config/settings.h"
 
@@ -1670,8 +1671,54 @@ void ui_async_result(ui_t *u, const json_t *m) {
     add_view(u, v);
 }
 
+/* ---------- per-turn usage row (display.showTokenUsage, usage-row.ts) ---------- */
+
+static double g_turn_started;      /* prompt->yield anchor (the turn's user prompt timestamp), 0 = unknown */
+static json_t *g_pending_usage;    /* replay: the last assistant message whose row waits for its tool results */
+
+void ui_usage_turn_start(double ts) { g_turn_started = ts; }
+
+/* assistantUsageIsBilled */
+static bool usage_billed(const json_t *us) {
+    return json_get_num(us, "input", 0) > 0 || json_get_num(us, "output", 0) > 0 || json_get_num(us, "cacheRead", 0) > 0 ||
+           json_get_num(us, "cacheWrite", 0) > 0 || json_get_num(us, "premiumRequests", 0) > 0;
+}
+
+static msgview_t *usage_row_view(const json_t *msg, double turn_start) {
+    const json_t *us = json_get_obj(msg, "usage");
+    double turn = 0;
+    if (settings_bool("display.showTurnTime", false) && turn_start > 0 && json_is_num(json_get(msg, "completedAt"))) {
+        double el = json_get_num(msg, "completedAt", 0) - turn_start;
+        turn = el > 0 ? floor(el + 0.5) : 0;
+    }
+    char *row = ui_usage_row(us, json_get_num(msg, "duration", 0), json_get_num(msg, "ttft", 0), json_get_num(msg, "timestamp", 0), turn);
+    msgview_t *v = mv_new(MV_NOTICE);
+    v->level = "styled";
+    v->text = fg(TUI_TC_DIM, row);
+    free(row);
+    return v;
+}
+
+/* live message_end of an assistant message: the metric strip below the turn */
+void ui_usage_row_live(ui_t *u, const json_t *msg) {
+    if (!settings_bool("display.showTokenUsage", false) || !usage_billed(json_get_obj(msg, "usage"))) return;
+    add_view(u, usage_row_view(msg, g_turn_started));
+}
+
+static void flush_pending_usage(ui_t *u) {
+    if (!g_pending_usage) return;
+    msgview_t *v = usage_row_view(g_pending_usage, json_get_num(g_pending_usage, "_turnStartedAt", 0));
+    tui_container_add(u->chat, &v->base);
+    json_free(g_pending_usage);
+    g_pending_usage = NULL;
+}
+
 static void replay_message(ui_t *u, const json_t *m, hmap_t *pending) {
     const char *role = json_get_str(m, "role");
+    if (!str_eq(role, "toolResult")) flush_pending_usage(u);
+    if (str_eq(role, "user") && !str_eq(json_get_str(m, "attribution"), "agent")) g_turn_started = json_get_num(m, "timestamp", 0);
+    else if (str_eq(role, "developer") && json_get_bool(m, "synthetic", false))
+        g_turn_started = json_get_bool(m, "userInitiated", false) ? json_get_num(m, "timestamp", 0) : 0;
     if (str_eq(role, "user") && str_eq(json_get_str(m, "customType"), "skill-prompt") && json_get_bool(m, "display", false)) {
         toolcard_break_group(u);
         msgview_t *v = mv_new(MV_SKILL);
@@ -1728,6 +1775,10 @@ static void replay_message(ui_t *u, const json_t *m, hmap_t *pending) {
             msgview_t *pv = mv_new(MV_ASSISTANT);
             pv->msg = after;
             tui_container_add(u->chat, &pv->base);
+        }
+        if (settings_bool("display.showTokenUsage", false) && usage_billed(json_get_obj(m, "usage"))) {
+            g_pending_usage = json_clone(m);
+            json_set_num(g_pending_usage, "_turnStartedAt", g_turn_started);
         }
     } else if (str_eq(role, "toolResult")) {
         const char *id = json_get_str(m, "toolCallId");
@@ -1805,6 +1856,7 @@ void ui_chat_replay_into(ui_t *u, tui_container_t *dest, const json_t *entries, 
         replay_entry(u, e, &pending);
         ends[i] = dest->children.n;
     }
+    flush_pending_usage(u);
     toolcard_set_replaying(false);
     hmap_free(&pending, NULL);
     hmap_free(&u->tools, NULL);
@@ -1884,6 +1936,7 @@ void ui_chat_rebuild(ui_t *u) {
         json_arr_foreach(msgs, i, m) replay_message(u, m, &pending);
         json_free(msgs);
     }
+    flush_pending_usage(u);
     json_free(path);
     hmap_free(&pending, NULL);
     toolcard_set_replaying(false);

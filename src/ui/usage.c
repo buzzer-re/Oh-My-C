@@ -2073,3 +2073,40 @@ void ui_usage_command(ui_t *u, const char *args) {
 }
 
 bool ui_usage_dashboard_open(void) { return g_dash != NULL; }
+
+/* ============================================================================================
+ * Per-turn usage row (usage-row.ts usageRowSpecs / formatMetricRow, separator "  ")
+ * ============================================================================================ */
+
+char *ui_usage_row(const json_t *usage, double duration_ms, double ttft_ms, double timestamp, double turn_ms) {
+    strvec_t parts = {0};
+    if (timestamp > 0 && isfinite(timestamp)) {
+        time_t t = (time_t)(timestamp / 1000);
+        struct tm tm;
+        localtime_r(&t, &tm);
+        char buf[32];
+        strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S", &tm);
+        strvec_push(&parts, buf);
+    }
+    if (turn_ms > 0) {
+        char *d = usage_fmt_duration(floor(turn_ms + 0.5));
+        strvec_push_own(&parts, xasprintf("\xce\x94 %s", d));
+        free(d);
+    }
+    double in = json_get_num(usage, "input", 0) + json_get_num(usage, "cacheWrite", 0), out = json_get_num(usage, "output", 0),
+           cr = json_get_num(usage, "cacheRead", 0);
+    char *a = usage_fmt_number(in, -1), *b = usage_fmt_number(out, -1);
+    strvec_push_own(&parts, xasprintf("%s %s", tui_sym("icon.input"), a));
+    strvec_push_own(&parts, xasprintf("%s %s", tui_sym("icon.output"), b));
+    free(a), free(b);
+    if (cr > 0) {
+        char *c = usage_fmt_number(cr, -1);
+        strvec_push_own(&parts, xasprintf("%s %s", tui_sym("icon.cache"), c));
+        free(c);
+    }
+    if (ttft_ms > 0) strvec_push_own(&parts, xasprintf("%s %.1fs", tui_sym("icon.time"), ttft_ms / 1000));
+    if (duration_ms > 100 && out > 0) strvec_push_own(&parts, xasprintf("%s %.1f/s", tui_sym("icon.throughput"), out / duration_ms * 1000));
+    char *r = strvec_join(&parts, "  ");
+    strvec_free(&parts);
+    return r;
+}

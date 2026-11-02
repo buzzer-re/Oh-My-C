@@ -25,5 +25,9 @@ void ui_usage_load_activity(const char *sessions_dir, json_t **points_out);
 /* usage-row.ts: the dim metric strip under a finished turn (`display.showTokenUsage`). usage is the
  * assistant message's usage; duration_ms / ttft_ms / timestamp / turn_ms are 0 when unknown. Owned. */
 char *ui_usage_row(const json_t *usage, double duration_ms, double ttft_ms, double timestamp, double turn_ms);
+/* chat.c: the prompt->yield anchor of the running turn (a user-attributed prompt's timestamp) and the live row
+ * after an assistant message_end (no-op unless display.showTokenUsage and the request was billed) */
+void ui_usage_turn_start(double ts);
+void ui_usage_row_live(ui_t *u, const json_t *msg);
 
 #endif
