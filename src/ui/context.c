@@ -232,7 +232,10 @@ static void build(cdata_t *d, app_t *a) {
     for (size_t i = 0; i < ag->tools.n; i++) {
         agent_tool_t *t = ag->tools.v[i];
         if (str_eq(t->name, "read")) has_read = true;
-        json_push(tools, agent_tool_wire(t));
+        /* toolWireSchema without the harness intent field (the agent loop injects it per request) */
+        json_t *w = agent_tool_wire(t);
+        json_set(w, "parameters", json_clone(t->parameters));
+        json_push(tools, w);
     }
     pthread_mutex_unlock(&ag->mu);
 

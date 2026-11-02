@@ -359,13 +359,8 @@ static void wrap_one_line(wrapper_t *w, const char *s, size_t n) {
             w->col += pend_w;
         } else if (!long_word) {
             if (w->col > 0) wr_break(w);
-        } else {
-            if (w->col > 0 && w->col + pend_w + 1 <= w->width) {
-                sb_appendn(&w->line, pend.s ? pend.s : "", pend.len);
-                w->col += pend_w;
-            } else if (w->col > 0) {
-                wr_break(w);
-            }
+        } else if (w->col > 0) { /* a word wider than the line starts its own row (native wrap_single_line) */
+            wr_break(w);
         }
         sb_clear(&pend);
         pend_w = 0;
