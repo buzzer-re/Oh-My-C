@@ -287,6 +287,7 @@ static bool host_trusted(const char *host, const char *cwd, char **err) {
             const char *k;
             json_t *v;
             json_obj_foreach(json_get_obj(cfg, "hosts"), i, k, v) {
+                (void)v;
                 char *lk = xstrdup(k);
                 for (char *c = lk; *c; c++) *c = (char)tolower((unsigned char)*c);
                 if (!strvec_contains(&t, lk)) strvec_push(&t, lk);

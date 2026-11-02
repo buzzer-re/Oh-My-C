@@ -99,7 +99,7 @@ Every package must:
 
 | WP | Scope | omc files | Upstream sources |
 |---|---|---|---|
-| WP-18 MCP and SSH management ✅ (done; remaining: Smithery registry verbs, `xd://` mount notices when MCP tools change, managed OAuth `auth` blocks, tools/list_changed outside the TUI) | `/mcp add` wizard, list, remove, test, reauth, unauth, enable, disable, reconnect, reload, resources, prompts, notifications (`mcp.enableProjectConfig`, `mcp.notifications`, `mcp.renderMarkdownResults`); `/ssh add\|list\|remove` | `src/mcp/mcp.c`, `src/mcp/oauth.c`, `src/modes/interactive.c`, new `src/ui/mcpwizard.c`, `src/tools/ssh.c` | U/modes/controllers/{mcp-command-controller,ssh-command-controller}.ts, T/overlays/mcp-add-wizard.ts, U/slash-commands/helpers/{mcp,ssh}.ts |
+| WP-18 MCP and SSH management ✅ (done; remaining: Smithery registry verbs, managed OAuth `auth` blocks, tools/list_changed outside the TUI) | `/mcp add` wizard, list, remove, test, reauth, unauth, enable, disable, reconnect, reload, resources, prompts, notifications (`mcp.enableProjectConfig`, `mcp.notifications`, `mcp.renderMarkdownResults`); `/ssh add\|list\|remove` | `src/mcp/mcp.c`, `src/mcp/oauth.c`, `src/modes/interactive.c`, new `src/ui/mcpwizard.c`, `src/tools/ssh.c` | U/modes/controllers/{mcp-command-controller,ssh-command-controller}.ts, T/overlays/mcp-add-wizard.ts, U/slash-commands/helpers/{mcp,ssh}.ts |
 | WP-19 Model switching (done: `/switch` + Alt+P picker incl. quick roles / task mode / over-context compact-first, `/switch` argument completion, Ctrl+P cycle (WP-5 key, #reapplyThinkingLevel), `/modelpreset` (shared with the hub presets), prewalk (`/prewalk`, `prewalk.enabled/into/from`, `--prewalk[-into]`/`--no-prewalk`), retry fallback chains + hub `f` (earlier), the 503 retry-backoff bug (turn level); remaining: `prewalk.auto`/`autoTarget` (judge classifier), `--models` scope in the picker/presets, xd:// device writes as prewalk triggers (no approval tier recorded)) | `/switch` + Alt+P temporary model picker; Ctrl+P / Shift+Ctrl+P role cycle with cycle track; `/modelpreset` + hub presets; prewalk (`/prewalk`, `prewalk.*`); retry fallback chains (`retry.*`, hub `f`) | `src/ui/modelhub.c`, `src/modes/interactive.c`, `src/coding/app.c` | T/overlays/model-picker.ts, model-hub.ts; U/modes/controllers/input-controller.ts (`cycleRoleModel`); U/session/{prewalk,retry-fallback-chains,role-models}.ts |
 | WP-20 Conversation utilities ✅ (done: `/copy` picker + `code\|cmd\|link` targets, `/open`, `/btw` panel + history + follow-ups; open: omp's native/TSP describe() variants of the picker (no native host in omc)) | `/copy` picker + `code\|cmd\|link` targets; `/btw` streaming panel, follow-up and history browser; `/open` | `src/modes/copyctl.c`, `src/ui/copysel.c`, `src/ui/rewind.c` (shared `ui_tx_*` engine), `src/ui/btw.c` | T/overlays/{copy-selector,copy-targets,btw-panel,btw-history-panel}.ts, U/modes/controllers/btw-controller.ts, U/session/btw-history.ts |
 | WP-21 Workspace and session lifecycle | **Done:** `/move` (+ overlay, create-directory confirm; session file, artifacts and `local://` root move to the new bucket, settings/discovery/commands/prompt re-scoped), `/wt` (+ `worktree.cleanSource/onStart/onExit/base`, shared `src/session/worktree.c` with `omc worktree` and the github tool), `/add-dir` / `/remove-dir` / multi-root `/dirs` + `--add-dir` + `workspace.additionalDirectories` (session header, `<workspace-roots>`, per-root context files, forwarded to subagents), `/restart` (execv with restartArgv), `/fresh`, `/pin`, `/local` + Alt+G, linked-worktree status-line path. **Remaining:** clone-first worktree backends (`worktree.clone`, `isolation.backend`: always a plain checkout), the per-root workspace tree / nested AGENTS.md list (omc has no workspace tree), `/fresh`'s provider-state count is omc's per-endpoint estimate, ACP `session/new` additionalDirectories (WP-16) | `src/coding/app.c`, `src/session/session.c`, `src/session/worktree.c`, `src/modes/interactive.c`, `src/ui/move.c` | U/slash-commands/builtin-lifecycle.ts, U/session/session-worktree.ts, T/overlays/move-overlay.ts, U/modes/local-file-editor.ts |
@@ -113,7 +113,7 @@ Every package must:
 
 | WP | Scope | omc files | Upstream sources |
 |---|---|---|---|
-| WP-27 Remaining tools | generate_image, remote tts, security_scan + `security://` + `/security`, hindsight memory backend (retain/recall/reflect), `mr://`, `attachment://`, think, yield + `task.structured`, task isolation / outputSchema / perCallModel, eval `agent()` / workpool | `src/tools/*`, `src/coding/memory.c`, `src/tools/task.c` | U/tools/{image-gen,tts,security-scan,think,yield}.ts, U/hindsight/*, U/internal-urls/{mr,attachment,security}-protocol.ts, U/task/* |
+| WP-27 Remaining tools 🟡 (done: `xd://` mount notices + MCP route guidance, think, generate_image, `mr://`, `attachment://`; remaining: remote tts, security_scan + `security://` + `/security`, hindsight memory backend, yield + `task.structured`, task isolation / outputSchema / perCallModel, eval `agent()` / workpool) | generate_image, remote tts, security_scan + `security://` + `/security`, hindsight memory backend (retain/recall/reflect), `mr://`, `attachment://`, think, yield + `task.structured`, task isolation / outputSchema / perCallModel, eval `agent()` / workpool | `src/tools/*`, `src/coding/memory.c`, `src/tools/task.c` | U/tools/{image-gen,tts,security-scan,think,yield}.ts, U/hindsight/*, U/internal-urls/{mr,attachment,security}-protocol.ts, U/task/* |
 | WP-28 Extra commands | done: `/changelog`, `/setup`, `/force`, `/skillful` (status.md). Remaining: `/omfg` (on top of `src/coding/ttsr.c`; needs runEphemeralTurn, the omfg panel and rule validation against the history), `/tan`, `/cleanse`, `/vibe`, `/ratchet` (needs eval preludes), `/debug` selector, `/record` (+ `omc play`), `/pause` (pause screen + agent freeze), marketplace/plugins install (git-based; JS parts ⛔), stats aggregation, `startup.changelogMode`, re-queueing a `/force` choice after an aborted request | `src/modes/interactive.c`, `src/coding/*` | U/slash-commands/builtin-*.ts, U/modes/controllers/{omfg,tan,cleanse}-*.ts, U/vibe/*, U/ratchet/*, U/extensibility/plugins/* |
 | WP-29 Rich rendering and display options | Mermaid / SVG / inline images (kitty/iTerm/sixel, `terminal.showImages`), table auto-graph, reactions, `display.collapseCompacted`, `display.hideToolActivity` (Ctrl+Shift+O), cache-miss marker, `tui.hyperlinks`, `tui.mouse`, `tui.tight`, vim mode, composer token rate | `src/tui/markdown.c`, `src/ui/chat.c`, `src/tui/term.c`, `src/tui/editor.c` | T/{kitty-graphics,sixel,vim,latex-block}.ts, T/charts/*, T/chat/*, U/auto-graph/* |
 
@@ -455,10 +455,10 @@ ast_edit debug eval glob grep find lsp checkpoint rewind task wait todo web_sear
 | context_notes, new_context | context-notes.ts | — | ❌ | `compaction.experimentalContextManagement` (off) |
 | retain, recall, reflect | memory-*.ts | — | ❌ | hindsight backend is HTTP (portable) |
 | memory_edit | memory-edit.ts | — | ⛔ | mnemopi (on-device embeddings) |
-| think | think.ts | — | ❌ | `externalThinking` (off) |
-| yield | yield.ts | — | ❌ | only with `task.structured` (off) |
-| generate_image | image-gen.ts | — | ❌ | remote APIs, portable (off by default) |
-| tts | tts.ts | — | ❌/⛔ | xAI remote path portable; local Kokoro ⛔ |
+| think | think.ts | `src/tools/think.c` | ✅ | `externalThinking` (off); Anthropic juice instruction not ported |
+| yield | yield.ts | — | ❌ | only for structured subagents (`requireYieldTool`, `task.structured`): belongs with the task port |
+| generate_image | image-gen.ts | `src/coding/imagegen.c` | 🟡 | openai-images, openrouter-images, google-generative-ai, OpenAI hosted carrier; Codex-hosted / Antigravity / Factory Droid transports skipped |
+| tts | tts.ts | — | ❌/⛔ | xAI / openai-speech remote paths portable; local Kokoro ⛔ (omp's description advertises it, so a remote-only port needs a decision on the description) |
 | vibe_* | vibe.ts | — | ❌ | vibe mode |
 | autoresearch tools | autoresearch/* | — | ❌ | portable, low priority |
 | ida | ida.ts | — | ⛔ | needs IDA Pro / idalib |
@@ -470,7 +470,8 @@ ast_edit debug eval glob grep find lsp checkpoint rewind task wait todo web_sear
 | Item | omc | Status | Notes |
 |---|---|---|---|
 | `read xd://` listing, `read xd://<tool>` docs + TS schema, `xd://<tool>/<topic>`, `write xd://<tool>` dispatch | `src/tools/xdev.c` | ✅ | |
-| docs placement (`tools.xdevDocs`) | `xdev_prompt_docs` | ✅ | MCP route guidance block ❌; `tools.xdevNotices` ❌ |
+| docs placement (`tools.xdevDocs`) | `xdev_prompt_docs` | ✅ | MCP route guidance block ✅ (`xdev_mcp_route_guidance`) |
+| mount notices (`tools.xdevNotices`) | `src/coding/xdnotice.c` | ✅ | status line + hidden `xdev-mount-notice`; the tool-roster notice only matters for prefix-binding models whose prompt rebuild freezes (not ported) |
 | `xd://report_issue` | `record_issue` | 🟡 | local only; no `dev.autoqaPush.endpoint` push |
 | `xd://resolve`, `xd://reject` | `write_bash.c` | 🟡 | ast_edit only; omp has a generic queueResolveHandler |
 | `xd://propose` | `write_bash.c` → `planmode.c` propose handlers | ✅ | XdevDispatch details, review / auto-approve / plan-yolo handlers |
@@ -489,8 +490,8 @@ ast_edit debug eval glob grep find lsp checkpoint rewind task wait todo web_sear
 | out:// | `out_url.c` | ✅ | write-only reply channel, bash redirects, `out.enabled` (unset: interactive TUI only) |
 | cfg:// | `cfg_url.c` | 🟡 | tree/namespace/setting views over omp's registry; approved writes in the TUI; no env provenance layer |
 | conflict:// | `conflict.c` | ✅ | blocks registered by `read`, `:conflicts` index, `conflict://N[/side]` read/write, `conflict://*` |
-| mr:// | — | ❌ | GitLab MRs via `glab` |
-| attachment:// | — | ❌ | |
+| mr:// | `src/tools/mr.c` | ✅ | GitLab MRs via `glab`; no view cache |
+| attachment:// | `src/coding/imgattach.c` | ✅ | |
 | security://, vault:// | — | ❌ | off by default |
 
 ## 5. Overlays, dialogs and command controllers

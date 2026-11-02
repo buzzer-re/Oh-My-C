@@ -50,11 +50,13 @@ plan proposals, UI `ask`). Per-tool completeness is tracked in [status.md](statu
 | `goal` | `coding/goal.c` | `goals/tools` | Goal mode only |
 | `learn`, `manage_skill` | `coding/autolearn.c` | `tools/learn.ts`, `manage-skill.ts` | `autolearn.enabled` |
 | `advise` | `coding/advisor.c` | `advisor/*` | Only inside the advisor's own agent |
+| `think` | `tools/think.c`, `coding/app.c` | `tools/think.ts` | `externalThinking` on a model that can suppress reasoning: forced on the first request of each user turn, every request sends forceReasoningOff |
+| `generate_image` | `coding/imagegen.c` | `tools/image-gen.ts`, `ai/images/*` | `generate_image.enabled`; xd:// dynamic device; `image` role chain over openai-images, openrouter-images, google-generative-ai and the OpenAI hosted carrier |
 | `mcp__<server>_<tool>` | `mcp/mcp.c` | `mcp/*` | One per MCP server tool |
 | host tools | `modes/rpc.c` (`set_host_tools`), `lib/omc.c` (`omc_register_tool`) | `modes/rpc/host-tools.ts` | Executed by the embedding program |
 
-omp tools with no omc implementation (`security_scan`, `ida`, `github`, `context_notes`,
-`new_context`, the hindsight/mnemopi memory tools, `browser`, `computer`, `image_gen`, `tts`) are
+omp tools with no omc implementation (`security_scan`, `ida`, `context_notes`, `new_context`,
+the hindsight/mnemopi memory tools, `yield`, `browser`, `computer`, `tts`) are
 listed in [status.md](status.md). Their names stay in `BUILTIN_ORDER` so ordering remains canonical.
 
 ## `xd://` tool devices (`tools/xdev.c`)
@@ -73,10 +75,13 @@ list and driven through files:
 | `write xd://propose` | plan-mode approval ([agent.md](agent.md#plan-mode)) |
 | `write xd://resolve`, `xd://reject` | finish a staged `ast_edit` |
 
-The default mounts are `ast_grep`, `ast_edit`, `debug`, `lsp`, `checkpoint`, `rewind` and MCP tools.
+The default mounts are `ast_grep`, `ast_edit`, `debug`, `lsp`, `checkpoint`, `rewind`, `generate_image` and MCP tools.
 `todo`, `ask`, `grep`, `web_search`, `read` and `write` stay top-level (omp's
 `XDEV_KEEP_TOP_LEVEL`), as does any tool named explicitly in `--tools`. The system prompt carries the
-device catalog or inline docs (`tools.xdevDocs`, `tools.xdevInlineDevices`).
+device catalog or inline docs (`tools.xdevDocs`, `tools.xdevInlineDevices`); mounted MCP tools are listed once, in the
+`## MCP Tool Routes` append part with their catalog summary. When the mounted set changes mid-session
+(`coding/xdnotice.c`) the UI shows `xdev: xd://: mounted …; unmounted …` (`tools.xdevNotices`) and the next user prompt
+carries a hidden `xdev-mount-notice` naming the net change the model has not seen yet.
 
 ## Internal URLs
 
@@ -96,6 +101,8 @@ from omp's `prompts/internal-urls/*.md`, listing only what the session can serve
 | `history://[<id>]` | `vurl.c` | subagent transcripts | `history-protocol.ts` |
 | `proc://[<id>[/…]]` | `vurl.c`, `jobs.c`, `services.c` | jobs, agents and services: listing, status, output streams, `stdin`, `kill`, mode | `proc-protocol.ts` |
 | `mcp://<resource-uri>` | `read.c`, `mcp.c` | MCP resource read (the server owning the URI answers) | `mcp-protocol.ts` |
+| `mr://[<host>/<group…>/<project>/]<iid>/diff[/i\|all]` | `tools/mr.c` | GitLab merge request diffs through `glab` (advertised only with glab on PATH) | `mr-protocol.ts` |
+| `attachment://N` | `coding/imgattach.c`, `tools_common.c` | the file behind the newest message's `Image #N` (the attachment notice's path, else a session blob) | `attachment-protocol.ts` |
 | `pr://[owner/repo/]N[/diff[/i\|all]]`, `issue://[owner/repo/]N` | `tools/github.c` | GitHub REST; repo defaults to the cwd's github.com remote; token from `GITHUB_TOKEN`, `GH_TOKEN` or `gh` | `issue-pr-protocol.ts` |
 | `ssh://[user@]host[:port]/path` | `tools/ssh.c` | remote UTF-8 text (≤1 MiB) and directory listings through OpenSSH (ControlMaster, `BatchMode=yes`, hosts from `ssh.json`); byte-exact staged writes; read/write/edit | `ssh-protocol.ts` |
 | `out://` | `out_url.c` (`iurl.h`) | write-only mid-turn reply to the user (`Shown to the user.`; ≤64 KiB; `cmd > out://` redirects in bash become `details.replies`); on where `out.enabled` says, unset = top-level interactive TUI only; never for subagents | `out-protocol.ts` |
