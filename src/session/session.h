@@ -92,6 +92,23 @@ void session_context_free(session_context_t *c);
 /* new branch file containing only root..leaf path */
 session_t *session_fork(const session_t *s, const char *leaf_id, const char *session_dir);
 
+/* multi-root workspace: header.additionalDirectories, the roots beyond cwd (session-workspace.ts) */
+char *session_normalize_workspace_dir(const char *dir, const char *base); /* ~ expanded, resolved (owned) */
+strvec_t session_additional_dirs(const session_t *s);                     /* owned copy, in order */
+/* addWorkspaceDirectory: 1 added, 0 already present (*resolved set either way, owned), -1 with *err (the cwd) */
+int session_add_workspace_dir(session_t *s, const char *dir, char **resolved, char **err);
+/* removeWorkspaceDirectory: 1 removed, 0 not an extra root; *resolved owned */
+int session_remove_workspace_dir(session_t *s, const char *dir, char **resolved);
+/* setAdditionalDirectories: normalized, deduped, cwd dropped; rewrites only when the list changed */
+void session_set_additional_dirs(session_t *s, const strvec_t *dirs);
+/* moveTo: relocate the session to `new_cwd` (its file, artifacts and local:// root move to that cwd's session
+ * bucket; header cwd + previousSessionFiles updated). 0, or -1 with *err (owned) and nothing moved */
+int session_move(session_t *s, const char *new_cwd, char **err);
+
+/* session pins (<agent>/session-pins.json; session-pins.ts) */
+bool session_is_pinned(const char *id);
+int session_pin_toggle(const char *id, char **err); /* 1 pinned, 0 unpinned, -1 with *err */
+
 /* listing */
 typedef struct {
     char *path;

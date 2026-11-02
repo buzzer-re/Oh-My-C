@@ -7,6 +7,7 @@
 #include "config/settings.h"
 #include "core/fs.h"
 #include "core/proc.h"
+#include "session/worktree.h"
 
 #include <sys/stat.h>
 
@@ -15,12 +16,7 @@ typedef struct {
 } wt_entry_t;
 typedef VEC(wt_entry_t *) wt_list_t;
 
-static char *worktrees_dir(void) {
-    const char *e = env_get("OMC_WORKTREE_DIR");
-    if (!e || e[0] != '/') e = env_get("OMP_WORKTREE_DIR");
-    if (e && e[0] == '/') return path_normalize(e);
-    return path_join(omc_config_dir(), "wt");
-}
+static char *worktrees_dir(void) { return wt_base_dir(); }
 
 static bool is_dir(const char *p) {
     struct stat st;

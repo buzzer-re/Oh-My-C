@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -737,6 +738,10 @@ session_t *session_fork(const session_t *s, const char *leaf_id, const char *ses
         json_set_str(n->header, "titleSource", n->title_source);
     }
     json_set_str(n->header, "parentSession", session_id(s));
+    /* the fork keeps the source's extra workspace roots (minus its own cwd) */
+    strvec_t roots = session_additional_dirs(s);
+    session_set_additional_dirs(n, &roots);
+    strvec_free(&roots);
     json_t *path = session_path_to(s, leaf_id ? leaf_id : s->leaf_id);
     json_t *e;
     json_arr_foreach(path, i, e) {
@@ -750,6 +755,244 @@ session_t *session_fork(const session_t *s, const char *leaf_id, const char *ses
     json_free(path);
     if (json_len(n->entries)) write_full(n);
     return n;
+}
+
+/* ---------- multi-root workspace (session-workspace.ts + SessionManager workspace directories) ---------- */
+
+char *session_normalize_workspace_dir(const char *dir, const char *base) { return path_abs(dir, base); }
+
+strvec_t session_additional_dirs(const session_t *s) {
+    strvec_t out = {0};
+    json_t *x;
+    json_arr_foreach(json_get_arr(s->header, "additionalDirectories"), i, x) if (json_is_str(x)) strvec_push(&out, json_sv(x));
+    return out;
+}
+
+/* header.additionalDirectories = dirs (key dropped when empty); rewrite a session already on disk */
+static void store_dirs(session_t *s, const strvec_t *dirs) {
+    if (!dirs->n) json_del(s->header, "additionalDirectories");
+    else {
+        json_t *a = json_arr();
+        for (size_t i = 0; i < dirs->n; i++) json_push_str(a, dirs->v[i]);
+        json_set(s->header, "additionalDirectories", a);
+    }
+    session_rewrite(s);
+}
+
+int session_add_workspace_dir(session_t *s, const char *dir, char **resolved, char **err) {
+    *resolved = NULL;
+    *err = NULL;
+    char *r = session_normalize_workspace_dir(dir, session_cwd(s));
+    char *cwd = path_abs(session_cwd(s), NULL);
+    bool is_cwd = !strcmp(r, cwd);
+    free(cwd);
+    if (is_cwd) {
+        free(r);
+        *err = xstrdup("The current working directory is already the primary workspace root.");
+        return -1;
+    }
+    strvec_t cur = session_additional_dirs(s);
+    if (strvec_contains(&cur, r)) {
+        strvec_free(&cur);
+        *resolved = r;
+        return 0;
+    }
+    strvec_push(&cur, r);
+    store_dirs(s, &cur);
+    strvec_free(&cur);
+    *resolved = r;
+    return 1;
+}
+
+int session_remove_workspace_dir(session_t *s, const char *dir, char **resolved) {
+    char *r = session_normalize_workspace_dir(dir, session_cwd(s));
+    *resolved = r;
+    strvec_t cur = session_additional_dirs(s), next = {0};
+    bool hit = false;
+    for (size_t i = 0; i < cur.n; i++) {
+        char *n = path_abs(cur.v[i], NULL);
+        if (!hit && !strcmp(n, r)) hit = true;
+        else strvec_push(&next, cur.v[i]);
+        free(n);
+    }
+    if (hit) store_dirs(s, &next);
+    strvec_free(&cur);
+    strvec_free(&next);
+    return hit ? 1 : 0;
+}
+
+void session_set_additional_dirs(session_t *s, const strvec_t *dirs) {
+    const char *cwd = session_cwd(s);
+    strvec_t next = {0};
+    for (size_t i = 0; i < dirs->n; i++) {
+        char *r = session_normalize_workspace_dir(dirs->v[i], cwd);
+        if (strcmp(r, cwd) != 0 && !strvec_contains(&next, r)) strvec_push(&next, r);
+        free(r);
+    }
+    strvec_t cur = session_additional_dirs(s);
+    bool same = cur.n == next.n;
+    for (size_t i = 0; same && i < cur.n; i++) same = !strcmp(cur.v[i], next.v[i]);
+    if (!same) store_dirs(s, &next);
+    strvec_free(&cur);
+    strvec_free(&next);
+}
+
+/* ---------- move (SessionManager.moveTo) ---------- */
+
+static int move_path(const char *from, const char *to) {
+    if (rename(from, to) == 0) return 0;
+    if (errno != EXDEV) return -errno;
+    size_t n = 0;
+    char *data = fs_read(from, &n);
+    if (!data) return -errno;
+    int rc = fs_write_atomic(to, data, n, 0600);
+    free(data);
+    if (rc == 0) unlink(from);
+    return rc;
+}
+
+static bool has_assistant(const session_t *s) {
+    json_t *x;
+    json_arr_foreach(s->entries, i, x) {
+        if (str_eq(json_get_str(x, "type"), "message") && str_eq(json_get_str(json_get(x, "message"), "role"), "assistant"))
+            return true;
+    }
+    return false;
+}
+
+int session_move(session_t *s, const char *new_cwd, char **err) {
+    *err = NULL;
+    char *cwd = path_abs(new_cwd, NULL);
+    char *old_cwd = path_abs(session_cwd(s), NULL);
+    char *next_dir = s->persist ? session_dir_for_cwd(cwd) : NULL;
+    char *new_file = s->file && next_dir ? path_join(next_dir, path_basename(s->file)) : NULL;
+    int rc = 0;
+    bool existed = s->file && fs_exists(s->file);
+    if (!strcmp(cwd, old_cwd) && (!new_file || !strcmp(new_file, s->file))) goto out;
+    if (new_file && strcmp(new_file, s->file) != 0) {
+        fs_mkdir_p(next_dir, 0700);
+        if (existed) {
+            if (fs_exists(new_file)) {
+                *err = xasprintf("Cannot move session to \"%s\": the destination already exists. Nothing was moved.", new_file);
+                rc = -1;
+                goto out;
+            }
+            int mr = move_path(s->file, new_file);
+            if (mr != 0) {
+                *err = xstrdup(strerror(-mr));
+                rc = -1;
+                goto out;
+            }
+        }
+        /* artifacts (<file minus .jsonl>/) and the local:// root (<dir>/<id>/) follow the file */
+        const char *sid = session_id(s);
+        char *oa = str_ends(s->file, ".jsonl") ? xstrndup(s->file, strlen(s->file) - 6) : NULL;
+        char *na = str_ends(new_file, ".jsonl") ? xstrndup(new_file, strlen(new_file) - 6) : NULL;
+        char *ol = path_join(s->dir, sid), *nl = path_join(next_dir, sid);
+        if (oa && na && fs_is_dir(oa) && !fs_exists(na) && rename(oa, na) != 0) LOGW("artifacts not moved: %s", strerror(errno));
+        if (fs_is_dir(ol) && !fs_exists(nl) && rename(ol, nl) != 0) LOGW("local:// root not moved: %s", strerror(errno));
+        free(oa);
+        free(na);
+        free(ol);
+        free(nl);
+        if (existed) { /* header.previousSessionFiles */
+            if (!json_get_arr(s->header, "previousSessionFiles")) json_set(s->header, "previousSessionFiles", json_arr());
+            json_t *prev = json_get_arr(s->header, "previousSessionFiles");
+            bool dup = false;
+            json_t *x;
+            json_arr_foreach(prev, i, x) dup |= str_eq(json_sv(x), s->file);
+            if (!dup) json_push_str(prev, s->file);
+        }
+        free(s->file);
+        s->file = new_file;
+        new_file = NULL;
+        free(s->dir);
+        s->dir = next_dir;
+        next_dir = NULL;
+    }
+    json_set_str(s->header, "cwd", cwd);
+    /* re-filter the extra roots: the new cwd may have been one of them */
+    strvec_t roots = session_additional_dirs(s), keep = {0};
+    for (size_t i = 0; i < roots.n; i++)
+        if (strcmp(roots.v[i], cwd) != 0) strvec_push(&keep, roots.v[i]);
+    if (!keep.n) json_del(s->header, "additionalDirectories");
+    else if (keep.n != roots.n) {
+        json_t *a = json_arr();
+        for (size_t i = 0; i < keep.n; i++) json_push_str(a, keep.v[i]);
+        json_set(s->header, "additionalDirectories", a);
+    }
+    strvec_free(&roots);
+    strvec_free(&keep);
+    if (s->persist && s->file && (existed || has_assistant(s))) write_full(s);
+out:
+    free(cwd);
+    free(old_cwd);
+    free(next_dir);
+    free(new_file);
+    return rc;
+}
+
+/* ---------- pins (session-pins.ts: <agent>/session-pins.json, a tab-indented JSON array of ids) ---------- */
+
+static strvec_t pins_read(const char *path) {
+    strvec_t out = {0};
+    size_t n = 0;
+    char *data = fs_read(path, &n);
+    json_t *j = data ? json_parse(data, n, NULL) : NULL;
+    free(data);
+    json_t *x;
+    json_arr_foreach(json_is_arr(j) ? j : NULL, i, x) if (json_is_str(x)) strvec_push(&out, json_sv(x));
+    json_free(j);
+    return out;
+}
+
+bool session_is_pinned(const char *id) {
+    char *p = omc_agent_path("session-pins.json");
+    strvec_t pins = pins_read(p);
+    bool r = id && strvec_contains(&pins, id);
+    strvec_free(&pins);
+    free(p);
+    return r;
+}
+
+int session_pin_toggle(const char *id, char **err) {
+    *err = NULL;
+    char *p = omc_agent_path("session-pins.json");
+    fs_mkdir_p(omc_agent_dir(), 0700);
+    char *lockp = xasprintf("%s.lock", p);
+    int lfd = open(lockp, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (lfd >= 0) flock(lfd, LOCK_EX);
+    strvec_t pins = pins_read(p), next = {0};
+    bool was = strvec_contains(&pins, id);
+    for (size_t i = 0; i < pins.n; i++)
+        if (strcmp(pins.v[i], id) != 0) strvec_push(&next, pins.v[i]);
+    if (!was) strvec_push(&next, id);
+    sb_t b = SB_INIT;
+    if (!next.n) sb_append(&b, "[]");
+    else {
+        sb_append(&b, "[\n");
+        for (size_t i = 0; i < next.n; i++) {
+            char *q = json_quote(next.v[i]);
+            sb_appendf(&b, "\t%s%s\n", q, i + 1 < next.n ? "," : "");
+            free(q);
+        }
+        sb_putc(&b, ']');
+    }
+    int rc = fs_write_atomic(p, b.s, b.len, 0600);
+    sb_free(&b);
+    if (lfd >= 0) {
+        flock(lfd, LOCK_UN);
+        close(lfd);
+    }
+    free(lockp);
+    free(p);
+    strvec_free(&pins);
+    strvec_free(&next);
+    if (rc != 0) {
+        *err = xasprintf("Failed to save session pins: %s", strerror(-rc));
+        return -1;
+    }
+    return was ? 0 : 1;
 }
 
 /* ---------- listing ---------- */

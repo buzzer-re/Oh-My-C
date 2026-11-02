@@ -8,6 +8,7 @@
 #include "config/settings.h"
 #include "core/fs.h"
 #include "core/proc.h"
+#include "session/worktree.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -944,22 +945,9 @@ static void wt_list_free(wt_list_t *l) {
     vec_free(l);
 }
 
-/* getWorktreesDir: OMC_WORKTREE_DIR / OMP_WORKTREE_DIR (absolute) or ~/.omc/wt */
-static char *worktrees_dir(void) {
-    const char *e = env_get("OMC_WORKTREE_DIR");
-    if (!e || e[0] != '/') e = env_get("OMP_WORKTREE_DIR");
-    if (e && e[0] == '/') return path_normalize(e);
-    return path_join(omc_config_dir(), "wt");
-}
-
-static char *hash_path(const char *abs) {
-    char *n = path_normalize(abs);
-    uint64_t h = gh_wyhash(n, strlen(n), 0);
-    free(n);
-    char buf[32];
-    snprintf(buf, sizeof buf, "%016llx", (unsigned long long)h);
-    return xstrdup(buf + 9);
-}
+/* getWorktreesDir / hashPath (session/worktree.c, shared with `omc worktree` and `/wt`) */
+static char *worktrees_dir(void) { return wt_base_dir(); }
+static char *hash_path(const char *abs) { return wt_hash_path(abs); }
 
 /* ---------- pr_checkout ---------- */
 
