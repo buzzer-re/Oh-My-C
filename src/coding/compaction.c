@@ -1829,6 +1829,108 @@ int app_compact_mode(app_t *a, const char *mode, const char *instructions, char 
 
 int app_compact(app_t *a, const char *instructions, char **err) { return app_compact_mode(a, NULL, instructions, err); }
 
+/* ---------- dead-end rescue ---------- */
+
+static char *thousands(int64_t v) {
+    char raw[32];
+    snprintf(raw, sizeof raw, "%lld", (long long)(v < 0 ? -v : v));
+    sb_t b = SB_INIT;
+    if (v < 0) sb_putc(&b, '-');
+    size_t n = strlen(raw);
+    for (size_t i = 0; i < n; i++) {
+        if (i && (n - i) % 3 == 0) sb_putc(&b, ',');
+        sb_putc(&b, raw[i]);
+    }
+    return sb_detach(&b);
+}
+
+enum { PROGRESS_PREPARE, PROGRESS_HEADROOM, PROGRESS_RETRY_FIT };
+
+/* #compactionCreatedHeadroom / #compactionCreatedRetryFit */
+static bool has_progress(app_t *a, int kind) {
+    const ai_model_t *m = a->model;
+    if (!m || m->context_window <= 0) return true;
+    if (kind == PROGRESS_PREPARE) {
+        prep_t p;
+        bool ok = prepare(a, m, &p) == 0;
+        prep_free(&p);
+        return ok;
+    }
+    int64_t stored = stored_context_tokens(a);
+    if (kind == PROGRESS_HEADROOM) return stored <= (int64_t)floor((double)threshold_for(m) * RECOVERY_BAND);
+    int64_t w = m->context_window;
+    int64_t budget = MAX(0, MIN(w - 1, w - budget_reserve(w)));
+    return stored <= budget;
+}
+
+/* #rescueCompactionDeadEnd: elide inside the kept tail, then drop images */
+static bool rescue_dead_end(app_t *a, bool skip_elide, int kind, int *flags) {
+    if (cancelled(a)) return false;
+    int elided = 0;
+    int64_t elided_tokens = 0;
+    bool artifact = false;
+    if (!skip_elide) {
+        app_shake_result_t r;
+        memset(&r, 0, sizeof r);
+        r.mode = "elide";
+        if (shake_elide(a, &RESCUE_SHAKE, false, false, &r) > 0) {
+            elided = r.tool_results_dropped + r.blocks_dropped;
+            elided_tokens = r.tokens_freed;
+            artifact = a->env && a->env->artifacts && artifacts_dir(a->env->artifacts);
+            *flags |= CMP_REWRITTEN;
+        }
+        if (elided > 0 && has_progress(a, kind)) {
+            char *t = thousands(elided_tokens);
+            app_notice(a, "info", "Compaction dead-end recovery: elided %d heavy block%s (~%s tokens) to %s so maintenance could make progress.",
+                       elided, elided == 1 ? "" : "s", t, artifact ? "an artifact" : "placeholders");
+            free(t);
+            return true;
+        }
+    }
+    if (cancelled(a)) return false;
+    app_shake_result_t ir;
+    app_shake(a, "images", &ir);
+    if (ir.images_dropped > 0) *flags |= CMP_REWRITTEN;
+    if (ir.images_dropped > 0 && has_progress(a, kind)) {
+        char *part = NULL;
+        if (elided > 0) {
+            char *t = thousands(elided_tokens);
+            part = xasprintf("elided %d heavy block%s (~%s tokens) to %s and ", elided, elided == 1 ? "" : "s", t,
+                             artifact ? "an artifact" : "placeholders");
+            free(t);
+        }
+        app_notice(a, "info", "Compaction dead-end recovery: %sdropped %d attached image%s so maintenance could make progress.",
+                   part ? part : "", ir.images_dropped, ir.images_dropped == 1 ? "" : "s");
+        free(part);
+        return true;
+    }
+    return false;
+}
+
+/* #compactionDeadEndWarning (owned) */
+static char *dead_end_warning(app_t *a, const char *remedies) {
+    const ai_model_t *m = a->model;
+    if (m && m->context_window > 0 && nonmessage_tokens(a) > (int64_t)floor((double)threshold_for(m) * RECOVERY_BAND))
+        return xstrdup("Compaction cannot create headroom \xe2\x80\x94 pausing automatic maintenance. The system prompt and always-sent "
+                       "tool schemas alone exceed the recovery band; reduce fixed context or adjust compaction.modelThresholds.");
+    return xasprintf("Compaction freed too little context to make progress \xe2\x80\x94 pausing automatic maintenance to avoid a "
+                     "compaction loop. The most recent turn alone is too large to reduce further; %s or switch to a larger-context model.",
+                     remedies);
+}
+
+/* stamp the dead-end warning on the branch's latest compaction entry (the divider badge) */
+static void stamp_warning(app_t *a, const char *warning) {
+    entvec_t ents = {0};
+    branch_entries(a, &ents);
+    for (size_t i = ents.n; i-- > 0;)
+        if (str_eq(json_get_str(ents.v[i], "type"), "compaction")) {
+            json_set_str(ents.v[i], "warning", warning);
+            session_rewrite(a->session);
+            break;
+        }
+    vec_free(&ents);
+}
+
 /* ---------- automatic ---------- */
 
 static bool method_usable(const char *m, cmp_reason_t reason, const ai_model_t *model) {
@@ -1938,21 +2040,20 @@ int cmp_auto(app_t *a, cmp_reason_t reason, bool will_retry, int64_t trigger) {
         }
         prep_t p;
         int pr = prepare(a, a->model, &p);
-        if (pr && reason != CMP_IDLE && !from_shake) {
-            /* dead-end rescue: an oversized kept tail; elide inside it so the cut can move */
-            app_shake_result_t sr;
-            memset(&sr, 0, sizeof sr);
-            sr.mode = "elide";
-            if (shake_elide(a, &RESCUE_SHAKE, false, false, &sr) > 0) {
-                flags |= CMP_REWRITTEN;
-                prep_free(&p);
-                pr = prepare(a, a->model, &p);
-            }
+        if (pr && reason != CMP_IDLE && rescue_dead_end(a, from_shake, PROGRESS_PREPARE, &flags)) {
+            /* dead-end rescue: an oversized kept tail was reduced so the cut can move */
+            prep_free(&p);
+            pr = prepare(a, a->model, &p);
         }
         if (pr) {
             prep_free(&p);
             emit_end(a, action, "skipped", NULL, false, NULL);
-            if (reason != CMP_IDLE && pr == 2 && (flags & CMP_REWRITTEN) == 0) flags |= CMP_BLOCKED;
+            if (reason != CMP_IDLE) {
+                char *w = dead_end_warning(a, "shrink it (e.g. clear large tool output)");
+                app_notice(a, "warning", "%s", w);
+                free(w);
+                flags |= CMP_BLOCKED;
+            }
             break;
         }
         result_t r;
@@ -2028,11 +2129,24 @@ int cmp_auto(app_t *a, cmp_reason_t reason, bool will_retry, int64_t trigger) {
         }
         if (after < MAX(effective, before_branch)) r.tokens_before = MAX(effective, before_branch);
         commit(a, &p, &r, m);
-        if (will_retry) drop_failed_tail(a, reason);
+        flags |= CMP_REWRITTEN;
+        /* post-maintenance progress guard: a retry only has to fit, a threshold pass needs the recovery band */
+        bool progress = true;
+        if (will_retry) {
+            drop_failed_tail(a, reason);
+            progress = has_progress(a, PROGRESS_RETRY_FIT) || rescue_dead_end(a, from_shake, PROGRESS_RETRY_FIT, &flags);
+        } else if (reason != CMP_IDLE) {
+            progress = has_progress(a, PROGRESS_HEADROOM) || rescue_dead_end(a, from_shake, PROGRESS_HEADROOM, &flags);
+        }
+        char *warning = progress ? NULL : dead_end_warning(a, "clear large tool output");
+        if (warning) stamp_warning(a, warning);
         emit_end(a, action, "ok", NULL, will_retry, &r);
+        if (warning) app_notice(a, "warning", "%s", warning);
+        free(warning);
         result_free(&r);
         prep_free(&p);
-        flags |= CMP_COMMITTED | CMP_REWRITTEN;
+        if (progress) flags |= CMP_COMMITTED;
+        else flags |= CMP_BLOCKED;
         break;
     }
     if (!picked_any && reason == CMP_THRESHOLD && from_shake) flags |= CMP_BLOCKED;

@@ -864,7 +864,7 @@ static bool hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, in
     bool flagged = false; /* providers mark opaque overflow errors (Devin large-history invalid_argument) */
     json_t *fl;
     json_arr_foreach(json_get(assistant, "errorFlags"), fi, fl) flagged = flagged || str_eq(json_sv(fl), "contextOverflow");
-    if ((flagged || is_overflow(err)) && attempt == 0 && !a->compacting) {
+    if ((flagged || is_overflow(err)) && !a->compacting) {
         /* overflow recovery: the method ladder with a retry of the failed turn (session-maintenance.ts) */
         int64_t billed = 0;
         const json_t *u = json_get_obj(assistant, "usage");
