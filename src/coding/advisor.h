@@ -17,5 +17,6 @@ const ai_model_t *advisor_role_model(void); /* resolveAdvisorRoleSelection (`@ad
 /* AdvisorStats for /advisor status: {model?:{provider,id}, contextTokens, contextWindow,
  * messages:{user,assistant,total}, tokens:{input,output,cacheRead,cacheWrite}, cost} (owned) */
 json_t *advisor_stats(advisor_t *ad);
+struct agent *advisor_agent(advisor_t *ad); /* the advisor's own agent (transcript for /advisor dump) */
 
 #endif

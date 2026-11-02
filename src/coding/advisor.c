@@ -429,3 +429,5 @@ json_t *advisor_stats(advisor_t *ad) {
     json_set_num(o, "cost", cost);
     return o;
 }
+
+struct agent *advisor_agent(advisor_t *ad) { return ad ? ad->ag : NULL; }
