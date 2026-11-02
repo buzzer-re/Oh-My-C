@@ -404,7 +404,11 @@ static void frame_apply(void *p) {
     free(f);
 }
 
-static void ui_tool_frame(void *ud, const char *tool_call_id, json_t *details) {
+static void ui_tool_frame(void *ud, const char *tool_call_id, const char *tool_name, const json_t *args, const char *text,
+                          json_t *details) {
+    UNUSED(tool_name);
+    UNUSED(args);
+    UNUSED(text);
     ui_t *u = ud;
     frame_t *f = xcalloc(1, sizeof *f);
     f->u = u;

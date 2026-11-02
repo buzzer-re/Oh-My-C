@@ -1072,13 +1072,71 @@ static json_t *session_tree_json(const session_t *s) {
     return roots;
 }
 
+/* a returned background call's job frame (task progress): omp's onUpdate keeps emitting tool_execution_update for
+ * the call after its tool_execution_end */
+static void rpc_tool_frame(void *ud, const char *tool_call_id, const char *tool_name, const json_t *args, const char *text,
+                           json_t *details) {
+    rpc_t *r = ud;
+    tool_result_t pr = {0};
+    tool_result_text(&pr, text ? text : "");
+    pr.details = details;
+    agent_event_t ev = {.type = AGENT_EV_TOOL_UPDATE, .tool_call_id = tool_call_id, .tool_name = tool_name,
+                        .args = args, .result = &pr};
+    forward(r, agent_event_to_json(&ev));
+    tool_result_free(&pr);
+}
+
+/* omc carries a delivered background-job batch as a hidden user turn; on the wire it is omp's custom message
+ * (async-job-delivery.ts buildAsyncResultBatchMessage): {role:"custom", customType, content, display, attribution,
+ * details:{meta, jobs}, timestamp}. Rewrites `m` in place. */
+static void rpc_project_message(json_t *m) {
+    if (!json_is_obj(m) || !str_eq(json_get_str(m, "role"), "user") || !str_eq(json_get_str(m, "customType"), "async-result"))
+        return;
+    char *txt = ai_message_text(m);
+    json_t *det = json_get(m, "details") ? json_clone(json_get(m, "details")) : json_obj();
+    int64_t ts = json_get_int(m, "timestamp", now_ms());
+    json_t *nd = json_obj(), *meta = json_obj(), *src = json_obj();
+    json_set_str(src, "type", "report");
+    json_set_str(src, "value", "background job delivery");
+    json_set(meta, "source", src);
+    json_set(nd, "meta", meta);
+    json_set(nd, "jobs", json_get_arr(det, "jobs") ? json_clone(json_get_arr(det, "jobs")) : json_arr());
+    json_free(det);
+    while (m->u.obj.n) json_del(m, m->u.obj.keys[0]);
+    json_set_str(m, "role", "custom");
+    json_set_str(m, "customType", "async-result");
+    json_set_str(m, "content", txt);
+    json_set_bool(m, "display", true);
+    json_set_str(m, "attribution", "agent");
+    json_set(m, "details", nd);
+    json_set_int(m, "timestamp", ts);
+    free(txt);
+}
+
+static void rpc_project_messages(json_t *frame) {
+    rpc_project_message(json_get(frame, "message"));
+    json_t *ms = json_get_arr(frame, "messages"), *m;
+    json_arr_foreach(ms, i, m) rpc_project_message(m);
+}
+
+/* hasPendingAsyncWork: a background job still running or a settled one not yet delivered can wake the session */
+static bool rpc_pending_async_work(app_t *a) {
+    return a->env && a->env->jobs && (jobs_running(a->env->jobs) > 0 || jobs_undelivered(a->env->jobs) > 0);
+}
+
 static void rpc_listener(void *ud, const agent_event_t *ev) {
     rpc_t *r = ud;
     json_t *j = agent_event_to_json(ev);
     if (ev->type == AGENT_EV_AGENT_END) {
-        json_set_bool(j, "isTerminal", true);
+        /* a run that hands control back while background jobs can still wake it is a scheduling pause, not the
+         * terminal stop (agent-session.ts #hasPendingAsyncWake -> willContinue + awaitingAsyncWork) */
+        const char *stop = json_get_str(last_assistant(r->a->agent->messages), "stopReason");
+        bool awaiting = !str_eq(stop, "aborted") && rpc_pending_async_work(r->a);
+        json_set_bool(j, "isTerminal", !awaiting);
         json_set_bool(j, "yielded", true);
+        if (awaiting) json_set_bool(j, "awaitingAsyncWork", true);
     }
+    rpc_project_messages(j);
     forward(r, j);
 }
 
@@ -1256,6 +1314,8 @@ again:;
     /* goal mode: keep going with hidden continuation turns while the goal is active and making progress */
     bool was_cont = false;
     const char *prev_type = r->hidden;
+    /* a background-job wake run has no prompt ticket: omp reports no prompt_result for it (rpc-prompt-results.ts) */
+    bool wake_run = str_eq(r->hidden, "async-result");
     for (;;) {
         json_t *run = json_arr();
         pthread_mutex_lock(&r->a->agent->mu);
@@ -1265,7 +1325,7 @@ again:;
         char *cont = app_after_run(r->a, run, prev_type, "rpc", &ctype);
         json_free(run);
         if (!cont) break;
-        if (!was_cont) {
+        if (!was_cont && !wake_run) {
             json_set_bool(res, "sessionSettled", false);
             emit(r, res);
         }
@@ -1275,8 +1335,11 @@ again:;
         app_prompt_hidden(r->a, cont, ctype);
         free(cont);
     }
-    json_set_bool(res, "sessionSettled", true);
-    if (!was_cont) emit(r, res);
+    /* isSessionSettled: background work that can still wake the session keeps it unsettled; its wake run's
+     * terminal agent_end closes the stretch with session_settled */
+    bool settled = !rpc_pending_async_work(r->a);
+    json_set_bool(res, "sessionSettled", settled);
+    if (!was_cont && !wake_run) emit(r, res);
     /* prompts queued into this run (steer / follow-up) report at the same yield */
     pthread_mutex_lock(&r->mu);
     json_t *waiting = r->waiting;
@@ -1289,17 +1352,19 @@ again:;
         if (json_is_str(w)) json_set_str(x, "id", json_sv(w));
         json_set_bool(x, "agentInvoked", true);
         json_set_str(x, "status", json_get_str(res, "status"));
-        json_set_bool(x, "sessionSettled", true);
+        json_set_bool(x, "sessionSettled", settled);
         if (json_get(res, "error")) json_set(x, "error", json_clone(json_get(res, "error")));
         emit(r, x);
         json_free(x);
     }
     json_free(waiting);
     json_free(res);
-    json_t *settled = json_obj();
-    json_set_str(settled, "type", "session_settled");
-    emit(r, settled);
-    json_free(settled);
+    if (settled) {
+        json_t *sf = json_obj();
+        json_set_str(sf, "type", "session_settled");
+        emit(r, sf);
+        json_free(sf);
+    }
     pthread_mutex_lock(&r->mu);
     free(r->text);
     r->text = NULL;
@@ -3329,6 +3394,7 @@ rpc_t *rpc_attach(app_t *a, rpc_sink_fn sink, void *ud) {
     pthread_mutex_unlock(&a->mu);
     a->env->ui.ask = rpc_ask;
     a->env->ui.approve = rpc_approve;
+    a->env->ui.tool_frame = rpc_tool_frame;
     a->env->ui.ud = r;
     json_t *adv = json_obj(); /* the session's advisor runtimes reset at startup */
     json_set_str(adv, "type", "advisor_cost_changed");
@@ -3405,6 +3471,7 @@ void rpc_detach(rpc_t *r) {
     if (a->env->ui.ud == r) {
         a->env->ui.ask = NULL;
         a->env->ui.approve = NULL;
+        a->env->ui.tool_frame = NULL;
         a->env->ui.ud = NULL;
     }
     char *berr = NULL;

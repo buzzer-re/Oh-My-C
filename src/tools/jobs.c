@@ -779,6 +779,8 @@ size_t jobs_undelivered(jobs_t *j) {
     return n;
 }
 
+static const char *job_status(const bgjob_t *x);
+
 json_t *jobs_take_finished(jobs_t *j) {
     json_t *arr = json_arr();
     if (!j) return arr;
@@ -795,6 +797,7 @@ json_t *jobs_take_finished(jobs_t *j) {
         json_set_str(o, "type", x->type);
         json_set_str(o, "result", x->result ? x->result : "");
         json_set_bool(o, "failed", x->failed);
+        json_set_str(o, "status", job_status(x));
         json_set_int(o, "durationMs", x->ended - x->started);
         if (x->agent_id) json_set_str(o, "agentId", x->agent_id);
         json_push(arr, o);

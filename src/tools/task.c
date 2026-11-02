@@ -139,6 +139,77 @@ static bool disabled_agent(const char *name) {
 
 /* ---------- tool ---------- */
 
+/* task/types.ts canSpawnAtDepth */
+static bool can_spawn_at_depth(int depth) {
+    int64_t max = settings_int("task.maxRecursionDepth", 2);
+    return max < 0 || depth < max;
+}
+
+/* irc/messaging.ts isIrcEnabled: subagents always message; the main session while it can spawn */
+static bool irc_enabled(const tool_env_t *env) { return env->subagent_depth > 0 || can_spawn_at_depth(env->subagent_depth); }
+
+/* task/index.ts composeSpawnAdvisory: the specialization nudge (>= 2 generic task/sonic items) and, for spawns that
+ * keep running after the call, the coordination suggestion (>= 2 live siblings). NULL when neither applies. */
+static char *spawn_advisory(const tool_env_t *env, const json_t *tasks, size_t async_items, bool will_run_async) {
+    if (!can_spawn_at_depth(env->subagent_depth)) return NULL;
+    sb_t b = SB_INIT;
+    size_t generics = 0;
+    const char *first = NULL;
+    json_t *t;
+    json_arr_foreach(tasks, i, t) {
+        const char *agent = json_get_str(t, "agent") ? json_get_str(t, "agent") : "task";
+        if (str_eq(agent, "task") || str_eq(agent, "sonic")) {
+            if (!first) first = agent;
+            generics++;
+        }
+    }
+    if (generics >= 2) {
+        json_t *c = json_obj();
+        json_set_int(c, "count", (int64_t)generics);
+        json_set_str(c, "agent", first);
+        json_set_bool(c, "scoutAvailable", tools_scout_available());
+        char *r = prompt_render("coding-agent/prompts/tools/task-specialization-advisory.md", c);
+        json_free(c);
+        char *tr = str_trim(r);
+        sb_append(&b, tr);
+        free(tr);
+        free(r);
+    }
+    if (will_run_async && irc_enabled(env) && async_items >= 2) {
+        json_t *c = json_obj();
+        json_set_int(c, "count", (int64_t)async_items);
+        char *r = prompt_render("coding-agent/prompts/tools/task-coordination-advisory.md", c);
+        json_free(c);
+        char *tr = str_trim(r);
+        if (b.len) sb_append(&b, "\n\n");
+        sb_append(&b, tr);
+        free(tr);
+        free(r);
+    }
+    if (!b.len) {
+        sb_free(&b);
+        return NULL;
+    }
+    return sb_detach(&b);
+}
+
+/* withAdvisory: appended to the result's first text block (a new block when there is none); takes advisory */
+static void append_advisory(tool_result_t *out, char *advisory) {
+    if (!advisory) return;
+    json_t *blk;
+    json_arr_foreach(out->content, i, blk) {
+        if (str_eq(json_get_str(blk, "type"), "text")) {
+            char *t = xasprintf("%s\n\n%s", json_get_str(blk, "text") ? json_get_str(blk, "text") : "", advisory);
+            json_set_str(blk, "text", t);
+            free(t);
+            free(advisory);
+            return;
+        }
+    }
+    tool_result_text(out, advisory);
+    free(advisory);
+}
+
 static bool async_on(const tool_env_t *env) { return env->jobs && settings_bool("async.enabled", true); }
 
 static spawn_spec_t spec_of(const json_t *t, const char *context) {
@@ -324,7 +395,7 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         json_set_str(as, "jobId", "");
         json_set_str(as, "type", "task");
         json_set(details, "async", as);
-        task_card_t *card = task_card_new(env, ctx->tool_call_id, details);
+        task_card_t *card = task_card_new(env, ctx->tool_call_id, args, details);
         json_free(defs);
         json_t *started = json_arr();
         strvec_t agents = {0};
@@ -356,6 +427,14 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             tool_result_error(out, "Failed to start background task job%s: %s", nfail == 1 ? "" : "s",
                               fails.s ? fails.s : "");
         } else {
+            if (ctx->update) { /* onUpdate before the call returns */
+                tool_result_t pr = {0};
+                if (n == 1) tool_result_textf(&pr, "Spawned agent `%s`...", json_get_str(json_at(started, 0), "agentId"));
+                else tool_result_textf(&pr, "Spawned %zu agents...", ns);
+                pr.details = task_card_snapshot(card);
+                ctx->update(ctx, &pr);
+                tool_result_free(&pr);
+            }
             sb_t label = SB_INIT;
             for (size_t i = 0; i < agents.n; i++) sb_appendf(&label, "%s%s", i ? ", " : "", agents.v[i]);
             json_t *c = json_obj();
@@ -379,6 +458,7 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             free(fb);
             json_free(c);
             sb_free(&label);
+            append_advisory(out, spawn_advisory(env, tasks, n, true));
             out->details = task_card_snapshot(card);
         }
         task_card_release(card);
@@ -405,6 +485,7 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     tool_result_text(out, b.s ? b.s : "");
     out->is_error = any_err && n == 1;
     sb_free(&b);
+    append_advisory(out, spawn_advisory(env, tasks, 0, false));
     json_free(single);
     return 0;
 }
@@ -412,7 +493,7 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
 agent_tool_t *tool_task_new(tool_env_t *env) {
     json_t *defs = agent_defs_load(env->cwd);
     bool async = async_on(env);
-    bool irc = true; /* `write agent://<id>` peer messaging (agents.c) */
+    bool irc = irc_enabled(env); /* `write agent://<id>` peer messaging (agents.c) */
     bool batch = settings_bool("task.batch", true);
     json_t *ctx = json_obj();
     json_t *agents = json_arr();

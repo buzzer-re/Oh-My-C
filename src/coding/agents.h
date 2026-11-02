@@ -24,7 +24,8 @@ const char *agents_id_of(const struct app *a); /* registry id (borrowed) or NULL
  * change is pushed to env->ui.tool_frame for the call's transcript card; the last frame is the settled one
  * (async.state completed/failed). Refcounted: the task tool and each spawn hold a reference. */
 typedef struct task_card task_card_t;
-task_card_t *task_card_new(tool_env_t *env, const char *tool_call_id, json_t *details /* owned */);
+/* args: the call's arguments (cloned), carried by the post-return tool_execution_update frames */
+task_card_t *task_card_new(tool_env_t *env, const char *tool_call_id, const json_t *args, json_t *details /* owned */);
 void task_card_release(task_card_t *c);
 json_t *task_card_snapshot(task_card_t *c); /* owned clone */
 void task_card_set_id(task_card_t *c, int index, const char *agent_id, bool primary); /* allocated agent id */

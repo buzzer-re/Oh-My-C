@@ -211,13 +211,15 @@ static void app_job_settled(void *ud) {
     if (!agent_is_running(a->agent) && a->wake) a->wake(a->wake_ud);
 }
 
-/* omp async-result custom message details: {jobs: [{jobId, type, label, durationMs}]} (owned) */
+/* omp async-result custom message details: {jobs: [{jobId, type, status, agentId?, label, durationMs}]} (owned) */
 static json_t *job_batch_details(const json_t *done) {
     json_t *d = json_obj(), *jobs = json_arr(), *j;
     json_arr_foreach(done, i, j) {
         json_t *e = json_obj();
         if (json_get_str(j, "jobId")) json_set_str(e, "jobId", json_get_str(j, "jobId"));
         if (json_get_str(j, "type")) json_set_str(e, "type", json_get_str(j, "type"));
+        if (json_get_str(j, "status")) json_set_str(e, "status", json_get_str(j, "status"));
+        if (json_get_str(j, "agentId")) json_set_str(e, "agentId", json_get_str(j, "agentId"));
         if (json_get_str(j, "label")) json_set_str(e, "label", json_get_str(j, "label"));
         if (json_get(j, "durationMs")) json_set_int(e, "durationMs", json_get_int(j, "durationMs", 0));
         json_push(jobs, e);
@@ -1328,7 +1330,9 @@ static void install_agent(app_t *a) {
     agent_set_intent_tracing(settings_bool("tools.intentTracing", true));
     if (!a->opts.no_tools) tools_register_builtin(ag, a->env, a->opts.tools);
     if (a->mcp && !a->opts.no_tools) mcp_register_tools(a->mcp, ag);
+    /* subagents get lsp only with task.enableLsp (task/index.ts enableLsp, off by default) */
     bool lsp_ok = !a->opts.no_tools && settings_bool("lsp.enabled", true) &&
+                  (!a->opts.subagent || settings_bool("task.enableLsp", false)) &&
                   (!a->opts.tools || strvec_contains(a->opts.tools, "lsp"));
     if (lsp_ok) {
         if (!a->lsp && a->opts.lsp) a->lsp = a->opts.lsp;
@@ -1356,6 +1360,8 @@ static void install_agent(app_t *a) {
     }
     if (a->opts.subagent && a->opts.subagent_depth >= (int)settings_int("task.maxRecursionDepth", 2))
         agent_remove_tool(ag, "task");
+    /* todos are parent-owned bookkeeping, stripped from subagents (task/executor.ts isParentOwnedTool) */
+    if (a->opts.subagent) agent_remove_tool(ag, "todo");
     if (!a->opts.no_tools) autolearn_register_tools(a, ag);
     /* discoverable (xd://-mountable) tools added outside tools_register_builtin; MCP tools too */
     for (size_t i = 0; i < ag->all_tools.n; i++) {

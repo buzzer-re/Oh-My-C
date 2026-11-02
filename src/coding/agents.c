@@ -56,17 +56,19 @@ struct task_card {
     int refs;
     tool_env_t *env;
     char *call_id;
+    json_t *args;
     json_t *details;
     int64_t started_at;
     int nspawn, settled, failed;
 };
 
-task_card_t *task_card_new(tool_env_t *env, const char *tool_call_id, json_t *details) {
+task_card_t *task_card_new(tool_env_t *env, const char *tool_call_id, const json_t *args, json_t *details) {
     task_card_t *c = xcalloc(1, sizeof *c);
     pthread_mutex_init(&c->mu, NULL);
     c->refs = 1;
     c->env = env;
     c->call_id = xstrdup(tool_call_id ? tool_call_id : "");
+    c->args = args ? json_clone(args) : json_obj();
     c->details = details;
     c->started_at = now_ms();
     c->nspawn = (int)json_len(json_get_arr(details, "progress"));
@@ -89,6 +91,7 @@ void task_card_release(task_card_t *c) {
     if (!last) return;
     pthread_mutex_destroy(&c->mu);
     json_free(c->details);
+    json_free(c->args);
     free(c->call_id);
     free(c);
 }
@@ -100,11 +103,12 @@ json_t *task_card_snapshot(task_card_t *c) {
     return d;
 }
 
-/* push the current snapshot to the UI (called without c->mu held) */
-static void card_emit(task_card_t *c) {
+/* push the current snapshot with its progress text (omp reportProgress / onProgress) to the UI or the RPC
+ * stream (called without c->mu held) */
+static void card_emit(task_card_t *c, const char *text) {
     tool_env_t *env = c->env;
     if (!env || !env->ui.tool_frame) return;
-    env->ui.tool_frame(env->ui.ud, c->call_id, task_card_snapshot(c));
+    env->ui.tool_frame(env->ui.ud, c->call_id, "task", c->args, text, task_card_snapshot(c));
 }
 
 static json_t *card_row_locked(task_card_t *c, int idx) { return json_at(json_get_arr(c->details, "progress"), (size_t)idx); }
@@ -534,7 +538,11 @@ static void on_child_event(void *ud, const agent_event_t *ev) {
         if (r->progress && r->executor_run && row_on_event(r->progress, 0, ev, win)) progress = true;
         pthread_mutex_unlock(&g_mu);
         if (card) {
-            if (card_on_event(card, idx, started, ev, win)) card_emit(card);
+            if (card_on_event(card, idx, started, ev, win)) {
+                char *t = xasprintf("Running agent %s...", r->id);
+                card_emit(card, t);
+                free(t);
+            }
             task_card_release(card);
         }
     }
@@ -796,6 +804,9 @@ static void spawn_free(void *p) {
     free(s);
 }
 
+/* a ref's registry status: the main session is `running` while its agent loop runs (syncSessionStatus) */
+static bool ref_live_running(const aref_t *r) { return r->is_main ? r->app && agent_is_running(r->app->agent) : r->running; }
+
 static char *peer_roster_prompt(aref_t *self, const char *agent_body, const char *context, const char *source,
                                 const char *model) {
     json_t *c = json_obj();
@@ -804,24 +815,40 @@ static char *peer_roster_prompt(aref_t *self, const char *agent_body, const char
     json_set_str(c, "ircSelfId", self->id);
     json_set_bool(c, "structured", false);
     json_t *peers = json_arr();
+    /* collectIrcPeerRoster: live refs, running before idle, then newest activity first; at most 20 named */
     pthread_mutex_lock(&g_mu);
-    size_t shown = 0, omitted = 0;
+    VEC(aref_t *) live = {0};
     for (size_t i = 0; i < g_refs.n; i++) {
         aref_t *r = g_refs.v[i];
         if (r == self || r->gone || !r->app) continue;
+        vec_push(&live, r);
+    }
+    for (size_t i = 1; i < live.n; i++) /* stable insertion sort (tiny lists) */
+        for (size_t k = i; k > 0; k--) {
+            aref_t *x = live.v[k - 1], *y = live.v[k];
+            int ox = ref_live_running(x) ? 0 : 1, oy = ref_live_running(y) ? 0 : 1;
+            if (ox < oy || (ox == oy && x->last_activity >= y->last_activity)) break;
+            live.v[k - 1] = y;
+            live.v[k] = x;
+        }
+    size_t shown = 0, omitted = 0;
+    for (size_t i = 0; i < live.n; i++) {
+        aref_t *r = live.v[i];
         if (shown >= 20) {
             omitted++;
             continue;
         }
         json_t *p = json_obj();
         json_set_str(p, "id", r->id);
-        json_set_str(p, "displayName", r->is_main ? "Main" : r->agent);
-        json_set_str(p, "kind", r->is_main ? "main" : "subagent");
-        json_set_str(p, "status", r->running ? "running" : "idle");
+        /* sdk.ts registers `displayName: agentDisplayName ?? agentKind` ("main" / the agent type), kind main|sub */
+        json_set_str(p, "displayName", r->is_main ? "main" : r->agent);
+        json_set_str(p, "kind", r->is_main ? "main" : "sub");
+        json_set_str(p, "status", ref_live_running(r) ? "running" : "idle");
         if (r->activity) json_set_str(p, "activity", r->activity);
         json_push(peers, p);
         shown++;
     }
+    vec_free(&live);
     pthread_mutex_unlock(&g_mu);
     json_set(c, "ircPeers", peers);
     if (omitted) json_set_int(c, "ircOmittedCount", (int64_t)omitted);
@@ -955,7 +982,9 @@ static char *task_body_run(bgjob_t *job, void *ud, bool *failed) {
     pthread_mutex_unlock(&g_mu);
     if (card) {
         card_set_status(card, cidx, "running");
-        card_emit(card);
+        char *t = xasprintf("Running background task %s...", r->id);
+        card_emit(card, t);
+        free(t);
         task_card_release(card);
     }
     bool aborted;
@@ -988,7 +1017,9 @@ static char *task_body(bgjob_t *job, void *ud, bool *failed) {
     pthread_mutex_unlock(&g_mu);
     if (card) {
         task_card_settle(card, idx, aborted ? "aborted" : *failed ? "failed" : "completed");
-        card_emit(card);
+        char *t = xasprintf(*failed ? "Background task %s failed." : "Background task %s complete.", r->id);
+        card_emit(card, t);
+        free(t);
         task_card_release(card);
     }
     return res;

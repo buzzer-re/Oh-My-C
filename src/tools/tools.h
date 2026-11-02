@@ -48,7 +48,8 @@ typedef struct {
     json_t *(*ask)(void *ud, const json_t *questions);
     /* a tool call that already returned has a new result frame (async task progress): details owned; called
      * from any thread (the UI posts it to its own) */
-    void (*tool_frame)(void *ud, const char *tool_call_id, json_t *details);
+    void (*tool_frame)(void *ud, const char *tool_call_id, const char *tool_name, const json_t *args, const char *text,
+                       json_t *details);
     /* tool approval prompt (overlays/approval-dialog.ts) for call `tool_call_id`; `status` is formatApprovalPrompt
      * (the blocked run status). Blocks the calling tool thread; returns an approval_answer_kind_t (tools/approval.h)
      * with *grant / *always set for a grant answer. `cancel` aborts the wait (deny). NULL: no UI can answer. */

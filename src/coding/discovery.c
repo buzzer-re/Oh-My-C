@@ -926,9 +926,9 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     json_set_bool(data, "scoutAvailable", scout);
     json_set_bool(data, "renderMermaid", false);
     json_set_bool(data, "subagent", o->subagent);
-    /* personality */
-    const char *pers = settings_str("personality", "default");
-    char *pfile = load_override(o->cwd, "PERSONALITY.md");
+    /* personality: "none" (and every subagent: sdk.ts passes "none" for agentKind "sub") skips the file lookup */
+    const char *pers = o->subagent ? "none" : settings_str("personality", "default");
+    char *pfile = pers && strcmp(pers, "none") != 0 ? load_override(o->cwd, "PERSONALITY.md") : NULL;
     if (pfile) {
         json_set_str(data, "personality", pfile);
         free(pfile);
