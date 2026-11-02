@@ -39,9 +39,9 @@ check "tier anthropic wire" "fast True"  "${KL[@]}" /v1/messages 'b.get("speed")
 kcfg 'modelRoles:\n  default: openai/gpt-5.2\n'
 check "tiers rpc"          "rpc ok"  bash -c "${KENV[*]} OMC_NO_TITLE=1 python3 -I '$ROOT/tests/e2e/tiers_rpc.py' '$B' > '$T/tiers.out' 2>&1; diff '$ROOT/tests/e2e/tiers_rpc.expected' '$T/tiers.out' && echo rpc ok"
 # extended context: gpt-5.6 runs at its 272K standard-pricing window unless extendedContext is on
-check "standard window"    "gpt-5.6                                          ctx=272000"  "${KENV[@]}" "$B" models openai
+check "standard window"    "│ gpt-5.6                  │    272K │"  "${KENV[@]}" "$B" models openai
 kcfg 'extendedContext: true\n'
-check "extended window"    "gpt-5.6                                          ctx=1050000"  "${KENV[@]}" "$B" models openai
+check "extended window"    "│ gpt-5.6                  │    1.1M │"  "${KENV[@]}" "$B" models openai
 # prompt-cache warming: one RPC turn on a 12 s cache lifetime, then idle refreshes (one-token replays) that hit
 kcfg 'modelRoles:\n  default: anthropic/claude-opus-4-6\n'
 rm -rf "$T/kagent/sessions"
