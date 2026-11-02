@@ -85,6 +85,11 @@ static int group_rank(const sdef_t *d) {
     return (int)json_len(gs);
 }
 
+/* omp settings that cannot mean anything in omc and are not offered: the startup update check and its channel
+ * ask omp's build service / npm for a newer omp and advise `omp update`; omc has no release feed or self-update
+ * (omp itself skips the check for a source checkout, which is how omc is built). The keys stay inert in config. */
+static bool omc_inert(const char *path) { return str_eq(path, "startup.checkUpdate") || str_eq(path, "update.channel"); }
+
 static void load_defs(void) {
     if (g_json) return;
     size_t len = 0;
@@ -124,7 +129,7 @@ static void load_defs(void) {
             const char *v = json_get_str(o, "value"), *l = json_get_str(o, "label"), *de = json_get_str(o, "description");
             d->opts[d->nopt++] = (sopt_t){xstrdup(v ? v : ""), xstrdup(l ? l : (v ? v : "")), de ? xstrdup(de) : NULL};
         }
-        if (d->path && d->label && d->type && d->tab >= 0) g_ndefs++;
+        if (d->path && d->label && d->type && d->tab >= 0 && !omc_inert(d->path)) g_ndefs++;
     }
     int nw = 0;
     for (size_t i = 0; i < g_ndefs; i++)
