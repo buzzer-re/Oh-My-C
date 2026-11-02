@@ -974,6 +974,12 @@ static int64_t context_used(app_t *a) {
     return used;
 }
 
+/* the context gauge's used-token figure (SessionStats.getContextBreakdown usedTokens) */
+int64_t ui_context_used(app_t *a) {
+    int64_t used = context_used(a);
+    return used < 0 ? estimate_context(a) + (-used - 1) : used;
+}
+
 static void fill_context(segctx_t *c) {
     app_t *a = c->a;
     c->window = a->model ? a->model->context_window : 0;

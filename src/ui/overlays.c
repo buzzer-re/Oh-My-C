@@ -11,7 +11,6 @@
 
 #include <math.h>
 
-static char *S(tui_tc_t slot, const char *s) { return tui_fgs(NULL, slot, s); }
 
 /* ---------- selector host: the selector replaces the composer (editor + its status rows) ---------- */
 

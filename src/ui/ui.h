@@ -193,6 +193,10 @@ char *ui_status_render(ui_t *u, int width, const char *layout); /* box|band|plai
 void ui_hint_record(const char *id);        /* composer hint gesture used ("effort", "agents") */
 char *ui_key_hint(const char *key);         /* "shift+tab" -> "⇧⇥" (active symbol preset) */
 char *ui_double_tap_hint(const char *key);
+/* $VISUAL / $EDITOR on a temp file with the TUI stopped (interactive.c); owned result, NULL when it failed or
+ * exited non-zero; *no_editor when none is configured */
+char *ui_external_edit(ui_t *u, const char *text, const char *ext, bool *no_editor);
+int64_t ui_context_used(app_t *a);         /* the context gauge's used tokens (anchored on provider usage) */
 
 /* btw.c - /btw side questions: inline answer panel, BTW history, follow-ups, copy, branch */
 tui_component_t *ui_btw_container_new(ui_t *u); /* the inline panel's slot (between transcript and banner) */

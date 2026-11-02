@@ -847,6 +847,7 @@ static json_t *job_json(const bgjob_t *x, bool full) {
     json_set_int(o, "startedAt", x->started);
     if (x->done) json_set_int(o, "endedAt", x->ended);
     if (x->agent_id) json_set_str(o, "agentId", x->agent_id);
+    if (x->bash && x->bash->cmd) json_set_str(o, "command", x->bash->cmd);
     if (full) {
         if (x->done) json_set_str(o, "result", x->result ? x->result : "");
         if (!x->done && x->output.len) json_set_str(o, "output", sb_cstr((sb_t *)&x->output));

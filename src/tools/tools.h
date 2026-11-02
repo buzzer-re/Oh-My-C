@@ -121,6 +121,11 @@ char *jobs_render_results(const json_t *jobs);
 agent_tool_t *tool_grep_new(tool_env_t *env);
 agent_tool_t *tool_glob_new(tool_env_t *env);
 agent_tool_t *tool_todo_new(tool_env_t *env);
+/* /todo helpers (tools/todo.ts): one todo op applied to a copy of `phases` (in-progress normalized; errors appended);
+ * phasesToMarkdown; markdownToPhases (errors appended). All return owned values. */
+json_t *todo_apply_op(const json_t *phases, const char *op, const json_t *args, strvec_t *errors);
+char *todo_phases_to_markdown(const json_t *phases);
+json_t *todo_markdown_to_phases(const char *md, strvec_t *errors);
 agent_tool_t *tool_ask_new(tool_env_t *env);
 agent_tool_t *tool_web_search_new(tool_env_t *env);
 agent_tool_t *tool_task_new(tool_env_t *env);

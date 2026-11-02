@@ -429,7 +429,10 @@ static void start_prompt_with(ui_t *u, const char *text, json_t *attachments) {
 /* `✔ <label>` in accent (Text padded 1,1), as #runNewSessionFlow / handleResetContextCommand present
  * it; `clear` resets the transcript first */
 static void ui_success_line(ui_t *u, const char *label, bool clear) {
-    if (clear) tui_container_clear(u->chat);
+    if (clear) {
+        tui_container_clear(u->chat);
+        ui_report_clear(u);
+    }
     char *l = xasprintf("%s %s", tui_sym("status.success"), label);
     char *t = tui_fgs(NULL, TUI_TC_ACCENT, l);
     tui_container_add(u->chat, &tui_text_new(t, 1, 1)->base);
@@ -648,7 +651,7 @@ static void plan_status(ui_t *u, const char *text) { add_notice(u, "info", text)
 
 /* $VISUAL / $EDITOR on a temp file with the TUI stopped (utils/external-editor.ts openInEditor); owned
  * result, NULL when unchanged / failed */
-static char *ui_external_edit(ui_t *u, const char *text, const char *ext, bool *no_editor) {
+char *ui_external_edit(ui_t *u, const char *text, const char *ext, bool *no_editor) {
     const char *ed = getenv("VISUAL");
     if (!ed || !*ed) ed = getenv("EDITOR");
     *no_editor = !ed || !*ed;
@@ -1614,13 +1617,7 @@ static bool handle_command(ui_t *u, const char *line) {
     } else if (!strcmp(cmd, "goal")) {
         goal_command(u, arg);
     } else if (!strcmp(cmd, "jobs")) {
-        json_t *snap = jobs_snapshot(a->env->jobs), *x;
-        sb_t b = SB_INIT;
-        json_arr_foreach(snap, i, x) sb_appendf(&b, "%s%-8s %-10s %5llds  %s", b.len ? "\n" : "", json_get_str(x, "id"), json_get_str(x, "status"),
-                                                  (long long)(json_get_int(x, "durationMs", 0) / 1000), json_get_str(x, "label"));
-        add_notice(u, "info", b.len ? sb_cstr(&b) : "No background jobs.");
-        sb_free(&b);
-        json_free(snap);
+        ui_jobs_command(u, arg);
     } else if (!strcmp(cmd, "advisor")) { /* builtin-collaboration.ts advisor handleTui */
         char *verb, *rest;
         slash_subcommand(arg, &verb, &rest);
@@ -1748,46 +1745,17 @@ static bool handle_command(ui_t *u, const char *line) {
             ui_session_banner(u, "Session deleted");
         }
     } else if (!strcmp(cmd, "todo")) {
-        json_t *ph, *t;
-        sb_t b = SB_INIT;
-        json_arr_foreach(a->env->todo.phases, i, ph) {
-            sb_appendf(&b, "%s%s\n", b.len ? "\n" : "", json_get_str(ph, "name") ? json_get_str(ph, "name") : "Todo");
-            json_arr_foreach(json_get_arr(ph, "tasks"), k, t) {
-                const char *st = json_get_str(t, "status");
-                sb_appendf(&b, "  %s %s\n", str_eq(st, "completed") ? "[x]" : str_eq(st, "in_progress") ? "[>]" : str_eq(st, "abandoned") ? "[-]" : "[ ]",
-                           json_get_str(t, "content"));
-            }
-        }
-        add_notice(u, "info", b.len ? sb_cstr(&b) : "No todos.");
-        sb_free(&b);
+        ui_todo_command(u, arg);
     } else if (!strcmp(cmd, "tools")) {
-        sb_t b = SB_INIT;
-        sb_appendf(&b, "%zu tools visible to the agent:\n", a->agent->tools.n);
-        for (size_t i = 0; i < a->agent->tools.n; i++) {
-            const char *d = a->agent->tools.v[i]->description ? a->agent->tools.v[i]->description : "";
-            sb_appendf(&b, "  %-14s %.*s\n", a->agent->tools.v[i]->name, (int)MIN(strcspn(d, "\n"), (size_t)90), d);
-        }
-        add_notice(u, "info", sb_cstr(&b));
-        sb_free(&b);
-    } else if (!strcmp(cmd, "context") || !strcmp(cmd, "usage")) {
+        ui_tools_command(u);
+    } else if (!strcmp(cmd, "context")) {
+        ui_context_command(u);
+    } else if (!strcmp(cmd, "usage")) {
         json_t *st = app_stats(a);
-        size_t sys = 0;
-        json_t *x;
-        json_arr_foreach(a->agent->system_prompt, i, x) sys += strlen(json_sv(x));
-        size_t tools = 0;
-        for (size_t i = 0; i < a->agent->tools.n; i++) {
-            char *w = json_dump(a->agent->tools.v[i]->parameters, 0);
-            tools += strlen(w) + strlen(a->agent->tools.v[i]->description ? a->agent->tools.v[i]->description : "");
-            free(w);
-        }
-        char *m = !strcmp(cmd, "context")
-                      ? xasprintf("Context: %lld / %lld tokens (%.1f%%)\n  system prompt ~%zu tokens · tools ~%zu tokens · %zu messages",
-                                  (long long)json_get_int(st, "contextTokens", 0), (long long)json_get_int(st, "contextWindow", 0),
-                                  json_get_num(st, "contextPercent", 0), sys / 4, tools / 4, json_len(a->agent->messages))
-                      : xasprintf("Usage: %lld in · %lld out · %lld cache read · %lld cache write · $%.4f",
-                                  (long long)json_get_int(st, "input", 0), (long long)json_get_int(st, "output", 0),
-                                  (long long)json_get_int(st, "cacheRead", 0), (long long)json_get_int(st, "cacheWrite", 0),
-                                  json_get_num(st, "cost", 0));
+        char *m = xasprintf("Usage: %lld in · %lld out · %lld cache read · %lld cache write · $%.4f",
+                            (long long)json_get_int(st, "input", 0), (long long)json_get_int(st, "output", 0),
+                            (long long)json_get_int(st, "cacheRead", 0), (long long)json_get_int(st, "cacheWrite", 0),
+                            json_get_num(st, "cost", 0));
         add_notice(u, "info", m);
         free(m);
         json_free(st);
@@ -1877,19 +1845,7 @@ static bool handle_command(ui_t *u, const char *line) {
         free(focus);
         free(err);
     } else if (!strcmp(cmd, "session")) {
-        json_t *st = app_stats(a);
-        char *s = xasprintf("Session %s\nFile: %s\nMessages: %lld user, %lld assistant, %lld tool results\n"
-                            "Tokens: %lld in, %lld out, %lld cache read, %lld cache write\nCost: $%.4f\nContext: %lld / %lld (%.1f%%)",
-                            json_get_str(st, "sessionId"), json_get_str(st, "sessionFile") ? json_get_str(st, "sessionFile") : "(memory)",
-                            (long long)json_get_int(st, "userMessages", 0), (long long)json_get_int(st, "assistantMessages", 0),
-                            (long long)json_get_int(st, "toolResults", 0), (long long)json_get_int(st, "input", 0),
-                            (long long)json_get_int(st, "output", 0), (long long)json_get_int(st, "cacheRead", 0),
-                            (long long)json_get_int(st, "cacheWrite", 0), json_get_num(st, "cost", 0),
-                            (long long)json_get_int(st, "contextTokens", 0), (long long)json_get_int(st, "contextWindow", 0),
-                            json_get_num(st, "contextPercent", 0));
-        add_notice(u, "info", s);
-        free(s);
-        json_free(st);
+        ui_session_command(u, arg);
     } else if (!strcmp(cmd, "export")) {
         export_command(u, arg);
     } else if (!strcmp(cmd, "copy")) {
@@ -2043,6 +1999,7 @@ static void clear_editor_draft(ui_t *u) {
 
 /* app.interrupt (editor.onEscape) */
 static void on_escape(ui_t *u) {
+    if (ui_report_dismiss(u)) return; /* dismissCommandReport */
     if (iq_escape(u)) return; /* maintenance / turn abort (queue back to the editor), bash or python mode */
     char *text = tui_editor_get_text(u->editor);
     char *tt = str_trim(text);
@@ -2345,6 +2302,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     u.pending_shell = tui_container_new();
     tui_container_add(root, &u.pending_shell->base);
     tui_container_add(root, ui_btw_container_new(&u)); /* omp btwContainer: right below the transcript */
+    tui_container_add(root, ui_report_slot_new(&u));    /* omp reportContainer: short command reports dock here */
     u.queue_band = ui_queue_band_new(&u);
     tui_container_add(root, u.queue_band);
     u.banner = tui_container_new();

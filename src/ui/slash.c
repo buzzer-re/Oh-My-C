@@ -3,6 +3,9 @@
  * offered. */
 #include "ui/overlays.h"
 #include "ui/ui.h"
+#include "tools/jobs.h"
+
+#include <math.h>
 
 #include "coding/slashcmd.h"
 
@@ -59,6 +62,51 @@ static char *live_description(void *ud, const char *name) {
         return xstrdup("Plan: off");
     }
     if (!strcmp(name, "plan-review")) return xstrdup(a->plan_mode ? "Plan review: available" : "Plan review: plan mode inactive");
+    if (!strcmp(name, "todo")) { /* the session todo state */
+        size_t pending = 0, active = 0, done = 0, total = 0;
+        json_t *p, *t;
+        pthread_mutex_lock(&a->env->mu);
+        json_arr_foreach(a->env->todo.phases, i, p) json_arr_foreach(json_get(p, "tasks"), k, t) {
+            const char *st = json_get_str(t, "status");
+            total++;
+            pending += str_eq(st, "pending");
+            active += str_eq(st, "in_progress");
+            done += str_eq(st, "completed");
+        }
+        pthread_mutex_unlock(&a->env->mu);
+        if (!total) return xstrdup("Todos: none");
+        return xasprintf("Todos: %zu open (%zu in progress, %zu done)", pending + active, active, done);
+    }
+    if (!strcmp(name, "jobs")) {
+        json_t *snap = jobs_snapshot(a->env->jobs), *x;
+        size_t running = 0, recent = 0;
+        json_arr_foreach(snap, i, x) {
+            if (str_eq(json_get_str(x, "status"), "running")) running++;
+            else recent++;
+        }
+        json_free(snap);
+        if (recent > 5) recent = 5;
+        if (!running && !recent) return xstrdup("Jobs: none");
+        return xasprintf("Jobs: %zu running, %zu recent", running, recent);
+    }
+    if (!strcmp(name, "context")) {
+        if (!a->model || a->model->context_window <= 0) return xstrdup("Context: unavailable");
+        int64_t used = ui_context_used(a), win = a->model->context_window;
+        char g1[48], g2[48];
+        int64_t vals[2] = {used, win};
+        char *outs[2] = {g1, g2};
+        for (int v = 0; v < 2; v++) {
+            char raw[32];
+            snprintf(raw, sizeof raw, "%lld", (long long)vals[v]);
+            size_t l = strlen(raw), o = 0;
+            for (size_t i = 0; i < l; i++) {
+                if (i && (l - i) % 3 == 0) outs[v][o++] = ',';
+                outs[v][o++] = raw[i];
+            }
+            outs[v][o] = 0;
+        }
+        return xasprintf("Context: %.0f%% (%s/%s)", round((double)used / (double)win * 100), g1, g2);
+    }
     if (!strcmp(name, "goal")) {
         if (a->plan_mode) return xstrdup("Goal: blocked by plan mode");
         return app_goal(a) ? xstrdup(goal_enabled(app_goal(a)) ? "Goal: active" : "Goal: paused") : xstrdup("Goal: off");
