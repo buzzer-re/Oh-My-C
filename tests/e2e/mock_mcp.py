@@ -1,19 +1,40 @@
 #!/usr/bin/env python3
 """Dev-only stdio MCP server fixture: one tool `echo_text` that returns its input, and two prompts
-(`greet` with a `name` argument, `empty` that renders no text) that become `/mockmcp:<prompt>` commands."""
+(`greet` with a `name` argument, `empty` that renders no text) that become `/mockmcp:<prompt>` commands.
+
+With `--full` it also advertises list_changed / subscribe capabilities, serves a resource (`mem://notes`)
+and a resource template (`mem://item/{id}`), accepts resources/subscribe, and has a `change_prompts` tool
+that adds a `fresh` prompt and sends `notifications/prompts/list_changed` plus
+`notifications/resources/updated` for mem://notes (MCP notification tests)."""
 import json, sys
+
+FULL = "--full" in sys.argv[1:]
+extra_prompt = [False]
+
+
+def send(obj):
+    print(json.dumps(obj), flush=True)
+
+
 for line in sys.stdin:
     msg = json.loads(line)
     mid, method = msg.get("id"), msg.get("method")
     if mid is None:
         continue
     if method == "initialize":
-        res = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}, "prompts": {}},
+        caps = {"tools": {}, "prompts": {}}
+        if FULL:
+            caps = {"tools": {"listChanged": True}, "prompts": {"listChanged": True},
+                    "resources": {"subscribe": True, "listChanged": True}}
+        res = {"protocolVersion": "2025-06-18", "capabilities": caps,
                "serverInfo": {"name": "mock", "version": "1"}, "instructions": "Mock MCP server instructions."}
     elif method == "prompts/list":
-        res = {"prompts": [{"name": "greet", "description": "Greet someone politely",
-                            "arguments": [{"name": "name", "required": True}]},
-                           {"name": "empty"}]}
+        prompts = [{"name": "greet", "description": "Greet someone politely",
+                    "arguments": [{"name": "name", "required": True, "description": "Who to greet"}]},
+                   {"name": "empty"}]
+        if extra_prompt[0]:
+            prompts.append({"name": "fresh", "description": "Added at runtime"})
+        res = {"prompts": prompts}
     elif method == "prompts/get":
         p = msg["params"]
         if p["name"] == "greet":
@@ -21,14 +42,36 @@ for line in sys.stdin:
             res = {"messages": [{"role": "user", "content": {"type": "text", "text": "MCP prompt says hello to " + who}},
                                 {"role": "user", "content": {"type": "resource",
                                                              "resource": {"uri": "mem://x", "text": "resource part"}}}]}
+        elif p["name"] == "fresh":
+            res = {"messages": [{"role": "user", "content": {"type": "text", "text": "fresh prompt text"}}]}
         else:
             res = {"messages": []}
     elif method == "tools/list":
-        res = {"tools": [{"name": "echo_text", "description": "Echo text back",
-                          "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
+        tools = [{"name": "echo_text", "description": "Echo text back",
+                  "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]
+        if FULL:
+            tools.append({"name": "change_prompts", "description": "Add a prompt and notify",
+                          "inputSchema": {"type": "object", "properties": {}}})
+        res = {"tools": tools}
     elif method == "tools/call":
-        res = {"content": [{"type": "text", "text": "mcp echo: " + msg["params"]["arguments"].get("text", "")}]}
+        name = msg["params"].get("name")
+        if name == "change_prompts":
+            extra_prompt[0] = True
+            send({"jsonrpc": "2.0", "method": "notifications/prompts/list_changed"})
+            send({"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": "mem://notes"}})
+            res = {"content": [{"type": "text", "text": "prompts changed"}]}
+        else:
+            res = {"content": [{"type": "text", "text": "mcp echo: " + msg["params"]["arguments"].get("text", "")}]}
+    elif FULL and method == "resources/list":
+        res = {"resources": [{"uri": "mem://notes", "name": "notes", "description": "Mock notes", "mimeType": "text/plain"}]}
+    elif FULL and method == "resources/templates/list":
+        res = {"resourceTemplates": [{"uriTemplate": "mem://item/{id}", "name": "item", "description": "One item"}]}
+    elif FULL and method == "resources/read":
+        uri = msg["params"]["uri"]
+        res = {"contents": [{"uri": uri, "mimeType": "text/plain", "text": "contents of " + uri}]}
+    elif FULL and method in ("resources/subscribe", "resources/unsubscribe"):
+        res = {}
     else:
-        print(json.dumps({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "nope"}}), flush=True)
+        send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "nope"}})
         continue
-    print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": res}), flush=True)
+    send({"jsonrpc": "2.0", "id": mid, "result": res})

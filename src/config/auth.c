@@ -707,3 +707,7 @@ int auth_login_descriptor(const char *key, const json_t *d, const auth_io_t *io,
 int auth_login_hooked(const char *provider, const auth_login_hooks_t *hooks, char **err) {
     return login_run(provider, descriptor(provider), false, hooks, err);
 }
+
+int auth_login_descriptor_hooked(const char *key, const json_t *d, const auth_login_hooks_t *hooks, char **err) {
+    return login_run(key, d, true, hooks, err);
+}

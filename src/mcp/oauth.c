@@ -23,6 +23,13 @@ char *mcp_oauth_token(const char *url) {
     return t;
 }
 
+bool mcp_oauth_has_credential(const char *url) {
+    char *key = mcp_oauth_key(url);
+    bool has = auth_has_credentials(key);
+    free(key);
+    return has;
+}
+
 int mcp_oauth_logout(const char *url) {
     char *key = mcp_oauth_key(url);
     int rc = auth_logout(key);
@@ -256,6 +263,46 @@ out:
     json_free(prm);
     json_free(asm_);
     return d;
+}
+
+json_t *mcp_oauth_discover(const char *server_url, const char *www_authenticate) {
+    if (!server_url) return NULL;
+    json_t *prm = protected_resource_metadata(server_url, www_authenticate);
+    const json_t *iss0 = json_at(json_get_arr(prm, "authorization_servers"), 0);
+    const char *issuer = json_is_str(iss0) ? json_sv(iss0) : NULL;
+    char *origin = origin_of(server_url, NULL);
+    json_t *asm_ = authorization_server_metadata(issuer ? issuer : origin);
+    json_t *out = NULL;
+    const char *authz = json_get_str(asm_, "authorization_endpoint"), *token = json_get_str(asm_, "token_endpoint");
+    if (authz && token) {
+        out = json_obj();
+        json_set_str(out, "authorizationUrl", authz);
+        json_set_str(out, "tokenUrl", token);
+        if (json_get_str(asm_, "registration_endpoint")) json_set_str(out, "registrationUrl", json_get_str(asm_, "registration_endpoint"));
+        if (json_get_str(asm_, "issuer")) json_set_str(out, "issuerUrl", json_get_str(asm_, "issuer"));
+        sb_t sc = SB_INIT;
+        json_t *x;
+        json_arr_foreach(json_get_arr(prm, "scopes_supported"), i, x)
+            if (json_is_str(x)) sb_appendf(&sc, "%s%s", sc.len ? " " : "", json_sv(x));
+        if (sc.len) json_set_str(out, "scopes", sb_cstr(&sc));
+        sb_free(&sc);
+        if (json_get_str(prm, "resource")) json_set_str(out, "resource", json_get_str(prm, "resource"));
+    }
+    free(origin);
+    json_free(prm);
+    json_free(asm_);
+    return out;
+}
+
+int mcp_oauth_login_hooked(const char *server_url, const json_t *server_cfg, const char *www_authenticate,
+                           const auth_login_hooks_t *hooks, char **err) {
+    json_t *d = mcp_oauth_descriptor(server_url, server_cfg, www_authenticate, err);
+    if (!d) return -1;
+    char *key = mcp_oauth_key(server_url);
+    int rc = auth_login_descriptor_hooked(key, d, hooks, err);
+    free(key);
+    json_free(d);
+    return rc;
 }
 
 int mcp_oauth_login(const char *server_url, const json_t *server_cfg, const char *www_authenticate, const auth_io_t *io, char **err) {

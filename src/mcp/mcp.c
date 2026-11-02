@@ -10,11 +10,15 @@
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <unistd.h>
 
 #define MCP_PROTOCOL "2025-06-18"
 
 typedef enum { T_STDIO, T_HTTP, T_SSE } transport_t;
+
+/* lifecycle of a managed server */
+typedef enum { S_CONNECTING, S_READY, S_FAILED } sstate_t;
 
 typedef struct {
     int64_t id;
@@ -35,22 +39,46 @@ struct mcp_server {
     pthread_t reader;
     bool reader_started;
     volatile bool closing;
+    volatile sig_atomic_t cancel; /* aborts HTTP requests and the SSE stream when closing */
+    volatile int *ext_cancel;     /* probe: caller's cancel flag */
     pthread_mutex_t mu;
     pthread_cond_t cv;
     VEC(pending_t *) pending;
     int64_t next_id;
+    /* catalogs (guarded by mu once the server is shared) */
     json_t *tools;      /* tools/list result array */
     json_t *prompts;    /* prompts/list result array (servers advertising the prompts capability), or NULL */
+    json_t *resources;  /* resources/list (servers advertising resources), or NULL */
+    json_t *templates;  /* resources/templates/list, or NULL */
+    json_t *caps;       /* initialize capabilities */
+    json_t *info;       /* initialize serverInfo */
+    json_t *subscribed; /* URIs subscribed with resources/subscribe, or NULL */
     char *instructions;
     char *error;
     char *www_auth; /* last 401 challenge (OAuth discovery) */
-    bool connected;
+    int http_status; /* last HTTP error status */
+    bool connected;  /* transport alive */
+    sstate_t state;
     int64_t timeout_ms;
+    int refs;
+    mcp_manager_t *mgr; /* NULL for probes */
 };
 
 struct mcp_manager {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
     VEC(mcp_server_t *) servers;
+    mcp_callbacks_t cb;
+    bool notifications;
+    int bg; /* background threads still using the manager */
+    bool closing;
 };
+
+static void srv_ref(mcp_server_t *s) { __atomic_add_fetch(&s->refs, 1, __ATOMIC_SEQ_CST); }
+static void server_free(mcp_server_t *s);
+static void srv_unref(mcp_server_t *s) {
+    if (s && __atomic_sub_fetch(&s->refs, 1, __ATOMIC_SEQ_CST) == 0) server_free(s);
+}
 
 /* ---------- config ---------- */
 
@@ -94,7 +122,7 @@ static void expand_tree(json_t *j) {
     }
 }
 
-static void add_servers(json_t *out, json_t *disabled, const char *path, const char *map_path) {
+static void add_servers(json_t *out, json_t *disabled, const char *path, const char *map_path, const char *provider) {
     size_t n;
     char *s = fs_read(path, &n);
     if (!s) return;
@@ -105,7 +133,7 @@ static void add_servers(json_t *out, json_t *disabled, const char *path, const c
         return;
     }
     json_t *dis = json_get_arr(j, "disabledServers"), *x;
-    json_arr_foreach(dis, i, x) if (json_is_str(x)) json_push_str(disabled, json_sv(x));
+    if (disabled) json_arr_foreach(dis, i, x) if (json_is_str(x)) json_push_str(disabled, json_sv(x));
     json_t *map = json_path(j, map_path);
     if (!json_is_obj(map) && strcmp(map_path, "mcpServers") == 0) map = json_get_obj(j, "servers");
     const char *k;
@@ -114,6 +142,7 @@ static void add_servers(json_t *out, json_t *disabled, const char *path, const c
         if (!json_is_obj(v) || json_get(out, k)) continue;
         json_t *c = json_clone(v);
         json_set_str(c, "_source", path);
+        json_set_str(c, "_provider", provider);
         json_set(out, k, c);
     }
     json_free(j);
@@ -122,22 +151,29 @@ static void add_servers(json_t *out, json_t *disabled, const char *path, const c
 json_t *mcp_discover_config(const char *cwd) {
     json_t *out = json_obj();
     json_t *disabled = json_arr();
-    const char *proj[] = {".omc/mcp.json", ".omp/mcp.json", ".omc/.mcp.json", ".omp/.mcp.json", "mcp.json",
-                          ".mcp.json", ".claude/mcp.json", ".claude/.mcp.json", ".cursor/mcp.json"};
-    for (size_t i = 0; i < ARRAY_LEN(proj); i++) {
-        char *p = path_join(cwd, proj[i]);
-        add_servers(out, disabled, p, "mcpServers");
+    bool project = settings_bool("mcp.enableProjectConfig", true);
+    static const struct {
+        const char *rel, *provider;
+    } proj[] = {{".omc/mcp.json", "OMP"},         {".omp/mcp.json", "OMP"},         {".omc/.mcp.json", "OMP"},
+                {".omp/.mcp.json", "OMP"},        {"mcp.json", "MCP Config"},      {".mcp.json", "MCP Config"},
+                {".claude/mcp.json", "Claude Code"}, {".claude/.mcp.json", "Claude Code"}, {".cursor/mcp.json", "Cursor"}};
+    for (size_t i = 0; project && i < ARRAY_LEN(proj); i++) {
+        char *p = path_join(cwd, proj[i].rel);
+        add_servers(out, NULL, p, "mcpServers", proj[i].provider);
         free(p);
     }
-    char *vs = path_join(cwd, ".vscode/mcp.json");
-    add_servers(out, disabled, vs, "servers");
-    free(vs);
-    const char *agent_files[] = {"mcp.json", ".mcp.json"};
-    for (size_t i = 0; i < ARRAY_LEN(agent_files); i++) {
-        char *p = omc_agent_path(agent_files[i]);
-        add_servers(out, disabled, p, "mcpServers");
-        free(p);
+    if (project) {
+        char *vs = path_join(cwd, ".vscode/mcp.json");
+        add_servers(out, NULL, vs, "servers", "VS Code");
+        free(vs);
     }
+    /* the user mcp.json owns the disabledServers denylist */
+    char *up = omc_agent_path("mcp.json");
+    add_servers(out, disabled, up, "mcpServers", "OMP");
+    free(up);
+    char *up2 = omc_agent_path(".mcp.json");
+    add_servers(out, NULL, up2, "mcpServers", "OMP");
+    free(up2);
     /* foreign user-level sources are opt-in (settings enabledProviders: [claude, cursor] or "*") */
     json_t *ep = settings_get("enabledProviders"), *e;
     bool want_claude = false, want_cursor = false;
@@ -150,12 +186,12 @@ json_t *mcp_discover_config(const char *cwd) {
     if (env_get("CLAUDE_CONFIG_DIR")) want_claude = true;
     if (want_cursor) {
         char *p = path_join(home_dir(), ".cursor/mcp.json");
-        add_servers(out, disabled, p, "mcpServers");
+        add_servers(out, NULL, p, "mcpServers", "Cursor");
         free(p);
     }
     if (want_claude) {
         char *p = path_join(home_dir(), ".claude/mcp.json");
-        add_servers(out, disabled, p, "mcpServers");
+        add_servers(out, NULL, p, "mcpServers", "Claude Code");
         free(p);
         /* ~/.claude.json: global mcpServers + per-project projects.<cwd>.mcpServers */
         char *cj = path_join(home_dir(), ".claude.json");
@@ -164,11 +200,21 @@ json_t *mcp_discover_config(const char *cwd) {
         if (s) {
             json_t *j = json_parse(s, n, NULL);
             json_t *projs = json_get_obj(j, "projects");
-            json_t *pm = json_get_obj(json_get_obj(projs, cwd), "mcpServers");
+            json_t *pm = project ? json_get_obj(json_get_obj(projs, cwd), "mcpServers") : NULL;
             const char *k;
             json_t *v;
-            json_obj_foreach(pm, i, k, v) if (!json_get(out, k)) json_set(out, k, json_clone(v));
-            json_obj_foreach(json_get_obj(j, "mcpServers"), i, k, v) if (!json_get(out, k)) json_set(out, k, json_clone(v));
+            json_obj_foreach(pm, i, k, v) if (!json_get(out, k) && json_is_obj(v)) {
+                json_t *c = json_clone(v);
+                json_set_str(c, "_source", cj);
+                json_set_str(c, "_provider", "Claude Code");
+                json_set(out, k, c);
+            }
+            json_obj_foreach(json_get_obj(j, "mcpServers"), i, k, v) if (!json_get(out, k) && json_is_obj(v)) {
+                json_t *c = json_clone(v);
+                json_set_str(c, "_source", cj);
+                json_set_str(c, "_provider", "Claude Code");
+                json_set(out, k, c);
+            }
             json_free(j);
             free(s);
         }
@@ -189,6 +235,8 @@ json_t *mcp_discover_config(const char *cwd) {
 }
 
 /* ---------- JSON-RPC plumbing ---------- */
+
+static void handle_notification(mcp_server_t *s, const char *method, const json_t *params);
 
 static void deliver(mcp_server_t *s, json_t *msg) {
     if (!json_is_obj(msg)) {
@@ -212,8 +260,13 @@ static void deliver(mcp_server_t *s, json_t *msg) {
         json_free(msg);
         return;
     }
-    /* server -> client request (e.g. ping, roots/list): answer minimal */
     const char *method = json_get_str(msg, "method");
+    if (method && !idj) { /* server notification */
+        handle_notification(s, method, json_get(msg, "params"));
+        json_free(msg);
+        return;
+    }
+    /* server -> client request (e.g. ping, roots/list): answer minimal */
     if (method && idj) {
         json_t *resp = json_obj();
         json_set_str(resp, "jsonrpc", "2.0");
@@ -291,7 +344,7 @@ static int post_sse_cb(void *ud, const char *event, const char *data, size_t len
 static int post_hdr(void *ud, int status, const http_headers_t *h) {
     post_ctx_t *c = ud;
     c->status = status;
-    if (status == 401) {
+    if (status == 401 || status == 403) {
         const char *w = http_headers_get(h, "WWW-Authenticate");
         pthread_mutex_lock(&c->s->mu);
         free(c->s->www_auth);
@@ -345,16 +398,18 @@ static int http_send(mcp_server_t *s, const json_t *msg, char **err) {
     const char *url = s->transport == T_SSE ? s->post_url : s->url;
     http_req_t req = {.method = "POST", .url = url, .headers = &h, .body = body, .body_len = strlen(body),
                       .timeout_ms = s->timeout_ms ? s->timeout_ms + 5000 : 0, .on_headers = post_hdr, .on_data = post_data,
-                      .ud = &c, .max_redirects = 5};
+                      .ud = &c, .max_redirects = 5, .cancel = &s->cancel};
     http_resp_t r;
     int rc = http_request(&req, &r);
     if (rc == 0 && c.is_sse) sse_finish(&c.sse);
     if (rc != 0) {
         *err = xstrdup(r.error ? r.error : "request failed");
     } else if (c.status == 401) {
+        s->http_status = 401;
         *err = xasprintf("HTTP 401: the server requires OAuth authorization; run `omc mcp login %s`", s->name);
         rc = -1;
     } else if (c.status >= 400) {
+        s->http_status = c.status;
         *err = xasprintf("HTTP %d: %.300s", c.status, sb_cstr(&c.body));
         rc = -1;
     } else if (!c.is_sse && c.body.len && s->transport == T_HTTP) {
@@ -420,7 +475,7 @@ json_t *mcp_request(mcp_server_t *s, const char *method, json_t *params, int64_t
     if (rc == 0) {
         int64_t deadline = timeout_ms > 0 ? mono_ms() + timeout_ms : 0;
         /* streamable HTTP delivers the response inside the POST; stdio/SSE responses arrive on the reader */
-        while (!p->done && s->transport != T_HTTP && s->connected && !s->closing) {
+        while (!p->done && s->transport != T_HTTP && s->connected && !s->closing && !(s->ext_cancel && *s->ext_cancel)) {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
             ts.tv_nsec += 100000000;
@@ -436,6 +491,8 @@ json_t *mcp_request(mcp_server_t *s, const char *method, json_t *params, int64_t
             if (e) *err = xasprintf("%s (code %lld)", json_get_str(e, "message") ? json_get_str(e, "message") : "error",
                                     (long long)json_get_int(e, "code", 0));
             else result = json_take(p->result, "result");
+        } else if (s->ext_cancel && *s->ext_cancel) {
+            *err = xstrdup("Aborted");
         } else {
             *err = s->connected || s->transport == T_HTTP ? xasprintf("%s: %s timed out", s->name, method)
                                                            : xasprintf("%s: server disconnected", s->name);
@@ -497,9 +554,8 @@ static void *sse_reader(void *p) {
     for (size_t i = 0; i < s->headers.n; i++) http_headers_add(&h, s->headers.v[i].name, s->headers.v[i].value);
     http_headers_set(&h, "Accept", "text/event-stream");
     add_oauth(s, &h);
-    volatile sig_atomic_t cancel = 0;
     http_req_t req = {.method = "GET", .url = s->url, .headers = &h, .on_data = sse_bg_data, .ud = &c,
-                      .idle_timeout_ms = 24 * 3600 * 1000LL, .cancel = &cancel};
+                      .idle_timeout_ms = 24 * 3600 * 1000LL, .cancel = &s->cancel};
     http_resp_t r;
     http_request(&req, &r);
     http_resp_free(&r);
@@ -518,6 +574,8 @@ static mcp_server_t *server_new(const char *name, const json_t *cfg) {
     mcp_server_t *s = xcalloc(1, sizeof(*s));
     s->name = xstrdup(name);
     s->cfg = json_clone(cfg);
+    s->refs = 1;
+    s->state = S_CONNECTING;
     pthread_mutex_init(&s->mu, NULL);
     pthread_cond_init(&s->cv, NULL);
     s->child.in_fd = s->child.out_fd = s->child.err_fd = -1;
@@ -537,15 +595,28 @@ static mcp_server_t *server_new(const char *name, const json_t *cfg) {
     return s;
 }
 
-static void server_free(mcp_server_t *s) {
+/* stop the transport: pending requests fail, readers end */
+static void server_close(mcp_server_t *s) {
     s->closing = true;
-    if (s->child_started) {
-        child_close(&s->child);
-    }
+    s->cancel = 1;
+    pthread_mutex_lock(&s->mu);
+    pthread_cond_broadcast(&s->cv);
+    pthread_mutex_unlock(&s->mu);
+    if (s->child_started) child_kill(&s->child, SIGTERM);
+}
+
+static void server_free(mcp_server_t *s) {
+    server_close(s);
+    if (s->child_started) child_close(&s->child);
     if (s->reader_started) pthread_join(s->reader, NULL);
     json_free(s->cfg);
     json_free(s->tools);
     json_free(s->prompts);
+    json_free(s->resources);
+    json_free(s->templates);
+    json_free(s->caps);
+    json_free(s->info);
+    json_free(s->subscribed);
     http_headers_free(&s->headers);
     free(s->name);
     free(s->url);
@@ -560,7 +631,29 @@ static void server_free(mcp_server_t *s) {
     free(s);
 }
 
-static json_t *list_all(mcp_server_t *s, const char *method, const char *key);
+static json_t *list_all(mcp_server_t *s, const char *method, const char *key, char **err_out);
+
+/* serverSupportsResources / serverSupportsPrompts */
+static bool cap(mcp_server_t *s, const char *name) { return json_get(s->caps, name) != NULL; }
+
+static void subscribe_uris(mcp_server_t *s, const json_t *uris, bool on) {
+    json_t *u;
+    json_arr_foreach(uris, i, u) {
+        if (!json_is_str(u)) continue;
+        json_t *p = json_obj();
+        json_set_str(p, "uri", json_sv(u));
+        char *err = NULL;
+        json_t *r = mcp_request(s, on ? "resources/subscribe" : "resources/unsubscribe", p, s->timeout_ms, &err);
+        json_free(r);
+        free(err);
+    }
+}
+
+static json_t *resource_uris(const json_t *resources) {
+    json_t *uris = json_arr(), *r;
+    json_arr_foreach(resources, i, r) if (json_get_str(r, "uri")) json_push_str(uris, json_get_str(r, "uri"));
+    return uris;
+}
 
 static int server_connect(mcp_server_t *s) {
     char *err = NULL;
@@ -594,14 +687,19 @@ static int server_connect(mcp_server_t *s) {
         s->connected = true;
         if (pthread_create(&s->reader, NULL, stdio_reader, s) == 0) s->reader_started = true;
     } else if (s->transport == T_SSE) {
-        if (pthread_create(&s->reader, NULL, sse_reader, s) == 0) s->reader_started = true;
         s->connected = true;
+        if (pthread_create(&s->reader, NULL, sse_reader, s) == 0) s->reader_started = true;
         pthread_mutex_lock(&s->mu);
         int64_t deadline = mono_ms() + s->timeout_ms;
-        while (!s->post_url && s->connected && mono_ms() < deadline) {
+        while (!s->post_url && s->connected && !s->closing && mono_ms() < deadline &&
+               !(s->ext_cancel && *s->ext_cancel)) {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_sec += 1;
+            ts.tv_nsec += 200000000;
+            if (ts.tv_nsec >= 1000000000) {
+                ts.tv_sec++;
+                ts.tv_nsec -= 1000000000;
+            }
             pthread_cond_timedwait(&s->cv, &s->mu, &ts);
         }
         bool ok = s->post_url != NULL;
@@ -625,36 +723,47 @@ static int server_connect(mcp_server_t *s) {
         s->error = err ? err : xstrdup("initialize failed");
         return -1;
     }
-    if (json_get_str(init, "instructions") && json_get_bool(s->cfg, "instructions", true))
-        s->instructions = xstrdup(json_get_str(init, "instructions"));
-    bool has_prompts = json_get(json_get(init, "capabilities"), "prompts") != NULL; /* serverSupportsPrompts */
-    s->connected = true;
+    char *instr = json_get_str(init, "instructions") && json_get_bool(s->cfg, "instructions", true)
+                      ? xstrdup(json_get_str(init, "instructions"))
+                      : NULL;
+    json_t *scaps = json_get_obj(init, "capabilities") ? json_clone(json_get_obj(init, "capabilities")) : json_obj();
+    json_t *info = json_get_obj(init, "serverInfo") ? json_clone(json_get_obj(init, "serverInfo")) : json_obj();
     json_free(init);
+    pthread_mutex_lock(&s->mu);
+    s->instructions = instr;
+    s->caps = scaps;
+    s->info = info;
+    s->connected = true;
+    pthread_mutex_unlock(&s->mu);
     notify(s, "notifications/initialized");
     /* list tools (paginated) */
-    s->tools = json_arr();
-    char *cursor = NULL;
-    for (int page = 0; page < 50; page++) {
-        json_t *p = json_obj();
-        if (cursor) json_set_str(p, "cursor", cursor);
-        json_t *res = mcp_request(s, "tools/list", p, s->timeout_ms, &err);
-        free(cursor);
-        cursor = NULL;
-        if (!res) {
-            s->error = err;
-            return -1;
-        }
-        json_t *t;
-        json_arr_foreach(json_get_arr(res, "tools"), i, t) json_push(s->tools, json_clone(t));
-        if (json_get_str(res, "nextCursor")) cursor = xstrdup(json_get_str(res, "nextCursor"));
-        json_free(res);
-        if (!cursor) break;
+    json_t *tools = list_all(s, "tools/list", "tools", &err);
+    if (!tools) {
+        s->error = err ? err : xstrdup("tools/list failed");
+        return -1;
     }
-    free(cursor);
-    /* #loadServerResourcesAndPrompts: best-effort prompt catalog (MCP prompts become slash commands) */
-    if (has_prompts) s->prompts = list_all(s, "prompts/list", "prompts");
+    pthread_mutex_lock(&s->mu);
+    s->tools = tools;
+    pthread_mutex_unlock(&s->mu);
+    /* #loadServerResourcesAndPrompts: best-effort resource / prompt catalogs (MCP prompts become slash commands) */
+    if (cap(s, "resources")) {
+        json_t *res = list_all(s, "resources/list", "resources", NULL);
+        json_t *tpl = list_all(s, "resources/templates/list", "resourceTemplates", NULL);
+        pthread_mutex_lock(&s->mu);
+        s->resources = res ? res : json_arr();
+        s->templates = tpl ? tpl : json_arr();
+        pthread_mutex_unlock(&s->mu);
+    }
+    if (cap(s, "prompts")) {
+        json_t *pr = list_all(s, "prompts/list", "prompts", NULL);
+        pthread_mutex_lock(&s->mu);
+        s->prompts = pr ? pr : json_arr();
+        pthread_mutex_unlock(&s->mu);
+    }
     return 0;
 }
+
+/* ---------- manager ---------- */
 
 /* the most recently created live manager serves mcp:// reads from tools */
 static pthread_mutex_t g_default_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -662,10 +771,25 @@ static mcp_manager_t *g_default;
 
 mcp_manager_t *mcp_manager_new(void) {
     mcp_manager_t *m = xcalloc(1, sizeof(mcp_manager_t));
+    pthread_mutex_init(&m->mu, NULL);
+    pthread_cond_init(&m->cv, NULL);
     pthread_mutex_lock(&g_default_mu);
     g_default = m;
     pthread_mutex_unlock(&g_default_mu);
     return m;
+}
+
+static void bg_enter(mcp_manager_t *m) {
+    pthread_mutex_lock(&m->mu);
+    m->bg++;
+    pthread_mutex_unlock(&m->mu);
+}
+
+static void bg_leave(mcp_manager_t *m) {
+    pthread_mutex_lock(&m->mu);
+    m->bg--;
+    pthread_cond_broadcast(&m->cv);
+    pthread_mutex_unlock(&m->mu);
 }
 
 void mcp_manager_free(mcp_manager_t *m) {
@@ -673,45 +797,587 @@ void mcp_manager_free(mcp_manager_t *m) {
     pthread_mutex_lock(&g_default_mu);
     if (g_default == m) g_default = NULL;
     pthread_mutex_unlock(&g_default_mu);
-    for (size_t i = 0; i < m->servers.n; i++) server_free(m->servers.v[i]);
+    pthread_mutex_lock(&m->mu);
+    m->closing = true;
+    memset(&m->cb, 0, sizeof m->cb);
+    for (size_t i = 0; i < m->servers.n; i++) server_close(m->servers.v[i]);
+    /* background connects / refreshes notice the closing transports; give them a moment to finish */
+    int64_t deadline = mono_ms() + 3000;
+    while (m->bg > 0 && mono_ms() < deadline) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 50000000;
+        if (ts.tv_nsec >= 1000000000) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000;
+        }
+        pthread_cond_timedwait(&m->cv, &m->mu, &ts);
+    }
+    bool busy = m->bg > 0;
+    pthread_mutex_unlock(&m->mu);
+    for (size_t i = 0; i < m->servers.n; i++) srv_unref(m->servers.v[i]);
     vec_free(&m->servers);
+    if (busy) return; /* a stuck thread still references the manager: leak it rather than free under it */
+    pthread_mutex_destroy(&m->mu);
+    pthread_cond_destroy(&m->cv);
     free(m);
 }
 
-size_t mcp_server_count(mcp_manager_t *m) { return m ? m->servers.n : 0; }
+void mcp_set_callbacks(mcp_manager_t *m, const mcp_callbacks_t *cb) {
+    if (!m) return;
+    pthread_mutex_lock(&m->mu);
+    if (cb) m->cb = *cb;
+    else memset(&m->cb, 0, sizeof m->cb);
+    pthread_mutex_unlock(&m->mu);
+}
+
+size_t mcp_server_count(mcp_manager_t *m) {
+    if (!m) return 0;
+    pthread_mutex_lock(&m->mu);
+    size_t n = m->servers.n;
+    pthread_mutex_unlock(&m->mu);
+    return n;
+}
+
+/* a referenced snapshot of the servers (release with snap_free) */
+typedef VEC(mcp_server_t *) srv_vec_t;
+static void snapshot(mcp_manager_t *m, srv_vec_t *out) {
+    memset(out, 0, sizeof *out);
+    if (!m) return;
+    pthread_mutex_lock(&m->mu);
+    for (size_t i = 0; i < m->servers.n; i++) {
+        srv_ref(m->servers.v[i]);
+        vec_push(out, m->servers.v[i]);
+    }
+    pthread_mutex_unlock(&m->mu);
+}
+static void snap_free(srv_vec_t *v) {
+    for (size_t i = 0; i < v->n; i++) srv_unref(v->v[i]);
+    vec_free(v);
+}
+
+static mcp_server_t *find_ref(mcp_manager_t *m, const char *name) {
+    if (!m || !name) return NULL;
+    mcp_server_t *s = NULL;
+    pthread_mutex_lock(&m->mu);
+    for (size_t i = 0; i < m->servers.n && !s; i++)
+        if (!strcmp(m->servers.v[i]->name, name)) {
+            s = m->servers.v[i];
+            srv_ref(s);
+        }
+    pthread_mutex_unlock(&m->mu);
+    return s;
+}
+
+static sstate_t sstate(mcp_server_t *s) {
+    pthread_mutex_lock(&s->mu);
+    sstate_t st = s->state;
+    pthread_mutex_unlock(&s->mu);
+    return st;
+}
+
+static bool ready(mcp_server_t *s) { return sstate(s) == S_READY && s->connected && !s->closing; }
+
+static void fire_tools_changed(mcp_server_t *s) {
+    mcp_manager_t *m = s->mgr;
+    if (!m) return;
+    pthread_mutex_lock(&m->mu);
+    mcp_callbacks_t cb = m->cb;
+    bool live = !m->closing && !s->closing;
+    pthread_mutex_unlock(&m->mu);
+    if (live && cb.tools_changed) cb.tools_changed(cb.ud, s->name);
+}
 
 typedef struct {
     mcp_server_t *s;
     pthread_t th;
     volatile bool done;
+    bool waited; /* the caller still waits for it (no late tools_changed) */
 } conn_job_t;
 
 static void *conn_thread(void *p) {
     conn_job_t *j = p;
-    if (server_connect(j->s) != 0) LOGW("mcp %s: %s", j->s->name, j->s->error ? j->s->error : "failed");
+    mcp_server_t *s = j->s;
+    int rc = server_connect(s);
+    if (rc != 0) LOGW("mcp %s: %s", s->name, s->error ? s->error : "failed");
+    pthread_mutex_lock(&s->mu);
+    s->state = rc == 0 ? S_READY : S_FAILED;
+    pthread_mutex_unlock(&s->mu);
+    /* mcp.notifications: subscribe to the new server's resources */
+    if (rc == 0 && s->mgr) {
+        pthread_mutex_lock(&s->mgr->mu);
+        bool want = s->mgr->notifications;
+        pthread_mutex_unlock(&s->mgr->mu);
+        json_t *sub = json_get_obj(s->caps, "resources");
+        if (want && json_get_bool(sub, "subscribe", false) && s->resources) {
+            json_t *uris = resource_uris(s->resources);
+            subscribe_uris(s, uris, true);
+            pthread_mutex_lock(&s->mu);
+            json_free(s->subscribed);
+            s->subscribed = uris;
+            pthread_mutex_unlock(&s->mu);
+        }
+    }
+    mcp_manager_t *m = s->mgr;
+    bool late;
+    pthread_mutex_lock(&m->mu);
+    late = !j->waited;
     j->done = true;
+    pthread_cond_broadcast(&m->cv);
+    pthread_mutex_unlock(&m->mu);
+    if (late) {
+        /* nobody waits any more: the job is ours; announce a late connection */
+        if (rc == 0) fire_tools_changed(s);
+        srv_unref(s);
+        free(j);
+        bg_leave(m);
+    }
     return NULL;
+}
+
+/* start connecting `s` (already in the manager); waits up to timeout_ms. A job still running after the wait
+ * finishes on its own. */
+static void connect_wait(mcp_manager_t *m, mcp_server_t **srv, size_t n, int64_t timeout_ms) {
+    conn_job_t **jobs = xcalloc(n ? n : 1, sizeof(conn_job_t *));
+    for (size_t i = 0; i < n; i++) {
+        jobs[i] = xcalloc(1, sizeof(conn_job_t));
+        jobs[i]->s = srv[i];
+        jobs[i]->waited = true;
+        srv_ref(srv[i]);
+        bg_enter(m);
+        if (pthread_create(&jobs[i]->th, NULL, conn_thread, jobs[i]) != 0) {
+            pthread_mutex_lock(&srv[i]->mu);
+            srv[i]->state = S_FAILED;
+            if (!srv[i]->error) srv[i]->error = xstrdup("cannot start connection thread");
+            pthread_mutex_unlock(&srv[i]->mu);
+            jobs[i]->done = true;
+            jobs[i]->th = 0;
+        }
+    }
+    int64_t deadline = mono_ms() + timeout_ms;
+    pthread_mutex_lock(&m->mu);
+    for (;;) {
+        bool all = true;
+        for (size_t i = 0; i < n; i++) all = all && jobs[i]->done;
+        if (all || mono_ms() >= deadline) break;
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 20000000;
+        if (ts.tv_nsec >= 1000000000) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000;
+        }
+        pthread_cond_timedwait(&m->cv, &m->mu, &ts);
+    }
+    bool *finished = xcalloc(n ? n : 1, sizeof(bool));
+    for (size_t i = 0; i < n; i++) {
+        finished[i] = jobs[i]->done;
+        if (!finished[i]) jobs[i]->waited = false; /* the thread owns the job now */
+    }
+    pthread_mutex_unlock(&m->mu);
+    for (size_t i = 0; i < n; i++) {
+        if (!finished[i]) {
+            pthread_detach(jobs[i]->th);
+            continue;
+        }
+        if (jobs[i]->th) pthread_join(jobs[i]->th, NULL);
+        srv_unref(jobs[i]->s);
+        free(jobs[i]);
+        bg_leave(m);
+    }
+    free(finished);
+    free(jobs);
+}
+
+static void remove_server_locked(mcp_manager_t *m, size_t i) {
+    memmove(m->servers.v + i, m->servers.v + i + 1, (m->servers.n - i - 1) * sizeof(void *));
+    m->servers.n--;
 }
 
 void mcp_connect_all(mcp_manager_t *m, const json_t *config, int64_t timeout_ms) {
     size_t n = json_len(config);
-    if (!n) return;
-    conn_job_t *jobs = xcalloc(n, sizeof(conn_job_t));
+    if (!n || !m) return;
+    mcp_server_t **srv = xcalloc(n, sizeof(mcp_server_t *));
+    srv_vec_t old = {0};
+    pthread_mutex_lock(&m->mu);
     for (size_t i = 0; i < n; i++) {
-        jobs[i].s = server_new(config->u.obj.keys[i], config->u.obj.vals[i]);
-        vec_push(&m->servers, jobs[i].s);
-        if (pthread_create(&jobs[i].th, NULL, conn_thread, &jobs[i]) != 0) conn_thread(&jobs[i]);
+        const char *name = config->u.obj.keys[i];
+        for (size_t k = 0; k < m->servers.n; k++)
+            if (!strcmp(m->servers.v[k]->name, name)) {
+                server_close(m->servers.v[k]);
+                vec_push(&old, m->servers.v[k]);
+                remove_server_locked(m, k);
+                break;
+            }
+        srv[i] = server_new(name, config->u.obj.vals[i]);
+        srv[i]->mgr = m;
+        vec_push(&m->servers, srv[i]);
     }
-    int64_t deadline = mono_ms() + timeout_ms;
-    for (size_t i = 0; i < n; i++) {
-        while (!jobs[i].done && mono_ms() < deadline) sleep_ms(10);
-        if (jobs[i].done) pthread_join(jobs[i].th, NULL);
-        else {
-            jobs[i].s->error = xstrdup("connection timed out");
-            pthread_detach(jobs[i].th);
+    pthread_mutex_unlock(&m->mu);
+    snap_free(&old); /* outside the lock: freeing joins reader threads that may take it */
+    connect_wait(m, srv, n, timeout_ms);
+    free(srv);
+}
+
+mcp_state_t mcp_connect_server(mcp_manager_t *m, const char *name, const json_t *cfg, int64_t timeout_ms) {
+    if (!m || !name || !cfg) return MCP_DISCONNECTED;
+    json_t *one = json_obj();
+    json_set(one, name, json_clone(cfg));
+    mcp_connect_all(m, one, timeout_ms);
+    json_free(one);
+    return mcp_server_state(m, name);
+}
+
+mcp_state_t mcp_reconnect_server(mcp_manager_t *m, const char *name, int64_t timeout_ms, char **err) {
+    if (err) *err = NULL;
+    mcp_server_t *s = find_ref(m, name);
+    if (!s) {
+        if (err) *err = xasprintf("Server \"%s\" not found", name);
+        return MCP_DISCONNECTED;
+    }
+    json_t *cfg = json_clone(s->cfg);
+    srv_unref(s);
+    mcp_state_t st = mcp_connect_server(m, name, cfg, timeout_ms);
+    json_free(cfg);
+    if (st == MCP_DISCONNECTED && err) {
+        mcp_server_t *n = find_ref(m, name);
+        if (n) {
+            pthread_mutex_lock(&n->mu);
+            *err = n->error ? xstrdup(n->error) : NULL;
+            pthread_mutex_unlock(&n->mu);
+            srv_unref(n);
         }
     }
-    free(jobs);
+    return st;
+}
+
+bool mcp_disconnect_server(mcp_manager_t *m, const char *name) {
+    if (!m || !name) return false;
+    mcp_server_t *s = NULL;
+    pthread_mutex_lock(&m->mu);
+    for (size_t i = 0; i < m->servers.n; i++)
+        if (!strcmp(m->servers.v[i]->name, name)) {
+            s = m->servers.v[i];
+            remove_server_locked(m, i);
+            break;
+        }
+    pthread_mutex_unlock(&m->mu);
+    if (!s) return false;
+    server_close(s);
+    srv_unref(s);
+    return true;
+}
+
+void mcp_disconnect_all(mcp_manager_t *m) {
+    if (!m) return;
+    pthread_mutex_lock(&m->mu);
+    srv_vec_t all = {0};
+    for (size_t i = 0; i < m->servers.n; i++) vec_push(&all, m->servers.v[i]);
+    m->servers.n = 0;
+    pthread_mutex_unlock(&m->mu);
+    for (size_t i = 0; i < all.n; i++) {
+        server_close(all.v[i]);
+        srv_unref(all.v[i]);
+    }
+    vec_free(&all);
+}
+
+mcp_state_t mcp_server_state(mcp_manager_t *m, const char *name) {
+    mcp_server_t *s = find_ref(m, name);
+    if (!s) return MCP_DISCONNECTED;
+    sstate_t st = sstate(s);
+    mcp_state_t r = st == S_CONNECTING ? MCP_CONNECTING : st == S_READY && s->connected ? MCP_CONNECTED : MCP_DISCONNECTED;
+    srv_unref(s);
+    return r;
+}
+
+bool mcp_has_server(mcp_manager_t *m, const char *name) {
+    mcp_server_t *s = find_ref(m, name);
+    srv_unref(s);
+    return s != NULL;
+}
+
+json_t *mcp_server_names(mcp_manager_t *m) {
+    json_t *out = json_arr();
+    if (!m) return out;
+    pthread_mutex_lock(&m->mu);
+    for (size_t i = 0; i < m->servers.n; i++) json_push_str(out, m->servers.v[i]->name);
+    pthread_mutex_unlock(&m->mu);
+    return out;
+}
+
+json_t *mcp_connected_names(mcp_manager_t *m) {
+    json_t *out = json_arr();
+    srv_vec_t v;
+    snapshot(m, &v);
+    for (size_t i = 0; i < v.n; i++)
+        if (ready(v.v[i])) json_push_str(out, v.v[i]->name);
+    snap_free(&v);
+    return out;
+}
+
+json_t *mcp_server_config(mcp_manager_t *m, const char *name) {
+    mcp_server_t *s = find_ref(m, name);
+    json_t *c = s ? json_clone(s->cfg) : NULL;
+    srv_unref(s);
+    return c;
+}
+
+/* clone a catalog field of a connected server under its lock */
+static json_t *catalog(mcp_manager_t *m, const char *name, size_t off, bool empty_when_null) {
+    mcp_server_t *s = find_ref(m, name);
+    if (!s) return NULL;
+    json_t *out = NULL;
+    if (ready(s)) {
+        pthread_mutex_lock(&s->mu);
+        json_t *f = *(json_t **)((char *)s + off);
+        out = f ? json_clone(f) : empty_when_null ? json_arr() : NULL;
+        pthread_mutex_unlock(&s->mu);
+    }
+    srv_unref(s);
+    return out;
+}
+
+json_t *mcp_server_tools(mcp_manager_t *m, const char *name) { return catalog(m, name, offsetof(mcp_server_t, tools), true); }
+json_t *mcp_server_prompts(mcp_manager_t *m, const char *name) { return catalog(m, name, offsetof(mcp_server_t, prompts), true); }
+json_t *mcp_server_capabilities(mcp_manager_t *m, const char *name) {
+    return catalog(m, name, offsetof(mcp_server_t, caps), false);
+}
+
+json_t *mcp_server_resources(mcp_manager_t *m, const char *name) {
+    mcp_server_t *s = find_ref(m, name);
+    if (!s) return NULL;
+    json_t *out = NULL;
+    if (ready(s)) {
+        out = json_obj();
+        pthread_mutex_lock(&s->mu);
+        json_set(out, "resources", s->resources ? json_clone(s->resources) : json_arr());
+        json_set(out, "templates", s->templates ? json_clone(s->templates) : json_arr());
+        pthread_mutex_unlock(&s->mu);
+    }
+    srv_unref(s);
+    return out;
+}
+
+json_t *mcp_subscriptions(mcp_manager_t *m, const char *name) {
+    mcp_server_t *s = find_ref(m, name);
+    if (!s) return NULL;
+    pthread_mutex_lock(&s->mu);
+    json_t *out = s->subscribed && json_len(s->subscribed) ? json_clone(s->subscribed) : NULL;
+    pthread_mutex_unlock(&s->mu);
+    srv_unref(s);
+    return out;
+}
+
+bool mcp_notifications_enabled(mcp_manager_t *m) {
+    if (!m) return false;
+    pthread_mutex_lock(&m->mu);
+    bool on = m->notifications;
+    pthread_mutex_unlock(&m->mu);
+    return on;
+}
+
+typedef struct {
+    mcp_server_t *s;
+    bool on;
+    json_t *uris;
+} sub_job_t;
+
+static void *sub_thread(void *p) {
+    sub_job_t *j = p;
+    mcp_server_t *s = j->s;
+    subscribe_uris(s, j->uris, j->on);
+    pthread_mutex_lock(&s->mu);
+    json_free(s->subscribed);
+    s->subscribed = j->on ? j->uris : NULL;
+    pthread_mutex_unlock(&s->mu);
+    if (!j->on) json_free(j->uris);
+    mcp_manager_t *m = s->mgr;
+    srv_unref(s);
+    free(j);
+    bg_leave(m);
+    return NULL;
+}
+
+void mcp_set_notifications(mcp_manager_t *m, bool enabled) {
+    if (!m) return;
+    pthread_mutex_lock(&m->mu);
+    bool was = m->notifications;
+    m->notifications = enabled;
+    pthread_mutex_unlock(&m->mu);
+    if (was == enabled) return;
+    srv_vec_t v;
+    snapshot(m, &v);
+    for (size_t i = 0; i < v.n; i++) {
+        mcp_server_t *s = v.v[i];
+        if (!ready(s)) continue;
+        json_t *uris = NULL;
+        pthread_mutex_lock(&s->mu);
+        if (enabled && json_get_bool(json_get_obj(s->caps, "resources"), "subscribe", false) && s->resources)
+            uris = resource_uris(s->resources);
+        else if (!enabled && s->subscribed)
+            uris = json_clone(s->subscribed);
+        if (!enabled) {
+            json_free(s->subscribed);
+            s->subscribed = NULL;
+        }
+        pthread_mutex_unlock(&s->mu);
+        if (!uris) continue;
+        sub_job_t *j = xcalloc(1, sizeof *j);
+        j->s = s;
+        j->on = enabled;
+        j->uris = uris;
+        srv_ref(s);
+        bg_enter(m);
+        pthread_t th;
+        if (pthread_create(&th, NULL, sub_thread, j) == 0) pthread_detach(th);
+        else sub_thread(j);
+    }
+    snap_free(&v);
+}
+
+/* ---------- server notifications (#handleServerNotification) ---------- */
+
+typedef struct {
+    mcp_server_t *s;
+    char *kind; /* tools / prompts / resources */
+} refresh_job_t;
+
+static void *refresh_thread(void *p) {
+    refresh_job_t *j = p;
+    mcp_server_t *s = j->s;
+    mcp_manager_t *m = s->mgr;
+    if (!strcmp(j->kind, "tools")) {
+        json_t *t = list_all(s, "tools/list", "tools", NULL);
+        if (t) {
+            pthread_mutex_lock(&s->mu);
+            json_free(s->tools);
+            s->tools = t;
+            pthread_mutex_unlock(&s->mu);
+            fire_tools_changed(s);
+        }
+    } else if (!strcmp(j->kind, "prompts")) {
+        json_t *pr = list_all(s, "prompts/list", "prompts", NULL);
+        if (pr) {
+            pthread_mutex_lock(&s->mu);
+            json_free(s->prompts);
+            s->prompts = pr;
+            pthread_mutex_unlock(&s->mu);
+            pthread_mutex_lock(&m->mu);
+            mcp_callbacks_t cb = m->cb;
+            bool live = !m->closing && !s->closing;
+            pthread_mutex_unlock(&m->mu);
+            if (live && cb.prompts_changed) cb.prompts_changed(cb.ud, s->name);
+        }
+    } else {
+        json_t *res = list_all(s, "resources/list", "resources", NULL);
+        json_t *tpl = list_all(s, "resources/templates/list", "resourceTemplates", NULL);
+        json_t *add = NULL, *drop = NULL;
+        pthread_mutex_lock(&m->mu);
+        bool notif = m->notifications;
+        pthread_mutex_unlock(&m->mu);
+        pthread_mutex_lock(&s->mu);
+        if (res) {
+            json_free(s->resources);
+            s->resources = res;
+        }
+        if (tpl) {
+            json_free(s->templates);
+            s->templates = tpl;
+        }
+        /* keep the subscription set in step with the catalog */
+        if (res && notif && json_get_bool(json_get_obj(s->caps, "resources"), "subscribe", false)) {
+            json_t *now = resource_uris(res), *u;
+            drop = json_arr();
+            json_arr_foreach(s->subscribed, i, u) {
+                bool keep = false;
+                json_t *w;
+                json_arr_foreach(now, k, w) keep = keep || str_eq(json_sv(u), json_sv(w));
+                if (!keep) json_push(drop, json_clone(u));
+            }
+            add = json_clone(now);
+            json_free(s->subscribed);
+            s->subscribed = now;
+        }
+        pthread_mutex_unlock(&s->mu);
+        if (drop && json_len(drop)) subscribe_uris(s, drop, false);
+        if (add) subscribe_uris(s, add, true);
+        json_free(add);
+        json_free(drop);
+    }
+    free(j->kind);
+    free(j);
+    srv_unref(s);
+    bg_leave(m);
+    return NULL;
+}
+
+static void handle_notification(mcp_server_t *s, const char *method, const json_t *params) {
+    if (!s->mgr || s->closing) return;
+    const char *kind = NULL;
+    if (!strcmp(method, "notifications/tools/list_changed")) kind = "tools";
+    else if (!strcmp(method, "notifications/prompts/list_changed")) kind = "prompts";
+    else if (!strcmp(method, "notifications/resources/list_changed")) kind = "resources";
+    else if (!strcmp(method, "notifications/resources/updated")) {
+        const char *uri = json_get_str(params, "uri");
+        bool sub = false;
+        pthread_mutex_lock(&s->mu);
+        json_t *u;
+        json_arr_foreach(s->subscribed, i, u) sub = sub || str_eq(json_sv(u), uri);
+        pthread_mutex_unlock(&s->mu);
+        if (!uri || !sub) return;
+        mcp_manager_t *m = s->mgr;
+        pthread_mutex_lock(&m->mu);
+        mcp_callbacks_t cb = m->cb;
+        bool live = !m->closing;
+        pthread_mutex_unlock(&m->mu);
+        if (live && cb.resource_updated) cb.resource_updated(cb.ud, s->name, uri);
+        return;
+    }
+    if (!kind || sstate(s) != S_READY) return;
+    /* the reader thread delivers responses: refresh on a thread of its own */
+    refresh_job_t *j = xcalloc(1, sizeof *j);
+    j->s = s;
+    j->kind = xstrdup(kind);
+    srv_ref(s);
+    bg_enter(s->mgr);
+    pthread_t th;
+    if (pthread_create(&th, NULL, refresh_thread, j) == 0) pthread_detach(th);
+    else {
+        free(j->kind);
+        free(j);
+        srv_unref(s);
+        bg_leave(s->mgr);
+    }
+}
+
+/* ---------- one-off probe ---------- */
+
+int mcp_probe(const char *name, const json_t *cfg, int64_t timeout_ms, volatile int *cancel, json_t **info, json_t **tools,
+              char **err, bool *auth_required, char **www_auth) {
+    if (info) *info = NULL;
+    if (tools) *tools = NULL;
+    if (err) *err = NULL;
+    if (auth_required) *auth_required = false;
+    if (www_auth) *www_auth = NULL;
+    json_t *c = json_clone(cfg);
+    expand_tree(c);
+    mcp_server_t *s = server_new(name, c);
+    json_free(c);
+    if (timeout_ms > 0) s->timeout_ms = timeout_ms;
+    s->ext_cancel = cancel;
+    int rc = server_connect(s);
+    if (cancel && *cancel) rc = -1;
+    if (rc == 0) {
+        if (info) *info = json_clone(s->info);
+        if (tools) *tools = json_clone(s->tools);
+    } else {
+        if (err) *err = xstrdup(cancel && *cancel ? "Aborted" : s->error ? s->error : "connection failed");
+        if (auth_required) *auth_required = s->http_status == 401 || s->http_status == 403;
+        if (www_auth && s->www_auth) *www_auth = xstrdup(s->www_auth);
+    }
+    srv_unref(s);
+    return rc;
 }
 
 /* ---------- tool bridge ---------- */
@@ -766,29 +1432,38 @@ char *mcp_tool_name(const char *server, const char *tool) {
     return name;
 }
 
+/* the bridge names its server: a reconnect / reload replaces the server object, the tool stays valid */
 typedef struct {
-    mcp_server_t *server;
+    mcp_manager_t *m;
+    char *server;
     char *tool;
 } bridge_t;
 
 static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     bridge_t *b = self->ud;
     UNUSED(ctx);
-    if (!b->server->connected) {
-        tool_result_error(out, "MCP server %s is not connected%s%s", b->server->name, b->server->error ? ": " : "",
-                          b->server->error ? b->server->error : "");
+    mcp_server_t *s = find_ref(b->m, b->server);
+    if (!s || !ready(s)) {
+        const char *e = NULL;
+        if (s) pthread_mutex_lock(&s->mu);
+        e = s ? s->error : NULL;
+        tool_result_error(out, "MCP server %s is not connected%s%s", b->server, e ? ": " : "", e ? e : "");
+        if (s) pthread_mutex_unlock(&s->mu);
+        srv_unref(s);
         return 0;
     }
     json_t *p = json_obj();
     json_set_str(p, "name", b->tool);
     json_set(p, "arguments", args ? json_clone(args) : json_obj());
     char *err = NULL;
-    json_t *res = mcp_request(b->server, "tools/call", p, b->server->timeout_ms, &err);
+    json_t *res = mcp_request(s, "tools/call", p, s->timeout_ms, &err);
     if (!res) {
-        tool_result_error(out, "MCP %s/%s failed: %s", b->server->name, b->tool, err ? err : "error");
+        tool_result_error(out, "MCP %s/%s failed: %s", b->server, b->tool, err ? err : "error");
         free(err);
+        srv_unref(s);
         return 0;
     }
+    srv_unref(s);
     json_t *c;
     json_arr_foreach(json_get_arr(res, "content"), i, c) {
         const char *t = json_get_str(c, "type");
@@ -815,9 +1490,9 @@ static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *a
     if (!out->content) tool_result_text(out, "(no content)");
     out->is_error = json_get_bool(res, "isError", false);
     out->details = json_obj();
-    json_set_str(out->details, "server", b->server->name);
+    json_set_str(out->details, "server", b->server);
     json_set_str(out->details, "tool", b->tool);
-    json_set_str(out->details, "serverName", b->server->name); /* omp MCPToolDetails */
+    json_set_str(out->details, "serverName", b->server); /* omp MCPToolDetails */
     json_set_str(out->details, "mcpToolName", b->tool);
     if (out->is_error) json_set_bool(out->details, "isError", true);
     json_free(res);
@@ -826,16 +1501,23 @@ static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *a
 
 static void bridge_destroy(agent_tool_t *t) {
     bridge_t *b = t->ud;
+    free(b->server);
     free(b->tool);
     free(b);
 }
 
 int mcp_register_tools(mcp_manager_t *m, agent_t *a) {
     int count = 0;
-    for (size_t i = 0; m && i < m->servers.n; i++) {
-        mcp_server_t *s = m->servers.v[i];
+    srv_vec_t v;
+    snapshot(m, &v);
+    for (size_t i = 0; i < v.n; i++) {
+        mcp_server_t *s = v.v[i];
+        if (!ready(s)) continue;
+        pthread_mutex_lock(&s->mu);
+        json_t *tools = json_clone(s->tools);
+        pthread_mutex_unlock(&s->mu);
         json_t *t;
-        json_arr_foreach(s->tools, k, t) {
+        json_arr_foreach(tools, k, t) {
             const char *tn = json_get_str(t, "name");
             if (!tn) continue;
             char *name = mcp_tool_name(s->name, tn);
@@ -849,7 +1531,8 @@ int mcp_register_tools(mcp_manager_t *m, agent_t *a) {
             agent_tool_t *at = agent_tool_new(name, label, d, params, mcp_tool_execute);
             free(label);
             bridge_t *b = xcalloc(1, sizeof(*b));
-            b->server = s;
+            b->m = m;
+            b->server = xstrdup(s->name);
             b->tool = xstrdup(tn);
             at->ud = b;
             at->destroy = bridge_destroy;
@@ -859,58 +1542,105 @@ int mcp_register_tools(mcp_manager_t *m, agent_t *a) {
             free(name);
             count++;
         }
+        json_free(tools);
     }
+    snap_free(&v);
     return count;
+}
+
+int mcp_sync_tools(mcp_manager_t *m, agent_t *a) {
+    strvec_t names = {0};
+    pthread_mutex_lock(&a->mu);
+    for (size_t i = 0; i < a->all_tools.n; i++)
+        if (str_starts(a->all_tools.v[i]->name, "mcp__")) strvec_push(&names, a->all_tools.v[i]->name);
+    pthread_mutex_unlock(&a->mu);
+    for (size_t i = 0; i < names.n; i++) agent_remove_tool(a, names.v[i]);
+    strvec_free(&names);
+    int n = m ? mcp_register_tools(m, a) : 0;
+    pthread_mutex_lock(&a->mu);
+    for (size_t i = 0; i < a->all_tools.n; i++)
+        if (str_starts(a->all_tools.v[i]->name, "mcp__")) a->all_tools.v[i]->discoverable = true;
+    pthread_mutex_unlock(&a->mu);
+    return n;
 }
 
 char *mcp_instructions(mcp_manager_t *m) {
     sb_t b = SB_INIT;
-    for (size_t i = 0; m && i < m->servers.n; i++) {
-        mcp_server_t *s = m->servers.v[i];
-        if (!s->instructions || !*s->instructions) continue;
-        if (!b.len) sb_append(&b, "# MCP Server Instructions\n");
-        sb_appendf(&b, "\n## %s\n%s\n", s->name, s->instructions);
+    srv_vec_t v;
+    snapshot(m, &v);
+    for (size_t i = 0; i < v.n; i++) {
+        mcp_server_t *s = v.v[i];
+        if (!ready(s)) continue;
+        pthread_mutex_lock(&s->mu);
+        if (s->instructions && *s->instructions) {
+            if (!b.len) sb_append(&b, "# MCP Server Instructions\n");
+            sb_appendf(&b, "\n## %s\n%s\n", s->name, s->instructions);
+        }
+        pthread_mutex_unlock(&s->mu);
     }
+    snap_free(&v);
     return sb_detach(&b);
 }
 
+static const char *tr_name(const mcp_server_t *s) { return s->transport == T_STDIO ? "stdio" : s->transport == T_HTTP ? "http" : "sse"; }
+
 char *mcp_status(mcp_manager_t *m) {
     sb_t b = SB_INIT;
-    if (!m || !m->servers.n) return xstrdup("No MCP servers configured.");
-    for (size_t i = 0; i < m->servers.n; i++) {
-        mcp_server_t *s = m->servers.v[i];
-        const char *tr = s->transport == T_STDIO ? "stdio" : s->transport == T_HTTP ? "http" : "sse";
-        if (s->error) sb_appendf(&b, "✗ %s (%s): %s\n", s->name, tr, s->error);
-        else sb_appendf(&b, "✓ %s (%s): %zu tools\n", s->name, tr, json_len(s->tools));
+    srv_vec_t v;
+    snapshot(m, &v);
+    if (!v.n) {
+        snap_free(&v);
+        return xstrdup("No MCP servers configured.");
     }
+    for (size_t i = 0; i < v.n; i++) {
+        mcp_server_t *s = v.v[i];
+        pthread_mutex_lock(&s->mu);
+        if (s->state == S_CONNECTING) sb_appendf(&b, "◌ %s (%s): connecting\n", s->name, tr_name(s));
+        else if (s->error) sb_appendf(&b, "✗ %s (%s): %s\n", s->name, tr_name(s), s->error);
+        else sb_appendf(&b, "✓ %s (%s): %zu tools\n", s->name, tr_name(s), json_len(s->tools));
+        pthread_mutex_unlock(&s->mu);
+    }
+    snap_free(&v);
     if (b.len) sb_truncate(&b, b.len - 1);
     return sb_detach(&b);
 }
 
 json_t *mcp_connected(mcp_manager_t *m) {
     json_t *out = json_arr();
-    for (size_t i = 0; m && i < m->servers.n; i++) {
-        mcp_server_t *s = m->servers.v[i];
-        if (s->error) continue;
+    srv_vec_t v;
+    snapshot(m, &v);
+    for (size_t i = 0; i < v.n; i++) {
+        mcp_server_t *s = v.v[i];
+        if (!ready(s)) continue;
         json_t *o = json_obj();
         json_set_str(o, "name", s->name);
+        pthread_mutex_lock(&s->mu);
         json_set_int(o, "tools", (int64_t)json_len(s->tools));
+        pthread_mutex_unlock(&s->mu);
         json_push(out, o);
     }
+    snap_free(&v);
     return out;
 }
 
 json_t *mcp_failed(mcp_manager_t *m) {
     json_t *out = json_arr();
-    for (size_t i = 0; m && i < m->servers.n; i++) {
-        mcp_server_t *s = m->servers.v[i];
-        if (!s->error) continue;
-        json_t *o = json_obj();
-        json_set_str(o, "name", s->name);
-        json_set_str(o, "error", s->error);
-        json_set_str(o, "transport", s->transport == T_STDIO ? "stdio" : s->transport == T_HTTP ? "http" : "sse");
-        json_push(out, o);
+    srv_vec_t v;
+    snapshot(m, &v);
+    for (size_t i = 0; i < v.n; i++) {
+        mcp_server_t *s = v.v[i];
+        pthread_mutex_lock(&s->mu);
+        const char *e = s->state == S_CONNECTING ? "connection timed out" : s->state == S_FAILED ? (s->error ? s->error : "failed") : NULL;
+        if (e) {
+            json_t *o = json_obj();
+            json_set_str(o, "name", s->name);
+            json_set_str(o, "error", e);
+            json_set_str(o, "transport", tr_name(s));
+            json_push(out, o);
+        }
+        pthread_mutex_unlock(&s->mu);
     }
+    snap_free(&v);
     return out;
 }
 
@@ -968,18 +1698,29 @@ static bool template_match(const char *uri, const char *tpl, size_t *literal, si
     return true;
 }
 
-static json_t *list_all(mcp_server_t *s, const char *method, const char *key) {
+/* every page of a list method; NULL (and *err_out) when the first page fails */
+static json_t *list_all(mcp_server_t *s, const char *method, const char *key, char **err_out) {
     json_t *all = json_arr();
     char *cursor = NULL;
+    if (err_out) *err_out = NULL;
     for (int page = 0; page < 50; page++) {
         json_t *p = json_obj();
         if (cursor) json_set_str(p, "cursor", cursor);
         char *err = NULL;
         json_t *res = mcp_request(s, method, p, s->timeout_ms, &err);
-        free(err);
         free(cursor);
         cursor = NULL;
-        if (!res) break;
+        if (!res) {
+            if (page == 0 && err_out) {
+                *err_out = err;
+                err = NULL;
+                json_free(all);
+                all = NULL;
+            }
+            free(err);
+            break;
+        }
+        free(err);
         json_t *items = json_get(res, key), *x;
         json_arr_foreach(items, i, x) json_push(all, json_clone(x));
         const char *next = json_get_str(res, "nextCursor");
@@ -1010,10 +1751,12 @@ int mcp_read_resource(mcp_manager_t *m, const char *uri, char **text, char **ser
     size_t best_lit = 0, best_expr = 0;
     bool have_tpl = false;
     sb_t avail = SB_INIT;
-    for (size_t i = 0; i < m->servers.n; i++) {
-        mcp_server_t *s = m->servers.v[i];
-        if (!s->connected) continue;
-        json_t *res = list_all(s, "resources/list", "resources"), *x;
+    srv_vec_t v;
+    snapshot(m, &v);
+    for (size_t i = 0; i < v.n; i++) {
+        mcp_server_t *s = v.v[i];
+        if (!ready(s)) continue;
+        json_t *res = list_all(s, "resources/list", "resources", NULL), *x;
         json_arr_foreach(res, k, x) {
             const char *u = json_get_str(x, "uri");
             if (!u) continue;
@@ -1021,7 +1764,7 @@ int mcp_read_resource(mcp_manager_t *m, const char *uri, char **text, char **ser
             if (!target && !strcmp(u, uri)) target = s;
         }
         json_free(res);
-        json_t *tpls = list_all(s, "resources/templates/list", "resourceTemplates");
+        json_t *tpls = list_all(s, "resources/templates/list", "resourceTemplates", NULL);
         json_arr_foreach(tpls, k, x) {
             const char *t = json_get_str(x, "uriTemplate");
             if (!t) continue;
@@ -1039,6 +1782,7 @@ int mcp_read_resource(mcp_manager_t *m, const char *uri, char **text, char **ser
     }
     if (!target) target = tpl_target;
     if (!target) {
+        snap_free(&v);
         char *list = sb_detach(&avail);
         size_t ll = strlen(list);
         if (ll && list[ll - 1] == '\n') list[ll - 1] = 0;
@@ -1055,6 +1799,7 @@ int mcp_read_resource(mcp_manager_t *m, const char *uri, char **text, char **ser
     if (!res) {
         *err = xasprintf("MCP resource read error: %s", rerr ? rerr : "request failed");
         free(rerr);
+        snap_free(&v);
         return -1;
     }
     free(rerr);
@@ -1076,6 +1821,7 @@ int mcp_read_resource(mcp_manager_t *m, const char *uri, char **text, char **ser
     if (!parts) sb_append(&b, "(empty resource)");
     *text = sb_detach(&b);
     *server = xstrdup(target->name);
+    snap_free(&v);
     return 0;
 }
 
@@ -1083,9 +1829,12 @@ int mcp_read_resource(mcp_manager_t *m, const char *uri, char **text, char **ser
 
 json_t *mcp_prompt_commands(mcp_manager_t *m) {
     json_t *out = json_arr();
-    for (size_t i = 0; m && i < m->servers.n; i++) {
-        mcp_server_t *s = m->servers.v[i];
-        if (!s->connected) continue;
+    srv_vec_t v;
+    snapshot(m, &v);
+    for (size_t i = 0; i < v.n; i++) {
+        mcp_server_t *s = v.v[i];
+        if (!ready(s)) continue;
+        pthread_mutex_lock(&s->mu);
         json_t *p;
         json_arr_foreach(s->prompts, k, p) {
             const char *pn = json_get_str(p, "name");
@@ -1102,16 +1851,17 @@ json_t *mcp_prompt_commands(mcp_manager_t *m) {
             json_set_str(c, "prompt", pn);
             json_push(out, c);
         }
+        pthread_mutex_unlock(&s->mu);
     }
+    snap_free(&v);
     return out;
 }
 
 char *mcp_run_prompt(mcp_manager_t *m, const char *server, const char *prompt, json_t *args, char **err) {
     *err = NULL;
-    mcp_server_t *s = NULL;
-    for (size_t i = 0; m && i < m->servers.n && !s; i++)
-        if (m->servers.v[i]->connected && !strcmp(m->servers.v[i]->name, server)) s = m->servers.v[i];
-    if (!s) {
+    mcp_server_t *s = find_ref(m, server);
+    if (!s || !ready(s)) {
+        srv_unref(s);
         json_free(args);
         return NULL; /* executePrompt: no connection, no result */
     }
@@ -1120,6 +1870,7 @@ char *mcp_run_prompt(mcp_manager_t *m, const char *server, const char *prompt, j
     if (args && json_len(args)) json_set(p, "arguments", args);
     else json_free(args);
     json_t *res = mcp_request(s, "prompts/get", p, s->timeout_ms, err);
+    srv_unref(s);
     if (!res) return NULL;
     sb_t b = SB_INIT;
     int parts = 0;

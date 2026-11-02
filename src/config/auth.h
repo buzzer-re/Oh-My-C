@@ -54,6 +54,8 @@ typedef struct {
 /* Runs provider's login (oauth-code, device-code, api-key or custom hook) and stores the result under the
  * provider's storeAs id. Returns 0 on success (an empty optional api key stores nothing), -1 and *err. */
 int auth_login_hooked(const char *provider, const auth_login_hooks_t *hooks, char **err);
+/* auth_login_descriptor through TUI hooks */
+int auth_login_descriptor_hooked(const char *key, const json_t *descriptor, const auth_login_hooks_t *hooks, char **err);
 json_t *auth_oauth_providers(void); /* borrowed array of catalog auth descriptors (login providers have `login`) */
 /* provider id a login stores its credential under (descriptor `storeAs`, e.g. openai-codex-device -> openai-codex) */
 const char *auth_store_id(const char *provider);
