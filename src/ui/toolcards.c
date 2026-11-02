@@ -8,6 +8,7 @@
  *    "group": [ {id, args, result, done, isError}, ... ]   (grouped reads only)} */
 #include "ui/ui.h"
 #include "ui/tools/tc.h"
+#include "tui/termcaps.h"
 
 static msgview_t *g_read_group; /* the read group a run of reads accretes into (omp #lastReadGroup) */
 static VEC(msgview_t *) g_live; /* running cards that repaint on a timer */
@@ -218,7 +219,6 @@ msgview_t *toolcard_start(ui_t *u, const char *id, const char *name, json_t *arg
 }
 
 void toolcard_result(ui_t *u, msgview_t *v, const char *id, json_t *result, bool partial, bool is_error) {
-    UNUSED(u);
     json_t *st = state_of(v);
     json_t *grp = json_get_arr(st, "group");
     if (grp) {
@@ -226,6 +226,7 @@ void toolcard_result(ui_t *u, msgview_t *v, const char *id, json_t *result, bool
         bool all_done = true;
         json_arr_foreach(grp, i, e) {
             if (str_eq(json_get_str(e, "id"), id) && !partial) {
+                ui_read_images(u, id, json_get_arr(result, "content")); /* grouped read images draw in the assistant */
                 json_set(e, "result", result);
                 result = NULL;
                 json_set_bool(e, "done", true);
@@ -321,6 +322,7 @@ static void fill_call(tc_call_t *c, const char *name, const json_t *args, const 
     c->elapsed_ms = -1;
     c->cwd = project_dir();
     c->term_rows = term_rows();
+    c->show_images = ui_inline_images();
 }
 
 void render_tool(msgview_t *v, int width, strvec_t *out) {
@@ -375,6 +377,18 @@ void render_tool(msgview_t *v, int width, strvec_t *out) {
         if (start && tc_wants_tick(v->tool_name) && strcmp(v->tool_name, "bash")) c.spinner = spinner_now();
     }
     tc_render(&c, width, out);
+    if (c.show_images && result) { /* result images below the card: a spacer and the image per block */
+        const json_t *blk;
+        size_t k = 0;
+        json_arr_foreach(json_get_arr(result, "content"), i, blk) {
+            if (!str_eq(json_get_str(blk, "type"), "image") || !json_get_str(blk, "data") || !json_get_str(blk, "mimeType"))
+                continue;
+            char *key = xasprintf("te%s:%zu", v->tool_id ? v->tool_id : "", k++);
+            strvec_push(out, "");
+            ui_image_rows(json_get_str(blk, "data"), json_get_str(blk, "mimeType"), key, width, out);
+            free(key);
+        }
+    }
 }
 
 static size_t g_visible_blocks;

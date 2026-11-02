@@ -43,6 +43,7 @@ typedef struct {
     bool activity;      /* tool activity (cards, read groups, TTSR / todo notices, job rows): hidden by
                          * display.hideToolActivity (omp ToolActivityComponent) */
     int64_t cache_miss; /* assistant: prompt tokens reprocessed after a cache invalidation (0 = no marker) */
+    json_t *tool_images; /* assistant: {toolCallId: [image blocks]} of its grouped reads (setToolResultImages) */
     /* tool */
     char *tool_name, *tool_id;
     json_t *args;
@@ -208,6 +209,11 @@ void ui_chat_rebuild(ui_t *u); /* replay the transcript from the session tree (r
 int64_t ui_detect_cache_invalidation(const json_t *prev, const json_t *cur);
 char *ui_cache_miss_divider(int64_t tokens, int width); /* the marker's rule row (owned) */
 void ui_toggle_tool_activity(ui_t *u);                  /* app.tools.toggleVisibility */
+bool ui_inline_images(void); /* terminal.showImages and an image protocol: images draw as graphics */
+/* one inline image's rows at `width` (Image component with resolveImageOptions; text fallback in toolOutput) */
+void ui_image_rows(const char *b64, const char *mime, const char *key, int width, strvec_t *out);
+/* a grouped read's result images: shown by the assistant message that issued the call */
+void ui_read_images(ui_t *u, const char *tool_call_id, const json_t *content);
 void ui_set_tool_activity_hidden(ui_t *u, bool hidden); /* display.hideToolActivity changed */
 /* replay transcript entries (message / custom_message, one path) into `dest`, a container apart from the
  * live transcript (rewind selector replica); ends[i] receives dest's child count after entries[i] */

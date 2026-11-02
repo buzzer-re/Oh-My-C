@@ -10,6 +10,7 @@
  * persist to the global config.yml like omp; theme/status-line choices preview live. */
 #include "ui/overlays.h"
 #include "ui/ui.h"
+#include "tui/termcaps.h"
 
 #include "config/settings.h"
 #include "coding/autolearn.h"
@@ -1725,6 +1726,7 @@ static void apply_change(settings_view_t *v, const char *path) {
     }
     if (!strcmp(path, "hideThinkingBlock")) u->hide_thinking = get_bool(path, false);
     if (!strcmp(path, "display.hideToolActivity")) ui_set_tool_activity_hidden(u, get_bool(path, false));
+    if (!strcmp(path, "tui.hyperlinks")) tui_hyperlinks_apply_setting(get_str(path, "auto"));
     /* usage rows, cache-miss markers and the compacted-history collapse are baked in at build time */
     if (!strcmp(path, "display.cacheMissMarker") || !strcmp(path, "display.collapseCompacted") ||
         !strcmp(path, "display.showTokenUsage") || !strcmp(path, "display.showTurnTime"))

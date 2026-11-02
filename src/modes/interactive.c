@@ -1,6 +1,7 @@
 /* interactive mode: TUI chat (port of omp's InteractiveMode, core feature set). */
 #include "modes.h"
 #include "modes/interactive.h"
+#include "tui/termcaps.h"
 #include "ui/ui.h"
 #include "coding/migrate.h"
 #include "coding/goal.h"
@@ -3233,6 +3234,8 @@ int run_interactive_mode(app_t *a, const char *initial) {
     u.app = a;
     u.hide_thinking = settings_bool("hideThinkingBlock", false);
     u.hide_tool_activity = settings_bool("display.hideToolActivity", false);
+    tui_hyperlinks_apply_setting(settings_str("tui.hyperlinks", "auto")); /* applyHyperlinkSetting */
+    tui_set_terminal_background_light(str_eq(tui_detect_theme_name(), "light"));
     kbcfg_init_global(); /* KeybindingsManager.create(): agent-dir keybindings.yml (+ legacy .json migration) */
     pthread_mutex_init(&u.mu, NULL);
     pthread_cond_init(&u.ask_cv, NULL);

@@ -5,6 +5,7 @@
 #include <strings.h>
 
 #include "tui/symbols.h"
+#include "tui/termcaps.h"
 
 #define MD_MAX_DEPTH 8
 #define MD_MAX_COLS 32
@@ -29,41 +30,9 @@ static void ctx_extend(md_ctx_t *dst, const md_ctx_t *src, const char *a, const 
     dst->base[n + la + lb + lc] = 0;
 }
 
-static bool env_is(const char *name, const char *v) {
-    const char *e = getenv(name);
-    return e && !strcasecmp(e, v);
-}
 
-/* OSC 8 policy of upstream terminal-capabilities.ts (shouldEnableHyperlinksByDefault), reduced to the
- * environment markers: PI_NO/FORCE_HYPERLINKS, the terminal's static capability, tmux >= 3.4 forwarding,
- * GNU screen never forwarding. */
-bool tui_md_hyperlinks_supported(void) {
-    static int cached = -1;
-    if (cached >= 0) return cached;
-    bool on;
-    if (env_is("PI_NO_HYPERLINKS", "1")) on = false;
-    else if (env_is("PI_FORCE_HYPERLINKS", "1")) on = true;
-    else {
-        static const char *const PROGRAMS[] = {"kitty", "ghostty", "wezterm", "iterm.app", "iterm2", "vscode",
-                                               "alacritty", "otty", "rio", "tern", "monstar"};
-        const char *tp = getenv("TERM_PROGRAM"), *term = getenv("TERM");
-        bool known = getenv("KITTY_WINDOW_ID") || getenv("GHOSTTY_RESOURCES_DIR") || getenv("WEZTERM_PANE") ||
-                     getenv("ITERM_SESSION_ID") || getenv("VSCODE_PID") || getenv("ALACRITTY_WINDOW_ID") ||
-                     (term && strstr(term, "ghostty")) || env_is("TERM", "monstar");
-        for (size_t i = 0; !known && tp && i < ARRAY_LEN(PROGRAMS); i++) known = !strcasecmp(tp, PROGRAMS[i]);
-        on = known;
-        if (on && getenv("STY")) on = false;
-        if (on && getenv("TMUX")) {
-            const char *v = getenv("TERM_PROGRAM_VERSION");
-            int maj = 0, min = 0;
-            on = tp && !strcasecmp(tp, "tmux") && v && sscanf(v, "%d.%d", &maj, &min) >= 1 && (maj > 3 || (maj == 3 && min >= 4));
-        } else if (on && term && (!strncmp(term, "screen", 6) || !strncmp(term, "tmux", 4))) {
-            on = false;
-        }
-    }
-    cached = on;
-    return on;
-}
+/* TERMINAL.hyperlinks: the detected OSC 8 capability under the tui.hyperlinks policy (termcaps.c) */
+bool tui_md_hyperlinks_supported(void) { return tui_hyperlinks_enabled(); }
 
 void tui_md_opts_default(tui_md_opts_t *o) {
     memset(o, 0, sizeof *o);

@@ -7,6 +7,7 @@
  *   - the working row while the model runs (Loader + shimmer working message)
  *   - transcript replay from the session tree on resume/branch */
 #include "ui/ui.h"
+#include "tui/termcaps.h"
 #include "ui/signals.h"
 #include "ui/tools/tc.h"
 #include "ui/usage.h"
@@ -671,6 +672,68 @@ void ui_assistant_streamed(ui_t *u, msgview_t *v) {
 static const char *const THINKING_FRAMES[] = {"\xe2\x9c\xbb", "\xe2\x9c\xbc", "\xe2\x9d\x89", "\xe2\x9d\x8a",
                                               "\xe2\x9c\xba", "\xe2\x9c\xb9", "\xe2\x9c\xb8", "\xe2\x9c\xb6"};
 
+static const tui_component_vt MV_VT;
+
+bool ui_inline_images(void) { return settings_bool("terminal.showImages", true) && tui_image_protocol() != TUI_IMG_NONE; }
+
+void ui_image_rows(const char *b64, const char *mime, const char *key, int width, strvec_t *out) {
+    tui_image_opts_t io = tui_image_default_opts(g_ui && g_ui->tui ? tui_term(g_ui->tui)->rows : 0);
+    char sgr[48];
+    snprintf(sgr, sizeof sgr, "%s", tui_fg_seq(TH(), TUI_TC_TOOL_OUTPUT));
+    tui_image_render(b64, mime, key, NULL, width, &io, sgr, out);
+}
+
+void ui_read_images(ui_t *u, const char *id, const json_t *content) {
+    json_t *imgs = json_arr();
+    const json_t *b;
+    json_arr_foreach(content, i, b) if (str_eq(json_get_str(b, "type"), "image") && json_get_str(b, "data") &&
+                                        json_get_str(b, "mimeType")) json_push(imgs, json_clone(b));
+    if (!json_len(imgs) || !id) {
+        json_free(imgs);
+        return;
+    }
+    for (size_t i = u->chat->children.n; i-- > 0;) { /* the assistant message that issued the call */
+        msgview_t *v = (msgview_t *)u->chat->children.v[i];
+        if (v->base.vt != &MV_VT || v->kind != MV_ASSISTANT) continue;
+        json_t *blk;
+        bool found = false;
+        json_arr_foreach(json_get_arr(v->msg, "content"), j, blk) if (str_eq(json_get_str(blk, "id"), id)) found = true;
+        if (!found) continue;
+        if (!v->tool_images) v->tool_images = json_obj();
+        json_set(v->tool_images, id, imgs);
+        v->dirty = true;
+        tui_request_render(u->tui);
+        return;
+    }
+    json_free(imgs);
+}
+
+/* #renderToolImages: a spacer, then each grouped read's images (text placeholders without a protocol) */
+static void tool_image_rows(msgview_t *v, int width, strvec_t *o) {
+    if (!v->tool_images || !json_len(v->tool_images) || !settings_bool("terminal.showImages", true)) return;
+    if (g_ui && g_ui->hide_tool_activity) return; /* setToolResultImagesVisible(false) */
+    strvec_push(o, "");
+    const char *id;
+    json_t *arr;
+    json_obj_foreach(v->tool_images, oi, id, arr) {
+        const json_t *img;
+        json_arr_foreach(arr, k, img) {
+            const char *mime = json_get_str(img, "mimeType");
+            if (tui_image_protocol() != TUI_IMG_NONE) {
+                char *key = xasprintf("%s:%zu", id, k);
+                ui_image_rows(json_get_str(img, "data"), mime, key, width, o);
+                free(key);
+            } else {
+                char *t = xasprintf("[Image: %s]", mime);
+                char *c = fg(TUI_TC_TOOL_OUTPUT, t);
+                strvec_push_own(o, xasprintf(" %s", c));
+                free(c);
+                free(t);
+            }
+        }
+    }
+}
+
 static void render_assistant_body(msgview_t *v, int width, strvec_t *o) {
     json_t *content = json_get(v->msg, "content");
     bool hide = g_ui && g_ui->hide_thinking;
@@ -742,6 +805,7 @@ static void render_assistant_body(msgview_t *v, int width, strvec_t *o) {
         free(l);
     }
     json_free(shown);
+    tool_image_rows(v, width, o);
     const char *stop = json_get_str(v->msg, "stopReason");
     if (v->retry_note && !v->streaming) {
         /* resolveAssistantErrorPresentation compact-recovered: a dim note in place of the error */
@@ -1159,6 +1223,7 @@ static void mv_destroy(tui_component_t *c) {
     msgview_t *v = (msgview_t *)c;
     reveal_stop(v);
     json_free(v->msg);
+    json_free(v->tool_images);
     free(v->text);
     free(v->retry_note);
     free(v->tool_name);

@@ -1,5 +1,6 @@
 /* render.c - component model, differential renderer, overlays, event loop. */
 #include "tui/render.h"
+#include "tui/termcaps.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -429,6 +430,7 @@ static cursor_pos_t extract_cursor(strvec_t *lines, int height) {
 static void normalize_lines(strvec_t *lines, int width) {
     for (size_t i = 0; i < lines->n; i++) {
         char *s = lines->v[i];
+        if (tui_is_image_line(s)) continue; /* image rows are written verbatim (no fitting, no terminator) */
         for (char *p = s; *p; p++)
             if (*p == '\n' || *p == '\r') *p = ' ';
         if (tui_visible_width(s) > width) {
@@ -483,10 +485,20 @@ static void dbg_note(tui_t *t, const char *kind, int first, const char *old_line
 
 /* omp PAINT_BEGIN / PAINT_END: hide the cursor, open the synchronized update and disable autowrap
  * while a frame is written (a full-width row never leaves a pending wrap behind). */
+/* one-time Kitty transmits precede the placements that use them */
+static void write_transmits(tui_term_t *tm) {
+    char *tx = tui_image_take_pending();
+    if (tx) {
+        tui_term_puts(tm, tx);
+        free(tx);
+    }
+}
+
 static void paint_begin(tui_t *t) {
     tui_term_t *tm = t->term;
     if (!tm->cursor_hidden) tui_term_cursor_show(tm, false);
     tui_term_sync_begin(tm);
+    write_transmits(tm);
     tui_term_puts(tm, "\x1b[?7l");
 }
 
@@ -495,6 +507,18 @@ static void paint_begin(tui_t *t) {
  * never shows blank on terminals without synchronized output. A row with non-ASCII text is erased
  * first (the width model can over-count it and leave stale cells). */
 static void write_row(tui_term_t *tm, const char *line, int width) {
+    if (tui_is_image_line(line)) {
+        /* an image row: erase it, then for a direct placement painting rows above (SIXEL / iTerm2 have no
+         * delete command and composite over old pixels) erase those rows too before the image is drawn */
+        tui_term_puts(tm, "\x1b[2K");
+        int lift = tui_image_lift(line);
+        if (lift > 0 && tui_image_protocol() != TUI_IMG_KITTY) {
+            tui_term_printf(tm, "\x1b[%dA", lift);
+            for (int i = 0; i < lift; i++) tui_term_puts(tm, "\x1b[2K\x1b[B");
+        }
+        tui_term_puts(tm, line);
+        return;
+    }
     for (const unsigned char *p = (const unsigned char *)line; *p; p++) {
         if (*p >= 0x80) {
             tui_term_puts(tm, "\x1b[0m\x1b[K");
@@ -578,10 +602,16 @@ static void write_from_top(tui_t *t, const strvec_t *lines, int c, int r0, int w
  * rebuild): omp's destructive reset (`clearScrollback`). */
 static void full_render(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int width, int height, bool clear) {
     tui_term_t *tm = t->term;
+    /* a destructive reset purges every Kitty image (text erases leave placements painted); the live ones
+     * are transmitted again after the clear */
+    char *purge = clear ? tui_image_reset_display() : NULL;
+    if (purge) tui_term_puts(tm, purge);
+    free(purge);
     paint_begin(t);
     int r0;
     if (clear) {
         tui_term_clear_screen(tm, true);
+        write_transmits(tm);
         t->full_count++;
         r0 = 0;
     } else {
@@ -884,7 +914,18 @@ static void run_timers(tui_t *t, int64_t now) {
 
 void tui_dispatch_key(tui_t *t, const tui_key_t *k) {
     if (k->kind == TUI_KEY_RESPONSE) {
-        if (k->text) tui_term_handle_response(t->term, k->text, k->text_len);
+        bool changed = false;
+        if (k->text && !tui_termcaps_response(k->text, k->text_len, &changed))
+            tui_term_handle_response(t->term, k->text, k->text_len);
+        if (changed) { /* a new image protocol or cell size: images re-render (onSixelSupport / cell size) */
+            if (tui_image_protocol() == TUI_IMG_SIXEL) {
+                char *pr = tui_termcaps_probes();
+                tui_term_puts(t->term, pr);
+                free(pr);
+            }
+            tui_component_invalidate(&t->root->base);
+            tui_request_full_render(t);
+        }
         return;
     }
     if (t->key_hook && t->key_hook(t, k, t->key_hook_ud)) {
@@ -977,6 +1018,12 @@ void tui_start(tui_t *t) {
     if (!t->have_frame) {
         int row = query_cursor_row(t);
         t->start_screen_row = row > 0 ? MIN(row - 1, t->term->rows - 1) : 0;
+    }
+    if (t->term->is_tty) { /* querySixelSupport (XTSMGRAPHICS) / queryCellSize (CSI 16 t) */
+        char *pr = tui_termcaps_probes();
+        tui_term_puts(t->term, pr);
+        tui_term_flush(t->term);
+        free(pr);
     }
     t->started = true;
     tui_request_render(t);

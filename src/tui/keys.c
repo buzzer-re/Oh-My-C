@@ -305,6 +305,12 @@ static void handle_csi(const char *seq, size_t len, tui_key_t *k) {
         key_set_text(k, seq, len);
         return;
     }
+    if (fin == 't' && pn > 3 && ((p[0] == '6' && p[1] == ';') || (p[0] == '4' && p[1] == '8' && p[2] == ';'))) {
+        /* CSI 6 ; h ; w t (cell size) / CSI 48 ; rows ; cols ; ypx ; xpx t (DEC 2048 in-band resize report) */
+        mk(k, TUI_KEY_RESPONSE, 0, 0);
+        key_set_text(k, seq, len);
+        return;
+    }
     /* intermediate bytes (e.g. "$y" replies) -> response */
     for (size_t i = 0; i < pn; i++) {
         unsigned char c = (unsigned char)p[i];

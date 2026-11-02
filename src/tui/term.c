@@ -193,6 +193,11 @@ void tui_term_stop(tui_term_t *t) {
     }
     tui_term_bracketed_paste(t, false);
     if (t->focus_events) tui_term_focus_events(t, false);
+    extern bool g_inband;
+    if (g_inband) {
+        tui_term_puts(t, "\x1b[?2048l");
+        g_inband = false;
+    }
     tui_term_puts(t, "\x1b[0m");
     tui_term_cursor_show(t, true);
     tui_term_flush(t);

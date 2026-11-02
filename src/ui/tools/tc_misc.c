@@ -1,6 +1,8 @@
 /* tc_misc.c - todo card, the generic fallback card and the renderer dispatch (port of omp
  * tools/todo.ts, tools/default-renderer.ts and the registry in tools/index.ts). */
 #include "ui/tools/tc.h"
+#include "img/img.h"
+#include "tui/termcaps.h"
 
 #include <ctype.h>
 
@@ -295,6 +297,27 @@ void tc_generic(const tc_call_t *c, int width, strvec_t *out) {
     }
     if (c->has_result) {
         char *raw = tc_text_of(c->content);
+        if (!c->show_images) { /* #getTextOutput: `[Image: [mime] WxH]` per image the terminal does not draw */
+            const json_t *blk;
+            json_arr_foreach(c->content, i, blk) {
+                if (!str_eq(json_get_str(blk, "type"), "image")) continue;
+                const char *mime = json_get_str(blk, "mimeType") ? json_get_str(blk, "mimeType") : "";
+                const char *data = json_get_str(blk, "data");
+                int w = 0, h = 0;
+                if (data) {
+                    size_t n = 0;
+                    uint8_t *bytes = base64_decode(data, strlen(data), &n);
+                    img_meta_t m;
+                    if (bytes && img_sniff(bytes, n, &m) && img_fmt_from_mime(mime) == m.fmt) w = m.w, h = m.h;
+                    free(bytes);
+                }
+                char *ind = tui_image_fallback(mime, w, h, NULL);
+                char *joined = *raw ? xasprintf("%s\n%s", raw, ind) : xstrdup(ind);
+                free(raw);
+                free(ind);
+                raw = joined;
+            }
+        }
         char *txt = tc_trim_end(raw);
         if (!*txt) {
             strvec_push_own(&body, tc_fg(TUI_TC_DIM, "(no output)"));

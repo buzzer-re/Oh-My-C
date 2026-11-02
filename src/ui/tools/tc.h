@@ -31,6 +31,7 @@ typedef struct {
     int64_t now_ms;       /* wall clock for live elapsed facts (0 = now) */
     /* registered tool label lookup (xd:// device writes delegate to the mounted tool's card); may be NULL */
     const char *(*label_of)(const char *tool);
+    bool show_images;     /* result images draw as terminal graphics below the card (no text indicator) */
 } tc_call_t;
 
 /* Render one tool call (any tool; falls back to the generic card). Appends lines to `out`. */
