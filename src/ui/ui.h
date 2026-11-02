@@ -121,6 +121,33 @@ char *ui_chip_label(int n);
 /* `[Image #N, WxH]` markers as chips; `reset` (may be NULL: plain labels) resumes the surrounding color */
 char *ui_collapse_image_markers(const char *text, const char *reset);
 
+/* input.c - single-line text input (components/input.ts) */
+typedef struct {
+    sb_t v;
+    size_t cur; /* byte offset */
+} ui_input_t;
+/* editing keys; true when handled (Enter / Escape / Up / Down are left to the caller) */
+bool ui_input_key(ui_input_t *in, const tui_key_t *k);
+void ui_input_insert(ui_input_t *in, const char *t); /* at the cursor; newlines/tabs become spaces */
+void ui_input_set(ui_input_t *in, const char *t);
+const char *ui_input_value(const ui_input_t *in);
+void ui_input_free(ui_input_t *in);
+/* `prompt` + the value windowed around the cursor cell, padded to width; owned */
+char *ui_input_render(const ui_input_t *in, const char *prompt, int width, bool focused, bool hw_cursor);
+
+/* histsearch.c - Ctrl+R prompt history search (overlays/history-search.ts) over prompt-history.jsonl */
+void ui_history_search(ui_t *u);
+typedef struct {
+    char *prompt;
+    int64_t created_at; /* unix seconds of the latest submission */
+    char *cwd;
+} ui_hist_entry_t;
+typedef VEC(ui_hist_entry_t) ui_hist_list_t;
+/* HistoryStorage over the jsonl lines: unique normalized prompts, latest submission first. `query` NULL/blank:
+ * getRecent; else search (every token a case-insensitive substring). At most `limit` entries. */
+void ui_hist_query(const char *jsonl, const char *query, int limit, ui_hist_list_t *out);
+void ui_hist_list_free(ui_hist_list_t *l);
+
 /* theme helpers */
 const tui_theme_t *TH(void);
 char *fg(tui_tc_t slot, const char *s); /* owned */
@@ -201,6 +228,10 @@ char *ui_double_tap_hint(const char *key);
 /* $VISUAL / $EDITOR on a temp file with the TUI stopped (interactive.c); owned result, NULL when it failed or
  * exited non-zero; *no_editor when none is configured */
 char *ui_external_edit(ui_t *u, const char *text, const char *ext, bool *no_editor);
+char *ui_editor_command(void); /* getEditorCommand: trimmed $VISUAL, else $EDITOR; owned or NULL */
+/* editDialogExternally: openInEditor(text, ".md") with the trailing newline trimmed; NULL when no editor is
+ * configured or it exited non-zero (no warning) */
+char *ui_dialog_external_edit(ui_t *u, const char *text);
 int64_t ui_context_used(app_t *a);         /* the context gauge's used tokens (anchored on provider usage) */
 
 /* btw.c - /btw side questions: inline answer panel, BTW history, follow-ups, copy, branch */

@@ -1013,6 +1013,15 @@ static bool prompt_key(ask_view_t *v, const tui_key_t *k) {
         close_prompt(v, NULL);
         return true;
     }
+    if (tui_kb(k, "app.editor.external")) { /* HookEditorComponent #openExternalEditor */
+        char *cur = tui_editor_get_expanded_text(v->ped);
+        char *r = ui_dialog_external_edit(v->u, cur);
+        if (r && v->pkind) tui_editor_set_text(v->ped, r);
+        free(r);
+        free(cur);
+        request(v);
+        return true;
+    }
     tui_editor_handle_key(v->ped, k);
     request(v);
     return true;

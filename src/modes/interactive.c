@@ -690,24 +690,48 @@ static void plan_status(ui_t *u, const char *text) { add_notice(u, "info", text)
 
 /* $VISUAL / $EDITOR on a temp file with the TUI stopped (utils/external-editor.ts openInEditor); owned
  * result, NULL when unchanged / failed */
+/* getEditorCommand: $VISUAL, else $EDITOR (trimmed); owned, NULL when neither is set */
+char *ui_editor_command(void) {
+    static const char *const names[] = {"VISUAL", "EDITOR"};
+    for (size_t i = 0; i < ARRAY_LEN(names); i++) {
+        const char *v = getenv(names[i]);
+        if (!v) continue;
+        char *t = str_trim(v);
+        if (*t) return t;
+        free(t);
+    }
+    return NULL;
+}
+
 char *ui_external_edit(ui_t *u, const char *text, const char *ext, bool *no_editor) {
-    const char *ed = getenv("VISUAL");
-    if (!ed || !*ed) ed = getenv("EDITOR");
-    *no_editor = !ed || !*ed;
-    if (*no_editor) return NULL;
-    char tmpl[] = "/tmp/omc-edit-XXXXXX";
-    int fd = mkstemp(tmpl);
-    if (fd < 0) return NULL;
+    char *ed = ui_editor_command();
+    *no_editor = !ed;
+    if (!ed) return NULL;
+    if (!ext) ext = ".md";
+    /* os.tmpdir()/omp-editor-<snowflake><ext>: mkstemps keeps the extension and makes the name unique */
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    char *path = xasprintf("%s%somc-editor-XXXXXXXXXX%s", tmp, str_ends(tmp, "/") ? "" : "/", ext);
+    int fd = mkstemps(path, (int)strlen(ext));
+    if (fd < 0) {
+        free(path);
+        free(ed);
+        return NULL;
+    }
+    size_t tl = strlen(text);
+    for (size_t off = 0; off < tl;) {
+        ssize_t w = write(fd, text + off, tl - off);
+        if (w <= 0) break;
+        off += (size_t)w;
+    }
     close(fd);
-    char *path = xasprintf("%s%s", tmpl, ext ? ext : ".md");
-    rename(tmpl, path);
-    fs_write(path, text, strlen(text));
     /* a fullscreen page (plan review) gives the alternate screen back to the editor and takes it again
      * after: only that page is repainted, the parked transcript is untouched */
     bool page = tui_alt_screen_active(u->tui);
     if (page) tui_alt_screen(u->tui, false);
     tui_term_stop(tui_term(u->tui));
     tui_term_set_loop_active(false);
+    /* resolveEditorSpawnCommand: sh -c '<editor> "$1"' sh <file>, stdio inherited from the pane */
     char *cmd = xasprintf("%s \"$1\"", ed);
     const char *argv[] = {"/bin/sh", "-c", cmd, "sh", path, NULL};
     pid_t pid = fork();
@@ -716,7 +740,9 @@ char *ui_external_edit(ui_t *u, const char *text, const char *ext, bool *no_edit
         execv("/bin/sh", (char *const *)argv);
         _exit(127);
     }
-    if (pid > 0) waitpid(pid, &status, 0);
+    if (pid > 0)
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        }
     tui_term_set_loop_active(true);
     tui_term_start(tui_term(u->tui));
     tui_term_query_size(tui_term(u->tui));
@@ -730,7 +756,34 @@ char *ui_external_edit(ui_t *u, const char *text, const char *ext, bool *no_edit
     unlink(path);
     free(path);
     free(cmd);
+    free(ed);
     return out;
+}
+
+/* openInEditor with the default trimTrailingNewline: one trailing "\n" dropped */
+static char *external_edit_trimmed(ui_t *u, const char *text, const char *ext, bool *no_editor) {
+    char *r = ui_external_edit(u, text, ext, no_editor);
+    size_t n = r ? strlen(r) : 0;
+    if (n && r[n - 1] == '\n') r[n - 1] = 0;
+    return r;
+}
+
+/* app.editor.external (InputController.openExternalEditor): the composer's expanded text in $VISUAL/$EDITOR */
+static void open_external_editor(ui_t *u) {
+    char *cur = tui_editor_get_expanded_text(u->editor);
+    bool none = false;
+    char *r = external_edit_trimmed(u, cur, ".omp.md", &none);
+    if (none) add_notice(u, "warning", "No editor configured. Set $VISUAL or $EDITOR environment variable.");
+    else if (r) tui_editor_set_text(u->editor, r);
+    free(r);
+    free(cur);
+    tui_request_render(u->tui);
+}
+
+/* editDialogExternally (ask "Other" / note prompts): silent when no editor is configured */
+char *ui_dialog_external_edit(ui_t *u, const char *text) {
+    bool none = false;
+    return external_edit_trimmed(u, text, ".md", &none);
 }
 
 static void plan_review_free_state(void) {
@@ -2140,6 +2193,14 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
     /* global listeners: they act on the transcript, whatever holds focus */
     if (tui_kb(k, "app.thinking.toggle")) {
         toggle_thinking_blocks(u);
+        return true;
+    }
+    if (tui_kb(k, "app.history.search")) {
+        ui_history_search(u);
+        return true;
+    }
+    if (tui_kb(k, "app.editor.external")) {
+        open_external_editor(u);
         return true;
     }
     if (tui_kb(k, "app.display.reset")) { /* resetDisplayAfterAppearanceRefresh */
