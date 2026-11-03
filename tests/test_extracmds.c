@@ -4,10 +4,12 @@
  * pause-screen.ts renderPauseScreen layouts), /debug (system info, terminal state, the tar.gz report bundle,
  * env sanitizing, the artifact cache), the startup release notes (resolveStartupChangelogForDisplay,
  * formatStartupChangelogSummary), /record + `omc play` (row normalization, redaction, the paint encoder,
- * recording parse). */
+ * recording parse), TTSR rule frontmatter as /omfg writes it (condition and scope lists, question rules). */
 #include "coding/changelog.h"
 #include "coding/debugtools.h"
 #include "coding/record.h"
+#include "coding/discovery.h"
+#include "coding/ttsr.h"
 #include "core/fs.h"
 #include "coding/slashcmd.h"
 #include "tui/ansi.h"
@@ -395,8 +397,49 @@ static void test_record(void) {
     free(path);
 }
 
+static bool ttsr_text(ttsr_t *t, const char *text) {
+    ttsr_reset(t);
+    ai_event_t ev = {.type = AI_EV_TEXT_DELTA, .content_index = 0, .delta = text, .delta_len = strlen(text)};
+    return ttsr_on_event(t, &ev);
+}
+
+static void test_ttsr_frontmatter(void) {
+    const char *tmp = getenv("TMPDIR");
+    char *base = xasprintf("%s/omc-wp28b-ttsr-XXXXXX", tmp ? tmp : "/tmp");
+    CHECK(mkdtemp(base) != NULL);
+    char *rules = path_join(base, ".omp/rules");
+    fs_mkdir_p(rules, 0755);
+    char *a = path_join(rules, "list-cond.md"), *b = path_join(rules, "judged.md"), *c = path_join(rules, "tool-only.md");
+    const char *ra = "---\nname: list-cond\ndescription: \"x\"\ncondition: [\"foo\\\\d\", \"barbaz\"]\nscope: [\"text\"]\n---\n\nbody\n";
+    const char *rb = "---\nname: judged\ndescription: \"x\"\ncondition: \"qqq\"\nquestion: \"Is it bad?\"\nscope: \"text\"\n---\n\nbody\n";
+    const char *rc = "---\nname: tool-only\ndescription: \"x\"\ncondition: \"zzz\"\nscope: [\"tool:edit(*.rs)\", \"tool:write(*.rs)\"]\n---\n\nbody\n";
+    fs_write(a, ra, strlen(ra));
+    fs_write(b, rb, strlen(rb));
+    fs_write(c, rc, strlen(rc));
+    discovery_t d;
+    memset(&d, 0, sizeof d);
+    discover_all(base, &d, true, true, false);
+    const rule_t *la = discovery_find_rule(&d, "list-cond"), *lc = discovery_find_rule(&d, "tool-only");
+    CHECK(la && str_eq(la->ttsr, "(?:foo\\d)|(?:barbaz)") && str_eq(la->scope, "text"));
+    CHECK(lc && str_eq(lc->scope, "tool:edit(*.rs),tool:write(*.rs)"));
+    ttsr_t *t = ttsr_new(&d);
+    CHECK(ttsr_rule_count(t) >= 2); /* list-cond and tool-only (plus omc's builtin rules); never the judged one */
+    CHECK(ttsr_text(t, "say foo7 now"));
+    json_t *names = NULL;
+    free(ttsr_take_interrupt(t, &names));
+    json_free(names);
+    CHECK(!ttsr_text(t, "qqq")); /* a question rule's condition is only a prefilter */
+    CHECK(!ttsr_text(t, "zzz in prose")); /* scope list: tool calls on .rs files only */
+    ttsr_free(t);
+    discovery_free(&d);
+    fs_rm_rf(base);
+    free(a), free(b), free(c), free(rules), free(base);
+}
+
 int main(void) {
+    setenv("OMC_CODING_AGENT_DIR", "/nonexistent-omc-wp28b-agent", 1); /* discovery never reads the real agent dir */
     test_views();
+    test_ttsr_frontmatter();
     test_record();
     test_startup_changelog();
     test_pause();
