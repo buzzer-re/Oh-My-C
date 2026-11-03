@@ -412,8 +412,10 @@ static void fill_request_opts(app_t *a, ai_stream_opts_t *o) {
     o->cache_retention = cr;
     json_t *tb = settings_get("thinkingBudgets");
     if (json_is_obj(tb)) o->thinking_budgets = tb;
-    double temp = settings_num("temperature", NAN);
-    if (!isnan(temp)) o->temperature = temp;
+    /* cfgSampling: a negative sampling setting means the provider default */
+    double temp = settings_num("temperature", -1), top_p = settings_num("topP", -1);
+    if (temp >= 0) o->temperature = temp;
+    if (top_p >= 0) o->top_p = top_p;
     o->text_verbosity = settings_str("textVerbosity", NULL);
     app_tier_request_opts(a, o);
     o->slow_hooks = &a->slow_hooks;

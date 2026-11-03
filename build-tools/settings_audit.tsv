@@ -1,1 +1,219 @@
-# settings_audit.tsv: key<TAB>status<TAB>note
+# WP-26 settings audit annotations (build-tools/settings_audit.py, tests/test_settings_audit.c).
+# key or `prefix.*` <TAB> status <TAB> note. First match wins, so exact keys go before globs.
+#   wired    read indirectly (no string literal of the key in src/), the note names the reader
+#   partial  read, but only part of omp's behaviour exists (the note says what differs)
+#   inert    nothing reads it (the note says what is missing); the test fails if one becomes read
+#            (move it to wired/partial) or if an unread key is not listed here
+#   oos      ⛔ needs the JS runtime, an omp-hosted service, a browser, on-device ML/audio or a
+#            platform API omc does not target
+#   omc-only a key omc reads that omp's registry does not have (allowed by the test, listed in the report)
+
+# ---------- read indirectly ----------
+magicKeywords.workflow	partial	src/coding/keywords.c builds magicKeywords.<id>; the workflowz notice is withheld (it teaches eval agent()/workpool(), which omc lacks)
+magicKeywords.*	wired	src/coding/keywords.c reads magicKeywords.<id> (snprintf)
+thinkingBudgets.*	wired	src/coding/app.c passes settings_get("thinkingBudgets") to the providers
+
+# ---------- read, partially implemented ----------
+github.cache.enabled	partial	omc keeps no issue/PR view cache: the switch only picks the freshness note
+read.summarize.enabled	partial	omc's summarizer is a line/indent heuristic, not omp's AST summarizer
+memory.backend	partial	`local` works; `mnemopi`/`hindsight` are ⛔ and behave as off
+compaction.methodOrder	partial	snapcompact entries are passed over (not implemented)
+autoResume	partial	src/cli/cli.c resumes like --continue; no "Auto resume skipped" fallback when the saved model cannot be restored
+power.sleepPrevention	partial	src/coding/power.c: systemd-inhibit / caffeinate; no desktop ScreenSaver inhibit
+topK	inert	request options have no top_k field yet (temperature/topP are sent)
+extensions	oos	JS/TS extension module paths (JS runtime)
+
+# ---------- ⛔ out of scope ----------
+mnemopi.*	oos	local Mnemopi memory needs an embedding store / on-device embedding model
+hindsight.*	oos	Hindsight memory backend service
+sharpshooter.*	oos	Sharpshooter memory extraction backend (part of the ⛔ memory backends)
+collab.*	oos	omp-hosted relay (my.omp.sh)
+share.*	oos	omp-hosted share service (my.omp.sh/s)
+stream.*	oos	omp-hosted live stream server (live.omp.sh)
+browser.*	oos	browser engine (Puppeteer/CDP, cmux, Tern)
+computer.*	oos	native desktop automation
+ida.*	oos	IDA Pro / idalib
+stt.*	oos	audio capture + on-device speech-to-text
+speech.*	oos	audio playback + Kokoro TTS
+tts.*	oos	on-device Kokoro TTS
+live.voice	oos	realtime voice audio
+providers.tinyModelDevice	oos	local ONNX inference
+providers.tinyModelDtype	oos	local ONNX inference
+extensionHandlers.*	oos	JS extension runtime
+extensionRenderers.*	oos	JS extension runtime
+eval.js	oos	Bun JS eval kernel
+eval.autoProvision	oos	provisions the managed JavaScript eval package environment
+statusLine.showHookStatus	oos	hook statuses come from JS hooks/extensions
+startup.checkUpdate	oos	omp's release feed / npm; hidden from /settings (src/ui/settings.c)
+update.channel	oos	omp's release feed / npm; hidden from /settings (src/ui/settings.c)
+skills.registryUrl	oos	omp-hosted skills registry (skills.omp.sh)
+dev.autoqaPush.*	oos	omp-hosted Auto QA collector (qa.omp.sh)
+spelling.typoDetection	oos	macOS dictionaries
+spelling.autocorrect	oos	macOS dictionaries
+expandThinkingBlocks	oos	omp applies it only to Tern's native view; its terminal renderer ignores it
+tui.textSizing	oos	Kitty OSC 66 text sizing; omp only enables it on Kitty with native support detection omc lacks
+speechgen.enabled	oos	tts tool: on-device Kokoro (or xAI voice) synthesis
+
+# ---------- inert: Appearance / TUI ----------
+images.blockImages	inert	needs omp's convertToLlm image-to-text replacement (also missing for text-only models)
+tui.maxInlineImages	inert	no inline-image budget (older images are never demoted to text)
+tui.resizeScrollback	inert	resize always rebuilds
+tui.completeScrollback	inert	not implemented
+terminal.showProgress	inert	no OSC 9;4 progress
+tui.renderMermaid	inert	no Mermaid rendering (WP-29 remainder; not advertised)
+tui.renderSvg	inert	no SVG rendering (WP-29 remainder; not advertised)
+tui.autoGraph	inert	no table charts (WP-29 remainder)
+tui.reactions	inert	no agent reactions (WP-29 remainder; not advertised)
+tui.codexResetFireworks	inert	no Codex reset overlay
+display.shimmer	inert	always the classic shimmer
+display.advisorCollapsedLines	inert	advisor card preview not capped
+tui.imeSafeCursor	inert	no separate IME border row
+tui.vimMode	inert	no vim mode in the editor
+tui.vimModeDisplay	inert	no vim mode in the editor
+task.showResolvedModelBadge	inert	no resolved-model badge in the task widget
+async.widgets	inert	no live job widgets (WP-22b remainder)
+emojiAutocomplete	inert	no :shortcode: emoji completion
+spelling.autocomplete	inert	no word-prediction hints
+composer.predictions	inert	no next-message prediction
+startup.showSplash	inert	no animated splash
+startup.changelogMode	inert	no startup changelog
+marketplace.autoUpdate	inert	no plugin marketplace update check
+session.worktreeScope	inert	resume picker does not merge sibling worktrees
+
+# ---------- inert: Model / providers ----------
+omitThinking	inert	no hideThinkingSummary request option
+inlineToolDescriptors	inert	tool descriptors always in the tool schemas
+includeWorkspaceTree	inert	no workspace tree in the system prompt
+minP	inert	request options have no min_p field
+presencePenalty	inert	request options have no presence_penalty field
+repetitionPenalty	inert	request options have no repetition_penalty field
+tier.advisor	inert	advisor requests use the default tier
+retry.waitForUsageReset	inert	no wait for usage-limit reset
+retry.usageAwareFallback	inert	no coding-plan quota-aware fallback
+retry.usageReservePct	inert	no coding-plan quota-aware fallback
+retry.usageReservePolicy	inert	no coding-plan quota-aware fallback
+providers.anthropic.serverSideFallback	inert	no classifier-block retry on Opus
+providers.ollama-cloud.maxConcurrency	inert	no per-provider subagent concurrency cap
+providers.antigravityEndpoint	inert	fixed endpoint routing
+providers.kimiApiFormat	inert	fixed API format
+providers.openaiWebsockets	inert	Codex websocket policy fixed
+providers.openaiLiveSteering	inert	no live steering over the Codex websocket
+providers.muse-code.storeResponses	inert	not implemented
+providers.openai-codex.daybreak	inert	no Daybreak access request
+providers.openrouterVariant	inert	no routing-variant suffix
+providers.fetch	inert	single reader backend
+codexResets.*	inert	no saved Codex reset redemption
+claudeResets.*	inert	no Claude reset redemption
+advisor.syncBacklog	inert	main agent never waits for the advisor backlog
+advisor.evictStaleResults	inert	advisor context keeps old read/grep/glob output
+auth.broker.*	inert	no auth broker client
+auth.accountPolicies	inert	no per-account policies
+judgment.attemptTimeoutMs	inert	omp registers it but no TypeScript reads it either
+prewalk.auto	inert	no automatic prewalk judging
+prewalk.autoTarget	inert	no automatic prewalk judging
+images.describeForTextModels	inert	images are not described for text-only models
+images.questionTimeoutMs	inert	read ?q= image questions use the default timeout
+images.urls.*	inert	no image URL publishing backends
+secrets.enabled	inert	no secret obfuscation
+telemetry.otlpExportEnabled	inert	no OTLP export
+
+# ---------- inert: Interaction / Context ----------
+todo.eager	inert	no eager todo nudge
+tasks.todoClearDelay	inert	the todo widget never auto-clears
+title.refreshOnReplan	inert	no title refresh on replan
+title.refreshAfterPrompts	inert	no periodic title check
+contextPromotion.enabled	inert	no context promotion on overflow
+compaction.experimentalContextManagement	inert	not implemented
+compaction.remoteStreamingV2Enabled	inert	remote compaction is not streamed
+compaction.v2RetainedMessageBudget	inert	remote compaction is not streamed
+compaction.idleEnabled	inert	no idle compaction
+compaction.idleThresholdTokens	inert	no idle compaction
+compaction.idleTimeoutSeconds	inert	no idle compaction
+snapcompact.*	inert	snapcompact not implemented
+tools.format	inert	native tool calling only (no in-band/owned dialect)
+tools.abortOnFabricatedResult	inert	only applies to in-band tool calls (tools.format), which omc lacks
+ttsr.judge	inert	no judge-backed `question` rules
+ttsr.contextMode	inert	partial output is always discarded
+ttsr.repeatMode	inert	each rule fires once per session
+ttsr.repeatGap	inert	each rule fires once per session
+
+# ---------- inert: Files / Shell / Tools ----------
+edit.modelVariants	inert	no per-model edit variants
+edit.streamingAbort	inert	no streaming patch-preview abort
+edit.recoverInlineEdits	inert	edit payloads written as text are not recovered
+edit.blockAutoGenerated	inert	no generated-file guard (port of pi-edit path_policy.rs)
+edit.blackbox.enabled	inert	not implemented
+edit.autoRepair.enabled	inert	not implemented
+read.renderMarkdown	inert	read results never rendered as Markdown
+read.toolResultPreview	inert	read results shown as summary rows
+read.summarize.prose	inert	no Markdown/plain-text summaries
+read.summarize.minBodyLines	inert	the line-heuristic summarizer has no body threshold
+read.summarize.minCommentLines	inert	the line-heuristic summarizer does not collapse comments
+read.summarize.unfoldUntil	inert	no BFS unfolding
+read.summarize.unfoldLimit	inert	no BFS unfolding
+lsp.lazy	inert	servers always start on first use
+lsp.shared	inert	no cross-session server broker
+lsp.formatOnWrite	inert	no LSP formatting
+bash.allowCompoundCommands	inert	&& chains are approved as one command
+bash.gitGuard	inert	no git guard
+bashInterceptor.*	inert	no bash interceptor
+bash.direnv	inert	no direnv loading
+bash.direnvLoadTimeoutMs	inert	no direnv loading
+shellMinimizer.*	inert	no shell output minimizer
+eval.py	inert	Python is omc's only eval backend; omp's JS-only fallback is ⛔
+eval.tools.enabled	inert	no eval-defined tools (agent()/workpool())
+eval.workpool.freshAgents	inert	no eval workpool
+eval.autoBackground.*	inert	eval cells never auto-background
+python.kernelMode	inert	the kernel always persists for the session
+ratchet.enabled	inert	no ratchet prelude
+archive.enabled	inert	no archive prelude
+vault.enabled	inert	no vault:// URLs
+security.enabled	inert	no security scan
+github.cache.softTtlSec	inert	omc keeps no view cache
+github.cache.hardTtlSec	inert	omc keeps no view cache
+tools.speculativeExecution.*	inert	no speculative execution
+async.printWake	inert	print mode does not wait for background jobs (omc's async.printWaitMs is omc-only)
+
+# ---------- inert: Tasks / skills / maintenance ----------
+task.isolation.*	inert	no isolated task runs
+isolation.backend	inert	no isolated task runs
+worktree.clone	inert	worktrees are plain checkouts
+task.file	inert	no taskFile parameter
+task.structured	inert	no outputSchema/yield results
+task.speculativeLaunch	inert	batch items start after the call finishes streaming
+task.enableEffort	inert	no per-spawn effort parameter
+task.perCallModel	inert	no per-call model selector
+task.perCallModelAllow	inert	no per-call model selector
+task.maxRuntimeMs	inert	no subagent wall-clock cap
+task.completionProbe	inert	no completion probe
+task.agentIdleTtlMs	inert	idle subagents are not parked on a timer
+task.softRequestBudget	inert	no soft request budget
+task.agentSoftRequestBudget	inert	no soft request budget
+task.softRequestBudgetNotice	inert	no soft request budget
+task.maxEffort	inert	no per-spawn effort parameter
+task.agentServiceTierOverrides	inert	subagent tier comes from tier.subagent only
+task.agentCompactionThresholdOverrides	inert	subagents use the global compaction threshold
+task.agentAccountPools	inert	no account pools
+skills.enableCodexUser	inert	omc does not scan Codex user skills
+commit.*	inert	no `commit` command
+gc.*	inert	no `gc` command
+
+# ---------- read indirectly (task.* objects) ----------
+task.agentPrewalk	wired	src/ui/agentshub.c reads json_get(settings_get("task"), "agentPrewalk") (OVR_KEYS)
+task.agentAdvisor	wired	src/ui/agentshub.c reads json_get(settings_get("task"), "agentAdvisor") (OVR_KEYS)
+
+# ---------- omc-only keys (read by omc, absent from omp's registry; parity says omp has no such switch) ----------
+compaction.strategy	omc-only	legacy omp key; omp migrates it into compaction.methodOrder at load and deletes it
+compaction.remoteEnabled	omc-only	legacy omp key; omp migrates it into compaction.methodOrder at load and deletes it
+advisor.includeThinking	omc-only	no omp equivalent
+advisor.finalReviewTimeoutMs	omc-only	no omp equivalent
+async.printWaitMs	omc-only	no omp equivalent (omp's switch is async.printWake)
+bash.persistent	omc-only	no omp equivalent
+bash.pipeStreams	omc-only	no omp equivalent
+dateCwdReminder	omc-only	no omp setting (omp always injects the reminder)
+lsp.diagnosticsWaitMs	omc-only	no omp equivalent
+lsp.servers	omc-only	no omp setting (omp reads servers from LSP config files)
+debug.adapters	omc-only	no omp setting
+mcp.enabled	omc-only	no omp setting (omp's switch is --no-mcp)
+mcp.disabledServers	omc-only	omp keeps disabledServers in its MCP config files, not settings
+skills.compressDescriptions	omc-only	no omp equivalent
