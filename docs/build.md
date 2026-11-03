@@ -97,6 +97,7 @@ checkout. They are run by hand when omp is updated, and the binary never runs th
 | `extract_symbols.py <symbols.ts> <out>` | `assets/tui/symbols.json` | asserts all presets have the same keys |
 | `extract_slash_commands.py <omp checkout>` | `assets/tui/slash-commands.json` | reads `slash-commands/builtin-*.ts` in registry order |
 | `extract_settings.sh <omp checkout>` + `settings-dump/{dump.ts,stub.js}` | `assets/tui/settings-ui.json` | runs omp's own settings registry with the Bun runtime embedded in the installed `omp` (`BUN_BE_BUN=1`), npm deps stubbed, `HOME`/agent dir pointed at throwaway dirs so only defaults are dumped |
+| `settings_audit.py [--table]` | (report only) | WP-26 audit: every registry setting with its omc readers, classified wired / partial / inert / ⛔ from `settings_audit.tsv`; after a registry refresh, annotate new keys there (`make test` runs `test_settings_audit`) |
 
 Use a checkout whose tag matches `omp --version`. Themes and tips are plain copies from the upstream
 tree. [UPDATE.md](../UPDATE.md) lists the exact command for every asset as part of the upstream

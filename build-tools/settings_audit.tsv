@@ -50,14 +50,14 @@ skills.registryUrl	oos	omp-hosted skills registry (skills.omp.sh)
 dev.autoqaPush.*	oos	omp-hosted Auto QA collector (qa.omp.sh)
 spelling.typoDetection	oos	macOS dictionaries
 spelling.autocorrect	oos	macOS dictionaries
-expandThinkingBlocks	oos	omp applies it only to Tern's native view; its terminal renderer ignores it
-tui.textSizing	oos	Kitty OSC 66 text sizing; omp only enables it on Kitty with native support detection omc lacks
-speechgen.enabled	oos	tts tool: on-device Kokoro (or xAI voice) synthesis
+expandThinkingBlocks	wired	nothing to read: omp applies it only to Tern's native view and its terminal renderer ignores it, like omc
+tui.textSizing	inert	no Kitty OSC 66 heading sizing
+speechgen.enabled	inert	no tts tool (Kokoro is ⛔; remote xAI voice awaits the WP-27 decision)
 
 # ---------- inert: Appearance / TUI ----------
 images.blockImages	inert	needs omp's convertToLlm image-to-text replacement (also missing for text-only models)
 tui.maxInlineImages	inert	no inline-image budget (older images are never demoted to text)
-tui.resizeScrollback	inert	resize always rebuilds
+tui.resizeScrollback	inert	fixed at the default (rebuild); `append`/`preserve` not implemented
 tui.completeScrollback	inert	not implemented
 terminal.showProgress	inert	no OSC 9;4 progress
 tui.renderMermaid	inert	no Mermaid rendering (WP-29 remainder; not advertised)
@@ -65,7 +65,7 @@ tui.renderSvg	inert	no SVG rendering (WP-29 remainder; not advertised)
 tui.autoGraph	inert	no table charts (WP-29 remainder)
 tui.reactions	inert	no agent reactions (WP-29 remainder; not advertised)
 tui.codexResetFireworks	inert	no Codex reset overlay
-display.shimmer	inert	always the classic shimmer
+display.shimmer	inert	fixed at the default (classic); other styles not implemented
 display.advisorCollapsedLines	inert	advisor card preview not capped
 tui.imeSafeCursor	inert	no separate IME border row
 tui.vimMode	inert	no vim mode in the editor
@@ -133,9 +133,9 @@ snapcompact.*	inert	snapcompact not implemented
 tools.format	inert	native tool calling only (no in-band/owned dialect)
 tools.abortOnFabricatedResult	inert	only applies to in-band tool calls (tools.format), which omc lacks
 ttsr.judge	inert	no judge-backed `question` rules
-ttsr.contextMode	inert	partial output is always discarded
-ttsr.repeatMode	inert	each rule fires once per session
-ttsr.repeatGap	inert	each rule fires once per session
+ttsr.contextMode	inert	fixed at the default (partial output discarded); `keep` not implemented
+ttsr.repeatMode	inert	fixed at the default (once per session); `after-gap` not implemented
+ttsr.repeatGap	inert	only used by ttsr.repeatMode after-gap
 
 # ---------- inert: Files / Shell / Tools ----------
 edit.modelVariants	inert	no per-model edit variants
@@ -151,7 +151,7 @@ read.summarize.minBodyLines	inert	the line-heuristic summarizer has no body thre
 read.summarize.minCommentLines	inert	the line-heuristic summarizer does not collapse comments
 read.summarize.unfoldUntil	inert	no BFS unfolding
 read.summarize.unfoldLimit	inert	no BFS unfolding
-lsp.lazy	inert	servers always start on first use
+lsp.lazy	inert	fixed at the default (servers start on first use); eager startup not implemented
 lsp.shared	inert	no cross-session server broker
 lsp.formatOnWrite	inert	no LSP formatting
 bash.allowCompoundCommands	inert	&& chains are approved as one command
@@ -160,11 +160,11 @@ bashInterceptor.*	inert	no bash interceptor
 bash.direnv	inert	no direnv loading
 bash.direnvLoadTimeoutMs	inert	no direnv loading
 shellMinimizer.*	inert	no shell output minimizer
-eval.py	inert	Python is omc's only eval backend; omp's JS-only fallback is ⛔
+eval.py	inert	fixed at the default (on): Python is omc's only eval backend, and turning it off would leave omp's JS-only eval (⛔)
 eval.tools.enabled	inert	no eval-defined tools (agent()/workpool())
 eval.workpool.freshAgents	inert	no eval workpool
 eval.autoBackground.*	inert	eval cells never auto-background
-python.kernelMode	inert	the kernel always persists for the session
+python.kernelMode	inert	fixed at the default (the kernel persists for the session); `per-call` not implemented
 ratchet.enabled	inert	no ratchet prelude
 archive.enabled	inert	no archive prelude
 vault.enabled	inert	no vault:// URLs

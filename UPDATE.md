@@ -76,6 +76,9 @@ matching line in [AGENTS.md](AGENTS.md) — every time an update pass is finishe
 
    After refreshing the settings table, compare its defaults with `src/config/settings.c` (omc's
    defaults must equal omp's — see the "Settings defaults" row in [docs/status.md](docs/status.md)).
+   After refreshing `assets/config/settings-registry.json` (`extract_settings.sh "$UP" --registry`), run
+   `build-tools/settings_audit.py` and annotate every new unread key in `build-tools/settings_audit.tsv`
+   (inert or ⛔); `test_settings_audit` fails until they are, and the counts in docs/gaps.md §3 come from it.
 
 6. **Verify parity** against an omp built from the target commit (the installed `omp` when versions match):
    - `make -B -j8` (zero warnings) and `make test` (unit + e2e) must pass;

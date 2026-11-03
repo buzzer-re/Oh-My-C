@@ -49,7 +49,7 @@ Ranked by how soon a user hits the gap in a normal interactive session.
 9. ~~**`/context`, `/session`, `/tools`, `/jobs`, `/todo` are one-line notices instead of omp's panels.**~~ Done (WP-7): context viewer, Session Info overlay with `delete`/`pin`, Available Tools panel, Background Jobs report with `full`/`kill`, the `/todo` verbs, and short reports docked above the editor.
 10. ~~**`/tree` and `/branch` are flat 14-row pickers.**~~ Done (WP-8): omp's session tree selector, fullscreen rewind selector and branch summaries.
 11. ~~**Custom markdown commands and `/skill:<name>` don't work.**~~ Done (WP-9): file commands from every omp provider, prompt templates, `/skill:<name>` (leading or mid-prompt, chips, skill transcript card), MCP prompt commands, in the TUI, RPC, ACP and print mode. Remaining: the bundled TS commands `/review` and `/green`.
-12. **304 of the 402 settings shown in `/settings` have no effect.** (`tools.approvalMode`, `tools.approval`, `tools.restrictedFolders` and `bash.patterns` now work: WP-10.) (WP-26)
+12. **127 of the 402 settings shown in `/settings` have no effect, and 76 more are ⛔** (WP-26 recount: 192 wired, 7 partial; §3). How `/settings` presents them awaits the user's decision (WP-26 row).
 13. ~~**Default-on agent guards are missing.**~~ Done (WP-12, WP-3): todo reminders + mid-run nudge, empty/unexpected-stop recovery, tool-call loop guard, stream loop guard, magic keywords, `out://`, `cfg://`, `conflict://N`. Remaining: fabricated-result abort (needs in-band tool calling), `todo.eager`, `tasks.todoClearDelay`.
 14. **Compaction: snapcompact and Codex V2 / Bedrock server compaction are missing.** The method ladder, omp's summary requests, auto shake/handoff, OpenAI Responses and Anthropic server compaction, mid-turn/async compaction and pruning landed (WP-13); prompt-cache warming landed (WP-14); snapcompact is a follow-up. (WP-13)
 15. **RPC wire parity landed with WP-15** (remaining: subagent frames, host URI schemes, §6a-b). ACP is done (WP-16): `omc acp`, the full session lifecycle, config options, the fs / terminal / elicitation bridges and history replay.
@@ -102,7 +102,7 @@ Every package must:
 | WP-23 Loop mode ✅ (done: `/loop` arguments, budget, `--while`/`--until`, `loop.mode` prompt/compact/reset, `loop.conditionTimeoutMs`, Esc pause, status-line segment, live autocomplete text; open: omp's vibe-mode guard for reset loops (omc has no `/vibe`), condition commands run through `proc_shell` instead of omp's per-session persistent shell) | `/loop [count\|duration] [--while\|--until cmd] [prompt]`, `loop.*`, Esc suspends | `src/modes/loopctl.c`, `src/coding/loop.c`, `src/modes/iqueue.c`, `src/ui/statusline.c` | U/slash-commands/builtin-modes.ts (loop), U/modes/{loop-limit,loop-condition}.ts |
 | WP-24 Provider usage 🟡 (**done:** fetchers for anthropic, openai-codex, github-copilot, google-gemini-cli, zai, synthetic, ollama(-cloud) with the shared cache + history; `/usage` dashboard + Details; `/usage reset` picker and Codex / Claude saved resets; per-turn usage row; `omc usage`; ACP `_omp/usage`; RPC `get_state.usageLimit`; text `/usage`. **Remaining:** the other 14 fetchers (kimi-code, minimax-code, opencode-go, google-antigravity, cursor, devin, xai-oauth, factory-droid, cline-pass, umans, commandcode, alibaba-token-plan, charm-hyper, muse-code), rate-limit header ingestion, usage-aware ranking / reserve fallback, account policies + tombstones + re-login / reset-expiry banners in `omc usage`, auto reset redemption, read-group usage rows, status-line usage segment) | `/usage` provider quota dashboard + `/usage reset` selector; per-provider usage fetchers; per-turn usage row (`display.showTokenUsage`, `display.showTurnTime`) | `src/modes/interactive.c`, `src/config/auth*.c`, `src/ui/chat.c` | T/overlays/{usage-dashboard,usage-display,usage-row,reset-usage-selector}.ts, U/slash-commands/helpers/usage-report.ts |
 | WP-25 Web search providers (done: web role chain + hosted expansion, anthropic/openai/codex/gemini/xai grounding, perplexity (API key), kimi, zai, searxng, `omc search` on the same code; omp's transport retries per provider; remaining: query directives (parseSearchQuery / applyQueryConstraints / per-provider formatQuery), Perplexity OAuth/cookie/anonymous transport, keyless Exa MCP, OpenRouter grounding, the scraper engines (startpage, ecosia, google, mojeek, public) and firecrawl/jina/kagi/deepseek/ollama/synthetic/tinyfish, `providers.fetch` reader backends (omc always uses its native reader, which is also omp's `auto` first choice)) | Search through logged-in providers (anthropic, openai, gemini, codex, xai, perplexity, kimi, zai), SearXNG (`searxng.endpoint`), `providers.fetch` | `src/tools/web.c` | U/web/search/{index,providers/*}.ts |
-| WP-26 Settings honesty | Until each feature lands, hide ⛔-subsystem settings (§3c) from `/settings`, or mark them unsupported (decide the presentation with the user, since parity says the UI should match omp). Add a unit test that fails when a newly read key is undocumented here | `src/ui/settings.c`, `build-tools/extract_settings.sh` | T/overlays/settings-selector.ts |
+| WP-26 Settings honesty 🟡 (**done:** recount with `build-tools/settings_audit.py` + `settings_audit.tsv` (§3: of the 402 in `/settings`, 192 wired, 7 partial, 127 inert, 76 ⛔); `tests/test_settings_audit.c` (a newly read key outside the registry, an unannotated unread key, or a read key still annotated inert fails `make test`); wired `fetch.enabled`, `goal.statusInFooter`, `exa.searchDelayMs`, `autocompleteMaxVisible`, the skill source toggles + `skills.customDirectories`, `read.summarize.minTotalLines`, `autoResume`, `topP` (+ negative sampling = provider default); e2e `tests/e2e/settings.sh`. **Remaining:** the presentation decision below; the inert features themselves (§3b/§3c, each a feature port, most in other WPs); the 14 omc-only keys (§3e)) | **Presentation, for the user to decide.** Parity says `/settings` should look like omp's, so nothing was hidden beyond the two update-check rows. Options: (a) keep showing everything (current; honest only through docs); (b) hide the 76 ⛔ rows (whole Memory sub-groups Mnemopi/Hindsight/Sharpshooter, Interaction Speech/Collab/Stream, Tools Computer/IDA/Browser rows), the way the update-check rows already are; (c) keep every row but append "(not supported in omc)" to the description of ⛔ and inert rows. Recommendation: (b) for ⛔ rows, since those features will never exist in omc, plus (c)'s marker for inert rows, since they may land later and hiding them would hide the gap. Both use the audit annotations as their source | `src/ui/settings.c`, `build-tools/settings_audit.{py,tsv}`, `tests/test_settings_audit.c` | T/overlays/settings-selector.ts |
 
 ### P3 — niche or large, low frequency
 
@@ -131,7 +131,7 @@ omc-only command (not in omp): `/migrate`.
 | Command (aliases) | Upstream | omc | Status | Notes |
 |---|---|---|---|---|
 | /security | builtin-modes.ts | — | ❌ | OMP-native security scans (plan/scan/status/…/disposition); needs scan engine + `security://` |
-| /settings | builtin-modes.ts | `ui_overlay_settings` | ✅ | most settings have no effect, see §3 |
+| /settings | builtin-modes.ts | `ui_overlay_settings` | ✅ | 127 of 402 settings inert and 76 ⛔, see §3 |
 | /setup (providers) [providers] | builtin-modes.ts, setup/lazy.ts runProviderSetupWizard | `ui_setup_run_providers` (`src/ui/setup.c`), `src/modes/extractl.c` | ✅ | sign-in scene only, setupVersion untouched, no welcome intro; TUI only (no text handler, like omp) |
 | /plan [prompt] | builtin-modes.ts, interactive-mode.ts `handlePlanModeCommand` | `handle_command` "plan" → `app_enter_plan_mode` / `app_exit_plan_mode` (`src/coding/planmode.c`) | ✅ | enter / "Exit plan mode?" confirm with a draft / paused / disabled, `plan.enabled`, plan-file path in the status and the live description; goal/vibe exclusion messages ❌ |
 | /plan-review | builtin-modes.ts | `plan_review_command` (`src/modes/interactive.c`) | ✅ | newest `local://*plan.md`, aborts a running turn first |
@@ -318,100 +318,153 @@ The key table (`src/tui/keys.c` `DEFAULTS[]`) holds omp's whole registry: the 32
 
 ## 3. Settings
 
-Method: every `path` in `assets/tui/settings-ui.json` (omp's own settings registry, 402 entries shown
-in `/settings`) was searched as a string literal in `src/` outside the settings UI (`src/ui/settings.c`).
-omc reads settings only by literal key (`settings_bool/str/int/num/get("key")`), so a key that never
-appears is shown and saved by `/settings` but **has no effect**. Result (main at 41f5226): **100 read, 302 never read**.
+Method (WP-26): `build-tools/settings_audit.py` lists every setting in omp's registry
+(`assets/config/settings-registry.json`, 579 keys; the 402 in `assets/tui/settings-ui.json` are the ones `/settings`
+shows) with the omc source lines that read it. A read is the key as a string literal passed as the first argument of
+a call (`settings_bool("key", …)`, `setting_on("key", …)`, …) in `src/` outside the generic settings plumbing
+(`src/config/settings.c`, `src/ui/settings.c`, `cfg_url.c`, `sub_config.c`). What the source cannot show (indirect
+reads, partial behaviour, why a key is inert, ⛔) is recorded in `build-tools/settings_audit.tsv`. `make test` runs
+`tests/test_settings_audit.c`, which fails when a key read through a settings call is not in the registry (unless
+marked omc-only), when a registry key nothing reads is not annotated inert or ⛔, and when a key annotated inert is
+read. Run `build-tools/settings_audit.py` for the counts and lists, `--table` for one row per key.
 
-The `/settings` UI should either honour these or hide them. Rows are grouped by what the gap means for a
-user who never opens `/settings` (default-on behaviour omc lacks) versus switches that do nothing.
+Result (WP-26, 2026-11-02):
 
-### 3a. Default-on behaviour omc does not have (user sees a difference without touching settings)
+| | wired | partial | inert | ⛔ | total |
+|---|---|---|---|---|---|
+| Shown in `/settings` | 192 | 7 | 127 | 76 | 402 |
+| Whole registry (`cfg://`, config.yml) | 280 | 7 | 183 | 109 | 579 |
 
-| Setting (default) | What omp does by default | omc |
-|---|---|---|
-| `tools.approvalMode` (yolo) + `tools.approval` ({}) + `tools.restrictedFolders` + `bash.patterns` | Approval tiers (always-ask, always-ask-cached, write, yolo), per-tool allow/prompt/deny, approval dialog | ✅ WP-10 (`tools/approval.c`); `bash.allowCompoundCommands` ❌ |
-| `magicKeywords.*` (on) | "ultrathink" / "orchestrate" / "workflow" / "jevify" in a prompt raise thinking and attach hidden notices (`modes/magic-keywords.ts`) | 🟡 notices ✅ (`src/coding/keywords.c`); `workflowz` notice withheld (teaches unimplemented eval `agent()`/`workpool()`); editor gradient ❌ |
-| `model.loopGuard.*`, `model.toolCallLoopGuard.enabled` (on) | detects repeated assistant output / identical tool-call loops and steers | ✅ (`guards.c`, `thinkloop.c`) |
-| `todo.reminders` (on), `todo.remindersMax` (3), `todo.eager` | reminds the model of unfinished todos at stop; eager todo creation | 🟡 reminders ✅; `todo.eager` ❌ |
-| `completion.notify` / `ask.notify` (on), `error.notify` | desktop/terminal notification when a turn ends or ask waits | ✅ |
-| `recap.enabled` (on), `recap.idleSeconds` (240) | idle recap message after inactivity | ✅ (not journaled: no history.db) |
-| `tui.titleState` (on), `tui.titleSpinner`, `terminal.programStatus` (on) | terminal title shows run state + spinner; OSC 7501 program status | ✅ |
-| `compaction.methodOrder` ([remote, snapcompact, handoff, shake, soft]), `compaction.midTurnEnabled`, `compaction.asyncEnabled`, `compaction.supersedeReads`, `compaction.dropUseless` (all on) | multi-method compaction ladder, mid-turn and async compaction, stale-read supersession, uneventful-result elision | ✅ snapcompact is passed over (not implemented) |
-| `display.collapseCompacted` (on) | compacted history collapses in the transcript | ✅ WP-29: off replays the whole path with a divider per compaction (superseded summaries elided like omp) |
-| `tui.renderMermaid`, `tui.renderSvg`, `tui.reactions` (on), `tui.autoGraph` (auto) | mermaid/SVG rendering, agent reactions, table charts | ❌ (WP-29 remaining; the system prompt does not advertise them) |
-| `terminal.showImages` (on), `images.autoResize` (on), `images.describeForTextModels` (on) | inline images (kitty/iTerm/sixel), resize before send, describe images for text-only models | 🟡 inline images ✅ (WP-29, see status.md); `images.describeForTextModels` ❌ |
-| `edit.recoverInlineEdits`, `edit.blockAutoGenerated` (on) | recovers edit payloads pasted inline; refuses to edit generated files | ❌ |
-| `lsp.lazy`, `lsp.shared` (on) | lazy server start, shared servers across sessions | 🟡 servers start on first use like the default; not switchable; no cross-session sharing (`lsp.diagnosticsDeduplicate` is now read) |
-| `shellMinimizer.enabled` (on) | compresses noisy shell output (`[raw output: artifact://N]`) | ❌ (also in status.md) |
-| `tools.abortOnFabricatedResult` (on) | aborts a turn whose text fabricates a tool result | ❌ only applies to in-band (owned-dialect, `tools.format`) tool calling, which omc does not implement; native tool calling never fabricates in-band results |
-| `async.widgets` (on) | live job widgets above the editor | ❌ (WP-22b remainder) |
-| `mcp.enableProjectConfig` (on), `mcp.renderMarkdownResults` (on), `mcp.notifications` (off) | project `.mcp.json` opt-out; markdown MCP results; resource-update injection | ✅ |
-| `skills.enableSkillCommands` (on), `commands.enableClaudeProject`/`enableOpencodeProject` (on) | `/skill:<name>` and file-based custom commands | ✅ (WP-9, §1) |
-| `skillful` (on) | skills listed in system prompt (session-toggleable) | 🟡 always listed; not switchable |
-| `plan.enabled` (on), `goal.statusInFooter` (on), `title.refreshOnReplan` (on) | plan mode can be disabled; goal in footer; retitle on replan | ❌ |
-| `task.speculativeLaunch`, `task.completionProbe`, `task.softRequestBudget` (200) + notice | subagent launch/probing/budget behaviour | ❌ |
-| `composer.recallClearedDrafts` (on), `doubleEscapeAction` (rewind) | Ctrl+C keeps the cleared draft in Up history; Esc-Esc action | ✅ (WP-5) |
-| `input.bareExitOnEmptySession` (on), `emojiAutocomplete` (on), `autocompleteMaxVisible` (10), `spelling.autocomplete` (auto) | editor conveniences (see §2) | ❌ (`paste.largeMenuThreshold` is honoured since WP-6) |
-| `features.unexpectedStopDetection` (mechanical) | detects/continues unexpected model stops | ✅ (mechanical + smart; plus the empty-stop retry) |
-| `power.sleepPrevention` (idle) | prevents system sleep while running | ✅ (Linux `systemd-inhibit` logind inhibitor; macOS `caffeinate`; no desktop ScreenSaver inhibit) |
-| `startup.checkUpdate` (on), `update.channel` | update check on start | ⛔ inert and hidden from /settings: omp asks its build service / npm for a newer omp and advises `omp update`; omc has no release feed or self-update (omp skips the check for source checkouts too) |
-| `startup.changelogMode` (summary) | changelog on start | ❌ |
-| `providers.cacheWarming` (idle) | keeps prompt cache warm while idle | ✅ (`src/coding/cachewarm.c`, WP-14) |
-| `exa.enabled` (on), `fetch.enabled` (on), `archive.enabled`, `out.enabled`, `browser.enabled`, `ida.enabled` (on) | tool availability (see §4) | ❌ tools absent, switches inert |
-| `eval.py`/`eval.js`/`eval.autoProvision`/`eval.tools.enabled` (on), `python.kernelMode` (session) | eval backends | 🟡 Python only, hard-wired |
-| `statusLine.showHookStatus` (on) | hook statuses in the status line | ❌ (no hooks) |
-| `advisor.evictStaleResults` (on) | advisor context hygiene | ❌ |
-| `telemetry.otlpExportEnabled` (on, needs endpoint env) | OTLP export | ❌ |
+"Wired" means omc reads the key and acts on it; only the partial rows below were checked for incomplete behaviour,
+so a wired key can still differ from omp in detail. The old count ("100 read, 302 never read" at 41f5226) had
+no ⛔ or partial split.
 
-### 3b. Switches that do nothing in omc (default off / opt-in; feature missing)
+**Wired by WP-26** (each checked against its omp reader): `fetch.enabled` (URL reads refused with omp's error),
+`goal.statusInFooter` (goal token budget `used[/budget]` in the status line's mode segment; on by default, so this
+was a visible default difference), `exa.searchDelayMs` (Exa request pacing), `autocompleteMaxVisible` (3–20, and
+the dropdown is clamped to the viewport like omp's), `skills.enabled` / `enablePiUser` / `enablePiProject` /
+`enableAgentsUser` / `enableAgentsProject` / `customDirectories`, `read.summarize.minTotalLines`, `autoResume`,
+`topP` (sent to the providers; a negative `temperature`/`topP` now means the provider default, as in omp's
+cfgSampling, instead of being sent as -1).
 
-Appearance: `images.blockImages`, `tui.resizeScrollback`, `tui.completeScrollback`,
-`terminal.showProgress`, `tui.textSizing`, `tui.codexResetFireworks`, `display.shimmer`, `display.pinnedAgents`,
-`display.subagentLivePreview`, `display.showTokenUsage`, `display.showTurnTime`,
-`display.advisorCollapsedLines`, `tui.imeSafeCursor`, `task.showResolvedModelBadge`.
-Model: `modelRoleStorage`, `inlineToolDescriptors`, `includeWorkspaceTree`, `prewalk.auto`, `prewalk.autoTarget`,
-`images.urls.*` (6), `expandThinkingBlocks`, `omitThinking`, `externalThinking`,
-`providers.autoThinkingMaxEffort`, `minP`, `presencePenalty`, `repetitionPenalty`,
-`tier.advisor`, `retry.waitForUsageReset`, `retry.modelFallback`,
-`retry.fallbackOn`, `retry.rateLimitWalksChain`, `retry.usageAwareFallback`, `retry.usageReservePct`,
-`retry.usageReservePolicy`, `retry.fallbackChains`, `retry.fallbackRevertPolicy`,
-`providers.anthropic.serverSideFallback`, `advisor.syncBacklog`.
-Interaction: `autoResume`, `startup.showSplash`, `update.channel`, `marketplace.autoUpdate`,
-`session.worktreeScope`, `tui.vimMode`, `tui.vimModeDisplay`,
-`input.bareSlashCommands`, `composer.predictions`, `spelling.typoDetection`/`autocorrect`
-(macOS ⛔), `skills.registryUrl`.
-Context: `contextPromotion.enabled`,
-`compaction.experimentalContextManagement`,
-`compaction.remoteStreamingV2Enabled`, `compaction.idleEnabled`, `compaction.idleThresholdTokens`,
-`compaction.idleTimeoutSeconds`, `snapcompact.*` (3), `tools.format`, `ttsr.judge`, `ttsr.contextMode`,
-`ttsr.repeatMode`, `ttsr.repeatGap`.
-Files/Shell: `edit.streamingAbort`, `edit.blackbox.enabled`, `edit.autoRepair.enabled`,
-`read.renderMarkdown`, `read.toolResultPreview`, `read.summarize.prose`, `lsp.formatOnWrite`,
-`bash.allowCompoundCommands`, `bash.gitGuard`, `bashInterceptor.enabled`, `bash.direnv`,
-`shellMinimizer.sourceOutlineLevel`, `eval.workpool.freshAgents`, `eval.autoBackground.enabled`.
-Tools: `speechgen.enabled`, `generate_image.enabled`, `ratchet.enabled`, `vault.enabled`,
-`security.enabled`, `todo.remindersMax`, `tasks.todoClearDelay`,
-`images.questionTimeoutMs`, `tools.speculativeExecution.*`, `async.printWake`,
-`tools.xdevNotices`, `dev.autoqaPush.endpoint`.
-Tasks: `task.isolation.*`, `isolation.backend`, `worktree.clone` (omc: always a plain checkout; `worktree.cleanSource/onStart/onExit/base` are read since WP-21), `task.file`, `task.structured`,
-`task.enableEffort`, `task.perCallModel`, `task.perCallModelAllow`, `task.enableLsp`, `task.maxRuntimeMs`,
-`task.maxEffort`, `task.prewalk`, `plan.autosave`, `plan.autosaveDir`, `title.refreshAfterPrompts`.
-Providers: `providers.antigravityEndpoint`, `providers.fetch`,
-`codexResets.autoRedeem`, `claudeResets.autoRedeem`, `searxng.endpoint`,
-`providers.kimiApiFormat`, `providers.openaiWebsockets`, `providers.openaiLiveSteering`,
-`providers.muse-code.storeResponses`, `providers.openai-codex.daybreak`, `providers.openrouterVariant`,
-`provider.appendOnlyContext`, `secrets.enabled`.
+**Presentation (pending the user's decision):** `/settings` still shows every omp setting, inert and ⛔ ones
+included, exactly like omp, except `startup.checkUpdate` and `update.channel`, which are hidden. See the WP-26 row
+for the options.
 
-### 3c. Settings of out-of-scope subsystems (⛔, hide in `/settings` or label as unsupported)
+### 3a. Partially implemented
 
-`mnemopi.*` (17) and `hindsight.*` (9) and `sharpshooter.model` (memory backends needing an embedding
-store / remote service; omc treats them as off), `collab.*` / `share.*` / `stream.serverUrl` (omp's hosted
-relay/share/stream services), `browser.*` (11) and `computer.*` (2) (browser engine / native desktop
-automation), `ida.*` (4) (IDA Pro + idalib), `stt.*`, `speech.*`, `tts.local*`, `live.voice` (audio
-capture/playback and local ONNX models), `providers.tinyModelDevice/Dtype` (local ONNX inference),
-`extensionHandlers.modeControl`, `extensionRenderers.assistantText` (JS extension runtime),
-`eval.js` (Bun JS kernel).
+| Setting | omc |
+|---|---|
+| `compaction.methodOrder` | snapcompact entries are passed over (not implemented) |
+| `read.summarize.enabled` | omc's summarizer is a line/indent heuristic, not omp's AST summarizer |
+| `github.cache.enabled` | omc keeps no issue/PR view cache: the switch only picks the freshness note |
+| `autoResume` | src/cli/cli.c resumes like --continue; no "Auto resume skipped" fallback when the saved model cannot be restored |
+| `magicKeywords.workflow` | src/coding/keywords.c builds magicKeywords.<id>; the workflowz notice is withheld (it teaches eval agent()/workpool(), which omc lacks) |
+| `power.sleepPrevention` | src/coding/power.c: systemd-inhibit / caffeinate; no desktop ScreenSaver inhibit |
+| `memory.backend` | `local` works; `mnemopi`/`hindsight` are ⛔ and behave as off |
+
+### 3b. Inert: default-on omp behaviour omc lacks (a difference without touching `/settings`)
+
+| Setting (omp default) | What omc lacks |
+|---|---|
+| `shellMinimizer.enabled` (on) | the shell output minimizer (`[raw output: artifact://N]`) |
+| `edit.recoverInlineEdits`, `edit.blockAutoGenerated` (on) | recovering edit payloads written as text; the generated-file guard (port of pi-edit `path_policy.rs`) |
+| `lsp.shared` (on) | the cross-session language-server broker (`lsp.lazy` is fixed at its default) |
+| `bash.direnv` (auto) | direnv / devenv `.envrc` loading |
+| `compaction.remoteStreamingV2Enabled` (on), `snapcompact.shape` | streamed remote compaction; snapcompact |
+| `tools.format` (auto), `tools.abortOnFabricatedResult` (on) | in-band (owned-dialect) tool calling, so the fabricated-result abort never applies |
+| `eval.tools.enabled`, `archive.enabled` (on) | eval-defined tools for agent()/workpool(); the archive prelude |
+| `task.speculativeLaunch`, `task.completionProbe`, `task.softRequestBudgetNotice` (on), `worktree.clone` (on) | early batch launch, the completion probe, the soft request budget; clone-first worktrees |
+| `async.widgets` (on) | live job widgets (WP-22b remainder) |
+| `tui.renderMermaid`, `tui.renderSvg`, `tui.reactions` (on), `tui.autoGraph` (auto) | Mermaid/SVG rendering, reactions, table charts (WP-29 remainder; none is advertised to the model) |
+| `emojiAutocomplete` (on), `spelling.autocomplete` (auto) | `:shortcode:` emoji completion, word-prediction hints |
+| `startup.changelogMode` (summary), `marketplace.autoUpdate` (notify) | startup changelog; plugin marketplace update check |
+| `session.worktreeScope` (repo) | the resume picker does not merge sibling worktrees |
+| `images.describeForTextModels` (on) | image descriptions for text-only models |
+| `inlineToolDescriptors` (auto) | tool descriptors in the system prompt |
+| `advisor.evictStaleResults` (on) | advisor context hygiene |
+| `ttsr.judge` (auto) | judge-backed `question` TTSR rules |
+| `title.refreshOnReplan` (on) | title refresh on replan |
+| `providers.openai-codex.daybreak` (on), `providers.openaiWebsockets` / `kimiApiFormat` / `antigravityEndpoint` / `fetch` (auto) | Daybreak request; the provider routing choices are fixed |
+| `telemetry.otlpExportEnabled` (on, needs `OTEL_*`) | OTLP export |
+| `commit.*`, `gc.*` (not in `/settings`) | the `commit` and `gc` commands |
+
+Inert settings whose fixed omc behaviour equals omp's default (only a non-default value would differ):
+`tui.resizeScrollback`, `display.shimmer`, `ttsr.contextMode`, `ttsr.repeatMode`, `lsp.lazy`, `eval.py`,
+`python.kernelMode`.
+
+### 3c. All inert settings, by `/settings` tab
+
+| Tab | Settings: what omc lacks |
+|---|---|
+| Appearance | `task.showResolvedModelBadge`: no resolved-model badge in the task widget; `images.blockImages`: needs omp's convertToLlm image-to-text replacement (also missing for text-only models); `tui.resizeScrollback`: fixed at the default (rebuild); `append`/`preserve` not implemented; `tui.completeScrollback`: not implemented; `terminal.showProgress`: no OSC 9;4 progress; `tui.textSizing`: no Kitty OSC 66 heading sizing; `tui.renderMermaid`: no Mermaid rendering (WP-29 remainder; not advertised); `tui.renderSvg`: no SVG rendering (WP-29 remainder; not advertised); `tui.autoGraph`: no table charts (WP-29 remainder); `tui.reactions`: no agent reactions (WP-29 remainder; not advertised); `tui.codexResetFireworks`: no Codex reset overlay; `display.shimmer`: fixed at the default (classic); other styles not implemented; `display.advisorCollapsedLines`: advisor card preview not capped; `tui.imeSafeCursor`: no separate IME border row |
+| Model | `prewalk.auto`: no automatic prewalk judging; `prewalk.autoTarget`: no automatic prewalk judging; `images.describeForTextModels`: images are not described for text-only models; `omitThinking`: no hideThinkingSummary request option; `inlineToolDescriptors`: tool descriptors always in the tool schemas; `includeWorkspaceTree`: no workspace tree in the system prompt; `topK`: request options have no top_k field yet (temperature/topP are sent); `minP`: request options have no min_p field; `presencePenalty`: request options have no presence_penalty field; `repetitionPenalty`: request options have no repetition_penalty field; `tier.advisor`: advisor requests use the default tier; `retry.waitForUsageReset`: no wait for usage-limit reset; `retry.usageAwareFallback`: no coding-plan quota-aware fallback; `retry.usageReservePct`: no coding-plan quota-aware fallback; `retry.usageReservePolicy`: no coding-plan quota-aware fallback; `providers.anthropic.serverSideFallback`: no classifier-block retry on Opus; `advisor.syncBacklog`: main agent never waits for the advisor backlog; `advisor.evictStaleResults`: advisor context keeps old read/grep/glob output; `images.urls.*` (10): no image URL publishing backends |
+| Interaction | `tui.vimMode`: no vim mode in the editor; `tui.vimModeDisplay`: no vim mode in the editor; `spelling.autocomplete`: no word-prediction hints; `composer.predictions`: no next-message prediction; `emojiAutocomplete`: no :shortcode: emoji completion; `startup.showSplash`: no animated splash; `marketplace.autoUpdate`: no plugin marketplace update check; `startup.changelogMode`: no startup changelog; `session.worktreeScope`: resume picker does not merge sibling worktrees |
+| Context | `contextPromotion.enabled`: no context promotion on overflow; `compaction.experimentalContextManagement`: not implemented; `compaction.remoteStreamingV2Enabled`: remote compaction is not streamed; `compaction.idleEnabled`: no idle compaction; `compaction.idleThresholdTokens`: no idle compaction; `compaction.idleTimeoutSeconds`: no idle compaction; `snapcompact.*` (3): snapcompact not implemented; `tools.format`: native tool calling only (no in-band/owned dialect); `ttsr.judge`: no judge-backed `question` rules; `ttsr.contextMode`: fixed at the default (partial output discarded); `keep` not implemented; `ttsr.repeatMode`: fixed at the default (once per session); `after-gap` not implemented; `ttsr.repeatGap`: only used by ttsr.repeatMode after-gap |
+| Files | `lsp.lazy`: fixed at the default (servers start on first use); eager startup not implemented; `lsp.shared`: no cross-session server broker; `lsp.formatOnWrite`: no LSP formatting; `read.renderMarkdown`: read results never rendered as Markdown; `read.summarize.prose`: no Markdown/plain-text summaries; `read.toolResultPreview`: read results shown as summary rows; `edit.streamingAbort`: no streaming patch-preview abort; `edit.recoverInlineEdits`: edit payloads written as text are not recovered; `edit.blockAutoGenerated`: no generated-file guard (port of pi-edit path_policy.rs); `edit.blackbox.enabled`: not implemented; `edit.autoRepair.enabled`: not implemented |
+| Shell | `bash.allowCompoundCommands`: && chains are approved as one command; `bash.gitGuard`: no git guard; `bashInterceptor.*` (2): no bash interceptor; `bash.direnv`: no direnv loading; `shellMinimizer.*` (7): no shell output minimizer; `eval.py`: fixed at the default (on): Python is omc's only eval backend, and turning it off would leave omp's JS-only eval (⛔); `eval.tools.enabled`: no eval-defined tools (agent()/workpool()); `eval.workpool.freshAgents`: no eval workpool; `eval.autoBackground.*` (2): eval cells never auto-background; `python.kernelMode`: fixed at the default (the kernel persists for the session); `per-call` not implemented |
+| Tools | `todo.eager`: no eager todo nudge; `tasks.todoClearDelay`: the todo widget never auto-clears; `speechgen.enabled`: no tts tool (Kokoro is ⛔; remote xAI voice awaits the WP-27 decision); `ratchet.enabled`: no ratchet prelude; `archive.enabled`: no archive prelude; `images.questionTimeoutMs`: read ?q= image questions use the default timeout; `vault.enabled`: no vault:// URLs; `security.enabled`: no security scan; `tools.abortOnFabricatedResult`: only applies to in-band tool calls (tools.format), which omc lacks; `tools.speculativeExecution.*` (2): no speculative execution; `async.printWake`: print mode does not wait for background jobs (omc's async.printWaitMs is omc-only); `async.widgets`: no live job widgets (WP-22b remainder) |
+| Tasks | `task.isolation.*` (4): no isolated task runs; `isolation.backend`: no isolated task runs; `worktree.clone`: worktrees are plain checkouts; `task.file`: no taskFile parameter; `task.structured`: no outputSchema/yield results; `task.speculativeLaunch`: batch items start after the call finishes streaming; `task.enableEffort`: no per-spawn effort parameter; `task.perCallModel`: no per-call model selector; `task.perCallModelAllow`: no per-call model selector; `task.maxRuntimeMs`: no subagent wall-clock cap; `task.completionProbe`: no completion probe; `task.softRequestBudget`: no soft request budget; `task.softRequestBudgetNotice`: no soft request budget; `task.maxEffort`: no per-spawn effort parameter; `title.refreshOnReplan`: no title refresh on replan; `title.refreshAfterPrompts`: no periodic title check |
+| Providers | `providers.antigravityEndpoint`: fixed endpoint routing; `providers.kimiApiFormat`: fixed API format; `providers.openaiWebsockets`: Codex websocket policy fixed; `providers.openaiLiveSteering`: no live steering over the Codex websocket; `providers.muse-code.storeResponses`: not implemented; `providers.openai-codex.daybreak`: no Daybreak access request; `providers.openrouterVariant`: no routing-variant suffix; `providers.fetch`: single reader backend; `codexResets.*` (4): no saved Codex reset redemption; `claudeResets.*` (4): no Claude reset redemption; `secrets.enabled`: no secret obfuscation; `telemetry.otlpExportEnabled`: no OTLP export |
+| Not in /settings (cfg://, config.yml) | `bash.direnvLoadTimeoutMs`: no direnv loading; `compaction.v2RetainedMessageBudget`: remote compaction is not streamed; `task.agentIdleTtlMs`: idle subagents are not parked on a timer; `task.agentSoftRequestBudget`: no soft request budget; `task.agentServiceTierOverrides`: subagent tier comes from tier.subagent only; `task.agentCompactionThresholdOverrides`: subagents use the global compaction threshold; `task.agentAccountPools`: no account pools; `read.summarize.minBodyLines`: the line-heuristic summarizer has no body threshold; `read.summarize.minCommentLines`: the line-heuristic summarizer does not collapse comments; `read.summarize.unfoldUntil`: no BFS unfolding; `read.summarize.unfoldLimit`: no BFS unfolding; `github.cache.softTtlSec`: omc keeps no view cache; `github.cache.hardTtlSec`: omc keeps no view cache; `tui.maxInlineImages`: no inline-image budget (older images are never demoted to text); `providers.ollama-cloud.maxConcurrency`: no per-provider subagent concurrency cap; `auth.broker.*` (2): no auth broker client; `auth.accountPolicies`: no per-account policies; `judgment.attemptTimeoutMs`: omp registers it but no TypeScript reads it either; `edit.modelVariants`: no per-model edit variants; `skills.enableCodexUser`: omc does not scan Codex user skills; `commit.*` (6): no `commit` command; `gc.*` (12): no `gc` command |
+
+### 3d. Out of scope (⛔)
+
+These need the JS runtime, an omp-hosted service, a browser engine, on-device ML/audio or a
+platform API omc does not target. omc treats them as off.
+
+| Setting | omc |
+|---|---|
+| `eval.js` | Bun JS eval kernel |
+| `eval.autoProvision` | provisions the managed JavaScript eval package environment |
+| `ida.*` (5, 5 in /settings) | IDA Pro / idalib |
+| `computer.*` (5, 3 in /settings) | native desktop automation |
+| `dev.autoqaPush.*` (2, 1 in /settings) | omp-hosted Auto QA collector (qa.omp.sh) |
+| `statusLine.showHookStatus` | hook statuses come from JS hooks/extensions |
+| `spelling.typoDetection` | macOS dictionaries |
+| `spelling.autocorrect` | macOS dictionaries |
+| `startup.checkUpdate` | omp's release feed / npm; hidden from /settings (src/ui/settings.c) |
+| `update.channel` | omp's release feed / npm; hidden from /settings (src/ui/settings.c) |
+| `providers.tinyModelDevice` | local ONNX inference |
+| `providers.tinyModelDtype` | local ONNX inference |
+| `sharpshooter.*` (4, 1 in /settings) | Sharpshooter memory extraction backend (part of the ⛔ memory backends) |
+| `mnemopi.*` (23, 17 in /settings) | local Mnemopi memory needs an embedding store / on-device embedding model |
+| `hindsight.*` (26, 9 in /settings) | Hindsight memory backend service |
+| `extensions` (not in /settings) | JS/TS extension module paths (JS runtime) |
+| `skills.registryUrl` | omp-hosted skills registry (skills.omp.sh) |
+| `extensionHandlers.*` (2, 1 in /settings) | JS extension runtime |
+| `extensionRenderers.*` (1, 1 in /settings) | JS extension runtime |
+| `browser.*` (10, 10 in /settings) | browser engine (Puppeteer/CDP, cmux, Tern) |
+| `tts.*` (2, 2 in /settings) | on-device Kokoro TTS |
+| `speech.*` (5, 5 in /settings) | audio playback + Kokoro TTS |
+| `stt.*` (3, 2 in /settings) | audio capture + on-device speech-to-text |
+| `live.voice` | realtime voice audio |
+| `collab.*` (4, 4 in /settings) | omp-hosted relay (my.omp.sh) |
+| `share.*` (3, 3 in /settings) | omp-hosted share service (my.omp.sh/s) |
+| `stream.*` (2, 1 in /settings) | omp-hosted live stream server (live.omp.sh) |
+
+### 3e. Keys omc reads that omp's registry does not have (omc-only)
+
+Parity says omp has no such switch; each is allowed by the unit test only because it is listed in
+`settings_audit.tsv`. They are kept for now (removing them changes behaviour some users may rely on), but none should
+be advertised.
+
+| Key | Note |
+|---|---|
+| `compaction.strategy` | legacy omp key; omp migrates it into compaction.methodOrder at load and deletes it |
+| `compaction.remoteEnabled` | legacy omp key; omp migrates it into compaction.methodOrder at load and deletes it |
+| `advisor.includeThinking` | no omp equivalent |
+| `advisor.finalReviewTimeoutMs` | no omp equivalent |
+| `async.printWaitMs` | no omp equivalent (omp's switch is async.printWake) |
+| `bash.persistent` | no omp equivalent |
+| `bash.pipeStreams` | no omp equivalent |
+| `dateCwdReminder` | no omp setting (omp always injects the reminder) |
+| `lsp.diagnosticsWaitMs` | no omp equivalent |
+| `lsp.servers` | no omp setting (omp reads servers from LSP config files) |
+| `debug.adapters` | no omp setting |
+| `mcp.enabled` | no omp setting (omp's switch is --no-mcp) |
+| `mcp.disabledServers` | omp keeps disabledServers in its MCP config files, not settings |
+| `skills.compressDescriptions` | no omp equivalent |
 
 ## 4. Tools, `xd://` devices and internal URLs
 
@@ -531,7 +584,7 @@ Upstream: `packages/tui/src/overlays/*`, `packages/coding-agent/src/modes/compon
 | model-hub, hub-frame, model-browser | model-hub.ts … | `/model`, Alt+M | `src/ui/modelhub.c`, `modelbrowser.c` | ✅/🟡 | gaps in status.md (presets, fallback chains, custom roles, F5, mouse) |
 | model-picker | model-picker.ts | Alt+P, `/switch` | `src/ui/modelpicker.c` | ✅ | cell-identical (plain + ANSI) in session, `@` quick-role and task modes; `--models` scope ❌ |
 | thinking-selector | thinking-selector.ts | `/thinking`, `/effort` | `ui_overlay_thinking` | ✅ | |
-| settings-selector | settings-selector.ts | `/settings` | `src/ui/settings.c` | ✅ | most settings inert (§3) |
+| settings-selector | settings-selector.ts | `/settings` | `src/ui/settings.c` | ✅ | 127 of 402 settings inert and 76 ⛔ (§3) |
 | session-selector | session-selector.ts | `/resume` | `src/ui/sessions.c` | ✅ | |
 | oauth-selector, login-dialog | *.ts | `/login`, `/logout` | `src/ui/login.c` | ✅ | |
 | logout-account-selector, session-account-selector | *.ts | multi-account `/logout`, `/session` | — | ❌ | omc stores one credential per provider |
