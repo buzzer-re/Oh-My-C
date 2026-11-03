@@ -58,6 +58,9 @@ full requests (`tui_request_full_render`: session replaced, transcript rebuilt, 
 toggled); a resize repaints only the screen with the frame's tail. `tui_full_redraw_count` exposes the
 clears to tests, and `OMC_TUI_DEBUG=<file>` logs one line per frame (kind: first/diff/above/none/full/
 resize, first changed row, viewport top, bytes written, old/new excerpt of the changed row).
+`tui_set_paint_listener` reports each written frame like omp's `TuiPaint` (rows newly committed to
+scrollback, the rows on screen, `reset` for a scrollback clear, `alt` for a fullscreen page); `/record`
+feeds its `.ompcast` encoder from it.
 
 Fullscreen pages (`/settings`, `/resume`, the Models hub, `/hotkeys`, the setup wizard, the BTW
 history, plan review) borrow the alternate screen through `tui_alt_screen(tui, on)`: the normal screen's frame is
