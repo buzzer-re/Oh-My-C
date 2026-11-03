@@ -8,6 +8,7 @@
 
 #include <ctype.h>
 #include <math.h>
+#include <pthread.h>
 
 /* ---------- HTML -> markdown ---------- */
 
@@ -680,10 +681,25 @@ int ws_search_tavily(const char *q, int limit, const char *recency, sresults_t *
     return 0;
 }
 
+/* exa.ts waitForExaSearchSlot: requests are spaced `exa.searchDelayMs` apart (0 disables pacing) */
+static void exa_wait_slot(void) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static int64_t next_at;
+    double d = settings_num("exa.searchDelayMs", 1000);
+    int64_t delay = isfinite(d) && d > 0 ? (int64_t)floor(d) : 0;
+    if (delay <= 0) return;
+    pthread_mutex_lock(&mu); /* serialized like omp's promise chain */
+    int64_t wait = next_at - mono_ms();
+    if (wait > 0) sleep_ms(wait);
+    next_at = mono_ms() + delay;
+    pthread_mutex_unlock(&mu);
+}
+
 int ws_search_exa(const char *q, int limit, const char *recency, sresults_t *out, char **err) {
     const char *key = env_get("EXA_API_KEY");
     if (!key) return -2;
     UNUSED(recency);
+    exa_wait_slot();
     json_t *b = json_obj();
     json_set_str(b, "query", q);
     json_set_int(b, "numResults", limit);

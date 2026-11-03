@@ -5,6 +5,7 @@
 #include "tui/symbols.h"
 
 #include <ctype.h>
+#include <math.h>
 
 enum { ACT_NONE, ACT_TYPE, ACT_OTHER };
 #define UNDO_MAX 200
@@ -1555,7 +1556,21 @@ static const char *composer_gutter(const tui_editor_t *ed) {
     return ed->gutter ? ed->gutter : ed->composer->default_gutter;
 }
 
+/* editor.ts render: the dropdown shows max(3, min(autocompleteMaxVisible, viewport rows - editor rows - 2)) items */
+static void ac_render(tui_editor_t *ed, int width, strvec_t *out, size_t first_row) {
+    if (!ed->ac_list) return;
+    int rows = ed->base.tui ? tui_term(ed->base.tui)->rows : 0;
+    if (rows <= 0) rows = 24;
+    ed->ac_list->max_visible = MAX(3, MIN(ed->ac_max_visible, rows - (int)(out->n - first_row) - 2));
+    tui_component_render(&ed->ac_list->base, width, out);
+}
+
+void tui_editor_set_autocomplete_max_visible(tui_editor_t *ed, double n) {
+    ed->ac_max_visible = isfinite(n) ? MAX(3, MIN(20, (int)floor(n))) : 10;
+}
+
 static void composer_render(tui_editor_t *ed, int width, strvec_t *out) {
+    size_t first_row = out->n;
     const tui_composer_style_t *st = ed->composer;
     tui_component_t *c = &ed->base;
     int px = composer_padding(ed);
@@ -1716,7 +1731,7 @@ static void composer_render(tui_editor_t *ed, int width, strvec_t *out) {
     free(g_first);
     free(g_cont);
     vec_free(&segs);
-    if (ed->ac_list) tui_component_render(&ed->ac_list->base, width, out);
+    ac_render(ed, width, out, first_row);
 }
 
 static void editor_render(tui_component_t *c, int width, strvec_t *out) {
@@ -1725,6 +1740,7 @@ static void editor_render(tui_component_t *c, int width, strvec_t *out) {
         composer_render(ed, width, out);
         return;
     }
+    size_t first_row = out->n;
     int content_w = MAX(1, width - 2 * ed->padding_x);
     int W = effective_layout_width(ed, width);
     ed->layout_width = W;
@@ -1797,7 +1813,7 @@ static void editor_render(tui_component_t *c, int width, strvec_t *out) {
     border_line(&b, width, ed->border_slot, below > 0 ? lab : NULL);
     strvec_push_own(out, sb_detach(&b));
     vec_free(&segs);
-    if (ed->ac_list) tui_component_render(&ed->ac_list->base, width, out);
+    ac_render(ed, width, out, first_row);
 }
 
 static bool editor_key(tui_component_t *c, const tui_key_t *k) { return tui_editor_handle_key((tui_editor_t *)c, k); }

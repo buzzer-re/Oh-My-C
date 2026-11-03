@@ -400,7 +400,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
     bool whole = false;
 
     summary_lang_t slang = summary_lang(abs);
-    bool want_summary = !sel->ranges.n && !sel->raw && !sel->immutable && slang != SUM_NONE && total >= 100 && len <= (2u << 20) &&
+    bool want_summary = !sel->ranges.n && !sel->raw && !sel->immutable && slang != SUM_NONE && total >= settings_int("read.summarize.minTotalLines", 100) && len <= (2u << 20) &&
                         total <= 20000 && settings_bool("read.summarize.enabled", true);
     bool *keep = NULL;
     size_t elided = 0;
@@ -1235,6 +1235,10 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         return 0;
     }
     if (str_starts(path, "http://") || str_starts(path, "https://")) {
+        if (!settings_bool("fetch.enabled", true)) { /* read.ts: URL reads gated by fetch.enabled */
+            tool_result_error(out, "URL reads are disabled by settings.");
+            return 0;
+        }
         return web_read_url(env, path, ctx->cancel, out);
     }
     if (xdev_read(ctx ? ctx->agent : NULL, path, out)) return 0;

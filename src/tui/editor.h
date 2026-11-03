@@ -248,6 +248,7 @@ void tui_editor_set_autocomplete(tui_editor_t *ed, tui_autocomplete_fn fn, void 
 void tui_editor_set_inline_hint(tui_editor_t *ed, char *(*fn)(void *ud, const char *line_before, bool first_line), void *ud);
 char *tui_editor_ghost(tui_editor_t *ed); /* the ghost text shown after the cursor now (owned) or NULL */
 void tui_editor_set_placeholder(tui_editor_t *ed, const char *text);
+void tui_editor_set_autocomplete_max_visible(tui_editor_t *ed, double n); /* autocompleteMaxVisible: clamped to 3..20 */
 bool tui_editor_autocomplete_open(const tui_editor_t *ed);
 /* Composer chrome: render through the named composer shape (box, band, claude, pi, borderless,
  * rule, field, rail; NULL restores the classic rules). */

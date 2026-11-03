@@ -549,10 +549,15 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
             }
         }
     }
-    if (!no_skills) {
+    /* skills.ts loadSkills: `skills.enabled` is the master switch (managed skills included); the per-source
+     * toggles gate native (.omc/.omp) and .agents/.agent user/project skills */
+    if (!no_skills && settings_bool("skills.enabled", true)) {
+        bool pi_project = settings_bool("skills.enablePiProject", true), pi_user = settings_bool("skills.enablePiUser", true);
+        bool agents_project = settings_bool("skills.enableAgentsProject", true);
+        bool agents_user = settings_bool("skills.enableAgentsUser", true);
         /* first wins, in omp provider-priority order: native (.omc/.omp project + agent dir, 100),
          * Claude project dirs (80), Agent Plugins (75), .agents/.agent (70), Claude Code plugins (70) */
-        for (size_t i = chain.n; i > 0; i--) { /* every ancestor's .omc/.omp skills, closest first */
+        for (size_t i = chain.n; i > 0 && pi_project; i--) { /* every ancestor's .omc/.omp skills, closest first */
             if (!strcmp(chain.v[i - 1], home)) continue;
             const char *pd[] = {".omc/skills", ".omp/skills"};
             for (size_t k = 0; k < 2; k++) {
@@ -561,9 +566,11 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
                 free(p);
             }
         }
-        char *u = path_join(agent, "skills");
-        scan_skills_dir_opt(d, u, true);
-        free(u);
+        if (pi_user) {
+            char *u = path_join(agent, "skills");
+            scan_skills_dir_opt(d, u, true);
+            free(u);
+        }
         /* Claude provider: user dir (foreign opt-in) then project .claude/skills up to the repo root */
         if (provider_user_source_enabled("claude") || settings_bool("skills.enableClaudeUser", false)) {
             char *cd = claude_config_dir();
@@ -583,7 +590,7 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
         plugin_skills_standard(&roots, d);
         /* agents.ts getProjectPathCandidates: cwd up to the repo root (else home, else /), home skipped */
         strvec_t walk = discovery_project_ancestors(cwd);
-        for (size_t i = 0; i < walk.n; i++) {
+        for (size_t i = 0; i < walk.n && agents_project; i++) {
             const char *dirs[] = {".agent/skills", ".agents/skills"};
             for (size_t k = 0; k < ARRAY_LEN(dirs); k++) {
                 char *p = path_join(walk.v[i], dirs[k]);
@@ -593,13 +600,21 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
         }
         strvec_free(&walk);
         const char *uskills[] = {".agent/skills", ".agents/skills"};
-        for (size_t i = 0; i < ARRAY_LEN(uskills); i++) {
+        for (size_t i = 0; i < ARRAY_LEN(uskills) && agents_user; i++) {
             char *p = path_join(home, uskills[i]);
             scan_skills_dir(d, p);
             free(p);
         }
         plugin_skills_legacy(&roots, d);
         plugin_roots_free(&roots);
+        /* `skills.customDirectories` (~ expanded, description required), after every provider */
+        json_t *custom = settings_get("skills.customDirectories"), *cx;
+        json_arr_foreach(custom, ci, cx) {
+            if (!json_is_str(cx) || !*json_sv(cx)) continue;
+            char *p = path_expand_home(json_sv(cx));
+            scan_skills_dir_opt(d, p, true);
+            free(p);
+        }
         scan_managed_skills(d);
         filter_skills(d);
         if (d->skills.n > 1) qsort(d->skills.v, d->skills.n, sizeof(skill_t), cmp_skill);

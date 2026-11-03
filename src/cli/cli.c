@@ -640,6 +640,16 @@ static int launch_run(launch_args_t *A, bool force_acp) {
         rc = session_error("--fork requires session persistence", false);
         goto out;
     }
+    /* main.ts createSessionManager: `autoResume` behaves like --continue when no session was selected
+     * (an explicit --goal or --session-dir starts fresh); a resumed session restores its model */
+    if (!A->fork && !A->no_session && !A->resume_set && !A->continue_recent && !A->session_dir && !A->goal &&
+        settings_bool("autoResume", false)) {
+        session_list_t l;
+        char *dir = session_dir_for_cwd(cwd);
+        A->continue_recent = session_list(dir, &l) == 0 && l.n > 0;
+        session_list_free(&l);
+        free(dir);
+    }
     if (picker) {
         session_list_t l;
         char *dir = A->session_dir ? xstrdup(A->session_dir) : session_dir_for_cwd(cwd);

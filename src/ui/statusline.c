@@ -660,6 +660,12 @@ static char *render_segment(const char *id, const segctx_t *c) {
             else if (str_eq(st, "budget-limited")) icon = sym("status.warning"), color = TUI_TC_WARNING;
             else if (str_eq(st, "dropped")) icon = sym("status.aborted"), color = TUI_TC_DIM;
             char *w = with_icon(icon, "Goal");
+            if (settings_bool("goal.statusInFooter", true)) { /* formatGoalBudget: used[/budget] */
+                char *used = fmt_number((double)goal_used(g)), *bud = goal_budget(g) ? fmt_number((double)goal_budget(g)) : NULL;
+                char *nw = bud ? xasprintf("%s %s/%s", w, used, bud) : xasprintf("%s %s", w, used);
+                free(w), free(used), free(bud);
+                w = nw;
+            }
             char *r = color == TUI_TC_ACCENT ? accent_fg(c, color, w) : fgw(color, w);
             free(w);
             return r;
@@ -1834,6 +1840,7 @@ void ui_chrome_setup(ui_t *u) {
     snprintf(ed->text_fg, sizeof ed->text_fg, "%s", tui_rgb_fg(TH(), tui_theme_rgb(TH(), TUI_TC_TEXT), b, sizeof b));
     ed->use_terminal_cursor = settings_bool("showHardwareCursor", true);
     tui_set_show_hardware_cursor(u->tui, ed->use_terminal_cursor);
+    tui_editor_set_autocomplete_max_visible(ed, settings_num("autocompleteMaxVisible", 10));
 }
 
 /* repaint while a turn runs so the brand spinner and timer advance */
