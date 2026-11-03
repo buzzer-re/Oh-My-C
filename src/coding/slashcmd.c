@@ -119,6 +119,7 @@ static const struct {
     {"local", NULL, true, NULL},
     {"skills", NULL, true, NULL},
     {"force", NULL, true, slash_force_text},
+    {"pause", NULL, true, NULL},
     {"forget-approvals", NULL, false, h_forget_approvals},
     {"quit", NULL, true, NULL},
     {"ssh", "*", true, slash_ssh_text},
