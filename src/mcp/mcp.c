@@ -47,6 +47,8 @@ struct mcp_server {
     int64_t next_id;
     /* catalogs (guarded by mu once the server is shared) */
     json_t *tools;      /* tools/list result array */
+    json_t *cached_tools; /* MCPToolCache hit when the startup window closed with the server still connecting:
+                           * registered as deferred tools while it is not connected (NULL: none) */
     json_t *prompts;    /* prompts/list result array (servers advertising the prompts capability), or NULL */
     json_t *resources;  /* resources/list (servers advertising resources), or NULL */
     json_t *templates;  /* resources/templates/list, or NULL */
@@ -71,6 +73,7 @@ struct mcp_manager {
     VEC(mcp_server_t *) servers;
     mcp_callbacks_t cb;
     bool notifications;
+    bool tool_cache; /* MCPToolCache enabled (mcp_set_tool_cache) */
     int bg; /* background threads still using the manager */
     bool closing;
 };
@@ -613,6 +616,7 @@ static void server_free(mcp_server_t *s) {
     if (s->reader_started) pthread_join(s->reader, NULL);
     json_free(s->cfg);
     json_free(s->tools);
+    json_free(s->cached_tools);
     json_free(s->prompts);
     json_free(s->resources);
     json_free(s->templates);
@@ -890,6 +894,31 @@ static void fire_tools_changed(mcp_server_t *s) {
     if (live && cb.tools_changed) cb.tools_changed(cb.ud, s->name);
 }
 
+static bool cache_on(mcp_manager_t *m) {
+    if (!m) return false;
+    pthread_mutex_lock(&m->mu);
+    bool on = m->tool_cache;
+    pthread_mutex_unlock(&m->mu);
+    return on;
+}
+
+/* toolCache.set after a successful tools/list */
+static void cache_tools(mcp_server_t *s) {
+    if (!cache_on(s->mgr)) return;
+    pthread_mutex_lock(&s->mu);
+    json_t *tools = json_clone(s->tools);
+    pthread_mutex_unlock(&s->mu);
+    mcp_tool_cache_set(s->name, s->cfg, tools);
+    json_free(tools);
+}
+
+void mcp_set_tool_cache(mcp_manager_t *m, bool on) {
+    if (!m) return;
+    pthread_mutex_lock(&m->mu);
+    m->tool_cache = on;
+    pthread_mutex_unlock(&m->mu);
+}
+
 typedef struct {
     mcp_server_t *s;
     pthread_t th;
@@ -902,8 +931,10 @@ static void *conn_thread(void *p) {
     mcp_server_t *s = j->s;
     int rc = server_connect(s);
     if (rc != 0) LOGW("mcp %s: %s", s->name, s->error ? s->error : "failed");
+    if (rc == 0) cache_tools(s);
     pthread_mutex_lock(&s->mu);
     s->state = rc == 0 ? S_READY : S_FAILED;
+    pthread_cond_broadcast(&s->cv); /* deferred tool calls wait for the connection (waitForConnection) */
     pthread_mutex_unlock(&s->mu);
     /* mcp.notifications: subscribe to the new server's resources */
     if (rc == 0 && s->mgr) {
@@ -1000,6 +1031,17 @@ static void connect_wait(mcp_manager_t *m, mcp_server_t **srv, size_t n, int64_t
         if (!finished[i]) jobs[i]->waited = false; /* the thread owns the job now */
     }
     pthread_mutex_unlock(&m->mu);
+    /* connectServers: a server still pending when the window closes gets its cached tools as DeferredMCPTools */
+    bool use_cache = cache_on(m);
+    for (size_t i = 0; i < n && use_cache; i++) {
+        if (finished[i]) continue;
+        json_t *cached = mcp_tool_cache_get(srv[i]->name, srv[i]->cfg);
+        if (!cached) continue;
+        pthread_mutex_lock(&srv[i]->mu);
+        json_free(srv[i]->cached_tools);
+        srv[i]->cached_tools = cached;
+        pthread_mutex_unlock(&srv[i]->mu);
+    }
     for (size_t i = 0; i < n; i++) {
         if (!finished[i]) {
             pthread_detach(jobs[i]->th);
@@ -1027,15 +1069,20 @@ void mcp_connect_all(mcp_manager_t *m, const json_t *config, int64_t timeout_ms)
     pthread_mutex_lock(&m->mu);
     for (size_t i = 0; i < n; i++) {
         const char *name = config->u.obj.keys[i];
+        srv[i] = server_new(name, config->u.obj.vals[i]);
+        srv[i]->mgr = m;
         for (size_t k = 0; k < m->servers.n; k++)
             if (!strcmp(m->servers.v[k]->name, name)) {
-                server_close(m->servers.v[k]);
-                vec_push(&old, m->servers.v[k]);
+                mcp_server_t *o = m->servers.v[k];
+                server_close(o);
+                /* deferred tools stay registered until live ones replace them (#replaceServerTools) */
+                pthread_mutex_lock(&o->mu);
+                if (o->cached_tools && json_equal(o->cfg, srv[i]->cfg)) srv[i]->cached_tools = json_clone(o->cached_tools);
+                pthread_mutex_unlock(&o->mu);
+                vec_push(&old, o);
                 remove_server_locked(m, k);
                 break;
             }
-        srv[i] = server_new(name, config->u.obj.vals[i]);
-        srv[i]->mgr = m;
         vec_push(&m->servers, srv[i]);
     }
     pthread_mutex_unlock(&m->mu);
@@ -1279,6 +1326,7 @@ static void *refresh_thread(void *p) {
             json_free(s->tools);
             s->tools = t;
             pthread_mutex_unlock(&s->mu);
+            cache_tools(s);
             fire_tools_changed(s);
         }
     } else if (!strcmp(j->kind, "prompts")) {
@@ -1485,10 +1533,51 @@ typedef struct {
     char *tool;
 } bridge_t;
 
+/* waitForConnection: wait while `s` is still connecting, up to its request timeout or until *cancel */
+static void wait_connected(mcp_server_t *s, volatile sig_atomic_t *cancel) {
+    int64_t deadline = mono_ms() + (s->timeout_ms > 0 ? s->timeout_ms : 30000);
+    pthread_mutex_lock(&s->mu);
+    while (s->state == S_CONNECTING && !s->closing && mono_ms() < deadline && !(cancel && *cancel)) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 50000000;
+        if (ts.tv_nsec >= 1000000000) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000;
+        }
+        pthread_cond_timedwait(&s->cv, &s->mu, &ts);
+    }
+    pthread_mutex_unlock(&s->mu);
+}
+
 static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     bridge_t *b = self->ud;
-    UNUSED(ctx);
+    volatile sig_atomic_t *cancel = ctx ? ctx->cancel : NULL;
     mcp_server_t *s = find_ref(b->m, b->server);
+    /* DeferredMCPTool.execute: a server still connecting is waited for; one replaced meanwhile (reconnect, reload)
+     * is followed by name; a failed connection gets one reconnect before the call */
+    bool reconnected = false;
+    for (int pass = 0; s && !ready(s) && pass < 4; pass++) {
+        if (sstate(s) == S_CONNECTING) wait_connected(s, cancel);
+        if (cancel && *cancel) {
+            srv_unref(s);
+            tool_result_error(out, "Aborted");
+            return 0;
+        }
+        if (ready(s)) break;
+        if (s->closing) {
+            srv_unref(s);
+            s = find_ref(b->m, b->server);
+            continue;
+        }
+        if (sstate(s) == S_CONNECTING || reconnected) break; /* the wait ran out */
+        reconnected = true;
+        srv_unref(s);
+        char *rerr = NULL;
+        mcp_reconnect_server(b->m, b->server, 0, &rerr);
+        free(rerr);
+        s = find_ref(b->m, b->server);
+    }
     if (!s || !ready(s)) {
         const char *e = NULL;
         if (s) pthread_mutex_lock(&s->mu);
@@ -1563,10 +1652,13 @@ int mcp_register_tools(mcp_manager_t *m, agent_t *a) {
     snapshot(m, &v);
     for (size_t i = 0; i < v.n; i++) {
         mcp_server_t *s = v.v[i];
-        if (!ready(s)) continue;
+        /* MCPTool for a connected server; DeferredMCPTool (the same bridge: the executor waits for the connection)
+         * from the cached catalog while it is not */
+        bool live = ready(s);
         pthread_mutex_lock(&s->mu);
-        json_t *tools = json_clone(s->tools);
+        json_t *tools = live ? json_clone(s->tools) : s->cached_tools ? json_clone(s->cached_tools) : NULL;
         pthread_mutex_unlock(&s->mu);
+        if (!tools) continue;
         json_t *t;
         json_arr_foreach(tools, k, t) {
             const char *tn = json_get_str(t, "name");

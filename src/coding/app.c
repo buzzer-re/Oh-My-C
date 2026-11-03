@@ -1653,6 +1653,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
         if (json_len(cfg)) {
             a->mcp = mcp_manager_new();
             a->owns_mcp = true;
+            mcp_set_tool_cache(a->mcp, true); /* sdk.ts: MCPManager(cwd, new MCPToolCache(storage)) */
             mcp_connect_all(a->mcp, cfg, mcp_startup_timeout_ms());
         }
         json_free(cfg);

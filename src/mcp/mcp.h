@@ -62,7 +62,14 @@ void mcp_set_notifications(mcp_manager_t *m, bool enabled);
 bool mcp_notifications_enabled(mcp_manager_t *m);
 json_t *mcp_subscriptions(mcp_manager_t *m, const char *name);
 
-/* Register bridged tools (mcp__<server>_<tool>) of connected servers on the agent. Returns count. */
+/* MCPToolCache (omp agent.db cache): turn the tool cache on for this manager (off by default; the main session
+ * manager uses it, ACP client servers do not). With it on, every successful tools/list is cached, and a server
+ * still connecting when the startup window closes gets its cached tools registered as deferred tools (calls
+ * wait for the connection) until the live tools replace them. */
+void mcp_set_tool_cache(mcp_manager_t *m, bool on);
+
+/* Register bridged tools (mcp__<server>_<tool>) of connected servers on the agent, plus the cached (deferred)
+ * tools of servers that are not connected. Returns count. */
 int mcp_register_tools(mcp_manager_t *m, agent_t *a);
 /* Replace every mcp__ tool on the agent with the connected servers' current tools (marked discoverable).
  * Call while the agent is idle. Returns the registered count. */
@@ -140,6 +147,14 @@ json_t *mcp_prompt_commands(mcp_manager_t *m);
 /* executePrompt: prompts/get with `args` (owned object, may be NULL); the text / resource-text parts of
  * every message joined by blank lines (owned), or NULL (*err set on a request failure) */
 char *mcp_run_prompt(mcp_manager_t *m, const char *server, const char *prompt, json_t *args, char **err);
+
+/* ---------- tool cache (toolcache.c; <agentDir>/mcp-tool-cache.json) ---------- */
+/* sha256 hex of the config's stable JSON (sorted keys; omc's top-level "_" annotations left out) (owned) */
+char *mcp_tool_cache_hash(const json_t *cfg);
+/* cached tools/list catalog for a server whose config hash still matches, unexpired (owned) or NULL */
+json_t *mcp_tool_cache_get(const char *server, const json_t *cfg);
+/* store a server's tools/list catalog (30-day TTL; expired entries pruned) */
+void mcp_tool_cache_set(const char *server, const json_t *cfg, const json_t *tools);
 
 /* low-level */
 json_t *mcp_request(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, char **err);
