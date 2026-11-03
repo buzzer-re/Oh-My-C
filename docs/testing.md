@@ -177,6 +177,8 @@ Parallel suites and omp comparisons have OOM-killed it, so when more than one bu
 - `sed -i` here resets file modes to 0600, so restore them from git afterwards (`run.sh` and the e2e
   scripts must stay executable).
 - `#ifdef __APPLE__` code never compiles on Linux, so run `build-tools/check_apple.sh` after touching it.
+- The checkout is shared with a Mac, and every `make` copies its own platform's binary over `build/omc`. So `make test`
+  runs the e2e suite against `build/obj/<os>-<arch>/omc` (`OMC_BIN`), which a build on the other OS can't replace.
 
 ## Sanitizer runs (ASan + UBSan)
 

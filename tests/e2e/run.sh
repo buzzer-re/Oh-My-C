@@ -2,7 +2,9 @@
 # End-to-end tests: drive build/omc against a local mock OpenAI-compatible server.
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-B="$ROOT/build/omc"
+# OMC_BIN: `make test` passes this platform's binary (build/obj/<os>-<arch>/omc), because build/omc is shared with
+# other machines building from the same checkout (a macOS make replaces it mid-run)
+B="${OMC_BIN:-$ROOT/build/omc}"
 T=$(mktemp -d "${TMPDIR:-/tmp}/omc-e2e.XXXXXX")
 PORT=$((20000 + RANDOM % 20000))
 mkdir -p "$T/agent" "$T/work"

@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <pthread.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <zlib.h>
 
 static VEC(ai_model_t *) g_models;
@@ -14,6 +15,11 @@ static hmap_t g_index; /* "provider/id" -> ai_model_t* */
 static json_t *g_providers; /* {providers:{id:{...}}, auth:[...]} */
 static json_t *g_defaults;  /* per-api compat defaults */
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
+/* models.yml can be re-read at runtime (catalog_refresh_if_stale), so the model list and index are guarded.
+ * Model objects are never freed: sessions keep pointers to them across a reload. */
+static pthread_rwlock_t g_lock = PTHREAD_RWLOCK_INITIALIZER;
+static int64_t g_cfg_mtime = -1; /* mtime (ns) of the models config last applied; -1 = none existed */
+static strvec_t g_yml_keys;      /* "provider\x1fid" of the models the last applied config defined */
 
 static char *inflate_buf(const unsigned char *data, size_t len, size_t *out_len) {
     z_stream zs = {0};
@@ -130,10 +136,24 @@ static ai_model_t *add_model(json_t *obj) {
 /* models.yml / models.json custom providers (upstream shape) */
 extern json_t *yaml_parse_file_json(const char *path, char **err) __attribute__((weak));
 
+static const char *const g_cfg_names[] = {"models.yml", "models.yaml", "models.json"};
+
+/* mtime (ns) of the models config that would be loaded now, -1 when none exists (ModelsConfigFile.getMtimeMs) */
+static int64_t cfg_mtime(void) {
+    for (size_t i = 0; i < ARRAY_LEN(g_cfg_names); i++) {
+        char *p = omc_agent_path(g_cfg_names[i]);
+        struct stat st;
+        bool ok = stat(p, &st) == 0 && S_ISREG(st.st_mode);
+        free(p);
+        if (ok) return (int64_t)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+    }
+    return -1;
+}
+
 static json_t *load_custom_models_file(void) {
-    static const char *names[] = {"models.yml", "models.yaml", "models.json"};
-    for (size_t i = 0; i < ARRAY_LEN(names); i++) {
-        char *p = omc_agent_path(names[i]);
+    g_cfg_mtime = cfg_mtime();
+    for (size_t i = 0; i < ARRAY_LEN(g_cfg_names); i++) {
+        char *p = omc_agent_path(g_cfg_names[i]);
         if (!fs_is_file(p)) {
             free(p);
             continue;
@@ -158,7 +178,32 @@ static json_t *load_custom_models_file(void) {
     return NULL;
 }
 
+/* models-config-schema thinking normalization: `efforts` wins, then legacy `levels`, then the
+ * `minLevel`..`maxLevel` range over minimal < low < medium < high < xhigh < max */
+static void normalize_thinking(json_t *o) {
+    json_t *t = json_get_obj(o, "thinking");
+    if (!t || json_get_arr(t, "efforts")) return;
+    json_t *lv = json_get_arr(t, "levels");
+    if (lv) {
+        json_set(t, "efforts", json_clone(lv));
+        return;
+    }
+    static const char *const order[] = {"minimal", "low", "medium", "high", "xhigh", "max"};
+    const char *mn = json_get_str(t, "minLevel"), *mx = json_get_str(t, "maxLevel");
+    int a = -1, b = -1;
+    for (int i = 0; i < (int)ARRAY_LEN(order); i++) {
+        if (str_eq(mn, order[i])) a = i;
+        if (str_eq(mx, order[i])) b = i;
+    }
+    if (a < 0 || b < 0) return;
+    if (b < a) b = a;
+    json_t *e = json_arr();
+    for (int i = a; i <= b; i++) json_push_str(e, order[i]);
+    json_set(t, "efforts", e);
+}
+
 static void apply_custom(json_t *cfg) {
+    strvec_t keys = {0};
     json_t *provs = json_get_obj(cfg, "providers");
     const char *pid;
     json_t *pv;
@@ -202,7 +247,9 @@ static void apply_custom(json_t *cfg) {
                 json_push_str(in, "text");
                 json_set(o, "input", in);
             }
-            add_model(o);
+            normalize_thinking(o);
+            ai_model_t *added = add_model(o);
+            if (added) strvec_push_own(&keys, xasprintf("%s\x1f%s", added->provider, added->id));
         }
         /* register provider info for key resolution */
         json_t *pmap = json_get_obj(g_providers, "providers");
@@ -212,11 +259,41 @@ static void apply_custom(json_t *cfg) {
             json_set(pmap, pid, info);
         }
         json_t *info = json_get(pmap, pid);
-        if (info) json_set_bool(info, "modelsYml", true);
+        if (info && !json_get_bool(info, "modelsYml", false)) json_set_bool(info, "modelsYml", true);
+        /* other threads may hold the previous key string (ai_env_api_key): only touch it when it changed, and
+         * leak the replaced value instead of freeing it */
         const char *key = json_get_str(pv, "apiKey");
-        if (info && key) json_set_str(info, "configApiKey", key);
+        if (info && key && !str_eq(json_get_str(info, "configApiKey"), key)) {
+            (void)json_take(info, "configApiKey");
+            json_set_str(info, "configApiKey", key);
+        }
         if (info && headers) json_set(info, "headers", json_clone(headers));
     }
+    /* a reload retires the models the previous config defined and this one no longer does (omp drops them):
+     * they leave the index and are marked gone, but stay allocated for sessions that still point at them */
+    for (size_t i = 0; i < g_yml_keys.n; i++) {
+        if (strvec_contains(&keys, g_yml_keys.v[i])) continue;
+        ai_model_t *m = hmap_del(&g_index, g_yml_keys.v[i]);
+        if (m) json_set_bool(m->raw, "gone", true);
+    }
+    strvec_free(&g_yml_keys);
+    g_yml_keys = keys;
+}
+
+bool catalog_refresh_if_stale(void) {
+    catalog_init();
+    int64_t now = cfg_mtime();
+    if (now == g_cfg_mtime) return false;
+    /* parse outside the lock; an empty config (file deleted) still retires the previous models */
+    json_t *custom = load_custom_models_file();
+    pthread_rwlock_wrlock(&g_lock);
+    json_t *empty = custom ? NULL : json_obj();
+    apply_custom(custom ? custom : empty);
+    pthread_rwlock_unlock(&g_lock);
+    json_free(custom);
+    json_free(empty);
+    LOGI("models config changed on disk: catalog reloaded");
+    return true;
 }
 
 static void do_init(void) {
@@ -253,21 +330,30 @@ void catalog_init(void) { pthread_once(&g_once, do_init); }
 
 size_t catalog_count(void) {
     catalog_init();
-    return g_models.n;
+    pthread_rwlock_rdlock(&g_lock);
+    size_t n = g_models.n;
+    pthread_rwlock_unlock(&g_lock);
+    return n;
 }
 
 const ai_model_t *catalog_at(size_t i) {
     catalog_init();
-    return i < g_models.n ? g_models.v[i] : NULL;
+    pthread_rwlock_rdlock(&g_lock);
+    const ai_model_t *m = i < g_models.n ? g_models.v[i] : NULL;
+    pthread_rwlock_unlock(&g_lock);
+    return m;
 }
 
 const ai_model_t *catalog_register(json_t *obj) {
     catalog_init();
-    return add_model(obj);
+    pthread_rwlock_wrlock(&g_lock);
+    const ai_model_t *m = add_model(obj);
+    pthread_rwlock_unlock(&g_lock);
+    return m;
 }
 
-const ai_model_t *catalog_find(const char *provider, const char *id) {
-    catalog_init();
+/* callers hold g_lock (read) */
+static const ai_model_t *find_unlocked(const char *provider, const char *id) {
     if (!id) return NULL;
     if (provider) {
         char *key = xasprintf("%s\x1f%s", provider, id);
@@ -282,6 +368,14 @@ const ai_model_t *catalog_find(const char *provider, const char *id) {
     return NULL;
 }
 
+const ai_model_t *catalog_find(const char *provider, const char *id) {
+    catalog_init();
+    pthread_rwlock_rdlock(&g_lock);
+    const ai_model_t *m = find_unlocked(provider, id);
+    pthread_rwlock_unlock(&g_lock);
+    return m;
+}
+
 /* provider preference order when an id is ambiguous */
 static int provider_rank(const char *p) {
     static const char *order[] = {"anthropic", "openai", "google", "openai-codex", "xai", "groq", "cerebras",
@@ -293,13 +387,23 @@ static int provider_rank(const char *p) {
 
 static bool provider_has_credentials(const char *p);
 
+static const ai_model_t *resolve_unlocked(const char *pattern);
+
 const ai_model_t *catalog_resolve(const char *pattern) {
     catalog_init();
     if (!pattern || !*pattern) return NULL;
+    pthread_rwlock_rdlock(&g_lock);
+    const ai_model_t *m = resolve_unlocked(pattern);
+    pthread_rwlock_unlock(&g_lock);
+    return m;
+}
+
+/* callers hold g_lock (read) */
+static const ai_model_t *resolve_unlocked(const char *pattern) {
     const char *slash = strchr(pattern, '/');
     if (slash) {
         char *prov = xstrndup(pattern, (size_t)(slash - pattern));
-        const ai_model_t *m = catalog_find(prov, slash + 1);
+        const ai_model_t *m = find_unlocked(prov, slash + 1);
         if (!m) {
             /* fuzzy within provider */
             const ai_model_t *best = NULL;
@@ -313,7 +417,7 @@ const ai_model_t *catalog_resolve(const char *pattern) {
         free(prov);
         if (m) return m;
         /* ids like "openrouter-style/vendor/model" */
-        const ai_model_t *exact = catalog_find(NULL, pattern);
+        const ai_model_t *exact = find_unlocked(NULL, pattern);
         if (exact) return exact;
     }
     /* exact id across providers: prefer authenticated, then provider rank */
@@ -552,12 +656,14 @@ const char *model_web_search_model(const ai_model_t *m) {
 
 void catalog_apply_context_policy(bool extended, bool (*opt_in)(const ai_model_t *m, int64_t standard)) {
     catalog_init();
+    pthread_rwlock_wrlock(&g_lock);
     g_extended = extended;
     for (size_t i = 0; i < g_models.n; i++) {
         ai_model_t *m = g_models.v[i];
         bool ext = extended || (opt_in && m->context_window_ext > m->context_window_std && opt_in(m, m->context_window_std));
         m->context_window = ext ? m->context_window_ext : m->context_window_std;
     }
+    pthread_rwlock_unlock(&g_lock);
 }
 
 bool catalog_context_tiers(const ai_model_t *m, int64_t *standard, int64_t *extended) {

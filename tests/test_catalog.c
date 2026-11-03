@@ -5,6 +5,9 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <time.h>
 
 static int fails;
 #define CHECK(c)                                                                                                       \
@@ -83,6 +86,34 @@ int main(void) {
     char *path = omc_agent_path("model-perf.json");
     CHECK(fs_is_file(path));
     free(path);
+
+    /* models.yml edited mid-session (ModelRegistry.refreshIfStale): a new provider appears, legacy
+     * minLevel/maxLevel thinking normalizes to efforts, removed models retire, unchanged config is a no-op */
+    char *yml = omc_agent_path("models.yml");
+    const char *v1 = "providers:\n  splash:\n    baseUrl: http://127.0.0.1:8000/v1\n    api: openai-completions\n"
+                     "    apiKey: K1\n    models:\n      - id: org/Model-gguf:PQ2_0\n        reasoning: true\n"
+                     "        thinking:\n          minLevel: low\n          maxLevel: xhigh\n          mode: effort\n"
+                     "      - id: other\n";
+    CHECK(!catalog_find("splash", "org/Model-gguf:PQ2_0"));
+    fs_write(yml, v1, strlen(v1));
+    CHECK(catalog_refresh_if_stale());
+    const ai_model_t *sm = catalog_find("splash", "org/Model-gguf:PQ2_0");
+    CHECK(sm && str_eq(sm->base_url, "http://127.0.0.1:8000/v1"));
+    CHECK(sm && !model_supports_effort(sm, EFFORT_MINIMAL) && model_supports_effort(sm, EFFORT_LOW) &&
+          model_supports_effort(sm, EFFORT_XHIGH) && !model_supports_effort(sm, EFFORT_MAX));
+    CHECK(catalog_resolve("splash/org/Model-gguf:PQ2_0") == sm);
+    CHECK(str_eq(json_get_str(catalog_provider_info("splash"), "configApiKey"), "K1"));
+    CHECK(!catalog_refresh_if_stale()); /* unchanged */
+    const char *v2 = "providers:\n  splash:\n    baseUrl: http://127.0.0.1:8001/v1\n    api: openai-completions\n"
+                     "    apiKey: K2\n    models:\n      - id: org/Model-gguf:PQ2_0\n";
+    fs_write(yml, v2, strlen(v2));
+    struct timespec ts[2] = {{0, UTIME_OMIT}, {time(NULL) + 5, 0}}; /* force a different mtime */
+    utimensat(AT_FDCWD, yml, ts, 0);
+    CHECK(catalog_refresh_if_stale());
+    CHECK(catalog_find("splash", "org/Model-gguf:PQ2_0") == sm && str_eq(sm->base_url, "http://127.0.0.1:8001/v1"));
+    CHECK(!catalog_find("splash", "other")); /* removed from models.yml */
+    CHECK(str_eq(json_get_str(catalog_provider_info("splash"), "configApiKey"), "K2"));
+    free(yml);
 
     fs_rm_rf(dir);
     if (fails) return 1;

@@ -286,6 +286,7 @@ void ui_overlay_model_picker(ui_t *u) {
         tui_set_focus(u->tui, &g_open->base);
         return;
     }
+    catalog_refresh_if_stale(); /* model-picker.ts refreshIfStale: pick up a mid-session models.yml edit */
     app_t *a = u->app;
     picker_t *p = xcalloc(1, sizeof *p);
     tui_component_init(&p->base, &PICKER_VT);

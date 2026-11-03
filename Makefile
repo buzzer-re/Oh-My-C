@@ -195,7 +195,7 @@ $(O)/tests/%: tests/%.c $$(T_$$*)
 
 test: $(addprefix $(O)/tests/,$(UNIT_TESTS)) build/examples/embed $(BIN)
 	@set -e; for t in $(UNIT_TESTS); do echo "== $$t"; ./$(O)/tests/$$t >/dev/null || { echo "   FAIL ($$t)"; exit 1; }; echo "   ok"; done
-	@./tests/e2e/run.sh
+	@OMC_BIN=$(CURDIR)/$(O)/omc ./tests/e2e/run.sh
 
 install: $(BIN)
 	mkdir -p $(DESTDIR)$(PREFIX)/bin

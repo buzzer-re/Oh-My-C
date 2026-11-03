@@ -2654,6 +2654,8 @@ static void hub_destroy(tui_component_t *c) {
 static const tui_component_vt HUB_VT = {"model-hub", hub_render, hub_key, NULL, hub_destroy};
 
 void ui_overlay_model_provider(ui_t *u, const char *provider) {
+    /* model-picker.ts: re-read only if models.yml changed since the last load (a mid-session edit) */
+    catalog_refresh_if_stale();
     hub_t *h = xcalloc(1, sizeof *h);
     tui_component_init(&h->base, &HUB_VT);
     h->base.wants_mouse = true;

@@ -71,6 +71,9 @@ const char *catalog_provider_default_model(const char *provider);
 json_t *catalog_provider_info(const char *provider);   /* borrowed: {id, envVars, defaultModel, ...} */
 json_t *catalog_auth_providers(void);                  /* borrowed array of OAuth login descriptors */
 const ai_model_t *catalog_register(json_t *model_obj); /* takes ownership; for custom/discovered models */
+/* ModelRegistry.refreshIfStale: re-applies models.yml when it changed on disk since the last load (new models
+ * appear, edited ones update in place, removed ones are marked gone); true when the catalog changed */
+bool catalog_refresh_if_stale(void);
 /* omp's built-in role selector chains (behavior.kdl role-defaults): borrowed {role: [selector, ...]} */
 json_t *catalog_role_defaults(void);
 /* provider usable without credentials (omp #keylessProviders: local, web, ollama, llama.cpp, lm-studio, apple,
