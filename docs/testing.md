@@ -76,7 +76,7 @@ Other mocks reach real provider code paths through `OMC_PROVIDER_URL_REWRITE` /
 | `mock_gitlab.py` | GitLab Duo and Duo Workflow WebSocket (`providers_gitlab.sh`) |
 | `mock_providers.py` | credential transports: URL, bearer and headers built from stored logins (`providers_transport.sh`) |
 | `mock_auth.py` | device-code, oauth-code, api-key validation, custom hooks (`omc login` over stdin) |
-| `mock_mcp.py`, `mock_mcp_oauth.py` | stdio MCP tool; OAuth-protected streamable-HTTP MCP |
+| `mock_mcp.py`, `mock_mcp_oauth.py` | stdio MCP tool (`--startup-delay=<s>`: a slow server for the startup window / tool cache, tests/e2e/mcp_cache.sh); OAuth-protected streamable-HTTP MCP |
 | `mock_dap.py` | scripted debug adapter |
 | `rpc_client.py`, `acp_client.py`, `eval_client.py` | protocol drivers for RPC, ACP and multi-cell eval sessions |
 | `acp_session.py` | `omc acp` as an editor drives it: session lifecycle (load replay, resume, fork, close), configOptions, steering, refusal, usage, and a fake client advertising fs / terminal / form elicitation for the bridges, plus client `mcpServers` |

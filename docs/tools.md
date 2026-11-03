@@ -240,6 +240,20 @@ not advertised in the description.
   server it keeps the initialize capabilities and serverInfo, the tool / prompt / resource / template
   catalogs, the connection state (connecting, connected, disconnected) and the subscribed URIs. A
   server still connecting after the startup window keeps connecting; its tools bind when it is ready.
+- Tool cache (`toolcache.c`, port of `mcp/tool-cache.ts`; on for the session manager, off for ACP client
+  servers like omp): every successful `tools/list` is stored in `<agent dir>/mcp-tool-cache.json` as
+  `{"<server>": {version: 1, configHash, tools, expiresAt}}` (SHA-256 of the config's sorted-key JSON without
+  omc's `_source`/`_provider` annotations, 30-day TTL, expired entries pruned on write). A server still
+  connecting when the startup window closes gets its cached catalog as deferred tools (`cached_tools`,
+  registered by `mcp_register_tools` like live ones): the bridge resolves the server by name, waits for the
+  connection (`waitForConnection`, up to the server timeout, Esc aborts), tries one reconnect when it failed,
+  then calls. The next tool sync swaps in the live catalog (`#replaceServerTools`); a reconnect with the same
+  config keeps the cached catalog until then. The TUI shows omp's `xdev: xd://: mounted …` line for them
+  at startup and the late `Connected to MCP server` status once the running turn's refresh settles.
+- Print mode waits for MCP startup before the first turn (`mcp_wait_startup`, up to `OMP_MCP_TIMEOUT_MS`,
+  default 30 s), binds the tools, and warns `MCP server "x" not ready after Nms` / `failed to connect: …;
+  its tools are unavailable for this run.`; `OMP_MCP_REQUIRE_READY=1` exits 1 with
+  `Error: MCP servers not ready: …` instead of prompting.
 - Server notifications: `notifications/tools/list_changed`, `prompts/list_changed` and
   `resources/list_changed` re-list that catalog (on a worker thread); prompt changes show up in the
   MCP prompt commands immediately (ACP re-sends `available_commands_update`). With
