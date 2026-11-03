@@ -6,6 +6,7 @@ provider (Qwen-style reasoning model, image input, thinking min/max levels) that
 project with AGENTS.md and two skills (so skill-description compression runs).
 
   first_request_timing.py [--mode rpc|print|tui] [--only omp|omc] [--slot S] [--think S] [--title] [--keep]
+                          [--config 'defaultThinkingLevel: auto\nmemory:\n  backend: local']
 
 For each app it prints every request the mock saw relative to the moment the prompt was submitted: arrival, queue
 time in the slot, kind (main / compress / title / side), size, and whether a Qwen template would think on it.
@@ -20,6 +21,7 @@ ap.add_argument("--slot", type=float, default=1.0)
 ap.add_argument("--think", type=float, default=3.0)
 ap.add_argument("--title", action="store_true", help="keep title generation on")
 ap.add_argument("--keep", action="store_true")
+ap.add_argument("--config", default="", help="extra config.yml lines for both apps (\\n separated)")
 ap.add_argument("--prompt", default="say:hello there, summarize the build rules")
 args = ap.parse_args()
 
@@ -55,7 +57,7 @@ def setup(app, port):
 """)
     with open(os.path.join(agent, "config.yml"), "w") as f:
         f.write("modelRoles:\n  default: splash/qwen3.6-27b\n  smol: splash/qwen3.6-27b\n"
-                "startup:\n  checkUpdate: false\nsetupVersion: 2\n")
+                "startup:\n  checkUpdate: false\nsetupVersion: 2\n" + args.config.replace("\\n", "\n") + "\n")
     # omp extracts its native module into ~/.omp/natives: share that cache (omp's own files) like tests/tui/compare.sh
     natives = os.path.expanduser("~/.omp/natives")
     if app == "omp" and os.path.isdir(natives):
