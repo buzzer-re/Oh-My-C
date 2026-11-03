@@ -31,6 +31,18 @@ models without image input, and drops errored or aborted assistant turns
 - Custom providers and models come from `<agent dir>/models.yml` (or `models.yaml` / `models.json`)
   in omp's format. `apiKey` is an env var name or a literal. `catalog_register()` adds discovered
   models at runtime.
+- Custom and discovered models have no bundled policy row, so `compat_resolve_model()` (`compat_detect.c`) builds
+  one the way omp's `buildModel` does: the identity (`classifyModel`: class, family, revision from the id), the
+  detected chat-completions compat for `openai-completions` / `openrouter` (resolve.ts `detectOpenAICompat`: host
+  quirks from hosts.ts markers; loopback / private-network base URLs count as a local backend, which turns on
+  `replayReasoningContent`, `clampOutputToModelMax`, the `grammar` tool-schema flavor, a 300 s idle timeout and no
+  first-event timeout; Qwen ids use the `qwen` thinking dialect, so requests carry `enable_thinking` and, on local
+  backends, `preserve_thinking`, and never `store`), then the KDL rules that can reach a custom provider id (the
+  llama.cpp / lm-studio / vllm provider rules with their Qwen 3.8 template-effort rules, the gpt-oss / deepseek /
+  kimi class rules), then the entry's own `compat` (known keys only), then `fixupOpenAICompat`. Legacy
+  `thinking.minLevel`/`maxLevel`/`levels` become `efforts`; a reasoning model without a ladder gets omp's default
+  (`minimal`..`xhigh` for the OpenAI dialect with effort support, else `minimal`..`high`); a non-reasoning model
+  drops its `thinking`.
 - `catalog_resolve(pattern)` accepts `provider/id`, a bare id or a fuzzy substring.
 - Context-window tiers (omp `model-registry.ts #applyContextWindowPolicies`): every row has a standard
   window (a premium long-context price tier, `cost.longContext.inputThreshold`, caps it unless

@@ -108,6 +108,10 @@ builds the system prompt. Its listener (`on_agent_event`) then:
 - delivers settled background jobs as steering (`async-result`);
 - applies checkpoint/rewind cuts.
 
+Automatic titles run only in the interactive TUI, like omp's `autoTitle` (print, json, RPC and ACP set
+`OMC_NO_TITLE`). Under `title.generator: fork` the title request starts when the first reply begins
+(`text_start` / `toolcall_start`) as an ephemeral side turn (`app_ephemeral_turn`: session model, system prompt, tool
+catalog, history, the streaming reply so far, the side-channel no-tools reminder and the session thinking level).
 After `agent_prompt()` returns, `app_prompt()` runs title generation and post-turn context maintenance. The modes
 then call `app_after_run()`, which may return a hidden follow-up prompt (async job results, an
 advisor continuation, or a goal continuation) that the mode runs with `app_prompt_hidden()`.
@@ -267,7 +271,11 @@ walking from the repo root to the cwd: `.agents/AGENTS.md`, `.agent/AGENTS.md`, 
 auto-learn managed skills (lowest priority). The first name wins. Skill descriptions are compressed
 into short routing hints by `coding/skilldesc.c` (`skills.compressDescriptions`). A session renders
 a frozen snapshot from the cache `<agent dir>/skill-descriptions.json` and compresses missing ones in
-the background for later sessions.
+the background for later sessions: one plain-string user message per skill on the `smol` role (never the
+session model), at most 4 at once, `temperature: 0`, 1,024 output tokens and reasoning disabled. These requests
+start with the session, so on a single-slot local server the first prompt queues behind them (in omp too). With
+thinking disabled they stay short: a local Qwen gets `enable_thinking: false` from the detected compat
+(docs/ai.md).
 
 **Rules** (markdown with `description`, `globs`, `alwaysApply`, `condition`, `scope`, ...).
 Sources: `.omc|.omp/rules`, `<agent dir>/rules`, `RULES.md`, `.cursor/rules/*.mdc`,
