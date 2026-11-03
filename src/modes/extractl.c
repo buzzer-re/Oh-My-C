@@ -1,11 +1,15 @@
 /* extractl.c - TUI handlers (`handleTui`) of the WP-28 commands: /changelog (CommandController
  * handleChangelogCommand), /setup [providers] (runProviderSetupWizard), /force (builtin-control.ts),
- * /skillful (builtin-modes.ts), /pause (builtin-control.ts, ui/pause.c), /debug (modes/debugctl.c). The session logic is shared with
+ * /skillful (builtin-modes.ts), /pause (builtin-control.ts, ui/pause.c), /debug (modes/debugctl.c); the startup
+ * release notes (startup.changelogMode, the "What's New" header block). The session logic is shared with
  * RPC/ACP in coding/extracmds.c. */
 #include "modes/interactive.h"
 
 #include "coding/changelog.h"
 #include "coding/extracmds.h"
+
+#include "config/settings.h"
+#include "core/fs.h"
 
 #include <ctype.h>
 
@@ -95,4 +99,85 @@ char *xc_description(ui_t *u, const char *name) {
     if (str_eq(name, "force")) return extracmd_force_description(u->app);
     if (str_eq(name, "skillful")) return xasprintf("Skill listing: %s", extracmd_skillful() ? "on" : "off");
     return NULL;
+}
+
+/* ---------- startup release notes (interactive-mode.ts headerAfter "What's New") ---------- */
+
+static changelog_startup_t g_startup;
+static bool g_startup_set;
+
+/* cfgStartupChangelogMode with the legacy `collapseChangelog` boolean (true -> summary, false -> expanded) */
+static const char *changelog_mode(void) {
+    const char *m = settings_str("startup.changelogMode", NULL);
+    if (m && (str_eq(m, "summary") || str_eq(m, "expanded") || str_eq(m, "hidden"))) return m;
+    const json_t *legacy = settings_get("collapseChangelog");
+    if (legacy && json_is_bool(legacy)) return json_bool(legacy) ? "summary" : "expanded";
+    return "summary";
+}
+
+void interactive_startup_changelog(void) {
+    char *marker = omc_agent_path("last-changelog-version");
+    changelog_startup_free(&g_startup);
+    g_startup_set = changelog_startup_resolve(changelog_mode(), marker, &g_startup);
+    free(marker);
+}
+
+/* DynamicBorder */
+static void border_render(tui_component_t *c, int width, strvec_t *out) {
+    sb_t r = SB_INIT;
+    sb_repeat(&r, tui_sym("boxRound.horizontal"), MAX(1, width));
+    strvec_push_own(out, fg(TUI_TC_BORDER, sb_cstr(&r)));
+    sb_free(&r);
+}
+
+static void border_destroy(tui_component_t *c) { free(c); }
+
+static const tui_component_vt BORDER_VT = {"dynamic-border", border_render, NULL, NULL, border_destroy};
+
+static tui_component_t *border_new(void) {
+    tui_component_t *c = xcalloc(1, sizeof *c);
+    tui_component_init(c, &BORDER_VT);
+    return c;
+}
+
+/* `/changelog` and `/changelog full` in the summary turn bold */
+static char *bold_commands(const char *s) {
+    sb_t b = SB_INIT;
+    for (const char *p = s; *p;) {
+        const char *k = strstr(p, "/changelog");
+        if (!k) {
+            sb_append(&b, p);
+            break;
+        }
+        sb_appendn(&b, p, (size_t)(k - p));
+        size_t n = strlen("/changelog");
+        if (!strncmp(k + n, " full", 5)) n += 5;
+        char *cmd = xstrndup(k, n), *bd = tui_bold(cmd);
+        sb_append(&b, bd);
+        free(cmd), free(bd);
+        p = k + n;
+    }
+    return sb_detach(&b);
+}
+
+void xc_whats_new(ui_t *u, tui_container_t *root) {
+    if (!g_startup_set || settings_bool("startup.quiet", false)) return;
+    const char *mode = changelog_mode();
+    if (str_eq(mode, "hidden")) return;
+    tui_container_add(root, border_new());
+    char *f = fg(TUI_TC_ACCENT, "What's New"), *t = tui_bold(f);
+    tui_container_add(root, &tui_text_new(t, 1, 0)->base);
+    free(f), free(t);
+    tui_container_add(root, &tui_spacer_new(1)->base);
+    if (str_eq(mode, "summary")) {
+        char *sum = changelog_startup_summary(&g_startup), *b = bold_commands(sum);
+        tui_container_add(root, &tui_text_new(b, 1, 0)->base);
+        free(sum), free(b);
+    } else {
+        char *md = str_trim(g_startup.markdown ? g_startup.markdown : "");
+        tui_container_add(root, &tui_markdown_new(md, 1, 0)->base);
+        free(md);
+    }
+    tui_container_add(root, &tui_spacer_new(1)->base);
+    tui_container_add(root, border_new());
 }

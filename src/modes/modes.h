@@ -34,6 +34,9 @@ typedef struct {
     const char *notice;       /* startup info notice (`Model scope: …`), may be NULL */
 } interactive_start_t;
 int run_interactive_mode_ex(app_t *a, const interactive_start_t *st);
+/* getChangelogForDisplay (startup.changelogMode): resolve the startup release notes and advance the
+ * last-changelog-version marker; the TUI shows them under the welcome banner. Not for --continue / --resume. */
+void interactive_startup_changelog(void);
 /* /restart closed the TUI: true once, with *resume = the session file to resume (owned, NULL when the session
  * never reached disk) */
 bool interactive_restart_requested(char **resume);

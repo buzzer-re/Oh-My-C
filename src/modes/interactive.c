@@ -3336,6 +3336,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
         tui_container_add(root, &tui_spacer_new(1)->base);
         tui_container_add(root, u.welcome);
         tui_container_add(root, &tui_spacer_new(1)->base);
+        xc_whats_new(&u, root); /* headerAfter: the startup release notes (modes/extractl.c) */
     }
     u.chat = ui_transcript_new(false); /* the welcome banner brings its own trailing spacer */
     tui_container_add(root, &u.chat->base);

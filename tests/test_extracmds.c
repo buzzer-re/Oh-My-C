@@ -2,7 +2,8 @@
  * parseChangelogView / selectChangelogEntries / renderChangelogEntries, handleChangelogCommand titles) and the
  * registry entries of /changelog, /setup, /force, /skillful; WP-28b: /pause (the agent pause gate and
  * pause-screen.ts renderPauseScreen layouts), /debug (system info, terminal state, the tar.gz report bundle,
- * env sanitizing, the artifact cache). */
+ * env sanitizing, the artifact cache), the startup release notes (resolveStartupChangelogForDisplay,
+ * formatStartupChangelogSummary). */
 #include "coding/changelog.h"
 #include "coding/debugtools.h"
 #include "core/fs.h"
@@ -244,8 +245,74 @@ static void test_debug(void) {
     free(base);
 }
 
+static char *marker_read(const char *p) {
+    size_t n = 0;
+    return fs_read(p, &n);
+}
+
+static void test_startup_changelog(void) {
+    CHECK(str_eq(changelog_current_version(), "18.14.2"));
+    const char *tmp = getenv("TMPDIR");
+    char *base = xasprintf("%s/omc-wp28b-cl-XXXXXX", tmp ? tmp : "/tmp");
+    CHECK(mkdtemp(base) != NULL);
+    char *marker = path_join(base, "last-changelog-version");
+    changelog_startup_t s;
+    /* no marker: record the current version, show nothing */
+    CHECK(!changelog_startup_resolve("summary", marker, &s));
+    char *m = marker_read(marker);
+    CHECK(str_eq(m, "18.14.2"));
+    free(m);
+    /* steady state */
+    CHECK(!changelog_startup_resolve("summary", marker, &s));
+    /* three newest of six unseen releases; the marker advances */
+    fs_write(marker, "18.13.0\n", 8);
+    CHECK(changelog_startup_resolve("summary", marker, &s));
+    CHECK(s.selected == 3 && s.total_unseen == 6 && str_eq(s.latest, "18.14.2") && s.change_count == 99);
+    CHECK(s.markdown && !strncmp(s.markdown, "## [18.14.2]", 12) && !s.truncated);
+    char *sum = changelog_startup_summary(&s);
+    CHECK(str_eq(sum, "Updated to v18.14.2 \xc2\xb7 99 changes across 3 releases\n3 breaking changes \xc2\xb7 17 added \xc2\xb7 "
+                      "22 changed \xc2\xb7 57 fixed \xc2\xb7 +3 earlier releases \xc2\xb7 Use /changelog full for history."));
+    free(sum);
+    changelog_startup_free(&s);
+    m = marker_read(marker);
+    CHECK(str_eq(m, "18.14.2"));
+    free(m);
+    /* one release: "in 1 release", details hint */
+    fs_write(marker, "18.14.1", 7);
+    CHECK(changelog_startup_resolve("expanded", marker, &s) && s.selected == 1 && s.total_unseen == 1);
+    sum = changelog_startup_summary(&s);
+    CHECK(strstr(sum, " in 1 release\n") && strstr(sum, "\xc2\xb7 Use /changelog for details."));
+    free(sum);
+    changelog_startup_free(&s);
+    /* hidden: an upgrade advances the marker, a downgrade keeps it */
+    fs_write(marker, "18.0.0", 6);
+    CHECK(!changelog_startup_resolve("hidden", marker, &s));
+    m = marker_read(marker);
+    CHECK(str_eq(m, "18.14.2"));
+    free(m);
+    fs_write(marker, "99.0.0", 6);
+    CHECK(!changelog_startup_resolve("hidden", marker, &s));
+    m = marker_read(marker);
+    CHECK(str_eq(m, "99.0.0"));
+    free(m);
+    /* an unparsable marker is replaced */
+    fs_write(marker, "v18", 3);
+    CHECK(!changelog_startup_resolve("summary", marker, &s));
+    m = marker_read(marker);
+    CHECK(str_eq(m, "18.14.2"));
+    free(m);
+    changelog_startup_t empty = {0};
+    sum = changelog_startup_summary(&empty);
+    CHECK(str_eq(sum, "Updated omp. Use /changelog for recent changes."));
+    free(sum);
+    fs_rm_rf(base);
+    free(marker);
+    free(base);
+}
+
 int main(void) {
     test_views();
+    test_startup_changelog();
     test_pause();
     test_debug();
     test_entries();

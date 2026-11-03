@@ -69,6 +69,9 @@ void cc_shutdown(ui_t *u);
 bool xc_command(ui_t *u, const char *cmd, const char *name, const char *arg);
 char *xc_description(ui_t *u, const char *name); /* getTuiAutocompleteDescription (owned) or NULL */
 
+/* the startup "What's New" block after the welcome banner (resolved by interactive_startup_changelog) */
+void xc_whats_new(ui_t *u, tui_container_t *root);
+
 /* debugctl.c (/debug, Shift+Ctrl+D: debug/index.ts DebugSelectorComponent) */
 void dc_debug_open(ui_t *u);
 /* formatTerminalState over omc's renderer state (owned; exposed for tests) */
