@@ -121,6 +121,7 @@ static const struct {
     {"force", NULL, true, slash_force_text},
     {"pause", NULL, true, NULL},
     {"debug", NULL, true, NULL},
+    {"record", NULL, true, NULL},
     {"forget-approvals", NULL, false, h_forget_approvals},
     {"quit", NULL, true, NULL},
     {"ssh", "*", true, slash_ssh_text},
@@ -183,6 +184,7 @@ static void registry_init(void) {
         /* /resume: omc has no foreign-session (@claude/@codex) import */
         if (!strcmp(c->name, "resume")) c->inline_hint = "[session id]";
         if (!strcmp(c->name, "restart")) c->description = "Restart omc with the same launch flags, resuming this session";
+        if (!strcmp(c->name, "record")) c->description = "Start or stop recording this screen to a replayable file (omc play)";
         vec_push(&g_reg, c);
     }
     /* omc-only commands */

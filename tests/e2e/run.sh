@@ -398,6 +398,7 @@ check "acp slash"      "agent_message_chunk Workspace directories:"  python3 -I 
 check "rpc slash"      "ok unknown slash goes to the model"  python3 -I "$ROOT/tests/e2e/slash_rpc.py" "$B"
 # WP-28: /changelog, /skillful, /force over RPC (forced tool_choice then "none" on the wire)
 check "rpc extracmds"  "extracmds rpc ok"  python3 -I "$ROOT/tests/e2e/extracmds_rpc.py" "$B" "$T/req.jsonl"
+check "tui extracmds"  "extracmds tui ok"  python3 -I "$ROOT/tests/e2e/extracmds_tui.py" "$B" "$T/xc"
 # workspace and session lifecycle (WP-21): --add-dir, /add-dir, /remove-dir, /dirs, /pin, /fresh, /move, /wt
 check "rpc workspace"  "workspace rpc ok"  python3 -I "$ROOT/tests/e2e/workspace_rpc.py" "$B" "$T/req.jsonl"
 # model switching (WP-19): /switch, /modelpreset, prewalk handoff, in a throwaway agent dir

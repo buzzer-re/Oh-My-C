@@ -3,9 +3,11 @@
  * registry entries of /changelog, /setup, /force, /skillful; WP-28b: /pause (the agent pause gate and
  * pause-screen.ts renderPauseScreen layouts), /debug (system info, terminal state, the tar.gz report bundle,
  * env sanitizing, the artifact cache), the startup release notes (resolveStartupChangelogForDisplay,
- * formatStartupChangelogSummary). */
+ * formatStartupChangelogSummary), /record + `omc play` (row normalization, redaction, the paint encoder,
+ * recording parse). */
 #include "coding/changelog.h"
 #include "coding/debugtools.h"
+#include "coding/record.h"
 #include "core/fs.h"
 #include "coding/slashcmd.h"
 #include "tui/ansi.h"
@@ -310,8 +312,92 @@ static void test_startup_changelog(void) {
     free(base);
 }
 
+static bool norm_is(const char *row, const char *want) {
+    char *n = record_normalize_row(row);
+    bool ok = str_eq(n, want);
+    if (!ok) fprintf(stderr, "  normalize: [%s]\n", n);
+    free(n);
+    return ok;
+}
+
+static void test_record(void) {
+    const slash_cmd_t *c = slash_lookup("record");
+    CHECK(c && c->tui && !c->handle && str_eq(c->description, "Start or stop recording this screen to a replayable file (omc play)"));
+    /* normalizeStreamRow: SGR + OSC 8 survive; other CSI, controls, cursor moves drop; images become [image] */
+    CHECK(norm_is("\x1b[1mhi\x1b[0m\x1b[2K\x07x", "\x1b[1mhi\x1b[0mx"));
+    CHECK(norm_is("\x1b]8;;http://a\x07link\x1b]8;;\x07", "\x1b]8;;http://a\x07link\x1b]8;;\x07"));
+    CHECK(norm_is("a\x1b]66;s=2;BIG\x07" "b", "aBIGb"));
+    CHECK(norm_is("x\x1b_Ga=T,f=100;AAAA\x1b\\y", "[image]"));
+    CHECK(norm_is("\x1bPq#0;2;0;0;0\x1b\\", "[image]"));
+    CHECK(norm_is("pre \xf4\x8e\xbb\xae post", "[image]"));
+    CHECK(norm_is("tab\there\xc2\x85!\x1b(0", "tab\there!"));
+    /* redaction: builtin shapes, prefixes, assignments, connection URLs, plain secrets; styling drops */
+    const char *plain[] = {"hunter2hunter2"};
+    record_redactor_t *r = record_redactor_new(plain, 1);
+    char *x = record_redact_row(r, "\x1b[1mok\x1b[0m");
+    CHECK(str_eq(x, "\x1b[1mok\x1b[0m"));
+    free(x);
+    x = record_redact_row(r, "\x1b[1mkey sk-ant-abcdef1234\x1b[0m end");
+    CHECK(str_eq(x, "key \xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2 end"));
+    free(x);
+    x = record_redact_row(r, "export API_TOKEN=\"abcd1234\" and pw hunter2hunter2!");
+    CHECK(x && strstr(x, "API_TOKEN=\"\xe2\x80\xa2") && !strstr(x, "abcd1234") && !strstr(x, "hunter2hunter2"));
+    free(x);
+    x = record_redact_row(r, "db postgres://bob:s3cretpw@host/db Bearer abc.def");
+    CHECK(x && !strstr(x, "s3cretpw") && !strstr(x, "abc.def") && strstr(x, "postgres://bob:"));
+    free(x);
+    /* encoder: a first full viewport, then a patch of the changed row, history + a resize */
+    record_encoder_t *e = record_encoder_new(80, 3, r);
+    const char *v1[] = {"a", "b", "c"}, *v2[] = {"a", "B", "c"}, *hist[] = {"old"};
+    record_paint_t p1 = {NULL, 0, v1, 3, false, false, 80, 3};
+    record_encoder_push(e, &p1);
+    json_t *f = record_encoder_drain(e);
+    char *s = json_dump(f, 0);
+    CHECK(str_eq(s, "[{\"t\":\"viewport\",\"rows\":[\"a\",\"b\",\"c\"]}]"));
+    free(s), json_free(f);
+    record_paint_t p2 = {hist, 1, v2, 3, false, false, 80, 3};
+    record_encoder_push(e, &p2);
+    f = record_encoder_drain(e);
+    s = json_dump(f, 0);
+    CHECK(str_eq(s, "[{\"t\":\"history\",\"rows\":[\"old\"]},{\"t\":\"patch\",\"ops\":[[1,\"B\"]],\"rows\":3}]"));
+    free(s), json_free(f);
+    record_paint_t p3 = {NULL, 0, v2, 3, true, false, 90, 3};
+    record_encoder_push(e, &p3);
+    f = record_encoder_drain(e);
+    s = json_dump(f, 0);
+    CHECK(str_eq(s, "[{\"t\":\"reset\"},{\"t\":\"resize\",\"cols\":90,\"rows\":3},{\"t\":\"viewport\",\"rows\":[\"a\",\"B\",\"c\"]}]"));
+    free(s), json_free(f);
+    f = record_encoder_drain(e); /* nothing pending */
+    CHECK(json_len(f) == 0);
+    json_free(f);
+    record_encoder_free(e);
+    record_redactor_free(r);
+    /* parseRecording */
+    const char *ok = "{\"ompcast\":1,\"cols\":80,\"rows\":24,\"title\":\"t\",\"createdAt\":\"x\"}\n"
+                     "[0,{\"t\":\"viewport\",\"rows\":[\"a\"]}]\n[5,{\"t\":\"patch\",\"ops\":[[0,\"b\"]],\"rows\":1}]\n[9,{\"t\":\"vie";
+    char *err = NULL;
+    json_t *rec = record_parse(ok, strlen(ok), &err);
+    CHECK(rec && json_len(json_get(rec, "events")) == 2 && !err); /* the torn last line is ignored */
+    json_free(rec);
+    const char *bad = "{\"ompcast\":1,\"cols\":80,\"rows\":24,\"title\":\"t\",\"createdAt\":\"x\"}\n[0,{\"t\":\"hello\"}]\n";
+    rec = record_parse(bad, strlen(bad), &err);
+    CHECK(!rec && str_eq(err, "malformed recording event on line 2"));
+    free(err);
+    rec = record_parse("{}\n", 3, &err);
+    CHECK(!rec && str_eq(err, "not an omp recording (missing ompcast header)"));
+    free(err);
+    const char *v2h = "{\"ompcast\":2,\"cols\":80,\"rows\":24,\"title\":\"t\",\"createdAt\":\"x\"}\n";
+    rec = record_parse(v2h, strlen(v2h), &err);
+    CHECK(!rec && str_eq(err, "unsupported recording version 2"));
+    free(err);
+    char *path = record_new_path("0123456789abcdef");
+    CHECK(path && strstr(path, "/omp-recordings/") && str_ends(path, "-01234567.ompcast"));
+    free(path);
+}
+
 int main(void) {
     test_views();
+    test_record();
     test_startup_changelog();
     test_pause();
     test_debug();

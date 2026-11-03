@@ -30,6 +30,9 @@ static char *with_icon(const char *icon, const char *text) {
     return icon && *icon ? xasprintf("%s %s", icon, text) : xstrdup(text);
 }
 
+static bool g_recording;
+void ui_status_set_recording(bool on) { g_recording = on; }
+
 static char *fgw(tui_tc_t slot, const char *s) { return xasprintf("%s%s\x1b[39m", tui_fg_seq(TH(), slot), s); }
 
 static char *fg_rgb(uint32_t rgb, const char *s) {
@@ -859,6 +862,10 @@ static char *render_segment(const char *id, const segctx_t *c) {
         char t[48];
         snprintf(t, sizeof t, "$%.2f", a->total_cost);
         return fgw(TUI_TC_STATUS_LINE_COST, t);
+    }
+    if (str_eq(id, "stream")) { /* streamSegment: `● REC` while /record runs (omc has no live stream) */
+        if (!g_recording) return NULL;
+        return xasprintf("%s\xe2\x97\x8f REC\x1b[39m", tui_fg_seq(TH(), TUI_TC_THINKING_HIGH));
     }
     if (str_eq(id, "session_name")) {
         if (!c->title) return NULL;

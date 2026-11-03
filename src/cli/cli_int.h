@@ -25,6 +25,7 @@ int cmd_grep(cparse_t *p);
 int cmd_login(cparse_t *p);
 int cmd_models(cparse_t *p);
 int cmd_read(cparse_t *p);
+int cmd_play(cparse_t *p); /* sub_play.c */
 int cmd_search(cparse_t *p);
 int cmd_session(cparse_t *p);
 int cmd_setup(cparse_t *p);

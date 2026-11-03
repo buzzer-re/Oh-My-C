@@ -168,6 +168,21 @@ void tui_dispatch_key(tui_t *t, const tui_key_t *k);
  * redraw. Returns 0, or -errno when the stop signal was refused (the TUI is back either way). */
 int tui_suspend(tui_t *t);
 
+/* Paint observer (omp TUI.addPaintListener / TuiPaint), called on the UI thread after each written frame:
+ * `history` the rows this paint committed above the viewport (native scrollback; empty on the alternate
+ * screen), `viewport` the rows on screen, `reset` when the paint erased scrollback and repainted from row
+ * zero, `alt` for an alternate-screen page. Pointers are valid for the call only. NULL fn removes it. */
+typedef struct {
+    const char *const *history;
+    size_t nhistory;
+    const char *const *viewport;
+    size_t nviewport;
+    bool reset, alt;
+    int columns, rows;
+} tui_paint_t;
+typedef void (*tui_paint_fn)(void *ud, const tui_paint_t *p);
+void tui_set_paint_listener(tui_t *t, tui_paint_fn fn, void *ud);
+
 /* Introspection (tests): previous frame lines and the hardware cursor row. */
 const strvec_t *tui_prev_lines(const tui_t *t);
 int tui_render_count(const tui_t *t);

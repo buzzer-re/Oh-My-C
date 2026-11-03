@@ -71,6 +71,9 @@ char *xc_description(ui_t *u, const char *name); /* getTuiAutocompleteDescriptio
 
 /* the startup "What's New" block after the welcome banner (resolved by interactive_startup_changelog) */
 void xc_whats_new(ui_t *u, tui_container_t *root);
+/* /record: start, or stop and save (the `● REC` status badge); shutdown saves a running one */
+void xc_toggle_recording(ui_t *u);
+void xc_recording_shutdown(ui_t *u);
 
 /* debugctl.c (/debug, Shift+Ctrl+D: debug/index.ts DebugSelectorComponent) */
 void dc_debug_open(ui_t *u);

@@ -307,6 +307,8 @@ size_t ui_background_job_count(ui_t *u);                   /* statusline.c: runn
 /* pause.c - `/pause` (overlays/pause-screen.ts runPauseScreen): engage the agent pause gate and hold the
  * fullscreen pause screen until a resume key; then "Resumed after <d> — agents are running again." */
 void ui_pause_run(ui_t *u);
+/* statusline.c: the `stream` segment's `● REC` badge while /record runs */
+void ui_status_set_recording(bool on);
 bool ui_pause_active(void);
 /* renderPauseScreen: exactly `height` rows (exposed for tests) */
 void ui_pause_render(int width, int height, int64_t elapsed_ms, const char *session_name, int turns, int jobs,

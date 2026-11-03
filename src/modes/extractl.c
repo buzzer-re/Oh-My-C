@@ -1,15 +1,18 @@
 /* extractl.c - TUI handlers (`handleTui`) of the WP-28 commands: /changelog (CommandController
  * handleChangelogCommand), /setup [providers] (runProviderSetupWizard), /force (builtin-control.ts),
  * /skillful (builtin-modes.ts), /pause (builtin-control.ts, ui/pause.c), /debug (modes/debugctl.c); the startup
- * release notes (startup.changelogMode, the "What's New" header block). The session logic is shared with
+ * release notes (startup.changelogMode, the "What's New" header block); /record (toggleRecording over
+ * coding/record.c and the renderer's paint observer). The session logic is shared with
  * RPC/ACP in coding/extracmds.c. */
 #include "modes/interactive.h"
 
 #include "coding/changelog.h"
 #include "coding/extracmds.h"
 
+#include "coding/record.h"
 #include "config/settings.h"
 #include "core/fs.h"
+#include "session/dump.h"
 
 #include <ctype.h>
 
@@ -84,6 +87,72 @@ static void setup_command(ui_t *u, const char *name, const char *args) {
     free(arg);
 }
 
+/* ---------- /record (InteractiveMode.toggleRecording + SessionRecorder) ---------- */
+
+static record_writer_t *g_rec;
+static int g_rec_timer;
+
+static void rec_flush(void *ud) {
+    g_rec_timer = 0;
+    if (g_rec) record_writer_flush(g_rec);
+}
+
+static void rec_paint(void *ud, const tui_paint_t *p) {
+    ui_t *u = ud;
+    if (!g_rec) return;
+    record_paint_t rp = {p->history, p->nhistory, p->viewport, p->nviewport, p->reset, p->alt, p->columns, p->rows};
+    record_writer_paint(g_rec, &rp, mono_ms());
+    if (!g_rec_timer) g_rec_timer = tui_add_timer(u->tui, RECORD_FLUSH_MS, false, rec_flush, u);
+}
+
+void xc_toggle_recording(ui_t *u) {
+    if (g_rec) {
+        record_writer_t *w = g_rec;
+        g_rec = NULL;
+        tui_set_paint_listener(u->tui, NULL, NULL);
+        if (g_rec_timer) tui_remove_timer(u->tui, g_rec_timer);
+        g_rec_timer = 0;
+        char *d = dump_format_duration((double)record_writer_elapsed(w, mono_ms()));
+        char *m = xasprintf("Saved %s recording to %s \xc2\xb7 replay: omc play", d, record_writer_path(w));
+        record_writer_close(w);
+        ui_status_set_recording(false);
+        add_notice(u, "info", m);
+        free(m), free(d);
+        return;
+    }
+    app_t *a = u->app;
+    const char *cwd = a->cwd ? a->cwd : ".";
+    record_redactor_t *red = record_redactor_load(cwd, settings_get("stream.redactPatterns"));
+    const char *title = a->session && a->session->title && *a->session->title ? a->session->title : path_basename(cwd);
+    char *path = record_new_path(a->session ? session_id(a->session) : "");
+    tui_term_t *t = tui_term(u->tui);
+    char *err = NULL;
+    g_rec = record_writer_open(path, t->cols, t->rows, title, red, &err);
+    free(path);
+    if (!g_rec) {
+        char *m = xasprintf("Could not start recording: %s", err ? err : "unknown error");
+        add_notice(u, "error", m);
+        free(m), free(err);
+        return;
+    }
+    tui_set_paint_listener(u->tui, rec_paint, u);
+    ui_status_set_recording(true);
+    char *m = xasprintf("Recording to %s \xc2\xb7 /record again to stop", record_writer_path(g_rec));
+    add_notice(u, "info", m);
+    free(m);
+}
+
+/* the TUI is closing: stop and save a running recording */
+void xc_recording_shutdown(ui_t *u) {
+    if (!g_rec) return;
+    tui_set_paint_listener(u->tui, NULL, NULL);
+    if (g_rec_timer) tui_remove_timer(u->tui, g_rec_timer);
+    g_rec_timer = 0;
+    record_writer_close(g_rec);
+    g_rec = NULL;
+    ui_status_set_recording(false);
+}
+
 bool xc_command(ui_t *u, const char *cmd, const char *name, const char *arg) {
     if (str_eq(cmd, "changelog")) changelog_command(u, arg);
     else if (str_eq(cmd, "force")) force_command(u, arg);
@@ -91,6 +160,7 @@ bool xc_command(ui_t *u, const char *cmd, const char *name, const char *arg) {
     else if (str_eq(cmd, "setup")) setup_command(u, name, arg);
     else if (str_eq(cmd, "pause")) ui_pause_run(u); /* builtin-control.ts pause: runPauseScreen */
     else if (str_eq(cmd, "debug")) dc_debug_open(u); /* builtin-lifecycle.ts debug: showDebugSelector */
+    else if (str_eq(cmd, "record")) xc_toggle_recording(u); /* builtin-control.ts record: toggleRecording */
     else return false;
     return true;
 }

@@ -3441,6 +3441,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
         pthread_join(u.worker, NULL);
     }
     ui_btw_free(&u);
+    xc_recording_shutdown(&u); /* save a running /record */
     tc_shutdown(&u);
     cc_shutdown(&u);
     lp_shutdown(&u);
