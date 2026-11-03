@@ -991,6 +991,33 @@ int64_t mcp_startup_timeout_ms(void) {
     return v < 0 ? 250 : v;
 }
 
+/* resolveMCPTimeoutMs: OMP_MCP_TIMEOUT_MS, else 30 s */
+int64_t mcp_timeout_ms(void) {
+    const char *raw = env_get("OMP_MCP_TIMEOUT_MS");
+    if (!raw) raw = env_get("OMC_MCP_TIMEOUT_MS");
+    if (raw && *raw) {
+        char *end;
+        double v = strtod(raw, &end);
+        if (end != raw && !*end && v >= 0) return (int64_t)v;
+        LOGW("Ignoring invalid OMP_MCP_TIMEOUT_MS env value; expected a non-negative number");
+    }
+    return 30000;
+}
+
+void mcp_wait_startup(mcp_manager_t *m, int64_t timeout_ms) {
+    if (!m) return;
+    int64_t deadline = mono_ms() + timeout_ms;
+    for (;;) {
+        srv_vec_t v;
+        snapshot(m, &v);
+        bool pending = false;
+        for (size_t i = 0; i < v.n && !pending; i++) pending = sstate(v.v[i]) == S_CONNECTING;
+        snap_free(&v);
+        if (!pending || (timeout_ms > 0 && mono_ms() >= deadline)) return;
+        usleep(20000);
+    }
+}
+
 /* start connecting `s` (already in the manager); waits up to timeout_ms (0 = until every job settles). A job
  * still running after the wait finishes on its own. */
 static void connect_wait(mcp_manager_t *m, mcp_server_t **srv, size_t n, int64_t timeout_ms) {

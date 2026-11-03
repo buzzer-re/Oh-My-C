@@ -2,6 +2,8 @@
 #include "modes.h"
 #include "coding/costgate.h"
 #include "coding/guards.h"
+#include "mcp/mcp.h"
+#include "tools/tools.h"
 
 #include <pthread.h>
 #include <unistd.h>
@@ -62,6 +64,53 @@ static void notice_stderr(void *ud, const char *level, const char *text) {
     fprintf(stderr, "[%s] %s\n", level, text);
 }
 
+/* singleLine: untrusted server names / errors as one stderr line */
+static char *single_line(const char *s) {
+    sb_t b = SB_INIT;
+    for (const char *p = s ? s : ""; *p; p++) {
+        if (*p == '\r' || *p == '\n' || *p == '\t') {
+            while (p[1] == '\r' || p[1] == '\n' || p[1] == '\t') p++;
+            sb_putc(&b, ' ');
+        } else if ((unsigned char)*p >= 0x20 && *p != 0x7f) {
+            sb_putc(&b, *p);
+        }
+    }
+    return sb_detach(&b);
+}
+
+/* print-mode evaluateReadiness: wait for MCP startup (up to the server timeout), bind the manager's current tools
+ * (deferred ones included) and warn about servers that are not usable. Returns their names (owned). */
+static json_t *mcp_readiness(app_t *a) {
+    json_t *out = json_arr();
+    if (!a->mcp) return out;
+    int64_t timeout = mcp_timeout_ms();
+    mcp_wait_startup(a->mcp, timeout);
+    mcp_sync_tools(a->mcp, a->agent);
+    tools_finalize(a->agent, a->opts.tools);
+    app_rebuild_system_prompt(a);
+    json_t *names = mcp_server_names(a->mcp), *nm;
+    json_arr_foreach(names, i, nm) {
+        if (mcp_server_state(a->mcp, json_sv(nm)) != MCP_CONNECTING) continue;
+        char *server = single_line(json_sv(nm));
+        if (timeout > 0)
+            fprintf(stderr, "Warning: MCP server \"%s\" not ready after %lldms; its tools are unavailable for this run.\n",
+                    server, (long long)timeout);
+        else fprintf(stderr, "Warning: MCP server \"%s\" not ready; its tools are unavailable for this run.\n", server);
+        json_push(out, json_str_own(server));
+    }
+    json_t *failed = mcp_failed(a->mcp), *f;
+    json_arr_foreach(failed, i, f) {
+        if (mcp_server_state(a->mcp, json_get_str(f, "name")) == MCP_CONNECTING) continue;
+        char *server = single_line(json_get_str(f, "name")), *err = single_line(json_get_str(f, "error"));
+        fprintf(stderr, "Warning: MCP server \"%s\" failed to connect: %s; its tools are unavailable for this run.\n", server, err);
+        json_push(out, json_str_own(server));
+        free(err);
+    }
+    json_free(failed);
+    json_free(names);
+    return out;
+}
+
 int run_print_mode(app_t *a, const print_opts_t *o) {
     text_ud_t tu = {.print_thoughts = o->print_thoughts};
     /* plan.defaultOnStartup needs a review surface; the headless plan flow is --plan-yolo */
@@ -87,8 +136,14 @@ int run_print_mode(app_t *a, const print_opts_t *o) {
     }
     int rc = 0;
     guards_disable_stop_reminders(a); /* omp print mode: todo reminders never start extra turns */
+    json_t *unavailable = NULL;
+    bool strict = env_truthy("OMP_MCP_REQUIRE_READY") || env_truthy("OMC_MCP_REQUIRE_READY");
     for (size_t i = 0; i < o->messages.n; i++) {
         size_t before = json_len(a->agent->messages);
+        /* prepareAgentTurn: MCP readiness before the first model turn (and before MCP prompt commands expand);
+         * OMP_MCP_REQUIRE_READY refuses the run */
+        if (!unavailable) unavailable = mcp_readiness(a);
+        if (strict && json_len(unavailable)) break;
         /* session.prompt: MCP prompt / file / template commands expand (skill commands do not run here) */
         char *x = app_expand_input(a, o->messages.v[i], true);
         if (!x) continue;
@@ -122,6 +177,17 @@ int run_print_mode(app_t *a, const print_opts_t *o) {
             break;
         }
     }
+    /* a run with no model turn still reports strict unreadiness */
+    if (strict && !unavailable) unavailable = mcp_readiness(a);
+    if (strict && json_len(unavailable)) {
+        sb_t b = SB_INIT;
+        json_t *n;
+        json_arr_foreach(unavailable, i, n) sb_appendf(&b, "%s%s", i ? ", " : "", json_sv(n));
+        fprintf(stderr, "Error: MCP servers not ready: %s\n", sb_cstr(&b));
+        sb_free(&b);
+        rc = 1;
+    }
+    json_free(unavailable);
     if (!o->json) {
         const json_t *last = last_assistant(a->agent->messages);
         if (last && rc == 0) {

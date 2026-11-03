@@ -5,10 +5,16 @@
 With `--full` it also advertises list_changed / subscribe capabilities, serves a resource (`mem://notes`)
 and a resource template (`mem://item/{id}`), accepts resources/subscribe, and has a `change_prompts` tool
 that adds a `fresh` prompt and sends `notifications/prompts/list_changed` plus
-`notifications/resources/updated` for mem://notes (MCP notification tests)."""
-import json, sys
+`notifications/resources/updated` for mem://notes (MCP notification tests).
+
+`--startup-delay=<secs>` holds the initialize reply back (a slow server: omp's startup window, MCP tool cache and
+deferred tools). $MOCK_MCP_EXTRA_TOOL=<name> adds a tool of that name to tools/list without changing the server
+config (so a cached catalog can differ from the live one)."""
+import json, os, sys, time
 
 FULL = "--full" in sys.argv[1:]
+STARTUP_DELAY = next((float(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("--startup-delay=")), 0.0)
+EXTRA_TOOL = os.environ.get("MOCK_MCP_EXTRA_TOOL")
 extra_prompt = [False]
 
 
@@ -22,6 +28,8 @@ for line in sys.stdin:
     if mid is None:
         continue
     if method == "initialize":
+        if STARTUP_DELAY:
+            time.sleep(STARTUP_DELAY)
         caps = {"tools": {}, "prompts": {}}
         if FULL:
             caps = {"tools": {"listChanged": True}, "prompts": {"listChanged": True},
@@ -51,6 +59,9 @@ for line in sys.stdin:
                   "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]
         if FULL:
             tools.append({"name": "change_prompts", "description": "Add a prompt and notify",
+                          "inputSchema": {"type": "object", "properties": {}}})
+        if EXTRA_TOOL:
+            tools.append({"name": EXTRA_TOOL, "description": "Extra tool",
                           "inputSchema": {"type": "object", "properties": {}}})
         res = {"tools": tools}
     elif method == "tools/call":

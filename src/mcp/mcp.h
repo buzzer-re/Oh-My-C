@@ -38,6 +38,10 @@ void mcp_set_callbacks(mcp_manager_t *m, const mcp_callbacks_t *cb);
 void mcp_connect_all(mcp_manager_t *m, const json_t *config, int64_t timeout_ms);
 /* startup discovery window: OMP_MCP_STARTUP_TIMEOUT_MS, else mcp.startupTimeoutMs (default 250 ms); 0 = wait for all */
 int64_t mcp_startup_timeout_ms(void);
+/* resolveMCPTimeoutMs: the per-server request timeout (OMP_MCP_TIMEOUT_MS, default 30 s) */
+int64_t mcp_timeout_ms(void);
+/* MCPManager.waitForStartup: wait until no server is still connecting, at most timeout_ms (0 = no limit) */
+void mcp_wait_startup(mcp_manager_t *m, int64_t timeout_ms);
 /* Add (or replace) one server and connect it, waiting up to timeout_ms. Returns its state. */
 mcp_state_t mcp_connect_server(mcp_manager_t *m, const char *name, const json_t *cfg, int64_t timeout_ms);
 /* MCPManager.reconnectServer: reconnect with the stored config; MCP_DISCONNECTED (+ *err) when it fails */
