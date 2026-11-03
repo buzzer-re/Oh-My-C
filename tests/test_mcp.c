@@ -198,12 +198,103 @@ static void test_manager(void) {
     json_free(cfg);
 }
 
+/* MCPToolCache (<agentDir>/mcp-tool-cache.json) and DeferredMCPTools: a server still connecting when the startup
+ * window closes gets its cached tools; a call waits for the connection; the live tools replace them */
+static void test_tool_cache(const char *dir) {
+    json_t *c1 = json_parse_str("{\"command\":\"python3\",\"args\":[\"-I\",\"x.py\"],\"env\":{\"B\":\"2\",\"A\":\"1\"}}");
+    json_t *c2 = json_parse_str("{\"env\":{\"A\":\"1\",\"B\":\"2\"},\"args\":[\"-I\",\"x.py\"],\"command\":\"python3\",\"_source\":\"/a/mcp.json\"}");
+    json_t *c3 = json_parse_str("{\"command\":\"python3\",\"args\":[\"-I\",\"y.py\"],\"env\":{\"B\":\"2\",\"A\":\"1\"}}");
+    char *h1 = mcp_tool_cache_hash(c1), *h2 = mcp_tool_cache_hash(c2), *h3 = mcp_tool_cache_hash(c3);
+    CHECK(strlen(h1) == 64 && str_eq(h1, h2) && !str_eq(h1, h3)); /* stable key order; omc "_" annotations ignored */
+    free(h1), free(h2), free(h3);
+    CHECK(mcp_tool_cache_get("srv", c1) == NULL);
+    json_t *tools = json_parse_str("[{\"name\":\"t1\",\"inputSchema\":{\"type\":\"object\"}}]");
+    mcp_tool_cache_set("srv", c1, tools);
+    json_t *got = mcp_tool_cache_get("srv", c2);
+    CHECK(json_equal(got, tools));
+    json_free(got);
+    CHECK(mcp_tool_cache_get("srv", c3) == NULL); /* config changed */
+    CHECK(mcp_tool_cache_get("other", c1) == NULL);
+    char *path = xasprintf("%s/agent/mcp-tool-cache.json", dir);
+    size_t n = 0;
+    char *txt = fs_read(path, &n);
+    json_t *file = txt ? json_parse_str(txt) : NULL;
+    json_t *e = json_get_obj(file, "srv");
+    CHECK(json_get_int(e, "version", 0) == 1 && json_get_int(e, "expiresAt", 0) > 1700000000);
+    /* expired / other versions miss; expired entries are pruned on the next write */
+    json_set_int(e, "expiresAt", 1);
+    char *d = json_dump(file, 0);
+    fs_write(path, d, strlen(d));
+    free(d), free(txt);
+    CHECK(mcp_tool_cache_get("srv", c1) == NULL);
+    mcp_tool_cache_set("srv2", c1, tools);
+    txt = fs_read(path, &n);
+    json_free(file);
+    file = txt ? json_parse_str(txt) : NULL;
+    CHECK(file && !json_get(file, "srv") && json_get(file, "srv2"));
+    json_free(file), free(txt);
+    json_free(tools), json_free(c1), json_free(c2), json_free(c3);
+
+    if (access("tests/e2e/mock_mcp.py", R_OK) != 0) {
+        free(path);
+        return;
+    }
+    json_t *cfg = json_parse_str("{\"command\":\"python3\",\"args\":[\"-I\",\"tests/e2e/mock_mcp.py\",\"--startup-delay=1.5\"]}");
+    /* the cached catalog is older than the server's: echo_text plus a tool the server no longer has */
+    json_t *cached = json_parse_str("[{\"name\":\"echo_text\",\"description\":\"Echo text back\",\"inputSchema\":{\"type\":\"object\","
+                                    "\"properties\":{\"text\":{\"type\":\"string\"}}}},{\"name\":\"old_tool\"}]");
+    mcp_tool_cache_set("slow", cfg, cached);
+    json_free(cached);
+    /* without the cache a pending server has no tools */
+    mcp_manager_t *m0 = mcp_manager_new();
+    CHECK(mcp_connect_server(m0, "slow", cfg, 100) == MCP_CONNECTING);
+    agent_t *a0 = agent_new();
+    CHECK(mcp_register_tools(m0, a0) == 0);
+    agent_free(a0);
+    mcp_manager_free(m0);
+
+    mcp_manager_t *m = mcp_manager_new();
+    mcp_set_tool_cache(m, true);
+    int64_t t0 = mono_ms();
+    CHECK(mcp_connect_server(m, "slow", cfg, 100) == MCP_CONNECTING);
+    CHECK(mono_ms() - t0 < 1000);
+    agent_t *a = agent_new();
+    CHECK(mcp_sync_tools(m, a) == 2);
+    agent_tool_t *echo = agent_find_tool(a, "mcp__slow_echo_text");
+    CHECK(echo && agent_find_tool(a, "mcp__slow_old_tool") && echo->discoverable);
+    if (echo) { /* the deferred call waits for the connection, then runs */
+        tool_ctx_t ctx = {0};
+        tool_result_t out = {0};
+        json_t *args = json_parse_str("{\"text\":\"later\"}");
+        echo->execute(echo, &ctx, args, &out);
+        char *res = tool_result_joined_text(&out);
+        CHECK(!out.is_error && str_eq(res, "mcp echo: later") && mono_ms() - t0 >= 1000);
+        free(res);
+        tool_result_free(&out);
+        json_free(args);
+    }
+    CHECK(mcp_server_state(m, "slow") == MCP_CONNECTED);
+    /* #replaceServerTools: the live catalog replaces the deferred one, and is cached */
+    CHECK(mcp_sync_tools(m, a) == 1 && agent_find_tool(a, "mcp__slow_echo_text") && !agent_find_tool(a, "mcp__slow_old_tool"));
+    json_t *now = mcp_tool_cache_get("slow", cfg);
+    CHECK(json_len(now) == 1 && str_eq(json_get_str(json_at(now, 0), "name"), "echo_text"));
+    json_free(now);
+    agent_free(a);
+    mcp_manager_free(m);
+    json_free(cfg);
+    free(path);
+}
+
 int main(void) {
     char tmpl[] = "/tmp/omc-test-mcp-XXXXXX";
     const char *tmp = getenv("TMPDIR");
     char *dir_t = tmp ? xasprintf("%s/omc-test-mcp-XXXXXX", tmp) : xstrdup(tmpl);
     char *dir = mkdtemp(dir_t);
     if (!dir) return 1;
+    char *agent_dir = xasprintf("%s/agent", dir); /* before anything reads omc_agent_dir() */
+    setenv("OMC_CODING_AGENT_DIR", agent_dir, 1);
+    free(agent_dir);
+    test_tool_cache(dir);
     test_validation();
     test_config_writer(dir);
     test_ssh_writer(dir);
