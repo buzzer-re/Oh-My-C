@@ -1752,7 +1752,7 @@ static int mcp_connect(const json_t *servers, mcp_manager_t **out, json_t **fail
     json_t *cfg = mcp_config(servers, err);
     if (!cfg) return -1;
     mcp_manager_t *m = mcp_manager_new();
-    mcp_connect_all(m, cfg, settings_int("mcp.startupTimeoutMs", 15000));
+    mcp_connect_all(m, cfg, mcp_startup_timeout_ms());
     json_free(cfg);
     json_free(*failed);
     *failed = mcp_failed(m);

@@ -1651,7 +1651,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
         if (json_len(cfg)) {
             a->mcp = mcp_manager_new();
             a->owns_mcp = true;
-            mcp_connect_all(a->mcp, cfg, settings_int("mcp.startupTimeoutMs", 15000));
+            mcp_connect_all(a->mcp, cfg, mcp_startup_timeout_ms());
         }
         json_free(cfg);
     }

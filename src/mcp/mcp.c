@@ -944,8 +944,24 @@ static void *conn_thread(void *p) {
     return NULL;
 }
 
-/* start connecting `s` (already in the manager); waits up to timeout_ms. A job still running after the wait
- * finishes on its own. */
+/* resolveMCPStartupTimeoutMs: the non-blocking discovery window for the initial connections. Startup waits at
+ * most this long; servers still connecting finish in the background and announce their tools (omp issue #2100:
+ * one unresponsive server used to block startup for the whole request timeout). 0 waits until all settle. */
+int64_t mcp_startup_timeout_ms(void) {
+    const char *raw = env_get("OMP_MCP_STARTUP_TIMEOUT_MS");
+    if (!raw) raw = env_get("OMC_MCP_STARTUP_TIMEOUT_MS");
+    if (raw && *raw) {
+        char *end;
+        double v = strtod(raw, &end);
+        if (end != raw && !*end && v >= 0) return (int64_t)v;
+        LOGW("Ignoring invalid OMP_MCP_STARTUP_TIMEOUT_MS env value; expected a non-negative number");
+    }
+    int64_t v = settings_int("mcp.startupTimeoutMs", 250);
+    return v < 0 ? 250 : v;
+}
+
+/* start connecting `s` (already in the manager); waits up to timeout_ms (0 = until every job settles). A job
+ * still running after the wait finishes on its own. */
 static void connect_wait(mcp_manager_t *m, mcp_server_t **srv, size_t n, int64_t timeout_ms) {
     conn_job_t **jobs = xcalloc(n ? n : 1, sizeof(conn_job_t *));
     for (size_t i = 0; i < n; i++) {
@@ -968,7 +984,7 @@ static void connect_wait(mcp_manager_t *m, mcp_server_t **srv, size_t n, int64_t
     for (;;) {
         bool all = true;
         for (size_t i = 0; i < n; i++) all = all && jobs[i]->done;
-        if (all || mono_ms() >= deadline) break;
+        if (all || (timeout_ms > 0 && mono_ms() >= deadline)) break;
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_nsec += 20000000;

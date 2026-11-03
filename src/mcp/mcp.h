@@ -36,6 +36,8 @@ void mcp_set_callbacks(mcp_manager_t *m, const mcp_callbacks_t *cb);
 /* Connect every configured server in parallel; waits up to timeout_ms. A server still connecting then
  * keeps connecting in the background (tools_changed fires when it is ready). */
 void mcp_connect_all(mcp_manager_t *m, const json_t *config, int64_t timeout_ms);
+/* startup discovery window: OMP_MCP_STARTUP_TIMEOUT_MS, else mcp.startupTimeoutMs (default 250 ms); 0 = wait for all */
+int64_t mcp_startup_timeout_ms(void);
 /* Add (or replace) one server and connect it, waiting up to timeout_ms. Returns its state. */
 mcp_state_t mcp_connect_server(mcp_manager_t *m, const char *name, const json_t *cfg, int64_t timeout_ms);
 /* MCPManager.reconnectServer: reconnect with the stored config; MCP_DISCONNECTED (+ *err) when it fails */

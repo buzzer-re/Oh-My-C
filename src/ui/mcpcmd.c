@@ -712,7 +712,7 @@ static void job_free(mjob_t *j) {
 static bool project_enabled(void) { return settings_bool("mcp.enableProjectConfig", true); }
 
 static int64_t startup_window(void) {
-    int64_t w = settings_int("mcp.startupTimeoutMs", 250);
+    int64_t w = mcp_startup_timeout_ms();
     return w <= 0 ? 30000 : w;
 }
 
