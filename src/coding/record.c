@@ -580,7 +580,7 @@ char *record_latest(void) {
             if (!str_ends(l.v[i].name, RECORD_EXTENSION)) continue;
             char *p = path_join(dir, l.v[i].name);
             struct stat st;
-            int64_t mt = stat(p, &st) == 0 ? (int64_t)st.st_mtim.tv_sec * 1000 + st.st_mtim.tv_nsec / 1000000 : 0;
+            int64_t mt = stat(p, &st) == 0 ? (int64_t)st.st_mtime : 0; /* st_mtim is Linux-only */
             if (!best || mt > best_mt) {
                 free(best);
                 best = p;
