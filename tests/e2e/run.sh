@@ -318,8 +318,11 @@ check "queue steer all"     "slow:1.5:x,s1,s2,f1 / 3"  env B="$B" ROOT="$ROOT" b
 check "async bash"     "Backgrounded as job bg_1"  bash -c "'$B' --model mock/mock-1 --mode json -p 'call:bash:{\"command\":\"sleep 1; echo bgdone\",\"async\":true}' | grep -o 'Backgrounded as job bg_1'"
 grep -q "Background job bg_1 has completed" "$T/req.jsonl" && echo "   ok  async delivered" || { echo "   FAIL async delivered"; fail=1; }
 check "wait nothing"   "Nothing to wait for"  "$B" --model mock/mock-1 -p 'call:wait:{}'
-# automatic session title: fork side request returns a card title
-check "fork title"     "🧪 PARK: Fix flaky park tests"  bash -c "env -u OMC_NO_TITLE '$B' --model mock/mock-1 -p 'bash:echo titled' >/dev/null && '$B' sessions | head -3"
+# automatic session title (interactive only, like omp's autoTitle): fork side request returns a card title
+: > "$T/req.jsonl"
+check "print no title"  "0"  bash -c "env -u OMC_NO_TITLE '$B' --model mock/mock-1 -p 'bash:echo untitled' >/dev/null; grep -c '<title-request>' '$T/req.jsonl'"
+check "fork title req"  "title request sent"  python3 -I "$ROOT/tests/e2e/tui_title.py" "$B" "$T/req.jsonl" "bash:echo titled"
+check "fork title"     "🧪 PARK: Fix flaky park tests"  bash -c "'$B' sessions | head -3"
 # omc migrate: a synthetic omp agent dir (SQLite credential/history stores built here, fake secrets)
 OMPD="$T/ompdir"; mkdir -p "$OMPD/skills/demo" "$OMPD/sessions/--x--" "$OMPD/blobs"
 printf 'theme:\n  dark: amethyst\n' > "$OMPD/config.yml"; printf '{"mcpServers":{}}' > "$OMPD/mcp.json"
@@ -599,6 +602,7 @@ source "$ROOT/tests/e2e/websearch.sh"
 source "$ROOT/tests/e2e/settings.sh"
 source "$ROOT/tests/e2e/stall.sh"
 source "$ROOT/tests/e2e/mcp_cache.sh"
+source "$ROOT/tests/e2e/first_request.sh"
 # provider logins over stdin (omc login) against tests/e2e/mock_auth.py
 APORT=$((PORT + 7)); python3 -I "$ROOT/tests/e2e/mock_auth.py" $APORT & APID=$!
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$APORT) 2>/dev/null && break; sleep 0.1; done
