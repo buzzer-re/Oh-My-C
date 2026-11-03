@@ -596,6 +596,7 @@ source "$ROOT/tests/e2e/cli.sh"
 source "$ROOT/tests/e2e/provider_knobs.sh"
 source "$ROOT/tests/e2e/usage.sh"
 source "$ROOT/tests/e2e/websearch.sh"
+source "$ROOT/tests/e2e/settings.sh"
 source "$ROOT/tests/e2e/stall.sh"
 # provider logins over stdin (omc login) against tests/e2e/mock_auth.py
 APORT=$((PORT + 7)); python3 -I "$ROOT/tests/e2e/mock_auth.py" $APORT & APID=$!
