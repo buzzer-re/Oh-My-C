@@ -155,6 +155,7 @@ typedef struct {
 } post_t;
 
 static void sync_tools(ui_t *u);
+static void connection_status(ui_t *u);
 
 static void spin_tick(void *ud) {
     blk_t *b = ud;
@@ -237,6 +238,7 @@ static void blk_post_text(ui_t *u, blk_t *b, const char *text) {
 /* ---------- tool refresh (session.refreshMCPTools) ---------- */
 
 static int g_sync_timer;
+static bool g_status_deferred; /* a late connection's status line waits for the running turn's tool refresh */
 
 static void sync_retry(void *ud) {
     g_sync_timer = 0;
@@ -261,6 +263,10 @@ static void sync_tools(ui_t *u) {
         add_notice(u, "info", m);
         free(m);
         free(xn);
+    }
+    if (g_status_deferred) {
+        g_status_deferred = false;
+        connection_status(u);
     }
     tui_request_render(u->tui);
 }
@@ -421,11 +427,48 @@ static void connection_status(ui_t *u) {
 }
 
 static bool g_startup_phase = true; /* the connection status line follows startup connections only */
+static bool g_install_done;
+
+/* the deferred (cached) MCP tools mounted under xd:// at startup: omp's deferred discovery mounts them through
+ * refreshMCPTools after the "Connecting…" line (xdev: xd://: mounted …); omc registers them with the session, so
+ * the notice line is shown here */
+static void deferred_mount_notice(ui_t *u) {
+    app_t *a = u->app;
+    if (!a->mcp || settings_bool("startup.quiet", false) || !settings_bool("tools.xdevNotices", true)) return;
+    strvec_t names = {0}, servers = {0};
+    pthread_mutex_lock(&a->agent->mu);
+    for (size_t i = 0; i < a->agent->all_tools.n; i++) {
+        agent_tool_t *t = a->agent->all_tools.v[i];
+        if (!t->mounted || !t->mcp_server) continue;
+        strvec_push(&names, t->name);
+        strvec_push(&servers, t->mcp_server);
+    }
+    pthread_mutex_unlock(&a->agent->mu);
+    strvec_t deferred = {0};
+    for (size_t i = 0; i < names.n; i++)
+        if (mcp_server_state(a->mcp, servers.v[i]) != MCP_CONNECTED) strvec_push(&deferred, names.v[i]);
+    if (deferred.n) {
+        char *j = strvec_join(&deferred, ", ");
+        char *m = xasprintf("xdev: xd://: mounted %s", j);
+        add_notice(u, "info", m);
+        free(m);
+        free(j);
+    }
+    strvec_free(&deferred);
+    strvec_free(&names);
+    strvec_free(&servers);
+}
 
 static void late_connect_ui(void *ud) {
     ui_t *u = ud;
+    bool busy = u->worker_running || agent_is_running(u->app->agent);
+    if (g_startup_phase && busy) g_status_deferred = true; /* shown by sync_tools once the turn settles */
     sync_tools(u);
-    if (g_startup_phase) connection_status(u);
+    if (g_startup_phase && !busy) connection_status(u);
+    if (!g_install_done) {
+        g_install_done = true;
+        deferred_mount_notice(u);
+    }
 }
 
 void ui_mcp_install(ui_t *u) {
@@ -448,6 +491,7 @@ static mcp_manager_t *manager(ui_t *u) {
     if (a->opts.no_mcp || a->opts.no_tools || !settings_bool("mcp.enabled", true)) return NULL;
     a->mcp = mcp_manager_new();
     a->owns_mcp = true;
+    mcp_set_tool_cache(a->mcp, true);
     install_callbacks(u);
     return a->mcp;
 }
