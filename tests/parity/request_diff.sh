@@ -8,12 +8,16 @@
 # RD_MODE=rpc drives `--mode rpc` (tests/parity/rpc_drive.py) instead of `-p`, so session continuations print
 # mode suppresses (todo reminders) reach the mock; the RPC events (todo_reminder, notice) land in $RD_DIR/<app>.out.
 # The tool messages of the last request each app sent are written to $RD_DIR/tools.{omp,omc} and diffed.
+# Each app runs with its own throwaway HOME ($RD_DIR/home.<app>), so skills or configs under the real ~ never leak in.
+# RD_TITLE=1 keeps title generation on (both apps otherwise run with OMC_NO_TITLE / PI_NO_TITLE).
+# Prints the size of each first request (bytes of the compact JSON body, system prompt, tool schemas) and every
+# side request (title, skill-description compression) with its position relative to the main request.
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 D=${RD_DIR:-${TMPDIR:-/tmp}/omc-reqdiff}
 PROMPT=${1:-say:hello}
 WORK=${2:-$D/work}
-rm -rf "$D/ompa" "$D/omca" "$D"/*.jsonl; mkdir -p "$D" "$WORK"
+rm -rf "$D/ompa" "$D/omca" "$D/home.omp" "$D/home.omc" "$D"/*.jsonl; mkdir -p "$D" "$WORK" "$D/home.omp" "$D/home.omc"
 port=$((30000 + RANDOM % 20000))
 for d in ompa omca; do
     mkdir -p "$D/$d"
@@ -34,17 +38,18 @@ YML
 done
 run() { # log-name env-var agent-dir binary
     [ -n "${RD_WORKSETUP:-}" ] && "$RD_WORKSETUP" "$WORK"
+    local notitle="OMC_NO_TITLE=1 PI_NO_TITLE=1"; [ -n "${RD_TITLE:-}" ] && notitle=
     MOCK_LOG="$D/$1.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $port >/dev/null 2>&1 & local mp=$!
     for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null && break; sleep 0.1; done
     if [ "${RD_MODE:-print}" = rpc ]; then # session continuations print mode suppresses (todo reminders)
-        (cd "$WORK" && env MOCK_KEY=x OMC_NO_TITLE=1 PI_NO_TITLE=1 "$2=$3" timeout 150 python3 -I "$ROOT/tests/parity/rpc_drive.py" "$4" "$PROMPT" >"$D/$1.out" 2>&1)
+        (cd "$WORK" && env MOCK_KEY=x HOME="$D/home.$1" $notitle "$2=$3" timeout 150 python3 -I "$ROOT/tests/parity/rpc_drive.py" "$4" "$PROMPT" >"$D/$1.out" 2>&1)
     else
-        (cd "$WORK" && env MOCK_KEY=x OMC_NO_TITLE=1 PI_NO_TITLE=1 "$2=$3" timeout 90 "$4" -p "$PROMPT" </dev/null >"$D/$1.out" 2>&1)
+        (cd "$WORK" && env MOCK_KEY=x HOME="$D/home.$1" $notitle "$2=$3" timeout 90 "$4" -p "$PROMPT" </dev/null >"$D/$1.out" 2>&1)
     fi
     kill $mp 2>/dev/null; wait $mp 2>/dev/null
 }
 run omp PI_CODING_AGENT_DIR "$D/ompa" "${OMP_BIN:-omp}"
-run omc OMC_CODING_AGENT_DIR "$D/omca" "$ROOT/build/omc"
+run omc OMC_CODING_AGENT_DIR "$D/omca" "${OMC_BIN:-$ROOT/build/omc}"
 python3 -I - "$D" <<'PY'
 import json, sys
 D = sys.argv[1]
@@ -72,6 +77,21 @@ for k in sorted(set(a) | set(b)):
 def txt(m):
     c = m["content"]
     return c if isinstance(c, str) else "".join(x.get("text", "") for x in c)
+def size(o): return len(json.dumps(o, ensure_ascii=False, separators=(",", ":")).encode())
+for name, r in (("omp", a), ("omc", b)):  # sizes of the first request, and side requests around it
+    allr = [json.loads(l) for l in open(f"{D}/{name}.jsonl")]
+    i = next(i for i, x in enumerate(allr) if x == r)
+    side = [x for x in allr if x is not allr[i]]
+    print(f"{name}: request {size(r)} B, system {len(txt(r['messages'][0]).encode())} B, {len(r['tools'])} tools "
+          f"{sum(size(t) for t in r['tools'])} B, {len(r['messages'])} messages; {i} side request(s) before it, "
+          f"{len(side) - i} after")
+for t in a["tools"]:
+    o = next((x for x in b["tools"] if x["function"]["name"] == t["function"]["name"]), None)
+    if o is None or prod(json.dumps(t)) != json.dumps(o):
+        print(f"  {t['function']['name']}: omp {size(t)} B, omc {size(o) if o else '-'} B")
+for o in b["tools"]:
+    if not any(x["function"]["name"] == o["function"]["name"] for x in a["tools"]):
+        print(f"  {o['function']['name']}: omp - B, omc {size(o)} B")
 open(f"{D}/sys.omp", "w").write(prod(txt(a["messages"][0])))
 open(f"{D}/sys.omc", "w").write(txt(b["messages"][0]))
 open(f"{D}/msgs.omp", "w").write(json.dumps(a["messages"][1:], indent=1, ensure_ascii=False))

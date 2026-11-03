@@ -1,5 +1,6 @@
 /* catalog.c - bundled model catalog (assets/models.json.z) + provider metadata + custom models. */
 #include "ai.h"
+#include "ai/compat_detect.h"
 #include "core/embed.h"
 #include "core/fs.h"
 #include "core/proc.h"
@@ -178,30 +179,6 @@ static json_t *load_custom_models_file(void) {
     return NULL;
 }
 
-/* models-config-schema thinking normalization: `efforts` wins, then legacy `levels`, then the
- * `minLevel`..`maxLevel` range over minimal < low < medium < high < xhigh < max */
-static void normalize_thinking(json_t *o) {
-    json_t *t = json_get_obj(o, "thinking");
-    if (!t || json_get_arr(t, "efforts")) return;
-    json_t *lv = json_get_arr(t, "levels");
-    if (lv) {
-        json_set(t, "efforts", json_clone(lv));
-        return;
-    }
-    static const char *const order[] = {"minimal", "low", "medium", "high", "xhigh", "max"};
-    const char *mn = json_get_str(t, "minLevel"), *mx = json_get_str(t, "maxLevel");
-    int a = -1, b = -1;
-    for (int i = 0; i < (int)ARRAY_LEN(order); i++) {
-        if (str_eq(mn, order[i])) a = i;
-        if (str_eq(mx, order[i])) b = i;
-    }
-    if (a < 0 || b < 0) return;
-    if (b < a) b = a;
-    json_t *e = json_arr();
-    for (int i = a; i <= b; i++) json_push_str(e, order[i]);
-    json_set(t, "efforts", e);
-}
-
 static void apply_custom(json_t *cfg) {
     strvec_t keys = {0};
     json_t *provs = json_get_obj(cfg, "providers");
@@ -247,7 +224,7 @@ static void apply_custom(json_t *cfg) {
                 json_push_str(in, "text");
                 json_set(o, "input", in);
             }
-            normalize_thinking(o);
+            compat_resolve_model(o); /* omp buildModel: legacy thinking ranges, identity, detected compat, ladder */
             ai_model_t *added = add_model(o);
             if (added) strvec_push_own(&keys, xasprintf("%s\x1f%s", added->provider, added->id));
         }
@@ -346,6 +323,7 @@ const ai_model_t *catalog_at(size_t i) {
 
 const ai_model_t *catalog_register(json_t *obj) {
     catalog_init();
+    if (json_is_obj(obj) && !json_get(obj, "compat")) compat_resolve_model(obj); /* discovered local models */
     pthread_rwlock_wrlock(&g_lock);
     const ai_model_t *m = add_model(obj);
     pthread_rwlock_unlock(&g_lock);

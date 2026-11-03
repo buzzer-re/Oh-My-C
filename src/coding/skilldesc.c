@@ -201,8 +201,12 @@ static void *compress_thread(void *p) {
             char *req = prompt_render(PROMPT_PATH, c);
             json_free(c);
             json_t *msgs = json_arr();
-            json_push(msgs, msg_user_text(req ? req : ""));
-            free(req);
+            /* omp: messages: [{role: "user", content: request}] - a plain string, not text blocks */
+            json_t *um = json_obj();
+            json_set_str(um, "role", "user");
+            json_set(um, "content", json_str_own(req ? req : xstrdup("")));
+            json_set_int(um, "timestamp", now_ms());
+            json_push(msgs, um);
             ai_context_t ctx = {.messages = msgs};
             ai_stream_opts_t o;
             ai_stream_opts_init(&o);
