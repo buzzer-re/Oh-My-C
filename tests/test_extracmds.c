@@ -1,13 +1,20 @@
 /* test_extracmds.c - WP-28 commands: /changelog views over the embedded CHANGELOG (utils/changelog.ts
  * parseChangelogView / selectChangelogEntries / renderChangelogEntries, handleChangelogCommand titles) and the
  * registry entries of /changelog, /setup, /force, /skillful; WP-28b: /pause (the agent pause gate and
- * pause-screen.ts renderPauseScreen layouts). */
+ * pause-screen.ts renderPauseScreen layouts), /debug (system info, terminal state, the tar.gz report bundle,
+ * env sanitizing, the artifact cache). */
 #include "coding/changelog.h"
+#include "coding/debugtools.h"
+#include "core/fs.h"
 #include "coding/slashcmd.h"
 #include "tui/ansi.h"
 #include "ui/ui.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <zlib.h>
+
+char *ui_debug_terminal_state(int cols, int rows, bool sync_output); /* modes/debugctl.c */
 
 static int fails;
 #define CHECK(c)                                                                                                       \
@@ -149,9 +156,98 @@ static void test_pause(void) {
     free(d);
 }
 
+/* tar header field helpers over a decompressed archive */
+static unsigned tar_sum(const unsigned char *h) {
+    unsigned s = 0;
+    for (int i = 0; i < 512; i++) s += (i >= 148 && i < 156) ? ' ' : h[i];
+    return s;
+}
+
+static void test_debug(void) {
+    const slash_cmd_t *c = slash_lookup("debug");
+    CHECK(c && c->tui && !c->handle && !c->allow_args && str_eq(c->icon, "bug") && str_eq(c->description, "Open debug tools selector"));
+    /* system info: omp's rows minus the Bun/Node versions */
+    json_t *info = debug_system_info("/work");
+    char *t = debug_format_system_info(info);
+    CHECK(!strncmp(t, "System Information\n\xe2\x94\x81", 22));
+    CHECK(strstr(t, "\nApp:     omc ") && strstr(t, "\nCWD:     /work\n") && !strstr(t, "Bun:") && !strstr(t, "Node:"));
+    CHECK(str_eq(json_get_str(info, "cwd"), "/work") && json_get_num(json_get(info, "memory"), "total", 0) > 0);
+    free(t);
+    json_free(info);
+    /* sanitizeEnv */
+    setenv("WP28B_API_THING", "v1", 1);
+    setenv("WP28B_PLAIN", "v2", 1);
+    json_t *env = debug_sanitized_env();
+    CHECK(str_eq(json_get_str(env, "WP28B_API_THING"), "[REDACTED]") && str_eq(json_get_str(env, "WP28B_PLAIN"), "v2"));
+    json_free(env);
+    json_t *mem = debug_memory_stats();
+    CHECK(json_get_num(json_get(mem, "process"), "rss", 0) > 0);
+    json_free(mem);
+    /* terminal state rows */
+    setenv("TERM", "xterm-256color", 1);
+    unsetenv("TMUX");
+    char *ts = ui_debug_terminal_state(120, 40, true);
+    CHECK(!strncmp(ts, "Terminal State\n", 15) && strstr(ts, "\nGeometry:     120x40 cells \xc2\xb7 cell 9x18px\n"));
+    CHECK(strstr(ts, "  Sync output:  yes (DEC 2026)\n") && strstr(ts, "  TERM:                 xterm-256color\n"));
+    free(ts);
+    /* tar.gz: parent directories once, 0644/0755, mtime 0, a PAX record for a path no ustar split fits */
+    char dir[] = "/tmp/omc-wp28b-XXXXXX";
+    const char *tmp = getenv("TMPDIR");
+    char *base = tmp ? xasprintf("%s/omc-wp28b-XXXXXX", tmp) : xstrdup(dir);
+    CHECK(mkdtemp(base) != NULL);
+    char *out = path_join(base, "r.tar.gz");
+    sb_t longname = SB_INIT;
+    for (int i = 0; i < 120; i++) sb_putc(&longname, 'x');
+    const char *names[] = {"a.json", "art/sub/f.txt", sb_cstr(&longname)};
+    const char *data[] = {"{}", "hello", "z"};
+    size_t lens[] = {2, 5, 1};
+    char *err = NULL;
+    CHECK(debug_write_tar_gz(out, names, data, lens, 3, &err) == 0);
+    gzFile gz = gzopen(out, "rb");
+    unsigned char buf[16384];
+    int n = gz ? gzread(gz, buf, sizeof buf) : 0;
+    if (gz) gzclose(gz);
+    /* a.json, art/, art/sub/, art/sub/f.txt, PaxHeaders + PaxFile, 2 end blocks */
+    CHECK(n == 512 * (2 + 1 + 1 + 2 + 2 + 2 + 2) );
+    if (n >= 512 * 6) {
+        CHECK(!strcmp((char *)buf, "a.json") && buf[156] == '0' && !memcmp(buf + 100, "0000644", 7) && !memcmp(buf + 136, "00000000000", 11));
+        CHECK(!strcmp((char *)buf + 1024, "art/") && buf[1024 + 156] == '5' && !memcmp(buf + 1024 + 100, "0000755", 7));
+        CHECK(!strcmp((char *)buf + 1536, "art/sub/") && !strcmp((char *)buf + 2048, "art/sub/f.txt"));
+        CHECK(!memcmp(buf + 257, "ustar\0" "00", 8) && strtoul((char *)buf + 148, NULL, 8) == tar_sum(buf));
+        CHECK(!strcmp((char *)buf + 3072, "PaxHeaders/00000004") && buf[3072 + 156] == 'x');
+        CHECK(!strncmp((char *)buf + 3584, "130 path=xxx", 12)); /* "<len> path=<120 x>\n": len counts itself */
+        CHECK(!strcmp((char *)buf + 4096, "PaxFile/00000004"));
+    }
+    sb_free(&longname);
+    /* report bundle: members in omp's order, the session's artifact subtree under artifacts/ */
+    char *sess = path_join(base, "s.jsonl"), *adir = path_join(base, "s"), *af = path_join(adir, "1.md");
+    fs_write(sess, "{}\n", 3);
+    fs_mkdir_p(adir, 0755);
+    fs_write(af, "x", 1);
+    json_t *cfg = json_obj();
+    json_set_str(cfg, "model", "m");
+    strvec_t files = {0};
+    char *rep = debug_report_bundle(base, sess, "/w", cfg, NULL, &files, &err);
+    CHECK(rep && files.n == 5 && str_eq(files.v[0], "system.json") && str_eq(files.v[1], "env.json") &&
+          str_eq(files.v[2], "config.json") && str_eq(files.v[3], "session.jsonl") && str_eq(files.v[4], "artifacts/1.md"));
+    CHECK(rep && strstr(rep, "/omp-report-") && strstr(rep, "Z.tar.gz"));
+    /* the artifact cache: subdirectories of the sessions dir */
+    debug_cache_stats_t st;
+    debug_artifact_cache_stats(base, &st);
+    CHECK(st.count == 1 && st.total_size == 1 && st.oldest_ms > 0);
+    CHECK(debug_clear_artifact_cache(base, 30) == 0); /* fresh: nothing older than 30 days */
+    CHECK(debug_clear_artifact_cache(base, -1) == 1);
+    free(rep), free(sess), free(adir), free(af), free(out), free(err);
+    strvec_free(&files);
+    json_free(cfg);
+    fs_rm_rf(base);
+    free(base);
+}
+
 int main(void) {
     test_views();
     test_pause();
+    test_debug();
     test_entries();
     test_registry();
     if (fails) fprintf(stderr, "%d failure(s)\n", fails);

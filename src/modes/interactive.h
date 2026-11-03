@@ -69,4 +69,9 @@ void cc_shutdown(ui_t *u);
 bool xc_command(ui_t *u, const char *cmd, const char *name, const char *arg);
 char *xc_description(ui_t *u, const char *name); /* getTuiAutocompleteDescription (owned) or NULL */
 
+/* debugctl.c (/debug, Shift+Ctrl+D: debug/index.ts DebugSelectorComponent) */
+void dc_debug_open(ui_t *u);
+/* formatTerminalState over omc's renderer state (owned; exposed for tests) */
+char *ui_debug_terminal_state(int cols, int rows, bool sync_output);
+
 #endif

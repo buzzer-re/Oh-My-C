@@ -1,6 +1,6 @@
 /* extractl.c - TUI handlers (`handleTui`) of the WP-28 commands: /changelog (CommandController
  * handleChangelogCommand), /setup [providers] (runProviderSetupWizard), /force (builtin-control.ts),
- * /skillful (builtin-modes.ts), /pause (builtin-control.ts, ui/pause.c). The session logic is shared with
+ * /skillful (builtin-modes.ts), /pause (builtin-control.ts, ui/pause.c), /debug (modes/debugctl.c). The session logic is shared with
  * RPC/ACP in coding/extracmds.c. */
 #include "modes/interactive.h"
 
@@ -86,6 +86,7 @@ bool xc_command(ui_t *u, const char *cmd, const char *name, const char *arg) {
     else if (str_eq(cmd, "skillful")) skillful_command(u, arg);
     else if (str_eq(cmd, "setup")) setup_command(u, name, arg);
     else if (str_eq(cmd, "pause")) ui_pause_run(u); /* builtin-control.ts pause: runPauseScreen */
+    else if (str_eq(cmd, "debug")) dc_debug_open(u); /* builtin-lifecycle.ts debug: showDebugSelector */
     else return false;
     return true;
 }

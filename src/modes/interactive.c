@@ -3046,6 +3046,10 @@ static bool inline_mouse(ui_t *u, const tui_key_t *k) {
 
 static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
     ui_t *u = ud;
+    if (tui_key_matches(k, "ctrl+shift+d") && !ui_pause_active()) { /* the TUI's global onDebug key (Shift+Ctrl+D) */
+        dc_debug_open(u);
+        return true;
+    }
     if (tui_overlay_visible(t) || ui_selector_open(u)) return false;
     if (k->kind == TUI_KEY_MOUSE) return inline_mouse(u, k);
     if (ui_btw_key(u, k)) return true; /* the /btw panel owns Esc while shown; c/f/b act on its answer */
