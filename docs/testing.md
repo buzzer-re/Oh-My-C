@@ -122,6 +122,17 @@ script `tests/e2e/first_request.sh` pins the same setup without omp: the request
 (compression without thinking, plain-string content), their order, the main request's slot wait, and the first
 request's size against omp's measured size (`FR_OMP_BYTES`; re-measure with omp when prompts change).
 
+## Custom model policy (`tests/parity/custom_model_diff.py`)
+
+```sh
+tests/parity/custom_model_diff.py [--sample N] [--seed S] [--show M] [--keep]
+```
+
+This loads one models file into omp and omc (throwaway HOME and agent dirs, no model is requested), asks each for RPC
+`get_available_models`, and diffs every field of each custom model. A fixed matrix covers local backends, hosts and API
+records; `--sample` adds catalog ids in proxy spellings (N up to 400: past that the answer exceeds the RPC transport
+limit in both apps). Run it after changing `compat_detect.c` or regenerating `assets/compat_rules.json.z`.
+
 ## ACP parity (`tests/parity/acp_diff.py`)
 
 ```sh

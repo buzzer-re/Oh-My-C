@@ -861,5 +861,5 @@ Side requests before the first answer, on the single-slot mock (TUI, local Qwen 
 - Memory (`memory.backend: local`) and prewalk add nothing before the first request of a fresh session in either.
 
 Remaining: the title fork snapshots the streaming reply at `text_start`, where omp's snapshot can already hold the
-first deltas; the rest of the custom-model policy gaps are in status.md (KDL cascade beyond the local-backend and
-lineage rules, reference-row inheritance, `moonshot-mfjs` schemas).
+first deltas; the rest of the custom-model policy gaps are in the status.md row (`moonshot-mfjs` schemas, `timeBased`
+cost, `-thinking` sibling collapse, models.yml schema validation).
