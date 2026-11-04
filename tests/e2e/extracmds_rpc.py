@@ -70,7 +70,7 @@ if cmds["changelog"].get("input", {}).get("hint") != "[full|last [N]]":
     fail("changelog hint " + json.dumps(cmds["changelog"]))
 if cmds["force"].get("aliases") != ["force:"]:
     fail("force aliases " + json.dumps(cmds["force"]))
-for name in ("setup", "providers", "ratchet", "omfg", "debug", "pause"):
+for name in ("setup", "providers", "ratchet", "omfg", "debug", "pause", "record"):
     if name in cmds:
         fail("advertised " + name)
 print("ok advertised")
