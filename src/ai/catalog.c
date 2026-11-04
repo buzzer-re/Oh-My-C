@@ -21,6 +21,7 @@ static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static pthread_rwlock_t g_lock = PTHREAD_RWLOCK_INITIALIZER;
 static int64_t g_cfg_mtime = -1; /* mtime (ns) of the models config last applied; -1 = none existed */
 static strvec_t g_yml_keys;      /* "provider\x1fid" of the models the last applied config defined */
+static size_t g_bundled;         /* the first g_bundled entries of g_models are bundled rows */
 
 static char *inflate_buf(const unsigned char *data, size_t len, size_t *out_len) {
     z_stream zs = {0};
@@ -179,6 +180,23 @@ static json_t *load_custom_models_file(void) {
     return NULL;
 }
 
+/* proxy reference lookup over the bundled rows; built before the first custom model joins the list. Caller holds the
+ * init once or g_lock. */
+static const compat_ref_index_t *reference_index(void) {
+    static compat_ref_index_t *idx;
+    if (!idx) {
+        idx = compat_ref_index_new();
+        for (size_t i = 0; i < g_bundled; i++) {
+            const ai_model_t *m = g_models.v[i];
+            /* omp discovers these two providers' rows online; they are not bundled references */
+            if (str_eq(m->provider, "charm-hyper") || str_eq(m->provider, "factory-droid")) continue;
+            compat_ref_index_add(idx, m->raw);
+        }
+        compat_ref_index_finish(idx);
+    }
+    return idx;
+}
+
 static void apply_custom(json_t *cfg) {
     strvec_t keys = {0};
     json_t *provs = json_get_obj(cfg, "providers");
@@ -219,14 +237,30 @@ static void apply_custom(json_t *cfg) {
             if (!json_get_str(o, "api")) json_set_str(o, "api", api ? api : "openai-completions");
             if (!json_get_str(o, "baseUrl") && base) json_set_str(o, "baseUrl", base);
             if (headers && !json_get(o, "headers")) json_set(o, "headers", json_clone(headers));
-            if (!json_get(o, "input")) {
-                json_t *in = json_arr();
-                json_push_str(in, "text");
-                json_set(o, "input", in);
+            /* buildCustomModelOverlay: the provider's compat under the model's */
+            json_t *pcompat = json_get_obj(pv, "compat") ? json_clone(json_get(pv, "compat")) : NULL;
+            if (json_get_bool(pv, "disableStrictTools", false)) {
+                if (!pcompat) pcompat = json_obj();
+                json_set_bool(pcompat, "disableStrictTools", true);
             }
-            compat_resolve_model(o); /* omp buildModel: legacy thinking ranges, identity, detected compat, ladder */
+            if (pcompat) {
+                json_set(o, "compat", compat_merge(pcompat, json_get_obj(o, "compat")));
+                json_free(pcompat);
+            }
+            compat_finalize_custom(o, compat_ref_lookup(reference_index(), json_get_str(o, "id")));
+            /* resolveCustomModelIsOAuth: `auth: oauth`, or an unset `auth` on an Anthropic-wire endpoint (typically a
+             * Claude-Code-style proxy expecting the cloaked request shape) */
+            const char *pauth = json_get_str(pv, "auth");
+            if (str_eq(pauth, "oauth") || (!pauth && str_eq(json_get_str(o, "api"), "anthropic-messages")))
+                json_set_bool(o, "isOAuth", true);
             ai_model_t *added = add_model(o);
-            if (added) strvec_push_own(&keys, xasprintf("%s\x1f%s", added->provider, added->id));
+            if (added) {
+                if (compat_api_has_record(added->api)) added->compat_defaults = NULL;
+                /* omp's inferred context-window tiers cover catalog rows; a custom model keeps its window */
+                added->context_window_pinned = true;
+                fill_model(added);
+                strvec_push_own(&keys, xasprintf("%s\x1f%s", added->provider, added->id));
+            }
         }
         /* register provider info for key resolution */
         json_t *pmap = json_get_obj(g_providers, "providers");
@@ -293,6 +327,7 @@ static void do_init(void) {
             }
         }
         json_free(cat);
+        g_bundled = g_models.n;
     } else {
         LOGE("bundled model catalog missing or corrupt");
     }
@@ -323,9 +358,11 @@ const ai_model_t *catalog_at(size_t i) {
 
 const ai_model_t *catalog_register(json_t *obj) {
     catalog_init();
-    if (json_is_obj(obj) && !json_get(obj, "compat")) compat_resolve_model(obj); /* discovered local models */
+    bool resolved = json_is_obj(obj) && !json_get(obj, "compat"); /* discovered local models */
+    if (resolved) compat_resolve_model(obj);
     pthread_rwlock_wrlock(&g_lock);
-    const ai_model_t *m = add_model(obj);
+    ai_model_t *m = add_model(obj);
+    if (m && resolved && compat_api_has_record(m->api)) m->compat_defaults = NULL;
     pthread_rwlock_unlock(&g_lock);
     return m;
 }

@@ -113,6 +113,43 @@ static void test_custom_policy(void) {
     CHECK(!json_get(m, "thinking"));
     check_json(json_get(m, "identity"), "{\"class\":\"gemma\",\"revision\":\"3.0.0\"}", "gemma identity");
     json_free(m);
+    /* the rule cascade reaches a custom id: DeepSeek keeps text-only input unless the id names vision (classes/deepseek.kdl) */
+    m = resolved("splash", "http://127.0.0.1:9/v1", "{\"id\":\"deepseek-ocr\",\"reasoning\":true}");
+    CHECK(!json_get_bool(json_get(m, "compat"), "stripImageInput", true));
+    json_free(m);
+    /* an Anthropic-wire proxy: signed thinking off the official host, Responses endpoint records */
+    m = resolved("ant", "https://claude-proxy.example.com", "{\"id\":\"not-claude\",\"api\":\"anthropic-messages\",\"reasoning\":true}");
+    c = json_get(m, "compat");
+    CHECK(!json_get_bool(c, "officialEndpoint", true) && !json_get_bool(c, "signingEndpoint", true) && json_get_bool(c, "replayUnsignedThinking", false));
+    json_free(m);
+    m = resolved("resp", "http://127.0.0.1:9/v1", "{\"id\":\"local-resp\",\"api\":\"openai-responses\",\"reasoning\":true}");
+    c = json_get(m, "compat");
+    CHECK(json_get_bool(c, "clampOutputToModelMax", false) && json_get_int(c, "streamIdleTimeoutMs", 0) == 300000);
+    json_free(m);
+    /* a custom entry inherits what it leaves out from its bundled reference, explicit values win */
+    compat_ref_index_t *rx = compat_ref_index_new();
+    json_t *row = json_parse_str("{\"id\":\"vendor/qwen9.9-1b\",\"provider\":\"bundled\",\"contextWindow\":777,\"maxTokens\":55,\"reasoning\":true,"
+                                 "\"input\":[\"text\",\"image\"],\"cost\":{\"input\":1,\"output\":2,\"cacheRead\":0,\"cacheWrite\":0},"
+                                 "\"compatConfig\":{\"supportsDeveloperRole\":true},\"thinking\":{\"mode\":\"effort\",\"efforts\":[\"low\"]}}");
+    compat_ref_index_add(rx, row);
+    compat_ref_index_finish(rx);
+    CHECK(compat_ref_lookup(rx, "vendor/qwen9.9-1b") == row && compat_ref_lookup(rx, "[Kiro] qwen9.9-1b:cloud") == row);
+    CHECK(compat_ref_lookup(rx, "other/QWEN9.9-1B-free") == row && !compat_ref_lookup(rx, "@gw/qwen9.9-1b") && !compat_ref_lookup(rx, "unrelated"));
+    m = json_parse_str("{\"id\":\"qwen9.9-1b\",\"provider\":\"splash\",\"api\":\"openai-completions\",\"baseUrl\":\"http://127.0.0.1:9/v1\",\"maxTokens\":9}");
+    compat_finalize_custom(m, compat_ref_lookup(rx, "qwen9.9-1b"));
+    CHECK(json_get_int(m, "contextWindow", 0) == 777 && json_get_int(m, "maxTokens", 0) == 9 && json_get_bool(m, "reasoning", false));
+    CHECK(json_get_num(json_get_obj(m, "cost"), "output", 0) == 2 && json_len(json_get_arr(m, "input")) == 2);
+    CHECK(json_get_bool(json_get(m, "compat"), "supportsDeveloperRole", false));
+    /* thinking comes along only from a same-provider reference */
+    check_json(json_get(m, "thinking"), "{\"mode\":\"effort\",\"efforts\":[\"minimal\",\"low\",\"medium\",\"high\"]}", "reference thinking");
+    json_free(m);
+    /* no reference: omp's defaults */
+    m = json_parse_str("{\"id\":\"plain\",\"provider\":\"splash\",\"api\":\"openai-completions\",\"baseUrl\":\"https://x.example.com/v1\",\"name\":\"Acme: Plain (latest)\"}");
+    compat_finalize_custom(m, NULL);
+    CHECK(json_get_int(m, "contextWindow", 0) == 128000 && json_get_int(m, "maxTokens", 0) == 16384 && !json_get_bool(m, "reasoning", true));
+    CHECK(str_eq(json_get_str(m, "name"), "Plain"));
+    json_free(m);
+    json_free(row);
     /* loopback / private ranges */
     CHECK(compat_local_base_url("http://localhost:8080/v1") && compat_local_base_url("http://[::1]:8080"));
     CHECK(compat_local_base_url("http://172.20.0.2/v1") && compat_local_base_url("http://box.local./v1"));

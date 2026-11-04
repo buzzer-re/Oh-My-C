@@ -272,7 +272,7 @@ static decision_t evaluate(cache_warmer_t *w, run_t *r) {
 
 void cachewarm_start(cache_warmer_t *w, const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o) {
     if (!w || !m) return;
-    bool oauth = str_eq(m->api, "anthropic-messages") && anthropic_is_oauth_token(o->api_key);
+    bool oauth = str_eq(m->api, "anthropic-messages") && anthropic_model_is_oauth(m, o->api_key);
     const char *tier = cachewarm_tier(m, o->cache_retention, oauth);
     uint64_t hash = 0;
     size_t count = live_count(w->a, NULL, 0);
