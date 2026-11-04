@@ -80,6 +80,9 @@ ttsr_t *ttsr_new(const discovery_t *disc) {
     for (size_t i = 0; i < disc->rules.n; i++) {
         const rule_t *r = &disc->rules.v[i];
         if (!r->ttsr) continue;
+        /* a `question` rule is judged (ttsr.judge): its `condition` is only the judge's prefilter, never a trigger
+         * on its own. omc has no TTSR judge, so such a rule never fires (omp without a judge model). */
+        if (r->has_question) continue;
         bool off = false;
         json_t *x;
         json_arr_foreach(disabled, k, x) if (str_eq(json_sv(x), r->name)) off = true;

@@ -303,6 +303,17 @@ void ui_left_tap(ui_t *u);                                 /* ← on an empty co
 void ui_agents_init(ui_t *u);                              /* registry listener: badge / HUD / hub / focus refresh */
 void ui_agents_shutdown(ui_t *u);
 size_t ui_background_job_count(ui_t *u);                   /* statusline.c: running jobs outside the subagent badge */
+
+/* pause.c - `/pause` (overlays/pause-screen.ts runPauseScreen): engage the agent pause gate and hold the
+ * fullscreen pause screen until a resume key; then "Resumed after <d> — agents are running again." */
+void ui_pause_run(ui_t *u);
+/* statusline.c: the `stream` segment's `● REC` badge while /record runs */
+void ui_status_set_recording(bool on);
+bool ui_pause_active(void);
+/* renderPauseScreen: exactly `height` rows (exposed for tests) */
+void ui_pause_render(int width, int height, int64_t elapsed_ms, const char *session_name, int turns, int jobs,
+                     strvec_t *out);
+char *ui_coarse_duration(int64_t ms); /* chrome/format.ts formatCoarseDuration (owned) */
 /* test hooks: pi-utils formatDuration / formatNumber / formatAge (v = ms / n / s), hub cost (v = micro-dollars);
  * formatMetricColumns of a roster ref; an agent's activity rows */
 char *ui_hub_format(const char *what, int64_t v);

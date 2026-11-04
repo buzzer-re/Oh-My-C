@@ -69,4 +69,15 @@ void cc_shutdown(ui_t *u);
 bool xc_command(ui_t *u, const char *cmd, const char *name, const char *arg);
 char *xc_description(ui_t *u, const char *name); /* getTuiAutocompleteDescription (owned) or NULL */
 
+/* the startup "What's New" block after the welcome banner (resolved by interactive_startup_changelog) */
+void xc_whats_new(ui_t *u, tui_container_t *root);
+/* /record: start, or stop and save (the `● REC` status badge); shutdown saves a running one */
+void xc_toggle_recording(ui_t *u);
+void xc_recording_shutdown(ui_t *u);
+
+/* debugctl.c (/debug, Shift+Ctrl+D: debug/index.ts DebugSelectorComponent) */
+void dc_debug_open(ui_t *u);
+/* formatTerminalState over omc's renderer state (owned; exposed for tests) */
+char *ui_debug_terminal_state(int cols, int rows, bool sync_output);
+
 #endif

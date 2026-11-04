@@ -92,6 +92,10 @@ static const char *const LAUNCH_EXAMPLES[] = {
 
 /* ---------- subcommand metadata ---------- */
 
+extern const cflag_t PLAY_FLAGS[];
+extern const carg_t PLAY_ARGS[];
+extern const char *const PLAY_EXAMPLES[];
+
 static const char *const AGENTS_ACTIONS[] = {"unpack", NULL};
 static const carg_t AGENTS_ARGS[] = {{"action", "Agents action", false, false, AGENTS_ACTIONS}, {0}};
 static const cflag_t AGENTS_FLAGS[] = {{.name = "force", .kind = CF_BOOL, .ch = 'f', .desc = "Overwrite existing agent files"},
@@ -352,6 +356,8 @@ static const cli_cmd_t COMMANDS[] = {
 #endif
     {.name = "setup", .desc = "Run onboarding setup or install dependencies for optional features", .aliases = NULL, .hidden = false, .flags = SETUP_FLAGS,
      .args = SETUP_ARGS, .examples = NULL, .run = cmd_setup},
+    {.name = "play", .desc = "Replay a /record session recording in the terminal (space pauses, q quits)", .aliases = NULL,
+     .hidden = false, .flags = PLAY_FLAGS, .args = PLAY_ARGS, .examples = PLAY_EXAMPLES, .run = cmd_play},
     {.name = "read", .desc = "Show what the read tool will return for a path, URL, or internal URI", .aliases = NULL, .hidden = false, .flags = NULL, .args = READ_ARGS,
      .examples = READ_EXAMPLES, .run = cmd_read},
     {.name = "ssh", .desc = "Manage SSH host configurations", .aliases = NULL, .hidden = false, .flags = SSH_FLAGS, .args = SSH_ARGS, .examples = NULL, .run = cmd_ssh},

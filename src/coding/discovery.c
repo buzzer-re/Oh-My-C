@@ -379,6 +379,15 @@ static rule_t *add_rule_text(discovery_t *d, char *text, const char *path, const
     if (!tt) tt = json_get_str(fm, "ttsr");
     if (!tt) tt = json_get_str(fm, "ttsrTrigger");
     if (tt) r.ttsr = xstrdup(tt);
+    else if (json_is_arr(json_get(fm, "condition"))) {
+        /* a condition list triggers on any of its patterns (omp compiles each): one alternation */
+        sb_t alt = SB_INIT;
+        json_t *x;
+        json_arr_foreach(json_get(fm, "condition"), i, x) if (json_is_str(x) && *json_sv(x))
+            sb_appendf(&alt, "%s(?:%s)", alt.len ? "|" : "", json_sv(x));
+        if (alt.len) r.ttsr = sb_detach(&alt);
+        else sb_free(&alt);
+    }
     const char *ckeys[] = {"condition", "ttsr_trigger", "ttsrTrigger"};
     for (size_t k = 0; k < ARRAY_LEN(ckeys); k++) {
         json_t *c = json_get(fm, ckeys[k]), *x;
@@ -387,6 +396,13 @@ static rule_t *add_rule_text(discovery_t *d, char *text, const char *path, const
         if (c) break;
     }
     if (json_get_str(fm, "scope")) r.scope = xstrdup(json_get_str(fm, "scope"));
+    else if (json_is_arr(json_get(fm, "scope"))) { /* a scope list is the comma-separated form */
+        strvec_t parts = {0};
+        json_t *x;
+        json_arr_foreach(json_get(fm, "scope"), i, x) if (json_is_str(x) && *json_sv(x)) strvec_push(&parts, json_sv(x));
+        if (parts.n) r.scope = strvec_join(&parts, ",");
+        strvec_free(&parts);
+    }
     if (json_get_str(fm, "interruptMode")) r.interrupt_mode = xstrdup(json_get_str(fm, "interruptMode"));
     json_t *ast = json_get(fm, "astCondition");
     if (json_is_str(ast)) {

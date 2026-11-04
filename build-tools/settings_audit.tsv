@@ -9,6 +9,7 @@
 #   omc-only a key omc reads that omp's registry does not have (allowed by the test, listed in the report)
 
 # ---------- read indirectly ----------
+stream.redactPatterns	wired	src/modes/extractl.c passes it to the /record redactor (record_redactor_load)
 magicKeywords.workflow	partial	src/coding/keywords.c builds magicKeywords.<id>; the workflowz notice is withheld (it teaches eval agent()/workpool(), which omc lacks)
 magicKeywords.*	wired	src/coding/keywords.c reads magicKeywords.<id> (snprintf)
 thinkingBudgets.*	wired	src/coding/app.c passes settings_get("thinkingBudgets") to the providers
@@ -76,7 +77,6 @@ emojiAutocomplete	inert	no :shortcode: emoji completion
 spelling.autocomplete	inert	no word-prediction hints
 composer.predictions	inert	no next-message prediction
 startup.showSplash	inert	no animated splash
-startup.changelogMode	inert	no startup changelog
 marketplace.autoUpdate	inert	no plugin marketplace update check
 session.worktreeScope	inert	resume picker does not merge sibling worktrees
 
@@ -202,6 +202,7 @@ task.agentAdvisor	wired	src/ui/agentshub.c reads json_get(settings_get("task"), 
 
 # ---------- omc-only keys (read by omc, absent from omp's registry; parity says omp has no such switch) ----------
 compaction.strategy	omc-only	legacy omp key; omp migrates it into compaction.methodOrder at load and deletes it
+collapseChangelog	omc-only	legacy omp key; omp migrates it into startup.changelogMode at load and deletes it
 compaction.remoteEnabled	omc-only	legacy omp key; omp migrates it into compaction.methodOrder at load and deletes it
 advisor.includeThinking	omc-only	no omp equivalent
 advisor.finalReviewTimeoutMs	omc-only	no omp equivalent

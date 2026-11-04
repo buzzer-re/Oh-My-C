@@ -925,6 +925,88 @@ static json_t *stream_assistant(agent_t *a, int *ttsr_abort, json_t **cursor_res
     return msg;
 }
 
+/* ---------- process-wide pause gate (pause.ts) ---------- */
+
+static pthread_mutex_t g_pause_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_pause_cv = PTHREAD_COND_INITIALIZER;
+static bool g_paused;
+static int64_t g_paused_at;
+static int g_live_loops; /* running loops not parked */
+
+bool agent_pause_gate_pause(void) {
+    pthread_mutex_lock(&g_pause_mu);
+    bool ok = !g_paused;
+    if (ok) {
+        g_paused = true;
+        g_paused_at = now_ms();
+    }
+    pthread_mutex_unlock(&g_pause_mu);
+    return ok;
+}
+
+int64_t agent_pause_gate_resume(void) {
+    pthread_mutex_lock(&g_pause_mu);
+    int64_t held = -1;
+    if (g_paused) {
+        g_paused = false;
+        held = now_ms() - g_paused_at;
+        g_paused_at = 0;
+        pthread_cond_broadcast(&g_pause_cv);
+    }
+    pthread_mutex_unlock(&g_pause_mu);
+    return held;
+}
+
+bool agent_pause_gate_paused(void) {
+    pthread_mutex_lock(&g_pause_mu);
+    bool p = g_paused;
+    pthread_mutex_unlock(&g_pause_mu);
+    return p;
+}
+
+int64_t agent_pause_gate_paused_at(void) {
+    pthread_mutex_lock(&g_pause_mu);
+    int64_t t = g_paused ? g_paused_at : 0;
+    pthread_mutex_unlock(&g_pause_mu);
+    return t;
+}
+
+int agent_unsettled_loops(void) {
+    pthread_mutex_lock(&g_pause_mu);
+    int n = g_live_loops;
+    pthread_mutex_unlock(&g_pause_mu);
+    return n;
+}
+
+static void live_loops_add(int d) {
+    pthread_mutex_lock(&g_pause_mu);
+    g_live_loops += d;
+    pthread_mutex_unlock(&g_pause_mu);
+}
+
+/* waitUntilResumed: park while the gate is engaged; the run's cancel releases only this wait. The loop counts
+ * as settled while any of its waits (turn boundary or a not-yet-started tool) is parked. */
+static void pause_park(agent_t *a) {
+    pthread_mutex_lock(&g_pause_mu);
+    if (!g_paused || a->cancel) {
+        pthread_mutex_unlock(&g_pause_mu);
+        return;
+    }
+    if (a->pause_parked++ == 0) g_live_loops--;
+    while (g_paused && !a->cancel) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 50 * 1000000L;
+        if (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000L;
+        }
+        pthread_cond_timedwait(&g_pause_cv, &g_pause_mu, &ts);
+    }
+    if (--a->pause_parked == 0) g_live_loops++;
+    pthread_mutex_unlock(&g_pause_mu);
+}
+
 /* ---------- tool execution ---------- */
 
 typedef struct {
@@ -950,6 +1032,7 @@ static void tool_update_cb(tool_ctx_t *ctx, const tool_result_t *partial) {
 
 static void run_tool(tool_job_t *j) {
     agent_t *a = j->a;
+    if (!j->skip) pause_park(a); /* tools already running are unaffected (pausing never aborts) */
     const char *name = json_get_str(j->call, "name");
     const char *id = json_get_str(j->call, "id");
     agent_event_t st = {.type = AGENT_EV_TOOL_START, .tool_call_id = id, .tool_name = name, .args = j->args,
@@ -1232,6 +1315,7 @@ static json_t *failed_turn_results(agent_t *a, const json_t *assistant, const js
 static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
     a->running = true;
     a->cancel = 0;
+    live_loops_add(1);
     json_t *run_msgs = json_arr();
     emit_simple(a, AGENT_EV_AGENT_START);
     json_t *m;
@@ -1255,6 +1339,7 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
     int paused_continuations = 0; /* MAX_PAUSED_TURN_CONTINUATIONS (agent-loop.ts) */
     for (;;) {
         if (a->hooks.before_model_call && a->hooks.before_model_call(a->hooks.ud, a)) break;
+        pause_park(a); /* the turn boundary: park while /pause holds the process */
         if (!turn_open) emit_simple(a, AGENT_EV_TURN_START);
         turn_open = false;
         int ttsr = 0;
@@ -1388,6 +1473,7 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
     agent_event_t ee = {.type = AGENT_EV_AGENT_END, .messages = run_msgs};
     a->silent_abort_next = 0;
     a->running = false;
+    live_loops_add(-1);
     emit(a, &ee);
     json_free(run_msgs);
 }

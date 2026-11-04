@@ -174,6 +174,9 @@ struct tui {
     /* OMC_TUI_DEBUG=<file>: one line per frame (kind, trigger, rows, bytes) */
     FILE *dbg;
     const char *frame_kind; /* "diff", "none", "first", "full:<trigger>" */
+    tui_paint_fn paint_fn;  /* tui_set_paint_listener */
+    void *paint_ud;
+    int paint_committed;    /* committed rows already reported to the paint listener */
     int dbg_first;
     char *dbg_old, *dbg_new;
 
@@ -530,7 +533,37 @@ static void write_row(tui_term_t *tm, const char *line, int width) {
     if (tui_visible_width(line) < width) tui_term_puts(tm, "\x1b[K");
 }
 
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+/* the TuiPaint of the frame just written */
+static void emit_paint(tui_t *t, const strvec_t *lines, int width, int height) {
+    tui_paint_t p = {.columns = width, .rows = height, .alt = t->alt};
+    int n = (int)lines->n;
+    if (t->alt) {
+        p.viewport = (const char *const *)lines->v;
+        p.nviewport = (size_t)MIN(n, height);
+    } else {
+        p.reset = str_eq(t->frame_kind, "full:request");
+        int com = clampi(t->committed, 0, n);
+        int from = p.reset ? 0 : clampi(t->paint_committed, 0, com);
+        p.history = (const char *const *)lines->v + from;
+        p.nhistory = (size_t)(com - from);
+        t->paint_committed = com;
+        int top = clampi(t->viewport_top, 0, n), end = MIN(n, top + height);
+        p.viewport = (const char *const *)lines->v + top;
+        p.nviewport = (size_t)(end - top);
+    }
+    t->paint_fn(t->paint_ud, &p);
+}
+
+void tui_set_paint_listener(tui_t *t, tui_paint_fn fn, void *ud) {
+    t->paint_fn = fn;
+    t->paint_ud = ud;
+    t->paint_committed = t->committed > 0 ? t->committed : 0;
+}
+
 static void finish_frame(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int width, int height) {
+    if (t->paint_fn) emit_paint(t, lines, width, height);
     position_cursor(t, cp, (int)lines->n);
     tui_term_puts(t->term, "\x1b[?7h");
     tui_term_sync_end(t->term);

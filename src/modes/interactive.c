@@ -3046,6 +3046,10 @@ static bool inline_mouse(ui_t *u, const tui_key_t *k) {
 
 static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
     ui_t *u = ud;
+    if (tui_key_matches(k, "ctrl+shift+d") && !ui_pause_active()) { /* the TUI's global onDebug key (Shift+Ctrl+D) */
+        dc_debug_open(u);
+        return true;
+    }
     if (tui_overlay_visible(t) || ui_selector_open(u)) return false;
     if (k->kind == TUI_KEY_MOUSE) return inline_mouse(u, k);
     if (ui_btw_key(u, k)) return true; /* the /btw panel owns Esc while shown; c/f/b act on its answer */
@@ -3332,6 +3336,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
         tui_container_add(root, &tui_spacer_new(1)->base);
         tui_container_add(root, u.welcome);
         tui_container_add(root, &tui_spacer_new(1)->base);
+        xc_whats_new(&u, root); /* headerAfter: the startup release notes (modes/extractl.c) */
     }
     u.chat = ui_transcript_new(false); /* the welcome banner brings its own trailing spacer */
     tui_container_add(root, &u.chat->base);
@@ -3436,6 +3441,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
         pthread_join(u.worker, NULL);
     }
     ui_btw_free(&u);
+    xc_recording_shutdown(&u); /* save a running /record */
     tc_shutdown(&u);
     cc_shutdown(&u);
     lp_shutdown(&u);

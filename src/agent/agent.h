@@ -189,6 +189,7 @@ struct agent {
     void *app;                 /* application pointer passed to tools */
     pthread_mutex_t ev_mu;     /* serializes event delivery from tool threads */
     char *stream_error;        /* errorMessage for an AGENT_STREAM_ERROR abort (owned, set by the hook) */
+    int pause_parked;          /* waits of this loop parked at the pause gate (guarded by the gate's lock) */
 };
 
 agent_t *agent_new(void);
@@ -237,6 +238,17 @@ bool agent_steering_has(agent_t *a, const json_t *msg); /* `msg` (by identity) i
 const json_t *agent_steering_at(agent_t *a, size_t i);  /* borrowed identity token; NULL past the end */
 /* Start a run that delivers queued messages (steering first, per mode) when idle. -1 if busy or nothing queued. */
 int agent_run_queued(agent_t *a);
+
+/* Process-wide pause gate (pi-agent-core pause.ts agentPauseGate, the TUI `/pause`): every agent loop of the
+ * process parks before its next model call and before starting each tool; nothing is aborted. A run's own
+ * cancel releases its park without releasing the gate. */
+bool agent_pause_gate_pause(void);          /* engage; false (no-op) when already paused */
+int64_t agent_pause_gate_resume(void);      /* release; the hold in ms, -1 when not paused */
+bool agent_pause_gate_paused(void);
+int64_t agent_pause_gate_paused_at(void);   /* epoch ms of the current pause, 0 when running */
+/* agent loops currently running and not parked at the gate (pauseWorkStatus unsettledTurns over every agent
+ * in the process: main, subagents, advisor) */
+int agent_unsettled_loops(void);
 
 /* helpers to build messages (owned) */
 json_t *msg_user_text(const char *text);

@@ -917,6 +917,7 @@ static int launch_run(launch_args_t *A, bool force_acp) {
             sb_append(&b, " (Ctrl+P to cycle)");
             scope_notice = sb_detach(&b);
         }
+        if (!A->continue_recent && !A->resume_set) interactive_startup_changelog(); /* getChangelogForDisplay */
         interactive_start_t st = {.initial = initial, .images = images, .more = &rest, .resume_picker = picker,
                                   .restore = A->restore, .notice = scope_notice};
         images = NULL; /* owned by the interactive start */
