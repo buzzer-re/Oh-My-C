@@ -22,6 +22,7 @@
 #include "tools/approval.h"
 #include "tools/artifacts.h"
 #include "tools/jobs.h"
+#include "tools/patch.h"
 #include "tools/xdev.h"
 #include "agents.h"
 
@@ -591,6 +592,14 @@ static json_t *wrap_steering(const json_t *messages) {
 }
 
 /* the title fork runs the same transform from its own thread: serialize the reminder state */
+/* a stray sloppy payload in plain text becomes a real edit tool call, so the normal pipeline executes it (omp sdk.ts);
+ * only the sloppy edit tool recovers */
+static void hook_transform_assistant(void *ud, agent_t *ag, json_t *assistant) {
+    app_t *a = ud;
+    if (!settings_bool("edit.recoverInlineEdits", true)) return;
+    if (a->env && str_eq(a->env->edit_mode, "sloppy") && agent_find_tool(ag, "edit")) sloppy_recover_inline(assistant);
+}
+
 static json_t *hook_transform(void *ud, agent_t *ag, const json_t *messages) {
     app_t *a = ud;
     UNUSED(ag);
@@ -1366,6 +1375,7 @@ static void install_agent(app_t *a) {
     ag->hooks.on_request = hook_on_request;
     ag->hooks.should_retry = hook_should_retry;
     ag->hooks.transform_context = hook_transform;
+    ag->hooks.transform_assistant = hook_transform_assistant;
     ag->hooks.on_stream_delta = hook_stream;
     ag->hooks.after_tool = hook_after_tool;
     ag->hooks.before_tool = hook_before_tool;

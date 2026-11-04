@@ -7,6 +7,10 @@
 #include "fuzzy.h"
 
 #include <ctype.h>
+#include <stdatomic.h>
+
+/* shared with the conflicting-operators error so region extraction can recognize a payload the pipeline must report */
+#define CONFLICTING_OPERATORS_LEAD "*** Find is followed by both"
 
 #define GAP "…"
 #define ADD_MARK "＋"
@@ -360,6 +364,166 @@ bool sloppy_split_sections(const char *input, sloppy_sections_t *out, char **err
     vec_free(&secs);
     if (!ok) sloppy_sections_free(out);
     return ok;
+}
+
+/* ---------- payloads written as text ---------- */
+
+void sloppy_inline_regions(const char *text, sloppy_regions_t *out) {
+    memset(out, 0, sizeof(*out));
+    if (!strstr(text, "***")) return;
+    size_t text_len = strlen(text);
+    strvec_t lines = {0};
+    VEC(size_t) starts = {0};
+    for (const char *p = text;;) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        strvec_push_own(&lines, xstrndup(p, n));
+        vec_push(&starts, (size_t)(p - text));
+        if (!nl) break;
+        p = nl + 1;
+    }
+    bool in_fence = false;
+    size_t index = 0;
+    while (index < lines.n) {
+        const char *line = lines.v[index];
+        if (fence_line(line)) {
+            in_fence = !in_fence;
+            index++;
+            continue;
+        }
+        char *path = NULL;
+        bool opener = !in_fence && parse_header(line, &path, NULL) == H_EDIT && path;
+        free(path);
+        if (!opener) {
+            index++;
+            continue;
+        }
+        size_t last = index, scan = index + 1;
+        bool in_block = false;
+        while (scan < lines.n) {
+            char *t = fz_trim(lines.v[scan]);
+            bool end = envelope_end(t);
+            free(t);
+            if (end) break;
+            int header = parse_header(lines.v[scan], NULL, NULL);
+            if (header == H_NONE) {
+                if (!in_block) {
+                    if (fz_blank(lines.v[scan])) {
+                        scan++;
+                        continue;
+                    }
+                    break;
+                }
+                last = scan++;
+                continue;
+            }
+            in_block = header != H_EDIT;
+            last = scan++;
+        }
+        sb_t payload = SB_INIT;
+        for (size_t i = index; i <= last; i++) {
+            if (i > index) sb_putc(&payload, '\n');
+            sb_append(&payload, lines.v[i]);
+        }
+        char *body = sb_detach(&payload);
+        /* a payload the parser rejects is prose, except conflicting operators, which the edit pipeline must report */
+        sloppy_sections_t secs;
+        char *err = NULL;
+        bool parsed = sloppy_split_sections(body, &secs, &err);
+        bool recognized = parsed ? secs.n > 0 : err && str_starts(err, CONFLICTING_OPERATORS_LEAD);
+        if (parsed) sloppy_sections_free(&secs);
+        free(err);
+        if (recognized) {
+            sloppy_region_t r = {.start = starts.v[index], .end = MIN(starts.v[last] + strlen(lines.v[last]) + 1, text_len), .payload = body};
+            vec_push(out, r);
+        } else {
+            free(body);
+        }
+        index = MAX(scan, last + 1);
+    }
+    strvec_free(&lines);
+    free(starts.v);
+}
+
+void sloppy_regions_free(sloppy_regions_t *r) {
+    for (size_t i = 0; i < r->n; i++) free(r->v[i].payload);
+    free(r->v);
+    memset(r, 0, sizeof(*r));
+}
+
+/* mintToolCallId: ptc_<ms in base 36>_<counter in base 36> */
+static void append_base36(sb_t *b, uint64_t v) {
+    char tmp[16];
+    int n = 0;
+    do {
+        tmp[n++] = "0123456789abcdefghijklmnopqrstuvwxyz"[v % 36];
+        v /= 36;
+    } while (v && n < (int)sizeof tmp);
+    while (n) sb_putc(b, tmp[--n]);
+}
+
+static char *mint_tool_call_id(void) {
+    static _Atomic uint64_t counter;
+    sb_t b = SB_INIT;
+    sb_append(&b, "ptc_");
+    append_base36(&b, (uint64_t)now_ms());
+    sb_putc(&b, '_');
+    append_base36(&b, ++counter);
+    return sb_detach(&b);
+}
+
+int sloppy_recover_inline(json_t *message) {
+    json_t *content = json_get_arr(message, "content");
+    if (!content || !str_eq(json_get_str(message, "stopReason"), "stop")) return 0;
+    json_t *block;
+    json_arr_foreach(content, bi, block) {
+        if (str_eq(json_get_str(block, "type"), "toolCall")) return 0;
+    }
+    strvec_t payloads = {0};
+    json_arr_foreach(content, ti, block) {
+        const char *text = json_get_str(block, "text");
+        if (!str_eq(json_get_str(block, "type"), "text") || !text) continue;
+        sloppy_regions_t regions;
+        sloppy_inline_regions(text, &regions);
+        if (!regions.n) continue;
+        sb_t remaining = SB_INIT;
+        size_t cursor = 0;
+        for (size_t i = 0; i < regions.n; i++) {
+            sb_appendn(&remaining, text + cursor, regions.v[i].start - cursor);
+            cursor = regions.v[i].end;
+            strvec_push(&payloads, regions.v[i].payload);
+        }
+        sb_append(&remaining, text + cursor);
+        json_set_str(block, "text", sb_cstr(&remaining));
+        sb_free(&remaining);
+        sloppy_regions_free(&regions);
+    }
+    int recovered = (int)payloads.n;
+    if (!recovered) return 0;
+    for (size_t i = json_len(content); i-- > 0;) {
+        json_t *b = json_at(content, i);
+        const char *text = json_get_str(b, "text");
+        if (str_eq(json_get_str(b, "type"), "text") && (!text || fz_blank(text))) json_free(json_arr_remove(content, i));
+    }
+    sb_t input = SB_INIT;
+    for (size_t i = 0; i < payloads.n; i++) {
+        if (i) sb_putc(&input, '\n');
+        sb_append(&input, payloads.v[i]);
+    }
+    strvec_free(&payloads);
+    json_t *call = json_obj();
+    json_set_str(call, "type", "toolCall");
+    char *id = mint_tool_call_id();
+    json_set_str(call, "id", id);
+    free(id);
+    json_set_str(call, "name", "edit");
+    json_t *args = json_obj();
+    json_set_str(args, "input", sb_cstr(&input));
+    json_set(call, "arguments", args);
+    json_set_str(call, "rawBlock", sb_cstr(&input));
+    sb_free(&input);
+    json_push(content, call);
+    return recovered;
 }
 
 void sloppy_sections_free(sloppy_sections_t *s) {

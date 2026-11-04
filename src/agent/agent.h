@@ -129,6 +129,9 @@ typedef struct {
     void (*after_tool)(void *ud, agent_t *a, const json_t *tool_call, tool_result_t *res);
     /* Transform the message list right before an LLM call (compaction, injections). Return owned array or NULL. */
     json_t *(*transform_context)(void *ud, agent_t *a, const json_t *messages);
+    /* Rewrite a finalized assistant message in place before it reaches the context, the UI or tool dispatch
+     * (omp transformAssistantMessage). */
+    void (*transform_assistant)(void *ud, agent_t *a, json_t *assistant);
     /* Fill per-request stream options (api key refresh etc). */
     void (*prepare_request)(void *ud, agent_t *a, ai_stream_opts_t *opts);
     /* the request about to be streamed (model, final provider context and options), e.g. to arm the prompt-cache

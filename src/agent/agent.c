@@ -1269,6 +1269,7 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
             a->cancel = 0;
             ttsr = 0;
         }
+        if (!ttsr && a->hooks.transform_assistant) a->hooks.transform_assistant(a->hooks.ud, a, assistant);
         const char *stop = json_get_str(assistant, "stopReason");
         bool failed = stop && (strcmp(stop, "error") == 0 || strcmp(stop, "aborted") == 0);
         json_t *synth = NULL; /* synthetic results of a failed turn's calls: emitted, not yet in the history */

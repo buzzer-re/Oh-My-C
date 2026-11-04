@@ -5,12 +5,14 @@
 #include "patch.h"
 
 #include "core/fs.h"
+#include "text/regex.h"
 #include "diff.h"
 #include "fuzzy.h"
 #include "hashline.h"
 #include "tools.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -535,7 +537,190 @@ static char *nb_serialize(const char *original, const char *text, const char *di
     return out;
 }
 
+/* ======================================================================================
+ * generated-file guard (pi-edit path_policy.rs: generated_filename, detect_generated_marker,
+ * comment_styles, leading_comment_text, auto_generated_message)
+ * ====================================================================================== */
+
+enum { CS_SLASH = 1, CS_HASH = 2, CS_SQL = 4, CS_HTML = 8 };
+
+static bool word_in(const char *w, const char *const *list) {
+    for (; *list; list++)
+        if (str_eq(w, *list)) return true;
+    return false;
+}
+
+/* final path component with `\` read as `/` (borrowed from `norm`, a writable copy of the display path) */
+static const char *display_basename(char *norm) {
+    for (char *p = norm; *p; p++)
+        if (*p == '\\') *p = '/';
+    const char *slash = strrchr(norm, '/');
+    return slash ? slash + 1 : norm;
+}
+
+/* basenames only generators produce: these block without inspecting content */
+static bool generated_filename(const char *name) {
+    static const char *const patterns[] = {
+        "^zz_generated\\.",       "\\.pb\\.(go|cc|h|c|js|ts)$", "_pb2\\.py$",
+        "_pb2_grpc\\.py$",        "\\.gen\\.(go|ts|js|py)$",    "\\.swagger\\.json$",
+        "\\.mock\\.(go|ts)$",     "\\.mocks?\\.(go|ts|js)$",
+    };
+    for (size_t i = 0; i < ARRAY_LEN(patterns); i++) {
+        rx_t *rx = rx_compile(patterns[i], 0, NULL);
+        bool hit = rx && rx_matches(rx, name);
+        rx_free(rx);
+        if (hit) return true;
+    }
+    return false;
+}
+
+static int comment_styles(const char *basename) {
+    static const char *const slash[] = {"c", "cc", "cpp", "cs", "dart", "go", "h", "hpp", "java", "js", "jsx", "kt", "kts",
+                                        "mjs", "cjs", "php", "rs", "scala", "swift", "ts", "tsx", NULL};
+    static const char *const hash[] = {"py", "rb", "sh", "bash", "zsh", "yml", "yaml", "toml", "ini", "cfg", "conf", "env",
+                                       "pl", "r", NULL};
+    static const char *const html[] = {"html", "htm", "xml", "svg", "xhtml", NULL};
+    char *name = xstrdup(basename);
+    for (char *p = name; *p; p++)
+        if (*p >= 'A' && *p <= 'Z') *p = (char)(*p + 32);
+    int styles = 0;
+    /* Path::extension: text after the last dot, none for a leading dot (`.env`) */
+    const char *dot = strrchr(name, '.');
+    const char *ext = dot && dot != name ? dot + 1 : "";
+    if (str_eq(name, "dockerfile") || str_eq(name, "makefile") || str_eq(name, "justfile")) styles = CS_HASH;
+    else if (word_in(ext, slash)) styles = CS_SLASH;
+    else if (word_in(ext, hash)) styles = CS_HASH;
+    else if (str_eq(ext, "sql")) styles = CS_SQL;
+    else if (word_in(ext, html)) styles = CS_HTML;
+    free(name);
+    return styles;
+}
+
+/* the file's leading comment block, at most its first 40 lines (owned) */
+static char *leading_comment_text(const char *content, int styles) {
+    sb_t out = SB_INIT;
+    bool first = true, started = false, slash_block = false, html_block = false;
+#define PUSH_LINE(text)                  \
+    do {                                 \
+        if (!first) sb_putc(&out, '\n'); \
+        first = false;                   \
+        sb_append(&out, (text));         \
+    } while (0)
+    const char *p = content;
+    for (int index = 0; index < 40 && *p; index++) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        char *raw = xstrndup(p, n);
+        p += n + (nl ? 1 : 0);
+        char *line = fz_trim(raw);
+        free(raw);
+        bool stop = false;
+        if (index == 0 && str_starts(line, "#!")) {
+            /* shebang: skipped */
+        } else if (slash_block) {
+            PUSH_LINE(line);
+            slash_block = !strstr(line, "*/");
+        } else if (html_block) {
+            PUSH_LINE(line);
+            html_block = !strstr(line, "-->");
+        } else if (!*line) {
+            if (started) PUSH_LINE("");
+        } else {
+            bool opens_slash = (styles & CS_SLASH) && str_starts(line, "/*");
+            bool opens_html = (styles & CS_HTML) && str_starts(line, "<!--");
+            bool accepted = ((styles & CS_SLASH) && str_starts(line, "//")) || ((styles & CS_HASH) && *line == '#') ||
+                            ((styles & CS_SQL) && str_starts(line, "--")) || opens_html;
+            if (!accepted && !opens_slash) {
+                stop = true;
+            } else {
+                started = true;
+                PUSH_LINE(line);
+                if (opens_slash) slash_block = !strstr(line, "*/");
+                if (opens_html) html_block = !strstr(line, "-->");
+            }
+        }
+        free(line);
+        if (stop) break;
+    }
+#undef PUSH_LINE
+    return sb_detach(&out);
+}
+
+/* the first marker found in the header comment (owned) or NULL */
+static char *detect_generated_marker(const char *content, const char *basename) {
+    int styles = comment_styles(basename);
+    if (!styles) return NULL;
+#define KNOWN_GENERATORS                                                                                                       \
+    "(?:protoc(?:-gen-[\\w-]+)?|sqlc|buf|swagger(?:-codegen)?|openapi(?:-generator)?|grpc-gateway|mockery|stringer|easyjson|" \
+    "deepcopy-gen|defaulter-gen|conversion-gen|client-gen|lister-gen|informer-gen|kysely-codegen|napi-rs)"
+    static const char *const patterns[] = {
+        "(?i)@generated\\b",
+        "(?i)\\bcode\\s+generated\\s+by\\s+[a-z0-9_.-]+",
+        "(?i)\\bcode\\s+generated\\b.*\\bdo\\s+not\\s+edit\\b",
+        "(?i)\\bthis\\s+file\\s+was\\s+automatically\\s+generated\\b",
+        "(?i)\\bgenerated\\s+by\\s+" KNOWN_GENERATORS "\\b",
+    };
+#undef KNOWN_GENERATORS
+    if (str_starts(content, "\xEF\xBB\xBF")) content += 3;
+    char *header = leading_comment_text(content, styles);
+    char *marker = NULL;
+    for (size_t i = 0; i < ARRAY_LEN(patterns) && !marker; i++) {
+        rx_t *rx = rx_compile(patterns[i], 0, NULL);
+        size_t ms, me;
+        if (rx && rx_find(rx, header, strlen(header), 0, &ms, &me)) marker = xstrndup(header + ms, me - ms);
+        rx_free(rx);
+    }
+    free(header);
+    return marker;
+}
+
+char *pe_auto_generated_message(const char *display, const char *head, size_t len) {
+    char *norm = xstrdup(display);
+    const char *name = display_basename(norm);
+    char *marker = NULL;
+    if (generated_filename(name)) {
+        marker = xstrdup(name);
+    } else {
+        char *prefix = utf8_sanitize(head, MIN(len, (size_t)1024));
+        marker = detect_generated_marker(prefix, name);
+        free(prefix);
+    }
+    free(norm);
+    if (!marker) return NULL;
+    char *msg = xasprintf("Cannot modify auto-generated file: %s\n\nThis file appears to be automatically generated (detected "
+                          "marker: \"%s\").\nAuto-generated files should not be edited directly. Instead:\n1. Find the source "
+                          "file or generator configuration\n2. Make changes to the source\n3. Regenerate the file",
+                          display, marker);
+    free(marker);
+    return msg;
+}
+
+char *pe_auto_generated_file_message(const char *abs_path, const char *display) {
+    int fd = open(abs_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    char head[1024];
+    size_t total = 0;
+    bool ok = true;
+    while (total < sizeof head) {
+        ssize_t n = read(fd, head + total, sizeof head - total);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) ok = false; /* a directory or an unreadable file is editable */
+        if (n <= 0) break;
+        total += (size_t)n;
+    }
+    close(fd);
+    return ok ? pe_auto_generated_message(display, head, total) : NULL;
+}
+
 static fread_t *build_read(fsrc_t *fs, const char *abs, const char *display, char *raw, size_t len, perr_t *e) {
+    if (fs->o->block_auto_generated) {
+        char *guard = pe_auto_generated_message(display, raw, len);
+        if (guard) {
+            fail(e, K_APPLY, guard);
+            free(raw);
+            return NULL;
+        }
+    }
     size_t ok = utf8_valid_up_to(raw, len);
     if (ok < len) {
         FAIL(e, K_UTF8, "%s is not valid UTF-8 at byte %zu; refusing to edit", display, ok);
