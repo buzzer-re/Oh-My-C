@@ -31,6 +31,21 @@ models without image input, and drops errored or aborted assistant turns
 - Custom providers and models come from `<agent dir>/models.yml` (or `models.yaml` / `models.json`)
   in omp's format. `apiKey` is an env var name or a literal. `catalog_register()` adds discovered
   models at runtime.
+- Custom and discovered models have no bundled policy row, so `compat_detect.c` builds one the way omp does.
+  `compat_finalize_custom()` (finalizeCustomModel, models.yml) first fills what the entry leaves out from its bundled
+  reference (`compat_ref_lookup`: identity/reference.ts, tried through the bracket, namespace, `:cloud`, marker and
+  case variants of the id; the largest limits win; `charm-hyper` / `factory-droid` rows are excluded because omp only
+  discovers them online), else omp's defaults (free, text, not reasoning, 128000 / 16384). `compat_resolve_model()`
+  (buildModel, also used for discovered models) then computes the identity (taxonomy with overrides and variant
+  collapse), resolves the rule cascade (`assets/compat_rules.json.z`: per axis, the matching rule with the greatest
+  exactness, dimensions and priority wins), builds the API's compat record (loopback and private-network URLs count as a
+  local backend: `replayReasoningContent`, `clampOutputToModelMax`, `grammar` tool schemas, a 300 s idle timeout, no
+  first-event timeout; Qwen ids use the `qwen` dialect, so requests carry `enable_thinking`, on local backends
+  `preserve_thinking`, and never `store`), applies wire axes and then `compat` (provider under model; known keys only),
+  resolves the thinking ladder, and applies catalog corrections. Explicit prices, limits, kind and `promptCache` win
+  afterwards. A resolved record is complete, so the per-API catalog defaults do not fill its unset keys; a custom
+  model's context window has no inferred tiers. Legacy `thinking.minLevel`/`maxLevel`/`levels` become `efforts`. An
+  `anthropic-messages` custom model without a provider `auth` is `isOAuth`: the cloaked Claude Code request shape.
 - `catalog_resolve(pattern)` accepts `provider/id`, a bare id or a fuzzy substring.
 - Context-window tiers (omp `model-registry.ts #applyContextWindowPolicies`): every row has a standard
   window (a premium long-context price tier, `cost.longContext.inputThreshold`, caps it unless

@@ -834,3 +834,33 @@ the plugin manager omc lacks), omp commands omc does not port error with `is not
 | Tern native rendering | tools/tern-media.ts | — | ⛔ | external native host |
 | STT, live voice, predict_word, local TTS | stt/, live/, predict/, tts/ | — | ⛔ | on-device ML / audio |
 | Skillshare registry | skillshare/ | — | ⛔ | hosted registry |
+
+### 7c. First request: size and side requests (audit 2026-11-02)
+
+Measured with `tests/parity/request_diff.sh` (throwaway HOME and agent dirs, a repository as the work dir) and
+`tests/parity/first_request_timing.py` (single-slot mock: 1 s per request, 3 s more when it would think). Bytes are
+the compact JSON body of the first tool-carrying request; "before" is main `18c1641`.
+
+| Config | omp | omc before | omc after | Notes |
+|---|---|---|---|---|
+| default (print) | 29,726 B: system 10,777, 11 tools 18,316 | 28,497 B: system 10,629, tools 17,236 | same | omc omits capabilities it lacks: eval JS / `workpool` / `browser` / `archive` preludes (eval 3,331 vs 2,346 B), eval-defined task `tools` (3,688 vs 3,593 B), the `browser.open` verify line |
+| AGENTS.md + 2 skills | 30,589 B, 2 compress requests | 29,360 B | same | |
+| local Qwen models.yml provider (`reasoning`, image input, `minLevel`/`maxLevel`) | 30,686 B; `enable_thinking`, `preserve_thinking`, no `store` | 29,399 B; `store: false`, `reasoning_effort: high` | 29,457 B, parameters identical | compat detection for custom models (status.md) |
+| + 2 MCP servers | 31,208 B | 29,921 B, same parameter drift | 29,979 B, parameters identical | MCP tools join after the first request in both |
+| interactive TUI (same provider) | 34,086 B, 12 tools | 31,373 B, `ask` schema without descriptions / `additionalProperties` / example | 31,783 B, `ask` identical | omc lacks the visuals (mermaid / svg / charts) and reactions sections |
+
+Side requests before the first answer, on the single-slot mock (TUI, local Qwen provider, smol = same model):
+- Skill-description compression (`smol` role, background from session start, up to 4 at once, cached per skill): same
+  in both, but omc sent it without `enable_thinking: false` (generic compat), so a local Qwen thought for up to 1,024
+  tokens per skill while the first request queued behind it: 8 s vs 2 s before the main request started on the mock,
+  on a real 27B tens of seconds per skill. Fixed by the compat detection; the prompt is now a plain string like omp's.
+- Auto-thinking judge (`defaultThinkingLevel: auto`): synchronous before every main request in both (1,352 B). It had
+  the same thinking problem before the fix.
+- Fork title: omp titles only interactive sessions; omc also titled print / json runs (a ~33 KB side request after
+  the reply started). Fixed. The fork title is now omp's ephemeral turn (streaming reply, side-channel reminder,
+  session thinking level, no 1,024-token cap) instead of a thinking-off request.
+- Memory (`memory.backend: local`) and prewalk add nothing before the first request of a fresh session in either.
+
+Remaining: the title fork snapshots the streaming reply at `text_start`, where omp's snapshot can already hold the
+first deltas; the rest of the custom-model policy gaps are in the status.md row (`moonshot-mfjs` schemas, `timeBased`
+cost, `-thinking` sibling collapse, models.yml schema validation).

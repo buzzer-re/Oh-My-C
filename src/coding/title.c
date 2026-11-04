@@ -2,7 +2,8 @@
  * agent-session title flow). Under `title.generator: fork` (default) the title is a side request
  * on the session's own model, system prompt, tools and history (so it reads the prompt cache),
  * started as soon as the reply to the operator's message begins; it asks for a card title
- * (`🧪 FLAKY: Fix flaky park tests`). The title model (`title-system.md`) is the fallback and the
+ * (`🧪 FLAKY: Fix flaky park tests`); like omp's runEphemeralTurn it carries the streaming reply so far, the
+ * side-channel no-tools reminder and the session's thinking level. The title model (`title-system.md`) is the fallback and the
  * only path under `title.generator: tiny`. Results are applied on the agent thread. */
 #include "title.h"
 
@@ -235,11 +236,11 @@ static const char *icons_setting(void) {
 typedef struct {
     app_t *a;
     char *input;
-    json_t *messages; /* snapshot */
-    json_t *system;
-    json_t *tools;
+    json_t *streaming; /* the streaming assistant reply when the title forked */
 } job_t;
 
+/* AgentSession.#forkTitle: an ephemeral side turn (runEphemeralTurn) forked from the streaming reply on the session's
+ * model, system prompt, tools, history and thinking level, so it extends the main request's cached prefix */
 static char *fork_title(job_t *j) {
     app_t *a = j->a;
     const char *icons = icons_setting();
@@ -248,34 +249,14 @@ static char *fork_title(job_t *j) {
     json_set_bool(c, "nerdFonts", false);
     char *req = prompt_render("coding-agent/prompts/system/title-fork.md", c);
     json_free(c);
-    json_t *msgs = j->messages;
-    json_t *um = msg_user_text(req ? req : "");
-    json_set_bool(um, "synthetic", true);
-    json_push(msgs, um);
-    free(req);
-    json_t *tx = a->agent->hooks.transform_context ? a->agent->hooks.transform_context(a, a->agent, msgs) : NULL;
-    json_t *wire = ai_transform_messages(tx ? tx : msgs, a->model);
-    json_free(tx);
-    ai_context_t ctx = {.system_prompt = j->system, .messages = wire, .tools = j->tools};
-    ai_stream_opts_t o;
-    ai_stream_opts_init(&o);
-    char *key = app_api_key_for(a->model);
-    o.api_key = key;
-    o.disable_reasoning = true;
-    o.max_tokens = 1024;
-    o.session_id = a->agent->session_id;
-    o.cancel = &a->agent->cancel;
-    json_t *r = ai_complete(a->model, &ctx, &o);
-    char *out = NULL;
-    const char *stop = json_get_str(r, "stopReason");
-    if (!str_eq(stop, "error") && !str_eq(stop, "aborted")) {
-        char *txt = ai_message_text(r);
-        out = title_parse_card_reply(txt, icons);
-        free(txt);
-    }
+    app_ephemeral_t e = {.prompt_text = req ? req : "", .streaming = j->streaming, .cancel = &a->agent->cancel};
+    char *reply = NULL, *err = NULL;
+    json_t *r = app_ephemeral_turn(a, &e, &reply, &err);
+    char *out = r && reply ? title_parse_card_reply(reply, icons) : NULL;
     json_free(r);
-    json_free(wire);
-    free(key);
+    free(reply);
+    free(err);
+    free(req);
     return out;
 }
 
@@ -296,9 +277,7 @@ static void *title_thread(void *p) {
     s->result = t;
     s->running = false;
     pthread_mutex_unlock(&s->mu);
-    json_free(j->messages);
-    json_free(j->system);
-    json_free(j->tools);
+    json_free(j->streaming);
     free(j->input);
     free(j);
     return NULL;
@@ -340,19 +319,12 @@ void title_on_event(app_t *a, const agent_event_t *ev) {
         job_t *j = xcalloc(1, sizeof(*j));
         j->a = a;
         j->input = xstrdup(s->input);
-        pthread_mutex_lock(&a->agent->mu);
-        j->messages = json_clone(a->agent->messages);
-        j->system = json_clone(a->agent->system_prompt);
-        j->tools = json_arr();
-        for (size_t i = 0; i < a->agent->tools.n; i++) json_push(j->tools, agent_tool_wire(a->agent->tools.v[i]));
-        pthread_mutex_unlock(&a->agent->mu);
+        j->streaming = ev->message ? json_clone(ev->message) : NULL;
         if (pthread_create(&s->th, NULL, title_thread, j) != 0) {
             pthread_mutex_lock(&s->mu);
             s->running = false;
             pthread_mutex_unlock(&s->mu);
-            json_free(j->messages);
-            json_free(j->system);
-            json_free(j->tools);
+            json_free(j->streaming);
             free(j->input);
             free(j);
         }

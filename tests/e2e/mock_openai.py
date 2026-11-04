@@ -19,6 +19,10 @@ Eval helper side requests (omc eval completion()/judge()):
     first option), yes/no = YES when the state contains "yes", score = first digit in the state (else 0); a state
     containing SLOWJUDGE answers after 1.5 s, FAILJUDGE answers gibberish (unparseable even on retries)
 $MOCK_DELAY (seconds, default 0) is slept between streamed chunks.
+$MOCK_SLOT_SECS / $MOCK_THINK_SECS model a single-slot local server (llama.cpp with one slot): requests run one at a
+  time, each waiting MOCK_SLOT_SECS (prefill) plus MOCK_THINK_SECS when it would think (no `enable_thinking: false`).
+  $MOCK_TIMELOG gets one JSON line per request arrival and per slot start (kind main/title/compress/side, bytes, queue
+  time), so tests can pin the order and timing of side requests against the main request.
 $MOCK_FAIL_RETRY_AFTER_MS (default "0"): `retry-after-ms` header on retryable "fail:" replies (408/429/5xx) so the
   transport's own retries (6 x 500 ms*2^n per attempt, like omp) don't slow the suite; "none" omits it (real backoff).
   A header of 0 is a retry-now hint: it never reaches the error message (omp's retry-after-ms= suffix needs > 0).
@@ -39,13 +43,17 @@ Mid-stream connection drops (turn recovery), driven by the latest user message:
 /btw side questions ("<btw>…Question:\n<q>\n</btw>"): <q> may be md:/think:/slow:/streamfail:/fail:, else a fixed
   markdown answer naming <q>.
 Every request body is appended to $MOCK_LOG (JSONL) for assertions."""
-import json, os, re, sys, time
+import json, os, re, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG = os.environ.get("MOCK_LOG")
 DELAY = float(os.environ.get("MOCK_DELAY") or 0)
 FAIL_RETRY_AFTER = os.environ.get("MOCK_FAIL_RETRY_AFTER_MS", "0")
 STALL_SECS = float(os.environ.get("MOCK_STALL_SECS") or 60)
+SLOT_SECS = float(os.environ.get("MOCK_SLOT_SECS") or 0)
+THINK_SECS = float(os.environ.get("MOCK_THINK_SECS") or 0)
+TIMELOG = os.environ.get("MOCK_TIMELOG")
+SLOT = threading.Lock()
 DROPS = {}  # drop command text -> requests dropped so far
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tui", "fixtures")
 
@@ -74,6 +82,21 @@ def judge_reply(system, user):
         return "\n".join(f"{parts[i]}: {answer(parts[i + 1])}" for i in range(1, len(parts), 2))
     return answer(system)
 
+def thinking_on(body):
+    """Whether a Qwen-style local server would think: the template thinks unless `enable_thinking: false` arrives
+    (top level or chat_template_kwargs) or the request asks for no reasoning effort."""
+    kw = body.get("chat_template_kwargs") or {}
+    if body.get("enable_thinking") is False or kw.get("enable_thinking") is False: return False
+    return body.get("reasoning_effort") not in ("none",)
+
+def req_kind(body):
+    """main (tools + system prompt), title, compress (skill description), or side."""
+    msgs = body.get("messages") or []
+    last = text_of(msgs[-1]) if msgs else ""
+    if "<title-request>" in last: return "title"
+    if last.startswith("Compress into one routing hint"): return "compress"
+    return "main" if body.get("tools") else "side"
+
 def text_of(msg):
     c = msg.get("content")
     if isinstance(c, str): return c
@@ -100,9 +123,26 @@ class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def log_message(self, *a): pass
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        body = json.loads(raw)
         if LOG:
             with open(LOG, "a") as f: f.write(json.dumps(body) + "\n")
+        if not (SLOT_SECS or THINK_SECS or TIMELOG): return self.reply(body)
+        thinks = thinking_on(body)
+        arrived = time.time()
+        if TIMELOG:
+            with open(TIMELOG, "a") as f:
+                f.write(json.dumps({"t": arrived, "event": "arrive", "kind": req_kind(body), "bytes": len(raw), "thinks": thinks}) + "\n")
+        if not (SLOT_SECS or THINK_SECS): return self.reply(body)
+        with SLOT:  # one llama.cpp-style slot: requests run one at a time, prefill + (optional) thinking first
+            start = time.time()
+            time.sleep(SLOT_SECS + (THINK_SECS if thinks else 0))
+            if TIMELOG:
+                with open(TIMELOG, "a") as f:
+                    f.write(json.dumps({"t": time.time(), "event": "start", "kind": req_kind(body), "queued": start - arrived}) + "\n")
+            self.reply(body)
+
+    def reply(self, body):
         msgs = body.get("messages", [])
         # hidden steering nudges (prewalk plan/continue/checklist) trail the turn: answer what precedes them
         while len(msgs) > 1 and msgs[-1].get("role") in ("user", "system", "developer") and \

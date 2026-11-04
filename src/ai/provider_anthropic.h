@@ -11,6 +11,7 @@
 
 /* True for Claude Code OAuth tokens (contain "sk-ant-oat"). */
 bool anthropic_is_oauth_token(const char *key);
+bool anthropic_model_is_oauth(const ai_model_t *m, const char *key); /* the model's `isOAuth`, else the token shape */
 
 /* provider_anthropic_stream with the OAuth wire forced on (is_oauth 1) / off (0) or detected from the key (-1),
  * like omp's `isOAuth` stream option (GitLab Duo's proxy takes its direct-access token as an OAuth bearer). */

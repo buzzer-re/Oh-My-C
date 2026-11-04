@@ -849,16 +849,23 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
 agent_tool_t *tool_ask_new(tool_env_t *env) {
     char *desc = tool_prompt("ask", NULL);
     json_t *s = schema_obj();
+    /* omp's wire schema (ask.ts askSchema through toolWireSchema): described optional fields, closed objects */
     json_t *qs = json_parse_str(
-        "{\"type\":\"array\",\"minItems\":1,\"items\":{\"type\":\"object\",\"properties\":{"
-        "\"id\":{\"type\":\"string\"},\"question\":{\"type\":\"string\"},\"header\":{\"type\":\"string\"},"
+        "{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{"
+        "\"id\":{\"type\":\"string\"},\"question\":{\"type\":\"string\"},"
         "\"options\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\"},"
-        "\"description\":{\"type\":\"string\"},\"preview\":{\"type\":\"string\"}},\"required\":[\"label\"]}},"
-        "\"multi\":{\"type\":\"boolean\"},\"recommended\":{\"type\":\"number\"}},"
-        "\"required\":[\"id\",\"question\",\"options\"]}}");
+        "\"description\":{\"type\":\"string\"},\"preview\":{\"type\":\"string\",\"description\":\"rich preview\"}},"
+        "\"required\":[\"label\"],\"additionalProperties\":false}},"
+        "\"header\":{\"type\":\"string\",\"description\":\"display chip\"},\"multi\":{\"type\":\"boolean\"},"
+        "\"recommended\":{\"type\":\"number\",\"description\":\"0-based default index\"}},"
+        "\"required\":[\"id\",\"question\",\"options\"],\"additionalProperties\":false},\"minItems\":1}");
     schema_prop_json(s, "questions", qs, true);
+    json_set_bool(s, "additionalProperties", false);
     agent_tool_t *t = agent_tool_new("ask", "Ask", desc, s, ask_execute);
     t->exclusive = true;
+    t->examples = json_parse_str("[{\"caption\":\"Choice\",\"call\":{\"questions\":[{\"id\":\"storage\",\"question\":"
+                                 "\"Database?\",\"options\":[{\"label\":\"SQLite\"},{\"label\":\"Postgres\"}],"
+                                 "\"recommended\":0}]}}]");
     free(desc);
     t->ud = env;
     return t;

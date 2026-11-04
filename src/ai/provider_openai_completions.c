@@ -3,6 +3,7 @@
  * "openrouter"), plus helpers shared with the Responses provider.
  * Port of packages/ai/src/providers/openai-completions.ts + openai-shared.ts (policy subset).
  */
+#include "ai/compat_detect.h"
 #include "ai/provider_openai.h"
 
 #include <math.h>
@@ -844,6 +845,7 @@ static json_t *convert_tools_cc(const ai_model_t *m, const json_t *over, const j
     bool no_strict = env_truthy("PI_NO_STRICT");
     bool supports = oai_cbool(m, over, "supportsStrictMode", false);
     const char *mode = oai_cstr(m, over, "toolStrictMode", "mixed");
+    bool grammar = str_eq(oai_cstr(m, over, "toolSchemaFlavor", NULL), "grammar");
     size_t n = json_len(tools);
     json_t **adapted = xcalloc(n ? n : 1, sizeof(json_t *));
     bool all = n > 0;
@@ -872,6 +874,9 @@ static json_t *convert_tools_cc(const ai_model_t *m, const json_t *over, const j
             json_set(fn, "parameters", tool_params(t));
             if (expl_false) json_set_bool(fn, "strict", false);
         }
+        /* grammar-constrained local backends (llama.cpp, LM Studio, vLLM) build a GBNF grammar from the schema and
+         * 400 on a bare boolean subschema (omp sanitizeSchemaForGrammar) */
+        if (grammar) json_set(fn, "parameters", compat_schema_for_grammar(json_get(fn, "parameters")));
         json_t *w = json_obj();
         json_set_str(w, "type", "function");
         json_set(w, "function", fn);

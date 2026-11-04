@@ -62,7 +62,9 @@ the reply**, so a test is just a prompt:
 | anything else | `plain answer` |
 
 It also answers eval `completion()`/`judge()` side requests and the memory pipeline stages, and
-logs every request body to `$MOCK_LOG` for assertions (`reqlog.py`).
+logs every request body to `$MOCK_LOG` for assertions (`reqlog.py`). `MOCK_SLOT_SECS` / `MOCK_THINK_SECS` make it a
+single-slot server (one request at a time, slower when a request would think) and `MOCK_TIMELOG` records each
+request's arrival and slot start (`first_request_check.py`).
 
 Other mocks reach real provider code paths through `OMC_PROVIDER_URL_REWRITE` /
 `OMC_AUTH_URL_REWRITE` (origin → mock path prefix), always with fake credentials:
@@ -91,15 +93,45 @@ tests/parity/request_diff.sh [prompt] [cwd]     # needs `omp` installed (OMP_BIN
 ```
 
 This runs omp and omc in print mode on the same prompt and cwd, against the same mock, with
-throwaway agent dirs. It then compares the **first model request**: the tool list and order, each
+throwaway agent dirs and a throwaway HOME per app (`$RD_DIR/home.<app>`), so skills under the real `~` never leak
+in. Use a repository as the work dir too: skill discovery walks up to the repository root, and from a plain
+directory under the real home it reaches `~/.claude/skills`. It then compares the **first model request**: the tool list and order, each
 tool's description and parameters, request parameters, the system prompt (diffed into
 `$RD_DIR/sys.diff`) and the messages. The only normalization is the product name (`omp's` →
 `omc's`, `omp://` → `omc://`). `RD_SETUP=<script>` seeds both agent dirs (skills, rules,
 settings, edit modes); `RD_WORKSETUP=<script>` runs `<script> <cwd>` before each app's run, so
 files a tool modifies are reseeded for the second app. The tool messages of each app's last request
 are written to `$RD_DIR/tools.{omp,omc}` and diffed (`tool messages: identical`), which is how tool
-result text is checked byte for byte against omp. Use it after any change to prompts, tools, schemas,
-tool output or discovery.
+result text is checked byte for byte against omp. It also prints each app's first-request size (compact JSON body,
+system prompt, tool schemas, per-tool bytes where they differ) and how many side requests came before and after
+it. `OMC_BIN` picks the omc binary, `RD_TITLE=1` keeps title generation on. Use it after any change to prompts,
+tools, schemas, tool output or discovery.
+
+## First-request timing (`tests/parity/first_request_timing.py`)
+
+```sh
+tests/parity/first_request_timing.py [--mode rpc|print|tui] [--title] [--config 'defaultThinkingLevel: auto'] [--keep]
+```
+
+This runs omp, then omc, against `mock_openai.py` modelling a single-slot local server (`--slot` seconds per request,
+`--think` more when the request would think), with a local Qwen-style models.yml provider that is also the `smol`
+role, in a repository with AGENTS.md and two skills. For each app it prints every request relative to the
+moment the prompt was submitted: arrival, time queued in the slot, kind (main / compress / title / side), size, and
+whether a Qwen template would think on it. `--mode tui` types the prompt into the real TUI under a pty. The e2e
+script `tests/e2e/first_request.sh` pins the same setup without omp: the request parameters, the side requests
+(compression without thinking, plain-string content), their order, the main request's slot wait, and the first
+request's size against omp's measured size (`FR_OMP_BYTES`; re-measure with omp when prompts change).
+
+## Custom model policy (`tests/parity/custom_model_diff.py`)
+
+```sh
+tests/parity/custom_model_diff.py [--sample N] [--seed S] [--show M] [--keep]
+```
+
+This loads one models file into omp and omc (throwaway HOME and agent dirs, no model is requested), asks each for RPC
+`get_available_models`, and diffs every field of each custom model. A fixed matrix covers local backends, hosts and API
+records; `--sample` adds catalog ids in proxy spellings (N up to 400: past that the answer exceeds the RPC transport
+limit in both apps). Run it after changing `compat_detect.c` or regenerating `assets/compat_rules.json.z`.
 
 ## ACP parity (`tests/parity/acp_diff.py`)
 

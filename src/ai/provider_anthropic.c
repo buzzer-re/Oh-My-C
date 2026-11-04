@@ -265,6 +265,11 @@ static bool adopt_required_version(const char *msg) {
 
 bool anthropic_is_oauth_token(const char *key) { return key && strstr(key, "sk-ant-oat") != NULL; }
 
+bool anthropic_model_is_oauth(const ai_model_t *m, const char *key) {
+    json_t *v = m && m->raw ? json_get(m->raw, "isOAuth") : NULL; /* stream.ts: providerModel.isOAuth before the token shape */
+    return json_is_bool(v) ? v->u.b : anthropic_is_oauth_token(key);
+}
+
 static const char *stainless_os(void) {
 #if defined(__APPLE__)
     return "MacOS";
@@ -2338,7 +2343,7 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
         free(env_key);
         return msg;
     }
-    bool oauth = is_oauth >= 0 ? is_oauth != 0 : anthropic_is_oauth_token(key);
+    bool oauth = is_oauth >= 0 ? is_oauth != 0 : anthropic_model_is_oauth(m, key);
     json_t *result = NULL;
     ai_stream_opts_t lo = *o; /* lo.fast_mode_disabled is pinned once this request drops fast mode */
     /* the provider loop owns transport retries (PROVIDER_MAX_RETRIES, calculateAnthropicRetryDelayMs) */

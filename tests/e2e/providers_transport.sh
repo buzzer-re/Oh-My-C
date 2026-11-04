@@ -76,7 +76,8 @@ mkdir -p "$T/thagent"
 printf 'providers:\n  thk:\n    baseUrl: %s/think\n    apiKey: TK\n    api: anthropic-messages\n    models:\n      - id: thk-1\n        contextWindow: 100000\n        maxTokens: 4096\n  thr:\n    baseUrl: %s/thinkr\n    apiKey: TK\n    api: openai-responses\n    models:\n      - id: thr-1\n        contextWindow: 100000\n        maxTokens: 4096\n' "$XB" "$XB" > "$T/thagent/models.yml"
 printf 'externalThinking: true\n' > "$T/thagent/config.yml"
 check "think forced"    "Tool said: ------"  env OMC_CODING_AGENT_DIR="$T/thagent" TK=x OMC_NO_TITLE=1 "$B" --model thk/thk-1 --no-session -p hi
-check "think wire"      "{'type': 'tool', 'name': 'think'} None private scratchpad; not shown to user"  "${XL[@]}" /think/ 'b.get("tool_choice"), b.get("thinking"), [t for t in b["tools"] if t["name"] == "think"][0]["description"]' '"tool_choice"'
+# a custom anthropic-messages endpoint gets omp's cloaked request shape (resolveCustomModelIsOAuth): prefixed tool names
+check "think wire"      "{'type': 'tool', 'name': '_think'} None private scratchpad; not shown to user"  "${XL[@]}" /think/ 'b.get("tool_choice"), b.get("thinking"), [t for t in b["tools"] if t["name"] == "_think"][0]["description"]' '"tool_choice"'
 check "think continue"  "None ------"  "${XL[@]}" /think/ 'b.get("tool_choice"), b["messages"][-1]["content"][0]["content"]'
 check "think responses" "{'effort': 'none'} {'type': 'function', 'name': 'think'}"  bash -c "env OMC_CODING_AGENT_DIR='$T/thagent' TK=x OMC_NO_TITLE=1 '$B' --model thr/thr-1 --no-session -p hi >/dev/null; ${XL[*]} /thinkr/ 'b.get(\"reasoning\"), b.get(\"tool_choice\")'"
 mkdir -p "$T/thagent2" && cp "$T/agent/models.yml" "$T/thagent2/" && cp "$T/thagent/config.yml" "$T/thagent2/"

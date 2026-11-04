@@ -601,7 +601,8 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     else if (A->auto_approve) settings_set_runtime("tools.approvalMode", json_str("yolo"));
     if (A->has_warn_cost) settings_set_runtime("session.warnCost", json_num(A->warn_cost));
     if (A->has_max_cost) settings_set_runtime("session.maxCost", json_num(A->max_cost));
-    if (A->no_title || protocol) setenv("OMC_NO_TITLE", "1", 1);
+    /* omp main.ts: autoTitle = isInteractive (print, json and protocol modes never send a title request) */
+    if (A->no_title || !interactive) setenv("OMC_NO_TITLE", "1", 1);
     /* model role overrides from CLI args or env vars (ephemeral) */
     const char *smol = A->smol ? A->smol : env_get("PI_SMOL_MODEL");
     const char *slow = A->slow ? A->slow : env_get("PI_SLOW_MODEL");
