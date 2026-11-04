@@ -12,6 +12,11 @@ UPDATE.md) when done.
 - **Dependencies:** runtime links only libc, OpenSSL (libssl/libcrypto), zlib, pthread and libm. No Node/Bun,
   no vendored third-party code, no new libraries. Python is allowed only for dev-time tools in
   `build-tools/` and test mocks/fixtures in `tests/`.
+- **No package managers, ever, for anything:** never run `cargo`, `rustup`, `npm`, `bun`, `pip`, etc. to build, fetch or
+  install code, not even in a temp dir or as a one-off comparison tool. Fetching third-party code and running its build
+  scripts is the supply-chain exposure omc exists to avoid. To check behaviour against omp, run the installed `omp`
+  binary and read the upstream sources as text; if something can only be checked by compiling upstream, port it from
+  the source and report it as unverified.
 - **Parity is the spec.** Port behaviour, exact strings, glyphs, colors and layout from the upstream
   source; when omc and omp differ, omc is wrong. Never advertise (in prompts/tool descriptions) a
   capability omc doesn't implement.
