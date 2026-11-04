@@ -90,6 +90,9 @@ const char *catalog_model_kind(const ai_model_t *m);
  * probed); force=true (hub F5) probes every server. Blocks for at most the probe timeouts (250 ms + 150 ms per
  * metadata call on loopback). Call from the UI/main thread. Returns the number of models registered. */
 int catalog_discover_local(bool force);
+/* re-probe one local provider now (selector-controller.ts: refreshProvider after a login), so its models appear without
+ * a restart; other providers untouched. Blocks for the probe: call off the UI thread. No-op for non-local providers. */
+int catalog_discover_provider(const char *provider);
 /* last discovery outcome for an implicit local provider: owned {status: "ok"|"empty"|"cached"|"unavailable",
  * optional, error?, fetchedAt?} or NULL when never probed (omp ProviderDiscoveryState; the hub hides an
  * optional provider that is unavailable) */

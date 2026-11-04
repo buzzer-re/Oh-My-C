@@ -3,8 +3,9 @@
   /ollama/api/tags, POST /ollama/api/show        Ollama
   /llama/models, /llama/props                     llama.cpp (native root)
   /lms/v1/models, /lms/api/v0/models              LM Studio
-Usage: mock_local.py <port>"""
-import json, sys
+Usage: mock_local.py <port>
+MOCK_LOCAL_REQUIRE_KEY=<key>: the LM Studio routes answer 401 unless sent `Authorization: Bearer <key>`."""
+import json, os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 OLLAMA_TAGS = {"models": [{"name": "qwen3:8b", "model": "qwen3:8b"}, {"name": "llava:7b", "model": "llava:7b"}]}
@@ -34,7 +35,10 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         routes = {"/ollama/api/tags": OLLAMA_TAGS, "/llama/models": LLAMA_MODELS, "/llama/props": LLAMA_PROPS,
                   "/lms/v1/models": LMS_MODELS, "/lms/api/v0/models": LMS_V0}
-        if self.path in routes:
+        need = os.environ.get("MOCK_LOCAL_REQUIRE_KEY")
+        if need and self.path.startswith("/lms/") and self.headers.get("Authorization") != "Bearer " + need:
+            self.send({"error": "unauthorized"}, 401)
+        elif self.path in routes:
             self.send(routes[self.path])
         else:
             self.send({"error": "not found"}, 404)

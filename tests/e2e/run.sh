@@ -653,6 +653,10 @@ check "discover lm-studio" "lm-studio qwen2.5-vl-7b ctx=12000 vision"  printf '%
 check "discovery cache"    '"baseUrl": "http://127.0.0.1:'"$DPORT"'/lms/v1"'  python3 -I -m json.tool "$T/dagent/local-models.json"
 kill $DPID 2>/dev/null
 check "cached when down"   "│ llava:7b"  "${DENV[@]}" "$B" models
+# a login refreshes that provider's models in the running session (selector-controller.ts refreshProvider), with its key
+mkdir -p "$T/lragent" "$T/lrwork"; cp "$T/agent/models.yml" "$T/lragent/"; printf 'setupVersion: 2\n' > "$T/lragent/config.yml"
+LRPORT=$((PORT + 41))
+( cd "$T/lrwork" && check "login refresh" "login refresh ok" python3 -I "$ROOT/tests/e2e/login_refresh.py" "$B" "$ROOT/tests/e2e/mock_local.py" "$T/lragent" "$LRPORT" )
 check "perf recorded"      '"mock/mock-1"'  cat "$T/agent/model-perf.json"
 # default-on agent guards and auto thinking (WP-3 / WP-12); request_diff.sh checks the same scenarios against omp
 REQS='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])][int(sys.argv[2]):]; r=[x for x in r if x.get("tools") or len(sys.argv)>3]

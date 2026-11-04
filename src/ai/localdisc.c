@@ -31,6 +31,7 @@ typedef struct {
     char *base;      /* primary endpoint */
     char *fallback;  /* llama.cpp second default port */
     bool optional;
+    char *api_key;   /* the provider's credential (omp sends it on discovery too), NULL when none */
     /* results */
     json_t *models;  /* array of model objects, NULL when nothing answered */
     char *error;
@@ -41,6 +42,12 @@ static json_t *g_state; /* {provider: {status, optional, error?, fetchedAt?}} */
 static bool g_started;
 
 extern json_t *settings_get(const char *path) __attribute__((weak));
+extern char *auth_get_api_key(const char *provider) __attribute__((weak));
+
+/* stored login or env key; a server that requires auth answers discovery only with it */
+static char *probe_key(const char *provider) {
+    return auth_get_api_key ? auth_get_api_key(provider) : ai_env_api_key(provider);
+}
 
 static bool provider_disabled(const char *p) {
     json_t *d = settings_get ? settings_get("disabledProviders") : NULL, *x;
@@ -85,9 +92,14 @@ static int64_t probe_timeout(const char *base, int64_t loopback_ms) {
 }
 
 /* GET/POST returning parsed JSON on 2xx; *answered is set when any HTTP status came back */
-static json_t *fetch_json(const char *url, const char *body, int64_t timeout, bool *answered) {
+static json_t *fetch_json(const char *url, const char *body, const char *api_key, int64_t timeout, bool *answered) {
     http_headers_t h = {0};
     http_headers_add(&h, "Accept", "application/json");
+    if (api_key && *api_key) {
+        char *bearer = xasprintf("Bearer %s", api_key);
+        http_headers_add(&h, "Authorization", bearer);
+        free(bearer);
+    }
     if (body) http_headers_add(&h, "Content-Type", "application/json");
     http_req_t rq = {.method = body ? "POST" : "GET", .url = url, .headers = &h, .body = body,
                      .body_len = body ? strlen(body) : 0, .timeout_ms = timeout, .connect_timeout_ms = timeout,
@@ -167,7 +179,7 @@ static int64_t ollama_ctx(const json_t *show) {
 static void probe_ollama(probe_t *p) {
     char *url = xasprintf("%s/api/tags", p->base);
     bool answered = false;
-    json_t *tags = fetch_json(url, NULL, probe_timeout(p->base, 250), &answered);
+    json_t *tags = fetch_json(url, NULL, p->api_key, probe_timeout(p->base, 250), &answered);
     free(url);
     if (!tags) {
         if (!answered) p->error = xstrdup("unreachable");
@@ -187,7 +199,7 @@ static void probe_ollama(probe_t *p) {
         json_set_str(req, "model", id);
         char *body = json_dump(req, 0);
         json_free(req);
-        json_t *show = fetch_json(surl, body, probe_timeout(p->base, 150), NULL);
+        json_t *show = fetch_json(surl, body, p->api_key, probe_timeout(p->base, 150), NULL);
         free(body);
         free(surl);
         bool reasoning = false, image = false;
@@ -235,8 +247,8 @@ static int64_t llamacpp_ctx_from_args(const json_t *args) {
 static bool probe_llamacpp_at(probe_t *p, const char *base) {
     char *url = xasprintf("%s/models", base), *purl = xasprintf("%s/props", base);
     bool answered = false;
-    json_t *list = fetch_json(url, NULL, probe_timeout(base, 250), &answered);
-    json_t *props = list ? fetch_json(purl, NULL, probe_timeout(base, 150), NULL) : NULL;
+    json_t *list = fetch_json(url, NULL, p->api_key, probe_timeout(base, 250), &answered);
+    json_t *props = list ? fetch_json(purl, NULL, p->api_key, probe_timeout(base, 150), NULL) : NULL;
     free(url);
     free(purl);
     if (!list) {
@@ -295,7 +307,7 @@ static void probe_llamacpp(probe_t *p) {
 static void probe_lmstudio(probe_t *p) {
     char *url = xasprintf("%s/models", p->base);
     bool answered = false;
-    json_t *list = fetch_json(url, NULL, probe_timeout(p->base, 250), &answered);
+    json_t *list = fetch_json(url, NULL, p->api_key, probe_timeout(p->base, 250), &answered);
     free(url);
     if (!list) {
         p->error = xstrdup(answered ? "bad response" : "unreachable");
@@ -303,7 +315,7 @@ static void probe_lmstudio(probe_t *p) {
     }
     char *native = str_ends(p->base, "/v1") ? xstrndup(p->base, strlen(p->base) - 3) : xstrdup(p->base);
     char *nurl = xasprintf("%s/api/v0/models", native);
-    json_t *v0 = fetch_json(nurl, NULL, probe_timeout(p->base, 250), NULL);
+    json_t *v0 = fetch_json(nurl, NULL, p->api_key, probe_timeout(p->base, 250), NULL);
     free(nurl);
     free(native);
     p->models = json_arr();
@@ -408,33 +420,32 @@ static bool configured_in_models_yml(const char *provider) {
     return json_get_bool(catalog_provider_info(provider), "modelsYml", false);
 }
 
-int catalog_discover_local(bool force) {
-    catalog_init();
-    if (!force) {
-        if (g_started) return 0;
-        g_started = true;
-    }
+/* `only`: probe just that provider (a login), leaving the others' models and cache rows alone */
+static int discover(bool force, const char *only) {
     if (env_truthy("OMC_NO_LOCAL_DISCOVERY")) return 0;
     probe_t probes[3];
     size_t np = 0;
+#define WANTED(id) ((!only || !strcmp(only, id)) && !configured_in_models_yml(id) && !provider_disabled(id))
     const char *oenv = env_get("OLLAMA_BASE_URL");
     char *ohost = oenv ? NULL : ollama_host_url(env_get("OLLAMA_HOST"));
-    if (!configured_in_models_yml("ollama") && !provider_disabled("ollama"))
+    if (WANTED("ollama"))
         probes[np++] = (probe_t){.kind = D_OLLAMA, .provider = "ollama", .api = "openai-responses",
                                  .base = trim_slashes(oenv ? oenv : ohost ? ohost : "http://127.0.0.1:11434"),
                                  .optional = !oenv && !ohost};
     free(ohost);
     const char *lenv = env_get("LLAMA_CPP_BASE_URL");
-    if (!configured_in_models_yml("llama.cpp") && !provider_disabled("llama.cpp")) {
+    if (WANTED("llama.cpp")) {
         char *b = trim_slashes(lenv ? lenv : "http://127.0.0.1:8080");
         if (str_ends(b, "/v1")) b[strlen(b) - 3] = 0;
         probes[np++] = (probe_t){.kind = D_LLAMACPP, .provider = "llama.cpp", .api = "openai-responses", .base = b,
                                  .fallback = lenv ? NULL : xstrdup("http://127.0.0.1:9931"), .optional = !lenv};
     }
     const char *senv = env_get("LM_STUDIO_BASE_URL");
-    if (!configured_in_models_yml("lm-studio") && !provider_disabled("lm-studio"))
+    if (WANTED("lm-studio"))
         probes[np++] = (probe_t){.kind = D_LMSTUDIO, .provider = "lm-studio", .api = "openai-completions",
                                  .base = trim_slashes(senv ? senv : "http://127.0.0.1:1234/v1"), .optional = !senv};
+#undef WANTED
+    for (size_t i = 0; i < np; i++) probes[i].api_key = probe_key(probes[i].provider);
     json_t *cache = cache_load();
     int64_t now = now_ms();
     bool online[3] = {0};
@@ -478,8 +489,24 @@ int catalog_discover_local(bool force) {
         free(p->error);
         free(p->base);
         free(p->fallback);
+        free(p->api_key);
     }
     if (dirty) cache_save(cache);
     json_free(cache);
     return total;
+}
+
+int catalog_discover_local(bool force) {
+    catalog_init();
+    if (!force) {
+        if (g_started) return 0;
+        g_started = true;
+    }
+    return discover(force, NULL);
+}
+
+int catalog_discover_provider(const char *provider) {
+    catalog_init();
+    if (!provider || (strcmp(provider, "ollama") && strcmp(provider, "llama.cpp") && strcmp(provider, "lm-studio"))) return 0;
+    return discover(true, provider);
 }

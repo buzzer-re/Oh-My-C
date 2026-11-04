@@ -2135,6 +2135,7 @@ static void login_main(rpc_t *r, const json_t *cmd) {
     h.ud = &c;
     char *err = NULL;
     int rc = auth_login_hooked(pid, &h, &err);
+    if (rc == 0) catalog_discover_provider(pid); /* refreshProvider after a login: the models appear in this session */
     if (rc == 0 && !c.error) {
         auth_reload();
         json_t *d = json_obj();

@@ -516,6 +516,8 @@ static void *login_worker(void *ud) {
     h.abort = &l->abort_flag;
     h.ud = l;
     l->rc = auth_login_hooked(l->provider, &h, &l->err);
+    /* the new credential may unlock models: refresh before the dialog reports success, as omp does (#5780) */
+    if (l->rc == 0) catalog_discover_provider(l->provider);
     tui_post(l->u->tui, login_finish_ui, l);
     return NULL;
 }
