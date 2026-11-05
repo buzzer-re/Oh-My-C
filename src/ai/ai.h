@@ -344,6 +344,8 @@ json_t *ai_error_message(const ai_model_t *m, const char *stop_reason, const cha
  * fetchWithRetry delays use the server hint (headers, then body text) when present; a hint above the cap
  * (opts->max_retry_delay_ms for anthropic / gemini-cli, else 60 s) fails at once. A final HTTP error whose
  * headers carry retry timing gets omp's " retry-after-ms=N" suffix. */
+/* networkFailureMessage: omp's sentence for a transport failure (net/http.c wording), the error itself otherwise. Owned. */
+char *ai_network_failure_message(const char *http_error, const char *url);
 enum { AI_RETRY_FETCH, AI_RETRY_OPENAI, AI_RETRY_OLLAMA, AI_RETRY_CODEX, AI_RETRY_GEMINI_CLI, AI_RETRY_ANTHROPIC };
 /* extractRetryHint: server-suggested delay from headers (may be NULL) and/or an error body (may be NULL); -1 none */
 int64_t ai_extract_retry_hint(const http_headers_t *h, const char *body);

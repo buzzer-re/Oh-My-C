@@ -51,7 +51,8 @@ int main(void) {
     char *my = xasprintf("%s/models.yml", dir);
     const char *yml = "providers:\n  mock:\n    baseUrl: http://127.0.0.1:9/v1\n    apiKey: MOCK_KEY\n    api: openai-completions\n"
                       "    models:\n      - id: mock-1\n        reasoning: true\n      - id: mock-2\n        reasoning: true\n"
-                      "      - id: mock-flaky\n      - id: mock-3-20250101\n      - id: mock-3-20260101\n";
+                      "      - id: mock-flaky\n      - id: mock-3-20250101\n      - id: mock-3-20260101\n"
+                      "      - id: MiMo-V2.6-Pro\n      - id: mimo-v2.6-pro\n";
     fs_write_atomic(my, yml, strlen(yml), 0644);
     free(my);
     settings_init(dir, NULL);
@@ -71,6 +72,10 @@ int main(void) {
     CHECK(mr_match("flaky", &avail, true) == NULL);
     CHECK(is(mr_match("mock-3", &avail, false), "mock/mock-3-20260101")); /* newest dated id */
     CHECK(mr_match("mock/flaky", &avail, false) == NULL);                  /* known provider: exact only */
+    /* ids differing only by case each resolve their exact selector; a spelling matching neither stays ambiguous */
+    CHECK(is(mr_match("mock/MiMo-V2.6-Pro", &avail, true), "mock/MiMo-V2.6-Pro"));
+    CHECK(is(mr_match("mock/mimo-v2.6-pro", &avail, true), "mock/mimo-v2.6-pro"));
+    CHECK(mr_match("mock/MIMO-V2.6-PRO", &avail, true) == NULL);
     mr_result_t r;
     CHECK(mr_parse_pattern("mock-2:high", &avail, &r) && is(r.model, "mock/mock-2") && str_eq(r.level, "high"));
     mr_result_clear(&r);

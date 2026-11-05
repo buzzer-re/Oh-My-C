@@ -58,7 +58,7 @@ models without image input, and drops errored or aborted assistant turns
 - Service tiers (`service_tier.c`, omp `pi-ai/types.ts`): `ai_service_tier_family()` (openai /
   anthropic / google, OpenRouter by identity class, Claude on any `anthropic-messages` host, OpenAI-id
   relays), `ai_should_send_service_tier()` (the wire gate per provider: OpenAI and Codex (advertised
-  `serviceTiers`), OpenRouter flex/scale/priority, Google flex/priority, Vertex/Fireworks priority,
+  `serviceTiers`; `ultrafast` also reaches an OpenAI-family relay row that lists it), OpenRouter flex/scale/priority, Google flex/priority, Vertex/Fireworks priority,
   never `auto`) and `ai_realizes_priority_tier()` (Anthropic direct → `speed: "fast"` + the fast-mode
   beta). A request carries the session's per-family map (`opts.service_tiers`); `ai_stream()` picks
   the entry for the request's model (Fireworks: `providers.fireworksTier`). The google-generative-ai
@@ -218,13 +218,14 @@ transport layer turns them into the request shape. It ports the registry `prepar
 | `oauth-code` | `auth.c` + `auth_engine.c` | authorize URL with upstream param order/encoding, PKCE, state, local callback server with port fallback, paste-code, after-exchange hooks (Google project provisioning, Codex profile, Anthropic identity, Z.ai key minting) |
 | `device-code` | `auth_engine.c` | RFC 8628 with interval / `slow_down` / expiry / denial, templated endpoints, OIDC discovery (xAI), JWT-claim fields |
 | `api-key` | `auth_engine.c` | prompt, normalization, optional validation probes (chat completions / anthropic messages / models endpoint) |
-| custom hooks | `auth_custom.c` | GitHub Copilot, Cursor, Codex device, Alibaba coding/token plan, Xiaomi, Perplexity, Cloudflare AI Gateway / Workers AI, Snowflake, Kilo |
+| custom hooks | `auth_custom.c` | GitHub Copilot, Cursor, Codex device, Alibaba coding/token plan, Xiaomi, Perplexity, Cloudflare AI Gateway / Workers AI, Snowflake, Kilo, Mistral Vibe browser sign-in (mints a plain API key) |
 
 Entry points: `omc login [provider]`, `/login` in the TUI, the setup wizard, and RPC
 `get_login_providers`. MCP servers reuse the same oauth-code machinery (`src/mcp/oauth.c`, see
 [tools.md](tools.md)). Environment-only credential chains live next to their providers:
 `aws.c` (env, web identity, profiles with SSO / `credential_process` / `role_arn`, ECS, IMDSv2) and
-`google_auth.c` (ADC: service account RS256 JWT, authorized user, impersonation, gcloud file,
+`google_auth.c` (ADC: service account RS256 JWT, authorized user, workforce `external_account_authorized_user` at its
+STS `token_url` with Basic client auth and in-memory rotated refresh tokens, impersonation, gcloud file,
 metadata server). Both have process-wide caches.
 
 ## Retries and fallback
@@ -288,7 +289,17 @@ There are two levels:
    A usage-limit wait runs on a wall-clock deadline taken before `auto_retry_start`, so system sleep counts toward it;
    ordinary backoff stays monotonic.
 3. **Model fallback** (`try_retry_fallback` in `app.c`, chains in `config/model_resolver.c`): `retry.fallbackChains`
-   is walked on retryable and hard errors (see [status.md](status.md), "Retry model fallback").
+   is walked on retryable and hard errors (see [status.md](status.md), "Retry model fallback"). A prompt whose model
+   has no usable credential (`auth_has_usable_credential`: none stored or in the environment, or an OAuth token still
+   expired after its refresh) walks the same chain before it is sent (`credential_preflight` in `app.c`, omp
+   `applyMissingCredentialFallback`), unpinned so the primary returns with its credential. With no candidate, or
+   `retry.modelFallback: false`, the prompt is refused with `No API key found for <provider>` (`APP_PROMPT_REFUSED`).
+
+A connect failure on the OpenAI, Codex and Anthropic transports surfaces as omp's sentence
+(`ai_network_failure_message`, omp `networkFailureMessage`): `Couldn't connect to <host> (connection refused)...`,
+`Couldn't reach <host> (getaddrinfo ENOTFOUND)...`, `No internet connection: couldn't reach <host> (...)...`, `TLS
+certificate verification failed for <host> (...)...`. In `-p` text mode each automatic retry prints
+`Retrying (n/m): <error>` to stderr, after one `Working...` line.
 
 Before the transport retry decision, a provider hook (`ai_post_ex_t.on_failure`) may resend the
 request itself or fail it at once. Anthropic uses it for:

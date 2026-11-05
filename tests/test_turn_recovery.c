@@ -2,6 +2,7 @@
  * and the turn-recovery.ts predicates (isRetryableError, #isMidStreamTransportFailure,
  * classifyResolvedInterruptedToolTurn, handleCommittedTextStreamStall) */
 #include "coding/turn_recovery.h"
+#include "ai/ai.h"
 
 #include <stdio.h>
 
@@ -66,6 +67,27 @@ int main(void) {
     CHECK(retriable("DNS lookup failed for api.example.com: Temporary failure in name resolution"));
     CHECK(retriable("connect to 10.0.0.1:443 failed: Network is unreachable"));
     CHECK(retriable("Anthropic stream envelope error: stream ended before message_stop"));
+    /* networkFailureMessage over net/http.c's wording; the sentences stay retryable */
+    static const struct { const char *in, *url, *out; } nf[] = {
+        {"connect to 127.0.0.1:1 failed: Connection refused", "http://127.0.0.1:1/v1/chat",
+         "Couldn't connect to 127.0.0.1:1 (connection refused). Check that the server is running and reachable."},
+        {"DNS lookup failed for my-llm.lan: Name or service not known", "http://my-llm.lan:11434/v1",
+         "Couldn't reach my-llm.lan:11434 (getaddrinfo ENOTFOUND). Check the URL, your network, or proxy."},
+        {"DNS lookup failed for api.anthropic.com: Temporary failure in name resolution", "https://api.anthropic.com/v1/messages",
+         "No internet connection: couldn't reach api.anthropic.com (getaddrinfo EAI_AGAIN). Check your network or proxy and try again."},
+        {"connect to 10.0.0.1:443 failed: Network is unreachable", "https://10.0.0.1/x",
+         "No internet connection: couldn't reach 10.0.0.1 (ENETUNREACH). Check your network or proxy and try again."},
+        {"TLS certificate verification failed for x.test: self-signed certificate", "https://x.test/v1",
+         "TLS certificate verification failed for x.test (self-signed certificate). If you're behind a TLS-inspecting proxy, its CA may need to be trusted."},
+        {"connection reset", "https://x.test/v1", "connection reset"},
+    };
+    for (size_t i = 0; i < sizeof nf / sizeof nf[0]; i++) {
+        char *m = ai_network_failure_message(nf[i].in, nf[i].url);
+        if (strcmp(m, nf[i].out)) fprintf(stderr, "got: %s\n", m);
+        CHECK(!strcmp(m, nf[i].out));
+        if (i + 1 < sizeof nf / sizeof nf[0]) CHECK(retriable(m));
+        free(m);
+    }
     CHECK(!retriable("400 invalid_request_error: messages: field required"));
     CHECK(!retriable("401 Unauthorized"));
     /* transport wording on a terminal 4xx stays terminal */

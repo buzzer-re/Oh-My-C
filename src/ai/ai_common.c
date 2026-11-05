@@ -617,6 +617,59 @@ static void ctx_reset(sse_ctx_t *c, http_resp_t *resp) {
     http_headers_free(&c->hdrs);
 }
 
+/* error/network-cause.ts networkFailureMessage over the transport's own wording (net/http.c). `requestUrl`'s host wins. */
+char *ai_network_failure_message(const char *http_error, const char *url) {
+    const char *e = http_error ? http_error : "";
+    const char *kind = NULL, *detail = NULL;
+    if (str_starts(e, "TLS certificate verification failed for ")) {
+        kind = "tls";
+        const char *sep = strstr(e, ": ");
+        detail = sep ? sep + 2 : NULL;
+    } else if (str_starts(e, "DNS lookup failed for ")) {
+        if (strstr(e, "Temporary failure")) {
+            kind = "offline";
+            detail = "getaddrinfo EAI_AGAIN";
+        } else {
+            kind = "unreachable";
+            detail = "getaddrinfo ENOTFOUND";
+        }
+    } else if (str_starts(e, "connect to ")) {
+        if (strstr(e, "Connection refused")) kind = "refused";
+        else if (strstr(e, "Network is unreachable")) kind = "offline", detail = "ENETUNREACH";
+        else if (strstr(e, "No route to host")) kind = "offline", detail = "EHOSTUNREACH";
+        else if (strstr(e, "timed out")) kind = "offline", detail = "ETIMEOUT";
+    }
+    if (!kind) return xstrdup(*e ? e : "network error");
+    url_t u;
+    char *host = NULL;
+    if (url && url_parse(url, &u) == 0) {
+        bool def_port = (str_eq(u.scheme, "https") && u.port == 443) || (str_eq(u.scheme, "http") && u.port == 80);
+        host = def_port ? xstrdup(u.host) : xasprintf("%s:%d", u.host, u.port);
+        url_free(&u);
+    }
+    char *d = detail ? xasprintf(" (%s)", detail) : xstrdup("");
+    const char *h = host ? host : "the API host";
+    char *msg;
+    if (str_eq(kind, "offline"))
+        msg = xasprintf("No internet connection: couldn't reach %s%s. Check your network or proxy and try again.", h, d);
+    else if (str_eq(kind, "unreachable")) msg = xasprintf("Couldn't reach %s%s. Check the URL, your network, or proxy.", h, d);
+    else if (str_eq(kind, "refused"))
+        msg = xasprintf("Couldn't connect to %s (connection refused). Check that the server is running and reachable.", h);
+    else
+        msg = xasprintf("TLS certificate verification failed for %s%s. If you're behind a TLS-inspecting proxy, its CA may need "
+                        "to be trusted.", h, d);
+    free(d);
+    free(host);
+    return msg;
+}
+
+/* the transports omp re-describes a rejected fetch on: postOpenAIStream, Codex, the Anthropic connection error */
+static char *network_failure_message(const char *http_error, const char *url, int policy) {
+    if (policy == AI_RETRY_OPENAI || policy == AI_RETRY_CODEX || policy == AI_RETRY_ANTHROPIC)
+        return ai_network_failure_message(http_error, url);
+    return xstrdup(http_error ? http_error : "network error");
+}
+
 static int stream_post_url(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
                            ai_sse_cb sse_cb, http_data_cb raw_cb, void *ud, int *status, char **err, ai_post_ex_t *ex) {
     if (!http_headers_get(headers, "Content-Type")) http_headers_add(headers, "Content-Type", "application/json");
@@ -709,7 +762,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
                 continue;
             }
             if (d == -2) {
-                *err = rc != 0 ? xstrdup(resp.error ? resp.error : "network error") : ai_extract_error(c.status, sb_cstr(&c.errbody));
+                *err = rc != 0 ? network_failure_message(resp.error, url, policy) : ai_extract_error(c.status, sb_cstr(&c.errbody));
                 if (rc == 0) *err = with_retry_after(*err, &c.hdrs);
                 free(ex->err_body);
                 ex->err_body = rc == 0 ? xstrdup(sb_cstr(&c.errbody)) : NULL;
@@ -720,7 +773,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
         /* failure: decide retry (fetchWithRetry / the anthropic.ts provider loop) */
         const char *ebody = sb_cstr(&c.errbody);
         bool http_fail = rc == 0;
-        char *msg = !http_fail ? xstrdup(resp.error ? resp.error : "network error") : ai_extract_error(c.status, ebody);
+        char *msg = !http_fail ? network_failure_message(resp.error, url, policy) : ai_extract_error(c.status, ebody);
         bool retry;
         int64_t delay;
         if (policy == AI_RETRY_ANTHROPIC) {

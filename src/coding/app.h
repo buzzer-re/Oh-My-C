@@ -71,6 +71,7 @@ struct app {
     int retry_count;
     int retry_offset;
     int retry_saga; /* attempt of the last auto_retry_start (0: no retry saga open) */
+    char *prompt_refusal; /* why the last APP_PROMPT_REFUSED prompt was refused (owned) */
     int stall_continues; /* committed-text stream-stall continuations this prompt (turn_recovery.h) */
     bool text_buffered;  /* streamed text is not committed to an output sink yet (subagents, print-mode text):
                           * omp setTextOutputCommitted(false), a failed turn's partial text is replay-safe */
@@ -205,6 +206,8 @@ app_t *app_create(const app_opts_t *o, char **err);
 void app_free(app_t *a);
 
 /* run a prompt to completion (blocking). images: array of image blocks or NULL. */
+/* a prompt refused before it reached the agent (no model credential and no fallback); the error was reported */
+#define APP_PROMPT_REFUSED (-3)
 int app_prompt(app_t *a, const char *text, json_t *images);
 /* app_prompt plus hidden notices (owned array of messages, may be NULL) placed before the user message */
 int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices);

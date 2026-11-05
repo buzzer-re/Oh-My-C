@@ -15,7 +15,7 @@ OLLAMA_SHOW = {
 }
 LLAMA_MODELS = {"data": [{"id": "gemma-local.gguf", "meta": {"n_ctx_train": 131072}, "status": {"args": ["--ctx-size", "16384"]}}]}
 LLAMA_PROPS = {"default_generation_settings": {"n_ctx": 32768, "params": {"n_predict": 2048}}, "modalities": {"vision": False}}
-LMS_MODELS = {"data": [{"id": "qwen2.5-vl-7b"}, {"id": "text-embedding-nomic"}]}
+LMS_MODELS = {"data": [{"id": "qwen2.5-vl-7b"}, {"id": "text-embedding-nomic"}, {"id": "reported-limits", "context_length": 54321, "max_completion_tokens": 4321}]}
 LMS_V0 = {"data": [{"id": "qwen2.5-vl-7b", "type": "vlm", "state": "loaded", "loaded_context_length": 12000, "max_context_length": 32768},
                    {"id": "text-embedding-nomic", "type": "embeddings", "max_context_length": 2048}]}
 

@@ -150,7 +150,8 @@ class H(BaseHTTPRequestHandler):
         if path.endswith("/responses/compact"):
             # OpenAI remote compaction: the retained user turns plus an opaque compaction item
             users = [i for i in body.get("input") or [] if i.get("type") == "message" and i.get("role") == "user"]
-            out = users[-1:] + [{"type": "compaction", "id": "cmp_1", "encrypted_content": "ENC:%d" % len(body.get("input") or [])}]
+            out = users[-1:] + [{"type": "compaction", "id": "cmp_1", "encrypted_content": "ENC:%d" % len(body.get("input") or []),
+                                 "internal_chat_message_metadata_passthrough": {"turn_id": "turn_0"}}]
             return self.reply(200, {"id": "resp_c", "object": "response.compaction", "output": out,
                                     "usage": {"input_tokens": 1234, "output_tokens": 56}})
         kind, text = last_turn(body)

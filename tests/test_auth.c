@@ -180,7 +180,7 @@ int main(void) {
                          "https://auth.meta.com=%1$s/meta,https://api.meta.ai=%1$s/metaapi,https://api.workos.com=%1$s/workos,"
                          "https://api.factory.ai=%1$s/factory,https://api.z.ai=%1$s/zaiapi,https://api.code.umans.ai=%1$s/umans,"
                          "https://api.commandcode.ai=%1$s/cmdcode,https://api.inference.wandb.ai=%1$s/coreweave,"
-                         "https://token-plan.ap-southeast-1.maas.aliyuncs.com=%1$s/tp",
+                         "https://token-plan.ap-southeast-1.maas.aliyuncs.com=%1$s/tp,https://console.mistral.ai=%1$s/mistral",
                          base);
     setenv("OMC_AUTH_URL_REWRITE", rw, 1);
     auth_init();
@@ -268,6 +268,98 @@ int main(void) {
         CHECK(str_eq(json_get_str(c, "refresh"), "xr2") && str_eq(json_get_str(c, "email"), "me@x.ai"), "xai refresh keeps identity");
         json_free(c);
         free(k);
+    }
+
+    /* ---- Mistral Vibe browser sign-in: PKCE-bound exchange, poll classification, the key stored as a plain API key ---- */
+    {
+        char *u = xasprintf("%s/mistral/_scenario?name=ok", base);
+        http_resp_t hr;
+        http_get(u, NULL, 5000, &hr);
+        http_resp_free(&hr);
+        free(u);
+        script_t s = {0};
+        int rc = login("mistral", &s, &err);
+        CHECK(rc == 0, "mistral login: %s", err ? err : "?");
+        CHECK(str_eq(s.url, "https://console.mistral.ai/vibe/approve?p=1"), "mistral sign-in url: %s", s.url ? s.url : "?");
+        CHECK(str_eq(s.instructions, "Sign in with your Mistral account and approve Mistral Vibe access, then return here."),
+              "mistral instructions");
+        CHECK(strvec_contains(&s.progress, "Waiting for Mistral sign-in to complete...") &&
+                  strvec_contains(&s.progress, "Exchanging sign-in for a Mistral API key..."),
+              "mistral progress");
+        json_t *c = stored("mistral");
+        CHECK(str_eq(json_get_str(c, "type"), "api_key") && str_eq(json_get_str(c, "key"), "vibe-key"), "mistral key stored as an API key");
+        json_free(c);
+        free(err);
+        err = NULL;
+        s_free(&s);
+        auth_logout("mistral");
+
+        static const struct {
+            const char *scenario, *want;
+        } fail_cases[] = {
+            {"expired", "Mistral sign-in expired; run /login again"},
+            {"denied", "Mistral sign-in was denied"},
+            {"hung-up", "console said no"},
+            {"unknown", "Mistral sign-in returned unknown state \"sideways\""},
+            {"no-token", "Mistral sign-in completed without an exchange token"},
+            {"down", "Mistral sign-in status unavailable: HTTP 503"},
+            {"workspace", "Your Mistral workspace can't be used for Mistral Vibe; run /login again and pick another workspace in the browser, or ask your administrator"},
+            {"bad-url", "Failed to start Mistral browser sign-in: unexpected URL https://evil.example.com/api/poll"},
+            {"start-500", "Failed to start Mistral browser sign-in: HTTP 500"},
+            {"expires-now", "Device flow timed out"},
+        };
+        for (size_t i = 0; i < ARRAY_LEN(fail_cases); i++) {
+            u = xasprintf("%s/mistral/_scenario?name=%s", base, fail_cases[i].scenario);
+            http_get(u, NULL, 5000, &hr);
+            http_resp_free(&hr);
+            free(u);
+            script_t f = {0};
+            rc = login("mistral", &f, &err);
+            CHECK(rc != 0 && str_eq(err, fail_cases[i].want), "mistral %s: %s", fail_cases[i].scenario, err ? err : "(no error)");
+            json_t *none = stored("mistral");
+            CHECK(!none, "mistral %s stored nothing", fail_cases[i].scenario);
+            json_free(none);
+            free(err);
+            err = NULL;
+            s_free(&f);
+        }
+
+        /* two transient poll failures ride out; a 429 stretches only that wait */
+        static const char *const ok_cases[] = {"flaky", "throttled"};
+        for (size_t i = 0; i < ARRAY_LEN(ok_cases); i++) {
+            u = xasprintf("%s/mistral/_scenario?name=%s", base, ok_cases[i]);
+            http_get(u, NULL, 5000, &hr);
+            http_resp_free(&hr);
+            free(u);
+            script_t f = {0};
+            rc = login("mistral", &f, &err);
+            CHECK(rc == 0, "mistral %s: %s", ok_cases[i], err ? err : "?");
+            free(err);
+            err = NULL;
+            s_free(&f);
+            auth_logout("mistral");
+        }
+
+        /* already cancelled: the console is never contacted */
+        volatile int abort_now = 1;
+        script_t f = {0};
+        auth_login_hooks_t h = {0};
+        h.abort = &abort_now;
+        h.ud = &f;
+        h.on_auth = s_auth;
+        h.on_progress = s_progress;
+        h.prompt = s_prompt;
+        json_t *lg = mock_log(port);
+        int before = count_req(lg, "/mistral/api/");
+        json_free(lg);
+        rc = auth_login_hooked("mistral", &h, &err);
+        CHECK(rc != 0 && str_eq(err, "Login cancelled"), "mistral cancelled: %s", err ? err : "?");
+        lg = mock_log(port);
+        CHECK(count_req(lg, "/mistral/api/") == before, "mistral cancelled before any request");
+        json_free(lg);
+        free(err);
+        err = NULL;
+        s_free(&f);
     }
 
     /* ---- after-exchange hooks: Muse key mint, Factory whoami ---- */

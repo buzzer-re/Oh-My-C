@@ -276,6 +276,28 @@ bool auth_has_credentials(const char *provider) {
     return ok;
 }
 
+bool auth_has_usable_credential(const char *provider) {
+    if (!auth_has_credentials(provider)) return false;
+    /* getApiKey refreshes an OAuth token about to expire; a token still expired after that is no credential */
+    char *k = auth_get_api_key(provider);
+    free(k);
+    pthread_mutex_lock(&g_mu);
+    json_t *e = hmap_get(&g_runtime, provider) ? NULL : json_get_obj(g_store, provider);
+    bool dead = false;
+    if (e && str_eq(json_get_str(e, "type"), "oauth")) {
+        json_t *dd = json_get_obj(e, "descriptor");
+        if (!dd) dd = descriptor(provider);
+        int64_t exp = normalized_expiry(dd, e);
+        dead = exp && exp <= now_ms();
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (!dead) return true;
+    k = ai_env_api_key(provider);
+    bool env = k != NULL;
+    free(k);
+    return env;
+}
+
 /* ---------- oauth-code flow (registry/engine/oauth-code.ts + oauth/callback-server.ts) ---------- */
 
 static char *pkce_challenge(const char *verifier) {

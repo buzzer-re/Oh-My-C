@@ -175,6 +175,40 @@ printf 'modelRoles:\n  smol: mock/mock-1\n' > "$T/agent/config.yml"
 sleep 1; "$B" --model mock/mock-1 -p "hi again" >/dev/null 2>&1 </dev/null
 tail -1 "$T/req.jsonl" | grep -q "Use for demo skill test routing" && echo "   ok  skill hint compressed" || { echo "   FAIL skill hint compressed"; fail=1; }
 rm -f "$T/agent/config.yml"
+# a prompt on a provider with no usable credential walks retry.fallbackChains (no request reaches its host)
+mkdir -p "$T/nocred"
+cat > "$T/nocred/models.yml" <<YML
+providers:
+  mock:
+    baseUrl: http://127.0.0.1:$PORT/v1
+    apiKey: MOCK_KEY
+    api: openai-completions
+    models:
+      - id: mock-1
+YML
+: > "$T/nocred/config.yml"
+NOCRED=(env -u SCW_SECRET_KEY -u SCW_API_KEY HOME="$T/nocred" OMC_CODING_AGENT_DIR="$T/nocred")
+out=$("${NOCRED[@]}" "$B" -p "hello" --model scaleway/glm-5.3 2>&1 </dev/null); nrc=$?
+[[ $nrc == 1 && "$out" == *"No API key found for scaleway."* && "$out" == *"Use /login, set an API key environment variable"* ]] && echo "   ok  no credential refuses the prompt" || { echo "   FAIL no credential refuses the prompt: $nrc $out"; fail=1; }
+printf 'retry:\n  fallbackChains:\n    scaleway/glm-5.3:\n      - mock/mock-1\n' > "$T/nocred/config.yml"
+: > "$T/req.jsonl"
+out=$("${NOCRED[@]}" "$B" -p "hello" --model scaleway/glm-5.3 2>&1 </dev/null); nrc=$?
+[[ $nrc == 0 && "$out" == *"[warning] Fallback: scaleway/glm-5.3"*" -> mock/mock-1"$'\n'"no credential for scaleway"* && "$out" != *"No API key"* ]] && echo "   ok  no credential walks the chain" || { echo "   FAIL no credential walks the chain: $nrc $out"; fail=1; }
+tail -1 "$T/req.jsonl" | grep -q '"model": "mock-1"' && echo "   ok  no credential fallback used" || { echo "   FAIL no credential fallback used"; fail=1; }
+printf 'retry:\n  modelFallback: false\n  fallbackChains:\n    scaleway/glm-5.3:\n      - mock/mock-1\n' > "$T/nocred/config.yml"
+out=$("${NOCRED[@]}" "$B" -p "hello" --model scaleway/glm-5.3 2>&1 </dev/null); nrc=$?
+[[ $nrc == 1 && "$out" == *"No API key found for scaleway."* ]] && echo "   ok  modelFallback off refuses" || { echo "   FAIL modelFallback off refuses: $nrc $out"; fail=1; }
+# `auth: none` needs no credential
+cat >> "$T/nocred/models.yml" <<YML
+  noauth:
+    baseUrl: http://127.0.0.1:$PORT/v1
+    auth: none
+    api: openai-completions
+    models:
+      - id: mock-1
+YML
+out=$("${NOCRED[@]}" "$B" -p "hello" --model noauth/mock-1 2>&1 </dev/null); nrc=$?
+[[ $nrc == 0 && "$out" != *"No API key"* ]] && echo "   ok  auth none is keyless" || { echo "   FAIL auth none is keyless: $nrc $out"; fail=1; }
 # retry model fallback: a rate-limited model walks retry.fallbackChains
 printf 'retry:\n  fallbackChains:\n    mock/mock-flaky:\n      - mock/mock-2\n' > "$T/agent/config.yml"
 out=$(timeout 60 "$B" --model mock/mock-flaky -p "bash:echo fb-ok" </dev/null 2>&1)
@@ -184,7 +218,7 @@ tail -1 "$T/req.jsonl" | grep -q '"model": "mock-2"' && echo "   ok  fallback mo
 # (the transport's own retries of each request come on top; the mock's retry-after-ms: 0 makes them immediate)
 printf 'retry:\n  maxRetries: 1\n  baseDelayMs: 10\n' > "$T/agent/config.yml"
 s0=$(date +%s%N); out=$(timeout 40 "$B" --model mock/mock-1 --no-session -p "fail:503:try again later" </dev/null 2>&1); s1=$(date +%s%N)
-(( (s1 - s0) / 1000000 < 30000 )) && [[ "$out" == *"[warning] Retrying (1/1) in 1s: 503 try again later"* ]] && echo "   ok  503 retry backoff" || { echo "   FAIL 503 retry backoff ($(( (s1 - s0) / 1000000 )) ms): $out"; fail=1; }
+(( (s1 - s0) / 1000000 < 30000 )) && [[ "$out" == *"Retrying (1/1): 503 try again later"* ]] && echo "   ok  503 retry backoff" || { echo "   FAIL 503 retry backoff ($(( (s1 - s0) / 1000000 )) ms): $out"; fail=1; }
 # transport retries like omp (postOpenAIStream + withReplaySafeStreamRetry): 6 attempts, then one replay-safe
 # provider retry after 500 ms = 12 requests per turn attempt; a 400 is sent once
 printf 'retry:\n  enabled: false\n' > "$T/agent/config.yml"
@@ -686,6 +720,7 @@ DOUT=$(dmodels)
 check "discover ollama"    "ollama qwen3:8b ctx=40960 reasoning"  printf '%s\n' "$DOUT"
 check "discover llama.cpp" "llama.cpp gemma-local.gguf ctx=16384"  printf '%s\n' "$DOUT"
 check "discover lm-studio" "lm-studio qwen2.5-vl-7b ctx=12000 vision"  printf '%s\n' "$DOUT"
+check "discover reported limits" "lm-studio reported-limits ctx=54321"  printf '%s\n' "$DOUT"
 check "discovery cache"    '"baseUrl": "http://127.0.0.1:'"$DPORT"'/lms/v1"'  python3 -I -m json.tool "$T/dagent/local-models.json"
 kill $DPID 2>/dev/null
 check "cached when down"   "│ llava:7b"  "${DENV[@]}" "$B" models

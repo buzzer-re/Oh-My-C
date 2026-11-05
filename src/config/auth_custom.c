@@ -1,11 +1,12 @@
 /* auth_custom.c - whole-flow login / refresh hooks (`login "custom" hook=...`), ported from omp v18.14.2
  * packages/ai/src/registry/oauth/{github-copilot,cursor,openai-codex,alibaba-coding-plan,alibaba-token-plan,
- * xiaomi,perplexity,cloudflare-ai-gateway,cloudflare-workers-ai,snowflake,kilo}.ts and registry/snowflake.ts. */
+ * xiaomi,perplexity,cloudflare-ai-gateway,cloudflare-workers-ai,snowflake,kilo,mistral-vibe}.ts and registry/snowflake.ts. */
 #define _GNU_SOURCE
 #include "config/auth_engine.h"
 
 #include "ai/ai.h"
 #include "core/proc.h"
+#include "session/trace.h"
 
 #include <ctype.h>
 #include <openssl/sha.h>
@@ -1330,6 +1331,211 @@ static int kilo_login(const actx_t *c, alogin_t *out, char **err) {
 }
 
 /* ======================================================================================= */
+/* Mistral Vibe browser sign-in (registry/oauth/mistral-vibe.ts + oauth/device-code.ts)       */
+/* ======================================================================================= */
+
+#define MISTRAL_CONSOLE_ORIGIN "https://console.mistral.ai"
+#define MISTRAL_REQUEST_TIMEOUT_MS 30000
+#define MISTRAL_POLL_INTERVAL_S 3          /* the Vibe CLI's poll cadence ... */
+#define MISTRAL_MAX_POLL_FAILURES 3        /* ... and failure budget */
+#define MISTRAL_MAX_RETRY_AFTER_MS 30000   /* so one large value cannot hide an approval until expiry */
+#define MISTRAL_WORKSPACE_DENIED 9004      /* console error_code: the workspace may not mint API keys */
+#define MISTRAL_EXPIRED "Mistral sign-in expired; run /login again"
+
+/* POST to the console API; r is filled on 0, and *err is set when the request itself failed */
+static int mistral_post(const actx_t *c, const char *path, const json_t *body, http_resp_t *r, char **err) {
+    if (cancelled(c, err)) return -1;
+    http_headers_t h = {0};
+    http_headers_set(&h, "Content-Type", "application/json");
+    char *url = xasprintf(MISTRAL_CONSOLE_ORIGIN "/api%s", path), *js = json_dump(body, 0);
+    int rc = auth_http("POST", url, &h, js, MISTRAL_REQUEST_TIMEOUT_MS, c, r);
+    free(url);
+    free(js);
+    http_headers_free(&h);
+    if (rc != 0) {
+        if (!cancelled(c, err)) *err = xstrdup(r->error ? r->error : "request failed");
+        http_resp_free(r);
+        return -1;
+    }
+    return 0;
+}
+
+/* Accept only console URLs at or below base_path (segment-aware: /api rejects /api-x). */
+static bool mistral_console_url(const char *value, const char *base_path) {
+    url_t u;
+    if (url_parse(value, &u) != 0) return false;
+    size_t n = strlen(base_path);
+    bool ok = str_eq(u.scheme, "https") && str_eq(u.host, "console.mistral.ai") && u.port == 443 && u.path &&
+              (!n || (!strncmp(u.path, base_path, n) && (!u.path[n] || u.path[n] == '/' || u.path[n] == '?')));
+    url_free(&u);
+    return ok;
+}
+
+/* one poll of signInPoller: 1 complete (*token set), 0 pending, 2 slow_down (*retry_ms, -1 = none), -1 terminal */
+static int mistral_poll(const actx_t *c, const char *poll_url, int *failures, int64_t timeout_ms, char **token,
+                        int64_t *retry_ms, char **err) {
+    http_resp_t r;
+    int hr = auth_http("GET", poll_url, NULL, NULL, MIN(timeout_ms, (int64_t)MISTRAL_REQUEST_TIMEOUT_MS), c, &r);
+    if (actx_aborted(c)) {
+        http_resp_free(&r);
+        return 0;
+    }
+    int status = hr == 0 ? r.status : 0;
+    if (status == 410) {
+        http_resp_free(&r);
+        *err = xstrdup(MISTRAL_EXPIRED);
+        return -1;
+    }
+    if (status == 429) {
+        *failures = 0;
+        int64_t ra = ai_retry_after_from_headers(&r.headers);
+        *retry_ms = ra > 0 ? MIN(ra, (int64_t)MISTRAL_MAX_RETRY_AFTER_MS) : -1;
+        http_resp_free(&r);
+        return 2;
+    }
+    bool ok2xx = status >= 200 && status < 300;
+    json_t *j = ok2xx ? body_json(&r) : NULL;
+    const char *st = json_is_obj(j) ? json_get_str(j, "status") : NULL;
+    json_t *xt = json_get(j, "exchange_token"), *msg = json_get(j, "message");
+    bool valid = st && (!xt || json_is_str(xt)) && (!msg || json_is_str(msg));
+    http_resp_free(&r);
+    if (!valid) {
+        json_free(j);
+        if (++*failures < MISTRAL_MAX_POLL_FAILURES) return 0;
+        char *reason = !status ? xstrdup("request failed") : ok2xx ? xstrdup("malformed response") : xasprintf("HTTP %d", status);
+        *err = xasprintf("Mistral sign-in status unavailable: %s", reason);
+        free(reason);
+        return -1;
+    }
+    *failures = 0;
+    int rc = -1;
+    if (str_eq(st, "pending")) rc = 0;
+    else if (str_eq(st, "completed")) {
+        if (xt && *json_sv(xt)) {
+            *token = xstrdup(json_sv(xt));
+            rc = 1;
+        } else *err = xstrdup("Mistral sign-in completed without an exchange token");
+    } else if (str_eq(st, "expired")) *err = xstrdup(MISTRAL_EXPIRED);
+    else if (str_eq(st, "denied")) *err = xstrdup("Mistral sign-in was denied");
+    else if (str_eq(st, "error")) *err = xstrdup(msg && *json_sv(msg) ? json_sv(msg) : "Mistral sign-in failed");
+    else *err = xasprintf("Mistral sign-in returned unknown state \"%s\"", st);
+    json_free(j);
+    return rc;
+}
+
+static int mistral_vibe_login(const actx_t *c, alogin_t *out, char **err) {
+    unsigned char vb[96], dig[SHA256_DIGEST_LENGTH]; /* generatePKCE: 96 random bytes */
+    rand_bytes(vb, sizeof vb);
+    char *verifier = base64url_encode(vb, sizeof vb);
+    SHA256((const unsigned char *)verifier, strlen(verifier), dig);
+    char *challenge = base64url_encode(dig, sizeof dig);
+    const char *start_msg = "Failed to start Mistral browser sign-in";
+    json_t *sb = json_obj(), *started = NULL;
+    json_set_str(sb, "code_challenge", challenge);
+    json_set_str(sb, "code_challenge_method", "S256");
+    free(challenge);
+    http_resp_t r;
+    int prc = mistral_post(c, "/vibe/sign-in", sb, &r, err);
+    json_free(sb);
+    char *token = NULL;
+    int rc = -1;
+    if (prc != 0) goto done;
+    if (r.status < 200 || r.status >= 300) {
+        *err = xasprintf("%s: HTTP %d", start_msg, r.status);
+        http_resp_free(&r);
+        goto done;
+    }
+    started = body_json(&r);
+    http_resp_free(&r);
+    const char *pid = json_get_str(started, "process_id"), *sign_url = json_get_str(started, "sign_in_url"),
+               *poll_url = json_get_str(started, "poll_url"), *exp = json_get_str(started, "expires_at");
+    if (!pid || !*pid || !sign_url || !poll_url || !exp) {
+        *err = xasprintf("%s: malformed response", start_msg);
+        goto done;
+    }
+    double exp_ms = 0;
+    if (!trace_parse_iso_ms(exp, &exp_ms)) {
+        *err = xasprintf("%s: invalid expires_at", start_msg);
+        goto done;
+    }
+    if (!mistral_console_url(sign_url, "")) {
+        *err = xasprintf("%s: unexpected URL %s", start_msg, sign_url);
+        goto done;
+    }
+    if (!mistral_console_url(poll_url, "/api")) {
+        *err = xasprintf("%s: unexpected URL %s", start_msg, poll_url);
+        goto done;
+    }
+    actx_auth(c, sign_url, NULL, "Sign in with your Mistral account and approve Mistral Vibe access, then return here.");
+    actx_progress(c, "Waiting for Mistral sign-in to complete...");
+
+    /* pollOAuthDeviceCodeFlow; Retry-After stretches only the next wait, at least the normal interval */
+    int64_t scale = scale_ms();
+    int64_t interval_ms = MISTRAL_POLL_INTERVAL_S * scale;
+    int64_t remaining_ms = (int64_t)exp_ms - now_ms();
+    int64_t deadline = mono_ms() + MAX((int64_t)0, remaining_ms);
+    int failures = 0;
+    while (mono_ms() < deadline) {
+        if (cancelled(c, err)) goto done;
+        int64_t retry_ms = -1;
+        int pr = mistral_poll(c, poll_url, &failures, deadline - mono_ms(), &token, &retry_ms, err);
+        if (cancelled(c, err)) goto done;
+        if (pr == 1) break;
+        if (pr < 0) {
+            if (mono_ms() >= deadline) { /* a failure at the deadline reads as the timeout */
+                free(*err);
+                *err = NULL;
+            }
+            break;
+        }
+        if (mono_ms() >= deadline) break;
+        /* retry_ms arrives in real milliseconds; the test scale shrinks provider seconds */
+        int64_t wait_ms = pr == 2 && retry_ms >= 0 ? MAX(interval_ms, retry_ms * scale / 1000) : interval_ms;
+        int64_t left = deadline - mono_ms();
+        if (left <= 0) break;
+        if (!actx_sleep(c, MIN(wait_ms, left))) {
+            cancelled(c, err);
+            goto done;
+        }
+    }
+    if (!token) {
+        if (!*err) *err = xstrdup("Device flow timed out");
+        goto done;
+    }
+    actx_progress(c, "Exchanging sign-in for a Mistral API key...");
+    const char *ex_msg = "Failed to exchange Mistral sign-in for an API key";
+    char *ep = url_encode(pid), *path = xasprintf("/vibe/sign-in/%s/exchange", ep);
+    free(ep);
+    json_t *xb = json_obj();
+    json_set_str(xb, "exchange_token", token);
+    json_set_str(xb, "code_verifier", verifier);
+    prc = mistral_post(c, path, xb, &r, err);
+    json_free(xb);
+    free(path);
+    if (prc != 0) goto done;
+    json_t *x = body_json(&r);
+    if (r.status == 403 && json_is_num(json_get(x, "error_code")) && json_get_int(x, "error_code", 0) == MISTRAL_WORKSPACE_DENIED) {
+        *err = xstrdup("Your Mistral workspace can't be used for Mistral Vibe; run /login again and pick another workspace in the browser, or "
+                       "ask your administrator");
+    } else if (r.status < 200 || r.status >= 300) {
+        *err = xasprintf("%s: HTTP %d", ex_msg, r.status);
+    } else {
+        const char *key = json_get_str(x, "api_key");
+        if (key && *key) {
+            out->api_key = xstrdup(key); /* /login stores it as a plain API-key credential */
+            rc = 0;
+        } else *err = xasprintf("%s: malformed response", ex_msg);
+    }
+    json_free(x);
+    http_resp_free(&r);
+done:
+    json_free(started);
+    free(token);
+    free(verifier);
+    return rc;
+}
+
+/* ======================================================================================= */
 /* dispatch                                                                                  */
 /* ======================================================================================= */
 
@@ -1345,6 +1551,7 @@ int auth_custom_hook_login(const actx_t *c, const char *hook, alogin_t *out, cha
     if (str_eq(hook, "cloudflare-workers-ai")) return cloudflare_login(c, false, out, err);
     if (str_eq(hook, "snowflake")) return snowflake_login(c, out, err);
     if (str_eq(hook, "kilo")) return kilo_login(c, out, err);
+    if (str_eq(hook, "mistral-vibe-sign-in")) return mistral_vibe_login(c, out, err);
     *err = xasprintf("auth rules reference unknown login hook \"%s\"", hook ? hook : "");
     return -1;
 }

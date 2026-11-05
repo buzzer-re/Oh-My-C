@@ -100,6 +100,11 @@ for f in glob.glob(sys.argv[1] + "/**/*.jsonl", recursive=True):
     for l in open(f):
         e = json.loads(l)
         if e.get("type") == "compaction": print(e["method"], e["summary"], e["preserveData"]["openaiRemoteCompaction"]["compactionItem"]["encrypted_content"])' "$T/cg3"
+check "openai compact strips metadata" "clean"  python3 -I -c '
+import json, sys
+rs = [json.loads(l) for l in open(sys.argv[1])]
+rs = [r for r in rs if r["path"] == "/v1/responses"]
+print("leak" if "internal_chat_message_metadata_passthrough" in json.dumps(rs[-1]["body"]["input"]) else "clean")' "$T/cprov.jsonl"
 # Anthropic compaction beta: `compaction` request param + beta, the signed block replays at the head of the tail
 : > "$T/cprov.jsonl"
 cagent "$T/cg4" $'modelRoles:\n  default: mocka/mock-a\ncompaction:\n  keepRecentTokens: 10'

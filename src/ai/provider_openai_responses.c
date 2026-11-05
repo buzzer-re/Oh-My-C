@@ -134,6 +134,9 @@ static json_t *input_content(const ai_model_t *m, const json_t *content) {
     return out;
 }
 
+/* stripOpenAIResponsesInternalMetadataForReplay: captured output items can carry it; Codex rejects it on input */
+#define INTERNAL_METADATA_KEY "internal_chat_message_metadata_passthrough"
+
 static json_t *parse_reasoning_item(const char *sig) {
     if (!sig || sig[0] != '{') return NULL;
     json_t *j = json_parse_str(sig);
@@ -345,6 +348,7 @@ json_t *oair_convert_input(const ai_model_t *m, const ai_context_t *ctx, int var
                         c = json_clone(it);
                         if (!str_eq(json_get_str(it, "type"), "computer_call")) json_del(c, "id");
                         json_del(c, "status");
+                        json_del(c, INTERNAL_METADATA_KEY);
                     }
                     if (str_eq(json_get_str(c, "type"), "function_call") || str_eq(json_get_str(c, "type"), "custom_tool_call"))
                         if (json_get_str(c, "call_id")) strvec_push(&known, json_get_str(c, "call_id"));
@@ -379,10 +383,11 @@ json_t *oair_convert_input(const ai_model_t *m, const ai_context_t *ctx, int var
     json_free(msgs);
     strvec_free(&known);
     if (variant == V_CODEX) {
-        /* store:false backend: drop item ids */
+        /* store:false backend: drop item ids; backend-only metadata Codex rejects as an unknown input parameter */
         json_t *it;
         json_arr_foreach(out, i, it) {
             if (!str_eq(json_get_str(it, "type"), "computer_call")) json_del(it, "id");
+            json_del(it, INTERNAL_METADATA_KEY);
         }
     }
     return out;
@@ -1456,7 +1461,11 @@ json_t *ai_openai_remote_compact(const ai_model_t *m, const char *api_key, const
     ai_context_t ctx = {.messages = (json_t *)messages};
     int variant = variant_of(m) == V_AZURE ? V_AZURE : V_OPENAI;
     json_t *input = json_arr(), *it;
-    json_arr_foreach(previous, i, it) json_push(input, json_clone(it));
+    json_arr_foreach(previous, i, it) {
+        json_t *c = json_clone(it);
+        json_del(c, INTERNAL_METADATA_KEY);
+        json_push(input, c);
+    }
     json_t *conv = oair_convert_input(m, &ctx, variant);
     json_arr_foreach(conv, i, it) {
         json_t *c;
@@ -1469,6 +1478,7 @@ json_t *ai_openai_remote_compact(const ai_model_t *m, const char *api_key, const
             json_obj_foreach(it, x, k, v) json_set(c, k, json_clone(v));
         } else c = json_clone(it);
         json_del(c, "status"); /* stripOpenAIResponsesOutputOnlyStatusesForReplay */
+        json_del(c, INTERNAL_METADATA_KEY);
         json_push(input, c);
     }
     json_free(conv);

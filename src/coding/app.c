@@ -860,7 +860,7 @@ static bool signed_thinking_blocks(agent_t *ag, const json_t *failed, const ai_m
 }
 
 static void apply_fallback(app_t *a, const char *role, const ai_model_t *cand, const char *level, const char *cur,
-                           const char *err) {
+                           const char *reason) {
     ai_effort_t prev = a->thinking, next = a->thinking;
     if (level && effort_parse(level, &next) != 0) next = a->thinking;
     char *from = xstrdup(cur);
@@ -886,8 +886,7 @@ static void apply_fallback(app_t *a, const char *role, const ai_model_t *cand, c
     a->fallback.last_thinking = next;
     app_rebuild_system_prompt(a);
     /* retry_fallback_applied {from, to, role, reason}: fields separated by \x1f */
-    notice(a, "retry_fallback_applied", "%s\x1f%s\x1f%s\x1fRequest failed: %s", from, key, role,
-           err ? err : "provider returned an error without details");
+    notice(a, "retry_fallback_applied", "%s\x1f%s\x1f%s\x1f%s", from, key, role, reason);
     free(key);
     free(from);
 }
@@ -917,7 +916,9 @@ static bool try_retry_fallback(app_t *a, agent_t *ag, const char *cur, const jso
             if (a->last_context_tokens > 0 && cand->context_window > 0 && a->last_context_tokens > cand->context_window)
                 continue;
             if (!mr_provider_available(cand->provider)) continue;
-            apply_fallback(a, keys.v[k], cand, c[i].level, cur, err);
+            char *reason = xasprintf("Request failed: %s", err ? err : "provider returned an error without details");
+            apply_fallback(a, keys.v[k], cand, c[i].level, cur, reason);
+            free(reason);
             done = true;
         }
         for (size_t i = 0; i < n; i++) mr_selector_free(&c[i]);
@@ -926,6 +927,65 @@ static bool try_retry_fallback(app_t *a, agent_t *ag, const char *cur, const jso
     mr_pool_free(&avail);
     strvec_free(&keys);
     return done;
+}
+
+/* getApiKey at prompt time: keyless providers need none */
+static bool model_has_usable_credential(const ai_model_t *m) {
+    return catalog_provider_keyless(m->provider) || auth_has_usable_credential(m->provider);
+}
+
+/* applyMissingCredentialFallback + #findKeyedRetryFallback: move off a model whose provider has no usable credential
+ * onto the first chain candidate with one that fits the live context. Unpinned: once the primary's credential returns
+ * maybe_restore_primary switches back at the next prompt. */
+static bool missing_credential_fallback(app_t *a) {
+    if (!settings_bool("retry.modelFallback", true)) return false;
+    char *cur = current_selector(a);
+    strvec_t keys = {0};
+    char *own = mr_fallback_chain_key(cur, a->model, NULL);
+    if (a->fallback.active && a->fallback.role) strvec_push(&keys, a->fallback.role);
+    if (own && !strvec_contains(&keys, own)) strvec_push(&keys, own);
+    free(own);
+    mr_pool_t avail = {0};
+    mr_pool_available(&avail, "all");
+    bool done = false;
+    for (size_t k = 0; k < keys.n && !done; k++) {
+        mr_selector_t *c = NULL;
+        size_t n = mr_fallback_candidates(keys.v[k], cur, a->model, false, &c);
+        for (size_t i = 0; i < n; i++) {
+            if (done || mr_selector_suppressed(c[i].raw)) continue;
+            mr_result_t r;
+            const ai_model_t *cand = mr_resolve_value(c[i].raw, &avail, &r) ? r.model : NULL;
+            mr_result_clear(&r);
+            if (!cand) cand = catalog_find(c[i].provider, c[i].id);
+            if (!cand || cand == a->model) continue;
+            if (a->last_context_tokens > 0 && cand->context_window > 0 && a->last_context_tokens > cand->context_window)
+                continue;
+            if (!mr_provider_available(cand->provider) || !model_has_usable_credential(cand)) continue;
+            char *reason = xasprintf("no credential for %s", a->model->provider);
+            apply_fallback(a, keys.v[k], cand, c[i].level, cur, reason);
+            free(reason);
+            done = true;
+        }
+        for (size_t i = 0; i < n; i++) mr_selector_free(&c[i]);
+        free(c);
+    }
+    mr_pool_free(&avail);
+    strvec_free(&keys);
+    free(cur);
+    return done;
+}
+
+/* #promptWithMessage: "Validate API key"; a provider without one walks the retry fallback chain first. False refuses
+ * the prompt (the error is reported). */
+static bool credential_preflight(app_t *a) {
+    if (!a->model || model_has_usable_credential(a->model) || missing_credential_fallback(a)) return true;
+    char *agent_dir = omc_agent_path("");
+    free(a->prompt_refusal);
+    a->prompt_refusal = xasprintf("No API key found for %s.\n\nUse /login, set an API key environment variable, or create %s/models.yml",
+                                  a->model->provider, agent_dir);
+    free(agent_dir);
+    notice(a, "error", "%s", a->prompt_refusal);
+    return false;
 }
 
 /* #maybeRestoreRetryFallbackPrimary: back to the primary once its cooldown ends (retry.fallbackRevertPolicy) */
@@ -950,7 +1010,7 @@ static void maybe_restore_primary(app_t *a) {
         return;
     }
     const ai_model_t *pm = catalog_find(orig.provider, orig.id);
-    if (pm && mr_provider_available(pm->provider)) {
+    if (pm && mr_provider_available(pm->provider) && model_has_usable_credential(pm)) {
         ai_effort_t th = a->thinking == a->fallback.last_thinking ? a->fallback.original_thinking : a->thinking;
         a->fallback.active = false;
         const ai_model_t *prev_model = a->model;
@@ -2869,6 +2929,11 @@ int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
     app_plan_yolo_arm(a);
     memory_take_prompt_refresh(a);
     maybe_restore_primary(a);
+    if (!credential_preflight(a)) {
+        json_free(images);
+        json_free(notices);
+        return APP_PROMPT_REFUSED;
+    }
     begin_turn_budget(a, text);
     guards_reset_cycle(a);
     json_t *content = json_arr();
@@ -3032,6 +3097,10 @@ int app_prompt_skill(app_t *a, json_t *msg) {
     app_plan_yolo_arm(a);
     memory_take_prompt_refresh(a);
     maybe_restore_primary(a);
+    if (!credential_preflight(a)) {
+        json_free(msg);
+        return APP_PROMPT_REFUSED;
+    }
     guards_reset_cycle(a);
     char *text = ai_message_text(msg);
     const char *args = json_get_str(json_get(msg, "details"), "args");
@@ -3061,6 +3130,7 @@ int app_prompt_skill(app_t *a, json_t *msg) {
 
 int app_prompt_hidden(app_t *a, const char *text, const char *custom_type) {
     maybe_restore_primary(a);
+    if (!credential_preflight(a)) return APP_PROMPT_REFUSED;
     json_t *msgs = json_arr();
     json_t *gm = app_goal_context_message(a);
     if (gm) json_push(msgs, gm);
@@ -3540,7 +3610,7 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
     pthread_t watcher;
     watch_ctx_t wc = {pc, child->agent, 0};
     bool watching = pc && pthread_create(&watcher, NULL, cancel_watch, &wc) == 0;
-    app_prompt(child, sb_cstr(&p), NULL);
+    bool refused = app_prompt(child, sb_cstr(&p), NULL) == APP_PROMPT_REFUSED;
     wc.done = 1;
     if (watching) pthread_join(watcher, NULL);
     sb_free(&p);
@@ -3549,7 +3619,8 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
     if (details) {
         *details = app_stats(child);
         json_set_str(*details, "agent", agent_name ? agent_name : "task");
-        if (last && json_get_str(last, "errorMessage")) json_set_str(*details, "error", json_get_str(last, "errorMessage"));
+        if (refused && child->prompt_refusal) json_set_str(*details, "error", child->prompt_refusal);
+        else if (last && json_get_str(last, "errorMessage")) json_set_str(*details, "error", json_get_str(last, "errorMessage"));
     }
     parent->total_cost += child->total_cost;
     app_free(child);

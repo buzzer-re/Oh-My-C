@@ -611,6 +611,18 @@ static const ai_model_t *provider_lookup(const mr_pool_t *pool, const char *prov
     return found;
 }
 
+/* unique model in pool with provider (ci) and exactly this id (getProviderExactIndex: duplicates mark it ambiguous) */
+static const ai_model_t *provider_exact_lookup(const mr_pool_t *pool, const char *provider, const char *id) {
+    const ai_model_t *found = NULL;
+    for (size_t i = 0; i < pool->n; i++) {
+        const ai_model_t *m = pool->v[i];
+        if (strcasecmp(m->provider, provider) || strcmp(m->id, id)) continue;
+        if (found) return NULL;
+        found = m;
+    }
+    return found;
+}
+
 /* reverse index over thinking.effortRouting wire ids */
 static const ai_model_t *wire_route_lookup(const mr_pool_t *pool, const char *provider, const char *want) {
     const ai_model_t *found = NULL;
@@ -643,6 +655,9 @@ static const ai_model_t *provider_reference(const char *provider_in, const char 
     const ai_model_t *r = NULL;
     bool amb = false;
     if (!*provider || !*id) goto done;
+    /* an exact id is never ambiguous: a models.yml entry `MiMo-V2.6-Pro` beside the bundled `mimo-v2.6-pro` */
+    r = provider_exact_lookup(pool, provider, id);
+    if (r) goto done;
     char *lid = lower_dup(id);
     r = provider_lookup(pool, provider, lid, false, &amb);
     if (r || amb) {

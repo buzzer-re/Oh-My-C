@@ -76,7 +76,13 @@ bool ai_should_send_service_tier_for(const char *tier, const char *provider, con
         if (str_eq(tier, "ultrafast")) return listed;
         if (n > 0) return listed;
     }
-    if (str_eq(tier, "ultrafast")) return str_eq(provider, "openai") || (!m && str_eq(provider, "openai-codex"));
+    if (str_eq(tier, "ultrafast")) {
+        if (!m) return str_eq(provider, "openai") || str_eq(provider, "openai-codex");
+        if (str_eq(provider, "openai")) return true;
+        /* an OpenAI-family relay gets it only when its service_tiers lists it */
+        size_t n = 0;
+        return openai_tier_model(m) && advertised(m, tier, &n);
+    }
     if (str_eq(provider, "openai") || str_eq(provider, "openai-codex")) return true;
     if (str_eq(provider, "openrouter")) return str_eq(tier, "flex") || str_eq(tier, "scale") || str_eq(tier, "priority");
     if (m && openai_tier_model(m)) return true;
