@@ -164,6 +164,7 @@ int run_print_mode(app_t *a, const print_opts_t *o) {
         int prc = app_prompt(a, x, i == 0 && json_len(o->initial_images) ? json_clone(o->initial_images) : NULL);
         free(x);
         if (prc == APP_PROMPT_REFUSED) { /* session.prompt rejected: the run fails with no turn to report */
+            if (o->json && a->prompt_refusal) fprintf(stderr, "%s\n", a->prompt_refusal);
             rc = 1;
             break;
         }
