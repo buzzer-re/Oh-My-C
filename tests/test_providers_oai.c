@@ -529,6 +529,26 @@ static void test_codex_azure(void) {
     CHECK(json_get(json_get_obj(p2, "reasoning"), "summary") == NULL);
     json_free(p2);
     json_free(p);
+
+    /* backend-only metadata on captured output items never reaches the Codex input */
+    json_t *meta_msgs = J(
+        "[{\"role\":\"user\",\"content\":\"s\",\"providerPayload\":{\"type\":\"openaiResponsesHistory\",\"items\":["
+        "{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"msg_1\",\"status\":\"completed\","
+        "\"content\":[],\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"t\"}}]}},"
+        "{\"role\":\"assistant\",\"api\":\"openai-codex-responses\",\"provider\":\"openai-codex\",\"model\":\"gpt-5.6-luna\","
+        "\"stopReason\":\"stop\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"x\",\"thinkingSignature\":"
+        "\"{\\\"type\\\":\\\"reasoning\\\",\\\"id\\\":\\\"rs_1\\\",\\\"summary\\\":[],"
+        "\\\"internal_chat_message_metadata_passthrough\\\":{\\\"turn_id\\\":\\\"t\\\"}}\"},"
+        "{\"type\":\"text\",\"text\":\"done\"}]},"
+        "{\"role\":\"user\",\"content\":\"next\"}]");
+    ai_context_t meta_ctx = {.system_prompt = sys, .messages = meta_msgs};
+    json_t *pm = oair_build_request(&t.m, &meta_ctx, &o);
+    char *pms = json_dump(json_get(pm, "input"), 0);
+    CHECK(strstr(pms, "internal_chat_message_metadata_passthrough") == NULL);
+    CHECK(strstr(pms, "\"reasoning\"") != NULL);
+    free(pms);
+    json_free(pm);
+    json_free(meta_msgs);
     json_free(t.raw);
 
     tmodel_t az;

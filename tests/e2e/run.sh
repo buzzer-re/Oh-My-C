@@ -652,6 +652,7 @@ DOUT=$(dmodels)
 check "discover ollama"    "ollama qwen3:8b ctx=40960 reasoning"  printf '%s\n' "$DOUT"
 check "discover llama.cpp" "llama.cpp gemma-local.gguf ctx=16384"  printf '%s\n' "$DOUT"
 check "discover lm-studio" "lm-studio qwen2.5-vl-7b ctx=12000 vision"  printf '%s\n' "$DOUT"
+check "discover reported limits" "lm-studio reported-limits ctx=54321"  printf '%s\n' "$DOUT"
 check "discovery cache"    '"baseUrl": "http://127.0.0.1:'"$DPORT"'/lms/v1"'  python3 -I -m json.tool "$T/dagent/local-models.json"
 kill $DPID 2>/dev/null
 check "cached when down"   "│ llava:7b"  "${DENV[@]}" "$B" models

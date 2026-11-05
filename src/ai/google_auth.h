@@ -3,8 +3,10 @@
  *
  * Sources, in priority order:
  *   0. GOOGLE_CLOUD_ACCESS_TOKEN / CLOUDSDK_AUTH_ACCESS_TOKEN (explicit bearer, never cached)
- *   1. GOOGLE_APPLICATION_CREDENTIALS -> service_account (RS256 JWT bearer grant), authorized_user (refresh token)
- *      or impersonated_service_account (source credential -> iamcredentials generateAccessToken)
+ *   1. GOOGLE_APPLICATION_CREDENTIALS -> service_account (RS256 JWT bearer grant), authorized_user (refresh token),
+ *      external_account_authorized_user (workforce: refresh at the file's token_url with Basic client auth, rotated
+ *      refresh tokens kept in memory) or impersonated_service_account (source credential -> iamcredentials
+ *      generateAccessToken)
  *   2. gcloud user ADC: ~/.config/gcloud/application_default_credentials.json
  *   3. GCE / Cloud Run metadata server (GCE_METADATA_HOST overrides metadata.google.internal)
  * Tokens are cached process-wide and refreshed GOOGLE_VERTEX_REFRESH_SKEW_MS (default 60s) before expiry;

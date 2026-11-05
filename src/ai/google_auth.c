@@ -75,6 +75,8 @@ char *google_jwt_rs256(const json_t *claims, const char *pem, const char *key_id
 
 /* ---------- helpers ---------- */
 
+static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+
 char *google_user_adc_path(void) { return xasprintf("%s/.config/gcloud/application_default_credentials.json", home_dir()); }
 
 bool google_adc_file_exists(void) {
@@ -103,12 +105,15 @@ static void form_add(sb_t *b, const char *k, const char *v) {
 typedef struct {
     char *token;
     int64_t expires_in; /* seconds */
+    char *refresh_token; /* replacement refresh token; STS may rotate workforce refresh tokens on exchange */
 } token_t;
 
-/* POST form -> {access_token, expires_in} */
-static int post_for_token(const char *url, const char *form, const char *what, token_t *out, char **err) {
+/* POST form -> {access_token, expires_in, refresh_token?}; authorization: optional Authorization header */
+static int post_for_token(const char *url, const char *form, const char *what, const char *authorization, token_t *out,
+                          char **err) {
     http_headers_t h = {0};
     http_headers_set(&h, "Content-Type", "application/x-www-form-urlencoded");
+    if (authorization) http_headers_set(&h, "Authorization", authorization);
     http_req_t req = {.method = "POST", .url = url, .headers = &h, .body = form, .body_len = strlen(form),
                       .timeout_ms = REQUEST_TIMEOUT_MS};
     http_resp_t r;
@@ -134,6 +139,8 @@ static int post_for_token(const char *url, const char *form, const char *what, t
     }
     out->token = xstrdup(tok);
     out->expires_in = json_get_int(j, "expires_in", 0);
+    const char *rotated = json_get_str(j, "refresh_token");
+    if (rotated && *rotated) out->refresh_token = xstrdup(rotated);
     json_free(j);
     return 0;
 }
@@ -164,7 +171,7 @@ static int exchange_jwt(const json_t *creds, token_t *out, char **err) {
     form_add(&f, "grant_type", JWT_BEARER_GRANT);
     form_add(&f, "assertion", jwt);
     free(jwt);
-    int rc = post_for_token(token_uri(creds), sb_cstr(&f), "Google OAuth token exchange", out, err);
+    int rc = post_for_token(token_uri(creds), sb_cstr(&f), "Google OAuth token exchange", NULL, out, err);
     sb_free(&f);
     return rc;
 }
@@ -175,8 +182,37 @@ static int exchange_refresh(const json_t *creds, token_t *out, char **err) {
     form_add(&f, "client_secret", json_get_str(creds, "client_secret"));
     form_add(&f, "refresh_token", json_get_str(creds, "refresh_token"));
     form_add(&f, "grant_type", "refresh_token");
-    int rc = post_for_token(token_uri(creds), sb_cstr(&f), "Google OAuth token exchange", out, err);
+    int rc = post_for_token(token_uri(creds), sb_cstr(&f), "Google OAuth token exchange", NULL, out, err);
     sb_free(&f);
+    return rc;
+}
+
+/* Latest workforce refresh token, keyed by the token stored in the ADC file. The file is never rewritten when STS
+ * rotates the token, so later refreshes must use the replacement; a re-login writes a new file token and bypasses
+ * the stale entry. Guarded by g_mu (held across resolution). */
+static hmap_t g_rotated_refresh;
+
+/* external_account_authorized_user: refresh at the file's STS token URL with Basic client authentication */
+static int exchange_workforce_refresh(const json_t *creds, token_t *out, char **err) {
+    const char *file_token = json_get_str(creds, "refresh_token");
+    const char *rotated = file_token ? hmap_get(&g_rotated_refresh, file_token) : NULL;
+    sb_t f = SB_INIT;
+    form_add(&f, "grant_type", "refresh_token");
+    form_add(&f, "refresh_token", rotated ? rotated : file_token);
+    const char *id = json_get_str(creds, "client_id"), *secret = json_get_str(creds, "client_secret");
+    char *pair = xasprintf("%s:%s", id ? id : "", secret ? secret : "");
+    char *b64 = base64_encode(pair, strlen(pair));
+    char *authorization = xasprintf("Basic %s", b64);
+    free(pair);
+    free(b64);
+    const char *url = json_get_str(creds, "token_url");
+    int rc = post_for_token(url ? url : "", sb_cstr(&f), "Google OAuth token exchange", authorization, out, err);
+    free(authorization);
+    sb_free(&f);
+    if (rc == 0 && out->refresh_token && file_token) {
+        free(hmap_put(&g_rotated_refresh, file_token, out->refresh_token));
+        out->refresh_token = NULL;
+    }
     return rc;
 }
 
@@ -184,7 +220,7 @@ static int exchange_source(const json_t *creds, token_t *out, char **err) {
     const char *type = json_get_str(creds, "type");
     if (str_eq(type, "service_account")) return exchange_jwt(creds, out, err);
     if (str_eq(type, "authorized_user")) return exchange_refresh(creds, out, err);
-    *err = xasprintf("Unsupported Google credential type \"%s\"", type ? type : "(missing)");
+    *err = xasprintf("Unsupported ADC credential type: %s", type ? type : "undefined");
     return -1;
 }
 
@@ -242,6 +278,7 @@ static int exchange_impersonated(const json_t *creds, token_t *out, char **err) 
     http_headers_set(&h, "Authorization", bearer);
     free(bearer);
     free(src.token);
+    free(src.refresh_token);
     http_req_t req = {.method = "POST", .url = endpoint, .headers = &h, .body = bj, .body_len = strlen(bj),
                       .timeout_ms = REQUEST_TIMEOUT_MS};
     http_resp_t r;
@@ -299,7 +336,6 @@ static int metadata_token(token_t *out) {
 
 /* ---------- resolution + cache ---------- */
 
-static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static char *g_token;
 static int64_t g_expires_ms;
 
@@ -308,6 +344,8 @@ void google_auth_reset_cache(void) {
     free(g_token);
     g_token = NULL;
     g_expires_ms = 0;
+    hmap_free(&g_rotated_refresh, free);
+    hmap_init(&g_rotated_refresh);
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -340,6 +378,8 @@ static int resolve_uncached(token_t *out, char **err) {
             rc = -1;
         } else if (str_eq(json_get_str(creds, "type"), "impersonated_service_account")) {
             rc = exchange_impersonated(creds, out, err);
+        } else if (str_eq(json_get_str(creds, "type"), "external_account_authorized_user")) {
+            rc = exchange_workforce_refresh(creds, out, err);
         } else {
             rc = exchange_source(creds, out, err);
         }
@@ -369,6 +409,7 @@ char *google_vertex_access_token(char **err) {
         g_token = NULL;
         token_t t = {0};
         if (resolve_uncached(&t, err) == 0) {
+            free(t.refresh_token);
             g_token = t.token;
             g_expires_ms = now_ms() + MAX((int64_t)0, t.expires_in * 1000);
             r = xstrdup(g_token);

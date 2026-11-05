@@ -39,6 +39,27 @@ static void test_families(void) {
     CHECK(ai_resolve_model_service_tier(&t, opus) == NULL);
     CHECK(str_eq(ai_resolve_model_service_tier(&t, gem), "flex"));
     CHECK(ai_fireworks_fast_model_id("glm-5.2-fast") && !ai_fireworks_fast_model_id("glm-5.2"));
+    /* Ultrafast: first-party OpenAI as-is, a relay on the OpenAI-family APIs only when it advertises it, a bare
+     * provider string for the provider alone */
+    json_t *relay_raw = json_parse_str("{\"serviceTiers\":[\"priority\",\"ultrafast\"]}");
+    json_t *plain_raw = json_parse_str("{\"serviceTiers\":[\"priority\"]}");
+    ai_model_t relay = {.id = "gpt-6-sol", .provider = "my-relay", .api = "openai-responses", .raw = relay_raw};
+    CHECK(ai_should_send_service_tier("ultrafast", &relay));
+    CHECK(str_eq(ai_service_tier_family(&relay), "openai"));
+    ai_model_t relay_comp = {.id = "gpt-6-sol", .provider = "my-relay", .api = "openai-completions", .raw = relay_raw};
+    CHECK(ai_should_send_service_tier("ultrafast", &relay_comp));
+    ai_model_t silent = {.id = "gpt-6-sol", .provider = "my-relay", .api = "openai-responses", .raw = plain_raw};
+    CHECK(!ai_should_send_service_tier("ultrafast", &silent));
+    CHECK(ai_should_send_service_tier("priority", &silent));
+    ai_model_t other = {.id = "llama-4", .provider = "my-relay", .api = "openai-responses", .raw = relay_raw};
+    CHECK(!ai_should_send_service_tier("ultrafast", &other)); /* not OpenAI-family */
+    ai_model_t codex = {.id = "gpt-6-sol", .provider = "openai-codex", .api = "openai-codex-responses", .raw = plain_raw};
+    CHECK(!ai_should_send_service_tier("ultrafast", &codex));
+    CHECK(ai_should_send_service_tier_for("ultrafast", "openai-codex", NULL));
+    CHECK(ai_should_send_service_tier_for("ultrafast", "openai", NULL));
+    CHECK(!ai_should_send_service_tier_for("ultrafast", "my-relay", NULL));
+    json_free(relay_raw);
+    json_free(plain_raw);
     for (size_t i = 0; i < catalog_count(); i++) { /* Copilot proxies OpenAI models but rejects service_tier */
         const ai_model_t *m = catalog_at(i);
         if (str_eq(m->provider, "github-copilot") && str_starts(m->id, "gpt-")) {

@@ -325,6 +325,15 @@ static reply_t adc_route(const char *method, const char *path, const http_header
         free(gt);
         return r;
     }
+    if (!strcmp(path, "/v1/oauthtoken")) {
+        /* Basic base64("workforce-client:workforce-secret"); body exactly grant_type + refresh_token */
+        if (!str_eq(auth, "Basic d29ya2ZvcmNlLWNsaWVudDp3b3JrZm9yY2Utc2VjcmV0")) return R(401, NULL, "{\"error\":\"bad client\"}");
+        if (str_eq(body, "grant_type=refresh_token&refresh_token=file-refresh"))
+            return R(200, NULL, "{\"access_token\":\"first-access\",\"expires_in\":0,\"refresh_token\":\"rotated-refresh\"}");
+        if (str_eq(body, "grant_type=refresh_token&refresh_token=rotated-refresh"))
+            return R(200, NULL, "{\"access_token\":\"second-access\",\"expires_in\":3600}");
+        return R(400, NULL, "{\"error\":\"invalid_grant\"}");
+    }
     if (!strcmp(path, "/v1/projects/-/serviceAccounts/target@proj.iam.gserviceaccount.com:generateAccessToken")) {
         json_t *b = json_parse_str(body);
         bool ok = str_eq(auth, "Bearer ya29.user-token") && str_eq(json_get_str(b, "lifetime"), "3600s") &&
@@ -401,6 +410,31 @@ static void test_adc(void) {
     t = google_vertex_access_token(&err);
     CHECK_STR(t, "ya29.imp-token");
     free(t);
+
+    /* workforce ADC: refresh at the file's STS token_url with Basic client auth; a rotated token replaces the
+     * file's on later refreshes (expires_in 0 forces the second exchange) */
+    char *wf = xasprintf("{\"type\":\"external_account_authorized_user\",\"client_id\":\"workforce-client\","
+                         "\"client_secret\":\"workforce-secret\",\"refresh_token\":\"file-refresh\","
+                         "\"token_url\":\"http://127.0.0.1:%d/v1/oauthtoken\"}", g_port);
+    write_creds(wf);
+    int wf0 = g_hits;
+    t = google_vertex_access_token(&err);
+    CHECK_STR(t, "first-access");
+    free(t);
+    t = google_vertex_access_token(&err);
+    CHECK_STR(t, "second-access");
+    free(t);
+    CHECK_INT(g_hits - wf0, 2);
+    free(wf);
+
+    /* unknown ADC types are rejected before any token request */
+    write_creds("{\"type\":\"unrecognized_adc\",\"client_id\":\"id\",\"client_secret\":\"secret\",\"refresh_token\":\"token\"}");
+    int un0 = g_hits;
+    t = google_vertex_access_token(&err);
+    CHECK(t == NULL && err && strstr(err, "Unsupported ADC credential type: unrecognized_adc"));
+    CHECK_INT(g_hits - un0, 0);
+    free(err);
+    err = NULL;
 
     /* missing file named by GOOGLE_APPLICATION_CREDENTIALS */
     setenv("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/creds.json", 1);

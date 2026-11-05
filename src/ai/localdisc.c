@@ -334,9 +334,12 @@ static void probe_lmstudio(probe_t *p) {
             if (!ctx) ctx = pos_int(json_get(nm, "context_length"));
             image = str_eq(type, "vlm");
         }
+        /* mapWithBundledReference: limits the /models row reports, under the native metadata's context */
+        if (!ctx) ctx = pos_int(json_get(it, "context_length"));
         if (!ctx) ctx = DISC_DEFAULT_CTX;
-        json_t *m = new_model(id, id, p->api, p->provider, p->base, false, image, ctx,
-                              MIN(ctx, (int64_t)DISC_DEFAULT_MAX_TOKENS));
+        int64_t max_tokens = pos_int(json_get(it, "max_completion_tokens"));
+        if (!max_tokens) max_tokens = MIN(ctx, (int64_t)DISC_DEFAULT_MAX_TOKENS);
+        json_t *m = new_model(id, id, p->api, p->provider, p->base, false, image, ctx, max_tokens);
         if (str_eq(type, "embeddings") || str_eq(type, "embedding")) json_set_str(m, "kind", "embedding");
         json_push(p->models, m);
     }
