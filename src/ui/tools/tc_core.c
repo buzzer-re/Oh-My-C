@@ -97,6 +97,25 @@ char *tc_status_line(const tc_status_line_t *o) {
     return sb_detach(&b);
 }
 
+/* formatStyledPath: a path in a tool body, the directory (with its trailing separator) dim and the final
+ * segment in FILE_NAME_COLOR; a trailing-slash directory keeps its slash on the name */
+char *tc_styled_path(const char *path) {
+    const char *p = path ? path : "";
+    size_t end = strlen(p);
+    while (end && (p[end - 1] == '/' || p[end - 1] == '\\')) end--;
+    size_t cut = end;
+    while (cut && p[cut - 1] != '/' && p[cut - 1] != '\\') cut--;
+    char *name = tc_fg(TC_FILE_NAME_COLOR, p + cut);
+    if (!cut) return name;
+    char *d0 = xstrndup(p, cut);
+    char *dir = tc_fg(TUI_TC_DIM, d0);
+    char *r = xasprintf("%s%s", dir, name);
+    free(dir);
+    free(d0);
+    free(name);
+    return r;
+}
+
 /* ---------- output block ---------- */
 
 static int norm_pad(int v) { return v < 0 ? 1 : v; }

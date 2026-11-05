@@ -42,17 +42,33 @@ bool tc_read_groupable(const json_t *args) {
 }
 
 static char *read_status_glyph(const tc_call_t *c) {
-    if (!c->has_result || c->partial) return tc_fg(TUI_TC_DIM, tc_sym("status.pending"));
-    if (c->is_error) return tc_fg(TUI_TC_ERROR, tc_sym("status.error"));
-    if (c->details && json_get_obj(c->details, "suffixResolution")) return tc_fg(TUI_TC_WARNING, tc_sym("status.warning"));
-    return tc_fg(TUI_TC_TEXT, tc_sym("status.enabled"));
+    if (!c->has_result || c->partial) return tc_status_icon(TC_ST_PENDING, -1);
+    if (c->is_error) return tc_status_icon(TC_ST_ERROR, -1);
+    if (c->details && json_get_obj(c->details, "suffixResolution")) return tc_status_icon(TC_ST_WARNING, -1);
+    return tc_status_icon(TC_ST_SUCCESS, -1);
 }
 
 static bool read_ok(const tc_call_t *c) {
     return c->has_result && !c->partial && !c->is_error && !(c->details && json_get_obj(c->details, "suffixResolution"));
 }
 
-static char *read_path_display(const tc_call_t *c) {
+/* splitReadQuery: `data.json?q=.items` -> `?q=.items` (the query's start, NULL when none). URLs own their query
+ * string and stay whole, as does a `?` inside a file name; READ_QUERY_RE: `?` + word chars + `=`. */
+static const char *read_query_start(const char *p) {
+    if (tc_is_url_like(p)) return NULL;
+    bool long_path = str_starts(p, "\\\\");
+    for (const char *q = strchr(p, '?'); q; q = strchr(q + 1, '?')) {
+        if (q == p || (long_path && q == p + 2)) continue;
+        const char *w = q + 1;
+        while (isalnum((unsigned char)*w) || *w == '_') w++;
+        if (w > q + 1 && *w == '=') return q;
+    }
+    return NULL;
+}
+
+/* #formatPathValue: a `Read <path>` header keeps the accent subject color; group rows share the tool-body path
+ * style with muted selectors */
+static char *read_path_display(const tc_call_t *c, bool row) {
     const char *raw = json_get_str(c->args, "path");
     if (!raw) raw = json_get_str(c->args, "file_path");
     const json_t *sr = c->details ? json_get_obj(c->details, "suffixResolution") : NULL;
@@ -62,15 +78,25 @@ static char *read_path_display(const tc_call_t *c) {
         free(path);
         path = xstrdup(json_get_str(sr, "to"));
     }
+    const char *qs = read_query_start(path);
+    char *query = qs ? xstrdup(qs) : NULL;
+    if (qs) path[qs - path] = 0;
     char *shown = tc_shorten_path(path);
     sb_t b = SB_INIT;
-    if (*shown) tc_fg_sb(&b, TUI_TC_ACCENT, shown);
-    else tc_fg_sb(&b, TUI_TC_TOOL_OUTPUT, "\xe2\x80\xa6");
-    if (sel) {
-        char *s = xasprintf(":%s", sel);
-        tc_fg_sb(&b, TUI_TC_ACCENT, s);
+    if (!*shown) tc_fg_sb(&b, TUI_TC_TOOL_OUTPUT, "\xe2\x80\xa6");
+    else if (!row) tc_fg_sb(&b, TUI_TC_ACCENT, shown);
+    else if (tc_is_url_like(path)) tc_fg_sb(&b, TC_FILE_NAME_COLOR, shown);
+    else {
+        char *sp = tc_styled_path(shown);
+        sb_append(&b, sp);
+        free(sp);
+    }
+    if (sel || query) {
+        char *s = sel ? xasprintf("%s:%s", query ? query : "", sel) : xstrdup(query);
+        tc_fg_sb(&b, row ? TUI_TC_MUTED : TUI_TC_ACCENT, s);
         free(s);
     }
+    free(query);
     if (sr && json_get_str(sr, "from")) {
         char *f = tc_shorten_path(json_get_str(sr, "from"));
         char *t = xasprintf(" (corrected from %s)", f);
@@ -99,7 +125,7 @@ void tc_render_read_group(const tc_call_t *calls, size_t n, int width, strvec_t 
         strvec_push_own(&lines, xasprintf(" %s %s", tc_sym("format.bullet"), title));
     } else if (n == 1) {
         char *st = read_status_glyph(&calls[0]);
-        char *pd = read_path_display(&calls[0]);
+        char *pd = read_path_display(&calls[0], false);
         char *l = xasprintf(" %s %s %s", st, title, pd);
         strvec_push_own(&lines, tc_trim_end(l));
         free(l);
@@ -113,7 +139,7 @@ void tc_render_read_group(const tc_call_t *calls, size_t n, int width, strvec_t 
         free(cnt);
         for (size_t i = 0; i < n; i++) {
             char *conn = tc_fg(TUI_TC_DIM, i + 1 == n ? tc_sym("tree.last") : tc_sym("tree.branch"));
-            char *pd = read_path_display(&calls[i]);
+            char *pd = read_path_display(&calls[i], true);
             char *st = read_ok(&calls[i]) ? xstrdup("") : read_status_glyph(&calls[i]);
             char *l = xasprintf("   %s %s%s%s", conn, st, *st ? " " : "", pd);
             strvec_push_own(&lines, tc_trim_end(l));

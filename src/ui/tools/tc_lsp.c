@@ -194,6 +194,28 @@ static bool has_status_row(const char *action, const strvec_t *lines, const char
     return false;
 }
 
+/* formatDiagnosticLocation: the muted file-type icon, the styled path and the muted `:line:col` */
+static char *diag_location(const diag_t *d) {
+    char *ic = tc_fg(TUI_TC_MUTED, tc_lang_icon(tc_lang_from_path(d->file)));
+    char *p = tc_styled_path(d->file);
+    char *pos0 = xasprintf(":%d:%d", d->line, d->col);
+    char *pos = tc_fg(TUI_TC_MUTED, pos0);
+    char *r = xasprintf("%s %s%s", ic, p, pos);
+    free(pos);
+    free(pos0);
+    free(p);
+    free(ic);
+    return r;
+}
+
+/* formatSeverityTag: the `[severity]` tag in its severity's color: the path no longer carries it */
+static char *severity_tag(const char *sev) {
+    char *t = xasprintf("[%s]", sev);
+    char *r = tc_fg(sev_color(sev), t);
+    free(t);
+    return r;
+}
+
 static bool has_line_col(const char *l) {
     for (const char *p = strchr(l, ':'); p; p = strchr(p + 1, ':')) {
         const char *q = p + 1;
@@ -263,11 +285,8 @@ static void render_diagnostics(int errs, int warns, const strvec_t *lines, bool 
                 free(m);
             } else {
                 diag_t *d = items.v[i].d;
-                char *ic = tc_fg(TUI_TC_MUTED, tc_lang_icon(tc_lang_from_path(d->file)));
-                char *loc0 = xasprintf("%s %s:%d:%d", ic, d->file, d->line, d->col);
-                char *loc = tc_fg(sev_color(d->sev), loc0);
-                char *sv0 = xasprintf("[%s]", d->sev);
-                char *sv = tc_fg(TUI_TC_DIM, sv0);
+                char *loc = diag_location(d);
+                char *sv = severity_tag(d->sev);
                 sb_appendf(&o, "\n %s %s %s", br, loc, sv);
                 char *msg = with_code_close(diag_message(d), d);
                 if (*msg) {
@@ -279,10 +298,7 @@ static void render_diagnostics(int errs, int warns, const strvec_t *lines, bool 
                 }
                 free(msg);
                 free(sv);
-                free(sv0);
                 free(loc);
-                free(loc0);
-                free(ic);
             }
             free(br);
         }
@@ -307,11 +323,10 @@ static void render_diagnostics(int errs, int warns, const strvec_t *lines, bool 
                 free(m);
             } else {
                 diag_t *d = items.v[i].d;
-                char *ic = tc_fg(TUI_TC_MUTED, tc_lang_icon(tc_lang_from_path(d->file)));
-                char *loc0 = xasprintf("%s %s:%d:%d", ic, d->file, d->line, d->col);
-                char *loc = tc_fg(sev_color(d->sev), loc0);
+                char *loc = diag_location(d);
+                char *sv = severity_tag(d->sev);
                 char *msg = with_code_close(diag_message(d), d);
-                sb_appendf(&o, "\n %s %s", br, loc);
+                sb_appendf(&o, "\n %s %s %s", br, loc, sv);
                 if (*msg) {
                     char *t = tui_truncate_to_width(msg, 80, NULL);
                     char *mm = tc_fg(TUI_TC_MUTED, t);
@@ -320,9 +335,8 @@ static void render_diagnostics(int errs, int warns, const strvec_t *lines, bool 
                     free(t);
                 }
                 free(msg);
+                free(sv);
                 free(loc);
-                free(loc0);
-                free(ic);
             }
             free(br);
         }
@@ -395,7 +409,7 @@ static void render_references(int count, const strvec_t *lines, bool expanded, s
         bool lastf = fi + 1 == nf && files.n <= max_files;
         char *fb = tc_fg(TUI_TC_DIM, tc_sym(lastf ? "tree.last" : "tree.branch"));
         const char *fc = lastf ? "   " : "\xe2\x94\x82  ";
-        char *fa = tc_fg(TUI_TC_ACCENT, files.v[fi]);
+        char *fa = tc_styled_path(files.v[fi]);
         char *fm0 = xasprintf("%zu reference%s", locs.v[fi].n, locs.v[fi].n != 1 ? "s" : "");
         char *fm = tc_fg(TUI_TC_DIM, fm0);
         sb_appendf(&o, "\n %s %s %s", fb, fa, fm);
@@ -412,11 +426,17 @@ static void render_references(int count, const strvec_t *lines, bool expanded, s
             sb_appendf(&o, "\n %s%s %s", fcd, lb, tm);
             if (expanded) {
                 char *lcd = tc_fg(TUI_TC_DIM, lastl ? "   " : "\xe2\x94\x82  ");
-                char *at = xasprintf("at %s:%s:%s", files.v[fi], lc, colon + 1);
-                char *am = tc_fg(TUI_TC_MUTED, at);
+                char *at0 = tc_fg(TUI_TC_MUTED, "at ");
+                char *atp = tc_styled_path(files.v[fi]);
+                char *atl0 = xasprintf(":%s:%s", lc, colon + 1);
+                char *atl = tc_fg(TUI_TC_MUTED, atl0);
+                char *am = xasprintf("%s%s%s", at0, atp, atl);
+                free(atl);
+                free(atl0);
+                free(atp);
+                free(at0);
                 sb_appendf(&o, "\n %s%s%s", fcd, lcd, am);
                 free(am);
-                free(at);
                 free(lcd);
             }
             free(tm);
@@ -538,7 +558,7 @@ static void render_locations(const char *noun, int count, locs_t *locs, bool exp
         char *pos = tc_fg(TUI_TC_MUTED, pos0);
         char *sp = tc_shorten_path(l->file);
         char *spr = tc_replace_tabs(sp);
-        char *fa = tc_fg(TUI_TC_ACCENT, spr);
+        char *fa = tc_styled_path(spr);
         strvec_push_own(&rows, xasprintf(" %s %s%s", br, fa, pos));
         int w = 0;
         for (size_t k = 0; k < l->nums.n; k++) {
@@ -917,7 +937,7 @@ void tc_lsp(const tc_call_t *c, int width, strvec_t *out) {
     size_t ns = 0;
     {
         strvec_t *rl = &secs[0].lines;
-        if (json_get_str(req, "file")) strvec_push_own(rl, tc_fg(TUI_TC_TOOL_OUTPUT, json_get_str(req, "file")));
+        if (json_get_str(req, "file")) strvec_push_own(rl, tc_styled_path(json_get_str(req, "file")));
         if (json_get(req, "line")) {
             char *n = json_dump(json_get(req, "line"), 0);
             char *t = xasprintf("line %s", n);

@@ -494,6 +494,127 @@ int main(void) {
         json_free(r);
         json_free(a);
     }
+    /* omp 1442d02a / d043cc13: one path style in tool bodies */
+    {
+        static const struct { const char *in, *dir, *name; } P[] = {
+            {"src/tools/grep.ts", "src/tools/", "grep.ts"}, {"C:\\repo\\grep.ts", "C:\\repo\\", "grep.ts"},
+            {"src/components/", "src/", "components/"},     {"README.md", NULL, "README.md"},
+        };
+        for (size_t i = 0; i < ARRAY_LEN(P); i++) {
+            char *got = tc_styled_path(P[i].in);
+            char *nm = tc_fg(TUI_TC_CUSTOM_MESSAGE_LABEL, P[i].name);
+            char *dr = P[i].dir ? tc_fg(TUI_TC_DIM, P[i].dir) : xstrdup("");
+            char *want = xasprintf("%s%s", dr, nm);
+            CHECK(str_eq(got, want), "styled path %s", P[i].in);
+            free(want), free(dr), free(nm), free(got);
+        }
+    }
+    /* classifyGroupedLines: full display paths across a nested stack, `# /` keeps its separator, a directory's `(…)`
+     * stays part of its name, only an uppercase hashline tag is dropped, url-like headers stay whole */
+    {
+        tc_grouped_t g;
+        tc_grouped_parse(&g, "# /\n## abs/\n### f.ts#AB12 (2 replacements)\n*1\xe2\x94\x82x\n\n# dir (x)/\n## a.c\n\n# n#dead\n\n# n#v2\n\n# local://a/b.ts#AB12\n 1\xe2\x94\x82y", NULL, NULL);
+        CHECK(g.rows[0].kind == TC_GROW_DIR && g.rows[1].kind == TC_GROW_DIR && g.rows[2].kind == TC_GROW_FILE, "kinds");
+        CHECK(str_eq(g.rows[2].display_path, "/abs/f.ts"), "abs path: %s", g.rows[2].display_path);
+        CHECK(str_eq(g.rows[2].suffix, "(2 replacements)"), "suffix");
+        CHECK(g.rows[3].kind == TC_GROW_CONTENT, "body");
+        CHECK(str_eq(g.rows[6].display_path, "dir (x)/a.c"), "dir parens: %s", g.rows[6].display_path);
+        CHECK(!g.rows[6].suffix, "no suffix");
+        CHECK(str_eq(g.rows[8].display_path, "n#dead"), "lowercase kept: %s", g.rows[8].display_path);
+        CHECK(str_eq(g.rows[10].display_path, "n#v2"), "other ending kept: %s", g.rows[10].display_path);
+        CHECK(g.rows[12].url && str_eq(g.rows[12].display_path, "local://a/b.ts"), "url: %s", g.rows[12].display_path);
+        CHECK(g.ngroups == 5, "one group per file: %zu", g.ngroups);
+        tc_grouped_free(&g);
+        /* a headerless URL scope's lines have no filesystem language; a file scope's do */
+        tc_grouped_parse(&g, "*7\xe2\x94\x82x", "local://notes/a.ts", NULL);
+        CHECK(!g.rows[0].lang, "url scope language");
+        tc_grouped_free(&g);
+        tc_grouped_parse(&g, "*7\xe2\x94\x82x", "/w/a.ts", NULL);
+        CHECK(g.rows[0].lang && str_eq(g.rows[0].lang, "typescript"), "file scope language");
+        tc_grouped_free(&g);
+    }
+    /* fitGroupsToBudget through the cards */
+    {
+        /* a single file taller than the preview shows its head and counts the matches it hides */
+        json_t *a = J("{\"pat\":\"p\"}");
+        json_t *r = J("{\"content\":[],\"details\":{\"matchCount\":8,\"fileCount\":1,\"filesSearched\":1,\"displayContent\":"
+                      "\"# a.ts\\n*1\xe2\x94\x82" "a\\n*2\xe2\x94\x82" "a\\n*3\xe2\x94\x82" "a\\n*4\xe2\x94\x82" "a\\n*5\xe2\x94\x82" "a\\n*6\xe2\x94\x82" "a\\n*7\xe2\x94\x82" "a\\n*8\xe2\x94\x82" "a\"}}");
+        tc_call_t c = call("ast_grep", a, r, false);
+        strvec_t out = {0};
+        tc_render(&c, 80, &out);
+        CHECK(out.n == 7, "ast_grep head + 6 rows: %zu", out.n);
+        CHECK(has_row(&out, "a.ts") && has_row(&out, "*4") && !has_row(&out, "*5"), "ast_grep shows the first file's head");
+        CHECK(has_row(&out, "\xe2\x80\xa6 4 more matches"), "ast_grep counts hidden matches");
+        strvec_free(&out);
+        json_free(r);
+        json_free(a);
+        /* the collapsed grep list is cut between files, never right after a file row without its match */
+        a = J("{\"pattern\":\"p\"}");
+        r = J("{\"content\":[],\"details\":{\"matchCount\":6,\"fileCount\":3,\"displayContent\":"
+              "\"# a.ts\\n*1\xe2\x94\x82" "a\\n*2\xe2\x94\x82" "a\\n*3\xe2\x94\x82" "a\\n\\n# b.ts\\n*1\xe2\x94\x82" "b\\n\\n# c.ts\\n*1\xe2\x94\x82" "c\\n*2\xe2\x94\x82" "c\"}}");
+        c = call("grep", a, r, false);
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, "a.ts") && !has_row(&out, "b.ts"), "a file row needs a match below it");
+        CHECK(has_row(&out, "\xe2\x80\xa6 3 more matches"), "grep counts hidden matches");
+        strvec_free(&out);
+        json_free(r);
+        json_free(a);
+        /* a long first diff is cut to the preview; the summary counts the files left out */
+        a = J("{\"ops\":[{\"pat\":\"p\",\"out\":\"q\"}]}");
+        r = J("{\"content\":[],\"details\":{\"totalReplacements\":9,\"filesTouched\":2,\"filesSearched\":2,\"displayContent\":"
+              "\"# a.ts (8 replacements)\\n-1\xe2\x94\x82" "a\\n+1\xe2\x94\x82" "b\\n-2\xe2\x94\x82" "a\\n+2\xe2\x94\x82" "b\\n-3\xe2\x94\x82" "a\\n+3\xe2\x94\x82" "b\\n-4\xe2\x94\x82" "a\\n\\n# b.ts (1 replacement)\\n-1\xe2\x94\x82" "a\"}}");
+        c = call("ast_edit", a, r, false);
+        tc_render(&c, 80, &out);
+        CHECK(out.n == 8, "ast_edit frame + 6 rows: %zu", out.n);
+        CHECK(has_row(&out, "a.ts") && has_row(&out, "(8 replacements)"), "ast_edit first file");
+        CHECK(has_row(&out, "\xe2\x80\xa6 1 more file"), "ast_edit counts hidden files");
+        strvec_free(&out);
+        json_free(r);
+        json_free(a);
+    }
+    /* grouped Read rows: path style, muted selectors and `?q=` queries; a URL whole in the name color */
+    {
+        json_t *a1 = J("{\"path\":\"src/a.ts:1-5\"}"), *a2 = J("{\"path\":\"data.json?q=.items\"}"), *a3 = J("{\"path\":\"https://x.dev/p?q=1\"}");
+        json_t *r = J("{\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}");
+        tc_call_t cs[3] = {call("read", a1, r, false), call("read", a2, r, false), call("read", a3, r, false)};
+        strvec_t out = {0};
+        tc_render_read_group(cs, 3, 80, &out);
+        char *dir = tc_fg(TUI_TC_DIM, "src/"), *nm = tc_fg(TUI_TC_CUSTOM_MESSAGE_LABEL, "a.ts"), *sel = tc_fg(TUI_TC_MUTED, ":1-5");
+        char *w1 = xasprintf("%s%s%s", dir, nm, sel);
+        CHECK(strstr(out.v[1], w1), "row path: %s", out.v[1]);
+        free(w1), free(dir), free(nm), free(sel);
+        char *nm2 = tc_fg(TUI_TC_CUSTOM_MESSAGE_LABEL, "data.json"), *q = tc_fg(TUI_TC_MUTED, "?q=.items");
+        char *w2 = xasprintf("%s%s", nm2, q);
+        CHECK(strstr(out.v[2], w2), "row query: %s", out.v[2]);
+        free(w2), free(nm2), free(q);
+        char *w3 = tc_fg(TUI_TC_CUSTOM_MESSAGE_LABEL, "https://x.dev/p?q=1");
+        CHECK(strstr(out.v[3], w3), "row url: %s", out.v[3]);
+        free(w3);
+        strvec_free(&out);
+        /* a lone read is a header: accent subject, success glyph */
+        tc_render_read_group(cs, 1, 80, &out);
+        char *acc = tc_fg(TUI_TC_ACCENT, "src/a.ts");
+        CHECK(strstr(out.v[0], acc) && has_row(&out, "\xe2\x9c\x94 "), "header row: %s", out.v[0]);
+        free(acc);
+        strvec_free(&out);
+        json_free(r), json_free(a1), json_free(a2), json_free(a3);
+    }
+    /* LSP diagnostics: the severity color moved from the location to the tag */
+    {
+        json_t *a = J("{\"action\":\"diagnostics\"}");
+        json_t *r = J("{\"content\":[{\"type\":\"text\",\"text\":\"1 error(s):\\nsrc/a.ts:3:5 [error] boom\"}]}");
+        tc_call_t c = call("lsp", a, r, false);
+        strvec_t out = {0};
+        tc_render(&c, 80, &out);
+        char *tag = tc_fg(TUI_TC_ERROR, "[error]"), *pos = tc_fg(TUI_TC_MUTED, ":3:5");
+        bool has_tag = false, has_pos = false;
+        for (size_t i = 0; i < out.n; i++) has_tag |= strstr(out.v[i], tag) != NULL, has_pos |= strstr(out.v[i], pos) != NULL;
+        CHECK(has_tag, "severity tag color");
+        CHECK(has_pos, "muted location");
+        free(tag), free(pos);
+        strvec_free(&out);
+        json_free(a), json_free(r);
+    }
     /* ASCII preset: three-column status glyphs, bracketed spinner */
     {
         tui_sym_set_preset("ascii");

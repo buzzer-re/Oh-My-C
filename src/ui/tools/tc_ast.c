@@ -27,55 +27,23 @@ static char *parse_errors_label(const json_t *d) {
                      : xasprintf("%lld parse issue%s", (long long)full, full != 1 ? "s" : "");
 }
 
-/* displayContent rows styled (headers tinted, code frames highlighted, `  meta:` dim) and grouped by blank
- * lines; groups starting with one of `drop` are left out. Rows of groups starting past `budget` render
- * blank (omp renders them empty: they never show collapsed). */
-static void styled_groups(const char *text, const json_t *d, const char *force_lang, bool expanded, int budget,
-                          const char *const *drop, strvec_t *items) {
-    strvec_t lines = {0};
-    tc_split_lines(text, &lines);
-    const char *cur = NULL;
-    const json_t *fl = json_get_arr(d, "files");
-    if (fl && json_len(fl) == 1 && json_is_str(json_at(fl, 0))) cur = tc_lang_from_path(json_sv(json_at(fl, 0)));
-    bool has_sep = false;
-    for (size_t i = 0; i < lines.n; i++) has_sep |= blank(lines.v[i]);
-    size_t start_line = 0;
-    for (size_t i = 0; i < lines.n;) {
-        if (blank(lines.v[i])) {
-            i++;
-            continue;
-        }
-        size_t gs = i;
-        sb_t g = SB_INIT;
-        size_t cnt = 0;
-        bool show = expanded || (int)start_line < budget;
-        for (; i < lines.n; i++) {
-            const char *l = lines.v[i];
-            if (blank(l)) {
-                if (has_sep) break;
-                continue;
-            }
-            if (tc_is_search_header(l)) {
-                size_t rl = strlen(l);
-                cur = rl && l[rl - 1] == '/' ? NULL : tc_search_header_lang(l);
-            }
-            if (cnt++) sb_putc(&g, '\n');
-            if (!show) continue;
-            char *st = !tc_is_search_header(l) && str_starts(l, "  meta:") ? tc_fg(TUI_TC_DIM, l)
-                                                                           : tc_style_search_line(l, force_lang ? force_lang : cur);
-            sb_append(&g, st);
-            free(st);
-        }
-        bool dropped = false;
-        for (size_t k = 0; drop && drop[k]; k++) dropped |= str_starts(lines.v[gs], drop[k]);
-        if (dropped) {
-            sb_free(&g);
-            continue;
-        }
-        start_line += cnt;
-        strvec_push_own(items, sb_detach(&g));
-    }
-    strvec_free(&lines);
+static bool drop_group(const tc_grouped_t *g, const tc_ggroup_t *gr, const char *a, const char *b) {
+    const char *first = g->lines.v[gr->v[0]];
+    return str_starts(first, a) || str_starts(first, b);
+}
+
+static bool match_unit(const tc_grouped_t *g, size_t i, void *ud) {
+    UNUSED(ud);
+    return tc_grouped_is_match(g->lines.v[i]);
+}
+
+static char *ast_grep_style(tc_grouped_t *g, size_t i, void *ud) {
+    UNUSED(ud);
+    if (g->rows[i].kind == TC_GROW_FILE) return tc_grouped_file_row(&g->rows[i]);
+    char *f = tc_grouped_code_frame(g, i);
+    if (f) return f;
+    const char *l = g->lines.v[i];
+    return tc_fg(str_starts(l, "  meta:") ? TUI_TC_DIM : TUI_TC_TOOL_OUTPUT, l);
 }
 
 void tc_ast_grep(const tc_call_t *c, int width, strvec_t *out) {
@@ -141,10 +109,19 @@ void tc_ast_grep(const tc_call_t *c, int width, strvec_t *out) {
     char *header = tc_status_line(&sl);
     const char *dc = json_get_str(d, "displayContent");
     char *text = dc ? xstrdup(dc) : tc_text_of(c->content);
-    static const char *const DROP[] = {"Result limit reached", "Parse issues:", NULL};
-    strvec_t items = {0}, rows = {0};
-    styled_groups(text, d, json_get_str(c->args, "lang"), c->expanded, 6, DROP, &items);
-    tc_tree_list_ex(&items, c->expanded, (int)items.n, c->expanded ? -1 : 6, "match", &rows);
+    /* classify the whole output so nested directory headers resolve across blank-line groups */
+    tc_grouped_t g;
+    tc_grouped_parse(&g, text, json_get_str(d, "searchPath"), json_get_str(c->args, "lang"));
+    tc_ggroup_t *kept = xcalloc(g.ngroups + 1, sizeof *kept);
+    size_t nkept = 0;
+    for (size_t i = 0; i < g.ngroups; i++)
+        if (!drop_group(&g, &g.groups[i], "Result limit reached", "Parse issues:")) kept[nkept++] = g.groups[i];
+    tc_ggroup_t *shown;
+    size_t nshown;
+    char *summary;
+    tc_grouped_fit(&g, kept, nkept, c->expanded ? -1 : 6, match_unit, NULL, "match", matches, 0, &shown, &nshown, &summary);
+    strvec_t rows = {0};
+    tc_grouped_tree(&g, shown, nshown, summary, ast_grep_style, NULL, &rows);
     if (limit) strvec_push_own(&rows, tc_fg(TUI_TC_WARNING, "limit reached; narrow path or use skip"));
     if (json_len(perrs)) {
         char *lab = parse_errors_label(d);
@@ -153,7 +130,10 @@ void tc_ast_grep(const tc_call_t *c, int width, strvec_t *out) {
     }
     tc_fit_headered(header, &rows, width, out);
     strvec_free(&rows);
-    strvec_free(&items);
+    free(summary);
+    free(shown);
+    free(kept);
+    tc_grouped_free(&g);
     free(text);
     free(header);
     free(ic);
@@ -182,7 +162,15 @@ static char *pattern_preview(const char *pat) {
     return sb_detach(&b);
 }
 
-static char *edit_style_line(const char *line) {
+static bool file_unit(const tc_grouped_t *g, size_t i, void *ud) {
+    UNUSED(ud);
+    return g->rows[i].kind == TC_GROW_FILE;
+}
+
+static char *edit_style(tc_grouped_t *g, size_t i) {
+    if (g->rows[i].kind == TC_GROW_FILE) return tc_grouped_file_row(&g->rows[i]);
+    /* swap the code-frame gutter `│` for a space so it does not nest a second vertical bar inside the frame border */
+    const char *line = g->lines.v[i];
     sb_t d = SB_INIT;
     const char *bar = strstr(line, "\xe2\x94\x82");
     if (bar) {
@@ -192,17 +180,7 @@ static char *edit_style_line(const char *line) {
     } else sb_append(&d, line);
     char *disp = tc_replace_tabs(sb_cstr(&d));
     sb_free(&d);
-    char *r;
-    if (tc_is_search_header(line)) {
-        size_t depth = strspn(line, "#");
-        char *rest = str_trim(line + depth);
-        size_t rl = strlen(rest);
-        bool dir = rl && rest[rl - 1] == '/';
-        r = tc_fg(dir || depth == 1 ? TUI_TC_ACCENT : TUI_TC_DIM, disp);
-        free(rest);
-    } else if (disp[0] == '+') r = tc_fg(TUI_TC_TOOL_DIFF_ADDED, disp);
-    else if (disp[0] == '-') r = tc_fg(TUI_TC_TOOL_DIFF_REMOVED, disp);
-    else r = tc_fg(TUI_TC_TOOL_OUTPUT, disp);
+    char *r = tc_fg(disp[0] == '+' ? TUI_TC_TOOL_DIFF_ADDED : disp[0] == '-' ? TUI_TC_TOOL_DIFF_REMOVED : TUI_TC_TOOL_OUTPUT, disp);
     free(disp);
     return r;
 }
@@ -292,46 +270,25 @@ void tc_ast_edit(const tc_call_t *c, int width, strvec_t *out) {
     char *header = tc_status_line(&sl);
     const char *dc = json_get_str(d, "displayContent");
     char *text = dc ? xstrdup(dc) : tc_text_of(c->content);
-    strvec_t lines = {0};
-    tc_split_lines(text, &lines);
-    /* change groups (blank-separated), minus the safety-cap / parse trailers */
-    bool has_sep = false;
-    for (size_t i = 0; i < lines.n; i++) has_sep |= blank(lines.v[i]);
-    VEC(strvec_t) groups = {0};
-    for (size_t i = 0; i < lines.n;) {
-        if (blank(lines.v[i])) {
-            i++;
-            continue;
-        }
-        size_t gs = i;
-        strvec_t g = {0};
-        for (; i < lines.n; i++) {
-            if (blank(lines.v[i])) {
-                if (has_sep) break;
-                continue;
-            }
-            strvec_push(&g, lines.v[i]);
-        }
-        if (str_starts(lines.v[gs], "Safety cap reached") || str_starts(lines.v[gs], "Parse issues:")) strvec_free(&g);
-        else vec_push(&groups, g);
-    }
-    /* buildChangeBody */
+    /* per-file change groups, minus the safety-cap / parse trailers */
+    tc_grouped_t g;
+    tc_grouped_parse(&g, text, json_get_str(d, "searchPath"), NULL);
+    tc_ggroup_t *kept = xcalloc(g.ngroups + 1, sizeof *kept);
+    size_t nkept = 0;
+    for (size_t i = 0; i < g.ngroups; i++)
+        if (!drop_group(&g, &g.groups[i], "Safety cap reached", "Parse issues:")) kept[nkept++] = g.groups[i];
+    /* buildChangeBody: files apart by a blank line and without tree guides (the frame border is the container),
+     * fit to the budget with the rest summarized as `… N more files` */
+    tc_ggroup_t *shown;
+    size_t nshown;
+    char *summary;
+    tc_grouped_fit(&g, kept, nkept, c->expanded ? -1 : 6, file_unit, NULL, "file", 0, 1, &shown, &nshown, &summary);
     strvec_t body = {0};
-    size_t shown = 0;
-    for (size_t gi = 0; gi < groups.n; gi++) {
-        strvec_t *g = &groups.v[gi];
-        size_t sep = shown > 0 ? 1 : 0;
-        size_t reserved = !c->expanded && groups.n - (gi + 1) > 0 ? 1 : 0;
-        if (!c->expanded && shown > 0 && body.n + sep + g->n + reserved > 6) break;
-        if (sep) strvec_push(&body, "");
-        for (size_t k = 0; k < g->n; k++) strvec_push_own(&body, edit_style_line(g->v[k]));
-        shown++;
+    for (size_t gi = 0; gi < nshown; gi++) {
+        if (body.n) strvec_push(&body, "");
+        for (size_t k = 0; k < shown[gi].n; k++) strvec_push_own(&body, edit_style(&g, shown[gi].v[k]));
     }
-    if (!c->expanded && groups.n > shown) {
-        char *m = tc_more_items((int64_t)(groups.n - shown), "change");
-        strvec_push_own(&body, tc_fg(TUI_TC_MUTED, m));
-        free(m);
-    }
+    if (summary) strvec_push_own(&body, tc_fg(TUI_TC_MUTED, summary));
     if (limit) strvec_push_own(&body, tc_fg(TUI_TC_WARNING, "limit reached; narrow path"));
     if (json_len(perrs)) {
         char *lab = parse_errors_label(d);
@@ -350,9 +307,10 @@ void tc_ast_edit(const tc_call_t *c, int width, strvec_t *out) {
     tc_output_block(&blk, out);
     strvec_free(&sec.lines);
     strvec_free(&body);
-    for (size_t i = 0; i < groups.n; i++) strvec_free(&groups.v[i]);
-    vec_free(&groups);
-    strvec_free(&lines);
+    free(summary);
+    free(shown);
+    free(kept);
+    tc_grouped_free(&g);
     free(text);
     free(header);
     strvec_free(&meta);

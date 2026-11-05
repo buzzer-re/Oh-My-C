@@ -38,7 +38,7 @@ typedef struct {
 
 /* Render one tool call (any tool; falls back to the generic card). Appends lines to `out`. */
 void tc_render(const tc_call_t *c, int width, strvec_t *out);
-/* Grouped `read` calls (omp ReadToolGroupComponent): ` ● Read path` or ` • Read (N)` + tree. */
+/* Grouped `read` calls (omp ReadToolGroupComponent): ` ✔ Read path` or ` • Read (N)` + tree. */
 void tc_render_read_group(const tc_call_t *calls, size_t n, int width, strvec_t *out);
 /* User `!cmd` / `!!cmd` shell run (omp BashExecutionComponent) or `$ code` / `$$ code` Python run
  * (EvalExecutionComponent). exit_code < 0: unknown. */
@@ -119,6 +119,10 @@ char *tc_sanitize_line(const char *s);                        /* tabs->spaces, C
 /* mcp.renderMarkdownResults (setMcpRenderMarkdownResults): non-JSON MCP text results render as Markdown */
 extern bool tc_mcp_markdown;
 char *tc_shorten_path(const char *p);                         /* $HOME -> ~ */
+/* color of a file's name, or a whole URL, in tool bodies (omp FILE_NAME_COLOR; bronze in titanium) */
+#define TC_FILE_NAME_COLOR TUI_TC_CUSTOM_MESSAGE_LABEL
+char *tc_styled_path(const char *path);                       /* formatStyledPath: dim directory + FILE_NAME_COLOR name */
+bool tc_is_url_like(const char *path);                        /* isUrlLikePath: `scheme://` */
 char *tc_rel_path(const char *p, const char *cwd);            /* cwd-relative when inside, else shortened */
 const char *tc_lang_from_path(const char *p);                 /* highlight language id or NULL */
 const char *tc_lang_icon(const char *lang);
@@ -183,9 +187,43 @@ void tc_lsp(const tc_call_t *c, int width, strvec_t *out);
 
 /* grouped-file-output helpers (tc_search.c) */
 char *tc_paths_of(const json_t *args);                       /* path/paths arg joined ", " (NULL none) */
-bool tc_is_search_header(const char *l);                     /* `# dir/`, `## file#TAG` */
-const char *tc_search_header_lang(const char *line);
-char *tc_style_search_line(const char *line, const char *lang); /* header tint / code-frame highlight */
+/* A grouped output (grep / ast-grep / ast-edit display content, omp tools/grouped-file-output.ts): lines
+ * classified as `# dir/`, `## file#TAG (suffix)` or body. File rows carry their full path; directory rows are
+ * dropped when rendering, and every file gets its own group. */
+typedef enum { TC_GROW_CONTENT, TC_GROW_DIR, TC_GROW_FILE } tc_grow_kind_t;
+typedef struct {
+    tc_grow_kind_t kind;
+    char *display_path;  /* file rows: the folded directory chain + name, without `#` markers or the hashline tag */
+    char *suffix;        /* file rows: a trailing `(2 replacements)` note */
+    bool url;            /* file rows: the header names a `scheme://` target */
+    const char *lang;    /* body rows: the highlight language of the owning file */
+} tc_grow_t;
+typedef struct {
+    size_t *v;
+    size_t n;
+} tc_ggroup_t;
+typedef struct {
+    strvec_t lines;
+    tc_grow_t *rows;
+    tc_ggroup_t *groups; /* groupsByFile(groupLineIndicesByBlank) */
+    size_t ngroups;
+    char **frames;       /* memoized code-frame rows */
+    const char *lang;    /* highlight language override (ast_grep's `lang`) */
+} tc_grouped_t;
+/* scope: the search's `searchPath` (owns the lines before any header); lang: language override or NULL */
+void tc_grouped_parse(tc_grouped_t *g, const char *text, const char *scope, const char *lang);
+void tc_grouped_free(tc_grouped_t *g);
+bool tc_grouped_is_match(const char *line);                     /* isMatchRow: `*12│...` */
+char *tc_grouped_code_frame(tc_grouped_t *g, size_t index);     /* createCodeFrameStyler: toolOutput gutter + highlighted source; NULL when no frame */
+char *tc_grouped_file_row(const tc_grow_t *row);                /* createGroupedRowStyler's file row */
+typedef bool (*tc_gunit_fn)(const tc_grouped_t *g, size_t index, void *ud);
+/* fitGroupsToBudget: fit groups into `budget` rows (< 0: unlimited), the summary row included. `shown` receives
+ * one (borrowing) group per shown group; `summary` is the `… N more` text or NULL. */
+void tc_grouped_fit(const tc_grouped_t *g, const tc_ggroup_t *groups, size_t ngroups, int budget, tc_gunit_fn is_unit, void *ud,
+                    const char *unit, int64_t total, int gap, tc_ggroup_t **shown, size_t *nshown, char **summary);
+/* renderTreeList with a trailing summary: every group a branch, its rows from `style`, the summary last */
+typedef char *(*tc_gstyle_fn)(tc_grouped_t *g, size_t index, void *ud);
+void tc_grouped_tree(tc_grouped_t *g, const tc_ggroup_t *shown, size_t nshown, const char *summary, tc_gstyle_fn style, void *ud, strvec_t *out);
 void tc_ask(const tc_call_t *c, int width, strvec_t *out);
 void tc_goal(const tc_call_t *c, int width, strvec_t *out);
 void tc_find(const tc_call_t *c, int width, strvec_t *out);
