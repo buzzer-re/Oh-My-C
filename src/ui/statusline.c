@@ -97,11 +97,16 @@ typedef struct {
     int64_t git_fetched;
     bool git_inflight, git_have;
     int staged, unstaged, untracked;
+    /* branch + worktree label: read off the UI thread, so a stalled filesystem can't block rendering */
+    pthread_cond_t head_cv;
+    char *head_cwd, *head_branch, *head_label;
+    int64_t head_fetched;
+    bool head_inflight, head_waited;
     /* composer hint usage */
     json_t *hint_uses;
 } sl_state_t;
 
-static sl_state_t g_sl = {.gmu = PTHREAD_MUTEX_INITIALIZER};
+static sl_state_t g_sl = {.gmu = PTHREAD_MUTEX_INITIALIZER, .head_cv = PTHREAD_COND_INITIALIZER};
 
 static const char *composer_shape(void) {
     const char *s = settings_str("composer.shape", "band");
@@ -422,6 +427,51 @@ static char *worktree_label(const char *cwd) {
     return label;
 }
 
+#define GIT_HEAD_REFRESH_MS 1000
+#define GIT_HEAD_FIRST_WAIT_MS 100
+
+static void *git_head_thread(void *arg) {
+    char *cwd = arg;
+    char *branch = git_branch(cwd), *label = worktree_label(cwd);
+    pthread_mutex_lock(&g_sl.gmu);
+    bool changed = !str_eq(g_sl.head_cwd, cwd) || !str_eq(g_sl.head_branch, branch) || !str_eq(g_sl.head_label, label);
+    free(g_sl.head_cwd), free(g_sl.head_branch), free(g_sl.head_label);
+    g_sl.head_cwd = cwd, g_sl.head_branch = branch, g_sl.head_label = label;
+    g_sl.head_fetched = mono_ms();
+    g_sl.head_inflight = g_sl.head_waited = false;
+    pthread_cond_broadcast(&g_sl.head_cv);
+    pthread_mutex_unlock(&g_sl.gmu);
+    if (changed && g_ui && g_ui->tui) tui_request_render(g_ui->tui);
+    return NULL;
+}
+
+/* omp's footer caches the branch (#cachedBranch) instead of reading it on every render. Stale values come back at
+ * once while a refresh runs; only the first read for a directory waits, briefly, so the first frame has the branch.
+ * Both results are owned; either can be NULL. */
+static void git_head(const char *cwd, char **branch, char **label) {
+    pthread_mutex_lock(&g_sl.gmu);
+    bool same = str_eq(g_sl.head_cwd, cwd);
+    if (!g_sl.head_inflight && (!same || mono_ms() - g_sl.head_fetched >= GIT_HEAD_REFRESH_MS)) {
+        g_sl.head_inflight = true;
+        pthread_t th;
+        if (pthread_create(&th, NULL, git_head_thread, xstrdup(cwd)) == 0) pthread_detach(th);
+        else g_sl.head_inflight = false;
+    }
+    if (!same && g_sl.head_inflight && !g_sl.head_waited) {
+        g_sl.head_waited = true; /* once: a read that never returns must not slow every later frame */
+        struct timespec until;
+        clock_gettime(CLOCK_REALTIME, &until);
+        until.tv_nsec += GIT_HEAD_FIRST_WAIT_MS * 1000000L;
+        if (until.tv_nsec >= 1000000000L) until.tv_sec++, until.tv_nsec -= 1000000000L;
+        while (g_sl.head_inflight && !str_eq(g_sl.head_cwd, cwd))
+            if (pthread_cond_timedwait(&g_sl.head_cv, &g_sl.gmu, &until) != 0) break;
+        same = str_eq(g_sl.head_cwd, cwd);
+    }
+    *branch = same && g_sl.head_branch ? xstrdup(g_sl.head_branch) : NULL;
+    *label = same && g_sl.head_label ? xstrdup(g_sl.head_label) : NULL;
+    pthread_mutex_unlock(&g_sl.gmu);
+}
+
 static void *git_status_thread(void *arg) {
     char *cwd = arg;
     const char *argv[] = {"git", "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=normal", NULL};
@@ -731,7 +781,9 @@ static char *render_segment(const char *id, const segctx_t *c) {
         free(disp);
         /* a linked git worktree (/wt, PR checkouts): the project name, plus the worktree dir when it is not the
          * branch name (resolveWorktreeContext) */
-        char *wt_label = strip ? worktree_label(cwd) : NULL;
+        char *head_branch = NULL, *wt_label = NULL;
+        if (strip) git_head(cwd, &head_branch, &wt_label);
+        free(head_branch);
         bool is_wt = wt_label != NULL;
         if (is_wt) {
             free(pwd);
@@ -768,7 +820,9 @@ static char *render_segment(const char *id, const segctx_t *c) {
     }
     if (str_eq(id, "git")) {
         if (!settings_bool("git.enabled", true)) return NULL;
-        char *branch = git_branch(a->cwd);
+        char *branch = NULL, *head_label = NULL;
+        git_head(a->cwd, &branch, &head_label);
+        free(head_label);
         if (!branch) return NULL;
         int st = 0, un = 0, ut = 0;
         bool have = git_status(a->cwd, &st, &un, &ut);
