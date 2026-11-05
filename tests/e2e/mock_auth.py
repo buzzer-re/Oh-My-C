@@ -5,7 +5,7 @@ omc reaches it through OMC_AUTH_URL_REWRITE (each real origin maps to a path pre
 device flows (authorization_pending / slow_down / expiry / denial), GitHub Copilot device login + endpoint
 discovery + model policies, Cursor polling, Codex device auth, Kilo, xAI OIDC discovery + userinfo, Muse
 key minting, Factory whoami, API-key validation probes and refresh grants. GET /_log returns every request."""
-import base64, json, sys, threading, time, urllib.parse
+import base64, hashlib, json, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1])
@@ -32,6 +32,7 @@ def device(code_prefix, expires=60):
 
 
 GOOD = "good-key"
+MISTRAL = {"name": "ok", "polls": 0, "challenge": None}
 
 
 class H(BaseHTTPRequestHandler):
@@ -72,6 +73,55 @@ class H(BaseHTTPRequestHandler):
         a = self.headers.get("Authorization", "")
         return a[7:] if a.startswith("Bearer ") else None
 
+    def mistral(self, path, j, q):
+        """Mistral Vibe browser sign-in (registry/oauth/mistral-vibe.ts); /mistral/_scenario?name=... picks the polls."""
+        global MISTRAL
+        console = "https://console.mistral.ai"
+        if path == "/mistral/_scenario":
+            MISTRAL = {"name": q.get("name", "ok"), "polls": 0, "challenge": None}
+            return self.send(200, {})
+        name = MISTRAL["name"]
+        if path == "/mistral/api/vibe/sign-in":
+            MISTRAL["challenge"] = j.get("code_challenge")
+            if name == "start-500":
+                return self.send(500, {})
+            poll = "https://evil.example.com/api/poll" if name == "bad-url" else console + "/api/vibe/sign-in/p%201/status"
+            exp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + (0 if name == "expires-now" else 600)))
+            return self.send(200, {"process_id": "p 1", "sign_in_url": console + "/vibe/approve?p=1", "poll_url": poll, "expires_at": exp})
+        if path == "/mistral/api/vibe/sign-in/p 1/status" or path == "/mistral/api/vibe/sign-in/p%201/status":
+            MISTRAL["polls"] += 1
+            n = MISTRAL["polls"]
+            done = {"status": "completed", "exchange_token": "xt-1"}
+            if name == "expired":
+                return self.send(410)
+            if name == "denied":
+                return self.send(200, {"status": "denied"})
+            if name == "hung-up":
+                return self.send(200, {"status": "error", "message": "console said no"})
+            if name == "unknown":
+                return self.send(200, {"status": "sideways"})
+            if name == "no-token":
+                return self.send(200, {"status": "completed"})
+            if name == "flaky":
+                return self.send(200, done) if n >= 3 else self.send(503, {}) if n == 1 else self.send(200, [])
+            if name == "down":
+                return self.send(503, {})
+            if name == "throttled":
+                if n == 1:
+                    self.extra = [("Retry-After", "1")]
+                    return self.send(429, {})
+                return self.send(200, done)
+            return self.send(200, done) if n >= 2 else self.send(200, {"status": "pending"})
+        if path == "/mistral/api/vibe/sign-in/p%201/exchange" or path == "/mistral/api/vibe/sign-in/p 1/exchange":
+            MISTRAL["exchanged"] = True
+            if name == "workspace":
+                return self.send(403, {"error_code": 9004})
+            dig = base64.urlsafe_b64encode(hashlib.sha256((j.get("code_verifier") or "").encode()).digest()).rstrip(b"=").decode()
+            if dig != MISTRAL["challenge"] or j.get("exchange_token") != "xt-1":
+                return self.send(400, {"detail": "verifier"})
+            return self.send(200, {"api_key": "vibe-key"})
+        return self.send(404, {})
+
     def do_GET(self):
         self.handle_req(b"")
 
@@ -83,6 +133,8 @@ class H(BaseHTTPRequestHandler):
         f, j, q = e["form"], e["json"] or {}, e["query"]
         if path == "/_log":
             return self.send(200, LOG)
+        if path.startswith("/mistral/"):
+            return self.mistral(path, j, q)
 
         # ---- Kimi device flow (KIMI_CODE_OAUTH_HOST=BASE/kimi, /kimi-expire, /kimi-deny) ----
         for pfx in ("/kimi-expire", "/kimi-deny", "/kimi"):
