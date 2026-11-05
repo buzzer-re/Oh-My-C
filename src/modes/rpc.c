@@ -2819,6 +2819,7 @@ static void handle(rpc_t *r, json_t *cmd) {
             char *ds = str_trim(json_get_str(ht, "description") ? json_get_str(ht, "description") : "");
             if (!*nm) verr = xasprintf("Host tool at index %zu must provide a non-empty name", i);
             else if (!*ds) verr = xasprintf("Host tool \"%s\" must provide a non-empty description", nm);
+            else if (json_get(ht, "exclusive") && !json_is_bool(json_get(ht, "exclusive"))) verr = xasprintf("Host tool \"%s\" exclusive must be a boolean", nm);
             else if (!json_is_obj(json_get(ht, "parameters"))) verr = xasprintf("Host tool \"%s\" must provide a JSON Schema object", nm);
             free(nm);
             free(ds);
@@ -2842,6 +2843,7 @@ static void handle(rpc_t *r, json_t *cmd) {
                                                 params ? json_clone(params) : json_parse_str("{\"type\":\"object\",\"properties\":{}}"),
                                                 host_tool_execute);
             tool->hidden = json_get_bool(t, "hidden", false);
+            tool->exclusive = json_get_bool(t, "exclusive", false); /* omc-only: runs alone, in message order */
             tool->ud = r;
             agent_add_tool(a->agent, tool);
             strvec_push(&r->host_tools, nm);

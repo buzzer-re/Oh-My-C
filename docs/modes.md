@@ -194,7 +194,10 @@ closed by an abort or timeout is followed by a `cancel` request; when stdin clos
 fail.
 
 **Host tools** let the client implement tools. `set_host_tools` registers `{name, description,
-parameters}` definitions. When the model calls one, omc sends
+parameters}` definitions, plus the optional omc-only `exclusive` boolean (omp has no such field). By default, host
+tools called in one assistant message run in parallel, so their `host_tool_call` frames can arrive in any order. An
+`exclusive: true` tool runs alone and in message order, so the client gets that call only after the calls before it
+have been answered. Use it for calls that depend on each other. When the model calls one, omc sends
 `{"type":"host_tool_call","id":"host-N","toolCallId","toolName","arguments"}` and blocks that tool
 thread until the client answers `{"type":"host_tool_result","id":"host-N","result":{content,
 details?},"isError":false}` (`host_tool_update` partial results stream as `tool_execution_update`).
