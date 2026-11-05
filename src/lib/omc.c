@@ -140,10 +140,10 @@ int omc_prompt(omc_session_t *s, const char *text, char **answer) {
     }
     s->prompting = true;
     pthread_mutex_unlock(&s->mu);
-    app_prompt(s->app, text, NULL);
+    bool refused = app_prompt(s->app, text, NULL) == APP_PROMPT_REFUSED;
     const json_t *last = last_assistant(s->app->agent->messages);
     const char *stop = json_get_str(last, "stopReason");
-    int rc = str_eq(stop, "error") || str_eq(stop, "aborted") ? 1 : 0;
+    int rc = refused || str_eq(stop, "error") || str_eq(stop, "aborted") ? 1 : 0;
     if (answer) *answer = last ? ai_message_text(last) : xstrdup("");
     pthread_mutex_lock(&s->mu);
     s->prompting = false;

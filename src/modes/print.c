@@ -147,12 +147,17 @@ int run_print_mode(app_t *a, const print_opts_t *o) {
     guards_disable_stop_reminders(a); /* omp print mode: todo reminders never start extra turns */
     json_t *unavailable = NULL;
     bool strict = env_truthy("OMP_MCP_REQUIRE_READY") || env_truthy("OMC_MCP_REQUIRE_READY");
+    bool wrote_working = false;
     for (size_t i = 0; i < o->messages.n; i++) {
         size_t before = json_len(a->agent->messages);
         /* prepareAgentTurn: MCP readiness before the first model turn (and before MCP prompt commands expand);
          * OMP_MCP_REQUIRE_READY refuses the run */
         if (!unavailable) unavailable = mcp_readiness(a);
         if (strict && json_len(unavailable)) break;
+        if (!o->json && !wrote_working) { /* writeTextWorkingIndicator */
+            fputs("Working...\n", stderr);
+            wrote_working = true;
+        }
         /* session.prompt: MCP prompt / file / template commands expand (skill commands do not run here) */
         char *x = app_expand_input(a, o->messages.v[i], true);
         if (!x) continue;

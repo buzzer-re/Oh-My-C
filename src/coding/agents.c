@@ -681,7 +681,7 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
     watch_t w = {cancel, child->agent, 0};
     bool watching = cancel && pthread_create(&wt, NULL, cancel_watch, &w) == 0;
     agent_subscribe(child->agent, on_child_event, r);
-    app_prompt(child, prompt, NULL);
+    bool refused = app_prompt(child, prompt, NULL) == APP_PROMPT_REFUSED;
     settle_owned_jobs(child, cancel);
     agent_unsubscribe(child->agent, on_child_event, r);
     w.done = 1;
@@ -690,7 +690,8 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
     char *text = last ? ai_message_text(last) : xstrdup("");
     const char *stop = json_get_str(last, "stopReason");
     *aborted = str_eq(stop, "aborted") || (cancel && *cancel);
-    if (str_eq(stop, "error") && json_get_str(last, "errorMessage")) *error = xstrdup(json_get_str(last, "errorMessage"));
+    if (refused) *error = xstrdup(child->prompt_refusal ? child->prompt_refusal : "error");
+    else if (str_eq(stop, "error") && json_get_str(last, "errorMessage")) *error = xstrdup(json_get_str(last, "errorMessage"));
     json_t *pp = NULL;
     lc = NULL;
     pthread_mutex_lock(&g_mu);
