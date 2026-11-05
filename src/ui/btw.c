@@ -10,7 +10,9 @@
 #include "ui/ui.h"
 
 #include "coding/btw.h"
+#include "config/settings.h"
 #include "core/fs.h"
+#include "modes/interactive.h"
 #include "tools/artifacts.h"
 
 #include <ctype.h>
@@ -31,6 +33,8 @@ typedef struct {
     char *visible; /* replaceTabs(answer).trim() */
     char *error;
     bool copied, closed;
+    bool inject_on; /* btw.inject eligibility when asked: the block shows apart from its prose */
+    bool injected;
     /* markdown cache */
     char *md_text;
     int md_width;
@@ -54,6 +58,7 @@ struct btw_req {
     volatile sig_atomic_t cancel;
     bool worker_live; /* thread started and its done callback has not run yet */
     bool dropped;     /* no longer the controller's: freed by the done callback */
+    bool inject_on;   /* btw.inject eligibility when asked, fixed for the request's life */
     pthread_t th;
     pthread_mutex_t mu;
     sb_t pending; /* deltas not yet applied on the UI thread */
@@ -76,6 +81,9 @@ struct btw_ctl {
     /* the last completed answer (copy / branch) */
     char *last_question, *last_reply, *last_copy, *last_leaf, *last_sid;
     json_t *last_images, *last_assistant;
+    /* inject state per answer turn (`<id>:<turn>` -> "ready" | "sent"): only turns answered in this process with
+     * the inject instruction and a closed block get an entry, so older history never sends */
+    json_t *injects;
 };
 
 static void hist_close(btw_ctl_t *c);
@@ -85,6 +93,7 @@ static bool hist_open_follow_up(hist_t *h, const char *record_id);
 static void hist_mark_copied(hist_t *h, const char *record_id, const char *text);
 static bool can_branch(btw_ctl_t *c);
 static bool can_follow_up(btw_ctl_t *c);
+static bool can_inject(btw_ctl_t *c);
 static bool start(btw_ctl_t *c, const char *question, const char *record_id, const json_t *images, const char *title);
 
 /* ---------- small helpers ---------- */
@@ -186,6 +195,66 @@ static void md_lines(const char *text, int width, strvec_t *out) {
 
 static const char *session_sid(ui_t *u) { return u->app->session ? session_id(u->app->session) : ""; }
 
+/* ---------- <inject> block (btw-inject.ts) ---------- */
+
+/* the first key bound to app.btw.inject (hint form), NULL when unbound */
+static char *inject_key_hint(void) {
+    const strvec_t *keys = tui_keybindings_get(tui_keybindings_global(), "app.btw.inject");
+    return keys && keys->n ? ui_key_hint(keys->v[0]) : NULL;
+}
+
+static void inject_prose(const char *text, int width, strvec_t *out) {
+    char *t = str_trim(text ? text : "");
+    if (*t) {
+        char *s = btw_sanitize_display(t);
+        md_lines(s, width, out);
+        free(s);
+    }
+    free(t);
+}
+
+static bool inject_prose_blank(const char *text) { return blank(text); }
+
+/* BtwInjectAnswer.render: prose, the railed block, prose, a blank row apart. Every wrapped block line sits behind a
+ * gutter of the `btw.rail` (pink while pending, green once sent) and the send arrow or blanks as wide, then the label
+ * on the row below: both states take the same rows and text column, so sending recolours the block in place. */
+static void inject_answer_lines(const btw_inject_parts_t *parts, bool sent, int width, strvec_t *out) {
+    if (!inject_prose_blank(parts->before)) {
+        inject_prose(parts->before, width, out);
+        strvec_push(out, "");
+    }
+    const char *arrow = tui_sym("nav.selected");
+    tui_tc_t color = sent ? TUI_TC_SUCCESS : TUI_TC_CUSTOM_MESSAGE_LABEL;
+    sb_t blanks = SB_INIT;
+    tui_sb_spaces(&blanks, tui_visible_width(arrow));
+    char *rail = sfg(color, tui_sym("btw.rail")), *marker = tui_bold(sent ? arrow : sb_cstr(&blanks));
+    char *prefix = xasprintf("%s %s ", rail, marker);
+    int inner = MAX(1, width - tui_visible_width(prefix));
+    char *body = btw_format_inject_text(parts->inject);
+    strvec_t rows = str_split(body, "\n");
+    for (size_t i = 0; i < rows.n; i++) {
+        if (blank(rows.v[i])) {
+            strvec_push_own(out, xasprintf("%s", prefix));
+            continue;
+        }
+        strvec_t w = {0};
+        tui_wrap_text_with_ansi(rows.v[i], inner, &w);
+        for (size_t k = 0; k < w.n; k++) strvec_push_own(out, xasprintf("%s%s", prefix, w.v[k]));
+        strvec_free(&w);
+    }
+    char *label = sfg(color, sent ? "Injected into main session" : "Inject into main session");
+    strvec_push_own(out, xasprintf("%s%s", prefix, label));
+    if (!inject_prose_blank(parts->after)) {
+        strvec_push(out, "");
+        inject_prose(parts->after, width, out);
+    }
+    free(label);
+    strvec_free(&rows);
+    free(body);
+    free(prefix), free(rail), free(marker);
+    sb_free(&blanks);
+}
+
 /* ---------- inline panel (btw-panel.ts) ---------- */
 
 static void panel_init(panel_t *p, const char *question, const char *title) {
@@ -254,6 +323,9 @@ static char *panel_footer(btw_ctl_t *c, panel_t *p) {
     }
     case PS_COMPLETE: {
         strvec_t acts = {0};
+        char *ik = can_inject(c) ? inject_key_hint() : NULL;
+        if (ik) strvec_push_own(&acts, xasprintf("%s to inject", ik));
+        free(ik);
         if (panel_copyable(p)) strvec_push(&acts, p->copied ? "c to copy again" : "c to copy");
         if (can_follow_up(c)) strvec_push(&acts, "f to follow up");
         if (can_branch(c)) strvec_push(&acts, "b to branch");
@@ -292,7 +364,15 @@ static char *panel_footer(btw_ctl_t *c, panel_t *p) {
     return r;
 }
 
+static bool panel_inject_parts(const panel_t *p, btw_inject_parts_t *parts) {
+    if (!p->inject_on || !btw_split_inject(p->visible, parts)) return false;
+    if (parts->closed || p->state == PS_RUNNING) return true;
+    btw_inject_parts_free(parts); /* an unclosed block in a finished answer stays plain text */
+    return false;
+}
+
 static void panel_render(btw_ctl_t *c, panel_t *p, int width, strvec_t *out) {
+    btw_inject_parts_t ip;
     int inner = MAX(1, width - 4);
     char *title = p->copied ? xasprintf("%s \xe2\x9c\x93 Copied", p->base_title) : xstrdup(p->base_title);
     strvec_t body = {0};
@@ -301,6 +381,10 @@ static void panel_render(btw_ctl_t *c, panel_t *p, int width, strvec_t *out) {
         char *e = sanitize_error_line(p->error ? p->error : "Unknown error"), *s = sfg(TUI_TC_ERROR, e);
         ui_push_text(&body, s, inner);
         free(e), free(s);
+    } else if (*p->visible && panel_inject_parts(p, &ip)) {
+        /* the block displays apart from the prose only while streaming or once the tag closed */
+        inject_answer_lines(&ip, p->injected, inner, &body);
+        btw_inject_parts_free(&ip);
     } else if (*p->visible) {
         if (!p->md_text || strcmp(p->md_text, p->visible) || p->md_width != inner) {
             free(p->md_text);
@@ -458,7 +542,7 @@ static void run_done(void *ud);
 
 static void *worker_main(void *p) {
     btw_req_t *r = p;
-    r->rc = btw_run_turn(r->c->u->app, r->question, r->images, r->history, r->conversation_key, r->streaming,
+    r->rc = btw_run_turn(r->c->u->app, r->question, r->images, r->history, r->inject_on, r->conversation_key, r->streaming,
                          worker_delta, r, &r->cancel, &r->reply, &r->assistant, &r->err);
     tui_post(r->c->u->tui, run_done, r);
     return NULL;
@@ -495,6 +579,13 @@ static json_t *assistant_with_reply(const json_t *msg, const char *reply) {
     return m;
 }
 
+static void inject_set(btw_ctl_t *c, const json_t *record, const char *state) {
+    if (!c->injects) c->injects = json_obj();
+    char *key = btw_turn_key(record, -1);
+    json_set_str(c->injects, key, state);
+    free(key);
+}
+
 /* #runRequest's settlement, on the UI thread */
 static void run_done(void *ud) {
     btw_req_t *r = ud;
@@ -517,6 +608,12 @@ static void run_done(void *ud) {
     if (str_eq(latest_status(r), "running")) {
         if (r->rc == 0) {
             btw_set_status(r->record, "complete", r->reply, NULL);
+            /* only an answer asked with the inject instruction can be sent, even if the setting is turned on later */
+            if (r->inject_on) {
+                char *inj = btw_record_inject(r->record);
+                if (inj) inject_set(c, r->record, "ready");
+                free(inj);
+            }
             if (is_active(c, r)) {
                 panel_set_answer(&r->panel, r->reply);
                 panel_mark(&r->panel, PS_COMPLETE, NULL);
@@ -600,6 +697,64 @@ static bool can_follow_up(btw_ctl_t *c) {
     btw_req_t *r = c->active;
     return c->visible && !c->starting && !c->branch_in_flight && c->transition == 0 && r && is_active(c, r) &&
            str_eq(latest_status(r), "complete");
+}
+
+/* #injectEnabled: `btw.inject` is on and the main session is in view; read once per surface, so one value gates the
+ * prompt instruction, the highlighted block and the inject key there */
+static bool inject_enabled(btw_ctl_t *c) { return settings_bool("btw.inject", false) && !c->u->focus_id; }
+
+/* #canSend: the topic's latest answer is ready, and no branch or session move would race the new main-session turn */
+static bool can_send(btw_ctl_t *c, const json_t *record) {
+    if (c->starting || c->branch_in_flight || c->transition) return false;
+    char *key = btw_turn_key(record, -1);
+    bool ready = str_eq(json_get_str(c->injects, key), "ready");
+    free(key);
+    return ready;
+}
+
+static bool can_inject(btw_ctl_t *c) {
+    btw_req_t *r = c->active;
+    return c->visible && r && r->inject_on && is_active(c, r) && can_send(c, r->record);
+}
+
+/* #injectState: how a turn's block shows: "sent", "pending" on the latest turn, or NULL for plain text */
+static const char *inject_state(btw_ctl_t *c, const json_t *record, size_t turn) {
+    char *key = btw_turn_key(record, (int)turn);
+    const char *st = json_get_str(c->injects, key);
+    free(key);
+    if (str_eq(st, "sent")) return "sent";
+    return st && turn + 1 == btw_turn_count(record) ? "pending" : NULL;
+}
+
+/* #inject: send the topic's steering prompt to the main session as a user message: a steer while the agent runs, else
+ * a new turn. Slash commands and templates are not expanded, so model-written text never runs as a command. A send
+ * refused before it reached the transcript or the steer queue stays ready, with the inject key as its retry path. */
+static void send_inject(btw_ctl_t *c, const json_t *record) {
+    ui_t *u = c->u;
+    char *text = btw_record_inject(record);
+    if (!text) return;
+    char *reason = NULL;
+    bool sent = iq_inject(u, text, &reason);
+    inject_set(c, record, sent ? "sent" : "ready");
+    char *key = btw_turn_key(record, -1), *ak = c->active ? btw_turn_key(c->active->record, -1) : NULL;
+    if (ak && str_eq(ak, key) && !c->active->panel.closed) c->active->panel.injected = sent;
+    free(ak), free(key);
+    hist_refresh(c);
+    if (!sent) {
+        if (reason) {
+            char *m = xasprintf("Cannot inject /btw prompt: %s", reason), *s = sanitize_error_line(m);
+            add_notice(u, "error", s);
+            free(s), free(m);
+        } else {
+            char *rk = inject_key_hint();
+            char *m = rk ? xasprintf("/btw prompt not sent \xc2\xb7 %s to retry", rk) : xstrdup("/btw prompt not sent");
+            add_notice(u, "info", m);
+            free(m), free(rk);
+        }
+    }
+    free(reason);
+    free(text);
+    tui_request_render(u->tui);
 }
 
 static void copy_answer(btw_ctl_t *c, const char *answer, const char *history_record_id) {
@@ -776,6 +931,7 @@ static bool start(btw_ctl_t *c, const char *question, const char *record_id, con
     r->leaf_id = a->session && a->session->leaf_id ? xstrdup(a->session->leaf_id) : NULL;
     r->session_id = xstrdup(session_sid(u));
     r->store = store;
+    r->inject_on = r->panel.inject_on = inject_enabled(c);
     btw_begin_t b;
     btw_begin_turn(q, r->leaf_id, previous, images, title, &b);
     json_free(previous);
@@ -887,6 +1043,12 @@ bool ui_btw_command(ui_t *u, const char *question, const json_t *images, const c
 }
 
 bool ui_btw_key(ui_t *u, const tui_key_t *k) {
+    /* a modifier chord, not a bare letter: it sends text into the main session, mid-run if it is working */
+    if (tui_focus(u->tui) == &u->editor->base && tui_kb(k, "app.btw.inject")) {
+        btw_ctl_t *ic = u->btw;
+        if (ic && can_inject(ic)) send_inject(ic, ic->active->record);
+        return true;
+    }
     if (!u->btw) return false;
     btw_ctl_t *c = u->btw;
     if (tui_key_matches(k, "escape")) return (has_active(c) || c->branch_in_flight) && handle_escape(c);
@@ -914,6 +1076,7 @@ void ui_btw_free(ui_t *u) {
     btw_ctl_t *c = u->btw;
     if (!c) return;
     dispose(c);
+    json_free(c->injects);
     u->btw = NULL;
     /* the box component is owned by the root container; its render reads u->btw lazily */
     free(c);
@@ -941,6 +1104,7 @@ struct hist {
     int detail_width;
     char *detail_id;
     bool detail_dirty;
+    bool inject_on; /* `btw.inject` hooks: given only while it is on for this view */
 };
 
 static const struct {
@@ -1159,6 +1323,10 @@ static bool hist_key(tui_component_t *cp, const tui_key_t *k) {
         free(t);
         return true;
     }
+    if (h->inject_on && tui_kb(k, "app.btw.inject")) {
+        if (rec && can_send(c, rec)) send_inject(c, rec); /* refreshes the sheet, which frees rec */
+        return true;
+    }
     if (tui_key_matches(k, "tab") || tui_key_matches(k, "shift+tab") || tui_key_matches(k, "ctrl+/") ||
         tui_key_matches(k, "ctrl+_")) {
         if (h_count(h) > 1) h->focus = !h->focus;
@@ -1183,7 +1351,8 @@ static bool hist_key(tui_component_t *cp, const tui_key_t *k) {
 }
 
 /* one turn: status line, Question, Answer, error / interrupted notes */
-static void h_render_turn(const json_t *turn, const char *question, int width, strvec_t *out) {
+static void h_render_turn(const json_t *turn, const char *question, const char *block, const btw_inject_parts_t *parts,
+                          int width, strvec_t *out) {
     const char *st = json_get_str(turn, "status");
     size_t si = status_ix(st);
     char date[64];
@@ -1202,7 +1371,8 @@ static void h_render_turn(const json_t *turn, const char *question, int width, s
     strvec_push(out, bl);
     free(lab), free(bl);
     const char *ans = json_get_str(turn, "answer");
-    if (!blank(ans)) md_lines(ans, width, out);
+    if (block) inject_answer_lines(parts, str_eq(block, "sent"), width, out);
+    else if (!blank(ans)) md_lines(ans, width, out);
     else {
         char *w = sfg(TUI_TC_DIM, str_eq(st, "running") ? "Waiting for response\xe2\x80\xa6" : "No answer text.");
         tui_wrap_text_with_ansi(w, width, out);
@@ -1250,7 +1420,15 @@ static void h_render_detail(hist_t *h, int width) {
             }
             /* a titled topic's opening question displays as its title */
             const char *q = i == 0 && json_get_str(rec, "title") ? json_get_str(rec, "title") : json_get_str(turns[i], "question");
-            h_render_turn(turns[i], q ? q : "", inner, &h->detail);
+            /* #injectBlock: the turn's block to show apart from its prose, if any */
+            btw_inject_parts_t parts;
+            bool split = h->inject_on && btw_split_inject(json_get_str(turns[i], "answer"), &parts);
+            const char *block = !split ? NULL
+                                : str_eq(json_get_str(turns[i], "status"), "running") ? "pending"
+                                : parts.closed ? inject_state(h->c, rec, i)
+                                               : NULL;
+            h_render_turn(turns[i], q ? q : "", block, &parts, inner, &h->detail);
+            if (split) btw_inject_parts_free(&parts);
         }
     } else {
         char *s = sfg(TUI_TC_MUTED, "No side questions yet. Use /btw QUESTION to start one.");
@@ -1390,6 +1568,9 @@ static void hist_render(tui_component_t *cp, int width, strvec_t *out) {
             strvec_push_own(&acts, key_hint(ks, "follow up"));
             free(ek), free(ks);
         }
+        char *ik = h->inject_on && rec && can_send(c, rec) ? inject_key_hint() : NULL;
+        if (ik) strvec_push_own(&acts, key_hint(ik, "inject"));
+        free(ik);
         char *ct = rec ? btw_copy_text(rec) : NULL;
         if (ct) {
             if (h_is_copied(h, rec)) strvec_push_own(&acts, sfg(TUI_TC_SUCCESS, "\xe2\x9c\x93 copied \xc2\xb7 c to copy again"));
@@ -1530,6 +1711,7 @@ static hist_t *hist_show(btw_ctl_t *c) {
     h->c = c;
     h->records = history_records(c);
     h->detail_dirty = true;
+    h->inject_on = inject_enabled(c);
     if (h_count(h)) h_set_selected(h, json_get_str(json_at(h->records, 0), "id"));
     if (h_count(h) == 1) h->focus = 1;
     c->hist = h;

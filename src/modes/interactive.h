@@ -9,6 +9,7 @@
 /* interactive.c */
 void ix_start_prompt(ui_t *u, const char *text);      /* draw the user message, start a run */
 void ix_start_prompt_with(ui_t *u, const char *text, json_t *attachments); /* ... with staged images (owned) */
+void ix_start_prompt_literal(ui_t *u, const char *text);                  /* sent as written: no command or template expansion */
 bool ix_handle_command(ui_t *u, const char *line);    /* built-in slash command; false if unknown */
 void ix_start_queued_run(ui_t *u);                    /* run that delivers the agent's queued messages */
 void ix_start_hidden(ui_t *u, const char *text, const char *ctype); /* synthetic prompt (not drawn) */
@@ -26,6 +27,7 @@ void iq_submit(ui_t *u, const char *text, json_t *attachments);
 /* ... `loop_body`: the inline prompt of `/loop … <prompt>` (submittedMode "loop": it becomes the loop prompt
  * even when it steers a running turn or queues behind a compaction) */
 void iq_submit_mode(ui_t *u, const char *text, json_t *attachments, bool loop_body);
+bool iq_inject(ui_t *u, const char *text, char **reason); /* /btw inject: steer while running, else a new turn; never expanded */
 void iq_follow_up(ui_t *u);                           /* app.message.followUp (ctrl+q / ctrl+enter) */
 void iq_dequeue(ui_t *u);                             /* app.message.dequeue (alt+up / shift+up) */
 bool iq_escape(ui_t *u);                              /* app.interrupt; false when Esc has nothing to do here */

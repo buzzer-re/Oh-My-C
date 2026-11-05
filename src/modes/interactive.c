@@ -760,6 +760,24 @@ void ix_start_prompt(ui_t *u, const char *text) { start_prompt(u, text); }
 
 void ix_start_prompt_with(ui_t *u, const char *text, json_t *attachments) { start_prompt_with(u, text, attachments); }
 
+/* a prompt sent as written: no slash command, file command or template expansion */
+void ix_start_prompt_literal(ui_t *u, const char *text) {
+    msgview_t *v = mv_new(MV_USER);
+    v->text = xstrdup(text);
+    add_view(u, v);
+    strvec_push(&u->optimistic, text); /* its message_start is already drawn */
+    job_t *j = xcalloc(1, sizeof(*j));
+    j->u = u;
+    j->text = xstrdup(text);
+    u->worker_running = true;
+    if (pthread_create(&u->worker, NULL, worker_main, j) != 0) {
+        u->worker_running = false;
+        add_notice(u, "error", "failed to start agent thread");
+        free(j->text);
+        free(j);
+    }
+}
+
 void ix_start_hidden(ui_t *u, const char *text, const char *ctype) { start_hidden(u, text, ctype); }
 
 void ix_start_queued_run(ui_t *u) {

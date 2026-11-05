@@ -414,6 +414,7 @@ check "rpc mcp/ssh"    "ok mcp rpc done"  python3 -I "$ROOT/tests/e2e/mcp_rpc.py
 if python3 -c 'import pty' 2>/dev/null; then
     check "tui mcp/ssh"  "mcp tui ok"  python3 -I "$ROOT/tests/e2e/mcp_tui.py" "$B" "$ROOT/tests/e2e/mock_mcp.py" "$T/req.jsonl"
     check "tui quiet"    "quiet tui ok"  python3 -I "$ROOT/tests/e2e/quiet_tui.py" "$B" "$ROOT/tests/e2e/mock_mcp.py" "$T/quiet"
+    check "tui btw inject"  "btw inject tui ok"  python3 -I "$ROOT/tests/e2e/btw_inject_tui.py" "$B" "$T/req.jsonl" "$T/btw_inject"
     check "tui fs stall"  "fs stall ok"  python3 -I "$ROOT/tests/e2e/fs_stall_tui.py" "$B" "$T/fs_stall"
 fi
 check "acp file cmd"   "stop end_turn"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/init"

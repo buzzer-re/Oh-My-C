@@ -38,13 +38,26 @@ void btw_begin_free(btw_begin_t *b);
 void btw_patch_latest(json_t *record, const json_t *patch);
 /* convenience patch: status (required), answer/error when non-NULL, updatedAt = now */
 void btw_set_status(json_t *record, const char *status, const char *answer, const char *error);
+/* An answer around its `<inject>` block, the steering prompt a side answer drafted for the main session
+ * (splitBtwInject): the last closed block, else the last opener running to the end (closed = false). */
+typedef struct {
+    char *before, *inject, *after;
+    bool closed;
+} btw_inject_parts_t;
+bool btw_split_inject(const char *answer, btw_inject_parts_t *out);
+void btw_inject_parts_free(btw_inject_parts_t *p);
+char *btw_sanitize_display(const char *text);     /* sanitizeDisplayText: control sequences stripped, tabs expanded */
+char *btw_format_inject_text(const char *inject); /* a block's text as shown and as sent */
+char *btw_inject_of(const char *answer);          /* the prompt to send (owned); NULL while unclosed or blank */
+char *btw_record_inject(const json_t *record);    /* only the latest turn's, once that turn completed */
+char *btw_turn_key(const json_t *record, int turn_index); /* `<id>:<turn>`; turn_index < 0: the latest (owned) */
 /* the record without its TUI-only title (owned) */
 json_t *btw_wire_record(const json_t *record);
 
 /* runBtwTurn: the side question as an ephemeral turn on the session (btw-user.md prompt, earlier turns of the
  * topic replayed as user/assistant context). Deltas arrive on the calling thread. Returns 0 with *reply
  * (owned, repeated-line collapse, no byte cap) and *assistant (owned), or -1 with *err (owned). */
-int btw_run_turn(app_t *a, const char *question, const json_t *images, const json_t *history,
+int btw_run_turn(app_t *a, const char *question, const json_t *images, const json_t *history, bool inject,
                  const char *conversation_key, const json_t *streaming, void (*on_delta)(void *ud, const char *delta),
                  void *ud, volatile sig_atomic_t *cancel, char **reply, json_t **assistant, char **err);
 

@@ -729,6 +729,7 @@ static const struct {
     {"app.message.followUp", {"ctrl+q", "ctrl+enter"}},
     {"app.retry", {"f5", "alt+r"}},
     {"app.message.dequeue", {"alt+up", "shift+up"}},
+    {"app.btw.inject", {"alt+i"}},
 #ifdef __APPLE__
     {"app.clipboard.pasteImage", {"ctrl+v", "super+v"}}, /* getDefaultPasteImageKeys("darwin") */
 #else
