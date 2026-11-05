@@ -545,6 +545,81 @@ bool gh_repo_slug_equals(const char *left, const char *right) {
     return eq;
 }
 
+/* the output of `git -C cwd <args>` trimmed, owned; NULL on failure or nothing */
+static char *git_text(const char *cwd, const char *const *argv) {
+    char *r = proc_capture(argv, cwd, 10000);
+    if (r && !*r) {
+        free(r);
+        return NULL;
+    }
+    return r;
+}
+
+/* unrelatedOrigin: the `origin` repository when `gh` picked an unrelated remote over it, else NULL. Without `gh repo
+ * set-default`, `gh` takes the first remote ranked `upstream` > `github` > `origin`, assuming `upstream` is the parent of an
+ * `origin` fork. When `origin` is not a fork of that pick (`upstream` is a project merged from, not contributed to), PRs
+ * and issues live on `origin`. When git or `gh` cannot answer (an `origin` on a non-GitHub host, behind an SSH alias) the
+ * pick stays. */
+static char *unrelated_origin(const char *cwd, const char *picked) {
+    const char *ls[] = {"git", "remote", NULL};
+    char *list = git_text(cwd, ls);
+    if (!list) return NULL;
+    strvec_t remotes = str_split(list, "\n");
+    free(list);
+    bool has_origin = false, outranks = false, resolved = false;
+    for (size_t i = 0; i < remotes.n; i++) {
+        const char *n = remotes.v[i];
+        if (!strcmp(n, "origin")) has_origin = true;
+        if (!strcasecmp(n, "upstream") || !strcasecmp(n, "github")) outranks = true;
+    }
+    /* `gh repo set-default` marks the chosen remote `gh-resolved` */
+    for (size_t i = 0; has_origin && outranks && i < remotes.n && !resolved; i++) {
+        char *key = xasprintf("remote.%s.gh-resolved", remotes.v[i]);
+        const char *cfg[] = {"git", "config", "--get", key, NULL};
+        char *v = git_text(cwd, cfg);
+        resolved = v != NULL;
+        free(v);
+        free(key);
+    }
+    bool go = has_origin && outranks && !resolved;
+    strvec_free(&remotes);
+    if (!go) return NULL;
+    const char *get[] = {"git", "remote", "get-url", "origin", NULL};
+    char *origin_url = git_text(cwd, get);
+    if (!origin_url) return NULL;
+    strvec_t a = gh_args("repo", "view", origin_url, "--json", "url,parent", NULL);
+    char *err = NULL;
+    json_t *view = gh_json(cwd, &a, false, false, &err);
+    strvec_free(&a);
+    free(err);
+    free(origin_url);
+    if (!view) return NULL;
+    const char *url = json_get_str(view, "url");
+    char *origin = url ? gh_repo_from_url(url) : NULL;
+    if (origin && gh_repo_slug_equals(origin, picked)) {
+        free(origin);
+        origin = NULL;
+    }
+    const json_t *parent = json_get_obj(view, "parent");
+    if (origin && parent) {
+        const char *pname = json_get_str(parent, "name"), *plogin = json_get_str(json_get_obj(parent, "owner"), "login");
+        if (pname && plogin) {
+            gh_ref_t ref;
+            gh_parse_ref(origin, &ref);
+            char *slug = xasprintf("%s/%s", plogin, pname), *pref = gh_format_ref(ref.host, slug);
+            gh_ref_free(&ref);
+            if (gh_repo_slug_equals(pref, picked)) {
+                free(origin);
+                origin = NULL;
+            }
+            free(slug);
+            free(pref);
+        }
+    }
+    json_free(view);
+    return origin;
+}
+
 /* resolveRepoFromCwd */
 char *gh_repo_from_cwd(const char *cwd, char **err) {
     strvec_t a = gh_args("repo", "view", "--json", "url", "-q", ".url", NULL);
@@ -561,6 +636,13 @@ char *gh_repo_from_cwd(const char *cwd, char **err) {
     if (!repo) *err = xasprintf("GitHub CLI returned an unrecognized repository URL: %s", norm);
     free(norm);
     free(url);
+    if (repo) {
+        char *origin = unrelated_origin(cwd, repo);
+        if (origin) {
+            free(repo);
+            repo = origin;
+        }
+    }
     return repo;
 }
 

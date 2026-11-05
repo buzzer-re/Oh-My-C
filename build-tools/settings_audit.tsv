@@ -72,7 +72,7 @@ tui.imeSafeCursor	inert	no separate IME border row
 tui.vimMode	inert	no vim mode in the editor
 tui.vimModeDisplay	inert	no vim mode in the editor
 task.showResolvedModelBadge	inert	no resolved-model badge in the task widget
-async.widgets	inert	no live job widgets (WP-22b remainder)
+async.widgets	partial	gates job captions only; no live job widgets (WP-22b remainder)
 emojiAutocomplete	inert	no :shortcode: emoji completion
 spelling.autocomplete	inert	no word-prediction hints
 composer.predictions	inert	no next-message prediction

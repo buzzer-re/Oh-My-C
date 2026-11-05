@@ -69,5 +69,7 @@ void hl_store_invalidate(void *store, const char *key);
 /* write-content.ts stripWriteContent (hashline mode): drop `[path#TAG]` headers / `N:` prefixes copied from read
  * output when every content row carries one; *stripped reports a change. Owned. */
 char *hl_strip_write_content(const char *content, bool *stripped);
+/* a row that is a truncation notice emitted by `read` (isReadTruncationNotice) */
+bool hl_is_read_truncation_notice(const char *line);
 
 #endif

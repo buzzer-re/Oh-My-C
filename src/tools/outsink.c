@@ -1075,6 +1075,11 @@ void out_meta_column_truncated(json_t **meta, int64_t max_column, const char *un
     json_set(limits, "columnTruncated", c);
 }
 
+void out_meta_column_raw_cap(json_t *meta, int64_t raw_byte_cap) {
+    json_t *c = json_get_obj(json_get_obj(meta, "limits"), "columnTruncated");
+    if (c && json_get_obj(c, "lines")) json_set_int(c, "rawByteCap", raw_byte_cap);
+}
+
 static void set_limit(json_t **meta, const char *key, int64_t reached, int64_t suggestion) {
     if (reached <= 0) return;
     json_t *m = meta_obj(meta);
@@ -1294,6 +1299,59 @@ static void artifact_error_notice(sb_t *b, const char *err) {
     sb_appendf(b, "Full output was not saved completely (artifact %s failed)", err);
 }
 
+/* The rest of the column-cap clause as out_format_notice writes it: the cap as JavaScript prints a finite number (the
+ * setting takes any, `768.5` included), its unit, then a `. ` suffix or the bracket:
+ * -?\d+(?:\.\d+)?(?:e[+-]\d+)? (?:chars|bytes)(?:\. .*)?\]$ */
+static bool column_clause_tail(const char *p, const char *end) {
+    if (p < end && *p == '-') p++;
+    const char *d = p;
+    while (p < end && isdigit((unsigned char)*p)) p++;
+    if (p == d) return false;
+    if (p < end && *p == '.' && p + 1 < end && isdigit((unsigned char)p[1])) {
+        p++;
+        while (p < end && isdigit((unsigned char)*p)) p++;
+    }
+    if (end - p >= 3 && *p == 'e' && (p[1] == '+' || p[1] == '-') && isdigit((unsigned char)p[2])) {
+        p += 2;
+        while (p < end && isdigit((unsigned char)*p)) p++;
+    }
+    if (end - p >= 6 && (!strncmp(p, " chars", 6) || !strncmp(p, " bytes", 6))) p += 6;
+    else return false;
+    if (p + 1 == end && *p == ']') return true;
+    return end - p >= 3 && p[0] == '.' && p[1] == ' ' && end[-1] == ']';
+}
+
+#define COLUMN_CLAUSE "Some lines truncated to "
+#define COLUMN_CLAUSE_LEN (sizeof COLUMN_CLAUSE - 1)
+
+/* line.trim() bounds; JS trim's ASCII whitespace plus the Unicode spaces source text can carry are close enough here:
+ * every notice is bracketed, so anything else fails the match anyway */
+static void trim_bounds(const char *line, const char **b, const char **e) {
+    const char *s = line, *t = line + strlen(line);
+    while (s < t && isspace((unsigned char)*s)) s++;
+    while (t > s && isspace((unsigned char)t[-1])) t--;
+    *b = s;
+    *e = t;
+}
+
+bool out_is_column_truncation_notice(const char *line) {
+    const char *b, *e;
+    trim_bounds(line, &b, &e);
+    if (e - b < 2 || *b != '[' || (size_t)(e - b - 1) < COLUMN_CLAUSE_LEN || strncmp(b + 1, COLUMN_CLAUSE, COLUMN_CLAUSE_LEN)) return false;
+    return column_clause_tail(b + 1 + COLUMN_CLAUSE_LEN, e);
+}
+
+bool out_has_column_truncation_clause(const char *line) {
+    if (out_is_column_truncation_notice(line)) return true;
+    const char *b, *e;
+    trim_bounds(line, &b, &e);
+    if (e - b < 2 || *b != '[') return false;
+    for (const char *p = b + 1; p + 2 + COLUMN_CLAUSE_LEN <= e; p++)
+        if (p[0] == '.' && p[1] == ' ' && !strncmp(p + 2, COLUMN_CLAUSE, COLUMN_CLAUSE_LEN) && column_clause_tail(p + 2 + COLUMN_CLAUSE_LEN, e))
+            return true;
+    return false;
+}
+
 char *out_format_notice(const json_t *meta) {
     if (!json_is_obj(meta)) return xstrdup("");
     strvec_t parts = {0};
@@ -1333,7 +1391,13 @@ char *out_format_notice(const json_t *meta) {
         const json_t *ln = json_get_obj(l, "lines");
         if (ln && base) {
             int64_t first = json_get_int(ln, "first", 0), last = json_get_int(ln, "last", 0);
-            sb_appendf(&b, ". Use %s:raw:%lld-%lld to read line %lld whole", base, (long long)first, (long long)first, (long long)first);
+            if (has_key(l, "rawByteCap")) {
+                char *cap = out_format_bytes(json_get_int(l, "rawByteCap", 0));
+                sb_appendf(&b, ". Use %s:raw:%lld-%lld to read line %lld uncut, byte-capped at %s", base, (long long)first, (long long)first, (long long)first, cap);
+                free(cap);
+            } else {
+                sb_appendf(&b, ". Use %s:raw:%lld-%lld to read line %lld whole", base, (long long)first, (long long)first, (long long)first);
+            }
             if (last > first) sb_appendf(&b, "; cut lines run to line %lld, each read the same way", (long long)last);
         } else if (aid) {
             sb_append(&b, ". ");

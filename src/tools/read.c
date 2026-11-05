@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 
 #define READ_MAX_BYTES (50u * 1024)
+#define READ_SNAPSHOT_MAX_BYTES ((size_t)4 * 1024 * 1024) /* omp SNAPSHOT_MAX_BYTES: larger files are streamed, range by range */
 #define DEFAULT_LIMIT read_default_limit()
 #define CTX_BEFORE 1
 #define CTX_AFTER 3
@@ -30,6 +31,7 @@
 typedef struct {
     int64_t start; /* 1-based; negative => last N lines */
     int64_t end;   /* inclusive; 0 => open-ended */
+    int64_t req_end; /* the end the selector asked for, kept through normalization (0 = open): names the range in notices */
 } lrange_t;
 
 typedef struct {
@@ -266,7 +268,7 @@ static void split_text(const char *s, size_t len, text_lines_t *t) {
 }
 
 /* per-call column cap state (tools.outputMaxColumns, in UTF-16 units like omp's truncateLine) */
-static __thread int64_t g_col_max, g_col_first, g_col_last;
+static __thread int64_t g_col_max, g_col_first, g_col_last, g_col_first_bytes;
 
 /* byte length of the first `max` UTF-16 units of text, or -1 when it fits */
 static int64_t utf16_cut(const char *text, int64_t max) {
@@ -289,7 +291,10 @@ static void emit_line(sb_t *out, int64_t no, const char *text, bool numbered) {
     if (cut >= 0) {
         sb_appendn(out, text, (size_t)cut);
         sb_append(out, "\xE2\x80\xA6");
-        if (!g_col_first) g_col_first = no;
+        if (!g_col_first) {
+            g_col_first = no;
+            g_col_first_bytes = (int64_t)strlen(text);
+        }
         g_col_last = no;
     } else {
         sb_append(out, text);
@@ -310,40 +315,90 @@ static int64_t page_budget(int64_t first_line, int64_t line_count, bool numbered
     return MIN(scaled, threshold - reserve);
 }
 
-/* collectLineWindowFromBuffer: lines [start, ...) within `max_lines` / `max_bytes`; returns the count */
-static int64_t collect_window(const strvec_t *lines, int64_t start, int64_t max_lines, int64_t max_bytes, int64_t sel_limit,
-                              int64_t *collected_bytes, int64_t *selected_bytes, bool *stopped) {
-    int64_t n = 0, seen = 0, total = (int64_t)lines->n;
-    *collected_bytes = *selected_bytes = 0;
-    *stopped = false;
+/* lineBudgetBytes: what a line costs against the page budget: the UTF-8 bytes of its column-capped display when a cap
+ * applies (stray bytes show as 3-byte U+FFFD), so a cut line is charged what the reader sees, not its source size.
+ * `display_columns` 0 charges source bytes (raw reads, cap off). */
+static int64_t line_budget_bytes(const char *line, int64_t source_bytes, int64_t display_columns) {
+    if (display_columns <= 0 || source_bytes <= display_columns) return source_bytes;
+    int64_t units = 0, bytes = 0;
+    size_t i = 0, n = (size_t)source_bytes;
+    while (i < n) {
+        uint32_t cp;
+        int k = utf8_decode(line + i, n - i, &cp);
+        int u = cp >= 0x10000 ? 2 : 1;
+        if (units + u > display_columns) return bytes + 3; /* the "…" */
+        units += u;
+        bytes += k == 1 && (unsigned char)line[i] >= 0x80 ? 3 : k;
+        i += (size_t)k;
+    }
+    return source_bytes;
+}
+
+typedef struct {
+    int64_t n;           /* lines collected */
+    int64_t collected;   /* bytes charged for them (display width of cut lines) */
+    int64_t selected;    /* source bytes of the first `sel_limit` selected lines */
+    int64_t first_bytes; /* source size of the first selected line */
+    int64_t limit_index, limit_bytes; /* byteLimitLine: 0-based line the budget refused, or -1 */
+    bool stopped;        /* stoppedByByteLimit */
+} line_window_t;
+
+/* collectLineWindowFromBuffer: lines [start, ...) within `max_lines` / `max_bytes` */
+static void collect_window(const strvec_t *lines, int64_t start, int64_t max_lines, int64_t max_bytes, int64_t sel_limit,
+                           int64_t display_columns, line_window_t *w) {
+    int64_t seen = 0, total = (int64_t)lines->n;
+    memset(w, 0, sizeof *w);
+    w->limit_index = w->first_bytes = -1;
     bool done = false;
     for (int64_t i = start; i < total; i++) {
         int64_t lb = (int64_t)strlen(lines->v[i]);
         if (seen < sel_limit) {
-            *selected_bytes += (seen > 0 ? 1 : 0) + lb;
+            w->selected += (seen > 0 ? 1 : 0) + lb;
             seen++;
         }
         if (done) {
             if (seen >= sel_limit) break;
             continue;
         }
-        int64_t sep = n > 0 ? 1 : 0;
-        if (n >= max_lines) done = true;
-        else if (n == 0 && lb > max_bytes) *stopped = done = true;
-        else if (n > 0 && *collected_bytes + sep + lb > max_bytes) *stopped = done = true;
-        else {
-            n++;
-            *collected_bytes += sep + lb;
-            if (*collected_bytes > max_bytes) *stopped = done = true;
-            else if (n >= max_lines) done = true;
+        int64_t sep = w->n > 0 ? 1 : 0;
+        if (w->n >= max_lines) {
+            done = true;
+        } else {
+            int64_t cost = line_budget_bytes(lines->v[i], lb, display_columns);
+            /* a first line is collected when its cut display or its source fits; if only its source fits (stray bytes
+             * widen on decode), the page ends after it */
+            if ((w->n == 0 && MIN(cost, lb) > max_bytes) || (w->n > 0 && w->collected + sep + cost > max_bytes)) {
+                w->stopped = done = true;
+                w->limit_index = i;
+                w->limit_bytes = lb;
+                if (w->n == 0) w->first_bytes = lb;
+            } else {
+                w->n++;
+                w->collected += sep + cost;
+                if (w->first_bytes < 0) w->first_bytes = lb;
+                if (w->collected > max_bytes) w->stopped = done = true;
+                else if (w->n >= max_lines) done = true;
+            }
         }
+        if (done && seen >= sel_limit) break;
     }
-    return n;
+}
+
+/* formatOmittedRequestedLineNotice */
+static void omitted_line_notice(sb_t *b, const line_window_t *w, int64_t budget) {
+    char *lb = out_format_bytes(w->limit_bytes), *mb = out_format_bytes(budget);
+    int64_t no = w->limit_index + 1;
+    sb_appendf(b,
+               "\n[Line %lld is %s and could not fit after preceding context in the %s read budget. Use :raw:%lld-%lld to read that "
+               "line without context (byte-capped if it exceeds the budget), or widen the requested range to increase the budget.]\n",
+               (long long)no, lb, mb, (long long)no, (long long)no);
+    free(lb);
+    free(mb);
 }
 
 /* omp's head-truncation meta for a read page (Showing lines A-B of N[ (X limit)]. Use :B+1 to continue) */
 static void page_meta(json_t *details, int64_t start_line, int64_t total, int64_t shown, int64_t sel_bytes, int64_t out_bytes,
-                      bool stopped, int64_t max_bytes) {
+                      bool stopped, int64_t max_bytes, int64_t next_offset) {
     out_trunc_t r = {0};
     r.truncated = true;
     r.by = stopped ? OUT_BY_BYTES : OUT_BY_LINES;
@@ -354,8 +409,50 @@ static void page_meta(json_t *details, int64_t start_line, int64_t total, int64_
     r.elided_bytes = r.elided_lines = r.head_lines = r.tail_lines = -1;
     json_t *meta = json_get_obj(details, "meta");
     json_t *m = meta ? json_clone(meta) : NULL;
-    out_meta_from_trunc(&m, &r, "head", start_line, total, NULL, max_bytes, 0);
+    out_meta_from_trunc(&m, &r, "head", start_line, total, NULL, max_bytes, next_offset);
     json_set(details, "meta", m);
+}
+
+/* read.ts firstLineExceedsLimit: no line fits the budget, not even cut. A hashline page refuses (it requires full lines),
+ * every other page shows a byte-capped preview; both carry the "partial" truncation notice. */
+static void first_line_page(sb_t *b, json_t *details, const char *line, int64_t line_no, int64_t total, int64_t budget, bool hashline,
+                            bool numbered) {
+    int64_t lb = (int64_t)strlen(line), keep = MIN(lb, budget);
+    while (keep > 0 && keep < lb && ((unsigned char)line[keep] & 0xC0) == 0x80) keep--;
+    char *fb = out_format_bytes(lb), *mb = out_format_bytes(budget);
+    if (hashline)
+        sb_appendf(b, "[Line %lld is %s, exceeds %s limit. Hashline output requires full lines; cannot emit an editable numbered preview for a truncated line.]\n",
+                   (long long)line_no, fb, mb);
+    else if (keep == 0)
+        sb_appendf(b, "[Line %lld is %s, exceeds %s limit. Unable to display a valid UTF-8 snippet.]\n", (long long)line_no, fb, mb);
+    else {
+        if (numbered) sb_appendf(b, "%lld:", (long long)line_no);
+        sb_appendn(b, line, (size_t)keep);
+        sb_putc(b, '\n');
+    }
+    free(fb);
+    free(mb);
+    out_trunc_t r = {0};
+    r.truncated = r.first_line_exceeds_limit = true;
+    r.by = OUT_BY_BYTES;
+    r.total_lines = total - (line_no - 1);
+    r.total_bytes = lb;
+    r.output_lines = keep > 0 ? 1 : 0;
+    r.output_bytes = keep;
+    json_t *meta = json_get_obj(details, "meta");
+    json_t *m = meta ? json_clone(meta) : NULL;
+    out_meta_from_trunc(&m, &r, "head", line_no, total, NULL, budget, 0);
+    json_set(details, "meta", m);
+}
+
+/* appendReadNotice for a raw read: the notices stay out of the verbatim text */
+static void raw_note(json_t *details, const char *note) {
+    json_t *notes = json_get_arr(details, "notes");
+    if (!notes) {
+        notes = json_arr();
+        json_set(details, "notes", notes);
+    }
+    json_push_str(notes, note);
 }
 
 /* omp read.ts: a mutable file window registers its complete conflict blocks and carries the warning footer
@@ -368,12 +465,7 @@ static void conflict_footer(tool_env_t *env, const char *abs, const selector_t *
     char *w = conflict_on_read(env, abs, NULL, &win, first, &count);
     if (!w) return;
     if (sel->raw) {
-        json_t *notes = json_get_arr(details, "notes");
-        if (!notes) {
-            notes = json_arr();
-            json_set(details, "notes", notes);
-        }
-        json_push_str(notes, w);
+        raw_note(details, w);
     } else {
         if (b->len && b->s[b->len - 1] != '\n') sb_putc(b, '\n');
         sb_appendf(b, "%s\n", w + 1);
@@ -394,7 +486,11 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
     sb_t b = SB_INIT;
     json_t *details = json_obj();
     g_col_max = sel->raw || sel->resource ? 0 : settings_int("tools.outputMaxColumns", 768); /* buildInMemoryTextResult keeps lines whole */
-    g_col_first = g_col_last = 0;
+    g_col_first = g_col_last = g_col_first_bytes = 0;
+    /* numbered pages charge a cut line its capped width, so the budget bounds what is shown */
+    int64_t display_columns = g_col_max > 0 ? g_col_max : 0;
+    /* no line fits the budget: in-memory documents keep their capped single-line page */
+    bool can_first_exceed = !sel->resource && !sel->immutable;
     json_set_str(details, "resolvedPath", abs);
     int64_t seen_lo = -1, seen_hi = -1;
     bool whole = false;
@@ -484,12 +580,19 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         /* an in-memory resource has no default line limit: truncateHead's 50 KB / 3000-line budget pages it */
         int64_t limit = sel->resource ? MAX(total, 1) : DEFAULT_LIMIT;
         int64_t max_lines = MIN(limit, OUT_DEFAULT_MAX_LINES);
-        int64_t budget = sel->resource ? (int64_t)READ_MAX_BYTES : page_budget(0, max_lines, numbered), cbytes, sbytes;
-        bool stopped;
-        int64_t got = collect_window(&t.lines, 0, max_lines, budget, limit, &cbytes, &sbytes, &stopped);
-        if (got == 0 && total > 0) got = 1; /* oversized first line: keep omc's capped single-line page */
+        int64_t budget = sel->resource ? (int64_t)READ_MAX_BYTES : page_budget(0, max_lines, numbered);
+        line_window_t w;
+        collect_window(&t.lines, 0, max_lines, budget, limit, display_columns, &w);
+        bool first_exceeds = w.n == 0 && w.stopped && can_first_exceed;
+        int64_t got = w.n;
+        if (got == 0 && total > 0 && !first_exceeds) got = 1; /* oversized first line: keep omc's capped single-line page */
         int64_t i;
         sb_t body = SB_INIT;
+        if (first_exceeds) {
+            first_line_page(&b, details, t.lines.v[0], 1, total, budget, hashline, numbered);
+            sb_free(&body);
+            goto rendered;
+        }
         for (i = 1; i <= got; i++) emit_line(&body, i, t.lines.v[i - 1], numbered);
         int64_t last = i - 1;
         if (hashline) {
@@ -502,7 +605,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         sb_free(&body);
         conflict_footer(env, abs, sel, &t.lines, 1, last, &b, details);
         if (last < total) {
-            page_meta(details, 1, total, last, sbytes, cbytes, stopped, budget);
+            page_meta(details, 1, total, last, w.selected, w.collected, w.stopped, budget, 0);
         } else if (total == 0) {
             if (sel->immutable) sb_appendf(&b, "(empty %s)", ent);
             else emit_line(&b, 1, "", numbered); /* omp: an empty file is one empty line */
@@ -513,9 +616,10 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
     } else {
         /* normalize ranges */
         VEC(lrange_t) rs = {0};
-        sb_t notes = SB_INIT;
+        sb_t notes = SB_INIT, beyond = SB_INIT;
         for (size_t k = 0; k < sel->ranges.n; k++) {
             lrange_t r = sel->ranges.v[k];
+            r.req_end = r.end;
             if (r.start < 0) {
                 r.start = MAX(1, total + r.start + 1);
                 r.end = total;
@@ -524,11 +628,14 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
             }
             if (r.start > total) {
                 if (sel->ranges.n == 1) {
-                    sb_appendf(&notes, "Line %lld is beyond end of %s (%lld lines total). Use :%lld to read the end.",
-                               (long long)r.start, ent, (long long)total, (long long)MAX(1, total - 20));
+                    if (total == 0)
+                        sb_appendf(&notes, "Line %lld is beyond end of %s (0 lines total). The %s is empty.", (long long)r.start, ent, ent);
+                    else
+                        sb_appendf(&notes, "Line %lld is beyond end of %s (%lld lines total). Use :1 to read from the start, or :%lld to read the last line.",
+                                   (long long)r.start, ent, (long long)total, (long long)total);
                 } else {
-                    sb_appendf(&notes, "[Range %lld is beyond end of %s (%lld lines total); skipped]\n", (long long)r.start,
-                               ent, (long long)total);
+                    if (r.req_end) sb_appendf(&beyond, "[Range %lld-%lld is beyond end of %s (%lld lines total); skipped]\n", (long long)r.start, (long long)r.req_end, ent, (long long)total);
+                    else sb_appendf(&beyond, "[Range %lld is beyond end of %s (%lld lines total); skipped]\n", (long long)r.start, ent, (long long)total);
                 }
                 continue;
             }
@@ -544,14 +651,21 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
             }
         size_t m = 0;
         for (size_t i = 0; i < rs.n; i++) {
-            if (m && rs.v[i].start <= rs.v[m - 1].end + 1) rs.v[m - 1].end = MAX(rs.v[m - 1].end, rs.v[i].end);
-            else rs.v[m++] = rs.v[i];
+            if (m && rs.v[i].start <= rs.v[m - 1].end + 1) {
+                rs.v[m - 1].end = MAX(rs.v[m - 1].end, rs.v[i].end);
+                rs.v[m - 1].req_end = rs.v[m - 1].req_end && rs.v[i].req_end ? MAX(rs.v[m - 1].req_end, rs.v[i].req_end) : 0;
+            } else {
+                rs.v[m++] = rs.v[i];
+            }
         }
         rs.n = m;
         /* context lines for a single bounded non-raw range */
         bool explicit_end = sel->ranges.n == 1 && sel->ranges.v[0].end != 0 && sel->ranges.v[0].start > 0;
         /* a single non-raw range pages like omp: 1 leading / 3 trailing context lines, byte budget, Showing notice */
-        bool paged = rs.n == 1 && sel->ranges.n == 1 && sel->ranges.v[0].start > 0 && !sel->raw;
+        bool paged = rs.n == 1 && sel->ranges.n == 1 && sel->ranges.v[0].start > 0 && (!sel->raw || can_first_exceed);
+        /* readLocalFileMultiRange: a range of a raw read, or of a file past the 4 MiB snapshot cap, gets its own line/byte
+         * budget; other multi-range reads slice the buffered file whole */
+        bool range_budget = sel->ranges.n > 1 && (sel->raw || len > READ_SNAPSHOT_MAX_BYTES);
         if (rs.n == 1 && !sel->raw && explicit_end && !paged) {
             rs.v[0].start = MAX(1, rs.v[0].start - CTX_BEFORE);
             rs.v[0].end = MIN(total, rs.v[0].end + CTX_AFTER);
@@ -560,31 +674,78 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         int64_t last_shown = 0;
         size_t bytes = 0;
         bool cut = false;
-        int64_t pg_budget = 0, pg_cbytes = 0, pg_sbytes = 0;
-        bool pg_stopped = false;
+        int64_t pg_budget = 0;
+        line_window_t pw = {.limit_index = -1};
+        bool omitted = false;
         if (paged) {
             const lrange_t *q = &sel->ranges.v[0];
-            int64_t req = q->start - 1, lead = q->start > 1 ? CTX_BEFORE : 0, trail = q->end ? CTX_AFTER : 0;
+            /* raw reads are exact: without line numbers context would be indistinguishable from the requested lines */
+            int64_t req = q->start - 1, lead = !sel->raw && q->start > 1 ? CTX_BEFORE : 0, trail = !sel->raw && q->end ? CTX_AFTER : 0;
             int64_t eff = q->end ? q->end - q->start + 1 : DEFAULT_LIMIT;
             int64_t st = req - lead;
             int64_t max_lines = MIN(eff + lead + trail, OUT_DEFAULT_MAX_LINES);
+            int64_t page_cols = sel->raw ? 0 : display_columns;
             pg_budget = page_budget(st, max_lines, numbered);
-            int64_t got = collect_window(&t.lines, st, max_lines, pg_budget, eff + lead + trail, &pg_cbytes, &pg_sbytes, &pg_stopped);
-            if (lead && pg_stopped && got < lead) { /* an oversized context line must not hide the requested page */
-                lead = 0;
-                st = req;
-                max_lines = MIN(eff + trail, OUT_DEFAULT_MAX_LINES);
-                pg_budget = page_budget(st, max_lines, numbered);
-                got = collect_window(&t.lines, st, max_lines, pg_budget, eff + trail, &pg_cbytes, &pg_sbytes, &pg_stopped);
+            collect_window(&t.lines, st, max_lines, pg_budget, eff + lead + trail, page_cols, &pw);
+            /* Leading context is optional padding: a context line must not hide the page that was asked for. When the
+             * context itself fit (a cut wide line can), keep it unless the retry shows the requested line: a requested
+             * line too large alone keeps its "could not fit after preceding context" notice. */
+            if (lead && pw.stopped && pw.n <= lead) {
+                int64_t retry_lines = MIN(eff + trail, OUT_DEFAULT_MAX_LINES), retry_budget = page_budget(req, retry_lines, numbered);
+                line_window_t rw;
+                collect_window(&t.lines, req, retry_lines, retry_budget, eff + trail, page_cols, &rw);
+                if (pw.n < lead || rw.n > 0) {
+                    lead = 0;
+                    st = req;
+                    pg_budget = retry_budget;
+                    pw = rw;
+                }
             }
+            if (pw.n == 0 && pw.stopped && can_first_exceed) {
+                first_line_page(&b, details, t.lines.v[st], st + 1, total, pg_budget, hashline, numbered);
+                sb_free(&body);
+                sb_free(&notes);
+                sb_free(&beyond);
+                vec_free(&rs);
+                goto rendered;
+            }
+            omitted = !sel->raw && lead > 0 && pw.limit_index == req && pw.n == lead;
+            int64_t got = pw.n;
             if (got == 0) got = 1;
             rs.v[0].start = st + 1;
             rs.v[0].end = MIN(total, st + got);
         }
+        if (range_budget) {
+            for (size_t i = 0; i < rs.n; i++) {
+                lrange_t *r = &rs.v[i];
+                int64_t want = r->req_end ? r->req_end - r->start + 1 : DEFAULT_LIMIT;
+                int64_t max_lines = MIN(want, OUT_DEFAULT_MAX_LINES), budget = MAX((int64_t)READ_MAX_BYTES, max_lines * 512);
+                line_window_t w;
+                collect_window(&t.lines, r->start - 1, max_lines, budget, max_lines, sel->raw ? 0 : display_columns, &w);
+                /* the read budget can end a range early (a line too large for it, or one whose cut display overflows it) */
+                if (w.stopped && r->start - 1 + w.n < MIN(r->start - 1 + max_lines, total)) {
+                    int64_t next = r->start + w.n;
+                    char *mb = out_format_bytes(budget);
+                    char *bound = r->req_end ? xasprintf("%lld-%lld", (long long)r->start, (long long)r->req_end) : xasprintf("%lld", (long long)r->start);
+                    char *rest = r->req_end ? xasprintf("%lld-%lld", (long long)next, (long long)r->req_end) : xasprintf("%lld", (long long)next);
+                    sb_appendf(&notes, "[Range %s stopped before line %lld at the %s read budget. Use :%s to continue]\n", bound, (long long)next, mb, rest);
+                    free(mb);
+                    free(bound);
+                    free(rest);
+                }
+                r->end = w.n > 0 ? r->start + w.n - 1 : r->start - 1;
+            }
+        }
+        sb_append(&notes, sb_cstr(&beyond));
+        sb_free(&beyond);
+        bool capped = !paged && sel->ranges.n <= 1; /* a single tail or in-memory range keeps omc's flat head budget */
+        bool sep_needed = false;
         for (size_t i = 0; i < rs.n && !cut; i++) {
-            if (i && numbered) sb_append(&body, "…\n");
+            if (rs.v[i].end < rs.v[i].start) continue;
+            if (sep_needed && numbered) sb_append(&body, "…\n");
+            sep_needed = true;
             for (int64_t ln = rs.v[i].start; ln <= rs.v[i].end; ln++) {
-                if (bytes > READ_MAX_BYTES) {
+                if (capped && bytes > READ_MAX_BYTES) {
                     cut = true;
                     break;
                 }
@@ -608,22 +769,34 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         }
         sb_append(&b, sb_cstr(&body));
         sb_free(&body);
+        if (omitted) omitted_line_notice(&b, &pw, pg_budget);
         if (rs.n == 1) conflict_footer(env, abs, sel, &t.lines, rs.v[0].start, last_shown, &b, details);
-        if (paged && sel->resource && last_shown < total && !pg_stopped && sel->ranges.v[0].end != 0) {
+        /* a byte stop truncates the page only when it left a line out: a sole last line whose cut display overflows the
+         * budget is still shown whole in its cut form */
+        int64_t window_end = sel->raw && paged && sel->ranges.v[0].end ? MIN(total, sel->ranges.v[0].end) : total;
+        if (paged && sel->resource && last_shown < total && !pw.stopped && sel->ranges.v[0].end != 0) {
             sb_appendf(&b, "%s\n[%lld more lines in %s. Use :%lld to continue]", b.len && b.s[b.len - 1] == '\n' ? "" : "\n",
                        (long long)(total - last_shown), ent, (long long)(last_shown + 1));
-        } else if (paged && (last_shown < total || pg_stopped)) {
-            page_meta(details, rs.v[0].start, total, last_shown - rs.v[0].start + 1, pg_sbytes, pg_cbytes, pg_stopped, pg_budget);
+        } else if (paged) {
+            if (last_shown < window_end)
+                page_meta(details, rs.v[0].start, total, last_shown - rs.v[0].start + 1, pw.selected, pw.collected, pw.stopped, pg_budget,
+                          omitted ? -1 : 0);
         } else if (cut || (rs.n == 1 && sel->ranges.v[0].end == 0 && last_shown < total && !sel->raw))
             sb_appendf(&b, "\n[%lld more lines in %s. Use :%lld to continue]", (long long)(total - last_shown), ent,
                        (long long)(last_shown + 1));
         if (notes.len) {
-            if (b.len) sb_putc(&b, '\n');
-            sb_append(&b, sb_cstr(&notes));
+            if (sel->raw) { /* appendReadNotice: a raw read keeps its notices out of the verbatim text */
+                while (notes.len && notes.s[notes.len - 1] == '\n') sb_truncate(&notes, notes.len - 1);
+                raw_note(details, sb_cstr(&notes));
+            } else {
+                if (b.len && b.s[b.len - 1] != '\n') sb_putc(&b, '\n');
+                sb_append(&b, sb_cstr(&notes));
+            }
         }
         sb_free(&notes);
         vec_free(&rs);
     }
+rendered:
     UNUSED(whole);
     UNUSED(seen_lo);
     UNUSED(seen_hi);
@@ -631,6 +804,9 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         json_t *meta = json_get_obj(details, "meta");
         json_t *m = meta ? json_clone(meta) : NULL;
         out_meta_column_truncated(&m, g_col_max, "chars", NULL, 0, g_col_first, g_col_last, "");
+        /* a `:raw:N-N` read gets the budget of a one-line raw page; a cut line past it comes back byte-capped */
+        int64_t raw_line_budget = MIN((int64_t)READ_MAX_BYTES, (int64_t)tool_spill_threshold());
+        if (g_col_first_bytes > raw_line_budget) out_meta_column_raw_cap(m, raw_line_budget);
         json_set(details, "meta", m);
     }
     g_col_max = 0;
@@ -947,7 +1123,7 @@ static bool read_pdf_pages(tool_env_t *env, const char *path, tool_result_t *out
     return true;
 }
 
-static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out);
+static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out);
 
 static int read_ssh(tool_env_t *env, const char *path, tool_result_t *out) {
     selector_t sel;
@@ -1227,7 +1403,7 @@ static bool read_image(tool_ctx_t *ctx, const char *abs, const char *display, in
     return true;
 }
 
-static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
+static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     const char *path = json_get_str(args, "path");
     if (!path || !*path) {
@@ -1261,7 +1437,7 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         json_t *a2 = json_obj();
         json_set_str(a2, "path", internal);
         free(internal);
-        int rc = read_execute(self, ctx, a2, out);
+        int rc = read_execute_inner(self, ctx, a2, out);
         json_free(a2);
         return rc;
     }
@@ -1370,6 +1546,106 @@ done:
     free(abs);
     free(display);
     return 0;
+}
+
+/* acceptsLineSelector: whether `path` takes a trailing `:A-B` line selector: filesystem paths, web URLs and `lines` schemes
+ * do; selector-free devices (`xd://`, `out://`, `attachment://`), opaque MCP resources and unregistered schemes would read
+ * the tail as part of the URL */
+static bool accepts_line_selector(const char *path) {
+    const char *sep = strstr(path, "://");
+    if (!sep || sep == path) return true;
+    for (const char *p = path; p < sep; p++)
+        if (!isalnum((unsigned char)*p) && !strchr("+-.", *p)) return true;
+    size_t n = (size_t)(sep - path);
+    static const char *const passthrough[] = {"file", "http", "https", NULL};
+    static const char *const lines[] = {"agent", "artifact", "cfg", "conflict", "history", "issue", "pr", "local", "memory", "mr", "omc", "omp",
+                                        "proc", "rule", "security", "skill", "ssh", "vault", NULL};
+    for (const char *const *s = passthrough; *s; s++)
+        if (strlen(*s) == n && !strncasecmp(path, *s, n)) return true;
+    for (const char *const *s = lines; *s; s++)
+        if (strlen(*s) == n && !strncasecmp(path, *s, n)) return true;
+    return false;
+}
+
+#define REPEAT_READ_HINT_THRESHOLD 3
+#define REPEAT_READ_TRACKER_CAP 64
+
+typedef struct {
+    uint64_t hash;
+    int64_t count;
+} read_repeat_t;
+
+static uint64_t fnv1a(uint64_t h, const char *s) {
+    for (; s && *s; s++) {
+        h ^= (unsigned char)*s;
+        h *= 0x100000001b3ULL;
+    }
+    h ^= 0xff; /* field separator */
+    return h * 0x100000001b3ULL;
+}
+
+/* appendRepeatReadHint: weak models re-issue an unchanged read dozens of times; naming the repetition breaks the loop the
+ * same way the edit no-op guard does. Tracked per session; resets whenever the output changes. */
+static void append_repeat_read_hint(tool_env_t *env, const char *path, tool_result_t *out) {
+    if (out->is_error || !out->content) return;
+    json_t *block = NULL, *c;
+    uint64_t hash = 0xcbf29ce484222325ULL ^ json_len(out->content);
+    json_arr_foreach(out->content, i, c) {
+        const char *type = json_get_str(c, "type");
+        hash = fnv1a(hash, type);
+        if (str_eq(type, "text")) {
+            hash = fnv1a(hash, json_get_str(c, "text"));
+            if (!block) block = c;
+        } else if (str_eq(type, "image")) {
+            hash = fnv1a(hash, json_get_str(c, "mimeType"));
+            hash = fnv1a(hash, json_get_str(c, "data"));
+        }
+    }
+    const char *text = block ? json_get_str(block, "text") : NULL;
+    if (!text || !*text) return;
+    pthread_mutex_lock(&env->mu);
+    if (env->read_repeats.n > REPEAT_READ_TRACKER_CAP) {
+        hmap_free(&env->read_repeats, free);
+        hmap_init(&env->read_repeats);
+    }
+    read_repeat_t *e = hmap_get(&env->read_repeats, path);
+    int64_t count = 0;
+    if (!e || e->hash != hash) {
+        if (!e) {
+            e = xmalloc(sizeof *e);
+            hmap_put(&env->read_repeats, path, e);
+        }
+        e->hash = hash;
+        e->count = 1;
+    } else {
+        count = ++e->count;
+    }
+    pthread_mutex_unlock(&env->mu);
+    if (count < REPEAT_READ_HINT_THRESHOLD) return;
+    char *notice = xasprintf("[You have received this identical output %lld times. Re-reading '%s' will not change it \xE2\x80\x94 %s with the edit.]",
+                             (long long)count, path, accepts_line_selector(path) ? "use a narrower selector (path:A-B), or proceed" : "proceed");
+    selector_t sel;
+    memset(&sel, 0, sizeof sel);
+    char *w = xstrdup(path);
+    strip_sel(w, &sel);
+    if (sel.raw) { /* appendReadNotice: a raw read keeps its notices out of the verbatim text */
+        if (!out->details) out->details = json_obj();
+        raw_note(out->details, notice);
+    } else {
+        char *joined = xasprintf("%s\n\n%s", text, notice);
+        json_set_str(block, "text", joined);
+        free(joined);
+    }
+    vec_free(&sel.ranges);
+    free(w);
+    free(notice);
+}
+
+static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
+    int rc = read_execute_inner(self, ctx, args, out);
+    const char *path = json_get_str(args, "path");
+    if (path) append_repeat_read_hint(self->ud, path, out);
+    return rc;
 }
 
 agent_tool_t *tool_read_new(tool_env_t *env) {

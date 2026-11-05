@@ -39,6 +39,7 @@ typedef struct tool_ctx {
     void (*xdev_outer_update)(struct tool_ctx *ctx, const tool_result_t *partial);
     const char *xdev_tool;
     const json_t *xdev_args;
+    const char *intent; /* the call's `i` intent as the model wrote it (trimmed; may be NULL) */
 } tool_ctx_t;
 
 struct agent_tool {

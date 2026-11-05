@@ -9,6 +9,7 @@
 #include "core/json.h"
 #include "core/proc.h"
 
+#include <pthread.h>
 #include <signal.h>
 
 typedef struct jobs jobs_t;
@@ -24,7 +25,7 @@ void jobs_free(jobs_t *j); /* cancels and joins running jobs, stops owned sessio
 void jobs_set_notify(jobs_t *j, void (*fn)(void *ud), void *ud);
 
 /* explicit `async: true` bash job (fresh shell); returns owned job id (bg_N) */
-char *jobs_start_bash(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *label);
+char *jobs_start_bash(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *label, const char *intent);
 /* generic job of `type` ("task", "service", ...). id_hint NULL => bg_N; a taken id gets a -N suffix.
  * agent_id: subagent behind a task job (NULL otherwise). hidden: never listed (service watchers).
  * ud_free (may be NULL) releases ud after the job is reaped. Returns the owned job id. */
@@ -34,6 +35,19 @@ char *jobs_start(jobs_t *j, const char *type, const char *id_hint, const char *l
 /* the job's settlement is not delivered to the agent (still listed by proc://) */
 void jobs_set_quiet(jobs_t *j, const char *id);
 
+/* a caption being written for a job: shared with the writer's thread, which may outlive the job */
+typedef struct job_caption {
+    pthread_mutex_t mu;
+    int refs;
+    char *text; /* set once written */
+    volatile sig_atomic_t cancel; /* the job is gone: the request is pointless */
+} job_caption_t;
+void job_caption_unref(job_caption_t *c);
+/* JobWidgets.requestCaption: ask once per job for the caption of each running command that has run `after_ms`. The
+ * command needs no caption or `busy()` says the writers are full: the former is decided for good, the latter retried
+ * by a later listing. `start` takes a reference on the caption it keeps. */
+void jobs_request_captions(jobs_t *j, int64_t after_ms, bool (*busy)(void), void (*start)(job_caption_t *c, const char *command, const char *intent, int64_t timeout_sec));
+
 /* job-side helpers (call from the job body) */
 const char *job_id(const bgjob_t *job);
 volatile sig_atomic_t *job_cancel_flag(bgjob_t *job);
@@ -42,7 +56,7 @@ void job_set_output(bgjob_t *job, const char *text); /* live output/progress sho
 /* ---------- foreground bash with auto-background ---------- */
 /* Start `cmd` as an attached (unlisted) foreground job; output is forwarded to cb while attached. `shell` is the
  * session's persistent shell (NULL => fresh shell); a busy shell falls back to a temporary one. Owned handle id. */
-char *jobs_start_bash_fg(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, struct shell *shell,
+char *jobs_start_bash_fg(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *intent, struct shell *shell,
                          proc_output_cb cb, void *cb_ud);
 /* wait up to ms for an attached job; returns true once it finished. A set *cancel cancels the command. */
 bool jobs_fg_wait(jobs_t *j, const char *id, int64_t ms, volatile sig_atomic_t *cancel);

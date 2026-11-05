@@ -801,13 +801,7 @@ static bool coerce_from_issues(json_t **args, const jissues_t *js) {
 /* ---------- normalizations ---------- */
 
 static const char *const IDENT_KEYS[] = {"path", "paths", "file", "file_path", "filePath", "filepath", "url", "uri", "title", "label"};
-static const char *const CONTENT_KEYS[] = {"content", "input", "body", "text", "command", "code"};
 
-static bool in_list(const char *k, const char *const *l, size_t n) {
-    for (size_t i = 0; i < n; i++)
-        if (!strcmp(k, l[i])) return true;
-    return false;
-}
 
 /* normalizeDoubleEncodedKeys */
 static bool norm_keys(json_t *v, int depth) {
@@ -850,6 +844,13 @@ static bool norm_keys(json_t *v, int depth) {
 }
 
 /* normalizeOptionalNullsForSchema (anyOf branches are left alone) */
+static const char *const CONTENT_KEYS[] = {"content", "input", "body", "text", "command", "code", "payload"};
+static bool in_list(const char *k, const char *const *l, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (!strcmp(k, l[i])) return true;
+    return false;
+}
+
 static json_t *norm_nulls(const json_t *s, json_t *v, bool is_root, bool *changed, int depth) {
     if (!v || v->type == JSON_NULL || !json_is_obj(s) || depth > MAX_DEPTH) return v;
     if (json_get(s, "anyOf") || json_get(s, "oneOf")) return v;
@@ -878,7 +879,10 @@ static json_t *norm_nulls(const json_t *s, json_t *v, bool is_root, bool *change
     json_obj_foreach(props, i, k, ps) {
         json_t *cur = json_get(v, k);
         if (!cur) continue;
-        bool nullish = cur->type == JSON_NULL || str_eq(json_sv(cur), "null");
+        /* optional null placeholders are stripped, but a literal "null" stays in a content field whose schema accepts it
+         * (e.g. a JSON payload) */
+        bool nullish = cur->type == JSON_NULL || (str_eq(json_sv(cur), "null") &&
+                                                  !(in_list(k, CONTENT_KEYS, sizeof CONTENT_KEYS / sizeof *CONTENT_KEYS) && node_valid(ps, cur, depth + 1)));
         bool req = is_required(s, k);
         bool bad_empty = json_is_str(cur) && cur->u.str.len == 0 && !req && !node_valid(ps, cur, depth + 1);
         if ((nullish || bad_empty) && !req) {

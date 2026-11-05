@@ -483,7 +483,16 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     if (tsec > 3600) tsec = 3600;
     int64_t tms = tsec > 0 ? (int64_t)(tsec * 1000) : 0;
     pthread_mutex_lock(&st->mu);
-    if (json_get_bool(args, "reset", false)) kernel_stop(st);
+    if (json_get_bool(args, "reset", false)) { /* an intentional reset is no surprise restart */
+        kernel_stop(st);
+        st->had_kernel = false;
+    }
+    if (st->k) { /* a kernel that died between cells (crash, kill, out-of-memory) is replaced on this call */
+        pthread_mutex_lock(&st->k->ch->mu);
+        bool dead = st->k->eof;
+        pthread_mutex_unlock(&st->k->ch->mu);
+        if (dead) kernel_stop(st);
+    }
     bool restarted = !st->k && st->had_kernel;
     char *err = NULL;
     if (kernel_start(st, &err) != 0) {
@@ -599,7 +608,9 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     char *combined = str_trim(cs.output);
     size_t clen = strlen(combined);
     sb_t b = SB_INIT;
-    if (restarted) sb_append(&b, "[kernel restarted: previous state was lost]\n");
+    /* the first cell to run on a replacement opens with this, once per replacement; it mirrors the `eval-state-context`
+     * reminder wording so agents recognise it */
+    if (restarted) sb_append(&b, "Kernel restarted: the previous Python kernel is dead; state is unavailable. Re-run needed setup: variables, imports and definitions from earlier cells are gone.\n");
     size_t nimg = json_len(json_get_arr(result, "images"));
     if (failed) {
         out->is_error = true;
@@ -607,7 +618,7 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         else sb_append(&b, "Command exited with code 1");
     } else if (clen) {
         sb_append(&b, combined);
-    } else if (!timed_out && !aborted && result) {
+    } else if (!timed_out && !aborted && result && !restarted) {
         if (nimg) sb_appendf(&b, "(%zu image%s; no text output)", nimg, nimg == 1 ? "" : "s");
         else sb_append(&b, "(no output)");
     }

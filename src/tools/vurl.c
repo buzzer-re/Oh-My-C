@@ -151,8 +151,9 @@ static void job_line(sb_t *b, const json_t *x) {
     char *label = xstrdup(json_get_str(x, "label") ? json_get_str(x, "label") : "");
     for (char *p = label; *p; p++)
         if (isspace((unsigned char)*p)) *p = ' ';
-    sb_appendf(b, "%s%s [%s] %s %s %s — %s", b->len ? "\n" : "", json_get_str(x, "id"), json_get_str(x, "type"), json_get_str(x, "status"),
-               running ? "up" : "in", d, label);
+    const char *intent = json_get_str(x, "intent");
+    sb_appendf(b, "%s%s [%s] %s %s %s — %s%s%s", b->len ? "\n" : "", json_get_str(x, "id"), json_get_str(x, "type"), json_get_str(x, "status"),
+               running ? "up" : "in", d, intent ? intent : "", intent ? " — " : "", label);
     free(d);
     free(label);
 }
@@ -251,8 +252,9 @@ static int proc_read(tool_env_t *env, const char *url, tool_result_t *out) {
         sb_free(&b);
     } else if (job) {
         sb_t b = SB_INIT;
-        sb_appendf(&b, "%s [%s] — %s — %s", json_get_str(job, "id"), json_get_str(job, "type"), json_get_str(job, "status"),
-                   json_get_str(job, "label"));
+        const char *job_intent = json_get_str(job, "intent");
+        sb_appendf(&b, "%s [%s] — %s — %s%s%s", json_get_str(job, "id"), json_get_str(job, "type"), json_get_str(job, "status"),
+                   job_intent ? job_intent : "", job_intent ? " — " : "", json_get_str(job, "label"));
         bool running = str_eq(json_get_str(job, "status"), "running");
         const char *res = json_get_str(job, "result");
         if (res && *res) sb_appendf(&b, "\n%s", res);

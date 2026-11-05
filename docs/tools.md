@@ -184,6 +184,33 @@ These port omp's `OutputSink` (`tui/src/tools/streaming-output.ts`), `output-met
 - `tool_postprocess_result()` (the `after_tool` hook) spills any oversized result from any tool
   the same way and writes omp's `details.meta`.
 
+### Read page budget and the write projection guard
+
+`read` pages through the budget of omp's `collectLineWindow`: `max(50 KB, lines * 512)`, capped by the spill threshold less
+the row-prefix reserve. A numbered page charges a line cut to `tools.outputMaxColumns` the UTF-8 bytes of its cut display
+(stray bytes count as 3-byte U+FFFD), `:raw` reads and a cap of `0` charge source bytes. A first line that neither form
+fits gets the partial preview (`Showing line N (partial, …)`), or the "Hashline output requires full lines" refusal. A
+leading context line that leaves no room for the requested line is dropped (retried from the requested start). The
+column notice names the byte cap when the first cut line is larger than one raw read returns. Raw and
+past-the-4-MiB-cap multi-range reads budget each range and append `[Range A-B stopped before line N at the … read budget.
+Use :N-B to continue]`. omc holds the whole file in memory, so the streaming display-head logic of omp (`prefixLines`) has
+no counterpart.
+
+`write` refuses a payload that ends with a read notice when it would lose content (`read_projection_refusal`): a truncation
+notice whose shown payload is shorter than the file, or any column-cap clause (a cut line ends in `…` in place of its tail).
+Matching is exact (`out_is_column_truncation_notice`, `out_has_column_truncation_clause`): bracketed, with a stated cap and
+unit.
+
+### Job intents and captions
+
+A bash job keeps the call's `i` intent as one line of plain text with home paths shortened (`job_clean_intent`). `/jobs`,
+`/jobs full`, `proc://` listings, the wait card and `wait` results (omp `buildJobResult`: `## Completed`, `Intent:`,
+`Label:`, `Delivery:`, `## Still Running`) lead with it ahead of the raw command line. `/jobs full` also asks the `widget`
+role's model (role, then the `smol` defaults, first with a credential) for a one-line caption of each running command that
+ran 15 s and needs explaining (`job_caption_needed`), at most two requests at once and once per job; the caption shows on a
+later listing, under the intent, while `async.widgets` is on. omp also requests it when a job's widget is shown; omc has no
+job widgets, so `/jobs full` is the only trigger. Requests are off-transcript `model_usage` entries, purpose `job-caption`.
+
 ## Eval kernel protocol (`tools/eval.c`, `assets/eval_kernel.py`)
 
 The kernel is a persistent Python process started as `python3 -u -c <embedded source>` (interpreter
@@ -216,6 +243,11 @@ host → kernel   {"type":"exec","id":N,"code":"…"}
 
 omp's JS/Bun eval runtime and the `agent()`/`workpool()`/browser preludes are not implemented and are
 not advertised in the description.
+
+A kernel that died (crash, kill, out-of-memory, or a cancel/timeout that ended it) is replaced on the next call; the first
+cell on the replacement opens with `Kernel restarted: the previous Python kernel is dead; state is unavailable. …`, once per
+replacement. A `reset` gives no notice. `CompletionHandle.attempts` lists the candidates tried so far, without waiting:
+`{model, effort, outcome, error?}`; omc tries one candidate (no completion fallback chain yet).
 
 ## MCP client (`src/mcp/`)
 

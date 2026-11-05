@@ -741,6 +741,20 @@ int ws_search_exa(const char *q, int limit, const char *recency, sresults_t *out
 }
 
 /* DuckDuckGo HTML frontend scraper (credential-free) */
+
+/* /^(?:https?:)?\/\/(?:www\.)?duckduckgo\.com\/y\.js(?:[?#]|$)/i on the href with `&amp;` decoded */
+static bool ddg_is_ad_redirect(const char *href) {
+    if (!href) return false;
+    const char *h = href;
+    if (!strncasecmp(h, "https:", 6)) h += 6;
+    else if (!strncasecmp(h, "http:", 5)) h += 5;
+    if (strncmp(h, "//", 2)) return false;
+    h += 2;
+    if (!strncasecmp(h, "www.", 4)) h += 4;
+    if (strncasecmp(h, "duckduckgo.com/y.js", 19)) return false;
+    return !h[19] || h[19] == '?' || h[19] == '#';
+}
+
 int ws_search_ddg(const char *q, int limit, const char *recency, sresults_t *out, char **err) {
     char *eq = url_encode(q);
     const char *df = !recency ? "" : !strcmp(recency, "day") ? "&df=d" : !strcmp(recency, "week") ? "&df=w"
@@ -771,6 +785,11 @@ int ws_search_ddg(const char *q, int limit, const char *recency, sresults_t *out
             free(href);
             break;
         }
+        if (ddg_is_ad_redirect(href)) { /* advertising click redirects are excluded before the limit counts them */
+            free(href);
+            p = close;
+            continue;
+        }
         char *title = html_to_markdown(tag_end + 1, (size_t)(close - tag_end - 1), NULL, NULL);
         char *snippet = NULL;
         const char *sn = strstr(close, "class=\"result__snippet\"");
@@ -793,7 +812,7 @@ int ws_search_ddg(const char *q, int limit, const char *recency, sresults_t *out
             }
         }
         char *tt = str_trim(title), *st = snippet ? str_trim(snippet) : xstrdup("");
-        if (real && !strstr(real, "duckduckgo.com/y.js")) sres_add(out, tt, real, st);
+        if (real) sres_add(out, tt, real, st);
         free(tt);
         free(st);
         free(title);

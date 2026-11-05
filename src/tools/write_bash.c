@@ -246,6 +246,114 @@ static char *apply_text_convention(const char *abs, const char *content, bool *c
     return sb_detach(&b);
 }
 
+/* ---- write.ts read-projection guard ---- */
+
+/* the last non-blank line of `content`, bounded in the raw text by CR or LF (owned), NULL when blank */
+static char *last_content_line(const char *content) {
+    size_t end = strlen(content), n = end;
+    while (end && isspace((unsigned char)content[end - 1])) end--;
+    if (!end) return NULL;
+    size_t start = end;
+    while (start && content[start - 1] != '\n' && content[start - 1] != '\r') start--;
+    while (end < n && content[end] != '\n' && content[end] != '\r') end++;
+    return xstrndup(content + start, end - start);
+}
+
+/* isReadProjectionNotice: a `read` truncation notice, or the column-cap notice of a page whose long lines are shown cut */
+static bool ends_with_read_projection_notice(const char *content) {
+    char *line = last_content_line(content);
+    bool r = line && (hl_is_read_truncation_notice(line) || out_is_column_truncation_notice(line));
+    free(line);
+    return r;
+}
+
+/* JS string length (UTF-16 units) of `n` bytes */
+static int64_t js_length(const char *s, size_t n) {
+    int64_t units = 0;
+    for (size_t i = 0; i < n;) {
+        uint32_t cp;
+        int k = utf8_decode(s + i, n - i, &cp);
+        units += cp >= 0x10000 ? 2 : 1;
+        i += (size_t)k;
+    }
+    return units;
+}
+
+/* normalizeToLF(text).length: each CRLF collapses to one LF */
+static int64_t lf_normalized_length(const char *s) {
+    int64_t len = js_length(s, strlen(s));
+    for (const char *p = s; (p = strstr(p, "\r\n")); p += 2) len--;
+    return len;
+}
+
+/* readProjectionPayloadLength: length of the shown payload, everything up to but excluding the trailing notice and the
+ * blank separator before it. A single line truncated just past the budget renders longer than its source yet covers
+ * strictly less of it: the marker, not the rendered length, proves the page incomplete. */
+static int64_t read_projection_payload_length(const char *content) {
+    char *text = fz_normalize_to_lf(content);
+    size_t end = strlen(text), payload_end = 0;
+    bool found = false;
+    while (end > 0) {
+        size_t start = end;
+        while (start && text[start - 1] != '\n') start--;
+        char *line = xstrndup(text + start, end - start);
+        char *trimmed = str_trim(line);
+        bool blank = !*trimmed;
+        bool notice = !blank && (hl_is_read_truncation_notice(line) || out_is_column_truncation_notice(line));
+        free(trimmed);
+        free(line);
+        if (!blank) {
+            found = notice;
+            payload_end = start;
+            break;
+        }
+        if (!start) break;
+        end = start - 1;
+    }
+    int64_t r = -1;
+    if (found) {
+        while (payload_end > 0) { /* back over the blank lines separating the payload from the notice */
+            size_t prev = payload_end > 1 ? payload_end - 1 : 0;
+            while (prev && text[prev - 1] != '\n') prev--;
+            char *line = xstrndup(text + prev, payload_end - 1 - prev);
+            char *trimmed = str_trim(line);
+            bool blank = !*trimmed;
+            free(trimmed);
+            free(line);
+            if (!blank) break;
+            payload_end = prev;
+        }
+        r = payload_end ? js_length(text, payload_end - 1) : 0;
+    }
+    free(text);
+    return r;
+}
+
+/* assertNotShorterReadProjection: owned refusal message or NULL. `write_content` is the text after display prefixes
+ * were stripped. */
+static char *read_projection_refusal(const char *display, const char *raw_content, const char *current, const char *write_content) {
+    int64_t raw_payload = read_projection_payload_length(raw_content);
+    if (raw_payload < 0 || !current) return NULL;
+    /* A column-cap notice proves the page lossy at any length: a cut line ends in `…` in place of its tail, and a line one
+     * column past the cap renders exactly as long as its source. So does a truncation notice carrying the column clause,
+     * whose line-number prefixes pad the payload. */
+    char *last = last_content_line(raw_content);
+    bool column_cut = last && out_has_column_truncation_clause(last);
+    free(last);
+    if (!column_cut) {
+        int64_t payload = !strcmp(write_content, raw_content) ? raw_payload : lf_normalized_length(write_content);
+        if (payload >= lf_normalized_length(current)) return NULL;
+    }
+    return column_cut
+               ? xasprintf("Refusing to overwrite '%s' with an incomplete read projection: the content ends with an omp read column-cap notice, so its cut "
+                           "lines would replace the full ones. Re-read the cut lines in raw mode and write the complete file, or use edit for a partial change.",
+                           display)
+               : xasprintf("Refusing to overwrite '%s' with an incomplete read projection: the content ends with an omp read truncation notice and covers "
+                           "less than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use "
+                           "edit for a partial change.",
+                           display);
+}
+
 static int write_local(tool_env_t *env, tool_ctx_t *ctx, const char *raw_path, const char *raw_content, tool_result_t *out) {
     char *path = unwrap_header(raw_path);
     if (!raw_content) {
@@ -325,6 +433,22 @@ static int write_local(tool_env_t *env, tool_ctx_t *ctx, const char *raw_path, c
      * goes as given (its buffer keeps its own line endings); OMP-owned artifacts (internal URLs, local://) stay local */
     bool bridged = env->bridge && env->bridge->write_text && !strstr(path, "://") &&
                    !(env->local_dir && str_starts(abs, env->local_dir));
+    if (ends_with_read_projection_notice(raw_content)) { /* assertNotTruncatedFileReadProjection */
+        char *current = NULL;
+        if (bridged && env->bridge->read_text) { /* readCurrentWriteSource: the editor's buffer, else the disk */
+            char *berr = NULL;
+            current = env->bridge->read_text(env->bridge, abs, &berr);
+            free(berr);
+        }
+        if (!current && existed && S_ISREG(st.st_mode)) current = fs_read(abs, NULL);
+        char *refusal = read_projection_refusal(display, raw_content, current, clean);
+        free(current);
+        if (refusal) {
+            tool_result_error(out, "%s", refusal);
+            free(refusal);
+            goto done;
+        }
+    }
     char *conv = !bridged && existed && S_ISREG(st.st_mode) ? apply_text_convention(abs, clean, &crlf_applied, &bom_applied) : NULL;
     final = conv ? conv : xstrdup(clean);
     size_t n = strlen(final);
@@ -798,7 +922,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     int64_t timeout_ms = tsec > 0 ? (int64_t)(tsec * 1000) : 0;
     bool pty = json_get_bool(args, "pty", false);
     if (async_req && env->jobs) {
-        char *jid = jobs_start_bash(env->jobs, full, cwd, timeout_ms, NULL);
+        char *jid = jobs_start_bash(env->jobs, full, cwd, timeout_ms, NULL, ctx ? ctx->intent : NULL);
         background_result(out, jid, NULL, &notices, tsec);
         free(jid);
         goto done;
@@ -882,7 +1006,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     if (auto_bg) {
         int64_t thr = settings_int("bash.autoBackground.thresholdMs", 60000);
         int64_t wait_ms = thr <= 0 ? 0 : timeout_ms ? MAX(0, MIN(thr, timeout_ms - 1000)) : thr;
-        char *fid = jobs_start_bash_fg(env->jobs, full, cwd, timeout_ms, persistent ? env->shell : NULL, bash_on_output, &bs);
+        char *fid = jobs_start_bash_fg(env->jobs, full, cwd, timeout_ms, ctx ? ctx->intent : NULL, persistent ? env->shell : NULL, bash_on_output, &bs);
         bool fin = false, steered = false;
         int64_t deadline = mono_ms() + wait_ms;
         for (;;) {
@@ -921,10 +1045,8 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         if (notice) strvec_push_own(&notices, notice);
         free(fid);
     } else {
-        static const char *env_extra[] = {"PAGER=cat", "GIT_PAGER=cat", "GIT_TERMINAL_PROMPT=0", "TERM=dumb",
-                                          "NO_COLOR=1", "OMC=1", NULL};
         proc_opts_t o = {.cwd = cwd,
-                         .env_extra = env_extra,
+                         .env_extra = tool_bash_env(),
                          .timeout_ms = timeout_ms,
                          .max_output = 64u << 20,
                          .merge_stderr = true,
@@ -1015,6 +1137,48 @@ char *jobs_render_results(const json_t *jobs) {
 
 #define WAIT_MAX_MS (30 * 60 * 1000)
 
+/* buildJobResult("wait"): the settled jobs, each led by what it was for, then what still runs. `recovered`: the job had
+ * settled before this wait started (its delivery was still pending). */
+static char *job_result_text(jobs_t *jobs, const json_t *done, bool recovered) {
+    sb_t b = SB_INIT;
+    const json_t *x;
+    if (json_len(done)) sb_appendf(&b, "## Completed (%zu)\n\n", json_len(done));
+    json_arr_foreach(done, i, x) {
+        const char *id = json_get_str(x, "jobId"), *status = json_get_str(x, "status");
+        const char *intent = json_get_str(x, "intent"), *agent = json_get_str(x, "agentId"), *type = json_get_str(x, "type");
+        sb_appendf(&b, "### %s [%s] \xE2\x80\x94 %s\n", id, type ? type : "bash", status ? status : "completed");
+        if (intent) sb_appendf(&b, "Intent: %s\n", intent);
+        sb_appendf(&b, "Label: %s\n", json_get_str(x, "label") ? json_get_str(x, "label") : "");
+        if (str_eq(type, "task") && agent && !str_eq(agent, id)) { /* taskAgentHandles */
+            if (str_eq(status, "completed")) sb_appendf(&b, "Agent: agent://%s, history://%s\n", agent, agent);
+            else sb_appendf(&b, "Agent: history://%s\n", agent);
+        }
+        if (!str_eq(status, "cancelled"))
+            sb_append(&b, recovered ? "Delivery: not auto-delivered; recovered by this snapshot.\n" : "Delivery: delivered directly to wait.\n");
+        const char *res = json_get_str(x, "result");
+        if (res && *res) {
+            if (json_get_bool(x, "failed", false)) sb_appendf(&b, "Error: %s\n", res);
+            else sb_appendf(&b, "```\n%s\n```\n", res);
+        }
+        sb_putc(&b, '\n');
+    }
+    json_t *snap = jobs ? jobs_snapshot(jobs) : json_arr();
+    size_t running = 0;
+    json_arr_foreach(snap, i, x) if (str_eq(json_get_str(x, "status"), "running")) running++;
+    if (running) {
+        sb_appendf(&b, "## Still Running (%zu)\n\n", running);
+        json_arr_foreach(snap, i, x) {
+            if (!str_eq(json_get_str(x, "status"), "running")) continue;
+            const char *intent = json_get_str(x, "intent");
+            sb_appendf(&b, "- `%s` [%s] \xE2\x80\x94 %s%s%s\n", json_get_str(x, "id"), json_get_str(x, "type"), intent ? intent : "",
+                       intent ? " \xE2\x80\x94 " : "", json_get_str(x, "label") ? json_get_str(x, "label") : "");
+        }
+    }
+    json_free(snap);
+    while (b.len && isspace((unsigned char)b.s[b.len - 1])) sb_truncate(&b, b.len - 1);
+    return sb_detach(&b);
+}
+
 static const char *NOTHING_TO_WAIT =
     "Nothing to wait for: no background job or service you started is running, and no agent you messaged this run owes a "
     "reply. Other agents' results and messages arrive on their own.";
@@ -1088,7 +1252,7 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     }
     json_t *done = jobs ? jobs_take_finished(jobs) : json_arr();
     if (json_len(done)) {
-        char *txt = jobs_render_results(done);
+        char *txt = job_result_text(jobs, done, ready > 0);
         tool_result_text(out, txt);
         free(txt);
     } else if (str_eq(wake, "abort")) {
@@ -1100,14 +1264,10 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         if (who) tool_result_textf(out, "%s finished its turn without replying. Ask again, or finish without the answer.", who);
         else tool_result_text(out, NOTHING_TO_WAIT);
     } else {
-        json_t *snap = jobs ? jobs_snapshot(jobs) : json_arr(), *x;
-        sb_t b = SB_INIT;
-        sb_append(&b, "Wait limit reached; background work may still be running. Read proc:// for status.");
-        json_arr_foreach(snap, i, x) if (str_eq(json_get_str(x, "status"), "running"))
-            sb_appendf(&b, "\n- %s (%s, %llds)", json_get_str(x, "id"), json_get_str(x, "label"), (long long)(json_get_int(x, "durationMs", 0) / 1000));
-        tool_result_text(out, sb_cstr(&b));
-        sb_free(&b);
-        json_free(snap);
+        /* a wait where everything is still running carries no new information once a later wait exists */
+        char *txt = job_result_text(jobs, done, false);
+        tool_result_text(out, *txt ? txt : "Wait limit reached; background work may still be running. Read proc:// for status.");
+        free(txt);
         out->useless = true;
     }
     free(who);
@@ -1120,6 +1280,7 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         json_set_str(s, "type", json_get_str(x, "type") ? json_get_str(x, "type") : "bash");
         json_set_str(s, "status", failed ? "failed" : "completed");
         json_set_str(s, "label", json_get_str(x, "label") ? json_get_str(x, "label") : "");
+        if (json_get_str(x, "intent")) json_set_str(s, "intent", json_get_str(x, "intent"));
         json_set_int(s, "durationMs", json_get_int(x, "durationMs", 0));
         json_set_str(s, failed ? "errorText" : "resultText", json_get_str(x, "result") ? json_get_str(x, "result") : "");
         json_push(snaps, s);

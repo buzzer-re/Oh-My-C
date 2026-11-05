@@ -110,6 +110,12 @@ printf 'a\r\nb\r\n' > crlf.txt
 check "write crlf"     "Note: kept the replaced file's CRLF line endings."  "$B" --model mock/mock-1 -p 'call:write:{"path":"crlf.txt","content":"x\ny\n"}'
 check "write no content" "content is required for nc.txt."  "$B" --model mock/mock-1 -p 'call:write:{"path":"nc.txt"}'
 check "write eisdir"   "EISDIR: illegal operation on a directory, open '"  "$B" --model mock/mock-1 -p "write:a:x"
+# non-interactive env: a config-file sequence.editor and GCM prompts must not hang a command
+check "bash env"       "true never" "$B" --model mock/mock-1 --no-session -p 'bash:echo $GIT_SEQUENCE_EDITOR $GCM_INTERACTIVE'
+mkdir -p "$T/rebase" && (cd "$T/rebase" && git init -q . && git config user.email a@b && git config user.name a && git config sequence.editor "sleep 300" && echo 1 > a && git add a && git commit -qm one && echo 2 > a && git commit -qam two)
+check "rebase -i"      "Successfully rebased" "$B" --model mock/mock-1 --no-session -p "bash:cd $T/rebase && git rebase -i HEAD~1 2>&1"
+# read page budget (column-cut lines, :raw byte cap, multi-range stop) and the write read-projection guard
+check "read budget" "read budget ok"  python3 -I "$ROOT/tests/e2e/read_budget.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/rb"
 # edit modes: apply_patch via config.yml (edit.mode), patch / replace / sloppy via PI_EDIT_VARIANT
 printf 'edit:\n  mode: apply_patch\n' > "$T/agent/config.yml"
 printf 'one\ntwo\nthree\n' > ap.txt; printf 'bye\n' > ap-gone.txt
@@ -319,6 +325,10 @@ check "queue steer all"     "slow:1.5:x,s1,s2,f1 / 3"  env B="$B" ROOT="$ROOT" b
 check "async bash"     "Backgrounded as job bg_1"  bash -c "'$B' --model mock/mock-1 --mode json -p 'call:bash:{\"command\":\"sleep 1; echo bgdone\",\"async\":true}' | grep -o 'Backgrounded as job bg_1'"
 grep -q "Background job bg_1 has completed" "$T/req.jsonl" && echo "   ok  async delivered" || { echo "   FAIL async delivered"; fail=1; }
 check "wait nothing"   "Nothing to wait for"  "$B" --model mock/mock-1 -p 'call:wait:{}'
+# background jobs carry the call's intent: proc://, wait, /jobs; /jobs full requests the widget role's caption
+check "jobs intent" "jobs intent ok"  python3 -I "$ROOT/tests/e2e/jobs_intent.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ji"
+# lsp: payload "null" stays JSON null; reload restarts rust-analyzer when a new crate appeared
+check "lsp reload" "lsp reload ok"  python3 -I "$ROOT/tests/e2e/lsp_reload.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/lr"
 # automatic session title (interactive only, like omp's autoTitle): fork side request returns a card title
 : > "$T/req.jsonl"
 check "print no title"  "0"  bash -c "env -u OMC_NO_TITLE '$B' --model mock/mock-1 -p 'bash:echo untitled' >/dev/null; grep -c '<title-request>' '$T/req.jsonl'"
@@ -637,6 +647,24 @@ check "pr:// view"       "Review Comments (2)"   "${GENV[@]}" "$B" --model mock/
 check "pr:// diff list"  "3. new.txt  +0 -0  [renamed]  (renamed from old.txt)"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "read:pr://acme/widgets/12/diff"
 check "issue:// list"    "# Issues in acme/widgets (open, up to 30)"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "read:issue://acme/widgets"
 check "issue:// error"   "issue:// resolution failed: GraphQL: Could not resolve"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "read:issue://acme/widgets/999"
+# gh's default repo pick: origin over an upstream it is no fork of; a fork's upstream stays (fake gh logs its argv)
+mkdir -p "$T/ghorigin/bin" "$T/ghorigin/w" && cat > "$T/ghorigin/bin/gh" <<'SH'
+#!/bin/sh
+echo "$*" >> "$FAKE_GH_LOG"
+case "$*" in
+    "repo view --json url -q .url") echo https://github.com/merged/from ;;
+    "repo view git@github.com:me/fork.git --json url,parent") printf '{"url":"https://github.com/me/fork","parent":%s}\n' "$FAKE_GH_PARENT" ;;
+    api*) echo '{"items":[],"total_count":0}' ;;
+esac
+SH
+chmod +x "$T/ghorigin/bin/gh"
+(cd "$T/ghorigin/w" && git init -q . && git remote add origin git@github.com:me/fork.git && git remote add upstream https://github.com/merged/from.git)
+GORIGIN=(env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST HOME="$T" PATH="$T/ghorigin/bin:$PATH" GH_CONFIG_DIR="$T/ghcfg" OMC_CODING_AGENT_DIR="$T/ghagent" FAKE_GH_LOG="$T/ghorigin/log")
+gh_search_q() { : > "$T/ghorigin/log"; (cd "$T/ghorigin/w" && "${GORIGIN[@]}" FAKE_GH_PARENT="$1" timeout 30 "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"search_prs\",\"query\":\"bug\"}"}' </dev/null >/dev/null 2>&1); cat "$T/ghorigin/log"; }
+gh_search_q null > "$T/ghorigin/a"
+check "gh prefers origin"  "repo:me/fork"  cat "$T/ghorigin/a"
+gh_search_q '{"name":"from","owner":{"login":"merged"}}' > "$T/ghorigin/b"
+check "gh keeps fork parent"  "repo:merged/from"  cat "$T/ghorigin/b"
 check "gh needs enable"  "No such tool: xd://github"  env PATH="$ROOT/tests/e2e/bin-gh:$PATH" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"repo_view\"}"}'
 # implicit local servers (ollama / llama.cpp / LM Studio discovery) against tests/e2e/mock_local.py
 DPORT=$((PORT + 9)); python3 -I "$ROOT/tests/e2e/mock_local.py" $DPORT & DPID=$!
