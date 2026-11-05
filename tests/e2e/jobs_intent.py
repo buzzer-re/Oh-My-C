@@ -21,7 +21,7 @@ def check(name, cond, detail=""):
         print("FAIL", name, str(detail)[-800:])
 
 
-env = dict(os.environ, OMC_CODING_AGENT_DIR=agent, MOCK_KEY="x", OMC_NO_TITLE="1", OMC_NO_LOCAL_DISCOVERY="1", TERM="xterm-256color",
+env = dict(os.environ, HOME=root, OMC_CODING_AGENT_DIR=agent, MOCK_KEY="x", OMC_NO_TITLE="1", OMC_NO_LOCAL_DISCOVERY="1", TERM="xterm-256color",
            OMC_SKIP_SETUP="1", PI_NO_DESKTOP_NOTIFY="1", OMC_JOB_CAPTION_AFTER_MS="0")
 for k in ("TMUX", "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"):
     env.pop(k, None)

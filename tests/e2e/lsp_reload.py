@@ -20,7 +20,7 @@ with open(os.path.join(work, "src", "lib.rs"), "w") as f:
     f.write("pub fn a() {}\n")
 with open(os.path.join(agent, "config.yml"), "w") as f:
     f.write("lsp:\n  enabled: true\n")
-env = dict(os.environ, OMC_CODING_AGENT_DIR=agent, MOCK_KEY="x", OMC_NO_TITLE="1", OMC_NO_LOCAL_DISCOVERY="1", FAKE_LSP_LOG=log,
+env = dict(os.environ, HOME=root, OMC_CODING_AGENT_DIR=agent, MOCK_KEY="x", OMC_NO_TITLE="1", OMC_NO_LOCAL_DISCOVERY="1", FAKE_LSP_LOG=log,
            PATH=os.path.join(here, "bin-lsp") + os.pathsep + os.environ["PATH"])
 fails = []
 

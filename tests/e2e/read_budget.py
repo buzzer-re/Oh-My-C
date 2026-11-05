@@ -18,7 +18,7 @@ def call(tool, args, config=""):
     shutil.copy(models, os.path.join(agent, "models.yml"))
     with open(os.path.join(agent, "config.yml"), "w") as f:
         f.write("read:\n  summarize:\n    enabled: false\n" + config)
-    env = dict(os.environ, OMC_CODING_AGENT_DIR=agent, MOCK_KEY="x", OMC_NO_TITLE="1", OMC_NO_LOCAL_DISCOVERY="1")
+    env = dict(os.environ, HOME=root, OMC_CODING_AGENT_DIR=agent, MOCK_KEY="x", OMC_NO_TITLE="1", OMC_NO_LOCAL_DISCOVERY="1")
     subprocess.run([omc, "--model", "mock/mock-1", "--no-session", "-p", "call:%s:%s" % (tool, json.dumps(args))], cwd=work, env=env,
                    stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
     last = None
@@ -38,7 +38,7 @@ def calls(script, config=""):
     os.makedirs(agent)
     shutil.copy(models, os.path.join(agent, "models.yml"))
     open(os.path.join(agent, "config.yml"), "w").write(config)
-    env = dict(os.environ, OMC_CODING_AGENT_DIR=agent, MOCK_KEY="x", OMC_NO_TITLE="1", OMC_NO_LOCAL_DISCOVERY="1")
+    env = dict(os.environ, HOME=root, OMC_CODING_AGENT_DIR=agent, MOCK_KEY="x", OMC_NO_TITLE="1", OMC_NO_LOCAL_DISCOVERY="1")
     subprocess.run([omc, "--model", "mock/mock-1", "--no-session", "-p", "calls:" + json.dumps(script)], cwd=work, env=env,
                    stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
     last = None
