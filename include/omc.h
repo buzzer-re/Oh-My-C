@@ -40,7 +40,12 @@ OMC_API const char *omc_version(void);
 OMC_API int omc_api_version(void);
 
 /* Run the complete omc command line in-process (interactive TUI, print/json/rpc/acp modes,
- * subcommands) exactly as the `omc` executable does. Returns the exit status. */
+ * subcommands) exactly as the `omc` executable does. Returns the exit status. It can run more than
+ * once in a process, one run at a time.
+ *
+ * Signals: nothing is installed when the library loads. On first use (omc_main or omc_session_new),
+ * SIGPIPE is ignored process-wide only if the host left it at the default; a handler the host installed
+ * stays, and omc's writes then get EPIPE. */
 OMC_API int omc_main(int argc, char **argv);
 
 typedef struct omc_session omc_session_t;

@@ -20,6 +20,8 @@ extern char **environ;
 
 void proc_ignore_sigpipe(void) {
     struct sigaction sa;
+    /* libomc shares the process with its host: a handler the host installed stays (writes still get EPIPE) */
+    if (sigaction(SIGPIPE, NULL, &sa) == 0 && ((sa.sa_flags & SA_SIGINFO) || sa.sa_handler != SIG_DFL)) return;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = SIG_IGN;
     sigaction(SIGPIPE, &sa, NULL);

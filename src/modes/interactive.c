@@ -3402,6 +3402,7 @@ static void setup_start_cb(void *ud) {
 }
 
 int run_interactive_mode(app_t *a, const char *initial) {
+    g_ask_closed = false; /* omc_main can run more than once in a process (libomc) */
     ui_t u = {0};
     g_ui = &u;
     u.app = a;

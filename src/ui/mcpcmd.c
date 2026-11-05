@@ -477,6 +477,10 @@ static void late_connect_ui(void *ud) {
 
 void ui_mcp_install(ui_t *u) {
     g_install_ui = u;
+    /* per run, not per process: omc_main can run again (libomc), and timers belonged to the previous TUI */
+    g_startup_phase = true;
+    g_install_done = g_status_deferred = false;
+    g_sync_timer = g_res_timer = 0;
     tc_mcp_markdown = settings_bool("mcp.renderMarkdownResults", true);
     install_callbacks(u);
     static bool listening;

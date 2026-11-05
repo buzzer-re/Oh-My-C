@@ -400,6 +400,10 @@ check "migrate history"   $'"text":"first"'  head -1 "$MIG/prompt-history.jsonl"
 check "migrate no blobs"  "absent"     bash -c "[ -e '$MIG/blobs' ] && echo present || echo absent"
 check "migrate idempotent" "kept omc's existing anthropic, openrouter"  env OMC_CODING_AGENT_DIR="$MIG" "$B" migrate --from "$OMPD"
 # libomc embedding (built by `make test` via `make lib`)
+if [ -x "$ROOT/build/examples/main_twice" ]; then
+    check "lib main twice"  "main twice ok"  python3 -I "$ROOT/tests/e2e/main_twice_tui.py" "$ROOT/build/examples/main_twice" "$T/main_twice"
+    check "lib sigpipe"     "host handler kept"  "$ROOT/build/examples/main_twice" --sigpipe-check
+fi
 if [ -x "$ROOT/build/examples/embed" ]; then
     check "lib host tool"  "hello from the host app, Ada"  "$ROOT/build/examples/embed" 'call:greet:{"name":"Ada"}' mock/mock-1
     check "lib rpc send"   '"command":"get_state","success":true'  "$ROOT/build/examples/embed" 'hi' mock/mock-1

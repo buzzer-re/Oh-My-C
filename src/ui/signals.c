@@ -388,6 +388,7 @@ void ui_signals_dispose(void) {
     memset(&S.blockers, 0, sizeof S.blockers);
     json_free(S.ended);
     S.ended = NULL;
+    S.u = NULL; /* its ui lives on run_interactive_mode's stack; omc_main can run again in this process */
     free(g_warp_prompt);
     g_warp_prompt = NULL;
 }
