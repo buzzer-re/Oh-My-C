@@ -909,6 +909,13 @@ static void test_replay_safe(void) {
     CHECK(f.calls == 1 && l.counts[AI_EV_DONE] == 1);
     json_free(msg);
     evlog_free(&l);
+    /* no event callback (ai_complete without the stream watchdog): held events and the retry are still handled */
+    o.accept_empty_response = false;
+    f = (fake_attempt_t){&t.m, 0, s1};
+    msg = ai_replay_safe_stream(fake_attempt, &f, &o, NULL, NULL, true, 1);
+    CHECK(f.calls == 2);
+    CHECK_STR(json_get_str(msg, "stopReason"), "stop");
+    json_free(msg);
     json_free(t.raw);
 }
 

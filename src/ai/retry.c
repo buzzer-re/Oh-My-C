@@ -449,9 +449,14 @@ static void replay_drop(replay_t *r) {
     r->has_terminal = false;
 }
 
+/* callers that only want the final message (ai_complete) pass no callback */
+static void replay_emit(const replay_t *r, const ai_event_t *ev) {
+    if (r->cb) r->cb(r->ud, ev);
+}
+
 static void replay_flush(replay_t *r) {
     for (size_t i = 0; i < r->held.n; i++) {
-        r->cb(r->ud, &r->held.v[i].ev);
+        replay_emit(r, &r->held.v[i].ev);
         held_clear(&r->held.v[i]);
     }
     r->held.n = 0;
@@ -483,7 +488,7 @@ static void replay_cb(void *ud, const ai_event_t *ev) {
     }
     r->committed = true;
     replay_flush(r);
-    r->cb(r->ud, ev);
+    replay_emit(r, ev);
 }
 
 /* hasVisibleAssistantContent */
@@ -545,7 +550,7 @@ json_t *ai_replay_safe_stream(ai_attempt_fn once, void *self, const ai_stream_op
         }
         replay_flush(&r);
         if (r.has_terminal) {
-            cb(ud, &r.terminal.ev);
+            replay_emit(&r, &r.terminal.ev);
             held_clear(&r.terminal);
             r.has_terminal = false;
         }
