@@ -7,13 +7,13 @@ commit omc currently matches and how to bring later upstream changes over.
 
 | | |
 |---|---|
-| **Upstream commit** | `7efd77219374ca4e8767979809835e4aa90666ba` |
-| **Tag / version** | `v18.14.2` (`omp --version` → `omp/18.14.2`) |
-| **Upstream date** | 2026-10-31 |
-| **Pinned on** | 2026-11-01 |
+| **Upstream commit** | `650f3a108229ee11bf68ba3377f4e8c3391cd424` |
+| **Tag / version** | `v18.16.0` (`omp --version` → `omp/18.16.0`) |
+| **Upstream date** | 2026-11-02 |
+| **Pinned on** | 2026-11-05 |
 
 Everything model-facing (prompts, tool schemas/descriptions, system prompt, output formatting), the TUI
-(verified side by side against the installed `omp/18.14.2`) and the embedded data (catalog, themes,
+(ported from the v18.16.0 source and checked with mocks; side-by-side checks last ran against `omp/18.14.2`, see the update section in docs/status.md for what awaits omp 18.16.0) and the embedded data (catalog, themes,
 symbols, settings table, slash commands, tips) corresponds to this commit. Update this table — and the
 matching line in [AGENTS.md](AGENTS.md) — every time an update pass is finished.
 
@@ -25,7 +25,7 @@ matching line in [AGENTS.md](AGENTS.md) — every time an update pass is finishe
    UP=/path/to/scratch/omp
    git clone https://github.com/can1357/oh-my-pi.git "$UP"
    cd "$UP"
-   PIN=7efd77219374ca4e8767979809835e4aa90666ba   # from the table above
+   PIN=650f3a108229ee11bf68ba3377f4e8c3391cd424   # from the table above
    git fetch --tags origin
    TARGET=origin/main                               # or the newest release tag: git tag --sort=-v:refname | head -1
    git log --oneline --no-merges "$PIN..$TARGET" | wc -l
@@ -66,13 +66,17 @@ matching line in [AGENTS.md](AGENTS.md) — every time an update pass is finishe
    | Data | Command |
    |---|---|
    | Prompt templates (`prompts/`) | `build-tools/sync_prompts.sh "$UP"` (report) then `build-tools/sync_prompts.sh "$UP" --apply` |
-   | Model catalog (`assets/models.json.z`) | `python3 build-tools/slim_catalog.py "$UP/packages/catalog/src/models.json" assets/models.json.z` |
+   | Model catalog (`assets/models.json.z`) | `python3 build-tools/decode_catalog_v1.py "$UP/packages/catalog/src/models.json" out.json`, then `python3 build-tools/slim_catalog.py out.json assets/models.json.z` (upstream only discovers `charm-hyper` and `factory-droid` online: keep or update their rows) |
    | Glyph presets (`assets/tui/symbols.json`) | `python3 build-tools/extract_symbols.py "$UP/packages/tui/src/theme/symbols.ts" assets/tui/symbols.json` |
-   | Themes (`assets/tui/themes/`) | `cp "$UP"/packages/tui/src/theme/{dark,light}.json "$UP"/packages/tui/src/theme/defaults/*.json assets/tui/themes/` |
+   | Themes (`assets/tui/themes/`) | `cp "$UP"/packages/tui/src/theme/{dark,light}.json assets/tui/themes/` (the other themes come from `packages/tui/src/theme/defaults.json`) |
    | Welcome tips (`assets/tui/tips.txt`) | `cp "$UP/packages/tui/src/prompt/tips.txt" assets/tui/tips.txt` |
    | Settings table (`assets/tui/settings-ui.json`) | `build-tools/extract_settings.sh "$UP" > assets/tui/settings-ui.json` |
    | Slash commands (`assets/tui/slash-commands.json`) | `python3 build-tools/extract_slash_commands.py "$UP" > assets/tui/slash-commands.json` |
-   | `/changelog` (`assets/CHANGELOG.md.z`, zlib) | `python3 -c 'import sys,zlib; open("assets/CHANGELOG.md.z","wb").write(zlib.compress(open(sys.argv[1],"rb").read(),9))' "$UP/packages/coding-agent/CHANGELOG.md"` (the released file: its newest `## [x.y.z]` heading must be the target version; tests/test_extracmds.c checks the top entry) |
+   | Compat rules and providers (`assets/compat_rules.json.z`, `assets/providers.json.z`) | `python3 build-tools/slim_compat_rules.py "$UP/packages/catalog/src/compat" assets/compat_rules.json.z`, `python3 build-tools/slim_providers.py "$UP/packages/catalog/src/compat/rules.json" assets/providers.json.z` |
+| Export viewer (`assets/export/`) | `file` and `integrity` from `$UP/packages/coding-agent/src/export/html/viewer.generated.json`, and bump `EXPORT_VIEWER_VERSION` in `src/session/export_html.h` |
+| `/changelog` (`assets/CHANGELOG.md.z`, zlib) | `python3 -c 'import sys,zlib; open("assets/CHANGELOG.md.z","wb").write(zlib.compress(open(sys.argv[1],"rb").read(),9))' "$UP/packages/coding-agent/CHANGELOG.md"` (the released file: its newest `## [x.y.z]` heading must be the target version; tests/test_extracmds.c checks the top entry) |
+
+   **`extract_settings.sh` executes upstream TypeScript through the Bun embedded in the installed `omp`.** That conflicts with omc's no-Node, no-executing-upstream rules, so it should be replaced by a static parser of `settings.ts`. Until then, get the user's OK before running it, and check its JSON against the source diff.
 
    After refreshing the settings table, compare its defaults with `src/config/settings.c` (omc's
    defaults must equal omp's — see the "Settings defaults" row in [docs/status.md](docs/status.md)).

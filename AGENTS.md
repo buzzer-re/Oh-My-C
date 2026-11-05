@@ -3,7 +3,7 @@
 omc is a from-scratch C11 rewrite of [oh-my-pi](https://github.com/can1357/oh-my-pi) (omp) that must
 behave 1:1 like omp: same TUI, same model-facing prompts/tools/output, same sessions and config.
 
-**Upstream pin — last omp commit ported:** `7efd77219374ca4e8767979809835e4aa90666ba` (`v18.14.2`, 2026-10-31).
+**Upstream pin — last omp commit ported:** `650f3a108229ee11bf68ba3377f4e8c3391cd424` (`v18.16.0`, 2026-11-02).
 To pull later upstream fixes in, follow [UPDATE.md](UPDATE.md) and move this pin (and the one in
 UPDATE.md) when done.
 
@@ -20,7 +20,7 @@ UPDATE.md) when done.
 - **Parity is the spec.** Port behaviour, exact strings, glyphs, colors and layout from the upstream
   source; when omc and omp differ, omc is wrong. Never advertise (in prompts/tool descriptions) a
   capability omc doesn't implement.
-- **Never touch the user's real omp setup** (`~/.omp`) or real model credentials/tokens in tests or
+- **Never touch the user's real omp or omc setup** (`~/.omp`, `~/.omc`) or real model credentials/tokens in tests or
   comparisons; use the mocks under `tests/e2e/` and throwaway agent dirs.
 - **Default build stays a single binary:** `make` → `build/omc`. The library (`make lib`, public API in
   `include/omc.h`) is opt-in.

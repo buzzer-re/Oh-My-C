@@ -494,7 +494,7 @@ check "bedrock text"    "plain bedrock answer"  "${BENV[@]}" AWS_ACCESS_KEY_ID=A
 check "bedrock tool"    "Tool said: br-e2e"     "${BENV[@]}" AWS_ACCESS_KEY_ID=AKIDMOCK AWS_SECRET_ACCESS_KEY=mock-secret "$B" --model "$BM" --no-session -p "bash:echo br-e2e"
 check "bedrock bearer"  "plain bedrock answer"  "${BENV[@]}" AWS_BEARER_TOKEN_BEDROCK=br-token "$B" --model "$BM" --no-session -p "hi"
 check "bedrock bad sig" "Bedrock HTTP 403: The request signature we calculated does not match"  "${BENV[@]}" AWS_ACCESS_KEY_ID=AKIDMOCK AWS_SECRET_ACCESS_KEY=wrong "$B" --model "$BM" --no-session -p "hi"
-check "bedrock no creds" "Unable to resolve AWS credentials"  "${BENV[@]}" "$B" --model "$BM" --no-session -p "hi"
+check "bedrock no creds" "No API key found for amazon-bedrock."  "${BENV[@]}" "$B" --model "$BM" --no-session -p "hi"
 grep -q '"path": "/model/us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/converse-stream"' "$T/bedrock.jsonl" && echo "   ok  bedrock request path" || { echo "   FAIL bedrock request path"; fail=1; }
 grep -q '"toolResult": {"toolUseId": "tooluse_mock1"' "$T/bedrock.jsonl" && echo "   ok  bedrock toolResult replay" || { echo "   FAIL bedrock toolResult replay"; fail=1; }
 cp "$T/models.yml.bak" "$T/agent/models.yml"
@@ -515,7 +515,7 @@ if openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$T/sa.pem"
     check "vertex models"     "google-vertex ("       "${VENV[@]}" "$B" models gemini-3.1-pro-preview
     check "vertex adc text"   "plain google answer"   "${VENV[@]}" "$B" --model google-vertex/gemini-3.1-pro-preview --no-session -p "hi"
     check "vertex adc tool"   "Tool said: vx-e2e"     "${VENV[@]}" "$B" --model google-vertex/gemini-3.1-pro-preview --no-session -p "bash:echo vx-e2e"
-    check "vertex no project" "Vertex AI requires a project ID"  "${GENV[@]}" GOOGLE_APPLICATION_CREDENTIALS="$T/sa.json" "$B" --model google-vertex/gemini-3.1-pro-preview --no-session -p "hi"
+    check "vertex no project" "No API key found for google-vertex."  "${GENV[@]}" GOOGLE_APPLICATION_CREDENTIALS="$T/sa.json" "$B" --model google-vertex/gemini-3.1-pro-preview --no-session -p "hi"
     grep -q '"path": "/v1/projects/proj-v/locations/us-central1/publishers/google/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse", "ua": "[^"]*", "auth": "Bearer ya29.mock-sa"' "$T/google.jsonl" \
         && echo "   ok  vertex request path" || { echo "   FAIL vertex request path"; fail=1; }
 fi

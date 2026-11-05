@@ -264,7 +264,7 @@ Reject / Always reject), unless an explicit yolo or `--auto-approve` is set.
 
 | Function | Purpose |
 |---|---|
-| `omc_main(argc, argv)` | run the whole CLI/TUI in-process (`src/main.c` is just this) |
+| `omc_main(argc, argv)` | run the whole CLI/TUI in-process (`src/main.c` is just this); can run again in the same process, one run at a time |
 | `omc_session_new(opts, on_event, ud, &err)` | create a session. `omc_options_t` (with `struct_size`) mirrors the CLI options: cwd, agent_dir, model, provider, api_key, thinking, system prompts, session dir/resume/no_session, tool allow-list, no_tools/context/skills/rules/mcp, plan_mode. Emits `{"type":"ready",...}` first |
 | `omc_send(s, json)` | send any RPC command (asynchronous; the response arrives via `on_event`) |
 | `omc_prompt(s, text, &answer)` | run a prompt to completion on the calling thread and return the final text |

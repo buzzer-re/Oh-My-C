@@ -1,6 +1,7 @@
 # Testing
 
-`make test` builds and runs every unit test, builds `examples/embed`, then runs the e2e suite. It
+`make test` builds and runs every unit test, builds `examples/embed`, then runs the e2e suite, always with a fresh
+`HOME` and agent dir under the build dir, so no test can reach the real `~/.omc` or `~/.omp`. It
 needs a C compiler and `python3` (for the mock servers). It needs **no network access, no real
 credentials and no omp install**. The parity harnesses that compare against a live `omp` are
 separate developer tools (below).
