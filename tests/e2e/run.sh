@@ -655,7 +655,7 @@ SH
 chmod +x "$T/ghorigin/bin/gh"
 (cd "$T/ghorigin/w" && git init -q . && git remote add origin git@github.com:me/fork.git && git remote add upstream https://github.com/merged/from.git)
 GORIGIN=(env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST PATH="$T/ghorigin/bin:$PATH" GH_CONFIG_DIR="$T/ghcfg" OMC_CODING_AGENT_DIR="$T/ghagent" FAKE_GH_LOG="$T/ghorigin/log")
-gh_search_q() { : > "$T/ghorigin/log"; (cd "$T/ghorigin/w" && "${GORIGIN[@]}" FAKE_GH_PARENT="$1" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"search_prs\",\"query\":\"bug\"}"}' >/dev/null 2>&1); cat "$T/ghorigin/log"; }
+gh_search_q() { : > "$T/ghorigin/log"; (cd "$T/ghorigin/w" && "${GORIGIN[@]}" FAKE_GH_PARENT="$1" timeout 30 "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"search_prs\",\"query\":\"bug\"}"}' </dev/null >/dev/null 2>&1); cat "$T/ghorigin/log"; }
 gh_search_q null > "$T/ghorigin/a"
 check "gh prefers origin"  "repo:me/fork"  cat "$T/ghorigin/a"
 gh_search_q '{"name":"from","owner":{"login":"merged"}}' > "$T/ghorigin/b"
