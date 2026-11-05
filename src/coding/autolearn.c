@@ -485,14 +485,21 @@ autolearn_t *autolearn_new(app_t *a) {
     return al;
 }
 
-static json_t *capture_messages(app_t *a) {
-    pthread_mutex_lock(&a->agent->mu);
-    json_t *src = json_clone(a->agent->messages);
-    pthread_mutex_unlock(&a->agent->mu);
+/* a detached snapshot of the source turn: the capture's first request keeps the primary's history bytes */
+static json_t *capture_messages(json_t *src, const ai_model_t *model) {
+    /* a fresh capture transport skips inherited native reasoning on its first request; keep that history stable when the
+     * transport warms */
+    const char *off = getenv("PI_OPENROUTER_RESPONSES");
+    bool strip_inherited = model && (str_eq(model->api, "openai-responses") || (str_eq(model->api, "openrouter") && !str_eq(off, "0")));
     json_t *m;
     json_arr_foreach(src, i, m) {
         const char *role = json_get_str(m, "role");
         if (str_eq(role, "assistant")) {
+            if (strip_inherited && str_eq(json_get_str(m, "provider"), model->provider) && str_eq(json_get_str(m, "api"), model->api) &&
+                str_eq(json_get_str(m, "model"), model->id)) {
+                json_t *b;
+                json_arr_foreach(json_get(m, "content"), k, b) if (str_eq(json_get_str(b, "type"), "thinking")) json_del(b, "thinkingSignature");
+            }
             json_del(m, "responseId");
             json_del(m, "providerPayload");
         } else if (str_eq(role, "user") || str_eq(role, "developer")) {
@@ -502,36 +509,90 @@ static json_t *capture_messages(app_t *a) {
     return src;
 }
 
+static int refused_capture_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
+    char *t = prompt_load("coding-agent/prompts/system/autolearn-capture-refused.md");
+    char *refused = str_trim(t ? t : "");
+    free(t);
+    tool_result_error(out, "%s", refused);
+    free(refused);
+    return 0;
+}
+
+/* refusedCaptureTool: the same request shape, and a call that runs nothing */
+agent_tool_t *autolearn_refused_tool(const agent_tool_t *tool) {
+    agent_tool_t *r = agent_tool_new(tool->name, tool->label, tool->description, json_clone(tool->parameters), refused_capture_execute);
+    r->hidden = tool->hidden;
+    r->lenient_args = tool->lenient_args;
+    r->mounted = tool->mounted;
+    r->discoverable = tool->discoverable;
+    r->strict = tool->strict;
+    r->intent_mode = tool->intent_mode;
+    if (tool->summary) r->summary = xstrdup(tool->summary);
+    if (tool->examples) r->examples = json_clone(tool->examples);
+    if (tool->mcp_server) r->mcp_server = xstrdup(tool->mcp_server);
+    if (tool->mcp_tool) r->mcp_tool = xstrdup(tool->mcp_tool);
+    return r;
+}
+
+/* captureToolList: the primary turn's list in its order, so the request keeps the primary prompt's cache prefix, with
+ * every tool but the capture tools refused; capture tools the primary list lacks go last. Takes `capture`'s tools. */
+void autolearn_capture_tool_list(agent_t *ag, agent_tool_t *const *primary, size_t n, agent_tool_t **capture, size_t ncapture) {
+    for (size_t i = 0; i < n; i++) {
+        agent_tool_t *own = NULL;
+        for (size_t k = 0; k < ncapture && !own; k++) {
+            if (capture[k] && str_eq(capture[k]->name, primary[i]->name)) {
+                own = capture[k];
+                capture[k] = NULL;
+            }
+        }
+        agent_add_tool(ag, own ? own : autolearn_refused_tool(primary[i]));
+    }
+    for (size_t k = 0; k < ncapture; k++)
+        if (capture[k]) agent_add_tool(ag, capture[k]);
+}
+
 static void *capture_thread(void *p) {
     autolearn_t *al = p;
     app_t *a = al->app;
     for (;;) {
+        /* capture tools resolve per run, so live autolearn.enabled / backend changes apply */
+        agent_tool_t *capture[2] = {0};
+        size_t ncapture = 0;
+        if (settings_bool("autolearn.enabled", false)) {
+            capture[ncapture++] = manage_skill_tool_new(a->env);
+            if (str_eq(memory_backend(), "local")) capture[ncapture++] = learn_tool_new(a->env);
+        }
         agent_t *ag = agent_new();
         ag->app = a;
-        agent_set_model(ag, a->model);
-        ag->thinking = a->thinking;
+        /* one snapshot of the source turn: the primary keeps running while a capture is built */
         pthread_mutex_lock(&a->agent->mu);
+        const ai_model_t *model = a->agent->model ? a->agent->model : a->model;
+        agent_set_model(ag, model);
+        ag->thinking = a->agent->thinking;
         agent_set_system_prompt_parts(ag, json_clone(a->agent->system_prompt));
+        json_t *source = json_clone(a->agent->messages);
+        /* the primary's cache key; the provider session id stays the capture's own (#10869) */
+        char *cache_key = a->agent->session_id ? xstrdup(a->agent->session_id) : NULL;
+        if (ncapture) autolearn_capture_tool_list(ag, (agent_tool_t *const *)a->agent->tools.v, a->agent->tools.n, capture, ncapture);
         pthread_mutex_unlock(&a->agent->mu);
         ag->hooks.prepare_request = a->agent->hooks.prepare_request;
         ag->hooks.transform_context = a->agent->hooks.transform_context;
         ag->hooks.ud = a;
         free(ag->session_id);
         ag->session_id = uuid_v7();
-        /* capture tools resolve per run, so live autolearn.enabled / backend changes apply */
-        if (settings_bool("autolearn.enabled", false)) {
-            agent_add_tool(ag, manage_skill_tool_new(a->env));
-            if (str_eq(memory_backend(), "local")) agent_add_tool(ag, learn_tool_new(a->env));
-        }
-        if (ag->tools.n && a->model && !al->stop) {
-            agent_replace_messages(ag, capture_messages(a));
+        ag->base_opts.prompt_cache_key = cache_key;
+        if (ncapture && model && !al->stop) {
+            agent_replace_messages(ag, capture_messages(source, model));
+            source = NULL;
             char *nudge = prompt_load("coding-agent/prompts/system/autolearn-nudge-autocontinue.md");
             char *nt = str_trim(nudge ? nudge : "");
             free(nudge);
             json_t *msgs = json_arr();
-            json_t *m = msg_user_text(nt);
-            json_set_bool(m, "synthetic", true);
+            /* role custom, display false, attribution agent: the model reads it as a hidden developer turn */
+            json_t *m = msg_developer_text(nt);
             json_set_str(m, "customType", "autolearn-nudge");
+            json_set_bool(m, "display", false);
+            json_set_str(m, "attribution", "agent");
             json_push(msgs, m);
             free(nt);
             pthread_mutex_lock(&al->mu);
@@ -544,7 +605,9 @@ static void *capture_thread(void *p) {
             al->capture = NULL;
             pthread_mutex_unlock(&al->mu);
         }
+        json_free(source);
         agent_free(ag);
+        free(cache_key);
         pthread_mutex_lock(&al->mu);
         bool again = al->pending && !al->stop;
         al->pending = false;

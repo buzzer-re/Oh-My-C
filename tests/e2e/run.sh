@@ -576,7 +576,9 @@ python3 -I -c '
 import json,sys
 rs=[json.loads(l) for l in open(sys.argv[1])]
 c=[x for x in rs if "Automated capture turn" in json.dumps(x.get("messages",[])[-1:])]
-print(sorted(t["function"]["name"] for t in c[-1]["tools"]) if c else "none")' "$T/req.jsonl" | grep -q "\['learn', 'manage_skill'\]" && echo "   ok  autolearn capture tools" || { echo "   FAIL autolearn capture tools"; fail=1; }
+main=[x for x in rs if x.get("tools") and "Automated capture turn" not in json.dumps(x.get("messages",[]))]
+same=bool(c) and bool(main) and c[-1]["tools"]==main[-1]["tools"]
+print("capture tools same-as-main=%s has=%s" % (same, {"learn","manage_skill"} <= {t["function"]["name"] for t in c[-1]["tools"]} if c else None))' "$T/req.jsonl" | grep -q "same-as-main=True has=True" && echo "   ok  autolearn capture tools" || { echo "   FAIL autolearn capture tools"; fail=1; }
 popd >/dev/null
 # LSP (only when clangd is installed)
 if command -v clangd >/dev/null; then

@@ -1800,12 +1800,21 @@ static int manual(app_t *a, const char *mode, const char *instructions, char **e
         if (str_eq(m, "remote")) {
             if (!remote_usable(model)) continue;
         } else if (str_eq(m, "snapcompact")) {
-            /* omc has no snapcompact renderer: an explicit request reports it; the ladder passes over it */
+            /* omc has no snapcompact renderer: an explicit request reports it once, naming the /compact mode of the next
+             * manual method (remote or soft); the ladder passes over it */
             if (!explicit_snap) continue;
-            if (!model->input_image) {
-                app_notice(a, "warning", "snapcompact needs a vision-capable model (%s is text-only)", model->id);
-                *err = xasprintf("snapcompact cannot run locally: %s is text-only.", model->id);
-            } else *err = xstrdup("snapcompact is not implemented in omc.");
+            const char *fallback = "soft";
+            strvec_t order = cmp_method_order();
+            for (size_t k = 0; k < order.n; k++) {
+                if (str_eq(order.v[k], "soft") || (str_eq(order.v[k], "remote") && remote_usable(model))) {
+                    fallback = str_eq(order.v[k], "remote") ? "remote" : "soft";
+                    break;
+                }
+            }
+            strvec_free(&order);
+            if (!model->input_image)
+                *err = xasprintf("snapcompact needs a vision-capable model (%s is text-only). Run /compact %s instead.", model->id, fallback);
+            else *err = xasprintf("snapcompact is not implemented in omc. Run /compact %s instead.", fallback);
             break;
         } else if (!str_eq(m, "soft")) continue;
         bool remote = str_eq(m, "remote");
