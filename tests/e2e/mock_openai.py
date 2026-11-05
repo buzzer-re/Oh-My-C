@@ -10,6 +10,7 @@ Display commands (used by tests/tui/compare.sh to exercise transcript views):
   - "fail:<status>:<msg>"    reply with an HTTP error (non-retryable for 400/401/403/404)
   - "streamfail:<text>"      stream <text>, then an in-stream error chunk
   - "seq:[[tool, args], ...]" one tool call per turn, in order, then the usual "Tool said:" answer
+  - "batch:[[tool, args], ...]" all the tool calls in one assistant message, then the usual "Tool said:" answer
   - model "mock-flaky"        every request fails with HTTP 429 (retry fallback chains)
   - a compaction summary (tool-less) or handoff-document request whose messages mention SLOWSUMMARY answers after 4 s
 Eval helper side requests (omc eval completion()/judge()):
@@ -214,7 +215,11 @@ class H(BaseHTTPRequestHandler):
             script = json.loads(text_of(msgs[ui])[6:])
             done = sum(1 for m in msgs[ui + 1:] if m.get("role") == "tool")
             side = ("call", script[done][0], script[done][1], f"call_{done + 1}") if done < len(script) else ("say", "script done")
-        if side and side[0] == "say":
+        if not side and last.get("role") == "user" and text_of(last).startswith("batch:"):
+            for k, (tname, targs) in enumerate(json.loads(text_of(last)[6:])):
+                chunks.append({**base, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": k, "id": f"call_{k + 1}", "type": "function", "function": {"name": tname, "arguments": json.dumps(targs)}}]}}]})
+            chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
+        elif side and side[0] == "say":
             chunks.append({**base, "choices": [{"index": 0, "delta": {"content": side[1]}}]})
             chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
         elif side:
