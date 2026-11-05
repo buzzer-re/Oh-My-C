@@ -195,9 +195,12 @@ $(O)/tests/%: tests/%.c $$(T_$$*)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $< $(T_$*) $(LIBS)
 
+# Never the real ~/.omc or ~/.omp: each run gets a fresh HOME and agent dir under the build dir
 test: $(addprefix $(O)/tests/,$(UNIT_TESTS)) build/examples/embed $(BIN)
-	@set -e; for t in $(UNIT_TESTS); do echo "== $$t"; ./$(O)/tests/$$t >/dev/null || { echo "   FAIL ($$t)"; exit 1; }; echo "   ok"; done
-	@OMC_BIN=$(CURDIR)/$(O)/omc ./tests/e2e/run.sh
+	@set -e; home=$$(mktemp -d "$(CURDIR)/$(O)/test-home.XXXXXX"); \
+	export HOME="$$home" OMC_CODING_AGENT_DIR="$$home/.omc/agent" PI_CODING_AGENT_DIR="$$home/.omp/agent"; \
+	for t in $(UNIT_TESTS); do echo "== $$t"; ./$(O)/tests/$$t >/dev/null || { echo "   FAIL ($$t)"; exit 1; }; echo "   ok"; done; \
+	OMC_BIN=$(CURDIR)/$(O)/omc ./tests/e2e/run.sh
 
 install: $(BIN)
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
