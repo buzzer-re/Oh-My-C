@@ -244,6 +244,11 @@ host → kernel   {"type":"exec","id":N,"code":"…"}
 omp's JS/Bun eval runtime and the `agent()`/`workpool()`/browser preludes are not implemented and are
 not advertised in the description.
 
+A kernel that died (crash, kill, out-of-memory, or a cancel/timeout that ended it) is replaced on the next call; the first
+cell on the replacement opens with `Kernel restarted: the previous Python kernel is dead; state is unavailable. …`, once per
+replacement. A `reset` gives no notice. `CompletionHandle.attempts` lists the candidates tried so far, without waiting:
+`{model, effort, outcome, error?}`; omc tries one candidate (no completion fallback chain yet).
+
 ## MCP client (`src/mcp/`)
 
 - Transports: stdio (`command` + `args`, a reader thread per server), streamable HTTP (`url`,

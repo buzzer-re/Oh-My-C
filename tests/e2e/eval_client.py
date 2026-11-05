@@ -31,7 +31,7 @@ fails = 0
 n = [0]
 
 
-def cell(name, code, want, timeout=None, reset=False, error=False):
+def cell(name, code, want, timeout=None, reset=False, error=False, absent=None):
     global fails
     n[0] += 1
     pid = f"p{n[0]}"
@@ -51,7 +51,7 @@ def cell(name, code, want, timeout=None, reset=False, error=False):
         time.sleep(0.05)
     with lock:
         got = results[before] if len(results) > before else (None, "<no result>")
-    ok = all(w in got[1] for w in (want if isinstance(want, list) else [want])) and bool(got[0]) == error
+    ok = all(w in got[1] for w in (want if isinstance(want, list) else [want])) and bool(got[0]) == error and (not absent or absent not in got[1])
     print(("   ok  " if ok else "   FAIL ") + "eval " + name + ("" if ok else f": got {got!r}"), flush=True)
     if not ok:
         fails += 1
@@ -69,6 +69,8 @@ cell("completion schema",
      "h = completion('q', schema={'type':'object','properties':{'a':{'type':'string'},'n':{'type':'number'}}})\nh.wait()",
      "{'a': 'q', 'n': 42}")
 cell("completion status", "h = completion('x')\nh.wait()\nprint(h.status, h.done())", "completed True")
+cell("completion attempts", "h = completion('x')\nh.wait()\na = h.attempts\nprint(len(a), a[0]['outcome'], a[0]['model'], 'error' in a[0])",
+     "1 succeeded mock/mock-1 False")
 cell("wait bad handle", "wait(['x'])", "TypeError", error=True)
 cell("judge", "r = await judge('a ripe pear, yes 2', " + repr(Q) + ")\n"
      "print(r['verdict']['choice'], r['nice']['bool'], r['level']['score'])", "pear 1 2")
@@ -90,7 +92,7 @@ cell("judge_batch iter",
 cell("judge_batch start", "B = judge_batch(['SLOWJUDGE'] * 40, {'b': {'type': 'bool', 'instructions': 'ok?'}}, "
      "concurrency=2)\nwrite('bid.txt', B.id)\nprint(B.id.startswith('jdgb-'), B.total)", "True 40")
 cell("judge_batch attach after reset", "b2 = judge_batch.attach(read('bid.txt'))\nprint(b2.status()['running'], b2.cancel())",
-     ["[kernel restarted", "True True"], reset=True)
+     "True True", reset=True, absent="Kernel restarted")
 cell("judge_batch cancelled", "import asyncio\nfor _ in range(50):\n    if not b2.status()['running']: break\n"
      "    await asyncio.sleep(0.2)\ntry:\n    while await b2.drain(1): pass\nexcept Exception as e:\n    print('raised', e)\n"
      "print(b2.status()['running'])", ["raised judge_batch cancelled", "False"])
@@ -103,6 +105,13 @@ cell("state kept", "KEEP", "5")
 cell("helper wait pauses timeout", "b = judge_batch(['SLOWJUDGE', 'SLOWJUDGE'], {'b': {'type': 'bool', 'instructions': 'ok?'}}, "
      "concurrency=1)\nn = 0\nwhile True:\n    items = await b.drain()\n    if not items: break\n    n += len(items)\nn",
      "2", timeout=2)
+cell("kernel dies", "import os\nos._exit(7)", "Python kernel exited", error=True)
+cell("restart notice on the first cell", "print('again')",
+     ["Kernel restarted: the previous Python kernel is dead; state is unavailable. Re-run needed setup: variables, imports and definitions from earlier cells are gone.\nagain"])
+cell("once per replacement", "print('quiet')", "quiet", absent="Kernel restarted")
+cell("dies between cells", "import os, threading\nthreading.Timer(0.2, lambda: os._exit(9)).start()\nprint('bye')", "bye")
+time.sleep(0.8)
+cell("replaced on the next call", "print('back')", ["Kernel restarted", "back"])
 cell("xd docs", "print(await tool.read({'path': 'xd://eval/judge'}))", "judge_batch(states, questions")
 p.stdin.close()
 p.wait(timeout=20)

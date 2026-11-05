@@ -410,6 +410,11 @@ class CompletionHandle:
         snap = _bridge_call("__status__", {"item": {"kind": self.kind, "id": self.id}})
         return snap.get("status") if isinstance(snap, dict) else "failed"
 
+    @property
+    def attempts(self):
+        snap = _bridge_call("__status__", {"item": {"kind": self.kind, "id": self.id}})
+        return snap.get("attempts", []) if isinstance(snap, dict) else []
+
     def done(self):
         return self.status != "running"
 

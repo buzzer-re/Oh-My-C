@@ -145,6 +145,7 @@ typedef struct chandle {
     const ai_model_t *model;
     ai_effort_t effort;
     struct evalhost *h;
+    json_t *attempts; /* CompletionAttempt[]: the candidates tried so far, in order (guarded by h->mu) */
 } chandle_t;
 
 typedef struct batch batch_t;
@@ -182,7 +183,34 @@ static void chandle_free(chandle_t *c) {
     free(c->prompt);
     free(c->system);
     json_free(c->schema);
+    json_free(c->attempts);
     free(c);
+}
+
+/* the running entry of this completion's fallback log: settled by attempt_settle */
+static void attempt_start(chandle_t *c) {
+    json_t *a = json_obj();
+    char *l = model_label(c->model);
+    json_set_str(a, "model", l);
+    free(l);
+    /* the reasoning effort sent; `null` leaves the provider default */
+    if (c->effort == EFFORT_OFF) json_set(a, "effort", json_null());
+    else json_set_str(a, "effort", effort_name(c->effort));
+    json_set_str(a, "outcome", "running");
+    pthread_mutex_lock(&c->h->mu);
+    if (!c->attempts) c->attempts = json_arr();
+    json_push(c->attempts, a);
+    pthread_mutex_unlock(&c->h->mu);
+}
+
+static void attempt_settle(chandle_t *c, const char *outcome, const char *error) {
+    pthread_mutex_lock(&c->h->mu);
+    json_t *a = c->attempts && json_len(c->attempts) ? json_at(c->attempts, json_len(c->attempts) - 1) : NULL;
+    if (a) {
+        json_set_str(a, "outcome", outcome);
+        if (error) json_set_str(a, "error", error);
+    }
+    pthread_mutex_unlock(&c->h->mu);
 }
 
 /* first {...} span parsed as JSON (parseJsonPayload) */
@@ -200,12 +228,14 @@ static json_t *json_payload(const char *text) {
 }
 
 static char *run_completion(chandle_t *c, char **err) {
+    attempt_start(c);
     char *key = app_api_key_for(c->model);
     if (!key) {
         char *l = model_label(c->model);
         *err = xasprintf("completion() has no API key for %s. Configure credentials for this provider or choose another "
                          "tier.", l);
         free(l);
+        attempt_settle(c, "no-credentials", NULL);
         return NULL;
     }
     json_t *tools = NULL, *choice = NULL;
@@ -261,6 +291,9 @@ static char *run_completion(chandle_t *c, char **err) {
         }
     }
     json_free(r);
+    if (text) attempt_settle(c, "succeeded", NULL);
+    else if (str_eq(stop, "aborted")) attempt_settle(c, "cancelled", NULL);
+    else attempt_settle(c, c->cancel ? "cancelled" : "failed", *err);
     return text;
 }
 
@@ -478,6 +511,7 @@ static json_t *op_status_cancel(evalhost_t *h, const json_t *args, bool cancel_i
         json_set_bool(res, "cancelled", did);
     } else if (c) {
         res = snapshot_locked(c);
+        json_set(res, "attempts", c->attempts ? json_clone(c->attempts) : json_arr());
     }
     pthread_mutex_unlock(&h->mu);
     return res;
