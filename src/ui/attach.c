@@ -610,6 +610,12 @@ static bool vision_marker_at(const char *p, int *num, size_t *len) {
     return true;
 }
 
+/* takes `attachments`, the entries ui_attach_take returned, back as the pending list */
+void ui_attach_restore(ui_t *u, json_t *attachments) {
+    json_free(u->att_images);
+    u->att_images = attachments;
+}
+
 json_t *ui_attach_take(ui_t *u, const char *text, char **out_text) {
     int count = pending_count(u);
     *out_text = xstrdup(text);

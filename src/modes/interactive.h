@@ -12,6 +12,8 @@ void ix_start_prompt_with(ui_t *u, const char *text, json_t *attachments); /* ..
 bool ix_handle_command(ui_t *u, const char *line);    /* built-in slash command; false if unknown */
 void ix_start_queued_run(ui_t *u);                    /* run that delivers the agent's queued messages */
 void ix_start_hidden(ui_t *u, const char *text, const char *ctype); /* synthetic prompt (not drawn) */
+void ix_resume(ui_t *u);   /* the `.`/`c` continue shortcut */
+void ix_job_wake(ui_t *u); /* deliver background results that settled while the session could not take them */
 void ix_history_add(ui_t *u, const char *text);       /* editor + persisted prompt history */
 /* #runSideFileCommand: a `side: true` file command answers as a /btw side question; false otherwise */
 bool ix_side_file_command(ui_t *u, const char *text);

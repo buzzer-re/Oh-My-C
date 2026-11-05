@@ -1121,6 +1121,8 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
         free(fe);
         return false;
     }
+    /* captured before event delivery, so delivery counts toward the announced wait */
+    int64_t usage_reset_deadline = now_ms() + (int64_t)ceil(delay);
     {
         json_t *ev = json_obj();
         json_set_str(ev, "type", "auto_retry_start");
@@ -1136,8 +1138,9 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     }
     maybe_thinking_loop_redirect(a, ag, err);
     strvec_push(&a->retry_notes, usage_limit ? "rate-limited; waited; retried" : "error; retried");
+    /* ordinary backoff keeps its monotonic duration; a quota reset elapses while the machine sleeps too */
     int64_t until = mono_ms() + (int64_t)ceil(delay);
-    while (mono_ms() < until) {
+    while (usage_limit ? now_ms() < usage_reset_deadline : mono_ms() < until) {
         if (ag->cancel) return false;
         sleep_ms(50);
     }
@@ -3062,6 +3065,75 @@ int app_prompt_hidden(app_t *a, const char *text, const char *custom_type) {
     json_push(msgs, m);
     guards_reset_cycle(a);
     int rc = run_guarded(a, msgs);
+    if (rc == 0) maybe_auto_compact(a);
+    return rc;
+}
+
+/* isCutOffAssistant: an assistant turn cut off before any text or tool call; no provider replays it */
+static bool is_cut_off_assistant(const json_t *m) {
+    if (!str_eq(json_get_str(m, "role"), "assistant")) return false;
+    const char *stop = json_get_str(m, "stopReason");
+    if (!str_eq(stop, "error") && !str_eq(stop, "aborted") && !str_eq(stop, "length")) return false;
+    const json_t *blk;
+    json_arr_foreach(json_get(m, "content"), j, blk) {
+        const char *bt = json_get_str(blk, "type");
+        if (str_eq(bt, "text") || str_eq(bt, "toolCall")) return false;
+    }
+    return true;
+}
+
+/* AgentSession.resume, the `.`/`c` continue shortcut. A prompt the model has not answered yet runs again as is;
+ * otherwise the hidden manual-continue directive asks the model to pick its work back up. */
+int app_resume(app_t *a, char **err) {
+    maybe_restore_primary(a);
+    pthread_mutex_lock(&a->agent->mu);
+    json_t *msgs = a->agent->messages;
+    /* conversationEnd: trailing custom messages the user did not author */
+    size_t end = json_len(msgs);
+    while (end > 0) {
+        const json_t *m = json_at(msgs, end - 1);
+        if (!str_eq(json_get_str(m, "role"), "custom") || str_eq(json_get_str(m, "attribution"), "user")) break;
+        end--;
+    }
+    size_t tail = end;
+    while (tail > 0 && is_cut_off_assistant(json_at(msgs, tail - 1))) tail--;
+    /* unansweredPrompt */
+    bool unanswered = false;
+    for (size_t i = tail; i-- > 0;) {
+        const json_t *m = json_at(msgs, i);
+        const char *role = json_get_str(m, "role");
+        if (str_eq(role, "assistant")) {
+            if (!is_cut_off_assistant(m)) break;
+        } else if (str_eq(role, "user") || (str_eq(role, "custom") && str_eq(json_get_str(m, "attribution"), "user") && json_get_bool(m, "display", true)) ||
+                   (str_eq(role, "developer") && json_get_bool(m, "userInitiated", false))) {
+            unanswered = true;
+            break;
+        }
+    }
+    if (unanswered)
+        for (size_t i = end; i-- > tail;) json_free(json_arr_remove(msgs, i));
+    bool has_user = false;
+    const json_t *m;
+    json_arr_foreach(msgs, i, m) if (str_eq(json_get_str(m, "role"), "user")) has_user = true;
+    pthread_mutex_unlock(&a->agent->mu);
+    guards_reset_cycle(a);
+    if (unanswered) {
+        a->retry_count = 0;
+        return agent_continue(a->agent);
+    }
+    if (!has_user) {
+        *err = xstrdup("Nothing to resume");
+        return -1;
+    }
+    char *text = prompt_load("coding-agent/prompts/system/manual-continue.md");
+    json_t *dev = msg_developer_text(text ? text : "");
+    free(text);
+    json_set_str(dev, "attribution", "agent");
+    json_set_bool(dev, "synthetic", true);
+    json_set_bool(dev, "userInitiated", true);
+    json_t *run = json_arr();
+    json_push(run, dev);
+    int rc = run_guarded(a, run);
     if (rc == 0) maybe_auto_compact(a);
     return rc;
 }

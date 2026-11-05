@@ -149,6 +149,7 @@ char *ui_paste_attachment_sgr(int n);         /* attachmentSgr("paste", n) */
  * ([{image, path?}], NULL when none) and the rewritten text (owned). Clears the pending list. */
 json_t *ui_attach_take(ui_t *u, const char *text, char **out_text);
 void ui_attach_clear(ui_t *u);
+void ui_attach_restore(ui_t *u, json_t *attachments);
 bool ui_extract_image_paths(const char *text, strvec_t *out);
 char *ui_attachment_sgr(int n);
 char *ui_chip_label(int n);

@@ -358,6 +358,7 @@ typedef struct {
     bool queued;        /* deliver the agent's queued messages (no new prompt) */
     json_t *skill_msg;  /* a /skill: invocation's built message (owned), run instead of `text` */
     bool expand;        /* `text` names an MCP prompt command: expand it on the worker (prompts/get) */
+    bool resume;        /* the `.`/`c` continue shortcut (AgentSession.resume) */
 } job_t;
 
 static void start_hidden(ui_t *u, const char *text, const char *ctype);
@@ -479,7 +480,11 @@ static void *worker_main(void *p) {
     app_t *a = j->u->app;
     size_t before = json_len(a->agent->messages);
     if (j->queued) agent_run_queued(a->agent);
-    else if (j->hidden) app_prompt_hidden(a, j->text, j->hidden);
+    else if (j->resume) {
+        char *err = NULL;
+        if (app_resume(a, &err) != 0 && err) ui_notice(j->u, "error", err);
+        free(err);
+    } else if (j->hidden) app_prompt_hidden(a, j->text, j->hidden);
     else if (j->skill_msg) app_prompt_skill(a, j->skill_msg);
     else if (j->expand) {
         char *x = app_expand_input(a, j->text, true);
@@ -516,6 +521,7 @@ static void *retry_main(void *p) {
 static void job_wake_cb(void *ud) {
     ui_t *u = ud;
     if (u->worker_running || u->picker_kind) return; /* worker_done delivers at the end of the run */
+    if (iq_busy(u)) return; /* a manual compaction replaces history first; iq_job_wake delivers when it ends */
     char *draft = tui_editor_get_text(u->editor);
     bool typing = draft && *draft;
     free(draft);
@@ -595,15 +601,69 @@ static void start_hidden(ui_t *u, const char *text, const char *ctype) {
 static void start_prompt_with(ui_t *u, const char *text, json_t *attachments);
 static void start_prompt(ui_t *u, const char *text) { start_prompt_with(u, text, NULL); }
 
-static void start_prompt_with(ui_t *u, const char *text, json_t *attachments) {
-    if (!u->app->model) { /* omp AgentSession.prompt: "No model selected." */
-        char *agent_dir = omc_agent_path("");
-        char *m = xasprintf("No model selected.\n\nUse /login, set an API key environment variable, or create %s/models.yml\n\n"
-                            "Then use /model to select a model.",
-                            agent_dir);
+/* #restoreDroppedPrompt: a prompt rejected before dispatch returns to the editor, never over a draft typed meanwhile */
+static void restore_dropped_prompt(ui_t *u, const char *text, json_t *attachments) {
+    if (tui_editor_is_empty(u->editor)) {
+        tui_editor_set_text(u->editor, text);
+        ui_attach_restore(u, attachments);
+    } else {
+        json_free(attachments);
+    }
+}
+
+/* AgentSession.prompt's preflight: the error for a missing model or credential, NULL when the prompt may go (owned).
+ * A configured fallback chain still gets its turn in the retry path. */
+static char *prompt_preflight_error(ui_t *u) {
+    const ai_model_t *model = u->app->model;
+    char *agent_dir = omc_agent_path("");
+    char *m = NULL;
+    if (!model) {
+        m = xasprintf("No model selected.\n\nUse /login, set an API key environment variable, or create %s/models.yml\n\n"
+                      "Then use /model to select a model.",
+                      agent_dir);
+    } else if (!catalog_provider_keyless(model->provider)) {
+        char *key = app_api_key_for(model);
+        const json_t *chains = settings_get("retry.fallbackChains");
+        bool fallback = settings_bool("retry.modelFallback", true) && json_is_obj(chains) && chains->u.obj.n > 0;
+        if (!key && !fallback)
+            m = xasprintf("No API key found for %s.\n\nUse /login, set an API key environment variable, or create %s/models.yml",
+                          model->provider, agent_dir);
+        free(key);
+    }
+    free(agent_dir);
+    return m;
+}
+
+void ix_resume(ui_t *u) {
+    if (u->worker_running) { /* resume() prompts without a queue intent: rejected, never queued as a user message */
+        add_notice(u, "error", "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion.");
+        return;
+    }
+    char *m = prompt_preflight_error(u);
+    if (m) {
         add_notice(u, "error", m);
         free(m);
-        free(agent_dir);
+        return;
+    }
+    job_t *j = xcalloc(1, sizeof(*j));
+    j->u = u;
+    j->text = xstrdup("");
+    j->resume = true;
+    u->worker_running = true;
+    if (pthread_create(&u->worker, NULL, worker_main, j) != 0) {
+        u->worker_running = false;
+        add_notice(u, "error", "failed to start agent thread");
+        free(j->text);
+        free(j);
+    }
+}
+
+static void start_prompt_with(ui_t *u, const char *text, json_t *attachments) {
+    char *rejected = prompt_preflight_error(u);
+    if (rejected) {
+        add_notice(u, "error", rejected);
+        free(rejected);
+        restore_dropped_prompt(u, text, attachments);
         return;
     }
     /* session.prompt expands file commands and prompt templates (drawn expanded, like the transcript row
@@ -760,6 +820,7 @@ void ix_start_prompt(ui_t *u, const char *text) { start_prompt(u, text); }
 void ix_start_prompt_with(ui_t *u, const char *text, json_t *attachments) { start_prompt_with(u, text, attachments); }
 
 void ix_start_hidden(ui_t *u, const char *text, const char *ctype) { start_hidden(u, text, ctype); }
+void ix_job_wake(ui_t *u) { job_wake_cb(u); }
 
 void ix_start_queued_run(ui_t *u) {
     if (u->worker_running || !u->app->model) return;
