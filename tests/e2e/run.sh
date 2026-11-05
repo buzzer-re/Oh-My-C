@@ -209,6 +209,10 @@ cat >> "$T/nocred/models.yml" <<YML
 YML
 out=$("${NOCRED[@]}" "$B" -p "hello" --model noauth/mock-1 2>&1 </dev/null); nrc=$?
 [[ $nrc == 0 && "$out" != *"No API key"* ]] && echo "   ok  auth none is keyless" || { echo "   FAIL auth none is keyless: $nrc $out"; fail=1; }
+# a foreground command past the auto-background threshold: detaching it used to loop forever holding the jobs lock
+printf 'bash:\n  autoBackground:\n    enabled: true\n    thresholdMs: 300\n' > "$T/agent/config.yml"
+check "bash auto-background" "plain answer"  "$B" --model mock/mock-1 --no-session -p "bash:sleep 2; echo finished"
+rm -f "$T/agent/config.yml"
 # retry model fallback: a rate-limited model walks retry.fallbackChains
 printf 'retry:\n  fallbackChains:\n    mock/mock-flaky:\n      - mock/mock-2\n' > "$T/agent/config.yml"
 out=$(timeout 60 "$B" --model mock/mock-flaky -p "bash:echo fb-ok" </dev/null 2>&1)

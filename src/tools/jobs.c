@@ -736,8 +736,11 @@ char *jobs_fg_detach(jobs_t *j, const char *id) {
         pthread_mutex_unlock(&j->mu);
         return NULL;
     }
+    /* before the free: assign_id compares against every job's id, and a freed x->id could be handed straight back as
+     * the candidate, which then always looks taken (an endless loop holding j->mu, freezing the UI) */
+    char *new_id = assign_id(j, NULL);
     free(x->id);
-    x->id = assign_id(j, NULL);
+    x->id = new_id;
     x->attached = false;
     char *nid = xstrdup(x->id);
     bashx_t *b = x->bash;
