@@ -254,6 +254,30 @@ static void test_consolidation(const char *dir) {
 
 static void test_managed_skills(const char *agent) {
     char *err = NULL, *path = NULL;
+    {
+        /* capture turn: the primary's tools in order, refused except the capture tools */
+        agent_t *ag = agent_new();
+        agent_tool_t *read = agent_tool_new("read", "Read", "reads", NULL, NULL);
+        read->summary = xstrdup("s");
+        agent_tool_t *learn = agent_tool_new("learn", "Learn", "primary learn", NULL, NULL);
+        agent_tool_t *primary[] = {read, learn};
+        agent_tool_t *cap_learn = agent_tool_new("learn", "Learn", "capture learn", NULL, NULL);
+        agent_tool_t *cap_skill = agent_tool_new("manage_skill", "Skill", "capture skill", NULL, NULL);
+        agent_tool_t *capture[] = {cap_learn, cap_skill};
+        autolearn_capture_tool_list(ag, primary, 2, capture, 2);
+        CHECK(ag->tools.n == 3 && str_eq(ag->tools.v[0]->name, "read") && str_eq(ag->tools.v[1]->name, "learn") &&
+              str_eq(ag->tools.v[2]->name, "manage_skill"));
+        CHECK(ag->tools.v[1] == cap_learn && str_eq(ag->tools.v[0]->description, "reads") && str_eq(ag->tools.v[0]->summary, "s"));
+        tool_result_t out = {0};
+        CHECK(ag->tools.v[0]->execute(ag->tools.v[0], NULL, NULL, &out) == 0 && out.is_error);
+        char *text = tool_result_joined_text(&out);
+        CHECK(str_eq(text, "This tool is not available during an auto-learn capture turn, and nothing was run. Use `learn` or `manage_skill` to capture something reusable, or stop."));
+        free(text);
+        tool_result_free(&out);
+        agent_tool_free(read);
+        agent_tool_free(learn);
+        agent_free(ag);
+    }
     CHECK(!autolearn_sanitize_skill_name("../evil", &err) && has(err, "Invalid skill name"));
     free(err);
     char *n = autolearn_sanitize_skill_name("  My-Skill ", NULL);

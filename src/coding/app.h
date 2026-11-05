@@ -124,9 +124,8 @@ struct app {
     struct title_state *title; /* automatic session title (title.c) */
     struct skilldesc *skilldesc; /* compressed skill descriptions snapshot (skilldesc.c) */
     /* date/cwd reminder injected per request into user turns (never persisted) */
-    int64_t dcr_first_ts;
-    json_t *dcr_sent; /* "role:ts" -> reminder text the turn was first sent with */
-    char *dcr_last;
+    struct dcr *dcr;      /* the main loop's date/cwd reminder injector, journaled in the session */
+    struct dcr *dcr_side; /* the injector of another agent on the main transform (unjournaled) */
     struct advisor *advisor; /* shadow reviewer (advisor.c), NULL when off or no advisor model */
     bool advisor_enabled;    /* the session's advisor setting (active only with a model for the 'advisor' role) */
     struct evalhost *evalhost; /* eval helpers' host state: completion handles, judge batches (evalhost.c) */
@@ -234,6 +233,7 @@ json_t *app_skill_message(app_t *a, const char *text, json_t *images, char **err
 int app_prompt_skill(app_t *a, json_t *msg);
 /* run a hidden prompt (not shown in transcripts), e.g. goal continuations; custom_type tags the session entry */
 int app_prompt_hidden(app_t *a, const char *text, const char *custom_type);
+int app_resume(app_t *a, char **err); /* the `.`/`c` continue shortcut; -1 + *err "Nothing to resume" */
 int app_set_model(app_t *a, const char *pattern, char **err);
 void app_set_thinking(app_t *a, ai_effort_t e);
 /* `auto`: classify each user turn (provisional level until the first); persists configured "auto" */

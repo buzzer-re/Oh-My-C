@@ -46,6 +46,7 @@ struct rpc {
     uint64_t host_seq;
     pthread_t th;
     bool running;
+    bool compacting; /* a manual compaction is replacing history */
     char *prompt_id;
     char *text;
     json_t *images;
@@ -1389,7 +1390,7 @@ again:;
 static void rpc_wake(void *ud) {
     rpc_t *r = ud;
     pthread_mutex_lock(&r->mu);
-    if (r->running) {
+    if (r->running || r->compacting) { /* a manual compaction replaces history first; it wakes again when it ends */
         pthread_mutex_unlock(&r->mu);
         return;
     }
@@ -3312,7 +3313,13 @@ static void handle(rpc_t *r, json_t *cmd) {
         json_t *st = json_obj();
         json_set_str(st, "type", "manual_compaction_start");
         app_emit(a, st);
+        pthread_mutex_lock(&r->mu);
+        r->compacting = true;
+        pthread_mutex_unlock(&r->mu);
         int rc = app_compact(a, json_get_str(cmd, "customInstructions"), &err);
+        pthread_mutex_lock(&r->mu);
+        r->compacting = false;
+        pthread_mutex_unlock(&r->mu);
         json_t *en = json_obj();
         json_set_str(en, "type", "manual_compaction_end");
         bool skipped = rc != 0 && err && (!strcmp(err, "Already compacted") || !strncmp(err, "Nothing to compact", 18));
@@ -3324,6 +3331,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         if (rc == 0) respond(r, id, type, true, app_compaction_result(a), NULL);
         else respond(r, id, type, false, NULL, err ? err : "Compaction failed");
         free(err);
+        rpc_wake(r); /* results that settled during the compaction go into the compacted context */
     } else if (!strcmp(type, "new_session") || !strcmp(type, "switch_session") || !strcmp(type, "fork") ||
                !strcmp(type, "branch") || !strcmp(type, "open_session")) {
         session_change(r, cmd, id, type);

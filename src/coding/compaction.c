@@ -5,6 +5,7 @@
 #include "ai/provider_anthropic.h"
 #include "coding/advisor.h"
 #include "coding/branchsum.h"
+#include "coding/dcr.h"
 #include "config/compaction_point.h"
 #include "ai/ai_images.h"
 #include "config/settings.h"
@@ -764,6 +765,8 @@ static bool anthropic_compact(app_t *a, const ai_model_t *m, const prep_t *p, co
         json_push(msgs, sm);
     }
     for (size_t i = 0; i < cut; i++) json_push(msgs, json_clone(json_at(all, i)));
+    size_t prefix_len = json_len(msgs);
+    for (size_t i = cut; i < json_len(all); i++) json_push(msgs, json_clone(json_at(all, i)));
     json_free(all);
     /* the live system prompt and tools, so the summarized prefix matches what the turns sent */
     pthread_mutex_lock(&a->agent->mu);
@@ -771,8 +774,20 @@ static bool anthropic_compact(app_t *a, const ai_model_t *m, const prep_t *p, co
     json_t *tools = json_arr();
     for (size_t i = 0; i < a->agent->tools.n; i++) json_push(tools, agent_tool_wire(a->agent->tools.v[i]));
     pthread_mutex_unlock(&a->agent->mu);
+    /* transform the whole history as the live turn does, then cut it. Date/cwd reminder controls are the only messages
+     * the transform inserts: count past them, and leave out any at the cut, so the kept turns follow the summarized
+     * range directly */
     json_t *tx = a->agent->hooks.transform_context ? a->agent->hooks.transform_context(a->agent->hooks.ud, a->agent, msgs) : NULL;
-    json_t *wire = ai_transform_messages(tx ? tx : msgs, m);
+    const json_t *live = tx ? tx : msgs;
+    json_t *sent = json_arr();
+    size_t counted = 0;
+    for (size_t i = 0; i < json_len(live) && counted < prefix_len; i++) {
+        const json_t *lm = json_at(live, i);
+        if (!dcr_is_control(lm)) counted++;
+        json_push(sent, json_clone(lm));
+    }
+    json_t *wire = ai_transform_messages(sent, m);
+    json_free(sent);
     json_free(tx);
     json_free(msgs);
     /* instructions (anthropic-compaction-instructions.md) */
@@ -1785,12 +1800,21 @@ static int manual(app_t *a, const char *mode, const char *instructions, char **e
         if (str_eq(m, "remote")) {
             if (!remote_usable(model)) continue;
         } else if (str_eq(m, "snapcompact")) {
-            /* omc has no snapcompact renderer: an explicit request reports it; the ladder passes over it */
+            /* omc has no snapcompact renderer: an explicit request reports it once, naming the /compact mode of the next
+             * manual method (remote or soft); the ladder passes over it */
             if (!explicit_snap) continue;
-            if (!model->input_image) {
-                app_notice(a, "warning", "snapcompact needs a vision-capable model (%s is text-only)", model->id);
-                *err = xasprintf("snapcompact cannot run locally: %s is text-only.", model->id);
-            } else *err = xstrdup("snapcompact is not implemented in omc.");
+            const char *fallback = "soft";
+            strvec_t order = cmp_method_order();
+            for (size_t k = 0; k < order.n; k++) {
+                if (str_eq(order.v[k], "soft") || (str_eq(order.v[k], "remote") && remote_usable(model))) {
+                    fallback = str_eq(order.v[k], "remote") ? "remote" : "soft";
+                    break;
+                }
+            }
+            strvec_free(&order);
+            if (!model->input_image)
+                *err = xasprintf("snapcompact needs a vision-capable model (%s is text-only). Run /compact %s instead.", model->id, fallback);
+            else *err = xasprintf("snapcompact is not implemented in omc. Run /compact %s instead.", fallback);
             break;
         } else if (!str_eq(m, "soft")) continue;
         bool remote = str_eq(m, "remote");
@@ -1832,7 +1856,8 @@ static int manual(app_t *a, const char *mode, const char *instructions, char **e
             *err = xstrdup("Compaction cancelled");
             break;
         }
-        if (idx + 1 < methods.n) app_notice(a, "warning", "%s compaction failed; trying the next preferred method", m);
+        if (idx + 1 < methods.n)
+            app_notice(a, "warning", "%s compaction failed (%s); trying the next preferred method", m, *err ? *err : "unknown error");
     }
     if (rc != 0 && !*err) *err = xstrdup("No configured compaction method can run manually.");
     strvec_free(&methods);
@@ -2013,6 +2038,7 @@ static const char *spec_method(app_t *a, bool skip_remote) {
 static void *spec_main(void *arg) {
     struct cmp_spec *sp = arg;
     tl_cancel = &sp->cancel;
+    dcr_set_side_thread(true); /* the turn that writes the session may still be running */
     char *err = NULL;
     bool ok;
     if (str_eq(sp->method, "handoff")) {

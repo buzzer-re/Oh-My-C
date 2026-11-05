@@ -12,6 +12,8 @@
 
 #include <math.h>
 #include <errno.h>
+#include <pthread.h>
+#include <stdint.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -33,7 +35,13 @@ typedef struct {
     sb_t rename;
     char *error;
     bool fake_cursor;
+    uint64_t gen;      /* the listing a running full scan belongs to */
+    strvec_t deleted;  /* paths deleted here: a listing scanned before the delete must not bring them back */
+    json_t *renamed;   /* path -> title renamed here: a listing scanned before the rename must not revert them */
 } sess_view_t;
+
+static sess_view_t *g_sess_view; /* the open picker; a full scan finishing after it closed finds no view */
+static uint64_t g_sess_gen;
 
 /* ---------- pins (session-pins.json: a tab-indented JSON array of ids) ---------- */
 
@@ -175,21 +183,126 @@ static void sess_refilter(sess_view_t *v) {
     v->sel = 0;
 }
 
-static void sess_load(sess_view_t *v) {
+/* takes `list` and the per-row arrays as the view's rows */
+static void sess_set_rows(sess_view_t *v, session_list_t list, int *status, bool *forked) {
     session_list_free(&v->all);
-    memset(&v->all, 0, sizeof v->all);
-    if (v->all_projects) {
-        session_list_all(&v->all);
-    } else {
-        char *dir = session_dir_for_cwd(v->u->app->cwd);
-        session_list(dir, &v->all);
-        free(dir);
-    }
+    v->all = list;
     free(v->status);
     free(v->forked);
-    v->status = xcalloc(v->all.n + 1, sizeof *v->status);
-    v->forked = xcalloc(v->all.n + 1, sizeof *v->forked);
-    for (size_t i = 0; i < v->all.n; i++) scan_session(v->all.v[i].path, &v->status[i], &v->forked[i]);
+    v->status = status;
+    v->forked = forked;
+}
+
+/* the full listing: prompts, status and untitled sessions (runs off the UI thread once rows are up) */
+static void sess_scan(bool all_projects, const char *dir, session_list_t *list, int **status, bool **forked) {
+    memset(list, 0, sizeof *list);
+    if (all_projects) session_list_all(list);
+    else session_list(dir, list);
+    *status = xcalloc(list->n + 1, sizeof **status);
+    *forked = xcalloc(list->n + 1, sizeof **forked);
+    for (size_t i = 0; i < list->n; i++) scan_session(list->v[i].path, &(*status)[i], &(*forked)[i]);
+}
+
+typedef struct {
+    ui_t *u;
+    uint64_t gen;
+    bool all_projects;
+    char *dir;
+    session_list_t list;
+    int *status;
+    bool *forked;
+} sess_job_t;
+
+static void sess_job_free(sess_job_t *j) {
+    session_list_free(&j->list);
+    free(j->status);
+    free(j->forked);
+    free(j->dir);
+    free(j);
+}
+
+/* refreshSessions: swap in the complete listing, keeping the query, the selected session, and deletes and renames made
+ * meanwhile; rows arriving above the cursor never move it onto another session */
+static void sess_complete(void *p) {
+    sess_job_t *j = p;
+    sess_view_t *v = g_sess_view;
+    if (!v || v->gen != j->gen) {
+        sess_job_free(j);
+        return;
+    }
+    char *selected = v->vis.n && v->sel < v->vis.n ? xstrdup(v->all.v[v->vis.v[v->sel]].path) : NULL;
+    size_t w = 0;
+    for (size_t i = 0; i < j->list.n; i++) {
+        if (strvec_contains(&v->deleted, j->list.v[i].path)) continue;
+        const char *title = json_get_str(v->renamed, j->list.v[i].path);
+        if (title) {
+            free(j->list.v[i].title);
+            j->list.v[i].title = xstrdup(title);
+        }
+        j->status[w] = j->status[i];
+        j->forked[w] = j->forked[i];
+        session_info_t tmp = j->list.v[w];
+        j->list.v[w] = j->list.v[i];
+        j->list.v[i] = tmp;
+        w++;
+    }
+    while (j->list.n > w) session_list_remove(&j->list, j->list.n - 1);
+    sess_set_rows(v, j->list, j->status, j->forked);
+    memset(&j->list, 0, sizeof j->list);
+    j->status = NULL;
+    j->forked = NULL;
+    sess_job_free(j);
+    sess_refilter(v);
+    for (size_t i = 0; selected && i < v->vis.n; i++) {
+        if (str_eq(v->all.v[v->vis.v[i]].path, selected)) {
+            v->sel = i;
+            break;
+        }
+    }
+    free(selected);
+    tui_request_render(v->u->tui);
+}
+
+static void *sess_scan_main(void *p) {
+    sess_job_t *j = p;
+    sess_scan(j->all_projects, j->dir, &j->list, &j->status, &j->forked);
+    tui_post(j->u->tui, sess_complete, j);
+    return NULL;
+}
+
+/* two passes (listSessionsForPicker): rows from the session headers show at once, and the full scan replaces them when it
+ * finishes. Preliminary rows are never empty while the full scan has sessions: with nothing titled, the listing waits for
+ * the scan. */
+static void sess_load(sess_view_t *v) {
+    char *dir = v->all_projects ? NULL : session_dir_for_cwd(v->u->app->cwd);
+    v->gen = ++g_sess_gen;
+    session_list_t titled;
+    memset(&titled, 0, sizeof titled);
+    if (v->all_projects) session_list_all_titled(&titled);
+    else session_list_titled(dir, &titled);
+    bool started = false;
+    if (titled.n) {
+        sess_job_t *j = xcalloc(1, sizeof *j);
+        j->u = v->u;
+        j->gen = v->gen;
+        j->all_projects = v->all_projects;
+        j->dir = dir ? xstrdup(dir) : NULL;
+        pthread_t th;
+        started = pthread_create(&th, NULL, sess_scan_main, j) == 0;
+        if (started) pthread_detach(th);
+        else sess_job_free(j);
+    }
+    if (started) {
+        sess_set_rows(v, titled, xcalloc(titled.n + 1, sizeof *v->status), xcalloc(titled.n + 1, sizeof *v->forked));
+    } else {
+        session_list_free(&titled);
+        session_list_t list;
+        int *status;
+        bool *forked;
+        sess_scan(v->all_projects, dir, &list, &status, &forked);
+        sess_set_rows(v, list, status, forked);
+    }
+    free(dir);
     sess_refilter(v);
 }
 
@@ -494,7 +607,12 @@ static void delete_selected(sess_view_t *v) {
             free(art);
         }
         size_t keep = v->sel;
-        sess_load(v);
+        strvec_push(&v->deleted, path);
+        size_t row = v->vis.v[v->sel];
+        session_list_remove(&v->all, row);
+        memmove(&v->status[row], &v->status[row + 1], (v->all.n - row) * sizeof v->status[0]);
+        memmove(&v->forked[row], &v->forked[row + 1], (v->all.n - row) * sizeof v->forked[0]);
+        sess_refilter(v);
         if (v->vis.n) v->sel = MIN(keep, v->vis.n - 1);
     }
     free(path);
@@ -531,6 +649,8 @@ static void rename_selected(sess_view_t *v) {
         session_info_t *e = &v->all.v[v->vis.v[v->sel]];
         free(e->title);
         e->title = xstrdup(title);
+        if (!v->renamed) v->renamed = json_obj();
+        json_set_str(v->renamed, e->path, title);
     }
     free(title);
 }
@@ -655,6 +775,9 @@ static bool sess_key(tui_component_t *c, const tui_key_t *k) {
 
 static void sess_destroy(tui_component_t *c) {
     sess_view_t *v = (sess_view_t *)c;
+    if (g_sess_view == v) g_sess_view = NULL;
+    strvec_free(&v->deleted);
+    json_free(v->renamed);
     session_list_free(&v->all);
     free(v->status);
     free(v->forked);
@@ -673,6 +796,7 @@ void ui_overlay_session(ui_t *u) {
     tui_component_init(&v->base, &SESS_VT);
     v->u = u;
     pins_load(v);
+    g_sess_view = v;
     sess_load(v);
     tui_alt_screen(u->tui, true);
     tui_overlay_opts_t o = {TUI_ANCHOR_TOP, 0, 0, 0, 0};

@@ -67,6 +67,8 @@ struct asess {
     char *last_error;        /* latest error notice of the running turn */
     char *cfg_sent;          /* configOptions the client last saw (config_option_update / a response) */
     tool_bridge_t bridge;
+    bool lifetime_ready;     /* lifetimeUpdatesReady: the bootstrap guard or a client prompt proved the session is known */
+    json_t *pending_compaction; /* compaction notifications captured before delivery opened; they cannot be rebuilt */
     bool closed;
 };
 
@@ -973,8 +975,11 @@ static void acp_mcp_callbacks(asess_t *s) {
 }
 
 /* #emitBootstrapUpdates: MCP startup failures, commands, session info (behind the bootstrap race guard) */
+static void activate_lifetime_updates(asess_t *s);
+
 static void bootstrap_updates(asess_t *s) {
     usleep(BOOTSTRAP_RACE_GUARD_MS * 1000);
+    activate_lifetime_updates(s);
     json_t *c;
     json_arr_foreach(s->mcp_chunks, i, c) {
         /* http/sse servers can be repaired with /mcp reauth */
@@ -1154,6 +1159,49 @@ static void acp_listener(void *ud, const agent_event_t *ev) {
 }
 
 /* app notices: todo reminders become plan updates; error notices explain a failed prompt */
+/* #handleLifetimeEvent: automatic maintenance as JSON-RPC extension notifications, for the session's lifetime: maintenance
+ * outside a prompt and an end after a cancellation still reach the client. Only the listed fields are sent. */
+static void forward_compaction(asess_t *s, bool start, const char *text) {
+    json_t *ev = json_parse(text, strlen(text), NULL);
+    json_t *p = json_obj();
+    json_set_str(p, "sessionId", s->id);
+    if (start && json_get_str(ev, "reason")) json_set_str(p, "reason", json_get_str(ev, "reason"));
+    if (json_get_str(ev, "action")) json_set_str(p, "action", json_get_str(ev, "action"));
+    if (!start) {
+        json_set_bool(p, "aborted", json_get_bool(ev, "aborted", false));
+        json_set_bool(p, "willRetry", json_get_bool(ev, "willRetry", false));
+        const json_t *sk = json_get(ev, "skipped");
+        if (sk) json_set(p, "skipped", json_clone(sk));
+        if (json_get_str(ev, "errorMessage")) json_set_str(p, "errorMessage", json_get_str(ev, "errorMessage"));
+        const json_t *tb = json_get(json_get(ev, "result"), "tokensBefore");
+        if (tb) json_set(p, "tokensBefore", json_clone(tb));
+    }
+    json_free(ev);
+    json_t *o = frame();
+    json_set_str(o, "method", start ? "_omp/compaction/start" : "_omp/compaction/end");
+    json_set(o, "params", p);
+    pthread_mutex_lock(&s->mu);
+    if (s->lifetime_ready) {
+        pthread_mutex_unlock(&s->mu);
+        wire_send(o);
+        return;
+    }
+    if (!s->pending_compaction) s->pending_compaction = json_arr();
+    json_push(s->pending_compaction, o);
+    pthread_mutex_unlock(&s->mu);
+}
+
+/* #activateLifetimeUpdates */
+static void activate_lifetime_updates(asess_t *s) {
+    pthread_mutex_lock(&s->mu);
+    json_t *pending = s->pending_compaction;
+    s->pending_compaction = NULL;
+    s->lifetime_ready = true;
+    pthread_mutex_unlock(&s->mu);
+    for (size_t i = 0; i < json_len(pending); i++) wire_send(json_clone(json_at(pending, i)));
+    json_free(pending);
+}
+
 static void acp_notice(void *ud, const char *level, const char *text) {
     asess_t *s = ud;
     if (str_eq(level, "todo-reminder")) {
@@ -1174,6 +1222,8 @@ static void acp_notice(void *ud, const char *level, const char *text) {
         free(s->last_error);
         s->last_error = xstrdup(text);
         pthread_mutex_unlock(&s->mu);
+    } else if (str_eq(level, "auto_compaction_start") || str_eq(level, "auto_compaction_end")) {
+        forward_compaction(s, !strcmp(level, "auto_compaction_start"), text);
     }
 }
 
@@ -2609,6 +2659,7 @@ static void handle_prompt(acp_t *a, const json_t *id, const json_t *params) {
     const char *sid = json_get_str(params, "sessionId");
     asess_t *s = find_session(a, sid);
     if (!s) return reply_not_found(id, sid);
+    activate_lifetime_updates(s);
     turn_t *t = xcalloc(1, sizeof(*t));
     t->s = s;
     t->req_id = json_clone(id);

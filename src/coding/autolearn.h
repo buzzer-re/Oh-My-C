@@ -36,4 +36,8 @@ void autolearn_free(autolearn_t *al); /* aborts and joins a running capture */
 /* wait for an in-flight capture (tests / print mode); returns immediately when idle */
 void autolearn_wait(autolearn_t *al, int64_t timeout_ms);
 
+/* the capture turn's tool list (sdk.ts captureToolList, refusedCaptureTool) */
+agent_tool_t *autolearn_refused_tool(const agent_tool_t *tool);
+void autolearn_capture_tool_list(agent_t *ag, agent_tool_t *const *primary, size_t n, agent_tool_t **capture, size_t ncapture);
+
 #endif

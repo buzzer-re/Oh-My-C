@@ -125,6 +125,12 @@ typedef VEC(session_info_t) session_list_t;
 int session_list(const char *dir, session_list_t *out);   /* one project dir, sorted newest first */
 int session_list_all(session_list_t *out);                /* all projects */
 void session_list_free(session_list_t *l);
+/* the resume picker's first pass: titled sessions only, from each file's header, without a content scan */
+int session_list_titled(const char *dir, session_list_t *out);
+int session_list_all_titled(session_list_t *out);
+bool session_dir_has_sessions(const char *dir); /* stops at the first valid session */
+bool session_any_sessions(void);                /* any project */
+void session_list_remove(session_list_t *l, size_t i);
 char *session_resolve(const char *query, const char *cwd); /* id prefix / path -> file path (owned) */
 
 /* export */

@@ -319,6 +319,8 @@ int app_goal_create(app_t *a, const char *objective, int64_t budget, char **err)
     return 0;
 }
 
+bool app_goal_interview_active(app_t *a) { return G(a)->interview && !G(a)->present; }
+
 void app_goal_expose_tool(app_t *a) {
     G(a)->interview = true;
     sync_tool(a);

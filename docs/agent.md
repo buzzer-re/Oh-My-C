@@ -288,11 +288,27 @@ their skills only. Plugin hooks, commands and marketplaces are not ported.
 
 ### Date/cwd reminder
 
-This ports `session/date-cwd-reminder.ts`. The `transform_context` hook prepends
+This ports `session/date-cwd-reminder.ts` (`coding/dcr.c`). The `transform_context` hook prepends
 `date-cwd-reminder.md` (date and cwd in a `<system-reminder>`) to the first user turn of each
-request, and remembers which reminder each turn was first sent with. The cached prefix therefore
-never changes. A new day or cwd attaches the new reminder to the newest unsent user turn. Setting:
-`dateCwdReminder`.
+request, so the system prompt stays byte-stable. Every turn keeps the reminder it was first sent with. A changed
+reminder (new day, new cwd) goes on a newly appended user turn, or on a hidden developer turn after the last turn when
+there is none. Turns are recognised by a key (role, timestamp, attribution, ordinal), and state is held per
+conversation root, up to 8.
+
+The main loop journals each placement as a `date-cwd-reminder` custom entry, so a resumed session or revived subagent
+resends its turns with the same bytes. The state resets when the history is replaced rather than continued: a switched
+session, a tree move, or another writer's placements after a reload. Placements before the latest `reset_boundary`
+are ignored. The auto-learn capture keeps an unjournaled injector. Side requests running next to the turn (`/btw`,
+speculative compaction) never touch the session: their placements wait for the next request on the writer's thread.
+The setting is `dateCwdReminder`.
+
+### Continue shortcut and rejected prompts
+
+Typing `.` or `c` (`c` is a normal reply during a `/guided-goal` interview) resumes without a visible user message: a
+prompt the model has not answered runs again as is, otherwise the hidden `manual-continue.md` directive goes out, and an
+empty conversation reports "Nothing to resume". A prompt rejected before dispatch for a missing model or credential goes
+back to the editor, never over a draft typed meanwhile. With `retry.fallbackChains` set the prompt goes out instead, so
+the retry path can fall back. Background results that settle during a manual compaction wait for it to replace history.
 
 ## TTSR: time-traveling stream rules (`coding/ttsr.c`)
 
@@ -342,6 +358,9 @@ Lower-severity notes appear as notices. It is enabled with `advisor.enabled`, `/
 - **Auto-learn** (`autolearn.enabled`) adds the `learn` and `manage_skill` tools, isolated managed
   skills in `<agent dir>/managed-skills` (strict names, symlink and size checks), standing prompt
   guidance, and a post-stop private capture turn.
+  The private capture turn advertises the main turn's tool list in its order, so it reuses that turn's prompt cache
+  (it sends the main session id as the cache key and keeps its own provider session id); every tool but `learn` and
+  `manage_skill` is a copy that refuses the call without running anything.
 
 ## Titles (`coding/title.c`)
 

@@ -294,7 +294,39 @@ static void test_tree_selector(void) {
     free(last_select), free(last_label_id), free(last_label);
 }
 
+/* the resume picker's first pass: titled sessions from the file heads only */
+static void test_picker_first_pass(void) {
+    char *dir = xasprintf("%s/omc-picker-%d", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());
+    fs_mkdir_p(dir, 0777);
+    char *a = path_join(dir, "a.jsonl"), *b = path_join(dir, "b.jsonl"), *c = path_join(dir, "c.jsonl");
+    const char *titled = "{\"type\":\"title\",\"title\":\"Named\"}\n{\"type\":\"session\",\"id\":\"s1\",\"cwd\":\"/w\"}\n"
+                         "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n";
+    const char *untitled = "{\"type\":\"session\",\"id\":\"s2\",\"cwd\":\"/w\"}\n";
+    fs_write(a, titled, strlen(titled));
+    fs_write(b, untitled, strlen(untitled));
+    fs_write(c, "not a session\n", 14);
+    session_list_t l;
+    CHECK(session_list_titled(dir, &l) == 0 && l.n == 1);
+    if (l.n == 1) {
+        CHECK(str_eq(l.v[0].title, "Named") && str_eq(l.v[0].id, "s1") && !l.v[0].first_message && l.v[0].message_count == 0);
+        session_list_remove(&l, 0);
+        CHECK(l.n == 0);
+    }
+    session_list_free(&l);
+    CHECK(session_dir_has_sessions(dir));
+    session_list(dir, &l);
+    CHECK(l.n == 2);
+    session_list_free(&l);
+    unlink(a);
+    unlink(b);
+    CHECK(!session_dir_has_sessions(dir));
+    unlink(c);
+    rmdir(dir);
+    free(a), free(b), free(c), free(dir);
+}
+
 int main(void) {
+    test_picker_first_pass();
     char *err = NULL;
     tui_theme_t *th = tui_theme_load("titanium", TUI_COLOR_TRUECOLOR, &err);
     if (th) tui_theme_set(th);

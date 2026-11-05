@@ -1,5 +1,6 @@
 #include "app.h"
 #include "coding/turn_recovery.h"
+#include "coding/dcr.h"
 #include "coding/autothink.h"
 #include "coding/modelctl.h"
 #include "coding/cachewarm.h"
@@ -523,28 +524,6 @@ static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
     app_note_provider_state(a);
 }
 
-/* ---------- date/cwd reminder (port of omp session/date-cwd-reminder.ts) ----------
- * The system prompt stays byte-stable; the volatile date/cwd line rides on the first user turn of each
- * request. Turns keep the reminder they were first sent with, so the cached prefix never changes; a
- * changed reminder (new day / new cwd) attaches to the newest unsent user turn instead. */
-static char *dcr_render(app_t *a) {
-    char date[16];
-    time_t t = time(NULL);
-    struct tm tm;
-    localtime_r(&t, &tm);
-    strftime(date, sizeof date, "%Y-%m-%d", &tm);
-    json_t *c = json_obj();
-    json_set_str(c, "date", date);
-    json_set_str(c, "cwd", a->cwd);
-    char *r = prompt_render("coding-agent/prompts/system/date-cwd-reminder.md", c);
-    json_free(c);
-    char *trim = str_trim(r ? r : "");
-    free(r);
-    return trim;
-}
-
-static json_t *hook_transform_locked(app_t *a, const json_t *messages);
-
 /* omp messages.ts wrapSteeringForModel: every steered user message reaches the model inside the
  * user-interjection envelope (text parts joined, images kept); NULL when there is none */
 static json_t *wrap_steering(const json_t *messages) {
@@ -591,7 +570,6 @@ static json_t *wrap_steering(const json_t *messages) {
     return out;
 }
 
-/* the title fork runs the same transform from its own thread: serialize the reminder state */
 /* a stray sloppy payload in plain text becomes a real edit tool call, so the normal pipeline executes it (omp sdk.ts);
  * only the sloppy edit tool recovers */
 static void hook_transform_assistant(void *ud, agent_t *ag, json_t *assistant) {
@@ -600,72 +578,36 @@ static void hook_transform_assistant(void *ud, agent_t *ag, json_t *assistant) {
     if (a->env && str_eq(a->env->edit_mode, "sloppy") && agent_find_tool(ag, "edit")) sloppy_recover_inline(assistant);
 }
 
+/* transformProviderContext's date/cwd step (coding/dcr.c): one injector per conversation. Only the main loop journals its
+ * reminders in the session; another agent on this hook (the auto-learn capture) keeps an unjournaled one. A side request
+ * runs through the main loop's injector from its own thread, so the state is serialized. */
 static json_t *hook_transform(void *ud, agent_t *ag, const json_t *messages) {
     app_t *a = ud;
-    UNUSED(ag);
     json_t *w = wrap_steering(messages);
     if (!settings_bool("dateCwdReminder", true)) return w;
+    pthread_mutex_lock(&ag->mu);
+    bool has_system = json_len(ag->system_prompt) > 0;
+    pthread_mutex_unlock(&ag->mu);
+    if (!has_system) return w;
+    char date[16];
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    strftime(date, sizeof date, "%Y-%m-%d", &tm);
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&mu);
-    json_t *r = hook_transform_locked(a, w ? w : messages);
+    dcr_t **slot = ag == a->agent ? &a->dcr : &a->dcr_side;
+    if (!*slot && ag == a->agent) {
+        dcr_journal_t j = dcr_session_journal(&a->session);
+        *slot = dcr_new(&j);
+    } else if (!*slot) {
+        *slot = dcr_new(NULL);
+    }
+    json_t *r = dcr_transform(*slot, w ? w : messages, date, a->cwd);
     pthread_mutex_unlock(&mu);
     if (!r) return w;
     json_free(w);
     return r;
-}
-
-static json_t *hook_transform_locked(app_t *a, const json_t *messages) {
-    ssize_t first = -1;
-    json_t *m;
-    json_arr_foreach(messages, i, m) if (str_eq(json_get_str(m, "role"), "user")) {
-        first = (ssize_t)i;
-        break;
-    }
-    if (first < 0) return NULL;
-    char *rem = dcr_render(a);
-    int64_t fts = json_get_int(json_at(messages, (size_t)first), "timestamp", 0);
-    if (!a->dcr_sent || a->dcr_first_ts != fts) { /* new conversation root (new session, compaction, branch) */
-        json_free(a->dcr_sent);
-        a->dcr_sent = json_obj();
-        a->dcr_first_ts = fts;
-        char key[48];
-        snprintf(key, sizeof key, "user:%lld", (long long)fts);
-        json_set_str(a->dcr_sent, key, rem);
-        free(a->dcr_last);
-        a->dcr_last = xstrdup(rem);
-    } else if (!str_eq(a->dcr_last, rem)) {
-        const json_t *last = json_at(messages, json_len(messages) - 1);
-        if (str_eq(json_get_str(last, "role"), "user")) {
-            char key[48];
-            snprintf(key, sizeof key, "user:%lld", (long long)json_get_int(last, "timestamp", 0));
-            if (!json_get(a->dcr_sent, key)) {
-                json_set_str(a->dcr_sent, key, rem);
-                free(a->dcr_last);
-                a->dcr_last = xstrdup(rem);
-            }
-        }
-    }
-    free(rem);
-    json_t *out = json_arr();
-    json_arr_foreach(messages, i, m) {
-        json_t *c = json_clone(m);
-        if (str_eq(json_get_str(m, "role"), "user")) {
-            char key[48];
-            snprintf(key, sizeof key, "user:%lld", (long long)json_get_int(m, "timestamp", 0));
-            const char *r = json_get_str(a->dcr_sent, key);
-            json_t *content = json_get(c, "content");
-            if (r && json_is_str(content)) {
-                char *t = xasprintf("%s\n\n%s", r, json_sv(content));
-                json_set_str(c, "content", t);
-                free(t);
-            } else if (r && json_is_arr(content)) {
-                const json_t *b0 = json_at(content, 0);
-                if (!str_eq(json_get_str(b0, "text"), r)) json_arr_insert(content, 0, text_block(r));
-            }
-        }
-        json_push(out, c);
-    }
-    return out;
 }
 
 static bool is_overflow(const char *err) {
@@ -1179,6 +1121,8 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
         free(fe);
         return false;
     }
+    /* captured before event delivery, so delivery counts toward the announced wait */
+    int64_t usage_reset_deadline = now_ms() + (int64_t)ceil(delay);
     {
         json_t *ev = json_obj();
         json_set_str(ev, "type", "auto_retry_start");
@@ -1194,8 +1138,9 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     }
     maybe_thinking_loop_redirect(a, ag, err);
     strvec_push(&a->retry_notes, usage_limit ? "rate-limited; waited; retried" : "error; retried");
+    /* ordinary backoff keeps its monotonic duration; a quota reset elapses while the machine sleeps too */
     int64_t until = mono_ms() + (int64_t)ceil(delay);
-    while (mono_ms() < until) {
+    while (usage_limit ? now_ms() < usage_reset_deadline : mono_ms() < until) {
         if (ag->cancel) return false;
         sleep_ms(50);
     }
@@ -1836,8 +1781,8 @@ void app_free(app_t *a) {
     title_free(a);
     skilldesc_free(a->skilldesc);
     json_free(a->forced_choice);
-    json_free(a->dcr_sent);
-    free(a->dcr_last);
+    dcr_free(a->dcr);
+    dcr_free(a->dcr_side);
     json_free(a->job_batch);
     json_free(a->fast_disabled);
     free(a->slow_lane);
@@ -2325,7 +2270,9 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
     json_t *um = msg_user_content(content);
     json_set_str(um, "attribution", "agent");
     json_push(msgs, um);
+    dcr_set_side_thread(true); /* runs next to the turn that writes the session */
     json_t *tx = a->agent->hooks.transform_context ? a->agent->hooks.transform_context(a, a->agent, msgs) : NULL;
+    dcr_set_side_thread(false);
     json_t *wire = ai_transform_messages(tx ? tx : msgs, model);
     json_free(tx);
     json_free(msgs);
@@ -3118,6 +3065,75 @@ int app_prompt_hidden(app_t *a, const char *text, const char *custom_type) {
     json_push(msgs, m);
     guards_reset_cycle(a);
     int rc = run_guarded(a, msgs);
+    if (rc == 0) maybe_auto_compact(a);
+    return rc;
+}
+
+/* isCutOffAssistant: an assistant turn cut off before any text or tool call; no provider replays it */
+static bool is_cut_off_assistant(const json_t *m) {
+    if (!str_eq(json_get_str(m, "role"), "assistant")) return false;
+    const char *stop = json_get_str(m, "stopReason");
+    if (!str_eq(stop, "error") && !str_eq(stop, "aborted") && !str_eq(stop, "length")) return false;
+    const json_t *blk;
+    json_arr_foreach(json_get(m, "content"), j, blk) {
+        const char *bt = json_get_str(blk, "type");
+        if (str_eq(bt, "text") || str_eq(bt, "toolCall")) return false;
+    }
+    return true;
+}
+
+/* AgentSession.resume, the `.`/`c` continue shortcut. A prompt the model has not answered yet runs again as is;
+ * otherwise the hidden manual-continue directive asks the model to pick its work back up. */
+int app_resume(app_t *a, char **err) {
+    maybe_restore_primary(a);
+    pthread_mutex_lock(&a->agent->mu);
+    json_t *msgs = a->agent->messages;
+    /* conversationEnd: trailing custom messages the user did not author */
+    size_t end = json_len(msgs);
+    while (end > 0) {
+        const json_t *m = json_at(msgs, end - 1);
+        if (!str_eq(json_get_str(m, "role"), "custom") || str_eq(json_get_str(m, "attribution"), "user")) break;
+        end--;
+    }
+    size_t tail = end;
+    while (tail > 0 && is_cut_off_assistant(json_at(msgs, tail - 1))) tail--;
+    /* unansweredPrompt */
+    bool unanswered = false;
+    for (size_t i = tail; i-- > 0;) {
+        const json_t *m = json_at(msgs, i);
+        const char *role = json_get_str(m, "role");
+        if (str_eq(role, "assistant")) {
+            if (!is_cut_off_assistant(m)) break;
+        } else if (str_eq(role, "user") || (str_eq(role, "custom") && str_eq(json_get_str(m, "attribution"), "user") && json_get_bool(m, "display", true)) ||
+                   (str_eq(role, "developer") && json_get_bool(m, "userInitiated", false))) {
+            unanswered = true;
+            break;
+        }
+    }
+    if (unanswered)
+        for (size_t i = end; i-- > tail;) json_free(json_arr_remove(msgs, i));
+    bool has_user = false;
+    const json_t *m;
+    json_arr_foreach(msgs, i, m) if (str_eq(json_get_str(m, "role"), "user")) has_user = true;
+    pthread_mutex_unlock(&a->agent->mu);
+    guards_reset_cycle(a);
+    if (unanswered) {
+        a->retry_count = 0;
+        return agent_continue(a->agent);
+    }
+    if (!has_user) {
+        *err = xstrdup("Nothing to resume");
+        return -1;
+    }
+    char *text = prompt_load("coding-agent/prompts/system/manual-continue.md");
+    json_t *dev = msg_developer_text(text ? text : "");
+    free(text);
+    json_set_str(dev, "attribution", "agent");
+    json_set_bool(dev, "synthetic", true);
+    json_set_bool(dev, "userInitiated", true);
+    json_t *run = json_arr();
+    json_push(run, dev);
+    int rc = run_guarded(a, run);
     if (rc == 0) maybe_auto_compact(a);
     return rc;
 }

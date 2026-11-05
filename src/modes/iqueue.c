@@ -7,6 +7,7 @@
  * queued-messages band (ui/queue.c) until the agent delivers them, when their user message_start draws
  * them in the transcript. `!cmd`, /compact and /handoff run on their own threads so the UI keeps
  * painting and Esc cancels them; input typed meanwhile queues behind the compaction. */
+#include "coding/goal.h"
 #include "coding/slashcmd.h"
 #include "modes/interactive.h"
 
@@ -63,6 +64,12 @@ static void queue_compaction_message(ui_t *u, const char *text, const char *mode
     status(u, "Queued message for after compaction");
 }
 
+/* "." or "c" resume the agent without a visible user message. During a /guided-goal interview "c" is a plausible answer
+ * (e.g. option C), so it is sent as a normal reply there. */
+static bool iq_is_continue_shortcut(ui_t *u, const char *t) {
+    return str_eq(t, ".") || (str_eq(t, "c") && !app_goal_interview_active(u->app));
+}
+
 static void flush_compaction_queue(ui_t *u) {
     if (u->yield_compaction || !json_len(u->compaction_queue)) return;
     json_t *q = u->compaction_queue;
@@ -73,6 +80,10 @@ static void flush_compaction_queue(ui_t *u) {
         const char *text = json_get_str(e, "text");
         if (!text || !*text) continue;
         if (text[0] == '/' && ix_handle_command(u, text)) continue;
+        if (iq_is_continue_shortcut(u, text) && !u->bg_kind) {
+            ix_resume(u);
+            continue;
+        }
         if (!u->worker_running && !u->bg_kind) ix_start_prompt(u, text);
         else if (str_eq(json_get_str(e, "mode"), "followUp")) agent_follow_up(u->app->agent, msg_user_text(text));
         else agent_steer(u->app->agent, msg_user_text(text));
@@ -163,6 +174,8 @@ static void bg_done(void *p) {
     tui_request_render(u->tui);
     flush_compaction_queue(u);
     if (!u->worker_running && !u->bg_kind && !u->compaction_queue) iq_run_end(u);
+    /* results that settled during the compaction go into the compacted context */
+    if (!u->worker_running && !u->bg_kind) ix_job_wake(u);
 }
 
 static void *bg_main(void *p) {
@@ -506,6 +519,12 @@ void iq_submit_mode(ui_t *u, const char *t, json_t *attachments, bool loop_body)
         json_free(attachments);
         /* empty submit while streaming with queued input: interrupt the turn; the queue is delivered next */
         if (u->worker_running && agent_queued_count(u->app->agent)) app_abort(u->app);
+        return;
+    }
+    if (!loop_body && !json_len(attachments) && iq_is_continue_shortcut(u, t)) {
+        json_free(attachments);
+        if (u->bg_kind) queue_compaction_message(u, t, "steer");
+        else ix_resume(u);
         return;
     }
     /* `->` / `=>`, slash commands and `!` / `$` runs are handled locally (staged images are dropped) */
