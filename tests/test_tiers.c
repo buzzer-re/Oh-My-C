@@ -6,6 +6,7 @@
 #include "coding/cachewarm.h"
 #include "coding/modelctl.h"
 
+#include "ai/provider_openai.h"
 #include <stdio.h>
 #include <time.h>
 
@@ -17,6 +18,58 @@ static int fails;
             fails++;                                                                                                   \
         }                                                                                                              \
     } while (0)
+
+/* the Chat Completions reasoning fields omc sends for a bundled row (upstream modular / scaleway provider tests) */
+static void catalog_reasoning_fields(const char *provider, const char *id, ai_effort_t effort, char **out) {
+    *out = NULL;
+    const ai_model_t *m = catalog_find(provider, id);
+    CHECK(m != NULL);
+    if (!m) return;
+    json_t *msgs = json_parse_str("[{\"role\":\"user\",\"content\":\"hi\"}]");
+    ai_context_t ctx = {.messages = msgs};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    o.reasoning = effort;
+    o.disable_reasoning = effort == EFFORT_OFF;
+    json_t *p = oaic_build_request(m, &ctx, &o), *f = json_obj();
+    if (json_get(p, "reasoning")) json_set(f, "reasoning", json_clone(json_get(p, "reasoning")));
+    if (json_get(p, "reasoning_effort")) json_set(f, "reasoning_effort", json_clone(json_get(p, "reasoning_effort")));
+    *out = json_dump(f, 0);
+    json_free(f);
+    json_free(p);
+    json_free(msgs);
+}
+
+static void test_catalog_new_providers(void) {
+    static const struct {
+        const char *provider, *id;
+        ai_effort_t effort;
+        const char *want;
+    } cases[] = {
+        {"modular", "MiniMaxAI/MiniMax-M3.1-Flash", EFFORT_HIGH, "{\"reasoning\":{\"effort\":\"high\"}}"},
+        {"modular", "minimax/minimax-m3", EFFORT_HIGH, "{\"reasoning\":{\"enabled\":true}}"},
+        {"modular", "minimax/minimax-m3", EFFORT_OFF, "{\"reasoning\":{\"enabled\":false}}"},
+        {"modular", "google/gemma-4-31b-it", EFFORT_HIGH, "{\"reasoning\":{\"enabled\":true}}"},
+        {"modular", "google/gemma-4-31b-it", EFFORT_OFF, "{\"reasoning\":{\"enabled\":false}}"},
+        {"scaleway", "glm-5.3", EFFORT_HIGH, "{\"reasoning_effort\":\"high\"}"},
+        {"scaleway", "glm-5.3", EFFORT_OFF, "{\"reasoning_effort\":\"none\"}"},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char *got = NULL;
+        catalog_reasoning_fields(cases[i].provider, cases[i].id, cases[i].effort, &got);
+        if (got && strcmp(got, cases[i].want))
+            fprintf(stderr, "  %s/%s effort %d: got %s, want %s\n", cases[i].provider, cases[i].id, (int)cases[i].effort, got, cases[i].want);
+        CHECK(str_eq(got, cases[i].want));
+        free(got);
+    }
+    CHECK(str_eq(json_get_str(catalog_provider_info("modular"), "defaultModel"), "google/gemma-4-31b-it"));
+    CHECK(str_eq(json_get_str(catalog_provider_info("scaleway"), "defaultModel"), "glm-5.3"));
+    setenv("SCW_API_KEY", "legacy-key", 1); /* the legacy env name still resolves */
+    char *key = ai_env_api_key("scaleway");
+    CHECK(str_eq(key, "legacy-key"));
+    free(key);
+    unsetenv("SCW_API_KEY");
+}
 
 static void test_families(void) {
     const ai_model_t *gpt = catalog_find("openai", "gpt-5.2"), *opus = catalog_find("anthropic", "claude-opus-4-6");
@@ -219,6 +272,7 @@ static void test_tier_json(void) {
 int main(void) {
     catalog_init();
     test_families();
+    test_catalog_new_providers();
     test_context_windows();
     test_cachewarm_rules();
     test_slow_mode();
