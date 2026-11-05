@@ -652,22 +652,15 @@ static int launch_run(launch_args_t *A, bool force_acp) {
         free(dir);
     }
     if (picker) {
-        session_list_t l;
+        /* existence only: the picker opens at once and scans on its own */
         char *dir = A->session_dir ? xstrdup(A->session_dir) : session_dir_for_cwd(cwd);
-        session_list(dir, &l);
+        bool any = session_dir_has_sessions(dir);
         free(dir);
-        size_t n = l.n;
-        session_list_free(&l);
-        if (!n) {
-            session_list_all(&l);
-            n = l.n;
-            session_list_free(&l);
-            if (!n) {
-                char *d = cli_dim("No sessions found");
-                printf("%s\n", d);
-                free(d);
-                goto out;
-            }
+        if (!any && !session_any_sessions()) {
+            char *d = cli_dim("No sessions found");
+            printf("%s\n", d);
+            free(d);
+            goto out;
         }
     }
     const char *resume_path = NULL;

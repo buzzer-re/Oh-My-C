@@ -1069,6 +1069,47 @@ static bool read_info(const char *path, session_info_t *info) {
     return true;
 }
 
+/* a preliminary row: what the first bytes of the file say. The header holds the title slot, so nothing past it is read
+ * (no prompts, status or counts). *is_session tells a session file from any other. */
+static bool read_head_info(const char *path, session_info_t *info, bool *is_session) {
+    memset(info, 0, sizeof(*info));
+    *is_session = false;
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    char head[8192];
+    size_t n = fread(head, 1, sizeof head - 1, f);
+    fclose(f);
+    head[n] = 0;
+    /* the session header and the title slot beside it; a header past the window waits for the full scan */
+    char *line = head;
+    for (int k = 0; k < 2; k++) {
+        char *nl = strchr(line, '\n');
+        if (!nl) break;
+        *nl = 0;
+        json_t *j = json_parse_str(line);
+        const char *type = json_get_str(j, "type");
+        const char *title = json_get_str(j, "title");
+        if (str_eq(type, "session")) {
+            *is_session = true;
+            info->id = xstrdup(json_get_str(j, "id"));
+            info->cwd = xstrdup(json_get_str(j, "cwd"));
+        }
+        if ((str_eq(type, "session") || str_eq(type, "title")) && title && *title && !info->title) info->title = xstrdup(title);
+        json_free(j);
+        line = nl + 1;
+    }
+    if (!*is_session || !info->title) {
+        free(info->id);
+        free(info->cwd);
+        free(info->title);
+        memset(info, 0, sizeof(*info));
+        return false;
+    }
+    info->path = xstrdup(path);
+    info->mtime_ms = fs_mtime_ms(path);
+    return info->title != NULL;
+}
+
 static int cmp_info(const void *a, const void *b) {
     int64_t x = ((const session_info_t *)a)->mtime_ms, y = ((const session_info_t *)b)->mtime_ms;
     return x < y ? 1 : x > y ? -1 : 0;
@@ -1088,6 +1129,91 @@ int session_list(const char *dir, session_list_t *out) {
     dirlist_free(&dl);
     if (out->n > 1) qsort(out->v, out->n, sizeof(session_info_t), cmp_info);
     return 0;
+}
+
+int session_list_titled(const char *dir, session_list_t *out) {
+    memset(out, 0, sizeof(*out));
+    dirlist_t dl;
+    if (fs_list_dir(dir, &dl) != 0) return -1;
+    for (size_t i = 0; i < dl.n; i++) {
+        if (dl.v[i].is_dir || !str_ends(dl.v[i].name, ".jsonl")) continue;
+        char *p = path_join(dir, dl.v[i].name);
+        session_info_t info;
+        bool is_session;
+        if (read_head_info(p, &info, &is_session)) vec_push(out, info);
+        free(p);
+    }
+    dirlist_free(&dl);
+    if (out->n > 1) qsort(out->v, out->n, sizeof(session_info_t), cmp_info);
+    return 0;
+}
+
+int session_list_all_titled(session_list_t *out) {
+    memset(out, 0, sizeof(*out));
+    char *root = omc_agent_path("sessions");
+    dirlist_t dl;
+    if (fs_list_dir(root, &dl) == 0) {
+        for (size_t i = 0; i < dl.n; i++) {
+            if (!dl.v[i].is_dir) continue;
+            char *d = path_join(root, dl.v[i].name);
+            session_list_t sub;
+            if (session_list_titled(d, &sub) == 0) {
+                for (size_t k = 0; k < sub.n; k++) vec_push(out, sub.v[k]);
+                vec_free(&sub);
+            }
+            free(d);
+        }
+        dirlist_free(&dl);
+    }
+    free(root);
+    if (out->n > 1) qsort(out->v, out->n, sizeof(session_info_t), cmp_info);
+    return 0;
+}
+
+bool session_dir_has_sessions(const char *dir) {
+    dirlist_t dl;
+    if (fs_list_dir(dir, &dl) != 0) return false;
+    bool found = false;
+    for (size_t i = 0; i < dl.n && !found; i++) {
+        if (dl.v[i].is_dir || !str_ends(dl.v[i].name, ".jsonl")) continue;
+        char *p = path_join(dir, dl.v[i].name);
+        session_info_t info;
+        bool is_session;
+        bool titled = read_head_info(p, &info, &is_session);
+        if (titled) session_info_free(&info);
+        found = is_session;
+        if (!found && read_info(p, &info)) { /* a header past the head window */
+            session_info_free(&info);
+            found = true;
+        }
+        free(p);
+    }
+    dirlist_free(&dl);
+    return found;
+}
+
+bool session_any_sessions(void) {
+    char *root = omc_agent_path("sessions");
+    dirlist_t dl;
+    bool found = false;
+    if (fs_list_dir(root, &dl) == 0) {
+        for (size_t i = 0; i < dl.n && !found; i++) {
+            if (!dl.v[i].is_dir) continue;
+            char *d = path_join(root, dl.v[i].name);
+            found = session_dir_has_sessions(d);
+            free(d);
+        }
+        dirlist_free(&dl);
+    }
+    free(root);
+    return found;
+}
+
+void session_list_remove(session_list_t *l, size_t i) {
+    if (i >= l->n) return;
+    session_info_free(&l->v[i]);
+    memmove(&l->v[i], &l->v[i + 1], (l->n - i - 1) * sizeof l->v[0]);
+    l->n--;
 }
 
 int session_list_all(session_list_t *out) {

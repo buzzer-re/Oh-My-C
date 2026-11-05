@@ -5,7 +5,7 @@ reply `.` sends the hidden manual-continue directive without a user bubble; a pr
 editor.
 usage: resume_tui.py <omc> <request log> <scratch dir>
 Prints "resume tui ok" or the first failing step."""
-import fcntl, json, os, pty, re, select, signal, struct, sys, termios, time
+import fcntl, glob, json, os, pty, re, select, signal, struct, subprocess, sys, termios, time
 
 omc, log, scratch = sys.argv[1:4]
 work = os.path.join(scratch, "work")
@@ -145,5 +145,33 @@ if not wait_for("keep-this-prompt!", 5):
     fail("prompt back in the editor", plain()[-600:])
 if len(requests()) != count:
     fail("missing credential sent a request", len(requests()) - count)
+
+# the picker opens on titled sessions and the full scan brings in the untitled one and the prompts
+def run_print(text):
+    subprocess.run([omc, "--model", "mock/mock-1", "-p", text], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+
+
+run_print("say:picker-named-prompt")
+files = sorted(glob.glob(os.path.join(agent, "sessions", "**", "*.jsonl"), recursive=True), key=os.path.getmtime)
+if not files:
+    fail("no session file")
+with open(files[-1]) as f:
+    body = f.read()
+with open(files[-1], "w") as f:
+    f.write('{"type":"title","title":"Picker Titled Row"}\n' + body)
+time.sleep(0.05)
+run_print("say:picker-untitled-prompt")
+stop()
+out = bytearray()
+pid, fd = pty.fork()
+if pid == 0:
+    os.execve(omc, [omc, "--model", "mock/mock-1", "--resume"], env)
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
+if not wait_for("Picker Titled Row"):
+    fail("titled row", plain()[-600:])
+if not wait_for("say:picker-untitled-prompt"):
+    fail("untitled row after the full scan", plain()[-600:])
+if not wait_for("say:picker-named-prompt"):
+    fail("titled row's prompt after the full scan", plain()[-600:])
 stop()
 print("resume tui ok")

@@ -1856,7 +1856,8 @@ static int manual(app_t *a, const char *mode, const char *instructions, char **e
             *err = xstrdup("Compaction cancelled");
             break;
         }
-        if (idx + 1 < methods.n) app_notice(a, "warning", "%s compaction failed; trying the next preferred method", m);
+        if (idx + 1 < methods.n)
+            app_notice(a, "warning", "%s compaction failed (%s); trying the next preferred method", m, *err ? *err : "unknown error");
     }
     if (rc != 0 && !*err) *err = xstrdup("No configured compaction method can run manually.");
     strvec_free(&methods);
