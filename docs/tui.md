@@ -327,7 +327,7 @@ without Kitty Unicode placeholders), video contact-sheet attachments, chip hyper
 
 Ports of omp's terminal-capabilities.ts image/hyperlink policy, kitty-graphics.ts, sixel.ts and components/image.ts:
 
-- **Protocol:** Kitty for kitty/ghostty/wezterm/warp/otty/rio/tern/monstar (and `screen`/`ghostty` TERMs on a TTY),
+- **Protocol:** Kitty for kitty/ghostty/wezterm/warp/otty/rio/rex/tern/monstar (and `screen`/`ghostty` TERMs on a TTY),
   iTerm2 for iTerm2, none for VS Code/Alacritty; `PI_FORCE_IMAGE_PROTOCOL` overrides; Kitty is dropped inside tmux
   without `allow-passthrough`, under Paseo and Herdr. A DA1 reply with attribute 4 or an XTSMGRAPHICS geometry upgrades
   an unknown terminal to SIXEL (not inside tmux). Cell size comes from CSI 16 t, DEC 2048 in-band resize reports or iTerm2

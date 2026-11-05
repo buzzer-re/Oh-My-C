@@ -55,7 +55,7 @@ static const char *from_program(const char *p) {
         {"kitty", "kitty"},   {"ghostty", "ghostty"}, {"wezterm", "wezterm"},   {"iterm.app", "iterm2"},
         {"iterm2", "iterm2"}, {"vscode", "vscode"},   {"alacritty", "alacritty"}, {"warpterminal", "warp"},
         {"orca", "orca"},     {"otty", "otty"},       {"rio", "rio"},           {"tern", "tern"},
-        {"monstar", "monstar"},
+        {"monstar", "monstar"}, {"rex", "rex"},
     };
     for (size_t i = 0; i < ARRAY_LEN(MAP); i++)
         if (str_ieq(p, MAP[i][0])) return MAP[i][1];
@@ -80,6 +80,7 @@ static void tmux_client_programs(const char *report, strvec_t *out) {
         char *low = str_lower(tn);
         if (!strcmp(low, "xterm-kitty")) strvec_push(out, "kitty");
         else if (!strcmp(low, "xterm-ghostty")) strvec_push(out, "ghostty");
+        else if (!strcmp(low, "xterm-rex")) strvec_push(out, "rex");
         else if (!strcmp(low, "wezterm")) strvec_push(out, "wezterm");
         free(low);
         free(tn);
@@ -123,6 +124,7 @@ static const char *detect(bool query_tmux) {
     const char *term = env_get("TERM");
     if (term && str_istr(term, "ghostty")) return "ghostty";
     if (str_ieq(term, "monstar")) return "monstar";
+    if (str_ieq(term, "xterm-rex")) return "rex";
     const char *ct = env_get("COLORTERM");
     if (ct && (str_ieq(ct, "truecolor") || str_ieq(ct, "24bit"))) return "trueColor";
     return "base";

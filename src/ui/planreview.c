@@ -2069,6 +2069,8 @@ static void he_destroy(tui_component_t *c) {
 
 static const tui_component_vt HE_VT = {"hook-editor", he_render, he_key, NULL, he_destroy};
 
+tui_editor_t *ui_hook_editor_of(tui_component_t *c) { return c && c->vt == &HE_VT ? ((hook_editor_t *)c)->ed : NULL; }
+
 /* getEditorTheme(): borderMuted frame, accent */
 static char *he_border(void *ud, const char *s) {
     UNUSED(ud);

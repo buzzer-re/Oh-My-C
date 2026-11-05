@@ -898,7 +898,8 @@ static void finish(ask_view_t *v, json_t *answers) {
     ui_ask_done_fn done = v->done;
     void *ud = v->ud;
     ui_t *u = v->u;
-    ui_close_selector(u); /* destroys v */
+    ui_close_nested_selector(u); /* a Ctrl+R history search open over the dialog */
+    ui_close_selector(u);        /* destroys v */
     if (done) done(ud, answers);
 }
 
@@ -1195,6 +1196,10 @@ static void ask_destroy(tui_component_t *c) {
 }
 
 static const tui_component_vt ASK_VT = {"ask-dialog", ask_render, ask_key, NULL, ask_destroy};
+
+bool ui_ask_is_dialog(const tui_component_t *c) { return c && c->vt == &ASK_VT; }
+
+tui_editor_t *ui_ask_prompt_editor(tui_component_t *c) { return ui_ask_is_dialog(c) ? ((ask_view_t *)c)->ped : NULL; }
 
 /* normalizeDialogQuestions */
 static void load_questions(ask_view_t *v, const json_t *questions) {

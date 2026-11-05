@@ -135,6 +135,13 @@ int main(void) {
     CHECK(str_eq(tui_terminal_id_detect(false), "ghostty"));
     setenv("TERM", "monstar", 1);
     CHECK(str_eq(tui_terminal_id_detect(false), "monstar"));
+    setenv("TERM", "xterm-rex", 1); /* omp 9e505924: TERM alone identifies Rex across SSH */
+    CHECK(str_eq(tui_terminal_id_detect(false), "rex"));
+    setenv("TERM", "xterm", 1);
+    setenv("TERM_PROGRAM", "rex", 1); /* omp c76e737a */
+    CHECK(str_eq(tui_terminal_id_detect(false), "rex"));
+    unsetenv("TERM_PROGRAM");
+    CHECK(tui_terminal_notify_protocol("rex") == TUI_NOTIFY_BELL);
     CHECK(tui_terminal_notify_protocol("kitty") == TUI_NOTIFY_OSC99);
     CHECK(tui_terminal_notify_protocol("tern") == TUI_NOTIFY_OSC99);
     CHECK(tui_terminal_notify_protocol("ghostty") == TUI_NOTIFY_OSC9);

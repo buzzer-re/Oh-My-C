@@ -3071,6 +3071,15 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
         dc_debug_open(u);
         return true;
     }
+    /* history search opens over the ask dialog and hook editor too (omp's global listener); the pick goes to a
+     * focused prompt */
+    if (!tui_overlay_visible(t) && ui_selector_open(u) && tui_kb(k, "app.history.search")) {
+        tui_component_t *top = ui_selector_top(u);
+        if (ui_ask_is_dialog(top) || ui_hook_editor_of(top)) {
+            ui_history_search(u);
+            return true;
+        }
+    }
     if (tui_overlay_visible(t) || ui_selector_open(u)) return false;
     if (k->kind == TUI_KEY_MOUSE) return inline_mouse(u, k);
     if (ui_btw_key(u, k)) return true; /* the /btw panel owns Esc while shown; c/f/b act on its answer */
