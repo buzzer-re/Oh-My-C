@@ -83,6 +83,10 @@ typedef struct lsp_client {
     VEC(openf_t) open;
     json_t *idle_closed; /* path -> version of documents closed for reopen */
     const char *status;  /* "connecting" | "ready" | "error" */
+    /* rust-analyzer only: the crate manifests present at initialize (listCargoManifests), listed off the call's thread */
+    pthread_t cargo_th;
+    bool cargo_started;
+    char *cargo_manifests;
 } lsp_client_t;
 
 struct lsp_manager {
@@ -368,6 +372,59 @@ static char *resolve_command(const char *command, const char *cwd) {
     return which(command);
 }
 
+/* typescriptPackageDir: the npm package a `tsc` belongs to, owned or NULL */
+static char *typescript_package_dir(const char *tsc) {
+    char *real = path_real(tsc);
+    char *bin_dir = path_dirname(tsc);
+    char *found = NULL;
+    if (real) {
+        char *rb = path_dirname(real);
+        if (!strcmp(path_basename(rb), "bin")) { /* <pkg>/bin/tsc: symlinked node_modules/.bin and global installs */
+            char *pkg = path_dirname(rb), *pj = path_join(pkg, "package.json");
+            if (fs_exists(pj)) found = xstrdup(pkg);
+            free(pj);
+            free(pkg);
+        }
+        free(rb);
+        free(real);
+    }
+    for (int i = 0; i < 2 && !found; i++) {
+        char *pkg = i == 0 ? path_join3(bin_dir, "..", "typescript") : path_join3(bin_dir, "node_modules", "typescript");
+        char *pj = path_join(pkg, "package.json");
+        if (fs_exists(pj)) found = xstrdup(pkg);
+        free(pj);
+        free(pkg);
+    }
+    free(bin_dir);
+    return found;
+}
+
+/* typescriptSpeaksLsp: TypeScript 7 dropped the JS lib/tsserver.js that typescript-language-server wraps and exposes
+ * `tsc --lsp --stdio` instead; older releases reject the flag. Outside an npm layout (e.g. nixpkgs) ask the compiler for its
+ * version, run in `cwd` so version-manager shims resolve the project's pinned TypeScript. */
+static bool typescript_speaks_lsp(const char *tsc, const char *cwd) {
+    char *pkg = typescript_package_dir(tsc);
+    if (pkg) {
+        char *ts = path_join3(pkg, "lib", "tsserver.js");
+        bool speaks = !fs_exists(ts);
+        free(ts);
+        free(pkg);
+        return speaks;
+    }
+    const char *argv[] = {tsc, "--version", NULL};
+    proc_opts_t o = {.cwd = cwd, .timeout_ms = 3000, .max_output = 4096};
+    proc_result_t r;
+    memset(&r, 0, sizeof r);
+    bool speaks = false;
+    if (proc_run(argv, &o, &r) == 0 && r.out && !strncmp(r.out, "Version ", 8) && isdigit((unsigned char)r.out[8])) {
+        char *end;
+        long major = strtol(r.out + 8, &end, 10);
+        speaks = *end == '.' && major >= 7;
+    }
+    proc_result_free(&r);
+    return speaks;
+}
+
 static json_t *load_config(const char *cwd) {
     size_t n;
     const char *d = embed_get("assets/lsp-servers.json", &n);
@@ -415,18 +472,7 @@ static json_t *load_config(const char *cwd) {
     json_t *native = json_get(servers, "typescript-native");
     if (native) {
         const char *tsc = json_get_str(native, "resolvedCommand");
-        char *real = tsc ? path_real(tsc) : NULL;
-        bool speaks = false;
-        if (real) {
-            char *bin = path_dirname(real), *pkg = path_dirname(bin);
-            char *pj = path_join(pkg, "package.json"), *ts = path_join3(pkg, "lib", "tsserver.js");
-            speaks = !strcmp(path_basename(bin), "bin") && fs_exists(pj) && !fs_exists(ts);
-            free(bin);
-            free(pkg);
-            free(pj);
-            free(ts);
-            free(real);
-        }
+        bool speaks = tsc && typescript_speaks_lsp(tsc, cwd);
         json_del(servers, speaks ? "typescript-language-server" : "typescript-native");
     }
     return servers;
@@ -898,12 +944,38 @@ static bool is_clangd(const json_t *cfg) {
 }
 
 static bool is_rust_analyzer(const lsp_client_t *c) {
-    const char *cmd = json_get_str(c->cfg, "command");
-    const char *b = cmd ? path_basename(cmd) : "";
-    return !strcmp(b, "rust-analyzer") || !strcmp(b, "rust-analyzer.exe");
+    const char *keys[] = {"command", "resolvedCommand"};
+    for (size_t i = 0; i < ARRAY_LEN(keys); i++) {
+        const char *cmd = json_get_str(c->cfg, keys[i]);
+        const char *b = cmd ? path_basename(cmd) : "";
+        if (!strcmp(b, "rust-analyzer") || !strcmp(b, "rust-analyzer.exe")) return true;
+    }
+    return false;
+}
+
+/* listCargoManifests: the `Cargo.toml` files rust-analyzer can discover under `root`, sorted and joined, so a reload can
+ * tell whether the crate set changed since initialize (gitignored dirs such as `target/` skipped); NULL on failure */
+static char *list_cargo_manifests(const char *root) {
+    walk_opts_t o = {.types = WALK_FILE};
+    walk_list_t l = {0};
+    if (walk_collect(root, &o, &l) != 0) return NULL;
+    sb_t b = SB_INIT;
+    for (size_t i = 0; i < l.n; i++)
+        if (!strcmp(path_basename(l.v[i].path), "Cargo.toml")) sb_appendf(&b, "%s\n", l.v[i].path);
+    walk_list_free(&l);
+    if (!b.s) return xstrdup("");
+    return sb_detach(&b);
+}
+
+static void *cargo_manifests_thread(void *p) {
+    lsp_client_t *c = p;
+    c->cargo_manifests = list_cargo_manifests(c->root);
+    return NULL;
 }
 
 static void client_free(lsp_client_t *c) {
+    if (c->cargo_started) pthread_join(c->cargo_th, NULL);
+    free(c->cargo_manifests);
     for (size_t i = 0; i < c->open.n; i++) {
         free(c->open.v[i].uri);
         free(c->open.v[i].lang);
@@ -1013,6 +1085,7 @@ static lsp_client_t *client_start(const char *name, const json_t *cfg, const cha
     json_set(pp, "settings", st ? json_clone(st) : json_obj());
     notify(c, "workspace/didChangeConfiguration", pp);
     c->status = "ready";
+    if (is_rust_analyzer(c) && pthread_create(&c->cargo_th, NULL, cargo_manifests_thread, c) == 0) c->cargo_started = true;
     return c;
 }
 
@@ -3777,6 +3850,45 @@ done:
     free(q);
 }
 
+/* reloadServer: owned result text. Gated on the binary: some servers (Roslyn) crash on an unknown method. reloadWorkspace
+ * refreshes only the projects found at initialize, so a new crate needs a restart: the next request cold-starts a client */
+static char *reload_server(lsp_manager_t *m, lsp_client_t *c, const char *server, budget_t *bg) {
+    if (is_rust_analyzer(c) || !strcmp(server, "rust-analyzer")) {
+        if (c->cargo_started) {
+            pthread_join(c->cargo_th, NULL);
+            c->cargo_started = false;
+        }
+        char *current = list_cargo_manifests(c->root);
+        bool same = c->cargo_manifests && current && !strcmp(c->cargo_manifests, current);
+        free(current);
+        if (!same) {
+            pthread_mutex_lock(&m->mu);
+            for (size_t i = 0; i < m->clients.n; i++)
+                if (m->clients.v[i] == c) {
+                    m->clients.v[i] = m->clients.v[--m->clients.n];
+                    break;
+                }
+            client_stop(c, true);
+            pthread_mutex_unlock(&m->mu);
+            return xasprintf("Restarted %s", server);
+        }
+        char *err = NULL;
+        int code = 0;
+        json_t *r = request(c, "rust-analyzer/reloadWorkspace", NULL, bg, &err, &code);
+        free(err);
+        if (r) {
+            json_free(r);
+            return xasprintf("Reloaded %s", server);
+        }
+    }
+    json_t *pp = json_obj();
+    json_t *st = json_get(c->cfg, "settings");
+    json_set(pp, "settings", st ? json_clone(st) : json_obj());
+    notify(c, "workspace/didChangeConfiguration", pp);
+    refresh_open_files(c);
+    return xasprintf("Reloaded %s", server);
+}
+
 static void do_reload_all(call_t *k) {
     lsp_manager_t *m = k->lt->m;
     pthread_mutex_lock(&m->mu);
@@ -3829,12 +3941,7 @@ static void do_reload_all(call_t *k) {
             free(err);
             continue;
         }
-        json_t *pp = json_obj();
-        json_t *st = json_get(c->cfg, "settings");
-        json_set(pp, "settings", st ? json_clone(st) : json_obj());
-        notify(c, "workspace/didChangeConfiguration", pp);
-        refresh_open_files(c);
-        strvec_push_own(&outputs, xasprintf("Reloaded %s", servers.v[s]));
+        strvec_push_own(&outputs, reload_server(m, c, servers.v[s], &k->bg));
     }
     {
         char *text = strvec_join(&outputs, "\n");
@@ -4296,21 +4403,7 @@ static void do_file_action(call_t *k, const char *resolved) {
         }
         json_free(r);
     } else if (!strcmp(action, "reload")) {
-        if (ra) {
-            json_t *r = request(c, "rust-analyzer/reloadWorkspace", NULL, &k->bg, &err, &code);
-            if (r) {
-                json_free(r);
-                output = xasprintf("Reloaded %s", server);
-            }
-        }
-        if (!output) {
-            json_t *pp = json_obj();
-            json_t *st = json_get(c->cfg, "settings");
-            json_set(pp, "settings", st ? json_clone(st) : json_obj());
-            notify(c, "workspace/didChangeConfiguration", pp);
-            refresh_open_files(c);
-            output = xasprintf("Reloaded %s", server);
-        }
+        output = reload_server(k->lt->m, c, server, &k->bg);
     } else {
         output = xasprintf("Unknown action: %s", action);
     }

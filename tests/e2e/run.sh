@@ -326,6 +326,8 @@ grep -q "Background job bg_1 has completed" "$T/req.jsonl" && echo "   ok  async
 check "wait nothing"   "Nothing to wait for"  "$B" --model mock/mock-1 -p 'call:wait:{}'
 # background jobs carry the call's intent: proc://, wait, /jobs; /jobs full requests the widget role's caption
 check "jobs intent" "jobs intent ok"  python3 -I "$ROOT/tests/e2e/jobs_intent.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ji"
+# lsp: payload "null" stays JSON null; reload restarts rust-analyzer when a new crate appeared
+check "lsp reload" "lsp reload ok"  python3 -I "$ROOT/tests/e2e/lsp_reload.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/lr"
 # automatic session title (interactive only, like omp's autoTitle): fork side request returns a card title
 : > "$T/req.jsonl"
 check "print no title"  "0"  bash -c "env -u OMC_NO_TITLE '$B' --model mock/mock-1 -p 'bash:echo untitled' >/dev/null; grep -c '<title-request>' '$T/req.jsonl'"
