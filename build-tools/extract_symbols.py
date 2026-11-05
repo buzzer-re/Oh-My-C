@@ -19,9 +19,10 @@ def block(name):
 out = {"presets": {"unicode": block("UNICODE_SYMBOLS"), "nerd": block("NERD_SYMBOLS"), "ascii": block("ASCII_SYMBOLS")}}
 sp = src[src.index("export const SPINNER_FRAMES"):]
 sp = sp[:sp.index("\n};")]
+sp = re.sub(r"^\s*//.*$", "", sp, flags=re.M)
 spin = {}
 for preset in ("unicode", "nerd", "ascii"):
-    m = re.search(preset + r":\s*\{\s*status:\s*(\[[^\]]*\]),\s*activity:\s*(\[[^\]]*\]),?\s*\}", sp)
+    m = re.search(preset + r":\s*\{\s*status:\s*(\[.*?\]),\s*activity:\s*(\[.*?\]),?\s*\}", sp)
     spin[preset] = {"status": json.loads(re.sub(r",\s*\]", "]", m.group(1))), "activity": json.loads(re.sub(r",\s*\]", "]", m.group(2)))}
 out["spinners"] = spin
 keys = [set(v) for v in out["presets"].values()]

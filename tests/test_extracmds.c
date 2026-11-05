@@ -63,13 +63,13 @@ static void test_entries(void) {
     changelog_view_t v = {CHANGELOG_LAST, 1};
     size_t shown = 0;
     char *md = changelog_markdown(&v, &shown);
-    CHECK(md && shown == 1 && !strncmp(md, "## [18.14.2]", 12)); /* [Unreleased] has no version: skipped */
-    CHECK(md && !strstr(md, "## [18.14.1]"));
+    CHECK(md && shown == 1 && !strncmp(md, "## [18.16.0]", 12)); /* [Unreleased] has no version: skipped */
+    CHECK(md && !strstr(md, "## [18.15.0]"));
     free(md);
     v = (changelog_view_t){CHANGELOG_LAST, 2};
     md = changelog_markdown(&v, &shown);
-    CHECK(shown == 2 && md && !strncmp(md, "## [18.14.1]", 12)); /* oldest first */
-    CHECK(md && strstr(md, "\n\n## [18.14.2]") != NULL);
+    CHECK(shown == 2 && md && !strncmp(md, "## [18.15.0]", 12)); /* oldest first */
+    CHECK(md && strstr(md, "\n\n## [18.16.0]") != NULL);
     free(md);
     v = (changelog_view_t){CHANGELOG_FULL, 0};
     md = changelog_markdown(&v, &shown);
@@ -255,7 +255,7 @@ static char *marker_read(const char *p) {
 }
 
 static void test_startup_changelog(void) {
-    CHECK(str_eq(changelog_current_version(), "18.14.2"));
+    CHECK(str_eq(changelog_current_version(), "18.16.0"));
     const char *tmp = getenv("TMPDIR");
     char *base = xasprintf("%s/omc-wp28b-cl-XXXXXX", tmp ? tmp : "/tmp");
     CHECK(mkdtemp(base) != NULL);
@@ -264,25 +264,25 @@ static void test_startup_changelog(void) {
     /* no marker: record the current version, show nothing */
     CHECK(!changelog_startup_resolve("summary", marker, &s));
     char *m = marker_read(marker);
-    CHECK(str_eq(m, "18.14.2"));
+    CHECK(str_eq(m, "18.16.0"));
     free(m);
     /* steady state */
     CHECK(!changelog_startup_resolve("summary", marker, &s));
-    /* three newest of six unseen releases; the marker advances */
+    /* three newest of eight unseen releases; the marker advances */
     fs_write(marker, "18.13.0\n", 8);
     CHECK(changelog_startup_resolve("summary", marker, &s));
-    CHECK(s.selected == 3 && s.total_unseen == 6 && str_eq(s.latest, "18.14.2") && s.change_count == 99);
-    CHECK(s.markdown && !strncmp(s.markdown, "## [18.14.2]", 12) && !s.truncated);
+    CHECK(s.selected == 3 && s.total_unseen == 8 && str_eq(s.latest, "18.16.0") && s.change_count == 89);
+    CHECK(s.markdown && !strncmp(s.markdown, "## [18.16.0]", 12) && !s.truncated);
     char *sum = changelog_startup_summary(&s);
-    CHECK(str_eq(sum, "Updated to v18.14.2 \xc2\xb7 99 changes across 3 releases\n3 breaking changes \xc2\xb7 17 added \xc2\xb7 "
-                      "22 changed \xc2\xb7 57 fixed \xc2\xb7 +3 earlier releases \xc2\xb7 Use /changelog full for history."));
+    CHECK(str_eq(sum, "Updated to v18.16.0 \xc2\xb7 89 changes across 3 releases\n10 added \xc2\xb7 "
+                      "17 changed \xc2\xb7 62 fixed \xc2\xb7 +5 earlier releases \xc2\xb7 Use /changelog full for history."));
     free(sum);
     changelog_startup_free(&s);
     m = marker_read(marker);
-    CHECK(str_eq(m, "18.14.2"));
+    CHECK(str_eq(m, "18.16.0"));
     free(m);
     /* one release: "in 1 release", details hint */
-    fs_write(marker, "18.14.1", 7);
+    fs_write(marker, "18.15.0", 7);
     CHECK(changelog_startup_resolve("expanded", marker, &s) && s.selected == 1 && s.total_unseen == 1);
     sum = changelog_startup_summary(&s);
     CHECK(strstr(sum, " in 1 release\n") && strstr(sum, "\xc2\xb7 Use /changelog for details."));
@@ -292,7 +292,7 @@ static void test_startup_changelog(void) {
     fs_write(marker, "18.0.0", 6);
     CHECK(!changelog_startup_resolve("hidden", marker, &s));
     m = marker_read(marker);
-    CHECK(str_eq(m, "18.14.2"));
+    CHECK(str_eq(m, "18.16.0"));
     free(m);
     fs_write(marker, "99.0.0", 6);
     CHECK(!changelog_startup_resolve("hidden", marker, &s));
@@ -303,7 +303,7 @@ static void test_startup_changelog(void) {
     fs_write(marker, "v18", 3);
     CHECK(!changelog_startup_resolve("summary", marker, &s));
     m = marker_read(marker);
-    CHECK(str_eq(m, "18.14.2"));
+    CHECK(str_eq(m, "18.16.0"));
     free(m);
     changelog_startup_t empty = {0};
     sum = changelog_startup_summary(&empty);

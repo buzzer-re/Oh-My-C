@@ -76,7 +76,7 @@ for name in ("setup", "providers", "ratchet", "omfg", "debug", "pause", "record"
 print("ok advertised")
 
 checks = [
-    ("/changelog last 1", "## [18.14.2]"),
+    ("/changelog last 1", "## [18.16.0]"),
     ("/changelog foo", "Usage: /changelog [full|last [N]]"),
     ("/skillful status", "Skill listing: on (session override; default from the skillful setting)."),
     ("/skillful off", "Skill listing disabled for this session."),
