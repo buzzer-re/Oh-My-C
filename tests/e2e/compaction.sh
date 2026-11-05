@@ -47,6 +47,9 @@ BIG2=$(python3 -I -c 'print("say:" + " ".join("delta%d epsilon%d zeta" % (i, i *
 cagent "$T/cg1" $'modelRoles:\n  default: mock/mock-1\ncompaction:\n  thresholdTokens: 75000\n  asyncEnabled: false\n  methodOrder: [soft]'
 : > "$T/req.jsonl"
 OMC_CODING_AGENT_DIR="$T/cg1" "${CR[@]}" "{\"type\":\"prompt\",\"message\":\"$BIG1\"}" "{\"type\":\"prompt\",\"message\":\"$BIG2\"}" > "$T/cg1.out"
+OMC_CODING_AGENT_DIR="$T/cg1" python3 -I "$ROOT/tests/e2e/acp_compaction.py" "$B" "$BIG1" "$BIG2" > "$T/cgacp.out" 2>&1
+check "acp compaction start"   "_omp/compaction/start True True ['action', 'reason', 'sessionId'] threshold context-full"  cat "$T/cgacp.out"
+check "acp compaction end"     "_omp/compaction/end True True ['aborted', 'action', 'sessionId', 'tokensBefore', 'willRetry'] None context-full False False"  cat "$T/cgacp.out"
 check "auto compaction start"  '"type": "auto_compaction_start", "reason": "threshold", "action": "context-full"'  cat "$T/cg1.out"
 check "auto compaction result" '"type": "auto_compaction_end", "action": "context-full", "result": {"summary": "plain answer\n\n---\n\n**Turn Context (split turn):**\n\nplain answer", "shortSummary": "plain answer"'  cat "$T/cg1.out"
 check "summary transcript"     $'<conversation>\n\n\nHuman: say:alpha0 beta0 gamma'  python3 -I -c '

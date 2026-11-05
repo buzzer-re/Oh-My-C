@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <math.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <zlib.h>
 
@@ -335,13 +336,109 @@ static char *template_doc(void) {
     return sb_detach(&b);
 }
 
-char *export_render_html(json_t *session_data, const char *theme_styles) {
+/* ---------- the #session-data payload, streamed (export/html/payload.ts) ----------
+ * base64(UTF-8 JSON), byte-identical to base64(JSON.stringify(value)), without ever holding the whole string: only a
+ * single entry-sized JSON piece and one chunk are resident. */
+
+/* bytes encoded per flush; a multiple of 3 so intermediate chunks carry no `=` padding */
+#define EXPORT_CHUNK_BYTES (3u << 20)
+/* container depth serialized piecewise; four levels reach each transcript entry:
+ * root -> subSessions -> sub-session -> entries -> entry */
+#define EXPORT_STREAM_DEPTH 4
+
+typedef struct {
+    int fd;         /* output file, or -1 with `mem` */
+    sb_t *mem;
+    unsigned char *buf;
+    size_t cap, len;
+    int err; /* the first write's errno: the failure to report */
+} html_sink_t;
+
+static void sink_raw(html_sink_t *k, const char *s, size_t n) {
+    if (k->err) return;
+    if (k->mem) {
+        sb_appendn(k->mem, s, n);
+        return;
+    }
+    while (n) {
+        ssize_t w = write(k->fd, s, n);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            k->err = errno;
+            return;
+        }
+        s += w;
+        n -= (size_t)w;
+    }
+}
+
+static void sink_flush(html_sink_t *k, bool final) {
+    /* keep the 1-2 trailing bytes of an unfinished 3-byte group for the next chunk */
+    size_t count = final ? k->len : k->len - k->len % 3;
+    if (!count) return;
+    char *b64 = base64_encode(k->buf, count);
+    sink_raw(k, b64, strlen(b64));
+    free(b64);
+    memmove(k->buf, k->buf + count, k->len - count);
+    k->len -= count;
+}
+
+static void sink_json(html_sink_t *k, const char *s, size_t n) {
+    while (n && !k->err) {
+        size_t room = k->cap - k->len;
+        size_t take = n < room ? n : room;
+        memcpy(k->buf + k->len, s, take);
+        k->len += take;
+        s += take;
+        n -= take;
+        if (n) sink_flush(k, false);
+    }
+}
+
+static bool has_duplicate_keys(const json_t *o) {
+    for (size_t i = 0; i < o->u.obj.n; i++)
+        for (size_t j = i + 1; j < o->u.obj.n; j++)
+            if (!strcmp(o->u.obj.keys[i], o->u.obj.keys[j])) return true;
+    return false;
+}
+
+/* jsonPieces: the JSON text of `v` in pieces whose concatenation equals JSON.stringify(v) */
+static void json_pieces(html_sink_t *k, const json_t *v, int depth) {
+    if (depth > 0 && json_is_arr(v)) {
+        sink_json(k, "[", 1);
+        const json_t *item;
+        json_arr_foreach(v, i, item) {
+            if (i) sink_json(k, ",", 1);
+            json_pieces(k, item, depth - 1);
+        }
+        sink_json(k, "]", 1);
+        return;
+    }
+    if (depth > 0 && json_is_obj(v) && !has_duplicate_keys(v)) {
+        sink_json(k, "{", 1);
+        for (size_t i = 0; i < v->u.obj.n && !k->err; i++) {
+            sb_t key = SB_INIT;
+            if (i) sb_putc(&key, ',');
+            json_js_quote_sb(&key, v->u.obj.keys[i], strlen(v->u.obj.keys[i]));
+            sb_putc(&key, ':');
+            sink_json(k, key.s, key.len);
+            sb_free(&key);
+            json_pieces(k, v->u.obj.vals[i], depth - 1);
+        }
+        sink_json(k, "}", 1);
+        return;
+    }
+    sb_t whole = SB_INIT;
+    json_dump_js_sb(&whole, v);
+    sink_json(k, whole.s ? whole.s : "", whole.len);
+    sb_free(&whole);
+}
+
+/* writeExportHtml's body: the page around the #session-data marker, the payload streamed in between */
+static void render_to_sink(html_sink_t *k, json_t *session_data, const char *theme_styles) {
     json_t *trace = session_trace_build(json_get(session_data, "header"), json_get(session_data, "entries"),
                                         json_get(session_data, "subSessions"));
     json_set(session_data, "trace", trace);
-    char *js = json_dump_js(session_data);
-    char *b64 = base64_encode(js, strlen(js));
-    free(js);
     sb_t b = SB_INIT;
     char *tpl = template_doc();
     sb_append(&b, tpl);
@@ -349,9 +446,24 @@ char *export_render_html(json_t *session_data, const char *theme_styles) {
     char *style = theme_styles ? xasprintf("<style>%s</style>", theme_styles) : xstrdup("");
     replace_once(&b, "<theme-vars/>", style);
     free(style);
-    replace_once(&b, "{{SESSION_DATA}}", b64);
-    free(b64);
-    return sb_detach(&b);
+    const char *page = sb_cstr(&b);
+    const char *marker = strstr(page, "{{SESSION_DATA}}");
+    size_t head = marker ? (size_t)(marker - page) : strlen(page);
+    sink_raw(k, page, head);
+    k->buf = xmalloc(k->cap);
+    json_pieces(k, session_data, EXPORT_STREAM_DEPTH);
+    sink_flush(k, true);
+    free(k->buf);
+    k->buf = NULL;
+    if (marker) sink_raw(k, marker + strlen("{{SESSION_DATA}}"), strlen(marker + strlen("{{SESSION_DATA}}")));
+    sb_free(&b);
+}
+
+char *export_render_html(json_t *session_data, const char *theme_styles) {
+    sb_t out = SB_INIT;
+    html_sink_t k = {.fd = -1, .mem = &out, .cap = 4096};
+    render_to_sink(&k, session_data, theme_styles);
+    return sb_detach(&out);
 }
 
 /* ---------- --themes palette (index.ts generateThemeVars("theme") + web-palette.ts) ---------- */
@@ -560,16 +672,28 @@ char *export_default_name(const char *session_file) {
     return xasprintf(EXPORT_APP_NAME "-session-%.*s.html", (int)n, base);
 }
 
-/* Bun.write: created 0666 under the umask (fs_write uses 0644) */
-static int write_out(const char *path, const char *html, char **err) {
+/* writeExportHtml: created 0666 under the umask, with its parent directories. A failed write removes the partial file;
+ * the original failure is the one to report. */
+static int write_export(const char *path, json_t *session_data, const char *theme_styles, char **err) {
+    char *parent = path_dirname(path);
+    if (parent && *parent) fs_mkdir_p(parent, 0777);
+    free(parent);
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
-    int rc = fd < 0 ? -errno : 0;
-    if (fd >= 0) {
-        rc = fs_write(path, html, strlen(html));
-        close(fd);
+    if (fd < 0) {
+        *err = xasprintf("%s: %s", path, strerror(errno));
+        return -1;
     }
-    if (rc) *err = xasprintf("%s: %s", path, strerror(-rc));
-    return rc ? -1 : 0;
+    html_sink_t k = {.fd = fd, .cap = EXPORT_CHUNK_BYTES};
+    render_to_sink(&k, session_data, theme_styles);
+    int failure = k.err;
+    if (close(fd) != 0 && !failure) failure = errno;
+    if (failure) {
+        struct stat st;
+        if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) unlink(path);
+        *err = xasprintf("%s: %s", path, strerror(failure));
+        return -1;
+    }
+    return 0;
 }
 
 int export_html_from_file(const char *session_file, const char *output_path, char **written_path, char **err) {
@@ -587,11 +711,9 @@ int export_html_from_file(const char *session_file, const char *output_path, cha
     if (json_len(subs) || (json_is_obj(subs) && subs->u.obj.n)) json_set(d, "subSessions", subs);
     else json_free(subs);
     json_free(header);
-    char *html = export_render_html(d, NULL);
-    json_free(d);
     char *out = output_path && *output_path ? xstrdup(output_path) : export_default_name(session_file);
-    int rc = write_out(out, html, err);
-    free(html);
+    int rc = write_export(out, d, NULL, err);
+    json_free(d);
     if (rc) free(out);
     else *written_path = out;
     return rc;
@@ -654,12 +776,10 @@ int app_export_html(app_t *a, const char *output_path, bool use_user_themes, cha
     json_t *subs = export_collect_sub_sessions(file);
     if (json_is_obj(subs) && subs->u.obj.n) json_set(d, "subSessions", subs);
     else json_free(subs);
-    char *html = export_render_html(d, styles);
+    char *out = output_path && *output_path ? xstrdup(output_path) : export_default_name(file);
+    int rc = write_export(out, d, styles, err);
     json_free(d);
     free(styles);
-    char *out = output_path && *output_path ? xstrdup(output_path) : export_default_name(file);
-    int rc = write_out(out, html, err);
-    free(html);
     if (rc) free(out);
     else *written_path = out;
     return rc;

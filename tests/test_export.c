@@ -31,7 +31,45 @@ static void first_diff(const char *a, const char *b) {
             b + (i > 40 ? i - 40 : 0));
 }
 
+/* writeBase64Json: the streamed payload equals base64(JSON.stringify(data)), byte for byte, across chunk boundaries */
+static void test_streamed_payload(void) {
+    json_t *d = json_obj();
+    json_t *h = json_obj();
+    json_set_str(h, "type", "session");
+    json_set_str(h, "id", "s\xc3\xa9ssion");
+    json_set(d, "header", h);
+    json_t *entries = json_arr();
+    for (int i = 0; i < 400; i++) {
+        json_t *e = json_parse_str("{\"type\":\"custom\",\"data\":{\"a\":{\"b\":{\"c\":[1,2.5,\"\\u2028x\"]}}},\"dup\":1,\"dup\":2}");
+        json_set_int(e, "n", i);
+        json_push(entries, e);
+    }
+    json_set(d, "entries", entries);
+    json_set(d, "leafId", json_null());
+    char *html = export_render_html(d, NULL); /* adds the trace */
+    char *js = json_dump_js(d);
+    char *b64 = base64_encode(js, strlen(js));
+    CHECK(strlen(b64) > 8192 && strstr(html, b64) != NULL, "streamed payload differs from base64(JSON.stringify)");
+    CHECK(strstr(html, "{{SESSION_DATA}}") == NULL, "marker left in the page");
+    free(b64);
+    free(js);
+    free(html);
+    json_free(d);
+}
+
+/* a failed write reports its own error, not one from closing the partial file */
+static void test_write_error(void) {
+    if (access("/dev/full", W_OK) != 0) return;
+    char *written = NULL, *err = NULL;
+    int rc = export_html_from_file("tests/fixtures/export/rich.jsonl", "/dev/full", &written, &err);
+    CHECK(rc == -1 && err && strstr(err, "No space left on device"), "write error: %s", err ? err : "(none)");
+    free(err);
+    free(written);
+}
+
 int main(void) {
+    test_streamed_payload();
+    test_write_error();
     /* Date.parse forms the trace relies on */
     double ms = 0;
     CHECK(trace_parse_iso_ms("2026-11-01T12:00:00.000Z", &ms) && ms == 1793534400000.0, "iso Z %f", ms);

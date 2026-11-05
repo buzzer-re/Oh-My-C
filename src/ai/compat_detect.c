@@ -1599,7 +1599,12 @@ static const char *resolve_tokenizer(const char *provider, const char *id) {
     if (is_cls(&i, "deepseek")) return "deepseek-v3";
     if (is_cls(&i, "kimi")) return "kimi-k2";
     if (is_cls(&i, "glm") && rev_gte(&i, 5, 0)) return "glm5";
-    if (is_cls(&i, "openai") && rev_gte(&i, 5, 0)) return "o200k";
+    /* GPT-5 and later bill text in o200k_base, GPT-3.5 and GPT-4 (Turbo) in cl100k_base. GPT-4.1, GPT-4.5, gpt-4o and the
+     * o-series are o200k too, which is the default for a model without a tokenizer */
+    if (is_cls(&i, "openai")) {
+        if (rev_gte(&i, 5, 0)) return "o200k";
+        if (is_fam(&i, "gpt") && rev_gte(&i, 3, 5) && !rev_gte(&i, 4, 1)) return "cl100k";
+    }
     return NULL;
 }
 
