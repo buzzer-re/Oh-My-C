@@ -404,7 +404,7 @@ static int prepare(app_t *a, const ai_model_t *model, prep_t *p) {
     }
     ssize_t turn = -1;
     bool is_start = ne && turn_start(ents.v[cut]);
-    if (!is_start)
+    if (ne && !is_start)
         for (size_t i = cut + 1; i-- > 0 && turn < 0;)
             if (turn_start(ents.v[i])) turn = (ssize_t)i;
     p->split = !is_start && turn >= 0;
