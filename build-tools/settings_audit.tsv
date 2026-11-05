@@ -76,7 +76,6 @@ async.widgets	partial	gates job captions only; no live job widgets (WP-22b remai
 emojiAutocomplete	inert	no :shortcode: emoji completion
 spelling.autocomplete	inert	no word-prediction hints
 composer.predictions	inert	no next-message prediction
-btw.inject	inert	not ported yet: /btw steering inject (omp v18.16.0)
 composer.predictionAlternatives	inert	omc has no composer predictions (omp v18.16.0)
 startup.showSplash	inert	no animated splash
 marketplace.autoUpdate	inert	no plugin marketplace update check

@@ -270,7 +270,7 @@ void tc_todo(const tc_call_t *c, int width, strvec_t *out) {
 
 void tc_generic(const tc_call_t *c, int width, strvec_t *out) {
     int cw = MAX(1, width - 2);
-    tc_status_t icon = c->partial ? (c->spinner >= 0 ? TC_ST_RUNNING : TC_ST_PENDING) : c->is_error ? TC_ST_ERROR : TC_ST_DONE;
+    tc_status_t icon = c->partial ? (c->spinner >= 0 ? TC_ST_RUNNING : TC_ST_PENDING) : c->is_error ? TC_ST_ERROR : TC_ST_SUCCESS;
     tc_status_line_t sl = {.icon = icon, .spinner = c->spinner, .title = c->label ? c->label : c->name, .title_slot = -1};
     strvec_t body = {0};
     strvec_push_own(&body, tc_status_line(&sl));

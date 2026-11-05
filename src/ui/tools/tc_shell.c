@@ -436,15 +436,43 @@ void tc_bash(const tc_call_t *c, int width, strvec_t *out) {
 
 /* ---------- user `!cmd` (chat/bash-execution.ts + execution-shared.ts) ---------- */
 
+/* execution-shared.ts PREVIEW_LINES: output rows shown while an execution is collapsed */
+#define BANG_PREVIEW_LINES 20
+
+/* DynamicBorder.render: a rule, with a pre-styled label after a short lead (`─── label ────`) */
+static char *frame_rule(tui_tc_t key, int width, const char *label) {
+    const char *h = tc_sym("boxRound.horizontal");
+    int cells = MAX(1, width), hw = MAX(1, tui_visible_width(h));
+    /* the label sits between single spaces and leaves at least one rule cell after it */
+    int lead_w = 3 * hw, room = cells - lead_w - 3;
+    sb_t b = SB_INIT;
+    if (!label || !*label || room < 1) {
+        sb_t r = SB_INIT;
+        for (int i = 0; i < cells; i++) sb_append(&r, h);
+        tc_fg_sb(&b, key, sb_cstr(&r));
+        sb_free(&r);
+        return sb_detach(&b);
+    }
+    char *fit = tui_truncate_to_width(label, room, NULL);
+    sb_t r = SB_INIT;
+    for (int i = 0; i < 3; i++) sb_append(&r, h);
+    tc_fg_sb(&b, key, sb_cstr(&r));
+    sb_appendf(&b, " %s ", fit);
+    sb_clear(&r);
+    int rest = cells - lead_w - tui_visible_width(fit) - 2;
+    for (int i = 0; i < rest; i++) sb_append(&r, h);
+    tc_fg_sb(&b, key, sb_cstr(&r));
+    sb_free(&r);
+    free(fit);
+    return sb_detach(&b);
+}
+
 void tc_render_bang(const tc_bang_t *b, int width, strvec_t *out) {
     /* buildExecutionFrame: bashMode (dim for `!!`) rules around a bold `$ cmd` header, the output pane
-     * (leading blank, muted rows, 10-row tail while collapsed) and the status footer */
+     * (leading blank, muted rows, 20-row tail while collapsed), the status footer and the run's state set
+     * into the bottom border */
     tui_tc_t key = b->exclude ? TUI_TC_DIM : b->python ? TUI_TC_PYTHON_MODE : TUI_TC_BASH_MODE;
-    sb_t r = SB_INIT;
-    for (int i = 0; i < width; i++) sb_append(&r, tc_sym("boxRound.horizontal"));
-    char *rule = tc_fg(key, sb_cstr(&r));
-    sb_free(&r);
-    strvec_push(out, rule);
+    strvec_push_own(out, frame_rule(key, width, NULL));
     char *hdr = NULL, *bold = NULL, *head = NULL;
     strvec_t lines = {0};
     if (b->python) {
@@ -475,55 +503,51 @@ void tc_render_bang(const tc_bang_t *b, int width, strvec_t *out) {
             free(raw.v[i]);
             raw.v[i] = t;
         }
-        size_t start = 0;
-        if (!b->expanded && raw.n > 10) {
-            hidden = raw.n - 10;
-            start = hidden;
-        }
+        if (!b->expanded && raw.n > BANG_PREVIEW_LINES) hidden = raw.n - BANG_PREVIEW_LINES;
         strvec_push(&lines, "");
-        for (size_t i = start; i < raw.n; i++) {
+        /* OutputPane (edge: tail, visual): the collapsed cap counts wrapped rows */
+        strvec_t rows = {0};
+        for (size_t i = 0; i < raw.n; i++) {
             char *m = tc_fg(TUI_TC_MUTED, raw.v[i]);
-            tc_push_wrapped(&lines, m, MAX(1, width - 2));
+            tc_push_wrapped(&rows, m, MAX(1, width - 2));
             free(m);
         }
+        size_t first = !b->expanded && rows.n > BANG_PREVIEW_LINES ? rows.n - BANG_PREVIEW_LINES : 0;
+        for (size_t i = first; i < rows.n; i++) strvec_push(&lines, rows.v[i]);
+        strvec_free(&rows);
         strvec_free(&raw);
     }
+    /* the bottom border keeps the live loader until the run settles, then its exit/cancel marker */
+    char *label = NULL;
     if (b->running) {
-        /* buildExecutionFrame's Loader: activity spinner frames, `Running… (⎋ to cancel)` */
-        const char *const *frames;
-        size_t nf = tui_sym_spinner("activity", &frames);
-        char *sp = tc_fg(key, nf ? frames[(size_t)(b->spinner < 0 ? 0 : b->spinner) % nf] : "");
+        /* Loader.inlineText: the status spinner, as on a running tool card's header */
+        char *sp = tc_fg(key, tc_spinner_frame(b->spinner));
         char *run = xasprintf("Running\xe2\x80\xa6 (%s to cancel)", tc_sym("key.esc"));
         char *msg = tc_fg(TUI_TC_MUTED, run);
-        free(run);
-        strvec_push(&lines, ""); /* Loader rows start with a blank line */
-        strvec_push_own(&lines, xasprintf("%s %s", sp, msg));
+        label = xasprintf("%s %s", sp, msg);
         free(msg);
+        free(run);
         free(sp);
     } else {
-        strvec_t parts = {0};
-        if (hidden) {
+        if (hidden) { /* buildStatusFooter */
             char *t = xasprintf("\xe2\x80\xa6 %zu more lines (Ctrl+O to expand)", hidden);
-            strvec_push_own(&parts, tc_fg(TUI_TC_DIM, t));
-            free(t);
-        }
-        if (b->cancelled) strvec_push_own(&parts, tc_fg(TUI_TC_WARNING, "(cancelled)"));
-        else if (b->exit_code != 0) {
-            char *t = xasprintf("(exit %d)", b->exit_code);
-            strvec_push_own(&parts, tc_fg(TUI_TC_ERROR, t));
-            free(t);
-        }
-        if (parts.n) {
             strvec_push(&lines, "");
-            for (size_t i = 0; i < parts.n; i++) strvec_push(&lines, parts.v[i]);
+            strvec_push_own(&lines, tc_fg(TUI_TC_DIM, t));
+            free(t);
         }
-        strvec_free(&parts);
+        /* executionStatusLabel */
+        if (b->cancelled) label = tc_fg(TUI_TC_WARNING, "cancelled");
+        else if (b->exit_code != 0) {
+            char *t = xasprintf("exit %d", b->exit_code);
+            label = tc_fg(TUI_TC_ERROR, t);
+            free(t);
+        }
     }
     for (size_t i = 0; i < lines.n; i++) strvec_push_own(out, *lines.v[i] ? xasprintf(" %s", lines.v[i]) : xstrdup(""));
-    strvec_push(out, rule);
+    strvec_push_own(out, frame_rule(key, width, label));
+    free(label);
     strvec_free(&lines);
     free(head);
     free(bold);
     free(hdr);
-    free(rule);
 }

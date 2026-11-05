@@ -220,6 +220,10 @@ void ui_apply_appearance(void);
 /* swap the composer area for a selector (upstream SelectorController.showSelector) */
 void ui_show_selector(ui_t *u, tui_component_t *comp, tui_component_t *focus);
 void ui_close_selector(ui_t *u);
+/* Open a selector over the one holding the editor slot; closing it restores that selector and its focus. */
+void ui_show_selector_over(ui_t *u, tui_component_t *comp, tui_component_t *focus);
+void ui_close_nested_selector(ui_t *u);
+tui_component_t *ui_selector_top(const ui_t *u);
 bool ui_selector_open(const ui_t *u);
 
 void ui_overlay_model(ui_t *u); /* modelhub.c: the Models hub */
@@ -329,6 +333,10 @@ void ui_hook_select(ui_t *u, const char *title, const char *const *options, size
                     void *ud);
 /* showHookEditor (hook style): multi-line editor, Ctrl+Q/Ctrl+Enter submits, Esc cancels; cb(text or NULL) */
 void ui_hook_editor(ui_t *u, const char *title, void (*cb)(void *ud, const char *text), void *ud);
+tui_editor_t *ui_hook_editor_of(tui_component_t *c); /* its editor when c is a hook editor, else NULL */
+/* the ask dialog as a selector; its custom-answer / note prompt editor while one is open, else NULL */
+bool ui_ask_is_dialog(const tui_component_t *c);
+tui_editor_t *ui_ask_prompt_editor(tui_component_t *c);
 /* "Save and quit" path prompt (overlays/plan-save-overlay.ts); done(NULL) on cancel */
 typedef struct ui_plan_save ui_plan_save_t;
 ui_plan_save_t *ui_plan_save_new(const char *suggested, void (*done)(void *ud, const char *path), void *ud);

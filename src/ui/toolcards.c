@@ -94,12 +94,24 @@ static bool view_attached(msgview_t *v) {
     return false;
 }
 
+/* Tools whose arguments stream a growing file body or diff into the card (omp streamsBody) */
+static bool streams_body(const char *name) { return str_eq(name, "edit") || str_eq(name, "apply_patch") || str_eq(name, "write"); }
+
+/* omp isStreamingArgs: the arguments of a body-streaming card are still arriving */
+static bool stream_spinning(msgview_t *v) {
+    if (v->done || !streams_body(v->tool_name)) return false;
+    json_t *st = state_of(v);
+    return !json_get_int(st, "startMs", 0) && !json_get_bool(st, "argsComplete", false) && !json_get_obj(st, "result");
+}
+
 static void tick(void *ud) {
     UNUSED(ud);
     bool any = false;
     for (size_t i = 0; i < g_live.n;) {
         msgview_t *v = g_live.v[i];
-        if (!view_attached(v) || v->done) {
+        /* a body-streaming card only ticks for its header spinner, which stops with the args */
+        bool settled = streams_body(v->tool_name) && !tc_wants_tick(v->tool_name) && !stream_spinning(v);
+        if (!view_attached(v) || v->done || settled) {
             g_live.v[i] = g_live.v[--g_live.n];
             continue;
         }
@@ -163,6 +175,21 @@ void toolcard_preview(ui_t *u, const char *id, const char *name, const json_t *a
     json_set_bool(state_of(v), "partial", true);
     add_view(u, v);
     hmap_put(&g_preview, id, v);
+    if (streams_body(name)) live_add(v); /* the card header's spinner animates while the body streams */
+}
+
+void toolcard_args_complete(ui_t *u, const json_t *msg) {
+    const char *stop = json_get_str(msg, "stopReason");
+    if (str_eq(stop, "aborted") || str_eq(stop, "error")) return;
+    json_t *blk;
+    json_arr_foreach(json_get_arr(msg, "content"), i, blk) {
+        const char *id = str_eq(json_get_str(blk, "type"), "toolCall") ? json_get_str(blk, "id") : NULL;
+        msgview_t *v = id ? hmap_get(&g_preview, id) : NULL;
+        if (!v || !view_attached(v)) continue;
+        json_set_bool(state_of(v), "argsComplete", true);
+        v->dirty = true;
+    }
+    if (u && u->tui) tui_request_render(u->tui);
 }
 
 msgview_t *toolcard_start(ui_t *u, const char *id, const char *name, json_t *args) {
@@ -375,7 +402,9 @@ void render_tool(msgview_t *v, int width, strvec_t *out) {
         }
         /* only the generic fallback consumes the spinner frame while running (omp animatedPartialResult) */
         if (start && tc_wants_tick(v->tool_name) && strcmp(v->tool_name, "bash")) c.spinner = spinner_now();
-    }
+        if (stream_spinning(v)) c.spinner = spinner_now();
+        c.args_complete = !stream_spinning(v);
+    } else c.args_complete = true;
     tc_render(&c, width, out);
     if (c.show_images && result) { /* result images below the card: a spacer and the image per block */
         const json_t *blk;

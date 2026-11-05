@@ -153,7 +153,7 @@ static bool tmux_allows_passthrough(void) {
 tui_img_proto_t tui_resolve_image_protocol(const char *id, bool is_tty) {
     tui_img_proto_t p = TUI_IMG_NONE;
     if (str_eq(id, "kitty") || str_eq(id, "ghostty") || str_eq(id, "wezterm") || str_eq(id, "warp") ||
-        str_eq(id, "otty") || str_eq(id, "rio") || str_eq(id, "tern") || str_eq(id, "monstar"))
+        str_eq(id, "otty") || str_eq(id, "rio") || str_eq(id, "rex") || str_eq(id, "tern") || str_eq(id, "monstar"))
         p = TUI_IMG_KITTY;
     else if (str_eq(id, "iterm2")) p = TUI_IMG_ITERM2;
     if (p == TUI_IMG_NONE && is_tty && !str_eq(id, "vscode") && !str_eq(id, "alacritty")) {

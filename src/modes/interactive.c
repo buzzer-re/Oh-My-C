@@ -125,6 +125,7 @@ static void ui_apply_event(void *ud) {
             e->msg = NULL;
             ui_assistant_end(u, u->cur_assistant);
             toolcard_note_message(u, u->cur_assistant->msg, true);
+            toolcard_args_complete(u, u->cur_assistant->msg);
             ui_usage_row_live(u, u->cur_assistant->msg);
             u->cur_assistant = NULL;
         }
@@ -818,6 +819,24 @@ void ix_invoke_skill(ui_t *u, const char *text, json_t *attachments, bool follow
 void ix_start_prompt(ui_t *u, const char *text) { start_prompt(u, text); }
 
 void ix_start_prompt_with(ui_t *u, const char *text, json_t *attachments) { start_prompt_with(u, text, attachments); }
+
+/* a prompt sent as written: no slash command, file command or template expansion */
+void ix_start_prompt_literal(ui_t *u, const char *text) {
+    msgview_t *v = mv_new(MV_USER);
+    v->text = xstrdup(text);
+    add_view(u, v);
+    strvec_push(&u->optimistic, text); /* its message_start is already drawn */
+    job_t *j = xcalloc(1, sizeof(*j));
+    j->u = u;
+    j->text = xstrdup(text);
+    u->worker_running = true;
+    if (pthread_create(&u->worker, NULL, worker_main, j) != 0) {
+        u->worker_running = false;
+        add_notice(u, "error", "failed to start agent thread");
+        free(j->text);
+        free(j);
+    }
+}
 
 void ix_start_hidden(ui_t *u, const char *text, const char *ctype) { start_hidden(u, text, ctype); }
 void ix_job_wake(ui_t *u) { job_wake_cb(u); }
@@ -3130,6 +3149,15 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
     if (tui_key_matches(k, "ctrl+shift+d") && !ui_pause_active()) { /* the TUI's global onDebug key (Shift+Ctrl+D) */
         dc_debug_open(u);
         return true;
+    }
+    /* history search opens over the ask dialog and hook editor too (omp's global listener); the pick goes to a
+     * focused prompt */
+    if (!tui_overlay_visible(t) && ui_selector_open(u) && tui_kb(k, "app.history.search")) {
+        tui_component_t *top = ui_selector_top(u);
+        if (ui_ask_is_dialog(top) || ui_hook_editor_of(top)) {
+            ui_history_search(u);
+            return true;
+        }
     }
     if (tui_overlay_visible(t) || ui_selector_open(u)) return false;
     if (k->kind == TUI_KEY_MOUSE) return inline_mouse(u, k);

@@ -571,6 +571,27 @@ void iq_submit_mode(ui_t *u, const char *t, json_t *attachments, bool loop_body)
     ix_start_prompt_with(u, t, attachments);
 }
 
+/* /btw inject (session.prompt with expandPromptTemplates off, streamingBehavior steer): a steer while the agent
+ * runs, else a new turn, the text never run as a command or template. Returns whether it was admitted; *reason
+ * (owned) says why not when it was refused. */
+bool iq_inject(ui_t *u, const char *text, char **reason) {
+    *reason = NULL;
+    if (u->bg_kind) return false; /* a compaction holds the session: the inject key retries */
+    app_sync_queue_modes(u->app);
+    if (u->worker_running) {
+        agent_steer(u->app->agent, msg_user_text(text));
+        ui_queue_refresh(u);
+        return true;
+    }
+    if (!u->app->model) {
+        *reason = xstrdup("No model selected.");
+        return false;
+    }
+    flush_pending_shell(u);
+    ix_start_prompt_literal(u, text);
+    return true;
+}
+
 /* ---------- follow-up key (InputController.handleFollowUp) ---------- */
 
 void iq_follow_up(ui_t *u) {

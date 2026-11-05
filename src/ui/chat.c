@@ -1833,7 +1833,7 @@ void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms) {
 /* ---------------------------------------------------------------------- */
 
 
-/* omp buildAsyncResultBlock: one `• Background job completed [type] id (duration)` row per delivered job */
+/* omp buildAsyncResultBlock: one `✔ Background job completed [type] id (duration)` row per delivered job */
 void ui_async_result(ui_t *u, const json_t *m) {
     if (!str_eq(json_get_str(m, "customType"), "async-result")) return;
     const json_t *jobs = json_get_arr(json_get_obj(m, "details"), "jobs");
@@ -1841,7 +1841,7 @@ void ui_async_result(ui_t *u, const json_t *m) {
     sb_t b = SB_INIT;
     json_t *j;
     json_arr_foreach(jobs, i, j) {
-        char *head = xasprintf("%s Background job completed", tui_sym("status.done"));
+        char *head = xasprintf("%s Background job completed", tui_sym("status.success"));
         char *type = xasprintf("[%s]", json_get_str(j, "type") ? json_get_str(j, "type") : "job");
         char *h = fg(TUI_TC_SUCCESS, head), *t = fg(TUI_TC_DIM, type);
         char *id = fg(TUI_TC_ACCENT, json_get_str(j, "jobId") ? json_get_str(j, "jobId") : "unknown");

@@ -252,6 +252,8 @@ void toolcard_frames_reset(void); /* a session switch drops the cached backgroun
 /* a tool call streaming in an assistant message: draws (or updates) its pending card before execution;
  * toolcard_start then adopts that card */
 void toolcard_preview(ui_t *u, const char *id, const char *name, const json_t *args);
+/* omp setArgsComplete at message_end: the assistant message's tool-call arguments are final */
+void toolcard_args_complete(ui_t *u, const json_t *msg);
 
 /* statusline.c */
 tui_component_t *ui_status_new(ui_t *u);   /* standalone bottom bar (pi/borderless/claude/rule/field/rail) */

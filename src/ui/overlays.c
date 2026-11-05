@@ -16,6 +16,8 @@
 
 static tui_component_t *g_sel;
 static bool g_editor_hidden, g_status_hidden;
+/* a selector parked under a nested one (SelectorController.showSelector restores its previous children) */
+static tui_component_t *g_under, *g_under_focus;
 
 bool ui_selector_open(const ui_t *u) { return g_sel != NULL; }
 
@@ -32,13 +34,44 @@ void ui_close_selector(ui_t *u) {
     g_sel = NULL;
     tui_container_remove(tui_root(u->tui), c);
     tui_component_destroy(c);
+    if (g_under) { /* a nested selector closes back to the one it covered */
+        g_sel = g_under;
+        g_under = NULL;
+        g_sel->hidden = false;
+        tui_set_focus(u->tui, g_under_focus);
+        g_under_focus = NULL;
+        tui_request_render(u->tui);
+        return;
+    }
     u->editor->base.hidden = g_editor_hidden;
     if (u->status) u->status->hidden = g_status_hidden;
     tui_set_focus(u->tui, &u->editor->base);
     tui_request_render(u->tui);
 }
 
+void ui_close_nested_selector(ui_t *u) {
+    if (g_under) ui_close_selector(u);
+}
+
+tui_component_t *ui_selector_top(const ui_t *u) { return g_sel; }
+
+void ui_show_selector_over(ui_t *u, tui_component_t *comp, tui_component_t *focus) {
+    if (!g_sel || g_under) {
+        ui_show_selector(u, comp, focus);
+        return;
+    }
+    g_under = g_sel;
+    g_under_focus = tui_focus(u->tui);
+    g_under->hidden = true;
+    g_sel = comp;
+    tui_container_insert(tui_root(u->tui), root_index(u, g_under) + 1, comp);
+    tui_attach(u->tui, comp);
+    tui_set_focus(u->tui, focus ? focus : comp);
+    tui_request_render(u->tui);
+}
+
 void ui_show_selector(ui_t *u, tui_component_t *comp, tui_component_t *focus) {
+    ui_close_nested_selector(u);
     ui_close_selector(u);
     g_sel = comp;
     g_editor_hidden = u->editor->base.hidden;

@@ -3,6 +3,7 @@
 
 #include "core/fs.h"
 #include "prompt/template.h"
+#include "tui/ansi.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -131,15 +132,108 @@ json_t *btw_wire_record(const json_t *record) {
 
 /* ---------- side turn ---------- */
 
-static char *render_prompt(const char *question) {
+static char *render_prompt(const char *question, bool inject) {
     json_t *c = json_obj();
     json_set_str(c, "question", question ? question : "");
+    json_set_bool(c, "inject", inject);
     char *q = prompt_render("coding-agent/prompts/system/btw-user.md", c);
     json_free(c);
     return q ? q : xstrdup(question ? question : "");
 }
 
-int btw_run_turn(app_t *a, const char *question, const json_t *images, const json_t *history,
+/* ---------- <inject> blocks (overlays/btw-history.ts) ---------- */
+
+#define INJECT_OPEN "<inject>"
+#define INJECT_CLOSE "</inject>"
+
+/* the last occurrence of `needle` starting at or before `limit` (NULL: anywhere), NULL when none */
+static const char *last_of(const char *s, const char *needle, const char *limit) {
+    const char *found = NULL;
+    for (const char *p = strstr(s, needle); p && (!limit || p <= limit); p = strstr(p + 1, needle)) found = p;
+    return found;
+}
+
+bool btw_split_inject(const char *answer, btw_inject_parts_t *out) {
+    memset(out, 0, sizeof *out);
+    const char *a = answer ? answer : "";
+    const char *last_close = last_of(a, INJECT_CLOSE, NULL);
+    size_t ol = strlen(INJECT_OPEN), cl = strlen(INJECT_CLOSE);
+    /* the last opener that has a close after it, paired with the first close after it: a tag merely mentioned
+     * in prose cannot capture the block */
+    const char *open = last_close && (size_t)(last_close - a) >= ol ? last_of(a, INJECT_OPEN, last_close - ol) : NULL;
+    if (open) {
+        const char *close = strstr(open + ol, INJECT_CLOSE);
+        out->before = xstrndup(a, (size_t)(open - a));
+        out->inject = xstrndup(open + ol, (size_t)(close - open - ol));
+        out->after = xstrdup(close + cl);
+        out->closed = true;
+        return true;
+    }
+    /* without a closed block the last opener runs to the end; displayed only while the answer still streams */
+    const char *streaming = last_of(a, INJECT_OPEN, NULL);
+    if (!streaming) return false;
+    out->before = xstrndup(a, (size_t)(streaming - a));
+    out->inject = xstrdup(streaming + ol);
+    out->after = xstrdup("");
+    return true;
+}
+
+void btw_inject_parts_free(btw_inject_parts_t *p) {
+    free(p->before);
+    free(p->inject);
+    free(p->after);
+    memset(p, 0, sizeof *p);
+}
+
+char *btw_format_inject_text(const char *inject) {
+    char *x = btw_sanitize_display(inject);
+    char *t = str_trim(x);
+    free(x);
+    return t;
+}
+
+char *btw_sanitize_display(const char *text) {
+    char *plain = tui_strip_ansi(text ? text : "");
+    char *u8 = utf8_sanitize(plain, strlen(plain));
+    sb_t b = SB_INIT;
+    for (const unsigned char *p = (const unsigned char *)u8; *p; p++) {
+        if (*p == 0xc2 && p[1] >= 0x80 && p[1] <= 0x9f) { /* C1 controls */
+            p++;
+            continue;
+        }
+        if ((*p < 0x20 && *p != '\n' && *p != '\t') || *p == 0x7f) continue;
+        sb_putc(&b, (char)*p);
+    }
+    char *r = tui_replace_tabs(sb_cstr(&b));
+    sb_free(&b);
+    free(u8);
+    free(plain);
+    return r;
+}
+
+char *btw_inject_of(const char *answer) {
+    btw_inject_parts_t p;
+    if (!btw_split_inject(answer, &p)) return NULL;
+    char *t = p.closed ? btw_format_inject_text(p.inject) : NULL;
+    btw_inject_parts_free(&p);
+    if (t && !*t) {
+        free(t);
+        return NULL;
+    }
+    return t;
+}
+
+char *btw_record_inject(const json_t *record) {
+    if (!str_eq(btw_latest_status(record), "complete")) return NULL;
+    return btw_inject_of(json_get_str(btw_latest_turn(record), "answer"));
+}
+
+char *btw_turn_key(const json_t *record, int turn_index) {
+    size_t idx = turn_index >= 0 ? (size_t)turn_index : json_len(json_get_arr(record, "followUps"));
+    return xasprintf("%s:%zu", json_get_str(record, "id") ? json_get_str(record, "id") : "", idx);
+}
+
+int btw_run_turn(app_t *a, const char *question, const json_t *images, const json_t *history, bool inject,
                  const char *conversation_key, const json_t *streaming, void (*on_delta)(void *ud, const char *delta),
                  void *ud, volatile sig_atomic_t *cancel, char **reply, json_t **assistant, char **err) {
     *reply = NULL;
@@ -153,7 +247,7 @@ int btw_run_turn(app_t *a, const char *question, const json_t *images, const jso
     json_t *hist = json_arr(), *turn;
     json_arr_foreach(history, i, turn) {
         json_t *content = json_arr();
-        char *p = render_prompt(json_get_str(turn, "question"));
+        char *p = render_prompt(json_get_str(turn, "question"), inject);
         json_push(content, text_block(p));
         free(p);
         json_t *img;
@@ -182,7 +276,7 @@ int btw_run_turn(app_t *a, const char *question, const json_t *images, const jso
         json_set_int(am, "timestamp", json_get_int(turn, "updatedAt", 0));
         json_push(hist, am);
     }
-    char *prompt = render_prompt(question);
+    char *prompt = render_prompt(question, inject);
     app_ephemeral_t e = {.prompt_text = prompt,
                          .prompt_images = images,
                          .history = hist,

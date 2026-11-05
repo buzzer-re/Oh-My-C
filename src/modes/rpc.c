@@ -1782,7 +1782,7 @@ static void *btw_thread(void *p) {
     rpc_t *r = run->r;
     char *reply = NULL, *err = NULL;
     json_t *assistant = NULL;
-    int rc = btw_run_turn(r->a, run->question, NULL, run->history, run->conversation_key, NULL, btw_delta, run,
+    int rc = btw_run_turn(r->a, run->question, NULL, run->history, false, run->conversation_key, NULL, btw_delta, run,
                           &run->cancel, &reply, &assistant, &err);
     pthread_mutex_lock(&r->btw_mu);
     if (rc == 0) btw_finish_locked(r, run, "complete", reply, NULL);

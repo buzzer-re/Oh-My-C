@@ -6,7 +6,7 @@
 #include "tui/ansi.h"
 
 static tc_status_t status_icon(const char *st) {
-    return str_eq(st, "completed") ? TC_ST_DONE : str_eq(st, "failed") ? TC_ST_ERROR : str_eq(st, "cancelled") ? TC_ST_ABORTED : TC_ST_RUNNING;
+    return str_eq(st, "completed") ? TC_ST_SUCCESS : str_eq(st, "failed") ? TC_ST_ERROR : str_eq(st, "cancelled") ? TC_ST_ABORTED : TC_ST_RUNNING;
 }
 
 static tui_tc_t status_color(const char *st) {
@@ -158,7 +158,7 @@ void tc_wait(const tc_call_t *c, int width, strvec_t *out) {
         for (size_t i = 0; i < nj; i++)
             if (!str_eq(json_get_str(sorted[i], "status"), "running")) nsettled++;
         if (!nsettled) strvec_push(&all, header);
-        char *dic = tc_status_icon(TC_ST_DONE, -1);
+        char *dic = tc_status_icon(TC_ST_SUCCESS, -1);
         int indent_w = tui_visible_width(dic) + 1;
         free(dic);
         size_t shown = 0;

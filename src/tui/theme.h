@@ -64,6 +64,7 @@ typedef struct {
     int64_t rgb[TUI_TC__COUNT]; /* 0xRRGGBB (palette indices resolved), or -1 for terminal default */
     char *spinner[TUI_MAX_SPINNER_FRAMES];
     int nspinner;
+    bool spinner_custom; /* symbols.spinnerFrames override: wins over the preset's frames (omp getSpinnerFrames) */
 } tui_theme_t;
 
 const char *tui_theme_slot_name(tui_tc_t slot);

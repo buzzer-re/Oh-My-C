@@ -184,6 +184,8 @@ static void test_images(void) {
 static void test_protocols(void) {
     clear_env();
     CHECK(tui_resolve_image_protocol("kitty", true) == TUI_IMG_KITTY);
+    CHECK(tui_resolve_image_protocol("rex", false) == TUI_IMG_KITTY); /* omp c76e737a: Kitty transport, other caps stay unassumed */
+    CHECK(!tui_hyperlinks_detect("rex"));
     CHECK(tui_resolve_image_protocol("ghostty", false) == TUI_IMG_KITTY);
     CHECK(tui_resolve_image_protocol("iterm2", true) == TUI_IMG_ITERM2);
     CHECK(tui_resolve_image_protocol("vscode", true) == TUI_IMG_NONE);

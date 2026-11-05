@@ -252,6 +252,17 @@ static void compare_rows(const char *name, fixture_t *fx, size_t start, const st
     }
 }
 
+/* whether any rendered row, stripped of styling, holds `needle` */
+static bool has_row(const strvec_t *out, const char *needle) {
+    bool found = false;
+    for (size_t i = 0; i < out->n && !found; i++) {
+        char *p = tui_strip_ansi(out->v[i]);
+        found = strstr(p, needle) != NULL;
+        free(p);
+    }
+    return found;
+}
+
 static json_t *J(const char *s) {
     json_t *j = json_parse_str(s);
     if (!j) {
@@ -347,7 +358,7 @@ int main(void) {
         json_free(r);
         free(dir);
     }
-    /* user `!cmd` execution frame: header, output pane (trailing blank row of "oops\n"), `(exit 3)` footer */
+    /* user `!cmd` execution frame: header, output pane (trailing blank row of "oops\n"), `exit 3` in the bottom border */
     {
         tc_bang_t b = {.command = "echo oops; exit 3", .output = "oops\n", .exit_code = 3, .spinner = -1, .term_rows = 50};
         strvec_t out = {0};
@@ -362,6 +373,261 @@ int main(void) {
      * token colors (omc's highlighter vs syntect), so those specs avoid such tokens or are compared via lsp2 only */
     static const char *const SPECS[] = {"ws", "ask", "goal", "find", "ast", "debug", "task", "wait", "lsp2", "github", "ghwatch"};
     for (size_t i = 0; i < ARRAY_LEN(SPECS); i++) run_spec(SPECS[i]);
+    /* omp a1e7a928: `!` runs keep the loader, then `exit N` / `cancelled`, in the frame's bottom border */
+    {
+        tc_bang_t b = {.command = "sleep 9", .running = true, .spinner = 0, .term_rows = 50};
+        strvec_t out = {0};
+        tc_render_bang(&b, 40, &out);
+        char *last = stripped_trim(out.v[out.n - 1]);
+        CHECK(str_starts(last, "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 \xe2\xa3\xbe Running"), "running border: %s", last);
+        CHECK(tui_visible_width(last) == 40, "running border width: %s", last);
+        free(last);
+        strvec_free(&out);
+        tc_bang_t cb = {.command = "sleep 9", .cancelled = true, .exit_code = -1, .spinner = -1, .term_rows = 50};
+        tc_render_bang(&cb, 40, &out);
+        last = stripped_trim(out.v[out.n - 1]);
+        CHECK(str_starts(last, "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 cancelled \xe2\x94\x80"), "cancelled border: %s", last);
+        CHECK(!has_row(&out, "(cancelled)"), "no cancelled row");
+        free(last);
+        strvec_free(&out);
+        tc_bang_t ok = {.command = "true", .spinner = -1, .term_rows = 50};
+        tc_render_bang(&ok, 40, &out);
+        char *top = stripped_trim(out.v[0]);
+        last = stripped_trim(out.v[out.n - 1]);
+        CHECK(str_eq(top, last), "a clean run keeps a plain rule: %s", last);
+        free(top);
+        free(last);
+        strvec_free(&out);
+        /* no room for a label: a plain rule */
+        tc_bang_t nar = {.command = "x", .exit_code = 2, .spinner = -1, .term_rows = 50};
+        tc_render_bang(&nar, 6, &out);
+        last = stripped_trim(out.v[out.n - 1]);
+        CHECK(!strstr(last, "exit"), "narrow border: %s", last);
+        free(last);
+        strvec_free(&out);
+    }
+    /* a1e7a928: Write's spinner in the header, `streaming` in the bottom border until the args complete */
+    {
+        json_t *a = J("{\"path\":\"new.txt\",\"content\":\"alpha\"}");
+        tc_call_t c = call("write", a, NULL, false);
+        c.spinner = 0;
+        strvec_t out = {0};
+        tc_render(&c, 60, &out);
+        CHECK(has_row(&out, "\xe2\xa3\xbe Write"), "write header spinner");
+        CHECK(has_row(&out, " streaming "), "write footer label");
+        CHECK(!has_row(&out, "(streaming)"), "no trailing streaming row");
+        strvec_free(&out);
+        c.spinner = -1;
+        c.args_complete = true;
+        tc_render(&c, 60, &out);
+        CHECK(!has_row(&out, "streaming"), "the label ends with the args");
+        CHECK(!has_row(&out, "\xe2\xa3\xbe"), "no frozen spinner");
+        strvec_free(&out);
+        json_free(a);
+        json_t *e = J("{\"path\":\"a.txt\",\"input\":\"x\"}");
+        tc_call_t ec = call("edit", e, NULL, false);
+        ec.spinner = 0;
+        tc_render(&ec, 60, &out);
+        CHECK(has_row(&out, "\xe2\xa3\xbe Edit"), "edit header spinner");
+        strvec_free(&out);
+        ec.spinner = -1;
+        tc_render(&ec, 60, &out);
+        CHECK(!has_row(&out, "\xe2\x8f\xb3"), "no pending hourglass on edit's header");
+        strvec_free(&out);
+        json_free(e);
+    }
+    /* 59deb3aa: only a diagnostics result's rows count as status rows; a raw `request` response is the server's text */
+    {
+        json_t *a = J("{\"action\":\"request\"}");
+        json_t *r = J("{\"content\":[{\"type\":\"text\",\"text\":\"\xe2\x9c\x98 starts with the glyph\\nsecond line\"}]}");
+        tc_call_t c = call("lsp", a, r, false);
+        strvec_t out = {0};
+        tc_render(&c, 80, &out);
+        CHECK(!has_row(&out, "No issues"), "request response isn't diagnostics");
+        CHECK(has_row(&out, "starts with the glyph"), "request response keeps its text");
+        strvec_free(&out);
+        json_free(a);
+        /* no action known: inference stays, anchored at a line start */
+        a = J("{}");
+        c = call("lsp", a, r, false);
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, "No issues") || has_row(&out, "starts with"), "unknown action infers");
+        CHECK(has_row(&out, "Diagnostics") || has_row(&out, "diagnostics"), "unknown action infers diagnostics");
+        strvec_free(&out);
+        json_free(a);
+        json_free(r);
+        a = J("{}");
+        r = J("{\"content\":[{\"type\":\"text\",\"text\":\"prose holding \xe2\x9c\x98 mid-line\"}]}");
+        c = call("lsp", a, r, false);
+        tc_render(&c, 80, &out);
+        CHECK(!has_row(&out, "No issues"), "a glyph mid-line isn't a status row");
+        strvec_free(&out);
+        json_free(a);
+        json_free(r);
+    }
+    /* a1e7a928 / e2fbe87d: Task rows; a frozen live row dims its glyph; a merge failure is a warning */
+    {
+        json_t *a = J("{}");
+        json_t *r = J("{\"content\":[],\"details\":{\"progress\":[{\"id\":\"A\",\"status\":\"running\",\"index\":0},{\"id\":\"B\",\"status\":\"pending\",\"index\":1}]}}");
+        tc_call_t c = call("task", a, r, false);
+        c.partial = true;
+        c.now_ms = 1000;
+        strvec_t out = {0};
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, "\xe2\x9f\xb3 A"), "running row glyph");
+        CHECK(has_row(&out, "\xe2\x8f\xb3 B"), "pending row glyph");
+        strvec_free(&out);
+        c.frozen = true;
+        tc_render(&c, 80, &out);
+        char *want = tc_fg(TUI_TC_DIM, "\xe2\x9f\xb3");
+        bool found = false;
+        for (size_t i = 0; i < out.n; i++) found |= strstr(out.v[i], want) != NULL;
+        CHECK(found, "frozen running row dims its glyph");
+        free(want);
+        strvec_free(&out);
+        json_free(r);
+        r = J("{\"content\":[],\"details\":{\"results\":[{\"id\":\"M\",\"exitCode\":0,\"error\":\"merge conflict\",\"durationMs\":5}]}}");
+        c = call("task", a, r, false);
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, "\xe2\x9a\xa0 M"), "merge failure draws the warning glyph");
+        strvec_free(&out);
+        json_free(r);
+        json_free(a);
+    }
+    /* omp 1442d02a / d043cc13: one path style in tool bodies */
+    {
+        static const struct { const char *in, *dir, *name; } P[] = {
+            {"src/tools/grep.ts", "src/tools/", "grep.ts"}, {"C:\\repo\\grep.ts", "C:\\repo\\", "grep.ts"},
+            {"src/components/", "src/", "components/"},     {"README.md", NULL, "README.md"},
+        };
+        for (size_t i = 0; i < ARRAY_LEN(P); i++) {
+            char *got = tc_styled_path(P[i].in);
+            char *nm = tc_fg(TUI_TC_CUSTOM_MESSAGE_LABEL, P[i].name);
+            char *dr = P[i].dir ? tc_fg(TUI_TC_DIM, P[i].dir) : xstrdup("");
+            char *want = xasprintf("%s%s", dr, nm);
+            CHECK(str_eq(got, want), "styled path %s", P[i].in);
+            free(want), free(dr), free(nm), free(got);
+        }
+    }
+    /* classifyGroupedLines: full display paths across a nested stack, `# /` keeps its separator, a directory's `(…)`
+     * stays part of its name, only an uppercase hashline tag is dropped, url-like headers stay whole */
+    {
+        tc_grouped_t g;
+        tc_grouped_parse(&g, "# /\n## abs/\n### f.ts#AB12 (2 replacements)\n*1\xe2\x94\x82x\n\n# dir (x)/\n## a.c\n\n# n#dead\n\n# n#v2\n\n# local://a/b.ts#AB12\n 1\xe2\x94\x82y", NULL, NULL);
+        CHECK(g.rows[0].kind == TC_GROW_DIR && g.rows[1].kind == TC_GROW_DIR && g.rows[2].kind == TC_GROW_FILE, "kinds");
+        CHECK(str_eq(g.rows[2].display_path, "/abs/f.ts"), "abs path: %s", g.rows[2].display_path);
+        CHECK(str_eq(g.rows[2].suffix, "(2 replacements)"), "suffix");
+        CHECK(g.rows[3].kind == TC_GROW_CONTENT, "body");
+        CHECK(str_eq(g.rows[6].display_path, "dir (x)/a.c"), "dir parens: %s", g.rows[6].display_path);
+        CHECK(!g.rows[6].suffix, "no suffix");
+        CHECK(str_eq(g.rows[8].display_path, "n#dead"), "lowercase kept: %s", g.rows[8].display_path);
+        CHECK(str_eq(g.rows[10].display_path, "n#v2"), "other ending kept: %s", g.rows[10].display_path);
+        CHECK(g.rows[12].url && str_eq(g.rows[12].display_path, "local://a/b.ts"), "url: %s", g.rows[12].display_path);
+        CHECK(g.ngroups == 5, "one group per file: %zu", g.ngroups);
+        tc_grouped_free(&g);
+        /* a headerless URL scope's lines have no filesystem language; a file scope's do */
+        tc_grouped_parse(&g, "*7\xe2\x94\x82x", "local://notes/a.ts", NULL);
+        CHECK(!g.rows[0].lang, "url scope language");
+        tc_grouped_free(&g);
+        tc_grouped_parse(&g, "*7\xe2\x94\x82x", "/w/a.ts", NULL);
+        CHECK(g.rows[0].lang && str_eq(g.rows[0].lang, "typescript"), "file scope language");
+        tc_grouped_free(&g);
+    }
+    /* fitGroupsToBudget through the cards */
+    {
+        /* a single file taller than the preview shows its head and counts the matches it hides */
+        json_t *a = J("{\"pat\":\"p\"}");
+        json_t *r = J("{\"content\":[],\"details\":{\"matchCount\":8,\"fileCount\":1,\"filesSearched\":1,\"displayContent\":"
+                      "\"# a.ts\\n*1\xe2\x94\x82" "a\\n*2\xe2\x94\x82" "a\\n*3\xe2\x94\x82" "a\\n*4\xe2\x94\x82" "a\\n*5\xe2\x94\x82" "a\\n*6\xe2\x94\x82" "a\\n*7\xe2\x94\x82" "a\\n*8\xe2\x94\x82" "a\"}}");
+        tc_call_t c = call("ast_grep", a, r, false);
+        strvec_t out = {0};
+        tc_render(&c, 80, &out);
+        CHECK(out.n == 7, "ast_grep head + 6 rows: %zu", out.n);
+        CHECK(has_row(&out, "a.ts") && has_row(&out, "*4") && !has_row(&out, "*5"), "ast_grep shows the first file's head");
+        CHECK(has_row(&out, "\xe2\x80\xa6 4 more matches"), "ast_grep counts hidden matches");
+        strvec_free(&out);
+        json_free(r);
+        json_free(a);
+        /* the collapsed grep list is cut between files, never right after a file row without its match */
+        a = J("{\"pattern\":\"p\"}");
+        r = J("{\"content\":[],\"details\":{\"matchCount\":6,\"fileCount\":3,\"displayContent\":"
+              "\"# a.ts\\n*1\xe2\x94\x82" "a\\n*2\xe2\x94\x82" "a\\n*3\xe2\x94\x82" "a\\n\\n# b.ts\\n*1\xe2\x94\x82" "b\\n\\n# c.ts\\n*1\xe2\x94\x82" "c\\n*2\xe2\x94\x82" "c\"}}");
+        c = call("grep", a, r, false);
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, "a.ts") && !has_row(&out, "b.ts"), "a file row needs a match below it");
+        CHECK(has_row(&out, "\xe2\x80\xa6 3 more matches"), "grep counts hidden matches");
+        strvec_free(&out);
+        json_free(r);
+        json_free(a);
+        /* a long first diff is cut to the preview; the summary counts the files left out */
+        a = J("{\"ops\":[{\"pat\":\"p\",\"out\":\"q\"}]}");
+        r = J("{\"content\":[],\"details\":{\"totalReplacements\":9,\"filesTouched\":2,\"filesSearched\":2,\"displayContent\":"
+              "\"# a.ts (8 replacements)\\n-1\xe2\x94\x82" "a\\n+1\xe2\x94\x82" "b\\n-2\xe2\x94\x82" "a\\n+2\xe2\x94\x82" "b\\n-3\xe2\x94\x82" "a\\n+3\xe2\x94\x82" "b\\n-4\xe2\x94\x82" "a\\n\\n# b.ts (1 replacement)\\n-1\xe2\x94\x82" "a\"}}");
+        c = call("ast_edit", a, r, false);
+        tc_render(&c, 80, &out);
+        CHECK(out.n == 8, "ast_edit frame + 6 rows: %zu", out.n);
+        CHECK(has_row(&out, "a.ts") && has_row(&out, "(8 replacements)"), "ast_edit first file");
+        CHECK(has_row(&out, "\xe2\x80\xa6 1 more file"), "ast_edit counts hidden files");
+        strvec_free(&out);
+        json_free(r);
+        json_free(a);
+    }
+    /* grouped Read rows: path style, muted selectors and `?q=` queries; a URL whole in the name color */
+    {
+        json_t *a1 = J("{\"path\":\"src/a.ts:1-5\"}"), *a2 = J("{\"path\":\"data.json?q=.items\"}"), *a3 = J("{\"path\":\"https://x.dev/p?q=1\"}");
+        json_t *r = J("{\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}");
+        tc_call_t cs[3] = {call("read", a1, r, false), call("read", a2, r, false), call("read", a3, r, false)};
+        strvec_t out = {0};
+        tc_render_read_group(cs, 3, 80, &out);
+        char *dir = tc_fg(TUI_TC_DIM, "src/"), *nm = tc_fg(TUI_TC_CUSTOM_MESSAGE_LABEL, "a.ts"), *sel = tc_fg(TUI_TC_MUTED, ":1-5");
+        char *w1 = xasprintf("%s%s%s", dir, nm, sel);
+        CHECK(strstr(out.v[1], w1), "row path: %s", out.v[1]);
+        free(w1), free(dir), free(nm), free(sel);
+        char *nm2 = tc_fg(TUI_TC_CUSTOM_MESSAGE_LABEL, "data.json"), *q = tc_fg(TUI_TC_MUTED, "?q=.items");
+        char *w2 = xasprintf("%s%s", nm2, q);
+        CHECK(strstr(out.v[2], w2), "row query: %s", out.v[2]);
+        free(w2), free(nm2), free(q);
+        char *w3 = tc_fg(TUI_TC_CUSTOM_MESSAGE_LABEL, "https://x.dev/p?q=1");
+        CHECK(strstr(out.v[3], w3), "row url: %s", out.v[3]);
+        free(w3);
+        strvec_free(&out);
+        /* a lone read is a header: accent subject, success glyph */
+        tc_render_read_group(cs, 1, 80, &out);
+        char *acc = tc_fg(TUI_TC_ACCENT, "src/a.ts");
+        CHECK(strstr(out.v[0], acc) && has_row(&out, "\xe2\x9c\x94 "), "header row: %s", out.v[0]);
+        free(acc);
+        strvec_free(&out);
+        json_free(r), json_free(a1), json_free(a2), json_free(a3);
+    }
+    /* LSP diagnostics: the severity color moved from the location to the tag */
+    {
+        json_t *a = J("{\"action\":\"diagnostics\"}");
+        json_t *r = J("{\"content\":[{\"type\":\"text\",\"text\":\"1 error(s):\\nsrc/a.ts:3:5 [error] boom\"}]}");
+        tc_call_t c = call("lsp", a, r, false);
+        strvec_t out = {0};
+        tc_render(&c, 80, &out);
+        char *tag = tc_fg(TUI_TC_ERROR, "[error]"), *pos = tc_fg(TUI_TC_MUTED, ":3:5");
+        bool has_tag = false, has_pos = false;
+        for (size_t i = 0; i < out.n; i++) has_tag |= strstr(out.v[i], tag) != NULL, has_pos |= strstr(out.v[i], pos) != NULL;
+        CHECK(has_tag, "severity tag color");
+        CHECK(has_pos, "muted location");
+        free(tag), free(pos);
+        strvec_free(&out);
+        json_free(a), json_free(r);
+    }
+    /* ASCII preset: three-column status glyphs, bracketed spinner */
+    {
+        tui_sym_set_preset("ascii");
+        tui_theme_set(tui_theme_builtin("titanium", TUI_COLOR_TRUECOLOR));
+        char *ok = tc_status_icon(TC_ST_SUCCESS, -1), *er = tc_status_icon(TC_ST_ERROR, -1), *ab = tc_status_icon(TC_ST_ABORTED, -1);
+        char *pe = tc_status_icon(TC_ST_PENDING, -1), *ru = tc_status_icon(TC_ST_RUNNING, 1);
+        char *pok = tui_strip_ansi(ok), *per = tui_strip_ansi(er), *pab = tui_strip_ansi(ab), *ppe = tui_strip_ansi(pe), *pru = tui_strip_ansi(ru);
+        CHECK(str_eq(pok, "[+]") && str_eq(per, "[-]") && str_eq(pab, "[#]") && str_eq(ppe, "[ ]"), "%s %s %s %s", pok, per, pab, ppe);
+        CHECK(str_eq(pru, "[/]"), "ascii spinner frame: %s", pru);
+        free(pok), free(per), free(pab), free(ppe), free(pru), free(ok), free(er), free(ab), free(pe), free(ru);
+        tui_sym_set_preset("unicode");
+        tui_theme_set(tui_theme_builtin("titanium", TUI_COLOR_TRUECOLOR));
+    }
     if (failures) fprintf(stderr, "%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

@@ -164,6 +164,7 @@ typedef struct {
     strvec_t tokens;       /* highlight tokens of the current results' query */
     int sel;               /* -1 when no results */
     char *results_query;   /* trimmed query the results were fetched for */
+    tui_editor_t *target;  /* receives the pick: the composer, or the prompt Ctrl+R was pressed in */
 } hs_t;
 
 /* pickerAge */
@@ -350,8 +351,9 @@ static void hs_pick(hs_t *h) {
     if (h->sel < 0 || h->sel >= (int)h->items.n) return;
     char *prompt = xstrdup(h->items.v[h->sel].prompt);
     ui_t *u = h->u;
+    tui_editor_t *target = h->target;
     ui_close_selector(u); /* destroys h */
-    tui_editor_set_text(u->editor, prompt);
+    tui_editor_set_text(target, prompt);
     free(prompt);
     tui_request_render(u->tui);
 }
@@ -401,9 +403,15 @@ static void hs_destroy(tui_component_t *c) {
 static const tui_component_vt HS_VT = {"history-search", hs_render, hs_key, NULL, hs_destroy};
 
 void ui_history_search(ui_t *u) {
+    /* Ctrl+R also opens over hook/ask prompts that replace the composer in the editor slot; the pick belongs
+     * to that prompt, not the hidden composer */
+    tui_component_t *top = ui_selector_top(u);
+    tui_editor_t *prompt = ui_hook_editor_of(top);
+    if (!prompt) prompt = ui_ask_prompt_editor(top);
     hs_t *h = xcalloc(1, sizeof *h);
     tui_component_init(&h->base, &HS_VT);
     h->u = u;
+    h->target = prompt ? prompt : u->editor;
     char *p = omc_agent_path("prompt-history.jsonl");
     size_t n;
     h->jsonl = fs_read(p, &n);
@@ -411,5 +419,6 @@ void ui_history_search(ui_t *u) {
     hs_update(h);
     ui_panel_t *panel = ui_panel_new("History");
     tui_container_add(&panel->c, &h->base);
-    ui_show_selector(u, &panel->c.base, &h->base);
+    if (top) ui_show_selector_over(u, &panel->c.base, &h->base);
+    else ui_show_selector(u, &panel->c.base, &h->base);
 }

@@ -113,9 +113,60 @@ static void test_store(void) {
     free(tpath);
 }
 
+static char *inject_of(const char *a) { return btw_inject_of(a); }
+
+static void check_inject(const char *answer, const char *want) {
+    char *got = inject_of(answer);
+    if (!want) CHECK(!got);
+    else CHECK(got && str_eq(got, want));
+    free(got);
+}
+
+/* omp btw-inject.test.ts */
+static void test_inject(void) {
+    /* the complete block, even when the answer mentions the tag in prose around it */
+    check_inject("I'll wrap it in <inject> tags:\n<inject>\n  Stop retrying the build.\n</inject>", "Stop retrying the build.");
+    check_inject("<inject>Stop retrying.</inject>\nThe <inject> block above is ready.", "Stop retrying.");
+    check_inject("<inject>Stop.</inject> The delimiter is </inject>.", "Stop.");
+    /* nothing until the block closes, nothing for a blank block */
+    btw_inject_parts_t p;
+    CHECK(btw_split_inject("Status ok.\n<inject>Stop ret", &p));
+    CHECK(str_eq(p.before, "Status ok.\n") && str_eq(p.inject, "Stop ret") && str_eq(p.after, "") && !p.closed);
+    btw_inject_parts_free(&p);
+    check_inject("Status ok.\n<inject>Stop ret", NULL);
+    check_inject("<inject> \n </inject>", NULL);
+    check_inject("No steering needed.", NULL);
+    /* what the block shows is what is sent: control sequences never ride along hidden */
+    check_inject("<inject>Stop \x1b[31mnow\x1b[0m.</inject>", "Stop now.");
+    check_inject("<inject>\x1b[31m\x1b[0m</inject>", NULL);
+    /* the parts around a closed block */
+    CHECK(btw_split_inject("a <inject>b</inject> c", &p));
+    CHECK(str_eq(p.before, "a ") && str_eq(p.inject, "b") && str_eq(p.after, " c") && p.closed);
+    btw_inject_parts_free(&p);
+    /* a topic's block only from its completed latest turn */
+    json_t *r = json_parse_str("{\"id\":\"r1\",\"question\":\"q\",\"answer\":\"<inject>Old prompt</inject>\",\"status\":\"complete\"}");
+    char *t = btw_record_inject(r);
+    CHECK(t && str_eq(t, "Old prompt"));
+    free(t);
+    t = btw_turn_key(r, -1);
+    CHECK(str_eq(t, "r1:0"));
+    free(t);
+    json_t *fu = json_parse_str("[{\"question\":\"n\",\"answer\":\"no block\",\"status\":\"complete\"}]");
+    json_set(r, "followUps", fu);
+    CHECK(!btw_record_inject(r));
+    t = btw_turn_key(r, -1);
+    CHECK(str_eq(t, "r1:1"));
+    free(t);
+    t = btw_turn_key(r, 0);
+    CHECK(str_eq(t, "r1:0"));
+    free(t);
+    json_free(r);
+}
+
 int main(void) {
     test_dedupe();
     test_records();
+    test_inject();
     test_store();
     if (fails) fprintf(stderr, "%d failure(s)\n", fails);
     else printf("test_btw ok\n");

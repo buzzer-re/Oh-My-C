@@ -34,6 +34,7 @@ typedef struct {
     /* model picker (markOverContext): rows whose context window is below the session's tokens are grayed */
     bool mark_over_context;
     int64_t ctx_tokens;
+    int64_t next_credit_change; /* earliest dated credit-rate change among the items (ms), 0 none */
 } ui_model_browser_t;
 
 /* a role resolved to a model (RoleAssignment) with its chip label/color (getRoleInfo) */
@@ -48,6 +49,7 @@ typedef struct ui_role_assign {
 } ui_role_assign_t;
 
 #define UI_MB_SEPARATOR ((size_t)-1)
+bool ui_model_is_free(const ai_model_t *m); /* isFreeModel: the `free` label and search word */
 /* hub data: copies `roles` and `mru` */
 void ui_model_browser_set_roles(ui_model_browser_t *b, const ui_role_assign_t *roles, size_t n, const strvec_t *mru);
 /* omp sortModelItems: role rank (MODEL_ROLE_IDS order), MRU, provider, priority, version, date */

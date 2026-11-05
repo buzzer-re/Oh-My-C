@@ -42,7 +42,8 @@ static char *render_hit(const json_t *hit, int range_limit) {
     char sc[32];
     snprintf(sc, sizeof sc, "%.2f", score);
     char *scs = tc_fg(score_color(score), sc);
-    char *rl = tc_fg(TUI_TC_ACCENT, rel);
+    /* URL hits show whole in the file-name color; file hits get the dim directory */
+    char *rl = tc_is_url_like(rel) ? tc_fg(TC_FILE_NAME_COLOR, rel) : tc_styled_path(rel);
     char *cov = json_get_bool(hit, "truncated", false)
                     ? xasprintf("%lld lines judged, partial", (long long)json_get_int(hit, "linesSeen", 0))
                     : xasprintf("%lld lines judged", (long long)json_get_int(hit, "linesSeen", 0));
