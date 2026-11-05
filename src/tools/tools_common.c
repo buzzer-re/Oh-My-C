@@ -17,6 +17,7 @@ tool_env_t *tool_env_new(const char *cwd) {
     edit_store_init(&e->store);
     e->todo.phases = json_arr();
     e->edit_mode = xstrdup("hashline");
+    hmap_init(&e->read_repeats);
     pthread_mutex_init(&e->mu, NULL);
     return e;
 }
@@ -32,6 +33,7 @@ void tool_env_free(tool_env_t *e) {
     shell_free(e->shell);
     jobs_free(e->jobs);
     conflict_history_free(e->conflicts);
+    hmap_free(&e->read_repeats, free);
     pthread_mutex_destroy(&e->mu);
     free(e);
 }

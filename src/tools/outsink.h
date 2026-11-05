@@ -101,12 +101,19 @@ void out_meta_result_limit(json_t **meta, int64_t reached, int64_t suggestion);
 void out_meta_head_limit(json_t **meta, int64_t reached, int64_t suggestion);
 void out_meta_column_truncated(json_t **meta, int64_t max_column, const char *unit, const char *artifact_id,
                                int64_t artifact_elided_bytes, int64_t first, int64_t last, const char *selector_base);
+/* the first cut line exceeds what one `:raw` read returns; that read stops at this many bytes (limits.columnTruncated.rawByteCap) */
+void out_meta_column_raw_cap(json_t *meta, int64_t raw_byte_cap);
 /* formatOutputNotice: "\n\n[...]" (+ LSP diagnostics block) or "" (owned) */
 char *out_format_notice(const json_t *meta);
 /* formatTruncationMetaNotice + artifact error, unbracketed (styled warning text); NULL when none */
 char *out_format_warning(const json_t *meta);
 /* stripOutputNotice: text without the trailing notice for `meta` (owned) */
 char *out_strip_notice(const char *text, const json_t *meta);
+/* isColumnTruncationNotice: `line` is the column-cap notice out_format_notice emits (`[Some lines truncated to 768 chars…]`) */
+bool out_is_column_truncation_notice(const char *line);
+/* hasColumnTruncationClause: the bracketed notice `line` carries the column-cap clause, alone or after the parts
+ * out_format_notice joins before it (`[Showing lines 1-4 of 5. … Some lines truncated to 768 chars…]`) */
+bool out_has_column_truncation_clause(const char *line);
 /* appendOutputNotice on a content array (json) */
 void out_append_notice(json_t *content, const json_t *meta);
 

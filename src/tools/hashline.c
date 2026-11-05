@@ -164,7 +164,7 @@ static bool u32_has(const u32v_t *v, uint32_t x) {
  * read-output metadata rows (prefixes.rs)
  * ====================================================================================== */
 
-static bool is_read_truncation_notice(const char *line) {
+bool hl_is_read_truncation_notice(const char *line) {
     char *t = trim(line);
     size_t n = strlen(t);
     bool r = false;
@@ -201,7 +201,7 @@ static bool is_read_truncation_notice(const char *line) {
 static bool contains_ellipsis(const char *s) { return strstr(s, "\xE2\x80\xA6") || strstr(s, "..."); }
 
 static bool is_read_metadata_line(const char *line) {
-    if (is_read_truncation_notice(line)) return true;
+    if (hl_is_read_truncation_notice(line)) return true;
     /* ^\s*[1-9]\d*\s*-\s*[1-9]\d*:.*(?:…|\.\.\.).*$ */
     const char *p = skip_ws(line);
     if (*p >= '1' && *p <= '9') {

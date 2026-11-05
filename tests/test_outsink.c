@@ -146,10 +146,28 @@ static void test_columns(const char *dir) {
     CHECK_STR(notice, "\n\n[Some lines truncated to 768 bytes. Use artifact://1:raw:3-3 to read line 3 whole; cut lines run to "
                       "line 39, each read the same way]");
     free(notice);
+    out_meta_column_raw_cap(meta, 50 * 1024);
+    notice = out_format_notice(meta);
+    CHECK_STR(notice, "\n\n[Some lines truncated to 768 bytes. Use artifact://1:raw:3-3 to read line 3 uncut, byte-capped at 50.0KB; "
+                      "cut lines run to line 39, each read the same way]");
+    free(notice);
     json_free(meta);
     out_summary_free(&sum);
     out_sink_free(s);
     sb_free(&in);
+    /* isColumnTruncationNotice / hasColumnTruncationClause: bracketed, a stated cap and unit, fractional caps too */
+    CHECK(out_is_column_truncation_notice("[Some lines truncated to 768 chars]"));
+    CHECK(out_is_column_truncation_notice("  [Some lines truncated to 768 bytes. Use :raw:3-3 to read line 3 whole]\r"));
+    CHECK(out_is_column_truncation_notice("[Some lines truncated to 768.5 chars. Use :raw:1-1 to read line 1 whole]"));
+    CHECK(out_is_column_truncation_notice("[Some lines truncated to 1e+21 chars]"));
+    CHECK(!out_is_column_truncation_notice("[Some lines truncated to explain the format]"));
+    CHECK(!out_is_column_truncation_notice("[Some lines truncated to explain the format"));
+    CHECK(!out_is_column_truncation_notice("[Some lines truncated to 768 cats]"));
+    CHECK(!out_is_column_truncation_notice("[Showing lines 1-4 of 5. Some lines truncated to 768 chars]"));
+    CHECK(out_has_column_truncation_clause("[Showing lines 1-4 of 5. Use :5 to continue. Some lines truncated to 768 chars. Use :raw:1-1 to read line 1 whole]"));
+    CHECK(out_has_column_truncation_clause("[Some lines truncated to 768 chars]"));
+    CHECK(!out_has_column_truncation_clause("[Showing lines 1-4 of 5. Use :5 to continue]"));
+    CHECK(!out_has_column_truncation_clause("Note. Some lines truncated to 768 chars]"));
     free(path);
 }
 

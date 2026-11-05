@@ -110,6 +110,8 @@ printf 'a\r\nb\r\n' > crlf.txt
 check "write crlf"     "Note: kept the replaced file's CRLF line endings."  "$B" --model mock/mock-1 -p 'call:write:{"path":"crlf.txt","content":"x\ny\n"}'
 check "write no content" "content is required for nc.txt."  "$B" --model mock/mock-1 -p 'call:write:{"path":"nc.txt"}'
 check "write eisdir"   "EISDIR: illegal operation on a directory, open '"  "$B" --model mock/mock-1 -p "write:a:x"
+# read page budget (column-cut lines, :raw byte cap, multi-range stop) and the write read-projection guard
+check "read budget" "read budget ok"  python3 -I "$ROOT/tests/e2e/read_budget.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/rb"
 # edit modes: apply_patch via config.yml (edit.mode), patch / replace / sloppy via PI_EDIT_VARIANT
 printf 'edit:\n  mode: apply_patch\n' > "$T/agent/config.yml"
 printf 'one\ntwo\nthree\n' > ap.txt; printf 'bye\n' > ap-gone.txt

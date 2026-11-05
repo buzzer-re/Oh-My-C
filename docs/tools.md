@@ -184,6 +184,23 @@ These port omp's `OutputSink` (`tui/src/tools/streaming-output.ts`), `output-met
 - `tool_postprocess_result()` (the `after_tool` hook) spills any oversized result from any tool
   the same way and writes omp's `details.meta`.
 
+### Read page budget and the write projection guard
+
+`read` pages through the budget of omp's `collectLineWindow`: `max(50 KB, lines * 512)`, capped by the spill threshold less
+the row-prefix reserve. A numbered page charges a line cut to `tools.outputMaxColumns` the UTF-8 bytes of its cut display
+(stray bytes count as 3-byte U+FFFD), `:raw` reads and a cap of `0` charge source bytes. A first line that neither form
+fits gets the partial preview (`Showing line N (partial, …)`), or the "Hashline output requires full lines" refusal. A
+leading context line that leaves no room for the requested line is dropped (retried from the requested start). The
+column notice names the byte cap when the first cut line is larger than one raw read returns. Raw and
+past-the-4-MiB-cap multi-range reads budget each range and append `[Range A-B stopped before line N at the … read budget.
+Use :N-B to continue]`. omc holds the whole file in memory, so the streaming display-head logic of omp (`prefixLines`) has
+no counterpart.
+
+`write` refuses a payload that ends with a read notice when it would lose content (`read_projection_refusal`): a truncation
+notice whose shown payload is shorter than the file, or any column-cap clause (a cut line ends in `…` in place of its tail).
+Matching is exact (`out_is_column_truncation_notice`, `out_has_column_truncation_clause`): bracketed, with a stated cap and
+unit.
+
 ## Eval kernel protocol (`tools/eval.c`, `assets/eval_kernel.py`)
 
 The kernel is a persistent Python process started as `python3 -u -c <embedded source>` (interpreter

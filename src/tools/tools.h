@@ -133,6 +133,7 @@ typedef struct tool_env {
      * owned value or NULL with *err (owned). cell = calling cell serial, cancel = this call's abort flag. */
     json_t *(*eval_bridge)(struct tool_env *env, const char *name, const json_t *args, int64_t cell,
                            volatile sig_atomic_t *cancel, char **err);
+    hmap_t read_repeats;       /* read repeat tracker: selector -> identical-output count (read.c) */
     pthread_mutex_t mu;
 } tool_env_t;
 
