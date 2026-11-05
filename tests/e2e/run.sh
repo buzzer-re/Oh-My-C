@@ -642,6 +642,24 @@ check "pr:// view"       "Review Comments (2)"   "${GENV[@]}" "$B" --model mock/
 check "pr:// diff list"  "3. new.txt  +0 -0  [renamed]  (renamed from old.txt)"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "read:pr://acme/widgets/12/diff"
 check "issue:// list"    "# Issues in acme/widgets (open, up to 30)"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "read:issue://acme/widgets"
 check "issue:// error"   "issue:// resolution failed: GraphQL: Could not resolve"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "read:issue://acme/widgets/999"
+# gh's default repo pick: origin over an upstream it is no fork of; a fork's upstream stays (fake gh logs its argv)
+mkdir -p "$T/ghorigin/bin" "$T/ghorigin/w" && cat > "$T/ghorigin/bin/gh" <<'SH'
+#!/bin/sh
+echo "$*" >> "$FAKE_GH_LOG"
+case "$*" in
+    "repo view --json url -q .url") echo https://github.com/merged/from ;;
+    "repo view git@github.com:me/fork.git --json url,parent") printf '{"url":"https://github.com/me/fork","parent":%s}\n' "$FAKE_GH_PARENT" ;;
+    api*) echo '{"items":[],"total_count":0}' ;;
+esac
+SH
+chmod +x "$T/ghorigin/bin/gh"
+(cd "$T/ghorigin/w" && git init -q . && git remote add origin git@github.com:me/fork.git && git remote add upstream https://github.com/merged/from.git)
+GORIGIN=(env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST PATH="$T/ghorigin/bin:$PATH" GH_CONFIG_DIR="$T/ghcfg" OMC_CODING_AGENT_DIR="$T/ghagent" FAKE_GH_LOG="$T/ghorigin/log")
+gh_search_q() { : > "$T/ghorigin/log"; (cd "$T/ghorigin/w" && "${GORIGIN[@]}" FAKE_GH_PARENT="$1" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"search_prs\",\"query\":\"bug\"}"}' >/dev/null 2>&1); cat "$T/ghorigin/log"; }
+gh_search_q null > "$T/ghorigin/a"
+check "gh prefers origin"  "repo:me/fork"  cat "$T/ghorigin/a"
+gh_search_q '{"name":"from","owner":{"login":"merged"}}' > "$T/ghorigin/b"
+check "gh keeps fork parent"  "repo:merged/from"  cat "$T/ghorigin/b"
 check "gh needs enable"  "No such tool: xd://github"  env PATH="$ROOT/tests/e2e/bin-gh:$PATH" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"repo_view\"}"}'
 # implicit local servers (ollama / llama.cpp / LM Studio discovery) against tests/e2e/mock_local.py
 DPORT=$((PORT + 9)); python3 -I "$ROOT/tests/e2e/mock_local.py" $DPORT & DPID=$!

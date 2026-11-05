@@ -254,6 +254,7 @@ static const char *const ANON_FIELD_RULES[][2] = {
     {"upstreamError", "error"},
     {"toolName", "tool"},
     {"tools", "tool"},
+    {"mountedTools", "tool"},
     {"declared", "tool"},
     {"deferred", "tool"},
     {"active", "tool"},

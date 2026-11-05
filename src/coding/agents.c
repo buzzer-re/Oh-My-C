@@ -18,6 +18,11 @@ typedef struct aref {
     app_t *app;     /* live session (owned for subagents, borrowed for Main) */
     app_t *spawner; /* session that spawned it (its jobs receive the results) */
     bool owned, running, aborted, gone, is_main;
+    /* the session is routable but its owner has not prompted the assignment yet: an IRC message must not wake a turn
+     * without it. The parent's ride the assignment's turn; a peer's keep a wake turn of their own after the run. */
+    bool awaiting_assignment;
+    strvec_t early_asides; /* rendered IRC texts */
+    strvec_t early_peers;  /* from, body pairs */
     char *output;
     bool has_output;
     int64_t started_at, published_at, run_started;
@@ -990,6 +995,8 @@ static app_t *make_child(spawn_t *sp, char **err) {
     return child;
 }
 
+static void deliver(const char *from, const char *to, const char *body, const char **outcome);
+
 static char *task_body_run(bgjob_t *job, void *ud, bool *failed) {
     spawn_t *sp = ud;
     aref_t *r = sp->ref;
@@ -1014,6 +1021,7 @@ static char *task_body_run(bgjob_t *job, void *ud, bool *failed) {
         pthread_mutex_lock(&g_mu);
         r->app = child;
         r->owned = child != NULL;
+        r->awaiting_assignment = child != NULL;
         pthread_mutex_unlock(&g_mu);
     }
     if (!child) {
@@ -1042,10 +1050,29 @@ static char *task_body_run(bgjob_t *job, void *ud, bool *failed) {
     }
     bool aborted;
     char *error = NULL;
+    /* this turn carries the assignment: IRC asides parked for it fold in ahead of the message */
+    pthread_mutex_lock(&g_mu);
+    r->awaiting_assignment = false;
+    strvec_t asides = r->early_asides, peers = r->early_peers;
+    memset(&r->early_asides, 0, sizeof r->early_asides);
+    memset(&r->early_peers, 0, sizeof r->early_peers);
+    pthread_mutex_unlock(&g_mu);
+    for (size_t i = 0; i < asides.n; i++) {
+        json_t *m = msg_user_text(asides.v[i]);
+        json_set_bool(m, "synthetic", true);
+        json_set_str(m, "customType", "irc");
+        agent_append_message(child->agent, m);
+    }
+    strvec_free(&asides);
     char *text = run_turn_ex(r, child, up, cancel, &aborted, &error, true, sp->task);
     free(up);
     permit_release();
     publish_output(r, text, true, !aborted && !error);
+    for (size_t i = 0; i + 1 < peers.n; i += 2) {
+        const char *oc;
+        deliver(peers.v[i], r->id, peers.v[i + 1], &oc);
+    }
+    strvec_free(&peers);
     const char *status = aborted ? "aborted" : error ? "failed" : "completed";
     *failed = aborted || error;
     char *sum = render_summary(r->id, sp->agent, status, mono_ms() - t0, text, error, aborted);
@@ -1279,6 +1306,18 @@ static void deliver(const char *from, const char *to, const char *body, const ch
         return;
     }
     free(mid);
+    if (r->awaiting_assignment) {
+        if (str_eq(from, r->parent_id)) {
+            strvec_push_own(&r->early_asides, render_irc(from, body, NULL, false, false));
+            *outcome = "injected";
+        } else {
+            strvec_push(&r->early_peers, from);
+            strvec_push(&r->early_peers, body);
+            *outcome = "woken";
+        }
+        pthread_mutex_unlock(&g_mu);
+        return;
+    }
     app_t *app = r->app;
     bool running = r->running || agent_is_running(app->agent);
     if (running) {
