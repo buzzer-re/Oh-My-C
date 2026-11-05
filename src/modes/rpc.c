@@ -1234,6 +1234,7 @@ static void *prompt_thread(void *p) {
     rpc_t *r = p;
 again:;
     size_t before = json_len(r->a->agent->messages);
+    bool refused = false;
     if (r->slash) {
         /* builtin: output as command_output frames; only an agent-invoking one (/retry) reports a
          * prompt_result (the prompt response already said agentInvoked) */
@@ -1267,7 +1268,7 @@ again:;
     else if (r->skill_msg) {
         json_t *m = r->skill_msg;
         r->skill_msg = NULL;
-        app_prompt_skill(r->a, m);
+        refused = app_prompt_skill(r->a, m) == APP_PROMPT_REFUSED;
     } else {
         /* AgentSession.prompt: custom (MCP prompt) / file commands / prompt templates expand first */
         char *x = app_expand_input(r->a, r->text, true);
@@ -1290,7 +1291,7 @@ again:;
             pthread_mutex_unlock(&r->mu);
             return NULL;
         }
-        app_prompt(r->a, x, r->images);
+        refused = app_prompt(r->a, x, r->images) == APP_PROMPT_REFUSED;
         free(x);
     }
     r->images = NULL;
@@ -1299,11 +1300,21 @@ again:;
     json_t *res = json_obj();
     json_set_str(res, "type", "prompt_result");
     if (r->prompt_id) json_set_str(res, "id", r->prompt_id);
-    json_set_bool(res, "agentInvoked", true);
+    json_set_bool(res, "agentInvoked", !refused);
     /* a run stopped from inside (a cancelled ask, Esc) ends aborted even when its last turn completed */
-    const char *status = str_eq(stop, "aborted") || r->a->agent->cancel ? "aborted" : str_eq(stop, "error") ? "error" : "completed";
+    const char *status = refused ? "error"
+                         : str_eq(stop, "aborted") || r->a->agent->cancel ? "aborted"
+                         : str_eq(stop, "error")                          ? "error"
+                                                                          : "completed";
     json_set_str(res, "status", status);
-    if (!strcmp(status, "error")) {
+    if (refused) {
+        json_t *e = json_obj();
+        json_set_str(e, "message", r->a->prompt_refusal ? r->a->prompt_refusal : "error");
+        json_set_str(e, "provider", r->a->model ? r->a->model->provider : "");
+        json_set_str(e, "model", r->a->model ? r->a->model->id : "");
+        json_set_bool(e, "retryable", false);
+        json_set(res, "error", e);
+    } else if (!strcmp(status, "error")) {
         json_t *e = json_obj();
         json_set_str(e, "message", json_get_str(last, "errorMessage") ? json_get_str(last, "errorMessage") : "error");
         json_set_str(e, "provider", json_get_str(last, "provider"));

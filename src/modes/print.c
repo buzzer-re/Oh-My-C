@@ -46,6 +46,20 @@ static void text_listener(void *ud, const agent_event_t *ev) {
     }
 }
 
+/* singleLine: untrusted server names / errors as one stderr line */
+static char *single_line(const char *s) {
+    sb_t b = SB_INIT;
+    for (const char *p = s ? s : ""; *p; p++) {
+        if (*p == '\r' || *p == '\n' || *p == '\t') {
+            while (p[1] == '\r' || p[1] == '\n' || p[1] == '\t') p++;
+            sb_putc(&b, ' ');
+        } else if ((unsigned char)*p >= 0x20 && *p != 0x7f) {
+            sb_putc(&b, *p);
+        }
+    }
+    return sb_detach(&b);
+}
+
 static void notice_stderr(void *ud, const char *level, const char *text) {
     UNUSED(ud);
     if (!strcmp(level, "todo-reminder")) return;
@@ -60,22 +74,17 @@ static void notice_stderr(void *ud, const char *level, const char *text) {
         free(m);
         return;
     }
+    /* auto_retry_start: a turn stuck retrying (offline, an outage) says why */
+    int at, max;
+    if (!strcmp(level, "warning") && sscanf(text, "Retrying (%d/%d)", &at, &max) == 2) {
+        const char *msg = strstr(text, ": ");
+        char *line = single_line(msg ? msg + 2 : "error");
+        fprintf(stderr, "Retrying (%d/%d): %s\n", at, max, line);
+        free(line);
+        return;
+    }
     if (strcmp(level, "warning") && strcmp(level, "error")) return;
     fprintf(stderr, "[%s] %s\n", level, text);
-}
-
-/* singleLine: untrusted server names / errors as one stderr line */
-static char *single_line(const char *s) {
-    sb_t b = SB_INIT;
-    for (const char *p = s ? s : ""; *p; p++) {
-        if (*p == '\r' || *p == '\n' || *p == '\t') {
-            while (p[1] == '\r' || p[1] == '\n' || p[1] == '\t') p++;
-            sb_putc(&b, ' ');
-        } else if ((unsigned char)*p >= 0x20 && *p != 0x7f) {
-            sb_putc(&b, *p);
-        }
-    }
-    return sb_detach(&b);
 }
 
 /* print-mode evaluateReadiness: wait for MCP startup (up to the server timeout), bind the manager's current tools
@@ -147,8 +156,12 @@ int run_print_mode(app_t *a, const print_opts_t *o) {
         /* session.prompt: MCP prompt / file / template commands expand (skill commands do not run here) */
         char *x = app_expand_input(a, o->messages.v[i], true);
         if (!x) continue;
-        app_prompt(a, x, i == 0 && json_len(o->initial_images) ? json_clone(o->initial_images) : NULL);
+        int prc = app_prompt(a, x, i == 0 && json_len(o->initial_images) ? json_clone(o->initial_images) : NULL);
         free(x);
+        if (prc == APP_PROMPT_REFUSED) { /* session.prompt rejected: the run fails with no turn to report */
+            rc = 1;
+            break;
+        }
         /* advisor notes (and goal continuations when "print" is enabled) extend the run before printing */
         const char *prev = NULL;
         for (int guard = 0; guard < 50; guard++) {
