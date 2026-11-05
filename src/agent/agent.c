@@ -1078,6 +1078,7 @@ static void run_tool(tool_job_t *j) {
                 j->ctx.cancel = &a->cancel;
                 j->ctx.update = tool_update_cb;
                 j->ctx.app = a->app;
+                j->ctx.intent = j->intent;
                 j->tool->execute(j->tool, &j->ctx, j->args, &j->res);
                 if (a->cancel && !j->res.content) tool_result_error(&j->res, "Tool execution was aborted");
             }

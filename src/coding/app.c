@@ -22,6 +22,7 @@
 #include "tools/approval.h"
 #include "tools/artifacts.h"
 #include "tools/jobs.h"
+#include "coding/jobcaption.h"
 #include "tools/patch.h"
 #include "tools/xdev.h"
 #include "agents.h"
@@ -434,6 +435,14 @@ void app_fill_request_opts(app_t *a, ai_stream_opts_t *o) { fill_request_opts(a,
 /* #recordCacheWarmUsage: paid warm requests as off-transcript model_usage entries (session totals include them) */
 void app_flush_warm_usage(app_t *a) {
     json_t *u = cachewarm_take_usage(a->warmer), *e;
+    if (!a->opts.subagent) { /* job captions (off-transcript like warm requests) go on the root session */
+        json_t *cap = job_captions_take_usage();
+        if (cap) {
+            if (!u) u = json_arr();
+            json_arr_foreach(cap, i, e) json_push(u, json_clone(e));
+            json_free(cap);
+        }
+    }
     json_arr_foreach(u, i, e) {
         a->total_cost += json_get_num(json_get(json_get(e, "usage"), "cost"), "total", 0);
         if (!a->session) continue;

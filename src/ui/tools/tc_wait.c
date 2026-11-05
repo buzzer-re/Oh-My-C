@@ -89,6 +89,8 @@ static char *job_label(const json_t *j) {
         if (*t) return t;
         free(t);
     }
+    const char *intent = json_get_str(j, "intent");
+    if (intent && *intent) return xstrdup(intent);
     return xstrdup(json_get_str(j, "label") ? json_get_str(j, "label") : "");
 }
 

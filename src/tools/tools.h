@@ -145,6 +145,8 @@ void tool_env_free(tool_env_t *e);
 char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err);
 /* resolve a model-supplied path against env cwd (expands ~), owned */
 char *tool_resolve_path(tool_env_t *env, const char *p);
+/* the environment bash commands run with (NON_INTERACTIVE_ENV), NULL-terminated "K=V" entries */
+const char *const *tool_bash_env(void);
 /* truncate output to a byte/line budget keeping the tail; returns owned text + notice */
 char *tool_truncate_tail(const char *s, size_t len, size_t max_bytes, size_t max_lines, bool *truncated);
 char *tool_truncate_head(const char *s, size_t len, size_t max_bytes, size_t max_lines, bool *truncated);

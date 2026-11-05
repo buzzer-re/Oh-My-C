@@ -5,6 +5,7 @@
 #include "config/settings.h"
 
 #include "core/fs.h"
+#include <unistd.h>
 #include "prompt/template.h"
 #include "shell.h"
 #include "iurl.h"
@@ -36,6 +37,51 @@ void tool_env_free(tool_env_t *e) {
     hmap_free(&e->read_repeats, free);
     pthread_mutex_destroy(&e->mu);
     free(e);
+}
+
+/* exec/non-interactive-env.ts NON_INTERACTIVE_ENV: pagers, prompts and editors that would block a bash command; `PI_BASH_NO_CI`
+ * (and its legacy alias) opts out of the automatic `CI=true` */
+static const char *g_bash_env[64];
+static pthread_once_t g_bash_env_once = PTHREAD_ONCE_INIT;
+
+static void bash_env_init(void) {
+    static const char *const base[] = {
+        "PAGER=cat", "GIT_PAGER=cat", "MANPAGER=cat", "SYSTEMD_PAGER=cat", "BAT_PAGER=cat", "DELTA_PAGER=cat", "GH_PAGER=cat",
+        "GLAB_PAGER=cat", "PSQL_PAGER=cat", "MYSQL_PAGER=cat", "AWS_PAGER=", "HOMEBREW_PAGER=cat", "LESS=FRX",
+        "TERM=dumb", "NO_COLOR=1", "PYTHONUNBUFFERED=1",
+        "GIT_EDITOR=true", "VISUAL=true", "EDITOR=true", "GIT_TERMINAL_PROMPT=0",
+        "GIT_SEQUENCE_EDITOR=true", /* a config-file `sequence.editor` outranks GIT_EDITOR and would block `git rebase -i` */
+        "GCM_INTERACTIVE=never",    /* Git Credential Manager GUI/browser auth dialogs ignore GIT_TERMINAL_PROMPT */
+        "AGENT=1",
+        "npm_config_yes=true", "npm_config_update_notifier=false", "npm_config_fund=false", "npm_config_audit=false",
+        "npm_config_progress=false", "PNPM_DISABLE_SELF_UPDATE_CHECK=true", "PNPM_UPDATE_NOTIFIER=false", "YARN_ENABLE_TELEMETRY=0",
+        "YARN_ENABLE_PROGRESS_BARS=0", "CARGO_TERM_PROGRESS_WHEN=never", "DEBIAN_FRONTEND=noninteractive", "PIP_NO_INPUT=1",
+        "PIP_DISABLE_PIP_VERSION_CHECK=1", "TF_INPUT=0", "TF_IN_AUTOMATION=1", "GH_PROMPT_DISABLED=1", "COMPOSER_NO_INTERACTION=1",
+        "CLOUDSDK_CORE_DISABLE_PROMPTS=1", "OMC=1", NULL};
+    size_t n = 0;
+    for (const char *const *e = base; *e; e++) g_bash_env[n++] = *e;
+    /* REJECT_PROMPT_COMMAND: `false` from PATH, else the bare name */
+    char *false_path = NULL;
+    const char *path = getenv("PATH");
+    if (path) {
+        strvec_t dirs = str_split(path, ":");
+        for (size_t i = 0; i < dirs.n && !false_path; i++) {
+            char *cand = path_join(dirs.v[i], "false");
+            if (access(cand, X_OK) == 0) false_path = cand;
+            else free(cand);
+        }
+        strvec_free(&dirs);
+    }
+    g_bash_env[n++] = xasprintf("SSH_ASKPASS=%s", false_path ? false_path : "false"); /* lives for the process */
+    free(false_path);
+    const char *no_ci = getenv("PI_BASH_NO_CI"), *no_ci2 = getenv("CLAUDE_BASH_NO_CI");
+    if (!(no_ci && *no_ci) && !(no_ci2 && *no_ci2)) g_bash_env[n++] = "CI=true";
+    g_bash_env[n] = NULL;
+}
+
+const char *const *tool_bash_env(void) {
+    pthread_once(&g_bash_env_once, bash_env_init);
+    return g_bash_env;
 }
 
 char *tool_resolve_path(tool_env_t *env, const char *p) {

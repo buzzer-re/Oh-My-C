@@ -12,5 +12,7 @@ void costgate_attach(app_t *a);
 void app_set_deadline(app_t *a, int64_t deadline_ms);
 /* a model request was refused by the cost cap since the last costgate_take_refusal (print mode exits 3) */
 bool costgate_take_refusal(app_t *a);
+/* costGate.admit for a side request: false once the session's spend reached session.maxCost */
+bool costgate_admits(void);
 
 #endif

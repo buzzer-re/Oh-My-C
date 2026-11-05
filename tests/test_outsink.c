@@ -1,5 +1,7 @@
 /* test_outsink.c - OutputSink / output-meta port (expected strings captured from omp 18.14.2) */
 #include "tools/outsink.h"
+#include "tools/jobtext.h"
+#include "core/fs.h"
 #include "core/fs.h"
 
 #include <stdio.h>
@@ -155,6 +157,38 @@ static void test_columns(const char *dir) {
     out_summary_free(&sum);
     out_sink_free(s);
     sb_free(&in);
+    /* needsJobCaption / normalizeJobCaption / resolveToolCallIntent's cleaning */
+    CHECK(job_caption_needed("while ssh worker 'systemctl is-active indexer'; do sleep 60; done"));
+    CHECK(!job_caption_needed("bun test 2>&1"));
+    CHECK(!job_caption_needed("curl -sO 'https://x.test/a?one=1&two=2|3'"));
+    CHECK(!job_caption_needed("echo \"a;b\" &> out"));
+    CHECK(job_caption_needed("echo \"$(date)\""));
+    CHECK(job_caption_needed("sleep 3; echo hi"));
+    CHECK(job_caption_needed("cat a | wc -l"));
+    CHECK(job_caption_needed("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"));
+    {
+        char *c = job_caption_normalize("- \"Checks worker every 60s until the indexer stops.\"\nExtra");
+        CHECK_STR(c, "Checks worker every 60s until the indexer stops");
+        free(c);
+        c = job_caption_normalize("\n  Caption:   Tails \x1b[1mlogs/app.log\x1b[0m   until cancelled.\nExtra");
+        CHECK_STR(c, "Tails logs/app.log until cancelled");
+        free(c);
+        CHECK(job_caption_normalize("  \n ") == NULL);
+        char *home = xasprintf("Tails %s/logs/x until done", home_dir()), *want = xstrdup("Tails ~/logs/x until done");
+        c = job_caption_normalize(home);
+        CHECK_STR(c, want);
+        free(c), free(home), free(want);
+        c = job_clean_intent("  Watch\tthe\n build ");
+        CHECK_STR(c, "Watch the build");
+        free(c);
+        CHECK(job_clean_intent("  \n") == NULL);
+        char *lng = xmalloc(301);
+        memset(lng, 'x', 300);
+        lng[300] = 0;
+        c = job_truncate(lng, 200);
+        CHECK(strlen(c) == 199 + 3 && str_ends(c, "\xE2\x80\xA6"));
+        free(c), free(lng);
+    }
     /* isColumnTruncationNotice / hasColumnTruncationClause: bracketed, a stated cap and unit, fractional caps too */
     CHECK(out_is_column_truncation_notice("[Some lines truncated to 768 chars]"));
     CHECK(out_is_column_truncation_notice("  [Some lines truncated to 768 bytes. Use :raw:3-3 to read line 3 whole]\r"));

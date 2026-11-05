@@ -922,7 +922,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     int64_t timeout_ms = tsec > 0 ? (int64_t)(tsec * 1000) : 0;
     bool pty = json_get_bool(args, "pty", false);
     if (async_req && env->jobs) {
-        char *jid = jobs_start_bash(env->jobs, full, cwd, timeout_ms, NULL);
+        char *jid = jobs_start_bash(env->jobs, full, cwd, timeout_ms, NULL, ctx ? ctx->intent : NULL);
         background_result(out, jid, NULL, &notices, tsec);
         free(jid);
         goto done;
@@ -1006,7 +1006,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     if (auto_bg) {
         int64_t thr = settings_int("bash.autoBackground.thresholdMs", 60000);
         int64_t wait_ms = thr <= 0 ? 0 : timeout_ms ? MAX(0, MIN(thr, timeout_ms - 1000)) : thr;
-        char *fid = jobs_start_bash_fg(env->jobs, full, cwd, timeout_ms, persistent ? env->shell : NULL, bash_on_output, &bs);
+        char *fid = jobs_start_bash_fg(env->jobs, full, cwd, timeout_ms, ctx ? ctx->intent : NULL, persistent ? env->shell : NULL, bash_on_output, &bs);
         bool fin = false, steered = false;
         int64_t deadline = mono_ms() + wait_ms;
         for (;;) {
@@ -1045,10 +1045,8 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         if (notice) strvec_push_own(&notices, notice);
         free(fid);
     } else {
-        static const char *env_extra[] = {"PAGER=cat", "GIT_PAGER=cat", "GIT_TERMINAL_PROMPT=0", "TERM=dumb",
-                                          "NO_COLOR=1", "OMC=1", NULL};
         proc_opts_t o = {.cwd = cwd,
-                         .env_extra = env_extra,
+                         .env_extra = tool_bash_env(),
                          .timeout_ms = timeout_ms,
                          .max_output = 64u << 20,
                          .merge_stderr = true,
@@ -1139,6 +1137,48 @@ char *jobs_render_results(const json_t *jobs) {
 
 #define WAIT_MAX_MS (30 * 60 * 1000)
 
+/* buildJobResult("wait"): the settled jobs, each led by what it was for, then what still runs. `recovered`: the job had
+ * settled before this wait started (its delivery was still pending). */
+static char *job_result_text(jobs_t *jobs, const json_t *done, bool recovered) {
+    sb_t b = SB_INIT;
+    const json_t *x;
+    if (json_len(done)) sb_appendf(&b, "## Completed (%zu)\n\n", json_len(done));
+    json_arr_foreach(done, i, x) {
+        const char *id = json_get_str(x, "jobId"), *status = json_get_str(x, "status");
+        const char *intent = json_get_str(x, "intent"), *agent = json_get_str(x, "agentId"), *type = json_get_str(x, "type");
+        sb_appendf(&b, "### %s [%s] \xE2\x80\x94 %s\n", id, type ? type : "bash", status ? status : "completed");
+        if (intent) sb_appendf(&b, "Intent: %s\n", intent);
+        sb_appendf(&b, "Label: %s\n", json_get_str(x, "label") ? json_get_str(x, "label") : "");
+        if (str_eq(type, "task") && agent && !str_eq(agent, id)) { /* taskAgentHandles */
+            if (str_eq(status, "completed")) sb_appendf(&b, "Agent: agent://%s, history://%s\n", agent, agent);
+            else sb_appendf(&b, "Agent: history://%s\n", agent);
+        }
+        if (!str_eq(status, "cancelled"))
+            sb_append(&b, recovered ? "Delivery: not auto-delivered; recovered by this snapshot.\n" : "Delivery: delivered directly to wait.\n");
+        const char *res = json_get_str(x, "result");
+        if (res && *res) {
+            if (json_get_bool(x, "failed", false)) sb_appendf(&b, "Error: %s\n", res);
+            else sb_appendf(&b, "```\n%s\n```\n", res);
+        }
+        sb_putc(&b, '\n');
+    }
+    json_t *snap = jobs ? jobs_snapshot(jobs) : json_arr();
+    size_t running = 0;
+    json_arr_foreach(snap, i, x) if (str_eq(json_get_str(x, "status"), "running")) running++;
+    if (running) {
+        sb_appendf(&b, "## Still Running (%zu)\n\n", running);
+        json_arr_foreach(snap, i, x) {
+            if (!str_eq(json_get_str(x, "status"), "running")) continue;
+            const char *intent = json_get_str(x, "intent");
+            sb_appendf(&b, "- `%s` [%s] \xE2\x80\x94 %s%s%s\n", json_get_str(x, "id"), json_get_str(x, "type"), intent ? intent : "",
+                       intent ? " \xE2\x80\x94 " : "", json_get_str(x, "label") ? json_get_str(x, "label") : "");
+        }
+    }
+    json_free(snap);
+    while (b.len && isspace((unsigned char)b.s[b.len - 1])) sb_truncate(&b, b.len - 1);
+    return sb_detach(&b);
+}
+
 static const char *NOTHING_TO_WAIT =
     "Nothing to wait for: no background job or service you started is running, and no agent you messaged this run owes a "
     "reply. Other agents' results and messages arrive on their own.";
@@ -1212,7 +1252,7 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     }
     json_t *done = jobs ? jobs_take_finished(jobs) : json_arr();
     if (json_len(done)) {
-        char *txt = jobs_render_results(done);
+        char *txt = job_result_text(jobs, done, ready > 0);
         tool_result_text(out, txt);
         free(txt);
     } else if (str_eq(wake, "abort")) {
@@ -1224,14 +1264,10 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         if (who) tool_result_textf(out, "%s finished its turn without replying. Ask again, or finish without the answer.", who);
         else tool_result_text(out, NOTHING_TO_WAIT);
     } else {
-        json_t *snap = jobs ? jobs_snapshot(jobs) : json_arr(), *x;
-        sb_t b = SB_INIT;
-        sb_append(&b, "Wait limit reached; background work may still be running. Read proc:// for status.");
-        json_arr_foreach(snap, i, x) if (str_eq(json_get_str(x, "status"), "running"))
-            sb_appendf(&b, "\n- %s (%s, %llds)", json_get_str(x, "id"), json_get_str(x, "label"), (long long)(json_get_int(x, "durationMs", 0) / 1000));
-        tool_result_text(out, sb_cstr(&b));
-        sb_free(&b);
-        json_free(snap);
+        /* a wait where everything is still running carries no new information once a later wait exists */
+        char *txt = job_result_text(jobs, done, false);
+        tool_result_text(out, *txt ? txt : "Wait limit reached; background work may still be running. Read proc:// for status.");
+        free(txt);
         out->useless = true;
     }
     free(who);
@@ -1244,6 +1280,7 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         json_set_str(s, "type", json_get_str(x, "type") ? json_get_str(x, "type") : "bash");
         json_set_str(s, "status", failed ? "failed" : "completed");
         json_set_str(s, "label", json_get_str(x, "label") ? json_get_str(x, "label") : "");
+        if (json_get_str(x, "intent")) json_set_str(s, "intent", json_get_str(x, "intent"));
         json_set_int(s, "durationMs", json_get_int(x, "durationMs", 0));
         json_set_str(s, failed ? "errorText" : "resultText", json_get_str(x, "result") ? json_get_str(x, "result") : "");
         json_push(snaps, s);

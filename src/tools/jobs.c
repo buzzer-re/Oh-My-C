@@ -3,6 +3,8 @@
  * delivered to the agent as a follow-up (or collected by the `wait` tool). */
 #define _GNU_SOURCE
 #include "jobs.h"
+#include "jobtext.h"
+#include "tools.h"
 #include "artifacts.h"
 #include "outsink.h"
 
@@ -316,6 +318,10 @@ typedef struct {
 
 struct job {
     char *id, *type, *label, *agent_id;
+    char *intent;           /* what the job is for, in the model's words: one line of plain text (AsyncJob.intent) */
+    int64_t timeout_sec;    /* bash: seconds until the command is killed (0: no timeout) */
+    bool caption_asked;     /* the caption was decided: requested, or found unneeded */
+    job_caption_t *caption;
     int64_t started, ended, delivered_at;
     char *result;
     sb_t output;
@@ -365,8 +371,24 @@ static void bashx_free(bashx_t *b) {
     free(b);
 }
 
+void job_caption_unref(job_caption_t *c) {
+    if (!c) return;
+    pthread_mutex_lock(&c->mu);
+    bool last = --c->refs == 0;
+    pthread_mutex_unlock(&c->mu);
+    if (!last) return;
+    pthread_mutex_destroy(&c->mu);
+    free(c->text);
+    free(c);
+}
+
 static void job_free(bgjob_t *x) {
     if (x->joinable) pthread_join(x->th, NULL);
+    if (x->caption) {
+        x->caption->cancel = 1;
+        job_caption_unref(x->caption);
+    }
+    free(x->intent);
     if (x->ud_free) x->ud_free(x->ud);
     bashx_free(x->bash);
     free(x->id);
@@ -524,8 +546,6 @@ char *jobs_start(jobs_t *j, const char *type, const char *id_hint, const char *l
 
 /* ---------- bash jobs ---------- */
 
-static const char *BASH_ENV[] = {"PAGER=cat", "GIT_PAGER=cat", "GIT_TERMINAL_PROMPT=0", "TERM=dumb", "NO_COLOR=1", "OMC=1", NULL};
-
 static void bash_out(void *ud, int stream, const char *data, size_t len) {
     bgjob_t *x = ud;
     pthread_mutex_lock(&x->owner->mu);
@@ -582,7 +602,7 @@ static char *bash_body(bgjob_t *x, void *ud, bool *failed) {
     if (settings_bool("bash.pipeStreams", true)) b->streams = streams_setup(b->cmd, &rewritten);
     const char *cmd = rewritten ? rewritten : b->cmd;
     proc_opts_t o = {.cwd = b->cwd,
-                     .env_extra = BASH_ENV,
+                     .env_extra = tool_bash_env(),
                      .timeout_ms = b->timeout_ms,
                      .max_output = 64u << 20,
                      .merge_stderr = true,
@@ -603,8 +623,10 @@ static char *bash_body(bgjob_t *x, void *ud, bool *failed) {
     return format_bash_result(x);
 }
 
-static bgjob_t *bash_job_new(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *label) {
+static bgjob_t *bash_job_new(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *label, const char *intent) {
     bgjob_t *x = job_new(j, "bash", label ? label : cmd);
+    x->intent = job_clean_intent(intent);
+    x->timeout_sec = timeout_ms / 1000;
     x->bash = xcalloc(1, sizeof(bashx_t));
     x->bash->cmd = xstrdup(cmd);
     x->bash->cwd = xstrdup(cwd);
@@ -614,9 +636,9 @@ static bgjob_t *bash_job_new(jobs_t *j, const char *cmd, const char *cwd, int64_
     return x;
 }
 
-char *jobs_start_bash(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *label) {
+char *jobs_start_bash(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *label, const char *intent) {
     prune(j);
-    bgjob_t *x = bash_job_new(j, cmd, cwd, timeout_ms, label);
+    bgjob_t *x = bash_job_new(j, cmd, cwd, timeout_ms, label, intent);
     pthread_mutex_lock(&j->mu);
     x->id = assign_id(j, NULL);
     char *id = xstrdup(x->id);
@@ -625,10 +647,10 @@ char *jobs_start_bash(jobs_t *j, const char *cmd, const char *cwd, int64_t timeo
     return id;
 }
 
-char *jobs_start_bash_fg(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, struct shell *shell,
+char *jobs_start_bash_fg(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *intent, struct shell *shell,
                          proc_output_cb cb, void *cb_ud) {
     prune(j);
-    bgjob_t *x = bash_job_new(j, cmd, cwd, timeout_ms, NULL);
+    bgjob_t *x = bash_job_new(j, cmd, cwd, timeout_ms, NULL, intent);
     x->bash->shell = shell;
     x->bash->fwd = cb;
     x->bash->fwd_ud = cb_ud;
@@ -795,6 +817,7 @@ json_t *jobs_take_finished(jobs_t *j) {
         json_set_str(o, "jobId", x->id);
         json_set_str(o, "label", x->label);
         json_set_str(o, "type", x->type);
+        if (x->intent) json_set_str(o, "intent", x->intent);
         json_set_str(o, "result", x->result ? x->result : "");
         json_set_bool(o, "failed", x->failed);
         json_set_str(o, "status", job_status(x));
@@ -853,6 +876,12 @@ static json_t *job_json(const bgjob_t *x, bool full) {
     if (x->done) json_set_int(o, "endedAt", x->ended);
     if (x->agent_id) json_set_str(o, "agentId", x->agent_id);
     if (x->bash && x->bash->cmd) json_set_str(o, "command", x->bash->cmd);
+    if (x->intent) json_set_str(o, "intent", x->intent);
+    if (x->caption && settings_bool("async.widgets", true)) { /* written while widgets are off it stays hidden */
+        pthread_mutex_lock(&x->caption->mu);
+        if (x->caption->text) json_set_str(o, "caption", x->caption->text);
+        pthread_mutex_unlock(&x->caption->mu);
+    }
     if (full) {
         if (x->done) json_set_str(o, "result", x->result ? x->result : "");
         if (!x->done && x->output.len) json_set_str(o, "output", sb_cstr((sb_t *)&x->output));
@@ -874,6 +903,24 @@ json_t *jobs_snapshot(jobs_t *j) {
     }
     pthread_mutex_unlock(&j->mu);
     return arr;
+}
+
+void jobs_request_captions(jobs_t *j, int64_t after_ms, bool (*busy)(void), void (*start)(job_caption_t *c, const char *command, const char *intent, int64_t timeout_sec)) {
+    if (!j) return;
+    int64_t now = now_ms();
+    pthread_mutex_lock(&j->mu);
+    for (size_t i = 0; i < j->v.n; i++) {
+        bgjob_t *x = j->v.v[i];
+        if (x->done || x->hidden || x->attached || !x->bash || !x->bash->cmd || x->caption_asked) continue;
+        if (now - x->started < after_ms || busy()) continue;
+        x->caption_asked = true;
+        if (!job_caption_needed(x->bash->cmd)) continue;
+        x->caption = xcalloc(1, sizeof *x->caption);
+        pthread_mutex_init(&x->caption->mu, NULL);
+        x->caption->refs = 1;
+        start(x->caption, x->bash->cmd, x->intent, x->timeout_sec);
+    }
+    pthread_mutex_unlock(&j->mu);
 }
 
 json_t *jobs_get(jobs_t *j, const char *id) {

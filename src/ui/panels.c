@@ -9,6 +9,7 @@
 #include "config/settings.h"
 #include "mcp/mcp.h"
 #include "tools/jobs.h"
+#include "tools/jobtext.h"
 #include "tools/outsink.h"
 #include "tools/xdev.h"
 
@@ -695,7 +696,9 @@ static void jobs_report(ui_t *u, bool full) {
             sb_appendf(&b, "%s%s %s %s %s%s%s\n", guide, did, dt, stt, dd, agent ? " " : "", agent ? agent : "");
             free(dur), free(type), free(did), free(dt), free(stt), free(pd), free(dd), free(agent), free(guide);
             const char *label = json_get_str(j, "label") ? json_get_str(j, "label") : "";
-            const char *text = full && json_get_str(j, "command") ? json_get_str(j, "command") : label;
+            /* what the job is for leads; full mode follows it with what the command does and the whole command */
+            const char *intent = json_get_str(j, "intent");
+            const char *text = full ? (json_get_str(j, "command") ? json_get_str(j, "command") : label) : (intent ? intent : label);
             if (!strcmp(text, id)) continue;
             char *indent = jrow_indent(r);
             char *prefix = S(TUI_TC_DIM, indent);
@@ -707,7 +710,14 @@ static void jobs_report(ui_t *u, bool full) {
                 free(l), free(dl);
             } else {
                 size_t n = 0;
-                char *san = out_sanitize(text, strlen(text), &n), *rt = tc_replace_tabs(san);
+                sb_t joined = SB_INIT;
+                const char *caption = json_get_str(j, "caption");
+                if (intent) sb_appendf(&joined, "%s\n", intent);
+                if (caption) sb_appendf(&joined, "%s\n", caption);
+                sb_append(&joined, text);
+                char *san = out_sanitize_lines(sb_cstr(&joined), joined.len, &n), *rt0 = tc_replace_tabs(san), *rt = job_shorten_home(rt0);
+                free(rt0);
+                sb_free(&joined);
                 strvec_t wl = {0};
                 tui_wrap_text_with_ansi(rt, MAX(1, columns - 4 - iw), &wl);
                 for (size_t w = 0; w < wl.n; w++) {
@@ -787,6 +797,9 @@ void ui_jobs_command(ui_t *u, const char *arg) {
     if (!u->app->env || !u->app->env->jobs) add_notice(u, "warning", "Async background jobs are unavailable in this session.");
     else if (!strcmp(verb, "kill")) jobs_kill(u, rest);
     else if (*rest || (*verb && strcmp(verb, "full"))) add_notice(u, "info", "Usage: /jobs [full|kill <id>|kill all]");
-    else jobs_report(u, !strcmp(verb, "full"));
+    else {
+        if (!strcmp(verb, "full")) agents_request_job_captions(u->app);
+        jobs_report(u, !strcmp(verb, "full"));
+    }
     free(verb), free(rest);
 }

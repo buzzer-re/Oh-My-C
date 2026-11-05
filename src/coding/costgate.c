@@ -75,6 +75,11 @@ static bool before_model_call(void *ud, agent_t *ag) {
     return true;
 }
 
+bool costgate_admits(void) {
+    double cap;
+    return !G.app || !threshold("session.maxCost", &cap) || spent() < cap;
+}
+
 void costgate_attach(app_t *a) {
     G.app = a;
     G.recorded = 0;

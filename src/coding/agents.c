@@ -8,6 +8,7 @@
 #include "session/session.h"
 #include "tools/artifacts.h"
 #include "tools/jobs.h"
+#include "coding/jobcaption.h"
 
 #include <ctype.h>
 #include <pthread.h>
@@ -1947,6 +1948,38 @@ char *agents_parent_of(const char *id) {
 static int job_newest_first(const void *a, const void *b) {
     int64_t x = json_get_int(*(const json_t *const *)a, "startedAt", 0), y = json_get_int(*(const json_t *const *)b, "startedAt", 0);
     return x > y ? -1 : x < y;
+}
+
+void agents_request_job_captions(app_t *root) {
+    const char *root_id = agents_id_of(root);
+    VEC(aref_t *) refs = {0};
+    json_t *parents = json_obj();
+    pthread_mutex_lock(&g_mu);
+    for (size_t i = 0; i < g_refs.n; i++) {
+        aref_t *r = g_refs.v[i];
+        if (!r->is_main && r->parent_id) json_set_str(parents, r->id, r->parent_id);
+    }
+    for (size_t i = 0; i < g_refs.n; i++) {
+        aref_t *r = g_refs.v[i];
+        if (r->is_main || r->gone || !r->app || !r->app->env || !r->app->env->jobs) continue;
+        bool below = false;
+        const char *p = r->parent_id;
+        for (int guard = 0; p && guard < 64 && !below; guard++) {
+            if (root_id && str_eq(p, root_id)) below = true;
+            else p = json_get_str(parents, p);
+        }
+        if (!below) continue;
+        r->pins++; /* held while its jobs are read */
+        vec_push(&refs, r);
+    }
+    pthread_mutex_unlock(&g_mu);
+    job_captions_request(root);
+    for (size_t i = 0; i < refs.n; i++) job_captions_request(refs.v[i]->app);
+    pthread_mutex_lock(&g_mu);
+    for (size_t i = 0; i < refs.n; i++) refs.v[i]->pins--;
+    pthread_mutex_unlock(&g_mu);
+    vec_free(&refs);
+    json_free(parents);
 }
 
 json_t *agents_job_tree(app_t *root, size_t recent_limit) {

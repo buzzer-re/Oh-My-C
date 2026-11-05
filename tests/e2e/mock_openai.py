@@ -202,6 +202,8 @@ class H(BaseHTTPRequestHandler):
             params = next(t["function"].get("parameters") or {} for t in body["tools"] if t["function"]["name"] == "respond")
             vals = {"string": lu_all, "number": 42, "integer": 42, "boolean": True}
             side = ("call", "respond", {k: vals.get(v.get("type"), lu_all) for k, v in (params.get("properties") or {}).items()})
+        elif last.get("role") == "user" and sysc.startswith("You explain one background shell command"):  # job caption request
+            side = ("say", '- "Waits about 2 min, printing a tick every 3s."\nExtra')
         elif last.get("role") == "user" and sysc == "You are a helpful assistant.":
             side = ("say", "completion says: " + lu_all)
         elif last.get("role") == "user" and lu_all.startswith("State:\n"):

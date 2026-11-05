@@ -110,6 +110,10 @@ printf 'a\r\nb\r\n' > crlf.txt
 check "write crlf"     "Note: kept the replaced file's CRLF line endings."  "$B" --model mock/mock-1 -p 'call:write:{"path":"crlf.txt","content":"x\ny\n"}'
 check "write no content" "content is required for nc.txt."  "$B" --model mock/mock-1 -p 'call:write:{"path":"nc.txt"}'
 check "write eisdir"   "EISDIR: illegal operation on a directory, open '"  "$B" --model mock/mock-1 -p "write:a:x"
+# non-interactive env: a config-file sequence.editor and GCM prompts must not hang a command
+check "bash env"       "true never" "$B" --model mock/mock-1 --no-session -p 'bash:echo $GIT_SEQUENCE_EDITOR $GCM_INTERACTIVE'
+mkdir -p "$T/rebase" && (cd "$T/rebase" && git init -q . && git config user.email a@b && git config user.name a && git config sequence.editor "sleep 300" && echo 1 > a && git add a && git commit -qm one && echo 2 > a && git commit -qam two)
+check "rebase -i"      "Successfully rebased" "$B" --model mock/mock-1 --no-session -p "bash:cd $T/rebase && git rebase -i HEAD~1 2>&1"
 # read page budget (column-cut lines, :raw byte cap, multi-range stop) and the write read-projection guard
 check "read budget" "read budget ok"  python3 -I "$ROOT/tests/e2e/read_budget.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/rb"
 # edit modes: apply_patch via config.yml (edit.mode), patch / replace / sloppy via PI_EDIT_VARIANT
@@ -320,6 +324,8 @@ check "queue steer all"     "slow:1.5:x,s1,s2,f1 / 3"  env B="$B" ROOT="$ROOT" b
 check "async bash"     "Backgrounded as job bg_1"  bash -c "'$B' --model mock/mock-1 --mode json -p 'call:bash:{\"command\":\"sleep 1; echo bgdone\",\"async\":true}' | grep -o 'Backgrounded as job bg_1'"
 grep -q "Background job bg_1 has completed" "$T/req.jsonl" && echo "   ok  async delivered" || { echo "   FAIL async delivered"; fail=1; }
 check "wait nothing"   "Nothing to wait for"  "$B" --model mock/mock-1 -p 'call:wait:{}'
+# background jobs carry the call's intent: proc://, wait, /jobs; /jobs full requests the widget role's caption
+check "jobs intent" "jobs intent ok"  python3 -I "$ROOT/tests/e2e/jobs_intent.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ji"
 # automatic session title (interactive only, like omp's autoTitle): fork side request returns a card title
 : > "$T/req.jsonl"
 check "print no title"  "0"  bash -c "env -u OMC_NO_TITLE '$B' --model mock/mock-1 -p 'bash:echo untitled' >/dev/null; grep -c '<title-request>' '$T/req.jsonl'"
