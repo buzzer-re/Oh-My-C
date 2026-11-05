@@ -285,6 +285,8 @@ There are two levels:
    wording (a plain 503 or 529 keeps the exponential base). A provider retry-after wins when longer; a wait above
    `retry.maxDelayMs` (5 min) fails fast. `retry.enabled: false` turns this off. The transport retries of item 1 run under every turn attempt, as in
    omp.
+   A usage-limit wait runs on a wall-clock deadline taken before `auto_retry_start`, so system sleep counts toward it;
+   ordinary backoff stays monotonic.
 3. **Model fallback** (`try_retry_fallback` in `app.c`, chains in `config/model_resolver.c`): `retry.fallbackChains`
    is walked on retryable and hard errors (see [status.md](status.md), "Retry model fallback").
 

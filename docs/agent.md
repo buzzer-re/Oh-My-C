@@ -302,6 +302,14 @@ are ignored. The auto-learn capture keeps an unjournaled injector. Side requests
 speculative compaction) never touch the session: their placements wait for the next request on the writer's thread.
 The setting is `dateCwdReminder`.
 
+### Continue shortcut and rejected prompts
+
+Typing `.` or `c` (`c` is a normal reply during a `/guided-goal` interview) resumes without a visible user message: a
+prompt the model has not answered runs again as is, otherwise the hidden `manual-continue.md` directive goes out, and an
+empty conversation reports "Nothing to resume". A prompt rejected before dispatch for a missing model or credential goes
+back to the editor, never over a draft typed meanwhile. With `retry.fallbackChains` set the prompt goes out instead, so
+the retry path can fall back. Background results that settle during a manual compaction wait for it to replace history.
+
 ## TTSR: time-traveling stream rules (`coding/ttsr.c`)
 
 This ports `session/ttsr-coordinator.ts`. Rules with a regex `condition` watch the streaming output
@@ -350,6 +358,9 @@ Lower-severity notes appear as notices. It is enabled with `advisor.enabled`, `/
 - **Auto-learn** (`autolearn.enabled`) adds the `learn` and `manage_skill` tools, isolated managed
   skills in `<agent dir>/managed-skills` (strict names, symlink and size checks), standing prompt
   guidance, and a post-stop private capture turn.
+  The private capture turn advertises the main turn's tool list in its order, so it reuses that turn's prompt cache
+  (it sends the main session id as the cache key and keeps its own provider session id); every tool but `learn` and
+  `manage_skill` is a copy that refuses the call without running anything.
 
 ## Titles (`coding/title.c`)
 

@@ -229,6 +229,9 @@ reader thread). Errors use
 omp's codes: `-32002` for an unknown session, `-32602` for steering validation, `-32603` with
 `data.details` otherwise. Session responses carry `configOptions` and `modes`; 50 ms after them the bootstrap
 updates follow (MCP connect failures, `available_commands_update`, `session_info_update`).
+Automatic maintenance reaches the client as `_omp/compaction/start` (`sessionId`, `reason`, `action`) and
+`_omp/compaction/end` (`sessionId`, `action`, `aborted`, `willRetry`, optional `skipped`, `errorMessage`, `tokensBefore`)
+for the session's lifetime, buffered until the bootstrap updates or the first prompt.
 
 **Sessions.** Each ACP session is its own `app_t`. Prompts run on a chain of worker threads (a prompt that
 arrives while one runs cancels it and queues), so the stdin reader stays free for cancels, steering and the
