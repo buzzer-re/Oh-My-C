@@ -124,9 +124,8 @@ struct app {
     struct title_state *title; /* automatic session title (title.c) */
     struct skilldesc *skilldesc; /* compressed skill descriptions snapshot (skilldesc.c) */
     /* date/cwd reminder injected per request into user turns (never persisted) */
-    int64_t dcr_first_ts;
-    json_t *dcr_sent; /* "role:ts" -> reminder text the turn was first sent with */
-    char *dcr_last;
+    struct dcr *dcr;      /* the main loop's date/cwd reminder injector, journaled in the session */
+    struct dcr *dcr_side; /* the injector of another agent on the main transform (unjournaled) */
     struct advisor *advisor; /* shadow reviewer (advisor.c), NULL when off or no advisor model */
     bool advisor_enabled;    /* the session's advisor setting (active only with a model for the 'advisor' role) */
     struct evalhost *evalhost; /* eval helpers' host state: completion handles, judge batches (evalhost.c) */

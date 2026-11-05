@@ -1,5 +1,6 @@
 #include "app.h"
 #include "coding/turn_recovery.h"
+#include "coding/dcr.h"
 #include "coding/autothink.h"
 #include "coding/modelctl.h"
 #include "coding/cachewarm.h"
@@ -523,28 +524,6 @@ static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
     app_note_provider_state(a);
 }
 
-/* ---------- date/cwd reminder (port of omp session/date-cwd-reminder.ts) ----------
- * The system prompt stays byte-stable; the volatile date/cwd line rides on the first user turn of each
- * request. Turns keep the reminder they were first sent with, so the cached prefix never changes; a
- * changed reminder (new day / new cwd) attaches to the newest unsent user turn instead. */
-static char *dcr_render(app_t *a) {
-    char date[16];
-    time_t t = time(NULL);
-    struct tm tm;
-    localtime_r(&t, &tm);
-    strftime(date, sizeof date, "%Y-%m-%d", &tm);
-    json_t *c = json_obj();
-    json_set_str(c, "date", date);
-    json_set_str(c, "cwd", a->cwd);
-    char *r = prompt_render("coding-agent/prompts/system/date-cwd-reminder.md", c);
-    json_free(c);
-    char *trim = str_trim(r ? r : "");
-    free(r);
-    return trim;
-}
-
-static json_t *hook_transform_locked(app_t *a, const json_t *messages);
-
 /* omp messages.ts wrapSteeringForModel: every steered user message reaches the model inside the
  * user-interjection envelope (text parts joined, images kept); NULL when there is none */
 static json_t *wrap_steering(const json_t *messages) {
@@ -591,7 +570,6 @@ static json_t *wrap_steering(const json_t *messages) {
     return out;
 }
 
-/* the title fork runs the same transform from its own thread: serialize the reminder state */
 /* a stray sloppy payload in plain text becomes a real edit tool call, so the normal pipeline executes it (omp sdk.ts);
  * only the sloppy edit tool recovers */
 static void hook_transform_assistant(void *ud, agent_t *ag, json_t *assistant) {
@@ -600,72 +578,36 @@ static void hook_transform_assistant(void *ud, agent_t *ag, json_t *assistant) {
     if (a->env && str_eq(a->env->edit_mode, "sloppy") && agent_find_tool(ag, "edit")) sloppy_recover_inline(assistant);
 }
 
+/* transformProviderContext's date/cwd step (coding/dcr.c): one injector per conversation. Only the main loop journals its
+ * reminders in the session; another agent on this hook (the auto-learn capture) keeps an unjournaled one. A side request
+ * runs through the main loop's injector from its own thread, so the state is serialized. */
 static json_t *hook_transform(void *ud, agent_t *ag, const json_t *messages) {
     app_t *a = ud;
-    UNUSED(ag);
     json_t *w = wrap_steering(messages);
     if (!settings_bool("dateCwdReminder", true)) return w;
+    pthread_mutex_lock(&ag->mu);
+    bool has_system = json_len(ag->system_prompt) > 0;
+    pthread_mutex_unlock(&ag->mu);
+    if (!has_system) return w;
+    char date[16];
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    strftime(date, sizeof date, "%Y-%m-%d", &tm);
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&mu);
-    json_t *r = hook_transform_locked(a, w ? w : messages);
+    dcr_t **slot = ag == a->agent ? &a->dcr : &a->dcr_side;
+    if (!*slot && ag == a->agent) {
+        dcr_journal_t j = dcr_session_journal(&a->session);
+        *slot = dcr_new(&j);
+    } else if (!*slot) {
+        *slot = dcr_new(NULL);
+    }
+    json_t *r = dcr_transform(*slot, w ? w : messages, date, a->cwd);
     pthread_mutex_unlock(&mu);
     if (!r) return w;
     json_free(w);
     return r;
-}
-
-static json_t *hook_transform_locked(app_t *a, const json_t *messages) {
-    ssize_t first = -1;
-    json_t *m;
-    json_arr_foreach(messages, i, m) if (str_eq(json_get_str(m, "role"), "user")) {
-        first = (ssize_t)i;
-        break;
-    }
-    if (first < 0) return NULL;
-    char *rem = dcr_render(a);
-    int64_t fts = json_get_int(json_at(messages, (size_t)first), "timestamp", 0);
-    if (!a->dcr_sent || a->dcr_first_ts != fts) { /* new conversation root (new session, compaction, branch) */
-        json_free(a->dcr_sent);
-        a->dcr_sent = json_obj();
-        a->dcr_first_ts = fts;
-        char key[48];
-        snprintf(key, sizeof key, "user:%lld", (long long)fts);
-        json_set_str(a->dcr_sent, key, rem);
-        free(a->dcr_last);
-        a->dcr_last = xstrdup(rem);
-    } else if (!str_eq(a->dcr_last, rem)) {
-        const json_t *last = json_at(messages, json_len(messages) - 1);
-        if (str_eq(json_get_str(last, "role"), "user")) {
-            char key[48];
-            snprintf(key, sizeof key, "user:%lld", (long long)json_get_int(last, "timestamp", 0));
-            if (!json_get(a->dcr_sent, key)) {
-                json_set_str(a->dcr_sent, key, rem);
-                free(a->dcr_last);
-                a->dcr_last = xstrdup(rem);
-            }
-        }
-    }
-    free(rem);
-    json_t *out = json_arr();
-    json_arr_foreach(messages, i, m) {
-        json_t *c = json_clone(m);
-        if (str_eq(json_get_str(m, "role"), "user")) {
-            char key[48];
-            snprintf(key, sizeof key, "user:%lld", (long long)json_get_int(m, "timestamp", 0));
-            const char *r = json_get_str(a->dcr_sent, key);
-            json_t *content = json_get(c, "content");
-            if (r && json_is_str(content)) {
-                char *t = xasprintf("%s\n\n%s", r, json_sv(content));
-                json_set_str(c, "content", t);
-                free(t);
-            } else if (r && json_is_arr(content)) {
-                const json_t *b0 = json_at(content, 0);
-                if (!str_eq(json_get_str(b0, "text"), r)) json_arr_insert(content, 0, text_block(r));
-            }
-        }
-        json_push(out, c);
-    }
-    return out;
 }
 
 static bool is_overflow(const char *err) {
@@ -1836,8 +1778,8 @@ void app_free(app_t *a) {
     title_free(a);
     skilldesc_free(a->skilldesc);
     json_free(a->forced_choice);
-    json_free(a->dcr_sent);
-    free(a->dcr_last);
+    dcr_free(a->dcr);
+    dcr_free(a->dcr_side);
     json_free(a->job_batch);
     json_free(a->fast_disabled);
     free(a->slow_lane);
@@ -2325,7 +2267,9 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
     json_t *um = msg_user_content(content);
     json_set_str(um, "attribution", "agent");
     json_push(msgs, um);
+    dcr_set_side_thread(true); /* runs next to the turn that writes the session */
     json_t *tx = a->agent->hooks.transform_context ? a->agent->hooks.transform_context(a, a->agent, msgs) : NULL;
+    dcr_set_side_thread(false);
     json_t *wire = ai_transform_messages(tx ? tx : msgs, model);
     json_free(tx);
     json_free(msgs);

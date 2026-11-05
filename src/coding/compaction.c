@@ -5,6 +5,7 @@
 #include "ai/provider_anthropic.h"
 #include "coding/advisor.h"
 #include "coding/branchsum.h"
+#include "coding/dcr.h"
 #include "config/compaction_point.h"
 #include "ai/ai_images.h"
 #include "config/settings.h"
@@ -764,6 +765,8 @@ static bool anthropic_compact(app_t *a, const ai_model_t *m, const prep_t *p, co
         json_push(msgs, sm);
     }
     for (size_t i = 0; i < cut; i++) json_push(msgs, json_clone(json_at(all, i)));
+    size_t prefix_len = json_len(msgs);
+    for (size_t i = cut; i < json_len(all); i++) json_push(msgs, json_clone(json_at(all, i)));
     json_free(all);
     /* the live system prompt and tools, so the summarized prefix matches what the turns sent */
     pthread_mutex_lock(&a->agent->mu);
@@ -771,8 +774,20 @@ static bool anthropic_compact(app_t *a, const ai_model_t *m, const prep_t *p, co
     json_t *tools = json_arr();
     for (size_t i = 0; i < a->agent->tools.n; i++) json_push(tools, agent_tool_wire(a->agent->tools.v[i]));
     pthread_mutex_unlock(&a->agent->mu);
+    /* transform the whole history as the live turn does, then cut it. Date/cwd reminder controls are the only messages
+     * the transform inserts: count past them, and leave out any at the cut, so the kept turns follow the summarized
+     * range directly */
     json_t *tx = a->agent->hooks.transform_context ? a->agent->hooks.transform_context(a->agent->hooks.ud, a->agent, msgs) : NULL;
-    json_t *wire = ai_transform_messages(tx ? tx : msgs, m);
+    const json_t *live = tx ? tx : msgs;
+    json_t *sent = json_arr();
+    size_t counted = 0;
+    for (size_t i = 0; i < json_len(live) && counted < prefix_len; i++) {
+        const json_t *lm = json_at(live, i);
+        if (!dcr_is_control(lm)) counted++;
+        json_push(sent, json_clone(lm));
+    }
+    json_t *wire = ai_transform_messages(sent, m);
+    json_free(sent);
     json_free(tx);
     json_free(msgs);
     /* instructions (anthropic-compaction-instructions.md) */
@@ -2013,6 +2028,7 @@ static const char *spec_method(app_t *a, bool skip_remote) {
 static void *spec_main(void *arg) {
     struct cmp_spec *sp = arg;
     tl_cancel = &sp->cancel;
+    dcr_set_side_thread(true); /* the turn that writes the session may still be running */
     char *err = NULL;
     bool ok;
     if (str_eq(sp->method, "handoff")) {

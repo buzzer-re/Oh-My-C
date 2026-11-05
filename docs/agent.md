@@ -288,11 +288,19 @@ their skills only. Plugin hooks, commands and marketplaces are not ported.
 
 ### Date/cwd reminder
 
-This ports `session/date-cwd-reminder.ts`. The `transform_context` hook prepends
+This ports `session/date-cwd-reminder.ts` (`coding/dcr.c`). The `transform_context` hook prepends
 `date-cwd-reminder.md` (date and cwd in a `<system-reminder>`) to the first user turn of each
-request, and remembers which reminder each turn was first sent with. The cached prefix therefore
-never changes. A new day or cwd attaches the new reminder to the newest unsent user turn. Setting:
-`dateCwdReminder`.
+request, so the system prompt stays byte-stable. Every turn keeps the reminder it was first sent with. A changed
+reminder (new day, new cwd) goes on a newly appended user turn, or on a hidden developer turn after the last turn when
+there is none. Turns are recognised by a key (role, timestamp, attribution, ordinal), and state is held per
+conversation root, up to 8.
+
+The main loop journals each placement as a `date-cwd-reminder` custom entry, so a resumed session or revived subagent
+resends its turns with the same bytes. The state resets when the history is replaced rather than continued: a switched
+session, a tree move, or another writer's placements after a reload. Placements before the latest `reset_boundary`
+are ignored. The auto-learn capture keeps an unjournaled injector. Side requests running next to the turn (`/btw`,
+speculative compaction) never touch the session: their placements wait for the next request on the writer's thread.
+The setting is `dateCwdReminder`.
 
 ## TTSR: time-traveling stream rules (`coding/ttsr.c`)
 
