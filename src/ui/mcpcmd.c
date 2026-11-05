@@ -239,6 +239,7 @@ static void blk_post_text(ui_t *u, blk_t *b, const char *text) {
 
 static int g_sync_timer;
 static bool g_status_deferred; /* a late connection's status line waits for the running turn's tool refresh */
+static bool g_startup_phase = true; /* the connection status line follows startup connections only */
 
 static void sync_retry(void *ud) {
     g_sync_timer = 0;
@@ -259,9 +260,11 @@ static void sync_tools(ui_t *u) {
     char *xn;
     xdnotice_sync(a, &xn);
     if (xn) { /* emitted while the refresh runs, ahead of the command's own result */
-        char *m = xasprintf("xdev: %s", xn);
-        add_notice(u, "info", m);
-        free(m);
+        if (!g_startup_phase || !settings_bool("startup.quietWarnings", false)) {
+            char *m = xasprintf("xdev: %s", xn);
+            add_notice(u, "info", m);
+            free(m);
+        }
         free(xn);
     }
     if (g_status_deferred) {
@@ -378,7 +381,7 @@ static void install_callbacks(ui_t *u) {
 /* formatMCPConnectionStatusMessage over the manager's servers (#handleMcpConnectionStatusEvent's status) */
 static void connection_status(ui_t *u) {
     mcp_manager_t *m = u->app->mcp;
-    if (!m || settings_bool("startup.quiet", false)) return;
+    if (!m || settings_bool("startup.quiet", false) || settings_bool("startup.quietWarnings", false)) return;
     json_t *names = mcp_server_names(m), *n;
     sb_t pend = SB_INIT, conn = SB_INIT, fail = SB_INIT;
     int np = 0, nc = 0, nf = 0;
@@ -426,7 +429,6 @@ static void connection_status(ui_t *u) {
     json_free(failed);
 }
 
-static bool g_startup_phase = true; /* the connection status line follows startup connections only */
 static bool g_install_done;
 
 /* the deferred (cached) MCP tools mounted under xd:// at startup: omp's deferred discovery mounts them through
@@ -434,7 +436,9 @@ static bool g_install_done;
  * the notice line is shown here */
 static void deferred_mount_notice(ui_t *u) {
     app_t *a = u->app;
-    if (!a->mcp || settings_bool("startup.quiet", false) || !settings_bool("tools.xdevNotices", true)) return;
+    if (!a->mcp || settings_bool("startup.quiet", false) || settings_bool("startup.quietWarnings", false) ||
+        !settings_bool("tools.xdevNotices", true))
+        return;
     strvec_t names = {0}, servers = {0};
     pthread_mutex_lock(&a->agent->mu);
     for (size_t i = 0; i < a->agent->all_tools.n; i++) {

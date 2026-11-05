@@ -188,6 +188,15 @@ static void registry_init(void) {
         vec_push(&g_reg, c);
     }
     /* omc-only commands */
+    slash_cmd_t *q = xcalloc(1, sizeof *q);
+    q->name = "quiet";
+    q->icon = "quiet"; /* a muted bell: command_icon() in src/ui/slash.c */
+    q->description = "Hide warnings and status messages when omc opens";
+    q->inline_hint = "[on|off|status]";
+    q->allow_args = true;
+    q->tui = true;
+    q->subs = xcalloc(1, sizeof *q->subs);
+    vec_push(&g_reg, q);
     slash_cmd_t *m = xcalloc(1, sizeof *m);
     m->name = "migrate";
     m->description = "Copy your omp configuration into omc";

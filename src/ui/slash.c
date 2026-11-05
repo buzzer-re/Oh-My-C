@@ -41,6 +41,8 @@ static const char *icon_key(const char *name) {
 /* getSlashCommandTypeIcon: no icon column in the ascii preset */
 static char *command_icon(const char *name) {
     if (!name || str_eq(tui_sym_preset(), "ascii")) return NULL;
+    /* omc-only command, so its glyph is not in the generated symbols.json: nf-fa-bell_slash (U+F1F6) / U+1F515 */
+    if (!strcmp(name, "quiet")) return xstrdup(str_eq(tui_sym_preset(), "nerd") ? "\xef\x87\xb6" : "\xf0\x9f\x94\x95");
     const char *k = icon_key(name);
     char *key = k ? xstrdup(k) : xasprintf("cmd.%s", name);
     const char *g = tui_sym(key);

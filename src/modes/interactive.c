@@ -2375,6 +2375,26 @@ static bool handle_command_inner(ui_t *u, const char *line) {
         free(m);
         free(low);
         tui_request_render(u->tui);
+    } else if (!strcmp(cmd, "quiet")) {
+        /* omc-only: startup.quietWarnings mutes startup warnings and status lines, the welcome banner stays
+         * (omp's startup.quiet also drops the banner) */
+        char *low = str_trim(arg);
+        for (char *p = low; *p; p++) *p = (char)tolower((unsigned char)*p);
+        bool on = settings_bool("startup.quietWarnings", false);
+        if (!strcmp(low, "status")) {
+            add_notice(u, "info", on ? "Quiet startup is on." : "Quiet startup is off.");
+        } else if (!*low || !strcmp(low, "on") || !strcmp(low, "off")) {
+            bool next = *low ? !strcmp(low, "on") : !on;
+            if (settings_set_global("startup.quietWarnings", json_bool(next)) != 0)
+                add_notice(u, "error", "Could not save the setting to config.yml.");
+            else
+                add_notice(u, "info", next ? "Quiet startup on: warnings stay hidden the next time omc opens."
+                                           : "Quiet startup off: warnings show again the next time omc opens.");
+        } else {
+            add_notice(u, "info", "Usage: /quiet [on|off|status]");
+        }
+        free(low);
+        tui_request_render(u->tui);
     } else if (!strcmp(cmd, "migrate")) {
         /* omp -> omc: settings, models, credentials, MCP, skills, rules, agents, themes, sessions, prompt history */
         migrate_opts_t mo = {.sessions = true};
@@ -3320,7 +3340,8 @@ int run_interactive_mode(app_t *a, const char *initial) {
     {
         strvec_t warns = {0};
         mr_fallback_validate(&warns);
-        for (size_t i = 0; i < warns.n; i++) {
+        bool mute = settings_bool("startup.quietWarnings", false); /* omc-only: /quiet */
+        for (size_t i = 0; i < warns.n && !mute; i++) {
             char *t = xasprintf("Warning: %s", warns.v[i]);
             char *styled = tui_fgs(NULL, TUI_TC_WARNING, t);
             tui_container_add(root, &tui_text_new(styled, 1, 0)->base);

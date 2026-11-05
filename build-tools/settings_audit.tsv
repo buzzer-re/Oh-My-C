@@ -201,6 +201,7 @@ task.agentPrewalk	wired	src/ui/agentshub.c reads json_get(settings_get("task"), 
 task.agentAdvisor	wired	src/ui/agentshub.c reads json_get(settings_get("task"), "agentAdvisor") (OVR_KEYS)
 
 # ---------- omc-only keys (read by omc, absent from omp's registry; parity says omp has no such switch) ----------
+startup.quietWarnings	omc-only	/quiet: startup warnings and status lines off, banner stays (omp's startup.quiet also drops the banner)
 compaction.strategy	omc-only	legacy omp key; omp migrates it into compaction.methodOrder at load and deletes it
 collapseChangelog	omc-only	legacy omp key; omp migrates it into startup.changelogMode at load and deletes it
 compaction.remoteEnabled	omc-only	legacy omp key; omp migrates it into compaction.methodOrder at load and deletes it

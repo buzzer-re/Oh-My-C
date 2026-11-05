@@ -38,6 +38,7 @@ static void test_registry(void) {
     CHECK(slash_lookup("debug") && !slash_lookup("debug")->handle && slash_lookup("pause") && !slash_lookup("pause")->handle);
     CHECK(slash_lookup("record") && !slash_lookup("record")->handle);
     CHECK(slash_lookup("migrate") && str_eq(slash_at(slash_count() - 1)->name, "migrate"));
+    CHECK(slash_lookup("quiet") && !slash_lookup("quiet")->handle && slash_lookup("quiet")->allow_args);
     const slash_cmd_t *a = slash_lookup("advisor");
     bool configure = false;
     for (size_t i = 0; i < a->nsubs; i++) configure |= str_eq(a->subs[i].name, "configure");
