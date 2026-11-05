@@ -9,6 +9,7 @@
 #include <pthread.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <zlib.h>
 
 static VEC(ai_model_t *) g_models;
@@ -685,5 +686,47 @@ bool catalog_context_tiers(const ai_model_t *m, int64_t *standard, int64_t *exte
     if (!m || m->context_window_ext <= m->context_window_std) return false;
     if (standard) *standard = m->context_window_std;
     if (extended) *extended = m->context_window_ext;
+    return true;
+}
+
+/* ---------- Factory Droid credit rates (catalog/src/models.ts getFactoryDroidCreditRate) ---------- */
+
+static int64_t parse_utc_instant(const char *s) {
+    struct tm tm = {0};
+    if (!s || sscanf(s, "%d-%d-%dT%d:%d:%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6) return -1;
+    tm.tm_year -= 1900;
+    tm.tm_mon -= 1;
+    return (int64_t)timegm(&tm) * 1000;
+}
+
+bool ai_factory_droid_credit_rate(const ai_model_t *m, int64_t now, ai_credit_rate_t *out) {
+    memset(out, 0, sizeof *out);
+    const json_t *basev = m && m->raw ? json_get(m->raw, "factoryDroidCredits") : NULL;
+    if (!basev || !json_is_num(basev)) return false;
+    double base = json_get_num(m->raw, "factoryDroidCredits", 0);
+    out->rate = base;
+    const json_t *cards = str_eq(m->provider, "factory-droid") ? compat_factory_droid_credit_cards(m->id) : NULL;
+    if (!cards) return true;
+    /* the card due now: the latest at or before it, as for cost cards */
+    int64_t due_at = -1;
+    for (size_t i = 0; i < cards->u.obj.n; i++) {
+        const json_t *card = cards->u.obj.vals[i];
+        int64_t at = parse_utc_instant(json_get_str(card, "effectiveFrom"));
+        if (at >= 0 && at <= now && at > due_at) {
+            due_at = at;
+            out->rate = json_get_num(card, "input", base);
+        }
+    }
+    /* the earliest later card that changes the rate */
+    for (size_t i = 0; i < cards->u.obj.n; i++) {
+        const json_t *card = cards->u.obj.vals[i];
+        int64_t at = parse_utc_instant(json_get_str(card, "effectiveFrom"));
+        double r = json_get_num(card, "input", base);
+        if (at > now && r != out->rate && (!out->has_next || at < out->next_at)) {
+            out->has_next = true;
+            out->next_at = at;
+            out->next_rate = r;
+        }
+    }
     return true;
 }

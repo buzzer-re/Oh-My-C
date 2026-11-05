@@ -34,6 +34,8 @@ bool compat_api_has_record(const char *api);
  * `efforts`), `identity`, `tokenizer`, the resolved `compat` (the object's own `compat`, kept as `compatConfig`, applied
  * on top; unknown keys ignored), the thinking ladder, and the rule cascade's catalog corrections. */
 void compat_resolve_model(json_t *model);
+/* the dated `effective-rates` cards of a Factory Droid model's `credit-rates` rule (borrowed), NULL when none */
+const json_t *compat_factory_droid_credit_cards(const char *model_id);
 
 /* finalizeCustomModel in place, for a models.yml model: `reference` (or NULL) fills what the entry leaves out (cost,
  * input, supportsTools, reasoning, same-provider thinking, context window, max tokens, omitMaxOutputTokens, compat), else

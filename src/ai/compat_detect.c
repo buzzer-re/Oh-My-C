@@ -54,6 +54,19 @@ static bool arr_has(const json_t *arr, const char *s) {
     return false;
 }
 
+const json_t *compat_factory_droid_credit_cards(const char *model_id) {
+    json_t *rule;
+    json_arr_foreach(json_get_arr(rules(), "cascade"), i, rule) {
+        const json_t *cards = json_get_obj(json_get_obj(json_get_obj(rule, "catalog"), "creditRates"), "effectiveRates");
+        if (!cards || !arr_has(json_get_arr(rule, "providers"), "factory-droid")) continue;
+        json_t *m;
+        json_arr_foreach(json_get_arr(rule, "models"), k, m) {
+            if (str_eq(json_get_str(m, "kind"), "exact") && str_eq(json_get_str(m, "value"), model_id)) return cards;
+        }
+    }
+    return NULL;
+}
+
 /* ---------- identity (compat/taxonomy.ts classifyModel, lenient) ---------- */
 
 /* cascade.ts globMatch: anchored `*` wildcards */

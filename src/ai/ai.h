@@ -420,6 +420,16 @@ json_t *provider_devin_stream(const ai_model_t *, const ai_context_t *, const ai
 json_t *provider_cursor_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 /* provider "gitlab-duo" (any of its chat APIs): direct-access token + GitLab Cloud Connector proxy */
 json_t *provider_gitlab_duo_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
+/* getFactoryDroidCreditRate: the Standard Credits rate at `now` (ms): the `input` of the dated `credit-rates` card due
+ * then, else the base rate, and the next dated change to it. False for models without a credit rate. */
+typedef struct {
+    double rate;
+    bool has_next;
+    double next_rate;
+    int64_t next_at; /* Unix ms */
+} ai_credit_rate_t;
+bool ai_factory_droid_credit_rate(const ai_model_t *m, int64_t now, ai_credit_rate_t *out);
+
 /* api "gitlab-duo-agent": Duo Workflow Service over WebSocket */
 json_t *provider_gitlab_duo_workflow_stream(const ai_model_t *, const ai_context_t *, const ai_stream_opts_t *, ai_event_cb, void *);
 

@@ -4,6 +4,10 @@
 #include "ai/ai.h"
 #include "ai/compat_detect.h"
 #include "core/fs.h"
+#include "tui/ansi.h"
+#include "tui/symbols.h"
+#include "tui/theme.h"
+#include "ui/modelbrowser.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -177,11 +181,54 @@ static void check_cell(const char *provider, const char *id, bool full, const ch
     free(c);
 }
 
+/* omp d174e191..b918fe76: the Standard Credits rate in force, from dated `credit-rates` cards */
+static void test_credit_rates(void) {
+    const ai_model_t *sol = catalog_find("factory-droid", "gpt-5.6-sol");
+    CHECK(sol != NULL);
+    if (!sol) return;
+    ai_credit_rate_t cr;
+    int64_t aug21 = 1787270400000LL, nov5 = 1793836800000LL, nov22 = 1795305600000LL; /* 2026, UTC */
+    CHECK(ai_factory_droid_credit_rate(sol, nov5, &cr));
+    CHECK(cr.rate == 1.6 && cr.has_next && cr.next_rate == 2 && cr.next_at == nov22);
+    /* passing the boundary: the standard rate, nothing further */
+    CHECK(ai_factory_droid_credit_rate(sol, nov22, &cr));
+    CHECK(cr.rate == 2 && !cr.has_next);
+    /* before any card: the base rate; the promotion is the next change */
+    CHECK(ai_factory_droid_credit_rate(sol, aug21, &cr));
+    CHECK(cr.rate == 2 && cr.has_next && cr.next_rate == 1.6);
+    /* a model without dated cards keeps its base rate */
+    const ai_model_t *opus = catalog_find("factory-droid", "claude-opus-5-5");
+    CHECK(opus && ai_factory_droid_credit_rate(opus, nov5, &cr) && cr.rate == 1.6 && !cr.has_next);
+    /* no credit rate at all */
+    const ai_model_t *other = catalog_find("anthropic", "claude-opus-5-5");
+    CHECK(other && !ai_factory_droid_credit_rate(other, nov5, &cr));
+    /* the row shows the badge beside the dollar reference; a credit-charged model is never `free` */
+    tui_theme_set(tui_theme_builtin("titanium", TUI_COLOR_TRUECOLOR));
+    tui_sym_set_preset("unicode");
+    ui_model_browser_t *b = ui_model_browser_new();
+    ui_model_browser_add(b, opus);
+    ui_model_browser_done_adding(b);
+    strvec_t rows = {0};
+    ui_model_browser_render(b, 140, &rows);
+    bool badge = false;
+    for (size_t i = 0; i < rows.n; i++) {
+        char *p = tui_strip_ansi(rows.v[i]);
+        badge |= strstr(p, "$4/20 1.6\xc3\x97") != NULL;
+        free(p);
+    }
+    CHECK(badge);
+    CHECK(!ui_model_is_free(opus));
+    strvec_free(&rows);
+    ui_model_browser_free(b);
+}
+
 int main(void) {
     char tmpl[] = "/tmp/omc-test-catalog.XXXXXX";
     char *dir = mkdtemp(tmpl);
     setenv("OMC_CODING_AGENT_DIR", dir, 1);
     setenv("OMC_NO_LOCAL_DISCOVERY", "1", 1);
+
+    test_credit_rates();
 
     /* providers present in omp's catalog but absent from its bundled rows */
     CHECK(catalog_find("charm-hyper", "glm-5.3") || catalog_find("charm-hyper", "deepseek-v4-flash-0731"));

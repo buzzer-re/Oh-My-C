@@ -13,6 +13,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include <math.h>
+#include <time.h>
 #include <strings.h>
 
 #define LIST_ROW_START 2
@@ -53,7 +54,14 @@ static char *lower_num(double n) {
     return s;
 }
 
-static bool is_free(const ai_model_t *m) { return m->cost_input == 0 && m->cost_output == 0; }
+/* isFreeModel: no token price and no subscription-credit charge at the rate due now */
+bool ui_model_is_free(const ai_model_t *m) {
+    if (m->cost_input != 0 || m->cost_output != 0) return false;
+    ai_credit_rate_t cr;
+    return !ai_factory_droid_credit_rate(m, now_ms(), &cr) || cr.rate == 0;
+}
+
+static bool is_free(const ai_model_t *m) { return ui_model_is_free(m); }
 
 static char *cost_leg(double n) {
     if (!isfinite(n) || n < 0) return xstrdup("?");
@@ -70,12 +78,37 @@ static char *cost_leg(double n) {
     return xstrdup(buf);
 }
 
+/* formatCostPair + withCreditBadge: Factory Droid's `N×` Standard Credits rate in force now beside a dollar price,
+ * replacing the price when the model has no dollar reference */
 static char *cost_pair(const ai_model_t *m) {
     if (is_free(m)) return xstrdup("free");
     char *a = cost_leg(m->cost_input), *b = cost_leg(m->cost_output);
     char *r = xasprintf("$%s/%s", a, b);
     free(a);
     free(b);
+    ai_credit_rate_t cr;
+    if (ai_factory_droid_credit_rate(m, now_ms(), &cr)) {
+        char *leg = cost_leg(cr.rate);
+        char *with = m->cost_input != 0 || m->cost_output != 0 ? xasprintf("%s %s\xc3\x97", r, leg) : xasprintf("%s\xc3\x97", leg);
+        free(leg);
+        free(r);
+        r = with;
+    }
+    return r;
+}
+
+/* nextCreditRateNote: `2× from 2026-11-22` when a dated card changes the rate in force now; NULL otherwise */
+static char *next_credit_note(const ai_model_t *m) {
+    ai_credit_rate_t cr;
+    if (!ai_factory_droid_credit_rate(m, now_ms(), &cr) || !cr.has_next) return NULL;
+    time_t t = (time_t)(cr.next_at / 1000);
+    struct tm tm;
+    gmtime_r(&t, &tm);
+    char date[16];
+    strftime(date, sizeof date, "%Y-%m-%d", &tm);
+    char *leg = cost_leg(cr.next_rate);
+    char *r = xasprintf("%s\xc3\x97 from %s", leg, date);
+    free(leg);
     return r;
 }
 
@@ -181,6 +214,7 @@ static bool recent_or_role(const ui_model_browser_t *b, const ui_model_item_t *i
 
 static void refilter(ui_model_browser_t *b, const char *keep) {
     b->visible.n = 0;
+    b->next_credit_change = 0;
     size_t n = b->items.n;
     char **texts = xcalloc(n ? n : 1, sizeof *texts);
     for (size_t i = 0; i < n; i++)
@@ -190,6 +224,10 @@ static void refilter(ui_model_browser_t *b, const char *keep) {
         char *base = it->label ? xasprintf("/%s", it->label) : xstrdup(it->selector);
         texts[i] = is_free(it->model) ? xasprintf("%s free", base) : xstrdup(base);
         free(base);
+        /* its credit rate changes at its next dated card: the `free` search word follows the rate */
+        ai_credit_rate_t cr;
+        if (ai_factory_droid_credit_rate(it->model, now_ms(), &cr) && cr.has_next && (!b->next_credit_change || cr.next_at < b->next_credit_change))
+            b->next_credit_change = cr.next_at;
     }
     size_t *idx = xmalloc((n ? n : 1) * sizeof *idx);
     size_t m = tui_fuzzy_rank(b->query ? b->query : "", (const char *const *)texts, n, idx);
@@ -404,6 +442,9 @@ static void detail_lines(const ui_model_browser_t *b, int width, strvec_t *out) 
         }
         free(key);
     }
+    /* last fact before prose, so narrow widths cut it before capability and perf facts */
+    char *next_credits = next_credit_note(m);
+    if (next_credits) strvec_push_own(&facts, next_credits);
     {
         const char *desc = json_get_str(m->raw, "description");
         if (desc && *desc) {
@@ -515,6 +556,13 @@ static void detail_lines(const ui_model_browser_t *b, int width, strvec_t *out) 
 }
 
 void ui_model_browser_render(const ui_model_browser_t *b, int width, strvec_t *out) {
+    /* #syncCreditClock: a dated credit rate took effect since the list was ranked */
+    if (b->next_credit_change && now_ms() >= b->next_credit_change) {
+        const ui_model_item_t *sel = ui_model_browser_selected(b);
+        char *keep = sel ? xstrdup(sel->selector) : NULL;
+        refilter((ui_model_browser_t *)b, keep);
+        free(keep);
+    }
     const char *icon = tui_sym("icon.search");
     char *si = tui_fgs(NULL, TUI_TC_ACCENT, icon);
     int input_w = MAX(4, width - tui_visible_width(icon) - 2);

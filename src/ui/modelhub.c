@@ -357,7 +357,7 @@ static int match_count(const hub_t *h, const char *provider) {
     for (size_t i = 0; i < h->available.n; i++) {
         const ai_model_t *m = h->available.v[i];
         if (provider && strcmp(m->provider, provider)) continue;
-        bool free_ = m->cost_input == 0 && m->cost_output == 0;
+        bool free_ = ui_model_is_free(m);
         char *t = xasprintf("%s/%s%s", m->provider, m->id, free_ ? " free" : "");
         if (tui_fuzzy_query_match(q, t, NULL)) n++;
         free(t);
