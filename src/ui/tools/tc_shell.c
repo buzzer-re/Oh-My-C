@@ -436,6 +436,9 @@ void tc_bash(const tc_call_t *c, int width, strvec_t *out) {
 
 /* ---------- user `!cmd` (chat/bash-execution.ts + execution-shared.ts) ---------- */
 
+/* execution-shared.ts PREVIEW_LINES: output rows shown while an execution is collapsed */
+#define BANG_PREVIEW_LINES 20
+
 /* DynamicBorder.render: a rule, with a pre-styled label after a short lead (`─── label ────`) */
 static char *frame_rule(tui_tc_t key, int width, const char *label) {
     const char *h = tc_sym("boxRound.horizontal");
@@ -466,7 +469,7 @@ static char *frame_rule(tui_tc_t key, int width, const char *label) {
 
 void tc_render_bang(const tc_bang_t *b, int width, strvec_t *out) {
     /* buildExecutionFrame: bashMode (dim for `!!`) rules around a bold `$ cmd` header, the output pane
-     * (leading blank, muted rows, 10-row tail while collapsed), the status footer and the run's state set
+     * (leading blank, muted rows, 20-row tail while collapsed), the status footer and the run's state set
      * into the bottom border */
     tui_tc_t key = b->exclude ? TUI_TC_DIM : b->python ? TUI_TC_PYTHON_MODE : TUI_TC_BASH_MODE;
     strvec_push_own(out, frame_rule(key, width, NULL));
@@ -500,17 +503,18 @@ void tc_render_bang(const tc_bang_t *b, int width, strvec_t *out) {
             free(raw.v[i]);
             raw.v[i] = t;
         }
-        size_t start = 0;
-        if (!b->expanded && raw.n > 10) {
-            hidden = raw.n - 10;
-            start = hidden;
-        }
+        if (!b->expanded && raw.n > BANG_PREVIEW_LINES) hidden = raw.n - BANG_PREVIEW_LINES;
         strvec_push(&lines, "");
-        for (size_t i = start; i < raw.n; i++) {
+        /* OutputPane (edge: tail, visual): the collapsed cap counts wrapped rows */
+        strvec_t rows = {0};
+        for (size_t i = 0; i < raw.n; i++) {
             char *m = tc_fg(TUI_TC_MUTED, raw.v[i]);
-            tc_push_wrapped(&lines, m, MAX(1, width - 2));
+            tc_push_wrapped(&rows, m, MAX(1, width - 2));
             free(m);
         }
+        size_t first = !b->expanded && rows.n > BANG_PREVIEW_LINES ? rows.n - BANG_PREVIEW_LINES : 0;
+        for (size_t i = first; i < rows.n; i++) strvec_push(&lines, rows.v[i]);
+        strvec_free(&rows);
         strvec_free(&raw);
     }
     /* the bottom border keeps the live loader until the run settles, then its exit/cancel marker */
