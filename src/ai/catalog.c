@@ -271,6 +271,9 @@ static void apply_custom(json_t *cfg) {
         }
         json_t *info = json_get(pmap, pid);
         if (info && !json_get_bool(info, "modelsYml", false)) json_set_bool(info, "modelsYml", true);
+        /* `auth: none`: an endpoint that takes no credential (keylessProviders) */
+        if (info && str_eq(json_get_str(pv, "auth"), "none") && !json_get_bool(info, "keyless", false))
+            json_set_bool(info, "keyless", true);
         /* other threads may hold the previous key string (ai_env_api_key): only touch it when it changed, and
          * leak the replaced value instead of freeing it */
         const char *key = json_get_str(pv, "apiKey");

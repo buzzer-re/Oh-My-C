@@ -192,6 +192,17 @@ tail -1 "$T/req.jsonl" | grep -q '"model": "mock-1"' && echo "   ok  no credenti
 printf 'retry:\n  modelFallback: false\n  fallbackChains:\n    scaleway/glm-5.3:\n      - mock/mock-1\n' > "$T/nocred/config.yml"
 out=$("${NOCRED[@]}" "$B" -p "hello" --model scaleway/glm-5.3 2>&1 </dev/null); nrc=$?
 [[ $nrc == 1 && "$out" == *"No API key found for scaleway."* ]] && echo "   ok  modelFallback off refuses" || { echo "   FAIL modelFallback off refuses: $nrc $out"; fail=1; }
+# `auth: none` needs no credential
+cat >> "$T/nocred/models.yml" <<YML
+  noauth:
+    baseUrl: http://127.0.0.1:$PORT/v1
+    auth: none
+    api: openai-completions
+    models:
+      - id: mock-1
+YML
+out=$("${NOCRED[@]}" "$B" -p "hello" --model noauth/mock-1 2>&1 </dev/null); nrc=$?
+[[ $nrc == 0 && "$out" != *"No API key"* ]] && echo "   ok  auth none is keyless" || { echo "   FAIL auth none is keyless: $nrc $out"; fail=1; }
 # retry model fallback: a rate-limited model walks retry.fallbackChains
 printf 'retry:\n  fallbackChains:\n    mock/mock-flaky:\n      - mock/mock-2\n' > "$T/agent/config.yml"
 out=$(timeout 60 "$B" --model mock/mock-flaky -p "bash:echo fb-ok" </dev/null 2>&1)
