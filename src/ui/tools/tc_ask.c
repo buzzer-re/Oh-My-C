@@ -117,7 +117,7 @@ static void answer_options(const json_t *options, const json_t *selected, bool m
     size_t nsel = json_len(selected);
     const json_t *list = options && json_len(options) ? options : selected;
     if (nsel == 0 && !custom && !note) {
-        char *ic = tc_styled_sym("status.warning", TUI_TC_WARNING), *t = tc_fg(TUI_TC_WARNING, "Cancelled");
+        char *ic = tc_status_icon(TC_ST_WARNING, -1), *t = tc_fg(TUI_TC_WARNING, "Cancelled");
         strvec_push_own(out, xasprintf(" %s %s", ic, t));
         free(t);
         free(ic);
@@ -137,15 +137,16 @@ static void answer_options(const json_t *options, const json_t *selected, bool m
         char *c = no_cr(custom);
         strvec_t lines = {0};
         tc_split_lines(c, &lines);
+        /* continuation rows line up under the answer text, past the glyph's own width */
+        char *ic = tc_status_icon(TC_ST_SUCCESS, -1);
+        int indent = tui_visible_width(ic) + 2;
         for (size_t i = 0; i < lines.n; i++) {
             char *t = tc_fg(TUI_TC_TOOL_OUTPUT, lines.v[i]);
-            if (i == 0) {
-                char *ic = tc_styled_sym("status.success", TUI_TC_SUCCESS);
-                strvec_push_own(out, xasprintf(" %s %s", ic, t));
-                free(ic);
-            } else strvec_push_own(out, xasprintf("   %s", t));
+            if (i == 0) strvec_push_own(out, xasprintf(" %s %s", ic, t));
+            else strvec_push_own(out, xasprintf("%*s%s", indent, "", t));
             free(t);
         }
+        free(ic);
         strvec_free(&lines);
         free(c);
     }

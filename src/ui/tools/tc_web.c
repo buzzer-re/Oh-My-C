@@ -410,16 +410,16 @@ static void gh_run_block(const json_t *run, int width, strvec_t *out) {
     for (size_t i = 0; i < json_len(jobs); i++) {
         const json_t *j = json_at(jobs, i);
         const char *concl = json_get_str(j, "conclusion"), *st = json_get_str(j, "status");
-        const char *icon;
-        tui_tc_t ic, tcol;
-        if (gh_in(concl, GH_OK)) icon = tc_sym("status.success"), ic = TUI_TC_ACCENT, tcol = TUI_TC_SUCCESS;
-        else if (gh_in(concl, GH_FAIL)) icon = tc_sym("status.error"), ic = TUI_TC_ERROR, tcol = TUI_TC_ERROR;
-        else if (str_eq(st, "in_progress")) icon = tc_sym("status.enabled"), ic = TUI_TC_WARNING, tcol = TUI_TC_WARNING;
-        else icon = tc_sym("status.shadowed"), ic = TUI_TC_MUTED, tcol = TUI_TC_MUTED;
-        (void)GH_PENDING;
-        char *pt = xasprintf("%s ", icon);
-        char *prefix = tc_fg(ic, pt);
-        free(pt);
+        char *icon;
+        tui_tc_t tcol;
+        if (gh_in(concl, GH_OK)) icon = tc_status_icon(TC_ST_SUCCESS, -1), tcol = TUI_TC_SUCCESS;
+        else if (gh_in(concl, GH_FAIL)) icon = tc_status_icon(TC_ST_ERROR, -1), tcol = TUI_TC_ERROR;
+        else if (str_eq(st, "in_progress")) icon = tc_status_icon(TC_ST_RUNNING, -1), tcol = TUI_TC_WARNING;
+        else if (gh_in(st, GH_PENDING)) icon = tc_status_icon(TC_ST_PENDING, -1), tcol = TUI_TC_MUTED;
+        /* an unrecognized state (e.g. a finished job with a new conclusion) claims neither queued nor settled */
+        else icon = tc_styled_sym("status.shadowed", TUI_TC_MUTED), tcol = TUI_TC_MUTED;
+        char *prefix = xasprintf("%s ", icon);
+        free(icon);
         char *dur = NULL;
         if (json_get(j, "durationSeconds")) {
             char *d = xasprintf("%llds", (long long)json_get_int(j, "durationSeconds", 0));
@@ -456,9 +456,10 @@ static void gh_failed_logs(const json_t *logs, int width, bool expanded, strvec_
         char *ctx = wf ? xasprintf("%s  #%lld", wf, (long long)rid) : xasprintf("run #%lld", (long long)rid);
         char *mctx = tc_fg(TUI_TC_MUTED, ctx);
         char *jn = tc_replace_tabs(json_get_str(e, "jobName") ? json_get_str(e, "jobName") : "");
-        char *head = xasprintf("%s %s  %s", tc_sym("status.error"), jn, mctx);
-        strvec_push_own(out, tc_fg(TUI_TC_ERROR, head));
-        free(head);
+        char *eic = tc_status_icon(TC_ST_ERROR, -1), *ejn = tc_fg(TUI_TC_ERROR, jn);
+        strvec_push_own(out, xasprintf("%s %s  %s", eic, ejn, mctx));
+        free(ejn);
+        free(eic);
         free(jn);
         free(mctx);
         free(ctx);

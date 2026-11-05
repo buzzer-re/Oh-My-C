@@ -261,6 +261,7 @@ tui_theme_t *tui_theme_from_json(const json_t *j, tui_color_mode_t mode, char **
             if (json_is_str(it) && t->nspinner < TUI_MAX_SPINNER_FRAMES) t->spinner[t->nspinner++] = xstrdup(json_sv(it));
         }
     }
+    t->spinner_custom = t->nspinner > 0;
     if (!t->nspinner)
         for (size_t i = 0; i < ARRAY_LEN(DEFAULT_SPINNER); i++) t->spinner[t->nspinner++] = xstrdup(DEFAULT_SPINNER[i]);
     return t;

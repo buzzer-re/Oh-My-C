@@ -32,6 +32,8 @@ typedef struct {
     /* registered tool label lookup (xd:// device writes delegate to the mounted tool's card); may be NULL */
     const char *(*label_of)(const char *tool);
     bool show_images;     /* result images draw as terminal graphics below the card (no text indicator) */
+    bool args_complete;   /* arguments are final (omp argsComplete); false while a write/edit body streams */
+    bool frozen;          /* renderContext.frozen: a live Task row is a dimmed snapshot, not in flight */
 } tc_call_t;
 
 /* Render one tool call (any tool; falls back to the generic card). Appends lines to `out`. */
@@ -67,7 +69,7 @@ char *tc_styled_sym(const char *key, tui_tc_t slot);          /* fg(slot, sym) *
 const char *tc_spinner_frame(int frame);
 
 typedef enum {
-    TC_ST_NONE, TC_ST_SUCCESS, TC_ST_DONE, TC_ST_ERROR, TC_ST_WARNING, TC_ST_INFO, TC_ST_PENDING,
+    TC_ST_NONE, TC_ST_SUCCESS, TC_ST_ERROR, TC_ST_WARNING, TC_ST_INFO, TC_ST_PENDING,
     TC_ST_RUNNING, TC_ST_ABORTED
 } tc_status_t;
 char *tc_status_icon(tc_status_t st, int spinner);

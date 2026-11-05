@@ -19,7 +19,7 @@ char *tc_styled_sym(const char *key, tui_tc_t slot) { return tc_fg(slot, tui_sym
 
 const char *tc_spinner_frame(int frame) {
     const tui_theme_t *th = tui_theme();
-    if (th && th->nspinner > 0) return th->spinner[(frame < 0 ? 0 : frame) % th->nspinner];
+    if (th && th->spinner_custom) return th->spinner[(frame < 0 ? 0 : frame) % th->nspinner];
     const char *const *frames;
     size_t n = tui_sym_spinner("status", &frames);
     return n ? frames[(size_t)(frame < 0 ? 0 : frame) % n] : "";
@@ -28,7 +28,6 @@ const char *tc_spinner_frame(int frame) {
 char *tc_status_icon(tc_status_t st, int spinner) {
     switch (st) {
     case TC_ST_SUCCESS: return tc_styled_sym("status.success", TUI_TC_SUCCESS);
-    case TC_ST_DONE: return tc_styled_sym("status.done", TUI_TC_SUCCESS);
     case TC_ST_ERROR: return tc_styled_sym("status.error", TUI_TC_ERROR);
     case TC_ST_WARNING: return tc_styled_sym("status.warning", TUI_TC_WARNING);
     case TC_ST_INFO: return tc_styled_sym("status.info", TUI_TC_ACCENT);

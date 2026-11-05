@@ -139,21 +139,22 @@ static void description_lines(const char *desc, const char *prefix, int width, s
 }
 
 /* renderAgentTreeRow (presentation "task") */
-static char *agent_row(const json_t *p, int width, int spinner, bool *desc_shown) {
+static char *agent_row(const json_t *p, int width, int spinner, bool frozen, bool *desc_shown) {
     const char *status = json_get_str(p, "status") ? json_get_str(p, "status") : "pending";
     bool live = str_eq(status, "pending") || str_eq(status, "running");
     bool failed = str_eq(status, "failed") || str_eq(status, "aborted");
-    tui_tc_t icon_color = str_eq(status, "completed") ? TUI_TC_SUCCESS : failed ? TUI_TC_ERROR : TUI_TC_ACCENT;
-    tui_tc_t name_color = str_eq(status, "completed") ? TUI_TC_TEXT : TUI_TC_ACCENT;
+    tui_tc_t name_color = live && frozen ? TUI_TC_DIM : str_eq(status, "completed") ? TUI_TC_TEXT : TUI_TC_ACCENT;
+    /* task rows draw a static glyph (their bytes hold across spinner frames); a frozen snapshot of a live
+     * row dims its glyph with its name, so it stops reading as in flight */
     char *icon;
-    if (!failed) icon = tc_styled_sym("status.done", name_color);
-    else {
-        char *ic = tc_status_icon(str_eq(status, "failed") ? TC_ST_ERROR : TC_ST_ABORTED, -1);
-        char *plain = tui_strip_ansi(ic);
-        icon = tc_fg(icon_color, plain);
-        free(plain);
-        free(ic);
-    }
+    if (live && frozen) icon = tc_styled_sym(str_eq(status, "running") ? "status.running" : "status.pending", TUI_TC_DIM);
+    else
+        icon = tc_status_icon(str_eq(status, "failed")      ? TC_ST_ERROR
+                              : str_eq(status, "completed") ? TC_ST_SUCCESS
+                              : str_eq(status, "aborted")   ? TC_ST_ABORTED
+                              : str_eq(status, "running")   ? TC_ST_RUNNING
+                                                            : TC_ST_PENDING,
+                              -1);
     UNUSED(spinner);
     char *lead = xasprintf("%s ", icon);
     char *sbadge = NULL;
@@ -166,7 +167,7 @@ static char *agent_row(const json_t *p, int width, int spinner, bool *desc_shown
         sbadge = xasprintf(" %s", b);
         free(b);
     } else if (failed) {
-        char *b = badge(status, icon_color);
+        char *b = badge(status, TUI_TC_ERROR);
         sbadge = xasprintf(" %s", b);
         free(b);
     } else sbadge = xstrdup("");
@@ -269,10 +270,10 @@ static void task_section(const char *task, const char *cont, bool expanded, strv
     free(t);
 }
 
-static void agent_progress(const json_t *p, bool expanded, int width, int spinner, int64_t now_ms, strvec_t *out) {
+static void agent_progress(const json_t *p, bool expanded, int width, int spinner, bool frozen, int64_t now_ms, strvec_t *out) {
     const char *cont = "  ";
     bool shown;
-    strvec_push_own(out, agent_row(p, width, spinner, &shown));
+    strvec_push_own(out, agent_row(p, width, spinner, frozen, &shown));
     const char *status = json_get_str(p, "status");
     if (json_get_str(p, "description") && !shown) {
         char *t = tc_replace_tabs(json_get_str(p, "description"));
@@ -354,7 +355,7 @@ static void output_section(const char *output, const char *cont, bool expanded, 
     free(ol);
     const char *ind = "  ";
     if (warning) {
-        char *ic = tc_fg(TUI_TC_WARNING, tc_sym("status.warning"));
+        char *ic = tc_status_icon(TC_ST_WARNING, -1);
         char *w = expanded ? xstrdup(warning) : tui_truncate_to_width(warning, 80, NULL);
         char *wd = tc_fg(TUI_TC_DIM, w);
         strvec_push_own(out, xasprintf("%s  %s %s", cont, ic, wd));
@@ -413,10 +414,8 @@ static void agent_result(const json_t *r, bool expanded, int width, strvec_t *ou
     bool success = !aborted && exit == 0 && !err;
     bool needs_warning = warning && success;
     tui_tc_t color = needs_warning ? TUI_TC_WARNING : success ? TUI_TC_SUCCESS : merge_failed ? TUI_TC_WARNING : TUI_TC_ERROR;
-    char *icon = aborted ? xstrdup(tc_sym("status.aborted"))
-                 : needs_warning ? xstrdup(tc_sym("status.warning"))
-                 : success      ? tc_styled_sym("status.done", TUI_TC_TEXT)
-                                : xstrdup(tc_sym("status.error"));
+    /* a merge failure is a warning: the agent's work succeeded, only folding it back did not */
+    char *icon = tc_status_icon(aborted ? TC_ST_ABORTED : needs_warning || merge_failed ? TC_ST_WARNING : success ? TC_ST_SUCCESS : TC_ST_ERROR, -1);
     const char *st = aborted ? "aborted" : needs_warning ? "warning" : success ? "done" : merge_failed ? "merge failed" : "failed";
     char *b0 = badge(st, color);
     char *sbadge = xasprintf(" %s", b0);
@@ -468,7 +467,7 @@ static void agent_result(const json_t *r, bool expanded, int width, strvec_t *ou
     task_section(json_get_str(r, "assignment") ? json_get_str(r, "assignment") : json_get_str(r, "task"), cont, expanded, out);
     const char *ar = json_get_str(r, "abortReason");
     if (aborted && ar) {
-        char *e = tc_fg(TUI_TC_ERROR, tc_sym("status.aborted"));
+        char *e = tc_status_icon(TC_ST_ABORTED, -1);
         char *f = flatten(ar);
         char *c = expanded ? xstrdup(f) : tui_truncate_to_width(f, 80, NULL);
         char *d = tc_fg(TUI_TC_DIM, c);
@@ -681,8 +680,7 @@ void tc_task(const tc_call_t *c, int width, strvec_t *out) {
     md_section(json_get_str(a, "task"), width, &secs[ns]);
     if (secs[ns].lines.n) ns++;
     if (!d) {
-        char *ov = c->is_error ? NULL : tc_styled_sym("status.done", TUI_TC_ACCENT);
-        tc_status_line_t sl = {.icon = TC_ST_ERROR, .icon_override = ov, .spinner = -1, .title = "Task", .title_slot = -1,
+        tc_status_line_t sl = {.icon = c->is_error ? TC_ST_ERROR : TC_ST_SUCCESS, .spinner = -1, .title = "Task", .title_slot = -1,
                                .description = agent};
         char *h = tc_status_line(&sl);
         if (*text) {
@@ -697,7 +695,6 @@ void tc_task(const tc_call_t *c, int width, strvec_t *out) {
         tc_output_block(&blk, out);
         for (size_t i = 0; i < 3; i++) strvec_free(&secs[i].lines);
         free(h);
-        free(ov);
         free(text);
         free(agent);
         return;
@@ -718,9 +715,8 @@ void tc_task(const tc_call_t *c, int width, strvec_t *out) {
     char *cnt = count ? xasprintf("%zu %s", count, count == 1 ? "agent" : "agents") : NULL;
     const char *meta_label = cnt ? cnt : agent;
     tc_status_t st = c->partial ? TC_ST_RUNNING : is_error ? TC_ST_ERROR : merge ? TC_ST_WARNING : TC_ST_SUCCESS;
-    char *ov = st == TC_ST_RUNNING ? tc_styled_sym("tool.task", TUI_TC_ACCENT)
-               : st == TC_ST_SUCCESS ? tc_styled_sym("status.done", TUI_TC_ACCENT)
-                                     : NULL;
+    /* while agents are in flight the header shows the dispatch glyph, not a spinner */
+    char *ov = st == TC_ST_RUNNING ? tc_styled_sym("tool.task", TUI_TC_ACCENT) : NULL;
     const char *m[] = {meta_label};
     tc_status_line_t sl = {.icon = st, .icon_override = ov, .spinner = -1, .title = "Task", .title_slot = -1,
                            .meta = m, .nmeta = meta_label ? 1 : 0};
@@ -732,7 +728,7 @@ void tc_task(const tc_call_t *c, int width, strvec_t *out) {
         size_t n = order_progress(progress, ord);
         size_t start = c->expanded || n <= 4 ? 0 : n - 4;
         if (start) strvec_push_own(&lines, hidden_progress_line(ord, start));
-        for (size_t i = start; i < n; i++) agent_progress(ord[i], c->expanded, cw, c->spinner, now, &lines);
+        for (size_t i = start; i < n; i++) agent_progress(ord[i], c->expanded, cw, c->spinner, c->frozen, now, &lines);
     } else if (nres) {
         for (size_t i = 0; i < nres; i++) ord[i] = json_at(results, i);
         qsort(ord, nres, sizeof *ord, cmp_dur);
@@ -764,7 +760,7 @@ void tc_task(const tc_call_t *c, int width, strvec_t *out) {
         json_arr_foreach(progress, i, p) {
             bool in = false;
             json_arr_foreach(results, k, r) in |= str_eq(json_get_str(r, "id"), json_get_str(p, "id"));
-            if (!in) agent_progress(p, c->expanded, cw, c->spinner, now, &lines);
+            if (!in) agent_progress(p, c->expanded, cw, c->spinner, c->frozen, now, &lines);
         }
         strvec_t parts = {0};
         char buf[64];

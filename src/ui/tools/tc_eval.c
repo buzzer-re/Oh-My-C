@@ -29,7 +29,7 @@ static void code_cell(const cell_t *cl, int index, int total, int spinner, bool 
     strvec_t parts = {0};
     strvec_push_own(&parts, py_icon());
     const char *st = cl->status;
-    tc_status_t s = str_eq(st, "complete") ? TC_ST_DONE : str_eq(st, "error") ? TC_ST_ERROR : str_eq(st, "running") ? TC_ST_RUNNING
+    tc_status_t s = str_eq(st, "complete") ? TC_ST_SUCCESS : str_eq(st, "error") ? TC_ST_ERROR : str_eq(st, "running") ? TC_ST_RUNNING
                                                                                                                  : TC_ST_PENDING;
     char *ic = tc_status_icon(s, str_eq(st, "running") ? spinner : -1);
     if (str_eq(st, "pending") || str_eq(st, "running")) {

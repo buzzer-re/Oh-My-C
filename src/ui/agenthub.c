@@ -615,7 +615,7 @@ static void hud_lines(ui_t *u, int columns, strvec_t *out) {
         strvec_push_own(out, xasprintf(" %s", tt2));
     }
     free(tt2), free(hint), free(key);
-    char *dot = S(TUI_TC_ACCENT, sym("status.done"));
+    char *dot = S(TUI_TC_ACCENT, sym("status.running"));
     for (size_t i = 0; i < items; i++) {
         const json_t *ref = json_at(running, i);
         const json_t *p = json_get_obj(ref, "progress");
@@ -626,7 +626,7 @@ static void hud_lines(ui_t *u, int columns, strvec_t *out) {
         int prefix_w = tui_visible_width(prefix);
         int row_w = MAX(0, content - 1 - prefix_w);
         char *fid = format_task_id(json_get_str(ref, "id"));
-        char *did = tui_truncate_to_width(fid, MAX(0, row_w - 2), NULL);
+        char *did = tui_truncate_to_width(fid, MAX(0, row_w - tui_visible_width(dot) - 1), NULL);
         free(fid);
         sb_t line = SB_INIT;
         sb_appendf(&line, "%s ", dot);

@@ -252,6 +252,17 @@ static void compare_rows(const char *name, fixture_t *fx, size_t start, const st
     }
 }
 
+/* whether any rendered row, stripped of styling, holds `needle` */
+static bool has_row(const strvec_t *out, const char *needle) {
+    bool found = false;
+    for (size_t i = 0; i < out->n && !found; i++) {
+        char *p = tui_strip_ansi(out->v[i]);
+        found = strstr(p, needle) != NULL;
+        free(p);
+    }
+    return found;
+}
+
 static json_t *J(const char *s) {
     json_t *j = json_parse_str(s);
     if (!j) {
@@ -347,7 +358,7 @@ int main(void) {
         json_free(r);
         free(dir);
     }
-    /* user `!cmd` execution frame: header, output pane (trailing blank row of "oops\n"), `(exit 3)` footer */
+    /* user `!cmd` execution frame: header, output pane (trailing blank row of "oops\n"), `exit 3` in the bottom border */
     {
         tc_bang_t b = {.command = "echo oops; exit 3", .output = "oops\n", .exit_code = 3, .spinner = -1, .term_rows = 50};
         strvec_t out = {0};
@@ -362,6 +373,140 @@ int main(void) {
      * token colors (omc's highlighter vs syntect), so those specs avoid such tokens or are compared via lsp2 only */
     static const char *const SPECS[] = {"ws", "ask", "goal", "find", "ast", "debug", "task", "wait", "lsp2", "github", "ghwatch"};
     for (size_t i = 0; i < ARRAY_LEN(SPECS); i++) run_spec(SPECS[i]);
+    /* omp a1e7a928: `!` runs keep the loader, then `exit N` / `cancelled`, in the frame's bottom border */
+    {
+        tc_bang_t b = {.command = "sleep 9", .running = true, .spinner = 0, .term_rows = 50};
+        strvec_t out = {0};
+        tc_render_bang(&b, 40, &out);
+        char *last = stripped_trim(out.v[out.n - 1]);
+        CHECK(str_starts(last, "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 \xe2\xa3\xbe Running"), "running border: %s", last);
+        CHECK(tui_visible_width(last) == 40, "running border width: %s", last);
+        free(last);
+        strvec_free(&out);
+        tc_bang_t cb = {.command = "sleep 9", .cancelled = true, .exit_code = -1, .spinner = -1, .term_rows = 50};
+        tc_render_bang(&cb, 40, &out);
+        last = stripped_trim(out.v[out.n - 1]);
+        CHECK(str_starts(last, "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 cancelled \xe2\x94\x80"), "cancelled border: %s", last);
+        CHECK(!has_row(&out, "(cancelled)"), "no cancelled row");
+        free(last);
+        strvec_free(&out);
+        tc_bang_t ok = {.command = "true", .spinner = -1, .term_rows = 50};
+        tc_render_bang(&ok, 40, &out);
+        char *top = stripped_trim(out.v[0]);
+        last = stripped_trim(out.v[out.n - 1]);
+        CHECK(str_eq(top, last), "a clean run keeps a plain rule: %s", last);
+        free(top);
+        free(last);
+        strvec_free(&out);
+        /* no room for a label: a plain rule */
+        tc_bang_t nar = {.command = "x", .exit_code = 2, .spinner = -1, .term_rows = 50};
+        tc_render_bang(&nar, 6, &out);
+        last = stripped_trim(out.v[out.n - 1]);
+        CHECK(!strstr(last, "exit"), "narrow border: %s", last);
+        free(last);
+        strvec_free(&out);
+    }
+    /* a1e7a928: Write's spinner in the header, `streaming` in the bottom border until the args complete */
+    {
+        json_t *a = J("{\"path\":\"new.txt\",\"content\":\"alpha\"}");
+        tc_call_t c = call("write", a, NULL, false);
+        c.spinner = 0;
+        strvec_t out = {0};
+        tc_render(&c, 60, &out);
+        CHECK(has_row(&out, "\xe2\xa3\xbe Write"), "write header spinner");
+        CHECK(has_row(&out, " streaming "), "write footer label");
+        CHECK(!has_row(&out, "(streaming)"), "no trailing streaming row");
+        strvec_free(&out);
+        c.spinner = -1;
+        c.args_complete = true;
+        tc_render(&c, 60, &out);
+        CHECK(!has_row(&out, "streaming"), "the label ends with the args");
+        CHECK(!has_row(&out, "\xe2\xa3\xbe"), "no frozen spinner");
+        strvec_free(&out);
+        json_free(a);
+        json_t *e = J("{\"path\":\"a.txt\",\"input\":\"x\"}");
+        tc_call_t ec = call("edit", e, NULL, false);
+        ec.spinner = 0;
+        tc_render(&ec, 60, &out);
+        CHECK(has_row(&out, "\xe2\xa3\xbe Edit"), "edit header spinner");
+        strvec_free(&out);
+        ec.spinner = -1;
+        tc_render(&ec, 60, &out);
+        CHECK(!has_row(&out, "\xe2\x8f\xb3"), "no pending hourglass on edit's header");
+        strvec_free(&out);
+        json_free(e);
+    }
+    /* 59deb3aa: only a diagnostics result's rows count as status rows; a raw `request` response is the server's text */
+    {
+        json_t *a = J("{\"action\":\"request\"}");
+        json_t *r = J("{\"content\":[{\"type\":\"text\",\"text\":\"\xe2\x9c\x98 starts with the glyph\\nsecond line\"}]}");
+        tc_call_t c = call("lsp", a, r, false);
+        strvec_t out = {0};
+        tc_render(&c, 80, &out);
+        CHECK(!has_row(&out, "No issues"), "request response isn't diagnostics");
+        CHECK(has_row(&out, "starts with the glyph"), "request response keeps its text");
+        strvec_free(&out);
+        json_free(a);
+        /* no action known: inference stays, anchored at a line start */
+        a = J("{}");
+        c = call("lsp", a, r, false);
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, "No issues") || has_row(&out, "starts with"), "unknown action infers");
+        CHECK(has_row(&out, "Diagnostics") || has_row(&out, "diagnostics"), "unknown action infers diagnostics");
+        strvec_free(&out);
+        json_free(a);
+        json_free(r);
+        a = J("{}");
+        r = J("{\"content\":[{\"type\":\"text\",\"text\":\"prose holding \xe2\x9c\x98 mid-line\"}]}");
+        c = call("lsp", a, r, false);
+        tc_render(&c, 80, &out);
+        CHECK(!has_row(&out, "No issues"), "a glyph mid-line isn't a status row");
+        strvec_free(&out);
+        json_free(a);
+        json_free(r);
+    }
+    /* a1e7a928 / e2fbe87d: Task rows; a frozen live row dims its glyph; a merge failure is a warning */
+    {
+        json_t *a = J("{}");
+        json_t *r = J("{\"content\":[],\"details\":{\"progress\":[{\"id\":\"A\",\"status\":\"running\",\"index\":0},{\"id\":\"B\",\"status\":\"pending\",\"index\":1}]}}");
+        tc_call_t c = call("task", a, r, false);
+        c.partial = true;
+        c.now_ms = 1000;
+        strvec_t out = {0};
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, "\xe2\x9f\xb3 A"), "running row glyph");
+        CHECK(has_row(&out, "\xe2\x8f\xb3 B"), "pending row glyph");
+        strvec_free(&out);
+        c.frozen = true;
+        tc_render(&c, 80, &out);
+        char *want = tc_fg(TUI_TC_DIM, "\xe2\x9f\xb3");
+        bool found = false;
+        for (size_t i = 0; i < out.n; i++) found |= strstr(out.v[i], want) != NULL;
+        CHECK(found, "frozen running row dims its glyph");
+        free(want);
+        strvec_free(&out);
+        json_free(r);
+        r = J("{\"content\":[],\"details\":{\"results\":[{\"id\":\"M\",\"exitCode\":0,\"error\":\"merge conflict\",\"durationMs\":5}]}}");
+        c = call("task", a, r, false);
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, "\xe2\x9a\xa0 M"), "merge failure draws the warning glyph");
+        strvec_free(&out);
+        json_free(r);
+        json_free(a);
+    }
+    /* ASCII preset: three-column status glyphs, bracketed spinner */
+    {
+        tui_sym_set_preset("ascii");
+        tui_theme_set(tui_theme_builtin("titanium", TUI_COLOR_TRUECOLOR));
+        char *ok = tc_status_icon(TC_ST_SUCCESS, -1), *er = tc_status_icon(TC_ST_ERROR, -1), *ab = tc_status_icon(TC_ST_ABORTED, -1);
+        char *pe = tc_status_icon(TC_ST_PENDING, -1), *ru = tc_status_icon(TC_ST_RUNNING, 1);
+        char *pok = tui_strip_ansi(ok), *per = tui_strip_ansi(er), *pab = tui_strip_ansi(ab), *ppe = tui_strip_ansi(pe), *pru = tui_strip_ansi(ru);
+        CHECK(str_eq(pok, "[+]") && str_eq(per, "[-]") && str_eq(pab, "[#]") && str_eq(ppe, "[ ]"), "%s %s %s %s", pok, per, pab, ppe);
+        CHECK(str_eq(pru, "[/]"), "ascii spinner frame: %s", pru);
+        free(pok), free(per), free(pab), free(ppe), free(pru), free(ok), free(er), free(ab), free(pe), free(ru);
+        tui_sym_set_preset("unicode");
+        tui_theme_set(tui_theme_builtin("titanium", TUI_COLOR_TRUECOLOR));
+    }
     if (failures) fprintf(stderr, "%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

@@ -125,6 +125,7 @@ static void ui_apply_event(void *ud) {
             e->msg = NULL;
             ui_assistant_end(u, u->cur_assistant);
             toolcard_note_message(u, u->cur_assistant->msg, true);
+            toolcard_args_complete(u, u->cur_assistant->msg);
             ui_usage_row_live(u, u->cur_assistant->msg);
             u->cur_assistant = NULL;
         }

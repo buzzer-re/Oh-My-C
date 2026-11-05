@@ -160,7 +160,7 @@ static bool read_markdown_card(const tc_call_t *c, int width, strvec_t *out) {
     }
     char *shown = tc_shorten_path(raw);
     char *t = xasprintf("Read %s", shown);
-    char *icon = tc_status_icon(TC_ST_DONE, -1);
+    char *icon = tc_status_icon(TC_ST_SUCCESS, -1);
     char *tt = tc_fg(TUI_TC_TOOL_TITLE, t);
     char *title = xasprintf("%s %s", icon, tt);
     int iw = MAX(20, tc_block_content_width(width, -1, -1));
@@ -435,16 +435,18 @@ void tc_write(const tc_call_t *c, int width, strvec_t *out) {
     char *path = *fp ? tc_fg(TUI_TC_ACCENT, fp) : tc_fg(TUI_TC_TOOL_OUTPUT, "\xe2\x80\xa6");
     int cw = tc_block_content_width(width, -1, -1);
     strvec_t body = {0};
-    char *header;
+    char *header, *footer = NULL;
     tc_state_t state;
     int border = TUI_TC_BORDER_MUTED;
     if (!c->has_result) {
         char *desc = xasprintf("%s %s", icon, path);
-        tc_status_line_t sl = {.icon = TC_ST_NONE, .spinner = -1, .title = "Write", .title_slot = -1, .description = desc};
+        /* only a live spinner fills the icon slot, as in Edit's call card */
+        tc_status_line_t sl = {.icon = c->spinner >= 0 ? TC_ST_RUNNING : TC_ST_NONE, .spinner = c->spinner, .title = "Write",
+                               .title_slot = -1, .description = desc};
         header = tc_status_line(&sl);
         free(desc);
         if (content && *content) {
-            /* formatStreamingContent: tail window of the streamed body + "… (streaming)" */
+            /* formatStreamingContent: tail window of the streamed body */
             char *norm = strip_cr(content);
             strvec_t lines = {0};
             tc_split_lines(norm, &lines);
@@ -472,11 +474,8 @@ void tc_write(const tc_call_t *c, int width, strvec_t *out) {
                 free(gd);
                 free(g);
             }
-            char *spin = c->spinner >= 0 ? xasprintf("%s ", tc_spinner_frame(c->spinner)) : xstrdup("");
-            char *st = tc_fg(TUI_TC_DIM, "\xe2\x80\xa6 (streaming)");
-            strvec_push_own(&body, xasprintf("%s%s", spin, st));
-            free(st);
-            free(spin);
+            /* the label ends with the args: once the content is complete the write is just running */
+            if (!c->args_complete) footer = tc_fg(TUI_TC_DIM, "streaming");
             strvec_free(&hl);
             sb_free(&vis);
             strvec_free(&lines);
@@ -534,11 +533,12 @@ void tc_write(const tc_call_t *c, int width, strvec_t *out) {
     strvec_t wrapped = {0};
     for (size_t i = 0; i < body.n; i++) wrap_gutter_row(body.v[i], cw, &wrapped);
     tc_section_t sec = {.lines = wrapped};
-    tc_block_t blk = {.header = header, .state = state, .sections = &sec, .nsections = wrapped.n ? 1 : 0, .width = width,
-                      .pad_left = -1, .pad_right = -1, .border_slot = border};
+    tc_block_t blk = {.header = header, .footer_meta = footer, .state = state, .sections = &sec, .nsections = wrapped.n ? 1 : 0,
+                      .width = width, .pad_left = -1, .pad_right = -1, .border_slot = border};
     tc_output_block(&blk, out);
     strvec_free(&wrapped);
     strvec_free(&body);
+    free(footer);
     free(header);
     free(path);
     free(icon);
@@ -1081,8 +1081,11 @@ void tc_edit(const tc_call_t *c, int width, strvec_t *out) {
         return;
     }
     if (!c->has_result) {
-        /* pending call: header + hourglass, no body (omc applies the edit at once) */
-        char *h = edit_header(width, title, TC_ST_PENDING, NULL, raw_path, rename, NULL);
+        /* pending call: only a live spinner fills the icon slot (a pending hourglass after it stops would read
+         * as a step backwards while the edit executes); no body (omc has no streamed diff preview) */
+        char *sp = c->spinner >= 0 ? xstrdup(tc_spinner_frame(c->spinner)) : NULL;
+        char *h = edit_header(width, title, TC_ST_NONE, sp, raw_path, rename, NULL);
+        free(sp);
         tc_block_t blk = {.header = h, .state = TC_STATE_PENDING, .width = width, .pad_left = 0, .pad_right = -1,
                           .border_slot = TUI_TC_BORDER_MUTED};
         tc_output_block(&blk, out);

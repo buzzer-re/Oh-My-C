@@ -178,6 +178,22 @@ static char *with_code_close(char *m, const diag_t *d) {
     return r;
 }
 
+/* one of the LSP tool's per-file status rows (`<glyph> <path>: …`): only a row's start counts, since
+ * response text such as source or hover content can hold the same characters (ASCII `[-]`) */
+static bool is_status_row(const char *line, const char *glyph) {
+    size_t n = strlen(glyph);
+    return !strncmp(line, glyph, n) && line[n] == ' ';
+}
+
+/* Only the diagnostics action writes status rows; any other action's text is the server's (a `request`
+ * response verbatim), so a glyph there is content even at a line start. An unknown action keeps the inference. */
+static bool has_status_row(const char *action, const strvec_t *lines, const char *glyph) {
+    if (action && !str_eq(action, "diagnostics")) return false;
+    for (size_t i = 0; i < lines->n; i++)
+        if (is_status_row(lines->v[i], glyph)) return true;
+    return false;
+}
+
 static bool has_line_col(const char *l) {
     for (const char *p = strchr(l, ':'); p; p = strchr(p + 1, ':')) {
         const char *q = p + 1;
@@ -212,7 +228,7 @@ static void render_diagnostics(int errs, int warns, const strvec_t *lines, bool 
     const char *err_sym = tc_sym("status.error");
     for (size_t i = 0; i < lines->n; i++) {
         const char *l = lines->v[i];
-        if (!(strstr(l, err_sym) || has_line_col(l))) continue;
+        if (!(is_status_row(l, err_sym) || has_line_col(l))) continue;
         char *t = str_trim(l);
         diag_t d;
         if (parse_diag(t, &d)) vec_push(&parsed, d);
@@ -679,9 +695,9 @@ static void render_hover(const char *text, const char *lang, const char *code_s,
     free(code0);
 }
 
-static void render_generic(const char *text, const strvec_t *lines, bool expanded, strvec_t *out) {
-    bool err = strstr(text, "Error:") || strstr(text, tc_sym("status.error"));
-    bool ok = strstr(text, tc_sym("status.success")) || strstr(text, "Applied");
+static void render_generic(const char *text, const strvec_t *lines, const char *action, bool expanded, strvec_t *out) {
+    bool err = strstr(text, "Error:") || has_status_row(action, lines, tc_sym("status.error"));
+    bool ok = has_status_row(action, lines, tc_sym("status.success")) || strstr(text, "Applied");
     char *icon = err && !ok ? tc_styled_sym("status.error", TUI_TC_ERROR) : ok && !err ? icon_lsp() : tc_styled_sym("status.info", TUI_TC_ACCENT);
     sb_t o = SB_INIT;
     if (expanded) {
@@ -896,6 +912,7 @@ void tc_lsp(const tc_call_t *c, int width, strvec_t *out) {
     strvec_t lines = {0};
     tc_split_lines(text, &lines);
     const json_t *req = c->args ? c->args : json_get_obj(c->details, "request");
+    const char *action = json_get_str(req, "action") ? json_get_str(req, "action") : json_get_str(c->details, "action");
     tc_section_t secs[2] = {0};
     size_t ns = 0;
     {
@@ -957,7 +974,7 @@ void tc_lsp(const tc_call_t *c, int width, strvec_t *out) {
         char *lang = xstrndup(fence + 3, (size_t)(fence_nl - fence - 3));
         render_hover(text, lang, fence_nl + 1, fence_end, c->expanded, &body);
         free(lang);
-    } else if (errs >= 0 || warns >= 0 || strstr(text, tc_sym("status.error")) || unreported) {
+    } else if (errs >= 0 || warns >= 0 || has_status_row(action, &lines, tc_sym("status.error")) || unreported) {
         label = "Diagnostics";
         state = errs > 0 ? TC_STATE_ERROR : (warns > 0 || unreported) ? TC_STATE_WARNING : TC_STATE_SUCCESS;
         render_diagnostics(MAX(errs, 0), MAX(warns, 0), &lines, c->expanded, &body);
@@ -977,7 +994,7 @@ void tc_lsp(const tc_call_t *c, int width, strvec_t *out) {
         free(d);
         free(ic);
     } else {
-        render_generic(text, &lines, c->expanded, &body);
+        render_generic(text, &lines, action, c->expanded, &body);
     }
     const char *act0 = json_get_str(req, "action") ? json_get_str(req, "action") : json_get_str(c->details, "action");
     char *lower = NULL;
