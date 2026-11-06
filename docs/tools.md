@@ -251,6 +251,12 @@ replacement. A `reset` gives no notice. `CompletionHandle.attempts` lists the ca
 
 ## MCP client (`src/mcp/`)
 
+Subagents share the parent's connections, each with its own view of the tools (`agent_t.mcp_scope`,
+`mcp_open_tool_scope`): a tool a server adds while a call to it runs reaches a session only once that session's own
+call to the server completes (the call waits for the refresh it provoked, and the session re-registers its tools at the
+next turn boundary). A new view starts from its spawner's. Tools present at connect, and tools a server adds while no
+call to it runs, every session sees.
+
 - Transports: stdio (`command` + `args`, a reader thread per server), streamable HTTP (`url`,
   `type: http|streamable-http`) and legacy SSE (`type: sse`). Protocol version `2025-06-18`.
 - Config discovery (project first, then user; `mcp_discover_config`): `.omc/mcp.json`,

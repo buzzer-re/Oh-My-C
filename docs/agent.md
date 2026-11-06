@@ -272,8 +272,11 @@ auto-learn managed skills (lowest priority). The first name wins. Skill descript
 into short routing hints by `coding/skilldesc.c` (`skills.compressDescriptions`). A session renders
 a frozen snapshot from the cache `<agent dir>/skill-descriptions.json` and compresses missing ones in
 the background for later sessions: one plain-string user message per skill on the `smol` role (never the
-session model), at most 4 at once, `temperature: 0`, 1,024 output tokens and reasoning disabled. These requests
-start with the session, so on a single-slot local server the first prompt queues behind them (in omp too). With
+session model), at most 4 at once, `temperature: 0`, 1,024 output tokens and reasoning disabled. A hint fitting 160
+characters is used however many words it has; an unusable answer is remembered per model and validation revision.
+Each provider attempt passes the session tree's cost cap (a refusal aborts it) and adds its cost to the cap. These
+requests start with the session, once its cost gate exists (the TUI starts them after its first frame), so on a
+single-slot local server the first prompt queues behind them (in omp too). With
 thinking disabled they stay short: a local Qwen gets `enable_thinking: false` from the detected compat
 (docs/ai.md).
 

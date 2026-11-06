@@ -37,7 +37,7 @@ agent-dir `SYSTEM_TEMPLATE.md` is discovered like `SYSTEM.md`), `--append-system
 `--hide-thinking`, `--advisor`, `--skills <globs>` (`skills.includeSkills`), `--no-skills`, `--no-rules`,
 `--no-context-files`, `--export <session> [out]`, `--no-title`, `--print-thoughts`, `--max-time 600|10m|1h`
 (runs stop at the deadline), `--warn-cost` / `--max-cost` (`session.warnCost` / `session.maxCost`:
-`src/coding/costgate.c`; a refused request ends print mode with exit 3), `--auto-approve`/`--yolo`,
+`src/coding/costgate.c`, one gate per session tree: subagents check it before each request, the cap is read on each check so one set mid-run applies to running subagents at once, and skill description compression is gated and counted too; a refused request ends print mode with exit 3), `--auto-approve`/`--yolo`,
 `--approval-mode`. omc extras (not in the help): `--plan-mode`, `--max-turns`. Unknown flags and bad enum
 values exit 2 with omp's `Error: …` lines.
 
