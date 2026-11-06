@@ -376,6 +376,39 @@ static void expect_error(pe_mode_t mode, const char *input, const char *want) {
     free(dir);
 }
 
+/* omp pi-edit tests/sloppy.rs end_sentinels_close_put_bodies_but_stay_literal_in_find */
+static void sloppy_sentinel_case(const char *before, const char *input, const char *expected) {
+    char *dir = fs_mktempdir("omc-edit");
+    char *cwd = path_real(dir);
+    write_file(cwd, "a.txt", before);
+    json_t *args = json_obj();
+    json_set_str(args, "input", input);
+    pe_opts_t o = opts_for(cwd, NULL);
+    pe_result_t r;
+    pe_run(PE_SLOPPY, args, &o, &r);
+    CHECK(!r.is_error, "sentinel-closed payload: %s", r.text);
+    char *p = path_join(cwd, "a.txt");
+    size_t n = 0;
+    char *got = fs_read(p, &n);
+    CHECK(got && !strcmp(got, expected), "sentinel-closed payload wrote: %s", got ? got : "(null)");
+    free(got);
+    free(p);
+    pe_result_free(&r);
+    json_free(args);
+    fs_rm_rf(cwd);
+    free(cwd);
+    free(dir);
+}
+
+static void test_sloppy_sentinels(void) {
+    sloppy_sentinel_case("one\ntwo\nthree\nfour\n",
+                         "*** Edit File: a.txt\n*** Find\none\n*** Replace\nONE\n*** End Patch\n*** Find\ntwo\n*** Replace\nTWO\n"
+                         "*** End\n*** Find\nthree\n*** Insert After\n3.5\n*** End\n*** Find\nfour\n*** Replace\nFOUR\n*** End\n",
+                         "ONE\nTWO\nthree\n3.5\nFOUR\n");
+    /* a Find body is matched as written, so a literal sentinel line can be removed */
+    sloppy_sentinel_case("a\n*** End\nb\n", "*** Edit File: a.txt\n*** Find\na\n*** End\n*** Replace\na\n", "a\nb\n");
+}
+
 static void test_parser_errors(void) {
     expect_error(PE_APPLY_PATCH, "bad", "The first line of the patch must be '*** Begin Patch'");
     expect_error(PE_APPLY_PATCH, "*** Begin Patch\nbad", "The last line of the patch must be '*** End Patch'");
@@ -535,6 +568,7 @@ int main(int argc, char **argv) {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
     test_diff_renderers();
     test_parser_errors();
+    test_sloppy_sentinels();
     test_auto_generated();
     test_inline_regions();
     test_recover_inline();
