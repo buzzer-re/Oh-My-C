@@ -66,6 +66,7 @@ def judge_reply(system, user):
     import re as _re
     state = user.split("\n\n")[0][len("State:\n"):] if user.startswith("State:\n") else user
     if "SLOWJUDGE" in state: time.sleep(1.5)
+    if "STALLVERIFY" in state and "This passage contains" in state: time.sleep(6)  # find's verification wave only
     if "FAILJUDGE" in state: return "I cannot decide"
     low = state.lower()
     def answer(section):

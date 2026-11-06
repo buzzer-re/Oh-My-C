@@ -295,6 +295,11 @@ rm -f "$T/agent/config.yml"
 printf "find:\n  enabled: on\n" > "$T/agent/config.yml"
 mkdir -p fnd && printf 'int parse_token(const char *raw) {\n  return raw[0];\n}\n' > fnd/tok.c && printf 'int other(void) { return 1; } /* FAILJUDGE */\n' > fnd/fail.c
 check "find hits"      $'1 hit(s) for "where are tokens parsed" in fnd/ (\xcf\x84 0.20), strongest first\npartial: 2 of 4 judge requests failed; unjudged files may still match\n\nfnd/tok.c  1.00  3 lines judged\n  fnd/tok.c:1-3  1.00  int parse_token(const char *raw) {\n\nlisted 2 \xc2\xb7 judged 2 \xc2\xb7 read 2 files' "$B" --model mock/mock-1 -p 'call:find:{"query":"where are tokens parsed","grep_keywords":["parse_token"],"path":"fnd"}'
+# find's deadline: the hits verified before it come back marked partial; none verified is an error naming the phase
+mkdir -p fnd2 && printf 'int parse_token(const char *raw) {\n  return raw[0];\n}\n' > fnd2/tok.c && printf 'int parse_tokens_slow(void) { return 1; } /* STALLVERIFY */\n' > fnd2/stall.c
+check "find deadline"  "partial: timed out after 3.0s with 1 of 2 passages verified; unverified files may still match. Narrow \`path\` for a complete search."  env OMC_FIND_TIMEOUT_MS=3000 "$B" --model mock/mock-1 -p 'call:find:{"query":"where are tokens parsed","grep_keywords":["parse_token"],"path":"fnd2"}'
+rm -f fnd2/tok.c
+check "find deadline, no hits" 'find timed out after 2.0s at "verifying 1 passages in 1 files", before any hit was verified. Narrow `path` to a smaller tree, or use grep.'  env OMC_FIND_TIMEOUT_MS=2000 "$B" --model mock/mock-1 -p 'call:find:{"query":"where are tokens parsed","grep_keywords":["parse_token"],"path":"fnd2"}'
 check "find empty"     '`query` must be a non-empty description'  "$B" --model mock/mock-1 -p 'call:find:{"query":"  ","grep_keywords":[]}'
 rm -f "$T/agent/config.yml"
 check "ast_edit stage" "(proposed) 1 replacement" "$B" --model mock/mock-1 -p 'call:ast_edit:{"ops":[{"pat":"console.log($$$X)","out":"log($$$X)"}],"paths":["s.ts"]}'

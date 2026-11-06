@@ -144,6 +144,14 @@ void tc_find(const tc_call_t *c, int width, strvec_t *out) {
         failed_s = tc_fg(TUI_TC_WARNING, f);
         free(f);
     }
+    /* details.timeout: the call's deadline cut verification short */
+    char *timeout_s = NULL;
+    const json_t *tmo = json_get_obj(d, "timeout");
+    if (tmo) {
+        char *f = xasprintf("timed out, %lld/%lld passages verified", (long long)json_get_int(tmo, "verified", 0), (long long)json_get_int(tmo, "passages", 0));
+        timeout_s = tc_fg(TUI_TC_WARNING, f);
+        free(f);
+    }
     if (nh == 0) {
         strvec_t meta = {0};
         strvec_push(&meta, "0 hits");
@@ -151,6 +159,7 @@ void tc_find(const tc_call_t *c, int width, strvec_t *out) {
         strvec_push(&meta, cost);
         strvec_push(&meta, dur);
         if (failed_s) strvec_push(&meta, failed_s);
+        if (timeout_s) strvec_push(&meta, timeout_s);
         tc_status_line_t sl = {.icon = TC_ST_WARNING, .spinner = -1, .title = "Find", .title_slot = TUI_TC_TOOL_TITLE,
                                .description = desc, .meta = (const char *const *)meta.v, .nmeta = meta.n};
         char *h = tc_status_line(&sl);
@@ -181,6 +190,7 @@ void tc_find(const tc_call_t *c, int width, strvec_t *out) {
         strvec_push(&meta, cost);
         strvec_push(&meta, dur);
         if (failed_s) strvec_push(&meta, failed_s);
+        if (timeout_s) strvec_push(&meta, timeout_s);
         char *ov = tc_fg(TUI_TC_TOOL_TITLE, tc_sym("icon.search"));
         tc_status_line_t sl = {.icon_override = ov, .spinner = -1, .title = "Find", .title_slot = TUI_TC_TOOL_TITLE,
                                .description = desc, .meta = (const char *const *)meta.v, .nmeta = meta.n};
@@ -208,6 +218,7 @@ void tc_find(const tc_call_t *c, int width, strvec_t *out) {
         strvec_free(&meta);
     }
     free(failed_s);
+    free(timeout_s);
     free(dur);
     free(scope_s);
     free(desc);
