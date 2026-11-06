@@ -2,6 +2,7 @@
  * retry.c - transport retry helpers shared by the providers:
  *   ai_extract_retry_hint        pi-utils fetch-retry.ts extractRetryHint
  *   ai_retry_after_from_headers  pi-ai utils/retry-after.ts getRetryAfterMsFromHeaders
+ *   ai_should_retry_verdict      pi-ai utils/retry-after.ts getShouldRetryFromHeaders
  *   ai_provider_retryable_error  pi-ai error/retryable.ts isProviderRetryableError (substring port of its patterns)
  *   ai_replay_safe_stream        pi-ai utils/empty-completion-retry.ts withReplaySafeStreamRetry
  * The fetch loop itself (fetchWithRetry / anthropic-client.ts) is stream_post_url in ai_common.c.
@@ -68,6 +69,13 @@ int64_t ai_retry_after_from_headers(const http_headers_t *h) {
         if (target > (double)now) best = MAX(best, (int64_t)ceil(target - (double)now));
     }
     return best;
+}
+
+int ai_should_retry_verdict(const http_headers_t *h) {
+    const char *v = h ? http_headers_get(h, "x-should-retry") : NULL;
+    if (str_eq(v, "true")) return 1;
+    if (str_eq(v, "false")) return 0;
+    return -1;
 }
 
 static double unit_ms(const char *u, size_t n, bool days) {

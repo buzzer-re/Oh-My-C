@@ -778,12 +778,18 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
         int64_t delay;
         if (policy == AI_RETRY_ANTHROPIC) {
             retry = !c.got_data && (!http_fail || ai_provider_retryable_error(msg, c.status));
+            /* a captured x-should-retry overrides the status and text heuristics, usage limits still stop */
+            int verdict = http_fail ? ai_should_retry_verdict(&c.hdrs) : -1;
+            if (verdict >= 0 && !c.got_data && !ai_usage_limit_text(msg, c.status)) retry = verdict == 1;
             int64_t backoff = anthropic_backoff_ms(attempt), hdr = http_fail ? ai_retry_after_from_headers(&c.hdrs) : -1;
             if (retry && hdr >= 0 && max_delay > 0 && hdr > max_delay) retry = false; /* over-cap hint: surface now */
             delay = hdr >= 0 ? MAX(hdr, backoff) : backoff;
         } else {
             retry = !c.got_data && (!http_fail || c.status >= 500 || c.status == 408 || c.status == 429);
-            if (retry && http_fail && policy == AI_RETRY_OPENAI && admission_rejection(&c.hdrs, ebody)) retry = false;
+            /* postOpenAIStream: a gateway's `x-should-retry: false` is terminal, as is a concurrency-admission 429 */
+            if (retry && http_fail && policy == AI_RETRY_OPENAI &&
+                (ai_should_retry_verdict(&c.hdrs) == 0 || admission_rejection(&c.hdrs, ebody)))
+                retry = false;
             if (retry && http_fail && policy == AI_RETRY_OLLAMA && c.status >= 500 &&
                 (str_istr(ebody, "failed to parse tool call arguments as json") ||
                  str_istr(ebody, "[json.exception.parse_error.101]")))

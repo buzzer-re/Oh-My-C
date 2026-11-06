@@ -23,6 +23,18 @@ static int variant_of(const ai_model_t *m) {
     return V_OPENAI;
 }
 
+/* responsesToolNaming + encodeResponsesToolName: the wire name carries compat.toolNamePrefix unless the prefixed name
+ * would pass the host's tool-call-name-max-length; without a prefix the name goes out unchanged. Owned. */
+static char *wire_tool_name(const ai_model_t *m, const char *name) {
+    const char *prefix = model_compat_str(m, "toolNamePrefix");
+    if (!name) name = "";
+    if (str_empty(prefix)) return xstrdup(name);
+    size_t len = strlen(prefix) + strlen(name);
+    const json_t *max = json_get(m->raw, "toolCallNameMaxLength");
+    if (json_is_num(max) && (int64_t)len > json_get_int(m->raw, "toolCallNameMaxLength", 0)) return xstrdup(name);
+    return xasprintf("%s%s", prefix, name);
+}
+
 static bool blank(const char *s) {
     if (!s) return true;
     for (; *s; s++)
@@ -167,7 +179,7 @@ static void parse_text_sig(const char *sig, char **id, char **phase) {
 }
 
 static void convert_assistant(json_t *out, const json_t *msg, const ai_model_t *m, size_t msg_index,
-                              bool include_sigs, bool preserve_ids, strvec_t *known) {
+                              bool include_sigs, bool preserve_ids, strvec_t *known, bool wire_names) {
     const char *stop = json_get_str(msg, "stopReason");
     bool errored = str_eq(stop, "error");
     json_t *content = json_get(msg, "content");
@@ -234,7 +246,9 @@ static void convert_assistant(json_t *out, const json_t *msg, const ai_model_t *
             json_set_str(item, "type", "function_call");
             if (item_id) json_set(item, "id", json_str_own(item_id));
             json_set(item, "call_id", json_str_own(call));
-            json_set_str(item, "name", json_get_str(b, "name") ? json_get_str(b, "name") : "");
+            /* rebuilt calls go out under the wire name; the declared tool list uses the same rule */
+            json_set(item, "name", wire_names ? json_str_own(wire_tool_name(m, json_get_str(b, "name")))
+                                              : json_str(json_get_str(b, "name") ? json_get_str(b, "name") : ""));
             json_t *args = json_get(b, "arguments");
             json_set(item, "arguments", args ? json_str_own(json_dump(args, 0)) : json_str("null"));
             json_push(out, item);
@@ -304,7 +318,7 @@ static void convert_tool_result(json_t *out, const json_t *tr, const ai_model_t 
     json_push(out, o);
 }
 
-json_t *oair_convert_input(const ai_model_t *m, const ai_context_t *ctx, int variant) {
+static json_t *convert_input(const ai_model_t *m, const ai_context_t *ctx, int variant, bool wire_names) {
     json_t *out = json_arr();
     if (variant == V_AZURE) {
         const char *role = m->reasoning && model_compat_bool(m, "supportsDeveloperRole", false) ? "developer" : "system";
@@ -375,7 +389,7 @@ json_t *oair_convert_input(const ai_model_t *m, const ai_context_t *ctx, int var
             }
             json_push(out, it);
         } else if (str_eq(role, "assistant")) {
-            convert_assistant(out, msg, m, idx, include_sigs, preserve_ids, &known);
+            convert_assistant(out, msg, m, idx, include_sigs, preserve_ids, &known, wire_names);
         } else if (str_eq(role, "toolResult")) {
             convert_tool_result(out, msg, m, strict_pairing, &known);
         }
@@ -391,6 +405,10 @@ json_t *oair_convert_input(const ai_model_t *m, const ai_context_t *ctx, int var
         }
     }
     return out;
+}
+
+json_t *oair_convert_input(const ai_model_t *m, const ai_context_t *ctx, int variant) {
+    return convert_input(m, ctx, variant, false);
 }
 
 /* ====================================================================== */
@@ -414,7 +432,7 @@ static json_t *convert_tools(const ai_model_t *m, const json_t *tools, int varia
     json_arr_foreach(tools, i, t) {
         json_t *w = json_obj();
         json_set_str(w, "type", "function");
-        json_set_str(w, "name", json_get_str(t, "name") ? json_get_str(t, "name") : "");
+        json_set(w, "name", json_str_own(wire_tool_name(m, json_get_str(t, "name"))));
         json_set_str(w, "description", json_get_str(t, "description") ? json_get_str(t, "description") : "");
         json_t *st = json_get(t, "strict");
         bool expl_false = json_is_bool(st) && !st->u.b;
@@ -460,21 +478,49 @@ static void apply_tool_choice(json_t *p, const ai_model_t *m, const ai_stream_op
         json_set_str(p, "tool_choice", mode);
         return;
     }
-    if (!name || !tools_have(tools, name)) return;
+    if (!name) return;
+    /* the declared list carries wire names: the forced choice is matched against and sent under them */
+    char *wire = wire_tool_name(m, name);
+    if (!tools_have(tools, wire)) {
+        free(wire);
+        return;
+    }
     if (variant != V_AZURE && !model_compat_bool(m, "supportsNamedToolChoice", true)) {
         json_t *f = json_arr();
         json_t *t;
         json_arr_foreach(tools, i, t) {
-            if (str_eq(json_get_str(t, "name"), name)) json_push(f, json_clone(t));
+            if (str_eq(json_get_str(t, "name"), wire)) json_push(f, json_clone(t));
         }
         json_set(p, "tools", f);
         json_set_str(p, "tool_choice", "required");
+        free(wire);
         return;
     }
     json_t *tc = json_obj();
     json_set_str(tc, "type", "function");
-    json_set_str(tc, "name", name);
+    json_set(tc, "name", json_str_own(wire));
     json_set(p, "tool_choice", tc);
+}
+
+/* toolNamesByWire: wire name -> declared name so a returned call dispatches to its tool; two tools sharing a wire name
+ * could not be told apart, so that request is rejected before it is sent. NULL when names go out unchanged. Owned. */
+json_t *oair_tool_names_by_wire(const ai_model_t *m, const json_t *tools, char **err) {
+    if (str_empty(model_compat_str(m, "toolNamePrefix"))) return NULL;
+    json_t *names = json_obj(), *t;
+    json_arr_foreach(tools, i, t) {
+        const char *name = json_get_str(t, "name") ? json_get_str(t, "name") : "";
+        char *wire = wire_tool_name(m, name);
+        const char *existing = json_get_str(names, wire);
+        if (existing && strcmp(existing, name)) {
+            *err = xasprintf("Tool names \"%s\" and \"%s\" both encode as \"%s\"", existing, name, wire);
+            free(wire);
+            json_free(names);
+            return NULL;
+        }
+        json_set_str(names, wire, name);
+        free(wire);
+    }
+    return names;
 }
 
 static void add_include(json_t *p, const char *what) {
@@ -668,7 +714,7 @@ json_t *oair_build_request(const ai_model_t *m, const ai_context_t *ctx, const a
     oai_policy_resolve(&ipol, m, o, o->tool_choice, json_len(ctx->tools) > 0);
     const char *wire_id = json_get_str(m->raw, "requestModelId");
     json_set_str(p, "model", wire_id ? wire_id : m->id);
-    json_t *input = oair_convert_input(m, ctx, V_OPENAI);
+    json_t *input = convert_input(m, ctx, V_OPENAI, true);
     json_t *sys = oai_system_prompts(ctx);
     if (json_len(sys)) {
         if (ipol.model_supported && oai_cbool(m, ipol.over, "supportsDeveloperRole", false)) {
@@ -856,7 +902,6 @@ static bool build_headers(http_headers_t *h, const ai_model_t *m, const ai_strea
         char *hint = tier ? xasprintf("model=%s;tier=%s", model, tier) : xasprintf("model=%s", model);
         http_headers_set(h, "x-codex-routing-hint", hint);
         free(hint);
-        http_headers_set(h, "OpenAI-Beta", "responses=experimental");
         http_headers_set(h, "originator", CODEX_ORIGINATOR);
         http_headers_set(h, "version", CODEX_CLIENT_VERSION);
         http_headers_set(h, "User-Agent", OMC_NAME "/" OMC_VERSION);
@@ -905,6 +950,7 @@ struct oair_stream {
     char *stop;
     char *error;
     bool completed;
+    json_t *wire_names; /* borrowed toolNamesByWire or NULL */
 };
 
 oair_stream_t *oair_stream_new(const ai_model_t *m, ai_event_cb cb, void *ud) {
@@ -912,6 +958,14 @@ oair_stream_t *oair_stream_new(const ai_model_t *m, ai_event_cb cb, void *ud) {
     s->m = m;
     aib_init(&s->b, m, cb, ud);
     return s;
+}
+
+void oair_stream_set_wire_names(oair_stream_t *s, const json_t *names) { s->wire_names = (json_t *)names; }
+
+/* the declared tool of a returned call name (toolNamesByWire); unknown names pass through */
+static const char *declared_name(const oair_stream_t *s, const char *wire) {
+    const char *n = s->wire_names && wire ? json_get_str(s->wire_names, wire) : NULL;
+    return n ? n : wire;
 }
 
 static json_t *r_content(oair_stream_t *s) { return json_get(s->b.msg, "content"); }
@@ -1105,7 +1159,7 @@ static void on_item_added(oair_stream_t *s, const json_t *ev) {
     it->out_idx = (int)json_get_int(ev, "output_index", -1);
     if (json_get_str(item, "id")) it->item_id = xstrdup(json_get_str(item, "id"));
     if (json_get_str(item, "call_id")) it->call_id = xstrdup(json_get_str(item, "call_id"));
-    if (json_get_str(item, "name")) it->name = xstrdup(json_get_str(item, "name"));
+    if (json_get_str(item, "name")) it->name = xstrdup(declared_name(s, json_get_str(item, "name")));
     vec_push(&s->items, it);
     if (kind == K_CALL) {
         char *id = encode_tool_id(it->call_id, it->item_id);
@@ -1179,7 +1233,7 @@ static void on_item_done(oair_stream_t *s, const json_t *ev) {
     } else {
         const char *a = json_get_str(item, "arguments");
         json_t *args = a && *a ? oai_parse_args(a, strlen(a)) : oai_parse_args(it->buf.s, it->buf.len);
-        if (!it->name && json_get_str(item, "name")) it->name = xstrdup(json_get_str(item, "name"));
+        if (!it->name && json_get_str(item, "name")) it->name = xstrdup(declared_name(s, json_get_str(item, "name")));
         char *id = encode_tool_id(json_get_str(item, "call_id") ? json_get_str(item, "call_id") : it->call_id,
                                   json_get_str(item, "id") ? json_get_str(item, "id") : it->item_id);
         call_finalize(s, it, args, id);
@@ -1360,7 +1414,9 @@ static json_t *oair_stream_once(void *self, ai_event_cb cb, void *ud) {
     char *err = NULL;
     oair_stream_t *st = oair_stream_new(m, cb, ud);
     json_t *msg;
-    if (!build_headers(&h, m, o, body, &err)) {
+    json_t *wire_names = oair_tool_names_by_wire(m, ctx->tools, &err);
+    oair_stream_set_wire_names(st, wire_names);
+    if (err || !build_headers(&h, m, o, body, &err)) {
         msg = oair_stream_finish(st, -1, err);
     } else {
         char *url = oair_url(m);
@@ -1374,6 +1430,7 @@ static json_t *oair_stream_once(void *self, ai_event_cb cb, void *ud) {
     free(err);
     http_headers_free(&h);
     json_free(body);
+    json_free(wire_names);
     return msg;
 }
 

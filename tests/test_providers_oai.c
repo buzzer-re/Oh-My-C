@@ -400,6 +400,90 @@ static const char *RESP_HISTORY =
     "{\"role\":\"toolResult\",\"toolCallId\":\"call_9|fc_9\",\"toolName\":\"read\",\"content\":[{\"type\":\"text\",\"text\":\"data\"}]},"
     "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"img\"},{\"type\":\"image\",\"data\":\"QQ==\",\"mimeType\":\"image/jpeg\"}]}]";
 
+/* compat.toolNamePrefix (Muse Code): declared tools, rebuilt calls and a forced choice use the wire name, a name the
+ * prefix would push past the limit stays bare, and returned calls map back to the declared tool */
+static void test_tool_name_prefix(void) {
+    tmodel_t t;
+    model_init(&t, "{\"id\":\"muse-spark\",\"api\":\"openai-responses\",\"provider\":\"muse-code\",\"toolCallNameMaxLength\":64,"
+                   "\"compat\":{\"toolNamePrefix\":\"_\",\"supportsToolChoice\":true,\"supportsNamedToolChoice\":true}}");
+    char long_name[65];
+    memset(long_name, 'a', 64);
+    long_name[64] = 0;
+    char *tools_json = xasprintf("[{\"name\":\"bash\",\"description\":\"d\",\"parameters\":{\"type\":\"object\"}},"
+                                 "{\"name\":\"%s\",\"description\":\"d\",\"parameters\":{\"type\":\"object\"}}]", long_name);
+    json_t *tools = J(tools_json);
+    free(tools_json);
+    json_t *msgs = J("[{\"role\":\"user\",\"content\":\"hi\"},"
+                     "{\"role\":\"assistant\",\"api\":\"openai-responses\",\"provider\":\"muse-code\",\"model\":\"muse-spark\","
+                     "\"stopReason\":\"toolUse\",\"content\":[{\"type\":\"toolCall\",\"id\":\"call_1|fc_1\",\"name\":\"bash\","
+                     "\"arguments\":{}}]},"
+                     "{\"role\":\"toolResult\",\"toolCallId\":\"call_1|fc_1\",\"toolName\":\"bash\",\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}]");
+    ai_context_t ctx = {.messages = msgs, .tools = tools};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    json_t *tc = J("{\"type\":\"tool\",\"name\":\"bash\"}");
+    o.tool_choice = tc;
+    json_t *p = oair_build_request(&t.m, &ctx, &o);
+    CHECK_STR(json_get_str(json_at(json_get(p, "tools"), 0), "name"), "_bash");
+    CHECK_STR(json_get_str(json_at(json_get(p, "tools"), 1), "name"), long_name);
+    CHECK_STR(json_get_str(json_get_obj(p, "tool_choice"), "name"), "_bash");
+    json_t *it;
+    bool saw_call = false;
+    json_arr_foreach(json_get(p, "input"), i, it) {
+        if (!str_eq(json_get_str(it, "type"), "function_call")) continue;
+        saw_call = true;
+        CHECK_STR(json_get_str(it, "name"), "_bash");
+    }
+    CHECK(saw_call);
+    json_free(p);
+
+    /* a forced choice of a name that is not declared (only its prefixed form exists) selects nothing */
+    json_t *tc2 = J("{\"type\":\"tool\",\"name\":\"_bash\"}");
+    o.tool_choice = tc2;
+    p = oair_build_request(&t.m, &ctx, &o);
+    CHECK(json_get(p, "tool_choice") == NULL);
+    json_free(p);
+
+    char *err = NULL;
+    json_t *names = oair_tool_names_by_wire(&t.m, tools, &err);
+    CHECK(names && !err);
+    evlog_t l = {0};
+    oair_stream_t *st = oair_stream_new(&t.m, on_ev, &l);
+    oair_stream_set_wire_names(st, names);
+    int rc = feed_sse(oair_stream_on_sse, st,
+                      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_2\",\"call_id\":\"call_2\",\"name\":\"_bash\",\"arguments\":\"\"}}\n\n"
+                      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_2\",\"call_id\":\"call_2\",\"name\":\"_bash\",\"arguments\":\"{}\"}}\n\n"
+                      "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n", 4096);
+    json_t *msg = oair_stream_finish(st, rc, NULL);
+    CHECK_STR(json_get_str(block_of(msg, "toolCall", 0), "name"), "bash");
+    CHECK_STR(json_get_str(msg, "stopReason"), "toolUse");
+    json_free(msg);
+    json_free(names);
+    evlog_free(&l);
+
+    /* the prefixed form meets a bare 64-character name */
+    err = NULL;
+    char u63[65] = "_";
+    memset(u63 + 1, 'c', 63);
+    u63[64] = 0;
+    char c63[64];
+    memset(c63, 'c', 63);
+    c63[63] = 0;
+    char *cs = xasprintf("[{\"name\":\"%s\"},{\"name\":\"%s\"}]", c63, u63);
+    json_t *clash = J(cs);
+    free(cs);
+    names = oair_tool_names_by_wire(&t.m, clash, &err);
+    CHECK(!names && err && strstr(err, "both encode as"));
+    free(err);
+    json_free(clash);
+
+    json_free(tc);
+    json_free(tc2);
+    json_free(tools);
+    json_free(msgs);
+    json_free(t.raw);
+}
+
 static void test_responses_request(void) {
     tmodel_t t;
     model_init(&t, "{\"id\":\"gpt-5\",\"api\":\"openai-responses\",\"provider\":\"openai\",\"reasoning\":true,\"image\":true,"
@@ -928,6 +1012,7 @@ int main(void) {
     test_completions_stream();
     test_completions_stream_errors();
     test_responses_request();
+    test_tool_name_prefix();
     test_codex_azure();
     test_responses_stream();
     test_ollama();

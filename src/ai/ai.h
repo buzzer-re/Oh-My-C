@@ -353,6 +353,8 @@ int64_t ai_extract_retry_hint(const http_headers_t *h, const char *body);
 int64_t ai_retry_after_from_headers(const http_headers_t *h);
 /* isProviderRetryableError over a finished error message (+ HTTP status, 0 = unknown) */
 bool ai_provider_retryable_error(const char *message, int status);
+/* getShouldRetryFromHeaders: the server's `x-should-retry` verdict, 1 true, 0 false, -1 absent or unrecognised */
+int ai_should_retry_verdict(const http_headers_t *h);
 /* account-level usage/quota wording (rate-limit.ts matchesUsageLimitText, approximated); status 0 = unknown */
 bool ai_usage_limit_text(const char *msg, int status);
 /* withReplaySafeStreamRetry: runs `once` again while no meaningful output was emitted, after a benign empty

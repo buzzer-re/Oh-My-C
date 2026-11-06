@@ -1566,7 +1566,7 @@ static void apply_catalog(json_t *m, const json_t *cat) {
     v = json_get(cat, "imageModel");
     if (json_is_str(v)) json_set_str(m, "imageModel", json_sv(v));
     else if (json_is_bool(v) && !v->u.b) json_del(m, "imageModel");
-    static const char *const copies[] = {"serviceTierCost", "priority", "promptCache", "applyPatchToolType", "editPromptVariant", "pricingStatus"};
+    static const char *const copies[] = {"serviceTierCost", "priority", "promptCache", "applyPatchToolType", "editPromptVariant", "pricingStatus", "toolCallNameMaxLength"};
     for (size_t i = 0; i < ARRAY_LEN(copies); i++)
         if ((v = json_get(cat, copies[i]))) json_set(m, copies[i], json_clone(v));
     v = json_get(cat, "toolSchemasInContext");
@@ -1698,7 +1698,7 @@ static void build_model(json_t *model) {
         compat = chat_compat(provider, backend, url, &idn, reasoning, user, &ax);
         json_t *resp = responses_compat(provider, backend, url, &idn, reasoning, user, &ax, api);
         static const char *const only[] = {"supportsLongPromptCacheRetention", "strictResponsesPairing", "supportsImageDetailOriginal",
-                                           "supportsObfuscationOptOut", "storeResponses", "connectionBoundNativeHistory",
+                                           "supportsObfuscationOptOut", "storeResponses", "toolNamePrefix", "connectionBoundNativeHistory",
                                            "supportsAllTurnsReasoningContext", "supportsConfigurationUpdate", "supportsSteering",
                                            "officialEndpoint", "harmonyLeakMitigation", "cacheControlFormat",
                                            "requiresReasoningOffJuiceInstruction", "supportsReasoningSummary", "statefulResponses",

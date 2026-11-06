@@ -81,6 +81,10 @@ char *oair_url(const ai_model_t *m);                   /* owned request URL */
 
 typedef struct oair_stream oair_stream_t;
 oair_stream_t *oair_stream_new(const ai_model_t *m, ai_event_cb cb, void *ud);
+/* toolNamesByWire: wire name -> declared name when compat.toolNamePrefix renames tools, NULL otherwise; a wire-name
+ * collision fails the request (*err owned). Owned. */
+json_t *oair_tool_names_by_wire(const ai_model_t *m, const json_t *tools, char **err);
+void oair_stream_set_wire_names(oair_stream_t *s, const json_t *names); /* borrowed, outlives the stream */
 int oair_stream_on_sse(void *ud, const char *event, const char *data, size_t len);
 json_t *oair_stream_finish(oair_stream_t *s, int transport_rc, const char *transport_err);
 

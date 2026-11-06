@@ -1030,6 +1030,37 @@ static void test_identity(void) {
     CHECK(v == NULL);
 }
 
+/* MALFORMED_RESPONSE: a transient error stop that keeps the chunk's usage (consumeGoogleStream finishErrorId) */
+static void test_malformed_response_finish(void) {
+    json_t *raw = json_parse_str("{\"id\":\"gemini-x\",\"api\":\"google-generative-ai\",\"provider\":\"google\"}");
+    ai_model_t m;
+    memset(&m, 0, sizeof m);
+    m.id = "gemini-x";
+    m.api = "google-generative-ai";
+    m.provider = "google";
+    m.raw = raw;
+    static const char *const reasons[] = {"MALFORMED_RESPONSE", "MALFORMED_FUNCTION_CALL"};
+    for (int i = 0; i < 2; i++) {
+        google_sse_t s;
+        google_sse_init(&s, &m, NULL, NULL);
+        char *data = xasprintf("{\"candidates\":[{\"finishReason\":\"%s\"}],\"usageMetadata\":{\"promptTokenCount\":7,"
+                               "\"candidatesTokenCount\":3,\"totalTokenCount\":10}}", reasons[i]);
+        google_sse_event(&s, NULL, data, strlen(data));
+        free(data);
+        json_t *msg = google_sse_finish(&s, 0, NULL);
+        CHECK(str_eq(json_get_str(msg, "stopReason"), "error"));
+        char *want = xasprintf("Generation failed with finish reason: %s", reasons[i]);
+        CHECK(str_eq(json_get_str(msg, "errorMessage"), want));
+        free(want);
+        CHECK(json_get_int(json_get(msg, "usage"), "input", 0) == 7);
+        CHECK(json_get_int(json_get(msg, "usage"), "output", 0) == 3);
+        CHECK((json_get_int(msg, "errorId", 0) != 0) == (i == 0));
+        json_free(msg);
+        google_sse_free(&s);
+    }
+    json_free(raw);
+}
+
 int main(void) {
     /* never touch real Google credentials */
     static const char *const vars[] = {"GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_ACCESS_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN",
@@ -1044,6 +1075,7 @@ int main(void) {
     http_global_init();
     make_key();
     start_server();
+    test_malformed_response_finish();
     test_jwt();
     test_adc();
     test_identity();

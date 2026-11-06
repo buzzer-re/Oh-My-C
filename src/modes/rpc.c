@@ -5,6 +5,7 @@
 #include "coding/btw.h"
 #include "coding/goal.h"
 #include "coding/slashcmd.h"
+#include "coding/turn_recovery.h"
 #include "session/export_html.h"
 
 #include "config/auth.h"
@@ -1320,7 +1321,7 @@ again:;
         json_set_str(e, "message", json_get_str(last, "errorMessage") ? json_get_str(last, "errorMessage") : "error");
         json_set_str(e, "provider", json_get_str(last, "provider"));
         json_set_str(e, "model", json_get_str(last, "model"));
-        json_set_bool(e, "retryable", app_error_retryable(json_get_str(last, "errorMessage")));
+        json_set_bool(e, "retryable", (aie_classify_message(last) & AIE_TRANSIENT) != 0); /* AIError.Flag.Transient */
         json_set(res, "error", e);
     }
     /* goal mode: keep going with hidden continuation turns while the goal is active and making progress */

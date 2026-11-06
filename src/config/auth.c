@@ -648,8 +648,9 @@ static int login_run(const char *provider, const json_t *d, bool embed, const au
         r.cred = NULL;
     }
     if (rc == 0 && r.api_key) {
-        /* an empty optional key (local servers) stores nothing */
-        if (*r.api_key && auth_set_api_key(provider, r.api_key) != 0) {
+        /* an empty optional key (local servers) stores nothing; `store-as` routes API-key logins too */
+        const char *key_store = json_get_str(d, "storeAs") ? json_get_str(d, "storeAs") : provider;
+        if (*r.api_key && auth_set_api_key(key_store, r.api_key) != 0) {
             *err = xstrdup("failed to save credentials");
             rc = -1;
         }
