@@ -32,6 +32,11 @@ th_check "threads replay"    "create continue create"  "bash:echo refuse-continu
 th_check "threads refused"   "create plain plain"  "bash:echo unsupported"  "${THENV[@]}"
 th_check "threads plain 400" "create plain plain"  "bash:echo plain400"  "${THENV[@]}"
 th_check "threads pause"     "create"  "paused"  "${THENV[@]}"
+# a gateway's x-should-retry: false ends the Anthropic transport loop at once (session retries off here; omp makes the
+# same 11 requests with them on: the first plus 10 session retries)
+mkdir -p "$T/mtagent2"
+printf 'skills:\n  enabled: false\nretry:\n  enabled: false\n' > "$T/mtagent2/config.yml"
+th_check "x-should-retry anthropic" "plain"  "noretry"  "${THENV[@]}" PI_ANTHROPIC_MESSAGE_THREADS=0 OMC_CODING_AGENT_DIR="$T/mtagent2"
 th_check "threads env off"   "plain plain"  "bash:echo off"  "${THENV[@]}" PI_ANTHROPIC_MESSAGE_THREADS=0
 # on by default on the official endpoint; a gateway reroute keeps the model flag on but must not see the field
 THDEF=(env HOME="$T/mthome" OMC_CODING_AGENT_DIR="$T/mtagent" OMC_NO_TITLE=1 ANTHROPIC_API_KEY=sk-ant-api-fake)

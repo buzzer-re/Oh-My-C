@@ -14,6 +14,7 @@ anything else plain text. Scenarios in the latest user text:
   unsupported          any thread request gets 400 thread_unsupported_request
   plain400             any thread request gets a 400 without a thread code
   paused               stop_reason pause_turn
+  noretry              503 with x-should-retry: false
   chain:<n>            (the first prompt) n rounds of text plus a bash call
   thinky               each reply opens with a signed thinking block"""
 import json, os, sys
@@ -104,6 +105,15 @@ class H(BaseHTTPRequestHandler):
                 f.write(json.dumps({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()},
                                     "body": body, "kind": kind, "full": strip_cc(full), "problem": problem}) + "\n")
         prompt = first_prompt(full)
+        if "noretry" in prompt:
+            b = json.dumps({"type": "error", "error": {"type": "api_error", "message": "gateway gave up"}}).encode()
+            self.send_response(503)
+            self.send_header("x-should-retry", "false")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+            return
         if th and "unsupported" in prompt:
             return self.error(400, "thread: unsupported for this organization", "thread_unsupported_request")
         if th and "plain400" in prompt:

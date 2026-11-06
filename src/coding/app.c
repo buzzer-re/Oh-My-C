@@ -658,8 +658,6 @@ static bool is_overflow(const char *err) {
 }
 
 /* AIError.retriable over an error text (RPC prompt_result error.retryable) */
-bool app_error_retryable(const char *err) { return err && aie_retriable(aie_classify_text(err, 0, NULL, NULL)); }
-
 static int hook_stream(void *ud, agent_t *ag, const ai_event_t *ev) {
     app_t *a = ud;
     if (ev->type != AI_EV_DONE && ttsr_on_event(a->ttsr, ev)) {

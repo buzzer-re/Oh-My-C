@@ -179,7 +179,6 @@ struct app {
  * "retry_fallback_succeeded" (model\x1frole), "retry-recovered" (notes, one per line), "title" */
 char *app_fallback_notice_text(const char *fields); /* "Fallback: from -> to\nreason" (owned) */
 /* the turn-recovery transient-error classification (a retry may succeed) */
-bool app_error_retryable(const char *err);
 /* hand a structured session event (owned) to app->session_event; true when a listener took it (the caller then
  * skips the plain-text notice the TUI renders for the same transition) */
 bool app_emit(app_t *a, json_t *ev);
