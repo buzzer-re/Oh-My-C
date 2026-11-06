@@ -31,7 +31,7 @@ static const char *icon_key(const char *name) {
         {"signOut", "icon.output"},  {"advisor", "icon.advisor"},     {"host", "icon.host"},
         {"package", "icon.package"}, {"fast", "icon.fast"},           {"voice", "icon.mic"},
         {"tools", "icon.extensionTool"}, {"rule", "icon.extensionRule"}, {"skill", "icon.extensionSkill"},
-        {"mcp", "icon.extensionMcp"}, {"pin", "icon.pin"},
+        {"mcp", "icon.extensionMcp"}, {"pin", "icon.pin"}, {"unpin", "icon.pin"},
     };
     for (size_t i = 0; i < ARRAY_LEN(MAP); i++)
         if (!strcmp(MAP[i][0], name)) return MAP[i][1];

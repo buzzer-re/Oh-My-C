@@ -1,4 +1,5 @@
 /* signals.c - terminal title run state, OSC 7501 program status and turn notifications (see signals.h). */
+#include "session/session.h"
 #include "ui/overlays.h"
 #include "tui/motion.h"
 #include "ui/signals.h"
@@ -474,6 +475,7 @@ static json_t *warp_event(const char *name) {
 }
 
 void ui_signals_session_start(void) {
+    session_pins_sync(); /* #syncSessionPinned: at startup and on session switch, picking up other instances' pins */
     free(g_warp_prompt);
     g_warp_prompt = NULL;
     warp_emit(warp_event("session_start"));

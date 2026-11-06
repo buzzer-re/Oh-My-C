@@ -964,6 +964,12 @@ static char *render_segment(const char *id, const segctx_t *c) {
     if (str_eq(id, "session_name")) {
         if (!c->title) return NULL;
         char *s = sanitize_status(c->title);
+        /* a pinned session shows the pin beside its title */
+        if (a->session && session_pin_cached(session_id(a->session))) {
+            char *wi = with_icon(sym("icon.pin"), s);
+            free(s);
+            s = wi;
+        }
         char *r = accent_fg(c, TUI_TC_ACCENT, s);
         free(s);
         return r;
@@ -1699,7 +1705,8 @@ static char *title_only(ui_t *u) {
     const char *t = u->app->session ? u->app->session->title : NULL;
     if (!t || !*t) return NULL;
     char *s = sanitize_status(t);
-    char *r = xasprintf("\x1b[2;3m%s\x1b[23;22m", s);
+    const char *pin = session_pin_cached(session_id(u->app->session)) ? sym("icon.pin") : NULL;
+    char *r = pin ? xasprintf("\x1b[2;3m%s %s\x1b[23;22m", pin, s) : xasprintf("\x1b[2;3m%s\x1b[23;22m", s);
     free(s);
     return r;
 }

@@ -109,6 +109,9 @@ int session_move(session_t *s, const char *new_cwd, char **err);
 /* session pins (<agent>/session-pins.json; session-pins.ts) */
 bool session_is_pinned(const char *id);
 int session_pin_toggle(const char *id, char **err); /* 1 pinned, 0 unpinned, -1 with *err */
+int session_pin_clear(const char *id, char **err);  /* unpinSession: 1 it was pinned, 0 it was not, -1 with *err */
+void session_pins_sync(void);                       /* reload the cached set from disk, picking up other instances' pins */
+bool session_pin_cached(const char *id);            /* the cached set: cheap enough for a frame */
 
 /* listing */
 typedef struct {
