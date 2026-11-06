@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""Dev-time only: update assets/config/settings-registry.json and assets/tui/settings-ui.json between two upstream
+tags by reading the `register({...})` blocks as text. It never runs upstream code (extract_settings.sh does, through
+the Bun inside omp).
+
+Usage: settings_patch.py <omp git checkout> <old tag or commit> <new tag or commit> [--apply]
+
+Prints every setting added, removed or changed, and the values it could not resolve from source (a default computed
+at runtime, say): fix those by hand after --apply. `order` is omp config list's position; new keys take the order of
+the setting registered just before them."""
+import json
+import re
+import subprocess
+import sys
+
+UP, OLD, NEW = sys.argv[1:4]
+APPLY = "--apply" in sys.argv
+REG = "assets/config/settings-registry.json"
+UI = "assets/tui/settings-ui.json"
+
+
+def git(*args):
+    return subprocess.run(["git", "-C", UP, *args], check=True, capture_output=True, text=True).stdout
+
+
+def skip_string(s, i):
+    q = s[i]
+    i += 1
+    while i < len(s):
+        c = s[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == q:
+            return i + 1
+        if q == "`" and c == "$" and s[i + 1 : i + 2] == "{":
+            i = match_bracket(s, i + 1) + 1
+            continue
+        i += 1
+    return i
+
+
+def match_bracket(s, i):
+    """Index of the bracket closing the one at s[i]."""
+    depth = 0
+    while i < len(s):
+        c = s[i]
+        if c in "\"'`":
+            i = skip_string(s, i)
+            continue
+        if s.startswith("//", i):
+            i = s.find("\n", i)
+            i = len(s) if i < 0 else i
+            continue
+        if s.startswith("/*", i):
+            i = s.find("*/", i)
+            i = len(s) if i < 0 else i + 2
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return len(s) - 1
+
+
+def props(body):
+    """Top-level `key: value` pairs of an object literal's body, as raw text."""
+    out = {}
+    i = 0
+    while i < len(body):
+        m = re.compile(r"\s*(?://[^\n]*\n\s*)*(?:/\*.*?\*/\s*)*([A-Za-z_]\w*)\s*(:|\(|,)", re.S).match(body, i)
+        if not m:
+            break
+        key = m.group(1)
+        j = m.end()
+        if m.group(2) == "(":  # a method: skip its parameters and body
+            j = match_bracket(body, j - 1) + 1
+            while j < len(body) and body[j] in " \n\t":
+                j += 1
+            if body[j : j + 1] == "{":
+                j = match_bracket(body, j) + 1
+            out[key] = "<function>"
+        elif m.group(2) == ",":
+            out[key] = key
+            i = j
+            continue
+        else:
+            start = j
+            while j < len(body):
+                c = body[j]
+                if c in "\"'`":
+                    j = skip_string(body, j)
+                    continue
+                if c in "([{":
+                    j = match_bracket(body, j) + 1
+                    continue
+                if c == ",":
+                    break
+                if body.startswith("//", j):
+                    k = body.find("\n", j)
+                    j = len(body) if k < 0 else k
+                    continue
+                j += 1
+            out[key] = body[start:j].strip()
+        i = j + 1 if j < len(body) and body[j] == "," else j
+    return out
+
+
+def literal(raw):
+    """A JSON value for a source literal, or None when it isn't one (the second result says which)."""
+    raw = raw.strip()
+    raw = re.sub(r"\s+as\s+const$", "", raw)
+    if raw in ("true", "false"):
+        return raw == "true", True
+    if raw == "undefined":
+        return None, False
+    if raw == "null":
+        return None, True
+    if re.fullmatch(r"-?\d[\d_]*(\.\d+)?", raw):
+        v = raw.replace("_", "")
+        return (float(v) if "." in v else int(v)), True
+    m = re.fullmatch(r"\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)'|`((?:[^`\\$]|\\.)*)`", raw, re.S)
+    if m:
+        t = next(g for g in m.groups() if g is not None)
+        return t.encode().decode("unicode_escape").encode("latin-1", "ignore").decode("utf8", "ignore") if "\\" in t else t, True
+    # an array or object of plain literals
+    if raw[:1] in "[{":
+        j = re.sub(r"([{,]\s*)([A-Za-z_]\w*)\s*:", r'\1"\2":', raw)
+        j = re.sub(r",\s*([}\]])", r"\1", j)
+        try:
+            return json.loads(j), True
+        except json.JSONDecodeError:
+            return None, False
+    return None, False
+
+
+def settings_at(tag):
+    out = {}
+    files = git("grep", "-lE", r"\bregister\(\{", tag, "--", "packages/coding-agent/src", "packages/*/src").splitlines()
+    for f in sorted({x.split(":", 1)[1] for x in files}):
+        if "/test/" in f:
+            continue
+        src = git("show", f"{tag}:{f}")
+        for m in re.finditer(r"\bregister\(\{", src):
+            start = m.end() - 1
+            end = match_bracket(src, start)
+            p = props(src[start + 1 : end])
+            sid, ok = literal(p.get("id", ""))
+            if not ok or not isinstance(sid, str):
+                continue
+            ui = props(p["ui"].strip()[1:-1]) if p.get("ui", "").startswith("{") else {}
+            out[sid] = {"file": f, "pos": m.start(), "p": p, "ui": ui, "src": src}
+    return out
+
+
+def constant(src, raw):
+    """`DEFAULT_X` or `A.b` declared in the same file as a plain literal."""
+    m = re.search(r"\b(?:const|export const)\s+" + re.escape(raw) + r"\b[^=]*=\s*([^;\n]+)", src)
+    return literal(m.group(1)) if m else (None, False)
+
+
+def field(entry, raw, unresolved, name):
+    v, ok = literal(raw)
+    if not ok:
+        v, ok = constant(entry["src"], raw)
+    if not ok and raw != "undefined":
+        unresolved.append(f"{name}: {raw[:70]}")
+    return v, ok
+
+
+def strtext(raw):
+    if raw is None:
+        return None
+    parts = re.findall(r"\"((?:[^\"\\]|\\.)*)\"|`((?:[^`\\]|\\.)*)`|'((?:[^'\\]|\\.)*)'", raw, re.S)
+    return "".join(a or b or c for a, b, c in parts).replace('\\"', '"').replace("\\n", "\n").replace("\\'", "'") or None
+
+
+def describe(sid, e):
+    unresolved = []
+    p, ui = e["p"], e["ui"]
+    r = {"id": sid, "type": literal(p.get("type", '""'))[0], "tab": strtext(ui.get("tab")) or "internal"}
+    if "default" in p:
+        d, ok = field(e, p["default"], unresolved, "default")
+        if ok:
+            r["default"] = d
+    if "values" in p:
+        v, ok = field(e, p["values"], unresolved, "values")
+        if ok:
+            r["values"] = v
+    desc = strtext(ui.get("description"))
+    if desc:
+        r["description"] = desc
+    if "env" in p:
+        r["env"], _ = literal(p["env"])
+    return r, unresolved
+
+
+def ui_row(sid, r, e):
+    ui = e["ui"]
+    if not ui:
+        return None
+    row = {"path": sid, "schemaType": r["type"], "type": "boolean" if r["type"] == "boolean" else "submenu"}
+    if "default" in r:
+        row["default"] = r["default"]
+    row.update({"tab": r["tab"], "label": strtext(ui.get("label")), "description": r.get("description")})
+    if strtext(ui.get("group")):
+        row["group"] = strtext(ui.get("group"))
+    if "options" in ui:
+        o, ok = literal(ui["options"])
+        row["options"] = o if ok else []
+    return row
+
+
+old, new = settings_at(OLD), settings_at(NEW)
+reg = json.load(open(REG))
+tab = json.load(open(UI))
+by_id = {x["id"]: x for x in reg}
+ui_by = {x["path"]: x for x in tab["settings"]}
+print(f"parsed {len(old)} settings at {OLD}, {len(new)} at {NEW}; registry has {len(reg)}")
+print("in the registry but not found in source:", sorted(set(by_id) - set(new) - set(old))[:12])
+
+added = [s for s in new if s not in old]
+removed = [s for s in old if s not in new]
+changed = []
+for s in new:
+    if s in old:
+        keys = ("type", "default", "values", "env")
+        a, b = old[s]["p"], new[s]["p"]
+        ua, ub = old[s]["ui"], new[s]["ui"]
+        diff = [k for k in keys if a.get(k) != b.get(k)] + [f"ui.{k}" for k in sorted(set(ua) | set(ub)) if ua.get(k) != ub.get(k)]
+        if diff:
+            changed.append((s, diff))
+print("ADDED", added)
+print("REMOVED", removed)
+for s, d in changed:
+    print("CHANGED", s, d)
+
+problems = []
+for s in added:
+    r, un = describe(s, new[s])
+    problems += [f"{s} {u}" for u in un]
+    keys = list(new)
+    prev = next((k for k in reversed(keys[: keys.index(s)]) if k in by_id), None)
+    r["order"] = by_id[prev]["order"] if prev else -1
+    by_id[s] = r
+    reg.append(r)
+    row = ui_row(s, r, new[s])
+    if row:
+        tab["settings"].append(row)
+        ui_by[s] = row
+for s in removed:
+    reg[:] = [x for x in reg if x["id"] != s]
+    tab["settings"][:] = [x for x in tab["settings"] if x["path"] != s]
+for s, d in changed:
+    r, un = describe(s, new[s])
+    problems += [f"{s} {u}" for u in un]
+    cur = by_id.get(s)
+    if cur:
+        for k in ("default", "values", "description", "type", "env"):
+            if k in r:
+                cur[k] = r[k]
+    row = ui_by.get(s)
+    if row:
+        fresh = ui_row(s, r, new[s]) or {}
+        for k, v in fresh.items():
+            if k in ("options",) and not v:
+                continue
+            row[k] = v
+print("UNRESOLVED (fix by hand):")
+for p in problems:
+    print(" ", p)
+if APPLY:
+    json.dump(reg, open(REG, "w", encoding="utf8"), ensure_ascii=False, separators=(",", ":"))
+    open(REG, "a").write("\n")
+    json.dump(tab, open(UI, "w", encoding="utf8"), ensure_ascii=False, separators=(",", ":"))
+    open(UI, "a").write("\n")
+    print("applied")
