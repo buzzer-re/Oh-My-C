@@ -49,14 +49,28 @@ int agents_spawn(tool_env_t *env, const spawn_spec_t *spec, char **agent_id, cha
 char *agents_run_blocking(tool_env_t *env, const spawn_spec_t *spec, volatile sig_atomic_t *cancel, bool *failed);
 
 /* ---------- IRC ---------- */
-/* `write agent://<to>` from the agent owning env: returns the receipt text (owned) and sets *is_error */
-char *agents_send(tool_env_t *env, const char *to, const char *body, bool *is_error);
-/* wait tool: next message queued for the agent owning env (owned "[id] from: body"), or NULL */
-char *agents_take_message(tool_env_t *env);
-void agents_wait_enter(tool_env_t *env, bool on); /* while waiting, incoming messages queue for the wait tool */
-/* reply status for the wait tool: 0 nobody owes a reply, 1 a messaged agent is still working, 2 they stopped
- * without replying (*who owned, `a`, `b` list) */
-int agents_reply_state(tool_env_t *env, char **who);
+const char *agents_id_of_env(tool_env_t *env); /* registry id of the agent owning env (borrowed) or NULL */
+/* `write agent://<to>[?progress]` from the agent owning env: returns the receipt text (owned) and sets *is_error */
+char *agents_send(tool_env_t *env, const char *to, const char *body, bool progress, bool *is_error);
+/* wait tool: every message queued for the agent owning env, oldest first, as omp IrcMessage rows
+ * ({id,from,to,body,ts,broadcast?,progress?}); owned array or NULL when none. Session records (asides, peer steers) are
+ * taken only when one of them is a direct message: broadcast legs and progress notes alone stay queued as asides. */
+json_t *agents_take_messages(tool_env_t *env);
+/* while waiting, direct messages (and a broadcast from an agent in `asked`) queue for the wait tool. `watched`: agents
+ * only whose results can end this wait (the awaits hold their reply waits read), or NULL. */
+void agents_wait_enter(tool_env_t *env, const strvec_t *asked, const strvec_t *watched);
+void agents_wait_leave(tool_env_t *env);
+/* a dialog of this agent's waits on the user (`ask`, a tool approval): AgentSession.waitForUser */
+void agents_user_wait(tool_env_t *env, bool on);
+/* pendingReplies (tools/wait.ts): agents messaged this run that have not answered, by whether a reply can still come */
+typedef struct {
+    strvec_t from;    /* can still answer */
+    strvec_t blocked; /* cannot before the caller finishes */
+    strvec_t on_user; /* cannot before the user answers */
+    strvec_t stopped; /* finished their turn without answering, or gone */
+} agents_replies_t;
+void agents_pending_replies(tool_env_t *env, agents_replies_t *out);
+void agents_replies_free(agents_replies_t *r);
 /* messages queued for a session that was idle without a wake hook (print mode); owned rendered text or NULL */
 char *agents_take_pending_for(struct app *a);
 bool agents_has_pending(struct app *a);

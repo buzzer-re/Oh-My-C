@@ -405,15 +405,27 @@ int vurl_write(tool_env_t *env, const char *path, const char *content, tool_resu
         return 0;
     }
     const char *rest = path + strlen("agent://");
-    if (strchr(rest, '/') && strchr(rest, '/')[1]) {
+    /* the query is not part of the recipient: agent://<id>?progress is a progress note */
+    size_t rl = strcspn(rest, "?#");
+    const char *q = rest[rl] == '?' ? rest + rl + 1 : NULL;
+    bool progress = false;
+    while (q && *q && *q != '#') {
+        size_t n = strcspn(q, "&#");
+        size_t k = strcspn(q, "=&#");
+        if (k == strlen("progress") && !strncmp(q, "progress", k)) progress = true;
+        q += n;
+        if (*q == '&') q++;
+    }
+    const char *sl0 = memchr(rest, '/', rl);
+    if (sl0 && sl0 + 1 < rest + rl) {
         tool_result_error(out, "agent:// message target cannot have a JSON-path suffix.");
         return 0;
     }
-    char *to = xstrdup(rest);
+    char *to = xstrndup(rest, rl);
     char *sl = strchr(to, '/');
     if (sl) *sl = 0;
     bool is_err = false;
-    char *r = agents_send(env, to, content ? content : "", &is_err);
+    char *r = agents_send(env, to, content ? content : "", progress, &is_err);
     tool_result_text(out, r);
     out->is_error = is_err;
     free(r);

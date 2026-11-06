@@ -704,7 +704,14 @@ static char *list_dir(const target_t *t, const char *path, const char *shell, ch
     return res;
 }
 
+#define SSH_REMOTE_MISSING_EXIT 66 /* sysexits EX_NOINPUT */
+
 int ssh_fetch(tool_env_t *env, const char *url, char **content, size_t *len, bool *is_dir, char **err) {
+    return ssh_fetch_ex(env, url, content, len, is_dir, NULL, err);
+}
+
+int ssh_fetch_ex(tool_env_t *env, const char *url, char **content, size_t *len, bool *is_dir, bool *missing, char **err) {
+    if (missing) *missing = false;
     *content = NULL;
     *len = 0;
     *is_dir = false;
@@ -765,10 +772,13 @@ int ssh_fetch(tool_env_t *env, const char *url, char **content, size_t *len, boo
                          path);
         goto out;
     }
-    cmd = xasprintf("head -c %d %s", SSH_TEXT_MAX + 1, qp);
+    /* nothing at the path (not even a dangling symlink) exits with a reserved status, which login-shell stdout noise cannot fake */
+    cmd = xasprintf("head -c %d %s || { s=$?; if [ ! -e %s ] && [ ! -L %s ]; then exit %d; fi; exit $s; }", SSH_TEXT_MAX + 1, qp, qp, qp,
+                    SSH_REMOTE_MISSING_EXIT);
     free(qp);
     memset(&r, 0, sizeof r);
     if (run_posix(&t, cmd, NULL, 0, &r, err) != 0) {
+        if (missing && r.exit_code == SSH_REMOTE_MISSING_EXIT) *missing = true;
         free(cmd);
         proc_result_free(&r);
         goto out;

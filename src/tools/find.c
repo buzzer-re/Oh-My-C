@@ -38,7 +38,13 @@
 #define FIND_VERIFY_STATE_BYTES (24 * 1024)
 #define FIND_FAILURES_KEPT 5
 #define FIND_RANGES_SHOWN 3
-#define FIND_TIMEOUT_MS 20000
+#define FIND_TIMEOUT_DEFAULT_MS 20000
+/* OMC_FIND_TIMEOUT_MS: test hook */
+static double find_timeout_ms(void) {
+    const char *v = env_get("OMC_FIND_TIMEOUT_MS");
+    return v && atof(v) > 0 ? atof(v) : FIND_TIMEOUT_DEFAULT_MS;
+}
+#define FIND_TIMEOUT_MS find_timeout_ms()
 #define FIND_BINARY_PROBE 8192
 
 /* ---------- text primitives (jfind/text.ts) ---------- */
@@ -931,6 +937,12 @@ static void *dispatch_worker(void *arg) {
         double u[3] = {0, 0, 0};
         j->answers = d->env->judge(d->env, j->state, j->questions, d->stop, u, &j->error);
         j->ms = now_ms_f() - t0;
+        /* a judge the abort ended reaches nothing: the call is over */
+        if (!j->answers && *d->stop) {
+            free(j->error);
+            j->error = NULL;
+            continue;
+        }
         if (!j->answers && !j->error) j->error = xstrdup("judgment failed");
         pthread_mutex_lock(&d->mu);
         for (int k = 0; k < 3; k++) d->usage[k] += u[k];
@@ -1130,6 +1142,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     pthread_t wt;
     bool wt_ok = pthread_create(&wt, NULL, watchdog, &w) == 0;
     double started = w.t0;
+    char *phase = xstrdup("lexical scan"); /* the phase the deadline interrupts, named when nothing was verified before it */
 
     fstats_t st;
     memset(&st, 0, sizeof st);
@@ -1220,8 +1233,17 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         free(batch);
         vec_push(&jobs, j);
     }
+    free(phase);
+    phase = xasprintf("filename ranking 0/%zu", ranked.n);
     dispatch(env, &jobs, &w.stop, &st);
-    if (w.stop) goto stopped;
+    if (w.stop) {
+        size_t named = 0;
+        for (size_t i = 0; i < jobs.n; i++)
+            if (jobs.v[i].answers || jobs.v[i].error) named += jobs.v[i].items.n;
+        free(phase);
+        phase = xasprintf("filename ranking %zu/%zu", named, ranked.n);
+        goto stopped;
+    }
     for (size_t i = 0; i < jobs.n; i++) {
         job_t *j = &jobs.v[i];
         if (!j->answers) stat_fail(&st, "filenames", j->error);
@@ -1261,6 +1283,8 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         for (size_t k = 0; k < selected.n && !dup; k++) dup = selected.v[k] == ranked.v[i].node;
         if (!dup) vec_push(&selected, ranked.v[i].node);
     }
+    free(phase);
+    phase = xasprintf("reading %zu files", selected.n);
     for (size_t s = 0; s < selected.n; s++) {
         const fentry_t *e = &entries.v[selected.v[s]];
         int fd = open(e->path, O_RDONLY | O_CLOEXEC);
@@ -1382,6 +1406,8 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         vec_push(&jobs, j);
     }
     st.map_cards += (int64_t)cards.n;
+    free(phase);
+    phase = xasprintf("scoring %zu passage sketches across %zu files", cards.n, files.n);
     dispatch(env, &jobs, &w.stop, &st);
     if (w.stop) goto stopped;
     for (size_t i = 0; i < jobs.n; i++) {
@@ -1466,13 +1492,17 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         }
         vec_free(&ps);
     }
-    (void)chosen_files;
     vec_free(&cands);
+    free(phase);
+    phase = xasprintf("verifying %zu passages in %zu files", nsurv, chosen_files);
     dispatch(env, &jobs, &w.stop, &st);
-    if (w.stop) goto stopped;
+    if (w.aborted) goto stopped;
+    /* the deadline during verification ends the search with the hits verified so far */
+    bool deadline_cut = w.timed_out;
     VEC(fresult_t) results = {0};
     for (size_t i = 0; i < jobs.n; i++) {
         job_t *j = &jobs.v[i];
+        if (!j->answers && !j->error) continue; /* stopped by the deadline before it answered */
         if (!j->answers) {
             stat_fail(&st, "verification", j->error);
             continue;
@@ -1513,6 +1543,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         }
     }
     jobs_free(&jobs);
+    int64_t verified_windows = st.windows_judged;
 
     /* hits */
     json_t *hits_j = json_arr();
@@ -1532,7 +1563,17 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     }
     st.file_bytes += sketch_bytes;
     st.files_read += (int64_t)files.n - (int64_t)results.n;
-    const char *coverage = st.failed == 0 ? "complete" : st.failed == st.requests ? "unavailable" : "partial";
+    if (deadline_cut && !hit_order.n) {
+        vec_free(&hit_order);
+        for (size_t i = 0; i < results.n; i++) {
+            for (size_t k = 0; k < results.v[i].heat.n; k++) free(results.v[i].heat.v[k].snippet);
+            vec_free(&results.v[i].heat);
+        }
+        vec_free(&results);
+        json_free(hits_j);
+        goto stopped_no_jobs;
+    }
+    const char *coverage = st.failed > 0 && st.failed == st.requests ? "unavailable" : st.failed > 0 || deadline_cut ? "partial" : "complete";
     double elapsed = now_ms_f() - started;
     sb_t b = SB_INIT;
     char *where = scope ? xasprintf(" in %s", scope) : xstrdup("");
@@ -1543,7 +1584,13 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
                    query, where, (long long)st.requests);
     else if (!hit_order.n) sb_appendf(&b, "no hits for \"%s\"%s (\xcf\x84 %s)", query, where, thr);
     else sb_appendf(&b, "%zu hit(s) for \"%s\"%s (\xcf\x84 %s), strongest first", hit_order.n, query, where, thr);
-    if (str_eq(coverage, "partial"))
+    if (deadline_cut) {
+        char *d = fmt_duration(FIND_TIMEOUT_MS);
+        sb_appendf(&b, "\npartial: timed out after %s with %lld of %zu passages verified; unverified files may still match. Narrow `path` for a complete search.",
+                   d, (long long)verified_windows, nsurv);
+        free(d);
+    }
+    if (str_eq(coverage, "partial") && st.failed > 0)
         sb_appendf(&b, "\npartial: %lld of %lld judge requests failed; unjudged files may still match", (long long)st.failed,
                    (long long)st.requests);
     if (hit_order.n) sb_putc(&b, '\n');
@@ -1645,6 +1692,12 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     for (size_t i = 0; i < st.failures.n; i++) json_push_str(fj, st.failures.v[i]);
     json_set(sj, "failures", fj);
     json_set(out->details, "stats", sj);
+    if (deadline_cut) {
+        json_t *tj = json_obj();
+        json_set_int(tj, "verified", verified_windows);
+        json_set_int(tj, "passages", (int64_t)nsurv);
+        json_set(out->details, "timeout", tj);
+    }
     json_set_num(out->details, "elapsedMs", elapsed);
     json_set_str(out->details, "cwd", env->cwd);
     if (scope) json_set_str(out->details, "scopePath", scope);
@@ -1660,14 +1713,16 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     goto finish;
 stopped:
     jobs_free(&jobs);
-    if (w.timed_out) {
+stopped_no_jobs:
+    if (!w.aborted) {
         char *d = fmt_duration(FIND_TIMEOUT_MS);
-        tool_result_error(out, "find timed out after %s", d);
+        tool_result_error(out, "find timed out after %s at \"%s\", before any hit was verified. Narrow `path` to a smaller tree, or use grep.", d, phase);
         free(d);
     } else {
         tool_result_error(out, "Operation aborted");
     }
 finish:
+    free(phase);
     pthread_mutex_lock(&w.mu);
     w.done = true;
     pthread_cond_signal(&w.cv);

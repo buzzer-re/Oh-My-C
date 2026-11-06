@@ -98,7 +98,7 @@ typedef struct tool_env {
     todo_state_t todo;
     tool_ui_t ui;
     json_t *settings;          /* borrowed effective settings */
-    char *edit_mode;           /* "hashline" | "replace" | "patch" | "apply_patch" | "sloppy" */
+    char *edit_mode;           /* "hashline" | "replace" | "patch" | "apply_patch" | "sloppy" | "none" (no edit tool, no anchors) */
     struct artifact_store *artifacts; /* session artifacts (artifact://<id>; shared with subagents; NULL: none) */
     int subagent_depth;
     bool can_prompt_user;      /* a UI can answer `ask` (interactive mode) */
@@ -134,6 +134,10 @@ typedef struct tool_env {
     json_t *(*eval_bridge)(struct tool_env *env, const char *name, const json_t *args, int64_t cell,
                            volatile sig_atomic_t *cancel, char **err);
     hmap_t read_repeats;       /* read repeat tracker: selector -> identical-output count (read.c) */
+    /* wait's IdleStreak: back-to-back waits that each elapsed with nothing new (write_bash.c) */
+    bool wait_idle;
+    int wait_idle_rung;
+    int64_t wait_idle_ended, wait_idle_waited_ms;
     pthread_mutex_t mu;
 } tool_env_t;
 
@@ -165,6 +169,7 @@ agent_tool_t *tool_write_new(tool_env_t *env);
 agent_tool_t *tool_edit_new(tool_env_t *env);
 agent_tool_t *tool_bash_new(tool_env_t *env);
 agent_tool_t *tool_wait_new(tool_env_t *env);
+const char *tool_edit_mode_setting(void); /* edit.mode / PI_EDIT_VARIANT: an edit mode, or "none" (no edit tool, bash stays) */
 /* render settled background jobs ([{jobId,label,result}]) as the async-result notice (owned) */
 char *jobs_render_results(const json_t *jobs);
 agent_tool_t *tool_grep_new(tool_env_t *env);
@@ -200,6 +205,8 @@ bool agent_def_read_only(const json_t *def);
 int github_resolve(tool_env_t *env, const char *url, char **content, bool *markdown, char **err);
 /* ssh://[user@]host[:port]/path (ssh.c): remote UTF-8 text (<=1 MiB) or one-level dir listing; bare ssh:// lists hosts */
 int ssh_fetch(tool_env_t *env, const char *url, char **content, size_t *len, bool *is_dir, char **err);
+/* the same, with *missing set when nothing exists at the path (a new file) */
+int ssh_fetch_ex(tool_env_t *env, const char *url, char **content, size_t *len, bool *is_dir, bool *missing, char **err);
 int ssh_store(tool_env_t *env, const char *url, const char *data, size_t len, char **err);
 bool ssh_available(void);
 char *ssh_quote(const char *s); /* POSIX single-quote */

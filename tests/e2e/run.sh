@@ -140,8 +140,8 @@ check "todo tool"      "Remaining items (2)"  "$B" --model mock/mock-1 -p "todo:
 # tool output parity (omp OutputSink): middle elision + session artifact, column cap, sanitizing, exit notice
 LASTMSG='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; m=[x for x in r[-1]["messages"] if x.get("role")=="tool"][-1]; c=m["content"]; print(c if isinstance(c,str) else "".join(b.get("text","") for b in c), end="")'
 "$B" --model mock/mock-1 --session-dir "$T/sink" -p "bash:seq 1 30000" >/dev/null 2>&1 </dev/null
-check "sink elision"   "[Showing lines 1-4720 and 25283-30001 of 30001; 20,562 middle lines (114.9KB) elided. Read artifact://0 for full output]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-check "sink marker"    "4317"$'\n'"43"$'\n'"[…20562ln elided…]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "sink elision"   "[Showing lines 1-4317 and 24882-30000 of 30000; 20,564 middle lines (114.9KB) elided. Read artifact://0 for full output]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "sink marker"    "4317"$'\n'"[…20564ln elided…]"$'\n'"24882"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 check "sink artifact"  "168894"  bash -c "wc -c < \"\$(ls $T/sink/*/0.bash.log)\""
 "$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://0:raw:29999-29999" >/dev/null 2>&1 </dev/null
 check "artifact read"  "29999"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
@@ -295,6 +295,11 @@ rm -f "$T/agent/config.yml"
 printf "find:\n  enabled: on\n" > "$T/agent/config.yml"
 mkdir -p fnd && printf 'int parse_token(const char *raw) {\n  return raw[0];\n}\n' > fnd/tok.c && printf 'int other(void) { return 1; } /* FAILJUDGE */\n' > fnd/fail.c
 check "find hits"      $'1 hit(s) for "where are tokens parsed" in fnd/ (\xcf\x84 0.20), strongest first\npartial: 2 of 4 judge requests failed; unjudged files may still match\n\nfnd/tok.c  1.00  3 lines judged\n  fnd/tok.c:1-3  1.00  int parse_token(const char *raw) {\n\nlisted 2 \xc2\xb7 judged 2 \xc2\xb7 read 2 files' "$B" --model mock/mock-1 -p 'call:find:{"query":"where are tokens parsed","grep_keywords":["parse_token"],"path":"fnd"}'
+# find's deadline: the hits verified before it come back marked partial; none verified is an error naming the phase
+mkdir -p fnd2 && printf 'int parse_token(const char *raw) {\n  return raw[0];\n}\n' > fnd2/tok.c && printf 'int parse_tokens_slow(void) { return 1; } /* STALLVERIFY */\n' > fnd2/stall.c
+check "find deadline"  "partial: timed out after 3.0s with 1 of 2 passages verified; unverified files may still match. Narrow \`path\` for a complete search."  env OMC_FIND_TIMEOUT_MS=3000 "$B" --model mock/mock-1 -p 'call:find:{"query":"where are tokens parsed","grep_keywords":["parse_token"],"path":"fnd2"}'
+rm -f fnd2/tok.c
+check "find deadline, no hits" 'find timed out after 2.0s at "verifying 1 passages in 1 files", before any hit was verified. Narrow `path` to a smaller tree, or use grep.'  env OMC_FIND_TIMEOUT_MS=2000 "$B" --model mock/mock-1 -p 'call:find:{"query":"where are tokens parsed","grep_keywords":["parse_token"],"path":"fnd2"}'
 check "find empty"     '`query` must be a non-empty description'  "$B" --model mock/mock-1 -p 'call:find:{"query":"  ","grep_keywords":[]}'
 rm -f "$T/agent/config.yml"
 check "ast_edit stage" "(proposed) 1 replacement" "$B" --model mock/mock-1 -p 'call:ast_edit:{"ops":[{"pat":"console.log($$$X)","out":"log($$$X)"}],"paths":["s.ts"]}'
@@ -310,6 +315,10 @@ check "ssh hosts"      "[box](ssh://box/)"  env PATH="$ROOT/tests/e2e/bin:$PATH"
 check "ssh read sel"   "2:remote two"       env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://box$T/remote.txt:2"
 check "ssh write"      "Successfully wrote 7 bytes to ssh://box"    env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/w.txt\",\"content\":\"via ssh\"}"
 check "ssh write file" "via ssh"            cat "$T/sub/w.txt"
+# a read projection written to a new remote file has no source to discard; over a longer one it is refused
+SSHPROJ='remote one\n\n[Showing lines 1-1 of 60. Use :2 to continue]'
+check "ssh projection new" "Successfully wrote"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/newproj.txt\",\"content\":\"$SSHPROJ\"}"
+check "ssh projection over" "Refusing to overwrite"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/remote.txt\",\"content\":\"$SSHPROJ\"}"
 check "ssh edit refused" 'is written through `write`, not edited'  env PI_EDIT_VARIANT=replace PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:edit:{\"path\":\"ssh://box$T/sub/w.txt\",\"old_string\":\"via ssh\",\"new_string\":\"replaced over ssh\"}"
 check "ssh file kept"  "via ssh"            cat "$T/sub/w.txt"
 check "ssh override"   "overrides are not allowed"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://me@box/etc/hosts"
@@ -363,9 +372,15 @@ check "queue steer all"     "slow:1.5:x,s1,s2,f1 / 3"  env B="$B" ROOT="$ROOT" b
 check "async bash"     "Backgrounded as job bg_1"  bash -c "'$B' --model mock/mock-1 --mode json -p 'call:bash:{\"command\":\"sleep 1; echo bgdone\",\"async\":true}' | grep -o 'Backgrounded as job bg_1'"
 grep -q "Background job bg_1 has completed" "$T/req.jsonl" && echo "   ok  async delivered" || { echo "   FAIL async delivered"; fail=1; }
 check "wait nothing"   "Nothing to wait for"  "$B" --model mock/mock-1 -p 'call:wait:{}'
+check "edit none" "edit none ok"  python3 -I "$ROOT/tests/e2e/edit_none.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/en"
+check "shell scope" "shell scope ok"  python3 -I "$ROOT/tests/e2e/shell_scope.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ss"
+# wait: idle ladder and its nudge; settle window, progress notes vs direct messages, no broadcast from a subagent
+check "wait ladder" "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl1" ladder
+check "wait peers"  "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl2" peers
 # background jobs carry the call's intent: proc://, wait, /jobs; /jobs full requests the widget role's caption
 check "jobs intent" "jobs intent ok"  python3 -I "$ROOT/tests/e2e/jobs_intent.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ji"
 # lsp: payload "null" stays JSON null; reload restarts rust-analyzer when a new crate appeared
+check "lsp sync" "lsp sync ok"  python3 -I "$ROOT/tests/e2e/lsp_sync.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ls"
 check "lsp reload" "lsp reload ok"  python3 -I "$ROOT/tests/e2e/lsp_reload.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/lr"
 # automatic session title (interactive only, like omp's autoTitle): fork side request returns a card title
 : > "$T/req.jsonl"

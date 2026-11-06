@@ -273,6 +273,21 @@ static void test_pipeline(void) {
     free(png);
     /* fast path: in bounds and under budget/4 -> untouched bytes, same mime */
     png = gradient_png(400, 300, false, &n);
+    { /* omp image-resize.test: a strip no uniform scale can lift over the floor is padded, not stretched */
+        img_t strip = {.w = 4000, .h = 10, .px = xcalloc((size_t)4000 * 10, 4)};
+        memset(strip.px, 0x80, (size_t)4000 * 10 * 4);
+        size_t sl = 0;
+        uint8_t *sp = img_png_encode(&strip, -1, &sl);
+        img_resized_t t = {0};
+        CHECK(img_resize_image(sp, sl, NULL, NULL, &t, NULL) == 0 && t.padded && t.w == 1568 && t.h == 200 && t.content_w == 1568 && t.content_h == 4 && t.pad_top == 98,
+              "padded strip");
+        char *tn = img_dimension_note(&t);
+        CHECK(tn && !strcmp(tn, "[Image: original 4000x10, displayed at 1568x200 with padding. Subtract padding offset (0, 98), then multiply x by 2.55 and y by 2.50 to map to original image coordinates.]"), "padded note: %s", tn ? tn : "");
+        free(tn);
+        img_resized_free(&t);
+        free(sp);
+        img_free(&strip);
+    }
     CHECK(img_resize_image(png, n, NULL, NULL, &r, NULL) == 0 && !r.was_resized && r.len == n && !memcmp(r.buf, png, n) &&
               !strcmp(r.mime, "image/png") && !img_dimension_note(&r),
           "fast path");

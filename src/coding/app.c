@@ -1374,7 +1374,9 @@ static tool_gate_t hook_approve_tool(void *ud, agent_t *ag, const json_t *call, 
     char *status = approval_format_prompt(&c, r.reason);
     int grant = 0;
     bool always = false;
+    agents_user_wait(a->env, true);
     int answer = a->env->ui.approve(a->env->ui.ud, json_get_str(call, "id"), name, status, &p, &grant, &always, &ag->cancel);
+    agents_user_wait(a->env, false);
     free(status);
     if (answer == APPROVE_SESSION && scoped) approval_session_grant(sid, scope_key);
     else if (answer == APPROVE_GRANT && grant >= 0 && (size_t)grant < p.ngrants)
@@ -3286,6 +3288,17 @@ json_t *app_user_bash_run(app_t *a, const char *cmd, bool exclude, proc_output_c
     json_set_int(m, "totalBytes", sum.total_bytes);
     json_set_int(m, "outputLines", sum.output_lines);
     json_set_int(m, "outputBytes", sum.output_bytes);
+    if (sum.elided_bytes >= 0) json_set_int(m, "elidedBytes", sum.elided_bytes);
+    if (sum.elided_lines >= 0) json_set_int(m, "elidedLines", sum.elided_lines);
+    if (sum.column_dropped_bytes > 0) json_set_int(m, "columnDroppedBytes", sum.column_dropped_bytes);
+    if (sum.column_truncated_lines > 0) json_set_int(m, "columnTruncatedLines", sum.column_truncated_lines);
+    if (sum.column_first > 0) {
+        json_t *range = json_obj();
+        json_set_int(range, "first", sum.column_first);
+        json_set_int(range, "last", sum.column_last);
+        json_set(m, "columnTruncatedRange", range);
+    }
+    if (sum.column_max > 0) json_set_int(m, "columnMax", sum.column_max);
     out_summary_free(&sum);
     proc_result_free(&r);
     return m;
@@ -3293,7 +3306,8 @@ json_t *app_user_bash_run(app_t *a, const char *cmd, bool exclude, proc_output_c
 
 void app_record_bash(app_t *a, const json_t *result) {
     json_t *m = json_clone(result);
-    static const char *const counters[] = {"totalLines", "totalBytes", "outputLines", "outputBytes"};
+    static const char *const counters[] = {"totalLines", "totalBytes", "outputLines", "outputBytes", "elidedBytes", "elidedLines",
+                                           "columnDroppedBytes", "columnTruncatedLines", "columnTruncatedRange", "columnMax"};
     for (size_t i = 0; i < ARRAY_LEN(counters); i++) json_del(m, counters[i]);
     if (a->session) session_append_message(a->session, m);
     if (!json_get_bool(m, "excludeFromContext", false)) {

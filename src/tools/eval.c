@@ -592,7 +592,7 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     }
     const char *e = json_get_str(result, "error");
     bool failed = e && !timed_out && !aborted && result;
-    if (failed) {
+    if (failed || (e && timed_out)) { /* an interrupted cell's error stays in its output */
         if (stream.len && stream.s[stream.len - 1] != '\n') sb_putc(&stream, '\n');
         sb_append(&stream, e);
     }
@@ -601,7 +601,14 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     out_sink_push(rawsink, stream.s ? stream.s : "", stream.len);
     sb_free(&stream);
     out_summary_t cs, rs;
-    out_sink_dump(cellsink, NULL, &cs);
+    /* the timeout leads the cell's output as its sink notice (kernel-session-registry.ts timeoutAnnotation) */
+    char *tnote = !timed_out ? NULL
+                  : killed   ? xstrdup("eval cell timed out and the kernel was unresponsive to interrupt; the kernel has been killed and "
+                                       "will be recreated on the next call.")
+                             : xasprintf("eval cell timed out after %llds; kernel interrupted but remains running. Reset the kernel via "
+                                         "{ reset: true } if state appears corrupted.", (long long)MAX(1, (tms + 500) / 1000));
+    out_sink_dump(cellsink, tnote, &cs);
+    free(tnote);
     out_sink_dump(rawsink, NULL, &rs);
     out_sink_free(cellsink);
     out_sink_free(rawsink);
@@ -623,13 +630,6 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         else sb_append(&b, "(no output)");
     }
     if (timed_out) {
-        if (b.len && b.s[b.len - 1] != '\n') sb_putc(&b, '\n');
-        if (killed)
-            sb_append(&b, "eval cell timed out and the kernel was unresponsive to interrupt; the kernel has been killed and "
-                          "will be recreated on the next call.");
-        else
-            sb_appendf(&b, "eval cell timed out after %llds; kernel interrupted but remains running. Reset the kernel via "
-                           "{ reset: true } if state appears corrupted.", (long long)MAX(1, (tms + 500) / 1000));
         out->is_error = true;
     } else if (aborted) {
         if (b.len && b.s[b.len - 1] != '\n') sb_putc(&b, '\n');

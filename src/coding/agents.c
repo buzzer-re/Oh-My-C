@@ -13,6 +13,12 @@
 #include <ctype.h>
 #include <pthread.h>
 
+typedef struct {
+    char *to;
+    bool promised;   /* progress arrived: only an explicit message answers now */
+    int64_t sent_at; /* mono_ms */
+} owed_t;
+
 typedef struct aref {
     char *id, *agent, *parent_id;
     app_t *app;     /* live session (owned for subagents, borrowed for Main) */
@@ -27,10 +33,15 @@ typedef struct aref {
     bool has_output;
     int64_t started_at, published_at, run_started;
     json_t *transcript; /* retained messages after the session is released */
-    strvec_t inbox;     /* "[mN] from: body" for the wait tool */
+    json_t *inbox;      /* IrcMessage rows queued for the wait tool */
     strvec_t pending;   /* rendered IRC texts for an idle top-level session */
-    strvec_t owed;      /* agents this one messaged during its current run */
+    VEC(owed_t) owed;   /* agents this one messaged directly and that have not answered (IrcBus.unansweredSends) */
+    strvec_t sent_run;  /* agents this one sent anything this run, progress included (IrcBus.sentSince) */
     int waiting;
+    strvec_t wait_asked;   /* with `waiting`: agents whose broadcast answers the wait */
+    strvec_t wait_watched; /* with `waiting`: the interruptible awaits hold of a wait only these agents' results end */
+    int64_t wait_since;
+    int user_waits;        /* open dialogs waiting on the user (USER_AWAIT_ID hold) */
     char *activity;
     char *job_id;
     volatile sig_atomic_t *cancel; /* running job's cancel flag */
@@ -362,6 +373,15 @@ static void progress_touch_locked(aref_t *r) {
     }
 }
 
+static void owed_clear(aref_t *r) {
+    for (size_t i = 0; i < r->owed.n; i++) free(r->owed.v[i].to);
+    r->owed.n = 0;
+}
+
+/* IrcBus.recordReply: a settled job of `agent` owned by `owner` delivers its outcome, so it answers what `owner` asked
+ * it; after progress only an explicit message does. Without g_mu. */
+static void owed_job_reply(const char *agent, const char *owner);
+
 static aref_t *find_locked(const char *id) {
     for (size_t i = 0; i < g_refs.n; i++)
         if (!g_refs.v[i]->gone && str_eq(g_refs.v[i]->id, id)) return g_refs.v[i];
@@ -397,9 +417,13 @@ __attribute__((unused)) static void ref_free(aref_t *r) {
     free(r->parent_id);
     free(r->output);
     json_free(r->transcript);
-    strvec_free(&r->inbox);
+    json_free(r->inbox);
     strvec_free(&r->pending);
-    strvec_free(&r->owed);
+    owed_clear(r);
+    vec_free(&r->owed);
+    strvec_free(&r->sent_run);
+    strvec_free(&r->wait_asked);
+    strvec_free(&r->wait_watched);
     free(r->activity);
     free(r->job_id);
     free(r);
@@ -679,7 +703,8 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
         r->lifecycle_open = true;
         if (has_observers()) lc = lifecycle_payload_locked(r, "started");
     }
-    strvec_free(&r->owed);
+    owed_clear(r);
+    strvec_free(&r->sent_run);
     pthread_mutex_unlock(&g_mu);
     if (lc) emit_obs("lifecycle", lc);
     notify_change();
@@ -998,7 +1023,10 @@ static app_t *make_child(spawn_t *sp, char **err) {
     return child;
 }
 
-static void deliver(const char *from, const char *to, const char *body, const char **outcome);
+typedef struct {
+    bool broadcast, progress, wake_relay;
+} irc_flags_t;
+static void deliver(const char *from, const char *to, const char *body, irc_flags_t fl, const char **outcome, char **err);
 
 static char *task_body_run(bgjob_t *job, void *ud, bool *failed) {
     spawn_t *sp = ud;
@@ -1071,9 +1099,10 @@ static char *task_body_run(bgjob_t *job, void *ud, bool *failed) {
     free(up);
     permit_release();
     publish_output(r, text, true, !aborted && !error);
+    owed_job_reply(r->id, r->parent_id);
     for (size_t i = 0; i + 1 < peers.n; i += 2) {
         const char *oc;
-        deliver(peers.v[i], r->id, peers.v[i + 1], &oc);
+        deliver(peers.v[i], r->id, peers.v[i + 1], (irc_flags_t){0}, &oc, NULL);
     }
     strvec_free(&peers);
     const char *status = aborted ? "aborted" : error ? "failed" : "completed";
@@ -1222,11 +1251,12 @@ char *agents_run_blocking(tool_env_t *env, const spawn_spec_t *spec, volatile si
 
 /* ---------- IRC ---------- */
 
-static char *render_irc(const char *from, const char *body, const char *reply_to, bool interrupting, bool relay) {
+static char *render_irc(const char *from, const char *body, const char *reply_to, bool progress, bool interrupting, bool relay) {
     json_t *c = json_obj();
     json_set_str(c, "from", from);
     json_set_str(c, "message", body);
     if (reply_to) json_set_str(c, "replyTo", reply_to);
+    json_set_bool(c, "progress", progress);
     json_set_bool(c, "interrupting", interrupting);
     json_set_bool(c, "relayOnStop", relay);
     char *s = prompt_render("coding-agent/prompts/system/irc-incoming.md", c);
@@ -1241,6 +1271,7 @@ typedef struct {
     aref_t *ref;
     char *from, *text;
     bool to_spawner;
+    bool relay; /* the turn's output answers `from` (relayOnStop) */
 } wake_t;
 
 static void wake_free(void *p) {
@@ -1250,8 +1281,6 @@ static void wake_free(void *p) {
     free(w);
 }
 
-static void deliver(const char *from, const char *to, const char *body, const char **outcome);
-
 static char *wake_body(bgjob_t *job, void *ud, bool *failed) {
     wake_t *w = ud;
     bool aborted;
@@ -1260,6 +1289,7 @@ static char *wake_body(bgjob_t *job, void *ud, bool *failed) {
     char *text = run_turn(w->ref, w->child, w->text, job_cancel_flag(job), &aborted, &error);
     *failed = aborted || error;
     if (w->to_spawner) publish_output(w->ref, text, false, !aborted && !error);
+    if (w->to_spawner) owed_job_reply(w->ref->id, w->from);
     char *res;
     if (w->to_spawner) {
         char *sum = render_summary(w->ref->id, w->ref->agent, aborted ? "aborted" : error ? "failed" : "completed", mono_ms() - t0,
@@ -1269,11 +1299,14 @@ static char *wake_body(bgjob_t *job, void *ud, bool *failed) {
         free(sum);
         free(hint);
     } else {
-        /* answer the sender directly */
+        /* relayWakeTurnOutput: answer the sender, unless this turn already answered or promised it an answer */
         char *t = str_trim(text);
-        if (*t) {
+        pthread_mutex_lock(&g_mu);
+        bool sent = strvec_contains(&w->ref->sent_run, w->from);
+        pthread_mutex_unlock(&g_mu);
+        if (*t && w->relay && !sent) {
             const char *oc;
-            deliver(w->ref->id, w->from, t, &oc);
+            deliver(w->ref->id, w->from, t, (irc_flags_t){.wake_relay = true}, &oc, NULL);
         }
         free(t);
         res = xstrdup("");
@@ -1283,35 +1316,101 @@ static char *wake_body(bgjob_t *job, void *ud, bool *failed) {
     return res;
 }
 
-/* deliver one message; caller does not hold g_mu */
-static void deliver(const char *from, const char *to, const char *body, const char **outcome) {
+static void owed_job_reply(const char *agent, const char *owner) {
+    pthread_mutex_lock(&g_mu);
+    aref_t *o = owner ? find_locked(owner) : NULL;
+    for (size_t i = 0; o && i < o->owed.n; i++)
+        if (str_eq(o->owed.v[i].to, agent)) {
+            if (!o->owed.v[i].promised) {
+                free(o->owed.v[i].to);
+                o->owed.v[i] = o->owed.v[--o->owed.n];
+            }
+            break;
+        }
+    pthread_mutex_unlock(&g_mu);
+}
+
+/* the records agents_take_messages can take back out of a session's queues: a peer's message, never a parent steer */
+static bool is_irc_record(const json_t *m) { return str_eq(json_get_str(m, "customType"), "irc") && json_get_obj(m, "details"); }
+
+static bool irc_record_direct(const json_t *m) {
+    const json_t *d = json_get_obj(m, "details");
+    return !json_get_bool(d, "broadcast", false) && !json_get_bool(d, "progress", false);
+}
+
+static json_t *irc_row(const char *id, const char *from, const char *to, const char *body, int64_t ts, irc_flags_t fl) {
+    json_t *m = json_obj();
+    json_set_str(m, "id", id);
+    json_set_str(m, "from", from);
+    json_set_str(m, "to", to);
+    json_set_str(m, "body", body);
+    json_set_int(m, "ts", ts);
+    if (fl.wake_relay) json_set_bool(m, "wakeRelay", true);
+    if (fl.broadcast) json_set_bool(m, "broadcast", true);
+    if (fl.progress) json_set_bool(m, "progress", true);
+    return m;
+}
+
+/* the sender's id is an ancestor's descendant: msg.from's parents reach msg.to */
+static bool from_descendant_locked(const char *from, const char *to) {
+    strvec_t seen = {0};
+    bool r = false;
+    aref_t *x = find_locked(from);
+    for (const char *id = x ? x->parent_id : NULL; id && !strvec_contains(&seen, id); id = (x = find_locked(id)) ? x->parent_id : NULL) {
+        if (str_eq(id, to)) {
+            r = true;
+            break;
+        }
+        strvec_push(&seen, id);
+    }
+    strvec_free(&seen);
+    return r;
+}
+
+/* deliver one message; caller does not hold g_mu. *outcome NULL on failure, with *err (owned, if asked) the reason. */
+static void deliver(const char *from, const char *to, const char *body, irc_flags_t fl, const char **outcome, char **err) {
+    bool quiet = fl.broadcast || fl.progress;
+    int64_t ts = now_ms();
     pthread_mutex_lock(&g_mu);
     aref_t *r = find_locked(to);
     if (!r || !r->app || r->gone || r->killed) {
+        bool known = r != NULL;
         pthread_mutex_unlock(&g_mu);
         *outcome = NULL;
+        if (err) {
+            *err = known ? xasprintf("Agent \"%s\" has no live session.", to)
+                         : xasprintf("Unknown agent \"%s\" \xE2\x80\x94 check the subagent roster or read history:// for known peers.", to);
+        }
         return;
     }
-    /* a message from `to`'s awaited peer settles that debt */
+    /* IrcBus.unansweredSends: a message back answers what `to` asked `from`; progress only promises an answer */
+    aref_t *sender = find_locked(from);
+    if (sender && !strvec_contains(&sender->sent_run, to)) strvec_push(&sender->sent_run, to);
     for (size_t i = 0; i < r->owed.n; i++)
-        if (str_eq(r->owed.v[i], from)) {
-            free(r->owed.v[i]);
+        if (str_eq(r->owed.v[i].to, from)) {
+            if (fl.progress) {
+                r->owed.v[i].promised = true;
+                break;
+            }
+            free(r->owed.v[i].to);
             r->owed.v[i] = r->owed.v[--r->owed.n];
             break;
         }
     char *mid = xasprintf("m%llu", (unsigned long long)++g_msg_seq);
-    if (r->waiting) {
-        strvec_push_own(&r->inbox, xasprintf("[%s] %s: %s", mid, from, body));
+    /* ircWaitAccepts: a pending wait consumes direct messages, and a broadcast from an agent it asked */
+    if (r->waiting && (!quiet || (!fl.progress && strvec_contains(&r->wait_asked, from)))) {
+        if (!r->inbox) r->inbox = json_arr();
+        json_push(r->inbox, irc_row(mid, from, to, body, ts, fl));
         free(mid);
         pthread_cond_broadcast(&g_cv);
         pthread_mutex_unlock(&g_mu);
         *outcome = "injected";
         return;
     }
-    free(mid);
     if (r->awaiting_assignment) {
+        free(mid);
         if (str_eq(from, r->parent_id)) {
-            strvec_push_own(&r->early_asides, render_irc(from, body, NULL, false, false));
+            strvec_push_own(&r->early_asides, render_irc(from, body, NULL, fl.progress, false, false));
             *outcome = "injected";
         } else {
             strvec_push(&r->early_peers, from);
@@ -1324,18 +1423,39 @@ static void deliver(const char *from, const char *to, const char *body, const ch
     app_t *app = r->app;
     bool running = r->running || agent_is_running(app->agent);
     if (running) {
+        bool from_parent = r->parent_id && str_eq(from, r->parent_id);
+        bool peer = r->parent_id && (fl.broadcast || (!from_parent && !from_descendant_locked(from, to)));
         pthread_mutex_unlock(&g_mu);
-        char *txt = render_irc(from, body, NULL, true, false);
-        json_t *m = msg_user_text(txt);
+        json_t *m;
+        if (from_parent && !peer) {
+            /* a parent's message steers: the template, not the incoming envelope; not a record a wait can take */
+            json_t *c = json_obj();
+            json_set_str(c, "from", from);
+            json_set_str(c, "message", body);
+            char *txt = prompt_render("coding-agent/prompts/steering/parent-irc.md", c);
+            json_free(c);
+            m = msg_user_text(txt);
+            free(txt);
+            json_set_str(m, "attribution", "agent");
+        } else {
+            /* a broadcast leg or progress note asks nothing: a busy recipient reads it at its next step boundary */
+            char *txt = render_irc(from, body, NULL, fl.progress, !quiet, false);
+            m = msg_user_text(txt);
+            free(txt);
+            json_t *d = irc_row(mid, from, to, body, ts, fl);
+            json_set(m, "details", d);
+        }
         json_set_bool(m, "synthetic", true);
-        json_set_str(m, "customType", "irc");
-        agent_steer(app->agent, m);
-        free(txt);
+        if (!(from_parent && !peer)) json_set_str(m, "customType", "irc");
+        if (quiet) agent_aside(app->agent, m);
+        else agent_steer(app->agent, m);
+        free(mid);
         *outcome = "injected";
         return;
     }
+    free(mid);
     if (r->is_main) {
-        char *txt = render_irc(from, body, NULL, false, false);
+        char *txt = render_irc(from, body, NULL, fl.progress, false, false);
         strvec_push_own(&r->pending, txt);
         void (*wake)(void *) = app->wake;
         void *wud = app->wake_ud;
@@ -1349,6 +1469,7 @@ static void deliver(const char *from, const char *to, const char *body, const ch
     if (!spawner || !spawner->env || !spawner->env->jobs) {
         pthread_mutex_unlock(&g_mu);
         *outcome = NULL;
+        if (err) *err = xasprintf("Agent \"%s\" has no live session.", to);
         return;
     }
     const char *spawner_id = NULL;
@@ -1358,8 +1479,10 @@ static void deliver(const char *from, const char *to, const char *body, const ch
     w->child = app;
     w->ref = r;
     w->from = xstrdup(from);
-    w->to_spawner = str_eq(from, spawner_id);
-    w->text = render_irc(from, body, NULL, false, true);
+    /* relays, broadcast legs and progress notes draw no automatic answer */
+    w->relay = !fl.wake_relay && !quiet;
+    w->to_spawner = !quiet && !fl.wake_relay && str_eq(from, spawner_id);
+    w->text = render_irc(from, body, NULL, fl.progress, false, w->relay);
     r->running = true; /* claimed before the job thread starts */
     char *id = xstrdup(r->id);
     pthread_mutex_unlock(&g_mu);
@@ -1370,22 +1493,36 @@ static void deliver(const char *from, const char *to, const char *body, const ch
     *outcome = "woken";
 }
 
-char *agents_send(tool_env_t *env, const char *to, const char *body, bool *is_error) {
+const char *agents_id_of_env(tool_env_t *env) { return env_id(env); }
+
+char *agents_send(tool_env_t *env, const char *to, const char *body, bool progress, bool *is_error) {
     *is_error = true;
     const char *self = env_id(env);
     if (!self) return xstrdup("Peer messaging is unavailable in this session.");
     char *from = xstrdup(self);
     char *dest = str_trim(to ? to : "");
+    char *trimmed = str_trim(body ? body : "");
     char *res = NULL;
     if (!*dest) res = xstrdup("A recipient is required.");
-    else if (!body || !*body) res = xstrdup("agent:// messages require non-empty content.");
+    else if (progress && str_eq(dest, "all")) res = xstrdup("agent://all broadcasts cannot be ?progress updates.");
+    else if (!*trimmed) res = xstrdup("agent:// messages require non-empty content.");
     else if (str_eq(dest, from)) res = xstrdup("Cannot send a message to yourself.");
+    free(trimmed);
+    bool all = str_eq(dest, "all");
+    if (!res && all) {
+        /* a subagent's broadcast wakes every live peer for news that is almost never theirs */
+        pthread_mutex_lock(&g_mu);
+        aref_t *me = find_locked(from);
+        bool is_main = me && me->is_main;
+        pthread_mutex_unlock(&g_mu);
+        if (!is_main) res = xstrdup("Only the main agent can broadcast. Message the one agent that can answer via `agent://<id>`.");
+    }
     if (res) {
         free(from);
         free(dest);
         return res;
     }
-    if (str_eq(dest, "all")) {
+    if (all) {
         strvec_t targets = {0};
         pthread_mutex_lock(&g_mu);
         for (size_t i = 0; i < g_refs.n; i++)
@@ -1396,9 +1533,12 @@ char *agents_send(tool_env_t *env, const char *to, const char *body, bool *is_er
         sb_t rows = SB_INIT;
         for (size_t i = 0; i < targets.n; i++) {
             const char *oc;
-            deliver(from, targets.v[i], body, &oc);
+            char *err = NULL;
+            deliver(from, targets.v[i], body, (irc_flags_t){.broadcast = true}, &oc, &err);
             if (oc) ok++;
-            sb_appendf(&rows, "\n- %s: %s", targets.v[i], oc ? oc : "failed — not running");
+            if (oc) sb_appendf(&rows, "\n- %s: %s", targets.v[i], oc);
+            else sb_appendf(&rows, "\n- %s: failed \xE2\x80\x94 %s", targets.v[i], err ? err : "not running");
+            free(err);
         }
         if (!targets.n) sb_append(&b, "No live peers to broadcast to.");
         else sb_appendf(&b, "Broadcast delivered to %zu of %zu peer(s).", ok, targets.n);
@@ -1410,68 +1550,175 @@ char *agents_send(tool_env_t *env, const char *to, const char *body, bool *is_er
         free(dest);
         return sb_detach(&b);
     }
-    const char *oc;
-    deliver(from, dest, body, &oc);
-    if (oc) {
+    /* the send's mark is taken before delivery: a reply sent while this is delivered still answers it */
+    if (!progress) {
         pthread_mutex_lock(&g_mu);
         aref_t *me = find_locked(from);
-        if (me && !strvec_contains(&me->owed, dest)) strvec_push(&me->owed, dest);
+        if (me) {
+            size_t i = 0;
+            while (i < me->owed.n && !str_eq(me->owed.v[i].to, dest)) i++;
+            if (i == me->owed.n) vec_push(&me->owed, ((owed_t){.to = xstrdup(dest)}));
+            me->owed.v[i].promised = false;
+            me->owed.v[i].sent_at = mono_ms();
+        }
         pthread_mutex_unlock(&g_mu);
-        *is_error = false;
-        res = str_eq(oc, "woken") ? xasprintf("Delivered to %s (was idle; woken).", dest) : xasprintf("Delivered to %s.", dest);
-    } else {
-        res = xasprintf("Failed: %s is not running.", dest);
     }
+    const char *oc;
+    char *err = NULL;
+    deliver(from, dest, body, (irc_flags_t){.progress = progress}, &oc, &err);
+    if (oc) {
+        *is_error = false;
+        res = xasprintf("Delivered to %s.", dest);
+    } else {
+        pthread_mutex_lock(&g_mu);
+        aref_t *me = find_locked(from);
+        for (size_t i = 0; me && i < me->owed.n; i++)
+            if (str_eq(me->owed.v[i].to, dest)) {
+                free(me->owed.v[i].to);
+                me->owed.v[i] = me->owed.v[--me->owed.n];
+                break;
+            }
+        pthread_mutex_unlock(&g_mu);
+        res = xasprintf("Failed: %s is not running. %s", dest, err ? err : "");
+        char *t = str_trim(res); /* trimEnd */
+        free(res);
+        res = t;
+    }
+    free(err);
     free(from);
     free(dest);
     return res;
 }
 
-char *agents_take_message(tool_env_t *env) {
-    const char *self = env_id(env);
-    if (!self) return NULL;
-    char *m = NULL;
-    pthread_mutex_lock(&g_mu);
-    aref_t *r = find_locked(self);
-    if (r && r->inbox.n) {
-        m = r->inbox.v[0];
-        memmove(r->inbox.v, r->inbox.v + 1, (r->inbox.n - 1) * sizeof(char *));
-        r->inbox.n--;
-    }
-    pthread_mutex_unlock(&g_mu);
-    return m;
+static int cmp_irc_ts(const void *a, const void *b) {
+    const json_t *x = *(const json_t *const *)a, *y = *(const json_t *const *)b;
+    int64_t tx = json_get_int(x, "ts", 0), ty = json_get_int(y, "ts", 0);
+    if (tx != ty) return tx < ty ? -1 : 1;
+    /* mN ids number sends within one millisecond */
+    const char *ix = json_get_str(x, "id"), *iy = json_get_str(y, "id");
+    size_t lx = ix ? strlen(ix) : 0, ly = iy ? strlen(iy) : 0;
+    if (lx != ly) return lx < ly ? -1 : 1;
+    return strcmp(ix ? ix : "", iy ? iy : "");
 }
 
-void agents_wait_enter(tool_env_t *env, bool on) {
+json_t *agents_take_messages(tool_env_t *env) {
+    const char *self = env_id(env);
+    if (!self) return NULL;
+    pthread_mutex_lock(&g_mu);
+    aref_t *r = find_locked(self);
+    json_t *rows = r && r->inbox && json_len(r->inbox) ? r->inbox : NULL;
+    if (rows) r->inbox = NULL;
+    app_t *app = r ? r->app : NULL;
+    pthread_mutex_unlock(&g_mu);
+    if (app && app->agent) {
+        json_t *recs = agent_take_records(app->agent, is_irc_record, rows ? NULL : irc_record_direct);
+        const json_t *m;
+        json_arr_foreach(recs, i, m) {
+            if (!rows) rows = json_arr();
+            json_push(rows, json_clone(json_get_obj(m, "details")));
+        }
+        json_free(recs);
+    }
+    if (!rows) return NULL;
+    /* oldest first */
+    size_t n = json_len(rows);
+    json_t **v = xcalloc(n, sizeof *v);
+    for (size_t i = 0; i < n; i++) v[i] = json_clone(json_at(rows, i));
+    qsort(v, n, sizeof *v, cmp_irc_ts);
+    json_free(rows);
+    rows = json_arr();
+    for (size_t i = 0; i < n; i++) json_push(rows, v[i]);
+    free(v);
+    return rows;
+}
+
+void agents_wait_enter(tool_env_t *env, const strvec_t *asked, const strvec_t *watched) {
     const char *self = env_id(env);
     if (!self) return;
     pthread_mutex_lock(&g_mu);
     aref_t *r = find_locked(self);
-    if (r) r->waiting += on ? 1 : -1;
-    if (r && r->waiting < 0) r->waiting = 0;
+    if (r) {
+        r->waiting++;
+        strvec_free(&r->wait_asked);
+        strvec_free(&r->wait_watched);
+        for (size_t i = 0; asked && i < asked->n; i++) strvec_push(&r->wait_asked, asked->v[i]);
+        for (size_t i = 0; watched && i < watched->n; i++) strvec_push(&r->wait_watched, watched->v[i]);
+        r->wait_since = mono_ms();
+    }
     pthread_mutex_unlock(&g_mu);
 }
 
-int agents_reply_state(tool_env_t *env, char **who) {
-    *who = NULL;
+void agents_wait_leave(tool_env_t *env) {
     const char *self = env_id(env);
-    if (!self) return 0;
-    int st = 0;
-    sb_t b = SB_INIT;
+    if (!self) return;
     pthread_mutex_lock(&g_mu);
-    aref_t *me = find_locked(self);
-    for (size_t i = 0; me && i < me->owed.n; i++) {
-        aref_t *p = find_locked(me->owed.v[i]);
-        if (p && p->running) st = 1;
-    }
-    if (me && st == 0 && me->owed.n) {
-        st = 2;
-        for (size_t i = 0; i < me->owed.n; i++) sb_appendf(&b, "%s`%s`", i ? ", " : "", me->owed.v[i]);
+    aref_t *r = find_locked(self);
+    if (r && r->waiting > 0) r->waiting--;
+    if (r && !r->waiting) {
+        strvec_free(&r->wait_asked);
+        strvec_free(&r->wait_watched);
     }
     pthread_mutex_unlock(&g_mu);
-    if (st == 2) *who = sb_detach(&b);
-    else sb_free(&b);
-    return st;
+}
+
+void agents_user_wait(tool_env_t *env, bool on) {
+    const char *self = env_id(env);
+    if (!self) return;
+    pthread_mutex_lock(&g_mu);
+    aref_t *r = find_locked(self);
+    if (r) r->user_waits = on ? r->user_waits + 1 : MAX(0, r->user_waits - 1);
+    pthread_mutex_unlock(&g_mu);
+}
+
+/* AgentAwaits.#reaches: whether `id` finishes only after `target` does */
+static bool await_reaches_locked(const char *id, const char *target, strvec_t *path) {
+    if (str_eq(id, target)) return true;
+    if (strvec_contains(path, id)) return false;
+    aref_t *r = find_locked(id);
+    if (!r || !r->waiting || !r->wait_watched.n) return false;
+    strvec_push(path, id);
+    bool all = true;
+    for (size_t i = 0; i < r->wait_watched.n && all; i++) all = await_reaches_locked(r->wait_watched.v[i], target, path);
+    free(path->v[--path->n]);
+    return all;
+}
+
+/* AgentAwaits.blocksOn: `agent` cannot act on a message `target` sent at `sent_at` until `target` finishes */
+static bool await_blocks_locked(aref_t *agent, const char *target, int64_t sent_at) {
+    if (!agent->waiting || !agent->wait_watched.n || agent->wait_since < sent_at) return false; /* interruptible */
+    strvec_t path = {0};
+    strvec_push(&path, agent->id);
+    bool all = true;
+    for (size_t i = 0; i < agent->wait_watched.n && all; i++) all = await_reaches_locked(agent->wait_watched.v[i], target, &path);
+    strvec_free(&path);
+    return all;
+}
+
+void agents_pending_replies(tool_env_t *env, agents_replies_t *out) {
+    memset(out, 0, sizeof *out);
+    const char *self = env_id(env);
+    if (!self) return;
+    pthread_mutex_lock(&g_mu);
+    aref_t *me = find_locked(self);
+    int64_t since = me && me->app && me->app->agent ? me->app->agent->run_started_mono : 0;
+    for (size_t i = 0; me && i < me->owed.n; i++) {
+        const owed_t *o = &me->owed.v[i];
+        if (o->sent_at < since) continue;
+        aref_t *p = find_locked(o->to);
+        bool session = p && p->app && !p->gone && !p->killed;
+        if (session && await_blocks_locked(p, self, o->sent_at)) strvec_push(&out->blocked, o->to);
+        else if (session && p->user_waits) strvec_push(&out->on_user, o->to);
+        else if (session && (o->promised || ref_live_running(p))) strvec_push(&out->from, o->to);
+        else strvec_push(&out->stopped, o->to);
+    }
+    pthread_mutex_unlock(&g_mu);
+}
+
+void agents_replies_free(agents_replies_t *r) {
+    strvec_free(&r->from);
+    strvec_free(&r->blocked);
+    strvec_free(&r->on_user);
+    strvec_free(&r->stopped);
 }
 
 char *agents_take_pending_for(app_t *a) {

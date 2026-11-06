@@ -49,7 +49,8 @@ static bool json_arr_has_str(const json_t *arr, const char *s) {
 static const char *const LABELS[][2] = {
     {"parallel", "Parallel"},   {"perplexity", "Perplexity"}, {"gemini", "Gemini"},       {"anthropic", "Anthropic"},
     {"codex", "OpenAI Codex"},  {"openai", "OpenAI API"},     {"xai", "xAI"},             {"openrouter", "OpenRouter"},
-    {"zai", "Z.AI"},            {"exa", "Exa"},               {"tinyfish", "TinyFish"},   {"jina", "Jina"},
+    {"zai", "Z.AI"},            {"exa", "Exa"},               {"tinyfish", "TinyFish"},   {"keenable", "Keenable"},
+    {"jina", "Jina"},
     {"kagi", "Kagi"},           {"tavily", "Tavily"},         {"firecrawl", "Firecrawl"}, {"brave", "Brave"},
     {"deepseek", "DeepSeek"},   {"kimi", "Kimi"},             {"synthetic", "Synthetic"}, {"ollama", "Ollama"},
     {"searxng", "SearXNG"},     {"startpage", "Startpage"},   {"duckduckgo", "DuckDuckGo"}, {"ecosia", "Ecosia"},
@@ -2295,6 +2296,465 @@ static json_t *s_zai(const ws_params_t *p, ws_err_t *e) {
 
 static bool has_zai(const ai_model_t *m) { return key_kind("zai") != NULL; }
 
+/* ---------- Keenable (providers/keenable.ts) ---------- */
+
+/* The part of parseSearchQuery (web/search/query.ts) Keenable reads: terms, `site:`, date bounds. Other constraint values come
+ * back as keywords; omc has no central post-filter, so they filter nothing (see docs/tools.md). */
+typedef struct {
+    strvec_t terms, sites, in_title, in_url, in_text, filetypes;
+    char *before, *after;
+    bool has_directives;
+} kq_t;
+
+static void kq_free(kq_t *q) {
+    strvec_free(&q->terms);
+    strvec_free(&q->sites);
+    strvec_free(&q->in_title);
+    strvec_free(&q->in_url);
+    strvec_free(&q->in_text);
+    strvec_free(&q->filetypes);
+    free(q->before);
+    free(q->after);
+}
+
+/* a `"`, U+201C or U+201D at p: its byte length, else 0 */
+static size_t kq_quote(const char *p) {
+    if (*p == '"') return 1;
+    return !strncmp(p, "\xE2\x80\x9C", 3) || !strncmp(p, "\xE2\x80\x9D", 3) ? 3 : 0;
+}
+
+/* parseDateValue: YYYY[-MM[-DD]] (also / and .) or MM/DD/YYYY (day first when the first field exceeds 12); owned ISO or NULL */
+static char *kq_date(const char *v) {
+    int a = 0, b = 0, c = 0, n = 0, la = 0;
+    if (sscanf(v, "%d%n", &a, &n) != 1 || !n) return NULL;
+    la = n;
+    const char *p = v + n;
+    int y, m = 1, d = 1;
+    bool has_b = false, has_c = false;
+    if (*p && strchr("-/.", *p) && isdigit((unsigned char)p[1])) {
+        b = (int)strtol(p + 1, (char **)&p, 10);
+        has_b = true;
+        if (*p && strchr("-/.", *p) && isdigit((unsigned char)p[1])) {
+            c = (int)strtol(p + 1, (char **)&p, 10);
+            has_c = true;
+        }
+    }
+    if (*p) return NULL;
+    if (la == 4) {
+        y = a;
+        if (has_b) m = b;
+        if (has_c) d = c;
+    } else if (la <= 2 && has_c && c >= 1000 && c <= 9999) {
+        y = c;
+        m = a;
+        d = b;
+        if (m > 12 && d <= 12) {
+            int t = m;
+            m = d;
+            d = t;
+        }
+    } else return NULL;
+    if (y < 1000 || y > 9999 || m < 1 || m > 12 || d < 1 || d > 31) return NULL;
+    return xasprintf("%d-%02d-%02d", y, m, d);
+}
+
+static char *kq_site(const char *value) { /* normalizeSite */
+    char *s = str_trim(value);
+    for (char *x = s; *x; x++) *x = (char)tolower((unsigned char)*x);
+    const char *h = s;
+    const char *sep = strstr(s, "://");
+    if (sep && sep > s && isalpha((unsigned char)*s)) {
+        bool scheme = true;
+        for (const char *x = s; x < sep; x++) scheme &= isalnum((unsigned char)*x) || strchr("+.-", *x) != NULL;
+        if (scheme) h = sep + 3;
+    }
+    if (!strncmp(h, "*.", 2)) h += 2;
+    char *r = xstrdup(h);
+    size_t n = strlen(r);
+    while (n && (r[n - 1] == '/' || r[n - 1] == '.')) r[--n] = 0;
+    free(s);
+    return r;
+}
+
+/* `name:value` directive names: 1 site, 2 inurl, 3 intitle, 4 intext, 5 filetype, 6 before, 7 after, 8 lang; 0 none */
+static int kq_field(const char *name, size_t n) {
+    static const struct {
+        const char *name;
+        int field;
+    } F[] = {{"site", 1},    {"domain", 1},   {"host", 1},     {"inurl", 2},  {"url", 2},   {"intitle", 3},
+             {"title", 3},   {"intext", 4},   {"inbody", 4},   {"inanchor", 4}, {"filetype", 5}, {"ext", 5},
+             {"before", 6},  {"until", 6},    {"after", 7},    {"since", 7},  {"lang", 8},  {"language", 8}};
+    for (size_t i = 0; i < ARRAY_LEN(F); i++)
+        if (strlen(F[i].name) == n && !strncasecmp(F[i].name, name, n)) return F[i].field;
+    return 0;
+}
+
+static int kq_all_mode(const char *name, size_t n) { /* ALL_MODES: inTitle, inUrl, inText */
+    if (n == 10 && !strncasecmp(name, "allintitle", n)) return 3;
+    if (n == 8 && !strncasecmp(name, "allinurl", n)) return 2;
+    if (n == 9 && !strncasecmp(name, "allintext", n)) return 4;
+    return 0;
+}
+
+/* DIRECTIVE_PATTERN: [+-]?name:value. Returns the name's start and length and the value, or false */
+static bool kq_directive(const char *t, const char **name, size_t *nl, const char **value, bool *minus) {
+    const char *p = t;
+    *minus = *p == '-';
+    if (*p == '+' || *p == '-') p++;
+    if (!isalpha((unsigned char)*p)) return false;
+    const char *s = p;
+    while (isalpha((unsigned char)*p) || *p == '-') p++;
+    if (*p != ':') return false;
+    *name = s;
+    *nl = (size_t)(p - s);
+    *value = p + 1;
+    return true;
+}
+
+static void kq_constraint(kq_t *q, int field, const char *value, bool negated) {
+    q->has_directives = true;
+    char *v = str_trim(value);
+    if (*v && !negated) {
+        if (field == 1) {
+            char *site = kq_site(v);
+            if (*site) strvec_push(&q->sites, site);
+            free(site);
+        } else if (field == 5) {
+            const char *e = v;
+            while (*e == '.') e++;
+            char *low = xstrdup(e);
+            for (char *x = low; *x; x++) *x = (char)tolower((unsigned char)*x);
+            if (*low) strvec_push(&q->filetypes, low);
+            free(low);
+        } else {
+            strvec_push(field == 2 ? &q->in_url : field == 3 ? &q->in_title : &q->in_text, v);
+        }
+    }
+    free(v);
+}
+
+static void kq_parse(const char *raw, kq_t *q) {
+    memset(q, 0, sizeof *q);
+    strvec_t tok = {0};
+    VEC(char) quoted = {0};
+    for (const char *p = raw; *p;) {
+        if (isspace((unsigned char)*p)) {
+            p++;
+            continue;
+        }
+        size_t ql = kq_quote(p);
+        if (ql) {
+            const char *s = p + ql, *e = s;
+            while (*e && !kq_quote(e)) e++;
+            char *inner = xstrndup(s, (size_t)(e - s)), *t = str_trim(inner);
+            free(inner);
+            if (*t) {
+                strvec_push(&tok, t);
+                vec_push(&quoted, 1);
+            }
+            free(t);
+            p = *e ? e + kq_quote(e) : e;
+            continue;
+        }
+        sb_t b = SB_INIT;
+        bool qv = false;
+        while (*p && !isspace((unsigned char)*p)) {
+            ql = kq_quote(p);
+            if (ql && b.len && b.s[b.len - 1] == ':') { /* intitle:"budget tips" */
+                const char *e = p + ql;
+                while (*e && !kq_quote(e)) e++;
+                sb_appendn(&b, p + ql, (size_t)(e - (p + ql)));
+                qv = true;
+                p = *e ? e + kq_quote(e) : e;
+                continue;
+            }
+            if (ql) break;
+            sb_putc(&b, *p++);
+        }
+        if (b.len) {
+            const char *t = sb_cstr(&b);
+            if (qv) {
+                strvec_push(&tok, t);
+                vec_push(&quoted, 2);
+            } else { /* splitParens */
+                while (*t == '(') {
+                    strvec_push(&tok, "(");
+                    vec_push(&quoted, 0);
+                    t++;
+                }
+                size_t n = strlen(t), trailing = 0;
+                while (n && t[n - 1] == ')') {
+                    int depth = 0;
+                    for (size_t i = 0; i + 1 < n; i++) depth += t[i] == '(' ? 1 : t[i] == ')' ? -1 : 0;
+                    if (depth > 0) break;
+                    n--;
+                    trailing++;
+                }
+                if (n) {
+                    char *w = xstrndup(t, n);
+                    strvec_push(&tok, w);
+                    vec_push(&quoted, 0);
+                    free(w);
+                }
+                for (size_t k = 0; k < trailing; k++) {
+                    strvec_push(&tok, ")");
+                    vec_push(&quoted, 0);
+                }
+            }
+        }
+        sb_free(&b);
+    }
+    bool negate_next = false;
+    int all_mode = 0;
+    for (size_t i = 0; i < tok.n; i++) {
+        const char *t = tok.v[i];
+        bool phrase = quoted.v[i] == 1;
+        if (!phrase) {
+            if (!strcmp(t, "(") || !strcmp(t, ")")) continue;
+            if (!strcmp(t, "OR") || !strcmp(t, "|") || !strcmp(t, "||") || !strcmp(t, "AND") || !strcmp(t, "&&")) {
+                q->has_directives = true;
+                continue;
+            }
+            if (!strcmp(t, "NOT") || !strcmp(t, "!")) {
+                negate_next = true;
+                q->has_directives = true;
+                continue;
+            }
+            if (!strcmp(t, "-") || !strcmp(t, "+")) {
+                if (t[0] == '-' && i + 1 < tok.n && quoted.v[i + 1] == 1) negate_next = true;
+                continue;
+            }
+            const char *name, *value;
+            size_t nl;
+            bool minus;
+            if (kq_directive(t, &name, &nl, &value, &minus)) {
+                int am = kq_all_mode(name, nl), field = kq_field(name, nl);
+                if (am) {
+                    all_mode = am;
+                    q->has_directives = true;
+                    char *inl = str_trim(value);
+                    if (*inl) kq_constraint(q, am, inl, minus);
+                    free(inl);
+                    continue;
+                }
+                if (field) {
+                    char *v = str_trim(value);
+                    if (!*v && i + 1 < tok.n) { /* `site: example.com` */
+                        const char *next = tok.v[i + 1], *n2, *v2;
+                        size_t l2;
+                        bool m2;
+                        bool reserved = !strcmp(next, "(") || !strcmp(next, ")") || !strcmp(next, "OR") || !strcmp(next, "AND") ||
+                                        !strcmp(next, "NOT") || !strcmp(next, "|") || !strcmp(next, "||") || !strcmp(next, "&&") ||
+                                        !strcmp(next, "!") ||
+                                        (kq_directive(next, &n2, &l2, &v2, &m2) && (kq_field(n2, l2) || kq_all_mode(n2, l2)));
+                        if (quoted.v[i + 1] == 1 || !reserved) {
+                            free(v);
+                            v = str_trim(next);
+                            i++;
+                        }
+                    }
+                    if (!*v) {
+                        q->has_directives = true;
+                        free(v);
+                        continue;
+                    }
+                    bool negated = minus || negate_next;
+                    negate_next = false;
+                    if (field == 6 || field == 7) {
+                        char *iso = kq_date(v);
+                        if (iso) {
+                            char **slot = field == 6 ? &q->before : &q->after;
+                            free(*slot);
+                            *slot = iso;
+                            q->has_directives = true;
+                        } else {
+                            strvec_push(&q->terms, t); /* `before:someday` is a plain term */
+                        }
+                    } else if (field == 8) {
+                        q->has_directives = true;
+                    } else {
+                        kq_constraint(q, field, v, negated);
+                    }
+                    free(v);
+                    continue;
+                }
+            }
+        }
+        /* plain term, optional +/- prefix */
+        const char *text = t;
+        bool as_phrase = phrase, negated = false;
+        if (!phrase && t[0] == '-' && t[1]) {
+            negate_next = true;
+            q->has_directives = true;
+            while (*text == '-') text++;
+            if (!*text) continue;
+            const char *name, *value;
+            size_t nl;
+            bool minus;
+            int f = kq_directive(text, &name, &nl, &value, &minus) ? kq_field(name, nl) : 0;
+            if (f && f < 6) {
+                negate_next = false;
+                kq_constraint(q, f, value, true);
+                continue;
+            }
+        } else if (!phrase && t[0] == '+' && t[1]) {
+            text = t + 1;
+            as_phrase = true;
+            q->has_directives = true;
+        }
+        negated = negate_next;
+        negate_next = false;
+        if (all_mode) {
+            kq_constraint(q, all_mode, text, negated);
+            continue;
+        }
+        if (negated) continue; /* renderTerm: no negation syntax */
+        if (as_phrase) {
+            char *w = xasprintf("\"%s\"", text);
+            strvec_push(&q->terms, w);
+            free(w);
+        } else strvec_push(&q->terms, text);
+    }
+    strvec_free(&tok);
+    vec_free(&quoted);
+}
+
+/* formatQuery({...parsed, raw: ""}, {phrases: true}): the terms, or the constraint values as plain keywords. Owned, "" when none. */
+static char *kq_format(const kq_t *q) {
+    strvec_t parts = {0};
+    if (q->terms.n) for (size_t i = 0; i < q->terms.n; i++) strvec_push(&parts, q->terms.v[i]);
+    else {
+        const strvec_t *const L[] = {&q->sites, &q->in_title, &q->in_url, &q->in_text, &q->filetypes};
+        for (size_t k = 0; k < ARRAY_LEN(L); k++)
+            for (size_t i = 0; i < L[k]->n; i++) strvec_push(&parts, L[k]->v[i]);
+    }
+    char *joined = strvec_join(&parts, " ");
+    strvec_free(&parts);
+    char *t = str_trim(joined);
+    free(joined);
+    return t;
+}
+
+/* new URL(value).toString() for http(s) values, owned; NULL for anything else */
+static char *ws_normalize_http_url(const char *v) {
+    if (!v) return NULL;
+    size_t sl = !strncasecmp(v, "https://", 8) ? 8 : !strncasecmp(v, "http://", 7) ? 7 : 0;
+    if (!sl || !v[sl] || strpbrk(v, " \t\r\n")) return NULL;
+    sb_t b = SB_INIT;
+    size_t hl = strcspn(v + sl, "/?#");
+    if (!hl) {
+        sb_free(&b);
+        return NULL;
+    }
+    for (size_t i = 0; i < sl + hl; i++) sb_putc(&b, (char)tolower((unsigned char)v[i]));
+    if (v[sl + hl] != '/') sb_putc(&b, '/');
+    sb_append(&b, v + sl + hl);
+    return sb_detach(&b);
+}
+
+static json_t *s_keenable(const ws_params_t *p, ws_err_t *e) {
+    int max = clamp_results(want_results(p), 10, 50);
+    kq_t q;
+    kq_parse(p->query, &q);
+    char *query = q.has_directives ? kq_format(&q) : str_trim(p->query);
+    if (!*query) {
+        free(query);
+        kq_free(&q);
+        fail_typed(e, "keenable", 400, xstrdup("Keenable needs search terms; date-only queries are not supported"));
+        return NULL;
+    }
+    json_t *body = json_obj();
+    json_set_str(body, "query", query);
+    json_set_int(body, "max_results", max);
+    free(query);
+    strvec_t hosts = {0}; /* siteHosts: bare, deduplicated */
+    for (size_t i = 0; i < q.sites.n; i++) {
+        char *h = xstrndup(q.sites.v[i], strcspn(q.sites.v[i], "/"));
+        if (*h && !strvec_contains(&hosts, h)) strvec_push(&hosts, h);
+        free(h);
+    }
+    if (hosts.n == 1) json_set_str(body, "site", hosts.v[0]);
+    strvec_free(&hosts);
+    /* Keenable accepts relative deltas on its date filters */
+    const char *delta = str_eq(p->recency, "day") ? "1d" : str_eq(p->recency, "week") ? "7d" : str_eq(p->recency, "month") ? "1mo" : str_eq(p->recency, "year") ? "1y" : NULL;
+    if (q.after) json_set_str(body, "published_after", q.after);
+    else if (delta) json_set_str(body, "published_after", delta);
+    if (q.before) json_set_str(body, "published_before", q.before);
+    kq_free(&q);
+    bool configured = key_kind("keenable") != NULL;
+    char *key = configured ? auth_get_api_key("keenable") : NULL;
+    /* a configured credential that fails to resolve must not silently downgrade to anonymous search */
+    if (configured && (!key || !*key)) {
+        free(key);
+        json_free(body);
+        fail_typed(e, "keenable", 0, xstrdup("Keenable credentials could not be resolved. Check your configured API key or credential helper."));
+        return NULL;
+    }
+    http_headers_t h = {0};
+    http_headers_set(&h, "Accept", "application/json");
+    http_headers_set(&h, "Content-Type", "application/json");
+    if (key) http_headers_set(&h, "X-API-Key", key);
+    else http_headers_set(&h, "X-Keenable-Title", "oh-my-pi"); /* the keyless endpoint rejects requests without it */
+    char *payload = json_dump(body, 0);
+    json_free(body);
+    http_resp_t r;
+    int rc = ws_http("POST", key ? "https://api.keenable.ai/v1/search" : "https://api.keenable.ai/v1/search/public", &h, payload, p, &r);
+    free(payload);
+    http_headers_free(&h);
+    bool keyed = key != NULL;
+    free(key);
+    if (rc != 0) {
+        fail_transport(e, p, &r);
+        http_resp_free(&r);
+        return NULL;
+    }
+    if (r.status < 200 || r.status >= 300) {
+        char *txt = xstrndup(r.body ? r.body : "", MIN(r.body_len, (size_t)(8 * 1024)));
+        if (!classify_http(e, "keenable", r.status, txt))
+            fail_typed(e, "keenable", r.status, xasprintf("Keenable search API error (%d): %s", r.status, txt));
+        free(txt);
+        http_resp_free(&r);
+        return NULL;
+    }
+    json_t *data = json_parse_str(r.body ? r.body : "");
+    http_resp_free(&r);
+    if (!data) {
+        fail_typed(e, "keenable", 500, xstrdup("Keenable search API returned invalid JSON"));
+        return NULL;
+    }
+    const json_t *results = json_get(data, "results");
+    if (!json_is_arr(results)) {
+        json_free(data);
+        fail_typed(e, "keenable", 500, xstrdup("Keenable search API returned an unexpected response shape"));
+        return NULL;
+    }
+    json_t *resp = resp_new("keenable"), *srcs = json_get(resp, "sources");
+    strvec_t seen = {0};
+    const json_t *x;
+    json_arr_foreach(results, i, x) {
+        if (!json_is_obj(x)) continue;
+        char *url = ws_normalize_http_url(json_get_str(x, "url"));
+        if (!url || strvec_contains(&seen, url)) {
+            free(url);
+            continue;
+        }
+        strvec_push(&seen, url);
+        char *title = json_get_str(x, "title") ? ws_collapse_spaces(json_get_str(x, "title")) : xstrdup("");
+        char *snip = json_get_str(x, "snippet") ? ws_collapse_spaces(json_get_str(x, "snippet")) : xstrdup("");
+        const char *date = json_get_str(x, "published_at");
+        if ((int)json_len(srcs) < max) json_push(srcs, src_new(*title ? title : url, url, *snip ? snip : NULL, date && *date ? date : NULL));
+        free(snip);
+        free(title);
+        free(url);
+    }
+    strvec_free(&seen);
+    json_free(data);
+    json_set_str(resp, "authMode", keyed ? "api_key" : "anonymous");
+    return resp;
+}
+
+static bool has_keenable(const ai_model_t *m) { return key_kind("keenable") != NULL; }
+
 /* ---------- SearXNG (providers/searxng.ts) ---------- */
 
 /* SearXNG connection value: setting, else its environment variable */
@@ -2590,7 +3050,7 @@ static const provider_t ENGINES[] = {
     {"tavily", s_tavily, has_tavily, NULL},     {"exa", s_exa, has_exa, NULL},
     {"duckduckgo", s_ddg, always, always},      {"perplexity", s_perplexity, has_perplexity, NULL},
     {"kimi", s_kimi, has_kimi, NULL},           {"zai", s_zai, has_zai, NULL},
-    {"searxng", s_searxng, has_searxng, NULL},
+    {"searxng", s_searxng, has_searxng, NULL},  {"keenable", s_keenable, has_keenable, always},
 };
 static const provider_t GROUNDED[] = {
     {"anthropic", s_anthropic, has_anthropic, NULL}, {"openai", s_openai, has_openai, NULL},
@@ -2612,6 +3072,30 @@ typedef struct {
     char *id, *label; /* provider meta */
     ws_err_t err;
 } failure_t;
+
+static char *format_failure(const failure_t *f);
+
+/* failureDetails: reason flattened and capped, the way the fallback note quotes it */
+static json_t *failure_details(const failure_t *v, size_t n) {
+    json_t *arr = json_arr();
+    for (size_t k = 0; k < n; k++) {
+        char *reason = format_failure(&v[k]);
+        char *col = ws_collapse_spaces(reason);
+        size_t cl = strlen(col);
+        if (cl && col[cl - 1] == '.') col[cl - 1] = 0;
+        char *tr = ws_truncate(col, 240);
+        json_t *o = json_obj();
+        json_set_str(o, "provider", v[k].id);
+        json_set_str(o, "label", v[k].label);
+        json_set_str(o, "reason", tr);
+        if (v[k].err.prov && v[k].err.status) json_set_int(o, "status", v[k].err.status);
+        json_push(arr, o);
+        free(tr);
+        free(col);
+        free(reason);
+    }
+    return arr;
+}
 
 /* formatSearchProviderFailure */
 static char *format_failure(const failure_t *f) {
@@ -2940,26 +3424,20 @@ char *ws_execute(const json_t *args, const char *model_sel, const ai_model_t *se
                 if (r) {
                     r = resp_finish(r);
                     strvec_t notes = {0};
-                    if (fails.n) {
+                    json_t *failed = fails.n ? failure_details(fails.v, fails.n) : NULL;
+                    if (failed) {
                         sb_t b = SB_INIT;
                         sb_appendf(&b, "answered by %s after ", provider_label(prov->id));
-                        for (size_t k = 0; k < fails.n; k++) {
-                            char *reason = format_failure(&fails.v[k]);
-                            char *col = ws_collapse_spaces(reason);
-                            size_t cl = strlen(col);
-                            if (cl && col[cl - 1] == '.') col[cl - 1] = 0;
-                            char *tr = ws_truncate(col, 240);
-                            sb_appendf(&b, "%s%s failed (%s)", k ? " and " : "", fails.v[k].label, tr);
-                            free(tr);
-                            free(col);
-                            free(reason);
-                        }
+                        const json_t *fx;
+                        json_arr_foreach(failed, k, fx)
+                            sb_appendf(&b, "%s%s failed (%s)", k ? " and " : "", json_get_str(fx, "label"), json_get_str(fx, "reason"));
                         strvec_push_own(&notes, sb_detach(&b));
                     }
                     text = format_for_llm(r, &notes);
                     strvec_free(&notes);
                     *details = json_obj();
                     json_set(*details, "response", r);
+                    if (failed) json_set(*details, "failures", failed);
                     free(f.id);
                     free(f.label);
                     break;
@@ -3005,6 +3483,7 @@ char *ws_execute(const json_t *args, const char *model_sel, const ai_model_t *se
         json_set(resp, "sources", json_arr());
         json_set(*details, "response", resp);
         json_set_str(*details, "error", msg);
+        if (!(available == 0 && fails.n == 0)) json_set(*details, "failures", failure_details(fails.v, fails.n));
         free(msg);
     }
     for (size_t k = 0; k < fails.n; k++) {

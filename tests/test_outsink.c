@@ -96,8 +96,9 @@ static void test_seq(const char *dir) {
     out_sink_dump(s, NULL, &sum);
     CHECK(sum.truncated);
     CHECK(sum.total_lines == 30001);
-    CHECK(sum.elided_lines == 20562);
-    CHECK(strstr(sum.output, "\n4317\n43\n[\xE2\x80\xA6" "20562ln elided\xE2\x80\xA6]\n24881\n") != NULL);
+    CHECK(sum.elided_lines == 20564);
+    /* omp 18.17: both windows cut back to whole lines */
+    CHECK(strstr(sum.output, "\n4316\n4317\n[\xE2\x80\xA6" "20564ln elided\xE2\x80\xA6]\n24882\n") != NULL);
     CHECK(str_ends(sum.output, "29999\n30000\n"));
     CHECK_STR(sum.artifact_id, "0");
     size_t n;
@@ -107,10 +108,10 @@ static void test_seq(const char *dir) {
     json_t *meta = NULL;
     out_meta_from_summary(&meta, &sum, "tail", 1, 0);
     char *notice = out_format_notice(meta);
-    CHECK_STR(notice, "\n\n[Showing lines 1-4720 and 25283-30001 of 30001; 20,562 middle lines (114.9KB) elided. Read "
+    CHECK_STR(notice, "\n\n[Showing lines 1-4317 and 24882-30000 of 30000; 20,564 middle lines (114.9KB) elided. Read "
                       "artifact://0 for full output]");
     char *warn = out_format_warning(meta);
-    CHECK(warn && !strncmp(warn, "Showing lines 1-4720", 20));
+    CHECK(warn && !strncmp(warn, "Showing lines 1-4317", 20));
     char *text = xasprintf("%s%s", sum.output, notice);
     char *stripped = out_strip_notice(text, meta);
     CHECK(str_ends(stripped, "30000\n"));

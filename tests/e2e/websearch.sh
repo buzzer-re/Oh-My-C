@@ -8,9 +8,9 @@ for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$WSPORT) 2>/dev/null && break
 WSM=http://127.0.0.1:$WSPORT
 mkdir -p "$T/wsagent" "$T/wswork"
 WSENV=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_OAUTH_TOKEN -u OPENAI_API_KEY -u GEMINI_API_KEY -u XAI_API_KEY -u ZAI_API_KEY
-       -u PERPLEXITY_API_KEY -u EXA_API_KEY -u BRAVE_API_KEY -u TAVILY_API_KEY
+       -u PERPLEXITY_API_KEY -u KEENABLE_API_KEY -u EXA_API_KEY -u BRAVE_API_KEY -u TAVILY_API_KEY
        HOME="$T" OMC_CODING_AGENT_DIR="$T/wsagent" NO_COLOR=1 SEARXNG_ENDPOINT="$WSM/searx"
-       OMC_PROVIDER_URL_REWRITE="https://api.anthropic.com=$WSM/anthropic,https://api.openai.com=$WSM/openai,https://chatgpt.com=$WSM/chatgpt,https://generativelanguage.googleapis.com=$WSM/google,https://api.x.ai=$WSM/xai,https://api.perplexity.ai=$WSM/pplx,https://api.kimi.com=$WSM/kimi,https://api.z.ai=$WSM/zai,https://search.parallel.ai=$WSM/parallel,https://html.duckduckgo.com=$WSM/ddg")
+       OMC_PROVIDER_URL_REWRITE="https://api.anthropic.com=$WSM/anthropic,https://api.openai.com=$WSM/openai,https://chatgpt.com=$WSM/chatgpt,https://generativelanguage.googleapis.com=$WSM/google,https://api.x.ai=$WSM/xai,https://api.perplexity.ai=$WSM/pplx,https://api.kimi.com=$WSM/kimi,https://api.keenable.ai=$WSM/keenable,https://api.z.ai=$WSM/zai,https://search.parallel.ai=$WSM/parallel,https://html.duckduckgo.com=$WSM/ddg")
 ws_search() { # selector query [env...] -> rendered output of `omc search`
     local sel=$1 q=$2; shift 2
     (cd "$T/wswork" && timeout 30 "${WSENV[@]}" "$@" "$B" search ${sel:+--model "$sel"} "$q" 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
@@ -46,6 +46,20 @@ out=$(ws_search web/kimi "kimi query" MOONSHOT_SEARCH_API_KEY=k-fake)
 out=$(ws_search web/zai "zai query" ZAI_API_KEY=z-fake)
 [[ "$out" == *"Z.AI Source"* && $(grep -c '/web_search_prime/mcp' "$T/websearch.jsonl") -eq 3 ]] \
     && echo "   ok  web search: z.ai mcp" || { echo "   FAIL web search zai: $out"; fail=1; }
+# Keenable: keyless on explicit selection only, operators never sent as keywords, keyed through X-API-Key
+ws_hdr() { tail -1 "$T/websearch.jsonl" | python3 -c "import json,sys; r=json.load(sys.stdin); print(r['path'], json.dumps(r['body'], sort_keys=True), r['headers'].get('x-api-key'), r['headers'].get('x-keenable-title'))"; }
+out=$(ws_search web/keenable "keen query")
+[[ "$out" == *"Keenable Source"* && "$out" == *"https://example.com/two"* && "$out" != *"ftp://"* && "$(ws_hdr)" == '/keenable/v1/search/public {"max_results": 10, "query": "keen query"} None oh-my-pi' ]] \
+    && echo "   ok  web search: keenable keyless" || { echo "   FAIL web search keenable keyless: $out / $(ws_hdr)"; fail=1; }
+out=$(ws_search web/keenable 'site:github.com/x "exact phrase" foo after:2024 before:2025-02 -bar' KEENABLE_API_KEY=keen-fake)
+[[ "$out" == *"Keenable Source"* && "$(ws_hdr)" == '/keenable/v1/search {"max_results": 10, "published_after": "2024-01-01", "published_before": "2025-02-01", "query": "\"exact phrase\" foo", "site": "github.com"} keen-fake None' ]] \
+    && echo "   ok  web search: keenable keyed, operators" || { echo "   FAIL web search keenable keyed: $out / $(ws_hdr)"; fail=1; }
+out=$(ws_search web/keenable 'site:a.com' KEENABLE_API_KEY=keen-fake)
+[[ "$(ws_hdr)" == '/keenable/v1/search {"max_results": 10, "query": "a.com", "site": "a.com"} keen-fake None' ]] \
+    && echo "   ok  web search: keenable site-only" || { echo "   FAIL web search keenable site-only: $(ws_hdr)"; fail=1; }
+out=$(ws_search web/keenable 'after:2024' KEENABLE_API_KEY=keen-fake)
+[[ "$out" == *"Keenable needs search terms; date-only queries are not supported"* ]] \
+    && echo "   ok  web search: keenable date-only" || { echo "   FAIL web search keenable date-only: $out"; fail=1; }
 out=$(ws_search web/searxng "searx query")
 [[ "$out" == *"searx answer"* && "$(ws_last)" == "/searx/search?q=searx+query&format=json"* ]] \
     && echo "   ok  web search: searxng" || { echo "   FAIL web search searxng: $out"; fail=1; }
@@ -54,6 +68,15 @@ printf 'modelRoles:\n  web: web/searxng\nretry:\n  fallbackChains:\n    web: [we
 out=$(ws_search "" "fallback query" SEARXNG_ENDPOINT="$WSM/fail/searx" MOONSHOT_SEARCH_API_KEY=k-fake)
 [[ "$out" == *"Kimi Source"* && "$(tail -2 "$T/websearch.jsonl" | head -1)" == *'"path": "/fail/searx/search?q=fallback+query&format=json"'* ]] \
     && echo "   ok  web search: role-chain fallback" || { echo "   FAIL web search fallback: $out"; fail=1; }
+# details.failures names the providers that failed before the one that answered, and none when the first one answers
+cp "$T/agent/models.yml" "$T/wsagent/models.yml"
+ws_details() { (cd "$T/wswork" && timeout 30 "${WSENV[@]}" MOCK_KEY=x "$@" "$B" --model mock/mock-1 --no-session --mode json -p 'call:web_search:{"query":"fallback query"}' </dev/null 2>/dev/null | grep -o '"failures":[^]]*]' | head -1); }
+out=$(ws_details SEARXNG_ENDPOINT="$WSM/fail/searx" MOONSHOT_SEARCH_API_KEY=k-fake)
+[[ "$out" == '"failures":[{"provider":"searxng","label":"SearXNG","reason":"SearXNG API error (500):'*'"status":500}]' ]] \
+    && echo "   ok  web search: details.failures" || { echo "   FAIL web search details.failures: $out"; fail=1; }
+out=$(ws_details MOONSHOT_SEARCH_API_KEY=k-fake)
+[[ -z "$out" ]] && echo "   ok  web search: no failures key" || { echo "   FAIL web search no failures key: $out"; fail=1; }
+rm -f "$T/wsagent/models.yml"
 out=$(ws_search "" "FAIL500 query" MOONSHOT_SEARCH_API_KEY=k-fake)
 rm -f "$T/wsagent/config.yml"
 [[ "$out" == *"Error: All web search providers failed: searxng: SearXNG API error (500): "*"; kimi: Kimi search API error (500): "* ]] \

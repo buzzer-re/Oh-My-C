@@ -525,6 +525,7 @@ agent_t *agent_new(void) {
     a->system_prompt = json_arr();
     a->steering = json_arr();
     a->follow_up = json_arr();
+    a->asides = json_arr();
     ai_stream_opts_init(&a->base_opts);
     return a;
 }
@@ -540,6 +541,7 @@ void agent_free(agent_t *a) {
     json_free(a->system_prompt);
     json_free(a->steering);
     json_free(a->follow_up);
+    json_free(a->asides);
     free(a->api_key);
     free(a->session_id);
     free(a->stream_error);
@@ -699,12 +701,44 @@ void agent_follow_up(agent_t *a, json_t *msg) {
     agent_queue_changed(a);
 }
 
+void agent_aside(agent_t *a, json_t *msg) {
+    pthread_mutex_lock(&a->mu);
+    json_push(a->asides, msg);
+    pthread_mutex_unlock(&a->mu);
+}
+
+json_t *agent_take_records(agent_t *a, bool (*is_record)(const json_t *msg), bool (*wakes)(const json_t *msg)) {
+    json_t *out = json_arr();
+    pthread_mutex_lock(&a->mu);
+    json_t *queues[2] = {a->steering, a->asides};
+    bool any = !wakes;
+    for (int q = 0; q < 2 && !any; q++)
+        for (size_t i = 0; i < json_len(queues[q]) && !any; i++) {
+            const json_t *m = json_at(queues[q], i);
+            any = is_record(m) && wakes(m);
+        }
+    bool steering_changed = false;
+    if (any)
+        for (int q = 0; q < 2; q++)
+            for (size_t i = 0; i < json_len(queues[q]);) {
+                if (is_record(json_at(queues[q], i))) {
+                    json_push(out, json_arr_remove(queues[q], i));
+                    steering_changed |= q == 0;
+                } else i++;
+            }
+    pthread_mutex_unlock(&a->mu);
+    if (steering_changed) agent_queue_changed(a);
+    return out;
+}
+
 void agent_clear_queues(agent_t *a) {
     pthread_mutex_lock(&a->mu);
     json_free(a->steering);
     json_free(a->follow_up);
+    json_free(a->asides);
     a->steering = json_arr();
     a->follow_up = json_arr();
+    a->asides = json_arr();
     pthread_mutex_unlock(&a->mu);
     agent_queue_changed(a);
 }
@@ -836,6 +870,18 @@ static json_t *take_queue(agent_t *a, json_t **q) {
         return NULL;
     }
     agent_queue_changed(a);
+    return out;
+}
+
+/* every queued aside (omp polls them at each step boundary; they have no one-at-a-time mode) */
+static json_t *take_asides(agent_t *a) {
+    pthread_mutex_lock(&a->mu);
+    json_t *out = NULL;
+    if (json_len(a->asides)) {
+        out = a->asides;
+        a->asides = json_arr();
+    }
+    pthread_mutex_unlock(&a->mu);
     return out;
 }
 
@@ -1348,6 +1394,7 @@ static json_t *failed_turn_results(agent_t *a, const json_t *assistant, const js
 static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
     a->running = true;
     a->cancel = 0;
+    a->run_started_mono = mono_ms();
     live_loops_add(1);
     json_t *run_msgs = json_arr();
     emit_simple(a, AGENT_EV_AGENT_START);
@@ -1478,10 +1525,12 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
         turns++;
         if (failed || a->cancel) break;
         if (a->max_turns && turns >= a->max_turns) break;
-        json_t *steer = take_queue(a, &a->steering);
-        if (steer) {
-            json_arr_foreach(steer, i, m) add_message(a, run_msgs, json_clone(m));
+        json_t *steer = take_queue(a, &a->steering), *asides = take_asides(a);
+        if (steer || asides) {
+            if (steer) json_arr_foreach(steer, i, m) add_message(a, run_msgs, json_clone(m));
+            if (asides) json_arr_foreach(asides, i, m) add_message(a, run_msgs, json_clone(m));
             json_free(steer);
+            json_free(asides);
             continue;
         }
         if (has_tools) {
@@ -1502,6 +1551,12 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
             continue;
         }
         break;
+    }
+    /* IrcBridge.flushPending: asides that missed their step boundary (an aborted or capped run) still reach the transcript */
+    json_t *late = take_asides(a);
+    if (late) {
+        json_arr_foreach(late, i, m) add_message(a, run_msgs, json_clone(m));
+        json_free(late);
     }
     agent_event_t ee = {.type = AGENT_EV_AGENT_END, .messages = run_msgs};
     a->silent_abort_next = 0;

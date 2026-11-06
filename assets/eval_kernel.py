@@ -785,6 +785,7 @@ def _do_cell(msg):
             frames = [f for f in traceback.extract_tb(tb) if f.filename == "<cell>"]
             err = "".join(traceback.format_list(frames)) + "".join(traceback.format_exception_only(et, ev))
             if et is KeyboardInterrupt:
+                err = "KeyboardInterrupt: Execution interrupted"
                 _cancel_pending()
         _figures()
     finally:

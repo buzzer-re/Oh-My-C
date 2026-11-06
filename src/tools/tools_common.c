@@ -302,7 +302,10 @@ static bool setting_on(const char *path, bool def) { return settings_bool(path, 
 
 /* upstream resolveBuiltinToolPlan().isToolAllowed for the tools constructed here */
 static bool builtin_allowed(tool_env_t *env, const char *name) {
-    if (!strcmp(name, "bash")) return setting_on("bash.enabled", true);
+    /* without an edit tool, bash is the remaining way to modify existing files */
+    bool no_edit = str_eq(tool_edit_mode_setting(), "none");
+    if (!strcmp(name, "edit")) return !no_edit;
+    if (!strcmp(name, "bash")) return no_edit || setting_on("bash.enabled", true);
     if (!strcmp(name, "todo")) return setting_on("todo.enabled", true);
     if (!strcmp(name, "glob")) return setting_on("glob.enabled", true);
     if (!strcmp(name, "grep")) return setting_on("grep.enabled", true);
@@ -347,6 +350,10 @@ bool tools_eager_delegation(const tool_env_t *env) {
 }
 
 void tools_register_builtin(agent_t *a, tool_env_t *env, const strvec_t *enabled) {
+    if (str_eq(tool_edit_mode_setting(), "none")) { /* no edit tool to read anchors for */
+        free(env->edit_mode);
+        env->edit_mode = xstrdup("none");
+    }
     env->find_enabled = (!enabled || strvec_contains(enabled, "find")) && builtin_allowed(env, "find");
     for (size_t i = 0; i < ARRAY_LEN(CTORS); i++) {
         if (enabled && !strvec_contains(enabled, CTORS[i].name)) continue;

@@ -51,6 +51,23 @@ static char **build_env(const char *const *extra) {
 
 static void set_nonblock(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK); }
 
+static char *g_shell_path; /* proc_shell_path() once known */
+
+/* exec in a forked child: the shell runs as `bash`, so its messages read `bash: line 1: ...` like omp's */
+static void exec_argv(const char *const *argv, char **env) {
+    if (g_shell_path && argv[0] == g_shell_path) {
+        size_t n = 0;
+        while (argv[n]) n++;
+        const char *v[n + 1];
+        for (size_t i = 0; i <= n; i++) v[i] = argv[i];
+        const char *b = strrchr(g_shell_path, '/');
+        if (b) v[0] = b + 1;
+        execve(g_shell_path, (char *const *)v, env);
+        return;
+    }
+    execvpe(argv[0], (char *const *)argv, env);
+}
+
 static void reset_child_signals(void) {
     sigset_t s;
     sigemptyset(&s);
@@ -102,7 +119,7 @@ int proc_run(const char *const *argv, const proc_opts_t *o, proc_result_t *res) 
             if (write(exec_p[1], &e, sizeof e) < 0) {}
             _exit(127);
         }
-        execvpe(argv[0], (char *const *)argv, env);
+        exec_argv(argv, env);
         int e = errno;
         if (write(exec_p[1], &e, sizeof e) < 0) {}
         _exit(127);
@@ -267,12 +284,13 @@ char *proc_capture(const char *const *argv, const char *cwd, int64_t timeout_ms)
 }
 
 const char *proc_shell_path(void) {
-    static char *sh;
-    if (sh) return sh;
+    if (g_shell_path) return g_shell_path;
+    char *sh = NULL;
     const char *e = env_get("OMC_SHELL");
     if (e && fs_is_exec(e)) sh = xstrdup(e);
     if (!sh) sh = which("bash");
     if (!sh) sh = xstrdup("/bin/sh");
+    g_shell_path = sh;
     return sh;
 }
 
@@ -285,6 +303,11 @@ int proc_shell(const char *cmd, const proc_opts_t *o, proc_result_t *res) {
 char *proc_shell_capture(const char *cmd, const char *cwd, int64_t timeout_ms) {
     const char *argv[] = {proc_shell_path(), "-c", cmd, NULL};
     return proc_capture(argv, cwd, timeout_ms);
+}
+
+const char *proc_shell_name(void) {
+    const char *sh = proc_shell_path(), *b = strrchr(sh, '/');
+    return b ? b + 1 : sh;
 }
 
 /* ---------- long-lived child ---------- */
@@ -315,7 +338,7 @@ int child_spawn(const char *const *argv, const char *cwd, const char *const *env
             if (write(exec_p[1], &e, sizeof e) < 0) {}
             _exit(127);
         }
-        execvpe(argv[0], (char *const *)argv, env);
+        exec_argv(argv, env);
         int e = errno;
         if (write(exec_p[1], &e, sizeof e) < 0) {}
         _exit(127);

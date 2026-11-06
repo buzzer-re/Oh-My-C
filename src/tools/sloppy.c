@@ -1830,9 +1830,8 @@ char *sloppy_apply(const char *text, const char *body, const char *path, strvec_
             for (size_t j = i + 1; j < plan.edits.n; j++) {
                 pedit_t *x = &plan.edits.v[i], *y = &plan.edits.v[j];
                 if (x->op == y->op || deferred[x->op - 1] || deferred[y->op - 1]) continue;
-                bool ov = (x->start < y->end && y->start < x->end) ||
-                          (x->start == y->start && (x->start == x->end || y->start == y->end) && x->end != y->end) ||
-                          (x->start == y->start && x->end == y->end);
+                /* merge_edits: an insertion at a replacement's start stays beside it, two insertions at one spot do not */
+                bool ov = (x->start < y->end && y->start < x->end) || (x->start == y->start && x->end == x->start && y->end == y->start);
                 if (!ov) continue;
                 int later = MAX(x->op, y->op), earlier = MIN(x->op, y->op);
                 deferred[later - 1] = earlier;

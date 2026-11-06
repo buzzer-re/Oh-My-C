@@ -1,5 +1,6 @@
 /* todo + ask tools */
 #include "tools.h"
+#include "coding/agents.h"
 
 /* ---------- todo (port of omp tools/todo.ts) ---------- */
 
@@ -806,7 +807,9 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
         out->details = json_obj();
         return 0;
     }
+    agents_user_wait(env, true);
     json_t *ans = env->ui.ask(env->ui.ud, qs);
+    agents_user_wait(env, false);
     if (!ans) return ask_cancelled(ctx, out);
     if (json_get_str(ans, "__error")) { /* the host's answer failed validation, or the host went away */
         tool_result_error(out, "%s", json_get_str(ans, "__error"));

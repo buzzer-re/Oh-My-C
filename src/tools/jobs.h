@@ -69,6 +69,8 @@ char *jobs_fg_detach(jobs_t *j, const char *id);
 /* ---------- queries ---------- */
 size_t jobs_running(jobs_t *j);     /* running visible jobs (service watchers excluded) */
 size_t jobs_running_all(jobs_t *j); /* running jobs incl. service watchers */
+/* running jobs a `wait` watches: visible and delivering a result (a peer's wake turn is not one) */
+size_t jobs_running_watchable(jobs_t *j);
 size_t jobs_undelivered(jobs_t *j);
 /* settled, not yet delivered jobs as [{jobId,label,type,result,failed,durationMs,agentId?}]; marks them delivered */
 json_t *jobs_take_finished(jobs_t *j);
@@ -77,7 +79,7 @@ json_t *jobs_take_finished(jobs_t *j);
 int jobs_wait_any(jobs_t *j, volatile sig_atomic_t *cancel, int64_t max_ms);
 int jobs_wait_any_ex(jobs_t *j, volatile sig_atomic_t *cancel, int64_t max_ms, bool include_services);
 bool jobs_cancel(jobs_t *j, const char *id); /* NULL = all visible jobs */
-/* [{id,type,label,status,durationMs,startedAt,endedAt?,agentId?}] of listed jobs (owned) */
+/* [{id,type,label,status,durationMs,startedAt,endedAt?,agentId?,quiet?}] of listed jobs (owned) */
 json_t *jobs_snapshot(jobs_t *j);
 /* one listed job: snapshot fields + result/output; NULL if unknown (owned) */
 json_t *jobs_get(jobs_t *j, const char *id);

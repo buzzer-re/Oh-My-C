@@ -41,6 +41,7 @@ void proc_result_free(proc_result_t *r);
 /* convenience: run and return trimmed stdout or NULL on failure/non-zero */
 char *proc_capture(const char *const *argv, const char *cwd, int64_t timeout_ms);
 const char *proc_shell_path(void); /* bash if available, else /bin/sh */
+const char *proc_shell_name(void); /* its name in the shell's own messages: `bash` (argv[0] when run through this path) */
 int proc_shell(const char *cmd, const proc_opts_t *opts, proc_result_t *res); /* bash -c / sh -c */
 /* run a shell command, return trimmed stdout if exit 0 (owned) else NULL */
 char *proc_shell_capture(const char *cmd, const char *cwd, int64_t timeout_ms);

@@ -29,6 +29,26 @@ static void put(const char *root, const char *rel, const char *text) {
 }
 
 static void test_args(void) {
+    /* omp prompt-templates.test.ts: prose apostrophes stay literal, quoted option values stay whole */
+    {
+        static const struct { const char *in; const char *want[5]; } C[] = {
+            {"fix the user's login bug", {"fix", "the", "user's", "login", "bug"}},
+            {"don't stop", {"don't", "stop"}},
+            {"rename \"foo bar\" now", {"rename", "foo bar", "now"}},
+            {"'unterminated value", {"'unterminated", "value"}},
+            {"--model=\"model selector\" x", {"--model=model selector", "x"}},
+            {"--name='a b'", {"--name=a b"}},
+            {"it's \"the user's\" 'best one'", {"it's", "the user's", "best one"}},
+        };
+        for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
+            strvec_t v = commands_parse_args(C[i].in);
+            size_t n = 0;
+            while (n < 5 && C[i].want[n]) n++;
+            CHECK(v.n == n);
+            for (size_t k = 0; k < n && k < v.n; k++) CHECK(str_eq(v.v[k], C[i].want[k]));
+            strvec_free(&v);
+        }
+    }
     strvec_t a = commands_parse_args("Bob \"good day\"  'x y' z");
     CHECK(a.n == 4 && str_eq(a.v[0], "Bob") && str_eq(a.v[1], "good day") && str_eq(a.v[2], "x y") && str_eq(a.v[3], "z"));
     char *s = commands_substitute_args("$1|$2|$9|$@|$ARGUMENTS|$@[2]|$@[2:1]|$@[0]|$x", &a);
