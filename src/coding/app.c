@@ -435,8 +435,17 @@ static void fill_request_opts(app_t *a, ai_stream_opts_t *o) {
         cr = env && (str_eq(env, "long") || str_eq(env, "short") || str_eq(env, "none")) ? env : "short";
     }
     o->cache_retention = cr;
-    json_t *tb = settings_get("thinkingBudgets");
-    if (json_is_obj(tb)) o->thinking_budgets = tb;
+    /* cfgThinkingBudgets: every level has a budget, configured or default (lives until this thread's next request) */
+    static _Thread_local json_t *budgets;
+    static const struct {
+        const char *key, *path;
+        int64_t def;
+    } TB[] = {{"minimal", "thinkingBudgets.minimal", 1024}, {"low", "thinkingBudgets.low", 2048},   {"medium", "thinkingBudgets.medium", 8192},
+              {"high", "thinkingBudgets.high", 16384},      {"xhigh", "thinkingBudgets.xhigh", 32768}, {"max", "thinkingBudgets.max", 32768}};
+    json_free(budgets);
+    budgets = json_obj();
+    for (size_t i = 0; i < ARRAY_LEN(TB); i++) json_set_int(budgets, TB[i].key, settings_int(TB[i].path, TB[i].def));
+    o->thinking_budgets = budgets;
     /* cfgSampling: a negative sampling setting means the provider default */
     double temp = settings_num("temperature", -1), top_p = settings_num("topP", -1);
     if (temp >= 0) o->temperature = temp;
@@ -795,7 +804,18 @@ static tool_gate_t hook_before_tool(void *ud, agent_t *ag, const json_t *call, c
 static void app_bind_local(app_t *a) {
     const char *sid = session_id(a->session);
     free(a->env->local_dir);
-    if (a->session->dir) a->env->local_dir = xasprintf("%s/%s/local", a->session->dir, sid);
+    char *adir = a->session->persist ? artifacts_dir_for_session(a->session->file) : NULL;
+    if (adir) { /* resolveLocalRoot: <artifacts dir>/local; sessions from before this keep <sessions>/<id>/local */
+        a->env->local_dir = path_join(adir, "local");
+        free(adir);
+        char *old = a->session->dir ? xasprintf("%s/%s/local", a->session->dir, sid) : NULL;
+        if (old && !fs_exists(a->env->local_dir) && fs_exists(old)) {
+            free(a->env->local_dir);
+            a->env->local_dir = old;
+        } else {
+            free(old);
+        }
+    } else if (a->session->dir) a->env->local_dir = xasprintf("%s/%s/local", a->session->dir, sid);
     else {
         char *base = omc_agent_path("local");
         a->env->local_dir = xasprintf("%s/%s", base, sid);

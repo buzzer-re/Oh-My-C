@@ -16,13 +16,19 @@ static json_t *responses_dispatch(const ai_model_t *m, const ai_context_t *c, co
     return provider_openai_responses_stream(m, c, o, cb, ud);
 }
 
+/* stream.ts: OpenRouter speaks the Responses API unless PI_OPENROUTER_RESPONSES=0 */
+static json_t *openrouter_dispatch(const ai_model_t *m, const ai_context_t *c, const ai_stream_opts_t *o, ai_event_cb cb, void *ud) {
+    if (str_eq(getenv("PI_OPENROUTER_RESPONSES"), "0")) return provider_openai_completions_stream(m, c, o, cb, ud);
+    return provider_openai_responses_stream(m, c, o, cb, ud);
+}
+
 void ai_providers_init(void) {
     static bool done;
     if (done) return;
     done = true;
     ai_register_api("anthropic-messages", anthropic_dispatch);
     ai_register_api("openai-completions", completions_dispatch);
-    ai_register_api("openrouter", provider_openai_completions_stream);
+    ai_register_api("openrouter", openrouter_dispatch);
     ai_register_api("openai-responses", responses_dispatch);
     ai_register_api("azure-openai-responses", provider_openai_responses_stream);
     ai_register_api("openai-codex-responses", provider_openai_responses_stream);

@@ -1830,6 +1830,10 @@ void anthropic_build_headers(const ai_model_t *m, const ai_stream_opts_t *o, con
                           cflag(m, "supportsContextManagement"));
     if (wants_fast_mode(m, o)) beta_add(&betas, BETA_FAST_MODE);
     if (emits_effort) beta_add(&betas, BETA_EFFORT);
+    /* resolveAnthropicControlBetas (model capability, whether or not this request uses it) */
+    if (cflag(m, "supportsTurnScopedSystem")) beta_add(&betas, "mid-conversation-system-clear-at-2026-08-21");
+    if (cflag(m, "supportsMidConversationToolChanges")) beta_add(&betas, "mid-conversation-tool-changes-2026-07-01");
+    if (cflag(m, "supportsPerMessageEffort")) beta_add(&betas, "mid-conversation-output-config-2026-07-01");
     json_t *cc = resolve_cache_control(m, o, oauth);
     json_t *eb2 = model_compat_get(m, "extendedCacheTtlBeta");
     if (!oauth && !is_vertex_raw_predict(base_url) && !(json_is_bool(eb2) && !eb2->u.b) && cc &&
@@ -1958,6 +1962,7 @@ void anthropic_build_headers(const ai_model_t *m, const ai_stream_opts_t *o, con
                                           !http_headers_get(h, "Authorization"))) {
             http_headers_set(h, "X-Api-Key", api_key ? api_key : "");
         }
+        ai_apply_inference_headers(h, m, o->session_id, true);
     }
     free(beta_hdr);
     http_headers_free(&caller);

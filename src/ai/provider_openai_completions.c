@@ -399,14 +399,11 @@ char *oai_base_url(const ai_model_t *m, const char *def) {
     return r;
 }
 
-/* inference-headers.ts applyInferenceHeaders, protocol "openai": the conversation id on OpenAI itself */
 void oai_apply_inference_headers(http_headers_t *h, const ai_model_t *m, const ai_stream_opts_t *o) {
-    const char *backend = json_get_str(m->raw, "providerType") ? json_get_str(m->raw, "providerType") : m->provider;
-    if (!str_eq(backend, "openai")) return;
-    const char *sid = !str_empty(o->session_id) ? o->session_id : o->prompt_cache_key;
-    if (str_empty(sid)) return;
-    http_headers_set(h, "session_id", sid);
-    http_headers_set(h, "x-client-request-id", sid);
+    ai_apply_inference_headers(h, m, !str_empty(o->session_id) ? o->session_id : o->prompt_cache_key, false);
+    /* applySessionHeader: the model's compat.sessionHeader, a header already set wins */
+    const char *name = model_compat_str(m, "sessionHeader");
+    if (!str_empty(name) && !str_empty(o->session_id) && !http_headers_get(h, name)) http_headers_set(h, name, o->session_id);
 }
 
 void oai_add_openrouter_headers(http_headers_t *h) {

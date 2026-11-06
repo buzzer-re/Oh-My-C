@@ -757,6 +757,13 @@ json_t *oair_build_request(const ai_model_t *m, const ai_context_t *ctx, const a
         char *sid = oai_prompt_cache_key(o, 256, "session_");
         if (sid) json_set(p, "session_id", json_str_own(sid));
     }
+    /* maybeAddOpenRouterAnthropicCacheControl */
+    if (!str_eq(o->cache_retention, "none") && str_eq(model_compat_str(m, "cacheControlFormat"), "anthropic") && !json_get(p, "cache_control")) {
+        json_t *cc = json_obj();
+        json_set_str(cc, "type", "ephemeral");
+        if (str_eq(o->cache_retention, "long")) json_set_str(cc, "ttl", "1h");
+        json_set(p, "cache_control", cc);
+    }
     json_set_bool(p, "store", false);
     if (model_compat_bool(m, "supportsObfuscationOptOut", false)) {
         json_t *so = json_obj();

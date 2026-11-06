@@ -221,11 +221,14 @@ static void *compress_thread(void *p) {
             o.max_tokens = 1024;
             o.disable_reasoning = true;
             o.temperature = 0;
+            char *side_sid = uuid_v4(); /* a side request is its own conversation on the wire */
+            o.session_id = side_sid;
             volatile sig_atomic_t refused = 0;
             o.cancel = &refused;
             o.on_payload = refuse_attempt;
             o.payload_ud = (void *)&refused;
             json_t *r = key ? ai_complete(m, &ctx, &o) : NULL;
+            free(side_sid);
             costgate_record(json_get_num(json_get(json_get(r, "usage"), "cost"), "total", 0));
             const char *stop = json_get_str(r, "stopReason");
             if (refused) {
