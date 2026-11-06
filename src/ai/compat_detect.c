@@ -1567,7 +1567,7 @@ static void apply_catalog(json_t *m, const json_t *cat) {
     v = json_get(cat, "imageModel");
     if (json_is_str(v)) json_set_str(m, "imageModel", json_sv(v));
     else if (json_is_bool(v) && !v->u.b) json_del(m, "imageModel");
-    static const char *const copies[] = {"serviceTierCost", "priority", "promptCache", "applyPatchToolType", "editPromptVariant", "pricingStatus", "toolCallNameMaxLength"};
+    static const char *const copies[] = {"serviceTierCost", "priority", "promptCache", "applyPatchToolType", "editPromptVariant", "pricingStatus"};
     for (size_t i = 0; i < ARRAY_LEN(copies); i++)
         if ((v = json_get(cat, copies[i]))) json_set(m, copies[i], json_clone(v));
     v = json_get(cat, "toolSchemasInContext");
@@ -1757,6 +1757,31 @@ static void build_model(json_t *model) {
     if (user) json_set(model, "compatConfig", user);
     apply_catalog(model, ax.catalog);
     axes_free(&ax);
+}
+
+const json_t *compat_catalog_policy(const char *provider, const char *api, const char *id, const char *key) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static hmap_t cache;
+    static bool ready;
+    char *ck = xasprintf("%s\x1f%s\x1f%s", provider ? provider : "", api ? api : "", id ? id : "");
+    pthread_mutex_lock(&mu);
+    if (!ready) {
+        hmap_init(&cache);
+        ready = true;
+    }
+    json_t *policy = hmap_get(&cache, ck);
+    if (!policy) {
+        model_identity_t idn;
+        model_identity_classify(provider, id, &idn);
+        axes_t ax = {0};
+        resolve_cascade(&ax, provider, api ? api : "", &idn, id, false);
+        policy = ax.catalog ? json_clone(ax.catalog) : json_obj();
+        axes_free(&ax);
+        hmap_put(&cache, ck, policy);
+    }
+    pthread_mutex_unlock(&mu);
+    free(ck);
+    return json_get(policy, key);
 }
 
 void compat_resolve_model(json_t *model) {

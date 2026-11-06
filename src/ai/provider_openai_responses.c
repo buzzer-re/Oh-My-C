@@ -5,7 +5,9 @@
  * Port of openai-responses.ts / azure-openai-responses.ts / openai-codex-responses.ts (SSE transport)
  * and the processResponsesStream decoder in openai-shared.ts.
  */
+#include "ai/compat_detect.h"
 #include "ai/provider_openai.h"
+#include "ai/responses_ws.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -30,8 +32,9 @@ static char *wire_tool_name(const ai_model_t *m, const char *name) {
     if (!name) name = "";
     if (str_empty(prefix)) return xstrdup(name);
     size_t len = strlen(prefix) + strlen(name);
-    const json_t *max = json_get(m->raw, "toolCallNameMaxLength");
-    if (json_is_num(max) && (int64_t)len > json_get_int(m->raw, "toolCallNameMaxLength", 0)) return xstrdup(name);
+    const json_t *max = json_get(m->raw, "toolCallNameMaxLength"); /* a models.yml row may set it */
+    if (!json_is_num(max)) max = compat_catalog_policy(m->provider, m->api, m->id, "toolCallNameMaxLength");
+    if (json_is_num(max) && (int64_t)len > (int64_t)(max->is_int ? max->u.num.i : max->u.num.d)) return xstrdup(name);
     return xasprintf("%s%s", prefix, name);
 }
 
@@ -918,6 +921,7 @@ static bool build_headers(http_headers_t *h, const ai_model_t *m, const ai_strea
     model_headers(h, m);
     if (str_eq(m->provider, "openrouter")) oai_add_openrouter_headers(h);
     ai_apply_headers(h, NULL, o);
+    oai_apply_inference_headers(h, m, o);
     if (key && strcmp(key, AI_NO_AUTH_SENTINEL) != 0 && !http_headers_get(h, "Authorization")) {
         char *auth = xasprintf("Bearer %s", key);
         http_headers_set(h, "Authorization", auth);
@@ -1401,7 +1405,106 @@ typedef struct {
     const ai_model_t *m;
     const ai_context_t *ctx;
     const ai_stream_opts_t *o;
+    int mode;             /* ResponsesAttemptContext.mode: 0 undecided, else WS_MODE_* */
+    bool retry_empty;     /* retryEmptyCompletion: an SSE attempt; a successful empty WS response submits once */
 } oair_attempt_t;
+
+enum { WS_MODE_SSE = 1, WS_MODE_WEBSOCKET = 2 };
+
+/* resolveResponsesWebSocketPreference: capability is rule-owned, callers must opt in, an explicit false vetoes */
+static bool ws_preferred(const ai_model_t *m, const ai_stream_opts_t *o) {
+    const json_t *cap = compat_catalog_policy(m->provider, m->api, m->id, "supportsWebsockets");
+    if (!json_is_bool(cap) || !cap->u.b) return false;
+    const json_t *pref = json_get(m->raw, "preferWebsockets");
+    bool model_true = json_is_bool(pref) && pref->u.b, model_false = json_is_bool(pref) && !pref->u.b;
+    if (o->prefer_websockets < 0 || model_false) return false;
+    return o->prefer_websockets > 0 || model_true;
+}
+
+/* isOpenAIResponsesWebSocketChainEnabled: socket-local continuation needs no stored responses, so only the explicit
+ * opt-outs apply: a gateway that ignores previous_response_id would silently drop prior turns */
+static bool ws_chain_enabled(const ai_model_t *m, const ai_stream_opts_t *o) {
+    if (o->stateful_responses) return o->stateful_responses > 0;
+    const char *env = env_get("PI_OPENAI_STATEFUL");
+    if (!str_empty(env)) return env_truthy("PI_OPENAI_STATEFUL");
+    const json_t *c = model_compat_get(m, "statefulResponses");
+    return json_is_bool(c) ? c->u.b : true;
+}
+
+/* the WebSocket half of streamOpenAIResponsesOnce. Returns the final message, or NULL to fall back to HTTP/SSE for this
+ * request (a pre-send transport failure, or an endpoint that refuses the upgrade). */
+static json_t *oair_ws_attempt(oair_attempt_t *at, const json_t *body, const http_headers_t *h, oair_stream_t *st) {
+    const ai_model_t *m = at->m;
+    const ai_stream_opts_t *o = at->o;
+    char *url = oair_url(m);
+    char *rewritten = ai_rewrite_url(url);
+    free(url);
+    const char *session = o->provider_session_state ? o->session_id : NULL;
+    if (rws_is_sse_only(rewritten, m->id, session)) {
+        free(rewritten);
+        at->mode = WS_MODE_SSE;
+        return NULL;
+    }
+    int64_t first = o->first_event_timeout_ms;
+    rws_lease_t *lease = rws_acquire(rewritten, m->id, session, h, MIN((int64_t)30000, first > 0 ? first : 30000), !str_empty(o->session_id));
+    free(rewritten);
+    int status = 0;
+    char *err = NULL;
+    bool caller_stop = o->cancel && *o->cancel;
+    if (caller_stop) {
+        rws_release(lease);
+        return oair_stream_finish(st, -2, "Request was aborted");
+    }
+    if (rws_connect(lease, &status, &err) != 0) {
+        /* a definite upgrade rejection proves the endpoint lacks WS; a network failure may be a blip */
+        bool definite = status == 404 || status == 405 || status == 426 || status == 501;
+        if (status && !definite) {
+            rws_release(lease);
+            json_t *msg = oair_stream_finish(st, -1, err);
+            json_set_int(msg, "errorStatus", status);
+            free(err);
+            return msg;
+        }
+        if (definite) rws_mark_sse_only(lease);
+        else rws_record_connect_failure(lease);
+        LOGW("responses websocket unavailable, falling back to SSE: %s", err ? err : "connect failed");
+        free(err);
+        rws_release(lease);
+        at->mode = WS_MODE_SSE;
+        return NULL;
+    }
+    at->retry_empty = false;
+    bool chain = ws_chain_enabled(m, o) && !rws_chain_disabled(lease);
+    int64_t idle = o->idle_timeout_ms == 0 || o->first_event_timeout_ms == 0 ? 24LL * 3600 * 1000 : MAX((int64_t)300000, MAX(o->idle_timeout_ms, o->first_event_timeout_ms));
+    rws_result_t r = rws_exchange(lease, body, chain, idle, o->cancel, oair_stream_on_sse, st, &status, &err);
+    json_t *msg;
+    switch (r) {
+    case RWS_DONE:
+    case RWS_STOPPED: msg = oair_stream_finish(st, 0, NULL); break;
+    case RWS_ABORTED:
+        /* the stream watchdog cancels too: a stream timeout is a post-send transport failure */
+        if (!(*(o->caller_cancel ? o->caller_cancel : o->cancel))) {
+            rws_mark_sse_only(lease);
+            rws_close_socket(lease);
+        }
+        msg = oair_stream_finish(st, -2, "Request was aborted");
+        break;
+    case RWS_CLOSED:
+        rws_mark_sse_only(lease);
+        msg = oair_stream_finish(st, -1, "OpenAI responses stream closed before a terminal response event was received");
+        break;
+    case RWS_REJECTED: /* a definite pre-generation rejection: the frame already reached the decoder, the socket is fine */
+        msg = oair_stream_finish(st, 0, NULL);
+        if (status) json_set_int(msg, "errorStatus", status);
+        break;
+    default:
+        msg = oair_stream_finish(st, -1, err ? err : "request failed");
+        break;
+    }
+    free(err);
+    rws_release(lease);
+    return msg;
+}
 
 static json_t *oair_stream_once(void *self, ai_event_cb cb, void *ud) {
     oair_attempt_t *at = self;
@@ -1413,10 +1516,23 @@ static json_t *oair_stream_once(void *self, ai_event_cb cb, void *ud) {
     http_headers_t h = {0};
     char *err = NULL;
     oair_stream_t *st = oair_stream_new(m, cb, ud);
-    json_t *msg;
+    json_t *msg = NULL;
     json_t *wire_names = oair_tool_names_by_wire(m, ctx->tools, &err);
     oair_stream_set_wire_names(st, wire_names);
-    if (err || !build_headers(&h, m, o, body, &err)) {
+    if (!at->mode) at->mode = variant_of(m) == V_OPENAI && ws_preferred(m, o) ? WS_MODE_WEBSOCKET : WS_MODE_SSE;
+    bool headers_ok = !err && build_headers(&h, m, o, body, &err);
+    if (headers_ok && at->mode == WS_MODE_WEBSOCKET) {
+        msg = oair_ws_attempt(at, body, &h, st);
+        if (!msg) {
+            /* a different transport is a different candidate: the hook replaces that body too */
+            json_free(body);
+            body = oair_build_request(m, ctx, o);
+            if (o->on_payload) o->on_payload(o->payload_ud, body);
+        }
+    }
+    if (msg) {
+        /* answered over the socket */
+    } else if (!headers_ok) {
         msg = oair_stream_finish(st, -1, err);
     } else {
         char *url = oair_url(m);
@@ -1446,9 +1562,9 @@ json_t *provider_openai_responses_stream(const ai_model_t *m, const ai_context_t
     lo.retry_policy = v == V_CODEX ? AI_RETRY_CODEX : AI_RETRY_OPENAI;
     lo.max_retries = 5;
     if (v == V_CODEX) lo.max_retry_delay_ms = 5 * 60 * 1000; /* CODEX_RATE_LIMIT_BUDGET_MS */
-    oair_attempt_t at = {m, ctx, &lo};
+    oair_attempt_t at = {.m = m, .ctx = ctx, .o = &lo, .retry_empty = v == V_OPENAI};
     if (v == V_CODEX) return oair_stream_once(&at, cb, ud);
-    return ai_replay_safe_stream(oair_stream_once, &at, &lo, cb, ud, v == V_OPENAI, v == V_AZURE ? 1 : 0);
+    return ai_replay_safe_stream_ex(oair_stream_once, &at, &lo, cb, ud, &at.retry_empty, v == V_AZURE ? 1 : 0);
 }
 
 /* ====================================================================== */

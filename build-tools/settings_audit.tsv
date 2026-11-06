@@ -83,7 +83,7 @@ tui.spinnerInterval	inert	not ported yet (omp v18.17.0)
 tui.maxFps	inert	not ported yet (omp v18.17.0)
 tui.motion	inert	not ported yet (omp v18.17.0)
 task.workerThreads	inert	omc subagents are threads already; no worker-thread placement
-providers.openaiResponsesWebsockets	inert	not ported yet (omp v18.17.0)
+providers.openaiResponsesWebsockets	wired	standard Responses over WebSocket
 magicKeywords.chillax	inert	not ported yet (omp v18.17.0)
 extensionRenderers.transcriptPresenters	oos	needs the JS extension runtime
 display.shellVisualization	oos	needs upstream's Rust shell engine (RunTrace)

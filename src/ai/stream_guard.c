@@ -280,7 +280,10 @@ json_t *ai_stream_guarded(ai_stream_fn fn, const ai_model_t *m, const ai_context
         pthread_t th;
         bool threaded = pthread_create(&th, NULL, watch_main, &w) == 0;
         ai_stream_opts_t o2 = *o;
-        if (threaded) o2.cancel = &w.local_cancel;
+        if (threaded) {
+            o2.cancel = &w.local_cancel;
+            o2.caller_cancel = o->cancel;
+        }
         r = fn(m, ctx, &o2, watch_cb, &w);
         pthread_mutex_lock(&w.mu);
         w.done = true;

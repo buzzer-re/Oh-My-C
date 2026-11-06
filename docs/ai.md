@@ -218,7 +218,7 @@ transport layer turns them into the request shape. It ports the registry `prepar
 | `oauth-code` | `auth.c` + `auth_engine.c` | authorize URL with upstream param order/encoding, PKCE, state, local callback server with port fallback, paste-code, after-exchange hooks (Google project provisioning, Codex profile, Anthropic identity, Z.ai key minting) |
 | `device-code` | `auth_engine.c` | RFC 8628 with interval / `slow_down` / expiry / denial, templated endpoints, OIDC discovery (xAI), JWT-claim fields |
 | `api-key` | `auth_engine.c` | prompt, normalization, optional validation probes (chat completions / anthropic messages / models endpoint) |
-| custom hooks | `auth_custom.c` | GitHub Copilot, Cursor, Codex device, Alibaba coding/token plan, Xiaomi, Perplexity, Cloudflare AI Gateway / Workers AI, Snowflake, Kilo, Mistral Vibe browser sign-in (mints a plain API key) |
+| custom hooks | `auth_custom.c` | GitHub Copilot, Cursor, Devin CLI seat key (`devin-cli`), Windsurf Enterprise (`devin-windsurf`), Codex device, Alibaba coding/token plan, Xiaomi, Perplexity, Cloudflare AI Gateway / Workers AI, Snowflake, Kilo, Mistral Vibe browser sign-in (mints a plain API key) |
 
 Entry points: `omc login [provider]`, `/login` in the TUI, the setup wizard, and RPC
 `get_login_providers`. MCP servers reuse the same oauth-code machinery (`src/mcp/oauth.c`, see
@@ -250,6 +250,8 @@ There are two levels:
      then body text such as "Please retry in 250ms", `"retryDelay"`, "try again in 5 min", "reset after 1h2m3s");
      a hint above the cap returns the response unretried. A final HTTP error whose headers carry retry timing gets
      omp's ` retry-after-ms=N` suffix (read by the turn level).
+   - A captured `x-should-retry` header overrides the Anthropic loop's status and text heuristics (usage limits still stop),
+     and `false` is terminal on the OpenAI wire.
    - Replay-safe stream retries (`ai_replay_safe_stream`, omp `withReplaySafeStreamRetry`): pre-output events of a
      discarded attempt never reach the agent; benign empty completions are retried twice (500 ms, 1 s) for OpenAI
      chat completions / Responses, Anthropic and Ollama (`accept_empty_response` turns it off).
@@ -317,6 +319,32 @@ request itself or fail it at once. Anthropic uses it for:
   wrapping up · resets …`) and the model is steered once per wrap-up window
   (`anthropic-usage-wrap-up.md`). omp's sibling-account health gate before auto-accept is not ported
   (omc does not rotate Claude accounts).
+
+## Server-side conversation state
+
+Both are ports of omp 18.17 and keep the client as the source of truth: a turn sends only what it appends when its full
+request extends what the server holds, and anything else (rewritten history, changed fixed fields, an expired or refused
+anchor) falls back to a full upload.
+
+**Anthropic message threads** (`src/ai/anthropic_threads.c`, `anthropic-threads.ts`). On by default for Claude 4.5 and newer
+on the official endpoint (`supportsMessageThreads`); `PI_ANTHROPIC_MESSAGE_THREADS=0/1` or the `statefulResponses` option
+override it, and a reroute through `ANTHROPIC_BASE_URL` turns it off. The first request carries `thread: {type: "create"}`, later
+ones `thread: {type: "continue", previous_message_id}` with the appended messages only, without `system` and `tools` (OAuth
+traffic keeps them) and with the `message-threads-2026-08-12` beta. A continue marks its first appended block besides its
+newest one, so prompt cache reads survive turns of many parallel tool calls. Chains are capped at 16 per endpoint and model
+(least recently used evicted); side requests release theirs. A refused continue replays as a create, two in a row or a
+refused create stop threading the session, and an unexplained 400 gets one unthreaded resend. Only requests with
+`provider_session_state` thread: the main loop, compaction and side requests without a per-call message.
+
+**Standard Responses WebSockets** (`src/ai/responses_ws.c`, `openai-responses-session.ts`). Opt-in with
+`providers.openaiResponsesWebsockets` on models whose rules set `supportsWebsockets`, a model's `preferWebsockets: false` vetoes
+it. One socket per session, reused for 30 s between exchanges (checked when the next request asks for it: omc has no reader
+thread), with `previous_response_id` turns unless `statefulResponses`, `PI_OPENAI_STATEFUL` or `compat.statefulResponses` opt out.
+omc rebuilds history items instead of replaying native ones, so the baseline comparison goes by content (call id, name, parsed
+arguments, text, encrypted reasoning) and any mismatch resends the full history. A first-frame stale-anchor rejection resends in
+full on the same socket; three in a row stop anchoring. An upgrade rejection with 404/405/426/501 or a post-send transport failure
+makes HTTP/SSE sticky for the session; a pre-send network failure falls back for that request and sticks on the second. Other
+upgrade statuses are errors. The Codex WebSocket transport itself is not ported.
 
 ## Transports (`src/net/`)
 

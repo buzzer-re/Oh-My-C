@@ -400,6 +400,43 @@ static const char *RESP_HISTORY =
     "{\"role\":\"toolResult\",\"toolCallId\":\"call_9|fc_9\",\"toolName\":\"read\",\"content\":[{\"type\":\"text\",\"text\":\"data\"}]},"
     "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"img\"},{\"type\":\"image\",\"data\":\"QQ==\",\"mimeType\":\"image/jpeg\"}]}]";
 
+/* #17847: a call cut by the output limit still replays next to its synthetic result; omc rebuilds every call from the
+ * assistant blocks, so no native item can omit it (omp's pickUnrecordedResponsesToolCalls) */
+static void test_cut_tool_calls_replay(void) {
+    static const char *const apis[] = {"openai-responses", "openai-codex-responses"};
+    for (int v = 0; v < 2; v++) {
+        tmodel_t t;
+        char *mj = xasprintf("{\"id\":\"m1\",\"api\":\"%s\",\"provider\":\"p1\",\"compat\":{\"strictResponsesPairing\":true}}", apis[v]);
+        model_init(&t, mj);
+        free(mj);
+        char *hist = xasprintf(
+            "[{\"role\":\"user\",\"content\":\"Write two files\"},"
+            "{\"role\":\"assistant\",\"api\":\"%s\",\"provider\":\"p1\",\"model\":\"m1\",\"stopReason\":\"length\",\"content\":["
+            "{\"type\":\"text\",\"text\":\"Writing files\"},"
+            "{\"type\":\"toolCall\",\"id\":\"call_A|fc_A\",\"name\":\"write\",\"arguments\":{\"path\":\"a\"}},"
+            "{\"type\":\"toolCall\",\"id\":\"call_B|fc_B\",\"name\":\"write\",\"arguments\":{\"path\":\"b\"}}]},"
+            "{\"role\":\"toolResult\",\"toolCallId\":\"call_A|fc_A\",\"toolName\":\"write\",\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"Stopped at output limit\"}]},"
+            "{\"role\":\"toolResult\",\"toolCallId\":\"call_B|fc_B\",\"toolName\":\"write\",\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"Stopped at output limit\"}]}]",
+            apis[v]);
+        json_t *msgs = J(hist);
+        free(hist);
+        ai_context_t ctx = {.messages = msgs};
+        json_t *in = oair_convert_input(&t.m, &ctx, v == 0 ? 0 : 2);
+        sb_t order = SB_INIT;
+        json_t *it;
+        json_arr_foreach(in, i, it) {
+            const char *ty = json_get_str(it, "type");
+            if (str_eq(ty, "function_call") || str_eq(ty, "function_call_output")) sb_appendf(&order, "%s:%s ", ty, json_get_str(it, "call_id"));
+        }
+        CHECK_STR(sb_cstr(&order), "function_call:call_A function_call:call_B function_call_output:call_A function_call_output:call_B ");
+        CHECK_STR(json_get_str(json_at(in, json_len(in) - 1), "type"), "function_call_output");
+        sb_free(&order);
+        json_free(in);
+        json_free(msgs);
+        json_free(t.raw);
+    }
+}
+
 /* compat.toolNamePrefix (Muse Code): declared tools, rebuilt calls and a forced choice use the wire name, a name the
  * prefix would push past the limit stays bare, and returned calls map back to the declared tool */
 static void test_tool_name_prefix(void) {
@@ -1013,6 +1050,7 @@ int main(void) {
     test_completions_stream_errors();
     test_responses_request();
     test_tool_name_prefix();
+    test_cut_tool_calls_replay();
     test_codex_azure();
     test_responses_stream();
     test_ollama();

@@ -42,6 +42,7 @@
 #include "mcp/mcp.h"
 #include "prompt/template.h"
 #include "ai/anthropic_threads.h"
+#include "ai/responses_ws.h"
 #include "ai/provider_anthropic.h"
 #include "ai/ai_images.h"
 
@@ -431,6 +432,8 @@ static void fill_request_opts(app_t *a, ai_stream_opts_t *o) {
     o->max_retry_delay_ms = max_delay > 0 ? max_delay : -1;
     const json_t *lim = settings_get("providers.maxInFlightRequests"); /* read once when the request starts */
     o->max_in_flight = json_is_obj(lim) ? lim : NULL;
+    /* resolveWebsocketPreference: the setting opts in for standard Responses models, the model's own false still vetoes */
+    if (!o->prefer_websockets) o->prefer_websockets = settings_bool("providers.openaiResponsesWebsockets", false) ? 1 : -1;
 }
 
 void app_fill_request_opts(app_t *a, ai_stream_opts_t *o) { fill_request_opts(a, o); }
@@ -2398,7 +2401,10 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
     o.cursor_exec = NULL;
     eph_ud_t x = {.e = e};
     json_t *r = ai_stream(model, &ctx, &o, eph_event, &x);
-    if (!e->conversation_key) anth_threads_release_session(sid); /* a one-shot side id: its chain would pin the conversation */
+    if (!e->conversation_key) { /* a one-shot side id: its chain would pin the conversation, its socket stay open */
+        anth_threads_release_session(sid);
+        rws_release_session(sid);
+    }
     json_free(wire);
     json_free(tools);
     json_free(sys);

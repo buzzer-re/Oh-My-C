@@ -235,6 +235,8 @@ typedef struct {
     /* omp's providerSessionState is present: server-side conversation state (Anthropic message threads) may be used */
     bool provider_session_state;
     int stateful_responses; /* the statefulResponses option: 0 unset, 1 true, -1 false */
+    int prefer_websockets;  /* the preferWebsockets option: 0 unset, 1 true, -1 false */
+    volatile sig_atomic_t *caller_cancel; /* set by the stream watchdog, which replaces cancel with its own flag */
 } ai_stream_opts_t;
 
 void ai_stream_opts_init(ai_stream_opts_t *o);
@@ -366,6 +368,9 @@ bool ai_usage_limit_text(const char *msg, int status);
 typedef json_t *(*ai_attempt_fn)(void *self, ai_event_cb cb, void *ud); /* one provider attempt */
 json_t *ai_replay_safe_stream(ai_attempt_fn once, void *self, const ai_stream_opts_t *o, ai_event_cb cb, void *ud,
                               bool retry_empty, int max_error_retries);
+/* retry_empty read after each attempt (a function-valued retryEmptyCompletion) */
+json_t *ai_replay_safe_stream_ex(ai_attempt_fn once, void *self, const ai_stream_opts_t *o, ai_event_cb cb, void *ud,
+                                 const bool *retry_empty, int max_error_retries);
 
 /* Streaming POST with SSE parsing + retry on transient errors (see the transport retry policies above).
  * on_event returns non-zero to abort. Returns 0 on success (2xx stream consumed);
