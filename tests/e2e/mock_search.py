@@ -136,6 +136,10 @@ class H(BaseHTTPRequestHandler):
                  "related_questions": ["What next?"]},
                 {"id": "pplx_1", "choices": [{"delta": {}, "finish_reason": "stop"}],
                  "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11}}])
+        if path.startswith("/keenable/"):
+            return self.send(200, json.dumps({"results": [
+                {"title": "Keenable  Source", "url": "HTTPS://Example.COM", "snippet": "keenable\n snippet", "published_at": "2026-01-02T00:00:00Z"},
+                {"title": "dup", "url": "https://example.com/"}, {"title": "bad", "url": "ftp://x"}, {"url": "https://example.com/two"}]}))
         if path.endswith("/coding/v1/search"):
             return self.send(200, json.dumps({"search_results": [
                 {"site_name": "Kimi Site", "title": "Kimi Source", "url": "https://example.com/kimi", "snippet": "kimi snippet", "date": "2026-01-02"}]}),

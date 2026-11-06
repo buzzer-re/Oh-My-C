@@ -455,6 +455,7 @@ char *cli_extra_help(void) {
         "  EXA_API_KEY                - Exa web search\n"
         "  BRAVE_API_KEY              - Brave web search\n"
         "  TAVILY_API_KEY             - Tavily web search\n"
+        "  KEENABLE_API_KEY           - Keenable web search (optional; keyless public fallback)\n"
         "\n"
         "  %s\n"
         "  OMC_CODING_AGENT_DIR       - Session storage directory (default: ~/.omc/agent)\n"
