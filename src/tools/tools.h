@@ -98,7 +98,7 @@ typedef struct tool_env {
     todo_state_t todo;
     tool_ui_t ui;
     json_t *settings;          /* borrowed effective settings */
-    char *edit_mode;           /* "hashline" | "replace" | "patch" | "apply_patch" | "sloppy" */
+    char *edit_mode;           /* "hashline" | "replace" | "patch" | "apply_patch" | "sloppy" | "none" (no edit tool, no anchors) */
     struct artifact_store *artifacts; /* session artifacts (artifact://<id>; shared with subagents; NULL: none) */
     int subagent_depth;
     bool can_prompt_user;      /* a UI can answer `ask` (interactive mode) */
@@ -169,6 +169,7 @@ agent_tool_t *tool_write_new(tool_env_t *env);
 agent_tool_t *tool_edit_new(tool_env_t *env);
 agent_tool_t *tool_bash_new(tool_env_t *env);
 agent_tool_t *tool_wait_new(tool_env_t *env);
+const char *tool_edit_mode_setting(void); /* edit.mode / PI_EDIT_VARIANT: an edit mode, or "none" (no edit tool, bash stays) */
 /* render settled background jobs ([{jobId,label,result}]) as the async-result notice (owned) */
 char *jobs_render_results(const json_t *jobs);
 agent_tool_t *tool_grep_new(tool_env_t *env);

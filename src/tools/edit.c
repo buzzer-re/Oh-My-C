@@ -158,12 +158,16 @@ static json_t *edit_examples(const char *mode) {
     return NULL;
 }
 
-agent_tool_t *tool_edit_new(tool_env_t *env) {
-    /* edit.mode (env PI_EDIT_VARIANT pins it); unknown values fall back to hashline */
-    const char *mode = settings_str("edit.mode", "hashline");
+/* edit.mode (env PI_EDIT_VARIANT pins it), "none" included */
+const char *tool_edit_mode_setting(void) {
     const char *ev = env_get("PI_EDIT_VARIANT");
     if (!ev) ev = env_get("OMC_EDIT_VARIANT");
-    if (ev) mode = ev;
+    return ev ? ev : settings_str("edit.mode", "hashline");
+}
+
+agent_tool_t *tool_edit_new(tool_env_t *env) {
+    /* unknown values fall back to hashline */
+    const char *mode = tool_edit_mode_setting();
     if (pe_mode_parse(mode) < 0) mode = "hashline";
     free(env->edit_mode);
     env->edit_mode = xstrdup(mode);
