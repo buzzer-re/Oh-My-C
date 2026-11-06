@@ -1,5 +1,5 @@
 /* judgment_native.h - native judgment APIs: catalog judge models (typesafe, openrouter-decisions,
- * workers-ai-systemone) that answer typed questions directly. */
+ * openai-decisions, workers-ai-systemone) that answer typed questions directly. */
 #ifndef OMC_JUDGMENT_NATIVE_H
 #define OMC_JUDGMENT_NATIVE_H
 
@@ -11,6 +11,6 @@ bool ai_is_judgment_api(const char *api);
  * checked against each question's type), adds the billed cost to *cost and sets *model_out (owned
  * "provider/model"), or NULL with *err (owned). */
 json_t *ai_native_judge(const ai_model_t *m, const char *key, const json_t *state, const json_t *questions,
-                        const json_t *images, volatile sig_atomic_t *cancel, double *cost, char **model_out, char **err);
+                        const json_t *images, volatile sig_atomic_t *cancel, double *cost, int64_t tokens[2], char **model_out, char **err);
 
 #endif

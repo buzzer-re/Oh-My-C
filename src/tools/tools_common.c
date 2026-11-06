@@ -1,4 +1,6 @@
 #include "tools.h"
+#include "ai/judgment_native.h"
+#include "config/model_resolver.h"
 #include "coding/memory.h"
 #include "jobs.h"
 #include "artifacts.h"
@@ -314,10 +316,16 @@ static bool builtin_allowed(tool_env_t *env, const char *name) {
     if (!strcmp(name, "web_search")) return setting_on("web_search.enabled", true);
     if (!strcmp(name, "ask")) return setting_on("ask.enabled", true) && (env->can_prompt_user || env->ask_ui);
     if (!strcmp(name, "find")) {
-        /* "auto" needs a native judgment backend (TypeSafe jev / Decisions APIs), which omc lacks */
         json_t *v = settings_get("find.enabled");
         if (json_is_bool(v)) return v->u.b;
-        return str_eq(json_sv(v), "on");
+        const char *mode = json_sv(v);
+        if (mode && !str_eq(mode, "auto")) return str_eq(mode, "on");
+        /* hasNativeJudge: the judge role resolves first to a native judgment backend */
+        mr_chain_t chain;
+        mr_role_chain("judge", NULL, &chain);
+        bool native = chain.n && chain.v[0].model && ai_is_judgment_api(chain.v[0].model->api);
+        mr_chain_free(&chain);
+        return native;
     }
     if (!strcmp(name, "wait"))
         return env->jobs && (setting_on("async.enabled", true) || setting_on("launch.enabled", true));

@@ -128,12 +128,25 @@ class H(BaseHTTPRequestHandler):
         path = path.split("?")[0]  # routing ignores query strings (omp's Anthropic client adds ?beta=true)
         if path.startswith("/deny") and self.headers.get("Copilot-Integration-Id") == "copilot-chat":
             return self.reply(403, {"error": {"message": "integration not allowed", "code": "forbidden"}})
+        if path.endswith("/decisions") and isinstance(body.get("questions"), list):
+            # OpenAI Decisions: questions and answers are arrays
+            out = []
+            for q in body["questions"]:
+                t, name = q.get("type"), q.get("name")
+                if t == "predicate":
+                    out.append({"type": t, "name": name, "probability": 0.9})
+                elif t == "choice":
+                    first = q["choices"][0]["value"]
+                    out.append({"type": t, "name": name, "choice": first, "probabilities": [{"value": first, "probability": 1}], "confidence": 1})
+                else:
+                    out.append({"type": t, "name": name, "score": 2, "probabilities": [{"value": 2, "probability": 1}], "confidence": 1})
+            return self.reply(200, {"model": body.get("model"), "answers": out, "usage": {"input_tokens": 10, "output_tokens": 2}})
         if path.endswith("/v1/systemone") or path.endswith("/decisions") or "/ai/run/" in path:
             answers = {}
             for qid, q in (body.get("questions") or {}).items():
                 t = q.get("type")
-                if t == "bool":
-                    answers[qid] = {"type": "bool", "bool": 0.9}
+                if t == "bool" or t == "noul":
+                    answers[qid] = {"type": t, t: 0.9}
                 elif t == "choice":
                     first = next(iter(q.get("criteria") or {"a": ""}))
                     answers[qid] = {"type": "choice", "choice": first, "probabilities": {first: 1}, "confidence": 1}

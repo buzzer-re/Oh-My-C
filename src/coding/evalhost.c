@@ -669,9 +669,12 @@ static bool run_judge(app_t *a, const json_t *state, const json_t *questions, co
         if (ai_is_judgment_api(m->api)) {
             /* native judgment API (TypeSafe System One, OpenRouter Decisions, Workers AI Clef) answers directly */
             char *nerr = NULL, *nmodel = NULL;
-            json_t *ans = ai_native_judge(m, key, state, questions, images, c1 ? c1 : c2, cost, &nmodel, &nerr);
+            int64_t ntok[2] = {0, 0};
+            json_t *ans = ai_native_judge(m, key, state, questions, images, c1 ? c1 : c2, cost, ntok, &nmodel, &nerr);
             if (ans) {
                 v->answers = ans;
+                v->in_tok = ntok[0];
+                v->out_tok = ntok[1];
                 v->model = nmodel ? nmodel : xstrdup(label);
                 done = true;
             } else if (cancelled(c1, c2)) {

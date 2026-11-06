@@ -12,7 +12,7 @@ plan proposals, UI `ask`). Per-tool completeness is tracked in [status.md](statu
 - `tools_register_builtin()` (`tools_common.c`) constructs the enabled built-ins. Gating follows
   omp's `resolveBuiltinToolPlan()`: `bash.enabled`, `todo.enabled`, `glob.enabled`,
   `grep.enabled`, `astGrep.enabled` (off), `astEdit.enabled`, `web_search.enabled`, `ask.enabled`
-  (needs a UI), `find.enabled` (only `true`/`on`; omp's `auto` needs a native judge backend),
+  (needs a UI), `find.enabled` (`auto` follows the judge role: on when it resolves first to a native judgment backend),
   `wait` (needs jobs), and `task` (depth below `task.maxRecursionDepth`). `--tools a,b` restricts
   the set, and `--no-tools` removes it.
 - `install_agent()` (`coding/app.c`) adds the session-level tools: `lsp`, `debug`,
