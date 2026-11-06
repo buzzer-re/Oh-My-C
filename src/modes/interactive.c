@@ -2851,7 +2851,7 @@ static bool focused_view_command(const char *name, const char *args) {
 static void focused_submit(ui_t *u, tui_editor_t *ed, const char *text) {
     char *t = str_trim(text);
     if (!*t) {
-        if (agent_is_running(u->view->agent)) agent_abort(u->view->agent);
+        if (agent_is_running(u->view->agent) && agent_has_interruptible_input(u->view->agent)) agent_abort_deliver_queued(u->view->agent);
         free(t);
         return;
     }

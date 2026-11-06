@@ -656,6 +656,28 @@ void agent_append_message(agent_t *a, json_t *msg) {
 void agent_abort(agent_t *a) { a->cancel = 1; }
 void agent_abort_next_silently(agent_t *a) { a->silent_abort_next = 1; }
 
+void agent_abort_deliver_queued(agent_t *a) {
+    a->deliver_queued = 1;
+    a->cancel = 1;
+}
+
+bool agent_take_forced_delivery(agent_t *a) {
+    if (!a->deliver_queued) return false;
+    a->deliver_queued = 0;
+    /* #promoteForcedFollowUps: the steering mode's boundary poll picks them up; they stay unmarked */
+    bool moved = false;
+    pthread_mutex_lock(&a->mu);
+    for (size_t i = 0; i < json_len(a->follow_up);) {
+        if (agent_msg_user_authored(json_at(a->follow_up, i))) {
+            json_push(a->steering, json_arr_remove(a->follow_up, i));
+            moved = true;
+        } else i++;
+    }
+    pthread_mutex_unlock(&a->mu);
+    if (moved) agent_queue_changed(a);
+    return true;
+}
+
 void agent_queue_changed(agent_t *a) {
     if (a->hooks.queue_changed) a->hooks.queue_changed(a->hooks.ud, a);
 }
@@ -755,6 +777,15 @@ size_t agent_queued_count(agent_t *a) {
     size_t n = json_len(a->steering) + json_len(a->follow_up);
     pthread_mutex_unlock(&a->mu);
     return n;
+}
+
+bool agent_has_interruptible_input(agent_t *a) {
+    bool r = false;
+    pthread_mutex_lock(&a->mu);
+    json_t *queues[] = {a->steering, a->follow_up}, *m;
+    for (int q = 0; q < 2 && !r; q++) json_arr_foreach(queues[q], i, m) if (agent_msg_user_authored(m)) r = true;
+    pthread_mutex_unlock(&a->mu);
+    return r;
 }
 
 size_t agent_steering_count(agent_t *a) {

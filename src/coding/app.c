@@ -3161,12 +3161,8 @@ static bool is_cut_off_assistant(const json_t *m) {
     return true;
 }
 
-/* AgentSession.resume, the `.`/`c` continue shortcut. A prompt the model has not answered yet runs again as is;
- * otherwise the hidden manual-continue directive asks the model to pick its work back up. */
-int app_resume(app_t *a, char **err) {
-    maybe_restore_primary(a);
-    pthread_mutex_lock(&a->agent->mu);
-    json_t *msgs = a->agent->messages;
+/* conversationEnd + the cut-off tail + unansweredPrompt (turn-recovery.ts). Sets the tail range; caller holds the lock. */
+static bool unanswered_prompt_locked(const json_t *msgs, size_t *tail_out, size_t *end_out) {
     /* conversationEnd: trailing custom messages the user did not author */
     size_t end = json_len(msgs);
     while (end > 0) {
@@ -3176,19 +3172,40 @@ int app_resume(app_t *a, char **err) {
     }
     size_t tail = end;
     while (tail > 0 && is_cut_off_assistant(json_at(msgs, tail - 1))) tail--;
-    /* unansweredPrompt */
-    bool unanswered = false;
+    *tail_out = tail;
+    *end_out = end;
     for (size_t i = tail; i-- > 0;) {
         const json_t *m = json_at(msgs, i);
         const char *role = json_get_str(m, "role");
         if (str_eq(role, "assistant")) {
-            if (!is_cut_off_assistant(m)) break;
+            if (!is_cut_off_assistant(m)) return false;
+        } else if (json_get_bool(m, "sessionSummary", false)) {
+            continue; /* a handoff or compaction can leave only the summary: the directive resumes it */
         } else if (str_eq(role, "user") || (str_eq(role, "custom") && str_eq(json_get_str(m, "attribution"), "user") && json_get_bool(m, "display", true)) ||
                    (str_eq(role, "developer") && json_get_bool(m, "userInitiated", false))) {
-            unanswered = true;
-            break;
+            return true;
         }
     }
+    return false;
+}
+
+bool app_has_unanswered_prompt(app_t *a) {
+    size_t tail, end;
+    pthread_mutex_lock(&a->agent->mu);
+    bool r = unanswered_prompt_locked(a->agent->messages, &tail, &end);
+    pthread_mutex_unlock(&a->agent->mu);
+    return r;
+}
+
+/* AgentSession.resume, the `.`/`c` continue shortcut. A prompt the model has not answered yet runs again as is;
+ * otherwise the hidden manual-continue directive asks the model to pick its work back up. omc's summaries and
+ * user-invoked /skill: prompts are `user` messages, so has_user below covers omp's resumable check. */
+int app_resume(app_t *a, char **err) {
+    maybe_restore_primary(a);
+    pthread_mutex_lock(&a->agent->mu);
+    json_t *msgs = a->agent->messages;
+    size_t tail, end;
+    bool unanswered = unanswered_prompt_locked(msgs, &tail, &end);
     if (unanswered)
         for (size_t i = end; i-- > tail;) json_free(json_arr_remove(msgs, i));
     bool has_user = false;

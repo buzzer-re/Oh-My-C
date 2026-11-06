@@ -237,6 +237,7 @@ int app_prompt_skill(app_t *a, json_t *msg);
 /* run a hidden prompt (not shown in transcripts), e.g. goal continuations; custom_type tags the session entry */
 int app_prompt_hidden(app_t *a, const char *text, const char *custom_type);
 int app_resume(app_t *a, char **err); /* the `.`/`c` continue shortcut; -1 + *err "Nothing to resume" */
+bool app_has_unanswered_prompt(app_t *a); /* the history ends in a prompt the model has not answered (omp unansweredPrompt) */
 int app_set_model(app_t *a, const char *pattern, char **err);
 void app_set_thinking(app_t *a, ai_effort_t e);
 /* `auto`: classify each user turn (provisional level until the first); persists configured "auto" */

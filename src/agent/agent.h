@@ -183,6 +183,7 @@ struct agent {
     bool steer_all, follow_up_all, interrupt_wait;
     volatile sig_atomic_t cancel;
     volatile sig_atomic_t silent_abort_next; /* abort the next model request as an internal transition */
+    volatile sig_atomic_t deliver_queued;    /* an empty Enter forced the queue into the continuation (see below) */
     bool running;
     json_t *streaming_message; /* borrowed while streaming */
     int max_turns;             /* 0 => unlimited */
@@ -237,6 +238,13 @@ size_t agent_steering_count(agent_t *a);
 void agent_prioritize_steering(agent_t *a, size_t from);
 bool agent_steering_has(agent_t *a, const json_t *msg); /* `msg` (by identity) is still queued */
 const json_t *agent_steering_at(agent_t *a, size_t i);  /* borrowed identity token; NULL past the end */
+/* AgentSession.abort({deliverQueuedMessages}): abort the run and deliver the queue once it unwinds. The run's owner
+ * calls agent_take_forced_delivery when the loop is idle: true when delivery was forced, with the queued user
+ * follow-ups moved behind the steers so they enter the continuation instead of waiting for a later yield. */
+void agent_abort_deliver_queued(agent_t *a);
+bool agent_has_interruptible_input(agent_t *a); /* omp hasInterruptibleInput: queued input the band shows */
+bool agent_take_forced_delivery(agent_t *a);
+
 /* Start a run that delivers queued messages (steering first, per mode) when idle. -1 if busy or nothing queued. */
 int agent_run_queued(agent_t *a);
 

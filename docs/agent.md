@@ -306,7 +306,10 @@ The setting is `dateCwdReminder`.
 
 Typing `.` or `c` (`c` is a normal reply during a `/guided-goal` interview) resumes without a visible user message: a
 prompt the model has not answered runs again as is, otherwise the hidden `manual-continue.md` directive goes out, and an
-empty conversation reports "Nothing to resume". A prompt rejected before dispatch for a missing model or credential goes
+empty conversation reports "Nothing to resume". A compaction or branch summary is not a prompt to run again: a
+conversation left with only a summary (after `/handoff` or a compaction) resumes with the directive. An empty Enter
+while input is queued interrupts the turn and forces the queue into the continuation: user follow-ups move behind the
+steers, and a message the loop took into the turn it aborted runs again. A prompt rejected before dispatch for a missing model or credential goes
 back to the editor, never over a draft typed meanwhile. With `retry.fallbackChains` set the prompt goes out instead, so
 the retry path can fall back. Background results that settle during a manual compaction wait for it to replace history.
 
