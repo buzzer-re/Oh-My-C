@@ -26,6 +26,7 @@ bool tui_hyperlinks_detected(void);                 /* shouldEnableHyperlinksByD
 bool tui_hyperlinks_detect(const char *terminal_id); /* the same, uncached, for a given id (tests) */
 void tui_hyperlinks_apply_setting(const char *mode); /* applyHyperlinkSetting: "off" | "auto" | "always" */
 bool tui_hyperlinks_enabled(void);                  /* TERMINAL.hyperlinks */
+bool tui_hyperlinks_off(void);                      /* the host pushed the explicit `off` policy */
 
 /* ---------- image protocol ---------- */
 typedef enum { TUI_IMG_NONE = 0, TUI_IMG_KITTY, TUI_IMG_ITERM2, TUI_IMG_SIXEL } tui_img_proto_t;

@@ -50,7 +50,7 @@ char *tc_file_hyperlink(const char *path, const char *text) {
         if (isalnum(*p) || strchr("/-_.~", *p)) sb_putc(&uri, (char)*p);
         else sb_appendf(&uri, "%%%02X", *p);
     }
-    char *r = tc_hyperlink(sb_cstr(&uri), text);
+    char *r = tui_md_hyperlinks_supported() ? xasprintf("\x1b]8;;%s\a%s" TUI_LINK_CLOSE, sb_cstr(&uri), text) : xstrdup(text);
     sb_free(&uri);
     return r;
 }

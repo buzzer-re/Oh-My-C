@@ -361,7 +361,7 @@ check "queue steer all"     "slow:1.5:x,s1,s2,f1 / 3"  env B="$B" ROOT="$ROOT" b
 # async jobs: background bash delivered as a follow-up; wait with nothing running returns at once
 : > "$T/req.jsonl"
 check "async bash"     "Backgrounded as job bg_1"  bash -c "'$B' --model mock/mock-1 --mode json -p 'call:bash:{\"command\":\"sleep 1; echo bgdone\",\"async\":true}' | grep -o 'Backgrounded as job bg_1'"
-grep -q "Background job bg_1 has completed" "$T/req.jsonl" && echo "   ok  async delivered" || { echo "   FAIL async delivered"; fail=1; }
+grep -q "Background job bg_1 (sleep 1; echo bgdone) has completed" "$T/req.jsonl" && echo "   ok  async delivered" || { echo "   FAIL async delivered"; fail=1; }
 check "wait nothing"   "Nothing to wait for"  "$B" --model mock/mock-1 -p 'call:wait:{}'
 # background jobs carry the call's intent: proc://, wait, /jobs; /jobs full requests the widget role's caption
 check "jobs intent" "jobs intent ok"  python3 -I "$ROOT/tests/e2e/jobs_intent.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ji"

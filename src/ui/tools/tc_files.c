@@ -91,6 +91,13 @@ static char *read_path_display(const tc_call_t *c, bool row) {
         sb_append(&b, sp);
         free(sp);
     }
+    /* a URL-shaped target links through urlHyperlinkAlways, so a transcript's URL stays clickable */
+    if (*shown && tc_is_url_like(path)) {
+        char *linked = tc_url_hyperlink_always(path, sb_cstr(&b));
+        sb_clear(&b);
+        sb_append(&b, linked);
+        free(linked);
+    }
     if (sel || query) {
         char *s = sel ? xasprintf("%s:%s", query ? query : "", sel) : xstrdup(query);
         tc_fg_sb(&b, row ? TUI_TC_MUTED : TUI_TC_ACCENT, s);

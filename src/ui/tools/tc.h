@@ -240,6 +240,7 @@ void tc_wrap_prefixed(const char *prefix, const char *cont, const char *content,
 /* web helpers (tc_web.c) */
 char *tc_url_domain(const char *url);                        /* hostname without www. */
 char *tc_hyperlink(const char *url, const char *text);       /* OSC 8 when the terminal supports it */
+char *tc_url_hyperlink_always(const char *url, const char *text); /* urlHyperlinkAlways */
 char *tc_format_age(int64_t secs);                           /* "2h ago" ("" for 0) */
 
 #endif
