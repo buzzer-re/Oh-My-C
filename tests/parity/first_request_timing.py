@@ -57,7 +57,7 @@ def setup(app, port):
 """)
     with open(os.path.join(agent, "config.yml"), "w") as f:
         f.write("modelRoles:\n  default: splash/qwen3.6-27b\n  smol: splash/qwen3.6-27b\n"
-                "startup:\n  checkUpdate: false\nsetupVersion: 2\n" + args.config.replace("\\n", "\n") + "\n")
+                "startup:\n  checkUpdate: false\nsetupVersion: 3\n" + args.config.replace("\\n", "\n") + "\n")
     # omp extracts its native module into ~/.omp/natives: share that cache (omp's own files) like tests/tui/compare.sh
     natives = os.path.expanduser("~/.omp/natives")
     if app == "omp" and os.path.isdir(natives):

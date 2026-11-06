@@ -24,7 +24,7 @@
 #      CMP_MODEL_ID (the mock model's id, default mock-1; e.g. gpt-5.2 makes it an OpenAI-family model for /fast),
 #      CMP_MODELS (extra models.yml lines under the mock provider's models, e.g.
 #      '      - id: mock-2\n        contextWindow: 2000\n        maxTokens: 1024').
-# Without CMP_SETUP both config.yml files start with setupVersion: 2 (both apps past the first-run wizard).
+# Without CMP_SETUP both config.yml files start with setupVersion: 3 (both apps past the first-run wizard).
 #      CMP_SPLIT=1 gives each app its own work dir ($D/omp/work, $D/omc/work: tools that modify files don't race),
 #      CMP_SEED=<dir> is copied into the work dir(s) before start, CMP_PATH=<dir> is prepended to both apps' PATH
 #      (e.g. tests/e2e/bin-gh for the fake `gh` the github tool needs),
@@ -58,7 +58,7 @@ YML
     [ -n "${CMP_PROVIDERS:-}" ] && printf '%b\n' "$CMP_PROVIDERS" >> "$1/models.yml"
     printf 'modelRoles:\n  default: mock/%s\nstartup:\n  checkUpdate: false\n' "${CMP_MODEL_ID:-mock-1}" > "$1/config.yml"
     [ -n "${CMP_CONFIG:-}" ] && printf '%b\n' "$CMP_CONFIG" >> "$1/config.yml"
-    [ -n "${CMP_SETUP:-}" ] || printf 'setupVersion: 2\n' >> "$1/config.yml"; true
+    [ -n "${CMP_SETUP:-}" ] || printf 'setupVersion: 3\n' >> "$1/config.yml"; true
 }
 workdirs() { if [ -n "${CMP_SPLIT:-}" ]; then WO=$D/omp/work; WC=$D/omc/work; else WO=$D/work; WC=$D/work; fi; }
 launch() { # cols rows extra-args...

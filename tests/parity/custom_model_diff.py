@@ -109,7 +109,7 @@ for app, binary, var in (("omp", os.environ.get("OMP_BIN", "omp"), "PI_CODING_AG
     with open(os.path.join(agent, "models.json"), "w") as f:
         json.dump(cfg, f)
     with open(os.path.join(agent, "config.yml"), "w") as f:
-        f.write("modelRoles:\n  default: splash/my-model\nstartup:\n  checkUpdate: false\nsetupVersion: 2\n")
+        f.write("modelRoles:\n  default: splash/my-model\nstartup:\n  checkUpdate: false\nsetupVersion: 3\n")
     res[app] = {(m["provider"], m["id"]): m for m in dump(binary, var, agent, home, work) if m["provider"] in provs}
 
 # compatConfig is compared through the resolved compat; int / tps reach omp's custom models only from its online catalog
