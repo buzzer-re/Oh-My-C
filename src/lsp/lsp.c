@@ -53,6 +53,7 @@ typedef struct {
     int64_t version;
     uint64_t hash;
     int64_t reopened_at; /* 0 = not reopened */
+    int64_t last_used;   /* mono_ms of the last use by an operation; a sweep over every open document is not one */
 } openf_t;
 
 typedef struct lsp_client {
@@ -1186,7 +1187,7 @@ static void track_opened(lsp_client_t *c, const char *uri, const char *lang, int
     bool reopened = json_get(c->idle_closed, key) != NULL;
     json_del(c->idle_closed, key);
     free(key);
-    openf_t o = {xstrdup(uri), xstrdup(lang), version, text_hash(text, n), reopened ? mono_ms() : 0};
+    openf_t o = {xstrdup(uri), xstrdup(lang), version, text_hash(text, n), reopened ? mono_ms() : 0, mono_ms()};
     vec_push(&c->open, o);
 }
 
@@ -1240,9 +1241,34 @@ static void close_document(lsp_client_t *c, const char *uri) {
     diags_delete(c, uri);
 }
 
+/* OPEN_FILE_IDLE_MS / closeIdleFiles: documents no operation used for this long leave the server before the next open */
+static int64_t open_file_idle_ms(void) {
+    const char *v = env_get("OMC_LSP_FILE_IDLE_MS"); /* test hook */
+    return v && atoll(v) > 0 ? atoll(v) : 5 * 60 * 1000;
+}
+
+static void close_idle_files(lsp_client_t *c) {
+    int64_t idle_before = mono_ms() - open_file_idle_ms();
+    for (size_t i = 0; i < c->open.n;) {
+        openf_t *o = &c->open.v[i];
+        if (o->last_used > idle_before) {
+            i++;
+            continue;
+        }
+        char *uri = xstrdup(o->uri), *key = uri_key(uri);
+        int64_t version = o->version;
+        close_document(c, uri);
+        json_set_int(c->idle_closed, key, version);
+        free(key);
+        free(uri);
+    }
+}
+
 static void ensure_open(lsp_client_t *c, const char *path) {
     char *uri = path_to_uri(path);
-    if (open_find(c, uri)) {
+    openf_t *found = open_find(c, uri);
+    if (found) {
+        found->last_used = mono_ms();
         free(uri);
         return;
     }
@@ -1252,6 +1278,7 @@ static void ensure_open(lsp_client_t *c, const char *path) {
         free(uri);
         return;
     }
+    close_idle_files(c);
     const char *lang = json_get_str(c->cfg, "languageId");
     if (!lang) lang = language_id(path);
     char *key = uri_key(uri);
@@ -1261,6 +1288,36 @@ static void ensure_open(lsp_client_t *c, const char *path) {
     track_opened(c, uri, lang, version, text, n);
     free(text);
     free(uri);
+}
+
+/* syncOpenFileFromDisk: push disk text for an open document whose overlay diverged from it; true when a didChange went out.
+ * Not a use of the document, so a sync of every open one leaves idle ones to close. A file gone from disk is closed; one that
+ * exists but cannot be read (a directory now, no permission, a FIFO) is closed with `close_unreadable`, else reported in *err. */
+static bool sync_open_file(lsp_client_t *c, const char *path, const char *uri, bool close_unreadable, char **err) {
+    openf_t *o = open_find(c, uri);
+    if (!o) return false;
+    size_t n;
+    char *text = read_text(path, &n);
+    if (!text) {
+        if (close_unreadable || !fs_exists(path)) close_document(c, uri);
+        else if (err && !*err) {
+            struct stat st;
+            *err = stat(path, &st) == 0 && S_ISDIR(st.st_mode) ? xstrdup("EISDIR: illegal operation on a directory, read")
+                                                               : xasprintf("EACCES: permission denied, open '%s'", path);
+        }
+        return false;
+    }
+    bool changed = false;
+    uint64_t h = text_hash(text, n);
+    if (h != o->hash) {
+        diags_delete(c, uri);
+        int64_t v = ++o->version;
+        send_did_change(c, uri, v, text, false);
+        o->hash = h;
+        changed = true;
+    }
+    free(text);
+    return changed;
 }
 
 /* reconcileFileFromDisk: true when stale diagnostics were dropped (didChange pushed / document reopened) */
@@ -1276,35 +1333,22 @@ static bool reconcile_file(lsp_client_t *c, const char *path) {
         free(uri);
         return r;
     }
-    size_t n;
-    char *text = read_text(path, &n);
-    if (!text) {
-        if (!fs_exists(path)) close_document(c, uri);
-        free(uri);
-        return false;
-    }
-    bool changed = false;
-    uint64_t h = text_hash(text, n);
-    if (h != o->hash) {
-        diags_delete(c, uri);
-        int64_t v = ++o->version;
-        send_did_change(c, uri, v, text, false);
-        o->hash = h;
-        changed = true;
-    }
-    free(text);
+    o->last_used = mono_ms();
+    bool changed = sync_open_file(c, path, uri, false, NULL);
     free(uri);
     return changed;
 }
 
-static int reconcile_open_files(lsp_client_t *c, const char *exclude_uri) {
+/* reconcileOpenFilesFromDisk: `close_unreadable` closes a document whose file can no longer be read, so one broken file does not
+ * fail a query about another; otherwise *err (may be NULL) reports it */
+static int reconcile_open_files(lsp_client_t *c, const char *exclude_uri, bool close_unreadable, char **err) {
     strvec_t uris = {0};
     for (size_t i = 0; i < c->open.n; i++)
         if (str_starts(c->open.v[i].uri, "file://") && !str_eq(c->open.v[i].uri, exclude_uri)) strvec_push(&uris, c->open.v[i].uri);
     int n = 0;
     for (size_t i = 0; i < uris.n; i++) {
         char *p = uri_to_path(uris.v[i]);
-        if (reconcile_file(c, p)) n++;
+        if (sync_open_file(c, p, uris.v[i], close_unreadable, err)) n++;
         free(p);
     }
     strvec_free(&uris);
@@ -1323,6 +1367,7 @@ static bool refresh_document(lsp_client_t *c, const char *path, int purpose) {
         free(uri);
         return false;
     }
+    if (purpose != RF_RESYNC) o->last_used = mono_ms();
     size_t n;
     char *text = read_text(path, &n);
     if (!text) {
@@ -1374,6 +1419,7 @@ static void sync_content(lsp_client_t *c, const char *path, const char *content)
     openf_t *o = open_find(c, uri);
     size_t n = strlen(content);
     if (!o) {
+        close_idle_files(c);
         const char *lang = json_get_str(c->cfg, "languageId");
         if (!lang) lang = language_id(path);
         char *key = uri_key(uri);
@@ -1382,6 +1428,7 @@ static void sync_content(lsp_client_t *c, const char *path, const char *content)
         send_did_open(c, uri, lang, version, content);
         track_opened(c, uri, lang, version, content, n);
     } else {
+        o->last_used = mono_ms();
         int64_t v = ++o->version;
         send_did_change(c, uri, v, content, false);
         o->hash = text_hash(content, n);
@@ -2701,7 +2748,7 @@ char *lsp_after_write(lsp_manager_t *m, const char *abs, int64_t wait_ms) {
         pthread_mutex_lock(&c->mu);
         int64_t min_version = c->diag_version;
         pthread_mutex_unlock(&c->mu);
-        reconcile_open_files(c, uri);
+        reconcile_open_files(c, uri, false, NULL);
         bool was_open = open_find(c, uri) != NULL;
         if (!was_open) {
             /* created/changed path announced to the server's watchers */
@@ -3046,7 +3093,7 @@ static void do_diagnostics(call_t *k) {
                 failures++;
                 continue;
             }
-            reconcile_open_files(c, uri);
+            reconcile_open_files(c, uri, false, NULL);
             pthread_mutex_lock(&c->mu);
             int64_t min_version = c->diag_version;
             bool have_build = c->build_status != NULL;
@@ -3752,6 +3799,8 @@ static void do_workspace_symbols(call_t *k) {
         if (c) {
             json_t *p = json_obj();
             json_set_str(p, "query", q);
+            /* results point into every open document, so sync those edited outside omc first */
+            reconcile_open_files(c, NULL, true, NULL);
             res = request(c, "workspace/symbol", p, &k->bg, &err, NULL);
         }
         if (!res) {
@@ -4080,6 +4129,21 @@ static void do_file_action(call_t *k, const char *resolved) {
     int64_t line0 = line - 1;
     if (needs_index && !ra) wait_project_loaded(c, &k->bg);
     if (deadline_hit(k, server)) goto done;
+    /* Answers that span files are computed from every open document, and one edited outside omc still holds its stale overlay:
+     * sync them all right before the request. An action that writes edits fails on an open file it cannot read; a read-only query
+     * closes that file and goes on. */
+    if (!strcmp(action, "definition") || !strcmp(action, "type_definition") || !strcmp(action, "implementation") ||
+        !strcmp(action, "references") || !strcmp(action, "rename") || !strcmp(action, "hover") || !strcmp(action, "code_actions")) {
+        bool writes = !strcmp(action, "rename") || (!strcmp(action, "code_actions") && json_get_bool(args, "apply", false));
+        char *serr = NULL;
+        reconcile_open_files(c, NULL, !writes, writes ? &serr : NULL);
+        if (serr) {
+            output = xasprintf("LSP error: %s", serr);
+            free(serr);
+            reply(k->out, output, action, server, false, k->args);
+            goto done;
+        }
+    }
     int code = 0;
 #define REQ(method, params)                                                                \
     ({                                                                                     \
@@ -4372,7 +4436,6 @@ static void do_file_action(call_t *k, const char *resolved) {
             reply(k->out, "Error: new_name parameter required for rename", action, server, false, NULL);
             goto done;
         }
-        reconcile_open_files(c, NULL);
         json_t *p = pos_params(uri, line0, col);
         json_set_str(p, "newName", new_name);
         json_t *r = REQ("textDocument/rename", p);

@@ -380,6 +380,7 @@ check "wait peers"  "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" 
 # background jobs carry the call's intent: proc://, wait, /jobs; /jobs full requests the widget role's caption
 check "jobs intent" "jobs intent ok"  python3 -I "$ROOT/tests/e2e/jobs_intent.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ji"
 # lsp: payload "null" stays JSON null; reload restarts rust-analyzer when a new crate appeared
+check "lsp sync" "lsp sync ok"  python3 -I "$ROOT/tests/e2e/lsp_sync.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ls"
 check "lsp reload" "lsp reload ok"  python3 -I "$ROOT/tests/e2e/lsp_reload.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/lr"
 # automatic session title (interactive only, like omp's autoTitle): fork side request returns a card title
 : > "$T/req.jsonl"
