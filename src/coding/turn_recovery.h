@@ -76,5 +76,7 @@ bool tr_resolved_interrupted_tool_turn(const json_t *msg, bool aborting);
 bool tr_committed_text_stall(const json_t *msg, bool text_committed, bool aborting, bool *reset);
 /* the stream-stall-continue.md reminder (owned developer message, attribution "agent") */
 json_t *tr_stream_stall_reminder(int attempt);
+/* isBillingCapUsageLimit: the error asks for money, not time (out of credit, spent prepaid balance, spend ceiling) */
+bool tr_billing_cap_usage_limit(int status, const char *msg);
 
 #endif

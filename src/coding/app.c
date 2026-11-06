@@ -1143,6 +1143,10 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     int saga = attempt - a->retry_offset + 1; /* omp #retryAttempt after its increment */
     bool exhausted = saga > max;
     bool usage_limit = is_usage_limit(err);
+    /* an account out of money has no reset to wait for: fallbacks still run, then the provider's error surfaces and
+     * the error frame's Retry re-attempts at once */
+    int status = (int)json_get_int(assistant, "errorStatus", 0);
+    bool billing_cap = tr_billing_cap_usage_limit(status ? status : aie_status_from_text(err), err);
     /* model fallback: consulted on every failed attempt, retryable or hard (hardErrorFallback) */
     bool switched = false;
     if (a->model && !is_abort_error(err) && settings_bool("retry.modelFallback", true) && mr_fallback_admits(usage_limit) &&
@@ -1151,7 +1155,7 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
         int64_t hint = retry_after_ms(err);
         mr_suppress_selector(cur, now_ms() + (hint > 0 ? hint : mr_rate_limit_backoff_ms(err)));
         bool rate_limited = str_istr(err, "429") || str_eq(mr_rate_limit_reason(err), "RATE_LIMIT_EXCEEDED");
-        bool same_model_retry = retryable && !exhausted && !(settings_bool("retry.rateLimitWalksChain", false) && rate_limited);
+        bool same_model_retry = retryable && !exhausted && !billing_cap && !(settings_bool("retry.rateLimitWalksChain", false) && rate_limited);
         switched = try_retry_fallback(a, ag, cur, assistant, err, same_model_retry);
         free(cur);
     }
@@ -1177,9 +1181,10 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     if ((double)window > delay) delay = (double)window;
     if ((double)hint > delay) delay = (double)hint;
     int64_t maxd = settings_int("retry.maxDelayMs", 5 * 60 * 1000);
-    if (maxd > 0 && delay > (double)maxd) {
-        char *fe = xasprintf("Provider requested %.0fms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
-                             ceil(delay), (long long)maxd, err ? err : "error");
+    if (billing_cap || (maxd > 0 && delay > (double)maxd)) {
+        char *fe = billing_cap ? xstrdup(err)
+                               : xasprintf("Provider requested %.0fms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
+                                           ceil(delay), (long long)maxd, err ? err : "error");
         json_t *ev = json_obj();
         json_set_str(ev, "type", "auto_retry_end");
         json_set_bool(ev, "success", false);
