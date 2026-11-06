@@ -20,6 +20,10 @@ UPDATE.md) when done.
 - **Parity is the spec.** Port behaviour, exact strings, glyphs, colors and layout from the upstream
   source; when omc and omp differ, omc is wrong. Never advertise (in prompts/tool descriptions) a
   capability omc doesn't implement.
+- **Exception: the shell is real bash.** omp v18.17.0 moved to its own Rust shell engine (`crates/pi-shell`); omc keeps
+  running the system's `bash`, on purpose. Don't copy that engine's behaviour, even where omp's output differs: real bash
+  decides things like `EXIT` trap timing and status, `jobs`, `$SHLVL`, `$-` and `BASH_SOURCE`. The tool's output format
+  (truncation, notices, exit lines) still follows omp. Don't port `omp zsh`/`bash`/`sh` or the shell visualization.
 - **Never touch the user's real omp or omc setup** (`~/.omp`, `~/.omc`) or real model credentials/tokens in tests or
   comparisons; use the mocks under `tests/e2e/` and throwaway agent dirs.
 - **Default build stays a single binary:** `make` → `build/omc`. The library (`make lib`, public API in
