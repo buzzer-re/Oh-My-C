@@ -34,6 +34,8 @@ bool tui_md_hyperlinks_supported(void);
 /* Render markdown for `width` columns (upstream Markdown component: marked-style block tokens with the
  * same per-token spacing, list/table/quote layout and code rows); appends owned lines to out. */
 void tui_md_render(const char *text, int width, const tui_md_opts_t *opts, strvec_t *out);
+/* lexDocument(text).findLast(non-space).type === "paragraph" */
+bool tui_md_ends_in_paragraph(const char *text);
 /* Render inline markdown (no wrapping) into an ANSI string (owned). */
 char *tui_md_inline(const char *text, const tui_md_opts_t *opts);
 

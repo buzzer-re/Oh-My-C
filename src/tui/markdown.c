@@ -1680,6 +1680,24 @@ static char *apply_bg(const char *line, int width, const char *bg) {
     return sb_detach(&b);
 }
 
+bool tui_md_ends_in_paragraph(const char *text) {
+    char *clean = tui_replace_tabs(text ? text : "");
+    strvec_t lines = str_split_lines(clean, strlen(clean));
+    lines_t L = {(const char *const *)lines.v, lines.n};
+    toks_t T = {0};
+    lex_blocks(&L, 0, L.n, &T);
+    bool r = false;
+    for (size_t i = T.n; i-- > 0;)
+        if (T.v[i].t != T_SPACE) {
+            r = T.v[i].t == T_PARA;
+            break;
+        }
+    free(T.v);
+    strvec_free(&lines);
+    free(clean);
+    return r;
+}
+
 void tui_md_render(const char *text, int width, const tui_md_opts_t *opts, strvec_t *out) {
     tui_md_opts_t def;
     if (!opts) {
