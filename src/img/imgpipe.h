@@ -28,6 +28,9 @@ typedef struct {
     int orig_w, orig_h, w, h;
     bool was_resized;
     bool decode_failed;
+    /* paddedContent: where the source content sits on the canvas when an extreme aspect ratio required padding */
+    bool padded;
+    int pad_left, pad_top, content_w, content_h;
 } img_resized_t;
 
 /* resizeImage: fit within the max dimensions and byte budget (fast path keeps a compact in-bounds input;
@@ -38,7 +41,7 @@ int img_resize_image(const uint8_t *in, size_t n, const char *caller_mime, const
                      char **err);
 void img_resized_free(img_resized_t *r);
 /* formatDimensionNote: "[Image: original WxH, displayed at wxh. Multiply coordinates by S to map to original image.]"
- * or NULL when the image was not resized. Owned. */
+ * (a padded image names its padding and both factors), or NULL when the image was not resized. Owned. */
 char *img_dimension_note(const img_resized_t *r);
 /* OMP_NO_WEBP (or OMC_NO_WEBP) = "1" / "true" */
 bool img_webp_excluded_by_env(void);

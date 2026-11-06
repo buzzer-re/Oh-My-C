@@ -146,6 +146,55 @@ static void set_result(img_resized_t *r, cand_t *c, int ow, int oh, int w, int h
     c->buf = NULL;
 }
 
+#define PADDED_NOTE                                                                                                    \
+    "[Image: original %dx%d, displayed at %dx%d with padding. Subtract padding offset (%d, %d), then multiply x by %s and y by %s " \
+    "to map to original image coordinates.]"
+
+/* fitImageBytes: scale as close to the side limits as the maximums allow, then pad with the top-left pixel when an extreme aspect
+ * ratio still leaves a side short. PNG, or JPEG when the PNG exceeds max_bytes; false when no encoding fits. */
+static bool fit_image_padded(const img_t *src, int min_side, int max_side, size_t max_bytes, img_resized_t *out) {
+    double ceiling = (double)max_side / MAX(src->w, src->h);
+    double floor_ = (double)min_side / MIN(src->w, src->h);
+    double scale = floor_ > 1 ? MIN(floor_, ceiling) : MIN(1, ceiling);
+    int sw = (int)MIN((long)max_side, MAX(1L, js_round(src->w * scale)));
+    int sh = (int)MIN((long)max_side, MAX(1L, js_round(src->h * scale)));
+    int cw = MAX(sw, min_side), ch = MAX(sh, min_side);
+    int left = (cw - sw) >> 1, top = (ch - sh) >> 1;
+    img_t sized = {0};
+    if (img_resize(src, sw, sh, &sized) < 0) return false;
+    img_t canvas = {.w = cw, .h = ch, .px = xmalloc((size_t)cw * ch * 4)};
+    for (size_t i = 0; i < (size_t)cw * ch; i++) memcpy(canvas.px + i * 4, sized.px, 4);
+    for (int y = 0; y < sh; y++)
+        memcpy(canvas.px + ((size_t)(top + y) * cw + left) * 4, sized.px + (size_t)y * sw * 4, (size_t)sw * 4);
+    img_free(&sized);
+    size_t len = 0;
+    uint8_t *buf = img_png_encode(&canvas, -1, &len);
+    const char *mime = "image/png";
+    static const int qualities[] = {90, 80, 70, 60, 50, 40};
+    for (size_t i = 0; i < ARRAY_LEN(qualities) && (!buf || len > max_bytes); i++) {
+        size_t jl = 0;
+        uint8_t *j = img_jpeg_encode(&canvas, qualities[i], &jl);
+        if (!j) continue;
+        free(buf);
+        buf = j;
+        len = jl;
+        mime = "image/jpeg";
+    }
+    img_free(&canvas);
+    if (!buf || len > max_bytes) {
+        free(buf);
+        return false;
+    }
+    out->buf = buf;
+    out->len = len;
+    out->mime = mime;
+    out->orig_w = src->w, out->orig_h = src->h, out->w = cw, out->h = ch;
+    out->was_resized = true;
+    out->padded = true;
+    out->pad_left = left, out->pad_top = top, out->content_w = sw, out->content_h = sh;
+    return true;
+}
+
 int img_resize_image(const uint8_t *in, size_t n, const char *caller_mime, const img_resize_opts_t *o, img_resized_t *out,
                      char **err) {
     memset(out, 0, sizeof *out);
@@ -195,6 +244,14 @@ int img_resize_image(const uint8_t *in, size_t n, const char *caller_mime, const
             tw = (int)MIN((long)max_w, js_round(tw * up));
             th = (int)MIN((long)max_h, js_round(th * up));
         }
+    }
+    /* a cap stopped the short edge below the floor: padded instead of stretched */
+    if (tw < min_dim || th < min_dim) {
+        bool fitted = fit_image_padded(&src, min_dim, MIN(max_w, max_h), max_bytes, out);
+        img_free(&src);
+        if (fitted) return 0;
+        if (err) *err = xasprintf("fitImage: no encoding fits %zu bytes", max_bytes);
+        return -1;
     }
 
     bool translucent = png_may_have_alpha(in, n) && img_translucent(&src);
@@ -290,6 +347,13 @@ void img_resized_free(img_resized_t *r) {
 char *img_dimension_note(const img_resized_t *r) {
     if (!r->was_resized || !r->orig_w || !r->orig_h || !r->w || !r->h) return NULL;
     if (r->w == r->orig_w && r->h == r->orig_h) return NULL;
+    if (r->padded) { /* paddedCoordinateNote */
+        char *xf = js_to_fixed((double)r->orig_w / r->content_w, 2), *yf = js_to_fixed((double)r->orig_h / r->content_h, 2);
+        char *note = xasprintf(PADDED_NOTE, r->orig_w, r->orig_h, r->w, r->h, r->pad_left, r->pad_top, xf, yf);
+        free(xf);
+        free(yf);
+        return note;
+    }
     char *s = js_to_fixed((double)r->orig_w / r->w, 2);
     char *note = xasprintf("[Image: original %dx%d, displayed at %dx%d. Multiply coordinates by %s to map to original image.]",
                            r->orig_w, r->orig_h, r->w, r->h, s);
