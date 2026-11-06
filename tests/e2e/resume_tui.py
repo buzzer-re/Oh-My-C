@@ -222,6 +222,25 @@ if "forced-follow-up" not in second:
     fail("follow-up joins the continuation", second[-300:])
 pump(0.5)
 
+# the idle recap waits for background jobs: a recap written over a running job would be stale when its result arrives
+with open(os.path.join(agent, "config.yml"), "w") as f:
+    f.write("recap:\n  idleSeconds: 1\n")
+launch("mock/mock-1")
+pump(1.0)
+count = len(requests())
+submit("call:task:" + json.dumps({"context": "recap", "tasks": [{"task": "slow:5:recap-job-done"}]}))
+is_recap = lambda r: "<recap>" in json.dumps(r["messages"][-1])
+end = time.time() + 30
+while time.time() < end and not any(is_recap(r) for r in requests()[count:]):
+    pump(0.2)
+later = requests()[count:]
+first = next((i for i, r in enumerate(later) if is_recap(r)), None)
+if first is None:
+    fail("no recap after the job settled", plain()[-600:])
+if "recap-job-done" not in json.dumps(later[first]["messages"]) or "async-result" in json.dumps(later[first]["messages"][-1]):
+    fail("recap before the job's result", json.dumps(later[first]["messages"])[-600:])
+os.unlink(os.path.join(agent, "config.yml"))
+
 # no credential: the prompt is refused before any request and returns to the editor
 launch("anthropic/claude-sonnet-4-5")
 pump(1.0)

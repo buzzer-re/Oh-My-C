@@ -3,8 +3,8 @@
  *
  * A stretch of activity ends when a run settles. If the run produced output (its last message is an assistant
  * message with text, thinking or a tool call) and `recap.enabled` (default on), a timer of `recap.idleSeconds`
- * (default 240, clamped to 1..3600) is armed once the session is quiet. When it fires and the session is still
- * quiet and unblocked (no draft in the editor, no compaction), an ephemeral side turn on the session model asks
+ * (default 240, clamped to 1..3600) is armed once the session is settled (quiet, with no background job or delivery
+ * that can wake it). When it fires and the session is still settled and unblocked (no draft in the editor, no compaction), an ephemeral side turn on the session model asks
  * for the recap (`recap-user.md`, anchored on the goal or session name and the active todo task); a nonblank reply
  * is shown in the transcript as a dim italic `※ recap: …` line (flattened, at most 280 cells). New activity, a
  * session transition or teardown invalidates everything captured before it, including an in-flight request.
@@ -16,6 +16,7 @@
 #include "coding/goal.h"
 #include "config/settings.h"
 #include "prompt/template.h"
+#include "tools/jobs.h"
 #include "ui/ui.h"
 
 #include <ctype.h>
@@ -99,6 +100,12 @@ static bool quiet(void) {
     return !u->worker_running && agent_queued_count(u->app->agent) == 0 && !u->goal_cont && !u->bash && !u->python;
 }
 
+/* isSettled: quiet, and no background job or delivery can wake the session and invalidate the recap */
+static bool settled(void) {
+    jobs_t *jobs = R.u->app->env ? R.u->app->env->jobs : NULL;
+    return quiet() && !(jobs && (jobs_running(jobs) || jobs_undelivered(jobs)));
+}
+
 static void schedule(void);
 
 static char *goal_text(app_t *a) {
@@ -159,7 +166,7 @@ static void run_done(void *ud) {
     bool current = j->gen == R.gen && !j->cancel && R.run == j;
     if (current) R.run = NULL;
     if (current && !blocked()) {
-        if (!quiet()) schedule();
+        if (!settled()) schedule();
         else {
             R.pending = false; /* #complete(pending, "recap") */
             if (j->reply && *j->reply) present(j->u, j->reply);
@@ -238,12 +245,18 @@ static void start_run(void) {
     pthread_detach(th);
 }
 
+static void on_settle_check(void *ud) {
+    (void)ud;
+    R.timer = 0;
+    schedule();
+}
+
 static void on_due(void *ud) {
     (void)ud;
     R.timer = 0;
     if (!R.pending || R.run) return;
     if (blocked()) return; /* blocked work stays owed: a refresh re-arms it */
-    if (!quiet()) {
+    if (!settled()) {
         schedule();
         return;
     }
@@ -255,6 +268,10 @@ static void schedule(void) {
     clear_timer();
     if (!R.u || !R.pending || R.run || !recap_enabled()) return;
     if (blocked() || !quiet()) return;
+    if (!settled()) { /* waitForSessionSettlement: the idle stretch starts once background work has settled */
+        R.timer = tui_add_timer(R.u->tui, 1000, false, on_settle_check, NULL);
+        return;
+    }
     double secs = settings_num("recap.idleSeconds", 240);
     if (!isfinite(secs)) secs = 240;
     secs = MAX(1, MIN(3600, secs));
