@@ -151,6 +151,8 @@ typedef struct {
 void tc_output_pane(const tc_pane_t *p, strvec_t *out);
 /* renderTreeList over pre-rendered single/multi-line items */
 void tc_tree_list(const strvec_t *items, bool expanded, int max_collapsed, const char *item_type, strvec_t *out);
+/* renderTreeList with trailingSummary: exactly `items`, then `summary` (NULL: none) as the final muted row */
+void tc_tree_list_summary(const strvec_t *items, const char *summary, strvec_t *out);
 /* ... with a collapsed row budget (maxCollapsedLines; < 0 = none) */
 void tc_tree_list_ex(const strvec_t *items, bool expanded, int max_collapsed, int max_lines, const char *item_type, strvec_t *out);
 /* wrap header + truncate rows (fitHeaderedRows) */
@@ -186,6 +188,8 @@ void tc_github(const tc_call_t *c, int width, strvec_t *out);
 void tc_lsp(const tc_call_t *c, int width, strvec_t *out);
 
 /* grouped-file-output helpers (tc_search.c) */
+char *tc_scoped_subject(const char *subject, const char *scope); /* formatScopedSubject; NULL when both are absent */
+char *tc_file_hyperlink(const char *path, const char *text);  /* fileHyperlink */
 char *tc_paths_of(const json_t *args);                       /* path/paths arg joined ", " (NULL none) */
 /* A grouped output (grep / ast-grep / ast-edit display content, omp tools/grouped-file-output.ts): lines
  * classified as `# dir/`, `## file#TAG (suffix)` or body. File rows carry their full path; directory rows are

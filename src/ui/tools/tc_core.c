@@ -691,6 +691,23 @@ void tc_tree_list_ex(const strvec_t *items, bool expanded, int max_collapsed, in
     free(vert);
 }
 
+void tc_tree_list_summary(const strvec_t *items, const char *summary, strvec_t *out) {
+    strvec_t rows = {0};
+    tc_tree_list(items, true, 0, "item", &rows);
+    if (summary) {
+        /* the last item keeps a branch: it isn't last any more */
+        strvec_free(&rows);
+        strvec_t all = {0};
+        for (size_t i = 0; i < items->n; i++) strvec_push(&all, items->v[i]);
+        strvec_push_own(&all, tc_fg(TUI_TC_MUTED, summary));
+        tc_tree_list(&all, true, 0, "item", out);
+        strvec_free(&all);
+        return;
+    }
+    for (size_t i = 0; i < rows.n; i++) strvec_push(out, rows.v[i]);
+    strvec_free(&rows);
+}
+
 void tc_fit_headered(const char *header, strvec_t *rows, int width, strvec_t *out) {
     tui_wrap_text_with_ansi(header, MAX(1, width), out);
     for (size_t i = 0; i < rows->n; i++) strvec_push_own(out, tui_truncate_to_width(rows->v[i], width, ""));

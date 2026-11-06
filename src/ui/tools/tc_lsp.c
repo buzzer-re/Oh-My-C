@@ -1,13 +1,14 @@
-/* tc_lsp.c - lsp card (port of omp tools/lsp.ts renderCall/renderResult). The result body is derived from
- * the response text the way omp does it: `Found N definition(s):` locations, ```lang hover blocks,
- * `N error(s)` / `N warning(s)` diagnostics, `N reference(s)` grouped by file, `Symbols in <file>:`
- * trees, otherwise a generic first-lines preview. Expanded rows are not re-wrapped under their guides
- * (wrapGuidedLine); the frame wraps them flush. */
+/* tc_lsp.c - lsp card (port of omp tools/lsp.ts renderCall/renderResult): one status line carrying the request and the
+ * result counts, over the result rows. The response kind is detected from its text: `Found N definition(s):` locations,
+ * `Found N reference(s):` grouped by file with source previews, ```lang hover blocks, diagnostics, `Symbols in <file>:` trees,
+ * otherwise a line-by-line list. */
 #include "ui/tools/tc.h"
 
 #include <ctype.h>
+#include <strings.h>
 
 #include "tui/ansi.h"
+#include "tui/markdown.h"
 
 static char *flat(const char *s) {
     char *t = tc_replace_tabs(s ? s : "");
@@ -27,13 +28,13 @@ static char *action_label(const char *a) {
     return r;
 }
 
-static void lsp_call(const tc_call_t *c, int width, strvec_t *out) {
-    const json_t *a = c->args;
-    char *act = action_label(json_get_str(a, "action"));
+/* lspRequestStatus: `action target` as the description (`references src/a.ts:42 (validateToken)`), the call facts as meta */
+static void lsp_request_status(const json_t *a, const char *fallback, char **desc, strvec_t *meta) {
+    char *act = action_label(json_get_str(a, "action") ? json_get_str(a, "action") : fallback);
     const char *q = json_get_str(a, "query");
-    char *qp = q ? tui_truncate_to_width(q, 40, NULL) : NULL;
+    char *qp = q && *q ? tui_truncate_to_width(q, 40, NULL) : NULL;
     char *sp = NULL;
-    if (json_get_str(a, "symbol")) {
+    if (json_get_str(a, "symbol") && *json_get_str(a, "symbol")) {
         char *f = flat(json_get_str(a, "symbol"));
         sp = tui_truncate_to_width(f, 40, NULL);
         free(f);
@@ -41,24 +42,16 @@ static void lsp_call(const tc_call_t *c, int width, strvec_t *out) {
     char *target = NULL;
     bool has_line = json_get(a, "line") != NULL;
     char *ln = has_line ? json_dump(json_get(a, "line"), 0) : NULL;
-    if (json_get_str(a, "file")) {
+    if (json_get_str(a, "file") && *json_get_str(a, "file")) {
         char *s = tc_shorten_path(json_get_str(a, "file"));
         if (has_line) target = sp ? xasprintf("%s:%s (%s)", s, ln, sp) : xasprintf("%s:%s", s, ln);
         else target = xstrdup(s);
         free(s);
     } else if (has_line) target = sp ? xasprintf("line %s (%s)", ln, sp) : xasprintf("line %s", ln);
-    strvec_t meta = {0};
-    if (qp && target) strvec_push_own(&meta, xasprintf("query:%s", qp));
-    if (json_get_str(a, "new_name")) strvec_push_own(&meta, xasprintf("new:%s", json_get_str(a, "new_name")));
-    if (json_get(a, "apply")) strvec_push_own(&meta, xasprintf("apply:%s", json_get_bool(a, "apply", false) ? "true" : "false"));
-    char *desc = target ? xasprintf("%s %s", act, target) : qp ? xasprintf("%s %s", act, qp) : xstrdup(act);
-    tc_status_line_t sl = {.icon = TC_ST_PENDING, .spinner = -1, .title = "LSP", .title_slot = -1, .description = desc,
-                           .meta = (const char *const *)meta.v, .nmeta = meta.n};
-    char *h = tc_status_line(&sl);
-    tc_push_wrapped(out, h, width);
-    free(h);
-    free(desc);
-    strvec_free(&meta);
+    if (qp && target) strvec_push_own(meta, xasprintf("query:%s", qp));
+    if (json_get_str(a, "new_name") && *json_get_str(a, "new_name")) strvec_push_own(meta, xasprintf("new:%s", json_get_str(a, "new_name")));
+    if (json_get(a, "apply")) strvec_push_own(meta, xasprintf("apply:%s", json_get_bool(a, "apply", false) ? "true" : "false"));
+    *desc = target ? xasprintf("%s %s", act, target) : qp ? xasprintf("%s %s", act, qp) : xstrdup(act);
     free(ln);
     free(target);
     free(sp);
@@ -66,27 +59,19 @@ static void lsp_call(const tc_call_t *c, int width, strvec_t *out) {
     free(act);
 }
 
-/* `N word(s)` count in text, -1 when absent */
-static int count_of(const char *text, const char *word) {
-    char *needle = xasprintf(" %s(s)", word);
-    const char *p = text;
-    int r = -1;
-    while ((p = strstr(p, needle))) {
-        const char *d = p;
-        while (d > text && isspace((unsigned char)d[-1]) && d - 1 >= text) d--;
-        const char *e = d;
-        while (d > text && isdigit((unsigned char)d[-1])) d--;
-        if (d < e) {
-            r = atoi(d);
-            break;
-        }
-        p += strlen(needle);
-    }
-    free(needle);
-    return r;
+/* renderCall: `LSP: <action> <file:line (symbol)>` */
+static void lsp_call(const tc_call_t *c, int width, strvec_t *out) {
+    char *desc = NULL;
+    strvec_t meta = {0};
+    lsp_request_status(c->args, NULL, &desc, &meta);
+    tc_status_line_t sl = {.icon = TC_ST_PENDING, .spinner = -1, .title = "LSP", .title_slot = -1, .description = desc,
+                           .meta = (const char *const *)meta.v, .nmeta = meta.n};
+    char *h = tc_status_line(&sl);
+    tc_push_wrapped(out, h, width);
+    free(h);
+    free(desc);
+    strvec_free(&meta);
 }
-
-static tc_status_t sev_slot_icon;
 
 static tui_tc_t sev_color(const char *s) {
     return str_eq(s, "error") ? TUI_TC_ERROR : str_eq(s, "warning") ? TUI_TC_WARNING : str_eq(s, "info") ? TUI_TC_ACCENT : TUI_TC_DIM;
@@ -216,275 +201,313 @@ static char *severity_tag(const char *sev) {
     return r;
 }
 
-static bool has_line_col(const char *l) {
-    for (const char *p = strchr(l, ':'); p; p = strchr(p + 1, ':')) {
-        const char *q = p + 1;
-        if (!isdigit((unsigned char)*q)) continue;
-        while (isdigit((unsigned char)*q)) q++;
-        if (*q == ':' && isdigit((unsigned char)q[1])) return true;
+static char *icon_lsp(void) { return tc_styled_sym("tool.lsp", TUI_TC_ACCENT); }
+
+/* wrapTreeLine / wrapGuidedLine: hang a tree row beneath its connector, or a connector-less detail row beneath its rails */
+static void wrap_guided(const char *line, int width, strvec_t *out) {
+    const char *vertical = tc_sym("tree.vertical");
+    const char *const conns[2] = {tc_sym("tree.branch"), tc_sym("tree.last")};
+    for (int i = 0; i < 2; i++) {
+        char *marker = tc_fg(TUI_TC_DIM, conns[i]);
+        const char *at = strstr(line, marker);
+        size_t ml = strlen(marker);
+        free(marker);
+        if (!at) continue;
+        char *before = xstrndup(line, (size_t)(at - line));
+        char *plain = tui_strip_ansi(before);
+        bool guides = true;
+        for (const char *p = plain; *p && guides;) {
+            if (*p == ' ') p++;
+            else if (*vertical && str_starts(p, vertical)) p += strlen(vertical);
+            else guides = false;
+        }
+        free(plain);
+        size_t end = (size_t)(at - line) + ml + 1;
+        if (!guides || strlen(line) < end || line[end - 1] != ' ') {
+            free(before);
+            continue;
+        }
+        int cw = tui_visible_width(conns[i]);
+        sb_t cont = SB_INIT;
+        sb_append(&cont, before);
+        if (i == 1) tui_sb_spaces(&cont, cw);
+        else {
+            tc_fg_sb(&cont, TUI_TC_DIM, vertical);
+            tui_sb_spaces(&cont, MAX(0, cw - tui_visible_width(vertical)));
+        }
+        sb_putc(&cont, ' ');
+        char *pre = xstrndup(line, end);
+        tc_wrap_prefixed(pre, sb_cstr(&cont), line + end, width, out);
+        free(pre);
+        sb_free(&cont);
+        free(before);
+        return;
+    }
+    /* guideRunEnd: the leading run of spaces, vertical guides and SGR escapes */
+    const char *p = line;
+    for (;;) {
+        if (*p == ' ') p++;
+        else if (*vertical && str_starts(p, vertical)) p += strlen(vertical);
+        else if (p[0] == 0x1b && p[1] == '[') {
+            const char *q = p + 2;
+            while (isdigit((unsigned char)*q) || *q == ';') q++;
+            if (*q != 'm') break;
+            p = q + 1;
+        } else break;
+    }
+    char *pre = xstrndup(line, (size_t)(p - line));
+    tc_wrap_prefixed(pre, pre, p, width, out);
+    free(pre);
+}
+
+/* one view of an LSP response: the header's status and counts, the body rows for one expansion state
+ * (LspResultView + its rows()) */
+typedef struct {
+    tc_status_t icon;     /* TC_ST_SUCCESS shows the LSP icon */
+    const char *action;   /* names the header when the request is unknown */
+    strvec_t meta;
+    strvec_t rows;
+    bool hidden;          /* the rows hold something back */
+    bool wrap_collapsed;  /* rows wrap while collapsed too (hover) */
+} view_t;
+
+/* ---------- hover ---------- */
+
+/* /```(\w*)\n([\s\S]*?)```/ */
+static bool find_code_block(const char *text, const char **start, const char **lang, size_t *lang_n, const char **code, size_t *code_n,
+                            const char **end) {
+    for (const char *f = strstr(text, "```"); f; f = strstr(f + 1, "```")) {
+        const char *p = f + 3;
+        while (isalnum((unsigned char)*p) || *p == '_') p++;
+        if (*p != '\n') continue;
+        const char *close = strstr(p + 1, "```");
+        if (!close) return false;
+        *start = f;
+        *lang = f + 3;
+        *lang_n = (size_t)(p - f - 3);
+        *code = p + 1;
+        *code_n = (size_t)(close - p - 1);
+        *end = close + 3;
+        return true;
     }
     return false;
 }
 
-static void push_split(strvec_t *out, const char *s) { tc_split_lines(s, out); }
-
-static char *icon_lsp(void) { return tc_styled_sym("tool.lsp", TUI_TC_ACCENT); }
-
-static void render_diagnostics(int errs, int warns, const strvec_t *lines, bool expanded, strvec_t *out) {
-    strvec_t unreported = {0};
-    for (size_t i = 0; i < lines->n; i++)
-        if (strstr(lines->v[i], "no diagnostics report yet")) strvec_push(&unreported, lines->v[i]);
-    char *icon = errs > 0 ? tc_styled_sym("status.error", TUI_TC_ERROR)
-                 : (warns > 0 || unreported.n) ? tc_styled_sym("status.warning", TUI_TC_WARNING)
-                                               : icon_lsp();
-    strvec_t meta = {0};
-    if (errs > 0) strvec_push_own(&meta, xasprintf("%d error%s", errs, errs != 1 ? "s" : ""));
-    if (warns > 0) strvec_push_own(&meta, xasprintf("%d warning%s", warns, warns != 1 ? "s" : ""));
-    if (unreported.n) strvec_push_own(&meta, tc_format_count("unverified file", (int64_t)unreported.n));
-    if (!meta.n) strvec_push(&meta, "No issues");
-    char *mj = strvec_join(&meta, tc_sym("sep.dot"));
-    char *md = tc_fg(TUI_TC_DIM, mj);
-    /* items: unreported rows first, then parsed diagnostics (raw rows when none parse) */
-    VEC(diag_t) parsed = {0};
-    strvec_t raws = {0};
-    const char *err_sym = tc_sym("status.error");
-    for (size_t i = 0; i < lines->n; i++) {
-        const char *l = lines->v[i];
-        if (!(is_status_row(l, err_sym) || has_line_col(l))) continue;
-        char *t = str_trim(l);
-        diag_t d;
-        if (parse_diag(t, &d)) vec_push(&parsed, d);
-        strvec_push_own(&raws, tc_replace_tabs(t));
+static void doc_rows(const char *doc, strvec_t *out) {
+    if (!*doc) return;
+    strvec_t l = {0};
+    tc_split_lines(doc, &l);
+    for (size_t i = 0; i < l.n; i++) {
+        char *t = tc_replace_tabs(l.v[i]);
+        strvec_push_own(out, tc_fg(TUI_TC_MUTED, t));
         free(t);
     }
-    typedef struct {
-        const char *raw;
-        diag_t *d;
-    } item_t;
-    VEC(item_t) items = {0};
-    char **utrim = xcalloc(unreported.n + 1, sizeof(char *));
-    for (size_t i = 0; i < unreported.n; i++) {
-        char *t = str_trim(unreported.v[i]);
-        utrim[i] = tc_replace_tabs(t);
-        free(t);
-        vec_push(&items, ((item_t){utrim[i], NULL}));
-    }
-    if (parsed.n)
-        for (size_t i = 0; i < parsed.n; i++) vec_push(&items, ((item_t){NULL, &parsed.v[i]}));
-    else
-        for (size_t i = 0; i < raws.n; i++) vec_push(&items, ((item_t){raws.v[i], NULL}));
-    sb_t o = SB_INIT;
-    if (expanded) {
-        sb_appendf(&o, "%s %s", icon, md);
-        for (size_t i = 0; i < items.n; i++) {
-            bool last = i + 1 == items.n;
-            char *br = tc_fg(TUI_TC_DIM, tc_sym(last ? "tree.last" : "tree.branch"));
-            if (items.v[i].raw) {
-                char *m = tc_fg(TUI_TC_MUTED, items.v[i].raw);
-                sb_appendf(&o, "\n %s %s", br, m);
-                free(m);
-            } else {
-                diag_t *d = items.v[i].d;
-                char *loc = diag_location(d);
-                char *sv = severity_tag(d->sev);
-                sb_appendf(&o, "\n %s %s %s", br, loc, sv);
-                char *msg = with_code_close(diag_message(d), d);
-                if (*msg) {
-                    char *dp = tc_fg(TUI_TC_DIM, last ? "   " : "\xe2\x94\x82  ");
-                    char *mm = tc_fg(TUI_TC_MUTED, msg);
-                    sb_appendf(&o, "\n %s%s", dp, mm);
-                    free(mm);
-                    free(dp);
-                }
-                free(msg);
-                free(sv);
-                free(loc);
-            }
-            free(br);
-        }
+    strvec_free(&l);
+}
+
+static void hover_view(const char *text, const char *start, const char *lang, size_t lang_n, const char *code, size_t code_n,
+                       const char *end, bool expanded, view_t *v) {
+    v->action = "hover";
+    v->icon = TC_ST_SUCCESS;
+    v->wrap_collapsed = true;
+    char *lg = xstrndup(lang, lang_n);
+    char *c0 = xstrndup(code, code_n);
+    char *ct = str_trim(c0);
+    strvec_t cl = {0}, full = {0};
+    tc_highlight(ct, *lg ? lg : NULL, &cl);
+    char *b0 = xstrndup(text, (size_t)(start - text));
+    char *before = str_trim(b0), *after = str_trim(end);
+    doc_rows(before, &full);
+    for (size_t i = 0; i < cl.n; i++) strvec_push(&full, cl.v[i]);
+    doc_rows(after, &full);
+    size_t hidden = full.n ? full.n - 1 : 0;
+    if (expanded || hidden == 0) {
+        for (size_t i = 0; i < full.n; i++) strvec_push(&v->rows, full.v[i]);
     } else {
-        size_t shown = MIN(items.n, (size_t)3), remaining = items.n - shown;
-        bool clipped = false;
-        for (size_t i = 0; i < shown; i++)
-            if (items.v[i].d) {
-                char *m = with_code_close(diag_message(items.v[i].d), items.v[i].d);
-                clipped |= tui_visible_width(m) > 80;
-                free(m);
-            }
-        char *hint = remaining > 0 || clipped ? tc_expand_hint() : xstrdup("");
-        sb_appendf(&o, "%s %s%s", icon, md, hint);
-        free(hint);
-        for (size_t i = 0; i < shown; i++) {
-            bool last = i + 1 == shown && remaining == 0;
-            char *br = tc_fg(TUI_TC_DIM, tc_sym(last ? "tree.last" : "tree.branch"));
-            if (items.v[i].raw) {
-                char *m = tc_fg(TUI_TC_MUTED, items.v[i].raw);
-                sb_appendf(&o, "\n %s %s", br, m);
-                free(m);
-            } else {
-                diag_t *d = items.v[i].d;
-                char *loc = diag_location(d);
-                char *sv = severity_tag(d->sev);
-                char *msg = with_code_close(diag_message(d), d);
-                sb_appendf(&o, "\n %s %s %s", br, loc, sv);
-                if (*msg) {
-                    char *t = tui_truncate_to_width(msg, 80, NULL);
-                    char *mm = tc_fg(TUI_TC_MUTED, t);
-                    sb_appendf(&o, " %s", mm);
-                    free(mm);
-                    free(t);
-                }
-                free(msg);
-                free(sv);
-                free(loc);
-            }
-            free(br);
-        }
-        if (remaining > 0) {
-            char *br = tc_fg(TUI_TC_DIM, tc_sym("tree.last"));
-            char *t = xasprintf("\xe2\x80\xa6 %zu more", remaining);
-            char *m = tc_fg(TUI_TC_MUTED, t);
-            sb_appendf(&o, "\n %s %s", br, m);
-            free(m);
-            free(t);
-            free(br);
-        }
+        strvec_push(&v->rows, cl.n ? cl.v[0] : full.v[0]);
+        char *m = tc_more_items((int64_t)hidden, "line");
+        strvec_push_own(&v->rows, tc_fg(TUI_TC_MUTED, m));
+        free(m);
+        v->hidden = true;
     }
-    push_split(out, sb_cstr(&o));
-    sb_free(&o);
-    for (size_t i = 0; i < unreported.n; i++) free(utrim[i]);
-    free(utrim);
-    vec_free(&items);
-    for (size_t i = 0; i < parsed.n; i++) diag_free(&parsed.v[i]);
-    vec_free(&parsed);
-    strvec_free(&raws);
-    free(md);
-    free(mj);
-    strvec_free(&meta);
-    free(icon);
-    strvec_free(&unreported);
+    strvec_free(&full);
+    strvec_free(&cl);
+    free(after);
+    free(before);
+    free(b0);
+    free(ct);
+    free(c0);
+    free(lg);
 }
 
-/* references grouped by file */
-static void render_references(int count, const strvec_t *lines, bool expanded, strvec_t *out) {
-    char *icon = count > 0 ? icon_lsp() : tc_styled_sym("status.warning", TUI_TC_WARNING);
-    strvec_t files = {0};
-    VEC(strvec_t) locs = {0};
-    for (size_t i = 0; i < lines->n; i++) {
-        char *t = str_trim(lines->v[i]);
-        /* file:line:col at the end */
-        char *c2 = strrchr(t, ':');
-        bool ok = false;
-        if (c2 && c2 > t && c2[1] && strspn(c2 + 1, "0123456789") == strlen(c2 + 1)) {
-            *c2 = 0;
-            char *c1 = strrchr(t, ':');
-            if (c1 && c1 > t && c1[1] && strspn(c1 + 1, "0123456789") == strlen(c1 + 1)) {
-                *c1 = 0;
-                ok = !strchr(t, ' ') || true;
-                size_t fi = files.n;
-                for (size_t k = 0; k < files.n; k++)
-                    if (!strcmp(files.v[k], t)) fi = k;
-                if (fi == files.n) {
-                    strvec_push(&files, t);
-                    strvec_t e = {0};
-                    vec_push(&locs, e);
-                }
-                strvec_push_own(&locs.v[fi], xasprintf("%s:%s", c1 + 1, c2 + 1));
-            }
+/* ---------- diagnostics ---------- */
+
+static bool word_char(unsigned char c) { return isalnum(c) || c == '_'; }
+
+/* `N word(s)(, N word(s))*` starting at p; returns the end, NULL when p doesn't hold one */
+static const char *summary_run(const char *p) {
+    for (;;) {
+        if (!isdigit((unsigned char)*p)) return NULL;
+        while (isdigit((unsigned char)*p)) p++;
+        if (*p != ' ') return NULL;
+        p++;
+        if (!word_char((unsigned char)*p)) return NULL;
+        while (word_char((unsigned char)*p)) p++;
+        if (!str_starts(p, "(s)")) return NULL;
+        p += 3;
+        if (!str_starts(p, ", ")) return p;
+        p += 2;
+    }
+}
+
+/* DIAGNOSTICS_SUMMARY_RE: /^\d+ \w+\(s\)(?:, \d+ \w+\(s\))*:?$/ */
+static bool is_summary_line(const char *l) {
+    const char *e = summary_run(l);
+    if (!e) return false;
+    if (*e == ':') e++;
+    return !*e;
+}
+
+/* FILE_SUMMARY_RE: /: (?:no issues|\d+ \w+\(s\)(?:, \d+ \w+\(s\))*)$/ */
+static bool is_file_summary(const char *l) {
+    for (const char *p = strstr(l, ": "); p; p = strstr(p + 1, ": ")) {
+        if (!strcmp(p + 2, "no issues")) return true;
+        const char *e = summary_run(p + 2);
+        if (e && !*e) return true;
+    }
+    return false;
+}
+
+/* DIAGNOSTIC_AT_RE: /^\d+:\d+\s+\[/ */
+static bool is_diagnostic_at(const char *l) {
+    if (!isdigit((unsigned char)*l)) return false;
+    while (isdigit((unsigned char)*l)) l++;
+    if (*l != ':' || !isdigit((unsigned char)l[1])) return false;
+    l++;
+    while (isdigit((unsigned char)*l)) l++;
+    if (!isspace((unsigned char)*l)) return false;
+    while (isspace((unsigned char)*l)) l++;
+    return *l == '[';
+}
+
+/* STATUS_GLYPH_RE: /^(?:\[[^\]\s]*\]|[^\p{L}\p{N}\s./~\\]+)\s+/u, stripped. Non-ASCII symbol blocks and the private use
+ * area count as glyphs; other non-ASCII letters as text. */
+static const char *strip_status_glyph(const char *l) {
+    const char *p = l;
+    if (*p == '[') {
+        const char *q = p + 1;
+        while (*q && *q != ']' && !isspace((unsigned char)*q)) q++;
+        if (*q == ']' && isspace((unsigned char)q[1])) {
+            q++;
+            while (isspace((unsigned char)*q)) q++;
+            return q;
         }
-        (void)ok;
+    }
+    size_t n = strlen(p), i = 0;
+    while (i < n) {
+        uint32_t cp;
+        int k = utf8_decode(p + i, n - i, &cp);
+        bool glyph = cp < 0x80 ? !(isalnum((int)cp) || isspace((int)cp) || strchr("./~\\", (int)cp))
+                               : (cp >= 0x2000 && cp <= 0x2bff) || (cp >= 0xe000 && cp <= 0xf8ff) || cp >= 0x1f000;
+        if (!glyph) break;
+        i += (size_t)k;
+    }
+    if (!i || !isspace((unsigned char)p[i])) return l;
+    while (isspace((unsigned char)p[i])) i++;
+    return p + i;
+}
+
+static void diag_item(const diag_t *d, bool expanded, strvec_t *items) {
+    char *loc = diag_location(d);
+    char *sv = severity_tag(d->sev);
+    char *msg = with_code_close(diag_message(d), d);
+    char *m0 = tc_replace_tabs(msg);
+    char *mm = tc_fg(TUI_TC_MUTED, m0);
+    strvec_push_own(items, !*msg ? xasprintf("%s %s", loc, sv) : xasprintf(expanded ? "%s %s\n%s" : "%s %s %s", loc, sv, mm));
+    free(mm);
+    free(m0);
+    free(msg);
+    free(sv);
+    free(loc);
+}
+
+static void push_raw(strvec_t *items, const strvec_t *raw, tui_tc_t slot) {
+    for (size_t i = 0; i < raw->n; i++) {
+        char *t = tc_replace_tabs(raw->v[i]);
+        strvec_push_own(items, tc_fg(slot, t));
         free(t);
     }
-    size_t max_files = expanded ? files.n : 3, max_locs = expanded ? SIZE_MAX : 1;
-    bool hidden = files.n > max_files;
-    for (size_t k = 0; k < files.n; k++) hidden |= locs.v[k].n > max_locs;
-    char cnt[32];
-    snprintf(cnt, sizeof cnt, "%d found", count);
-    char *cd = tc_fg(TUI_TC_DIM, cnt);
-    char *hint = !expanded && hidden ? tc_expand_hint() : xstrdup("");
-    sb_t o = SB_INIT;
-    sb_appendf(&o, "%s %s%s", icon, cd, hint);
-    size_t nf = MIN(files.n, max_files);
-    for (size_t fi = 0; fi < nf; fi++) {
-        bool lastf = fi + 1 == nf && files.n <= max_files;
-        char *fb = tc_fg(TUI_TC_DIM, tc_sym(lastf ? "tree.last" : "tree.branch"));
-        const char *fc = lastf ? "   " : "\xe2\x94\x82  ";
-        char *fa = tc_styled_path(files.v[fi]);
-        char *fm0 = xasprintf("%zu reference%s", locs.v[fi].n, locs.v[fi].n != 1 ? "s" : "");
-        char *fm = tc_fg(TUI_TC_DIM, fm0);
-        sb_appendf(&o, "\n %s %s %s", fb, fa, fm);
-        size_t nl = MIN(locs.v[fi].n, max_locs);
-        for (size_t li = 0; li < nl; li++) {
-            bool lastl = li + 1 == nl && locs.v[fi].n <= max_locs;
-            char *lc = xstrdup(locs.v[fi].v[li]);
-            char *colon = strchr(lc, ':');
-            *colon = 0;
-            char *fcd = tc_fg(TUI_TC_DIM, fc);
-            char *lb = tc_fg(TUI_TC_DIM, tc_sym(lastl ? "tree.last" : "tree.branch"));
-            char *t = xasprintf("line %s, col %s", lc, colon + 1);
-            char *tm = tc_fg(TUI_TC_MUTED, t);
-            sb_appendf(&o, "\n %s%s %s", fcd, lb, tm);
-            if (expanded) {
-                char *lcd = tc_fg(TUI_TC_DIM, lastl ? "   " : "\xe2\x94\x82  ");
-                char *at0 = tc_fg(TUI_TC_MUTED, "at ");
-                char *atp = tc_styled_path(files.v[fi]);
-                char *atl0 = xasprintf(":%s:%s", lc, colon + 1);
-                char *atl = tc_fg(TUI_TC_MUTED, atl0);
-                char *am = xasprintf("%s%s%s", at0, atp, atl);
-                free(atl);
-                free(atl0);
-                free(atp);
-                free(at0);
-                sb_appendf(&o, "\n %s%s%s", fcd, lcd, am);
-                free(am);
-                free(lcd);
-            }
-            free(tm);
-            free(t);
-            free(lb);
-            free(fcd);
-            free(lc);
-        }
-        if (locs.v[fi].n > max_locs) {
-            char *fcd = tc_fg(TUI_TC_DIM, fc);
-            char *lb = tc_fg(TUI_TC_DIM, tc_sym("tree.last"));
-            char *t = xasprintf("\xe2\x80\xa6 %zu more", locs.v[fi].n - max_locs);
-            char *tm = tc_fg(TUI_TC_MUTED, t);
-            sb_appendf(&o, "\n %s%s %s", fcd, lb, tm);
-            free(tm);
-            free(t);
-            free(lb);
-            free(fcd);
-        }
-        free(fm);
-        free(fm0);
-        free(fa);
-        free(fb);
-    }
-    if (files.n > max_files) {
-        char *lb = tc_fg(TUI_TC_DIM, tc_sym("tree.last"));
-        char *mi = tc_more_items((int64_t)(files.n - max_files), "file");
-        char *mm = tc_fg(TUI_TC_MUTED, mi);
-        sb_appendf(&o, "\n %s %s", lb, mm);
-        free(mm);
-        free(mi);
-        free(lb);
-    }
-    push_split(out, sb_cstr(&o));
-    sb_free(&o);
-    free(hint);
-    free(cd);
-    for (size_t k = 0; k < locs.n; k++) strvec_free(&locs.v[k]);
-    vec_free(&locs);
-    strvec_free(&files);
-    free(icon);
 }
 
-/* `Found N definition(s):` + `  file:line:col` + `    N: source` context */
+/* diagnosticsView + parseLspDiagnostics: failures and unverified files lead, partial-failure warnings and unparsed lines
+ * follow; counted from the rows (a multi-file response carries one summary per file) */
+static void diagnostics_view(const char *text, bool expanded, view_t *v) {
+    v->action = "diagnostics";
+    tc_grouped_t g;
+    tc_grouped_parse(&g, text, NULL, NULL);
+    strvec_t failures = {0}, warnings = {0}, unreported = {0}, other = {0};
+    VEC(diag_t) diags = {0};
+    const char *file = NULL;
+    for (size_t i = 0; i < g.lines.n; i++) {
+        if (g.rows[i].kind != TC_GROW_CONTENT) {
+            file = g.rows[i].kind == TC_GROW_FILE ? g.rows[i].display_path : NULL;
+            continue;
+        }
+        char *line = str_trim(g.lines.v[i]);
+        if (!*line || !strcmp(line, "OK") || is_summary_line(line)) {
+        } else if (strstr(line, "all language servers failed")) {
+            strvec_push(&failures, strip_status_glyph(line));
+        } else if (strstr(line, "some servers failed")) {
+            strvec_push(&warnings, strip_status_glyph(line));
+        } else if (strstr(line, "no diagnostics report yet")) {
+            strvec_push(&unreported, strip_status_glyph(line));
+        } else if (!is_file_summary(line)) {
+            char *q = file && is_diagnostic_at(line) ? xasprintf("%s:%s", file, line) : xstrdup(line);
+            diag_t d;
+            if (parse_diag(q, &d)) vec_push(&diags, d);
+            else strvec_push(&other, line);
+            free(q);
+        }
+        free(line);
+    }
+    static const char *const SEV[] = {"error", "warning", "info", "hint"};
+    int64_t counts[4] = {0};
+    for (size_t i = 0; i < diags.n; i++)
+        for (int k = 0; k < 4; k++)
+            if (!strcmp(diags.v[i].sev, SEV[k])) counts[k]++;
+    for (int k = 0; k < 4; k++)
+        if (counts[k] > 0) strvec_push_own(&v->meta, tc_format_count(SEV[k], counts[k]));
+    if (failures.n) strvec_push_own(&v->meta, tc_format_count("server failure", (int64_t)failures.n));
+    if (unreported.n) strvec_push_own(&v->meta, tc_format_count("unverified file", (int64_t)unreported.n));
+    strvec_t items = {0};
+    push_raw(&items, &failures, TUI_TC_ERROR);
+    push_raw(&items, &unreported, TUI_TC_WARNING);
+    for (size_t i = 0; i < diags.n; i++) diag_item(&diags.v[i], expanded, &items);
+    push_raw(&items, &warnings, TUI_TC_WARNING);
+    push_raw(&items, &other, TUI_TC_MUTED);
+    /* only a response with nothing to count and nothing to show claims a clean file */
+    if (!v->meta.n && !items.n) strvec_push(&v->meta, "No issues");
+    v->icon = counts[0] > 0 || failures.n ? TC_ST_ERROR : counts[1] > 0 || unreported.n || warnings.n ? TC_ST_WARNING : TC_ST_SUCCESS;
+    tc_tree_list(&items, expanded, 3, "diagnostic", &v->rows);
+    v->hidden = !expanded && items.n > 3;
+    strvec_free(&items);
+    for (size_t i = 0; i < diags.n; i++) diag_free(&diags.v[i]);
+    vec_free(&diags);
+    strvec_free(&failures);
+    strvec_free(&warnings);
+    strvec_free(&unreported);
+    strvec_free(&other);
+    tc_grouped_free(&g);
+}
+
+/* ---------- locations and references ---------- */
+
+/* Found N definition(s) / type definition(s) / implementation(s) / reference(s): `  file:line:col` rows, each with the
+ * `    N: source` context after it; a row matching both is context of the current location */
 typedef struct {
     char *file;
     int line, col;
-    strvec_t ctx;  /* raw source */
+    strvec_t ctx;
     VEC(int) nums;
 } loc_t;
 typedef VEC(loc_t) locs_t;
@@ -497,9 +520,9 @@ static bool parse_locations(const strvec_t *lines, char **noun, int *count, locs
     while (isdigit((unsigned char)*p)) p++;
     if (*p != ' ') return false;
     p++;
-    static const char *const NOUNS[] = {"type definition", "implementation", "definition"};
+    static const char *const NOUNS[] = {"type definition", "implementation", "definition", "reference"};
     const char *nn = NULL;
-    for (size_t i = 0; i < 3; i++) {
+    for (size_t i = 0; i < ARRAY_LEN(NOUNS); i++) {
         char *f = xasprintf("%s(s):", NOUNS[i]);
         if (!strcmp(p, f)) nn = NOUNS[i];
         free(f);
@@ -541,374 +564,337 @@ static bool parse_locations(const strvec_t *lines, char **noun, int *count, locs
     return true;
 }
 
-static void render_locations(const char *noun, int count, locs_t *locs, bool expanded, int cw, strvec_t *out) {
-    size_t shown = expanded ? locs->n : MIN(locs->n, (size_t)2), hidden = locs->n - shown;
-    char *icon = count > 0 ? icon_lsp() : tc_styled_sym("status.warning", TUI_TC_WARNING);
-    char *fc = tc_format_count(noun, count);
-    char *fd = tc_fg(TUI_TC_DIM, fc);
-    char *hint = !expanded && hidden ? tc_expand_hint() : xstrdup("");
-    strvec_t rows = {0};
-    strvec_push_own(&rows, xasprintf("%s %s%s", icon, fd, hint));
-    for (size_t i = 0; i < shown; i++) {
-        loc_t *l = &locs->v[i];
-        bool last = i + 1 == shown && hidden == 0;
-        char *br = tc_fg(TUI_TC_DIM, tc_sym(last ? "tree.last" : "tree.branch"));
-        char *rail = tc_fg(TUI_TC_DIM, last ? "   " : "\xe2\x94\x82  ");
+/* highlightSourceLine: one source line in its file's language, or in `fallback` when the highlighter doesn't know it */
+static char *highlight_source_line(const char *source, const char *lang, tui_tc_t fallback) {
+    char *plain = tc_replace_tabs(source);
+    if (lang && !strcmp(lang, "markdown")) return plain; /* the native highlighter knows it; plain rows stay uncolored */
+    if (!lang || !tui_highlight_supported(lang)) {
+        char *r = tc_fg(fallback, plain);
+        free(plain);
+        return r;
+    }
+    strvec_t hl = {0};
+    tc_highlight(plain, lang, &hl);
+    char *r = xstrdup(hl.n ? hl.v[0] : plain);
+    strvec_free(&hl);
+    free(plain);
+    return r;
+}
+
+static char *styled_shortened(const char *file) {
+    char *sp = tc_shorten_path(file);
+    char *t = tc_replace_tabs(sp);
+    char *r = tc_styled_path(t);
+    free(t);
+    free(sp);
+    return r;
+}
+
+/* referencesView: one branch per file (`file (N)`) over its locations, each previewing its source line; all positions
+ * share one width, so the rules line up across files and stay put when the view expands */
+static void references_view(int count, const locs_t *locs, bool expanded, view_t *v) {
+    v->action = "references";
+    v->icon = count > 0 ? TC_ST_SUCCESS : TC_ST_WARNING;
+    strvec_t files = {0};
+    size_t *counts = xcalloc(locs->n + 1, sizeof *counts);
+    int pos_w = 0;
+    for (size_t i = 0; i < locs->n; i++) {
+        size_t fi = files.n;
+        for (size_t k = 0; k < files.n; k++)
+            if (!strcmp(files.v[k], locs->v[i].file)) fi = k;
+        if (fi == files.n) strvec_push(&files, locs->v[i].file);
+        counts[fi]++;
+        char b[48];
+        pos_w = MAX(pos_w, snprintf(b, sizeof b, "%d:%d", locs->v[i].line, locs->v[i].col));
+    }
+    strvec_push_own(&v->meta, tc_format_count("reference", count));
+    if (files.n) strvec_push_own(&v->meta, tc_format_count("file", (int64_t)files.n));
+    bool hides = files.n > 3;
+    for (size_t k = 0; k < MIN(files.n, (size_t)3); k++) hides |= counts[k] > 2;
+    strvec_t items = {0};
+    for (size_t fi = 0; fi < files.n; fi++) {
+        const char *lang = tc_lang_from_path(files.v[fi]);
+        strvec_t rows = {0};
+        for (size_t i = 0; i < locs->n; i++) {
+            const loc_t *l = &locs->v[i];
+            if (strcmp(l->file, files.v[fi])) continue;
+            char pos[48];
+            char b[48];
+            snprintf(b, sizeof b, "%d:%d", l->line, l->col);
+            snprintf(pos, sizeof pos, "%*s", pos_w, b);
+            char *source = NULL;
+            for (size_t k = 0; k < l->ctx.n && !source; k++)
+                if (l->nums.v[k] == l->line) source = str_trim(l->ctx.v[k]);
+            if (!source || !*source) strvec_push_own(&rows, tc_fg(TUI_TC_MUTED, pos));
+            else {
+                char *g0 = xasprintf("%s\xe2\x94\x82", pos);
+                char *g = tc_fg(TUI_TC_MUTED, g0);
+                char *s = highlight_source_line(source, lang, TUI_TC_TOOL_OUTPUT);
+                strvec_push_own(&rows, xasprintf("%s %s", g, s));
+                free(s);
+                free(g);
+                free(g0);
+            }
+            free(source);
+        }
+        strvec_t nested = {0};
+        tc_tree_list(&rows, expanded, 2, "location", &nested);
+        char *p = styled_shortened(files.v[fi]);
+        char *c0 = xasprintf("(%zu)", counts[fi]);
+        char *cd = tc_fg(TUI_TC_DIM, c0);
+        sb_t it = SB_INIT;
+        sb_appendf(&it, "%s %s", p, cd);
+        for (size_t i = 0; i < nested.n; i++) sb_appendf(&it, "\n%s", nested.v[i]);
+        strvec_push_own(&items, sb_detach(&it));
+        free(cd);
+        free(c0);
+        free(p);
+        strvec_free(&nested);
+        strvec_free(&rows);
+    }
+    tc_tree_list(&items, expanded, 3, "file", &v->rows);
+    v->hidden = !expanded && hides;
+    strvec_free(&items);
+    free(counts);
+    strvec_free(&files);
+}
+
+/* locationsView: one branch per `file:line:col` over its source context, the location's line marked like a grep match */
+static void locations_view(const char *noun, int count, const locs_t *locs, bool expanded, view_t *v) {
+    v->action = noun;
+    v->icon = count > 0 ? TC_ST_SUCCESS : TC_ST_WARNING;
+    strvec_push_own(&v->meta, tc_format_count(noun, count));
+    strvec_t items = {0};
+    size_t limit = expanded ? locs->n : MIN(locs->n, (size_t)2);
+    for (size_t i = 0; i < limit; i++) {
+        const loc_t *l = &locs->v[i];
         char *pos0 = xasprintf(":%d:%d", l->line, l->col);
         char *pos = tc_fg(TUI_TC_MUTED, pos0);
-        char *sp = tc_shorten_path(l->file);
-        char *spr = tc_replace_tabs(sp);
-        char *fa = tc_styled_path(spr);
-        strvec_push_own(&rows, xasprintf(" %s %s%s", br, fa, pos));
+        char *fa = styled_shortened(l->file);
+        sb_t it = SB_INIT;
+        sb_appendf(&it, "%s%s", fa, pos);
         int w = 0;
         for (size_t k = 0; k < l->nums.n; k++) {
             char b[16];
             w = MAX(w, snprintf(b, sizeof b, "%d", l->nums.v[k]));
         }
-        for (size_t k = 0; k < l->ctx.n; k++) {
-            char g[32];
-            snprintf(g, sizeof g, "%s%d", l->nums.v[k] == l->line ? "*" : "", l->nums.v[k]);
-            char *src = tc_replace_tabs(l->ctx.v[k]);
-            char *frame = xasprintf("%*s\xe2\x94\x82%s", w + 1, g, src);
-            char *fo = tc_fg(TUI_TC_TOOL_OUTPUT, frame);
-            strvec_push_own(&rows, xasprintf(" %s%s", rail, fo));
-            free(fo);
-            free(frame);
-            free(src);
+        /* renderCodeFrameRun: each gutter in toolOutput, the sources highlighted as one run */
+        const char *lang = tc_lang_from_path(l->file);
+        bool plain = lang && !strcmp(lang, "markdown");
+        bool known = lang && tui_highlight_supported(lang);
+        strvec_t src = {0}, hl = {0};
+        for (size_t k = 0; k < l->ctx.n; k++) strvec_push_own(&src, tc_replace_tabs(l->ctx.v[k]));
+        if (known) {
+            char *joined = strvec_join(&src, "\n");
+            tui_highlight_code(joined, lang, NULL, &hl);
+            free(joined);
         }
+        for (size_t k = 0; k < l->ctx.n; k++) {
+            char g[32], gg[64];
+            snprintf(g, sizeof g, "%s%d", l->nums.v[k] == l->line ? "*" : "", l->nums.v[k]);
+            snprintf(gg, sizeof gg, "%*s\xe2\x94\x82", w + 1, g);
+            char *gs = tc_fg(TUI_TC_TOOL_OUTPUT, gg);
+            char *ss = plain ? xstrdup(src.v[k]) : known && k < hl.n ? xstrdup(hl.v[k]) : tc_fg(TUI_TC_TOOL_OUTPUT, src.v[k]);
+            sb_appendf(&it, "\n%s%s", gs, ss);
+            free(ss);
+            free(gs);
+        }
+        strvec_free(&hl);
+        strvec_free(&src);
+        strvec_push_own(&items, sb_detach(&it));
         free(fa);
-        free(spr);
-        free(sp);
         free(pos);
         free(pos0);
-        free(rail);
-        free(br);
     }
-    if (hidden) {
-        char *br = tc_fg(TUI_TC_DIM, tc_sym("tree.last"));
-        char *mi = tc_more_items((int64_t)hidden, noun);
-        char *mm = tc_fg(TUI_TC_MUTED, mi);
-        strvec_push_own(&rows, xasprintf(" %s %s", br, mm));
-        free(mm);
-        free(mi);
-        free(br);
-    }
-    if (expanded) {
-        for (size_t i = 0; i < rows.n; i++) strvec_push(out, rows.v[i]);
-    } else {
-        /* clipCollapsedLocations */
-        bool clipped = false;
-        strvec_t cl = {0};
-        for (size_t i = 0; i < rows.n; i++) {
-            char *t = tui_truncate_to_width(rows.v[i], cw, NULL);
-            clipped |= strcmp(t, rows.v[i]) != 0;
-            strvec_push_own(&cl, t);
-        }
-        if (locs->n <= 2 && clipped) {
-            char *h = tc_expand_hint();
-            char *j = xasprintf("%s%s", rows.v[0], h);
-            free(cl.v[0]);
-            cl.v[0] = tui_truncate_to_width(j, cw, NULL);
-            free(j);
-            free(h);
-        }
-        for (size_t i = 0; i < cl.n; i++) strvec_push(out, cl.v[i]);
-        strvec_free(&cl);
-    }
-    strvec_free(&rows);
-    free(hint);
-    free(fd);
-    free(fc);
-    free(icon);
+    for (size_t i = limit; i < locs->n; i++) strvec_push(&items, "");
+    tc_tree_list(&items, expanded, 2, noun, &v->rows);
+    v->hidden = !expanded && locs->n > 2;
+    strvec_free(&items);
 }
 
-static void render_hover(const char *text, const char *lang, const char *code_s, const char *code_e, bool expanded, strvec_t *out) {
-    /* code between the fence line and the closing ``` */
-    char *code0 = xstrndup(code_s, (size_t)(code_e - code_s));
-    char *code = str_trim(code0);
-    char *before0 = xstrndup(text, (size_t)(strstr(text, "```") - text));
-    char *before = tc_trim_end(before0);
-    /* omp: fullText.slice(fullText.indexOf("```", 3) + 3) — the first fence at offset >= 3, which is the opening
-     * fence itself whenever text precedes it (so the code block then repeats as the "after" text) */
-    const char *close = strlen(text) > 3 ? strstr(text + 3, "```") : NULL;
-    char *after = str_trim(close ? close + 3 : text + MIN(strlen(text), (size_t)2));
-    strvec_t cl = {0};
-    tc_highlight(code, *lang ? lang : NULL, &cl);
-    char *icon = tc_styled_sym("status.info", TUI_TC_ACCENT);
-    char *ll = NULL;
-    if (*lang) {
-        char *t = xasprintf(" %s", lang);
-        ll = tc_fg(TUI_TC_MD_CODE_BLOCK_BORDER, t);
-        free(t);
-    } else ll = xstrdup("");
-    const char *h = tc_sym("boxRound.horizontal"), *v = tc_sym("boxRound.vertical");
-    char *vb = tc_fg(TUI_TC_MD_CODE_BLOCK_BORDER, v);
-    char *bottom0 = xasprintf("%s%s%s%s", tc_sym("boxRound.bottomLeft"), h, h, h);
-    char *bottom = tc_fg(TUI_TC_MD_CODE_BLOCK_BORDER, bottom0);
-    sb_t o = SB_INIT;
-    if (expanded) {
-        char *top0 = xasprintf("%s%s%s%s", tc_sym("boxRound.topLeft"), h, h, h);
-        char *top = tc_fg(TUI_TC_MD_CODE_BLOCK_BORDER, top0);
-        sb_appendf(&o, "%s%s", icon, ll);
-        if (*before) {
-            strvec_t bl = {0};
-            tc_split_lines(before, &bl);
-            for (size_t i = 0; i < bl.n; i++) {
-                char *m = tc_fg(TUI_TC_MUTED, bl.v[i]);
-                sb_appendf(&o, "\n %s", m);
-                free(m);
-            }
-            strvec_free(&bl);
-        }
-        sb_appendf(&o, "\n %s", top);
-        for (size_t i = 0; i < cl.n; i++) sb_appendf(&o, "\n %s %s", vb, cl.v[i]);
-        sb_appendf(&o, "\n %s", bottom);
-        if (*after) {
-            char *m = tc_fg(TUI_TC_MUTED, after);
-            sb_appendf(&o, "\n %s", m);
-            free(m);
-        }
-        free(top);
-        free(top0);
-    } else {
-        bool more = cl.n > 1 || *after || *before;
-        char *hint = more ? tc_expand_hint() : xstrdup("");
-        sb_appendf(&o, "%s%s%s", icon, ll, hint);
-        free(hint);
-        if (*before) {
-            char *t = tui_truncate_to_width(before, 60, NULL);
-            char *br = tc_fg(TUI_TC_DIM, tc_sym("tree.branch")), *m = tc_fg(TUI_TC_MUTED, t);
-            sb_appendf(&o, "\n %s %s", br, m);
-            free(m);
-            free(br);
-            free(t);
-        }
-        sb_appendf(&o, "\n %s %s", vb, cl.n ? cl.v[0] : "");
-        if (cl.n > 1) {
-            char *t = xasprintf("\xe2\x80\xa6 %zu more lines", cl.n - 1);
-            char *m = tc_fg(TUI_TC_MUTED, t);
-            sb_appendf(&o, "\n %s %s", vb, m);
-            free(m);
-            free(t);
-        }
-        if (*after) {
-            char *t = tui_truncate_to_width(after, 60, NULL);
-            char *br = tc_fg(TUI_TC_DIM, tc_sym("tree.last")), *m = tc_fg(TUI_TC_MUTED, t);
-            sb_appendf(&o, "\n %s %s", br, m);
-            free(m);
-            free(br);
-            free(t);
-        } else sb_appendf(&o, "\n %s", bottom);
+/* ---------- symbols ---------- */
+
+typedef struct {
+    char *icon, *name, *line;
+    int indent;
+} sym_t;
+
+/* /^(\S+)\s+(.+?)\s*@\s*line\s*(\d+)/ on a trimmed line */
+static bool parse_symbol(const char *t, int indent, sym_t *s) {
+    const char *sp = strpbrk(t, " \t");
+    if (!sp || sp == t) return false;
+    const char *ns = sp;
+    while (isspace((unsigned char)*ns)) ns++;
+    for (const char *at = strchr(ns + 1, '@'); at; at = strchr(at + 1, '@')) {
+        const char *ln = at + 1;
+        while (isspace((unsigned char)*ln)) ln++;
+        if (!str_starts(ln, "line")) continue;
+        ln += 4;
+        while (isspace((unsigned char)*ln)) ln++;
+        if (!isdigit((unsigned char)*ln)) continue;
+        const char *ne = at;
+        while (ne > ns + 1 && isspace((unsigned char)ne[-1])) ne--;
+        s->icon = xstrndup(t, (size_t)(sp - t));
+        s->name = xstrndup(ns, (size_t)(ne - ns));
+        s->line = xstrndup(ln, strspn(ln, "0123456789"));
+        s->indent = indent;
+        return true;
     }
-    push_split(out, sb_cstr(&o));
-    sb_free(&o);
-    free(bottom);
-    free(bottom0);
-    free(vb);
-    free(ll);
-    free(icon);
-    strvec_free(&cl);
-    free(after);
-    free(before);
-    free(before0);
-    free(code);
-    free(code0);
+    return false;
 }
 
-static void render_generic(const char *text, const strvec_t *lines, const char *action, bool expanded, strvec_t *out) {
-    bool err = strstr(text, "Error:") || has_status_row(action, lines, tc_sym("status.error"));
-    bool ok = has_status_row(action, lines, tc_sym("status.success")) || strstr(text, "Applied");
-    char *icon = err && !ok ? tc_styled_sym("status.error", TUI_TC_ERROR) : ok && !err ? icon_lsp() : tc_styled_sym("status.info", TUI_TC_ACCENT);
-    sb_t o = SB_INIT;
-    if (expanded) {
-        char *d = tc_fg(TUI_TC_DIM, "Output");
-        sb_appendf(&o, "%s %s", icon, d);
-        free(d);
-        for (size_t i = 0; i < lines->n; i++) {
-            char *br = tc_fg(TUI_TC_DIM, tc_sym(i + 1 == lines->n ? "tree.last" : "tree.branch"));
-            char *t = tc_replace_tabs(lines->v[i]);
-            sb_appendf(&o, "\n %s %s", br, t);
-            free(t);
-            free(br);
-        }
-    } else {
-        const char *first = lines->n && *lines->v[0] ? lines->v[0] : "No output";
-        bool more = lines->n > 1 || tui_visible_width(first) > 60;
-        char *hint = more ? tc_expand_hint() : xstrdup("");
-        char *t = tui_truncate_to_width(first, 60, NULL);
-        char *d = tc_fg(TUI_TC_DIM, t);
-        sb_appendf(&o, "%s %s%s", icon, d, hint);
-        free(d);
-        free(t);
-        free(hint);
-        size_t pv = lines->n > 1 ? MIN(lines->n - 1, (size_t)3) : 0;
-        for (size_t i = 1; i <= pv; i++) {
-            bool last = i == pv && lines->n <= 4;
-            char *br = tc_fg(TUI_TC_DIM, tc_sym(last ? "tree.last" : "tree.branch"));
-            char *tr = str_trim(lines->v[i]);
-            char *tt = tui_truncate_to_width(tr, 80, NULL);
-            char *dd = tc_fg(TUI_TC_DIM, tt);
-            sb_appendf(&o, "\n %s %s", br, dd);
-            free(dd);
-            free(tt);
-            free(tr);
-            free(br);
-        }
-        if (lines->n > 4) {
-            char *br = tc_fg(TUI_TC_DIM, tc_sym("tree.last"));
-            char *mi = tc_more_items((int64_t)(lines->n - 4), "line");
-            char *mm = tc_fg(TUI_TC_MUTED, mi);
-            sb_appendf(&o, "\n %s %s", br, mm);
-            free(mm);
-            free(mi);
-            free(br);
-        }
-    }
-    push_split(out, sb_cstr(&o));
-    sb_free(&o);
-    free(icon);
+static char *symbol_label(const sym_t *s, const char *lang) {
+    char *ic = tc_fg(TUI_TC_ACCENT, s->icon);
+    char *nm = highlight_source_line(s->name, lang, TUI_TC_ACCENT);
+    char *r = xasprintf("%s %s", ic, nm);
+    free(nm);
+    free(ic);
+    return r;
 }
 
-/* symbols: `Symbols in <file>:` + indented `<icon> <name> @ line N` rows (top-level only collapsed) */
-static void render_symbols(const char *file, const strvec_t *lines, bool expanded, strvec_t *out) {
-    typedef struct {
-        char *icon, *name, *line;
-        int indent;
-    } sym_t;
+static void symbols_view(const char *file, bool show_file, const strvec_t *lines, bool expanded, view_t *v) {
+    v->action = "symbols";
     VEC(sym_t) syms = {0};
     for (size_t i = 0; i < lines->n; i++) {
         const char *l = lines->v[i];
         if (!strchr(l, '@') || !strstr(l, "line")) continue;
         int ind = (int)strspn(l, " \t");
         char *t = str_trim(l);
-        char *sp = strpbrk(t, " \t");
-        char *at = strrchr(t, '@');
-        if (sp && at && at > sp) {
-            const char *ln = at + 1;
-            while (*ln == ' ') ln++;
-            if (str_starts(ln, "line")) {
-                ln += 4;
-                while (*ln == ' ') ln++;
-                if (isdigit((unsigned char)*ln)) {
-                    char *name = xstrndup(sp, (size_t)(at - sp));
-                    char *nt = str_trim(name);
-                    sym_t s = {xstrndup(t, (size_t)(sp - t)), nt, xstrndup(ln, strspn(ln, "0123456789")), ind};
-                    vec_push(&syms, s);
-                    free(name);
-                }
-            }
-        }
+        sym_t s;
+        if (parse_symbol(t, ind, &s)) vec_push(&syms, s);
         free(t);
     }
-    char *icon = tc_styled_sym("status.info", TUI_TC_ACCENT);
-    char *in0 = xasprintf("in %s", file);
-    char *in = tc_fg(TUI_TC_DIM, in0);
+    v->icon = syms.n ? TC_ST_SUCCESS : TC_ST_WARNING;
+    strvec_push_own(&v->meta, tc_format_count("symbol", (int64_t)syms.n));
+    if (show_file) strvec_push_own(&v->meta, xasprintf("in %s", file));
     const char *lang = tc_lang_from_path(file);
-    sb_t o = SB_INIT;
-    size_t top = 0;
-    for (size_t i = 0; i < syms.n; i++) top += syms.v[i].indent == 0;
+    const char *vertical = tc_sym("tree.vertical");
     if (expanded) {
-        sb_appendf(&o, "%s %s", icon, in);
+        /* one linear pass each: isLast (monotonic stack, right to left); per ancestor level, the nearest earlier symbol at
+         * that indent decides the rail */
+        bool *is_last = xcalloc(syms.n + 1, sizeof *is_last);
+        size_t *pending = xcalloc(syms.n + 1, sizeof *pending);
+        size_t np = 0;
+        for (size_t i = syms.n; i-- > 0;) {
+            int my = syms.v[i].indent;
+            while (np && syms.v[pending[np - 1]].indent > my) np--;
+            is_last[i] = !np || syms.v[pending[np - 1]].indent != my;
+            pending[np++] = i;
+        }
         for (size_t i = 0; i < syms.n; i++) {
-            /* isLast: no later sibling at the same indent before a shallower one */
-            bool last = true;
-            for (size_t k = i + 1; k < syms.n; k++) {
-                if (syms.v[k].indent < syms.v[i].indent) break;
-                if (syms.v[k].indent == syms.v[i].indent) {
-                    last = false;
-                    break;
-                }
-            }
+            int my = syms.v[i].indent;
             sb_t pre = SB_INIT;
-            sb_putc(&pre, ' ');
-            for (int lvl = 2; lvl <= syms.v[i].indent; lvl += 2) {
-                /* ancestor at indent lvl-2: nearest earlier symbol at that indent */
-                bool alast = true;
+            for (int level = 2; level <= my; level += 2) {
+                bool rail = false;
                 for (size_t a = i; a-- > 0;)
-                    if (syms.v[a].indent == lvl - 2) {
-                        for (size_t k = a + 1; k < syms.n; k++) {
-                            if (syms.v[k].indent < lvl - 2) break;
-                            if (syms.v[k].indent == lvl - 2) {
-                                alast = false;
-                                break;
-                            }
-                        }
+                    if (syms.v[a].indent == level - 2) {
+                        rail = !is_last[a];
                         break;
                     }
-                sb_append(&pre, alast ? "   " : "\xe2\x94\x82  ");
+                bool seen = false;
+                for (size_t a = i; a-- > 0 && !seen;) seen = syms.v[a].indent == level - 2;
+                if (seen && !rail) sb_append(&pre, "   ");
+                else sb_appendf(&pre, "%s  ", vertical);
             }
-            char *br = tc_fg(TUI_TC_DIM, tc_sym(last ? "tree.last" : "tree.branch"));
-            char *ic = tc_fg(TUI_TC_ACCENT, syms.v[i].icon);
-            strvec_t hl = {0};
-            char *nm = tc_replace_tabs(syms.v[i].name);
-            if (lang) tc_highlight(nm, lang, &hl);
-            char *name = lang ? xstrdup(hl.n ? hl.v[0] : nm) : tc_fg(TUI_TC_ACCENT, nm);
-            char *dp = tc_fg(TUI_TC_DIM, last ? "   " : "\xe2\x94\x82  ");
+            char *prefix = tc_fg(TUI_TC_DIM, sb_cstr(&pre));
+            char *br = tc_fg(TUI_TC_DIM, tc_sym(is_last[i] ? "tree.last" : "tree.branch"));
+            char *det0 = is_last[i] ? xstrdup("   ") : xasprintf("%s  ", vertical);
+            char *det = tc_fg(TUI_TC_DIM, det0);
+            char *lb = symbol_label(&syms.v[i], lang);
             char *lt = xasprintf("line %s", syms.v[i].line);
             char *lm = tc_fg(TUI_TC_MUTED, lt);
-            sb_appendf(&o, "\n%s%s %s %s\n%s%s%s", sb_cstr(&pre), br, ic, name, sb_cstr(&pre), dp, lm);
+            strvec_push_own(&v->rows, xasprintf("%s%s %s", prefix, br, lb));
+            strvec_push_own(&v->rows, xasprintf("%s%s%s", prefix, det, lm));
             free(lm);
             free(lt);
-            free(dp);
-            free(name);
-            free(nm);
-            strvec_free(&hl);
-            free(ic);
+            free(lb);
+            free(det);
+            free(det0);
             free(br);
+            free(prefix);
             sb_free(&pre);
         }
+        free(pending);
+        free(is_last);
     } else {
-        size_t shown = MIN(top, (size_t)3);
-        char *hint = syms.n > shown ? tc_expand_hint() : xstrdup("");
-        sb_appendf(&o, "%s %s%s", icon, in, hint);
-        free(hint);
-        size_t k = 0;
-        for (size_t i = 0; i < syms.n && k < shown; i++) {
+        /* the marker counts every hidden symbol, nested ones included, so it adds up to the header's count */
+        strvec_t items = {0};
+        for (size_t i = 0; i < syms.n && items.n < 3; i++) {
             if (syms.v[i].indent) continue;
-            k++;
-            bool last = k == shown && top <= 3;
-            char *br = tc_fg(TUI_TC_DIM, tc_sym(last ? "tree.last" : "tree.branch"));
-            char *ic = tc_fg(TUI_TC_ACCENT, syms.v[i].icon);
-            strvec_t hl = {0};
-            char *nm = tc_replace_tabs(syms.v[i].name);
-            if (lang) tc_highlight(nm, lang, &hl);
-            char *name = lang ? xstrdup(hl.n ? hl.v[0] : nm) : tc_fg(TUI_TC_ACCENT, nm);
+            char *lb = symbol_label(&syms.v[i], lang);
             char *lt = xasprintf("line %s", syms.v[i].line);
             char *lm = tc_fg(TUI_TC_MUTED, lt);
-            sb_appendf(&o, "\n %s %s %s %s", br, ic, name, lm);
+            strvec_push_own(&items, xasprintf("%s %s", lb, lm));
             free(lm);
             free(lt);
-            free(name);
-            free(nm);
-            strvec_free(&hl);
-            free(ic);
-            free(br);
+            free(lb);
         }
-        if (top > 3) {
-            char *br = tc_fg(TUI_TC_DIM, tc_sym("tree.last"));
-            char *t = xasprintf("\xe2\x80\xa6 %zu more", top - 3);
-            char *m = tc_fg(TUI_TC_MUTED, t);
-            sb_appendf(&o, "\n %s %s", br, m);
-            free(m);
-            free(t);
-            free(br);
-        }
+        size_t hidden = syms.n - items.n;
+        char *summary = hidden ? tc_more_items((int64_t)hidden, "symbol") : NULL;
+        tc_tree_list_summary(&items, summary, &v->rows);
+        v->hidden = hidden > 0;
+        free(summary);
+        strvec_free(&items);
     }
-    push_split(out, sb_cstr(&o));
-    sb_free(&o);
     for (size_t i = 0; i < syms.n; i++) free(syms.v[i].icon), free(syms.v[i].name), free(syms.v[i].line);
     vec_free(&syms);
-    free(in);
-    free(in0);
-    free(icon);
 }
 
-/* /Symbols in (.+):/ — the last ':' on the line (NULL-safe: returns s when none) */
-static const char *sym_colon(const char *s) {
-    const char *eol = s + strcspn(s, "\n"), *last = s;
-    for (const char *p = s; p < eol; p++)
-        if (*p == ':') last = p;
-    return last;
+/* ---------- generic ---------- */
+
+/* /^no\b.*\bfound\b/i on the trimmed text */
+static bool is_no_found(const char *text) {
+    char *t = str_trim(text);
+    bool r = false;
+    if (!strncasecmp(t, "no", 2) && !word_char((unsigned char)t[2])) {
+        size_t eol = strcspn(t, "\n");
+        for (size_t i = 2; i + 5 <= eol && !r; i++)
+            r = !strncasecmp(t + i, "found", 5) && !word_char((unsigned char)t[i - 1]) && !word_char((unsigned char)t[i + 5]);
+    }
+    free(t);
+    return r;
+}
+
+static void generic_view(const char *text, const strvec_t *lines, const char *action, bool expanded, view_t *v) {
+    v->action = "request";
+    bool err = strstr(text, "Error:") || has_status_row(action, lines, tc_sym("status.error"));
+    bool ok = has_status_row(action, lines, tc_sym("status.success")) || strstr(text, "Applied");
+    /* the call completed; an error reported inside its output, or an empty answer, needs attention */
+    v->icon = (err && !ok) || is_no_found(text) ? TC_ST_WARNING : TC_ST_SUCCESS;
+    strvec_t items = {0};
+    push_raw(&items, lines, TUI_TC_TOOL_OUTPUT);
+    tc_tree_list(&items, expanded, 4, "line", &v->rows);
+    v->hidden = !expanded && items.n > 4;
+    strvec_free(&items);
+}
+
+/* ---------- renderResult ---------- */
+
+/* /\d+\s+(?:error|warning)\(s\)/ */
+static bool has_severity_count(const char *text) {
+    for (const char *p = text; *p; p++) {
+        if (!isdigit((unsigned char)*p)) continue;
+        const char *q = p;
+        while (isdigit((unsigned char)*q)) q++;
+        if (!isspace((unsigned char)*q)) continue;
+        while (isspace((unsigned char)*q)) q++;
+        if (str_starts(q, "error(s)") || str_starts(q, "warning(s)")) return true;
+    }
+    return false;
+}
+
+/* /Symbols in (.+):/ — the last ':' on the line (NULL when there is no non-empty match) */
+static const char *symbols_header(const char *text, const char **file_end) {
+    for (const char *s = strstr(text, "Symbols in "); s; s = strstr(s + 1, "Symbols in ")) {
+        const char *b = s + 11, *eol = b + strcspn(b, "\n"), *last = NULL;
+        for (const char *p = b + 1; p < eol; p++)
+            if (*p == ':') last = p;
+        if (last) {
+            *file_end = last;
+            return b;
+        }
+    }
+    return NULL;
 }
 
 void tc_lsp(const tc_call_t *c, int width, strvec_t *out) {
@@ -916,129 +902,118 @@ void tc_lsp(const tc_call_t *c, int width, strvec_t *out) {
         lsp_call(c, width, out);
         return;
     }
+    const json_t *req = c->args ? c->args : json_get_obj(c->details, "request");
+    const char *details_action = json_get_str(c->details, "action");
     const json_t *first = json_at(c->content, 0);
     const char *text = str_eq(json_get_str(first, "type"), "text") ? json_get_str(first, "text") : NULL;
-    if (!text || !*text) {
-        char *ic = tc_status_icon(TC_ST_WARNING, -1);
-        char *d = tc_fg(TUI_TC_DIM, "No result");
-        char *j = xasprintf("%s LSP\n%s", ic, d);
-        tc_push_wrapped(out, j, width);
-        free(j);
-        free(d);
-        free(ic);
+    if (!text) text = "";
+    if (c->is_error) {
+        char *desc = NULL;
+        strvec_t meta = {0};
+        lsp_request_status(req, details_action, &desc, &meta);
+        tc_status_line_t sl = {.icon = TC_ST_ERROR, .spinner = -1, .title = "LSP", .title_slot = -1, .description = desc,
+                               .meta = (const char *const *)meta.v, .nmeta = meta.n};
+        strvec_t rows = {0};
+        strvec_push_own(&rows, tc_status_line(&sl));
+        /* the message hangs under the title, like a Grep or AST Grep error's, and wraps in full */
+        char *tr = str_trim(text);
+        strvec_t ml = {0};
+        tc_split_lines(*tr ? tr : "LSP request failed", &ml);
+        for (size_t i = 0; i < ml.n; i++) {
+            char *mt = str_trim(ml.v[i]);
+            if (*mt) {
+                char *t = tc_replace_tabs(ml.v[i]);
+                char *e = tc_fg(TUI_TC_ERROR, t);
+                tc_wrap_prefixed("  ", "  ", e, width, &rows);
+                free(e);
+                free(t);
+            }
+            free(mt);
+        }
+        for (size_t i = 0; i < rows.n; i++) tc_push_wrapped(out, rows.v[i], width);
+        strvec_free(&rows);
+        strvec_free(&ml);
+        free(tr);
+        strvec_free(&meta);
+        free(desc);
         return;
     }
-    int cw = tc_block_content_width(width, -1, -1);
+    if (!*text) {
+        char *desc = NULL;
+        strvec_t meta = {0};
+        lsp_request_status(req, details_action, &desc, &meta);
+        strvec_push(&meta, "No result");
+        tc_status_line_t sl = {.icon = TC_ST_WARNING, .spinner = -1, .title = "LSP", .title_slot = -1, .description = desc,
+                               .meta = (const char *const *)meta.v, .nmeta = meta.n};
+        char *h = tc_status_line(&sl);
+        tc_push_wrapped(out, h, width);
+        free(h);
+        strvec_free(&meta);
+        free(desc);
+        return;
+    }
     strvec_t lines = {0};
     tc_split_lines(text, &lines);
-    const json_t *req = c->args ? c->args : json_get_obj(c->details, "request");
-    const char *action = json_get_str(req, "action") ? json_get_str(req, "action") : json_get_str(c->details, "action");
-    tc_section_t secs[2] = {0};
-    size_t ns = 0;
-    {
-        strvec_t *rl = &secs[0].lines;
-        if (json_get_str(req, "file")) strvec_push_own(rl, tc_styled_path(json_get_str(req, "file")));
-        if (json_get(req, "line")) {
-            char *n = json_dump(json_get(req, "line"), 0);
-            char *t = xasprintf("line %s", n);
-            strvec_push_own(rl, tc_fg(TUI_TC_DIM, t));
-            free(t);
-            free(n);
-        }
-        if (json_get_str(req, "symbol")) {
-            char *f = flat(json_get_str(req, "symbol"));
-            char *t = xasprintf("symbol: %s", f);
-            strvec_push_own(rl, tc_fg(TUI_TC_DIM, t));
-            free(t);
-            free(f);
-        }
-        if (json_get_str(req, "query")) {
-            char *t = xasprintf("query: %s", json_get_str(req, "query"));
-            strvec_push_own(rl, tc_fg(TUI_TC_DIM, t));
-            free(t);
-        }
-        if (json_get_str(req, "new_name")) {
-            char *t = xasprintf("new name: %s", json_get_str(req, "new_name"));
-            strvec_push_own(rl, tc_fg(TUI_TC_DIM, t));
-            free(t);
-        }
-        if (json_get(req, "apply")) {
-            char *t = xasprintf("apply: %s", json_get_bool(req, "apply", false) ? "true" : "false");
-            strvec_push_own(rl, tc_fg(TUI_TC_DIM, t));
-            free(t);
-        }
-        if (rl->n) ns = 1;
-    }
-    strvec_t body = {0};
-    const char *label = "Response";
-    tc_state_t state = TC_STATE_SUCCESS;
+    const char *action = json_get_str(req, "action") ? json_get_str(req, "action") : details_action;
+    view_t v = {0};
     char *noun = NULL;
     int lcount = 0;
     locs_t locs = {0};
-    const char *fence = strstr(text, "```");
-    const char *fence_nl = fence ? strchr(fence + 3, '\n') : NULL;
-    const char *fence_end = fence_nl ? strstr(fence_nl + 1, "```") : NULL;
-    bool word_lang = fence_nl != NULL;
-    if (fence_nl)
-        for (const char *p = fence + 3; p < fence_nl; p++) word_lang &= isalnum((unsigned char)*p) || *p == '_';
-    int errs = count_of(text, "error"), warns = count_of(text, "warning"), refs = count_of(text, "reference");
-    size_t unreported = 0;
-    for (size_t i = 0; i < lines.n; i++) unreported += strstr(lines.v[i], "no diagnostics report yet") != NULL;
-    const char *syms = strstr(text, "Symbols in ");
+    const char *block, *lang = NULL, *code = NULL, *block_end = NULL, *sym_end = NULL, *sym_file = NULL;
+    size_t lang_n = 0, code_n = 0;
+    /* locations and references are anchored at the response's first line, so they win over hover and diagnostics checks
+     * their source context could trip; a diagnostics request answers with diagnostics whatever its rows hold */
     if (parse_locations(&lines, &noun, &lcount, &locs)) {
-        label = "Locations";
-        state = lcount > 0 ? TC_STATE_SUCCESS : TC_STATE_WARNING;
-        render_locations(noun, lcount, &locs, c->expanded, cw, &body);
-    } else if (fence && word_lang && fence_end) {
-        label = "Hover";
-        char *lang = xstrndup(fence + 3, (size_t)(fence_nl - fence - 3));
-        render_hover(text, lang, fence_nl + 1, fence_end, c->expanded, &body);
-        free(lang);
-    } else if (errs >= 0 || warns >= 0 || has_status_row(action, &lines, tc_sym("status.error")) || unreported) {
-        label = "Diagnostics";
-        state = errs > 0 ? TC_STATE_ERROR : (warns > 0 || unreported) ? TC_STATE_WARNING : TC_STATE_SUCCESS;
-        render_diagnostics(MAX(errs, 0), MAX(warns, 0), &lines, c->expanded, &body);
-    } else if (refs >= 0) {
-        label = "References";
-        render_references(refs, &lines, c->expanded, &body);
-    } else if (syms && sym_colon(syms + 11) > syms + 11) {
-        label = "Symbols";
-        const char *e = sym_colon(syms + 11);
-        char *file = xstrndup(syms + 11, (size_t)(e - syms - 11));
-        render_symbols(file, &lines, c->expanded, &body);
+        if (!strcmp(noun, "reference")) references_view(lcount, &locs, c->expanded, &v);
+        else locations_view(noun, lcount, &locs, c->expanded, &v);
+    } else if (str_eq(action, "diagnostics")) {
+        diagnostics_view(text, c->expanded, &v);
+    } else if (find_code_block(text, &block, &lang, &lang_n, &code, &code_n, &block_end)) {
+        hover_view(text, block, lang, lang_n, code, code_n, block_end, c->expanded, &v);
+    } else if (has_severity_count(text) || has_status_row(action, &lines, tc_sym("status.error")) ||
+               strstr(text, "no diagnostics report yet")) {
+        diagnostics_view(text, c->expanded, &v);
+    } else if ((sym_file = symbols_header(text, &sym_end))) {
+        char *file = xstrndup(sym_file, (size_t)(sym_end - sym_file));
+        symbols_view(file, !json_get_str(req, "file"), &lines, c->expanded, &v);
         free(file);
-    } else if (str_eq(json_get_str(c->details, "action"), "diagnostics") && !strcmp(text, "OK")) {
-        label = "Diagnostics";
-        char *ic = icon_lsp(), *d = tc_fg(TUI_TC_DIM, "OK");
-        strvec_push_own(&body, xasprintf("%s %s", ic, d));
-        free(d);
-        free(ic);
     } else {
-        render_generic(text, &lines, action, c->expanded, &body);
+        generic_view(text, &lines, action, c->expanded, &v);
     }
-    const char *act0 = json_get_str(req, "action") ? json_get_str(req, "action") : json_get_str(c->details, "action");
-    char *lower = NULL;
-    if (!act0) {
-        lower = xstrdup(label);
-        for (char *p = lower; *p; p++) *p = (char)tolower((unsigned char)*p);
-        act0 = lower;
+    char *desc = NULL;
+    strvec_t meta = {0};
+    lsp_request_status(req, details_action ? details_action : v.action, &desc, &meta);
+    for (size_t i = 0; i < v.meta.n; i++) strvec_push(&meta, v.meta.v[i]);
+    /* layoutBody: expanded rows hang under their connector or guide rails; collapsed rows clip to one row each, and a
+     * collapsed view that hides rows or clips one gets the expand hint */
+    strvec_t body = {0};
+    bool hinted = !c->expanded && v.hidden;
+    if (c->expanded || v.wrap_collapsed) {
+        for (size_t i = 0; i < v.rows.n; i++) wrap_guided(v.rows.v[i], width, &body);
+    } else {
+        for (size_t i = 0; i < v.rows.n; i++) {
+            char *t = tui_truncate_to_width(v.rows.v[i], width, NULL);
+            hinted |= strcmp(t, v.rows.v[i]) != 0;
+            strvec_push_own(&body, t);
+        }
     }
-    char *act = action_label(act0);
-    bool success = !c->partial && !c->is_error;
-    char *icon = success ? icon_lsp() : tc_status_icon(c->partial ? TC_ST_RUNNING : TC_ST_ERROR, c->spinner);
-    char *header = xasprintf("%s LSP %s", icon, act);
-    secs[ns].label = tc_fg(TUI_TC_TOOL_TITLE, "Response");
-    for (size_t i = 0; i < body.n; i++) strvec_push(&secs[ns].lines, body.v[i]);
-    ns++;
-    tc_block_t blk = {.header = header, .state = c->partial ? TC_STATE_PENDING : state, .sections = secs, .nsections = ns, .width = width,
-                      .no_bg = true, .pad_left = -1, .pad_right = -1, .border_slot = -1};
-    tc_output_block(&blk, out);
-    free((char *)secs[ns - 1].label);
-    for (size_t i = 0; i < 2; i++) strvec_free(&secs[i].lines);
+    char *ic = !c->partial && v.icon == TC_ST_SUCCESS ? icon_lsp() : NULL;
+    tc_status_line_t sl = {.icon = c->partial ? TC_ST_RUNNING : v.icon, .icon_override = ic, .spinner = c->partial ? c->spinner : -1,
+                           .title = "LSP", .title_slot = -1, .description = desc, .meta = (const char *const *)meta.v, .nmeta = meta.n};
+    char *h = tc_status_line(&sl);
+    char *hint = hinted ? tc_expand_hint() : xstrdup("");
+    char *header = xasprintf("%s%s", h, hint);
+    tc_push_wrapped(out, header, width);
+    for (size_t i = 0; i < body.n; i++) tc_push_wrapped(out, body.v[i], width);
     free(header);
-    free(icon);
-    free(act);
-    free(lower);
+    free(hint);
+    free(h);
+    free(ic);
+    strvec_free(&body);
+    strvec_free(&meta);
+    free(desc);
+    strvec_free(&v.meta);
+    strvec_free(&v.rows);
     for (size_t i = 0; i < locs.n; i++) {
         free(locs.v[i].file);
         strvec_free(&locs.v[i].ctx);
@@ -1046,7 +1021,5 @@ void tc_lsp(const tc_call_t *c, int width, strvec_t *out) {
     }
     vec_free(&locs);
     free(noun);
-    strvec_free(&body);
     strvec_free(&lines);
-    (void)sev_slot_icon;
 }

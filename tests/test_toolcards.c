@@ -1,6 +1,6 @@
 /* test_toolcards.c - tool card regression checks against captured omp output.
  *
- * Fixtures under tests/fixtures/toolcards/ are `tmux capture-pane -e` captures of omp v18.14.2 driven by
+ * Fixtures under tests/fixtures/toolcards/ are `tmux capture-pane -e` captures of omp driven by
  * tests/tui/compare.sh (120 columns, titanium theme, truecolor, unicode glyphs, mock model). Each case
  * renders the same tool call through ui/tools (tc_render / tc_render_read_group) at width 120 and compares
  * the card rows cell by cell (glyph, fg, bg, attributes) with the fixture rows from an anchor line on.

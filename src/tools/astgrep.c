@@ -535,8 +535,20 @@ static int astgrep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *ar
                             capture_t *c = &ms.v[i].caps.v[k];
                             sb_appendf(&mb, "%s%s=%.*s", k ? ", " : "", c->name, (int)MIN(c->end - c->start, (size_t)120), src + c->start);
                         }
-                        for (char *p = mb.s; *p; p++)
-                            if (*p == '\n') *p = ' ';
+                        /* singleLine: a capture can span lines; its display row stays one row */
+                        {
+                            sb_t one = SB_INIT;
+                            for (const char *p = sb_cstr(&mb); *p; p++) {
+                                if (*p == '\r' || *p == '\n') {
+                                    while (p[1] == '\r' || p[1] == '\n') p++;
+                                    sb_putc(&one, ' ');
+                                } else if (*p == '\t') sb_append(&one, "   "); /* replaceTabs */
+                                else sb_putc(&one, *p);
+                            }
+                            sb_clear(&mb);
+                            sb_append(&mb, sb_cstr(&one));
+                            sb_free(&one);
+                        }
                         json_t *dl = json_obj();
                         json_set_int(dl, "line", 0);
                         json_set_str(dl, "text", sb_cstr(&mb));
