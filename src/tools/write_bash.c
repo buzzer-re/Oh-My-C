@@ -809,8 +809,6 @@ static void bash_finish(tool_env_t *env, tool_result_t *out, proc_result_t *r, b
     json_set_int(out->details, "wallTimeMs", dur);
     if (failed) json_set_int(out->details, "exitCode", exit_code);
     if (timed_out) json_set_bool(out->details, "timedOut", true);
-    json_set_int(out->details, "durationMs", dur);
-    json_set_str(out->details, "cwd", cwd);
     json_t *meta = NULL;
     out_meta_from_summary(&meta, &sum, "tail", 1, 0);
     if (meta) json_set(out->details, "meta", meta);

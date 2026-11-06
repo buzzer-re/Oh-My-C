@@ -756,7 +756,9 @@ static void tool_end_updates(const char *sid, const char *id, const char *name, 
     json_set_str(u, "sessionUpdate", "tool_call_update");
     json_set_str(u, "toolCallId", id ? id : "");
     json_set_str(u, "status", is_error ? "failed" : "completed");
-    json_set(u, "rawOutput", json_clone(result));
+    json_t *raw = json_clone(result);
+    if (is_error && json_is_obj(raw) && !json_get_bool(json_get(raw, "details"), "isError", false)) json_set_bool(raw, "isError", true);
+    json_set(u, "rawOutput", raw);
     if (json_len(content)) json_set(u, "content", content);
     else json_free(content);
     json_t *l = result_locations(result, cwd);

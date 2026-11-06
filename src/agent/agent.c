@@ -503,6 +503,9 @@ json_t *agent_event_to_json(const agent_event_t *ev) {
         json_set_str(o, "toolCallId", ev->tool_call_id);
         json_set_str(o, "toolName", ev->tool_name);
         json_set(o, "result", result_json(ev->result));
+        /* agent-loop.ts: a tool that failed marks its result too; a call refused before running carries details instead */
+        if (ev->is_error && !json_get_bool(json_get(o, "result") ? json_get(json_get(o, "result"), "details") : NULL, "isError", false))
+            json_set_bool(json_get(o, "result"), "isError", true);
         json_set_bool(o, "isError", ev->is_error);
         break;
     default: break;
