@@ -601,6 +601,26 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
     if (!str_starts(path, "ssh://")) return write_local(env, ctx, path, raw_content, out);
     char *err = NULL;
     size_t n = strlen(content);
+    if (ends_with_read_projection_notice(raw_content)) {
+        /* not shorter than the resource a read projected; a missing target has no source to discard, as for a new disk file */
+        char *current = NULL;
+        size_t clen = 0;
+        bool is_dir = false, missing = false;
+        if (ssh_fetch_ex(env, path, &current, &clen, &is_dir, &missing, &err) != 0 && !missing) {
+            tool_result_error(out, "%s", err ? err : "ssh:// read failed");
+            free(err);
+            return 0;
+        }
+        free(err);
+        err = NULL;
+        char *refusal = read_projection_refusal(path, raw_content, current, content);
+        free(current);
+        if (refusal) {
+            tool_result_error(out, "%s", refusal);
+            free(refusal);
+            return 0;
+        }
+    }
     if (ssh_store(env, path, content, n, &err) != 0) {
         tool_result_error(out, "%s", err);
     } else {

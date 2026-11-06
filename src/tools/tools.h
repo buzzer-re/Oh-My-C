@@ -205,6 +205,8 @@ bool agent_def_read_only(const json_t *def);
 int github_resolve(tool_env_t *env, const char *url, char **content, bool *markdown, char **err);
 /* ssh://[user@]host[:port]/path (ssh.c): remote UTF-8 text (<=1 MiB) or one-level dir listing; bare ssh:// lists hosts */
 int ssh_fetch(tool_env_t *env, const char *url, char **content, size_t *len, bool *is_dir, char **err);
+/* the same, with *missing set when nothing exists at the path (a new file) */
+int ssh_fetch_ex(tool_env_t *env, const char *url, char **content, size_t *len, bool *is_dir, bool *missing, char **err);
 int ssh_store(tool_env_t *env, const char *url, const char *data, size_t len, char **err);
 bool ssh_available(void);
 char *ssh_quote(const char *s); /* POSIX single-quote */

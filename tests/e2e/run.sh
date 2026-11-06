@@ -315,6 +315,10 @@ check "ssh hosts"      "[box](ssh://box/)"  env PATH="$ROOT/tests/e2e/bin:$PATH"
 check "ssh read sel"   "2:remote two"       env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://box$T/remote.txt:2"
 check "ssh write"      "Successfully wrote 7 bytes to ssh://box"    env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/w.txt\",\"content\":\"via ssh\"}"
 check "ssh write file" "via ssh"            cat "$T/sub/w.txt"
+# a read projection written to a new remote file has no source to discard; over a longer one it is refused
+SSHPROJ='remote one\n\n[Showing lines 1-1 of 60. Use :2 to continue]'
+check "ssh projection new" "Successfully wrote"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/newproj.txt\",\"content\":\"$SSHPROJ\"}"
+check "ssh projection over" "Refusing to overwrite"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/remote.txt\",\"content\":\"$SSHPROJ\"}"
 check "ssh edit refused" 'is written through `write`, not edited'  env PI_EDIT_VARIANT=replace PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:edit:{\"path\":\"ssh://box$T/sub/w.txt\",\"old_string\":\"via ssh\",\"new_string\":\"replaced over ssh\"}"
 check "ssh file kept"  "via ssh"            cat "$T/sub/w.txt"
 check "ssh override"   "overrides are not allowed"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://me@box/etc/hosts"
