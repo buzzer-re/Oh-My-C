@@ -1033,6 +1033,13 @@ static void maybe_restore_primary(app_t *a) {
 static void hook_turn_boundary(void *ud, agent_t *ag, const json_t *assistant) {
     app_t *a = ud;
     cmp_mid_turn(ud, assistant);
+    if (ag->mcp_tools_dirty && a->mcp) { /* the call that loaded tools returned: they reach this session's next request */
+        ag->mcp_tools_dirty = 0;
+        mcp_sync_tools(a->mcp, ag);
+        tools_finalize(ag, a->opts.tools);
+        app_rebuild_system_prompt(a);
+        xdnotice_sync(a, NULL);
+    }
     /* #steerAnthropicWrapUp: once per wrap-up window, tell the model to checkpoint when nothing (low priority, extra
      * usage) carries the work past the allowance */
     if (app_anthropic_wrap_up_key(a) >= 0) {
@@ -1413,6 +1420,11 @@ static void install_agent(app_t *a) {
     a->env->delegation_bias = model_delegation_bias(a->model);
     agent_set_intent_tracing(settings_bool("tools.intentTracing", true));
     if (!a->opts.no_tools) tools_register_builtin(ag, a->env, a->opts.tools);
+    if (a->mcp && a->opts.subagent) { /* subagents share the parent's connections, each with its own view */
+        free(ag->mcp_scope);
+        ag->mcp_scope = xstrdup(ag->session_id);
+        mcp_open_tool_scope(a->mcp, ag->mcp_scope, a->opts.mcp_seed_scope);
+    }
     if (a->mcp && !a->opts.no_tools) mcp_register_tools(a->mcp, ag);
     /* subagents get lsp only with task.enableLsp (task/index.ts enableLsp, off by default) */
     bool lsp_ok = !a->opts.no_tools && settings_bool("lsp.enabled", true) &&
@@ -3581,6 +3593,7 @@ app_t *app_subagent_new_at(app_t *parent, const char *agent_name, const char *mo
     o.model = chosen ? chosen : label;
     o.append_system_prompt = append_prompt ? append_prompt : json_get_str(def, "body");
     o.mcp = parent->mcp;
+    o.mcp_seed_scope = parent->agent->mcp_scope;
     o.lsp = parent->lsp;
     strvec_t tools = {0};
     json_t *tl = json_get_arr(def, "tools"), *tn;

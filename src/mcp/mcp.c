@@ -29,6 +29,13 @@ typedef struct {
 struct mcp_server {
     char *name;
     json_t *cfg;
+    /* per-session tool views (MCPManager #scopedTools): a tool added while a call to this server ran is visible only
+     * to the scopes listed here (tool name -> [scope]); a tool absent here is visible to every scope */
+    json_t *scoped;
+    int inflight_calls;
+    int tool_refreshes;           /* tools/list refreshes announced and not finished */
+    bool call_provoked;           /* the pending refresh answers a list_changed received during a call */
+    pthread_mutex_t refresh_mu;   /* one tools/list refresh at a time: a later list holds what an earlier notice announced */
     transport_t transport;
     char *url;          /* http/sse */
     char *post_url;     /* sse: endpoint for POST */
@@ -74,6 +81,7 @@ struct mcp_manager {
     mcp_callbacks_t cb;
     bool notifications;
     bool tool_cache; /* MCPToolCache enabled (mcp_set_tool_cache) */
+    json_t *tool_scopes; /* per-session views opened so far (scope -> true) */
     int bg; /* background threads still using the manager */
     bool closing;
 };
@@ -581,6 +589,7 @@ static mcp_server_t *server_new(const char *name, const json_t *cfg) {
     s->refs = 1;
     s->state = S_CONNECTING;
     pthread_mutex_init(&s->mu, NULL);
+    pthread_mutex_init(&s->refresh_mu, NULL);
     pthread_cond_init(&s->cv, NULL);
     s->child.in_fd = s->child.out_fd = s->child.err_fd = -1;
     const char *type = json_get_str(cfg, "type");
@@ -633,6 +642,8 @@ static void server_free(mcp_server_t *s) {
     free(s->error);
     vec_free(&s->pending);
     pthread_mutex_destroy(&s->mu);
+    pthread_mutex_destroy(&s->refresh_mu);
+    json_free(s->scoped);
     pthread_cond_destroy(&s->cv);
     free(s);
 }
@@ -1342,20 +1353,70 @@ typedef struct {
     char *kind; /* tools / prompts / resources */
 } refresh_job_t;
 
+static const char *scope_key(const char *scope) { return scope ? scope : "owner"; }
+
+static bool scope_listed(const json_t *scopes, const char *key) {
+    const json_t *x;
+    json_arr_foreach(scopes, i, x) if (str_eq(json_sv(x), key)) return true;
+    return false;
+}
+
+/* #scopeAddedTools: tools the server does not serve yet start visible to no scope */
+static void scope_added_tools_locked(mcp_server_t *s, const json_t *tools) {
+    const json_t *t, *old;
+    json_arr_foreach(tools, i, t) {
+        const char *name = json_get_str(t, "name");
+        bool known = !name;
+        json_arr_foreach(s->tools, k, old) known = known || str_eq(json_get_str(old, "name"), name);
+        if (known) continue;
+        if (!s->scoped) s->scoped = json_obj();
+        json_set(s->scoped, name, json_arr());
+    }
+}
+
+/* #replaceServerTools: a scoped tool the server stopped serving is forgotten */
+static void prune_scoped_locked(mcp_server_t *s, const json_t *tools) {
+    for (size_t i = 0; s->scoped && i < s->scoped->u.obj.n;) {
+        const char *name = s->scoped->u.obj.keys[i];
+        bool present = false;
+        const json_t *t;
+        json_arr_foreach(tools, k, t) present = present || str_eq(json_get_str(t, "name"), name);
+        if (present) i++;
+        else json_del(s->scoped, name);
+    }
+}
+
 static void *refresh_thread(void *p) {
     refresh_job_t *j = p;
     mcp_server_t *s = j->s;
     mcp_manager_t *m = s->mgr;
     if (!strcmp(j->kind, "tools")) {
+        pthread_mutex_lock(&s->refresh_mu);
+        /* claimed before the request: only a list requested after a call's notice can hold what that call added */
+        pthread_mutex_lock(&s->mu);
+        bool provoked = s->call_provoked;
+        s->call_provoked = false;
+        pthread_mutex_unlock(&s->mu);
         json_t *t = list_all(s, "tools/list", "tools", NULL);
+        pthread_mutex_lock(&s->mu);
         if (t) {
-            pthread_mutex_lock(&s->mu);
+            if (provoked) scope_added_tools_locked(s, t);
+            prune_scoped_locked(s, t);
             json_free(s->tools);
             s->tools = t;
-            pthread_mutex_unlock(&s->mu);
+        } else if (provoked) {
+            s->call_provoked = true;
+        }
+        pthread_mutex_unlock(&s->mu);
+        if (t) {
             cache_tools(s);
             fire_tools_changed(s);
         }
+        pthread_mutex_unlock(&s->refresh_mu);
+        pthread_mutex_lock(&s->mu);
+        s->tool_refreshes--;
+        pthread_cond_broadcast(&s->cv);
+        pthread_mutex_unlock(&s->mu);
     } else if (!strcmp(j->kind, "prompts")) {
         json_t *pr = list_all(s, "prompts/list", "prompts", NULL);
         if (pr) {
@@ -1435,6 +1496,13 @@ static void handle_notification(mcp_server_t *s, const char *method, const json_
         return;
     }
     if (!kind || sstate(s) != S_READY) return;
+    if (!strcmp(kind, "tools")) {
+        pthread_mutex_lock(&s->mu);
+        /* a change announced during a call belongs to the sessions whose calls see it through */
+        if (s->inflight_calls > 0) s->call_provoked = true;
+        s->tool_refreshes++; /* before the call's reply can be read: settle_tool_call waits for this refresh */
+        pthread_mutex_unlock(&s->mu);
+    }
     /* the reader thread delivers responses: refresh on a thread of its own */
     refresh_job_t *j = xcalloc(1, sizeof *j);
     j->s = s;
@@ -1444,6 +1512,11 @@ static void handle_notification(mcp_server_t *s, const char *method, const json_
     pthread_t th;
     if (pthread_create(&th, NULL, refresh_thread, j) == 0) pthread_detach(th);
     else {
+        if (!strcmp(kind, "tools")) {
+            pthread_mutex_lock(&s->mu);
+            s->tool_refreshes--;
+            pthread_mutex_unlock(&s->mu);
+        }
         free(j->kind);
         free(j);
         srv_unref(s);
@@ -1558,7 +1631,39 @@ typedef struct {
     mcp_manager_t *m;
     char *server;
     char *tool;
+    char *scope; /* the session's view of the manager (NULL: the owning session) */
 } bridge_t;
+
+/* #observeToolCall: a call completes only after the tool refresh it provoked lands, then its session sees every tool
+ * the server now serves */
+static void settle_tool_call(mcp_server_t *s, const bridge_t *b, tool_ctx_t *ctx) {
+    volatile sig_atomic_t *cancel = ctx ? ctx->cancel : NULL;
+    int64_t until = mono_ms() + (s->timeout_ms > 0 ? s->timeout_ms : 30000);
+    bool granted = false;
+    const char *key = scope_key(b->scope);
+    pthread_mutex_lock(&s->mu);
+    s->inflight_calls--;
+    while (s->tool_refreshes > 0 && !(cancel && *cancel) && mono_ms() < until) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 50 * 1000000L;
+        if (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000L;
+        }
+        pthread_cond_timedwait(&s->cv, &s->mu, &ts);
+    }
+    for (size_t i = 0; s->scoped && i < s->scoped->u.obj.n; i++) {
+        json_t *scopes = s->scoped->u.obj.vals[i];
+        if (scope_listed(scopes, key)) continue;
+        json_push_str(scopes, key);
+        granted = true;
+    }
+    pthread_mutex_unlock(&s->mu);
+    if (!granted) return;
+    if (ctx && ctx->agent) ctx->agent->mcp_tools_dirty = 1;
+    if (!b->scope) fire_tools_changed(s);
+}
 
 /* waitForConnection: wait while `s` is still connecting, up to its request timeout or until *cancel */
 static void wait_connected(mcp_server_t *s, volatile sig_atomic_t *cancel) {
@@ -1618,7 +1723,11 @@ static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *a
     json_set_str(p, "name", b->tool);
     json_set(p, "arguments", args ? json_clone(args) : json_obj());
     char *err = NULL;
+    pthread_mutex_lock(&s->mu);
+    s->inflight_calls++;
+    pthread_mutex_unlock(&s->mu);
     json_t *res = mcp_request(s, "tools/call", p, s->timeout_ms, &err);
+    settle_tool_call(s, b, ctx);
     if (!res) {
         tool_result_error(out, "MCP %s/%s failed: %s", b->server, b->tool, err ? err : "error");
         free(err);
@@ -1665,11 +1774,34 @@ static void bridge_destroy(agent_tool_t *t) {
     bridge_t *b = t->ud;
     free(b->server);
     free(b->tool);
+    free(b->scope);
     free(b);
 }
 
 static int tool_name_cmp(const void *x, const void *y) {
     return strcmp((*(agent_tool_t *const *)x)->name, (*(agent_tool_t *const *)y)->name);
+}
+
+void mcp_open_tool_scope(mcp_manager_t *m, const char *scope, const char *seed) {
+    if (!m || !scope) return;
+    pthread_mutex_lock(&m->mu);
+    if (!m->tool_scopes) m->tool_scopes = json_obj();
+    bool known = json_get(m->tool_scopes, scope) != NULL;
+    if (!known) json_set_bool(m->tool_scopes, scope, true); /* never forgotten: a revived session reopens its own */
+    pthread_mutex_unlock(&m->mu);
+    if (known) return;
+    srv_vec_t v;
+    snapshot(m, &v);
+    for (size_t i = 0; i < v.n; i++) {
+        mcp_server_t *s = v.v[i];
+        pthread_mutex_lock(&s->mu);
+        for (size_t k = 0; s->scoped && k < s->scoped->u.obj.n; k++) {
+            json_t *scopes = s->scoped->u.obj.vals[k];
+            if (scope_listed(scopes, scope_key(seed))) json_push_str(scopes, scope);
+        }
+        pthread_mutex_unlock(&s->mu);
+    }
+    snap_free(&v);
 }
 
 int mcp_register_tools(mcp_manager_t *m, agent_t *a) {
@@ -1690,6 +1822,12 @@ int mcp_register_tools(mcp_manager_t *m, agent_t *a) {
         json_arr_foreach(tools, k, t) {
             const char *tn = json_get_str(t, "name");
             if (!tn) continue;
+            /* MCPManager.getTools(scope) */
+            pthread_mutex_lock(&s->mu);
+            const json_t *scopes = json_get(s->scoped, tn);
+            bool visible = !scopes || scope_listed(scopes, scope_key(a->mcp_scope));
+            pthread_mutex_unlock(&s->mu);
+            if (!visible) continue;
             char *name = mcp_tool_name(s->name, tn);
             json_t *schema = json_get_obj(t, "inputSchema");
             json_t *params = schema ? json_clone(schema) : json_parse_str("{\"type\":\"object\",\"properties\":{}}");
@@ -1704,6 +1842,7 @@ int mcp_register_tools(mcp_manager_t *m, agent_t *a) {
             b->m = m;
             b->server = xstrdup(s->name);
             b->tool = xstrdup(tn);
+            b->scope = a->mcp_scope ? xstrdup(a->mcp_scope) : NULL;
             at->ud = b;
             at->destroy = bridge_destroy;
             at->lenient_args = true;

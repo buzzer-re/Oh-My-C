@@ -183,6 +183,8 @@ struct agent {
     bool steer_all, follow_up_all, interrupt_wait;
     volatile sig_atomic_t cancel;
     volatile sig_atomic_t silent_abort_next; /* abort the next model request as an internal transition */
+    char *mcp_scope;                         /* this session's view of a shared MCP manager (NULL: the owner) */
+    volatile sig_atomic_t mcp_tools_dirty;   /* an MCP call granted this session tools: re-register at the next boundary */
     volatile sig_atomic_t deliver_queued;    /* an empty Enter forced the queue into the continuation (see below) */
     bool running;
     json_t *streaming_message; /* borrowed while streaming */

@@ -531,6 +531,7 @@ agent_t *agent_new(void) {
 
 void agent_free(agent_t *a) {
     if (!a) return;
+    free(a->mcp_scope);
     for (size_t i = 0; i < a->all_tools.n; i++) agent_tool_free(a->all_tools.v[i]);
     vec_free(&a->all_tools);
     vec_free(&a->tools);

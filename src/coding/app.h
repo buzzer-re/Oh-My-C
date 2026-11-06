@@ -30,6 +30,7 @@ typedef struct {
     bool no_tools;
     bool no_context_files, no_skills, no_rules;
     bool subagent;
+    const char *mcp_seed_scope; /* the spawner's view of the shared MCP manager (borrowed; NULL: the owner) */
     int subagent_depth;
     int max_turns;
     struct mcp_manager *mcp; /* borrowed shared MCP connections (subagents); NULL => discover */
