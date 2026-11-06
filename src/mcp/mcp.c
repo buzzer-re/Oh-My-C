@@ -697,7 +697,10 @@ static int server_connect(mcp_server_t *s) {
         strvec_free(&argv);
         strvec_free(&envv);
         if (rc != 0) {
-            s->error = xasprintf("failed to start %s: %s", cmd, strerror(errno));
+            /* the runtime's spawn error, as omp shows it */
+            if (errno == ENOENT) s->error = xasprintf("ENOENT: no such file or directory, posix_spawn '%s'", cmd);
+            else if (errno == EACCES) s->error = xasprintf("EACCES: permission denied, posix_spawn '%s'", cmd);
+            else s->error = xasprintf("failed to start %s: %s", cmd, strerror(errno));
             return -1;
         }
         s->child_started = true;

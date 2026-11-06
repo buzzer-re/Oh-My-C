@@ -173,16 +173,38 @@ static void registry_init(void) {
             if (!word_in(OMC[k].subs, json_get_str(s, "name"))) continue;
             c->subs[c->nsubs++] = (slash_sub_t){json_get_str(s, "name"), json_get_str(s, "description"), json_get_str(s, "usage")};
         }
-        /* an ACP hint naming every upstream subcommand: rebuild it from what omc implements */
-        if (c->acp_input_hint && json_len(subs) != c->nsubs && c->nsubs) {
+        /* an ACP hint naming every upstream subcommand: keep the alternatives omc implements */
+        if (c->acp_input_hint && *c->acp_input_hint == '[' && json_len(subs) != c->nsubs && c->nsubs) {
             sb_t h = SB_INIT;
             sb_putc(&h, '[');
-            for (size_t j = 0; j < c->nsubs; j++) sb_appendf(&h, "%s%s", j ? "|" : "", c->subs[j].name);
-            sb_putc(&h, ']');
-            const char *tail = strchr(c->acp_input_hint, ']');
-            if (tail) sb_append(&h, tail + 1);
+            const char *p = c->acp_input_hint + 1;
+            int kept = 0;
+            for (;;) {
+                const char *q = p;
+                int depth = 0;
+                for (; *q && !(depth == 0 && (*q == '|' || *q == ']')); q++) {
+                    if (*q == '[') depth++;
+                    else if (*q == ']') depth--;
+                }
+                size_t word = strcspn(p, " |]");
+                char *w = xstrndup(p, word);
+                bool on = false;
+                for (size_t j = 0; j < c->nsubs && !on; j++) on = str_eq(c->subs[j].name, w);
+                free(w);
+                if (on) sb_appendf(&h, "%s%.*s", kept++ ? "|" : "", (int)(q - p), p);
+                if (*q != '|') {
+                    sb_append(&h, *q ? q : "]");
+                    break;
+                }
+                p = q + 1;
+            }
             c->acp_input_hint = sb_detach(&h);
         }
+        /* the level's description is generated upstream and the extracted table leaves it blank */
+        if (!strcmp(c->name, "effort"))
+            for (size_t j = 0; j < c->nsubs; j++)
+                if (str_eq(c->subs[j].name, "minimal") && (!c->subs[j].description || !*c->subs[j].description))
+                    c->subs[j].description = "Very brief reasoning (~1k tokens)";
         /* /resume: omc has no foreign-session (@claude/@codex) import */
         if (!strcmp(c->name, "resume")) c->inline_hint = "[session id]";
         if (!strcmp(c->name, "restart")) c->description = "Restart omc with the same launch flags, resuming this session";

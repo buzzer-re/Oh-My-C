@@ -52,6 +52,21 @@ void tool_result_error(tool_result_t *r, const char *fmt, ...) {
     r->is_error = true;
 }
 
+/* agent-loop.ts: a call refused before running carries details {isError, error} */
+static void tool_result_validation_error(tool_result_t *r, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    char *s = xvasprintf(fmt, ap);
+    va_end(ap);
+    tool_result_text(r, s);
+    json_free(r->details);
+    r->details = json_obj();
+    json_set_bool(r->details, "isError", true);
+    json_set_str(r->details, "error", s);
+    free(s);
+    r->is_error = true;
+}
+
 void tool_result_free(tool_result_t *r) {
     json_free(r->content);
     json_free(r->details);
@@ -1120,7 +1135,7 @@ static void run_tool(tool_job_t *j) {
     if (j->skip) {
         tool_result_error(&j->res, "Skipped due to queued user message.");
     } else if (!j->tool) {
-        tool_result_error(&j->res, "Tool %s not found", name ? name : "(null)");
+        tool_result_validation_error(&j->res, "Tool %s not found", name ? name : "(null)");
     } else if (j->intent_too_long) {
         tool_result_error(&j->res,
                           "`%s` is a short intent label (at most %d chars); the value you sent is %zu chars. The tool was "
@@ -1142,7 +1157,7 @@ static void run_tool(tool_job_t *j) {
                 verr = NULL;
             }
             if (verr) {
-                tool_result_error(&j->res, "Validation failed for tool \"%s\":\n%s\n\nReceived arguments:\n%s", name, verr, recv);
+                tool_result_validation_error(&j->res, "Validation failed for tool \"%s\":\n%s\n\nReceived arguments:\n%s", name, verr, recv);
                 free(recv);
                 free(verr);
             } else if (a->hooks.approve_tool &&
