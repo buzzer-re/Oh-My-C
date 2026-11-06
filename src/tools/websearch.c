@@ -965,7 +965,6 @@ static json_t *s_codex(const ws_params_t *p, ws_err_t *e) {
     if (acc) http_headers_set(&h, "chatgpt-account-id", acc);
     else http_headers_del(&h, "chatgpt-account-id");
     free(acc);
-    http_headers_set(&h, "OpenAI-Beta", "responses=experimental");
     http_headers_set(&h, "originator", "omp");
     http_headers_set(&h, "version", "0.159.0");
     http_headers_set(&h, "User-Agent", OMC_NAME "/" OMC_VERSION);

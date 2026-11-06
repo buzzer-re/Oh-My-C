@@ -42,6 +42,9 @@
 #include "tools/gh.h"
 #include "mcp/mcp.h"
 #include "prompt/template.h"
+#include "ai/anthropic_threads.h"
+#include "ai/responses_ws.h"
+#include "ai/provider_anthropic.h"
 #include "ai/ai_images.h"
 
 #include <ctype.h>
@@ -430,9 +433,37 @@ static void fill_request_opts(app_t *a, ai_stream_opts_t *o) {
     o->max_retry_delay_ms = max_delay > 0 ? max_delay : -1;
     const json_t *lim = settings_get("providers.maxInFlightRequests"); /* read once when the request starts */
     o->max_in_flight = json_is_obj(lim) ? lim : NULL;
+    /* resolveWebsocketPreference: the setting opts in for standard Responses models, the model's own false still vetoes */
+    if (!o->prefer_websockets) o->prefer_websockets = settings_bool("providers.openaiResponsesWebsockets", false) ? 1 : -1;
 }
 
 void app_fill_request_opts(app_t *a, ai_stream_opts_t *o) { fill_request_opts(a, o); }
+
+/* session/session-metadata.ts buildSessionMetadata: the per-request `metadata`, so the backend buckets requests under
+ * one session; the Claude account stays off every other provider. Interned: providers borrow it for the whole request,
+ * and the set is bounded by the sessions and accounts of the process. */
+const json_t *app_session_metadata(app_t *a, const char *provider) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static VEC(json_t *) interned;
+    const char *sid = a->agent ? a->agent->session_id : NULL;
+    if (str_empty(sid)) return NULL;
+    json_t *cred = str_eq(provider, "anthropic") ? auth_get_credential_raw("anthropic") : NULL;
+    const char *account = str_eq(json_get_str(cred, "type"), "oauth") ? json_get_str(cred, "accountId") : NULL;
+    char *uid = anthropic_session_user_id(sid, account);
+    json_free(cred);
+    json_t *found = NULL;
+    pthread_mutex_lock(&mu);
+    for (size_t i = 0; i < interned.n && !found; i++)
+        if (str_eq(json_get_str(interned.v[i], "user_id"), uid)) found = interned.v[i];
+    if (!found) {
+        found = json_obj();
+        json_set_str(found, "user_id", uid);
+        vec_push(&interned, found);
+    }
+    pthread_mutex_unlock(&mu);
+    free(uid);
+    return found;
+}
 
 /* #recordCacheWarmUsage: paid warm requests as off-transcript model_usage entries (session totals include them) */
 void app_flush_warm_usage(app_t *a) {
@@ -531,6 +562,7 @@ static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
     }
     extracmd_prepare_request(a, o); /* /force */
     fill_request_opts(a, o);
+    if (!o->metadata && ag->model) o->metadata = (json_t *)app_session_metadata(a, ag->model->provider);
     app_note_provider_state(a);
 }
 
@@ -627,8 +659,6 @@ static bool is_overflow(const char *err) {
 }
 
 /* AIError.retriable over an error text (RPC prompt_result error.retryable) */
-bool app_error_retryable(const char *err) { return err && aie_retriable(aie_classify_text(err, 0, NULL, NULL)); }
-
 static int hook_stream(void *ud, agent_t *ag, const ai_event_t *ev) {
     app_t *a = ud;
     if (ev->type != AI_EV_DONE && ttsr_on_event(a->ttsr, ev)) {
@@ -2327,6 +2357,7 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
     pthread_mutex_unlock(&a->agent->mu);
     /* the in-flight streaming reply: its thinking blocks and joined text replace (or follow) the last message */
     const json_t *st = e->streaming;
+    bool per_call_message = false; /* markPerCallContextMessage: rebuilt next request, so no thread can continue past it */
     if (st && str_eq(json_get_str(st, "role"), "assistant") && json_is_arr(json_get(st, "content"))) {
         json_t *blocks = json_arr(), *blk;
         sb_t txt = SB_INIT;
@@ -2343,6 +2374,7 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
             size_t n = json_len(msgs);
             if (n && str_eq(json_get_str(json_at(msgs, n - 1), "role"), "assistant")) json_free(json_arr_remove(msgs, n - 1));
             json_push(msgs, m);
+            per_call_message = true;
         } else {
             json_free(blocks);
         }
@@ -2378,6 +2410,8 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
                                     : xasprintf("%s:side:%s", main_sid ? main_sid : "", rid);
     free(rid);
     o.session_id = sid;
+    o.provider_session_state = !per_call_message;
+    o.metadata = (json_t *)app_session_metadata(a, model->provider);
     o.prompt_cache_key = main_sid;
     o.reasoning = model_clamp_effort(model, a->thinking);
     o.disable_reasoning = a->thinking == EFFORT_OFF;
@@ -2386,6 +2420,10 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
     o.cursor_exec = NULL;
     eph_ud_t x = {.e = e};
     json_t *r = ai_stream(model, &ctx, &o, eph_event, &x);
+    if (!e->conversation_key) { /* a one-shot side id: its chain would pin the conversation, its socket stay open */
+        anth_threads_release_session(sid);
+        rws_release_session(sid);
+    }
     json_free(wire);
     json_free(tools);
     json_free(sys);

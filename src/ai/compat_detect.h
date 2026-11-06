@@ -34,6 +34,9 @@ bool compat_api_has_record(const char *api);
  * `efforts`), `identity`, `tokenizer`, the resolved `compat` (the object's own `compat`, kept as `compatConfig`, applied
  * on top; unknown keys ignored), the thinking ladder, and the rule cascade's catalog corrections. */
 void compat_resolve_model(json_t *model);
+/* resolveCatalogPolicy(model)[key] for a model: bundled rows carry their wire compat, the catalog axes resolve at
+ * runtime. Borrowed (cached for the process), NULL when the rules set none. */
+const json_t *compat_catalog_policy(const char *provider, const char *api, const char *id, const char *key);
 /* the dated `effective-rates` cards of a Factory Droid model's `credit-rates` rule (borrowed), NULL when none */
 const json_t *compat_factory_droid_credit_cards(const char *model_id);
 

@@ -5,7 +5,7 @@ built. Every request is appended to $MOCK_LOG as {method, path, headers (lower-c
 
 Protocols (chosen by path suffix):
   .../chat/completions  OpenAI Chat Completions SSE      .../responses  OpenAI Responses SSE
-  .../messages          Anthropic Messages SSE           .../v1/systemone, .../ai/run/<model>  native judgments
+  .../messages          Anthropic Messages SSE           .../v1/systemone, .../decisions, .../ai/run/<model>  native judgments
 A user message "bash:<cmd>" gets a bash tool call (chat completions / anthropic), "read:<path>" a read call (anthropic), "call:<tool>:<json args>" any tool
 (chat completions), a tool result gets the final text.
 .../images/generations, .../images/edits, .../images: a one-image b64_json answer (HTTP 500 when the body mentions
@@ -128,7 +128,7 @@ class H(BaseHTTPRequestHandler):
         path = path.split("?")[0]  # routing ignores query strings (omp's Anthropic client adds ?beta=true)
         if path.startswith("/deny") and self.headers.get("Copilot-Integration-Id") == "copilot-chat":
             return self.reply(403, {"error": {"message": "integration not allowed", "code": "forbidden"}})
-        if path.endswith("/v1/systemone") or "/ai/run/" in path:
+        if path.endswith("/v1/systemone") or path.endswith("/decisions") or "/ai/run/" in path:
             answers = {}
             for qid, q in (body.get("questions") or {}).items():
                 t = q.get("type")
@@ -192,6 +192,17 @@ class H(BaseHTTPRequestHandler):
                 "tools": [{"type": "image_generation", "model": "gpt-image-2-2026"}], "usage": {"input_tokens": 7, "output_tokens": 9}})
         if path.endswith("/responses"):
             self.sse_start()
+            last = (body.get("input") or [{}])[-1]
+            ltext = next((p.get("text", "") for p in reversed(last.get("content") or []) if isinstance(p, dict)), "") if isinstance(last.get("content"), list) else ""
+            if ltext.startswith("bash:"):  # the declared name of the bash tool, as the host would return it
+                name = next((t["name"] for t in body.get("tools") or [] if t.get("name", "").endswith("bash")), "bash")
+                call = {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": name, "arguments": json.dumps({"command": ltext[5:]})}
+                self.ev({"type": "response.created", "response": {"id": "resp_1"}})
+                self.ev({"type": "response.output_item.added", "output_index": 0, "item": dict(call, arguments="")})
+                self.ev({"type": "response.output_item.done", "output_index": 0, "item": call})
+                self.ev({"type": "response.completed", "response": {"id": "resp_1", "status": "completed", "output": [call],
+                                                                      "usage": {"input_tokens": 5, "output_tokens": 3}}})
+                return self.end()
             item = {"type": "message", "id": "msg_1", "role": "assistant", "status": "in_progress", "content": []}
             self.ev({"type": "response.created", "response": {"id": "resp_1"}})
             self.ev({"type": "response.output_item.added", "output_index": 0, "item": item})

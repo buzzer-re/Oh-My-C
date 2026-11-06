@@ -5,12 +5,16 @@
 #include "config/auth_engine.h"
 
 #include "ai/ai.h"
+#include "ai/pb.h"
+#include "core/fs.h"
 #include "core/proc.h"
 #include "session/trace.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <openssl/sha.h>
 #include <pthread.h>
+#include <zlib.h>
 
 #define MAX_SAFE_INTEGER 9007199254740991LL
 
@@ -1539,6 +1543,329 @@ done:
 /* dispatch                                                                                  */
 /* ======================================================================================= */
 
+/* ---------- devin-cli (registry/oauth/devin-cli.ts) ---------- */
+
+/* hosts verified to accept the same raw seat key; the key is sent to the provider's default host, so a CLI bound
+ * elsewhere must not be adopted */
+static const char *const DEVIN_KNOWN_API_HOSTS[] = {"server.codeium.com", "server.enterprise.windsurf.com"};
+
+/* one TOML string value at *pp ('...' or "..." with escapes, single line). Owned, NULL when malformed. */
+static char *toml_string(const char **pp) {
+    const char *p = *pp;
+    char q = *p++;
+    sb_t b = SB_INIT;
+    for (; *p && *p != '\n' && *p != q; p++) {
+        if (q == '"' && *p == '\\') {
+            p++;
+            switch (*p) {
+            case 'n': sb_putc(&b, '\n'); break;
+            case 't': sb_putc(&b, '\t'); break;
+            case 'r': sb_putc(&b, '\r'); break;
+            case 'b': sb_putc(&b, '\b'); break;
+            case 'f': sb_putc(&b, '\f'); break;
+            case '"': sb_putc(&b, '"'); break;
+            case '\\': sb_putc(&b, '\\'); break;
+            default: sb_free(&b); return NULL; /* \u escapes do not occur in a seat key or URL */
+            }
+            continue;
+        }
+        sb_putc(&b, *p);
+    }
+    if (*p != q) {
+        sb_free(&b);
+        return NULL;
+    }
+    *pp = p + 1;
+    return sb_detach(&b);
+}
+
+/* a bare TOML scalar: number, date, boolean, inf or nan */
+static bool toml_bare_scalar(const char *p) {
+    size_t n = strcspn(p, " \t#");
+    static const char *const words[] = {"true", "false", "inf", "+inf", "-inf", "nan", "+nan", "-nan"};
+    for (size_t i = 0; i < ARRAY_LEN(words); i++)
+        if (strlen(words[i]) == n && !strncmp(p, words[i], n)) return true;
+    if (!isdigit((unsigned char)*p) && *p != '+' && *p != '-') return false;
+    for (size_t i = 0; i < n; i++)
+        if (!isalnum((unsigned char)p[i]) && !strchr("+-._:", p[i])) return false;
+    return n > 0;
+}
+
+/* The top-level string keys of a TOML document as a JSON object (tables, arrays and other scalars are skipped). Owned,
+ * NULL with *why (owned) on a syntax error. omp parses with Bun.TOML; the credentials file only has flat keys. */
+static json_t *toml_top_strings(const char *text, char **why) {
+    json_t *out = json_obj();
+    bool in_table = false;
+    int depth = 0; /* inside a multi-line array or inline table */
+    for (const char *line = text; line && *line;) {
+        const char *nl = strchr(line, '\n');
+        size_t len = nl ? (size_t)(nl - line) : strlen(line);
+        char *row = xstrndup(line, len);
+        char *t = str_trim(row);
+        const char *p = t;
+        line = nl ? nl + 1 : NULL;
+        bool bad = false;
+        if (depth > 0) {
+            for (; *p && *p != '#'; p++) {
+                if (*p == '"' || *p == '\'') {
+                    char *s = toml_string(&p);
+                    if (!s) {
+                        bad = true;
+                        break;
+                    }
+                    free(s);
+                    p--;
+                } else if (*p == '[' || *p == '{') {
+                    depth++;
+                } else if (*p == ']' || *p == '}') {
+                    depth--;
+                }
+            }
+        } else if (*p && *p != '#') {
+            if (*p == '[') {
+                in_table = true;
+                if (!strchr(p, ']')) bad = true;
+            } else {
+                const char *k = p;
+                char *key = NULL;
+                if (*p == '"' || *p == '\'') {
+                    key = toml_string(&p);
+                } else {
+                    while (*p && (isalnum((unsigned char)*p) || *p == '_' || *p == '-' || *p == '.')) p++;
+                    if (p > k) key = xstrndup(k, (size_t)(p - k));
+                }
+                while (*p == ' ' || *p == '\t') p++;
+                if (!key || *p != '=') {
+                    bad = true;
+                } else {
+                    p++;
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (*p == '"' || *p == '\'') {
+                        char *v = toml_string(&p);
+                        if (!v) bad = true;
+                        else if (!in_table) json_set(out, key, json_str_own(v));
+                        else free(v);
+                    } else if (*p != '[' && *p != '{' && !toml_bare_scalar(p)) {
+                        *why = xasprintf("TOML Parse error: Expected a value but found '%c'", *p ? *p : ' ');
+                        bad = true;
+                    } else {
+                        for (; *p && *p != '#'; p++) {
+                            if (*p == '[' || *p == '{') depth++;
+                            else if (*p == ']' || *p == '}') depth--;
+                        }
+                    }
+                }
+                free(key);
+            }
+        }
+        free(t);
+        free(row);
+        if (bad) {
+            if (!*why) *why = xstrdup("TOML Parse error: Unexpected token");
+            json_free(out);
+            return NULL;
+        }
+    }
+    return out;
+}
+
+/* URL.host: the default port is elided. Owned, NULL when the URL does not parse. */
+static char *url_host_of(const char *u) {
+    url_t parsed;
+    if (url_parse(u, &parsed) != 0) return NULL;
+    bool def = (str_eq(parsed.scheme, "https") && parsed.port == 443) || (str_eq(parsed.scheme, "http") && parsed.port == 80);
+    char *h = def ? xstrdup(parsed.host) : xasprintf("%s:%d", parsed.host, parsed.port);
+    url_free(&parsed);
+    for (char *p = h; *p; p++) *p = (char)tolower((unsigned char)*p);
+    return h;
+}
+
+/* adopts the Windsurf seat key the official Devin CLI persists as a stored `devin` API key; never prompts and never
+ * touches the network */
+static int devin_cli_login(alogin_t *out, char **err) {
+    strvec_t files = {0};
+    const char *xdg = env_get("XDG_DATA_HOME");
+    char *dirs[3] = {!str_empty(xdg) ? xstrdup(xdg) : NULL, xasprintf("%s/.local/share", home_dir()),
+                     xasprintf("%s/Library/Application Support", home_dir())};
+    for (int i = 0; i < 3; i++) {
+        if (!dirs[i]) continue;
+        char *f = xasprintf("%s/devin/credentials.toml", dirs[i]);
+        if (!strvec_contains(&files, f)) strvec_push(&files, f);
+        free(f);
+        free(dirs[i]);
+    }
+    int rc = -1;
+    char *text = NULL;
+    const char *file = NULL;
+    for (size_t i = 0; i < files.n && !file; i++) {
+        size_t n = 0;
+        errno = 0;
+        text = fs_read(files.v[i], &n);
+        if (text) file = files.v[i];
+        else if (errno != ENOENT && errno != ENOTDIR) {
+            *err = xasprintf("Cannot read Devin CLI credentials at %s: %s", files.v[i], strerror(errno));
+            goto done;
+        }
+    }
+    if (!file) {
+        char *probed = strvec_join(&files, ", ");
+        *err = xasprintf("No Devin CLI credentials found (probed: %s). Run `devin auth login`, then retry.", probed);
+        free(probed);
+        goto done;
+    }
+    char *why = NULL;
+    json_t *record = toml_top_strings(text, &why);
+    if (!record) {
+        *err = xasprintf("Devin CLI credentials at %s are not valid TOML: %s", file, why);
+        free(why);
+        goto done;
+    }
+    char *key = str_trim(json_get_str(record, "windsurf_api_key") ? json_get_str(record, "windsurf_api_key") : "");
+    const char *server = json_get_str(record, "api_server_url");
+    if (!*key) {
+        *err = xasprintf("Devin CLI credentials at %s have no windsurf_api_key. Run `devin auth login`, then retry.", file);
+    } else if (!str_empty(server)) {
+        char *host = url_host_of(server);
+        bool known = false;
+        for (size_t i = 0; host && i < ARRAY_LEN(DEVIN_KNOWN_API_HOSTS); i++) known = known || !strcmp(host, DEVIN_KNOWN_API_HOSTS[i]);
+        if (!known)
+            *err = xasprintf("Devin CLI credentials at %s point at unsupported API server \"%s\" (supported: %s, %s).", file, server,
+                             DEVIN_KNOWN_API_HOSTS[0], DEVIN_KNOWN_API_HOSTS[1]);
+        free(host);
+    }
+    if (!*err) {
+        out->api_key = key;
+        key = NULL;
+        rc = 0;
+    }
+    free(key);
+    json_free(record);
+done:
+    free(text);
+    strvec_free(&files);
+    return rc;
+}
+
+/* ---------- devin-windsurf (registry/oauth/devin-windsurf.ts) ---------- */
+
+#define WINDSURF_EXCHANGE_URL "https://server.codeium.com/exa.seat_management_pb.SeatManagementService/ExchangePKCEAuthorizationCode"
+
+/* field 1 (apiKey) of ExchangePKCEAuthorizationCodeResponse; owned, NULL when the bytes are no such message */
+static char *windsurf_api_key_field(const unsigned char *p, size_t n) {
+    char *key = NULL;
+    for (size_t pos = 0; pos < n;) {
+        uint64_t tag = 0, len = 0;
+        if (pb_get_varint(p, n, &pos, &tag) != 0) goto bad;
+        switch (tag & 7) {
+        case 0:
+            if (pb_get_varint(p, n, &pos, &len) != 0) goto bad;
+            break;
+        case 1:
+            if (n - pos < 8) goto bad;
+            pos += 8;
+            break;
+        case 2:
+            if (pb_get_varint(p, n, &pos, &len) != 0 || len > n - pos) goto bad;
+            if (tag >> 3 == 1) {
+                free(key);
+                key = xstrndup((const char *)p + pos, (size_t)len);
+            }
+            pos += (size_t)len;
+            break;
+        case 5:
+            if (n - pos < 4) goto bad;
+            pos += 4;
+            break;
+        default: goto bad;
+        }
+    }
+    return key ? key : xstrdup("");
+bad:
+    free(key);
+    return NULL;
+}
+
+/* decodeDevinUnaryMessage: the plain message, else the gunzipped one */
+static char *windsurf_decode_key(const char *body, size_t len) {
+    char *key = windsurf_api_key_field((const unsigned char *)body, len);
+    if (key) return key;
+    z_stream zs;
+    memset(&zs, 0, sizeof zs);
+    if (inflateInit2(&zs, 15 + 32) != Z_OK) return NULL;
+    sb_t out = SB_INIT;
+    unsigned char buf[4096];
+    zs.next_in = (unsigned char *)body;
+    zs.avail_in = (uInt)len;
+    int r;
+    do {
+        zs.next_out = buf;
+        zs.avail_out = sizeof buf;
+        r = inflate(&zs, Z_NO_FLUSH);
+        if (r != Z_OK && r != Z_STREAM_END) break;
+        sb_appendn(&out, (const char *)buf, sizeof buf - zs.avail_out);
+    } while (r != Z_STREAM_END && out.len < (1u << 24));
+    inflateEnd(&zs);
+    if (r == Z_STREAM_END) key = windsurf_api_key_field((const unsigned char *)out.s, out.len);
+    sb_free(&out);
+    return key;
+}
+
+/* exchangeWindsurfCode: the authorization code for the seat's raw API key. Owned, NULL with *err. */
+char *auth_windsurf_exchange(const actx_t *c, const char *code, const char *verifier, char **err) {
+    sb_t b = SB_INIT;
+    pb_put_len_bytes(&b, 1, code, strlen(code));
+    pb_put_len_bytes(&b, 2, verifier, strlen(verifier));
+    http_headers_t h = {0};
+    /* any other content type is answered with 200 and an empty body */
+    http_headers_set(&h, "content-type", "application/proto");
+    http_headers_set(&h, "connect-protocol-version", "1");
+    http_headers_set(&h, "accept", "*/*");
+    http_resp_t r;
+    int rc = auth_http("POST", WINDSURF_EXCHANGE_URL, &h, sb_cstr(&b), 30000, c, &r);
+    http_headers_free(&h);
+    sb_free(&b);
+    char *key = NULL;
+    if (rc != 0) {
+        *err = xasprintf("Windsurf code exchange failed: %s", r.error ? r.error : "request failed");
+    } else if (r.status < 200 || r.status >= 300) {
+        char *msg = xasprintf("Windsurf code exchange failed: %d %s", r.status, r.body ? r.body : "");
+        *err = str_trim(msg);
+        free(msg);
+    } else {
+        key = windsurf_decode_key(r.body ? r.body : "", r.body_len);
+        if (str_empty(key)) {
+            free(key);
+            key = NULL;
+            *err = xstrdup("Windsurf code exchange returned no API key");
+        } else if (str_starts(key, "gsk-")) {
+            /* the exchange returns the `g`-prefixed wire form (`gsk-ws-…`); RPCs authenticate with the raw key */
+            memmove(key, key + 1, strlen(key));
+        }
+    }
+    http_resp_free(&r);
+    return key;
+}
+
+/* Windsurf Enterprise seats cannot finish the Devin-native flow: the Windsurf editor authorize page (PKCE + loopback
+ * callback on the port the official CLI uses) and the seat key from the code exchange */
+static int devin_windsurf_login(const actx_t *c, alogin_t *out, char **err) {
+    json_t *login = json_parse_str(
+        "{\"scopes\":[],\"pkce\":true,\"state\":\"uuid\",\"standardAuthorizeParams\":false,"
+        "\"authorizeUrl\":{\"value\":\"https://windsurf.com/editor/signin\"},"
+        "\"authorizeParams\":{\"response_type\":\"code\",\"redirect_uri\":\"{redirect_uri}\",\"state\":\"{state}\","
+        "\"code_challenge\":\"{code_challenge}\",\"code_challenge_method\":\"S256\",\"prompt\":\"login\","
+        "\"redirect_parameters_type\":\"query\"},"
+        "\"instructions\":\"Sign in with your Windsurf (Enterprise) account in your browser.\","
+        "\"callback\":{\"port\":59654,\"path\":\"/callback\",\"hostname\":\"127.0.0.1\",\"portFallback\":true},"
+        "\"exchangeHook\":\"devin-windsurf\"}");
+    json_t *cred = NULL;
+    int rc = auth_oauth_code_flow(c, login, &cred, err);
+    json_free(login);
+    if (rc == 0) out->api_key = xstrdup(json_get_str(cred, "access") ? json_get_str(cred, "access") : "");
+    json_free(cred);
+    return rc;
+}
+
 int auth_custom_hook_login(const actx_t *c, const char *hook, alogin_t *out, char **err) {
     if (str_eq(hook, "github-copilot")) return copilot_login(c, out, err);
     if (str_eq(hook, "cursor")) return cursor_login(c, out, err);
@@ -1552,6 +1879,8 @@ int auth_custom_hook_login(const actx_t *c, const char *hook, alogin_t *out, cha
     if (str_eq(hook, "snowflake")) return snowflake_login(c, out, err);
     if (str_eq(hook, "kilo")) return kilo_login(c, out, err);
     if (str_eq(hook, "mistral-vibe-sign-in")) return mistral_vibe_login(c, out, err);
+    if (str_eq(hook, "devin-cli")) return devin_cli_login(out, err);
+    if (str_eq(hook, "devin-windsurf")) return devin_windsurf_login(c, out, err);
     *err = xasprintf("auth rules reference unknown login hook \"%s\"", hook ? hook : "");
     return -1;
 }

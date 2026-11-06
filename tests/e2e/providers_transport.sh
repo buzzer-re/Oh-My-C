@@ -28,6 +28,12 @@ check "cf no gateway"     "Cloudflare AI Gateway ID is required"  "${XENV[@]}" C
 check "muse login"        "Logged in to Muse Code (Subscription)"  bash -c "${XENV[*]} '$B' login muse-code </dev/null"
 check "muse chat"         "plain provider answer"  "${XENV[@]}" "$B" --model muse-code/muse-spark-1.3 --no-session -p hi
 check "muse wire"         "/meta/v1/responses Bearer muse-key 1.0.0"  "${XL[@]}" /meta/ 'x["path"], h.get("authorization"), h.get("x-api-version")'
+# Muse Code subscriptions declare tools under the `_` prefix (403 client_attestation_denied otherwise); returned calls run
+# under their own name and history replays the wire name
+check "muse tool names"   "_bash True"  "${XL[@]}" /meta/ 'next(t["name"] for t in b["tools"] if t["name"].endswith("bash")), all(t["name"].startswith("_") for t in b["tools"])'
+check "muse tool call"    "plain provider answer"  "${XENV[@]}" "$B" --model muse-code/muse-spark-1.3 --no-session -p "bash:echo muse-e2e"
+check "muse call replay"  "_bash"  "${XL[@]}" /meta/ 'next(i["name"] for i in b["input"] if i.get("type") == "function_call")'
+check "muse call result"  "muse-e2e"  "${XL[@]}" /meta/ 'next(i["output"] for i in b["input"] if i.get("type") == "function_call_output")'
 # Snowflake: structured OAuth key -> account URL replaces the placeholder origin
 FAR=$(( $(date +%s) * 1000 + 3600000 ))
 python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["snowflake"]={"type":"oauth","access":"sf-at","refresh":"sf-rt","expires":int(sys.argv[2]),"enterpriseUrl":"https://acme-prod.snowflakecomputing.com"}; json.dump(d,open(p,"w"))' "$T/pagent/auth.json" $FAR
@@ -66,6 +72,12 @@ JQ='call:eval:{"language":"py","code":"r = await judge({\"text\": \"ok\"}, {\"b\
 printf 'modelRoles:\n  judge: typesafe/jev-latest\n' > "$T/pagent/config.yml"
 check "typesafe judge"  "verdict {'type': 'bool', 'bool': 0.9}"  "${XENV[@]}" TYPESAFE_API_KEY=ts-key OMC_PROVIDER_URL_REWRITE="https://api.typesafe.ai=$XB/ts,https://api.kilo.ai=$XB/kilo" "$B" --model "kilo/~anthropic/claude-sonnet-latest" --no-session -p "$JQ"
 check "typesafe wire"   "/ts/v1/systemone Bearer ts-key jev-latest {'b': {'type': 'bool', 'instructions': 'fine?'}}"  "${XL[@]}" /ts/ 'x["path"], h.get("authorization"), b.get("model"), b.get("questions")'
+# OpenRouter Decisions: compat.openRouterRouting becomes `provider`, compat.extraBody overlays the body
+mkdir -p "$T/ordagent"
+printf 'providers:\n  ord:\n    baseUrl: %s/ord\n    apiKey: ord-key\n    api: openrouter-decisions\n    models:\n      - id: jev\n        name: Jev\n        compat:\n          openRouterRouting:\n            order: [cerebras]\n          extraBody:\n            zdr: true\n  mock:\n    baseUrl: %s/ord\n    apiKey: ord-key\n    api: openai-completions\n    models:\n      - id: c\n        name: C\n' "$XB" "$XB" > "$T/ordagent/models.yml"
+printf 'modelRoles:\n  judge: ord/jev\n' > "$T/ordagent/config.yml"
+check "decisions judge" "verdict {'type': 'bool', 'bool': 0.9}"  "${XENV[@]}" OMC_CODING_AGENT_DIR="$T/ordagent" "$B" --model mock/c --no-session -p "$JQ"
+check "decisions wire"  "/ord/decisions Bearer ord-key {'order': ['cerebras']} True jev"  "${XL[@]}" /ord/decisions 'x["path"], h.get("authorization"), b.get("provider"), b.get("zdr"), b.get("model")'
 check "workers login"   "Logged in to Cloudflare Workers AI"  bash -c "printf 'wa-tok\nacct7\n' | ${XENV[*]} '$B' login cloudflare-workers-ai"
 printf 'modelRoles:\n  judge: cloudflare-workers-ai/@cf/cloudflare/clef\n' > "$T/pagent/config.yml"
 check "workers judge"   "verdict {'type': 'bool', 'bool': 0.9}"  "${XENV[@]}" OMC_PROVIDER_URL_REWRITE="https://api.cloudflare.com=$XB/cfapi,https://api.kilo.ai=$XB/kilo" "$B" --model "kilo/~anthropic/claude-sonnet-latest" --no-session -p "$JQ"

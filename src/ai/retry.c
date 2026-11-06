@@ -2,6 +2,7 @@
  * retry.c - transport retry helpers shared by the providers:
  *   ai_extract_retry_hint        pi-utils fetch-retry.ts extractRetryHint
  *   ai_retry_after_from_headers  pi-ai utils/retry-after.ts getRetryAfterMsFromHeaders
+ *   ai_should_retry_verdict      pi-ai utils/retry-after.ts getShouldRetryFromHeaders
  *   ai_provider_retryable_error  pi-ai error/retryable.ts isProviderRetryableError (substring port of its patterns)
  *   ai_replay_safe_stream        pi-ai utils/empty-completion-retry.ts withReplaySafeStreamRetry
  * The fetch loop itself (fetchWithRetry / anthropic-client.ts) is stream_post_url in ai_common.c.
@@ -68,6 +69,13 @@ int64_t ai_retry_after_from_headers(const http_headers_t *h) {
         if (target > (double)now) best = MAX(best, (int64_t)ceil(target - (double)now));
     }
     return best;
+}
+
+int ai_should_retry_verdict(const http_headers_t *h) {
+    const char *v = h ? http_headers_get(h, "x-should-retry") : NULL;
+    if (str_eq(v, "true")) return 1;
+    if (str_eq(v, "false")) return 0;
+    return -1;
 }
 
 static double unit_ms(const char *u, size_t n, bool days) {
@@ -519,6 +527,11 @@ static bool wait_ms_cancellable(const ai_stream_opts_t *o, int64_t ms) {
 
 json_t *ai_replay_safe_stream(ai_attempt_fn once, void *self, const ai_stream_opts_t *o, ai_event_cb cb, void *ud,
                               bool retry_empty, int max_error_retries) {
+    return ai_replay_safe_stream_ex(once, self, o, cb, ud, &retry_empty, max_error_retries);
+}
+
+json_t *ai_replay_safe_stream_ex(ai_attempt_fn once, void *self, const ai_stream_opts_t *o, ai_event_cb cb, void *ud,
+                                 const bool *retry_empty, int max_error_retries) {
     replay_t r = {.cb = cb, .ud = ud};
     int empty_retries = 0, error_retries = 0;
     for (;;) {
@@ -529,7 +542,7 @@ json_t *ai_replay_safe_stream(ai_attempt_fn once, void *self, const ai_stream_op
         const char *sd = json_get_str(json_get(msg, "stopDetails"), "type");
         bool cancelled = o && o->cancel && *o->cancel;
         int64_t delay = -1;
-        if (retry_empty && !(o && o->accept_empty_response) && !r.committed && str_eq(stop, "stop") &&
+        if (*retry_empty && !(o && o->accept_empty_response) && !r.committed && str_eq(stop, "stop") &&
             !str_eq(sd, "pause_turn") && !str_eq(sd, "compaction") && !errmsg &&
             json_get_int(json_get(msg, "usage"), "output", 0) <= 1 && !visible_content(msg) &&
             empty_retries < MAX_EMPTY_COMPLETION_RETRIES) {

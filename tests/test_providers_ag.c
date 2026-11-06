@@ -2,6 +2,7 @@
  * test_providers_ag.c - offline tests for the Anthropic and Google providers:
  * request shaping (bodies/headers/urls) and recorded SSE streams fed through the event handlers.
  */
+#include "ai/anthropic_threads.h"
 #include "ai/ai.h"
 #include "ai/provider_anthropic.h"
 #include "ai/provider_google.h"
@@ -837,6 +838,155 @@ static void test_google_sse_edges(void) {
     json_free(raw);
 }
 
+/* message threads: continue only past an extended conversation, within the window, with the fixed fields unchanged;
+ * 16 chains per endpoint and model; refused continues replay, then stop threading */
+static json_t *thread_params(const char *msgs_json, const char *system) {
+    char *j = xasprintf("{\"model\":\"claude-x\",\"messages\":%s,\"system\":\"%s\",\"tools\":[],\"stream\":true}", msgs_json, system);
+    json_t *p = json_parse_str(j);
+    free(j);
+    return p;
+}
+
+#define T_U1 "{\"role\":\"user\",\"content\":\"one\"}"
+#define T_A1 "{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}"
+#define T_U2 "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"two\",\"cache_control\":{\"type\":\"ephemeral\"}}]}"
+
+static void test_message_threads(void) {
+    json_t *a1 = json_parse_str(T_A1);
+    bool cont = false;
+    anth_thread_turn_t *t = anth_thread_turn_new("https://api.anthropic.com", "tm", "s1", false);
+    json_t *p = thread_params("[" T_U1 "]", "sys");
+    json_t *w = anth_thread_plan(t, p, "b,a", 1000, &cont);
+    CHECK(w && !cont);
+    CHECK_STR(json_get_str(json_get(w, "thread"), "type"), "create");
+    CHECK(json_get(w, "system") != NULL);
+    json_free(w);
+    json_free(p);
+    anth_thread_settle(t, "msg_1", a1, 1000);
+    anth_thread_turn_free(t);
+
+    /* extended, same fixed fields (beta order aside), the string message equals its cached single-block form */
+    t = anth_thread_turn_new("https://api.anthropic.com", "tm", "s1", false);
+    p = thread_params("[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"one\",\"cache_control\":{\"type\":\"ephemeral\"}}]}," T_A1 "," T_U2 "]", "sys");
+    w = anth_thread_plan(t, p, "a,b,a", 2000, &cont);
+    CHECK(w && cont);
+    CHECK_STR(json_get_str(json_get(w, "thread"), "previous_message_id"), "msg_1");
+    CHECK(json_len(json_get(w, "messages")) == 1);
+    CHECK(json_get(w, "system") == NULL && json_get(w, "tools") == NULL);
+    CHECK(json_get(json_at(json_get(json_at(json_get(w, "messages"), 0), "content"), 0), "cache_control") != NULL);
+    json_free(w);
+    json_free(p);
+    /* a transient retry of the same turn keeps continuing the claimed id */
+    p = thread_params("[" T_U1 "," T_A1 "," T_U2 "]", "sys");
+    w = anth_thread_plan(t, p, "a,b", 2000, &cont);
+    CHECK(w && cont);
+    json_free(w);
+    /* a refused continue replays, a second one stops threading */
+    CHECK(anth_thread_recover(t, 500, "{}") == ANTH_THREAD_NO_RECOVERY);
+    CHECK(anth_thread_recover(t, 404, "{\"error\":{\"type\":\"not_found_error\",\"message\":\"model: nope\"}}") == ANTH_THREAD_NO_RECOVERY);
+    CHECK(anth_thread_recover(t, 404, "{\"error\":{\"details\":{\"error_code\":\"thread_not_found\"}}}") == ANTH_THREAD_REPLAY);
+    w = anth_thread_plan(t, p, "a,b", 2000, &cont);
+    CHECK(w && !cont);
+    CHECK_STR(json_get_str(json_get(w, "thread"), "type"), "create");
+    json_free(w);
+    json_free(p);
+    anth_thread_settle(t, "msg_2", a1, 2000);
+    anth_thread_turn_free(t);
+
+    /* the error text of a codeless thread 400, and what is not one */
+    t = anth_thread_turn_new("https://api.anthropic.com", "tm", "s-text", false);
+    p = thread_params("[" T_U1 "]", "sys");
+    w = anth_thread_plan(t, p, "", 1000, &cont);
+    json_free(w);
+    CHECK(anth_thread_recover(t, 400, "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"x.diagnostics.previous_message_id bad\"}}") == ANTH_THREAD_NO_RECOVERY);
+    CHECK(anth_thread_recover(t, 400, "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"threading is off\"}}") == ANTH_THREAD_NO_RECOVERY);
+    CHECK(anth_thread_recover(t, 400, "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"thread: nope\"}}") == ANTH_THREAD_UNTHREADED);
+    w = anth_thread_plan(t, p, "", 1000, &cont); /* a refused create stops threading the session */
+    CHECK(w == NULL);
+    json_free(p);
+    anth_thread_turn_free(t);
+
+    /* past the reuse window, changed fixed fields or rewritten history start a new thread */
+    static const struct {
+        const char *msgs, *system;
+        const char *beta;
+        int64_t now;
+    } fresh[] = {{"[" T_U1 "," T_A1 "," T_U2 "]", "sys", "", 1000 + 270000},
+                 {"[" T_U1 "," T_A1 "," T_U2 "]", "other", "", 2000},
+                 {"[" T_U1 "," T_A1 "," T_U2 "]", "sys", "new-beta", 2000},
+                 {"[{\"role\":\"user\",\"content\":\"edited\"}," T_A1 "," T_U2 "]", "sys", "", 2000},
+                 {"[" T_U1 "," T_A1 "]", "sys", "", 2000}};
+    for (size_t i = 0; i < ARRAY_LEN(fresh); i++) {
+        char sid[32];
+        snprintf(sid, sizeof sid, "s-fresh-%zu", i);
+        t = anth_thread_turn_new("https://api.anthropic.com", "tm2", sid, false);
+        p = thread_params("[" T_U1 "]", "sys");
+        w = anth_thread_plan(t, p, "", 1000, &cont);
+        json_free(w);
+        json_free(p);
+        anth_thread_settle(t, "msg_f", a1, 1000);
+        anth_thread_turn_free(t);
+        t = anth_thread_turn_new("https://api.anthropic.com", "tm2", sid, false);
+        p = thread_params(fresh[i].msgs, fresh[i].system);
+        w = anth_thread_plan(t, p, fresh[i].beta, fresh[i].now, &cont);
+        CHECK(w && !cont);
+        json_free(w);
+        json_free(p);
+        anth_thread_turn_free(t);
+        anth_threads_release_session(sid);
+    }
+
+    /* OAuth traffic keeps system and tools on a continue */
+    t = anth_thread_turn_new("https://api.anthropic.com", "tm3", "s-oauth", true);
+    p = thread_params("[" T_U1 "]", "sys");
+    w = anth_thread_plan(t, p, "", 1000, &cont);
+    json_free(w);
+    json_free(p);
+    anth_thread_settle(t, "msg_o", a1, 1000);
+    anth_thread_turn_free(t);
+    t = anth_thread_turn_new("https://api.anthropic.com", "tm3", "s-oauth", true);
+    p = thread_params("[" T_U1 "," T_A1 "," T_U2 "]", "sys");
+    w = anth_thread_plan(t, p, "", 2000, &cont);
+    CHECK(w && cont && json_get(w, "system") && json_get(w, "tools"));
+    json_free(w);
+    json_free(p);
+    anth_thread_turn_free(t);
+
+    /* an unsuitable body goes without a thread and leaves the anchor alone */
+    t = anth_thread_turn_new("https://api.anthropic.com", "tm4", "s-c", false);
+    json_t *cp = json_parse_str("{\"model\":\"m\",\"messages\":[],\"compaction\":{\"type\":\"summarize\"}}");
+    CHECK(anth_thread_plan(t, cp, "", 1000, &cont) == NULL);
+    json_free(cp);
+    anth_thread_turn_free(t);
+
+    /* at most 16 chains per endpoint and model: the least recently used one goes first */
+    for (int i = 0; i < 17; i++) {
+        char sid[32];
+        snprintf(sid, sizeof sid, "s-lru-%d", i);
+        t = anth_thread_turn_new("https://api.anthropic.com", "tm5", sid, false);
+        p = thread_params("[" T_U1 "]", "sys");
+        w = anth_thread_plan(t, p, "", 1000, &cont);
+        json_free(w);
+        json_free(p);
+        anth_thread_settle(t, "msg_l", a1, 1000);
+        anth_thread_turn_free(t);
+    }
+    p = thread_params("[" T_U1 "," T_A1 "," T_U2 "]", "sys");
+    t = anth_thread_turn_new("https://api.anthropic.com", "tm5", "s-lru-16", false);
+    w = anth_thread_plan(t, p, "", 2000, &cont);
+    CHECK(w && cont);
+    json_free(w);
+    anth_thread_turn_free(t);
+    t = anth_thread_turn_new("https://api.anthropic.com", "tm5", "s-lru-0", false);
+    w = anth_thread_plan(t, p, "", 2000, &cont);
+    CHECK(w && !cont);
+    json_free(w);
+    anth_thread_turn_free(t);
+    json_free(p);
+    anth_threads_reset();
+    json_free(a1);
+}
+
 int main(void) {
     /* isolate the OAuth install-id file */
     const char *tmp = getenv("TMPDIR");
@@ -846,6 +996,7 @@ int main(void) {
     unsetenv("ANTHROPIC_BASE_URL");
     unsetenv("PI_AI_CLAUDE_CODE_VERSION");
 
+    test_message_threads();
     test_anthropic_request_apikey();
     test_anthropic_request_adaptive();
     test_anthropic_request_oauth();

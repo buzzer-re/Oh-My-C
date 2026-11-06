@@ -1232,6 +1232,7 @@ static json_t *anthropic_compat(const char *provider, const char *url, const mod
     json_set_bool(c, "supportsServerCompaction", false);
     json_set_bool(c, "firstPartyProvider", false);
     json_set_bool(c, "honorsClaudeCodeBetaKillSwitch", false);
+    json_set_bool(c, "supportsMessageThreads", false);
     json_set_bool(c, "supportsOutputEffort", true);
     json_set_bool(c, "disableStrictTools", azure_anthropic(u) || bedrock);
     if (bedrock) json_set_bool(c, "bedrockMessagesApi", true);
@@ -1698,7 +1699,7 @@ static void build_model(json_t *model) {
         compat = chat_compat(provider, backend, url, &idn, reasoning, user, &ax);
         json_t *resp = responses_compat(provider, backend, url, &idn, reasoning, user, &ax, api);
         static const char *const only[] = {"supportsLongPromptCacheRetention", "strictResponsesPairing", "supportsImageDetailOriginal",
-                                           "supportsObfuscationOptOut", "storeResponses", "connectionBoundNativeHistory",
+                                           "supportsObfuscationOptOut", "storeResponses", "toolNamePrefix", "connectionBoundNativeHistory",
                                            "supportsAllTurnsReasoningContext", "supportsConfigurationUpdate", "supportsSteering",
                                            "officialEndpoint", "harmonyLeakMitigation", "cacheControlFormat",
                                            "requiresReasoningOffJuiceInstruction", "supportsReasoningSummary", "statefulResponses",
@@ -1756,6 +1757,31 @@ static void build_model(json_t *model) {
     if (user) json_set(model, "compatConfig", user);
     apply_catalog(model, ax.catalog);
     axes_free(&ax);
+}
+
+const json_t *compat_catalog_policy(const char *provider, const char *api, const char *id, const char *key) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static hmap_t cache;
+    static bool ready;
+    char *ck = xasprintf("%s\x1f%s\x1f%s", provider ? provider : "", api ? api : "", id ? id : "");
+    pthread_mutex_lock(&mu);
+    if (!ready) {
+        hmap_init(&cache);
+        ready = true;
+    }
+    json_t *policy = hmap_get(&cache, ck);
+    if (!policy) {
+        model_identity_t idn;
+        model_identity_classify(provider, id, &idn);
+        axes_t ax = {0};
+        resolve_cascade(&ax, provider, api ? api : "", &idn, id, false);
+        policy = ax.catalog ? json_clone(ax.catalog) : json_obj();
+        axes_free(&ax);
+        hmap_put(&cache, ck, policy);
+    }
+    pthread_mutex_unlock(&mu);
+    free(ck);
+    return json_get(policy, key);
 }
 
 void compat_resolve_model(json_t *model) {

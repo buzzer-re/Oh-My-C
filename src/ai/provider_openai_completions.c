@@ -399,6 +399,16 @@ char *oai_base_url(const ai_model_t *m, const char *def) {
     return r;
 }
 
+/* inference-headers.ts applyInferenceHeaders, protocol "openai": the conversation id on OpenAI itself */
+void oai_apply_inference_headers(http_headers_t *h, const ai_model_t *m, const ai_stream_opts_t *o) {
+    const char *backend = json_get_str(m->raw, "providerType") ? json_get_str(m->raw, "providerType") : m->provider;
+    if (!str_eq(backend, "openai")) return;
+    const char *sid = !str_empty(o->session_id) ? o->session_id : o->prompt_cache_key;
+    if (str_empty(sid)) return;
+    http_headers_set(h, "session_id", sid);
+    http_headers_set(h, "x-client-request-id", sid);
+}
+
 void oai_add_openrouter_headers(http_headers_t *h) {
     http_headers_set(h, "User-Agent", OMC_NAME "/" OMC_VERSION);
     http_headers_set(h, "HTTP-Referer", "https://github.com/can1357/oh-my-pi");
@@ -1503,6 +1513,7 @@ static json_t *oaic_stream_once(void *self, ai_event_cb cb, void *ud) {
     }
     if (str_eq(m->provider, "openrouter")) oai_add_openrouter_headers(&h);
     ai_apply_headers(&h, NULL, o);
+    oai_apply_inference_headers(&h, m, o);
     const char *sess_hdr = oai_cstr(m, NULL, "promptCacheSessionHeader", NULL);
     if (sess_hdr && !str_empty(o->session_id) && !http_headers_get(&h, sess_hdr)) http_headers_set(&h, sess_hdr, o->session_id);
     if (key && strcmp(key, AI_NO_AUTH_SENTINEL) != 0 && !http_headers_get(&h, "Authorization")) {

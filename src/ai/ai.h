@@ -232,6 +232,11 @@ typedef struct {
     int64_t idle_timeout_ms;
     /* providers.maxInFlightRequests: per-provider concurrent request caps (borrowed object, may be NULL) */
     const json_t *max_in_flight;
+    /* omp's providerSessionState is present: server-side conversation state (Anthropic message threads) may be used */
+    bool provider_session_state;
+    int stateful_responses; /* the statefulResponses option: 0 unset, 1 true, -1 false */
+    int prefer_websockets;  /* the preferWebsockets option: 0 unset, 1 true, -1 false */
+    volatile sig_atomic_t *caller_cancel; /* set by the stream watchdog, which replaces cancel with its own flag */
 } ai_stream_opts_t;
 
 void ai_stream_opts_init(ai_stream_opts_t *o);
@@ -353,6 +358,8 @@ int64_t ai_extract_retry_hint(const http_headers_t *h, const char *body);
 int64_t ai_retry_after_from_headers(const http_headers_t *h);
 /* isProviderRetryableError over a finished error message (+ HTTP status, 0 = unknown) */
 bool ai_provider_retryable_error(const char *message, int status);
+/* getShouldRetryFromHeaders: the server's `x-should-retry` verdict, 1 true, 0 false, -1 absent or unrecognised */
+int ai_should_retry_verdict(const http_headers_t *h);
 /* account-level usage/quota wording (rate-limit.ts matchesUsageLimitText, approximated); status 0 = unknown */
 bool ai_usage_limit_text(const char *msg, int status);
 /* withReplaySafeStreamRetry: runs `once` again while no meaningful output was emitted, after a benign empty
@@ -361,6 +368,9 @@ bool ai_usage_limit_text(const char *msg, int status);
 typedef json_t *(*ai_attempt_fn)(void *self, ai_event_cb cb, void *ud); /* one provider attempt */
 json_t *ai_replay_safe_stream(ai_attempt_fn once, void *self, const ai_stream_opts_t *o, ai_event_cb cb, void *ud,
                               bool retry_empty, int max_error_retries);
+/* retry_empty read after each attempt (a function-valued retryEmptyCompletion) */
+json_t *ai_replay_safe_stream_ex(ai_attempt_fn once, void *self, const ai_stream_opts_t *o, ai_event_cb cb, void *ud,
+                                 const bool *retry_empty, int max_error_retries);
 
 /* Streaming POST with SSE parsing + retry on transient errors (see the transport retry policies above).
  * on_event returns non-zero to abort. Returns 0 on success (2xx stream consumed);

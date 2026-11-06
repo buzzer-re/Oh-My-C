@@ -67,6 +67,8 @@ int auth_validate_models(const char *label, const char *key, const char *url, co
 
 /* auth.c: the oauth-code callback flow for a descriptor's `login` object (also used by custom hooks) */
 int auth_oauth_code_flow(const actx_t *c, const json_t *login, json_t **cred, char **err);
+/* auth_custom.c: Windsurf's code exchange (the flow's `exchangeHook`) */
+char *auth_windsurf_exchange(const actx_t *c, const char *code, const char *verifier, char **err);
 
 /* auth_custom.c */
 int auth_custom_hook_login(const actx_t *c, const char *hook, alogin_t *out, char **err);

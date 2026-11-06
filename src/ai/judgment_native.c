@@ -160,6 +160,16 @@ json_t *ai_native_judge(const ai_model_t *m, const char *key, const json_t *stat
             http_headers_set(&h, "TypeSafe-Danger-Zone-Images", "true");
         }
     }
+    if (str_eq(api, "openrouter-decisions")) {
+        /* openRouterDecisionsBody: the configured compat in the chat vocabulary, merged over the encoded body */
+        const json_t *cfg = json_get_obj(m->raw, "compatConfig");
+        const json_t *routing = json_get(cfg, "openRouterRouting");
+        if (json_is_obj(routing)) json_set(body, "provider", json_clone(routing));
+        const json_t *extra = json_get_obj(cfg, "extraBody");
+        const char *ek;
+        json_t *ev;
+        json_obj_foreach(extra, xi, ek, ev) json_set(body, ek, json_clone(ev));
+    }
     json_t *answers = NULL;
     if (!*err) {
         char *auth = xasprintf("Bearer %s", token ? token : "");

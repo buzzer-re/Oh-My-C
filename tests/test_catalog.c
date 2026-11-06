@@ -222,6 +222,17 @@ static void test_credit_rates(void) {
     ui_model_browser_free(b);
 }
 
+/* catalog axes resolve at runtime for bundled rows */
+static void test_catalog_policy(void) {
+    const json_t *max = compat_catalog_policy("muse-code", "openai-responses", "muse-spark-1.3", "toolCallNameMaxLength");
+    CHECK(json_is_num(max) && (max->is_int ? max->u.num.i : (int64_t)max->u.num.d) == 64);
+    const json_t *ws = compat_catalog_policy("openai", "openai-responses", "gpt-5.5", "supportsWebsockets");
+    CHECK(json_is_bool(ws) && ws->u.b);
+    CHECK(compat_catalog_policy("openai", "openai-completions", "gpt-5.5", "supportsWebsockets") == NULL);
+    CHECK(compat_catalog_policy("openai-codex", "openai-codex-responses", "gpt-5.5", "supportsWebsockets") == NULL);
+    CHECK(catalog_find("factory-droid", "muse-spark-1.3") && catalog_find("factory-droid", "gemini-4-argon"));
+}
+
 int main(void) {
     char tmpl[] = "/tmp/omc-test-catalog.XXXXXX";
     char *dir = mkdtemp(tmpl);
@@ -229,6 +240,7 @@ int main(void) {
     setenv("OMC_NO_LOCAL_DISCOVERY", "1", 1);
 
     test_credit_rates();
+    test_catalog_policy();
 
     /* providers present in omp's catalog but absent from its bundled rows */
     CHECK(catalog_find("charm-hyper", "glm-5.3") || catalog_find("charm-hyper", "deepseek-v4-flash-0731"));

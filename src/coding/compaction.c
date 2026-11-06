@@ -1,4 +1,5 @@
 /* compaction.c - context maintenance (see compaction.h). */
+#include "ai/anthropic_threads.h"
 #include "coding/compaction.h"
 
 #include "ai/dialect.h"
@@ -495,6 +496,8 @@ static char *oneshot(app_t *a, const ai_model_t *m, const char *system, const ch
     o.max_tokens = max_tokens;
     compaction_effort(a, m, &o);
     o.session_id = a->agent->session_id;
+    o.provider_session_state = true;
+    o.metadata = (json_t *)app_session_metadata(a, m->provider);
     o.cancel = cancel_ptr(a);
     json_t *r = ai_complete(m, &ctx, &o);
     char *text = NULL;
@@ -809,6 +812,8 @@ static bool anthropic_compact(app_t *a, const ai_model_t *m, const prep_t *p, co
     compaction_effort(a, m, &o);
     o.disable_reasoning = false;
     o.session_id = a->agent->session_id;
+    o.provider_session_state = true;
+    o.metadata = (json_t *)app_session_metadata(a, m->provider);
     o.cancel = cancel_ptr(a);
     o.on_payload = NULL;
     o.cursor_exec = NULL;
@@ -1612,6 +1617,7 @@ typedef struct {
 } handoff_req_t;
 
 static void handoff_req_free(handoff_req_t *h) {
+    if (h->sid) anth_threads_release_session(h->sid);
     json_free(h->sys);
     json_free(h->tools);
     json_free(h->wire);
@@ -1670,6 +1676,8 @@ static char *handoff_exec(app_t *a, handoff_req_t *h, bool auto_triggered, char 
     o.api_key = key;
     app_fill_request_opts(a, &o);
     o.session_id = h->sid;
+    o.provider_session_state = true;
+    o.metadata = (json_t *)app_session_metadata(a, model->provider);
     o.prompt_cache_key = h->main_sid;
     compaction_effort(a, model, &o);
     o.disable_reasoning = false;

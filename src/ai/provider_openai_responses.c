@@ -5,7 +5,9 @@
  * Port of openai-responses.ts / azure-openai-responses.ts / openai-codex-responses.ts (SSE transport)
  * and the processResponsesStream decoder in openai-shared.ts.
  */
+#include "ai/compat_detect.h"
 #include "ai/provider_openai.h"
+#include "ai/responses_ws.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -21,6 +23,19 @@ static int variant_of(const ai_model_t *m) {
     if (str_eq(m->api, "azure-openai-responses")) return V_AZURE;
     if (str_eq(m->api, "openai-codex-responses")) return V_CODEX;
     return V_OPENAI;
+}
+
+/* responsesToolNaming + encodeResponsesToolName: the wire name carries compat.toolNamePrefix unless the prefixed name
+ * would pass the host's tool-call-name-max-length; without a prefix the name goes out unchanged. Owned. */
+static char *wire_tool_name(const ai_model_t *m, const char *name) {
+    const char *prefix = model_compat_str(m, "toolNamePrefix");
+    if (!name) name = "";
+    if (str_empty(prefix)) return xstrdup(name);
+    size_t len = strlen(prefix) + strlen(name);
+    const json_t *max = json_get(m->raw, "toolCallNameMaxLength"); /* a models.yml row may set it */
+    if (!json_is_num(max)) max = compat_catalog_policy(m->provider, m->api, m->id, "toolCallNameMaxLength");
+    if (json_is_num(max) && (int64_t)len > (int64_t)(max->is_int ? max->u.num.i : max->u.num.d)) return xstrdup(name);
+    return xasprintf("%s%s", prefix, name);
 }
 
 static bool blank(const char *s) {
@@ -167,7 +182,7 @@ static void parse_text_sig(const char *sig, char **id, char **phase) {
 }
 
 static void convert_assistant(json_t *out, const json_t *msg, const ai_model_t *m, size_t msg_index,
-                              bool include_sigs, bool preserve_ids, strvec_t *known) {
+                              bool include_sigs, bool preserve_ids, strvec_t *known, bool wire_names) {
     const char *stop = json_get_str(msg, "stopReason");
     bool errored = str_eq(stop, "error");
     json_t *content = json_get(msg, "content");
@@ -234,7 +249,9 @@ static void convert_assistant(json_t *out, const json_t *msg, const ai_model_t *
             json_set_str(item, "type", "function_call");
             if (item_id) json_set(item, "id", json_str_own(item_id));
             json_set(item, "call_id", json_str_own(call));
-            json_set_str(item, "name", json_get_str(b, "name") ? json_get_str(b, "name") : "");
+            /* rebuilt calls go out under the wire name; the declared tool list uses the same rule */
+            json_set(item, "name", wire_names ? json_str_own(wire_tool_name(m, json_get_str(b, "name")))
+                                              : json_str(json_get_str(b, "name") ? json_get_str(b, "name") : ""));
             json_t *args = json_get(b, "arguments");
             json_set(item, "arguments", args ? json_str_own(json_dump(args, 0)) : json_str("null"));
             json_push(out, item);
@@ -304,7 +321,7 @@ static void convert_tool_result(json_t *out, const json_t *tr, const ai_model_t 
     json_push(out, o);
 }
 
-json_t *oair_convert_input(const ai_model_t *m, const ai_context_t *ctx, int variant) {
+static json_t *convert_input(const ai_model_t *m, const ai_context_t *ctx, int variant, bool wire_names) {
     json_t *out = json_arr();
     if (variant == V_AZURE) {
         const char *role = m->reasoning && model_compat_bool(m, "supportsDeveloperRole", false) ? "developer" : "system";
@@ -375,7 +392,7 @@ json_t *oair_convert_input(const ai_model_t *m, const ai_context_t *ctx, int var
             }
             json_push(out, it);
         } else if (str_eq(role, "assistant")) {
-            convert_assistant(out, msg, m, idx, include_sigs, preserve_ids, &known);
+            convert_assistant(out, msg, m, idx, include_sigs, preserve_ids, &known, wire_names);
         } else if (str_eq(role, "toolResult")) {
             convert_tool_result(out, msg, m, strict_pairing, &known);
         }
@@ -391,6 +408,10 @@ json_t *oair_convert_input(const ai_model_t *m, const ai_context_t *ctx, int var
         }
     }
     return out;
+}
+
+json_t *oair_convert_input(const ai_model_t *m, const ai_context_t *ctx, int variant) {
+    return convert_input(m, ctx, variant, false);
 }
 
 /* ====================================================================== */
@@ -414,7 +435,7 @@ static json_t *convert_tools(const ai_model_t *m, const json_t *tools, int varia
     json_arr_foreach(tools, i, t) {
         json_t *w = json_obj();
         json_set_str(w, "type", "function");
-        json_set_str(w, "name", json_get_str(t, "name") ? json_get_str(t, "name") : "");
+        json_set(w, "name", json_str_own(wire_tool_name(m, json_get_str(t, "name"))));
         json_set_str(w, "description", json_get_str(t, "description") ? json_get_str(t, "description") : "");
         json_t *st = json_get(t, "strict");
         bool expl_false = json_is_bool(st) && !st->u.b;
@@ -460,21 +481,49 @@ static void apply_tool_choice(json_t *p, const ai_model_t *m, const ai_stream_op
         json_set_str(p, "tool_choice", mode);
         return;
     }
-    if (!name || !tools_have(tools, name)) return;
+    if (!name) return;
+    /* the declared list carries wire names: the forced choice is matched against and sent under them */
+    char *wire = wire_tool_name(m, name);
+    if (!tools_have(tools, wire)) {
+        free(wire);
+        return;
+    }
     if (variant != V_AZURE && !model_compat_bool(m, "supportsNamedToolChoice", true)) {
         json_t *f = json_arr();
         json_t *t;
         json_arr_foreach(tools, i, t) {
-            if (str_eq(json_get_str(t, "name"), name)) json_push(f, json_clone(t));
+            if (str_eq(json_get_str(t, "name"), wire)) json_push(f, json_clone(t));
         }
         json_set(p, "tools", f);
         json_set_str(p, "tool_choice", "required");
+        free(wire);
         return;
     }
     json_t *tc = json_obj();
     json_set_str(tc, "type", "function");
-    json_set_str(tc, "name", name);
+    json_set(tc, "name", json_str_own(wire));
     json_set(p, "tool_choice", tc);
+}
+
+/* toolNamesByWire: wire name -> declared name so a returned call dispatches to its tool; two tools sharing a wire name
+ * could not be told apart, so that request is rejected before it is sent. NULL when names go out unchanged. Owned. */
+json_t *oair_tool_names_by_wire(const ai_model_t *m, const json_t *tools, char **err) {
+    if (str_empty(model_compat_str(m, "toolNamePrefix"))) return NULL;
+    json_t *names = json_obj(), *t;
+    json_arr_foreach(tools, i, t) {
+        const char *name = json_get_str(t, "name") ? json_get_str(t, "name") : "";
+        char *wire = wire_tool_name(m, name);
+        const char *existing = json_get_str(names, wire);
+        if (existing && strcmp(existing, name)) {
+            *err = xasprintf("Tool names \"%s\" and \"%s\" both encode as \"%s\"", existing, name, wire);
+            free(wire);
+            json_free(names);
+            return NULL;
+        }
+        json_set_str(names, wire, name);
+        free(wire);
+    }
+    return names;
 }
 
 static void add_include(json_t *p, const char *what) {
@@ -668,7 +717,7 @@ json_t *oair_build_request(const ai_model_t *m, const ai_context_t *ctx, const a
     oai_policy_resolve(&ipol, m, o, o->tool_choice, json_len(ctx->tools) > 0);
     const char *wire_id = json_get_str(m->raw, "requestModelId");
     json_set_str(p, "model", wire_id ? wire_id : m->id);
-    json_t *input = oair_convert_input(m, ctx, V_OPENAI);
+    json_t *input = convert_input(m, ctx, V_OPENAI, true);
     json_t *sys = oai_system_prompts(ctx);
     if (json_len(sys)) {
         if (ipol.model_supported && oai_cbool(m, ipol.over, "supportsDeveloperRole", false)) {
@@ -857,7 +906,6 @@ static bool build_headers(http_headers_t *h, const ai_model_t *m, const ai_strea
         char *hint = tier ? xasprintf("model=%s;tier=%s", model, tier) : xasprintf("model=%s", model);
         http_headers_set(h, "x-codex-routing-hint", hint);
         free(hint);
-        http_headers_set(h, "OpenAI-Beta", "responses=experimental");
         http_headers_set(h, "originator", CODEX_ORIGINATOR);
         http_headers_set(h, "version", CODEX_CLIENT_VERSION);
         http_headers_set(h, "User-Agent", OMC_NAME "/" OMC_VERSION);
@@ -874,6 +922,7 @@ static bool build_headers(http_headers_t *h, const ai_model_t *m, const ai_strea
     model_headers(h, m);
     if (str_eq(m->provider, "openrouter")) oai_add_openrouter_headers(h);
     ai_apply_headers(h, NULL, o);
+    oai_apply_inference_headers(h, m, o);
     if (key && strcmp(key, AI_NO_AUTH_SENTINEL) != 0 && !http_headers_get(h, "Authorization")) {
         char *auth = xasprintf("Bearer %s", key);
         http_headers_set(h, "Authorization", auth);
@@ -906,6 +955,7 @@ struct oair_stream {
     char *stop;
     char *error;
     bool completed;
+    json_t *wire_names; /* borrowed toolNamesByWire or NULL */
 };
 
 oair_stream_t *oair_stream_new(const ai_model_t *m, ai_event_cb cb, void *ud) {
@@ -913,6 +963,14 @@ oair_stream_t *oair_stream_new(const ai_model_t *m, ai_event_cb cb, void *ud) {
     s->m = m;
     aib_init(&s->b, m, cb, ud);
     return s;
+}
+
+void oair_stream_set_wire_names(oair_stream_t *s, const json_t *names) { s->wire_names = (json_t *)names; }
+
+/* the declared tool of a returned call name (toolNamesByWire); unknown names pass through */
+static const char *declared_name(const oair_stream_t *s, const char *wire) {
+    const char *n = s->wire_names && wire ? json_get_str(s->wire_names, wire) : NULL;
+    return n ? n : wire;
 }
 
 static json_t *r_content(oair_stream_t *s) { return json_get(s->b.msg, "content"); }
@@ -1106,7 +1164,7 @@ static void on_item_added(oair_stream_t *s, const json_t *ev) {
     it->out_idx = (int)json_get_int(ev, "output_index", -1);
     if (json_get_str(item, "id")) it->item_id = xstrdup(json_get_str(item, "id"));
     if (json_get_str(item, "call_id")) it->call_id = xstrdup(json_get_str(item, "call_id"));
-    if (json_get_str(item, "name")) it->name = xstrdup(json_get_str(item, "name"));
+    if (json_get_str(item, "name")) it->name = xstrdup(declared_name(s, json_get_str(item, "name")));
     vec_push(&s->items, it);
     if (kind == K_CALL) {
         char *id = encode_tool_id(it->call_id, it->item_id);
@@ -1180,7 +1238,7 @@ static void on_item_done(oair_stream_t *s, const json_t *ev) {
     } else {
         const char *a = json_get_str(item, "arguments");
         json_t *args = a && *a ? oai_parse_args(a, strlen(a)) : oai_parse_args(it->buf.s, it->buf.len);
-        if (!it->name && json_get_str(item, "name")) it->name = xstrdup(json_get_str(item, "name"));
+        if (!it->name && json_get_str(item, "name")) it->name = xstrdup(declared_name(s, json_get_str(item, "name")));
         char *id = encode_tool_id(json_get_str(item, "call_id") ? json_get_str(item, "call_id") : it->call_id,
                                   json_get_str(item, "id") ? json_get_str(item, "id") : it->item_id);
         call_finalize(s, it, args, id);
@@ -1348,7 +1406,106 @@ typedef struct {
     const ai_model_t *m;
     const ai_context_t *ctx;
     const ai_stream_opts_t *o;
+    int mode;             /* ResponsesAttemptContext.mode: 0 undecided, else WS_MODE_* */
+    bool retry_empty;     /* retryEmptyCompletion: an SSE attempt; a successful empty WS response submits once */
 } oair_attempt_t;
+
+enum { WS_MODE_SSE = 1, WS_MODE_WEBSOCKET = 2 };
+
+/* resolveResponsesWebSocketPreference: capability is rule-owned, callers must opt in, an explicit false vetoes */
+static bool ws_preferred(const ai_model_t *m, const ai_stream_opts_t *o) {
+    const json_t *cap = compat_catalog_policy(m->provider, m->api, m->id, "supportsWebsockets");
+    if (!json_is_bool(cap) || !cap->u.b) return false;
+    const json_t *pref = json_get(m->raw, "preferWebsockets");
+    bool model_true = json_is_bool(pref) && pref->u.b, model_false = json_is_bool(pref) && !pref->u.b;
+    if (o->prefer_websockets < 0 || model_false) return false;
+    return o->prefer_websockets > 0 || model_true;
+}
+
+/* isOpenAIResponsesWebSocketChainEnabled: socket-local continuation needs no stored responses, so only the explicit
+ * opt-outs apply: a gateway that ignores previous_response_id would silently drop prior turns */
+static bool ws_chain_enabled(const ai_model_t *m, const ai_stream_opts_t *o) {
+    if (o->stateful_responses) return o->stateful_responses > 0;
+    const char *env = env_get("PI_OPENAI_STATEFUL");
+    if (!str_empty(env)) return env_truthy("PI_OPENAI_STATEFUL");
+    const json_t *c = model_compat_get(m, "statefulResponses");
+    return json_is_bool(c) ? c->u.b : true;
+}
+
+/* the WebSocket half of streamOpenAIResponsesOnce. Returns the final message, or NULL to fall back to HTTP/SSE for this
+ * request (a pre-send transport failure, or an endpoint that refuses the upgrade). */
+static json_t *oair_ws_attempt(oair_attempt_t *at, const json_t *body, const http_headers_t *h, oair_stream_t *st) {
+    const ai_model_t *m = at->m;
+    const ai_stream_opts_t *o = at->o;
+    char *url = oair_url(m);
+    char *rewritten = ai_rewrite_url(url);
+    free(url);
+    const char *session = o->provider_session_state ? o->session_id : NULL;
+    if (rws_is_sse_only(rewritten, m->id, session)) {
+        free(rewritten);
+        at->mode = WS_MODE_SSE;
+        return NULL;
+    }
+    int64_t first = o->first_event_timeout_ms;
+    rws_lease_t *lease = rws_acquire(rewritten, m->id, session, h, MIN((int64_t)30000, first > 0 ? first : 30000), !str_empty(o->session_id));
+    free(rewritten);
+    int status = 0;
+    char *err = NULL;
+    bool caller_stop = o->cancel && *o->cancel;
+    if (caller_stop) {
+        rws_release(lease);
+        return oair_stream_finish(st, -2, "Request was aborted");
+    }
+    if (rws_connect(lease, &status, &err) != 0) {
+        /* a definite upgrade rejection proves the endpoint lacks WS; a network failure may be a blip */
+        bool definite = status == 404 || status == 405 || status == 426 || status == 501;
+        if (status && !definite) {
+            rws_release(lease);
+            json_t *msg = oair_stream_finish(st, -1, err);
+            json_set_int(msg, "errorStatus", status);
+            free(err);
+            return msg;
+        }
+        if (definite) rws_mark_sse_only(lease);
+        else rws_record_connect_failure(lease);
+        LOGW("responses websocket unavailable, falling back to SSE: %s", err ? err : "connect failed");
+        free(err);
+        rws_release(lease);
+        at->mode = WS_MODE_SSE;
+        return NULL;
+    }
+    at->retry_empty = false;
+    bool chain = ws_chain_enabled(m, o) && !rws_chain_disabled(lease);
+    int64_t idle = o->idle_timeout_ms == 0 || o->first_event_timeout_ms == 0 ? 24LL * 3600 * 1000 : MAX((int64_t)300000, MAX(o->idle_timeout_ms, o->first_event_timeout_ms));
+    rws_result_t r = rws_exchange(lease, body, chain, idle, o->cancel, oair_stream_on_sse, st, &status, &err);
+    json_t *msg;
+    switch (r) {
+    case RWS_DONE:
+    case RWS_STOPPED: msg = oair_stream_finish(st, 0, NULL); break;
+    case RWS_ABORTED:
+        /* the stream watchdog cancels too: a stream timeout is a post-send transport failure */
+        if (!(*(o->caller_cancel ? o->caller_cancel : o->cancel))) {
+            rws_mark_sse_only(lease);
+            rws_close_socket(lease);
+        }
+        msg = oair_stream_finish(st, -2, "Request was aborted");
+        break;
+    case RWS_CLOSED:
+        rws_mark_sse_only(lease);
+        msg = oair_stream_finish(st, -1, "OpenAI responses stream closed before a terminal response event was received");
+        break;
+    case RWS_REJECTED: /* a definite pre-generation rejection: the frame already reached the decoder, the socket is fine */
+        msg = oair_stream_finish(st, 0, NULL);
+        if (status) json_set_int(msg, "errorStatus", status);
+        break;
+    default:
+        msg = oair_stream_finish(st, -1, err ? err : "request failed");
+        break;
+    }
+    free(err);
+    rws_release(lease);
+    return msg;
+}
 
 static json_t *oair_stream_once(void *self, ai_event_cb cb, void *ud) {
     oair_attempt_t *at = self;
@@ -1360,8 +1517,23 @@ static json_t *oair_stream_once(void *self, ai_event_cb cb, void *ud) {
     http_headers_t h = {0};
     char *err = NULL;
     oair_stream_t *st = oair_stream_new(m, cb, ud);
-    json_t *msg;
-    if (!build_headers(&h, m, o, body, &err)) {
+    json_t *msg = NULL;
+    json_t *wire_names = oair_tool_names_by_wire(m, ctx->tools, &err);
+    oair_stream_set_wire_names(st, wire_names);
+    if (!at->mode) at->mode = variant_of(m) == V_OPENAI && ws_preferred(m, o) ? WS_MODE_WEBSOCKET : WS_MODE_SSE;
+    bool headers_ok = !err && build_headers(&h, m, o, body, &err);
+    if (headers_ok && at->mode == WS_MODE_WEBSOCKET) {
+        msg = oair_ws_attempt(at, body, &h, st);
+        if (!msg) {
+            /* a different transport is a different candidate: the hook replaces that body too */
+            json_free(body);
+            body = oair_build_request(m, ctx, o);
+            if (o->on_payload) o->on_payload(o->payload_ud, body);
+        }
+    }
+    if (msg) {
+        /* answered over the socket */
+    } else if (!headers_ok) {
         msg = oair_stream_finish(st, -1, err);
     } else {
         char *url = oair_url(m);
@@ -1375,6 +1547,7 @@ static json_t *oair_stream_once(void *self, ai_event_cb cb, void *ud) {
     free(err);
     http_headers_free(&h);
     json_free(body);
+    json_free(wire_names);
     return msg;
 }
 
@@ -1390,9 +1563,9 @@ json_t *provider_openai_responses_stream(const ai_model_t *m, const ai_context_t
     lo.retry_policy = v == V_CODEX ? AI_RETRY_CODEX : AI_RETRY_OPENAI;
     lo.max_retries = 5;
     if (v == V_CODEX) lo.max_retry_delay_ms = 5 * 60 * 1000; /* CODEX_RATE_LIMIT_BUDGET_MS */
-    oair_attempt_t at = {m, ctx, &lo};
+    oair_attempt_t at = {.m = m, .ctx = ctx, .o = &lo, .retry_empty = v == V_OPENAI};
     if (v == V_CODEX) return oair_stream_once(&at, cb, ud);
-    return ai_replay_safe_stream(oair_stream_once, &at, &lo, cb, ud, v == V_OPENAI, v == V_AZURE ? 1 : 0);
+    return ai_replay_safe_stream_ex(oair_stream_once, &at, &lo, cb, ud, &at.retry_empty, v == V_AZURE ? 1 : 0);
 }
 
 /* ====================================================================== */
