@@ -133,6 +133,113 @@ static bool has_closer(const char *s, size_t i, size_t n, char ch, size_t need) 
 
 static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, int depth);
 
+/* ---------- emphasis closers (marked/inline-closers.ts) ---------- */
+
+static bool em_space(char ch) { return isspace((unsigned char)ch) != 0; }
+static bool em_alnum(char ch) { return isalnum((unsigned char)ch) || (unsigned char)ch >= 0x80; }
+static bool em_punct(char ch) { return (unsigned char)ch < 0x80 && ispunct((unsigned char)ch); }
+
+static bool em_can_open(const char *s, size_t i, size_t n, size_t width, char marker, char previous) {
+    char before = i == 0 ? previous : s[i - 1];
+    if (i == 0 && before == marker) return false;
+    if (i + width >= n || em_space(s[i + width])) return false;
+    return !(marker == '_' && em_alnum(before) && em_alnum(s[i + width]));
+}
+
+/* canOpenDelimiter(rest, 0, ...): matchEmphasis reads what the lexer emitted before, never a marker */
+static bool em_can_open_here(const char *s, size_t i, size_t n, size_t width, char marker, char before) {
+    if (before == marker) return false;
+    if (i + width >= n || em_space(s[i + width])) return false;
+    return !(marker == '_' && em_alnum(before) && em_alnum(s[i + width]));
+}
+
+static bool em_can_close(const char *s, size_t i, size_t n, char marker) {
+    if (i == 0 || em_space(s[i - 1])) return false;
+    char before = s[i - 1], after = i + 1 < n ? s[i + 1] : '\n';
+    if (marker == '_' && em_alnum(before) && em_alnum(after)) return false;
+    return !em_punct(before) || em_space(after) || em_punct(after);
+}
+
+typedef struct {
+    size_t at;
+    int depth;
+} em_delim_t;
+
+/* the delimiters a closer walk visits for one marker and width in the source: `closers` sorted by depth, then offset */
+typedef struct {
+    bool built;
+    VEC(em_delim_t) delims, closers;
+} em_index_t;
+
+typedef struct {
+    size_t at;
+    int width;
+    bool strong;
+} em_open_t;
+
+static int em_delim_cmp(const void *a, const void *b) {
+    const em_delim_t *x = a, *y = b;
+    if (x->depth != y->depth) return x->depth < y->depth ? -1 : 1;
+    return x->at < y->at ? -1 : x->at > y->at;
+}
+
+static void em_index_build(em_index_t *x, const char *s, size_t n, char marker, size_t width) {
+    x->built = true;
+    int level = 0;
+    for (size_t run = 0; run < n;) {
+        if (s[run] != marker) {
+            run++;
+            continue;
+        }
+        size_t end = run + 1;
+        while (end < n && s[end] == marker) end++;
+        size_t bs = 0;
+        while (bs < run && s[run - bs - 1] == '\\') bs++;
+        for (size_t at = bs % 2 ? run + width : run; at + width <= end; at += width) {
+            em_delim_t d = {at, level};
+            vec_push(&x->delims, d);
+            if (em_can_close(s, at, n, marker)) {
+                vec_push(&x->closers, d);
+                level--;
+            } else if (em_can_open(s, at, n, width, marker, '\n')) {
+                level++;
+            }
+        }
+        run = end;
+    }
+    if (x->closers.n > 1) qsort(x->closers.v, x->closers.n, sizeof(em_delim_t), em_delim_cmp);
+}
+
+/* EmphasisDelimiters.closeFor: the closer for the opener at `opener` in a source ending at `end`, or SIZE_MAX */
+static size_t em_close_for(const em_index_t *x, const char *s, size_t n, char marker, size_t width, size_t opener, size_t end) {
+    size_t walk = opener + width;
+    if (width == 2 && walk + 1 < n && s[walk] == marker && s[walk + 1] == marker) return walk + width <= end ? walk : SIZE_MAX;
+    size_t lo = 0, hi = x->delims.n;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (x->delims.v[mid].at < walk) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo == x->delims.n) return SIZE_MAX;
+    em_delim_t key = x->delims.v[lo];
+    lo = 0, hi = x->closers.n;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (em_delim_cmp(&x->closers.v[mid], &key) < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo == x->closers.n || x->closers.v[lo].depth != key.depth) return SIZE_MAX;
+    size_t close = x->closers.v[lo].at;
+    return close + width <= end ? close : SIZE_MAX;
+}
+
+static const char *strstr_n(const char *h, size_t n, const char *needle) {
+    size_t m = strlen(needle);
+    for (size_t i = 0; i + m <= n; i++)
+        if (!memcmp(h + i, needle, m)) return h + i;
+    return NULL;
+}
+
 /* Negative-result caches keep delimiter scanning linear on adversarial input: once no
  * closer exists after position p, none exists after any later position either. */
 typedef struct {
@@ -268,6 +375,10 @@ static size_t html_tag(const char *s, size_t n, char *name, size_t cap, bool *cl
 static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, int depth) {
     istyle_t st = {0};
     scan_cache_t sc;
+    em_index_t ed[2][2] = {{{0}}};
+    em_open_t es[64];
+    size_t en = 0, nest_start = 0;
+    int nbold = st.bold ? 1 : 0, nitalic = st.italic ? 1 : 0;
     memset(&sc, 0xff, sizeof sc);
     /* no leading reset: an enclosing style (a bold table header cell) stays in effect */
     sb_append(b, c->base);
@@ -277,6 +388,16 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
     bool line_start = false; /* after a hard break: drop the next line's leading whitespace */
     while (i < n) {
         char ch = s[i];
+        if (en && i >= es[en - 1].at) { /* the emphasis closes here */
+            em_open_t top = es[--en];
+            if (top.strong) nbold--;
+            else nitalic--;
+            st.bold = nbold > 0;
+            st.italic = nitalic > 0;
+            emit_style(b, c, &st);
+            if (i == top.at) i += (size_t)top.width;
+            continue;
+        }
         if (line_start) {
             line_start = false;
             while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
@@ -355,49 +476,57 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
             continue;
         }
         if (ch == '*' || ch == '_') {
-            size_t r = 0;
-            while (i + r < n && s[i + r] == ch) r++;
-            char prev = i > 0 ? s[i - 1] : ' ';
-            char next = i + r < n ? s[i + r] : ' ';
-            bool can_open = !isspace((unsigned char)next);
-            bool can_close = !isspace((unsigned char)prev);
-            if (ch == '_' && isalnum((unsigned char)prev) && isalnum((unsigned char)next)) {
-                sb_appendn(b, s + i, r);
-                i += r;
+            /* marked/core.ts matchEmphasis: a match opens here and closes at a known offset; no match is text, and the
+             * rest of the run then follows a marker, which cannot open */
+            size_t limit = en ? es[en - 1].at : n;
+            char prev = i == nest_start ? '\n' : s[i - 1];
+            size_t open = 0, close = 0, skip = 0;
+            bool strong = false;
+            if (i + 2 < n && s[i + 1] == ch && s[i + 2] == ch && em_can_open_here(s, i, limit, 3, ch, prev)) {
+                char d[4] = {ch, ch, ch, 0};
+                const char *e = s + i + 3;
+                size_t at = SIZE_MAX;
+                while ((e = strstr_n(e, (size_t)(s + limit - e), d))) {
+                    size_t k = 0;
+                    while ((size_t)(e - s) > k && e[-(ptrdiff_t)k - 1] == '\\') k++;
+                    if (k % 2 == 0) {
+                        at = (size_t)(e - s);
+                        break;
+                    }
+                    e += 3;
+                }
+                if (at != SIZE_MAX && em_can_close(s, at, n, ch)) {
+                    open = 1;
+                    close = at + 2;
+                    skip = 1;
+                }
+            }
+            if (!open) {
+                size_t w = i + 1 < n && s[i + 1] == ch ? 2 : 1;
+                if (em_can_open_here(s, i, limit, w, ch, prev)) {
+                    if (!ed[ch == '_'][w - 1].built) em_index_build(&ed[ch == '_'][w - 1], s, n, ch, w);
+                    size_t at = em_close_for(&ed[ch == '_'][w - 1], s, n, ch, w, i, limit);
+                    if (at != SIZE_MAX) {
+                        open = 1;
+                        close = at;
+                        skip = w;
+                        strong = w == 2;
+                    }
+                }
+            }
+            if (open && en < ARRAY_LEN(es)) {
+                es[en++] = (em_open_t){close, strong ? 2 : 1, strong};
+                if (strong) nbold++;
+                else nitalic++;
+                st.bold = nbold > 0;
+                st.italic = nitalic > 0;
+                emit_style(b, c, &st);
+                i += skip;
+                nest_start = i;
                 continue;
             }
-            size_t used = 0;
-            size_t rem = r;
-            bool changed = false;
-            if (rem >= 2) {
-                if (st.bold && can_close) {
-                    st.bold = false;
-                    rem -= 2;
-                    used += 2;
-                    changed = true;
-                } else if (!st.bold && can_open && closer_cached(&sc, s, i + r, n, ch, 2)) {
-                    st.bold = true;
-                    rem -= 2;
-                    used += 2;
-                    changed = true;
-                }
-            }
-            if (rem >= 1) {
-                if (st.italic && can_close) {
-                    st.italic = false;
-                    rem--;
-                    used++;
-                    changed = true;
-                } else if (!st.italic && can_open && closer_cached(&sc, s, i + r, n, ch, 1)) {
-                    st.italic = true;
-                    rem--;
-                    used++;
-                    changed = true;
-                }
-            }
-            if (changed) emit_style(b, c, &st);
-            if (rem) sb_appendn(b, s + i + used, rem);
-            i += r;
+            sb_putc(b, ch);
+            i++;
             continue;
         }
         if (ch == '~' && i + 1 < n && s[i + 1] == '~') {
@@ -557,6 +686,11 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
         else sb_appendn(b, s + i, (size_t)k);
         i += (size_t)k;
     }
+    for (int x = 0; x < 2; x++)
+        for (int y = 0; y < 2; y++) {
+            free(ed[x][y].delims.v);
+            free(ed[x][y].closers.v);
+        }
     if (styled || st.bold || st.italic || st.strike || memmem(b->s, b->len, "\x1b[", 2)) sb_append(b, TUI_RESET);
 }
 
@@ -779,9 +913,7 @@ static bool interrupts_para(const lines_t *L, size_t i, size_t to) {
     size_t co;
     if (is_fence(s, NULL, NULL, NULL) || heading_level(s) || is_hr(s, NULL) || is_quote(s) || is_html_block(s))
         return true;
-    if (list_item(s, NULL, &k, &num, &co, NULL) && indent_of(s) <= 3 && !is_blank(s + co) &&
-        ((k != '.' && k != ')') || num == 1))
-        return true;
+    if (list_item(s, NULL, &k, &num, &co, NULL) && indent_of(s) <= 3) return true; /* marked/core.ts isBlockStart: any list marker */
     return is_table_start(L, i, to);
 }
 
@@ -789,10 +921,9 @@ static void lex_blocks(const lines_t *L, size_t from, size_t to, toks_t *out);
 
 static size_t lex_list(const lines_t *L, size_t i, size_t to) {
     char kind;
-    size_t ccol;
-    list_item(L->v[i], NULL, &kind, NULL, NULL, &ccol);
+    size_t ccol, ind0;
+    list_item(L->v[i], &ind0, &kind, NULL, NULL, &ccol);
     size_t j = i + 1;
-    bool last_para = true;
     while (j < to) {
         const char *s = L->v[j];
         if (is_blank(s)) {
@@ -805,13 +936,11 @@ static size_t lex_list(const lines_t *L, size_t i, size_t to) {
             size_t xc;
             if (indent_of(x) >= ccol) {
                 j = k;
-                last_para = false;
                 continue;
             }
             if (list_item(x, &xi, &xk, NULL, NULL, &xc) && xk == kind && xi < ccol) {
                 ccol = xc;
                 j = k + 1;
-                last_para = true;
                 continue;
             }
             break;
@@ -822,16 +951,14 @@ static size_t lex_list(const lines_t *L, size_t i, size_t to) {
             if (xk != kind) break;
             ccol = xc;
             j++;
-            last_para = true;
             continue;
         }
         if (indent_of(s) >= ccol) {
             j++;
-            last_para = !is_fence(skip_ws(s), NULL, NULL, NULL);
             continue;
         }
-        /* lazy paragraph continuation */
-        if (last_para && !interrupts_para(L, j, to)) {
+        /* marked/core.ts parseList: no lazy continuation; an indented line that starts no block stays in the item */
+        if (indent_of(s) > 0 && !(indent_of(s) <= ind0 && interrupts_para(L, j, to))) {
             j++;
             continue;
         }
@@ -862,8 +989,8 @@ static void lex_blocks(const lines_t *L, size_t from, size_t to, toks_t *out) {
         size_t flen;
         const char *info;
         int hl;
-        if (indent_of(s) >= 4 && !any) {
-            /* indented code (only where a paragraph cannot continue) */
+        if (indent_of(s) >= 4) {
+            /* indented code: the paragraph loop has already taken lines attached to its text */
             t.t = T_CODE;
             t.strip = 4;
             size_t j = i, last = i;

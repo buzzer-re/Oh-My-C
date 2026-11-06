@@ -1,0 +1,27 @@
+[49m Remaining items (3):
+ [38;2;0;180;255m- [39mfirst [in_progress] (Tasks)
+ [38;2;0;180;255m- [39msecond [pending] (Tasks)
+ Overall: 0/3 done.
+ Active phase 1/1.
+   Tasks:
+     - [ ] first task (in progress)
+     - [ ] second task
+
+ Top tasks:
+
+ [38;2;0;180;255m- [39mopen task
+ [38;2;0;180;255m- [39mdone task
+   [38;2;0;180;255m- [39mnested open
+
+ Stars: [1m[38;2;208;111;237m/[3m.c and a* and *a and ***b*[0;1m[38;2;208;111;237m and __c_ and de and a[0mb**c and [1m[38;2;208;111;237m/x/[0m.
+
+ [38;2;0;180;255m1. [39mone
+ continued lazily
+ [38;2;0;180;255m2. [39mtwo
+
+ [38;2;0;180;255m- [39mitem
+ next lazy line
+
+ [38;2;42;48;56m```[39m
+indented code after list
+ [38;2;42;48;56m```[39m
