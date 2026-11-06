@@ -250,6 +250,7 @@ for s in added:
     row = ui_row(s, r, new[s])
     if row:
         tab["settings"].append(row)
+        tab["settings"].sort(key=lambda x: by_id.get(x.get("path"), {}).get("order", 1 << 30))  # the panel lists rows in registration order
         ui_by[s] = row
 for s in removed:
     reg[:] = [x for x in reg if x["id"] != s]

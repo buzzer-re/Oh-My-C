@@ -1112,10 +1112,6 @@ static bool ask_key(tui_component_t *c, const tui_key_t *k) {
     } else {
         bool enter = is_enter(k), space = tui_key_matches(k, "space");
         if (!enter && !(q->multi && space)) return true;
-        if (enter && s->cursor >= (int)q->nopt && has_submit_tab(v)) {
-            advance(v, s->custom ? s->cursor : -1);
-            return true;
-        }
         commit_row(v, q, s, s->cursor, enter);
         return true;
     }
