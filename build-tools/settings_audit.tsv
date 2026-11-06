@@ -66,7 +66,6 @@ tui.renderSvg	inert	no SVG rendering (WP-29 remainder; not advertised)
 tui.autoGraph	inert	no table charts (WP-29 remainder)
 tui.reactions	inert	no agent reactions (WP-29 remainder; not advertised)
 tui.codexResetFireworks	inert	no Codex reset overlay
-display.shimmer	inert	fixed at the default (classic); other styles not implemented
 display.advisorCollapsedLines	inert	advisor card preview not capped
 tui.imeSafeCursor	inert	no separate IME border row
 tui.vimMode	inert	no vim mode in the editor
@@ -78,10 +77,6 @@ spelling.autocomplete	inert	no word-prediction hints
 composer.predictions	inert	no next-message prediction
 composer.predictionAlternatives	inert	omc has no composer predictions (omp v18.16.0)
 skills.manualSkills	inert	not ported yet (omp v18.17.0)
-tui.colorfulMarkdown	wired	Markdown theme roles from terminal.ansi (src/tui/markdown.c)
-tui.spinnerInterval	inert	not ported yet (omp v18.17.0)
-tui.maxFps	inert	not ported yet (omp v18.17.0)
-tui.motion	inert	not ported yet (omp v18.17.0)
 task.workerThreads	inert	omc subagents are threads already; no worker-thread placement
 providers.openaiResponsesWebsockets	inert	not ported yet (omp v18.17.0)
 magicKeywords.chillax	inert	not ported yet (omp v18.17.0)

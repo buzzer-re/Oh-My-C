@@ -6,6 +6,7 @@
  * destructor in chat.c frees it:
  *   {"result": {content, details} | absent, "partial": bool, "isError": bool, "startMs": n, "endMs": n,
  *    "group": [ {id, args, result, done, isError}, ... ]   (grouped reads only)} */
+#include "tui/motion.h"
 #include "ui/ui.h"
 #include "ui/tools/tc.h"
 #include "tui/termcaps.h"
@@ -83,7 +84,7 @@ static const char *tool_label(const char *name) {
     return t && t->label && *t->label ? t->label : NULL;
 }
 
-static int spinner_now(void) { return (int)((mono_ms() / 80) % 1000000); }
+static int spinner_now(void) { return tui_spinner_tick(); }
 
 /* ---------- live repaint ticker ---------- */
 
@@ -119,7 +120,8 @@ static void tick(void *ud) {
         any = true;
         i++;
     }
-    if (any) tui_request_render(g_ui->tui);
+    /* a tick under a static spinner paints frame 0: nothing to repaint */
+    if (any && tui_spinner_animated()) tui_request_render(g_ui->tui);
     if (!g_live.n && g_timer) {
         tui_remove_timer(g_ui->tui, g_timer);
         g_timer = 0;
@@ -131,7 +133,7 @@ static void live_add(msgview_t *v) {
     for (size_t i = 0; i < g_live.n; i++)
         if (g_live.v[i] == v) return;
     vec_push(&g_live, v);
-    if (!g_timer) g_timer = tui_add_timer(g_ui->tui, 80, true, tick, NULL);
+    if (!g_timer) g_timer = tui_add_clock_timer(g_ui->tui, NULL, tick, NULL);
 }
 
 /* ---------- events ---------- */
@@ -375,8 +377,6 @@ void render_tool(msgview_t *v, int width, strvec_t *out) {
         b.cancelled = json_get_bool(v->args, "cancelled", false);
         b.python = json_get_bool(v->args, "python", false);
         if (b.python) b.command = json_get_str(v->args, "code") ? json_get_str(v->args, "code") : b.command;
-        /* the execution frame's Loader starts at frame 0 and advances every 80 ms */
-        if (json_get(v->args, "startMs")) b.spinner = (int)((mono_ms() - json_get_int(v->args, "startMs", 0)) / 80);
         tc_render_bang(&b, width, out);
         return;
     }

@@ -8,6 +8,7 @@
 #include "tui/fuzzy.h"
 #include "tui/keys.h"
 #include "tui/markdown.h"
+#include "tui/motion.h"
 #include "tui/render.h"
 #include "tui/term.h"
 #include "tui/theme.h"
@@ -498,6 +499,23 @@ static strvec_t render_fixture(const char *name, tui_md_opts_t *o, int width) {
     free(src);
     free(path);
     return out;
+}
+
+/* spinner-clock.ts, frame-rate.ts */
+static void test_motion_knobs(void) {
+    CHECK(tui_spinner_animated());
+    CHECK(tui_spinner_tick_delay(80) >= 1 && tui_spinner_tick_delay(80) <= 80);
+    tui_set_spinner_interval(TUI_SPINNER_INTERVAL_STATIC);
+    CHECK(!tui_spinner_animated());
+    CHECK(tui_shared_spinner_frame(10) == 0 && tui_spinner_tick() == 0);
+    tui_set_spinner_interval(TUI_DEFAULT_SPINNER_INTERVAL_MS);
+    CHECK(tui_shared_spinner_frame(10) >= 0 && tui_shared_spinner_frame(10) < 10);
+    tui_set_max_fps(4);
+    CHECK(tui_min_frame_interval_ms() == 250.0);
+    tui_set_max_fps(TUI_DEFAULT_MAX_FPS);
+    CHECK(tui_motion_preset_interval(TUI_MOTION_REDUCED) == 250 && !tui_motion_preset_effects(TUI_MOTION_REDUCED));
+    CHECK(tui_motion_preset_interval(TUI_MOTION_NONE) == 0 && !tui_motion_preset_effects(TUI_MOTION_NONE));
+    CHECK(tui_motion_preset_interval(TUI_MOTION_FULL) == 80 && tui_motion_preset_effects(TUI_MOTION_FULL));
 }
 
 /* tui.colorfulMarkdown (colorful-markdown.test.ts): off keeps mdHeading/mdCode and uncolored emphasis */
@@ -1478,6 +1496,7 @@ static void test_wp6_editor(void) {
 
 int main(void) {
     test_colorful_markdown();
+    test_motion_knobs();
     test_keys();
     test_wp6_editor();
     test_app_keybindings();

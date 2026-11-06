@@ -1,5 +1,6 @@
 /* render.c - component model, differential renderer, overlays, event loop. */
 #include "tui/render.h"
+#include "tui/motion.h"
 #include "tui/termcaps.h"
 
 #include <errno.h>
@@ -136,6 +137,7 @@ typedef struct {
     bool removed;
     void (*fn)(void *);
     void *ud;
+    int (*period)(void); /* on the shared spinner clock */
 } timer_t_;
 
 typedef struct {
@@ -200,6 +202,7 @@ struct tui {
     void *sig_hook_ud;
     bool started;
     bool input_eof;
+    bool input_render_pending; /* the pending frame was requested by terminal input */
     int start_screen_row; /* 0-based screen row where content row 0 starts */
 };
 
@@ -218,7 +221,7 @@ tui_t *tui_new(tui_term_t *term) {
     t->root = tui_container_new();
     t->root->base.tui = t;
     t->hold = INT_MAX;
-    t->min_interval = 33; /* omp: MIN_RENDER_INTERVAL_MS = 1000 / 30 */
+    t->min_interval = -1; /* the tui.maxFps ceiling */
     pthread_mutex_init(&t->mu, NULL);
     t->wake[0] = t->wake[1] = -1;
     if (pipe(t->wake) == 0) {
@@ -297,7 +300,16 @@ void tui_set_min_render_interval(tui_t *t, int ms) { t->min_interval = ms < 0 ? 
 
 /* Gap between frame starts (omp #scheduleRender): the 30 fps cadence, stretched to twice the last
  * frame's cost (~50% render duty cycle, capped at 200 ms) so heavy frames cannot busy-loop. */
-static int render_gap(const tui_t *t) { return MAX(t->min_interval, MIN(200, 2 * t->last_cost)); }
+/* Animation and content frames land no closer than the tui.maxFps ceiling allows; a frame a keystroke is waiting on keeps the
+ * fixed 30 fps input cadence, so the pane being typed in echoes within a frame */
+static int frame_interval(const tui_t *t) {
+    if (t->min_interval >= 0) return t->min_interval;
+    double ms = tui_min_frame_interval_ms();
+    if (t->input_render_pending && ms > 1000.0 / 30) ms = 1000.0 / 30;
+    return (int)ms;
+}
+
+static int render_gap(const tui_t *t) { return MAX(frame_interval(t), MIN(200, 2 * t->last_cost)); }
 
 const strvec_t *tui_prev_lines(const tui_t *t) { return &t->prev; }
 int tui_render_count(const tui_t *t) { return t->render_count; }
@@ -705,6 +717,7 @@ static void do_render(tui_t *t) {
     int width = MAX(1, tm->cols), height = MAX(1, tm->rows);
     strvec_t lines = {0};
     t->last_render = mono_ms();
+    t->input_render_pending = false;
     t->hold = INT_MAX;
     tui_component_render(&t->root->base, width, &lines);
     if (t->overlays.n) composite_overlays(t, &lines, width, height);
@@ -917,6 +930,21 @@ int tui_add_timer(tui_t *t, int interval_ms, bool repeat, void (*fn)(void *ud), 
     return tm.id;
 }
 
+static int default_clock_period(void) { return tui_spinner_animated() ? tui_spinner_interval() : 1000; }
+
+int tui_add_clock_timer(tui_t *t, int (*period)(void), void (*fn)(void *ud), void *ud) {
+    timer_t_ tm;
+    memset(&tm, 0, sizeof tm);
+    tm.id = t->next_timer_id++;
+    tm.period = period ? period : default_clock_period;
+    tm.due = mono_ms() + tui_spinner_tick_delay(tm.period());
+    tm.repeat = true;
+    tm.fn = fn;
+    tm.ud = ud;
+    vec_push(&t->timers, tm);
+    return tm.id;
+}
+
 void tui_remove_timer(tui_t *t, int id) {
     for (size_t i = 0; i < t->timers.n; i++)
         if (t->timers.v[i].id == id) t->timers.v[i].removed = true;
@@ -929,7 +957,9 @@ static void run_timers(tui_t *t, int64_t now) {
         if (tm->removed || tm->due > now) continue;
         void (*fn)(void *) = tm->fn;
         void *ud = tm->ud;
-        if (tm->repeat) {
+        if (tm->period) {
+            tm->due = now + tui_spinner_tick_delay(tm->period());
+        } else if (tm->repeat) {
             tm->due += tm->interval;
             if (tm->due <= now) tm->due = now + tm->interval;
         } else {
@@ -1187,8 +1217,10 @@ bool tui_run_once(tui_t *t, int timeout_ms) {
         } else if (in_i >= 0 && (fds[in_i].revents & (POLLIN | POLLHUP | POLLERR))) {
             char buf[65536];
             ssize_t r = read(t->term->in_fd, buf, sizeof buf);
-            if (r > 0) tui_keydec_feed(&t->dec, buf, (size_t)r);
-            else if (r == 0 || (errno != EINTR && errno != EAGAIN)) {
+            if (r > 0) {
+                t->input_render_pending = true;
+                tui_keydec_feed(&t->dec, buf, (size_t)r);
+            } else if (r == 0 || (errno != EINTR && errno != EAGAIN)) {
                 t->input_eof = true;
                 tui_stop(t, 0);
             }

@@ -6,6 +6,7 @@
  * context gauge, embedded in the box composer's top border), `band` (box opened by a soft cap,
  * the band composer's top row; omp's default), `plain-full` / `plain-left` (standalone bottom
  * bar) and `plain-right` (the chip on the claude/rule composers' top rule). */
+#include "tui/motion.h"
 #include "ui/ui.h"
 
 #include "coding/agents.h"
@@ -604,9 +605,10 @@ static uint32_t brand_rgb(const segctx_t *c, bool working, bool visible) {
         uint32_t prev = g_sl.brand_working ? work : idle;
         g_sl.fade_from = brand_sample(prev, now);
         g_sl.fade_to = working ? work : idle;
-        g_sl.fade_start = now;
+        /* with decorative motion off the brand snaps to its settled color; otherwise it eases over */
+        g_sl.fade_start = tui_motion_effects_enabled() ? now : 0;
         g_sl.brand_working = working;
-        if (visible && !g_sl.fade_timer && c->u && c->u->tui) g_sl.fade_timer = tui_add_timer(c->u->tui, 40, true, fade_tick, c->u);
+        if (g_sl.fade_start && visible && !g_sl.fade_timer && c->u && c->u->tui) g_sl.fade_timer = tui_add_timer(c->u->tui, 40, true, fade_tick, c->u);
     }
     return brand_sample(working ? work : idle, now);
 }
@@ -629,7 +631,7 @@ static char *render_segment(const char *id, const segctx_t *c) {
         if (el >= 0) {
             const char *const *frames;
             size_t nf = tui_sym_spinner("activity", &frames);
-            const char *fr = nf ? frames[(mono_ms() / 80) % nf] : "";
+            const char *fr = nf ? frames[tui_shared_spinner_frame((int)nf)] : "";
             int64_t s = el / 1000;
             char t[16];
             if (s < 60) snprintf(t, sizeof t, "%llds", (long long)s);
@@ -1693,13 +1695,31 @@ typedef struct {
     tui_component_t *inner; /* the loader */
 } statusrow_t;
 
-/* shimmerText (classic mode): a cosine band sweeping at 30 cells/s over low/mid/high tiers */
+/* shimmerText: a band sweeping at 30 cells/s over low/mid/high tiers: a cosine bump (classic) or a bright head ping-ponging
+ * with a quadratic trail behind it (kitt); disabled renders every tier as the mid color */
 static char *shimmer(const char *text, const char *low, const char *mid, const char *high) {
     int total = (int)utf8_strlen(text);
     if (!total) return xstrdup("");
+    tui_shimmer_mode_t mode = tui_shimmer_mode();
+    if (mode == TUI_SHIMMER_DISABLED) return xasprintf("%s%s\x1b[39m", mid, text);
     double travel = (double)now_ms() / 1000.0 * 30.0;
-    double pos = fmod(travel, total + 20);
-    double lo = pos - 10 - 6, hi = pos - 10 + 6;
+    bool kitt = mode == TUI_SHIMMER_KITT, going_right = true;
+    double pos, lo, hi;
+    if (kitt) {
+        int range = total - 1;
+        if (range <= 0) pos = 0;
+        else {
+            double sweep = fmod(travel, 2.0 * range);
+            going_right = sweep < range;
+            pos = going_right ? sweep : 2.0 * range - sweep;
+        }
+        lo = going_right ? pos - 0.6 - 7 : pos - 0.6;
+        hi = going_right ? pos + 0.6 : pos + 0.6 + 7;
+    } else {
+        pos = fmod(travel, total + 20);
+        lo = pos - 10 - 6;
+        hi = pos - 10 + 6;
+    }
     sb_t b = SB_INIT;
     int run = -1, idx = 0;
     const char *p = text;
@@ -1708,8 +1728,19 @@ static char *shimmer(const char *text, const char *low, const char *mid, const c
         int k = utf8_decode(p, strlen(p), &cp);
         int tier = 0;
         if (idx >= lo && idx <= hi) {
-            double dist = fabs(idx + 10 - pos);
-            double in = dist >= 6 ? 0 : 0.5 * (1 + cos(M_PI * dist / 6));
+            double in;
+            if (kitt) {
+                double delta = idx - pos, behind = going_right ? -delta : delta;
+                if (fabs(delta) <= 0.6) in = 1;
+                else if (behind <= 0.6) in = 0;
+                else {
+                    double tt = (behind - 0.6) / 7;
+                    in = tt >= 1 ? 0 : (1 - tt) * (1 - tt);
+                }
+            } else {
+                double dist = fabs(idx + 10 - pos);
+                in = dist >= 6 ? 0 : 0.5 * (1 + cos(M_PI * dist / 6));
+            }
             tier = in >= 0.65 ? 2 : in >= 0.22 ? 1 : 0;
         }
         if (tier != run) {
@@ -1904,6 +1935,12 @@ void ui_chrome_setup(ui_t *u) {
     tui_editor_set_autocomplete_max_visible(ed, settings_num("autocompleteMaxVisible", 10));
 }
 
+/* #tickIntervalMs: shimmer drives a 30 Hz repaint; otherwise the glyph's period, or once a second for a static spinner */
+static int turn_period(void) {
+    if (tui_shimmer_mode() != TUI_SHIMMER_DISABLED) return 33;
+    return tui_spinner_animated() ? tui_spinner_interval() : 1000;
+}
+
 /* repaint while a turn runs so the brand spinner and timer advance */
 static void turn_tick(void *ud) {
     ui_t *u = ud;
@@ -1914,7 +1951,7 @@ void ui_chrome_turn(ui_t *u, bool active) {
     if (active) {
         if (g_sl.started) return;
         g_sl.started = mono_ms();
-        if (!g_sl.tick_timer) g_sl.tick_timer = tui_add_timer(u->tui, 33, true, turn_tick, u); /* shimmer cadence */
+        if (!g_sl.tick_timer) g_sl.tick_timer = tui_add_clock_timer(u->tui, turn_period, turn_tick, u);
     } else {
         if (!g_sl.started) return;
         g_sl.active_ms += MAX(0, mono_ms() - g_sl.started);

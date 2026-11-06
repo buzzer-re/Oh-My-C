@@ -599,6 +599,9 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     settings_init(cwd, &A->config);
     if (A->approval_mode) settings_set_runtime("tools.approvalMode", json_str(A->approval_mode));
     else if (A->auto_approve) settings_set_runtime("tools.approvalMode", json_str("yolo"));
+    if (A->has_spinner_interval) settings_set_runtime("tui.spinnerInterval", json_num(A->spinner_interval));
+    if (A->has_max_fps) settings_set_runtime("tui.maxFps", json_num(A->max_fps));
+    if (A->motion) settings_set_runtime("tui.motion", json_str(A->motion));
     if (A->has_warn_cost) settings_set_runtime("session.warnCost", json_num(A->warn_cost));
     if (A->has_max_cost) settings_set_runtime("session.maxCost", json_num(A->max_cost));
     /* omp main.ts: autoTitle = isInteractive (print, json and protocol modes never send a title request) */

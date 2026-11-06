@@ -6,6 +6,7 @@
  *
  * Connection tests and the OAuth flow run on worker threads (mcpcmd.c helpers); their results come back
  * through tui_post and are dropped when the user stepped away meanwhile (`attempt`) or the wizard closed. */
+#include "tui/motion.h"
 #include "ui/mcpint.h"
 
 #include "core/fs.h"
@@ -673,7 +674,7 @@ typedef struct {
 
 static void health_spin(void *ud) {
     wiz_t *w = ud;
-    w->spin_frame++;
+    w->spin_frame = tui_spinner_tick();
     request(w);
 }
 
@@ -686,7 +687,7 @@ static void oauth_signed_in_ui(void *p) {
         body_push(w, TUI_TC_MUTED, "Running connection health check...");
         w->health_row = (int)w->body.n;
         strvec_push(&w->body, "");
-        w->spin_timer = tui_add_timer(w->u->tui, 80, true, health_spin, w);
+        w->spin_timer = tui_add_clock_timer(w->u->tui, NULL, health_spin, w);
         request(w);
     }
     wiz_unref(w);

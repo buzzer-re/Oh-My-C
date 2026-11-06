@@ -1,3 +1,7 @@
+#include <ctype.h>
+#include <math.h>
+#include <strings.h>
+#include "tui/motion.h"
 #include "settings.h"
 
 #include "core/fs.h"
@@ -36,7 +40,7 @@ static const char *DEFAULTS_JSON =
     "}";
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
-static json_t *g_defaults, *g_global, *g_project, *g_overlay, *g_runtime, *g_effective;
+static json_t *g_defaults, *g_global, *g_project, *g_overlay, *g_env, *g_runtime, *g_effective;
 static char *g_global_path;
 static char *g_project_dir;
 static char *g_cwd;
@@ -67,6 +71,88 @@ static json_t *load_file(const char *path) {
     return j;
 }
 
+#define SPINNER_INTERVAL_MIN_MS 50
+#define MIN_MAX_FPS 1
+#define MAX_MAX_FPS 120
+
+static void set_path(json_t *root, const char *path, json_t *val);
+
+/* Number(value.trim() || NaN) restricted to integers: a JS numeric literal such as "80", "8e1" or "0x50" */
+static bool parse_whole_number(const char *s, double *out) {
+    if (!s) return false;
+    while (isspace((unsigned char)*s)) s++;
+    size_t n = strlen(s);
+    while (n && isspace((unsigned char)s[n - 1])) n--;
+    if (!n) return false;
+    char *t = xstrndup(s, n);
+    char *end = NULL;
+    double v = strtod(t, &end);
+    bool ok = end && !*end && isfinite(v) && !strchr(t, 'n') && !strchr(t, 'N');
+    free(t);
+    if (!ok || v != floor(v)) return false;
+    *out = v;
+    return true;
+}
+
+static void set_err(char **err, char *msg) {
+    if (err) *err = msg;
+    else free(msg);
+}
+
+bool settings_parse_spinner_interval(const char *s, int *out, char **err) {
+    double v;
+    if (parse_whole_number(s, &v) && (v == TUI_SPINNER_INTERVAL_STATIC || (v >= SPINNER_INTERVAL_MIN_MS && v <= 2147483647.0))) {
+        *out = (int)v;
+        return true;
+    }
+    set_err(err, xasprintf("Spinner interval must be %d (static) or a whole number of milliseconds \xe2\x89\xa5 %d, got \"%s\".",
+                           TUI_SPINNER_INTERVAL_STATIC, SPINNER_INTERVAL_MIN_MS, s ? s : ""));
+    return false;
+}
+
+bool settings_parse_max_fps(const char *s, int *out, char **err) {
+    double v;
+    if (parse_whole_number(s, &v) && v >= MIN_MAX_FPS && v <= MAX_MAX_FPS) {
+        *out = (int)v;
+        return true;
+    }
+    set_err(err, xasprintf("Max frames per second must be a whole number from %d to %d, got \"%s\".", MIN_MAX_FPS, MAX_MAX_FPS, s ? s : ""));
+    return false;
+}
+
+bool settings_parse_motion_mode(const char *s, tui_motion_mode_t *out, char **err) {
+    const char *p = s ? s : "";
+    while (isspace((unsigned char)*p)) p++;
+    size_t n = strlen(p);
+    while (n && isspace((unsigned char)p[n - 1])) n--;
+    if (n == 4 && !strncasecmp(p, "full", 4)) return *out = TUI_MOTION_FULL, true;
+    if (n == 7 && !strncasecmp(p, "reduced", 7)) return *out = TUI_MOTION_REDUCED, true;
+    if (n == 4 && !strncasecmp(p, "none", 4)) return *out = TUI_MOTION_NONE, true;
+    set_err(err, xasprintf("Motion mode must be one of full, reduced, none, got \"%s\".", s ? s : ""));
+    return false;
+}
+
+/* the settings with an `env` in their definition that omc reads through this layer: an unparseable value is ignored */
+static json_t *env_layer(void) {
+    json_t *e = NULL;
+    const char *v;
+    int n;
+    tui_motion_mode_t m;
+    if ((v = env_get("PI_SPINNER_INTERVAL")) && settings_parse_spinner_interval(v, &n, NULL)) {
+        if (!e) e = json_obj();
+        set_path(e, "tui.spinnerInterval", json_num(n));
+    }
+    if ((v = env_get("PI_MAX_FPS")) && settings_parse_max_fps(v, &n, NULL)) {
+        if (!e) e = json_obj();
+        set_path(e, "tui.maxFps", json_num(n));
+    }
+    if ((v = env_get("PI_MOTION")) && settings_parse_motion_mode(v, &m, NULL)) {
+        if (!e) e = json_obj();
+        set_path(e, "tui.motion", json_str(m == TUI_MOTION_NONE ? "none" : m == TUI_MOTION_REDUCED ? "reduced" : "full"));
+    }
+    return e;
+}
+
 static void rebuild(void) {
     json_free(g_effective);
     g_effective = json_clone(g_defaults);
@@ -78,7 +164,10 @@ static void rebuild(void) {
         if (!json_is_str(v) && !json_is_arr(v)) json_del(proles, proles->u.obj.keys[i]);
         else i++;
     }
-    json_t *layers[] = {g_global, project, g_overlay, g_runtime};
+    /* precedence: runtime override (flags, session-only writes), the definition's environment variable, overlay, project, global */
+    json_free(g_env);
+    g_env = env_layer();
+    json_t *layers[] = {g_global, project, g_overlay, g_env, g_runtime};
     for (size_t i = 0; i < ARRAY_LEN(layers); i++)
         if (layers[i]) json_merge(g_effective, layers[i]);
     json_free(project);
@@ -441,13 +530,13 @@ int settings_set_project_entry(const char *parent, const char *key, json_t *val)
     return rc;
 }
 
-/* omp Settings.getProvenance (no env layer): the highest layer holding a non-null value at `path` */
+/* omp Settings.getProvenance: the highest layer holding a non-null value at `path` */
 const char *settings_provenance(const char *path) {
     ensure();
     pthread_mutex_lock(&g_mu);
     const char *r = "default";
-    const json_t *layers[] = {g_runtime, g_overlay, g_project, g_global};
-    static const char *const names[] = {"runtime", "overlay", "project", "global"};
+    const json_t *layers[] = {g_runtime, g_env, g_overlay, g_project, g_global};
+    static const char *const names[] = {"runtime", "env", "overlay", "project", "global"};
     for (size_t i = 0; i < ARRAY_LEN(layers); i++) {
         const json_t *v = layers[i] ? json_path(layers[i], path) : NULL;
         if (v && !json_is_null(v)) {

@@ -8,6 +8,13 @@ check "cli bad mode"      'Error: Invalid --mode value: "bad". Expected one of: 
 check "cli bad thinking"  'Invalid --thinking value: "zz". Expected one of: off, minimal, low, medium, high, xhigh, max, auto.'  "$B" --thinking zz -p x
 check "cli max-time"      'Error: Invalid --max-time value: "abc". Expected a positive number of seconds or duration like "5s", "10m", "1h".'  "$B" --max-time=abc
 check "cli max-cost"      'Error: Invalid --max-cost value: "-1". Expected a positive USD amount, e.g. 0.50.'  "$B" --max-cost=-1
+check "cli spinner flag"  'Error: --spinner-interval: Spinner interval must be 0 (static) or a whole number of milliseconds ≥ 50, got "10".'  "$B" --spinner-interval 10
+check "cli fps flag"      'Error: --max-fps: Max frames per second must be a whole number from 1 to 120, got "0".'  "$B" --max-fps 0
+check "cli motion flag"   'Error: --motion: Motion mode must be one of full, reduced, none, got "fast".'  "$B" --motion fast
+check "motion env"        "reduced"              env PI_MOTION=reduced "$B" config get tui.motion
+check "spinner env"       "250"                  env PI_SPINNER_INTERVAL=250 "$B" config get tui.spinnerInterval
+check "spinner set range" "Error: Spinner interval must be 0 (static) or a whole number of milliseconds ≥ 50, got 10."  "$B" config set tui.spinnerInterval 10
+check "fps set range"     "Error: Max frames per second must be a whole number from 1 to 120, got 500."  "$B" config set tui.maxFps 500
 check "cli goal print"    "Error: --goal requires an interactive terminal (not --print or --mode)."  "$B" --goal x -p y
 check "cli restore print" "Error: --restore requires an interactive terminal (not --print or --mode)."  "$B" --restore -p
 check "cli sp + tpl"      "Error: --system-prompt and --system-prompt-template cannot be combined"  "$B" --system-prompt x --system-prompt-template y

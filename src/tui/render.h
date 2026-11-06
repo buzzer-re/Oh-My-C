@@ -137,6 +137,10 @@ void tui_stop(tui_t *t, int code);
 
 /* Timers (UI thread only). Returns id > 0. Repeating timers re-arm every interval_ms. */
 int tui_add_timer(tui_t *t, int interval_ms, bool repeat, void (*fn)(void *ud), void *ud);
+/* A repeating timer on the shared spinner clock: each tick lands on the next boundary of `period()` (NULL: the spinner period,
+ * or once a second for a static spinner's dynamic label), so N spinners cost one frame per period and a setting change
+ * applies from the next tick. */
+int tui_add_clock_timer(tui_t *t, int (*period)(void), void (*fn)(void *ud), void *ud);
 void tui_remove_timer(tui_t *t, int id);
 
 /* Start terminal (raw mode, protocols) without running the loop. tui_run calls it. */

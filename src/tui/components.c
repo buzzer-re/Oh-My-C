@@ -1,5 +1,6 @@
 /* components.c - Text, TruncatedText, Box, Spacer, Loader, SelectList */
 #include "tui/components.h"
+#include "tui/motion.h"
 
 static bool g_tight;
 void tui_set_tight(bool on) { g_tight = on; }
@@ -213,7 +214,8 @@ static void loader_render(tui_component_t *c, int width, strvec_t *out) {
     const tui_theme_t *th = tui_theme();
     if (l->leading_blank) strvec_push(out, "");
     sb_t b = SB_INIT;
-    const char *frame = th->nspinner ? th->spinner[l->frame % th->nspinner] : "*";
+    /* the glyph is the shared clock's, so every spinner on screen shows the same frame */
+    const char *frame = th->nspinner ? th->spinner[tui_shared_spinner_frame(th->nspinner)] : "*";
     tui_fg(&b, th, (tui_tc_t)l->spinner_slot, frame);
     sb_putc(&b, ' ');
     tui_fg(&b, th, (tui_tc_t)l->message_slot, l->message);
@@ -224,13 +226,12 @@ static void loader_render(tui_component_t *c, int width, strvec_t *out) {
 
 static void loader_tick(void *ud) {
     tui_loader_t *l = ud;
-    l->frame++;
     if (l->tui) tui_request_render(l->tui);
 }
 
 void tui_loader_start(tui_loader_t *l) {
     if (l->timer_id || !l->tui) return;
-    l->timer_id = tui_add_timer(l->tui, l->interval_ms, true, loader_tick, l);
+    l->timer_id = tui_add_clock_timer(l->tui, NULL, loader_tick, l);
 }
 
 void tui_loader_stop(tui_loader_t *l) {

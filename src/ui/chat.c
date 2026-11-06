@@ -6,6 +6,7 @@
  *   - the pinned error banner above the editor (ErrorBannerComponent)
  *   - the working row while the model runs (Loader + shimmer working message)
  *   - transcript replay from the session tree on resume/branch */
+#include "tui/motion.h"
 #include "ui/ui.h"
 #include "tui/termcaps.h"
 #include "ui/signals.h"
@@ -1744,13 +1745,13 @@ static void working_render(tui_component_t *c, int width, strvec_t *out) {
 
 static void working_tick(void *ud) {
     working_t *w = ud;
-    w->frame++;
+    w->frame = tui_spinner_tick();
     if (w->u && w->u->tui) tui_request_render(w->u->tui);
 }
 
 static void working_timer(working_t *w, int interval) {
     if (w->timer && w->u && w->u->tui) tui_remove_timer(w->u->tui, w->timer);
-    w->timer = interval > 0 && w->u && w->u->tui ? tui_add_timer(w->u->tui, interval, true, working_tick, w) : 0;
+    w->timer = interval > 0 && w->u && w->u->tui ? tui_add_clock_timer(w->u->tui, NULL, working_tick, w) : 0;
 }
 
 static void working_destroy(tui_component_t *c) {

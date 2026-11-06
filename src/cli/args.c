@@ -1,6 +1,8 @@
 /* args.c - launch argv parsing, a port of omp cli/args.ts parseArgs and the flag tables of cli/flag-tables.ts,
  * plus resolveCliArgv (cli-commands.ts). Only the flags omc implements are in the tables; the rest of omp's
  * launch surface (extensions, profiles, foreign imports, …) is reported as an unknown flag. */
+#include "config/settings.h"
+#include "tui/motion.h"
 #include "cli/args.h"
 #include "cli/cmd.h"
 #include "cli/cli_int.h"
@@ -13,7 +15,7 @@
 
 static const char *const STRING_FLAGS[] = {
     "--cwd", "--config", "--add-dir", "--mode", "--fork", "--provider", "--model", "--smol", "--slow", "--goal",
-    "--plan", "--plan-yolo-into", "--prewalk-into", "--max-time", "--warn-cost", "--max-cost", "--api-key", "--system-prompt",
+    "--plan", "--plan-yolo-into", "--prewalk-into", "--spinner-interval", "--max-fps", "--motion", "--max-time", "--warn-cost", "--max-cost", "--api-key", "--system-prompt",
     "--system-prompt-template", "--append-system-prompt", "--session-dir", "--models", "--tools", "--thinking",
     "--export", "--skills", "--approval-mode", "--service-tier",
     "--max-turns", /* omc: stop after n turns */
@@ -187,7 +189,32 @@ static bool set_string(launch_args_t *r, const char *flag, const char *value) {
     } else if (!strcmp(flag, "--plan")) r->plan = value;
     else if (!strcmp(flag, "--plan-yolo-into")) r->plan_yolo_into = value;
     else if (!strcmp(flag, "--prewalk-into")) r->prewalk_into = value;
-    else if (!strcmp(flag, "--max-time")) {
+    else if (!strcmp(flag, "--spinner-interval")) {
+        char *e = NULL;
+        if (!settings_parse_spinner_interval(value, &r->spinner_interval, &e)) {
+            usage_errorf("--spinner-interval: %s", e);
+            free(e);
+            return false;
+        }
+        r->has_spinner_interval = true;
+    } else if (!strcmp(flag, "--max-fps")) {
+        char *e = NULL;
+        if (!settings_parse_max_fps(value, &r->max_fps, &e)) {
+            usage_errorf("--max-fps: %s", e);
+            free(e);
+            return false;
+        }
+        r->has_max_fps = true;
+    } else if (!strcmp(flag, "--motion")) {
+        char *e = NULL;
+        tui_motion_mode_t m;
+        if (!settings_parse_motion_mode(value, &m, &e)) {
+            usage_errorf("--motion: %s", e);
+            free(e);
+            return false;
+        }
+        r->motion = m == TUI_MOTION_NONE ? "none" : m == TUI_MOTION_REDUCED ? "reduced" : "full";
+    } else if (!strcmp(flag, "--max-time")) {
         if (!parse_max_time(value, &r->max_time)) {
             char *q = js_quote(value);
             usage_errorf("Invalid --max-time value: %s. Expected a positive number of seconds or duration like \"5s\", "
