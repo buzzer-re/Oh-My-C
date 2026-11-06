@@ -400,6 +400,11 @@ int ai_stream_post(const char *url, http_headers_t *headers, const char *body, c
 char *ai_rewrite_url(const char *url);
 /* Extract a human-readable error from a provider error body. Owned. */
 char *ai_extract_error(int status, const char *body);
+/* inference-headers.ts applyInferenceHeaders: gateway attribution and the conversation id under the protocol's and
+ * host's own header (protocol anthropic or openai) */
+void ai_apply_inference_headers(http_headers_t *h, const ai_model_t *m, const char *session_id, bool anthropic);
+/* stripRawHttpRequestDiagnostics: the error without its trailing local dump lines (hosts relaying it must not leak paths). Owned. */
+char *ai_strip_request_dump_lines(const char *msg);
 /* Copy model headers + option headers into h. */
 void ai_apply_headers(http_headers_t *h, const ai_model_t *m, const ai_stream_opts_t *o);
 

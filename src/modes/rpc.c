@@ -1220,6 +1220,7 @@ static void notice_rpc(void *ud, const char *level, const char *text) {
     json_set_str(j, "level", xdev ? "info" : level);
     json_set_str(j, "message", text);
     if (xdev) json_set_str(j, "source", "xdev");
+    else if (str_starts(text, "Prewalk: ")) json_set_str(j, "source", "prewalk");
     emit(r, j);
     json_free(j);
 }
@@ -1318,10 +1319,13 @@ again:;
         json_set(res, "error", e);
     } else if (!strcmp(status, "error")) {
         json_t *e = json_obj();
-        json_set_str(e, "message", json_get_str(last, "errorMessage") ? json_get_str(last, "errorMessage") : "error");
+        char *pm = ai_strip_request_dump_lines(json_get_str(last, "errorMessage"));
+        json_set_str(e, "message", pm ? pm : "error");
+        free(pm);
         json_set_str(e, "provider", json_get_str(last, "provider"));
         json_set_str(e, "model", json_get_str(last, "model"));
         json_set_bool(e, "retryable", (aie_classify_message(last) & AIE_TRANSIENT) != 0); /* AIError.Flag.Transient */
+        if (json_get(last, "errorStatus")) json_set_int(e, "httpStatus", json_get_int(last, "errorStatus", 0));
         json_set(res, "error", e);
     }
     /* goal mode: keep going with hidden continuation turns while the goal is active and making progress */

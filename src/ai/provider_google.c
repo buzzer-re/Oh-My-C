@@ -9,6 +9,7 @@
 #include "ai/google_auth.h"
 #include "coding/turn_recovery.h"
 
+#include <ctype.h>
 #include <math.h>
 
 #define DEFAULT_GEMINI_BASE "https://generativelanguage.googleapis.com/v1beta"
@@ -836,12 +837,24 @@ json_t *google_sse_finish(google_sse_t *s, int rc, const char *err) {
  * entry point
  * ====================================================================== */
 
-/* Google error bodies: keep `error.message` (plus RPC status/details on usage-limit statuses). Owned. */
-static char *google_error_text(int status, const char *err) {
-    char prefix[16];
-    snprintf(prefix, sizeof(prefix), "%d ", status);
-    if (err && str_starts(err, prefix)) err += strlen(prefix); /* ai_extract_error prefixes the status */
-    return xasprintf("Google API error (%d): %s", status, err && *err ? err : "Unknown error");
+/* google.ts: `error.message` when the body is an error object, else the body. The dump line of a rejected request stays. Owned. */
+static char *google_error_text(int status, const char *err, const char *body) {
+    char *b = NULL;
+    json_t *j = body ? json_parse_str(body) : NULL;
+    const char *m = json_get_str(json_get_obj(j, "error"), "message");
+    if (m && *m) b = xstrdup(m);
+    else if (body) {
+        const char *s = body;
+        while (isspace((unsigned char)*s)) s++;
+        b = xstrdup(s);
+        size_t n = strlen(b);
+        while (n && isspace((unsigned char)b[n - 1])) b[--n] = 0;
+    }
+    json_free(j);
+    const char *dump = err ? strstr(err, "\nraw-http-request") : NULL;
+    char *r = xasprintf("Google API error (%d): %s%s", status, b && *b ? b : "Unknown error", dump ? dump : "");
+    free(b);
+    return r;
 }
 
 json_t *provider_google_stream(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, ai_event_cb cb,
@@ -935,17 +948,21 @@ json_t *provider_google_stream(const ai_model_t *m, const ai_context_t *ctx, con
     for (int attempt = 0;; attempt++) {
         int status = 0;
         char *err = NULL;
-        int rc = ai_sse_post(url, &h, body, o, google_sse_event, &s, &status, &err);
+        ai_post_ex_t ex = {0};
+        int rc = ai_sse_post_ex(url, &h, body, o, google_sse_event, &s, &status, &err, &ex);
         if (rc == -1 && status == 404 && fallback_url && !s.b.started) {
             free(err);
             err = NULL;
-            rc = ai_sse_post(fallback_url, &h, body, o, google_sse_event, &s, &status, &err);
+            free(ex.err_body);
+            ex.err_body = NULL;
+            rc = ai_sse_post_ex(fallback_url, &h, body, o, google_sse_event, &s, &status, &err, &ex);
         }
         if (rc == -1 && status >= 400) {
-            char *e2 = google_error_text(status, err);
+            char *e2 = google_error_text(status, err, ex.err_body);
             free(err);
             err = e2;
         }
+        free(ex.err_body);
         if (google_sse_empty_stop(&s, rc)) {
             if (attempt >= MAX_EMPTY_STREAM_RETRIES) {
                 free(s.error);

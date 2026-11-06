@@ -2,8 +2,19 @@
 #include "ai.h"
 #include "provider_transport.h"
 
+#include <ctype.h>
+#include <dirent.h>
+#include <errno.h>
 #include <math.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
+
+#include "core/fs.h"
+
+static _Thread_local const ai_model_t *g_req_model; /* the model of this thread's ai_stream, for the dump */
+static _Thread_local int g_req_status;              /* the status of the attempt that failed last, 0 after a success */
+
 
 /* ---------- effort ---------- */
 
@@ -417,7 +428,14 @@ json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_str
         }
         return m;
     }
+    const ai_model_t *outer = g_req_model;
+    g_req_model = &t.model;
+    g_req_status = 0;
     json_t *r = ai_stream_guarded(fn, &t.model, ctx, &t.opts, cb, ud);
+    g_req_model = outer;
+    if (g_req_status && str_eq(json_get_str(r, "stopReason"), "error") && !json_get(r, "errorStatus"))
+        json_set_int(r, "errorStatus", g_req_status);
+    g_req_status = 0;
     ai_transport_finish(&t, r);
     ai_transport_free(&t);
     return r;
@@ -502,6 +520,239 @@ char *ai_extract_error(int status, const char *body) {
     }
     char *r = status ? xasprintf("%d %s", status, msg) : xstrdup(msg);
     free(msg);
+    return r;
+}
+
+void ai_apply_inference_headers(http_headers_t *h, const ai_model_t *m, const char *session_id, bool anthropic) {
+    const char *backend = json_get_str(m->raw, "providerType") ? json_get_str(m->raw, "providerType") : m->provider;
+    if (str_eq(backend, "vercel-ai-gateway")) {
+        if (!http_headers_get(h, "http-referer")) http_headers_set(h, "http-referer", "https://github.com/can1357/oh-my-pi");
+        if (!http_headers_get(h, "x-title")) http_headers_set(h, "x-title", OMC_NAME);
+    }
+    bool opencode = str_eq(backend, "opencode-go") || str_eq(backend, "opencode-zen");
+    if (!str_empty(session_id)) {
+        if (anthropic) http_headers_set(h, "X-Claude-Code-Session-Id", session_id);
+        else if (str_eq(backend, "openai")) {
+            http_headers_set(h, "session_id", session_id);
+            http_headers_set(h, "x-client-request-id", session_id);
+        }
+    }
+    if (opencode) {
+        if (!http_headers_get(h, "User-Agent")) http_headers_set(h, "User-Agent", OMC_NAME "/" OMC_VERSION);
+        if (!str_empty(session_id)) http_headers_set(h, "x-opencode-session", session_id);
+    }
+}
+
+/* ---------- provider error text and the rejected-request dump (http-inspector.ts, openai-http.ts, classes.ts) ---------- */
+
+static char *trimmed_copy(const char *s) {
+    if (!s) return xstrdup("");
+    while (*s && isspace((unsigned char)*s)) s++;
+    size_t n = strlen(s);
+    while (n && isspace((unsigned char)s[n - 1])) n--;
+    return xstrndup(s, n);
+}
+
+/* getStringProperty: a string that is not blank */
+static const char *nonblank_prop(const json_t *o, const char *k) {
+    const char *v = json_get_str(o, k);
+    if (!v) return NULL;
+    for (const char *p = v; *p; p++)
+        if (!isspace((unsigned char)*p)) return v;
+    return NULL;
+}
+
+/* createOpenAIHttpError's message merged with the captured body: `<status> <detail>` carrying the core message once,
+ * plus the ` (type=… param=… code=…)` suffix of the payload (numbered by what is present, as formatCapturedHttpErrorParts) */
+static char *openai_error_text(int status, const char *raw) {
+    char *body = trimmed_copy(raw);
+    if (!*body) {
+        free(body);
+        return xasprintf("%d status code (no body)", status);
+    }
+    json_t *j = json_parse_str(body);
+    const json_t *obj = json_is_obj(j) ? j : NULL;
+    const json_t *eo = json_get_obj(obj, "error");
+    const char *es = json_get_str(obj, "error");
+    const char *emsg = eo ? json_get_str(eo, "message") : NULL;
+    /* parseEnvelope */
+    const char *detail = body;
+    if (eo) detail = emsg && *emsg ? emsg : body;
+    else if (es && *es) detail = es;
+    else if (json_get_str(obj, "message") && *json_get_str(obj, "message")) detail = json_get_str(obj, "message");
+    /* formatCapturedHttpErrorParts */
+    const char *core = body;
+    sb_t suffix = SB_INIT;
+    if (obj) {
+        const json_t *ep = eo ? eo : obj;
+        core = nonblank_prop(ep, "message");
+        if (!core) core = nonblank_prop(obj, "message");
+        if (!core && !eo) core = nonblank_prop(obj, "error");
+        if (!core) core = body;
+        static const char *const keys[] = {"type", "param", "code"};
+        int n = 0;
+        for (size_t i = 0; i < ARRAY_LEN(keys); i++) {
+            const char *v = nonblank_prop(ep, keys[i]);
+            if (!v) v = nonblank_prop(obj, keys[i]);
+            if (v) {
+                sb_appendf(&suffix, "%s%s=%s", n ? " " : " (", keys[n], v);
+                n++;
+            }
+        }
+        if (n) sb_putc(&suffix, ')');
+    }
+    /* mergeCapturedBody */
+    char *msg = xasprintf("%d %s", status, detail);
+    char *r;
+    if (strstr(msg, core)) r = suffix.len && !strstr(msg, suffix.s) ? xasprintf("%s%s", msg, suffix.s) : xstrdup(msg);
+    else r = xasprintf("%s\n%s%s", msg, core, suffix.len ? suffix.s : "");
+    free(msg);
+    sb_free(&suffix);
+    /* readOpenRouterRawMetadata: some providers behind OpenRouter explain themselves here */
+    const char *rawm = nonblank_prop(json_get_obj(eo, "metadata"), "raw");
+    if (rawm) {
+        char *t = trimmed_copy(rawm);
+        char *r2 = xasprintf("%s\n%s", r, t);
+        free(t);
+        free(r);
+        r = r2;
+    }
+    json_free(j);
+    free(body);
+    return r;
+}
+
+/* AnthropicApiError.fromResponse: the body as it came, cut at 64 KiB */
+static char *anthropic_error_text(int status, const char *raw) {
+    char *body = trimmed_copy(raw);
+    char *r;
+    if (!*body) r = xasprintf("%d status code (no body)", status);
+    else if (strlen(body) > 64 * 1024) r = xasprintf("%d %.*s\n[Response body truncated after 64 KiB]", status, 64 * 1024, body);
+    else r = xasprintf("%d %s", status, body);
+    free(body);
+    return r;
+}
+
+static char *http_error_text(int policy, int status, const char *body) {
+    if (policy == AI_RETRY_ANTHROPIC) return anthropic_error_text(status, body);
+    if (policy == AI_RETRY_OPENAI) return openai_error_text(status, body);
+    return ai_extract_error(status, body);
+}
+
+/* pruneHttpRequestDumps: `*.json` older than 7 days, then the oldest until the directory fits 64 MiB */
+static void prune_request_dumps(const char *dir, const char *keep) {
+    DIR *d = opendir(dir);
+    if (!d) return;
+    typedef struct {
+        char *path;
+        int64_t size;
+        time_t mtime;
+    } dump_t;
+    VEC(dump_t) v = {0};
+    int64_t total = 0;
+    time_t now = time(NULL);
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (!str_ends(e->d_name, ".json") || str_eq(e->d_name, keep)) continue;
+        char *p = path_join(dir, e->d_name);
+        struct stat st;
+        if (stat(p, &st) != 0 || !S_ISREG(st.st_mode)) {
+            free(p);
+            continue;
+        }
+        if (now - st.st_mtime > 7 * 24 * 3600) {
+            unlink(p);
+            free(p);
+            continue;
+        }
+        dump_t x = {p, st.st_size, st.st_mtime};
+        vec_push(&v, x);
+        total += st.st_size;
+    }
+    closedir(d);
+    while (total > 64LL * 1024 * 1024 && v.n) {
+        size_t old = 0;
+        for (size_t i = 1; i < v.n; i++)
+            if (v.v[i].mtime < v.v[old].mtime) old = i;
+        unlink(v.v[old].path);
+        total -= v.v[old].size;
+        v.v[old].size = 0;
+        v.v[old].mtime = now + 1; /* gone: never the oldest again */
+    }
+    for (size_t i = 0; i < v.n; i++) free(v.v[i].path);
+    free(v.v);
+}
+
+/* appendRawHttpRequestDumpFor400: a 400 or 413 keeps its request under <root>/logs/http-400-requests, credentials
+ * redacted, and the error names the file. Takes msg, returns the text to use. */
+static char *with_request_dump(char *msg, int status, const char *url, const http_headers_t *headers, const char *body) {
+    if ((status != 400 && status != 413) || !msg || !g_req_model) return msg;
+    json_t *o = json_obj();
+    json_set_str(o, "provider", g_req_model->provider);
+    json_set_str(o, "api", g_req_model->api);
+    json_set_str(o, "model", g_req_model->id);
+    json_set_str(o, "method", "POST");
+    const char *q = strchr(url, '?');
+    if (q) json_set(o, "url", json_str_own(xasprintf("%.*s[redacted-query]", (int)(q - url), url)));
+    else json_set_str(o, "url", url);
+    json_t *hs = json_obj();
+    static const char *const sensitive[] = {"key", "token", "secret", "auth", "credential", "cookie"};
+    for (size_t i = 0; headers && i < headers->n; i++) {
+        bool redact = false;
+        for (size_t k = 0; k < ARRAY_LEN(sensitive) && !redact; k++) redact = str_istr(headers->v[i].name, sensitive[k]) != NULL;
+        json_set_str(hs, headers->v[i].name, redact ? "[redacted]" : headers->v[i].value);
+    }
+    json_set(o, "headers", hs);
+    json_t *b = body ? json_parse_str(body) : NULL;
+    if (b) json_set(o, "body", b);
+    else if (body) json_set_str(o, "body", body);
+    json_t *er = json_obj();
+    json_set_int(er, "status", status);
+    json_set_str(er, "message", msg);
+    json_set(o, "errorResponse", er);
+    char *text = json_dump(o, 2);
+    json_free(o);
+    uint64_t h = 1469598103934665603ULL; /* FNV-1a: only names the file */
+    for (const char *p = text; *p; p++) h = (h ^ (unsigned char)*p) * 1099511628211ULL;
+    char id[16];
+    size_t n = 0;
+    do {
+        id[n++] = "0123456789abcdefghijklmnopqrstuvwxyz"[h % 36];
+        h /= 36;
+    } while (h && n < sizeof id - 1);
+    id[n] = 0;
+    char *root = path_join(omc_config_dir(), "logs/http-400-requests");
+    char *name = xasprintf("%lld-%s.json", (long long)now_ms(), id);
+    char *file = path_join(root, name);
+    char *content = xasprintf("%s\n", text);
+    fs_mkdir_p(root, 0700);
+    char *r;
+    if (fs_write_atomic(file, content, strlen(content), 0600) == 0) {
+        prune_request_dumps(root, name);
+        r = xasprintf("%s\nraw-http-request=%s", msg, file);
+    } else {
+        r = xasprintf("%s\nraw-http-request-save-failed=%s", msg, strerror(errno));
+    }
+    free(content);
+    free(file);
+    free(name);
+    free(root);
+    free(text);
+    free(msg);
+    return r;
+}
+
+char *ai_strip_request_dump_lines(const char *msg) {
+    if (!msg) return NULL;
+    char *r = xstrdup(msg);
+    for (;;) {
+        char *nl = strrchr(r, '\n');
+        char *last = nl ? nl + 1 : r;
+        if (!str_starts(last, "raw-http-request=") && !str_starts(last, "raw-http-request-save-failed=")) break;
+        *last = 0;
+        if (!nl) break;
+        *nl = 0;
+    }
     return r;
 }
 
@@ -762,8 +1013,12 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
                 continue;
             }
             if (d == -2) {
-                *err = rc != 0 ? network_failure_message(resp.error, url, policy) : ai_extract_error(c.status, sb_cstr(&c.errbody));
-                if (rc == 0) *err = with_retry_after(*err, &c.hdrs);
+                *err = rc != 0 ? network_failure_message(resp.error, url, policy) : http_error_text(policy, c.status, sb_cstr(&c.errbody));
+                if (rc == 0) {
+                    g_req_status = c.status;
+                    *err = with_retry_after(*err, &c.hdrs);
+                    *err = with_request_dump(*err, c.status, url, headers, body);
+                }
                 free(ex->err_body);
                 ex->err_body = rc == 0 ? xstrdup(sb_cstr(&c.errbody)) : NULL;
                 ctx_reset(&c, &resp);
@@ -773,7 +1028,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
         /* failure: decide retry (fetchWithRetry / the anthropic.ts provider loop) */
         const char *ebody = sb_cstr(&c.errbody);
         bool http_fail = rc == 0;
-        char *msg = !http_fail ? network_failure_message(resp.error, url, policy) : ai_extract_error(c.status, ebody);
+        char *msg = !http_fail ? network_failure_message(resp.error, url, policy) : http_error_text(policy, c.status, ebody);
         bool retry;
         int64_t delay;
         if (policy == AI_RETRY_ANTHROPIC) {
@@ -820,6 +1075,10 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
             retry = false;
         }
         if (!retry || attempt >= max_retries) {
+            if (http_fail) {
+                g_req_status = c.status;
+                msg = with_request_dump(msg, c.status, url, headers, body);
+            }
             *err = msg;
             return -1;
         }

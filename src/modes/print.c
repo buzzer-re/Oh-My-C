@@ -60,12 +60,18 @@ static char *single_line(const char *s) {
     return sb_detach(&b);
 }
 
+static char *g_budget_error; /* the retry saga ended on the budget: the final error line */
+
 static void notice_stderr(void *ud, const char *level, const char *text) {
     UNUSED(ud);
     if (!strcmp(level, "todo-reminder")) return;
     if (!strcmp(level, "retry-failed")) {
+        /* the final turn's message reads "Retry budget exhausted …" (turn-recovery.ts): the error line at the end prints it */
         const char *f1 = strchr(text, '\x1f'), *f2 = f1 ? strchr(f1 + 1, '\x1f') : NULL;
-        if (f1 && f2) fprintf(stderr, "[error] Retry failed after %d attempts: %s\n", atoi(text), f2 + 1);
+        if (f1 && f2) {
+            free(g_budget_error);
+            g_budget_error = xstrndup(f1 + 1, (size_t)(f2 - f1 - 1));
+        }
         return;
     }
     if (!strcmp(level, "retry_fallback_applied")) {
@@ -190,8 +196,9 @@ int run_print_mode(app_t *a, const print_opts_t *o) {
         const json_t *last = last_assistant(a->agent->messages);
         const char *stop = json_get_str(last, "stopReason");
         if (str_eq(stop, "error") || str_eq(stop, "aborted")) {
+            /* a terminal failure prints only the error line (print-mode.ts) */
             if (!o->json)
-                fprintf(stderr, "omc: %s\n", json_get_str(last, "errorMessage") ? json_get_str(last, "errorMessage") : stop);
+                fprintf(stderr, "%s\n", g_budget_error ? g_budget_error : json_get_str(last, "errorMessage") ? json_get_str(last, "errorMessage") : stop);
             rc = 1;
             break;
         }
