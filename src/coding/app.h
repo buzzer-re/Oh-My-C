@@ -441,6 +441,7 @@ char *app_complete_first(app_t *a, const mr_pool_t *models, const char *system, 
 void app_notice(app_t *a, const char *level, const char *fmt, ...) PRINTF_LIKE(3, 4);
 void app_reload_context(app_t *a);
 void app_fill_request_opts(app_t *a, ai_stream_opts_t *o);
+const json_t *app_session_metadata(app_t *a, const char *provider);
 
 /* record paid cache-warm requests (cachewarm.c) as model_usage entries; call from the session's own thread */
 void app_flush_warm_usage(app_t *a);

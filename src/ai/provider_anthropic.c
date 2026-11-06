@@ -6,6 +6,9 @@
 #include "ai/provider_anthropic.h"
 #include "ai/anthropic_slow.h"
 
+#include "ai/anthropic_threads.h"
+#include "coding/turn_recovery.h"
+
 #include <ctype.h>
 #include <math.h>
 #include <openssl/evp.h>
@@ -409,6 +412,18 @@ static char *metadata_session_id(const char *user_id) {
     if (!user_id) return NULL;
     if (is_cloaking_user_id(user_id)) return xstrdup(strstr(user_id, "_session_") + 9);
     return json_user_id_session(user_id);
+}
+
+char *anthropic_session_user_id(const char *session_id, const char *account_uuid) {
+    json_t *o = json_obj();
+    json_set_str(o, "session_id", session_id ? session_id : "");
+    if (!str_empty(account_uuid)) {
+        json_set_str(o, "account_uuid", account_uuid);
+        json_set(o, "device_id", json_str_own(derive_device_id(account_uuid)));
+    }
+    char *s = json_dump(o, 0);
+    json_free(o);
+    return s;
 }
 
 static const char *metadata_str(const json_t *md, const char *k) {
@@ -1501,7 +1516,8 @@ static bool wants_fast_mode(const ai_model_t *m, const ai_stream_opts_t *o) {
     return wants_fast_mode_raw(m, o) && !(o->fast_mode_disabled && o->fast_mode_disabled(o->fast_mode_ud, m));
 }
 
-json_t *anthropic_build_request(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, bool oauth) {
+static json_t *build_request(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, bool oauth,
+                             bool *thinking_on_out) {
     ai_stream_opts_t defo;
     if (!o) {
         ai_stream_opts_init(&defo);
@@ -1573,6 +1589,7 @@ json_t *anthropic_build_request(const ai_model_t *m, const ai_context_t *ctx, co
     }
     const char *ttype = thinking ? json_get_str(thinking, "type") : NULL;
     bool thinking_on = str_eq(ttype, "adaptive") || str_eq(ttype, "enabled");
+    if (thinking_on_out) *thinking_on_out = thinking_on;
 
     bool compaction_ok = anthropic_compaction_supported(m);
     const json_t *comp_req = compaction_ok ? o->anthropic_compaction : NULL;
@@ -1684,6 +1701,31 @@ json_t *anthropic_build_request(const ai_model_t *m, const ai_context_t *ctx, co
     json_free(cc);
     free(base);
     return p;
+}
+
+json_t *anthropic_build_request(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, bool oauth) {
+    return build_request(m, ctx, o, oauth, NULL);
+}
+
+/* replayResponse: the response as the next request's history serializes it, so a message thread can tell whether that
+ * request extends this one. Owned, NULL when it serializes to nothing. */
+static json_t *replay_response(const ai_model_t *m, const json_t *message, bool oauth, bool thinking_on) {
+    json_t *one = json_arr();
+    json_push(one, json_clone(message));
+    json_t *transformed = ai_transform_messages(one, m);
+    json_free(one);
+    json_t *params = convert_messages(m, transformed, oauth, thinking_on, anthropic_compaction_supported(m), false);
+    json_free(transformed);
+    strip_private_keys(params);
+    json_t *out = NULL, *it;
+    json_arr_foreach(params, i, it) {
+        if (str_eq(json_get_str(it, "role"), "assistant")) {
+            out = json_clone(it);
+            break;
+        }
+    }
+    json_free(params);
+    return out;
 }
 
 /* ======================================================================
@@ -2247,6 +2289,9 @@ json_t *provider_anthropic_stream(const ai_model_t *m, const ai_context_t *ctx, 
     return provider_anthropic_stream_ex(m, ctx, o, -1, cb, ud);
 }
 
+/* AIError.classify for dropAfterUnexplained400; the provider-only test binaries link without the classifier */
+extern uint32_t aie_classify_text(const char *err, int status, const char *api, const char *provider) __attribute__((weak));
+
 /* ---------- per-request failure hooks: fast-mode fallback and subscription slow mode ---------- */
 
 typedef struct {
@@ -2345,6 +2390,7 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
     }
     bool oauth = is_oauth >= 0 ? is_oauth != 0 : anthropic_model_is_oauth(m, key);
     json_t *result = NULL;
+    bool thinking_on = false;
     ai_stream_opts_t lo = *o; /* lo.fast_mode_disabled is pinned once this request drops fast mode */
     /* the provider loop owns transport retries (PROVIDER_MAX_RETRIES, calculateAnthropicRetryDelayMs) */
     lo.retry_policy = AI_RETRY_ANTHROPIC;
@@ -2354,10 +2400,16 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
     anth_hook_t hk = {.m = m, .o = &lo, .wait_since = -1};
     if (o->slow_hooks && cflag(m, "firstPartyProvider") && oauth && is_official_url(base_url))
         hk.lane = anthropic_slow_lane_key(key);
+    /* message threads: only against a session with provider state. Per-call context messages are rebuilt next request,
+     * so a thread could never continue past them; those callers leave provider_session_state off. */
+    anth_thread_turn_t *thread = lo.provider_session_state && !str_empty(lo.session_id) && anth_threads_wanted(m, &lo, base_url)
+                                     ? anth_thread_turn_new(base_url, m->id, lo.session_id, oauth)
+                                     : NULL;
     free(base_url);
     bool version_retried = false;
-    for (int guard = 0; guard < 4; guard++) {
-        json_t *params = anthropic_build_request(m, ctx, &lo, oauth);
+    /* bounded: each retry below is taken at most once, a refused continue at most twice */
+    for (int guard = 0; guard < 8; guard++) {
+        json_t *params = build_request(m, ctx, &lo, oauth, &thinking_on);
         if (o->on_payload) o->on_payload(o->payload_ud, params);
         http_headers_t h = {0};
         anthropic_build_headers(m, &lo, ctx, params, key, oauth, &h);
@@ -2366,7 +2418,16 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
         hk.sent_slow = hk.lane && anthropic_slow_is_active(o->slow_hooks, hk.lane);
         if (hk.sent_slow) http_headers_set(&h, "anthropic-usage-limit", "slow");
         char *url = anthropic_request_url(m, oauth);
-        char *body = anthropic_serialize_body(params);
+        /* `params` stays the full body; only the wire sees the thread shape, with its beta */
+        json_t *wire = thread ? anth_thread_plan(thread, params, http_headers_get(&h, "anthropic-beta"), now_ms(), NULL) : NULL;
+        if (wire) {
+            const char *sent = http_headers_get(&h, "anthropic-beta");
+            char *merged = !str_empty(sent) ? xasprintf("%s,%s", sent, ANTHROPIC_THREADS_BETA) : xstrdup(ANTHROPIC_THREADS_BETA);
+            http_headers_set(&h, "anthropic-beta", merged);
+            free(merged);
+        }
+        char *body = anthropic_serialize_body(wire ? wire : params);
+        json_free(wire);
         json_free(params);
         anthropic_sse_t s;
         anthropic_sse_init(&s, m, oauth, cb, ud);
@@ -2374,18 +2435,35 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
         char *err = NULL;
         ai_post_ex_t ex = {.on_headers = anth_on_headers, .on_failure = anth_on_failure, .hook_ud = &hk};
         int rc = ai_sse_post_ex(url, &h, body, &lo, anthropic_sse_event, &s, &status, &err, &ex);
-        free(ex.err_body);
         free(url);
         free(body);
         http_headers_free(&h);
-        bool retry = oauth && !version_retried && rc == -1 && !s.saw_start && adopt_required_version(err);
-        if (retry) version_retried = true;
+        /* a thread refusal goes first; an undocumented 400 falls back to an unthreaded resend after the other rungs */
+        bool retry = false;
+        if (thread && rc == -1 && !s.saw_start) {
+            anth_thread_recovery_t rec = anth_thread_recover(thread, status, ex.err_body);
+            if (rec != ANTH_THREAD_NO_RECOVERY) {
+                LOGW("%s", rec == ANTH_THREAD_REPLAY ? "anthropic: thread continue refused, replaying the full conversation"
+                                                     : "anthropic: thread refused, resending without thread");
+                retry = true;
+            }
+        }
+        if (!retry && oauth && !version_retried && rc == -1 && !s.saw_start && adopt_required_version(err)) {
+            retry = true;
+            version_retried = true;
+        }
         if (!retry && rc == -1 && !s.saw_start && hk.fast_unsupported && lo.fast_mode_disabled != fast_dropped) {
             /* fast mode unsupported: drop `speed` for this endpoint+model and resend once */
             if (o->on_fast_mode_unsupported) o->on_fast_mode_unsupported(o->fast_mode_ud, m);
             lo.fast_mode_disabled = fast_dropped;
             retry = true;
         }
+        if (!retry && thread && rc == -1 && !s.saw_start &&
+            anth_thread_drop_after_400(thread, status, aie_classify_text && (aie_classify_text(err, status, m->api, m->provider) & AIE_CONTEXT_OVERFLOW))) {
+            LOGW("anthropic: 400 on a thread request, resending without thread");
+            retry = true;
+        }
+        free(ex.err_body);
         if (retry) {
             free(err);
             anthropic_sse_free(&s);
@@ -2396,6 +2474,21 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
         anthropic_sse_free(&s);
         break;
     }
+    if (thread && result) {
+        /* the server keeps a finished turn from the requested model; a paused or truncated turn, or one a fallback model
+         * wrote, starts a new thread next. A failed turn settles nothing. */
+        const char *stop = json_get_str(result, "stopReason");
+        if (!str_eq(stop, "error") && !str_eq(stop, "aborted")) {
+            bool continuable = (str_eq(stop, "stop") || str_eq(stop, "toolUse")) &&
+                               !str_eq(json_get_str(json_get_obj(result, "stopDetails"), "type"), "pause_turn") &&
+                               str_eq(json_get_str(result, "model"), m->id);
+            const char *id = json_get_str(result, "responseId");
+            json_t *replay = continuable && id ? replay_response(m, result, oauth, thinking_on) : NULL;
+            anth_thread_settle(thread, id, replay, now_ms());
+            json_free(replay);
+        }
+    }
+    anth_thread_turn_free(thread);
     free(hk.lane);
     free(env_key);
     return result;

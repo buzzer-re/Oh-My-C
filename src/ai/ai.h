@@ -232,6 +232,9 @@ typedef struct {
     int64_t idle_timeout_ms;
     /* providers.maxInFlightRequests: per-provider concurrent request caps (borrowed object, may be NULL) */
     const json_t *max_in_flight;
+    /* omp's providerSessionState is present: server-side conversation state (Anthropic message threads) may be used */
+    bool provider_session_state;
+    int stateful_responses; /* the statefulResponses option: 0 unset, 1 true, -1 false */
 } ai_stream_opts_t;
 
 void ai_stream_opts_init(ai_stream_opts_t *o);

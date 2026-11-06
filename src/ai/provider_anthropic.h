@@ -80,4 +80,7 @@ const char *anthropic_map_stop_reason(const char *reason);
 /* Normalize a tool parameter schema into an Anthropic input_schema (owned). */
 json_t *anthropic_normalize_tool_schema(const json_t *schema);
 
+/* buildSessionMetadata's user_id: {session_id[, account_uuid, device_id]} as JSON text. Owned. */
+char *anthropic_session_user_id(const char *session_id, const char *account_uuid);
+
 #endif

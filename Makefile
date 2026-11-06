@@ -135,7 +135,7 @@ IMG_OBJ  := $(O)/ai/ai_images.o $(CODEC_OBJ)
 T_test_text          := $(CORE_OBJ) $(patsubst src/%.c,$(O)/%.o,$(wildcard src/text/*.c))
 T_test_tui           := $(CORE_OBJ) $(patsubst src/%.c,$(O)/%.o,$(wildcard src/tui/*.c)) $(O)/text/walker.o $(O)/text/glob.o $(CODEC_OBJ)
 GOOGLE_OBJ := $(O)/ai/provider_google.o $(O)/ai/google_schema.o $(O)/ai/google_auth.o
-T_test_providers_ag  := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/retry.o $(O)/ai/stream_guard.o $(O)/ai/service_tier.o $(O)/ai/provider_transport.o $(O)/ai/provider_anthropic.o $(O)/ai/anthropic_slow.o $(GOOGLE_OBJ) $(IMG_OBJ)
+T_test_providers_ag  := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/retry.o $(O)/ai/stream_guard.o $(O)/ai/service_tier.o $(O)/ai/provider_transport.o $(O)/ai/provider_anthropic.o $(O)/ai/anthropic_slow.o $(O)/ai/anthropic_threads.o $(GOOGLE_OBJ) $(IMG_OBJ)
 T_test_providers_google := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/retry.o $(O)/ai/stream_guard.o $(O)/ai/service_tier.o $(O)/ai/provider_transport.o $(GOOGLE_OBJ) $(O)/ai/google_cca.o \
                         $(O)/ai/provider_gemini_cli.o $(O)/ai/think_heal.o $(IMG_OBJ)
 T_test_providers_oai := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/retry.o $(O)/ai/stream_guard.o $(O)/ai/service_tier.o $(O)/ai/provider_transport.o $(O)/ai/provider_openai_completions.o \

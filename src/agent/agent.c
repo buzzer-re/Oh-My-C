@@ -888,6 +888,7 @@ static json_t *stream_assistant(agent_t *a, int *ttsr_abort, json_t **cursor_res
     ai_stream_opts_t opts = a->base_opts;
     opts.api_key = a->api_key;
     opts.session_id = a->session_id;
+    opts.provider_session_state = true;
     opts.reasoning = model_clamp_effort(a->model, a->thinking);
     opts.cancel = &a->cancel;
     if (a->hooks.prepare_request) a->hooks.prepare_request(a->hooks.ud, a, &opts);

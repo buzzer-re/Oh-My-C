@@ -1232,6 +1232,7 @@ static json_t *anthropic_compat(const char *provider, const char *url, const mod
     json_set_bool(c, "supportsServerCompaction", false);
     json_set_bool(c, "firstPartyProvider", false);
     json_set_bool(c, "honorsClaudeCodeBetaKillSwitch", false);
+    json_set_bool(c, "supportsMessageThreads", false);
     json_set_bool(c, "supportsOutputEffort", true);
     json_set_bool(c, "disableStrictTools", azure_anthropic(u) || bedrock);
     if (bedrock) json_set_bool(c, "bedrockMessagesApi", true);
