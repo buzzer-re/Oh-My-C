@@ -2,6 +2,7 @@
 #include "../../include/omc.h"
 
 #include "ai/ai.h"
+#include "coding/skilldesc.h"
 #include "coding/app.h"
 #include "config/auth.h"
 #include "config/settings.h"
@@ -80,6 +81,7 @@ omc_session_t *omc_session_new(const omc_options_t *o, omc_event_fn on_event, vo
                      .no_mcp = opt.no_mcp};
     char *err = NULL;
     app_t *app = app_create(&ao, &err);
+    if (app) skilldesc_start_compression(app->skilldesc);
     strvec_free(&tools);
     free(cwd);
     if (!app) {

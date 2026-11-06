@@ -913,6 +913,12 @@ int http_request(const http_req_t *req, http_resp_t *resp) {
     char *method_own = NULL;
     for (int redirects = 0;; redirects++) {
         bool ka = false;
+        if (req->cancel && *req->cancel) { /* cancelled before dispatch: nothing goes on the wire */
+            resp->error = xstrdup("request cancelled");
+            free(url);
+            free(method_own);
+            return -1;
+        }
         rr_t rr = do_once(req, url, method, body, body_len, resp, &ka);
         if (rr == RR_RETRYABLE) {
             http_headers_free(&resp->headers);

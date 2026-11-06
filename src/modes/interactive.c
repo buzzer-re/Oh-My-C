@@ -33,6 +33,7 @@
 #include <sys/wait.h>
 #include "ui/modelbrowser.h"
 #include "ui/tools/tc.h"
+#include "coding/skilldesc.h"
 #include "coding/title.h"
 #include "coding/agents.h"
 #include "coding/modelpreset.h"
@@ -2847,6 +2848,8 @@ static bool focused_view_command(const char *name, const char *args) {
     return str_eq(name, "effort") || str_eq(name, "export");
 }
 
+static void skilldesc_start_cb(void *ud) { skilldesc_start_compression(ud); }
+
 /* #submitToFocusedSession: the editor is a plain chat box for the focused subagent */
 static void focused_submit(ui_t *u, tui_editor_t *ed, const char *text) {
     char *t = str_trim(text);
@@ -3535,6 +3538,8 @@ int run_interactive_mode(app_t *a, const char *initial) {
         if (u.welcome) ui_welcome_play_intro(u.welcome, u.tui);
         if (init_job) tui_post(u.tui, initial_prompt_cb, init_job);
     }
+    /* startDeferredStartupWork: resolving the compression model composes the catalog, so it runs off the first frame */
+    tui_add_timer(u.tui, 1, false, skilldesc_start_cb, a->skilldesc);
     int code = tui_run(u.tui);
     /* a tool thread waiting on the ask dialog would block the worker join forever once the loop is gone
      * (terminal closed mid-question): answer it as cancelled */

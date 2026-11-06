@@ -2,6 +2,7 @@
 #include "skilldesc.h"
 
 #include "coding/app.h"
+#include "coding/costgate.h"
 #include "config/settings.h"
 #include "core/fs.h"
 #include "core/json.h"
@@ -14,7 +15,9 @@
 #define MAX_PREVIEW_CHARS 100
 #define MIN_PREVIEW_CUT 40
 #define MAX_COMPRESSED_CHARS 160
-#define MAX_COMPRESSED_WORDS 12
+/* revision of skilldesc_valid's rules, part of every unusable-answer marker: answers an older, stricter revision
+ * rejected are asked for again */
+#define VALIDATION_REVISION 2
 #define MAX_PARALLEL 4
 
 #define PROMPT_PATH "coding-agent/prompts/skills/compress-description.md"
@@ -145,18 +148,11 @@ char *skilldesc_preview(const char *description) {
     return r;
 }
 
+/* the prompt's 12-word target stays advisory: small models overshoot it by a few words while staying well inside the
+ * character budget, which is what bounds the prompt */
 char *skilldesc_valid(const char *text) {
     char *line = str_trim(text ? text : "");
-    int words = 0;
-    bool in = false;
-    for (const char *p = line; *p; p++) {
-        if (isspace((unsigned char)*p)) in = false;
-        else if (!in) {
-            in = true;
-            words++;
-        }
-    }
-    if (!*line || strpbrk(line, "\r\n") || utf8_strlen(line) > MAX_COMPRESSED_CHARS || words > MAX_COMPRESSED_WORDS) {
+    if (!*line || strpbrk(line, "\r\n") || utf8_strlen(line) > MAX_COMPRESSED_CHARS) {
         free(line);
         return NULL;
     }
@@ -184,6 +180,14 @@ typedef struct {
     char *key, *name, *description;
 } job_t;
 
+/* refuseAttempt: a refusal inside a provider's retry loop aborts the request, so no retry layer treats it as a
+ * transient network error. The payload hook runs once per provider attempt, right before it is dispatched. */
+static void refuse_attempt(void *ud, const json_t *payload) {
+    UNUSED(payload);
+    volatile sig_atomic_t *refused = ud;
+    if (!costgate_admits()) *refused = 1;
+}
+
 static void *compress_thread(void *p) {
     job_t *j = p;
     pthread_mutex_lock(&g_mu);
@@ -192,9 +196,11 @@ static void *compress_thread(void *p) {
     pthread_mutex_unlock(&g_mu);
     const ai_model_t *m = pick_model();
     if (m) {
-        char *unusable = xasprintf("%s:%s/%s", j->key, m->provider, m->id);
+        char *unusable = xasprintf("%s:v%d:%s/%s", j->key, VALIDATION_REVISION, m->provider, m->id);
         char *seen = store_get(unusable);
-        if (!seen) {
+        if (!seen && !costgate_admits()) {
+            LOGW("skill description compression failed for %s: the session reached its cost cap", j->name);
+        } else if (!seen) {
             json_t *c = json_obj();
             json_set_str(c, "name", j->name);
             json_set_str(c, "description", j->description);
@@ -215,9 +221,16 @@ static void *compress_thread(void *p) {
             o.max_tokens = 1024;
             o.disable_reasoning = true;
             o.temperature = 0;
+            volatile sig_atomic_t refused = 0;
+            o.cancel = &refused;
+            o.on_payload = refuse_attempt;
+            o.payload_ud = (void *)&refused;
             json_t *r = key ? ai_complete(m, &ctx, &o) : NULL;
+            costgate_record(json_get_num(json_get(json_get(r, "usage"), "cost"), "total", 0));
             const char *stop = json_get_str(r, "stopReason");
-            if (str_eq(stop, "stop")) {
+            if (refused) {
+                LOGW("skill description compression failed for %s: the session reached its cost cap", j->name);
+            } else if (str_eq(stop, "stop")) {
                 char *txt = ai_message_text(r);
                 char *v = skilldesc_valid(txt);
                 if (v) store_put(j->key, v);
@@ -294,13 +307,27 @@ static void schedule(const char *key, const char *name, const char *description)
 struct skilldesc {
     pthread_mutex_t mu;
     json_t *snapshot; /* key -> description shown in this session */
+    json_t *deferred; /* misses rendered before skilldesc_start_compression: key -> {name, description}; NULL once it ran */
 };
 
 skilldesc_t *skilldesc_new(void) {
     skilldesc_t *c = xcalloc(1, sizeof(*c));
     pthread_mutex_init(&c->mu, NULL);
     c->snapshot = json_obj();
+    c->deferred = json_obj();
     return c;
+}
+
+void skilldesc_start_compression(skilldesc_t *c) {
+    if (!c) return;
+    pthread_mutex_lock(&c->mu);
+    json_t *deferred = c->deferred;
+    c->deferred = NULL;
+    pthread_mutex_unlock(&c->mu);
+    const char *k;
+    json_t *v;
+    json_obj_foreach(deferred, i, k, v) schedule(k, json_get_str(v, "name"), json_get_str(v, "description"));
+    json_free(deferred);
 }
 
 void skilldesc_free(skilldesc_t *c) {
@@ -316,6 +343,7 @@ void skilldesc_free(skilldesc_t *c) {
         nanosleep(&ts, NULL);
     }
     json_free(c->snapshot);
+    json_free(c->deferred);
     pthread_mutex_destroy(&c->mu);
     free(c);
 }
@@ -329,14 +357,23 @@ char *skilldesc_render(void *catalog, const char *name, const char *description)
     char *r = snap ? xstrdup(snap) : NULL;
     pthread_mutex_unlock(&c->mu);
     if (!r) {
+        bool miss = false;
         r = settings_bool("skills.compressDescriptions", true) ? store_get(key) : NULL;
         if (!r) {
             r = skilldesc_preview(description);
-            if (settings_bool("skills.compressDescriptions", true)) schedule(key, name, description);
+            miss = settings_bool("skills.compressDescriptions", true);
         }
         pthread_mutex_lock(&c->mu);
         json_set_str(c->snapshot, key, r);
+        if (miss && c->deferred) {
+            json_t *d = json_obj();
+            json_set_str(d, "name", name);
+            json_set_str(d, "description", description);
+            json_set(c->deferred, key, d);
+            miss = false;
+        }
         pthread_mutex_unlock(&c->mu);
+        if (miss) schedule(key, name, description);
     }
     free(key);
     return r;

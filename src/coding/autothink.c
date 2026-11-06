@@ -1,6 +1,7 @@
 /* autothink.c - `auto` thinking: provisional level, per-turn difficulty classification, tiny-message cleanup.
  * Ports omp auto-thinking/classifier.ts, tiny/message-preproc.ts, pi-tui thinking.ts (clampAutoThinkingEffort,
  * resolveProvisionalAutoLevel) and session/model-controls.ts applyAutoThinkingLevel. */
+#include "coding/costgate.h"
 #include "coding/autothink.h"
 
 #include "coding/app.h"
@@ -351,7 +352,7 @@ static bool classify(app_t *a, const char *request, ai_effort_t *out) {
         json_t *ans = evalhost_judge(a, state, qs, &w.flag, usage, &err);
         w.done = 1;
         if (have_th) pthread_join(th, NULL);
-        a->total_cost += usage[2];
+        costgate_add(a, usage[2]);
         const char *choice = json_get_str(json_get(ans, "level"), "choice");
         ok = false;
         for (size_t i = 0; choice && i < nl; i++)

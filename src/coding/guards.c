@@ -1,4 +1,5 @@
 /* guards.c - tool-call loop guard, todo reminders, empty/unexpected stop recovery (see guards.h). */
+#include "coding/costgate.h"
 #include "coding/guards.h"
 
 #include "coding/app.h"
@@ -881,7 +882,7 @@ static int classify_unexpected(app_t *a, const char *message) {
     json_t *ans = evalhost_judge(a, state, qs, &w.flag, usage, &err);
     w.done = 1;
     if (have) pthread_join(th, NULL);
-    a->total_cost += usage[2];
+    costgate_add(a, usage[2]);
     int r = -1;
     json_t *st = json_get(ans, "stopped");
     if (st && !w.flag) r = json_get_num(st, "bool", 0) >= 0.5 ? 1 : 0;

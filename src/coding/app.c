@@ -1,4 +1,5 @@
 #include "app.h"
+#include "coding/costgate.h"
 #include "coding/turn_recovery.h"
 #include "coding/dcr.h"
 #include "coding/autothink.h"
@@ -386,7 +387,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
         }
         if (str_eq(role, "assistant")) {
             json_t *u = json_get(ev->message, "usage");
-            a->total_cost += json_get_num(json_get(u, "cost"), "total", 0);
+            costgate_add(a, json_get_num(json_get(u, "cost"), "total", 0));
             __atomic_add_fetch(&a->output_tokens, json_get_int(u, "output", 0), __ATOMIC_SEQ_CST);
             int64_t ctx = json_get_int(u, "input", 0) + json_get_int(u, "cacheRead", 0) + json_get_int(u, "cacheWrite", 0) +
                           json_get_int(u, "output", 0);
@@ -445,7 +446,7 @@ void app_flush_warm_usage(app_t *a) {
         }
     }
     json_arr_foreach(u, i, e) {
-        a->total_cost += json_get_num(json_get(json_get(e, "usage"), "cost"), "total", 0);
+        costgate_add(a, json_get_num(json_get(json_get(e, "usage"), "cost"), "total", 0));
         if (!a->session) continue;
         json_t *entry = json_obj();
         json_set_str(entry, "type", "model_usage");
@@ -1757,6 +1758,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (!o->subagent) app_bind_artifacts(a, NULL);
     app_bind_local(a);
     a->skilldesc = skilldesc_new();
+    if (o->subagent) skilldesc_start_compression(a->skilldesc); /* the tree's cost gate already exists */
     a->memory = memory_rt_new();
     if (!o->subagent) a->autolearn = autolearn_new(a);
     if (a->auto_thinking) { /* keep auto pending until the first turn while exposing a valid wire effort */
@@ -3360,6 +3362,7 @@ int app_new_session(app_t *a) {
     free(label);
     a->title_done = false;
     a->total_cost = 0;
+    costgate_reseed(a);
     a->last_context_tokens = 0;
     json_free(a->env->todo.phases);
     a->env->todo.phases = json_arr();
@@ -3379,6 +3382,7 @@ int app_switch_session(app_t *a, const char *path, char **err) {
     a->agent->session_id = xstrdup(session_id(s));
     load_session_into_agent(a);
     a->title_done = s->title != NULL;
+    costgate_reseed(a);
     app_goal_restore(a);
     return 0;
 }
@@ -3603,6 +3607,7 @@ app_t *app_subagent_new_at(app_t *parent, const char *agent_name, const char *mo
     strvec_free(&tools);
     json_free(defs);
     if (!child) return NULL;
+    costgate_attach_subagent(child);
     /* subagents share the parent's artifact id space and directory (omp adoptArtifactManager) */
     artifacts_unref(child->env->artifacts);
     child->env->artifacts = artifacts_ref(parent->env->artifacts);
@@ -3644,7 +3649,7 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
         if (refused && child->prompt_refusal) json_set_str(*details, "error", child->prompt_refusal);
         else if (last && json_get_str(last, "errorMessage")) json_set_str(*details, "error", json_get_str(last, "errorMessage"));
     }
-    parent->total_cost += child->total_cost;
+    costgate_merge_child(parent, child->total_cost);
     app_free(child);
     return text;
 }

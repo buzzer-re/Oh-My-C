@@ -463,6 +463,7 @@ check "rpc model switch" "ok prewalk session entries"  env OMC_CODING_AGENT_DIR=
 # custom commands (WP-9): file commands, prompt templates, /skill:, MCP prompts over RPC, ACP and print mode
 check "rpc commands"   "ok empty MCP prompt consumed"  python3 -I "$ROOT/tests/e2e/commands_rpc.py" "$B" "$T/req.jsonl" "$ROOT/tests/e2e/mock_mcp.py"
 # MCP and SSH management (WP-18): /mcp and /ssh over RPC (text mode) and in the TUI (wizard, test, cancel)
+check "skill cost cap" "skill cost ok"  python3 -I "$ROOT/tests/e2e/skill_cost_rpc.py" "$B" "$T/req.jsonl" "$T/skill_cost" "$T/agent/models.yml"
 check "rpc mcp/ssh"    "ok mcp rpc done"  python3 -I "$ROOT/tests/e2e/mcp_rpc.py" "$B" "$ROOT/tests/e2e/mock_mcp.py"
 if python3 -c 'import pty' 2>/dev/null; then
     check "tui mcp/ssh"  "mcp tui ok"  python3 -I "$ROOT/tests/e2e/mcp_tui.py" "$B" "$ROOT/tests/e2e/mock_mcp.py" "$T/req.jsonl"

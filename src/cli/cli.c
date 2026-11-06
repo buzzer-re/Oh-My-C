@@ -8,6 +8,7 @@
 #include "coding/app.h"
 #include "coding/modelctl.h"
 #include "coding/costgate.h"
+#include "coding/skilldesc.h"
 #include "coding/goal.h"
 #include "coding/migrate.h"
 #include "config/auth.h"
@@ -839,6 +840,8 @@ static int launch_run(launch_args_t *A, bool force_acp) {
         goto out2;
     }
     costgate_attach(app);
+    /* held until the cost gate exists; the interactive TUI starts it after its first frame instead */
+    if (!interactive) skilldesc_start_compression(app->skilldesc);
     if (A->plan_yolo_into && !A->plan_yolo) {
         fprintf(stderr, "omc: --plan-yolo-into requires --plan-yolo\n");
         rc = 1;
