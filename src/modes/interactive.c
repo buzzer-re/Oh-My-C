@@ -3410,6 +3410,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     u.hide_tool_activity = settings_bool("display.hideToolActivity", false);
     tokrate_init(&u.tokrate);
     tui_set_tight(settings_bool("tui.tight", false));
+    tui_md_set_colorful(settings_bool("tui.colorfulMarkdown", true));
     tui_hyperlinks_apply_setting(settings_str("tui.hyperlinks", "auto")); /* applyHyperlinkSetting */
     tui_set_terminal_background_light(str_eq(tui_detect_theme_name(), "light"));
     kbcfg_init_global(); /* KeybindingsManager.create(): agent-dir keybindings.yml (+ legacy .json migration) */

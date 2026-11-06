@@ -65,7 +65,11 @@ typedef struct {
     char *spinner[TUI_MAX_SPINNER_FRAMES];
     int nspinner;
     bool spinner_custom; /* symbols.spinnerFrames override: wins over the preset's frames (omp getSpinnerFrames) */
+    char ansi_fg[16][24]; /* foreground SGR per terminal.ansi slot; omitted slots use the terminal's palette */
 } tui_theme_t;
+
+/* Theme.ansiFg palette slots (ANSI_COLOR_INDEX) */
+enum { TUI_ANSI_GREEN = 2, TUI_ANSI_YELLOW = 3, TUI_ANSI_BLUE = 4, TUI_ANSI_MAGENTA = 5 };
 
 const char *tui_theme_slot_name(tui_tc_t slot);
 int tui_theme_slot_from_name(const char *name); /* -1 if unknown */
@@ -92,6 +96,7 @@ char *tui_fgs(const tui_theme_t *th, tui_tc_t slot, const char *text); /* owned 
 char *tui_bgs(const tui_theme_t *th, tui_tc_t slot, const char *text); /* owned */
 const char *tui_fg_seq(const tui_theme_t *th, tui_tc_t slot);
 const char *tui_bg_seq(const tui_theme_t *th, tui_tc_t slot);
+const char *tui_ansi_fg_seq(const tui_theme_t *th, int ansi_slot); /* Theme.ansiFg's opening SGR, slot 0..15 */
 /* Simple attribute wrappers (owned results). */
 char *tui_bold(const char *text);
 char *tui_italic(const char *text);

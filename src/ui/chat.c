@@ -513,6 +513,11 @@ static void md_rows(strvec_t *o, const char *text, int width, bool thinking) {
         mo.italic = true;
     } else {
         mo.code_indent = 0;
+        /* #getProseTextStyle: the optional assistantMessageText token paints prose, not themed spans */
+        if (strcmp(tui_fg_seq(NULL, TUI_TC_ASSISTANT_MESSAGE_TEXT), "\x1b[39m")) {
+            mo.text_slot = TUI_TC_ASSISTANT_MESSAGE_TEXT;
+            mo.prose_fg = true;
+        }
     }
     tui_md_render(text, width, &mo, o);
 }

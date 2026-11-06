@@ -19,12 +19,16 @@ typedef struct {
     int code_indent;          /* code block body indent (default 2); 0 = literal rows outside the margins */
     int text_slot;            /* default prose color slot, -1 = terminal default */
     const char *text_sgr;     /* default prose SGR (overrides text_slot), e.g. a contrast fg on a bg */
+    bool prose_fg;            /* DefaultTextStyle.proseFg: themed spans (headings, links, colorful roles) drop the color */
     bool italic;              /* default prose italic (thinking blocks) */
     int padding_x;            /* left margin applied by tui_md_render (width is then the full width) */
     int bg_slot;              /* background slot for every line, padded to width; -1 = none (default) */
 } tui_md_opts_t;
 
 void tui_md_opts_default(tui_md_opts_t *o);
+/* tui.colorfulMarkdown (setMarkdownColorful); on by default */
+void tui_md_set_colorful(bool on);
+bool tui_md_colorful(void);
 /* whether OSC 8 links are on by default for this terminal (upstream terminal-capabilities policy) */
 bool tui_md_hyperlinks_supported(void);
 /* Render markdown for `width` columns (upstream Markdown component: marked-style block tokens with the

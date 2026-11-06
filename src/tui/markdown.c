@@ -17,7 +17,29 @@ typedef struct {
     const tui_md_opts_t *o;
     char base[512];  /* wrapper SGR (heading, link, quote) re-applied after every reset */
     char deflt[128]; /* default prose style of the component (color, italic), applied to text runs */
+    char deflt_exempt[128]; /* deflt inside a themed role under a `proseFg` default: the color is dropped */
+    bool run_forced;        /* text runs have their own color (a non-proseFg default): role colors stay outside it */
 } md_ctx_t;
+
+/* tui.colorfulMarkdown (setMarkdownColorful): headings, emphasis, inline code and table headers take their hues
+ * from the theme's terminal.ansi palette */
+static bool g_colorful = true;
+void tui_md_set_colorful(bool on) { g_colorful = on; }
+bool tui_md_colorful(void) { return g_colorful; }
+
+/* theme.code */
+static const char *code_seq(const md_ctx_t *c) {
+    return g_colorful ? tui_ansi_fg_seq(c->th, TUI_ANSI_GREEN) : tui_fg_seq(c->th, TUI_TC_MD_CODE);
+}
+
+/* theme.heading(text, depth) (COLORFUL_HEADING_COLORS: H1 magenta, H2 yellow, deeper reuse blue) */
+static const char *heading_seq(const md_ctx_t *c, int depth) {
+    if (!g_colorful) return tui_fg_seq(c->th, TUI_TC_MD_HEADING);
+    return tui_ansi_fg_seq(c->th, depth <= 1 ? TUI_ANSI_MAGENTA : depth == 2 ? TUI_ANSI_YELLOW : TUI_ANSI_BLUE);
+}
+
+/* #proseFgExemptContext: a semantically themed span owns its color over a `proseFg` default */
+static void ctx_exempt(md_ctx_t *c) { memcpy(c->deflt, c->deflt_exempt, sizeof c->deflt); }
 
 /* dst->base = src->base + a + b (+ c); keeps src->base unchanged if it would not fit */
 static void ctx_extend(md_ctx_t *dst, const md_ctx_t *src, const char *a, const char *b, const char *c) {
@@ -55,7 +77,10 @@ typedef struct {
 static void emit_style(sb_t *b, const md_ctx_t *c, const istyle_t *s) {
     sb_append(b, TUI_RESET);
     sb_append(b, c->base);
-    sb_append(b, c->deflt);
+    /* colorfulMarkdownRoles: strong and emphasis own the span's color (a forced run color still wins) */
+    bool role = g_colorful && (s->bold || s->italic);
+    if (role && !c->run_forced) sb_append(b, tui_ansi_fg_seq(c->th, TUI_ANSI_MAGENTA));
+    sb_append(b, role ? c->deflt_exempt : c->deflt);
     if (s->bold) sb_append(b, "\x1b[1m");
     if (s->italic) sb_append(b, "\x1b[3m");
     if (s->strike) sb_append(b, "\x1b[9m");
@@ -133,21 +158,28 @@ static void put_url(sb_t *b, const char *u, size_t n) {
  * (or the address of a mailto: href). OSC 8 wraps both when hyperlinks are on. */
 static void emit_link(const char *text, size_t tn, const char *url, size_t un, const md_ctx_t *c, sb_t *b,
                       istyle_t *st, int depth) {
+    /* the enclosing emphasis stays outside the link: theme.strong(theme.link(theme.underline(text))) */
+    char outer[64];
+    snprintf(outer, sizeof outer, "%s%s%s%s",
+             g_colorful && (st->bold || st->italic) && !c->run_forced ? tui_ansi_fg_seq(c->th, TUI_ANSI_MAGENTA) : "",
+             st->bold ? "\x1b[1m" : "", st->italic ? "\x1b[3m" : "", st->strike ? "\x1b[9m" : "");
     md_ctx_t lc;
-    ctx_extend(&lc, c, tui_fg_seq(c->th, TUI_TC_MD_LINK), "\x1b[4m", "");
+    ctx_extend(&lc, c, outer, tui_fg_seq(c->th, TUI_TC_MD_LINK), "\x1b[4m");
+    ctx_exempt(&lc);
     bool hl = c->o->hyperlinks && un > 0;
     if (hl) {
         sb_append(b, "\x1b]8;;");
         put_url(b, url, un);
         sb_append(b, "\a");
     }
-    istyle_t ls = *st;
+    istyle_t ls = {0};
     emit_style(b, &lc, &ls);
     if (depth < 3) render_inline(text, tn, &lc, b, depth + 1);
     else sb_appendn(b, text, tn);
     if (hl) sb_append(b, TUI_LINK_CLOSE);
     sb_append(b, TUI_RESET);
     sb_append(b, c->base);
+    sb_append(b, outer);
     bool same = un == 0 || (tn == un && !memcmp(text, url, un));
     if (un > 7 && !strncmp(url, "mailto:", 7) && tn == un - 7 && !memcmp(text, url + 7, tn)) same = true;
     if (!same) {
@@ -316,7 +348,7 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
             if (st.bold) sb_append(b, "\x1b[1m");
             if (st.italic) sb_append(b, "\x1b[3m");
             if (st.strike) sb_append(b, "\x1b[9m");
-            sb_append(b, tui_fg_seq(c->th, TUI_TC_MD_CODE));
+            sb_append(b, code_seq(c));
             for (size_t q = 0; q < cl; q++) sb_putc(b, cs[q] == '\n' ? ' ' : cs[q]);
             emit_style(b, c, &st);
             i = close + r;
@@ -477,7 +509,7 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
                     if (e) {
                         sb_append(b, TUI_RESET);
                         sb_append(b, c->base);
-                        sb_append(b, tui_fg_seq(c->th, TUI_TC_MD_CODE));
+                        sb_append(b, code_seq(c));
                         for (const char *q = s + i + tl; q < e;) {
                             if (*q == '&') {
                                 size_t k = html_entity(q, (size_t)(e - q), b);
@@ -981,7 +1013,8 @@ static char *heading_str(const lines_t *L, const tok_t *t, const md_ctx_t *c) {
         while (n > 0 && s[n - 1] == ' ') n--;
     }
     md_ctx_t hc;
-    ctx_extend(&hc, c, tui_fg_seq(c->th, TUI_TC_MD_HEADING), "\x1b[1m", t->level == 1 ? "\x1b[4m" : "");
+    ctx_extend(&hc, c, heading_seq(c, t->level), "\x1b[1m", t->level == 1 ? "\x1b[4m" : "");
+    ctx_exempt(&hc);
     sb_t b = SB_INIT;
     if (t->level >= 3) {
         sb_append(&b, TUI_RESET);
@@ -1068,6 +1101,8 @@ static void render_quote(const lines_t *L, const tok_t *t, int width, const md_c
     md_ctx_t qc;
     ctx_extend(&qc, c, tui_fg_seq(c->th, TUI_TC_MD_QUOTE), "\x1b[3m", "");
     qc.deflt[0] = 0; /* quotes replace the default prose style */
+    qc.deflt_exempt[0] = 0;
+    qc.run_forced = false;
     int iw = MAX(1, width - 2);
     rows_t inner = {0};
     lines_t IL = {(const char *const *)src.v, src.n};
@@ -1374,7 +1409,9 @@ static void render_table(const lines_t *L, size_t from, size_t to, int width, tt
             cells[r] = xcalloc((size_t)nc, sizeof(char *));
             for (int i = 0; i < nc; i++) {
                 const char *t = i < (int)raw.n ? raw.v[i] : "";
-                cells[r][i] = inline_str(t, strlen(t), c);
+                md_ctx_t cc = *c;
+                if (r == 0 && g_colorful) ctx_exempt(&cc); /* theme.tableHeader owns the cell's color */
+                cells[r][i] = inline_str(t, strlen(t), &cc);
             }
             strvec_free(&raw);
         }
@@ -1459,19 +1496,30 @@ static void render_table(const lines_t *L, size_t from, size_t to, int width, tt
                     }
                     char *a = align_cell(li < wrapped[i].n ? wrapped[i].v[li] : "", w[i], align[i]);
                     if (r == 0) {
-                        /* theme.bold(): re-opens bold after every inner bold reset */
+                        /* theme.tableHeader: ansiFg("yellow", bold(cell)) when colorful, else theme.bold(); the
+                         * styles re-open after every inner reset */
+                        const char *yl = g_colorful ? tui_ansi_fg_seq(c->th, TUI_ANSI_YELLOW) : "";
+                        sb_append(&b, yl);
                         sb_append(&b, "\x1b[1m");
                         for (const char *q = a; *q;) {
                             if (!strncmp(q, "\x1b[22m", 5) || !strncmp(q, "\x1b[0m", 4)) {
                                 size_t l = q[2] == '2' ? 5 : 4;
                                 sb_appendn(&b, q, l);
+                                if (l == 4) sb_append(&b, yl);
                                 sb_append(&b, "\x1b[1m");
                                 q += l;
+                                continue;
+                            }
+                            if (*yl && !strncmp(q, "\x1b[39m", 5)) {
+                                sb_appendn(&b, q, 5);
+                                sb_append(&b, yl);
+                                q += 5;
                                 continue;
                             }
                             sb_putc(&b, *q++);
                         }
                         sb_append(&b, "\x1b[22m");
+                        if (*yl) sb_append(&b, "\x1b[39m");
                     } else sb_append(&b, a);
                     free(a);
                 }
@@ -1604,9 +1652,13 @@ static void init_ctx(md_ctx_t *c, const tui_md_opts_t *o) {
     sb_t d = SB_INIT;
     if (o->text_sgr) sb_append(&d, o->text_sgr);
     else if (o->text_slot >= 0) sb_append(&d, tui_fg_seq(c->th, (tui_tc_t)o->text_slot));
+    bool colored = d.len > 0;
     if (o->italic) sb_append(&d, "\x1b[3m");
     snprintf(c->deflt, sizeof c->deflt, "%s", sb_cstr(&d));
     sb_free(&d);
+    if (o->prose_fg) snprintf(c->deflt_exempt, sizeof c->deflt_exempt, "%s", o->italic ? "\x1b[3m" : "");
+    else memcpy(c->deflt_exempt, c->deflt, sizeof c->deflt);
+    c->run_forced = colored && !o->prose_fg;
 }
 
 /* re-open the line background after every reset that would clear it (upstream bgFill) */

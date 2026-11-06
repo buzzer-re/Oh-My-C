@@ -1745,6 +1745,10 @@ static void apply_change(settings_view_t *v, const char *path) {
         if (!strcmp(path, "tui.tight")) tui_set_tight(get_bool(path, false));
         tui_component_invalidate(&tui_root(u->tui)->base); /* rows rebuilt with the new padding / links / images */
     }
+    if (!strcmp(path, "tui.colorfulMarkdown")) {
+        tui_md_set_colorful(get_bool(path, true));
+        ui_chat_rebuild(u);
+    }
     /* usage rows, cache-miss markers and the compacted-history collapse are baked in at build time */
     if (!strcmp(path, "display.cacheMissMarker") || !strcmp(path, "display.collapseCompacted") ||
         !strcmp(path, "display.showTokenUsage") || !strcmp(path, "display.showTurnTime"))
