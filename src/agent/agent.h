@@ -178,6 +178,8 @@ struct agent {
     char *session_id;
     json_t *steering;   /* queued user messages delivered mid-run */
     json_t *follow_up;  /* queued messages delivered after the run would stop */
+    json_t *asides;     /* quiet records (IRC broadcast legs, progress notes): read at the next step boundary, never interrupt */
+    int64_t run_started_mono; /* mono_ms when the current or latest run started (AgentSession.runStartedAt) */
     /* omp steeringMode / followUpMode ("one-at-a-time" default: one queued message per turn; "all") and
      * interruptMode ("immediate" default: queued steering skips the rest of the turn's tool calls; "wait") */
     bool steer_all, follow_up_all, interrupt_wait;
@@ -218,6 +220,10 @@ void agent_abort(agent_t *a);
 void agent_abort_next_silently(agent_t *a);
 void agent_steer(agent_t *a, json_t *msg);      /* owned */
 void agent_follow_up(agent_t *a, json_t *msg);  /* owned */
+void agent_aside(agent_t *a, json_t *msg);      /* owned: joins the next step boundary without skipping any tool call */
+/* Take the steering and aside records `is_record` selects, steering first. With `wakes`, takes nothing unless one
+ * record satisfies it (IrcBridge.drainInboxMessages ifAny). Owned array, possibly empty. */
+json_t *agent_take_records(agent_t *a, bool (*is_record)(const json_t *msg), bool (*wakes)(const json_t *msg));
 void agent_clear_queues(agent_t *a);
 void agent_queue_changed(agent_t *a); /* run hooks.queue_changed (after an external queue edit) */
 bool agent_is_running(agent_t *a);

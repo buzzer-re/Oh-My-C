@@ -1,6 +1,6 @@
 /* tc_wait.c - wait card (port of omp tools/wait.ts jobsRenderResult): pending row, compact settled-job log
  * while collapsed, job tree with output previews when expanded, interrupted/empty forms. Live job widgets
- * (job-widget.ts charts), shimmer, agent roster rows and IRC message cards are not ported. */
+ * (job-widget.ts charts), shimmer and agent roster rows are not ported. */
 #include "ui/tools/tc.h"
 
 #include "tui/ansi.h"
@@ -94,6 +94,67 @@ static char *job_label(const json_t *j) {
     return xstrdup(json_get_str(j, "label") ? json_get_str(j, "label") : "");
 }
 
+/* bodyLines: quote-bordered preview of a received message, a dim counter marking elided lines */
+static void irc_body_lines(const char *body, bool expanded, strvec_t *out) {
+    size_t max = expanded ? 12 : 2, shown = 0, hidden = 0;
+    char *quote = tc_fg(TUI_TC_DIM, tc_sym("md.quoteBorder"));
+    for (const char *p = body ? body : ""; *p;) {
+        size_t n = strcspn(p, "\n");
+        char *l = xstrndup(p, n);
+        char *t = str_trim(l);
+        free(l);
+        if (*t) {
+            if (shown < max) {
+                char *cut = tui_truncate_to_width(t, 100, NULL);
+                char *tabs = tc_replace_tabs(cut);
+                char *fg = tc_fg(TUI_TC_TOOL_OUTPUT, tabs);
+                strvec_push_own(out, xasprintf("  %s %s", quote, fg));
+                free(fg);
+                free(tabs);
+                free(cut);
+                shown++;
+            } else hidden++;
+        }
+        free(t);
+        p += n;
+        if (*p) p++;
+    }
+    if (hidden) {
+        char *m = xasprintf("\xE2\x80\xA6 +%zu more %s", hidden, hidden == 1 ? "line" : "lines");
+        char *fg = tc_fg(TUI_TC_DIM, m);
+        strvec_push_own(out, xasprintf("  %s %s", quote, fg));
+        free(fg);
+        free(m);
+    }
+    free(quote);
+}
+
+/* waitToolRenderer.renderResult, received messages: one `IRC ← from` row and body per message, oldest first */
+static void irc_messages(const json_t *waited, bool expanded, int width, strvec_t *out) {
+    const json_t *m;
+    json_arr_foreach(waited, i, m) {
+        strvec_t rows = {0};
+        char *icon = tc_styled_sym("tool.irc", TUI_TC_ACCENT);
+        char *from = tc_replace_tabs(json_get_str(m, "from") ? json_get_str(m, "from") : "");
+        char *title = xasprintf("IRC %s %s", tc_sym("nav.back"), from);
+        int64_t ts = json_get_int(m, "ts", 0), age = (now_ms() - ts + 500) / 1000;
+        char *ages = ts ? tc_format_age(age < 1 ? 1 : age) : xstrdup("");
+        const char *meta[2];
+        size_t nm = 0;
+        if (*ages) meta[nm++] = ages;
+        if (json_get_str(m, "replyTo")) meta[nm++] = "reply";
+        tc_status_line_t sl = {.icon_override = icon, .spinner = -1, .title = title, .title_slot = -1, .meta = meta, .nmeta = nm};
+        strvec_push_own(&rows, tc_status_line(&sl));
+        irc_body_lines(json_get_str(m, "body"), expanded, &rows);
+        for (size_t k = 0; k < rows.n; k++) strvec_push_own(out, tui_truncate_to_width(rows.v[k], width, NULL));
+        strvec_free(&rows);
+        free(ages);
+        free(title);
+        free(from);
+        free(icon);
+    }
+}
+
 void tc_wait(const tc_call_t *c, int width, strvec_t *out) {
     if (!c->has_result) {
         tc_status_line_t sl = {.icon = TC_ST_PENDING, .spinner = -1, .title = "Wait", .title_slot = -1};
@@ -109,6 +170,10 @@ void tc_wait(const tc_call_t *c, int width, strvec_t *out) {
         char *h = tc_status_line(&sl);
         tc_push_wrapped(out, h, width);
         free(h);
+        return;
+    }
+    if (json_len(json_get_arr(d, "waited"))) {
+        irc_messages(json_get_arr(d, "waited"), c->expanded, width, out);
         return;
     }
     const json_t *jobs = json_get_arr(d, "jobs"), *agents = json_get_arr(d, "agents");

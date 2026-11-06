@@ -1361,7 +1361,9 @@ static tool_gate_t hook_approve_tool(void *ud, agent_t *ag, const json_t *call, 
     char *status = approval_format_prompt(&c, r.reason);
     int grant = 0;
     bool always = false;
+    agents_user_wait(a->env, true);
     int answer = a->env->ui.approve(a->env->ui.ud, json_get_str(call, "id"), name, status, &p, &grant, &always, &ag->cancel);
+    agents_user_wait(a->env, false);
     free(status);
     if (answer == APPROVE_SESSION && scoped) approval_session_grant(sid, scope_key);
     else if (answer == APPROVE_GRANT && grant >= 0 && (size_t)grant < p.ngrants)

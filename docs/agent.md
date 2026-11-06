@@ -434,7 +434,15 @@ tools are exclusive and mountable as `xd://` devices.
   or the definition's model. With `async.enabled` (the default), each spawn becomes a background
   job and the result is delivered automatically. Otherwise the call blocks.
 - **Peer messaging**: subagents stay alive and idle after their run. `write agent://<id>` (or
-  `agent://all`) sends a message, an idle agent wakes to answer, and `wait` collects replies.
+  `agent://all`, main agent only) sends a message, an idle agent wakes to answer, and `wait` collects replies.
+  `agent://<id>?progress` is an interim note. Broadcast legs and progress notes ask nothing, so they queue as asides
+  (`agent_aside`) for the next step boundary: they never end a `wait` or interrupt bash. A direct message ends a wait, whose
+  result carries every queued message (`details.waited`).
+- **`wait`** (`tools/write_bash.c`, port of `tools/wait.ts`): with nothing new it returns after a window that climbs 5s, 10s,
+  30s, 1m, 5m across back-to-back idle waits, restarting after news or a 60 s gap; from the second rung it appends the
+  `wait-idle.md` nudge. A wait woken by a job keeps collecting for up to 1.5 s while other watched jobs run. A wait for a reply
+  ends at once when the asked agent can no longer answer soon: it finished its turn, it waits on the caller, or a dialog of
+  its own (`ask`, an approval) waits on the user.
   Outputs are readable at `agent://<id>`, transcripts at `history://<id>`, and running agents at
   `proc://`.
 - **Registry for the UI and RPC** (WP-22): every spawn keeps an omp `AgentProgress` of its current

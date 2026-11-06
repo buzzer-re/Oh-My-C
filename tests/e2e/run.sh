@@ -363,6 +363,9 @@ check "queue steer all"     "slow:1.5:x,s1,s2,f1 / 3"  env B="$B" ROOT="$ROOT" b
 check "async bash"     "Backgrounded as job bg_1"  bash -c "'$B' --model mock/mock-1 --mode json -p 'call:bash:{\"command\":\"sleep 1; echo bgdone\",\"async\":true}' | grep -o 'Backgrounded as job bg_1'"
 grep -q "Background job bg_1 has completed" "$T/req.jsonl" && echo "   ok  async delivered" || { echo "   FAIL async delivered"; fail=1; }
 check "wait nothing"   "Nothing to wait for"  "$B" --model mock/mock-1 -p 'call:wait:{}'
+# wait: idle ladder and its nudge; settle window, progress notes vs direct messages, no broadcast from a subagent
+check "wait ladder" "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl1" ladder
+check "wait peers"  "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl2" peers
 # background jobs carry the call's intent: proc://, wait, /jobs; /jobs full requests the widget role's caption
 check "jobs intent" "jobs intent ok"  python3 -I "$ROOT/tests/e2e/jobs_intent.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ji"
 # lsp: payload "null" stays JSON null; reload restarts rust-analyzer when a new crate appeared

@@ -14,6 +14,7 @@
  * Credential values are always redacted. */
 #include "iurl.h"
 
+#include "coding/agents.h"
 #include "config/settings.h"
 #include "core/embed.h"
 #include "prompt/template.h"
@@ -454,7 +455,9 @@ static answer_t ask_user(tool_env_t *env, const char *path, const char *previous
     json_set(q, "options", opts);
     json_set_int(q, "recommended", 1); /* a reflexive Enter approves this change only */
     json_push(qs, q);
+    agents_user_wait(env, true);
     json_t *ans = env->ui.ask(env->ui.ud, qs);
+    agents_user_wait(env, false);
     answer_t r = ANS_DENY;
     const char *choice = NULL;
     bool timed_out = false;

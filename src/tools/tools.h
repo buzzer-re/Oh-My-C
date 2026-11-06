@@ -134,6 +134,10 @@ typedef struct tool_env {
     json_t *(*eval_bridge)(struct tool_env *env, const char *name, const json_t *args, int64_t cell,
                            volatile sig_atomic_t *cancel, char **err);
     hmap_t read_repeats;       /* read repeat tracker: selector -> identical-output count (read.c) */
+    /* wait's IdleStreak: back-to-back waits that each elapsed with nothing new (write_bash.c) */
+    bool wait_idle;
+    int wait_idle_rung;
+    int64_t wait_idle_ended, wait_idle_waited_ms;
     pthread_mutex_t mu;
 } tool_env_t;
 

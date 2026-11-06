@@ -113,9 +113,14 @@ STEER_NUDGES = ("STOP: In NEXT reply", "Continue task now", "Before task complet
 
 def seq_next(msgs):
     """`seq:[[tool, args], ...]` user prompt: the call after the tool results so far (None when done)."""
-    ui = max((i for i, m in enumerate(msgs) if m.get("role") == "user" and text_of(m).startswith("seq:")), default=None)
+    assign = "Complete assignment thoroughly:\n\n"  # a subagent's assignment is its script
+    def script(m):
+        t = text_of(m)
+        if t.startswith(assign): t = t[len(assign):].strip()
+        return t if t.startswith("seq:") else None
+    ui = max((i for i, m in enumerate(msgs) if m.get("role") == "user" and script(m)), default=None)
     if ui is None: return None
-    try: calls = json.loads(text_of(msgs[ui])[4:])
+    try: calls = json.loads(script(msgs[ui])[4:])
     except ValueError: return None
     done = sum(1 for m in msgs[ui:] if m.get("role") == "tool")
     return calls[done] if done < len(calls) else None

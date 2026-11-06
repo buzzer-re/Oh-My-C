@@ -9,6 +9,7 @@
 #include "prompt/template.h"
 
 #include "config/settings.h"
+#include "config/usage.h"
 #include "core/fs.h"
 #include "core/proc.h"
 #include "shell.h"
@@ -1135,7 +1136,14 @@ char *jobs_render_results(const json_t *jobs) {
     return s;
 }
 
-#define WAIT_MAX_MS (30 * 60 * 1000)
+/* Windows a blocking wait gives its first wake before it returns with nothing new; each back-to-back idle wait climbs one
+ * rung, so the agent gets its turn back early while work warms up, and a wait loop backs off. */
+static const int64_t WAIT_LADDER_MS[] = {5000, 10000, 30000, 60000, 300000};
+#define WAIT_LADDER_RUNGS 5
+#define WAIT_LADDER_RESET_MS 60000 /* a gap this long since the last idle wait means the agent worked in between */
+#define WAIT_NOTICE_RUNG 1         /* one idle wait is patience, a second back-to-back is a loop */
+#define WAIT_SETTLE_WINDOW_MS 1500 /* after one watched job settles, near-simultaneous completions share the result */
+#define WAIT_PROGRESS_INTERVAL_MS 500
 
 /* buildJobResult("wait"): the settled jobs, each led by what it was for, then what still runs. `recovered`: the job had
  * settled before this wait started (its delivery was still pending). */
@@ -1164,11 +1172,11 @@ static char *job_result_text(jobs_t *jobs, const json_t *done, bool recovered) {
     }
     json_t *snap = jobs ? jobs_snapshot(jobs) : json_arr();
     size_t running = 0;
-    json_arr_foreach(snap, i, x) if (str_eq(json_get_str(x, "status"), "running")) running++;
+    json_arr_foreach(snap, i, x) if (str_eq(json_get_str(x, "status"), "running") && !json_get_bool(x, "quiet", false)) running++;
     if (running) {
         sb_appendf(&b, "## Still Running (%zu)\n\n", running);
         json_arr_foreach(snap, i, x) {
-            if (!str_eq(json_get_str(x, "status"), "running")) continue;
+            if (!str_eq(json_get_str(x, "status"), "running") || json_get_bool(x, "quiet", false)) continue;
             const char *intent = json_get_str(x, "intent");
             sb_appendf(&b, "- `%s` [%s] \xE2\x80\x94 %s%s%s\n", json_get_str(x, "id"), json_get_str(x, "type"), intent ? intent : "",
                        intent ? " \xE2\x80\x94 " : "", json_get_str(x, "label") ? json_get_str(x, "label") : "");
@@ -1179,100 +1187,55 @@ static char *job_result_text(jobs_t *jobs, const json_t *done, bool recovered) {
     return sb_detach(&b);
 }
 
-static const char *NOTHING_TO_WAIT =
-    "Nothing to wait for: no background job or service you started is running, and no agent you messaged this run owes a "
-    "reply. Other agents' results and messages arrive on their own.";
+/* noReplyText (tools/wait.ts): why a reply wait cannot, or can no longer, get its answer */
+static char *wait_ids(const strvec_t *v) {
+    sb_t b = SB_INIT;
+    for (size_t i = 0; i < v->n; i++) sb_appendf(&b, "%s`%s`", i ? ", " : "", v->v[i]);
+    return sb_detach(&b);
+}
 
-static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
-    tool_env_t *env = self->ud;
-    UNUSED(args);
-    out->details = json_obj();
-    json_set_str(out->details, "op", "wait");
-    char *msg = agents_take_message(env);
-    if (msg) {
-        tool_result_text(out, msg);
-        free(msg);
-        return 0;
-    }
-    jobs_t *jobs = env->jobs;
-    size_t running = jobs ? jobs_running_all(jobs) : 0, ready = jobs ? jobs_undelivered(jobs) : 0;
-    char *who = NULL;
-    int replies = agents_reply_state(env, &who);
-    if (!ready && !running && replies != 1) {
-        if (replies == 2)
-            tool_result_textf(out, "Nothing to wait for: %s finished its turn without replying. Ask again, or finish without the answer.", who);
-        else {
-            tool_result_text(out, NOTHING_TO_WAIT);
-            out->useless = true;
-        }
-        free(who);
-        json_set(out->details, "jobs", json_arr());
-        return 0;
-    }
-    free(who);
-    who = NULL;
-    agents_wait_enter(env, true);
-    int64_t deadline = mono_ms() + WAIT_MAX_MS;
-    const char *wake = "timeout";
-    for (;;) {
-        msg = agents_take_message(env);
-        if (msg) break;
-        if (jobs && jobs_undelivered(jobs)) {
-            wake = "job";
-            break;
-        }
-        if (ctx && ctx->cancel && *ctx->cancel) {
-            wake = "abort";
-            break;
-        }
-        if (steer_queued(ctx)) {
-            wake = "steer";
-            break;
-        }
-        bool any = jobs && jobs_running_all(jobs);
-        if (!any) {
-            free(who);
-            who = NULL;
-            if (agents_reply_state(env, &who) != 1) {
-                wake = "unanswerable";
-                break;
-            }
-        }
-        if (mono_ms() >= deadline) break;
-        if (any) jobs_wait_any_ex(jobs, ctx ? ctx->cancel : NULL, 200, true);
-        else sleep_ms(100);
-    }
-    agents_wait_enter(env, false);
-    if (!msg) msg = agents_take_message(env);
-    if (msg) {
-        tool_result_text(out, msg);
-        free(msg);
-        free(who);
-        return 0;
-    }
-    json_t *done = jobs ? jobs_take_finished(jobs) : json_arr();
-    if (json_len(done)) {
-        char *txt = job_result_text(jobs, done, ready > 0);
-        tool_result_text(out, txt);
-        free(txt);
-    } else if (str_eq(wake, "abort")) {
-        tool_result_text(out, "Wait interrupted.");
-    } else if (str_eq(wake, "steer")) {
-        tool_result_text(out, "Wait interrupted by message.");
-        json_set_bool(out->details, "interrupted", true);
-    } else if (str_eq(wake, "unanswerable")) {
-        if (who) tool_result_textf(out, "%s finished its turn without replying. Ask again, or finish without the answer.", who);
-        else tool_result_text(out, NOTHING_TO_WAIT);
+static char *no_reply_text(const agents_replies_t *r) {
+    char *ids, *t;
+    if (r->blocked.n) {
+        ids = wait_ids(&r->blocked);
+        t = xasprintf("%s cannot reply before you finish: it is waiting on your result. Finish without the answer.", ids);
+    } else if (r->on_user.n) {
+        ids = wait_ids(&r->on_user);
+        t = xasprintf("%s is waiting on the user and cannot reply until they answer. Go on without the answer; its reply, if it comes, arrives as a message.", ids);
+    } else if (r->stopped.n) {
+        ids = wait_ids(&r->stopped);
+        t = xasprintf("%s finished its turn without replying. Ask again, or finish without the answer.", ids);
     } else {
-        /* a wait where everything is still running carries no new information once a later wait exists */
-        char *txt = job_result_text(jobs, done, false);
-        tool_result_text(out, *txt ? txt : "Wait limit reached; background work may still be running. Read proc:// for status.");
-        free(txt);
-        out->useless = true;
+        return xstrdup("no background job or service you started is running, and no agent you messaged this run owes a reply. "
+                       "Other agents' results and messages arrive on their own.");
     }
-    free(who);
-    /* omp JobSnapshot rows: {id, type, status, label, durationMs, resultText | errorText} */
-    json_t *snaps = json_arr(), *x;
+    free(ids);
+    return t;
+}
+
+/* messageResult (irc/messaging.ts): `msgs` (owned) in the result text and details.waited */
+static void wait_message_result(tool_env_t *env, json_t *msgs, tool_result_t *out) {
+    sb_t b = SB_INIT;
+    const json_t *m;
+    json_arr_foreach(msgs, i, m) {
+        const char *reply = json_get_str(m, "replyTo");
+        if (i) sb_append(&b, "\n\n");
+        sb_appendf(&b, "[%s] %s", json_get_str(m, "id"), json_get_str(m, "from"));
+        if (reply) sb_appendf(&b, " (reply to %s)", reply);
+        if (json_get_bool(m, "progress", false)) sb_append(&b, " (progress; reply follows)");
+        sb_appendf(&b, ": %s", json_get_str(m, "body"));
+    }
+    tool_result_text(out, sb_cstr(&b));
+    sb_free(&b);
+    const char *self = agents_id_of_env(env);
+    if (self) json_set_str(out->details, "from", self);
+    json_set(out->details, "waited", msgs);
+}
+
+/* omp JobSnapshot rows: {id, type, status, label, durationMs, resultText | errorText}, settled ones then what still runs */
+static json_t *wait_job_rows(jobs_t *jobs, const json_t *done) {
+    json_t *rows = json_arr();
+    const json_t *x;
     json_arr_foreach(done, i, x) {
         json_t *s = json_obj();
         bool failed = json_get_bool(x, "failed", false);
@@ -1283,10 +1246,218 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         if (json_get_str(x, "intent")) json_set_str(s, "intent", json_get_str(x, "intent"));
         json_set_int(s, "durationMs", json_get_int(x, "durationMs", 0));
         json_set_str(s, failed ? "errorText" : "resultText", json_get_str(x, "result") ? json_get_str(x, "result") : "");
-        json_push(snaps, s);
+        json_push(rows, s);
     }
-    json_free(done);
-    json_set(out->details, "jobs", snaps);
+    json_t *snap = jobs ? jobs_snapshot(jobs) : json_arr();
+    json_arr_foreach(snap, i, x) {
+        if (!str_eq(json_get_str(x, "status"), "running") || json_get_bool(x, "quiet", false)) continue;
+        json_t *s = json_obj();
+        json_set_str(s, "id", json_get_str(x, "id"));
+        json_set_str(s, "type", json_get_str(x, "type"));
+        json_set_str(s, "status", "running");
+        json_set_str(s, "label", json_get_str(x, "label") ? json_get_str(x, "label") : "");
+        if (json_get_str(x, "intent")) json_set_str(s, "intent", json_get_str(x, "intent"));
+        json_set_int(s, "durationMs", json_get_int(x, "durationMs", 0));
+        json_push(rows, s);
+    }
+    json_free(snap);
+    return rows;
+}
+
+/* #elapsed: a window ran out with nothing new. Extend the idle streak and, from WAIT_NOTICE_RUNG on, append the reminder. */
+static void wait_elapsed(tool_env_t *env, tool_result_t *out, int rung, int64_t streak_ms) {
+    int64_t waited = streak_ms + WAIT_LADDER_MS[rung];
+    env->wait_idle = true;
+    env->wait_idle_rung = rung;
+    env->wait_idle_ended = mono_ms();
+    env->wait_idle_waited_ms = waited;
+    if (rung < WAIT_NOTICE_RUNG) return;
+    char *span = usage_fmt_duration((double)waited);
+    json_t *c = json_obj();
+    json_set_str(c, "waited", span);
+    char *notice = prompt_render("coding-agent/prompts/tools/wait-idle.md", c);
+    tool_result_text(out, notice);
+    free(notice);
+    json_free(c);
+    free(span);
+}
+
+static void wait_emit_progress(tool_ctx_t *ctx, jobs_t *jobs) {
+    if (!ctx || !ctx->update) return;
+    tool_result_t p = {0};
+    tool_result_text(&p, "");
+    p.details = json_obj();
+    json_set_str(p.details, "op", "wait");
+    json_set(p.details, "jobs", wait_job_rows(jobs, NULL));
+    ctx->update(ctx, &p);
+    tool_result_free(&p);
+}
+
+typedef enum { WAKE_TIMEOUT, WAKE_JOB, WAKE_MESSAGE, WAKE_ABORT, WAKE_STEER, WAKE_UNANSWERABLE, WAKE_SERVICE } wait_wake_t;
+
+static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
+    tool_env_t *env = self->ud;
+    UNUSED(args);
+    out->details = json_obj();
+    json_set_str(out->details, "op", "wait");
+    /* any wait ends the idle streak unless its window elapses too */
+    bool idle = env->wait_idle;
+    int idle_rung = env->wait_idle_rung;
+    int64_t idle_ended = env->wait_idle_ended, idle_waited = env->wait_idle_waited_ms;
+    env->wait_idle = false;
+    json_t *msgs = agents_take_messages(env);
+    if (msgs) {
+        wait_message_result(env, msgs, out);
+        return 0;
+    }
+    jobs_t *jobs = env->jobs;
+    /* an accepted completion whose delivery has not reached the transcript yet is exactly what this wait is for */
+    if (jobs && jobs_undelivered(jobs)) {
+        json_t *done = jobs_take_finished(jobs);
+        char *txt = job_result_text(jobs, done, true);
+        tool_result_text(out, txt);
+        free(txt);
+        json_set(out->details, "jobs", wait_job_rows(jobs, done));
+        json_free(done);
+        return 0;
+    }
+    size_t running = jobs ? jobs_running_watchable(jobs) : 0;
+    bool service_running = jobs && jobs_running_all(jobs) > jobs_running(jobs);
+    agents_replies_t replies;
+    agents_pending_replies(env, &replies);
+    if (!running && !service_running && !replies.from.n) {
+        char *why = no_reply_text(&replies);
+        tool_result_textf(out, "Nothing to wait for: %s", why);
+        free(why);
+        /* an idle poll, not a failure, unless an interrupt landed meanwhile or the text names an agent that can no longer answer */
+        out->useless = !(ctx && ctx->cancel && *ctx->cancel) && !steer_queued(ctx) && !replies.blocked.n && !replies.on_user.n && !replies.stopped.n;
+        json_set(out->details, "jobs", json_arr());
+        agents_replies_free(&replies);
+        return 0;
+    }
+    bool streak = idle && mono_ms() - idle_ended < WAIT_LADDER_RESET_MS;
+    int rung = streak ? MIN(idle_rung + 1, WAIT_LADDER_RUNGS - 1) : 0;
+    int64_t streak_ms = streak ? idle_waited : 0;
+    bool reply_wait = !running && !service_running;
+    /* a wait only these subagents' results can end blocks the caller on them; a bash job or service is another way out */
+    strvec_t watched = {0};
+    if (running && !service_running) {
+        json_t *snap = jobs_snapshot(jobs);
+        const json_t *x;
+        size_t agents = 0;
+        json_arr_foreach(snap, i, x) {
+            if (!str_eq(json_get_str(x, "status"), "running") || json_get_bool(x, "quiet", false)) continue;
+            if (json_get_str(x, "agentId")) {
+                strvec_push(&watched, json_get_str(x, "agentId"));
+                agents++;
+            }
+        }
+        json_free(snap);
+        if (agents != running) strvec_free(&watched);
+    }
+    agents_wait_enter(env, reply_wait ? &replies.from : NULL, watched.n ? &watched : NULL);
+    strvec_free(&watched);
+    agents_replies_free(&replies);
+    agents_replies_t no_reply = {0};
+    int64_t t0 = mono_ms(), deadline = t0 + WAIT_LADDER_MS[rung], next_progress = t0;
+    wait_wake_t wake;
+    volatile sig_atomic_t *cancel = ctx ? ctx->cancel : NULL;
+    for (;;) {
+        msgs = agents_take_messages(env);
+        if (msgs) {
+            wake = WAKE_MESSAGE;
+            break;
+        }
+        if (cancel && *cancel) {
+            wake = WAKE_ABORT;
+            break;
+        }
+        if (steer_queued(ctx)) {
+            wake = WAKE_STEER;
+            break;
+        }
+        if (jobs && jobs_undelivered(jobs)) {
+            wake = WAKE_JOB;
+            break;
+        }
+        if (service_running && !running && jobs_running_all(jobs) == jobs_running(jobs)) {
+            wake = WAKE_SERVICE;
+            break;
+        }
+        if (reply_wait) {
+            agents_replies_free(&no_reply);
+            agents_pending_replies(env, &no_reply);
+            if (!no_reply.from.n) {
+                wake = WAKE_UNANSWERABLE;
+                break;
+            }
+        }
+        int64_t now = mono_ms();
+        if (now >= deadline) {
+            wake = WAKE_TIMEOUT;
+            break;
+        }
+        if (running && now >= next_progress) {
+            wait_emit_progress(ctx, jobs);
+            next_progress = now + WAIT_PROGRESS_INTERVAL_MS;
+        }
+        int64_t nap = MIN(100, deadline - now);
+        if (jobs && (running || service_running)) jobs_wait_any_ex(jobs, cancel, nap, true);
+        else sleep_ms(nap);
+    }
+    if (wake == WAKE_JOB && jobs_running_watchable(jobs)) {
+        /* keep collecting briefly so near-simultaneous completions share one result; other wakes still end it */
+        int64_t settle = mono_ms() + WAIT_SETTLE_WINDOW_MS;
+        while (jobs_running_watchable(jobs) && mono_ms() < settle && !(cancel && *cancel) && !steer_queued(ctx)) {
+            msgs = agents_take_messages(env);
+            if (msgs) {
+                wake = WAKE_MESSAGE;
+                break;
+            }
+            sleep_ms(50);
+        }
+    }
+    agents_wait_leave(env);
+    /* a dequeued message wins a photo-finish with a job: the job remains deliverable, a lost message cannot be recovered */
+    if (!msgs) msgs = agents_take_messages(env);
+    if (msgs) {
+        wait_message_result(env, msgs, out);
+    } else if (cancel && *cancel) {
+        tool_result_error(out, "Operation aborted");
+    } else if (wake == WAKE_STEER) {
+        /* not useless: a message woke the agent, which the loop guard must treat as progress */
+        tool_result_text(out, "Wait interrupted by message.");
+        json_set(out->details, "jobs", json_arr());
+        json_set_bool(out->details, "interrupted", true);
+    } else if (running || (jobs && jobs_undelivered(jobs))) {
+        json_t *done = jobs_take_finished(jobs);
+        char *txt = job_result_text(jobs, done, false);
+        tool_result_text(out, *txt ? txt : "No background jobs.");
+        free(txt);
+        json_set(out->details, "jobs", wait_job_rows(jobs, done));
+        /* a wait where everything is still running carries no new information once a later wait exists */
+        out->useless = !json_len(done) && wake != WAKE_SERVICE;
+        if (wake == WAKE_TIMEOUT) wait_elapsed(env, out, rung, streak_ms);
+        json_free(done);
+    } else if (wake == WAKE_TIMEOUT) {
+        char *span = usage_fmt_duration((double)WAIT_LADDER_MS[rung]);
+        if (reply_wait) tool_result_textf(out, "No reply within %s.", span);
+        else tool_result_textf(out, "No service finished within %s. Read proc:// for status.", span);
+        free(span);
+        out->useless = true; /* a wait that ran out with nothing to report is an idle poll */
+        json_set(out->details, "jobs", json_arr());
+        wait_elapsed(env, out, rung, streak_ms);
+    } else {
+        if (wake == WAKE_UNANSWERABLE) {
+            char *why = no_reply_text(&no_reply);
+            tool_result_text(out, why);
+            free(why);
+        } else {
+            tool_result_text(out, "A service finished. Read proc:// for its status and output.");
+        }
+        json_set(out->details, "jobs", json_arr());
+    }
+    agents_replies_free(&no_reply);
     return 0;
 }
 

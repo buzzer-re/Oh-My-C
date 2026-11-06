@@ -310,6 +310,7 @@ typedef struct {
     proc_result_t res;
     int rc;
     bool temp_shell;
+    int64_t wall_ms;
     pthread_mutex_t fwd_mu;
     proc_output_cb fwd;
     void *fwd_ud;
@@ -583,6 +584,8 @@ static char *format_bash_result(const bgjob_t *x) {
         sb_append(&s, *sum.output ? sum.output : "Command aborted");
     } else {
         sb_append(&s, *sum.output ? sum.output : "(no output)");
+        /* WALL_TIME_NOTICE_MIN_MS: #buildCompletedResult, the same as a foreground result */
+        if (b->wall_ms >= 1000) sb_appendf(&s, "\n\nWall time: %.2f seconds", (double)b->wall_ms / 1000.0);
         if (!r->timed_out && code != 0) sb_appendf(&s, "\n\nCommand exited with code %d", code);
     }
     json_t *meta = NULL;
@@ -611,11 +614,13 @@ static char *bash_body(bgjob_t *x, void *ud, bool *failed) {
                      .on_output = bash_out,
                      .ud = x};
     int rc = -2;
+    int64_t t0 = mono_ms();
     if (b->shell) rc = shell_run_try(b->shell, cmd, b->cwd, &o, &b->res);
     if (rc == -2) {
         b->temp_shell = b->shell != NULL;
         rc = shell_exec_once(cmd, &o, &b->res);
     }
+    b->wall_ms = mono_ms() - t0;
     b->rc = rc;
     free(rewritten);
     if (b->streams) streams_finish(b->streams);
@@ -782,6 +787,18 @@ size_t jobs_running(jobs_t *j) {
     return n;
 }
 
+size_t jobs_running_watchable(jobs_t *j) {
+    if (!j) return 0;
+    pthread_mutex_lock(&j->mu);
+    size_t n = 0;
+    for (size_t i = 0; i < j->v.n; i++) {
+        const bgjob_t *x = j->v.v[i];
+        n += !x->done && !x->attached && !x->quiet && !str_eq(x->type, "service");
+    }
+    pthread_mutex_unlock(&j->mu);
+    return n;
+}
+
 size_t jobs_running_all(jobs_t *j) {
     if (!j) return 0;
     pthread_mutex_lock(&j->mu);
@@ -902,7 +919,9 @@ json_t *jobs_snapshot(jobs_t *j) {
     for (size_t i = 0; i < j->v.n; i++) {
         bgjob_t *x = j->v.v[i];
         if (x->hidden || x->attached) continue;
-        json_push(arr, job_json(x, false));
+        json_t *row = job_json(x, false);
+        if (x->quiet) json_set_bool(row, "quiet", true);
+        json_push(arr, row);
     }
     pthread_mutex_unlock(&j->mu);
     return arr;
