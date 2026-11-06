@@ -198,6 +198,100 @@ static const compat_ref_index_t *reference_index(void) {
     return idx;
 }
 
+/* buildModel({...toModelSpec(row), baseUrl, compat}): the row's policy follows its endpoint. The old object stays
+ * allocated: other threads and the reference index may hold it. */
+static void row_install(ai_model_t *m, json_t *o) {
+    compat_resolve_model(o);
+    m->raw = o;
+    fill_model(m);
+    if (compat_api_has_record(m->api)) m->compat_defaults = NULL;
+}
+
+static void row_rebuild(ai_model_t *m, const char *url, const json_t *pcompat) {
+    json_t *o = json_clone(m->raw);
+    json_t *compat = compat_merge(json_get_obj(o, "compatConfig"), pcompat);
+    json_del(o, "compat");
+    json_del(o, "compatConfig");
+    if (compat) json_set(o, "compat", compat);
+    if (url) json_set_str(o, "baseUrl", url);
+    row_install(m, o);
+}
+
+/* the provider's compat with disableStrictTools folded in (owned or NULL) */
+static json_t *provider_compat(const json_t *pv) {
+    json_t *c = json_get_obj(pv, "compat") ? json_clone(json_get(pv, "compat")) : NULL;
+    if (json_get_bool(pv, "disableStrictTools", false)) {
+        if (!c) c = json_obj();
+        json_set_bool(c, "disableStrictTools", true);
+    }
+    return c;
+}
+
+/* resolveProviderBaseUrl + the baseUrlApis scope: the effective APIs of the custom models inheriting the URL, plus a
+ * provider `api` when there are none; no scope covers the whole provider. Owned, NULL when the row keeps its URL. */
+static char *provider_row_base_url(const json_t *pv, const ai_model_t *m, const char *base) {
+    if (!base) return NULL;
+    const char *papi = json_get_str(pv, "api");
+    json_t *models = json_get_arr(pv, "models"), *md;
+    bool scoped = false, covered = false;
+    json_arr_foreach(models, i, md) {
+        if (json_get_str(md, "baseUrl")) continue;
+        const char *a = json_get_str(md, "api");
+        if (!a) a = papi;
+        if (a) {
+            scoped = true;
+            if (str_eq(a, m->api)) covered = true;
+        }
+    }
+    if (papi && json_len(models) == 0) {
+        scoped = true;
+        if (str_eq(papi, m->api)) covered = true;
+    }
+    if (scoped && !covered) return NULL;
+    if (!scoped && str_eq(m->api, "openrouter-decisions")) { /* openrouterDecisionsBaseUrl: the /alpha sibling of the chat root */
+        char *u = xstrdup(base);
+        size_t n = strlen(u);
+        while (n && u[n - 1] == '/') u[--n] = 0;
+        if (n >= 3 && str_eq(u + n - 3, "/v1")) u[n -= 3] = 0;
+        char *r = xasprintf("%s/alpha", u);
+        free(u);
+        return r;
+    }
+    return xstrdup(base);
+}
+
+/* applyModelPatch for a `modelOverrides` entry: a compat patch merges into the row's configured compat and rebuilds;
+ * limits and pricing stay as already resolved, explicit input and thinking win */
+static void row_override(ai_model_t *m, json_t *mv) {
+    const json_t *pc = json_get_obj(mv, "compat");
+    if (!pc) {
+        json_merge(m->raw, mv);
+        fill_model(m);
+        return;
+    }
+    json_t *o = json_clone(m->raw);
+    json_t *compat = compat_merge(json_get_obj(o, "compatConfig"), pc);
+    json_merge(o, mv);
+    json_del(o, "compatConfig");
+    json_set(o, "compat", compat);
+    json_t *ctx = json_clone(json_get(o, "contextWindow")), *max = json_clone(json_get(o, "maxTokens"));
+    json_t *cost = json_clone(json_get(o, "cost"));
+    json_t *thinking = json_get_obj(mv, "thinking") ? json_clone(json_get(mv, "thinking")) : NULL;
+    json_t *input = json_get(mv, "input") ? json_clone(json_get(mv, "input")) : NULL;
+    compat_resolve_model(o);
+    json_set(o, "contextWindow", ctx);
+    json_set(o, "maxTokens", max);
+    json_set(o, "cost", cost);
+    if (thinking) {
+        if (json_get_obj(o, "thinking")) json_set(o, "thinking", thinking);
+        else json_free(thinking);
+    }
+    if (input) json_set(o, "input", input);
+    m->raw = o;
+    fill_model(m);
+    if (compat_api_has_record(m->api)) m->compat_defaults = NULL;
+}
+
 static void apply_custom(json_t *cfg) {
     strvec_t keys = {0};
     json_t *provs = json_get_obj(cfg, "providers");
@@ -207,28 +301,30 @@ static void apply_custom(json_t *cfg) {
         const char *base = json_get_str(pv, "baseUrl");
         const char *api = json_get_str(pv, "api");
         json_t *headers = json_get_obj(pv, "headers");
-        /* provider-level overrides of bundled models */
-        if (base) {
-            for (size_t k = 0; k < g_models.n; k++) {
+        /* #loadBuiltInModels: a provider override rebuilds its bundled rows under the new URL and compat */
+        json_t *pover = provider_compat(pv);
+        if (base || pover) {
+            (void)reference_index(); /* identity/reference.ts reads the rows as bundled */
+            for (size_t k = 0; k < g_bundled; k++) {
                 ai_model_t *m = g_models.v[k];
-                if (strcmp(m->provider, pid) == 0 && (!api || strcmp(m->api, api) == 0)) {
-                    json_set_str(m->raw, "baseUrl", base);
-                    fill_model(m);
-                }
+                if (!str_eq(m->provider, pid)) continue;
+                char *url = provider_row_base_url(pv, m, base);
+                row_rebuild(m, url, pover);
+                free(url);
             }
         }
+        json_free(pover);
         json_t *ov = json_get_obj(pv, "modelOverrides");
         const char *mid;
         json_t *mv;
         json_obj_foreach(ov, k2, mid, mv) {
             /* direct index lookup: this runs inside catalog_init's pthread_once (catalog_find would re-enter it) */
             char *okey = xasprintf("%s\x1f%s", pid, mid);
-            const ai_model_t *m = hmap_get(&g_index, okey);
+            ai_model_t *m = hmap_get(&g_index, okey);
             free(okey);
             if (m) {
-                json_merge(m->raw, mv);
-                if (json_get(mv, "contextWindow")) ((ai_model_t *)m)->context_window_pinned = true;
-                fill_model((ai_model_t *)m);
+                if (json_get(mv, "contextWindow")) m->context_window_pinned = true;
+                row_override(m, mv);
             }
         }
         json_t *models = json_get_arr(pv, "models"), *mm;
