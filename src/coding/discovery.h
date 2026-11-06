@@ -94,6 +94,7 @@ typedef struct {
     bool memory_local;     /* memory.backend=local owns the file-backed memory://root namespace */
     bool out_replies;      /* omp outRepliesActive: `out://` writes reach the user */
     bool settings_approval; /* omp settingsApproval: `cfg://` writes can be approved (top-level TUI session) */
+    bool subagent;         /* omp SchemeHost.subagent: `agent://all` broadcasts are refused, so they go unadvertised */
 } sysprompt_url_host_t;
 
 /* "- " lines for the "# Internal URLs" section in omp registration order (owned) */

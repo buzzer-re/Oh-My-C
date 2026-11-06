@@ -715,7 +715,8 @@ json_t *oair_build_request(const ai_model_t *m, const ai_context_t *ctx, const a
         json_set(p, "stream_options", so);
     }
     apply_sampling(p, m, o);
-    if (!str_empty(o->text_verbosity) && model_compat_bool(m, "officialEndpoint", false)) {
+    /* settings-stream-fn.ts sends the setting to "openai-responses" and "openai-codex-responses" only */
+    if (!str_empty(o->text_verbosity) && str_eq(m->api, "openai-responses") && model_compat_bool(m, "officialEndpoint", false)) {
         json_t *t = json_obj();
         json_set_str(t, "verbosity", o->text_verbosity);
         json_set(p, "text", t);
