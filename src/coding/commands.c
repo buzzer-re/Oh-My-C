@@ -447,23 +447,36 @@ void prompt_templates_free(prompt_tpls_t *t) {
 
 /* ---------- argument substitution ---------- */
 
+/* findClosingQuote: the quote matching *open that ends an argument, or NULL when none does */
+static const char *find_closing_quote(const char *open) {
+    for (const char *p = open + 1; *p; p++)
+        if (*p == *open && (!p[1] || p[1] == ' ' || p[1] == '\t')) return p;
+    return NULL;
+}
+
 strvec_t commands_parse_args(const char *s) {
     strvec_t args = {0};
     sb_t cur = SB_INIT;
-    char quote = 0;
+    bool started = false;
     for (const char *p = s ? s : ""; *p; p++) {
         char c = *p;
-        if (quote) {
-            if (c == quote) quote = 0;
-            else sb_putc(&cur, c);
-        } else if (c == '"' || c == '\'') {
-            quote = c;
+        /* prose apostrophes stay literal: a quote delimits only at an argument's start or after an option `=`, and only
+         * when a matching quote ends an argument */
+        if ((c == '"' || c == '\'') && (!started || (cur.len && cur.s[cur.len - 1] == '='))) {
+            const char *close = find_closing_quote(p);
+            if (close) {
+                sb_appendn(&cur, p + 1, (size_t)(close - p - 1));
+                p = close;
+            } else sb_putc(&cur, c);
+            started = true;
         } else if (c == ' ' || c == '\t') {
-            if (cur.len) {
-                strvec_push(&args, sb_cstr(&cur));
-                sb_clear(&cur);
-            }
-        } else sb_putc(&cur, c);
+            if (cur.len) strvec_push(&args, sb_cstr(&cur));
+            sb_clear(&cur);
+            started = false;
+        } else {
+            sb_putc(&cur, c);
+            started = true;
+        }
     }
     if (cur.len) strvec_push(&args, sb_cstr(&cur));
     sb_free(&cur);

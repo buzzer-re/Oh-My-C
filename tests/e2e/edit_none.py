@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """e2e: `edit.mode: none` / PI_EDIT_VARIANT=none remove the edit tool and keep bash (omp 75b4c84f); the sloppy edit mode reads
-`*** End` / `*** End Patch` closing a Replace or Insert body as a close, never as content (omp ae923ccd).
+`*** End` / `*** End Patch` closing a Replace or Insert body as a close, never as content (omp ae923ccd);
+skills.manualSkills hides skills from the model's catalog (omp a5e905cd).
 Usage: edit_none.py <omc> <request log> <models.yml> <scratch dir>"""
 import json, os, shutil, subprocess, sys
 
@@ -61,5 +62,13 @@ for name, before, patch, want in [
     open(path, "w").write(before)
     rs = run("seq:" + json.dumps([["edit", {"input": patch}]]))
     check(name, open(path).read() == want, open(path).read())
+# skills.manualSkills: out of the model's catalog, by glob
+for n in ("third-party-a", "pdf", "keep"):
+    os.makedirs(os.path.join(agent, "skills", n), exist_ok=True)
+    with open(os.path.join(agent, "skills", n, "SKILL.md"), "w") as f: f.write(f"---\nname: {n}\ndescription: Demo skill {n}\n---\nBody\n")
+config("skills:\n  manualSkills:\n    - third-party-*\n    - pdf\n")
+rs = run("say:hi")
+sysmsg = json.dumps(rs[0]["messages"][0]) if rs else ""
+check("manual skills hidden", "Demo skill keep" in sysmsg and "Demo skill pdf" not in sysmsg and "Demo skill third-party-a" not in sysmsg, sysmsg[-300:])
 print("edit none ok" if not fails else "edit none failed")
 sys.exit(1 if fails else 0)

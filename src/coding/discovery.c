@@ -633,6 +633,17 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
         }
         scan_managed_skills(d);
         filter_skills(d);
+        /* skills.manualSkills: matching skills leave the model's catalog and stay manually invocable */
+        json_t *manual = settings_get("skills.manualSkills");
+        if (json_is_arr(manual)) {
+            const json_t *pat;
+            json_arr_foreach(manual, i, pat) {
+                glob_pat_t *g = json_sv(pat) ? glob_compile(json_sv(pat), 0) : NULL;
+                for (size_t k = 0; g && k < d->skills.n; k++)
+                    if (glob_pat_match(g, d->skills.v[k].name)) d->skills.v[k].hide = true;
+                glob_pat_free(g);
+            }
+        }
         if (d->skills.n > 1) qsort(d->skills.v, d->skills.n, sizeof(skill_t), cmp_skill);
     }
     free(native);

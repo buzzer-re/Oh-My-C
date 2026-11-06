@@ -77,7 +77,6 @@ emojiAutocomplete	inert	no :shortcode: emoji completion
 spelling.autocomplete	inert	no word-prediction hints
 composer.predictions	inert	no next-message prediction
 composer.predictionAlternatives	inert	omc has no composer predictions (omp v18.16.0)
-skills.manualSkills	inert	not ported yet (omp v18.17.0)
 tui.colorfulMarkdown	inert	not ported yet (omp v18.17.0)
 tui.spinnerInterval	inert	not ported yet (omp v18.17.0)
 tui.maxFps	inert	not ported yet (omp v18.17.0)

@@ -39,7 +39,8 @@ const file_cmd_t *commands_find(const file_cmds_t *c, const char *name);
 void prompt_templates_load(const char *cwd, prompt_tpls_t *out);
 void prompt_templates_free(prompt_tpls_t *t);
 
-/* parseCommandArgs (non-strict): whitespace split with '...' / "..." quoting */
+/* parseCommandArgs (non-strict): whitespace split; a quote delimits only at an argument's start or after an option `=`, and
+ * only when a matching quote ends an argument, so prose apostrophes stay literal */
 strvec_t commands_parse_args(const char *s);
 /* substituteArgs: $1.., $@, $ARGUMENTS, $@[start:len] */
 char *commands_substitute_args(const char *content, const strvec_t *args);
