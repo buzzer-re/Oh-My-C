@@ -1054,6 +1054,14 @@
   "handle": true
  },
  {
+  "name": "unpin",
+  "icon": "pin",
+  "description": "Unpin a session from the top of the resume list",
+  "inlineHint": "[session id]",
+  "allowArgs": true,
+  "handle": true
+ },
+ {
   "name": "btw",
   "icon": "question",
   "description": "Ask a side question, or browse this session's BTW history",
