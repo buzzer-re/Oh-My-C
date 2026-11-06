@@ -1,9 +1,9 @@
-[49m [1;4m[38;2;0;180;255mHeading One[0m
+[49m [1;4m[38;2;208;111;237mHeading One[0m
 
- Some [1mbold[0m, [3mitalic[0m, [38;2;0;255;136minline code[39m, [9mstruck[0m and a [4m[38;2;0;180;255mlink[0m [38;2;0;130;179m(https://example.com)[39m plus
+ Some [1m[38;2;208;111;237mbold[0m, [3m[38;2;208;111;237mitalic[0m, [38;2;0;255;136minline code[39m, [9mstruck[0m and a [4m[38;2;0;180;255mlink[0m [38;2;0;130;179m(https://example.com)[39m plus
  [4m[38;2;0;180;255mhttps://bare.example.org[0m.
 
- [1m[38;2;0;180;255mHeading Two[0m
+ [1m[38;2;240;192;64mHeading Two[0m
 
  [38;2;0;180;255m- [39mfirst item
  [38;2;0;180;255m- [39msecond item with [38;2;0;255;136mcode[39m
@@ -29,7 +29,7 @@
  [38;2;42;48;56m```[39m
 
  ┌───────┬───────┬────────────┐
- │ [1mName [0m │ [1mValue[0m │ [1m  Notes   [0m │
+ │ [1m[38;2;240;192;64mName [0m │ [1m[38;2;240;192;64mValue[0m │ [1m[38;2;240;192;64m  Notes   [0m │
  ├───────┼───────┼────────────┤
  │ alpha │     1 │   first    │
  ├───────┼───────┼────────────┤

@@ -6,6 +6,7 @@
  *   - the pinned error banner above the editor (ErrorBannerComponent)
  *   - the working row while the model runs (Loader + shimmer working message)
  *   - transcript replay from the session tree on resume/branch */
+#include "tui/motion.h"
 #include "ui/ui.h"
 #include "tui/termcaps.h"
 #include "ui/signals.h"
@@ -163,6 +164,16 @@ static void render_user(msgview_t *v, int width, strvec_t *o) {
     size_t first = o->n;
     tui_component_render(&m->base, width, o);
     tui_component_destroy(&m->base);
+    /* magic keywords glow in the sent bubble, statically; code spans keep their own color */
+    if (!v->synthetic) {
+        for (size_t i = first; i < o->n; i++) {
+            char *g = ui_keywords_paint(o->v[i], sgr, 0, sgr);
+            if (g) {
+                free(o->v[i]);
+                o->v[i] = g;
+            }
+        }
+    }
     /* chips keep their identity color (userBubbleColor renderReference), the bubble fg resumes after */
     if (strcmp(shown, v->text) && !v->synthetic) {
         for (int n = 1; n <= 64; n++) {
@@ -513,6 +524,11 @@ static void md_rows(strvec_t *o, const char *text, int width, bool thinking) {
         mo.italic = true;
     } else {
         mo.code_indent = 0;
+        /* #getProseTextStyle: the optional assistantMessageText token paints prose, not themed spans */
+        if (strcmp(tui_fg_seq(NULL, TUI_TC_ASSISTANT_MESSAGE_TEXT), "\x1b[39m")) {
+            mo.text_slot = TUI_TC_ASSISTANT_MESSAGE_TEXT;
+            mo.prose_fg = true;
+        }
     }
     tui_md_render(text, width, &mo, o);
 }
@@ -1581,7 +1597,9 @@ static json_t *g_last_usage; /* lastAssistantUsage: the newest assistant usage t
 int64_t ui_detect_cache_invalidation(const json_t *prev, const json_t *cur) {
     if (!prev || !cur) return 0;
     if (json_get_num(prev, "cacheRead", 0) < MIN_CACHE_FOOTPRINT) return 0;
-    if (json_get_num(cur, "cacheRead", 0) > 0) return 0;
+    /* the prefix survived when this turn read back at least half of what the previous one did (a cold turn can still read the
+     * shared system/tool block back) */
+    if (json_get_num(cur, "cacheRead", 0) * 2 >= json_get_num(prev, "cacheRead", 0)) return 0;
     if (json_get_num(cur, "cacheWrite", 0) <= 0) return 0;
     double reprocessed = json_get_num(cur, "cacheWrite", 0) + json_get_num(cur, "input", 0);
     if (reprocessed < MIN_CACHE_FOOTPRINT) return 0;
@@ -1739,13 +1757,13 @@ static void working_render(tui_component_t *c, int width, strvec_t *out) {
 
 static void working_tick(void *ud) {
     working_t *w = ud;
-    w->frame++;
+    w->frame = tui_spinner_tick();
     if (w->u && w->u->tui) tui_request_render(w->u->tui);
 }
 
 static void working_timer(working_t *w, int interval) {
     if (w->timer && w->u && w->u->tui) tui_remove_timer(w->u->tui, w->timer);
-    w->timer = interval > 0 && w->u && w->u->tui ? tui_add_timer(w->u->tui, interval, true, working_tick, w) : 0;
+    w->timer = interval > 0 && w->u && w->u->tui ? tui_add_clock_timer(w->u->tui, NULL, working_tick, w) : 0;
 }
 
 static void working_destroy(tui_component_t *c) {
@@ -2193,6 +2211,7 @@ void ui_chat_rebuild(ui_t *u) {
     json_free(path);
     hmap_free(&pending, NULL);
     toolcard_set_replaying(false);
+    if (!u->view) ui_recap_replay(u);
     if (!u->view && !u->worker_running) { /* #reseedTokenRate: the last completed turn after a history swap */
         agent_t *ag = u->app->agent;
         double out = 0, dur = 0;

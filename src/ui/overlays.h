@@ -217,6 +217,7 @@ void ui_setup_run_providers(ui_t *u);
 
 /* apply the configured theme / glyph preset / color-blind mode (startup and after changes) */
 void ui_apply_appearance(void);
+void ui_apply_motion(void); /* tui.motion, tui.spinnerInterval, tui.maxFps and display.shimmer -> the shared knobs */
 /* swap the composer area for a selector (upstream SelectorController.showSelector) */
 void ui_show_selector(ui_t *u, tui_component_t *comp, tui_component_t *focus);
 void ui_close_selector(ui_t *u);

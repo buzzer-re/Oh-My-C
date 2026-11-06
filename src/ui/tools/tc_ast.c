@@ -46,42 +46,56 @@ static char *ast_grep_style(tc_grouped_t *g, size_t i, void *ud) {
     return tc_fg(str_starts(l, "  meta:") ? TUI_TC_DIM : TUI_TC_TOOL_OUTPUT, l);
 }
 
+/* astGrepSubject / astEditSubject: the result's display scope, or the call's requested paths */
+static char *scoped(const char *label, const json_t *args, const json_t *d) {
+    const char *scope = json_get_str(d, "scopePath");
+    if (scope && *scope) return tc_scoped_subject(label, scope);
+    char *ps = tc_paths_of(args);
+    char *r = tc_scoped_subject(label, ps);
+    free(ps);
+    return r;
+}
+
 void tc_ast_grep(const tc_call_t *c, int width, strvec_t *out) {
     const json_t *d = c->details;
     const char *pat = json_get_str(c->args, "pat");
     if (!c->has_result) {
         strvec_t meta = {0};
-        char *ps = tc_paths_of(c->args);
-        if (ps) strvec_push_own(&meta, xasprintf("in %s", ps));
-        free(ps);
+        char *subj = scoped(pat && *pat ? pat : "?", c->args, NULL);
         if (json_get_int(c->args, "skip", 0) > 0) strvec_push_own(&meta, xasprintf("skip:%lld", (long long)json_get_int(c->args, "skip", 0)));
         tc_status_line_t sl = {.icon = TC_ST_PENDING, .spinner = -1, .title = "AST Grep", .title_slot = -1,
-                               .description = pat ? pat : "?", .meta = (const char *const *)meta.v, .nmeta = meta.n};
+                               .description = subj, .meta = (const char *const *)meta.v, .nmeta = meta.n};
         char *h = tc_status_line(&sl);
         tc_push_wrapped(out, h, width);
         free(h);
+        free(subj);
         strvec_free(&meta);
         return;
     }
+    char *subject = scoped(pat && *pat ? pat : NULL, c->args, d);
     if (c->is_error) {
         char *t = tc_text_of(c->content);
-        char *e = tc_error_message(*t ? t : "Unknown error");
-        tc_push_wrapped(out, e, width);
+        tc_status_line_t sl = {.icon = TC_ST_ERROR, .spinner = -1, .title = "AST Grep", .title_slot = -1, .description = subject};
+        char *h = tc_status_line(&sl);
+        char *e = tc_error_detail(*t ? t : "Unknown error");
+        char *j = xasprintf("%s\n%s", h, e);
+        tc_push_wrapped(out, j, width);
+        free(j);
         free(e);
+        free(h);
         free(t);
+        free(subject);
         return;
     }
     int64_t matches = json_get_int(d, "matchCount", 0), files = json_get_int(d, "fileCount", 0);
     int64_t searched = json_get_int(d, "filesSearched", 0);
     bool limit = json_get_bool(d, "limitReached", false);
-    const char *scope = json_get_str(d, "scopePath");
     const json_t *perrs = json_get_arr(d, "parseErrors");
     if (matches == 0) {
         strvec_t meta = {0};
         strvec_push(&meta, "0 matches");
-        if (scope) strvec_push_own(&meta, xasprintf("in %s", scope));
         if (searched > 0) strvec_push_own(&meta, xasprintf("searched %lld", (long long)searched));
-        tc_status_line_t sl = {.icon = TC_ST_WARNING, .spinner = -1, .title = "AST Grep", .title_slot = -1, .description = pat,
+        tc_status_line_t sl = {.icon = TC_ST_WARNING, .spinner = -1, .title = "AST Grep", .title_slot = -1, .description = subject,
                                .meta = (const char *const *)meta.v, .nmeta = meta.n};
         strvec_t lines = {0};
         strvec_push_own(&lines, tc_status_line(&sl));
@@ -95,17 +109,17 @@ void tc_ast_grep(const tc_call_t *c, int width, strvec_t *out) {
         free(j);
         strvec_free(&lines);
         strvec_free(&meta);
+        free(subject);
         return;
     }
     strvec_t meta = {0};
     strvec_push_own(&meta, tc_format_count("match", matches));
     strvec_push_own(&meta, tc_format_count("file", files));
-    if (scope) strvec_push_own(&meta, xasprintf("in %s", scope));
     strvec_push_own(&meta, xasprintf("searched %lld", (long long)searched));
     if (limit) strvec_push_own(&meta, tc_fg(TUI_TC_WARNING, "limit reached"));
     char *ic = limit ? NULL : tc_fg(TUI_TC_ACCENT, tc_sym("icon.search"));
     tc_status_line_t sl = {.icon = TC_ST_WARNING, .icon_override = ic, .spinner = -1, .title = "AST Grep", .title_slot = -1,
-                           .description = pat, .meta = (const char *const *)meta.v, .nmeta = meta.n};
+                           .description = subject, .meta = (const char *const *)meta.v, .nmeta = meta.n};
     char *header = tc_status_line(&sl);
     const char *dc = json_get_str(d, "displayContent");
     char *text = dc ? xstrdup(dc) : tc_text_of(c->content);
@@ -116,10 +130,18 @@ void tc_ast_grep(const tc_call_t *c, int width, strvec_t *out) {
     size_t nkept = 0;
     for (size_t i = 0; i < g.ngroups; i++)
         if (!drop_group(&g, &g.groups[i], "Result limit reached", "Parse issues:")) kept[nkept++] = g.groups[i];
+    /* collapsed previews drop the per-match `meta:` capture rows; a match keeps all its other rows */
+    tc_ggroup_t *compact = xcalloc(nkept + 1, sizeof *compact);
+    for (size_t i = 0; i < nkept; i++) {
+        compact[i].v = xcalloc(kept[i].n + 1, sizeof(size_t));
+        for (size_t k = 0; k < kept[i].n; k++)
+            if (!str_starts(g.lines.v[kept[i].v[k]], "  meta:")) compact[i].v[compact[i].n++] = kept[i].v[k];
+    }
     tc_ggroup_t *shown;
     size_t nshown;
     char *summary;
-    tc_grouped_fit(&g, kept, nkept, c->expanded ? -1 : 6, match_unit, NULL, "match", matches, 0, &shown, &nshown, &summary);
+    tc_grouped_fit(&g, c->expanded ? kept : compact, nkept, c->expanded ? -1 : 6, match_unit, NULL, "match", matches, 0, &shown, &nshown,
+                   &summary);
     strvec_t rows = {0};
     tc_grouped_tree(&g, shown, nshown, summary, ast_grep_style, NULL, &rows);
     if (limit) strvec_push_own(&rows, tc_fg(TUI_TC_WARNING, "limit reached; narrow path or use skip"));
@@ -132,12 +154,15 @@ void tc_ast_grep(const tc_call_t *c, int width, strvec_t *out) {
     strvec_free(&rows);
     free(summary);
     free(shown);
+    for (size_t i = 0; i < nkept; i++) free(compact[i].v);
+    free(compact);
     free(kept);
     tc_grouped_free(&g);
     free(text);
     free(header);
     free(ic);
     strvec_free(&meta);
+    free(subject);
 }
 
 /* ---------- ast_edit ---------- */
@@ -189,33 +214,22 @@ void tc_ast_edit(const tc_call_t *c, int width, strvec_t *out) {
     const json_t *d = c->details;
     const json_t *ops = json_get_arr(c->args, "ops");
     size_t nops = json_len(ops);
-    char *pv = nops == 1 ? pattern_preview(json_get_str(json_at(ops, 0), "pat")) : NULL;
+    /* rewriteLabel: the single rewrite's pattern preview, or `N rewrites` for several */
+    char *pv = nops == 1 ? pattern_preview(json_get_str(json_at(ops, 0), "pat")) : nops > 1 ? xasprintf("%zu rewrites", nops) : NULL;
     if (!c->has_result) {
-        strvec_t meta = {0};
-        const json_t *paths = json_get_arr(c->args, "paths");
-        if (json_len(paths)) {
-            strvec_t p = {0};
-            json_t *e;
-            json_arr_foreach(paths, i, e) if (json_is_str(e)) strvec_push(&p, json_sv(e));
-            char *j = strvec_join(&p, ", ");
-            strvec_push_own(&meta, xasprintf("in %s", j));
-            free(j);
-            strvec_free(&p);
-        }
-        char *rw = nops ? xasprintf("%zu rewrites", nops) : NULL;
-        if (nops > 1) strvec_push(&meta, rw);
-        tc_status_line_t sl = {.icon = TC_ST_PENDING, .spinner = -1, .title = "AST Edit", .title_slot = -1,
-                               .description = nops == 1 ? pv : nops ? rw : "?", .meta = (const char *const *)meta.v, .nmeta = meta.n};
+        char *subj = scoped(pv ? pv : "?", c->args, NULL);
+        tc_status_line_t sl = {.icon = TC_ST_PENDING, .spinner = -1, .title = "AST Edit", .title_slot = -1, .description = subj};
         char *h = tc_status_line(&sl);
         tc_push_wrapped(out, h, width);
         free(h);
-        free(rw);
-        strvec_free(&meta);
+        free(subj);
         free(pv);
         return;
     }
+    char *subject = scoped(pv, c->args, d);
+    free(pv);
     if (c->is_error) {
-        tc_status_line_t sl = {.icon = TC_ST_ERROR, .spinner = -1, .title = "AST Edit", .title_slot = -1};
+        tc_status_line_t sl = {.icon = TC_ST_ERROR, .spinner = -1, .title = "AST Edit", .title_slot = -1, .description = subject};
         char *h = tc_status_line(&sl);
         char *t = tc_text_of(c->content);
         char *e = tc_error_detail(*t ? t : "Unknown error");
@@ -228,46 +242,64 @@ void tc_ast_edit(const tc_call_t *c, int width, strvec_t *out) {
         free(e);
         free(t);
         free(h);
-        free(pv);
+        free(subject);
         return;
     }
     int64_t total = json_get_int(d, "totalReplacements", 0), touched = json_get_int(d, "filesTouched", 0);
     int64_t searched = json_get_int(d, "filesSearched", 0);
     bool limit = json_get_bool(d, "limitReached", false);
-    const char *scope = json_get_str(d, "scopePath");
     const json_t *perrs = json_get_arr(d, "parseErrors");
     if (total == 0) {
         strvec_t meta = {0};
         strvec_push(&meta, "0 replacements");
-        if (scope) strvec_push_own(&meta, xasprintf("in %s", scope));
         if (searched > 0) strvec_push_own(&meta, xasprintf("searched %lld", (long long)searched));
-        tc_status_line_t sl = {.icon = TC_ST_WARNING, .spinner = -1, .title = "AST Edit", .title_slot = -1, .description = pv,
-                               .meta = (const char *const *)meta.v, .nmeta = meta.n};
-        char *h = tc_status_line(&sl);
+        /* only parse errors are worth a body; a framed card carries the counts in its bottom border */
         tc_section_t sec = {0};
         push_parse_errors(&sec.lines, perrs, json_get_int(d, "parseErrorsTotal", 0));
-        if (!sec.lines.n) tc_push_wrapped(out, h, width);
-        else {
-            tc_block_t blk = {.header = h, .state = TC_STATE_WARNING, .sections = &sec, .nsections = 1, .width = width,
+        if (!sec.lines.n) {
+            tc_status_line_t sl = {.icon = TC_ST_WARNING, .spinner = -1, .title = "AST Edit", .title_slot = -1, .description = subject,
+                                   .meta = (const char *const *)meta.v, .nmeta = meta.n};
+            char *h = tc_status_line(&sl);
+            tc_push_wrapped(out, h, width);
+            free(h);
+        } else {
+            tc_status_line_t sl = {.icon = TC_ST_WARNING, .spinner = -1, .title = "AST Edit", .title_slot = -1, .description = subject};
+            char *h = tc_status_line(&sl);
+            char *joined = strvec_join(&meta, tc_sym("sep.dot"));
+            char *fm = tc_fg(TUI_TC_DIM, joined);
+            tc_block_t blk = {.header = h, .footer_meta = fm, .state = TC_STATE_WARNING, .sections = &sec, .nsections = 1, .width = width,
                               .pad_left = -1, .pad_right = -1, .border_slot = TUI_TC_BORDER_MUTED};
             tc_output_block(&blk, out);
+            free(fm);
+            free(joined);
+            free(h);
         }
         strvec_free(&sec.lines);
-        free(h);
         strvec_free(&meta);
-        free(pv);
+        free(subject);
         return;
     }
-    strvec_t meta = {0};
-    strvec_push_own(&meta, tc_format_count("replacement", total));
-    strvec_push_own(&meta, tc_format_count("file", touched));
-    if (scope) strvec_push_own(&meta, xasprintf("in %s", scope));
-    strvec_push_own(&meta, xasprintf("searched %lld", (long long)searched));
-    if (limit) strvec_push_own(&meta, tc_fg(TUI_TC_WARNING, "limit reached"));
     tc_status_line_t sl = {.icon = limit ? TC_ST_WARNING : TC_ST_SUCCESS, .spinner = -1, .title = "AST Edit", .title_slot = -1,
-                           .description = pv, .badge = "proposed", .badge_slot = TUI_TC_WARNING,
-                           .meta = (const char *const *)meta.v, .nmeta = meta.n};
+                           .description = subject};
     char *header = tc_status_line(&sl);
+    /* an unapplied result is a staged proposal; the bottom rail leads with that state */
+    char *f_rep = tc_format_count("replacement", total), *f_file = tc_format_count("file", touched);
+    char *f_searched = xasprintf("searched %lld", (long long)searched);
+    char *dim_rep = tc_fg(TUI_TC_DIM, f_rep), *dim_file = tc_fg(TUI_TC_DIM, f_file), *dim_searched = tc_fg(TUI_TC_DIM, f_searched);
+    char *dim_sep = tc_fg(TUI_TC_DIM, tc_sym("sep.dot"));
+    sb_t foot = SB_INIT;
+    if (!json_get_bool(d, "applied", false)) {
+        tc_fg_sb(&foot, TUI_TC_WARNING, "proposed");
+        sb_append(&foot, dim_sep);
+    }
+    sb_appendf(&foot, "%s%s%s%s%s", dim_rep, dim_sep, dim_file, dim_sep, dim_searched);
+    free(f_rep);
+    free(f_file);
+    free(f_searched);
+    free(dim_rep);
+    free(dim_file);
+    free(dim_searched);
+    free(dim_sep);
     const char *dc = json_get_str(d, "displayContent");
     char *text = dc ? xstrdup(dc) : tc_text_of(c->content);
     /* per-file change groups, minus the safety-cap / parse trailers */
@@ -301,7 +333,7 @@ void tc_ast_edit(const tc_call_t *c, int width, strvec_t *out) {
         if (!sec.lines.n && blank(body.v[i])) continue;
         strvec_push_own(&sec.lines, tui_truncate_to_width(body.v[i], cw, ""));
     }
-    tc_block_t blk = {.header = header, .state = c->partial ? TC_STATE_PENDING : TC_STATE_SUCCESS, .sections = &sec,
+    tc_block_t blk = {.header = header, .footer_meta = sb_cstr(&foot), .state = c->partial ? TC_STATE_PENDING : TC_STATE_SUCCESS, .sections = &sec,
                       .nsections = sec.lines.n ? 1 : 0, .width = width, .pad_left = -1, .pad_right = -1,
                       .border_slot = TUI_TC_BORDER_MUTED};
     tc_output_block(&blk, out);
@@ -313,6 +345,6 @@ void tc_ast_edit(const tc_call_t *c, int width, strvec_t *out) {
     tc_grouped_free(&g);
     free(text);
     free(header);
-    strvec_free(&meta);
-    free(pv);
+    sb_free(&foot);
+    free(subject);
 }

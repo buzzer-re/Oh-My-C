@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <pthread.h>
 #include "session.h"
 #include "session/blobs.h"
 #include "session/trace.h"
@@ -966,7 +967,11 @@ bool session_is_pinned(const char *id) {
     return r;
 }
 
-int session_pin_toggle(const char *id, char **err) {
+void session_pins_sync(void);
+
+/* updateSessionPin: read-modify-write under the file lock, atomic replace; `want` 1 pin, 0 unpin, -1 toggle. Returns whether it was
+ * pinned before the update, -1 (+ *err) on failure. */
+static int pin_update(const char *id, int want, char **err) {
     *err = NULL;
     char *p = omc_agent_path("session-pins.json");
     fs_mkdir_p(omc_agent_dir(), 0700);
@@ -977,7 +982,7 @@ int session_pin_toggle(const char *id, char **err) {
     bool was = strvec_contains(&pins, id);
     for (size_t i = 0; i < pins.n; i++)
         if (strcmp(pins.v[i], id) != 0) strvec_push(&next, pins.v[i]);
-    if (!was) strvec_push(&next, id);
+    if (want < 0 ? !was : want) strvec_push(&next, id);
     sb_t b = SB_INIT;
     if (!next.n) sb_append(&b, "[]");
     else {
@@ -1003,7 +1008,37 @@ int session_pin_toggle(const char *id, char **err) {
         *err = xasprintf("Failed to save session pins: %s", strerror(-rc));
         return -1;
     }
-    return was ? 0 : 1;
+    session_pins_sync();
+    return was ? 1 : 0;
+}
+
+int session_pin_toggle(const char *id, char **err) {
+    int was = pin_update(id, -1, err);
+    return was < 0 ? -1 : !was;
+}
+
+int session_pin_clear(const char *id, char **err) { return pin_update(id, 0, err); }
+
+/* the set the status line reads every frame, refreshed at startup, on a session switch and after every update of ours */
+static strvec_t g_pin_cache;
+static pthread_mutex_t g_pin_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void session_pins_sync(void) {
+    char *p = omc_agent_path("session-pins.json");
+    strvec_t pins = pins_read(p);
+    free(p);
+    pthread_mutex_lock(&g_pin_mu);
+    strvec_free(&g_pin_cache);
+    g_pin_cache = pins;
+    pthread_mutex_unlock(&g_pin_mu);
+}
+
+bool session_pin_cached(const char *id) {
+    if (!id) return false;
+    pthread_mutex_lock(&g_pin_mu);
+    bool r = strvec_contains(&g_pin_cache, id);
+    pthread_mutex_unlock(&g_pin_mu);
+    return r;
 }
 
 /* ---------- listing ---------- */

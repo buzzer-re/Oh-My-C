@@ -1,4 +1,7 @@
 /* signals.c - terminal title run state, OSC 7501 program status and turn notifications (see signals.h). */
+#include "session/session.h"
+#include "ui/overlays.h"
+#include "tui/motion.h"
 #include "ui/signals.h"
 
 #include "config/settings.h"
@@ -10,7 +13,6 @@
 
 /* Plain π, not the nerd-font glyph: window/tab titles render in the OS UI font */
 #define DEFAULT_TITLE "\xcf\x80"
-#define SPINNER_INTERVAL_MS 80
 #define MSG_MAX_BYTES 2048
 
 static const char *const BRAILLE[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
@@ -180,6 +182,7 @@ static struct {
     run_state_t title_state;
     int frame;
     int timer;
+    int interval; /* the title spinner's period (setTerminalTitleSpinnerInterval) */
     char *last_title;
     const char *style;
     /* program status */
@@ -230,7 +233,8 @@ static void write_title(const char *title) {
 }
 
 static void emit_title(void) {
-    char *t = ui_title_compose(S.label, S.title_state, S.frame, title_state_enabled(), S.style, static_host());
+    /* tui.spinnerInterval 0 pins the working separator too */
+    char *t = ui_title_compose(S.label, S.title_state, S.frame, title_state_enabled(), S.style, static_host() || !tui_spinner_animated());
     write_title(t);
     free(t);
 }
@@ -249,8 +253,9 @@ static void stop_spinner(void) {
 }
 
 static void start_spinner(void) {
-    if (static_host() || S.disposed || S.timer || !term()) return;
-    S.timer = tui_add_timer(S.u->tui, SPINNER_INTERVAL_MS, true, spinner_tick, NULL);
+    if (static_host() || S.disposed || S.timer || !term() || !tui_spinner_animated()) return;
+    S.interval = tui_spinner_interval();
+    S.timer = tui_add_timer(S.u->tui, S.interval, true, spinner_tick, NULL);
 }
 
 /* setTerminalTitleState */
@@ -340,6 +345,18 @@ void ui_signals_settings_changed(void) {
 
 static void settings_changed_cb(void *ud) {
     (void)ud;
+    ui_apply_motion();
+    /* setTerminalTitleSpinnerInterval: re-arm a live spinner so the new cadence applies immediately */
+    if (tui_spinner_interval() != S.interval) {
+        S.interval = tui_spinner_interval();
+        S.frame = 0;
+        if (S.timer && !tui_spinner_animated()) stop_spinner();
+        else if (S.timer) {
+            stop_spinner();
+            start_spinner();
+        } else if (S.title_state == RUN_WORKING && title_state_enabled()) start_spinner();
+        emit_title();
+    }
     ui_signals_settings_changed();
     ui_recap_refresh();
 }
@@ -357,6 +374,7 @@ void ui_signals_init(ui_t *u) {
     S.claimed = true;
     S.disposed = false;
     S.style = norm_style(settings_str("tui.titleSpinner", "braille"));
+    S.interval = tui_spinner_interval();
     /* setTerminalTitleStateEnabled: emits before the session label is known (`π >`) */
     if (S.title_state == RUN_WORKING && title_state_enabled()) start_spinner();
     emit_title();
@@ -457,6 +475,7 @@ static json_t *warp_event(const char *name) {
 }
 
 void ui_signals_session_start(void) {
+    session_pins_sync(); /* #syncSessionPinned: at startup and on session switch, picking up other instances' pins */
     free(g_warp_prompt);
     g_warp_prompt = NULL;
     warp_emit(warp_event("session_start"));

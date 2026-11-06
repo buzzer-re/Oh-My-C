@@ -3,6 +3,7 @@
 #include "ui/tools/tc.h"
 
 #include <ctype.h>
+#include <unistd.h>
 
 #include "tui/ansi.h"
 #include "tui/markdown.h"
@@ -25,6 +26,33 @@ char *tc_paths_of(const json_t *args) {
         return r;
     }
     return NULL;
+}
+
+/* formatScopedSubject: `pattern in scope`, with `in` dim so the pattern and the scope read as one subject */
+char *tc_scoped_subject(const char *subject, const char *scope) {
+    if (!scope || !*scope) return subject ? xstrdup(subject) : NULL;
+    char *kw = tc_fg(TUI_TC_DIM, "in");
+    char *r = subject ? xasprintf("%s %s %s", subject, kw, scope) : xasprintf("%s %s", kw, scope);
+    free(kw);
+    return r;
+}
+
+/* fileHyperlink: `text` as an OSC 8 link to a local path (resolved against the cwd, percent-encoded) */
+char *tc_file_hyperlink(const char *path, const char *text) {
+    char cwd[4096];
+    sb_t uri = SB_INIT;
+    sb_append(&uri, "file://");
+    if (path[0] != '/' && getcwd(cwd, sizeof cwd)) {
+        sb_append(&uri, cwd);
+        sb_putc(&uri, '/');
+    }
+    for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
+        if (isalnum(*p) || strchr("/-_.~", *p)) sb_putc(&uri, (char)*p);
+        else sb_appendf(&uri, "%%%02X", *p);
+    }
+    char *r = tui_md_hyperlinks_supported() ? xasprintf("\x1b]8;;%s\a%s" TUI_LINK_CLOSE, sb_cstr(&uri), text) : xstrdup(text);
+    sb_free(&uri);
+    return r;
 }
 
 /* ---------- grouped output (tools/grouped-file-output.ts) ---------- */
@@ -219,6 +247,8 @@ char *tc_grouped_code_frame(tc_grouped_t *g, size_t index) {
     while (end < start + CODE_FRAME_CHUNK_ROWS && end < g->lines.n && frame_continues(g, end)) end++;
     /* each gutter in toolOutput, the sources highlighted as one run: a multi-line string or comment keeps its colors */
     const char *lang = g->rows[index].lang;
+    /* the native highlighter knows Markdown: its plain rows stay uncolored rather than taking the frame's color */
+    bool plain = lang && !strcmp(lang, "markdown");
     bool known = lang && tui_highlight_supported(lang);
     strvec_t src = {0}, hl = {0};
     for (size_t r = start; r < end; r++) {
@@ -234,7 +264,7 @@ char *tc_grouped_code_frame(tc_grouped_t *g, size_t index) {
         size_t k = r - start;
         char *gut = xstrndup(g->lines.v[r], frame_gutter(g->lines.v[r], NULL));
         char *gs = tc_fg(TUI_TC_TOOL_OUTPUT, gut);
-        char *ss = known && k < hl.n ? xstrdup(hl.v[k]) : tc_fg(TUI_TC_TOOL_OUTPUT, src.v[k]);
+        char *ss = plain ? xstrdup(src.v[k]) : known && k < hl.n ? xstrdup(hl.v[k]) : tc_fg(TUI_TC_TOOL_OUTPUT, src.v[k]);
         free(g->frames[r]);
         g->frames[r] = xasprintf("%s%s", gs, ss);
         free(ss);
@@ -349,38 +379,56 @@ static char *grep_style(tc_grouped_t *g, size_t i, void *ud) {
     return f ? f : tc_fg(TUI_TC_TOOL_OUTPUT, g->lines.v[i]);
 }
 
+/* grepSubject: a result names the tool's display scope (linked to the original search path); a call falls back
+ * to the requested paths */
+static char *grep_subject(const char *pattern, const json_t *args, const json_t *d) {
+    const char *scope = json_get_str(d, "scopePath");
+    const char *sp = json_get_str(d, "searchPath");
+    char *sc = NULL;
+    if (scope && *scope) sc = sp ? tc_file_hyperlink(sp, scope) : xstrdup(scope);
+    else sc = tc_paths_of(args);
+    char *r = tc_scoped_subject(pattern && *pattern ? pattern : NULL, sc);
+    free(sc);
+    return r;
+}
+
 void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
     const json_t *d = c->details;
     const char *pattern = json_get_str(c->args, "pattern");
     if (!c->has_result || c->partial) {
         strvec_t meta = {0};
-        char *ps = tc_paths_of(c->args);
-        if (ps) meta_push(&meta, xasprintf("in %s", ps));
-        free(ps);
+        char *subj = grep_subject(pattern && *pattern ? pattern : "?", c->args, NULL);
         if (json_get(c->args, "case") && !json_get_bool(c->args, "case", true)) strvec_push(&meta, "case:insensitive");
         if (json_get(c->args, "gitignore") && !json_get_bool(c->args, "gitignore", true)) strvec_push(&meta, "gitignore:false");
         if (json_get_int(c->args, "skip", 0) > 0) meta_push(&meta, xasprintf("skip:%lld", (long long)json_get_int(c->args, "skip", 0)));
         tc_status_line_t sl = {.icon = TC_ST_PENDING, .spinner = -1, .title = "Grep", .title_slot = TUI_TC_TOOL_TITLE,
-                               .description = pattern && *pattern ? pattern : "?", .meta = (const char *const *)meta.v, .nmeta = meta.n};
+                               .description = subj, .meta = (const char *const *)meta.v, .nmeta = meta.n};
         char *h = tc_status_line(&sl);
         tc_push_wrapped(out, h, width);
         free(h);
+        free(subj);
         strvec_free(&meta);
         return;
     }
+    char *subject = grep_subject(pattern, c->args, d);
     if (c->is_error || json_get_str(d, "error")) {
         char *t = json_get_str(d, "error") ? xstrdup(json_get_str(d, "error")) : tc_text_of(c->content);
-        char *e = tc_error_message(*t ? t : "Unknown error");
-        tc_push_wrapped(out, e, width);
+        tc_status_line_t sl = {.icon = TC_ST_ERROR, .spinner = -1, .title = "Grep", .title_slot = TUI_TC_TOOL_TITLE, .description = subject};
+        char *h = tc_status_line(&sl);
+        char *e = tc_error_detail(*t ? t : "Unknown error");
+        char *j = xasprintf("%s\n%s", h, e);
+        tc_push_wrapped(out, j, width);
+        free(j);
         free(e);
+        free(h);
         free(t);
+        free(subject);
         return;
     }
     bool detailed = json_get(d, "matchCount") || json_get(d, "fileCount");
     const char *dc = json_get_str(d, "displayContent");
     char *text = dc ? xstrdup(dc) : tc_text_of(c->content);
     int64_t matches = json_get_int(d, "matchCount", 0), files = json_get_int(d, "fileCount", 0);
-    const char *scope = json_get_str(d, "scopePath");
     strvec_t missing = {0};
     {
         json_t *e;
@@ -408,7 +456,7 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
             char *cnt = tc_format_count("item", (int64_t)items.n);
             const char *m[] = {cnt};
             tc_status_line_t sl = {.icon_override = ic, .spinner = -1, .title = "Grep", .title_slot = TUI_TC_TOOL_TITLE,
-                                   .description = pattern, .meta = m, .nmeta = 1};
+                                   .description = subject, .meta = m, .nmeta = 1};
             char *h = tc_status_line(&sl);
             strvec_t rows = {0};
             tc_tree_list(&items, c->expanded, 6, "item", &rows);
@@ -423,14 +471,14 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
         free(missing_note);
         strvec_free(&missing);
         free(text);
+        free(subject);
         return;
     }
     if (matches == 0) {
         strvec_t meta = {0};
         strvec_push(&meta, "0 matches");
-        if (scope) meta_push(&meta, xasprintf("in %s", scope));
         tc_status_line_t sl = {.icon = TC_ST_WARNING, .spinner = -1, .title = "Grep", .title_slot = TUI_TC_TOOL_TITLE,
-                               .description = pattern, .meta = (const char *const *)meta.v, .nmeta = meta.n};
+                               .description = subject, .meta = (const char *const *)meta.v, .nmeta = meta.n};
         char *h = tc_status_line(&sl);
         tc_push_wrapped(out, h, width);
         char *e = tc_empty_message("No matches found");
@@ -442,6 +490,7 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
         free(missing_note);
         strvec_free(&missing);
         free(text);
+        free(subject);
         return;
     }
     const json_t *mt = json_get_obj(d, "meta");
@@ -450,11 +499,10 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
     strvec_t meta = {0};
     meta_push(&meta, tc_format_count("match", matches));
     meta_push(&meta, tc_format_count("file", files));
-    if (scope) meta_push(&meta, xasprintf("in %s", scope));
     if (truncated) meta_push(&meta, tc_fg(TUI_TC_WARNING, "truncated"));
     char *ic = truncated ? NULL : search_icon();
     tc_status_line_t sl = {.icon = truncated ? TC_ST_WARNING : TC_ST_NONE, .icon_override = ic, .spinner = -1, .title = "Grep",
-                           .title_slot = TUI_TC_TOOL_TITLE, .description = pattern, .meta = (const char *const *)meta.v,
+                           .title_slot = TUI_TC_TOOL_TITLE, .description = subject, .meta = (const char *const *)meta.v,
                            .nmeta = meta.n};
     char *header = tc_status_line(&sl);
 
@@ -495,6 +543,7 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
     free(missing_note);
     strvec_free(&missing);
     free(text);
+    free(subject);
 }
 
 /* ---------- glob ---------- */

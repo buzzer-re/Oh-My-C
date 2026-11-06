@@ -40,6 +40,10 @@ typedef struct {
     bool has_skills;
     strvec_t skills;
     bool no_rules, no_context_files, no_title;
+    /* motion flags: ephemeral setting overrides, outrank PI_SPINNER_INTERVAL / PI_MAX_FPS / PI_MOTION */
+    int spinner_interval, max_fps;
+    bool has_spinner_interval, has_max_fps;
+    const char *motion;
     bool auto_approve;
     const char *approval_mode;
     const char *service_tier; /* --service-tier (an OpenAI tier setting value) */

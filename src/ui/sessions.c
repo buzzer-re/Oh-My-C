@@ -731,6 +731,7 @@ static bool sess_key(tui_component_t *c, const tui_key_t *k) {
             }
             free(v->error);
             v->error = pins_save(v);
+            session_pins_sync(); /* applySessionPin */
             sess_refilter(v);
             for (size_t i = 0; i < v->vis.n; i++) /* the cursor follows the session */
                 if (str_eq(v->all.v[v->vis.v[i]].id, id)) v->sel = i;

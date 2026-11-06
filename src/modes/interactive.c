@@ -3118,7 +3118,7 @@ static void retry_key(ui_t *u) {
         add_notice(u, "info", "Nothing to retry");
         return;
     }
-    tui_editor_clear(u->editor);
+    /* composer text is an unsent draft, not the request retry resends */
     handle_command(u, "/retry");
 }
 
@@ -3379,6 +3379,18 @@ static void restore_cb(void *ud) {
     if (pthread_create(&u->worker, NULL, retry_main, u) != 0) u->worker_running = false;
 }
 
+static tui_container_t *g_header_after;
+
+static void whats_new_cb(void *ud) {
+    ui_t *u = ud;
+    if (!tui_has_rendered(u->tui)) {
+        tui_add_timer(u->tui, 10, false, whats_new_cb, u);
+        return;
+    }
+    xc_whats_new(u, g_header_after);
+    tui_request_render(u->tui);
+}
+
 static void startup_picker_cb(void *ud) {
     g_start_picker = true;
     ui_overlay_session(ud);
@@ -3413,6 +3425,8 @@ int run_interactive_mode(app_t *a, const char *initial) {
     u.hide_tool_activity = settings_bool("display.hideToolActivity", false);
     tokrate_init(&u.tokrate);
     tui_set_tight(settings_bool("tui.tight", false));
+    tui_md_set_colorful(settings_bool("tui.colorfulMarkdown", true));
+    ui_apply_motion();
     tui_hyperlinks_apply_setting(settings_str("tui.hyperlinks", "auto")); /* applyHyperlinkSetting */
     tui_set_terminal_background_light(str_eq(tui_detect_theme_name(), "light"));
     kbcfg_init_global(); /* KeybindingsManager.create(): agent-dir keybindings.yml (+ legacy .json migration) */
@@ -3450,7 +3464,10 @@ int run_interactive_mode(app_t *a, const char *initial) {
         tui_container_add(root, &tui_spacer_new(1)->base);
         tui_container_add(root, u.welcome);
         tui_container_add(root, &tui_spacer_new(1)->base);
-        xc_whats_new(&u, root); /* headerAfter: the startup release notes (modes/extractl.c) */
+        /* headerAfter: the startup release notes (modes/extractl.c), added after the first session-bound frame */
+        g_header_after = tui_container_new();
+        tui_container_add(root, &g_header_after->base);
+        tui_add_timer(u.tui, 1, false, whats_new_cb, &u);
     }
     u.chat = ui_transcript_new(false); /* the welcome banner brings its own trailing spacer */
     tui_container_add(root, &u.chat->base);
@@ -3482,6 +3499,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_editor_set_inline_hint(u.editor, tui_ac_default_inline_hint, ac);
     tui_editor_set_autocomplete(u.editor, tui_ac_default_provider, ac);
     tui_editor_set_token_hook(u.editor, skill_chip_hook, &u);
+    ui_keywords_attach(&u);
     tui_container_add(root, &u.editor->base);
     u.status = ui_status_new(&u);
     tui_container_add(root, u.status);

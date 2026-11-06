@@ -15,15 +15,18 @@
 typedef struct {
     const char *id, *word, *notice; /* notice: prompts/coding-agent/prompts/system/<notice> */
     const char *requires[2];
+    double hue_from, hue_to; /* the editor/bubble gradient */
+    double light_from, light_to; /* lightness sweep; 0: the default lightness */
 } keyword_t;
 
 /* MAGIC_KEYWORDS. `workflowz` is detected but its notice teaches eval `workpool()`/`agent()`, which omc does not
  * implement, so (like omp skipping a notice whose required tools are inactive) it is never injected. */
 static const keyword_t KEYWORDS[] = {
-    {"ultrathink", "ultrathink", "ultrathink-notice.md", {NULL, NULL}},
-    {"orchestrate", "orchestrate", "orchestrate-notice.md", {"task", NULL}},
-    {"workflow", "workflowz", NULL, {"task", "eval"}},
-    {"jevify", "jevify", "jevify-notice.md", {"eval", NULL}},
+    {"ultrathink", "ultrathink", "ultrathink-notice.md", {NULL, NULL}, 0, 330, 0, 0},
+    {"chillax", "chillax", "chillax-notice.md", {NULL, NULL}, 180, 235, 62, 45}, /* cyan darkening into deep blue */
+    {"orchestrate", "orchestrate", "orchestrate-notice.md", {"task", NULL}, 150, 280, 0, 0},
+    {"workflow", "workflowz", NULL, {"task", "eval"}, 30, 150, 0, 0},
+    {"jevify", "jevify", "jevify-notice.md", {"eval", NULL}, 300, 420, 0, 0},
 };
 
 bool keywords_enabled(const char *id) {
@@ -228,9 +231,11 @@ static size_t cp_len_at(const char *t, size_t i, size_t n) {
 
 /* LEFT_BOUNDARY (?<![\p{L}\p{N}_./\\-])(?<!::), then the word, then RIGHT_BOUNDARY
  * (?![\p{L}\p{N}_/\\-])(?!\.[\p{L}\p{N}_-])(?!\() */
-static bool word_match(const char *text, const char *word) {
+/* the next standalone occurrence of `word` at or after `from`, -1 when none */
+static long word_find(const char *text, const char *word, size_t from) {
     size_t n = strlen(text), wl = strlen(word);
-    for (const char *p = strstr(text, word); p; p = strstr(p + 1, word)) {
+    if (from > n) return -1;
+    for (const char *p = strstr(text + from, word); p; p = strstr(p + 1, word)) {
         size_t i = (size_t)(p - text), e = i + wl;
         if (i > 0) {
             size_t ps = i - 1;
@@ -245,10 +250,12 @@ static bool word_match(const char *text, const char *word) {
             if (c == '.' && e + 1 < n && (strchr("_-", text[e + 1]) || letter_or_number(text + e + 1, cp_len_at(text, e + 1, n))))
                 continue;
         }
-        return true;
+        return (long)i;
     }
-    return false;
+    return -1;
 }
+
+static bool word_match(const char *text, const char *word) { return word_find(text, word, 0) >= 0; }
 
 bool keywords_contains(const char *text, const char *word) {
     if (!text || !word || !strstr(text, word) || !word_match(text, word)) return false;
@@ -256,6 +263,35 @@ bool keywords_contains(const char *text, const char *word) {
     bool hit = word_match(masked, word);
     free(masked);
     return hit;
+}
+
+size_t keywords_ranges(const char *text, keyword_range_t **out) {
+    *out = NULL;
+    bool any = false;
+    for (size_t i = 0; i < ARRAY_LEN(KEYWORDS) && !any; i++) any = strstr(text, KEYWORDS[i].word) != NULL;
+    if (!any) return 0;
+    char *masked = keywords_mask_non_prose(text);
+    VEC(keyword_range_t) v = {0};
+    for (size_t k = 0; k < ARRAY_LEN(KEYWORDS); k++) {
+        size_t wl = strlen(KEYWORDS[k].word), at = 0;
+        long hit;
+        while ((hit = word_find(masked, KEYWORDS[k].word, at)) >= 0) {
+            keyword_range_t r = {(size_t)hit, (size_t)hit + wl, (int)k};
+            vec_push(&v, r);
+            at = (size_t)hit + wl;
+        }
+    }
+    free(masked);
+    *out = v.v;
+    return v.n;
+}
+
+void keywords_glow_spec(int kw, double *hue_from, double *hue_to, double *light_from, double *light_to) {
+    const keyword_t *k = &KEYWORDS[kw];
+    *hue_from = k->hue_from;
+    *hue_to = k->hue_to;
+    *light_from = k->light_from ? k->light_from : 62;
+    *light_to = k->light_to ? k->light_to : 62;
 }
 
 /* ---------- notices ---------- */

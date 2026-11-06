@@ -7,6 +7,7 @@
 #include "config/settings.h"
 #include "core/embed.h"
 #include "core/fs.h"
+#include "tui/motion.h"
 
 #include <math.h>
 
@@ -14,6 +15,35 @@ static char *g_theme_name;
 static bool g_color_blind;
 
 const char *ui_theme_current_name(void) { return g_theme_name; }
+
+/* cfgMotionResolved + its effect: tui.motion's preset under the user's own spinner interval and shimmer; a setting set anywhere
+ * (file, flag, env) wins over the preset. Also tui.maxFps. */
+void ui_apply_motion(void) {
+    tui_motion_mode_t mode = TUI_MOTION_FULL;
+    settings_parse_motion_mode(settings_str("tui.motion", "full"), &mode, NULL);
+    int interval = tui_motion_preset_interval(mode);
+    const json_t *si = settings_get("tui.spinnerInterval");
+    if (si && !json_is_null(si)) {
+        char *t = json_is_str(si) ? xstrdup(json_sv(si)) : json_dump(si, 0);
+        int v;
+        if (settings_parse_spinner_interval(t, &v, NULL)) interval = v;
+        free(t);
+    }
+    tui_set_spinner_interval(interval);
+    int fps = TUI_DEFAULT_MAX_FPS;
+    const json_t *mf = settings_get("tui.maxFps");
+    if (mf && !json_is_null(mf)) {
+        char *t = json_is_str(mf) ? xstrdup(json_sv(mf)) : json_dump(mf, 0);
+        int v;
+        if (settings_parse_max_fps(t, &v, NULL)) fps = v;
+        free(t);
+    }
+    tui_set_max_fps(fps);
+    bool effects = tui_motion_preset_effects(mode);
+    tui_set_motion_effects(effects);
+    const char *sh = settings_str("display.shimmer", "classic");
+    tui_set_shimmer_mode(!effects || str_eq(sh, "disabled") ? TUI_SHIMMER_DISABLED : str_eq(sh, "kitt") ? TUI_SHIMMER_KITT : TUI_SHIMMER_CLASSIC);
+}
 
 /* HSV shift used by colorBlindMode (loader.ts COLORBLIND_ADJUSTMENT = {h: 60, s: 0.71}) */
 static int64_t adjust_hsv(int64_t rgb) {

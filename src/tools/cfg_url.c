@@ -364,7 +364,19 @@ static json_t *parse_value(const setting_t *s, const char *text, char **err) {
         char *end = NULL;
         double d = *t ? strtod(t, &end) : NAN;
         if (!*t || !end || *end || !isfinite(d)) *err = xasprintf("Invalid number: %s", text);
-        else v = json_num(d);
+        else {
+            /* the setting's own validate: parseSpinnerInterval / parseMaxFps */
+            int n;
+            json_t *num = json_num(d);
+            char *shown = json_dump(num, 0);
+            if (!strcmp(s->id, "tui.spinnerInterval") && !settings_parse_spinner_interval(shown, &n, NULL))
+                *err = xasprintf("Spinner interval must be 0 (static) or a whole number of milliseconds \xe2\x89\xa5 50, got %s.", shown);
+            else if (!strcmp(s->id, "tui.maxFps") && !settings_parse_max_fps(shown, &n, NULL))
+                *err = xasprintf("Max frames per second must be a whole number from 1 to 120, got %s.", shown);
+            free(shown);
+            if (*err) json_free(num);
+            else v = num;
+        }
     } else if (str_eq(type, "array") || str_eq(type, "record")) {
         json_t *p = json_parse(t, strlen(t), NULL);
         bool ok = str_eq(type, "array") ? json_is_arr(p) : json_is_obj(p);

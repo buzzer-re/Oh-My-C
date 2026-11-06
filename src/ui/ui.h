@@ -211,6 +211,12 @@ void ui_working_set_message(ui_t *u, const char *message);
 void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms);
 void ui_working_compaction(ui_t *u, const char *label);
 bool ui_working_busy(ui_t *u); /* a retry countdown or compaction row replaces the working/title row */
+/* highlightMagicKeywords over a rendered row: paints each keyword standing as prose with its gradient; escapes in the row are
+ * kept. `reset_to`: the SGR restored after a keyword (NULL: foreground reset); `only_fg`: only paint where this is the active
+ * foreground. NULL when nothing was painted. */
+char *ui_keywords_paint(const char *row, const char *reset_to, double phase, const char *only_fg);
+/* the composer's row decoration: the gradient, animated while the prompt is focused and motion allows */
+void ui_keywords_attach(ui_t *u);
 void ui_chat_rebuild(ui_t *u); /* replay the transcript from the session tree (resume, branch, reload) */
 /* detectCacheInvalidation(prev usage, current usage): reprocessed prompt tokens, 0 = no invalidation */
 int64_t ui_detect_cache_invalidation(const json_t *prev, const json_t *cur);

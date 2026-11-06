@@ -8,6 +8,7 @@
  * transcript (showCommandMessage). Everything that connects to a server runs on a worker thread and talks
  * to the UI through tui_post. omc keeps MCP OAuth credentials url-keyed in auth.json ("mcp:<url>"), so a
  * signed-in server needs no `auth` block in mcp.json. The Smithery registry subcommands are not ported. */
+#include "tui/motion.h"
 #include "ui/mcpint.h"
 #include "coding/xdnotice.h"
 
@@ -160,7 +161,7 @@ static void connection_status(ui_t *u);
 static void spin_tick(void *ud) {
     blk_t *b = ud;
     pthread_mutex_lock(&b->mu);
-    b->frame++;
+    b->frame = tui_spinner_tick();
     pthread_mutex_unlock(&b->mu);
     if (b->tui) tui_request_render(b->tui);
 }
@@ -180,7 +181,7 @@ static void post_cb(void *p) {
         x->blk->tui = u->tui;
         __atomic_add_fetch(&x->blk->refs, 1, __ATOMIC_SEQ_CST); /* the transcript's reference */
         present(u, &x->blk->base);
-        x->blk->timer = tui_add_timer(u->tui, 80, true, spin_tick, x->blk);
+        x->blk->timer = tui_add_clock_timer(u->tui, NULL, spin_tick, x->blk);
         blk_unref(x->blk); /* the post's reference */
         break;
     case P_BLK_TEXT:

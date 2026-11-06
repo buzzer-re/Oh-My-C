@@ -8,6 +8,7 @@
 #include "tui/fuzzy.h"
 #include "tui/keys.h"
 #include "tui/markdown.h"
+#include "tui/motion.h"
 #include "tui/render.h"
 #include "tui/term.h"
 #include "tui/theme.h"
@@ -498,6 +499,80 @@ static strvec_t render_fixture(const char *name, tui_md_opts_t *o, int width) {
     free(src);
     free(path);
     return out;
+}
+
+/* spinner-clock.ts, frame-rate.ts */
+static void test_motion_knobs(void) {
+    CHECK(tui_spinner_animated());
+    CHECK(tui_spinner_tick_delay(80) >= 1 && tui_spinner_tick_delay(80) <= 80);
+    tui_set_spinner_interval(TUI_SPINNER_INTERVAL_STATIC);
+    CHECK(!tui_spinner_animated());
+    CHECK(tui_shared_spinner_frame(10) == 0 && tui_spinner_tick() == 0);
+    tui_set_spinner_interval(TUI_DEFAULT_SPINNER_INTERVAL_MS);
+    CHECK(tui_shared_spinner_frame(10) >= 0 && tui_shared_spinner_frame(10) < 10);
+    tui_set_max_fps(4);
+    CHECK(tui_min_frame_interval_ms() == 250.0);
+    tui_set_max_fps(TUI_DEFAULT_MAX_FPS);
+    CHECK(tui_motion_preset_interval(TUI_MOTION_REDUCED) == 250 && !tui_motion_preset_effects(TUI_MOTION_REDUCED));
+    CHECK(tui_motion_preset_interval(TUI_MOTION_NONE) == 0 && !tui_motion_preset_effects(TUI_MOTION_NONE));
+    CHECK(tui_motion_preset_interval(TUI_MOTION_FULL) == 80 && tui_motion_preset_effects(TUI_MOTION_FULL));
+}
+
+/* tui.colorfulMarkdown (colorful-markdown.test.ts): off keeps mdHeading/mdCode and uncolored emphasis */
+static void test_colorful_markdown(void) {
+    char *err = NULL;
+    tui_theme_t *th = tui_theme_load("titanium", TUI_COLOR_TRUECOLOR, &err);
+    CHECK(th != NULL);
+    free(err);
+    if (!th) return;
+    tui_theme_set(th);
+    tui_md_opts_t o;
+    tui_md_opts_default(&o);
+    o.hyperlinks = false;
+    const char *doc = "## Two\n\n**loud `code` tail** *soft*";
+    const char *magenta = tui_ansi_fg_seq(NULL, TUI_ANSI_MAGENTA);
+    strvec_t on = {0}, off = {0};
+    tui_md_render(doc, 60, &o, &on);
+    char *j = strvec_join(&on, "\n");
+    CHECK(strstr(j, tui_ansi_fg_seq(NULL, TUI_ANSI_YELLOW)) != NULL);
+    CHECK(strstr(j, magenta) != NULL);
+    CHECK(strstr(j, tui_ansi_fg_seq(NULL, TUI_ANSI_GREEN)) != NULL);
+    free(j);
+    tui_md_set_colorful(false);
+    tui_md_render(doc, 60, &o, &off);
+    tui_md_set_colorful(true);
+    j = strvec_join(&off, "\n");
+    CHECK(strstr(j, tui_fg_seq(NULL, TUI_TC_MD_HEADING)) != NULL);
+    CHECK(strstr(j, tui_fg_seq(NULL, TUI_TC_MD_CODE)) != NULL);
+    CHECK(strstr(j, magenta) == NULL);
+    free(j);
+    strvec_free(&on);
+    strvec_free(&off);
+    /* a theme without terminal.ansi falls back to the terminal's own palette */
+    char *src = fs_read("assets/tui/themes/dark.json", NULL);
+    CHECK(src != NULL);
+    json_t *bare = src ? json_parse(src, strlen(src), NULL) : NULL;
+    CHECK(bare != NULL);
+    if (bare) {
+        tui_theme_t *one = tui_theme_from_json(bare, TUI_COLOR_TRUECOLOR, NULL);
+        CHECK(one && !strcmp(one->ansi_fg[5], "\x1b[38;2;188;63;188m"));
+        tui_theme_free(one);
+        json_del(bare, "terminal");
+        one = tui_theme_from_json(bare, TUI_COLOR_TRUECOLOR, NULL);
+        CHECK(one && !strcmp(one->ansi_fg[5], "\x1b[38;5;5m"));
+        tui_theme_free(one);
+        json_free(bare);
+    }
+    free(src);
+    /* a thinking block's forced run color stays over the strong role */
+    tui_md_opts_t t = o;
+    t.text_slot = TUI_TC_THINKING_TEXT;
+    strvec_t th_out = {0};
+    tui_md_render("**x**", 60, &t, &th_out);
+    j = strvec_join(&th_out, "\n");
+    CHECK(strstr(j, magenta) == NULL);
+    free(j);
+    strvec_free(&th_out);
 }
 
 static void test_golden(void) {
@@ -1420,6 +1495,8 @@ static void test_wp6_editor(void) {
 }
 
 int main(void) {
+    test_colorful_markdown();
+    test_motion_knobs();
     test_keys();
     test_wp6_editor();
     test_app_keybindings();

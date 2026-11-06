@@ -351,3 +351,31 @@ Ports of omp's terminal-capabilities.ts image/hyperlink policy, kitty-graphics.t
 
 Not ported: the inline-image budget (`tui.maxInlineImages` demotion and purges), re-anchoring/cropping of image blocks clipped
 at the screen top, OSC 11 background detection, image fallback hyperlinks, vim mode, charts, reactions, Mermaid, SVG and LaTeX.
+
+## Motion
+
+`src/tui/motion.c` holds the shared animation knobs (omp `spinner-clock.ts`, `frame-rate.ts`, `motion-effects.ts`). Every
+spinner reads `tui_shared_spinner_frame` from the wall clock and repaints on `tui_add_clock_timer`, whose ticks land on the
+period's boundaries, so N spinners cost one frame. `ui_apply_motion` resolves `tui.motion`'s preset under `tui.spinnerInterval`
+(unset follows the preset) and `display.shimmer`, plus the `tui.maxFps` ceiling; it runs at startup and on every settings
+change. Frames a keystroke waits on keep 30 fps under any ceiling. Decorative motion (brand fade, shimmer) stops when the
+preset turns effects off. `--spinner-interval`, `--max-fps` and `--motion` are runtime overrides, which outrank
+`PI_SPINNER_INTERVAL`, `PI_MAX_FPS` and `PI_MOTION`; those outrank every settings file (`env_layer` in `src/config/settings.c`).
+
+## Markdown colors and the keyword glow
+
+With `tui.colorfulMarkdown` on (the default) `src/tui/markdown.c` paints headings by level (magenta, yellow, blue), strong and
+emphasis (magenta), inline code (green) and table headers (yellow) from the theme's `terminal.ansi` palette
+(`tui_ansi_fg_seq`; a theme without one falls back to the terminal's own palette). A forced run color (thinking blocks, the user
+bubble) stays over a role's color; `proseFg` (`assistantMessageText`) yields to it. `src/ui/keywordglow.c` paints standalone
+magic keywords with their HSL gradient in sent bubbles and, rotating while the prompt is focused, in the composer.
+
+## Prompt cache
+
+`cachewarm_status` (`src/coding/cachewarm.c`) says what the next request finds in the prompt cache: the confirmed entry of the
+last response while the transcript still extends it, else what the branch's newest cached reply left. The `cache` status-line
+segment and `/session`'s Prompt Cache rows read it. The armed entry's lifetime counts from when the request is prepared.
+
+The idle recap is journaled in `<agent>/session-recaps.jsonl` (omp uses history.db), and a transcript replay re-shows the newest one
+while the conversation has not moved since.
+

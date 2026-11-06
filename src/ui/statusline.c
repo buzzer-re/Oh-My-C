@@ -6,6 +6,8 @@
  * context gauge, embedded in the box composer's top border), `band` (box opened by a soft cap,
  * the band composer's top row; omp's default), `plain-full` / `plain-left` (standalone bottom
  * bar) and `plain-right` (the chip on the claude/rule composers' top rule). */
+#include "coding/cachewarm.h"
+#include "tui/motion.h"
 #include "ui/ui.h"
 
 #include "coding/agents.h"
@@ -278,11 +280,11 @@ static void preset_def(const char *name, sl_settings_t *s) {
          "{\"model\":{\"showThinkingLevel\":false},\"git\":{\"showBranch\":true,\"showStaged\":true,\"showUnstaged\":true,"
          "\"showUntracked\":false}}"},
         {"full", "pi vim hostname model mode path git pr subagents",
-         "session_name cache_hit token_in token_out token_rate cache_read cost context_pct time_spent time", "powerline",
+         "session_name cache_hit token_in token_out token_rate cache_read cache cost context_pct time_spent time", "powerline",
          "{\"model\":{\"showThinkingLevel\":true},\"path\":{\"abbreviate\":true,\"maxLength\":50},\"git\":{\"showBranch\":true,"
          "\"showStaged\":true,\"showUnstaged\":true,\"showUntracked\":true},\"time\":{\"format\":\"24h\",\"showSeconds\":false}}"},
         {"nerd", "pi vim hostname model mode path git pr session subagents",
-         "session_name token_in token_out cache_read cache_write token_rate cost context_pct context_total time_spent time",
+         "session_name token_in token_out cache_read cache_write token_rate cache cost context_pct context_total time_spent time",
          "powerline",
          "{\"model\":{\"showThinkingLevel\":true},\"path\":{\"abbreviate\":true,\"maxLength\":60},\"git\":{\"showBranch\":true,"
          "\"showStaged\":true,\"showUnstaged\":true,\"showUntracked\":true},\"time\":{\"format\":\"24h\",\"showSeconds\":true}}"},
@@ -604,14 +606,38 @@ static uint32_t brand_rgb(const segctx_t *c, bool working, bool visible) {
         uint32_t prev = g_sl.brand_working ? work : idle;
         g_sl.fade_from = brand_sample(prev, now);
         g_sl.fade_to = working ? work : idle;
-        g_sl.fade_start = now;
+        /* with decorative motion off the brand snaps to its settled color; otherwise it eases over */
+        g_sl.fade_start = tui_motion_effects_enabled() ? now : 0;
         g_sl.brand_working = working;
-        if (visible && !g_sl.fade_timer && c->u && c->u->tui) g_sl.fade_timer = tui_add_timer(c->u->tui, 40, true, fade_tick, c->u);
+        if (g_sl.fade_start && visible && !g_sl.fade_timer && c->u && c->u->tui) g_sl.fade_timer = tui_add_timer(c->u->tui, 40, true, fade_tick, c->u);
     }
     return brand_sample(working ? work : idle, now);
 }
 
 /* returns owned content or NULL when not visible */
+/* #syncPromptCacheTimer: repaint as a warm entry expires, nothing else would */
+static int g_cache_wake_timer;
+static int64_t g_cache_wake_at;
+
+static void cache_wake_cb(void *ud) {
+    ui_t *u = ud;
+    g_cache_wake_timer = 0;
+    g_cache_wake_at = 0;
+    tui_request_render(u->tui);
+}
+
+static void cache_wake_sync(const segctx_t *c, const cache_status_t *st, int64_t now) {
+    int64_t wake = st && !st->cold && st->ttl_ms >= 0 ? st->touched_at + st->ttl_ms : 0;
+    ui_t *u = c->u;
+    if (!u || !u->tui) return;
+    if (wake <= now) wake = 0;
+    if (g_cache_wake_at == wake) return;
+    if (g_cache_wake_timer) tui_remove_timer(u->tui, g_cache_wake_timer);
+    g_cache_wake_timer = 0;
+    g_cache_wake_at = wake;
+    if (wake) g_cache_wake_timer = tui_add_timer(u->tui, (int)MIN(wake - now, (int64_t)86400000), false, cache_wake_cb, u);
+}
+
 static char *render_segment(const char *id, const segctx_t *c) {
     const app_t *a = c->a;
     if (str_eq(id, "pi")) {
@@ -629,7 +655,7 @@ static char *render_segment(const char *id, const segctx_t *c) {
         if (el >= 0) {
             const char *const *frames;
             size_t nf = tui_sym_spinner("activity", &frames);
-            const char *fr = nf ? frames[(mono_ms() / 80) % nf] : "";
+            const char *fr = nf ? frames[tui_shared_spinner_frame((int)nf)] : "";
             int64_t s = el / 1000;
             char t[16];
             if (s < 60) snprintf(t, sizeof t, "%llds", (long long)s);
@@ -921,9 +947,29 @@ static char *render_segment(const char *id, const segctx_t *c) {
         if (!g_recording) return NULL;
         return xasprintf("%s\xe2\x97\x8f REC\x1b[39m", tui_fg_seq(TH(), TUI_TC_THINKING_HIGH));
     }
+    if (str_eq(id, "cache")) {
+        /* one glyph, no words: the cache icon dim while cached, struck through in the warning colour once the next message
+         * re-sends the prefix */
+        cache_status_t st;
+        int64_t now = now_ms();
+        if (!cachewarm_status((app_t *)a, now, c->ctx_tokens, &st)) {
+            cache_wake_sync(c, NULL, now);
+            return NULL;
+        }
+        cache_wake_sync(c, &st, now);
+        char *r = st.cold ? fgw(TUI_TC_WARNING, sym("icon.cacheCold")) : fgw(TUI_TC_DIM, sym("icon.cacheWarm"));
+        cache_status_free(&st);
+        return r;
+    }
     if (str_eq(id, "session_name")) {
         if (!c->title) return NULL;
         char *s = sanitize_status(c->title);
+        /* a pinned session shows the pin beside its title */
+        if (a->session && session_pin_cached(session_id(a->session))) {
+            char *wi = with_icon(sym("icon.pin"), s);
+            free(s);
+            s = wi;
+        }
         char *r = accent_fg(c, TUI_TC_ACCENT, s);
         free(s);
         return r;
@@ -1659,7 +1705,8 @@ static char *title_only(ui_t *u) {
     const char *t = u->app->session ? u->app->session->title : NULL;
     if (!t || !*t) return NULL;
     char *s = sanitize_status(t);
-    char *r = xasprintf("\x1b[2;3m%s\x1b[23;22m", s);
+    const char *pin = session_pin_cached(session_id(u->app->session)) ? sym("icon.pin") : NULL;
+    char *r = pin ? xasprintf("\x1b[2;3m%s %s\x1b[23;22m", pin, s) : xasprintf("\x1b[2;3m%s\x1b[23;22m", s);
     free(s);
     return r;
 }
@@ -1693,13 +1740,31 @@ typedef struct {
     tui_component_t *inner; /* the loader */
 } statusrow_t;
 
-/* shimmerText (classic mode): a cosine band sweeping at 30 cells/s over low/mid/high tiers */
+/* shimmerText: a band sweeping at 30 cells/s over low/mid/high tiers: a cosine bump (classic) or a bright head ping-ponging
+ * with a quadratic trail behind it (kitt); disabled renders every tier as the mid color */
 static char *shimmer(const char *text, const char *low, const char *mid, const char *high) {
     int total = (int)utf8_strlen(text);
     if (!total) return xstrdup("");
+    tui_shimmer_mode_t mode = tui_shimmer_mode();
+    if (mode == TUI_SHIMMER_DISABLED) return xasprintf("%s%s\x1b[39m", mid, text);
     double travel = (double)now_ms() / 1000.0 * 30.0;
-    double pos = fmod(travel, total + 20);
-    double lo = pos - 10 - 6, hi = pos - 10 + 6;
+    bool kitt = mode == TUI_SHIMMER_KITT, going_right = true;
+    double pos, lo, hi;
+    if (kitt) {
+        int range = total - 1;
+        if (range <= 0) pos = 0;
+        else {
+            double sweep = fmod(travel, 2.0 * range);
+            going_right = sweep < range;
+            pos = going_right ? sweep : 2.0 * range - sweep;
+        }
+        lo = going_right ? pos - 0.6 - 7 : pos - 0.6;
+        hi = going_right ? pos + 0.6 : pos + 0.6 + 7;
+    } else {
+        pos = fmod(travel, total + 20);
+        lo = pos - 10 - 6;
+        hi = pos - 10 + 6;
+    }
     sb_t b = SB_INIT;
     int run = -1, idx = 0;
     const char *p = text;
@@ -1708,8 +1773,19 @@ static char *shimmer(const char *text, const char *low, const char *mid, const c
         int k = utf8_decode(p, strlen(p), &cp);
         int tier = 0;
         if (idx >= lo && idx <= hi) {
-            double dist = fabs(idx + 10 - pos);
-            double in = dist >= 6 ? 0 : 0.5 * (1 + cos(M_PI * dist / 6));
+            double in;
+            if (kitt) {
+                double delta = idx - pos, behind = going_right ? -delta : delta;
+                if (fabs(delta) <= 0.6) in = 1;
+                else if (behind <= 0.6) in = 0;
+                else {
+                    double tt = (behind - 0.6) / 7;
+                    in = tt >= 1 ? 0 : (1 - tt) * (1 - tt);
+                }
+            } else {
+                double dist = fabs(idx + 10 - pos);
+                in = dist >= 6 ? 0 : 0.5 * (1 + cos(M_PI * dist / 6));
+            }
             tier = in >= 0.65 ? 2 : in >= 0.22 ? 1 : 0;
         }
         if (tier != run) {
@@ -1904,6 +1980,12 @@ void ui_chrome_setup(ui_t *u) {
     tui_editor_set_autocomplete_max_visible(ed, settings_num("autocompleteMaxVisible", 10));
 }
 
+/* #tickIntervalMs: shimmer drives a 30 Hz repaint; otherwise the glyph's period, or once a second for a static spinner */
+static int turn_period(void) {
+    if (tui_shimmer_mode() != TUI_SHIMMER_DISABLED) return 33;
+    return tui_spinner_animated() ? tui_spinner_interval() : 1000;
+}
+
 /* repaint while a turn runs so the brand spinner and timer advance */
 static void turn_tick(void *ud) {
     ui_t *u = ud;
@@ -1914,7 +1996,7 @@ void ui_chrome_turn(ui_t *u, bool active) {
     if (active) {
         if (g_sl.started) return;
         g_sl.started = mono_ms();
-        if (!g_sl.tick_timer) g_sl.tick_timer = tui_add_timer(u->tui, 33, true, turn_tick, u); /* shimmer cadence */
+        if (!g_sl.tick_timer) g_sl.tick_timer = tui_add_clock_timer(u->tui, turn_period, turn_tick, u);
     } else {
         if (!g_sl.started) return;
         g_sl.active_ms += MAX(0, mono_ms() - g_sl.started);
@@ -1923,4 +2005,160 @@ void ui_chrome_turn(ui_t *u, bool active) {
         g_sl.tick_timer = 0;
     }
     tui_request_render(u->tui);
+}
+
+/* ---------- /session's Prompt Cache rows (status-line/prompt-cache.ts) ---------- */
+
+static void month_day_time(int64_t at, int64_t now, sb_t *b) {
+    time_t a = (time_t)(at / 1000), n = (time_t)(now / 1000);
+    struct tm ta, tn;
+    localtime_r(&a, &ta);
+    localtime_r(&n, &tn);
+    bool same = ta.tm_year == tn.tm_year && ta.tm_yday == tn.tm_yday;
+    int h = ta.tm_hour % 12 ? ta.tm_hour % 12 : 12;
+    char mon[8] = "";
+    strftime(mon, sizeof mon, "%b", &ta);
+    if (!same) sb_appendf(b, "%s %d, ", mon, ta.tm_mday);
+    sb_appendf(b, "%d:%02d %s", h, ta.tm_min, ta.tm_hour < 12 ? "AM" : "PM");
+}
+
+static bool same_day(int64_t at, int64_t now) {
+    time_t a = (time_t)(at / 1000), n = (time_t)(now / 1000);
+    struct tm ta, tn;
+    localtime_r(&a, &ta);
+    localtime_r(&n, &tn);
+    return ta.tm_year == tn.tm_year && ta.tm_yday == tn.tm_yday;
+}
+
+/* relative: ` (in 41 min)` / ` (3 h ago)` / ` (12 days ago)` */
+static void relative_span(int64_t at, int64_t now, sb_t *b) {
+    int64_t diff = at >= now ? at - now : now - at;
+    int64_t minutes = (diff + 30000) / 60000;
+    if (minutes == 0) {
+        sb_append(b, at >= now ? " (in under a minute)" : " (just now)");
+        return;
+    }
+    char span[32];
+    if (minutes < 60) snprintf(span, sizeof span, "%lld min", (long long)minutes);
+    else if (minutes < 48 * 60) snprintf(span, sizeof span, "%lld h", (long long)((minutes + 30) / 60));
+    else snprintf(span, sizeof span, "%lld days", (long long)((minutes + 12 * 60) / (24 * 60)));
+    if (at >= now) sb_appendf(b, " (in %s)", span);
+    else sb_appendf(b, " (%s ago)", span);
+}
+
+static char *cold_reason_text(const cache_status_t *st, int64_t now) {
+    const char *k = st->reason;
+    sb_t b = SB_INIT;
+    if (!strcmp(k, "expired")) {
+        sb_append(&b, "expired ");
+        if (same_day(st->reason_at, now)) sb_append(&b, "at ");
+        month_day_time(st->reason_at, now, &b);
+        relative_span(st->reason_at, now, &b);
+    } else if (!strcmp(k, "refresh-missed")) sb_append(&b, "omp's refresh found the entry gone");
+    else if (!strcmp(k, "model") || !strcmp(k, "thinking")) {
+        char *f = sanitize_status(st->reason_from ? st->reason_from : ""), *t = sanitize_status(st->reason_to ? st->reason_to : "");
+        sb_appendf(&b, "%s changed: %s \xe2\x86\x92 %s", !strcmp(k, "model") ? "model" : "thinking level", f, t);
+        free(f);
+        free(t);
+    } else if (!strcmp(k, "tools")) sb_append(&b, "tool set changed");
+    else if (!strcmp(k, "system-prompt")) sb_append(&b, "system prompt changed");
+    else if (!strcmp(k, "retention")) sb_append(&b, "cache retention setting changed");
+    else if (!strcmp(k, "compaction")) sb_append(&b, "context was compacted");
+    return sb_detach(&b);
+}
+
+/* resendText: a lapsed entry, a missed refresh, another model or another tool set leaves nothing to read; any other change keeps
+ * the cached blocks ahead of it, whose share omp cannot see, so the whole prompt is only the most it re-sends */
+static char *resend_text(const cache_status_t *st) {
+    char *n = fmt_number((double)st->next_tokens);
+    const char *k = st->reason ? st->reason : "";
+    bool all = !strcmp(k, "expired") || !strcmp(k, "refresh-missed") || !strcmp(k, "model") || !strcmp(k, "tools");
+    char *r = xasprintf("re-sends %s~%s", all ? "" : "up to ", n);
+    free(n);
+    return r;
+}
+
+static char *cache_duration(int64_t ms) {
+    sb_t b = SB_INIT;
+    int64_t sec = 1000, min = 60 * sec, hour = 60 * min, day = 24 * hour;
+    if (ms <= 0) sb_append(&b, "0ms");
+    else if (ms < sec) sb_appendf(&b, "%lldms", (long long)ms);
+    else if (ms < min) {
+        int64_t tenths = (ms + 50) / 100;
+        if (tenths < 600) sb_appendf(&b, "%.1fs", (double)tenths / 10);
+        else sb_append(&b, "1m");
+    } else if (ms < hour) {
+        int64_t m = ms / min, s = (ms % min) / sec;
+        if (s) sb_appendf(&b, "%lldm%llds", (long long)m, (long long)s);
+        else sb_appendf(&b, "%lldm", (long long)m);
+    } else if (ms < day) {
+        int64_t h = ms / hour, m = (ms % hour) / min;
+        if (m) sb_appendf(&b, "%lldh%lldm", (long long)h, (long long)m);
+        else sb_appendf(&b, "%lldh", (long long)h);
+    } else {
+        int64_t d = ms / day, h = (ms % day) / hour;
+        if (h) sb_appendf(&b, "%lldd%lldh", (long long)d, (long long)h);
+        else sb_appendf(&b, "%lldd", (long long)d);
+    }
+    return sb_detach(&b);
+}
+
+static void push_row(strvec_t *out, const char *label, char *value, bool warning) {
+    strvec_push(out, label);
+    strvec_push_own(out, value);
+    strvec_push(out, warning ? "w" : "");
+}
+
+static void push_warming(const cache_status_t *st, int64_t now, strvec_t *out) {
+    if (!st->has_warming) return;
+    sb_t b = SB_INIT;
+    if (str_eq(st->warming_state, "scheduled")) {
+        if (st->next_warm_at < 0) sb_append(&b, "refresh scheduled");
+        else {
+            sb_append(&b, "next refresh ");
+            month_day_time(st->next_warm_at, now, &b);
+        }
+        if (st->stops_at >= 0) {
+            sb_append(&b, ", gives up by ");
+            month_day_time(st->stops_at, now, &b);
+        }
+    } else if (str_eq(st->warming_state, "refreshing")) sb_append(&b, "refreshing now");
+    else {
+        char *r = st->warming_reason ? sanitize_status(st->warming_reason) : xstrdup("");
+        if (*r) sb_appendf(&b, "off: %s", r);
+        else sb_append(&b, "off");
+        free(r);
+    }
+    push_row(out, "Warming", sb_detach(&b), false);
+}
+
+/* promptCacheDetails: label, value, tone triples, in display order */
+void ui_prompt_cache_details(const cache_status_t *st, int64_t now, strvec_t *out) {
+    char *tier = st->ttl_ms < 0 ? xstrdup("no expiry") : cache_duration(st->ttl_ms);
+    if (st->cold) {
+        push_row(out, "State", xstrdup("Not cached"), true);
+        if (st->reason) push_row(out, "Why not cached", cold_reason_text(st, now), true);
+        push_row(out, "Tier", tier, false);
+        push_warming(st, now, out);
+        char *rs = resend_text(st);
+        push_row(out, "Next message", xasprintf("%s uncached", rs), false);
+        free(rs);
+        return;
+    }
+    push_row(out, "State", xstrdup(st->inferred ? "Likely cached" : "Cached"), false);
+    if (st->ttl_ms < 0) push_row(out, "Expires", xstrdup("never (the provider keeps it)"), false);
+    else {
+        sb_t b = SB_INIT;
+        int64_t at = st->touched_at + st->ttl_ms;
+        month_day_time(at, now, &b);
+        relative_span(at, now, &b);
+        push_row(out, "Expires", sb_detach(&b), false);
+    }
+    push_row(out, "Tier", tier, false);
+    push_warming(st, now, out);
+    int64_t reads = MIN(st->cached_tokens, st->next_tokens);
+    char *r = fmt_number((double)reads), *n = fmt_number((double)(st->next_tokens - reads));
+    push_row(out, "Next message", xasprintf("reads ~%s from cache, sends ~%s new", r, n), false);
+    free(r);
+    free(n);
 }

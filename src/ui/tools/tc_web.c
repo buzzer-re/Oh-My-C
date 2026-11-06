@@ -1,5 +1,8 @@
 /* tc_web.c - web_search card (port of omp tools/web-search.ts). */
 #include "ui/tools/tc.h"
+#include "tui/termcaps.h"
+
+#include <strings.h>
 
 #include "tui/ansi.h"
 #include "tui/markdown.h"
@@ -45,6 +48,14 @@ char *tc_hyperlink(const char *url, const char *text) {
                                                     str_starts(url, "www.")))
         return xstrdup(text);
     return xasprintf("\x1b]8;;%s%s\a%s" TUI_LINK_CLOSE, str_starts(url, "www.") ? "https://" : "", url, text);
+}
+
+/* urlHyperlinkAlways: an http(s) link past capability detection, plain only under an explicit `off` policy */
+char *tc_url_hyperlink_always(const char *url, const char *text) {
+    if (tui_hyperlinks_off() || !url) return xstrdup(text);
+    bool www = !strncasecmp(url, "www.", 4);
+    if (!www && strncasecmp(url, "http://", 7) && strncasecmp(url, "https://", 8)) return xstrdup(text);
+    return xasprintf("\x1b]8;;%s%s\a%s" TUI_LINK_CLOSE, www ? "https://" : "", url, text);
 }
 
 char *tc_format_age(int64_t secs) {

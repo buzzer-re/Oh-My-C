@@ -193,6 +193,33 @@ static bool resolve_color(tui_theme_t *t, int slot, const json_t *val, const jso
     return resolve_color(t, slot, ref, vars, depth + 1, err);
 }
 
+/* fgAnsi(terminal.ansi[index] ?? index): var references resolve like resolveVarRefs; a bad entry keeps the index */
+static void resolve_ansi_palette(tui_theme_t *t, const json_t *terminal, const json_t *vars) {
+    const json_t *ansi = terminal ? json_get(terminal, "ansi") : NULL;
+    for (int i = 0; i < 16; i++) {
+        snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;5;%dm", i);
+        const json_t *v = json_is_arr(ansi) ? json_at(ansi, (size_t)i) : NULL;
+        for (int depth = 0; v && json_is_str(v) && depth < 8; depth++) {
+            const char *s = json_sv(v);
+            int r, g, b;
+            if (!*s) {
+                strcpy(t->ansi_fg[i], "\x1b[39m");
+                v = NULL;
+            } else if (parse_hex(s, &r, &g, &b)) {
+                if (t->mode == TUI_COLOR_TRUECOLOR) snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;2;%d;%d;%dm", r, g, b);
+                else snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;5;%dm", tui_rgb_to_256(r, g, b));
+                v = NULL;
+            } else {
+                v = vars ? json_get(vars, s) : NULL;
+            }
+        }
+        if (v && json_is_num(v)) {
+            int idx = (int)v->u.num.d;
+            if (idx >= 0 && idx <= 255) snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;5;%dm", idx);
+        }
+    }
+}
+
 void tui_theme_free(tui_theme_t *t) {
     if (!t) return;
     free(t->name);
@@ -251,6 +278,7 @@ tui_theme_t *tui_theme_from_json(const json_t *j, tui_color_mode_t mode, char **
         memcpy(t->bg[TUI_TC_LINK], t->bg[TUI_TC_MD_LINK], sizeof t->bg[0]);
         t->rgb[TUI_TC_LINK] = t->rgb[TUI_TC_MD_LINK];
     }
+    resolve_ansi_palette(t, json_get_obj(j, "terminal"), vars);
     /* spinner frames: symbols.spinnerFrames = [..] | {"status": [..]} */
     const json_t *sym = json_get_obj(j, "symbols");
     const json_t *sf = sym ? json_get(sym, "spinnerFrames") : NULL;
@@ -346,6 +374,11 @@ const char *tui_fg_seq(const tui_theme_t *th, tui_tc_t slot) {
 const char *tui_bg_seq(const tui_theme_t *th, tui_tc_t slot) {
     if (!th) th = tui_theme();
     return slot < TUI_TC__COUNT && th->bg[slot][0] ? th->bg[slot] : "\x1b[49m";
+}
+
+const char *tui_ansi_fg_seq(const tui_theme_t *th, int ansi_slot) {
+    if (!th) th = tui_theme();
+    return ansi_slot >= 0 && ansi_slot < 16 && th->ansi_fg[ansi_slot][0] ? th->ansi_fg[ansi_slot] : "\x1b[39m";
 }
 
 /* upstream wrapForeground: the color is restored after every nested reset (\e[0m / \e[39m) in `text` */

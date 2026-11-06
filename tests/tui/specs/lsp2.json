@@ -25,7 +25,7 @@
    "line": 3,
    "symbol": "x"
   },
-  "text": "Found 1 definition(s):\n  src/a.ts:3:5\n    2: // before\n    3: const x = 1;\n    4: export {}",
+  "text": "Found 1 definition(s):\n  src/a.ts:3:5\n    2: // before\n    3: return 1;\n    4: export {}",
   "details": {
    "action": "definition",
    "success": true

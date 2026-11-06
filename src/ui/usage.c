@@ -1465,7 +1465,11 @@ static void dash_render(tui_component_t *c, int width, strvec_t *out) {
     char *scroll = max_scroll > 0 ? editor_keys2("tui.select.up", "tui.select.down") : NULL;
     char *sh = scroll ? xasprintf("%s scroll \xc2\xb7 ", scroll) : xstrdup("");
     char *cancel = ui_editor_key("tui.select.cancel"), *enter = ui_key_hint("enter"), *hint;
-    if (d->detail) hint = xasprintf("%sr refresh \xc2\xb7 %s back", sh, cancel);
+    if (d->detail) {
+        char *tabk = ui_key_hint("tab");
+        hint = xasprintf("%sr refresh \xc2\xb7 %s overview \xc2\xb7 %s back", sh, tabk, cancel);
+        free(tabk);
+    }
     else hint = xasprintf("%sr refresh \xc2\xb7 %s details \xc2\xb7 %s close", sh, enter, cancel);
     strvec_push_own(out, ui_box_top(width, d->detail ? "Usage \xc2\xb7 Details" : "Usage"));
     char *cd = *checked ? S(TUI_TC_DIM, checked) : xstrdup("");
@@ -1616,7 +1620,10 @@ static bool dash_key(tui_component_t *c, const tui_key_t *k) {
             return true;
         }
     } else if (tui_key_matches(k, "r")) dash_refresh(d);
-    else if (!d->detail && (tui_key_matches(k, "enter") || tui_key_matches(k, "tab") || tui_key_matches(k, "d"))) {
+    else if (tui_key_matches(k, "tab")) {
+        d->detail = !d->detail;
+        d->scroll = 0;
+    } else if (!d->detail && (tui_key_matches(k, "enter") || tui_key_matches(k, "d"))) {
         d->detail = true;
         d->scroll = 0;
     } else if (tui_kb(k, "tui.select.up")) d->scroll = MAX(0, d->scroll - 1);

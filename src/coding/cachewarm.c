@@ -4,6 +4,7 @@
 
 #include "ai/provider_anthropic.h"
 #include "config/settings.h"
+#include "session/session.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -28,7 +29,35 @@ typedef struct {
     bool armed;         /* a refresh timer is set (false while refreshing) */
     size_t arm_count;   /* live messages at arm time */
     uint64_t arm_hash, arm_shape;
+    uint64_t entry_gen;     /* the entry this run keeps warm */
+    int64_t refresh_sent_at;/* a refresh in flight went out then (0: none) */
 } run_t;
+
+/* TrackedCacheEntry + the request shape it was armed with (PromptCacheShape) */
+typedef struct {
+    bool active;
+    uint64_t gen;
+    const ai_model_t *model;
+    const char *tier;
+    int64_t touched_at, prompt_tokens;
+    bool refresh_missed;
+    char *model_key, *model_name, *thinking, *retention;
+    uint64_t tools, system;
+    const void **msgs; /* the armed messages, by identity: appends are fine, a rewrite or compaction is not */
+    size_t nmsgs;
+} centry_t;
+
+/* BranchPromptCacheObservation: what a branch says about the prompt cache its newest cached reply left */
+typedef struct {
+    bool valid;
+    char *leaf;      /* the branch view it was folded from */
+    bool have;
+    char *provider, *model;
+    int64_t timestamp, prompt_tokens;
+    const char *observed_tier;
+    int64_t warmed_at;
+    bool refresh_missed, compacted;
+} observation_t;
 
 typedef struct {
     bool idle, available, warm;
@@ -48,7 +77,31 @@ struct cache_warmer {
     bool have_stop_decision;
     decision_t stop_decision;
     json_t *usage;         /* pending model_usage records */
+    centry_t entry;        /* the entry the latest confirmed request wrote */
+    centry_t pending;      /* the entry the in-flight request will write */
+    uint64_t entry_gen;
+    char *arm_session;     /* the session the warmer's entries belong to */
+    observation_t obs;     /* memo of the current branch's fold */
 };
+
+static void centry_free(centry_t *e) {
+    free(e->model_key), free(e->model_name), free(e->thinking), free(e->retention);
+    free(e->msgs);
+    memset(e, 0, sizeof *e);
+}
+
+/* observedPromptCacheTier: the tier a completed response wrote, from the per-TTL cache-write breakdown */
+static const char *observed_tier(const json_t *usage) {
+    const json_t *c = json_get_obj(usage, "cttl");
+    if (json_get_int(c, "ephemeral1h", 0) > 0) return "long";
+    if (json_get_int(c, "ephemeral5m", 0) > 0) return "short";
+    return NULL;
+}
+
+/* promptTokensOf */
+static int64_t prompt_tokens_of(const json_t *usage) {
+    return json_get_int(usage, "input", 0) + json_get_int(usage, "cacheRead", 0) + json_get_int(usage, "cacheWrite", 0);
+}
 
 static int64_t wall_ms(void) {
     struct timespec ts;
@@ -157,6 +210,32 @@ static bool run_current(cache_warmer_t *w, run_t *r) {
     uint64_t h = 0;
     if (live_count(w->a, &h, r->arm_count) < r->arm_count || h != r->arm_hash) return false;
     return live_shape(w->a) == r->arm_shape;
+}
+
+/* the specs as the wire carries them: a refreshed MCP tool keeps its name */
+static uint64_t tools_fingerprint(agent_t *ag) {
+    uint64_t h = 1469598103934665603ULL;
+    pthread_mutex_lock(&ag->mu);
+    for (size_t i = 0; i < ag->tools.n; i++) {
+        agent_tool_t *t = ag->tools.v[i];
+        h = fnv(h, t->name);
+        h = fnv(h, t->description);
+        char *sc = t->parameters ? json_dump(t->parameters, 0) : NULL;
+        h = fnv(h, sc);
+        free(sc);
+    }
+    pthread_mutex_unlock(&ag->mu);
+    return h;
+}
+
+static uint64_t system_fingerprint(agent_t *ag) {
+    uint64_t h = 1469598103934665603ULL;
+    pthread_mutex_lock(&ag->mu);
+    char *sp = json_dump(ag->system_prompt, 0);
+    h = fnv(h, sp);
+    free(sp);
+    pthread_mutex_unlock(&ag->mu);
+    return h;
 }
 
 static const char *mode(void) {
@@ -278,7 +357,37 @@ void cachewarm_start(cache_warmer_t *w, const ai_model_t *m, const ai_context_t 
     size_t count = live_count(w->a, NULL, 0);
     live_count(w->a, &hash, count);
     uint64_t shape = live_shape(w->a);
+    /* the entry this request writes, published once its response confirms it */
+    agent_t *ag = w->a->agent;
+    centry_t pe = {0};
+    if (tier) {
+        pe.active = true;
+        pe.model = m;
+        pe.tier = tier;
+        pe.touched_at = wall_ms();
+        pe.model_key = xasprintf("%s/%s", m->provider, m->id);
+        pe.model_name = xstrdup(m->name ? m->name : m->id);
+        pe.thinking = xstrdup(effort_name(w->a->thinking));
+        pe.retention = xstrdup(settings_str("providers.cacheRetention", "auto"));
+        pe.tools = tools_fingerprint(ag);
+        pe.system = system_fingerprint(ag);
+        pthread_mutex_lock(&ag->mu);
+        pe.nmsgs = json_len(ag->messages);
+        pe.msgs = xcalloc(pe.nmsgs + 1, sizeof *pe.msgs);
+        for (size_t i = 0; i < pe.nmsgs; i++) pe.msgs[i] = json_at(ag->messages, i);
+        pthread_mutex_unlock(&ag->mu);
+    }
+    const char *sid = w->a->session ? session_id(w->a->session) : NULL;
     pthread_mutex_lock(&w->mu);
+    /* the warmer keeps its confirmed entry across requests until a response replaces it; another transcript's says nothing */
+    if (!str_eq(sid, w->arm_session)) {
+        centry_free(&w->entry);
+        free(w->arm_session);
+        w->arm_session = sid ? xstrdup(sid) : NULL;
+    }
+    centry_free(&w->pending);
+    w->pending = pe;
+    if (pe.active) w->pending.gen = ++w->entry_gen;
     run_clear(w);
     if (str_eq(mode(), "off")) set_reason(w, "cache warming disabled", NULL);
     else if (!cachewarm_replayable(m, o)) set_reason(w, "request cannot be replayed safely", NULL);
@@ -309,6 +418,7 @@ void cachewarm_start(cache_warmer_t *w, const ai_model_t *m, const ai_context_t 
         r->arm_count = count;
         r->arm_hash = hash;
         r->arm_shape = shape;
+        r->entry_gen = w->pending.gen;
         schedule_locked(w);
     }
     pthread_mutex_unlock(&w->mu);
@@ -342,8 +452,63 @@ void cachewarm_mode_changed(cache_warmer_t *w) {
 void cachewarm_cancel(cache_warmer_t *w) {
     if (!w) return;
     pthread_mutex_lock(&w->mu);
+    centry_free(&w->entry);
+    centry_free(&w->pending);
     stop_locked(w, "inactive", NULL);
     pthread_mutex_unlock(&w->mu);
+}
+
+/* answers: the response to a request sent to `m`; a server-side fallback retags it, its marker's `from` names the requested model */
+static bool answers(const json_t *msg, const ai_model_t *m) {
+    if (!str_eq(json_get_str(msg, "provider"), m->provider)) return false;
+    if (str_eq(json_get_str(msg, "model"), m->id)) return true;
+    json_t *b;
+    json_arr_foreach(json_get_arr(msg, "content"), i, b) {
+        if (str_eq(json_get_str(b, "type"), "fallback") && str_eq(json_get_str(json_get_obj(b, "from"), "model"), m->id)) return true;
+    }
+    return false;
+}
+
+void cachewarm_on_response(cache_warmer_t *w, const json_t *msg) {
+    if (!w || !msg) return;
+    const json_t *u = json_get_obj(msg, "usage");
+    const char *observed = observed_tier(u);
+    pthread_mutex_lock(&w->mu);
+    if (w->pending.active && answers(msg, w->pending.model)) {
+        if (!str_eq(json_get_str(msg, "stopReason"), "error") &&
+            (json_get_int(u, "cacheRead", 0) > 0 || json_get_int(u, "cacheWrite", 0) > 0)) {
+            if (observed) w->pending.tier = observed;
+            w->pending.prompt_tokens = prompt_tokens_of(u);
+            centry_free(&w->entry);
+            w->entry = w->pending;
+            memset(&w->pending, 0, sizeof w->pending);
+        } else centry_free(&w->pending);
+    }
+    run_t *r = &w->run;
+    if (r->active && r->armed && answers(msg, r->model) && observed && !str_eq(observed, r->tier)) {
+        int64_t delay = delay_for(r->model, observed);
+        if (delay < 0) stop_locked(w, "cache lifetime unavailable", NULL);
+        else {
+            r->tier = observed;
+            r->delay_ms = delay;
+            schedule_locked(w);
+        }
+    }
+    pthread_mutex_unlock(&w->mu);
+}
+
+/* #touch: a refresh sent at sent_at left the run's entry in the cache: its lifetime restarts then, at the replay's size */
+static void touch_locked(cache_warmer_t *w, uint64_t entry_gen, int64_t sent_at, const json_t *usage) {
+    if (w->pending.active && w->pending.gen == entry_gen) {
+        centry_free(&w->entry);
+        w->entry = w->pending;
+        memset(&w->pending, 0, sizeof w->pending);
+    }
+    if (w->entry.active && w->entry.gen == entry_gen) {
+        w->entry.touched_at = sent_at;
+        w->entry.prompt_tokens = prompt_tokens_of(usage);
+        w->entry.refresh_missed = false;
+    }
 }
 
 json_t *cachewarm_take_usage(cache_warmer_t *w) {
@@ -431,7 +596,7 @@ static json_t *replay(run_t *r, volatile sig_atomic_t *cancel) {
     return rp.partial;
 }
 
-static void record_usage(cache_warmer_t *w, const json_t *msg) {
+static void record_usage(cache_warmer_t *w, const json_t *msg, const json_t *refresh) {
     json_t *e = json_obj();
     json_set_str(e, "purpose", "cache-warm");
     json_set_str(e, "api", json_get_str(msg, "api"));
@@ -439,6 +604,7 @@ static void record_usage(cache_warmer_t *w, const json_t *msg) {
     json_set_str(e, "model", json_get_str(msg, "model"));
     json_set(e, "usage", json_clone(json_get(msg, "usage")));
     json_set_str(e, "stopReason", json_get_str(msg, "stopReason"));
+    if (refresh) json_set(e, "cacheRefresh", json_clone(refresh));
     if (!w->usage) w->usage = json_arr();
     json_push(w->usage, e);
 }
@@ -475,6 +641,8 @@ static void refresh_locked(cache_warmer_t *w) {
         return;
     }
     w->refresh_cancel = 0;
+    int64_t sent_at = r->refresh_sent_at = wall_ms();
+    uint64_t entry_gen = r->entry_gen;
     run_t req;
     run_copy(&req, r);
     pthread_mutex_unlock(&w->mu);
@@ -486,12 +654,23 @@ static void refresh_locked(cache_warmer_t *w) {
     json_set_str(ev, "model", req.model->id);
     emit_event(w, ev);
     json_t *msg = replay(&req, &w->refresh_cancel);
+    bool still_current = msg && !str_eq(json_get_str(msg, "stopReason"), "error") && run_current(w, &req);
     run_free(&req);
     pthread_mutex_lock(&w->mu);
+    if (r->active && r->gen == gen) r->refresh_sent_at = 0;
     const char *outcome = "error";
-    /* a refresh cancelled or replaced after acceptance was still billed */
+    /* a refresh cancelled or replaced after acceptance was still billed; only one that answered for the conversation as it
+     * still stands says anything about that conversation's cache entry */
     if (msg && json_get_int(json_get(msg, "usage"), "totalTokens", 0) > 0) {
-        record_usage(w, msg);
+        json_t *refresh = NULL;
+        if (still_current && r->active && r->gen == gen) {
+            json_t *u = json_get(msg, "usage");
+            refresh = json_obj();
+            json_set_int(refresh, "sentAt", sent_at);
+            json_set_bool(refresh, "hit", json_get_int(u, "cacheRead", 0) > 0 && json_get_int(u, "cacheWrite", 0) == 0);
+        }
+        record_usage(w, msg, refresh);
+        json_free(refresh);
         json_set(ev, "usage", json_clone(json_get(msg, "usage")));
     }
     const char *stop = NULL;
@@ -503,9 +682,14 @@ static void refresh_locked(cache_warmer_t *w) {
         json_t *u = json_get(msg, "usage");
         if (json_get_int(u, "cacheRead", 0) <= 0 || json_get_int(u, "cacheWrite", 0) > 0) {
             outcome = "miss";
+            /* what it wrote, though, the next request reads: a new lifetime from the replay's send */
+            if (json_get_int(u, "cacheWrite", 0) > 0) touch_locked(w, entry_gen, sent_at, u);
+            else if (w->entry.active && w->entry.gen == entry_gen) w->entry.refresh_missed = true;
             stop = "refresh missed the cache";
         } else {
             outcome = "hit";
+            /* a hit proves the run's entry exists even before its own response confirmed it, and restarts its lifetime */
+            touch_locked(w, entry_gen, sent_at, u);
             stop = mode_stop_reason(r);
         }
     }
@@ -572,6 +756,10 @@ void cachewarm_free(cache_warmer_t *w) {
     run_clear(w);
     json_free(w->usage);
     free(w->reason);
+    centry_free(&w->entry);
+    centry_free(&w->pending);
+    free(w->arm_session);
+    free(w->obs.leaf), free(w->obs.provider), free(w->obs.model);
     pthread_cond_destroy(&w->cv);
     pthread_mutex_destroy(&w->mu);
     free(w);
@@ -634,4 +822,228 @@ char *cachewarm_status_text(cache_warmer_t *w) {
     }
     free(e);
     return out;
+}
+
+/* ---------- prompt cache status (session/prompt-cache-status.ts, AgentSession.getPromptCacheStatus) ---------- */
+
+/* isPromptCachePersistent: the `prompt-cache-persistent` axis, set for openai-codex on the provider's own endpoint */
+static bool prompt_cache_persistent(const ai_model_t *m) {
+    return str_eq(m->provider, "openai-codex") && (!m->base_url || strstr(m->base_url, "chatgpt.com"));
+}
+
+void cache_status_free(cache_status_t *st) {
+    free(st->reason_from), free(st->reason_to), free(st->warming_reason);
+    memset(st, 0, sizeof *st);
+}
+
+/* foldBranch: the branch's newest reply that used the prompt cache, with what followed it (scanBranchPromptCache) */
+static void scan_branch(cache_warmer_t *w, session_t *s, observation_t *ob) {
+    const char *leaf = s->leaf_id;
+    if (ob->valid && str_eq(ob->leaf, leaf)) return;
+    free(ob->leaf), free(ob->provider), free(ob->model);
+    memset(ob, 0, sizeof *ob);
+    ob->valid = true;
+    ob->leaf = leaf ? xstrdup(leaf) : NULL;
+    if (!leaf) return;
+    json_t *path = session_path_to(s, leaf), *e;
+    json_arr_foreach(path, i, e) {
+        const char *t = json_get_str(e, "type");
+        if (str_eq(t, "compaction")) {
+            if (ob->have) ob->compacted = true;
+        } else if (str_eq(t, "reset_boundary")) {
+            /* /clear starts a new transcript: nothing before the boundary is a prefix of the next request */
+            ob->have = false;
+        } else if (str_eq(t, "model_usage")) {
+            const json_t *cr = json_get_obj(e, "cacheRefresh");
+            if (!cr || !ob->have) continue;
+            /* a refresh that wrote the prefix again left it cached from its send, as a hit does */
+            bool cached = json_get_bool(cr, "hit", false) || json_get_int(json_get_obj(e, "usage"), "cacheWrite", 0) > 0;
+            ob->warmed_at = cached ? json_get_int(cr, "sentAt", 0) : 0;
+            ob->refresh_missed = !cached;
+        } else if (str_eq(t, "message")) {
+            const json_t *m = json_get_obj(e, "message");
+            if (!str_eq(json_get_str(m, "role"), "assistant") || str_eq(json_get_str(m, "stopReason"), "error")) continue;
+            const json_t *u = json_get_obj(m, "usage");
+            if (json_get_int(u, "cacheRead", 0) + json_get_int(u, "cacheWrite", 0) <= 0) continue;
+            free(ob->provider), free(ob->model);
+            ob->have = true;
+            ob->provider = xstrdup(json_get_str(m, "provider") ? json_get_str(m, "provider") : "");
+            const char *mid = json_get_str(m, "model");
+            /* a server-side fallback retags the reply with the served model; the entry is the requested one's */
+            json_t *b;
+            json_arr_foreach(json_get_arr(m, "content"), k, b) {
+                if (str_eq(json_get_str(b, "type"), "fallback") && json_get_str(json_get_obj(b, "from"), "model"))
+                    mid = json_get_str(json_get_obj(b, "from"), "model");
+            }
+            ob->model = xstrdup(mid ? mid : "");
+            ob->timestamp = json_get_int(m, "timestamp", 0);
+            ob->prompt_tokens = prompt_tokens_of(u);
+            ob->observed_tier = observed_tier(u);
+            ob->warmed_at = 0;
+            ob->refresh_missed = false;
+            ob->compacted = false;
+        }
+    }
+    json_free(path);
+    UNUSED(w);
+}
+
+bool cachewarm_status(app_t *a, int64_t now, int64_t next_tokens, cache_status_t *out) {
+    cache_warmer_t *w = a->warmer;
+    memset(out, 0, sizeof *out);
+    out->ttl_ms = out->next_warm_at = out->stops_at = -1;
+    if (!w) return false;
+    agent_t *ag = a->agent;
+    /* the next request's shape: what it would send differently from the armed one */
+    const ai_model_t *cur = a->model;
+    char *cur_key = cur ? xasprintf("%s/%s", cur->provider, cur->id) : xstrdup("");
+    uint64_t cur_tools = tools_fingerprint(ag), cur_system = system_fingerprint(ag);
+    const char *cur_thinking = effort_name(a->thinking), *cur_retention = settings_str("providers.cacheRetention", "auto");
+    const char *sid = a->session ? session_id(a->session) : NULL;
+    bool live = false;
+    const ai_model_t *model = NULL;
+    const char *tier = NULL;
+    int64_t touched = 0, prompt_tokens = 0;
+    bool refresh_missed = false, heldoff_possible = false;
+    int64_t sent_at = 0;
+    const char *change = NULL;
+    char *from = NULL, *to = NULL;
+    pthread_mutex_lock(&w->mu);
+    if (w->entry.active && str_eq(w->arm_session, sid)) {
+        centry_t *e = &w->entry;
+        bool history = false;
+        pthread_mutex_lock(&ag->mu);
+        size_t cn = json_len(ag->messages);
+        if (cn < e->nmsgs) history = true;
+        for (size_t i = 0; i < e->nmsgs && !history; i++) history = (const void *)json_at(ag->messages, i) != e->msgs[i];
+        pthread_mutex_unlock(&ag->mu);
+        /* a replaced transcript (rewind, branch switch, reload, compaction) no longer extends the armed request; the branch now
+         * on screen says what its own replies cached */
+        if (!history) {
+            live = true;
+            model = e->model;
+            tier = e->tier;
+            touched = e->touched_at;
+            prompt_tokens = e->prompt_tokens;
+            refresh_missed = e->refresh_missed;
+            if (strcmp(e->model_key, cur_key)) {
+                change = "model";
+                from = xstrdup(e->model_name);
+                to = xstrdup(cur ? (cur->name ? cur->name : cur->id) : "no model");
+            } else if (!str_eq(e->thinking, cur_thinking)) {
+                change = "thinking";
+                from = xstrdup(e->thinking);
+                to = xstrdup(cur_thinking);
+            } else if (e->tools != cur_tools) change = "tools";
+            else if (e->system != cur_system) change = "system-prompt";
+            else if (!str_eq(e->retention, cur_retention)) change = "retention";
+            /* warming: formatted the way #statusOf reports it */
+            run_t *r = &w->run;
+            out->has_warming = true;
+            if (str_eq(mode(), "off")) {
+                out->warming_state = "inactive";
+                out->warming_reason = xstrdup("cache warming disabled");
+            } else if (!r->active) {
+                out->warming_state = "inactive";
+                out->warming_reason = w->reason ? xstrdup(w->reason) : NULL;
+            } else if (change) {
+                out->warming_state = "inactive";
+                out->warming_reason = xstrdup("conversation context changed");
+            } else {
+                bool refreshing = !r->armed;
+                decision_t d = evaluate(w, r);
+                if (!d.available && !refreshing) {
+                    out->warming_state = "inactive";
+                    out->warming_reason = xstrdup("cache economics unavailable");
+                } else {
+                    sent_at = refreshing ? r->refresh_sent_at : 0;
+                    heldoff_possible = sent_at != 0;
+                    out->warming_state = sent_at ? "refreshing" : "scheduled";
+                    if (!sent_at) out->next_warm_at = r->next_warm_at;
+                    out->stops_at = r->started_at + (r->idle ? MAX_IDLE_WARMING_AGE_MS : MAX_WARMING_AGE_MS);
+                }
+            }
+        }
+    }
+    pthread_mutex_unlock(&w->mu);
+    if (!live) {
+        /* #inferredPromptCacheEntry: thinking level, tools and credential at the time are unknown */
+        pthread_mutex_lock(&w->mu);
+        if (a->session) scan_branch(w, a->session, &w->obs);
+        observation_t ob = w->obs;
+        bool have = a->session && ob.have;
+        char *prov = have ? xstrdup(ob.provider) : NULL, *mid = have ? xstrdup(ob.model) : NULL;
+        pthread_mutex_unlock(&w->mu);
+        const ai_model_t *m = have ? catalog_find(prov, mid) : NULL;
+        if (!m) {
+            free(prov), free(mid), free(cur_key);
+            return false;
+        }
+        bool oauth = str_eq(m->api, "anthropic-messages") && anthropic_model_is_oauth(m, NULL);
+        const char *requested = cachewarm_tier(m, str_eq(cur_retention, "auto") ? NULL : cur_retention, oauth);
+        /* a reply that used the cache wrote some tier even when the next request asks for none; a provider that reports no split
+         * wrote the default one */
+        const char *t = ob.observed_tier ? ob.observed_tier : requested ? requested : cachewarm_tier(m, NULL, oauth);
+        if (!t) {
+            free(prov), free(mid), free(cur_key);
+            return false;
+        }
+        model = m;
+        tier = t;
+        touched = MAX(ob.timestamp, ob.warmed_at);
+        prompt_tokens = ob.prompt_tokens;
+        refresh_missed = ob.refresh_missed;
+        if (!cur || !str_eq(cur->provider, m->provider) || !str_eq(cur->id, m->id)) {
+            change = "model";
+            from = xstrdup(m->name ? m->name : m->id);
+            to = xstrdup(cur ? (cur->name ? cur->name : cur->id) : "no model");
+        } else if (!str_eq(requested, t)) {
+            change = "retention"; /* the next request asks for another tier, or for no caching at all */
+        } else if (ob.compacted) {
+            change = "compaction";
+        }
+        free(prov), free(mid);
+        out->inferred = true;
+    }
+    free(cur_key);
+    int64_t secs = ttl_seconds(model, tier);
+    bool persistent = prompt_cache_persistent(model);
+    int64_t ttl = persistent || secs < 0 ? -1 : secs * 1000;
+    if (!persistent && secs < 0) {
+        free(from), free(to);
+        cache_status_free(out);
+        return false;
+    }
+    if (persistent) {
+        free(out->warming_reason);
+        out->warming_reason = NULL;
+        out->has_warming = false;
+        out->next_warm_at = out->stops_at = -1;
+    }
+    /* a lapsed lifetime is the reason whenever it holds; a refresh in flight the provider sent before the entry lapsed holds
+     * expiry off: it moves the touch once it hits */
+    const char *reason = NULL;
+    if (ttl >= 0) {
+        int64_t expires = touched + ttl;
+        bool held = heldoff_possible && sent_at < expires;
+        if (now >= expires && !held) {
+            reason = "expired";
+            out->reason_at = expires;
+        }
+    }
+    if (!reason) reason = change ? change : refresh_missed ? "refresh-missed" : NULL;
+    out->cold = reason != NULL;
+    out->reason = reason;
+    if (reason && (!strcmp(reason, "model") || !strcmp(reason, "thinking"))) {
+        out->reason_from = from;
+        out->reason_to = to;
+    } else {
+        free(from), free(to);
+    }
+    out->tier = tier;
+    out->touched_at = touched;
+    out->ttl_ms = ttl;
+    out->cached_tokens = prompt_tokens;
+    out->next_tokens = next_tokens;
+    return true;
 }

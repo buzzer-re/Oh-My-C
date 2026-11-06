@@ -145,6 +145,8 @@ struct tui_editor {
     int paste_counter;
     /* bracketed-paste interceptor (image paths, empty pastes): return true when it consumed the text */
     bool (*paste_hook)(void *ud, tui_editor_t *ed, const char *text);
+    char *(*row_hook)(void *ud, tui_editor_t *ed, const char *row);
+    void *row_hook_ud;
     void *paste_hook_ud;
     /* completed-token collapse (CustomEditor #collapseSkillTokens): in `line` of the buffer `text`, the first
      * token at or after byte `from` to turn into an atom (span, label, expansion, style: owned); false when
@@ -214,6 +216,8 @@ void tui_editor_insert_text(tui_editor_t *ed, const char *text); /* at cursor, o
 void tui_editor_paste(tui_editor_t *ed, const char *text);       /* same path as bracketed paste */
 /* insert an atomic token at the cursor (one undo step); expands to `expansion` on submit */
 void tui_editor_insert_atom(tui_editor_t *ed, const char *label, const char *expansion, const char *style);
+/* decorate one composer row just before it is drawn (the magic-keyword glow); returns the row (owned) or NULL to keep it */
+void tui_editor_set_row_hook(tui_editor_t *ed, char *(*fn)(void *ud, tui_editor_t *ed, const char *row), void *ud);
 void tui_editor_set_paste_hook(tui_editor_t *ed, bool (*fn)(void *ud, tui_editor_t *ed, const char *text), void *ud);
 void tui_editor_set_token_hook(tui_editor_t *ed,
                                bool (*fn)(void *ud, const char *text, const char *line, size_t from, size_t *start, size_t *end,

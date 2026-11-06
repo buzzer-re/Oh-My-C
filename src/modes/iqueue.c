@@ -403,7 +403,7 @@ static void run_bang(ui_t *u, const char *cmd, bool exclude, bool python) {
     else add_view(u, v);
     if (python) u->python = b;
     else u->bash = b;
-    b->timer = tui_add_timer(u->tui, 80, true, bash_tick, b);
+    b->timer = tui_add_clock_timer(u->tui, NULL, bash_tick, b);
     if (pthread_create(&b->th, NULL, bash_main, b) != 0) {
         b->th = pthread_self(); /* never joined below: finish inline */
         b->result = NULL;

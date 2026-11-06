@@ -1183,10 +1183,58 @@ static void project_tree(hub_t *h, json_t *rows) {
 
 static void refresh_activity_view(hub_t *h);
 
+/* the session header's id of a transcript (owned), NULL when unreadable */
+static char *transcript_header_id(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    char line[4096];
+    char *id = NULL;
+    if (fgets(line, sizeof line, f)) {
+        json_t *h = json_parse_str(line);
+        const char *v = json_get_str(h, "id");
+        if (v) id = xstrdup(v);
+        json_free(h);
+    }
+    fclose(f);
+    return id;
+}
+
+/* inSession: the registry outlives /new and session switches, so earlier sessions' agents stay registered. A ref belongs when it has
+ * no transcript, its transcript is the root's or under its artifacts tree (sessionFileBelongsToRoot), or a fork copied its idle or
+ * killed transcript here without detaching the source ref: the copy keeps the source's header id, a separately created same-id agent
+ * does not, so only proven copies count. */
+static bool ref_in_session(const json_t *ref, const char *root) {
+    const char *file = json_get_str(ref, "sessionFile");
+    if (!file || !*file) return true;
+    if (!strcmp(file, root)) return true;
+    size_t al = strlen(root) - strlen(".jsonl");
+    if (!strncmp(file, root, al) && file[al] == '/') return true;
+    const char *status = json_get_str(ref, "status");
+    if (!str_eq(json_get_str(ref, "kind"), "sub") || !(str_eq(status, "idle") || str_eq(status, "aborted"))) return false;
+    const char *base = strrchr(file, '/');
+    char *copy = xasprintf("%.*s/%s", (int)al, root, base ? base + 1 : file);
+    char *a = transcript_header_id(file), *b = transcript_header_id(copy);
+    bool same = a && b && !strcmp(a, b);
+    free(a), free(b), free(copy);
+    return same;
+}
+
+static json_t *session_refs(hub_t *h) {
+    json_t *refs = agents_list();
+    session_t *s = h->u->app->session;
+    const char *root = s ? s->file : NULL;
+    size_t rl = root ? strlen(root) : 0;
+    if (rl <= 6 || strcmp(root + rl - 6, ".jsonl")) return refs;
+    json_t *out = json_arr(), *r;
+    json_arr_foreach(refs, i, r) if (ref_in_session(r, root)) json_push(out, json_clone(r));
+    json_free(refs);
+    return out;
+}
+
 static void refresh_rows(hub_t *h) {
     const json_t *cur = sel_ref(h);
     char *selected = cur ? xstrdup(json_get_str(cur, "id")) : NULL;
-    json_t *refs = agents_list(), *r;
+    json_t *refs = session_refs(h), *r;
     int batch = 0;
     bool batch_set = false;
     json_arr_foreach(refs, i, r) {

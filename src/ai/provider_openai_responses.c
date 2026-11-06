@@ -906,6 +906,7 @@ static bool build_headers(http_headers_t *h, const ai_model_t *m, const ai_strea
         char *hint = tier ? xasprintf("model=%s;tier=%s", model, tier) : xasprintf("model=%s", model);
         http_headers_set(h, "x-codex-routing-hint", hint);
         free(hint);
+        /* codex-rs sends `OpenAI-Beta` only on the WebSocket handshake; HTTP carries none */
         http_headers_set(h, "originator", CODEX_ORIGINATOR);
         http_headers_set(h, "version", CODEX_CLIENT_VERSION);
         http_headers_set(h, "User-Agent", OMC_NAME "/" OMC_VERSION);

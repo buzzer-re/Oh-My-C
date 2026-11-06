@@ -668,6 +668,73 @@ char *jobs_start_bash_fg(jobs_t *j, const char *cmd, const char *cwd, int64_t ti
     return id;
 }
 
+/* commandIdentity: a bash command on one line (line breaks written `\\n`), the middle elided past 400 UTF-16 units so commands that
+ * differ only at the end stay distinct */
+char *job_command_identity(const char *command) {
+    enum { MAX_CHARS = 400 };
+    size_t n = strlen(command);
+    while (n && isspace((unsigned char)*command)) command++, n--;
+    while (n && isspace((unsigned char)command[n - 1])) n--;
+    sb_t b = SB_INIT;
+    for (size_t i = 0; i < n; i++) {
+        if (command[i] == '\r' && i + 1 < n && command[i + 1] == '\n') {
+            sb_append(&b, "\\n");
+            i++;
+        } else if (command[i] == '\r' || command[i] == '\n') sb_append(&b, "\\n");
+        else sb_putc(&b, command[i]);
+    }
+    /* UTF-16 length, and the byte offsets `keep` units from each end */
+    const char *s = sb_cstr(&b);
+    size_t len = b.len, units = 0, head = 0, tail = len;
+    size_t keep = MAX_CHARS / 2;
+    for (size_t i = 0; i < len;) {
+        uint32_t cp;
+        int k = utf8_decode(s + i, len - i, &cp);
+        if (units < keep) head = i + (size_t)k;
+        units += cp > 0xffff ? 2 : 1;
+        i += (size_t)k;
+    }
+    if (units <= MAX_CHARS) return sb_detach(&b);
+    size_t back = 0;
+    for (size_t i = len; i > 0 && back < keep;) {
+        size_t st = i - 1;
+        while (st > 0 && ((unsigned char)s[st] & 0xc0) == 0x80) st--;
+        uint32_t cp;
+        utf8_decode(s + st, len - st, &cp);
+        back += cp > 0xffff ? 2 : 1;
+        i = st;
+        tail = st;
+    }
+    char *r = xasprintf("%.*s\xe2\x80\xa6%s", (int)head, s, s + tail);
+    sb_free(&b);
+    return r;
+}
+
+/* escapeHarnessTags: `<` of a harness tag (`irc` or a `system-*` name, opening or closing), so job-authored text can neither
+ * close the harness block it renders into nor open a forged one */
+char *job_escape_harness_tags(const char *text) {
+    sb_t b = SB_INIT;
+    for (const char *p = text; *p; p++) {
+        if (*p != '<') {
+            sb_putc(&b, *p);
+            continue;
+        }
+        const char *q = p + 1;
+        while (isspace((unsigned char)*q)) q++;
+        if (*q == '/') q++;
+        while (isspace((unsigned char)*q)) q++;
+        const char *e = NULL;
+        if (!strncasecmp(q, "irc", 3)) e = q + 3;
+        else if (!strncasecmp(q, "system-", 7) && isalpha((unsigned char)q[7])) {
+            e = q + 8;
+            while (isalpha((unsigned char)*e) || *e == '-') e++;
+        }
+        if (e && !(isalnum((unsigned char)*e) || *e == '_' || *e == '-')) sb_append(&b, "&lt;");
+        else sb_putc(&b, '<');
+    }
+    return sb_detach(&b);
+}
+
 static bgjob_t *find_locked(jobs_t *j, const char *id) {
     for (size_t i = 0; i < j->v.n; i++)
         if (str_eq(j->v.v[i]->id, id)) return j->v.v[i];
@@ -836,9 +903,22 @@ json_t *jobs_take_finished(jobs_t *j) {
         json_t *o = json_obj();
         json_set_str(o, "jobId", x->id);
         json_set_str(o, "label", x->label);
+        /* a bash job is named by its whole command: its label truncates the tail, so parallel jobs could read alike */
+        const char *job_cmd = x->bash ? x->bash->cmd : NULL;
+        const char *cmd_prefix = job_cmd ? settings_str("shellCommandPrefix", "") : NULL;
+        size_t cpl = cmd_prefix ? strlen(cmd_prefix) : 0;
+        if (cpl && !strncmp(job_cmd, cmd_prefix, cpl) && job_cmd[cpl] == '\n') job_cmd += cpl + 1;
+        char *ident = job_cmd ? job_command_identity(job_cmd) : NULL;
+        char *hl = job_escape_harness_tags(ident ? ident : x->label);
+        if (*hl) json_set_str(o, "headerLabel", hl);
+        json_set_bool(o, "namedByCommand", x->bash != NULL);
+        free(hl);
+        free(ident);
         json_set_str(o, "type", x->type);
         if (x->intent) json_set_str(o, "intent", x->intent);
-        json_set_str(o, "result", x->result ? x->result : "");
+        char *res = job_escape_harness_tags(x->result ? x->result : "");
+        json_set_str(o, "result", res);
+        free(res);
         json_set_bool(o, "failed", x->failed);
         json_set_str(o, "status", job_status(x));
         json_set_int(o, "durationMs", x->ended - x->started);

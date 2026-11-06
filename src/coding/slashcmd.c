@@ -44,6 +44,7 @@ static void h_slow(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_extended_context(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_fresh(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_pin(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
+static void h_unpin(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_move(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_wt(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
 static void h_add_dir(const slash_parsed_t *, slash_rt_t *, slash_result_t *);
@@ -105,6 +106,7 @@ static const struct {
     {"handoff", NULL, true, h_handoff},
     {"resume", NULL, true, NULL},
     {"pin", NULL, false, h_pin},
+    {"unpin", NULL, false, h_unpin},
     {"btw", NULL, true, NULL},
     {"retry", NULL, true, h_retry},
     {"memory", "view stats diagnose queue sync clear reset enqueue rebuild", true, h_memory},
@@ -841,7 +843,8 @@ static void h_fresh(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res
     else outf(rt, res, false, "Fresh provider session started (%d %s pruned).", n, n == 1 ? "provider state" : "provider states");
 }
 
-static void h_pin(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+/* resolvePinTarget: the argument's match, else the active session, or the usage result (NULL) */
+static char *pin_target(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res, const char *verb) {
     char *id = NULL;
     if (*c->args) {
         char *path = session_resolve(c->args, rt->app->cwd);
@@ -849,20 +852,35 @@ static void h_pin(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) 
         if (s) id = xstrdup(session_id(s));
         session_free(s);
         free(path);
-        if (!id) {
-            outf(rt, res, true, "Session \"%s\" not found.", c->args);
-            return;
-        }
+        if (!id) outf(rt, res, true, "Session \"%s\" not found.", c->args);
     } else if (rt->app->session && session_id(rt->app->session)) {
         id = xstrdup(session_id(rt->app->session));
     } else {
-        usage(rt, res, "No active session to pin.");
-        return;
+        char *m = xasprintf("No active session to %s.", verb);
+        usage(rt, res, m);
+        free(m);
     }
+    return id;
+}
+
+static void h_pin(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    char *id = pin_target(c, rt, res, "pin");
+    if (!id) return;
     char *err = NULL;
     int r = session_pin_toggle(id, &err);
     if (r < 0) usage(rt, res, err);
     else out(rt, r ? "Session pinned to the top of the resume list." : "Session unpinned.");
+    free(err);
+    free(id);
+}
+
+static void h_unpin(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
+    char *id = pin_target(c, rt, res, "unpin");
+    if (!id) return;
+    char *err = NULL;
+    int r = session_pin_clear(id, &err);
+    if (r < 0) usage(rt, res, err);
+    else out(rt, r ? "Session unpinned." : "Session is not pinned.");
     free(err);
     free(id);
 }

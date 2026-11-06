@@ -2,6 +2,7 @@
 #ifndef OMC_SETTINGS_H
 #define OMC_SETTINGS_H
 
+#include "tui/motion.h"
 #include "core/core.h"
 #include "core/json.h"
 
@@ -31,6 +32,10 @@ char *settings_project_config_path(void); /* <project dir>/config.yml, <cwd>/.om
  * config.yml, merged into the re-read file; val NULL deletes; takes ownership of val */
 int settings_set_project_entry(const char *parent, const char *key, json_t *val);
 /* Setting.listen: fn(ud) runs after every runtime/global set or unset, on the writing thread */
+/* parseSpinnerInterval / parseMaxFps / parseMotionMode on text: false when rejected; *err (optional, owned) is omp's message */
+bool settings_parse_spinner_interval(const char *s, int *out, char **err);
+bool settings_parse_max_fps(const char *s, int *out, char **err);
+bool settings_parse_motion_mode(const char *s, tui_motion_mode_t *out, char **err);
 void settings_on_change(void (*fn)(void *ud), void *ud);
 void settings_off_change(void (*fn)(void *ud), void *ud);
 /* layer that supplies `path` (omp SettingProvenance without the env layer): "runtime" | "overlay" | "project" |

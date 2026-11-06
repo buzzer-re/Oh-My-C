@@ -94,6 +94,8 @@ void tui_hyperlinks_apply_setting(const char *mode) {
     else if (g_link_mode < 0) g_link_mode = 1;
 }
 
+bool tui_hyperlinks_off(void) { return g_link_mode == 0; }
+
 bool tui_hyperlinks_enabled(void) {
     switch (g_link_mode) {
     case 0: return false;
