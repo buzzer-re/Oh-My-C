@@ -1587,7 +1587,9 @@ static json_t *g_last_usage; /* lastAssistantUsage: the newest assistant usage t
 int64_t ui_detect_cache_invalidation(const json_t *prev, const json_t *cur) {
     if (!prev || !cur) return 0;
     if (json_get_num(prev, "cacheRead", 0) < MIN_CACHE_FOOTPRINT) return 0;
-    if (json_get_num(cur, "cacheRead", 0) > 0) return 0;
+    /* the prefix survived when this turn read back at least half of what the previous one did (a cold turn can still read the
+     * shared system/tool block back) */
+    if (json_get_num(cur, "cacheRead", 0) * 2 >= json_get_num(prev, "cacheRead", 0)) return 0;
     if (json_get_num(cur, "cacheWrite", 0) <= 0) return 0;
     double reprocessed = json_get_num(cur, "cacheWrite", 0) + json_get_num(cur, "input", 0);
     if (reprocessed < MIN_CACHE_FOOTPRINT) return 0;

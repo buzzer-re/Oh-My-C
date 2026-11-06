@@ -1,6 +1,7 @@
 /* panels.c - /session, /tools and /jobs (ports of omp CommandController.handleSessionCommand / handleToolsCommand /
  * handleJobsCommand, overlays/session-info-overlay.ts, overlays/job-tree.ts, prompt/tools-markdown.ts and the
  * builtin-session.ts `/session` and `/jobs` subcommands). */
+#include "coding/cachewarm.h"
 #include "ui/ui.h"
 #include "coding/agents.h"
 #include "ui/tools/tc.h"
@@ -301,6 +302,24 @@ static char *session_info_text(ui_t *u) {
     if (cr > 0) kv_int(s, "Cache Read:", cr);
     if (cw > 0) kv_int(s, "Cache Write:", cw);
     kv_int(s, "Total:", total_tok);
+    {
+        cache_status_t cs;
+        if (cachewarm_status(a, now_ms(), ui_context_used(a), &cs)) {
+            sb_append(s, "\n");
+            head(s, "Prompt Cache");
+            strvec_t rows = {0};
+            ui_prompt_cache_details(&cs, now_ms(), &rows);
+            for (size_t i = 0; i + 2 < rows.n; i += 3) {
+                char *k = xasprintf("%s:", rows.v[i]);
+                char *v = rows.v[i + 2][0] ? S(TUI_TC_WARNING, rows.v[i + 1]) : xstrdup(rows.v[i + 1]);
+                kv(s, k, v);
+                free(v);
+                free(k);
+            }
+            strvec_free(&rows);
+            cache_status_free(&cs);
+        }
+    }
     double cost = json_get_num(st, "cost", 0);
     if (cost > 0) {
         sb_append(s, "\n");

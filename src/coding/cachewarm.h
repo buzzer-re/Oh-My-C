@@ -28,6 +28,34 @@ void cachewarm_cancel(cache_warmer_t *w);
  * the session records them as model_usage entries from its own thread */
 json_t *cachewarm_take_usage(cache_warmer_t *w);
 
+/* onResponse: confirm the in-flight request's entry and adopt the tier its response wrote (a failed response, or one that neither
+ * read nor wrote the cache, never publishes its entry) */
+void cachewarm_on_response(cache_warmer_t *w, const json_t *message);
+
+/* What the next request finds in the prompt cache (PromptCacheStatus): the `cache` segment's marker and /session's rows */
+typedef struct {
+    bool cold;
+    const char *reason;  /* "expired", "refresh-missed", "model", "thinking", "tools", "system-prompt", "retention", "compaction"; NULL when warm */
+    char *reason_from, *reason_to; /* model and thinking changes */
+    int64_t reason_at;   /* expired */
+    bool inferred;       /* read off the transcript of a reopened session, not a response this process saw */
+    const char *tier;    /* "short" | "long" */
+    int64_t touched_at;  /* send time of the last request that read or wrote the entry */
+    int64_t ttl_ms;      /* -1: the provider never expires the entry */
+    int64_t cached_tokens, next_tokens;
+    bool has_warming;
+    const char *warming_state; /* "scheduled" | "refreshing" | "inactive" */
+    int64_t next_warm_at, stops_at; /* -1: absent */
+    char *warming_reason;
+} cache_status_t;
+
+/* getPromptCacheStatus; false when there is nothing to reason about (no reply that used the cache, no declared lifetime) */
+bool cachewarm_status(app_t *a, int64_t now, int64_t next_tokens, cache_status_t *out);
+void cache_status_free(cache_status_t *st);
+
+/* /session's Prompt Cache rows: label, value, tone ("w": warning) triples (promptCacheDetails; src/ui/statusline.c) */
+void ui_prompt_cache_details(const cache_status_t *st, int64_t now, strvec_t *out);
+
 /* formatCacheWarmingStatus of the current status (owned) */
 char *cachewarm_status_text(cache_warmer_t *w);
 
