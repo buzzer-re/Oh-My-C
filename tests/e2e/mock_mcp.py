@@ -9,13 +9,17 @@ that adds a `fresh` prompt and sends `notifications/prompts/list_changed` plus
 
 `--startup-delay=<secs>` holds the initialize reply back (a slow server: omp's startup window, MCP tool cache and
 deferred tools). $MOCK_MCP_EXTRA_TOOL=<name> adds a tool of that name to tools/list without changing the server
-config (so a cached catalog can differ from the live one)."""
+config (so a cached catalog can differ from the live one).
+`--lazy` serves lazy loaders shaped like Kata's `load_*`: `load_extra` adds `extra_tool` and announces it before its
+reply, `load_extra_late` replies first and announces it afterwards (no call to the server running)."""
 import json, os, sys, time
 
 FULL = "--full" in sys.argv[1:]
 STARTUP_DELAY = next((float(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("--startup-delay=")), 0.0)
 EXTRA_TOOL = os.environ.get("MOCK_MCP_EXTRA_TOOL")
+LAZY = "--lazy" in sys.argv[1:]
 extra_prompt = [False]
+loaded = [False]
 
 
 def send(obj):
@@ -63,9 +67,25 @@ for line in sys.stdin:
         if EXTRA_TOOL:
             tools.append({"name": EXTRA_TOOL, "description": "Extra tool",
                           "inputSchema": {"type": "object", "properties": {}}})
+        if LAZY:
+            tools += [{"name": n, "description": "Load extra tools", "inputSchema": {"type": "object", "properties": {}}}
+                      for n in ("load_extra", "load_extra_late")]
+            if loaded[0]:
+                tools.append({"name": "extra_tool", "description": "A lazily loaded tool",
+                              "inputSchema": {"type": "object", "properties": {}}})
         res = {"tools": tools}
     elif method == "tools/call":
         name = msg["params"].get("name")
+        if LAZY and name in ("load_extra", "load_extra_late"):
+            first = not loaded[0]
+            loaded[0] = True
+            if first and name == "load_extra":
+                send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+            send({"jsonrpc": "2.0", "id": msg.get("id"), "result": {"content": [{"type": "text", "text": "loaded"}]}})
+            if first and name == "load_extra_late":
+                time.sleep(0.2)
+                send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+            continue
         if name == "change_prompts":
             extra_prompt[0] = True
             send({"jsonrpc": "2.0", "method": "notifications/prompts/list_changed"})

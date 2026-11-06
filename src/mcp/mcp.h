@@ -75,6 +75,11 @@ void mcp_set_tool_cache(mcp_manager_t *m, bool on);
 /* Register bridged tools (mcp__<server>_<tool>) of connected servers on the agent, plus the cached (deferred)
  * tools of servers that are not connected. Returns count. */
 int mcp_register_tools(mcp_manager_t *m, agent_t *a);
+/* MCPManager.openToolScope: the view of the session `scope` names. One opened for the first time starts from `seed`'s
+ * (NULL: the owner's), so a child sees what its spawner saw; reopening keeps what it was granted. A tool a server adds
+ * while a call to it runs reaches a session (agent_t.mcp_scope) only once that session's own call to the server
+ * completes; tools present at connect, and tools added while no call runs, every session sees. */
+void mcp_open_tool_scope(mcp_manager_t *m, const char *scope, const char *seed);
 /* Replace every mcp__ tool on the agent with the connected servers' current tools (marked discoverable).
  * Call while the agent is idle. Returns the registered count. */
 int mcp_sync_tools(mcp_manager_t *m, agent_t *a);

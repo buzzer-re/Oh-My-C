@@ -1444,7 +1444,8 @@ static char *chain_key_in(json_t *chains, const char *current_selector, const ai
     {
         const char *matched = NULL, *effort = NULL;
         json_obj_foreach(chains, i3, k, v) {
-            if (is_model_key(k)) continue;
+            /* a kind role (`web`, `judge`) applies only through the hint: a shared model is not role ownership */
+            if (is_model_key(k) || mr_is_kind_role(k)) continue;
             mr_selector_t p;
             bool hp = primary_selector(k, &p);
             int mk = match_kind(&p, hp, &cur, has_plain ? &plain : NULL, model);

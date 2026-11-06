@@ -2904,7 +2904,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         a->env->todo.phases = ph ? json_clone(ph) : json_arr();
         json_t *ce = json_obj(); /* USER_TODO_EDIT_CUSTOM_TYPE entry */
         json_set(ce, "phases", json_clone(a->env->todo.phases));
-        session_append_custom(a->session, "user-todo-edit", ce); /* takes ce */
+        session_append_custom(a->session, "user_todo_edit", ce); /* takes ce */
         json_t *d = json_obj();
         json_set(d, "todoPhases", json_clone(a->env->todo.phases));
         respond(r, id, type, true, d, NULL);

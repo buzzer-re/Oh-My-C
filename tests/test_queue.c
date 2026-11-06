@@ -158,6 +158,32 @@ static void test_python_text(void) {
     json_free(m);
 }
 
+static void test_forced_delivery(void) {
+    agent_t *a = agent_new();
+    CHECK(!agent_take_forced_delivery(a), "no forced delivery by default");
+    CHECK(!agent_has_interruptible_input(a), "an empty queue is not interruptible");
+    agent_steer(a, synthetic("hidden steer"));
+    CHECK(!agent_has_interruptible_input(a), "agent-authored input does not count");
+    agent_follow_up(a, msg_user_text("f1"));
+    agent_follow_up(a, synthetic("hidden follow-up"));
+    agent_steer(a, msg_user_text("s1"));
+    agent_follow_up(a, msg_user_text("f2"));
+    CHECK(agent_has_interruptible_input(a), "user input counts");
+    agent_abort_deliver_queued(a);
+    CHECK(a->cancel, "the forced delivery aborts the run");
+    CHECK(agent_take_forced_delivery(a), "forced");
+    CHECK(!agent_take_forced_delivery(a), "taken once");
+    CHECK(json_len(a->steering) == 4 && json_len(a->follow_up) == 1, "user follow-ups moved behind the steers");
+    char *t = agent_queued_text(json_at(a->steering, 2));
+    CHECK(!strcmp(t, "f1"), "first promoted: %s", t);
+    free(t);
+    t = agent_queued_text(json_at(a->steering, 3));
+    CHECK(!strcmp(t, "f2"), "second promoted: %s", t);
+    free(t);
+    CHECK(!json_get_bool(json_at(a->steering, 2), "steering", false), "a promoted follow-up stays unmarked");
+    agent_free(a);
+}
+
 int main(void) {
     char *dir = fs_mktempdir("omc-queue");
     setenv("OMC_CODING_AGENT_DIR", dir, 1);
@@ -167,6 +193,7 @@ int main(void) {
     tui_sym_set_preset("unicode");
     test_split();
     test_agent_queue();
+    test_forced_delivery();
     test_band();
     test_python_text();
     fs_rm_rf(dir);

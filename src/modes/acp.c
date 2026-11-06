@@ -2,6 +2,7 @@
  * Port of omp modes/acp/{acp-agent,acp-event-mapper,acp-client-bridge,acp-mode,terminal-auth}.ts and
  * commands/acp.ts. Every ACP session is its own app_t; prompts run on a per-session worker thread chain
  * while the stdin reader keeps dispatching (cancel, steering, client responses). */
+#include "coding/skilldesc.h"
 #include "coding/slashcmd.h"
 #include "coding/xdnotice.h"
 #include "modes.h"
@@ -1864,6 +1865,7 @@ static asess_t *open_record(acp_t *a, const char *cwd, const char *resume, const
     o.mcp = m;
     o.interactive_prompts = caps_form(a);
     app_t *app = app_create(&o, err);
+    if (app) skilldesc_start_compression(app->skilldesc);
     if (!app) {
         if (m) mcp_manager_free(m);
         json_free(failed);

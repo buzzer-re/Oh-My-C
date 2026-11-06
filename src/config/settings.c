@@ -14,6 +14,7 @@ static const char *DEFAULTS_JSON =
     "\"interruptMode\":\"immediate\","
     "\"personality\":\"default\","
     "\"includeModelInPrompt\":true,"
+    "\"textVerbosity\":\"low\","
     "\"retry\":{\"enabled\":true,\"maxRetries\":10,\"baseDelayMs\":500,\"maxDelayMs\":300000},"
     "\"tools\":{\"approvalMode\":\"yolo\",\"maxTimeout\":0,\"intentTracing\":true,\"outputMaxColumns\":768,"
     "\"artifactSpillThreshold\":50,\"artifactTailBytes\":20,\"artifactTailLines\":500,\"artifactHeadBytes\":20,\"artifactMaxBytes\":16},"

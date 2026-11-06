@@ -689,6 +689,8 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
     agent_subscribe(child->agent, on_child_event, r);
     bool refused = app_prompt(child, prompt, NULL) == APP_PROMPT_REFUSED;
     settle_owned_jobs(child, cancel);
+    /* a focused view's empty Enter forced the queue into the continuation */
+    while (agent_take_forced_delivery(child->agent) && agent_run_queued(child->agent) == 0) settle_owned_jobs(child, cancel);
     agent_unsubscribe(child->agent, on_child_event, r);
     w.done = 1;
     if (watching) pthread_join(wt, NULL);

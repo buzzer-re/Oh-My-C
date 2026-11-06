@@ -5,6 +5,7 @@
  * env sanitizing, the artifact cache), the startup release notes (resolveStartupChangelogForDisplay,
  * formatStartupChangelogSummary), /record + `omc play` (row normalization, redaction, the paint encoder,
  * recording parse), TTSR rule frontmatter as /omfg writes it (condition and scope lists, question rules). */
+#include "coding/skilldesc.h"
 #include "coding/changelog.h"
 #include "coding/debugtools.h"
 #include "coding/record.h"
@@ -162,6 +163,23 @@ static void test_pause(void) {
 }
 
 /* tar header field helpers over a decompressed archive */
+/* skill-descriptions.ts validCompression: the 160 characters bound the prompt, the 12-word target stays advisory */
+static void test_skilldesc_valid(void) {
+    char *v = skilldesc_valid("  one two three four five six seven eight nine ten eleven twelve thirteen fourteen  ");
+    CHECK(v && str_eq(v, "one two three four five six seven eight nine ten eleven twelve thirteen fourteen"));
+    free(v);
+    CHECK(!skilldesc_valid("two\nlines"));
+    CHECK(!skilldesc_valid("   "));
+    char long_line[162];
+    memset(long_line, 'x', 161);
+    long_line[161] = 0;
+    CHECK(!skilldesc_valid(long_line));
+    long_line[160] = 0;
+    v = skilldesc_valid(long_line);
+    CHECK(v != NULL);
+    free(v);
+}
+
 static unsigned tar_sum(const unsigned char *h) {
     unsigned s = 0;
     for (int i = 0; i < 512; i++) s += (i >= 148 && i < 156) ? ' ' : h[i];
@@ -437,6 +455,7 @@ static void test_ttsr_frontmatter(void) {
 }
 
 int main(void) {
+    test_skilldesc_valid();
     setenv("OMC_CODING_AGENT_DIR", "/nonexistent-omc-wp28b-agent", 1); /* discovery never reads the real agent dir */
     test_views();
     test_ttsr_frontmatter();

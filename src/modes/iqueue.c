@@ -518,7 +518,10 @@ void iq_submit_mode(ui_t *u, const char *t, json_t *attachments, bool loop_body)
     if (!*t && !json_len(attachments)) {
         json_free(attachments);
         /* empty submit while streaming with queued input: interrupt the turn; the queue is delivered next */
-        if (u->worker_running && agent_queued_count(u->app->agent)) app_abort(u->app);
+        if (u->worker_running && agent_has_interruptible_input(u->app->agent)) {
+            agent_abort_deliver_queued(u->app->agent);
+            app_abort(u->app);
+        }
         return;
     }
     if (!loop_body && !json_len(attachments) && iq_is_continue_shortcut(u, t)) {
@@ -768,6 +771,7 @@ bool iq_run_end(ui_t *u) {
         if (u->bg_kind) return true;
         ui_chrome_turn(u, false);
     }
+    bool forced = agent_take_forced_delivery(u->app->agent);
     strvec_t st = {0}, fu = {0};
     agent_queue_texts(u->app->agent, &st, &fu);
     bool queued = st.n || fu.n;
@@ -777,6 +781,12 @@ bool iq_run_end(ui_t *u) {
         ix_start_queued_run(u);
         ui_queue_refresh(u);
         return true;
+    }
+    /* the forcing Enter raced the turn boundary: the loop took the message into the turn it aborted before any output */
+    if (forced && app_has_unanswered_prompt(u->app)) {
+        ix_resume(u);
+        ui_queue_refresh(u);
+        if (u->worker_running) return true;
     }
     if (u->yield_compaction) {
         const char *arg = u->yield_compaction + strlen("/compact");

@@ -718,7 +718,16 @@ strvec_t internal_url_docs(const sysprompt_url_host_t *h) {
     if (h->rule_count > 0) push_url_doc(&out, "rule", NULL, NULL);
     if (h->memory_local) push_url_doc(&out, "memory", NULL, NULL);
     if (h->out_replies) push_url_doc(&out, "out", NULL, NULL);
-    push_url_doc(&out, "agent", NULL, NULL);
+    { /* agent-protocol.ts: a subagent's `agent://all` is refused, so it goes unadvertised */
+        json_t *c = json_obj();
+        json_set_bool(c, "subagent", h->subagent);
+        char *doc = prompt_render("coding-agent/prompts/internal-urls/agent.md", c);
+        json_free(c);
+        if (doc) {
+            strvec_push_own(&out, str_trim(doc));
+            free(doc);
+        }
+    }
     push_url_doc(&out, "history", NULL, NULL);
     push_url_doc(&out, "artifact", NULL, NULL);
     push_url_doc(&out, "local", NULL, NULL);
@@ -934,6 +943,7 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
         .memory_local = str_eq(memory_backend(), "local"),
         .out_replies = settings_configured("out.enabled") ? settings_bool("out.enabled", true) : o->tui_transcript,
         .settings_approval = o->tui_transcript,
+        .subagent = o->subagent,
     };
     strvec_t docs = internal_url_docs(&host);
     for (size_t i = 0; i < docs.n; i++) json_push_str(urls, docs.v[i]);

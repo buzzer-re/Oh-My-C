@@ -173,6 +173,20 @@ int main(void) {
     CHECK(txt && strstr(txt, "The provider connection dropped mid-response") && strstr(txt, "Attempt #2/3"));
     json_free(r);
 
+    /* isBillingCapUsageLimit (rate-limit-utils.test.ts) */
+    const char *lithos = "402 the organization is out of credit, add more to continue (type=insufficient_quota param=insufficient_quota)";
+    CHECK(tr_billing_cap_usage_limit(402, lithos));
+    CHECK(tr_billing_cap_usage_limit(0, lithos));
+    CHECK(tr_billing_cap_usage_limit(429, "Insufficient balance in account"));
+    CHECK(tr_billing_cap_usage_limit(429, "OpenRouter: Insufficient credits"));
+    CHECK(tr_billing_cap_usage_limit(403, "Your monthly spend limit has been reached"));
+    CHECK(!tr_billing_cap_usage_limit(429, "429 You exceeded your current quota, please check your plan and billing details. For details, see: "
+                                           "https://help.aliyun.com/zh/model-studio/error-code#token-limit"));
+    CHECK(!tr_billing_cap_usage_limit(429, "Rate limit exceeded, too many requests"));
+    CHECK(!tr_billing_cap_usage_limit(402, "A subscription is required for this endpoint"));
+    CHECK(!tr_billing_cap_usage_limit(0, "503 service unavailable"));
+    CHECK(!tr_billing_cap_usage_limit(0, NULL));
+
     if (fails) fprintf(stderr, "%d failure(s)\n", fails);
     return fails != 0;
 }

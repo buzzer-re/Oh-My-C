@@ -48,6 +48,16 @@ enum {
     P_STREAM_DROP,
     P_OVERFLOW_NO_BODY,
     P_GENERIC_LIMIT,
+    P_DASHSCOPE_DOC, /* isBillingCapUsageLimit (rate-limit.ts) */
+    P_DASHSCOPE_MSG,
+    P_STATUS_402_QUOTA,
+    P_OUT_OF_CREDIT,
+    P_INSUFFICIENT_BALANCE,
+    P_CREDITS_EXHAUSTED,
+    P_PREPAID_EXHAUSTED,
+    P_SPEND_LIMIT,
+    P_CREDITS_REQUIRED,
+    P_INSUFFICIENT_QUOTA,
     P_STATUS0, /* STATUS_MESSAGE_PATTERNS (5) */
     P_STATUS4 = P_STATUS0 + 4,
     P_PAYLOAD0, /* PAYLOAD_REJECTION_PATTERNS (5) */
@@ -124,6 +134,16 @@ static const struct {
      "disconnected before secure tls connection"},
     {P_OVERFLOW_NO_BODY, RX_ICASE, "\\b4(00|13)\\s*(status code)?\\s*\\(no body\\)"},
     {P_GENERIC_LIMIT, RX_ICASE, "exceeds the limit of \\d+"},
+    {P_DASHSCOPE_DOC, RX_ICASE, "error-code[^()\\s]*#token-limit"},
+    {P_DASHSCOPE_MSG, RX_ICASE, "\\byou exceeded your current quota, please check your plan and billing details\\b"},
+    {P_STATUS_402_QUOTA, RX_ICASE, "\\b(?:payment(?:\\s+is)?[-_.\\s]*required|deactivated_workspace|insufficient.?(?:balance|account.?funds))\\b"},
+    {P_OUT_OF_CREDIT, RX_ICASE, "\\bout of credit|\\badd (?:more )?credit|\\btop ?up\\b"},
+    {P_INSUFFICIENT_BALANCE, RX_ICASE, "insufficient.?balance"},
+    {P_CREDITS_EXHAUSTED, RX_ICASE, "\\b(?:exceed\\w*|insufficient|not enough)\\b[^\\n]{0,40}\\bcredits?\\b|\\bcredits?\\b[^\\n]{0,40}\\b(?:exhausted|depleted)\\b"},
+    {P_PREPAID_EXHAUSTED, RX_ICASE, "\\busage_pricing_required\\b|\\bprepaid balance\\b[^\\n]{0,40}\\b(?:used up|exhausted|depleted)\\b"},
+    {P_SPEND_LIMIT, RX_ICASE, "spend(?:ing)?[\\s_-]?(?:limit|cap)\\b"},
+    {P_CREDITS_REQUIRED, RX_ICASE, "\\busage credits are required\\b|\\bcredits_required\\b"},
+    {P_INSUFFICIENT_QUOTA, RX_ICASE, "\\binsufficient_quota\\b"},
     {P_STATUS0 + 0, RX_ICASE, "\\bstatus(?:_code)?[:=]\\s*(\\d{3})\\b"},
     {P_STATUS0 + 1, RX_ICASE, "\\bstatus\\s+(\\d{3})\\b"},
     {P_STATUS0 + 2, RX_ICASE, "\\bHTTP\\s+(\\d{3})\\b"},
@@ -256,6 +276,19 @@ static bool opaque_status_body(const char *s) {
         }
     }
     return true;
+}
+
+/* rate-limit.ts isBillingCapUsageLimit: topping the account up clears the error, waiting never does */
+bool tr_billing_cap_usage_limit(int status, const char *msg) {
+    if (!msg) return false;
+    const char *reason = mr_rate_limit_reason(msg);
+    if (str_eq(reason, "CONCURRENT_LIMIT") && status != 402) return false; /* isConcurrencyCapExclusion */
+    if (m(P_DASHSCOPE_DOC, msg) && m(P_DASHSCOPE_MSG, msg)) return false;  /* isDashScopeTokenLimitText */
+    if (status == 402) /* is402BillingCapBody */
+        return opaque_status_body(msg) || m(P_STATUS_402_QUOTA, msg) || str_eq(reason, "QUOTA_EXHAUSTED") ||
+               str_eq(reason, "CONCURRENT_LIMIT");
+    return m(P_OUT_OF_CREDIT, msg) || m(P_INSUFFICIENT_BALANCE, msg) || m(P_CREDITS_EXHAUSTED, msg) ||
+           m(P_PREPAID_EXHAUSTED, msg) || m(P_SPEND_LIMIT, msg) || m(P_CREDITS_REQUIRED, msg) || m(P_INSUFFICIENT_QUOTA, msg);
 }
 
 static bool terminal_client_status(int st) { return st >= 400 && st < 500 && st != 408 && st != 429; }

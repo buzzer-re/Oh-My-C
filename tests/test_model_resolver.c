@@ -149,6 +149,16 @@ int main(void) {
     key = mr_fallback_chain_key("mock/mock-2", catalog_find("mock", "mock-2"), NULL); /* smol gets the default chain */
     CHECK(key && !strcmp(key, "smol"));
     free(key);
+    /* a chat session on the model assigned to a kind role does not adopt that role's chain */
+    set("modelRoles", "{\"default\":\"mock/mock-1\",\"web\":\"mock/mock-2\"}");
+    set("retry.fallbackChains", "{\"default\":[\"mock/mock-flaky\"],\"web\":[\"web/exa\"]}");
+    key = mr_fallback_chain_key("mock/mock-2", catalog_find("mock", "mock-2"), NULL);
+    CHECK(key && !strcmp(key, "default"));
+    free(key);
+    key = mr_fallback_chain_key("mock/mock-2", catalog_find("mock", "mock-2"), "web"); /* the explicit hint still applies */
+    CHECK(key && !strcmp(key, "web"));
+    free(key);
+    set("modelRoles", "{\"default\":\"mock/mock-1\",\"smol\":\"mock/mock-2\"}");
     set("retry.fallbackChains", "{\"mock/*\":[\"other/*\"]}");
     key = mr_fallback_chain_key("mock/mock-2", NULL, NULL);
     CHECK(key && !strcmp(key, "mock/*"));

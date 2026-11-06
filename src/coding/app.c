@@ -1,4 +1,5 @@
 #include "app.h"
+#include "coding/costgate.h"
 #include "coding/turn_recovery.h"
 #include "coding/dcr.h"
 #include "coding/autothink.h"
@@ -386,7 +387,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
         }
         if (str_eq(role, "assistant")) {
             json_t *u = json_get(ev->message, "usage");
-            a->total_cost += json_get_num(json_get(u, "cost"), "total", 0);
+            costgate_add(a, json_get_num(json_get(u, "cost"), "total", 0));
             __atomic_add_fetch(&a->output_tokens, json_get_int(u, "output", 0), __ATOMIC_SEQ_CST);
             int64_t ctx = json_get_int(u, "input", 0) + json_get_int(u, "cacheRead", 0) + json_get_int(u, "cacheWrite", 0) +
                           json_get_int(u, "output", 0);
@@ -445,7 +446,7 @@ void app_flush_warm_usage(app_t *a) {
         }
     }
     json_arr_foreach(u, i, e) {
-        a->total_cost += json_get_num(json_get(json_get(e, "usage"), "cost"), "total", 0);
+        costgate_add(a, json_get_num(json_get(json_get(e, "usage"), "cost"), "total", 0));
         if (!a->session) continue;
         json_t *entry = json_obj();
         json_set_str(entry, "type", "model_usage");
@@ -1032,6 +1033,13 @@ static void maybe_restore_primary(app_t *a) {
 static void hook_turn_boundary(void *ud, agent_t *ag, const json_t *assistant) {
     app_t *a = ud;
     cmp_mid_turn(ud, assistant);
+    if (ag->mcp_tools_dirty && a->mcp) { /* the call that loaded tools returned: they reach this session's next request */
+        ag->mcp_tools_dirty = 0;
+        mcp_sync_tools(a->mcp, ag);
+        tools_finalize(ag, a->opts.tools);
+        app_rebuild_system_prompt(a);
+        xdnotice_sync(a, NULL);
+    }
     /* #steerAnthropicWrapUp: once per wrap-up window, tell the model to checkpoint when nothing (low priority, extra
      * usage) carries the work past the allowance */
     if (app_anthropic_wrap_up_key(a) >= 0) {
@@ -1143,6 +1151,10 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     int saga = attempt - a->retry_offset + 1; /* omp #retryAttempt after its increment */
     bool exhausted = saga > max;
     bool usage_limit = is_usage_limit(err);
+    /* an account out of money has no reset to wait for: fallbacks still run, then the provider's error surfaces and
+     * the error frame's Retry re-attempts at once */
+    int status = (int)json_get_int(assistant, "errorStatus", 0);
+    bool billing_cap = tr_billing_cap_usage_limit(status ? status : aie_status_from_text(err), err);
     /* model fallback: consulted on every failed attempt, retryable or hard (hardErrorFallback) */
     bool switched = false;
     if (a->model && !is_abort_error(err) && settings_bool("retry.modelFallback", true) && mr_fallback_admits(usage_limit) &&
@@ -1151,7 +1163,7 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
         int64_t hint = retry_after_ms(err);
         mr_suppress_selector(cur, now_ms() + (hint > 0 ? hint : mr_rate_limit_backoff_ms(err)));
         bool rate_limited = str_istr(err, "429") || str_eq(mr_rate_limit_reason(err), "RATE_LIMIT_EXCEEDED");
-        bool same_model_retry = retryable && !exhausted && !(settings_bool("retry.rateLimitWalksChain", false) && rate_limited);
+        bool same_model_retry = retryable && !exhausted && !billing_cap && !(settings_bool("retry.rateLimitWalksChain", false) && rate_limited);
         switched = try_retry_fallback(a, ag, cur, assistant, err, same_model_retry);
         free(cur);
     }
@@ -1177,9 +1189,10 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     if ((double)window > delay) delay = (double)window;
     if ((double)hint > delay) delay = (double)hint;
     int64_t maxd = settings_int("retry.maxDelayMs", 5 * 60 * 1000);
-    if (maxd > 0 && delay > (double)maxd) {
-        char *fe = xasprintf("Provider requested %.0fms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
-                             ceil(delay), (long long)maxd, err ? err : "error");
+    if (billing_cap || (maxd > 0 && delay > (double)maxd)) {
+        char *fe = billing_cap ? xstrdup(err)
+                               : xasprintf("Provider requested %.0fms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
+                                           ceil(delay), (long long)maxd, err ? err : "error");
         json_t *ev = json_obj();
         json_set_str(ev, "type", "auto_retry_end");
         json_set_bool(ev, "success", false);
@@ -1407,6 +1420,11 @@ static void install_agent(app_t *a) {
     a->env->delegation_bias = model_delegation_bias(a->model);
     agent_set_intent_tracing(settings_bool("tools.intentTracing", true));
     if (!a->opts.no_tools) tools_register_builtin(ag, a->env, a->opts.tools);
+    if (a->mcp && a->opts.subagent) { /* subagents share the parent's connections, each with its own view */
+        free(ag->mcp_scope);
+        ag->mcp_scope = xstrdup(ag->session_id);
+        mcp_open_tool_scope(a->mcp, ag->mcp_scope, a->opts.mcp_seed_scope);
+    }
     if (a->mcp && !a->opts.no_tools) mcp_register_tools(a->mcp, ag);
     /* subagents get lsp only with task.enableLsp (task/index.ts enableLsp, off by default) */
     bool lsp_ok = !a->opts.no_tools && settings_bool("lsp.enabled", true) &&
@@ -1752,6 +1770,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (!o->subagent) app_bind_artifacts(a, NULL);
     app_bind_local(a);
     a->skilldesc = skilldesc_new();
+    if (o->subagent) skilldesc_start_compression(a->skilldesc); /* the tree's cost gate already exists */
     a->memory = memory_rt_new();
     if (!o->subagent) a->autolearn = autolearn_new(a);
     if (a->auto_thinking) { /* keep auto pending until the first turn while exposing a valid wire effort */
@@ -3161,12 +3180,8 @@ static bool is_cut_off_assistant(const json_t *m) {
     return true;
 }
 
-/* AgentSession.resume, the `.`/`c` continue shortcut. A prompt the model has not answered yet runs again as is;
- * otherwise the hidden manual-continue directive asks the model to pick its work back up. */
-int app_resume(app_t *a, char **err) {
-    maybe_restore_primary(a);
-    pthread_mutex_lock(&a->agent->mu);
-    json_t *msgs = a->agent->messages;
+/* conversationEnd + the cut-off tail + unansweredPrompt (turn-recovery.ts). Sets the tail range; caller holds the lock. */
+static bool unanswered_prompt_locked(const json_t *msgs, size_t *tail_out, size_t *end_out) {
     /* conversationEnd: trailing custom messages the user did not author */
     size_t end = json_len(msgs);
     while (end > 0) {
@@ -3176,19 +3191,40 @@ int app_resume(app_t *a, char **err) {
     }
     size_t tail = end;
     while (tail > 0 && is_cut_off_assistant(json_at(msgs, tail - 1))) tail--;
-    /* unansweredPrompt */
-    bool unanswered = false;
+    *tail_out = tail;
+    *end_out = end;
     for (size_t i = tail; i-- > 0;) {
         const json_t *m = json_at(msgs, i);
         const char *role = json_get_str(m, "role");
         if (str_eq(role, "assistant")) {
-            if (!is_cut_off_assistant(m)) break;
+            if (!is_cut_off_assistant(m)) return false;
+        } else if (json_get_bool(m, "sessionSummary", false)) {
+            continue; /* a handoff or compaction can leave only the summary: the directive resumes it */
         } else if (str_eq(role, "user") || (str_eq(role, "custom") && str_eq(json_get_str(m, "attribution"), "user") && json_get_bool(m, "display", true)) ||
                    (str_eq(role, "developer") && json_get_bool(m, "userInitiated", false))) {
-            unanswered = true;
-            break;
+            return true;
         }
     }
+    return false;
+}
+
+bool app_has_unanswered_prompt(app_t *a) {
+    size_t tail, end;
+    pthread_mutex_lock(&a->agent->mu);
+    bool r = unanswered_prompt_locked(a->agent->messages, &tail, &end);
+    pthread_mutex_unlock(&a->agent->mu);
+    return r;
+}
+
+/* AgentSession.resume, the `.`/`c` continue shortcut. A prompt the model has not answered yet runs again as is;
+ * otherwise the hidden manual-continue directive asks the model to pick its work back up. omc's summaries and
+ * user-invoked /skill: prompts are `user` messages, so has_user below covers omp's resumable check. */
+int app_resume(app_t *a, char **err) {
+    maybe_restore_primary(a);
+    pthread_mutex_lock(&a->agent->mu);
+    json_t *msgs = a->agent->messages;
+    size_t tail, end;
+    bool unanswered = unanswered_prompt_locked(msgs, &tail, &end);
     if (unanswered)
         for (size_t i = end; i-- > tail;) json_free(json_arr_remove(msgs, i));
     bool has_user = false;
@@ -3338,6 +3374,7 @@ int app_new_session(app_t *a) {
     free(label);
     a->title_done = false;
     a->total_cost = 0;
+    costgate_reseed(a);
     a->last_context_tokens = 0;
     json_free(a->env->todo.phases);
     a->env->todo.phases = json_arr();
@@ -3357,6 +3394,7 @@ int app_switch_session(app_t *a, const char *path, char **err) {
     a->agent->session_id = xstrdup(session_id(s));
     load_session_into_agent(a);
     a->title_done = s->title != NULL;
+    costgate_reseed(a);
     app_goal_restore(a);
     return 0;
 }
@@ -3555,6 +3593,7 @@ app_t *app_subagent_new_at(app_t *parent, const char *agent_name, const char *mo
     o.model = chosen ? chosen : label;
     o.append_system_prompt = append_prompt ? append_prompt : json_get_str(def, "body");
     o.mcp = parent->mcp;
+    o.mcp_seed_scope = parent->agent->mcp_scope;
     o.lsp = parent->lsp;
     strvec_t tools = {0};
     json_t *tl = json_get_arr(def, "tools"), *tn;
@@ -3581,6 +3620,7 @@ app_t *app_subagent_new_at(app_t *parent, const char *agent_name, const char *mo
     strvec_free(&tools);
     json_free(defs);
     if (!child) return NULL;
+    costgate_attach_subagent(child);
     /* subagents share the parent's artifact id space and directory (omp adoptArtifactManager) */
     artifacts_unref(child->env->artifacts);
     child->env->artifacts = artifacts_ref(parent->env->artifacts);
@@ -3622,7 +3662,7 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
         if (refused && child->prompt_refusal) json_set_str(*details, "error", child->prompt_refusal);
         else if (last && json_get_str(last, "errorMessage")) json_set_str(*details, "error", json_get_str(last, "errorMessage"));
     }
-    parent->total_cost += child->total_cost;
+    costgate_merge_child(parent, child->total_cost);
     app_free(child);
     return text;
 }

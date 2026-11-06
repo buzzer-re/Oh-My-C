@@ -146,7 +146,7 @@ static bool fence_line(const char *l) {
 
 static strvec_t strip_envelope_noise(const strvec_t *in) {
     strvec_t out = {0};
-    bool skipping = false, inserting = false;
+    bool skipping = false, inserting = false, writing = false;
     for (size_t i = 0; i < in->n; i++) {
         const char *line = in->v[i];
         char *path = NULL;
@@ -156,15 +156,27 @@ static strvec_t strip_envelope_noise(const strvec_t *in) {
         char *t = fz_trim(line);
         if (h != H_NONE) {
             inserting = !skipping && (h == H_BEFORE || h == H_AFTER);
-        } else if (inserting) {
-            if (envelope_end(t)) {
-                bool rest_blank = true;
-                for (size_t k = i + 1; k < in->n && rest_blank; k++) rest_blank = fz_blank(in->v[k]) || fence_line(in->v[k]);
-                if (rest_blank) {
-                    free(t);
-                    break;
-                }
+            writing = !skipping && (h == H_REPLACE || h == H_BEFORE || h == H_AFTER);
+        } else if (writing && envelope_end(t)) {
+            /* a closing sentinel ending a Replace or Insert body is never content: before blank or fence lines only it
+             * closes the payload, before a header or envelope row it closes that one body. Find bodies keep such
+             * lines, so a stray one can be matched and removed. */
+            const char *next = NULL;
+            for (size_t k = i + 1; k < in->n && !next; k++)
+                if (!fz_blank(in->v[k]) && !fence_line(in->v[k])) next = in->v[k];
+            if (!next) {
+                free(t);
+                break;
             }
+            char *nt = fz_trim(next);
+            bool closes_body = parse_header(next, NULL, NULL) != H_NONE || envelope_line(nt);
+            free(nt);
+            if (closes_body) {
+                free(t);
+                continue;
+            }
+        }
+        if (inserting && h == H_NONE) {
             strvec_push(&out, line);
             free(t);
             continue;

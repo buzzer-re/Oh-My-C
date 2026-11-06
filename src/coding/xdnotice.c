@@ -18,6 +18,7 @@ struct xdnotice {
     strvec_t announced; /* devices the model has been told about */
     bool seeded;        /* announced replayed from persisted notices */
     strvec_t base;      /* devices the current base system prompt lists */
+    strvec_t base_routed; /* devices whose route line, with its catalog summary, that prompt renders */
 };
 
 static void sv_remove(strvec_t *v, const char *s) {
@@ -127,9 +128,13 @@ void xdnotice_base_rebuilt(app_t *a, bool catalog_delivered) {
     if (!a->agent) return;
     struct xdnotice *x = state(a);
     strvec_t cur = catalog_delivered ? mounted_names(a->agent) : (strvec_t){0};
+    strvec_t routed = {0};
+    free(xdev_mcp_route_guidance(a->agent, &routed));
     pthread_mutex_lock(&x->mu);
     strvec_free(&x->base);
     x->base = cur;
+    strvec_free(&x->base_routed);
+    x->base_routed = routed;
     pthread_mutex_unlock(&x->mu);
 }
 
@@ -192,15 +197,11 @@ json_t *xdnotice_take(app_t *a) {
         return NULL;
     }
     seed(x, a->agent);
-    /* a pending add the outgoing base prompt already lists (its catalog, or an MCP route line carrying the
-     * catalog summary) needs no notice line */
-    strvec_t routed = {0};
-    char *guide = xdev_mcp_route_guidance(a->agent, &routed);
-    free(guide);
+    /* a pending add the committed base prompt already lists (its catalog, or an MCP route line carrying the catalog
+     * summary) needs no notice line; one mounted since keeps its notice even when the live routes list it */
     for (size_t i = 0; i < x->added.n; i++)
-        if (strvec_contains(&x->base, x->added.v[i]) || strvec_contains(&routed, x->added.v[i]))
+        if (strvec_contains(&x->base, x->added.v[i]) || strvec_contains(&x->base_routed, x->added.v[i]))
             sv_add(&x->announced, x->added.v[i]);
-    strvec_free(&routed);
     strvec_t added = {0}, removed = {0};
     for (size_t i = 0; i < x->added.n; i++)
         if (!strvec_contains(&x->announced, x->added.v[i])) strvec_push(&added, x->added.v[i]);
@@ -258,6 +259,7 @@ void xdnotice_free(app_t *a) {
     strvec_free(&x->removed);
     strvec_free(&x->announced);
     strvec_free(&x->base);
+    strvec_free(&x->base_routed);
     pthread_mutex_destroy(&x->mu);
     free(x);
     a->xdnotice = NULL;
