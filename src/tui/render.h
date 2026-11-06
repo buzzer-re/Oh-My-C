@@ -124,6 +124,7 @@ typedef bool (*tui_signal_hook_fn)(tui_t *t, int sig, void *ud);
 void tui_set_signal_hook(tui_t *t, tui_signal_hook_fn fn, void *ud);
 
 void tui_set_show_hardware_cursor(tui_t *t, bool show);
+bool tui_has_rendered(const tui_t *t); /* a frame was painted */
 void tui_set_min_render_interval(tui_t *t, int ms); /* throttle, default 33 (omp: 30 fps) */
 
 /* Thread-safe. Coalesced and throttled (min interval). The _full variant clears screen and

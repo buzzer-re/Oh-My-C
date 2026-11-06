@@ -437,7 +437,7 @@ static void fill_request_opts(app_t *a, ai_stream_opts_t *o) {
     double temp = settings_num("temperature", -1), top_p = settings_num("topP", -1);
     if (temp >= 0) o->temperature = temp;
     if (top_p >= 0) o->top_p = top_p;
-    o->text_verbosity = settings_str("textVerbosity", NULL);
+    o->text_verbosity = settings_str("textVerbosity", "low");
     app_tier_request_opts(a, o);
     o->slow_hooks = &a->slow_hooks;
     o->first_event_timeout_ms = timeout_seconds_ms(settings_num("providers.streamFirstEventTimeoutSeconds", -1));

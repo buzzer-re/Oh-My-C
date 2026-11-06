@@ -817,6 +817,7 @@ static void close_prompt(ask_view_t *v, const char *text) {
         free(s->note);
         s->note = xstrdup(text);
         s->note_row = row;
+        v->just_q = -1; /* the note went to it: a later question's note goes to that question's row */
     }
     request(v);
 }

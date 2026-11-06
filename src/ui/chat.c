@@ -2211,6 +2211,7 @@ void ui_chat_rebuild(ui_t *u) {
     json_free(path);
     hmap_free(&pending, NULL);
     toolcard_set_replaying(false);
+    if (!u->view) ui_recap_replay(u);
     if (!u->view && !u->worker_running) { /* #reseedTokenRate: the last completed turn after a history swap */
         agent_t *ag = u->app->agent;
         double out = 0, dur = 0;

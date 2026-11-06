@@ -9,17 +9,24 @@
  * is shown in the transcript as a dim italic `※ recap: …` line (flattened, at most 280 cells). New activity, a
  * session transition or teardown invalidates everything captured before it, including an in-flight request.
  *
- * Not ported: omp journals each recap to history.db (`session_recaps`), which omc does not have.
+ * omp journals each recap to history.db (`session_recaps`); omc, which has no history.db, keeps the same records in
+ * <agent>/session-recaps.jsonl. A replay (resume, /restart, rebuild) re-shows the newest one while the conversation has not moved
+ * since it was recorded and the view still stands at that point.
  */
 #include "ui/signals.h"
 
 #include "coding/goal.h"
 #include "config/settings.h"
+#include "coding/app.h"
+#include "session/session.h"
+#include "core/fs.h"
 #include "prompt/template.h"
 #include "ui/ui.h"
 
 #include <ctype.h>
 #include <math.h>
+#include <sys/stat.h>
+#include <time.h>
 
 #define RECAP_MAX_CELLS 280 /* TRUNCATE_LENGTHS.RECAP */
 
@@ -154,6 +161,96 @@ static void present(ui_t *u, const char *reply) {
     free(line);
 }
 
+/* ---------- the recap journal ---------- */
+
+#define JOURNAL_MAX_BYTES (256 * 1024)
+#define JOURNAL_KEEP_LINES 200
+
+static void journal_append(const char *session_id, const char *recap) {
+    if (!session_id) return;
+    char *p = omc_agent_path("session-recaps.jsonl");
+    struct stat st;
+    if (stat(p, &st) == 0 && st.st_size > JOURNAL_MAX_BYTES) {
+        size_t n = 0;
+        char *d = fs_read(p, &n);
+        strvec_t lines = d ? str_split_lines(d, n) : (strvec_t){0};
+        sb_t kept = SB_INIT;
+        for (size_t i = lines.n > JOURNAL_KEEP_LINES ? lines.n - JOURNAL_KEEP_LINES : 0; i < lines.n; i++)
+            if (*lines.v[i]) sb_appendf(&kept, "%s\n", lines.v[i]);
+        fs_write_atomic(p, kept.s ? kept.s : "", kept.len, 0600);
+        sb_free(&kept);
+        strvec_free(&lines);
+        free(d);
+    }
+    json_t *e = json_obj();
+    json_set_str(e, "sessionId", session_id);
+    json_set_int(e, "createdAt", (int64_t)time(NULL));
+    json_set_str(e, "recap", recap);
+    char *line = json_dump(e, 0);
+    json_free(e);
+    FILE *f = fopen(p, "a");
+    if (f) {
+        fprintf(f, "%s\n", line);
+        fclose(f);
+    }
+    free(line);
+    free(p);
+}
+
+/* movesConversation: an entry that marks when the conversation last moved (an eval-state snapshot does not) */
+static bool moves_conversation(const json_t *e) {
+    const char *t = json_get_str(e, "type");
+    if (!str_eq(t, "message") && !str_eq(t, "custom_message") && !str_eq(t, "branch_summary") && !str_eq(t, "reset_boundary")) return false;
+    const char *ct = str_eq(t, "custom_message") ? json_get_str(e, "customType") : json_get_str(json_get_obj(e, "message"), "customType");
+    return !str_eq(ct, "eval-state-context");
+}
+
+static int64_t iso_ms(const char *s) {
+    struct tm tm;
+    memset(&tm, 0, sizeof tm);
+    int ms = 0;
+    if (!s || sscanf(s, "%d-%d-%dT%d:%d:%d.%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min, &tm.tm_sec, &ms) < 6) return -1;
+    tm.tm_year -= 1900;
+    tm.tm_mon -= 1;
+    return (int64_t)timegm(&tm) * 1000 + ms;
+}
+
+void ui_recap_replay(ui_t *u) {
+    app_t *a = u->app;
+    session_t *s = a ? a->session : NULL;
+    if (!s || !s->leaf_id || u->worker_running) return;
+    /* conversationTip: the newest entry that moves the conversation, when the branch ends at it */
+    const json_t *newest = NULL, *e;
+    json_arr_foreach(s->entries, i, e) if (moves_conversation(e)) newest = e;
+    if (!newest) return;
+    json_t *path = session_path_to(s, s->leaf_id);
+    const char *tip = NULL;
+    json_arr_foreach(path, k, e) if (moves_conversation(e)) tip = json_get_str(e, "id");
+    bool at_tip = tip && str_eq(tip, json_get_str(newest, "id"));
+    json_free(path);
+    if (!at_tip) return;
+    char *p = omc_agent_path("session-recaps.jsonl");
+    size_t n = 0;
+    char *d = fs_read(p, &n);
+    free(p);
+    if (!d) return;
+    strvec_t lines = str_split_lines(d, n);
+    const char *sid = session_id(s);
+    int64_t tip_ms = iso_ms(json_get_str(newest, "timestamp"));
+    for (size_t i = lines.n; i-- > 0;) {
+        json_t *j = *lines.v[i] ? json_parse_str(lines.v[i]) : NULL;
+        if (j && str_eq(json_get_str(j, "sessionId"), sid)) {
+            /* createdAt has second precision; a recap lands at least a second after the turn it follows */
+            if (json_get_int(j, "createdAt", 0) * 1000 > tip_ms && json_get_str(j, "recap")) present(u, json_get_str(j, "recap"));
+            json_free(j);
+            break;
+        }
+        json_free(j);
+    }
+    strvec_free(&lines);
+    free(d);
+}
+
 static void run_done(void *ud) {
     recap_job_t *j = ud;
     bool current = j->gen == R.gen && !j->cancel && R.run == j;
@@ -162,7 +259,10 @@ static void run_done(void *ud) {
         if (!quiet()) schedule();
         else {
             R.pending = false; /* #complete(pending, "recap") */
-            if (j->reply && *j->reply) present(j->u, j->reply);
+            if (j->reply && *j->reply) {
+                present(j->u, j->reply);
+                journal_append(j->u->app && j->u->app->session ? session_id(j->u->app->session) : NULL, j->reply);
+            }
         }
     }
     free(j->prompt);

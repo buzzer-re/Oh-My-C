@@ -264,6 +264,15 @@ static void test_cache_marker(void) {
     CHECK(ui_detect_cache_invalidation(prev, implicit) == 0);
     CHECK(ui_detect_cache_invalidation(small, cold) == 0);
     CHECK(ui_detect_cache_invalidation(NULL, cold) == 0);
+    /* a cold turn can still read the shared system block back: under half of what the previous turn read is a miss */
+    json_t *wide = json_parse_str("{\"input\":10,\"cacheRead\":300000,\"cacheWrite\":0}");
+    json_t *shared = json_parse_str("{\"input\":100,\"cacheRead\":15000,\"cacheWrite\":285000}");
+    json_t *half = json_parse_str("{\"input\":100,\"cacheRead\":150000,\"cacheWrite\":150000}");
+    CHECK(ui_detect_cache_invalidation(wide, shared) == 285100);
+    CHECK(ui_detect_cache_invalidation(wide, half) == 0);
+    json_free(wide);
+    json_free(shared);
+    json_free(half);
     char *row = ui_cache_miss_divider(50900, 80);
     char *plain = tui_strip_ansi(row);
     CHECK(eq_free(plain, "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"

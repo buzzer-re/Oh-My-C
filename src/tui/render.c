@@ -296,6 +296,8 @@ void tui_set_show_hardware_cursor(tui_t *t, bool show) {
     tui_request_render(t);
 }
 
+bool tui_has_rendered(const tui_t *t) { return t->last_render != 0; }
+
 void tui_set_min_render_interval(tui_t *t, int ms) { t->min_interval = ms < 0 ? 0 : ms; }
 
 /* Gap between frame starts (omp #scheduleRender): the 30 fps cadence, stretched to twice the last

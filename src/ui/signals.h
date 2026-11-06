@@ -64,6 +64,7 @@ void ui_signals_ask_waiting(void);
 
 /* recap.c - the idle recap (`recap.enabled`, `recap.idleSeconds`) */
 void ui_recap_init(ui_t *u);
+void ui_recap_replay(ui_t *u);                     /* a transcript replay re-shows the newest journaled recap still current */
 void ui_recap_settled(const json_t *run_messages); /* a run settled: arm the recap of this stretch */
 void ui_recap_invalidate(void);                    /* new activity / session transition */
 void ui_recap_refresh(void);                       /* settings or blockers changed */
