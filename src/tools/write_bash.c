@@ -681,55 +681,20 @@ static bool split_leading_cd(const char *cmd, char **dir, char **rest) {
 
 #define BASH_TIMEOUT_DESC "timeout in seconds; 0 disables the command deadline; nonzero values are clamped to 1-3600"
 
-/* LLM-facing footer when a call becomes a background job. It names the command, and its directory when that is not the
- * session's: parallel calls' results arrive in completion order, so the id alone doesn't say which call started which job. */
-static char *background_notice(const char *jid, double tsec, const char *command, const char *cwd_display) {
-    char *id = job_command_identity(command);
-    char *named = cwd_display ? xasprintf(" for `%s` in %s", id, cwd_display) : xasprintf(" for `%s`", id);
-    free(id);
-    char *r;
+static char *background_notice(const char *jid, double tsec) {
     if (tsec > 0)
-        r = xasprintf("Backgrounded as job %s%s (killed once it has run %.0fs in total; `timeout: 0` disables the deadline); its "
-                      "output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no "
-                      "`sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn. Do other work, or end "
-                      "your reply and wait to be woken.",
-                      jid, named, tsec);
-    else
-        r = xasprintf("Backgrounded as job %s%s (no deadline); its output is injected into the conversation as a follow-up the "
-                      "moment it finishes. Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every "
-                      "poll is a wasted turn. Do other work, or end your reply and wait to be woken.",
-                      jid, named);
-    free(named);
-    return r;
+        return xasprintf("Backgrounded as job %s (killed once it has run %.0fs in total; `timeout: 0` disables the deadline); its "
+                         "output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no "
+                         "`sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn. Do other work, or end "
+                         "your reply and wait to be woken.",
+                         jid, tsec);
+    return xasprintf("Backgrounded as job %s (no deadline); its output is injected into the conversation as a follow-up the "
+                     "moment it finishes. Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every "
+                     "poll is a wasted turn. Do other work, or end your reply and wait to be woken.",
+                     jid);
 }
 
-/* formatToolWorkingDirectory: NULL for the session's directory, relative inside it, shortened outside; line breaks as `\\n` */
-static char *job_cwd_display(const char *cwd, const char *session_cwd) {
-    if (!cwd || !session_cwd || !strcmp(cwd, session_cwd)) return NULL;
-    size_t cl = strlen(session_cwd);
-    char *disp;
-    if (!strncmp(cwd, session_cwd, cl) && cwd[cl] == '/') disp = xstrdup(cwd + cl + 1);
-    else {
-        const char *home = getenv("HOME");
-        size_t hl = home ? strlen(home) : 0;
-        if (hl && (!strncmp(cwd, home, hl) && (cwd[hl] == '/' || !cwd[hl]))) disp = xasprintf("~%s", cwd + hl);
-        else disp = xstrdup(cwd);
-    }
-    sb_t b = SB_INIT;
-    for (const char *p = disp; *p; p++) {
-        if (*p == '\t') sb_append(&b, "   ");
-        else if (*p == '\r' && p[1] == '\n') {
-            sb_append(&b, "\\n");
-            p++;
-        } else if (*p == '\r' || *p == '\n') sb_append(&b, "\\n");
-        else sb_putc(&b, *p);
-    }
-    free(disp);
-    return sb_detach(&b);
-}
-
-static void background_result(tool_result_t *out, const char *jid, const char *preview, const strvec_t *notices, double tsec,
-                              const char *command, const char *cwd, const char *session_cwd) {
+static void background_result(tool_result_t *out, const char *jid, const char *preview, const strvec_t *notices, double tsec) {
     sb_t b = SB_INIT;
     size_t pl = preview ? strlen(preview) : 0;
     while (pl && isspace((unsigned char)preview[pl - 1])) pl--;
@@ -739,11 +704,9 @@ static void background_result(tool_result_t *out, const char *jid, const char *p
     }
     for (size_t i = 0; notices && i < notices->n; i++) sb_appendf(&b, "%s\n", notices->v[i]);
     if (notices && notices->n) sb_putc(&b, '\n');
-    char *cwd_disp = job_cwd_display(cwd, session_cwd);
-    char *n = background_notice(jid, tsec, command, cwd_disp);
+    char *n = background_notice(jid, tsec);
     sb_append(&b, n);
     free(n);
-    free(cwd_disp);
     tool_result_text(out, sb_cstr(&b));
     sb_free(&b);
     out->details = json_obj();
@@ -960,7 +923,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     bool pty = json_get_bool(args, "pty", false);
     if (async_req && env->jobs) {
         char *jid = jobs_start_bash(env->jobs, full, cwd, timeout_ms, NULL, ctx ? ctx->intent : NULL);
-        background_result(out, jid, NULL, &notices, tsec, cmd, cwd, env->cwd);
+        background_result(out, jid, NULL, &notices, tsec);
         free(jid);
         goto done;
     }
@@ -1061,7 +1024,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             if (jid) {
                 if (steered) strvec_push(&notices, "Backgrounded early to handle an incoming message; the command keeps running.");
                 char *pv = out_sink_preview(bs.sink);
-                background_result(out, jid, pv, &notices, tsec, cmd, cwd, env->cwd);
+                background_result(out, jid, pv, &notices, tsec);
                 free(pv);
                 free(jid);
                 free(fid);

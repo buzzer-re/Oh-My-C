@@ -25,7 +25,7 @@ void jobs_free(jobs_t *j); /* cancels and joins running jobs, stops owned sessio
 void jobs_set_notify(jobs_t *j, void (*fn)(void *ud), void *ud);
 
 /* explicit `async: true` bash job (fresh shell); returns owned job id (bg_N) */
-char *job_command_identity(const char *command);    /* formatCommandIdentity (owned) */
+char *job_command_identity(const char *command);    /* commandIdentity (owned) */
 char *job_escape_harness_tags(const char *text);    /* escapeHarnessTags (owned) */
 char *jobs_start_bash(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *label, const char *intent);
 /* generic job of `type` ("task", "service", ...). id_hint NULL => bg_N; a taken id gets a -N suffix.

@@ -362,6 +362,11 @@ check "queue steer all"     "slow:1.5:x,s1,s2,f1 / 3"  env B="$B" ROOT="$ROOT" b
 : > "$T/req.jsonl"
 check "async bash"     "Backgrounded as job bg_1"  bash -c "'$B' --model mock/mock-1 --mode json -p 'call:bash:{\"command\":\"sleep 1; echo bgdone\",\"async\":true}' | grep -o 'Backgrounded as job bg_1'"
 grep -q "Background job bg_1 (sleep 1; echo bgdone) has completed" "$T/req.jsonl" && echo "   ok  async delivered" || { echo "   FAIL async delivered"; fail=1; }
+# the start notice no longer echoes the command; the completion header names it on one line, middle elided past 400 chars
+check "async start plain" "Backgrounded as job bg_1 (killed once" bash -c "'$B' --model mock/mock-1 --mode json -p 'call:bash:{\"command\":\"echo one; echo two\",\"async\":true}' | grep -o 'Backgrounded as job bg_1 ([a-z]* [a-z]*'"
+check "async multi-line"  "async ok" bash -c "'$B' --model mock/mock-1 -p 'call:bash:{\"command\":\"echo a\\necho b\",\"async\":true}' >/dev/null; grep -qF 'Background job bg_1 (echo a\\\\necho b) has completed' '$T/req.jsonl' && echo async ok"
+long_cmd=": $(printf 'x%.0s' $(seq 500))"
+check "async long cmd"    "async ok" bash -c "'$B' --model mock/mock-1 -p 'call:bash:{\"command\":\"$long_cmd\",\"async\":true}' >/dev/null; python3 -I -c 'import sys;d=open(sys.argv[1],encoding=\"utf-8\").read();x=\"x\"*198;sys.exit(0 if \": \"+x+\"\\\\u2026\"+\"x\"*200+\") has completed\" in d or \": \"+x+\"…\"+\"x\"*200+\") has completed\" in d else 1)' '$T/req.jsonl' && echo async ok"
 check "wait nothing"   "Nothing to wait for"  "$B" --model mock/mock-1 -p 'call:wait:{}'
 # background jobs carry the call's intent: proc://, wait, /jobs; /jobs full requests the widget role's caption
 check "jobs intent" "jobs intent ok"  python3 -I "$ROOT/tests/e2e/jobs_intent.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ji"

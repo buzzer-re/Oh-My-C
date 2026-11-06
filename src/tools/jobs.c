@@ -663,10 +663,10 @@ char *jobs_start_bash_fg(jobs_t *j, const char *cmd, const char *cwd, int64_t ti
     return id;
 }
 
-/* formatCommandIdentity: on one line (line breaks written `\\n`) and, past 2000 UTF-16 units, with the middle elided so commands
- * that differ only at the end stay distinguishable */
+/* commandIdentity: a bash command on one line (line breaks written `\\n`), the middle elided past 400 UTF-16 units so commands that
+ * differ only at the end stay distinct */
 char *job_command_identity(const char *command) {
-    enum { MAX_CHARS = 2000 };
+    enum { MAX_CHARS = 400 };
     size_t n = strlen(command);
     while (n && isspace((unsigned char)*command)) command++, n--;
     while (n && isspace((unsigned char)command[n - 1])) n--;
@@ -685,9 +685,8 @@ char *job_command_identity(const char *command) {
     for (size_t i = 0; i < len;) {
         uint32_t cp;
         int k = utf8_decode(s + i, len - i, &cp);
-        size_t w = cp > 0xffff ? 2 : 1;
         if (units < keep) head = i + (size_t)k;
-        units += w;
+        units += cp > 0xffff ? 2 : 1;
         i += (size_t)k;
     }
     if (units <= MAX_CHARS) return sb_detach(&b);
@@ -701,7 +700,7 @@ char *job_command_identity(const char *command) {
         i = st;
         tail = st;
     }
-    char *r = xasprintf("%.*s[\xe2\x80\xa6%zuch elided\xe2\x80\xa6]%s", (int)head, s, units - 2 * keep, s + tail);
+    char *r = xasprintf("%.*s\xe2\x80\xa6%s", (int)head, s, s + tail);
     sb_free(&b);
     return r;
 }
@@ -887,7 +886,7 @@ json_t *jobs_take_finished(jobs_t *j) {
         json_t *o = json_obj();
         json_set_str(o, "jobId", x->id);
         json_set_str(o, "label", x->label);
-        /* a bash job is named by its command in both headers, as its start notice named it */
+        /* a bash job is named by its whole command: its label truncates the tail, so parallel jobs could read alike */
         const char *job_cmd = x->bash ? x->bash->cmd : NULL;
         const char *cmd_prefix = job_cmd ? settings_str("shellCommandPrefix", "") : NULL;
         size_t cpl = cmd_prefix ? strlen(cmd_prefix) : 0;
