@@ -53,3 +53,6 @@ assert routed and routed[0]["chatModelUid"] == "MODEL_ASSIGNED_1" and routed[0][
 assert routed[0]["cascadeId"] == assign[0]["cascadeId"], "router and chat share the cascade id"
 PY
 kill $DVPID 2>/dev/null
+# devin-cli adopts the Devin CLI seat key, devin-windsurf exchanges the Windsurf code; both file a `devin` API key
+mkdir -p "$T/devinlogin"
+check "devin logins"    "windsurf denied ok"  python3 -I "$ROOT/tests/e2e/login_devin.py" "$B" "$T/devinlogin"

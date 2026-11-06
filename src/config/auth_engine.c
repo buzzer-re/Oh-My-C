@@ -901,6 +901,8 @@ static bool factory_whoami(const actx_t *c, const char *phase, json_t *identity,
     http_headers_set(&h, "Authorization", b);
     http_headers_set(&h, "Accept", "application/json");
     if (json_get_str(identity, "orgId")) http_headers_set(&h, "X-Factory-Org-Id", json_get_str(identity, "orgId"));
+    /* droid sends it on every whoami; Factory adds newer identity fields only for it */
+    http_headers_set(&h, "X-Factory-Whoami-Extended", "true");
     free(b);
     http_resp_t r;
     int rc = auth_http("GET", url, &h, NULL, 15000, c, &r);

@@ -571,6 +571,18 @@ int auth_oauth_code_flow(const actx_t *c, const json_t *login, json_t **cred_out
         }
     } else if (got_state && *state && strcmp(got_state, state) != 0) {
         *err = xstrdup("OAuth state mismatch; aborting");
+    } else if (json_get_str(login, "exchangeHook")) {
+        /* the code exchange is not a declared token request: the seat key neither expires nor refreshes */
+        char *access = auth_windsurf_exchange(c, code, verifier, err);
+        if (access) {
+            json_t *cr = json_obj();
+            json_set_str(cr, "type", "oauth");
+            json_set(cr, "access", json_str_own(access));
+            json_set_str(cr, "refresh", "");
+            json_set_int(cr, "expires", AUTH_NEVER_EXPIRES);
+            *cred_out = cr;
+            rc = 0;
+        }
     } else {
         json_t *xv = json_clone(vars);
         json_set_str(xv, "code", code);

@@ -24,6 +24,7 @@ $MOCK_SLOT_SECS / $MOCK_THINK_SECS model a single-slot local server (llama.cpp w
   time, each waiting MOCK_SLOT_SECS (prefill) plus MOCK_THINK_SECS when it would think (no `enable_thinking: false`).
   $MOCK_TIMELOG gets one JSON line per request arrival and per slot start (kind main/title/compress/side, bytes, queue
   time), so tests can pin the order and timing of side requests against the main request.
+$MOCK_SHOULD_RETRY: `x-should-retry` header on "fail:" replies.
 $MOCK_FAIL_RETRY_AFTER_MS (default "0"): `retry-after-ms` header on retryable "fail:" replies (408/429/5xx) so the
   transport's own retries (6 x 500 ms*2^n per attempt, like omp) don't slow the suite; "none" omits it (real backoff).
   A header of 0 is a retry-now hint: it never reaches the error message (omp's retry-after-ms= suffix needs > 0).
@@ -162,6 +163,8 @@ class H(BaseHTTPRequestHandler):
             self.send_response(code)
             if (code >= 500 or code in (408, 429)) and FAIL_RETRY_AFTER != "none":
                 self.send_header("retry-after-ms", FAIL_RETRY_AFTER)
+            if os.environ.get("MOCK_SHOULD_RETRY"):
+                self.send_header("x-should-retry", os.environ["MOCK_SHOULD_RETRY"])
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(b)))
             self.end_headers()
