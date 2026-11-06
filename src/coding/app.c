@@ -50,6 +50,8 @@
 
 /* ---------- model resolution (config/model_resolver.c) ---------- */
 
+static bool apply_chillax(app_t *a, const char *text);
+
 static void level_out(const char *lv, ai_effort_t *effort_out, bool *has_effort) {
     ai_effort_t e;
     if (lv && effort_parse(lv, &e) == 0) {
@@ -260,6 +262,21 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
     /* power.sleepPrevention: held while a run is in flight (subagents run inside the parent's run) */
     if (ev->type == AGENT_EV_AGENT_START && !a->opts.subagent) power_acquire();
     if (ev->type == AGENT_EV_AGENT_END && !a->opts.subagent) power_release();
+    /* #relaxOnDelivery: apply `chillax` when a queued message is delivered, so a steer relaxes the running turn from its next
+     * request (the run's first prompt already applied it in apply_auto_thinking, and doing so again changes nothing) */
+    if (ev->type == AGENT_EV_MESSAGE_END && str_eq(json_get_str(ev->message, "role"), "user") && !json_get_bool(ev->message, "synthetic", false) &&
+        !a->opts.subagent) {
+        const json_t *ct = json_get(ev->message, "content");
+        const char *tx = json_is_str(ct) ? json_sv(ct) : NULL;
+        const json_t *b;
+        if (!tx) json_arr_foreach(ct, bi, b) {
+            if (str_eq(json_get_str(b, "type"), "text")) {
+                tx = json_get_str(b, "text");
+                break;
+            }
+        }
+        apply_chillax(a, tx);
+    }
     if (ev->type == AGENT_EV_MESSAGE_END && str_eq(json_get_str(ev->message, "role"), "assistant")) {
         cachewarm_on_response(a->warmer, ev->message);
         /* completedAt: local completion time stamped by the session at message_end (persisted with the message) */
@@ -2839,13 +2856,8 @@ static int run_guarded_inner(app_t *a, json_t *msgs) {
 }
 
 /* applyAutoThinkingLevel: classify this user turn; false when an abort superseded the prompt meanwhile */
-static bool apply_auto_thinking(app_t *a, const char *text) {
-    if (!a->auto_thinking) return true;
-    int gen = __atomic_load_n(&a->abort_gen, __ATOMIC_SEQ_CST);
-    ai_effort_t e;
-    bool ok = autothink_resolve(a, text, &e);
-    if (__atomic_load_n(&a->abort_gen, __ATOMIC_SEQ_CST) != gen) return false;
-    if (!ok || !a->auto_thinking) return true;
+/* #resolveAutoThinkingLevel: publish `e` as the turn's auto resolution; the transcript records only a changed level */
+static void resolve_auto_thinking(app_t *a, ai_effort_t e) {
     bool changed = a->thinking != e;
     a->auto_resolved = (int)e;
     a->thinking = e;
@@ -2861,6 +2873,38 @@ static bool apply_auto_thinking(app_t *a, const char *text) {
         } else json_set_str(ev, "configured", "auto");
         app_emit(a, ev);
     }
+}
+
+/* applyChillax: drop effort to the model's lowest supported level from the next request on. Only models that take per-message
+ * effort qualify (they switch effort between steps without rewriting the cached prefix, so a steer relaxes the running turn). In
+ * auto mode the floor is this turn's resolution; a pinned level is re-pinned lower, never raised, and off stays off. Whether the
+ * keyword applied, so auto classification must not run for the turn. */
+static bool apply_chillax(app_t *a, const char *text) {
+    if (!text || !keywords_enabled("chillax") || !keywords_contains(text, "chillax")) return false;
+    const ai_model_t *m = a->model;
+    ai_effort_t sup[6];
+    if (!m || !m->reasoning || json_get_bool(m->thinking, "unverified", false) || !model_compat_bool(m, "supportsPerMessageEffort", false) ||
+        !autothink_supported(m, sup))
+        return false;
+    ai_effort_t floor_e = sup[0];
+    if (a->auto_thinking) {
+        resolve_auto_thinking(a, floor_e);
+        return true;
+    }
+    if (a->thinking != EFFORT_OFF && floor_e < a->thinking) app_set_thinking(a, floor_e);
+    return true;
+}
+
+static bool apply_auto_thinking(app_t *a, const char *text) {
+    /* `chillax` settles the turn's effort itself, so classification is skipped */
+    if (apply_chillax(a, text)) return true;
+    if (!a->auto_thinking) return true;
+    int gen = __atomic_load_n(&a->abort_gen, __ATOMIC_SEQ_CST);
+    ai_effort_t e;
+    bool ok = autothink_resolve(a, text, &e);
+    if (__atomic_load_n(&a->abort_gen, __ATOMIC_SEQ_CST) != gen) return false;
+    if (!ok || !a->auto_thinking) return true;
+    resolve_auto_thinking(a, e);
     return true;
 }
 
@@ -2907,6 +2951,12 @@ int app_prompt_attachments(app_t *a, const char *text, json_t *attachments) {
 int app_prompt(app_t *a, const char *text, json_t *images) { return app_prompt_ex(a, text, images, NULL); }
 
 void app_steer_attachments(app_t *a, const char *text, json_t *attachments) {
+    /* prependNotices: magic keywords ride ahead of a queued message as they do a direct prompt */
+    {
+        json_t *kn = keywords_notices(a, text), *k;
+        json_arr_foreach(kn, ki, k) agent_steer(a->agent, json_clone(k));
+        json_free(kn);
+    }
     json_t *images = json_arr(), *e;
     json_arr_foreach(attachments, i, e) {
         json_t *img = json_get(e, "image");

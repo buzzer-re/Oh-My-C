@@ -1506,6 +1506,11 @@ bool tui_editor_handle_key(tui_editor_t *ed, const tui_key_t *k) {
     return true;
 }
 
+void tui_editor_set_row_hook(tui_editor_t *ed, char *(*fn)(void *ud, tui_editor_t *ed, const char *row), void *ud) {
+    ed->row_hook = fn;
+    ed->row_hook_ud = ud;
+}
+
 /* ---------- rendering ---------- */
 
 static void border_line(sb_t *b, int width, int slot, const char *label) {
@@ -1711,6 +1716,13 @@ static void composer_render(tui_editor_t *ed, int width, strvec_t *out) {
             sb_append(&d, text);
         }
         char *disp = style_atoms(ed, sb_detach(&d), st->filled_surface);
+        if (ed->row_hook) {
+            char *decorated = ed->row_hook(ed->row_hook_ud, ed, disp);
+            if (decorated) {
+                free(disp);
+                disp = decorated;
+            }
+        }
         char *rendered = st->filled_surface ? xstrdup(disp) : text_colored(ed, disp);
         tui_composer_row_t r = {.ctx = &ctx,
                                 .text = rendered,

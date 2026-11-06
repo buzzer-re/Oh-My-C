@@ -164,6 +164,16 @@ static void render_user(msgview_t *v, int width, strvec_t *o) {
     size_t first = o->n;
     tui_component_render(&m->base, width, o);
     tui_component_destroy(&m->base);
+    /* magic keywords glow in the sent bubble, statically; code spans keep their own color */
+    if (!v->synthetic) {
+        for (size_t i = first; i < o->n; i++) {
+            char *g = ui_keywords_paint(o->v[i], sgr, 0, sgr);
+            if (g) {
+                free(o->v[i]);
+                o->v[i] = g;
+            }
+        }
+    }
     /* chips keep their identity color (userBubbleColor renderReference), the bubble fg resumes after */
     if (strcmp(shown, v->text) && !v->synthetic) {
         for (int n = 1; n <= 64; n++) {

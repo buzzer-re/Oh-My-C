@@ -3481,6 +3481,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_editor_set_inline_hint(u.editor, tui_ac_default_inline_hint, ac);
     tui_editor_set_autocomplete(u.editor, tui_ac_default_provider, ac);
     tui_editor_set_token_hook(u.editor, skill_chip_hook, &u);
+    ui_keywords_attach(&u);
     tui_container_add(root, &u.editor->base);
     u.status = ui_status_new(&u);
     tui_container_add(root, u.status);

@@ -79,7 +79,6 @@ composer.predictionAlternatives	inert	omc has no composer predictions (omp v18.1
 skills.manualSkills	inert	not ported yet (omp v18.17.0)
 task.workerThreads	inert	omc subagents are threads already; no worker-thread placement
 providers.openaiResponsesWebsockets	inert	not ported yet (omp v18.17.0)
-magicKeywords.chillax	inert	not ported yet (omp v18.17.0)
 extensionRenderers.transcriptPresenters	oos	needs the JS extension runtime
 display.shellVisualization	oos	needs upstream's Rust shell engine (RunTrace)
 update.auto	oos	omp's release feed and install methods
