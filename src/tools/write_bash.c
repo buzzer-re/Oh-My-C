@@ -751,7 +751,8 @@ static void bash_finish(tool_env_t *env, tool_result_t *out, proc_result_t *r, b
     int exit_code = r->term_signal ? 128 + r->term_signal : r->exit_code;
     bool failed = !timed_out && exit_code != 0;
     sb_t b = SB_INIT;
-    sb_append(&b, *sum.output ? sum.output : "(no output)");
+    /* a failed exit gets its own notice; a clean one says so, or an empty result reads like a broken command */
+    sb_append(&b, *sum.output ? sum.output : !timed_out && exit_code == 0 ? "(no output, exit code 0)" : "(no output)");
     bool wall_notice = dur >= 1000;
     if (wall_notice || (notices && notices->n)) {
         sb_append(&b, "\n");
@@ -763,7 +764,9 @@ static void bash_finish(tool_env_t *env, tool_result_t *out, proc_result_t *r, b
     if (timed_out) {
         char *m = tsec > 0 ? xasprintf("Command timed out after %.0f seconds", tsec) : xstrdup("Command timed out");
         char *lead = xasprintf("[%s]\n", m);
-        if (!str_starts(sum.output, lead)) sb_appendf(&b, "\n\n[%s]", m);
+        /* the sink's own leading notice: exactly once in the text sent */
+        if (strncmp(sum.output, lead, strlen(lead) - 1) || (sum.output[strlen(lead) - 1] && sum.output[strlen(lead) - 1] != '\n'))
+            sb_appendf(&b, "\n\n[%s]", m);
         free(lead);
         free(m);
     }

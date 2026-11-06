@@ -1,4 +1,5 @@
 /* outsink.c - see outsink.h */
+#define _GNU_SOURCE
 #include "outsink.h"
 
 #include <ctype.h>
@@ -948,17 +949,30 @@ static void compose_body(out_sink_t *s, composed_t *r) {
     r->elided_bytes = r->elided_lines = -1;
     sb_t b = SB_INIT;
     if (hb > 0 && eff_total > (int64_t)(hb + tb)) {
-        int64_t eb = MAX(0, eff_total - (int64_t)hb - (int64_t)tb);
-        int64_t el = MAX(0, total_lines - head_lines - tail_lines);
+        /* each window cut back to whole lines (a window that is one line fragment stays as is): a line split at the marker
+         * reads as two lines, and the counts would no longer name the source lines shown */
+        size_t khb = hb, ktail = 0;
+        if (!head_nl) {
+            const char *nl = hb ? memrchr(head, '\n', hb) : NULL;
+            if (nl) khb = (size_t)(nl - head) + 1;
+        }
+        const char *tnl = tb ? memchr(tail, '\n', tb) : NULL;
+        if (tnl && (size_t)(tnl - tail) < tb - 1) ktail = (size_t)(tnl - tail) + 1;
+        const char *khead = head, *kt = tail + ktail;
+        size_t ktb = tb - ktail;
+        int64_t khl = khb == hb ? head_lines : (int64_t)out_count_nl(khead, khb);
+        int64_t ktl = ktb == tb ? tail_lines : (int64_t)out_count_nl(kt, ktb) + 1;
+        int64_t eb = MAX(0, eff_total - (int64_t)khb - (int64_t)ktb);
+        int64_t el = MAX(0, total_lines - khl - ktl);
         char *marker = out_middle_marker(el, eb);
-        bool hsep = !head_nl, tsep = !(tb && tail[0] == '\n');
-        sb_appendn(&b, head, hb);
+        bool hsep = !(khb && khead[khb - 1] == '\n'), tsep = !(ktb && kt[0] == '\n');
+        sb_appendn(&b, khead, khb);
         if (hsep) sb_putc(&b, '\n');
         sb_append(&b, marker);
         if (tsep) sb_putc(&b, '\n');
-        sb_appendn(&b, tail, tb);
-        r->output_bytes = (int64_t)(hb + strlen(marker) + tb) + hsep + tsep;
-        r->output_lines = head_lines + 1 + tail_lines;
+        sb_appendn(&b, kt, ktb);
+        r->output_bytes = (int64_t)(khb + strlen(marker) + ktb) + hsep + tsep;
+        r->output_lines = khl + 1 + ktl;
         r->elided_bytes = eb;
         r->elided_lines = el;
         free(marker);
@@ -1102,6 +1116,21 @@ void out_meta_head_limit(json_t **meta, int64_t reached, int64_t suggestion) {
     set_limit(meta, "headLimit", reached, suggestion < 0 ? reached * 2 : suggestion);
 }
 
+/* MIDDLE_ELISION_MARKER: the sink's marker line (out_middle_marker) */
+static bool is_middle_marker(const char *p, size_t n) {
+    static const char open[] = "[" ELLIPSIS, close[] = " elided" ELLIPSIS "]";
+    size_t ol = sizeof open - 1, cl = sizeof close - 1;
+    if (n < ol + cl + 2 || memcmp(p, open, ol) || memcmp(p + n - cl, close, cl)) return false;
+    size_t i = ol, end = n - cl;
+    if (end >= 2 && p[end - 2] == 'l' && p[end - 1] == 'n') end -= 2;
+    else if (end >= 1 && p[end - 1] == 'B') end -= 1;
+    else return false;
+    if (i >= end) return false;
+    for (; i < end; i++)
+        if (!isdigit((unsigned char)p[i])) return false;
+    return true;
+}
+
 void out_meta_from_summary(json_t **meta, const out_summary_t *sum, const char *direction, int64_t start_line,
                            int64_t total_file_lines) {
     if (sum->artifact_error) json_set_str(meta_obj(meta), "artifactError", sum->artifact_error);
@@ -1117,15 +1146,29 @@ void out_meta_from_summary(json_t **meta, const out_summary_t *sum, const char *
     if (sum->elided_bytes > 0) {
         int64_t el = sum->elided_lines >= 0 ? sum->elided_lines : MAX(0, total_lines - sum->output_lines);
         int64_t kept = MAX(0, sum->output_lines - 1);
-        int64_t hl = (kept + 1) / 2, tl = kept - hl;
+        /* the marker's line splits head from tail; output ending in a newline has no line after it, though the counts
+         * carry an empty one, and a notice dump() put above the head is not in output_lines */
+        int64_t shown = 0, marker_at = -1;
+        const char *o = sum->output ? sum->output : "", *oe = o + sum->output_len;
+        for (const char *p = o;; shown++) {
+            const char *nl = memchr(p, '\n', (size_t)(oe - p));
+            if (marker_at < 0 && is_middle_marker(p, (size_t)((nl ? nl : oe) - p))) marker_at = shown;
+            if (!nl) break;
+            p = nl + 1;
+        }
+        shown++;
+        int64_t trailing = marker_at >= 0 && shown > marker_at + 1 && sum->output_len && oe[-1] == '\n' ? 1 : 0;
+        int64_t last_line = total_lines - trailing;
+        int64_t tl = marker_at >= 0 ? shown - marker_at - 1 - trailing : kept - (kept + 1) / 2;
+        int64_t hl = marker_at >= 0 ? MAX(0, sum->output_lines - (shown - marker_at)) : (kept + 1) / 2;
         json_set_str(t, "direction", "middle");
         json_set_str(t, "truncatedBy", "middle");
-        json_set_int(t, "totalLines", total_lines);
+        json_set_int(t, "totalLines", last_line);
         json_set_int(t, "totalBytes", sum->total_bytes);
         json_set_int(t, "outputLines", sum->output_lines);
         json_set_int(t, "outputBytes", sum->output_bytes);
         if (hl > 0) json_set(t, "headRange", range_obj(1, hl));
-        if (tl > 0) json_set(t, "tailRange", range_obj(total_lines - tl + 1, total_lines));
+        if (tl > 0) json_set(t, "tailRange", range_obj(last_line - tl + 1, last_line));
         json_set_int(t, "elidedBytes", sum->elided_bytes);
         json_set_int(t, "elidedLines", el);
         if (aid) json_set_str(t, "artifactId", aid);

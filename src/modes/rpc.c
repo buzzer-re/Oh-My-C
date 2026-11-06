@@ -2033,7 +2033,8 @@ static void run_background(rpc_t *r, const json_t *cmd, void (*fn)(rpc_t *, cons
 }
 
 /* executeBash: BashResult {exitCode?, cancelled, workingDir, output, truncated, totalLines, totalBytes, outputLines,
- * outputBytes}; `abort_bash` stops it */
+ * outputBytes, elidedBytes?, elidedLines?, columnDroppedBytes?, columnTruncatedLines?, columnTruncatedRange?, columnMax?};
+ * `abort_bash` stops it */
 static void bash_main(rpc_t *r, const json_t *cmd) {
     app_t *a = r->a;
     const char *id = json_get_str(cmd, "id");
@@ -2054,7 +2055,8 @@ static void bash_main(rpc_t *r, const json_t *cmd) {
     if (json_get(m, "exitCode")) json_set(d, "exitCode", json_clone(json_get(m, "exitCode")));
     json_set_bool(d, "cancelled", json_get_bool(m, "cancelled", false));
     json_set_str(d, "workingDir", a->cwd);
-    static const char *const keys[] = {"output", "truncated", "totalLines", "totalBytes", "outputLines", "outputBytes"};
+    static const char *const keys[] = {"output", "truncated", "totalLines", "totalBytes", "outputLines", "outputBytes", "elidedBytes",
+                                       "elidedLines", "columnDroppedBytes", "columnTruncatedLines", "columnTruncatedRange", "columnMax"};
     for (size_t i = 0; i < ARRAY_LEN(keys); i++)
         if (json_get(m, keys[i])) json_set(d, keys[i], json_clone(json_get(m, keys[i])));
     json_free(m);

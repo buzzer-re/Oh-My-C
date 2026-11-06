@@ -4,15 +4,19 @@
 #include "core/fs.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 struct shell {
     child_t child;
-    bool started;
-    char *nonce;
+    bool started, is_bash;
+    char *dir;    /* private directory: the command file and each command's output pipe */
+    char *script; /* <dir>/c: the name error messages carry until they are rewritten */
+    uint64_t seq;
     pthread_mutex_t mu;
 };
 
@@ -23,30 +27,97 @@ shell_t *shell_new(void) {
     return s;
 }
 
+/* output pipes a background job still holds: read and dropped, so the job never blocks or dies writing to one. The job can
+ * outlive its shell (a one-shot command's), so this outlives them all. */
+static pthread_mutex_t g_drain_mu = PTHREAD_MUTEX_INITIALIZER;
+static VEC(int) g_drain;
+static bool g_drain_started;
+
+static void *drain_main(void *p) {
+    UNUSED(p);
+    char buf[16384];
+    for (;;) {
+        struct pollfd pf[64];
+        nfds_t n = 0;
+        pthread_mutex_lock(&g_drain_mu);
+        for (size_t i = 0; i < g_drain.n && n < 64; i++) pf[n++] = (struct pollfd){g_drain.v[i], POLLIN, 0};
+        pthread_mutex_unlock(&g_drain_mu);
+        if (poll(pf, n, 200) <= 0) continue;
+        for (nfds_t k = 0; k < n; k++) {
+            if (!(pf[k].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) continue;
+            ssize_t r = read(pf[k].fd, buf, sizeof buf);
+            if (r > 0 || (r < 0 && (errno == EAGAIN || errno == EINTR))) continue;
+            pthread_mutex_lock(&g_drain_mu);
+            for (size_t i = 0; i < g_drain.n; i++)
+                if (g_drain.v[i] == pf[k].fd) {
+                    close(pf[k].fd);
+                    g_drain.v[i] = g_drain.v[--g_drain.n];
+                    break;
+                }
+            pthread_mutex_unlock(&g_drain_mu);
+        }
+    }
+    return NULL;
+}
+
+static void drain_add(int fd) {
+    pthread_mutex_lock(&g_drain_mu);
+    vec_push(&g_drain, fd);
+    if (!g_drain_started) {
+        pthread_t th;
+        if (pthread_create(&th, NULL, drain_main, NULL) == 0) {
+            pthread_detach(th);
+            g_drain_started = true;
+        }
+    }
+    pthread_mutex_unlock(&g_drain_mu);
+}
+
 static void stop(shell_t *s) {
     if (!s->started) return;
     child_kill(&s->child, SIGKILL);
     child_close(&s->child);
     s->started = false;
-    free(s->nonce);
-    s->nonce = NULL;
 }
 
 void shell_free(shell_t *s) {
     if (!s) return;
     stop(s);
+    if (s->script) unlink(s->script);
+    if (s->dir) rmdir(s->dir);
+    free(s->script);
+    free(s->dir);
     pthread_mutex_destroy(&s->mu);
     free(s);
 }
 
+static int write_all(int fd, const char *p, size_t n);
+
 static int start(shell_t *s, const proc_opts_t *o) {
     const char *sh = proc_shell_path();
-    bool is_bash = str_ends(sh, "bash");
+    s->is_bash = str_ends(sh, "bash");
+    if (!s->dir) {
+        const char *tmp = env_get("TMPDIR");
+        char *t = xasprintf("%s/omc-sh-XXXXXX", tmp && *tmp ? tmp : "/tmp");
+        if (!mkdtemp(t)) {
+            free(t);
+            return -1;
+        }
+        s->dir = t;
+        s->script = xasprintf("%s/c", t);
+    }
     const char *argv_bash[] = {sh, "--noprofile", "--norc", NULL};
     const char *argv_sh[] = {sh, NULL};
-    if (child_spawn(is_bash ? argv_bash : argv_sh, NULL, o ? o->env_extra : NULL, false, &s->child) != 0) return -1;
+    if (child_spawn(s->is_bash ? argv_bash : argv_sh, NULL, o ? o->env_extra : NULL, false, &s->child) != 0) return -1;
     s->started = true;
-    s->nonce = rand_hex(8);
+    /* aliases defined by one command work in the next (omp's embedded bash keeps them) */
+    if (s->is_bash) {
+        static const char init[] = "shopt -s expand_aliases\n";
+        if (write_all(s->child.in_fd, init, sizeof init - 1) != 0) {
+            stop(s);
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -132,10 +203,42 @@ static bool match_job_notice(const char *sh, const char *p, const char *end) {
     return match_job_status(q + d + 1, end);
 }
 
+/* `<script>: line N: ` -> `bash: line N: ` as a one-shot `bash -c` says it, parse errors as `bash: -c: line N: `.
+ * Returns the bytes removed from the line at ls..le. */
+static size_t rewrite_script_name(const char *script, char *buf, size_t *len, char *ls, char *le, size_t min_keep) {
+    size_t sl = strlen(script), removed = 0;
+    for (char *p = ls; (p = memmem(p, (size_t)(le - p), script, sl)) != NULL;) {
+        const char *q = p + sl;
+        size_t d = (size_t)(le - q) > 7 && !memcmp(q, ": line ", 7) ? digits(q + 7, le) : 0;
+        if (!d || (size_t)(p - buf) < min_keep) {
+            p += sl;
+            continue;
+        }
+        const char *msg = q + 7 + d;
+        bool parse = le - msg > 2 && !memcmp(msg, ": ", 2) &&
+                     ((size_t)(le - msg) >= 14 && !memcmp(msg + 2, "syntax error", 12) ? true
+                      : (size_t)(le - msg) >= 16 && !memcmp(msg + 2, "unexpected EOF", 14) ? true
+                                                                                           : msg[2] == '`');
+        const char *name = proc_shell_name();
+        char *rep = parse ? xasprintf("%s: -c", name) : xstrdup(name);
+        size_t rl = strlen(rep);
+        if (rl <= sl) { /* the private path is never shorter than the shell's name */
+            memcpy(p, rep, rl);
+            memmove(p + rl, p + sl, (size_t)(buf + *len - (p + sl)));
+            *len -= sl - rl;
+            le -= sl - rl;
+            removed += sl - rl;
+        }
+        free(rep);
+        p += rl;
+    }
+    return removed;
+}
+
 /* Drop job notices from the complete lines of buf[*from, *len) (never touching bytes before min_keep); *from becomes
  * the start of the trailing incomplete line. Returns how many tail bytes may still grow into a notice (to hold back
- * from streaming). */
-static size_t strip_job_notices(const char *sh, char *buf, size_t *len, size_t *from, size_t min_keep) {
+ * from streaming). With `script` (sh is then the same string), error messages naming the command file read as `bash -c`'s. */
+static size_t strip_job_notices_ex(const char *sh, const char *script, char *buf, size_t *len, size_t *from, size_t min_keep) {
     size_t i = *from;
     while (i < *len) {
         char *nl = memchr(buf + i, '\n', *len - i);
@@ -153,6 +256,7 @@ static size_t strip_job_notices(const char *sh, char *buf, size_t *len, size_t *
             i = (size_t)(ls - buf);
             continue;
         }
+        if (script) le -= rewrite_script_name(script, buf, len, ls, le, min_keep);
         i = (size_t)(le - buf) + 1;
     }
     *from = i;
@@ -176,9 +280,13 @@ static size_t strip_job_notices(const char *sh, char *buf, size_t *len, size_t *
     return hold_from == SIZE_MAX ? 0 : *len - hold_from;
 }
 
+static size_t strip_job_notices(const char *sh, char *buf, size_t *len, size_t *from, size_t min_keep) {
+    return strip_job_notices_ex(sh, NULL, buf, len, from, min_keep);
+}
+
 void shell_strip_job_notices(char *buf, size_t *len) {
     size_t from = 0;
-    strip_job_notices(proc_shell_path(), buf, len, &from, 0);
+    strip_job_notices(proc_shell_name(), buf, len, &from, 0);
 }
 
 static int run_locked(shell_t *s, const char *cmd, const char *cwd, const proc_opts_t *o, proc_result_t *res);
@@ -201,13 +309,35 @@ static int run_locked(shell_t *s, const char *cmd, const char *cwd, const proc_o
         pthread_mutex_unlock(&s->mu);
         return -1;
     }
-    char *qcwd = sh_quote(cwd ? cwd : "/");
-    /* The command runs in the shell itself (state persists); output merged; stdin detached. */
-    char *script = xasprintf("cd -- %s 2>/dev/null\n{\n%s\n} </dev/null 2>&1\n__omc_rc=$?\nprintf '\\n__OMC_DONE_%s_%%d__\\n' \"$__omc_rc\"\n",
-                             qcwd, cmd, s->nonce);
+    /* The command is a file sourced in the shell itself, so its state persists, a syntax error fails it alone and its line
+     * numbers start at 1. Its group has its own output pipe: `exec` redirections end with the group and a job left running
+     * keeps a pipe nobody shows. The shell's real stdout carries only the status line. */
+    char *fifo = xasprintf("%s/f%llu", s->dir, (unsigned long long)++s->seq);
+    int ofd = -1;
+    if (mkfifo(fifo, 0600) == 0) ofd = open(fifo, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (ofd < 0 || fs_write(s->script, cmd, strlen(cmd)) != 0) {
+        if (ofd >= 0) close(ofd);
+        unlink(fifo);
+        free(fifo);
+        pthread_mutex_unlock(&s->mu);
+        return -1;
+    }
+    char *qcwd = sh_quote(cwd ? cwd : "/"), *qscript = sh_quote(s->script), *qfifo = sh_quote(fifo);
+    /* an EXIT trap belongs to its command: it fires once at the command's end, with its status in $?, not at the session's */
+    const char *exit_trap = s->is_bash ? "__omc_t=$(trap -p EXIT); if [ -n \"$__omc_t\" ]; then __omc_t=${__omc_t#trap -- }; "
+                                         "eval \"__omc_t=${__omc_t% EXIT}\"; trap - EXIT; (exit $__omc_rc); eval \"$__omc_t\"; fi; "
+                                         "\\unset __omc_t; "
+                                       : "";
+    char *script = xasprintf("\\cd -- %s 2>/dev/null\n{ \\. %s; __omc_rc=$?; %s} </dev/null >%s 2>&1; \\command printf '__OMC_DONE_%%d\\n' \"$__omc_rc\"; \\unset __omc_rc\n",
+                             qcwd, qscript, exit_trap, qfifo);
     free(qcwd);
+    free(qscript);
+    free(qfifo);
     if (write_all(s->child.in_fd, script, strlen(script)) != 0) {
         free(script);
+        close(ofd);
+        unlink(fifo);
+        free(fifo);
         stop(s);
         /* shell died: restart once and retry */
         if (start(s, o) != 0) {
@@ -217,13 +347,11 @@ static int run_locked(shell_t *s, const char *cmd, const char *cwd, const proc_o
         return run_locked(s, cmd, cwd, o, res);
     }
     free(script);
-    char *marker = xasprintf("\n__OMC_DONE_%s_", s->nonce);
-    size_t mlen = strlen(marker);
     size_t cap = o && o->max_output ? o->max_output : (16u << 20);
-    sb_t out = SB_INIT;
+    sb_t out = SB_INIT, ctl = SB_INIT;
     int64_t deadline = o && o->timeout_ms > 0 ? mono_ms() + o->timeout_ms : 0;
     size_t emitted = 0, scan = 0;
-    bool done = false;
+    bool done = false, ofd_eof = false;
     while (!done) {
         if (o && o->cancel && *o->cancel) {
             res->cancelled = true;
@@ -233,61 +361,57 @@ static int run_locked(shell_t *s, const char *cmd, const char *cwd, const proc_o
             res->timed_out = true;
             break;
         }
-        struct pollfd pf = {s->child.out_fd, POLLIN, 0};
-        int pr = poll(&pf, 1, 100);
-        if (pr <= 0) continue;
+        struct pollfd pf[2] = {{s->child.out_fd, POLLIN, 0}, {ofd, POLLIN, 0}};
+        /* no writer yet, or none left for now: only the status line can still end this */
+        poll(pf, ofd_eof ? 1 : 2, ofd_eof ? 20 : 100);
         char buf[16384];
-        ssize_t n = read(s->child.out_fd, buf, sizeof buf);
-        if (n <= 0) {
-            /* the command exited the shell itself (e.g. `exit 3`): report its status, restart next time */
-            int st = child_wait(&s->child, 2000);
-            res->exit_code = st >= 0 ? st : -1;
-            child_close(&s->child);
-            s->started = false;
-            free(s->nonce);
-            s->nonce = NULL;
-            done = true;
-            break;
-        }
-        sb_appendn(&out, buf, (size_t)n);
-        size_t note_hold = strip_job_notices(proc_shell_path(), out.s, &out.len, &scan, emitted);
-        /* search for the marker (allow the leading newline to be the start of output) */
-        char *hit = memmem(out.s, out.len, marker, mlen);
-        if (!hit && out.len >= mlen - 1 && memcmp(out.s, marker + 1, mlen - 1) == 0) hit = out.s - 1;
-        if (hit) {
-            char *num = hit + mlen;
-            char *end = memmem(num, out.len - (size_t)(num - out.s), "__\n", 3);
-            if (end) {
-                res->exit_code = atoi(num);
-                size_t keep = hit < out.s ? 0 : (size_t)(hit - out.s);
-                if (o && o->on_output && keep > emitted) o->on_output(o->ud, 1, out.s + emitted, keep - emitted);
-                sb_truncate(&out, keep);
+        ssize_t n = read(ofd, buf, sizeof buf);
+        ofd_eof = n == 0;
+        if (n > 0) sb_appendn(&out, buf, (size_t)n);
+        if (pf[0].revents) {
+            ssize_t c = read(s->child.out_fd, buf, sizeof buf);
+            if (c > 0) {
+                sb_appendn(&ctl, buf, (size_t)c);
+                char *hit = memmem(ctl.s, ctl.len, "__OMC_DONE_", 11);
+                char *end = hit ? memchr(hit, '\n', ctl.len - (size_t)(hit - ctl.s)) : NULL;
+                if (end) {
+                    res->exit_code = atoi(hit + 11);
+                    done = true;
+                }
+            } else if (c == 0 || (errno != EAGAIN && errno != EINTR)) {
+                /* the command exited the shell itself (e.g. `exit 3`): report its status, restart next time */
+                int st = child_wait(&s->child, 2000);
+                res->exit_code = st >= 0 ? st : -1;
+                child_close(&s->child);
+                s->started = false;
                 done = true;
-                break;
             }
         }
-        /* stream everything except a possible partial marker at the tail */
-        /* hold back only a tail that could still grow into the marker, so short output streams live */
-        size_t hold = 0;
-        for (size_t k = MIN(out.len, mlen + 32); k > 0; k--)
-            if (memcmp(out.s + out.len - k, marker, MIN(k, mlen)) == 0 || (k <= mlen - 1 && memcmp(out.s + out.len - k, marker + 1, k) == 0)) {
-                hold = k;
-                break;
-            }
-        if (note_hold > hold) hold = note_hold;
-        size_t safe = out.len - hold;
+        if (done) { /* what the command wrote before it ended */
+            while ((n = read(ofd, buf, sizeof buf)) > 0) sb_appendn(&out, buf, (size_t)n);
+            ofd_eof = n == 0;
+        }
+        size_t hold = strip_job_notices_ex(s->script, s->script, out.s ? out.s : "", &out.len, &scan, emitted);
+        if (out.s) out.s[out.len] = 0;
+        /* stream all but what could still become a notice; a finished command has nothing left to wait for */
+        size_t safe = done ? out.len : out.len - hold;
         if (o && o->on_output && safe > emitted) {
             o->on_output(o->ud, 1, out.s + emitted, safe - emitted);
             emitted = safe;
         }
         if (out.len > cap) res->truncated = true;
     }
+    sb_free(&ctl);
     if (!done && s->started) {
         /* kill the whole group (shell + children); state is lost, a fresh shell starts next time */
         stop(s);
         if (!res->timed_out && !res->cancelled && res->exit_code == 0) res->exit_code = -1;
     }
-    free(marker);
+    /* a job still holding the pipe keeps running; whatever it writes from here on is nobody's output */
+    if (done && !ofd_eof) drain_add(ofd);
+    else close(ofd);
+    unlink(fifo);
+    free(fifo);
     if (out.len > cap) {
         memmove(out.s, out.s + out.len - cap, cap);
         sb_truncate(&out, cap);
@@ -310,7 +434,7 @@ typedef struct {
 static void once_out(void *ud, int stream, const char *data, size_t len) {
     once_filter_t *f = ud;
     sb_appendn(&f->pend, data, len);
-    size_t hold = strip_job_notices(proc_shell_path(), f->pend.s, &f->pend.len, &f->scan, 0);
+    size_t hold = strip_job_notices(proc_shell_name(), f->pend.s, &f->pend.len, &f->scan, 0);
     size_t safe = f->pend.len - hold;
     if (safe && f->o->on_output) f->o->on_output(f->o->ud, stream, f->pend.s, safe);
     memmove(f->pend.s, f->pend.s + safe, f->pend.len - safe);
@@ -319,6 +443,17 @@ static void once_out(void *ud, int stream, const char *data, size_t len) {
 }
 
 int shell_exec_once(const char *cmd, const proc_opts_t *o, proc_result_t *res) {
+    if (!o->use_pty) {
+        /* a session of its own: the same rules as the persistent shell; a job the command left running outlives it */
+        shell_t *s = shell_new();
+        int rc = shell_run(s, cmd, o->cwd, o, res);
+        if (s->started) {
+            child_close(&s->child);
+            s->started = false;
+        }
+        shell_free(s);
+        return rc;
+    }
     once_filter_t f = {.o = o, .pend = SB_INIT};
     proc_opts_t oo = *o;
     oo.on_output = once_out;

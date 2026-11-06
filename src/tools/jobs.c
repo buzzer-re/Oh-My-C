@@ -583,7 +583,7 @@ static char *format_bash_result(const bgjob_t *x) {
     if (r->cancelled && !r->timed_out) {
         sb_append(&s, *sum.output ? sum.output : "Command aborted");
     } else {
-        sb_append(&s, *sum.output ? sum.output : "(no output)");
+        sb_append(&s, *sum.output ? sum.output : !r->timed_out && code == 0 ? "(no output, exit code 0)" : "(no output)");
         /* WALL_TIME_NOTICE_MIN_MS: #buildCompletedResult, the same as a foreground result */
         if (b->wall_ms >= 1000) sb_appendf(&s, "\n\nWall time: %.2f seconds", (double)b->wall_ms / 1000.0);
         if (!r->timed_out && code != 0) sb_appendf(&s, "\n\nCommand exited with code %d", code);
