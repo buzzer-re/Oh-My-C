@@ -1,7 +1,9 @@
 /* test_toolcards.c - tool card regression checks against captured omp output.
  *
  * Fixtures under tests/fixtures/toolcards/ are `tmux capture-pane -e` captures of omp driven by
- * tests/tui/compare.sh (120 columns, titanium theme, truecolor, unicode glyphs, mock model). Each case
+ * tests/tui/compare.sh (omp v18.17.0, 120 columns, titanium theme, truecolor, unicode glyphs, mock model; the bash
+ * cards with `display.shellVisualization: false`, since omc does not port the Rust shell engine's view; the github
+ * transcripts as calls through `write xd://github`, how omp registers that tool now). Each case
  * renders the same tool call through ui/tools (tc_render / tc_render_read_group) at width 120 and compares
  * the card rows cell by cell (glyph, fg, bg, attributes) with the fixture rows from an anchor line on.
  * tmux only emits SGR changes, so a fixture is parsed as one stream (state carries across rows). */
@@ -308,7 +310,7 @@ int main(void) {
         true);
     /* shell highlighting of the command row (Sublime Bash scopes: keywords, options, quotes, vars, redirects) */
     run("bashhl", "\xe2\x95\xad", "bash", "{\"command\":\"if test -n \\\"$HOME\\\"; then FOO=1 echo 'x' \\\"y $HOME\\\" 2>/dev/null\"}",
-        "{\"content\":[{\"type\":\"text\",\"text\":\"error: pi-natives:command: syntax error at end of input\\n\\nCommand exited with code 2\"}],"
+        "{\"content\":[{\"type\":\"text\",\"text\":\"bash: -c: line 2: syntax error: unexpected end of file from `if' command on line 1\\n\\nCommand exited with code 2\"}],"
         "\"details\":{\"exitCode\":2,\"wallTimeMs\":10,\"timeoutSeconds\":300}}",
         true);
     run("write1", "Write:", "write", "{\"path\":\"new.txt\",\"content\":\"alpha\\\\nbeta\"}",

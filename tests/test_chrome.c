@@ -1,11 +1,11 @@
 /* test_chrome.c - screen chrome regression checks against captured omp output.
  *
- * The fixtures under tests/fixtures/chrome/ are `tmux capture-pane -e` captures of omp v18.13.3
- * (rechecked unchanged on v18.14.2; tests/tui/compare.sh, 120 columns, titanium theme, truecolor, unicode glyphs, mock model
+ * The fixtures under tests/fixtures/chrome/ are `tmux capture-pane -e` captures of omp v18.17.0
+ * (tests/tui/compare.sh, 120 columns, titanium theme, truecolor, unicode glyphs, mock model
  * "Mock One" with a 100K window). Each test renders the same rows through omc's welcome,
  * working/idle row, editor top gap and band composer, then compares cell by cell: glyph,
  * foreground, background and attributes. The wordmark rows only compare the logo cells (omc
- * draws `omc` and its own version where omp draws `omp v18.13.3`). */
+ * draws `omc` and its own version where omp draws `omp v18.17.0`). */
 #include "coding/app.h"
 #include "config/settings.h"
 #include "core/fs.h"
@@ -235,7 +235,7 @@ static void test_band_welcome(ui_t *u) {
     strvec_t want = {0}, got = {0};
     load_fixture("band120.omp.ansi", &want);
     tui_component_t *w = ui_welcome_new();
-    ui_welcome_set_tip(w, "Psst, omp has a natural habitat \xf0\x9f\x90\xa6 [tern](https://scl.so/tern)");
+    ui_welcome_set_tip(w, "Type `/` at the start of your prompt to browse every command");
     /* a fresh session: system prompt + tools estimated at 4.1 chars/token; 7600 tokens is omp's count of its
      * default request (8%) */
     char *sys = xmalloc(31161);

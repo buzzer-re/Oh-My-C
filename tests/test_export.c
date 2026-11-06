@@ -1,4 +1,4 @@
-/* test_export.c - `/export` HTML (session/export_html.c, session/trace.c) against omp v18.14.2 output.
+/* test_export.c - `/export` HTML (session/export_html.c, session/trace.c) against omp v18.17.0 output.
  *
  * tests/fixtures/export/rich.jsonl (+ rich/ sub-sessions: nested subagent, advisor, tombstone, gzip, a
  * header-less transcript, a .bak; built by mkrich.py) exercises the trace port: usage/cost doubles,

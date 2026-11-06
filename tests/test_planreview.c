@@ -1,4 +1,4 @@
-/* test_planreview.c - plan review overlay (ui/planreview.c) against an omp v18.14.2 capture.
+/* test_planreview.c - plan review overlay (ui/planreview.c) against an omp v18.17.0 capture.
  *
  * tests/fixtures/planreview/overlay.ansi is `tmux capture-pane -e` of omp's plan review overlay (120x40,
  * titanium, truecolor, unicode glyphs) for tests/fixtures/planreview/plan.md, proposed in plan mode
@@ -23,7 +23,7 @@ static int failures;
     } while (0)
 
 static const char *const OPTS[] = {"Approve and execute", "Approve and compact context",
-                                   "Approve and keep context (~106 / 100k)", "Refine plan", "Save and quit"};
+                                   "Approve and keep context (~105 / 100k)", "Refine plan", "Save and quit"};
 
 static char *last_feedback, *last_edit, *picked;
 static void on_feedback(void *ud, const char *f) {

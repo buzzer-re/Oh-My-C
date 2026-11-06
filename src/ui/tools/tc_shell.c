@@ -340,7 +340,7 @@ void tc_bash(const tc_call_t *c, int width, strvec_t *out) {
             free(dur);
         }
         tc_section_t sec = {.lines = cmd};
-        tc_block_t blk = {.footer_meta = footer, .state = TC_STATE_PENDING, .sections = &sec, .nsections = 1, .width = width,
+        tc_block_t blk = {.no_bg = true, .footer_meta = footer, .state = TC_STATE_PENDING, .sections = &sec, .nsections = 1, .width = width,
                           .pad_left = -1, .pad_right = -1, .border_slot = -1};
         tc_output_block(&blk, out);
         free(footer);
@@ -419,7 +419,9 @@ void tc_bash(const tc_call_t *c, int width, strvec_t *out) {
     tc_section_t secs[2] = {{.lines = cmd}, {.lines = olines}};
     char *label = tc_fg(TUI_TC_TOOL_TITLE, "Output");
     secs[1].label = label;
-    tc_block_t blk = {.footer_meta = footer,
+    /* bash.ts: shell cards keep the neutral segmented look, the phase colours status and border, never a background wash */
+    tc_block_t blk = {.no_bg = true,
+                      .footer_meta = footer,
                       .state = partial ? TC_STATE_PENDING : is_error ? (timed_out ? TC_STATE_WARNING : TC_STATE_ERROR) : TC_STATE_SUCCESS,
                       .sections = secs, .nsections = 2, .width = width, .pad_left = -1, .pad_right = -1, .border_slot = -1};
     tc_output_block(&blk, out);
