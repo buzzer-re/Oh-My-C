@@ -18,7 +18,8 @@ for k in ("TMUX", "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"):
 pid, fd = pty.fork()
 if pid == 0:
     os.chdir(work)
-    os.execve(host, [host, "--model", "mock/mock-1", "--no-session"], env)
+    # --motion changes a setting at startup: a listener left over from the first run must not fire into dead memory
+    os.execve(host, [host, "--model", "mock/mock-1", "--no-session", "--motion", "reduced"], env)
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 160, 0, 0))
 out = bytearray()
 

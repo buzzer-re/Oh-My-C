@@ -334,6 +334,7 @@ void ix_view_subscribe(ui_t *u, app_t *a, bool on);
 /* mcpcmd.c - /mcp (MCPCommandController) and sshcmd.c - /ssh (SSHCommandController); `text` is the whole line */
 void ui_mcp_command(ui_t *u, const char *text);
 void ui_ssh_command(ui_t *u, const char *text);
+void ui_mcp_uninstall(void);                          /* the run ended: its ui is gone (omc_main can run again) */
 void ui_mcp_install(ui_t *u);                         /* live MCP tool / prompt refresh, mcp.notifications */
 bool ui_mcp_escape(ui_t *u);                          /* Esc: stop an MCP OAuth wait / cancel /mcp test */
 bool ui_mcp_manual_input(ui_t *u, const char *value); /* `/login <value>` for a waiting MCP OAuth flow */

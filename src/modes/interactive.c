@@ -3570,6 +3570,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     pthread_mutex_unlock(&u.mu);
     ui_approval_shutdown(&u); /* likewise for a call waiting on an approval prompt: denied */
     ui_signals_dispose();
+    ui_mcp_uninstall(); /* a settings listener outlives this run and must not reach this stack frame */
     if (u.worker_running) {
         app_abort(a);
         pthread_join(u.worker, NULL);

@@ -476,6 +476,8 @@ static void late_connect_ui(void *ud) {
     }
 }
 
+void ui_mcp_uninstall(void) { g_install_ui = NULL; }
+
 void ui_mcp_install(ui_t *u) {
     g_install_ui = u;
     /* per run, not per process: omc_main can run again (libomc), and timers belonged to the previous TUI */
