@@ -421,7 +421,7 @@ static void test_markdown(void) {
     free(s);
 }
 
-/* ---------- golden transcript renders (captured from omp v18.13.3 under tmux, titanium theme) ----------
+/* ---------- golden transcript renders (captures of omp under tmux, titanium theme; recaptured from v18.17.0) ----------
  * tests/tui/golden/<name>.ansi are `tmux capture-pane -e` cuts (tests/tui/mkgolden.py) of the reference app
  * rendering tests/tui/fixtures/<name>.md through the mock model. tmux re-encodes SGR, so both sides are
  * reduced to cells: every visible character tagged with its effective attributes and colors. */

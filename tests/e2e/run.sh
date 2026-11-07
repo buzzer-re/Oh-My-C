@@ -223,6 +223,16 @@ tail -1 "$T/req.jsonl" | grep -q '"model": "mock-2"' && echo "   ok  fallback mo
 printf 'retry:\n  maxRetries: 1\n  baseDelayMs: 10\n' > "$T/agent/config.yml"
 s0=$(date +%s%N); out=$(timeout 40 "$B" --model mock/mock-1 --no-session -p "fail:503:try again later" </dev/null 2>&1); s1=$(date +%s%N)
 (( (s1 - s0) / 1000000 < 30000 )) && [[ "$out" == *"Retrying (1/1): 503 try again later"* ]] && echo "   ok  503 retry backoff" || { echo "   FAIL 503 retry backoff ($(( (s1 - s0) / 1000000 )) ms): $out"; fail=1; }
+# a rejected request: omp's error text, the dump line and file with its credentials redacted, no `omc:` prefix
+printf 'retry:\n  enabled: false\n' > "$T/agent/config.yml"
+out=$(timeout 30 "$B" --model mock/mock-1 --no-session -p "fail:400:bad things" </dev/null 2>&1)
+dump=$(printf '%s\n' "$out" | sed -n 's/^raw-http-request=//p')
+if [[ "$out" == *$'\n400 bad things (type=invalid_request_error)\nraw-http-request='* && -f "$dump" ]] && python3 -I -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["provider"] == "mock" and d["errorResponse"]["status"] == 400 and d["errorResponse"]["message"].startswith("400 bad things")
+assert d["headers"].get("Authorization", d["headers"].get("authorization")) == "[redacted]" and "messages" in d["body"]' "$dump"
+then echo "   ok  rejected request dump"; else echo "   FAIL rejected request dump: $out"; fail=1; fi
 # transport retries like omp (postOpenAIStream + withReplaySafeStreamRetry): 6 attempts, then one replay-safe
 # provider retry after 500 ms = 12 requests per turn attempt; a 400 is sent once
 printf 'retry:\n  enabled: false\n' > "$T/agent/config.yml"
