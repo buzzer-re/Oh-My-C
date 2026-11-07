@@ -12,6 +12,9 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include "ai/ai_images.h"
+#include "img/imgpipe.h"
+
 #include <math.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -22,6 +25,14 @@ typedef struct {
 } gh_tool_t;
 
 /* ---------- small helpers ---------- */
+
+static const ai_model_t *active_model(tool_env_t *env) {
+    if (!env || !env->active_model) return NULL;
+    char *sid = NULL;
+    const ai_model_t *m = env->active_model(env, &sid);
+    free(sid);
+    return m;
+}
 
 static char *opt_str(const json_t *args, const char *key) { return gh_norm_opt(json_get_str(args, key)); }
 
@@ -72,12 +83,12 @@ static char *fmt_bytes(int64_t n) {
 typedef struct {
     const char *mime;
     int64_t w, h; /* -1 unknown */
-} img_meta_t;
+} gh_img_meta_t;
 
 static uint32_t be32(const unsigned char *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 
 /* parseImageMetadata (png/jpeg/gif/webp) */
-static bool image_meta(const unsigned char *b, size_t n, img_meta_t *m) {
+static bool image_meta(const unsigned char *b, size_t n, gh_img_meta_t *m) {
     m->w = m->h = -1;
     if (n >= 8 && !memcmp(b, "\x89PNG\r\n\x1a\n", 8)) {
         m->mime = "image/png";
@@ -298,14 +309,25 @@ static void op_file_read(tool_env_t *env, const json_t *args, tool_result_t *out
             bytes = (unsigned char *)xstrdup("");
             n = 0;
         }
-        img_meta_t im;
+        gh_img_meta_t im;
         if (image_meta(bytes, n, &im)) {
             char *sz = fmt_bytes((int64_t)n);
             char *dims = im.w >= 0 && im.h >= 0 ? xasprintf("\nDimensions: %lldx%lld", (long long)im.w, (long long)im.h) : xstrdup("");
-            char *t = xasprintf("Image file: %s\nMIME: %s\nSize: %s%s", path, im.mime, sz, dims);
-            tool_result_text(out, t);
-            tool_result_image(out, sb_cstr(&enc), im.mime);
-            free(t);
+            /* loadImageAttachmentInput: the size and encoder policy of file-backed image inputs */
+            img_loaded_t l;
+            char *lerr = NULL;
+            const ai_model_t *model = active_model(env);
+            if (img_load_input(bytes, n, im.mime, src, "Read image attachment", settings_bool("images.autoResize", true),
+                               ai_model_lacks_webp(model) ? 1 : 0, &l, &lerr) < 0) {
+                tool_result_error(out, "%s", lerr);
+            } else {
+                char *t = xasprintf("Image file: %s\nMIME: %s\nSize: %s%s", path, l.mime, sz, dims);
+                tool_result_text(out, t);
+                tool_result_image(out, l.data, l.mime);
+                free(t);
+                img_loaded_free(&l);
+            }
+            free(lerr);
             free(dims);
             free(sz);
             sb_free(&enc);
