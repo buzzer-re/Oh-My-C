@@ -1140,6 +1140,14 @@ static void rpc_listener(void *ud, const agent_event_t *ev) {
     forward(r, j);
 }
 
+/* rpc-prompt-results.ts #report: sessionSettled, then the error */
+static void prompt_result_settled(json_t *res, bool settled) {
+    json_t *e = json_get(res, "error") ? json_clone(json_get(res, "error")) : NULL;
+    json_del(res, "error");
+    json_set_bool(res, "sessionSettled", settled);
+    if (e) json_set(res, "error", e);
+}
+
 static void notice_rpc(void *ud, const char *level, const char *text) {
     rpc_t *r = ud;
     if (!strcmp(level, "retry-recovered")) return;
@@ -1343,7 +1351,7 @@ again:;
         json_free(run);
         if (!cont) break;
         if (!was_cont && !wake_run) {
-            json_set_bool(res, "sessionSettled", false);
+            prompt_result_settled(res, false);
             emit(r, res);
         }
         was_cont = true;
@@ -1355,7 +1363,7 @@ again:;
     /* isSessionSettled: background work that can still wake the session keeps it unsettled; its wake run's
      * terminal agent_end closes the stretch with session_settled */
     bool settled = !rpc_pending_async_work(r->a);
-    json_set_bool(res, "sessionSettled", settled);
+    prompt_result_settled(res, settled);
     if (!was_cont && !wake_run) emit(r, res);
     /* prompts queued into this run (steer / follow-up) report at the same yield */
     pthread_mutex_lock(&r->mu);

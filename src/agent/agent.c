@@ -935,14 +935,17 @@ static void cursor_bridge_result(void *ud, json_t *tool_result);
 static void on_ai_event(void *ud, const ai_event_t *ev) {
     stream_ud_t *s = ud;
     agent_t *a = s->a;
-    if (ev->type == AI_EV_START || !s->started) {
-        if (!s->started) {
-            s->started = true;
-            emit_message(a, AGENT_EV_MESSAGE_START, ev->partial);
-        }
-        if (ev->type == AI_EV_START) return;
-    }
+    /* omp's providers push `start` once the response is accepted; omc's push it before the request. Held until the
+     * first content, so a request that fails outright has one message_start carrying the final error (stream_assistant) */
+    if (ev->type == AI_EV_START) return;
     if (ev->type == AI_EV_DONE || ev->type == AI_EV_ERROR) return; /* message_end emitted by caller */
+    if (!s->started) {
+        s->started = true;
+        json_t *head = json_clone(ev->partial); /* the message as `start` saw it: nothing streamed yet */
+        json_set(head, "content", json_arr());
+        emit_message(a, AGENT_EV_MESSAGE_START, head);
+        json_free(head);
+    }
     agent_event_t ae = {.type = AGENT_EV_MESSAGE_UPDATE, .message = ev->partial, .ai = ev};
     emit(a, &ae);
     if (a->hooks.on_stream_delta && !s->abort_requested &&
