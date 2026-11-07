@@ -14,7 +14,7 @@ SEL=$1
 CFG=${2:-}
 shift 2 || shift $#
 PROV=${SEL%%/*}
-rm -rf "$D"; mkdir -p "$D/work"
+rm -rf "$D"; mkdir -p "$D/work" "$D/home/.omp"; [ -d "$HOME/.omp/natives" ] && ln -s "$HOME/.omp/natives" "$D/home/.omp/natives" # never the real ~/.omp or ~/.claude
 port=$((30000 + RANDOM % 20000))
 case "$PROV" in
 openai) BASE="http://127.0.0.1:$port/v1" ;;
@@ -32,7 +32,7 @@ run() { # log-name env-var agent-dir binary [args]
     shift 4
     MOCK_LOG="$D/$name.jsonl" python3 -I "$ROOT/tests/e2e/mock_providers.py" $port >/dev/null 2>&1 & local mp=$!
     for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null && break; sleep 0.1; done
-    (cd "$D/work" && env OPENAI_API_KEY=sk-test ANTHROPIC_API_KEY=sk-ant-api-test GEMINI_API_KEY=g-test OMC_NO_TITLE=1 \
+    (cd "$D/work" && env HOME="$D/home" OPENAI_API_KEY=sk-test ANTHROPIC_API_KEY=sk-ant-api-test GEMINI_API_KEY=g-test OMC_NO_TITLE=1 \
         PI_NO_TITLE=1 "$var=$dir" timeout 90 "$bin" ${TD_ARGS:-} "$@" -p "say hello" </dev/null >"$D/$name.out" 2>&1)
     kill $mp 2>/dev/null; wait $mp 2>/dev/null
 }

@@ -15,7 +15,9 @@ set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 D=${TD_DIR:-${TMPDIR:-/tmp}/omc-tooldiff}
 CASES=$1
-rm -rf "$D/ompa" "$D/omca"; mkdir -p "$D/out"
+rm -rf "$D/ompa" "$D/omca" "$D/home"; mkdir -p "$D/out" "$D/home/.omp"
+# a throwaway HOME: never the real ~/.omp (logs, run/) or ~/.claude (MCP discovery reaches real servers); omp's native cache is shared
+[ -d "$HOME/.omp/natives" ] && ln -s "$HOME/.omp/natives" "$D/home/.omp/natives"
 port=$((30000 + RANDOM % 20000))
 for d in ompa omca; do
     mkdir -p "$D/$d"
@@ -42,7 +44,7 @@ run() { # app env-var agent-dir binary prompt
     [ -n "${TD_FIXTURE:-}" ] && cp -a "$TD_FIXTURE/." "$D/work/"
     [ -n "${TD_RESET:-}" ] && "$TD_RESET" "$D/work"
     : > "$D/mock.jsonl"; rm -f "$D/out/$1.log"
-    (cd "$D/work" && env MOCK_KEY=x OMC_NO_TITLE=1 PI_NO_TITLE=1 PATH="${TD_PATH:+$TD_PATH:}$PATH" TD_CASE_LOG="$D/out/$1.log" "$2=$3" \
+    (cd "$D/work" && env HOME="$D/home" MOCK_KEY=x OMC_NO_TITLE=1 PI_NO_TITLE=1 PATH="${TD_PATH:+$TD_PATH:}$PATH" TD_CASE_LOG="$D/out/$1.log" "$2=$3" \
         timeout 120 "$4" -p "$5" </dev/null >"$D/out/$1.stdout" 2>&1)
     cp "$D/mock.jsonl" "$D/out/$1.req.jsonl"
     python3 -I - "$D/mock.jsonl" "$D/work" <<'PY' > "$D/out/$1.txt"

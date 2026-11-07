@@ -10,7 +10,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 D=${CW_DIR:-${TMPDIR:-/tmp}/omc-cachewarm}
 MODE=${1:-idle}
 IDLE=${2:-7}
-rm -rf "$D"; mkdir -p "$D/work"
+rm -rf "$D"; mkdir -p "$D/work" "$D/home/.omp"; [ -d "$HOME/.omp/natives" ] && ln -s "$HOME/.omp/natives" "$D/home/.omp/natives" # never the real ~/.omp or ~/.claude
 port=$((30000 + RANDOM % 20000))
 for d in ompa omca; do
     mkdir -p "$D/$d"
@@ -21,7 +21,7 @@ done
 run() { # name env-var agent-dir binary
     MOCK_CACHE_TOKENS=200000 MOCK_LOG="$D/$1.jsonl" python3 -I "$ROOT/tests/e2e/mock_providers.py" $port >/dev/null 2>&1 & local mp=$!
     for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null && break; sleep 0.1; done
-    (cd "$D/work" && env OMC_LOG="$D/$1.log" OMC_DEBUG=1 ANTHROPIC_API_KEY=sk-ant-api-test OMC_NO_TITLE=1 PI_NO_TITLE=1 "$2=$3" timeout 120 \
+    (cd "$D/work" && env HOME="$D/home" OMC_LOG="$D/$1.log" OMC_DEBUG=1 ANTHROPIC_API_KEY=sk-ant-api-test OMC_NO_TITLE=1 PI_NO_TITLE=1 "$2=$3" timeout 120 \
         python3 -I "$ROOT/tests/parity/rpc_drive.py" "$4" "say hello" "$IDLE" >"$D/$1.out" 2>&1)
     kill $mp 2>/dev/null; wait $mp 2>/dev/null
 }
