@@ -1312,28 +1312,31 @@ json_t *provider_bedrock_stream(const ai_model_t *m, const ai_context_t *ctx, co
         bedrock_stream_init(&s, m, req.sentinel_injected, cb, ud);
         int status = 0;
         char *err = NULL;
-        int rc = ai_stream_post(tgt.url, &h, body, o, bedrock_stream_feed, &s, &status, &err);
+        ai_post_ex_t ex = {0};
+        int rc = ai_stream_post_ex(tgt.url, &h, body, o, bedrock_stream_feed, &s, &status, &err, &ex);
         http_headers_free(&h);
         free(body);
         bool cancelled = o->cancel && *o->cancel;
         if (rc == -1 && status > 0 && (status < 200 || status >= 300)) {
             /* stale cached credentials (rotated session keys): re-resolve next time */
             if (!bearer && (status == 401 || status == 403)) aws_invalidate_credentials(NULL, region);
-            char prefix[16];
-            snprintf(prefix, sizeof prefix, "%d ", status); /* ai_extract_error yields "<status> <message>" */
-            const char *detail = err && str_starts(err, prefix) ? err + strlen(prefix) : (err ? err : "");
-            char *msg = xasprintf("Bedrock HTTP %d: %.1000s", status, detail);
-            free(err);
-            err = msg;
-            if (!prefix_retry_done && bedrock_is_prefix_binding_error(err)) {
+            char *text = xasprintf("Bedrock HTTP %d: %.1000s", status, ex.err_body ? ex.err_body : "");
+            if (!prefix_retry_done && bedrock_is_prefix_binding_error(text)) {
                 prefix_retry_done = true;
                 LOGW("bedrock: thinking prefix changed, stripping bound thinking and retrying (%s)", m->id);
                 drop_reasoning_content(req.body);
+                free(text);
                 free(err);
+                free(ex.err_body);
                 bedrock_stream_free(&s);
                 continue;
             }
+            char *msg = ai_rewrap_http_error(text, err);
+            free(text);
+            free(err);
+            err = msg;
         }
+        free(ex.err_body);
         result = bedrock_stream_finish(&s, rc, err, cancelled);
         free(err);
         bedrock_stream_free(&s);

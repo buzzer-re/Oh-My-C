@@ -837,7 +837,7 @@ json_t *google_sse_finish(google_sse_t *s, int rc, const char *err) {
  * entry point
  * ====================================================================== */
 
-/* google.ts: `error.message` when the body is an error object, else the body. The dump line of a rejected request stays. Owned. */
+/* google.ts: `error.message` when the body is an error object, else the body. Owned. */
 static char *google_error_text(int status, const char *err, const char *body) {
     char *b = NULL;
     json_t *j = body ? json_parse_str(body) : NULL;
@@ -851,8 +851,9 @@ static char *google_error_text(int status, const char *err, const char *body) {
         while (n && isspace((unsigned char)b[n - 1])) b[--n] = 0;
     }
     json_free(j);
-    const char *dump = err ? strstr(err, "\nraw-http-request") : NULL;
-    char *r = xasprintf("Google API error (%d): %s%s", status, b && *b ? b : "Unknown error", dump ? dump : "");
+    char *text = xasprintf("Google API error (%d): %s", status, b && *b ? b : "Unknown error");
+    char *r = ai_rewrap_http_error(text, err);
+    free(text);
     free(b);
     return r;
 }

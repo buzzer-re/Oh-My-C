@@ -1604,24 +1604,6 @@ static char *compact_endpoint(const ai_model_t *m) {
     return r;
 }
 
-static const char *http_status_text(int st) {
-    switch (st) {
-    case 400: return "Bad Request";
-    case 401: return "Unauthorized";
-    case 403: return "Forbidden";
-    case 404: return "Not Found";
-    case 408: return "Request Timeout";
-    case 413: return "Payload Too Large";
-    case 422: return "Unprocessable Entity";
-    case 429: return "Too Many Requests";
-    case 500: return "Internal Server Error";
-    case 502: return "Bad Gateway";
-    case 503: return "Service Unavailable";
-    case 504: return "Gateway Timeout";
-    default: return "";
-    }
-}
-
 /* shouldKeepOpenAiCompactOutputItem */
 static bool keep_compact_item(const json_t *it) {
     const char *t = json_get_str(it, "type");
@@ -1689,7 +1671,7 @@ json_t *ai_openai_remote_compact(const ai_model_t *m, const char *api_key, const
     else if (hr != 0 || resp.error) *err = xasprintf("Remote compaction failed: %s", resp.error ? resp.error : "request failed");
     else if (resp.status < 200 || resp.status >= 300) {
         LOGW("OpenAI remote compaction failed: %s %d %.500s", url, resp.status, resp.body ? resp.body : "");
-        *err = xasprintf("Remote compaction failed (%d %s)", resp.status, http_status_text(resp.status));
+        *err = xasprintf("Remote compaction failed (%d %s)", resp.status, ai_http_status_text(resp.status));
     } else {
         json_t *data = json_parse(resp.body ? resp.body : "", resp.body_len, NULL);
         json_t *hist = json_arr(), *item = NULL;

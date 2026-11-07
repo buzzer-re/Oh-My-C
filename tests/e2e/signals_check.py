@@ -3,8 +3,8 @@
 usage: signals_check.py <typescript> <kind>
 Extracts the title (OSC 0), title stack (CSI 22/23;2t), OSC 7501 and notification (BEL / OSC 9 / tmux passthrough)
 sequences, collapses consecutive working-spinner titles to one `π * <label>` row, and compares them with the
-sequence omp v18.14.2 writes for the same scenario. Prints "signals ok" or a diff."""
-import re, sys
+sequence omp writes (v18.14.2; the error message's text follows v18.17.0's run-status.ts) for the same scenario. Prints "signals ok" or a diff."""
+import base64, re, sys
 
 data = open(sys.argv[1], "rb").read()
 kind = sys.argv[2]
@@ -29,9 +29,17 @@ want = {
              T("π > work"), R("state=done:app=omc"), "\x07", R("state=clear"), T(""), "\x1b[23;2t"],
     # an OSC 9 terminal (WezTerm) failing with error.notify on, then a completed turn
     "error": ["\x1b[22;2t", T("π >"), R("state=idle:app=omc"), T("π > work"), T("π * work"), R("state=working:app=omc"),
-              T("π > work"), R("state=error:app=omc:msg=NDAwIGJhZCB0aGluZ3M="), "\x1b]9;omc: Stopped with error\x1b\\",
+              T("π > work"), R("state=error:app=omc:msg=400 bad things (type=invalid_request_error) raw-http-request=<dump>"), "\x1b]9;omc: Stopped with error\x1b\\",
               R("state=clear"), T(""), "\x1b[23;2t"],
 }[kind]
+# the error message carries the rejected request's dump line (event-controller passes errorMessage whole): its path varies
+def unpath(s):
+    m = re.match(r"(\x1b\]7501;state=error:app=omc:msg=)([A-Za-z0-9+/=]+)(.*)", s, re.S)
+    if not m:
+        return s
+    text = base64.b64decode(m.group(2)).decode()
+    return m.group(1) + re.sub(r"raw-http-request=\S+", "raw-http-request=<dump>", text) + m.group(3)
+got = [unpath(s) for s in got]
 if got == want:
     print("signals ok")
 else:

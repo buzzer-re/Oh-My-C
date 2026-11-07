@@ -10,6 +10,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "coding/turn_recovery.h"
 #include "core/fs.h"
 
 static _Thread_local const ai_model_t *g_req_model; /* the model of this thread's ai_stream, for the dump */
@@ -433,8 +434,14 @@ json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_str
     g_req_status = 0;
     json_t *r = ai_stream_guarded(fn, &t.model, ctx, &t.opts, cb, ud);
     g_req_model = outer;
-    if (g_req_status && str_eq(json_get_str(r, "stopReason"), "error") && !json_get(r, "errorStatus"))
-        json_set_int(r, "errorStatus", g_req_status);
+    if (str_eq(json_get_str(r, "stopReason"), "error")) {
+        /* finalize(): errorStatus, errorId, errorMessage, in that order on the wire */
+        if (g_req_status && !json_get(r, "errorStatus")) json_set_int(r, "errorStatus", g_req_status);
+        json_set_int(r, "errorId", aie_classify_message(r));
+        json_t *em = json_get(r, "errorMessage") ? json_clone(json_get(r, "errorMessage")) : NULL;
+        json_del(r, "errorMessage");
+        if (em) json_set(r, "errorMessage", em);
+    }
     g_req_status = 0;
     ai_transport_finish(&t, r);
     ai_transport_free(&t);
@@ -622,6 +629,39 @@ static char *openai_error_text(int status, const char *raw) {
     return r;
 }
 
+/* formatCapturedHttpErrorParts' text: core message and type/param/code suffix, "" for a blank body. Owned. */
+static char *captured_error_text(const char *raw) {
+    char *body = trimmed_copy(raw);
+    if (!*body) return body;
+    json_t *j = json_parse_str(body);
+    const json_t *obj = json_is_obj(j) ? j : NULL;
+    sb_t b = SB_INIT;
+    if (!obj) {
+        sb_append(&b, body);
+    } else {
+        const json_t *eo = json_get_obj(obj, "error");
+        const json_t *ep = eo ? eo : obj;
+        const char *core = nonblank_prop(ep, "message");
+        if (!core) core = nonblank_prop(obj, "message");
+        if (!core && !eo) core = nonblank_prop(obj, "error");
+        sb_append(&b, core ? core : body);
+        static const char *const keys[] = {"type", "param", "code"};
+        int n = 0;
+        for (size_t i = 0; i < ARRAY_LEN(keys); i++) {
+            const char *v = nonblank_prop(ep, keys[i]);
+            if (!v) v = nonblank_prop(obj, keys[i]);
+            if (v) {
+                sb_appendf(&b, "%s%s=%s", n ? " " : " (", keys[n], v);
+                n++;
+            }
+        }
+        if (n) sb_putc(&b, ')');
+    }
+    json_free(j);
+    free(body);
+    return sb_detach(&b);
+}
+
 /* AnthropicApiError.fromResponse: the body as it came, cut at 64 KiB */
 static char *anthropic_error_text(int status, const char *raw) {
     char *body = trimmed_copy(raw);
@@ -633,53 +673,172 @@ static char *anthropic_error_text(int status, const char *raw) {
     return r;
 }
 
-static char *http_error_text(int policy, int status, const char *body) {
-    if (policy == AI_RETRY_ANTHROPIC) return anthropic_error_text(status, body);
-    if (policy == AI_RETRY_OPENAI) return openai_error_text(status, body);
-    return ai_extract_error(status, body);
+/* OpenAIHttpError's message alone: azure-openai-responses hands finalize no captured response */
+static char *azure_error_text(int status, const char *raw) {
+    char *body = trimmed_copy(raw);
+    char *r;
+    if (!*body) {
+        r = xasprintf("%d status code (no body)", status);
+    } else {
+        json_t *j = json_parse_str(body);
+        const json_t *eo = json_is_obj(j) ? json_get_obj(j, "error") : NULL;
+        const char *es = json_is_obj(j) ? json_get_str(j, "error") : NULL;
+        const char *top = json_is_obj(j) ? json_get_str(j, "message") : NULL;
+        const char *detail = body;
+        if (eo) detail = json_get_str(eo, "message") && *json_get_str(eo, "message") ? json_get_str(eo, "message") : body;
+        else if (es && *es) detail = es;
+        else if (top && *top) detail = top;
+        r = xasprintf("%d %.4096s", status, detail); /* MAX_DETAIL_CHARS */
+        json_free(j);
+    }
+    free(body);
+    return r;
 }
 
-/* pruneHttpRequestDumps: `*.json` older than 7 days, then the oldest until the directory fits 64 MiB */
+/* OllamaApiError over the captured body (mergeCapturedBody: the message never holds it) */
+static char *ollama_error_text(int status, const char *url, const char *raw) {
+    char *captured = captured_error_text(raw);
+    char *r = *captured ? xasprintf("HTTP %d from %s\n%s", status, url, captured) : xasprintf("HTTP %d from %s", status, url);
+    free(captured);
+    return r;
+}
+
+const char *ai_http_status_text(int status) {
+    switch (status) {
+    case 400: return "Bad Request";
+    case 401: return "Unauthorized";
+    case 402: return "Payment Required";
+    case 403: return "Forbidden";
+    case 404: return "Not Found";
+    case 405: return "Method Not Allowed";
+    case 408: return "Request Timeout";
+    case 409: return "Conflict";
+    case 413: return "Payload Too Large";
+    case 422: return "Unprocessable Entity";
+    case 429: return "Too Many Requests";
+    case 500: return "Internal Server Error";
+    case 502: return "Bad Gateway";
+    case 503: return "Service Unavailable";
+    case 504: return "Gateway Timeout";
+    default: return "";
+    }
+}
+
+/* parseCodexError: friendlyMessage || error.message || the raw body || the status text */
+static char *codex_error_text(int status, const char *raw, const http_headers_t *h) {
+    const char *body = raw ? raw : "";
+    const char *status_text = ai_http_status_text(status);
+    json_t *j = json_parse_str(body);
+    const json_t *err = json_is_obj(j) ? json_get_obj(j, "error") : NULL;
+    const char *code = json_get_str(err, "code");
+    if (!code) code = json_get_str(err, "type");
+    bool have_resets = json_is_num(json_get(err, "resets_at"));
+    double err_resets = json_get_num(err, "resets_at", 0);
+    double primary = 0, secondary = 0, pused = -1, sused = -1;
+    const char *v;
+    if ((v = http_headers_get(h, "x-codex-primary-reset-at"))) primary = atof(v);
+    if ((v = http_headers_get(h, "x-codex-secondary-reset-at"))) secondary = atof(v);
+    if ((v = http_headers_get(h, "x-codex-primary-used-percent"))) pused = atof(v);
+    if ((v = http_headers_get(h, "x-codex-secondary-used-percent"))) sused = atof(v);
+    char *friendly = NULL;
+    double resets = 0;
+    if (code && (str_istr(code, "usage_limit_reached") || str_istr(code, "usage_not_included"))) {
+        const char *plan = json_get_str(err, "plan_type");
+        resets = have_resets ? err_resets : primary ? primary : secondary;
+        sb_t b = SB_INIT;
+        sb_append(&b, "You have hit your ChatGPT usage limit");
+        if (plan && *plan) {
+            char *low = xstrdup(plan);
+            for (char *p = low; *p; p++) *p = (char)tolower((unsigned char)*p);
+            sb_appendf(&b, " (%s plan)", low);
+            free(low);
+        }
+        sb_putc(&b, '.');
+        if (resets > 0) sb_appendf(&b, " Try again in ~%lld min.", (long long)MAX(0.0, llround((resets * 1000 - (double)now_ms()) / 60000.0)));
+        friendly = sb_detach(&b);
+    } else if (j && ((code && str_istr(code, "rate_limit_exceeded")) || status == 429)) {
+        /* only the error's own resets_at or an exhausted window's reset; with both spent the later one */
+        double exhausted = 0;
+        if (pused >= 100 && primary > 0) exhausted = MAX(exhausted, primary);
+        if (sused >= 100 && secondary > 0) exhausted = MAX(exhausted, secondary);
+        resets = have_resets ? err_resets : exhausted;
+        sb_t b = SB_INIT;
+        sb_append(&b, "ChatGPT rate limit exceeded.");
+        if (resets > 0) sb_appendf(&b, " Try again in ~%lld min.", (long long)MAX(0.0, llround((resets * 1000 - (double)now_ms()) / 60000.0)));
+        friendly = sb_detach(&b);
+    }
+    char *r;
+    const char *emsg = json_get_str(err, "message");
+    if (friendly) r = friendly;
+    else if (emsg && *emsg) r = xstrdup(emsg);
+    else if (*body) r = xstrdup(body);
+    else r = xstrdup(*status_text ? status_text : "Request failed");
+    json_free(j);
+    return r;
+}
+
+static char *http_error_text(int policy, int status, const char *url, const http_headers_t *h, const char *body) {
+    switch (policy) {
+    case AI_RETRY_ANTHROPIC: return anthropic_error_text(status, body);
+    case AI_RETRY_OPENAI:
+        return g_req_model && str_eq(g_req_model->api, "azure-openai-responses") ? azure_error_text(status, body) : openai_error_text(status, body);
+    case AI_RETRY_OLLAMA: return ollama_error_text(status, url, body);
+    case AI_RETRY_CODEX: return codex_error_text(status, body, h);
+    default: return ai_extract_error(status, body);
+    }
+}
+
+char *ai_rewrap_http_error(const char *text, const char *err) {
+    const char *dump = err ? strstr(err, "\nraw-http-request") : NULL;
+    const char *hint = err ? strstr(err, " retry-after-ms=") : NULL;
+    if (hint && dump && hint > dump) hint = NULL;
+    size_t hint_len = !hint ? 0 : dump ? (size_t)(dump - hint) : strlen(hint);
+    return xasprintf("%s%.*s%s", text, (int)hint_len, hint ? hint : "", dump ? dump : "");
+}
+
+/* pruneHttpRequestDumps: walking newest first, `*.json` older than 7 days or past the 64 MiB running total go */
+typedef struct {
+    char *name;
+    int64_t size;
+    time_t mtime;
+} req_dump_t;
+
+static int req_dump_newest_first(const void *pa, const void *pb) {
+    const req_dump_t *a = pa, *b = pb;
+    if (a->mtime != b->mtime) return a->mtime > b->mtime ? -1 : 1;
+    return -strcmp(a->name, b->name);
+}
+
 static void prune_request_dumps(const char *dir, const char *keep) {
     DIR *d = opendir(dir);
     if (!d) return;
-    typedef struct {
-        char *path;
-        int64_t size;
-        time_t mtime;
-    } dump_t;
-    VEC(dump_t) v = {0};
-    int64_t total = 0;
+    VEC(req_dump_t) v = {0};
     time_t now = time(NULL);
     struct dirent *e;
     while ((e = readdir(d))) {
-        if (!str_ends(e->d_name, ".json") || str_eq(e->d_name, keep)) continue;
+        if (!str_ends(e->d_name, ".json")) continue;
         char *p = path_join(dir, e->d_name);
         struct stat st;
-        if (stat(p, &st) != 0 || !S_ISREG(st.st_mode)) {
-            free(p);
-            continue;
+        if (stat(p, &st) == 0 && S_ISREG(st.st_mode)) {
+            req_dump_t x = {xstrdup(e->d_name), st.st_size, st.st_mtime};
+            vec_push(&v, x);
         }
-        if (now - st.st_mtime > 7 * 24 * 3600) {
-            unlink(p);
-            free(p);
-            continue;
-        }
-        dump_t x = {p, st.st_size, st.st_mtime};
-        vec_push(&v, x);
-        total += st.st_size;
+        free(p);
     }
     closedir(d);
-    while (total > 64LL * 1024 * 1024 && v.n) {
-        size_t old = 0;
-        for (size_t i = 1; i < v.n; i++)
-            if (v.v[i].mtime < v.v[old].mtime) old = i;
-        unlink(v.v[old].path);
-        total -= v.v[old].size;
-        v.v[old].size = 0;
-        v.v[old].mtime = now + 1; /* gone: never the oldest again */
+    qsort(v.v, v.n, sizeof *v.v, req_dump_newest_first);
+    int64_t retained = 0;
+    for (size_t i = 0; i < v.n; i++) {
+        bool stay = str_eq(v.v[i].name, keep) || (now - v.v[i].mtime <= 7 * 24 * 3600 && retained + v.v[i].size <= 64LL * 1024 * 1024);
+        if (stay) {
+            retained += v.v[i].size;
+        } else {
+            char *p = path_join(dir, v.v[i].name);
+            unlink(p);
+            free(p);
+        }
+        free(v.v[i].name);
     }
-    for (size_t i = 0; i < v.n; i++) free(v.v[i].path);
     free(v.v);
 }
 
@@ -1013,7 +1172,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
                 continue;
             }
             if (d == -2) {
-                *err = rc != 0 ? network_failure_message(resp.error, url, policy) : http_error_text(policy, c.status, sb_cstr(&c.errbody));
+                *err = rc != 0 ? network_failure_message(resp.error, url, policy) : http_error_text(policy, c.status, url, &c.hdrs, sb_cstr(&c.errbody));
                 if (rc == 0) {
                     g_req_status = c.status;
                     *err = with_retry_after(*err, &c.hdrs);
@@ -1028,7 +1187,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
         /* failure: decide retry (fetchWithRetry / the anthropic.ts provider loop) */
         const char *ebody = sb_cstr(&c.errbody);
         bool http_fail = rc == 0;
-        char *msg = !http_fail ? network_failure_message(resp.error, url, policy) : http_error_text(policy, c.status, ebody);
+        char *msg = !http_fail ? network_failure_message(resp.error, url, policy) : http_error_text(policy, c.status, url, &c.hdrs, ebody);
         bool retry;
         int64_t delay;
         if (policy == AI_RETRY_ANTHROPIC) {
@@ -1116,6 +1275,11 @@ int ai_sse_post_ex(const char *url, http_headers_t *headers, const char *body, c
 int ai_stream_post(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
                    http_data_cb on_data, void *ud, int *status, char **err) {
     return stream_post(url, headers, body, opts, NULL, on_data, ud, status, err, NULL);
+}
+
+int ai_stream_post_ex(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
+                      http_data_cb on_data, void *ud, int *status, char **err, ai_post_ex_t *ex) {
+    return stream_post(url, headers, body, opts, NULL, on_data, ud, status, err, ex);
 }
 
 /* ---------- thinking budgets ---------- */

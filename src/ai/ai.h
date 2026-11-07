@@ -395,6 +395,8 @@ int ai_sse_post_ex(const char *url, http_headers_t *headers, const char *body, c
 /* Raw streaming POST (for newline-delimited JSON etc.). */
 int ai_stream_post(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
                    http_data_cb on_data, void *ud, int *status, char **err);
+int ai_stream_post_ex(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
+                      http_data_cb on_data, void *ud, int *status, char **err, ai_post_ex_t *ex);
 /* Test-only: OMC_PROVIDER_URL_REWRITE ("from=to,from=to", prefix match) redirects provider requests (applied by
  * ai_sse_post / ai_stream_post; providers making their own HTTP calls apply it too). Owned. */
 char *ai_rewrite_url(const char *url);
@@ -403,6 +405,11 @@ char *ai_extract_error(int status, const char *body);
 /* inference-headers.ts applyInferenceHeaders: gateway attribution and the conversation id under the protocol's and
  * host's own header (protocol anthropic or openai) */
 void ai_apply_inference_headers(http_headers_t *h, const ai_model_t *m, const char *session_id, bool anthropic);
+/* text plus the retry-after hint and dump line the transport appended to its error err: for a provider whose own wording
+ * wraps the failed response. Owned. */
+char *ai_rewrap_http_error(const char *text, const char *err);
+/* the reason phrase of an HTTP status, "" when unknown */
+const char *ai_http_status_text(int status);
 /* stripRawHttpRequestDiagnostics: the error without its trailing local dump lines (hosts relaying it must not leak paths). Owned. */
 char *ai_strip_request_dump_lines(const char *msg);
 /* Copy model headers + option headers into h. */

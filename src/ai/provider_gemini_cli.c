@@ -1019,7 +1019,9 @@ json_t *provider_gemini_cli_stream(const ai_model_t *m, const ai_context_t *ctx,
                         char *vu = cca_extract_validation_url(ex.err_body);
                         char *detail = vu ? cca_validation_message(vu, "retry your request", creds.email)
                                           : xstrdup(ex.err_body ? ex.err_body : err ? err : "");
-                        error = xasprintf("Cloud Code Assist API error (%d): %s", status, detail);
+                        char *text = xasprintf("Cloud Code Assist API error (%d): %s", status, detail);
+                        error = ai_rewrap_http_error(text, err);
+                        free(text);
                         free(detail);
                         free(vu);
                     }
