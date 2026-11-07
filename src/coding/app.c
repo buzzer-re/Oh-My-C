@@ -641,6 +641,16 @@ static json_t *wrap_steering(const json_t *messages) {
 
 /* a stray sloppy payload in plain text becomes a real edit tool call, so the normal pipeline executes it (omp sdk.ts);
  * only the sloppy edit tool recovers */
+/* AIError.finalize: errorStatus, errorId, errorMessage, in that order on the wire */
+static void hook_finalize_error(void *ud, agent_t *ag, json_t *msg) {
+    UNUSED(ud);
+    UNUSED(ag);
+    json_set_int(msg, "errorId", aie_classify_message(msg));
+    json_t *em = json_get(msg, "errorMessage") ? json_clone(json_get(msg, "errorMessage")) : NULL;
+    json_del(msg, "errorMessage");
+    if (em) json_set(msg, "errorMessage", em);
+}
+
 static void hook_transform_assistant(void *ud, agent_t *ag, json_t *assistant) {
     app_t *a = ud;
     if (!settings_bool("edit.recoverInlineEdits", true)) return;
@@ -1517,6 +1527,7 @@ static void install_agent(app_t *a) {
     ag->hooks.on_request = hook_on_request;
     ag->hooks.should_retry = hook_should_retry;
     ag->hooks.transform_context = hook_transform;
+    ag->hooks.finalize_error = hook_finalize_error;
     ag->hooks.transform_assistant = hook_transform_assistant;
     ag->hooks.on_stream_delta = hook_stream;
     ag->hooks.after_tool = hook_after_tool;

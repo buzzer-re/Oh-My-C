@@ -1009,6 +1009,7 @@ static json_t *stream_assistant(agent_t *a, int *ttsr_abort, json_t **cursor_res
         json_set_int(msg, "errorId", 33558528);
     }
     if (silent) a->cancel = 0; /* internal transition: later side requests must not inherit the abort */
+    if (a->hooks.finalize_error && str_eq(json_get_str(msg, "stopReason"), "error")) a->hooks.finalize_error(a->hooks.ud, a, msg);
     if (!s.started) emit_message(a, AGENT_EV_MESSAGE_START, msg);
     if (!s.abort_requested && a->hooks.on_stream_delta) { /* the finished stream (loop guard flush) */
         const char *st = json_get_str(msg, "stopReason");

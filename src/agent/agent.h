@@ -133,6 +133,8 @@ typedef struct {
     /* Rewrite a finalized assistant message in place before it reaches the context, the UI or tool dispatch
      * (omp transformAssistantMessage). */
     void (*transform_assistant)(void *ud, agent_t *a, json_t *assistant);
+    /* a provider request ended: the host's classification of a failed message, before its first event */
+    void (*finalize_error)(void *ud, agent_t *a, json_t *assistant);
     /* Fill per-request stream options (api key refresh etc). */
     void (*prepare_request)(void *ud, agent_t *a, ai_stream_opts_t *opts);
     /* the request about to be streamed (model, final provider context and options), e.g. to arm the prompt-cache

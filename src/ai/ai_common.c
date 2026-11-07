@@ -10,7 +10,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "coding/turn_recovery.h"
 #include "core/fs.h"
 
 static _Thread_local const ai_model_t *g_req_model; /* the model of this thread's ai_stream, for the dump */
@@ -434,14 +433,8 @@ json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_str
     g_req_status = 0;
     json_t *r = ai_stream_guarded(fn, &t.model, ctx, &t.opts, cb, ud);
     g_req_model = outer;
-    if (str_eq(json_get_str(r, "stopReason"), "error")) {
-        /* finalize(): errorStatus, errorId, errorMessage, in that order on the wire */
-        if (g_req_status && !json_get(r, "errorStatus")) json_set_int(r, "errorStatus", g_req_status);
-        json_set_int(r, "errorId", aie_classify_message(r));
-        json_t *em = json_get(r, "errorMessage") ? json_clone(json_get(r, "errorMessage")) : NULL;
-        json_del(r, "errorMessage");
-        if (em) json_set(r, "errorMessage", em);
-    }
+    if (g_req_status && str_eq(json_get_str(r, "stopReason"), "error") && !json_get(r, "errorStatus"))
+        json_set_int(r, "errorStatus", g_req_status);
     g_req_status = 0;
     ai_transport_finish(&t, r);
     ai_transport_free(&t);
