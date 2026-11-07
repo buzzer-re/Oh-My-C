@@ -1796,7 +1796,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (o->model && a->model && !o->subagent) {
         char *key = mr_model_key(a->model);
         char *val = has_eff && !a->auto_thinking ? mr_selector_with_level(key, effort_name(eff)) : xstrdup(key);
-        settings_set_runtime("modelRoles.default", json_str_own(val));
+        settings_set_runtime_quiet("modelRoles.default", json_str_own(val));
         free(key);
     }
     a->guards = guards_new();

@@ -367,6 +367,14 @@ void settings_set_runtime(const char *path, json_t *val) {
     notify_change();
 }
 
+void settings_set_runtime_quiet(const char *path, json_t *val) {
+    ensure();
+    pthread_mutex_lock(&g_mu);
+    set_path(g_runtime, path, val);
+    rebuild();
+    pthread_mutex_unlock(&g_mu);
+}
+
 void settings_unset_runtime(const char *path) {
     ensure();
     pthread_mutex_lock(&g_mu);

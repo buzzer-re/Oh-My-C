@@ -525,7 +525,7 @@ check "bedrock models"  "amazon-bedrock ("      "${BENV[@]}" AWS_ACCESS_KEY_ID=A
 check "bedrock text"    "plain bedrock answer"  "${BENV[@]}" AWS_ACCESS_KEY_ID=AKIDMOCK AWS_SECRET_ACCESS_KEY=mock-secret "$B" --model "$BM" --no-session -p "hi"
 check "bedrock tool"    "Tool said: br-e2e"     "${BENV[@]}" AWS_ACCESS_KEY_ID=AKIDMOCK AWS_SECRET_ACCESS_KEY=mock-secret "$B" --model "$BM" --no-session -p "bash:echo br-e2e"
 check "bedrock bearer"  "plain bedrock answer"  "${BENV[@]}" AWS_BEARER_TOKEN_BEDROCK=br-token "$B" --model "$BM" --no-session -p "hi"
-check "bedrock bad sig" "Bedrock HTTP 403: The request signature we calculated does not match"  "${BENV[@]}" AWS_ACCESS_KEY_ID=AKIDMOCK AWS_SECRET_ACCESS_KEY=wrong "$B" --model "$BM" --no-session -p "hi"
+check "bedrock bad sig" 'Bedrock HTTP 403: {"message": "The request signature we calculated does not match'  "${BENV[@]}" AWS_ACCESS_KEY_ID=AKIDMOCK AWS_SECRET_ACCESS_KEY=wrong "$B" --model "$BM" --no-session -p "hi"
 check "bedrock no creds" "No API key found for amazon-bedrock."  "${BENV[@]}" "$B" --model "$BM" --no-session -p "hi"
 grep -q '"path": "/model/us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/converse-stream"' "$T/bedrock.jsonl" && echo "   ok  bedrock request path" || { echo "   FAIL bedrock request path"; fail=1; }
 grep -q '"toolResult": {"toolUseId": "tooluse_mock1"' "$T/bedrock.jsonl" && echo "   ok  bedrock toolResult replay" || { echo "   FAIL bedrock toolResult replay"; fail=1; }

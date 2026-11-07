@@ -16,6 +16,8 @@ double settings_num(const char *path, double def);
 bool settings_bool(const char *path, bool def);
 bool settings_is_configured(const char *path); /* set in a config layer (not only the built-in default) */
 void settings_set_runtime(const char *path, json_t *val); /* in-memory override (takes ownership) */
+/* the same before a session exists: listeners of a run that ended may still be registered (omc_main twice) */
+void settings_set_runtime_quiet(const char *path, json_t *val);
 int settings_set_global(const char *path, json_t *val);   /* persist to config.yml (takes ownership) */
 void settings_unset_runtime(const char *path);           /* drop an in-memory override */
 int settings_unset_global(const char *path);
