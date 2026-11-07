@@ -650,7 +650,52 @@ static void hook_transform_assistant(void *ud, agent_t *ag, json_t *assistant) {
 /* transformProviderContext's date/cwd step (coding/dcr.c): one injector per conversation. Only the main loop journals its
  * reminders in the session; another agent on this hook (the auto-learn capture) keeps an unjournaled one. A side request
  * runs through the main loop's injector from its own thread, so the state is serialized. */
+/* sdk.ts convertToLlmWithBlockImages + replaceLlmImagesWithText: a model that takes no image input sees one placeholder per
+ * run of images. NULL when nothing changes. */
+static json_t *omit_images_for_model(const json_t *messages, const ai_model_t *m) {
+    static const char PLACEHOLDER[] = "[image omitted: the active model does not support image input]";
+    if (!m || m->input_image) return NULL;
+    json_t *out = NULL, *msg;
+    json_arr_foreach((json_t *)messages, i, msg) {
+        const char *role = json_get_str(msg, "role");
+        if (!str_eq(role, "user") && !str_eq(role, "developer") && !str_eq(role, "toolResult")) continue;
+        const json_t *content = json_get(msg, "content");
+        if (!json_is_arr(content)) continue;
+        bool any = false;
+        json_t *part;
+        json_arr_foreach((json_t *)content, k, part) any = any || str_eq(json_get_str(part, "type"), "image");
+        if (!any) continue;
+        if (!out) out = json_clone(messages);
+        json_t *replaced = json_arr();
+        json_arr_foreach((json_t *)content, k2, part) {
+            if (!str_eq(json_get_str(part, "type"), "image")) {
+                json_push(replaced, json_clone(part));
+                continue;
+            }
+            size_t n = json_len(replaced);
+            const json_t *prev = n ? json_at(replaced, n - 1) : NULL;
+            if (prev && str_eq(json_get_str(prev, "type"), "text") && str_eq(json_get_str(prev, "text"), PLACEHOLDER)) continue;
+            json_t *t = json_obj();
+            json_set_str(t, "type", "text");
+            json_set_str(t, "text", PLACEHOLDER);
+            json_push(replaced, t);
+        }
+        json_set(json_at(out, i), "content", replaced);
+    }
+    return out;
+}
+
+static json_t *hook_transform_inner(void *ud, agent_t *ag, const json_t *messages);
+
 static json_t *hook_transform(void *ud, agent_t *ag, const json_t *messages) {
+    json_t *r = hook_transform_inner(ud, ag, messages);
+    json_t *o = omit_images_for_model(r ? r : messages, ag->model);
+    if (!o) return r;
+    json_free(r);
+    return o;
+}
+
+static json_t *hook_transform_inner(void *ud, agent_t *ag, const json_t *messages) {
     app_t *a = ud;
     json_t *w = wrap_steering(messages);
     if (!settings_bool("dateCwdReminder", true)) return w;
@@ -1735,6 +1780,14 @@ app_t *app_create(const app_opts_t *o, char **err) {
         else effort_parse(dl, &eff);
     }
     a->thinking = eff;
+    /* main.ts overrideModelRoles: `--model` is the session's default role (roles that inherit it, like smol, follow), with
+     * the effort it starts at; ephemeral, never persisted */
+    if (o->model && a->model && !o->subagent) {
+        char *key = mr_model_key(a->model);
+        char *val = has_eff && !a->auto_thinking ? mr_selector_with_level(key, effort_name(eff)) : xstrdup(key);
+        settings_set_runtime("modelRoles.default", json_str_own(val));
+        free(key);
+    }
     a->guards = guards_new();
     a->thinkloop = thinkloop_new();
     /* environment & discovery */
