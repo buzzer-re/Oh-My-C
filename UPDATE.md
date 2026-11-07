@@ -7,13 +7,13 @@ commit omc currently matches and how to bring later upstream changes over.
 
 | | |
 |---|---|
-| **Upstream commit** | `650f3a108229ee11bf68ba3377f4e8c3391cd424` |
-| **Tag / version** | `v18.16.0` (`omp --version` → `omp/18.16.0`) |
-| **Upstream date** | 2026-11-02 |
-| **Pinned on** | 2026-11-05 |
+| **Upstream commit** | `75e7801e247d4e3263439d4cc08ccad60dc64bdd` |
+| **Tag / version** | `v18.17.0` (`omp --version` → `omp/18.17.0`) |
+| **Upstream date** | 2026-11-06 |
+| **Pinned on** | 2026-11-06 |
 
 Everything model-facing (prompts, tool schemas/descriptions, system prompt, output formatting), the TUI
-(ported from the v18.16.0 source and checked with mocks; side-by-side checks last ran against `omp/18.14.2`, see the update section in docs/status.md for what awaits omp 18.16.0) and the embedded data (catalog, themes,
+(verified side by side against the installed `omp/18.17.0`; docs/status.md's update section lists what still differs) and the embedded data (catalog, themes,
 symbols, settings table, slash commands, tips) corresponds to this commit. Update this table — and the
 matching line in [AGENTS.md](AGENTS.md) — every time an update pass is finished.
 
@@ -25,7 +25,7 @@ matching line in [AGENTS.md](AGENTS.md) — every time an update pass is finishe
    UP=/path/to/scratch/omp
    git clone https://github.com/can1357/oh-my-pi.git "$UP"
    cd "$UP"
-   PIN=650f3a108229ee11bf68ba3377f4e8c3391cd424   # from the table above
+   PIN=75e7801e247d4e3263439d4cc08ccad60dc64bdd   # from the table above
    git fetch --tags origin
    TARGET=origin/main                               # or the newest release tag: git tag --sort=-v:refname | head -1
    git log --oneline --no-merges "$PIN..$TARGET" | wc -l
@@ -70,17 +70,17 @@ matching line in [AGENTS.md](AGENTS.md) — every time an update pass is finishe
    | Glyph presets (`assets/tui/symbols.json`) | `python3 build-tools/extract_symbols.py "$UP/packages/tui/src/theme/symbols.ts" assets/tui/symbols.json` |
    | Themes (`assets/tui/themes/`) | `cp "$UP"/packages/tui/src/theme/{dark,light}.json assets/tui/themes/` (the other themes come from `packages/tui/src/theme/defaults.json`) |
    | Welcome tips (`assets/tui/tips.txt`) | `cp "$UP/packages/tui/src/prompt/tips.txt" assets/tui/tips.txt` |
-   | Settings table (`assets/tui/settings-ui.json`) | `build-tools/extract_settings.sh "$UP" > assets/tui/settings-ui.json` |
+   | Settings tables (`assets/tui/settings-ui.json`, `assets/config/settings-registry.json`) | `python3 build-tools/settings_patch.py "$UP" "$PIN" "$TARGET"` (report), then again with `--apply`; fix what it lists as unresolved by hand, and add generated keys such as `magicKeywords.<id>` by hand. It reads upstream as text and runs nothing |
    | Slash commands (`assets/tui/slash-commands.json`) | `python3 build-tools/extract_slash_commands.py "$UP" > assets/tui/slash-commands.json` |
    | Compat rules and providers (`assets/compat_rules.json.z`, `assets/providers.json.z`) | `python3 build-tools/slim_compat_rules.py "$UP/packages/catalog/src/compat" assets/compat_rules.json.z`, `python3 build-tools/slim_providers.py "$UP/packages/catalog/src/compat/rules.json" assets/providers.json.z` |
 | Export viewer (`assets/export/`) | `file` and `integrity` from `$UP/packages/coding-agent/src/export/html/viewer.generated.json`, and bump `EXPORT_VIEWER_VERSION` in `src/session/export_html.h` |
 | `/changelog` (`assets/CHANGELOG.md.z`, zlib) | `python3 -c 'import sys,zlib; open("assets/CHANGELOG.md.z","wb").write(zlib.compress(open(sys.argv[1],"rb").read(),9))' "$UP/packages/coding-agent/CHANGELOG.md"` (the released file: its newest `## [x.y.z]` heading must be the target version; tests/test_extracmds.c checks the top entry) |
 
-   **`extract_settings.sh` executes upstream TypeScript through the Bun embedded in the installed `omp`.** That conflicts with omc's no-Node, no-executing-upstream rules, so it should be replaced by a static parser of `settings.ts`. Until then, get the user's OK before running it, and check its JSON against the source diff.
+   **Don't run `extract_settings.sh`:** it executes upstream TypeScript through the Bun embedded in `omp`, which breaks omc's no-Node and no-executing-upstream rules. Use `settings_patch.py` above.
 
    After refreshing the settings table, compare its defaults with `src/config/settings.c` (omc's
    defaults must equal omp's — see the "Settings defaults" row in [docs/status.md](docs/status.md)).
-   After refreshing `assets/config/settings-registry.json` (`extract_settings.sh "$UP" --registry`), run
+   After refreshing the settings tables, run
    `build-tools/settings_audit.py` and annotate every new unread key in `build-tools/settings_audit.tsv`
    (inert or ⛔); `test_settings_audit` fails until they are, and the counts in docs/gaps.md §3 come from it.
 
@@ -97,3 +97,9 @@ matching line in [AGENTS.md](AGENTS.md) — every time an update pass is finishe
 
 Partial passes are fine: if you stop midway, pin the last upstream commit whose changes are *all* ported
 (or still triaged as skip), never a later one.
+
+## Things that went wrong before, so check them
+
+- The installed `omp` must match the target (`omp update`) for the side-by-side checks to mean anything. Run it only with a throwaway `HOME` and agent dir plus a symlink to `~/.omp/natives`. Some providers ignore a mock `baseUrl` and reach the real service (`google-vertex` does): keep those out of comparison matrices.
+- `crates/pi-shell` is out of scope: omc keeps real bash (AGENTS.md).
+- Most of a release's commits amend or revert earlier ones in it. Port the final state at the tag, not each step.

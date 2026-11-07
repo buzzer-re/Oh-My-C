@@ -96,7 +96,8 @@ checkout. They are run by hand when omp is updated, and the binary never runs th
 | `slim_catalog.py <models.json> <out>` | `assets/models.json.z` | factors per-API compat defaults, zlib-compresses |
 | `extract_symbols.py <symbols.ts> <out>` | `assets/tui/symbols.json` | asserts all presets have the same keys |
 | `extract_slash_commands.py <omp checkout>` | `assets/tui/slash-commands.json` | reads `slash-commands/builtin-*.ts` in registry order |
-| `extract_settings.sh <omp checkout>` + `settings-dump/{dump.ts,stub.js}` | `assets/tui/settings-ui.json` | runs omp's own settings registry with the Bun runtime embedded in the installed `omp` (`BUN_BE_BUN=1`), npm deps stubbed, `HOME`/agent dir pointed at throwaway dirs so only defaults are dumped |
+| `settings_patch.py <omp checkout> <old> <new> [--apply]` | `assets/tui/settings-ui.json`, `assets/config/settings-registry.json` | reads `register()` blocks as text at two tags and reports what it cannot resolve; runs nothing from upstream |
+| `extract_settings.sh <omp checkout>` (retired: it runs upstream code) + `settings-dump/{dump.ts,stub.js}` | `assets/tui/settings-ui.json` | runs omp's own settings registry with the Bun runtime embedded in the installed `omp` (`BUN_BE_BUN=1`), npm deps stubbed, `HOME`/agent dir pointed at throwaway dirs so only defaults are dumped |
 | `settings_audit.py [--table]` | (report only) | WP-26 audit: every registry setting with its omc readers, classified wired / partial / inert / ⛔ from `settings_audit.tsv`; after a registry refresh, annotate new keys there (`make test` runs `test_settings_audit`) |
 
 Use a checkout whose tag matches `omp --version`. Themes and tips are plain copies from the upstream
