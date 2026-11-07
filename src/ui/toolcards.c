@@ -270,7 +270,10 @@ void toolcard_result(ui_t *u, msgview_t *v, const char *id, json_t *result, bool
     }
     if (!result) result = json_obj();
     bool parked = false;
-    const json_t *latest = !partial && g_replaying && is_async_state(json_get_obj(result, "details"), "running")
+    /* parksAsBackground: detached `task` spawns only; backgrounded bash/eval park only under native rendering, the terminal
+     * transcript keeps their card frozen as a settled result */
+    bool job_card = str_eq(v->tool_name, "task") && is_async_state(json_get_obj(result, "details"), "running");
+    const json_t *latest = !partial && g_replaying && job_card
                                ? frame_lookup(u, id)
                                : NULL;
     if (latest) { /* a rebuild: the job's newest frame supersedes the persisted "running" snapshot */
@@ -278,7 +281,7 @@ void toolcard_result(ui_t *u, msgview_t *v, const char *id, json_t *result, bool
         parked = is_async_state(latest, "running");
         if (is_async_state(latest, "failed")) is_error = true;
         if (parked && id) hmap_put(&g_bg, id, v); /* later frames keep landing on the rebuilt card */
-    } else if (!partial && !g_replaying && is_async_state(json_get_obj(result, "details"), "running")) {
+    } else if (!partial && !g_replaying && job_card) {
         /* a background call returned: the card stays live for its job frames (omp parkAsBackground) */
         parked = true;
         json_t *frame = json_get_obj(st, "frame");
