@@ -173,8 +173,16 @@ static void registry_init(void) {
             if (!word_in(OMC[k].subs, json_get_str(s, "name"))) continue;
             c->subs[c->nsubs++] = (slash_sub_t){json_get_str(s, "name"), json_get_str(s, "description"), json_get_str(s, "usage")};
         }
-        /* an ACP hint naming every upstream subcommand: keep the alternatives omc implements */
-        if (c->acp_input_hint && *c->acp_input_hint == '[' && json_len(subs) != c->nsubs && c->nsubs) {
+        /* a hint the extractor left as a template literal (/compact's `[${MODES}] [focus]`): the alternatives are the subcommands */
+        const char *tmpl_end = c->acp_input_hint && str_starts(c->acp_input_hint, "[${") ? strstr(c->acp_input_hint, "}]") : NULL;
+        if (tmpl_end) {
+            sb_t h = SB_INIT;
+            sb_putc(&h, '[');
+            for (size_t j = 0; j < c->nsubs; j++) sb_appendf(&h, "%s%s", j ? "|" : "", c->subs[j].name);
+            sb_append(&h, tmpl_end + 1);
+            c->acp_input_hint = sb_detach(&h);
+        } else if (c->acp_input_hint && *c->acp_input_hint == '[' && json_len(subs) != c->nsubs && c->nsubs) {
+            /* an ACP hint naming every upstream subcommand: keep the alternatives omc implements */
             sb_t h = SB_INIT;
             sb_putc(&h, '[');
             const char *p = c->acp_input_hint + 1;
