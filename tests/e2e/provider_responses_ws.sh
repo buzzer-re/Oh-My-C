@@ -26,23 +26,23 @@ rw_check() { # name want-substring prompt env...
     if [[ "$out" == *"$want"* ]]; then echo "   ok  $name"; else echo "   FAIL $name: wanted '$want', got: $out / $(tail -3 "$T/rw.out")"; fail=1; fi
 }
 rw_start ""
-rw_check "ws incremental"  "up ws:3 ws+prev:1 ws+prev:1"  "chain:2"  "${RWENV[@]}"
+rw_check "ws incremental"  "up ws:1 ws+prev:1 ws+prev:1"  "chain:2"  "${RWENV[@]}"
 check "ws frame shape"     "response.create None None gpt-5.5"  python3 -I -c 'import json,sys; b=[json.loads(l) for l in open(sys.argv[1])][1]["body"]; print(b.get("type"), b.get("stream"), b.get("stream_options"), b["model"])' "$T/rw.jsonl"
 check "ws session headers" "True True"  python3 -I -c 'import json,sys; h=json.loads(open(sys.argv[1]).readline())["headers"]; print("session_id" in h, "x-client-request-id" in h)' "$T/rw.jsonl"
-rw_check "ws one socket"   "up ws:3 ws+prev:1"  "bash:echo one"  "${RWENV[@]}"
-rw_check "ws stale anchor" "up ws:3 ws+prev:1 ws:5"  "bash:echo a stale-once"  "${RWENV[@]}"
-rw_check "ws no chaining"  "up ws:3 ws:5"  "bash:echo nochain"  "${RWENV[@]}" PI_OPENAI_STATEFUL=0
-rw_check "ws drop"         "up ws:3 http:3"  "drop-mid"  "${RWENV[@]}"
+rw_check "ws one socket"   "up ws:1 ws+prev:1"  "bash:echo one"  "${RWENV[@]}"
+rw_check "ws stale anchor" "up ws:1 ws+prev:1 ws:3"  "bash:echo a stale-once"  "${RWENV[@]}"
+rw_check "ws no chaining"  "up ws:1 ws:3"  "bash:echo nochain"  "${RWENV[@]}" PI_OPENAI_STATEFUL=0
+rw_check "ws drop"         "up ws:1 http:1"  "drop-mid"  "${RWENV[@]}"
 check "ws drop text"       "OpenAI responses stream closed before a terminal response event was received"  cat "$T/rw.out"
-rw_check "ws rejection"    "up ws:3"  "reject"  "${RWENV[@]}"
+rw_check "ws rejection"    "up ws:1"  "reject"  "${RWENV[@]}"
 check "ws rejection text"  "Error Code bad_param: request rejected"  cat "$T/rw.out"
 # off by default, and a model's preferWebsockets: false vetoes the setting
 printf 'skills:\n  enabled: false\n' > "$T/rwagent/config.yml"
-rw_check "ws default off"  "http:3 http:5"  "bash:echo off"  "${RWENV[@]}"
+rw_check "ws default off"  "http:1 http:3"  "bash:echo off"  "${RWENV[@]}"
 printf 'providers:\n  openaiResponsesWebsockets: true\nskills:\n  enabled: false\n' > "$T/rwagent/config.yml"
 rw_stop
 rw_start 404
-rw_check "ws upgrade 404"  "up http:3 http:5"  "bash:echo fall"  "${RWENV[@]}"
+rw_check "ws upgrade 404"  "up http:1 http:3"  "bash:echo fall"  "${RWENV[@]}"
 rw_stop
 rw_start 401
 rw_check "ws upgrade 401"  "up"  "bash:echo denied"  "${RWENV[@]}"

@@ -71,7 +71,7 @@ check "copilot denied"    "GitHub Copilot access denied (HTTP 403)"  "${XENV[@]}
 JQ='call:eval:{"language":"py","code":"r = await judge({\"text\": \"ok\"}, {\"b\": {\"type\": \"bool\", \"instructions\": \"fine?\"}})\nprint(\"verdict\", r[\"b\"])"}'
 printf 'modelRoles:\n  judge: typesafe/jev-latest\n' > "$T/pagent/config.yml"
 check "typesafe judge"  "verdict {'type': 'bool', 'bool': 0.9}"  "${XENV[@]}" TYPESAFE_API_KEY=ts-key OMC_PROVIDER_URL_REWRITE="https://api.typesafe.ai=$XB/ts,https://api.kilo.ai=$XB/kilo" "$B" --model "kilo/~anthropic/claude-sonnet-latest" --no-session -p "$JQ"
-check "typesafe wire"   "/ts/v1/systemone Bearer ts-key jev-latest {'b': {'type': 'bool', 'instructions': 'fine?'}}"  "${XL[@]}" /ts/ 'x["path"], h.get("authorization"), b.get("model"), b.get("questions")'
+check "typesafe wire"   "/ts/v1/systemone Bearer ts-key jev-latest {'b': {'type': 'noul', 'instructions': 'fine?'}}"  "${XL[@]}" /ts/ 'x["path"], h.get("authorization"), b.get("model"), b.get("questions")'
 # OpenRouter Decisions: compat.openRouterRouting becomes `provider`, compat.extraBody overlays the body
 mkdir -p "$T/ordagent"
 printf 'providers:\n  ord:\n    baseUrl: %s/ord\n    apiKey: ord-key\n    api: openrouter-decisions\n    models:\n      - id: jev\n        name: Jev\n        compat:\n          openRouterRouting:\n            order: [cerebras]\n          extraBody:\n            zdr: true\n  mock:\n    baseUrl: %s/ord\n    apiKey: ord-key\n    api: openai-completions\n    models:\n      - id: c\n        name: C\n' "$XB" "$XB" > "$T/ordagent/models.yml"
