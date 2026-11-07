@@ -1778,7 +1778,8 @@ static void init_ctx(md_ctx_t *c, const tui_md_opts_t *o) {
     c->th = o->theme ? o->theme : tui_theme();
     sb_t d = SB_INIT;
     if (o->text_sgr) sb_append(&d, o->text_sgr);
-    else if (o->text_slot >= 0) sb_append(&d, tui_fg_seq(c->th, (tui_tc_t)o->text_slot));
+    else if (o->text_slot >= 0 && strcmp(tui_fg_seq(c->th, (tui_tc_t)o->text_slot), "\x1b[39m") != 0)
+        sb_append(&d, tui_fg_seq(c->th, (tui_tc_t)o->text_slot)); /* an empty theme color styles nothing: role colors stay */
     bool colored = d.len > 0;
     if (o->italic) sb_append(&d, "\x1b[3m");
     snprintf(c->deflt, sizeof c->deflt, "%s", sb_cstr(&d));
