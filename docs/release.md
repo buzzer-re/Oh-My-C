@@ -9,7 +9,7 @@ omc's version is the omp release it matches: `OMC_VERSION` in `src/core/core.h`,
 ## CI (`.github/workflows/ci.yml`)
 
 Every push to `main` and every pull request builds and tests on Linux x86_64 (`ubuntu-22.04`), Linux arm64
-(`ubuntu-22.04-arm`) and macOS arm64 (`macos-14`):
+(`ubuntu-22.04-arm`) and macOS arm64 (`macos-15`):
 
 1. `build-tools/ci.sh check-deps`: a C compiler, `python3`, OpenSSL 3 and zlib are present. Nothing is installed.
 2. `build-tools/ci.sh build`: a single compiler warning fails the build.
@@ -44,6 +44,18 @@ git push origin main v18.17.0
 
 `make dist` builds the same archive locally into `build/dist/`.
 
+## Install script (`install.sh`)
+
+`curl -fsSL https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.sh | sh` installs the latest release:
+it picks the archive for the OS and architecture, verifies it against the release's `SHA256SUMS` (a mismatch installs
+nothing), checks on Linux that the system has the libraries omc links, and renames the new binary over the old one so
+a running omc keeps working. It is plain POSIX `sh`, and the whole body runs from `main()`, so a download cut off
+halfway executes nothing. `OMC_VERSION`, `OMC_INSTALL_DIR`, `OMC_REPO` and `OMC_DOWNLOAD_URL` override the defaults.
+The latest release is found by following GitHub's `releases/latest` redirect, so it needs no API token.
+
+The raw URL serves `main`, so the script only works once the repository is public (a private repository's raw files
+and release assets need authentication).
+
 ## Supply chain
 
 The workflows use no third-party actions: the code is checked out with `git`, the token is passed as a one-off
@@ -54,7 +66,7 @@ uses only the runner's compiler, OpenSSL and zlib, so a tampered package registr
 
 - **Linux binaries** link the system's OpenSSL 3 and zlib dynamically, so they get the distribution's security updates.
   Built on Ubuntu 22.04, they need glibc 2.35+ and OpenSSL 3.
-- **The macOS binary** targets macOS 14+ on Apple silicon. It isn't signed or notarized: a copy downloaded with a
+- **The macOS binary** targets macOS 15+ on Apple silicon (the runner's release: Homebrew's static OpenSSL is built for it). It isn't signed or notarized: a copy downloaded with a
   browser needs `xattr -d com.apple.quarantine omc` once. There is no Intel macOS build.
 - **`ubuntu-22.04-arm`** runners are free only for public repositories. For a private repository, remove the
   `linux-arm64` entries from both workflows, or the job waits for a runner that never comes.

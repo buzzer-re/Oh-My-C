@@ -29,7 +29,7 @@ omc --version   # omc/$V
 |---|---|
 | \`omc-$V-linux-x86_64.tar.gz\` | Linux x86_64 with glibc 2.35+ and OpenSSL 3 (Ubuntu 22.04+, Debian 12+, Fedora 36+) |
 | \`omc-$V-linux-arm64.tar.gz\` | Linux arm64, same requirements |
-| \`omc-$V-macos-arm64.tar.gz\` | macOS 14+ on Apple silicon (OpenSSL is built in) |
+| \`omc-$V-macos-arm64.tar.gz\` | macOS 15+ on Apple silicon (OpenSSL is built in) |
 
 The macOS binary is not notarized: a copy downloaded with a browser needs \`xattr -d com.apple.quarantine omc\` once.
 Building from source works anywhere with a C11 compiler and the OpenSSL and zlib headers (\`make && make install\`).
