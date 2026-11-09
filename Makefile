@@ -19,6 +19,9 @@ endif
 ifeq ($(UNAME_S),Darwin)
 # Apple ld: PIE is the default; no -z options. OpenSSL comes from Homebrew (keg-only) or pkg-config.
 LDFLAGS += -Wl,-export_dynamic
+# unit tests link a subset of the objects, leaving some __attribute__((weak)) references undefined; ELF resolves those
+# to NULL at link time, Apple ld needs them looked up at load time (dyld then also leaves a missing weak symbol NULL)
+TEST_LDFLAGS := -Wl,-undefined,dynamic_lookup
 OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3 2>/dev/null || brew --prefix openssl 2>/dev/null)
 SSL_PC  := $(if $(OPENSSL_PREFIX),PKG_CONFIG_PATH=$(OPENSSL_PREFIX)/lib/pkgconfig:$$PKG_CONFIG_PATH )
 SSL_CFLAGS := $(shell $(SSL_PC)$(PKG) --cflags openssl 2>/dev/null || { [ -n "$(OPENSSL_PREFIX)" ] && echo -I$(OPENSSL_PREFIX)/include; })
@@ -197,7 +200,7 @@ UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_provi
 .SECONDEXPANSION:
 $(O)/tests/%: tests/%.c $$(T_$$*)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -o $@ $< $(T_$*) $(LIBS)
+	$(CC) $(CFLAGS) -o $@ $< $(T_$*) $(LIBS) $(TEST_LDFLAGS)
 
 build/examples/main_twice: tests/e2e/main_twice.c $(LIB_STATIC)
 	@mkdir -p build/examples
