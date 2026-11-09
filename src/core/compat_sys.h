@@ -1,5 +1,5 @@
 /* compat_sys.h - macOS versions of the Linux-only calls omc uses: pipe2, socket(... | SOCK_CLOEXEC |
- * SOCK_NONBLOCK), getrandom, execvpe. Include it (after system headers) only where these are called. */
+ * SOCK_NONBLOCK), getrandom, execvpe, memrchr. Include it (after system headers) only where these are called. */
 #ifndef OMC_COMPAT_SYS_H
 #define OMC_COMPAT_SYS_H
 
@@ -62,6 +62,15 @@ static inline int omc_compat_execvpe(const char *file, char *const argv[], char 
     return execvp(file, argv);
 }
 #define execvpe(f, a, e) omc_compat_execvpe((f), (a), (e))
+
+/* memrchr(s, c, n): the last c in the first n bytes of s (a GNU extension) */
+static inline void *omc_compat_memrchr(const void *s, int c, size_t n) {
+    const unsigned char *p = (const unsigned char *)s + n;
+    while (n--)
+        if (*--p == (unsigned char)c) return (void *)p;
+    return NULL;
+}
+#define memrchr(s, c, n) omc_compat_memrchr((s), (c), (n))
 
 #endif /* __APPLE__ */
 

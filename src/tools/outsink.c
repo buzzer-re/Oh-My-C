@@ -6,6 +6,8 @@
 #include <errno.h>
 #include <stdio.h>
 
+#include "core/compat_sys.h" /* memrchr on macOS */
+
 #define ELLIPSIS "\xE2\x80\xA6"
 #define ELLIPSIS_LEN 3
 

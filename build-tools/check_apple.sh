@@ -18,5 +18,27 @@ for f in $(grep -rl '__APPLE__' src --include='*.c'); do
         rc=1
     fi
 done
+# glibc-only calls: glibc's headers declare them, so the syntax pass above can't see that macOS lacks them. Each file is
+# preprocessed as macOS sees it (__APPLE__ defined, the real compat shims applied, which rename the calls they cover),
+# and any of these names still called from the file's own code is a call that would not link on a Mac.
+# empty stand-ins for the Darwin-only headers, so files that include them still preprocess on Linux
+STUBS=$(mktemp -d)
+trap 'rm -rf "$STUBS"' EXIT
+mkdir -p "$STUBS/mach" "$STUBS/CoreFoundation" "$STUBS/sys"
+for h in util.h libproc.h mach/mach.h mach/mach_time.h CoreFoundation/CoreFoundation.h sys/sysctl.h; do : > "$STUBS/$h"; done
+GLIBC_ONLY='memrchr|pipe2|getrandom|execvpe|strchrnul|mempcpy|rawmemchr|accept4|dup3|get_current_dir_name|strverscmp|secure_getenv|explicit_bzero|copy_file_range|memfd_create|epoll_create1|inotify_init1|signalfd|eventfd|gettid'
+for f in $(grep -rlwE "$GLIBC_ONLY" src --include='*.c'); do
+    pp=$($CC -std=gnu11 -E -D__APPLE__ -Isrc -Iinclude -idirafter "$STUBS" "$f" 2>/dev/null) || { echo "== $f: preprocessing failed"; rc=1; continue; }
+    hits=$(printf '%s\n' "$pp" |
+        awk -v want="\"$f\"" -v re="(^|[^A-Za-z0-9_])($GLIBC_ONLY)[ \t]*[(]" '
+            /^# [0-9]+ "/ { cur = $3; next }
+            cur == want && $0 ~ re { match($0, re); print substr($0, RSTART, RLENGTH) }') ||
+        { echo "== $f: awk failed"; rc=1; continue; }
+    hits=$(printf '%s' "$hits" | tr -d '( \t' | sed 's/^[^A-Za-z_]*//' | sort -u | tr '\n' ' ')
+    if [ -n "$hits" ]; then
+        echo "== $f: calls $hits- not on macOS (add a shim to core/compat_sys.h and include it)"
+        rc=1
+    fi
+done
 [ $rc = 0 ] && echo "check_apple: macOS branches OK"
 exit $rc
