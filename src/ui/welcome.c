@@ -381,7 +381,7 @@ static void center_block(strvec_t *lines, size_t from, int width) {
 static void render_lines(welcome_t *w, int width, strvec_t *out) {
     int room = width - 2;
     if (room < 4) return;
-    char *vtext = xasprintf("v%s", OMC_VERSION);
+    char *vtext = xstrdup(OMC_VERSION_LABEL);
     char *version = fg(TUI_TC_DIM, vtext);
     free(vtext);
     int lockup_w = LOGO_WIDTH + LOCKUP_GAP + MAX(WORDMARK_WIDTH, tui_visible_width(version));

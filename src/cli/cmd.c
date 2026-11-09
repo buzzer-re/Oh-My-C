@@ -187,7 +187,7 @@ static int cmd_name_cmp(const void *a, const void *b) {
 
 void cli_render_root_help(FILE *f) {
     sb_t b = SB_INIT;
-    sb_appendf(&b, "%s v%s\n\nUSAGE\n  $ %s [COMMAND]\n\n", CLI_BIN, OMC_VERSION, CLI_BIN);
+    sb_appendf(&b, "%s %s\n\nUSAGE\n  $ %s [COMMAND]\n\n", CLI_BIN, OMC_VERSION_LABEL, CLI_BIN);
     render_body(&b, cli_launch_command());
     size_t n;
     const cli_cmd_t *cmds = cli_commands(&n);

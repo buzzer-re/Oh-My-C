@@ -34,7 +34,7 @@ extern "C" {
 
 #define OMC_API_VERSION 1
 
-/* library version string, e.g. "0.1.0" */
+/* library version string: the omp release this build matches, e.g. "18.17.0" */
 OMC_API const char *omc_version(void);
 /* OMC_API_VERSION the library was built with (compare with the header you compiled against) */
 OMC_API int omc_api_version(void);

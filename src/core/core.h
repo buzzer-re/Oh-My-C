@@ -22,7 +22,9 @@
 
 #include "core/compat.h"
 
-#define OMC_VERSION "0.1.0"
+/* the omp release whose behaviour this build matches (UPDATE.md pin); release tags are v<OMC_VERSION> */
+#define OMC_VERSION "18.17.0"
+#define OMC_VERSION_LABEL "v" OMC_VERSION " (OMP equivalent)"
 #define OMC_NAME "omc"
 
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
