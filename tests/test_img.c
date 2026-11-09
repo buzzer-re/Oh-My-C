@@ -352,6 +352,10 @@ static void test_pipeline(void) {
 }
 
 int main(void) {
+    if (system("python3 -I -c 'import PIL' >/dev/null 2>&1") != 0) {
+        printf("test_img: python3 with Pillow not found, skipping\n");
+        return 0;
+    }
     const char *tmp = getenv("TMPDIR");
     snprintf(DIR_, sizeof DIR_, "%s/omc-img-test-%d", tmp && *tmp ? tmp : "/tmp", (int)getpid());
     char *cmd = xasprintf("python3 -I tests/img_fixtures.py '%s' >/dev/null", DIR_);

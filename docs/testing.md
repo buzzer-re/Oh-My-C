@@ -231,9 +231,11 @@ Keep `halt_on_error=0` and the `log_path` settings. Otherwise the first finding 
 - `tests/test_img.c`, `test_img_jpeg.c`, `test_img_webp.c`: codecs against Pillow-decoded references generated
   at test time by `tests/img_fixtures.py` (PNG exact, GIF / lossless WebP exact, JPEG / lossy WebP within a
   tolerance), malformed-input fuzzing, encoder round trips (own decoder + Pillow), and the `resizeImage` /
-  `loadImageInput` ports.
+  `loadImageInput` ports. All three need `python3` with Pillow and print a skip line without it; nothing
+  installs Pillow for them (no package managers), so the GitHub runners skip them.
 - `tests/e2e/images.sh` (sourced by `run.sh`): read-tool notes and the wire image (1568x882, <= 500 KiB),
   undecodable and magic-byte detection, text-only metadata, the Anthropic per-image clamp against
-  `mock_providers.py`, session blob persistence and resume.
+  `mock_providers.py`, session blob persistence and resume. `img wire` and `img anthropic cap` decode the
+  sent image with Pillow and print `skip` when it is missing.
 - TUI: `CMP_IMAGES=1 tests/tui/compare.sh start` + `compare.sh paste <path>` reproduces a pasted / dropped image
   path in both apps (chips, band, transcript, request).

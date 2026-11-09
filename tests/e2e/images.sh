@@ -46,6 +46,8 @@ icheck() { # name want cmd...  (runs in the image work dir)
     local out; out=$(cd "$T/iwork" && timeout 60 "$@" </dev/null 2>&1)
     if [[ "$out" == *"$want"* ]]; then echo "   ok  $name"; else echo "   FAIL $name: got: ${out:0:400}"; fail=1; fi
 }
+# the checks that decode what omc sent need Pillow; without it (CI runners) they are skipped, not failed
+if python3 -I -c 'import PIL' 2>/dev/null; then picheck() { icheck "$@"; }; else picheck() { echo "   skip $1 (no Pillow)"; }; fi
 : > "$T/req.jsonl"
 icheck "img read"          "plain answer"  "${IENV[@]}" "$B" --model mock/vision-1 --no-session -p "read:shot.png"
 # the tool text and the image the model receives: decodable, 1568x882, within omp's 500 KiB budget
@@ -55,7 +57,7 @@ r = [json.loads(l) for l in open(sys.argv[1])][-1]
 print([m["content"] for m in r["messages"] if m["role"] == "tool"][-1])' "$T/req.jsonl"
 icheck "img read dims"     "[Image: original 3200x1800, displayed at 1568x882. Multiply coordinates by 2.04 to map to original image.]" \
     python3 -I -c 'import json, sys; r = [json.loads(l) for l in open(sys.argv[1])][-1]; print([m["content"] for m in r["messages"] if m["role"] == "tool"][-1])' "$T/req.jsonl"
-icheck "img wire"          "1568x882 ok" python3 -I -c '
+picheck "img wire"          "1568x882 ok" python3 -I -c '
 import json, sys, base64, io
 from PIL import Image
 r = [json.loads(l) for l in open(sys.argv[1])][-1]
@@ -69,7 +71,7 @@ icheck "img text model"    "Image metadata:"  env OMC_CODING_AGENT_DIR="$T/agent
 # provider clamps it under 90% of the 10 MiB per-image cap before the request leaves (prepareAnthropicImageContext)
 printf 'images:\n  autoResize: false\n' > "$T/iagent/config.yml"
 icheck "img anthropic"     "Tool said: Read image file [image/png]"  "${IENV[@]}" "$B" --model mockant/claude-mock --no-session -p "read:noise.png"
-icheck "img anthropic cap" "clamped ok" python3 -I -c '
+picheck "img anthropic cap" "clamped ok" python3 -I -c '
 import json, sys, base64, io
 from PIL import Image
 rows = [json.loads(l) for l in open(sys.argv[1])]
