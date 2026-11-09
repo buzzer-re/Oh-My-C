@@ -593,7 +593,7 @@ static track_t *scan_transcript(const json_t *entries, const char *track_id, con
             json_t *usage = json_get(msg, "usage");
             double total = usage_total(usage);
             json_t *cost_obj = json_get(usage, "cost");
-            double cost_total;
+            double cost_total = 0;
             bool has_cost = fin_num(json_get(cost_obj, "total"), &cost_total);
             if (total > 0 && (!has_cost || cost_total == 0)) {
                 const char *prov = json_get_str(msg, "provider") ? json_get_str(msg, "provider") : "";

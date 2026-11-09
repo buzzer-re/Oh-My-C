@@ -56,7 +56,7 @@ build() {
     make -j"$JOBS" "${STATIC[@]}" 2>&1 | tee build/ci-build.log
     local n
     n=$(grep 'warning:' build/ci-build.log | grep -vc '^make' || true) # make's own clock-skew notices aren't the compiler's
-    [ "$n" = 0 ] || { grep 'warning:' build/ci-build.log | grep -v '^make' | head -20; fail "$n compiler warning(s); the build must have none"; }
+    [ "$n" = 0 ] || { grep -A3 'warning:' build/ci-build.log | grep -v '^make'; fail "$n compiler warning(s); the build must have none"; }
 }
 
 run_tests() {

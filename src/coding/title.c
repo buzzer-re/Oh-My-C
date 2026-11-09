@@ -5,6 +5,7 @@
  * (`🧪 FLAKY: Fix flaky park tests`); like omp's runEphemeralTurn it carries the streaming reply so far, the
  * side-channel no-tools reminder and the session's thinking level. The title model (`title-system.md`) is the fallback and the
  * only path under `title.generator: tiny`. Results are applied on the agent thread. */
+#define _GNU_SOURCE /* memmem, strcasestr, vasprintf: glibc before 2.38 declares them only with it */
 #include "title.h"
 
 #include "config/settings.h"

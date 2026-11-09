@@ -1,4 +1,5 @@
 /* astgrep.c - structural search/rewrite over a bracket-aware token tree (ast_grep, ast_edit). */
+#define _GNU_SOURCE /* memmem, strcasestr, vasprintf: glibc before 2.38 declares them only with it */
 #include "tools.h"
 
 #include "core/fs.h"

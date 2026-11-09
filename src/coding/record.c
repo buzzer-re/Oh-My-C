@@ -1,4 +1,5 @@
 /* record.c - session recordings (see record.h). */
+#define _GNU_SOURCE /* memmem, strcasestr, vasprintf: glibc before 2.38 declares them only with it */
 #include "coding/record.h"
 
 #include "config/settings.h"

@@ -3,6 +3,7 @@
  * -> dynamic client registration (RFC 7591) unless a client id is configured -> authorization code
  * + PKCE through the shared login engine (config/auth.c), with the RFC 8707 `resource` indicator.
  * Credentials live in auth.json under "mcp:<server url>" with the descriptor needed to refresh. */
+#define _GNU_SOURCE /* memmem, strcasestr, vasprintf: glibc before 2.38 declares them only with it */
 #include "mcp.h"
 
 #include "config/auth.h"

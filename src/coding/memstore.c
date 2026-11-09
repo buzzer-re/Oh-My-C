@@ -255,7 +255,7 @@ int memstore_claim_stage1(const char *path, const mem_claim_params_t *p, mem_cla
         if (prev >= upd) continue;
         json_t *j = ensure_job(&t, MEMSTORE_STAGE1_KIND, id);
         /* UPDATE ... WHERE: not yet succeeded for this watermark, no live lease, new input or retry due */
-        int64_t lsw, iw, ra, rr = json_get_int(j, "retry_remaining", 0);
+        int64_t lsw = 0, iw = 0, ra = 0, rr = json_get_int(j, "retry_remaining", 0);
         bool has_lsw = nget(j, "last_success_watermark", &lsw), has_iw = nget(j, "input_watermark", &iw),
              has_ra = nget(j, "retry_at", &ra);
         if (has_lsw && !(lsw < upd)) continue;
@@ -286,7 +286,7 @@ static void enqueue_global_locked(tx_t *t, int64_t src, const char *cwd, bool fo
     char *key = global_job_key(cwd);
     json_t *j = ensure_job(t, MEMSTORE_GLOBAL_KIND, key);
     free(key);
-    int64_t iw, lsw;
+    int64_t iw = 0, lsw = 0;
     bool has_iw = nget(j, "input_watermark", &iw), has_lsw = nget(j, "last_success_watermark", &lsw);
     bool forced = force && (!has_lsw || (has_iw && iw <= lsw));
     if (!has_iw || iw < src) {
@@ -396,7 +396,7 @@ int memstore_claim_global(const char *path, const char *worker_id, int64_t lease
     char *key = global_job_key(cwd);
     json_t *j = ensure_job(&t, MEMSTORE_GLOBAL_KIND, key);
     free(key);
-    int64_t iw, lsw, ra, rr = json_get_int(j, "retry_remaining", 0);
+    int64_t iw = 0, lsw = 0, ra = 0, rr = json_get_int(j, "retry_remaining", 0);
     bool has_iw = nget(j, "input_watermark", &iw), has_lsw = nget(j, "last_success_watermark", &lsw),
          has_ra = nget(j, "retry_at", &ra);
     int rc;

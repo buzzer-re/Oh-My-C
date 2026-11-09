@@ -2,6 +2,7 @@
  * Markdown round-trip), copy, expand/collapse, export/import, append, start, done, drop, rm. A change replaces the
  * session todo state, is persisted as a `user_todo_edit` custom entry and tells the model through a developer
  * <system-reminder> message. */
+#define _GNU_SOURCE /* memmem, strcasestr, vasprintf: glibc before 2.38 declares them only with it */
 #include "ui/ui.h"
 
 #include "tools/tools.h"

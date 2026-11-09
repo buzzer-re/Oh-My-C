@@ -1,4 +1,5 @@
 /* web.c - URL reading (HTML -> markdown) and the scraping/API search engines of web_search (websearch.c). */
+#define _GNU_SOURCE /* memmem, strcasestr, vasprintf: glibc before 2.38 declares them only with it */
 #include "web.h"
 #include "websearch.h"
 

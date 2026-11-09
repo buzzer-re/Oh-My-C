@@ -262,6 +262,7 @@ static bool attach_bytes(ui_t *u, const uint8_t *bytes, size_t n, const char *so
 
 /* ---------- clipboard ---------- */
 
+#ifndef __APPLE__ /* only the Linux clipboard readers below use it */
 static bool have_cmd(const char *name) {
     const char *argv[] = {"sh", "-c", "command -v \"$0\" >/dev/null 2>&1", name, NULL};
     proc_opts_t o = {.timeout_ms = 3000};
@@ -271,6 +272,7 @@ static bool have_cmd(const char *name) {
     proc_result_free(&r);
     return ok;
 }
+#endif
 
 static bool run_capture(const char *const *argv, char **out, size_t *len) {
     proc_opts_t o = {.timeout_ms = 5000, .max_output = IMG_MAX_INPUT_BYTES + 1};

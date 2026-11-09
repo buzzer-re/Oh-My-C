@@ -40,5 +40,17 @@ for f in $(grep -rlwE "$GLIBC_ONLY" src --include='*.c'); do
         rc=1
     fi
 done
+# glibc before 2.38 (Ubuntu 22.04, the release baseline) declares these only with _GNU_SOURCE, so a file calling them
+# must define it before its first #include; a newer glibc hides the omission, which then only fails on older systems
+for f in $(grep -rlwE 'memmem|strcasestr|vasprintf|asprintf|memrchr|pipe2|execvpe|getrandom' src --include='*.c'); do
+    calls=$(sed -e 's#/\*.*\*/##g' -e 's#//.*##' "$f" | grep -cE '(^|[^A-Za-z0-9_])(memmem|strcasestr|vasprintf|asprintf|memrchr|pipe2|execvpe|getrandom)[ \t]*[(]' || true)
+    [ "$calls" -gt 0 ] || continue
+    def=$(grep -n '^#define _GNU_SOURCE' "$f" | head -1 | cut -d: -f1)
+    inc=$(grep -n '^#include' "$f" | head -1 | cut -d: -f1)
+    if [ -z "$def" ] || { [ -n "$inc" ] && [ "$def" -gt "$inc" ]; }; then
+        echo "== $f: calls a glibc extension without '#define _GNU_SOURCE' before its first #include"
+        rc=1
+    fi
+done
 [ $rc = 0 ] && echo "check_apple: macOS branches OK"
 exit $rc

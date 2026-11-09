@@ -1,4 +1,5 @@
 /* markdown.c - markdown renderer and syntax highlighter */
+#define _GNU_SOURCE /* memmem, strcasestr, vasprintf: glibc before 2.38 declares them only with it */
 #include "tui/markdown.h"
 
 #include <ctype.h>

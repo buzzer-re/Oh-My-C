@@ -10,6 +10,7 @@
  *     (meta.function-call), where it takes the function color
  *   - "." / "->" member accessors are operator color
  * Unsupported languages render verbatim, as omp does. */
+#define _GNU_SOURCE /* memmem, strcasestr, vasprintf: glibc before 2.38 declares them only with it */
 #include "tui/markdown.h"
 
 #include <ctype.h>

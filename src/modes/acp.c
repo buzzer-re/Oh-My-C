@@ -2,6 +2,7 @@
  * Port of omp modes/acp/{acp-agent,acp-event-mapper,acp-client-bridge,acp-mode,terminal-auth}.ts and
  * commands/acp.ts. Every ACP session is its own app_t; prompts run on a per-session worker thread chain
  * while the stdin reader keeps dispatching (cancel, steering, client responses). */
+#define _GNU_SOURCE /* memmem, strcasestr, vasprintf: glibc before 2.38 declares them only with it */
 #include "coding/skilldesc.h"
 #include "coding/slashcmd.h"
 #include "coding/xdnotice.h"
