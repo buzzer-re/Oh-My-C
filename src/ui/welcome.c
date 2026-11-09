@@ -365,9 +365,10 @@ static void logo_frame(welcome_t *w, strvec_t *out) {
 
 /* ---------- component ---------- */
 
-static void center_block(strvec_t *lines, size_t from, int width) {
-    int widest = 0;
-    for (size_t i = from; i < lines->n; i++) widest = MAX(widest, tui_visible_width(lines->v[i]));
+/* `block_w` > 0 centers as if the block were that wide (what overhangs it runs on to the right) */
+static void center_block(strvec_t *lines, size_t from, int width, int block_w) {
+    int widest = block_w;
+    for (size_t i = from; i < lines->n && block_w <= 0; i++) widest = MAX(widest, tui_visible_width(lines->v[i]));
     int indent = MAX(0, (width - widest) / 2);
     for (size_t i = from; i < lines->n; i++) {
         sb_t b = SB_INIT;
@@ -381,10 +382,13 @@ static void center_block(strvec_t *lines, size_t from, int width) {
 static void render_lines(welcome_t *w, int width, strvec_t *out) {
     int room = width - 2;
     if (room < 4) return;
-    char *vtext = xstrdup(OMC_VERSION_LABEL);
-    char *version = fg(TUI_TC_DIM, vtext);
-    free(vtext);
-    int lockup_w = LOGO_WIDTH + LOCKUP_GAP + MAX(WORDMARK_WIDTH, tui_visible_width(version));
+    /* the logo sits where omp centers it (its lockup holds a bare "v<version>"); omc's label then runs on to the
+     * right, or stays bare when the row has no room for it */
+    char *bare = xasprintf("v%s", OMC_VERSION);
+    int lockup_w = LOGO_WIDTH + LOCKUP_GAP + MAX(WORDMARK_WIDTH, tui_visible_width(bare));
+    bool labeled = MAX(0, (width - lockup_w) / 2) + LOGO_WIDTH + LOCKUP_GAP + tui_visible_width(OMC_VERSION_LABEL) <= room;
+    char *version = fg(TUI_TC_DIM, labeled ? OMC_VERSION_LABEL : bare);
+    free(bare);
     strvec_t logo = {0};
     logo_frame(w, &logo);
     size_t start = out->n;
@@ -404,7 +408,7 @@ static void render_lines(welcome_t *w, int width, strvec_t *out) {
     } else if (room >= LOGO_WIDTH) {
         for (int i = 0; i < 5; i++) strvec_push(out, logo.v[i]);
     }
-    center_block(out, start, width);
+    center_block(out, start, width, room >= lockup_w ? lockup_w : 0);
     strvec_free(&logo);
     free(version);
     const char *tip = width >= TIP_MIN_COLUMNS ? welcome_tip(w) : NULL;
@@ -417,7 +421,7 @@ static void render_lines(welcome_t *w, int width, strvec_t *out) {
             for (size_t i = 0; i < tl.n; i++) {
                 size_t at = out->n;
                 strvec_push(out, tl.v[i]);
-                center_block(out, at, width);
+                center_block(out, at, width, 0);
             }
         }
         strvec_free(&tl);
