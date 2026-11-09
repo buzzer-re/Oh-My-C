@@ -19,6 +19,14 @@ It also solved another problem for me: I don't have to install Bun or any other 
 
 Each release on GitHub has prebuilt binaries for Linux (x86_64 and arm64) and macOS (Apple silicon), with a `SHA256SUMS` file. omc's version is the omp release it matches, so `omc v18.17.0` behaves like `omp v18.17.0`.
 
+The quick way picks the right binary, checks it against `SHA256SUMS` and installs it into `~/.local/bin`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.sh | sh
+```
+
+Set `OMC_VERSION=18.17.0` for a specific release, or `OMC_INSTALL_DIR` for another directory. If you prefer to do it by hand:
+
 ```sh
 sha256sum -c SHA256SUMS --ignore-missing      # on macOS: shasum -a 256 -c SHA256SUMS --ignore-missing
 tar -xzf omc-18.17.0-linux-x86_64.tar.gz
