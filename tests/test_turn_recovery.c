@@ -104,6 +104,14 @@ int main(void) {
     CHECK(aie_status_from_text("HTTP 404 page") == 404);
     CHECK(aie_status_from_text("no status here") == 0);
     CHECK(aie_is(aie_classify_text("prompt is too long: 210000 tokens > 200000", 400, NULL, NULL), AIE_CONTEXT_OVERFLOW));
+    /* a 429/402 worded like an overflow is a throughput cap (Bedrock), not window excess */
+    static const char BEDROCK_429[] = "429 Too many tokens, please wait before trying again. (type=rate_limit_error param=rate_limit_exceeded)";
+    CHECK(!aie_is(aie_classify_text(BEDROCK_429, 0, NULL, NULL), AIE_CONTEXT_OVERFLOW));
+    CHECK(retriable(BEDROCK_429));
+    CHECK(!aie_is(aie_classify_text("Too many tokens, please wait before trying again.", 429, NULL, NULL), AIE_CONTEXT_OVERFLOW));
+    CHECK(!aie_is(aie_classify_text("Too many tokens in this request", 402, NULL, NULL), AIE_CONTEXT_OVERFLOW));
+    CHECK(aie_is(aie_classify_text("Too many tokens in this request", 400, NULL, NULL), AIE_CONTEXT_OVERFLOW));
+    CHECK(aie_is(aie_classify_text("Too many tokens in this request", 0, NULL, NULL), AIE_CONTEXT_OVERFLOW));
 
     /* #isMidStreamTransportFailure: stall / premature close / envelope truncation; not a socket close */
     json_t *m = turn(STALL, "t");

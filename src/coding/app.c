@@ -734,8 +734,17 @@ static json_t *hook_transform_inner(void *ud, agent_t *ag, const json_t *message
     return r;
 }
 
-static bool is_overflow(const char *err) {
-    return err && (str_istr(err, "prompt is too long") || str_istr(err, "context length") || str_istr(err, "maximum context") ||
+/* isContextOverflow's text arm: a 429/402 status (field, raw-status id, or the text's own "429") vetoes it, since
+ * "tokens" wording on a rate-limit status is a throughput cap (Bedrock: "429 Too many tokens, please wait…") */
+static bool is_overflow(const json_t *assistant) {
+    const char *err = json_get_str(assistant, "errorMessage");
+    if (!err) return false;
+    int st = (int)json_get_int(assistant, "errorStatus", 0);
+    int64_t id = json_get_int(assistant, "errorId", 0);
+    if (!st && id && !(id & AIE_CLASS)) st = (int)id;
+    if (!st) st = aie_status_from_text(err);
+    if (st == 429 || st == 402) return false;
+    return (str_istr(err, "prompt is too long") || str_istr(err, "context length") || str_istr(err, "maximum context") ||
                    str_istr(err, "context_length_exceeded") || str_istr(err, "too many tokens") ||
                    str_istr(err, "exceeds the context window") || str_istr(err, "input is too long"));
 }
@@ -1235,7 +1244,7 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     bool flagged = false; /* providers mark opaque overflow errors (Devin large-history invalid_argument) */
     json_t *fl;
     json_arr_foreach(json_get(assistant, "errorFlags"), fi, fl) flagged = flagged || str_eq(json_sv(fl), "contextOverflow");
-    if ((flagged || is_overflow(err)) && !a->compacting) {
+    if ((flagged || is_overflow(assistant)) && !a->compacting) {
         /* overflow recovery: the method ladder with a retry of the failed turn (session-maintenance.ts) */
         int64_t billed = 0;
         const json_t *u = json_get_obj(assistant, "usage");
@@ -1281,7 +1290,7 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     /* model fallback: consulted on every failed attempt, retryable or hard (hardErrorFallback) */
     bool switched = false;
     if (a->model && !is_abort_error(err) && settings_bool("retry.modelFallback", true) && mr_fallback_admits(usage_limit) &&
-        !(is_overflow(err))) {
+        !(is_overflow(assistant))) {
         char *cur = current_selector(a);
         int64_t hint = retry_after_ms(err);
         mr_suppress_selector(cur, now_ms() + (hint > 0 ? hint : mr_rate_limit_backoff_ms(err)));

@@ -302,7 +302,10 @@ static uint32_t create(uint32_t kinds) { return kinds | AIE_CLASS; }
 static uint32_t classify_text(const char *msg, int err_status, bool prior_overflow, const char *api, const char *provider) {
     uint32_t kinds = 0;
     if (msg && *msg) {
-        if (overflow_text(msg)) kinds |= AIE_CONTEXT_OVERFLOW;
+        /* a 429/402 is a throughput or quota decision, never window excess, even when worded like one (Bedrock:
+         * "429 Too many tokens, please wait…"): overflow would skip retry and the fallback chain */
+        int st_clean = err_status ? err_status : aie_status_from_text(msg);
+        if (overflow_text(msg) && st_clean != 429 && st_clean != 402) kinds |= AIE_CONTEXT_OVERFLOW;
         if (payload_rejection_text(msg)) kinds |= AIE_PAYLOAD_REJECTED;
         if (m(P_MALFORMED, msg)) kinds |= AIE_MALFORMED_FUNCTION_CALL;
         if (m(P_PROVIDER_FINISH, msg)) kinds |= AIE_PROVIDER_FINISH_ERROR;
