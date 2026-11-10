@@ -50,7 +50,7 @@ char *tui_md_inline(const char *text, const tui_md_opts_t *opts);
 /* Highlight source code (highlight.c); appends one owned line per source line, colored with the theme's
  * syntax* slots the way omp's syntect highlighter maps scopes. Unsupported languages come back verbatim.
  * Language names: c, cpp, js, ts, jsx, tsx, python/py, rust/rs, go, java, kotlin, sh/bash/zsh/shell, json,
- * yaml/yml, toml/ini, sql, ruby/rb, lua, diff, html/xml, css ... */
+ * yaml/yml, toml/ini, sql, ruby/rb, lua, diff, html/xml, css, re / "Regular Expression" ... */
 void tui_highlight_code(const char *code, const char *lang, const tui_theme_t *th, strvec_t *out);
 bool tui_highlight_supported(const char *lang);
 

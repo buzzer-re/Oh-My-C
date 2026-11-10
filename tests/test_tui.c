@@ -588,7 +588,7 @@ static void test_golden(void) {
     o.hyperlinks = false;
     o.padding_x = 1;
     o.code_indent = 0;
-    const char *const names[] = {"basic", "code", "lists", "mdedge"};
+    const char *const names[] = {"basic", "code", "lists", "mdedge", "regex"};
     for (size_t i = 0; i < ARRAY_LEN(names); i++) {
         strvec_t got = render_fixture(names[i], &o, 100);
         check_golden(names[i], &got);

@@ -630,6 +630,26 @@ int main(void) {
         tui_sym_set_preset("unicode");
         tui_theme_set(tui_theme_builtin("titanium", TUI_COLOR_TRUECOLOR));
     }
+    /* omp 177f03059f / a370f02197: the grep header colors its pattern with the regex grammar; the placeholder stays plain */
+    {
+        json_t *a = J("{\"pattern\":\"a+\\\\d\"}");
+        tc_call_t c = call("grep", a, NULL, false);
+        strvec_t out = {0};
+        tc_render(&c, 120, &out);
+        char *kw = tc_fg(TUI_TC_SYNTAX_KEYWORD, "+\\d");
+        CHECK(out.n && strstr(out.v[0], kw), "grep pattern highlighted: %s", out.n ? out.v[0] : "");
+        free(kw);
+        strvec_free(&out);
+        json_free(a);
+        a = J("{}");
+        c = call("grep", a, NULL, false);
+        tc_render(&c, 120, &out);
+        char *h = stripped_trim(out.v[0]);
+        CHECK(strstr(h, "Grep: ?") || strstr(h, "Grep ?"), "placeholder: %s", h);
+        free(h);
+        strvec_free(&out);
+        json_free(a);
+    }
     /* omp cf00fca50c / 140108f134: a scoped single-file grep drops the redundant `1 file`; scope-less keeps it */
     {
         const char *r = "{\"content\":[{\"type\":\"text\",\"text\":\"x\"}],\"details\":{\"matchCount\":2,\"fileCount\":1,"
