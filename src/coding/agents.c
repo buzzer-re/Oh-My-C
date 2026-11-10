@@ -713,6 +713,8 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
     watch_t w = {cancel, child->agent, 0};
     bool watching = cancel && pthread_create(&wt, NULL, cancel_watch, &w) == 0;
     agent_subscribe(child->agent, on_child_event, r);
+    free(child->cost_refusal);
+    child->cost_refusal = NULL;
     bool refused = app_prompt(child, prompt, NULL) == APP_PROMPT_REFUSED;
     settle_owned_jobs(child, cancel);
     /* a focused view's empty Enter forced the queue into the continuation */
@@ -726,6 +728,9 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
     *aborted = str_eq(stop, "aborted") || (cancel && *cancel);
     if (refused) *error = xstrdup(child->prompt_refusal ? child->prompt_refusal : "error");
     else if (str_eq(stop, "error") && json_get_str(last, "errorMessage")) *error = xstrdup(json_get_str(last, "errorMessage"));
+    /* executor.ts: the cap refused a request mid-run (the loop stops before the model call without throwing): its
+     * message is why the run produced no result */
+    else if (child->cost_refusal && !*aborted) *error = xstrdup(child->cost_refusal);
     json_t *pp = NULL;
     lc = NULL;
     pthread_mutex_lock(&g_mu);

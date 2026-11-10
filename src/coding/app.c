@@ -2021,6 +2021,7 @@ void app_free(app_t *a) {
     free(a->cwd);
     free(a->sys_custom);
     free(a->sys_append);
+    free(a->cost_refusal);
     free(a->plan_file);
     free(a->plan_reference_path);
     free(a->fallback.role);
@@ -3873,6 +3874,8 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
     pthread_t watcher;
     watch_ctx_t wc = {pc, child->agent, 0};
     bool watching = pc && pthread_create(&watcher, NULL, cancel_watch, &wc) == 0;
+    free(child->cost_refusal);
+    child->cost_refusal = NULL;
     bool refused = app_prompt(child, sb_cstr(&p), NULL) == APP_PROMPT_REFUSED;
     wc.done = 1;
     if (watching) pthread_join(watcher, NULL);
@@ -3884,6 +3887,7 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
         json_set_str(*details, "agent", agent_name ? agent_name : "task");
         if (refused && child->prompt_refusal) json_set_str(*details, "error", child->prompt_refusal);
         else if (last && json_get_str(last, "errorMessage")) json_set_str(*details, "error", json_get_str(last, "errorMessage"));
+        else if (child->cost_refusal && !child->agent->cancel) json_set_str(*details, "error", child->cost_refusal);
     }
     costgate_merge_child(parent, child->total_cost);
     app_free(child);

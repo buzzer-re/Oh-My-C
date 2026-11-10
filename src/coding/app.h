@@ -79,6 +79,7 @@ struct app {
     int retry_offset;
     int retry_saga; /* attempt of the last auto_retry_start (0: no retry saga open) */
     char *prompt_refusal; /* why the last APP_PROMPT_REFUSED prompt was refused (owned) */
+    char *cost_refusal;   /* a subagent's cost-cap refusal of a mid-run model request (owned; costgate.c) */
     int stall_continues; /* committed-text stream-stall continuations this prompt (turn_recovery.h) */
     bool text_buffered;  /* streamed text is not committed to an output sink yet (subagents, print-mode text):
                           * omp setTextOutputCommitted(false), a failed turn's partial text is replay-safe */

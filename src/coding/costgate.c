@@ -77,11 +77,10 @@ static bool subagent_before_model_call(void *ud, agent_t *ag) {
     check_warn(G.app);
     double cap;
     if (!threshold("session.maxCost", &cap) || spent() < cap) return false;
-    if (a->notice) {
-        char *m = refusal_text(cap);
-        a->notice(a->notice_ud, "error", m);
-        free(m);
-    }
+    char *m = refusal_text(cap);
+    if (a->notice) a->notice(a->notice_ud, "error", m);
+    free(a->cost_refusal); /* executor.ts: the refusal is why the run produced no result */
+    a->cost_refusal = m;
     return true;
 }
 
