@@ -630,6 +630,17 @@ int main(void) {
         tui_sym_set_preset("unicode");
         tui_theme_set(tui_theme_builtin("titanium", TUI_COLOR_TRUECOLOR));
     }
+    /* omp 2e254233c2: debug call args lose ANSI / control characters and fold to one line */
+    {
+        json_t *a = J("{\"action\":\"set_breakpoint\",\"function\":\"main\\u001b[31m\\nred\\tx\"}");
+        tc_call_t c = call("debug", a, NULL, false);
+        strvec_t out = {0};
+        tc_render(&c, 120, &out);
+        CHECK(out.n == 1 && has_row(&out, "set breakpoint main red   x"), "debug args sanitized");
+        for (size_t i = 0; i < out.n; i++) CHECK(!strstr(out.v[i], "\x1b[31m"), "no model ANSI");
+        strvec_free(&out);
+        json_free(a);
+    }
     /* omp db90c0d96e: a parent steer renders as an incoming IRC card, 3 body rows collapsed */
     {
         strvec_t out = {0};
