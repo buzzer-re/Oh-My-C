@@ -771,6 +771,11 @@ bool iq_run_end(ui_t *u) {
         if (u->bg_kind) return true;
         ui_chrome_turn(u, false);
     }
+    if (u->resume_pending) { /* `.`/`c` interrupted the turn: continue from where it stopped */
+        u->resume_pending = false;
+        ix_resume(u);
+        if (u->worker_running) return true;
+    }
     bool forced = agent_take_forced_delivery(u->app->agent);
     strvec_t st = {0}, fu = {0};
     agent_queue_texts(u->app->agent, &st, &fu);

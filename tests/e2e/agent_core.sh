@@ -126,3 +126,5 @@ import re
 tools=[text(m) for r in main for m in r["messages"] if m.get("role") == "tool"]
 ok=any(re.search(r"Delivery: handed over by this snapshot \(it finished [0-9.]+m?s before this call\) — this snapshot superseded its queued completion push\.", t) for t in tools)
 print("superseded=%s" % ok)'
+# `.` on a running turn interrupts it and continues (8e3a4c0436): the prompt the model never answered runs again
+check "continue interrupts" "continue tui ok" env OMC_CODING_AGENT_DIR="$T/agent" python3 -I "$ROOT/tests/e2e/continue_tui.py" "$B" "$T/req.jsonl"

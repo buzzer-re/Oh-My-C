@@ -111,6 +111,7 @@ struct ui {
     json_t *compaction_queue;       /* [{text, mode: steer|followUp}] typed while compacting / behind a yield compaction */
     char *yield_compaction;         /* `/compact …` queued with the follow-up key while streaming */
     char *compact_pending;          /* `/compact` sent with Enter mid-run: runs once the aborted turn unwinds */
+    bool resume_pending;            /* `.`/`c` interrupted the running turn: the continuation starts once it unwinds */
     strvec_t optimistic;            /* submitted prompts already drawn: their user message_start is not drawn again */
     int bg_kind;                    /* running maintenance op: 0 none, 1 compaction, 2 handoff */
     /* iq_compact_then: runs once the manual compaction settles (ok: committed or nothing to compact) */

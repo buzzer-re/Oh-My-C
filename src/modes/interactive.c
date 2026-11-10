@@ -637,8 +637,12 @@ static char *prompt_preflight_error(ui_t *u) {
 }
 
 void ix_resume(ui_t *u) {
-    if (u->worker_running) { /* resume() prompts without a queue intent: rejected, never queued as a user message */
-        add_notice(u, "error", "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion.");
+    if (u->worker_running) {
+        /* AgentSession.resume on a running turn: interrupt it as Esc would; input queued behind it continues the run in
+         * place of the directive, else the continuation starts once the turn unwinds (iq_run_end) */
+        if (agent_has_interruptible_input(u->app->agent)) agent_abort_deliver_queued(u->app->agent);
+        else u->resume_pending = true;
+        app_abort(u->app);
         return;
     }
     char *m = prompt_preflight_error(u);
