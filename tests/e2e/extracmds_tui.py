@@ -4,7 +4,7 @@ selector and system-info view, /record writes a redacted .ompcast that `omc play
 release notes under the welcome banner.
 usage: extracmds_tui.py <omc> <scratch dir>
 Prints "extracmds tui ok" or the first failing step."""
-import fcntl, json, os, pty, select, struct, sys, termios, time
+import fcntl, json, os, pty, re, select, struct, sys, termios, time
 
 omc, scratch = sys.argv[1:3]
 work = os.path.join(scratch, "work")
@@ -68,9 +68,16 @@ def wait_out(needle, timeout=10, since=0):
     end = time.time() + timeout
     while time.time() < end:
         pump(0.1)
-        if needle.encode() in out[since:]:
+        if needle.encode() in out[since:] or needle.encode() in screen_text(out[since:]):
             return True
     return False
+
+
+def screen_text(b):
+    """The output's text with escape sequences dropped and whitespace runs collapsed, so a notice the TUI
+    word-wraps (a long recording path pushes "replay: omc play" onto two rows) still matches."""
+    b = re.sub(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b[@-_]", b"", bytes(b))
+    return re.sub(rb"\s+", b" ", b)
 
 
 def fail(step, detail=""):
