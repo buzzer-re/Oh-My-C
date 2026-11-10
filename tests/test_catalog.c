@@ -253,6 +253,22 @@ static void test_fable_52(void) {
     CHECK(str_eq(json_sv(json_at(slow, 2)), "anthropic/claude-fable-5-2"));
 }
 
+/* omp 503d43fbb5: a models.yml `compat.disabledThinking` on an anthropic-messages model is kept */
+static void test_anthropic_disabled_thinking(void) {
+    json_t *m = resolved("claude", "https://api.anthropic.com",
+                         "{\"id\":\"claude-haiku-5-5\",\"api\":\"anthropic-messages\",\"reasoning\":true,"
+                         "\"compat\":{\"disabledThinking\":\"disabled\"}}");
+    CHECK(str_eq(json_get_str(json_get(m, "compat"), "disabledThinking"), "disabled"));
+    json_free(m);
+    /* only the Haiku 5.5 route rule assigns one: other Claude models keep the API's Off handling */
+    m = resolved("anthropic", "https://api.anthropic.com", "{\"id\":\"claude-opus-5\",\"api\":\"anthropic-messages\",\"reasoning\":true}");
+    CHECK(!json_get(json_get(m, "compat"), "disabledThinking"));
+    json_free(m);
+    m = resolved("anthropic", "https://api.anthropic.com", "{\"id\":\"claude-haiku-5-5\",\"api\":\"anthropic-messages\",\"reasoning\":true}");
+    CHECK(str_eq(json_get_str(json_get(m, "compat"), "disabledThinking"), "disabled"));
+    json_free(m);
+}
+
 /* catalog axes resolve at runtime for bundled rows */
 static void test_catalog_policy(void) {
     const json_t *max = compat_catalog_policy("muse-code", "openai-responses", "muse-spark-1.3", "toolCallNameMaxLength");
@@ -273,6 +289,7 @@ int main(void) {
     test_credit_rates();
     test_catalog_policy();
     test_fable_52();
+    test_anthropic_disabled_thinking();
 
     /* providers present in omp's catalog but absent from its bundled rows */
     CHECK(catalog_find("charm-hyper", "glm-5.3") || catalog_find("charm-hyper", "deepseek-v4-flash-0731"));

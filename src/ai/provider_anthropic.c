@@ -1545,18 +1545,22 @@ static json_t *build_request(const ai_model_t *m, const ai_context_t *ctx, const
     const char *oc_effort = NULL;
     const char *display = o->hide_thinking_summary ? "omitted" : "summarized";
     if (m->reasoning) {
+        /* the route's (or models.yml's) Off dialect; omc sends no per-message effort controls, so
+         * effortControlsBlockDisabledThinking never vetoes `disabled` */
         const char *disabled = cstr(m, "disabledThinking");
-        /* "disabled" is treated like unset: see report (the bundled api-default injects it for every model) */
-        bool explicit_off_mode = disabled && strcmp(disabled, "disabled") != 0;
-        if (!ro.thinking_enabled && explicit_off_mode) {
+        if (!ro.thinking_enabled && disabled) {
             if (!strcmp(disabled, "between-tools")) {
                 thinking = json_obj();
                 json_set_str(thinking, "type", "between_tools");
                 oc_effort = cstr(m, "betweenToolsEffort");
-            } else if (!strcmp(disabled, "adaptive")) {
+            } else if (strcmp(disabled, "omit") != 0) {
                 thinking = json_obj();
-                json_set_str(thinking, "type", "adaptive");
-                if (thinking_supports_display(m) == 1) json_set_str(thinking, "display", display);
+                if (!strcmp(disabled, "adaptive")) {
+                    json_set_str(thinking, "type", "adaptive");
+                    if (thinking_supports_display(m) == 1) json_set_str(thinking, "display", display);
+                } else {
+                    json_set_str(thinking, "type", "disabled");
+                }
             }
         } else if (ro.thinking_enabled || cflag(m, "requiresThinkingEnabled")) {
             const char *effort = ro.effort;
