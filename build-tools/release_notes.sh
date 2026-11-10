@@ -17,22 +17,26 @@ prompts, tools, sessions and config, rewritten in C with no Node or Bun.
 
 ## Install
 
-Download the archive for your system, check it against \`SHA256SUMS\`, and put \`omc\` on your PATH:
+Releases ship source only: omc is built on your machine. The installer downloads \`omc-$V.tar.gz\`, checks it against
+\`SHA256SUMS\`, builds it and installs \`omc\` into \`~/.local/bin\`:
 
 \`\`\`sh
-tar -xzf omc-$V-<os>-<arch>.tar.gz
-install -m755 omc-$V-<os>-<arch>/omc ~/.local/bin/omc
-omc --version   # omc/$V
+curl -fsSL https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.sh | OMC_VERSION=$V sh
 \`\`\`
 
-| Archive | Runs on |
-|---|---|
-| \`omc-$V-linux-x86_64.tar.gz\` | Linux x86_64 with glibc 2.35+ and OpenSSL 3 (Ubuntu 22.04+, Debian 12+, Fedora 36+) |
-| \`omc-$V-linux-arm64.tar.gz\` | Linux arm64, same requirements |
-| \`omc-$V-macos-arm64.tar.gz\` | macOS 15+ on Apple silicon (OpenSSL is built in) |
+Or by hand:
 
-The macOS binary is not notarized: a copy downloaded with a browser needs \`xattr -d com.apple.quarantine omc\` once.
-Building from source works anywhere with a C11 compiler and the OpenSSL and zlib headers (\`make && make install\`).
+\`\`\`sh
+sha256sum -c SHA256SUMS      # on macOS: shasum -a 256 -c SHA256SUMS
+tar -xzf omc-$V.tar.gz && cd omc-$V
+make && make install         # -> ~/.local/bin/omc
+omc --version                # omc/$V
+\`\`\`
+
+It needs a C11 compiler, make, and the OpenSSL 3 and zlib development files (Debian/Ubuntu: \`build-essential
+libssl-dev zlib1g-dev\`; Fedora: \`gcc make openssl-devel zlib-devel\`; macOS: the Xcode command line tools and
+Homebrew's \`openssl@3\`). Use \`omc-$V.tar.gz\`, which \`SHA256SUMS\` covers, rather than GitHub's generated
+"Source code" archives.
 
 ## What changed
 

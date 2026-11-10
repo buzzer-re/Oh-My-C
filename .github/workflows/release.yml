@@ -1,5 +1,6 @@
-# Release: pushing a tag v<OMC_VERSION> builds and tests the binaries for Linux and macOS, attaches them with
-# SHA256SUMS to a GitHub release and publishes it. The release stays a draft until every platform has uploaded.
+# Release: pushing a tag v<OMC_VERSION> publishes the source. Releases carry no binaries: users build omc on their own
+# machine (install.sh does it for them). The job builds and tests the tagged commit, packs it with `make dist`
+# (git archive), checks that the archive alone builds, and attaches it with SHA256SUMS to a GitHub release.
 # Supply chain: no third-party actions. Checkout is plain git; publishing uses the gh CLI that GitHub's runners
 # ship with; build-tools/ci.sh installs nothing.
 name: Release
@@ -21,12 +22,12 @@ env:
   TAG: ${{ github.ref_name }}
 
 jobs:
-  prepare:
+  release:
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 60
     steps:
       - name: Check out (git only)
-        run: &checkout |
+        run: |
           git init -q .
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
@@ -34,56 +35,21 @@ jobs:
           git checkout -q FETCH_HEAD
       - name: Tag matches the version
         run: build-tools/ci.sh tag-check "$TAG"
-      - name: Draft release
-        run: |
-          build-tools/release_notes.sh "$(make -s version)" > notes.md
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release $TAG already exists; refusing to overwrite it" >&2
-            exit 1
-          fi
-          gh release create "$TAG" --draft --verify-tag --title "omc $TAG" --notes-file notes.md
-
-  build:
-    needs: prepare
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false # every platform reports; publish still needs all of them
-      matrix:
-        include:
-          - name: linux-x86_64
-            runner: ubuntu-22.04
-          - name: linux-arm64
-            runner: ubuntu-22.04-arm
-          - name: macos-arm64
-            runner: macos-15
-    steps:
-      - name: Check out (git only)
-        run: *checkout
       - name: Dependencies
         run: build-tools/ci.sh check-deps
       - name: Build (zero warnings)
         run: build-tools/ci.sh build
-      - name: Smoke
-        run: build-tools/ci.sh smoke
       - name: Tests
         run: build-tools/ci.sh test
-      - name: Package
+      - name: Source archive (built once more from the archive alone)
         run: build-tools/ci.sh dist
-      - name: Upload to the draft release
-        run: gh release upload "$TAG" build/dist/*.tar.gz build/dist/*.tar.gz.sha256
-
-  publish:
-    needs: build
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - name: Checksums and publish
+      - name: Publish
         run: |
-          mkdir sums && cd sums
-          gh release download "$TAG" --pattern '*.tar.gz.sha256'
-          cat ./*.tar.gz.sha256 | sort -k2 > SHA256SUMS
-          cat SHA256SUMS
-          gh release upload "$TAG" SHA256SUMS
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists; refusing to overwrite it" >&2
+            exit 1
+          fi
+          build-tools/release_notes.sh "$(make -s version)" > notes.md
+          gh release create "$TAG" --draft --verify-tag --title "omc $TAG" --notes-file notes.md \
+            build/dist/omc-*.tar.gz build/dist/SHA256SUMS
           gh release edit "$TAG" --draft=false --latest

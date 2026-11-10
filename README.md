@@ -17,27 +17,27 @@ It also solved another problem for me: I don't have to install Bun or any other 
 
 ## Installing
 
-Each release on GitHub has prebuilt binaries for Linux (x86_64 and arm64) and macOS (Apple silicon), with a `SHA256SUMS` file. omc's version is the omp release it matches, so `omc v18.17.0` behaves like `omp v18.17.0`.
+There are no prebuilt binaries: each release on GitHub ships the source (`omc-<version>.tar.gz` with a `SHA256SUMS` file), and you build it on your own machine. omc's version is the omp release it matches, so `omc v18.17.0` behaves like `omp v18.17.0`.
 
-The quick way picks the right binary, checks it against `SHA256SUMS` and installs it into `~/.local/bin`:
+The quick way downloads the latest release, checks it against `SHA256SUMS`, builds it and installs it into `~/.local/bin`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.sh | sh
 ```
 
-Set `OMC_VERSION=18.17.0` for a specific release, or `OMC_INSTALL_DIR` for another directory. If you prefer to do it by hand:
+Set `OMC_VERSION=18.17.0` for a specific release, or `OMC_INSTALL_DIR` for another directory. You need the same things as in [Building](#building) below. If you prefer to do it by hand:
 
 ```sh
-sha256sum -c SHA256SUMS --ignore-missing      # on macOS: shasum -a 256 -c SHA256SUMS --ignore-missing
-tar -xzf omc-18.17.0-linux-x86_64.tar.gz
-install -m755 omc-18.17.0-linux-x86_64/omc ~/.local/bin/omc
+sha256sum -c SHA256SUMS      # on macOS: shasum -a 256 -c SHA256SUMS
+tar -xzf omc-18.17.0.tar.gz && cd omc-18.17.0
+make && make install
 ```
 
-The Linux binaries use your system's OpenSSL 3, and the macOS one has it built in. The macOS binary isn't notarized, so if you downloaded it with a browser, run `xattr -d com.apple.quarantine omc` once. See [docs/release.md](docs/release.md) for how releases are built.
+See [docs/release.md](docs/release.md) for how releases are made.
 
 ## Building
 
-You just need a C11 compiler and the OpenSSL and zlib headers.
+You just need a C11 compiler, make, and the OpenSSL 3 and zlib headers (on Debian/Ubuntu: `build-essential libssl-dev zlib1g-dev`, on Fedora: `gcc make openssl-devel zlib-devel`, on macOS: the Xcode command line tools and Homebrew's `openssl@3`).
 
 ```sh
 make            # -> build/omc

@@ -26,10 +26,6 @@ OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3 2>/dev/null || brew --prefix o
 SSL_PC  := $(if $(OPENSSL_PREFIX),PKG_CONFIG_PATH=$(OPENSSL_PREFIX)/lib/pkgconfig:$$PKG_CONFIG_PATH )
 SSL_CFLAGS := $(shell $(SSL_PC)$(PKG) --cflags openssl 2>/dev/null || { [ -n "$(OPENSSL_PREFIX)" ] && echo -I$(OPENSSL_PREFIX)/include; })
 SSL_LIBS   := $(shell $(SSL_PC)$(PKG) --libs openssl 2>/dev/null || { [ -n "$(OPENSSL_PREFIX)" ] && echo -L$(OPENSSL_PREFIX)/lib; echo -lssl -lcrypto; })
-# release builds (make dist): OpenSSL linked in statically, so the binary needs no Homebrew on the target Mac
-ifeq ($(STATIC_OPENSSL),1)
-SSL_LIBS   := $(OPENSSL_PREFIX)/lib/libssl.a $(OPENSSL_PREFIX)/lib/libcrypto.a
-endif
 else
 LDFLAGS += -pie -rdynamic -Wl,-z,relro,-z,now
 SSL_CFLAGS := $(shell $(PKG) --cflags openssl 2>/dev/null)
@@ -219,23 +215,21 @@ test-unit: $(addprefix $(O)/tests/,$(UNIT_TESTS))
 	export HOME="$$home" OMC_CODING_AGENT_DIR="$$home/.omc/agent" PI_CODING_AGENT_DIR="$$home/.omp/agent"; \
 	for t in $(UNIT_TESTS); do echo "== $$t"; ./$(O)/tests/$$t >/dev/null || { echo "   FAIL ($$t)"; exit 1; }; echo "   ok"; done
 
-# release packaging: build/dist/omc-<version>-<os>-<arch>.tar.gz (+ .sha256) holding the binary, README and the
-# upstream license notice for the embedded omp prompts. Release builds link OpenSSL statically on macOS.
+# release packaging: releases ship source only. build/dist/omc-<version>.tar.gz is `git archive` of HEAD (committed
+# files only, under omc-<version>/), with build/dist/SHA256SUMS next to it
 VERSION   := $(shell sed -n 's/^\#define OMC_VERSION "\(.*\)"/\1/p' src/core/core.h)
-DIST_OS   := $(if $(filter Darwin,$(UNAME_S)),macos,linux)
-DIST_ARCH := $(if $(filter aarch64 arm64,$(UNAME_M)),arm64,$(UNAME_M))
-DIST_NAME := omc-$(VERSION)-$(DIST_OS)-$(DIST_ARCH)
+DIST_NAME := omc-$(VERSION)
 
 version:
 	@echo $(VERSION)
 
-dist: $(BIN)
-	@rm -rf build/dist/$(DIST_NAME) && mkdir -p build/dist/$(DIST_NAME)
-	cp $(BIN) README.md build/dist/$(DIST_NAME)/
-	cp prompts/UPSTREAM-LICENSE build/dist/$(DIST_NAME)/OMP-LICENSE
-	tar -C build/dist -czf build/dist/$(DIST_NAME).tar.gz $(DIST_NAME)
-	cd build/dist && { command -v sha256sum >/dev/null && sha256sum $(DIST_NAME).tar.gz || shasum -a 256 $(DIST_NAME).tar.gz; } > $(DIST_NAME).tar.gz.sha256
-	@echo build/dist/$(DIST_NAME).tar.gz
+dist: FORCE
+	@git rev-parse --verify -q HEAD >/dev/null || { echo "make dist: needs a git checkout" >&2; exit 1; }
+	@git diff --quiet HEAD -- || echo "make dist: note: uncommitted changes are not in the archive" >&2
+	@rm -rf build/dist && mkdir -p build/dist
+	git archive --format=tar --prefix=$(DIST_NAME)/ HEAD | gzip -9n > build/dist/$(DIST_NAME).tar.gz
+	cd build/dist && { command -v sha256sum >/dev/null && sha256sum $(DIST_NAME).tar.gz || shasum -a 256 $(DIST_NAME).tar.gz; } > SHA256SUMS
+	@cat build/dist/SHA256SUMS
 
 install: $(BIN)
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
