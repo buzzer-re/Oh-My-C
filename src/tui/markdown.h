@@ -39,6 +39,9 @@ void tui_md_render(const char *text, int width, const tui_md_opts_t *opts, strve
  * of the quote; indented code is not offered. `text` is owned by the callback; `lang` is borrowed. */
 typedef void (*tui_md_block_fn)(void *ud, bool code, const char *lang, char *text);
 void tui_md_extract_blocks(const char *text, tui_md_block_fn fn, void *ud);
+/* holdPendingBullet: a streaming source ending on a lone `-` line that underlines a paragraph (a setext H2, also as
+ * the last child of a list item or quote) is almost always a bullet being typed: drop that line, in place */
+void tui_md_hold_pending_bullet(char *text);
 /* lexDocument(text).findLast(non-space).type === "paragraph" */
 bool tui_md_ends_in_paragraph(const char *text);
 /* Render inline markdown (no wrapping) into an ANSI string (owned). */

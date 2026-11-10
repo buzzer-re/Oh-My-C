@@ -796,6 +796,7 @@ static void render_assistant_body(msgview_t *v, int width, strvec_t *o) {
             if (!canonical_nonempty(tx)) continue;
             tail = 1;
             char *tr = trim_dup(tx);
+            if (v->streaming) tui_md_hold_pending_bullet(tr); /* omp d9382eb30a */
             md_rows(o, tr, width, false);
             free(tr);
         } else if (str_eq(t, "thinking")) {

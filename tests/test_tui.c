@@ -1513,8 +1513,28 @@ static void test_cooked_enter(void) {
     CHECK_STR(e, "abc");
 }
 
+/* omp d9382eb30a: a streaming lone `-` under a paragraph is a bullet being typed, not a setext underline */
+static void test_pending_bullet(void) {
+    static const char *const CASES[][2] = {
+        {"Intro text\n-", "Intro text"},
+        {"- **one**\n  more\n  -", "- **one**\n  more"},
+        {"> quoted\n> -", "> quoted"},
+        {"Intro\n\n-", "Intro\n\n-"},      /* an empty bullet, not an underline */
+        {"Title\n--", "Title\n--"},          /* a longer underline is a heading as written */
+        {"- a\n-", "- a\n-"},                /* a sibling bullet */
+        {"no newline -", "no newline -"},
+    };
+    for (size_t i = 0; i < ARRAY_LEN(CASES); i++) {
+        char *t = xstrdup(CASES[i][0]);
+        tui_md_hold_pending_bullet(t);
+        CHECK_STR(t, CASES[i][1]);
+        free(t);
+    }
+}
+
 int main(void) {
     test_cooked_enter();
+    test_pending_bullet();
     test_colorful_markdown();
     test_motion_knobs();
     test_keys();

@@ -2035,3 +2035,80 @@ void tui_md_extract_blocks(const char *text, tui_md_block_fn fn, void *ud) {
     vec_free(&T);
     strvec_free(&lines);
 }
+
+/* ---------- holdPendingBullet ---------- */
+
+/* whether the last block of L (recursing into the last list item / quote child) is a setext heading underlined by
+ * the source's last line */
+static bool ends_in_setext(const lines_t *L, int depth) {
+    if (depth >= MD_MAX_DEPTH || !L->n) return false;
+    toks_t T = {0};
+    lex_blocks(L, 0, L->n, &T);
+    bool r = false;
+    const tok_t *t = T.n ? &T.v[T.n - 1] : NULL;
+    if (t && t->to == L->n) {
+        if (t->t == T_HEADING) r = t->setext;
+        else if (t->t == T_QUOTE) {
+            strvec_t src = {0};
+            for (size_t i = t->from; i < t->to; i++) {
+                const char *x = L->v[i];
+                if (is_quote(x)) {
+                    x = skip_ws(x) + 1;
+                    if (*x == ' ' || *x == '\t') x++;
+                }
+                strvec_push(&src, x);
+            }
+            lines_t QL = {(const char *const *)src.v, src.n};
+            r = ends_in_setext(&QL, depth + 1);
+            strvec_free(&src);
+        } else if (t->t == T_LIST) {
+            char kind;
+            list_item(L->v[t->from], NULL, &kind, NULL, NULL, NULL);
+            size_t i = t->from;
+            while (i < t->to) {
+                size_t co, cc, ii;
+                char kk;
+                if (!list_item(L->v[i], &ii, &kk, NULL, &co, &cc) || kk != kind) {
+                    i++;
+                    continue;
+                }
+                strvec_t body = {0};
+                size_t j = list_item_body(L, t, i, kind, co, cc, &body);
+                if (j >= t->to) { /* the last item */
+                    lines_t BL = {(const char *const *)body.v, body.n};
+                    r = ends_in_setext(&BL, depth + 1);
+                }
+                strvec_free(&body);
+                i = j;
+            }
+        }
+    }
+    vec_free(&T);
+    return r;
+}
+
+void tui_md_hold_pending_bullet(char *text) {
+    if (!text) return;
+    size_t n = strlen(text);
+    char *nl = strrchr(text, '\n');
+    if (!nl) return;
+    /* PENDING_BULLET_LINE: \n[ \t>]*-[ \t]*$ */
+    const char *p = nl + 1;
+    while (*p == ' ' || *p == '\t' || *p == '>') p++;
+    if (*p != '-') return;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p) return;
+    strvec_t lines = {0};
+    const char *q = text;
+    for (;;) {
+        const char *e = strchr(q, '\n');
+        strvec_push_own(&lines, e ? xstrndup(q, (size_t)(e - q)) : xstrdup(q));
+        if (!e) break;
+        q = e + 1;
+    }
+    lines_t L = {(const char *const *)lines.v, lines.n};
+    if (ends_in_setext(&L, 0)) *nl = 0;
+    strvec_free(&lines);
+    (void)n;
+}
