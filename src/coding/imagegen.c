@@ -16,6 +16,41 @@
 #include <ctype.h>
 #include <math.h>
 
+/* MAX_FAILURE_REASON_CHARS: one provider failure as the exhausted-chain error quotes it: whitespace collapsed, cut to 300
+ * UTF-16 units (pi-utils truncate, `…`), its closing period dropped (the list adds its own). A gateway's HTML error page
+ * must not reach the model whole. */
+static char *failure_reason(const char *msg) {
+    sb_t b = SB_INIT;
+    bool sp = false;
+    for (const char *p = msg ? msg : ""; *p; p++) {
+        if (isspace((unsigned char)*p)) sp = true;
+        else {
+            if (sp && b.len) sb_putc(&b, ' ');
+            sp = false;
+            sb_putc(&b, *p);
+        }
+    }
+    char *t = sb_detach(&b);
+    size_t units = 0, cut = 0, n = strlen(t);
+    for (size_t i = 0; i < n;) {
+        unsigned char c = (unsigned char)t[i];
+        size_t len = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+        size_t u = len == 4 ? 2 : 1;
+        if (units + u <= 299) cut = i + len;
+        units += u;
+        i += len;
+    }
+    if (units > 300) {
+        t[cut] = 0;
+        char *x = xasprintf("%s…", t);
+        free(t);
+        t = x;
+    }
+    size_t l = strlen(t);
+    if (l && t[l - 1] == '.') t[l - 1] = 0;
+    return t;
+}
+
 #define IMAGE_TIMEOUT_MS (3 * 60 * 1000)
 #define MAX_IMAGE_SIZE (35 * 1024 * 1024)
 #define XAI_MAX_EDIT_IMAGES 3
@@ -771,7 +806,9 @@ static int ig_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, t
         free(key);
         if (rc == 0) ran = m;
         else if (st > 0) { /* ProviderHttpError: try the next candidate */
-            sb_appendf(&failures, "%s%s", failures.len ? "\n" : "", err);
+            char *reason = failure_reason(err);
+            sb_appendf(&failures, "%s%s", failures.len ? "; " : "", reason);
+            free(reason);
             free(err);
             gen_result_free(&res);
         } else fatal = err;
@@ -784,7 +821,8 @@ static int ig_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, t
     else if (!ran) {
         sb_t att = SB_INIT;
         for (size_t i = 0; i < cands.n; i++) sb_appendf(&att, "%s%s/%s", i ? ", " : "", cands.v[i]->provider, cands.v[i]->id);
-        tool_result_error(out, "Image generation exhausted the resolved image chain%s%s%s%s%s", att.len ? ": " : ".", sb_cstr(&att),
+        tool_result_error(out, "Image generation exhausted the resolved image chain%s%s.%s%s%s%s%s%s", att.len ? ": " : "",
+                          sb_cstr(&att), failures.len ? " Failures: " : "", sb_cstr(&failures), failures.len ? "." : "",
                           skipped.len ? " Skipped: " : "", sb_cstr(&skipped), skipped.len ? "." : "");
         sb_free(&att);
     } else {
