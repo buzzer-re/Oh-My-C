@@ -222,6 +222,37 @@ static void test_credit_rates(void) {
     ui_model_browser_free(b);
 }
 
+/* omp e66cb977c7: Claude Fable / Mythos 5.2, discovered-row repairs, Mythos 5.1+ prefix binding, slow-role default */
+static void test_fable_52(void) {
+    const ai_model_t *f = catalog_find("anthropic", "claude-fable-5-2"), *my = catalog_find("anthropic", "claude-mythos-5-2");
+    CHECK(f && my);
+    /* /v1/models reports a not-yet-catalogued Fable/Mythos row text-only, non-reasoning and unpriced */
+    const char *ids[] = {"claude-fable-5-2", "claude-mythos-5-2"};
+    for (size_t i = 0; i < 2; i++) {
+        char *js = xasprintf("{\"id\":\"%s\",\"api\":\"anthropic-messages\",\"reasoning\":false,\"input\":[\"text\"],"
+                             "\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0}}",
+                             ids[i]);
+        json_t *m = resolved("anthropic", "https://api.anthropic.com", js);
+        free(js);
+        CHECK(json_get_bool(m, "reasoning", false));
+        check_json(json_get(m, "input"), "[\"text\",\"image\"]", ids[i]);
+        const json_t *c = json_get_obj(m, "cost");
+        CHECK(json_get_num(c, "input", 0) == 8 && json_get_num(c, "output", 0) == 40);
+        CHECK(json_get_num(c, "cacheRead", 0) == 0.2 && json_get_num(c, "cacheWrite", 0) == 10);
+        CHECK(json_get_int(m, "contextWindow", 0) == 1000000 && json_get_int(m, "maxTokens", 0) == 128000);
+        CHECK(json_get_bool(json_get_obj(m, "thinking"), "prefixBinding", false));
+        json_free(m);
+    }
+    /* Mythos 5.1 binds the thinking prefix on every account */
+    json_t *m = resolved("anthropic", "https://api.anthropic.com",
+                         "{\"id\":\"claude-mythos-5-1\",\"api\":\"anthropic-messages\",\"reasoning\":true}");
+    CHECK(json_get_bool(json_get_obj(m, "thinking"), "prefixBinding", false));
+    json_free(m);
+    /* the slow role prefers Fable 5.2 right after the Codex Sol rows */
+    json_t *slow = json_get_arr(catalog_role_defaults(), "slow");
+    CHECK(str_eq(json_sv(json_at(slow, 2)), "anthropic/claude-fable-5-2"));
+}
+
 /* catalog axes resolve at runtime for bundled rows */
 static void test_catalog_policy(void) {
     const json_t *max = compat_catalog_policy("muse-code", "openai-responses", "muse-spark-1.3", "toolCallNameMaxLength");
@@ -241,6 +272,7 @@ int main(void) {
 
     test_credit_rates();
     test_catalog_policy();
+    test_fable_52();
 
     /* providers present in omp's catalog but absent from its bundled rows */
     CHECK(catalog_find("charm-hyper", "glm-5.3") || catalog_find("charm-hyper", "deepseek-v4-flash-0731"));
