@@ -45,6 +45,9 @@ void settings_off_change(void (*fn)(void *ud), void *ud);
 const char *settings_provenance(const char *path);
 /* omp Setting.isConfigured: a layer above the defaults holds a non-null value at `path` */
 bool settings_configured(const char *path);
+/* omp Settings.grantAuthority().get(path): the effective value from the default, global, --config, environment and
+ * runtime layers without the project layer (repository settings are writable by the agent); owned clone or NULL */
+json_t *settings_operator_get(const char *path);
 
 
 #endif

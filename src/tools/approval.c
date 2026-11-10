@@ -915,15 +915,17 @@ static bool segment_matches(const char *command, const char *pattern) {
     return hit;
 }
 
-static void bash_decision(const json_t *args, approval_decision_t *out) {
-    const char *command = json_get_str(args, "command");
-    if (!command) command = "";
-    /* getBashApprovalPatternRules(bash.patterns) + findBashApprovalPatternRule */
-    const char *rule_match = NULL;
-    approval_policy_t rule_pol = APOL_UNSET;
-    char *rule_buf = NULL;
+typedef struct {
+    char *match; /* normalized */
+    approval_policy_t pol;
+} bash_rule_t;
+
+/* getBashApprovalPatternRules */
+static size_t bash_rules_load(const json_t *patterns, bash_rule_t **out) {
+    size_t n = 0;
+    *out = NULL;
     json_t *rule;
-    json_arr_foreach(json_is_arr(settings_get("bash.patterns")) ? settings_get("bash.patterns") : NULL, i, rule) {
+    json_arr_foreach(json_is_arr(patterns) ? patterns : NULL, i, rule) {
         if (!json_is_obj(rule) || !json_is_str(json_get(rule, "match"))) continue;
         char *m = norm_ws(json_get_str(rule, "match"));
         approval_policy_t p = policy_parse(json_get(rule, "approval"));
@@ -931,32 +933,83 @@ static void bash_decision(const json_t *args, approval_decision_t *out) {
             free(m);
             continue;
         }
-        bool hit = p == APOL_ALLOW ? !has_shell_control(command) && pattern_matches(command, m) : segment_matches(command, m);
-        if (hit) {
-            rule_buf = m;
-            rule_match = m;
-            rule_pol = p;
-            break;
-        }
-        free(m);
+        *out = xrealloc(*out, (n + 1) * sizeof **out);
+        (*out)[n++] = (bash_rule_t){m, p};
     }
+    return n;
+}
+
+static void bash_rules_free(bash_rule_t *r, size_t n) {
+    for (size_t i = 0; i < n; i++) free(r[i].match);
+    free(r);
+}
+
+/* findNonCompoundBashRestrictionRule: a deny matching any segment (or only the whole line) outranks every prompt */
+static const bash_rule_t *bash_restriction_rule(const char *command, const bash_rule_t *rules, size_t n) {
+    strvec_t segs = {0};
+    approval_shell_segments(command, &segs);
+    const bash_rule_t *prompt = NULL, *hit = NULL;
+    for (size_t r = 0; r < n && !hit; r++) {
+        if (rules[r].pol == APOL_ALLOW || !pattern_matches(command, rules[r].match)) continue;
+        bool seg_hit = false;
+        for (size_t i = 0; i < segs.n && !seg_hit; i++) seg_hit = pattern_matches(segs.v[i], rules[r].match);
+        if (seg_hit) continue;
+        if (rules[r].pol == APOL_DENY) hit = &rules[r];
+        else if (!prompt) prompt = &rules[r];
+    }
+    for (size_t i = 0; i < segs.n && !hit; i++) {
+        const bash_rule_t *sr = NULL;
+        for (size_t r = 0; r < n && !sr; r++)
+            if (rules[r].pol != APOL_ALLOW && pattern_matches(segs.v[i], rules[r].match)) sr = &rules[r];
+        if (sr && sr->pol == APOL_DENY) hit = sr;
+        else if (sr && !prompt) prompt = sr;
+    }
+    strvec_free(&segs);
+    return hit ? hit : prompt;
+}
+
+/* findBashApprovalPatternRule */
+static const bash_rule_t *bash_pattern_rule(const char *command, const bash_rule_t *rules, size_t n) {
+    if (has_shell_control(command)) return bash_restriction_rule(command, rules, n);
+    for (size_t r = 0; r < n; r++)
+        if (rules[r].pol == APOL_ALLOW ? pattern_matches(command, rules[r].match) : segment_matches(command, rules[r].match))
+            return &rules[r];
+    return NULL;
+}
+
+static void bash_decision(const json_t *args, approval_decision_t *out) {
+    const char *command = json_get_str(args, "command");
+    if (!command) command = "";
+    bash_rule_t *rules, *arules;
+    size_t n = bash_rules_load(settings_get("bash.patterns"), &rules);
+    /* project layers may tighten the operator's bash.patterns, never loosen them: an operator deny or prompt still
+     * applies under a project allow (Settings.grantAuthority) */
+    json_t *operator_patterns = settings_operator_get("bash.patterns");
+    size_t an = bash_rules_load(operator_patterns, &arules);
+    json_free(operator_patterns);
+    const bash_rule_t *rule = bash_pattern_rule(command, rules, n);
+    const bash_rule_t *arule = bash_pattern_rule(command, arules, an);
+    const bash_rule_t *denied = arule && arule->pol == APOL_DENY ? arule : rule && rule->pol == APOL_DENY ? rule : NULL;
+    const bash_rule_t *prompted =
+        arule && arule->pol == APOL_PROMPT ? arule : rule && rule->pol == APOL_PROMPT ? rule : NULL;
     dec_tier(out, TIER_EXEC);
-    if (rule_pol == APOL_DENY) {
+    if (denied) {
         out->override = true;
         out->policy = APOL_DENY;
-        out->reason = xasprintf("Blocked by bash pattern: %s", rule_match);
+        out->reason = xasprintf("Blocked by bash pattern: %s", denied->match);
     } else if (approval_bash_critical(command)) {
         out->override = true;
         out->reason = xstrdup("Critical pattern detected");
-    } else if (rule_pol == APOL_ALLOW) {
-        out->tier = TIER_WRITE;
-        out->policy = APOL_ALLOW;
-    } else if (rule_pol == APOL_PROMPT) {
+    } else if (prompted) {
         out->override = true;
         out->policy = APOL_PROMPT;
-        out->reason = xasprintf("Prompt required by bash pattern: %s", rule_match);
+        out->reason = xasprintf("Prompt required by bash pattern: %s", prompted->match);
+    } else if (rule && rule->pol == APOL_ALLOW) {
+        out->tier = TIER_WRITE;
+        out->policy = APOL_ALLOW;
     }
-    free(rule_buf);
+    bash_rules_free(rules, n);
+    bash_rules_free(arules, an);
 }
 
 /* ---------- per-tool declarations ---------- */

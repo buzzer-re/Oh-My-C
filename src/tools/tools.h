@@ -151,6 +151,8 @@ char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err);
 char *tool_resolve_path(tool_env_t *env, const char *p);
 /* the environment bash commands run with (NON_INTERACTIVE_ENV), NULL-terminated "K=V" entries */
 const char *const *tool_bash_env(void);
+/* extractLeadingCdTarget: `cd <path> && rest` / `cd <path>; rest` → literal path, rest (owned) and *sep ('&' or ';') */
+bool bash_extract_leading_cd(const char *cmd, char **dir, char **rest, char *sep);
 /* truncate output to a byte/line budget keeping the tail; returns owned text + notice */
 char *tool_truncate_tail(const char *s, size_t len, size_t max_bytes, size_t max_lines, bool *truncated);
 char *tool_truncate_head(const char *s, size_t len, size_t max_bytes, size_t max_lines, bool *truncated);

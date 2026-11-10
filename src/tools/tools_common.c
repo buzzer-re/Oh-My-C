@@ -102,7 +102,7 @@ char *tool_resolve_path(tool_env_t *env, const char *p) {
         return n;
     }
     if (p && str_starts(p, "ssh://")) return xstrdup(p); /* remote: resolved by ssh.c */
-    if (!p || !*p || strcmp(p, "/") == 0) return xstrdup(env->cwd); /* omp: bare "/" means session cwd */
+    if (!p || !*p || !p[strspn(p, "/")]) return xstrdup(env->cwd); /* omp: a bare root (`/`, `//`) means session cwd */
     if (str_starts(p, "file://")) p += 7;
     return path_abs(p, env->cwd);
 }

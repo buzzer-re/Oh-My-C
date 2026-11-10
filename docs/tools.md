@@ -135,7 +135,7 @@ per-call prompt. In yolo a tool's override prompt (critical bash) is ignored; a 
 | `read` | read (an `ssh://` path, or a legacy PDF image member `x.pdf:page2.png`: exec) |
 | `write` | the target's write tier: plain path write, `local://`/`agent://`/`out://` read, `cfg://`/`conflict://`/`vault://` write, `proc://`/`ssh://` exec, `xd://<device>` the device's own tier under policy key `<device>` (`resolve`/`reject`/`propose` read, `report_issue` write), other registered schemes deny |
 | `edit`, `ast_edit` | the strictest write tier over every target (and move destination) |
-| `bash` | exec; `bash.patterns` (`*` globs: `allow` must match the whole command without shell control, `deny`/`prompt` any segment), the critical patterns (`rm -rf /`, `sudo rm`, `curl … \| sh`, `mkfs`, `dd of=/dev/…`, fork bomb, `reboot`, `nc -e`, …) |
+| `bash` | exec; `bash.patterns` (`*` globs: `allow` must match the whole command without shell control, `deny`/`prompt` any segment, with a `deny` on any segment outranking another segment's `prompt`; operator (non-project) `deny`/`prompt` rules outrank a project-layer `allow`), the critical patterns (`rm -rf /`, `sudo rm`, `curl … \| sh`, `mkfs`, `dd of=/dev/…`, fork bomb, `reboot`, `nc -e`, …) |
 | `grep`, `glob`, `ast_grep`, `find` | read (exec when a path names `ssh://`) |
 | `github`, `debug`, `lsp` | read for their read-only ops/actions, else exec (`lsp`: write) |
 | `goal` (`get`), `learn` (project scope, no local backend), `todo`, `ask`, `wait`, `checkpoint`, `rewind`, `web_search` | read |

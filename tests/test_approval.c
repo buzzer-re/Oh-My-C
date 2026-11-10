@@ -5,6 +5,7 @@
 #include "config/settings.h"
 #include "core/fs.h"
 #include "tools/approval.h"
+#include "tools/tools.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -159,6 +160,75 @@ int main(void) {
     CHECK(resolve("\"yolo\"", "bash", "{\"command\":\"cd x && rm y\"}", &src, NULL, NULL) == APOL_DENY && src == ASRC_TOOL);
     CHECK(reason_is("\"yolo\"", "bash", "{\"command\":\"cd x && rm y\"}", "Blocked by bash pattern: rm *"));
     CHECK(resolve("\"yolo\"", "bash", "{\"command\":\"npm publish\"}", NULL, NULL, NULL) == APOL_PROMPT);
+    /* deny outranks an earlier segment's prompt across non-compound segments (omp 2277c47058) */
+    set("bash.patterns", "[{\"match\":\"curl *\",\"approval\":\"prompt\"},{\"match\":\"rm -rf *\",\"approval\":\"deny\"}]");
+    CHECK(reason_is("\"yolo\"", "bash", "{\"command\":\"curl http://example.com; rm -rf build\"}",
+                    "Blocked by bash pattern: rm -rf *"));
+    CHECK(reason_is("\"yolo\"", "bash", "{\"command\":\"curl http://example.com; ls\"}",
+                    "Prompt required by bash pattern: curl *"));
+    CHECK(reason_is("\"yolo\"", "bash", "{\"command\":\"curl x\"}", "Prompt required by bash pattern: curl *"));
+    /* operator rules outrank project-layer rules: a project allow can't loosen an operator deny or prompt */
+    settings_unset_runtime("bash.patterns");
+    {
+        char *pdir = path_join(g_cwd, ".omc");
+        fs_mkdir_p(pdir, 0700);
+        char *pcfg = path_join(pdir, "config.yml");
+        const char *py = "bash:\n  patterns:\n    - match: \"make *\"\n      approval: allow\n";
+        fs_write(pcfg, py, strlen(py));
+        char *gcfg = path_join(agent, "config.yml");
+        const char *gy = "bash:\n  patterns:\n    - match: \"make deploy*\"\n      approval: deny\n"
+                         "    - match: \"make push*\"\n      approval: prompt\n";
+        fs_write(gcfg, gy, strlen(gy));
+        settings_init(g_cwd, NULL);
+        CHECK(resolve("\"always-ask\"", "bash", "{\"command\":\"make build\"}", NULL, NULL, NULL) == APOL_ALLOW);
+        CHECK(reason_is("\"yolo\"", "bash", "{\"command\":\"make deploy\"}", "Blocked by bash pattern: make deploy*"));
+        CHECK(reason_is("\"yolo\"", "bash", "{\"command\":\"make push\"}", "Prompt required by bash pattern: make push*"));
+        unlink(pcfg);
+        unlink(gcfg);
+        rmdir(pdir);
+        free(pdir), free(pcfg), free(gcfg);
+        settings_init(g_cwd, NULL);
+    }
+    /* extractLeadingCdTarget (shell-tokenize.test.ts) */
+    {
+        static const struct {
+            const char *cmd, *path, *rest;
+            char sep;
+        } cds[] = {
+            {"cd /some/dir && echo ok", "/some/dir", "echo ok", '&'},
+            {"cd /some/dir; echo ok", "/some/dir", "echo ok", ';'},
+            {"cd \"/my dir\" && ls", "/my dir", "ls", '&'},
+            {"cd '/a b' && ls", "/a b", "ls", '&'},
+            {"cd /a\\ b && ls", "/a b", "ls", '&'},
+            {"cd ~/proj && make", "~/proj", "make", '&'},
+            {"cd /tmp&& echo ok", "/tmp", "echo ok", '&'},
+            {"cd /tmp;echo ok", "/tmp", "echo ok", ';'},
+            {"cd /tmp\\\n&& echo ok", NULL, NULL, 0},
+            {"cd \"/tmp\\\n\" && echo ok", NULL, NULL, 0},
+            {"cd /tmp 2>/dev/null && echo ok", NULL, NULL, 0},
+            {"cd /tmp >/dev/null 2>&1 && echo ok", NULL, NULL, 0},
+            {"cd /tmp extra && echo ok", NULL, NULL, 0},
+            {"cd $HOME && ls", NULL, NULL, 0},
+            {"cd \"$(git rev-parse --show-toplevel)\" && make", NULL, NULL, 0},
+            {"cd `pwd` && ls", NULL, NULL, 0},
+            {"cd /foo || echo fail", NULL, NULL, 0},
+            {"cd /tmp &echo", NULL, NULL, 0},
+            {"cd /tmp;; echo ok", NULL, NULL, 0},
+            {"cd /tmp;& echo ok", NULL, NULL, 0},
+            {"cd  && echo", NULL, NULL, 0},
+            {"ls -la", NULL, NULL, 0},
+            {"cdx /tmp && ls", NULL, NULL, 0},
+        };
+        for (size_t i = 0; i < sizeof cds / sizeof *cds; i++) {
+            char *d = NULL, *r = NULL, sep = 0;
+            bool ok = bash_extract_leading_cd(cds[i].cmd, &d, &r, &sep);
+            bool want = cds[i].path != NULL;
+            bool good = ok == want && (!ok || (!strcmp(d, cds[i].path) && !strcmp(r, cds[i].rest) && sep == cds[i].sep));
+            if (!good) fprintf(stderr, "leading cd [%s] -> %d [%s] [%s] %c\n", cds[i].cmd, ok, d ? d : "", r ? r : "", sep);
+            CHECK(good);
+            free(d), free(r);
+        }
+    }
     set("bash.patterns", "[]");
     {
         strvec_t segs = {0};

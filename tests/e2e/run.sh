@@ -51,6 +51,10 @@ check "read hashline"  "1:written by omc"                "$B" --model mock/mock-
 # intent field: injected (required) into tool schemas, stripped before execution
 check "intent schema"  '"i": {"type": "string", "description": "concise intent"}'  bash -c "python3 -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; t=[x for x in r if x.get(\"tools\")][-1][\"tools\"][0][\"function\"][\"parameters\"]; print(json.dumps(t[\"properties\"][\"i\"]) if \"i\" in t[\"required\"] else \"no i\")' '$T/req.jsonl' | sed 's/^/\"i\": /'"
 check "intent stripped" "Tool said: hi-intent"           "$B" --model mock/mock-1 -p 'call:bash:{"i":"Checking echo","command":"echo hi-intent"}'
+# a leading `cd <dir> &&` always hoists into cwd; `cd <dir>;` only onto an existing directory (omp 6ad51806eb)
+check "bash cd hoist"  "Tool said: Working directory does not exist: /nonexistent-omc-cd" "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /nonexistent-omc-cd && echo hi"}'
+check "bash cd semi"   "after-cd"                         "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /nonexistent-omc-cd; echo after-cd"}'
+check "bash cd root"   "Tool said: /"                     "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /; pwd"}'
 # xd:// devices: discoverable tools are mounted, listed, documented and dispatched through read/write
 check "xd listing"     "mounted tool devices"             "$B" --model mock/mock-1 -p "read:xd://"
 check "xd docs"        "type Args = {"                    "$B" --model mock/mock-1 -p "read:xd://debug"
