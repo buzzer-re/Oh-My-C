@@ -670,10 +670,40 @@ class _Budget:
 
 budget = _Budget()
 
+
+class ShellError(RuntimeError):
+    """An ``sh(...)`` command that exited non-zero (``exit_code``) or timed out (``exit_code`` None)."""
+
+    def __init__(self, message, output, exit_code):
+        super().__init__(message)
+        self.output = output
+        self.exit_code = exit_code
+
+
+def sh(command, cwd=None, timeout=None):
+    """Run ``command`` on the session's bash and return its output (host side: eval.c eval_shell).
+    Raises ShellError on a non-zero exit or timeout."""
+    if not isinstance(command, str):
+        raise TypeError(f"sh() expects a command string (got {type(command).__name__})")
+    args = {"command": command}
+    if cwd is not None:
+        args["cwd"] = str(cwd)
+    if timeout is not None:
+        args["timeout"] = timeout
+    result = _bridge_call("__shell__", args)
+    output = result.get("output", "")
+    exit_code = result.get("exitCode")
+    if exit_code == 0:
+        return output
+    status = f"timed out after {timeout}s" if result.get("timedOut") else f"exited with code {exit_code}"
+    detail = f"\n{output.rstrip()}" if output else ""
+    raise ShellError(f"$ {command}: {status}{detail}", output, exit_code)
+
 _ns.update({
     "tool": tool, "read": read, "write": write, "env": env, "log": log, "phase": phase, "output": output,
     "wait": wait, "completion": completion, "CompletionHandle": CompletionHandle, "judge": judge,
     "judge_batch": judge_batch, "JudgmentBatch": JudgmentBatch, "JudgmentItem": JudgmentItem, "budget": budget,
+    "sh": sh, "ShellError": ShellError,
 })
 
 # ---------------------------------------------------------------------------

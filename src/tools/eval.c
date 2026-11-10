@@ -14,6 +14,7 @@
 #include "tools.h"
 #include "artifacts.h"
 #include "outsink.h"
+#include "shell.h"
 
 #include "config/settings.h"
 #include "core/embed.h"
@@ -90,6 +91,9 @@ struct eval_state {
     int workers;
     pthread_cond_t wcv;
     json_t *tool_names;
+    /* the `sh` helper's persistent shell, apart from the bash tool's (eval/shell-bridge.ts sessionKey `eval:<id>`) */
+    pthread_mutex_t shmu;
+    shell_t *sh;
 };
 
 static int64_t g_cell_serial;
@@ -198,12 +202,98 @@ static json_t *run_tool(bcall_t *c, char **err) {
     return v;
 }
 
+/* ---------- the `sh` helper (eval/shell-bridge.ts runEvalShell) ---------- */
+
+/* output characters kept per command, so a runaway command cannot exhaust host or kernel memory */
+#define SH_MAX_OUTPUT ((size_t)16 * 1024 * 1024)
+
+typedef struct {
+    sb_t out;
+    bool truncated;
+} sh_capture_t;
+
+static void sh_on_output(void *ud, int stream, const char *data, size_t len) {
+    sh_capture_t *c = ud;
+    if (c->truncated) return;
+    size_t room = SH_MAX_OUTPUT - c->out.len;
+    if (len > room) {
+        sb_appendn(&c->out, data, room);
+        c->truncated = true;
+        return;
+    }
+    sb_appendn(&c->out, data, len);
+}
+
+/* one command on the session's eval shell, run to completion: {output, exitCode} or {output, timedOut}; *err on
+ * malformed arguments or a cancelled run (a non-zero exit or a timeout is a result) */
+static json_t *eval_shell(eval_state_t *st, const json_t *args, volatile sig_atomic_t *cancel, char **err) {
+    const char *command = json_get_str(args, "command");
+    if (!json_is_obj(args) || !command) {
+        *err = xstrdup("sh() expects a command string");
+        return NULL;
+    }
+    const json_t *cwdj = json_get(args, "cwd"), *toj = json_get(args, "timeout");
+    if (cwdj && !json_is_str(cwdj)) {
+        *err = xstrdup("sh() cwd must be a string");
+        return NULL;
+    }
+    if (toj && (!json_is_num(toj) || !(json_get_num(args, "timeout", -1) >= 0))) {
+        *err = xstrdup("sh() timeout must be a non-negative number of seconds");
+        return NULL;
+    }
+    const char *cwd_arg = json_sv(cwdj);
+    char *cwd = cwd_arg && *cwd_arg ? tool_resolve_path(st->env, cwd_arg) : xstrdup(st->env->cwd);
+    /* 0 disables the command deadline: the cell's own deadline governs */
+    double tsec = toj ? json_get_num(args, "timeout", 0) : 0;
+    sh_capture_t cap = {SB_INIT, false};
+    proc_opts_t o = {.cwd = cwd,
+                     .env_extra = tool_bash_env(),
+                     .timeout_ms = tsec > 0 ? (int64_t)(tsec * 1000) : 0,
+                     .max_output = SH_MAX_OUTPUT,
+                     .merge_stderr = true,
+                     .new_session = true,
+                     .cancel = cancel,
+                     .on_output = sh_on_output,
+                     .ud = &cap};
+    proc_result_t r;
+    pthread_mutex_lock(&st->shmu);
+    if (!st->sh) st->sh = shell_new();
+    int rc = shell_run(st->sh, command, cwd, &o, &r);
+    pthread_mutex_unlock(&st->shmu);
+    free(cwd);
+    if (cap.truncated) sb_appendf(&cap.out, "\n[output truncated: sh() keeps the first %zu characters]\n", SH_MAX_OUTPUT);
+    size_t olen = 0;
+    char *output = out_sanitize(cap.out.s ? cap.out.s : "", cap.out.len, &olen);
+    sb_free(&cap.out);
+    json_t *v = NULL;
+    if (rc != 0) {
+        *err = xstrdup("sh() command failed: missing exit status");
+    } else if (r.timed_out) {
+        v = json_obj();
+        json_set(v, "output", json_str_own(output));
+        output = NULL;
+        json_set_bool(v, "timedOut", true);
+    } else if (r.cancelled || (cancel && *cancel)) {
+        *err = xstrdup("sh() command was cancelled");
+    } else {
+        v = json_obj();
+        json_set(v, "output", json_str_own(output));
+        output = NULL;
+        json_set_int(v, "exitCode", r.term_signal ? 128 + r.term_signal : r.exit_code);
+    }
+    free(output);
+    proc_result_free(&r);
+    return v;
+}
+
 static void *call_main(void *p) {
     bcall_t *c = p;
     eval_state_t *st = c->st;
     char *err = NULL;
     json_t *value = NULL;
-    if (str_starts(c->name, "__") && str_ends(c->name, "__")) {
+    if (str_eq(c->name, "__shell__")) {
+        value = eval_shell(st, c->args, &c->cancel, &err);
+    } else if (str_starts(c->name, "__") && str_ends(c->name, "__")) {
         if (st->env->eval_bridge) value = st->env->eval_bridge(st->env, c->name, c->args, c->cell, &c->cancel, &err);
         else err = xasprintf("%s is unavailable in this session", c->name);
     } else {
@@ -696,6 +786,8 @@ static void eval_destroy(agent_tool_t *t) {
     free(st->python);
     free(st->tool_call_id);
     json_free(st->tool_names);
+    shell_free(st->sh);
+    pthread_mutex_destroy(&st->shmu);
     pthread_mutex_destroy(&st->mu);
     pthread_mutex_destroy(&st->cmu);
     pthread_cond_destroy(&st->wcv);
@@ -795,6 +887,7 @@ agent_tool_t *tool_eval_new(tool_env_t *env) {
     st->self = t;
     pthread_mutex_init(&st->mu, NULL);
     pthread_mutex_init(&st->cmu, NULL);
+    pthread_mutex_init(&st->shmu, NULL);
     pthread_cond_init(&st->wcv, NULL);
     t->ud = st;
     t->destroy = eval_destroy;

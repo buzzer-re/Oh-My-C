@@ -238,6 +238,9 @@ host → kernel   {"type":"exec","id":N,"code":"…"}
   prompts, `coding/judgment.c`, or native judgment APIs), `judge_batch()` host-owned async batches,
   `budget`, and `output()` over `agent://` outputs. Also `%load`, `%pip`, `%time`, `!cmd`, figures
   and printed images.
+- `sh(command, cwd?, timeout?)` runs a command to completion on a persistent bash of the eval tool's own
+  (`tools/eval.c` `__shell__`, apart from the bash tool's shell): output capped at 16 MiB, a non-zero
+  exit or timeout raises `ShellError`.
 - Interrupts (timeout or abort) send SIGINT and cancel the cell's in-flight calls. A kernel that
   doesn't answer within 5 s is killed. Waiting on helpers pauses the cell deadline.
 

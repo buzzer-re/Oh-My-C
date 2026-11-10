@@ -298,6 +298,8 @@ check "plan blocks"    "working tree is read-only"  "$B" --model mock/mock-1 --p
 # eval (python kernel) when python3 is available
 if command -v python3 >/dev/null; then
     check "eval python"    "Tool said: 42"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"6*7"}'
+    # sh(): a command run to completion on the eval session's shell; a failure raises ShellError (omp d013a0a269)
+    check "eval sh"        "Tool said: 'hi\\n/tmp\\n' 3 'bad\\n'"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"x = sh(\"echo hi; pwd\", cwd=\"/tmp\")\ntry:\n    sh(\"echo bad; exit 3\")\nexcept ShellError as e:\n    print(repr(x), e.exit_code, repr(e.output))"}'
     # eval helpers: completion/wait, judge, judge_batch (drain/iter/attach/cancel/min_ok), budget, timeouts, xd://eval docs
     python3 -I "$ROOT/tests/e2e/eval_client.py" "$B" || fail=1
 fi
