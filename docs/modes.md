@@ -143,7 +143,8 @@ uses it ([below](#library-embedding)). `--mode rpc-ui` is the same protocol with
 (its questions go to the client).
 
 On start the endpoint emits `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],
-"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864}`, then `advisor_cost_changed` and
+"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864,"supportsBashExcludeFromContext":true}` (`bash`
+takes `excludeFromContext: true` to keep a run out of model context, like `!!`; a non-boolean is rejected), then `advisor_cost_changed` and
 `available_commands_update`. **Commands** carry `{"type": "<command>", "id"?: "..."}` and get exactly one
 response (`code` is a machine-readable reason on some errors):
 
