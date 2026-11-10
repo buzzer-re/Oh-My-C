@@ -259,6 +259,32 @@ void schema_prop(json_t *schema, const char *name, const char *type, const char 
     schema_prop_json(schema, name, p, required);
 }
 
+/* structured-subagent.ts renderSubagentUserPrompt: only the template is formatted; the trimmed, LF-normalized
+ * assignment goes in afterwards with its interior whitespace intact (blank-line runs, Markdown hard breaks, table
+ * padding) */
+char *tool_subagent_user_prompt(const char *assignment) {
+    static const char SLOT[] = "\x01assignment\x01"; /* format() leaves it untouched */
+    char *trim = str_trim(assignment ? assignment : "");
+    sb_t text = SB_INIT;
+    for (const char *p = trim; *p; p++) {
+        if (*p == '\r') {
+            sb_append(&text, "\n");
+            if (p[1] == '\n') p++;
+        } else sb_appendn(&text, p, 1);
+    }
+    free(trim);
+    json_t *uc = json_obj();
+    json_set_str(uc, "assignment", SLOT);
+    char *tpl = prompt_render("coding-agent/prompts/system/subagent-user-prompt.md", uc);
+    json_free(uc);
+    char *at = tpl ? strstr(tpl, SLOT) : NULL;
+    char *out = at ? xasprintf("%.*s%s%s", (int)(at - tpl), tpl, sb_cstr(&text), at + strlen(SLOT))
+                   : xstrdup(tpl ? tpl : sb_cstr(&text));
+    free(tpl);
+    sb_free(&text);
+    return out;
+}
+
 char *tool_prompt(const char *name, const json_t *ctx) {
     char *rel = xasprintf("coding-agent/prompts/tools/%s.md", name);
     char *r = prompt_render(rel, ctx);

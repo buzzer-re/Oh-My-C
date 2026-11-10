@@ -40,3 +40,9 @@ popd >/dev/null
 # title usage (c5b2810dbc, 1ea6be1d9c): the fork title's billed request is journaled as a model_usage entry
 mkdir -p "$T/actitle"; cp "$T/agent/models.yml" "$T/actitle/models.yml"
 check "title usage" $'title request sent\ntitle usage journaled'  env OMC_CODING_AGENT_DIR="$T/actitle" python3 -I "$ROOT/tests/e2e/tui_title.py" "$B" "$T/req.jsonl" "bash:echo titled usage" "$T/actitle"
+# subagent assignment whitespace (b83f8d747c): blank-line runs, hard breaks and table padding reach the subagent
+M=$(ac_mark)
+(cd "$ACW" && timeout 60 "$B" --model mock/mock-1 -p 'call:task:{"context":"ws","tasks":[{"task":"say:keep\r\n\n\n\nspacing  \n|  a  |  b |\n\n"}]}' </dev/null >/dev/null 2>&1)
+check "task whitespace" "assignment kept" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+sub=[r for r in main if "Complete assignment thoroughly" in text(r["messages"][-1])]
+print("assignment kept" if sub and text(sub[0]["messages"][-1]).endswith("Complete assignment thoroughly:\n\nsay:keep\n\n\n\nspacing  \n|  a  |  b |") else "got %r" % (sub and text(sub[0]["messages"][-1])))'

@@ -8,6 +8,7 @@
 #include "session/session.h"
 #include "tools/artifacts.h"
 #include "tools/jobs.h"
+#include "tools/tools.h"
 #include "coding/jobcaption.h"
 
 #include <ctype.h>
@@ -1062,10 +1063,7 @@ static char *task_body_run(bgjob_t *job, void *ud, bool *failed) {
         free(err);
         return s;
     }
-    json_t *uc = json_obj();
-    json_set_str(uc, "assignment", sp->task);
-    char *up = prompt_render("coding-agent/prompts/system/subagent-user-prompt.md", uc);
-    json_free(uc);
+    char *up = tool_subagent_user_prompt(sp->task);
     job_set_output(job, "running");
     pthread_mutex_lock(&g_mu);
     task_card_t *card = card_retain(r->card);
@@ -1168,10 +1166,7 @@ static aref_t *new_ref(tool_env_t *env, const spawn_spec_t *spec, char **err) {
         pthread_mutex_unlock(&spec->card->mu);
     }
     if (!r->progress) {
-        json_t *uc = json_obj();
-        json_set_str(uc, "assignment", spec->task ? spec->task : "");
-        char *up = prompt_render("coding-agent/prompts/system/subagent-user-prompt.md", uc);
-        json_free(uc);
+        char *up = tool_subagent_user_prompt(spec->task);
         r->progress = progress_new_locked(r, up, spec->task);
         json_set_str(r->progress, "status", "pending");
         free(up);

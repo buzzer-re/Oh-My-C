@@ -390,10 +390,7 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             const char *agent = json_get_str(t, "agent") ? json_get_str(t, "agent") : "task";
             const char *src = json_get_str(json_get(defs, agent), "source");
             char *assign = str_trim(json_get_str(t, "task") ? json_get_str(t, "task") : "");
-            json_t *uc = json_obj();
-            json_set_str(uc, "assignment", assign);
-            char *up = prompt_render("coding-agent/prompts/system/subagent-user-prompt.md", uc);
-            json_free(uc);
+            char *up = tool_subagent_user_prompt(assign);
             json_set_int(p, "index", (int64_t)i);
             json_set_str(p, "id", json_get_str(t, "name") ? json_get_str(t, "name") : agent);
             json_set_str(p, "agent", agent);

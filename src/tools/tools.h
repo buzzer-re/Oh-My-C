@@ -225,6 +225,8 @@ int ssh_config_remove(const char *path, const char *name, char **err);
 
 /* helpers shared across tools */
 char *tool_prompt(const char *name, const json_t *ctx); /* renders prompts/coding-agent/prompts/tools/<name>.md */
+/* the subagent's user prompt for an assignment, whitespace kept (renderSubagentUserPrompt; owned) */
+char *tool_subagent_user_prompt(const char *assignment);
 json_t *schema_obj(void);
 /* parse a JSON schema literal (exact upstream wire schema, minus the injected `i`); aborts if malformed */
 json_t *schema_lit(const char *json);
