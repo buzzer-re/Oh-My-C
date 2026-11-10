@@ -630,6 +630,30 @@ int main(void) {
         tui_sym_set_preset("unicode");
         tui_theme_set(tui_theme_builtin("titanium", TUI_COLOR_TRUECOLOR));
     }
+    /* omp cf00fca50c / 140108f134: a scoped single-file grep drops the redundant `1 file`; scope-less keeps it */
+    {
+        const char *r = "{\"content\":[{\"type\":\"text\",\"text\":\"x\"}],\"details\":{\"matchCount\":2,\"fileCount\":1,"
+                        "\"scopePath\":\"a.txt\",\"displayContent\":\"*1\xe2\x94\x82hello\\n*3\xe2\x94\x82hello\"}}";
+        json_t *a = J("{\"pattern\":\"hello\",\"path\":\"a.txt\"}"), *rj = J(r);
+        tc_call_t c = call("grep", a, rj, false);
+        strvec_t out = {0};
+        tc_render(&c, 120, &out);
+        char *h = stripped_trim(out.v[0]);
+        CHECK(strstr(h, "2 matches") && !strstr(h, "1 file"), "single-file grep head: %s", h);
+        free(h);
+        strvec_free(&out);
+        json_free(a);
+        a = J("{\"pattern\":\"hello\"}");
+        json_set_str(json_get_obj(rj, "details"), "scopePath", "");
+        c = call("grep", a, rj, false);
+        tc_render(&c, 120, &out);
+        h = stripped_trim(out.v[0]);
+        CHECK(strstr(h, "1 file"), "scope-less grep keeps 1 file: %s", h);
+        free(h);
+        strvec_free(&out);
+        json_free(a);
+        json_free(rj);
+    }
     /* omp 2e254233c2: debug call args lose ANSI / control characters and fold to one line */
     {
         json_t *a = J("{\"action\":\"set_breakpoint\",\"function\":\"main\\u001b[31m\\nred\\tx\"}");

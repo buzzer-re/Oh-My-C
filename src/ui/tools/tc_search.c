@@ -379,6 +379,17 @@ static char *grep_style(tc_grouped_t *g, size_t i, void *ud) {
     return f ? f : tc_fg(TUI_TC_TOOL_OUTPUT, g->lines.v[i]);
 }
 
+/* isGroupedHeader over every row: `^#+\s+` (a `#` directory or file header) */
+static bool grouped_has_header(const char *text) {
+    for (const char *p = text; p && *p;) {
+        size_t h = strspn(p, "#");
+        if (h && (p[h] == ' ' || p[h] == '\t' || p[h] == '\v' || p[h] == '\f' || p[h] == '\r')) return true;
+        p = strchr(p, '\n');
+        if (p) p++;
+    }
+    return false;
+}
+
 /* grepSubject: a result names the tool's display scope (linked to the original search path); a call falls back
  * to the requested paths */
 static char *grep_subject(const char *pattern, const json_t *args, const json_t *d) {
@@ -498,7 +509,12 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
                      json_get_bool(json_get_obj(mt, "limits"), "columnTruncated", false);
     strvec_t meta = {0};
     meta_push(&meta, tc_format_count("match", matches));
-    meta_push(&meta, tc_format_count("file", files));
+    /* a scoped single-file search prints no `#` headers: its one file is the scope, so no `1 file` */
+    char *scope_paths = tc_paths_of(c->args);
+    const char *scope_path = json_get_str(d, "scopePath");
+    bool has_scope = (scope_path && *scope_path) || scope_paths;
+    free(scope_paths);
+    if (!(has_scope && files == 1 && !grouped_has_header(text))) meta_push(&meta, tc_format_count("file", files));
     if (truncated) meta_push(&meta, tc_fg(TUI_TC_WARNING, "truncated"));
     char *ic = truncated ? NULL : search_icon();
     tc_status_line_t sl = {.icon = truncated ? TC_ST_WARNING : TC_ST_NONE, .icon_override = ic, .spinner = -1, .title = "Grep",
