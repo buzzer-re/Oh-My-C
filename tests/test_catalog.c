@@ -299,6 +299,21 @@ static void test_paused_provider_stream(void) {
     json_free(msgs);
 }
 
+/* omp fd41ef6386: the V4.1 Flash carve-out keys on family/revision, so a hyphenated id keeps image input */
+static void test_deepseek_hyphen_flash(void) {
+    static const char *const ids[] = {"deepseek-v4-1-flash-1017", "deepseek-v4.1-flash"};
+    for (size_t i = 0; i < 2; i++) {
+        char *js = xasprintf("{\"id\":\"%s\",\"reasoning\":true,\"input\":[\"text\",\"image\"]}", ids[i]);
+        json_t *m = resolved("mistral", "https://api.mistral.ai/v1", js);
+        free(js);
+        CHECK(!json_get_bool(json_get(m, "compat"), "stripImageInput", true));
+        json_free(m);
+    }
+    json_t *m = resolved("mistral", "https://api.mistral.ai/v1", "{\"id\":\"deepseek-v4-flash\",\"reasoning\":true}");
+    CHECK(json_get_bool(json_get(m, "compat"), "stripImageInput", false));
+    json_free(m);
+}
+
 /* catalog axes resolve at runtime for bundled rows */
 static void test_catalog_policy(void) {
     const json_t *max = compat_catalog_policy("muse-code", "openai-responses", "muse-spark-1.3", "toolCallNameMaxLength");
@@ -322,6 +337,7 @@ int main(void) {
     test_anthropic_disabled_thinking();
     test_google_base64_skip();
     test_paused_provider_stream();
+    test_deepseek_hyphen_flash();
 
     /* providers present in omp's catalog but absent from its bundled rows */
     CHECK(catalog_find("charm-hyper", "glm-5.3") || catalog_find("charm-hyper", "deepseek-v4-flash-0731"));
