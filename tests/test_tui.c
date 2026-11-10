@@ -625,6 +625,12 @@ static void test_golden(void) {
     tui_highlight_code("plain text", "no-such-lang", tui_theme(), &hl);
     CHECK(hl.n == 1 && !strcmp(hl.v[0], "plain text"));
     strvec_free(&hl);
+    /* zig / zon blocks get colors (omp 3411531f39): keyword, string and comment spans differ from the source */
+    CHECK(tui_highlight_supported("zig") && tui_highlight_supported("zon"));
+    hl = (strvec_t){0};
+    tui_highlight_code("const std = @import(\"std\"); // greet", "zig", tui_theme(), &hl);
+    CHECK(hl.n == 1 && strstr(hl.v[0], "mconst\x1b[39m") && strstr(hl.v[0], "mstd\x1b[39m") && strstr(hl.v[0], " greet"));
+    strvec_free(&hl);
     tui_theme_set(NULL);
 }
 

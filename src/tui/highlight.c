@@ -91,6 +91,13 @@ static const lang_t LANGS[] = {
      "bool byte rune error any ",
      "", " nil true false iota ",
      " append cap close copy delete len make new panic print println recover ", " func ", " type ", false, true, false},
+    {" zig zon ", F_C, /* Zig.sublime-syntax (omp 3411531f39) */
+     " while for break return continue asm defer errdefer unreachable async await suspend nosuspend resume if else "
+     "switch try catch orelse usingnamespace and or const var extern packed export pub noalias inline noinline "
+     "comptime volatile align linksection threadlocal allowzero test struct enum union error fn anyframe ",
+     " i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f16 f32 f64 f80 f128 bool void noreturn type anyerror "
+     "anyopaque anytype comptime_int comptime_float c_int c_uint c_long c_ulong c_char ",
+     "", " null undefined true false ", "", " fn ", " struct enum union ", true, false, false},
     {" java kotlin kt kts scala swift cs csharp c# dart groovy ", F_C,
      " if else for while do switch case default break continue return class interface extends implements new this "
      "super throw throws try catch finally import package public private protected static final abstract "
