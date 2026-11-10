@@ -300,6 +300,11 @@ if command -v python3 >/dev/null; then
     check "eval python"    "Tool said: 42"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"6*7"}'
     # sh(): a command run to completion on the eval session's shell; a failure raises ShellError (omp d013a0a269)
     check "eval sh"        "Tool said: 'hi\\n/tmp\\n' 3 'bad\\n'"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"x = sh(\"echo hi; pwd\", cwd=\"/tmp\")\ntry:\n    sh(\"echo bad; exit 3\")\nexcept ShellError as e:\n    print(repr(x), e.exit_code, repr(e.output))"}'
+    # a kernel that exits during startup says why: its exit code and the end of its stderr (omp af92dbc0b2)
+    printf '#!/bin/sh\necho "no module named boom" >&2\nexit 3\n' > "$T/fakepy" && chmod +x "$T/fakepy"
+    printf "python:\n  interpreter: $T/fakepy\n" > "$T/agent/config.yml"
+    check "eval init exit" "Python kernel init failed: Python kernel exited with code 3; its last stderr output: no module named boom"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"1"}'
+    rm -f "$T/agent/config.yml"
     # eval helpers: completion/wait, judge, judge_batch (drain/iter/attach/cancel/min_ok), budget, timeouts, xd://eval docs
     python3 -I "$ROOT/tests/e2e/eval_client.py" "$B" || fail=1
 fi

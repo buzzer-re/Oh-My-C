@@ -72,6 +72,7 @@ typedef struct {
     json_t *result;
     sb_t raw;
     bool raw_truncated;
+    sb_t err_tail; /* STDERR_TAIL_CHARS: the end of what the runner wrote to stderr, to say why it stopped */
     eval_state_t *st;
 } kernel_t;
 
@@ -401,6 +402,18 @@ static void handle_msg(kernel_t *k, json_t *m) {
     json_free(m);
 }
 
+#define STDERR_TAIL_CHARS 2000
+
+/* keep the last STDERR_TAIL_CHARS bytes (cut on a UTF-8 boundary); caller holds ch->mu */
+static void err_tail_add(kernel_t *k, const char *buf, size_t n) {
+    sb_appendn(&k->err_tail, buf, n);
+    if (k->err_tail.len <= STDERR_TAIL_CHARS) return;
+    size_t cut = k->err_tail.len - STDERR_TAIL_CHARS;
+    while (cut < k->err_tail.len && ((unsigned char)k->err_tail.s[cut] & 0xC0) == 0x80) cut++;
+    memmove(k->err_tail.s, k->err_tail.s + cut, k->err_tail.len - cut);
+    sb_truncate(&k->err_tail, k->err_tail.len - cut);
+}
+
 static void *reader_main(void *p) {
     kernel_t *k = p;
     int out_fd = k->child.out_fd, err_fd = k->child.err_fd;
@@ -415,6 +428,7 @@ static void *reader_main(void *p) {
             if (r <= 0) err_open = false;
             else {
                 pthread_mutex_lock(&k->ch->mu);
+                err_tail_add(k, buf, (size_t)r);
                 if (k->cell_active) {
                     if (k->raw.len + (size_t)r <= RAW_CAP) sb_appendn(&k->raw, buf, (size_t)r);
                     else k->raw_truncated = true;
@@ -474,6 +488,7 @@ static void kernel_stop(eval_state_t *st) {
     chan_unref(k->ch);
     sb_free(&k->rbuf);
     sb_free(&k->raw);
+    sb_free(&k->err_tail);
     json_free(k->result);
     free(k);
 }
@@ -530,11 +545,39 @@ static int kernel_start(eval_state_t *st, char **err) {
     int64_t deadline = mono_ms() + STARTUP_TIMEOUT_MS;
     pthread_mutex_lock(&k->ch->mu);
     while (!k->ready && !k->eof && mono_ms() < deadline) cv_wait_ms(&k->ch->cv, &k->ch->mu, 100);
-    bool ok = k->ready;
+    bool ok = k->ready, exited = k->eof;
     pthread_mutex_unlock(&k->ch->mu);
     if (!ok) {
+        if (exited) {
+            /* a kernel that exits during startup says so with its exit code and the end of its stderr; the exit can
+             * come before the last stderr bytes are read, so give them a moment (STDERR_SETTLE_MS) */
+            int xcode = child_wait(&k->child, 1000);
+            if (k->child.err_fd >= 0) {
+                char buf[4096];
+                int64_t until = mono_ms() + 200;
+                while (mono_ms() < until) {
+                    struct pollfd pf = {k->child.err_fd, POLLIN, 0};
+                    if (poll(&pf, 1, 20) <= 0) continue;
+                    ssize_t r = read(k->child.err_fd, buf, sizeof buf);
+                    if (r <= 0) break;
+                    pthread_mutex_lock(&k->ch->mu);
+                    err_tail_add(k, buf, (size_t)r);
+                    pthread_mutex_unlock(&k->ch->mu);
+                }
+            }
+            pthread_mutex_lock(&k->ch->mu);
+            char *tail = str_trim(k->err_tail.s ? k->err_tail.s : "");
+            pthread_mutex_unlock(&k->ch->mu);
+            char *reason = xcode >= 0 ? xasprintf("Python kernel exited with code %d", xcode)
+                                      : xstrdup("Python kernel stopped responding");
+            *err = *tail ? xasprintf("Python kernel init failed: %s; its last stderr output: %s", reason, tail)
+                         : xasprintf("Python kernel init failed: %s", reason);
+            free(reason);
+            free(tail);
+        } else {
+            *err = xstrdup("Python kernel init timed out");
+        }
         kernel_stop(st);
-        *err = xstrdup("python kernel failed to start");
         return -1;
     }
     st->had_kernel = true;
