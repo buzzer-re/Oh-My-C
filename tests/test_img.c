@@ -330,6 +330,15 @@ static void test_pipeline(void) {
     CHECK(why && !strcmp(why, "Image: decode failed"), "truncated %s", why ? why : "");
     free(why);
     free(b64);
+    /* jpegStreamIsComplete: segments by length, stuffed scan bytes, an EOI inside a segment is not the end */
+    {
+        static const unsigned char ok[] = {0xff, 0xd8, 0xff, 0xe1, 0x00, 0x04, 0xff, 0xd9, 0xff, 0xda, 0x00, 0x02,
+                                           0x12, 0xff, 0x00, 0x34, 0xff, 0xd0, 0x56, 0xff, 0xd9, 0x00, 0x01};
+        CHECK(img_jpeg_stream_complete(ok, sizeof ok), "complete jpeg");
+        CHECK(!img_jpeg_stream_complete(ok, sizeof ok - 4), "jpeg cut before EOI");
+        CHECK(!img_jpeg_stream_complete(ok, 8), "EOI inside APP1 is not the end");
+        CHECK(!img_jpeg_stream_complete(ok + 2, sizeof ok - 2), "no SOI");
+    }
     /* loadImageInput messages */
     img_loaded_t l;
     CHECK(img_load_input(png, n, "image/png", "/x/a.png", "Read image file", true, 0, &l, &err) == 0 &&

@@ -393,6 +393,48 @@ typedef struct {
 static verdict_t g_verdicts[VERDICT_SLOTS];
 static pthread_mutex_t g_verdict_mu = PTHREAD_MUTEX_INITIALIZER;
 
+/* image-loading.ts jpegStreamIsComplete: whether a JPEG stream reaches an EOI marker. A decoder that pads the rows a
+ * truncated scan never covered cannot tell a complete file from one cut mid-scan, and strict provider decoders reject
+ * those bytes. Segments carry their length and entropy-coded data is skipped by JPEG's byte-stuffing rules, so an EOI
+ * inside an embedded thumbnail is not taken for the file's end; metadata after the EOI (MPF, motion photos) passes. */
+bool img_jpeg_stream_complete(const unsigned char *b, size_t n) {
+    if (n < 4 || b[0] != 0xff || b[1] != 0xd8) return false;
+    size_t off = 2;
+    while (off < n) {
+        if (b[off] != 0xff) return false;
+        size_t mo = off + 1;
+        while (mo < n && b[mo] == 0xff) mo++;
+        if (mo >= n) return false;
+        unsigned char marker = b[mo];
+        if (marker == 0xd9) return true;
+        off = mo + 1;
+        if (marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+        if (marker == 0xd8) return false;
+        if (off + 1 >= n) return false;
+        size_t seg = ((size_t)b[off] << 8) | b[off + 1];
+        if (seg < 2) return false;
+        off += seg;
+        if (off > n) return false;
+        if (marker == 0xda) {
+            for (;;) {
+                const unsigned char *nx = off < n ? memchr(b + off, 0xff, n - off) : NULL;
+                if (!nx) return false;
+                size_t next = (size_t)(nx - b), scan = next + 1;
+                while (scan < n && b[scan] == 0xff) scan++;
+                if (scan >= n) return false;
+                unsigned char code = b[scan];
+                if (code == 0x00 || (code >= 0xd0 && code <= 0xd7)) {
+                    off = scan + 1;
+                    continue;
+                }
+                off = next;
+                break;
+            }
+        }
+    }
+    return false;
+}
+
 static char *decode_failure_uncached(const char *b64, size_t blen, const char *mime) {
     const char *bad = img_b64_failure(b64, blen);
     if (bad) return xstrdup(bad);
@@ -409,6 +451,10 @@ static char *decode_failure_uncached(const char *b64, size_t blen, const char *m
             free(bytes);
             return xasprintf("declared %s but contains %s", mime, det);
         }
+    }
+    if (mime && !strcasecmp(mime, "image/jpeg") && !img_jpeg_stream_complete(bytes, n)) {
+        free(bytes);
+        return xstrdup("truncated JPEG data: no EOI marker");
     }
     img_t im = {0};
     int rc = img_decode(bytes, n, &im, NULL, NULL);
