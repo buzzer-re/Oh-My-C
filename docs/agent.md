@@ -383,7 +383,9 @@ begins, a side request on the same model, system prompt, tools and history asks 
 such as `🧪 FLAKY: Fix flaky park tests`. This reuses the prompt cache. Low-signal input
 (greetings, acks) is skipped. The `tiny` generator and the fallback use the title model with
 `title-system.md`. Titles are applied on the agent thread and written to the title slot.
-`OMC_NO_TITLE=1` disables them (RPC mode always does).
+`OMC_NO_TITLE=1` disables them (RPC mode always does). Every billed title request (the fork, each
+title-model attempt, errors included) is journaled as an off-transcript `model_usage` entry with
+`purpose: "title"` and charged to the session's cost gate, so `/usage` and `--max-cost` count it.
 
 ## Plan mode
 

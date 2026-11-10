@@ -62,6 +62,7 @@ struct app {
     discovery_t prompt_skills;
     int64_t next_unknown_skill_rediscovery; /* earliest ms a skill:// miss may rediscover again */
     struct skill_graveyard *skill_graveyard; /* replaced skill lists (autolearn.c) */
+    json_t *side_usage;                      /* pending model_usage records of side requests (under mu) */
     file_cmds_t file_cmds;     /* `commands/<name>.md` slash commands + bundled /init (commands.c) */
     prompt_tpls_t prompt_tpls; /* prompts/<name>.md templates */
     const ai_model_t *model;
@@ -348,6 +349,9 @@ typedef struct {
     void (*on_text_delta)(void *ud, const char *delta); /* called on the requesting thread */
     void *ud;
     volatile sig_atomic_t *cancel;
+    /* onUsage: journal the billed request (errors included) as an off-transcript model_usage entry of this purpose
+     * and charge it to the cost gate (NULL: not recorded) */
+    const char *usage_purpose;
 } app_ephemeral_t;
 /* Returns the final assistant message (toolCall blocks dropped, owned) and *reply (owned: trimmed, deduped when
  * asked), or NULL with *err (owned; "Request was aborted" after a cancel). */
@@ -400,6 +404,12 @@ char *app_generate_title_from(app_t *a, const char *text);
 /* same with a custom system prompt (NULL = title-system.md); owned raw reply or NULL */
 char *app_generate_title_with(app_t *a, const char *text, const char *system_prompt);
 char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const char *user, ai_effort_t effort);
+/* the same, journaling the billed request as a model_usage entry of `usage_purpose` (NULL: none) */
+char *app_complete_text_for(app_t *a, const ai_model_t *m, const char *system, const char *user, ai_effort_t effort,
+                            const char *usage_purpose);
+/* an off-transcript side request billed `msg` (any thread): queued as a model_usage entry {purpose, api, provider,
+ * model, usage, stopReason, errorMessage?} and charged to the cost gate when the session writer next flushes */
+void app_note_side_usage(app_t *a, const char *purpose, const json_t *msg);
 /* child session for subagent `agent_name` (agents dirs); model_override (pattern) and append_prompt are optional */
 app_t *app_subagent_new(app_t *parent, const char *agent_name, const char *model_override, const char *append_prompt,
                         char **err);

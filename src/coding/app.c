@@ -492,9 +492,35 @@ const json_t *app_session_metadata(app_t *a, const char *provider) {
     return found;
 }
 
-/* #recordCacheWarmUsage: paid warm requests as off-transcript model_usage entries (session totals include them) */
+void app_note_side_usage(app_t *a, const char *purpose, const json_t *msg) {
+    if (!a || !msg || !json_get(msg, "usage")) return;
+    json_t *e = json_obj();
+    json_set_str(e, "purpose", purpose);
+    json_set_str(e, "api", json_get_str(msg, "api") ? json_get_str(msg, "api") : "");
+    json_set_str(e, "provider", json_get_str(msg, "provider") ? json_get_str(msg, "provider") : "");
+    json_set_str(e, "model", json_get_str(msg, "model") ? json_get_str(msg, "model") : "");
+    json_set(e, "usage", json_clone(json_get(msg, "usage")));
+    json_set_str(e, "stopReason", json_get_str(msg, "stopReason") ? json_get_str(msg, "stopReason") : "");
+    if (json_get_str(msg, "errorMessage")) json_set_str(e, "errorMessage", json_get_str(msg, "errorMessage"));
+    pthread_mutex_lock(&a->mu);
+    if (!a->side_usage) a->side_usage = json_arr();
+    json_push(a->side_usage, e);
+    pthread_mutex_unlock(&a->mu);
+}
+
+/* #recordCacheWarmUsage: paid warm requests as off-transcript model_usage entries (session totals include them);
+ * title requests (#reportTitleUsage) ride the same queue */
 void app_flush_warm_usage(app_t *a) {
     json_t *u = cachewarm_take_usage(a->warmer), *e;
+    pthread_mutex_lock(&a->mu);
+    json_t *side = a->side_usage;
+    a->side_usage = NULL;
+    pthread_mutex_unlock(&a->mu);
+    if (side) {
+        if (!u) u = json_arr();
+        json_arr_foreach(side, i, e) json_push(u, json_clone(e));
+        json_free(side);
+    }
     if (!a->opts.subagent) { /* job captions (off-transcript like warm requests) go on the root session */
         json_t *cap = job_captions_take_usage();
         if (cap) {
@@ -1989,6 +2015,7 @@ void app_free(app_t *a) {
     discovery_free(&a->disc);
     discovery_free(&a->prompt_skills);
     autolearn_free_skill_graveyard(a);
+    json_free(a->side_usage);
     commands_free(&a->file_cmds);
     prompt_templates_free(&a->prompt_tpls);
     free(a->cwd);
@@ -2111,6 +2138,11 @@ void app_abort(app_t *a) {
 /* ---------- one-shot completion ---------- */
 
 char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const char *user, ai_effort_t effort) {
+    return app_complete_text_for(a, m, system, user, effort, NULL);
+}
+
+char *app_complete_text_for(app_t *a, const ai_model_t *m, const char *system, const char *user, ai_effort_t effort,
+                            const char *usage_purpose) {
     if (!m) m = a->model;
     json_t *sys = json_arr();
     if (system) json_push_str(sys, system);
@@ -2125,6 +2157,7 @@ char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const
     o.disable_reasoning = effort == EFFORT_OFF;
     o.cancel = &a->agent->cancel;
     json_t *r = ai_complete(m, &ctx, &o);
+    if (usage_purpose) app_note_side_usage(a, usage_purpose, r);
     char *text = NULL;
     const char *stop = json_get_str(r, "stopReason");
     if (!str_eq(stop, "error") && !str_eq(stop, "aborted")) text = ai_message_text(r);
@@ -2528,6 +2561,7 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
     o.cursor_exec = NULL;
     eph_ud_t x = {.e = e};
     json_t *r = ai_stream(model, &ctx, &o, eph_event, &x);
+    if (e->usage_purpose) app_note_side_usage(a, e->usage_purpose, r); /* billed even when it ends in an error */
     if (!e->conversation_key) { /* a one-shot side id: its chain would pin the conversation, its socket stay open */
         anth_threads_release_session(sid);
         rws_release_session(sid);
@@ -2853,8 +2887,8 @@ char *app_generate_title_with(app_t *a, const char *text, const char *system_pro
     char *snippet = xasprintf("%.2000s", text);
     char *title = NULL;
     for (size_t i = 0; i < models.n && !title && !a->agent->cancel; i++)
-        title = app_complete_text(a, models.v[i], sys, snippet, EFFORT_OFF);
-    if (!models.n && a->model) title = app_complete_text(a, a->model, sys, snippet, EFFORT_OFF);
+        title = app_complete_text_for(a, models.v[i], sys, snippet, EFFORT_OFF, "title");
+    if (!models.n && a->model) title = app_complete_text_for(a, a->model, sys, snippet, EFFORT_OFF, "title");
     mr_pool_free(&models);
     free(snippet);
     free(sys);
@@ -2882,6 +2916,7 @@ static void maybe_title(app_t *a) {
     /* the side request started when the reply began; give it a moment, then apply */
     title_wait(a, 3000);
     title_apply(a);
+    app_flush_warm_usage(a); /* the title's model_usage entries */
 }
 
 /* omp's context-maintenance trigger: thresholdTokens (>0) overrides thresholdPercent (>0); both -1 =

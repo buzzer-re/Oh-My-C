@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Automatic session title in the interactive TUI (omp autoTitle = isInteractive): type one prompt under a pty and
 wait for the fork title side request; print the title the session got ("title: <name>") or what went wrong.
-usage: tui_title.py <omc> <req.jsonl> <prompt>"""
-import json, os, pty, select, signal, sys, time
+With [agent-dir], also wait for the title request's `model_usage` entry (purpose "title") in the session file.
+usage: tui_title.py <omc> <req.jsonl> <prompt> [agent-dir]"""
+import glob, json, os, pty, select, signal, sys, time
 
 omc, reqlog, prompt = sys.argv[1:4]
 env = dict(os.environ, TERM="xterm-256color", OMC_SKIP_SETUP="1", PI_NO_DESKTOP_NOTIFY="1")
@@ -50,6 +51,18 @@ try:
     pump(1.0)
     r = title_request()
     print("title request sent" if r else "no title request")
+    if len(sys.argv) > 4:
+        def title_usage():
+            for f in glob.glob(os.path.join(sys.argv[4], "sessions", "**", "*.jsonl"), recursive=True):
+                for l in open(f):
+                    e = json.loads(l)
+                    if e.get("type") == "model_usage" and e.get("purpose") == "title" and e.get("usage"):
+                        return True
+            return False
+        end = time.time() + 10
+        while time.time() < end and not title_usage():
+            pump(0.2)
+        print("title usage journaled" if title_usage() else "no title usage")
 finally:
     os.kill(pid, signal.SIGKILL)
     os.waitpid(pid, 0)

@@ -37,3 +37,6 @@ upd = len(notices(c)) == 2 and "Updated (this description replaces the earlier o
 late = any("late-skill: Late skill" in n for n in notices(e))
 print("notice once=%s stable=%s updated=%s late-read=%s late-notice=%s" % (once, stable, upd, "LATE BODY" in text(d["messages"][-1]), late))'
 popd >/dev/null
+# title usage (c5b2810dbc, 1ea6be1d9c): the fork title's billed request is journaled as a model_usage entry
+mkdir -p "$T/actitle"; cp "$T/agent/models.yml" "$T/actitle/models.yml"
+check "title usage" $'title request sent\ntitle usage journaled'  env OMC_CODING_AGENT_DIR="$T/actitle" python3 -I "$ROOT/tests/e2e/tui_title.py" "$B" "$T/req.jsonl" "bash:echo titled usage" "$T/actitle"
