@@ -76,7 +76,8 @@ check "attachment none" "Available attachment URIs: none. Use one of the listed 
 mkdir -p "$T/agent-img" && sed 's/^\(      - id: mock-1\)$/\1\n        input: [text, image]/' "$T/agent/models.yml" > "$T/agent-img/models.yml"
 python3 -c 'import base64,sys; open(sys.argv[1],"wb").write(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAAEElEQVR4nGP4z8AARww4OQD1MQv1NXv7ggAAAABJRU5ErkJggg=="))' "$T/work/red.png"
 env OMC_CODING_AGENT_DIR="$T/agent-img" "$B" --model mock/mock-1 -p "attach:read:attachment://1" @red.png >/dev/null 2>&1 </dev/null
-check "attachment read" "Read image file [image/"  python3 -I -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])][-1]; print([m["content"] for m in r["messages"] if m.get("role") == "tool"][-1])' "$T/req.jsonl"
+# (the last request carrying a tool result: a background skill-description compression may be logged after it)
+check "attachment read" "Read image file [image/"  python3 -I -c 'import json,sys; r=[x for x in map(json.loads, open(sys.argv[1])) if any(m.get("role") == "tool" for m in x.get("messages", []))][-1]; print([m["content"] for m in r["messages"] if m.get("role") == "tool"][-1])' "$T/req.jsonl"
 check "attachment list" "Available attachment URIs: attachment://1."  env OMC_CODING_AGENT_DIR="$T/agent-img" "$B" --model mock/mock-1 -p "attach:read:attachment://3" @red.png
 rm -f "$T/work/red.png"
 check "grep file"      $'[a/b.txt#'                      "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"written","path":"a/b.txt:1-5"}'
