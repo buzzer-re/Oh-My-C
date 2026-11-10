@@ -59,7 +59,10 @@ static void bash_env_init(void) {
         "npm_config_progress=false", "PNPM_DISABLE_SELF_UPDATE_CHECK=true", "PNPM_UPDATE_NOTIFIER=false", "YARN_ENABLE_TELEMETRY=0",
         "YARN_ENABLE_PROGRESS_BARS=0", "CARGO_TERM_PROGRESS_WHEN=never", "DEBIAN_FRONTEND=noninteractive", "PIP_NO_INPUT=1",
         "PIP_DISABLE_PIP_VERSION_CHECK=1", "TF_INPUT=0", "TF_IN_AUTOMATION=1", "GH_PROMPT_DISABLED=1", "COMPOSER_NO_INTERACTION=1",
-        "CLOUDSDK_CORE_DISABLE_PROMPTS=1", "OMC=1", NULL};
+        "CLOUDSDK_CORE_DISABLE_PROMPTS=1", "OMC=1",
+        /* AGENT_LOCALE: agent commands pin the locale over the inherited one (byte-order collation, `C` numbers and
+         * messages, UTF-8 text) so output doesn't vary by machine; user `!` commands keep theirs */
+        "LANG=C.UTF-8", "LC_ALL=C.UTF-8", NULL};
     size_t n = 0;
     for (const char *const *e = base; *e; e++) g_bash_env[n++] = *e;
     /* REJECT_PROMPT_COMMAND: `false` from PATH, else the bare name */
