@@ -269,6 +269,17 @@ static void test_anthropic_disabled_thinking(void) {
     json_free(m);
 }
 
+/* omp 8a4a370cfc, f4f11329de: base64SkipThoughtSignature is unset by default and settable from models.yml */
+static void test_google_base64_skip(void) {
+    json_t *m = resolved("gw", "https://gw.example.com/v1beta", "{\"id\":\"gemini-3-pro\",\"api\":\"google-generative-ai\",\"reasoning\":true}");
+    CHECK(!json_get(json_get(m, "compat"), "base64SkipThoughtSignature"));
+    json_free(m);
+    m = resolved("gw", "https://gw.example.com/v1beta", "{\"id\":\"gemini-3-pro\",\"api\":\"google-generative-ai\",\"reasoning\":true,"
+                                                        "\"compat\":{\"base64SkipThoughtSignature\":true}}");
+    CHECK(json_get_bool(json_get(m, "compat"), "base64SkipThoughtSignature", false));
+    json_free(m);
+}
+
 /* catalog axes resolve at runtime for bundled rows */
 static void test_catalog_policy(void) {
     const json_t *max = compat_catalog_policy("muse-code", "openai-responses", "muse-spark-1.3", "toolCallNameMaxLength");
@@ -290,6 +301,7 @@ int main(void) {
     test_catalog_policy();
     test_fable_52();
     test_anthropic_disabled_thinking();
+    test_google_base64_skip();
 
     /* providers present in omp's catalog but absent from its bundled rows */
     CHECK(catalog_find("charm-hyper", "glm-5.3") || catalog_find("charm-hyper", "deepseek-v4-flash-0731"));

@@ -750,6 +750,12 @@ static void test_google_request_gemini3(void) {
     CHECK_STR(P(c, "2.parts.0.functionResponse.response.output"), "[image omitted: model does not support vision]");
     CHECK(json_get(b, "tools") == NULL && json_get(b, "toolConfig") == NULL);
     json_free(b);
+    /* base64SkipThoughtSignature: the sentinel goes out base64-encoded for gateways that decode it as bytes */
+    json_set_bool(json_get(raw, "compat"), "base64SkipThoughtSignature", true);
+    b = google_build_request(&m, &ctx, &o);
+    CHECK_STR(P(json_get(b, "contents"), "1.parts.0.thoughtSignature"), "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I=");
+    json_free(b);
+    json_del(json_get(raw, "compat"), "base64SkipThoughtSignature");
     o.reasoning = EFFORT_MEDIUM; /* unsupported -> clamps to low */
     o.hide_thinking_summary = false;
     b = google_build_request(&m, &ctx, &o);

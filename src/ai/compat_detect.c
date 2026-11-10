@@ -1297,7 +1297,8 @@ static json_t *devin_compat(const json_t *user, const axes_t *ax) {
 }
 
 static json_t *google_compat(const char *api, const json_t *user, const axes_t *ax) {
-    static const char *const declared[] = {"maxImageDimension", "maxImagePayloadBytes"};
+    /* unset keys a KDL rule or a models.yml `compat` block may set */
+    static const char *const declared[] = {"maxImageDimension", "maxImagePayloadBytes", "base64SkipThoughtSignature"};
     static const char *const flags[] = {"supportsFunctionPartId", "requiresSkipThoughtSignature",
                                         "requiresSkipThoughtSignatureOnFirstFunctionCall", "dropUnsignedThinking",
                                         "ccaLegacyParametersSchema", "multimodalFunctionResponse", "flashStreamLeakWorkaround",

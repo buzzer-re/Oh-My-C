@@ -14,6 +14,8 @@
 
 #define DEFAULT_GEMINI_BASE "https://generativelanguage.googleapis.com/v1beta"
 #define SKIP_THOUGHT_SIGNATURE "skip_thought_signature_validator"
+/* the same sentinel base64-encoded, for gateways that decode `thoughtSignature` as bytes (compat base64SkipThoughtSignature) */
+#define SKIP_THOUGHT_SIGNATURE_BASE64 "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I="
 #define NON_VISION_IMAGE_PLACEHOLDER "[image omitted: model does not support vision]"
 #define MIN_OUTPUT_TOKENS 1024
 #define OUTPUT_CAP_WHEN_UNKNOWN 64000
@@ -290,7 +292,8 @@ static json_t *convert_messages(const ai_model_t *m, const json_t *msgs) {
                     const char *sig = resolve_signature(same, json_get_str(blk, "thoughtSignature"));
                     bool fallback = cflag(m, "requiresSkipThoughtSignature") ||
                                     (first_call && cflag(m, "requiresSkipThoughtSignatureOnFirstFunctionCall"));
-                    const char *eff = sig ? sig : (fallback ? SKIP_THOUGHT_SIGNATURE : NULL);
+                    const char *skip = cflag(m, "base64SkipThoughtSignature") ? SKIP_THOUGHT_SIGNATURE_BASE64 : SKIP_THOUGHT_SIGNATURE;
+                    const char *eff = sig ? sig : (fallback ? skip : NULL);
                     first_call = false;
                     json_t *fc = json_obj();
                     json_set_str(fc, "name", name ? name : "");
