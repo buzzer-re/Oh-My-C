@@ -630,6 +630,19 @@ int main(void) {
         tui_sym_set_preset("unicode");
         tui_theme_set(tui_theme_builtin("titanium", TUI_COLOR_TRUECOLOR));
     }
+    /* omp db90c0d96e: a parent steer renders as an incoming IRC card, 3 body rows collapsed */
+    {
+        strvec_t out = {0};
+        tc_irc_incoming_card(" main ", "one\ntwo\n\nthree\nfour\nfive", "5s ago", false, 80, &out);
+        char *head = stripped_trim(out.v[0]);
+        CHECK(strstr(head, "IRC \xe2\x9f\xb5 main") && strstr(head, "5s ago"), "irc card head: %s", head);
+        free(head);
+        CHECK(out.n == 5 && has_row(&out, "three") && !has_row(&out, "four") && has_row(&out, "+2 more lines"), "irc body rows %zu", out.n);
+        strvec_free(&out);
+        tc_irc_incoming_card("main", "", NULL, false, 80, &out);
+        CHECK(out.n == 1, "empty body: head only");
+        strvec_free(&out);
+    }
     if (failures) fprintf(stderr, "%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

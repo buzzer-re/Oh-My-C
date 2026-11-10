@@ -718,6 +718,13 @@ bool iq_escape(ui_t *u) {
 /* ---------- run boundaries ---------- */
 
 void iq_user_message_start(ui_t *u, const json_t *msg) {
+    msgview_t *irc = str_eq(json_get_str(msg, "role"), "user") ? ui_parent_irc_view(msg) : NULL;
+    if (irc) { /* a parent steer: its sender and body, not the model-facing envelope (omp db90c0d96e) */
+        toolcard_break_group(u);
+        add_view(u, irc);
+        ui_queue_refresh(u);
+        return;
+    }
     if (!agent_msg_user_authored(msg)) return;
     if (str_eq(json_get_str(msg, "customType"), "skill-prompt")) { /* SkillMessageComponent */
         toolcard_break_group(u);

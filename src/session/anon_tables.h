@@ -259,6 +259,7 @@ static const char *const ANON_FIELD_RULES[][2] = {
     {"deferred", "tool"},
     {"active", "tool"},
     {"message", "struct"},
+    {"parentIrc", "struct"},
     {"usage", "struct"},
     {"cost", "struct"},
     {"cttl", "struct"},

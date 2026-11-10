@@ -27,7 +27,7 @@
 #include <pthread.h>
 
 
-typedef enum { MV_USER, MV_ASSISTANT, MV_TOOL, MV_NOTICE, MV_BASH, MV_CUSTOM, MV_SUMMARY, MV_TTSR, MV_TODO, MV_SKILL } mv_kind_t;
+typedef enum { MV_USER, MV_ASSISTANT, MV_TOOL, MV_NOTICE, MV_BASH, MV_CUSTOM, MV_SUMMARY, MV_TTSR, MV_TODO, MV_SKILL, MV_IRC } mv_kind_t;
 
 typedef struct {
     tui_component_t base;
@@ -185,6 +185,8 @@ void push_wrapped(strvec_t *out, const char *text, int width, int indent);
  * lead_gap also puts a blank row above the first block */
 tui_container_t *ui_transcript_new(bool lead_gap);
 msgview_t *mv_new(mv_kind_t k);
+/* a parent-agent IRC steer (message with `parentIrc`) as an IRC card; NULL when `m` has none */
+msgview_t *ui_parent_irc_view(const json_t *m);
 void add_view(ui_t *u, msgview_t *v);
 /* "info" -> dim status line (consecutive ones update in place), "warning" -> "Warning: …",
  * "error" -> "Error: …"; "Injecting rule: …" becomes a TTSR notice, "Retrying (n/m) in Ns…" the retry row */

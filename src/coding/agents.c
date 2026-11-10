@@ -1436,6 +1436,11 @@ static void deliver(const char *from, const char *to, const char *body, irc_flag
             json_free(c);
             m = msg_user_text(txt);
             free(txt);
+            /* original sender and body, for transcript presentation only (omp db90c0d96e) */
+            json_t *pi = json_obj();
+            json_set_str(pi, "from", from);
+            json_set_str(pi, "body", body);
+            json_set(m, "parentIrc", pi);
             json_set_str(m, "attribution", "agent");
         } else {
             /* a broadcast leg or progress note asks nothing: a busy recipient reads it at its next step boundary */

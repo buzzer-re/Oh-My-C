@@ -95,8 +95,8 @@ static char *job_label(const json_t *j) {
 }
 
 /* bodyLines: quote-bordered preview of a received message, a dim counter marking elided lines */
-static void irc_body_lines(const char *body, bool expanded, strvec_t *out) {
-    size_t max = expanded ? 12 : 2, shown = 0, hidden = 0;
+static void irc_body_lines_n(const char *body, bool expanded, size_t collapsed, strvec_t *out) {
+    size_t max = expanded ? 12 : collapsed, shown = 0, hidden = 0;
     char *quote = tc_fg(TUI_TC_DIM, tc_sym("md.quoteBorder"));
     for (const char *p = body ? body : ""; *p;) {
         size_t n = strcspn(p, "\n");
@@ -127,6 +127,30 @@ static void irc_body_lines(const char *body, bool expanded, strvec_t *out) {
         free(m);
     }
     free(quote);
+}
+
+static void irc_body_lines(const char *body, bool expanded, strvec_t *out) { irc_body_lines_n(body, expanded, 2, out); }
+
+/* createIrcMessageCard, kind "incoming" (buildParentIrcMessageCard): `IRC ← from` with its age, then up to 3
+ * body rows (12 expanded). `age` is the formatted age taken when the card was built. */
+void tc_irc_incoming_card(const char *from, const char *body, const char *age, bool expanded, int width, strvec_t *out) {
+    strvec_t rows = {0};
+    char *icon = tc_styled_sym("tool.irc", TUI_TC_ACCENT);
+    char *f = str_trim(from ? from : "");
+    char *title = xasprintf("IRC %s %s", tc_sym("nav.back"), *f ? f : "?");
+    const char *meta[1];
+    size_t nm = 0;
+    if (age && *age) meta[nm++] = age;
+    tc_status_line_t sl = {.icon_override = icon, .spinner = -1, .title = title, .title_slot = -1, .meta = meta, .nmeta = nm};
+    strvec_push_own(&rows, tc_status_line(&sl));
+    char *bt = str_trim(body ? body : "");
+    if (*bt) irc_body_lines_n(body, expanded, 3, &rows);
+    free(bt);
+    for (size_t k = 0; k < rows.n; k++) strvec_push_own(out, tui_truncate_to_width(rows.v[k], width, NULL));
+    strvec_free(&rows);
+    free(title);
+    free(f);
+    free(icon);
 }
 
 /* waitToolRenderer.renderResult, received messages: one `IRC ← from` row and body per message, oldest first */
