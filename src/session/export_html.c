@@ -696,6 +696,22 @@ static int write_export(const char *path, json_t *session_data, const char *them
     return 0;
 }
 
+/* path.resolve(outputPath || default): resolved once against the process cwd, so the written (and reported) path is
+ * absolute and normalized (omp 9ee085a440) */
+static char *resolve_out(const char *output_path, const char *session_file) {
+    char *p = output_path && *output_path ? xstrdup(output_path) : export_default_name(session_file);
+    char *r;
+    if (p[0] == '/') r = path_normalize(p);
+    else {
+        char *cwd = get_cwd(), *j = path_join(cwd ? cwd : ".", p);
+        r = path_normalize(j);
+        free(j);
+        free(cwd);
+    }
+    free(p);
+    return r;
+}
+
 int export_html_from_file(const char *session_file, const char *output_path, char **written_path, char **err) {
     *written_path = NULL;
     json_t *header, *entries;
@@ -711,7 +727,7 @@ int export_html_from_file(const char *session_file, const char *output_path, cha
     if (json_len(subs) || (json_is_obj(subs) && subs->u.obj.n)) json_set(d, "subSessions", subs);
     else json_free(subs);
     json_free(header);
-    char *out = output_path && *output_path ? xstrdup(output_path) : export_default_name(session_file);
+    char *out = resolve_out(output_path, session_file);
     int rc = write_export(out, d, NULL, err);
     json_free(d);
     if (rc) free(out);
@@ -776,7 +792,7 @@ int app_export_html(app_t *a, const char *output_path, bool use_user_themes, cha
     json_t *subs = export_collect_sub_sessions(file);
     if (json_is_obj(subs) && subs->u.obj.n) json_set(d, "subSessions", subs);
     else json_free(subs);
-    char *out = output_path && *output_path ? xstrdup(output_path) : export_default_name(file);
+    char *out = resolve_out(output_path, file);
     int rc = write_export(out, d, styles, err);
     json_free(d);
     free(styles);
