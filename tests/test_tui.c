@@ -1494,7 +1494,27 @@ static void test_wp6_editor(void) {
     free(g_action), free(g_action_prefix);
 }
 
+/* omp #17820: Enter typed during startup reaches raw mode as LF (ICRNL) */
+static void test_cooked_enter(void) {
+    char a[] = "hello\n";
+    tui_term_restore_cooked_enter(a, strlen(a));
+    CHECK_STR(a, "hello\r");
+    char b[] = "one\ntwo\n\x1b[12;1R";
+    tui_term_restore_cooked_enter(b, strlen(b));
+    CHECK_STR(b, "one\ntwo\r\x1b[12;1R");
+    char c[] = "win\r\n";
+    tui_term_restore_cooked_enter(c, strlen(c));
+    CHECK_STR(c, "win\r\n");
+    char d[] = "\x1b[1;1R\n";
+    tui_term_restore_cooked_enter(d, strlen(d));
+    CHECK_STR(d, "\x1b[1;1R\n");
+    char e[] = "abc";
+    tui_term_restore_cooked_enter(e, strlen(e));
+    CHECK_STR(e, "abc");
+}
+
 int main(void) {
+    test_cooked_enter();
     test_colorful_markdown();
     test_motion_knobs();
     test_keys();
