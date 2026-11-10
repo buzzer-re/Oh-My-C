@@ -22,7 +22,9 @@
 #define IR_BEFORE "\x01" "BEFORE "
 #define IR_AFTER "\x01" "AFTER "
 #define MAX_TUPLES 20000
-#define ATOMICITY "No operations were applied — ops apply atomically; re-send the full corrected payload."
+/* PARSE_FAILURE_NOTICE leads a section that does not parse (nothing of it applies); PARTIAL_NOTICE leads a file's rejected
+ * operations (the patch layer adds it) */
+#define PARSE_FAILURE_NOTICE "No operations were applied — the payload did not parse; re-send the full corrected payload."
 
 #define K_PARSE "parse"
 #define K_MATCH "no_match"
@@ -1157,9 +1159,8 @@ static bool no_match_error(actx_t *a, const char *content, const pattern_t *pt, 
         }
         strvec_free(&miss);
     }
-    bool standalone = a->nops == 1;
     char *correction;
-    if (!occurs && cscore < 0.35 && *ctext && standalone) {
+    if (!occurs && cscore < 0.35 && *ctext) {
         /* replacen(literal, closest, 1) over the authored pattern */
         const char *at = strstr(pat_text, lit_trim);
         char *corrected = at ? xasprintf("%.*s%s%s", (int)(at - pat_text), pat_text, ctext, at + strlen(lit_trim))
@@ -1168,12 +1169,9 @@ static bool no_match_error(actx_t *a, const char *content, const pattern_t *pt, 
         correction = xasprintf("Copy-ready corrected operation:\n%s", pl);
         free(pl);
         free(corrected);
-    } else if (standalone) {
+    } else {
         correction = xstrdup("No copy-ready correction — the closest current text is only a fuzzy match. Re-read the "
                              "region above and rebuild *** Find from the exact current text.");
-    } else {
-        correction = xstrdup("No copy-ready correction — retrying this operation alone would drop sibling "
-                             "operations. Rebuild it inside the full payload.");
     }
     char *prev = numbered_preview(content, offset);
     char *msg = xasprintf("%s%s\nCurrent file content near the closest match (no re-read needed):\n%s\n%s", first,
@@ -1780,9 +1778,23 @@ static void plan_free(plan_t *p) {
     vec_free(&p->deletions);
 }
 
-char *sloppy_apply(const char *text, const char *body, const char *path, strvec_t *notes, char **err,
-                   const char **err_kind) {
+/* join_failures: messages in order, repeats dropped, blank-line separated (owned) */
+static char *join_failures(char **msgs, size_t n) {
+    strvec_t seen = {0};
+    for (size_t i = 0; i < n; i++)
+        if (msgs[i] && !strvec_contains(&seen, msgs[i])) strvec_push(&seen, msgs[i]);
+    char *r = seen.n ? strvec_join(&seen, "\n\n") : NULL;
+    strvec_free(&seen);
+    return r;
+}
+
+/* apply_operations: locate every operation and splice the edits of those that apply; a failing operation is rejected
+ * alone. An operation whose edits overlap an earlier one's without reconciling is withheld and located again in that
+ * pass's result. A section that does not parse fails whole. */
+sloppy_outcome_t sloppy_apply(const char *text, const char *body, const char *path, strvec_t *notes, char **out_text,
+                              char **err, const char **err_kind) {
     *err = NULL;
+    *out_text = NULL;
     sops_t ops = {0};
     parse_ir(body, &ops);
     actx_t a = {path, NULL, K_MATCH, ops.n};
@@ -1792,30 +1804,48 @@ char *sloppy_apply(const char *text, const char *body, const char *path, strvec_
     int *overlapped = xcalloc(ops.n + 1, sizeof(int)); /* later -> earlier (1-based), 0 none */
     strvec_t all_notes = {0};
     char **deletions = xcalloc(ops.n + 1, sizeof(char *));
-    bool failed = false, have_last = false;
+    char **rejected = xcalloc(ops.n + 1, sizeof(char *)); /* by op index */
+    const char **rejected_kind = xcalloc(ops.n + 1, sizeof(char *));
+    bool parse_failed = false, have_last = false;
     size_t last_match = 0;
     for (;;) {
         bool any = false;
         for (size_t i = 0; i < ops.n; i++) any |= pending[i];
-        if (!any) break;
+        if (!any || parse_failed) break;
         plan_t plan;
         memset(&plan, 0, sizeof(plan));
         for (size_t i = 0; i < ops.n; i++) vec_push(&plan.deletions, NULL);
-        for (size_t i = 0; i < ops.n && !failed; i++)
-            if (pending[i] && !plan_op(&a, cur, &ops.v[i], &plan)) failed = true;
-        if (failed) {
-            sb_t pre = SB_INIT;
-            for (size_t i = 0; i < ops.n; i++)
-                if (overlapped[i])
-                    sb_appendf(&pre, "Note: operation %zu overlaps operation %d, so it was located in the file as "
-                                     "operation %d left it.\n",
-                               i + 1, overlapped[i], overlapped[i]);
-            if (pre.len) {
-                char *m = xasprintf("%s%s", sb_cstr(&pre), a.err);
-                free(a.err);
-                a.err = m;
+        for (size_t i = 0; i < ops.n && !parse_failed; i++) {
+            if (!pending[i]) continue;
+            size_t nedits = plan.edits.n, nnotes = plan.notes.n, lm = plan.last_match;
+            bool hl = plan.have_last;
+            if (plan_op(&a, cur, &ops.v[i], &plan)) continue;
+            if (!strcmp(a.kind, K_PARSE)) { /* parse-level: nothing of the section applies */
+                parse_failed = true;
+                break;
             }
-            sb_free(&pre);
+            /* rejected alone: its edits and advisories are dropped */
+            for (size_t k = nedits; k < plan.edits.n; k++) free(plan.edits.v[k].repl);
+            plan.edits.n = nedits;
+            while (plan.notes.n > nnotes) free(plan.notes.v[--plan.notes.n]);
+            plan.last_match = lm;
+            plan.have_last = hl;
+            free(plan.deletions.v[i]);
+            plan.deletions.v[i] = NULL;
+            char *msg = a.err;
+            a.err = NULL;
+            if (overlapped[i]) {
+                char *m = xasprintf("Note: operation %zu overlaps operation %d, so it was located in the file as operation %d "
+                                    "left it.\n%s",
+                                    i + 1, overlapped[i], overlapped[i], msg);
+                free(msg);
+                msg = m;
+            }
+            free(rejected[i]);
+            rejected[i] = msg;
+            rejected_kind[i] = a.kind;
+        }
+        if (parse_failed) {
             plan_free(&plan);
             break;
         }
@@ -1854,7 +1884,7 @@ char *sloppy_apply(const char *text, const char *body, const char *path, strvec_
                 deletions[i] = plan.deletions.v[i];
                 plan.deletions.v[i] = NULL;
             }
-            if (!deferred[i] && overlapped[i] && pending[i]) {
+            if (!deferred[i] && overlapped[i] && pending[i] && !rejected[i]) {
                 char *n = xasprintf("Note: operation %zu overlaps operation %d, so it was located in the file as "
                                     "operation %d left it.",
                                     i + 1, overlapped[i], overlapped[i]);
@@ -1868,31 +1898,60 @@ char *sloppy_apply(const char *text, const char *body, const char *path, strvec_
         free(deferred);
         plan_free(&plan);
     }
-    if (!failed && !strcmp(cur, text)) {
-        no_op_error(&a, 0, text, have_last ? last_match : 0, -1);
-        failed = true;
-    }
-    char *result = NULL;
-    if (failed) {
-        if (strstr(a.err, ATOMICITY)) *err = a.err;
-        else {
-            *err = xasprintf("%s\n%s", ATOMICITY, a.err);
-            free(a.err);
-        }
+    sloppy_outcome_t outcome;
+    const char *first_kind = NULL;
+    for (size_t i = 0; i < ops.n && !first_kind; i++)
+        if (rejected[i]) first_kind = rejected_kind[i];
+    if (parse_failed) {
+        *err = xasprintf("%s\n%s", PARSE_FAILURE_NOTICE, a.err);
         *err_kind = a.kind;
-        free(cur);
+        outcome = SLOPPY_FAILED;
+    } else if (!strcmp(cur, text)) {
+        *err = join_failures(rejected, ops.n);
+        if (*err) *err_kind = first_kind;
+        else {
+            no_op_error(&a, 0, text, have_last ? last_match : 0, -1);
+            *err = a.err;
+            a.err = NULL;
+            *err_kind = a.kind;
+        }
+        outcome = SLOPPY_UNCHANGED;
     } else {
+        /* a rejected operation located again in the final text quotes the file as written; one that would now apply
+         * keeps the failure it hit */
+        for (size_t i = 0; i < ops.n; i++) {
+            if (!rejected[i]) continue;
+            plan_t again;
+            memset(&again, 0, sizeof(again));
+            for (size_t k = 0; k < ops.n; k++) vec_push(&again.deletions, NULL);
+            if (!plan_op(&a, cur, &ops.v[i], &again)) {
+                free(rejected[i]);
+                rejected[i] = a.err;
+                a.err = NULL;
+            }
+            plan_free(&again);
+        }
+        *err = join_failures(rejected, ops.n);
+        if (*err) *err_kind = first_kind;
         for (size_t i = 0; i < all_notes.n; i++) strvec_push(notes, all_notes.v[i]);
         for (size_t i = 0; i < ops.n; i++)
             if (deletions[i]) strvec_push(notes, deletions[i]);
-        result = cur;
-        free(a.err);
+        *out_text = cur;
+        cur = NULL;
+        outcome = SLOPPY_CHANGED;
     }
-    for (size_t i = 0; i < ops.n; i++) free(deletions[i]);
+    free(cur);
+    free(a.err);
+    for (size_t i = 0; i < ops.n; i++) {
+        free(deletions[i]);
+        free(rejected[i]);
+    }
     free(deletions);
+    free(rejected);
+    free(rejected_kind);
     strvec_free(&all_notes);
     free(pending);
     free(overlapped);
     sops_free(&ops);
-    return result;
+    return outcome;
 }

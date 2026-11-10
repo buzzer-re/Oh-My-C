@@ -84,7 +84,7 @@ static const char *const SLOPPY_GAPS[] = {
     "accepts the Unicode ellipsis gap",
     "still deletes one of two adjacent duplicate lines without echo dedup",
     "opens a new line for an insert after the last line of a file without a trailing newline",
-    "rejects an overlapping op that no longer matches the earlier op's result atomically",
+    "rejects an overlapping op that no longer matches the earlier op's result alone",
     "resolves every batch anchor against the original content",
     "normalizes Unicode punctuation in sparse literals",
     "treats rewrite ellipses beyond the capture count as literal",
