@@ -231,7 +231,9 @@ chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp
   defers to it; the armed result is committed by the next pass when still valid for the branch.
 - **Dead ends**: when preparation finds nothing or a commit leaves no headroom (or no retry fit), a
   rescue elides inside the kept tail, then drops images; otherwise omp's dead-end warning is shown
-  and stamped on the compaction entry.
+  and stamped on the compaction entry. A threshold pass is not started at all while the system prompt and
+  tool schemas alone exceed the recovery band: it blocks automatic continuation and warns once per session
+  (`Compaction cannot create headroom …`), so it never loops every turn.
 - **Commit**: `session_append_compaction_ex()` writes omp's entry fields (`shortSummary`,
   `tokensAfter`, `method`, `providerReplayThroughEntryId`, `details`, `fromExtension`, `preserveData`),
   the context is rebuilt and `auto_compaction_start` / `auto_compaction_end` events (omp's shapes) go to

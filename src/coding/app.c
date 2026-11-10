@@ -2072,6 +2072,7 @@ void app_free(app_t *a) {
     free(a->sys_custom);
     free(a->sys_append);
     free(a->cost_refusal);
+    free(a->fixed_dead_end_session);
     free(a->plan_file);
     free(a->plan_reference_path);
     free(a->fallback.role);

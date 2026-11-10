@@ -2314,9 +2314,33 @@ static const char *context_prefix(cmp_reason_t reason) {
                                                                                                     : "Auto-compaction failed: ";
 }
 
+/* #thresholdFixedContextDeadEnd: when the system prompt and tool schemas alone exceed the recovery band, no threshold
+ * pass can land under it, and re-running one every turn loops (#18589). Warns once per session. */
+static bool threshold_fixed_context_dead_end(app_t *a) {
+    const ai_model_t *m = a->model;
+    if (!m || m->context_window <= 0 ||
+        nonmessage_tokens(a) <= (int64_t)floor((double)threshold_for(m) * RECOVERY_BAND)) {
+        free(a->fixed_dead_end_session);
+        a->fixed_dead_end_session = NULL;
+        return false;
+    }
+    const char *sid = a->session ? session_id(a->session) : NULL;
+    if (!sid || !str_eq(a->fixed_dead_end_session, sid)) {
+        app_notice(a, "warning", "%s",
+                   "Compaction cannot create headroom \xe2\x80\x94 pausing automatic maintenance. The system prompt and "
+                   "always-sent tool schemas alone exceed the recovery band; reduce fixed context or adjust "
+                   "compaction.modelThresholds.");
+        free(a->fixed_dead_end_session);
+        a->fixed_dead_end_session = sid ? xstrdup(sid) : NULL;
+    }
+    return true;
+}
+
 int cmp_auto(app_t *a, cmp_reason_t reason, bool will_retry, int64_t trigger) {
     if (reason != CMP_IDLE && !settings_bool("compaction.enabled", true)) return CMP_NONE;
     if (a->compacting || !a->session) return CMP_NONE;
+    /* every threshold caller and strategy goes through here, so the fixed-context gate lives here once */
+    if (reason == CMP_THRESHOLD && threshold_fixed_context_dead_end(a)) return CMP_BLOCKED;
     strvec_t methods = cmp_method_order();
     if (!methods.n) {
         strvec_free(&methods);

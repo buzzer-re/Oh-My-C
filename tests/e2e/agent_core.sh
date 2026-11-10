@@ -104,3 +104,16 @@ short=[r for r in rs if "as a pull request description" in json.dumps(r.get("mes
 full=[r for r in rs if "<conversation>" in json.dumps(r.get("messages", [])[-1:]) and r not in short]
 # disableReasoning on a model that cannot switch reasoning off sends its lowest effort
 print("short=%s full=%s" % ([r.get("reasoning_effort") for r in short], [r.get("reasoning_effort") for r in full]))'
+# fixed-context compaction gate (b7968ed353, 6ddfe5a1d8, f9bb58908d): a system prompt + tool schemas over the
+# recovery band block every threshold pass with one warning per session instead of compacting each turn
+FX="$T/acfixed"; mkdir -p "$FX"; cp "$T/agent/models.yml" "$FX/models.yml"
+printf 'modelRoles:\n  default: mock/mock-1\ncompaction:\n  thresholdTokens: 2000\n  asyncEnabled: false\n  methodOrder: [soft]\n' > "$FX/config.yml"
+M=$(ac_mark)
+(cd "$ACW" && timeout 60 env OMC_CODING_AGENT_DIR="$FX" python3 -I "$ROOT/tests/e2e/rpc_compact.py" "$B" '{"type":"prompt","message":"say:fixed one"}' \
+    '{"type":"prompt","message":"say:fixed two"}' '{"type":"prompt","message":"say:fixed three"}' </dev/null > "$T/acfixed.out" 2>&1)
+check "fixed context gate" "warnings=1 summaries=0 starts=0" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+ev=[json.loads(l) for l in open(sys.argv[1].replace("req.jsonl", "acfixed.out")) if l.startswith("{")]
+w=[e for e in ev if e.get("type") == "notice" and "Compaction cannot create headroom" in e.get("message", "")]
+rs=[json.loads(l) for l in open(sys.argv[1])][int(sys.argv[2]):]
+summ=[r for r in rs if "<conversation>" in json.dumps(r.get("messages", [])[-1:])]
+print("warnings=%d summaries=%d starts=%d" % (len(w), len(summ), len([e for e in ev if e.get("type") == "auto_compaction_start"])))'
