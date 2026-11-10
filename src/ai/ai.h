@@ -70,6 +70,10 @@ const ai_model_t *catalog_resolve(const char *pattern);
 const char *catalog_provider_default_model(const char *provider);
 json_t *catalog_provider_info(const char *provider);   /* borrowed: {id, envVars, defaultModel, ...} */
 json_t *catalog_auth_providers(void);                  /* borrowed array of OAuth login descriptors */
+/* auth rule `disabled "<reason>"` (providerPauseReason): the provider offers no login and nothing may call it;
+ * stored logins stay on disk. The reason is borrowed; the error ("<provider> is turned off: <reason>") owned. */
+const char *catalog_provider_pause_reason(const char *provider);
+char *catalog_provider_disabled_error(const char *provider);
 const ai_model_t *catalog_register(json_t *model_obj); /* takes ownership; for custom/discovered models */
 /* ModelRegistry.refreshIfStale: re-applies models.yml when it changed on disk since the last load (new models
  * appear, edited ones update in place, removed ones are marked gone); true when the catalog changed */

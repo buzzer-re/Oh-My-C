@@ -559,11 +559,13 @@ printf '{"google-gemini-cli":{"type":"oauth","access":"cca-token","refresh":"r1"
 check "gemini-cli models" "google-gemini-cli ("  "${GENV[@]}" "$B" models gemini-2.5-pro
 check "gemini-cli text"   "plain cca answer"     "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "hi"
 check "gemini-cli tool"   "Tool said: gc-e2e"    "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "bash:echo gc-e2e"
-check "antigravity claude" "plain cca answer"    "${GENV[@]}" "$B" --model google-antigravity/claude-opus-4-6 --no-session -p "hi"
-check "antigravity tool"  "Tool said: ag-e2e"    "${GENV[@]}" "$B" --model google-antigravity/gemini-3.1-pro --no-session -p "bash:echo ag-e2e"
+# Google Antigravity is paused by its auth rules (omp 8895c0fa32): a stored login stays on disk, but no key reaches
+# it, no request goes out and no login offers it
+check "antigravity paused" "No API key found for google-antigravity."  "${GENV[@]}" "$B" --model google-antigravity/claude-opus-4-6 --no-session -p "hi"
+check "antigravity login" "Unknown OAuth provider 'google-antigravity'"  "${GENV[@]}" "$B" login google-antigravity
 grep -q '"ua": "GeminiCLI/0.46.0/gemini-2.5-pro (' "$T/google.jsonl" && echo "   ok  gemini-cli client headers" || { echo "   FAIL gemini-cli client headers"; fail=1; }
-grep -q '"ua": "antigravity/hub/2.26.0 (aidev_client; .*"model": "claude-opus-4-6-thinking", "userAgent": "antigravity"' "$T/google.jsonl" \
-    && echo "   ok  antigravity envelope" || { echo "   FAIL antigravity envelope"; fail=1; }
+! grep -q '"ua": "antigravity/hub/' "$T/google.jsonl" && grep -q '"google-antigravity"' "$T/agent/auth.json" \
+    && echo "   ok  antigravity never called" || { echo "   FAIL antigravity never called"; fail=1; }
 grep -q '"functionResponse": {"name": "bash"' "$T/google.jsonl" && echo "   ok  cca functionResponse replay" || { echo "   FAIL cca functionResponse replay"; fail=1; }
 if [ -f "$T/auth.json.bak" ]; then mv "$T/auth.json.bak" "$T/agent/auth.json"; else rm -f "$T/agent/auth.json"; fi
 # Cursor agent (Connect + protobuf over HTTP/1.1: RunSSE stream + BidiAppend unary appends, exec channel, KV blobs)

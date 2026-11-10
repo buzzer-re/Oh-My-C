@@ -210,6 +210,11 @@ transport layer turns them into the request shape. It ports the registry `prepar
      structured`) yield a JSON key for the transport layer.
 3. environment variables named by the catalog's `envVars` for the provider (`ai_env_api_key`).
 
+A provider its auth rule pauses (`disabled "<reason>"`, at v18.18.6 Google Antigravity;
+`catalog_provider_pause_reason`) is reached by none of these: no key resolves, no token refreshes, no usage probe
+runs, no login list offers it and `omc login <id>` refuses it, and `ai_stream` answers "`<provider> is turned off:
+<reason>`" without calling it even when a key is passed in. Stored logins stay in `auth.json` untouched.
+
 **Login engines** port omp's declarative registry (`ai/src/registry/engine/*`, `registry/oauth/*`,
 `registry/hooks/*`):
 

@@ -280,6 +280,25 @@ static void test_google_base64_skip(void) {
     json_free(m);
 }
 
+/* omp 8895c0fa32: a paused provider is never called, even with a key passed in */
+static void test_paused_provider_stream(void) {
+    const ai_model_t *ag = NULL;
+    for (size_t i = 0; i < catalog_count() && !ag; i++)
+        if (str_eq(catalog_at(i)->provider, "google-antigravity")) ag = catalog_at(i);
+    CHECK(ag != NULL);
+    if (!ag) return;
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    o.api_key = "passed-in";
+    json_t *msgs = json_parse_str("[{\"role\":\"user\",\"content\":\"hi\"}]");
+    ai_context_t ctx = {.messages = msgs};
+    json_t *r = ai_stream(ag, &ctx, &o, NULL, NULL);
+    CHECK(str_eq(json_get_str(r, "stopReason"), "error"));
+    CHECK(str_starts(json_get_str(r, "errorMessage"), "google-antigravity is turned off: Google may restrict accounts"));
+    json_free(r);
+    json_free(msgs);
+}
+
 /* catalog axes resolve at runtime for bundled rows */
 static void test_catalog_policy(void) {
     const json_t *max = compat_catalog_policy("muse-code", "openai-responses", "muse-spark-1.3", "toolCallNameMaxLength");
@@ -302,6 +321,7 @@ int main(void) {
     test_fable_52();
     test_anthropic_disabled_thinking();
     test_google_base64_skip();
+    test_paused_provider_stream();
 
     /* providers present in omp's catalog but absent from its bundled rows */
     CHECK(catalog_find("charm-hyper", "glm-5.3") || catalog_find("charm-hyper", "deepseek-v4-flash-0731"));
