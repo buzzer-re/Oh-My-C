@@ -86,7 +86,9 @@ static void ui_apply_partial(void *ud) {
         u->cur_assistant->msg = json_obj();
         u->cur_assistant->streaming = true;
         add_view(u, u->cur_assistant);
+        toolcard_stream_begin();
     }
+    toolcard_retract_abandoned(u, p); /* omp bfa62bcba1: a provider replay abandoned previewed tool calls */
     json_free(u->cur_assistant->msg);
     u->cur_assistant->msg = p;
     u->cur_assistant->dirty = true;

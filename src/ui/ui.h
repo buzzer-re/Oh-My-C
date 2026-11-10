@@ -262,6 +262,10 @@ void toolcard_frames_reset(void); /* a session switch drops the cached backgroun
 void toolcard_preview(ui_t *u, const char *id, const char *name, const json_t *args);
 /* omp setArgsComplete at message_end: the assistant message's tool-call arguments are final */
 void toolcard_args_complete(ui_t *u, const json_t *msg);
+/* a new assistant message starts streaming: forget the previous message's previews */
+void toolcard_stream_begin(void);
+/* a provider replay restarted the streaming message: drop previews of tool calls it no longer holds */
+void toolcard_retract_abandoned(ui_t *u, const json_t *partial);
 
 /* statusline.c */
 tui_component_t *ui_status_new(ui_t *u);   /* standalone bottom bar (pi/borderless/claude/rule/field/rail) */
