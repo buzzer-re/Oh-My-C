@@ -354,6 +354,8 @@ check "branch summary request" 'request "<conversation>\n\n\nAssistant: plain an
 # plan mode without a review surface: xd://propose auto-approves (ACP-without-elicitation semantics)
 check "plan propose"   'Tool said: Plan approved at local://retry-plan.md. Plan mode exited; proceed with the implementation.' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-mode
 check "plan propose dispatch" '"xdev": {"args": {"title": "retry"}, "inner": {"planExists": true, "planFilePath": "local://retry-plan.md", "title": "retry"}, "mode": "execute", "tool": "propose"}' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-mode
+# omp 5fd26783af: the approval is recorded, so a resumed session trusts only an approved plan as its reference
+check "plan approval entry" '"mode":"none","data":{"approvedPlanFilePath":"local://retry-plan.md"}' bash -c 'grep -ho "\"mode\":\"none\",\"data\":{[^}]*}" $(ls -t "$0"/agent/sessions/*/*.jsonl | head -1)' "$T"
 check "plan propose off" 'No plan is awaiting approval' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B"
 # --plan-yolo: plan phase first, approved on the first propose, then implemented on the hand-off model
 check "plan yolo"      '"tool": "propose"}} Plan approved. Implementing now with mock-1.' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-yolo --plan-yolo-into mock/mock-1

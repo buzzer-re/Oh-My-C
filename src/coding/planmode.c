@@ -363,6 +363,7 @@ void app_enter_plan_mode(app_t *a, const char *plan_file) {
     a->plan_reference_sent = false;
     free(a->plan_reference_path);
     a->plan_reference_path = xstrdup(p);
+    a->plan_reference_approved = false; /* a draft is not execution consent */
     a->plan_reentry = a->plan_has_entered;
     a->plan_has_entered = true;
     install_propose(a);
@@ -455,13 +456,28 @@ void app_set_plan_review_ui(app_t *a, bool on) {
     install_propose(a);
 }
 
+/* setPlanReferencePath: marks a reviewed plan as approved so later prompts may reference it */
 void app_set_plan_reference(app_t *a, const char *path) {
     free(a->plan_reference_path);
     a->plan_reference_path = xstrdup(path ? path : DEFAULT_PLAN_URL);
+    a->plan_reference_approved = true;
+}
+
+/* appendModeChange("none", {approvedPlanFilePath}): the recorded approval a resumed session trusts */
+void app_plan_record_approval(app_t *a, const char *path) {
+    if (!a->session) return;
+    json_t *e = json_obj();
+    json_set_str(e, "type", "mode_change");
+    json_set_str(e, "mode", "none");
+    json_t *d = json_obj();
+    json_set_str(d, "approvedPlanFilePath", path);
+    json_set(e, "data", d);
+    session_append_entry(a->session, e);
 }
 
 json_t *app_plan_reference_message(app_t *a) {
     if (a->plan_mode || a->plan_reference_sent) return NULL;
+    if (!a->plan_reference_approved) return NULL; /* a draft's file path alone is not execution consent */
     char *c = app_plan_read(a, a->plan_reference_path ? a->plan_reference_path : DEFAULT_PLAN_URL);
     if (!c) return NULL;
     char *t = str_trim(c);
@@ -559,6 +575,7 @@ static char *propose_auto(tool_env_t *env, const char *title, bool *is_error, js
     a->plan_reference_sent = false;
     a->plan_mode = false;
     a->env->propose_plan = NULL;
+    app_plan_record_approval(a, path);
     app_rebuild_system_prompt(a);
     char *aerr = NULL;
     char *saved = app_plan_autosave(a, rt, content, &aerr);
@@ -729,6 +746,22 @@ int app_plan_restore_from_session(app_t *a) {
     if (!a->session) return 0;
     json_t *path = session_path_to(a->session, a->session->leaf_id);
     const json_t *last = NULL, *e;
+    /* only a recorded approval may turn a draft file into an execution reference: the newest mode_change back to the
+     * last plan / plan_paused entry */
+    a->plan_reference_approved = false;
+    for (size_t i = json_len(path); i-- > 0;) {
+        const json_t *x = json_at(path, i);
+        if (!str_eq(json_get_str(x, "type"), "mode_change")) continue;
+        const char *m = json_get_str(x, "mode");
+        if (str_eq(m, "plan") || str_eq(m, "plan_paused")) break;
+        const char *ap = json_get_str(json_get(x, "data"), "approvedPlanFilePath");
+        if (ap) {
+            free(a->plan_reference_path);
+            a->plan_reference_path = xstrdup(ap);
+            a->plan_reference_approved = true;
+            break;
+        }
+    }
     json_arr_foreach(path, i, e) if (str_eq(json_get_str(e, "type"), "mode_change")) last = e;
     const char *mode = last ? json_get_str(last, "mode") : NULL;
     int r = 0;

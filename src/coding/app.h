@@ -103,6 +103,7 @@ struct app {
     bool plan_review_ui;        /* xd://propose opens a review (TUI) instead of approving automatically */
     char *plan_reference_path;  /* approved plan re-injected (plan-mode-reference.md) after history rewrites */
     bool plan_reference_sent;
+    bool plan_reference_approved; /* only an approved plan becomes an execution reference (omp 5fd26783af) */
     const ai_model_t *plan_prev_model; /* the model before the `plan` role took over (restored on exit) */
     ai_effort_t plan_prev_thinking;
     bool plan_prev_set;
@@ -254,6 +255,7 @@ void app_set_plan_file(app_t *a, const char *plan_file);   /* promote a reviewed
 void app_set_plan_review_ui(app_t *a, bool on);
 /* restore plan mode from the session's last mode_change (resume / switch): 1 plan, 2 paused, 0 none */
 int app_plan_restore_from_session(app_t *a);
+void app_plan_record_approval(app_t *a, const char *path); /* mode_change none {approvedPlanFilePath} */
 void app_exit_plan_mode_silently(app_t *a);
 bool app_plan_should_start(app_t *a); /* plan.defaultOnStartup applies to this (fresh) session */
 void app_set_plan_reference(app_t *a, const char *path);

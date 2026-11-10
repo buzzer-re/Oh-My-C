@@ -1226,6 +1226,7 @@ static void *plan_exec_main(void *p) {
         free(instr);
     }
     app_set_plan_reference(a, x->path);
+    app_plan_record_approval(a, x->path);
     char *aerr = NULL;
     char *saved = app_plan_autosave(a, x->title, x->content, &aerr);
     if (saved) {
@@ -1651,6 +1652,9 @@ static bool plan_has_draft(app_t *a) {
 static void plan_exit_confirmed(void *ud, bool yes) {
     ui_t *u = ud;
     if (!yes || !u->app->plan_mode) return;
+    /* an open review must not outlive the plan mode it approves: a later pick would autosave and dispatch the plan
+     * while plan mode is paused (omp 660900d90e) */
+    if (g_pr.open || g_pr.exec_pending) pr_finish(u, NULL);
     if (u->worker_running) app_abort(u->app);
     app_exit_plan_mode(u->app, true);
     add_notice(u, "info", "Plan mode paused.");
