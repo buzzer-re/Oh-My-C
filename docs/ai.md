@@ -291,7 +291,11 @@ There are two levels:
    A usage-limit wait runs on a wall-clock deadline taken before `auto_retry_start`, so system sleep counts toward it;
    ordinary backoff stays monotonic.
 3. **Model fallback** (`try_retry_fallback` in `app.c`, chains in `config/model_resolver.c`): `retry.fallbackChains`
-   is walked on retryable and hard errors (see [status.md](status.md), "Retry model fallback"). A prompt whose model
+   is walked on retryable and hard errors (see [status.md](status.md), "Retry model fallback"). The chain key comes
+   from the current selector, with the branch's last assigned role (`model_change` role, temporary `fallback` and
+   `prewalk` switches skipped) as the hint while that role's configured model is the current one; `--model pi/<role>`
+   (also `@<role>` or a bare configured role name) records that role after the default entry, on `--continue` too, so
+   its retries walk the role's chain, not `default`'s. A prompt whose model
    has no usable credential (`auth_has_usable_credential`: none stored or in the environment, or an OAuth token still
    expired after its refresh) walks the same chain before it is sent (`credential_preflight` in `app.c`, omp
    `applyMissingCredentialFallback`), unpinned so the primary returns with its credential. With no candidate, or

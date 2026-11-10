@@ -987,6 +987,25 @@ static char *current_selector(app_t *a) {
     return s;
 }
 
+/* turn-recovery.ts #liveRetryRoleHint: the role the branch last assigned (temporary fallback / prewalk switches
+ * passed over), when its configured model is the current one; owned or NULL */
+static char *live_retry_role_hint(app_t *a) {
+    if (!a->session || !a->model) return NULL;
+    json_t *path = session_path_to(a->session, a->session->leaf_id);
+    const char *role = NULL;
+    for (size_t i = json_len(path); i-- > 0 && !role;) {
+        const json_t *e = json_at(path, i);
+        if (!str_eq(json_get_str(e, "type"), "model_change")) continue;
+        const char *r = json_get_str(e, "role") ? json_get_str(e, "role") : "default";
+        if (str_eq(r, "fallback") || str_eq(r, "prewalk")) continue;
+        role = r;
+    }
+    char *out = NULL;
+    if (role && mr_role_get(role) && app_resolve_model_pattern(mr_role_get(role), NULL, NULL) == a->model) out = xstrdup(role);
+    json_free(path);
+    return out;
+}
+
 /* the last assistant turn before the failed one carries Anthropic signed thinking from another model */
 static bool signed_thinking_blocks(agent_t *ag, const json_t *failed, const ai_model_t *cand) {
     json_t *msgs = ag->messages, *last = NULL;
@@ -1045,7 +1064,9 @@ static void apply_fallback(app_t *a, const char *role, const ai_model_t *cand, c
 static bool try_retry_fallback(app_t *a, agent_t *ag, const char *cur, const json_t *failed, const char *err,
                                bool same_model_retry) {
     strvec_t keys = {0};
-    char *own = mr_fallback_chain_key(cur, a->model, NULL);
+    char *hint = live_retry_role_hint(a);
+    char *own = mr_fallback_chain_key(cur, a->model, hint);
+    free(hint);
     if (a->fallback.active && a->fallback.role) strvec_push(&keys, a->fallback.role);
     if (own && !strvec_contains(&keys, own)) strvec_push(&keys, own);
     free(own);
@@ -1091,7 +1112,9 @@ static bool missing_credential_fallback(app_t *a) {
     if (!settings_bool("retry.modelFallback", true)) return false;
     char *cur = current_selector(a);
     strvec_t keys = {0};
-    char *own = mr_fallback_chain_key(cur, a->model, NULL);
+    char *hint = live_retry_role_hint(a);
+    char *own = mr_fallback_chain_key(cur, a->model, hint);
+    free(hint);
     if (a->fallback.active && a->fallback.role) strvec_push(&keys, a->fallback.role);
     if (own && !strvec_contains(&keys, own)) strvec_push(&keys, own);
     free(own);
@@ -1717,6 +1740,13 @@ void app_rebuild_system_prompt(app_t *a) {
     strvec_free(&names);
 }
 
+static void record_initial_model_change(app_t *a, const char *role) {
+    char *label = app_model_label(a);
+    session_append_model_change(a->session, label, NULL);
+    if (role && strcmp(role, "default") != 0) session_append_model_change(a->session, label, role);
+    free(label);
+}
+
 static void load_session_into_agent(app_t *a) {
     xdnotice_reset_announced(a); /* the replaced transcript's notices no longer apply */
     session_context_t sc;
@@ -1821,6 +1851,17 @@ app_t *app_create(const app_opts_t *o, char **err) {
     a->thinking = eff;
     /* main.ts overrideModelRoles: `--model` is the session's default role (roles that inherit it, like smol, follow), with
      * the effort it starts at; ephemeral, never persisted */
+    /* resolveCliModel configuredRole: `--model pi/<role>` / `@<role>` / a bare configured role name */
+    char *cli_role = NULL;
+    if (o->model && a->model && !o->subagent && !o->provider) {
+        cli_role = mr_explicit_role(o->model);
+        if (!cli_role) {
+            char *base = NULL;
+            mr_split_level(o->model, -1, true, &base);
+            if (base && !strchr(base, '/') && mr_role_get(base)) cli_role = xstrdup(base);
+            free(base);
+        }
+    }
     if (o->model && a->model && !o->subagent) {
         char *key = mr_model_key(a->model);
         char *val = has_eff && !a->auto_thinking ? mr_selector_with_level(key, effort_name(eff)) : xstrdup(key);
@@ -1873,12 +1914,14 @@ app_t *app_create(const app_opts_t *o, char **err) {
         char *path = session_resolve(o->resume, a->cwd);
         if (!path) {
             *err = xasprintf("Session not found: %s", o->resume);
+            free(cli_role);
             app_free(a);
             return NULL;
         }
         a->session = session_open(path, err);
         free(path);
         if (!a->session) {
+            free(cli_role);
             app_free(a);
             return NULL;
         }
@@ -1888,6 +1931,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
         free(path);
         if (!src) {
             if (!*err) *err = xasprintf("Session not found: %s", o->fork);
+            free(cli_role);
             app_free(a);
             return NULL;
         }
@@ -1928,6 +1972,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (!a->model && !o->allow_no_model) {
         *err = xstrdup("No model available. Set an API key (e.g. ANTHROPIC_API_KEY or OPENAI_API_KEY), run `omc login`, "
                        "or pass --model provider/id with --api-key.");
+        free(cli_role);
         app_free(a);
         return NULL;
     }
@@ -1945,6 +1990,10 @@ app_t *app_create(const app_opts_t *o, char **err) {
     modelctl_tiers_from_settings(&a->tiers);
     bool resumed = json_len(a->session->entries) > 0;
     if (resumed) load_session_into_agent(a);
+    /* sdk.ts recordInitialModelChange: an explicit model (or role) on a resumed session is recorded as the default
+     * entry, then its role's own entry so retry chain lookup prefers that role's chain while resume still restores
+     * this model as the default */
+    if (resumed && a->model && o->model && !o->subagent && a->session->persist) record_initial_model_change(a, cli_role);
     /* sdk.ts initial service tiers: a resolver (subagent tier.subagent) or --service-tier overrides the session's /
      * configured map and is persisted */
     bool persist_tiers = o->service_tier || o->service_tiers;
@@ -1960,12 +2009,13 @@ app_t *app_create(const app_opts_t *o, char **err) {
     xdnotice_init(a);
     if (!json_len(a->session->entries) && a->session->persist && a->model) {
         char *label = app_model_label(a);
-        session_append_model_change(a->session, label, NULL);
+        record_initial_model_change(a, cli_role);
         /* `auto` is not written before the first turn resolves (sdk.ts) */
         if (!a->auto_thinking) session_append_thinking_change(a->session, effort_name(a->thinking));
         if (persist_tiers || !modelctl_tiers_empty(&a->tiers)) app_append_service_tier_entry(a);
         free(label);
     }
+    free(cli_role);
     a->title_done = a->session->title != NULL;
     if (settings_bool("advisor.enabled", false) && !o->subagent) app_set_advisor(a, true);
     if (!o->subagent) {

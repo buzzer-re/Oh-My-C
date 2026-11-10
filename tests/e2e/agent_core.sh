@@ -74,3 +74,19 @@ bs, es = text(b["messages"][0]), text(e["messages"][0])
 bal = "Unfamiliar subsystem? Explore it with a read-only `scout` while you keep working" in bs and "Map unknown code" not in bs and "Task + scout" not in desc(b, "grep")
 eag = "Map unknown code via `task`" in es and "Delegation preferred." in es and "Unfamiliar subsystem?" not in es
 print("balanced=%s eager=%s" % (bal, eag))'
+# role ownership for retry chains (8cf606f833, 85ad332028): `--model pi/<role>` records the role after the default
+# entry, so a retry walks that role's retry.fallbackChains entry instead of `default`'s, also on --continue
+export RO="$T/acrole"; mkdir -p "$RO/agent" "$RO/work"; cp "$T/agent/models.yml" "$RO/agent/models.yml"
+printf 'modelRoles:\n  slow: mock/mock-flaky\nretry:\n  fallbackChains:\n    default: [mock/mock-think]\n    slow: [mock/mock-2]\n' > "$RO/agent/config.yml"
+M=$(ac_mark)
+(cd "$RO/work" && timeout 60 env OMC_CODING_AGENT_DIR="$RO/agent" "$B" --model pi/slow -p 'say:role chain' </dev/null >/dev/null 2>&1)
+(cd "$RO/work" && timeout 60 env OMC_CODING_AGENT_DIR="$RO/agent" "$B" --continue --model pi/slow -p 'say:role chain again' </dev/null >/dev/null 2>&1)
+check "role retry chain" "chain=mock-2 again=mock-2 entries=True" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+import glob, os
+def walk(w):  # the transport retries the 429 itself; the session then walks the role chain
+    ms = [r["model"] for r in main if text(r["messages"][-1]).endswith(w)]
+    return ms[-1] if ms and ms[0] == "mock-flaky" and "mock-think" not in ms else ms
+f = sorted(glob.glob(os.path.join(os.environ["RO"], "agent", "sessions", "**", "*.jsonl"), recursive=True))[-1]
+mc = [(e.get("model"), e.get("role")) for e in map(json.loads, open(f)) if e.get("type") == "model_change"]
+ok = mc[:2] == [("mock/mock-flaky", None), ("mock/mock-flaky", "slow")] and ("mock/mock-flaky", "slow") in mc[2:]
+print("chain=%s again=%s entries=%s" % (walk("role chain"), walk("role chain again"), ok))'
