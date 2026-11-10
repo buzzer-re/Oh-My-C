@@ -73,7 +73,7 @@ static void test_restart_argv(void) {
                     "--session", "s1", "--thinking=high", "--", "--model", "x"};
     launch_remember_argv((int)ARRAY_LEN(argv), argv);
     strvec_t k = launch_restart_argv("/s/f.jsonl");
-    const char *want[] = {"--model", "mock/m", "--add-dir", "d", "--thinking=high", "--resume", "/s/f.jsonl"};
+    const char *want[] = {"--model", "mock/m", "--add-dir", "d", "--thinking=high", "--restore", "/s/f.jsonl"};
     bool ok = k.n == ARRAY_LEN(want);
     for (size_t i = 0; ok && i < k.n; i++) ok = str_eq(k.v[i], want[i]);
     sb_t got = SB_INIT;

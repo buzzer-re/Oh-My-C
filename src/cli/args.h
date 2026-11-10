@@ -71,7 +71,8 @@ void launch_report_usage_error(const char *msg);
 bool resolve_cli_argv(int argc, char **argv, strvec_t *out, char **err);
 
 /* /restart: the process argv (kept by omc_main) rewritten by restartArgv: one-shot session selectors and
- * positionals dropped, `--resume <resume_source>` appended when given (owned, without the program name) */
+ * positionals dropped, `--restore <resume_source>` appended when given, so a turn the teardown cut off goes on (owned,
+ * without the program name) */
 void launch_remember_argv(int argc, char **argv);
 strvec_t launch_restart_argv(const char *resume_source);
 

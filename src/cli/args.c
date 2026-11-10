@@ -597,8 +597,8 @@ strvec_t launch_restart_argv(const char *resume_source) {
         strvec_push(&kept, arg);
         if (consumes) strvec_push(&kept, g_proc_argv[++i]);
     }
-    if (resume_source) {
-        strvec_push(&kept, "--resume");
+    if (resume_source) { /* --restore: a turn the teardown cut off goes on in the relaunched process */
+        strvec_push(&kept, "--restore");
         strvec_push(&kept, resume_source);
     }
     return kept;
