@@ -211,7 +211,11 @@ chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp
   compaction beta (`compat.supportsServerCompaction` on a supported route) sends `compaction:
   {type: "summarize", instructions}` with `compact-2026-09-04`, keeps the signed block in
   `preserveData.anthropicCompaction` and replays it as a `compaction` block at the head of the kept
-  tail. A native failure falls through to the next method.
+  tail. A native failure falls through to the next method. The context is built for the model that reads
+  it (`session_build_context_as`): a model that cannot replay the newest OpenAI payload (another provider, or a
+  non-Responses API) stands on the newest compaction it can read and carries the raw history behind the
+  unreadable one, a model switch rebuilds the agent's messages when the two models stand on different
+  boundaries, and compaction preparation re-expands a trailing payload the active model cannot reuse.
 - **Method ladder** (`compaction.methodOrder`, default remote → snapcompact → handoff → shake → soft):
   manual `/compact` uses remote/soft (a `/compact <mode>` overrides the order); automatic passes
   (`cmp_auto`) run the first usable method and fall through on failure or when a pass would not reduce

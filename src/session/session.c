@@ -644,24 +644,61 @@ json_t *session_compaction_payload(const json_t *compaction, bool *openai_histor
     return NULL;
 }
 
-static void build_context_path(const json_t *path, session_context_t *out);
+typedef struct {
+    const char *provider, *api; /* NULL provider: any reader */
+} reader_t;
+
+static void build_context_path(const json_t *path, session_context_t *out, const reader_t *rd);
+
+/* isOpenAiRemoteCompactionApi */
+static bool responses_api(const char *api) {
+    return str_eq(api, "openai-responses") || str_eq(api, "azure-openai-responses") || str_eq(api, "openai-codex-responses");
+}
+
+bool session_compaction_readable(const json_t *c, const char *provider, const char *api) {
+    if (!provider) return true;
+    const json_t *oa = json_get_obj(json_get_obj(c, "preserveData"), "openaiRemoteCompaction");
+    if (!oa || !json_is_arr(json_get(oa, "replacementHistory"))) return true;
+    return str_eq(json_get_str(oa, "provider"), provider) && responses_api(api);
+}
 
 void session_build_context(const session_t *s, session_context_t *out) {
+    session_build_context_as(s, NULL, NULL, out);
+}
+
+void session_build_context_as(const session_t *s, const char *provider, const char *api, session_context_t *out) {
     memset(out, 0, sizeof(*out));
     out->messages = json_arr();
     if (!s->leaf_id) return;
     json_t *path = session_path_to(s, s->leaf_id);
-    build_context_path(path, out);
+    reader_t rd = {provider, api};
+    build_context_path(path, out, &rd);
     json_free(path);
+}
+
+const char *session_readable_compaction(const session_t *s, const char *provider, const char *api) {
+    if (!s->leaf_id) return NULL;
+    json_t *path = session_path_to(s, s->leaf_id);
+    const char *id = NULL;
+    for (size_t i = json_len(path); i-- > 0 && !id;) {
+        const json_t *e = json_at(path, i);
+        if (str_eq(json_get_str(e, "type"), "compaction") && session_compaction_readable(e, provider, api)) {
+            const json_t *orig = hmap_get(&s->by_id, json_get_str(e, "id"));
+            id = orig ? json_get_str(orig, "id") : NULL;
+        }
+    }
+    json_free(path);
+    return id;
 }
 
 void session_build_context_for(const json_t *path, session_context_t *out) {
     memset(out, 0, sizeof(*out));
     out->messages = json_arr();
-    build_context_path(path, out);
+    reader_t rd = {NULL, NULL};
+    build_context_path(path, out, &rd);
 }
 
-static void build_context_path(const json_t *path, session_context_t *out) {
+static void build_context_path(const json_t *path, session_context_t *out, const reader_t *rd) {
     size_t n = json_len(path);
     ssize_t boundary = -1, compaction = -1;
     for (size_t i = 0; i < n; i++) {
@@ -689,7 +726,7 @@ static void build_context_path(const json_t *path, session_context_t *out) {
             boundary = (ssize_t)i;
             compaction = -1;
         } else if (str_eq(t, "compaction")) {
-            compaction = (ssize_t)i;
+            if (session_compaction_readable(e, rd->provider, rd->api)) compaction = (ssize_t)i;
         }
     }
     size_t start = (size_t)(boundary + 1);

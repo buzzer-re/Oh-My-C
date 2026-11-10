@@ -81,6 +81,16 @@ typedef struct {
     int64_t compaction_tokens_before;
 } session_context_t;
 void session_build_context(const session_t *s, session_context_t *out);
+/* buildSessionContext({model}): the context as a reader (provider + api) reads it. A compaction whose OpenAI remote
+ * payload the reader cannot replay (another provider, or a non-Responses API) summarizes nothing for it, so the
+ * context stands on the newest compaction it can read and carries the raw history behind the unreadable one.
+ * NULL provider: the newest compaction. */
+void session_build_context_as(const session_t *s, const char *provider, const char *api, session_context_t *out);
+/* getReadableCompactionEntry: id of the newest compaction on the current branch the reader can read (borrowed from
+ * the session's entries), or NULL */
+const char *session_readable_compaction(const session_t *s, const char *provider, const char *api);
+/* canReplayRemoteCompaction: whether a reader can replay a compaction entry's provider-native payload */
+bool session_compaction_readable(const json_t *compaction, const char *provider, const char *api);
 /* the same over an explicit root..leaf entry array (projections over a pending entry) */
 void session_build_context_for(const json_t *path, session_context_t *out);
 /* convertToLlm for a persisted message (custom roles: bash/python execution, hook messages); owned or NULL */

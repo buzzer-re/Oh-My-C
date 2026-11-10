@@ -321,7 +321,10 @@ static int prepare(app_t *a, const ai_model_t *model, prep_t *p) {
     size_t n = json_len(p->path);
     if (!n) return 2;
     const json_t *last = json_at(p->path, n - 1);
-    if (str_eq(json_get_str(last, "type"), "compaction") && !json_get_str(last, "providerReplayThroughEntryId")) return 1;
+    /* a trailing boundary this preparation re-expands (one the active model cannot reuse) covers nothing yet */
+    if (str_eq(json_get_str(last, "type"), "compaction") && !json_get_str(last, "providerReplayThroughEntryId") &&
+        (!model || preserve_reusable(last, model)))
+        return 1;
     ssize_t prev = -1, reset = -1;
     for (size_t i = n; i-- > 0 && prev < 0;) {
         const json_t *e = json_at(p->path, i);
@@ -1078,8 +1081,8 @@ static int64_t project_after(app_t *a, const prep_t *p, const result_t *r, const
 }
 
 static int64_t branch_tokens(app_t *a) {
-    session_context_t sc;
-    session_build_context(a->session, &sc);
+    session_context_t sc; /* as the active model reads it */
+    session_build_context_as(a->session, a->model ? a->model->provider : NULL, a->model ? a->model->api : NULL, &sc);
     int64_t n = messages_tokens(sc.messages);
     session_context_free(&sc);
     return n + nonmessage_tokens(a);

@@ -150,7 +150,30 @@ const char *app_wire_thinking(app_t *a) {
 }
 
 /* model_changed / thinking_level_changed after a model or thinking mutation (only for real changes) */
+static void build_context_for_model(app_t *a, const ai_model_t *m, session_context_t *sc);
+
+/* #setModel: a model that cannot replay the latest provider-native compaction reads the history behind it instead;
+ * rebuild the context whenever the two models stand on different boundaries. A switch made while the failed turn is
+ * being retried leaves out only that failed turn (persisted at its message_end, never in the live history). */
+static void reread_context_for_switch(app_t *a, const ai_model_t *prev) {
+    if (!a->session || !a->model || prev == a->model) return;
+    const char *was = session_readable_compaction(a->session, prev ? prev->provider : NULL, prev ? prev->api : NULL);
+    const char *now = session_readable_compaction(a->session, a->model->provider, a->model->api);
+    if (str_eq(was, now)) return;
+    session_context_t sc;
+    build_context_for_model(a, a->model, &sc);
+    size_t n = json_len(sc.messages);
+    const json_t *last = n ? json_at(sc.messages, n - 1) : NULL;
+    if (agent_is_running(a->agent) && str_eq(json_get_str(last, "role"), "assistant") &&
+        (str_eq(json_get_str(last, "stopReason"), "error") || str_eq(json_get_str(last, "stopReason"), "aborted")))
+        json_free(json_arr_remove(sc.messages, n - 1));
+    agent_replace_messages(a->agent, sc.messages);
+    sc.messages = NULL;
+    session_context_free(&sc);
+}
+
 void app_model_state_changed(app_t *a, const ai_model_t *prev_model, const char *prev_thinking) {
+    reread_context_for_switch(a, prev_model);
     if (!a->session_event) return;
     if (prev_model != a->model) {
         json_t *e = json_obj();
@@ -1747,18 +1770,32 @@ static void record_initial_model_change(app_t *a, const char *role) {
     free(label);
 }
 
+/* the agent's messages as `m` reads them (SessionProviderBoundary.buildDisplaySessionContext(model)) */
+static void build_context_for_model(app_t *a, const ai_model_t *m, session_context_t *sc) {
+    session_build_context_as(a->session, m ? m->provider : NULL, m ? m->api : NULL, sc);
+}
+
 static void load_session_into_agent(app_t *a) {
     xdnotice_reset_announced(a); /* the replaced transcript's notices no longer apply */
     session_context_t sc;
-    session_build_context(a->session, &sc);
+    build_context_for_model(a, a->model, &sc);
+    const ai_model_t *restored = sc.model && !a->opts.model ? catalog_resolve(sc.model) : NULL;
+    if (restored && restored != a->model &&
+        !str_eq(session_readable_compaction(a->session, a->model ? a->model->provider : NULL, a->model ? a->model->api : NULL),
+                session_readable_compaction(a->session, restored->provider, restored->api))) {
+        /* the first build was read by the departing model; rebuild it for the one this session adopts */
+        session_context_t again;
+        build_context_for_model(a, restored, &again);
+        json_free(sc.messages);
+        sc.messages = again.messages;
+        again.messages = NULL;
+        session_context_free(&again);
+    }
     agent_replace_messages(a->agent, sc.messages);
     sc.messages = NULL;
-    if (sc.model && !a->opts.model) {
-        const ai_model_t *m = catalog_resolve(sc.model);
-        if (m) {
-            a->model = m;
-            agent_set_model(a->agent, m);
-        }
+    if (restored) {
+        a->model = restored;
+        agent_set_model(a->agent, restored);
     }
     /* restoreServiceTiers: the session's latest service_tier_change, else the configured tier.* settings */
     ai_service_tiers_t tiers;
