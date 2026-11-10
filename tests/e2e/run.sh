@@ -579,6 +579,7 @@ check "cursor text"     "plain cursor answer"   "${CENV[@]}" "$B" --model "$CM" 
 check "cursor shell"    "Tool said: cur-e2e"    "${CENV[@]}" "$B" --model "$CM" --session-dir "$T/cur" -p "bash:echo cur-e2e"
 check "cursor history"  "user,assistant,tool,assistant"  "${CENV[@]}" "$B" --model "$CM" --session-dir "$T/cur" -c -p "history"
 check "cursor read"     "Read said: cursor line one"     "${CENV[@]}" "$B" --model "$CM" --no-session -p "read:$T/cur/r.txt"
+check "cursor xd read"  "Read said: # debug"              "${CENV[@]}" "$B" --model "$CM" --no-session -p "read:xd://debug"
 check "cursor mcp"      "MCP said: "            "${CENV[@]}" "$B" --model "$CM" --no-session -p 'mcp:glob:{"path":"**/*.txt"}'
 check "cursor end err"  "Connect error resource_exhausted: Error"  "${CENV[@]}" "$B" --model "$CM" --no-session -p "fail"
 check "cursor retry"    "recovered"             "${CENV[@]}" "$B" --model "$CM" --no-session -p "flaky"
