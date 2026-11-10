@@ -205,7 +205,11 @@ unit.
 
 A bash job keeps the call's `i` intent as one line of plain text with home paths shortened (`job_clean_intent`). `/jobs`,
 `/jobs full`, `proc://` listings, the wait card and `wait` results (omp `buildJobResult`: `## Completed`, `Intent:`,
-`Label:`, `Delivery:`, `## Still Running`) lead with it ahead of the raw command line. `/jobs full` also asks the `widget`
+`Label:`, `Delivery:`, `## Still Running`) lead with it ahead of the raw command line. The `Delivery:` line says how the
+result reached the call: `delivered by this wait — it finished while you were waiting.` for a job that settled after
+the call began, else `handed over by this snapshot (it finished <age> before this call) — this snapshot superseded its
+queued completion push.` (settled jobs are delivered at the next turn boundary, so an earlier one always had its push
+queued). `/jobs full` also asks the `widget`
 role's model (role, then the `smol` defaults, first with a credential) for a one-line caption of each running command that
 ran 15 s and needs explaining (`job_caption_needed`), at most two requests at once and once per job; the caption shows on a
 later listing, under the intent, while `async.widgets` is on. omp also requests it when a job's widget is shown; omc has no
