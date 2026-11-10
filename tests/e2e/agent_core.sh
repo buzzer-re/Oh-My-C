@@ -117,3 +117,12 @@ w=[e for e in ev if e.get("type") == "notice" and "Compaction cannot create head
 rs=[json.loads(l) for l in open(sys.argv[1])][int(sys.argv[2]):]
 summ=[r for r in rs if "<conversation>" in json.dumps(r.get("messages", [])[-1:])]
 print("warnings=%d summaries=%d starts=%d" % (len(w), len(summ), len([e for e in ev if e.get("type") == "auto_compaction_start"])))'
+# wait delivery lines (974c8b5a43, 1d6e0afcad): a job that finished during the wait was delivered by it; one that had
+# already finished (its completion push still queued) is handed over by the snapshot, which supersedes that push
+M=$(ac_mark)
+(cd "$ACW" && timeout 60 "$B" --model mock/mock-1 --no-session -p 'batch:[["bash",{"command":"echo early","async":true}],["bash",{"command":"sleep 1"}],["wait",{}]]' </dev/null >/dev/null 2>&1)
+check "wait delivery" "superseded=True" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+import re
+tools=[text(m) for r in main for m in r["messages"] if m.get("role") == "tool"]
+ok=any(re.search(r"Delivery: handed over by this snapshot \(it finished [0-9.]+m?s before this call\) — this snapshot superseded its queued completion push\.", t) for t in tools)
+print("superseded=%s" % ok)'

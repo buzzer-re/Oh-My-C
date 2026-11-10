@@ -1185,9 +1185,24 @@ static const int64_t WAIT_LADDER_MS[] = {5000, 10000, 30000, 60000, 300000};
 #define WAIT_SETTLE_WINDOW_MS 1500 /* after one watched job settles, near-simultaneous completions share the result */
 #define WAIT_PROGRESS_INTERVAL_MS 500
 
-/* buildJobResult("wait"): the settled jobs, each led by what it was for, then what still runs. `recovered`: the job had
- * settled before this wait started (its delivery was still pending). */
-static char *job_result_text(jobs_t *jobs, const json_t *done, bool recovered) {
+/* job-control.ts describeDelivery for a wait: a job that settled after the call began was handed over by this wait;
+ * one already settled at entry still had its completion push queued (omc delivers every settled job at the next turn
+ * boundary), so this snapshot superseded that push. */
+static void describe_delivery(sb_t *b, const json_t *job, const strvec_t *settled_at_entry, int64_t started_at) {
+    if (!strvec_contains(settled_at_entry, json_get_str(job, "jobId") ? json_get_str(job, "jobId") : "")) {
+        sb_append(b, "Delivery: delivered by this wait \xE2\x80\x94 it finished while you were waiting.\n");
+        return;
+    }
+    int64_t settled = json_get_int(job, "settledAtMs", 0);
+    char *age = settled > 0 && started_at > settled ? usage_fmt_duration((double)(started_at - settled)) : NULL;
+    sb_appendf(b, "Delivery: handed over by this snapshot%s%s%s \xE2\x80\x94 this snapshot superseded its queued completion push.\n",
+               age ? " (it finished " : "", age ? age : "", age ? " before this call)" : "");
+    free(age);
+}
+
+/* buildJobResult("wait"): the settled jobs, each led by what it was for, then what still runs. `settled_at_entry`: the
+ * ids already settled when the call started; `started_at`: its epoch ms. */
+static char *job_result_text(jobs_t *jobs, const json_t *done, const strvec_t *settled_at_entry, int64_t started_at) {
     sb_t b = SB_INIT;
     const json_t *x;
     if (json_len(done)) sb_appendf(&b, "## Completed (%zu)\n\n", json_len(done));
@@ -1201,8 +1216,7 @@ static char *job_result_text(jobs_t *jobs, const json_t *done, bool recovered) {
             if (str_eq(status, "completed")) sb_appendf(&b, "Agent: agent://%s, history://%s\n", agent, agent);
             else sb_appendf(&b, "Agent: history://%s\n", agent);
         }
-        if (!str_eq(status, "cancelled"))
-            sb_append(&b, recovered ? "Delivery: not auto-delivered; recovered by this snapshot.\n" : "Delivery: delivered directly to wait.\n");
+        if (!str_eq(status, "cancelled")) describe_delivery(&b, x, settled_at_entry, started_at);
         const char *res = json_get_str(x, "result");
         if (res && *res) {
             if (json_get_bool(x, "failed", false)) sb_appendf(&b, "Error: %s\n", res);
@@ -1285,6 +1299,7 @@ static json_t *wait_job_rows(jobs_t *jobs, const json_t *done) {
         json_set_str(s, "label", json_get_str(x, "label") ? json_get_str(x, "label") : "");
         if (json_get_str(x, "intent")) json_set_str(s, "intent", json_get_str(x, "intent"));
         json_set_int(s, "durationMs", json_get_int(x, "durationMs", 0));
+        if (json_get(x, "settledAtMs")) json_set_int(s, "settledAtMs", json_get_int(x, "settledAtMs", 0));
         json_set_str(s, failed ? "errorText" : "resultText", json_get_str(x, "result") ? json_get_str(x, "result") : "");
         json_push(rows, s);
     }
@@ -1335,6 +1350,9 @@ static void wait_emit_progress(tool_ctx_t *ctx, jobs_t *jobs) {
 
 typedef enum { WAKE_TIMEOUT, WAKE_JOB, WAKE_MESSAGE, WAKE_ABORT, WAKE_STEER, WAKE_UNANSWERABLE, WAKE_SERVICE } wait_wake_t;
 
+static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_result_t *out, bool idle, int idle_rung,
+                    int64_t idle_ended, int64_t idle_waited, const strvec_t *settled_at_entry, int64_t call_started);
+
 static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     UNUSED(args);
@@ -1345,6 +1363,17 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     int idle_rung = env->wait_idle_rung;
     int64_t idle_ended = env->wait_idle_ended, idle_waited = env->wait_idle_waited_ms;
     env->wait_idle = false;
+    /* stamped once at entry, before any wait: a job already settled here was not handed over by this call */
+    int64_t call_started = now_ms();
+    strvec_t settled_at_entry = jobs_settled_ids(env->jobs);
+    int rc = wait_run(self, ctx, env, out, idle, idle_rung, idle_ended, idle_waited, &settled_at_entry, call_started);
+    strvec_free(&settled_at_entry);
+    return rc;
+}
+
+static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_result_t *out, bool idle, int idle_rung,
+                    int64_t idle_ended, int64_t idle_waited, const strvec_t *settled_at_entry, int64_t call_started) {
+    UNUSED(self);
     json_t *msgs = agents_take_messages(env);
     if (msgs) {
         wait_message_result(env, msgs, out);
@@ -1354,7 +1383,7 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     /* an accepted completion whose delivery has not reached the transcript yet is exactly what this wait is for */
     if (jobs && jobs_undelivered(jobs)) {
         json_t *done = jobs_take_finished(jobs);
-        char *txt = job_result_text(jobs, done, true);
+        char *txt = job_result_text(jobs, done, settled_at_entry, call_started);
         tool_result_text(out, txt);
         free(txt);
         json_set(out->details, "jobs", wait_job_rows(jobs, done));
@@ -1471,7 +1500,7 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         json_set_bool(out->details, "interrupted", true);
     } else if (running || (jobs && jobs_undelivered(jobs))) {
         json_t *done = jobs_take_finished(jobs);
-        char *txt = job_result_text(jobs, done, false);
+        char *txt = job_result_text(jobs, done, settled_at_entry, call_started);
         tool_result_text(out, *txt ? txt : "No background jobs.");
         free(txt);
         json_set(out->details, "jobs", wait_job_rows(jobs, done));

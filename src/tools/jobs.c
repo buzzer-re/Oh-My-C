@@ -922,11 +922,22 @@ json_t *jobs_take_finished(jobs_t *j) {
         json_set_bool(o, "failed", x->failed);
         json_set_str(o, "status", job_status(x));
         json_set_int(o, "durationMs", x->ended - x->started);
+        json_set_int(o, "settledAtMs", x->ended);
         if (x->agent_id) json_set_str(o, "agentId", x->agent_id);
         json_push(arr, o);
     }
     pthread_mutex_unlock(&j->mu);
     return arr;
+}
+
+strvec_t jobs_settled_ids(jobs_t *j) {
+    strvec_t v = {0};
+    if (!j) return v;
+    pthread_mutex_lock(&j->mu);
+    for (size_t i = 0; i < j->v.n; i++)
+        if (j->v.v[i]->done) strvec_push(&v, j->v.v[i]->id);
+    pthread_mutex_unlock(&j->mu);
+    return v;
 }
 
 int jobs_wait_any_ex(jobs_t *j, volatile sig_atomic_t *cancel, int64_t max_ms, bool include_services) {
