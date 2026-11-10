@@ -559,8 +559,27 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         tool_result_error(out, "path is required");
         return 0;
     }
-    if (vurl_is(path)) return vurl_write(env, path, content, out);
-    if (iurl_write(env, path, content, out)) return 0;
+    /* coordination writes (peer messages, background-work cancellation) and replies touch no files: the flag tells
+     * the prewalk gate the write was not implementation work (write.ts fileFreeDetails) */
+    bool touches_no_files = str_starts(path, "agent://") || !strncasecmp(path, "out:", 4) ||
+                            (str_starts(path, "proc://") && str_ends(path, "/kill"));
+    bool handled = false;
+    if (vurl_is(path)) {
+        vurl_write(env, path, content, out);
+        handled = true;
+    } else if (iurl_write(env, path, content, out)) {
+        handled = true;
+    }
+    if (handled) {
+        if (touches_no_files) {
+            if (!json_is_obj(out->details)) {
+                json_free(out->details);
+                out->details = json_obj();
+            }
+            json_set_bool(out->details, "touchesNoFiles", true);
+        }
+        return 0;
+    }
     if (!content) content = "";
     if (!strcmp(path, "xd://resolve") || !strcmp(path, "xd://reject")) {
         bool err = false;
