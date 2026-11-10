@@ -18,6 +18,10 @@ void shell_strip_job_notices(char *buf, size_t *len);
 /* a command in a temporary session (`pty`: proc_shell under a pty, with those notices dropped from the streamed and the
  * collected output) */
 int shell_exec_once(const char *cmd, const proc_opts_t *o, proc_result_t *res);
+/* a command in a copy of `parent`, which another command holds: a temporary session seeded with the state that command
+ * started from (variables, functions, aliases, options); what it sets stays in the copy. Without a published state (or
+ * under a pty) it is shell_exec_once. */
+int shell_exec_fork(shell_t *parent, const char *cmd, const proc_opts_t *o, proc_result_t *res);
 /* like shell_run, but returns -2 at once when another command holds the shell */
 int shell_run_try(shell_t *s, const char *cmd, const char *cwd, const proc_opts_t *o, proc_result_t *res);
 

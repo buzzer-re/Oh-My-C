@@ -51,6 +51,10 @@ check "read hashline"  "1:written by omc"                "$B" --model mock/mock-
 # intent field: injected (required) into tool schemas, stripped before execution
 check "intent schema"  '"i": {"type": "string", "description": "concise intent"}'  bash -c "python3 -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; t=[x for x in r if x.get(\"tools\")][-1][\"tools\"][0][\"function\"][\"parameters\"]; print(json.dumps(t[\"properties\"][\"i\"]) if \"i\" in t[\"required\"] else \"no i\")' '$T/req.jsonl' | sed 's/^/\"i\": /'"
 check "intent stripped" "Tool said: hi-intent"           "$B" --model mock/mock-1 -p 'call:bash:{"i":"Checking echo","command":"echo hi-intent"}'
+# a leading `cd <dir> &&` always hoists into cwd; `cd <dir>;` only onto an existing directory (omp 6ad51806eb)
+check "bash cd hoist"  "Tool said: Working directory does not exist: /nonexistent-omc-cd" "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /nonexistent-omc-cd && echo hi"}'
+check "bash cd semi"   "after-cd"                         "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /nonexistent-omc-cd; echo after-cd"}'
+check "bash cd root"   "Tool said: /"                     "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /; pwd"}'
 # xd:// devices: discoverable tools are mounted, listed, documented and dispatched through read/write
 check "xd listing"     "mounted tool devices"             "$B" --model mock/mock-1 -p "read:xd://"
 check "xd docs"        "type Args = {"                    "$B" --model mock/mock-1 -p "read:xd://debug"
@@ -159,6 +163,11 @@ check "args coerced"   $'  - case: case must be boolean (was a number)\n\nReceiv
 check "todo bad op"    'Invalid todo arguments: op must be "init", "start", "done", "rm", "drop", "block", "unblock", "append" or "view" (was "bogus")'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p 'seq:[["todo",{"op":"init","items":["a"]}],["todo",{"op":"start","task":"nope"}]]' >/dev/null 2>&1 </dev/null
 check "todo errors"    $'Errors: Task "nope" not found\nRemaining items (1):'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+# an empty init phase name is `Tasks`; append without a phase joins the active task's phase (omp 60441bea29, 694e9e2079)
+"$B" --model mock/mock-1 --no-session -p 'seq:[["todo",{"op":"init","list":[{"phase":"A","items":["a"]},{"phase":"","items":["b"]}]}],["todo",{"op":"append","items":["c"]}]]' >/dev/null 2>&1 </dev/null
+check "todo append"    $'  - a [in_progress] (A)\n  - c [pending] (A)\n  - b [pending] (Tasks)'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --no-session -p 'call:todo:{"op":"append","phase":"","items":["x"]}' >/dev/null 2>&1 </dev/null
+check "todo append ''" 'Errors: Missing phase name for append operation'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p 'call:task:{}' >/dev/null 2>&1 </dev/null
 check "task shape"     'Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p "bash:sh -c 'kill -9 \$\$'; printf 'x'; sh -c 'kill -SEGV \$\$'; echo after-kill" >/dev/null 2>&1 </dev/null
@@ -290,6 +299,13 @@ check "plan blocks"    "working tree is read-only"  "$B" --model mock/mock-1 --p
 # eval (python kernel) when python3 is available
 if command -v python3 >/dev/null; then
     check "eval python"    "Tool said: 42"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"6*7"}'
+    # sh(): a command run to completion on the eval session's shell; a failure raises ShellError (omp d013a0a269)
+    check "eval sh"        "Tool said: 'hi\\n/tmp\\n' 3 'bad\\n'"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"x = sh(\"echo hi; pwd\", cwd=\"/tmp\")\ntry:\n    sh(\"echo bad; exit 3\")\nexcept ShellError as e:\n    print(repr(x), e.exit_code, repr(e.output))"}'
+    # a kernel that exits during startup says why: its exit code and the end of its stderr (omp af92dbc0b2)
+    printf '#!/bin/sh\necho "no module named boom" >&2\nexit 3\n' > "$T/fakepy" && chmod +x "$T/fakepy"
+    printf "python:\n  interpreter: $T/fakepy\n" > "$T/agent/config.yml"
+    check "eval init exit" "Python kernel init failed: Python kernel exited with code 3; its last stderr output: no module named boom"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"1"}'
+    rm -f "$T/agent/config.yml"
     # eval helpers: completion/wait, judge, judge_batch (drain/iter/attach/cancel/min_ok), budget, timeouts, xd://eval docs
     python3 -I "$ROOT/tests/e2e/eval_client.py" "$B" || fail=1
 fi
@@ -390,6 +406,12 @@ check "async long cmd"    "async ok" bash -c "'$B' --model mock/mock-1 -p 'call:
 check "wait nothing"   "Nothing to wait for"  "$B" --model mock/mock-1 -p 'call:wait:{}'
 check "edit none" "edit none ok"  python3 -I "$ROOT/tests/e2e/edit_none.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/en"
 check "shell scope" "shell scope ok"  python3 -I "$ROOT/tests/e2e/shell_scope.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ss"
+# a call overlapping a backgrounded one runs in a copy of the busy session shell: it sees the session's variables and
+# functions, and what it sets stays in the copy (omp 1e2fbfd2e2)
+printf 'bash:\n  autoBackground:\n    thresholdMs: 500\n' > "$T/agent/config.yml"
+( for m in 'bash:export FORKV=bar; forkf() { echo fn-$FORKV; }' 'bash:sleep 4; echo slow' 'bash:echo got-$FORKV; forkf; FORKB=1' 'bash:echo forkb=[$FORKB]'; do python3 -c 'import json,sys; print(json.dumps({"id":"x","type":"prompt","message":sys.argv[1]}))' "$m"; sleep 2.5; done ) | timeout 60 "$B" --model mock/mock-1 --mode rpc >/dev/null 2>&1
+rm -f "$T/agent/config.yml"
+check "bash fork"      "got-bar|fn-bar|||Ran in a copy of the busy session shell; changes here won't persist.##forkb=[]"  python3 -I -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; m=[x for x in r[-1]["messages"] if x.get("role")=="tool"]; t=[x["content"] if isinstance(x["content"],str) else "".join(b.get("text","") for b in x["content"]) for x in m]; print("##".join(t[2:4]).replace("\n","|"))' "$T/req.jsonl"
 # wait: idle ladder and its nudge; settle window, progress notes vs direct messages, no broadcast from a subagent
 check "wait ladder" "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl1" ladder
 check "wait peers"  "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl2" peers

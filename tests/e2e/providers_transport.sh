@@ -101,6 +101,10 @@ printf 'modelRoles:\n  image: xai/grok-imagine-image\ngenerate_image:\n  enabled
 IGC='call:write:{"path":"xd://generate_image","content":"{\"subject\":\"a red cube.\",\"aspect_ratio\":\"3:2\"}"}'
 check "image gen"       "Tool said: Provider: xai"  env OMC_CODING_AGENT_DIR="$T/igagent" XK=x TMPDIR="$T" "$B" --model mock/mock-1 --no-session -p "$IGC"
 check "image gen wire"  "/img/v1/images/generations grok-imagine-image a red cube. 3:2 1k b64_json"  "${XL[@]}" /img/ 'x["path"], b.get("model"), b.get("prompt"), b.get("aspect_ratio"), b.get("resolution"), b.get("response_format")'
+# an exhausted chain names each provider failure, whitespace collapsed and its period dropped (omp a874c10430, f597096732)
+mkdir -p "$T/igagent3" && cp "$T/agent/models.yml" "$T/igagent3/" && cp "$T/igagent/config.yml" "$T/igagent3/"
+printf '  xai:\n    baseUrl: %s/img/v1\n    apiKey: XK\n' "$XB" >> "$T/igagent3/models.yml"
+check "image gen fail"  "Image generation exhausted the resolved image chain: xai/grok-imagine-image. Failures: "  env OMC_CODING_AGENT_DIR="$T/igagent3" XK=x TMPDIR="$T" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://generate_image","content":"{\"subject\":\"fail now\"}"}'
 printf 'modelRoles:\n  image: openai/gpt-image-2\ngenerate_image:\n  enabled: true\n' > "$T/igagent/config.yml"
 check "image hosted"    "Model: gpt-image-2-2026 (catalog entry openai/gpt-image-2)"  env OMC_CODING_AGENT_DIR="$T/igagent" XK=x TMPDIR="$T" "$B" --model mock/mock-1 --no-session -p "$IGC"
 check "image hosted wire" "/imgo/v1/responses gpt-5-nano {'type': 'image_generation'}"  "${XL[@]}" /imgo/ 'x["path"], b.get("model"), b.get("tool_choice")'

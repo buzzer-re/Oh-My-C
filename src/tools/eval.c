@@ -5,7 +5,7 @@
  * pipes. At startup the kernel points fd 0 at /dev/null and fd 1 at fd 2 (the stderr pipe), so stray writes from C
  * extensions, os.system or subprocesses can never corrupt the framing; the host reads that pipe as raw cell output.
  *   kernel -> host  {type:"ready"} | {type:"call",id,name,args} | {type:"cancel",id} | {type:"result",id,stdout,error,images}
- *   host -> kernel  {type:"exec",id,code} | {type:"reply",id,ok,value|error}
+ *   host -> kernel  {type:"exec",id,code} | {type:"reply",id,ok,value|error} | {type:"interrupt",id}
  * A host reader thread owns the read side; every bridge call runs on its own worker thread so concurrent helper calls
  * (asyncio.gather over judge(), background threads) never block each other. Interrupts (timeout, abort) send SIGINT
  * and cancel the cell's in-flight calls; a kernel that does not answer within 5 s is killed. Waits on helpers
@@ -14,6 +14,7 @@
 #include "tools.h"
 #include "artifacts.h"
 #include "outsink.h"
+#include "shell.h"
 
 #include "config/settings.h"
 #include "core/embed.h"
@@ -71,6 +72,7 @@ typedef struct {
     json_t *result;
     sb_t raw;
     bool raw_truncated;
+    sb_t err_tail; /* STDERR_TAIL_CHARS: the end of what the runner wrote to stderr, to say why it stopped */
     eval_state_t *st;
 } kernel_t;
 
@@ -90,6 +92,9 @@ struct eval_state {
     int workers;
     pthread_cond_t wcv;
     json_t *tool_names;
+    /* the `sh` helper's persistent shell, apart from the bash tool's (eval/shell-bridge.ts sessionKey `eval:<id>`) */
+    pthread_mutex_t shmu;
+    shell_t *sh;
 };
 
 static int64_t g_cell_serial;
@@ -198,12 +203,98 @@ static json_t *run_tool(bcall_t *c, char **err) {
     return v;
 }
 
+/* ---------- the `sh` helper (eval/shell-bridge.ts runEvalShell) ---------- */
+
+/* output characters kept per command, so a runaway command cannot exhaust host or kernel memory */
+#define SH_MAX_OUTPUT ((size_t)16 * 1024 * 1024)
+
+typedef struct {
+    sb_t out;
+    bool truncated;
+} sh_capture_t;
+
+static void sh_on_output(void *ud, int stream, const char *data, size_t len) {
+    sh_capture_t *c = ud;
+    if (c->truncated) return;
+    size_t room = SH_MAX_OUTPUT - c->out.len;
+    if (len > room) {
+        sb_appendn(&c->out, data, room);
+        c->truncated = true;
+        return;
+    }
+    sb_appendn(&c->out, data, len);
+}
+
+/* one command on the session's eval shell, run to completion: {output, exitCode} or {output, timedOut}; *err on
+ * malformed arguments or a cancelled run (a non-zero exit or a timeout is a result) */
+static json_t *eval_shell(eval_state_t *st, const json_t *args, volatile sig_atomic_t *cancel, char **err) {
+    const char *command = json_get_str(args, "command");
+    if (!json_is_obj(args) || !command) {
+        *err = xstrdup("sh() expects a command string");
+        return NULL;
+    }
+    const json_t *cwdj = json_get(args, "cwd"), *toj = json_get(args, "timeout");
+    if (cwdj && !json_is_str(cwdj)) {
+        *err = xstrdup("sh() cwd must be a string");
+        return NULL;
+    }
+    if (toj && (!json_is_num(toj) || !(json_get_num(args, "timeout", -1) >= 0))) {
+        *err = xstrdup("sh() timeout must be a non-negative number of seconds");
+        return NULL;
+    }
+    const char *cwd_arg = json_sv(cwdj);
+    char *cwd = cwd_arg && *cwd_arg ? tool_resolve_path(st->env, cwd_arg) : xstrdup(st->env->cwd);
+    /* 0 disables the command deadline: the cell's own deadline governs */
+    double tsec = toj ? json_get_num(args, "timeout", 0) : 0;
+    sh_capture_t cap = {SB_INIT, false};
+    proc_opts_t o = {.cwd = cwd,
+                     .env_extra = tool_bash_env(),
+                     .timeout_ms = tsec > 0 ? (int64_t)(tsec * 1000) : 0,
+                     .max_output = SH_MAX_OUTPUT,
+                     .merge_stderr = true,
+                     .new_session = true,
+                     .cancel = cancel,
+                     .on_output = sh_on_output,
+                     .ud = &cap};
+    proc_result_t r;
+    pthread_mutex_lock(&st->shmu);
+    if (!st->sh) st->sh = shell_new();
+    int rc = shell_run(st->sh, command, cwd, &o, &r);
+    pthread_mutex_unlock(&st->shmu);
+    free(cwd);
+    if (cap.truncated) sb_appendf(&cap.out, "\n[output truncated: sh() keeps the first %zu characters]\n", SH_MAX_OUTPUT);
+    size_t olen = 0;
+    char *output = out_sanitize(cap.out.s ? cap.out.s : "", cap.out.len, &olen);
+    sb_free(&cap.out);
+    json_t *v = NULL;
+    if (rc != 0) {
+        *err = xstrdup("sh() command failed: missing exit status");
+    } else if (r.timed_out) {
+        v = json_obj();
+        json_set(v, "output", json_str_own(output));
+        output = NULL;
+        json_set_bool(v, "timedOut", true);
+    } else if (r.cancelled || (cancel && *cancel)) {
+        *err = xstrdup("sh() command was cancelled");
+    } else {
+        v = json_obj();
+        json_set(v, "output", json_str_own(output));
+        output = NULL;
+        json_set_int(v, "exitCode", r.term_signal ? 128 + r.term_signal : r.exit_code);
+    }
+    free(output);
+    proc_result_free(&r);
+    return v;
+}
+
 static void *call_main(void *p) {
     bcall_t *c = p;
     eval_state_t *st = c->st;
     char *err = NULL;
     json_t *value = NULL;
-    if (str_starts(c->name, "__") && str_ends(c->name, "__")) {
+    if (str_eq(c->name, "__shell__")) {
+        value = eval_shell(st, c->args, &c->cancel, &err);
+    } else if (str_starts(c->name, "__") && str_ends(c->name, "__")) {
         if (st->env->eval_bridge) value = st->env->eval_bridge(st->env, c->name, c->args, c->cell, &c->cancel, &err);
         else err = xasprintf("%s is unavailable in this session", c->name);
     } else {
@@ -311,6 +402,18 @@ static void handle_msg(kernel_t *k, json_t *m) {
     json_free(m);
 }
 
+#define STDERR_TAIL_CHARS 2000
+
+/* keep the last STDERR_TAIL_CHARS bytes (cut on a UTF-8 boundary); caller holds ch->mu */
+static void err_tail_add(kernel_t *k, const char *buf, size_t n) {
+    sb_appendn(&k->err_tail, buf, n);
+    if (k->err_tail.len <= STDERR_TAIL_CHARS) return;
+    size_t cut = k->err_tail.len - STDERR_TAIL_CHARS;
+    while (cut < k->err_tail.len && ((unsigned char)k->err_tail.s[cut] & 0xC0) == 0x80) cut++;
+    memmove(k->err_tail.s, k->err_tail.s + cut, k->err_tail.len - cut);
+    sb_truncate(&k->err_tail, k->err_tail.len - cut);
+}
+
 static void *reader_main(void *p) {
     kernel_t *k = p;
     int out_fd = k->child.out_fd, err_fd = k->child.err_fd;
@@ -325,6 +428,7 @@ static void *reader_main(void *p) {
             if (r <= 0) err_open = false;
             else {
                 pthread_mutex_lock(&k->ch->mu);
+                err_tail_add(k, buf, (size_t)r);
                 if (k->cell_active) {
                     if (k->raw.len + (size_t)r <= RAW_CAP) sb_appendn(&k->raw, buf, (size_t)r);
                     else k->raw_truncated = true;
@@ -384,6 +488,7 @@ static void kernel_stop(eval_state_t *st) {
     chan_unref(k->ch);
     sb_free(&k->rbuf);
     sb_free(&k->raw);
+    sb_free(&k->err_tail);
     json_free(k->result);
     free(k);
 }
@@ -440,11 +545,39 @@ static int kernel_start(eval_state_t *st, char **err) {
     int64_t deadline = mono_ms() + STARTUP_TIMEOUT_MS;
     pthread_mutex_lock(&k->ch->mu);
     while (!k->ready && !k->eof && mono_ms() < deadline) cv_wait_ms(&k->ch->cv, &k->ch->mu, 100);
-    bool ok = k->ready;
+    bool ok = k->ready, exited = k->eof;
     pthread_mutex_unlock(&k->ch->mu);
     if (!ok) {
+        if (exited) {
+            /* a kernel that exits during startup says so with its exit code and the end of its stderr; the exit can
+             * come before the last stderr bytes are read, so give them a moment (STDERR_SETTLE_MS) */
+            int xcode = child_wait(&k->child, 1000);
+            if (k->child.err_fd >= 0) {
+                char buf[4096];
+                int64_t until = mono_ms() + 200;
+                while (mono_ms() < until) {
+                    struct pollfd pf = {k->child.err_fd, POLLIN, 0};
+                    if (poll(&pf, 1, 20) <= 0) continue;
+                    ssize_t r = read(k->child.err_fd, buf, sizeof buf);
+                    if (r <= 0) break;
+                    pthread_mutex_lock(&k->ch->mu);
+                    err_tail_add(k, buf, (size_t)r);
+                    pthread_mutex_unlock(&k->ch->mu);
+                }
+            }
+            pthread_mutex_lock(&k->ch->mu);
+            char *tail = str_trim(k->err_tail.s ? k->err_tail.s : "");
+            pthread_mutex_unlock(&k->ch->mu);
+            char *reason = xcode >= 0 ? xasprintf("Python kernel exited with code %d", xcode)
+                                      : xstrdup("Python kernel stopped responding");
+            *err = *tail ? xasprintf("Python kernel init failed: %s; its last stderr output: %s", reason, tail)
+                         : xasprintf("Python kernel init failed: %s", reason);
+            free(reason);
+            free(tail);
+        } else {
+            *err = xstrdup("Python kernel init timed out");
+        }
         kernel_stop(st);
-        *err = xstrdup("python kernel failed to start");
         return -1;
     }
     st->had_kernel = true;
@@ -454,6 +587,12 @@ static int kernel_start(eval_state_t *st, char **err) {
 /* ---------- execute ---------- */
 
 static void interrupt_cell(eval_state_t *st, kernel_t *k, int64_t cell) {
+    /* named first: a cell the kernel has not started yet is stopped as it starts (the signal alone would be lost) */
+    json_t *im = json_obj();
+    json_set_str(im, "type", "interrupt");
+    json_set_int(im, "id", cell);
+    chan_send(k->ch, im);
+    json_free(im);
     if (k->child.pid > 0) kill(-k->child.pid, SIGINT);
     cancel_calls(k->ch, cell);
     if (st->env->eval_bridge) {
@@ -696,6 +835,8 @@ static void eval_destroy(agent_tool_t *t) {
     free(st->python);
     free(st->tool_call_id);
     json_free(st->tool_names);
+    shell_free(st->sh);
+    pthread_mutex_destroy(&st->shmu);
     pthread_mutex_destroy(&st->mu);
     pthread_mutex_destroy(&st->cmu);
     pthread_cond_destroy(&st->wcv);
@@ -795,6 +936,7 @@ agent_tool_t *tool_eval_new(tool_env_t *env) {
     st->self = t;
     pthread_mutex_init(&st->mu, NULL);
     pthread_mutex_init(&st->cmu, NULL);
+    pthread_mutex_init(&st->shmu, NULL);
     pthread_cond_init(&st->wcv, NULL);
     t->ud = st;
     t->destroy = eval_destroy;

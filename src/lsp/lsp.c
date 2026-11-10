@@ -71,7 +71,9 @@ typedef struct lsp_client {
     VEC(lpend_t *) pending;
     int64_t next_id;
     json_t *caps;         /* server capabilities */
-    json_t *diags;        /* path -> {items:[...], version:n|null} */
+    json_t *diags;        /* path -> {items:[...], version:n|null}: what readers see */
+    json_t *pub_diags;    /* path -> record delivered by textDocument/publishDiagnostics */
+    json_t *pull_diags;   /* path -> record delivered by a textDocument/diagnostic pull */
     int64_t diag_version; /* bumps on every publishDiagnostics */
     bool publishes_versions;
     json_t *build_status; /* path -> {busy, idle} (clangd.fileStatus) or NULL */
@@ -200,7 +202,7 @@ static const char *language_id(const char *path) {
         {"js", "javascript"}, {"jsx", "javascriptreact"}, {"mjs", "javascript"}, {"cjs", "javascript"},
         {"rs", "rust"}, {"go", "go"}, {"c", "c"}, {"h", "c"}, {"cpp", "cpp"}, {"cc", "cpp"}, {"cxx", "cpp"},
         {"hh", "cpp"}, {"hpp", "cpp"}, {"hxx", "cpp"}, {"cu", "cpp"}, {"cuh", "cpp"}, {"ino", "cpp"}, {"zig", "zig"},
-        {"py", "python"}, {"pyi", "python"}, {"rb", "ruby"}, {"rbw", "ruby"}, {"gemspec", "ruby"}, {"lua", "lua"},
+        {"py", "python"}, {"pyi", "python"}, {"rb", "ruby"}, {"rbw", "ruby"}, {"gemspec", "ruby"}, {"erb", "erb"}, {"lua", "lua"},
         {"sh", "shellscript"}, {"bash", "shellscript"}, {"zsh", "shellscript"}, {"ksh", "shellscript"},
         {"bats", "shellscript"}, {"tmux", "shellscript"}, {"cgi", "shellscript"}, {"fcgi", "shellscript"},
         {"command", "shellscript"}, {"tool", "shellscript"}, {"fish", "fish"}, {"pl", "perl"}, {"pm", "perl"},
@@ -560,6 +562,36 @@ static void respond_error(lsp_client_t *c, const json_t *id, int code, const cha
 
 static int apply_workspace_edit(const json_t *edit, const char *cwd, strvec_t *applied, char **err);
 
+static bool supports_pull(lsp_client_t *c);
+
+static char *diagnostic_fingerprint(const json_t *d) {
+    const json_t *r = json_get(d, "range"), *st = json_get(r, "start"), *en = json_get(r, "end");
+    const char *src = json_get_str(d, "source"), *msg = json_get_str(d, "message");
+    return xasprintf("%lld:%lld:%lld:%lld:%s:%s", (long long)json_get_int(st, "line", 0), (long long)json_get_int(st, "character", 0),
+                     (long long)json_get_int(en, "line", 0), (long long)json_get_int(en, "character", 0), src ? src : "",
+                     msg ? msg : "undefined");
+}
+
+/* mergeDiagnosticLists: primary then secondary, in order, deduplicated by range, source and message (owned) */
+static json_t *merge_diagnostic_lists(const json_t *primary, const json_t *secondary) {
+    if (!json_len(primary)) return json_is_arr(secondary) ? json_clone(secondary) : json_arr();
+    if (!json_len(secondary)) return json_clone(primary);
+    json_t *out = json_arr(), *d;
+    strvec_t seen = {0};
+    const json_t *lists[] = {primary, secondary};
+    for (int l = 0; l < 2; l++)
+        json_arr_foreach(lists[l], i, d) {
+            char *k = diagnostic_fingerprint(d);
+            if (strvec_contains(&seen, k)) free(k);
+            else {
+                strvec_push_own(&seen, k);
+                json_push(out, json_clone(d));
+            }
+        }
+    strvec_free(&seen);
+    return out;
+}
+
 static void handle_notification(lsp_client_t *c, const char *method, json_t *params) {
     if (!strcmp(method, "textDocument/publishDiagnostics")) {
         const char *uri = json_get_str(params, "uri");
@@ -570,7 +602,13 @@ static void handle_notification(lsp_client_t *c, const char *method, json_t *par
         json_set(e, "items", json_is_arr(items) ? json_clone(items) : json_arr());
         json_t *ver = json_get(params, "version");
         json_set(e, "version", json_is_num(ver) ? json_clone(ver) : json_null());
+        bool dual = supports_pull(c);
         pthread_mutex_lock(&c->mu);
+        json_set(c->pub_diags, key, json_clone(e));
+        if (dual) { /* a dual-mode server: the pulled report plus what was pushed */
+            json_t *combined = merge_diagnostic_lists(json_get(json_get(c->pull_diags, key), "items"), json_get(e, "items"));
+            json_set(e, "items", combined);
+        }
         json_set(c->diags, key, e);
         c->diag_version++;
         if (json_is_num(ver)) c->publishes_versions = true;
@@ -986,6 +1024,8 @@ static void client_free(lsp_client_t *c) {
     json_free(c->cfg);
     json_free(c->caps);
     json_free(c->diags);
+    json_free(c->pub_diags);
+    json_free(c->pull_diags);
     json_free(c->build_status);
     json_free(c->registrations);
     json_free(c->progress);
@@ -1031,6 +1071,8 @@ static lsp_client_t *client_start(const char *name, const json_t *cfg, const cha
     c->cfg = json_clone(cfg);
     c->root = xstrdup(cwd);
     c->diags = json_obj();
+    c->pub_diags = json_obj();
+    c->pull_diags = json_obj();
     c->registrations = json_obj();
     c->progress = json_obj();
     c->idle_closed = json_obj();
@@ -1168,13 +1210,19 @@ static void open_remove(lsp_client_t *c, const char *uri) {
         }
 }
 
-static void diags_delete(lsp_client_t *c, const char *uri) {
+/* drop the cached report and the pulled one computed against the stale document; `all` also forgets the pushed one
+ * (the document closed) */
+static void diags_drop(lsp_client_t *c, const char *uri, bool all) {
     char *k = uri_key(uri);
     pthread_mutex_lock(&c->mu);
     json_del(c->diags, k);
+    json_del(c->pull_diags, k);
+    if (all) json_del(c->pub_diags, k);
     pthread_mutex_unlock(&c->mu);
     free(k);
 }
+
+static void diags_delete(lsp_client_t *c, const char *uri) { diags_drop(c, uri, false); }
 
 static char *read_text(const char *path, size_t *n) {
     struct stat st;
@@ -1238,7 +1286,7 @@ static void send_did_save(lsp_client_t *c, const char *uri, const char *text) {
 static void close_document(lsp_client_t *c, const char *uri) {
     send_simple(c, "textDocument/didClose", uri);
     open_remove(c, uri);
-    diags_delete(c, uri);
+    diags_drop(c, uri, true);
 }
 
 /* OPEN_FILE_IDLE_MS / closeIdleFiles: documents no operation used for this long leave the server before the next open */
@@ -1530,7 +1578,7 @@ static json_t *wait_for_diagnostics(lsp_client_t *c, const char *uri, int64_t ti
     json_t *settled = NULL;
     int64_t settled_at = 0;
     json_t *result = NULL;
-    bool have = false;
+    bool have = false, from_pull = false;
     while (mono_ms() < deadline && !budget_expired(bg)) {
         bool pull = supports_pull(c);
         if (awaiting_load && pull) {
@@ -1552,19 +1600,14 @@ static json_t *wait_for_diagnostics(lsp_client_t *c, const char *uri, int64_t ti
             if (rep) {
                 if (str_eq(json_get_str(rep, "kind"), "full") && json_is_arr(json_get(rep, "items"))) {
                     result = json_clone(json_get(rep, "items"));
-                    have = true;
+                    have = from_pull = true;
                     json_free(rep);
-                    /* client.diagnostics.set(uri, pulled) */
-                    json_t *e = json_obj();
-                    json_set(e, "items", json_clone(result));
-                    if (expected >= 0) json_set_int(e, "version", expected);
-                    else json_set(e, "version", json_null());
-                    pthread_mutex_lock(&c->mu);
-                    json_set(c->diags, key, e);
-                    c->diag_version++;
-                    pthread_mutex_unlock(&c->mu);
                     break;
                 }
+                /* LSP requires a report, but ruby-lsp answers `null` for a document it does not diagnose (ERB, or
+                 * outside its workspace) and when its own diagnostics fail: that is the server's answer, not a failed
+                 * attempt, so a publish already on its way gets one settle window, not the budget */
+                if (json_is_null(rep)) deadline = MIN(deadline, mono_ms() + DIAGNOSTICS_SETTLE_MS);
                 json_free(rep);
             } else if (code == RQ_ERROR) {
                 bool retrigger = ecode == -32801 || (ecode == -32802 && !(json_is_obj(data) && json_get(data, "retriggerRequest") &&
@@ -1581,7 +1624,7 @@ static json_t *wait_for_diagnostics(lsp_client_t *c, const char *uri, int64_t ti
         bool version_ok = min_version < 0 || c->diag_version > min_version;
         pthread_mutex_unlock(&c->mu);
         int64_t pv = -1;
-        json_t *pub = version_ok ? published_get(c, key, &pv) : NULL;
+        json_t *pub = version_ok && !pull ? published_get(c, key, &pv) : NULL;
         if (pub) {
             if (expected >= 0 && pv == expected) {
                 result = json_take(pub, "items");
@@ -1606,12 +1649,14 @@ static json_t *wait_for_diagnostics(lsp_client_t *c, const char *uri, int64_t ti
         if (!c->alive) break;
         sleep_ms(MIN((int64_t)DIAGNOSTICS_POLL_MS, MAX((int64_t)0, deadline - mono_ms())));
     }
+    bool dual = supports_pull(c);
+    pthread_mutex_lock(&c->mu);
+    bool final_version_ok = min_version < 0 || c->diag_version > min_version;
+    pthread_mutex_unlock(&c->mu);
     if (!have) {
-        pthread_mutex_lock(&c->mu);
-        bool version_ok = min_version < 0 || c->diag_version > min_version;
-        pthread_mutex_unlock(&c->mu);
+        bool version_ok = final_version_ok;
         int64_t pv = -1;
-        json_t *pub = version_ok ? published_get(c, key, &pv) : NULL;
+        json_t *pub = version_ok && !dual ? published_get(c, key, &pv) : NULL;
         if (pub) {
             if ((expected >= 0 && pv == expected) ||
                 (settled && json_equal(settled, pub) && mono_ms() - settled_at >= DIAGNOSTICS_SETTLE_MS &&
@@ -1621,6 +1666,53 @@ static json_t *wait_for_diagnostics(lsp_client_t *c, const char *uri, int64_t ti
             }
             json_free(pub);
         }
+    }
+    /* a dual-mode server: the pull's report merged with the pushed one, or the push alone standing in for a failed
+     * pull, but only a push that arrived after the caller's minVersion */
+    if (dual && (from_pull || (!have && final_version_ok))) {
+        openf_t *o = open_find(c, uri);
+        int64_t doc_version = o ? o->version : -1;
+        pthread_mutex_lock(&c->mu);
+        json_t *pe = json_get(c->pub_diags, key);
+        json_t *pub = pe ? json_clone(pe) : NULL;
+        json_t *pulled_rec = from_pull ? NULL : json_clone(json_get(c->pull_diags, key));
+        pthread_mutex_unlock(&c->mu);
+        int64_t pv = json_is_num(json_get(pub, "version")) ? json_get_int(pub, "version", -1) : -1;
+        int64_t ver = expected >= 0 ? expected : doc_version;
+        json_t *combined = NULL;
+        if (from_pull) {
+            /* unversioned flycheck publishes still merge; a push older than the open document does not */
+            bool can_merge = pub && (pv < 0 || doc_version < 0 || pv >= doc_version);
+            combined = can_merge ? merge_diagnostic_lists(result, json_get(pub, "items")) : json_clone(result);
+            json_t *pr = json_obj();
+            json_set(pr, "items", result);
+            if (ver >= 0) json_set_int(pr, "version", ver);
+            else json_set(pr, "version", json_null());
+            pthread_mutex_lock(&c->mu);
+            json_set(c->pull_diags, key, pr);
+            pthread_mutex_unlock(&c->mu);
+            result = combined;
+        } else if (pub) {
+            bool fresh = pv < 0 ? !provisional_cold_publish(c, uri, pub, pv, expected) : doc_version < 0 || pv >= doc_version;
+            if (fresh) {
+                combined = pulled_rec ? merge_diagnostic_lists(json_get(pulled_rec, "items"), json_get(pub, "items"))
+                                      : json_clone(json_get(pub, "items"));
+                result = combined;
+                have = true;
+            }
+        }
+        if (combined) {
+            json_t *e = json_obj();
+            json_set(e, "items", json_clone(combined));
+            if (ver >= 0) json_set_int(e, "version", ver);
+            else json_set(e, "version", json_null());
+            pthread_mutex_lock(&c->mu);
+            json_set(c->diags, key, e);
+            c->diag_version++;
+            pthread_mutex_unlock(&c->mu);
+        }
+        json_free(pub);
+        json_free(pulled_rec);
     }
     json_free(settled);
     free(key);
@@ -2045,7 +2137,7 @@ static void format_document_symbol(sb_t *b, const json_t *s, int indent) {
     for (int k = 0; k < indent; k++) sb_append(b, "  ");
     const char *detail = json_get_str(s, "detail");
     sb_appendf(b, "%s %s%s%s @ line %lld", symbol_icon(json_get_int(s, "kind", 0)), json_get_str(s, "name") ? json_get_str(s, "name") : "",
-               detail && *detail ? " " : "", detail && *detail ? detail : "", (long long)pos_line(json_get(s, "range"), "start") + 1);
+               detail && *detail ? " " : "", detail && *detail ? detail : "", (long long)pos_line(json_get(s, "selectionRange"), "start") + 1);
     json_t *ch;
     if (indent < 64) json_arr_foreach(json_get_arr(s, "children"), i, ch) format_document_symbol(b, ch, indent + 1);
 }
@@ -3101,7 +3193,6 @@ static void do_diagnostics(call_t *k) {
             pthread_mutex_unlock(&c->mu);
             int64_t rebuild_since = -1;
             if (supports_pull(c)) {
-                diags_delete(c, uri);
                 reconcile_file(c, resolved);
             } else if (have_build) {
                 if (refresh_document(c, resolved, RF_REBUILD)) rebuild_since = since;
@@ -4272,14 +4363,63 @@ static void do_file_action(call_t *k, const char *resolved) {
         json_set(range, "end", en);
         json_set(p, "range", range);
         json_set(ctx, "diagnostics", diags);
-        if (!apply && query && *query) {
+        bool kind_query = !apply && query && *query;
+        if (kind_query) {
             json_t *only = json_arr();
             json_push_str(only, query);
             json_set(ctx, "only", only);
         }
         json_set_int(ctx, "triggerKind", 1);
         json_set(p, "context", ctx);
-        json_t *r = REQ("textDocument/codeAction", p);
+        /* Servers like typescript-language-server return source actions (organize imports, fix all) only when
+         * `context.only` asks for them, as VS Code does. The unfiltered set backs both listing and apply (by title or
+         * index), so it also requests `source` kinds; a kind query narrows listing to that kind. */
+        json_t *r;
+        if (kind_query) {
+            r = REQ("textDocument/codeAction", p);
+        } else {
+            json_t *ps = json_clone(p), *only = json_arr();
+            json_push_str(only, "source");
+            json_set(json_get(ps, "context"), "only", only);
+            free(err);
+            err = NULL;
+            json_t *r1 = request(c, "textDocument/codeAction", p, &k->bg, &err, &code);
+            if (!r1) { /* REQ's failure path */
+                json_free(ps);
+                if (!deadline_hit(k, server)) {
+                    char *o_ = xasprintf("LSP error: %s", err ? err : "unknown error");
+                    reply(k->out, o_, action, server, false, k->args);
+                    free(o_);
+                }
+                goto done;
+            }
+            if (!json_is_arr(r1)) {
+                json_free(r1);
+                r1 = json_arr();
+            }
+            r = request(c, "textDocument/codeAction", ps, &k->bg, &err, &code);
+            if (!r) {
+                json_free(r1);
+                if (!deadline_hit(k, server)) {
+                    char *o_ = xasprintf("LSP error: %s", err ? err : "unknown error");
+                    reply(k->out, o_, action, server, false, k->args);
+                    free(o_);
+                }
+                goto done;
+            }
+            /* mergeCodeActions: append the source actions that do not already appear identically */
+            strvec_t seen = {0};
+            json_t *x;
+            json_arr_foreach(r1, i, x) strvec_push_own(&seen, json_dump(x, 0));
+            json_arr_foreach(json_is_arr(r) ? r : NULL, i, x) {
+                char *d = json_dump(x, 0);
+                if (!strvec_contains(&seen, d)) json_push(r1, json_clone(x));
+                free(d);
+            }
+            strvec_free(&seen);
+            json_free(r);
+            r = r1;
+        }
         size_t n = json_is_arr(r) ? json_len(r) : 0;
         if (!n) output = xstrdup("No code actions available");
         else if (apply && query && *query) {

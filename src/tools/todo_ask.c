@@ -133,7 +133,7 @@ static json_t *init_phases(const json_t *args, strvec_t *errs) {
     if (json_len(items)) {
         flat = json_arr();
         json_t *e = json_obj();
-        json_set_str(e, "phase", phase ? phase : "Tasks");
+        if (phase) json_set_str(e, "phase", phase);
         json_set(e, "items", json_clone(items));
         json_push(flat, e);
     }
@@ -146,8 +146,9 @@ static json_t *init_phases(const json_t *args, strvec_t *errs) {
     strvec_t seen_ph = {0}, seen_t = {0};
     json_t *e, *it;
     json_arr_foreach(use, i, e) {
+        /* an empty phase name cannot be explicitly targeted, so it gets the default */
         const char *nm = json_get_str(e, "phase");
-        if (!nm) nm = "";
+        if (!nm || !*nm) nm = "Tasks";
         bool dup = false;
         for (size_t k = 0; k < seen_ph.n; k++) dup |= !strcmp(seen_ph.v[k], nm);
         if (dup) strvec_push_own(errs, xasprintf("Duplicate phase \"%s\" in init list", nm));
@@ -175,7 +176,7 @@ static json_t *init_phases(const json_t *args, strvec_t *errs) {
 static void append_items(json_t *phases, const json_t *args, strvec_t *errs) {
     const char *phase = json_get_str(args, "phase");
     json_t *items = json_get_arr(args, "items"), *it;
-    if (!phase || !*phase) {
+    if (phase && !*phase) {
         strvec_push(errs, "Missing phase name for append operation");
         return;
     }
@@ -198,6 +199,20 @@ static void append_items(json_t *phases, const json_t *args, strvec_t *errs) {
     }
     strvec_free(&seen);
     if (dup) return;
+    /* an omitted phase: the in-progress task's, else the first pending task's, else the last phase, else `Tasks` */
+    if (!phase) {
+        json_t *active = NULL, *first_pending = NULL, *q, *t;
+        json_arr_foreach(phases, i, q) {
+            json_arr_foreach(json_get(q, "tasks"), k, t) {
+                const char *st = json_get_str(t, "status");
+                if (!active && str_eq(st, "in_progress")) active = q;
+                if (!first_pending && str_eq(st, "pending")) first_pending = q;
+            }
+        }
+        json_t *sel = active ? active : first_pending ? first_pending : json_len(phases) ? json_at(phases, json_len(phases) - 1) : NULL;
+        phase = sel ? json_get_str(sel, "name") : NULL;
+        if (!phase) phase = "Tasks";
+    }
     json_t *p = find_phase(phases, phase);
     if (!p) {
         p = json_obj();

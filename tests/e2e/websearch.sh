@@ -30,7 +30,7 @@ out=$(ws_search google/gemini-2.5-pro "gemini query" GEMINI_API_KEY=g-fake)
 [[ "$out" == *"Gemini answer about gemini query"* && "$(ws_last)" == *':streamGenerateContent?alt=sse'*'"googleSearch": {}'* ]] \
     && echo "   ok  web search: gemini grounding" || { echo "   FAIL web search gemini: $out"; fail=1; }
 out=$(ws_search xai/grok-4 "xai query" XAI_API_KEY=x-fake)
-[[ "$out" == *"Responses answer about xai query"* && "$(ws_last)" == *'{"type": "x_search"}'* ]] \
+[[ "$out" == *"Responses answer about xai query"* && "$(ws_last)" == *'{"type": "x_search"}'*'"max_turns": 2'* ]] \
     && echo "   ok  web search: xai web + x search" || { echo "   FAIL web search xai: $out"; fail=1; }
 printf '{"openai-codex":{"type":"oauth","access":"tok-codex","refresh":"r","expires":4102444800000}}' > "$T/wsagent/auth.json"
 out=$(ws_search openai-codex/gpt-6-luna "codex query")

@@ -618,7 +618,7 @@ static char *bash_body(bgjob_t *x, void *ud, bool *failed) {
     if (b->shell) rc = shell_run_try(b->shell, cmd, b->cwd, &o, &b->res);
     if (rc == -2) {
         b->temp_shell = b->shell != NULL;
-        rc = shell_exec_once(cmd, &o, &b->res);
+        rc = b->shell ? shell_exec_fork(b->shell, cmd, &o, &b->res) : shell_exec_once(cmd, &o, &b->res);
     }
     b->wall_ms = mono_ms() - t0;
     b->rc = rc;
@@ -795,8 +795,7 @@ bool jobs_fg_take(jobs_t *j, const char *id, proc_result_t *out, char **notice) 
     if (x->bash->rc != 0 && !out->spawn_errno) out->spawn_errno = EIO;
     memset(&x->bash->res, 0, sizeof x->bash->res);
     if (notice && x->bash->temp_shell)
-        *notice = xstrdup("Ran in a temporary shell while the session shell is busy with another command: session variables and "
-                          "functions were unavailable, and nothing set here persists.");
+        *notice = xstrdup("Ran in a copy of the busy session shell; changes here won't persist.");
     job_free(x);
     return true;
 }

@@ -65,10 +65,14 @@ typedef VEC(sloppy_section_t) sloppy_sections_t;
 /* split a payload into per-file sections; false + *err (owned, parse error) on malformed input */
 bool sloppy_split_sections(const char *input, sloppy_sections_t *out, char **err);
 void sloppy_sections_free(sloppy_sections_t *s);
-/* apply one section body to LF text; returns owned new text or NULL + *err (owned) / *err_kind.
- * notes receives post-apply advisories. */
-char *sloppy_apply(const char *text, const char *body, const char *path, strvec_t *notes, char **err,
-                   const char **err_kind);
+/* apply one section body to LF text, rejecting failing operations alone:
+ * SLOPPY_CHANGED: *out_text (owned) is the new text, *err (owned, may be NULL) the rejected operations' failures;
+ * SLOPPY_UNCHANGED: nothing changed, *err (owned) says why (every operation rejected, or a no-op);
+ * SLOPPY_FAILED: the section does not parse, *err (owned) leads with the parse-failure notice.
+ * *err_kind is the first failure's kind; notes receives post-apply advisories. */
+typedef enum { SLOPPY_CHANGED, SLOPPY_UNCHANGED, SLOPPY_FAILED } sloppy_outcome_t;
+sloppy_outcome_t sloppy_apply(const char *text, const char *body, const char *path, strvec_t *notes, char **out_text,
+                              char **err, const char **err_kind);
 /* pathful sloppy payloads embedded in prose (omp extract_inline_sloppy_regions), byte offsets */
 typedef struct {
     size_t start, end;

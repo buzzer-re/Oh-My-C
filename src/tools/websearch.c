@@ -1673,6 +1673,7 @@ static json_t *s_xai(const ws_params_t *p, ws_err_t *e) {
     json_push(tools, xs);
     json_set(body, "tools", tools);
     json_set_str(body, "tool_choice", "required");
+    json_set_int(body, "max_turns", 2); /* XAI_SEARCH_MAX_TURNS: one tool round plus a follow-up when a call misfires */
     json_t *rs = json_obj();
     json_set_str(rs, "effort", "low");
     json_set(body, "reasoning", rs);

@@ -613,3 +613,17 @@ const char *settings_provenance(const char *path) {
 }
 
 bool settings_configured(const char *path) { return strcmp(settings_provenance(path), "default") != 0; }
+
+json_t *settings_operator_get(const char *path) {
+    ensure();
+    pthread_mutex_lock(&g_mu);
+    json_t *view = json_clone(g_defaults);
+    json_t *layers[] = {g_global, g_overlay, g_env, g_runtime};
+    for (size_t i = 0; i < ARRAY_LEN(layers); i++)
+        if (layers[i]) json_merge(view, layers[i]);
+    json_t *v = json_path(view, path);
+    json_t *r = v ? json_clone(v) : NULL;
+    json_free(view);
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}

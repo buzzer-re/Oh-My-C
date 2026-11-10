@@ -317,6 +317,146 @@ char *html_to_markdown(const char *html, size_t len, const char *base_url, char 
     return sb_detach(&r);
 }
 
+/* ---------- bot walls (web/scrapers/types.ts botWallOf) ---------- */
+
+/* CHALLENGE_PAGE_MAX_CHARS: a challenge interstitial carries no content; a larger page is no wall */
+#define CHALLENGE_PAGE_MAX 65536
+
+/* the value of attribute `name` in the start-tag attribute text a..e (entities decoded), owned, NULL if absent */
+static char *tag_attr(const char *a, const char *e, const char *name) {
+    size_t nl = strlen(name);
+    while (a < e) {
+        while (a < e && (isspace((unsigned char)*a) || *a == '/')) a++;
+        const char *ks = a;
+        while (a < e && !isspace((unsigned char)*a) && *a != '=' && *a != '/' && *a != '>') a++;
+        size_t kl = (size_t)(a - ks);
+        if (!kl) {
+            if (a < e) a++;
+            continue;
+        }
+        while (a < e && isspace((unsigned char)*a)) a++;
+        const char *vs = a, *ve = a;
+        if (a < e && *a == '=') {
+            a++;
+            while (a < e && isspace((unsigned char)*a)) a++;
+            if (a < e && (*a == '"' || *a == '\'')) {
+                char q = *a++;
+                vs = a;
+                while (a < e && *a != q) a++;
+                ve = a;
+                if (a < e) a++;
+            } else {
+                vs = a;
+                while (a < e && !isspace((unsigned char)*a) && *a != '>') a++;
+                ve = a;
+            }
+        }
+        if (kl == nl && !strncasecmp(ks, name, nl)) {
+            sb_t v = SB_INIT;
+            for (const char *p = vs; p < ve;) {
+                if (*p == '&') p += decode_entity(p, (size_t)(ve - p), &v);
+                else sb_putc(&v, *p++);
+            }
+            return sb_detach(&v);
+        }
+    }
+    return NULL;
+}
+
+/* hasChallengeForm: a page small enough to be an interstitial holds an `<input name="js_challenge">` field outside
+ * `<template>`, tokenized as a browser does: a form quoted in a comment, script, raw-text element or attribute is no
+ * field, and a tag cut off by the end of the page is text */
+static bool has_challenge_form(const char *html, size_t n) {
+    if (n > CHALLENGE_PAGE_MAX) return false;
+    static const char *const RAW[] = {"script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes", NULL};
+    int template_depth = 0;
+    for (size_t i = 0; i < n;) {
+        if (html[i] != '<') {
+            i++;
+            continue;
+        }
+        if (i + 4 <= n && !memcmp(html + i, "<!--", 4)) {
+            const char *end = memmem(html + i + 4, n - i - 4, "-->", 3);
+            if (!end) return false;
+            i = (size_t)(end - html) + 3;
+            continue;
+        }
+        if (i + 1 < n && (html[i + 1] == '!' || html[i + 1] == '?')) { /* doctype / bogus comment */
+            const char *end = memchr(html + i, '>', n - i);
+            if (!end) return false;
+            i = (size_t)(end - html) + 1;
+            continue;
+        }
+        bool closing = i + 1 < n && html[i + 1] == '/';
+        size_t ns = i + 1 + closing, ne = ns;
+        if (ne >= n || !isalpha((unsigned char)html[ne])) {
+            i++;
+            continue;
+        }
+        while (ne < n && !isspace((unsigned char)html[ne]) && html[ne] != '/' && html[ne] != '>') ne++;
+        /* the tag's end, skipping quoted attribute values */
+        size_t k = ne;
+        char q = 0;
+        for (; k < n; k++) {
+            if (q) {
+                if (html[k] == q) q = 0;
+            } else if (html[k] == '"' || html[k] == '\'') {
+                q = html[k];
+            } else if (html[k] == '>') {
+                break;
+            }
+        }
+        if (k >= n) return false; /* cut off by the end of the page */
+        size_t nl = ne - ns;
+        const char *name = html + ns;
+        if (nl == 8 && !strncasecmp(name, "template", 8)) template_depth += closing ? (template_depth > 0 ? -1 : 0) : 1;
+        if (!closing && nl == 5 && !strncasecmp(name, "input", 5) && !template_depth) {
+            char *v = tag_attr(html + ne, html + k, "name");
+            bool hit = v && !strcmp(v, "js_challenge");
+            free(v);
+            if (hit) return true;
+        }
+        i = k + 1;
+        if (!closing)
+            for (const char *const *r = RAW; *r; r++) {
+                size_t rl = strlen(*r);
+                if (rl != nl || strncasecmp(name, *r, rl)) continue;
+                /* raw text ends only at a full end tag: `</name` then whitespace, `/` or `>` */
+                size_t j = i;
+                for (;;) {
+                    const char *lt = memmem(html + j, n - j, "</", 2);
+                    if (!lt) return false;
+                    size_t at = (size_t)(lt - html) + 2;
+                    if (at + rl < n && !strncasecmp(html + at, *r, rl) &&
+                        (isspace((unsigned char)html[at + rl]) || html[at + rl] == '/' || html[at + rl] == '>')) {
+                        i = (size_t)(lt - html);
+                        break;
+                    }
+                    j = at;
+                }
+                break;
+            }
+    }
+    return false;
+}
+
+/* botWallOf: the bot protection whose challenge or block page an HTML response is (static string), or NULL. A 2xx page
+ * counts only from Cloudflare's header or a live challenge form; vendor markers in the body count on an error status. */
+const char *web_bot_wall(int status, const char *content_type, const char *cf_mitigated, const char *body, size_t n) {
+    if (!content_type || !strstr(content_type, "html")) return NULL;
+    if (cf_mitigated && !strcmp(cf_mitigated, "challenge")) return "Cloudflare";
+    if (body && has_challenge_form(body, n)) return "JavaScript challenge";
+    if (status >= 200 && status < 300) return NULL;
+    if (!body) return NULL;
+#define HAS(lit) (memmem(body, n, lit, sizeof lit - 1) != NULL)
+    if (HAS("_cf_chl_opt")) return "Cloudflare";
+    if (HAS("captcha-delivery.com")) return "DataDome";
+    if (HAS("px-captcha")) return "PerimeterX";
+    if (HAS("blocked by network security")) return "network security block";
+#undef HAS
+    return NULL;
+}
+
 /* ---------- read URL ---------- */
 
 static const char *BROWSER_UA =
@@ -365,6 +505,24 @@ int web_read_url(tool_env_t *env, const char *url_in, volatile sig_atomic_t *can
     json_set_str(details, "url", url);
     json_set_str(details, "finalUrl", r.final_url ? r.final_url : url);
     json_set_str(details, "contentType", ct);
+    /* a wall's response is never content; one served with a 2xx status is a challenge interstitial (`:raw` returns it
+     * as fetched) */
+    const char *wall = web_bot_wall(r.status, ct, http_headers_get(&r.headers, "cf-mitigated"), r.body, r.body_len);
+    if (wall && r.status < 300 && !raw) {
+        tool_result_error(out, "Blocked by bot protection (%s, HTTP %d): the site served a challenge instead of the page", wall,
+                          r.status);
+        out->details = details;
+        http_resp_free(&r);
+        free(url);
+        return 0;
+    }
+    if (wall && r.status >= 400) {
+        tool_result_error(out, "HTTP %d fetching %s\nBlocked by bot protection (%s)", r.status, url, wall);
+        out->details = details;
+        http_resp_free(&r);
+        free(url);
+        return 0;
+    }
     if (r.status >= 400) {
         tool_result_error(out, "HTTP %d fetching %s\n%.2000s", r.status, url, r.body ? r.body : "");
         out->details = details;

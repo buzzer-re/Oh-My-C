@@ -77,5 +77,12 @@ op = methods(rows, "textDocument/didOpen", "a.rs")
 check("reopen versions", [o["params"]["textDocument"]["version"] for o in op] == [1, 2], op)
 res, rows = run([lsp(action="code_actions", file="src/a.rs", line=1), lsp(action="code_actions", file="src/b.rs", line=1)])
 check("not idle by default", not methods(rows, "textDocument/didClose", "a.rs"), rows)
+
+# code actions: the unfiltered set plus the source kinds a server lists only on request, merged without repeats (omp
+# da8463bb58, f27d11cfc6); a document symbol's line is its identifier's (omp 55041b7e07)
+res, rows = run([lsp(action="code_actions", file="src/a.rs", line=1), lsp(action="symbols", file="src/a.rs")], {"FAKE_LSP_ACTIONS": "1"})
+check("source actions listed", "0: [quickfix] Fix" in res[0] and "1: [source.organizeImports] Organize Imports" in res[0]
+      and "2:" not in res[0], res)
+check("symbol identifier line", "a @ line 3" in res[1], res)
 print("lsp sync ok" if not fails else "lsp sync failed")
 sys.exit(1 if fails else 0)

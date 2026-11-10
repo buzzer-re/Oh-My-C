@@ -671,33 +671,77 @@ static void bash_on_output(void *ud, int stream, const char *data, size_t len) {
     }
 }
 
-/* leading `cd <dir> && rest` → (dir, rest) when cwd omitted */
-static bool split_leading_cd(const char *cmd, char **dir, char **rest) {
-    const char *p = cmd;
-    while (isspace((unsigned char)*p)) p++;
-    if (strncmp(p, "cd ", 3) != 0) return false;
-    p += 3;
-    while (*p == ' ') p++;
-    const char *d = p;
-    char q = 0;
-    if (*p == '"' || *p == '\'') {
-        q = *p++;
-        d = p;
-        while (*p && *p != q) p++;
-        if (!*p) return false;
-    } else {
-        while (*p && !isspace((unsigned char)*p) && *p != '&' && *p != ';') p++;
+/* an internal-URL style target (`local://x`): never a host directory */
+static bool has_url_scheme(const char *s) {
+    if (!isalpha((unsigned char)*s)) return false;
+    while (isalnum((unsigned char)*s) || *s == '+' || *s == '-' || *s == '.') s++;
+    return str_starts(s, "://");
+}
+
+/* extractLeadingCdTarget: a leading `cd <path> && rest` or `cd <path>; rest` → (literal path, rest, separator ';' or '&').
+ * Bails (false) on anything but exactly `cd`, one path token and a top-level `&&`/`;`: redirects, extra arguments,
+ * paths needing expansion (`$`, backticks, `(`), line continuations, `;;`/`;&` case terminators. */
+bool bash_extract_leading_cd(const char *cmd, char **dir, char **rest, char *sep) {
+    if (strncmp(cmd, "cd", 2) != 0 || (cmd[2] != ' ' && cmd[2] != '\t')) return false;
+    size_t i = 2;
+    while (cmd[i] == ' ' || cmd[i] == '\t') i++;
+    sb_t path = SB_INIT;
+    bool in_single = false, in_double = false;
+    for (; cmd[i]; i++) {
+        char ch = cmd[i];
+        if (in_single) {
+            if (ch == '\'') in_single = false;
+            else sb_putc(&path, ch);
+            continue;
+        }
+        if (in_double) {
+            if (ch == '\\' && cmd[i + 1]) {
+                char next = cmd[i + 1];
+                if (next == '\n' || next == '\r') goto fail;
+                if (next == '"' || next == '\\' || next == '$' || next == '`') {
+                    sb_putc(&path, next);
+                    i++;
+                    continue;
+                }
+            }
+            if (ch == '"') in_double = false;
+            else sb_putc(&path, ch);
+            continue;
+        }
+        if (ch == '\'') {
+            in_single = true;
+            continue;
+        }
+        if (ch == '"') {
+            in_double = true;
+            continue;
+        }
+        if (ch == '\\' && cmd[i + 1]) {
+            if (cmd[i + 1] == '\n' || cmd[i + 1] == '\r') goto fail;
+            sb_putc(&path, cmd[++i]);
+            continue;
+        }
+        if (strchr(" \t\n\r&|;<>()", ch)) break;
+        sb_putc(&path, ch);
     }
-    size_t dl = (size_t)(p - d);
-    if (q) p++;
-    while (*p == ' ') p++;
-    if (strncmp(p, "&&", 2) != 0) return false;
-    p += 2;
-    while (*p == ' ') p++;
-    if (!*p || dl == 0) return false;
-    *dir = xstrndup(d, dl);
-    *rest = xstrdup(p);
+    if (in_single || in_double || !path.len || strpbrk(sb_cstr(&path), "$`(")) goto fail;
+    while (cmd[i] == ' ' || cmd[i] == '\t') i++;
+    if (cmd[i] == '&' && cmd[i + 1] == '&') {
+        *sep = '&';
+        i += 2;
+    } else if (cmd[i] == ';' && cmd[i + 1] != ';' && cmd[i + 1] != '&') {
+        *sep = ';';
+        i++;
+    } else {
+        goto fail;
+    }
+    while (cmd[i] == ' ' || cmd[i] == '\t') i++;
+    *dir = sb_detach(&path);
+    *rest = xstrdup(cmd + i);
     return true;
+fail:
+    sb_free(&path);
+    return false;
 }
 
 #define BASH_TIMEOUT_DESC "timeout in seconds; 0 disables the command deadline; nonzero values are clamped to 1-3600"
@@ -907,16 +951,28 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     const char *cwd_arg = json_get_str(args, "cwd");
     char *cwd = NULL;
     char *full = NULL;
+    /* the directory the command ran in when the call named one (explicit cwd or a hoisted cd), stamped on the
+     * result's details; cd_sep is ';' when the hoisted cd was written with `;` */
+    bool ran_cwd = false;
+    char cd_sep = 0;
     if (cwd_arg && *cwd_arg) {
         cwd = tool_resolve_path(env, cwd_arg);
+        ran_cwd = true;
     } else {
+        /* `&&` always hoists (a missing directory fails early, as the shell would short-circuit); `;` runs the rest
+         * even when cd fails, so it hoists only onto an existing host directory. The target is a shell path: `/` is
+         * the filesystem root, not the workspace alias an explicit tool cwd keeps. */
         char *d, *rest;
-        if (split_leading_cd(command, &d, &rest)) {
-            char *cand = tool_resolve_path(env, d);
-            if (fs_is_dir(cand)) {
+        char sep;
+        if (bash_extract_leading_cd(command, &d, &rest, &sep)) {
+            bool virt = has_url_scheme(d);
+            char *cand = virt ? tool_resolve_path(env, d) : path_abs(d, env->cwd);
+            if (sep == '&' || (!virt && fs_is_dir(cand))) {
                 cwd = cand;
                 free(cmd);
                 cmd = rest;
+                ran_cwd = true;
+                if (sep == ';') cd_sep = ';';
             } else {
                 free(cand);
                 free(rest);
@@ -1086,6 +1142,12 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     out_sink_free(bs.sink);
     proc_result_free(&r);
 done:
+    /* details.cwd / cdSeparator: the directory the command actually ran in (a thrown error carries no details) */
+    if (ran_cwd && (out->details || !out->is_error)) {
+        if (!out->details) out->details = json_obj();
+        json_set_str(out->details, "cwd", cwd);
+        if (cd_sep) json_set_str(out->details, "cdSeparator", ";");
+    }
     strvec_free(&notices);
     free(full);
     free(cwd);
@@ -1285,6 +1347,17 @@ static json_t *wait_job_rows(jobs_t *jobs, const json_t *done) {
     return rows;
 }
 
+/* elapsedReport: the window an elapsed wait spent and the one a back-to-back wait gets (a bare still-running snapshot
+ * reads as an empty result, and agents then start `sleep` jobs to block for longer) */
+static char *elapsed_report(const char *what, int rung) {
+    char *span = usage_fmt_duration((double)WAIT_LADDER_MS[rung]);
+    char *next = usage_fmt_duration((double)WAIT_LADDER_MS[MIN(rung + 1, WAIT_LADDER_RUNGS - 1)]);
+    char *r = xasprintf("%s within %s; a back-to-back wait allows up to %s.", what, span, next);
+    free(span);
+    free(next);
+    return r;
+}
+
 /* #elapsed: a window ran out with nothing new. Extend the idle streak and, from WAIT_NOTICE_RUNG on, append the reminder. */
 static void wait_elapsed(tool_env_t *env, tool_result_t *out, int rung, int64_t streak_ms) {
     int64_t waited = streak_ms + WAIT_LADDER_MS[rung];
@@ -1453,6 +1526,13 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     } else if (running || (jobs && jobs_undelivered(jobs))) {
         json_t *done = jobs_take_finished(jobs);
         char *txt = job_result_text(jobs, done, false);
+        if (wake == WAKE_TIMEOUT) { /* the timeout line joins the report's text block */
+            char *rep = elapsed_report("No job finished", rung);
+            char *joined = xasprintf("%s\n\n%s", *txt ? txt : "No background jobs.", rep);
+            free(rep);
+            free(txt);
+            txt = joined;
+        }
         tool_result_text(out, *txt ? txt : "No background jobs.");
         free(txt);
         json_set(out->details, "jobs", wait_job_rows(jobs, done));
@@ -1461,10 +1541,10 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         if (wake == WAKE_TIMEOUT) wait_elapsed(env, out, rung, streak_ms);
         json_free(done);
     } else if (wake == WAKE_TIMEOUT) {
-        char *span = usage_fmt_duration((double)WAIT_LADDER_MS[rung]);
-        if (reply_wait) tool_result_textf(out, "No reply within %s.", span);
-        else tool_result_textf(out, "No service finished within %s. Read proc:// for status.", span);
-        free(span);
+        char *rep = elapsed_report(reply_wait ? "No reply" : "No service finished", rung);
+        if (reply_wait) tool_result_text(out, rep);
+        else tool_result_textf(out, "%s Read proc:// for status.", rep);
+        free(rep);
         out->useless = true; /* a wait that ran out with nothing to report is an idle poll */
         json_set(out->details, "jobs", json_arr());
         wait_elapsed(env, out, rung, streak_ms);

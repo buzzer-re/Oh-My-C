@@ -59,7 +59,10 @@ static void bash_env_init(void) {
         "npm_config_progress=false", "PNPM_DISABLE_SELF_UPDATE_CHECK=true", "PNPM_UPDATE_NOTIFIER=false", "YARN_ENABLE_TELEMETRY=0",
         "YARN_ENABLE_PROGRESS_BARS=0", "CARGO_TERM_PROGRESS_WHEN=never", "DEBIAN_FRONTEND=noninteractive", "PIP_NO_INPUT=1",
         "PIP_DISABLE_PIP_VERSION_CHECK=1", "TF_INPUT=0", "TF_IN_AUTOMATION=1", "GH_PROMPT_DISABLED=1", "COMPOSER_NO_INTERACTION=1",
-        "CLOUDSDK_CORE_DISABLE_PROMPTS=1", "OMC=1", NULL};
+        "CLOUDSDK_CORE_DISABLE_PROMPTS=1", "OMC=1",
+        /* AGENT_LOCALE: agent commands pin the locale over the inherited one (byte-order collation, `C` numbers and
+         * messages, UTF-8 text) so output doesn't vary by machine; user `!` commands keep theirs */
+        "LANG=C.UTF-8", "LC_ALL=C.UTF-8", NULL};
     size_t n = 0;
     for (const char *const *e = base; *e; e++) g_bash_env[n++] = *e;
     /* REJECT_PROMPT_COMMAND: `false` from PATH, else the bare name */
@@ -102,7 +105,7 @@ char *tool_resolve_path(tool_env_t *env, const char *p) {
         return n;
     }
     if (p && str_starts(p, "ssh://")) return xstrdup(p); /* remote: resolved by ssh.c */
-    if (!p || !*p || strcmp(p, "/") == 0) return xstrdup(env->cwd); /* omp: bare "/" means session cwd */
+    if (!p || !*p || !p[strspn(p, "/")]) return xstrdup(env->cwd); /* omp: a bare root (`/`, `//`) means session cwd */
     if (str_starts(p, "file://")) p += 7;
     return path_abs(p, env->cwd);
 }

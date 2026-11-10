@@ -3183,6 +3183,11 @@ static bool replace_stage(fsrc_t *fs, const json_t *args, bool fz, double thresh
  * sloppy mode (modes/sloppy/mod.rs)
  * ====================================================================================== */
 
+/* PARTIAL_NOTICE: leads a file's rejected operations, so the model re-sends only those */
+#define SLOPPY_PARTIAL_NOTICE                                                                                          \
+    "Rejected the operations below; the payload's other operations were applied. Re-send only the rejected "          \
+    "operations — the applied ones are already in place."
+
 static bool sloppy_stage(fsrc_t *fs, const json_t *args, stageds_t *out, perr_t *e) {
     const char *input = json_get_str(args, "input");
     sloppy_sections_t secs = {0};
@@ -3193,6 +3198,8 @@ static bool sloppy_stage(fsrc_t *fs, const json_t *args, stageds_t *out, perr_t 
         return FAIL(e, K_PARSE, "Missing file target: start the payload with *** Edit File: relative/path.ts.");
     }
     bool multi = secs.n > 1, ok = true;
+    strvec_t unchanged = {0}; /* each unchanged file's rejections; the call fails with them when no file changes */
+    const char *unchanged_kind = NULL;
     for (size_t i = 0; i < secs.n && ok; i++) {
         fread_t *r = fs_read_path(fs, secs.v[i].path, e);
         if (!r) {
@@ -3202,8 +3209,9 @@ static bool sloppy_stage(fsrc_t *fs, const json_t *args, stageds_t *out, perr_t 
         }
         strvec_t notes = {0};
         const char *kind = K_APPLY;
-        char *after = sloppy_apply(r->text, secs.v[i].body, r->display, &notes, &err, &kind);
-        if (!after) {
+        char *after = NULL;
+        sloppy_outcome_t oc = sloppy_apply(r->text, secs.v[i].body, r->display, &notes, &after, &err, &kind);
+        if (oc == SLOPPY_FAILED) { /* a section that does not parse fails the whole payload */
             fail(e, kind, err);
             err = NULL;
             if (multi) wrap_in_file(e, r->display);
@@ -3215,16 +3223,41 @@ static bool sloppy_stage(fsrc_t *fs, const json_t *args, stageds_t *out, perr_t 
         memset(&s, 0, sizeof(s));
         s.display = xstrdup(r->display);
         s.abs = xstrdup(r->abs);
-        s.op = OP_UPDATE;
         s.existed = true;
         s.before_raw = xstrdup(r->raw);
         s.before = xstrdup(r->text);
-        s.after = after;
-        s.persisted = persist(r, after);
-        s.diff = diff_numbered(r->text, after, -1, &s.first_changed);
+        if (oc == SLOPPY_CHANGED) {
+            s.op = OP_UPDATE;
+            s.after = after;
+            s.persisted = persist(r, after);
+            s.diff = diff_numbered(r->text, after, -1, &s.first_changed);
+            if (err) strvec_push_own(&notes, xasprintf("%s\n%s", SLOPPY_PARTIAL_NOTICE, err));
+        } else {
+            s.op = OP_NOOP;
+            s.after = xstrdup(r->text);
+            s.diff = xstrdup("");
+            strvec_push_own(&notes, xasprintf("%s\n%s", SLOPPY_PARTIAL_NOTICE, err));
+            if (!unchanged_kind) unchanged_kind = kind;
+            strvec_push_own(&unchanged, multi ? xasprintf("[%s]: %s", r->display, err) : xstrdup(err));
+        }
+        free(err);
+        err = NULL;
         s.after_preview = notes;
         vec_push(out, s);
     }
+    if (ok && unchanged.n) {
+        bool changed = false;
+        for (size_t i = 0; i < out->n; i++) changed |= out->v[i].op != OP_NOOP;
+        if (!changed) {
+            /* no file changed: the call fails with every file's rejections (repeats dropped) */
+            strvec_t uniq = {0};
+            for (size_t i = 0; i < unchanged.n; i++)
+                if (!strvec_contains(&uniq, unchanged.v[i])) strvec_push(&uniq, unchanged.v[i]);
+            ok = fail(e, unchanged_kind ? unchanged_kind : K_APPLY, strvec_join(&uniq, "\n\n"));
+            strvec_free(&uniq);
+        }
+    }
+    strvec_free(&unchanged);
     sloppy_sections_free(&secs);
     return ok;
 }
