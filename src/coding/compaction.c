@@ -482,8 +482,8 @@ static volatile sig_atomic_t *cancel_ptr(app_t *a) { return tl_cancel ? tl_cance
 static bool cancelled(app_t *a) { return *cancel_ptr(a) != 0; }
 
 /* one summarization oneshot: owned text, NULL + *err (owned) on failure; *status the HTTP status if known */
-static char *oneshot(app_t *a, const ai_model_t *m, const char *system, const char *user, int64_t max_tokens,
-                     const char *what, char **err, int *status) {
+static char *oneshot_ex(app_t *a, const ai_model_t *m, const char *system, const char *user, int64_t max_tokens,
+                        const char *what, char **err, int *status, bool disable_reasoning) {
     json_t *sys = json_arr();
     json_push_str(sys, system ? system : "");
     json_t *msgs = json_arr();
@@ -494,7 +494,8 @@ static char *oneshot(app_t *a, const ai_model_t *m, const char *system, const ch
     char *key = app_api_key_for(m);
     o.api_key = key;
     o.max_tokens = max_tokens;
-    compaction_effort(a, m, &o);
+    if (disable_reasoning) o.disable_reasoning = true;
+    else compaction_effort(a, m, &o);
     o.session_id = a->agent->session_id;
     o.provider_session_state = true;
     o.metadata = (json_t *)app_session_metadata(a, m->provider);
@@ -513,6 +514,11 @@ static char *oneshot(app_t *a, const ai_model_t *m, const char *system, const ch
     json_free(msgs);
     free(key);
     return text;
+}
+
+static char *oneshot(app_t *a, const ai_model_t *m, const char *system, const char *user, int64_t max_tokens,
+                     const char *what, char **err, int *status) {
+    return oneshot_ex(a, m, system, user, max_tokens, what, err, status, false);
 }
 
 static char *load_prompt(const char *name) {
@@ -638,7 +644,9 @@ static char *short_summary(app_t *a, const ai_model_t *m, const json_t *recent, 
     free(sp);
     char *sys = load_prompt("summarization-system");
     char *err = NULL;
-    char *out = oneshot(a, m, sys, sb_cstr(&p), max_tokens, "Short summary failed", &err, NULL);
+    /* display-only summary under a 512-token cap: reasoning would consume the whole budget (the full summary keeps
+     * the session's effort) */
+    char *out = oneshot_ex(a, m, sys, sb_cstr(&p), max_tokens, "Short summary failed", &err, NULL, true);
     free(sys);
     sb_free(&p);
     free(err);

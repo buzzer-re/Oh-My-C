@@ -90,3 +90,17 @@ f = sorted(glob.glob(os.path.join(os.environ["RO"], "agent", "sessions", "**", "
 mc = [(e.get("model"), e.get("role")) for e in map(json.loads, open(f)) if e.get("type") == "model_change"]
 ok = mc[:2] == [("mock/mock-flaky", None), ("mock/mock-flaky", "slow")] and ("mock/mock-flaky", "slow") in mc[2:]
 print("chain=%s again=%s entries=%s" % (walk("role chain"), walk("role chain again"), ok))'
+# compaction display summary (dc44458606, 2c43992f91): the 512-token short summary never asks for reasoning; the full
+# summary keeps the session's effort
+SS="$T/acshort"; mkdir -p "$SS"; cp "$T/agent/models.yml" "$SS/models.yml"
+printf 'modelRoles:\n  default: mock/mock-think\ndefaultThinkingLevel: high\ncompaction:\n  methodOrder: [soft]\n' > "$SS/config.yml"
+SBIG=$(python3 -I -c 'print("say:" + " ".join("alpha%d beta%d gamma" % (i, i * 7) for i in range(4000)))')
+M=$(ac_mark)
+(cd "$ACW" && timeout 60 env OMC_CODING_AGENT_DIR="$SS" python3 -I "$ROOT/tests/e2e/rpc_compact.py" "$B" "{\"type\":\"prompt\",\"message\":\"$SBIG\"}" \
+    '{"type":"prompt","message":"say:compact me"}' '{"type":"compact"}' </dev/null > "$T/acshort.out" 2>&1)
+check "short summary reasoning" "short=['low'] full=['high', 'high']" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+rs=[json.loads(l) for l in open(sys.argv[1])][int(sys.argv[2]):]
+short=[r for r in rs if "as a pull request description" in json.dumps(r.get("messages", [])[-1:])]
+full=[r for r in rs if "<conversation>" in json.dumps(r.get("messages", [])[-1:]) and r not in short]
+# disableReasoning on a model that cannot switch reasoning off sends its lowest effort
+print("short=%s full=%s" % ([r.get("reasoning_effort") for r in short], [r.get("reasoning_effort") for r in full]))'
