@@ -27,8 +27,8 @@
 #define MAX_STREAM_BLOCKS 4096
 #define MAX_TOOL_ID_LEN 64
 
-#define DEFAULT_CLAUDE_CODE_VERSION "2.1.280"
-#define CLAUDE_CODE_SDK_VERSION "0.112.1"
+#define DEFAULT_CLAUDE_CODE_VERSION "2.1.321"
+#define CLAUDE_CODE_SDK_VERSION "0.128.0"
 #define CLAUDE_CODE_SYSTEM_INSTRUCTION "You are Claude Code, Anthropic's official CLI for Claude."
 #define CLAUDE_TOOL_PREFIX "_"
 #define BILLING_PREFIX "x-anthropic-billing-header:"
@@ -39,7 +39,6 @@
 
 /* betas */
 #define BETA_OAUTH "oauth-2025-04-20"
-#define BETA_MID_CONV_SYSTEM "mid-conversation-system-2026-04-07"
 #define BETA_CONTEXT_MGMT "context-management-2025-06-27"
 #define BETA_STRUCTURED_OUTPUTS "structured-outputs-2025-12-15"
 #define BETA_THINKING_TOKEN_COUNT "thinking-token-count-2026-05-13"
@@ -312,7 +311,7 @@ static const char *stainless_value(size_t i) {
     case 3: return CLAUDE_CODE_SDK_VERSION;
     case 4: return "0";
     case 5: return "node";
-    case 6: return "v26.3.0";
+    case 6: return "v26.12.1";
     default: return "600";
     }
 }
@@ -1760,8 +1759,7 @@ static void beta_add(strvec_t *v, const char *b) {
 static void claude_code_betas(strvec_t *v, bool agent, bool thinking, bool no_strict, bool cm) {
     if (agent) {
         static const char *const a[] = {BETA_CLAUDE_CODE,          BETA_OAUTH,        BETA_INTERLEAVED,
-                                        BETA_THINKING_TOKEN_COUNT, BETA_CONTEXT_MGMT, BETA_PROMPT_CACHING_SCOPE,
-                                        BETA_MID_CONV_SYSTEM};
+                                        BETA_THINKING_TOKEN_COUNT, BETA_CONTEXT_MGMT, BETA_PROMPT_CACHING_SCOPE};
         for (size_t i = 0; i < ARRAY_LEN(a); i++) {
             if (!cm && !strcmp(a[i], BETA_CONTEXT_MGMT)) continue;
             beta_add(v, a[i]);
