@@ -235,13 +235,24 @@ static void append_advisory(tool_result_t *out, char *advisory) {
 
 static bool async_on(const tool_env_t *env) { return env->jobs && settings_bool("async.enabled", true); }
 
+/* structured-subagent.ts normalizeModelSelector: a present but blank `model` ("", whitespace, []) is "use the
+ * agent's routing", not a selector */
+static bool blank_model(const json_t *m) {
+    if (json_is_str(m)) {
+        for (const char *s = json_sv(m); *s; s++)
+            if (!isspace((unsigned char)*s)) return false;
+        return true;
+    }
+    return json_is_arr(m) && json_len(m) == 0;
+}
+
 static spawn_spec_t spec_of(const json_t *t, const char *context) {
     spawn_spec_t spec = {.agent = json_get_str(t, "agent") ? json_get_str(t, "agent") : "task",
                          .name = json_get_str(t, "name"),
                          .task = json_get_str(t, "task"),
                          .context = context,
                          .source_session = json_get_str(t, "sourceSession"),
-                         .model = json_get(t, "model")};
+                         .model = blank_model(json_get(t, "model")) ? NULL : json_get(t, "model")};
     return spec;
 }
 
@@ -366,7 +377,7 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             sb_appendf(&errs, "tasks[%zu]: `sourceSession` is only valid with agent \"seance\"\n", i);
         if (seance && !json_get_str(t, "sourceSession"))
             sb_appendf(&errs, "tasks[%zu]: agent \"seance\" requires `sourceSession`\n", i);
-        if (json_get(t, "model") && !seance)
+        if (json_get(t, "model") && !blank_model(json_get(t, "model")) && !seance)
             sb_appendf(&errs, "tasks[%zu]: per-call `model` is disabled (task.perCallModel: off)\n", i);
     }
     if (errs.len) {
@@ -557,12 +568,14 @@ agent_tool_t *tool_task_new(tool_env_t *env) {
     char *desc = tool_prompt("task", ctx);
     json_free(ctx);
     json_free(defs);
-    /* upstream task/types.ts createTaskSchema (no isolation, no eval tools; seance widens `model`) */
-    const char *seance_fields = seance ? "\"model\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"array\",\"items\":{"
+    /* upstream task/types.ts createTaskSchema (no isolation, no eval tools): `model` is declared only while the
+     * caller may send it, i.e. seance's selector list (task.perCallModel has no per-call selector here); an
+     * undeclared `model` still reaches the preflight refusal through lenient validation */
+    const char *seance_fields = seance ? ",\"model\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"array\",\"items\":{"
                                          "\"type\":\"string\"}}]},\"sourceSession\":{\"type\":\"string\"}"
-                                       : "\"model\":{\"type\":\"string\"}";
+                                       : "";
     char *it = xasprintf("{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"solutionSpace\":{\"type\":"
-                         "\"string\"},\"name\":{\"type\":\"string\"},\"agent\":{\"type\":\"string\"},%s},\"required\":["
+                         "\"string\"},\"name\":{\"type\":\"string\"},\"agent\":{\"type\":\"string\"}%s},\"required\":["
                          "\"task\",\"solutionSpace\"],\"additionalProperties\":false}",
                          seance_fields);
     char *sch = batch ? xasprintf("{\"type\":\"object\",\"properties\":{\"context\":{\"type\":\"string\"},\"tasks\":{"

@@ -46,3 +46,17 @@ M=$(ac_mark)
 check "task whitespace" "assignment kept" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
 sub=[r for r in main if "Complete assignment thoroughly" in text(r["messages"][-1])]
 print("assignment kept" if sub and text(sub[0]["messages"][-1]).endswith("Complete assignment thoroughly:\n\nsay:keep\n\n\n\nspacing  \n|  a  |  b |") else "got %r" % (sub and text(sub[0]["messages"][-1])))'
+# task model placeholders (9c75a72acd, ad36b9ac35, 05a8b9c180): "" / whitespace / [] route like an omitted model, a
+# real per-call model is still refused, and the schema declares `model` only for seance
+M=$(ac_mark)
+(cd "$ACW" && timeout 60 "$B" --model mock/mock-1 -p 'call:task:{"context":"m","tasks":[{"task":"say:blank-model-a","model":"  "},{"task":"say:blank-model-b","model":[]}]}' </dev/null >/dev/null 2>&1)
+mkdir -p "$ACW/noseance/.omc" && printf 'task:\n  disabledAgents: [seance]\n' > "$ACW/noseance/.omc/config.yml"
+(cd "$ACW/noseance" && timeout 60 "$B" --model mock/mock-1 -p 'call:task:{"context":"m","tasks":[{"task":"say:pinned","model":"mock/mock-2"}]}' </dev/null >/dev/null 2>&1)
+check "task blank model" "blank routed=True pinned refused=True schema model=False" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+subs=[text(r["messages"][-1]) for r in main if "Complete assignment thoroughly" in text(r["messages"][-1])]
+routed=any("blank-model-a" in s for s in subs) and any("blank-model-b" in s for s in subs)
+tools=[m for r in main for m in r["messages"] if m.get("role")=="tool"]
+refused=any("per-call `model` is disabled" in text(m) for m in tools) and not any("say:pinned" in s for s in subs)
+task=[t for t in main[-1]["tools"] if t["function"]["name"]=="task"][0]["function"]["parameters"]
+props=task["properties"]["tasks"]["items"]["properties"] if "tasks" in task["properties"] else task["properties"]
+print("blank routed=%s pinned refused=%s schema model=%s" % (routed, refused, "model" in props))'
