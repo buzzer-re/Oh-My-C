@@ -794,7 +794,6 @@ int google_sse_event(void *ud, const char *event, const char *data, size_t len) 
             if (!strcmp(mapped, "error")) {
                 free(s->error);
                 s->error = xasprintf("Generation failed with finish reason: %s", fr);
-                s->finish_transient = str_eq(fr, "MALFORMED_RESPONSE");
             }
         }
     }
@@ -823,7 +822,6 @@ bool google_sse_empty_stop(const google_sse_t *s, int rc) {
 json_t *google_sse_finish(google_sse_t *s, int rc, const char *err) {
     if (rc == -2) return aib_finish(&s->b, "aborted", err ? err : "Request was aborted");
     if (s->error) {
-        if (s->finish_transient) aib_set(&s->b, "errorId", json_int(AIE_CLASS | AIE_TRANSIENT));
         return aib_finish(&s->b, "error", s->error);
     }
     if (rc < 0 || rc > 2) return aib_finish(&s->b, "error", err ? err : "request failed");

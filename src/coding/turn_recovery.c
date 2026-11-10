@@ -33,6 +33,7 @@ enum {
     P_MALFORMED,
     P_PROVIDER_FINISH,
     P_EMPTY_RESPONSE,
+    P_MALFORMED_RESPONSE_FINISH,
     P_CONTENT_FILTER,
     P_ACCOUNT_POLICY,
     P_ANTHROPIC_ACCOUNT_POLICY,
@@ -111,6 +112,9 @@ static const struct {
     {P_MALFORMED, RX_ICASE, "\\b(?:malformed[_. ]?(?:function[_. ]?call|response)|unexpected[_. ]?tool[_. ]?call)\\b"},
     {P_PROVIDER_FINISH, RX_ICASE, "\\bProvider (?:returned error finish_reason|finish_reason:\\s*error)\\b"},
     {P_EMPTY_RESPONSE, RX_ICASE, "\\bthought-only response without final output\\b"},
+    /* Gemini's MALFORMED_RESPONSE finish is a backend fault: the same request can succeed. Kept narrow so other
+     * "malformed response" errors (e.g. an image API's) stay terminal */
+    {P_MALFORMED_RESPONSE_FINISH, RX_ICASE, "\\bfinish reason:\\s*MALFORMED_RESPONSE\\b"},
     {P_CONTENT_FILTER, RX_ICASE, "\\b(?:incomplete:\\s*)?content_filter\\b"},
     {P_ACCOUNT_POLICY, RX_ICASE, "\\bcyber_policy\\b|trusted access for cyber"},
     {P_ANTHROPIC_ACCOUNT_POLICY, RX_ICASE,
@@ -303,6 +307,7 @@ static uint32_t classify_text(const char *msg, int err_status, bool prior_overfl
         if (m(P_MALFORMED, msg)) kinds |= AIE_MALFORMED_FUNCTION_CALL;
         if (m(P_PROVIDER_FINISH, msg)) kinds |= AIE_PROVIDER_FINISH_ERROR;
         if (m(P_EMPTY_RESPONSE, msg)) kinds |= AIE_EMPTY_RESPONSE | AIE_TRANSIENT;
+        if (m(P_MALFORMED_RESPONSE_FINISH, msg)) kinds |= AIE_TRANSIENT;
         if (m(P_CONTENT_FILTER, msg)) kinds |= AIE_CONTENT_BLOCKED;
         int st = err_status ? err_status : aie_status_from_text(msg);
         if (m(P_ACCOUNT_POLICY, msg) || (str_eq(provider, "cursor") && m(P_CURSOR_MARKER, msg) && m(P_CURSOR_PLAN, msg)))
