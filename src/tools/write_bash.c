@@ -1347,6 +1347,17 @@ static json_t *wait_job_rows(jobs_t *jobs, const json_t *done) {
     return rows;
 }
 
+/* elapsedReport: the window an elapsed wait spent and the one a back-to-back wait gets (a bare still-running snapshot
+ * reads as an empty result, and agents then start `sleep` jobs to block for longer) */
+static char *elapsed_report(const char *what, int rung) {
+    char *span = usage_fmt_duration((double)WAIT_LADDER_MS[rung]);
+    char *next = usage_fmt_duration((double)WAIT_LADDER_MS[MIN(rung + 1, WAIT_LADDER_RUNGS - 1)]);
+    char *r = xasprintf("%s within %s; a back-to-back wait allows up to %s.", what, span, next);
+    free(span);
+    free(next);
+    return r;
+}
+
 /* #elapsed: a window ran out with nothing new. Extend the idle streak and, from WAIT_NOTICE_RUNG on, append the reminder. */
 static void wait_elapsed(tool_env_t *env, tool_result_t *out, int rung, int64_t streak_ms) {
     int64_t waited = streak_ms + WAIT_LADDER_MS[rung];
@@ -1515,6 +1526,13 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     } else if (running || (jobs && jobs_undelivered(jobs))) {
         json_t *done = jobs_take_finished(jobs);
         char *txt = job_result_text(jobs, done, false);
+        if (wake == WAKE_TIMEOUT) { /* the timeout line joins the report's text block */
+            char *rep = elapsed_report("No job finished", rung);
+            char *joined = xasprintf("%s\n\n%s", *txt ? txt : "No background jobs.", rep);
+            free(rep);
+            free(txt);
+            txt = joined;
+        }
         tool_result_text(out, *txt ? txt : "No background jobs.");
         free(txt);
         json_set(out->details, "jobs", wait_job_rows(jobs, done));
@@ -1523,10 +1541,10 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         if (wake == WAKE_TIMEOUT) wait_elapsed(env, out, rung, streak_ms);
         json_free(done);
     } else if (wake == WAKE_TIMEOUT) {
-        char *span = usage_fmt_duration((double)WAIT_LADDER_MS[rung]);
-        if (reply_wait) tool_result_textf(out, "No reply within %s.", span);
-        else tool_result_textf(out, "No service finished within %s. Read proc:// for status.", span);
-        free(span);
+        char *rep = elapsed_report(reply_wait ? "No reply" : "No service finished", rung);
+        if (reply_wait) tool_result_text(out, rep);
+        else tool_result_textf(out, "%s Read proc:// for status.", rep);
+        free(rep);
         out->useless = true; /* a wait that ran out with nothing to report is an idle poll */
         json_set(out->details, "jobs", json_arr());
         wait_elapsed(env, out, rung, streak_ms);
