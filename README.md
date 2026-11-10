@@ -8,32 +8,12 @@ system's libc, OpenSSL (for TLS), zlib (for gzip), pthreads and libm.
 $ ldd build/omc
     libssl.so.3  libcrypto.so.3  libz.so.1  libm.so.6  libc.so.6
 ```
-
+Current equivalent OMP release: v18.17.0
 ## Why
 
 Having Oh-My-Pi fully rewritten in C lets me easily embed it in any project I want. Since it can also be built as `libomc`, you can use it inside existing software written in C/C++, inject it into any game to assist modding, use it as RE tooling for instrumentation, create more integrated assistants and use it in embedded systems.
 
 It also solved another problem for me: I don't have to install Bun or any other Node.js-related library on my host. A lot of supply-chain attacks have happened lately, so I prefer to stay in my comfy C/C++ world.
-
-## Installing
-
-Each release on GitHub has prebuilt binaries for Linux (x86_64 and arm64) and macOS (Apple silicon), with a `SHA256SUMS` file. omc's version is the omp release it matches, so `omc v18.17.0` behaves like `omp v18.17.0`.
-
-The quick way picks the right binary, checks it against `SHA256SUMS` and installs it into `~/.local/bin`:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.sh | sh
-```
-
-Set `OMC_VERSION=18.17.0` for a specific release, or `OMC_INSTALL_DIR` for another directory. If you prefer to do it by hand:
-
-```sh
-sha256sum -c SHA256SUMS --ignore-missing      # on macOS: shasum -a 256 -c SHA256SUMS --ignore-missing
-tar -xzf omc-18.17.0-linux-x86_64.tar.gz
-install -m755 omc-18.17.0-linux-x86_64/omc ~/.local/bin/omc
-```
-
-The Linux binaries use your system's OpenSSL 3, and the macOS one has it built in. The macOS binary isn't notarized, so if you downloaded it with a browser, run `xattr -d com.apple.quarantine omc` once. See [docs/release.md](docs/release.md) for how releases are built.
 
 ## Building
 
@@ -71,12 +51,6 @@ tools, but it doesn't read everything that omp does yet. Sessions are saved as o
 under `~/.omc/agent/sessions/`.
 
 If you want to migrate your `omp` setup, just run `/migrate` inside `omc` and it will copy your existing configuration.
-
-## The shell is real bash
-
-The agent's `bash` tool runs your system's real `bash`. Since v18.17.0, `omp` runs commands on its own shell engine, written in Rust, and `omc` will not follow it there on purpose. A huge engine like that goes against the whole idea of this project, and real bash is what your scripts already expect.
-
-So this is the place where `omc` doesn't try to match `omp`: shell behaviour follows real bash. For example, an `EXIT` trap fires when the command ends and sees its real exit status, and things like `jobs`, `$SHLVL` and `$-` are whatever bash says they are. It also means `omc` has no `omp zsh`, `omp bash` or `omp sh`, and no live shell visualization. Everywhere else, the goal is still to behave 1:1 with `omp`.
 
 ## Embedding
 
