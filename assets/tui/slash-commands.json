@@ -1246,7 +1246,7 @@
  {
   "name": "restart",
   "icon": "restart",
-  "description": "Restart omp with the same launch flags, resuming this session",
+  "description": "Restart omp with the same launch flags, resuming this session and its running subagents",
   "handleTui": true
  },
  {
