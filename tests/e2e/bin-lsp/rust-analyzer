@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A fake rust-analyzer for tests/e2e/lsp_reload.py: answers initialize, logs each message's method and params to
-$FAKE_LSP_LOG, and echoes request params back."""
+$FAKE_LSP_LOG, and echoes request params back (with FAKE_LSP_ACTIONS, answers code actions and document symbols)."""
 import json, os, sys
 
 log = os.environ.get("FAKE_LSP_LOG")
@@ -43,5 +43,14 @@ while True:
         continue
     if m.get("method") == "initialize":
         send({"jsonrpc": "2.0", "id": m["id"], "result": {"capabilities": {"textDocumentSync": 1}}})
+    elif m.get("method") == "textDocument/codeAction" and os.environ.get("FAKE_LSP_ACTIONS"):
+        # like typescript-language-server: source actions only when `context.only` asks for them
+        only = m["params"]["context"].get("only")
+        fix = {"title": "Fix", "kind": "quickfix"}
+        acts = [fix, {"title": "Organize Imports", "kind": "source.organizeImports"}] if only == ["source"] else [fix] if only is None else []
+        send({"jsonrpc": "2.0", "id": m["id"], "result": acts})
+    elif m.get("method") == "textDocument/documentSymbol" and os.environ.get("FAKE_LSP_ACTIONS"):
+        rng = lambda a, b: {"start": {"line": a, "character": 0}, "end": {"line": b, "character": 1}}
+        send({"jsonrpc": "2.0", "id": m["id"], "result": [{"name": "a", "kind": 12, "range": rng(0, 4), "selectionRange": rng(2, 2)}]})
     else:
         send({"jsonrpc": "2.0", "id": m["id"], "result": {"echo": m.get("params", "absent")}})

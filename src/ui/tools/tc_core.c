@@ -364,7 +364,7 @@ static const struct {
     {"jsx", "javascript"}, {"mjs", "javascript"}, {"cjs", "javascript"}, {"rs", "rust"}, {"go", "go"}, {"c", "c"},
     {"h", "c"}, {"cpp", "cpp"}, {"cc", "cpp"}, {"cxx", "cpp"}, {"hh", "cpp"}, {"hpp", "cpp"}, {"hxx", "cpp"},
     {"cu", "cpp"}, {"cuh", "cpp"}, {"ino", "cpp"}, {"zig", "zig"}, {"py", "python"}, {"pyi", "python"},
-    {"rb", "ruby"}, {"rbw", "ruby"}, {"gemspec", "ruby"}, {"lua", "lua"}, {"sh", "bash"}, {"bash", "bash"},
+    {"rb", "ruby"}, {"rbw", "ruby"}, {"gemspec", "ruby"}, {"erb", "erb"}, {"lua", "lua"}, {"sh", "bash"}, {"bash", "bash"},
     {"zsh", "bash"}, {"ksh", "bash"}, {"bats", "bash"}, {"tmux", "bash"}, {"cgi", "bash"}, {"fcgi", "bash"},
     {"command", "bash"}, {"tool", "bash"}, {"fish", "fish"}, {"pl", "perl"}, {"pm", "perl"}, {"perl", "perl"},
     {"php", "php"}, {"java", "java"}, {"kt", "kotlin"}, {"ktm", "kotlin"}, {"kts", "kotlin"}, {"scala", "scala"},

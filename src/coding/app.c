@@ -1430,14 +1430,15 @@ static json_t *app_eval_bridge(tool_env_t *env, const char *name, const json_t *
 
 static char *app_after_write(tool_env_t *env, const char *abs) {
     app_t *a = env->session;
-    if (!a || !a->lsp || !settings_bool("lsp.diagnosticsOnWrite", true)) return NULL;
+    /* lsp.enabled gates the writethrough per write (a settings change applies at once) */
+    if (!a || !a->lsp || !settings_bool("lsp.enabled", true) || !settings_bool("lsp.diagnosticsOnWrite", true)) return NULL;
     return lsp_after_write(a->lsp, abs, settings_int("lsp.diagnosticsWaitMs", 3000));
 }
 
 /* edits report diagnostics only with lsp.diagnosticsOnEdit (omp default: off) */
 static char *app_after_edit(tool_env_t *env, const char *abs) {
     app_t *a = env->session;
-    if (!a || !a->lsp || !settings_bool("lsp.diagnosticsOnEdit", false)) return NULL;
+    if (!a || !a->lsp || !settings_bool("lsp.enabled", true) || !settings_bool("lsp.diagnosticsOnEdit", false)) return NULL;
     return lsp_after_write(a->lsp, abs, settings_int("lsp.diagnosticsWaitMs", 3000));
 }
 
