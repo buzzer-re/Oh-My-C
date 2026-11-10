@@ -248,8 +248,9 @@ templates with the result. The system prompt is a list of parts:
 
 1. `system-prompt.md`, or `custom-system-prompt.md` when a custom prompt is given (`--system-prompt`
    text or file, or `SYSTEM.md` in `.omc/`, `.omp/` or the agent dir), with tool inventory and
-   labels, `xd://` device docs, skills, rules, internal-URL docs, delegation settings (catalog
-   `delegationBias`, `task.*`), personality (`personality` setting or `PERSONALITY.md`), the model
+   labels, `xd://` device docs, skills, rules, internal-URL docs, delegation settings (`delegationTier`:
+   the catalog delegation bias, `balanced` without a rule, lifted to `eager` by `task.eager` in the main
+   agent only; `task.*`), personality (`personality` setting or `PERSONALITY.md`), the model
    name, and the append prompt (`--append-system-prompt` or `APPEND_SYSTEM.md`) composed after
    generated memory and auto-learn blocks (`user-append.md`);
 2. `project-prompt.md` (context files, cwd);

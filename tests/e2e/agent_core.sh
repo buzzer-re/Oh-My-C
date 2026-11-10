@@ -60,3 +60,17 @@ refused=any("per-call `model` is disabled" in text(m) for m in tools) and not an
 task=[t for t in main[-1]["tools"] if t["function"]["name"]=="task"][0]["function"]["parameters"]
 props=task["properties"]["tasks"]["items"]["properties"] if "tasks" in task["properties"] else task["properties"]
 print("blank routed=%s pinned refused=%s schema model=%s" % (routed, refused, "model" in props))'
+# delegation tiers (c28b3e3e42, 0e2ab63349): a model without a delegation-bias rule is `balanced` (one scout nudge, no
+# fan-out push in grep/glob); task.eager lifts it to the eager wording
+M=$(ac_mark)
+(cd "$ACW" && timeout 30 "$B" --model mock/mock-1 -p 'say:balanced' </dev/null >/dev/null 2>&1)
+mkdir -p "$ACW/eager/.omc" && printf 'task:\n  eager: preferred\n' > "$ACW/eager/.omc/config.yml"
+(cd "$ACW/eager" && timeout 30 "$B" --model mock/mock-1 -p 'say:eager tier' </dev/null >/dev/null 2>&1)
+check "delegation tier" "balanced=True eager=True" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+def req(w): return [r for r in main if w in text(r["messages"][-1])][-1]
+def desc(r, n): return [t for t in r["tools"] if t["function"]["name"] == n][0]["function"]["description"]
+b, e = req("say:balanced"), req("say:eager tier")
+bs, es = text(b["messages"][0]), text(e["messages"][0])
+bal = "Unfamiliar subsystem? Explore it with a read-only `scout` while you keep working" in bs and "Map unknown code" not in bs and "Task + scout" not in desc(b, "grep")
+eag = "Map unknown code via `task`" in es and "Delegation preferred." in es and "Unfamiliar subsystem?" not in es
+print("balanced=%s eager=%s" % (bal, eag))'

@@ -381,7 +381,7 @@ bool tools_scout_available(void) {
 }
 
 bool tools_eager_delegation(const tool_env_t *env) {
-    return !env->delegation_bias || str_eq(env->delegation_bias, "eager");
+    return str_eq(env->delegation_bias, "eager"); /* sessionDelegationBias: `balanced` before a model is bound */
 }
 
 void tools_register_builtin(agent_t *a, tool_env_t *env, const strvec_t *enabled) {

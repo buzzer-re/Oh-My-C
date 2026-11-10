@@ -105,7 +105,7 @@ typedef struct tool_env {
     bool ask_ui;               /* the protocol client answers `ask`: `--mode rpc-ui`, or an ACP client with form elicitation */
     tool_bridge_t *bridge;     /* client bridge (ACP; borrowed, NULL = local I/O) */
     bool find_enabled;         /* `find` is part of this session (set by tools_register_builtin) */
-    const char *delegation_bias; /* model delegation bias ("eager"/"gated"/"restrained"; static) */
+    const char *delegation_bias; /* model delegation bias ("eager"/"balanced"/"restrained"/"gated"; static) */
     void *session;             /* app session (for task tool) */
     struct shell *shell;       /* persistent bash session (lazy) */
     const discovery_t *disc;   /* skills/rules for skill:// and rule:// (borrowed) */

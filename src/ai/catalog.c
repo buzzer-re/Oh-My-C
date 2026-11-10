@@ -701,8 +701,10 @@ static void parse_revision(const char *s, int v[3]) {
     }
 }
 
+/* compat/delegation.ts resolveDelegationBias: `balanced` when no rule assigns one (task/prompt-policy.ts: also before
+ * a model is bound) */
 const char *model_delegation_bias(const ai_model_t *m) {
-    if (!m) return "eager";
+    if (!m) return "balanced";
     json_t *ident = m->raw ? json_get_obj(m->raw, "identity") : NULL;
     const char *cls = json_get_str(ident, "class");
     const char *rev = json_get_str(ident, "revision");
@@ -719,10 +721,10 @@ const char *model_delegation_bias(const ai_model_t *m) {
             have = true;
         }
     }
-    if (!cls || strcmp(cls, "openai") != 0 || !have) return "eager";
+    if (!cls || strcmp(cls, "openai") != 0 || !have) return "balanced";
     if (v[0] == 5 && v[1] == 6 && v[2] == 0) return "gated";
     if (v[0] >= 6) return "restrained";
-    return "eager";
+    return "balanced";
 }
 
 /* catalog compat cascade `web-search` / `web-search-model` (classes/{anthropic,gemini,openai,xai}.kdl and

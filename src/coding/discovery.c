@@ -988,13 +988,14 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     json_set_str(data, "cwd", o->cwd);
     json_set_str(data, "model", settings_bool("includeModelInPrompt", true) && o->model_name ? o->model_name : "");
     /* delegation (sdk.ts buildSystemPrompt options): model catalog bias, task.eager/batch/maxConcurrency, IRC */
-    const char *bias = o->delegation_bias ? o->delegation_bias : "eager";
-    const char *eager = settings_str("task.eager", "default");
+    const char *bias = o->delegation_bias ? o->delegation_bias : "balanced";
+    /* sdk.ts: task.eager shapes only the main agent's prompt; subagents follow their model's own policy */
+    const char *eager = o->subagent ? "default" : settings_str("task.eager", "default");
     bool eager_tasks = !str_eq(eager, "default");
-    json_set_str(data, "delegationBias", bias);
+    /* an explicit eager-tasks mode lifts balanced/restrained wording to eager; gated has its own eager-tasks text */
+    json_set_str(data, "delegationTier", eager_tasks && !str_eq(bias, "gated") ? "eager" : bias);
     json_set_bool(data, "eagerTasks", eager_tasks);
     json_set_bool(data, "eagerTasksAlways", str_eq(eager, "always"));
-    json_set_bool(data, "inlineFirstDelegation", str_eq(bias, "restrained") && !eager_tasks);
     int64_t maxc = settings_int("task.maxConcurrency", 32);
     json_set_int(data, "MAX_CONCURRENCY", maxc > 0 ? maxc : 0);
     json_set_bool(data, "taskBatch", settings_bool("task.batch", true));
