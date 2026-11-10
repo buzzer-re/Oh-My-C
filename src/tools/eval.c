@@ -5,7 +5,7 @@
  * pipes. At startup the kernel points fd 0 at /dev/null and fd 1 at fd 2 (the stderr pipe), so stray writes from C
  * extensions, os.system or subprocesses can never corrupt the framing; the host reads that pipe as raw cell output.
  *   kernel -> host  {type:"ready"} | {type:"call",id,name,args} | {type:"cancel",id} | {type:"result",id,stdout,error,images}
- *   host -> kernel  {type:"exec",id,code} | {type:"reply",id,ok,value|error}
+ *   host -> kernel  {type:"exec",id,code} | {type:"reply",id,ok,value|error} | {type:"interrupt",id}
  * A host reader thread owns the read side; every bridge call runs on its own worker thread so concurrent helper calls
  * (asyncio.gather over judge(), background threads) never block each other. Interrupts (timeout, abort) send SIGINT
  * and cancel the cell's in-flight calls; a kernel that does not answer within 5 s is killed. Waits on helpers
@@ -587,6 +587,12 @@ static int kernel_start(eval_state_t *st, char **err) {
 /* ---------- execute ---------- */
 
 static void interrupt_cell(eval_state_t *st, kernel_t *k, int64_t cell) {
+    /* named first: a cell the kernel has not started yet is stopped as it starts (the signal alone would be lost) */
+    json_t *im = json_obj();
+    json_set_str(im, "type", "interrupt");
+    json_set_int(im, "id", cell);
+    chan_send(k->ch, im);
+    json_free(im);
     if (k->child.pid > 0) kill(-k->child.pid, SIGINT);
     cancel_calls(k->ch, cell);
     if (st->env->eval_bridge) {

@@ -23,6 +23,10 @@ _plock = threading.Lock()
 _pending = {}
 _ids = itertools.count(1)
 _exec_q = queue.Queue()
+# cells received but not started, and the ones among them the host interrupted (each interrupt delivered once)
+_ilock = threading.Lock()
+_queued = set()
+_interrupt_ids = set()
 _closed = [False]
 _ns = {"__name__": "__main__", "__builtins__": builtins}
 _cell = {"images": None}
@@ -67,7 +71,14 @@ def _reader():
                 continue
             t = msg.get("type")
             if t == "exec":
+                with _ilock:
+                    _queued.add(msg.get("id"))
                 _exec_q.put(msg)
+            elif t == "interrupt":
+                # a cell still queued is stopped as it starts; the SIGINT that follows reaches a running one
+                with _ilock:
+                    if msg.get("id") in _queued:
+                        _interrupt_ids.add(msg.get("id"))
             elif t == "reply":
                 with _plock:
                     slot = _pending.get(msg.get("id"))
@@ -836,7 +847,15 @@ def main():
         if msg is None:
             return
         try:
-            res = _do_cell(msg)
+            with _ilock:
+                _queued.discard(msg.get("id"))
+                pending = msg.get("id") in _interrupt_ids
+                _interrupt_ids.discard(msg.get("id"))
+            if pending:
+                res = {"type": "result", "id": msg.get("id"), "stdout": "",
+                       "error": "KeyboardInterrupt: Execution interrupted", "images": []}
+            else:
+                res = _do_cell(msg)
         except KeyboardInterrupt:
             res = {"type": "result", "id": msg.get("id"), "stdout": "", "error": "KeyboardInterrupt", "images": []}
         while True:
