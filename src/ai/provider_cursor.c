@@ -328,14 +328,18 @@ static int64_t ms_to_seconds(int64_t ms) {
     return s < 1 ? 1 : s;
 }
 
+/* both budgets stop at the bash tool's 3600 s ceiling: Cursor's native Shell sends a 24 h hard_timeout on every
+ * call, which the tool would otherwise clamp with a notice on every result */
+#define BASH_MAX_DEADLINE_SECONDS 3600
+
 static int64_t shell_deadline_seconds(const json_t *args) {
     json_t *hard = json_get(args, "hardTimeout");
     if (hard) {
         int64_t h = ms_to_seconds(json_get_int(args, "hardTimeout", 0));
-        if (h > 0) return h;
+        if (h > 0) return MIN(h, BASH_MAX_DEADLINE_SECONDS);
     }
     int64_t w = ms_to_seconds(json_get_int(args, "timeout", 0));
-    return w > 300 ? w : -1;
+    return w > 300 ? MIN(w, BASH_MAX_DEADLINE_SECONDS) : -1;
 }
 
 /* ======================================================================================================

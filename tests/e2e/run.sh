@@ -588,6 +588,7 @@ check "cursor retry"    "recovered"             "${CENV[@]}" "$B" --model "$CM" 
 check "cursor 401"      "Cursor RunSSE failed with HTTP 401"  env HOME="$T" CURSOR_ACCESS_TOKEN=wrong "$B" --model "$CM" --no-session -p "hi"
 check "cursor effort"   "plain cursor answer"   "${CENV[@]}" "$B" --model cursor/gpt-5.4 --thinking high --no-session -p "hi"
 check "cursor json"     '"toolName":"bash"'     "${CENV[@]}" "$B" --model "$CM" --no-session --mode json -p "bash:echo j"
+check "cursor 24h cap"  '"timeout":3600'       "${CENV[@]}" "$B" --model "$CM" --no-session --mode json -p "bash24h:echo j"
 grep -q '"requestedModel": "gpt-5.4", "maxMode": false, "parameters": \[{"id": "reasoning", "value": "high"}\]' "$T/cursor.jsonl" \
     && echo "   ok  cursor effort parameters" || { echo "   FAIL cursor effort parameters"; fail=1; }
 grep -q '"modelDetails": "gpt-5.4-high"' "$T/cursor.jsonl" && echo "   ok  cursor model details" || { echo "   FAIL cursor model details"; fail=1; }
