@@ -2181,6 +2181,41 @@ int mcp_read_resource(mcp_manager_t *m, const char *uri, char **text, char **ser
 
 /* ---------- prompts as slash commands (sdk.ts buildMCPPromptCommands) ---------- */
 
+/* prompt-args.ts mapPromptArguments: a `key=value` token lands under its own name; the positional tokens fill the
+ * declared arguments in declaration order, skipping names a `key=value` token already set; positionals past the
+ * last free declared argument are ignored */
+json_t *mcp_map_prompt_arguments(const json_t *declared, const strvec_t *tokens) {
+    json_t *named = json_obj();
+    strvec_t positional = {0};
+    for (size_t i = 0; i < tokens->n; i++) {
+        const char *t = tokens->v[i], *eq = strchr(t, '=');
+        if (eq && eq > t) {
+            char *k = xstrndup(t, (size_t)(eq - t));
+            json_set_str(named, k, eq + 1);
+            free(k);
+        } else if (*t) {
+            strvec_push(&positional, t);
+        }
+    }
+    size_t slot = 0, nslots = json_len(declared);
+    for (size_t i = 0; i < positional.n; i++) {
+        const char *name = NULL;
+        while (slot < nslots) {
+            const char *n = json_get_str(json_at(declared, slot), "name");
+            if (n && !json_get(named, n)) {
+                name = n;
+                break;
+            }
+            slot++;
+        }
+        if (!name) break;
+        json_set_str(named, name, positional.v[i]);
+        slot++;
+    }
+    strvec_free(&positional);
+    return named;
+}
+
 json_t *mcp_prompt_commands(mcp_manager_t *m) {
     json_t *out = json_arr();
     srv_vec_t v;
@@ -2203,6 +2238,7 @@ json_t *mcp_prompt_commands(mcp_manager_t *m) {
             free(desc);
             json_set_str(c, "server", s->name);
             json_set_str(c, "prompt", pn);
+            if (json_is_arr(json_get(p, "arguments"))) json_set(c, "arguments", json_clone(json_get(p, "arguments")));
             json_push(out, c);
         }
         pthread_mutex_unlock(&s->mu);

@@ -91,6 +91,8 @@ extensibility/slash-commands.ts and config/prompt-templates.ts):
   same way after file commands (and also in RPC `steer`/`follow_up`).
 - **MCP prompts** of connected servers (`prompts/list`) run as `/<server>:<prompt> key=value …`
   (`prompts/get`; text and resource text parts joined by blank lines; an empty result consumes the input).
+  Positional tokens fill the prompt's declared `arguments` in order, skipping names a `key=value` token set
+  (mapPromptArguments); positionals past the last free argument are ignored.
 - **`/skill:<name> args`** (or a `/skill:<name>` token after prompt text) sends omp's user-invocation prompt
   (`prompts/skills/user-invocation.md`) as a `skill-prompt` custom message attributed to the user (the model
   sees a user turn; the session stores `custom_message` with `details {name, path, args, prompt, lineCount}`).

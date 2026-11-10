@@ -285,6 +285,30 @@ static void test_tool_cache(const char *dir) {
     free(path);
 }
 
+/* prompt-args.ts mapPromptArguments */
+static void test_prompt_args(void) {
+    json_t *decl = json_parse_str("[{\"name\":\"path\"},{\"name\":\"mode\"},{\"name\":\"__proto__\"}]");
+    strvec_t t = {0};
+    strvec_push(&t, "mode=fast");
+    strvec_push(&t, "src/app.ts");
+    strvec_push(&t, "");
+    strvec_push(&t, "x");
+    strvec_push(&t, "extra");
+    strvec_push(&t, "=lead");
+    json_t *m = mcp_map_prompt_arguments(decl, &t);
+    char *s = json_dump(m, 0);
+    CHECK(str_eq(s, "{\"mode\":\"fast\",\"path\":\"src/app.ts\",\"__proto__\":\"x\"}"));
+    free(s);
+    json_free(m);
+    strvec_free(&t);
+    strvec_push(&t, "only");
+    m = mcp_map_prompt_arguments(NULL, &t);
+    CHECK(json_len(m) == 0);
+    json_free(m);
+    strvec_free(&t);
+    json_free(decl);
+}
+
 int main(void) {
     char tmpl[] = "/tmp/omc-test-mcp-XXXXXX";
     const char *tmp = getenv("TMPDIR");
@@ -296,6 +320,7 @@ int main(void) {
     free(agent_dir);
     test_tool_cache(dir);
     test_validation();
+    test_prompt_args();
     test_config_writer(dir);
     test_ssh_writer(dir);
     test_registry();

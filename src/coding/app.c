@@ -3240,20 +3240,13 @@ bool app_is_mcp_prompt_command(app_t *a, const char *text) {
 char *app_expand_input(app_t *a, const char *text, bool mcp) {
     char *cur = xstrdup(text ? text : "");
     if (cur[0] == '/' && mcp) {
-        /* #tryExecuteCustomCommand: `key=value` args become the prompt's arguments; a failure or empty
-         * result consumes the input */
+        /* #tryExecuteCustomCommand: the typed tokens become the prompt's arguments (mapPromptArguments); a failure
+         * or empty result consumes the input */
         char *args;
         json_t *c = mcp_command_for(a, cur, &args);
         if (c) {
             strvec_t av = commands_parse_args(args);
-            json_t *pa = json_obj();
-            for (size_t i = 0; i < av.n; i++) {
-                const char *eq = strchr(av.v[i], '=');
-                if (!eq || eq == av.v[i]) continue;
-                char *k = xstrndup(av.v[i], (size_t)(eq - av.v[i]));
-                json_set_str(pa, k, eq + 1);
-                free(k);
-            }
+            json_t *pa = mcp_map_prompt_arguments(json_get(c, "arguments"), &av);
             strvec_free(&av);
             char *err = NULL;
             char *r = mcp_run_prompt(a->mcp, json_get_str(c, "server"), json_get_str(c, "prompt"), pa, &err);
