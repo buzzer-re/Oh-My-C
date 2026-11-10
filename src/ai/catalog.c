@@ -576,6 +576,23 @@ json_t *catalog_auth_providers(void) {
     return json_get_arr(g_providers, "auth");
 }
 
+/* providerPauseReason: why the auth rules turn `provider` off (`disabled "<reason>"`), else NULL. omc has no
+ * extension-registered logins that could take the id back. Borrowed. */
+const char *catalog_provider_pause_reason(const char *provider) {
+    if (!provider) return NULL;
+    json_t *d;
+    json_arr_foreach(catalog_auth_providers(), i, d) if (str_eq(json_get_str(d, "id"), provider)) {
+        const char *r = json_get_str(d, "disabled");
+        return r && *r ? r : NULL;
+    }
+    return NULL;
+}
+
+char *catalog_provider_disabled_error(const char *provider) {
+    const char *r = catalog_provider_pause_reason(provider);
+    return r ? xasprintf("%s is turned off: %s", provider, r) : NULL;
+}
+
 json_t *catalog_role_defaults(void) {
     catalog_init();
     return json_get_obj(g_providers, "roleDefaults");

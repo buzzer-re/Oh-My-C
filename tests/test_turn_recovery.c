@@ -94,11 +94,24 @@ int main(void) {
     CHECK(!aie_retriable(aie_classify_text("unexpected EOF", 400, NULL, NULL)));
     CHECK(aie_retriable(aie_classify_text("unexpected EOF", 0, NULL, NULL)));
     CHECK(!retriable("incomplete: content_filter"));
+    /* Gemini's MALFORMED_RESPONSE finish is transient on every transport; other malformed responses stay terminal */
+    CHECK(retriable("Generation failed with finish reason: MALFORMED_RESPONSE"));
+    CHECK(aie_is(aie_classify_text("Generation failed with finish reason: MALFORMED_RESPONSE", 0, "google-gemini-cli", "google-gemini-cli"),
+                 AIE_TRANSIENT));
+    CHECK(!aie_is(aie_classify_text("Image API returned a malformed response", 400, NULL, NULL), AIE_TRANSIENT));
     CHECK(!retriable("413 request_too_large: request exceeds the maximum size"));
     CHECK(aie_status_from_text("Request failed with status 502") == 502);
     CHECK(aie_status_from_text("HTTP 404 page") == 404);
     CHECK(aie_status_from_text("no status here") == 0);
     CHECK(aie_is(aie_classify_text("prompt is too long: 210000 tokens > 200000", 400, NULL, NULL), AIE_CONTEXT_OVERFLOW));
+    /* a 429/402 worded like an overflow is a throughput cap (Bedrock), not window excess */
+    static const char BEDROCK_429[] = "429 Too many tokens, please wait before trying again. (type=rate_limit_error param=rate_limit_exceeded)";
+    CHECK(!aie_is(aie_classify_text(BEDROCK_429, 0, NULL, NULL), AIE_CONTEXT_OVERFLOW));
+    CHECK(retriable(BEDROCK_429));
+    CHECK(!aie_is(aie_classify_text("Too many tokens, please wait before trying again.", 429, NULL, NULL), AIE_CONTEXT_OVERFLOW));
+    CHECK(!aie_is(aie_classify_text("Too many tokens in this request", 402, NULL, NULL), AIE_CONTEXT_OVERFLOW));
+    CHECK(aie_is(aie_classify_text("Too many tokens in this request", 400, NULL, NULL), AIE_CONTEXT_OVERFLOW));
+    CHECK(aie_is(aie_classify_text("Too many tokens in this request", 0, NULL, NULL), AIE_CONTEXT_OVERFLOW));
 
     /* #isMidStreamTransportFailure: stall / premature close / envelope truncation; not a socket close */
     json_t *m = turn(STALL, "t");

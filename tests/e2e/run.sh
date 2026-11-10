@@ -560,11 +560,13 @@ printf '{"google-gemini-cli":{"type":"oauth","access":"cca-token","refresh":"r1"
 check "gemini-cli models" "google-gemini-cli ("  "${GENV[@]}" "$B" models gemini-2.5-pro
 check "gemini-cli text"   "plain cca answer"     "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "hi"
 check "gemini-cli tool"   "Tool said: gc-e2e"    "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "bash:echo gc-e2e"
-check "antigravity claude" "plain cca answer"    "${GENV[@]}" "$B" --model google-antigravity/claude-opus-4-6 --no-session -p "hi"
-check "antigravity tool"  "Tool said: ag-e2e"    "${GENV[@]}" "$B" --model google-antigravity/gemini-3.1-pro --no-session -p "bash:echo ag-e2e"
+# Google Antigravity is paused by its auth rules (omp 8895c0fa32): a stored login stays on disk, but no key reaches
+# it, no request goes out and no login offers it
+check "antigravity paused" "No API key found for google-antigravity."  "${GENV[@]}" "$B" --model google-antigravity/claude-opus-4-6 --no-session -p "hi"
+check "antigravity login" "Unknown OAuth provider 'google-antigravity'"  "${GENV[@]}" "$B" login google-antigravity
 grep -q '"ua": "GeminiCLI/0.46.0/gemini-2.5-pro (' "$T/google.jsonl" && echo "   ok  gemini-cli client headers" || { echo "   FAIL gemini-cli client headers"; fail=1; }
-grep -q '"ua": "antigravity/hub/2.26.0 (aidev_client; .*"model": "claude-opus-4-6-thinking", "userAgent": "antigravity"' "$T/google.jsonl" \
-    && echo "   ok  antigravity envelope" || { echo "   FAIL antigravity envelope"; fail=1; }
+! grep -q '"ua": "antigravity/hub/' "$T/google.jsonl" && grep -q '"google-antigravity"' "$T/agent/auth.json" \
+    && echo "   ok  antigravity never called" || { echo "   FAIL antigravity never called"; fail=1; }
 grep -q '"functionResponse": {"name": "bash"' "$T/google.jsonl" && echo "   ok  cca functionResponse replay" || { echo "   FAIL cca functionResponse replay"; fail=1; }
 if [ -f "$T/auth.json.bak" ]; then mv "$T/auth.json.bak" "$T/agent/auth.json"; else rm -f "$T/agent/auth.json"; fi
 # Cursor agent (Connect + protobuf over HTTP/1.1: RunSSE stream + BidiAppend unary appends, exec channel, KV blobs)
@@ -580,12 +582,23 @@ check "cursor text"     "plain cursor answer"   "${CENV[@]}" "$B" --model "$CM" 
 check "cursor shell"    "Tool said: cur-e2e"    "${CENV[@]}" "$B" --model "$CM" --session-dir "$T/cur" -p "bash:echo cur-e2e"
 check "cursor history"  "user,assistant,tool,assistant"  "${CENV[@]}" "$B" --model "$CM" --session-dir "$T/cur" -c -p "history"
 check "cursor read"     "Read said: cursor line one"     "${CENV[@]}" "$B" --model "$CM" --no-session -p "read:$T/cur/r.txt"
+check "cursor xd read"  "Read said: # debug"              "${CENV[@]}" "$B" --model "$CM" --no-session -p "read:xd://debug"
+printf 'orig\n' > "$T/cur/e.txt"
+check "cursor edit order" "Order: write,shell; Shell said: edited"  "${CENV[@]}" "$B" --model "$CM" --no-session -p "editorder:$T/cur/e.txt"
+printf 'orig\n' > "$T/cur/e2.txt"
+"${CENV[@]}" timeout 30 "$B" --model "$CM" --no-session --mode json -p "editorder:$T/cur/e2.txt" </dev/null > "$T/cur/edit.jsonl" 2>&1
+check "cursor edit card" "edit -1|orig\n+1|edited; no read/write cards"  python3 -I -c 'import json,sys
+ev=[json.loads(l) for l in open(sys.argv[1]) if l.startswith("{")]
+ex=[(e["type"],e.get("toolName")) for e in ev if e.get("type","").startswith("tool_execution") and e.get("toolCallId")=="call_edit_1"]
+end=[e for e in ev if e.get("type")=="tool_execution_end" and e.get("toolCallId")=="call_edit_1"]
+print(end[0]["toolName"], end[0]["result"]["details"]["diff"].split("\n",1)[1].replace("\n","\\n") if ex==[("tool_execution_end","edit")] else ex, end="; no read/write cards\n")' "$T/cur/edit.jsonl"
 check "cursor mcp"      "MCP said: "            "${CENV[@]}" "$B" --model "$CM" --no-session -p 'mcp:glob:{"path":"**/*.txt"}'
 check "cursor end err"  "Connect error resource_exhausted: Error"  "${CENV[@]}" "$B" --model "$CM" --no-session -p "fail"
 check "cursor retry"    "recovered"             "${CENV[@]}" "$B" --model "$CM" --no-session -p "flaky"
 check "cursor 401"      "Cursor RunSSE failed with HTTP 401"  env HOME="$T" CURSOR_ACCESS_TOKEN=wrong "$B" --model "$CM" --no-session -p "hi"
 check "cursor effort"   "plain cursor answer"   "${CENV[@]}" "$B" --model cursor/gpt-5.4 --thinking high --no-session -p "hi"
 check "cursor json"     '"toolName":"bash"'     "${CENV[@]}" "$B" --model "$CM" --no-session --mode json -p "bash:echo j"
+check "cursor 24h cap"  '"timeout":3600'       "${CENV[@]}" "$B" --model "$CM" --no-session --mode json -p "bash24h:echo j"
 grep -q '"requestedModel": "gpt-5.4", "maxMode": false, "parameters": \[{"id": "reasoning", "value": "high"}\]' "$T/cursor.jsonl" \
     && echo "   ok  cursor effort parameters" || { echo "   FAIL cursor effort parameters"; fail=1; }
 grep -q '"modelDetails": "gpt-5.4-high"' "$T/cursor.jsonl" && echo "   ok  cursor model details" || { echo "   FAIL cursor model details"; fail=1; }

@@ -187,6 +187,10 @@ static void test_lessons(const char *agent) {
     CHECK(has(blk, "# Memory Guidance") && has(blk, "Memory summary:\nSum") && has(blk, "- l1"));
     free(blk);
     CHECK(!memory_render_instructions("", "", 5000));
+    /* learned-only: no summary read path, the rules stay well-formed bullets (omp ecbd5d8b2e, aaa53f05d3) */
+    blk = memory_render_instructions("", "- l2", 5000);
+    CHECK(blk && !has(blk, "memory_summary.md") && has(blk, "Rules:\n- Memory: heuristics") && has(blk, "- l2"));
+    free(blk);
     blk = memory_render_instructions("0123456789abcdef", "- lesson", 4);
     CHECK(blk && !has(blk, "Learned lessons"));
     free(blk);

@@ -156,7 +156,12 @@ Points worth knowing per provider:
 - **Agent-style providers** (Cursor, Devin, GitLab Duo agent) run the agent loop on the server.
   Cursor asks the client to run tools mid-stream through exec frames. `ai_stream_opts_t.cursor_exec`
   is a bridge into the agent's local tools (`agent.c` `cursor_bridge_run`), and the resolved tool
-  results are inserted after the assistant message. GitLab Duo agent turns end with a `runMCPTool`
+  results are inserted after the assistant message. Exec frames run one at a time in arrival order
+  (omp's `CursorExecOrder`); a native StrReplace/Write holds its place from its read frame until its
+  write lands or the server completes it, so frames arriving in between wait. Its read and write run
+  without tool events (`run_quiet`) and the write reports as the `edit` card's result with the diff
+  against the file as it was (`edit_end`); a server-completed or dropped edit ends the card the same
+  way. Cursor Shell deadlines stop at the bash tool's 3600 s ceiling. GitLab Duo agent turns end with a `runMCPTool`
   action (a normal tool call answered on the same socket), and `pause_turn` stops are re-sampled by
   the loop up to 8 times.
 - **Server-side compaction** (driven by `coding/compaction.c`): `ai_openai_remote_compact()` posts the
@@ -209,6 +214,11 @@ transport layer turns them into the request shape. It ports the registry `prepar
      using the stored descriptor's refresh rule. Structured descriptors (`apiKeyFormat:
      structured`) yield a JSON key for the transport layer.
 3. environment variables named by the catalog's `envVars` for the provider (`ai_env_api_key`).
+
+A provider its auth rule pauses (`disabled "<reason>"`, at v18.18.6 Google Antigravity;
+`catalog_provider_pause_reason`) is reached by none of these: no key resolves, no token refreshes, no usage probe
+runs, no login list offers it and `omc login <id>` refuses it, and `ai_stream` answers "`<provider> is turned off:
+<reason>`" without calling it even when a key is passed in. Stored logins stay in `auth.json` untouched.
 
 **Login engines** port omp's declarative registry (`ai/src/registry/engine/*`, `registry/oauth/*`,
 `registry/hooks/*`):

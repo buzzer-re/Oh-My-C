@@ -79,7 +79,7 @@ ui_oauth_sel_t *ui_oauth_sel_new(bool logout) {
     json_t *disabled = settings_get("disabledProviders"), *p;
     json_arr_foreach(s->providers, i, p) {
         const char *id = json_get_str(p, "id");
-        bool off = !json_get_obj(p, "login"); /* not a login provider (openai, azure) */
+        bool off = !auth_login_listed(p); /* not a login provider (openai, azure), or paused by its auth rules */
         if (logout) {
             off = off || !auth_has_credentials(id);
         } else {

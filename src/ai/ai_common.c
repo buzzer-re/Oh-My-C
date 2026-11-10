@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "ai.h"
 #include "provider_transport.h"
+#include "coding/turn_recovery.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -390,6 +391,9 @@ void aib_free(ai_builder_t *b) {
 
 /* ---------- stream entry ---------- */
 
+/* catalog.c; weak so provider unit tests can link without the catalog */
+extern char *catalog_provider_disabled_error(const char *provider) __attribute__((weak));
+
 json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts, ai_event_cb cb,
                   void *ud) {
     ai_stream_fn fn;
@@ -403,6 +407,18 @@ json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_str
         tiered = *opts;
         tiered.service_tier = ai_resolve_model_service_tier(&opts->service_tiers, model);
         opts = &tiered;
+    }
+    /* assertProviderEnabled: a provider the auth rules turn off is never called, even with a key passed in */
+    char *paused = catalog_provider_disabled_error ? catalog_provider_disabled_error(model->provider) : NULL;
+    if (paused) {
+        json_t *m = ai_error_message(model, "error", paused);
+        json_set_int(m, "errorId", AIE_CLASS | AIE_AUTH_FAILED); /* ProviderDisabledError is a MissingApiKeyError */
+        free(paused);
+        if (cb) {
+            ai_event_t ev = {.type = AI_EV_ERROR, .content_index = -1, .partial = m, .reason = "error"};
+            cb(ud, &ev);
+        }
+        return m;
     }
     ai_transport_t t;
     char *terr = NULL;

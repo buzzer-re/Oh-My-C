@@ -378,12 +378,14 @@ static int gen_openai(const ai_model_t *m, const char *key, const char *prompt, 
             if (!gpt) FIELD("response_format", "b64_json");
             if (size) FIELD("size", size);
 #undef FIELD
+            /* a repeated scalar `image` is rejected as duplicate_parameter: several inputs use `image[]` */
+            const char *field = json_len(inputs) == 1 ? "image" : "image[]";
             json_arr_foreach(inputs, i, img) {
                 size_t n = 0;
                 const char *d = json_get_str(img, "data");
                 unsigned char *raw = base64_decode(d, strlen(d), &n);
-                sb_appendf(&b, "--%s\r\nContent-Disposition: form-data; name=\"image\"; filename=\"image\"\r\nContent-Type: %s\r\n\r\n",
-                           boundary, json_get_str(img, "mimeType"));
+                sb_appendf(&b, "--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"image\"\r\nContent-Type: %s\r\n\r\n",
+                           boundary, field, json_get_str(img, "mimeType"));
                 sb_appendn(&b, (const char *)raw, n);
                 sb_append(&b, "\r\n");
                 free(raw);

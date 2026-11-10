@@ -18,6 +18,8 @@
 #define _GNU_SOURCE
 #include "ai.h"
 #include "cursor_proto.h"
+#include "core/fs.h"
+#include "tools/diff.h"
 
 #include <errno.h>
 #include <math.h>
@@ -242,12 +244,19 @@ static int64_t jfloor(const json_t *v) {
     return v->is_int ? v->u.num.i : (int64_t)floor(v->u.num.d);
 }
 
+/* isXdDevicePath: xd:// devices take no path selectors, so a forced `:raw` would become part of the device name */
+static bool is_xd_device_path(const char *p) {
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\v' || *p == '\f') p++;
+    return strncasecmp(p, "xd://", 5) == 0;
+}
+
 static char *pi_read_path(const char *path, const json_t *offset, const json_t *limit) {
     if (!json_is_num(offset)) offset = NULL;
     if (!json_is_num(limit)) limit = NULL;
     if (limit && jfloor(limit) <= 0) return NULL;
     bool has_start = offset != NULL, has_count = limit != NULL;
     if (!has_start && !has_count) return xstrdup(path);
+    if (is_xd_device_path(path)) return xstrdup(path); /* a ranged device read reads the whole device doc */
     char *base = path_has_raw(path) ? xstrdup(path) : xasprintf("%s:raw", path);
     char *r;
     int64_t start = has_start ? MAX(1, jfloor(offset)) : 0;
@@ -260,7 +269,7 @@ static char *pi_read_path(const char *path, const json_t *offset, const json_t *
 }
 
 static char *cursor_raw_read_path(const char *path) {
-    if (path_has_raw(path)) return xstrdup(path);
+    if (is_xd_device_path(path) || path_has_raw(path)) return xstrdup(path);
     if (read_path_has_range(path)) {
         const char *last = strrchr(path, ':');
         const char *l = last ? last + 1 : path;
@@ -289,6 +298,7 @@ static char *cursor_exec_read_path(const char *path, const json_t *offset, const
 static char *pi_read_display_path(const char *path, const json_t *offset, const json_t *limit) {
     char *c = pi_read_path(path, offset, limit);
     if (c) return c;
+    if (is_xd_device_path(path)) return xstrdup(path);
     int64_t start = json_is_num(offset) ? MAX(1, jfloor(offset)) : 1;
     return xasprintf("%s:raw:%lld+0", path, (long long)start);
 }
@@ -320,14 +330,18 @@ static int64_t ms_to_seconds(int64_t ms) {
     return s < 1 ? 1 : s;
 }
 
+/* both budgets stop at the bash tool's 3600 s ceiling: Cursor's native Shell sends a 24 h hard_timeout on every
+ * call, which the tool would otherwise clamp with a notice on every result */
+#define BASH_MAX_DEADLINE_SECONDS 3600
+
 static int64_t shell_deadline_seconds(const json_t *args) {
     json_t *hard = json_get(args, "hardTimeout");
     if (hard) {
         int64_t h = ms_to_seconds(json_get_int(args, "hardTimeout", 0));
-        if (h > 0) return h;
+        if (h > 0) return MIN(h, BASH_MAX_DEADLINE_SECONDS);
     }
     int64_t w = ms_to_seconds(json_get_int(args, "timeout", 0));
-    return w > 300 ? w : -1;
+    return w > 300 ? MIN(w, BASH_MAX_DEADLINE_SECONDS) : -1;
 }
 
 /* ======================================================================================================
@@ -1841,6 +1855,13 @@ typedef struct {
     json_t *latest_checkpoint;
     int64_t latest_checkpoint_version;
     bool latest_checkpoint_terminal;
+    /* CursorExecOrder: exec frames run one at a time in arrival order on this thread, so a call already waits for
+     * the calls before it. A native StrReplace/Write spans two frames (its read, then its write once the server
+     * applied the edit) and holds its place until the write lands or the server completes it: frames arriving
+     * meanwhile wait here, in order, and are dropped when the run ends first. */
+    char *exec_span;
+    json_t *exec_waiting;
+    bool quiet_frame; /* the frame being run materializes a native edit: its tool runs emit no events */
 } cs_t;
 
 static json_t *content(cs_t *s) { return json_get(s->msg, "content"); }
@@ -2138,6 +2159,9 @@ static json_t *todo_tool_result(const char *id, const json_t *snap, const char *
 
 /* ---------- edit (native StrReplace) ---------- */
 
+static void exec_leave(cs_t *s, const char *id);
+static void edit_end(cs_t *s, const json_t *tr);
+
 static bool edit_owned(cs_t *s, const char *id) {
     if (strvec_contains(&s->edit_owned, id)) return true;
     json_t *b = find_call_block(s, id);
@@ -2399,6 +2423,7 @@ static void tool_call_completed(cs_t *s, const json_t *u) {
         json_free(snap);
         free(err);
     } else if (t->kind == BK_EDIT) {
+        exec_leave(s, id);
         json_t *edit = tc ? json_get_obj(tc, "editToolCall") : NULL;
         json_t *ea = json_get_obj(edit, "args");
         if (ea) {
@@ -2410,7 +2435,9 @@ static void tool_call_completed(cs_t *s, const json_t *u) {
             char *text;
             bool is_error;
             describe_edit_result(tc, &text, &is_error);
-            pair_text(s, id, "edit", text, is_error);
+            json_t *r = make_tool_result(id, "edit", text, is_error);
+            edit_end(s, r); /* editSettled: a failed match or a refusal ends the live card too */
+            pair_result(s, r);
             free(text);
         }
     }
@@ -2480,9 +2507,13 @@ static void flush_open_calls(cs_t *s) {
             t->has_partial = false;
         }
         if (t->kind == BK_SCM || t->kind == BK_TODO || t->kind == BK_EDIT || t->kind == BK_FETCH) {
-            if (!(t->kind == BK_EDIT && strvec_contains(&s->paired_edit, jstr(blk, "id"))))
-                pair_text(s, jstr(blk, "id"), jstr(blk, "name"),
-                          "The connection to Cursor closed before this call completed.", true);
+            if (!(t->kind == BK_EDIT && strvec_contains(&s->paired_edit, jstr(blk, "id")))) {
+                json_t *r = make_tool_result(jstr(blk, "id"), jstr(blk, "name"),
+                                             "The connection to Cursor closed before this call completed.", true);
+                /* the edit's materializing read surfaced no call, so nothing else ends its live card */
+                if (t->kind == BK_EDIT) edit_end(s, r);
+                pair_result(s, r);
+            }
         }
         ev(s, AI_EV_TOOLCALL_END, t->index, NULL, 0, blk, NULL);
         t->open = false;
@@ -2532,7 +2563,7 @@ static json_t *run_host(cs_t *s, const char *id, const char *tool, json_t *args 
     const ai_cursor_exec_t *x = s->opts->cursor_exec;
     json_t *r = NULL;
     if (x && x->run) {
-        r = x->run(x->ud, id, tool, args);
+        r = s->quiet_frame && x->run_quiet ? x->run_quiet(x->ud, id, tool, args) : x->run(x->ud, id, tool, args);
         if (!r) r = make_tool_result(id, tool, "Tool returned no result", true);
     }
     json_free(args);
@@ -3176,6 +3207,43 @@ static void shell_stream_exit(cs_t *s, const json_t *exec, const json_t *res) {
 
 static json_t *with_path(const char *path) { return jobj1("path", json_str(path)); }
 
+/* the edit card's tool_execution_end (CursorExecHandlers editSettled / materializeEdit) */
+static void edit_end(cs_t *s, const json_t *tr) {
+    const ai_cursor_exec_t *x = s->opts->cursor_exec;
+    if (x && x->edit_end) x->edit_end(x->ud, tr);
+}
+
+/* a BOM-stripped, LF-normalized copy (normalizeToLF(stripBom(text).text)). Owned. */
+static char *edit_norm(const char *t) {
+    if (!strncmp(t, "\xef\xbb\xbf", 3)) t += 3;
+    sb_t b = SB_INIT;
+    for (const char *p = t; *p; p++) {
+        if (*p == '\r') {
+            sb_putc(&b, '\n');
+            if (p[1] == '\n') p++;
+        } else {
+            sb_putc(&b, *p);
+        }
+    }
+    return sb_detach(&b);
+}
+
+/* materializeEdit: the write reports as `edit` with the diff against the file as it was (`write` restores the
+ * file's CRLF and BOM, so both sides compare normalized, as `edit` does) */
+static void materialized_edit_details(json_t *tr, const char *before, const char *after, const char *abs) {
+    char *b = edit_norm(before), *a = edit_norm(after);
+    int64_t first = 0;
+    char *diff = diff_numbered_unified(b, a, -1, &first);
+    json_t *d = json_is_obj(json_get(tr, "details")) ? json_clone(json_get(tr, "details")) : json_obj();
+    json_set(d, "diff", json_str_own(diff));
+    if (first) json_set_int(d, "firstChangedLine", first);
+    else json_del(d, "firstChangedLine");
+    json_set_str(d, "path", abs);
+    json_set(tr, "details", d);
+    free(b);
+    free(a);
+}
+
 static void handle_exec(cs_t *s, const json_t *exec) {
     json_t *a;
     if (has(exec, "requestContextArgs")) {
@@ -3197,6 +3265,7 @@ static void handle_exec(cs_t *s, const json_t *exec) {
         const char *path = jstr(a, "path");
         json_t *off = json_get(a, "offset"), *lim = json_get(a, "limit");
         bool owned = edit_owned(s, id);
+        s->quiet_frame = owned; /* the edit's read runs without a Read card of its own */
         bool neg = off && json_get_int(a, "offset", 0) < 0;
         char *composed = neg ? cursor_raw_read_path(path) : cursor_exec_read_path(path, off, lim);
         bool range = off || lim || read_path_has_range(path);
@@ -3264,6 +3333,7 @@ static void handle_exec(cs_t *s, const json_t *exec) {
         json_free(ctx);
         free(composed);
         free(gen);
+        s->quiet_frame = false;
         send_exec(s, exec, "readResult", res);
         return;
     }
@@ -3321,15 +3391,32 @@ static void handle_exec(cs_t *s, const json_t *exec) {
         json_t *targs = with_path(jstr(a, "path"));
         json_set_str(targs, "content", content_s);
         if (!owned) synthesize_call(s, id, "write", json_clone(targs), true);
+        /* materializeEdit: the file as it was, for the edit card's diff (a missing file diffs from empty) */
+        char *before = NULL, *abs = NULL;
+        if (owned) {
+            const char *wp = jstr(a, "path");
+            abs = path_is_abs(wp) ? xstrdup(wp) : xasprintf("%s/%s", s->cwd ? s->cwd : ".", wp);
+            size_t n = 0;
+            before = fs_read(abs, &n);
+            if (!before && errno == ENOENT) before = xstrdup("");
+        }
         json_t *tr = NULL;
+        s->quiet_frame = owned;
         json_t *res = resolve_exec(s, id, "write", targs, false, write_from_tr, write_rejected, a, &tr);
+        s->quiet_frame = false;
         if (tr) {
-            if (owned) json_set_str(tr, "toolName", "edit");
+            if (owned) {
+                json_set_str(tr, "toolName", "edit");
+                if (!json_get_bool(tr, "isError", false) && before) materialized_edit_details(tr, before, content_s, abs);
+                edit_end(s, tr);
+            }
             pair_result(s, tr);
         } else {
             pair_text(s, id, owned ? "edit" : "write", "Tool not available", true);
         }
         if (owned) strvec_push(&s->paired_edit, id);
+        free(before);
+        free(abs);
         free(content_s);
         free(gen);
         send_exec(s, exec, "writeResult", res);
@@ -3864,6 +3951,66 @@ static bool err_conversation_rejected(const cerr_t *e) {
 
 typedef enum { ATTEMPT_OK, ATTEMPT_ERROR, ATTEMPT_ABORTED } attempt_rc_t;
 
+/* execFrameCallId: the frame's tool call id, or the frame itself when it carries none. Owned. */
+static char *exec_frame_call_id(const json_t *exec) {
+    for (size_t i = 0; i < exec->u.obj.n; i++) {
+        const char *k = exec->u.obj.keys[i];
+        const json_t *v = exec->u.obj.vals[i];
+        if (!json_is_obj(v) || !str_ends(k, "Args")) continue;
+        const char *tc = json_get_str(v, "toolCallId");
+        if (tc && *tc) return xstrdup(tc);
+        break;
+    }
+    char *id = json_get(exec, "id") ? json_dump(json_get(exec, "id"), 0) : xstrdup("");
+    const char *eid = json_get_str(exec, "execId");
+    char *r = xasprintf("exec:%s:%s", id, eid ? eid : "");
+    free(id);
+    return r;
+}
+
+static void exec_run_frame(cs_t *s, const json_t *exec) {
+    if (has(exec, "requestContextArgs")) {
+        handle_exec(s, exec);
+        return;
+    }
+    char *id = exec_frame_call_id(exec);
+    bool edit_read = has(exec, "readArgs") && edit_owned(s, id);
+    handle_exec(s, exec);
+    /* an edit keeps its place past its read: its write follows, or the server completes it */
+    if (edit_read && !s->exec_span) s->exec_span = id;
+    else free(id);
+}
+
+/* CursorExecOrder.leave: the call gives up its place; frames waiting on it run in order until one holds a place */
+static void exec_leave(cs_t *s, const char *id) {
+    if (!s->exec_span || !str_eq(s->exec_span, id)) return;
+    free(s->exec_span);
+    s->exec_span = NULL;
+    while (!s->exec_span && json_len(s->exec_waiting)) {
+        json_t *f = json_arr_remove(s->exec_waiting, 0);
+        exec_run_frame(s, f);
+        json_free(f);
+    }
+}
+
+static void handle_exec_ordered(cs_t *s, const json_t *exec) {
+    if (has(exec, "requestContextArgs")) {
+        handle_exec(s, exec);
+        return;
+    }
+    char *id = exec_frame_call_id(exec);
+    if (s->exec_span && !str_eq(s->exec_span, id)) {
+        if (!s->exec_waiting) s->exec_waiting = json_arr();
+        json_push(s->exec_waiting, json_clone(exec));
+        free(id);
+        return;
+    }
+    bool held = s->exec_span != NULL; /* the edit's write frame proceeds at once */
+    exec_run_frame(s, exec);
+    if (held) exec_leave(s, id);
+    free(id);
+}
+
 static void handle_server_message(cs_t *s, const json_t *msg) {
     json_t *iu = json_get_obj(msg, "interactionUpdate");
     bool heartbeat = iu && has(iu, "heartbeat");
@@ -3879,7 +4026,7 @@ static void handle_server_message(cs_t *s, const json_t *msg) {
         process_interaction(s, iu);
         if (has(iu, "turnEnded")) s->saw_turn_ended = true;
     } else if ((v = json_get_obj(msg, "execServerMessage"))) {
-        handle_exec(s, v);
+        handle_exec_ordered(s, v);
     } else if ((v = json_get_obj(msg, "conversationCheckpointUpdate"))) {
         json_free(s->latest_checkpoint);
         s->latest_checkpoint = json_clone(v);
@@ -4016,6 +4163,8 @@ static void cs_free(cs_t *s) {
     json_free(s->req_tools);
     json_free(s->req_rules);
     json_free(s->latest_checkpoint);
+    free(s->exec_span);
+    json_free(s->exec_waiting);
 }
 
 json_t *provider_cursor_stream(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, ai_event_cb cb,

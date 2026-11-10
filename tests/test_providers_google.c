@@ -1030,7 +1030,8 @@ static void test_identity(void) {
     CHECK(v == NULL);
 }
 
-/* MALFORMED_RESPONSE: a transient error stop that keeps the chunk's usage (consumeGoogleStream finishErrorId) */
+/* MALFORMED_RESPONSE: an error stop that keeps the chunk's usage; the shared classifier marks its finish message
+ * transient on every transport (test_turn_recovery), so the stream attaches no errorId */
 static void test_malformed_response_finish(void) {
     json_t *raw = json_parse_str("{\"id\":\"gemini-x\",\"api\":\"google-generative-ai\",\"provider\":\"google\"}");
     ai_model_t m;
@@ -1054,7 +1055,7 @@ static void test_malformed_response_finish(void) {
         free(want);
         CHECK(json_get_int(json_get(msg, "usage"), "input", 0) == 7);
         CHECK(json_get_int(json_get(msg, "usage"), "output", 0) == 3);
-        CHECK((json_get_int(msg, "errorId", 0) != 0) == (i == 0));
+        CHECK(!json_get(msg, "errorId"));
         json_free(msg);
         google_sse_free(&s);
     }

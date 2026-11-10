@@ -222,6 +222,98 @@ static void test_credit_rates(void) {
     ui_model_browser_free(b);
 }
 
+/* omp e66cb977c7: Claude Fable / Mythos 5.2, discovered-row repairs, Mythos 5.1+ prefix binding, slow-role default */
+static void test_fable_52(void) {
+    const ai_model_t *f = catalog_find("anthropic", "claude-fable-5-2"), *my = catalog_find("anthropic", "claude-mythos-5-2");
+    CHECK(f && my);
+    /* /v1/models reports a not-yet-catalogued Fable/Mythos row text-only, non-reasoning and unpriced */
+    const char *ids[] = {"claude-fable-5-2", "claude-mythos-5-2"};
+    for (size_t i = 0; i < 2; i++) {
+        char *js = xasprintf("{\"id\":\"%s\",\"api\":\"anthropic-messages\",\"reasoning\":false,\"input\":[\"text\"],"
+                             "\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0}}",
+                             ids[i]);
+        json_t *m = resolved("anthropic", "https://api.anthropic.com", js);
+        free(js);
+        CHECK(json_get_bool(m, "reasoning", false));
+        check_json(json_get(m, "input"), "[\"text\",\"image\"]", ids[i]);
+        const json_t *c = json_get_obj(m, "cost");
+        CHECK(json_get_num(c, "input", 0) == 8 && json_get_num(c, "output", 0) == 40);
+        CHECK(json_get_num(c, "cacheRead", 0) == 0.2 && json_get_num(c, "cacheWrite", 0) == 10);
+        CHECK(json_get_int(m, "contextWindow", 0) == 1000000 && json_get_int(m, "maxTokens", 0) == 128000);
+        CHECK(json_get_bool(json_get_obj(m, "thinking"), "prefixBinding", false));
+        json_free(m);
+    }
+    /* Mythos 5.1 binds the thinking prefix on every account */
+    json_t *m = resolved("anthropic", "https://api.anthropic.com",
+                         "{\"id\":\"claude-mythos-5-1\",\"api\":\"anthropic-messages\",\"reasoning\":true}");
+    CHECK(json_get_bool(json_get_obj(m, "thinking"), "prefixBinding", false));
+    json_free(m);
+    /* the slow role prefers Fable 5.2 right after the Codex Sol rows */
+    json_t *slow = json_get_arr(catalog_role_defaults(), "slow");
+    CHECK(str_eq(json_sv(json_at(slow, 2)), "anthropic/claude-fable-5-2"));
+}
+
+/* omp 503d43fbb5: a models.yml `compat.disabledThinking` on an anthropic-messages model is kept */
+static void test_anthropic_disabled_thinking(void) {
+    json_t *m = resolved("claude", "https://api.anthropic.com",
+                         "{\"id\":\"claude-haiku-5-5\",\"api\":\"anthropic-messages\",\"reasoning\":true,"
+                         "\"compat\":{\"disabledThinking\":\"disabled\"}}");
+    CHECK(str_eq(json_get_str(json_get(m, "compat"), "disabledThinking"), "disabled"));
+    json_free(m);
+    /* only the Haiku 5.5 route rule assigns one: other Claude models keep the API's Off handling */
+    m = resolved("anthropic", "https://api.anthropic.com", "{\"id\":\"claude-opus-5\",\"api\":\"anthropic-messages\",\"reasoning\":true}");
+    CHECK(!json_get(json_get(m, "compat"), "disabledThinking"));
+    json_free(m);
+    m = resolved("anthropic", "https://api.anthropic.com", "{\"id\":\"claude-haiku-5-5\",\"api\":\"anthropic-messages\",\"reasoning\":true}");
+    CHECK(str_eq(json_get_str(json_get(m, "compat"), "disabledThinking"), "disabled"));
+    json_free(m);
+}
+
+/* omp 8a4a370cfc, f4f11329de: base64SkipThoughtSignature is unset by default and settable from models.yml */
+static void test_google_base64_skip(void) {
+    json_t *m = resolved("gw", "https://gw.example.com/v1beta", "{\"id\":\"gemini-3-pro\",\"api\":\"google-generative-ai\",\"reasoning\":true}");
+    CHECK(!json_get(json_get(m, "compat"), "base64SkipThoughtSignature"));
+    json_free(m);
+    m = resolved("gw", "https://gw.example.com/v1beta", "{\"id\":\"gemini-3-pro\",\"api\":\"google-generative-ai\",\"reasoning\":true,"
+                                                        "\"compat\":{\"base64SkipThoughtSignature\":true}}");
+    CHECK(json_get_bool(json_get(m, "compat"), "base64SkipThoughtSignature", false));
+    json_free(m);
+}
+
+/* omp 8895c0fa32: a paused provider is never called, even with a key passed in */
+static void test_paused_provider_stream(void) {
+    const ai_model_t *ag = NULL;
+    for (size_t i = 0; i < catalog_count() && !ag; i++)
+        if (str_eq(catalog_at(i)->provider, "google-antigravity")) ag = catalog_at(i);
+    CHECK(ag != NULL);
+    if (!ag) return;
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    o.api_key = "passed-in";
+    json_t *msgs = json_parse_str("[{\"role\":\"user\",\"content\":\"hi\"}]");
+    ai_context_t ctx = {.messages = msgs};
+    json_t *r = ai_stream(ag, &ctx, &o, NULL, NULL);
+    CHECK(str_eq(json_get_str(r, "stopReason"), "error"));
+    CHECK(str_starts(json_get_str(r, "errorMessage"), "google-antigravity is turned off: Google may restrict accounts"));
+    json_free(r);
+    json_free(msgs);
+}
+
+/* omp fd41ef6386: the V4.1 Flash carve-out keys on family/revision, so a hyphenated id keeps image input */
+static void test_deepseek_hyphen_flash(void) {
+    static const char *const ids[] = {"deepseek-v4-1-flash-1017", "deepseek-v4.1-flash"};
+    for (size_t i = 0; i < 2; i++) {
+        char *js = xasprintf("{\"id\":\"%s\",\"reasoning\":true,\"input\":[\"text\",\"image\"]}", ids[i]);
+        json_t *m = resolved("mistral", "https://api.mistral.ai/v1", js);
+        free(js);
+        CHECK(!json_get_bool(json_get(m, "compat"), "stripImageInput", true));
+        json_free(m);
+    }
+    json_t *m = resolved("mistral", "https://api.mistral.ai/v1", "{\"id\":\"deepseek-v4-flash\",\"reasoning\":true}");
+    CHECK(json_get_bool(json_get(m, "compat"), "stripImageInput", false));
+    json_free(m);
+}
+
 /* catalog axes resolve at runtime for bundled rows */
 static void test_catalog_policy(void) {
     const json_t *max = compat_catalog_policy("muse-code", "openai-responses", "muse-spark-1.3", "toolCallNameMaxLength");
@@ -241,6 +333,11 @@ int main(void) {
 
     test_credit_rates();
     test_catalog_policy();
+    test_fable_52();
+    test_anthropic_disabled_thinking();
+    test_google_base64_skip();
+    test_paused_provider_stream();
+    test_deepseek_hyphen_flash();
 
     /* providers present in omp's catalog but absent from its bundled rows */
     CHECK(catalog_find("charm-hyper", "glm-5.3") || catalog_find("charm-hyper", "deepseek-v4-flash-0731"));

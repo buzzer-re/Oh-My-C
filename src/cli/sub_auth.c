@@ -67,7 +67,7 @@ int cmd_login(cparse_t *p) {
     const char *provider = cp_arg(p, "provider");
     json_t *all = auth_oauth_providers(), *d;
     VEC(const json_t *) providers = {0};
-    json_arr_foreach(all, i, d) if (json_get_obj(d, "login")) vec_push(&providers, d);
+    json_arr_foreach(all, i, d) if (auth_login_listed(d)) vec_push(&providers, d);
     char *picked = NULL, *err = NULL;
     int rc = 0;
     if (!provider) {

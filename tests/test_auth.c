@@ -628,6 +628,33 @@ int main(void) {
         s_free(&sf);
     }
 
+    /* ---- a provider paused by its auth rules (omp 8895c0fa32): Google Antigravity ---- */
+    {
+        const char *why = "Google may restrict accounts that use Antigravity outside its own apps, so this provider is paused for now.";
+        CHECK(str_eq(catalog_provider_pause_reason("google-antigravity"), why), "antigravity pause reason");
+        CHECK(!catalog_provider_pause_reason("google-gemini-cli"), "gemini-cli not paused");
+        CHECK(auth_set_api_key("google-antigravity", "stored-token") == 0, "store a paused login");
+        CHECK(!auth_has_credentials("google-antigravity") && !auth_get_api_key("google-antigravity") &&
+                  !auth_get_credential("google-antigravity"),
+              "paused provider resolves no key");
+        json_t *c = stored("google-antigravity");
+        CHECK(c != NULL, "the stored login stays on disk");
+        json_free(c);
+        script_t sp = {0};
+        err = NULL;
+        int rc = login("google-antigravity", &sp, &err);
+        CHECK(rc != 0 && err && !strcmp(err, "google-antigravity is turned off: Google may restrict accounts that use Antigravity outside its own "
+                                              "apps, so this provider is paused for now."),
+              "paused login refused: %s", err ? err : "(none)");
+        free(err);
+        s_free(&sp);
+        json_t *d;
+        bool listed = false;
+        json_arr_foreach(auth_oauth_providers(), i, d) if (auth_login_listed(d) && str_eq(json_get_str(d, "id"), "google-antigravity")) listed = true;
+        CHECK(!listed, "paused provider is no login choice");
+        auth_logout("google-antigravity");
+    }
+
     if (mock > 0) {
         kill(mock, SIGTERM);
         waitpid(mock, NULL, 0);

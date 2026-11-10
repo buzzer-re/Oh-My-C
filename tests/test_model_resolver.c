@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 extern char **environ;
 
@@ -213,6 +214,28 @@ int main(void) {
     strvec_t u = mr_usage_order();
     CHECK(u.n == 2 && !strcmp(u.v[0], "mock/mock-1"));
     strvec_free(&u);
+
+    /* omp f462f71eb4..ef855c96bc: disabledProviders from any layer drops the native project items (its config.yml
+     * modelRoles stay); a project that disables itself keeps that switch */
+    char *proj = xasprintf("%s/proj", dir), *pdir = xasprintf("%s/proj/.omc", dir), *pcfg = xasprintf("%s/proj/.omc/config.yml", dir);
+    fs_mkdir_p(pdir, 0755);
+    const char *pyml = "fetch:\n  enabled: false\nmodelRoles:\n  smol: mock/mock-2\n";
+    fs_write_atomic(pcfg, pyml, strlen(pyml), 0644);
+    settings_init(proj, NULL);
+    CHECK(!settings_bool("fetch.enabled", true) && !strcmp(settings_provenance("fetch.enabled"), "project"));
+    char *gcfg = xasprintf("%s/config.yml", dir);
+    fs_write_atomic(gcfg, "disabledProviders:\n  - native\n", 30, 0644);
+    settings_init(proj, NULL);
+    CHECK(settings_bool("fetch.enabled", true) && !strcmp(settings_provenance("fetch.enabled"), "default"));
+    CHECK(str_eq(json_get_str(json_get(settings_project(), "modelRoles"), "smol"), "mock/mock-2"));
+    unlink(gcfg);
+    pyml = "fetch:\n  enabled: false\ndisabledProviders: [native]\n";
+    fs_write_atomic(pcfg, pyml, strlen(pyml), 0644);
+    settings_init(proj, NULL);
+    CHECK(settings_bool("fetch.enabled", true) && !strcmp(settings_provenance("fetch.enabled"), "default"));
+    json_t *dp = settings_get("disabledProviders");
+    CHECK(json_len(dp) == 1 && str_eq(json_sv(json_at(dp, 0)), "native"));
+    free(proj), free(pdir), free(pcfg), free(gcfg);
 
     mr_pool_free(&avail);
     if (fails) fprintf(stderr, "%d failure(s)\n", fails);

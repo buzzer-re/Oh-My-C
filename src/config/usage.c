@@ -35,6 +35,7 @@ size_t usage_provider_count(void) { return ARRAY_LEN(PROVIDERS); }
 const usage_provider_t *usage_provider_at(size_t i) { return i < ARRAY_LEN(PROVIDERS) ? PROVIDERS[i] : NULL; }
 
 const usage_provider_t *usage_provider_for(const char *provider) {
+    if (catalog_provider_pause_reason(provider)) return NULL; /* a paused provider has no usage provider: never probed */
     for (size_t i = 0; provider && i < ARRAY_LEN(PROVIDERS); i++)
         if (!strcmp(PROVIDERS[i]->id, provider)) return PROVIDERS[i];
     return NULL;

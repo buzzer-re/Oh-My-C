@@ -930,6 +930,8 @@ typedef struct {
 } stream_ud_t;
 
 static json_t *cursor_bridge_run(void *ud, const char *id, const char *name, const json_t *args);
+static json_t *cursor_bridge_run_quiet(void *ud, const char *id, const char *name, const json_t *args);
+static void cursor_bridge_edit_end(void *ud, const json_t *tr);
 static void cursor_bridge_result(void *ud, json_t *tool_result);
 
 static void on_ai_event(void *ud, const ai_event_t *ev) {
@@ -994,7 +996,8 @@ static json_t *stream_assistant(agent_t *a, int *ttsr_abort, json_t **cursor_res
 
     stream_ud_t s = {.a = a, .cursor_results = json_arr()};
     /* Cursor runs its tools through exec frames mid-stream; they execute here as local tools */
-    ai_cursor_exec_t bridge = {.run = cursor_bridge_run, .result = cursor_bridge_result, .ud = &s};
+    ai_cursor_exec_t bridge = {.run = cursor_bridge_run, .result = cursor_bridge_result, .run_quiet = cursor_bridge_run_quiet,
+                               .edit_end = cursor_bridge_edit_end, .ud = &s};
     if (a->model->api && strcmp(a->model->api, "cursor-agent") == 0 && !opts.cursor_exec) opts.cursor_exec = &bridge;
     bool silent = a->silent_abort_next;
     if (silent) {
@@ -1120,12 +1123,14 @@ typedef struct {
     volatile sig_atomic_t cancel;
     pthread_t th;
     bool skip;
+    bool quiet;            /* no tool events (a Cursor edit's materialization frames) */
     char *intent;          /* extracted `i` (owned) */
     size_t intent_too_long; /* >0: length of an over-long `i` (tool not run) */
 } tool_job_t;
 
 static void tool_update_cb(tool_ctx_t *ctx, const tool_result_t *partial) {
     tool_job_t *j = (tool_job_t *)((char *)ctx - offsetof(tool_job_t, ctx));
+    if (j->quiet) return;
     agent_event_t ev = {.type = AGENT_EV_TOOL_UPDATE, .tool_call_id = ctx->tool_call_id, .tool_name = ctx->tool_name,
                         .args = j->args, .result = partial};
     emit(j->a, &ev);
@@ -1138,7 +1143,7 @@ static void run_tool(tool_job_t *j) {
     const char *id = json_get_str(j->call, "id");
     agent_event_t st = {.type = AGENT_EV_TOOL_START, .tool_call_id = id, .tool_name = name, .args = j->args,
                         .intent = j->intent};
-    emit(a, &st);
+    if (!j->quiet) emit(a, &st);
     if (j->skip) {
         tool_result_error(&j->res, "Skipped due to queued user message.");
     } else if (!j->tool) {
@@ -1190,7 +1195,7 @@ static void run_tool(tool_job_t *j) {
     if (!j->res.content) j->res.content = json_arr();
     agent_event_t en = {.type = AGENT_EV_TOOL_END, .tool_call_id = id, .tool_name = name, .result = &j->res,
                         .is_error = j->res.is_error};
-    emit(a, &en);
+    if (!j->quiet) emit(a, &en);
 }
 
 static void *tool_thread(void *p) {
@@ -1259,13 +1264,13 @@ static json_t *cursor_delete(agent_t *a, const char *id, const json_t *args) {
     return m;
 }
 
-static json_t *cursor_bridge_run(void *ud, const char *id, const char *name, const json_t *args) {
+static json_t *cursor_bridge_run_as(void *ud, const char *id, const char *name, const json_t *args, bool quiet) {
     stream_ud_t *s = ud;
     agent_t *a = s->a;
     agent_tool_t *tool = agent_find_tool(a, name);
     if (!tool && strcmp(name, "delete") == 0) return cursor_delete(a, id, args);
     if (!tool) return cursor_unavailable(a, id, name);
-    tool_job_t j = {0};
+    tool_job_t j = {.quiet = quiet};
     json_t *call = json_obj();
     json_set_str(call, "type", "toolCall");
     json_set_str(call, "id", id);
@@ -1281,6 +1286,24 @@ static json_t *cursor_bridge_run(void *ud, const char *id, const char *name, con
     json_free(j.args);
     json_free(call);
     return m;
+}
+
+static json_t *cursor_bridge_run(void *ud, const char *id, const char *name, const json_t *args) {
+    return cursor_bridge_run_as(ud, id, name, args, false);
+}
+
+static json_t *cursor_bridge_run_quiet(void *ud, const char *id, const char *name, const json_t *args) {
+    return cursor_bridge_run_as(ud, id, name, args, true);
+}
+
+/* CursorExecHandlers editSettled / materializeEdit: the edit card's tool_execution_end */
+static void cursor_bridge_edit_end(void *ud, const json_t *tr) {
+    stream_ud_t *s = ud;
+    tool_result_t r = {.content = json_get(tr, "content"), .details = json_get(tr, "details"),
+                       .is_error = json_get_bool(tr, "isError", false)};
+    agent_event_t en = {.type = AGENT_EV_TOOL_END, .tool_call_id = json_get_str(tr, "toolCallId"),
+                        .tool_name = json_get_str(tr, "toolName"), .result = &r, .is_error = r.is_error};
+    emit(s->a, &en);
 }
 
 static void cursor_bridge_result(void *ud, json_t *tool_result) {

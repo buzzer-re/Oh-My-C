@@ -124,8 +124,7 @@ static int feed_sse(const char *text, sse_event_cb cb, void *ud) {
     "\"cost\":{\"input\":3,\"output\":15,\"cacheRead\":0.3,\"cacheWrite\":3.75},\"contextWindow\":200000,"         \
     "\"maxTokens\":64000,\"thinking\":{\"mode\":\"budget\",\"efforts\":[\"minimal\",\"low\",\"medium\","            \
     "\"high\",\"xhigh\"]},\"compat\":{\"officialEndpoint\":true,\"signingEndpoint\":true,"                         \
-    "\"supportsEagerToolInputStreaming\":true,\"supportsLongCacheRetention\":true,\"replayUnsignedThinking\":false," \
-    "\"disabledThinking\":\"disabled\"}}"
+    "\"supportsEagerToolInputStreaming\":true,\"supportsLongCacheRetention\":true,\"replayUnsignedThinking\":false}}"
 
 #define OPUS48                                                                                                    \
     "{\"id\":\"claude-opus-4-8\",\"api\":\"anthropic-messages\",\"provider\":\"anthropic\","                     \
@@ -134,7 +133,7 @@ static int feed_sse(const char *text, sse_event_cb cb, void *ud) {
     "\"thinking\":{\"mode\":\"anthropic-adaptive\",\"efforts\":[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"],"   \
     "\"supportsDisplay\":true},\"compat\":{\"officialEndpoint\":true,\"signingEndpoint\":true,"                    \
     "\"supportsEagerToolInputStreaming\":true,\"supportsLongCacheRetention\":true,"                                \
-    "\"supportsMidConversationSystem\":true,\"disabledThinking\":\"disabled\"}}"
+    "\"supportsMidConversationSystem\":true}}"
 
 static const char *CTX_MESSAGES =
     "["
@@ -315,6 +314,18 @@ static void test_anthropic_request_adaptive(void) {
     CHECK(strstr(dump, "cache_control") == NULL);
     free(dump);
     json_free(p);
+    /* a route's (or models.yml's) Off dialect wins: `disabled` is explicit, `omit` sends neither field */
+    json_t *mc = json_get(raw, "compat");
+    json_set_str(mc, "disabledThinking", "disabled");
+    p = anthropic_build_request(&m, &ctx, &o, false);
+    CHECK_STR(P(p, "thinking.type"), "disabled");
+    CHECK(json_get(p, "output_config") == NULL);
+    json_free(p);
+    json_set_str(mc, "disabledThinking", "omit");
+    p = anthropic_build_request(&m, &ctx, &o, false);
+    CHECK(json_get(p, "thinking") == NULL && json_get(p, "output_config") == NULL);
+    json_free(p);
+    json_del(mc, "disabledThinking");
 
     /* forced tool choice drops thinking */
     json_t *tools = J(CTX_TOOLS), *tc = json_str("required");
@@ -739,6 +750,12 @@ static void test_google_request_gemini3(void) {
     CHECK_STR(P(c, "2.parts.0.functionResponse.response.output"), "[image omitted: model does not support vision]");
     CHECK(json_get(b, "tools") == NULL && json_get(b, "toolConfig") == NULL);
     json_free(b);
+    /* base64SkipThoughtSignature: the sentinel goes out base64-encoded for gateways that decode it as bytes */
+    json_set_bool(json_get(raw, "compat"), "base64SkipThoughtSignature", true);
+    b = google_build_request(&m, &ctx, &o);
+    CHECK_STR(P(json_get(b, "contents"), "1.parts.0.thoughtSignature"), "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I=");
+    json_free(b);
+    json_del(json_get(raw, "compat"), "base64SkipThoughtSignature");
     o.reasoning = EFFORT_MEDIUM; /* unsupported -> clamps to low */
     o.hide_thinking_summary = false;
     b = google_build_request(&m, &ctx, &o);

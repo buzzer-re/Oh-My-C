@@ -43,7 +43,6 @@ typedef struct {
     bool saw_finish;
     const char *stop_reason; /* static */
     char *error;             /* owned */
-    bool finish_transient;   /* MALFORMED_RESPONSE: a backend fault, the same request can succeed */
 } google_sse_t;
 
 void google_sse_init(google_sse_t *s, const ai_model_t *m, ai_event_cb cb, void *ud);

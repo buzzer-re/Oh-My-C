@@ -112,7 +112,7 @@ Some state is shared by all of them:
 
 | Process-wide | Where |
 |---|---|
-| Settings (defaults < global `config.yml` < project `.omc/`/`.omp/` `config.yml` < `--config` overlays < runtime overrides) | `config/settings.c` |
+| Settings (defaults < global `config.yml` < project `.omc/`/`.omp/` `config.yml` < `--config` overlays < runtime overrides; `disabledProviders: [native]` from any layer drops the project files except their `config.yml` `modelRoles`) | `config/settings.c` |
 | Credentials (`auth.json`, runtime `--api-key`, OAuth refresh) | `config/auth.c` |
 | Model catalog + custom `models.yml` providers, API registry | `ai/catalog.c`, `ai/ai_common.c` |
 | Token caches: AWS credential chain, Google ADC, GitLab direct-access, Copilot identity | `ai/aws.c`, `ai/google_auth.c`, `ai/provider_gitlab_duo.c`, `ai/provider_transport.c` |

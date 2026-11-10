@@ -70,6 +70,10 @@ const ai_model_t *catalog_resolve(const char *pattern);
 const char *catalog_provider_default_model(const char *provider);
 json_t *catalog_provider_info(const char *provider);   /* borrowed: {id, envVars, defaultModel, ...} */
 json_t *catalog_auth_providers(void);                  /* borrowed array of OAuth login descriptors */
+/* auth rule `disabled "<reason>"` (providerPauseReason): the provider offers no login and nothing may call it;
+ * stored logins stay on disk. The reason is borrowed; the error ("<provider> is turned off: <reason>") owned. */
+const char *catalog_provider_pause_reason(const char *provider);
+char *catalog_provider_disabled_error(const char *provider);
 const ai_model_t *catalog_register(json_t *model_obj); /* takes ownership; for custom/discovered models */
 /* ModelRegistry.refreshIfStale: re-applies models.yml when it changed on disk since the last load (new models
  * appear, edited ones update in place, removed ones are marked gone); true when the catalog changed */
@@ -172,6 +176,12 @@ typedef struct {
     json_t *(*run)(void *ud, const char *id, const char *name, const json_t *args);
     /* A ToolResultMessage (owned) pairing a resolved toolCall block of the streamed message. */
     void (*result)(void *ud, json_t *tool_result);
+    /* editMaterialization frames (a native StrReplace/Write's read, then its write): `run` without tool events of
+     * their own; NULL falls back to `run` */
+    json_t *(*run_quiet)(void *ud, const char *id, const char *name, const json_t *args);
+    /* ends the live `edit` card of a native StrReplace/Write (tool_execution_end under its result's toolName, from
+     * the materialized write or the server's completion); may be NULL */
+    void (*edit_end)(void *ud, const json_t *tool_result);
     void *ud;
 } ai_cursor_exec_t;
 

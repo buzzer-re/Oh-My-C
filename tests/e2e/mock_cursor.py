@@ -7,7 +7,9 @@ POST /aiserver.v1.BidiService/BidiAppend (BidiAppendRequest{requestId, appendSeq
 protobuf, hand-encoded here (field numbers from Cursor's agent.proto). Scripted turns, by user text:
   "hi"              -> thinking + text "plain cursor answer" + checkpoint + turnEnded usage
   "bash:<cmd>"      -> requestContext exec, blob set/get round trip, shellArgs exec, then "Tool said: <stdout>"
+  "bash24h:<cmd>"   -> the same with Cursor's 24 h hard_timeout on the ShellArgs
   "read:<path>"     -> readArgs exec, then "Read said: <content>"
+  "editorder:<path>" -> native StrReplace read/write frames with a Shell between them; "Order: ...; Shell said: ..."
   "mcp:<tool>:<js>" -> streamed mcpToolCall + mcpArgs exec, then "MCP said: <text>"
   "history"         -> fetches every rootPromptMessagesJson blob over KV and answers "roles: ..."
   "fail"            -> Connect end-stream error (resource_exhausted)
@@ -315,8 +317,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def script(self, user_text, state, recv, rid):
         out = self.chunk
-        if user_text.startswith("bash:"):
-            cmd = user_text[5:]
+        if user_text.startswith("bash:") or user_text.startswith("bash24h:"):
+            # bash24h: Cursor's native Shell 24 h hard_timeout (ShellArgs field 14)
+            hard = 86400000 if user_text.startswith("bash24h:") else None
+            cmd = user_text.split(":", 1)[1]
             out(exec_msg(1, "ctx1", 10, b""))  # requestContextArgs
             ctx = parse(get(parse(get(recv(2), 2)), 10))
             rc = parse(get(parse(get(ctx, 1)), 1))
@@ -328,7 +332,7 @@ class Handler(BaseHTTPRequestHandler):
             out(kv(6, 2, msg((1, b"\x01\x02blob"))))  # getBlobArgs
             got = get(parse(get(parse(get(recv(3), 3)), 2, b"")), 1, b"")
             out(interaction(2, msg((1, "env1"), (2, msg((1, msg((1, msg((1, cmd))))))))))  # toolCallStarted shell
-            out(exec_msg(2, "sh1", 2, msg((1, cmd), (4, "call_shell_1"))))
+            out(exec_msg(2, "sh1", 2, msg((1, cmd), (4, "call_shell_1"), (14, hard))))
             res = parse(get(parse(get(recv(2), 2)), 2))  # shellResult
             ok = parse(get(res, 1, b"")) if 1 in res else parse(get(res, 2, b""))
             stdout = get(ok, 5, b"").decode().strip()
@@ -337,6 +341,32 @@ class Handler(BaseHTTPRequestHandler):
             out(interaction(17, msg((1, 1))))
             out(checkpoint(1234))
             out(turn_ended(500, 40))
+            out(END)
+            return
+        if user_text.startswith("editorder:"):
+            # a native StrReplace (read frame, then write frame) with a Shell sent between them: the Shell must wait
+            # until the edit's write lands (CursorExecOrder)
+            path = user_text[len("editorder:"):]
+            edit_call = msg((57, "call_edit_1"), (12, msg((1, msg((1, path))))))
+            out(interaction(2, msg((1, "ed1"), (2, edit_call))))  # toolCallStarted editToolCall
+            out(exec_msg(1, "rd1", 7, msg((1, path), (2, "call_edit_1"))))
+            recv(2)  # readResult
+            out(exec_msg(2, "sh1", 2, msg((1, "cat " + path), (4, "call_shell_1"))))
+            out(exec_msg(3, "wr1", 3, msg((1, path), (2, "edited\n"), (3, "call_edit_1"))))
+            order, stdout = [], ""
+            for _ in range(2):
+                em = parse(get(recv(2), 2))
+                if 3 in em:
+                    order.append("write")
+                elif 2 in em:
+                    order.append("shell")
+                    res = parse(get(em, 2))
+                    ok = parse(get(res, 1, b"")) if 1 in res else parse(get(res, 2, b""))
+                    stdout = get(ok, 5, b"").decode().strip()
+            done = msg((57, "call_edit_1"), (12, msg((1, msg((1, path))), (2, msg((1, msg((1, path))))))))
+            out(interaction(3, msg((1, "ed1"), (2, done))))  # toolCallCompleted: edit success
+            out(text("Order: " + ",".join(order) + "; Shell said: " + stdout))
+            out(turn_ended(10, 5))
             out(END)
             return
         if user_text.startswith("read:"):

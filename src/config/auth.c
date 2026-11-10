@@ -130,6 +130,10 @@ static json_t *descriptor(const char *provider) {
 
 json_t *auth_oauth_providers(void) { return catalog_auth_providers(); }
 
+bool auth_login_listed(const json_t *d) {
+    return json_get_obj(d, "login") && !catalog_provider_pause_reason(json_get_str(d, "id"));
+}
+
 const char *auth_store_id(const char *provider) {
     const char *s = json_get_str(descriptor(provider), "storeAs");
     return s ? s : provider;
@@ -140,6 +144,8 @@ const char *auth_store_id(const char *provider) {
 static int refresh_oauth(const char *provider, json_t *entry, char **err) {
     /* credentials minted from a runtime descriptor (MCP OAuth) carry it along */
     json_t *d = json_get_obj(entry, "descriptor");
+    /* a paused provider never starts a token exchange */
+    if (!d && (*err = catalog_provider_disabled_error(provider))) return -1;
     if (!d) d = descriptor(provider);
     json_t *fresh = NULL;
     if (auth_refresh_credential(provider, d, entry, &fresh, err) != 0) return -1;
@@ -182,7 +188,12 @@ static int64_t normalized_expiry(const json_t *d, const json_t *e) {
     return r;
 }
 
+/* a provider the auth rules pause is reached by no key source (runtime, models.yml, stored, env); its stored rows
+ * stay on disk untouched but nothing reads them */
+static bool paused(const char *provider) { return catalog_provider_pause_reason(provider) != NULL; }
+
 char *auth_get_api_key(const char *provider) {
+    if (paused(provider)) return NULL;
     pthread_mutex_lock(&g_mu);
     load();
     char *r = NULL;
@@ -222,6 +233,7 @@ char *auth_get_api_key(const char *provider) {
 }
 
 json_t *auth_get_credential_raw(const char *provider) {
+    if (paused(provider)) return NULL;
     pthread_mutex_lock(&g_mu);
     load();
     json_t *e = json_get_obj(g_store, provider);
@@ -231,6 +243,7 @@ json_t *auth_get_credential_raw(const char *provider) {
 }
 
 json_t *auth_get_credential(const char *provider) {
+    if (paused(provider)) return NULL;
     pthread_mutex_lock(&g_mu);
     load();
     json_t *e = json_get_obj(g_store, provider);
@@ -261,6 +274,7 @@ bool auth_has_runtime_key(const char *provider) {
 }
 
 bool auth_has_credentials(const char *provider) {
+    if (paused(provider)) return false;
     pthread_mutex_lock(&g_mu);
     load();
     bool ok = hmap_get(&g_runtime, provider) || json_get_obj(g_store, provider);
@@ -641,6 +655,7 @@ static int login_run(const char *provider, const json_t *d, bool embed, const au
         *err = xasprintf("Unknown OAuth provider: %s", provider);
         return -1;
     }
+    if (!embed && (*err = catalog_provider_disabled_error(provider))) return -1; /* assertProviderEnabled */
     const json_t *login = json_get_obj(d, "login");
     const char *kind = json_get_str(login, "kind");
     actx_t c = {provider, json_get_str(d, "name") ? json_get_str(d, "name") : provider, d, hooks};

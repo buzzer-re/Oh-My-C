@@ -42,6 +42,9 @@ static const char *DEFAULTS_JSON =
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static json_t *g_defaults, *g_global, *g_project, *g_overlay, *g_env, *g_runtime, *g_effective;
+/* g_project as merged (#resolveProjectRead: disabledProviders may drop the native items) and the native project
+ * config.yml's own modelRoles, which stay either way */
+static json_t *g_project_resolved, *g_native_roles;
 static char *g_global_path;
 static char *g_project_dir;
 static char *g_cwd;
@@ -154,11 +157,59 @@ static json_t *env_layer(void) {
     return e;
 }
 
+/* the disabledProviders strings the layers resolve to with `project` as the project layer */
+static strvec_t disabled_providers(const json_t *project) {
+    json_t *m = json_obj();
+    const json_t *layers[] = {g_global, project, g_overlay, g_env, g_runtime};
+    for (size_t i = 0; i < ARRAY_LEN(layers); i++)
+        if (layers[i]) json_merge(m, layers[i]);
+    strvec_t out = {0};
+    json_t *x;
+    json_arr_foreach(json_get(m, "disabledProviders"), i, x) if (json_is_str(x) && !strvec_contains(&out, json_sv(x)))
+        strvec_push(&out, json_sv(x));
+    json_free(m);
+    return out;
+}
+
+static bool same_set(const strvec_t *a, const strvec_t *b) {
+    if (a->n != b->n) return false;
+    for (size_t i = 0; i < a->n; i++)
+        if (!strvec_contains(b, a->v[i])) return false;
+    return true;
+}
+
+/* #resolveProjectRead: `disabledProviders`, from any layer (the project's own native config included), drops the
+ * native provider's project items; the native config.yml's modelRoles stay. A project config that disables itself
+ * keeps only that switch, so removing its other settings cannot undo the decision. Owned. */
+static json_t *resolve_project(void) {
+    if (!g_project || !g_project_dir) return g_project ? json_clone(g_project) : NULL;
+    strvec_t disabled = disabled_providers(g_project);
+    json_t *out;
+    if (!strvec_contains(&disabled, "native")) {
+        out = json_clone(g_project);
+    } else {
+        out = json_obj();
+        if (g_native_roles) json_set(out, "modelRoles", json_clone(g_native_roles));
+        const json_t *sw = json_get(g_project, "disabledProviders");
+        if (sw) {
+            strvec_t remaining = disabled_providers(out);
+            if (!same_set(&disabled, &remaining)) json_set(out, "disabledProviders", json_clone(sw));
+            strvec_free(&remaining);
+        }
+    }
+    strvec_free(&disabled);
+    return out;
+}
+
 static void rebuild(void) {
     json_free(g_effective);
     g_effective = json_clone(g_defaults);
+    json_free(g_env);
+    g_env = env_layer();
+    json_free(g_project_resolved);
+    g_project_resolved = resolve_project();
     /* projectLayerForMerge: a cleared (null) project model role falls back to the global one */
-    json_t *project = g_project ? json_clone(g_project) : NULL;
+    json_t *project = g_project_resolved ? json_clone(g_project_resolved) : NULL;
     json_t *proles = json_get_obj(project, "modelRoles");
     for (size_t i = 0; proles && i < proles->u.obj.n;) {
         json_t *v = proles->u.obj.vals[i];
@@ -166,8 +217,6 @@ static void rebuild(void) {
         else i++;
     }
     /* precedence: runtime override (flags, session-only writes), the definition's environment variable, overlay, project, global */
-    json_free(g_env);
-    g_env = env_layer();
     json_t *layers[] = {g_global, project, g_overlay, g_env, g_runtime};
     for (size_t i = 0; i < ARRAY_LEN(layers); i++)
         if (layers[i]) json_merge(g_effective, layers[i]);
@@ -178,6 +227,8 @@ static void rebuild(void) {
 static void load_project(const char *cwd) {
     json_free(g_project);
     g_project = json_obj();
+    json_free(g_native_roles);
+    g_native_roles = NULL;
     free(g_project_dir);
     g_project_dir = NULL;
     char *c = cwd ? xstrdup(cwd) : get_cwd();
@@ -193,6 +244,8 @@ static void load_project(const char *cwd) {
                 char *p = path_join(d, pf[k]);
                 json_t *j = load_file(p);
                 if (j) {
+                    if (str_eq(pf[k], "config.yml") && json_get(j, "modelRoles"))
+                        g_native_roles = json_clone(json_get(j, "modelRoles"));
                     json_merge(g_project, j);
                     json_free(j);
                 }
@@ -293,7 +346,7 @@ bool settings_bool(const char *path, bool def) {
 bool settings_is_configured(const char *path) {
     ensure();
     pthread_mutex_lock(&g_mu);
-    json_t *layers[] = {g_global, g_project, g_overlay, g_runtime};
+    json_t *layers[] = {g_global, g_project_resolved, g_overlay, g_runtime};
     bool r = false;
     for (size_t i = 0; i < ARRAY_LEN(layers) && !r; i++) r = layers[i] && json_path(layers[i], path) != NULL;
     pthread_mutex_unlock(&g_mu);
@@ -497,7 +550,7 @@ int settings_set_global_entry(const char *parent, const char *key, json_t *val) 
 
 json_t *settings_project(void) {
     ensure();
-    return g_project;
+    return g_project_resolved ? g_project_resolved : g_project;
 }
 
 char *settings_project_config_path(void) {
@@ -525,6 +578,8 @@ int settings_set_project_entry(const char *parent, const char *key, json_t *val)
         o = parent_obj(g_project, parent, false);
         if (o) json_del(o, key);
     }
+    json_free(g_native_roles);
+    g_native_roles = json_get(file, "modelRoles") ? json_clone(json_get(file, "modelRoles")) : NULL;
     char *dir = path_dirname(path);
     fs_mkdir_p(dir, 0755);
     if (!g_project_dir) g_project_dir = xstrdup(dir);
@@ -544,7 +599,7 @@ const char *settings_provenance(const char *path) {
     ensure();
     pthread_mutex_lock(&g_mu);
     const char *r = "default";
-    const json_t *layers[] = {g_runtime, g_env, g_overlay, g_project, g_global};
+    const json_t *layers[] = {g_runtime, g_env, g_overlay, g_project_resolved, g_global};
     static const char *const names[] = {"runtime", "env", "overlay", "project", "global"};
     for (size_t i = 0; i < ARRAY_LEN(layers); i++) {
         const json_t *v = layers[i] ? json_path(layers[i], path) : NULL;
