@@ -451,6 +451,8 @@ char *cli_extra_help(void) {
         "  SINGULARITYAPI_DEV_API_KEY - SingularityAPI universal gateway (300+ models)\n"
         "  SINGULARITYAPI_TECH_API_KEY - SingularityAPI reserved DeepSeek lanes\n"
         "  SCW_SECRET_KEY             - Scaleway Generative APIs models\n"
+        "  OTARI_API_KEY              - Otari AI gateway (workspace models)\n"
+        "  OTARI_BASE_URL             - Otari self-hosted API root (e.g. https://host/api/v1)\n"
         "\n"
         "  %s\n"
         "  AWS_PROFILE                - AWS Bedrock (or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)\n"
