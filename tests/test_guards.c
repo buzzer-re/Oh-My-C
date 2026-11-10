@@ -1,9 +1,11 @@
 /* guards: magic-keyword prose detection, tiny-message preprocessing, auto-thinking clamps, todo-tracker
- * isAwaitingUserAnswer, tool-call loop canonicalization (ports of omp magic-keywords.ts / markdown-prose.ts,
- * tiny/message-preproc.ts, pi-tui thinking.ts, session/todo-tracker.ts, utils/tool-call-loop-guard.ts) */
+ * isAwaitingUserAnswer, tool-call loop canonicalization, URL-read bot walls (ports of omp magic-keywords.ts /
+ * markdown-prose.ts, tiny/message-preproc.ts, pi-tui thinking.ts, session/todo-tracker.ts, utils/tool-call-loop-guard.ts,
+ * web/scrapers/types.ts botWallOf) */
 #include "coding/autothink.h"
 #include "coding/guards.h"
 #include "coding/keywords.h"
+#include "tools/web.h"
 
 #include <stdio.h>
 
@@ -116,6 +118,38 @@ int main(void) {
     CHECK(!strcmp(c, "{\"a\":{\"x\":\"s\",\"y\":[1,{\"b\":3,\"c\":2}]},\"z\":1}"));
     free(c);
     json_free(args);
+
+    /* botWallOf / hasChallengeForm */
+    {
+#define WALL(st, ct, cf, body) web_bot_wall(st, ct, cf, body, strlen(body))
+#define IS(got, want) ((got) && !strcmp((got), (want)))
+        const char *html = "text/html; charset=utf-8";
+        CHECK(!WALL(200, "application/json", "challenge", "{}"));
+        CHECK(IS(WALL(200, html, "challenge", "<p>hi</p>"), "Cloudflare"));
+        CHECK(IS(WALL(200, html, NULL, "<form><input type=hidden name=\"js_challenge\" value=1></form>"), "JavaScript challenge"));
+        CHECK(IS(WALL(200, html, NULL, "<input NAME='js&#95;challenge'>"), "JavaScript challenge"));
+        CHECK(!WALL(200, html, NULL, "<input name=\"JS_CHALLENGE\">"));
+        CHECK(!WALL(200, html, NULL, "<!-- <input name=js_challenge> -->"));
+        CHECK(!WALL(200, html, NULL, "<script>x='<input name=js_challenge>'</script>"));
+        CHECK(!WALL(200, html, NULL, "<template><input name=js_challenge></template>"));
+        CHECK(!WALL(200, html, NULL, "<p title=\"<input name=js_challenge>\">x</p>"));
+        CHECK(!WALL(200, html, NULL, "<textarea></textareax><input name=js_challenge></textarea>"));
+        CHECK(!WALL(200, html, NULL, "<input name=js_challenge"));
+        CHECK(IS(WALL(200, html, NULL, "<script>1</script><input name=js_challenge>"), "JavaScript challenge"));
+        CHECK(!WALL(200, html, NULL, "<p>_cf_chl_opt captcha-delivery.com</p>"));
+        CHECK(IS(WALL(403, html, NULL, "<script>window._cf_chl_opt={}</script>"), "Cloudflare"));
+        CHECK(IS(WALL(403, html, NULL, "<script src=https://ct.captcha-delivery.com/c.js></script>"), "DataDome"));
+        CHECK(IS(WALL(403, html, NULL, "<div id=px-captcha></div>"), "PerimeterX"));
+        CHECK(IS(WALL(403, html, NULL, "You've been blocked by network security."), "network security block"));
+        CHECK(!WALL(404, html, NULL, "<p>not found</p>"));
+        char *big = calloc(70000, 1);
+        memset(big, ' ', 69990);
+        memcpy(big, "<input name=js_challenge>", 25);
+        CHECK(!web_bot_wall(200, html, NULL, big, strlen(big)));
+        free(big);
+#undef WALL
+#undef IS
+    }
 
     if (fails) fprintf(stderr, "%d failure(s)\n", fails);
     else printf("ok\n");
