@@ -964,14 +964,16 @@ static char *render_segment(const char *id, const segctx_t *c) {
     if (str_eq(id, "session_name")) {
         if (!c->title) return NULL;
         char *s = sanitize_status(c->title);
-        /* a pinned session shows the pin beside its title */
-        if (a->session && session_pin_cached(session_id(a->session))) {
-            char *wi = with_icon(sym("icon.pin"), s);
-            free(s);
-            s = wi;
-        }
         char *r = accent_fg(c, TUI_TC_ACCENT, s);
         free(s);
+        /* a pinned session shows the pin, in the theme accent, beside its title */
+        const char *pin = sym("icon.pin");
+        if (a->session && session_pin_cached(session_id(a->session)) && pin && *pin) {
+            char *p = fg(TUI_TC_ACCENT, pin), *wi = xasprintf("%s %s", p, r);
+            free(p);
+            free(r);
+            r = wi;
+        }
         return r;
     }
     if (str_eq(id, "session")) {
@@ -1706,8 +1708,12 @@ static char *title_only(ui_t *u) {
     if (!t || !*t) return NULL;
     char *s = sanitize_status(t);
     const char *pin = session_pin_cached(session_id(u->app->session)) ? sym("icon.pin") : NULL;
-    char *r = pin ? xasprintf("\x1b[2;3m%s %s\x1b[23;22m", pin, s) : xasprintf("\x1b[2;3m%s\x1b[23;22m", s);
+    char *styled = xasprintf("\x1b[2;3m%s\x1b[23;22m", s);
     free(s);
+    if (!pin || !*pin) return styled;
+    char *p = fg(TUI_TC_ACCENT, pin), *r = xasprintf("%s %s", p, styled);
+    free(p);
+    free(styled);
     return r;
 }
 

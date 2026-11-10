@@ -34,6 +34,14 @@ bool tui_md_hyperlinks_supported(void);
 /* Render markdown for `width` columns (upstream Markdown component: marked-style block tokens with the
  * same per-token spacing, list/table/quote layout and code rows); appends owned lines to out. */
 void tui_md_render(const char *text, int width, const tui_md_opts_t *opts, strvec_t *out);
+/* copy-targets.ts extractBlocks: fenced code (any nesting under list items; an unclosed fence runs to the end)
+ * and blockquotes, in document order, tokenized the way the renderer draws them. Code inside a quote stays part
+ * of the quote; indented code is not offered. `text` is owned by the callback; `lang` is borrowed. */
+typedef void (*tui_md_block_fn)(void *ud, bool code, const char *lang, char *text);
+void tui_md_extract_blocks(const char *text, tui_md_block_fn fn, void *ud);
+/* holdPendingBullet: a streaming source ending on a lone `-` line that underlines a paragraph (a setext H2, also as
+ * the last child of a list item or quote) is almost always a bullet being typed: drop that line, in place */
+void tui_md_hold_pending_bullet(char *text);
 /* lexDocument(text).findLast(non-space).type === "paragraph" */
 bool tui_md_ends_in_paragraph(const char *text);
 /* Render inline markdown (no wrapping) into an ANSI string (owned). */
@@ -42,7 +50,7 @@ char *tui_md_inline(const char *text, const tui_md_opts_t *opts);
 /* Highlight source code (highlight.c); appends one owned line per source line, colored with the theme's
  * syntax* slots the way omp's syntect highlighter maps scopes. Unsupported languages come back verbatim.
  * Language names: c, cpp, js, ts, jsx, tsx, python/py, rust/rs, go, java, kotlin, sh/bash/zsh/shell, json,
- * yaml/yml, toml/ini, sql, ruby/rb, lua, diff, html/xml, css ... */
+ * yaml/yml, toml/ini, sql, ruby/rb, lua, diff, html/xml, css, re / "Regular Expression" ... */
 void tui_highlight_code(const char *code, const char *lang, const tui_theme_t *th, strvec_t *out);
 bool tui_highlight_supported(const char *lang);
 

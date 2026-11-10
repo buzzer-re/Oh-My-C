@@ -43,6 +43,23 @@ static void test_split(void) {
     CHECK(ui_queue_shorthand("-> x") && !strcmp(ui_queue_shorthand("-> x"), " x"), "-> shorthand");
     CHECK(ui_queue_shorthand("=>x") != NULL, "=> shorthand");
     CHECK(ui_queue_shorthand("- > x") == NULL, "no shorthand");
+    /* formatQueueShorthand reads back as the same messages */
+    {
+        strvec_t m = {0};
+        strvec_push(&m, "one");
+        char *f = ui_format_queue_shorthand(&m);
+        CHECK(!strcmp(f, "=> one"), "shorthand single: %s", f);
+        free(f);
+        strvec_push(&m, "two\nlines");
+        f = ui_format_queue_shorthand(&m);
+        CHECK(!strcmp(f, "=>\n1. one\n2. two\n   lines"), "shorthand list: %s", f);
+        strvec_t back = {0};
+        ui_split_queued_messages(ui_queue_shorthand(f), &back);
+        CHECK(back.n == 2 && !strcmp(back.v[0], "one") && !strcmp(back.v[1], "two\n   lines"), "shorthand round trip");
+        strvec_free(&back);
+        free(f);
+        strvec_free(&m);
+    }
 }
 
 static json_t *synthetic(const char *t) {

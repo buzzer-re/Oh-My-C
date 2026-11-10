@@ -55,6 +55,7 @@ check "cli template miss" "ENOENT: no such file or directory, open '$T/none.md'"
 # --export (exportFromFile)
 SESS=$(ls -t "$T/agent/sessions"/*/*.jsonl 2>/dev/null | head -1)
 check "cli export"        "Exported to: $T/cli-export.html"  "$B" --export "$SESS" "$T/cli-export.html"
+check "cli export rel"    "Exported to: $T/rel-export.html"  "$B" --export "$SESS" "sub/../../rel-export.html"  # omp 9ee085a440: resolved once
 check "cli export miss"   "Error: File not found: $T/none.jsonl"  "$B" --export "$T/none.jsonl"
 # subcommands
 check "models json"       '"selector":"mock/mock-1"'  "$B" models --json mock

@@ -3371,7 +3371,10 @@ static void handle(rpc_t *r, json_t *cmd) {
         }
         free(t);
     } else if (!strcmp(type, "bash")) {
-        bash_start(r, cmd, id);
+        /* reject rather than coerce: a falsy non-boolean such as `null` would silently share the output */
+        const json_t *ex = json_get(cmd, "excludeFromContext");
+        if (ex && !json_is_bool(ex)) respond(r, id, type, false, NULL, "excludeFromContext must be a boolean");
+        else bash_start(r, cmd, id);
     } else if (!strcmp(type, "login") || !strcmp(type, "get_logout_accounts") || !strcmp(type, "logout")) {
         login_command(r, cmd, id, type);
     } else if (!strcmp(type, "get_session_stats")) {
@@ -3415,6 +3418,7 @@ rpc_t *rpc_attach(app_t *a, rpc_sink_fn sink, void *ud) {
     json_set(ready, "supportedProtocolVersions", sv);
     json_set_int(ready, "maxFrameBytes", RPC_MAX_FRAME_BYTES);
     json_set_int(ready, "maxReassembledFrameBytes", RPC_MAX_REASSEMBLED_BYTES);
+    json_set_bool(ready, "supportsBashExcludeFromContext", true); /* `bash` accepts excludeFromContext */
     emit(r, ready);
     json_free(ready);
     agent_subscribe(a->agent, rpc_listener, r);

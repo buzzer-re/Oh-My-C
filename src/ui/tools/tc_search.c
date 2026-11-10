@@ -379,6 +379,30 @@ static char *grep_style(tc_grouped_t *g, size_t i, void *ud) {
     return f ? f : tc_fg(TUI_TC_TOOL_OUTPUT, g->lines.v[i]);
 }
 
+/* isGroupedHeader over every row: `^#+\s+` (a `#` directory or file header) */
+static bool grouped_has_header(const char *text) {
+    for (const char *p = text; p && *p;) {
+        size_t h = strspn(p, "#");
+        if (h && (p[h] == ' ' || p[h] == '\t' || p[h] == '\v' || p[h] == '\f' || p[h] == '\r')) return true;
+        p = strchr(p, '\n');
+        if (p) p++;
+    }
+    return false;
+}
+
+/* the pattern syntax-colored with the bundled regex grammar (also incomplete, still-streaming patterns); NULL when
+ * there is none */
+static char *grep_pattern(const char *pattern) {
+    if (!pattern || !*pattern) return NULL;
+    char *t = tc_replace_tabs(pattern);
+    strvec_t lines = {0};
+    tui_highlight_code(t, "Regular Expression", NULL, &lines);
+    char *r = strvec_join(&lines, "\n");
+    strvec_free(&lines);
+    free(t);
+    return r;
+}
+
 /* grepSubject: a result names the tool's display scope (linked to the original search path); a call falls back
  * to the requested paths */
 static char *grep_subject(const char *pattern, const json_t *args, const json_t *d) {
@@ -397,7 +421,9 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
     const char *pattern = json_get_str(c->args, "pattern");
     if (!c->has_result || c->partial) {
         strvec_t meta = {0};
-        char *subj = grep_subject(pattern && *pattern ? pattern : "?", c->args, NULL);
+        char *hp = grep_pattern(pattern);
+        char *subj = grep_subject(hp ? hp : "?", c->args, NULL);
+        free(hp);
         if (json_get(c->args, "case") && !json_get_bool(c->args, "case", true)) strvec_push(&meta, "case:insensitive");
         if (json_get(c->args, "gitignore") && !json_get_bool(c->args, "gitignore", true)) strvec_push(&meta, "gitignore:false");
         if (json_get_int(c->args, "skip", 0) > 0) meta_push(&meta, xasprintf("skip:%lld", (long long)json_get_int(c->args, "skip", 0)));
@@ -410,7 +436,9 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
         strvec_free(&meta);
         return;
     }
-    char *subject = grep_subject(pattern, c->args, d);
+    char *hp = grep_pattern(pattern);
+    char *subject = grep_subject(hp, c->args, d);
+    free(hp);
     if (c->is_error || json_get_str(d, "error")) {
         char *t = json_get_str(d, "error") ? xstrdup(json_get_str(d, "error")) : tc_text_of(c->content);
         tc_status_line_t sl = {.icon = TC_ST_ERROR, .spinner = -1, .title = "Grep", .title_slot = TUI_TC_TOOL_TITLE, .description = subject};
@@ -498,7 +526,12 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
                      json_get_bool(json_get_obj(mt, "limits"), "columnTruncated", false);
     strvec_t meta = {0};
     meta_push(&meta, tc_format_count("match", matches));
-    meta_push(&meta, tc_format_count("file", files));
+    /* a scoped single-file search prints no `#` headers: its one file is the scope, so no `1 file` */
+    char *scope_paths = tc_paths_of(c->args);
+    const char *scope_path = json_get_str(d, "scopePath");
+    bool has_scope = (scope_path && *scope_path) || scope_paths;
+    free(scope_paths);
+    if (!(has_scope && files == 1 && !grouped_has_header(text))) meta_push(&meta, tc_format_count("file", files));
     if (truncated) meta_push(&meta, tc_fg(TUI_TC_WARNING, "truncated"));
     char *ic = truncated ? NULL : search_icon();
     tc_status_line_t sl = {.icon = truncated ? TC_ST_WARNING : TC_ST_NONE, .icon_override = ic, .spinner = -1, .title = "Grep",

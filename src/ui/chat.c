@@ -796,6 +796,7 @@ static void render_assistant_body(msgview_t *v, int width, strvec_t *o) {
             if (!canonical_nonempty(tx)) continue;
             tail = 1;
             char *tr = trim_dup(tx);
+            if (v->streaming) tui_md_hold_pending_bullet(tr); /* omp d9382eb30a */
             md_rows(o, tr, width, false);
             free(tr);
         } else if (str_eq(t, "thinking")) {
@@ -1210,6 +1211,25 @@ static void render_todo_reminder(msgview_t *v, int width, strvec_t *o) {
     free(header);
 }
 
+/* buildParentIrcMessageCard: v->msg is the steer's parentIrc {from, body}, v->text the age taken at build time */
+static void render_irc(msgview_t *v, int width, strvec_t *o) {
+    tc_irc_incoming_card(json_get_str(v->msg, "from"), json_get_str(v->msg, "body"), v->text, g_ui && g_ui->expand_tools,
+                         width, o);
+}
+
+msgview_t *ui_parent_irc_view(const json_t *m) {
+    const json_t *pi = json_get(m, "parentIrc");
+    if (!json_is_obj(pi)) return NULL;
+    msgview_t *v = mv_new(MV_IRC);
+    v->msg = json_clone(pi);
+    int64_t ts = (int64_t)json_get_num(m, "timestamp", 0);
+    if (ts) {
+        int64_t age = (int64_t)llround((double)(now_ms() - ts) / 1000.0);
+        v->text = tc_format_age(age < 1 ? 1 : age);
+    }
+    return v;
+}
+
 static void mv_render(tui_component_t *c, int width, strvec_t *out) {
     msgview_t *v = (msgview_t *)c;
     if (v->activity && g_ui && g_ui->hide_tool_activity) return; /* ToolActivityComponent hidden: no rows */
@@ -1231,6 +1251,7 @@ static void mv_render(tui_component_t *c, int width, strvec_t *out) {
     case MV_TTSR: render_ttsr(v, width, o); break;
     case MV_TODO: render_todo_reminder(v, width, o); break;
     case MV_SKILL: render_skill(v, width, o); break;
+    case MV_IRC: render_irc(v, width, o); break;
     }
     v->cache_w = width;
     v->dirty = false;
@@ -1940,6 +1961,9 @@ static void replay_message(ui_t *u, const json_t *m, hmap_t *pending) {
         msgview_t *v = mv_new(MV_SKILL);
         v->msg = json_clone(m);
         tui_container_add(u->chat, &v->base);
+    } else if (str_eq(role, "user") && json_is_obj(json_get(m, "parentIrc"))) {
+        toolcard_break_group(u);
+        tui_container_add(u->chat, &ui_parent_irc_view(m)->base);
     } else if (str_eq(role, "user")) {
         toolcard_break_group(u);
         char *text = ai_message_text(m);

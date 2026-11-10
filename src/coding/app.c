@@ -3560,6 +3560,7 @@ int app_new_session(app_t *a) {
     a->plan_reference_sent = false;
     free(a->plan_reference_path);
     a->plan_reference_path = NULL;
+    a->plan_reference_approved = false;
     agent_replace_messages(a->agent, json_arr());
     xdnotice_reset_announced(a);
     free(a->agent->session_id);

@@ -630,6 +630,74 @@ int main(void) {
         tui_sym_set_preset("unicode");
         tui_theme_set(tui_theme_builtin("titanium", TUI_COLOR_TRUECOLOR));
     }
+    /* omp 177f03059f / a370f02197: the grep header colors its pattern with the regex grammar; the placeholder stays plain */
+    {
+        json_t *a = J("{\"pattern\":\"a+\\\\d\"}");
+        tc_call_t c = call("grep", a, NULL, false);
+        strvec_t out = {0};
+        tc_render(&c, 120, &out);
+        char *kw = tc_fg(TUI_TC_SYNTAX_KEYWORD, "+\\d");
+        CHECK(out.n && strstr(out.v[0], kw), "grep pattern highlighted: %s", out.n ? out.v[0] : "");
+        free(kw);
+        strvec_free(&out);
+        json_free(a);
+        a = J("{}");
+        c = call("grep", a, NULL, false);
+        tc_render(&c, 120, &out);
+        char *h = stripped_trim(out.v[0]);
+        CHECK(strstr(h, "Grep: ?") || strstr(h, "Grep ?"), "placeholder: %s", h);
+        free(h);
+        strvec_free(&out);
+        json_free(a);
+    }
+    /* omp cf00fca50c / 140108f134: a scoped single-file grep drops the redundant `1 file`; scope-less keeps it */
+    {
+        const char *r = "{\"content\":[{\"type\":\"text\",\"text\":\"x\"}],\"details\":{\"matchCount\":2,\"fileCount\":1,"
+                        "\"scopePath\":\"a.txt\",\"displayContent\":\"*1\xe2\x94\x82hello\\n*3\xe2\x94\x82hello\"}}";
+        json_t *a = J("{\"pattern\":\"hello\",\"path\":\"a.txt\"}"), *rj = J(r);
+        tc_call_t c = call("grep", a, rj, false);
+        strvec_t out = {0};
+        tc_render(&c, 120, &out);
+        char *h = stripped_trim(out.v[0]);
+        CHECK(strstr(h, "2 matches") && !strstr(h, "1 file"), "single-file grep head: %s", h);
+        free(h);
+        strvec_free(&out);
+        json_free(a);
+        a = J("{\"pattern\":\"hello\"}");
+        json_set_str(json_get_obj(rj, "details"), "scopePath", "");
+        c = call("grep", a, rj, false);
+        tc_render(&c, 120, &out);
+        h = stripped_trim(out.v[0]);
+        CHECK(strstr(h, "1 file"), "scope-less grep keeps 1 file: %s", h);
+        free(h);
+        strvec_free(&out);
+        json_free(a);
+        json_free(rj);
+    }
+    /* omp 2e254233c2: debug call args lose ANSI / control characters and fold to one line */
+    {
+        json_t *a = J("{\"action\":\"set_breakpoint\",\"function\":\"main\\u001b[31m\\nred\\tx\"}");
+        tc_call_t c = call("debug", a, NULL, false);
+        strvec_t out = {0};
+        tc_render(&c, 120, &out);
+        CHECK(out.n == 1 && has_row(&out, "set breakpoint main red   x"), "debug args sanitized");
+        for (size_t i = 0; i < out.n; i++) CHECK(!strstr(out.v[i], "\x1b[31m"), "no model ANSI");
+        strvec_free(&out);
+        json_free(a);
+    }
+    /* omp db90c0d96e: a parent steer renders as an incoming IRC card, 3 body rows collapsed */
+    {
+        strvec_t out = {0};
+        tc_irc_incoming_card(" main ", "one\ntwo\n\nthree\nfour\nfive", "5s ago", false, 80, &out);
+        char *head = stripped_trim(out.v[0]);
+        CHECK(strstr(head, "IRC \xe2\x9f\xb5 main") && strstr(head, "5s ago"), "irc card head: %s", head);
+        free(head);
+        CHECK(out.n == 5 && has_row(&out, "three") && !has_row(&out, "four") && has_row(&out, "+2 more lines"), "irc body rows %zu", out.n);
+        strvec_free(&out);
+        tc_irc_incoming_card("main", "", NULL, false, 80, &out);
+        CHECK(out.n == 1, "empty body: head only");
+        strvec_free(&out);
+    }
     if (failures) fprintf(stderr, "%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

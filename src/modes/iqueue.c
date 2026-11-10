@@ -499,6 +499,18 @@ void iq_queue_command(ui_t *u, const char *text) {
     if (now) {
         ix_start_prompt(u, msgs.v[0]);
         i = 1;
+        if (!u->worker_running && msgs.n > 1) {
+            /* the first never reached the agent (refused at preflight): the whole list goes back as one `=>` list,
+             * nothing runs ahead of it (omp e0eba274da) */
+            char *cur = tui_editor_get_expanded_text(u->editor);
+            if (!*cur || str_eq(cur, msgs.v[0])) {
+                char *list = ui_format_queue_shorthand(&msgs);
+                tui_editor_set_text(u->editor, list);
+                free(list);
+            }
+            free(cur);
+            i = msgs.n;
+        }
     }
     for (; i < msgs.n; i++) agent_follow_up(u->app->agent, msg_user_text(msgs.v[i]));
     ui_queue_refresh(u);
@@ -718,6 +730,13 @@ bool iq_escape(ui_t *u) {
 /* ---------- run boundaries ---------- */
 
 void iq_user_message_start(ui_t *u, const json_t *msg) {
+    msgview_t *irc = str_eq(json_get_str(msg, "role"), "user") ? ui_parent_irc_view(msg) : NULL;
+    if (irc) { /* a parent steer: its sender and body, not the model-facing envelope (omp db90c0d96e) */
+        toolcard_break_group(u);
+        add_view(u, irc);
+        ui_queue_refresh(u);
+        return;
+    }
     if (!agent_msg_user_authored(msg)) return;
     if (str_eq(json_get_str(msg, "customType"), "skill-prompt")) { /* SkillMessageComponent */
         toolcard_break_group(u);

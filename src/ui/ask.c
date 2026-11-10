@@ -48,6 +48,7 @@ typedef struct {
 typedef struct {
     bool *sel; /* per option */
     char *custom;
+    char *draft; /* customDraft: an unsubmitted custom answer a cancelled prompt left; prefills the next one */
     char *note;
     int note_row; /* -1 none; option index; nopt = the Other row */
     int cursor, scroll;
@@ -64,7 +65,6 @@ typedef struct ask_view {
     int submit_scroll, body_rows, content_width;
     bool can_page, closed, expanded, hidden, header_exp, desc_exp;
     int stable_key_w, stable_key_rows, stable_key_exp, stable_total;
-    int just_q, just_row; /* just_q < 0: none */
     /* countdown (ask.timeout) */
     int64_t timeout_ms, deadline;
     int remaining; /* -1: no countdown */
@@ -780,23 +780,34 @@ static void open_prompt(ask_view_t *v, int kind, size_t qi, int row, const char 
     request(v);
 }
 
-static void advance(ask_view_t *v, int answered_row);
+static void advance(ask_view_t *v);
 static void finish_submit(ask_view_t *v);
 
-static void close_prompt(ask_view_t *v, const char *text) {
+/* `text` is the submitted value; NULL for a cancel, which leaves `draft` (the editor's text) behind */
+static void close_prompt(ask_view_t *v, const char *text, const char *draft) {
     int kind = v->pkind;
     size_t qi = v->pq;
     int row = v->prow;
     tui_component_destroy(&v->ped->base);
     v->ped = NULL;
     v->pkind = 0;
-    if (!text || v->closed) {
+    if (v->closed) {
         request(v);
         return;
     }
     aq_t *q = &v->q[qi];
     ast_t *s = &v->st[qi];
+    if (!text) { /* a cancelled custom answer keeps its draft for the next Other prompt; a note keeps nothing */
+        if (kind == 1) {
+            free(s->draft);
+            s->draft = draft && !blank(draft) ? xstrdup(draft) : NULL;
+        }
+        request(v);
+        return;
+    }
     if (kind == 1) {
+        free(s->draft);
+        s->draft = NULL;
         if (blank(text)) {
             free(s->custom);
             s->custom = NULL;
@@ -811,13 +822,12 @@ static void close_prompt(ask_view_t *v, const char *text) {
             if (q->multi && v->nq == 1) {
                 v->active_tab = submit_tab(v);
                 v->submit_scroll = 0;
-            } else advance(v, row);
+            } else advance(v);
         }
     } else {
         free(s->note);
         s->note = xstrdup(text);
         s->note_row = row;
-        v->just_q = -1; /* the note went to it: a later question's note goes to that question's row */
     }
     request(v);
 }
@@ -906,12 +916,9 @@ static void finish(ask_view_t *v, json_t *answers) {
 
 static void finish_submit(ask_view_t *v) { finish(v, build_answers(v)); }
 
-static void advance(ask_view_t *v, int answered_row) {
+/* move past the current question (submits a single-question dialog) */
+static void advance(ask_view_t *v) {
     size_t cur = cur_q(v);
-    if (answered_row >= 0 && v->nq > 1) {
-        v->just_q = (int)cur;
-        v->just_row = answered_row;
-    } else v->just_q = -1;
     if (v->nq == 1) {
         finish_submit(v);
         return;
@@ -959,13 +966,13 @@ static void countdown_reset(ask_view_t *v) {
 static void commit_row(ask_view_t *v, aq_t *q, ast_t *s, int row, bool enter) {
     if (row >= (int)q->nopt) {
         char *title = xstrdup("Custom answer");
-        open_prompt(v, 1, cur_q(v), row, title, s->custom);
+        open_prompt(v, 1, cur_q(v), row, title, s->draft ? s->draft : s->custom); /* a cancelled edit's draft wins */
         free(title);
         return;
     }
     if (q->multi) {
         if (enter) {
-            advance(v, s->sel[row] ? row : -1);
+            advance(v);
             return;
         }
         if (label_selected(q, s, (size_t)row)) {
@@ -981,17 +988,13 @@ static void commit_row(ask_view_t *v, aq_t *q, ast_t *s, int row, bool enter) {
     free(s->custom);
     s->custom = NULL;
     if (s->note_row >= 0 && s->note_row != row) clear_note(s);
-    advance(v, row);
+    advance(v);
 }
 
 static void press_note(ask_view_t *v) {
     if (on_submit_tab(v) || !v->nq) return;
     size_t qi = cur_q(v);
-    int row = v->st[qi].cursor;
-    if (v->just_q >= 0 && (size_t)v->just_q != qi && !is_answered(&v->q[qi], &v->st[qi])) {
-        qi = (size_t)v->just_q;
-        row = v->just_row;
-    }
+    int row = v->st[qi].cursor; /* the highlighted row of the question shown */
     ast_t *s = &v->st[qi];
     char *title = xasprintf("Note for %s", row_label(&v->q[qi], row));
     open_prompt(v, 2, qi, row, title, s->note_row == row ? s->note : NULL);
@@ -1007,12 +1010,14 @@ static bool prompt_key(ask_view_t *v, const tui_key_t *k) {
     if (tui_key_matches(k, "ctrl+q") || tui_key_matches(k, "ctrl+enter") || tui_key_matches(k, "enter") ||
         tui_key_matches(k, "return")) {
         char *t = tui_editor_get_expanded_text(v->ped);
-        close_prompt(v, t);
+        close_prompt(v, t, NULL);
         free(t);
         return true;
     }
     if (tui_key_matches(k, "escape")) {
-        close_prompt(v, NULL);
+        char *d = tui_editor_get_expanded_text(v->ped);
+        close_prompt(v, NULL, d);
+        free(d);
         return true;
     }
     if (tui_kb(k, "app.editor.external")) { /* HookEditorComponent #openExternalEditor */
@@ -1034,8 +1039,6 @@ static bool ask_key(tui_component_t *c, const tui_key_t *k) {
     if (v->closed) return true;
     if (v->pkind) return prompt_key(v, k);
     countdown_reset(v);
-    if (!(k->kind == TUI_KEY_CHAR && (k->codepoint == 'n' || k->codepoint == 'N') && !(k->mods & ~TUI_MOD_SHIFT)))
-        v->just_q = -1;
     if (tui_kb(k, "tui.select.cancel")) {
         finish(v, NULL);
         return true;
@@ -1182,6 +1185,7 @@ static void ask_destroy(tui_component_t *c) {
         free(q->header);
         free(v->st[i].sel);
         free(v->st[i].custom);
+        free(v->st[i].draft);
         free(v->st[i].note);
     }
     free(v->q);
@@ -1247,7 +1251,6 @@ void ui_ask_dialog_show(ui_t *u, const json_t *questions, ui_ask_done_fn done, v
     v->u = u;
     v->done = done;
     v->ud = ud;
-    v->just_q = -1;
     v->remaining = -1;
     load_questions(v, questions);
     double secs = settings_num("ask.timeout", 0);

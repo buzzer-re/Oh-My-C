@@ -27,7 +27,7 @@
 #include <pthread.h>
 
 
-typedef enum { MV_USER, MV_ASSISTANT, MV_TOOL, MV_NOTICE, MV_BASH, MV_CUSTOM, MV_SUMMARY, MV_TTSR, MV_TODO, MV_SKILL } mv_kind_t;
+typedef enum { MV_USER, MV_ASSISTANT, MV_TOOL, MV_NOTICE, MV_BASH, MV_CUSTOM, MV_SUMMARY, MV_TTSR, MV_TODO, MV_SKILL, MV_IRC } mv_kind_t;
 
 typedef struct {
     tui_component_t base;
@@ -185,6 +185,8 @@ void push_wrapped(strvec_t *out, const char *text, int width, int indent);
  * lead_gap also puts a blank row above the first block */
 tui_container_t *ui_transcript_new(bool lead_gap);
 msgview_t *mv_new(mv_kind_t k);
+/* a parent-agent IRC steer (message with `parentIrc`) as an IRC card; NULL when `m` has none */
+msgview_t *ui_parent_irc_view(const json_t *m);
 void add_view(ui_t *u, msgview_t *v);
 /* "info" -> dim status line (consecutive ones update in place), "warning" -> "Warning: …",
  * "error" -> "Error: …"; "Injecting rule: …" becomes a TTSR notice, "Retrying (n/m) in Ns…" the retry row */
@@ -260,6 +262,10 @@ void toolcard_frames_reset(void); /* a session switch drops the cached backgroun
 void toolcard_preview(ui_t *u, const char *id, const char *name, const json_t *args);
 /* omp setArgsComplete at message_end: the assistant message's tool-call arguments are final */
 void toolcard_args_complete(ui_t *u, const json_t *msg);
+/* a new assistant message starts streaming: forget the previous message's previews */
+void toolcard_stream_begin(void);
+/* a provider replay restarted the streaming message: drop previews of tool calls it no longer holds */
+void toolcard_retract_abandoned(ui_t *u, const json_t *partial);
 
 /* statusline.c */
 tui_component_t *ui_status_new(ui_t *u);   /* standalone bottom bar (pi/borderless/claude/rule/field/rail) */
@@ -299,6 +305,7 @@ tui_component_t *ui_queue_band_new(ui_t *u); /* "Steering · N" / "After yield �
 void ui_queue_refresh(ui_t *u);              /* re-read the agent + compaction queues into the band */
 const char *ui_queue_shorthand(const char *text); /* body after a leading `->` / `=>`, else NULL */
 void ui_split_queued_messages(const char *text, strvec_t *out); /* queue-input.ts splitQueuedMessages */
+char *ui_format_queue_shorthand(const strvec_t *msgs);           /* queue-input.ts formatQueueShorthand */
 
 /* agenthub.c - subagent HUD, Agent Hub (/hub, Alt+A, ←←), transcript viewer, session focus */
 tui_component_t *ui_subagent_hud_new(ui_t *u);

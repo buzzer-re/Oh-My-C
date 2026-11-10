@@ -1,13 +1,33 @@
 /* tc_debug.c - debug (DAP) card (port of omp tools/debug.ts). */
 #include "ui/tools/tc.h"
 
+#include "tools/outsink.h"
 #include "tui/ansi.h"
+
+/* sanitizeDebugArg: model-authored arg text is untrusted: strip ANSI escapes and control characters, then
+ * singleLine (tab expansion, line-break runs collapsed to one space) */
+static char *sanitize_arg(const char *v) {
+    char *s = out_sanitize(v ? v : "", strlen(v ? v : ""), NULL);
+    char *t = tc_replace_tabs(s);
+    free(s);
+    sb_t b = SB_INIT;
+    for (const char *p = t; *p; p++) {
+        if (*p == '\r' || *p == '\n') {
+            while (p[1] == '\r' || p[1] == '\n') p++;
+            sb_putc(&b, ' ');
+        } else sb_putc(&b, *p);
+    }
+    free(t);
+    return sb_detach(&b);
+}
 
 static char *underscores_to_spaces(const char *s) {
     char *r = xstrdup(s);
     for (char *p = r; *p; p++)
         if (*p == '_') *p = ' ';
-    return r;
+    char *c = sanitize_arg(r);
+    free(r);
+    return c;
 }
 
 static char *summarize_call(const json_t *a) {
@@ -26,7 +46,9 @@ static char *summarize_call(const json_t *a) {
             if (json_get_str(a, KEYS[i])) target = xstrdup(json_get_str(a, KEYS[i]));
     char *r;
     if (target) {
-        char *t = tui_truncate_to_width(target, 60, NULL);
+        char *st = sanitize_arg(target);
+        char *t = tui_truncate_to_width(st, 60, NULL);
+        free(st);
         r = xasprintf("%s %s", action, t);
         free(t);
         free(action);

@@ -153,6 +153,7 @@ bool toolcard_group_open(const msgview_t *v) { return v && v == g_read_group; }
 
 /* tool calls whose arguments are still streaming: id -> pending card (omp draws the call before execution) */
 static hmap_t g_preview;
+static strvec_t g_stream_ids; /* tool call ids previewed by the assistant message streaming now */
 
 void toolcard_preview(ui_t *u, const char *id, const char *name, const json_t *args) {
     if (!id || !*id || !name || !*name || str_eq(name, "read")) return;
@@ -177,7 +178,41 @@ void toolcard_preview(ui_t *u, const char *id, const char *name, const json_t *a
     json_set_bool(state_of(v), "partial", true);
     add_view(u, v);
     hmap_put(&g_preview, id, v);
+    strvec_push(&g_stream_ids, id);
     if (streams_body(name)) live_add(v); /* the card header's spinner animates while the body streams */
+}
+
+void toolcard_stream_begin(void) { strvec_free(&g_stream_ids); }
+
+/* #retractStreamedToolPreviews: a provider replay restarts the message and can abandon previews without ever
+ * executing them; no result would settle those cards, so drop the ones the restarted partial no longer holds */
+void toolcard_retract_abandoned(ui_t *u, const json_t *partial) {
+    size_t w = 0;
+    for (size_t i = 0; i < g_stream_ids.n; i++) {
+        const char *id = g_stream_ids.v[i];
+        bool held = false;
+        const json_t *blk;
+        json_arr_foreach(json_get_arr(partial, "content"), k, blk) held |= str_eq(json_get_str(blk, "type"), "toolCall") &&
+                                                                          str_eq(json_get_str(blk, "id"), id);
+        msgview_t *v = held ? NULL : hmap_get(&g_preview, id);
+        if (held || !v) {
+            g_stream_ids.v[w++] = g_stream_ids.v[i];
+            continue;
+        }
+        hmap_del(&g_preview, id);
+        for (size_t j = 0; j < g_live.n; j++)
+            if (g_live.v[j] == v) {
+                memmove(&g_live.v[j], &g_live.v[j + 1], (g_live.n - j - 1) * sizeof *g_live.v);
+                g_live.n--;
+                break;
+            }
+        if (view_attached(v)) {
+            tui_container_remove(u->chat, &v->base);
+            tui_component_destroy(&v->base);
+        }
+        free(g_stream_ids.v[i]);
+    }
+    g_stream_ids.n = w;
 }
 
 void toolcard_args_complete(ui_t *u, const json_t *msg) {

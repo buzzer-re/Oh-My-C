@@ -86,7 +86,9 @@ static void ui_apply_partial(void *ud) {
         u->cur_assistant->msg = json_obj();
         u->cur_assistant->streaming = true;
         add_view(u, u->cur_assistant);
+        toolcard_stream_begin();
     }
+    toolcard_retract_abandoned(u, p); /* omp bfa62bcba1: a provider replay abandoned previewed tool calls */
     json_free(u->cur_assistant->msg);
     u->cur_assistant->msg = p;
     u->cur_assistant->dirty = true;
@@ -464,6 +466,7 @@ static void worker_done(void *ud) {
     u->worker_running = false;
     u->wake_suppressed = false; /* a turn ended on its own since the interrupt */
     ui_signals_settle();
+    ui_signals_settle_startup(); /* a startup prompt whose run reported nothing goes back to idle */
     iq_flush_deferred(u);
     plan_exec_resume(u);
     /* deferred `!cmd` results, a pending /compact, queued input left behind by an interrupted run */
@@ -1223,6 +1226,7 @@ static void *plan_exec_main(void *p) {
         free(instr);
     }
     app_set_plan_reference(a, x->path);
+    app_plan_record_approval(a, x->path);
     char *aerr = NULL;
     char *saved = app_plan_autosave(a, x->title, x->content, &aerr);
     if (saved) {
@@ -1648,6 +1652,9 @@ static bool plan_has_draft(app_t *a) {
 static void plan_exit_confirmed(void *ud, bool yes) {
     ui_t *u = ud;
     if (!yes || !u->app->plan_mode) return;
+    /* an open review must not outlive the plan mode it approves: a later pick would autosave and dispatch the plan
+     * while plan mode is paused (omp 660900d90e) */
+    if (g_pr.open || g_pr.exec_pending) pr_finish(u, NULL);
     if (u->worker_running) app_abort(u->app);
     app_exit_plan_mode(u->app, true);
     add_notice(u, "info", "Plan mode paused.");
@@ -3367,6 +3374,7 @@ static void initial_prompt_cb(void *ud) {
         free(x);
     }
     if (g_start && g_start->more && g_start->more->n) ui_queue_refresh(j->u);
+    if (!j->u->worker_running) ui_signals_settle_startup(); /* rejected before any run */
     free(j->text);
     free(j);
 }
@@ -3528,6 +3536,11 @@ int run_interactive_mode(app_t *a, const char *initial) {
     ui_mcp_install(&u);
     app_set_plan_review_ui(a, true);
     g_pr.u = &u;
+    /* startupRun: setup scenes and the worktree.onStart `ask` question wait on the user before any prompt runs,
+     * so they keep the boot `idle` */
+    bool fresh = !a->opts.resume && !a->opts.continue_recent && !a->opts.fork && !(g_start && g_start->resume_picker);
+    ui_signals_set_startup_run(initial && !ui_setup_pending(a->opts.resume || a->opts.continue_recent) &&
+                               !(fresh && str_eq(settings_str("worktree.onStart", "off"), "ask")));
     tui_post(u.tui, signals_init_cb, &u); /* the terminal title / program status claim the terminal first */
     job_t *init_job = NULL;
     if (initial) {
@@ -3544,8 +3557,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     }
     if (g_start && g_start->resume_picker) tui_post(u.tui, startup_picker_cb, &u);
     /* worktree.onStart applies to fresh launches only */
-    if (!a->opts.resume && !a->opts.continue_recent && !a->opts.fork && !(g_start && g_start->resume_picker))
-        tui_post(u.tui, wt_onstart_cb, &u);
+    if (fresh) tui_post(u.tui, wt_onstart_cb, &u);
     if (g_start && g_start->restore) tui_post(u.tui, restore_cb, &u);
     if (g_start && g_start->notice) add_notice(&u, "info", g_start->notice); /* main.ts notifs */
     /* first-run setup wizard (omp main.ts: stale setupVersion, not resuming, TTY); the welcome intro

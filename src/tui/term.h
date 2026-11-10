@@ -25,6 +25,7 @@ typedef struct tui_term {
     int in_fd, out_fd;
     bool is_tty;      /* in_fd and out_fd are terminals */
     bool raw;         /* raw mode currently active */
+    bool cooked_typeahead; /* raw attached over a cooked tty: the next read holds line-buffered typeahead */
     bool started;     /* protocols enabled by tui_term_start */
     struct termios saved;
     int cols, rows;
@@ -47,6 +48,10 @@ void tui_term_free(tui_term_t *t); /* restores the terminal first */
 /* Raw mode (termios); no-ops for non-ttys. */
 int tui_term_enter_raw(tui_term_t *t);
 void tui_term_leave_raw(tui_term_t *t);
+/* Restore the submit Enter of keystrokes the kernel buffered in cooked mode before raw input attached: ICRNL
+ * folded it into LF, which reads as Shift+Enter. The line break ending the typeahead (its ESC-free prefix)
+ * becomes CR, in place; CRLF is left alone. (omp terminal.ts restoreCookedEnter) */
+void tui_term_restore_cooked_enter(char *data, size_t n);
 /* Enter raw mode, enable bracketed paste, query kitty keyboard protocol, hide cursor. */
 void tui_term_start(tui_term_t *t);
 /* Undo everything tui_term_start did (pop kitty, disable modes, show cursor, restore termios). */

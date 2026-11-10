@@ -1027,6 +1027,13 @@ void tui_feed_input(tui_t *t, const char *data, size_t n) {
     process_keys(t, mono_ms());
 }
 
+/* The first read after raw input attached over a cooked tty starts with the typeahead (#17820). */
+static void take_typeahead(tui_term_t *tm, char *buf, size_t n) {
+    if (!tm->cooked_typeahead || n == 0) return;
+    tm->cooked_typeahead = false;
+    tui_term_restore_cooked_enter(buf, n);
+}
+
 /* Ask the terminal where the cursor is (CPR) so inline content starting mid-screen is
  * tracked correctly. Other bytes received meanwhile are kept as input. */
 static int query_cursor_row(tui_t *t) {
@@ -1045,6 +1052,7 @@ static int query_cursor_row(tui_t *t) {
         if (poll(&p, 1, left) <= 0) break;
         ssize_t r = read(tm->in_fd, buf + len, sizeof buf - 1 - len);
         if (r <= 0) break;
+        take_typeahead(tm, buf + len, (size_t)r);
         len += (size_t)r;
         buf[len] = 0;
         /* find ESC [ digits ; digits R */
@@ -1220,6 +1228,7 @@ bool tui_run_once(tui_t *t, int timeout_ms) {
             char buf[65536];
             ssize_t r = read(t->term->in_fd, buf, sizeof buf);
             if (r > 0) {
+                take_typeahead(t->term, buf, (size_t)r);
                 t->input_render_pending = true;
                 tui_keydec_feed(&t->dec, buf, (size_t)r);
             } else if (r == 0 || (errno != EINTR && errno != EAGAIN)) {

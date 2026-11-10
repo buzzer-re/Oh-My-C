@@ -226,6 +226,8 @@ void ui_show_selector_over(ui_t *u, tui_component_t *comp, tui_component_t *focu
 void ui_close_nested_selector(ui_t *u);
 tui_component_t *ui_selector_top(const ui_t *u);
 bool ui_selector_open(const ui_t *u);
+/* focusActiveEditorArea: focus the editor-slot owner (an open selector, else the composer) */
+void ui_focus_editor_area(ui_t *u);
 
 void ui_overlay_model(ui_t *u); /* modelhub.c: the Models hub */
 void ui_agents_hub_open(ui_t *u); /* agentshub.c: the /agents hub (agent definitions) */

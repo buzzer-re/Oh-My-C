@@ -18,8 +18,14 @@ static tui_component_t *g_sel;
 static bool g_editor_hidden, g_status_hidden;
 /* a selector parked under a nested one (SelectorController.showSelector restores its previous children) */
 static tui_component_t *g_under, *g_under_focus;
+static tui_component_t *g_sel_focus; /* what took input when g_sel opened */
 
 bool ui_selector_open(const ui_t *u) { return g_sel != NULL; }
+
+/* focusActiveEditorArea: return input to the current editor-slot owner after a fullscreen overlay closes */
+void ui_focus_editor_area(ui_t *u) {
+    tui_set_focus(u->tui, g_sel ? (g_sel_focus ? g_sel_focus : g_sel) : &u->editor->base);
+}
 
 static size_t root_index(ui_t *u, tui_component_t *c) {
     tui_container_t *root = tui_root(u->tui);
@@ -32,12 +38,14 @@ void ui_close_selector(ui_t *u) {
     if (!g_sel) return;
     tui_component_t *c = g_sel;
     g_sel = NULL;
+    g_sel_focus = NULL;
     tui_container_remove(tui_root(u->tui), c);
     tui_component_destroy(c);
     if (g_under) { /* a nested selector closes back to the one it covered */
         g_sel = g_under;
         g_under = NULL;
         g_sel->hidden = false;
+        g_sel_focus = g_under_focus;
         tui_set_focus(u->tui, g_under_focus);
         g_under_focus = NULL;
         tui_request_render(u->tui);
@@ -64,6 +72,7 @@ void ui_show_selector_over(ui_t *u, tui_component_t *comp, tui_component_t *focu
     g_under_focus = tui_focus(u->tui);
     g_under->hidden = true;
     g_sel = comp;
+    g_sel_focus = focus ? focus : comp;
     tui_container_insert(tui_root(u->tui), root_index(u, g_under) + 1, comp);
     tui_attach(u->tui, comp);
     tui_set_focus(u->tui, focus ? focus : comp);
@@ -74,6 +83,7 @@ void ui_show_selector(ui_t *u, tui_component_t *comp, tui_component_t *focus) {
     ui_close_nested_selector(u);
     ui_close_selector(u);
     g_sel = comp;
+    g_sel_focus = focus ? focus : comp;
     g_editor_hidden = u->editor->base.hidden;
     g_status_hidden = u->status ? u->status->hidden : false;
     tui_container_insert(tui_root(u->tui), root_index(u, &u->editor->base) + 1, comp);

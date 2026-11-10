@@ -184,6 +184,8 @@ void tc_debug(const tc_call_t *c, int width, strvec_t *out);
 void tc_task(const tc_call_t *c, int width, strvec_t *out);
 void tc_eval(const tc_call_t *c, int width, strvec_t *out);
 void tc_wait(const tc_call_t *c, int width, strvec_t *out);
+/* a parent-agent IRC steer as an incoming IRC card (buildParentIrcMessageCard) */
+void tc_irc_incoming_card(const char *from, const char *body, const char *age, bool expanded, int width, strvec_t *out);
 void tc_github(const tc_call_t *c, int width, strvec_t *out);
 void tc_lsp(const tc_call_t *c, int width, strvec_t *out);
 

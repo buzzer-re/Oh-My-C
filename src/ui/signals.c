@@ -191,6 +191,8 @@ static struct {
     char *reported;
     VEC(blocker_t) blockers;
     json_t *ended; /* the last agent_end's messages, not yet settled */
+    bool startup_run;  /* set before init: a command-line prompt runs once startup ends */
+    bool startup_hold; /* the boot `working` that prompt holds until its run reports (run-status.ts startup) */
 } S = {.style = "braille"};
 
 static tui_term_t *term(void) {
@@ -287,6 +289,7 @@ static void clear_report(void) {
 }
 
 void ui_signals_run_status(run_state_t state, const char *kind, const char *msg) {
+    S.startup_hold = false;
     S.status = state;
     free(S.kind);
     free(S.msg);
@@ -375,6 +378,11 @@ void ui_signals_init(ui_t *u) {
     S.disposed = false;
     S.style = norm_style(settings_str("tui.titleSpinner", "braille"));
     S.interval = tui_spinner_interval();
+    /* initProgramStatus({startupRun}): the first report is `working`, not the `idle` a supervisor waiting on
+     * this terminal would take as finished before the prompt even starts; the title follows now */
+    S.startup_hold = S.startup_run;
+    S.startup_run = false;
+    if (S.startup_hold) S.status = S.title_state = RUN_WORKING;
     /* setTerminalTitleStateEnabled: emits before the session label is known (`π >`) */
     if (S.title_state == RUN_WORKING && title_state_enabled()) start_spinner();
     emit_title();
@@ -646,6 +654,14 @@ void ui_signals_run_settled(const json_t *run_messages, bool interrupted) {
 void ui_signals_agent_end(const json_t *run_messages) {
     json_free(S.ended);
     S.ended = run_messages ? json_clone(run_messages) : json_arr();
+}
+
+void ui_signals_set_startup_run(bool on) { S.startup_run = on; }
+
+void ui_signals_settle_startup(void) {
+    if (!S.startup_hold) return;
+    S.startup_hold = false;
+    ui_signals_run_status(RUN_IDLE, NULL, NULL);
 }
 
 void ui_signals_settle(void) {

@@ -187,6 +187,18 @@ static void fmt_time(int64_t ms, bool date, char *buf, size_t n) {
     else snprintf(buf, n, "%02d:%02d", tm.tm_hour, tm.tm_min);
 }
 
+/* #listStamp: the time for a question asked today, its date (and year, if not this one) before */
+static void list_stamp(int64_t ms, int64_t now_ms_, char *buf, size_t n) {
+    static const char *const MON[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    time_t t = (time_t)(ms / 1000), nt = (time_t)(now_ms_ / 1000);
+    struct tm tm, now;
+    localtime_r(&t, &tm);
+    localtime_r(&nt, &now);
+    if (tm.tm_year == now.tm_year && tm.tm_yday == now.tm_yday) snprintf(buf, n, "%02d:%02d", tm.tm_hour, tm.tm_min);
+    else if (tm.tm_year == now.tm_year) snprintf(buf, n, "%s %d", MON[tm.tm_mon % 12], tm.tm_mday);
+    else snprintf(buf, n, "%s %d, %d", MON[tm.tm_mon % 12], tm.tm_mday, tm.tm_year + 1900);
+}
+
 static void md_lines(const char *text, int width, strvec_t *out) {
     tui_md_opts_t o;
     tui_md_opts_default(&o);
@@ -1105,6 +1117,9 @@ struct hist {
     char *detail_id;
     bool detail_dirty;
     bool inject_on; /* `btw.inject` hooks: given only while it is on for this view */
+    /* the last frame's body geometry, for wheel hit-testing: first body row, height, split, left pane columns */
+    int body_top, body_h_last, left_col, left_w;
+    bool wide;
 };
 
 static const struct {
@@ -1288,9 +1303,39 @@ static bool h_scroll_detail(hist_t *h, const tui_key_t *k, int page) {
 
 static int g_page_rows = 10;
 
+/* #routeWheel: a wheel notch over the body follows the pointer: over the history list it moves the selection,
+ * over the reader it scrolls the answer three rows; a narrow frame follows the one pane it shows */
+static void hist_mouse(hist_t *h, const tui_key_t *k) {
+    const char *s = k->text;
+    int button, col, row;
+    char fin = 0;
+    if (!s || strncmp(s, "\x1b[<", 3) || sscanf(s + 3, "%d;%d;%d%c", &button, &col, &row, &fin) != 4 ||
+        (fin != 'M' && fin != 'm'))
+        return;
+    int wheel = (button & 64) && !(button & 2) ? ((button & 1) ? 1 : -1) : 0;
+    if (!wheel) return;
+    int line = row - 1 - h->body_top;
+    col -= 1;
+    if (line < 0 || line >= h->body_h_last) return;
+    bool over_list = h->wide ? col >= h->left_col && col < h->left_col + h->left_w : h->focus == 0;
+    if (over_list) {
+        /* a follow-up composer holds the record it was opened for */
+        if (h->composing) return;
+        h_select(h, h_selected_index(h) + wheel);
+    } else {
+        h->detail_scroll = MAX(0, h->detail_scroll + wheel * 3);
+        h->follow_latest = false;
+    }
+    tui_request_render(h->c->u->tui);
+}
+
 static bool hist_key(tui_component_t *cp, const tui_key_t *k) {
     hist_t *h = (hist_t *)cp;
     btw_ctl_t *c = h->c;
+    if (k->kind == TUI_KEY_MOUSE) { /* SGR reports reach this page while it holds focus (tui.mouse) */
+        hist_mouse(h, k);
+        return true;
+    }
     if (h->composing) {
         if (tui_kb(k, "tui.input.submit") || tui_key_matches(k, "enter")) h_submit(h);
         else if (tui_key_matches(k, "escape")) {
@@ -1465,13 +1510,14 @@ static void h_render_list(hist_t *h, int width, int height, strvec_t *out) {
     bool bar = total > height && width > 1;
     int cw = MAX(0, width - (bar ? 1 : 0));
     strvec_t rows = {0};
+    int64_t now = now_ms();
     for (int i = h->list_scroll; i < MIN(n, h->list_scroll + h->list_height); i++) {
         json_t *rec = json_at(h->records, (size_t)i);
         bool selected = i == sel;
         size_t si = status_ix(btw_latest_status(rec));
         char *cursor = selected ? sfg(h->focus == 0 ? TUI_TC_ACCENT : TUI_TC_MUTED, tui_sym("nav.cursor")) : xstrdup(" ");
-        char tm[16];
-        fmt_time(json_get_int(rec, "createdAt", 0), false, tm, sizeof tm);
+        char tm[32];
+        list_stamp(json_get_int(rec, "createdAt", 0), now, tm, sizeof tm);
         char *time = sfg(TUI_TC_DIM, tm), *badge = sfg(STATUS[si].color, STATUS[si].label);
         char *prefix = xasprintf("%s %s %s ", cursor, time, badge);
         char *question = display_line(btw_topic_label(rec));
@@ -1617,6 +1663,12 @@ static void hist_render(tui_component_t *cp, int width, strvec_t *out) {
         if (h->follow_latest) h->detail_scroll = MAX(0, (int)h->detail.n - body_h);
         ui_scroll_view(&h->detail, body_h, &h->detail_scroll, dw, &detail);
     }
+    /* wheel hit-testing reads the geometry of the frame it already shows */
+    h->body_top = framed ? 2 : height >= 3 ? 1 : 0;
+    h->wide = wide;
+    h->body_h_last = body_h;
+    h->left_col = 2;
+    h->left_w = lw;
     strvec_t lines = {0};
     if (framed) {
         strvec_push_own(&lines, ui_box_top(width, "BTW history"));
@@ -1708,6 +1760,7 @@ static hist_t *hist_show(btw_ctl_t *c) {
     hide_inline(c);
     hist_t *h = xcalloc(1, sizeof *h);
     tui_component_init(&h->base, &HIST_VT);
+    h->base.wants_mouse = true;
     h->c = c;
     h->records = history_records(c);
     h->detail_dirty = true;
@@ -1733,7 +1786,7 @@ static void hist_close(btw_ctl_t *c) {
     ui_t *u = c->u;
     tui_overlay_hide(u->tui, &h->base);
     tui_alt_screen(u->tui, false);
-    tui_set_focus(u->tui, &u->editor->base);
+    ui_focus_editor_area(u);
     tui_component_destroy(&h->base);
     btw_req_t *r = c->active;
     if (r && is_active(c, r) && str_eq(latest_status(r), "running")) {

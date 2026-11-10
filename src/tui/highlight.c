@@ -24,7 +24,7 @@ static const tui_tc_t HSLOT[] = {TUI_TC_SYNTAX_COMMENT,  TUI_TC_SYNTAX_KEYWORD, 
                                  TUI_TC_SYNTAX_TYPE,     TUI_TC_SYNTAX_OPERATOR, TUI_TC_SYNTAX_PUNCTUATION,
                                  TUI_TC_TOOL_DIFF_ADDED, TUI_TC_TOOL_DIFF_REMOVED};
 
-typedef enum { F_C, F_JS, F_PY, F_SH, F_JSON, F_YAML, F_TOML, F_SQL, F_DIFF, F_RUBY, F_LUA, F_HTML, F_CSS } family_t;
+typedef enum { F_C, F_JS, F_PY, F_SH, F_JSON, F_YAML, F_TOML, F_SQL, F_DIFF, F_RUBY, F_LUA, F_HTML, F_CSS, F_REGEX } family_t;
 
 typedef struct {
     const char *names; /* space separated aliases, padded with spaces */
@@ -42,6 +42,8 @@ typedef struct {
 } lang_t;
 
 static const lang_t LANGS[] = {
+    /* syntect's bundled RegExp.sublime-syntax: its `re` extension and its name (grep headers pass the name) */
+    {" re regular expression ", F_REGEX, "", "", "", "", "", "", "", false, false, false},
     {" c h objc objective-c ", F_C,
      " if else for while do switch case default break continue return goto sizeof typedef struct union enum static "
      "extern const volatile register inline restrict auto signed unsigned _Bool _Atomic _Noreturn alignof ",
@@ -826,6 +828,346 @@ static void lex_diff(em_t *e, const char *s, size_t n) {
     }
 }
 
+/* ---------- Regular Expression (RegExp.sublime-syntax under omp's scope mapping) ----------
+ * Observed against omp's native highlighter: anchors, class escapes, `.`, quantifiers, `|`, group parens and set
+ * brackets are keyword; group-type marks (`?:` `?=` `?!` `?<=` `?<!` `?>`), set ranges and POSIX class names are
+ * number; other escapes are string; name delimiters and comment groups are punctuation; group / backreference names
+ * and numbers are variable; comment text is comment. */
+
+static bool rx_class_escape(char c) { return c && strchr("bBAzZGdDwWsShHvVRXK", c) != NULL; }
+
+static bool rx_word(char c) { return isalnum((unsigned char)c) || c == '_'; }
+
+/* `<name>` / `'name'` / `{name}`: punctuation, variable, punctuation; returns the bytes taken (0: no match) */
+static size_t rx_name_ex(em_t *e, const char *s, size_t n, size_t i, bool allow_num, bool emit);
+static size_t rx_name(em_t *e, const char *s, size_t n, size_t i, bool allow_num) {
+    return rx_name_ex(e, s, n, i, allow_num, true);
+}
+
+static size_t rx_name_ex(em_t *e, const char *s, size_t n, size_t i, bool allow_num, bool emit) {
+    if (i >= n) return 0;
+    char open = s[i], close = open == '<' ? '>' : open == '{' ? '}' : open == '\'' ? '\'' : 0;
+    if (!close) return 0;
+    size_t j = i + 1;
+    if (allow_num && j < n && (s[j] == '-' || s[j] == '+')) j++;
+    size_t k = j;
+    while (k < n && rx_word(s[k])) k++;
+    if (k == j || k >= n || s[k] != close) return 0;
+    if (!emit) return k + 1 - i;
+    em(e, H_PUNCT, s + i, 1);
+    em(e, H_VARIABLE, s + i + 1, k - i - 1);
+    em(e, H_PUNCT, s + k, 1);
+    return k + 1 - i;
+}
+
+/* a quantifier at s[i]: `*` `+` `?` or `{n}` `{n,}` `{n,m}`, then an optional lazy `?` / possessive `+` */
+static size_t rx_quant(const char *s, size_t n, size_t i) {
+    size_t j = i;
+    if (s[i] == '*' || s[i] == '+' || s[i] == '?') j = i + 1;
+    else if (s[i] == '{') {
+        size_t k = i + 1, d = 0;
+        while (k < n && isdigit((unsigned char)s[k])) k++, d++;
+        if (!d) return 0;
+        if (k < n && s[k] == ',') {
+            k++;
+            while (k < n && isdigit((unsigned char)s[k])) k++;
+        }
+        if (k >= n || s[k] != '}') return 0;
+        j = k + 1;
+    } else return 0;
+    if (j < n && (s[j] == '?' || s[j] == '+')) j++;
+    return j - i;
+}
+
+/* one escape outside or inside a set; returns its length */
+static size_t rx_escape(em_t *e, const char *s, size_t n, size_t i, bool in_set) {
+    if (i + 1 >= n) { /* a trailing backslash escapes nothing */
+        em(e, H_NONE, s + i, 1);
+        return 1;
+    }
+    char c = s[i + 1];
+    if (!in_set && c >= '1' && c <= '9') { /* backreference */
+        size_t k = i + 1;
+        while (k < n && isdigit((unsigned char)s[k])) k++;
+        em(e, H_KEYWORD, s + i, 1);
+        em(e, H_VARIABLE, s + i + 1, k - i - 1);
+        return k - i;
+    }
+    if (c == '0') { /* octal */
+        size_t k = i + 2;
+        while (k < n && k < i + 4 && s[k] >= '0' && s[k] <= '7') k++;
+        em(e, H_STRING, s + i, k - i);
+        return k - i;
+    }
+    if (!in_set && (c == 'k' || c == 'g')) {
+        em(e, H_KEYWORD, s + i, 2);
+        size_t t = rx_name(e, s, n, i + 2, c == 'g');
+        if (!t && c == 'g') {
+            size_t k = i + 2;
+            if (k < n && (s[k] == '-' || s[k] == '+')) k++;
+            size_t d = k;
+            while (k < n && isdigit((unsigned char)s[k])) k++;
+            if (k > d) {
+                em(e, H_VARIABLE, s + i + 2, k - i - 2);
+                t = k - i - 2;
+            }
+        }
+        return 2 + t;
+    }
+    if (c == 'p' || c == 'P') {
+        if (i + 2 < n && s[i + 2] == '{') {
+            size_t k = i + 3;
+            while (k < n && (rx_word(s[k]) || s[k] == '=' || s[k] == ' ' || s[k] == '-')) k++;
+            if (k > i + 3 && k < n && s[k] == '}') {
+                em(e, H_KEYWORD, s + i, k + 1 - i);
+                return k + 1 - i;
+            }
+        } else if (i + 2 < n && isalpha((unsigned char)s[i + 2])) {
+            em(e, H_KEYWORD, s + i, 3);
+            return 3;
+        }
+        em(e, H_STRING, s + i, 2);
+        return 2;
+    }
+    if (c == 'c' && i + 2 < n) { /* control character: no scope color */
+        em(e, H_NONE, s + i, 3);
+        return 3;
+    }
+    if (c == 'x') {
+        if (i + 2 < n && s[i + 2] == '{') {
+            size_t k = i + 3;
+            while (k < n && isxdigit((unsigned char)s[k])) k++;
+            if (k < n && s[k] == '}') {
+                em(e, H_STRING, s + i, k + 1 - i);
+                return k + 1 - i;
+            }
+        }
+        if (i + 3 < n && isxdigit((unsigned char)s[i + 2]) && isxdigit((unsigned char)s[i + 3])) {
+            em(e, H_STRING, s + i, 4);
+            return 4;
+        }
+        em(e, H_NONE, s + i, 2); /* `\x` without two hex digits is no escape the grammar colors */
+        return 2;
+    }
+    if (c == 'u') {
+        size_t k = i + 2;
+        while (k < n && k < i + 6 && isxdigit((unsigned char)s[k])) k++;
+        if (k - i - 2 != 4) k = i + 2;
+        em(e, H_STRING, s + i, k - i);
+        return k - i;
+    }
+    if (rx_class_escape(c)) {
+        em(e, H_KEYWORD, s + i, 2);
+        return 2;
+    }
+    /* multi-byte escaped character: keep its whole UTF-8 sequence */
+    size_t l = 1;
+    while (i + 1 + l < n && ((unsigned char)s[i + 1 + l] & 0xC0) == 0x80) l++;
+    em(e, H_STRING, s + i, 1 + l);
+    return 1 + l;
+}
+
+/* an escape's length inside a set, without emitting it */
+static size_t rx_escape_len(em_t *e, const char *s, size_t n, size_t i) {
+    sb_t tmp = SB_INIT;
+    em_t t = {&tmp, e->th, H_NONE};
+    size_t l = rx_escape(&t, s, n, i, true);
+    sb_free(&tmp);
+    return l;
+}
+
+static const char *const RX_POSIX[] = {"alnum", "alpha", "ascii", "blank", "cntrl", "digit", "graph",
+                                       "lower", "print", "punct", "space", "upper", "word",  "xdigit"};
+
+/* a set body from s[i] (just past `[` / `[^`); returns the index past its closing `]` (or n) */
+static size_t rx_set(em_t *e, const char *s, size_t n, size_t i, int depth) {
+    size_t start = i;
+    while (i < n) {
+        char c = s[i];
+        if (c == ']' && i > start) {
+            em(e, H_KEYWORD, s + i, 1);
+            return i + 1;
+        }
+        if (c == '[' && i + 1 < n && s[i + 1] == ':') {
+            size_t k = i + 2;
+            while (k < n && isalpha((unsigned char)s[k])) k++;
+            bool known = false;
+            for (size_t q = 0; q < ARRAY_LEN(RX_POSIX); q++)
+                if (k - i - 2 == strlen(RX_POSIX[q]) && !strncmp(s + i + 2, RX_POSIX[q], k - i - 2)) known = true;
+            if (known && k + 1 < n && s[k] == ':' && s[k + 1] == ']') {
+                em(e, H_KEYWORD, s + i, 1);
+                em(e, H_NUMBER, s + i + 1, k + 1 - i - 1);
+                em(e, H_KEYWORD, s + k + 1, 1);
+                i = k + 2;
+                continue;
+            }
+        }
+        if (c == '[' && depth < 8) { /* a nested set */
+            size_t k = i + 1;
+            if (k < n && s[k] == '^') k++;
+            em(e, H_KEYWORD, s + i, k - i);
+            i = rx_set(e, s, n, k, depth + 1);
+            continue;
+        }
+        /* a range: endpoint '-' endpoint, literal endpoints colored as the range */
+        size_t a_len = c == '\\' ? rx_escape_len(e, s, n, i) : 1;
+        while (c != '\\' && i + a_len < n && ((unsigned char)s[i + a_len] & 0xC0) == 0x80) a_len++;
+        if (i + a_len + 1 < n && s[i + a_len] == '-' && s[i + a_len + 1] != ']') {
+            size_t b = i + a_len + 1;
+            if (s[b] != '[') { /* escaped endpoints (class escapes too) read as escaped characters */
+                if (c == '\\') em(e, H_STRING, s + i, a_len);
+                else em(e, H_NUMBER, s + i, a_len);
+                em(e, H_NUMBER, s + i + a_len, 1);
+                size_t bl;
+                if (s[b] == '\\') {
+                    bl = rx_escape_len(e, s, n, b);
+                    em(e, H_STRING, s + b, bl);
+                } else {
+                    bl = 1;
+                    while (b + bl < n && ((unsigned char)s[b + bl] & 0xC0) == 0x80) bl++;
+                    em(e, H_NUMBER, s + b, bl);
+                }
+                i = b + bl;
+                continue;
+            }
+        }
+        if (c == '\\') {
+            i += rx_escape(e, s, n, i, true);
+            continue;
+        }
+        em(e, H_NONE, s + i, 1);
+        i++;
+    }
+    return n;
+}
+
+static void lex_regex(em_t *e, const char *s, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        char c = s[i];
+        size_t q;
+        if (c == '\\') {
+            if (i + 1 < n && s[i + 1] == 'Q') { /* \Q … \E: literal text */
+                em(e, H_KEYWORD, s + i, 2);
+                const char *end = n > i + 2 ? memmem(s + i + 2, n - i - 2, "\\E", 2) : NULL;
+                size_t stop = end ? (size_t)(end - s) : n;
+                em(e, H_NONE, s + i + 2, stop - i - 2);
+                if (end) em(e, H_KEYWORD, end, 2);
+                i = end ? stop + 2 : n;
+                continue;
+            }
+            i += rx_escape(e, s, n, i, false);
+        } else if (c == '^' || c == '$' || c == '.' || c == '|' || c == ')') {
+            em(e, H_KEYWORD, s + i, 1);
+            i++;
+        } else if (c == '[') {
+            size_t k = i + 1;
+            if (k < n && s[k] == '^') k++;
+            em(e, H_KEYWORD, s + i, k - i);
+            i = rx_set(e, s, n, k, 0);
+        } else if (c == '(') {
+            size_t k = i + 1;
+            if (k < n && s[k] == '*') { /* (*VERB) / (*VERB:arg) */
+                size_t v = k + 1;
+                while (v < n && (isupper((unsigned char)s[v]) || s[v] == '_')) v++;
+                if (v > k + 1 && v < n && s[v] == ':') while (v < n && s[v] != ')') v++;
+                if (v > k + 1 && v < n && s[v] == ')') {
+                    em(e, H_KEYWORD, s + i, v + 1 - i);
+                    i = v + 1;
+                    continue;
+                }
+            }
+            if (k >= n || s[k] != '?') {
+                em(e, H_KEYWORD, s + i, 1);
+                i++;
+                continue;
+            }
+            const char *t = s + k + 1;
+            size_t rest = n - k - 1;
+            if (rest && *t == '#') { /* (?# comment ) */
+                const char *close = memchr(t, ')', rest);
+                em(e, H_PUNCT, s + i, 3);
+                size_t stop = close ? (size_t)(close - s) : n;
+                em(e, H_COMMENT, s + i + 3, stop - i - 3);
+                if (close) em(e, H_PUNCT, close, 1);
+                i = close ? stop + 1 : n;
+            } else if (rest && (*t == ':' || *t == '=' || *t == '!' || *t == '>')) {
+                em(e, H_KEYWORD, s + i, 1);
+                em(e, H_NUMBER, s + k, 2);
+                i = k + 2;
+            } else if (rest >= 2 && *t == '<' && (t[1] == '=' || t[1] == '!')) {
+                em(e, H_KEYWORD, s + i, 1);
+                em(e, H_NUMBER, s + k, 3);
+                i = k + 3;
+            } else if (rest && (*t == '<' || *t == '\'') && rx_name_ex(e, s, n, k + 1, false, false) > 0) {
+                em(e, H_KEYWORD, s + i, 2); /* (?<name> / (?'name' */
+                i = k + 1 + rx_name(e, s, n, k + 1, false);
+            } else if (rest && *t == '(') { /* (?(cond)…) */
+                em(e, H_KEYWORD, s + i, 3);
+                size_t j = k + 2, d = j;
+                while (j < n && isdigit((unsigned char)s[j])) j++;
+                if (j > d) em(e, H_VARIABLE, s + d, j - d);
+                else j += rx_name(e, s, n, j, false);
+                i = j;
+            } else if (rest && (*t == '&' || *t == '+' || *t == '-' || isdigit((unsigned char)*t))) {
+                size_t j = k + 1;
+                if (*t == '&') {
+                    j++;
+                    size_t w = j;
+                    while (w < n && rx_word(s[w])) w++;
+                    if (w > j && w < n && s[w] == ')') {
+                        em(e, H_KEYWORD, s + i, j - i);
+                        em(e, H_VARIABLE, s + j, w - j);
+                        i = w;
+                        continue;
+                    }
+                } else {
+                    size_t w = j + (*t == '+' || *t == '-');
+                    size_t d0 = w;
+                    while (w < n && isdigit((unsigned char)s[w])) w++;
+                    if (w > d0 && w < n && s[w] == ')') {
+                        em(e, H_KEYWORD, s + i, 2);
+                        em(e, H_VARIABLE, s + j, w - j);
+                        i = w;
+                        continue;
+                    }
+                }
+                goto flags;
+            } else {
+            flags:;
+                /* (?flags) / (?flags:  — imnsxu, optionally `-` and more */
+                size_t j = k + 1;
+                while (j < n && strchr("imnsxu", s[j]) && s[j]) j++;
+                bool ok = j > k + 1;
+                if (j < n && s[j] == '-') {
+                    size_t f = ++j;
+                    while (j < n && strchr("imnsxu", s[j]) && s[j]) j++;
+                    ok = j > f; /* `(?i-)` / `(?-)`: a dash needs flags after it */
+                }
+                if (ok && j < n && (s[j] == ')' || s[j] == ':')) {
+                    em(e, H_KEYWORD, s + i, j + 1 - i);
+                    i = j + 1;
+                } else { /* an unknown group form: the paren alone, its `?` literal */
+                    em(e, H_KEYWORD, s + i, 1);
+                    em(e, H_NONE, s + k, 1);
+                    i = k + 1;
+                }
+            }
+        } else if ((c == '*' || c == '+' || c == '?') && (i == 0 || s[i - 1] == '(' || s[i - 1] == '|')) {
+            em(e, H_NONE, s + i, 1); /* nothing before it to repeat */
+            i++;
+        } else if ((q = rx_quant(s, n, i)) > 0) {
+            em(e, H_KEYWORD, s + i, q);
+            i += q;
+        } else {
+            size_t l = 1;
+            while (i + l < n && ((unsigned char)s[i + l] & 0xC0) == 0x80) l++;
+            em(e, H_NONE, s + i, l);
+            i += l;
+        }
+    }
+}
+
 static void lex_html(em_t *e, hs_t *st, const char *s, size_t n) {
     size_t i = 0;
     while (i < n) {
@@ -960,6 +1302,7 @@ void tui_highlight_code(const char *code, const char *lang, const tui_theme_t *t
             case F_YAML: lex_yaml(&e, L, &st, s, n); break;
             case F_TOML: lex_toml(&e, L, &st, s, n); break;
             case F_DIFF: lex_diff(&e, s, n); break;
+            case F_REGEX: lex_regex(&e, s, n); break;
             case F_HTML: lex_html(&e, &st, s, n); break;
             case F_CSS: lex_css(&e, &st, s, n); break;
             default: lex_code(&e, L, &st, s, n); break;

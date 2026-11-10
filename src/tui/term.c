@@ -147,11 +147,20 @@ int tui_term_enter_raw(tui_term_t *t) {
     tio.c_lflag &= ~(tcflag_t)(ECHO | ICANON | IEXTEN | ISIG);
     tio.c_cc[VMIN] = 1;
     tio.c_cc[VTIME] = 0;
-    if (tcsetattr(t->in_fd, TCSAFLUSH, &tio) != 0) return -errno;
+    /* TCSADRAIN like libuv's setRawMode: keystrokes typed during startup stay queued */
+    if (tcsetattr(t->in_fd, TCSADRAIN, &tio) != 0) return -errno;
+    t->cooked_typeahead = (t->saved.c_lflag & ICANON) != 0;
     g_saved_tio = t->saved;
     g_tty_fd = t->in_fd;
     t->raw = true;
     return 0;
+}
+
+void tui_term_restore_cooked_enter(char *data, size_t n) {
+    const char *esc = memchr(data, 0x1b, n);
+    size_t end = esc ? (size_t)(esc - data) : n;
+    if (end == 0 || data[end - 1] != '\n' || (end >= 2 && data[end - 2] == '\r')) return;
+    data[end - 1] = '\r';
 }
 
 void tui_term_leave_raw(tui_term_t *t) {

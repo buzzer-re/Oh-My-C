@@ -66,7 +66,10 @@ def check(name, cond, info=""):
 r = Rpc("--mode", "rpc-ui")
 ready = r.wait(lambda f: f.get("type") == "ready")
 check("ready", ready == {"type": "ready", "protocolVersion": 1, "supportedProtocolVersions": [1, 2],
-                         "maxFrameBytes": 1048576, "maxReassembledFrameBytes": 67108864}, ready)
+                         "maxFrameBytes": 1048576, "maxReassembledFrameBytes": 67108864,
+                         "supportsBashExcludeFromContext": True}, ready)
+x = r.call({"id": "bx", "type": "bash", "command": "echo x", "excludeFromContext": None})
+check("bash exclude type", x and x.get("error") == "excludeFromContext must be a boolean", x)
 check("startup commands", r.wait(lambda f: f.get("type") == "available_commands_update"), "no available_commands_update")
 x = r.call({"id": "n1", "type": "negotiate_protocol", "protocolVersion": 1})
 check("negotiate v1", x and x.get("error") == "Unsupported RPC protocol version: 1", x)

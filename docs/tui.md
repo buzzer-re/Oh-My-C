@@ -176,11 +176,15 @@ shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, 
 - `markdown.c` renders a marked-style block lexer with omp's per-token spacing: headings, lists with
   hanging wraps, task lists, `▏` quotes, sharp tables with row rules, code fences, OSC 8 links,
   entities and glyph-preset rules. Unclosed fences render to the end, so streaming is safe. Nesting
-  depth is capped.
+  depth is capped. While a reply streams, a trailing lone `-` line that would underline a paragraph
+  (a setext heading) is held back as a bullet being typed. The copy overlay's code/quote blocks
+  (`tui_md_extract_blocks`) come from this same lexer.
 - `highlight.c` uses hand-written lexers per language family that assign the color category omp's
   syntect-based highlighter (`crates/pi-natives` highlight.rs) would give each token: comment,
   keyword, function, string, number, type, operator, punctuation, inserted/deleted.
-  Unsupported languages render plain.
+  Unsupported languages render plain. The Regular Expression lexer (`re`, and the grep card's
+  header pattern) follows syntect's RegExp grammar, checked cell by cell against omp
+  (tests/tui/golden/regex.ansi); it restarts at each line, where syntect carries an open set across.
 - `ansi.c` holds the ANSI-aware width, slice, truncate and wrap helpers (escape sequences are zero
   width, tabs are 3 columns). `fuzzy.c` is omp's word-local fuzzy matcher (`fuzzy.ts`) used by
   pickers.

@@ -588,7 +588,7 @@ static void test_golden(void) {
     o.hyperlinks = false;
     o.padding_x = 1;
     o.code_indent = 0;
-    const char *const names[] = {"basic", "code", "lists", "mdedge"};
+    const char *const names[] = {"basic", "code", "lists", "mdedge", "regex"};
     for (size_t i = 0; i < ARRAY_LEN(names); i++) {
         strvec_t got = render_fixture(names[i], &o, 100);
         check_golden(names[i], &got);
@@ -1500,7 +1500,47 @@ static void test_wp6_editor(void) {
     free(g_action), free(g_action_prefix);
 }
 
+/* omp #17820: Enter typed during startup reaches raw mode as LF (ICRNL) */
+static void test_cooked_enter(void) {
+    char a[] = "hello\n";
+    tui_term_restore_cooked_enter(a, strlen(a));
+    CHECK_STR(a, "hello\r");
+    char b[] = "one\ntwo\n\x1b[12;1R";
+    tui_term_restore_cooked_enter(b, strlen(b));
+    CHECK_STR(b, "one\ntwo\r\x1b[12;1R");
+    char c[] = "win\r\n";
+    tui_term_restore_cooked_enter(c, strlen(c));
+    CHECK_STR(c, "win\r\n");
+    char d[] = "\x1b[1;1R\n";
+    tui_term_restore_cooked_enter(d, strlen(d));
+    CHECK_STR(d, "\x1b[1;1R\n");
+    char e[] = "abc";
+    tui_term_restore_cooked_enter(e, strlen(e));
+    CHECK_STR(e, "abc");
+}
+
+/* omp d9382eb30a: a streaming lone `-` under a paragraph is a bullet being typed, not a setext underline */
+static void test_pending_bullet(void) {
+    static const char *const CASES[][2] = {
+        {"Intro text\n-", "Intro text"},
+        {"- **one**\n  more\n  -", "- **one**\n  more"},
+        {"> quoted\n> -", "> quoted"},
+        {"Intro\n\n-", "Intro\n\n-"},      /* an empty bullet, not an underline */
+        {"Title\n--", "Title\n--"},          /* a longer underline is a heading as written */
+        {"- a\n-", "- a\n-"},                /* a sibling bullet */
+        {"no newline -", "no newline -"},
+    };
+    for (size_t i = 0; i < ARRAY_LEN(CASES); i++) {
+        char *t = xstrdup(CASES[i][0]);
+        tui_md_hold_pending_bullet(t);
+        CHECK_STR(t, CASES[i][1]);
+        free(t);
+    }
+}
+
 int main(void) {
+    test_cooked_enter();
+    test_pending_bullet();
     test_colorful_markdown();
     test_motion_knobs();
     test_keys();
