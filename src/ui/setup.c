@@ -443,12 +443,23 @@ static void unmount_scene(wizard_t *w) {
 }
 
 static void complete(wizard_t *w);
+static void tick(void *ud);
+
+/* #startTimer: repaint during timed phases only (splash, transition, outro); a scene waiting for input needs none */
+static void sync_timer(wizard_t *w) {
+    bool timed = w->phase == PH_SPLASH || w->phase == PH_TRANSITION || w->phase == PH_OUTRO;
+    if (!timed) {
+        if (w->timer) tui_remove_timer(w->u->tui, w->timer);
+        w->timer = 0;
+    } else if (!w->timer) w->timer = tui_add_timer(w->u->tui, TICK_MS, true, tick, w);
+}
 
 static void begin_outro(wizard_t *w) {
     if (w->phase == PH_DONE) return;
     unmount_scene(w);
     w->phase = PH_OUTRO;
     w->phase_start = mono_ms();
+    sync_timer(w);
     request_render(w);
 }
 
@@ -461,6 +472,7 @@ static void mount_scene(wizard_t *w, phase_t target) {
     w->phase = target;
     w->phase_start = mono_ms();
     w->active = w->scenes[w->index]->mount(w);
+    sync_timer(w);
     request_render(w);
 }
 
@@ -478,6 +490,7 @@ static void tick(void *ud) {
     else if (w->phase == PH_TRANSITION && e >= TRANSITION_MS) {
         w->phase = PH_SCENE;
         w->phase_start = mono_ms();
+        sync_timer(w);
         request_render(w);
     } else if (w->phase == PH_OUTRO && e >= OUTRO_MS) complete(w);
     else if (w->phase != PH_SCENE) request_render(w);
@@ -1404,7 +1417,7 @@ static void setup_start(ui_t *u, bool providers_only, void (*done)(void *ud), vo
     tui_alt_screen(u->tui, true);
     tui_overlay_opts_t o = {TUI_ANCHOR_TOP, 0, 0, 0, 0};
     tui_overlay_show(u->tui, &w->base, &o);
-    w->timer = tui_add_timer(u->tui, TICK_MS, true, tick, w);
+    sync_timer(w);
 }
 
 void ui_setup_run(ui_t *u, void (*done)(void *ud), void *ud) { setup_start(u, false, done, ud); }
