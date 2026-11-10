@@ -63,6 +63,7 @@ struct app {
     int64_t next_unknown_skill_rediscovery; /* earliest ms a skill:// miss may rediscover again */
     struct skill_graveyard *skill_graveyard; /* replaced skill lists (autolearn.c) */
     json_t *side_usage;                      /* pending model_usage records of side requests (under mu) */
+    bool power_held;                         /* this run holds a sleep-prevention reference (power.c) */
     char *fixed_dead_end_session;            /* session the fixed-context compaction dead end was announced for */
     file_cmds_t file_cmds;     /* `commands/<name>.md` slash commands + bundled /init (commands.c) */
     prompt_tpls_t prompt_tpls; /* prompts/<name>.md templates */

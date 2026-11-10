@@ -287,8 +287,14 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
         a->rewind_graveyard = NULL;
     }
     /* power.sleepPrevention: held while a run is in flight (subagents run inside the parent's run) */
-    if (ev->type == AGENT_EV_AGENT_START && !a->opts.subagent) power_acquire();
-    if (ev->type == AGENT_EV_AGENT_END && !a->opts.subagent) power_release();
+    if (ev->type == AGENT_EV_AGENT_START && !a->opts.subagent) {
+        power_acquire();
+        a->power_held = true;
+    }
+    if (ev->type == AGENT_EV_AGENT_END && !a->opts.subagent && a->power_held) {
+        power_release();
+        a->power_held = false;
+    }
     /* #relaxOnDelivery: apply `chillax` when a queued message is delivered, so a steer relaxes the running turn from its next
      * request (the run's first prompt already applied it in apply_auto_thinking, and doing so again changes nothing) */
     if (ev->type == AGENT_EV_MESSAGE_END && str_eq(json_get_str(ev->message, "role"), "user") && !json_get_bool(ev->message, "synthetic", false) &&
@@ -441,6 +447,21 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
 }
 
 /* ---------- hooks ---------- */
+
+/* #onAgentPauseChange: turn-scoped sleep prevention is released only once the agent has parked at a safe pause
+ * boundary, and taken again before work resumes */
+static void hook_pause_change(void *ud, agent_t *ag, bool paused) {
+    UNUSED(ag);
+    app_t *a = ud;
+    if (a->opts.subagent) return;
+    if (paused && a->power_held) {
+        power_release();
+        a->power_held = false;
+    } else if (!paused && !a->power_held && agent_is_running(a->agent)) {
+        power_acquire();
+        a->power_held = true;
+    }
+}
 
 /* settings-stream-fn.ts timeoutSecondsToMs: < 0 -> provider/env defaults (-1), 0 disables */
 static int64_t timeout_seconds_ms(double v) {
@@ -1607,6 +1628,7 @@ static void install_agent(app_t *a) {
     ag->hooks.approve_tool = hook_approve_tool;
     ag->hooks.turn_boundary = hook_turn_boundary;
     ag->hooks.queue_changed = hook_queue_changed;
+    ag->hooks.pause_change = hook_pause_change;
     ag->hooks.ud = a;
     free(ag->session_id);
     ag->session_id = a->session ? xstrdup(session_id(a->session)) : uuid_v7();

@@ -1093,7 +1093,13 @@ static void pause_park(agent_t *a) {
         pthread_mutex_unlock(&g_pause_mu);
         return;
     }
-    if (a->pause_parked++ == 0) g_live_loops--;
+    bool first = a->pause_parked++ == 0;
+    if (first) g_live_loops--;
+    if (first && a->hooks.pause_change) { /* the loop reached a safe pause boundary */
+        pthread_mutex_unlock(&g_pause_mu);
+        a->hooks.pause_change(a->hooks.ud, a, true);
+        pthread_mutex_lock(&g_pause_mu);
+    }
     while (g_paused && !a->cancel) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
@@ -1104,8 +1110,10 @@ static void pause_park(agent_t *a) {
         }
         pthread_cond_timedwait(&g_pause_cv, &g_pause_mu, &ts);
     }
-    if (--a->pause_parked == 0) g_live_loops++;
+    bool last = --a->pause_parked == 0;
+    if (last) g_live_loops++;
     pthread_mutex_unlock(&g_pause_mu);
+    if (last && a->hooks.pause_change) a->hooks.pause_change(a->hooks.ud, a, false); /* work resumes */
 }
 
 /* ---------- tool execution ---------- */
