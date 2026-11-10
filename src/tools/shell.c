@@ -3,6 +3,7 @@
 
 #include "core/fs.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -18,12 +19,17 @@ struct shell {
     char *script; /* <dir>/c: the name error messages carry until they are rewritten */
     uint64_t seq;
     pthread_mutex_t mu;
+    /* the session's root state (variables, functions, aliases, options) as of its last command boundary, published by
+     * each command before it runs: <dir>/state, renamed into place once complete; guarded by snap_mu */
+    pthread_mutex_t snap_mu;
+    bool have_snap;
 };
 
 shell_t *shell_new(void) {
     shell_t *s = xcalloc(1, sizeof(*s));
     s->child.in_fd = s->child.out_fd = s->child.err_fd = -1;
     pthread_mutex_init(&s->mu, NULL);
+    pthread_mutex_init(&s->snap_mu, NULL);
     return s;
 }
 
@@ -84,10 +90,18 @@ void shell_free(shell_t *s) {
     if (!s) return;
     stop(s);
     if (s->script) unlink(s->script);
-    if (s->dir) rmdir(s->dir);
+    if (s->dir) {
+        char *st = xasprintf("%s/state", s->dir), *tmp = xasprintf("%s/state.tmp", s->dir);
+        unlink(st);
+        unlink(tmp);
+        free(st);
+        free(tmp);
+        rmdir(s->dir);
+    }
     free(s->script);
     free(s->dir);
     pthread_mutex_destroy(&s->mu);
+    pthread_mutex_destroy(&s->snap_mu);
     free(s);
 }
 
@@ -328,8 +342,20 @@ static int run_locked(shell_t *s, const char *cmd, const char *cwd, const proc_o
                                          "eval \"__omc_t=${__omc_t% EXIT}\"; trap - EXIT; (exit $__omc_rc); eval \"$__omc_t\"; fi; "
                                          "\\unset __omc_t; "
                                        : "";
-    char *script = xasprintf("\\cd -- %s 2>/dev/null\n{ \\. %s; __omc_rc=$?; %s} </dev/null >%s 2>&1; \\command printf '__OMC_DONE_%%d\\n' \"$__omc_rc\"; \\unset __omc_rc\n",
-                             qcwd, qscript, exit_trap, qfifo);
+    /* the state this command starts from, for a fork of the shell while it runs (shell_exec_fork) */
+    char *snap = NULL;
+    if (s->is_bash) {
+        char *tmp = xasprintf("%s/state.tmp", s->dir), *qtmp = sh_quote(tmp);
+        snap = xasprintf("{ \\builtin declare -p; \\builtin declare -f; \\builtin alias -p; \\builtin shopt -p; \\builtin set +o; } >%s "
+                         "2>/dev/null; \\command printf '__OMC_SNAP\\n'\n",
+                         qtmp);
+        free(tmp);
+        free(qtmp);
+    }
+    char *script = xasprintf("%s\\cd -- %s 2>/dev/null\n{ \\. %s; __omc_rc=$?; %s} </dev/null >%s 2>&1; \\command printf '__OMC_DONE_%%d\\n' \"$__omc_rc\"; \\unset __omc_rc\n",
+                             snap ? snap : "", qcwd, qscript, exit_trap, qfifo);
+    free(snap);
+    bool snap_seen = !s->is_bash;
     free(qcwd);
     free(qscript);
     free(qfifo);
@@ -372,6 +398,15 @@ static int run_locked(shell_t *s, const char *cmd, const char *cwd, const proc_o
             ssize_t c = read(s->child.out_fd, buf, sizeof buf);
             if (c > 0) {
                 sb_appendn(&ctl, buf, (size_t)c);
+                if (!snap_seen && memmem(ctl.s, ctl.len, "__OMC_SNAP\n", 11)) {
+                    snap_seen = true;
+                    char *tmp = xasprintf("%s/state.tmp", s->dir), *st = xasprintf("%s/state", s->dir);
+                    pthread_mutex_lock(&s->snap_mu);
+                    if (rename(tmp, st) == 0) s->have_snap = true;
+                    pthread_mutex_unlock(&s->snap_mu);
+                    free(tmp);
+                    free(st);
+                }
                 char *hit = memmem(ctl.s, ctl.len, "__OMC_DONE_", 11);
                 char *end = hit ? memchr(hit, '\n', ctl.len - (size_t)(hit - ctl.s)) : NULL;
                 if (end) {
@@ -421,6 +456,83 @@ static int run_locked(shell_t *s, const char *cmd, const char *cwd, const proc_o
     res->err = xstrdup("");
     pthread_mutex_unlock(&s->mu);
     return 0;
+}
+
+/* ---------- fork of a busy session shell ---------- */
+
+/* variables bash owns or a fork must not inherit: read-only ones, ones assigning would act on (`RANDOM` would seed every
+ * sibling fork alike, `SECONDS` restart the clock), and the call stack */
+static bool fork_skips_var(const char *name, size_t n) {
+    static const char *const SKIP[] = {"BASHOPTS", "BASHPID", "BASH_ALIASES", "BASH_ARGC", "BASH_ARGV", "BASH_ARGV0",
+                                       "BASH_CMDS", "BASH_COMMAND", "BASH_LINENO", "BASH_SOURCE", "BASH_SUBSHELL",
+                                       "BASH_VERSINFO", "BASH_EXECUTION_STRING", "BASH_REMATCH", "EPOCHREALTIME",
+                                       "EPOCHSECONDS", "EUID", "FUNCNAME", "GROUPS", "HISTCMD", "LINENO", "OLDPWD", "PIPESTATUS",
+                                       "PPID", "PWD", "RANDOM", "SECONDS", "SHELLOPTS", "SHLVL", "SRANDOM", "UID", "_", NULL};
+    for (const char *const *k = SKIP; *k; k++)
+        if (strlen(*k) == n && !memcmp(*k, name, n)) return true;
+    return false;
+}
+
+/* the snapshot without the variables a fork must not take: a `declare -<flags> NAME[=…]` line naming one is dropped (a
+ * multi-line value is kept whole, its continuation lines never start a declaration) */
+static char *fork_filter_snapshot(const char *text) {
+    sb_t b = SB_INIT;
+    const char *p = text;
+    bool skipping = false;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) + 1 : strlen(p);
+        if (!strncmp(p, "declare -", 9)) {
+            const char *q = p + 9;
+            while (*q && *q != ' ' && *q != '\n') q++;
+            if (*q == ' ') q++;
+            const char *ns = q;
+            while (*q && (isalnum((unsigned char)*q) || *q == '_')) q++;
+            skipping = fork_skips_var(ns, (size_t)(q - ns));
+        } else if (!strncmp(p, "alias ", 6) || !strncmp(p, "shopt ", 6) || !strncmp(p, "set ", 4) ||
+                   (len > 4 && !memcmp(p + len - (nl ? 5 : 4), " () ", 4))) {
+            skipping = false;
+        }
+        if (!skipping) sb_appendn(&b, p, len);
+        p += len;
+    }
+    return sb_detach(&b);
+}
+
+int shell_exec_fork(shell_t *parent, const char *cmd, const proc_opts_t *o, proc_result_t *res) {
+    char *text = NULL;
+    if (parent) {
+        pthread_mutex_lock(&parent->snap_mu);
+        if (parent->have_snap && parent->dir) {
+            char *st = xasprintf("%s/state", parent->dir);
+            size_t n = 0;
+            text = fs_read(st, &n);
+            free(st);
+        }
+        pthread_mutex_unlock(&parent->snap_mu);
+    }
+    if (!text || o->use_pty) {
+        free(text);
+        return shell_exec_once(cmd, o, res);
+    }
+    shell_t *s = shell_new();
+    /* the fork starts from the session's state: restored silently, before the command */
+    char *restore = fork_filter_snapshot(text);
+    free(text);
+    proc_opts_t ro = {.cwd = o->cwd, .env_extra = o->env_extra, .timeout_ms = 10000, .merge_stderr = true,
+                      .new_session = true, .cancel = o->cancel};
+    proc_result_t rr;
+    int rc = shell_run(s, restore, o->cwd, &ro, &rr);
+    free(restore);
+    proc_result_free(&rr);
+    if (rc == 0) rc = shell_run(s, cmd, o->cwd, o, res);
+    else memset(res, 0, sizeof *res);
+    if (s->started) {
+        child_close(&s->child);
+        s->started = false;
+    }
+    shell_free(s);
+    return rc;
 }
 
 /* ---------- one-shot `bash -c` with the same notice filtering ---------- */

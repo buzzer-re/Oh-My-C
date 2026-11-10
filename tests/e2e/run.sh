@@ -405,6 +405,12 @@ check "async long cmd"    "async ok" bash -c "'$B' --model mock/mock-1 -p 'call:
 check "wait nothing"   "Nothing to wait for"  "$B" --model mock/mock-1 -p 'call:wait:{}'
 check "edit none" "edit none ok"  python3 -I "$ROOT/tests/e2e/edit_none.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/en"
 check "shell scope" "shell scope ok"  python3 -I "$ROOT/tests/e2e/shell_scope.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ss"
+# a call overlapping a backgrounded one runs in a copy of the busy session shell: it sees the session's variables and
+# functions, and what it sets stays in the copy (omp 1e2fbfd2e2)
+printf 'bash:\n  autoBackground:\n    thresholdMs: 500\n' > "$T/agent/config.yml"
+( for m in 'bash:export FORKV=bar; forkf() { echo fn-$FORKV; }' 'bash:sleep 4; echo slow' 'bash:echo got-$FORKV; forkf; FORKB=1' 'bash:echo forkb=[$FORKB]'; do python3 -c 'import json,sys; print(json.dumps({"id":"x","type":"prompt","message":sys.argv[1]}))' "$m"; sleep 2.5; done ) | timeout 60 "$B" --model mock/mock-1 --mode rpc >/dev/null 2>&1
+rm -f "$T/agent/config.yml"
+check "bash fork"      "got-bar|fn-bar|||Ran in a copy of the busy session shell; changes here won't persist.##forkb=[]"  python3 -I -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; m=[x for x in r[-1]["messages"] if x.get("role")=="tool"]; t=[x["content"] if isinstance(x["content"],str) else "".join(b.get("text","") for b in x["content"]) for x in m]; print("##".join(t[2:4]).replace("\n","|"))' "$T/req.jsonl"
 # wait: idle ladder and its nudge; settle window, progress notes vs direct messages, no broadcast from a subagent
 check "wait ladder" "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl1" ladder
 check "wait peers"  "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl2" peers
