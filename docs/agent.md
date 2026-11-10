@@ -211,7 +211,11 @@ chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp
   compaction beta (`compat.supportsServerCompaction` on a supported route) sends `compaction:
   {type: "summarize", instructions}` with `compact-2026-09-04`, keeps the signed block in
   `preserveData.anthropicCompaction` and replays it as a `compaction` block at the head of the kept
-  tail. A native failure falls through to the next method.
+  tail. A native failure falls through to the next method. The context is built for the model that reads
+  it (`session_build_context_as`): a model that cannot replay the newest OpenAI payload (another provider, or a
+  non-Responses API) stands on the newest compaction it can read and carries the raw history behind the
+  unreadable one, a model switch rebuilds the agent's messages when the two models stand on different
+  boundaries, and compaction preparation re-expands a trailing payload the active model cannot reuse.
 - **Method ladder** (`compaction.methodOrder`, default remote → snapcompact → handoff → shake → soft):
   manual `/compact` uses remote/soft (a `/compact <mode>` overrides the order); automatic passes
   (`cmp_auto`) run the first usable method and fall through on failure or when a pass would not reduce
@@ -231,7 +235,9 @@ chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp
   defers to it; the armed result is committed by the next pass when still valid for the branch.
 - **Dead ends**: when preparation finds nothing or a commit leaves no headroom (or no retry fit), a
   rescue elides inside the kept tail, then drops images; otherwise omp's dead-end warning is shown
-  and stamped on the compaction entry.
+  and stamped on the compaction entry. A threshold pass is not started at all while the system prompt and
+  tool schemas alone exceed the recovery band: it blocks automatic continuation and warns once per session
+  (`Compaction cannot create headroom …`), so it never loops every turn.
 - **Commit**: `session_append_compaction_ex()` writes omp's entry fields (`shortSummary`,
   `tokensAfter`, `method`, `providerReplayThroughEntryId`, `details`, `fromExtension`, `preserveData`),
   the context is rebuilt and `auto_compaction_start` / `auto_compaction_end` events (omp's shapes) go to
@@ -248,8 +254,9 @@ templates with the result. The system prompt is a list of parts:
 
 1. `system-prompt.md`, or `custom-system-prompt.md` when a custom prompt is given (`--system-prompt`
    text or file, or `SYSTEM.md` in `.omc/`, `.omp/` or the agent dir), with tool inventory and
-   labels, `xd://` device docs, skills, rules, internal-URL docs, delegation settings (catalog
-   `delegationBias`, `task.*`), personality (`personality` setting or `PERSONALITY.md`), the model
+   labels, `xd://` device docs, skills, rules, internal-URL docs, delegation settings (`delegationTier`:
+   the catalog delegation bias, `balanced` without a rule, lifted to `eager` by `task.eager` in the main
+   agent only; `task.*`), personality (`personality` setting or `PERSONALITY.md`), the model
    name, and the append prompt (`--append-system-prompt` or `APPEND_SYSTEM.md`) composed after
    generated memory and auto-learn blocks (`user-append.md`);
 2. `project-prompt.md` (context files, cwd);
@@ -279,6 +286,14 @@ requests start with the session, once its cost gate exists (the TUI starts them 
 single-slot local server the first prompt queues behind them (in omp too). With
 thinking disabled they stay short: a local Qwen gets `enable_thinking: false` from the detected compat
 (docs/ai.md).
+
+The system prompt lists a snapshot of the skills taken at startup (and on a cwd change). A skill that `learn` or
+`manage_skill` writes or deletes mid-session reloads the registry only, so `skill://` and `/skill:` find it at once
+while the prompt stays byte-identical for the provider cache. A `skill://` name no loaded skill owns rediscovers the
+main session's skills (at most once every 2 seconds; a subagent's list is fixed). The model learns of what changed
+through a hidden `skill-notice` message (`prompts/system/skill-notice.md`) that rides with the next user prompt:
+skills added, skills whose description changed, and skills removed, compared with the prompt's list plus the notices
+still in context. It is sent only while `skillful` is on and `read` is active (session-tools.ts `takeSkillNotice`).
 
 **Rules** (markdown with `description`, `globs`, `alwaysApply`, `condition`, `scope`, ...).
 Sources: `.omc|.omp/rules`, `<agent dir>/rules`, `RULES.md`, `.cursor/rules/*.mdc`,
@@ -375,7 +390,9 @@ begins, a side request on the same model, system prompt, tools and history asks 
 such as `🧪 FLAKY: Fix flaky park tests`. This reuses the prompt cache. Low-signal input
 (greetings, acks) is skipped. The `tiny` generator and the fallback use the title model with
 `title-system.md`. Titles are applied on the agent thread and written to the title slot.
-`OMC_NO_TITLE=1` disables them (RPC mode always does).
+`OMC_NO_TITLE=1` disables them (RPC mode always does). Every billed title request (the fork, each
+title-model attempt, errors included) is journaled as an off-transcript `model_usage` entry with
+`purpose: "title"` and charged to the session's cost gate, so `/usage` and `--max-cost` count it.
 
 ## Plan mode
 

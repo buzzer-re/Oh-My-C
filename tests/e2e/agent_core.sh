@@ -1,0 +1,130 @@
+# Sourced by tests/e2e/run.sh: agent-core behaviour ported from omp 18.18 (sessions, skills, retries, task, titles).
+AC="$T/acagent"; ACW="$T/acwork"
+mkdir -p "$AC" "$ACW/.omc/skills"
+cp "$T/agent/models.yml" "$AC/models.yml"
+printf 'modelRoles:\n  default: mock/mock-1\nmemory:\n  backend: local\nautolearn:\n  enabled: true\n  autoContinue: false\n' > "$AC/config.yml"
+ACENV=(env OMC_CODING_AGENT_DIR="$AC")
+# ac_req.py <log> <mark> <code>: python over the main (tool-carrying) requests logged since line <mark>
+cat > "$T/ac_req.py" <<'PY'
+import json,sys
+rs=[json.loads(l) for l in open(sys.argv[1])][int(sys.argv[2]):]
+main=[r for r in rs if r.get("tools")]
+def text(m):
+    c=m.get("content"); return c if isinstance(c,str) else "".join(p.get("text","") for p in (c or []) if isinstance(p,dict))
+exec(sys.argv[3])
+PY
+ac_mark() { cat "$T/req.jsonl" 2>/dev/null | wc -l; }
+pushd "$ACW" >/dev/null
+# skill notice (session-tools.ts takeSkillNotice): a skill manage_skill writes mid-session keeps the system prompt
+# byte-stable and reaches the model as a hidden notice with the next prompt, once; a changed description is announced
+# again under "Updated"; a skill created on disk mid-session is found by skill:// name (rediscoverForUnknownName)
+M=$(ac_mark)
+timeout 60 "${ACENV[@]}" python3 -I "$ROOT/tests/e2e/rpc_seq.py" "$B" --arg --model --arg mock/mock-1 \
+    'call:manage_skill:{"action":"create","name":"sn-skill","description":"Use for notice tests","body":"Body one."}' \
+    'say:after create' 'say:again' \
+    'call:manage_skill:{"action":"update","name":"sn-skill","description":"Use for updated notice tests","body":"Body two."}' \
+    'say:after update' \
+    'bash:mkdir -p .omc/skills/late-skill && printf -- "---\nname: late-skill\ndescription: Late skill\n---\nLATE BODY\n" > .omc/skills/late-skill/SKILL.md' \
+    'read:skill://late-skill' 'say:after late' </dev/null >/dev/null 2>&1
+check "skill notice" "notice once=True stable=True updated=True late-read=True late-notice=True" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+sysp=lambda r: text(r["messages"][0])
+def notices(r): return [text(m) for m in r["messages"] if "Skills changed this session" in text(m)]
+def at(word): return [r for r in main if word in text(r["messages"][-1])][0]
+a, b, c, d, e = at("after create"), at("again"), at("after update"), at("LATE BODY"), at("after late")
+once = len(notices(a)) == 1 and "Now available:\n- sn-skill: Use for notice tests" in notices(a)[0] and len(notices(b)) == 1
+stable = len({sysp(r) for r in main}) == 1 and "sn-skill" not in sysp(a)
+upd = len(notices(c)) == 2 and "Updated (this description replaces the earlier one):\n- sn-skill: Use for updated notice tests" in notices(c)[1]
+late = any("late-skill: Late skill" in n for n in notices(e))
+print("notice once=%s stable=%s updated=%s late-read=%s late-notice=%s" % (once, stable, upd, "LATE BODY" in text(d["messages"][-1]), late))'
+popd >/dev/null
+# title usage (c5b2810dbc, 1ea6be1d9c): the fork title's billed request is journaled as a model_usage entry
+mkdir -p "$T/actitle"; cp "$T/agent/models.yml" "$T/actitle/models.yml"
+check "title usage" $'title request sent\ntitle usage journaled'  env OMC_CODING_AGENT_DIR="$T/actitle" python3 -I "$ROOT/tests/e2e/tui_title.py" "$B" "$T/req.jsonl" "bash:echo titled usage" "$T/actitle"
+# subagent assignment whitespace (b83f8d747c): blank-line runs, hard breaks and table padding reach the subagent
+M=$(ac_mark)
+(cd "$ACW" && timeout 60 "$B" --model mock/mock-1 -p 'call:task:{"context":"ws","tasks":[{"task":"say:keep\r\n\n\n\nspacing  \n|  a  |  b |\n\n"}]}' </dev/null >/dev/null 2>&1)
+check "task whitespace" "assignment kept" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+sub=[r for r in main if "Complete assignment thoroughly" in text(r["messages"][-1])]
+print("assignment kept" if sub and text(sub[0]["messages"][-1]).endswith("Complete assignment thoroughly:\n\nsay:keep\n\n\n\nspacing  \n|  a  |  b |") else "got %r" % (sub and text(sub[0]["messages"][-1])))'
+# task model placeholders (9c75a72acd, ad36b9ac35, 05a8b9c180): "" / whitespace / [] route like an omitted model, a
+# real per-call model is still refused, and the schema declares `model` only for seance
+M=$(ac_mark)
+(cd "$ACW" && timeout 60 "$B" --model mock/mock-1 -p 'call:task:{"context":"m","tasks":[{"task":"say:blank-model-a","model":"  "},{"task":"say:blank-model-b","model":[]}]}' </dev/null >/dev/null 2>&1)
+mkdir -p "$ACW/noseance/.omc" && printf 'task:\n  disabledAgents: [seance]\n' > "$ACW/noseance/.omc/config.yml"
+(cd "$ACW/noseance" && timeout 60 "$B" --model mock/mock-1 -p 'call:task:{"context":"m","tasks":[{"task":"say:pinned","model":"mock/mock-2"}]}' </dev/null >/dev/null 2>&1)
+check "task blank model" "blank routed=True pinned refused=True schema model=False" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+subs=[text(r["messages"][-1]) for r in main if "Complete assignment thoroughly" in text(r["messages"][-1])]
+routed=any("blank-model-a" in s for s in subs) and any("blank-model-b" in s for s in subs)
+tools=[m for r in main for m in r["messages"] if m.get("role")=="tool"]
+refused=any("per-call `model` is disabled" in text(m) for m in tools) and not any("say:pinned" in s for s in subs)
+task=[t for t in main[-1]["tools"] if t["function"]["name"]=="task"][0]["function"]["parameters"]
+props=task["properties"]["tasks"]["items"]["properties"] if "tasks" in task["properties"] else task["properties"]
+print("blank routed=%s pinned refused=%s schema model=%s" % (routed, refused, "model" in props))'
+# delegation tiers (c28b3e3e42, 0e2ab63349): a model without a delegation-bias rule is `balanced` (one scout nudge, no
+# fan-out push in grep/glob); task.eager lifts it to the eager wording
+M=$(ac_mark)
+(cd "$ACW" && timeout 30 "$B" --model mock/mock-1 -p 'say:balanced' </dev/null >/dev/null 2>&1)
+mkdir -p "$ACW/eager/.omc" && printf 'task:\n  eager: preferred\n' > "$ACW/eager/.omc/config.yml"
+(cd "$ACW/eager" && timeout 30 "$B" --model mock/mock-1 -p 'say:eager tier' </dev/null >/dev/null 2>&1)
+check "delegation tier" "balanced=True eager=True" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+def req(w): return [r for r in main if w in text(r["messages"][-1])][-1]
+def desc(r, n): return [t for t in r["tools"] if t["function"]["name"] == n][0]["function"]["description"]
+b, e = req("say:balanced"), req("say:eager tier")
+bs, es = text(b["messages"][0]), text(e["messages"][0])
+bal = "Unfamiliar subsystem? Explore it with a read-only `scout` while you keep working" in bs and "Map unknown code" not in bs and "Task + scout" not in desc(b, "grep")
+eag = "Map unknown code via `task`" in es and "Delegation preferred." in es and "Unfamiliar subsystem?" not in es
+print("balanced=%s eager=%s" % (bal, eag))'
+# role ownership for retry chains (8cf606f833, 85ad332028): `--model pi/<role>` records the role after the default
+# entry, so a retry walks that role's retry.fallbackChains entry instead of `default`'s, also on --continue
+export RO="$T/acrole"; mkdir -p "$RO/agent" "$RO/work"; cp "$T/agent/models.yml" "$RO/agent/models.yml"
+printf 'modelRoles:\n  slow: mock/mock-flaky\nretry:\n  fallbackChains:\n    default: [mock/mock-think]\n    slow: [mock/mock-2]\n' > "$RO/agent/config.yml"
+M=$(ac_mark)
+(cd "$RO/work" && timeout 60 env OMC_CODING_AGENT_DIR="$RO/agent" "$B" --model pi/slow -p 'say:role chain' </dev/null >/dev/null 2>&1)
+(cd "$RO/work" && timeout 60 env OMC_CODING_AGENT_DIR="$RO/agent" "$B" --continue --model pi/slow -p 'say:role chain again' </dev/null >/dev/null 2>&1)
+check "role retry chain" "chain=mock-2 again=mock-2 entries=True" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+import glob, os
+def walk(w):  # the transport retries the 429 itself; the session then walks the role chain
+    ms = [r["model"] for r in main if text(r["messages"][-1]).endswith(w)]
+    return ms[-1] if ms and ms[0] == "mock-flaky" and "mock-think" not in ms else ms
+f = sorted(glob.glob(os.path.join(os.environ["RO"], "agent", "sessions", "**", "*.jsonl"), recursive=True))[-1]
+mc = [(e.get("model"), e.get("role")) for e in map(json.loads, open(f)) if e.get("type") == "model_change"]
+ok = mc[:2] == [("mock/mock-flaky", None), ("mock/mock-flaky", "slow")] and ("mock/mock-flaky", "slow") in mc[2:]
+print("chain=%s again=%s entries=%s" % (walk("role chain"), walk("role chain again"), ok))'
+# compaction display summary (dc44458606, 2c43992f91): the 512-token short summary never asks for reasoning; the full
+# summary keeps the session's effort
+SS="$T/acshort"; mkdir -p "$SS"; cp "$T/agent/models.yml" "$SS/models.yml"
+printf 'modelRoles:\n  default: mock/mock-think\ndefaultThinkingLevel: high\ncompaction:\n  methodOrder: [soft]\n' > "$SS/config.yml"
+SBIG=$(python3 -I -c 'print("say:" + " ".join("alpha%d beta%d gamma" % (i, i * 7) for i in range(4000)))')
+M=$(ac_mark)
+(cd "$ACW" && timeout 60 env OMC_CODING_AGENT_DIR="$SS" python3 -I "$ROOT/tests/e2e/rpc_compact.py" "$B" "{\"type\":\"prompt\",\"message\":\"$SBIG\"}" \
+    '{"type":"prompt","message":"say:compact me"}' '{"type":"compact"}' </dev/null > "$T/acshort.out" 2>&1)
+check "short summary reasoning" "short=['low'] full=['high', 'high']" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+rs=[json.loads(l) for l in open(sys.argv[1])][int(sys.argv[2]):]
+short=[r for r in rs if "as a pull request description" in json.dumps(r.get("messages", [])[-1:])]
+full=[r for r in rs if "<conversation>" in json.dumps(r.get("messages", [])[-1:]) and r not in short]
+# disableReasoning on a model that cannot switch reasoning off sends its lowest effort
+print("short=%s full=%s" % ([r.get("reasoning_effort") for r in short], [r.get("reasoning_effort") for r in full]))'
+# fixed-context compaction gate (b7968ed353, 6ddfe5a1d8, f9bb58908d): a system prompt + tool schemas over the
+# recovery band block every threshold pass with one warning per session instead of compacting each turn
+FX="$T/acfixed"; mkdir -p "$FX"; cp "$T/agent/models.yml" "$FX/models.yml"
+printf 'modelRoles:\n  default: mock/mock-1\ncompaction:\n  thresholdTokens: 2000\n  asyncEnabled: false\n  methodOrder: [soft]\n' > "$FX/config.yml"
+M=$(ac_mark)
+(cd "$ACW" && timeout 60 env OMC_CODING_AGENT_DIR="$FX" python3 -I "$ROOT/tests/e2e/rpc_compact.py" "$B" '{"type":"prompt","message":"say:fixed one"}' \
+    '{"type":"prompt","message":"say:fixed two"}' '{"type":"prompt","message":"say:fixed three"}' </dev/null > "$T/acfixed.out" 2>&1)
+check "fixed context gate" "warnings=1 summaries=0 starts=0" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+ev=[json.loads(l) for l in open(sys.argv[1].replace("req.jsonl", "acfixed.out")) if l.startswith("{")]
+w=[e for e in ev if e.get("type") == "notice" and "Compaction cannot create headroom" in e.get("message", "")]
+rs=[json.loads(l) for l in open(sys.argv[1])][int(sys.argv[2]):]
+summ=[r for r in rs if "<conversation>" in json.dumps(r.get("messages", [])[-1:])]
+print("warnings=%d summaries=%d starts=%d" % (len(w), len(summ), len([e for e in ev if e.get("type") == "auto_compaction_start"])))'
+# wait delivery lines (974c8b5a43, 1d6e0afcad): a job that finished during the wait was delivered by it; one that had
+# already finished (its completion push still queued) is handed over by the snapshot, which supersedes that push
+M=$(ac_mark)
+(cd "$ACW" && timeout 60 "$B" --model mock/mock-1 --no-session -p 'batch:[["bash",{"command":"echo early","async":true}],["bash",{"command":"sleep 1"}],["wait",{}]]' </dev/null >/dev/null 2>&1)
+check "wait delivery" "superseded=True" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+import re
+tools=[text(m) for r in main for m in r["messages"] if m.get("role") == "tool"]
+ok=any(re.search(r"Delivery: handed over by this snapshot \(it finished [0-9.]+m?s before this call\) — this snapshot superseded its queued completion push\.", t) for t in tools)
+print("superseded=%s" % ok)'
+# `.` on a running turn interrupts it and continues (8e3a4c0436): the prompt the model never answered runs again
+check "continue interrupts" "continue tui ok" env OMC_CODING_AGENT_DIR="$T/agent" python3 -I "$ROOT/tests/e2e/continue_tui.py" "$B" "$T/req.jsonl"

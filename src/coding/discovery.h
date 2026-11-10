@@ -45,6 +45,11 @@ typedef struct {
 void discover_all(const char *cwd, discovery_t *out, bool no_context, bool no_skills, bool no_rules);
 void discovery_free(discovery_t *d);
 const skill_t *discovery_find_skill(const discovery_t *d, const char *name);
+void discovery_free_skills(discovery_t *d);
+/* replace dst's skills with a deep copy of src's (the system prompt's skill snapshot) */
+void discovery_copy_skills(discovery_t *dst, const discovery_t *src);
+/* both lists hold the same skills by name and SKILL.md path (session-tools.ts #adoptNewSkills) */
+bool discovery_same_skills(const discovery_t *a, const discovery_t *b);
 /* add a skill unless one with the same name exists (first wins); copies all strings */
 bool discovery_add_skill(discovery_t *d, const char *name, const char *description, const char *path, const char *dir,
                          bool hide);

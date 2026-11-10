@@ -243,6 +243,10 @@ json_t *mcp_oauth_descriptor(const char *server_url, const json_t *server_cfg, c
     json_t *tok = json_obj();
     json_set_str(tok, "url", token);
     json_set_str(tok, "body", "form");
+    /* oauth-flow.ts: GitHub's token endpoint replies form-encoded unless JSON is requested (exchange and refresh) */
+    json_t *th = json_obj();
+    json_set_str(th, "Accept", "application/json");
+    json_set(tok, "headers", th);
     json_t *tp = json_obj();
     json_set_str(tp, "resource", resource);
     if (client_secret) json_set_str(tp, "client_secret", client_secret);

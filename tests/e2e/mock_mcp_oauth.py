@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """OAuth-protected streamable-HTTP MCP server for e2e tests (dev/test only).
 RFC 9728 resource metadata, RFC 8414 AS metadata, RFC 7591 registration, auth code + PKCE (S256 verified),
-refresh tokens. /authorize redirects straight back with a code (the test plays the browser with curl -L)."""
+refresh tokens. /authorize redirects straight back with a code (the test plays the browser with curl -L).
+Like GitHub's, the token endpoint answers form-encoded unless the request accepts application/json."""
 import base64, hashlib, json, sys, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -43,6 +44,12 @@ class H(BaseHTTPRequestHandler):
             return self.send(201, {"client_id": "cid-1"})
         if u.path == "/token":
             f = dict(urllib.parse.parse_qsl(data.decode()))
+            if "application/json" not in self.headers.get("Accept", ""):
+                send = self.send
+                def form(code, obj=None, headers=None, raw=None):  # GitHub: access_token=...&token_type=bearer
+                    body = urllib.parse.urlencode(obj or {}).encode()
+                    return send(code, None, {"Content-Type": "application/x-www-form-urlencoded"}, raw=body)
+                self.send = form
             if f.get("grant_type") == "authorization_code":
                 ch, red, res = codes.pop(f.get("code"), (None, None, None))
                 ok = ch and base64.urlsafe_b64encode(hashlib.sha256(f["code_verifier"].encode()).digest()).rstrip(b"=").decode() == ch

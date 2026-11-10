@@ -321,7 +321,10 @@ static int prepare(app_t *a, const ai_model_t *model, prep_t *p) {
     size_t n = json_len(p->path);
     if (!n) return 2;
     const json_t *last = json_at(p->path, n - 1);
-    if (str_eq(json_get_str(last, "type"), "compaction") && !json_get_str(last, "providerReplayThroughEntryId")) return 1;
+    /* a trailing boundary this preparation re-expands (one the active model cannot reuse) covers nothing yet */
+    if (str_eq(json_get_str(last, "type"), "compaction") && !json_get_str(last, "providerReplayThroughEntryId") &&
+        (!model || preserve_reusable(last, model)))
+        return 1;
     ssize_t prev = -1, reset = -1;
     for (size_t i = n; i-- > 0 && prev < 0;) {
         const json_t *e = json_at(p->path, i);
@@ -482,8 +485,8 @@ static volatile sig_atomic_t *cancel_ptr(app_t *a) { return tl_cancel ? tl_cance
 static bool cancelled(app_t *a) { return *cancel_ptr(a) != 0; }
 
 /* one summarization oneshot: owned text, NULL + *err (owned) on failure; *status the HTTP status if known */
-static char *oneshot(app_t *a, const ai_model_t *m, const char *system, const char *user, int64_t max_tokens,
-                     const char *what, char **err, int *status) {
+static char *oneshot_ex(app_t *a, const ai_model_t *m, const char *system, const char *user, int64_t max_tokens,
+                        const char *what, char **err, int *status, bool disable_reasoning) {
     json_t *sys = json_arr();
     json_push_str(sys, system ? system : "");
     json_t *msgs = json_arr();
@@ -494,7 +497,8 @@ static char *oneshot(app_t *a, const ai_model_t *m, const char *system, const ch
     char *key = app_api_key_for(m);
     o.api_key = key;
     o.max_tokens = max_tokens;
-    compaction_effort(a, m, &o);
+    if (disable_reasoning) o.disable_reasoning = true;
+    else compaction_effort(a, m, &o);
     o.session_id = a->agent->session_id;
     o.provider_session_state = true;
     o.metadata = (json_t *)app_session_metadata(a, m->provider);
@@ -513,6 +517,11 @@ static char *oneshot(app_t *a, const ai_model_t *m, const char *system, const ch
     json_free(msgs);
     free(key);
     return text;
+}
+
+static char *oneshot(app_t *a, const ai_model_t *m, const char *system, const char *user, int64_t max_tokens,
+                     const char *what, char **err, int *status) {
+    return oneshot_ex(a, m, system, user, max_tokens, what, err, status, false);
 }
 
 static char *load_prompt(const char *name) {
@@ -638,7 +647,9 @@ static char *short_summary(app_t *a, const ai_model_t *m, const json_t *recent, 
     free(sp);
     char *sys = load_prompt("summarization-system");
     char *err = NULL;
-    char *out = oneshot(a, m, sys, sb_cstr(&p), max_tokens, "Short summary failed", &err, NULL);
+    /* display-only summary under a 512-token cap: reasoning would consume the whole budget (the full summary keeps
+     * the session's effort) */
+    char *out = oneshot_ex(a, m, sys, sb_cstr(&p), max_tokens, "Short summary failed", &err, NULL, true);
     free(sys);
     sb_free(&p);
     free(err);
@@ -1070,8 +1081,8 @@ static int64_t project_after(app_t *a, const prep_t *p, const result_t *r, const
 }
 
 static int64_t branch_tokens(app_t *a) {
-    session_context_t sc;
-    session_build_context(a->session, &sc);
+    session_context_t sc; /* as the active model reads it */
+    session_build_context_as(a->session, a->model ? a->model->provider : NULL, a->model ? a->model->api : NULL, &sc);
     int64_t n = messages_tokens(sc.messages);
     session_context_free(&sc);
     return n + nonmessage_tokens(a);
@@ -2306,9 +2317,33 @@ static const char *context_prefix(cmp_reason_t reason) {
                                                                                                     : "Auto-compaction failed: ";
 }
 
+/* #thresholdFixedContextDeadEnd: when the system prompt and tool schemas alone exceed the recovery band, no threshold
+ * pass can land under it, and re-running one every turn loops (#18589). Warns once per session. */
+static bool threshold_fixed_context_dead_end(app_t *a) {
+    const ai_model_t *m = a->model;
+    if (!m || m->context_window <= 0 ||
+        nonmessage_tokens(a) <= (int64_t)floor((double)threshold_for(m) * RECOVERY_BAND)) {
+        free(a->fixed_dead_end_session);
+        a->fixed_dead_end_session = NULL;
+        return false;
+    }
+    const char *sid = a->session ? session_id(a->session) : NULL;
+    if (!sid || !str_eq(a->fixed_dead_end_session, sid)) {
+        app_notice(a, "warning", "%s",
+                   "Compaction cannot create headroom \xe2\x80\x94 pausing automatic maintenance. The system prompt and "
+                   "always-sent tool schemas alone exceed the recovery band; reduce fixed context or adjust "
+                   "compaction.modelThresholds.");
+        free(a->fixed_dead_end_session);
+        a->fixed_dead_end_session = sid ? xstrdup(sid) : NULL;
+    }
+    return true;
+}
+
 int cmp_auto(app_t *a, cmp_reason_t reason, bool will_retry, int64_t trigger) {
     if (reason != CMP_IDLE && !settings_bool("compaction.enabled", true)) return CMP_NONE;
     if (a->compacting || !a->session) return CMP_NONE;
+    /* every threshold caller and strategy goes through here, so the fixed-context gate lives here once */
+    if (reason == CMP_THRESHOLD && threshold_fixed_context_dead_end(a)) return CMP_BLOCKED;
     strvec_t methods = cmp_method_order();
     if (!methods.n) {
         strvec_free(&methods);

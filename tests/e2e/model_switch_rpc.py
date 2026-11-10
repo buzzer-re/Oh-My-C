@@ -109,14 +109,16 @@ open(reqlog, "a").close()
 mark = os.path.getsize(reqlog)
 n0 = len(frames)
 send({"id": "run", "type": "prompt", "message":
-      'seq:[["todo",{"op":"init","items":["a","b"]}],["write",{"path":"pw.txt","content":"hi"}]]'})
+      'seq:[["todo",{"op":"init","items":["a","b"]}],["write",{"path":"agent://0-Nobody","content":"status?"}],'
+      '["write",{"path":"pw.txt","content":"hi"}]]'})
 if not wait(lambda f: f.get("type") == "prompt_result" and f.get("id") == "run", 30, n0):
     fail("prewalk run did not finish")
 with open(reqlog) as f:
     f.seek(mark)
     reqs = [json.loads(l) for l in f if l.strip()]
 models = [r.get("model") for r in reqs if r.get("messages")]
-if not models or models[0] != "mock-1" or models[-1] != "mock-2":
+# a file-free coordination write (agent://) before the first file edit does not hand off (omp 605b460c7a)
+if not models or models[0] != "mock-1" or len(models) < 4 or models[2] != "mock-1" or models[-1] != "mock-2":
     fail("prewalk handoff: request models %s" % models)
 body = json.dumps(reqs[0])
 if "STOP: In NEXT reply, before further exploration, write complete plan." not in body:

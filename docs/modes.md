@@ -91,6 +91,8 @@ extensibility/slash-commands.ts and config/prompt-templates.ts):
   same way after file commands (and also in RPC `steer`/`follow_up`).
 - **MCP prompts** of connected servers (`prompts/list`) run as `/<server>:<prompt> key=value …`
   (`prompts/get`; text and resource text parts joined by blank lines; an empty result consumes the input).
+  Positional tokens fill the prompt's declared `arguments` in order, skipping names a `key=value` token set
+  (mapPromptArguments); positionals past the last free argument are ignored.
 - **`/skill:<name> args`** (or a `/skill:<name>` token after prompt text) sends omp's user-invocation prompt
   (`prompts/skills/user-invocation.md`) as a `skill-prompt` custom message attributed to the user (the model
   sees a user turn; the session stores `custom_message` with `details {name, path, args, prompt, lineCount}`).
@@ -111,8 +113,10 @@ and offers to create a missing directory; `/wt` creates the worktree on the next
 on …` row paints, and the worktrees a launch created are offered for removal on exit per `worktree.onExit`
 (planned in the TUI, removed after the terminal is handed back, messages on stderr). `worktree.onStart` runs on
 fresh launches only. `/restart` closes the TUI like `/exit` and `cli.c` execs `/proc/self/exe` with omp's
-restartArgv (one-shot session selectors and positionals dropped, `--resume <session file>` appended when the
-session is on disk). `/local [name]` and Alt+G (`app.local.open`) open a `local://` file in $VISUAL/$EDITOR,
+restartArgv (one-shot session selectors and positionals dropped, `--restore <session file>` appended when the
+session is on disk, so a turn the teardown cut off goes on; omp also revives the subagents it cut off, which omc does
+not). `.`/`c` on a running turn interrupts it like Esc and continues: input queued behind the turn continues the run
+in place of the directive, else the continuation starts once the turn unwinds. `/local [name]` and Alt+G (`app.local.open`) open a `local://` file in $VISUAL/$EDITOR,
 with a picker when no name is given.
 
 Subagent visibility (WP-22, `src/ui/agenthub.c`): the status line counts running subagents (`👥 N`) and

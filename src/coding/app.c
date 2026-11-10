@@ -150,7 +150,30 @@ const char *app_wire_thinking(app_t *a) {
 }
 
 /* model_changed / thinking_level_changed after a model or thinking mutation (only for real changes) */
+static void build_context_for_model(app_t *a, const ai_model_t *m, session_context_t *sc);
+
+/* #setModel: a model that cannot replay the latest provider-native compaction reads the history behind it instead;
+ * rebuild the context whenever the two models stand on different boundaries. A switch made while the failed turn is
+ * being retried leaves out only that failed turn (persisted at its message_end, never in the live history). */
+static void reread_context_for_switch(app_t *a, const ai_model_t *prev) {
+    if (!a->session || !a->model || prev == a->model) return;
+    const char *was = session_readable_compaction(a->session, prev ? prev->provider : NULL, prev ? prev->api : NULL);
+    const char *now = session_readable_compaction(a->session, a->model->provider, a->model->api);
+    if (str_eq(was, now)) return;
+    session_context_t sc;
+    build_context_for_model(a, a->model, &sc);
+    size_t n = json_len(sc.messages);
+    const json_t *last = n ? json_at(sc.messages, n - 1) : NULL;
+    if (agent_is_running(a->agent) && str_eq(json_get_str(last, "role"), "assistant") &&
+        (str_eq(json_get_str(last, "stopReason"), "error") || str_eq(json_get_str(last, "stopReason"), "aborted")))
+        json_free(json_arr_remove(sc.messages, n - 1));
+    agent_replace_messages(a->agent, sc.messages);
+    sc.messages = NULL;
+    session_context_free(&sc);
+}
+
 void app_model_state_changed(app_t *a, const ai_model_t *prev_model, const char *prev_thinking) {
+    reread_context_for_switch(a, prev_model);
     if (!a->session_event) return;
     if (prev_model != a->model) {
         json_t *e = json_obj();
@@ -264,8 +287,14 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
         a->rewind_graveyard = NULL;
     }
     /* power.sleepPrevention: held while a run is in flight (subagents run inside the parent's run) */
-    if (ev->type == AGENT_EV_AGENT_START && !a->opts.subagent) power_acquire();
-    if (ev->type == AGENT_EV_AGENT_END && !a->opts.subagent) power_release();
+    if (ev->type == AGENT_EV_AGENT_START && !a->opts.subagent) {
+        power_acquire();
+        a->power_held = true;
+    }
+    if (ev->type == AGENT_EV_AGENT_END && !a->opts.subagent && a->power_held) {
+        power_release();
+        a->power_held = false;
+    }
     /* #relaxOnDelivery: apply `chillax` when a queued message is delivered, so a steer relaxes the running turn from its next
      * request (the run's first prompt already applied it in apply_auto_thinking, and doing so again changes nothing) */
     if (ev->type == AGENT_EV_MESSAGE_END && str_eq(json_get_str(ev->message, "role"), "user") && !json_get_bool(ev->message, "synthetic", false) &&
@@ -419,6 +448,21 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
 
 /* ---------- hooks ---------- */
 
+/* #onAgentPauseChange: turn-scoped sleep prevention is released only once the agent has parked at a safe pause
+ * boundary, and taken again before work resumes */
+static void hook_pause_change(void *ud, agent_t *ag, bool paused) {
+    UNUSED(ag);
+    app_t *a = ud;
+    if (a->opts.subagent) return;
+    if (paused && a->power_held) {
+        power_release();
+        a->power_held = false;
+    } else if (!paused && !a->power_held && agent_is_running(a->agent)) {
+        power_acquire();
+        a->power_held = true;
+    }
+}
+
 /* settings-stream-fn.ts timeoutSecondsToMs: < 0 -> provider/env defaults (-1), 0 disables */
 static int64_t timeout_seconds_ms(double v) {
     if (!isfinite(v) || v < 0) return -1;
@@ -492,9 +536,35 @@ const json_t *app_session_metadata(app_t *a, const char *provider) {
     return found;
 }
 
-/* #recordCacheWarmUsage: paid warm requests as off-transcript model_usage entries (session totals include them) */
+void app_note_side_usage(app_t *a, const char *purpose, const json_t *msg) {
+    if (!a || !msg || !json_get(msg, "usage")) return;
+    json_t *e = json_obj();
+    json_set_str(e, "purpose", purpose);
+    json_set_str(e, "api", json_get_str(msg, "api") ? json_get_str(msg, "api") : "");
+    json_set_str(e, "provider", json_get_str(msg, "provider") ? json_get_str(msg, "provider") : "");
+    json_set_str(e, "model", json_get_str(msg, "model") ? json_get_str(msg, "model") : "");
+    json_set(e, "usage", json_clone(json_get(msg, "usage")));
+    json_set_str(e, "stopReason", json_get_str(msg, "stopReason") ? json_get_str(msg, "stopReason") : "");
+    if (json_get_str(msg, "errorMessage")) json_set_str(e, "errorMessage", json_get_str(msg, "errorMessage"));
+    pthread_mutex_lock(&a->mu);
+    if (!a->side_usage) a->side_usage = json_arr();
+    json_push(a->side_usage, e);
+    pthread_mutex_unlock(&a->mu);
+}
+
+/* #recordCacheWarmUsage: paid warm requests as off-transcript model_usage entries (session totals include them);
+ * title requests (#reportTitleUsage) ride the same queue */
 void app_flush_warm_usage(app_t *a) {
     json_t *u = cachewarm_take_usage(a->warmer), *e;
+    pthread_mutex_lock(&a->mu);
+    json_t *side = a->side_usage;
+    a->side_usage = NULL;
+    pthread_mutex_unlock(&a->mu);
+    if (side) {
+        if (!u) u = json_arr();
+        json_arr_foreach(side, i, e) json_push(u, json_clone(e));
+        json_free(side);
+    }
     if (!a->opts.subagent) { /* job captions (off-transcript like warm requests) go on the root session */
         json_t *cap = job_captions_take_usage();
         if (cap) {
@@ -970,6 +1040,25 @@ static char *current_selector(app_t *a) {
     return s;
 }
 
+/* turn-recovery.ts #liveRetryRoleHint: the role the branch last assigned (temporary fallback / prewalk switches
+ * passed over), when its configured model is the current one; owned or NULL */
+static char *live_retry_role_hint(app_t *a) {
+    if (!a->session || !a->model) return NULL;
+    json_t *path = session_path_to(a->session, a->session->leaf_id);
+    const char *role = NULL;
+    for (size_t i = json_len(path); i-- > 0 && !role;) {
+        const json_t *e = json_at(path, i);
+        if (!str_eq(json_get_str(e, "type"), "model_change")) continue;
+        const char *r = json_get_str(e, "role") ? json_get_str(e, "role") : "default";
+        if (str_eq(r, "fallback") || str_eq(r, "prewalk")) continue;
+        role = r;
+    }
+    char *out = NULL;
+    if (role && mr_role_get(role) && app_resolve_model_pattern(mr_role_get(role), NULL, NULL) == a->model) out = xstrdup(role);
+    json_free(path);
+    return out;
+}
+
 /* the last assistant turn before the failed one carries Anthropic signed thinking from another model */
 static bool signed_thinking_blocks(agent_t *ag, const json_t *failed, const ai_model_t *cand) {
     json_t *msgs = ag->messages, *last = NULL;
@@ -1028,7 +1117,9 @@ static void apply_fallback(app_t *a, const char *role, const ai_model_t *cand, c
 static bool try_retry_fallback(app_t *a, agent_t *ag, const char *cur, const json_t *failed, const char *err,
                                bool same_model_retry) {
     strvec_t keys = {0};
-    char *own = mr_fallback_chain_key(cur, a->model, NULL);
+    char *hint = live_retry_role_hint(a);
+    char *own = mr_fallback_chain_key(cur, a->model, hint);
+    free(hint);
     if (a->fallback.active && a->fallback.role) strvec_push(&keys, a->fallback.role);
     if (own && !strvec_contains(&keys, own)) strvec_push(&keys, own);
     free(own);
@@ -1074,7 +1165,9 @@ static bool missing_credential_fallback(app_t *a) {
     if (!settings_bool("retry.modelFallback", true)) return false;
     char *cur = current_selector(a);
     strvec_t keys = {0};
-    char *own = mr_fallback_chain_key(cur, a->model, NULL);
+    char *hint = live_retry_role_hint(a);
+    char *own = mr_fallback_chain_key(cur, a->model, hint);
+    free(hint);
     if (a->fallback.active && a->fallback.role) strvec_push(&keys, a->fallback.role);
     if (own && !strvec_contains(&keys, own)) strvec_push(&keys, own);
     free(own);
@@ -1545,6 +1638,7 @@ static void install_agent(app_t *a) {
     ag->hooks.approve_tool = hook_approve_tool;
     ag->hooks.turn_boundary = hook_turn_boundary;
     ag->hooks.queue_changed = hook_queue_changed;
+    ag->hooks.pause_change = hook_pause_change;
     ag->hooks.ud = a;
     free(ag->session_id);
     ag->session_id = a->session ? xstrdup(session_id(a->session)) : uuid_v7();
@@ -1645,11 +1739,13 @@ void app_rebuild_system_prompt(app_t *a) {
     strvec_free(&routed);
     strvec_t roots = {0};
     if (a->session) roots = session_additional_dirs(a->session);
+    discovery_t listed = a->disc; /* the prompt renders its skill snapshot, not the live registry */
+    listed.skills = a->prompt_skills.skills;
     sysprompt_opts_t so = {.cwd = a->cwd,
                            .additional_roots = &roots,
                            .model_name = label,
                            .tool_names = &names,
-                           .disc = &a->disc,
+                           .disc = &listed,
                            .custom_prompt = a->sys_custom,
                            .custom_template = a->opts.subagent ? NULL : a->opts.system_prompt_template,
                            .append_prompt = a->sys_append,
@@ -1699,18 +1795,39 @@ void app_rebuild_system_prompt(app_t *a) {
     strvec_free(&names);
 }
 
+static void record_initial_model_change(app_t *a, const char *role) {
+    char *label = app_model_label(a);
+    session_append_model_change(a->session, label, NULL);
+    if (role && strcmp(role, "default") != 0) session_append_model_change(a->session, label, role);
+    free(label);
+}
+
+/* the agent's messages as `m` reads them (SessionProviderBoundary.buildDisplaySessionContext(model)) */
+static void build_context_for_model(app_t *a, const ai_model_t *m, session_context_t *sc) {
+    session_build_context_as(a->session, m ? m->provider : NULL, m ? m->api : NULL, sc);
+}
+
 static void load_session_into_agent(app_t *a) {
     xdnotice_reset_announced(a); /* the replaced transcript's notices no longer apply */
     session_context_t sc;
-    session_build_context(a->session, &sc);
+    build_context_for_model(a, a->model, &sc);
+    const ai_model_t *restored = sc.model && !a->opts.model ? catalog_resolve(sc.model) : NULL;
+    if (restored && restored != a->model &&
+        !str_eq(session_readable_compaction(a->session, a->model ? a->model->provider : NULL, a->model ? a->model->api : NULL),
+                session_readable_compaction(a->session, restored->provider, restored->api))) {
+        /* the first build was read by the departing model; rebuild it for the one this session adopts */
+        session_context_t again;
+        build_context_for_model(a, restored, &again);
+        json_free(sc.messages);
+        sc.messages = again.messages;
+        again.messages = NULL;
+        session_context_free(&again);
+    }
     agent_replace_messages(a->agent, sc.messages);
     sc.messages = NULL;
-    if (sc.model && !a->opts.model) {
-        const ai_model_t *m = catalog_resolve(sc.model);
-        if (m) {
-            a->model = m;
-            agent_set_model(a->agent, m);
-        }
+    if (restored) {
+        a->model = restored;
+        agent_set_model(a->agent, restored);
     }
     /* restoreServiceTiers: the session's latest service_tier_change, else the configured tier.* settings */
     ai_service_tiers_t tiers;
@@ -1803,6 +1920,17 @@ app_t *app_create(const app_opts_t *o, char **err) {
     a->thinking = eff;
     /* main.ts overrideModelRoles: `--model` is the session's default role (roles that inherit it, like smol, follow), with
      * the effort it starts at; ephemeral, never persisted */
+    /* resolveCliModel configuredRole: `--model pi/<role>` / `@<role>` / a bare configured role name */
+    char *cli_role = NULL;
+    if (o->model && a->model && !o->subagent && !o->provider) {
+        cli_role = mr_explicit_role(o->model);
+        if (!cli_role) {
+            char *base = NULL;
+            mr_split_level(o->model, -1, true, &base);
+            if (base && !strchr(base, '/') && mr_role_get(base)) cli_role = xstrdup(base);
+            free(base);
+        }
+    }
     if (o->model && a->model && !o->subagent) {
         char *key = mr_model_key(a->model);
         char *val = has_eff && !a->auto_thinking ? mr_selector_with_level(key, effort_name(eff)) : xstrdup(key);
@@ -1831,6 +1959,8 @@ app_t *app_create(const app_opts_t *o, char **err) {
         prompt_templates_load(a->cwd, &a->prompt_tpls);
     }
     a->env->disc = &a->disc;
+    discovery_copy_skills(&a->prompt_skills, &a->disc);
+    if (!o->subagent) a->env->rediscover_skills = autolearn_rediscover_skills; /* a subagent's list is fixed */
     a->ttsr = ttsr_new(&a->disc);
     if (o->mcp) {
         a->mcp = o->mcp;
@@ -1853,12 +1983,14 @@ app_t *app_create(const app_opts_t *o, char **err) {
         char *path = session_resolve(o->resume, a->cwd);
         if (!path) {
             *err = xasprintf("Session not found: %s", o->resume);
+            free(cli_role);
             app_free(a);
             return NULL;
         }
         a->session = session_open(path, err);
         free(path);
         if (!a->session) {
+            free(cli_role);
             app_free(a);
             return NULL;
         }
@@ -1868,6 +2000,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
         free(path);
         if (!src) {
             if (!*err) *err = xasprintf("Session not found: %s", o->fork);
+            free(cli_role);
             app_free(a);
             return NULL;
         }
@@ -1908,6 +2041,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (!a->model && !o->allow_no_model) {
         *err = xstrdup("No model available. Set an API key (e.g. ANTHROPIC_API_KEY or OPENAI_API_KEY), run `omc login`, "
                        "or pass --model provider/id with --api-key.");
+        free(cli_role);
         app_free(a);
         return NULL;
     }
@@ -1925,6 +2059,10 @@ app_t *app_create(const app_opts_t *o, char **err) {
     modelctl_tiers_from_settings(&a->tiers);
     bool resumed = json_len(a->session->entries) > 0;
     if (resumed) load_session_into_agent(a);
+    /* sdk.ts recordInitialModelChange: an explicit model (or role) on a resumed session is recorded as the default
+     * entry, then its role's own entry so retry chain lookup prefers that role's chain while resume still restores
+     * this model as the default */
+    if (resumed && a->model && o->model && !o->subagent && a->session->persist) record_initial_model_change(a, cli_role);
     /* sdk.ts initial service tiers: a resolver (subagent tier.subagent) or --service-tier overrides the session's /
      * configured map and is persisted */
     bool persist_tiers = o->service_tier || o->service_tiers;
@@ -1940,12 +2078,13 @@ app_t *app_create(const app_opts_t *o, char **err) {
     xdnotice_init(a);
     if (!json_len(a->session->entries) && a->session->persist && a->model) {
         char *label = app_model_label(a);
-        session_append_model_change(a->session, label, NULL);
+        record_initial_model_change(a, cli_role);
         /* `auto` is not written before the first turn resolves (sdk.ts) */
         if (!a->auto_thinking) session_append_thinking_change(a->session, effort_name(a->thinking));
         if (persist_tiers || !modelctl_tiers_empty(&a->tiers)) app_append_service_tier_entry(a);
         free(label);
     }
+    free(cli_role);
     a->title_done = a->session->title != NULL;
     if (settings_bool("advisor.enabled", false) && !o->subagent) app_set_advisor(a, true);
     if (!o->subagent) {
@@ -1993,11 +2132,16 @@ void app_free(app_t *a) {
     if (a->owns_lsp) lsp_manager_free(a->lsp);
     dap_manager_free(a->dap);
     discovery_free(&a->disc);
+    discovery_free(&a->prompt_skills);
+    autolearn_free_skill_graveyard(a);
+    json_free(a->side_usage);
     commands_free(&a->file_cmds);
     prompt_templates_free(&a->prompt_tpls);
     free(a->cwd);
     free(a->sys_custom);
     free(a->sys_append);
+    free(a->cost_refusal);
+    free(a->fixed_dead_end_session);
     free(a->plan_file);
     free(a->plan_reference_path);
     free(a->fallback.role);
@@ -2115,6 +2259,11 @@ void app_abort(app_t *a) {
 /* ---------- one-shot completion ---------- */
 
 char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const char *user, ai_effort_t effort) {
+    return app_complete_text_for(a, m, system, user, effort, NULL);
+}
+
+char *app_complete_text_for(app_t *a, const ai_model_t *m, const char *system, const char *user, ai_effort_t effort,
+                            const char *usage_purpose) {
     if (!m) m = a->model;
     json_t *sys = json_arr();
     if (system) json_push_str(sys, system);
@@ -2129,6 +2278,7 @@ char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const
     o.disable_reasoning = effort == EFFORT_OFF;
     o.cancel = &a->agent->cancel;
     json_t *r = ai_complete(m, &ctx, &o);
+    if (usage_purpose) app_note_side_usage(a, usage_purpose, r);
     char *text = NULL;
     const char *stop = json_get_str(r, "stopReason");
     if (!str_eq(stop, "error") && !str_eq(stop, "aborted")) text = ai_message_text(r);
@@ -2532,6 +2682,7 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
     o.cursor_exec = NULL;
     eph_ud_t x = {.e = e};
     json_t *r = ai_stream(model, &ctx, &o, eph_event, &x);
+    if (e->usage_purpose) app_note_side_usage(a, e->usage_purpose, r); /* billed even when it ends in an error */
     if (!e->conversation_key) { /* a one-shot side id: its chain would pin the conversation, its socket stay open */
         anth_threads_release_session(sid);
         rws_release_session(sid);
@@ -2857,8 +3008,8 @@ char *app_generate_title_with(app_t *a, const char *text, const char *system_pro
     char *snippet = xasprintf("%.2000s", text);
     char *title = NULL;
     for (size_t i = 0; i < models.n && !title && !a->agent->cancel; i++)
-        title = app_complete_text(a, models.v[i], sys, snippet, EFFORT_OFF);
-    if (!models.n && a->model) title = app_complete_text(a, a->model, sys, snippet, EFFORT_OFF);
+        title = app_complete_text_for(a, models.v[i], sys, snippet, EFFORT_OFF, "title");
+    if (!models.n && a->model) title = app_complete_text_for(a, a->model, sys, snippet, EFFORT_OFF, "title");
     mr_pool_free(&models);
     free(snippet);
     free(sys);
@@ -2886,6 +3037,7 @@ static void maybe_title(app_t *a) {
     /* the side request started when the reply began; give it a moment, then apply */
     title_wait(a, 3000);
     title_apply(a);
+    app_flush_warm_usage(a); /* the title's model_usage entries */
 }
 
 /* omp's context-maintenance trigger: thresholdTokens (>0) overrides thresholdPercent (>0); both -1 =
@@ -3163,6 +3315,8 @@ int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
     /* the pending xd:// mount delta rides with the next user prompt, right before it */
     json_t *xn = xdnotice_take(a);
     if (xn) json_push(msgs, xn);
+    json_t *sn = autolearn_take_skill_notice(a); /* skills written or found since the prompt listed them */
+    if (sn) json_push(msgs, sn);
     json_push(msgs, msg_user_typed(content));
     if (!apply_auto_thinking(a, text)) {
         json_free(msgs);
@@ -3207,20 +3361,13 @@ bool app_is_mcp_prompt_command(app_t *a, const char *text) {
 char *app_expand_input(app_t *a, const char *text, bool mcp) {
     char *cur = xstrdup(text ? text : "");
     if (cur[0] == '/' && mcp) {
-        /* #tryExecuteCustomCommand: `key=value` args become the prompt's arguments; a failure or empty
-         * result consumes the input */
+        /* #tryExecuteCustomCommand: the typed tokens become the prompt's arguments (mapPromptArguments); a failure
+         * or empty result consumes the input */
         char *args;
         json_t *c = mcp_command_for(a, cur, &args);
         if (c) {
             strvec_t av = commands_parse_args(args);
-            json_t *pa = json_obj();
-            for (size_t i = 0; i < av.n; i++) {
-                const char *eq = strchr(av.v[i], '=');
-                if (!eq || eq == av.v[i]) continue;
-                char *k = xstrndup(av.v[i], (size_t)(eq - av.v[i]));
-                json_set_str(pa, k, eq + 1);
-                free(k);
-            }
+            json_t *pa = mcp_map_prompt_arguments(json_get(c, "arguments"), &av);
             strvec_free(&av);
             char *err = NULL;
             char *r = mcp_run_prompt(a->mcp, json_get_str(c, "server"), json_get_str(c, "prompt"), pa, &err);
@@ -3848,6 +3995,8 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
     pthread_t watcher;
     watch_ctx_t wc = {pc, child->agent, 0};
     bool watching = pc && pthread_create(&watcher, NULL, cancel_watch, &wc) == 0;
+    free(child->cost_refusal);
+    child->cost_refusal = NULL;
     bool refused = app_prompt(child, sb_cstr(&p), NULL) == APP_PROMPT_REFUSED;
     wc.done = 1;
     if (watching) pthread_join(watcher, NULL);
@@ -3859,6 +4008,7 @@ char *app_run_subagent(tool_env_t *env, const char *agent_name, const char *assi
         json_set_str(*details, "agent", agent_name ? agent_name : "task");
         if (refused && child->prompt_refusal) json_set_str(*details, "error", child->prompt_refusal);
         else if (last && json_get_str(last, "errorMessage")) json_set_str(*details, "error", json_get_str(last, "errorMessage"));
+        else if (child->cost_refusal && !child->agent->cancel) json_set_str(*details, "error", child->cost_refusal);
     }
     costgate_merge_child(parent, child->total_cost);
     app_free(child);
@@ -3924,6 +4074,7 @@ static void app_apply_cwd(app_t *a, const char *cwd) {
     a->env->settings = settings_effective();
     discovery_free(&a->disc);
     discover_all(cwd, &a->disc, a->opts.no_context_files, a->opts.no_skills, a->opts.no_rules);
+    discovery_copy_skills(&a->prompt_skills, &a->disc);
     a->env->disc = &a->disc;
     ttsr_free(a->ttsr);
     a->ttsr = ttsr_new(&a->disc);

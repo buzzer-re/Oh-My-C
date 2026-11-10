@@ -860,7 +860,7 @@ static json_t *template_ctx(const json_t *tool_names) {
     json_set_bool(ctx, "js", false);
     json_set_bool(ctx, "evalTools", false);
     json_set_bool(ctx, "spawns", false);
-    json_set_bool(ctx, "eagerDelegation", true);
+    json_set_bool(ctx, "eagerDelegation", false); /* only read under `spawns` (off) */
     json_set_bool(ctx, "waitTool", tool_names ? names_have(tool_names, "wait") : true);
     json_set_bool(ctx, "autoBackgroundEnabled", false);
     json_set_bool(ctx, "autoProvision", true);

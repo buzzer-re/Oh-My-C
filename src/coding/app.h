@@ -57,6 +57,14 @@ struct app {
     session_t *session;
     tool_env_t *env;
     discovery_t disc;
+    /* the skills the system prompt lists: only a full refresh (startup, cwd change) moves it, so a skill written or
+     * rediscovered mid-session keeps the prompt byte-stable and reaches the model as a skill notice (autolearn.c) */
+    discovery_t prompt_skills;
+    int64_t next_unknown_skill_rediscovery; /* earliest ms a skill:// miss may rediscover again */
+    struct skill_graveyard *skill_graveyard; /* replaced skill lists (autolearn.c) */
+    json_t *side_usage;                      /* pending model_usage records of side requests (under mu) */
+    bool power_held;                         /* this run holds a sleep-prevention reference (power.c) */
+    char *fixed_dead_end_session;            /* session the fixed-context compaction dead end was announced for */
     file_cmds_t file_cmds;     /* `commands/<name>.md` slash commands + bundled /init (commands.c) */
     prompt_tpls_t prompt_tpls; /* prompts/<name>.md templates */
     const ai_model_t *model;
@@ -73,6 +81,7 @@ struct app {
     int retry_offset;
     int retry_saga; /* attempt of the last auto_retry_start (0: no retry saga open) */
     char *prompt_refusal; /* why the last APP_PROMPT_REFUSED prompt was refused (owned) */
+    char *cost_refusal;   /* a subagent's cost-cap refusal of a mid-run model request (owned; costgate.c) */
     int stall_continues; /* committed-text stream-stall continuations this prompt (turn_recovery.h) */
     bool text_buffered;  /* streamed text is not committed to an output sink yet (subagents, print-mode text):
                           * omp setTextOutputCommitted(false), a failed turn's partial text is replay-safe */
@@ -345,6 +354,9 @@ typedef struct {
     void (*on_text_delta)(void *ud, const char *delta); /* called on the requesting thread */
     void *ud;
     volatile sig_atomic_t *cancel;
+    /* onUsage: journal the billed request (errors included) as an off-transcript model_usage entry of this purpose
+     * and charge it to the cost gate (NULL: not recorded) */
+    const char *usage_purpose;
 } app_ephemeral_t;
 /* Returns the final assistant message (toolCall blocks dropped, owned) and *reply (owned: trimmed, deduped when
  * asked), or NULL with *err (owned; "Request was aborted" after a cancel). */
@@ -397,6 +409,12 @@ char *app_generate_title_from(app_t *a, const char *text);
 /* same with a custom system prompt (NULL = title-system.md); owned raw reply or NULL */
 char *app_generate_title_with(app_t *a, const char *text, const char *system_prompt);
 char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const char *user, ai_effort_t effort);
+/* the same, journaling the billed request as a model_usage entry of `usage_purpose` (NULL: none) */
+char *app_complete_text_for(app_t *a, const ai_model_t *m, const char *system, const char *user, ai_effort_t effort,
+                            const char *usage_purpose);
+/* an off-transcript side request billed `msg` (any thread): queued as a model_usage entry {purpose, api, provider,
+ * model, usage, stopReason, errorMessage?} and charged to the cost gate when the session writer next flushes */
+void app_note_side_usage(app_t *a, const char *purpose, const json_t *msg);
 /* child session for subagent `agent_name` (agents dirs); model_override (pattern) and append_prompt are optional */
 app_t *app_subagent_new(app_t *parent, const char *agent_name, const char *model_override, const char *append_prompt,
                         char **err);

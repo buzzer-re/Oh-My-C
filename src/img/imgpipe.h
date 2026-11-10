@@ -50,6 +50,8 @@ bool img_webp_excluded_by_env(void);
  * owned reason ("invalid base64 image data", "empty image data", "declared X but contains Y",
  * "Image: decode failed"). Verdicts are cached by payload hash. */
 char *img_decode_failure_reason(const char *b64, const char *mime);
+/* jpegStreamIsComplete: the JPEG marker walk reaches an EOI (truncated scans are rejected) */
+bool img_jpeg_stream_complete(const unsigned char *bytes, size_t n);
 /* Strict standard-base64 validation (pi-utils base64ImageDataFailureReason); NULL when valid. Static. */
 const char *img_b64_failure(const char *b64, size_t len);
 

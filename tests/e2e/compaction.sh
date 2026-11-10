@@ -105,6 +105,23 @@ import json, sys
 rs = [json.loads(l) for l in open(sys.argv[1])]
 rs = [r for r in rs if r["path"] == "/v1/responses"]
 print("leak" if "internal_chat_message_metadata_passthrough" in json.dumps(rs[-1]["body"]["input"]) else "clean")' "$T/cprov.jsonl"
+# a provider switch away from an OpenAI remote compaction (omp f470ea46f9, b899f57f13): the new model cannot replay the
+# payload, so it reads the history behind it instead of the placeholder summary; switching back replays it again
+cagent "$T/cg3s" $'modelRoles:\n  default: mockr/mock-r\ncompaction:\n  keepRecentTokens: 10'
+CG3M=$(cat "$T/req.jsonl" 2>/dev/null | wc -l)
+OMC_CODING_AGENT_DIR="$T/cg3s" "${CR[@]}" '{"type":"prompt","message":"first question"}' '{"type":"prompt","message":"second question"}' \
+    '{"type":"compact"}' '{"type":"set_model","provider":"mock","modelId":"mock-1"}' '{"type":"prompt","message":"say:after the switch"}' \
+    '{"type":"set_model","provider":"mockr","modelId":"mock-r"}' '{"type":"prompt","message":"back on responses"}' > "$T/cg3s.out"
+check "remote compaction switch" "raw history=True placeholder=False back replays=True"  python3 -I -c '
+import json, sys
+rs = [json.loads(l) for l in open(sys.argv[1])][int(sys.argv[3]):]
+r = [x for x in rs if "say:after the switch" in json.dumps(x.get("messages", [])[-1:])][-1]
+body = json.dumps(r["messages"])
+pv = [json.loads(l) for l in open(sys.argv[2])]
+back = [x for x in pv if x["path"] == "/v1/responses" and "back on responses" in json.dumps(x["body"]["input"])][-1]
+enc = any(i.get("type") == "compaction" for i in back["body"]["input"])
+print("raw history=%s placeholder=%s back replays=%s" % ("first question" in body and "second question" in body,
+      "Remote compaction preserved" in body, enc))' "$T/req.jsonl" "$T/cprov.jsonl" "$CG3M"
 # Anthropic compaction beta: `compaction` request param + beta, the signed block replays at the head of the tail
 : > "$T/cprov.jsonl"
 cagent "$T/cg4" $'modelRoles:\n  default: mocka/mock-a\ncompaction:\n  keepRecentTokens: 10'

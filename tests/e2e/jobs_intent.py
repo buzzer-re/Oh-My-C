@@ -44,7 +44,7 @@ subprocess.run([omc, "--model", "mock/mock-1", "--no-session", "-p", "calls:" + 
 msgs = tool_messages()
 check("proc listing leads with intent", len(msgs) > 1 and " — Watch the nightly build — sleep 1; echo built" in msgs[1], msgs)
 wtext = msgs[2] if len(msgs) > 2 else ""
-check("wait intent", "## Completed (1)\n\n### bg_1 [bash] — completed\nIntent: Watch the nightly build\nLabel: sleep 1; echo built\nDelivery: delivered directly to wait.\n```\nbuilt" in wtext, wtext)
+check("wait intent", "## Completed (1)\n\n### bg_1 [bash] — completed\nIntent: Watch the nightly build\nLabel: sleep 1; echo built\nDelivery: delivered by this wait — it finished while you were waiting.\n```\nbuilt" in wtext, wtext)
 
 # /jobs and /jobs full under a pty
 with open(os.path.join(agent, "config.yml"), "w") as f:

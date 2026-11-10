@@ -76,6 +76,8 @@ size_t jobs_running_watchable(jobs_t *j);
 size_t jobs_undelivered(jobs_t *j);
 /* settled, not yet delivered jobs as [{jobId,label,type,result,failed,durationMs,agentId?}]; marks them delivered */
 json_t *jobs_take_finished(jobs_t *j);
+/* settledJobIds: ids of the jobs that have already settled (a call's entry state) */
+strvec_t jobs_settled_ids(jobs_t *j);
 /* block until a job settles (returns undelivered count), nothing runs, cancel, or max_ms; service watchers count
  * only with include_services */
 int jobs_wait_any(jobs_t *j, volatile sig_atomic_t *cancel, int64_t max_ms);

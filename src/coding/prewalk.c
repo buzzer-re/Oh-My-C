@@ -228,6 +228,8 @@ int prewalk_restart(app_t *a, const ai_model_t *source, const char *source_level
 static bool implementation_action(const json_t *r) {
     const char *tn = json_get_str(r, "toolName");
     if (!str_eq(tn, "edit") && !str_eq(tn, "write")) return false;
+    /* a write that touched no files (a peer message, a reply, a cancellation) is coordination, not implementation */
+    if (json_get_bool(json_get(r, "details"), "touchesNoFiles", false)) return false;
     const json_t *x = json_get(json_get(r, "details"), "xdev");
     if (!x || json_is_null(x)) return true;
     const char *tier = json_get_str(x, "tier");

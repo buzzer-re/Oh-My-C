@@ -157,6 +157,9 @@ typedef struct {
     /* Before each model request of the loop (omp addBeforeModelCall): return true to end the run there, before
      * the turn opens (cost cap, --max-time deadline). */
     bool (*before_model_call)(void *ud, agent_t *a);
+    /* The loop parked at the process pause gate (paused) or resumed from it (omp Agent.onPauseChange). Called on the
+     * loop's thread without agent locks held. */
+    void (*pause_change)(void *ud, agent_t *a, bool paused);
     void *ud;
 } agent_hooks_t;
 

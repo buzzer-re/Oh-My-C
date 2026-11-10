@@ -28,6 +28,12 @@ char *autolearn_instructions(agent_t *ag);
 /* live `autolearn.*` / `memory.backend` change: re-register learn/manage_skill, (re)start the backend and
  * rebuild the prompt (session built-in reconcile + applyMemoryBackend). No-op while a run is in flight. */
 void autolearn_reconcile(struct app *a);
+/* skill:// miss in a top-level session: rediscover skills (rate-limited) and adopt a changed list (tool_env_t hook) */
+struct tool_env;
+bool autolearn_rediscover_skills(struct tool_env *env);
+/* the hidden `skill-notice` for the next user prompt (owned developer message, NULL when nothing changed) */
+json_t *autolearn_take_skill_notice(struct app *a);
+void autolearn_free_skill_graveyard(struct app *a); /* skill lists the registry replaced */
 
 /* controller: installed for top-level sessions; reads autolearn.* live at every stop */
 autolearn_t *autolearn_new(struct app *a);

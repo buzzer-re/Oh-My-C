@@ -250,7 +250,8 @@ static char *fork_title(job_t *j) {
     json_set_bool(c, "nerdFonts", false);
     char *req = prompt_render("coding-agent/prompts/system/title-fork.md", c);
     json_free(c);
-    app_ephemeral_t e = {.prompt_text = req ? req : "", .streaming = j->streaming, .cancel = &a->agent->cancel};
+    app_ephemeral_t e = {.prompt_text = req ? req : "", .streaming = j->streaming, .cancel = &a->agent->cancel,
+                         .usage_purpose = "title"};
     char *reply = NULL, *err = NULL;
     json_t *r = app_ephemeral_turn(a, &e, &reply, &err);
     char *out = r && reply ? title_parse_card_reply(reply, icons) : NULL;

@@ -135,4 +135,8 @@ if not any("call:task:" in json.dumps(r["messages"]) for r in later):
     fail("parent turn", [json.dumps(r["messages"])[:200] for r in later])
 if any("Complete assignment thoroughly" in json.dumps(r["messages"]) for r in later):
     fail("subagent request past the cap", json.dumps(later[-1]["messages"])[-300:])
+# executor.ts (omp 3b063cc7af): the cap's refusal is the capped subagent's error, not an empty result
+res = [f for f in frames if f.get("type") == "message_end" and f["message"].get("customType") == "async-result"]
+if not res or 'status="failed"' not in res[-1]["message"]["content"] or "<error>Cost cap reached: this session spent" not in res[-1]["message"]["content"]:
+    fail("subagent cap refusal as its error", json.dumps(res[-1:])[:600])
 print("skill cost ok")
