@@ -71,6 +71,12 @@ def props(body):
     out = {}
     i = 0
     while i < len(body):
+        g = re.compile(r"\s*(?://[^\n]*\n\s*)*(?:/\*.*?\*/\s*)*get\s+([A-Za-z_]\w*)\s*\(\s*\)\s*\{", re.S).match(body, i)
+        if g:  # a getter (`get description() { ... }`): its body as raw text, flagged so a change is reported, not guessed
+            j = match_bracket(body, g.end() - 1) + 1
+            out[g.group(1)] = "<getter>" + body[g.end() : j - 1].strip()
+            i = j + 1 if j < len(body) and body[j] == "," else j
+            continue
         m = re.compile(r"\s*(?://[^\n]*\n\s*)*(?:/\*.*?\*/\s*)*([A-Za-z_]\w*)\s*(:|\(|,)", re.S).match(body, i)
         if not m:
             break
@@ -190,7 +196,11 @@ def describe(sid, e):
         v, ok = field(e, p["values"], unresolved, "values")
         if ok:
             r["values"] = v
-    desc = strtext(ui.get("description"))
+    raw = ui.get("description")
+    if raw and raw.startswith("<getter>"):  # computed at runtime upstream (key hints etc.): write it by hand
+        unresolved.append("description: computed by a getter; update its text by hand")
+        raw = None
+    desc = strtext(raw)
     if desc:
         r["description"] = desc
     if "env" in p:
