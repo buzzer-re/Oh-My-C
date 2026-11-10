@@ -109,6 +109,9 @@ typedef struct tool_env {
     void *session;             /* app session (for task tool) */
     struct shell *shell;       /* persistent bash session (lazy) */
     const discovery_t *disc;   /* skills/rules for skill:// and rule:// (borrowed) */
+    /* a skill:// name no loaded skill owns: rediscover the session's skills (rate-limited); true when the list
+     * changed and the name is worth looking up again (NULL: a fixed list, e.g. a subagent's) */
+    bool (*rediscover_skills)(struct tool_env *env);
     /* called after write/edit lands a file; returns owned text appended to the result (e.g. LSP diagnostics) */
     char *(*after_write)(struct tool_env *env, const char *abs_path);
     char *(*after_edit)(struct tool_env *env, const char *abs); /* edit-tool variant (lsp.diagnosticsOnEdit) */

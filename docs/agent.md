@@ -280,6 +280,14 @@ single-slot local server the first prompt queues behind them (in omp too). With
 thinking disabled they stay short: a local Qwen gets `enable_thinking: false` from the detected compat
 (docs/ai.md).
 
+The system prompt lists a snapshot of the skills taken at startup (and on a cwd change). A skill that `learn` or
+`manage_skill` writes or deletes mid-session reloads the registry only, so `skill://` and `/skill:` find it at once
+while the prompt stays byte-identical for the provider cache. A `skill://` name no loaded skill owns rediscovers the
+main session's skills (at most once every 2 seconds; a subagent's list is fixed). The model learns of what changed
+through a hidden `skill-notice` message (`prompts/system/skill-notice.md`) that rides with the next user prompt:
+skills added, skills whose description changed, and skills removed, compared with the prompt's list plus the notices
+still in context. It is sent only while `skillful` is on and `read` is active (session-tools.ts `takeSkillNotice`).
+
 **Rules** (markdown with `description`, `globs`, `alwaysApply`, `condition`, `scope`, ...).
 Sources: `.omc|.omp/rules`, `<agent dir>/rules`, `RULES.md`, `.cursor/rules/*.mdc`,
 `.cursorrules`, `.windsurfrules`, `.clinerules`, `.github/instructions/*.instructions.md`, and omp's

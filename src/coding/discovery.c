@@ -650,12 +650,7 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
     strvec_free(&chain);
 }
 
-void discovery_free(discovery_t *d) {
-    for (size_t i = 0; i < d->files.n; i++) {
-        free(d->files.v[i].path);
-        free(d->files.v[i].content);
-    }
-    vec_free(&d->files);
+void discovery_free_skills(discovery_t *d) {
     for (size_t i = 0; i < d->skills.n; i++) {
         free(d->skills.v[i].name);
         free(d->skills.v[i].description);
@@ -663,6 +658,36 @@ void discovery_free(discovery_t *d) {
         free(d->skills.v[i].dir);
     }
     vec_free(&d->skills);
+}
+
+void discovery_copy_skills(discovery_t *dst, const discovery_t *src) {
+    discovery_free_skills(dst);
+    for (size_t i = 0; src && i < src->skills.n; i++) {
+        const skill_t *s = &src->skills.v[i];
+        skill_t c = {xstrdup(s->name), xstrdup(s->description ? s->description : ""), s->path ? xstrdup(s->path) : NULL,
+                     s->dir ? xstrdup(s->dir) : NULL, s->hide, s->managed};
+        vec_push(&dst->skills, c);
+    }
+}
+
+bool discovery_same_skills(const discovery_t *a, const discovery_t *b) {
+    if (a->skills.n != b->skills.n) return false;
+    for (size_t i = 0; i < a->skills.n; i++) {
+        bool held = false;
+        for (size_t k = 0; !held && k < b->skills.n; k++)
+            held = str_eq(a->skills.v[i].name, b->skills.v[k].name) && str_eq(a->skills.v[i].path, b->skills.v[k].path);
+        if (!held) return false;
+    }
+    return true;
+}
+
+void discovery_free(discovery_t *d) {
+    for (size_t i = 0; i < d->files.n; i++) {
+        free(d->files.v[i].path);
+        free(d->files.v[i].content);
+    }
+    vec_free(&d->files);
+    discovery_free_skills(d);
     for (size_t i = 0; i < d->rules.n; i++) {
         rule_t *r = &d->rules.v[i];
         free(r->name);

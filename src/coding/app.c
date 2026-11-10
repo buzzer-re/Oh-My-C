@@ -1635,11 +1635,13 @@ void app_rebuild_system_prompt(app_t *a) {
     strvec_free(&routed);
     strvec_t roots = {0};
     if (a->session) roots = session_additional_dirs(a->session);
+    discovery_t listed = a->disc; /* the prompt renders its skill snapshot, not the live registry */
+    listed.skills = a->prompt_skills.skills;
     sysprompt_opts_t so = {.cwd = a->cwd,
                            .additional_roots = &roots,
                            .model_name = label,
                            .tool_names = &names,
-                           .disc = &a->disc,
+                           .disc = &listed,
                            .custom_prompt = a->sys_custom,
                            .custom_template = a->opts.subagent ? NULL : a->opts.system_prompt_template,
                            .append_prompt = a->sys_append,
@@ -1821,6 +1823,8 @@ app_t *app_create(const app_opts_t *o, char **err) {
         prompt_templates_load(a->cwd, &a->prompt_tpls);
     }
     a->env->disc = &a->disc;
+    discovery_copy_skills(&a->prompt_skills, &a->disc);
+    if (!o->subagent) a->env->rediscover_skills = autolearn_rediscover_skills; /* a subagent's list is fixed */
     a->ttsr = ttsr_new(&a->disc);
     if (o->mcp) {
         a->mcp = o->mcp;
@@ -1983,6 +1987,8 @@ void app_free(app_t *a) {
     if (a->owns_lsp) lsp_manager_free(a->lsp);
     dap_manager_free(a->dap);
     discovery_free(&a->disc);
+    discovery_free(&a->prompt_skills);
+    autolearn_free_skill_graveyard(a);
     commands_free(&a->file_cmds);
     prompt_templates_free(&a->prompt_tpls);
     free(a->cwd);
@@ -3153,6 +3159,8 @@ int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
     /* the pending xd:// mount delta rides with the next user prompt, right before it */
     json_t *xn = xdnotice_take(a);
     if (xn) json_push(msgs, xn);
+    json_t *sn = autolearn_take_skill_notice(a); /* skills written or found since the prompt listed them */
+    if (sn) json_push(msgs, sn);
     json_push(msgs, msg_user_typed(content));
     if (!apply_auto_thinking(a, text)) {
         json_free(msgs);
@@ -3913,6 +3921,7 @@ static void app_apply_cwd(app_t *a, const char *cwd) {
     a->env->settings = settings_effective();
     discovery_free(&a->disc);
     discover_all(cwd, &a->disc, a->opts.no_context_files, a->opts.no_skills, a->opts.no_rules);
+    discovery_copy_skills(&a->prompt_skills, &a->disc);
     a->env->disc = &a->disc;
     ttsr_free(a->ttsr);
     a->ttsr = ttsr_new(&a->disc);

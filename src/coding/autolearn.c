@@ -219,9 +219,9 @@ int autolearn_delete_skill(const char *raw, char **err) {
 
 /* ---------- session skill refresh (session.refreshSkills) ---------- */
 
-typedef struct graveyard {
+typedef struct skill_graveyard {
     discovery_t disc;
-    struct graveyard *next;
+    struct skill_graveyard *next;
 } graveyard_t;
 
 struct autolearn {
@@ -234,29 +234,139 @@ struct autolearn {
     bool th_running, in_flight, pending;
     agent_t *capture;
     volatile sig_atomic_t stop;
-    graveyard_t *dead; /* replaced skill lists: concurrent skill:// readers may still hold pointers */
 };
 
+/* swap the session's skill registry for `fresh`'s skills; the replaced list stays alive until the session ends
+ * because concurrent skill:// readers may still hold pointers into it */
+static void adopt_skills(app_t *a, discovery_t *fresh) {
+    graveyard_t *g = xcalloc(1, sizeof *g);
+    pthread_mutex_lock(&a->mu);
+    g->disc.skills = a->disc.skills;
+    a->disc.skills = fresh->skills;
+    fresh->skills.v = NULL;
+    fresh->skills.n = fresh->skills.cap = 0;
+    g->next = a->skill_graveyard;
+    a->skill_graveyard = g;
+    pthread_mutex_unlock(&a->mu);
+}
+
+void autolearn_free_skill_graveyard(app_t *a) {
+    while (a->skill_graveyard) {
+        graveyard_t *g = a->skill_graveyard;
+        a->skill_graveyard = g->next;
+        discovery_free(&g->disc);
+        free(g);
+    }
+}
+
+/* session-tools.ts reloadSkills: after a tool wrote or deleted a skill, rediscover for the registry only
+ * (skill:// and /skill: resolve it at once). The system prompt keeps its list so the provider cache prefix
+ * survives; autolearn_take_skill_notice tells the model instead. */
 static void refresh_skills(app_t *a) {
     if (a->opts.no_skills) return;
     discovery_t fresh = {0};
     discover_all(a->cwd, &fresh, true, false, true);
+    adopt_skills(a, &fresh);
+    discovery_free(&fresh);
+}
+
+/* UNKNOWN_SKILL_REDISCOVERY_INTERVAL_MS: a typo read in a loop costs one pass per interval */
+#define UNKNOWN_SKILL_REDISCOVERY_INTERVAL_MS 2000
+
+/* rediscoverSkillsForUnknownName + #adoptNewSkills: a skill:// name no loaded skill owns (one created or installed
+ * since) rediscovers, at most once per interval; the result is adopted only when the list differs. Concurrent
+ * misses share one pass (the skill mutex). Returns whether the registry changed. */
+bool autolearn_rediscover_skills(tool_env_t *env) {
+    app_t *a = env ? env->session : NULL;
+    if (!a || a->opts.no_skills) return false;
+    static pthread_mutex_t pass_mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&pass_mu);
+    int64_t now = now_ms();
+    if (now < a->next_unknown_skill_rediscovery) {
+        pthread_mutex_unlock(&pass_mu);
+        return false;
+    }
+    a->next_unknown_skill_rediscovery = now + UNKNOWN_SKILL_REDISCOVERY_INTERVAL_MS;
+    discovery_t fresh = {0};
+    discover_all(a->cwd, &fresh, true, false, true);
+    bool changed = !discovery_same_skills(&fresh, &a->disc);
+    if (changed) adopt_skills(a, &fresh);
+    discovery_free(&fresh);
+    pthread_mutex_unlock(&pass_mu);
+    return changed;
+}
+
+/* session-tools.ts takeSkillNotice: the hidden notice of skills the live registry has gained, changed or lost since
+ * the system prompt and the notices still in context listed them. A changed description is announced again because
+ * the model routes on it. Gated like the prompt's skill list: `skillful` on and an enabled tool that reads
+ * skill:// (read). */
+json_t *autolearn_take_skill_notice(app_t *a) {
+    if (!a || !a->agent || !settings_bool("skillful", true)) return NULL;
+    if (!agent_find_tool(a->agent, "read")) return NULL;
+    json_t *known = json_obj(); /* name -> description */
+    for (size_t i = 0; i < a->prompt_skills.skills.n; i++) {
+        const skill_t *s = &a->prompt_skills.skills.v[i];
+        if (!s->hide) json_set_str(known, s->name, s->description ? s->description : "");
+    }
+    pthread_mutex_lock(&a->agent->mu);
+    json_t *m;
+    json_arr_foreach(a->agent->messages, i, m) {
+        if (!str_eq(json_get_str(m, "customType"), "skill-notice")) continue;
+        const json_t *d = json_get_obj(m, "details");
+        const json_t *ann = json_get_arr(d, "announced"), *rm = json_get_arr(d, "removed"), *x;
+        if (!ann || !rm) continue;
+        json_arr_foreach(ann, k, x) if (json_get_str(x, "name") && json_get_str(x, "description"))
+            json_set_str(known, json_get_str(x, "name"), json_get_str(x, "description"));
+        json_arr_foreach(rm, k, x) if (json_sv(x)) json_del(known, json_sv(x));
+    }
+    pthread_mutex_unlock(&a->agent->mu);
+    json_t *added = json_arr(), *updated = json_arr(), *removed = json_arr(), *announced = json_arr();
     pthread_mutex_lock(&a->mu);
-    graveyard_t *g = xcalloc(1, sizeof *g);
-    g->disc.skills = a->disc.skills;
-    a->disc.skills = fresh.skills;
-    fresh.skills.v = NULL;
-    fresh.skills.n = fresh.skills.cap = 0;
-    if (a->autolearn) {
-        g->next = a->autolearn->dead;
-        a->autolearn->dead = g;
-    } else {
-        discovery_free(&g->disc);
-        free(g);
+    for (int pass = 0; pass < 2; pass++) /* added before updated, like [...added, ...updated] */
+        for (size_t i = 0; i < a->disc.skills.n; i++) {
+            const skill_t *s = &a->disc.skills.v[i];
+            if (s->hide) continue;
+            const char *was = json_get_str(known, s->name);
+            const char *desc = s->description ? s->description : "";
+            if (pass == 0 ? was != NULL : (!was || str_eq(was, desc))) continue;
+            json_t *e = json_obj();
+            json_set_str(e, "name", s->name);
+            json_set_str(e, "description", desc);
+            json_push(announced, json_clone(e));
+            json_push(pass == 0 ? added : updated, e);
+        }
+    const char *k;
+    json_t *v;
+    json_obj_foreach(known, ki, k, v) {
+        bool live = false;
+        for (size_t i = 0; !live && i < a->disc.skills.n; i++) live = !a->disc.skills.v[i].hide && str_eq(a->disc.skills.v[i].name, k);
+        if (!live) json_push_str(removed, k);
     }
     pthread_mutex_unlock(&a->mu);
-    discovery_free(&fresh);
-    app_rebuild_system_prompt(a);
+    json_free(known);
+    if (!json_len(added) && !json_len(updated) && !json_len(removed)) {
+        json_free(added);
+        json_free(updated);
+        json_free(removed);
+        json_free(announced);
+        return NULL;
+    }
+    json_t *ctx = json_obj();
+    json_set(ctx, "added", added);
+    json_set(ctx, "updated", updated);
+    json_set(ctx, "removed", json_clone(removed));
+    char *body = prompt_render("coding-agent/prompts/system/skill-notice.md", ctx);
+    json_free(ctx);
+    json_t *msg = msg_developer_text(body ? body : "");
+    free(body);
+    json_set_str(msg, "customType", "skill-notice");
+    json_set_str(msg, "attribution", "agent");
+    json_set_bool(msg, "display", false);
+    json_t *det = json_obj();
+    json_set(det, "announced", announced);
+    json_set(det, "removed", removed);
+    json_set(msg, "details", det);
+    return msg;
 }
 
 static bool claimed_by_authored(app_t *a, const char *name) {
@@ -680,12 +790,6 @@ void autolearn_free(autolearn_t *al) {
     bool join = al->th_running;
     pthread_mutex_unlock(&al->mu);
     if (join) pthread_join(al->th, NULL);
-    while (al->dead) {
-        graveyard_t *g = al->dead;
-        al->dead = g->next;
-        discovery_free(&g->disc);
-        free(g);
-    }
     pthread_mutex_destroy(&al->mu);
     free(al);
 }

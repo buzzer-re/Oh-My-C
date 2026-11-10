@@ -57,6 +57,11 @@ struct app {
     session_t *session;
     tool_env_t *env;
     discovery_t disc;
+    /* the skills the system prompt lists: only a full refresh (startup, cwd change) moves it, so a skill written or
+     * rediscovered mid-session keeps the prompt byte-stable and reaches the model as a skill notice (autolearn.c) */
+    discovery_t prompt_skills;
+    int64_t next_unknown_skill_rediscovery; /* earliest ms a skill:// miss may rediscover again */
+    struct skill_graveyard *skill_graveyard; /* replaced skill lists (autolearn.c) */
     file_cmds_t file_cmds;     /* `commands/<name>.md` slash commands + bundled /init (commands.c) */
     prompt_tpls_t prompt_tpls; /* prompts/<name>.md templates */
     const ai_model_t *model;

@@ -152,6 +152,7 @@ char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err) {
         char *slash = strchr(target, '/');
         if (slash) *slash = 0;
         const skill_t *sk = discovery_find_skill(env->disc, target);
+        if (!sk && env->rediscover_skills && env->rediscover_skills(env)) sk = discovery_find_skill(env->disc, target);
         if (!sk) *err = xasprintf("Unknown skill: %s", target);
         else if (slash && slash[1]) {
             char *p = path_join(sk->dir, slash + 1);
