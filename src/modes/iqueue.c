@@ -499,6 +499,18 @@ void iq_queue_command(ui_t *u, const char *text) {
     if (now) {
         ix_start_prompt(u, msgs.v[0]);
         i = 1;
+        if (!u->worker_running && msgs.n > 1) {
+            /* the first never reached the agent (refused at preflight): the whole list goes back as one `=>` list,
+             * nothing runs ahead of it (omp e0eba274da) */
+            char *cur = tui_editor_get_expanded_text(u->editor);
+            if (!*cur || str_eq(cur, msgs.v[0])) {
+                char *list = ui_format_queue_shorthand(&msgs);
+                tui_editor_set_text(u->editor, list);
+                free(list);
+            }
+            free(cur);
+            i = msgs.n;
+        }
     }
     for (; i < msgs.n; i++) agent_follow_up(u->app->agent, msg_user_text(msgs.v[i]));
     ui_queue_refresh(u);

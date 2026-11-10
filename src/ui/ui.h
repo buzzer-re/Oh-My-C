@@ -305,6 +305,7 @@ tui_component_t *ui_queue_band_new(ui_t *u); /* "Steering · N" / "After yield �
 void ui_queue_refresh(ui_t *u);              /* re-read the agent + compaction queues into the band */
 const char *ui_queue_shorthand(const char *text); /* body after a leading `->` / `=>`, else NULL */
 void ui_split_queued_messages(const char *text, strvec_t *out); /* queue-input.ts splitQueuedMessages */
+char *ui_format_queue_shorthand(const strvec_t *msgs);           /* queue-input.ts formatQueueShorthand */
 
 /* agenthub.c - subagent HUD, Agent Hub (/hub, Alt+A, ←←), transcript viewer, session focus */
 tui_component_t *ui_subagent_hud_new(ui_t *u);

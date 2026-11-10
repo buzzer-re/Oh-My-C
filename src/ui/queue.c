@@ -81,6 +81,21 @@ const char *ui_queue_shorthand(const char *text) {
     return NULL;
 }
 
+/* formatQueueShorthand: `=> msg`, or `=>` over a numbered list whose continuation lines indent 3 */
+char *ui_format_queue_shorthand(const strvec_t *msgs) {
+    if (msgs->n == 1) return xasprintf("=> %s", msgs->v[0]);
+    sb_t b = SB_INIT;
+    sb_append(&b, "=>");
+    for (size_t i = 0; i < msgs->n; i++) {
+        sb_appendf(&b, "\n%zu. ", i + 1);
+        for (const char *p = msgs->v[i]; *p; p++) {
+            if (*p == '\n') sb_append(&b, "\n   ");
+            else sb_putc(&b, *p);
+        }
+    }
+    return sb_detach(&b);
+}
+
 typedef struct {
     size_t line;
     char *indent, *marker;
