@@ -162,6 +162,11 @@ check "args coerced"   $'  - case: case must be boolean (was a number)\n\nReceiv
 check "todo bad op"    'Invalid todo arguments: op must be "init", "start", "done", "rm", "drop", "block", "unblock", "append" or "view" (was "bogus")'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p 'seq:[["todo",{"op":"init","items":["a"]}],["todo",{"op":"start","task":"nope"}]]' >/dev/null 2>&1 </dev/null
 check "todo errors"    $'Errors: Task "nope" not found\nRemaining items (1):'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+# an empty init phase name is `Tasks`; append without a phase joins the active task's phase (omp 60441bea29, 694e9e2079)
+"$B" --model mock/mock-1 --no-session -p 'seq:[["todo",{"op":"init","list":[{"phase":"A","items":["a"]},{"phase":"","items":["b"]}]}],["todo",{"op":"append","items":["c"]}]]' >/dev/null 2>&1 </dev/null
+check "todo append"    $'  - a [in_progress] (A)\n  - c [pending] (A)\n  - b [pending] (Tasks)'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --no-session -p 'call:todo:{"op":"append","phase":"","items":["x"]}' >/dev/null 2>&1 </dev/null
+check "todo append ''" 'Errors: Missing phase name for append operation'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p 'call:task:{}' >/dev/null 2>&1 </dev/null
 check "task shape"     'Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p "bash:sh -c 'kill -9 \$\$'; printf 'x'; sh -c 'kill -SEGV \$\$'; echo after-kill" >/dev/null 2>&1 </dev/null
