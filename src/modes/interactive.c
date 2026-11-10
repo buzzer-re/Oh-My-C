@@ -464,6 +464,7 @@ static void worker_done(void *ud) {
     u->worker_running = false;
     u->wake_suppressed = false; /* a turn ended on its own since the interrupt */
     ui_signals_settle();
+    ui_signals_settle_startup(); /* a startup prompt whose run reported nothing goes back to idle */
     iq_flush_deferred(u);
     plan_exec_resume(u);
     /* deferred `!cmd` results, a pending /compact, queued input left behind by an interrupted run */
@@ -3367,6 +3368,7 @@ static void initial_prompt_cb(void *ud) {
         free(x);
     }
     if (g_start && g_start->more && g_start->more->n) ui_queue_refresh(j->u);
+    if (!j->u->worker_running) ui_signals_settle_startup(); /* rejected before any run */
     free(j->text);
     free(j);
 }
@@ -3528,6 +3530,11 @@ int run_interactive_mode(app_t *a, const char *initial) {
     ui_mcp_install(&u);
     app_set_plan_review_ui(a, true);
     g_pr.u = &u;
+    /* startupRun: setup scenes and the worktree.onStart `ask` question wait on the user before any prompt runs,
+     * so they keep the boot `idle` */
+    bool fresh = !a->opts.resume && !a->opts.continue_recent && !a->opts.fork && !(g_start && g_start->resume_picker);
+    ui_signals_set_startup_run(initial && !ui_setup_pending(a->opts.resume || a->opts.continue_recent) &&
+                               !(fresh && str_eq(settings_str("worktree.onStart", "off"), "ask")));
     tui_post(u.tui, signals_init_cb, &u); /* the terminal title / program status claim the terminal first */
     job_t *init_job = NULL;
     if (initial) {
@@ -3544,8 +3551,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     }
     if (g_start && g_start->resume_picker) tui_post(u.tui, startup_picker_cb, &u);
     /* worktree.onStart applies to fresh launches only */
-    if (!a->opts.resume && !a->opts.continue_recent && !a->opts.fork && !(g_start && g_start->resume_picker))
-        tui_post(u.tui, wt_onstart_cb, &u);
+    if (fresh) tui_post(u.tui, wt_onstart_cb, &u);
     if (g_start && g_start->restore) tui_post(u.tui, restore_cb, &u);
     if (g_start && g_start->notice) add_notice(&u, "info", g_start->notice); /* main.ts notifs */
     /* first-run setup wizard (omp main.ts: stale setupVersion, not resuming, TTY); the welcome intro

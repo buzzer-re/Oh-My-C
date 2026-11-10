@@ -31,6 +31,10 @@ void ui_signals_init(ui_t *u);
 void ui_signals_dispose(void);
 /* setSessionTerminalTitle from the live session name / cwd (rename, new session, resume, title generated) */
 void ui_signals_session_title(void);
+/* before ui_signals_init: a command-line prompt runs once startup ends, so report `working` from the first frame */
+void ui_signals_set_startup_run(bool on);
+/* settleStartupRun: end that hold once the startup prompts are dispatched; a run that reported keeps its status */
+void ui_signals_settle_startup(void);
 /* setRunStatus; kind ("question" | "permission") and msg only for blocked / error */
 void ui_signals_run_status(run_state_t state, const char *kind, const char *msg);
 /* back from a suspend (Ctrl+Z / fg): re-send an idle / working / blocked record */

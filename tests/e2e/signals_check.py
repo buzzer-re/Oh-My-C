@@ -25,10 +25,11 @@ T = lambda t: "\x1b]0;" + t + "\x07"
 R = lambda r: "\x1b]7501;" + r + "\x1b\\"
 want = {
     # a plain turn on a BEL terminal: push, claim, idle, label, working spinner, done, completion BEL, teardown
-    "turn": ["\x1b[22;2t", T("π >"), R("state=idle:app=omc"), T("π > work"), T("π * work"), R("state=working:app=omc"),
+    # the command-line prompt holds `working` from the first frame (omp 5d5142e3fd, d62d143c22: initProgramStatus startupRun)
+    "turn": ["\x1b[22;2t", T("π *"), R("state=working:app=omc"), T("π * work"),
              T("π > work"), R("state=done:app=omc"), "\x07", R("state=clear"), T(""), "\x1b[23;2t"],
     # an OSC 9 terminal (WezTerm) failing with error.notify on, then a completed turn
-    "error": ["\x1b[22;2t", T("π >"), R("state=idle:app=omc"), T("π > work"), T("π * work"), R("state=working:app=omc"),
+    "error": ["\x1b[22;2t", T("π *"), R("state=working:app=omc"), T("π * work"),
               T("π > work"), R("state=error:app=omc:msg=400 bad things (type=invalid_request_error) raw-http-request=<dump>"), "\x1b]9;omc: Stopped with error\x1b\\",
               R("state=clear"), T(""), "\x1b[23;2t"],
 }[kind]
