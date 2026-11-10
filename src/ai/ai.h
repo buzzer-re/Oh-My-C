@@ -176,6 +176,12 @@ typedef struct {
     json_t *(*run)(void *ud, const char *id, const char *name, const json_t *args);
     /* A ToolResultMessage (owned) pairing a resolved toolCall block of the streamed message. */
     void (*result)(void *ud, json_t *tool_result);
+    /* editMaterialization frames (a native StrReplace/Write's read, then its write): `run` without tool events of
+     * their own; NULL falls back to `run` */
+    json_t *(*run_quiet)(void *ud, const char *id, const char *name, const json_t *args);
+    /* ends the live `edit` card of a native StrReplace/Write (tool_execution_end under its result's toolName, from
+     * the materialized write or the server's completion); may be NULL */
+    void (*edit_end)(void *ud, const json_t *tool_result);
     void *ud;
 } ai_cursor_exec_t;
 

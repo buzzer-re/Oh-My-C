@@ -582,6 +582,15 @@ check "cursor shell"    "Tool said: cur-e2e"    "${CENV[@]}" "$B" --model "$CM" 
 check "cursor history"  "user,assistant,tool,assistant"  "${CENV[@]}" "$B" --model "$CM" --session-dir "$T/cur" -c -p "history"
 check "cursor read"     "Read said: cursor line one"     "${CENV[@]}" "$B" --model "$CM" --no-session -p "read:$T/cur/r.txt"
 check "cursor xd read"  "Read said: # debug"              "${CENV[@]}" "$B" --model "$CM" --no-session -p "read:xd://debug"
+printf 'orig\n' > "$T/cur/e.txt"
+check "cursor edit order" "Order: write,shell; Shell said: edited"  "${CENV[@]}" "$B" --model "$CM" --no-session -p "editorder:$T/cur/e.txt"
+printf 'orig\n' > "$T/cur/e2.txt"
+"${CENV[@]}" timeout 30 "$B" --model "$CM" --no-session --mode json -p "editorder:$T/cur/e2.txt" </dev/null > "$T/cur/edit.jsonl" 2>&1
+check "cursor edit card" "edit -1|orig\n+1|edited; no read/write cards"  python3 -I -c 'import json,sys
+ev=[json.loads(l) for l in open(sys.argv[1]) if l.startswith("{")]
+ex=[(e["type"],e.get("toolName")) for e in ev if e.get("type","").startswith("tool_execution") and e.get("toolCallId")=="call_edit_1"]
+end=[e for e in ev if e.get("type")=="tool_execution_end" and e.get("toolCallId")=="call_edit_1"]
+print(end[0]["toolName"], end[0]["result"]["details"]["diff"].split("\n",1)[1].replace("\n","\\n") if ex==[("tool_execution_end","edit")] else ex, end="; no read/write cards\n")' "$T/cur/edit.jsonl"
 check "cursor mcp"      "MCP said: "            "${CENV[@]}" "$B" --model "$CM" --no-session -p 'mcp:glob:{"path":"**/*.txt"}'
 check "cursor end err"  "Connect error resource_exhausted: Error"  "${CENV[@]}" "$B" --model "$CM" --no-session -p "fail"
 check "cursor retry"    "recovered"             "${CENV[@]}" "$B" --model "$CM" --no-session -p "flaky"
