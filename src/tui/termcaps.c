@@ -52,7 +52,7 @@ static bool parse_major_minor(const char *v, int *maj, int *min) {
 /* KNOWN_TERMINALS[id].hyperlinks */
 static bool terminal_hyperlinks(const char *id) {
     static const char *const ON[] = {"kitty", "ghostty", "wezterm", "iterm2", "vscode",
-                                     "alacritty", "otty", "rio", "tern", "monstar"};
+                                     "alacritty", "otty", "rio", "rex", "tern", "monstar"};
     for (size_t i = 0; id && i < ARRAY_LEN(ON); i++)
         if (!strcmp(id, ON[i])) return true;
     return false;
