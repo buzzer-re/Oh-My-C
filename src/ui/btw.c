@@ -1733,7 +1733,7 @@ static void hist_close(btw_ctl_t *c) {
     ui_t *u = c->u;
     tui_overlay_hide(u->tui, &h->base);
     tui_alt_screen(u->tui, false);
-    tui_set_focus(u->tui, &u->editor->base);
+    ui_focus_editor_area(u);
     tui_component_destroy(&h->base);
     btw_req_t *r = c->active;
     if (r && is_active(c, r) && str_eq(latest_status(r), "running")) {
