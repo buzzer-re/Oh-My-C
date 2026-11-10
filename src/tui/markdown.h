@@ -34,6 +34,11 @@ bool tui_md_hyperlinks_supported(void);
 /* Render markdown for `width` columns (upstream Markdown component: marked-style block tokens with the
  * same per-token spacing, list/table/quote layout and code rows); appends owned lines to out. */
 void tui_md_render(const char *text, int width, const tui_md_opts_t *opts, strvec_t *out);
+/* copy-targets.ts extractBlocks: fenced code (any nesting under list items; an unclosed fence runs to the end)
+ * and blockquotes, in document order, tokenized the way the renderer draws them. Code inside a quote stays part
+ * of the quote; indented code is not offered. `text` is owned by the callback; `lang` is borrowed. */
+typedef void (*tui_md_block_fn)(void *ud, bool code, const char *lang, char *text);
+void tui_md_extract_blocks(const char *text, tui_md_block_fn fn, void *ud);
 /* lexDocument(text).findLast(non-space).type === "paragraph" */
 bool tui_md_ends_in_paragraph(const char *text);
 /* Render inline markdown (no wrapping) into an ANSI string (owned). */

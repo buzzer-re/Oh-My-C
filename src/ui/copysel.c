@@ -48,55 +48,13 @@ static void join_lines(const strvec_t *lines, size_t from, size_t to, sb_t *b) {
     }
 }
 
-/* extractBlocks: fenced code (```info ... ```) and `>`-quote runs in document order; an unclosed fence is
- * ordinary text, and fences mask their bodies */
-void ui_md_extract_blocks(const char *text, ui_md_blocks_t *out) {
-    strvec_t lines = {0};
-    const char *p = text ? text : "";
-    for (;;) {
-        const char *nl = strchr(p, '\n');
-        strvec_push_own(&lines, nl ? xstrndup(p, (size_t)(nl - p)) : xstrdup(p));
-        if (!nl) break;
-        p = nl + 1;
-    }
-    sb_t quote = SB_INIT;
-    bool in_quote = false;
-#define FLUSH_QUOTE()                                                   \
-    do {                                                                \
-        if (in_quote) push_block(out, "quote", NULL, sb_detach(&quote)); \
-        in_quote = false;                                               \
-        quote = (sb_t)SB_INIT;                                          \
-    } while (0)
-    for (size_t i = 0; i < lines.n; i++) {
-        const char *line = lines.v[i];
-        if (!strncmp(line, "```", 3)) {
-            size_t close = SIZE_MAX;
-            for (size_t k = i + 1; k < lines.n && close == SIZE_MAX; k++)
-                if (!strncmp(lines.v[k], "```", 3)) close = k;
-            if (close != SIZE_MAX) {
-                FLUSH_QUOTE();
-                char *info = str_trim(line + 3);
-                sb_t code = SB_INIT;
-                join_lines(&lines, i + 1, close, &code);
-                push_block(out, "code", info, sb_detach(&code));
-                free(info);
-                i = close;
-                continue;
-            }
-        }
-        if (line[0] == '>') {
-            const char *body = line + 1;
-            if (*body == ' ') body++;
-            if (in_quote) sb_putc(&quote, '\n');
-            sb_append(&quote, body);
-            in_quote = true;
-        } else FLUSH_QUOTE();
-    }
-    FLUSH_QUOTE();
-#undef FLUSH_QUOTE
-    sb_free(&quote);
-    strvec_free(&lines);
+static void take_block(void *ud, bool code, const char *lang, char *text) {
+    push_block(ud, code ? "code" : "quote", code ? lang : NULL, text);
 }
+
+/* extractBlocks: fenced code and blockquotes in document order, split the way the message renderer draws them
+ * (lexDocument): fences nested in list items count, an unclosed fence runs to the end, quotes take lazy lines */
+void ui_md_extract_blocks(const char *text, ui_md_blocks_t *out) { tui_md_extract_blocks(text, take_block, out); }
 
 /* extractLinks: the hyperlinks the renderer draws (its OSC 8 spans), http(s) only, deduplicated by href */
 void ui_md_extract_links(const char *text, strvec_t *hrefs, strvec_t *labels) {

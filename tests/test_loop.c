@@ -154,12 +154,23 @@ static void test_budget_and_texts(void) {
 
 static void test_copy_targets(void) {
     ui_md_blocks_t b = {0};
-    ui_md_extract_blocks("intro\n```ts\nconst a = 1;\n```\n> one\n>two\ntext\n```\nunclosed\n> q", &b);
+    /* omp 9b0a5564d9: the renderer's tokens: a quote takes its lazy line, an unclosed fence runs to the end */
+    ui_md_extract_blocks("intro\n```ts\nconst a = 1;\n```\n> one\n>two\ntext\n\n```\nunclosed\n> q", &b);
     CHECK(b.n == 3);
     if (b.n == 3) {
         CHECK(str_eq(b.v[0].kind, "code") && str_eq(b.v[0].lang, "ts") && str_eq(b.v[0].text, "const a = 1;"));
-        CHECK(str_eq(b.v[1].kind, "quote") && str_eq(b.v[1].text, "one\ntwo"));
-        CHECK(str_eq(b.v[2].kind, "quote") && str_eq(b.v[2].text, "q")); /* an unclosed fence is ordinary text */
+        CHECK(str_eq(b.v[1].kind, "quote") && str_eq(b.v[1].text, "one\ntwo\ntext"));
+        CHECK(str_eq(b.v[2].kind, "code") && str_eq(b.v[2].lang, "") && str_eq(b.v[2].text, "unclosed\n> q"));
+    }
+    ui_md_blocks_free(&b);
+    /* fences indented under list items are offered; indented code is not; code in a quote stays the quote's */
+    ui_md_extract_blocks("1. step\n\n   ```sh\n   make\n     -j3\n   ```\n2. next\n   - inner\n\n     ~~~py\n     x = 1\n     ~~~\n\n"
+                         "    indented\n\n> ```\n> in quote\n> ```", &b);
+    CHECK(b.n == 3);
+    if (b.n == 3) {
+        CHECK(str_eq(b.v[0].kind, "code") && str_eq(b.v[0].lang, "sh") && str_eq(b.v[0].text, "make\n  -j3"));
+        CHECK(str_eq(b.v[1].kind, "code") && str_eq(b.v[1].lang, "py") && str_eq(b.v[1].text, "x = 1"));
+        CHECK(str_eq(b.v[2].kind, "quote") && str_eq(b.v[2].text, "```\nin quote\n```"));
     }
     ui_md_blocks_free(&b);
 

@@ -1347,6 +1347,28 @@ static void push_item_row(rows_t *out, const row_t *line, const char *first, con
     strvec_free(&w);
 }
 
+/* a list item's body: the first line after the marker, then lines up to the next sibling marker, de-indented to
+ * the item's content column; returns the line after the item */
+static size_t list_item_body(const lines_t *L, const tok_t *t, size_t i, char kind, size_t co, size_t cc, strvec_t *body) {
+    strvec_push(body, skip_task(L->v[i] + co));
+    size_t j = i + 1;
+    while (j < t->to) {
+        const char *s = L->v[j];
+        size_t ji, jc;
+        char jk;
+        if (!is_blank(s) && indent_of(s) < cc && list_item(s, &ji, &jk, NULL, NULL, &jc) && jk == kind) break;
+        size_t k = 0, col = 0;
+        while ((s[k] == ' ' || s[k] == '\t') && col < cc) {
+            col += s[k] == '\t' ? 4 : 1;
+            k++;
+        }
+        strvec_push(body, s + k);
+        j++;
+    }
+    while (body->n > 1 && is_blank(body->v[body->n - 1])) free(vec_pop(body));
+    return j;
+}
+
 static void render_list(const lines_t *L, const tok_t *t, int depth, int width, const md_ctx_t *c, rows_t *out) {
     char kind;
     long start;
@@ -1366,24 +1388,8 @@ static void render_list(const lines_t *L, const tok_t *t, int depth, int width, 
             i++;
             continue;
         }
-        /* item body: first line after the marker, then lines up to the next sibling marker */
         strvec_t body = {0};
-        strvec_push(&body, skip_task(L->v[i] + co));
-        size_t j = i + 1;
-        while (j < t->to) {
-            const char *s = L->v[j];
-            size_t ji, jc;
-            char jk;
-            if (!is_blank(s) && indent_of(s) < cc && list_item(s, &ji, &jk, NULL, NULL, &jc) && jk == kind) break;
-            size_t k = 0, col = 0;
-            while ((s[k] == ' ' || s[k] == '\t') && col < cc) {
-                col += s[k] == '\t' ? 4 : 1;
-                k++;
-            }
-            strvec_push(&body, s + k);
-            j++;
-        }
-        while (body.n > 1 && is_blank(body.v[body.n - 1])) free(vec_pop(&body));
+        size_t j = list_item_body(L, t, i, kind, co, cc, &body);
         char bullet[24];
         if (ordered) snprintf(bullet, sizeof bullet, "%ld. ", start + idx);
         else snprintf(bullet, sizeof bullet, "- ");
@@ -1953,4 +1959,79 @@ void tui_markdown_append(tui_markdown_t *m, const char *delta) {
     free(m->text);
     m->text = t;
     tui_component_request_render(&m->base);
+}
+
+/* ---------- copy-targets.ts extractBlocks over the renderer's own tokens ---------- */
+
+static void extract_tokens(const lines_t *L, const toks_t *T, int depth, tui_md_block_fn fn, void *ud) {
+    for (size_t ti = 0; ti < T->n; ti++) {
+        const tok_t *t = &T->v[ti];
+        if (t->t == T_CODE && t->fenced) {
+            const char *info = "";
+            is_fence(L->v[t->from], NULL, NULL, &info);
+            char *lang = str_trim(info);
+            sb_t b = SB_INIT;
+            size_t end = t->closed ? t->to - 1 : t->to;
+            for (size_t i = t->from + 1; i < end; i++) {
+                const char *x = L->v[i];
+                size_t k = 0; /* indentCodeCompensation: up to the fence's indent */
+                while (k < t->strip && x[k] == ' ') k++;
+                if (i > t->from + 1) sb_putc(&b, '\n');
+                sb_append(&b, x + k);
+            }
+            fn(ud, true, lang, sb_detach(&b));
+            free(lang);
+        } else if (t->t == T_QUOTE) {
+            sb_t b = SB_INIT;
+            for (size_t i = t->from; i < t->to; i++) {
+                const char *x = L->v[i];
+                if (is_quote(x)) {
+                    x = skip_ws(x) + 1;
+                    if (*x == ' ' || *x == '\t') x++;
+                }
+                if (i > t->from) sb_putc(&b, '\n');
+                sb_append(&b, x);
+            }
+            while (b.len && b.s[b.len - 1] == '\n') b.s[--b.len] = 0;
+            fn(ud, false, NULL, sb_detach(&b));
+        } else if (t->t == T_LIST && depth + 1 < MD_MAX_DEPTH) {
+            char kind;
+            size_t ccol, coff, ind;
+            list_item(L->v[t->from], &ind, &kind, NULL, &coff, &ccol);
+            size_t i = t->from;
+            while (i < t->to) {
+                size_t co, cc, ii;
+                char kk;
+                if (!list_item(L->v[i], &ii, &kk, NULL, &co, &cc) || kk != kind) {
+                    i++;
+                    continue;
+                }
+                strvec_t body = {0};
+                i = list_item_body(L, t, i, kind, co, cc, &body);
+                lines_t BL = {(const char *const *)body.v, body.n};
+                toks_t BT = {0};
+                lex_blocks(&BL, 0, BL.n, &BT);
+                extract_tokens(&BL, &BT, depth + 1, fn, ud);
+                vec_free(&BT);
+                strvec_free(&body);
+            }
+        }
+    }
+}
+
+void tui_md_extract_blocks(const char *text, tui_md_block_fn fn, void *ud) {
+    strvec_t lines = {0};
+    const char *p = text ? text : "";
+    for (;;) {
+        const char *nl = strchr(p, '\n');
+        strvec_push_own(&lines, nl ? xstrndup(p, (size_t)(nl - p)) : xstrdup(p));
+        if (!nl) break;
+        p = nl + 1;
+    }
+    lines_t L = {(const char *const *)lines.v, lines.n};
+    toks_t T = {0};
+    lex_blocks(&L, 0, L.n, &T);
+    extract_tokens(&L, &T, 0, fn, ud);
+    vec_free(&T);
+    strvec_free(&lines);
 }
