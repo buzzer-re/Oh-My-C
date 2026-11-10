@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Dev-only e2e helper: reqlog.py <log.jsonl> <path-substring> <expr> [body-substring] prints expr evaluated over the last
-logged request whose path contains the substring (and whose body contains body-substring) (x = entry, h = headers, b = body)."""
+logged request whose path contains the substring (and whose body contains body-substring) (x = entry, h = headers, b = body).
+Background skill-description compressions (skill-descriptions.ts, sent on their own schedule) are skipped, so they can't
+be "the last request" of the turn under test."""
 import json, sys
+BACKGROUND = "Compress into one routing hint"
 r = [json.loads(l) for l in open(sys.argv[1])]
-r = [x for x in r if sys.argv[2] in x["path"] and (len(sys.argv) < 5 or sys.argv[4] in json.dumps(x["body"]))]
+r = [x for x in r if sys.argv[2] in x["path"] and (len(sys.argv) < 5 or sys.argv[4] in json.dumps(x["body"]))
+     and BACKGROUND not in json.dumps(x.get("body", {}))]
 x = r[-1] if r else {}
 h, b = x.get("headers", {}), x.get("body", {})
 v = eval(sys.argv[3])
