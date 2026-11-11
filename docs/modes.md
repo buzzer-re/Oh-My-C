@@ -191,8 +191,14 @@ other frames are shrunk (`…[N chars elided for RPC frame]`).
 
 **Dialogs.** Tools that need the user send `{"type":"extension_ui_request","id","method",...}` and
 wait for `{"type":"extension_ui_response","id","value"|"confirmed"|"cancelled"|"answers"}`. The ask
-tool uses `select` (options plus `Other (type your own)`, `optionDetails` for descriptions) and
-`editor` (`promptStyle`), or one `ask` request after `set_ask_dialog {enabled: true}`; tool approvals
+tool has no form surface here, so it walks its HTML form's named fields in order (omp `askFieldByField`):
+radio groups and single selects are one `select` (options plus `Other (type your own)` for radio groups,
+which then asks an `input`), checkbox groups and multi-selects a `select` loop titled `(N selected) …`
+with a `✔ Done selecting` row (hidden while a required group has nothing checked), empty text inputs an
+`input` with their placeholder, textareas and prefilled inputs an `editor` with `prefill` (`promptStyle`
+for inputs), re-asked as `Question (error)` until valid; `ask.timeout` goes out as `timeout` and a
+deadline submits the remaining defaults. `set_ask_dialog {enabled: true}` only affects the questions
+dialog of `cfg://` change approvals (one `ask` request); tool approvals
 (`tools.approvalMode`) use a `select` with the full prompt as title and `Approve` / `Approve <tool>
 for this session` / grant labels / `Deny`; `login` sends `open_url`, `notify` and `input`. A dialog
 closed by an abort or timeout is followed by a `cancel` request; when stdin closes pending dialogs
@@ -257,7 +263,10 @@ reminders, `current_mode_update` and `config_option_update` when the mode, model
 **Client bridges.** When the client advertises them, the read tool reads through `fs/read_text_file` (unsaved
 editor buffers), write and edit write through `fs/write_text_file` (session artifacts stay local), bash runs in
 a client terminal (`terminal/create`, `wait_for_exit`, polled `terminal/output`, `kill` on timeout or abort,
-`release`), and with form elicitation the `ask` tool and plan approval ask through `elicitation/create`.
+`release`), and with form elicitation the `ask` tool and plan approval ask through `elicitation/create` (the ask form is one
+elicitation: its sections and context blocks as the message, a property per named field with the preselected
+values as defaults, an optional `<name>_other` string per radio/checkbox group, `required` from the form;
+`ask.timeout` submits the form's defaults).
 Bash and delete/move edits ask through `session/request_permission` first (Allow once / Always allow /
 Reject / Always reject), unless an explicit yolo or `--auto-approve` is set.
 

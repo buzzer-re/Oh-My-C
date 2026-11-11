@@ -35,6 +35,7 @@ catalog or auth symbols and run without the rest of the program.
 | `test_judgment` | judge question validation, keyword prompts, reply parsing |
 | `test_memory` | memory job store semantics, redaction, lessons, consolidation, managed skills |
 | `test_settings_audit` | WP-26 settings honesty: scans `src/` for settings reads; fails on a read key missing from omp's registry (unless omc-only), an unread registry key not annotated inert/⛔, or a read key still annotated inert (`build-tools/settings_audit.tsv`; `build-tools/settings_audit.py` prints the full audit). Runs from the repo root |
+| `test_htmlform` | the `ask` tool's HTML form: parser (sections, groups, captions, implied closes, truncated markup), form data, validation, `JSON.stringify` output, pagination, and the form dialog (layout, dropdown, hide row, timeout, paging, validation, pictures) |
 
 `test_http` (manual network smoke test) and `tests/tui_demo.c` (interactive TUI playground) are
 not part of `make test`.

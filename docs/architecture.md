@@ -25,7 +25,7 @@ between the two programs, and most source files name the omp file they port in t
             ai/   catalog, API registry, providers, credential transports
                  │
             net/  HTTP/1.1 + TLS + SSE, WebSocket          prompt/ (Handlebars templates)
-                 │                                         text/ (regex, glob, walker, search, yaml)
+                 │                                         text/ (regex, glob, walker, search, yaml, htmlform)
             core/  alloc, strings, vectors, hash map, JSON, fs, processes, embedded files
 ```
 
@@ -158,6 +158,7 @@ usually because Bun, npm packages or Rust crates provide it in omp.
 | `text/walker.c`, `text/glob.c` | `crates/pi-walker`, ignore/globset in `crates/pi-natives` |
 | `text/search.c` | `crates/pi-natives` grep |
 | `text/yaml.c`, `config/yaml_file.c` | YAML parser used by `utils/src/yaml-config.ts` and frontmatter |
+| `text/htmlform.c` | `tui/src/html-form/{parse,data,paginate}.ts` and the linkedom/htmlparser2 `parseHTML` they run on (from-scratch tokenizer + tree builder) |
 | `text/fuzzy.c` | fzf-style scorer (omc-only; exercised by tests, not used at runtime) |
 | `img/img.c`, `png.c`, `jpeg.c`, `gif.c`, `webp.c`, `webp_enc.c`, `vp8*.c` | `Bun.Image` (libpng / libjpeg-turbo / giflib / libwebp inside Bun): from-scratch bounds-checked decoders (PNG all color types + Adam7, JPEG baseline/progressive, GIF first frame, WebP VP8/VP8L/ALPH), encoders (PNG, baseline JPEG, lossy WebP), separable resampling; header sniffing = `utils/src/mime.ts` `parseImageMetadata` |
 | `img/imgpipe.c` | `coding-agent/src/utils/image-resize.ts` (`resizeImage`, `formatDimensionNote`), `utils/image-loading.ts` (`loadImageInput`), `tui/src/chat/image-loading.ts` (`imageDecodeFailureReason`, size limits) |
@@ -236,7 +237,7 @@ usually because Bun, npm packages or Rust crates provide it in omp.
 | `ui/toolcards.c`, `ui/tools/tc_*.c` | `chat/tool-execution.ts`, `chat/read-tool-group.ts`, `tui/src/tools/*`, `render/*` |
 | `ui/statusline.c` | `status-line/*`, `prompt/composer-hints.ts` |
 | `ui/welcome.c` | `prompt/welcome.ts` |
-| `ui/setup.c`, `login.c`, `modelbrowser.c`, `modelhub.c`, `sessions.c`, `settings.c`, `ask.c`, `overlays.c`, `appearance.c`, `widgets.c`, `slash.c` | `setup/*`, `overlays/{oauth-selector,login-dialog,model-browser,model-hub,hub-frame,session-selector,settings-selector,ask-dialog,thinking-selector,report-panel,composer-shape-preview}.ts`, `theme/theme.ts`, `slash-commands/builtin-*.ts` metadata |
+| `ui/setup.c`, `login.c`, `modelbrowser.c`, `modelhub.c`, `sessions.c`, `settings.c`, `ask.c`, `formdlg.c`, `overlays.c`, `appearance.c`, `widgets.c`, `slash.c` | `setup/*`, `overlays/{oauth-selector,login-dialog,model-browser,model-hub,hub-frame,session-selector,settings-selector,ask-dialog,thinking-selector,report-panel,composer-shape-preview}.ts`, `html-form/{dialog,media}.ts`, `theme/theme.ts`, `slash-commands/builtin-*.ts` metadata |
 
 The prompts under `prompts/` mirror omp's source paths (`prompts/coding-agent/prompts/system/...` is
 `packages/coding-agent/src/prompts/system/...`), and `prompts/crates/pi-edit` comes from the Rust
