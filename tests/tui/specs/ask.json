@@ -1,17 +1,80 @@
 [
- {"user": "a1"},
- {"tool": "ask", "args": {"questions": [{"id": "db", "question": "Which **database** should we use?", "options": [{"label": "Postgres", "description": "relational, `mature`"}, {"label": "SQLite"}, {"label": "Redis"}]}]},
-  "text": "User selected: Postgres", "details": {"question": "Which **database** should we use?", "options": ["Postgres", "SQLite", "Redis"], "multi": false, "selectedOptions": ["Postgres"]}},
- {"user": "a2"},
- {"tool": "ask", "args": {"questions": [{"id": "a", "question": "Pick features", "options": [{"label": "x"}, {"label": "y"}], "multi": true}, {"id": "b", "question": "Name?", "options": [{"label": "foo"}]}]},
-  "text": "User answers", "details": {"results": [
-    {"id": "a", "question": "Pick features", "options": ["x", "y"], "multi": true, "selectedOptions": ["x", "y"]},
-    {"id": "b", "question": "Name?", "options": ["foo"], "multi": false, "selectedOptions": [], "customInput": "bar\nbaz", "note": "a note"}]}},
- {"user": "a3"},
- {"tool": "ask", "args": {"questions": [{"id": "c", "question": "Cancel me?", "options": [{"label": "a"}]}]},
-  "text": "User cancelled", "isError": true, "details": {"question": "Cancel me?", "options": ["a"], "multi": false, "selectedOptions": [], "timedOut": true}},
- {"user": "a4"},
- {"tool": "ask", "args": {"questions": [{"id": "c", "question": "x"}]}, "text": "ask is unavailable: no interactive user", "isError": true},
- {"user": "a5"},
- {"tool": "ask", "args": {"questions": [{"id": "c", "question": "x"}]}, "text": "chat", "details": {"chatRedirect": true, "questions": ["What *now*?", "Second"]}}
+ {
+  "user": "a1"
+ },
+ {
+  "tool": "ask",
+  "args": {
+   "html": "<form><p>Sessions live in memory.</p><fieldset><legend>Session store</legend><label><input type=\"radio\" name=\"store\" value=\"sqlite\" checked> SQLite: one file</label><label><input type=\"radio\" name=\"store\" value=\"redis\"> Redis: <code>shared</code></label></fieldset><label>Session lifetime (days) <input type=\"number\" name=\"ttl_days\" value=\"30\" min=\"1\" required></label></form>"
+  },
+  "text": "User answers:\n{\n  \"store\": \"redis\",\n  \"ttl_days\": 7\n}",
+  "details": {
+   "answers": [
+    {
+     "name": "store",
+     "question": "Session store",
+     "answer": "Redis: shared"
+    },
+    {
+     "name": "ttl_days",
+     "question": "Session lifetime (days)",
+     "answer": "7"
+    }
+   ]
+  }
+ },
+ {
+  "user": "a2"
+ },
+ {
+  "tool": "ask",
+  "args": {
+   "html": "<form><p>Pick <b>features</b></p><label><input type=checkbox name=f value=x> x</label><label><input type=checkbox name=f value=y> y</label><textarea name=notes>line one\nline two</textarea><input type=password name=pw></form>"
+  },
+  "text": "No answer before the timeout; submitted the form's current values:\n{}",
+  "details": {
+   "answers": [
+    {
+     "name": "f",
+     "question": "Pick features",
+     "answer": "x, Other: z"
+    },
+    {
+     "name": "notes",
+     "question": "notes",
+     "answer": "line one\nline two"
+    },
+    {
+     "name": "pw",
+     "question": "pw",
+     "answer": "hunter2"
+    }
+   ],
+   "timedOut": true
+  }
+ },
+ {
+  "user": "a3"
+ },
+ {
+  "tool": "ask",
+  "args": {
+   "html": "<form><p>Cancel me?</p><label><input type=radio name=c value=a> a</label><label><input type=radio name=c value=b> b</label></form>"
+  },
+  "text": "Ask tool was cancelled by the user",
+  "isError": true
+ },
+ {
+  "user": "a4"
+ },
+ {
+  "tool": "ask",
+  "args": {
+   "html": "<form><p>no controls</p></form>"
+  },
+  "text": "Error: the form has no named controls. Put at least one <input>, <select> or <textarea> with a `name` attribute inside the <form>.",
+  "details": {
+   "answers": []
+  }
+ }
 ]

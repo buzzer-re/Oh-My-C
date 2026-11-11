@@ -373,8 +373,63 @@ int main(void) {
     }
     /* replayed transcripts (tests/tui/specs) against omp captures; lsp1 hover / cells error highlighting differ in
      * token colors (omc's highlighter vs syntect), so those specs avoid such tokens or are compared via lsp2 only */
-    static const char *const SPECS[] = {"ws", "ask", "goal", "find", "ast", "debug", "task", "wait", "lsp2", "github", "ghwatch"};
+    static const char *const SPECS[] = {"ws", "goal", "find", "ast", "debug", "task", "wait", "lsp2", "github", "ghwatch"};
     for (size_t i = 0; i < ARRAY_LEN(SPECS); i++) run_spec(SPECS[i]);
+    /* omp ec06d26987: the ask card draws the HTML form (pending) and each field's question over its answer. The
+     * spec_ask capture predates HTML forms (recapture pending against omp 18.18.6), so check the shapes here. */
+    {
+        char *d = fs_read("tests/tui/specs/ask.json", NULL);
+        json_t *spec = d ? json_parse_str(d) : NULL;
+        free(d);
+        CHECK(spec != NULL, "ask spec");
+        const json_t *e = json_at(spec, 1);
+        tc_call_t c = call("ask", json_get(e, "args"), NULL, false);
+        strvec_t out = {0};
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, "Ask") && has_row(&out, " Session store") && has_row(&out, "\xe2\x97\x89 SQLite: one file") &&
+                  has_row(&out, "\xe2\x97\x8b Redis: shared") && has_row(&out, "\xe2\x97\x8b Other\xe2\x80\xa6") &&
+                  has_row(&out, " Session lifetime (days) *") && has_row(&out, "\xe2\x94\x82 30") && has_row(&out, "2 fields"),
+              "ask pending form");
+        strvec_free(&out);
+        json_t *r = json_obj(), *content = json_arr(), *blk = json_obj();
+        json_set_str(blk, "type", "text");
+        json_set_str(blk, "text", json_get_str(e, "text"));
+        json_push(content, blk);
+        json_set(r, "content", content);
+        json_set(r, "details", json_clone(json_get(e, "details")));
+        c = call("ask", json_get(e, "args"), r, false);
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, " Session store") && has_row(&out, "\xe2\x9c\x94 Redis: shared") && has_row(&out, "\xe2\x9c\x94 7") &&
+                  !has_row(&out, "auto-selected"),
+              "ask answers");
+        strvec_free(&out);
+        json_free(r);
+        e = json_at(spec, 3);
+        r = json_obj();
+        json_set(r, "content", json_arr());
+        json_set(r, "details", json_clone(json_get(e, "details")));
+        c = call("ask", json_get(e, "args"), r, false);
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, "x, Other: z") && has_row(&out, "line two") && has_row(&out, "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2") &&
+                  !has_row(&out, "hunter2") && has_row(&out, "auto-selected after timeout"),
+              "ask timed out answers");
+        strvec_free(&out);
+        json_free(r);
+        e = json_at(spec, 5);
+        r = json_obj();
+        content = json_arr();
+        blk = json_obj();
+        json_set_str(blk, "type", "text");
+        json_set_str(blk, "text", json_get_str(e, "text"));
+        json_push(content, blk);
+        json_set(r, "content", content);
+        c = call("ask", json_get(e, "args"), r, true);
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, "Ask") && has_row(&out, "Ask tool was cancelled by the user"), "ask cancelled");
+        strvec_free(&out);
+        json_free(r);
+        json_free(spec);
+    }
     /* omp a1e7a928: `!` runs keep the loader, then `exit N` / `cancelled`, in the frame's bottom border */
     {
         tc_bang_t b = {.command = "sleep 9", .running = true, .spinner = 0, .term_rows = 50};
