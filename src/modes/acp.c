@@ -14,6 +14,7 @@
 #include "config/usage.h"
 #include "core/fs.h"
 #include "mcp/mcp.h"
+#include "text/htmlform.h"
 #include "tools/approval.h"
 #include "ui/ui.h"
 
@@ -1604,8 +1605,9 @@ static void flush_all_held(void *ud) {
     pthread_mutex_unlock(&s->mu);
 }
 
-/* unstable_createElicitation (form): accepted content (owned) or NULL */
-static json_t *elicit_form(asess_t *s, const char *message, json_t *properties, json_t *required) {
+/* unstable_createElicitation (form): accepted content (owned) or NULL; with a timeout, *timed_out when it passed */
+static json_t *elicit_form_timed(asess_t *s, const char *message, json_t *properties, json_t *required, int64_t timeout_ms,
+                                 bool *timed_out) {
     json_t *p = json_obj(), *schema = json_obj();
     json_set_str(p, "mode", "form");
     json_set_str(p, "sessionId", s->id);
@@ -1614,7 +1616,18 @@ static json_t *elicit_form(asess_t *s, const char *message, json_t *properties, 
     json_set(schema, "properties", properties);
     if (required) json_set(schema, "required", required);
     json_set(p, "requestedSchema", schema);
-    json_t *r = client_request(s->acp, "elicitation/create", p, &s->app->agent->cancel, flush_all_held, s, NULL);
+    json_t *r;
+    if (timeout_ms > 0) {
+        apend_t *pend = client_send(s->acp, "elicitation/create", p);
+        flush_all_held(s);
+        int rc = client_wait(s->acp, pend, timeout_ms, &s->app->agent->cancel);
+        if (rc != 1) {
+            if (rc == 0 && timed_out) *timed_out = true;
+            client_cancel(s->acp, pend);
+            return NULL;
+        }
+        r = client_take(s->acp, pend, NULL);
+    } else r = client_request(s->acp, "elicitation/create", p, &s->app->agent->cancel, flush_all_held, s, NULL);
     json_t *content = str_eq(json_get_str(r, "action"), "accept") ? json_take(r, "content") : NULL;
     json_free(r);
     if (content && !json_is_obj(content)) {
@@ -1622,6 +1635,245 @@ static json_t *elicit_form(asess_t *s, const char *message, json_t *properties, 
         content = NULL;
     }
     return content;
+}
+
+static json_t *elicit_form(asess_t *s, const char *message, json_t *properties, json_t *required) {
+    return elicit_form_timed(s, message, properties, required, 0, NULL);
+}
+
+/* formElicitationMessage: section titles and context blocks as plain text (the fields are schema properties) */
+static char *form_message(const hf_form_t *f) {
+    strvec_t parts = {0};
+    for (size_t si = 0; si < f->sections.n; si++) {
+        const hf_section_t *sec = &f->sections.v[si];
+        char *t = hf_spans_text(&sec->title), *tt = str_trim(t);
+        free(t);
+        if (*tt) strvec_push(&parts, tt);
+        free(tt);
+        for (size_t bi = 0; bi < sec->blocks.n; bi++) {
+            const hf_block_t *b = &sec->blocks.v[bi];
+            if (b->kind == HF_B_TEXT) strvec_push_own(&parts, hf_spans_text(&b->spans));
+            else if (b->kind == HF_B_PRE) strvec_push(&parts, b->text);
+            else if (b->kind == HF_B_LIST) {
+                sb_t l = SB_INIT;
+                for (size_t i = 0; i < b->items.n; i++) {
+                    char *it = hf_spans_text(&b->items.v[i]);
+                    if (i) sb_putc(&l, '\n');
+                    if (b->ordered) sb_appendf(&l, "%zu. %s", i + 1, it);
+                    else sb_appendf(&l, "- %s", it);
+                    free(it);
+                }
+                strvec_push_own(&parts, sb_detach(&l));
+            } else if (b->kind == HF_B_TABLE) {
+                sb_t l = SB_INIT;
+                for (size_t r = 0; r < b->rows.n; r++) {
+                    if (r) sb_putc(&l, '\n');
+                    for (size_t c = 0; c < b->rows.v[r].n; c++) {
+                        char *ct = hf_spans_text(&b->rows.v[r].v[c]);
+                        if (c) sb_append(&l, " | ");
+                        sb_append(&l, ct);
+                        free(ct);
+                    }
+                }
+                strvec_push_own(&parts, sb_detach(&l));
+            }
+        }
+    }
+    sb_t out = SB_INIT;
+    for (size_t i = 0; i < parts.n; i++) {
+        char *t = str_trim(parts.v[i]);
+        bool blank = !*t;
+        free(t);
+        if (blank) continue;
+        if (out.len) sb_append(&out, "\n\n");
+        sb_append(&out, parts.v[i]);
+    }
+    strvec_free(&parts);
+    if (!out.len) sb_append(&out, "Fill in the form");
+    return sb_detach(&out);
+}
+
+/* otherProperties: `<name>_other` for each Other choice field, more underscores while another control uses it */
+static void other_props(const hf_form_t *f, strvec_t *out) {
+    strvec_t taken = {0};
+    for (size_t i = 0; i < f->fields.n; i++) strvec_push(&taken, f->fields.v[i]->name);
+    for (size_t i = 0; i < f->hidden_names.n; i++) strvec_push(&taken, f->hidden_names.v[i]);
+    for (size_t i = 0; i < f->fields.n; i++) {
+        const hf_field_t *fl = f->fields.v[i];
+        if (fl->kind != HF_CHOICE || !fl->other || !*fl->name) {
+            strvec_push(out, "");
+            continue;
+        }
+        char *prop = xasprintf("%s_other", fl->name);
+        for (;;) {
+            bool used = false;
+            for (size_t k = 0; k < taken.n && !used; k++) used = !strcmp(taken.v[k], prop);
+            if (!used) break;
+            char *q = xasprintf("%s_", prop);
+            free(prop);
+            prop = q;
+        }
+        strvec_push(&taken, prop);
+        strvec_push_own(out, prop);
+    }
+    strvec_free(&taken);
+}
+
+/* formElicitationSchema: one property per named field; Other answers as extra optional strings */
+static json_t *form_schema(const hf_form_t *f, json_t **required) {
+    json_t *props = json_obj();
+    *required = json_arr();
+    strvec_t others = {0};
+    other_props(f, &others);
+    for (size_t i = 0; i < f->fields.n; i++) {
+        const hf_field_t *fl = f->fields.v[i];
+        if (!*fl->name) continue;
+        const char *title = fl->question ? fl->question : fl->name;
+        if (fl->required) json_push_str(*required, fl->name);
+        json_t *pr = json_obj();
+        if (fl->kind == HF_CHOICE) {
+            json_t *entries = json_arr(), *checked = json_arr();
+            for (size_t k = 0; k < fl->opts.n; k++) {
+                if (fl->opts.v[k].disabled) continue;
+                char *lt = hf_spans_text(&fl->opts.v[k].label);
+                json_t *e = json_obj();
+                json_set_str(e, "const", fl->opts.v[k].value);
+                json_set_str(e, "title", *lt ? lt : fl->opts.v[k].value);
+                free(lt);
+                json_push(entries, e);
+                if (fl->opts.v[k].checked) json_push_str(checked, fl->opts.v[k].value);
+            }
+            if (hf_is_array_choice(fl)) {
+                json_set_str(pr, "type", "array");
+                json_set_str(pr, "title", title);
+                json_t *items = json_obj();
+                json_set(items, "anyOf", entries);
+                json_set(pr, "items", items);
+                json_set(pr, "default", checked);
+            } else if (fl->multi) {
+                /* a lone checkbox renders as one box: its own label says what checking it means */
+                const char *box = json_len(entries) ? json_get_str(json_at(entries, 0), "title") : NULL;
+                json_set_str(pr, "type", "boolean");
+                json_set_str(pr, "title", box ? box : title);
+                if (box && strcmp(title, fl->name) && strcmp(title, box)) json_set_str(pr, "description", title);
+                json_set_bool(pr, "default", json_len(checked) > 0);
+                json_free(entries);
+                json_free(checked);
+            } else {
+                json_set_str(pr, "type", "string");
+                json_set_str(pr, "title", title);
+                json_set(pr, "oneOf", entries);
+                if (json_len(checked)) json_set(pr, "default", json_clone(json_at(checked, 0)));
+                json_free(checked);
+            }
+            json_set(props, fl->name, pr);
+            if (*others.v[i]) {
+                json_t *o = json_obj();
+                char *ot = xasprintf("%s \xe2\x80\x94 " HF_OTHER_LABEL, title);
+                json_set_str(o, "type", "string");
+                json_set_str(o, "title", ot);
+                json_set_str(o, "description", fl->multi ? "Another answer, added to those checked" : "Your own answer instead");
+                free(ot);
+                json_set(props, others.v[i], o);
+            }
+            continue;
+        }
+        char *ph = str_trim(fl->placeholder);
+        bool has_desc = *ph;
+        free(ph);
+        if (str_eq(fl->type, "number") || str_eq(fl->type, "range")) {
+            json_set_str(pr, "type", "number");
+            json_set_str(pr, "title", title);
+            if (has_desc) json_set_str(pr, "description", fl->placeholder);
+            if (fl->has_min) json_set_num(pr, "minimum", fl->min);
+            if (fl->has_max) json_set_num(pr, "maximum", fl->max);
+            json_t *v = hf_text_value(fl, fl->value);
+            if (json_is_num(v)) json_set(pr, "default", v);
+            else json_free(v);
+        } else {
+            json_set_str(pr, "type", "string");
+            json_set_str(pr, "title", title);
+            if (has_desc) json_set_str(pr, "description", fl->placeholder);
+            if (fl->has_minlength) json_set_num(pr, "minLength", fl->minlength);
+            if (fl->has_maxlength) json_set_num(pr, "maxLength", fl->maxlength);
+            if (*fl->value) json_set_str(pr, "default", fl->value);
+        }
+        json_set(props, fl->name, pr);
+    }
+    strvec_free(&others);
+    return props;
+}
+
+/* formDataFromElicitation: keep only values the form offers */
+static json_t *form_data_from(const hf_form_t *f, const json_t *content) {
+    strvec_t others = {0};
+    other_props(f, &others);
+    json_t *data = json_obj();
+    for (size_t i = 0; i < f->hidden_names.n; i++) json_set_str(data, f->hidden_names.v[i], f->hidden_values.v[i]);
+    for (size_t i = 0; i < f->fields.n; i++) {
+        const hf_field_t *fl = f->fields.v[i];
+        if (!*fl->name) continue;
+        const json_t *v = json_get(content, fl->name);
+        json_t *out;
+        if (fl->kind == HF_CHOICE) {
+            bool *picked = xcalloc(fl->opts.n + 1, sizeof *picked);
+            for (size_t k = 0; k < fl->opts.n; k++) {
+                const char *ov = fl->opts.v[k].value;
+                if (json_is_arr(v)) {
+                    const json_t *x;
+                    json_arr_foreach(v, m, x) picked[k] |= str_eq(json_sv(x), ov);
+                } else if (json_is_bool(v)) picked[k] = v->u.b;
+                else picked[k] = str_eq(json_sv(v), ov);
+            }
+            const char *typed = *others.v[i] ? json_get_str(content, others.v[i]) : NULL;
+            out = hf_choice_value(fl, picked, typed);
+            free(picked);
+        } else {
+            char *text;
+            if (!v || json_is_arr(v)) text = xstrdup("");
+            else if (json_is_str(v)) text = xstrdup(json_sv(v));
+            else if (json_is_num(v)) {
+                sb_t b = SB_INIT;
+                json_js_num_sb(&b, v->u.num.d);
+                text = sb_detach(&b);
+            } else if (json_is_bool(v)) text = xstrdup(v->u.b ? "true" : "false");
+            else if (json_is_null(v)) text = xstrdup("null");
+            else text = xstrdup("[object Object]");
+            out = hf_text_value(fl, text);
+            free(text);
+        }
+        if (out) json_set(data, fl->name, out);
+    }
+    strvec_free(&others);
+    return data;
+}
+
+/* formDialog over form elicitation (one elicitation with a property per field) */
+static json_t *acp_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, volatile sig_atomic_t *cancel,
+                        char **err) {
+    asess_t *s = ud;
+    UNUSED(cancel);
+    UNUSED(err);
+    *timed_out = false;
+    hf_form_t *f = hf_parse(html);
+    json_t *required = NULL;
+    json_t *props = form_schema(f, &required);
+    char *msg = form_message(f);
+    bool to = false, has_required = json_len(required) > 0;
+    if (!has_required) {
+        json_free(required);
+        required = NULL;
+    }
+    json_t *content = elicit_form_timed(s, msg, props, required, timeout_ms, &to);
+    free(msg);
+    json_t *data = NULL;
+    if (to) {
+        *timed_out = true;
+        data = hf_default_data(f);
+    } else if (content) data = form_data_from(f, content);
+    json_free(content);
+    hf_form_free(f);
+    return data;
 }
 
 /* askDialog: one form for all questions (q<i>, q<i>__other) */
@@ -1891,6 +2143,7 @@ static asess_t *open_record(acp_t *a, const char *cwd, const char *resume, const
     if (caps_form(a)) {
         app->plan_approval_choice = acp_plan_choice;
         app->env->ui.ask = acp_ask;
+        app->env->ui.form = acp_form;
         app->env->ui.ud = s;
     }
     app->notice = acp_notice;

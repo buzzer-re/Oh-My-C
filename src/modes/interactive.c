@@ -927,6 +927,78 @@ static json_t *ui_ask(void *ud, const json_t *questions) {
     return ans;
 }
 
+/* ---------- formDialog bridge (the ask tool's HTML form; extension-ui-controller #showLocalFormDialog) ---------- */
+
+static void form_done(void *ud, json_t *data, bool timed_out) {
+    ui_t *u = ud;
+    pthread_mutex_lock(&u->mu);
+    bool closed = g_ask_closed;
+    json_free(u->ask_answers);
+    u->ask_answers = data;
+    u->form_timed_out = timed_out;
+    u->ask_done = true;
+    pthread_cond_signal(&u->ask_cv);
+    pthread_mutex_unlock(&u->mu);
+    if (!closed) tui_request_render(u->tui);
+}
+
+static void form_start(void *ud) {
+    ui_t *u = ud;
+    ui_form_dialog_show(u, u->form_html, u->form_timeout, u->app->env->cwd, form_done, u);
+}
+
+/* the run was aborted while the form waited: close it as cancelled */
+static void form_abort(void *ud) {
+    ui_t *u = ud;
+    tui_component_t *top = ui_selector_top(u);
+    if (ui_form_is_dialog(top)) {
+        ui_close_nested_selector(u);
+        ui_close_selector(u); /* destroying it reports a cancel */
+    }
+}
+
+static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, volatile sig_atomic_t *cancel,
+                       char **err) {
+    ui_t *u = ud;
+    UNUSED(err);
+    *timed_out = false;
+    pthread_mutex_lock(&u->mu);
+    if (g_ask_closed) {
+        pthread_mutex_unlock(&u->mu);
+        return NULL;
+    }
+    u->form_html = xstrdup(html);
+    u->form_timeout = timeout_ms;
+    u->form_timed_out = false;
+    u->ask_answers = NULL;
+    u->ask_done = false;
+    pthread_mutex_unlock(&u->mu);
+    tui_post(u->tui, form_start, u);
+    pthread_mutex_lock(&u->mu);
+    bool abort_posted = false;
+    while (!u->ask_done) {
+        if (cancel && *cancel && !abort_posted) {
+            abort_posted = true;
+            tui_post(u->tui, form_abort, u);
+        }
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 100 * 1000000L;
+        if (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000L;
+        }
+        pthread_cond_timedwait(&u->ask_cv, &u->mu, &ts);
+    }
+    json_t *data = u->ask_answers;
+    u->ask_answers = NULL;
+    *timed_out = u->form_timed_out;
+    free(u->form_html);
+    u->form_html = NULL;
+    pthread_mutex_unlock(&u->mu);
+    return data;
+}
+
 /* ---------- plan approval (InteractiveMode.handlePlanApproval / #approvePlan / #savePlanAndQuit) ---------- */
 
 #define PLAN_SAVE_AND_QUIT "Save and quit"
@@ -3168,7 +3240,7 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
      * focused prompt */
     if (!tui_overlay_visible(t) && ui_selector_open(u) && tui_kb(k, "app.history.search")) {
         tui_component_t *top = ui_selector_top(u);
-        if (ui_ask_is_dialog(top) || ui_hook_editor_of(top)) {
+        if (ui_ask_is_dialog(top) || ui_form_is_dialog(top) || ui_hook_editor_of(top)) {
             ui_history_search(u);
             return true;
         }
@@ -3534,6 +3606,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     a->wake = ui_wake;
     a->wake_ud = &u;
     a->env->ui.ask = ui_ask;
+    a->env->ui.form = ui_form;
     a->env->ui.tool_frame = ui_tool_frame;
     a->env->ui.ud = &u;
     ui_approval_install(&u);
@@ -3579,7 +3652,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
      * (terminal closed mid-question): answer it as cancelled */
     pthread_mutex_lock(&u.mu);
     g_ask_closed = true;
-    if (u.ask_questions && !u.ask_done) {
+    if ((u.ask_questions || u.form_html) && !u.ask_done) {
         u.ask_done = true;
         pthread_cond_broadcast(&u.ask_cv);
     }
@@ -3602,6 +3675,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     a->notice = NULL;
     a->wake = NULL;
     a->env->ui.ask = NULL;
+    a->env->ui.form = NULL;
     a->env->ui.tool_frame = NULL;
     app_set_plan_review_ui(a, false);
     if (g_pr.open) plan_review_hide(&u);

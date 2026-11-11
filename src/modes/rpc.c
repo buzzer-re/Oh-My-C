@@ -920,6 +920,54 @@ static json_t *rpc_ask(void *ud, const json_t *qs) {
     return out;
 }
 
+/* ---------- the ask tool's field-by-field fallback (tool_ui_t.select / input / editor) ---------- */
+
+#define RPC_GONE "RPC client disconnected before extension UI response completed"
+
+static char *rpc_fb_select(void *ud, const char *title, const strvec_t *options, int64_t timeout_ms, bool *timed_out,
+                           volatile sig_atomic_t *cancel, char **err) {
+    bool gone = false, to = false;
+    char *v = ui_select(ud, title, options, NULL, timeout_ms, cancel, &to, &gone);
+    if (timed_out) *timed_out = to;
+    if (gone && !*err) *err = xstrdup(RPC_GONE);
+    return v;
+}
+
+static char *rpc_fb_input(void *ud, const char *title, const char *placeholder, int64_t timeout_ms, bool *timed_out,
+                          volatile sig_atomic_t *cancel, char **err) {
+    rpc_t *r = ud;
+    json_t *f = json_obj();
+    json_set_str(f, "method", "input");
+    json_set_str(f, "title", title);
+    if (placeholder) json_set_str(f, "placeholder", placeholder);
+    if (timeout_ms > 0) json_set_int(f, "timeout", timeout_ms);
+    json_t *resp = NULL;
+    bool to = false;
+    int rc = ui_request(r, f, timeout_ms, cancel, &resp, &to);
+    if (rc == 0 && json_get_bool(resp, "cancelled", false) && json_get_bool(resp, "timedOut", false)) to = true;
+    if (timed_out) *timed_out = to;
+    if (rc < 0 && !*err) *err = xstrdup(RPC_GONE);
+    char *v = rc == 0 && !json_get_bool(resp, "cancelled", false) && json_get_str(resp, "value") ? xstrdup(json_get_str(resp, "value")) : NULL;
+    json_free(resp);
+    return v;
+}
+
+static char *rpc_fb_editor(void *ud, const char *title, const char *prefill, bool prompt_style, volatile sig_atomic_t *cancel,
+                           char **err) {
+    rpc_t *r = ud;
+    json_t *f = json_obj();
+    json_set_str(f, "method", "editor");
+    json_set_str(f, "title", title);
+    if (prefill) json_set_str(f, "prefill", prefill);
+    if (prompt_style) json_set_bool(f, "promptStyle", true);
+    json_t *resp = NULL;
+    int rc = ui_request(r, f, 0, cancel, &resp, NULL);
+    if (rc < 0 && !*err) *err = xstrdup(RPC_GONE);
+    char *v = rc == 0 && !json_get_bool(resp, "cancelled", false) && json_get_str(resp, "value") ? xstrdup(json_get_str(resp, "value")) : NULL;
+    json_free(resp);
+    return v;
+}
+
 /* tool_ui_t.approve: requestApproval for a host without an approval dialog — a select with the full prompt and
  * approvalChoiceLabels; anything but an approval is a denial */
 static int rpc_approve(void *ud, const char *tool_call_id, const char *tool_name, const char *status,
@@ -3434,6 +3482,9 @@ rpc_t *rpc_attach(app_t *a, rpc_sink_fn sink, void *ud) {
     a->queue_snapshot = qsnap;
     pthread_mutex_unlock(&a->mu);
     a->env->ui.ask = rpc_ask;
+    a->env->ui.select = rpc_fb_select;
+    a->env->ui.input = rpc_fb_input;
+    a->env->ui.editor = rpc_fb_editor;
     a->env->ui.approve = rpc_approve;
     a->env->ui.tool_frame = rpc_tool_frame;
     a->env->ui.ud = r;
@@ -3511,6 +3562,9 @@ void rpc_detach(rpc_t *r) {
     }
     if (a->env->ui.ud == r) {
         a->env->ui.ask = NULL;
+        a->env->ui.select = NULL;
+        a->env->ui.input = NULL;
+        a->env->ui.editor = NULL;
         a->env->ui.approve = NULL;
         a->env->ui.tool_frame = NULL;
         a->env->ui.ud = NULL;

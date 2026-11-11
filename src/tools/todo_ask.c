@@ -1,6 +1,9 @@
 /* todo + ask tools */
 #include "tools.h"
 #include "coding/agents.h"
+#include "config/settings.h"
+#include "text/htmlform.h"
+#include "tui/symbols.h"
 
 /* ---------- todo (port of omp tools/todo.ts) ---------- */
 
@@ -633,132 +636,266 @@ agent_tool_t *tool_todo_new(tool_env_t *env) {
     return t;
 }
 
-/* ---------- ask ---------- */
+/* ---------- ask (port of omp tools/ask.ts: one HTML form) ---------- */
 
-/* one question's result (omp QuestionResult) from the dialog's rich result, or from the legacy
- * {id: label | [labels] | custom} answer object */
-static json_t *ask_result(const json_t *q, const json_t *ans) {
-    const char *id = json_get_str(q, "id");
-    json_t *r = json_obj(), *opts = json_arr(), *o;
-    json_set_str(r, "id", id ? id : "");
-    json_set_str(r, "question", json_get_str(q, "question") ? json_get_str(q, "question") : "");
-    json_arr_foreach(json_get_arr(q, "options"), k, o) {
-        const char *l = json_is_str(o) ? json_sv(o) : json_get_str(o, "label");
-        if (l) json_push_str(opts, l);
-    }
-    json_set(r, "options", opts);
-    json_set_bool(r, "multi", json_get_bool(q, "multi", false));
-    const json_t *rich = NULL, *x;
-    json_arr_foreach(json_get_arr(ans, "__results"), k, x) if (str_eq(json_get_str(x, "id"), id)) rich = x;
-    if (rich) {
-        json_set(r, "selectedOptions", json_clone(json_get(rich, "selectedOptions")));
-        static const char *const keys[] = {"customInput", "note", "noteOption", "timedOut"};
-        for (size_t k = 0; k < 4; k++)
-            if (json_get(rich, keys[k])) json_set(r, keys[k], json_clone(json_get(rich, keys[k])));
-        return r;
-    }
-    json_t *sel = json_arr();
-    const json_t *a = json_get(ans, id ? id : "");
-    const char *custom = NULL;
-    json_t *y;
-    if (json_is_arr(a)) {
-        json_arr_foreach(a, k, y) {
-            if (!json_is_str(y)) continue;
-            bool known = false;
-            json_arr_foreach(opts, m, o) known |= str_eq(json_sv(o), json_sv(y));
-            if (known) json_push_str(sel, json_sv(y));
-            else if (!custom) custom = json_sv(y);
+#define NO_NAMED_CONTROLS_ERROR                                                                                        \
+    "Error: the form has no named controls. Put at least one <input>, <select> or <textarea> with a `name` "          \
+    "attribute inside the <form>."
+#define OTHER_ROW HF_OTHER_LABEL " (type your own)"
+
+typedef struct {
+    tool_env_t *env;
+    int64_t timeout;
+    volatile sig_atomic_t *cancel;
+    char *err; /* the host failed (owned) */
+} fb_ui_t;
+
+/* disambiguateDisplayLabels: a label already taken gets ` (2)`, ` (3)`, ... */
+static void disambiguate(strvec_t *labels, const strvec_t *reserved) {
+    strvec_t taken = {0};
+    for (size_t i = 0; reserved && i < reserved->n; i++) strvec_push(&taken, reserved->v[i]);
+    for (size_t i = 0; i < labels->n; i++) {
+        char *base = xstrdup(labels->v[i]), *cand = xstrdup(base);
+        for (int suffix = 2;; suffix++) {
+            bool dup = false;
+            for (size_t k = 0; k < taken.n && !dup; k++) dup = !strcmp(taken.v[k], cand);
+            if (!dup) break;
+            free(cand);
+            cand = xasprintf("%s (%d)", base, suffix);
         }
-    } else if (json_is_str(a)) {
-        bool known = false;
-        json_arr_foreach(opts, m, o) known |= str_eq(json_sv(o), json_sv(a));
-        if (known) json_push_str(sel, json_sv(a));
-        else custom = json_sv(a);
+        strvec_push(&taken, cand);
+        free(labels->v[i]);
+        labels->v[i] = cand;
+        free(base);
     }
-    json_set(r, "selectedOptions", sel);
-    if (custom) json_set_str(r, "customInput", custom);
-    return r;
+    strvec_free(&taken);
 }
 
-static void indented(sb_t *b, const char *text) {
-    for (const char *p = text;;) {
-        const char *nl = strchr(p, '\n');
-        sb_appendf(b, "\n  %.*s", (int)(nl ? nl - p : (ptrdiff_t)strlen(p)), p);
-        if (!nl) break;
-        p = nl + 1;
+static int index_of(const strvec_t *v, const char *s) {
+    for (size_t i = 0; s && i < v->n; i++)
+        if (!strcmp(v->v[i], s)) return (int)i;
+    return -1;
+}
+
+/* askChoice: checked option indices (and an Other text) for a choice field; *timed_out at a deadline; false
+ * when cancelled */
+static bool ask_choice(fb_ui_t *ui, const hf_field_t *f, const char *question, bool *checked, char **other,
+                       bool *timed_out) {
+    tool_ui_t *u = &ui->env->ui;
+    strvec_t labels = {0};
+    VEC(size_t) opts = {0};
+    for (size_t i = 0; i < f->opts.n; i++) {
+        if (f->opts.v[i].disabled) continue;
+        char *t = hf_spans_text(&f->opts.v[i].label), *l = hf_one_line(t);
+        free(t);
+        if (!*l) {
+            free(l);
+            l = xstrdup(f->opts.v[i].value);
+        }
+        strvec_push_own(&labels, l);
+        vec_push(&opts, i);
+    }
+    disambiguate(&labels, NULL);
+    strvec_t rows = {0};
+    for (size_t i = 0; i < labels.n; i++) strvec_push(&rows, labels.v[i]);
+    char *other_row = NULL;
+    if (f->other) {
+        strvec_t one = {0};
+        strvec_push(&one, OTHER_ROW);
+        disambiguate(&one, &labels);
+        other_row = xstrdup(one.v[0]);
+        strvec_free(&one);
+        strvec_push(&rows, other_row);
+    }
+    bool ok = true;
+    *timed_out = false;
+    *other = NULL;
+    if (!f->multi) {
+        for (;;) {
+            bool to = false;
+            char *pick = u->select(u->ud, question, &rows, ui->timeout, &to, ui->cancel, &ui->err);
+            if (other_row && str_eq(pick, other_row)) {
+                free(pick);
+                bool to2 = false;
+                char *typed = u->input(u->ud, question, NULL, ui->timeout, &to2, ui->cancel, &ui->err);
+                if (to2) {
+                    *timed_out = true;
+                    ok = false;
+                    free(typed);
+                    break;
+                }
+                if (ui->err || (ui->cancel && *ui->cancel)) {
+                    free(typed);
+                    ok = false;
+                    break;
+                }
+                char *t = typed ? str_trim(typed) : NULL;
+                bool blank = !t || !*t;
+                free(t);
+                if (blank) {
+                    free(typed);
+                    continue;
+                }
+                memset(checked, 0, f->opts.n * sizeof(bool));
+                *other = typed;
+                break;
+            }
+            int row = index_of(&labels, pick);
+            free(pick);
+            *timed_out = to;
+            if (row < 0) {
+                ok = false; /* cancelled, or the deadline (field keeps its default) */
+                break;
+            }
+            memset(checked, 0, f->opts.n * sizeof(bool));
+            checked[opts.v[row]] = true;
+            break;
+        }
+    } else {
+        char *done = xasprintf("%s Done selecting", tui_sym("status.success"));
+        strvec_t one = {0};
+        strvec_push_own(&one, done);
+        disambiguate(&one, &rows);
+        done = xstrdup(one.v[0]);
+        strvec_free(&one);
+        for (;;) {
+            size_t answered = (size_t)(*other != NULL);
+            for (size_t i = 0; i < f->opts.n; i++) answered += checked[i];
+            strvec_t shown = {0};
+            for (size_t i = 0; i < rows.n; i++) strvec_push(&shown, rows.v[i]);
+            if (!f->required || answered) strvec_push(&shown, done);
+            char *title = answered ? xasprintf("(%zu selected) %s", answered, question) : xstrdup(question);
+            bool to = false;
+            char *pick = u->select(u->ud, title, &shown, ui->timeout, &to, ui->cancel, &ui->err);
+            free(title);
+            strvec_free(&shown);
+            if (to) { /* a deadline keeps whatever was checked so far */
+                free(pick);
+                *timed_out = true;
+                break;
+            }
+            if (!pick) {
+                ok = false;
+                break;
+            }
+            if (!strcmp(pick, done)) {
+                free(pick);
+                break;
+            }
+            if (other_row && !strcmp(pick, other_row)) {
+                free(pick);
+                if (*other) {
+                    free(*other);
+                    *other = NULL;
+                    continue;
+                }
+                bool to2 = false;
+                char *typed = u->input(u->ud, question, NULL, ui->timeout, &to2, ui->cancel, &ui->err);
+                if (to2) {
+                    free(typed);
+                    *timed_out = true;
+                    break;
+                }
+                if (ui->err || (ui->cancel && *ui->cancel)) {
+                    free(typed);
+                    ok = false;
+                    break;
+                }
+                char *t = typed ? str_trim(typed) : NULL;
+                if (t && *t) *other = typed; /* a blank or cancelled answer leaves Other unchecked */
+                else free(typed);
+                free(t);
+                continue;
+            }
+            int row = index_of(&labels, pick);
+            free(pick);
+            if (row < 0) continue;
+            checked[opts.v[row]] = !checked[opts.v[row]];
+        }
+        free(done);
+    }
+    strvec_free(&rows);
+    strvec_free(&labels);
+    free(opts.v);
+    free(other_row);
+    return ok;
+}
+
+/* askText: re-asked with the validation error until valid; textareas and prefilled inputs open the editor on
+ * their current value, empty inputs prompt with their placeholder. NULL when cancelled or timed out */
+static char *ask_text(fb_ui_t *ui, const hf_field_t *f, const char *question, bool *timed_out) {
+    tool_ui_t *u = &ui->env->ui;
+    bool use_editor = f->multiline || *f->value;
+    char *error = NULL, *current = xstrdup(f->value);
+    *timed_out = false;
+    for (;;) {
+        char *title = error ? xasprintf("%s (%s)", question, error) : xstrdup(question);
+        char *value;
+        if (use_editor) value = u->editor(u->ud, title, current, !f->multiline, ui->cancel, &ui->err);
+        else value = u->input(u->ud, title, *f->placeholder ? f->placeholder : NULL, ui->timeout, timed_out, ui->cancel, &ui->err);
+        free(title);
+        if (!value) {
+            free(error);
+            free(current);
+            return NULL;
+        }
+        json_t *jv = json_str(value);
+        free(error);
+        error = hf_field_error(f, jv);
+        json_free(jv);
+        if (!error) {
+            free(current);
+            return value;
+        }
+        free(current);
+        current = value;
     }
 }
 
-/* formatSingleQuestionResponse */
-static char *ask_single_text(const json_t *r) {
-    sb_t b = SB_INIT;
-    json_t *sel = json_get_arr(r, "selectedOptions"), *x;
-    bool multi = json_get_bool(r, "multi", false);
-    const char *custom = json_get_str(r, "customInput"), *note = json_get_str(r, "note"), *on = json_get_str(r, "noteOption");
-    if (json_len(sel)) {
-        sb_append(&b, "User selected: ");
-        if (multi) json_arr_foreach(sel, i, x) sb_appendf(&b, "%s%s", i ? ", " : "", json_sv(x));
-        else sb_append(&b, json_sv(json_at(sel, 0)));
-        if (json_get_bool(r, "timedOut", false)) sb_append(&b, " (auto-selected after timeout)");
-    }
-    if (custom) {
-        if (b.len) sb_putc(&b, '\n');
-        if (strchr(custom, '\n')) {
-            sb_append(&b, "User provided custom input:");
-            indented(&b, custom);
-        } else sb_appendf(&b, "User provided custom input: %s", custom);
-    }
-    if (note && *note) {
-        if (b.len) sb_putc(&b, '\n');
-        char *label = on ? xasprintf("User added note on %s:", on) : xstrdup("User added note:");
-        if (strchr(note, '\n')) {
-            sb_append(&b, label);
-            indented(&b, note);
-        } else sb_appendf(&b, "%s %s", label, note);
-        free(label);
-    }
-    if (!b.len) sb_append(&b, multi ? "User did not select any options" : "User cancelled the selection");
-    return sb_detach(&b);
-}
-
-/* formatQuestionResult */
-static void ask_result_line(sb_t *b, const json_t *r) {
-    const char *id = json_get_str(r, "id"), *custom = json_get_str(r, "customInput"), *note = json_get_str(r, "note"),
-               *on = json_get_str(r, "noteOption");
-    bool multi = json_get_bool(r, "multi", false);
-    char *suffix = note && *note ? (on ? xasprintf(" (note on %s: %s)", on, note) : xasprintf(" (note: %s)", note)) : xstrdup("");
-    json_t *sel = json_get_arr(r, "selectedOptions"), *x;
-    if (!json_len(sel)) {
-        if (custom) sb_appendf(b, "%s: \"%s\"%s", id, custom, suffix);
-        else sb_appendf(b, "%s: %s%s", id, multi ? "[]" : "(cancelled)", suffix);
-        free(suffix);
-        return;
-    }
-    sb_appendf(b, "%s: ", id);
-    if (multi) {
-        sb_putc(b, '[');
-        json_arr_foreach(sel, i, x) sb_appendf(b, "%s%s", i ? ", " : "", json_sv(x));
-        sb_putc(b, ']');
-    } else sb_append(b, json_sv(json_at(sel, 0)));
-    if (custom) sb_appendf(b, " + \"%s\"", custom);
-    if (json_get_bool(r, "timedOut", false)) sb_append(b, " (auto-selected after timeout)");
-    sb_append(b, suffix);
-    free(suffix);
-}
-
-static char *strip_cr(const char *s) {
-    /* sanitizeCarriageReturns: \r\n -> \n, other \r runs -> one space */
-    sb_t b = SB_INIT;
-    for (; s && *s; s++) {
-        if (*s != '\r') {
-            sb_putc(&b, *s);
+/* askFieldByField: undefined (NULL) when cancelled; a deadline stops the walk with the rest at their defaults */
+static json_t *ask_field_by_field(fb_ui_t *ui, const hf_form_t *form, bool *timed_out) {
+    json_t *data = hf_default_data(form);
+    *timed_out = false;
+    for (size_t i = 0; i < form->fields.n; i++) {
+        const hf_field_t *f = form->fields.v[i];
+        if (!*f->name) continue;
+        const char *question = f->question ? f->question : f->name;
+        bool to = false;
+        if (f->kind == HF_CHOICE) {
+            bool *checked = xcalloc(f->opts.n + 1, sizeof *checked);
+            for (size_t k = 0; k < f->opts.n; k++) checked[k] = f->opts.v[k].checked;
+            char *other = NULL;
+            bool ok = ask_choice(ui, f, question, checked, &other, &to);
+            if (ok || (to && f->multi)) {
+                json_t *v = hf_choice_value(f, checked, other);
+                if (v) json_set(data, f->name, v);
+                else json_del(data, f->name);
+            }
+            free(other);
+            free(checked);
+            if (to) {
+                *timed_out = true;
+                return data;
+            }
+            if (!ok) {
+                json_free(data);
+                return NULL;
+            }
             continue;
         }
-        if (s[1] == '\n') continue;
-        while (s[1] == '\r' && s[2] != '\n') s++;
-        sb_putc(&b, ' ');
+        char *text = ask_text(ui, f, question, &to);
+        if (to) {
+            *timed_out = true;
+            return data;
+        }
+        if (!text) {
+            json_free(data);
+            return NULL;
+        }
+        json_set(data, f->name, hf_text_value(f, text));
+        free(text);
     }
-    return sb_detach(&b);
+    return data;
 }
 
 /* ToolAbortError: a cancelled ask ends the run (context.abort()) */
@@ -770,120 +907,87 @@ static int ask_cancelled(tool_ctx_t *ctx, tool_result_t *out) {
 
 static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
-    json_t *qs = json_get_arr(args, "questions"), *q, *o;
-    if (!env->ui.ask) {
+    if (!env->ui.form && !(env->ui.select && env->ui.input && env->ui.editor)) {
         tool_result_error(out, "Ask tool requires interactive mode");
         return 0;
     }
-    /* reserved runtime labels, duplicate ids / labels (omp fails closed with a plain text result) */
-    static const char *const reserved[] = {"Other (type your own)", "Chat about this", "Next \xe2\x86\x92"};
-    json_arr_foreach(qs, i, q) json_arr_foreach(json_get_arr(q, "options"), k, o) {
-        char *l = strip_cr(json_get_str(o, "label"));
-        for (size_t r = 0; r < 3; r++)
-            if (!strcmp(l, reserved[r])) {
-                tool_result_textf(out, "Error: option labels must not collide with reserved runtime labels: %s", l);
-                out->details = json_obj();
-                free(l);
-                return 0;
-            }
-        free(l);
-    }
-    strvec_t ids = {0};
-    json_arr_foreach(qs, i, q) {
-        char *id = strip_cr(json_get_str(q, "id"));
-        for (size_t k = 0; k < ids.n; k++)
-            if (!strcmp(ids.v[k], id)) {
-                tool_result_textf(out, "Error: question ids must be unique: %s", id);
-                out->details = json_obj();
-                free(id);
-                strvec_free(&ids);
-                return 0;
-            }
-        strvec_push_own(&ids, id);
-        strvec_t labels = {0};
-        json_arr_foreach(json_get_arr(q, "options"), k, o) {
-            char *l = strip_cr(json_get_str(o, "label"));
-            for (size_t m = 0; m < labels.n; m++)
-                if (!strcmp(labels.v[m], l)) {
-                    tool_result_textf(out, "Error: option labels must be unique within a question: %s", l);
-                    out->details = json_obj();
-                    free(l);
-                    strvec_free(&labels);
-                    strvec_free(&ids);
-                    return 0;
-                }
-            strvec_push_own(&labels, l);
-        }
-        strvec_free(&labels);
-    }
-    strvec_free(&ids);
-    if (!json_len(qs)) {
-        tool_result_text(out, "Error: questions must not be empty");
+    const char *html = json_get_str(args, "html");
+    hf_form_t *form = hf_parse(html ? html : "");
+    if (!hf_named_count(form)) {
+        hf_form_free(form);
+        tool_result_text(out, NO_NAMED_CONTROLS_ERROR);
         out->details = json_obj();
+        json_set(out->details, "answers", json_arr());
         return 0;
     }
+    bool plan = env->plan_mode_active && env->plan_mode_active(env);
+    double secs = settings_num("ask.timeout", 0);
+    int64_t timeout = plan || !(secs > 0) ? 0 : (int64_t)(secs * 1000);
+    volatile sig_atomic_t *cancel = ctx && ctx->agent ? &ctx->agent->cancel : NULL;
+    bool timed_out = false;
+    char *err = NULL;
+    json_t *data;
     agents_user_wait(env, true);
-    json_t *ans = env->ui.ask(env->ui.ud, qs);
-    agents_user_wait(env, false);
-    if (!ans) return ask_cancelled(ctx, out);
-    if (json_get_str(ans, "__error")) { /* the host's answer failed validation, or the host went away */
-        tool_result_error(out, "%s", json_get_str(ans, "__error"));
-        json_free(ans);
-        return 0;
-    }
-    json_t *results = json_arr();
-    json_arr_foreach(qs, i, q) json_push(results, ask_result(q, ans));
-    json_free(ans);
-    if (json_len(results) == 1) {
-        json_t *r = json_at(results, 0);
-        if (!json_get_bool(r, "timedOut", false) && !json_get_bool(r, "multi", false) &&
-            !json_len(json_get_arr(r, "selectedOptions")) && !json_get(r, "customInput")) {
-            json_free(results);
-            return ask_cancelled(ctx, out);
+    if (env->ui.form) data = env->ui.form(env->ui.ud, html ? html : "", timeout, &timed_out, cancel, &err);
+    else {
+        fb_ui_t fb = {env, timeout, cancel, NULL};
+        data = ask_field_by_field(&fb, form, &timed_out);
+        err = fb.err;
+        if (err) {
+            json_free(data);
+            data = NULL;
         }
-        char *text = ask_single_text(r);
-        tool_result_text(out, text);
-        free(text);
-        json_t *d = json_clone(r);
-        json_del(d, "id");
-        out->details = d;
-        json_free(results);
+    }
+    agents_user_wait(env, false);
+    if (err) {
+        tool_result_error(out, "%s", err);
+        free(err);
+        hf_form_free(form);
         return 0;
     }
-    sb_t b = SB_INIT;
-    sb_append(&b, "User answers:");
-    json_t *r;
-    json_arr_foreach(results, i, r) {
-        sb_putc(&b, '\n');
-        ask_result_line(&b, r);
+    if (!data) {
+        hf_form_free(form);
+        return ask_cancelled(ctx, out);
     }
-    tool_result_text(out, sb_cstr(&b));
-    sb_free(&b);
+    char *json = hf_data_json(data);
     out->details = json_obj();
-    json_set(out->details, "results", results);
+    json_set(out->details, "answers", hf_answers(form, data));
+    if (timed_out) {
+        json_set_bool(out->details, "timedOut", true);
+        tool_result_textf(out, "No answer before the timeout; submitted the form's current values:\n%s", json);
+    } else tool_result_textf(out, "User answers:\n%s", json);
+    free(json);
+    json_free(data);
+    hf_form_free(form);
     return 0;
 }
+
+static const char ASK_EXAMPLE_FORM[] =
+    "<form>\n"
+    "  <p>Sessions live in memory and are lost on restart.</p>\n"
+    "  <fieldset>\n"
+    "    <legend>Session store</legend>\n"
+    "    <label><input type=\"radio\" name=\"store\" value=\"sqlite\" checked> SQLite: one file, no new service</label>\n"
+    "    <label><input type=\"radio\" name=\"store\" value=\"redis\"> Redis: shared across instances, needs ops</label>\n"
+    "  </fieldset>\n"
+    "  <label>Session lifetime (days) <input type=\"number\" name=\"ttl_days\" value=\"30\" min=\"1\"></label>\n"
+    "</form>";
 
 agent_tool_t *tool_ask_new(tool_env_t *env) {
     char *desc = tool_prompt("ask", NULL);
     json_t *s = schema_obj();
-    /* omp's wire schema (ask.ts askSchema through toolWireSchema): described optional fields, closed objects */
-    json_t *qs = json_parse_str(
-        "{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{"
-        "\"id\":{\"type\":\"string\"},\"question\":{\"type\":\"string\"},"
-        "\"options\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\"},"
-        "\"description\":{\"type\":\"string\"},\"preview\":{\"type\":\"string\",\"description\":\"rich preview\"}},"
-        "\"required\":[\"label\"],\"additionalProperties\":false}},"
-        "\"header\":{\"type\":\"string\",\"description\":\"display chip\"},\"multi\":{\"type\":\"boolean\"},"
-        "\"recommended\":{\"type\":\"number\",\"description\":\"0-based default index\"}},"
-        "\"required\":[\"id\",\"question\",\"options\"],\"additionalProperties\":false},\"minItems\":1}");
-    schema_prop_json(s, "questions", qs, true);
+    /* omp's wire schema (ask.ts askSchema through toolWireSchema) */
+    json_t *h = json_parse_str("{\"type\":\"string\",\"description\":\"one HTML <form>\"}");
+    schema_prop_json(s, "html", h, true);
     json_set_bool(s, "additionalProperties", false);
     agent_tool_t *t = agent_tool_new("ask", "Ask", desc, s, ask_execute);
     t->exclusive = true;
-    t->examples = json_parse_str("[{\"caption\":\"Choice\",\"call\":{\"questions\":[{\"id\":\"storage\",\"question\":"
-                                 "\"Database?\",\"options\":[{\"label\":\"SQLite\"},{\"label\":\"Postgres\"}],"
-                                 "\"recommended\":0}]}}]");
+    json_t *ex = json_arr(), *e = json_obj(), *call = json_obj();
+    json_set_str(e, "caption", "Choice with context and a number");
+    json_set_str(call, "html", ASK_EXAMPLE_FORM);
+    json_set(e, "call", call);
+    json_push(ex, e);
+    t->examples = ex;
     free(desc);
     t->ud = env;
     return t;

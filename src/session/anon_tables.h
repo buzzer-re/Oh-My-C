@@ -333,6 +333,7 @@ static const char *const ANON_FIELD_RULES[][2] = {
     {"statusEvents", "opaque"},
     {"options", "opaque"},
     {"selectedOptions", "opaque"},
+    {"answers", "opaque"},
     {"phases", "opaque"},
     {"tasks", "opaque"},
     {"completedTasks", "opaque"},
@@ -357,7 +358,7 @@ static const char *const ANON_FIELD_RULES[][2] = {
 
 static const char *const ANON_TEXT_ARG_KEYS[] = {
     "content", "text", "code", "task", "context", "prompt", "message", "body", "input", "summary",
-    "description", "old_text", "new_text",
+    "description", "old_text", "new_text", "html",
     NULL,
 };
 
@@ -520,7 +521,7 @@ static const char *const ANON_ARG_SCHEMAS[][2] = {
     {"todo", "op items task phase list reason tasks content status phase_note"},
     {"wait", "ids timeout#"},
     {"web_search", "query limit# recency num_search_results# max_tokens# temperature#"},
-    {"ask", "questions id question options label description recommended# header preview multi"},
+    {"ask", "html"},
     {"ast_grep", "pat path lang skip# limit#"},
     {"ast_edit", "pat out ops paths path lang"},
     {"github", "op repo branch path pr# force forceWithLease title body base head draft fill reviewer assignee label query since until dateField limit# run tail#"},
