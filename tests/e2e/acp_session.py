@@ -70,8 +70,9 @@ class Client:
         elif method == "terminal/wait_for_exit":
             res = {"exitCode": self.terms["t1"].returncode, "signal": None}
         elif method == "elicitation/create":
+            self.elicited = p
             props = p["requestedSchema"]["properties"]
-            res = {"action": "accept", "content": {"q0": props["q0"]["oneOf"][0]["const"]}}
+            res = {"action": "accept", "content": {"color": props["color"]["oneOf"][1]["const"], "n": 5, "bogus": 1}}
         self.send({"id": rid, "result": res})
 
     def close(self):
@@ -156,9 +157,17 @@ c.call("initialize", {"protocolVersion": 1, "clientCapabilities": {"elicitation"
 r, _ = c.call("session/new", {"cwd": WORK, "mcpServers": [
     {"name": "mock", "command": sys.executable, "args": ["-I", MOCK_MCP], "env": []}]})
 sid = r["result"]["sessionId"]
-q = {"questions": [{"id": "color", "question": "Pick a color", "options": [{"label": "Red"}, {"label": "Blue"}]}]}
-r, fr = prompt(c, sid, "call:ask:" + json.dumps(q))
-check("elicitation", any(f.get("method") == "elicitation/create" for f in fr) and "User selected: Red" in texts(fr), texts(fr))
+form = ('<form><p>Paint it</p><fieldset><legend>Pick a color</legend><label><input type="radio" name="color" value="red" checked> Red</label>'
+        '<label><input type="radio" name="color" value="blue"> Blue</label></fieldset>'
+        '<label>Coats <input type="number" name="n" value="2" min="1" required></label></form>')
+r, fr = prompt(c, sid, "call:ask:" + json.dumps({"html": form}))
+el = getattr(c, "elicited", {})
+want_schema = {"type": "object", "properties": {
+    "color": {"type": "string", "title": "Pick a color", "oneOf": [{"const": "red", "title": "Red"}, {"const": "blue", "title": "Blue"}], "default": "red"},
+    "color_other": {"type": "string", "title": "Pick a color \u2014 Other", "description": "Your own answer instead"},
+    "n": {"type": "number", "title": "Coats", "minimum": 1, "default": 2}}, "required": ["n"]}
+check("elicitation", el.get("message") == "Paint it\n\nPick a color" and el.get("requestedSchema") == want_schema and
+      'User answers:\n{\n  "color": "blue",\n  "n": 5\n}' in texts(fr), (el, texts(fr)))
 r, fr = prompt(c, sid, "call:mcp__mock_echo_text:" + json.dumps({"text": "via mcp"}))
 check("mcp servers", "mcp echo: via mcp" in texts(fr), texts(fr))
 c.close()

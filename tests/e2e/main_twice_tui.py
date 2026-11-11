@@ -63,7 +63,8 @@ def command(text):
     os.write(fd, b"\r")
 
 
-ASK = "call:ask:" + json.dumps({"questions": [{"id": "q1", "question": "Pick one", "options": [{"label": "Aa"}, {"label": "Bb"}]}]})
+ASK = "call:ask:" + json.dumps({"html": '<form><p>Pick one</p><label><input type="radio" name="q1" value="a"> Aa</label>'
+                                       '<label><input type="radio" name="q1" value="b"> Bb</label></form>'})
 
 next_mark = 0
 for run in (1, 2):
@@ -80,7 +81,9 @@ for run in (1, 2):
     if not wait_out("Pick one", 10, mark_ask):
         fail(f"run {run} ask dialog")
     pump(0.3)
-    os.write(fd, b"\r")
+    os.write(fd, b"\r")  # pick Aa (focus moves to Submit)
+    pump(0.3)
+    os.write(fd, b"\r")  # Submit
     pump(1.0)
     next_mark = len(out)
     command("/exit")

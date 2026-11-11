@@ -155,24 +155,40 @@ check("queue_update", qu and qu.get("liveSteered") == 0, qu)
 r.wait(lambda f: f.get("type") == "prompt_result" and f.get("id") == "q", 30)
 r.wait(lambda f: f.get("type") == "queue_update" and f.get("followUp") == [], 10)
 
-# ask over select / editor dialogs
-r.ui += [{"value": "B (Recommended)"}]
-r.prompt("a1", 'call:ask:{"questions":[{"id":"q1","question":"Pick one","options":[{"label":"A"},{"label":"B","description":"bee"}],"recommended":1}]}')
+# ask: a host without a form surface walks the HTML form's named fields through select / input / editor
+FORM1 = ('<form><p>Pick one</p><label><input type="radio" name="q1" value="a"> A</label>'
+         '<label><input type="radio" name="q1" value="b" checked> B</label>'
+         '<label>Name <input name="n" placeholder="you"></label><label>Notes <textarea name="t">draft</textarea></label></form>')
+r.ui += [{"value": "B"}, {"value": "Zed"}, {"value": "final"}]
+n0 = len(r.frames)
+r.prompt("a1", "call:ask:" + json.dumps({"html": FORM1}))
 sel = r.wait(lambda f: f.get("type") == "extension_ui_request" and f.get("method") == "select" and f.get("title") == "Pick one")
-check("ask select", sel and sel["options"] == ["A", "B (Recommended)", "Other (type your own)"] and
-      sel.get("optionDetails") == [{}, {"description": "bee"}, {}], sel)
+check("ask select", sel and sel["options"] == ["A", "B", "Other (type your own)"] and "optionDetails" not in sel, sel)
 te = r.wait(lambda f: f.get("type") == "tool_execution_end" and f.get("toolName") == "ask")
-check("ask answer", te and te["result"]["content"][0]["text"] == "User selected: B", te)
+with r.lock:
+    inp = next((f for f in r.frames[n0:] if f.get("method") == "input"), None)
+    ed = next((f for f in r.frames[n0:] if f.get("method") == "editor"), None)
+check("ask input", inp and inp["title"] == "Name" and inp.get("placeholder") == "you", inp)
+check("ask editor", ed and ed["title"] == "Notes" and ed.get("prefill") == "draft" and "promptStyle" not in ed, ed)
+check("ask answer", te and te["result"]["content"][0]["text"] == 'User answers:\n{\n  "q1": "b",\n  "n": "Zed",\n  "t": "final"\n}' and
+      te["result"]["details"] == {"answers": [{"name": "q1", "question": "Pick one", "answer": "B"},
+                                              {"name": "n", "question": "Name", "answer": "Zed"},
+                                              {"name": "t", "question": "Notes", "answer": "final"}]}, te)
+# set_ask_dialog only governs extension askDialog calls: the ask tool still walks its form; "Other" asks for text
 x = r.call({"id": "ad", "type": "set_ask_dialog", "enabled": True})
 check("set_ask_dialog", x and x["data"] == {"enabled": True}, x)
-r.ui += [{"answers": [{"id": "q", "selectedOptions": ["A"]}]}]
+r.ui = [{"value": "Other (type your own)"}, {"value": "teal"}, {"value": "\u2714 Done selecting"}]
 n0 = len(r.frames)
-r.prompt("a2", 'call:ask:{"questions":[{"id":"q","question":"Q","options":[{"label":"A"}]}]}')
+r.prompt("a2", "call:ask:" + json.dumps({"html": '<form><p>Q</p><label><input type="checkbox" name="c" value="x" checked> X</label>'
+                                                  '<label><input type="checkbox" name="c" value="y"> Y</label></form>'}))
 with r.lock:
+    te = next((f for f in r.frames[n0:] if f.get("type") == "tool_execution_end" and f.get("toolName") == "ask"), None)
     ask = next((f for f in r.frames[n0:] if f.get("method") == "ask"), None)
-    te = next((f for f in r.frames[n0:] if f.get("type") == "tool_execution_end"), None)
-check("ask dialog", ask and ask["questions"] == [{"id": "q", "question": "Q", "options": [{"label": "A"}]}], ask)
-check("ask dialog answer", te and te["result"]["content"][0]["text"] == "User selected: A", te)
+    sels = [f for f in r.frames[n0:] if f.get("method") == "select"]
+check("ask no dialog", ask is None and len(sels) == 2 and sels[0]["title"] == "(1 selected) Q" and
+      sels[0]["options"] == ["X", "Y", "Other (type your own)", "\u2714 Done selecting"] and sels[1]["title"] == "(2 selected) Q", sels)
+check("ask other", te and te["result"]["content"][0]["text"] == 'User answers:\n{\n  "c": [\n    "x",\n    "teal"\n  ]\n}', te)
+x = r.call({"id": "ad2", "type": "set_ask_dialog", "enabled": False})
 
 # session change shapes
 n0 = len(r.frames)
