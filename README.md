@@ -17,7 +17,7 @@ It also solved another problem for me: I don't have to install Bun or any other 
 
 ## Installing
 
-There are no prebuilt binaries: each release on GitHub ships the source (`omc-<version>.tar.gz` with a `SHA256SUMS` file), and you build it on your own machine. omc's version is the omp release it matches, so `omc v18.17.0` behaves like `omp v18.17.0`.
+There are no prebuilt binaries: each release on GitHub ships the source (`omc-<version>.tar.gz` with a `SHA256SUMS` file), and you build it on your own machine. omc's version is the omp release it matches, so `omc v18.18.6` behaves like `omp v18.18.6`.
 
 The quick way downloads the latest release, checks it against `SHA256SUMS`, builds it and installs it into `~/.local/bin`:
 
@@ -25,11 +25,11 @@ The quick way downloads the latest release, checks it against `SHA256SUMS`, buil
 curl -fsSL https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.sh | sh
 ```
 
-Set `OMC_VERSION=18.17.0` for a specific release, or `OMC_INSTALL_DIR` for another directory. You need the same things as in [Building](#building) below. If you prefer to do it by hand:
+Set `OMC_VERSION=18.18.6` for a specific release, or `OMC_INSTALL_DIR` for another directory. You need the same things as in [Building](#building) below. If you prefer to do it by hand:
 
 ```sh
 sha256sum -c SHA256SUMS      # on macOS: shasum -a 256 -c SHA256SUMS
-tar -xzf omc-18.17.0.tar.gz && cd omc-18.17.0
+tar -xzf omc-18.18.6.tar.gz && cd omc-18.18.6
 make && make install
 ```
 

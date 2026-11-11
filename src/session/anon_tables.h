@@ -5,6 +5,7 @@
 static const char *const ANON_FIELD_RULES[][2] = {
     {"version", "num"},
     {"resolvedModelIsFallback", "num"},
+    {"perCallModel", "num"},
     {"display", "num"},
     {"synthetic", "num"},
     {"steering", "num"},
@@ -128,6 +129,7 @@ static const char *const ANON_FIELD_RULES[][2] = {
     {"role", "enum"},
     {"titleSource", "enum"},
     {"thinkingLevel", "enum"},
+    {"perCallThinkingLevel", "enum"},
     {"configured", "enum"},
     {"serviceTier", "enum"},
     {"purpose", "enum"},
@@ -173,6 +175,7 @@ static const char *const ANON_FIELD_RULES[][2] = {
     {"provider", "identity"},
     {"model", "identity"},
     {"resolvedModel", "identity"},
+    {"perCallModelIdentity", "identity"},
     {"upstreamProvider", "identity"},
     {"upstreamModel", "identity"},
     {"advisor", "identity"},

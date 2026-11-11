@@ -7,13 +7,13 @@ commit omc currently matches and how to bring later upstream changes over.
 
 | | |
 |---|---|
-| **Upstream commit** | `75e7801e247d4e3263439d4cc08ccad60dc64bdd` |
-| **Tag / version** | `v18.17.0` (`omp --version` → `omp/18.17.0`) |
-| **Upstream date** | 2026-11-06 |
-| **Pinned on** | 2026-11-06 |
+| **Upstream commit** | `9058ab9d229663e229e2867824ba6df6f21e9e59` |
+| **Tag / version** | `v18.18.6` (`omp --version` → `omp/18.18.6`) |
+| **Upstream date** | 2026-11-10 |
+| **Pinned on** | 2026-11-10 |
 
 Everything model-facing (prompts, tool schemas/descriptions, system prompt, output formatting), the TUI
-(verified side by side against the installed `omp/18.17.0`; docs/status.md's update section lists what still differs) and the embedded data (catalog, themes,
+(verified side by side against `omp/18.17.0`; the v18.18.6 changes were ported from source and still need the side-by-side pass, see docs/status.md's update section) and the embedded data (catalog, themes,
 symbols, settings table, slash commands, tips) corresponds to this commit. Update this table — and the
 matching line in [AGENTS.md](AGENTS.md) — every time an update pass is finished.
 
@@ -25,7 +25,7 @@ matching line in [AGENTS.md](AGENTS.md) — every time an update pass is finishe
    UP=/path/to/scratch/omp
    git clone https://github.com/can1357/oh-my-pi.git "$UP"
    cd "$UP"
-   PIN=75e7801e247d4e3263439d4cc08ccad60dc64bdd   # from the table above
+   PIN=9058ab9d229663e229e2867824ba6df6f21e9e59   # from the table above
    git fetch --tags origin
    TARGET=origin/main                               # or the newest release tag: git tag --sort=-v:refname | head -1
    git log --oneline --no-merges "$PIN..$TARGET" | wc -l
@@ -103,3 +103,5 @@ Partial passes are fine: if you stop midway, pin the last upstream commit whose 
 - The installed `omp` must match the target (`omp update`) for the side-by-side checks to mean anything. Run it only with a throwaway `HOME` and agent dir plus a symlink to `~/.omp/natives`. Some providers ignore a mock `baseUrl` and reach the real service (`google-vertex` does): keep those out of comparison matrices.
 - `crates/pi-shell` is out of scope: omc keeps real bash (AGENTS.md).
 - Most of a release's commits amend or revert earlier ones in it. Port the final state at the tag, not each step.
+- `settings_patch.py` can't evaluate a description written as a getter (`get description() { ... }`, usually with a key hint): it lists a changed one under UNRESOLVED, so copy that text by hand.
+- Streams that split the commit list by path still overlap (one upstream commit touches tools, TUI and session): note cross-stream edits, merge the streams in one place and run the suite once on the merged result.
