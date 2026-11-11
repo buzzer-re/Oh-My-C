@@ -280,6 +280,29 @@ void ui_overlay_login_provider(ui_t *u, const char *provider, bool reopen_hub);
 typedef void (*ui_ask_done_fn)(void *ud, json_t *answers);
 void ui_ask_dialog_show(ui_t *u, const json_t *questions, ui_ask_done_fn done, void *ud);
 
+/* ---------- formdlg.c ---------- */
+
+/* the ask tool's HTML form (html-form/dialog.ts HtmlFormDialog) in the composer's place. `done` runs once on the UI
+ * thread with the submitted form data (owned by the callee; NULL when cancelled); `timed_out` when the inactivity
+ * timeout submitted the current values. */
+typedef void (*ui_form_done_fn)(void *ud, json_t *data, bool timed_out);
+typedef struct {
+    ui_t *ui;             /* host (closes the selector on finish); NULL in tests */
+    tui_t *tui;           /* terminal height, timers, repaints, background picture loads; NULL in tests */
+    tui_editor_t *draft;  /* a composer draft keeps typing until ↑/↓ hands the keyboard over (NULL: none) */
+    int64_t timeout_ms;   /* inactivity timeout (0: none) */
+    char *cwd;            /* relative <img src> paths resolve here (copied) */
+    char *title;          /* panel title (copied; NULL: "Ask") */
+    int term_rows;        /* terminal height without a tui (tests) */
+    ui_form_done_fn done;
+    void *ud;
+} ui_form_opts_t;
+tui_component_t *ui_form_dialog_new(const char *html, const ui_form_opts_t *o);
+void ui_form_dialog_show(ui_t *u, const char *html, int64_t timeout_ms, const char *cwd, ui_form_done_fn done, void *ud);
+bool ui_form_is_dialog(const tui_component_t *c);
+json_t *ui_form_dialog_data(tui_component_t *c); /* current answers as submission would report them (owned) */
+void ui_form_dialog_tick(tui_component_t *c, int64_t now_ms); /* tests: the countdown's deadline passes */
+
 /* ---------- approval.c ---------- */
 
 /* tool approval prompt in the composer's place (overlays/approval-dialog.ts): installs the tool env's `approve`
