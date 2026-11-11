@@ -311,8 +311,12 @@ def sc_bridge(c):
 def sc_elicit(c):
     init(c, {"elicitation": {"form": {}}})
     sid = new(c)
-    q = {"questions": [{"id": "color", "question": "Pick a color", "options": [{"label": "Red"}, {"label": "Blue"}]}]}
-    prompt(c, sid, "call:ask:" + json.dumps(q))
+    form = ('<form><p>Paint it</p><fieldset><legend>Pick a color</legend>'
+            '<label><input type="radio" name="color" value="red"> Red</label>'
+            '<label><input type="radio" name="color" value="blue" checked> Blue</label></fieldset>'
+            '<label>Coats <input type="number" name="n" value="2" min="1" required></label>'
+            '<label><input type="checkbox" name="gloss"> Glossy</label></form>')
+    prompt(c, sid, "call:ask:" + json.dumps({"html": form}))
 
 
 def sc_steer(c):

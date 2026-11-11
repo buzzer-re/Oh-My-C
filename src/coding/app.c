@@ -1853,6 +1853,8 @@ static void load_session_into_agent(app_t *a) {
 
 void app_reload_context(app_t *a) { load_session_into_agent(a); }
 
+static bool app_env_plan_mode(tool_env_t *env) { return env && env->session && ((app_t *)env->session)->plan_mode; }
+
 app_t *app_create(const app_opts_t *o, char **err) {
     *err = NULL;
     ai_providers_init();
@@ -1949,6 +1951,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     app_bind_image_attachments(a); /* attachment://N */
     if (!o->subagent) agents_register_main(a);
     a->env->run_subagent = app_run_subagent;
+    a->env->plan_mode_active = app_env_plan_mode;
     a->env->judge = app_tool_judge;
     a->env->active_model = app_tool_active_model;
     a->evalhost = evalhost_new(a);

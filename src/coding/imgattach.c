@@ -25,8 +25,7 @@ json_t *app_image_attachments(app_t *a) {
     for (size_t i = json_len(msgs); i-- > 0;) {
         const json_t *m = json_at(msgs, i);
         const char *role = json_get_str(m, "role");
-        bool carries = str_eq(role, "user") || str_eq(role, "developer") ||
-                       (str_eq(role, "toolResult") && str_eq(json_get_str(m, "toolName"), "ask"));
+        bool carries = str_eq(role, "user") || str_eq(role, "developer");
         const json_t *content = json_get_arr(m, "content");
         if (!carries || !content) continue;
         int n = 0;

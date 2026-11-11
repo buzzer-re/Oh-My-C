@@ -94,6 +94,9 @@ struct ui {
     json_t *ask_questions;
     json_t *ask_answers;
     bool ask_done;
+    char *form_html;      /* the ask tool's form while its dialog is up (formDialog bridge) */
+    int64_t form_timeout;
+    bool form_timed_out;
     tui_select_list_t *picker;
     char *goal_cont; /* pending hidden continuation prompt (goal / advisor) */
     const char *cont_type;

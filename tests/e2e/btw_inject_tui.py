@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """/btw steering inject and Ctrl+R over an ask prompt under a pty (tests/e2e/run.sh): with btw.inject on, the side
 question carries the instruction, the answer shows its block, Alt+I sends it once, verbatim and unexpanded; with it off
-there is no instruction, block or send. Ctrl+R in the ask dialog's custom-answer prompt picks into that prompt, not the
-hidden composer.
+there is no instruction, block or send. Ctrl+R over the ask form opens History and picks into the composer.
 usage: btw_inject_tui.py <omc> <req.jsonl> <scratch dir>
 Prints "btw inject tui ok" or the first failing step."""
 import fcntl, json, os, pty, select, signal, struct, sys, termios, time
@@ -187,44 +186,36 @@ if sent_count("say:OFF-SENT"):
 os.write(fd, b"\x1b")  # close the panel
 pump(0.3)
 
-# ---- Ctrl+R over the ask dialog's custom-answer prompt: the pick lands in the prompt
+# ---- Ctrl+R over the ask form: History opens over it and the pick lands in the composer (the form has no prompt
+# editor of its own); closing History brings the form back
 mark = len(out)
 command("say:HISTORY-ENTRY")
 if not wait_out("HISTORY-ENTRY", 15, mark):
     fail("history entry", out[mark:][-800:])
 pump(0.5)
 mark = len(out)
-command('call:ask:{"questions":[{"id":"q1","question":"Pick one","options":[{"label":"Aa"},{"label":"Bb"}]}]}')
+command("call:ask:" + json.dumps({"html": '<form><p>Pick one</p><label><input type="radio" name="q1" value="a"> Aa</label>'
+                                           '<label><input type="radio" name="q1" value="b"> Bb</label></form>'}))
 if not wait_out("Pick one", 15, mark):
     fail("ask", out[mark:][-800:])
 pump(0.8)
-os.write(fd, b"\x1b[B\x1b[B")  # down to Other
-pump(0.3)
-os.write(fd, b"\r")
-if not wait_out("> ", 5):
-    fail("ask prompt", out[mark:][-800:])
-pump(0.5)
 mark = len(out)
 os.write(fd, b"\x12")
 if not wait_out("History", 5, mark):
-    fail("history over the prompt", out[mark:][-800:])
+    fail("history over the form", out[mark:][-800:])
 pump(0.3)
-os.write(fd, b"HISTORY")  # recency would pick the ask prompt itself
+os.write(fd, b"HISTORY")
 pump(0.8)
+mark = len(out)
 os.write(fd, b"\r")
-pump(0.8)
-# the prompt holds the pick: submitting it answers the ask
+if not wait_out("Pick one", 5, mark):
+    fail("form back after history", out[mark:][-800:])
+pump(0.5)
+os.write(fd, b"\x1b")  # cancel the form; the composer holds the pick
+pump(1.0)
 os.write(fd, b"\r")
-end = time.time() + 15
-answered = False
-while time.time() < end and not answered:
-    pump(0.2)
-    for r in requests():
-        for m in r.get("messages", []):
-            if m.get("role") == "tool" and "say:HISTORY-ENTRY" in json.dumps(m.get("content")):
-                answered = True
-if not answered:
-    fail("ask answer", out[-800:])
+if not wait_sent("say:HISTORY-ENTRY", 2):
+    fail("history pick in the composer", out[-800:])
 
 stop()
 print("btw inject tui ok")

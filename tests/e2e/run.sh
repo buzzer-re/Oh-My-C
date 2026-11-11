@@ -526,6 +526,8 @@ if python3 -c 'import pty' 2>/dev/null; then
     check "tui quiet"    "quiet tui ok"  python3 -I "$ROOT/tests/e2e/quiet_tui.py" "$B" "$ROOT/tests/e2e/mock_mcp.py" "$T/quiet"
     check "tui resume"   "resume tui ok" python3 -I "$ROOT/tests/e2e/resume_tui.py" "$B" "$T/req.jsonl" "$T/resume"
     check "tui btw inject"  "btw inject tui ok"  python3 -I "$ROOT/tests/e2e/btw_inject_tui.py" "$B" "$T/req.jsonl" "$T/btw_inject"
+    # the ask tool's HTML form (omp 18.18 html-form/dialog.ts): submit, validation, Other, inactivity timeout, cancel
+    mkdir -p "$T/ask_form" && check "tui ask form" "ask form tui ok"  python3 -I "$ROOT/tests/e2e/ask_form_tui.py" "$B" "$T/req.jsonl" "$T/ask_form"
     check "tui fs stall"  "fs stall ok"  python3 -I "$ROOT/tests/e2e/fs_stall_tui.py" "$B" "$T/fs_stall"
 fi
 check "acp file cmd"   "stop end_turn"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/init"

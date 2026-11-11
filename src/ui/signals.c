@@ -3,6 +3,7 @@
 #include "ui/overlays.h"
 #include "tui/motion.h"
 #include "ui/signals.h"
+#include "text/htmlform.h"
 
 #include "config/settings.h"
 #include "tui/ansi.h"
@@ -560,15 +561,15 @@ void ui_signals_tool_start(const char *tool_call_id, const char *tool_name, cons
     json_t *qa = warp_event("question_asked");
     json_set_str(qa, "summary", "Waiting for your answer");
     warp_emit(qa);
-    /* #blockingPrompt: the questions joined by a space */
-    strvec_t qs = {0};
-    json_t *q;
-    json_arr_foreach(json_get_arr(args, "questions"), i, q) {
-        const char *t = json_get_str(q, "question");
-        if (t) strvec_push(&qs, t);
+    /* #blockingPrompt: the question of the form's first named field */
+    const char *html = json_get_str(args, "html");
+    char *msg = NULL;
+    if (html) {
+        hf_form_t *f = hf_parse(html);
+        for (size_t i = 0; i < f->fields.n && !msg; i++)
+            if (*f->fields.v[i]->name) msg = xstrdup(f->fields.v[i]->question);
+        hf_form_free(f);
     }
-    char *msg = qs.n ? strvec_join(&qs, " ") : NULL;
-    strvec_free(&qs);
     blocker_t b = {xstrdup(tool_call_id), msg, "question"};
     vec_push(&S.blockers, b);
     ui_signals_run_status(RUN_BLOCKED, "question", msg);

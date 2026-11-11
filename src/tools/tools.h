@@ -44,8 +44,22 @@ typedef struct {
 /* ---------- UI callbacks (interactive mode supplies these; NULL in print/rpc) ---------- */
 struct approval_prompt;
 typedef struct {
-    /* ask the user; returns owned JSON answer object or NULL if unavailable/cancelled */
+    /* questions dialog (cfg:// change approvals): returns owned JSON answer object or NULL if unavailable/cancelled */
     json_t *(*ask)(void *ud, const json_t *questions);
+    /* formDialog: the `ask` tool's HTML form rendered whole (interactive TUI, ACP form elicitation). Returns the
+     * owned form data object, or NULL when cancelled; *timed_out when the inactivity timeout (timeout_ms > 0)
+     * submitted the current values; *err (owned) when the host failed. NULL member: no form surface, so the tool
+     * walks the form's fields through select / input / editor below. */
+    json_t *(*form)(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, volatile sig_atomic_t *cancel,
+                    char **err);
+    /* dialog primitives of the field-by-field fallback (RPC). Each returns the owned answer or NULL (cancelled,
+     * *timed_out at the deadline, *err (owned) when the host went away). */
+    char *(*select)(void *ud, const char *title, const strvec_t *options, int64_t timeout_ms, bool *timed_out,
+                    volatile sig_atomic_t *cancel, char **err);
+    char *(*input)(void *ud, const char *title, const char *placeholder, int64_t timeout_ms, bool *timed_out,
+                   volatile sig_atomic_t *cancel, char **err);
+    char *(*editor)(void *ud, const char *title, const char *prefill, bool prompt_style, volatile sig_atomic_t *cancel,
+                    char **err);
     /* a tool call that already returned has a new result frame (async task progress): details owned; called
      * from any thread (the UI posts it to its own) */
     void (*tool_frame)(void *ud, const char *tool_call_id, const char *tool_name, const json_t *args, const char *text,
@@ -107,6 +121,7 @@ typedef struct tool_env {
     bool find_enabled;         /* `find` is part of this session (set by tools_register_builtin) */
     const char *delegation_bias; /* model delegation bias ("eager"/"balanced"/"restrained"/"gated"; static) */
     void *session;             /* app session (for task tool) */
+    bool (*plan_mode_active)(struct tool_env *env); /* plan mode is on (the ask timeout is off); NULL: never */
     struct shell *shell;       /* persistent bash session (lazy) */
     const discovery_t *disc;   /* skills/rules for skill:// and rule:// (borrowed) */
     /* a skill:// name no loaded skill owns: rediscover the session's skills (rate-limited); true when the list
