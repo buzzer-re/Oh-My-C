@@ -103,5 +103,7 @@ Partial passes are fine: if you stop midway, pin the last upstream commit whose 
 - The installed `omp` must match the target (`omp update`) for the side-by-side checks to mean anything. Run it only with a throwaway `HOME` and agent dir plus a symlink to `~/.omp/natives`. Some providers ignore a mock `baseUrl` and reach the real service (`google-vertex` does): keep those out of comparison matrices.
 - `crates/pi-shell` is out of scope: omc keeps real bash (AGENTS.md).
 - Most of a release's commits amend or revert earlier ones in it. Port the final state at the tag, not each step.
+- `settings_patch.py` only sees `register({...})` calls: a setting registered through a helper (v18.18.7's
+  `resetWindowSetting(id, label, description)`) shows up only as REMOVED for the key it replaced. Add those rows by hand.
 - `settings_patch.py` can't evaluate a description written as a getter (`get description() { ... }`, usually with a key hint): it lists a changed one under UNRESOLVED, so copy that text by hand.
 - Streams that split the commit list by path still overlap (one upstream commit touches tools, TUI and session): note cross-stream edits, merge the streams in one place and run the suite once on the merged result.
