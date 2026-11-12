@@ -1144,6 +1144,53 @@ static void tool_update_cb(tool_ctx_t *ctx, const tool_result_t *partial) {
     emit(j->a, &ev);
 }
 
+/* agent-loop.ts formatToolNotFoundMessage / suggestToolNames: `Tool <name> not found`, plus the tools whose name is a
+ * tail of it (the last `__` and `_` segments, at least 3 chars, longest first): advertised tools, then mounted xd://
+ * devices. Advisory only; it never selects a tool. */
+static char *tool_not_found_message(agent_t *a, const char *name) {
+    strvec_t cand = {0}, seg = {0}, match = {0};
+    pthread_mutex_lock(&a->mu);
+    for (size_t i = 0; i < a->tools.n; i++) strvec_push(&cand, a->tools.v[i]->name);
+    for (size_t i = 0; i < a->all_tools.n; i++)
+        if (a->all_tools.v[i]->mounted) strvec_push(&cand, a->all_tools.v[i]->name);
+    pthread_mutex_unlock(&a->mu);
+    static const char *const bounds[] = {"__", "_"};
+    for (size_t b = 0; b < 2 && cand.n; b++) {
+        const char *hit = NULL;
+        for (const char *q = strstr(name, bounds[b]); q; q = strstr(q + 1, bounds[b])) hit = q; /* lastIndexOf */
+        if (!hit) continue;
+        const char *tail = hit + strlen(bounds[b]);
+        if (strlen(tail) >= 3 && !strvec_contains(&seg, tail)) strvec_push(&seg, tail);
+    }
+    for (size_t i = 1; i < seg.n; i++) /* longest tail first (stable) */
+        for (size_t k = i; k > 0 && strlen(seg.v[k]) > strlen(seg.v[k - 1]); k--) {
+            char *t = seg.v[k];
+            seg.v[k] = seg.v[k - 1];
+            seg.v[k - 1] = t;
+        }
+    for (size_t i = 0; i < seg.n; i++)
+        for (size_t k = 0; k < cand.n; k++) {
+            const char *c = cand.v[k];
+            if (!strcmp(c, name) || strvec_contains(&match, c)) continue;
+            size_t cl = strlen(c), sl = strlen(seg.v[i]);
+            if (!strcmp(c, seg.v[i]) || (cl > sl && c[cl - sl - 1] == '_' && !strcmp(c + cl - sl, seg.v[i])))
+                strvec_push(&match, c);
+        }
+    char *out;
+    if (!match.n) out = xasprintf("Tool %s not found", name);
+    else if (match.n == 1) out = xasprintf("Tool %s not found. Did you mean %s?", name, match.v[0]);
+    else {
+        sb_t b = {0};
+        for (size_t i = 0; i < match.n && i < 3; i++) sb_appendf(&b, "%s%s", i ? ", " : "", match.v[i]);
+        out = xasprintf("Tool %s not found. Closest available: %s", name, b.s);
+        sb_free(&b);
+    }
+    strvec_free(&cand);
+    strvec_free(&seg);
+    strvec_free(&match);
+    return out;
+}
+
 static void run_tool(tool_job_t *j) {
     agent_t *a = j->a;
     if (!j->skip) pause_park(a); /* tools already running are unaffected (pausing never aborts) */
@@ -1155,7 +1202,9 @@ static void run_tool(tool_job_t *j) {
     if (j->skip) {
         tool_result_error(&j->res, "Skipped due to queued user message.");
     } else if (!j->tool) {
-        tool_result_validation_error(&j->res, "Tool %s not found", name ? name : "(null)");
+        char *msg = tool_not_found_message(a, name ? name : "(null)");
+        tool_result_validation_error(&j->res, "%s", msg);
+        free(msg);
     } else if (j->intent_too_long) {
         tool_result_error(&j->res,
                           "`%s` is a short intent label (at most %d chars); the value you sent is %zu chars. The tool was "

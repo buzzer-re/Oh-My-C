@@ -557,6 +557,10 @@ static bool reply_write(const tc_call_t *c) {
 
 void tc_render(const tc_call_t *c, int width, strvec_t *out) {
     const char *n = c->name ? c->name : "";
+    if (c->unregistered) { /* createToolCallBlock: useBuiltInRenderer only for a tool the session holds */
+        tc_generic(c, width, out);
+        return;
+    }
     if (!strcmp(n, "write") && reply_write(c)) {
         reply_prose(json_get_str(c->args, "content"), width, out);
         if (c->has_result && !c->partial && c->is_error) {

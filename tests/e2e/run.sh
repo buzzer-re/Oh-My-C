@@ -83,6 +83,10 @@ rm -f "$T/work/red.png"
 check "grep file"      $'[a/b.txt#'                      "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"written","path":"a/b.txt:1-5"}'
 check "grep no match"  "Tool said: No matches found"     "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"zzq_none"}'
 check "grep missing"   "Path not found: nope/x"          "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"x","path":"nope/x"}'
+# an unknown tool name names the tool its tail matches (agent-loop.ts formatToolNotFoundMessage)
+check "tool suggest one"  "Tool ast_grep not found. Did you mean grep?"  "$B" --model mock/mock-1 --no-session -p 'call:ast_grep:{"pat":"x"}'
+check "tool suggest none" "Tool zzz_nope not found"  "$B" --model mock/mock-1 --no-session -p 'call:zzz_nope:{}'
+check "tool suggest mcp"  "Tool mcp__srv__read not found. Did you mean read?"  "$B" --model mock/mock-1 --no-session -p 'call:mcp__srv__read:{}'
 check "grep partial"   "Skipped missing paths: nope"     "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"written","path":"a;nope"}'
 check "glob none"      "No files found matching pattern" "$B" --model mock/mock-1 -p 'call:glob:{"path":"*.zzq"}'
 check "glob limit"     "Requested limit 500 clamped to the max of 200" "$B" --model mock/mock-1 -p 'call:glob:{"path":"a","limit":500}'
