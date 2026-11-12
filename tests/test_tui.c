@@ -501,6 +501,93 @@ static strvec_t render_fixture(const char *name, tui_md_opts_t *o, int width) {
     return out;
 }
 
+/* inline and block HTML (markdown.ts normalizeHtmlForTerminal, #renderHtmlBlock, collapseInlineHtml and marked's
+ * inline html rule); the expected rows are omp 18.18.7's assistant-message render at 100 columns (98 content) */
+static void test_markdown_html(void) {
+    tui_theme_set(tui_theme_builtin("dark", TUI_COLOR_TRUECOLOR));
+    const struct {
+        const char *md;
+        const char **want;
+    } cases[] = {
+        {"call <form><p>Pick a <b>store</b></p><fieldset><legend>Store</legend><label><input type=\\\"radio\\\" name=\\\"s\\\" value=\\\"sqlite\\\" checked> SQLite</label></fieldset></form> end",
+         (const char *[]){"call <form>Pick a <b>store</b>", "<fieldset><legend>Store</legend><label><input type=\\\"radio\\\" name=\\\"s\\\" value=\\\"sqlite\\\" checked>", "SQLite</label></fieldset></form> end", NULL}},
+        {"x <ol start=3><li>a</li><li>b</li></ol> y\n\n<ol start=3><li>a</li><li>b</li></ol>\n\nafter",
+         (const char *[]){"x 3. a", "", "4. b", "y", "", "3. a", "4. b", "", "after", NULL}},
+        {"<ul><li>Parent<ul><li>Child</li><li>Second child</li></ul><ol start=\"3\"><li>Ordered child</li></ol></li><li>Sibling</li></ul>\n\nFirst<br><br>Second, a<br/>b<br />c\n\n<p></p>Visible\n\n<ul>\n  <li>First</li>\n  <li>Second</li>\n</ul>\n\nend",
+         (const char *[]){"\xe2\x80\xa2" " Parent", "  \xe2\x80\xa2" " Child", "  \xe2\x80\xa2" " Second child", "  3. Ordered child", "\xe2\x80\xa2" " Sibling", "", "First", "", "Second, a", "b", "c", "", "", "Visible", "", "\xe2\x80\xa2" " First", "\xe2\x80\xa2" " Second", "", "end", NULL}},
+        {"before\n\n<hr>\n\nafter <hr/> x <blockquote>q</blockquote> y\n\n<blockquote>heads up, <code>a &lt; b</code> warning</blockquote>\n\ntail",
+         (const char *[]){"before", "", "<hr80>", "", "", "after", "<hr80>", " x", "\xe2\x96\x8f" " q", " y", "\xe2\x96\x8f" " heads up, a < b warning", "", "", "tail", NULL}},
+        {"a <code>a &lt; b</code> c <!-- hidden --> d <code>x \\* `y` *z* [l](http://u) &amp;lt; <b>t</b></code> **<code>b</code>** <span>s</span> e &#10; f &#x41;&amp;&nbsp;g <a title=\"x>y\" href=\\\"q\\\">L</a> <img src=\"a.png\"/> </code> h <code>dangling",
+         (const char *[]){"a a < b c  d x * y z l &lt; <b>t</b> b s e", " f A& g <a title=\"x>y\" href=\\\"q\\\">L</a> <img src=\"a.png\"/>  h dangling", NULL}},
+        {"# Head <code>x</code> <br> two\n\n- item <b>bold</b><br>next\n- <ul><li>in</li></ul>\n- item\n  <div>\n  blk <p>p</p>\n  </div>\n  after\n\n| A | B |\n| --- | --- |\n| x<hr>y | <code>&amp;self</code> <ol start=\"2\"><li>q</li><li>r</li></ol> |\n\n> quote <br> line\n> <p>para</p>\n\n<div class=\"a\">\n<p>Hello &amp; <em>world</em></p>\n\n<ol start=' 7'><li>s</li></ol>\n</div>\nfinal",
+         (const char *[]){"Head x", "two", "", "- item <b>bold</b>", "  next", "- \xe2\x80\xa2" " in", "", "- item", "  <div>", "  blk", "  p", "", "  </div>", "", "  after", "", "\xe2\x94\x8c" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\xac" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x90", "\xe2\x94\x82" " A \xe2\x94\x82" " B          \xe2\x94\x82", "\xe2\x94\x9c" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\xbc" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\xa4", "\xe2\x94\x82" " x \xe2\x94\x82" " &self 2. q \xe2\x94\x82", "\xe2\x94\x82" " y \xe2\x94\x82" "            \xe2\x94\x82", "\xe2\x94\x82" "   \xe2\x94\x82" " 3. r       \xe2\x94\x82", "\xe2\x94\x94" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\xb4" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x98", "", "\xe2\x96\x8f" " quote", "\xe2\x96\x8f" " line", "\xe2\x96\x8f", "\xe2\x96\x8f" " para", "", "<div class=\"a\">", "Hello & <em>world</em>", "1. s", "", "</div>", "final", NULL}},
+        {"a</p>\n\nb<br>\n\n**c<br>**\n\nd\n\n- e<br>\n- f\n\n| g |\n| - |\n| h<br> |\n\nend",
+         (const char *[]){"a", "", "", "b", "", "", "c", "", "", "d", "", "- e", "", "- f", "", "\xe2\x94\x8c" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x90", "\xe2\x94\x82" " g \xe2\x94\x82", "\xe2\x94\x9c" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\xa4", "\xe2\x94\x82" " h \xe2\x94\x82", "\xe2\x94\x94" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x80" "\xe2\x94\x98", "", "end", NULL}},
+        {"x **<ol><li>a</li></ol>** <li>b</li> *<ul><li>c<ul><li>d</li></ul></li></ul>* e ~~f<br>~~ g\n\nA <input\nvalue=\"q\"> B <a title=\"x> C <p class=\"a>b\">D</p> <BR>E<P>F</P> G<Br/>H\n\nI &#0; J &#99999999; L &#65 M &AMP; N &#x4a;&#X4B;\n\n<!-- multi\nline -->\nafter comment\n\n<!-->\nz",
+         (const char *[]){"x 1. a", " \xe2\x80\xa2" " b", "\xe2\x80\xa2" " c", "  \xe2\x80\xa2" " d", "", " e f", " g", "", "A <input", "value=\"q\"> B <a title=\"x> C", "b\">D", "", "EF", "G", "H", "", "I  J  L &#65 M & N JK", "", "after comment", "", "<!-->", "z", NULL}},
+        {"<details>\n<summary>More</summary>\n\nhidden <b>x</b>\n</details>\n\n<p>open para\n\nstill html</p>\nnext",
+         (const char *[]){"<details>", "<summary>More</summary>", "", "hidden <b>x</b>", "</details>", "", "open para", "", "still html", "next", NULL}},
+        {"<pre>\n  keep  <code>c</code>\n</pre>\n\n<table><tr><td>1</td></tr></table>\n\nok <user@example.com> <http://a.b/c> <x-y z=\"1\">w</x-y>",
+         (const char *[]){"<pre>", "  keep  c", "</pre>", "", "<table><tr><td>1</td></tr></table>", "", "ok user@example.com http://a.b/c <x-y z=\"1\">w</x-y>", NULL}},
+    };
+    sb_t hr = SB_INIT;
+    sb_repeat(&hr, "\xe2\x94\x80", 80);
+    for (size_t k = 0; k < ARRAY_LEN(cases); k++) {
+        strvec_t got = md_plain(cases[k].md, 98);
+        size_t n = 0;
+        while (cases[k].want[n]) n++;
+        bool ok = got.n == n;
+        for (size_t i = 0; ok && i < n; i++) {
+            char *g = got.v[i];
+            size_t gl = strlen(g);
+            while (gl && g[gl - 1] == ' ') g[--gl] = 0; /* the terminal capture drops trailing blanks */
+            const char *w = !strcmp(cases[k].want[i], "<hr80>") ? sb_cstr(&hr) : cases[k].want[i];
+            if (strcmp(g, w)) ok = false;
+        }
+        CHECK(ok);
+        if (!ok) {
+            fprintf(stderr, "html case %zu: got %zu rows, want %zu\n", k + 1, got.n, n);
+            for (size_t i = 0; i < got.n; i++) fprintf(stderr, "  |%s|\n", got.v[i]);
+        }
+        strvec_free(&got);
+    }
+    sb_free(&hr);
+
+    /* upstream markdown.test.ts: entities inside and outside tags, stripped span/text, empty comments, <p></p> */
+    strvec_t p = md_plain("<span>&lt;\xe2\x96\x83&gt;</span> &amp; &quot;test&quot; &#128512; &#x1F600;", 80);
+    CHECK(p.n == 1 && !strcmp(p.v[0], "<\xe2\x96\x83> & \"test\" \xf0\x9f\x98\x80 \xf0\x9f\x98\x80"));
+    strvec_free(&p);
+    p = md_plain("<span></span><text>\xe2\x96\x83</text>", 80);
+    CHECK(p.n == 1 && !strcmp(p.v[0], "\xe2\x96\x83"));
+    strvec_free(&p);
+    p = md_plain("<p>First result.</p><p>Second result.</p>", 80);
+    CHECK(p.n == 2 && !strcmp(p.v[0], "First result.") && !strcmp(p.v[1], "Second result."));
+    strvec_free(&p);
+    p = md_plain("| Result |\n| --- |\n| <ul><li>Pass<br>OK</li></ul> |", 80);
+    CHECK(has_line(&p, "\xe2\x94\x82 \xe2\x80\xa2 Pass \xe2\x94\x82") && has_line(&p, "\xe2\x94\x82 OK     \xe2\x94\x82"));
+    strvec_free(&p);
+    /* a <code> run renders exactly like a backtick code span */
+    tui_md_opts_t o;
+    tui_md_opts_default(&o);
+    strvec_t a = {0}, b = {0};
+    tui_md_render("call <code>install()</code> now", 80, &o, &a);
+    tui_md_render("call `install()` now", 80, &o, &b);
+    CHECK(a.n == 1 && b.n == 1 && !strcmp(a.v[0], b.v[0]));
+    strvec_free(&a);
+    strvec_free(&b);
+    /* renderInlineMarkdown: <code> runs collapse, and each other tag is normalized with a fresh list state */
+    char *s = tui_md_inline("Use <code>&amp;self</code> not <code>&amp;mut self</code>", &o);
+    char *sp = tui_strip_ansi(s);
+    CHECK(!strcmp(sp, "Use &self not &mut self"));
+    free(s);
+    free(sp);
+    s = tui_md_inline("<ol start=3><li>a</li><li>b</li></ol>", &o);
+    sp = tui_strip_ansi(s);
+    CHECK(!strcmp(sp, "\xe2\x80\xa2 a\n\xe2\x80\xa2 b\n"));
+    free(s);
+    free(sp);
+}
+
 /* spinner-clock.ts, frame-rate.ts */
 static void test_motion_knobs(void) {
     CHECK(tui_spinner_animated());
@@ -1550,6 +1637,7 @@ int main(void) {
     test_ansi();
     test_theme();
     test_markdown();
+    test_markdown_html();
     test_golden();
     test_editor();
     test_select();

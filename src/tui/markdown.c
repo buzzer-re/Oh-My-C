@@ -20,6 +20,8 @@ typedef struct {
     char deflt[128]; /* default prose style of the component (color, italic), applied to text runs */
     char deflt_exempt[128]; /* deflt inside a themed role under a `proseFg` default: the color is dropped */
     bool run_forced;        /* text runs have their own color (a non-proseFg default): role colors stay outside it */
+    bool html_fresh;        /* renderInlineMarkdown: each inline HTML tag is normalized with a fresh list state */
+    bool plain;             /* plainInlineTokens: entities and html tags stay as written, links give their label */
 } md_ctx_t;
 
 /* tui.colorfulMarkdown (setMarkdownColorful): headings, emphasis, inline code and table headers take their hues
@@ -266,6 +268,11 @@ static void put_url(sb_t *b, const char *u, size_t n) {
  * (or the address of a mailto: href). OSC 8 wraps both when hyperlinks are on. */
 static void emit_link(const char *text, size_t tn, const char *url, size_t un, const md_ctx_t *c, sb_t *b,
                       istyle_t *st, int depth) {
+    if (c->plain) {
+        if (depth < 3) render_inline(text, tn, c, b, depth + 1);
+        else sb_appendn(b, text, tn);
+        return;
+    }
     /* the enclosing emphasis stays outside the link: theme.strong(theme.link(theme.underline(text))) */
     char outer[64];
     snprintf(outer, sizeof outer, "%s%s%s%s",
@@ -322,55 +329,398 @@ static size_t url_end(const char *s, size_t i, size_t n) {
     return j;
 }
 
-/* &amp; &lt; &gt; &quot; &apos; &nbsp; &#N; &#xH; -> characters (upstream normalizeHtmlEntitiesForTerminal) */
+/* one character of JavaScript's \s at s (ASCII and Unicode spaces): its byte length, else 0 */
+static size_t js_space(const char *s, size_t n) {
+    if (!n) return 0;
+    unsigned char c = (unsigned char)s[0];
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r') return 1;
+    if (c < 0x80) return 0;
+    uint32_t cp;
+    int k = utf8_decode(s, n, &cp);
+    if (cp == 0xa0 || cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200a) || cp == 0x2028 || cp == 0x2029 || cp == 0x202f ||
+        cp == 0x205f || cp == 0x3000 || cp == 0xfeff)
+        return (size_t)k;
+    return 0;
+}
+
+/* s.trim() === "" */
+static bool js_blank(const char *s, size_t n) {
+    for (size_t i = 0; i < n;) {
+        size_t k = js_space(s + i, n - i);
+        if (!k) return false;
+        i += k;
+    }
+    return true;
+}
+
+/* length of s.trimEnd() */
+static size_t js_trim_end(const char *s, size_t n) {
+    size_t end = 0;
+    for (size_t i = 0; i < n;) {
+        size_t k = js_space(s + i, n - i);
+        if (!k) {
+            uint32_t cp;
+            i += (size_t)utf8_decode(s + i, n - i, &cp);
+            end = i;
+        } else i += k;
+    }
+    return end;
+}
+
+/* upstream normalizeHtmlEntitiesForTerminal, one match at s[0] == '&':
+ * /&(amp|lt|gt|quot|apos|nbsp|#\d+|#x[0-9a-fA-F]+);/i -> its character; returns the bytes matched, else 0 */
 static size_t html_entity(const char *s, size_t n, sb_t *b) {
     static const struct {
         const char *name;
         const char *out;
     } named[] = {{"amp", "&"}, {"lt", "<"}, {"gt", ">"}, {"quot", "\""}, {"apos", "'"}, {"nbsp", " "}};
-    size_t semi = 1;
-    while (semi < n && semi < 12 && s[semi] != ';') semi++;
-    if (semi >= n || s[semi] != ';' || semi < 2) return 0;
-    for (size_t k = 0; k < ARRAY_LEN(named); k++)
-        if (semi - 1 == strlen(named[k].name) && !strncasecmp(s + 1, named[k].name, semi - 1)) {
+    if (n < 3 || s[0] != '&') return 0;
+    for (size_t k = 0; k < ARRAY_LEN(named); k++) {
+        size_t l = strlen(named[k].name);
+        if (n > l + 1 && !strncasecmp(s + 1, named[k].name, l) && s[1 + l] == ';') {
             sb_append(b, named[k].out);
-            return semi + 1;
+            return l + 2;
         }
+    }
     if (s[1] != '#') return 0;
     bool hex = s[2] == 'x' || s[2] == 'X';
-    size_t p = hex ? 3 : 2;
-    if (p >= semi) return 0;
+    size_t p = hex ? 3 : 2, k = p;
     unsigned long v = 0;
-    for (size_t k = p; k < semi; k++) {
-        int d = hex ? (isxdigit((unsigned char)s[k]) ? (isdigit((unsigned char)s[k]) ? s[k] - '0' : (tolower(s[k]) - 'a' + 10)) : -1)
-                    : (isdigit((unsigned char)s[k]) ? s[k] - '0' : -1);
-        if (d < 0) return 0;
-        v = v * (hex ? 16 : 10) + (unsigned long)d;
-        if (v > 0x10ffff) return 0;
+    for (; k < n && (hex ? isxdigit((unsigned char)s[k]) : isdigit((unsigned char)s[k])); k++) {
+        int d = isdigit((unsigned char)s[k]) ? s[k] - '0' : tolower((unsigned char)s[k]) - 'a' + 10;
+        if (v <= 0x10ffff) v = v * (hex ? 16 : 10) + (unsigned long)d;
     }
-    if (v >= 0x20 && !(v >= 0xd800 && v <= 0xdfff)) {
-        char u[8];
-        int k = utf8_encode((uint32_t)v, u);
-        sb_appendn(b, u, (size_t)k);
+    if (k == p || k >= n || s[k] != ';') return 0;
+    /* parseCodePoint: out of range -> "" ; a lone surrogate reaches the terminal as U+FFFD */
+    if (v > 0x10ffff || v == 0) return k + 1;
+    if (v < 0x20) {
+        if (v == '\n') sb_putc(b, '\n'); /* other control characters are not drawn */
+        return k + 1;
     }
-    return semi + 1;
+    char u[8];
+    int ul = utf8_encode(v >= 0xd800 && v <= 0xdfff ? 0xfffd : (uint32_t)v, u);
+    sb_appendn(b, u, (size_t)ul);
+    return k + 1;
 }
 
-/* html tag at s[0]=='<': returns length of a recognised tag and its lowercase name, else 0 */
-static size_t html_tag(const char *s, size_t n, char *name, size_t cap, bool *closing) {
-    size_t i = 1;
-    *closing = false;
-    if (i < n && s[i] == '/') {
-        *closing = true;
-        i++;
+static void html_decode_entities(const char *s, size_t n, sb_t *b) {
+    for (size_t i = 0; i < n;) {
+        if (s[i] == '&') {
+            size_t k = html_entity(s + i, n - i, b);
+            if (k) {
+                i += k;
+                continue;
+            }
+        }
+        sb_putc(b, s[i++]);
     }
-    size_t k = 0;
-    while (i < n && isalnum((unsigned char)s[i]) && k + 1 < cap) name[k++] = (char)tolower((unsigned char)s[i++]);
+}
+
+/* InlineIndexes for the inline HTML rule over one source, built on first use so a scan stays linear */
+typedef struct {
+    const char *s;
+    size_t n;
+    size_t *tag_end;      /* tagEnds: where a tag scan from each offset stops (its ">"), SIZE_MAX for none */
+    size_t no_cend;       /* no "-->" starts at or after this offset */
+    size_t no_code_close; /* no </code> token follows this offset */
+} html_scan_t;
+
+static void html_scan_init(html_scan_t *x, const char *s, size_t n) {
+    memset(x, 0, sizeof *x);
+    x->s = s;
+    x->n = n;
+    x->no_cend = x->no_code_close = SIZE_MAX;
+}
+
+/* tagEnds: the first ">" at or after each offset outside quotes; a quote skips past its partner and an unpaired
+ * one ends the scan */
+static void html_scan_tag_ends(html_scan_t *x) {
+    size_t n = x->n, *e = xmalloc((n + 1) * sizeof *e), next_d = SIZE_MAX, next_s = SIZE_MAX;
+    e[n] = SIZE_MAX;
+    for (size_t at = n; at-- > 0;) {
+        char c = x->s[at];
+        if (c == '>') e[at] = at;
+        else if (c == '"') {
+            e[at] = next_d == SIZE_MAX ? SIZE_MAX : e[next_d + 1];
+            next_d = at;
+        } else if (c == '\'') {
+            e[at] = next_s == SIZE_MAX ? SIZE_MAX : e[next_s + 1];
+            next_s = at;
+        } else e[at] = e[at + 1];
+    }
+    x->tag_end = e;
+}
+
+/* marked (utils/src/marked) inlineHtmlPrefix: the inline HTML at s[pos] == '<' in a source ending at `lim`: a
+ * comment up to the first "-->", or /^<\/?[A-Za-z][A-Za-z0-9-]*(?:\s|\/?>)/ up to the first ">" outside quotes;
+ * its length, else 0 */
+static size_t inline_html_len(html_scan_t *x, size_t pos, size_t lim) {
+    const char *s = x->s + pos;
+    size_t n = lim - pos;
+    if (n >= 4 && !strncmp(s, "<!--", 4)) {
+        if (pos + 4 >= x->no_cend) return 0;
+        const char *e = strstr_n(s + 4, n - 4, "-->");
+        if (!e && lim == x->n) x->no_cend = pos + 4;
+        return e ? (size_t)(e - s) + 3 : 0;
+    }
+    size_t i = 1;
+    if (i < n && s[i] == '/') i++;
+    if (i >= n || !isalpha((unsigned char)s[i])) return 0;
+    while (i < n && (isalnum((unsigned char)s[i]) || s[i] == '-')) i++;
+    if (i >= n) return 0;
+    if (!js_space(s + i, n - i) && s[i] != '>' && !(s[i] == '/' && i + 1 < n && s[i + 1] == '>')) return 0;
+    if (!x->tag_end) html_scan_tag_ends(x);
+    size_t close = x->tag_end[pos + 1];
+    return close == SIZE_MAX || close >= lim ? 0 : close - pos + 1;
+}
+
+/* htmlTagName: /^<\/?\s*([A-Za-z][A-Za-z0-9:-]*)/, lowercased ("" for a comment) */
+static void html_tag_name(const char *s, size_t n, char *name, size_t cap) {
+    size_t i = 1, k = 0;
+    if (i < n && s[i] == '/') i++;
+    while (i < n && js_space(s + i, n - i)) i += js_space(s + i, n - i);
+    if (i < n && isalpha((unsigned char)s[i]))
+        while (i < n && (isalnum((unsigned char)s[i]) || s[i] == ':' || s[i] == '-') && k + 1 < cap)
+            name[k++] = (char)tolower((unsigned char)s[i++]);
     name[k] = 0;
-    if (!k) return 0;
-    while (i < n && s[i] != '>' && s[i] != '<' && s[i] != '\n' && i < 400) i++;
-    if (i >= n || s[i] != '>') return 0;
-    return i + 1;
+}
+
+/* HTML_TAG_REGEX /<\/?(?:br|p|ol|ul|li|span|text|code|hr|blockquote)\b(?:\s[^>]*)?\s*\/?>/i at s[0] == '<':
+ * the tag's length and its lowercase name, else 0 */
+static size_t html_known_tag(const char *s, size_t n, char *name, const char **no_gt) {
+    static const char *const TAGS[] = {"br", "p", "ol", "ul", "li", "span", "text", "code", "hr", "blockquote"};
+    size_t i = 1, k = 0;
+    if (i < n && s[i] == '/') i++;
+    size_t start = i;
+    while (i < n && (isalnum((unsigned char)s[i]) || s[i] == '_')) i++;
+    if (i - start > 10 || i == start) return 0;
+    for (; k < i - start; k++) name[k] = (char)tolower((unsigned char)s[start + k]);
+    name[k] = 0;
+    bool known = false;
+    for (size_t t = 0; t < ARRAY_LEN(TAGS); t++)
+        if (!strcmp(name, TAGS[t])) known = true;
+    if (!known || i >= n) return 0;
+    if (js_space(s + i, n - i)) {
+        const char *gt = s + i >= *no_gt ? NULL : memchr(s + i, '>', n - i);
+        if (!gt) *no_gt = s + i; /* no ">" after here: later tags cannot close either */
+        return gt ? (size_t)(gt - s) + 1 : 0;
+    }
+    if (s[i] == '>') return i + 1;
+    if (s[i] == '/' && i + 1 < n && s[i + 1] == '>') return i + 2;
+    return 0;
+}
+
+/* HtmlNormalizationState: one entry per open <ol>/<ul> (lists, openItems and itemHasContent move together) */
+typedef struct {
+    bool ol;
+    double next;
+    bool open, content;
+} html_list_t;
+typedef VEC(html_list_t) html_state_t;
+
+/* htmlOlStart: /\bstart\s*=\s*(?:"(\d+)"|'(\d+)'|(\d+))/i, else 1 */
+static double html_ol_start(const char *s, size_t n) {
+    for (size_t i = 0; i + 5 <= n; i++) {
+        if (strncasecmp(s + i, "start", 5) || (i > 0 && (isalnum((unsigned char)s[i - 1]) || s[i - 1] == '_'))) continue;
+        size_t j = i + 5;
+        while (j < n && js_space(s + j, n - j)) j += js_space(s + j, n - j);
+        if (j >= n || s[j] != '=') continue;
+        j++;
+        while (j < n && js_space(s + j, n - j)) j += js_space(s + j, n - j);
+        char q = j < n && (s[j] == '"' || s[j] == '\'') ? s[j] : 0;
+        if (q) j++;
+        size_t d = j;
+        double v = 0;
+        while (j < n && isdigit((unsigned char)s[j])) v = v * 10 + (s[j++] - '0');
+        if (j == d || (q && (j >= n || s[j] != q))) continue;
+        return v;
+    }
+    return 1;
+}
+
+static void html_mark_content(html_state_t *st, const char *s, size_t n) {
+    if (st->n && !js_blank(s, n)) st->v[st->n - 1].content = true;
+}
+
+/* appendHtmlLineBreak */
+static void html_line_break(sb_t *o, bool force) {
+    size_t n = o->len;
+    while (n && (o->s[n - 1] == ' ' || o->s[n - 1] == '\t')) n--;
+    sb_truncate(o, n);
+    if (force || !o->len || o->s[o->len - 1] != '\n') sb_putc(o, '\n');
+}
+
+/* htmlListIndent: two spaces per enclosing list (capped: a hostile nesting would grow the output quadratically) */
+#define HTML_MAX_INDENT 32
+static size_t html_indent(const html_state_t *st) { return 2 * (st->n > 1 ? MIN(st->n - 1, HTML_MAX_INDENT) : 0); }
+
+/* appendHtmlListBreak: no break when the output already ends with the list's indent and a newline */
+static void html_list_break(sb_t *o, const html_state_t *st) {
+    size_t ind = html_indent(st);
+    bool ends = o->len >= ind + 1 && o->s[o->len - 1] == '\n';
+    for (size_t k = 0; ends && k < ind; k++)
+        if (o->s[o->len - 2 - k] != ' ') ends = false;
+    if (!ends) html_line_break(o, false);
+}
+
+/* the codeHook of #renderHtmlBlock / #renderHtmlBlockquote: theme.code, then the surrounding style again */
+typedef struct {
+    const md_ctx_t *c;
+    const char *after;
+} html_hook_t;
+
+static void html_put(sb_t *o, const char *s, size_t n, bool code, const html_hook_t *hook) {
+    if (!n) return;
+    if (code && hook) {
+        sb_append(o, code_seq(hook->c));
+        sb_appendn(o, s, n);
+        sb_append(o, TUI_RESET);
+        sb_append(o, hook->after);
+    } else sb_appendn(o, s, n);
+}
+
+/* normalizeHtmlForTerminal: comments dropped, entities decoded, <br>/<hr> break the line, <p>/<blockquote> separate
+ * paragraphs, <ol>/<ul>/<li> become numbered or bulleted lines indented by list depth, <span>/<text> vanish and
+ * <code> runs go through `hook`; any other tag stays verbatim. Appends to `o`, which must start empty. */
+static void html_normalize(const char *raw, size_t rn, html_state_t *st, const html_hook_t *hook, sb_t *o) {
+    sb_t wc = SB_INIT;
+    bool no_cend = false;
+    for (size_t i = 0; i < rn;) { /* HTML_COMMENT_REGEX /<!--[\s\S]*?-->/g */
+        if (!no_cend && i + 4 <= rn && !strncmp(raw + i, "<!--", 4)) {
+            const char *e = strstr_n(raw + i + 4, rn - i - 4, "-->");
+            if (e) {
+                i = (size_t)(e - raw) + 3;
+                continue;
+            }
+            no_cend = true; /* no later comment closes either */
+        }
+        sb_putc(&wc, raw[i++]);
+    }
+    const char *w = wc.s ? wc.s : "";
+    size_t wn = wc.len, last = 0;
+    bool in_code = false;
+    const char *no_gt = w + wn + 1;
+    sb_t text = SB_INIT;
+    for (size_t p = 0; p < wn; p++) {
+        char name[16];
+        size_t tl = w[p] == '<' ? html_known_tag(w + p, wn - p, name, &no_gt) : 0;
+        if (!tl) continue;
+        sb_truncate(&text, 0);
+        html_decode_entities(w + last, p - last, &text);
+        bool inl = !strcmp(name, "span") || !strcmp(name, "text");
+        if (inl || in_code || !js_blank(text.s, text.len)) {
+            html_put(o, text.s, text.len, in_code, hook);
+            html_mark_content(st, text.s, text.len);
+        }
+        last = p + tl;
+        bool closing = w[p + 1] == '/';
+        size_t q = last - 1; /* /\/\s*>$/ */
+        while (q > p && js_space(w + q - 1, 1)) q--;
+        bool self_closing = q > p && w[q - 1] == '/';
+        if (!strcmp(name, "code")) {
+            if (closing) in_code = false;
+            else if (!self_closing) in_code = true;
+        } else if (!strcmp(name, "br") || !strcmp(name, "hr")) {
+            html_line_break(o, true);
+        } else if (!strcmp(name, "p") || !strcmp(name, "blockquote")) {
+            if (closing) html_line_break(o, false);
+            else if (!js_blank(o->s, o->len) && o->s[o->len - 1] != '\n' &&
+                     !(st->n && st->v[st->n - 1].open && !st->v[st->n - 1].content))
+                html_line_break(o, false);
+        } else if (!strcmp(name, "ol") || !strcmp(name, "ul")) {
+            if (closing) {
+                if (st->n) st->n--;
+            } else if (!self_closing) {
+                if (st->n && st->v[st->n - 1].open) html_list_break(o, st);
+                html_list_t l = {name[0] == 'o', name[0] == 'o' ? html_ol_start(w + p, tl) : 1, false, false};
+                vec_push(st, l);
+            }
+        } else if (!strcmp(name, "li")) {
+            if (closing) {
+                html_line_break(o, false);
+            } else {
+                if (st->n) {
+                    if (st->v[st->n - 1].open) html_list_break(o, st);
+                    st->v[st->n - 1].open = true;
+                    st->v[st->n - 1].content = false;
+                } else if (!js_blank(o->s, o->len) && o->s[o->len - 1] != '\n') {
+                    html_line_break(o, false);
+                }
+                for (size_t k = html_indent(st); k > 0; k--) sb_putc(o, ' ');
+                if (st->n && st->v[st->n - 1].ol) sb_appendf(o, "%.0f. ", st->v[st->n - 1].next++);
+                else sb_append(o, "\xe2\x80\xa2 ");
+            }
+        } /* span, text: nothing */
+        p = last - 1;
+    }
+    sb_truncate(&text, 0);
+    html_decode_entities(w + last, wn - last, &text);
+    html_mark_content(st, text.s, text.len);
+    html_put(o, text.s, text.len, in_code, hook);
+    sb_free(&text);
+    sb_free(&wc);
+}
+
+/* a code span: wrapper styles and emphasis stay, the default prose style does not */
+static void emit_code(sb_t *b, const md_ctx_t *c, const istyle_t *st, const char *text, size_t n) {
+    sb_append(b, TUI_RESET);
+    sb_append(b, c->base);
+    if (st->bold) sb_append(b, "\x1b[1m");
+    if (st->italic) sb_append(b, "\x1b[3m");
+    if (st->strike) sb_append(b, "\x1b[9m");
+    sb_append(b, code_seq(c));
+    sb_appendn(b, text, n);
+    emit_style(b, c, st);
+}
+
+/* the closing run of a backtick string of `r` at s[i] in a source ending at n, else SIZE_MAX */
+static size_t code_run_close(const char *s, size_t i, size_t r, size_t n) {
+    for (size_t k = i + r; k < n;) {
+        if (s[k] != '`') {
+            k++;
+            continue;
+        }
+        size_t r2 = 0;
+        while (k + r2 < n && s[k + r2] == '`') r2++;
+        if (r2 == r) return k;
+        k += r2;
+    }
+    return SIZE_MAX;
+}
+
+/* collapseInlineHtml: the `</code>` html token closing a <code> run, searched from `from` among the tokens of the
+ * same source (escapes, code spans and other html tokens are skipped whole); its offset and length, else `n` */
+static size_t html_code_close(html_scan_t *x, size_t from, size_t n, size_t *len) {
+    const char *s = x->s;
+    if (n == x->n && from >= x->no_code_close) return n;
+    size_t no_run[8];
+    for (size_t k = 0; k < ARRAY_LEN(no_run); k++) no_run[k] = SIZE_MAX;
+    for (size_t j = from; j < n;) {
+        if (s[j] == '\\' && j + 1 < n && is_punct(s[j + 1])) {
+            j += 2;
+        } else if (s[j] == '`') {
+            size_t r = 0;
+            while (j + r < n && s[j + r] == '`') r++;
+            size_t e = r < 8 && j >= no_run[r] ? SIZE_MAX : code_run_close(s, j, r, n);
+            if (e == SIZE_MAX && r < 8 && j < no_run[r]) no_run[r] = j;
+            j = e == SIZE_MAX ? j + r : e + r;
+        } else if (s[j] == '<') {
+            size_t hl = inline_html_len(x, j, n);
+            if (!hl) {
+                j++;
+                continue;
+            }
+            char name[16];
+            html_tag_name(s + j, hl, name, sizeof name);
+            if (!strcmp(name, "code") && s[j + 1] == '/') {
+                *len = hl;
+                return j;
+            }
+            j += hl;
+        } else j++;
+    }
+    if (n == x->n && from < x->no_code_close) x->no_code_close = from;
+    return n;
 }
 
 static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, int depth) {
@@ -378,10 +728,15 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
     scan_cache_t sc;
     em_index_t ed[2][2] = {{{0}}};
     em_open_t es[64];
+    /* each emphasis level renders its content with its own HTML list state (a nested #renderInlineTokens) */
+    html_state_t hst[65] = {{0}};
+    html_scan_t hx;
+    html_scan_init(&hx, s, n);
     size_t en = 0, nest_start = 0;
     int nbold = st.bold ? 1 : 0, nitalic = st.italic ? 1 : 0;
     memset(&sc, 0xff, sizeof sc);
     /* no leading reset: an enclosing style (a bold table header cell) stays in effect */
+    size_t start = b->len;
     sb_append(b, c->base);
     sb_append(b, c->deflt);
     bool styled = c->base[0] || c->deflt[0];
@@ -397,11 +752,13 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
             st.italic = nitalic > 0;
             emit_style(b, c, &st);
             if (i == top.at) i += (size_t)top.width;
+            line_start = false; /* a line break inside the span trims only inside it */
             continue;
         }
-        if (line_start) {
+        bool at_line_start = line_start;
+        if (line_start) { /* the next text's /^\s+/ */
             line_start = false;
-            while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+            while (i < n && js_space(s + i, n - i)) i += js_space(s + i, n - i);
             if (i >= n) break;
             ch = s[i];
         }
@@ -422,7 +779,7 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
             i++;
             continue;
         }
-        if (ch == '&') {
+        if (ch == '&' && !c->plain) {
             size_t k = html_entity(s + i, n - i, b);
             if (k) {
                 i += k;
@@ -464,15 +821,11 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
                 cs++;
                 cl -= 2;
             }
-            /* code spans keep wrapper styles and emphasis but not the default prose style */
-            sb_append(b, TUI_RESET);
-            sb_append(b, c->base);
-            if (st.bold) sb_append(b, "\x1b[1m");
-            if (st.italic) sb_append(b, "\x1b[3m");
-            if (st.strike) sb_append(b, "\x1b[9m");
-            sb_append(b, code_seq(c));
-            for (size_t q = 0; q < cl; q++) sb_putc(b, cs[q] == '\n' ? ' ' : cs[q]);
-            emit_style(b, c, &st);
+            char *ct = xstrndup(cs, cl);
+            for (size_t q = 0; q < cl; q++)
+                if (ct[q] == '\n') ct[q] = ' ';
+            emit_code(b, c, &st, ct, cl);
+            free(ct);
             i = close + r;
             continue;
         }
@@ -517,6 +870,8 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
             }
             if (open && en < ARRAY_LEN(es)) {
                 es[en++] = (em_open_t){close, strong ? 2 : 1, strong};
+                hst[en].n = 0;
+                line_start = false;
                 if (strong) nbold++;
                 else nitalic++;
                 st.bold = nbold > 0;
@@ -537,12 +892,14 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
                 st.strike = false;
                 emit_style(b, c, &st);
                 i += 2;
+                line_start = false;
                 continue;
             }
             if (!st.strike && !isspace((unsigned char)next) && next != '~' && closer_cached(&sc, s, i + 2, n, '~', 2)) {
                 st.strike = true;
                 emit_style(b, c, &st);
                 i += 2;
+                line_start = false;
                 continue;
             }
         }
@@ -618,48 +975,57 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
                     continue;
                 }
             }
-            /* inline html: <br> breaks the line, <code>..</code> is a code span, a few layout tags vanish */
-            char name[16];
-            bool closing;
-            size_t tl = html_tag(s + i, n - i, name, sizeof name, &closing);
-            if (tl) {
-                if (!strcmp(name, "br")) {
-                    sb_putc(b, '\n');
-                    i += tl;
-                    line_start = true;
-                    continue;
-                }
-                if (!strcmp(name, "code") && !closing) {
-                    const char *e = NULL;
-                    for (size_t q = i + tl; q + 7 <= n; q++)
-                        if (!strncasecmp(s + q, "</code>", 7)) {
-                            e = s + q;
-                            break;
-                        }
-                    if (e) {
-                        sb_append(b, TUI_RESET);
-                        sb_append(b, c->base);
-                        sb_append(b, code_seq(c));
-                        for (const char *q = s + i + tl; q < e;) {
-                            if (*q == '&') {
-                                size_t k = html_entity(q, (size_t)(e - q), b);
-                                if (k) {
-                                    q += k;
-                                    continue;
-                                }
-                            }
-                            sb_putc(b, *q == '\n' ? ' ' : *q);
-                            q++;
-                        }
-                        emit_style(b, c, &st);
-                        i = (size_t)(e - s) + 7;
+            /* inline html (marked's html token): <code>..</code> runs collapse into a code span (collapseInlineHtml),
+             * any other tag or comment goes through normalizeHtmlForTerminal */
+            size_t lim = en ? es[en - 1].at : n;
+            size_t hl = i < lim ? inline_html_len(&hx, i, lim) : 0;
+            if (hl && c->plain) {
+                sb_appendn(b, s + i, hl);
+                i += hl;
+                continue;
+            }
+            if (hl) {
+                char name[16];
+                html_tag_name(s + i, hl, name, sizeof name);
+                if (!strcmp(name, "code")) {
+                    size_t cl = 0, cj = s[i + 1] == '/' ? lim : html_code_close(&hx, i + hl, lim, &cl);
+                    if (cj < lim) {
+                        /* the run's tokens as plain text (plainInlineTokens), entities decoded */
+                        md_ctx_t pc = *c;
+                        pc.plain = true;
+                        pc.base[0] = pc.deflt[0] = pc.deflt_exempt[0] = 0;
+                        sb_t raw = SB_INIT, dec = SB_INIT;
+                        render_inline(s + i + hl, cj - i - hl, &pc, &raw, depth + 1);
+                        char *plain = tui_strip_ansi(sb_cstr(&raw));
+                        html_decode_entities(plain, strlen(plain), &dec);
+                        emit_code(b, c, &st, dec.s ? dec.s : "", dec.len);
+                        free(plain);
+                        sb_free(&raw);
+                        sb_free(&dec);
+                        i = cj + cl;
                         continue;
                     }
-                }
-                if (!strcmp(name, "span") || !strcmp(name, "text") || !strcmp(name, "code")) {
-                    i += tl;
+                    /* a stray </code> or an unmatched <code> is dropped */
+                    i += hl;
+                    line_start = at_line_start;
                     continue;
                 }
+                sb_t o = SB_INIT;
+                html_state_t fresh = {0};
+                html_normalize(s + i, hl, c->html_fresh ? &fresh : &hst[en], NULL, &o);
+                free(fresh.v);
+                for (size_t q = 0; q < o.len;) {
+                    uint32_t cp;
+                    int k = utf8_decode(o.s + q, o.len - q, &cp);
+                    if (cp < 0x20 && cp != '\t' && cp != '\n') sb_putc(b, ' ');
+                    else sb_appendn(b, o.s + q, (size_t)k);
+                    q += (size_t)k;
+                }
+                if (o.len && o.s[o.len - 1] == '\n') line_start = true;
+                else if (!o.len) line_start = at_line_start;
+                sb_free(&o);
+                i += hl;
+                continue;
             }
         }
         if ((ch == 'h' || ch == 'w' || ch == 'f') && (i == 0 || strchr(" \t\n*_~(", s[i - 1]))) {
@@ -692,7 +1058,17 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
             free(ed[x][y].delims.v);
             free(ed[x][y].closers.v);
         }
-    if (styled || st.bold || st.italic || st.strike || memmem(b->s, b->len, "\x1b[", 2)) sb_append(b, TUI_RESET);
+    for (size_t x = 0; x < ARRAY_LEN(hst); x++) free(hst[x].v);
+    free(hx.tag_end);
+    if (styled || st.bold || st.italic || st.strike || memmem(b->s, b->len, "\x1b[", 2)) {
+        /* the reset closes the last line: trailing line breaks (an html </li> or </p>) stay bare, as upstream strips
+         * the dangling style prefix, so a wrapped cell or row does not gain a styled empty line */
+        size_t nl = 0;
+        while (nl < b->len - start && b->s[b->len - 1 - nl] == '\n') nl++;
+        sb_truncate(b, b->len - nl);
+        sb_append(b, TUI_RESET);
+        for (size_t k = 0; k < nl; k++) sb_putc(b, '\n');
+    }
 }
 
 /* ====================================================================== */
@@ -874,26 +1250,35 @@ static bool is_table_start(const lines_t *L, size_t i, size_t to) {
     return ok;
 }
 
+/* marked/core.ts isHtmlStart: a comment, or an opening tag of a block-level element followed by \s, ">" or "/>" */
 static bool is_html_block(const char *s) {
     if (indent_of(s) > 3) return false;
     s = skip_ws(s);
     if (!strncmp(s, "<!--", 4)) return true;
     if (*s != '<') return false;
-    static const char *const TAGS[] = {"address", "article", "aside", "blockquote", "details", "div", "dl", "fieldset",
-                                       "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr",
-                                       "main", "nav", "ol", "p", "pre", "section", "summary", "table", "ul", "center"};
+    static const char *const TAGS[] = {
+        "script",   "pre",      "style",    "textarea", "address", "article",    "aside",    "base",     "basefont",
+        "blockquote", "body",   "caption",  "center",   "col",     "colgroup",   "dd",       "details",  "dialog",
+        "dir",      "div",      "dl",       "dt",       "fieldset", "figcaption", "figure",  "footer",   "form",
+        "frame",    "frameset", "h1",       "h2",       "h3",      "h4",         "h5",       "h6",       "head",
+        "header",   "hr",       "html",     "iframe",   "legend",  "li",         "link",     "main",     "menu",
+        "menuitem", "nav",      "noframes", "ol",       "optgroup", "option",    "p",        "param",    "search",
+        "section",  "summary",  "table",    "tbody",    "td",      "tfoot",      "th",       "thead",    "title",
+        "tr",       "track",    "ul"};
     const char *p = s + 1;
-    if (*p == '/') p++;
-    char name[16];
-    size_t k = 0;
-    while (isalnum((unsigned char)p[k]) && k + 1 < sizeof name) {
-        name[k] = (char)tolower((unsigned char)p[k]);
-        k++;
+    for (size_t t = 0; t < ARRAY_LEN(TAGS); t++) {
+        size_t k = strlen(TAGS[t]);
+        if (strncasecmp(p, TAGS[t], k)) continue;
+        const char *e = p + k; /* lines carry no "\n": the end of the line is the \s */
+        if (!*e || js_space(e, strlen(e)) || *e == '>' || (e[0] == '/' && e[1] == '>')) return true;
     }
-    name[k] = 0;
-    if (!k || (p[k] && p[k] != ' ' && p[k] != '>' && p[k] != '/')) return false;
-    for (size_t t = 0; t < ARRAY_LEN(TAGS); t++)
-        if (!strcmp(name, TAGS[t])) return true;
+    return false;
+}
+
+/* does the line hold "</tag>" (case-insensitive)? */
+static bool has_close_tag(const char *s, const char *tag, size_t tl) {
+    for (const char *p = strstr(s, "</"); p; p = strstr(p + 1, "</"))
+        if (!strncasecmp(p + 2, tag, tl) && p[2 + tl] == '>') return true;
     return false;
 }
 
@@ -1044,9 +1429,19 @@ static void lex_blocks(const lines_t *L, size_t from, size_t to, toks_t *out) {
             t.to = lex_list(L, i, to);
             i = t.to;
         } else if (is_html_block(s)) {
+            /* a comment runs to the line holding "-->", an element to the line holding its closing tag (or the end) */
             t.t = T_HTML;
             size_t j = i + 1;
-            while (j < to && !is_blank(L->v[j])) j++;
+            const char *x = skip_ws(s);
+            if (!strncmp(x, "<!--", 4)) {
+                if (!strstr(s, "-->"))
+                    while (j < to && !strstr(L->v[j++], "-->")) {}
+            } else {
+                size_t tl = 0;
+                while (isalnum((unsigned char)x[1 + tl]) || x[1 + tl] == '_' || x[1 + tl] == '-') tl++;
+                if (!has_close_tag(s, x + 1, tl))
+                    while (j < to && !has_close_tag(L->v[j++], x + 1, tl)) {}
+            }
             t.to = j;
             i = j;
         } else if (!any && is_ref_def(s)) {
@@ -1113,6 +1508,16 @@ static char *para_source(const lines_t *L, size_t from, size_t to) {
         sb_appendn(&src, s, n);
         if (i + 1 < to) sb_append(&src, hard ? "\\\n" : "\n");
         prev_hard = hard;
+    }
+    return sb_detach(&src);
+}
+
+/* the source of an html token: its lines joined */
+static char *html_source(const lines_t *L, size_t from, size_t to) {
+    sb_t src = SB_INIT;
+    for (size_t i = from; i < to; i++) {
+        if (i > from) sb_putc(&src, '\n');
+        sb_append(&src, L->v[i]);
     }
     return sb_detach(&src);
 }
@@ -1215,6 +1620,16 @@ static char *hr_str(int width, const char *src, const md_ctx_t *c) {
 
 /* blockquote: inner tokens at width-2, trailing blank rows dropped, each styled row wrapped and prefixed with
  * the quote border; literal code rows pass through unbordered */
+/* the quote style: quote color and italic in place of the default prose style */
+static void quote_ctx(md_ctx_t *qc, const md_ctx_t *c) {
+    ctx_extend(qc, c, tui_fg_seq(c->th, TUI_TC_MD_QUOTE), "\x1b[3m", "");
+    qc->deflt[0] = 0;
+    qc->deflt_exempt[0] = 0;
+    qc->run_forced = false;
+}
+
+static void quote_border(const rows_t *inner, int width, const md_ctx_t *c, const md_ctx_t *qc, rows_t *out);
+
 static void render_quote(const lines_t *L, const tok_t *t, int width, const md_ctx_t *c, int depth, rows_t *out) {
     strvec_t src = {0};
     for (size_t i = t->from; i < t->to; i++) {
@@ -1227,10 +1642,7 @@ static void render_quote(const lines_t *L, const tok_t *t, int width, const md_c
         strvec_push(&src, s);
     }
     md_ctx_t qc;
-    ctx_extend(&qc, c, tui_fg_seq(c->th, TUI_TC_MD_QUOTE), "\x1b[3m", "");
-    qc.deflt[0] = 0; /* quotes replace the default prose style */
-    qc.deflt_exempt[0] = 0;
-    qc.run_forced = false;
+    quote_ctx(&qc, c);
     int iw = MAX(1, width - 2);
     rows_t inner = {0};
     lines_t IL = {(const char *const *)src.v, src.n};
@@ -1243,21 +1655,29 @@ static void render_quote(const lines_t *L, const tok_t *t, int width, const md_c
         for (size_t i = 0; i < src.n; i++) rows_push(&inner, xstrdup(src.v[i]), false);
     }
     while (inner.n && !inner.v[inner.n - 1].text[0]) free(vec_pop(&inner).text);
+    quote_border(&inner, width, c, &qc, out);
+    rows_free(&inner);
+    strvec_free(&src);
+}
+
+/* #applyQuoteBorder: quote-styled rows wrapped to width - 2 behind the border; literal code rows pass through */
+static void quote_border(const rows_t *inner, int width, const md_ctx_t *c, const md_ctx_t *qc, rows_t *out) {
+    int iw = MAX(1, width - 2);
     const char *qb = tui_sym("md.quoteBorder");
     char *border_txt = xasprintf("%s ", qb && *qb ? qb : "\xe2\x96\x8f");
     char *border = tui_fgs(c->th, TUI_TC_MD_QUOTE_BORDER, border_txt);
     free(border_txt);
-    for (size_t i = 0; i < inner.n; i++) {
+    for (size_t i = 0; i < inner->n; i++) {
         strvec_t w = {0};
-        if (inner.v[i].literal) {
-            tui_wrap_text_with_ansi(inner.v[i].text, iw, &w);
+        if (inner->v[i].literal) {
+            tui_wrap_text_with_ansi(inner->v[i].text, iw, &w);
             if (!w.n) strvec_push(&w, "");
             for (size_t k = 0; k < w.n; k++) {
                 rows_push(out, w.v[k], true);
                 w.v[k] = NULL;
             }
         } else {
-            char *styled = xasprintf("%s%s%s", qc.base, inner.v[i].text, TUI_RESET);
+            char *styled = xasprintf("%s%s%s", qc->base, inner->v[i].text, TUI_RESET);
             tui_wrap_text_with_ansi(styled, iw, &w);
             free(styled);
             for (size_t k = 0; k < w.n; k++) rows_push(out, xasprintf("%s%s" TUI_RESET, border, w.v[k]), false);
@@ -1265,8 +1685,6 @@ static void render_quote(const lines_t *L, const tok_t *t, int width, const md_c
         strvec_free(&w);
     }
     free(border);
-    rows_free(&inner);
-    strvec_free(&src);
 }
 
 static void render_list(const lines_t *L, const tok_t *t, int depth, int width, const md_ctx_t *c, rows_t *out);
@@ -1300,6 +1718,25 @@ static void render_list_item(const lines_t *IL, int depth, int width, int conten
         case T_HEADING: rows_push(out, heading_str(IL, t, c), false); break;
         case T_HR: rows_push(out, hr_str(content_width, t->hrc, c), false); break;
         case T_QUOTE: render_quote(IL, t, content_width, c, depth + 1, out); break;
+        case T_HTML: { /* an html token in a list item renders as inline html: normalized, no rules or quotes */
+            char *src = html_source(IL, t->from, t->to);
+            sb_t o = SB_INIT;
+            html_state_t st = {0};
+            html_normalize(src, strlen(src), &st, NULL, &o);
+            if (t->to < IL->n && !is_blank(IL->v[t->to])) sb_putc(&o, '\n'); /* the token's raw keeps its newline */
+            if (o.len) {
+                sb_t r = SB_INIT;
+                sb_append(&r, c->base);
+                sb_append(&r, c->deflt);
+                sb_appendn(&r, o.s, o.len);
+                if (c->base[0] || c->deflt[0]) sb_append(&r, TUI_RESET);
+                rows_push(out, sb_detach(&r), false);
+            }
+            free(st.v);
+            sb_free(&o);
+            free(src);
+            break;
+        }
         default: {
             char *src = para_source(IL, t->from, t->to);
             rows_push(out, inline_str(src, strlen(src), c), false);
@@ -1680,43 +2117,95 @@ done:
     strvec_free(&seps);
 }
 
-/* html block: comments dropped, <br>/<p> break lines, other tags kept verbatim */
-static void render_html(const lines_t *L, const tok_t *t, const md_ctx_t *c, rows_t *out) {
-    sb_t src = SB_INIT;
-    for (size_t i = t->from; i < t->to; i++) {
-        if (i > t->from) sb_putc(&src, '\n');
-        sb_append(&src, L->v[i]);
-    }
-    char *s = sb_detach(&src);
-    sb_t b = SB_INIT;
-    for (char *p = s; *p;) {
-        if (!strncmp(p, "<!--", 4)) {
-            char *e = strstr(p + 4, "-->");
-            p = e ? e + 3 : p + strlen(p);
-            continue;
+/* #renderHtmlBlock's flushText: a normalized run of block HTML as default-styled lines */
+static void html_block_text(const char *s, size_t n, html_state_t *st, const md_ctx_t *c, rows_t *out) {
+    char after[sizeof c->base + sizeof c->deflt + 8];
+    snprintf(after, sizeof after, "%s%s", c->base, c->deflt);
+    html_hook_t hook = {c, after};
+    sb_t o = SB_INIT;
+    html_normalize(s, n, st, &hook, &o);
+    if (!js_blank(o.s, o.len)) {
+        strvec_t lines = str_split_lines(o.s, o.len); /* splitTerminalLines */
+        while (lines.n > 1 && !lines.v[lines.n - 1][0]) free(vec_pop(&lines));
+        for (size_t i = 0; i < lines.n; i++) {
+            const char *l = lines.v[i];
+            size_t ln = js_trim_end(l, strlen(l));
+            if (js_blank(l, ln)) rows_push(out, xstrdup(""), false);
+            else rows_push(out, xasprintf(TUI_RESET "%s%s%.*s" TUI_RESET, c->base, c->deflt, (int)ln, l), false);
         }
-        if (*p == '<') {
-            char name[16];
-            bool closing;
-            size_t tl = html_tag(p, strlen(p), name, sizeof name, &closing);
-            if (tl && (!strcmp(name, "br") || !strcmp(name, "p"))) {
-                if (b.len && b.s[b.len - 1] != '\n') sb_putc(&b, '\n');
-                p += tl;
-                continue;
+        strvec_free(&lines);
+    }
+    sb_free(&o);
+}
+
+/* #renderHtmlBlockquote: the inner HTML of a <blockquote>, normalized, behind the quote border */
+static void html_blockquote(const char *s, size_t n, int width, const md_ctx_t *c, rows_t *out) {
+    md_ctx_t qc;
+    quote_ctx(&qc, c);
+    html_hook_t hook = {&qc, qc.base};
+    html_state_t st = {0};
+    sb_t o = SB_INIT;
+    html_normalize(s, n, &st, &hook, &o);
+    free(st.v);
+    strvec_t lines = str_split_lines(o.s ? o.s : "", o.len);
+    while (lines.n > 1 && !lines.v[lines.n - 1][0]) free(vec_pop(&lines));
+    rows_t inner = {0};
+    for (size_t i = 0; i < lines.n; i++) {
+        const char *l = lines.v[i];
+        rows_push(&inner, xstrndup(l, js_trim_end(l, strlen(l))), false);
+    }
+    while (inner.n && !inner.v[inner.n - 1].text[0]) free(vec_pop(&inner).text);
+    quote_border(&inner, width, c, &qc, out);
+    rows_free(&inner);
+    strvec_free(&lines);
+    sb_free(&o);
+}
+
+/* #renderHtmlBlock: a standalone <hr> becomes a rule and a balanced <blockquote>..</blockquote> a quote
+ * (BLOCK_HTML_REGEX /<hr\b[^>]*\/?>|<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi); the HTML between them is
+ * normalized to text with one list state */
+static void render_html(const lines_t *L, const tok_t *t, int width, const md_ctx_t *c, rows_t *out) {
+    char *s = html_source(L, t->from, t->to);
+    size_t n = strlen(s), last = 0;
+    html_state_t st = {0};
+    bool no_gt = false, no_close = false; /* a failed search fails from every later start too */
+    for (size_t p = 0; p < n; p++) {
+        if (s[p] != '<' || no_gt) continue;
+        size_t end = 0, in0 = 0, in1 = 0;
+        bool quote = false;
+        if (!strncasecmp(s + p, "<hr", 3) && !(isalnum((unsigned char)s[p + 3]) || s[p + 3] == '_')) {
+            const char *gt = strchr(s + p + 3, '>');
+            if (gt) end = (size_t)(gt - s) + 1;
+            else no_gt = true;
+        } else if (!no_close && !strncasecmp(s + p, "<blockquote", 11) &&
+                   !(isalnum((unsigned char)s[p + 11]) || s[p + 11] == '_')) {
+            const char *gt = strchr(s + p + 11, '>');
+            const char *cl = gt ? strcasestr(gt + 1, "</blockquote>") : NULL;
+            if (!gt) no_gt = true;
+            else if (!cl) no_close = true;
+            if (cl) {
+                quote = true;
+                in0 = (size_t)(gt - s) + 1;
+                in1 = (size_t)(cl - s);
+                end = in1 + 13;
             }
         }
-        sb_putc(&b, *p++);
+        if (!end) continue;
+        html_block_text(s + last, p - last, &st, c, out);
+        if (quote) {
+            rows_t q = {0};
+            html_blockquote(s + in0, in1 - in0, width, c, &q);
+            for (size_t r = 0; r < q.n; r++) q.v[r].nested = true; /* wrapped already */
+            for (size_t r = 0; r < q.n; r++) vec_push(out, q.v[r]);
+            free(q.v);
+        } else {
+            rows_push(out, hr_str(width, NULL, c), false);
+        }
+        last = end;
+        p = end - 1;
     }
-    strvec_t lines = str_split_lines(sb_cstr(&b), b.len);
-    for (size_t i = 0; i < lines.n; i++) {
-        char *l = lines.v[i];
-        size_t n = strlen(l);
-        while (n > 0 && (l[n - 1] == ' ' || l[n - 1] == '\t')) n--;
-        if (!*skip_ws(l)) rows_push(out, xstrdup(""), false);
-        else rows_push(out, xasprintf(TUI_RESET "%s%s%.*s" TUI_RESET, c->base, c->deflt, (int)n, l), false);
-    }
-    strvec_free(&lines);
-    sb_free(&b);
+    html_block_text(s + last, n - last, &st, c, out);
+    free(st.v);
     free(s);
 }
 
@@ -1773,7 +2262,7 @@ static void render_tokens(const lines_t *L, const toks_t *T, int width, const md
             rows_push(out, hr_str(width, t->hrc, c), false);
             if (gap) rows_push(out, xstrdup(""), false);
             break;
-        case T_HTML: render_html(L, t, c, out); break;
+        case T_HTML: render_html(L, t, width, c, out); break;
         case T_NONE: break;
         }
     }
@@ -1892,6 +2381,7 @@ char *tui_md_inline(const char *text, const tui_md_opts_t *opts) {
     }
     md_ctx_t c;
     init_ctx(&c, opts);
+    c.html_fresh = true;
     sb_t b = SB_INIT;
     render_inline(text ? text : "", text ? strlen(text) : 0, &c, &b, 0);
     return sb_detach(&b);

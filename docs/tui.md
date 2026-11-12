@@ -179,6 +179,15 @@ shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, 
   depth is capped. While a reply streams, a trailing lone `-` line that would underline a paragraph
   (a setext heading) is held back as a bullet being typed. The copy overlay's code/quote blocks
   (`tui_md_extract_blocks`) come from this same lexer.
+- HTML follows omp's `markdown.ts` and its marked fork. Inline, any well-formed tag (`<name …>` up to
+  the first `>` outside quotes) or `<!--…-->` comment is one raw token, so escapes inside it stay as
+  written. `<code>…</code>` runs become code spans; every other tag goes through
+  `normalizeHtmlForTerminal`. That function drops comments and decodes entities. `<br>`/`<hr>` break
+  the line, `<p>`/`<blockquote>` separate paragraphs, and `<ol start=N>`/`<ul>`/`<li>` become
+  numbered or `•` lines indented by list depth. `<span>`/`<text>` vanish and any other tag stays
+  verbatim. A block (`isHtmlStart`'s element list or a comment) runs to the line holding its
+  closing tag (or `-->`), or to the end of the input. A standalone `<hr>` in it draws a rule and a
+  balanced `<blockquote>` draws a quote.
 - `highlight.c` uses hand-written lexers per language family that assign the color category omp's
   syntect-based highlighter (`crates/pi-natives` highlight.rs) would give each token: comment,
   keyword, function, string, number, type, operator, punctuation, inserted/deleted.
