@@ -513,6 +513,8 @@ static char *reset_window_id(const json_t *v) {
     if (!strcmp(s, "seven_day")) return xstrdup("anthropic:7d");
     if (!strcmp(s, "seven_day_opus")) return xstrdup("anthropic:7d:opus");
     if (!strcmp(s, "seven_day_sonnet")) return xstrdup("anthropic:7d:sonnet");
+    /* Fable launch resets clear the Fable weekly cap, reported as `seven_day_overage_included` */
+    if (!strcmp(s, "seven_day_overage_included")) return xstrdup("anthropic:7d:fable");
     return xasprintf("anthropic:reset:%s", s);
 }
 

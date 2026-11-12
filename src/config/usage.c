@@ -637,6 +637,7 @@ const char *usage_reset_window_name(const char *id) {
     if (str_eq(id, "anthropic:7d")) return "Claude weekly";
     if (str_eq(id, "anthropic:7d:opus")) return "Claude Opus weekly";
     if (str_eq(id, "anthropic:7d:sonnet")) return "Claude Sonnet weekly";
+    if (str_eq(id, "anthropic:7d:fable")) return "Claude Fable weekly";
     return id;
 }
 
