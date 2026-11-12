@@ -808,6 +808,10 @@ check "discover reported limits" "lm-studio reported-limits ctx=54321"  printf '
 check "discovery cache"    '"baseUrl": "http://127.0.0.1:'"$DPORT"'/lms/v1"'  python3 -I -m json.tool "$T/dagent/local-models.json"
 kill $DPID 2>/dev/null
 check "cached when down"   "│ llava:7b"  "${DENV[@]}" "$B" models
+# an env var that redirects a built-in local provider to a dead endpoint: omp's header config warning
+if python3 -c 'import pty' 2>/dev/null; then
+    check "discover warning" "localdisc warn tui ok"  python3 -I "$ROOT/tests/e2e/localdisc_warn_tui.py" "$B" "$T/ldwarn" "$((PORT + 43))"
+fi
 # a login refreshes that provider's models in the running session (selector-controller.ts refreshProvider), with its key
 mkdir -p "$T/lragent" "$T/lrwork"; cp "$T/agent/models.yml" "$T/lragent/"; printf 'setupVersion: 2\n' > "$T/lragent/config.yml"
 LRPORT=$((PORT + 41))
