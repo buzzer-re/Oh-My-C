@@ -44,6 +44,18 @@ static void check_json(const json_t *v, const char *want, const char *what) {
 }
 
 static void test_custom_policy(void) {
+    /* omp bd075c82b9 / 827739e906: Morph pins a conversation to one worker by `x-session-id`, on both OpenAI wires */
+    {
+        json_t *mm = resolved("morph", "https://api.morphllm.com/v1", "{\"id\":\"morph-v3-large\"}");
+        CHECK(str_eq(json_get_str(json_get(mm, "compat"), "promptCacheSessionHeader"), "x-session-id"));
+        json_free(mm);
+        mm = resolved("morph", "https://api.morphllm.com/v1", "{\"id\":\"morph-v3-large\",\"api\":\"openai-responses\"}");
+        CHECK(str_eq(json_get_str(json_get(mm, "compat"), "promptCacheSessionHeader"), "x-session-id"));
+        json_free(mm);
+        mm = resolved("other", "https://api.example.com/v1", "{\"id\":\"morph-v3-large\"}");
+        CHECK(!json_get_str(json_get(mm, "compat"), "promptCacheSessionHeader"));
+        json_free(mm);
+    }
     /* the user's local Qwen: loopback, legacy thinking range */
     json_t *m = resolved("splash", "http://127.0.0.1:9/v1",
                          "{\"id\":\"qwen3.6-27b\",\"reasoning\":true,\"input\":[\"text\",\"image\"],"

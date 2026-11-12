@@ -923,6 +923,32 @@ static void test_strict_schema(void) {
 
 /* ---------- transport retry helpers (fetch-retry.ts, retry-after.ts, retryable.ts) ---------- */
 
+/* omp bd075c82b9: the host's affinity header mirrors the normalized prompt-cache key, none when retention is off */
+static void test_prompt_cache_session_header(void) {
+    tmodel_t t;
+    model_init(&t, "{\"id\":\"m\",\"api\":\"openai-completions\",\"provider\":\"morph\","
+                   "\"compat\":{\"promptCacheSessionHeader\":\"x-session-id\"}}");
+    ai_stream_opts_t o = {.session_id = "sess-1"};
+    http_headers_t h = {0};
+    oai_apply_prompt_cache_session_header(&h, &t.m, &o);
+    CHECK_STR(http_headers_get(&h, "x-session-id"), "sess-1");
+    http_headers_free(&h);
+    o.prompt_cache_key = "shared-key";
+    oai_apply_prompt_cache_session_header(&h, &t.m, &o);
+    CHECK_STR(http_headers_get(&h, "x-session-id"), "shared-key");
+    http_headers_free(&h);
+    o.prompt_cache_key = NULL;
+    o.session_id = "0123456789012345678901234567890123456789012345678901234567890123456789";
+    oai_apply_prompt_cache_session_header(&h, &t.m, &o);
+    CHECK(str_starts(http_headers_get(&h, "x-session-id"), "pc_"));
+    http_headers_free(&h);
+    o.cache_retention = "none";
+    oai_apply_prompt_cache_session_header(&h, &t.m, &o);
+    CHECK(!http_headers_get(&h, "x-session-id"));
+    http_headers_free(&h);
+    json_free(t.raw);
+}
+
 static void test_retry_hints(void) {
     http_headers_t h = {0};
     CHECK(ai_extract_retry_hint(NULL, NULL) == -1);
@@ -1041,6 +1067,7 @@ static void test_replay_safe(void) {
 }
 
 int main(void) {
+    test_prompt_cache_session_header();
     test_retry_hints();
     test_replay_safe();
     test_completions_request();

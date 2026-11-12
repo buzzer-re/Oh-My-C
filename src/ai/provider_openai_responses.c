@@ -931,6 +931,7 @@ static bool build_headers(http_headers_t *h, const ai_model_t *m, const ai_strea
     if (str_eq(m->provider, "openrouter")) oai_add_openrouter_headers(h);
     ai_apply_headers(h, NULL, o);
     oai_apply_inference_headers(h, m, o);
+    oai_apply_prompt_cache_session_header(h, m, o);
     if (key && strcmp(key, AI_NO_AUTH_SENTINEL) != 0 && !http_headers_get(h, "Authorization")) {
         char *auth = xasprintf("Bearer %s", key);
         http_headers_set(h, "Authorization", auth);

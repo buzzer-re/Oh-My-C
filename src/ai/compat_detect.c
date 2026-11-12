@@ -753,6 +753,8 @@ static const host_t HOSTS[] = {
     {"opencode", {"opencode-go", "opencode-zen"}, NULL, {"opencode.ai"}},
     {"zenmux", {"zenmux"}, NULL, {"zenmux.ai"}},
     {"chutes", {0}, NULL, {"chutes.ai"}},
+    /* Morph: reached only through custom providers, so the URL is its sole identity */
+    {"morph", {0}, NULL, {"api.morphllm.com"}},
 };
 
 static const host_t *host_get(const char *name) {
@@ -975,6 +977,7 @@ static json_t *chat_compat(const char *provider, const char *backend, const char
     json_set_bool(c, "emptyLengthFinishIsContextError", false);
     json_set_bool(c, "usesOpenAIToolCallIdLimit", false);
     if (URL("xai")) json_set_str(c, "promptCacheSessionHeader", "x-grok-conv-id");
+    else if (URL("morph")) json_set_str(c, "promptCacheSessionHeader", "x-session-id");
     json_set_bool(c, "dropThinkingWhenReasoningEffort", false);
     json_set_bool(c, "nativeKimiK3Reasoning", false);
     json_set_bool(c, "zaiReasoningEffortDialect", false);
@@ -1132,6 +1135,7 @@ static json_t *responses_compat(const char *provider, const char *backend, const
     json_set_bool(c, "emptyLengthFinishIsContextError", false);
     json_set_bool(c, "usesOpenAIToolCallIdLimit", false);
     if (URL("xai")) json_set_str(c, "promptCacheSessionHeader", "x-grok-conv-id");
+    else if (URL("morph")) json_set_str(c, "promptCacheSessionHeader", "x-session-id");
     if (local_serving) {
         json_set_int(c, "streamFirstEventTimeoutMs", 0);
         json_set_int(c, "streamIdleTimeoutMs", 300000);
