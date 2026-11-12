@@ -6,7 +6,9 @@
  * (``` / ~~~, unclosed fences render to the end: streaming-safe) with highlighting,
  * ordered/unordered/nested lists, blockquotes (nested), GFM tables (box drawing, column
  * alignment, cell wrapping), [links](url) / <autolinks> / bare URLs (OSC 8), horizontal
- * rules, backslash escapes. Nesting depth is capped (MD_MAX_DEPTH).
+ * rules, backslash escapes, inline and block HTML (omp's normalizeHtmlForTerminal: entities,
+ * <br>/<p>/<ol>/<ul>/<li>/<code>/<hr>/<blockquote>, comments dropped, other tags verbatim).
+ * Nesting depth is capped (MD_MAX_DEPTH).
  */
 #ifndef OMC_TUI_MARKDOWN_H
 #define OMC_TUI_MARKDOWN_H
