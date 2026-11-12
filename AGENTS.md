@@ -3,7 +3,7 @@
 omc is a from-scratch C11 rewrite of [oh-my-pi](https://github.com/can1357/oh-my-pi) (omp) that must
 behave 1:1 like omp: same TUI, same model-facing prompts/tools/output, same sessions and config.
 
-**Upstream pin — last omp commit ported:** `9058ab9d229663e229e2867824ba6df6f21e9e59` (`v18.18.6`, 2026-11-10).
+**Upstream pin — last omp commit ported:** `e325ffc73ab86e03bdd20a91b77d8e2b3964c906` (`v18.18.7`, 2026-11-10).
 To pull later upstream fixes in, follow [UPDATE.md](UPDATE.md) and move this pin (and the one in
 UPDATE.md) when done.
 

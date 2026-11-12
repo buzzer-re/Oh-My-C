@@ -23,7 +23,7 @@ Every push to `main` and every pull request builds and tests on Linux x86_64 (`u
 ## Releases (`.github/workflows/release.yml`)
 
 Releases ship **source only**. There are no prebuilt binaries: everyone builds omc on their own machine, by hand or
-with `install.sh`. Pushing a tag `v<OMC_VERSION>` (for example `v18.18.6`) runs one job on `ubuntu-22.04` that:
+with `install.sh`. Pushing a tag `v<OMC_VERSION>` (for example `v18.18.7`) runs one job on `ubuntu-22.04` that:
 
 1. checks the tag against `OMC_VERSION`;
 2. builds the tagged commit with zero warnings and runs `make test`;
@@ -43,10 +43,10 @@ A failed job leaves no release, or at most a draft: fix it, delete the draft and
 To release after an update pass:
 
 ```sh
-make version                 # e.g. 18.18.6, from src/core/core.h
-build-tools/release_notes.sh 18.18.6 | less   # preview the notes
-git tag -a v18.18.6 -m "omc v18.18.6"
-git push origin main v18.18.6
+make version                 # e.g. 18.18.7, from src/core/core.h
+build-tools/release_notes.sh 18.18.7 | less   # preview the notes
+git tag -a v18.18.7 -m "omc v18.18.7"
+git push origin main v18.18.7
 ```
 
 `build-tools/ci.sh dist` (or just `make dist`) builds the same archive locally into `build/dist/`.

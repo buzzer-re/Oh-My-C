@@ -92,10 +92,10 @@ def fail(step, detail=""):
 
 if not wait_out("mock-1", 15):
     fail("startup", out[-300:])
-if not wait_out("What's New", 2) or not wait_out("Updated to v18.18.6", 1):
+if not wait_out("What's New", 2) or not wait_out("Updated to v18.18.7", 1):
     fail("release notes", out[-800:])
 with open(os.path.join(agent, "last-changelog-version")) as f:
-    if f.read().strip() != "18.18.6":
+    if f.read().strip() != "18.18.7":
         fail("marker advanced")
 pump(0.8)
 

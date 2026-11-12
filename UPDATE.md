@@ -7,13 +7,13 @@ commit omc currently matches and how to bring later upstream changes over.
 
 | | |
 |---|---|
-| **Upstream commit** | `9058ab9d229663e229e2867824ba6df6f21e9e59` |
-| **Tag / version** | `v18.18.6` (`omp --version` → `omp/18.18.6`) |
+| **Upstream commit** | `e325ffc73ab86e03bdd20a91b77d8e2b3964c906` |
+| **Tag / version** | `v18.18.7` (`omp --version` → `omp/18.18.7`) |
 | **Upstream date** | 2026-11-10 |
-| **Pinned on** | 2026-11-10 |
+| **Pinned on** | 2026-11-12 |
 
 Everything model-facing (prompts, tool schemas/descriptions, system prompt, output formatting), the TUI
-(verified side by side against `omp/18.17.0`; the v18.18.6 changes were ported from source and still need the side-by-side pass, see docs/status.md's update section) and the embedded data (catalog, themes,
+(verified side by side against `omp/18.17.0`; the v18.18 changes were then checked side by side against `omp/18.18.7`, see docs/status.md's update section) and the embedded data (catalog, themes,
 symbols, settings table, slash commands, tips) corresponds to this commit. Update this table — and the
 matching line in [AGENTS.md](AGENTS.md) — every time an update pass is finished.
 
@@ -25,7 +25,7 @@ matching line in [AGENTS.md](AGENTS.md) — every time an update pass is finishe
    UP=/path/to/scratch/omp
    git clone https://github.com/can1357/oh-my-pi.git "$UP"
    cd "$UP"
-   PIN=9058ab9d229663e229e2867824ba6df6f21e9e59   # from the table above
+   PIN=e325ffc73ab86e03bdd20a91b77d8e2b3964c906   # from the table above
    git fetch --tags origin
    TARGET=origin/main                               # or the newest release tag: git tag --sort=-v:refname | head -1
    git log --oneline --no-merges "$PIN..$TARGET" | wc -l

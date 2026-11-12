@@ -132,9 +132,9 @@ exercised by the e2e suite.
 
 ## Version
 
-`OMC_VERSION` in `src/core/core.h` (currently `18.18.6`) is the omp release this build matches, the
-upstream pin in UPDATE.md. It is reported by `omc --version` (`omc/18.18.6`), `omc_version()`, `omc.pc` and
-the user agent; the welcome banner and `omc --help` show `OMC_VERSION_LABEL` (`v18.18.6 (OMP equivalent)`).
+`OMC_VERSION` in `src/core/core.h` (currently `18.18.7`) is the omp release this build matches, the
+upstream pin in UPDATE.md. It is reported by `omc --version` (`omc/18.18.7`), `omc_version()`, `omc.pc` and
+the user agent; the welcome banner and `omc --help` show `OMC_VERSION_LABEL` (`v18.18.7 (OMP equivalent)`).
 Release tags are `v<OMC_VERSION>` (see [release.md](release.md)); `make version` prints it. `OMC_API_VERSION` in `include/omc.h` versions the C API. `omc_options_t`
 carries `struct_size` so that new option fields can be added without breaking the ABI.
 
