@@ -215,10 +215,17 @@ transport layer turns them into the request shape. It ports the registry `prepar
      structured`) yield a JSON key for the transport layer.
 3. environment variables named by the catalog's `envVars` for the provider (`ai_env_api_key`).
 
-A provider its auth rule pauses (`disabled "<reason>"`, at v18.18.6 Google Antigravity;
+A provider its auth rule pauses (`disabled "<reason>"`, none at v18.18.7;
 `catalog_provider_pause_reason`) is reached by none of these: no key resolves, no token refreshes, no usage probe
 runs, no login list offers it and `omc login <id>` refuses it, and `ai_stream` answers "`<provider> is turned off:
 <reason>`" without calling it even when a key is passed in. Stored logins stay in `auth.json` untouched.
+
+A provider whose auth rule carries `login-warning "<text>"` (at v18.18.7 Google Antigravity;
+`catalog_provider_login_warning`) stays usable: stored logins, refresh and requests are not asked again, but a new
+login first prompts `⚠ <name>: use at your own risk` + the text + `Type "yes" to accept the risk and continue` and
+starts only on an explicit `yes` (any other answer or a cancel is "Login cancelled" and stores nothing). Login lists
+(`/login`, `omc login`, RPC `get_login_providers`, the login dialog title) name it `<name> (at your own risk)`
+(`auth_login_name`).
 
 **Login engines** port omp's declarative registry (`ai/src/registry/engine/*`, `registry/oauth/*`,
 `registry/hooks/*`):

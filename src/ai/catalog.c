@@ -588,6 +588,16 @@ const char *catalog_provider_pause_reason(const char *provider) {
     return NULL;
 }
 
+const char *catalog_provider_login_warning(const char *provider) {
+    if (!provider) return NULL;
+    json_t *d;
+    json_arr_foreach(catalog_auth_providers(), i, d) if (str_eq(json_get_str(d, "id"), provider)) {
+        const char *w = json_get_str(d, "loginWarning");
+        return w && *w ? w : NULL;
+    }
+    return NULL;
+}
+
 char *catalog_provider_disabled_error(const char *provider) {
     const char *r = catalog_provider_pause_reason(provider);
     return r ? xasprintf("%s is turned off: %s", provider, r) : NULL;

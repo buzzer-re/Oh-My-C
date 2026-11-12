@@ -411,10 +411,11 @@ static void session_pin(ui_t *u, const char *arg) {
         add_notice(u, "info", "Select a model before pinning a provider account.");
         return;
     }
-    const char *provider = a->model->provider, *pname = provider;
+    const char *provider = a->model->provider;
+    char *pname = NULL;
     json_t *d;
-    json_arr_foreach(auth_oauth_providers(), i, d) if (str_eq(json_get_str(d, "id"), provider) && json_get_str(d, "name")) pname =
-        json_get_str(d, "name");
+    json_arr_foreach(auth_oauth_providers(), i, d) if (!pname && str_eq(json_get_str(d, "id"), provider)) pname = auth_login_name(d);
+    if (!pname) pname = xstrdup(provider);
     json_t *list = auth_list();
     const json_t *stored = stored_credential(provider, list);
     if (!stored || !str_eq(json_get_str(stored, "type"), "oauth")) {
@@ -422,7 +423,7 @@ static void session_pin(ui_t *u, const char *arg) {
         char *m = src ? xasprintf("No stored OAuth accounts for %s. Current auth comes from %s.", pname, src)
                       : xasprintf("No stored OAuth accounts for %s. Use /login to add one.", pname);
         add_notice(u, "info", m);
-        free(m), free(src);
+        free(m), free(src), free(pname);
         json_free(list);
         return;
     }
@@ -443,7 +444,7 @@ static void session_pin(ui_t *u, const char *arg) {
         free(raw);
     }
     add_notice(u, "info", m);
-    free(m), free(sel), free(label);
+    free(m), free(sel), free(label), free(pname);
     json_free(list);
 }
 

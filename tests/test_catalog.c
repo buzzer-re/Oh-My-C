@@ -293,22 +293,10 @@ static void test_google_base64_skip(void) {
 }
 
 /* omp 8895c0fa32: a paused provider is never called, even with a key passed in */
+/* omp e3fde96e2a: Google Antigravity is no longer paused; its auth rule carries a login warning instead */
 static void test_paused_provider_stream(void) {
-    const ai_model_t *ag = NULL;
-    for (size_t i = 0; i < catalog_count() && !ag; i++)
-        if (str_eq(catalog_at(i)->provider, "google-antigravity")) ag = catalog_at(i);
-    CHECK(ag != NULL);
-    if (!ag) return;
-    ai_stream_opts_t o;
-    ai_stream_opts_init(&o);
-    o.api_key = "passed-in";
-    json_t *msgs = json_parse_str("[{\"role\":\"user\",\"content\":\"hi\"}]");
-    ai_context_t ctx = {.messages = msgs};
-    json_t *r = ai_stream(ag, &ctx, &o, NULL, NULL);
-    CHECK(str_eq(json_get_str(r, "stopReason"), "error"));
-    CHECK(str_starts(json_get_str(r, "errorMessage"), "google-antigravity is turned off: Google may restrict accounts"));
-    json_free(r);
-    json_free(msgs);
+    CHECK(!catalog_provider_pause_reason("google-antigravity") && !catalog_provider_disabled_error("google-antigravity"));
+    CHECK(str_starts(catalog_provider_login_warning("google-antigravity"), "Google's Antigravity terms do not allow"));
 }
 
 /* omp fd41ef6386: the V4.1 Flash carve-out keys on family/revision, so a hyphenated id keeps image input */

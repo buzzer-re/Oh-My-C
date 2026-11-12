@@ -134,6 +134,12 @@ bool auth_login_listed(const json_t *d) {
     return json_get_obj(d, "login") && !catalog_provider_pause_reason(json_get_str(d, "id"));
 }
 
+char *auth_login_name(const json_t *d) {
+    const char *id = json_get_str(d, "id"), *name = json_get_str(d, "name");
+    if (!name) name = id ? id : "";
+    return catalog_provider_login_warning(id) ? xasprintf("%s (at your own risk)", name) : xstrdup(name);
+}
+
 const char *auth_store_id(const char *provider) {
     const char *s = json_get_str(descriptor(provider), "storeAs");
     return s ? s : provider;
@@ -659,6 +665,23 @@ static int login_run(const char *provider, const json_t *d, bool embed, const au
     const json_t *login = json_get_obj(d, "login");
     const char *kind = json_get_str(login, "kind");
     actx_t c = {provider, json_get_str(d, "name") ? json_get_str(d, "name") : provider, d, hooks};
+    /* loginRiskWarning: no answer but an explicit "yes" starts a login the provider's own terms put at risk */
+    const char *warning = embed ? NULL : catalog_provider_login_warning(provider);
+    if (warning) {
+        char *msg = xasprintf("\xe2\x9a\xa0 %s: use at your own risk\n\n%s\n\nType \"yes\" to accept the risk and continue", c.label,
+                              warning);
+        char *ans = actx_prompt(&c, msg, "yes", true, err);
+        free(msg);
+        if (!ans) return -1;
+        char *t = str_trim(ans);
+        bool yes = str_ieq(t, "yes");
+        free(t);
+        free(ans);
+        if (!yes) {
+            *err = xstrdup("Login cancelled");
+            return -1;
+        }
+    }
     alogin_t r = {0};
     int rc;
     if (str_eq(kind, "oauth-code")) rc = auth_oauth_code_flow(&c, login, &r.cred, err);

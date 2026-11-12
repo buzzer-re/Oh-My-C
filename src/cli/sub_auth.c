@@ -77,8 +77,9 @@ int cmd_login(cparse_t *p) {
         }
         printf("Select a provider:\n\n");
         for (size_t i = 0; i < providers.n; i++) {
-            const char *nm = json_get_str(providers.v[i], "name");
-            printf("  %zu. %s\n", i + 1, nm ? nm : json_get_str(providers.v[i], "id"));
+            char *nm = auth_login_name(providers.v[i]);
+            printf("  %zu. %s\n", i + 1, nm);
+            free(nm);
         }
         printf("\n");
         char *q = xasprintf("Enter number (1-%zu): ", providers.n);
@@ -111,7 +112,7 @@ int cmd_login(cparse_t *p) {
     auth_login_hooks_t hooks = {.on_auth = on_auth, .on_progress = on_progress, .prompt = on_prompt, .read_stdin = true};
     if (auth_login_hooked(provider, &hooks, &err) != 0) goto fail;
     const char *store = auth_store_id(provider);
-    const char *name = json_get_str(info, "name") ? json_get_str(info, "name") : provider;
+    char *name = auth_login_name(info);
     auth_reload();
     json_t *l = auth_list(), *e;
     const char *who = NULL, *type = NULL;
@@ -138,6 +139,7 @@ int cmd_login(cparse_t *p) {
         free(path);
     }
     json_free(l);
+    free(name);
     goto done;
 fail: {
     char *m = xasprintf("Login failed: %s", err ? err : "unknown error");
