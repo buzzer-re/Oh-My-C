@@ -3527,10 +3527,11 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_term_set_mouse_capture(tui_term(u.tui), settings_bool("tui.mouse", false));
     tui_sym_set_preset(settings_str("symbolPreset", "unicode"));
     /* config warnings head the header (interactive-mode.ts #buildConfigWarningComponents): retry.fallbackChains
-     * validation (turn-recovery validateRetryFallbackChains) */
+     * validation (turn-recovery validateRetryFallbackChains) and the model registry's discovery warnings */
     {
         strvec_t warns = {0};
         mr_fallback_validate(&warns);
+        catalog_drain_config_warnings(&warns); /* model registry: failed discovery of an env-redirected local provider */
         bool mute = settings_bool("startup.quietWarnings", false); /* omc-only: /quiet */
         for (size_t i = 0; i < warns.n && !mute; i++) {
             char *t = xasprintf("Warning: %s", warns.v[i]);

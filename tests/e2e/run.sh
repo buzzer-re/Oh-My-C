@@ -83,6 +83,10 @@ rm -f "$T/work/red.png"
 check "grep file"      $'[a/b.txt#'                      "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"written","path":"a/b.txt:1-5"}'
 check "grep no match"  "Tool said: No matches found"     "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"zzq_none"}'
 check "grep missing"   "Path not found: nope/x"          "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"x","path":"nope/x"}'
+# an unknown tool name names the tool its tail matches (agent-loop.ts formatToolNotFoundMessage)
+check "tool suggest one"  "Tool ast_grep not found. Did you mean grep?"  "$B" --model mock/mock-1 --no-session -p 'call:ast_grep:{"pat":"x"}'
+check "tool suggest none" "Tool zzz_nope not found"  "$B" --model mock/mock-1 --no-session -p 'call:zzz_nope:{}'
+check "tool suggest mcp"  "Tool mcp__srv__read not found. Did you mean read?"  "$B" --model mock/mock-1 --no-session -p 'call:mcp__srv__read:{}'
 check "grep partial"   "Skipped missing paths: nope"     "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"written","path":"a;nope"}'
 check "glob none"      "No files found matching pattern" "$B" --model mock/mock-1 -p 'call:glob:{"path":"*.zzq"}'
 check "glob limit"     "Requested limit 500 clamped to the max of 200" "$B" --model mock/mock-1 -p 'call:glob:{"path":"a","limit":500}'
@@ -810,6 +814,10 @@ check "discover reported limits" "lm-studio reported-limits ctx=54321"  printf '
 check "discovery cache"    '"baseUrl": "http://127.0.0.1:'"$DPORT"'/lms/v1"'  python3 -I -m json.tool "$T/dagent/local-models.json"
 kill $DPID 2>/dev/null
 check "cached when down"   "│ llava:7b"  "${DENV[@]}" "$B" models
+# an env var that redirects a built-in local provider to a dead endpoint: omp's header config warning
+if python3 -c 'import pty' 2>/dev/null; then
+    check "discover warning" "localdisc warn tui ok"  python3 -I "$ROOT/tests/e2e/localdisc_warn_tui.py" "$B" "$T/ldwarn" "$((PORT + 43))"
+fi
 # a login refreshes that provider's models in the running session (selector-controller.ts refreshProvider), with its key
 mkdir -p "$T/lragent" "$T/lrwork"; cp "$T/agent/models.yml" "$T/lragent/"; printf 'setupVersion: 2\n' > "$T/lragent/config.yml"
 LRPORT=$((PORT + 41))

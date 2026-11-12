@@ -34,6 +34,7 @@ typedef struct {
     bool show_images;     /* result images draw as terminal graphics below the card (no text indicator) */
     bool args_complete;   /* arguments are final (omp argsComplete); false while a write/edit body streams */
     bool frozen;          /* renderContext.frozen: a live Task row is a dimmed snapshot, not in flight */
+    bool unregistered;    /* the session has no such tool (hasBuiltInTool false): the generic card draws it */
 } tc_call_t;
 
 /* Render one tool call (any tool; falls back to the generic card). Appends lines to `out`. */

@@ -377,6 +377,8 @@ static void fill_call(tc_call_t *c, const char *name, const json_t *args, const 
     memset(c, 0, sizeof *c);
     c->name = name;
     c->label = tool_label(name);
+    /* tool-call-block.ts: the name-keyed renderers only draw a tool the session holds */
+    c->unregistered = name && g_ui && g_ui->app && g_ui->app->agent && !agent_find_tool(g_ui->app->agent, name);
     c->label_of = tool_label;
     c->args = args;
     c->content = result ? json_get_arr(result, "content") : NULL;

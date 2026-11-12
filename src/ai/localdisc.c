@@ -14,6 +14,7 @@
 #include "ai.h"
 #include "core/fs.h"
 
+#include <ctype.h>
 #include <pthread.h>
 #include <strings.h>
 
@@ -33,13 +34,74 @@ typedef struct {
     bool optional;
     char *api_key;   /* the provider's credential (omp sends it on discovery too), NULL when none */
     /* results */
+    const char *endpoint_env; /* the env var that named this endpoint (omp #implicitProviderEndpointEnv), or NULL */
+    char *display_url;        /* the endpoint as omp's baseUrl names it, for the warning */
+    /* results */
     json_t *models;  /* array of model objects, NULL when nothing answered */
     char *error;
+    char *detail;    /* the failed list request's error in omp's (Bun fetch) wording */
 } probe_t;
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static json_t *g_state; /* {provider: {status, optional, error?, fetchedAt?}} */
 static bool g_started;
+static json_t *g_last_warning;  /* {provider: error} (omp #lastDiscoveryWarnings: one warning per distinct error) */
+static strvec_t g_config_warnings; /* omp #configWarnings, drained by the interactive startup */
+
+/* redactUrlForLog: the URL without userinfo, serialized like WHATWG URL (a bare origin gains its trailing `/`) */
+static char *redact_url(const char *url) {
+    const char *sch = strstr(url, "://");
+    if (!sch) return xstrdup(url);
+    const char *host = sch + 3;
+    const char *end = host + strcspn(host, "/?#");
+    const char *at = NULL;
+    for (const char *q = host; q < end; q++)
+        if (*q == '@') at = q;
+    if (at) host = at + 1;
+    return xasprintf("%.*s%.*s%s%s", (int)(sch + 3 - url), url, (int)(end - host), host, *end == '/' ? "" : "/", end);
+}
+
+/* #warnProviderDiscoveryFailure: a built-in provider an env var redirected failed discovery */
+static void warn_discovery_failure(const probe_t *p) {
+    const char *err = p->detail ? p->detail : p->error ? p->error : "unknown error";
+    pthread_mutex_lock(&g_mu);
+    if (!g_last_warning) g_last_warning = json_obj();
+    bool repeat = str_eq(json_get_str(g_last_warning, p->provider), err);
+    if (!repeat) json_set_str(g_last_warning, p->provider, err);
+    pthread_mutex_unlock(&g_mu);
+    if (repeat || !p->endpoint_env || !p->display_url || !*p->display_url) return;
+    char *url = redact_url(p->display_url);
+    /* the endpoint may embed `user:pass@`, and errors can echo it; whitespace runs collapse to one space */
+    char *d = str_replace(err, p->display_url, url); /* replaceAll */
+    sb_t b = {0};
+    bool sp = false;
+    for (const char *q = d; *q; q++) {
+        if (isspace((unsigned char)*q)) {
+            sp = b.len > 0;
+            continue;
+        }
+        if (sp) sb_putc(&b, ' ');
+        sp = false;
+        sb_putc(&b, *q);
+    }
+    char *w = xasprintf("Built-in %s provider: model discovery at %s (from %s) failed. Fix or unset %s, or add \"%s\" to "
+                        "disabledProviders. Error: %s",
+                        p->provider, url, p->endpoint_env, p->endpoint_env, p->provider, b.s ? b.s : "");
+    pthread_mutex_lock(&g_mu);
+    strvec_push(&g_config_warnings, w);
+    pthread_mutex_unlock(&g_mu);
+    free(w);
+    sb_free(&b);
+    free(d);
+    free(url);
+}
+
+void catalog_drain_config_warnings(strvec_t *out) {
+    pthread_mutex_lock(&g_mu);
+    for (size_t i = 0; i < g_config_warnings.n; i++) strvec_push(out, g_config_warnings.v[i]);
+    strvec_free(&g_config_warnings);
+    pthread_mutex_unlock(&g_mu);
+}
 
 extern json_t *settings_get(const char *path) __attribute__((weak));
 extern char *auth_get_api_key(const char *provider) __attribute__((weak));
@@ -92,7 +154,34 @@ static int64_t probe_timeout(const char *base, int64_t loopback_ms) {
 }
 
 /* GET/POST returning parsed JSON on 2xx; *answered is set when any HTTP status came back */
-static json_t *fetch_json(const char *url, const char *body, const char *api_key, int64_t timeout, bool *answered) {
+/* JavaScriptCore's JSON.parse message for the start of an unparsable body (the cases a local server produces) */
+static char *jsc_json_error(const char *b, size_t n) {
+    size_t i = 0;
+    while (i < n && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r')) i++;
+    if (i >= n) return xstrdup("JSON Parse error: Unexpected EOF");
+    if (isalpha((unsigned char)b[i]) || b[i] == '_' || b[i] == '$') {
+        size_t j = i;
+        while (j < n && (isalnum((unsigned char)b[j]) || b[j] == '_' || b[j] == '$')) j++;
+        return xasprintf("JSON Parse error: Unexpected identifier \"%.*s\"", (int)(j - i), b + i);
+    }
+    return xasprintf("JSON Parse error: Unrecognized token '%c'", b[i]);
+}
+
+/* omc's transport errors in the wording of omp's fetch (Bun) / withTimeoutSignal, which the discovery warning shows */
+static char *bun_fetch_error(const char *err) {
+    if (!err) return xstrdup("Unable to connect. Is the computer able to access the url?");
+    if (strstr(err, "Connection refused")) return xstrdup("ECONNREFUSED: Unable to connect. Is the computer able to access the url?");
+    if (strstr(err, "timed out")) return xstrdup("The operation timed out.");
+    if (!strncmp(err, "ECONNRESET", 10) || strstr(err, "connection closed before response") || strstr(err, "Connection reset"))
+        return xstrdup("ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` "
+                       "in the second argument to fetch()");
+    return xstrdup(err);
+}
+
+/* `detail` (optional) receives omp's error message for a failed request: the Bun fetch error, `HTTP <status> from
+ * <url>` (DiscoveryHttpError) or the JSON.parse error */
+static json_t *fetch_json_d(const char *url, const char *body, const char *api_key, int64_t timeout, bool *answered,
+                            char **detail) {
     http_headers_t h = {0};
     http_headers_add(&h, "Accept", "application/json");
     if (api_key && *api_key) {
@@ -109,10 +198,19 @@ static json_t *fetch_json(const char *url, const char *body, const char *api_key
     if (http_request(&rq, &rs) == 0 && !rs.error) {
         if (answered) *answered = true;
         if (rs.status >= 200 && rs.status < 300 && rs.body) j = json_parse(rs.body, rs.body_len, NULL);
+        if (detail && !j)
+            *detail = rs.status >= 200 && rs.status < 300 ? jsc_json_error(rs.body ? rs.body : "", rs.body ? rs.body_len : 0)
+                                                          : xasprintf("HTTP %d from %s", rs.status, url);
+    } else if (detail) {
+        *detail = bun_fetch_error(rs.error);
     }
     http_resp_free(&rs);
     http_headers_free(&h);
     return j;
+}
+
+static json_t *fetch_json(const char *url, const char *body, const char *api_key, int64_t timeout, bool *answered) {
+    return fetch_json_d(url, body, api_key, timeout, answered, NULL);
 }
 
 static int64_t pos_int_str(const char *s) {
@@ -179,7 +277,7 @@ static int64_t ollama_ctx(const json_t *show) {
 static void probe_ollama(probe_t *p) {
     char *url = xasprintf("%s/api/tags", p->base);
     bool answered = false;
-    json_t *tags = fetch_json(url, NULL, p->api_key, probe_timeout(p->base, 250), &answered);
+    json_t *tags = fetch_json_d(url, NULL, p->api_key, probe_timeout(p->base, 250), &answered, &p->detail);
     free(url);
     if (!tags) {
         if (!answered) p->error = xstrdup("unreachable");
@@ -247,7 +345,9 @@ static int64_t llamacpp_ctx_from_args(const json_t *args) {
 static bool probe_llamacpp_at(probe_t *p, const char *base) {
     char *url = xasprintf("%s/models", base), *purl = xasprintf("%s/props", base);
     bool answered = false;
-    json_t *list = fetch_json(url, NULL, p->api_key, probe_timeout(base, 250), &answered);
+    free(p->detail);
+    p->detail = NULL;
+    json_t *list = fetch_json_d(url, NULL, p->api_key, probe_timeout(base, 250), &answered, &p->detail);
     json_t *props = list ? fetch_json(purl, NULL, p->api_key, probe_timeout(base, 150), NULL) : NULL;
     free(url);
     free(purl);
@@ -307,7 +407,7 @@ static void probe_llamacpp(probe_t *p) {
 static void probe_lmstudio(probe_t *p) {
     char *url = xasprintf("%s/models", p->base);
     bool answered = false;
-    json_t *list = fetch_json(url, NULL, p->api_key, probe_timeout(p->base, 250), &answered);
+    json_t *list = fetch_json_d(url, NULL, p->api_key, probe_timeout(p->base, 250), &answered, &p->detail);
     free(url);
     if (!list) {
         p->error = xstrdup(answered ? "bad response" : "unreachable");
@@ -434,19 +534,23 @@ static int discover(bool force, const char *only) {
     if (WANTED("ollama"))
         probes[np++] = (probe_t){.kind = D_OLLAMA, .provider = "ollama", .api = "openai-responses",
                                  .base = trim_slashes(oenv ? oenv : ohost ? ohost : "http://127.0.0.1:11434"),
-                                 .optional = !oenv && !ohost};
+                                 .optional = !oenv && !ohost,
+                                 .endpoint_env = oenv ? "OLLAMA_BASE_URL" : ohost ? "OLLAMA_HOST" : NULL,
+                                 .display_url = oenv ? xstrdup(oenv) : ohost ? xstrdup(ohost) : NULL};
     free(ohost);
     const char *lenv = env_get("LLAMA_CPP_BASE_URL");
     if (WANTED("llama.cpp")) {
         char *b = trim_slashes(lenv ? lenv : "http://127.0.0.1:8080");
         if (str_ends(b, "/v1")) b[strlen(b) - 3] = 0;
         probes[np++] = (probe_t){.kind = D_LLAMACPP, .provider = "llama.cpp", .api = "openai-responses", .base = b,
-                                 .fallback = lenv ? NULL : xstrdup("http://127.0.0.1:9931"), .optional = !lenv};
+                                 .fallback = lenv ? NULL : xstrdup("http://127.0.0.1:9931"), .optional = !lenv,
+                                 .endpoint_env = lenv ? "LLAMA_CPP_BASE_URL" : NULL, .display_url = lenv ? xstrdup(lenv) : NULL};
     }
     const char *senv = env_get("LM_STUDIO_BASE_URL");
     if (WANTED("lm-studio"))
         probes[np++] = (probe_t){.kind = D_LMSTUDIO, .provider = "lm-studio", .api = "openai-completions",
-                                 .base = trim_slashes(senv ? senv : "http://127.0.0.1:1234/v1"), .optional = !senv};
+                                 .base = trim_slashes(senv ? senv : "http://127.0.0.1:1234/v1"), .optional = !senv,
+                                 .endpoint_env = senv ? "LM_STUDIO_BASE_URL" : NULL, .display_url = senv ? xstrdup(senv) : NULL};
 #undef WANTED
     for (size_t i = 0; i < np; i++) probes[i].api_key = probe_key(probes[i].provider);
     json_t *cache = cache_load();
@@ -470,6 +574,9 @@ static int discover(bool force, const char *only) {
         json_t *row = json_get_obj(cache, p->provider);
         bool cached_ok = row && str_eq(json_get_str(row, "baseUrl"), p->base);
         if (p->models) {
+            pthread_mutex_lock(&g_mu);
+            if (g_last_warning) json_del(g_last_warning, p->provider);
+            pthread_mutex_unlock(&g_mu);
             register_models(p->provider, p->models);
             total += (int)json_len(p->models);
             json_t *r = json_obj();
@@ -488,8 +595,11 @@ static int discover(bool force, const char *only) {
         } else {
             set_state(p->provider, "unavailable", p->optional, p->error, 0);
         }
+        if (online[i] && !p->models) warn_discovery_failure(p);
         json_free(p->models);
         free(p->error);
+        free(p->detail);
+        free(p->display_url);
         free(p->base);
         free(p->fallback);
         free(p->api_key);
