@@ -44,6 +44,14 @@ static void check_json(const json_t *v, const char *want, const char *what) {
 }
 
 static void test_custom_policy(void) {
+    /* omp f31041c637: Muse Ember classifies as meta/muse-ember with the minimal..max ladder */
+    {
+        json_t *mm = resolved("custom-meta", "https://api.example.com/v1", "{\"id\":\"muse-ember-1.0\",\"reasoning\":true}");
+        check_json(json_get(mm, "identity"), "{\"class\":\"meta\",\"family\":\"muse-ember\",\"revision\":\"1.0.0\"}", "muse ember identity");
+        check_json(json_get(mm, "thinking"), "{\"mode\":\"effort\",\"efforts\":[\"minimal\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]}",
+                   "muse ember ladder");
+        json_free(mm);
+    }
     /* omp bd075c82b9 / 827739e906: Morph pins a conversation to one worker by `x-session-id`, on both OpenAI wires */
     {
         json_t *mm = resolved("morph", "https://api.morphllm.com/v1", "{\"id\":\"morph-v3-large\"}");
@@ -339,6 +347,16 @@ int main(void) {
     test_paused_provider_stream();
     test_deepseek_hyphen_flash();
 
+    /* omp f31041c637 / 895d5838f8: bundled Muse Ember rows, max-capable ladder, >200K long-context card */
+    {
+        const ai_model_t *me = catalog_find("meta", "muse-ember-1.0");
+        CHECK(me && catalog_find("muse-code", "muse-ember-1.0"));
+        if (me) {
+            const json_t *ef = json_get_arr(me->thinking, "efforts");
+            CHECK(json_len(ef) == 6 && str_eq(json_sv(json_at(ef, 5)), "max"));
+            CHECK(me->context_window_ext == 1048576 && me->context_window_std == 200000);
+        }
+    }
     /* providers present in omp's catalog but absent from its bundled rows */
     CHECK(catalog_find("charm-hyper", "glm-5.3") || catalog_find("charm-hyper", "deepseek-v4-flash-0731"));
     bool droid = false;
