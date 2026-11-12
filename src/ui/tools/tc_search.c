@@ -504,15 +504,12 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
     }
     if (matches == 0) {
         strvec_t meta = {0};
-        strvec_push(&meta, "0 matches");
+        strvec_push_own(&meta, tc_fg(TUI_TC_WARNING, "0 matches"));
         tc_status_line_t sl = {.icon = TC_ST_WARNING, .spinner = -1, .title = "Grep", .title_slot = TUI_TC_TOOL_TITLE,
                                .description = subject, .meta = (const char *const *)meta.v, .nmeta = meta.n};
         char *h = tc_status_line(&sl);
         tc_push_wrapped(out, h, width);
-        char *e = tc_empty_message("No matches found");
-        tc_push_wrapped(out, e, width);
         if (missing_note) tc_push_wrapped(out, missing_note, width);
-        free(e);
         free(h);
         strvec_free(&meta);
         free(missing_note);

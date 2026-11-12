@@ -44,6 +44,26 @@ static void check_json(const json_t *v, const char *want, const char *what) {
 }
 
 static void test_custom_policy(void) {
+    /* omp f31041c637: Muse Ember classifies as meta/muse-ember with the minimal..max ladder */
+    {
+        json_t *mm = resolved("custom-meta", "https://api.example.com/v1", "{\"id\":\"muse-ember-1.0\",\"reasoning\":true}");
+        check_json(json_get(mm, "identity"), "{\"class\":\"meta\",\"family\":\"muse-ember\",\"revision\":\"1.0.0\"}", "muse ember identity");
+        check_json(json_get(mm, "thinking"), "{\"mode\":\"effort\",\"efforts\":[\"minimal\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]}",
+                   "muse ember ladder");
+        json_free(mm);
+    }
+    /* omp bd075c82b9 / 827739e906: Morph pins a conversation to one worker by `x-session-id`, on both OpenAI wires */
+    {
+        json_t *mm = resolved("morph", "https://api.morphllm.com/v1", "{\"id\":\"morph-v3-large\"}");
+        CHECK(str_eq(json_get_str(json_get(mm, "compat"), "promptCacheSessionHeader"), "x-session-id"));
+        json_free(mm);
+        mm = resolved("morph", "https://api.morphllm.com/v1", "{\"id\":\"morph-v3-large\",\"api\":\"openai-responses\"}");
+        CHECK(str_eq(json_get_str(json_get(mm, "compat"), "promptCacheSessionHeader"), "x-session-id"));
+        json_free(mm);
+        mm = resolved("other", "https://api.example.com/v1", "{\"id\":\"morph-v3-large\"}");
+        CHECK(!json_get_str(json_get(mm, "compat"), "promptCacheSessionHeader"));
+        json_free(mm);
+    }
     /* the user's local Qwen: loopback, legacy thinking range */
     json_t *m = resolved("splash", "http://127.0.0.1:9/v1",
                          "{\"id\":\"qwen3.6-27b\",\"reasoning\":true,\"input\":[\"text\",\"image\"],"
@@ -281,22 +301,10 @@ static void test_google_base64_skip(void) {
 }
 
 /* omp 8895c0fa32: a paused provider is never called, even with a key passed in */
+/* omp e3fde96e2a: Google Antigravity is no longer paused; its auth rule carries a login warning instead */
 static void test_paused_provider_stream(void) {
-    const ai_model_t *ag = NULL;
-    for (size_t i = 0; i < catalog_count() && !ag; i++)
-        if (str_eq(catalog_at(i)->provider, "google-antigravity")) ag = catalog_at(i);
-    CHECK(ag != NULL);
-    if (!ag) return;
-    ai_stream_opts_t o;
-    ai_stream_opts_init(&o);
-    o.api_key = "passed-in";
-    json_t *msgs = json_parse_str("[{\"role\":\"user\",\"content\":\"hi\"}]");
-    ai_context_t ctx = {.messages = msgs};
-    json_t *r = ai_stream(ag, &ctx, &o, NULL, NULL);
-    CHECK(str_eq(json_get_str(r, "stopReason"), "error"));
-    CHECK(str_starts(json_get_str(r, "errorMessage"), "google-antigravity is turned off: Google may restrict accounts"));
-    json_free(r);
-    json_free(msgs);
+    CHECK(!catalog_provider_pause_reason("google-antigravity") && !catalog_provider_disabled_error("google-antigravity"));
+    CHECK(str_starts(catalog_provider_login_warning("google-antigravity"), "Google's Antigravity terms do not allow"));
 }
 
 /* omp fd41ef6386: the V4.1 Flash carve-out keys on family/revision, so a hyphenated id keeps image input */
@@ -339,6 +347,16 @@ int main(void) {
     test_paused_provider_stream();
     test_deepseek_hyphen_flash();
 
+    /* omp f31041c637 / 895d5838f8: bundled Muse Ember rows, max-capable ladder, >200K long-context card */
+    {
+        const ai_model_t *me = catalog_find("meta", "muse-ember-1.0");
+        CHECK(me && catalog_find("muse-code", "muse-ember-1.0"));
+        if (me) {
+            const json_t *ef = json_get_arr(me->thinking, "efforts");
+            CHECK(json_len(ef) == 6 && str_eq(json_sv(json_at(ef, 5)), "max"));
+            CHECK(me->context_window_ext == 1048576 && me->context_window_std == 200000);
+        }
+    }
     /* providers present in omp's catalog but absent from its bundled rows */
     CHECK(catalog_find("charm-hyper", "glm-5.3") || catalog_find("charm-hyper", "deepseek-v4-flash-0731"));
     bool droid = false;

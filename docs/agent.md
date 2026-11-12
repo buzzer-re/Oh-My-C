@@ -364,6 +364,9 @@ thread. It receives incremental transcript updates, can verify suspicions with r
 `advisor.continueSeverity`, default `concern`) as a continuation turn after the run.
 Lower-severity notes appear as notices. It is enabled with `advisor.enabled`, `/advisor` or RPC
 `set_advisor`.
+A continuation an advisor note starts supersedes the reviews of the work it revises still queued (the one whose
+note started it is kept): they are held and reviewed with the continuation's final boundary, so they cannot re-raise
+what is being fixed. An `advise` call from a cancelled review records nothing (`Dropped: this review was cancelled.`).
 
 ## Memory and auto-learn (`coding/memory.c`, `memstore.c`, `autolearn.c`)
 

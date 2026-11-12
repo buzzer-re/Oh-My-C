@@ -74,6 +74,8 @@ json_t *catalog_auth_providers(void);                  /* borrowed array of OAut
  * stored logins stay on disk. The reason is borrowed; the error ("<provider> is turned off: <reason>") owned. */
 const char *catalog_provider_pause_reason(const char *provider);
 char *catalog_provider_disabled_error(const char *provider);
+/* auth rule `login-warning "<text>"` (providerLoginWarning): the account risk a new login must accept first. Borrowed */
+const char *catalog_provider_login_warning(const char *provider);
 const ai_model_t *catalog_register(json_t *model_obj); /* takes ownership; for custom/discovered models */
 /* ModelRegistry.refreshIfStale: re-applies models.yml when it changed on disk since the last load (new models
  * appear, edited ones update in place, removed ones are marked gone); true when the catalog changed */

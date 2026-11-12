@@ -66,6 +66,9 @@ int auth_login_descriptor_hooked(const char *key, const json_t *descriptor, cons
 json_t *auth_oauth_providers(void); /* borrowed array of catalog auth descriptors (login providers have `login`) */
 /* a login choice: the descriptor has a `login` and the auth rules do not pause the provider (builtInOAuthProviders) */
 bool auth_login_listed(const json_t *descriptor);
+/* the provider's login-list name (getOAuthProviders): one with a `login-warning` rule reads "<name> (at your own
+ * risk)". Owned */
+char *auth_login_name(const json_t *descriptor);
 /* provider id a login stores its credential under (descriptor `storeAs`, e.g. openai-codex-device -> openai-codex) */
 const char *auth_store_id(const char *provider);
 

@@ -628,31 +628,49 @@ int main(void) {
         s_free(&sf);
     }
 
-    /* ---- a provider paused by its auth rules (omp 8895c0fa32): Google Antigravity ---- */
+    /* ---- a login-warning provider (omp e3fde96e2a): Google Antigravity is back, at your own risk ---- */
     {
-        const char *why = "Google may restrict accounts that use Antigravity outside its own apps, so this provider is paused for now.";
-        CHECK(str_eq(catalog_provider_pause_reason("google-antigravity"), why), "antigravity pause reason");
-        CHECK(!catalog_provider_pause_reason("google-gemini-cli"), "gemini-cli not paused");
-        CHECK(auth_set_api_key("google-antigravity", "stored-token") == 0, "store a paused login");
-        CHECK(!auth_has_credentials("google-antigravity") && !auth_get_api_key("google-antigravity") &&
-                  !auth_get_credential("google-antigravity"),
-              "paused provider resolves no key");
-        json_t *c = stored("google-antigravity");
-        CHECK(c != NULL, "the stored login stays on disk");
-        json_free(c);
-        script_t sp = {0};
-        err = NULL;
-        int rc = login("google-antigravity", &sp, &err);
-        CHECK(rc != 0 && err && !strcmp(err, "google-antigravity is turned off: Google may restrict accounts that use Antigravity outside its own "
-                                              "apps, so this provider is paused for now."),
-              "paused login refused: %s", err ? err : "(none)");
-        free(err);
-        s_free(&sp);
-        json_t *d;
-        bool listed = false;
-        json_arr_foreach(auth_oauth_providers(), i, d) if (auth_login_listed(d) && str_eq(json_get_str(d, "id"), "google-antigravity")) listed = true;
-        CHECK(!listed, "paused provider is no login choice");
+        const char *warn = "Google's Antigravity terms do not allow signing in from third-party tools like omp, and Google has "
+                           "suspended accounts that did (see #18341). If you depend on this Google account, use GEMINI_API_KEY "
+                           "(AI Studio) or google-vertex instead.";
+        CHECK(!catalog_provider_pause_reason("google-antigravity"), "antigravity no longer paused");
+        CHECK(str_eq(catalog_provider_login_warning("google-antigravity"), warn), "antigravity login warning");
+        CHECK(!catalog_provider_login_warning("google-gemini-cli"), "gemini-cli has no login warning");
+        /* stored logins resolve again without a prompt */
+        CHECK(auth_set_api_key("google-antigravity", "stored-token") == 0, "store an antigravity key");
+        char *k = auth_get_api_key("google-antigravity");
+        CHECK(str_eq(k, "stored-token"), "stored antigravity key resolves: %s", k ? k : "(none)");
+        free(k);
         auth_logout("google-antigravity");
+        /* a new login asks first; anything but "yes" (or a cancel) stores nothing */
+        const char *answers[] = {"no", "", NULL};
+        for (size_t i = 0; i < ARRAY_LEN(answers); i++) {
+            script_t sp = {.answers = {answers[i]}};
+            err = NULL;
+            int rc = login("google-antigravity", &sp, &err);
+            CHECK(rc != 0 && str_eq(err, "Login cancelled"), "declined risk: %s", err ? err : "(none)");
+            char *want = xasprintf("\xe2\x9a\xa0 Google Antigravity (Gemini, Claude, GPT-OSS): use at your own risk\n\n%s\n\n"
+                                   "Type \"yes\" to accept the risk and continue",
+                                   warn);
+            CHECK(sp.prompts.n == 1 && str_eq(sp.prompts.v[0], want), "risk prompt: %s", sp.prompts.n ? sp.prompts.v[0] : "(none)");
+            CHECK(!sp.url, "no login flow started");
+            free(want);
+            free(err);
+            s_free(&sp);
+            json_t *c = stored("google-antigravity");
+            CHECK(c == NULL, "nothing stored");
+            json_free(c);
+        }
+        json_t *d;
+        char *name = NULL;
+        json_arr_foreach(auth_oauth_providers(), i, d) if (auth_login_listed(d) && str_eq(json_get_str(d, "id"), "google-antigravity"))
+            name = auth_login_name(d);
+        CHECK(str_eq(name, "Google Antigravity (Gemini, Claude, GPT-OSS) (at your own risk)"), "login list label: %s", name ? name : "(unlisted)");
+        free(name);
+        name = NULL;
+        json_arr_foreach(auth_oauth_providers(), i, d) if (str_eq(json_get_str(d, "id"), "google-gemini-cli")) name = auth_login_name(d);
+        CHECK(name && !strstr(name, "at your own risk"), "other providers keep their name");
+        free(name);
     }
 
     if (mock > 0) {

@@ -338,6 +338,16 @@ char *oai_prompt_cache_key(const ai_stream_opts_t *o, size_t max_len, const char
     return r;
 }
 
+/* omp openai-shared: the host's worker-affinity header (`x-grok-conv-id`, Morph's `x-session-id`) mirrors the normalized
+ * prompt-cache key (`promptCacheKey`, else the session id; none when cache retention is off) */
+void oai_apply_prompt_cache_session_header(http_headers_t *h, const ai_model_t *m, const ai_stream_opts_t *o) {
+    const char *hdr = oai_cstr(m, NULL, "promptCacheSessionHeader", NULL);
+    if (!hdr || !*hdr) return;
+    char *key = oai_prompt_cache_key(o, 64, "pc_");
+    if (key && !http_headers_get(h, hdr)) http_headers_set(h, hdr, key);
+    free(key);
+}
+
 bool oai_send_service_tier(const ai_model_t *m, const char *tier) { return ai_should_send_service_tier(tier, m); }
 
 char *oai_image_url(const json_t *img) {
@@ -1511,8 +1521,7 @@ static json_t *oaic_stream_once(void *self, ai_event_cb cb, void *ud) {
     if (str_eq(m->provider, "openrouter")) oai_add_openrouter_headers(&h);
     ai_apply_headers(&h, NULL, o);
     oai_apply_inference_headers(&h, m, o);
-    const char *sess_hdr = oai_cstr(m, NULL, "promptCacheSessionHeader", NULL);
-    if (sess_hdr && !str_empty(o->session_id) && !http_headers_get(&h, sess_hdr)) http_headers_set(&h, sess_hdr, o->session_id);
+    oai_apply_prompt_cache_session_header(&h, m, o);
     if (key && strcmp(key, AI_NO_AUTH_SENTINEL) != 0 && !http_headers_get(&h, "Authorization")) {
         char *a = xasprintf("Bearer %s", key);
         http_headers_set(&h, "Authorization", a);

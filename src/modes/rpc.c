@@ -3308,7 +3308,7 @@ static void handle(rpc_t *r, json_t *cmd) {
             if (!auth_login_listed(p)) continue; /* env-only providers have no login flow; paused ones offer none */
             json_t *x = json_obj();
             json_set_str(x, "id", json_get_str(p, "id"));
-            json_set_str(x, "name", json_get_str(p, "name") ? json_get_str(p, "name") : json_get_str(p, "id"));
+            json_set(x, "name", json_str_own(auth_login_name(p)));
             json_set_bool(x, "available", true);
             json_set_bool(x, "authenticated", auth_has_credentials(auth_store_id(json_get_str(p, "id"))));
             json_push(arr, x);

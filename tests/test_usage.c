@@ -76,6 +76,9 @@ static void test_fractions(void) {
 }
 
 static void test_resets(void) {
+    /* omp d502479ba7: a Fable launch reset names the Fable weekly cap it clears */
+    CHECK(!strcmp(usage_reset_window_name("anthropic:7d:fable"), "Claude Fable weekly"), "fable window name");
+    CHECK(!strcmp(usage_reset_window_name("anthropic:7d:sonnet"), "Claude Sonnet weekly"), "sonnet window name");
     char *exp = iso8601_from_ms(now_ms() + 5 * 86400000LL);
     char *js = xasprintf("{\"availableCount\":2,\"credits\":[{\"grantedAt\":\"2026-10-01T00:00:00.000Z\",\"expiresAt\":\"%s\","
                          "\"status\":\"available\"}]}",

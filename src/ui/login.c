@@ -56,7 +56,9 @@ static void sel_refilter(ui_oauth_sel_t *s) {
     for (size_t i = 0; i < n; i++) {
         const json_t *p = sel_prov(s, i);
         sb_t b = SB_INIT;
-        sb_appendf(&b, "%s %s", json_get_str(p, "name"), json_get_str(p, "id"));
+        char *nm = auth_login_name(p);
+        sb_appendf(&b, "%s %s", nm, json_get_str(p, "id"));
+        free(nm);
         char *src = prov_source(json_get_str(p, "id"));
         if (src) sb_appendf(&b, " logged in authenticated %s", src);
         free(src);
@@ -127,7 +129,7 @@ void ui_oauth_sel_render(ui_oauth_sel_t *s, int width, strvec_t *out) {
         const json_t *p = sel_prov(s, s->vis.v[i]);
         bool selected = (size_t)i == s->sel;
         sb_t l = SB_INIT;
-        const char *name = json_get_str(p, "name");
+        char *name = auth_login_name(p);
         if (selected) {
             char *cur = xasprintf("%s ", tui_sym("nav.cursor"));
             tui_fg(&l, NULL, TUI_TC_ACCENT, cur);
@@ -136,6 +138,7 @@ void ui_oauth_sel_render(ui_oauth_sel_t *s, int width, strvec_t *out) {
         } else {
             sb_appendf(&l, "  %s", name);
         }
+        free(name);
         char *src = prov_source(json_get_str(p, "id"));
         if (src) {
             char *st = xasprintf(" %s logged in", tui_sym("status.enabled"));
@@ -527,7 +530,7 @@ ui_login_t *ui_login_start(ui_t *u, const char *provider, ui_login_done_fn done,
     ui_login_t *l = xcalloc(1, sizeof *l);
     l->u = u;
     l->provider = xstrdup(provider);
-    l->name = xstrdup(p && json_get_str(p, "name") ? json_get_str(p, "name") : provider);
+    l->name = p ? auth_login_name(p) : xstrdup(provider);
     l->done = done;
     l->done_ud = ud;
     l->refcount = 1; /* owner */

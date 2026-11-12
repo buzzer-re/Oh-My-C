@@ -26,6 +26,7 @@ struct advisor {
     bool stop;
     size_t last_count;  /* primary messages already delivered */
     sb_t pending;       /* rendered updates waiting for the advisor */
+    sb_t held;          /* superseded updates: reviewed with the continuation's terminal boundary */
     VEC(anote_t) out;   /* notes produced, not yet delivered */
     strvec_t given;     /* every note ever delivered (dedup) */
     int turns;          /* completed primary turns */
@@ -115,8 +116,15 @@ static void render_messages(sb_t *b, const json_t *msgs, size_t from, bool think
 
 static int advise_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     advisor_t *ad = self->ud;
-    UNUSED(ctx);
     const char *note = json_get_str(args, "note");
+    /* omp e8aa5185bd: a cancelled review emits nothing; its output describes superseded work */
+    if (ctx && ctx->cancel && *ctx->cancel) {
+        tool_result_text(out, "Dropped: this review was cancelled.");
+        out->details = json_obj();
+        json_set_str(out->details, "note", note);
+        json_set_str(out->details, "severity", SEV[sev_rank(json_get_str(args, "severity"))]);
+        return 0;
+    }
     char *t = str_trim(note ? note : "");
     if (!*t) {
         free(t);
@@ -253,6 +261,7 @@ void advisor_free(advisor_t *ad) {
     vec_free(&ad->out);
     strvec_free(&ad->given);
     sb_free(&ad->pending);
+    sb_free(&ad->held);
     pthread_mutex_destroy(&ad->mu);
     pthread_cond_destroy(&ad->cv);
     free(ad);
@@ -340,6 +349,17 @@ void advisor_on_event(advisor_t *ad, const agent_event_t *ev) {
 char *advisor_after_run(advisor_t *ad, bool *is_continuation) {
     *is_continuation = false;
     if (!ad) return NULL;
+    /* the terminal boundary owes the review a continuation superseded: held updates go first */
+    pthread_mutex_lock(&ad->mu);
+    if (ad->held.len) {
+        if (ad->pending.len) sb_appendf(&ad->held, "\n\n%s", sb_cstr(&ad->pending));
+        sb_t t = ad->pending;
+        ad->pending = ad->held;
+        ad->held = t;
+        sb_clear(&ad->held);
+        pthread_cond_broadcast(&ad->cv);
+    }
+    pthread_mutex_unlock(&ad->mu);
     enqueue_delta(ad, false);
     /* wait for the final review so the run's last word is reviewed before anyone calls it done */
     pthread_mutex_lock(&ad->mu);
@@ -356,6 +376,14 @@ char *advisor_after_run(advisor_t *ad, bool *is_continuation) {
     char *txt = take_notes(ad, min, &msev);
     if (txt) {
         *is_continuation = true;
+        /* omp e8aa5185bd: the continuation supersedes every queued review of the work it revises (the one whose
+         * note started it is kept); they return to held and are reviewed at the continuation's terminal boundary */
+        pthread_mutex_lock(&ad->mu);
+        if (ad->pending.len) {
+            sb_append(&ad->held, sb_cstr(&ad->pending));
+            sb_clear(&ad->pending);
+        }
+        pthread_mutex_unlock(&ad->mu);
         if (ad->app->notice) {
             char *s = xasprintf("Advisor: %s", txt);
             ad->app->notice(ad->app->notice_ud, "advisor", s);
@@ -379,6 +407,7 @@ void advisor_reset(advisor_t *ad) {
     pthread_mutex_lock(&ad->mu);
     ad->last_count = json_len(ad->app->agent->messages);
     sb_clear(&ad->pending);
+    sb_clear(&ad->held);
     pthread_mutex_unlock(&ad->mu);
 }
 
