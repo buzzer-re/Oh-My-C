@@ -1857,12 +1857,48 @@ static void working_row(ui_t *u, const char *message, int width, strvec_t *out) 
     free(frame), free(spin), free(msg);
 }
 
+/* the retry hint, laid out as the working row it replaces: a blank row, then ` <key> to retry` (Text paddingX 1,
+ * rawKeyHint: dim key, muted description) */
+static void retry_hint_row(int width, strvec_t *out) {
+    const strvec_t *keys = tui_keybindings_get(tui_keybindings_global(), "app.retry");
+    char *key = ui_key_hint(keys && keys->n ? keys->v[0] : "f5");
+    char *k = fg(TUI_TC_DIM, key), *d = fg(TUI_TC_MUTED, " to retry");
+    sb_t b = SB_INIT;
+    tui_sb_spaces(&b, tui_padding_x(1) + 1);
+    sb_append(&b, k);
+    sb_append(&b, d);
+    char *line = sb_detach(&b);
+    if (tui_visible_width(line) > width) {
+        char *t = tui_truncate_to_width(line, width, "");
+        free(line);
+        line = t;
+    }
+    strvec_push(out, "");
+    strvec_push_own(out, line);
+    free(key), free(k), free(d);
+}
+
+void ui_sync_retry_hint(ui_t *u) {
+    bool show = !u->view && !u->worker_running && app_has_aborted_tool_call_tail(u->app);
+    if (u->retry_hint) {
+        if (show) return;
+        u->retry_hint = false;
+        tui_request_render(u->tui);
+    }
+    /* never contend with a live loader (working / auto-retry / compaction) */
+    if (!show || (u->loader && !u->loader->base.hidden) || ui_working_busy(u)) return;
+    u->retry_hint = true;
+    tui_request_render(u->tui);
+}
+
 static void statusrow_render(tui_component_t *c, int width, strvec_t *out) {
     statusrow_t *r = (statusrow_t *)c;
     size_t before = out->n;
     if (r->inner && !r->inner->hidden) {
         tui_loader_t *l = (tui_loader_t *)r->inner;
         working_row(r->u, l->message ? l->message : "Working\xe2\x80\xa6", width, out);
+    } else if (r->u->retry_hint && !ui_working_busy(r->u)) {
+        retry_hint_row(width, out);
     }
     if (out->n == before && !ui_working_busy(r->u)) {
         char *t = ui_title_trailer(r->u);

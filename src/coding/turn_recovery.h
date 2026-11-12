@@ -79,4 +79,21 @@ json_t *tr_stream_stall_reminder(int attempt);
 /* isBillingCapUsageLimit: the error asks for money, not time (out of credit, spent prepaid balance, spend ceiling) */
 bool tr_billing_cap_usage_limit(int status, const char *msg);
 
+/* Manual retry tail rules (turn-recovery.ts) over an agent message array (live context or display transcript).
+ * Custom messages are omc's `custom` role or a user/developer message carrying a customType. */
+
+/* conversationEnd: the end before trailing context-only custom messages (eval snapshots, deliveries folded in
+ * without a turn); a user-invoked /skill: prompt is conversation */
+size_t tr_conversation_end(const json_t *msgs);
+/* retryableAssistantTurnEnd: past the synthetic tool-result placeholders, the end of a failed/aborted assistant
+ * turn (the index after it); -1 when the tail is no such turn */
+ssize_t tr_retryable_turn_end(const json_t *msgs);
+/* abortedToolCallTail: the failed/aborted tail turn's most recent activity was a tool call (synthetic results trail
+ * it, or an errored tool result sits right before the aborted boundary) */
+bool tr_aborted_tool_call_tail(const json_t *msgs);
+/* toolReplayStart: index of the first trailing failed tool result to strip so the batch re-executes (a fully
+ * failed batch of a completed toolUse/stop turn, optionally behind an aborted boundary without calls); -1 when the
+ * tail does not qualify */
+ssize_t tr_tool_replay_start(const json_t *msgs);
+
 #endif

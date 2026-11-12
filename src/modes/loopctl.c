@@ -109,7 +109,7 @@ static void pause_loop(ui_t *u) {
 bool lp_escape(ui_t *u) {
     if (!g.st.enabled) return false;
     /* Esc suspends the loop even mid-iteration: abort the live turn, then drop the captured prompt */
-    if (u->worker_running) app_abort(u->app);
+    if (u->worker_running) app_abort_user(u->app);
     pause_loop(u);
     return true;
 }

@@ -901,7 +901,7 @@ static json_t *ask_field_by_field(fb_ui_t *ui, const hf_form_t *form, bool *time
 /* ToolAbortError: a cancelled ask ends the run (context.abort()) */
 static int ask_cancelled(tool_ctx_t *ctx, tool_result_t *out) {
     tool_result_error(out, "Ask tool was cancelled by the user");
-    if (ctx && ctx->agent) agent_abort(ctx->agent);
+    if (ctx && ctx->agent) agent_abort_user(ctx->agent); /* sdk.ts tool context abort(): USER_INTERRUPT_LABEL */
     return 0;
 }
 

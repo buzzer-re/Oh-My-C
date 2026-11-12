@@ -516,6 +516,41 @@ void toolcard_replay(ui_t *u, const json_t *msg) {
 
 void toolcard_set_replaying(bool on) { g_replaying = on; }
 
+static hmap_t g_run_cards, g_prior_cards; /* call id -> card (borrowed; checked against the transcript before use) */
+
+void toolcard_run_track(const char *id, msgview_t *v) {
+    if (id && *id && v) hmap_put(&g_run_cards, id, v);
+}
+
+void toolcard_run_end(void) {
+    hmap_free(&g_prior_cards, NULL);
+    g_prior_cards = g_run_cards;
+    hmap_init(&g_run_cards);
+}
+
+void toolcard_prior_reset(ui_t *u) {
+    UNUSED(u);
+    hmap_free(&g_prior_cards, NULL);
+    hmap_init(&g_prior_cards);
+    hmap_free(&g_run_cards, NULL);
+    hmap_init(&g_run_cards);
+}
+
+void toolcard_prior_evict(ui_t *u, const char *id) {
+    if (!id || !*id || hmap_get(&g_preview, id) || hmap_get(&g_run_cards, id)) return;
+    msgview_t *v = hmap_del(&g_prior_cards, id);
+    /* never evict a shared read-group card: it may still carry sibling reads */
+    if (!v || !view_attached(v) || json_get_arr(state_of(v), "group") || v == g_read_group) return;
+    for (size_t j = 0; j < g_live.n; j++)
+        if (g_live.v[j] == v) {
+            g_live.v[j] = g_live.v[--g_live.n];
+            break;
+        }
+    if (hmap_get(&g_bg, id) == v) hmap_del(&g_bg, id);
+    tui_container_remove(u->chat, &v->base);
+    tui_component_destroy(&v->base);
+}
+
 void toolcard_frames_reset(void) {
     json_free(g_frames);
     g_frames = NULL;

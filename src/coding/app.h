@@ -341,6 +341,7 @@ void app_abort_branch_summary(app_t *a);
 int app_branch_from_btw(app_t *a, const char *question, const json_t *images, const json_t *assistant,
                         const char *leaf_id, const char *session_id, char **err);
 void app_abort(app_t *a);
+void app_abort_user(app_t *a); /* abort({reason: USER_INTERRUPT_LABEL}): Esc, `.`/`c`, loop-mode Esc, RPC abort */
 /* AgentSession.runEphemeralTurn: one side-channel turn on the current model, system prompt, tool catalog and
  * history (plus `streaming`, the in-flight assistant reply, and the no-tools reminder), never recorded. */
 typedef struct {
@@ -380,7 +381,16 @@ char *app_workspace_dirs_text(app_t *a, const char *note);
 /* resolveToCwd for a user-typed path (~, absolute, "/" = cwd) (owned) */
 char *app_resolve_user_path(app_t *a, const char *p);
 int app_handoff(app_t *a, const char *focus, char **err); /* handoff document (+ focus instructions) + compact in place */
-int app_retry(app_t *a, char **err);                /* drop a failed last assistant turn and continue (blocking) */
+/* AgentSession.retry (turn-recovery.ts retry): with the agent idle, strip the failed/aborted last turn (and its
+ * synthetic tool results) from context, or, for a fully failed tool batch, its results (the session leaf moves back
+ * to the calling turn) so the continuation re-executes the calls; a restored session whose context already lost the
+ * failed turn asks the display transcript. False when busy or nothing to retry. Resets the retry budget. */
+bool app_retry_prepare(app_t *a);
+bool app_retry_available(app_t *a);           /* app_retry_prepare would retry (no changes made) */
+int app_retry(app_t *a, char **err);          /* app_retry_prepare + agent_continue (blocking); *err "Nothing to retry" */
+/* hasAbortedToolCallTail: idle, and the last turn died on a tool call (Esc during a tool, a stream failure after
+ * tool calls): the TUI's idle "F5 to retry" row */
+bool app_has_aborted_tool_call_tail(app_t *a);
 /* /shake (shake-types.ts ShakeResult): mode "elide" | "images" | "thinking"; rewrites the branch on disk */
 typedef struct {
     const char *mode;

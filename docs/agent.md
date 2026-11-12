@@ -10,7 +10,8 @@ in [status.md](status.md) (Agent & session).
 `agent_prompt(agent, messages)` blocks until the run ends. `run_loop()` does this:
 
 ```
-agent_start
+agent_start                             # a continue onto an assistant tail with tool calls (a tool replay)
+                                        # runs that batch first: resumedToolCallIds, turn_start, tools, turn_end
 loop:
   turn_start
   assistant = stream_assistant()        # transform_context → prepare_request → ai_stream
@@ -21,6 +22,7 @@ loop:
                           → PRESERVE / CONTINUE: keep the turn + results (+ the hook's reminder), continue
   run tool calls (see below) → toolResult messages
   turn_end
+  aborted during the tool batch? → the aborted boundary turn (see Abort), stop
   stop if error, aborted, or max_turns reached
   steering queued?      → append, continue
   tool calls made?      → continue
@@ -42,7 +44,19 @@ agent_end(messages added in this run)
   request transform keeps an errored turn's calls paired with these results (or `aborted`), so turn recovery can
   continue a preserved turn without re-running anything.
 - **Abort** (`agent_abort`) sets `agent->cancel`, which providers, tools, HTTP and retry waits
-  poll. Pending tool calls get `Tool execution was aborted`.
+  poll. Pending tool calls get `Tool execution was aborted`. `agent_abort_user` is omp's
+  `abort({reason: USER_INTERRUPT_LABEL})` (Esc, `.`/`c`, loop-mode Esc, a cancelled ask form, RPC `abort`): the
+  aborted assistant message reads `Interrupted by user` with errorId `Flag.UserInterrupt` instead of
+  `Request was aborted`. A run aborted during a tool batch ends with agent-loop's `endAbortedBeforeModel` boundary:
+  one more turn holding an empty aborted assistant message (no errorId on its `message_start`).
+- **Manual retry** (`app_retry_prepare`, omp `TurnRecovery.retry`; the tail rules are `tr_*` in
+  `coding/turn_recovery.c`): the failed/aborted last turn, looked up past its synthetic tool results and any trailing
+  context-only custom messages, is dropped and the agent continues. A fully failed tool batch of a completed
+  `toolUse`/`stop` turn (optionally behind the aborted boundary, with only eval snapshots after it) is replayed
+  instead: its results are stripped, the session leaf moves back to the calling turn and the continue re-executes the
+  calls. When the live context has no failed tail, the session's display transcript (`transcript_messages`) decides,
+  as for a restored session. `app_has_aborted_tool_call_tail` (omp `hasAbortedToolCallTail`) drives the TUI's idle
+  `F5 to retry` row.
 - **Events** (`agent_event_t`, serialized by `agent_event_to_json` in omp's shape): `agent_start`,
   `agent_end`, `turn_start`, `turn_end`, `message_start`, `message_update` (wraps the `ai` stream
   event), `message_end`, `tool_execution_start` (with the extracted intent),

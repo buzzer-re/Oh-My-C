@@ -525,6 +525,8 @@ check "rpc commands"   "ok empty MCP prompt consumed"  python3 -I "$ROOT/tests/e
 check "skill cost cap" "skill cost ok"  python3 -I "$ROOT/tests/e2e/skill_cost_rpc.py" "$B" "$T/req.jsonl" "$T/skill_cost" "$T/agent/models.yml"
 check "mcp tool scope" "mcp scope ok"  python3 -I "$ROOT/tests/e2e/mcp_scope_rpc.py" "$B" "$T/req.jsonl" "$ROOT/tests/e2e/mock_mcp.py" "$T/mcp_scope"
 check "rpc mcp/ssh"    "ok mcp rpc done"  python3 -I "$ROOT/tests/e2e/mcp_rpc.py" "$B" "$ROOT/tests/e2e/mock_mcp.py"
+# abort during a tool: the aborted boundary turn; /retry re-executes the failed batch (resumedToolCallIds)
+check "rpc retry"      "retry rpc ok"  python3 -I "$ROOT/tests/e2e/retry_rpc.py" "$B" "$T/req.jsonl"
 if python3 -c 'import pty' 2>/dev/null; then
     check "tui mcp/ssh"  "mcp tui ok"  python3 -I "$ROOT/tests/e2e/mcp_tui.py" "$B" "$ROOT/tests/e2e/mock_mcp.py" "$T/req.jsonl"
     check "tui quiet"    "quiet tui ok"  python3 -I "$ROOT/tests/e2e/quiet_tui.py" "$B" "$ROOT/tests/e2e/mock_mcp.py" "$T/quiet"
@@ -532,6 +534,8 @@ if python3 -c 'import pty' 2>/dev/null; then
     check "tui btw inject"  "btw inject tui ok"  python3 -I "$ROOT/tests/e2e/btw_inject_tui.py" "$B" "$T/req.jsonl" "$T/btw_inject"
     # the ask tool's HTML form (omp 18.18 html-form/dialog.ts): submit, validation, Other, inactivity timeout, cancel
     mkdir -p "$T/ask_form" && check "tui ask form" "ask form tui ok"  python3 -I "$ROOT/tests/e2e/ask_form_tui.py" "$B" "$T/req.jsonl" "$T/ask_form"
+    # manual retry (omp TurnRecovery.retry, syncRetryHintRow): the idle "F5 to retry" row, tool replay, -c, nothing to retry
+    mkdir -p "$T/retry_tui" && check "tui retry"  "retry tui ok"  python3 -I "$ROOT/tests/e2e/retry_tui.py" "$B" "$T/req.jsonl" "$T/retry_tui"
     check "tui fs stall"  "fs stall ok"  python3 -I "$ROOT/tests/e2e/fs_stall_tui.py" "$B" "$T/fs_stall"
 fi
 check "acp file cmd"   "stop end_turn"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/init"

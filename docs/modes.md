@@ -53,11 +53,15 @@ list|clear|add` (`wt`), `migrate`. Hidden omc extras: `mcp list|login|logout`, `
 ## Interactive (`modes/interactive.c`)
 
 This ports omp's `InteractiveMode`. The UI thread runs the TUI ([tui.md](tui.md)). Prompts run on a
-worker thread (`worker_main`; `retry_main` for `/retry`; `btw_main` for `/btw`), and agent events are
+worker thread (`worker_main`; `retry_main` for F5 / `/retry`, after `app_retry_prepare` on the UI thread, else
+`Nothing to retry`; `btw_main` for `/btw`), and agent events are
 posted back to the UI thread. While a run is active, input typed in the composer is queued as steering
 or follow-up (`steeringMode`, `followUpMode`, `interruptMode`). Esc aborts the run (and pauses an active
 goal). Ctrl+C clears the input or exits. Background jobs that settle while the session is idle wake it
-through `app_t.wake`.
+through `app_t.wake`. When a turn settles, and after every transcript replay (resume, `/tree`, session switch), the
+status row shows omp's idle `F5 to retry` hint (`ui_sync_retry_hint`, `syncRetryHintRow`) if the last turn died on
+a tool call; a loader (working, retry countdown, compaction) replaces it. A tool replay drops the previous run's card
+for the re-executed call (`toolcard_prior_evict`, omp `#priorTurnToolComponents`).
 
 If no model is configured on a terminal, the TUI still starts so that `/login` and `/model` can fix
 it, as omp does. A fresh agent dir shows the setup wizard (`OMC_SKIP_SETUP`/`OMP_SKIP_SETUP`,

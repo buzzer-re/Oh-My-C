@@ -487,3 +487,92 @@ json_t *tr_stream_stall_reminder(int attempt) {
     free(txt);
     return msg;
 }
+
+/* ---------- manual retry tail rules (TurnRecovery.retry / hasAbortedToolCallTail) ---------- */
+
+static const char *role_of(const json_t *m) { return json_get_str(m, "role"); }
+
+/* isUserTurnInitiator: a user-invoked /skill: prompt (or a writable collab prompt) */
+static bool user_turn_initiator(const json_t *m) {
+    const char *ct = json_get_str(m, "customType");
+    return (str_eq(ct, "skill-prompt") || str_eq(ct, "collab-prompt")) && str_eq(json_get_str(m, "attribution"), "user");
+}
+
+static bool is_custom(const json_t *m) {
+    const char *r = role_of(m);
+    return str_eq(r, "custom") || ((str_eq(r, "user") || str_eq(r, "developer")) && json_get_str(m, "customType"));
+}
+
+static bool is_eval_state_context(const json_t *m) {
+    return is_custom(m) && str_eq(json_get_str(m, "customType"), "eval-state-context");
+}
+
+/* isSyntheticToolResultMessage */
+static bool is_synthetic_result(const json_t *m) {
+    return str_eq(role_of(m), "toolResult") && json_get_bool(json_get_obj(m, "details"), "__synthetic", false);
+}
+
+static bool failed_stop(const json_t *m) {
+    const char *st = json_get_str(m, "stopReason");
+    return str_eq(st, "error") || str_eq(st, "aborted");
+}
+
+static bool has_tool_call(const json_t *m) {
+    const json_t *b;
+    json_arr_foreach(json_get_arr(m, "content"), i, b) if (str_eq(json_get_str(b, "type"), "toolCall")) return true;
+    return false;
+}
+
+size_t tr_conversation_end(const json_t *msgs) {
+    size_t end = json_len(msgs);
+    while (end > 0 && is_custom(json_at(msgs, end - 1)) && !user_turn_initiator(json_at(msgs, end - 1))) end--;
+    return end;
+}
+
+ssize_t tr_retryable_turn_end(const json_t *msgs) {
+    size_t end = tr_conversation_end(msgs);
+    while (end > 0 && is_synthetic_result(json_at(msgs, end - 1))) end--;
+    const json_t *m = end > 0 ? json_at(msgs, end - 1) : NULL;
+    if (!str_eq(role_of(m), "assistant") || !failed_stop(m)) return -1;
+    return (ssize_t)end;
+}
+
+bool tr_aborted_tool_call_tail(const json_t *msgs) {
+    ssize_t end = tr_retryable_turn_end(msgs);
+    if (end < 0) return false;
+    if ((size_t)end < json_len(msgs) && is_synthetic_result(json_at(msgs, (size_t)end))) return true;
+    const json_t *before = end >= 2 ? json_at(msgs, (size_t)end - 2) : NULL;
+    return str_eq(role_of(before), "toolResult") && json_get_bool(before, "isError", false);
+}
+
+ssize_t tr_tool_replay_start(const json_t *msgs) {
+    size_t n = json_len(msgs), end = tr_conversation_end(msgs);
+    for (size_t i = end; i < n; i++)
+        if (!is_eval_state_context(json_at(msgs, i))) return -1;
+    const json_t *tail = end > 0 ? json_at(msgs, end - 1) : NULL;
+    if (str_eq(role_of(tail), "assistant")) {
+        if (!failed_stop(tail) || has_tool_call(tail)) return -1;
+        end--;
+    }
+    size_t start = end;
+    while (start > 0 && str_eq(role_of(json_at(msgs, start - 1)), "toolResult")) start--;
+    if (start == end) return -1;
+    const json_t *anchor = start > 0 ? json_at(msgs, start - 1) : NULL;
+    if (!str_eq(role_of(anchor), "assistant")) return -1;
+    const char *st = json_get_str(anchor, "stopReason");
+    if (!str_eq(st, "toolUse") && !str_eq(st, "stop")) return -1;
+    strvec_t ids = {0};
+    const json_t *b;
+    json_arr_foreach(json_get_arr(anchor, "content"), i, b) {
+        const char *id = json_get_str(b, "id");
+        if (str_eq(json_get_str(b, "type"), "toolCall") && id && !strvec_contains(&ids, id)) strvec_push(&ids, id);
+    }
+    bool ok = end - start == ids.n;
+    for (size_t i = start; ok && i < end; i++) {
+        const json_t *r = json_at(msgs, i);
+        ok = str_eq(role_of(r), "toolResult") && json_get_bool(r, "isError", false) &&
+             strvec_contains(&ids, json_get_str(r, "toolCallId") ? json_get_str(r, "toolCallId") : "");
+    }
+    strvec_free(&ids);
+    return ok ? (ssize_t)start : -1;
+}

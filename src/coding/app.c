@@ -2259,6 +2259,11 @@ void app_abort(app_t *a) {
     app_goal_on_abort(a);
 }
 
+void app_abort_user(app_t *a) {
+    agent_abort_user(a->agent);
+    app_abort(a);
+}
+
 /* ---------- one-shot completion ---------- */
 
 char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const char *user, ai_effort_t effort) {
@@ -2931,21 +2936,129 @@ int app_clear_context(app_t *a) {
     return 0;
 }
 
-int app_retry(app_t *a, char **err) {
+/* buildSessionContext({transcript: true}).messages, as far as the retry tail rules read it: every message on the
+ * current branch in order (failed turns included), custom messages as `custom`, summaries by their own roles */
+static json_t *transcript_messages(app_t *a) {
+    json_t *out = json_arr();
+    if (!a->session || !a->session->leaf_id) return out;
+    json_t *path = session_path_to(a->session, a->session->leaf_id);
+    const json_t *e;
+    json_arr_foreach(path, i, e) {
+        const char *t = json_get_str(e, "type");
+        if (str_eq(t, "message") && json_get_obj(e, "message")) {
+            json_push(out, json_clone(json_get(e, "message")));
+        } else if (str_eq(t, "custom_message")) {
+            json_t *m = json_obj();
+            json_set_str(m, "role", "custom");
+            if (json_get_str(e, "customType")) json_set_str(m, "customType", json_get_str(e, "customType"));
+            if (json_get_str(e, "attribution")) json_set_str(m, "attribution", json_get_str(e, "attribution"));
+            json_push(out, m);
+        } else if (str_eq(t, "branch_summary") || str_eq(t, "compaction")) {
+            json_t *m = json_obj();
+            json_set_str(m, "role", str_eq(t, "compaction") ? "compactionSummary" : "branchSummary");
+            json_push(out, m);
+        }
+    }
+    json_free(path);
+    return out;
+}
+
+bool app_has_aborted_tool_call_tail(app_t *a) {
+    if (agent_is_running(a->agent)) return false;
+    pthread_mutex_lock(&a->agent->mu);
+    const json_t *active = a->agent->messages;
+    bool tail = tr_aborted_tool_call_tail(active);
+    size_t end = tr_conversation_end(active);
+    /* a trailing assistant message is authoritative for a live session: a settled turn leaves nothing to retry */
+    bool settled = !tail && end > 0 && str_eq(json_get_str(json_at(active, end - 1), "role"), "assistant");
+    pthread_mutex_unlock(&a->agent->mu);
+    if (tail || settled) return tail;
+    /* a restored session omits the failed turn from provider context: the display transcript decides */
+    json_t *tr = transcript_messages(a);
+    tail = tr_aborted_tool_call_tail(tr);
+    json_free(tr);
+    return tail;
+}
+
+/* #isSameAssistantMessage */
+static bool same_assistant(const json_t *x, const json_t *y) {
+    return json_get_int(x, "timestamp", -1) == json_get_int(y, "timestamp", -2) &&
+           str_eq(json_get_str(x, "provider"), json_get_str(y, "provider")) &&
+           str_eq(json_get_str(x, "model"), json_get_str(y, "model")) &&
+           str_eq(json_get_str(x, "stopReason"), json_get_str(y, "stopReason")) &&
+           str_eq(json_get_str(x, "errorMessage"), json_get_str(y, "errorMessage")) &&
+           json_equal(json_get(x, "content"), json_get(y, "content"));
+}
+
+/* #stripForToolReplay (agent lock held): reparent the persisted leaf onto the anchor assistant entry, so the dropped
+ * results cannot resurface on reload or pair duplicate tool call ids on replay, then cut the context to it */
+static void strip_for_tool_replay(app_t *a, json_t *msgs, size_t start) {
+    const json_t *anchor = json_at(msgs, start - 1);
+    json_t *path = a->session && a->session->leaf_id ? session_path_to(a->session, a->session->leaf_id) : NULL;
+    const char *anchor_id = NULL;
+    for (size_t i = json_len(path); i-- > 0 && !anchor_id;) {
+        const json_t *e = json_at(path, i);
+        const json_t *m = json_get_obj(e, "message");
+        if (str_eq(json_get_str(e, "type"), "message") && str_eq(json_get_str(m, "role"), "assistant") &&
+            same_assistant(m, anchor))
+            anchor_id = json_get_str(e, "id");
+    }
+    if (anchor_id) session_branch(a->session, anchor_id);
+    json_free(path);
+    while (json_len(msgs) > start) json_free(json_arr_remove(msgs, json_len(msgs) - 1));
+}
+
+bool app_retry_prepare(app_t *a) {
+    if (agent_is_running(a->agent)) return false;
     pthread_mutex_lock(&a->agent->mu);
     json_t *msgs = a->agent->messages;
-    size_t n = json_len(msgs);
-    json_t *last = n ? json_at(msgs, n - 1) : NULL;
-    bool failed = last && str_eq(json_get_str(last, "role"), "assistant") &&
-                  (str_eq(json_get_str(last, "stopReason"), "error") || str_eq(json_get_str(last, "stopReason"), "aborted"));
-    if (failed) json_free(json_arr_remove(msgs, n - 1));
+    ssize_t turn_end = tr_retryable_turn_end(msgs);
+    if (turn_end >= 0) {
+        ssize_t replay = tr_tool_replay_start(msgs);
+        if (replay >= 0) {
+            strip_for_tool_replay(a, msgs, (size_t)replay);
+        } else {
+            /* drop the failed/aborted turn and its synthetic results, keeping the trailing context deliveries */
+            size_t end = tr_conversation_end(msgs);
+            for (size_t i = end; i-- > (size_t)turn_end - 1;) json_free(json_arr_remove(msgs, i));
+        }
+    } else {
+        pthread_mutex_unlock(&a->agent->mu);
+        /* a restored session already dropped the failed turn from provider context: the display transcript is
+         * the source of truth for a retryable failed tail */
+        json_t *tr = transcript_messages(a);
+        bool retryable = tr_retryable_turn_end(tr) >= 0;
+        json_free(tr);
+        if (!retryable) return false;
+        pthread_mutex_lock(&a->agent->mu);
+        msgs = a->agent->messages;
+        /* the boundary is already gone from active context; an intact failed batch still at the tail replays */
+        ssize_t replay = tr_tool_replay_start(msgs);
+        if (replay >= 0) strip_for_tool_replay(a, msgs, (size_t)replay);
+    }
     pthread_mutex_unlock(&a->agent->mu);
-    if (!failed) {
-        *err = xstrdup("Nothing to retry: the last turn did not fail.");
+    a->retry_count = 0; /* a fresh retry budget */
+    return true;
+}
+
+int app_retry(app_t *a, char **err) {
+    if (!app_retry_prepare(a)) {
+        *err = xstrdup("Nothing to retry");
         return -1;
     }
-    a->retry_count = 0;
     return agent_continue(a->agent);
+}
+
+bool app_retry_available(app_t *a) {
+    if (agent_is_running(a->agent)) return false;
+    pthread_mutex_lock(&a->agent->mu);
+    bool ok = tr_retryable_turn_end(a->agent->messages) >= 0;
+    pthread_mutex_unlock(&a->agent->mu);
+    if (ok) return true;
+    json_t *tr = transcript_messages(a);
+    ok = tr_retryable_turn_end(tr) >= 0;
+    json_free(tr);
+    return ok;
 }
 
 /* session-maintenance.ts resolveCompactionModelCandidates: the model's compactionModel target, the

@@ -712,30 +712,18 @@ static void h_handoff(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *r
     free(err);
 }
 
-static bool last_turn_failed(app_t *a) {
-    pthread_mutex_lock(&a->agent->mu);
-    size_t n = json_len(a->agent->messages);
-    json_t *last = n ? json_at(a->agent->messages, n - 1) : NULL;
-    bool failed = last && str_eq(json_get_str(last, "role"), "assistant") &&
-                  (str_eq(json_get_str(last, "stopReason"), "error") || str_eq(json_get_str(last, "stopReason"), "aborted"));
-    pthread_mutex_unlock(&a->agent->mu);
-    return failed;
-}
-
 static void h_retry(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
     (void)c;
     if (agent_is_running(rt->app->agent)) {
         usage(rt, res, "Wait for the current response to finish or abort it before retrying.");
         return;
     }
-    if (!last_turn_failed(rt->app)) {
+    if (!app_retry_prepare(rt->app)) {
         usage(rt, res, "Nothing to retry.");
         return;
     }
     out(rt, "Retrying the last failed turn.");
-    char *err = NULL;
-    app_retry(rt->app, &err);
-    free(err);
+    agent_continue(rt->app->agent);
     res->agent_invoked = true;
 }
 
@@ -1094,7 +1082,7 @@ void slash_execute_text(app_t *a, const char *text, slash_output_fn output, void
 }
 
 bool slash_invokes_agent(app_t *a, const char *name) {
-    return str_eq(name, "retry") && !agent_is_running(a->agent) && last_turn_failed(a);
+    return str_eq(name, "retry") && app_retry_available(a);
 }
 
 void slash_result_free(slash_result_t *res) {

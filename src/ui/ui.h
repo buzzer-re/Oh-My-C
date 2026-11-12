@@ -105,6 +105,7 @@ struct ui {
     /* chrome (welcome.c / statusline.c) */
     tui_component_t *welcome;
     bool status_row_occupied; /* the working/idle-title row rendered lines this frame */
+    bool retry_hint;          /* the idle "F5 to retry" row is mounted in the status row (ui_sync_retry_hint) */
     json_t *att_images; /* pending composer image attachments [{image, path?, w?, h?}] (attach.c) */
     struct btw_ctl *btw;      /* /btw controller (btw.c), created on first use */
     /* message queue and background input work (queue.c, modes/interactive.c) */
@@ -261,6 +262,12 @@ void toolcard_frame(ui_t *u, const char *id, json_t *details);
 /* history rebuild in progress: persisted background results render settled, not live */
 void toolcard_set_replaying(bool on);
 void toolcard_frames_reset(void); /* a session switch drops the cached background-job frames */
+/* #priorTurnToolComponents: the cards of the run that just ended, by call id. A tool replay (F5 on a failed batch)
+ * re-executes those ids in the next run: its start drops the stale card so the fresh one takes its place. */
+void toolcard_run_track(const char *id, msgview_t *v); /* a card this run drew for `id` */
+void toolcard_run_end(void);                           /* the run settled: its cards become the prior turn's */
+void toolcard_prior_evict(ui_t *u, const char *id);    /* tool start: drop the prior turn's card for `id` */
+void toolcard_prior_reset(ui_t *u);                    /* transcript rebuilt: the tracked cards are gone */
 /* a tool call streaming in an assistant message: draws (or updates) its pending card before execution;
  * toolcard_start then adopts that card */
 void toolcard_preview(ui_t *u, const char *id, const char *name, const json_t *args);
@@ -276,6 +283,9 @@ tui_component_t *ui_status_new(ui_t *u);   /* standalone bottom bar (pi/borderle
 void ui_chrome_setup(ui_t *u);              /* composer shape, chrome colors, status top, hint, cursor */
 void ui_chrome_turn(ui_t *u, bool active);  /* agent turn start/end: brand spinner, time_spent */
 tui_component_t *ui_status_row_new(ui_t *u, tui_component_t *loader); /* loader, else idle title row */
+/* syncRetryHintRow: mount the idle "F5 to retry" row when the last turn died on a tool call and the status row is
+ * free, unmount it when stale. Runs at turn end and after every transcript replay; a loader replaces it. */
+void ui_sync_retry_hint(ui_t *u);
 tui_component_t *ui_editor_gap_new(ui_t *u); /* blank row above the editor (collapses under band) */
 char *ui_title_trailer(ui_t *u);            /* band: dim italic session title for the working row */
 const char *ui_composer_shape(void);        /* composer.shape setting (default band) */
