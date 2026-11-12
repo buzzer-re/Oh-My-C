@@ -729,6 +729,25 @@ int main(void) {
         json_free(a);
         json_free(rj);
     }
+    /* omp fb0fea4937: a grep with no matches is one line, `0 matches` in the warning color, no empty-message row */
+    {
+        json_t *a = J("{\"pattern\":\"zzq\"}"), *rj = J("{\"content\":[{\"type\":\"text\",\"text\":\"No matches found\"}],"
+                                                       "\"details\":{\"matchCount\":0,\"fileCount\":0}}");
+        tc_call_t c = call("grep", a, rj, false);
+        strvec_t out = {0};
+        tc_render(&c, 120, &out);
+        CHECK(out.n == 1 && has_row(&out, "0 matches") && !has_row(&out, "No matches found"), "grep zero matches: %zu rows", out.n);
+        char *warn = tc_fg(TUI_TC_WARNING, "0 matches");
+        CHECK(out.n && strstr(out.v[0], warn), "0 matches in warning color");
+        free(warn);
+        strvec_free(&out);
+        json_set(json_get_obj(rj, "details"), "missingPaths", J("[\"nope\"]"));
+        tc_render(&c, 120, &out);
+        CHECK(out.n == 2 && has_row(&out, "skipped missing: nope"), "grep zero matches + missing note: %zu rows", out.n);
+        strvec_free(&out);
+        json_free(a);
+        json_free(rj);
+    }
     /* omp 2e254233c2: debug call args lose ANSI / control characters and fold to one line */
     {
         json_t *a = J("{\"action\":\"set_breakpoint\",\"function\":\"main\\u001b[31m\\nred\\tx\"}");

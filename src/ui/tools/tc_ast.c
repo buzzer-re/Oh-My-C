@@ -93,13 +93,12 @@ void tc_ast_grep(const tc_call_t *c, int width, strvec_t *out) {
     const json_t *perrs = json_get_arr(d, "parseErrors");
     if (matches == 0) {
         strvec_t meta = {0};
-        strvec_push(&meta, "0 matches");
+        strvec_push_own(&meta, tc_fg(TUI_TC_WARNING, "0 matches"));
         if (searched > 0) strvec_push_own(&meta, xasprintf("searched %lld", (long long)searched));
         tc_status_line_t sl = {.icon = TC_ST_WARNING, .spinner = -1, .title = "AST Grep", .title_slot = -1, .description = subject,
                                .meta = (const char *const *)meta.v, .nmeta = meta.n};
         strvec_t lines = {0};
         strvec_push_own(&lines, tc_status_line(&sl));
-        strvec_push_own(&lines, tc_empty_message("No matches found"));
         if (json_len(perrs)) {
             strvec_push_own(&lines, tc_fg(TUI_TC_WARNING, "Query may be mis-scoped; narrow `path` before concluding absence"));
             push_parse_errors(&lines, perrs, json_get_int(d, "parseErrorsTotal", 0));

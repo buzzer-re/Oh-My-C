@@ -23,8 +23,7 @@
  [38;2;229;229;231ma2[39m
 
 
-[38;2;255;179;71m[49m⚠[39m [38;2;0;180;255mAST Grep[39m: [38;2;156;163;176mfoo($$$)[39m [38;2;107;114;128m0 matches · searched 3[39m
-[38;2;255;179;71m⚠[39m [38;2;156;163;176mNo matches found[39m
+[38;2;255;179;71m[49m⚠[39m [38;2;0;180;255mAST Grep[39m: [38;2;156;163;176mfoo($$$)[39m [38;2;107;114;128m[38;2;255;179;71m0 matches[38;2;107;114;128m · searched 3[39m
 [38;2;255;179;71mQuery may be mis-scoped; narrow `path` before concluding absence[39m
 [38;2;255;179;71m  - a.ts: parse error[39m
 
