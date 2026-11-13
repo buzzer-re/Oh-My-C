@@ -8,7 +8,7 @@ system's libc, OpenSSL (for TLS), zlib (for gzip), pthreads and libm.
 $ ldd build/omc
     libssl.so.3  libcrypto.so.3  libz.so.1  libm.so.6  libc.so.6
 ```
-
+Current equivalent OMP release: v18.18.7
 ## Why
 
 Having Oh-My-Pi fully rewritten in C lets me easily embed it in any project I want. Since it can also be built as `libomc`, you can use it inside existing software written in C/C++, inject it into any game to assist modding, use it as RE tooling for instrumentation, create more integrated assistants and use it in embedded systems.
@@ -71,12 +71,6 @@ tools, but it doesn't read everything that omp does yet. Sessions are saved as o
 under `~/.omc/agent/sessions/`.
 
 If you want to migrate your `omp` setup, just run `/migrate` inside `omc` and it will copy your existing configuration.
-
-## The shell is real bash
-
-The agent's `bash` tool runs your system's real `bash`. Since v18.17.0, `omp` runs commands on its own shell engine, written in Rust, and `omc` will not follow it there on purpose. A huge engine like that goes against the whole idea of this project, and real bash is what your scripts already expect.
-
-So this is the place where `omc` doesn't try to match `omp`: shell behaviour follows real bash. For example, an `EXIT` trap fires when the command ends and sees its real exit status, and things like `jobs`, `$SHLVL` and `$-` are whatever bash says they are. It also means `omc` has no `omp zsh`, `omp bash` or `omp sh`, and no live shell visualization. Everywhere else, the goal is still to behave 1:1 with `omp`.
 
 ## Embedding
 
