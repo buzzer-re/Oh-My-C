@@ -1,4 +1,5 @@
 /* test_providers_oai.c - offline tests for the OpenAI-family providers (request building + stream decoding). */
+#include "ai/leaked_thinking.h"
 #include "ai/provider_openai.h"
 
 #include <math.h>
@@ -885,6 +886,152 @@ static void test_ollama(void) {
     json_free(t.raw);
 }
 
+
+/* ---------- leaked-thinking healing (leaked-thinking-stream.ts, StreamMarkupHealing) ---------- */
+
+/* event trace: "type idx [delta]" lines */
+static void trace_ev(void *ud, const ai_event_t *ev) {
+    sb_t *b = ud;
+    sb_appendf(b, "%s", ai_event_name(ev->type));
+    if (ev->content_index >= 0) sb_appendf(b, " %d", ev->content_index);
+    if (ev->delta && ev->delta_len) sb_appendf(b, " %.*s", (int)ev->delta_len, ev->delta);
+    sb_append(b, "|");
+}
+
+typedef enum { SRC_TEXT, SRC_THINK, SRC_SIG, SRC_TOOL, SRC_END } src_kind_t;
+typedef struct {
+    src_kind_t kind;
+    const char *s;
+} src_step_t;
+
+/* drive the projector with an ai_builder as the provider; returns the healed message (owned) */
+static json_t *project(const ai_model_t *m, const src_step_t *steps, sb_t *trace) {
+    leaked_thinking_t *w = leaked_thinking_new(trace_ev, trace);
+    ai_builder_t b;
+    aib_init(&b, m, leaked_thinking_cb, w);
+    aib_start(&b);
+    for (const src_step_t *st = steps; st->kind != SRC_END; st++) {
+        if (st->kind == SRC_TEXT) aib_text_delta(&b, st->s, strlen(st->s));
+        else if (st->kind == SRC_THINK) aib_thinking_delta(&b, st->s, strlen(st->s));
+        else if (st->kind == SRC_SIG) aib_set_thinking_signature(&b, st->s);
+        else {
+            aib_toolcall_start(&b, "call_1", st->s);
+            aib_toolcall_delta(&b, "{}", 2);
+        }
+    }
+    json_t *msg = leaked_thinking_finish(w, aib_finish(&b, "stop", NULL));
+    leaked_thinking_free(w);
+    aib_free(&b);
+    return msg;
+}
+
+static void check_projection(const ai_model_t *m, const src_step_t *steps, const char *want_trace, const char *want_content) {
+    sb_t tr = SB_INIT;
+    json_t *msg = project(m, steps, &tr);
+    CHECK_STR(sb_cstr(&tr), want_trace);
+    char *c = json_dump(json_get(msg, "content"), 0);
+    CHECK_STR(c, want_content);
+    free(c);
+    json_free(msg);
+    sb_free(&tr);
+}
+
+static void test_leaked_thinking(void) {
+    tmodel_t t;
+    model_init(&t, "{\"id\":\"m1\",\"api\":\"openai-completions\",\"provider\":\"test\",\"compat\":{}}");
+    /* a fence split across chunks becomes a thinking block live */
+    check_projection(&t.m, (src_step_t[]){{SRC_TEXT, "<thi"}, {SRC_TEXT, "nk>abc</th"}, {SRC_TEXT, "ink>tail"}, {SRC_END, 0}},
+                     "start|thinking_start 0|thinking_delta 0 abc|thinking_end 0|text_start 1|text_delta 1 tail|text_end 1|done|",
+                     "[{\"type\":\"thinking\",\"thinking\":\"abc\"},{\"type\":\"text\",\"text\":\"tail\"}]");
+    /* prefilled opener: only the close streams; the leading text block is re-projected in place */
+    check_projection(&t.m, (src_step_t[]){{SRC_TEXT, "plan it"}, {SRC_TEXT, "</think>"}, {SRC_TEXT, "Answer"}, {SRC_END, 0}},
+                     "start|text_start 0|text_delta 0 plan it|text_end 0|thinking_start 0|thinking_delta 0 plan it|thinking_end 0|"
+                     "text_start 1|text_delta 1 Answer|text_end 1|done|",
+                     "[{\"type\":\"thinking\",\"thinking\":\"plan it\"},{\"type\":\"text\",\"text\":\"Answer\"}]");
+    /* a stray close after other content is dropped */
+    check_projection(&t.m, (src_step_t[]){{SRC_TEXT, "<thinking>a</thinking>b</think>c"}, {SRC_END, 0}},
+                     "start|thinking_start 0|thinking_delta 0 a|thinking_end 0|text_start 1|text_delta 1 b|text_delta 1 c|text_end 1|done|",
+                     "[{\"type\":\"thinking\",\"thinking\":\"a\"},{\"type\":\"text\",\"text\":\"bc\"}]");
+    /* a literal tag inside a code span stays visible; plain text passes through unchanged */
+    check_projection(&t.m, (src_step_t[]){{SRC_TEXT, "use `<think>` ok"}, {SRC_END, 0}},
+                     "start|text_start 0|text_delta 0 use |text_delta 0 `|text_delta 0 <think>`|text_delta 0  ok|text_end 0|done|",
+                     "[{\"type\":\"text\",\"text\":\"use `<think>` ok\"}]");
+    /* native thinking keeps its signature; held text is released before a tool call */
+    check_projection(&t.m,
+                     (src_step_t[]){{SRC_THINK, "native"}, {SRC_SIG, "sig1"}, {SRC_TEXT, "x <"}, {SRC_TOOL, "read"}, {SRC_END, 0}},
+                     "start|thinking_start 0|thinking_delta 0 native|thinking_end 0|text_start 1|text_delta 1 x |text_delta 1 <|"
+                     "text_end 1|toolcall_start 2|toolcall_delta 2 {}|toolcall_end 2|done|",
+                     "[{\"type\":\"thinking\",\"thinking\":\"native\",\"thinkingSignature\":\"sig1\"},{\"type\":\"text\",\"text\":\"x <\"},"
+                     "{\"type\":\"toolCall\",\"id\":\"call_1\",\"name\":\"read\",\"arguments\":{}}]");
+    /* an unterminated leak ends as thinking */
+    check_projection(&t.m, (src_step_t[]){{SRC_TEXT, "```thinking\nstill going"}, {SRC_END, 0}},
+                     "start|thinking_start 0|thinking_delta 0 still going|thinking_end 0|done|",
+                     "[{\"type\":\"thinking\",\"thinking\":\"still going\"}]");
+
+    /* an error with empty content is forwarded as is */
+    {
+        sb_t tr = SB_INIT;
+        leaked_thinking_t *w = leaked_thinking_new(trace_ev, &tr);
+        ai_builder_t b;
+        aib_init(&b, &t.m, leaked_thinking_cb, w);
+        aib_start(&b);
+        json_t *msg = leaked_thinking_finish(w, aib_finish(&b, "error", "boom"));
+        CHECK_STR(sb_cstr(&tr), "start|error|");
+        CHECK_STR(json_get_str(msg, "errorMessage"), "boom");
+        CHECK(json_len(json_get(msg, "content")) == 0);
+        json_free(msg);
+        leaked_thinking_free(w);
+        aib_free(&b);
+        sb_free(&tr);
+    }
+
+    /* the gate: official first-party endpoints are not wrapped */
+    CHECK(!ai_reaches_official_endpoint(&t.m));
+    tmodel_t off;
+    model_init(&off, "{\"id\":\"gpt\",\"api\":\"openai-responses\",\"provider\":\"openai\",\"compat\":{\"officialEndpoint\":true}}");
+    CHECK(ai_reaches_official_endpoint(&off.m));
+    json_free(off.raw);
+    model_init(&off, "{\"id\":\"c\",\"api\":\"anthropic-messages\",\"provider\":\"anthropic\",\"compat\":{\"officialEndpoint\":true}}");
+    unsetenv("ANTHROPIC_BASE_URL");
+    CHECK(ai_reaches_official_endpoint(&off.m));
+    setenv("ANTHROPIC_BASE_URL", "https://proxy.example.com/v1", 1); /* rerouted at request time */
+    CHECK(!ai_reaches_official_endpoint(&off.m));
+    setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1/", 1);
+    CHECK(ai_reaches_official_endpoint(&off.m));
+    unsetenv("ANTHROPIC_BASE_URL");
+    json_free(off.raw);
+
+    /* StreamMarkupHealing in the chat-completions provider: healed thinking is the model's trace (summary:false),
+     * dropped once explicit reasoning streamed */
+    json_free(t.raw);
+    model_init(&t, "{\"id\":\"m1\",\"api\":\"openai-completions\",\"provider\":\"test\",\"compat\":{\"streamMarkupHealingPattern\":\"thinking\"}}");
+    const char *sse =
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<thin\"}}]}\n\n"
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"king>why</thinking>Hi\"}}]}\n\n"
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    oaic_stream_t *st = oaic_stream_new(&t.m, NULL, NULL);
+    int rc = feed_sse(oaic_stream_on_sse, st, sse, 5);
+    json_t *msg = oaic_stream_finish(st, rc, NULL);
+    char *c = json_dump(json_get(msg, "content"), 0);
+    CHECK_STR(c, "[{\"type\":\"thinking\",\"thinking\":\"why\",\"summary\":false},{\"type\":\"text\",\"text\":\"Hi\"}]");
+    free(c);
+    json_free(msg);
+    sse = "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"real\"}}]}\n\n"
+          "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<think>leak</think>Hi\"}}]}\n\n"
+          "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+          "data: [DONE]\n\n";
+    st = oaic_stream_new(&t.m, NULL, NULL);
+    rc = feed_sse(oaic_stream_on_sse, st, sse, 4096);
+    msg = oaic_stream_finish(st, rc, NULL);
+    c = json_dump(json_get(msg, "content"), 0);
+    CHECK_STR(c, "[{\"type\":\"thinking\",\"thinking\":\"real\",\"thinkingSignature\":\"reasoning_content\",\"summary\":false},"
+                 "{\"type\":\"text\",\"text\":\"Hi\"}]");
+    free(c);
+    json_free(msg);
+    json_free(t.raw);
+}
+
 static void test_strict_schema(void) {
     json_t *s = J("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"default\":\"x\"},"
                   "\"b\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"number\"}]},"
@@ -1082,6 +1229,7 @@ int main(void) {
     test_responses_stream();
     test_ollama();
     test_strict_schema();
+    test_leaked_thinking();
     printf("test_providers_oai: %d checks, %d failures\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }
