@@ -1,6 +1,7 @@
 /* htmlform.c - see htmlform.h. Ports omp html-form/parse.ts (FormBuilder), data.ts and paginate.ts over a small
  * from-scratch HTML tree builder that follows htmlparser2's tokenizer and implied-close rules (what linkedom's
  * parseHTML uses upstream). */
+#define _GNU_SOURCE /* memmem: glibc declares it only with _GNU_SOURCE (build-tools/check_apple.sh) */
 #include "text/htmlform.h"
 
 #include "text/regex.h"
