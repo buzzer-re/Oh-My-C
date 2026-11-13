@@ -458,6 +458,20 @@ static json_t *result_json(const tool_result_t *r) {
     return o;
 }
 
+/* AIError.create(Flag.UserInterrupt) / create(Flag.Abort) (packages/ai/src/error/flags.ts; Class = 0x1000) */
+#define AIE_ID_USER_INTERRUPT (0x4000000 | 0x1000)
+#define AIE_ID_ABORT (0x8000000 | 0x1000)
+
+/* agent-loop.ts emitAbortedAssistantMessage leaves errorId unset for a user interrupt (classify(reason) is 0); the
+ * session stamps UserInterrupt on the message_end copy only, so turn_end / agent_end carry the loop's own object */
+static json_t *loop_copy(const json_t *m) {
+    json_t *c = json_clone(m);
+    if (str_eq(json_get_str(c, "role"), "assistant") && str_eq(json_get_str(c, "stopReason"), "aborted") &&
+        str_eq(json_get_str(c, "errorMessage"), AGENT_USER_INTERRUPT_LABEL) && json_get_int(c, "errorId", 0) == AIE_ID_USER_INTERRUPT)
+        json_del(c, "errorId");
+    return c;
+}
+
 json_t *agent_event_to_json(const agent_event_t *ev) {
     json_t *o = json_obj();
     json_set_str(o, "type", agent_event_name(ev->type));
@@ -465,11 +479,15 @@ json_t *agent_event_to_json(const agent_event_t *ev) {
     case AGENT_EV_AGENT_START: /* agentLoopContinue: a resumed tool batch names its calls */
         if (ev->messages) json_set(o, "resumedToolCallIds", json_clone(ev->messages));
         break;
-    case AGENT_EV_AGENT_END:
-        json_set(o, "messages", ev->messages ? json_clone(ev->messages) : json_arr());
+    case AGENT_EV_AGENT_END: {
+        json_t *ms = json_arr();
+        json_t *m;
+        json_arr_foreach(ev->messages, i, m) json_push(ms, loop_copy(m));
+        json_set(o, "messages", ms);
         break;
+    }
     case AGENT_EV_TURN_END:
-        json_set(o, "message", json_clone(ev->message));
+        json_set(o, "message", ev->message ? loop_copy(ev->message) : json_clone(NULL));
         json_set(o, "toolResults", ev->tool_results ? json_clone(ev->tool_results) : json_arr());
         break;
     case AGENT_EV_MESSAGE_START:
@@ -928,9 +946,6 @@ static void add_message(agent_t *a, json_t *run_msgs, json_t *msg) {
     emit_message(a, AGENT_EV_MESSAGE_END, msg);
 }
 
-/* AIError.create(Flag.UserInterrupt) / create(Flag.Abort) (packages/ai/src/error/flags.ts; Class = 0x1000) */
-#define AIE_ID_USER_INTERRUPT (0x4000000 | 0x1000)
-#define AIE_ID_ABORT (0x8000000 | 0x1000)
 
 static void user_interrupt_label(json_t *msg) {
     json_set_str(msg, "errorMessage", AGENT_USER_INTERRUPT_LABEL);
@@ -956,7 +971,42 @@ typedef struct {
     bool started;
     int abort_requested;
     json_t *cursor_results; /* cursor-agent: tool results the provider resolved during the stream */
+    strvec_t completed;     /* ids of the tool calls that reached toolcall_end before an abort (completedToolCallIds) */
 } stream_ud_t;
+
+/* agent-loop.ts retainCompletedToolCalls: only tool calls that reached `toolcall_end` survive an abort or error
+ * (partial arguments are unsafe to keep and can carry incomplete provider ids); dropping one records the
+ * stream_interrupted_after_content stop detail */
+static void retain_completed_tool_calls(json_t *msg, const strvec_t *completed) {
+    const char *stop = json_get_str(msg, "stopReason");
+    if (!str_eq(stop, "error") && !str_eq(stop, "aborted")) return;
+    json_t *content = json_get(msg, "content");
+    json_t *kept = json_arr();
+    bool dropped = false;
+    json_t *b;
+    json_arr_foreach(content, i, b) {
+        if (str_eq(json_get_str(b, "type"), "toolCall") && !strvec_contains(completed, json_get_str(b, "id") ? json_get_str(b, "id") : "")) {
+            dropped = true;
+            continue;
+        }
+        json_push(kept, json_clone(b));
+    }
+    if (!dropped) {
+        json_free(kept);
+        return;
+    }
+    json_set(msg, "content", kept);
+    json_t *sd = json_get_obj(msg, "stopDetails");
+    if (str_eq(json_get_str(sd, "type"), "stream_interrupted_after_content")) return;
+    json_t *nsd = json_obj();
+    json_set_str(nsd, "type", "stream_interrupted_after_content");
+    const char *cat = json_get_str(sd, "type");
+    json_set(nsd, "category", cat ? json_str(cat) : json_null());
+    const char *expl = json_get_str(sd, "explanation");
+    if (!expl) expl = json_get_str(msg, "errorMessage");
+    json_set(nsd, "explanation", expl ? json_str(expl) : json_null());
+    json_set(msg, "stopDetails", nsd);
+}
 
 static json_t *cursor_bridge_run(void *ud, const char *id, const char *name, const json_t *args);
 static json_t *cursor_bridge_run_quiet(void *ud, const char *id, const char *name, const json_t *args);
@@ -970,6 +1020,10 @@ static void on_ai_event(void *ud, const ai_event_t *ev) {
      * first content, so a request that fails outright has one message_start carrying the final error (stream_assistant) */
     if (ev->type == AI_EV_START) return;
     if (ev->type == AI_EV_DONE || ev->type == AI_EV_ERROR) return; /* message_end emitted by caller */
+    /* agent-loop.ts: the abort race ends the stream at once; nothing the provider pushes afterwards reaches the
+     * transcript (finishAbortedStream commits the partial as it stood) */
+    if (a->cancel) return;
+    if (ev->type == AI_EV_TOOLCALL_END) strvec_push(&s->completed, json_get_str(ev->block, "id") ? json_get_str(ev->block, "id") : "");
     if (!s->started) {
         s->started = true;
         json_t *head = json_clone(ev->partial); /* the message as `start` saw it: nothing streamed yet */
@@ -1044,6 +1098,13 @@ static json_t *stream_assistant(agent_t *a, int *ttsr_abort, json_t **cursor_res
     else if (a->abort_user && str_eq(json_get_str(msg, "stopReason"), "aborted") &&
              (!json_get_str(msg, "errorMessage") || str_eq(json_get_str(msg, "errorMessage"), "Request was aborted")))
         user_interrupt_label(msg); /* abortReasonText: the caller's reason, classified UserInterrupt */
+    if (a->cancel && !silent && str_eq(json_get_str(msg, "stopReason"), "aborted")) {
+        /* finishAbortedStream commits the streaming partial: the provider's closing timings never land on it */
+        json_del(msg, "duration");
+        json_del(msg, "ttft");
+    }
+    retain_completed_tool_calls(msg, &s.completed);
+    strvec_free(&s.completed);
     if (a->hooks.finalize_error && str_eq(json_get_str(msg, "stopReason"), "error")) a->hooks.finalize_error(a->hooks.ud, a, msg);
     if (!s.started) emit_message(a, AGENT_EV_MESSAGE_START, msg);
     if (!s.abort_requested && a->hooks.on_stream_delta) { /* the finished stream (loop guard flush) */

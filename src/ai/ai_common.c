@@ -221,7 +221,8 @@ void aib_end_block(ai_builder_t *b) {
             json_free(full);
         }
         sb_clear(&b->buf);
-        emit(b, AI_EV_TOOLCALL_END, idx, NULL, 0, blk, NULL);
+        if (b->defer_toolcall_end) vec_push(&b->deferred_tc, idx);
+        else emit(b, AI_EV_TOOLCALL_END, idx, NULL, 0, blk, NULL);
     }
 }
 
@@ -368,6 +369,9 @@ void aib_set(ai_builder_t *b, const char *key, json_t *val) { json_set(b->msg, k
 json_t *aib_finish(ai_builder_t *b, const char *stop_reason, const char *error_message) {
     aib_start(b);
     aib_end_block(b);
+    for (size_t i = 0; i < b->deferred_tc.n; i++)
+        emit(b, AI_EV_TOOLCALL_END, b->deferred_tc.v[i], NULL, 0, json_at(content(b), (size_t)b->deferred_tc.v[i]), NULL);
+    vec_free(&b->deferred_tc);
     if (!stop_reason) stop_reason = "stop";
     /* if the model emitted tool calls, the stop reason is toolUse regardless of provider wording */
     if (strcmp(stop_reason, "stop") == 0 && last_block_of(b, "toolCall")) stop_reason = "toolUse";
@@ -385,6 +389,7 @@ json_t *aib_finish(ai_builder_t *b, const char *stop_reason, const char *error_m
 }
 
 void aib_free(ai_builder_t *b) {
+    vec_free(&b->deferred_tc);
     json_free(b->msg);
     b->msg = NULL;
     sb_free(&b->buf);
