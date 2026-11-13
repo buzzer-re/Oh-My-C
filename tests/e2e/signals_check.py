@@ -3,7 +3,7 @@
 usage: signals_check.py <typescript> <kind>
 Extracts the title (OSC 0), title stack (CSI 22/23;2t), OSC 7501 and notification (BEL / OSC 9 / tmux passthrough)
 sequences, collapses consecutive working-spinner titles to one `π * <label>` row, and compares them with the
-sequence omp writes (v18.14.2; the error message's text follows v18.17.0's run-status.ts) for the same scenario. Prints "signals ok" or a diff."""
+sequence omp writes (v18.14.2; the error message's text follows v18.17.0's run-status.ts; the boot order v18.18.7's) for the same scenario. Prints "signals ok" or a diff."""
 import base64, re, sys
 
 data = open(sys.argv[1], "rb").read()
@@ -25,11 +25,12 @@ T = lambda t: "\x1b]0;" + t + "\x07"
 R = lambda r: "\x1b]7501;" + r + "\x1b\\"
 want = {
     # a plain turn on a BEL terminal: push, claim, idle, label, working spinner, done, completion BEL, teardown
-    # the command-line prompt holds `working` from the first frame (omp 5d5142e3fd, d62d143c22: initProgramStatus startupRun)
-    "turn": ["\x1b[22;2t", T("π *"), R("state=working:app=omc"), T("π * work"),
+    # the command-line prompt holds `working` from the first report (omp 5d5142e3fd, d62d143c22: initProgramStatus
+    # startupRun); the title writes its idle `π >` first, then the spinner (checked against omp 18.18.7 under `script`)
+    "turn": ["\x1b[22;2t", T("π >"), T("π *"), R("state=working:app=omc"), T("π * work"),
              T("π > work"), R("state=done:app=omc"), "\x07", R("state=clear"), T(""), "\x1b[23;2t"],
     # an OSC 9 terminal (WezTerm) failing with error.notify on, then a completed turn
-    "error": ["\x1b[22;2t", T("π *"), R("state=working:app=omc"), T("π * work"),
+    "error": ["\x1b[22;2t", T("π >"), T("π *"), R("state=working:app=omc"), T("π * work"),
               T("π > work"), R("state=error:app=omc:msg=400 bad things (type=invalid_request_error) raw-http-request=<dump>"), "\x1b]9;omc: Stopped with error\x1b\\",
               R("state=clear"), T(""), "\x1b[23;2t"],
 }[kind]

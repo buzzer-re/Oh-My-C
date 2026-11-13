@@ -379,14 +379,19 @@ void ui_signals_init(ui_t *u) {
     S.disposed = false;
     S.style = norm_style(settings_str("tui.titleSpinner", "braille"));
     S.interval = tui_spinner_interval();
-    /* initProgramStatus({startupRun}): the first report is `working`, not the `idle` a supervisor waiting on
-     * this terminal would take as finished before the prompt even starts; the title follows now */
-    S.startup_hold = S.startup_run;
-    S.startup_run = false;
-    if (S.startup_hold) S.status = S.title_state = RUN_WORKING;
     /* setTerminalTitleStateEnabled: emits before the session label is known (`π >`) */
     if (S.title_state == RUN_WORKING && title_state_enabled()) start_spinner();
     emit_title();
+    /* initProgramStatus({startupRun}): the first report is `working`, not the `idle` a supervisor waiting on
+     * this terminal would take as finished before the prompt even starts; the title turns to the spinner right
+     * after its idle first write (omp: `π >`, `π *`, then the report) */
+    S.startup_hold = S.startup_run;
+    S.startup_run = false;
+    if (S.startup_hold) {
+        S.status = S.title_state = RUN_WORKING;
+        if (title_state_enabled()) start_spinner();
+        emit_title();
+    }
     report(); /* setProgramStatusEnabled */
     ui_signals_session_title();
     ui_recap_init(u);
