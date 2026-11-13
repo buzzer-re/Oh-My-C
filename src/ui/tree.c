@@ -447,7 +447,11 @@ static void entry_parts(tree_sel_t *t, const tnode_t *nd, parts_t *out) {
             const char *full = NULL;
             if (str_eq(json_get_str(rr, "status"), "superseded")) full = NULL;
             else if (str_eq(stop, "error")) full = err && *err ? err : "Error";
-            else if (str_eq(stop, "aborted")) full = err && *err && strcmp(err, "Request was aborted") ? err : NULL;
+            else if (str_eq(stop, "aborted")) /* shouldRenderAbortReason: a user interrupt or silent abort stays quiet */
+                full = err && *err && strcmp(err, "Request was aborted") && strcmp(err, "Interrupted by user") &&
+                               strcmp(err, "__omp.silent_abort__") && !(json_get_int(m, "errorId", 0) & 0x4000000)
+                           ? err
+                           : NULL;
             if (full) {
                 char *fn = normalize(full);
                 char *cut = slice_cps(fn, 80, NULL);

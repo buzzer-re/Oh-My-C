@@ -703,7 +703,7 @@ bool iq_escape(ui_t *u) {
     if (lp_escape(u)) return true; /* loop mode: Esc suspends the loop (and aborts the live turn) */
     if (u->worker_running) {
         restore_all(u);
-        app_abort(u->app);
+        app_abort_user(u->app);
         return true;
     }
     if (u->bash) {

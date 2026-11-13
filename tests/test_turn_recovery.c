@@ -49,6 +49,76 @@ static json_t *turn(const char *err, const char *blocks) {
 
 static bool retriable(const char *err) { return aie_retriable(aie_classify_text(err, 0, NULL, NULL)); }
 
+/* manual retry fixtures: "u" user, "c" toolUse turn with call_1, "C" toolUse turn with call_1 + call_2, "e"/"r" errored
+ * / ok result of call_1, "E" errored result of call_2, "a" aborted boundary (no calls), "f" error turn with call_1,
+ * "s" synthetic result of call_1, "j" async-result delivery, "v" eval-state snapshot, "k" user-invoked /skill: prompt,
+ * "d" settled stop turn */
+static json_t *msgs_of(const char *spec) {
+    json_t *arr = json_arr();
+    for (const char *p = spec; *p; p++) {
+        json_t *m = json_obj();
+        switch (*p) {
+        case 'u': json_set_str(m, "role", "user"); json_set_str(m, "content", "run"); break;
+        case 'j':
+        case 'v':
+        case 'k':
+            json_set_str(m, "role", "user");
+            json_set_str(m, "customType", *p == 'j' ? "async-result" : *p == 'v' ? "eval-state-context" : "skill-prompt");
+            if (*p == 'k') json_set_str(m, "attribution", "user");
+            json_set_str(m, "content", "x");
+            break;
+        case 'c':
+        case 'C':
+        case 'f':
+        case 'a':
+        case 'd': {
+            json_free(m);
+            m = turn(NULL, *p == 'a' || *p == 'd' ? "" : "c");
+            json_set_str(m, "stopReason", *p == 'f' ? "error" : *p == 'a' ? "aborted" : *p == 'd' ? "stop" : "toolUse");
+            if (*p == 'C') {
+                json_t *b = json_clone(json_at(json_get(m, "content"), 0));
+                json_set_str(b, "id", "call_2");
+                json_push(json_get(m, "content"), b);
+            }
+            break;
+        }
+        default: { /* e r E s */
+            json_set_str(m, "role", "toolResult");
+            json_set_str(m, "toolCallId", *p == 'E' ? "call_2" : "call_1");
+            json_set_bool(m, "isError", *p != 'r');
+            if (*p == 's') {
+                json_t *d = json_obj();
+                json_set_bool(d, "__synthetic", true);
+                json_set(m, "details", d);
+            }
+        }
+        }
+        json_push(arr, m);
+    }
+    return arr;
+}
+
+static bool tail_of(const char *spec) {
+    json_t *m = msgs_of(spec);
+    bool r = tr_aborted_tool_call_tail(m);
+    json_free(m);
+    return r;
+}
+
+static ssize_t replay_of(const char *spec) {
+    json_t *m = msgs_of(spec);
+    ssize_t r = tr_tool_replay_start(m);
+    json_free(m);
+    return r;
+}
+
+static ssize_t turn_end_of(const char *spec) {
+    json_t *m = msgs_of(spec);
+    ssize_t r = tr_retryable_turn_end(m);
+    json_free(m);
+    return r;
+}
+
 int main(void) {
     /* isUnexpectedSocketCloseMessage */
     CHECK(aie_socket_close_text(SOCK));
@@ -199,6 +269,33 @@ int main(void) {
     CHECK(!tr_billing_cap_usage_limit(402, "A subscription is required for this endpoint"));
     CHECK(!tr_billing_cap_usage_limit(0, "503 service unavailable"));
     CHECK(!tr_billing_cap_usage_limit(0, NULL));
+
+    /* manual retry tail rules (agent-session-manual-retry.test.ts) */
+    CHECK(tail_of("ucea"));   /* Esc during tool execution: errored result right before the boundary */
+    CHECK(!tail_of("ucra"));  /* the tool completed; the abort only killed the next model call */
+    CHECK(!tail_of("ua"));    /* abort with no tool activity */
+    CHECK(tail_of("ufs"));    /* a stream that died mid-tool-call: synthetic results trail the failed turn */
+    CHECK(tail_of("uceaj"));  /* a background-job result folded in after the interrupt */
+    CHECK(!tail_of("ucerd")); /* a settled turn */
+    CHECK(turn_end_of("ufs") == 2 && turn_end_of("ucea") == 4 && turn_end_of("uceaj") == 4);
+    CHECK(turn_end_of("uf") == 2 && turn_end_of("ud") == -1 && turn_end_of("ucer") == -1);
+    CHECK(turn_end_of("ufk") == -1); /* a user-invoked /skill: prompt is conversation, not a trailing delivery */
+    CHECK(replay_of("ucea") == 2);   /* the failed batch, behind the aborted boundary */
+    CHECK(replay_of("uce") == 2);    /* a restored context without the boundary */
+    CHECK(replay_of("uceav") == 2);  /* eval snapshots go with the strip */
+    CHECK(replay_of("uceaj") == -1); /* a delivery stays in context: a fresh model call instead */
+    CHECK(replay_of("ufs") == -1);   /* placeholders anchor on the failed turn itself */
+    CHECK(replay_of("ucra") == -1);  /* a completed call never re-runs */
+    CHECK(replay_of("uCeEa") == 2 && replay_of("uCera") == -1 && replay_of("uCea") == -1);
+    CHECK(replay_of("ua") == -1 && replay_of("uf") == -1);
+    { /* a failed turn of its own calls is no boundary */
+        json_t *own = msgs_of("uce");
+        json_t *b = turn(NULL, "c");
+        json_set_str(b, "stopReason", "aborted");
+        json_push(own, b);
+        CHECK(tr_tool_replay_start(own) == -1);
+        json_free(own);
+    }
 
     if (fails) fprintf(stderr, "%d failure(s)\n", fails);
     return fails != 0;

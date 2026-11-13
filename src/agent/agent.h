@@ -108,7 +108,7 @@ typedef struct {
     const tool_result_t *result; /* tool_update (partial) / tool_end */
     bool is_error;
     const json_t *tool_results; /* turn_end: array of toolResult messages */
-    const json_t *messages;     /* agent_end: messages added in this run */
+    const json_t *messages;     /* agent_end: messages added in this run; agent_start: resumedToolCallIds (ids) */
 } agent_event_t;
 
 const char *agent_event_name(agent_event_type_t t);
@@ -193,6 +193,7 @@ struct agent {
     char *mcp_scope;                         /* this session's view of a shared MCP manager (NULL: the owner) */
     volatile sig_atomic_t mcp_tools_dirty;   /* an MCP call granted this session tools: re-register at the next boundary */
     volatile sig_atomic_t deliver_queued;    /* an empty Enter forced the queue into the continuation (see below) */
+    volatile sig_atomic_t abort_user;        /* the abort carries USER_INTERRUPT_LABEL (agent_abort_user) */
     bool running;
     json_t *streaming_message; /* borrowed while streaming */
     int max_turns;             /* 0 => unlimited */
@@ -222,6 +223,11 @@ int agent_prompt(agent_t *a, json_t *new_messages);
 /* Continue from current history without new messages (e.g., retry/resume). */
 int agent_continue(agent_t *a);
 void agent_abort(agent_t *a);
+/* session.abort({reason: USER_INTERRUPT_LABEL}): the user stopped the run (Esc, a cancelled ask form, RPC abort). The
+ * aborted assistant message reads "Interrupted by user" (errorId Flag.UserInterrupt) instead of the bare
+ * "Request was aborted". */
+void agent_abort_user(agent_t *a);
+#define AGENT_USER_INTERRUPT_LABEL "Interrupted by user"
 /* Abort the next model request of the running loop as an expected internal transition (omp
  * markPlanInternalAbortPending + abort): the aborted assistant message is stamped with
  * errorMessage "__omp.silent_abort__" so no abort line renders. */

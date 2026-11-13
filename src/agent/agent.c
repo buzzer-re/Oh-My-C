@@ -462,6 +462,9 @@ json_t *agent_event_to_json(const agent_event_t *ev) {
     json_t *o = json_obj();
     json_set_str(o, "type", agent_event_name(ev->type));
     switch (ev->type) {
+    case AGENT_EV_AGENT_START: /* agentLoopContinue: a resumed tool batch names its calls */
+        if (ev->messages) json_set(o, "resumedToolCallIds", json_clone(ev->messages));
+        break;
     case AGENT_EV_AGENT_END:
         json_set(o, "messages", ev->messages ? json_clone(ev->messages) : json_arr());
         break;
@@ -675,10 +678,15 @@ void agent_append_message(agent_t *a, json_t *msg) {
 }
 
 void agent_abort(agent_t *a) { a->cancel = 1; }
+void agent_abort_user(agent_t *a) {
+    a->abort_user = 1;
+    a->cancel = 1;
+}
 void agent_abort_next_silently(agent_t *a) { a->silent_abort_next = 1; }
 
 void agent_abort_deliver_queued(agent_t *a) {
     a->deliver_queued = 1;
+    a->abort_user = 1; /* abort({reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true}) */
     a->cancel = 1;
 }
 
@@ -920,6 +928,27 @@ static void add_message(agent_t *a, json_t *run_msgs, json_t *msg) {
     emit_message(a, AGENT_EV_MESSAGE_END, msg);
 }
 
+/* AIError.create(Flag.UserInterrupt) / create(Flag.Abort) (packages/ai/src/error/flags.ts; Class = 0x1000) */
+#define AIE_ID_USER_INTERRUPT (0x4000000 | 0x1000)
+#define AIE_ID_ABORT (0x8000000 | 0x1000)
+
+static void user_interrupt_label(json_t *msg) {
+    json_set_str(msg, "errorMessage", AGENT_USER_INTERRUPT_LABEL);
+    json_set_int(msg, "errorId", AIE_ID_USER_INTERRUPT);
+}
+
+/* agent-loop.ts endAbortedBeforeModel -> emitAbortedAssistantMessage(null): the run was aborted after a tool batch,
+ * before its next model call; an empty aborted assistant turn closes it (the "aborted boundary" that
+ * TurnRecovery.retry looks behind for the failed batch) */
+static json_t *aborted_boundary(agent_t *a) {
+    json_t *m = ai_error_message(a->model, "aborted", a->abort_user ? AGENT_USER_INTERRUPT_LABEL : "Request was aborted");
+    int64_t ts = json_get_int(m, "timestamp", now_ms());
+    json_del(m, "timestamp");
+    json_set_int(m, "errorId", a->abort_user ? AIE_ID_USER_INTERRUPT : AIE_ID_ABORT);
+    json_set_int(m, "timestamp", ts);
+    return m;
+}
+
 /* ---------- streaming ---------- */
 
 typedef struct {
@@ -1012,6 +1041,9 @@ static json_t *stream_assistant(agent_t *a, int *ttsr_abort, json_t **cursor_res
         json_set_int(msg, "errorId", 33558528);
     }
     if (silent) a->cancel = 0; /* internal transition: later side requests must not inherit the abort */
+    else if (a->abort_user && str_eq(json_get_str(msg, "stopReason"), "aborted") &&
+             (!json_get_str(msg, "errorMessage") || str_eq(json_get_str(msg, "errorMessage"), "Request was aborted")))
+        user_interrupt_label(msg); /* abortReasonText: the caller's reason, classified UserInterrupt */
     if (a->hooks.finalize_error && str_eq(json_get_str(msg, "stopReason"), "error")) a->hooks.finalize_error(a->hooks.ud, a, msg);
     if (!s.started) emit_message(a, AGENT_EV_MESSAGE_START, msg);
     if (!s.abort_requested && a->hooks.on_stream_delta) { /* the finished stream (loop guard flush) */
@@ -1494,13 +1526,59 @@ static json_t *failed_turn_results(agent_t *a, const json_t *assistant, const js
     return out;
 }
 
+/* agent-loop.ts unpairedToolCallTail: a continue whose history ends in an assistant turn with runnable tool calls
+ * (AgentSession.retry stripped the failed results of that batch) resumes by executing them. Owned clone or NULL. */
+static json_t *unpaired_tool_call_tail(agent_t *a) {
+    pthread_mutex_lock(&a->mu);
+    size_t n = json_len(a->messages);
+    const json_t *tail = n ? json_at(a->messages, n - 1) : NULL;
+    const char *stop = json_get_str(tail, "stopReason");
+    bool runnable = false;
+    if (str_eq(json_get_str(tail, "role"), "assistant") && (str_eq(stop, "toolUse") || str_eq(stop, "stop"))) {
+        const json_t *b;
+        json_arr_foreach(json_get_arr(tail, "content"), i, b) runnable |= str_eq(json_get_str(b, "type"), "toolCall");
+    }
+    json_t *r = runnable ? json_clone(tail) : NULL;
+    pthread_mutex_unlock(&a->mu);
+    return r;
+}
+
+/* endAbortedBeforeModel: the closing aborted turn of a run stopped between a tool batch and its next model call */
+static void end_aborted_before_model(agent_t *a, json_t *run_msgs) {
+    emit_simple(a, AGENT_EV_TURN_START);
+    json_t *m = aborted_boundary(a);
+    /* the errorId is the session's finalize at message_end: message_start carries the bare abort */
+    json_t *start = json_clone(m);
+    json_del(start, "errorId");
+    emit_message(a, AGENT_EV_MESSAGE_START, start);
+    json_free(start);
+    pthread_mutex_lock(&a->mu);
+    json_push(a->messages, m);
+    pthread_mutex_unlock(&a->mu);
+    json_push(run_msgs, json_clone(m));
+    emit_message(a, AGENT_EV_MESSAGE_END, m);
+    agent_event_t te = {.type = AGENT_EV_TURN_END, .message = m, .tool_results = NULL};
+    emit(a, &te);
+}
+
 static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
     a->running = true;
     a->cancel = 0;
+    a->abort_user = 0;
     a->run_started_mono = mono_ms();
     live_loops_add(1);
     json_t *run_msgs = json_arr();
-    emit_simple(a, AGENT_EV_AGENT_START);
+    json_t *resume = new_messages ? NULL : unpaired_tool_call_tail(a);
+    json_t *resumed_ids = NULL;
+    if (resume) {
+        resumed_ids = json_arr();
+        const json_t *b;
+        json_arr_foreach(json_get_arr(resume, "content"), i, b) if (str_eq(json_get_str(b, "type"), "toolCall"))
+            json_push(resumed_ids, json_str(json_get_str(b, "id") ? json_get_str(b, "id") : ""));
+    }
+    agent_event_t as = {.type = AGENT_EV_AGENT_START, .messages = resumed_ids};
+    emit(a, &as);
+    json_free(resumed_ids);
     json_t *m;
     /* agent-loop.ts runLoop: the first turn opens before its input messages are emitted */
     bool turn_open = false;
@@ -1520,7 +1598,23 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
     int turns = 0;
     int retry_attempt = 0;
     int paused_continuations = 0; /* MAX_PAUSED_TURN_CONTINUATIONS (agent-loop.ts) */
-    for (;;) {
+    bool stop_run = false;
+    if (resume) {
+        /* runLoop: run the resumed batch before the first model call; the loop then goes on with its fresh results */
+        if (!turn_open) emit_simple(a, AGENT_EV_TURN_START);
+        turn_open = false;
+        json_t *results = json_arr();
+        execute_tools(a, run_msgs, resume, results, NULL);
+        agent_event_t te = {.type = AGENT_EV_TURN_END, .message = resume, .tool_results = results};
+        emit(a, &te);
+        json_free(results);
+        json_free(resume);
+        if (a->cancel) {
+            end_aborted_before_model(a, run_msgs);
+            stop_run = true;
+        }
+    }
+    while (!stop_run) {
         if (a->hooks.before_model_call && a->hooks.before_model_call(a->hooks.ud, a)) break;
         pause_park(a); /* the turn boundary: park while /pause holds the process */
         if (!turn_open) emit_simple(a, AGENT_EV_TURN_START);
@@ -1626,6 +1720,7 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
         emit(a, &te);
         json_free(results);
         turns++;
+        if (!failed && has_tools && a->cancel) end_aborted_before_model(a, run_msgs); /* the batch was stopped */
         if (failed || a->cancel) break;
         if (a->max_turns && turns >= a->max_turns) break;
         json_t *steer = take_queue(a, &a->steering), *asides = take_asides(a);

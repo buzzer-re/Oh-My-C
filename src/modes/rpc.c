@@ -2853,7 +2853,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         else agent_follow_up(a->agent, m);
         respond(r, id, type, true, NULL, NULL);
     } else if (!strcmp(type, "abort")) {
-        agent_abort(a->agent);
+        agent_abort_user(a->agent); /* session.abort({reason: USER_INTERRUPT_LABEL}) */
         respond(r, id, type, true, NULL, NULL);
     } else if (!strcmp(type, "goal")) {
         const char *op = json_get_str(cmd, "op");

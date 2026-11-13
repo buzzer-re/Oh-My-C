@@ -1819,6 +1819,7 @@ static void loader_visible(ui_t *u, bool on) {
 }
 
 void ui_working_start(ui_t *u) {
+    u->retry_hint = false; /* the loader takes the status row (disposeChildren) */
     working_t *w = (working_t *)u->working;
     if (w) {
         w->mode = 0;
@@ -1844,6 +1845,7 @@ void ui_working_set_message(ui_t *u, const char *message) {
 }
 
 void ui_working_compaction(ui_t *u, const char *label) {
+    u->retry_hint = false; /* the loader takes the status row (disposeChildren) */
     working_t *w = (working_t *)u->working;
     if (!w) return;
     free(w->compaction_label);
@@ -1855,6 +1857,7 @@ void ui_working_compaction(ui_t *u, const char *label) {
 }
 
 void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms) {
+    u->retry_hint = false; /* the loader takes the status row (disposeChildren) */
     working_t *w = (working_t *)u->working;
     if (!w) return;
     w->mode = 2;
@@ -2255,5 +2258,7 @@ void ui_chat_rebuild(ui_t *u) {
         ui_recap_invalidate();
         ui_signals_session_start();
     }
+    ui_sync_retry_hint(u); /* renderInitialMessages: resume, /tree, session switch */
+    toolcard_prior_reset(u);
     tui_request_full_render(u->tui);
 }

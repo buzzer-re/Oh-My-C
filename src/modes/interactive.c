@@ -135,9 +135,11 @@ static void ui_apply_event(void *ud) {
         break;
     case AGENT_EV_TOOL_START: {
         ui_signals_tool_start(e->id, e->name, e->args);
+        if (!hmap_get(&u->tools, e->id)) toolcard_prior_evict(u, e->id);
         msgview_t *v = toolcard_start(u, e->id, e->name, e->args ? e->args : json_obj());
         e->args = NULL;
         hmap_put(&u->tools, e->id, v);
+        toolcard_run_track(e->id, v);
         ui_tool_started(u, e->id);
         break;
     }
@@ -167,6 +169,7 @@ static void ui_apply_event(void *ud) {
     case AGENT_EV_AGENT_END:
         ui_signals_agent_end(e->msg); /* settled when the worker ends (worker_done) */
         ui_working_stop(u);
+        toolcard_run_end();
         /* a run that only waits on background jobs keeps its activity window (markActivityEnd runs at the settle) */
         u->async_hold = !u->view && app_pending_async_work(u->app) &&
                         !str_eq(json_get_str(last_assistant(u->app->agent->messages), "stopReason"), "aborted");
@@ -477,6 +480,7 @@ static void worker_done(void *ud) {
         ui_chrome_turn(u, false);
         u->async_hold = false;
     }
+    ui_sync_retry_hint(u); /* #finishAgentEnd: a turn that died on a tool call offers F5 */
     tui_request_render(u->tui);
 }
 
@@ -513,11 +517,11 @@ static void *worker_main(void *p) {
     return NULL;
 }
 
+static void retry_key(ui_t *u);
+
 static void *retry_main(void *p) {
     ui_t *u = p;
-    char *err = NULL;
-    if (app_retry(u->app, &err) != 0 && err) ui_notice(u, "warning", err);
-    free(err);
+    agent_continue(u->app->agent); /* app_retry_prepare already readied the context */
     tui_post(u->tui, worker_done, u);
     return NULL;
 }
@@ -645,7 +649,7 @@ void ix_resume(ui_t *u) {
          * place of the directive, else the continuation starts once the turn unwinds (iq_run_end) */
         if (agent_has_interruptible_input(u->app->agent)) agent_abort_deliver_queued(u->app->agent);
         else u->resume_pending = true;
-        app_abort(u->app);
+        app_abort_user(u->app);
         return;
     }
     char *m = prompt_preflight_error(u);
@@ -2664,11 +2668,7 @@ static bool handle_command_inner(ui_t *u, const char *line) {
     } else if (!strcmp(cmd, "branch")) { /* also /rewind (registry alias) */
         tc_rewind_open(u);
     } else if (!strcmp(cmd, "retry")) {
-        if (u->worker_running) add_notice(u, "warning", "The agent is already running.");
-        else {
-            u->worker_running = true;
-            if (pthread_create(&u->worker, NULL, retry_main, u) != 0) u->worker_running = false;
-        }
+        retry_key(u);
     } else if (!strcmp(cmd, "btw")) {
         /* a question that did not start comes back to an empty editor (runWithDetachedDraft restoreText) */
         if (!ui_btw_command(u, arg, NULL, NULL) && *arg && tui_editor_is_empty(u->editor))
@@ -2788,6 +2788,7 @@ static bool handle_command_inner(ui_t *u, const char *line) {
         ui_btw_dispose(u);
         app_new_session(a);
         ui_session_banner(u, "New session started");
+        ui_sync_retry_hint(u); /* clearTransientSessionUi */
     } else if (!strcmp(cmd, "resume")) {
         if (!*arg) ui_overlay_session(u);
         else {
@@ -3187,22 +3188,15 @@ static void register_prompt_actions(ui_t *u, tui_ac_default_t *ac) {
     u->editor->action_ud = u;
 }
 
-/* app.retry (handleRetry): retry a failed last turn, else "Nothing to retry" */
+/* app.retry (handleRetry) and the TUI's /retry: retry the failed last turn, else "Nothing to retry". The composer
+ * text is an unsent draft, not the request retry resends. */
 static void retry_key(ui_t *u) {
-    if (u->worker_running) return;
-    app_t *a = u->app;
-    pthread_mutex_lock(&a->agent->mu);
-    size_t n = json_len(a->agent->messages);
-    json_t *last = n ? json_at(a->agent->messages, n - 1) : NULL;
-    bool failed = last && str_eq(json_get_str(last, "role"), "assistant") &&
-                  (str_eq(json_get_str(last, "stopReason"), "error") || str_eq(json_get_str(last, "stopReason"), "aborted"));
-    pthread_mutex_unlock(&a->agent->mu);
-    if (!failed) {
+    if (u->worker_running || !app_retry_prepare(u->app)) {
         add_notice(u, "info", "Nothing to retry");
         return;
     }
-    /* composer text is an unsent draft, not the request retry resends */
-    handle_command(u, "/retry");
+    u->worker_running = true;
+    if (pthread_create(&u->worker, NULL, retry_main, u) != 0) u->worker_running = false;
 }
 
 /* #handleInlineMouse (tui.mouse): pointer motion moves the hover band over a HUD agent row, a left click
@@ -3458,7 +3452,8 @@ static void initial_prompt_cb(void *ud) {
 /* --restore: go on with the interrupted turn of the resumed session (AgentSession.restoreInterruptedTurn) */
 static void restore_cb(void *ud) {
     ui_t *u = ud;
-    if (u->worker_running || !app_restore_interrupted_turn(u->app)) return;
+    /* restoreInterruptedTurn: close the cut-off turn, then retry() it (a fully cut-off batch runs again) */
+    if (u->worker_running || !app_restore_interrupted_turn(u->app) || !app_retry_prepare(u->app)) return;
     u->worker_running = true;
     if (pthread_create(&u->worker, NULL, retry_main, u) != 0) u->worker_running = false;
 }
