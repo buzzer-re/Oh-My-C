@@ -723,6 +723,7 @@ static void h_retry(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res
         return;
     }
     out(rt, "Retrying the last failed turn.");
+    if (rt->agent_invoked) rt->agent_invoked(rt->ud);
     agent_continue(rt->app->agent);
     res->agent_invoked = true;
 }
@@ -1069,12 +1070,17 @@ static void h_dump(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res)
 }
 
 void slash_execute_text(app_t *a, const char *text, slash_output_fn output, void *ud, slash_result_t *res) {
+    slash_execute_text_ex(a, text, output, NULL, ud, res);
+}
+
+void slash_execute_text_ex(app_t *a, const char *text, slash_output_fn output, void (*agent_invoked)(void *ud), void *ud,
+                           slash_result_t *res) {
     memset(res, 0, sizeof *res);
     slash_parsed_t p;
     if (!slash_parse(text, &p)) return;
     const slash_cmd_t *c = slash_lookup(p.name);
     if (c && c->handle) { /* ACP dispatch does not gate on allowArgs */
-        slash_rt_t rt = {a, output, ud};
+        slash_rt_t rt = {a, output, ud, agent_invoked};
         res->kind = SLASH_CONSUMED;
         c->handle(&p, &rt, res);
     }

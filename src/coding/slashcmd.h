@@ -39,6 +39,7 @@ typedef struct {
     app_t *app;
     slash_output_fn output;
     void *ud;
+    void (*agent_invoked)(void *ud); /* a builtin is about to run an agent turn (/retry): the host may answer now */
 } slash_rt_t;
 
 typedef void (*slash_handle_fn)(const slash_parsed_t *cmd, slash_rt_t *rt, slash_result_t *res);
@@ -77,6 +78,9 @@ char *slash_format_description(const char *description, char *(*key_fmt)(const c
 /* executeAcpBuiltinSlashCommand: run a builtin's text-mode handler. res->kind == SLASH_NONE when no
  * builtin with a text handler matched (the caller sends the text as a prompt). */
 void slash_execute_text(app_t *a, const char *text, slash_output_fn output, void *ud, slash_result_t *res);
+/* the same, with `agent_invoked` called before a builtin starts its agent turn (RPC answers the prompt then) */
+void slash_execute_text_ex(app_t *a, const char *text, slash_output_fn output, void (*agent_invoked)(void *ud), void *ud,
+                           slash_result_t *res);
 void slash_result_free(slash_result_t *res);
 /* resolveSessionModelSelector (/switch, /prewalk): fuzzy ids, provider/id, @role, `:level`; the explicit level
  * selector in *level (owned or NULL) */
