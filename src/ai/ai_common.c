@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "ai.h"
 #include "provider_transport.h"
+#include "leaked_thinking.h"
 #include "coding/turn_recovery.h"
 
 #include <ctype.h>
@@ -447,7 +448,11 @@ json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_str
     const ai_model_t *outer = g_req_model;
     g_req_model = &t.model;
     g_req_status = 0;
-    json_t *r = ai_stream_guarded(fn, &t.model, ctx, &t.opts, cb, ud);
+    /* healLeakedThinking: leaked reasoning markup becomes thinking blocks live, except on official endpoints */
+    leaked_thinking_t *heal = ai_reaches_official_endpoint(&t.model) ? NULL : leaked_thinking_new(cb, ud);
+    json_t *r = heal ? leaked_thinking_finish(heal, ai_stream_guarded(fn, &t.model, ctx, &t.opts, leaked_thinking_cb, heal))
+                     : ai_stream_guarded(fn, &t.model, ctx, &t.opts, cb, ud);
+    leaked_thinking_free(heal);
     g_req_model = outer;
     if (g_req_status && str_eq(json_get_str(r, "stopReason"), "error") && !json_get(r, "errorStatus"))
         json_set_int(r, "errorStatus", g_req_status);

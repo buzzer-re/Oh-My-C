@@ -4,16 +4,17 @@
 typedef struct {
     const char *open, *close;
     bool fenced;
+    bool implied_open; /* chat templates prefill this opener, so a bare close can imply it */
 } tag_t;
 
 static const tag_t TAGS[] = {
-    {"<think>", "</think>", false},
-    {"<thinking>", "</thinking>", false},
-    {"<scratchpad>", "</scratchpad>", false},
-    {"```thinking\n", "```", true},
-    {"<|channel>thought\n", "<channel|>", false},
-    {"<|start|>assistant<|channel|>analysis<|message|>", "<|end|>", false},
-    {"<|channel|>analysis<|message|>", "<|end|>", false},
+    {"<think>", "</think>", false, true},
+    {"<thinking>", "</thinking>", false, false},
+    {"<scratchpad>", "</scratchpad>", false, false},
+    {"```thinking\n", "```", true, false},
+    {"<|channel>thought\n", "<channel|>", false, false},
+    {"<|start|>assistant<|channel|>analysis<|message|>", "<|end|>", false, false},
+    {"<|channel|>analysis<|message|>", "<|end|>", false, false},
 };
 /* longest delimiter (opens + the implied "</think>" close): a held tail must be shorter */
 #define MAX_DELIM 48
@@ -50,12 +51,12 @@ static int trailing_line_indent(const char *s, size_t n, int prior) {
 
 static void emit_text(out_t *o, const char *s, size_t n) {
     if (!n) return;
-    o->emit(o->ud, false, s, n);
+    o->emit(o->ud, THINK_HEAL_TEXT, s, n);
     o->h->line_indent = trailing_line_indent(s, n, o->h->line_indent);
 }
 
 static void emit_thinking(out_t *o, const char *s, size_t n) {
-    if (n) o->emit(o->ud, true, s, n);
+    if (n) o->emit(o->ud, THINK_HEAL_THINKING, s, n);
 }
 
 static void buf_consume(sb_t *b, size_t n) {
@@ -219,9 +220,9 @@ static bool fence_feed(think_heal_t *h, const char *s, size_t n, bool final, out
 
 /* ---------- ThinkingInbandScanner ---------- */
 
-enum { HIT_NONE, HIT_TAG, HIT_CODE, HIT_HOLD };
+enum { HIT_NONE, HIT_TAG, HIT_IMPLIED_CLOSE, HIT_CODE, HIT_HOLD };
 
-static int scan_visible(const char *b, size_t n, bool final, size_t *idx, const tag_t **tag, size_t *ticks) {
+static int scan_visible(const char *b, size_t n, bool final, bool implied, size_t *idx, const tag_t **tag, size_t *ticks) {
     size_t hold_from = final ? n : (n + 1 > MAX_DELIM ? n + 1 - MAX_DELIM : 0);
     for (size_t i = 0; i < n; i++) {
         char c = b[i];
@@ -233,10 +234,20 @@ static int scan_visible(const char *b, size_t n, bool final, size_t *idx, const 
                 return HIT_TAG;
             }
         }
+        if (implied) {
+            for (size_t t = 0; t < ARRAY_LEN(TAGS); t++) {
+                if (TAGS[t].implied_open && starts_at(b, n, i, TAGS[t].close)) {
+                    *idx = i;
+                    *tag = &TAGS[t];
+                    return HIT_IMPLIED_CLOSE;
+                }
+            }
+        }
         if (i >= hold_from) {
             size_t rl = n - i;
             for (size_t t = 0; t < ARRAY_LEN(TAGS); t++) {
-                if (strlen(TAGS[t].open) > rl && memcmp(TAGS[t].open, b + i, rl) == 0) {
+                if ((strlen(TAGS[t].open) > rl && memcmp(TAGS[t].open, b + i, rl) == 0) ||
+                    (implied && TAGS[t].implied_open && strlen(TAGS[t].close) > rl && memcmp(TAGS[t].close, b + i, rl) == 0)) {
                     *idx = i;
                     return HIT_HOLD;
                 }
@@ -380,7 +391,7 @@ static void consume(think_heal_t *h, bool final, out_t *o) {
         }
         size_t idx = 0, ticks = 0;
         const tag_t *tag = NULL;
-        int kind = scan_visible(h->buf.s, h->buf.len, final, &idx, &tag, &ticks);
+        int kind = scan_visible(h->buf.s, h->buf.len, final, h->implied_open, &idx, &tag, &ticks);
         if (kind == HIT_NONE) {
             emit_text(o, h->buf.s, h->buf.len);
             sb_clear(&h->buf);
@@ -390,6 +401,11 @@ static void consume(think_heal_t *h, bool final, out_t *o) {
         if (kind == HIT_HOLD) {
             buf_consume(&h->buf, idx);
             break;
+        }
+        if (kind == HIT_IMPLIED_CLOSE) {
+            buf_consume(&h->buf, idx + strlen(tag->close));
+            o->emit(o->ud, THINK_HEAL_IMPLIED_END, NULL, 0);
+            continue;
         }
         if (kind == HIT_CODE) {
             bool fenced = ticks >= 3 && h->line_indent >= 0 && h->line_indent <= 3;

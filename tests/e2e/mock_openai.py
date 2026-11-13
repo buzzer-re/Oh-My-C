@@ -9,6 +9,7 @@ Display commands (used by tests/tui/compare.sh to exercise transcript views):
   - "slow:<secs>:<text>"     wait <secs> (loader visible), then stream <text> slowly
   - "fail:<status>:<msg>"    reply with an HTTP error (non-retryable for 400/401/403/404)
   - "streamfail:<text>"      stream <text>, then an in-stream error chunk
+  - "chunks:<JSON list>"     one content delta per string as is (a ["r", <text>] item is a reasoning_content delta)
   - "seq:[[tool, args], ...]" one tool call per turn, in order, then the usual "Tool said:" answer
   - "batch:[[tool, args], ...]" all the tool calls in one assistant message, then the usual "Tool said:" answer
   - model "mock-flaky"        every request fails with HTTP 429 (retry fallback chains)
@@ -292,6 +293,12 @@ class H(BaseHTTPRequestHandler):
                 name, args = tname, json.loads(a or "{}")
             elif kind == "seq":
                 name, args = json.loads(rest)[0]
+            elif kind == "chunks":  # chunks:<JSON list>: each string is one content delta; ["r", s] a reasoning_content one
+                for c in json.loads(rest):
+                    delta = {"reasoning_content": c[1]} if isinstance(c, list) else {"content": c}
+                    chunks.append({**base, "choices": [{"index": 0, "delta": delta}]})
+                chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+                name = None
             elif kind == "say":
                 for w in rest.split(" "):
                     chunks.append({**base, "choices": [{"index": 0, "delta": {"content": w + " "}}]})

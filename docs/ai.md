@@ -92,7 +92,8 @@ token budgets for budget-style APIs (overridable with the `thinkingBudgets` sett
 1. runs `ai_transport_prepare()` (`provider_transport.c`), the provider-owned shaping step that
    turns structured credentials into the bearer, base URL and headers (see below);
 2. looks up the function by `model->api` and calls it through `ai_stream_guarded()`
-   (`stream_guard.c`, below);
+   (`stream_guard.c`, below), with its events and final message passed through the leaked-thinking
+   projector (`leaked_thinking.c`, below) unless the request reaches the model's official endpoint;
 3. lets the transport post-process the result (`ai_transport_finish`).
 
 `ai_stream_guarded()` wraps every provider call:
@@ -115,6 +116,35 @@ token budgets for budget-style APIs (overridable with the `thinkingBudgets` sett
 
 `ai_complete()` is the non-streaming wrapper used for one-shot side requests: titles, compaction
 summaries, judges, the advisor and memory extraction.
+
+### Leaked reasoning markup (`leaked_thinking.c`, `think_heal.c`)
+
+Some models put their reasoning idioms into the visible text instead of a reasoning field: ` ```thinking `
+fences, `<think>`, `<thinking>`, `<scratchpad>`, Gemma `<|channel>thought` and Harmony analysis channels.
+Healing happens at two levels, as in omp:
+
+- **Provider level** (`StreamMarkupHealing`): the chat-completions and Ollama providers feed the visible
+  content through `think_heal.c` (omp's `ThinkingInbandScanner`) when the model's compat sets
+  `streamMarkupHealingPattern` (every chat-completions model except the official OpenAI endpoint; Ollama
+  always), and so does Cloud Code Assist. Healed reasoning becomes a thinking block (chat completions marks
+  it, like every reasoning-field block, `summary: false`: the model's own trace). Once a reasoning field
+  (`reasoning_content`, Ollama `thinking`, Mistral thinking parts) has streamed, thinking the healer
+  recovers from the content is dropped. Only the thinking scanner is ported: the Kimi, DeepSeek DSML and
+  Qwen in-band tool-call grammars of the `kimi`/`dsml`/`qwen` patterns are not.
+- **Central** (`wrapLeakedThinkingStream`, `healLeakedThinking`): `ai_stream()` re-projects every
+  provider's stream unless `ai_reaches_official_endpoint()` (omp `reachesOfficialEndpoint`: compat
+  `officialEndpoint`, and for a first-party Anthropic model the request-time base URL, `ANTHROPIC_BASE_URL`
+  included, is `https://api.anthropic.com`). The projector owns the message: it feeds visible text deltas
+  through `think_heal.c` with implied opens, opens and closes its own text/thinking blocks with its own
+  content indexes, forwards native thinking (signature and `summary` adopted from the source block, its
+  `thinking_end` held until the source's) and tool calls (fields assigned like `Object.assign`), and
+  rebuilds the final content ordered by source position. A bare `</think>` (DeepSeek-R1 / Qwen3-Thinking
+  templates prefill the opener) turns the leading text block, when it is the message's only content and
+  not blank, into a closed thinking block at the same index (`text_end`, then `thinking_start` /
+  `thinking_delta` / `thinking_end` at index 0); anywhere else the stray tag is dropped. A signed thinking
+  block that never streamed is still projected; blocks no event announced (`redactedThinking`) are left
+  out, and an error with empty content passes through untouched. Healing is idempotent, so a stream
+  already healed by its provider passes through.
 
 ### Stream events
 
@@ -179,9 +209,7 @@ Points worth knowing per provider:
 - **Transcript dialects** (`dialect.c`): each dialect's `renderTranscript` and
   `serializeConversationForSummary`, used for compaction and branch-summary input (not for in-band tool
   calls).
-- **Leaked reasoning markup** (`<think>`, `<thinking>`, `<scratchpad>`, Gemini thinking fences,
-  Gemma/Harmony channels) is re-routed into thinking blocks by `think_heal.c` for the Cloud Code
-  Assist wire.
+- **Leaked reasoning markup**: see "Leaked reasoning markup" above.
 - **Schema normalization** for Google wires (`google_schema.c`) strips unsupported JSON Schema
   keywords and rewrites legacy `parameters` for Claude-on-CCA, porting
   `ai/src/utils/schema/*`.

@@ -587,9 +587,9 @@ typedef struct {
     const char *sig;
 } heal_ud_t;
 
-static void heal_emit(void *ud, bool thinking, const char *t, size_t n) {
+static void heal_emit(void *ud, int kind, const char *t, size_t n) {
     heal_ud_t *h = ud;
-    if (thinking) {
+    if (kind == THINK_HEAL_THINKING) {
         thinking_delta(h->s, t, n);
     } else {
         aib_text_delta(&h->s->b, t, n);

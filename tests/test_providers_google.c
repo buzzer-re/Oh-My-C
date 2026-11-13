@@ -797,14 +797,16 @@ typedef struct {
     sb_t text, thinking;
 } heal_rec_t;
 
-static void heal_cb(void *ud, bool thinking, const char *s, size_t n) {
+static void heal_cb(void *ud, int kind, const char *s, size_t n) {
     heal_rec_t *r = ud;
-    sb_appendn(thinking ? &r->thinking : &r->text, s, n);
+    if (kind == THINK_HEAL_IMPLIED_END) sb_append(&r->text, "[implied]");
+    else sb_appendn(kind == THINK_HEAL_THINKING ? &r->thinking : &r->text, s, n);
 }
 
-static void heal(const char *const *chunks, const char *want_text, const char *want_thinking) {
+static void heal_mode(bool implied, const char *const *chunks, const char *want_text, const char *want_thinking) {
     think_heal_t h;
     think_heal_init(&h);
+    h.implied_open = implied;
     heal_rec_t r = {SB_INIT, SB_INIT};
     for (size_t i = 0; chunks[i]; i++) think_heal_feed(&h, chunks[i], strlen(chunks[i]), heal_cb, &r);
     think_heal_flush(&h, heal_cb, &r);
@@ -813,6 +815,10 @@ static void heal(const char *const *chunks, const char *want_text, const char *w
     think_heal_free(&h);
     sb_free(&r.text);
     sb_free(&r.thinking);
+}
+
+static void heal(const char *const *chunks, const char *want_text, const char *want_thinking) {
+    heal_mode(false, chunks, want_text, want_thinking);
 }
 
 static void test_think_heal(void) {
@@ -824,6 +830,12 @@ static void test_think_heal(void) {
     heal((const char *[]){"```c\n<think>x</think>\n```\n", NULL}, "```c\n<think>x</think>\n```\n", "");
     heal((const char *[]){"<thinking>unterminated", NULL}, "", "unterminated");
     heal((const char *[]){"a <", NULL}, "a <", "");
+    /* implied opens (the central projector): a bare </think> is reported, split across chunks too */
+    heal((const char *[]){"plan</think>answer", NULL}, "plan</think>answer", "");
+    heal_mode(true, (const char *[]){"plan</th", "ink>answer", NULL}, "plan[implied]answer", "");
+    heal_mode(true, (const char *[]){"plan</thinking>answer", NULL}, "plan</thinking>answer", "");
+    heal_mode(true, (const char *[]){"<think>a</think>b", NULL}, "b", "a");
+    heal_mode(true, (const char *[]){"x </th", NULL}, "x </th", "");
 }
 
 /* ====================================================================== CCA schema */
