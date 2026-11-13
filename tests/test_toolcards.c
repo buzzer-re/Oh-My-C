@@ -373,7 +373,7 @@ int main(void) {
     }
     /* replayed transcripts (tests/tui/specs) against omp captures; lsp1 hover / cells error highlighting differ in
      * token colors (omc's highlighter vs syntect), so those specs avoid such tokens or are compared via lsp2 only */
-    static const char *const SPECS[] = {"ws", "goal", "find", "ast", "debug", "task", "wait", "lsp2", "github", "ghwatch"};
+    static const char *const SPECS[] = {"ws", "goal", "find", "ast", "ask", "debug", "task", "wait", "lsp2", "github", "ghwatch"};
     for (size_t i = 0; i < ARRAY_LEN(SPECS); i++) run_spec(SPECS[i]);
     /* omp ec06d26987: the ask card draws the HTML form (pending) and each field's question over its answer. The
      * spec_ask capture predates HTML forms (recapture pending against omp 18.18.6), so check the shapes here. */
