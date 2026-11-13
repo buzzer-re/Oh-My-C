@@ -1,8 +1,10 @@
 /*
  * provider_ollama.c - Ollama native chat (api "ollama-chat"): POST {base}/api/chat, NDJSON stream.
- * Port of packages/ai/src/providers/ollama.ts (without leaked-markup healing).
+ * Port of packages/ai/src/providers/ollama.ts. Leaked-markup healing runs only its ThinkingInbandScanner (the kimi/dsml
+ * tool-call grammars of StreamMarkupHealing are not ported).
  */
 #include "ai/provider_openai.h"
+#include "ai/think_heal.h"
 
 #include <math.h>
 
@@ -196,13 +198,22 @@ struct ollama_stream {
     char *stop;
     char *error;
     bool done;
+    think_heal_t heal;             /* StreamMarkupHealing over message.content */
+    bool suppress_healed_thinking; /* native message.thinking seen: drop thinking the healer recovers */
 };
 
 ollama_stream_t *ollama_stream_new(const ai_model_t *m, ai_event_cb cb, void *ud) {
     ollama_stream_t *s = xcalloc(1, sizeof(*s));
     s->m = m;
     aib_init(&s->b, m, cb, ud);
+    think_heal_init(&s->heal);
     return s;
+}
+
+static void heal_emit(void *ud, int kind, const char *t, size_t n) {
+    ollama_stream_t *s = ud;
+    if (kind == THINK_HEAL_TEXT) aib_text_delta(&s->b, t, n);
+    else if (kind == THINK_HEAL_THINKING && !s->suppress_healed_thinking) aib_thinking_delta(&s->b, t, n);
 }
 
 static int handle_chunk(ollama_stream_t *s, const char *line, size_t len) {
@@ -223,9 +234,12 @@ static int handle_chunk(ollama_stream_t *s, const char *line, size_t len) {
     }
     json_t *msg = json_get_obj(j, "message");
     json_t *th = json_get(msg, "thinking");
-    if (json_is_str(th) && th->u.str.len) aib_thinking_delta(&s->b, th->u.str.s, th->u.str.len);
+    if (json_is_str(th) && th->u.str.len) {
+        s->suppress_healed_thinking = true;
+        aib_thinking_delta(&s->b, th->u.str.s, th->u.str.len);
+    }
     json_t *c = json_get(msg, "content");
-    if (json_is_str(c) && c->u.str.len) aib_text_delta(&s->b, c->u.str.s, c->u.str.len);
+    if (json_is_str(c) && c->u.str.len) think_heal_feed(&s->heal, c->u.str.s, c->u.str.len, heal_emit, s);
     json_t *call;
     json_arr_foreach(json_get_arr(msg, "tool_calls"), i, call) {
         json_t *fn = json_get_obj(call, "function");
@@ -248,6 +262,8 @@ static int handle_chunk(ollama_stream_t *s, const char *line, size_t len) {
         }
     }
     if (json_get_bool(j, "done", false)) {
+        think_heal_flush(&s->heal, heal_emit, s);
+        aib_end_block(&s->b);
         s->done = true;
         const char *dr = json_get_str(j, "done_reason");
         const char *stop = "stop";
@@ -297,6 +313,7 @@ static bool visible(const json_t *content) {
 
 json_t *ollama_stream_finish(ollama_stream_t *s, int rc, const char *terr) {
     if (rc == 0 && s->line.len) handle_chunk(s, sb_cstr(&s->line), s->line.len);
+    if ((rc == 0 || rc == OAI_STREAM_STOP) && !s->error) think_heal_flush(&s->heal, heal_emit, s);
     const char *stop = s->stop ? s->stop : "stop";
     const char *err = NULL;
     if (rc == -2) {
@@ -316,6 +333,7 @@ json_t *ollama_stream_finish(ollama_stream_t *s, int rc, const char *terr) {
     }
     json_t *msg = aib_finish(&s->b, stop, err);
     sb_free(&s->line);
+    think_heal_free(&s->heal);
     free(s->stop);
     free(s->error);
     aib_free(&s->b);

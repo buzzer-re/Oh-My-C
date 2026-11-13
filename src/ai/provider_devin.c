@@ -702,7 +702,9 @@ static void handle_response(dstream_t *s, const json_t *msg) {
     json_t *th = json_get(msg, "deltaThinking");
     if (json_is_str(th) && th->u.str.len) {
         s->got_token = true;
+        bool fresh = s->b.cur_kind != 2;
         aib_thinking_delta(&s->b, th->u.str.s, th->u.str.len);
+        if (fresh) json_set_bool(json_at(json_get(s->b.msg, "content"), (size_t)s->b.cur_index), "summary", false);
         const char *sig = json_get_str(msg, "deltaSignature");
         if (sig && *sig) aib_set_thinking_signature(&s->b, sig);
     }

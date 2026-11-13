@@ -5,6 +5,7 @@
  */
 #include "ai/compat_detect.h"
 #include "ai/provider_openai.h"
+#include "ai/think_heal.h"
 
 #include <math.h>
 
@@ -1172,12 +1173,20 @@ struct oaic_stream {
     char *finish_err;
     char *error;
     bool finished, done, saw_usage, has_response_id;
+    /* StreamMarkupHealing over the visible content when compat.streamMarkupHealingPattern is set (only its
+     * ThinkingInbandScanner: the kimi/dsml/qwen tool-call grammars are not ported) */
+    think_heal_t *heal;
+    bool suppress_healed_thinking; /* explicit reasoning seen: drop thinking the healer recovers */
 };
 
 oaic_stream_t *oaic_stream_new(const ai_model_t *m, ai_event_cb cb, void *ud) {
     oaic_stream_t *s = xcalloc(1, sizeof(*s));
     s->m = m;
     aib_init(&s->b, m, cb, ud);
+    if (json_is_str(model_compat_get(m, "streamMarkupHealingPattern"))) {
+        s->heal = xmalloc(sizeof(*s->heal));
+        think_heal_init(s->heal);
+    }
     return s;
 }
 
@@ -1232,6 +1241,21 @@ static void thinking_delta(oaic_stream_t *s, const char *t, size_t n, const char
     bool fresh = s->b.cur_kind != 2;
     aib_thinking_delta(&s->b, t, n);
     if (fresh && sig) aib_set_thinking_signature(&s->b, sig);
+    /* openThinkingBlock: chat-completions reasoning is the model's own trace */
+    if (fresh) json_set_bool(json_at(s_content(s), (size_t)s->b.cur_index), "summary", false);
+}
+
+static void heal_emit(void *ud, int kind, const char *t, size_t n) {
+    oaic_stream_t *s = ud;
+    if (kind == THINK_HEAL_TEXT) aib_text_delta(&s->b, t, n);
+    else if (kind == THINK_HEAL_THINKING && !s->suppress_healed_thinking) thinking_delta(s, t, n, NULL);
+}
+
+/* visible content: through the healer when one is configured */
+static void visible_text(oaic_stream_t *s, const char *t, size_t n) {
+    if (!n) return;
+    if (s->heal) think_heal_feed(s->heal, t, n, heal_emit, s);
+    else aib_text_delta(&s->b, t, n);
 }
 
 static oaic_tc_t *tc_find_id(oaic_stream_t *s, const char *id) {
@@ -1312,7 +1336,7 @@ static void handle_tool_calls(oaic_stream_t *s, json_t *calls) {
 
 static void handle_content_value(oaic_stream_t *s, json_t *content) {
     if (json_is_str(content)) {
-        aib_text_delta(&s->b, content->u.str.s, content->u.str.len);
+        visible_text(s, content->u.str.s, content->u.str.len);
         return;
     }
     json_t *part;
@@ -1320,13 +1344,15 @@ static void handle_content_value(oaic_stream_t *s, json_t *content) {
         const char *t = json_get_str(part, "type");
         if (str_eq(t, "text")) {
             json_t *tx = json_get(part, "text");
-            if (json_is_str(tx)) aib_text_delta(&s->b, tx->u.str.s, tx->u.str.len);
+            if (json_is_str(tx)) visible_text(s, tx->u.str.s, tx->u.str.len);
         } else if (str_eq(t, "thinking")) {
             json_t *inner;
             json_arr_foreach(json_get(part, "thinking"), j, inner) {
                 json_t *tx = json_get(inner, "text");
-                if (str_eq(json_get_str(inner, "type"), "text") && json_is_str(tx))
+                if (str_eq(json_get_str(inner, "type"), "text") && json_is_str(tx) && tx->u.str.len) {
                     thinking_delta(s, tx->u.str.s, tx->u.str.len, "mistral-content-parts");
+                    s->suppress_healed_thinking = true;
+                }
             }
         }
     }
@@ -1397,6 +1423,7 @@ int oaic_stream_on_sse(void *ud, const char *event, const char *data, size_t len
             json_t *v = json_get(delta, fields[i]);
             if (json_is_str(v) && v->u.str.len) {
                 thinking_delta(s, v->u.str.s, v->u.str.len, fields[i]);
+                s->suppress_healed_thinking = true;
                 break;
             }
         }
@@ -1433,6 +1460,10 @@ static void free_stream(oaic_stream_t *s) {
     free(s->stop);
     free(s->finish_err);
     free(s->error);
+    if (s->heal) {
+        think_heal_free(s->heal);
+        free(s->heal);
+    }
     aib_free(&s->b);
     free(s);
 }
@@ -1449,6 +1480,8 @@ static bool has_visible(const json_t *content) {
 }
 
 json_t *oaic_stream_finish(oaic_stream_t *s, int rc, const char *terr) {
+    /* held-back healer fragments flush once the stream completed (a thrown stream error skips this upstream) */
+    if (s->heal && (rc == 0 || rc == OAI_STREAM_STOP) && !s->error) think_heal_flush(s->heal, heal_emit, s);
     aib_end_block(&s->b);
     /* authoritative tool arguments from the per-call accumulators */
     for (size_t i = 0; i < s->tcs.n; i++) {
