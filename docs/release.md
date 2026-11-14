@@ -26,8 +26,9 @@ Pushing a tag `v<OMC_VERSION>` (for example `v18.18.7`) publishes a GitHub relea
 and the source:
 
 1. `prepare` checks the tag against `OMC_VERSION` and creates a **draft** release, with notes from
-   `build-tools/release_notes.sh <version>`: install steps plus the `## omp v<version> update` section of
-   [status.md](status.md), which must exist. It refuses to overwrite an existing release.
+   `build-tools/release_notes.sh <version>`: `docs/releases/v<version>.md` when it exists (hand-written for readers,
+   one line per paragraph since GitHub keeps line breaks in release text), otherwise install steps plus the
+   `## omp v<version> update` section of [status.md](status.md), which must then exist. It refuses to overwrite an existing release.
 2. `build` runs on Linux x86_64 (`ubuntu-22.04`), Linux arm64 (`ubuntu-22.04-arm`) and macOS arm64 (`macos-15`): the CI
    steps, then `build-tools/ci.sh dist` (`make dist`: the binary, README and omp's license notice in
    `omc-<version>-<os>-<arch>.tar.gz`, smoke-tested as packaged) and uploads the archive with its `.sha256`. The

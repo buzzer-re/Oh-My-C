@@ -1,10 +1,16 @@
 #!/bin/sh
-# Release notes for omc v<version>: what this build matches, how to install it, and the matching update section of
-# docs/status.md. Used by .github/workflows/release.yml; run it locally to preview.
+# Release notes for omc v<version>. Used by .github/workflows/release.yml; run it locally to preview.
+# docs/releases/v<version>.md, when it exists, is the whole release body (hand-written, one line per paragraph:
+# GitHub keeps line breaks in release text). Otherwise the notes are generated: what this build matches, how to
+# install it, and the matching update section of docs/status.md.
 # Usage: build-tools/release_notes.sh <version>
 set -eu
 cd "$(dirname "$0")/.."
 V=${1:?usage: release_notes.sh <version>}
+if [ -f "docs/releases/v$V.md" ]; then
+    cat "docs/releases/v$V.md"
+    exit 0
+fi
 SECTION=$(awk -v h="## omp v$V update" '
     index($0, h) == 1 { on = 1; next }
     on && /^## / { exit }
