@@ -17,23 +17,17 @@ It also solved another problem for me: I don't have to install Bun or any other 
 
 ## Installing
 
-There are no prebuilt binaries: each release on GitHub ships the source (`omc-<version>.tar.gz` with a `SHA256SUMS` file), and you build it on your own machine. omc's version is the omp release it matches, so `omc v18.18.7` behaves like `omp v18.18.7`.
+Each release on GitHub has prebuilt binaries for Linux (x86_64 and arm64) and macOS (Apple silicon), the source, and a `SHA256SUMS` file. omc's version is the omp release it matches, so `omc v18.18.7` behaves like `omp v18.18.7`.
 
-The quick way downloads the latest release, checks it against `SHA256SUMS`, builds it and installs it into `~/.local/bin`:
+The quick way picks the right binary for your system, checks it against `SHA256SUMS` and installs it into `~/.local/bin`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.sh | sh
 ```
 
-Set `OMC_VERSION=18.18.7` for a specific release, or `OMC_INSTALL_DIR` for another directory. You need the same things as in [Building](#building) below. If you prefer to do it by hand:
+If you prefer to build it on your own machine, pass `--build` (`... | sh -s -- --build`, or `./install.sh --build`). It downloads the release's source instead and builds it, so you need the same things as in [Building](#building) below. Set `OMC_VERSION=18.18.7` for a specific release, or `OMC_INSTALL_DIR` for another directory.
 
-```sh
-sha256sum -c SHA256SUMS      # on macOS: shasum -a 256 -c SHA256SUMS
-tar -xzf omc-18.18.7.tar.gz && cd omc-18.18.7
-make && make install
-```
-
-See [docs/release.md](docs/release.md) for how releases are made.
+The Linux binaries use your system's OpenSSL 3, and the macOS one has it built in. The macOS binary isn't notarized, so if you downloaded it with a browser, run `xattr -d com.apple.quarantine omc` once. See [docs/release.md](docs/release.md) for how releases are made.
 
 ## Building
 
