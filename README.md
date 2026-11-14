@@ -18,7 +18,7 @@ It also solved another problem for me: I don't have to install Bun or any other 
 
 ## Installing
 
-Each release on GitHub has prebuilt binaries for Linux (x86_64 and arm64) and macOS (Apple silicon), plus the source and a `SHA256SUMS` file. omc's version is the omp release it matches, so `omc v18.18.7` behaves like `omp v18.18.7`.
+mc's version is the omp release it matches, so `omc v18.18.7` behaves like `omp v18.18.7`.
 
 The quick way picks the right binary for your system, checks it against `SHA256SUMS` and installs it into `~/.local/bin`:
 
@@ -33,9 +33,6 @@ curl -fsSL https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.sh |
 ./install.sh --build                # the same, from a clone
 ```
 
-To pin a release or install somewhere else, set `OMC_VERSION` or `OMC_INSTALL_DIR`, e.g. `curl ... | OMC_VERSION=18.18.7 sh`.
-
-The Linux binaries use your system's OpenSSL 3, and the macOS one has it built in, so you don't need Homebrew to run it. It isn't notarized, though: if you downloaded it with a browser, run `xattr -d com.apple.quarantine omc` once. See [docs/release.md](docs/release.md) for how releases are made.
 
 ## Building
 
