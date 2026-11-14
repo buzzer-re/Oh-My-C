@@ -5,9 +5,10 @@
 # think (no `enable_thinking: false`) slower (MOCK_THINK_SECS). Pins what omp v18.14.2 sends: the detected Qwen
 # compat (enable_thinking / preserve_thinking, no store, no reasoning_effort), skill-description compression with
 # thinking off and plain-string content, the request order, and the first request's size (omc must never send
-# more than omp: FR_OMP_BYTES is omp's size for this exact setup, measured with first_request_check.py size).
+# more than omp: FR_OMP_BYTES is omp's size for this exact setup, measured with first_request_check.py size; omp
+# 18.18.7 on Linux arm64).
 FRPORT=$((PORT + 31))
-FR_OMP_BYTES=30572
+FR_OMP_BYTES=31908
 mkdir -p "$T/fragent" "$T/frhome" "$T/frwork/.omp/skills/deploy" "$T/frwork/.omp/skills/db-migrate"
 cat > "$T/fragent/models.yml" <<YML
 providers:

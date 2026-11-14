@@ -188,13 +188,15 @@ static size_t match_sig_desc(const char *p, const char *end) {
     return best;
 }
 
-/* `Desc<pad to 27>[(core dumped) ]cmd` from p to the line end */
+/* `Desc<pad>[(core dumped) ]cmd` from p to the line end: bash 5.2+ pads the description to 27 columns, bash 5.1
+ * (Ubuntu 22.04) to 24 (`%-24s`); a description that fills the column gets one space */
 static bool match_job_status(const char *p, const char *end) {
     size_t n = match_sig_desc(p, end);
     if (!n) return false;
     const char *q = p + n;
     while (q < end && *q == ' ') q++;
-    return q - p >= 27 || (q - p == (ptrdiff_t)n + 1 && n >= 26);
+    ptrdiff_t w = q - p;
+    return w >= 27 || w == 24 || (w == (ptrdiff_t)n + 1 && n >= 23);
 }
 
 static size_t digits(const char *p, const char *end) {

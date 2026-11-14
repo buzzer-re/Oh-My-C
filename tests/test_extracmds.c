@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <zlib.h>
+#include <unistd.h> /* mkdtemp: <unistd.h> on macOS, <stdlib.h> on glibc */
 
 char *ui_debug_terminal_state(int cols, int rows, bool sync_output); /* modes/debugctl.c */
 

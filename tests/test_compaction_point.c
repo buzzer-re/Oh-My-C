@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h> /* mkdtemp: <unistd.h> on macOS, <stdlib.h> on glibc */
 
 static int fails;
 #define CHECK(c)                                                                                                       \

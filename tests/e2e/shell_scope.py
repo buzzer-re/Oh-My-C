@@ -27,6 +27,13 @@ cmds = ["exec >out.txt; echo hidden", "echo visible",
         "echo \"abc", "if", "foo", "echo a\nbar",
         "export KEEP=yes; f() { echo fn; }; alias al='echo aliased'; cd /", "echo $KEEP; f; al; pwd",
         "true", "false", "echo x > /dev/stdout; echo y > /dev/stderr; echo $0"]
+def bash_parse_error(cmd):
+    """the installed bash's own parse error for `bash -c cmd` (bash 5.1 and 5.3 word these differently; omc passes
+    real bash's text through), as the tool result shows it"""
+    err = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True).stderr
+    return err + "\n\nCommand exited with code 2"
+
+
 open(reqlog, "w").close()
 subprocess.run([omc, "--model", "mock/mock-1", "--no-session", "-p", "seq:" + json.dumps([["bash", {"command": c}] for c in cmds])],
                cwd=work, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=28)
@@ -39,8 +46,8 @@ want = ["(no output, exit code 0)", "visible\n",
         "(no output)\n\nCommand exited with code 2", "1\n",
         "set\nFIRED\n", "later\n",
         "started\n", None,
-        "bash: -c: line 1: unexpected EOF while looking for matching `\"'\n\n\nCommand exited with code 2",
-        "bash: -c: line 2: syntax error: unexpected end of file from `if' command on line 1\n\n\nCommand exited with code 2",
+        bash_parse_error("echo \"abc"),
+        bash_parse_error("if"),
         "bash: line 1: foo: command not found\n\n\nCommand exited with code 127",
         "a\nbash: line 2: bar: command not found\n\n\nCommand exited with code 127",
         "(no output, exit code 0)", "yes\nfn\naliased\n" + os.path.realpath(work) + "\n",

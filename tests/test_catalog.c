@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h> /* mkdtemp: <unistd.h> on macOS, <stdlib.h> on glibc */
 
 static int fails;
 #define CHECK(c)                                                                                                       \
