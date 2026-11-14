@@ -1,8 +1,6 @@
 # omc (oh-my-c)
 
-A from-scratch C rewrite of [oh-my-pi (omp)](https://github.com/can1357/oh-my-pi), the coding agent.
-It doesn't use Node, Bun, npm or any vendored third-party code, so all it needs at runtime is the
-system's libc, OpenSSL (for TLS), zlib (for gzip), pthreads and libm.
+A from-scratch C rewrite of [oh-my-pi (omp)](https://github.com/can1357/oh-my-pi), the coding agent. It doesn't use Node, Bun or npm , all it needs at runtime is the system's libc, OpenSSL (for TLS), zlib (for gzip), pthreads and libm.
 
 ```
 $ ldd build/omc
@@ -18,7 +16,7 @@ It also solved another problem for me: I don't have to install Bun or any other 
 
 ## Installing
 
-mc's version is the omp release it matches, so `omc v18.18.7` behaves like `omp v18.18.7`.
+omc's version is the omp release it matches, so `omc v18.18.7` behaves like `omp v18.18.7`.
 
 The quick way picks the right binary for your system, checks it against `SHA256SUMS` and installs it into `~/.local/bin`:
 
