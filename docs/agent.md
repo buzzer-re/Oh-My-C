@@ -49,6 +49,13 @@ agent_end(messages added in this run)
   aborted assistant message reads `Interrupted by user` with errorId `Flag.UserInterrupt` instead of
   `Request was aborted`. A run aborted during a tool batch ends with agent-loop's `endAbortedBeforeModel` boundary:
   one more turn holding an empty aborted assistant message (no errorId on its `message_start`).
+  An abort ends the stream at once (omp's abort race): nothing the provider pushes after `agent->cancel` reaches the
+  listeners, and the aborted message is the partial as it stood, without the provider's `duration`/`ttft`. As in
+  agent-loop's `retainCompletedToolCalls`, only tool calls that reached `toolcall_end` before the abort (or before an
+  error) survive in an aborted or errored message; dropping one adds `stopDetails: {type:
+  stream_interrupted_after_content, category, explanation}`, so a call still streaming when Esc lands leaves no
+  synthetic result and no `F5 to retry` row. `turn_end`/`agent_end` carry the loop's own copy of a user-interrupted
+  message, without the `UserInterrupt` errorId the session stamps on `message_end`.
 - **Manual retry** (`app_retry_prepare`, omp `TurnRecovery.retry`; the tail rules are `tr_*` in
   `coding/turn_recovery.c`): the failed/aborted last turn, looked up past its synthetic tool results and any trailing
   context-only custom messages, is dropped and the agent continues. A fully failed tool batch of a completed

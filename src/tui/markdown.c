@@ -367,6 +367,21 @@ static size_t js_trim_end(const char *s, size_t n) {
     return end;
 }
 
+/* the value of a numeric entity (&#N; / &#xH;) at s[0], with its length in *len; -1 when there is none */
+static long html_numeric_entity(const char *s, size_t n, size_t *len) {
+    if (n < 4 || s[0] != '&' || s[1] != '#') return -1;
+    bool hex = s[2] == 'x' || s[2] == 'X';
+    size_t p = hex ? 3 : 2, k = p;
+    unsigned long v = 0;
+    for (; k < n && (hex ? isxdigit((unsigned char)s[k]) : isdigit((unsigned char)s[k])); k++) {
+        int d = isdigit((unsigned char)s[k]) ? s[k] - '0' : tolower((unsigned char)s[k]) - 'a' + 10;
+        if (v <= 0x10ffff) v = v * (hex ? 16 : 10) + (unsigned long)d;
+    }
+    if (k == p || k >= n || s[k] != ';' || v > 0x10ffff) return -1;
+    *len = k + 1;
+    return (long)v;
+}
+
 /* upstream normalizeHtmlEntitiesForTerminal, one match at s[0] == '&':
  * /&(amp|lt|gt|quot|apos|nbsp|#\d+|#x[0-9a-fA-F]+);/i -> its character; returns the bytes matched, else 0 */
 static size_t html_entity(const char *s, size_t n, sb_t *b) {
@@ -398,9 +413,43 @@ static size_t html_entity(const char *s, size_t n, sb_t *b) {
         return k + 1;
     }
     char u[8];
+    size_t used = k + 1;
+    if (v >= 0xd800 && v <= 0xdbff && used < n) {
+        /* the entity leaves a lone high surrogate in omp's JS string; its terminal writer combines it with whatever
+         * UTF-16 unit follows, unchecked: (hi - 0xD800) * 0x400 + (unit - 0xDC00) + 0x10000, swallowing that unit
+         * (`&#xD800; ` draws U+2420 ␠, `&#xD83D;&#xDE00;` the pair's emoji). The next unit is the following
+         * entity's character once decoded. */
+        uint32_t unit = 0;
+        size_t take = 0;
+        sb_t rest = {0};
+        long nv = html_numeric_entity(s + used, n - used, &take);
+        if (nv >= 0xd800 && nv <= 0xdfff) unit = (uint32_t)nv;
+        else {
+            size_t ek = s[used] == '&' ? html_entity(s + used, n - used, &rest) : 0;
+            const char *ns = ek ? sb_cstr(&rest) : s + used;
+            size_t nn = ek ? rest.len : n - used;
+            uint32_t c = 0;
+            int cl = nn ? utf8_decode(ns, nn, &c) : 0;
+            if (cl > 0 && !(c == 0xfffd && cl == 1) && c < 0x10000) {
+                unit = c;
+                take = ek ? ek : (size_t)cl;
+                if (ek) memmove(rest.s, rest.s + cl, rest.len - (size_t)cl + 1), rest.len -= (size_t)cl;
+                else rest.len = 0;
+            } else take = 0;
+        }
+        if (take) {
+            uint32_t cp = (uint32_t)(v - 0xd800) * 0x400 + unit + 0x10000 - 0xdc00;
+            int ul = utf8_encode(cp >= 0xd800 && cp <= 0xdfff ? 0xfffd : cp, u);
+            sb_appendn(b, u, (size_t)ul);
+            if (rest.len) sb_appendn(b, rest.s, rest.len);
+            sb_free(&rest);
+            return used + take;
+        }
+        sb_free(&rest);
+    }
     int ul = utf8_encode(v >= 0xd800 && v <= 0xdfff ? 0xfffd : (uint32_t)v, u);
     sb_appendn(b, u, (size_t)ul);
-    return k + 1;
+    return used;
 }
 
 static void html_decode_entities(const char *s, size_t n, sb_t *b) {

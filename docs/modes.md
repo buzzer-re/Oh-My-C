@@ -61,7 +61,9 @@ goal). Ctrl+C clears the input or exits. Background jobs that settle while the s
 through `app_t.wake`. When a turn settles, and after every transcript replay (resume, `/tree`, session switch), the
 status row shows omp's idle `F5 to retry` hint (`ui_sync_retry_hint`, `syncRetryHintRow`) if the last turn died on
 a tool call; a loader (working, retry countdown, compaction) replaces it. A tool replay drops the previous run's card
-for the re-executed call (`toolcard_prior_evict`, omp `#priorTurnToolComponents`).
+for the re-executed call (`toolcard_prior_evict`, omp `#priorTurnToolComponents`); a call this run already
+streamed (a read in the read group included) keeps the prior card, so a provider that reuses call ids across turns
+does not lose earlier cards.
 
 If no model is configured on a terminal, the TUI still starts so that `/login` and `/model` can fix
 it, as omp does. A fresh agent dir shows the setup wizard (`OMC_SKIP_SETUP`/`OMP_SKIP_SETUP`,
@@ -176,7 +178,11 @@ response (`code` is a machine-readable reason on some errors):
 `prompt`, `bash` and `login` answer off the reader thread, so `abort`, `abort_bash` and
 `extension_ui_response` overtake them. Each accepted prompt gets one `prompt_result` (`agentInvoked`,
 `status`, `sessionSettled`) after its work yields; a prompt sent while a run streams is queued into it and
-reports at that run's yield.
+reports at that run's yield. `abort` and `abort_and_restore_queue` answer like omp's awaited `session.abort`:
+once the run's `agent_end` is out (from a helper thread), ahead of the aborted prompt's `prompt_result`; later
+commands other than the control frames (`extension_ui_response`, `host_tool_*`) and omp's background commands
+wait for that reply. A builtin slash command sent as `prompt` is answered after it ran (its `command_output`
+first, `{agentInvoked: false}`); `/retry` answers `{agentInvoked: true}` just before the retried turn starts.
 
 **Events** are agent events in omp's JSON shape. `message_start` / `message_update` / `message_end`
 carry a `messageId` (`msg-N`, shared by one message's frames); `message_update.assistantMessageEvent`

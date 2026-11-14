@@ -557,6 +557,12 @@ static void test_markdown_html(void) {
     strvec_t p = md_plain("<span>&lt;\xe2\x96\x83&gt;</span> &amp; &quot;test&quot; &#128512; &#x1F600;", 80);
     CHECK(p.n == 1 && !strcmp(p.v[0], "<\xe2\x96\x83> & \"test\" \xf0\x9f\x98\x80 \xf0\x9f\x98\x80"));
     strvec_free(&p);
+    /* lone surrogates as omp's terminal writer draws them (checked side by side against omp 18.18.7): a high surrogate
+     * swallows the next UTF-16 unit, a low one alone is U+FFFD, an entity pair is the astral character */
+    p = md_plain("x &#xD800; y &#xDC00;z &#xD83D;&#xDE00; &#xD800;&#x41;B &#xD801;q &#xDBFF;&amp;r &#55296;\xc3\xa9 end", 80);
+    CHECK(p.n == 1 && !strcmp(p.v[0], "x \xe2\x90\xa0y \xef\xbf\xbdz \xf0\x9f\x98\x80 \xe2\x91\x81"
+                                      "B \xe2\xa1\xb1 \xf4\x82\x80\xa6r \xe2\x93\xa9 end"));
+    strvec_free(&p);
     p = md_plain("<span></span><text>\xe2\x96\x83</text>", 80);
     CHECK(p.n == 1 && !strcmp(p.v[0], "\xe2\x96\x83"));
     strvec_free(&p);

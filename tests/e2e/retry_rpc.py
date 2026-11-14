@@ -3,7 +3,10 @@
 an `abort` while a bash call runs ends the run with the aborted boundary turn (empty, "Interrupted by user",
 errorId Flag.UserInterrupt); `/retry` then re-executes the failed batch (agent_start names it in
 resumedToolCallIds, no model request until its fresh result is in), and a `/retry` after a settled turn reports
-"Nothing to retry.".
+"Nothing to retry.". The `abort` reply waits for the run's agent_end (session.abort) and precedes the aborted
+prompt's prompt_result; a builtin's reply follows its command_output. An abort while a tool call is still streaming keeps only the calls that reached toolcall_end
+(agent-loop retainCompletedToolCalls): the aborted turn is empty, tagged stream_interrupted_after_content, carries no
+provider timings, and turn_end / agent_end show the loop's copy without the session's UserInterrupt errorId.
 usage: retry_rpc.py <omc> <request log>
 Prints "retry rpc ok" or the first failing step."""
 import json, subprocess, sys, threading, time
@@ -75,6 +78,14 @@ time.sleep(0.3)
 send(2, type="abort")
 if not wait(ends, s):
     fail("abort end")
+# session.abort: the reply waits for the run's agent_end and comes before the aborted prompt's prompt_result
+if not wait(lambda m: m.get("type") == "prompt_result" and m.get("id") == "1", s):
+    fail("aborted prompt_result")
+with lock:
+    order = [m.get("type") if m.get("type") != "response" else "response:" + m.get("id", "") for m in events[s:]]
+order = [t for t in order if t in ("agent_end", "response:2", "prompt_result")]
+if order != ["agent_end", "response:2", "prompt_result"]:
+    fail("abort reply order", order)
 with lock:
     boundary = [m["message"] for m in events[s:] if m.get("type") == "message_end" and m["message"].get("role") == "assistant"]
 b = boundary[-1] if boundary else {}
@@ -95,6 +106,12 @@ if requests() != n:
     fail("replay sent a model request", requests() - n)
 if not wait(lambda m: m.get("type") == "command_output" and m.get("text") == "Retrying the last failed turn.", s):
     fail("retry output")
+# the builtin's output, then its reply ({agentInvoked: true}), then the retried run
+with lock:
+    order = [m.get("type") if m.get("type") != "response" else "response:" + m.get("id", "") for m in events[s:]]
+order = [t for t in order if t in ("command_output", "response:3", "agent_start")]
+if order[:3] != ["command_output", "response:3", "agent_start"]:
+    fail("retry reply order", order)
 send(4, type="abort")
 if not wait(ends, s):
     fail("second abort end")
@@ -107,6 +124,39 @@ s = mark()
 send(6, type="prompt", message="/retry")
 if not wait(lambda m: "Nothing to retry." in json.dumps(m), s, 5):
     fail("nothing to retry", events[s:])
+
+s = mark()
+send(7, type="prompt", message="dropcall:stall:1:echo streaming-call")
+if not wait(lambda m: m.get("type") == "message_update" and m["assistantMessageEvent"]["type"] == "toolcall_delta", s):
+    fail("streaming call")
+time.sleep(0.3)
+a = mark()
+send(8, type="abort")
+if not wait(ends, s):
+    fail("streaming abort end")
+with lock:
+    tail = events[a:]
+    me = [m["message"] for m in tail if m.get("type") == "message_end" and m["message"].get("role") == "assistant"]
+    te = [m["message"] for m in tail if m.get("type") == "turn_end"]
+    late = [m for m in tail if m.get("type") in ("message_update", "tool_execution_start")]
+b = me[-1] if me else {}
+want_sd = {"type": "stream_interrupted_after_content", "category": None, "explanation": "Interrupted by user"}
+if b.get("content") != [] or b.get("stopDetails") != want_sd or "duration" in b or b.get("errorId") != 67112960:
+    fail("streaming call dropped", b)
+if not te or "errorId" in te[-1] or te[-1].get("stopDetails") != want_sd:
+    fail("turn_end loop copy", te)
+if late:
+    fail("events after the abort", late)
+s = mark()
+send(9, type="prompt", message="say:after the streaming abort")
+if not wait(ends, s):
+    fail("after streaming abort")
+with open(log) as f:
+    last = [json.loads(line) for line in f if '"tools"' in line][-1]
+msgs = last["messages"]
+cut = max(i for i, m in enumerate(msgs) if "echo streaming-call" in json.dumps(m.get("content")))
+if [m.get("role") for m in msgs[cut:]] != ["user", "user"]:
+    fail("next request replays the dropped call", msgs[cut:])
 p.stdin.close()
 p.kill()
 print("retry rpc ok")

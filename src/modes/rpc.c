@@ -53,6 +53,12 @@ struct rpc {
     json_t *images;
     const char *hidden; /* custom type when the run is a hidden wake-up (async-result) */
     bool slash;         /* the prompt is a builtin slash command (executeAcpBuiltinSlashCommand) */
+    bool slash_reply;   /* its `prompt` response is owed by the prompt thread, once the builtin ran */
+    /* session.abort(): the `abort` reply waits for the run's agent_end; later serial commands and the aborted
+     * prompt's prompt_result wait for that reply */
+    pthread_cond_t abort_cv;
+    int abort_waiters;
+    unsigned agent_ends;
     json_t *skill_msg;  /* the prompt invokes a skill (dispatchRpcSkillPrompt): its built custom message */
     pthread_mutex_t mu;
     /* /btw (rpc-btw.ts) */
@@ -1186,6 +1192,19 @@ static void rpc_listener(void *ud, const agent_event_t *ev) {
     }
     rpc_project_messages(j);
     forward(r, j);
+    if (ev->type == AGENT_EV_AGENT_END) {
+        pthread_mutex_lock(&r->mu);
+        r->agent_ends++;
+        pthread_cond_broadcast(&r->abort_cv);
+        pthread_mutex_unlock(&r->mu);
+    }
+}
+
+/* the serial command queue and the aborted prompt's prompt_result hold behind a pending `abort` reply */
+static void abort_barrier(rpc_t *r) {
+    pthread_mutex_lock(&r->mu);
+    while (r->abort_waiters > 0) pthread_cond_wait(&r->abort_cv, &r->mu);
+    pthread_mutex_unlock(&r->mu);
 }
 
 /* rpc-prompt-results.ts #report: sessionSettled, then the error */
@@ -1289,6 +1308,16 @@ static void rpc_command_output(void *ud, const char *text) {
     json_free(o);
 }
 
+/* /retry: the builtin's result reaches the host before the retried turn streams */
+static void rpc_slash_agent(void *ud) {
+    rpc_t *r = ud;
+    if (!r->slash_reply) return;
+    r->slash_reply = false;
+    json_t *d = json_obj();
+    json_set_bool(d, "agentInvoked", true);
+    respond(r, r->prompt_id, "prompt", true, d, NULL);
+}
+
 static void *prompt_thread(void *p) {
     rpc_t *r = p;
 again:;
@@ -1299,8 +1328,14 @@ again:;
          * prompt_result (the prompt response already said agentInvoked) */
         r->slash = false;
         slash_result_t sr;
-        slash_execute_text(r->a, r->text, rpc_command_output, r, &sr);
+        slash_execute_text_ex(r->a, r->text, rpc_command_output, rpc_slash_agent, r, &sr);
         bool invoked = sr.agent_invoked;
+        if (r->slash_reply && sr.kind != SLASH_PROMPT) { /* a builtin that ran locally: its output came first */
+            r->slash_reply = false;
+            json_t *d = json_obj();
+            json_set_bool(d, "agentInvoked", invoked);
+            respond(r, r->prompt_id, "prompt", true, d, NULL);
+        }
         if (sr.kind == SLASH_PROMPT && sr.prompt) { /* builtinResult.prompt: sent as the prompt (/force <tool> <prompt>) */
             pthread_mutex_lock(&r->mu);
             free(r->text);
@@ -1308,6 +1343,10 @@ again:;
             sr.prompt = NULL;
             pthread_mutex_unlock(&r->mu);
             slash_result_free(&sr);
+            if (r->slash_reply) { /* builtinResult.prompt: acknowledged as the prompt it became */
+                r->slash_reply = false;
+                respond(r, r->prompt_id, "prompt", true, NULL, NULL);
+            }
             goto again;
         }
         slash_result_free(&sr);
@@ -1354,6 +1393,7 @@ again:;
         free(x);
     }
     r->images = NULL;
+    abort_barrier(r); /* an `abort` of this run is answered before its prompt_result */
     const json_t *last = last_assistant(r->a->agent->messages);
     const char *stop = json_get_str(last, "stopReason");
     json_t *res = json_obj();
@@ -2735,6 +2775,62 @@ static void session_change(rpc_t *r, const json_t *cmd, const char *id, const ch
     respond(r, id, type, true, d, NULL);
 }
 
+static void rpc_abort_user(app_t *a) { agent_abort_user(a->agent); }
+
+/* `abort`: session.abort waits for the agent to go idle (its agent_end is out) before the reply */
+typedef struct {
+    rpc_t *r;
+    char *id;
+    const char *type;
+    json_t *data; /* the reply's data (abort_and_restore_queue: the restored input) */
+    bool live;
+    unsigned ends;
+} abort_job_t;
+
+static void *abort_main(void *p) {
+    abort_job_t *j = p;
+    rpc_t *r = j->r;
+    if (j->live) {
+        struct timespec dl;
+        clock_gettime(CLOCK_REALTIME, &dl);
+        dl.tv_sec += 60;
+        pthread_mutex_lock(&r->mu);
+        while (r->agent_ends == j->ends && pthread_cond_timedwait(&r->abort_cv, &r->mu, &dl) == 0) {}
+        pthread_mutex_unlock(&r->mu);
+    }
+    respond(r, j->id, j->type, true, j->data, NULL);
+    pthread_mutex_lock(&r->mu);
+    r->abort_waiters--;
+    pthread_cond_broadcast(&r->abort_cv);
+    pthread_mutex_unlock(&r->mu);
+    free(j->id);
+    free(j);
+    return NULL;
+}
+
+/* abort the run with `kick` and answer `type` (with `data`, owned) once it unwound */
+static void abort_start(rpc_t *r, const char *id, const char *type, json_t *data, void (*kick)(app_t *a)) {
+    abort_job_t *j = xcalloc(1, sizeof *j);
+    j->r = r;
+    j->id = id ? xstrdup(id) : NULL;
+    j->type = type;
+    j->data = data;
+    pthread_mutex_lock(&r->mu);
+    r->abort_waiters++;
+    j->ends = r->agent_ends;
+    pthread_mutex_unlock(&r->mu);
+    j->live = agent_is_running(r->a->agent);
+    kick(r->a);
+    pthread_t th;
+    if (pthread_create(&th, NULL, abort_main, j) != 0) {
+        abort_main(j);
+        return;
+    }
+    pthread_mutex_lock(&r->bg_mu);
+    vec_push(&r->bg_threads, th);
+    pthread_mutex_unlock(&r->bg_mu);
+}
+
 static void handle(rpc_t *r, json_t *cmd) {
     app_t *a = r->a;
     const char *id = json_get_str(cmd, "id");
@@ -2743,6 +2839,13 @@ static void handle(rpc_t *r, json_t *cmd) {
         respond(r, id, "undefined", false, NULL, "Unknown command: undefined");
         return;
     }
+    /* RpcInputDispatcher: control frames and BACKGROUND_COMMANDS overtake the serial queue; everything else waits
+     * behind a pending `abort` */
+    if (!str_eq(type, "extension_ui_response") && !str_eq(type, "host_tool_result") && !str_eq(type, "host_tool_update") &&
+        !str_eq(type, "host_uri_result") && !str_eq(type, "bash") && !str_eq(type, "btw_cancel") &&
+        !str_eq(type, "abort_branch_summary") && !str_eq(type, "predict_word") && !str_eq(type, "live_start") &&
+        !str_eq(type, "live_connect"))
+        abort_barrier(r);
     { /* set_fast_mode / set_slow_mode / set_cache_warming (modelctl.c) */
         char *err = NULL;
         bool handled = false;
@@ -2833,8 +2936,11 @@ static void handle(rpc_t *r, json_t *cmd) {
         const slash_cmd_t *sc = !skill_msg && slash_parse(r->text, &sp) ? slash_lookup(sp.name) : NULL;
         if (sp.name) slash_parsed_free(&sp);
         r->slash = sc && sc->handle;
+        r->slash_reply = r->slash && !strcmp(type, "prompt");
         pthread_mutex_unlock(&r->mu);
-        if (r->slash) {
+        if (r->slash_reply) {
+            /* answered by the prompt thread once the builtin ran (its command_output first) */
+        } else if (r->slash) {
             json_t *d = json_obj();
             json_set_bool(d, "agentInvoked", slash_invokes_agent(a, sc->name));
             respond(r, id, type, true, d, NULL);
@@ -2853,8 +2959,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         else agent_follow_up(a->agent, m);
         respond(r, id, type, true, NULL, NULL);
     } else if (!strcmp(type, "abort")) {
-        agent_abort_user(a->agent); /* session.abort({reason: USER_INTERRUPT_LABEL}) */
-        respond(r, id, type, true, NULL, NULL);
+        abort_start(r, id, "abort", NULL, rpc_abort_user); /* session.abort({reason: USER_INTERRUPT_LABEL}) */
     } else if (!strcmp(type, "goal")) {
         const char *op = json_get_str(cmd, "op");
         char *err = NULL;
@@ -3231,10 +3336,9 @@ static void handle(rpc_t *r, json_t *cmd) {
         }
         pthread_mutex_unlock(&a->agent->mu);
         agent_clear_queues(a->agent);
-        app_abort(a);
         json_set(d, "steering", sr);
         json_set(d, "followUp", fr);
-        respond(r, id, type, true, d, NULL);
+        abort_start(r, id, "abort_and_restore_queue", d, app_abort);
     } else if (!strcmp(type, "remove_queued_message") || !strcmp(type, "promote_queued_message")) {
         const char *msg = json_get_str(cmd, "message");
         bool promote = !strcmp(type, "promote_queued_message");
@@ -3445,6 +3549,7 @@ rpc_t *rpc_attach(app_t *a, rpc_sink_fn sink, void *ud) {
     r->sink = sink;
     r->sink_ud = ud;
     pthread_mutex_init(&r->mu, NULL);
+    pthread_cond_init(&r->abort_cv, NULL);
     pthread_mutex_init(&r->filter_mu, NULL);
     pthread_mutex_init(&r->host_mu, NULL);
     pthread_cond_init(&r->host_cv, NULL);

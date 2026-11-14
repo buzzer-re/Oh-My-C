@@ -156,7 +156,9 @@ partial message and emits omp's event sequence:
 `toolcall_end`)* → `done` | `error`
 
 Each event carries the content index, the delta, the finished block (on `*_end`) and the partial
-message. `aib_finish()` computes cost from usage and the catalog prices and sets `stopReason`
+message. `openai-completions` sets `defer_toolcall_end`: as in omp's `finishPendingToolCallBlocks`, tool calls stay
+pending until the stream ends, so every `toolcall_end` comes from `aib_finish` (after the final `text_end`), in the
+order the calls closed. `aib_finish()` computes cost from usage and the catalog prices and sets `stopReason`
 (`stop`, `length`, `toolUse`, `error`, `aborted`). `ai_stream()` never returns NULL: failures come
 back as an assistant message with `stopReason: "error"` and `errorMessage`.
 

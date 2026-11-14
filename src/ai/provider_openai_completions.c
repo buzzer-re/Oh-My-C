@@ -1183,6 +1183,7 @@ oaic_stream_t *oaic_stream_new(const ai_model_t *m, ai_event_cb cb, void *ud) {
     oaic_stream_t *s = xcalloc(1, sizeof(*s));
     s->m = m;
     aib_init(&s->b, m, cb, ud);
+    s->b.defer_toolcall_end = true;
     if (json_is_str(model_compat_get(m, "streamMarkupHealingPattern"))) {
         s->heal = xmalloc(sizeof(*s->heal));
         think_heal_init(s->heal);

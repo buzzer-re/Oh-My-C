@@ -7,6 +7,9 @@
   nothing F5 after a turn that settled reports "Nothing to retry" and sends nothing
   restore a process killed during a bash call: `--restore <session>` closes the cut-off turn and replays the call
           (AgentSession.restoreInterruptedTurn -> retry), so the model gets its real output, not "outcome unknown"
+  reuse   a streamed read whose call id repeats a prior turn's bash call (the mock numbers ids per turn) keeps that
+          bash card: only a call that starts without a streamed preview (a replay) evicts the prior turn's card
+          (EventController #priorTurnToolComponents)
 usage: retry_tui.py <omc> <request log> <scratch dir>
 Prints "retry tui ok" or the first failing step."""
 import fcntl, glob, json, os, pty, re, select, signal, struct, sys, termios, time
@@ -189,5 +192,28 @@ if requests() != n + 1:
 res = last_tool_results()
 if not res or "replayed-42" not in res[-1]:
     fail("restore replayed output", res)
+stop()
+
+# reuse: a later turn's streamed read reusing call_1 leaves the earlier bash card in place
+launch()
+if not wait_for("mock-1", 10):
+    fail("reuse startup", plain()[-600:])
+with open("reuse.txt", "w") as f:
+    f.write("reuse\n")
+send("bash:echo kept-card")
+send(ENTER)
+if not wait_for("Tool said: kept-card"):
+    fail("reuse bash", plain()[-600:])
+send("read:reuse.txt")
+send(ENTER)
+if not wait_for("Read reuse.txt"):
+    fail("reuse read", plain()[-600:])
+pump(1)
+mark = len(plain())
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 110, 0, 0))
+os.kill(pid, signal.SIGWINCH)
+pump(1.5)
+if "$ echo kept-card" not in plain()[mark:]:
+    fail("reuse kept the bash card", plain()[mark:][-1500:])
 stop()
 print("retry tui ok")

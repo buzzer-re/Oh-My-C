@@ -324,6 +324,10 @@ typedef struct {
     int64_t t_start;
     int64_t t_first_token;
     bool started;
+    /* openai-completions: tool calls stay pending until the stream ends (finishPendingToolCallBlocks), so a closed
+     * call's toolcall_end waits for aib_finish; indices of the closed calls, in close order */
+    bool defer_toolcall_end;
+    VEC(int) deferred_tc;
 } ai_builder_t;
 
 void aib_init(ai_builder_t *b, const ai_model_t *m, ai_event_cb cb, void *ud);
