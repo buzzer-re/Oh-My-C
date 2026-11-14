@@ -246,6 +246,7 @@ int main(void) {
     const char *home = home_dir();
     bool under_home = home && strlen(home) > 1 && str_starts(docs, home) && docs[strlen(home)] == '/';
     char *want = under_home ? xasprintf("Restricted folder: ~%s", docs + strlen(home)) : xasprintf("Restricted folder: %s", docs);
+    if (!rr || strcmp(rr, want)) fprintf(stderr, "restricted reason [%s] want [%s]\n", rr ? rr : "", want);
     CHECK(rr && !strcmp(rr, want));
     free(want);
     free(rr);
