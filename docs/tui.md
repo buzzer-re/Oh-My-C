@@ -182,7 +182,9 @@ shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, 
 - HTML follows omp's `markdown.ts` and its marked fork. Inline, any well-formed tag (`<name …>` up to
   the first `>` outside quotes) or `<!--…-->` comment is one raw token, so escapes inside it stay as
   written. `<code>…</code>` runs become code spans; every other tag goes through
-  `normalizeHtmlForTerminal`. That function drops comments and decodes entities. `<br>`/`<hr>` break
+  `normalizeHtmlForTerminal`. That function drops comments and decodes entities (a surrogate entity draws as omp's
+  terminal writer draws the lone UTF-16 unit: a low one is U+FFFD, a high one combines unchecked with the next unit
+  and swallows it, so `&#xD800; ` is `␠` and `&#xD83D;&#xDE00;` the emoji). `<br>`/`<hr>` break
   the line, `<p>`/`<blockquote>` separate paragraphs, and `<ol start=N>`/`<ul>`/`<li>` become
   numbered or `•` lines indented by list depth. `<span>`/`<text>` vanish and any other tag stays
   verbatim. A block (`isHtmlStart`'s element list or a comment) runs to the line holding its
