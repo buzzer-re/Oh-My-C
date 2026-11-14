@@ -73,7 +73,10 @@ static bool details_is(const char *tool, const char *args, const char *want) {
 
 int main(void) {
     char tmpl[512];
-    snprintf(tmpl, sizeof tmpl, "%s/omc-approval-XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    /* macOS's TMPDIR ends in `/`: normalize, since omc compares normalized paths */
+    char *tmpd = path_normalize(getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    snprintf(tmpl, sizeof tmpl, "%s/omc-approval-XXXXXX", tmpd);
+    free(tmpd);
     char *root = mkdtemp(tmpl);
     if (!root) return 1;
     char *agent = path_join(root, "agent");
