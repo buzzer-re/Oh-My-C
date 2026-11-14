@@ -154,8 +154,15 @@ bool toolcard_group_open(const msgview_t *v) { return v && v == g_read_group; }
 /* tool calls whose arguments are still streaming: id -> pending card (omp draws the call before execution) */
 static hmap_t g_preview;
 static strvec_t g_stream_ids; /* tool call ids previewed by the assistant message streaming now */
+/* read calls of this run whose streamed args named a target: omp's #toolTimelineComponents holds them (in the read
+ * group) from the stream on, so their execution never evicts a prior turn's card with the same id */
+static strvec_t g_run_streamed_reads;
 
 void toolcard_preview(ui_t *u, const char *id, const char *name, const json_t *args) {
+    if (id && *id && str_eq(name, "read")) {
+        const char *path = json_get_str(args, "path");
+        if (path && *path && !strvec_contains(&g_run_streamed_reads, id)) strvec_push(&g_run_streamed_reads, id);
+    }
     if (!id || !*id || !name || !*name || str_eq(name, "read")) return;
     msgview_t *v = hmap_get(&g_preview, id);
     if (v && !view_attached(v)) {
@@ -523,6 +530,7 @@ void toolcard_run_track(const char *id, msgview_t *v) {
 }
 
 void toolcard_run_end(void) {
+    strvec_free(&g_run_streamed_reads);
     hmap_free(&g_prior_cards, NULL);
     g_prior_cards = g_run_cards;
     hmap_init(&g_run_cards);
@@ -530,6 +538,7 @@ void toolcard_run_end(void) {
 
 void toolcard_prior_reset(ui_t *u) {
     UNUSED(u);
+    strvec_free(&g_run_streamed_reads);
     hmap_free(&g_prior_cards, NULL);
     hmap_init(&g_prior_cards);
     hmap_free(&g_run_cards, NULL);
@@ -537,7 +546,8 @@ void toolcard_prior_reset(ui_t *u) {
 }
 
 void toolcard_prior_evict(ui_t *u, const char *id) {
-    if (!id || !*id || hmap_get(&g_preview, id) || hmap_get(&g_run_cards, id)) return;
+    if (!id || !*id || hmap_get(&g_preview, id) || hmap_get(&g_run_cards, id) || strvec_contains(&g_run_streamed_reads, id))
+        return;
     msgview_t *v = hmap_del(&g_prior_cards, id);
     /* never evict a shared read-group card: it may still carry sibling reads */
     if (!v || !view_attached(v) || json_get_arr(state_of(v), "group") || v == g_read_group) return;

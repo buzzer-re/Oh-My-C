@@ -61,7 +61,9 @@ goal). Ctrl+C clears the input or exits. Background jobs that settle while the s
 through `app_t.wake`. When a turn settles, and after every transcript replay (resume, `/tree`, session switch), the
 status row shows omp's idle `F5 to retry` hint (`ui_sync_retry_hint`, `syncRetryHintRow`) if the last turn died on
 a tool call; a loader (working, retry countdown, compaction) replaces it. A tool replay drops the previous run's card
-for the re-executed call (`toolcard_prior_evict`, omp `#priorTurnToolComponents`).
+for the re-executed call (`toolcard_prior_evict`, omp `#priorTurnToolComponents`); a call this run already
+streamed (a read in the read group included) keeps the prior card, so a provider that reuses call ids across turns
+does not lose earlier cards.
 
 If no model is configured on a terminal, the TUI still starts so that `/login` and `/model` can fix
 it, as omp does. A fresh agent dir shows the setup wizard (`OMC_SKIP_SETUP`/`OMP_SKIP_SETUP`,
