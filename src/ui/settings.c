@@ -192,13 +192,7 @@ static const char *get_str(const char *path, const char *def) {
 
 static bool condition_ok(const char *c) {
     if (!c) return true;
-    if (!strcmp(c, "macOS")) {
-#ifdef __APPLE__
-        return true;
-#else
-        return false;
-#endif
-    }
+    if (!strcmp(c, "macOS")) return omc_platform_darwin();
     if (!strcmp(c, "hasImageProtocol") || !strcmp(c, "nativeRendering")) return false;
     if (!strcmp(c, "advisorEnabled")) return get_bool("advisor.enabled", false);
     if (!strcmp(c, "vimModeEnabled")) return get_bool("tui.vimMode", false);

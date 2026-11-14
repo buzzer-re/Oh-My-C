@@ -183,5 +183,8 @@ void log_msg(log_level_t lvl, const char *fmt, ...) PRINTF_LIKE(2, 3);
 /* ---------- env ---------- */
 const char *env_get(const char *name); /* NULL if unset or empty */
 bool env_truthy(const char *name);
+/* the platform the UI presents (macOS key glyphs, Cmd+click, the macOS-only settings and shortcuts): the build's,
+ * unless OMC_PLATFORM=darwin|linux says otherwise (tests set linux: their fixtures are captures of omp on Linux) */
+bool omc_platform_darwin(void);
 
 #endif

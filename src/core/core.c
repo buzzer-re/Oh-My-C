@@ -936,3 +936,16 @@ bool env_truthy(const char *name) {
     return strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0 || strcasecmp(v, "yes") == 0 ||
            strcasecmp(v, "on") == 0;
 }
+
+bool omc_platform_darwin(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = env_get("OMC_PLATFORM");
+#ifdef __APPLE__
+        v = e ? strcmp(e, "linux") != 0 : 1;
+#else
+        v = e ? strcmp(e, "darwin") == 0 : 0;
+#endif
+    }
+    return v != 0;
+}

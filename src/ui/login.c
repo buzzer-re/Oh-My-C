@@ -353,13 +353,7 @@ static void show_auth(ui_login_t *l, const char *url, const char *instructions, 
     char *acc = xasprintf("\x1b]8;;%s\x07%s\x1b]8;;\x07", url, url);
     dpush(l, DI_TEXT, S(TUI_TC_ACCENT, acc));
     free(acc);
-    char *k = ui_key_hint(
-#ifdef __APPLE__
-        "super"
-#else
-        "ctrl"
-#endif
-    );
+    char *k = ui_key_hint(omc_platform_darwin() ? "super" : "ctrl");
     char *hint = xasprintf("\x1b]8;;%s\x07%s+click to open\x1b]8;;\x07", url, k);
     dpush(l, DI_TEXT, S(TUI_TC_DIM, hint));
     free(hint);

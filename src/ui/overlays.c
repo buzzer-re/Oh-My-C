@@ -204,17 +204,17 @@ char *ui_hotkeys_markdown(void) {
     free(up);
     act_ = "Move by word";
     HK("alt+left", "alt+right");
-#ifdef __APPLE__
-    act_ = "Start of line";
-    HK("ctrl+a", "home", "super+left");
-    act_ = "End of line";
-    HK("ctrl+e", "end", "super+right");
-#else
-    act_ = "Start of line";
-    HK("ctrl+a", "home");
-    act_ = "End of line";
-    HK("ctrl+e", "end");
-#endif
+    if (omc_platform_darwin()) {
+        act_ = "Start of line";
+        HK("ctrl+a", "home", "super+left");
+        act_ = "End of line";
+        HK("ctrl+e", "end", "super+right");
+    } else {
+        act_ = "Start of line";
+        HK("ctrl+a", "home");
+        act_ = "End of line";
+        HK("ctrl+e", "end");
+    }
     sb_append(&b, "\n**Editing**\n| Key | Action |\n|-----|--------|\n");
     act_ = "Send message";
     HK("enter");

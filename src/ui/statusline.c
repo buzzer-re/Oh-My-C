@@ -120,11 +120,7 @@ const char *ui_composer_shape(void) { return composer_shape(); }
 /* ---------- key hints (upstream key-hint-format.ts) ---------- */
 
 char *ui_key_hint(const char *key) {
-#ifdef __APPLE__
-    const bool mac = true;
-#else
-    const bool mac = false;
-#endif
+    const bool mac = omc_platform_darwin();
     static const char *const MODS[4][3] = {
         {"ctrl", "key.ctrl", "key.ctrlMac"}, {"alt", "key.alt", "key.altMac"}, {"shift", "key.shift", "key.shift"}, {"super", "key.super", "key.superMac"}};
     static const char *const KEYS[][2] = {{"esc", "key.esc"},     {"escape", "key.esc"}, {"enter", "key.enter"},
