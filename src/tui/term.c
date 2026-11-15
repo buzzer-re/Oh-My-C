@@ -373,7 +373,9 @@ void tui_term_copy_osc52(tui_term_t *t, const char *text, size_t n) {
 }
 
 void tui_term_clear_screen(tui_term_t *t, bool scrollback) {
-    tui_term_puts(t, scrollback ? "\x1b[3J\x1b[2J\x1b[H" : "\x1b[2J\x1b[H");
+    /* ED2 before ED3: tmux implements ED2 by scrolling the screen into pane history, which ED3 then wipes
+     * (the other order leaves a copy of the old screen in history) */
+    tui_term_puts(t, scrollback ? "\x1b[H\x1b[2J\x1b[3J" : "\x1b[2J\x1b[H");
 }
 
 void tui_hyperlink(sb_t *b, const char *uri, const char *text) {

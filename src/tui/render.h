@@ -4,9 +4,11 @@
  * Components render into an array of lines for a given width. The TUI concatenates the
  * root container's lines, composites overlays, and writes only the lines that changed
  * since the previous frame. Rendering is inline (no alternate screen): content taller
- * than the terminal scrolls into native scrollback. If a change lands above the visible
- * viewport (already in scrollback) or the width changes, the TUI clears screen+scrollback
- * and redraws everything.
+ * than the terminal scrolls into native scrollback; rows up there are never repainted.
+ * A terminal resize is a coalesced transaction (omp tui.ts): once the size has been quiet
+ * for 120 ms it settles, and `tui_set_resize_scrollback` picks how native history is
+ * refreshed (rebuild: erase it and replay every row at the new width; append: write a
+ * current-width copy below it; preserve: repaint the screen only).
  *
  * Every rendered line gets "\x1b[0m\x1b]8;;\x07" appended so styles never bleed. Lines
  * wider than the terminal are truncated. A focused component may emit TUI_CURSOR_MARKER
@@ -126,6 +128,19 @@ void tui_set_signal_hook(tui_t *t, tui_signal_hook_fn fn, void *ud);
 void tui_set_show_hardware_cursor(tui_t *t, bool show);
 bool tui_has_rendered(const tui_t *t); /* a frame was painted */
 void tui_set_min_render_interval(tui_t *t, int ms); /* throttle, default 33 (omp: 30 fps) */
+
+/* How a settled resize refreshes native scrollback (omp ResizeScrollbackMode, setting tui.resizeScrollback).
+ * The TUI starts in PI_TUI_RESIZE_SCROLLBACK's mode, else preserve; the coding agent applies the setting
+ * (default rebuild). */
+typedef enum { TUI_RESIZE_PRESERVE, TUI_RESIZE_REBUILD, TUI_RESIZE_APPEND } tui_resize_scrollback_t;
+void tui_set_resize_scrollback(tui_t *t, tui_resize_scrollback_t mode);
+tui_resize_scrollback_t tui_resize_scrollback(const tui_t *t);
+/* "append" / "rebuild" / "preserve" -> mode; anything else -> `dflt` */
+tui_resize_scrollback_t tui_resize_scrollback_parse(const char *s, tui_resize_scrollback_t dflt);
+/* The terminal's size changed (SIGWINCH does this; tests call it after tui_term_set_size): start or extend
+ * the resize burst. In tmux (rebuild mode) and Warp paints wait in place for the settle; elsewhere the
+ * burst borrows the alternate screen and paints the frame's tail there until it settles. */
+void tui_handle_resize(tui_t *t);
 
 /* Thread-safe. Coalesced and throttled (min interval). The _full variant clears screen and
  * scrollback and repaints everything. */

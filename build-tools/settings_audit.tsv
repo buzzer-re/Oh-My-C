@@ -58,7 +58,7 @@ speechgen.enabled	inert	no tts tool (Kokoro is ⛔; remote xAI voice awaits the 
 # ---------- inert: Appearance / TUI ----------
 images.blockImages	inert	needs omp's convertToLlm image-to-text replacement (also missing for text-only models)
 tui.maxInlineImages	inert	no inline-image budget (older images are never demoted to text)
-tui.resizeScrollback	inert	fixed at the default (rebuild); `append`/`preserve` not implemented
+tui.resizeScrollback	partial	settled-resize transaction in src/tui/render.c; `preserve` does not re-emit blocks that no longer fit (no block ledger)
 tui.completeScrollback	inert	not implemented
 terminal.showProgress	inert	no OSC 9;4 progress
 tui.renderMermaid	inert	no Mermaid rendering (WP-29 remainder; not advertised)
