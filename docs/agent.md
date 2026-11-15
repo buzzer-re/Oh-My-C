@@ -24,19 +24,30 @@ loop:
   turn_end
   aborted during the tool batch? → the aborted boundary turn (see Abort), stop
   stop if error, aborted, or max_turns reached
-  steering queued?      → append, continue
+  steering queued?      → turn_start, append, continue
   tool calls made?      → continue
   stopReason pause_turn → re-sample (up to 8 times)
-  follow-up queued?     → append, continue
+  follow-up queued?     → turn_start, append, continue
   else break
 agent_end(messages added in this run)
 ```
 
-- **Steering** (`agent_steer`) is delivered after the current turn's tools. If steering arrives
-  while tools are pending, the remaining calls of that assistant message are skipped with
-  `Skipped due to queued user message.`. **Follow-ups** (`agent_follow_up`) are delivered only
-  when the run would otherwise stop. Modes expose these as RPC `steer` / `follow_up`, and the TUI
-  queues them from the composer.
+- **Steering** (`agent_steer`) is delivered at the batch boundary, after the current turn's tools: the next turn opens
+  (`turn_start`) and the steer is emitted into it. A steer queued while a batch runs (or while its calls were still
+  streaming) never skips an already-emitted call (agent-loop.ts runTool, omp #10439): the expensive part, generating
+  the call, is paid, and a skip only makes the model re-emit it. Before each tool starts, the steering queue is peeked
+  without consuming it (`steeringQueueState`: user, agent, system, or `irc` for a peer's record) and the first hit
+  latches the batch's interrupt. Only an `interruptible` tool (`agent_tool_t.interruptible`; omc's `wait`) is cut
+  short, in either `interruptMode`; a not-yet-started one is skipped unless it `handles_tool_interrupt` (`wait` does:
+  it runs and returns `Wait interrupted by message.`). A skipped one gets omp's `createSkippedToolResult` text
+  (`Skipped due to <reason>. Do not count this skipped result as completed work or verification. After the <blocker>
+  is handled on the next step, retry the skipped tool if it is still needed.`, details `{__synthetic, source:
+  interrupt_skipped, executed: false}` or `{__interrupted, ..., execution: started}`). Outside `interruptMode` "wait"
+  the latch also raises the cooperative steering signal (`agent_tool_steering_signal`): an auto-backgroundable bash
+  backgrounds itself (`Backgrounded early to handle an incoming message; …`); in "wait" mode foreground tools finish
+  undisturbed. Each tool's result message is emitted as soon as it and every earlier call have results.
+  **Follow-ups** (`agent_follow_up`) are delivered only when the run would otherwise stop. Modes expose these as RPC
+  `steer` / `follow_up`, and the TUI queues them from the composer.
 - **Failed turns** (agent-loop.ts `createAbortedToolResult`): every tool call of a turn that ended in error or
   aborted gets a synthetic error result (`Tool call was not executed because the provider stream ended with an error
   before the tool could run: <error>` / `Tool execution was aborted: <error>`, details `{__synthetic, source:

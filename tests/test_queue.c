@@ -201,6 +201,74 @@ static void test_forced_delivery(void) {
     agent_free(a);
 }
 
+static json_t *typed(const char *t) {
+    json_t *c = json_arr();
+    json_push(c, text_block(t));
+    return msg_user_typed(c);
+}
+
+/* agent-loop.ts mid-batch interrupt peeks (steeringQueueState sources, interruptMode) and createSkippedToolResult */
+static void test_batch_interrupt(void) {
+    agent_t *a = agent_new();
+    CHECK(!agent_tool_interrupted(a) && !agent_tool_steering_signal(a), "nothing queued: no interrupt");
+    agent_steer(a, typed("typed"));
+    CHECK(agent_tool_steering_signal(a), "immediate mode: queued steering raises the cooperative signal");
+    CHECK(str_eq(agent_tool_interrupt_source(a), "user"), "typed steering source: %s", agent_tool_interrupt_source(a));
+    agent_clear_queues(a);
+    CHECK(agent_tool_interrupted(a), "the interrupt stays latched once the queue empties");
+    agent_free(a);
+
+    a = agent_new();
+    a->interrupt_wait = true;
+    json_t *m = msg_user_text("parent says");
+    json_set_str(m, "attribution", "agent");
+    agent_steer(a, m);
+    CHECK(agent_tool_interrupted(a), "wait mode: an interruptible wait is still cut short");
+    CHECK(!agent_tool_steering_signal(a), "wait mode: no cooperative signal for other tools");
+    CHECK(str_eq(agent_tool_interrupt_source(a), "agent"), "agent steering source: %s", agent_tool_interrupt_source(a));
+    agent_free(a);
+
+    a = agent_new();
+    json_t *adv = json_obj();
+    json_set_str(adv, "role", "custom");
+    json_set_str(adv, "customType", "advisory");
+    agent_steer(a, adv);
+    agent_steer(a, typed("typed after"));
+    CHECK(str_eq(agent_tool_interrupt_source(a), "system"), "one-at-a-time classifies the head only: %s",
+          agent_tool_interrupt_source(a));
+    agent_free(a);
+
+    a = agent_new();
+    json_t *irc = msg_user_text("peer");
+    json_set_bool(irc, "synthetic", true);
+    json_set_str(irc, "customType", "irc");
+    agent_steer(a, irc);
+    CHECK(str_eq(agent_tool_interrupt_source(a), "irc"), "peer interrupt source: %s", agent_tool_interrupt_source(a));
+    agent_free(a);
+
+    tool_result_t r = {0};
+    agent_skipped_tool_result(&r, "user", false);
+    const char *t = json_get_str(json_at(r.content, 0), "text");
+    CHECK(r.is_error && str_eq(t, "Skipped due to queued user message. Do not count this skipped result as completed work or "
+                                  "verification. After the queued message is handled on the next step, retry the skipped tool "
+                                  "if it is still needed."),
+          "skip text: %s", t);
+    CHECK(json_get_bool(r.details, "__synthetic", false) && str_eq(json_get_str(r.details, "source"), "interrupt_skipped") &&
+              json_get(r.details, "executed") && !json_get_bool(r.details, "executed", true),
+          "skip details");
+    agent_skipped_tool_result(&r, "background", true);
+    t = json_get_str(json_at(r.content, 0), "text");
+    CHECK(strstr(t, "Skipped due to a queued background completion (job or supervised process). ") &&
+              strstr(t, "After the completion notice is handled"),
+          "background skip text: %s", t);
+    CHECK(json_get_bool(r.details, "__interrupted", false) && str_eq(json_get_str(r.details, "execution"), "started"),
+          "interrupted details");
+    agent_skipped_tool_result(&r, NULL, false);
+    t = json_get_str(json_at(r.content, 0), "text");
+    CHECK(strstr(t, "Skipped due to pending steering message. ") != NULL, "unknown-source skip text: %s", t);
+    tool_result_free(&r);
+}
+
 int main(void) {
     char *dir = fs_mktempdir("omc-queue");
     setenv("OMC_CODING_AGENT_DIR", dir, 1);
@@ -211,6 +279,7 @@ int main(void) {
     test_split();
     test_agent_queue();
     test_forced_delivery();
+    test_batch_interrupt();
     test_band();
     test_python_text();
     fs_rm_rf(dir);
