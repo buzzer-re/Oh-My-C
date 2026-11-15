@@ -48,6 +48,11 @@ struct agent_tool {
     char *description;
     json_t *parameters; /* JSON schema object (owned) */
     bool exclusive;     /* runs alone when several calls arrive in one turn */
+    /* omp `interruptible`: a pure wait that queued steering / a peer interrupt cuts short in either interruptMode;
+     * a not-yet-started one is skipped unless `handles_tool_interrupt` (it then runs and drains the wake itself).
+     * Every other tool always runs once emitted (agent-loop.ts runTool, #10439). */
+    bool interruptible;
+    bool handles_tool_interrupt;
     bool hidden;        /* not sent to the model */
     bool lenient_args;  /* skip schema validation errors */
     bool mounted;       /* presented as an xd://<name> device instead of top-level (implies hidden) */
@@ -186,8 +191,13 @@ struct agent {
     json_t *asides;     /* quiet records (IRC broadcast legs, progress notes): read at the next step boundary, never interrupt */
     int64_t run_started_mono; /* mono_ms when the current or latest run started (AgentSession.runStartedAt) */
     /* omp steeringMode / followUpMode ("one-at-a-time" default: one queued message per turn; "all") and
-     * interruptMode ("immediate" default: queued steering skips the rest of the turn's tool calls; "wait") */
+     * interruptMode ("immediate" default: queued steering cuts interruptible waits short and raises the cooperative
+     * steering signal for the other running tools; "wait": only interruptible waits are cut short) */
     bool steer_all, follow_up_all, interrupt_wait;
+    /* the running tool batch's interrupt state (agent-loop.ts interruptState / steeringSoftController), under `mu`:
+     * `batch_source` is the first interrupt's origin ("user", "agent", "system", "unknown" or "irc"; NULL: none yet) */
+    const char *batch_source;
+    bool batch_steered, batch_soft;
     volatile sig_atomic_t cancel;
     volatile sig_atomic_t silent_abort_next; /* abort the next model request as an internal transition */
     char *mcp_scope;                         /* this session's view of a shared MCP manager (NULL: the owner) */
@@ -233,6 +243,15 @@ void agent_abort_user(agent_t *a);
  * errorMessage "__omp.silent_abort__" so no abort line renders. */
 void agent_abort_next_silently(agent_t *a);
 void agent_steer(agent_t *a, json_t *msg);      /* owned */
+/* For tools running in a batch (non-consuming peeks of the steering queue, latched until the batch ends):
+ * agent_tool_steering_signal is omp's cooperative `ctx.steeringSignal` (queued steering or a peer interrupt, only when
+ * interruptMode is not "wait": backgroundable work may step aside); agent_tool_interrupted is an interruptible tool's
+ * wake (queued steering or a peer interrupt, in either interruptMode). */
+bool agent_tool_steering_signal(agent_t *a);
+bool agent_tool_interrupted(agent_t *a);
+const char *agent_tool_interrupt_source(agent_t *a); /* the latched interrupt's origin, NULL: none (static string) */
+/* agent-loop.ts createSkippedToolResult into `r` (replaced): source words the reason; `started`: it was running */
+void agent_skipped_tool_result(tool_result_t *r, const char *source, bool started);
 void agent_follow_up(agent_t *a, json_t *msg);  /* owned */
 void agent_aside(agent_t *a, json_t *msg);      /* owned: joins the next step boundary without skipping any tool call */
 /* Take the steering and aside records `is_record` selects, steering first. With `wakes`, takes nothing unless one

@@ -933,8 +933,14 @@ static void bash_service(tool_env_t *env, tool_ctx_t *ctx, const char *name, con
     json_free(snap);
 }
 
+/* omp ctx.toolCall.steeringSignal: queued steering (or a peer interrupt) outside interruptMode "wait" */
+static bool steer_signal(tool_ctx_t *ctx) {
+    return ctx && agent_tool_steering_signal(ctx->agent);
+}
+
+/* the interruptible `wait`'s signal: queued steering or a peer interrupt cuts it short in either interruptMode */
 static bool steer_queued(tool_ctx_t *ctx) {
-    return ctx && ctx->agent && ctx->agent->steering && json_len(ctx->agent->steering) > 0;
+    return ctx && agent_tool_interrupted(ctx->agent);
 }
 
 static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
@@ -1107,14 +1113,15 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         bool fin = false, steered = false;
         int64_t deadline = mono_ms() + wait_ms;
         for (;;) {
+            /* raceJobSettlement: a steering signal already up (or raised mid-wait) backgrounds the command at once */
+            if (!(ctx && ctx->cancel && *ctx->cancel) && steer_signal(ctx)) {
+                steered = true;
+                break;
+            }
             fin = jobs_fg_wait(env->jobs, fid, MIN(100, MAX(0, deadline - mono_ms())), ctx ? ctx->cancel : NULL);
             if (fin) break;
             if (ctx && ctx->cancel && *ctx->cancel) continue; /* the wait propagated the cancel; let it finish */
             if (mono_ms() >= deadline) break;
-            if (steer_queued(ctx)) {
-                steered = true;
-                break;
-            }
         }
         if (!fin) {
             char *jid = jobs_fg_detach(env->jobs, fid);
@@ -1616,6 +1623,8 @@ agent_tool_t *tool_wait_new(tool_env_t *env) {
     agent_tool_t *t = agent_tool_new("wait", "Wait", desc, s, wait_execute);
     free(desc);
     t->intent_mode = INTENT_OPTIONAL; /* wait.ts: intent = "optional" */
+    t->interruptible = true;          /* wait.ts: interruptible + handlesToolInterrupt (it drains the wake itself) */
+    t->handles_tool_interrupt = true;
     t->ud = env;
     return t;
 }

@@ -731,7 +731,18 @@ void agent_queue_changed(agent_t *a) {
 
 void agent_steer(agent_t *a, json_t *msg) {
     /* omp AgentSession.steer: user input delivered mid-run is marked so the model sees it as an interjection */
-    if (agent_msg_user_authored(msg)) json_set_bool(msg, "steering", true);
+    if (agent_msg_user_authored(msg) && !json_get(msg, "steering")) {
+        json_set_bool(msg, "steering", true);
+        /* omp's key order (session JSONL): {role, content, steering, attribution, timestamp} */
+        static const char *const tail[] = {"attribution", "timestamp"};
+        for (size_t i = 0; i < 2; i++) {
+            json_t *v = json_get(msg, tail[i]);
+            if (!v) continue;
+            v = json_clone(v);
+            json_del(msg, tail[i]);
+            json_set(msg, tail[i], v);
+        }
+    }
     pthread_mutex_lock(&a->mu);
     json_push(a->steering, msg);
     pthread_mutex_unlock(&a->mu);
@@ -929,11 +940,108 @@ static json_t *take_asides(agent_t *a) {
     return out;
 }
 
-static bool queue_nonempty(agent_t *a, json_t *q) {
+/* agent-loop.ts steeringQueueState over the messages the next boundary takes (the head in one-at-a-time mode, all of
+ * them otherwise): any user-attributed message wins, then user-role messages not attributed to an agent; agent-authored
+ * steering is "agent", anything else (advisories, hidden directives) "system". A peer's IRC record (customType "irc"),
+ * which omp queues apart from steering, counts only when no steering is queued: "irc". Caller holds mu; NULL: nothing. */
+static const char *steering_source_locked(agent_t *a) {
+    size_t n = json_len(a->steering), seen = 0;
+    bool agent = false, irc = false;
+    for (size_t i = 0; i < n; i++) {
+        const json_t *m = json_at(a->steering, i);
+        if (str_eq(json_get_str(m, "customType"), "irc")) {
+            irc = true;
+            continue;
+        }
+        if (!a->steer_all && seen == 1) break;
+        seen++;
+        const char *attribution = json_get_str(m, "attribution");
+        if (str_eq(attribution, "user")) return "user";
+        if (!str_eq(json_get_str(m, "role"), "user")) continue;
+        if (!str_eq(attribution, "agent")) return "user";
+        agent = true;
+    }
+    if (seen) return agent ? "agent" : "system";
+    return irc ? "irc" : NULL;
+}
+
+/* agent-loop.ts checkSteering / checkAsideInterrupts (non-consuming peeks while a tool batch runs): the first queued
+ * steering fixes the interrupt's source (a peer interrupt only when nothing triggered yet), and outside interruptMode
+ * "wait" either raises the cooperative steering signal. Latched until the batch ends. Caller holds mu. */
+static void check_steering_locked(agent_t *a) {
+    if (a->cancel) return;
+    const char *src = steering_source_locked(a);
+    if (!src) return;
+    if (str_eq(src, "irc")) {
+        if (!a->batch_source) a->batch_source = src;
+    } else if (!a->batch_steered) {
+        a->batch_steered = true;
+        a->batch_source = src;
+    }
+    if (!a->interrupt_wait) a->batch_soft = true;
+}
+
+bool agent_tool_steering_signal(agent_t *a) {
+    if (!a) return false;
     pthread_mutex_lock(&a->mu);
-    bool r = json_len(q) > 0;
+    check_steering_locked(a);
+    bool r = a->batch_soft;
     pthread_mutex_unlock(&a->mu);
     return r;
+}
+
+const char *agent_tool_interrupt_source(agent_t *a) {
+    if (!a) return NULL;
+    pthread_mutex_lock(&a->mu);
+    check_steering_locked(a);
+    const char *r = a->batch_source;
+    pthread_mutex_unlock(&a->mu);
+    return r;
+}
+
+bool agent_tool_interrupted(agent_t *a) {
+    if (!a) return false;
+    pthread_mutex_lock(&a->mu);
+    check_steering_locked(a);
+    bool r = a->batch_source != NULL;
+    pthread_mutex_unlock(&a->mu);
+    return r;
+}
+
+static void batch_interrupt_reset(agent_t *a) {
+    pthread_mutex_lock(&a->mu);
+    a->batch_source = NULL;
+    a->batch_steered = a->batch_soft = false;
+    pthread_mutex_unlock(&a->mu);
+}
+
+/* agent-loop.ts createSkippedToolResult: an interruptible tool the interrupt preempted (`started`: it was running) */
+void agent_skipped_tool_result(tool_result_t *r, const char *source, bool started) {
+    const char *reason = "pending steering message", *blocker = "queued message";
+    if (str_eq(source, "user")) reason = "queued user message", blocker = "queued message";
+    else if (str_eq(source, "agent")) reason = "pending parent steering message", blocker = "steering message";
+    else if (str_eq(source, "system")) reason = "pending system advisory", blocker = "advisory";
+    else if (str_eq(source, "irc")) reason = "pending peer interrupt", blocker = "interrupt";
+    else if (str_eq(source, "aside")) reason = "a queued aside message", blocker = "aside";
+    else if (str_eq(source, "background"))
+        reason = "a queued background completion (job or supervised process)", blocker = "completion notice";
+    tool_result_free(r);
+    *r = (tool_result_t){0};
+    tool_result_textf(r,
+                      "Skipped due to %s. Do not count this skipped result as completed work or verification. After the %s "
+                      "is handled on the next step, retry the skipped tool if it is still needed.",
+                      reason, blocker);
+    r->is_error = true;
+    r->details = json_obj();
+    if (started) {
+        json_set_bool(r->details, "__interrupted", true);
+        json_set_str(r->details, "source", "interrupt_skipped");
+        json_set_str(r->details, "execution", "started");
+    } else {
+        json_set_bool(r->details, "__synthetic", true);
+        json_set_str(r->details, "source", "interrupt_skipped");
+        json_set_bool(r->details, "executed", false);
+    }
 }
 
 /* adds message to history and to the run list, emitting start/end */
@@ -1293,7 +1401,10 @@ static void run_tool(tool_job_t *j) {
                         .intent = j->intent};
     if (!j->quiet) emit(a, &st);
     if (j->skip) {
-        tool_result_error(&j->res, "Skipped due to queued user message.");
+        pthread_mutex_lock(&a->mu);
+        const char *src = a->batch_source;
+        pthread_mutex_unlock(&a->mu);
+        agent_skipped_tool_result(&j->res, src, false);
     } else if (!j->tool) {
         char *msg = tool_not_found_message(a, name ? name : "(null)");
         tool_result_validation_error(&j->res, "%s", msg);
@@ -1337,6 +1448,14 @@ static void run_tool(tool_job_t *j) {
                 j->ctx.intent = j->intent;
                 j->tool->execute(j->tool, &j->ctx, j->args, &j->res);
                 if (a->cancel && !j->res.content) tool_result_error(&j->res, "Tool execution was aborted");
+                /* an interruptible tool the interrupt cut short with an error (not an external abort) reads as skipped;
+                 * a handler of the interrupt (wait) reports its own wake */
+                if (j->tool->interruptible && !j->tool->handles_tool_interrupt && j->res.is_error && !a->cancel) {
+                    pthread_mutex_lock(&a->mu);
+                    const char *src = a->batch_source;
+                    pthread_mutex_unlock(&a->mu);
+                    if (src) agent_skipped_tool_result(&j->res, src, true);
+                }
             }
         }
         free(reason);
@@ -1475,6 +1594,19 @@ static bool resolved_call(const json_t *resolved, const char *id) {
     return false;
 }
 
+/* agent-loop.ts flushResultMessages: a tool's result message joins the history (message_start/end) as soon as it and
+ * every call before it have results, in batch order */
+static void flush_tool_results(agent_t *a, json_t *run_msgs, json_t *results_out, tool_job_t **jobs, size_t *flushed,
+                               size_t upto) {
+    for (; *flushed < upto; ++*flushed) {
+        tool_job_t *j = jobs[*flushed];
+        if (!j->res.content) tool_result_error(&j->res, "Tool execution was aborted");
+        json_t *m = msg_tool_result(json_get_str(j->call, "id"), json_get_str(j->call, "name"), &j->res);
+        json_push(results_out, json_clone(m));
+        add_message(a, run_msgs, m);
+    }
+}
+
 static void execute_tools(agent_t *a, json_t *run_msgs, const json_t *assistant, json_t *results_out,
                           const json_t *resolved) {
     json_t *content = json_get(assistant, "content");
@@ -1493,7 +1625,8 @@ static void execute_tools(agent_t *a, json_t *run_msgs, const json_t *assistant,
         j->intent = extract_intent(j->tool, j->args, &j->intent_too_long);
         vec_push(&jobs, j);
     }
-    size_t i = 0;
+    batch_interrupt_reset(a);
+    size_t i = 0, flushed = 0;
     while (i < jobs.n) {
         if (a->cancel) {
             for (size_t k = i; k < jobs.n; k++) {
@@ -1507,13 +1640,22 @@ static void execute_tools(agent_t *a, json_t *run_msgs, const json_t *assistant,
             }
             break;
         }
-        if (!a->interrupt_wait && queue_nonempty(a, a->steering)) {
-            for (size_t k = i; k < jobs.n; k++) jobs.v[k]->skip = true;
-        }
+        /* agent-loop.ts runTool: a pending interrupt preempts only not-yet-started interruptible tools that don't
+         * drain the wake themselves; every other already-emitted call runs (#10439) and the steer injects at the batch
+         * boundary. Steering is peeked before each start (omp's watch + post-tool checkSteering). */
+        pthread_mutex_lock(&a->mu);
+        check_steering_locked(a);
+        bool interrupted = a->batch_source != NULL;
+        pthread_mutex_unlock(&a->mu);
+        if (interrupted)
+            for (size_t k = i; k < jobs.n; k++)
+                if (jobs.v[k]->tool && jobs.v[k]->tool->interruptible && !jobs.v[k]->tool->handles_tool_interrupt)
+                    jobs.v[k]->skip = true;
         bool excl = !jobs.v[i]->tool || jobs.v[i]->tool->exclusive || jobs.v[i]->skip;
         if (excl) {
             run_tool(jobs.v[i]);
             i++;
+            flush_tool_results(a, run_msgs, results_out, jobs.v, &flushed, i);
             continue;
         }
         /* batch of consecutive shared tools, run in parallel (cap 8) */
@@ -1532,19 +1674,18 @@ static void execute_tools(agent_t *a, json_t *run_msgs, const json_t *assistant,
                 if (jobs.v[k]->th) pthread_join(jobs.v[k]->th, NULL);
         }
         i = end;
+        flush_tool_results(a, run_msgs, results_out, jobs.v, &flushed, i);
     }
+    flush_tool_results(a, run_msgs, results_out, jobs.v, &flushed, jobs.n);
     for (size_t k = 0; k < jobs.n; k++) {
         tool_job_t *j = jobs.v[k];
-        if (!j->res.content) tool_result_error(&j->res, "Tool execution was aborted");
-        json_t *m = msg_tool_result(json_get_str(j->call, "id"), json_get_str(j->call, "name"), &j->res);
-        json_push(results_out, json_clone(m));
-        add_message(a, run_msgs, m);
         tool_result_free(&j->res);
         json_free(j->args);
         free(j->intent);
         free(j);
     }
     vec_free(&jobs);
+    batch_interrupt_reset(a);
 }
 
 /* ---------- loop ---------- */
@@ -1786,6 +1927,9 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
         if (a->max_turns && turns >= a->max_turns) break;
         json_t *steer = take_queue(a, &a->steering), *asides = take_asides(a);
         if (steer || asides) {
+            /* runLoop: the next turn opens before its queued input messages are emitted */
+            emit_simple(a, AGENT_EV_TURN_START);
+            turn_open = true;
             if (steer) json_arr_foreach(steer, i, m) add_message(a, run_msgs, json_clone(m));
             if (asides) json_arr_foreach(asides, i, m) add_message(a, run_msgs, json_clone(m));
             json_free(steer);
@@ -1805,6 +1949,8 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
         }
         json_t *fu = take_queue(a, &a->follow_up);
         if (fu) {
+            emit_simple(a, AGENT_EV_TURN_START);
+            turn_open = true;
             json_arr_foreach(fu, i, m) add_message(a, run_msgs, json_clone(m));
             json_free(fu);
             continue;

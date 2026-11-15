@@ -400,6 +400,9 @@ qrun() { # extra-commands...
 }
 check "queue one-at-a-time" "slow:1.5:x,s1,s2,f1 / 4"  env B="$B" ROOT="$ROOT" bash -c "$(declare -f qrun); qrun"
 check "queue steer all"     "slow:1.5:x,s1,s2,f1 / 3"  env B="$B" ROOT="$ROOT" bash -c "$(declare -f qrun); qrun '{\"id\":\"m\",\"type\":\"set_steering_mode\",\"mode\":\"all\"}'"
+# a steer queued mid-batch never skips the already-emitted calls (omp #10439): bash backgrounds itself early only outside
+# interruptMode "wait", the write still runs, results flush per tool and the steer opens the next turn
+check "steer batch"    $'immediate: bash=backgrounded write=ok file=yes skipped=0 order=ok\nwait: bash=finished write=ok file=yes skipped=0 order=ok' python3 -I "$ROOT/tests/e2e/steer_batch_rpc.py" "$B"
 # async jobs: background bash delivered as a follow-up; wait with nothing running returns at once
 : > "$T/req.jsonl"
 check "async bash"     "Backgrounded as job bg_1"  bash -c "'$B' --model mock/mock-1 --mode json -p 'call:bash:{\"command\":\"sleep 1; echo bgdone\",\"async\":true}' | grep -o 'Backgrounded as job bg_1'"
