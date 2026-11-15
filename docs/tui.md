@@ -55,9 +55,38 @@ last screen row, as omp's bottom-anchored viewport does (they are also still in 
 Frames are framed like omp's paints (cursor hidden, `CSI ?2026` synchronized output, autowrap off,
 each row written then erased to its end). Clearing screen and scrollback is reserved for explicit
 full requests (`tui_request_full_render`: session replaced, transcript rebuilt, thinking visibility
-toggled); a resize repaints only the screen with the frame's tail. `tui_full_redraw_count` exposes the
-clears to tests, and `OMC_TUI_DEBUG=<file>` logs one line per frame (kind: first/diff/above/none/full/
-resize, first changed row, viewport top, bytes written, old/new excerpt of the changed row).
+toggled) and settled resizes in `rebuild` mode (below); the clear is ED2 then ED3 (tmux scrolls an ED2'd
+screen into pane history, which ED3 then wipes). `tui_full_redraw_count` exposes the clears to tests, and
+`OMC_TUI_DEBUG=<file>` logs one line per frame (kind: first/diff/above/none/full:request/full:resize/
+resize:width/resize:height/resize:append/resize:alt, first changed row, viewport top, bytes written,
+old/new excerpt of the changed row).
+
+**Resize** is a transaction, ported from omp's tui.ts (`tui_handle_resize`, called on SIGWINCH). Every
+step of a burst is folded into burst flags (width changed, resized, shrank, grew, total grow), so a drag
+that ends where it started still counts; the burst settles once the size has been quiet for 120 ms.
+Meanwhile: inside tmux in `rebuild` mode with synchronized output, and on Warp (`TERM_PROGRAM`), nothing
+paints until the settle (the old screen stays up); everywhere else the burst borrows the alternate screen
+and paints the frame's tail there, after blanking the live rows on the normal screen first (direct
+terminals only; the erase rides in the first resize frame's synchronized update), so the terminal's
+reflow can only push committed rows into scrollback. `PI_TUI_RESIZE_IN_PLACE=1|0` forces either path.
+At the settle, `tui_set_resize_scrollback` (setting `tui.resizeScrollback`, default `rebuild`; the TUI
+alone starts in `PI_TUI_RESIZE_SCROLLBACK` or `preserve`) decides (omp `#prepareResizeReplay`):
+`rebuild` erases screen and scrollback and replays every row at the new width when the width moved or a
+step shrank the height (the borrow's exit is fused into that write, and in tmux the replay renews DEC 2026
+every 16 KiB and, from 7 MiB, is preceded by the bottom-row `↻ Rebuilding…` notice); `append` writes every
+row from the viewport's anchor down, a current-width copy below the retained history, on a width change;
+`preserve`, Warp, and height-only grows repaint the screen only. Non-destructive settles first recover the
+reflowed anchor with a CPR (`CSI 6n`, 200 ms, once more on a multiplexer or after a grow; omp
+`#resolveResizeAnchor`'s direct-terminal bound and multiplexer clip model as the fallbacks), so a frame
+shorter than the screen stays where it was. Held rows (`tui_hold_history`) keep their rule through all of
+this: a rebuild writes the rows above the hold and the screen's tail, and the held block enters
+scrollback once it settles. A size change while a fullscreen page is up repaints the page; the normal
+screen settles the same way when the page closes. 100 ms after a borrow settles a new size change paints
+directly (omp's echo suppression). omp differences left: omp's viewport is its live (unretired) blocks, so
+in `preserve` it writes the blocks that no longer fit after the resize into history again at the new
+width; omc has no block ledger and treats the rows above the repainted screen as history. The CPR is
+synchronous and untagged (omp tags each request with a cursor column), and the tmux replay does not
+REP-encode its padding.
 `tui_set_paint_listener` reports each written frame like omp's `TuiPaint` (rows newly committed to
 scrollback, the rows on screen, `reset` for a scrollback clear, `alt` for a fullscreen page); `/record`
 feeds its `.ompcast` encoder from it.

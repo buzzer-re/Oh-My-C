@@ -1,6 +1,7 @@
 /* render.c - component model, differential renderer, overlays, event loop. */
 #include "tui/render.h"
 #include "tui/motion.h"
+#include "tui/notify.h"
 #include "tui/termcaps.h"
 
 #include <errno.h>
@@ -168,6 +169,30 @@ struct tui {
         int viewport_top, committed, hw_row, width, height;
         bool have_frame;
     } normal;
+    /* settled-resize transaction (omp tui.ts resize burst, tui.resizeScrollback) */
+    tui_resize_scrollback_t resize_mode;
+    struct {
+        bool width_changed, resized, shrank, grew; /* any step of the burst, not the net change */
+        int last_height;                           /* 0: no step yet */
+        int pull;                                  /* sum of the burst's height grows */
+    } burst;
+    int settle_timer;           /* the quiet-window timer, 0: none */
+    bool resize_alt;            /* the burst borrowed the alternate screen; its frames paint there */
+    bool resize_inplace;        /* an in-place burst: normal paints wait for the settle */
+    bool resize_alt_exit_fused; /* pending_alt_exit is the borrow's own exit, fused into the latched rebuild */
+    char *pending_alt_enter;    /* the borrow's entry, carried by its first frame (or the exit write) */
+    char *pending_alt_exit;     /* written inside the rebuild frame's synchronized update */
+    int replay_w, replay_h;     /* #resizeReplaySize: the size whose history refresh is already latched */
+    bool append_replay;         /* the next normal frame writes every row below retained history */
+    bool force_repaint;         /* the next normal frame repaints the screen at resize_top */
+    int resize_top;             /* settled anchor: screen row of the viewport's top row, -1: unknown */
+    int64_t suppress_resize_until;
+    strvec_t probe_window;      /* rows on screen when the burst began */
+    int probe_top, probe_offset; /* their first screen row; the parked cursor's row among them */
+    bool probe_hidden;          /* held rows were hidden above the screen when the burst began */
+    int probe_committed;
+    bool renew_sync;            /* tmux rebuild replay: renew DEC 2026 every SYNC_RENEW_BYTES */
+    size_t sync_mark;
     bool show_hw_cursor;
     int min_interval;
     int64_t last_render; /* start of the last frame */
@@ -221,6 +246,8 @@ tui_t *tui_new(tui_term_t *term) {
     t->root = tui_container_new();
     t->root->base.tui = t;
     t->hold = INT_MAX;
+    t->resize_top = -1;
+    t->resize_mode = tui_resize_scrollback_parse(getenv("PI_TUI_RESIZE_SCROLLBACK"), TUI_RESIZE_PRESERVE);
     t->min_interval = -1; /* the tui.maxFps ceiling */
     pthread_mutex_init(&t->mu, NULL);
     t->wake[0] = t->wake[1] = -1;
@@ -250,6 +277,9 @@ void tui_free(tui_t *t) {
     tui_component_destroy(&t->root->base);
     strvec_free(&t->prev);
     strvec_free(&t->normal.prev);
+    strvec_free(&t->probe_window);
+    free(t->pending_alt_enter);
+    free(t->pending_alt_exit);
     tui_keydec_free(&t->dec);
     vec_free(&t->timers);
     vec_free(&t->posted);
@@ -557,7 +587,7 @@ static void emit_paint(tui_t *t, const strvec_t *lines, int width, int height) {
         p.viewport = (const char *const *)lines->v;
         p.nviewport = (size_t)MIN(n, height);
     } else {
-        p.reset = str_eq(t->frame_kind, "full:request");
+        p.reset = str_eq(t->frame_kind, "full:request") || str_eq(t->frame_kind, "full:resize");
         int com = clampi(t->committed, 0, n);
         int from = p.reset ? 0 : clampi(t->paint_committed, 0, com);
         p.history = (const char *const *)lines->v + from;
@@ -603,6 +633,13 @@ static void finish_frame(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int 
     t->prev_height = height;
     t->have_frame = true;
     t->render_count++;
+    if (!t->alt) { /* a normal-screen frame commits the geometry: the burst is over */
+        memset(&t->burst, 0, sizeof t->burst);
+        t->replay_w = t->replay_h = 0;
+        t->append_replay = t->force_repaint = false;
+        t->resize_top = -1;
+        t->probe_hidden = false;
+    }
 }
 
 /* erase the rows below the cursor's (the cursor may sit in the last column of a full row, where ED 0
@@ -611,11 +648,18 @@ static void finish_frame(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int 
 
 /* Write rows [from, to) one per screen row starting at the cursor's row (column 0 after the first).
  * Rows past the bottom scroll the screen, pushing its top rows into native scrollback. */
+/* tmux expires a synchronized update after a second: a large rebuild replay renews it as it streams */
+#define SYNC_RENEW_BYTES (16 * 1024)
+
 static void write_run(tui_t *t, const strvec_t *lines, int from, int to, bool *any, int width) {
     for (int i = from; i < to; i++) {
         if (*any) tui_term_puts(t->term, "\r\n");
         write_row(t->term, lines->v[i], width);
         *any = true;
+        if (t->renew_sync && t->term->out.len - t->sync_mark >= SYNC_RENEW_BYTES) {
+            tui_term_puts(t->term, "\x1b[?2026h");
+            t->sync_mark = t->term->out.len;
+        }
     }
 }
 
@@ -647,8 +691,28 @@ static void write_from_top(tui_t *t, const strvec_t *lines, int c, int r0, int w
 /* Write every row: the first frame from where the cursor is, or (clear) after erasing the screen and
  * scrollback. Clearing is reserved for explicit full requests (session replace, transcript
  * rebuild): omp's destructive reset (`clearScrollback`). */
+/* Smallest settled tmux rebuild replay preceded by the `Rebuilding…` notice (omp
+ * #RESIZE_REBUILD_NOTICE_MIN_BYTES): tmux holds the replay's synchronized update until it ends, so the
+ * notice stays up exactly as long as tmux takes to ingest it; a smaller replay would only flash it. */
+#define RESIZE_REBUILD_NOTICE_MIN_BYTES ((size_t)7 * 1024 * 1024)
+
+/* omp #rebuildNoticeSequence: the bottom-row notice, closed as its own synchronized update so tmux forwards
+ * it before the replay starts a new hold; cursor save/restore and no newline keep it out of scrollback, and
+ * the replay's ED2 erases it */
+static char *rebuild_notice(const tui_term_t *tm, int width, int height) {
+    char *label = tui_truncate_to_width("\u21bb Rebuilding\u2026", width, "");
+    char *s = xasprintf("\x1b[?25l%s\x1b[?7l\x1b" "7\x1b[%d;1H\x1b[0m\x1b[2K%s" LINE_TERMINATOR "\x1b" "8\x1b[?7h%s",
+                        tm->sync_output ? "\x1b[?2026h" : "", height, label, tm->sync_output ? "\x1b[?2026l" : "");
+    free(label);
+    return s;
+}
+
+/* Write every row: the first frame from where the cursor is, or (clear) after erasing the screen and
+ * scrollback. Clearing is reserved for explicit full requests (session replace, transcript
+ * rebuild) and a settled resize in rebuild mode: omp's destructive reset (`clearScrollback`). */
 static void full_render(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int width, int height, bool clear) {
     tui_term_t *tm = t->term;
+    size_t mark = tm->out.len;
     /* a destructive reset purges every Kitty image (text erases leave placements painted); the live ones
      * are transmitted again after the clear */
     char *purge = clear ? tui_image_reset_display() : NULL;
@@ -656,33 +720,427 @@ static void full_render(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int w
     free(purge);
     paint_begin(t);
     int r0;
+    bool fused_exit = false;
     if (clear) {
+        /* a settled resize borrow's exit rides in this update: the terminal goes from the resize frame
+         * straight to the rebuilt screen (an entry no frame carried yet goes first) */
+        if (t->pending_alt_exit) {
+            if (t->pending_alt_enter) tui_term_puts(tm, t->pending_alt_enter);
+            tui_term_puts(tm, t->pending_alt_exit);
+            free(t->pending_alt_enter);
+            free(t->pending_alt_exit);
+            t->pending_alt_enter = t->pending_alt_exit = NULL;
+            t->resize_alt_exit_fused = false;
+            fused_exit = true;
+        }
+        tui_term_puts(tm, LINE_TERMINATOR);
         tui_term_clear_screen(tm, true);
         write_transmits(tm);
         t->full_count++;
         r0 = 0;
+        t->renew_sync = t->resize_mode == TUI_RESIZE_REBUILD && tm->sync_output && tui_inside_tmux();
+        t->sync_mark = mark;
     } else {
         tui_term_puts(tm, "\r");
         r0 = t->start_screen_row;
     }
     write_from_top(t, lines, -r0, r0, width, height);
+    if (t->renew_sync && !fused_exit && t->replay_w && tm->out.len - mark >= RESIZE_REBUILD_NOTICE_MIN_BYTES) {
+        char *notice = rebuild_notice(tm, width, height);
+        sb_t b = SB_INIT;
+        sb_appendn(&b, tm->out.s, mark);
+        sb_append(&b, notice);
+        sb_appendn(&b, tm->out.s + mark, tm->out.len - mark);
+        sb_free(&tm->out);
+        tm->out = b;
+        free(notice);
+    }
+    t->renew_sync = false;
     finish_frame(t, lines, cp, width, height);
 }
 
-/* After a resize, repaint only the screen with the frame's tail (omp's default `preserve` resize
- * mode): native scrollback keeps what it already holds. */
-static void window_repaint(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int width, int height) {
+/* ---------- settled resize (omp tui.ts resize transaction, tui.resizeScrollback) ---------- */
+
+/* quiet window before a resize burst settles, and the longest wait for its anchor's CPR reply */
+#define RESIZE_SETTLE_MS 120
+#define RESIZE_PROBE_TIMEOUT_MS 200
+
+static int query_cursor_row_ms(tui_t *t, int timeout_ms);
+
+void tui_set_resize_scrollback(tui_t *t, tui_resize_scrollback_t mode) { t->resize_mode = mode; }
+tui_resize_scrollback_t tui_resize_scrollback(const tui_t *t) { return t->resize_mode; }
+
+tui_resize_scrollback_t tui_resize_scrollback_parse(const char *s, tui_resize_scrollback_t dflt) {
+    if (str_eq(s, "append")) return TUI_RESIZE_APPEND;
+    if (str_eq(s, "rebuild")) return TUI_RESIZE_REBUILD;
+    if (str_eq(s, "preserve")) return TUI_RESIZE_PRESERVE;
+    return dflt;
+}
+
+/* PI_TUI_RESIZE_IN_PLACE=1|true forces the in-place resize, 0|false the alternate-screen borrow; -1: unset */
+static int resize_in_place_override(void) {
+    const char *o = getenv("PI_TUI_RESIZE_IN_PLACE");
+    if (!o) return -1;
+    if (!strcmp(o, "1") || !strcmp(o, "true")) return 1;
+    if (!strcmp(o, "0") || !strcmp(o, "false")) return 0;
+    return -1;
+}
+
+/* omp #resizeRepaintsInPlace: Warp re-reports its size on alt-buffer toggles (a borrow would loop on its
+ * own echo), so it repaints the settled screen in place with no history refresh; a multiplexer owns the grid
+ * and consumes the toggles itself */
+static bool resize_repaints_in_place(void) {
+    int o = resize_in_place_override();
+    if (o >= 0) return o == 1;
+    if (tui_inside_multiplexer()) return false;
+    return str_ieq(env_get("TERM_PROGRAM"), "warpterminal");
+}
+
+/* omp #resizeAvoidsAltBuffer: tmux ends a synchronized update early when the alternate buffer is restored,
+ * so a synchronized rebuild there stays on the main buffer */
+static bool resize_avoids_alt(const tui_t *t) {
+    if (resize_repaints_in_place()) return true;
+    return !t->resize_alt && !t->pending_alt_exit && resize_in_place_override() != 0 &&
+           t->resize_mode == TUI_RESIZE_REBUILD && t->term->sync_output && tui_inside_tmux();
+}
+
+/* rows [start, end) of a painted window re-measured at `width` (every terminal rewraps on a width change) */
+static int reflowed_rows(const strvec_t *w, int start, int end, int width) {
+    int rows = 0;
+    for (int i = MAX(0, start); i < MIN(end, (int)w->n); i++)
+        rows += MAX(1, (tui_visible_width(w->v[i]) + MAX(1, width) - 1) / MAX(1, width));
+    return rows;
+}
+
+/* keyboard enhancement around the borrowed buffer (omp #keyboardEnhancementEnter / #altScreenExit) */
+static char *alt_enter_seq(const tui_term_t *tm) {
+    if (tm->kitty_active) return xasprintf("\x1b[?1049h\x1b[>%du", tm->kitty_flags);
+    return xstrdup(tm->modify_other_keys ? "\x1b[?1049h\x1b[>4;2m" : "\x1b[?1049h");
+}
+
+static char *alt_exit_seq(const tui_term_t *tm) {
+    if (tm->kitty_active) return xasprintf("\x1b[<u\x1b[?1049l\x1b[=%d;1u", tm->kitty_flags);
+    return xstrdup("\x1b[?1049l");
+}
+
+static void latch_full(tui_t *t) {
+    pthread_mutex_lock(&t->mu);
+    t->full_pending = true;
+    t->render_pending = true;
+    pthread_mutex_unlock(&t->mu);
+}
+
+/* One SIGWINCH step of the coalesced burst (omp #trackResizeBurst) */
+static void track_burst(tui_t *t) {
+    int cols = t->term->cols, rows = t->term->rows;
+    int last = t->burst.last_height ? t->burst.last_height : t->prev_height;
+    if (rows > last) t->burst.grew = true;
+    if (rows < last) t->burst.shrank = true;
+    t->burst.last_height = rows;
+    t->burst.pull += MAX(0, rows - last);
+    if (cols != t->prev_width) t->burst.width_changed = true;
+    if (cols != t->prev_width || rows != t->prev_height) t->burst.resized = true;
+}
+
+/* the rows on screen when the burst began, for the live-viewport erase and the settled anchor */
+static void stash_window(tui_t *t) {
+    strvec_free(&t->probe_window);
+    int vt = t->viewport_top, pn = (int)t->prev.n;
+    int from = MAX(vt, 0), to = MIN(pn, vt + t->prev_height);
+    for (int i = from; i < to; i++) strvec_push(&t->probe_window, t->prev.v[i]);
+    t->probe_top = MAX(0, -vt);
+    t->probe_offset = MAX(0, t->hw_row - from);
+    t->probe_hidden = t->committed >= 0 && t->committed < vt;
+    t->probe_committed = t->committed;
+}
+
+/* omp #eraseBelowRow: erase `row` and below, absolute, never a full-screen clear (tmux archives those) */
+static char *erase_below_row(int row, int height) {
+    int top = MAX(0, MIN(row, MAX(0, height - 1)));
+    if (top > 0) return xasprintf("\x1b[%d;1H\x1b[J", top + 1);
+    if (height <= 1) return xstrdup("\x1b[1;1H\x1b[2K");
+    return xstrdup("\x1b[1;1H\x1b[2K\x1b[2;1H\x1b[J\x1b[1;1H");
+}
+
+/* omp #eraseBelowCursorRow: the cursor's row and below, cursor-relative, never from the first cell */
+static const char *erase_below_cursor_row(int width, int height) {
+    if (height <= 1) return "\r\x1b[2K";
+    if (width > 1) return "\r\x1b[2K\x1b[C\x1b[J\r";
+    return "\r\x1b[2K\x1b" "7\x1b[B\x1b[J\x1b" "8";
+}
+
+/* omp #liveViewportResizeErase: blank the live rows on the normal screen before the burst waits out the drag,
+ * so a reflow-driven scroll can only push committed rows (or blanks) into scrollback; the cursor ends on the
+ * viewport's top row. Multiplexers skip it (an immediate erase races the pane re-layout). */
+static char *live_viewport_erase(tui_t *t) {
+    if (!t->have_frame || t->probe_window.n == 0 || tui_inside_multiplexer()) return xstrdup("");
+    int cols = MAX(1, t->term->cols), rows = MAX(1, t->term->rows);
+    if (rows < t->prev_height) {
+        int stale = reflowed_rows(&t->probe_window, 0, (int)t->probe_window.n, cols);
+        char *e = erase_below_row(MAX(0, MIN(t->probe_top, rows - stale)), rows);
+        char *r = xasprintf("\x1b[?25l%s", e);
+        free(e);
+        return r;
+    }
+    int up = reflowed_rows(&t->probe_window, 0, t->probe_offset, cols);
+    if (up > 0) return xasprintf("\x1b[?25l\x1b[%dA%s", up, erase_below_cursor_row(cols, rows));
+    return xasprintf("\x1b[?25l%s", erase_below_cursor_row(cols, rows));
+}
+
+/* omp #prepareResizeReplay: latch the settled history refresh, keyed on the whole burst (a drag that ends
+ * where it started has still rewrapped retained history). rebuild: the destructive reset, when the width
+ * moved or a step shrank the height; append: a current-width replay below retained history, on a width
+ * change only (a height change reflows nothing); preserve and Warp: nothing. */
+static void prepare_resize_replay(tui_t *t, int width, int height) {
+    bool wc = t->burst.width_changed || width != t->prev_width;
+    bool resized = t->burst.resized || wc || height != t->prev_height;
+    if (!t->have_frame || !resized || (t->replay_w == width && t->replay_h == height) ||
+        t->resize_mode == TUI_RESIZE_PRESERVE || resize_repaints_in_place())
+        return;
+    t->replay_w = width;
+    t->replay_h = height;
+    if (t->full_pending) {
+        t->force_repaint = true;
+        return;
+    }
+    if (t->resize_mode == TUI_RESIZE_REBUILD) {
+        if (!wc && !t->burst.shrank) return;
+        latch_full(t);
+        t->force_repaint = true;
+        return;
+    }
+    if (!wc) return;
+    t->append_replay = true;
+    t->force_repaint = true;
+}
+
+/* omp #resolveResizeAnchor: where the viewport's top row landed after the terminal reflowed the normal
+ * buffer. `reported` is the parked cursor's 0-based CPR row, -1 when the probe timed out. */
+static void resolve_resize_anchor(tui_t *t, int reported) {
+    t->resize_inplace = false;
+    int w = MAX(1, t->term->cols), h = MAX(1, t->term->rows);
+    const strvec_t *win = &t->probe_window;
+    int stale = reflowed_rows(win, 0, (int)win->n, w);
+    int above = reflowed_rows(win, 0, t->probe_offset, w);
+    int reported_top = reported < 0 ? t->probe_top : reported - above;
+    int top;
+    if (tui_inside_multiplexer()) {
+        if (reported >= 0) {
+            /* tmux can grow its grid before SIGWINCH arrives; a previously full viewport that no longer
+             * reaches the bottom may have been damaged, so rebuild-mode replays its history instead */
+            if (t->resize_mode == TUI_RESIZE_REBUILD && tui_inside_tmux() && !resize_repaints_in_place() &&
+                t->burst.grew && t->probe_top + (int)win->n >= t->prev_height && reported_top + stale < h)
+                latch_full(t);
+            top = MAX(0, reported_top);
+        } else if (h < t->prev_height && !t->burst.grew) {
+            /* clip model: rows below the cursor are discarded first, the rest of the shrink pushes top rows */
+            int parked = t->probe_top + above, shrink = t->prev_height - h;
+            int discarded = MIN(shrink, MAX(0, t->prev_height - 1 - parked));
+            top = MAX(0, t->probe_top - MAX(0, shrink - discarded));
+        } else {
+            top = MAX(0, t->probe_top + t->burst.pull);
+        }
+    } else {
+        /* direct terminals rewrap bottom-preserving: the top cannot exceed `height - staleRows` */
+        int fallback = reported < 0 && t->burst.grew ? t->probe_top + t->burst.pull : reported_top;
+        top = MAX(0, MIN(fallback, h - stale));
+    }
+    t->resize_top = MIN(top, MAX(0, h - 1));
+    t->force_repaint = true;
+    tui_request_render(t);
+}
+
+/* omp #beginResizeAnchorProbe: ask the parked cursor's row (CSI 6n), once more on a multiplexer or after a
+ * grow when no reply came, then anchor the settled repaint */
+static void resize_anchor_probe(tui_t *t) {
+    int reported = -1;
+    if (t->term->is_tty && t->started) {
+        int row = query_cursor_row_ms(t, RESIZE_PROBE_TIMEOUT_MS);
+        if (row <= 0 && (tui_inside_multiplexer() || t->burst.grew)) row = query_cursor_row_ms(t, RESIZE_PROBE_TIMEOUT_MS);
+        if (row > 0) reported = row - 1;
+    }
+    resolve_resize_anchor(t, reported); /* input read around the reply waits in the decoder for the loop */
+}
+
+/* omp #settleResizeAltPaint: end the borrow. A settle that rebuilds history fuses the exit into the
+ * destructive reset's write; every other settle restores the normal screen and probes its anchor. */
+static void settle_resize_alt(tui_t *t) {
+    t->resize_alt = false;
+    t->suppress_resize_until = mono_ms() + 100;
+    char *exit = alt_exit_seq(t->term);
+    if (!t->pending_alt_exit) {
+        if (t->resize_mode == TUI_RESIZE_REBUILD) prepare_resize_replay(t, t->term->cols, t->term->rows);
+        if (t->full_pending) {
+            t->pending_alt_exit = exit;
+            t->resize_alt_exit_fused = true;
+            tui_request_render(t);
+            return;
+        }
+    }
+    if (t->pending_alt_enter) tui_term_puts(t->term, t->pending_alt_enter);
+    free(t->pending_alt_enter);
+    t->pending_alt_enter = NULL;
+    tui_term_puts(t->term, exit);
+    free(exit);
+    tui_term_flush(t->term);
+    resize_anchor_probe(t);
+}
+
+static void resize_settle(void *ud) {
+    tui_t *t = ud;
+    t->settle_timer = 0;
+    if (t->resize_alt) {
+        settle_resize_alt(t);
+    } else if (t->resize_inplace) {
+        prepare_resize_replay(t, t->term->cols, t->term->rows);
+        if (t->full_pending) {
+            t->resize_inplace = false;
+            tui_request_render(t);
+            return;
+        }
+        resize_anchor_probe(t);
+    }
+}
+
+static void arm_settle(tui_t *t) {
+    if (t->settle_timer) tui_remove_timer(t, t->settle_timer);
+    t->settle_timer = tui_add_timer(t, RESIZE_SETTLE_MS, false, resize_settle, t);
+}
+
+/* omp #beginResizeInPlacePaint: wait out the drag with the old screen visible (no paints), then rebuild
+ * under synchronized output (tmux) or repaint at the probed anchor (Warp) */
+static void begin_resize_inplace(tui_t *t) {
+    track_burst(t);
+    if (!t->resize_inplace) {
+        stash_window(t);
+        char *erase = live_viewport_erase(t);
+        if (*erase) {
+            tui_term_puts(t->term, erase);
+            tui_term_flush(t->term);
+            t->term->cursor_hidden = true;
+            t->probe_offset = 0; /* the erase parked the cursor on the viewport's top row */
+        }
+        free(erase);
+    }
+    t->resize_inplace = true;
+    arm_settle(t);
+}
+
+/* omp #beginResizeAltPaint: borrow the alternate screen for history-free resize frames. The live-viewport
+ * erase and the buffer switch ride in the first resize frame's synchronized update. */
+static void begin_resize_alt(tui_t *t) {
+    track_burst(t);
+    if (!t->resize_alt && t->resize_alt_exit_fused) {
+        /* the settled rebuild has not been written yet, so the terminal never left the borrowed buffer */
+        t->resize_alt = true;
+        free(t->pending_alt_exit);
+        t->pending_alt_exit = NULL;
+        t->resize_alt_exit_fused = false;
+    } else if (!t->resize_alt) {
+        t->resize_alt = true;
+        stash_window(t);
+        char *erase = live_viewport_erase(t);
+        if (*erase) t->probe_offset = 0;
+        char *enter = alt_enter_seq(t->term);
+        free(t->pending_alt_enter);
+        t->pending_alt_enter = xasprintf("%s%s", erase, enter);
+        free(erase);
+        free(enter);
+    }
+    arm_settle(t);
+    tui_request_render(t);
+}
+
+void tui_handle_resize(tui_t *t) {
+    tui_component_invalidate(&t->root->base);
+    if (!t->have_frame || t->alt) { /* a fullscreen page just repaints at the new size */
+        tui_request_render(t);
+        return;
+    }
+    if (mono_ms() < t->suppress_resize_until) { /* right after a borrow settled: no new borrow */
+        tui_request_render(t);
+        return;
+    }
+    if (resize_avoids_alt(t)) begin_resize_inplace(t);
+    else begin_resize_alt(t);
+}
+
+/* drop a resize transaction (suspend, shutdown): leave a borrowed buffer whose entry was written */
+static void resize_abort(tui_t *t) {
+    if (t->settle_timer) tui_remove_timer(t, t->settle_timer);
+    t->settle_timer = 0;
+    if ((t->resize_alt || t->resize_alt_exit_fused) && !t->pending_alt_enter) {
+        char *exit = alt_exit_seq(t->term);
+        tui_term_puts(t->term, exit);
+        free(exit);
+    }
+    free(t->pending_alt_enter);
+    free(t->pending_alt_exit);
+    t->pending_alt_enter = t->pending_alt_exit = NULL;
+    t->resize_alt = t->resize_alt_exit_fused = t->resize_inplace = false;
+    memset(&t->burst, 0, sizeof t->burst);
+    t->replay_w = t->replay_h = 0;
+    t->append_replay = t->force_repaint = false;
+    t->resize_top = -1;
+}
+
+/* One frame on the borrowed resize screen: the frame's tail, repainted whole. The normal screen's
+ * accounting is untouched (omp #renderResizeAltFrame: a transient buffer, not a session paint). */
+static void paint_resize_alt(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int width, int height) {
     tui_term_t *tm = t->term;
-    int nn = (int)lines->n;
     paint_begin(t);
-    int top = MAX(0, nn - height);
+    if (t->pending_alt_enter) {
+        tui_term_puts(tm, t->pending_alt_enter);
+        free(t->pending_alt_enter);
+        t->pending_alt_enter = NULL;
+    }
     tui_term_puts(tm, "\x1b[H");
     bool any = false;
-    write_run(t, lines, top, nn, &any, width);
-    if (nn - top < height) tui_term_puts(tm, ERASE_BELOW);
-    t->viewport_top = top;
-    t->committed = MIN(t->committed, top);
-    t->hw_row = MAX(top, nn - 1);
+    write_run(t, lines, 0, (int)lines->n, &any, width);
+    if ((int)lines->n < height) tui_term_puts(tm, lines->n ? ERASE_BELOW : "\x1b[J");
+    if (cp->found && lines->n) {
+        tui_term_printf(tm, "\x1b[%d;%dH", MIN(cp->row, (int)lines->n - 1) + 1, cp->col + 1);
+        if (t->show_hw_cursor) tui_term_cursor_show(tm, true);
+    }
+    tui_term_puts(tm, "\x1b[?7h");
+    tui_term_sync_end(tm);
+    if (t->dbg)
+        fprintf(t->dbg, "%lld frame=- kind=resize:alt bytes=%zu new=%zu\n", (long long)mono_ms(), tm->out.len, lines->n);
+    tui_term_flush(tm);
+    strvec_free(lines);
+    t->last_cost = (int)(mono_ms() - t->last_render);
+}
+
+/* The settled non-destructive repaint at the anchor (omp: the forced provider frame after
+ * #resolveResizeAnchor). append writes every row from the anchor down, a current-width copy below retained
+ * history; otherwise the frame's tail is repainted on screen, starting at the anchor when it is short, and
+ * scrollback keeps what it holds. */
+static void resize_repaint(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int width, int height) {
+    tui_term_t *tm = t->term;
+    int nn = (int)lines->n;
+    int top = t->resize_top >= 0 ? t->resize_top : MAX(0, -t->viewport_top);
+    top = MAX(0, MIN(top, height - 1));
+    paint_begin(t);
+    if (t->append_replay) {
+        tui_term_printf(tm, "\x1b[%d;1H", top + 1);
+        write_from_top(t, lines, -top, top, width, height);
+    } else {
+        int rows = MIN(nn, height), new_top = MAX(0, MIN(top, height - rows)), first = nn - rows;
+        tui_term_printf(tm, "\x1b[%d;1H", new_top + 1);
+        bool any = false;
+        write_run(t, lines, first, nn, &any, width);
+        if (new_top + rows < height) tui_term_puts(tm, rows ? ERASE_BELOW : "\x1b[J");
+        t->viewport_top = first - new_top;
+        /* rows above the screen count as history (they are in scrollback at the old width), except held
+         * rows, which were never written there */
+        int c = t->viewport_top;
+        if (c > 0 && t->hold < c) c = MAX(0, t->hold);
+        else if (c > 0 && t->probe_hidden) c = MIN(c, MAX(0, t->probe_committed));
+        t->committed = c;
+        t->paint_committed = MAX(t->paint_committed, c); /* not newly written: no paint history */
+        t->hw_row = MAX(t->viewport_top, nn - 1);
+    }
+    t->probe_hidden = false;
     finish_frame(t, lines, cp, width, height);
 }
 
@@ -720,10 +1178,13 @@ static void do_render(tui_t *t) {
     strvec_t lines = {0};
     t->last_render = mono_ms();
     t->input_render_pending = false;
+    /* an in-place resize burst: the normal-screen anchor is stale until the settle, which paints */
+    if (t->resize_inplace && !t->alt) return;
     t->hold = INT_MAX;
     tui_component_render(&t->root->base, width, &lines);
     if (t->overlays.n) composite_overlays(t, &lines, width, height);
-    if (t->alt && (int)lines.n > height) { /* the alternate screen shows the frame's last screenful */
+    bool borrowed = t->resize_alt && !t->alt;
+    if ((t->alt || borrowed) && (int)lines.n > height) { /* the alternate screen shows the frame's last screenful */
         size_t drop = lines.n - (size_t)height;
         for (size_t i = 0; i < drop; i++) free(lines.v[i]);
         memmove(lines.v, lines.v + drop, (size_t)height * sizeof *lines.v);
@@ -731,6 +1192,12 @@ static void do_render(tui_t *t) {
     }
     cursor_pos_t cp = extract_cursor(&lines, height);
     normalize_lines(&lines, width);
+    if (borrowed) {
+        paint_resize_alt(t, &lines, &cp, width, height);
+        return;
+    }
+    /* a settled rebuild-mode resize latches this frame's reset itself */
+    if (!t->alt) prepare_resize_replay(t, width, height);
 
     bool full = t->full_pending;
     t->full_pending = false;
@@ -749,13 +1216,14 @@ static void do_render(tui_t *t) {
         full = false;
     }
     if (full) {
-        dbg_note(t, "full:request", 0, NULL, NULL);
+        dbg_note(t, t->replay_w ? "full:resize" : "full:request", 0, NULL, NULL);
         full_render(t, &lines, &cp, width, height, true);
         return;
     }
-    if (width != t->prev_width || height != t->prev_height) {
-        dbg_note(t, width != t->prev_width ? "resize:width" : "resize:height", 0, NULL, NULL);
-        window_repaint(t, &lines, &cp, width, height);
+    if (width != t->prev_width || height != t->prev_height || t->force_repaint) {
+        dbg_note(t, t->append_replay ? "resize:append" : width != t->prev_width ? "resize:width" : "resize:height", 0,
+                 NULL, NULL);
+        resize_repaint(t, &lines, &cp, width, height);
         return;
     }
 
@@ -840,7 +1308,20 @@ void tui_alt_screen(tui_t *t, bool on) {
     if (on == t->alt) return;
     t->alt = on;
     if (on) {
-        tui_term_puts(t->term, "\x1b[?1049h\x1b[H\x1b[2J");
+        if (t->resize_alt || t->resize_alt_exit_fused) {
+            /* a fullscreen page opening while a resize borrow holds the alternate screen takes it over; the
+             * resize settles against the normal screen when the page closes */
+            if (t->settle_timer) tui_remove_timer(t, t->settle_timer);
+            t->settle_timer = 0;
+            if (t->pending_alt_enter) tui_term_puts(t->term, t->pending_alt_enter);
+            free(t->pending_alt_enter);
+            free(t->pending_alt_exit);
+            t->pending_alt_enter = t->pending_alt_exit = NULL;
+            t->resize_alt = t->resize_alt_exit_fused = false;
+            tui_term_puts(t->term, "\x1b[H\x1b[2J");
+        } else {
+            tui_term_puts(t->term, "\x1b[?1049h\x1b[H\x1b[2J");
+        }
         t->normal.prev = t->prev;
         memset(&t->prev, 0, sizeof t->prev);
         t->normal.viewport_top = t->viewport_top;
@@ -867,6 +1348,13 @@ void tui_alt_screen(tui_t *t, bool on) {
         t->have_frame = t->normal.have_frame;
         if (t->alt_full) t->full_pending = true;
         t->alt_full = false;
+        if (t->have_frame && !t->full_pending && (t->term->cols != t->prev_width || t->term->rows != t->prev_height)) {
+            /* the normal screen resized while covered: refresh history per the mode, else recover the
+             * reflowed anchor before anything repaints at the stale one */
+            stash_window(t);
+            prepare_resize_replay(t, t->term->cols, t->term->rows);
+            if (!t->full_pending) resize_anchor_probe(t);
+        }
     }
     tui_request_render(t);
 }
@@ -1036,14 +1524,14 @@ static void take_typeahead(tui_term_t *tm, char *buf, size_t n) {
 
 /* Ask the terminal where the cursor is (CPR) so inline content starting mid-screen is
  * tracked correctly. Other bytes received meanwhile are kept as input. */
-static int query_cursor_row(tui_t *t) {
+static int query_cursor_row_ms(tui_t *t, int timeout_ms) {
     tui_term_t *tm = t->term;
     if (!tm->is_tty) return 0;
     tui_term_puts(tm, "\x1b[6n");
     tui_term_flush(tm);
     char buf[256];
     size_t len = 0;
-    int64_t deadline = mono_ms() + 200;
+    int64_t deadline = mono_ms() + timeout_ms;
     int row = 0;
     while (len < sizeof buf - 1) {
         int left = (int)(deadline - mono_ms());
@@ -1087,6 +1575,8 @@ static int query_cursor_row(tui_t *t) {
     return 0;
 }
 
+static int query_cursor_row(tui_t *t) { return query_cursor_row_ms(t, 200); }
+
 void tui_start(tui_t *t) {
     if (t->started) return;
     t->ui_thread = pthread_self();
@@ -1121,6 +1611,7 @@ static void move_below_content(tui_t *t) {
 
 void tui_shutdown(tui_t *t) {
     if (!t->started) return;
+    resize_abort(t);
     move_below_content(t);
     tui_term_stop(t->term);
     t->started = false;
@@ -1128,6 +1619,7 @@ void tui_shutdown(tui_t *t) {
 
 int tui_suspend(tui_t *t) {
     if (!t->started) return 0;
+    resize_abort(t);
     move_below_content(t);
     tui_term_stop(t->term);
     tui_term_set_loop_active(false);
@@ -1151,11 +1643,7 @@ static void handle_signal(tui_t *t, int sig) {
     if (sig == SIGWINCH) {
         int oc = t->term->cols, orows = t->term->rows;
         tui_term_query_size(t->term);
-        if (oc != t->term->cols || orows != t->term->rows) {
-            /* the frame sees the new size and repaints the screen (scrollback is kept, as in omp) */
-            tui_component_invalidate(&t->root->base);
-            tui_request_render(t);
-        }
+        if (oc != t->term->cols || orows != t->term->rows) tui_handle_resize(t);
         return;
     }
     if (sig == SIGTSTP) {

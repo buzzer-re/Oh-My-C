@@ -506,6 +506,10 @@ if python3 -c 'import pty' 2>/dev/null; then
     check "display kitty" $'kitty transmit once ok\nkitty placement ok\ncache miss ok\nkitty placeholders ok'  env OMC_CODING_AGENT_DIR="$T/agent-disp" python3 -I "$ROOT/tests/e2e/display_tui.py" "$B" "$T/disp" kitty
     check "display sixel/iterm2" $'sixel ok\niterm2 ok\nfallback text ok'  env OMC_CODING_AGENT_DIR="$T/agent-disp" python3 -I "$ROOT/tests/e2e/display_tui.py" "$B" "$T/disp" other
     check "display keys" $'hide tool activity ok\nexpand while hidden ok\nshow tool activity ok\nmouse capture ok'  env OMC_CODING_AGENT_DIR="$T/agent-disp" python3 -I "$ROOT/tests/e2e/display_tui.py" "$B" "$T/disp" keys
+    # settled resize per tui.resizeScrollback: alternate-screen borrow, then rebuild (default) / append / preserve
+    mkdir -p "$T/resize" && for m in default append preserve; do
+        check "resize $m" "resize $m ok"  python3 -I "$ROOT/tests/e2e/resize_tui.py" "$B" "$T/agent/models.yml" "$T/resize" $m
+    done
 fi
 # slash commands (WP-4): one registry behind RPC/ACP advertising and builtin dispatch
 check "acp commands"   "available_commands_update"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo cmds"

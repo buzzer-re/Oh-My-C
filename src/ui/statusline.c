@@ -2015,6 +2015,8 @@ void ui_chrome_setup(ui_t *u) {
     snprintf(ed->text_fg, sizeof ed->text_fg, "%s", tui_rgb_fg(TH(), tui_theme_rgb(TH(), TUI_TC_TEXT), b, sizeof b));
     ed->use_terminal_cursor = settings_bool("showHardwareCursor", true);
     tui_set_show_hardware_cursor(u->tui, ed->use_terminal_cursor);
+    tui_set_resize_scrollback(u->tui, tui_resize_scrollback_parse(settings_str("tui.resizeScrollback", "rebuild"),
+                                                                  TUI_RESIZE_REBUILD));
     tui_editor_set_autocomplete_max_visible(ed, settings_num("autocompleteMaxVisible", 10));
 }
 

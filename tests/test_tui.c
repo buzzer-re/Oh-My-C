@@ -1060,12 +1060,13 @@ static void test_renderer(void) {
     CHECK(!strstr(o7, "\x1b_pi:c"));
     free(o7);
 
-    /* resize -> the screen is repainted from its top row, scrollback is kept (omp `preserve`) */
+    /* a size change a frame sees by itself, in the TUI's default `preserve` mode: the screen is repainted
+     * from its top row, scrollback is kept */
     tui_term_set_size(tm, 30, 10);
     tui_render_now(t);
     CHECK(tui_full_redraw_count(t) == fulls);
     char *o8 = drain_fd(pfd[0]);
-    CHECK(strstr(o8, "\x1b[H") && !strstr(o8, "\x1b[3J"));
+    CHECK(strstr(o8, "\x1b[1;1H") && !strstr(o8, "\x1b[3J"));
     free(o8);
 
     /* an explicit full request clears screen + scrollback */
@@ -1073,7 +1074,7 @@ static void test_renderer(void) {
     tui_render_now(t);
     CHECK(tui_full_redraw_count(t) == fulls + 1);
     char *o9 = drain_fd(pfd[0]);
-    CHECK(strstr(o9, "\x1b[3J") != NULL);
+    CHECK(strstr(o9, "\x1b[H\x1b[2J\x1b[3J") != NULL); /* ED2 before ED3 (tmux archives an ED2'd screen) */
     free(o9);
 
     /* posted callbacks + timers via run_once */
@@ -1327,6 +1328,249 @@ static void test_renderer_viewport(void) {
     CHECK(tui_full_redraw_count(t) == 0);
     tui_free(t);
     strvec_free(&v.scrollback);
+    close(pfd[0]);
+}
+
+/* ---------- settled resize (tui.resizeScrollback) ---------- */
+
+/* a direct terminal: no multiplexer, Warp or override in the environment */
+static void resize_env_direct(void) {
+    static const char *vars[] = {"TMUX", "STY", "ZELLIJ", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_TAB_ID",
+                                 "HERDR_WORKSPACE_ID", "CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_REMOTE_TRANSPORT",
+                                 "WMUX", "WMUX_SURFACE_ID", "TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE",
+                                 "PI_TUI_RESIZE_SCROLLBACK"};
+    for (size_t i = 0; i < sizeof vars / sizeof *vars; i++) unsetenv(vars[i]);
+    setenv("TERM", "xterm-256color", 1);
+}
+
+/* wait out the 120 ms quiet window and run the settle timer */
+static void resize_settle_now(tui_t *t) {
+    usleep(160 * 1000);
+    tui_run_once(t, 0);
+}
+
+static void resize_resize(tui_t *t, tui_term_t *tm, int cols, int rows) {
+    usleep(110 * 1000); /* past the 100 ms after a settle in which a new resize starts no transaction */
+    tui_term_set_size(tm, cols, rows);
+    tui_handle_resize(t);
+}
+
+static tui_t *resize_tui(int fd, tui_resize_scrollback_t mode, int nrows) {
+    tui_term_t *tm = tui_term_new(-1, fd);
+    tui_term_set_size(tm, VT_COLS, VT_ROWS);
+    tui_t *t = tui_new(tm);
+    tui_set_resize_scrollback(t, mode);
+    for (int i = 0; i < nrows; i++) {
+        char buf[32];
+        snprintf(buf, sizeof buf, "row %d", i);
+        tui_container_add(tui_root(t), &tui_text_new(buf, 0, 0)->base);
+    }
+    return t;
+}
+
+/* a frame of `n` rows of `w` x's (the rebuild notice needs a replay of at least 7 MiB) */
+typedef struct {
+    tui_component_t base;
+    int n, w;
+} bulk_t;
+
+static void bulk_render(tui_component_t *c, int width, strvec_t *out) {
+    bulk_t *b = (bulk_t *)c;
+    char *row = xmalloc((size_t)b->w + 1);
+    memset(row, 'x', (size_t)b->w);
+    row[b->w] = 0;
+    for (int i = 0; i < b->n; i++) strvec_push(out, row);
+    free(row);
+}
+
+static const tui_component_vt BULK_VT = {"bulk", bulk_render, NULL, NULL, NULL};
+
+static void test_resize_scrollback(void) {
+    resize_env_direct();
+    int pfd[2];
+    CHECK(pipe(pfd) == 0);
+    fcntl(pfd[0], F_SETFL, O_NONBLOCK);
+    char *o;
+
+    /* rebuild on a direct terminal: the burst borrows the alternate screen (live rows erased first), a drag
+     * that returns to its starting width still rebuilds, and the borrow's exit rides in the rebuild */
+    tui_t *t = resize_tui(pfd[1], TUI_RESIZE_REBUILD, 25);
+    tui_term_t *tm = tui_term(t);
+    vt_t v;
+    vt_init(&v);
+    vt_render(&v, t, pfd[0]);
+    CHECK(v.scrollback.n == 15);
+    resize_resize(t, tm, 30, VT_ROWS);
+    tui_render_now(t);
+    o = drain_fd(pfd[0]);
+    CHECK(strstr(o, "\x1b[?1049h") && strstr(o, "row 24") && !strstr(o, "\x1b[3J") && !strstr(o, "\x1b[?1049l"));
+    CHECK(strstr(o, "\x1b[J") && strstr(o, "\x1b[?1049h") > strstr(o, "\x1b[J")); /* live viewport erased first */
+    vt_feed(&v, o);
+    free(o);
+    tui_term_set_size(tm, VT_COLS, VT_ROWS); /* back to the starting width within the quiet window */
+    tui_handle_resize(t);
+    tui_render_now(t);
+    o = drain_fd(pfd[0]);
+    CHECK(!strstr(o, "\x1b[?1049h") && !strstr(o, "\x1b[3J") && strstr(o, "row 24"));
+    vt_feed(&v, o);
+    free(o);
+    CHECK(tui_full_redraw_count(t) == 0);
+    resize_settle_now(t);
+    o = drain_fd(pfd[0]);
+    CHECK(str_eq(o, "")); /* the exit waits for the rebuild frame */
+    free(o);
+    tui_render_now(t);
+    o = drain_fd(pfd[0]);
+    char *ex = strstr(o, "\x1b[?1049l"), *clr = strstr(o, "\x1b[H\x1b[2J\x1b[3J");
+    CHECK(ex && clr && ex < clr && strstr(o, "\x1b[?2026h") < ex);
+    CHECK(tui_full_redraw_count(t) == 1);
+    vt_feed(&v, o);
+    free(o);
+    CHECK(v.scrollback.n == 15 && str_eq(v.scrollback.v[0], "row 0") && str_eq(v.scrollback.v[14], "row 14"));
+    CHECK(vt_shows_tail(&v, t));
+    /* a height-only grow rewraps nothing: no rebuild; a height shrink does rebuild */
+    resize_resize(t, tm, VT_COLS, VT_ROWS + 2);
+    tui_render_now(t);
+    resize_settle_now(t);
+    tui_render_now(t);
+    o = drain_fd(pfd[0]);
+    CHECK(strstr(o, "\x1b[?1049l") && !strstr(o, "\x1b[3J") && tui_full_redraw_count(t) == 1);
+    free(o);
+    resize_resize(t, tm, VT_COLS, VT_ROWS);
+    tui_render_now(t);
+    resize_settle_now(t);
+    tui_render_now(t);
+    o = drain_fd(pfd[0]);
+    CHECK(strstr(o, "\x1b[3J") && tui_full_redraw_count(t) == 2);
+    free(o);
+    /* resized under a fullscreen page: the rebuild lands when the page closes */
+    tui_alt_screen(t, true);
+    tui_render_now(t);
+    resize_resize(t, tm, 30, VT_ROWS);
+    tui_render_now(t);
+    o = drain_fd(pfd[0]);
+    CHECK(!strstr(o, "\x1b[3J"));
+    free(o);
+    tui_alt_screen(t, false);
+    tui_render_now(t);
+    o = drain_fd(pfd[0]);
+    CHECK(strstr(o, "\x1b[?1049l") && strstr(o, "\x1b[3J") && tui_full_redraw_count(t) == 3);
+    free(o);
+    tui_free(t);
+    strvec_free(&v.scrollback);
+    free(drain_fd(pfd[0]));
+
+    /* preserve: the borrow ends at the settle and only the screen is repainted */
+    t = resize_tui(pfd[1], TUI_RESIZE_PRESERVE, 25);
+    tm = tui_term(t);
+    tui_render_now(t);
+    free(drain_fd(pfd[0]));
+    resize_resize(t, tm, 30, VT_ROWS);
+    tui_render_now(t);
+    free(drain_fd(pfd[0]));
+    resize_settle_now(t);
+    o = drain_fd(pfd[0]);
+    CHECK(strstr(o, "\x1b[?1049l") != NULL);
+    free(o);
+    tui_render_now(t);
+    o = drain_fd(pfd[0]);
+    CHECK(strstr(o, "row 24") && !strstr(o, "row 0\x1b") && !strstr(o, "\x1b[3J") && tui_full_redraw_count(t) == 0);
+    free(o);
+    tui_free(t);
+    free(drain_fd(pfd[0]));
+
+    /* append: a current-width copy of every row below retained history, no erase */
+    t = resize_tui(pfd[1], TUI_RESIZE_APPEND, 25);
+    tm = tui_term(t);
+    tui_render_now(t);
+    free(drain_fd(pfd[0]));
+    resize_resize(t, tm, 30, VT_ROWS);
+    tui_render_now(t);
+    resize_settle_now(t);
+    free(drain_fd(pfd[0]));
+    tui_render_now(t);
+    o = drain_fd(pfd[0]);
+    CHECK(strstr(o, "row 0\x1b") && strstr(o, "row 24") && !strstr(o, "\x1b[3J") && tui_full_redraw_count(t) == 0);
+    free(o);
+    /* a height-only change replays nothing */
+    resize_resize(t, tm, 30, VT_ROWS + 3);
+    tui_render_now(t);
+    resize_settle_now(t);
+    free(drain_fd(pfd[0]));
+    tui_render_now(t);
+    o = drain_fd(pfd[0]);
+    CHECK(!strstr(o, "row 0\x1b") && strstr(o, "row 24"));
+    free(o);
+    tui_free(t);
+    free(drain_fd(pfd[0]));
+
+    /* tmux (rebuild, synchronized output): no borrow, paints wait for the settle, then the rebuild; a held
+     * (streaming) block never loses rows: its head stays out of scrollback until it settles */
+    setenv("TMUX", "/tmp/tmux-test,1,0", 1);
+    t = resize_tui(pfd[1], TUI_RESIZE_REBUILD, 5);
+    tm = tui_term(t);
+    held_t *hb = xcalloc(1, sizeof *hb);
+    tui_component_init(&hb->base, &HELD_VT);
+    hb->n = 20;
+    hb->active = true;
+    tui_container_add(tui_root(t), &hb->base);
+    vt_init(&v);
+    vt_render(&v, t, pfd[0]);
+    CHECK(v.scrollback.n == 5);
+    resize_resize(t, tm, 30, VT_ROWS);
+    hb->n = 22;
+    tui_render_now(t);
+    o = drain_fd(pfd[0]);
+    CHECK(str_eq(o, ""));
+    free(o);
+    resize_settle_now(t);
+    tui_render_now(t);
+    o = drain_fd(pfd[0]);
+    CHECK(strstr(o, "\x1b[3J") && !strstr(o, "1049") && !strstr(o, "Rebuilding"));
+    vt_feed(&v, o);
+    free(o);
+    CHECK(v.scrollback.n == 5 && str_eq(v.scrollback.v[4], "row 4"));
+    CHECK(vt_shows_tail(&v, t));
+    hb->active = false;
+    vt_render(&v, t, pfd[0]);
+    CHECK(v.scrollback.n == 17 && str_eq(v.scrollback.v[5], "held 0") && str_eq(v.scrollback.v[16], "held 11"));
+    CHECK(vt_shows_tail(&v, t));
+    tui_free(t);
+    strvec_free(&v.scrollback);
+    free(drain_fd(pfd[0]));
+
+    /* a rebuild replay of 7 MiB or more in tmux is preceded by the bottom-row notice, and renews the
+     * synchronized update every 16 KiB */
+    char *path = xasprintf("%s/omc-test-resize-%d.out", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    CHECK(fd >= 0);
+    tm = tui_term_new(-1, fd);
+    tui_term_set_size(tm, 70, VT_ROWS);
+    t = tui_new(tm);
+    tui_set_resize_scrollback(t, TUI_RESIZE_REBUILD);
+    bulk_t *bk = xcalloc(1, sizeof *bk);
+    tui_component_init(&bk->base, &BULK_VT);
+    bk->n = 110000;
+    bk->w = 60;
+    tui_container_add(tui_root(t), &bk->base);
+    tui_render_now(t);
+    off_t start = lseek(fd, 0, SEEK_END);
+    resize_resize(t, tm, 60, VT_ROWS);
+    resize_settle_now(t);
+    tui_render_now(t);
+    off_t end = lseek(fd, 0, SEEK_END);
+    char *big = xmalloc((size_t)(end - start) + 1);
+    CHECK(pread(fd, big, (size_t)(end - start), start) == end - start);
+    big[end - start] = 0;
+    char *notice = strstr(big, "\x1b" "7\x1b[10;1H\x1b[0m\x1b[2K\xe2\x86\xbb Rebuilding\xe2\x80\xa6");
+    CHECK(notice && strstr(big, "\x1b[3J") && notice < strstr(big, "\x1b[3J"));
+    CHECK(str_count(big, "\x1b[?2026h") > 400);
+    free(big);
+    tui_free(t);
+    close(fd);
+    unlink(path);
+    free(path);
+    unsetenv("TMUX");
     close(pfd[0]);
 }
 
@@ -1650,6 +1894,7 @@ int main(void) {
     test_fuzzy_select();
     test_renderer();
     test_renderer_viewport();
+    test_resize_scrollback();
     test_loop();
     tui_theme_set(NULL);
     tui_keybindings_set_global(NULL);
