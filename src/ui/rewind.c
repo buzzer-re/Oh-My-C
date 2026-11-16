@@ -1013,7 +1013,7 @@ static const tui_component_vt REWIND_VT = {"rewind-selector", rewind_render, rew
 json_t *ui_tx_branch_entries(ui_t *u) {
     session_t *s = u->app->session;
     if (!s || !s->leaf_id) return NULL;
-    json_t *path = session_path_to(s, s->leaf_id);
+    json_t *path = session_current_path(s);
     json_t *entries = json_arr();
     const json_t *e;
     json_arr_foreach(path, i, e) if (ui_tx_is_transcript_entry(e)) json_push(entries, json_clone(e));

@@ -686,8 +686,10 @@ static const char *branch_unavailable(btw_ctl_t *c) {
     if (json_len(c->active->history)) return "multi-turn side conversations remain in BTW history";
     if (!c->last_question || !c->last_reply || !c->last_assistant) return "the answer is unavailable";
     if (!c->last_leaf) return "the session has no branch point";
-    const char *leaf = c->u->app->session ? c->u->app->session->leaf_id : NULL;
-    if (!str_eq(c->last_sid, session_sid(c->u)) || !str_eq(c->last_leaf, leaf)) return "the session changed since /btw started";
+    char *leaf = c->u->app->session ? session_leaf_dup(c->u->app->session) : NULL; /* the worker may move it */
+    bool changed = !str_eq(c->last_sid, session_sid(c->u)) || !str_eq(c->last_leaf, leaf);
+    free(leaf);
+    if (changed) return "the session changed since /btw started";
     if (c->u->worker_running) return "a turn is still running";
     return NULL;
 }
@@ -940,7 +942,7 @@ static bool start(btw_ctl_t *c, const char *question, const char *record_id, con
     panel_init(&r->panel, q, title);
     r->question = xstrdup(q);
     r->images = json_len(images) ? json_clone(images) : NULL;
-    r->leaf_id = a->session && a->session->leaf_id ? xstrdup(a->session->leaf_id) : NULL;
+    r->leaf_id = a->session ? session_leaf_dup(a->session) : NULL;
     r->session_id = xstrdup(session_sid(u));
     r->store = store;
     r->inject_on = r->panel.inject_on = inject_enabled(c);

@@ -217,6 +217,14 @@ assistant message, and then the whole session is written at once.
   (`--fork`, `/fork`). Labels (`set_label`) annotate entries.
 - **Listing / resume**: `session_list` (one project) and `session_list_all`; `-c` continues the
   newest one for the cwd; `-r <id-prefix|path>` resumes. Export to Markdown/HTML lives here too.
+- **Threads**: one thread writes a session at a time (the prompt worker during a run, the UI or RPC thread while
+  idle) and may read `session_t` fields directly. Other threads read through the locked calls
+  (`session_current_path`, `session_leaf_dup`, `session_title_dup`, `session_path_to`, `session_get`,
+  `session_build_context*`): the TUI rebuilds the transcript on `auto_compaction_end` while the worker keeps
+  appending, the status line shows the title the worker may rename, RPC `get_entries` / `get_tree` run beside a
+  prompt. Every mutation holds the session's recursive mutex, and code that edits entries in place (shake, the prune
+  passes, the dead-end warning stamp in `compaction.c`) wraps the edit in `session_lock` / `session_unlock`. Never
+  hold the session lock while waiting on the UI thread.
 
 ### Compaction (`src/coding/compaction.c`)
 

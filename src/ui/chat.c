@@ -1262,6 +1262,7 @@ static void mv_invalidate(tui_component_t *c) { ((msgview_t *)c)->dirty = true; 
 
 static void mv_destroy(tui_component_t *c) {
     msgview_t *v = (msgview_t *)c;
+    toolcard_forget(v);
     reveal_stop(v);
     json_free(v->msg);
     json_free(v->tool_images);
@@ -1471,8 +1472,8 @@ void add_notice(ui_t *u, const char *level, const char *text) {
         long long secs = 0;
         if (sscanf(text, "Retrying (%d/%d) in %llds", &at, &max, &secs) == 3) {
             /* #handleAutoRetryStart: the retry supersedes the failed turn's never-run calls */
-            for (size_t i = 0; i < u->synthetic_cards.n; i++) {
-                msgview_t *c = u->synthetic_cards.v[i];
+            while (u->synthetic_cards.n) { /* popped before the destroy: toolcard_forget edits the list */
+                msgview_t *c = u->synthetic_cards.v[--u->synthetic_cards.n];
                 for (size_t k = 0; k < u->chat->children.n; k++) {
                     if (u->chat->children.v[k] != &c->base) continue;
                     tui_container_remove(u->chat, &c->base);
@@ -1480,7 +1481,6 @@ void add_notice(ui_t *u, const char *level, const char *text) {
                     break;
                 }
             }
-            u->synthetic_cards.n = 0;
             ui_working_retry(u, at, max, secs * 1000);
             return;
         }
@@ -2153,6 +2153,21 @@ void ui_chat_replay_into(ui_t *u, tui_container_t *dest, const json_t *entries, 
     toolcard_group_swap(group);
 }
 
+const char *ui_session_title(ui_t *u) {
+    /* the worker (auto title) may replace the title mid-frame: read a locked copy, keeping every copy handed out alive
+     * (titles change a handful of times per process) so a borrowed pointer stays valid however long a frame holds it */
+    static strvec_t seen;
+    char *t = u && u->app ? session_title_dup(u->app->session) : NULL;
+    if (!t) return NULL;
+    for (size_t i = seen.n; i-- > 0;)
+        if (!strcmp(seen.v[i], t)) {
+            free(t);
+            return seen.v[i];
+        }
+    strvec_push_own(&seen, t);
+    return t;
+}
+
 /* Rebuild the transcript from the session tree (renderSessionContext): the path root..leaf after the last
  * reset boundary; a compaction shows the kept tail, its divider, then everything after it (with
  * display.collapseCompacted off: the whole path, a divider at each compaction). Without a session file the
@@ -2168,8 +2183,9 @@ void ui_chat_rebuild(ui_t *u) {
     hmap_init(&pending);
     toolcard_set_replaying(true);
     session_t *s = ui_view_app(u)->session; /* a focused subagent view replays its session */
-    /* a focused subagent's session grows on its job thread: replay a locked copy of its messages instead */
-    json_t *path = !u->view && s && s->leaf_id ? session_path_to(s, s->leaf_id) : NULL;
+    /* a focused subagent's session grows on its job thread: replay a locked copy of its messages instead. The main
+     * session's worker may still be writing too (a rebuild after a mid-run compaction): copy its branch locked. */
+    json_t *path = !u->view && s ? session_current_path(s) : NULL;
     json_free(g_last_usage);
     g_last_usage = NULL;
     rt_reset();

@@ -1708,7 +1708,9 @@ static json_t *state_json(rpc_t *r) {
     json_set_str(s, "interruptMode", settings_str("interruptMode", "immediate"));
     if (a->session->file) json_set_str(s, "sessionFile", a->session->file);
     json_set_str(s, "sessionId", session_id(a->session));
-    if (a->session->title) json_set_str(s, "sessionName", a->session->title);
+    char *title = session_title_dup(a->session); /* the prompt thread may be renaming the session */
+    if (title) json_set_str(s, "sessionName", title);
+    free(title);
     json_set_bool(s, "autoCompactionEnabled", settings_bool("compaction.enabled", true));
     pthread_mutex_lock(&a->agent->mu);
     int64_t queued = (int64_t)(json_len(a->agent->steering) + json_len(a->agent->follow_up));
@@ -2022,7 +2024,9 @@ static json_t *btw_ask(rpc_t *r, const char *question, const char *record_id, ch
     }
     if (a->session) session_ensure_on_disk(a->session);
     btw_begin_t b;
-    btw_begin_turn(trimmed, a->session ? a->session->leaf_id : NULL, previous, NULL, NULL, &b);
+    char *leaf = a->session ? session_leaf_dup(a->session) : NULL;
+    btw_begin_turn(trimmed, leaf, previous, NULL, NULL, &b);
+    free(leaf);
     json_free(previous);
     char *werr = NULL;
     if (btw_store_upsert(store, b.record, &werr) != 0) {
@@ -3078,8 +3082,10 @@ static void handle(rpc_t *r, json_t *cmd) {
         respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "get_tree")) {
         json_t *d = json_obj();
+        session_lock(a->session); /* commands run beside the prompt thread, which may be appending */
         json_set(d, "tree", session_tree_json(a->session));
         json_set(d, "leafId", a->session->leaf_id ? json_str(a->session->leaf_id) : json_null());
+        session_unlock(a->session);
         respond(r, id, type, true, d, NULL);
     } else if (!strcmp(type, "navigate_tree")) {
         const char *eid = json_get_str(cmd, "entryId");
@@ -3123,7 +3129,7 @@ static void handle(rpc_t *r, json_t *cmd) {
             respond(r, id, type, true, NULL, NULL);
         }
     } else if (!strcmp(type, "get_branch_messages")) {
-        json_t *path = session_path_to(a->session, a->session->leaf_id), *e, *arr = json_arr();
+        json_t *path = session_current_path(a->session), *e, *arr = json_arr();
         json_arr_foreach(path, i, e) {
             json_t *m = json_get(e, "message");
             if (!str_eq(json_get_str(e, "type"), "message") || !str_eq(json_get_str(m, "role"), "user") || json_get_bool(m, "synthetic", false))
@@ -3434,6 +3440,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         const json_t *since = json_get(cmd, "since");
         size_t from = 0;
         bool found = !since;
+        session_lock(a->session); /* commands run beside the prompt thread, which may be appending */
         if (since) {
             json_t *e;
             json_arr_foreach(a->session->entries, i, e) if (!found && json_is_str(since) && str_eq(json_get_str(e, "id"), json_sv(since))) {
@@ -3442,6 +3449,7 @@ static void handle(rpc_t *r, json_t *cmd) {
             }
         }
         if (!found) {
+            session_unlock(a->session);
             char *v = json_is_str(since) ? xstrdup(json_sv(since)) : json_dump_js(since);
             char *m = xasprintf("Unknown entries cursor: %s", v);
             respond_code(r, id, type, false, NULL, m, "unknown_since");
@@ -3452,6 +3460,7 @@ static void handle(rpc_t *r, json_t *cmd) {
             for (size_t i = from; i < json_len(a->session->entries); i++) json_push(arr, json_clone(json_at(a->session->entries, i)));
             json_set(d, "entries", arr);
             json_set(d, "leafId", a->session->leaf_id ? json_str(a->session->leaf_id) : json_null());
+            session_unlock(a->session);
             respond(r, id, type, true, d, NULL);
         }
     } else if (!strcmp(type, "set_model")) {

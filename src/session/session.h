@@ -2,6 +2,8 @@
 #ifndef OMC_SESSION_H
 #define OMC_SESSION_H
 
+#include <pthread.h>
+
 #include "core/core.h"
 #include "core/json.h"
 
@@ -19,7 +21,19 @@ typedef struct {
     char *title;
     char *title_source;
     hmap_t by_id;      /* id -> json_t* entry (borrowed) */
+    pthread_mutex_t *mu; /* recursive; see "Threads" below */
 } session_t;
+
+/* Threads: one thread writes a session at a time (its prompt worker, or the UI thread while no run is going) and may
+ * read the fields above directly. Another thread (the UI while the worker runs: a transcript rebuild after a
+ * compaction, the status line, /btw) reads only through the locked calls: session_current_path, session_leaf_dup,
+ * session_title_dup, session_path_to, session_get, session_build_context*, ... Every mutation below holds the lock;
+ * code that edits entries in place (compaction prune / shake) wraps the edit in session_lock/session_unlock. */
+void session_lock(const session_t *s);
+void session_unlock(const session_t *s);
+json_t *session_current_path(const session_t *s); /* owned clone of root..leaf (empty array without a leaf) */
+char *session_leaf_dup(const session_t *s);       /* owned copy of leaf_id, or NULL */
+char *session_title_dup(const session_t *s);      /* owned copy of title, or NULL (NULL session: NULL) */
 
 /* lifecycle */
 session_t *session_create(const char *cwd, const char *session_dir); /* lazy file creation */

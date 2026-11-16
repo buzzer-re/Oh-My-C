@@ -290,6 +290,40 @@ static void test_pieces(void) {
     strvec_free(&tl);
 }
 
+/* A transcript rebuild (the auto_compaction_end of a compaction, a subagent focus switch) or a superseded retry
+ * destroys tool cards that are still in the repaint ticker's list. Every registry must let go of a destroyed card:
+ * the user's crashes were the ticker reading a freed card's tool name (strcmp on a dangling pointer) a tick after a
+ * remote compaction rebuilt the transcript. Under ASan the timer loop below reports the use-after-free if not. */
+static void run_timers_for(ui_t *u, int ms) {
+    int64_t end = mono_ms() + ms;
+    while (mono_ms() < end) tui_run_once(u->tui, 50);
+}
+
+static void test_rebuild_drops_live_cards(ui_t *u) {
+    u->chat = ui_transcript_new(false);
+    /* a running generic card (an unknown tool such as `exec`: spinner + elapsed clock) and a running bash card */
+    msgview_t *exec = toolcard_start(u, "call_exec", "exec", json_parse_str("{\"cmd\":\"ls\"}"));
+    hmap_put(&u->tools, "call_exec", exec);
+    toolcard_run_track("call_exec", exec);
+    msgview_t *bash = toolcard_start(u, "call_bash", "bash", json_parse_str("{\"command\":\"sleep 9\"}"));
+    vec_push(&u->synthetic_cards, bash);
+    CHECK(toolcard_tracked(exec) && toolcard_tracked(bash), "running cards are tracked");
+    ui_chat_rebuild(u); /* the maintenance-end rebuild */
+    CHECK(!toolcard_tracked(exec) && !toolcard_tracked(bash), "rebuilt transcript: destroyed cards still tracked");
+    CHECK(!hmap_get(&u->tools, "call_exec") && u->synthetic_cards.n == 0, "call-id map / synthetic cards keep a destroyed card");
+    run_timers_for(u, 1300); /* the clock ticker runs once a second */
+    /* a superseded retry removes its synthetic cards (add_notice "Retrying (…)") while they still tick */
+    msgview_t *a = toolcard_start(u, "call_a", "exec", json_obj()), *b = toolcard_start(u, "call_b", "shell", json_obj());
+    vec_push(&u->synthetic_cards, a);
+    vec_push(&u->synthetic_cards, b);
+    size_t before = tui_container_count(u->chat);
+    add_notice(u, "warning", "Retrying (1/3) in 2s");
+    CHECK(tui_container_count(u->chat) == before - 2, "retry removed %zu of 2 synthetic cards", before - tui_container_count(u->chat));
+    CHECK(!toolcard_tracked(a) && !toolcard_tracked(b), "retry: removed cards still tracked");
+    run_timers_for(u, 1300);
+    ui_working_stop(u);
+}
+
 int main(void) {
     char *dir = fs_mktempdir("omc-chrome");
     setenv("OMC_CODING_AGENT_DIR", dir, 1);
@@ -304,6 +338,7 @@ int main(void) {
     test_pieces();
     test_band_welcome(u);
     test_titled(u);
+    test_rebuild_drops_live_cards(u);
     fs_rm_rf(dir);
     free(dir);
     if (failures) {

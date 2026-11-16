@@ -121,7 +121,9 @@ static char *goal_text(app_t *a) {
     char *t = o ? str_trim(o) : NULL;
     if (t && *t) return t;
     free(t);
-    t = str_trim(a->session && a->session->title ? a->session->title : "");
+    char *title = session_title_dup(a->session);
+    t = str_trim(title ? title : "");
+    free(title);
     if (*t) return t;
     free(t);
     return NULL;
@@ -225,16 +227,23 @@ static int64_t iso_ms(const char *s) {
 void ui_recap_replay(ui_t *u) {
     app_t *a = u->app;
     session_t *s = a ? a->session : NULL;
-    if (!s || !s->leaf_id || u->worker_running) return;
-    /* conversationTip: the newest entry that moves the conversation, when the branch ends at it */
-    const json_t *newest = NULL, *e;
-    json_arr_foreach(s->entries, i, e) if (moves_conversation(e)) newest = e;
+    if (!s || u->worker_running) return;
+    /* conversationTip: the newest entry that moves the conversation, when the branch ends at it (read locked: a
+     * background delivery may still be writing the session) */
+    const json_t *e;
+    json_t *newest = NULL;
+    session_lock(s);
+    json_arr_foreach(s->entries, i, e) if (moves_conversation(e)) newest = (json_t *)e;
+    newest = newest && s->leaf_id ? json_clone(newest) : NULL;
+    session_unlock(s);
     if (!newest) return;
-    json_t *path = session_path_to(s, s->leaf_id);
+    json_t *path = session_current_path(s);
     const char *tip = NULL;
     json_arr_foreach(path, k, e) if (moves_conversation(e)) tip = json_get_str(e, "id");
     bool at_tip = tip && str_eq(tip, json_get_str(newest, "id"));
     json_free(path);
+    int64_t tip_ms = iso_ms(json_get_str(newest, "timestamp"));
+    json_free(newest);
     if (!at_tip) return;
     char *p = omc_agent_path("session-recaps.jsonl");
     size_t n = 0;
@@ -243,7 +252,6 @@ void ui_recap_replay(ui_t *u) {
     if (!d) return;
     strvec_t lines = str_split_lines(d, n);
     const char *sid = session_id(s);
-    int64_t tip_ms = iso_ms(json_get_str(newest, "timestamp"));
     for (size_t i = lines.n; i-- > 0;) {
         json_t *j = *lines.v[i] ? json_parse_str(lines.v[i]) : NULL;
         if (j && str_eq(json_get_str(j, "sessionId"), sid)) {

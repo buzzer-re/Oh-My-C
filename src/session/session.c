@@ -15,6 +15,30 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* ---------- lock ---------- */
+
+/* The tree (entries, by_id, leaf_id), header and title are written by one thread at a time (the session's prompt
+ * worker, or the UI thread while it is idle), but the UI thread also reads them while the worker runs (a transcript
+ * rebuild after a compaction, the status line's title, /btw). Writers and the shared read paths hold `mu`
+ * (recursive, so a locked API may call another); see session.h. */
+static pthread_mutex_t *mu_new(void) {
+    pthread_mutex_t *m = xmalloc(sizeof *m);
+    pthread_mutexattr_t at;
+    pthread_mutexattr_init(&at);
+    pthread_mutexattr_settype(&at, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(m, &at);
+    pthread_mutexattr_destroy(&at);
+    return m;
+}
+
+void session_lock(const session_t *s) {
+    if (s && s->mu) pthread_mutex_lock(s->mu);
+}
+
+void session_unlock(const session_t *s) {
+    if (s && s->mu) pthread_mutex_unlock(s->mu);
+}
+
 /* ---------- paths ---------- */
 
 static char *encode_rel(const char *prefix, const char *rel) {
@@ -83,6 +107,7 @@ static char *file_safe_ts(const char *iso) {
 
 static session_t *session_new_base(const char *cwd) {
     session_t *s = xcalloc(1, sizeof(*s));
+    s->mu = mu_new();
     s->entries = json_arr();
     hmap_init(&s->by_id);
     s->header = json_obj();
@@ -130,6 +155,10 @@ void session_free(session_t *s) {
     free(s->dir);
     free(s->title);
     free(s->title_source);
+    if (s->mu) {
+        pthread_mutex_destroy(s->mu);
+        free(s->mu);
+    }
     free(s);
 }
 
@@ -141,7 +170,35 @@ const char *session_short_id(const char *id) {
     return n > 8 ? id + n - 8 : (id ? id : "");
 }
 
-json_t *session_get(const session_t *s, const char *id) { return id ? hmap_get(&s->by_id, id) : NULL; }
+json_t *session_get(const session_t *s, const char *id) {
+    if (!id) return NULL;
+    session_lock(s);
+    json_t *e = hmap_get(&s->by_id, id);
+    session_unlock(s);
+    return e;
+}
+
+json_t *session_current_path(const session_t *s) {
+    session_lock(s);
+    json_t *path = s->leaf_id ? session_path_to(s, s->leaf_id) : json_arr();
+    session_unlock(s);
+    return path;
+}
+
+char *session_leaf_dup(const session_t *s) {
+    session_lock(s);
+    char *id = s->leaf_id ? xstrdup(s->leaf_id) : NULL;
+    session_unlock(s);
+    return id;
+}
+
+char *session_title_dup(const session_t *s) {
+    if (!s) return NULL;
+    session_lock(s);
+    char *t = s->title ? xstrdup(s->title) : NULL;
+    session_unlock(s);
+    return t;
+}
 
 static char *title_slot_line(const char *title, const char *source) {
     char *ts = iso8601_now();
@@ -192,7 +249,16 @@ static char *title_slot_line(const char *title, const char *source) {
     return line;
 }
 
+static int write_full_locked(session_t *s);
+
 static int write_full(session_t *s) {
+    session_lock(s);
+    int rc = write_full_locked(s);
+    session_unlock(s);
+    return rc;
+}
+
+static int write_full_locked(session_t *s) {
     if (!s->persist || !s->file) return 0;
     sb_t b = SB_INIT;
     char *slot = title_slot_line(s->title, s->title_source);
@@ -261,6 +327,7 @@ static char *new_entry_id(session_t *s) {
 }
 
 const char *session_append_entry(session_t *s, json_t *entry) {
+    session_lock(s);
     char *id = new_entry_id(s);
     json_t *e = json_obj();
     json_set_str(e, "type", json_get_str(entry, "type"));
@@ -281,6 +348,7 @@ const char *session_append_entry(session_t *s, json_t *entry) {
     free(s->leaf_id);
     s->leaf_id = id;
     persist_entry(s, e);
+    session_unlock(s);
     return json_get_str(e, "id");
 }
 
@@ -379,7 +447,15 @@ const char *session_append_label(session_t *s, const char *target, const char *l
 
 const char *session_append_reset_boundary(session_t *s) { return session_append_entry(s, typed("reset_boundary")); }
 
+static void set_title_locked(session_t *s, const char *title, const char *source);
+
 void session_set_title(session_t *s, const char *title, const char *source) {
+    session_lock(s);
+    set_title_locked(s, title, source);
+    session_unlock(s);
+}
+
+static void set_title_locked(session_t *s, const char *title, const char *source) {
     if (str_eq(s->title_source, "user") && str_eq(source, "auto")) return;
     free(s->title);
     free(s->title_source);
@@ -428,6 +504,7 @@ session_t *session_open(const char *path, char **err) {
         return NULL;
     }
     session_t *s = xcalloc(1, sizeof(*s));
+    s->mu = mu_new();
     s->entries = json_arr();
     hmap_init(&s->by_id);
     s->persist = true;
@@ -477,17 +554,24 @@ session_t *session_open(const char *path, char **err) {
 /* ---------- tree ---------- */
 
 void session_branch(session_t *s, const char *entry_id) {
-    if (!session_get(s, entry_id)) return;
-    free(s->leaf_id);
-    s->leaf_id = xstrdup(entry_id);
+    session_lock(s);
+    if (session_get(s, entry_id)) {
+        char *id = xstrdup(entry_id); /* entry_id may be the current leaf_id */
+        free(s->leaf_id);
+        s->leaf_id = id;
+    }
+    session_unlock(s);
 }
 
 void session_reset_leaf(session_t *s) {
+    session_lock(s);
     free(s->leaf_id);
     s->leaf_id = NULL;
+    session_unlock(s);
 }
 
 json_t *session_path_to(const session_t *s, const char *leaf) {
+    session_lock(s);
     json_t *rev = json_arr();
     hmap_t seen;
     hmap_init(&seen);
@@ -501,6 +585,7 @@ json_t *session_path_to(const session_t *s, const char *leaf) {
         cur = json_get_str(e, "parentId");
     }
     hmap_free(&seen, NULL);
+    session_unlock(s);
     json_t *out = json_arr();
     for (size_t i = json_len(rev); i > 0; i--) json_push(out, json_clone(json_at(rev, i - 1)));
     json_free(rev);
@@ -510,10 +595,12 @@ json_t *session_path_to(const session_t *s, const char *leaf) {
 json_t *session_children(const session_t *s, const char *id) {
     json_t *out = json_arr();
     json_t *e;
+    session_lock(s);
     json_arr_foreach(s->entries, i, e) {
         const char *p = json_get_str(e, "parentId");
         if ((id && str_eq(p, id)) || (!id && !p)) json_push(out, json_clone(e));
     }
+    session_unlock(s);
     return out;
 }
 
@@ -669,21 +756,19 @@ void session_build_context(const session_t *s, session_context_t *out) {
 void session_build_context_as(const session_t *s, const char *provider, const char *api, session_context_t *out) {
     memset(out, 0, sizeof(*out));
     out->messages = json_arr();
-    if (!s->leaf_id) return;
-    json_t *path = session_path_to(s, s->leaf_id);
+    json_t *path = session_current_path(s);
     reader_t rd = {provider, api};
     build_context_path(path, out, &rd);
     json_free(path);
 }
 
 const char *session_readable_compaction(const session_t *s, const char *provider, const char *api) {
-    if (!s->leaf_id) return NULL;
-    json_t *path = session_path_to(s, s->leaf_id);
+    json_t *path = session_current_path(s);
     const char *id = NULL;
     for (size_t i = json_len(path); i-- > 0 && !id;) {
         const json_t *e = json_at(path, i);
         if (str_eq(json_get_str(e, "type"), "compaction") && session_compaction_readable(e, provider, api)) {
-            const json_t *orig = hmap_get(&s->by_id, json_get_str(e, "id"));
+            const json_t *orig = session_get(s, json_get_str(e, "id"));
             id = orig ? json_get_str(orig, "id") : NULL;
         }
     }
@@ -782,6 +867,7 @@ void session_context_free(session_context_t *c) {
 }
 
 session_t *session_fork(const session_t *s, const char *leaf_id, const char *session_dir) {
+    session_lock(s);
     session_t *n = session_create(session_cwd(s), session_dir ? session_dir : s->dir);
     if (s->title) { /* the fork keeps the session name (createBranchedSession / fork) */
         n->title = xstrdup(s->title);
@@ -795,6 +881,7 @@ session_t *session_fork(const session_t *s, const char *leaf_id, const char *ses
     session_set_additional_dirs(n, &roots);
     strvec_free(&roots);
     json_t *path = session_path_to(s, leaf_id ? leaf_id : s->leaf_id);
+    session_unlock(s);
     json_t *e;
     json_arr_foreach(path, i, e) {
         json_t *c = json_clone(e);
@@ -816,12 +903,15 @@ char *session_normalize_workspace_dir(const char *dir, const char *base) { retur
 strvec_t session_additional_dirs(const session_t *s) {
     strvec_t out = {0};
     json_t *x;
+    session_lock(s);
     json_arr_foreach(json_get_arr(s->header, "additionalDirectories"), i, x) if (json_is_str(x)) strvec_push(&out, json_sv(x));
+    session_unlock(s);
     return out;
 }
 
 /* header.additionalDirectories = dirs (key dropped when empty); rewrite a session already on disk */
 static void store_dirs(session_t *s, const strvec_t *dirs) {
+    session_lock(s);
     if (!dirs->n) json_del(s->header, "additionalDirectories");
     else {
         json_t *a = json_arr();
@@ -829,6 +919,7 @@ static void store_dirs(session_t *s, const strvec_t *dirs) {
         json_set(s->header, "additionalDirectories", a);
     }
     session_rewrite(s);
+    session_unlock(s);
 }
 
 int session_add_workspace_dir(session_t *s, const char *dir, char **resolved, char **err) {
@@ -912,7 +1003,16 @@ static bool has_assistant(const session_t *s) {
     return false;
 }
 
+static int move_locked(session_t *s, const char *new_cwd, char **err);
+
 int session_move(session_t *s, const char *new_cwd, char **err) {
+    session_lock(s);
+    int rc = move_locked(s, new_cwd, err);
+    session_unlock(s);
+    return rc;
+}
+
+static int move_locked(session_t *s, const char *new_cwd, char **err) {
     *err = NULL;
     char *cwd = path_abs(new_cwd, NULL);
     char *old_cwd = path_abs(session_cwd(s), NULL);
@@ -1369,10 +1469,12 @@ static void md_content(sb_t *b, const json_t *content) {
 
 char *session_export_markdown(const session_t *s) {
     sb_t b = SB_INIT;
+    session_lock(s);
     sb_appendf(&b, "# %s\n\n", s->title ? s->title : "Session");
     sb_appendf(&b, "- Session: `%s`\n- Directory: `%s`\n- Created: %s\n\n", session_id(s), session_cwd(s),
                json_get_str(s->header, "timestamp"));
-    json_t *path = session_path_to(s, s->leaf_id);
+    json_t *path = session_current_path(s);
+    session_unlock(s);
     json_t *e;
     json_arr_foreach(path, i, e) {
         if (!str_eq(json_get_str(e, "type"), "message")) continue;
