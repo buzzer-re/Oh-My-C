@@ -51,6 +51,8 @@ static void emergency_restore(void) {
     if (g_tty_fd >= 0) tcsetattr(g_tty_fd, TCSAFLUSH, &g_saved_tio);
 }
 
+void tui_term_emergency_restore(void) { emergency_restore(); }
+
 static void on_signal(int sig) {
     int saved_errno = errno;
     bool terminating = sig == SIGTERM || sig == SIGHUP || sig == SIGINT || sig == SIGQUIT;

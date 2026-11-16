@@ -221,11 +221,13 @@ glibc lets some heap overflows and use-after-frees run without crashing, so they
 ```sh
 git worktree add --detach ../omc-asan main && cd ../omc-asan
 LDFLAGS="-fsanitize=address,undefined" make -B -j3 OPT="-O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
-export ASAN_OPTIONS=detect_leaks=0:halt_on_error=0:log_path=$PWD/san/asan UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=0:log_path=$PWD/san/ubsan
+export OMC_NO_CRASH_HANDLER=1 ASAN_OPTIONS=detect_leaks=0:halt_on_error=0:log_path=$PWD/san/asan UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=0:log_path=$PWD/san/ubsan
 mkdir -p san && ./tests/e2e/run.sh            # unit tests: build build/obj/<plat>/tests/test_* the same way and run each
 ls san/                                       # must be empty
 ```
-Keep `halt_on_error=0` and the `log_path` settings. Otherwise the first finding aborts each run and is printed into the test output, failing hundreds of checks and hiding later findings. At `-O1`, GCC also prints a few known false-positive warnings (a NULL format string in `xvasprintf`/`sb_vappendf`, and `memmem` in `highlight.c`).
+`OMC_NO_CRASH_HANDLER=1` keeps ASan's own SEGV report (omc's crash reporter would replace it). For data races, build
+with `CC=clang-21 OPT='-O1 -fsanitize=thread'` into its own `O=` dir: on the aarch64 VM GCC's libtsan dies with
+SIGILL in `pthread_cond_wait`. Keep `halt_on_error=0` and the `log_path` settings. Otherwise the first finding aborts each run and is printed into the test output, failing hundreds of checks and hiding later findings. At `-O1`, GCC also prints a few known false-positive warnings (a NULL format string in `xvasprintf`/`sb_vappendf`, and `memmem` in `highlight.c`).
 
 ## Image pipeline
 
