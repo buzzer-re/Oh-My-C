@@ -56,6 +56,8 @@ void tui_term_restore_cooked_enter(char *data, size_t n);
 void tui_term_start(tui_term_t *t);
 /* Undo everything tui_term_start did (pop kitty, disable modes, show cursor, restore termios). */
 void tui_term_stop(tui_term_t *t);
+/* async-signal-safe: undo the started terminal's modes and termios (a fatal-signal handler, before it reports) */
+void tui_term_emergency_restore(void);
 
 /* Size */
 void tui_term_query_size(tui_term_t *t); /* ioctl TIOCGWINSZ, fallback COLUMNS/LINES, 80x24 */

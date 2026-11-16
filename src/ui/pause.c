@@ -221,7 +221,7 @@ static void work_status(pause_t *p, int *turns, int *jobs) {
 static void pause_render(tui_component_t *c, int width, strvec_t *out) {
     pause_t *p = (pause_t *)c;
     int rows = p->u->tui ? MAX(1, tui_term(p->u->tui)->rows) : 24;
-    const char *name = p->u->app && p->u->app->session ? p->u->app->session->title : NULL;
+    const char *name = ui_session_title(p->u);
     ui_pause_render(width, rows, mono_ms() - p->started, name, p->turns, p->jobs, out);
 }
 

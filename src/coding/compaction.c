@@ -1460,8 +1460,19 @@ static int cmp_region_start(const void *x, const void *y) {
     return sb < sa ? -1 : sb > sa;
 }
 
-/* shake("elide"): returns -1 when a required artifact could not be saved */
+static int shake_elide_locked(app_t *a, const shake_cfg_t *cfg_in, bool require_artifact, bool tool_results_only, app_shake_result_t *res);
+
+/* shake("elide"): returns -1 when a required artifact could not be saved. */
+/* edits the session's entries in place: holds the session lock so another thread's locked read (a transcript
+ * rebuild) never sees a half-edited entry */
 static int shake_elide(app_t *a, const shake_cfg_t *cfg_in, bool require_artifact, bool tool_results_only, app_shake_result_t *res) {
+    session_lock(a->session);
+    int rc = shake_elide_locked(a, cfg_in, require_artifact, tool_results_only, res);
+    session_unlock(a->session);
+    return rc;
+}
+
+static int shake_elide_locked(app_t *a, const shake_cfg_t *cfg_in, bool require_artifact, bool tool_results_only, app_shake_result_t *res) {
     entvec_t ents = {0};
     branch_entries(a, &ents);
     shake_cfg_t cfg = *cfg_in;
@@ -1548,6 +1559,8 @@ static int shake_elide(app_t *a, const shake_cfg_t *cfg_in, bool require_artifac
     return 1;
 }
 
+static void shake_blocks_locked(app_t *a, app_shake_result_t *r);
+
 void app_shake(app_t *a, const char *mode, app_shake_result_t *r) {
     memset(r, 0, sizeof *r);
     r->mode = str_eq(mode, "images") ? "images" : str_eq(mode, "thinking") ? "thinking" : "elide";
@@ -1556,6 +1569,12 @@ void app_shake(app_t *a, const char *mode, app_shake_result_t *r) {
         shake_elide(a, &AGGRESSIVE_SHAKE, false, false, r);
         return;
     }
+    session_lock(a->session); /* edits entries in place (see shake_elide) */
+    shake_blocks_locked(a, r);
+    session_unlock(a->session);
+}
+
+static void shake_blocks_locked(app_t *a, app_shake_result_t *r) {
     entvec_t ents = {0};
     branch_entries(a, &ents);
     bool images = !strcmp(r->mode, "images");
@@ -1991,6 +2010,7 @@ static char *dead_end_warning(app_t *a, const char *remedies) {
 /* stamp the dead-end warning on the branch's latest compaction entry (the divider badge) */
 static void stamp_warning(app_t *a, const char *warning) {
     entvec_t ents = {0};
+    session_lock(a->session); /* edits an entry in place (see shake_elide) */
     branch_entries(a, &ents);
     for (size_t i = ents.n; i-- > 0;)
         if (str_eq(json_get_str(ents.v[i], "type"), "compaction")) {
@@ -1998,6 +2018,7 @@ static void stamp_warning(app_t *a, const char *warning) {
             session_rewrite(a->session);
             break;
         }
+    session_unlock(a->session);
     vec_free(&ents);
 }
 
@@ -2649,8 +2670,26 @@ static size_t boundary_index(json_t **ents, size_t n) {
     return 0;
 }
 
-/* pruneSupersededToolResults: cache-aware (small suffix, or an idle cold cache) */
+static int64_t prune_stale_locked(app_t *a);
+static int64_t prune_outputs_locked(app_t *a);
+
+/* the prune passes edit entries in place (see shake_elide) */
 static int64_t prune_stale(app_t *a) {
+    session_lock(a->session);
+    int64_t saved = prune_stale_locked(a);
+    session_unlock(a->session);
+    return saved;
+}
+
+static int64_t prune_outputs(app_t *a) {
+    session_lock(a->session);
+    int64_t saved = prune_outputs_locked(a);
+    session_unlock(a->session);
+    return saved;
+}
+
+/* pruneSupersededToolResults: cache-aware (small suffix, or an idle cold cache) */
+static int64_t prune_stale_locked(app_t *a) {
     bool supersede = settings_bool("compaction.supersedeReads", true), useless = settings_bool("compaction.dropUseless", true);
     if (!supersede && !useless) return 0;
     entvec_t ents = {0};
@@ -2702,7 +2741,7 @@ static int64_t prune_stale(app_t *a) {
 }
 
 /* pruneToolOutputs (DEFAULT_PRUNE_CONFIG: protect 40k, minimum savings 20k) */
-static int64_t prune_outputs(app_t *a) {
+static int64_t prune_outputs_locked(app_t *a) {
     entvec_t ents = {0};
     branch_entries(a, &ents);
     size_t start = boundary_index(ents.v, ents.n);

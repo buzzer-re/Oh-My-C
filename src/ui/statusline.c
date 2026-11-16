@@ -1403,7 +1403,7 @@ static void build_ctx(segctx_t *c, ui_t *u, const sl_settings_t *set) {
     c->u = u;
     c->a = ui_view_app(u);
     c->set = set;
-    c->title = u->app->session ? u->app->session->title : NULL; /* the session title stays the main one */
+    c->title = ui_session_title(u); /* the session title stays the main one */
     if (c->title && !*c->title) c->title = NULL;
     c->accent = c->title && settings_bool("statusLine.sessionAccent", true);
     if (c->accent) c->accent_rgb = tui_session_accent(c->title, TH());
@@ -1700,7 +1700,7 @@ tui_component_t *ui_status_new(ui_t *u) {
 /* band composer: the title docks right-aligned, dim italic, on the working row */
 static char *title_only(ui_t *u) {
     if (!str_eq(composer_shape(), "band")) return NULL;
-    const char *t = u->app->session ? u->app->session->title : NULL;
+    const char *t = ui_session_title(u);
     if (!t || !*t) return NULL;
     char *s = sanitize_status(t);
     const char *pin = session_pin_cached(session_id(u->app->session)) ? sym("icon.pin") : NULL;
@@ -1808,7 +1808,7 @@ static char *shimmer(const char *text, const char *low, const char *mid, const c
 /* the working row (omp Loader with the interrupt key as its one-frame spinner): a blank line,
  * then ` ⎋ Working…` with the message shimmering and the title docked right */
 static void working_row(ui_t *u, const char *message, int width, strvec_t *out) {
-    const char *title = u->app->session ? u->app->session->title : NULL;
+    const char *title = ui_session_title(u);
     bool accent = title && *title && settings_bool("statusLine.sessionAccent", true);
     char mb[32], db[32];
     const char *low = tui_fg_seq(TH(), TUI_TC_DIM), *mid = tui_fg_seq(TH(), TUI_TC_MUTED), *high = tui_fg_seq(TH(), TUI_TC_ACCENT);
@@ -1960,7 +1960,7 @@ static char *chrome_border(void *ud, const char *s) {
     if (*p == '!') r = fgw(TUI_TC_BASH_MODE, s);
     else if (py) r = fgw(TUI_TC_PYTHON_MODE, s);
     else {
-        const char *title = u->app->session ? u->app->session->title : NULL;
+        const char *title = ui_session_title(u);
         if (title && *title && settings_bool("statusLine.sessionAccent", true)) r = fg_rgb(tui_session_accent(title, TH()), s);
         else r = fgw((tui_tc_t)(TUI_TC_THINKING_OFF + (int)effective_effort(ui_view_app(u))), s);
     }

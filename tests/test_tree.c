@@ -5,6 +5,7 @@
 #include "ui/overlays.h"
 #include "ui/ui.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -325,7 +326,65 @@ static void test_picker_first_pass(void) {
     free(a), free(b), free(c), free(dir);
 }
 
+/* The UI thread reads the main session (a transcript rebuild after a compaction, the status line's title, /btw)
+ * while the prompt worker appends to it: by_id rehashes, leaf_id is replaced and freed, entries grow. Those reads
+ * go through the locked accessors; without the lock this races (TSan) and under ASan the reader walks a freed
+ * hash table (the strcmp crash). */
+typedef struct {
+    session_t *s;
+    volatile int done;
+} race_t;
+
+static void *race_writer(void *p) {
+    race_t *r = p;
+    for (int i = 0; i < 4000; i++) {
+        json_t *m = user("x");
+        session_append_message(r->s, m);
+        json_free(m);
+        if (i % 500 == 0) {
+            char t[32];
+            snprintf(t, sizeof t, "title %d", i);
+            session_set_title(r->s, t, "auto");
+        }
+    }
+    r->done = 1;
+    return NULL;
+}
+
+static void test_session_concurrent_reads(void) {
+    race_t r = {session_in_memory("/tmp"), 0};
+    pthread_t th;
+    CHECK(pthread_create(&th, NULL, race_writer, &r) == 0);
+    size_t last = 0;
+    bool monotonic = true;
+    int reads = 0;
+    while (!r.done || reads < 3) {
+        json_t *path = session_current_path(r.s);
+        char *leaf = session_leaf_dup(r.s), *title = session_title_dup(r.s);
+        size_t n = json_len(path);
+        if (n < last) monotonic = false;
+        last = n;
+        if (n && leaf && !str_eq(json_get_str(json_at(path, n - 1), "id"), leaf) && json_len(path) == n) {
+            /* the leaf may move between the two calls; it must at least name an entry of the session */
+            if (!session_get(r.s, leaf)) monotonic = false;
+        }
+        free(leaf), free(title);
+        json_free(path);
+        reads++;
+    }
+    pthread_join(th, NULL);
+    CHECK(monotonic);
+    json_t *path = session_current_path(r.s);
+    CHECK(json_len(path) == 4000);
+    json_free(path);
+    char *title = session_title_dup(r.s);
+    CHECK(str_eq(title, "title 3500"));
+    free(title);
+    session_free(r.s);
+}
+
 int main(void) {
+    test_session_concurrent_reads();
     test_picker_first_pass();
     char *err = NULL;
     tui_theme_t *th = tui_theme_load("titanium", TUI_COLOR_TRUECOLOR, &err);

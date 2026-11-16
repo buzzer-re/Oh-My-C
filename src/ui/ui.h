@@ -238,6 +238,8 @@ void ui_set_tool_activity_hidden(ui_t *u, bool hidden); /* display.hideToolActiv
 /* replay transcript entries (message / custom_message, one path) into `dest`, a container apart from the
  * live transcript (rewind selector replica); ends[i] receives dest's child count after entries[i] */
 void ui_chat_replay_into(ui_t *u, tui_container_t *dest, const json_t *entries, size_t *ends);
+/* the main session's title (NULL: none), safe while its worker renames it; borrowed for the process lifetime */
+const char *ui_session_title(ui_t *u);
 /* toolcards.c: the open read group (omp #lastReadGroup); returns the previous one */
 msgview_t *toolcard_group_swap(msgview_t *group);
 
@@ -268,6 +270,10 @@ void toolcard_run_track(const char *id, msgview_t *v); /* a card this run drew f
 void toolcard_run_end(void);                           /* the run settled: its cards become the prior turn's */
 void toolcard_prior_evict(ui_t *u, const char *id);    /* tool start: drop the prior turn's card for `id` */
 void toolcard_prior_reset(ui_t *u);                    /* transcript rebuilt: the tracked cards are gone */
+/* a view is being destroyed (chat.c mv_destroy): every registry that borrows it lets go (repaint ticker, previews,
+ * background frames, run/prior cards, the call-id map, synthetic cards, current/pinned assistant) */
+void toolcard_forget(msgview_t *v);
+bool toolcard_tracked(const msgview_t *v); /* some registry above still borrows `v` (tests) */
 /* a tool call streaming in an assistant message: draws (or updates) its pending card before execution;
  * toolcard_start then adopts that card */
 void toolcard_preview(ui_t *u, const char *id, const char *name, const json_t *args);

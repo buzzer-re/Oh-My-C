@@ -561,6 +561,55 @@ void toolcard_prior_evict(ui_t *u, const char *id) {
     tui_component_destroy(&v->base);
 }
 
+/* drop every key of `m` that maps to `v` (keys collected first: deleting while probing would skip entries) */
+static bool forget_in(hmap_t *m, const msgview_t *v) {
+    strvec_t keys = {0};
+    hmap_foreach(m, it) if (it->val == v) strvec_push(&keys, it->key);
+    for (size_t i = 0; i < keys.n; i++) hmap_del(m, keys.v[i]);
+    bool found = keys.n > 0;
+    strvec_free(&keys);
+    return found;
+}
+
+/* The registries above, the transcript's call-id map and the run's synthetic/current/pinned views borrow their
+ * cards. A card that leaves the transcript any way (a rebuild after compaction, a focus switch, a superseded retry,
+ * an evicted prior card) is dropped from all of them before its memory goes, so the repaint ticker, previews,
+ * background frames and later tool events never reach a freed card. */
+void toolcard_forget(msgview_t *v) {
+    for (size_t i = 0; i < g_live.n; i++)
+        if (g_live.v[i] == v) {
+            g_live.v[i] = g_live.v[--g_live.n];
+            break;
+        }
+    if (g_read_group == v) g_read_group = NULL;
+    forget_in(&g_preview, v);
+    forget_in(&g_bg, v);
+    forget_in(&g_run_cards, v);
+    forget_in(&g_prior_cards, v);
+    ui_t *u = g_ui;
+    if (!u) return;
+    forget_in(&u->tools, v);
+    for (size_t i = 0; i < u->synthetic_cards.n; i++)
+        if (u->synthetic_cards.v[i] == v) {
+            u->synthetic_cards.v[i] = u->synthetic_cards.v[--u->synthetic_cards.n];
+            i--;
+        }
+    if (u->cur_assistant == v) u->cur_assistant = NULL;
+    if (u->pinned_error == v) u->pinned_error = NULL;
+}
+
+bool toolcard_tracked(const msgview_t *v) {
+    for (size_t i = 0; i < g_live.n; i++)
+        if (g_live.v[i] == v) return true;
+    const hmap_t *maps[] = {&g_preview, &g_bg, &g_run_cards, &g_prior_cards, g_ui ? &g_ui->tools : NULL};
+    for (size_t k = 0; k < ARRAY_LEN(maps); k++)
+        if (maps[k]) hmap_foreach(maps[k], it) if (it->val == v) return true;
+    if (g_ui)
+        for (size_t i = 0; i < g_ui->synthetic_cards.n; i++)
+            if (g_ui->synthetic_cards.v[i] == v) return true;
+    return v == g_read_group || (g_ui && (v == g_ui->cur_assistant || v == g_ui->pinned_error));
+}
+
 void toolcard_frames_reset(void) {
     json_free(g_frames);
     g_frames = NULL;

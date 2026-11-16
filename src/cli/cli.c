@@ -21,8 +21,10 @@
 #include "session/export_html.h"
 #include "tools/approval.h"
 #include "tools/tools.h"
+#include "tui/term.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <execinfo.h>
 #include <poll.h>
 #include <pthread.h>
@@ -996,24 +998,93 @@ int cli_acp(int argc, char **argv) {
 
 /* ---------- main ---------- */
 
-static void crash_handler(int sig) {
+/* Fatal signals: restore the terminal, write a backtrace to stderr and to <agent dir>/crash-<pid>.log, then re-raise
+ * with the default action (a core dump where the system allows one). Everything the handler touches is prepared at
+ * startup: the path is formatted, backtrace() has loaded its unwinder, so the handler itself only calls
+ * async-signal-safe functions (open, write, backtrace_symbols_fd, tcsetattr, raise). OMC_NO_CRASH_HANDLER=1 skips it
+ * (sanitizers, debuggers). */
+static char g_crash_path[4096];
+static volatile sig_atomic_t g_crashing;
+
+static void crash_write(int fd, const char *s) {
+    size_t n = strlen(s);
+    while (n > 0) {
+        ssize_t w = write(fd, s, n);
+        if (w <= 0) {
+            if (w < 0 && errno == EINTR) continue;
+            return;
+        }
+        s += w;
+        n -= (size_t)w;
+    }
+}
+
+static void crash_hex(char *out, uintptr_t v) { /* "0x…" without stdio */
+    char tmp[2 + 2 * sizeof v + 1];
+    int i = (int)sizeof tmp - 1;
+    tmp[i] = 0;
+    do tmp[--i] = "0123456789abcdef"[v & 15], v >>= 4;
+    while (v && i > 2);
+    tmp[--i] = 'x';
+    tmp[--i] = '0';
+    memcpy(out, tmp + i, sizeof tmp - (size_t)i);
+}
+
+static void crash_handler(int sig, siginfo_t *si, void *uc) {
+    UNUSED(uc);
+    if (g_crashing) { /* a second thread faulting meanwhile: let the first finish its report */
+        for (;;) pause();
+    }
+    g_crashing = 1;
+    tui_term_emergency_restore();
     void *frames[64];
     int n = backtrace(frames, 64);
-    const char msg[] = "omc: fatal signal; backtrace:\n";
-    if (write(2, msg, sizeof msg - 1) < 0) {}
-    backtrace_symbols_fd(frames, n, 2);
+    const char *name = sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : sig == SIGILL ? "SIGILL" : sig == SIGFPE ? "SIGFPE" : "SIGABRT";
+    char addr[24];
+    crash_hex(addr, si ? (uintptr_t)si->si_addr : 0);
+    int fd = g_crash_path[0] ? open(g_crash_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600) : -1;
+    for (int k = 0; k < 2; k++) {
+        int out = k ? fd : 2;
+        if (out < 0) continue;
+        crash_write(out, "omc " OMC_VERSION ": fatal signal ");
+        crash_write(out, name);
+        crash_write(out, " (fault address ");
+        crash_write(out, addr);
+        crash_write(out, "); backtrace:\n");
+        backtrace_symbols_fd(frames, n, out);
+    }
+    if (fd >= 0) {
+        close(fd);
+        crash_write(2, "omc: crash report written to ");
+        crash_write(2, g_crash_path);
+        crash_write(2, "\n");
+    }
     signal(sig, SIG_DFL);
     raise(sig);
+}
+
+static void install_crash_handler(void) {
+    if (env_truthy("OMC_NO_CRASH_HANDLER")) return;
+    void *warm[1];
+    backtrace(warm, 1); /* loads the unwinder now: the first call may allocate */
+    const char *dir = omc_agent_dir();
+    if (dir && *dir) snprintf(g_crash_path, sizeof g_crash_path, "%s/crash-%ld.log", dir, (long)getpid());
+    static char altstack[64 * 1024]; /* a stack overflow on the main thread still reports */
+    stack_t ss = {.ss_sp = altstack, .ss_size = sizeof altstack, .ss_flags = 0};
+    sigaltstack(&ss, NULL);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = crash_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND;
+    const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
+    for (size_t i = 0; i < ARRAY_LEN(sigs); i++) sigaction(sigs[i], &sa, NULL);
 }
 
 int omc_main(int argc, char **argv) {
     proc_ignore_sigpipe();
     launch_remember_argv(argc, argv);
-    if (env_truthy("OMC_DEBUG")) {
-        signal(SIGSEGV, crash_handler);
-        signal(SIGABRT, crash_handler);
-        signal(SIGBUS, crash_handler);
-    }
+    install_crash_handler();
     const char *lp = env_get("OMC_LOG");
     if (lp) log_init(lp, env_truthy("OMC_DEBUG") ? LOG_DEBUG : LOG_INFO);
     /* main(): no arguments launches */

@@ -28,7 +28,7 @@ static bool g_expanded;
 
 /* getLatestTodoPhasesFromEntries over the active branch, else the session's todo state (owned) */
 static json_t *current_phases(app_t *a) {
-    json_t *path = a->session ? session_path_to(a->session, a->session->leaf_id) : NULL, *found = NULL;
+    json_t *path = a->session ? session_current_path(a->session) : NULL, *found = NULL;
     for (size_t i = json_len(path); i-- > 0 && !found;) {
         const json_t *e = json_at(path, i);
         const char *type = json_get_str(e, "type");

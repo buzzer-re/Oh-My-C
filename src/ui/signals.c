@@ -317,7 +317,7 @@ static char *cwd_label(const char *cwd) {
 void ui_signals_session_title(void) {
     if (!S.u) return;
     app_t *a = S.u->app;
-    char *name = ui_title_sanitize(a && a->session ? a->session->title : NULL);
+    char *name = ui_title_sanitize(ui_session_title(S.u));
     free(S.label);
     S.label = name ? name : cwd_label(a ? a->cwd : NULL);
     emit_title();
@@ -630,7 +630,7 @@ static void notify(const char *title, const char *body, const char *type, const 
 }
 
 static const char *session_title(void) {
-    const char *t = S.u && S.u->app && S.u->app->session ? S.u->app->session->title : NULL;
+    const char *t = ui_session_title(S.u);
     return t && *t ? t : TUI_NOTIFY_APP_NAME;
 }
 

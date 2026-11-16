@@ -60,7 +60,7 @@ omc uses plain pthreads. There is no event loop library and no green threads.
 
 | Thread | Owner | Notes |
 |---|---|---|
-| main / UI | `tui_run()` in interactive mode; stdin reader in rpc/acp | Only the UI thread touches components. Other threads use `tui_post()` / `tui_request_render()` (thread-safe). |
+| main / UI | `tui_run()` in interactive mode; stdin reader in rpc/acp | Only the UI thread touches components. Other threads use `tui_post()` / `tui_request_render()` (thread-safe). A posted event is handled while the worker keeps running, so the UI reads the session only through its locked calls ([agent.md](agent.md#sessions-srcsessionsessionc)). |
 | prompt worker | `modes/interactive.c` (`worker_main`), `modes/rpc.c`, `modes/acp.c` (`prompt_thread`), `omc_prompt()` | Runs the blocking `app_prompt()` / agent loop. One per session at a time (`agent_prompt` returns -1 while running). |
 | tool threads | `execute_tools()` in `agent.c` | Up to 8 consecutive non-exclusive tool calls run in parallel, joined before the next step. |
 | job threads | `tools/jobs.c` | Async/auto-backgrounded bash, subagent `task` jobs, service watchers. Results are delivered as follow-ups. |
@@ -102,7 +102,10 @@ The full rules are in [CONVENTIONS.md](CONVENTIONS.md). In short:
 - Untrusted input is bounds-checked and depth-capped (JSON 512, YAML 256, markdown, archives, ...).
   See [security.md](security.md).
 - Diagnostics go to the log (`LOGD/LOGI/LOGW/LOGE`), never to the TUI's stdout. Logging is off
-  unless `OMC_LOG=<file>` is set, and `OMC_DEBUG=1` adds debug lines. `die()` is reserved for
+  unless `OMC_LOG=<file>` is set, and `OMC_DEBUG=1` adds debug lines. A fatal signal (SIGSEGV, SIGBUS, SIGILL,
+  SIGFPE, SIGABRT) restores the terminal, writes the faulting thread's backtrace to stderr and to
+  `<agent dir>/crash-<pid>.log`, then re-raises (core dump where enabled); `OMC_NO_CRASH_HANDLER=1` leaves the
+  default handlers (sanitizers, debuggers). `die()` is reserved for
   programming errors and OOM.
 
 ## Process-wide vs per-session state
