@@ -729,6 +729,36 @@ static void flush_planning_buffer(cca_sse_t *s, bool final) {
     free(sig);
 }
 
+/* settleVisibleText: reply text waits in two stages (the planning-leak buffer and markup healing); anything that ends a
+ * run of reply text lands it first, or the next block lands ahead of text that streamed before it. The signature the
+ * buffered text carried signs where it landed. */
+static void settle_visible(cca_sse_t *s) {
+    char *sig = s->tbuf_sig;
+    s->tbuf_sig = NULL;
+    if (s->buffering) {
+        char *vis = NULL;
+        int r = consume_planning(s, sb_cstr(&s->tbuf), true, &vis);
+        s->buffering = false;
+        sb_clear(&s->tbuf);
+        if (r == PB_LEAK) s->stripped_leak = true;
+        if (r != PB_INCOMPLETE && vis) feed_visible(s, vis, strlen(vis), NULL);
+        free(vis);
+    }
+    flush_visible(s, NULL);
+    if (sig) retain_sig(s, sig);
+    free(sig);
+}
+
+/* signVisibleText: an unmarked signature-only part signs the reply text before it, which may still be held */
+static void sign_visible(cca_sse_t *s, const char *sig) {
+    if (s->buffering) {
+        set_str(&s->tbuf_sig, sig);
+        return;
+    }
+    flush_visible(s, NULL);
+    retain_sig(s, sig);
+}
+
 static void push_tool_call(cca_sse_t *s, const json_t *part) {
     json_t *fc = json_get_obj(part, "functionCall");
     const char *name = json_get_str(fc, "name");
@@ -817,7 +847,7 @@ int cca_sse_event(void *ud, const char *event, const char *data, size_t len) {
             const char *text = tv->u.str.s;
             size_t tl = tv->u.str.len;
             if (json_get_bool(part, "thought", false)) {
-                flush_visible(s, NULL);
+                settle_visible(s);
                 thinking_delta(s, text, tl);
                 retain_sig(s, sig);
             } else {
@@ -835,7 +865,24 @@ int cca_sse_event(void *ud, const char *event, const char *data, size_t len) {
                 if (s->buffering) flush_planning_buffer(s, false);
             }
         } else if (json_is_str(tv) && sig && *sig && !has_fc) {
-            retain_sig(s, sig);
+            /* a signature-only part: an unmarked one signs the reply text before it (which may still be held), a
+             * thought part signs thinking of its own, as on the other Google routes (omp d0b09e88ae, f99a342be8) */
+            if (!json_get_bool(part, "thought", false)) {
+                sign_visible(s, sig);
+            } else {
+                settle_visible(s);
+                if (str_eq(json_get_str(cur_block(s), "type"), "thinking")) {
+                    retain_sig(s, sig);
+                } else {
+                    aib_start(&s->b);
+                    aib_end_block(&s->b);
+                    json_t *tb = json_obj();
+                    json_set_str(tb, "type", "thinking");
+                    json_set_str(tb, "thinking", "");
+                    json_set_str(tb, "thinkingSignature", sig);
+                    json_push(ccontent(s), tb);
+                }
+            }
         }
         if (has_fc) {
             flush_visible(s, NULL);
