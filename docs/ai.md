@@ -298,9 +298,15 @@ There are two levels:
      fails at once (11 requests / ~48 s for a plain 503).
    - Codex SSE: 6 attempts at 500 ms·(n+1), 5 min cap. Ollama: 5 attempts at 2 s / 5 s / 10 s, llama.cpp tool-call
      parse 500s fail at once. Bedrock: fetchWithRetry defaults (5 attempts). Gemini CLI: 4 attempts at 1 s·2ⁿ on the
-     last endpoint. Google generative AI / Vertex: no transport retries (one request).
+     last endpoint. Google generative AI / Vertex: no transport retries (one request). A segmented long decode
+     (Gemini 4 Hydrogen: `finishReason: CONTINUATION` + `continuationToken` per 65,536-token segment) resumes with
+     the token (top-level on the Gemini API / Vertex, `request.continuationToken` in the Cloud Code Assist envelope)
+     into the same message, each resume with 4 attempts; usage sums every segment (each is billed) and
+     `usage.contextTokens` is the last segment's own total; a CONTINUATION without a token is `length`. Vertex uses
+     `v1beta1` (the only version that resumes long decodes).
    - fetchWithRetry delays use the server hint (`extractRetryHint`: retry-after-ms, Retry-After, x-ratelimit-reset*,
-     then body text such as "Please retry in 250ms", `"retryDelay"`, "try again in 5 min", "reset after 1h2m3s");
+     then body text such as "Please retry in 250ms", `"retryDelay"`, "try again in 5 min", "reset after 1h2m3s",
+     "Resets in 71h48m47s", `"quotaResetDelay"`, an absolute `"quotaResetTimeStamp": "…Z"`);
      a hint above the cap returns the response unretried. A final HTTP error whose headers carry retry timing gets
      omp's ` retry-after-ms=N` suffix (read by the turn level).
    - A captured `x-should-retry` header overrides the Anthropic loop's status and text heuristics (usage limits still stop),

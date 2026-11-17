@@ -589,8 +589,12 @@ if openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$T/sa.pem"
     check "vertex models"     "google-vertex ("       "${VENV[@]}" "$B" models gemini-3.1-pro-preview
     check "vertex adc text"   "plain google answer"   "${VENV[@]}" "$B" --model google-vertex/gemini-3.1-pro-preview --no-session -p "hi"
     check "vertex adc tool"   "Tool said: vx-e2e"     "${VENV[@]}" "$B" --model google-vertex/gemini-3.1-pro-preview --no-session -p "bash:echo vx-e2e"
+    # a long decode split into segments (Gemini 4 Hydrogen, finishReason CONTINUATION + continuationToken) resumes
+    # with the token into one answer (omp 1aa73b27a5)
+    check "vertex continuation" "seg1 seg2 seg3"  "${VENV[@]}" "$B" --model google-vertex/gemini-3.1-pro-preview --no-session -p "segments:3"
+    grep -q '"continuationToken": "tok-2"' "$T/google.jsonl" && echo "   ok  vertex continuation token" || { echo "   FAIL vertex continuation token"; fail=1; }
     check "vertex no project" "No API key found for google-vertex."  "${GENV[@]}" GOOGLE_APPLICATION_CREDENTIALS="$T/sa.json" "$B" --model google-vertex/gemini-3.1-pro-preview --no-session -p "hi"
-    grep -q '"path": "/v1/projects/proj-v/locations/us-central1/publishers/google/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse", "ua": "[^"]*", "auth": "Bearer ya29.mock-sa"' "$T/google.jsonl" \
+    grep -q '"path": "/v1beta1/projects/proj-v/locations/us-central1/publishers/google/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse", "ua": "[^"]*", "auth": "Bearer ya29.mock-sa"' "$T/google.jsonl" \
         && echo "   ok  vertex request path" || { echo "   FAIL vertex request path"; fail=1; }
 fi
 check "vertex no adc"     "No models matching \"gemini-3.1-pro-preview\""      "${GENV[@]}" "$B" models gemini-3.1-pro-preview
@@ -601,6 +605,8 @@ printf '{"google-gemini-cli":{"type":"oauth","access":"cca-token","refresh":"r1"
 check "gemini-cli models" "google-gemini-cli ("  "${GENV[@]}" "$B" models gemini-2.5-pro
 check "gemini-cli text"   "plain cca answer"     "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "hi"
 check "gemini-cli tool"   "Tool said: gc-e2e"    "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "bash:echo gc-e2e"
+check "gemini-cli continuation" "seg1 seg2"  "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "segments:2"
+check "gemini-cli continuation token" "tok-1"  python3 -I -c 'import json,sys; print([r["body"]["request"].get("continuationToken") for r in map(json.loads, open(sys.argv[1])) if r["path"].startswith("/v1internal")])' "$T/google.jsonl"
 # omp 9a37046d3a paused Google Antigravity again: a stored credential is never used and login refuses it.
 # auth.unpausedProviders (omp af8e4c142b) turns it back on from operator layers only (global config, --config,
 # runtime); a project's .omc/config.yml cannot.

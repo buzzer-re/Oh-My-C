@@ -102,6 +102,8 @@ static const char *thinking_level(ai_effort_t e, const ai_model_t *m) {
     }
     if (e == EFFORT_LOW) return "LOW";
     if (e == EFFORT_MEDIUM) return "MEDIUM";
+    /* xhigh reaches here only for ladders that expose it (Gemini 4 Hydrogen); the Gemini API documents it lowercase */
+    if (e == EFFORT_XHIGH) return "xhigh";
     return "HIGH";
 }
 
@@ -646,8 +648,61 @@ static const char *env_first(const char *a, const char *b, const char *c) {
 
 const char *google_map_finish_reason(const char *r) {
     if (str_eq(r, "STOP")) return "stop";
-    if (str_eq(r, "MAX_TOKENS")) return "length";
+    /* CONTINUATION reaches here only without a token to resume from: the output was cut short */
+    if (str_eq(r, "MAX_TOKENS") || str_eq(r, "CONTINUATION")) return "length";
     return "error";
+}
+
+static const char *const USAGE_COUNTS[] = {"promptTokenCount", "candidatesTokenCount", "thoughtsTokenCount",
+                                           "totalTokenCount", "cachedContentTokenCount"};
+
+/* addGoogleUsage: every count summed (each segment's request is billed), contextTokenCount = the latest segment's own
+ * total (its prompt is the original prompt plus all earlier output: what one unsplit request would report) */
+static json_t *add_google_usage(const json_t *earlier, const json_t *seg) {
+    json_t *sum = seg ? json_clone(seg) : json_obj();
+    for (size_t i = 0; i < ARRAY_LEN(USAGE_COUNTS); i++) {
+        const json_t *a = json_get(earlier, USAGE_COUNTS[i]), *b = json_get(seg, USAGE_COUNTS[i]);
+        if (a || b) json_set_int(sum, USAGE_COUNTS[i], json_get_int(earlier, USAGE_COUNTS[i], 0) + json_get_int(seg, USAGE_COUNTS[i], 0));
+    }
+    int64_t total = json_get_int(seg, "totalTokenCount", 0);
+    if (!total)
+        total = json_get_int(seg, "promptTokenCount", 0) + json_get_int(seg, "candidatesTokenCount", 0) +
+                json_get_int(seg, "thoughtsTokenCount", 0);
+    if (total > 0) json_set_int(sum, "contextTokenCount", total);
+    return sum;
+}
+
+void google_cont_observe(google_cont_t *c, json_t *cand, json_t *holder) {
+    const char *tok = json_get_str(cand, "continuationToken");
+    if (str_eq(json_get_str(cand, "finishReason"), "CONTINUATION") && tok && *tok) {
+        free(c->token);
+        c->token = xstrdup(tok);
+        json_del(cand, "finishReason");
+    }
+    json_t *um = json_get_obj(holder, "usageMetadata");
+    if (!um) return;
+    json_free(c->seg);
+    c->seg = json_clone(um);
+    if (c->earlier) json_set(holder, "usageMetadata", add_google_usage(c->earlier, c->seg));
+}
+
+char *google_cont_take(google_cont_t *c) {
+    char *tok = c->token;
+    c->token = NULL;
+    if (!tok) return NULL;
+    json_t *sum = add_google_usage(c->earlier, c->seg);
+    json_free(c->earlier);
+    c->earlier = sum;
+    json_free(c->seg);
+    c->seg = NULL;
+    return tok;
+}
+
+void google_cont_free(google_cont_t *c) {
+    free(c->token);
+    json_free(c->earlier);
+    json_free(c->seg);
+    memset(c, 0, sizeof *c);
 }
 
 void google_sse_init(google_sse_t *s, const ai_model_t *m, ai_event_cb cb, void *ud) {
@@ -660,6 +715,7 @@ void google_sse_init(google_sse_t *s, const ai_model_t *m, ai_event_cb cb, void 
 void google_sse_free(google_sse_t *s) {
     free(s->error);
     s->error = NULL;
+    google_cont_free(&s->cont);
     aib_free(&s->b);
 }
 
@@ -748,6 +804,9 @@ void google_apply_usage(ai_builder_t *b, const json_t *u) {
     json_t *usage = json_get(b->msg, "usage");
     if (thoughts > 0) aib_usage_add_reasoning(b, thoughts);
     else json_del(usage, "reasoningTokens");
+    /* a continued (segmented) answer is sized by its last segment, not the summed counts */
+    if (json_get(u, "contextTokenCount")) json_set_int(usage, "contextTokens", json_get_int(u, "contextTokenCount", 0));
+    else json_del(usage, "contextTokens");
 }
 
 static void apply_usage(google_sse_t *s, const json_t *u) { google_apply_usage(&s->b, u); }
@@ -780,6 +839,7 @@ int google_sse_event(void *ud, const char *event, const char *data, size_t len) 
         return 2;
     }
     json_t *cand = json_at(cands, 0);
+    google_cont_observe(&s->cont, cand, chunk);
     json_t *content = cand ? json_get_obj(cand, "content") : NULL;
     json_t *part;
     json_arr_foreach(content ? json_get(content, "parts") : NULL, i, part) {
@@ -891,7 +951,9 @@ json_t *provider_google_stream(const ai_model_t *m, const ai_context_t *ctx, con
             /* an ambient (env) region falls back to the global endpoint on 404 */
             const char *location = loc ? loc : "global";
             char *host = vertex_host(location);
-            char *path = xasprintf("v1/publishers/google/models/%s:streamGenerateContent?alt=sse", m->id);
+            /* v1beta1, the Google Gen AI SDK's default: Agent Platform resumes long decodes (continuationToken,
+             * Gemini 4 Hydrogen past 65,536 output tokens) only there */
+            char *path = xasprintf("v1beta1/publishers/google/models/%s:streamGenerateContent?alt=sse", m->id);
             if (custom) {
                 url = xasprintf("%s/%s", custom, path);
             } else {
@@ -914,7 +976,7 @@ json_t *provider_google_stream(const ai_model_t *m, const ai_context_t *ctx, con
             if (!cfg_err) {
                 char *host = vertex_host(loc);
                 char *origin = custom ? xstrdup(custom) : xasprintf("https://%s", host);
-                url = xasprintf("%s/v1/projects/%s/locations/%s/publishers/google/models/%s:streamGenerateContent?alt=sse",
+                url = xasprintf("%s/v1beta1/projects/%s/locations/%s/publishers/google/models/%s:streamGenerateContent?alt=sse",
                                 origin, project, loc, m->id);
                 free(origin);
                 free(host);
@@ -951,13 +1013,33 @@ json_t *provider_google_stream(const ai_model_t *m, const ai_context_t *ctx, con
         int status = 0;
         char *err = NULL;
         ai_post_ex_t ex = {0};
+        const char *used_url = url;
         int rc = ai_sse_post_ex(url, &h, body, o, google_sse_event, &s, &status, &err, &ex);
         if (rc == -1 && status == 404 && fallback_url && !s.b.started) {
             free(err);
             err = NULL;
             free(ex.err_body);
             ex.err_body = NULL;
+            used_url = fallback_url;
             rc = ai_sse_post_ex(fallback_url, &h, body, o, google_sse_event, &s, &status, &err, &ex);
+        }
+        /* followGoogleContinuations: a segment that ended in CONTINUATION resumes with its token (top-level
+         * `continuationToken`) into the same message; a resume retries transient failures, since a failed one
+         * would discard every segment already streamed */
+        for (char *tok; (rc == 0 || rc == 1) && !s.error && (tok = google_cont_take(&s.cont));) {
+            json_t *pj = json_parse_str(body);
+            json_set_str(pj, "continuationToken", tok);
+            free(tok);
+            char *cbody = json_dump(pj, 0);
+            json_free(pj);
+            ai_stream_opts_t co = *o;
+            co.max_retries = GOOGLE_CONTINUATION_MAX_ATTEMPTS - 1;
+            free(err);
+            err = NULL;
+            free(ex.err_body);
+            ex = (ai_post_ex_t){0};
+            rc = ai_sse_post_ex(used_url, &h, cbody, &co, google_sse_event, &s, &status, &err, &ex);
+            free(cbody);
         }
         if (rc == -1 && status >= 400) {
             char *e2 = google_error_text(status, err, ex.err_body);

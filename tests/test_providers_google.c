@@ -342,7 +342,7 @@ static reply_t adc_route(const char *method, const char *path, const http_header
         return ok ? R(200, NULL, "{\"accessToken\":\"ya29.imp-token\",\"expireTime\":\"2099-01-01T00:00:00Z\"}")
                   : R(403, NULL, "{\"error\":{\"message\":\"denied\"}}");
     }
-    if (str_starts(path, "/v1/projects/proj-9/locations/us-central1/publishers/google/models/gemini-x:streamGenerateContent")) {
+    if (str_starts(path, "/v1beta1/projects/proj-9/locations/us-central1/publishers/google/models/gemini-x:streamGenerateContent")) {
         if (!str_eq(auth, "Bearer ya29.sa-token")) return R(401, NULL, "{\"error\":{\"message\":\"bad token\"}}");
         return R(200, "text/event-stream",
                  "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"vertex says hi\"}]},"

@@ -560,6 +560,7 @@ void cca_sse_free(cca_sse_t *s) {
     free(s->tbuf_sig);
     sb_free(&s->tbuf);
     strvec_free(&s->tool_names);
+    google_cont_free(&s->cont);
     if (s->heal) {
         think_heal_free(s->heal);
         free(s->heal);
@@ -838,6 +839,7 @@ int cca_sse_event(void *ud, const char *event, const char *data, size_t len) {
         return 2;
     }
     json_t *cand = json_at(cands, 0);
+    google_cont_observe(&s->cont, cand, resp);
     json_t *part;
     json_arr_foreach(json_get_arr(json_get_obj(cand, "content"), "parts"), i, part) {
         json_t *tv = json_get(part, "text");
@@ -1088,6 +1090,36 @@ json_t *provider_gemini_cli_stream(const ai_model_t *m, const ai_context_t *ctx,
                 else error = xstrdup(s.error ? s.error : "Cloud Code Assist stream error");
                 break;
             }
+            /* followGoogleContinuations: a segment that ended in CONTINUATION resumes with its token
+             * (request.continuationToken in the envelope) into the same message; each resume gets the pre-response
+             * watchdog and retries transient failures, since a failed one would discard every streamed segment */
+            for (char *tok; !error && (tok = google_cont_take(&s.cont));) {
+                json_t *pj = json_parse_str(body);
+                json_t *req = json_get_obj(pj, "request");
+                if (req) json_set_str(req, "continuationToken", tok);
+                free(tok);
+                char *cbody = json_dump(pj, 0);
+                json_free(pj);
+                ai_stream_opts_t co = ro;
+                co.max_retries = GOOGLE_CONTINUATION_MAX_ATTEMPTS - 1;
+                ai_post_ex_t cex = {.idle_timeout_ms = first_event_ms};
+                int cstatus = 0;
+                char *cerr = NULL;
+                int crc = ai_sse_post_ex(url, &h, cbody, &co, cca_sse_event, &s, &cstatus, &cerr, &cex);
+                free(cbody);
+                if (crc == -2) result = aib_finish(&s.b, "aborted", "Request was aborted");
+                else if (crc == -1 && cstatus >= 400) {
+                    char *text = xasprintf("Cloud Code Assist API error (%d): %s", cstatus,
+                                           cex.err_body ? cex.err_body : cerr ? cerr : "");
+                    error = ai_rewrap_http_error(text, cerr);
+                    free(text);
+                } else if (crc == -1) error = xstrdup(cerr ? cerr : "request failed");
+                else if (crc == 2) error = xstrdup(s.error ? s.error : "Cloud Code Assist stream error");
+                free(cerr);
+                free(cex.err_body);
+                if (result) break;
+            }
+            if (result || error) break;
             cca_sse_end(&s);
             bool meaningful = cca_sse_meaningful(&s);
             if (strcmp(s.stop_reason, "stop") != 0 || meaningful) {
