@@ -41,12 +41,6 @@ static char *todo_line(const json_t *task) {
     } else if (str_eq(st, "abandoned")) {
         line = xasprintf("%s \x1b[9m%s\x1b[29m", unchecked, text);
         r = tc_fg(TUI_TC_ERROR, line);
-    } else if (str_eq(st, "blocked")) {
-        const char *bl = json_get_str(task, "blocker");
-        char *note = bl ? xasprintf("blocked: %s", bl) : xstrdup("blocked");
-        line = xasprintf("%s %s (%s)", unchecked, text, note);
-        r = tc_fg(TUI_TC_WARNING, line);
-        free(note);
     } else {
         line = xasprintf("%s %s", unchecked, text);
         r = tc_fg(TUI_TC_DIM, line);

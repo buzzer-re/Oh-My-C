@@ -272,32 +272,6 @@ static json_t *apply_entry(json_t *phases, const char *op, const json_t *args, s
     } else if (!strcmp(op, "done") || !strcmp(op, "drop")) {
         task_targets(phases, task, phase, errs, &targets);
         for (size_t i = 0; i < targets.n; i++) json_set_str(targets.v[i], "status", op[1] == 'o' ? "completed" : "abandoned");
-    } else if (!strcmp(op, "block")) {
-        if (!(task && *task) && !(phase && *phase)) {
-            strvec_push(errs, "block requires a task or phase target");
-        } else {
-            char *reason = collapse_ws(json_get_str(args, "reason"));
-            task_targets(phases, task, phase, errs, &targets);
-            for (size_t i = 0; i < targets.n; i++) {
-                const char *st = json_get_str(targets.v[i], "status");
-                if (!is_open(st) && !str_eq(st, "blocked")) continue;
-                json_set_str(targets.v[i], "status", "blocked");
-                if (*reason) json_set_str(targets.v[i], "blocker", reason);
-                else json_del(targets.v[i], "blocker");
-            }
-            free(reason);
-        }
-    } else if (!strcmp(op, "unblock")) {
-        if (!(task && *task) && !(phase && *phase)) {
-            strvec_push(errs, "unblock requires a task or phase target");
-        } else {
-            task_targets(phases, task, phase, errs, &targets);
-            for (size_t i = 0; i < targets.n; i++)
-                if (str_eq(json_get_str(targets.v[i], "status"), "blocked")) {
-                    json_set_str(targets.v[i], "status", "pending");
-                    json_del(targets.v[i], "blocker");
-                }
-        }
     } else if (!strcmp(op, "rm")) {
         remove_tasks(phases, args, errs);
     } else if (!strcmp(op, "append")) {
@@ -320,7 +294,6 @@ static const char *status_marker(const char *st) {
     if (str_eq(st, "in_progress")) return "/";
     if (str_eq(st, "completed")) return "x";
     if (str_eq(st, "abandoned")) return "-";
-    if (str_eq(st, "blocked")) return "!";
     return " ";
 }
 
@@ -332,10 +305,8 @@ char *todo_phases_to_markdown(const json_t *phases) {
         if (i) sb_putc(&b, '\n');
         sb_appendf(&b, "# %s\n", json_get_str(p, "name") ? json_get_str(p, "name") : "");
         json_arr_foreach(json_get(p, "tasks"), k, t) {
-            const char *st = json_get_str(t, "status"), *blocker = json_get_str(t, "blocker");
-            sb_appendf(&b, "- [%s] %s", status_marker(st), json_get_str(t, "content") ? json_get_str(t, "content") : "");
-            if (str_eq(st, "blocked") && blocker && *blocker) sb_appendf(&b, " <!-- blocker: %s -->", blocker);
-            sb_putc(&b, '\n');
+            const char *st = json_get_str(t, "status");
+            sb_appendf(&b, "- [%s] %s\n", status_marker(st), json_get_str(t, "content") ? json_get_str(t, "content") : "");
         }
     }
     return sb_detach(&b);
@@ -406,10 +377,9 @@ json_t *todo_markdown_to_phases(const char *md, strvec_t *errors) {
         const char *st = !strcmp(marker, " ") || !*marker ? "pending"
                          : !strcmp(marker, "x") || !strcmp(marker, "X") ? "completed"
                          : !strcmp(marker, "/") || !strcmp(marker, ">") ? "in_progress"
-                         : !strcmp(marker, "-") || !strcmp(marker, "~") ? "abandoned"
-                         : !strcmp(marker, "!") ? "blocked" : NULL;
+                         : !strcmp(marker, "-") || !strcmp(marker, "~") ? "abandoned" : NULL;
         if (!st) {
-            strvec_push_own(errors, xasprintf("Line %zu: unknown status marker \"[%s]\" (use [ ], [x], [/], [-], [!])", ln + 1, marker));
+            strvec_push_own(errors, xasprintf("Line %zu: unknown status marker \"[%s]\" (use [ ], [x], [/], [-])", ln + 1, marker));
             free(tr);
             continue;
         }
@@ -421,24 +391,8 @@ json_t *todo_markdown_to_phases(const char *md, strvec_t *errors) {
         }
         char *raw = str_trim(content);
         json_t *t = json_obj();
-        const char *cm = strstr(raw, "<!--");
-        size_t rl = strlen(raw);
-        if (!strcmp(st, "blocked") && cm && rl >= 3 && !strcmp(raw + rl - 3, "-->")) {
-            const char *in = cm + 4;
-            while (is_sp(*in)) in++;
-            if (!strncmp(in, "blocker:", 8)) {
-                char *before = xstrndup(raw, (size_t)(cm - raw)), *bt = str_trim(before);
-                char *note = xstrndup(in + 8, (size_t)(raw + rl - 3 - (in + 8))), *nt = str_trim(note);
-                json_set_str(t, "content", bt);
-                json_set_str(t, "status", st);
-                json_set_str(t, "blocker", nt);
-                free(before), free(bt), free(note), free(nt);
-            }
-        }
-        if (!json_get(t, "content")) {
-            json_set_str(t, "content", raw);
-            json_set_str(t, "status", st);
-        }
+        json_set_str(t, "content", raw);
+        json_set_str(t, "status", st);
         json_push(json_get(cur, "tasks"), t);
         free(raw);
         free(tr);
@@ -449,14 +403,13 @@ json_t *todo_markdown_to_phases(const char *md, strvec_t *errors) {
 }
 
 static char *format_summary(json_t *phases, strvec_t *errors, bool readonly) {
-    size_t total = 0, closed = 0, blocked = 0, open = 0;
+    size_t total = 0, closed = 0, open = 0;
     json_t *p, *t;
     json_arr_foreach(phases, i, p) {
         json_arr_foreach(json_get(p, "tasks"), k, t) {
             const char *st = json_get_str(t, "status");
             total++;
             if (is_closed(st)) closed++;
-            if (str_eq(st, "blocked")) blocked++;
             if (is_open(st)) open++;
         }
     }
@@ -493,9 +446,7 @@ static char *format_summary(json_t *phases, strvec_t *errors, bool readonly) {
     bool ahead = false;
     for (size_t i = cur + 1; i < nph; i++)
         json_arr_foreach(json_get(json_at(phases, i), "tasks"), k, t) if (is_closed(json_get_str(t, "status"))) ahead = true;
-    sb_appendf(&b, "Overall: %zu/%zu done, %zu open", closed, total, open);
-    if (blocked) sb_appendf(&b, ", %zu blocked", blocked);
-    sb_append(&b, ".\n");
+    sb_appendf(&b, "Overall: %zu/%zu done, %zu open.\n", closed, total, open);
     sb_appendf(&b, "Active phase %zu/%zu \"%s\" (%zu/%zu)%s\n", cur + 1, nph, json_get_str(cp, "name"), cdone,
                json_len(json_get(cp, "tasks")),
                ahead ? " — earliest phase with open tasks; the in-progress pointer auto-advances to the earliest open task "
@@ -505,14 +456,9 @@ static char *format_summary(json_t *phases, strvec_t *errors, bool readonly) {
         sb_appendf(&b, "  %s:\n", json_get_str(p, "name"));
         json_arr_foreach(json_get(p, "tasks"), k, t) {
             const char *st = json_get_str(t, "status");
-            const char *blk = json_get_str(t, "blocker");
             sb_appendf(&b, "    - %s %s", str_eq(st, "completed") ? "[X]" : "[ ]", json_get_str(t, "content"));
             if (str_eq(st, "in_progress")) sb_append(&b, " (in progress)");
             else if (str_eq(st, "abandoned")) sb_append(&b, " (dropped)");
-            else if (str_eq(st, "blocked")) {
-                if (blk && *blk) sb_appendf(&b, " (blocked: %s)", blk);
-                else sb_append(&b, " (blocked)");
-            }
             sb_putc(&b, '\n');
         }
     }
@@ -625,14 +571,13 @@ static int todo_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
 agent_tool_t *tool_todo_new(tool_env_t *env) {
     char *desc = tool_prompt("todo", NULL);
     json_t *s = schema_lit(
-        "{\"type\":\"object\",\"properties\":{\"op\":{\"enum\":[\"init\",\"start\",\"done\",\"rm\",\"drop\",\"block\","
-        "\"unblock\",\"append\",\"view\"],\"type\":\"string\"},\"list\":{\"type\":\"array\",\"items\":{\"type\":"
+        "{\"type\":\"object\",\"properties\":{\"op\":{\"enum\":[\"init\",\"start\",\"done\",\"rm\",\"drop\","
+        "\"append\",\"view\"],\"type\":\"string\"},\"list\":{\"type\":\"array\",\"items\":{\"type\":"
         "\"object\",\"properties\":{\"phase\":{\"type\":\"string\"},\"items\":{\"type\":\"array\",\"items\":{\"type\":"
         "\"string\"},\"minItems\":1}},\"required\":[\"phase\",\"items\"],\"additionalProperties\":false},"
         "\"description\":\"phases for init\"},\"task\":{\"type\":\"string\",\"description\":\"verbatim task content\"},"
         "\"phase\":{\"type\":\"string\"},\"items\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},"
-        "\"description\":\"tasks for flat init or append\"},\"reason\":{\"type\":\"string\",\"description\":"
-        "\"blocker note for block\"}},\"required\":[\"op\"],\"additionalProperties\":false}");
+        "\"description\":\"tasks for flat init or append\"}},\"required\":[\"op\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("todo", "Todo", desc, s, todo_execute);
     t->lenient_args = true; /* omp lenientArgValidation: execute() reports schema errors itself */
     free(desc);
@@ -1015,19 +960,9 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
     if (notes) {
         json_t *nt;
         json_arr_foreach(notes, i, nt) {
-            const char *t = json_get_str(nt, "text");
-            sb_t b = SB_INIT;
-            bool space = false;
-            for (const char *p = t ? t : ""; *p; p++) { /* text.replace(/\s+/g, " ").trim() */
-                if (isspace((unsigned char)*p)) space = true;
-                else {
-                    if (space && b.len) sb_putc(&b, ' ');
-                    space = false;
-                    sb_putc(&b, *p);
-                }
-            }
-            json_set_str(nt, "text", sb_cstr(&b));
-            sb_free(&b);
+            char *one = collapse_ws(json_get_str(nt, "text")); /* text.replace(/\s+/g, " ").trim() */
+            json_set_str(nt, "text", one);
+            free(one);
         }
         json_set(c, "notes", notes);
         notes = NULL;
