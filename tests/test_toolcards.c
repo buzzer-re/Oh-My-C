@@ -771,6 +771,19 @@ int main(void) {
         tc_irc_incoming_card("main", "", NULL, false, 80, &out);
         CHECK(out.n == 1, "empty body: head only");
         strvec_free(&out);
+        /* omp 471febb43d, 182ad04260, 8025dbc9f2: collapsed rows clip to the card and say so; expanded, the whole
+         * message soft-wraps */
+        sb_t lng = SB_INIT;
+        for (int i = 0; i < 30; i++) sb_append(&lng, "word ");
+        tc_irc_incoming_card("main", sb_cstr(&lng), NULL, false, 40, &out);
+        CHECK(out.n == 3 && has_row(&out, "Ctrl+O: Expand"), "clipped row hint %zu", out.n);
+        for (size_t i = 0; i < out.n; i++) CHECK(tui_visible_width(out.v[i]) <= 40, "row fits the card");
+        strvec_free(&out);
+        sb_append(&lng, "\n2\n3\n4\n5");
+        tc_irc_incoming_card("main", sb_cstr(&lng), NULL, true, 40, &out);
+        CHECK(out.n == 1 + 5 + 4 && has_row(&out, "5") && !has_row(&out, "more line"), "expanded whole %zu", out.n);
+        strvec_free(&out);
+        sb_free(&lng);
     }
     if (failures) fprintf(stderr, "%d failure(s)\n", failures);
     return failures ? 1 : 0;
