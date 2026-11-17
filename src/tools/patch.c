@@ -2411,11 +2411,12 @@ static bool compute_replacements(const strvec_t *lines_v, const char *path, cons
                 line_index = found + pattern.n;
                 goto next;
             }
-            size_t nm = MIN(found + pattern.n, n) - found;
+            /* the character-level fallback places a match past an exhausted file at `start` (> n): nothing to copy */
+            size_t nm = found < n ? MIN(found + pattern.n, n) - found : 0;
             if (res.strategy == SEQ_PREFIX || res.strategy == SEQ_SUBSTRING) {
-                if (!(ok = assert_partial_match(path, &pattern, L + found, nm, &new_lines, found, e))) goto next;
+                if (!(ok = assert_partial_match(path, &pattern, L + MIN(found, n), nm, &new_lines, found, e))) goto next;
             }
-            strvec_t matched = vec_copy(L + found, nm);
+            strvec_t matched = vec_copy(L + MIN(found, n), nm);
             repl_t rp = {found, pattern.n, adjust_lines_indentation(&pattern, &matched, &new_lines)};
             strvec_free(&matched);
             vec_push(out, rp);
@@ -3547,9 +3548,6 @@ static json_t *per_file_json(const staged_t *s, pe_mode_t mode, bool single, boo
         diag = json_obj();
         json_set_str(diag, "server", "patch");
         json_t *msgs = json_arr();
-        for (size_t i = 0; i < s->warnings.n; i++) json_push_str(msgs, xasprintf("patch: %s", s->warnings.v[i]) ? NULL : NULL);
-        json_free(msgs);
-        msgs = json_arr();
         for (size_t i = 0; i < s->warnings.n; i++) {
             char *m = xasprintf("patch: %s", s->warnings.v[i]);
             json_push_str(msgs, m);
