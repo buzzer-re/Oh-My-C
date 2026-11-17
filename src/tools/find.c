@@ -9,6 +9,7 @@
  * Each judged phase runs its requests through a bounded-parallel dispatcher and drains before the next. */
 #include "tools.h"
 #include "prompt/template.h"
+#include "config/settings.h"
 
 #include "core/fs.h"
 #include "text/search.h"
@@ -31,7 +32,16 @@
 #define FIND_SKETCH_BYTES 384
 #define FIND_FULL_LIMIT 40
 #define FIND_CUTOFF 0.45
-#define FIND_THRESHOLD 0.2
+#define FIND_THRESHOLD 0.2 /* unless find.hitThreshold sets one */
+
+/* find.hitThreshold (tools/settings.ts cfgFindHitThreshold): a number above 0, up to 1; omp's validate rejects any other
+ * value, omc ignores it and keeps the default */
+static double find_hit_threshold(void) {
+    const json_t *v = settings_get("find.hitThreshold");
+    if (!json_is_num(v)) return FIND_THRESHOLD;
+    double d = v->u.num.d;
+    return d > 0 && d <= 1 ? d : FIND_THRESHOLD;
+}
 #define FIND_READ_LIMIT (4 * 1024 * 1024)
 #define FIND_SKETCH_STATE_BYTES 18000
 #define FIND_SKETCH_CARDS_MAX 48
@@ -909,6 +919,7 @@ typedef struct {
     json_t *state, *questions; /* owned */
     json_t *answers;           /* outcome (owned) or NULL */
     char *error;               /* outcome error (owned) */
+    const char *lead;          /* model selector tried before the judge role (find.verifyModel for verification) */
     double ms;
     size_t a, b;               /* job payload (batch offset / file index) */
     VEC(size_t) items;
@@ -935,7 +946,7 @@ static void *dispatch_worker(void *arg) {
         job_t *j = &d->jobs->v[i];
         double t0 = now_ms_f();
         double u[3] = {0, 0, 0};
-        j->answers = d->env->judge(d->env, j->state, j->questions, d->stop, u, &j->error);
+        j->answers = d->env->judge(d->env, j->lead, j->state, j->questions, d->stop, u, &j->error);
         j->ms = now_ms_f() - t0;
         /* a judge the abort ended reaches nothing: the call is over */
         if (!j->answers && *d->stop) {
@@ -1079,6 +1090,7 @@ static int cmp_rank_lex(const void *a, const void *b) {
 
 static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
+    double hit_threshold = find_hit_threshold();
     char *query = trim_dup(json_get_str(args, "query") ? json_get_str(args, "query") : "");
     if (!*query) {
         free(query);
@@ -1495,7 +1507,12 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     vec_free(&cands);
     free(phase);
     phase = xasprintf("verifying %zu passages in %zu files", nsurv, chosen_files);
+    /* verification goes through find.verifyModel first when set; ranking stays on the judge role (omp 904824b03a) */
+    char *verify_model = trim_dup(settings_str("find.verifyModel", ""));
+    for (size_t i = 0; i < jobs.n; i++) jobs.v[i].lead = *verify_model ? verify_model : NULL;
     dispatch(env, &jobs, &w.stop, &st);
+    for (size_t i = 0; i < jobs.n; i++) jobs.v[i].lead = NULL;
+    free(verify_model);
     if (w.aborted) goto stopped;
     /* the deadline during verification ends the search with the hits verified so far */
     bool deadline_cut = w.timed_out;
@@ -1552,7 +1569,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         fresult_t *r = &results.v[i];
         st.files_read++;
         st.file_bytes += r->bytes;
-        if (r->score < FIND_THRESHOLD) continue;
+        if (r->score < hit_threshold) continue;
         size_t k = hit_order.n;
         vec_push(&hit_order, i);
         while (k > 0 && results.v[hit_order.v[k - 1]].score < r->score) {
@@ -1577,7 +1594,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     double elapsed = now_ms_f() - started;
     sb_t b = SB_INIT;
     char *where = scope ? xasprintf(" in %s", scope) : xstrdup("");
-    char *thr = js_fixed(FIND_THRESHOLD, 2);
+    char *thr = js_fixed(hit_threshold, 2);
     if (str_eq(coverage, "unavailable"))
         sb_appendf(&b, "find unavailable for \"%s\"%s: all %lld judge requests failed, nothing was judged. This is not "
                        "evidence of absence; use grep.",
@@ -1610,7 +1627,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         sb_appendf(&b, "\n%s  %s  %lld lines judged%s", rel, cs, (long long)r->lines, truncated ? ", partial" : "");
         free(cs);
         heats_t merged = {0};
-        merge_heat(&r->heat, FIND_THRESHOLD, &merged);
+        merge_heat(&r->heat, hit_threshold, &merged);
         json_t *h = json_obj();
         json_set_str(h, "rel", rel);
         if (!isnan(name_score[pl->node])) json_set_num(h, "nameScore", name_score[pl->node]);
@@ -1670,7 +1687,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     json_t *kj = json_arr();
     for (size_t k = 0; k < kw.n; k++) json_push_str(kj, kw.v[k]);
     json_set(out->details, "keywords", kj);
-    json_set_num(out->details, "threshold", FIND_THRESHOLD);
+    json_set_num(out->details, "threshold", hit_threshold);
     json_set(out->details, "hits", hits_j);
     json_set_str(out->details, "coverage", coverage);
     json_t *sj = json_obj();

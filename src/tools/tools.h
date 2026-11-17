@@ -133,10 +133,10 @@ typedef struct tool_env {
     /* getImageAttachments: the latest image attachments [{label, uri, sourcePath}] (owned; NULL callback = none) */
     json_t *(*image_attachments)(struct tool_env *env);
     char *local_dir;           /* root for local:// session artifacts */
-    /* one judgment through the judge role chain (find): normalized questions {id: {type, instructions}}; owned
+    /* one judgment through the judge role chain (find), `lead_model` (a selector, may be NULL) tried first: normalized questions {id: {type, instructions}}; owned
      * answers keyed by id or NULL with *err (owned); usage accumulates [input, output, cost] (set by app) */
-    json_t *(*judge)(struct tool_env *env, const json_t *state, const json_t *questions, volatile sig_atomic_t *cancel,
-                     double usage[3], char **err);
+    json_t *(*judge)(struct tool_env *env, const char *lead_model, const json_t *state, const json_t *questions,
+                     volatile sig_atomic_t *cancel, double usage[3], char **err);
     /* write to xd://propose (plan approval) with the trimmed plan title; returns owned result text, sets
      * *is_error and *details (owned PlanApprovalDetails {planFilePath, title, planExists} or NULL) */
     char *(*propose_plan)(struct tool_env *env, const char *title, bool *is_error, json_t **details);

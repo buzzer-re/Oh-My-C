@@ -1515,9 +1515,9 @@ static void add_checkpoint_tools(app_t *a, agent_t *ag) {
 
 /* ---------- setup ---------- */
 
-static json_t *app_tool_judge(tool_env_t *env, const json_t *state, const json_t *questions,
+static json_t *app_tool_judge(tool_env_t *env, const char *lead_model, const json_t *state, const json_t *questions,
                               volatile sig_atomic_t *cancel, double usage[3], char **err) {
-    return evalhost_judge(env->session, state, questions, cancel, usage, err);
+    return evalhost_judge_lead(env->session, lead_model, state, questions, cancel, usage, err);
 }
 
 static json_t *app_eval_bridge(tool_env_t *env, const char *name, const json_t *args, int64_t cell,

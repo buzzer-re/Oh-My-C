@@ -347,6 +347,14 @@ check "find hits"      $'1 hit(s) for "where are tokens parsed" in fnd/ (\xcf\x8
 mkdir -p fnd2 && printf 'int parse_token(const char *raw) {\n  return raw[0];\n}\n' > fnd2/tok.c && printf 'int parse_tokens_slow(void) { return 1; } /* STALLVERIFY */\n' > fnd2/stall.c
 check "find deadline"  "partial: timed out after 3.0s with 1 of 2 passages verified; unverified files may still match. Narrow \`path\` for a complete search."  env OMC_FIND_TIMEOUT_MS=3000 "$B" --model mock/mock-1 -p 'call:find:{"query":"where are tokens parsed","grep_keywords":["parse_token"],"path":"fnd2"}'
 rm -f fnd2/tok.c
+# find.hitThreshold sets the hit cutoff; find.verifyModel answers verification ahead of the judge role (omp 3dd907fb25, 904824b03a)
+printf "find:\n  enabled: on\n  hitThreshold: 1\n  verifyModel: mock/mock-2\n" > "$T/agent/config.yml"
+: > "$T/req.jsonl"
+check "find threshold" $'(\xcf\x84 1.00), strongest first'  "$B" --model mock/mock-1 -p 'call:find:{"query":"where are tokens parsed","grep_keywords":["parse_token"],"path":"fnd"}'
+check "find verify model" "verify=mock-2"  python3 -I -c 'import json,sys
+ms=[json.loads(l).get("model") for l in open(sys.argv[1]) if "This passage only mentions" in l]
+print("verify=" + (ms[0] if ms else "none"))' "$T/req.jsonl"
+printf "find:\n  enabled: on\n" > "$T/agent/config.yml"
 check "find deadline, no hits" 'find timed out after 2.0s at "verifying 1 passages in 1 files", before any hit was verified. Narrow `path` to a smaller tree, or use grep.'  env OMC_FIND_TIMEOUT_MS=2000 "$B" --model mock/mock-1 -p 'call:find:{"query":"where are tokens parsed","grep_keywords":["parse_token"],"path":"fnd2"}'
 check "find empty"     '`query` must be a non-empty description'  "$B" --model mock/mock-1 -p 'call:find:{"query":"  ","grep_keywords":[]}'
 rm -f "$T/agent/config.yml"

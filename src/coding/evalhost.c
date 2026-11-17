@@ -610,10 +610,27 @@ static json_t *load_images(const json_t *v, const char *cwd, char **err) {
 
 /* the live judge role chain (resolveRoleChain("judge"): modelRoles.judge or the catalog chain
  * typesafe jev -> @tiny -> @smol -> @default, or retry.fallbackChains.judge), then the session model */
-static size_t judge_candidates(app_t *a, const ai_model_t **out, size_t max) {
+/* resolveJudge with deps.leadModel: the lead selector, resolved with role-value syntax over the judge role's candidate
+ * pool, goes first and the judge role chain follows without it; a selector matching nothing is logged once and
+ * ignored (omp 904824b03a) */
+static size_t judge_candidates(app_t *a, const char *lead, const ai_model_t **out, size_t max) {
     mr_chain_t chain;
     mr_role_chain("judge", NULL, &chain);
     size_t n = 0;
+    if (lead && *lead) {
+        mr_pool_t pool = {0};
+        mr_pool_role(&pool, "judge");
+        mr_result_t r = {0};
+        if (mr_resolve_value(lead, &pool, &r) && r.model) {
+            out[n++] = r.model;
+        } else {
+            static bool warned;
+            if (!warned) LOGW("judgment lead model matched no judge candidate; using the judge role chain (%s)", lead);
+            warned = true;
+        }
+        mr_result_clear(&r);
+        mr_pool_free(&pool);
+    }
     for (size_t i = 0; i <= chain.n && n < max; i++) {
         const ai_model_t *m = i < chain.n ? chain.v[i].model : a->model;
         if (!m) continue;
@@ -633,11 +650,11 @@ typedef struct {
 } verdict_t;
 
 /* answer every question about one state through the judge chain; false with *err on failure */
-static bool run_judge(app_t *a, const json_t *state, const json_t *questions, const json_t *images,
+static bool run_judge(app_t *a, const char *lead, const json_t *state, const json_t *questions, const json_t *images,
                       volatile sig_atomic_t *c1, volatile sig_atomic_t *c2, double *cost, verdict_t *v, char **err) {
     *err = NULL;
     const ai_model_t *cands[16];
-    size_t n = judge_candidates(a, cands, 16);
+    size_t n = judge_candidates(a, lead, cands, 16);
     bool want_images = json_len(images) > 0, compatible = false, unsupported = false;
     char *system = NULL, *user = NULL;
     judgment_render_prompt(state, questions, &system, &user);
@@ -783,7 +800,7 @@ static json_t *op_judge(evalhost_t *h, const json_t *args, volatile sig_atomic_t
         json_t *images = load_images(json_get(args, "images"), h->a->cwd, err);
         double cost = 0;
         verdict_t v = {0};
-        if (!*err && run_judge(h->a, state, qs, images, cancel, NULL, &cost, &v, err)) {
+        if (!*err && run_judge(h->a, NULL, state, qs, images, cancel, NULL, &cost, &v, err)) {
             res = json_obj();
             json_set(res, "answers", v.answers);
             json_set_str(res, "model", v.model);
@@ -798,10 +815,15 @@ static json_t *op_judge(evalhost_t *h, const json_t *args, volatile sig_atomic_t
 
 json_t *evalhost_judge(struct app *a, const json_t *state, const json_t *questions, volatile sig_atomic_t *cancel,
                        double usage[3], char **err) {
+    return evalhost_judge_lead(a, NULL, state, questions, cancel, usage, err);
+}
+
+json_t *evalhost_judge_lead(struct app *a, const char *lead, const json_t *state, const json_t *questions,
+                            volatile sig_atomic_t *cancel, double usage[3], char **err) {
     *err = NULL;
     double cost = 0;
     verdict_t v = {0};
-    if (!run_judge(a, state, questions, NULL, cancel, NULL, &cost, &v, err)) return NULL;
+    if (!run_judge(a, lead, state, questions, NULL, cancel, NULL, &cost, &v, err)) return NULL;
     if (usage) {
         usage[0] += (double)v.in_tok;
         usage[1] += (double)v.out_tok;
@@ -948,7 +970,7 @@ static json_t *batch_judge_item(batch_t *b, const json_t *input) {
         err = NULL;
         double cost = 0;
         verdict_t v = {0};
-        bool ok = run_judge(b->a, json_get(input, "state"), b->questions, images, &b->cancel, NULL, &cost, &v, &err);
+        bool ok = run_judge(b->a, NULL, json_get(input, "state"), b->questions, images, &b->cancel, NULL, &cost, &v, &err);
         pthread_mutex_lock(&b->mu);
         b->cost += cost;
         pthread_mutex_unlock(&b->mu);
