@@ -858,9 +858,16 @@ static rr_t do_once(const http_req_t *req, const char *url_s, const char *method
         for (;;) {
             char *nl;
             while (!(nl = memmem(c->rbuf + c->rpos, AVAIL, "\r\n", 2))) FILL();
-            long long sz = strtoll(c->rbuf + c->rpos, NULL, 16);
+            /* chunk-size [; ext] CRLF, parsed inside the line: strtoll skipped leading whitespace (an empty line's CRLF)
+             * and read on past the line end, into bytes not yet received */
+            long long sz = 0;
+            const char *q = c->rbuf + c->rpos;
+            while (q < nl && (*q == ' ' || *q == '\t')) q++;
+            int nd = 0;
+            for (; q < nl && isxdigit((unsigned char)*q) && sz <= (1LL << 56); q++, nd++)
+                sz = sz * 16 + (isdigit((unsigned char)*q) ? *q - '0' : (tolower((unsigned char)*q) - 'a' + 10));
             c->rpos = (size_t)(nl - c->rbuf) + 2;
-            if (sz < 0) { ok = false; goto body_done; }
+            if (!nd || sz > (1LL << 56)) { ok = false; fail_code = -5; goto body_done; }
             if (sz == 0) {
                 /* trailers until empty line */
                 for (;;) {
