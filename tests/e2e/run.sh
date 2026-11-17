@@ -88,6 +88,16 @@ check "tool suggest one"  "Tool ast_grep not found. Did you mean grep?"  "$B" --
 check "tool suggest none" "Tool zzz_nope not found"  "$B" --model mock/mock-1 --no-session -p 'call:zzz_nope:{}'
 check "tool suggest mcp"  "Tool mcp__srv__read not found. Did you mean read?"  "$B" --model mock/mock-1 --no-session -p 'call:mcp__srv__read:{}'
 check "grep partial"   "Skipped missing paths: nope"     "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"written","path":"a;nope"}'
+# grep v18.22: 10 matches per file across several files, cross-line rows numbered, binary files named only when they
+# match (a named one is searched as text), match lines only by default (omp 53058a755c, 1b7b9a6860, 390d9cd437)
+mkdir -p gq; for i in $(seq 1 12); do echo "gqx $i"; done > gq/many.txt; printf 'gqa\ngqb\nctx\n' > gq/x.txt; printf 'gqx\0bin\n' > gq/d.bin
+check "grep per-file cap" $'*10:gqx 10\n## x.txt#'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqx|gqa","path":"gq"}'
+check "grep cap notice" "More than 10 matches in gq/many.txt; grep keeps the first 10 per file when searching several. Search one file alone for up to 50."  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqx","path":"gq"}'
+check "grep binary note" 'Binary files also match (name one as `path` to search it as text): gq/d.bin'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqx","path":"gq"}'
+check "grep binary only" $'Tool said: No matches in text files\nBinary files also match'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"bin$","path":"gq"}'
+check "grep named binary" '*1:gqxbin'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"bin","path":"gq/d.bin"}'
+check "grep cross-line"  $'*1:gqa\n 2:gqb'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqa\\ngqb","path":"gq/x.txt"}'
+check "grep url;path list" $'## x.txt#'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqa","path":"local://nope.md;gq"}'
 check "glob none"      "No files found matching pattern" "$B" --model mock/mock-1 -p 'call:glob:{"path":"*.zzq"}'
 check "glob limit"     "Requested limit 500 clamped to the max of 200" "$B" --model mock/mock-1 -p 'call:glob:{"path":"a","limit":500}'
 check "plain answer"   "plain answer"                    "$B" --model mock/mock-1 -p "hi"
@@ -117,7 +127,12 @@ CTAG=$(timeout 30 "$B" --model mock/mock-1 -p "read:blk.c" </dev/null | grep -o 
 check "edit block"     "PUT 1*: → resolved lines 1-3 (3 lines)"  "$B" --model mock/mock-1 -p "edit:[blk.c#$CTAG]\nPUT 1*:\n+int f(void) { return 2; }"
 printf 'a\r\nb\r\n' > crlf.txt
 check "write crlf"     "Note: kept the replaced file's CRLF line endings."  "$B" --model mock/mock-1 -p 'call:write:{"path":"crlf.txt","content":"x\ny\n"}'
-check "write no content" "content is required for nc.txt."  "$B" --model mock/mock-1 -p 'call:write:{"path":"nc.txt"}'
+# xd://<wire alias> reaches the canonical tool: edit runs as apply_patch in apply_patch mode (omp 3eed7ca5ae, d247d81d34)
+check "xd:// wire alias" "[xdap.txt]"  env PI_EDIT_VARIANT=apply_patch "$B" --model mock/mock-1 --no-session -p 'seq:[["write",{"path":"xd://apply_patch","content":"{\"input\":\"*** Begin Patch\\n*** Add File: xdap.txt\\n+hi\\n*** End Patch\\n\"}"}]]'
+# xd:// docs take line selectors; a selector on a device write is refused (omp c51e68b454)
+check "xd:// doc range"  "more lines in resource. Use :6 to continue]"  "$B" --model mock/mock-1 --no-session -p 'call:read:{"path":"xd://ast_edit:1-2"}'
+check "xd:// write selector" 'write does not accept the trailing selector ":raw" on a device URL. Remove it.'  "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://ast_edit:raw","content":"{}"}'
+check "write no content" "content: content must be a string (was missing)"  "$B" --model mock/mock-1 -p 'call:write:{"path":"nc.txt"}'
 check "write eisdir"   "EISDIR: illegal operation on a directory, open '"  "$B" --model mock/mock-1 -p "write:a:x"
 # non-interactive env: a config-file sequence.editor and GCM prompts must not hang a command
 check "bash env"       "true never" "$B" --model mock/mock-1 --no-session -p 'bash:echo $GIT_SEQUENCE_EDITOR $GCM_INTERACTIVE'
@@ -146,6 +161,8 @@ printf 'start();\nconst timeout = 1000;\nfinish();\n' > sl.ts
 check "sloppy mode"     "[sl.ts]"  env PI_EDIT_VARIANT=sloppy "$B" --model mock/mock-1 -p 'call:edit:{"input":"*** Edit File: sl.ts\n*** Find\nconst timeout = 1000;\n*** Replace\nconst timeout = 5000;\n*** Find\nfinish();\n*** Insert Before\nlog();\n"}'
 check "sloppy result"   $'start();\nconst timeout = 5000;\nlog();\nfinish();'  cat sl.ts
 check "todo tool"      "Remaining items (2)"  "$B" --model mock/mock-1 -p "todo:first,second"
+# done/drop/rm take several tasks: an array or a flattened list (omp f87959c6a6)
+check "todo several"   "Overall: 2/3 done, 1 open."  "$B" --model mock/mock-1 --no-session -p 'seq:[["todo",{"op":"init","items":["ta","tb","tc"]}],["todo",{"op":"done","task":"ta; tb"}]]'
 # tool output parity (omp OutputSink): middle elision + session artifact, column cap, sanitizing, exit notice
 LASTMSG='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; m=[x for x in r[-1]["messages"] if x.get("role")=="tool"][-1]; c=m["content"]; print(c if isinstance(c,str) else "".join(b.get("text","") for b in c), end="")'
 "$B" --model mock/mock-1 --session-dir "$T/sink" -p "bash:seq 1 30000" >/dev/null 2>&1 </dev/null
@@ -303,6 +320,10 @@ check "plan blocks"    "working tree is read-only"  "$B" --model mock/mock-1 --p
 # eval (python kernel) when python3 is available
 if command -v python3 >/dev/null; then
     check "eval python"    "Tool said: 42"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"6*7"}'
+    # cells are `<cell-N>` in linecache (inspect.getsource, numbered frames); wait() refuses a number (omp 325470758a, c4d4c72cd2)
+    check "eval cell source" $'Tool said: def g():\n    return 41'  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"import inspect\ndef g():\n    return 41\nprint(inspect.getsource(g))"}'
+    check "eval cell frames" $'Traceback (most recent call last):\n  File "<cell-4>", line 1, in <module>\n    1/0'  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"1/0"}'
+    check "eval wait number" "TypeError: wait() takes agent or completion handles; it is not a sleep."  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"wait(3)"}'
     # sh(): a command run to completion on the eval session's shell; a failure raises ShellError (omp d013a0a269)
     check "eval sh"        "Tool said: 'hi\\n/tmp\\n' 3 'bad\\n'"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"x = sh(\"echo hi; pwd\", cwd=\"/tmp\")\ntry:\n    sh(\"echo bad; exit 3\")\nexcept ShellError as e:\n    print(repr(x), e.exit_code, repr(e.output))"}'
     # a kernel that exits during startup says why: its exit code and the end of its stderr (omp af92dbc0b2)
@@ -330,6 +351,14 @@ check "find hits"      $'1 hit(s) for "where are tokens parsed" in fnd/ (\xcf\x8
 mkdir -p fnd2 && printf 'int parse_token(const char *raw) {\n  return raw[0];\n}\n' > fnd2/tok.c && printf 'int parse_tokens_slow(void) { return 1; } /* STALLVERIFY */\n' > fnd2/stall.c
 check "find deadline"  "partial: timed out after 3.0s with 1 of 2 passages verified; unverified files may still match. Narrow \`path\` for a complete search."  env OMC_FIND_TIMEOUT_MS=3000 "$B" --model mock/mock-1 -p 'call:find:{"query":"where are tokens parsed","grep_keywords":["parse_token"],"path":"fnd2"}'
 rm -f fnd2/tok.c
+# find.hitThreshold sets the hit cutoff; find.verifyModel answers verification ahead of the judge role (omp 3dd907fb25, 904824b03a)
+printf "find:\n  enabled: on\n  hitThreshold: 1\n  verifyModel: mock/mock-2\n" > "$T/agent/config.yml"
+: > "$T/req.jsonl"
+check "find threshold" $'(\xcf\x84 1.00), strongest first'  "$B" --model mock/mock-1 -p 'call:find:{"query":"where are tokens parsed","grep_keywords":["parse_token"],"path":"fnd"}'
+check "find verify model" "verify=mock-2"  python3 -I -c 'import json,sys
+ms=[json.loads(l).get("model") for l in open(sys.argv[1]) if "This passage only mentions" in l]
+print("verify=" + (ms[0] if ms else "none"))' "$T/req.jsonl"
+printf "find:\n  enabled: on\n" > "$T/agent/config.yml"
 check "find deadline, no hits" 'find timed out after 2.0s at "verifying 1 passages in 1 files", before any hit was verified. Narrow `path` to a smaller tree, or use grep.'  env OMC_FIND_TIMEOUT_MS=2000 "$B" --model mock/mock-1 -p 'call:find:{"query":"where are tokens parsed","grep_keywords":["parse_token"],"path":"fnd2"}'
 check "find empty"     '`query` must be a non-empty description'  "$B" --model mock/mock-1 -p 'call:find:{"query":"  ","grep_keywords":[]}'
 rm -f "$T/agent/config.yml"
@@ -857,7 +886,19 @@ n=$(mark); "$B" --model mock/mock-1 --no-session -p 'calls:[["write",{"path":"ou
 check "out:// write"  "Shown to the user."  python3 -I -c "$REQS" "$T/req.jsonl" $n
 rm -f "$T/agent/config.yml"
 check "cfg:// read"   "maxRetries: 10"  "$B" --model mock/mock-1 --no-session -p "read:cfg://retry"
+# /new starts the tools' conversation state fresh: repeat-read counts do not carry over (omp 84f5adc3bb)
+printf 'abc\n' > rr.txt; : > "$T/req.jsonl"
+check "new resets repeat reads" "hinted=1 fresh=1" bash -c "( printf '%s\n' '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"seq:[[\\\"read\\\",{\\\"path\\\":\\\"rr.txt\\\"}],[\\\"read\\\",{\\\"path\\\":\\\"rr.txt\\\"}],[\\\"read\\\",{\\\"path\\\":\\\"rr.txt\\\"}]]\"}'; sleep 4; printf '%s\n' '{\"id\":\"2\",\"type\":\"new_session\"}'; sleep 1; printf '%s\n' '{\"id\":\"3\",\"type\":\"prompt\",\"message\":\"read:rr.txt\"}'; sleep 3 ) | timeout 20 '$B' --model mock/mock-1 --mode rpc >/dev/null 2>&1; python3 -I -c 'import json,sys
+rs=[json.loads(l) for l in open(sys.argv[1])]
+def tools(r): return [\"\".join(p.get(\"text\",\"\") for p in m[\"content\"]) if not isinstance(m[\"content\"],str) else m[\"content\"] for m in r[\"messages\"] if m.get(\"role\")==\"tool\"]
+first=max((tools(r) for r in rs), key=len)
+last=[tools(r) for r in rs if tools(r)][-1]
+print(\"hinted=%d fresh=%d\" % (\"identical output 3 times\" in first[-1], len(last)==1 and \"identical output\" not in last[0]))' '$T/req.jsonl'"
 check "conflict:// unknown"  "Conflict #1 not found: it was resolved"  "$B" --model mock/mock-1 --no-session -p "read:conflict://1"
+# a side with no lines leaves no blank line; a UTF-8 BOM survives the write (omp 47daf5e3bb, fca084bcdd)
+printf '\xef\xbb\xbfa\n<<<<<<< ours\n=======\nx\n>>>>>>> theirs\nb\n' > cfe.txt
+"$B" --model mock/mock-1 --no-session -p 'seq:[["read",{"path":"cfe.txt"}],["write",{"path":"conflict://1","content":"@ours"}]]' >/dev/null 2>&1 </dev/null
+check "conflict:// empty side"  $'\xef\xbb\xbfa\nb'  cat cfe.txt
 # turn-lifecycle signals (WP-11): terminal title + run state, OSC 7501, completion / error notifications, under a pty
 if script --version 2>/dev/null | grep -q util-linux; then
     tui_signals() { # out-file prompt env...

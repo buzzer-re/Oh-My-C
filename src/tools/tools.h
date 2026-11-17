@@ -133,10 +133,10 @@ typedef struct tool_env {
     /* getImageAttachments: the latest image attachments [{label, uri, sourcePath}] (owned; NULL callback = none) */
     json_t *(*image_attachments)(struct tool_env *env);
     char *local_dir;           /* root for local:// session artifacts */
-    /* one judgment through the judge role chain (find): normalized questions {id: {type, instructions}}; owned
+    /* one judgment through the judge role chain (find), `lead_model` (a selector, may be NULL) tried first: normalized questions {id: {type, instructions}}; owned
      * answers keyed by id or NULL with *err (owned); usage accumulates [input, output, cost] (set by app) */
-    json_t *(*judge)(struct tool_env *env, const json_t *state, const json_t *questions, volatile sig_atomic_t *cancel,
-                     double usage[3], char **err);
+    json_t *(*judge)(struct tool_env *env, const char *lead_model, const json_t *state, const json_t *questions,
+                     volatile sig_atomic_t *cancel, double usage[3], char **err);
     /* write to xd://propose (plan approval) with the trimmed plan title; returns owned result text, sets
      * *is_error and *details (owned PlanApprovalDetails {planFilePath, title, planExists} or NULL) */
     char *(*propose_plan)(struct tool_env *env, const char *title, bool *is_error, json_t **details);
@@ -197,6 +197,11 @@ agent_tool_t *tool_glob_new(tool_env_t *env);
 agent_tool_t *tool_todo_new(tool_env_t *env);
 /* /todo helpers (tools/todo.ts): one todo op applied to a copy of `phases` (in-progress normalized; errors appended);
  * phasesToMarkdown; markdownToPhases (errors appended). All return owned values. */
+/* todoTaskTargets: the task contents a todo `task` arg (string or string array) targets, a flattened list split like
+ * a path list unless it names a task verbatim */
+void todo_task_targets(const json_t *phases, const json_t *task, strvec_t *out);
+/* start the env's per-conversation tool state fresh: snapshots, conflict:// ids, repeat-read counts */
+void tool_env_reset_conversation(tool_env_t *e);
 json_t *todo_apply_op(const json_t *phases, const char *op, const json_t *args, strvec_t *errors);
 char *todo_phases_to_markdown(const json_t *phases);
 json_t *todo_markdown_to_phases(const char *md, strvec_t *errors);

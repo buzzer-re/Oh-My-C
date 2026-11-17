@@ -1515,9 +1515,9 @@ static void add_checkpoint_tools(app_t *a, agent_t *ag) {
 
 /* ---------- setup ---------- */
 
-static json_t *app_tool_judge(tool_env_t *env, const json_t *state, const json_t *questions,
+static json_t *app_tool_judge(tool_env_t *env, const char *lead_model, const json_t *state, const json_t *questions,
                               volatile sig_atomic_t *cancel, double usage[3], char **err) {
-    return evalhost_judge(env->session, state, questions, cancel, usage, err);
+    return evalhost_judge_lead(env->session, lead_model, state, questions, cancel, usage, err);
 }
 
 static json_t *app_eval_bridge(tool_env_t *env, const char *name, const json_t *args, int64_t cell,
@@ -3813,6 +3813,12 @@ json_t *app_user_bash(app_t *a, const char *cmd, bool exclude) {
     return m;
 }
 
+/* omp 84f5adc3bb: a new or switched-to conversation starts the tools' conversation state fresh */
+static void app_reset_tool_state(app_t *a) {
+    tool_env_reset_conversation(a->env);
+    if (a->lsp) lsp_manager_reset_ledger(a->lsp);
+}
+
 int app_new_session(app_t *a) {
     session_t *ns = a->opts.no_session ? session_in_memory(a->cwd) : session_create(a->cwd, a->opts.session_dir);
     session_free(a->session);
@@ -3839,6 +3845,7 @@ int app_new_session(app_t *a) {
     a->last_context_tokens = 0;
     json_free(a->env->todo.phases);
     a->env->todo.phases = json_arr();
+    app_reset_tool_state(a);
     app_goal_restore(a);
     prewalk_new_session(a);
     return 0;
@@ -3856,6 +3863,7 @@ int app_switch_session(app_t *a, const char *path, char **err) {
     load_session_into_agent(a);
     a->title_done = s->title != NULL;
     costgate_reseed(a);
+    app_reset_tool_state(a);
     app_goal_restore(a);
     return 0;
 }

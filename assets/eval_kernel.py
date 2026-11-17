@@ -4,7 +4,7 @@
 #   host -> kernel  {"type":"exec","id":N,"code":"..."} | {"type":"reply","id":M,"ok":bool,"value"|"error":...}
 #   kernel -> host  {"type":"ready"} | {"type":"call","id":M,"name":"read"|"__judge__"|...,"args":{...}}
 #                   {"type":"cancel","id":M} | {"type":"result","id":N,"stdout":"...","error":null|"...","images":[...]}
-import ast, asyncio, base64, builtins, io, itertools, json, math, os, queue, re, shlex, subprocess, sys, threading, time, traceback
+import ast, asyncio, base64, builtins, io, itertools, json, linecache, math, os, queue, re, shlex, subprocess, sys, threading, time, traceback
 from pathlib import Path
 
 _PIN = os.dup(0)
@@ -463,6 +463,11 @@ def _handle_value(handle, snap):
 
 def wait(handles, timeout=None, *, raise_errors=True):
     """Wait for completion handles in input order."""
+    if isinstance(handles, (int, float)):
+        raise TypeError(
+            "wait() takes agent or completion handles; it is not a sleep. "
+            "Wait for page state with tab.waitFor*(…), or pause with await asyncio.sleep(seconds)."
+        )
     items = [handles] if isinstance(handles, CompletionHandle) else list(handles)
     for h in items:
         if not isinstance(h, CompletionHandle):
@@ -791,16 +796,26 @@ def _cancel_pending():
         pass
 
 
-def _run(code):
+_cell_count = [3]  # omp's runner has run three setup cells before the first user cell (`<cell-4>`)
+
+
+def _run(code, filename):
+    source = code
     code = _rewrite(code)
-    tree = ast.parse(code, "<cell>", "exec")
+    tree = ast.parse(code, filename, "exec")
+    # runner.py _prepare_file_source: the cell's own source in linecache, so tracebacks and inspect.getsource
+    # see it (omp 325470758a)
+    lines = source.splitlines(keepends=True)
+    if source and (not lines or not lines[-1].endswith(("\n", "\r"))):
+        lines[-1] += "\n"
+    linecache.cache[filename] = (len(source), None, lines, filename)
     last_expr = None
     if tree.body and isinstance(tree.body[-1], ast.Expr):
         last_expr = ast.Expression(tree.body.pop().value)
     flags = ast.PyCF_ALLOW_TOP_LEVEL_AWAIT
-    _await(eval(compile(tree, "<cell>", "exec", flags=flags), _ns))
+    _await(eval(compile(tree, filename, "exec", flags=flags), _ns))
     if last_expr is not None:
-        val = _await(eval(compile(last_expr, "<cell>", "eval", flags=flags), _ns))
+        val = _await(eval(compile(last_expr, filename, "eval", flags=flags), _ns))
         if val is not None:
             img = _value_image(val)
             if img is not None:
@@ -816,15 +831,18 @@ def _do_cell(msg):
     sys.stdout = sys.stderr = buf
     _cell["images"] = []
     err = None
+    _cell_count[0] += 1
+    filename = f"<cell-{_cell_count[0]}>"
     try:
         try:
-            _run(msg.get("code", ""))
+            _run(msg.get("code", ""), filename)
         except SystemExit as e:
             err = f"SystemExit: {e.code}"
         except BaseException:
             et, ev, tb = sys.exc_info()
-            frames = [f for f in traceback.extract_tb(tb) if f.filename == "<cell>"]
-            err = "".join(traceback.format_list(frames)) + "".join(traceback.format_exception_only(et, ev))
+            frames = [f for f in traceback.extract_tb(tb) if f.filename == filename]
+            head = "Traceback (most recent call last):\n" if frames else ""
+            err = head + "".join(traceback.format_list(frames)) + "".join(traceback.format_exception_only(et, ev))
             if et is KeyboardInterrupt:
                 err = "KeyboardInterrupt: Execution interrupted"
                 _cancel_pending()

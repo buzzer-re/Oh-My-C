@@ -61,7 +61,7 @@ if part == "ladder":
           "No job finished within 5.0s; a back-to-back wait allows up to 10.0s.", res)
     want = ("## Still Running (1)\n\n- `bg_1` [bash] — sleep 24\n\n"
             "No job finished within 10.0s; a back-to-back wait allows up to 30.0s.\n"
-            "<system-notice>\nNothing new after 15.0s of back-to-back waits. Waiting is not progress:")
+            "<system-notice>\nNothing new after 15.0s of back-to-back waits.\nWaiting is not progress:")
     check("second wait nudges", len(res) == 3 and res[2].startswith(want), res)
 else:
     # jobs finishing 1 s apart share one result

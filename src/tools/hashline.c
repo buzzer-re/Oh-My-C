@@ -3604,6 +3604,9 @@ char *file_tag(const char *text, size_t len) {
 #define MAX_SNAPSHOTS 256
 
 const char *edit_store_record(edit_store_t *s, const char *abs_path, const char *content, int64_t lo, int64_t hi) {
+    /* the snapshot store hashes and keeps the BOM-stripped text, what `Bun.file(path).text()` returns (read.ts
+     * deriveBufferedFileText strippedText); the patcher reads the live file the same way */
+    if (str_starts(content, "\xEF\xBB\xBF")) content += 3;
     char *tag = file_tag(content, strlen(content));
     pthread_mutex_lock(&s->mu);
     snapshot_t *sn = NULL;

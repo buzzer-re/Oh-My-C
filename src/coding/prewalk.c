@@ -224,7 +224,7 @@ int prewalk_restart(app_t *a, const ai_model_t *source, const char *source_level
     return r;
 }
 
-/* a direct edit/write (an xd:// device write needs a write/exec approval tier: omc's dispatch records none) */
+/* a direct edit/write (an xd:// device write needs the write approval tier: omc's dispatch records none) */
 static bool implementation_action(const json_t *r) {
     const char *tn = json_get_str(r, "toolName");
     if (!str_eq(tn, "edit") && !str_eq(tn, "write")) return false;
@@ -233,7 +233,7 @@ static bool implementation_action(const json_t *r) {
     const json_t *x = json_get(json_get(r, "details"), "xdev");
     if (!x || json_is_null(x)) return true;
     const char *tier = json_get_str(x, "tier");
-    if (!str_eq(tier, "write") && !str_eq(tier, "exec")) return false;
+    if (!str_eq(tier, "write")) return false; /* exec-tier devices count no more than bash itself (omp 60ef4a2e80) */
     return !json_get_bool(x, "readOnlyHint", false);
 }
 

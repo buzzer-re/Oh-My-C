@@ -33,5 +33,8 @@ json_t *evalhost_call(evalhost_t *h, const char *name, const json_t *args, int64
  * usage (optional) accumulates [input tokens, output tokens, cost] of the answering completion. */
 json_t *evalhost_judge(struct app *a, const json_t *state, const json_t *questions, volatile sig_atomic_t *cancel,
                        double usage[3], char **err);
+/* evalhost_judge with `lead` (a model selector, may be NULL) tried before the judge role chain (JudgeDeps.leadModel) */
+json_t *evalhost_judge_lead(struct app *a, const char *lead, const json_t *state, const json_t *questions,
+                            volatile sig_atomic_t *cancel, double usage[3], char **err);
 
 #endif

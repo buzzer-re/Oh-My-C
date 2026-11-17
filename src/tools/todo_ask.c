@@ -1,5 +1,6 @@
 /* todo + ask tools */
 #include "tools.h"
+#include <ctype.h>
 #include "coding/agents.h"
 #include "config/settings.h"
 #include "text/htmlform.h"
@@ -83,10 +84,15 @@ static json_t *resolve_phase(json_t *phases, const char *name, strvec_t *errs) {
 /* getTaskTargets: borrowed task objects */
 typedef VEC(json_t *) jvec_t;
 
-static void task_targets(json_t *phases, const char *task, const char *phase, strvec_t *errs, jvec_t *out) {
-    if (task && *task) {
-        json_t *t = resolve_task(phases, task, errs, NULL);
-        if (t) vec_push(out, t);
+static void task_targets(json_t *phases, const json_t *task_arg, const char *phase, strvec_t *errs, jvec_t *out) {
+    strvec_t contents = {0};
+    todo_task_targets(phases, task_arg, &contents);
+    if (contents.n) {
+        for (size_t i = 0; i < contents.n; i++) {
+            json_t *t = resolve_task(phases, contents.v[i], errs, NULL);
+            if (t) vec_push(out, t);
+        }
+        strvec_free(&contents);
         return;
     }
     json_t *p, *t;
@@ -227,18 +233,23 @@ static void append_items(json_t *phases, const json_t *args, strvec_t *errs) {
 }
 
 static void remove_tasks(json_t *phases, const json_t *args, strvec_t *errs) {
-    const char *task = json_get_str(args, "task"), *phase = json_get_str(args, "phase");
+    const char *phase = json_get_str(args, "phase");
     json_t *p;
-    if (task && *task) {
-        json_t *owner = NULL;
-        json_t *t = resolve_task(phases, task, errs, &owner);
-        if (!t) return;
-        json_t *tasks = json_get(owner, "tasks");
-        for (size_t k = 0; k < json_len(tasks); k++)
-            if (json_at(tasks, k) == t) {
-                json_free(json_arr_remove(tasks, k));
-                break;
-            }
+    strvec_t contents = {0};
+    todo_task_targets(phases, json_get(args, "task"), &contents);
+    if (contents.n) {
+        for (size_t c = 0; c < contents.n; c++) {
+            json_t *owner = NULL;
+            json_t *t = resolve_task(phases, contents.v[c], errs, &owner);
+            if (!t) continue;
+            json_t *tasks = json_get(owner, "tasks");
+            for (size_t k = 0; k < json_len(tasks); k++)
+                if (json_at(tasks, k) == t) {
+                    json_free(json_arr_remove(tasks, k));
+                    break;
+                }
+        }
+        strvec_free(&contents);
         return;
     }
     if (phase && *phase) {
@@ -251,13 +262,21 @@ static void remove_tasks(json_t *phases, const json_t *args, strvec_t *errs) {
 
 /* applyEntry; returns the (possibly replaced) phases */
 static json_t *apply_entry(json_t *phases, const char *op, const json_t *args, strvec_t *errs) {
-    const char *task = json_get_str(args, "task"), *phase = json_get_str(args, "phase");
+    const json_t *task_arg = json_get(args, "task");
+    const char *phase = json_get_str(args, "phase");
+    /* a task target: a non-empty string or a non-empty array */
+    bool has_task = (json_is_str(task_arg) && *json_sv(task_arg)) || json_len(json_is_arr(task_arg) ? task_arg : NULL);
     jvec_t targets = {0};
     if (!strcmp(op, "init")) {
         json_free(phases);
         return init_phases(args, errs);
     } else if (!strcmp(op, "start")) {
-        json_t *t = resolve_task(phases, task, errs, NULL);
+        strvec_t contents = {0};
+        todo_task_targets(phases, task_arg, &contents);
+        json_t *t = NULL;
+        if (contents.n > 1) strvec_push(errs, "start takes a single task: only one task can be in progress");
+        else t = resolve_task(phases, contents.n ? contents.v[0] : NULL, errs, NULL);
+        strvec_free(&contents);
         if (t) {
             json_t *p, *x;
             json_arr_foreach(phases, i, p) json_arr_foreach(json_get(p, "tasks"), k, x) {
@@ -266,14 +285,14 @@ static json_t *apply_entry(json_t *phases, const char *op, const json_t *args, s
             json_set_str(t, "status", "in_progress");
         }
     } else if (!strcmp(op, "done") || !strcmp(op, "drop")) {
-        task_targets(phases, task, phase, errs, &targets);
+        task_targets(phases, task_arg, phase, errs, &targets);
         for (size_t i = 0; i < targets.n; i++) json_set_str(targets.v[i], "status", op[1] == 'o' ? "completed" : "abandoned");
     } else if (!strcmp(op, "block")) {
-        if (!(task && *task) && !(phase && *phase)) {
+        if (!has_task && !(phase && *phase)) {
             strvec_push(errs, "block requires a task or phase target");
         } else {
             char *reason = collapse_ws(json_get_str(args, "reason"));
-            task_targets(phases, task, phase, errs, &targets);
+            task_targets(phases, task_arg, phase, errs, &targets);
             for (size_t i = 0; i < targets.n; i++) {
                 const char *st = json_get_str(targets.v[i], "status");
                 if (!is_open(st) && !str_eq(st, "blocked")) continue;
@@ -284,10 +303,10 @@ static json_t *apply_entry(json_t *phases, const char *op, const json_t *args, s
             free(reason);
         }
     } else if (!strcmp(op, "unblock")) {
-        if (!(task && *task) && !(phase && *phase)) {
+        if (!has_task && !(phase && *phase)) {
             strvec_push(errs, "unblock requires a task or phase target");
         } else {
-            task_targets(phases, task, phase, errs, &targets);
+            task_targets(phases, task_arg, phase, errs, &targets);
             for (size_t i = 0; i < targets.n; i++)
                 if (str_eq(json_get_str(targets.v[i], "status"), "blocked")) {
                     json_set_str(targets.v[i], "status", "pending");
@@ -625,7 +644,8 @@ agent_tool_t *tool_todo_new(tool_env_t *env) {
         "\"unblock\",\"append\",\"view\"],\"type\":\"string\"},\"list\":{\"type\":\"array\",\"items\":{\"type\":"
         "\"object\",\"properties\":{\"phase\":{\"type\":\"string\"},\"items\":{\"type\":\"array\",\"items\":{\"type\":"
         "\"string\"},\"minItems\":1}},\"required\":[\"phase\",\"items\"],\"additionalProperties\":false},"
-        "\"description\":\"phases for init\"},\"task\":{\"type\":\"string\",\"description\":\"verbatim task content\"},"
+        "\"description\":\"phases for init\"},\"task\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"array\",\"items\":"
+        "{\"type\":\"string\"}}],\"description\":\"verbatim task content; array targets several (not start)\"},"
         "\"phase\":{\"type\":\"string\"},\"items\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},"
         "\"description\":\"tasks for flat init or append\"},\"reason\":{\"type\":\"string\",\"description\":"
         "\"blocker note for block\"}},\"required\":[\"op\"],\"additionalProperties\":false}");

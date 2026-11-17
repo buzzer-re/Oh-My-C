@@ -7,6 +7,7 @@
 #include "config/settings.h"
 #include "core/fs.h"
 #include "core/proc.h"
+#include "outsink.h"
 
 #include <ctype.h>
 #include <pthread.h>
@@ -74,10 +75,13 @@ char *gh_norm_text(const char *s) {
     return r;
 }
 
+/* normalizeBlock: CR/tab normalization, then sanitizeText (ANSI escapes and control characters), then trimEnd */
 char *gh_norm_block(const char *s) {
     char *w = norm_ws(s);
-    char *r = gh_js_trim_end(w);
+    char *c = out_sanitize(w, strlen(w), NULL);
+    char *r = gh_js_trim_end(c);
     free(w);
+    free(c);
     return r;
 }
 

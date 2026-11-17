@@ -392,7 +392,150 @@ static char *gh_watch_header(const json_t *w) {
     return r;
 }
 
-static void gh_run_block(const json_t *run, int width, strvec_t *out) {
+/* sanitizeDisplayLine: ANSI / C0 / C1 stripped, tabs expanded, newline runs collapsed to a space, trimmed */
+static char *gh_disp(const char *s) {
+    char *plain = tui_strip_ansi(s ? s : "");
+    char *u8 = utf8_sanitize(plain, strlen(plain));
+    sb_t b = SB_INIT;
+    for (const unsigned char *p = (const unsigned char *)u8; *p; p++) {
+        if (*p == 0xc2 && p[1] >= 0x80 && p[1] <= 0x9f) {
+            p++;
+            continue;
+        }
+        if (*p == '\r' || *p == '\n') {
+            while (p[1] == '\r' || p[1] == '\n') p++;
+            sb_putc(&b, ' ');
+            continue;
+        }
+        if ((*p < 0x20 && *p != '\t') || *p == 0x7f) continue;
+        sb_putc(&b, (char)*p);
+    }
+    char *tabs = tc_replace_tabs(sb_cstr(&b));
+    char *r = str_trim(tabs);
+    free(tabs);
+    sb_free(&b);
+    free(u8);
+    free(plain);
+    return r;
+}
+
+/* ---- workflow steps (omp 4c73c16e0b: getStepProgress / renderStepProgressLine / renderStepLine) ---- */
+typedef enum { GS_SUCCESS, GS_ERROR, GS_WARNING, GS_MUTED } gh_tone_t;
+
+static gh_tone_t gh_step_tone(const json_t *st) {
+    const char *c = json_get_str(st, "conclusion"), *s = json_get_str(st, "status");
+    if (gh_in(c, GH_OK)) return GS_SUCCESS;
+    if (gh_in(c, GH_FAIL)) return GS_ERROR;
+    if (!c && str_eq(s, "in_progress")) return GS_WARNING;
+    return GS_MUTED;
+}
+
+static tui_tc_t gh_tone_color(gh_tone_t t) {
+    return t == GS_SUCCESS ? TUI_TC_SUCCESS : t == GS_ERROR ? TUI_TC_ERROR : t == GS_WARNING ? TUI_TC_WARNING : TUI_TC_MUTED;
+}
+
+static char *gh_step_icon(const json_t *st) {
+    gh_tone_t t = gh_step_tone(st);
+    if (t == GS_SUCCESS) return tc_status_icon(TC_ST_SUCCESS, -1);
+    if (t == GS_ERROR) return tc_status_icon(TC_ST_ERROR, -1);
+    if (t == GS_WARNING) return tc_status_icon(TC_ST_RUNNING, -1);
+    if (!json_get_str(st, "conclusion") && gh_in(json_get_str(st, "status"), GH_PENDING)) return tc_status_icon(TC_ST_PENDING, -1);
+    return tc_styled_sym("status.shadowed", TUI_TC_MUTED);
+}
+
+static char *gh_step_state(const json_t *st) {
+    const char *c = json_get_str(st, "conclusion"), *s = json_get_str(st, "status");
+    const char *v = c && *c ? c : s && *s ? s : "unknown";
+    char *u = str_replace(v, "_", " ");
+    char *r = gh_disp(u);
+    free(u);
+    return r;
+}
+
+/* getStepProgressLabel over a job's steps; *summary = the current or failed step (NULL when neither) */
+static char *gh_step_progress(const json_t *steps, const json_t **summary, bool *all_ok) {
+    size_t total = json_len(steps), completed = 0;
+    ssize_t cur = -1;
+    const json_t *failed = NULL;
+    *all_ok = true;
+    for (size_t i = 0; i < total; i++) {
+        const json_t *st = json_at(steps, i);
+        const char *c = json_get_str(st, "conclusion"), *s = json_get_str(st, "status");
+        if ((c && *c) || str_eq(s, "completed")) completed++;
+        if (cur < 0 && !(c && *c) && str_eq(s, "in_progress")) cur = (ssize_t)i;
+        if (!failed && gh_in(c, GH_FAIL)) failed = st;
+        if (!gh_in(c, GH_OK)) *all_ok = false;
+    }
+    if (cur < 0 && !failed)
+        for (size_t i = 0; i < total && cur < 0; i++) {
+            const json_t *st = json_at(steps, i);
+            const char *c = json_get_str(st, "conclusion"), *s = json_get_str(st, "status");
+            if (!(c && *c) && !str_eq(s, "completed") && s && gh_in(s, GH_PENDING)) cur = (ssize_t)i;
+        }
+    *summary = cur >= 0 ? json_at(steps, (size_t)cur) : failed;
+    if (cur >= 0) {
+        const json_t *st = json_at(steps, (size_t)cur);
+        char *nm = gh_disp(json_get_str(st, "name")), *sl = gh_step_state(st);
+        char *r = xasprintf("%zd/%zu #%lld %s \xc2\xb7 %s", cur + 1, total, (long long)json_get_int(st, "number", 0), nm, sl);
+        free(nm);
+        free(sl);
+        return r;
+    }
+    if (failed) {
+        char *nm = gh_disp(json_get_str(failed, "name")), *sl = gh_step_state(failed);
+        char *r = xasprintf("#%lld %s \xc2\xb7 %s \xc2\xb7 %zu/%zu", (long long)json_get_int(failed, "number", 0), nm, sl, completed, total);
+        free(nm);
+        free(sl);
+        return r;
+    }
+    return xasprintf("%zu/%zu steps complete", completed, total);
+}
+
+static char *gh_step_progress_line(const json_t *steps, int width, bool hint) {
+    const json_t *summary = NULL;
+    bool all_ok = false;
+    char *label = gh_step_progress(steps, &summary, &all_ok);
+    tui_tc_t color = summary ? gh_tone_color(gh_step_tone(summary)) : all_ok ? TUI_TC_SUCCESS : TUI_TC_MUTED;
+    char *icon = summary ? gh_step_icon(summary) : tc_status_icon(all_ok ? TC_ST_SUCCESS : TC_ST_PENDING, -1);
+    char *arrow = tc_fg(TUI_TC_DIM, "\xe2\x86\xb3");
+    char *prefix = xasprintf("  %s %s ", arrow, icon);
+    char *h = hint ? tc_expand_hint() : xstrdup("");
+    char *hs = *h ? xasprintf(" %s", h) : xstrdup("");
+    int lw = MAX(0, width - tui_visible_width(prefix) - tui_visible_width(hs));
+    char *tl = tui_truncate_to_width(label, lw, NULL);
+    char *cl = tc_fg(color, tl);
+    char *line = xasprintf("%s%s%s", prefix, cl, hs);
+    char *r = tui_truncate_to_width(line, MAX(1, width), NULL);
+    free(line), free(cl), free(tl), free(hs), free(h), free(prefix), free(arrow), free(icon), free(label);
+    return r;
+}
+
+static char *gh_step_line(const json_t *st, int width) {
+    tui_tc_t color = gh_tone_color(gh_step_tone(st));
+    char *icon = gh_step_icon(st);
+    char *prefix = xasprintf("    %s #%lld ", icon, (long long)json_get_int(st, "number", 0));
+    char *sl = gh_step_state(st);
+    char *state = tc_fg(color, sl);
+    char *dur = NULL;
+    if (json_get(st, "durationSeconds")) {
+        char *d = xasprintf("%llds", (long long)json_get_int(st, "durationSeconds", 0));
+        char *m = tc_fg(TUI_TC_MUTED, d);
+        dur = xasprintf("  %s", m);
+        free(m);
+        free(d);
+    }
+    char *suffix = xasprintf("  %s%s", state, dur ? dur : "");
+    int nw = MAX(0, width - tui_visible_width(prefix) - tui_visible_width(suffix));
+    char *nm = gh_disp(json_get_str(st, "name"));
+    char *tn = tui_truncate_to_width(nm, nw, NULL);
+    char *name = tc_fg(color, tn);
+    char *line = xasprintf("%s%s%s", prefix, name, suffix);
+    char *r = tui_truncate_to_width(line, MAX(1, width), NULL);
+    free(line), free(name), free(tn), free(nm), free(suffix), free(dur), free(state), free(sl), free(prefix), free(icon);
+    return r;
+}
+
+static void gh_run_block(const json_t *run, int width, bool expanded, strvec_t *out) {
     const char *wf = json_get_str(run, "workflowName");
     if (!wf) wf = json_get_str(run, "displayTitle");
     char *label = tc_replace_tabs(wf ? wf : "GitHub Actions");
@@ -418,6 +561,7 @@ static void gh_run_block(const json_t *run, int width, strvec_t *out) {
         strvec_push_own(out, tc_fg(TUI_TC_DIM, "waiting for workflow jobs..."));
         return;
     }
+    bool hint_shown = false;
     for (size_t i = 0; i < json_len(jobs); i++) {
         const json_t *j = json_at(jobs, i);
         const char *concl = json_get_str(j, "conclusion"), *st = json_get_str(j, "status");
@@ -439,7 +583,7 @@ static void gh_run_block(const json_t *run, int width, strvec_t *out) {
         }
         int reserved = tui_visible_width(prefix) + (dur ? 1 + tui_visible_width(dur) : 0);
         int nw = MAX(8, width - reserved);
-        char *nm = tc_replace_tabs(json_get_str(j, "name") ? json_get_str(j, "name") : "");
+        char *nm = gh_disp(json_get_str(j, "name"));
         char *tr = tui_truncate_to_width(nm, nw, NULL);
         char *name = tc_fg(tcol, tr);
         sb_t l = SB_INIT;
@@ -456,6 +600,14 @@ static void gh_run_block(const json_t *run, int width, strvec_t *out) {
         free(nm);
         free(prefix);
         free(dur);
+        /* steps: every one when expanded, else one progress row (the first one carries the expand hint) */
+        const json_t *steps = json_get_arr(j, "steps");
+        if (expanded) {
+            for (size_t k = 0; k < json_len(steps); k++) strvec_push_own(out, gh_step_line(json_at(steps, k), width));
+        } else if (json_len(steps)) {
+            strvec_push_own(out, gh_step_progress_line(steps, width, !hint_shown));
+            hint_shown = true;
+        }
     }
 }
 
@@ -533,13 +685,13 @@ static void gh_watch_result(const tc_call_t *c, const json_t *w, int width, strv
         free(n);
     }
     if (str_eq(json_get_str(w, "mode"), "run") && json_get_obj(w, "run")) {
-        gh_run_block(json_get_obj(w, "run"), iw, &main);
+        gh_run_block(json_get_obj(w, "run"), iw, c->expanded, &main);
     } else if (str_eq(json_get_str(w, "mode"), "commit")) {
         const json_t *runs = json_get_arr(w, "runs");
         if (!json_len(runs)) strvec_push_own(&main, tc_fg(TUI_TC_DIM, "waiting for workflow runs..."));
         for (size_t i = 0; i < json_len(runs); i++) {
             if (i) strvec_push(&main, "");
-            gh_run_block(json_at(runs, i), iw, &main);
+            gh_run_block(json_at(runs, i), iw, c->expanded, &main);
         }
     }
     if (main.n) secs[ns++].lines = main;

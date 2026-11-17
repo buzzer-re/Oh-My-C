@@ -355,6 +355,16 @@ static char *read_projection_refusal(const char *display, const char *raw_conten
                            display);
 }
 
+/* a `lines` selector token (`raw`, `conflicts`, `raw:1-5`, `5`, `1-20`, `-30`, `L5`, `1-20,40`) after a URL's last ':' */
+static bool xd_selector_like(const char *s) {
+    if (!strncmp(s, "raw", 3) && (!s[3] || s[3] == ':')) s += s[3] ? 4 : 3;
+    else if (!strcmp(s, "conflicts")) return true;
+    if (!*s) return true;
+    for (const char *p = s; *p; p++)
+        if (!strchr("0123456789L-,.", *p)) return false;
+    return strpbrk(s, "0123456789") != NULL;
+}
+
 static int write_local(tool_env_t *env, tool_ctx_t *ctx, const char *raw_path, const char *raw_content, tool_result_t *out) {
     char *path = unwrap_header(raw_path);
     if (!raw_content) {
@@ -571,6 +581,8 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         handled = true;
     }
     if (handled) {
+        /* proc:// service stdin and mode writes change no files either (omp 60ef4a2e80) */
+        if (str_starts(path, "proc://") && !out->is_error) touches_no_files = true;
         if (touches_no_files) {
             if (!json_is_obj(out->details)) {
                 json_free(out->details);
@@ -616,6 +628,15 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         free(title);
         return 0;
     }
+    /* router.peelWriteSelector: a device URL refuses every trailing selector, since approval judged the unpeeled URL
+     * (omp c51e68b454) */
+    if (!strncasecmp(path, "xd://", 5)) {
+        const char *colon = strrchr(path + 5, ':');
+        if (colon && xd_selector_like(colon + 1)) {
+            tool_result_error(out, "write does not accept the trailing selector \":%s\" on a device URL. Remove it.", colon + 1);
+            return 0;
+        }
+    }
     if (xdev_write(ctx, path, content, out)) return 0;
     if (!str_starts(path, "ssh://")) return write_local(env, ctx, path, raw_content, out);
     char *err = NULL;
@@ -656,7 +677,7 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
 agent_tool_t *tool_write_new(tool_env_t *env) {
     char *desc = tool_prompt("write", NULL);
     json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":"
-                           "\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
+                           "\"string\"}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("write", "Write", desc, s, write_execute);
     t->exclusive = true;
     free(desc);
