@@ -123,6 +123,7 @@ void costgate_add(app_t *a, double cost) {
 
 void costgate_merge_child(app_t *parent, double child_total) {
     parent->total_cost += child_total;
+    parent->subagent_cost += child_total;
     if (parent == G.app) G.base_total += child_total; /* already counted when the child spent it */
 }
 

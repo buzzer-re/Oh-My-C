@@ -2227,7 +2227,8 @@ static void end_of_turn_updates(asess_t *s) {
         json_set_str(u, "sessionUpdate", "usage_update");
         json_set_int(u, "size", a->model->context_window);
         json_set_int(u, "used", MAX(0, ui_context_used(a)));
-        double cost = session_cost(a);
+        /* the session's own spend plus its live subagent tree, background children included (#sessionTreeCost) */
+        double cost = a->session ? session_cost(a) + a->subagent_cost : a->total_cost;
         if (cost > 0) {
             json_t *c = json_obj();
             json_set_num(c, "amount", cost);
