@@ -10,6 +10,7 @@
 #include "coding/turn_recovery.h"
 
 #include <ctype.h>
+#include <pthread.h>
 #include <math.h>
 #include <openssl/evp.h>
 #include <sys/stat.h>
@@ -228,12 +229,17 @@ static char *render_demoted_thinking(const char *model_id, const char *text) {
  * ====================================================================== */
 
 static char g_adopted_version[32];
+static pthread_mutex_t g_adopted_mu = PTHREAD_MUTEX_INITIALIZER;
+static __thread char g_version_buf[32];
 
 const char *anthropic_claude_code_version(void) {
     const char *env = getenv("PI_AI_CLAUDE_CODE_VERSION");
     if (env && *env) return env;
-    if (g_adopted_version[0]) return g_adopted_version;
-    return DEFAULT_CLAUDE_CODE_VERSION;
+    pthread_mutex_lock(&g_adopted_mu);
+    bool adopted = g_adopted_version[0] != 0;
+    if (adopted) snprintf(g_version_buf, sizeof g_version_buf, "%s", g_adopted_version);
+    pthread_mutex_unlock(&g_adopted_mu);
+    return adopted ? g_version_buf : DEFAULT_CLAUDE_CODE_VERSION;
 }
 
 static bool parse_semver(const char *s, int v[3]) {
@@ -241,8 +247,15 @@ static bool parse_semver(const char *s, int v[3]) {
     return s && sscanf(s, "%d.%d.%d%c", &v[0], &v[1], &v[2], &tail) == 3;
 }
 
-/* adoptRequiredClaudeCodeVersion: true when the wire version increased (caller retries once). */
-static bool adopt_required_version(const char *msg) {
+static int semver_cmp(const int a[3], const int b[3]) {
+    return a[0] != b[0] ? a[0] - b[0] : a[1] != b[1] ? a[1] - b[1] : a[2] - b[2];
+}
+
+/* adoptRequiredClaudeCodeVersion: true when the required version is newer than `sent`, the version the failed request
+ * actually sent (caller retries once). Concurrent first requests all send the same stale version: judging each against
+ * the version another one already adopted would let all but the first skip the retry. Adoption is process-wide and
+ * never moves backwards. */
+static bool adopt_required_version(const char *msg, const char *sent) {
     const char *env = getenv("PI_AI_CLAUDE_CODE_VERSION");
     if ((env && *env) || !msg || !strstr(msg, "claude_code_version_too_old")) return false;
     const char *p = str_istr(msg, "version ");
@@ -254,10 +267,12 @@ static bool adopt_required_version(const char *msg) {
         if (n > 0 && n < sizeof(buf) && str_istr(q + n, " or newer is required") == q + n) {
             memcpy(buf, q, n);
             buf[n] = '\0';
-            if (!parse_semver(buf, v) || !parse_semver(anthropic_claude_code_version(), cur)) return false;
-            int cmp = v[0] != cur[0] ? v[0] - cur[0] : v[1] != cur[1] ? v[1] - cur[1] : v[2] - cur[2];
-            if (cmp <= 0) return false;
-            snprintf(g_adopted_version, sizeof(g_adopted_version), "%s", buf);
+            if (!parse_semver(buf, v) || !parse_semver(sent, cur) || semver_cmp(v, cur) <= 0) return false;
+            pthread_mutex_lock(&g_adopted_mu);
+            int adopted[3];
+            if (!parse_semver(g_adopted_version, adopted) || semver_cmp(v, adopted) > 0)
+                snprintf(g_adopted_version, sizeof(g_adopted_version), "%s", buf);
+            pthread_mutex_unlock(&g_adopted_mu);
             return true;
         }
         p = str_istr(p + 1, "version ");
@@ -2416,6 +2431,8 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
     bool version_retried = false;
     /* bounded: each retry below is taken at most once, a refused continue at most twice */
     for (int guard = 0; guard < 8; guard++) {
+        char sent_version[32]; /* the Claude Code version this request advertises */
+        snprintf(sent_version, sizeof sent_version, "%s", anthropic_claude_code_version());
         json_t *params = build_request(m, ctx, &lo, oauth, &thinking_on);
         if (o->on_payload) o->on_payload(o->payload_ud, params);
         http_headers_t h = {0};
@@ -2455,7 +2472,7 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
                 retry = true;
             }
         }
-        if (!retry && oauth && !version_retried && rc == -1 && !s.saw_start && adopt_required_version(err)) {
+        if (!retry && oauth && !version_retried && rc == -1 && !s.saw_start && adopt_required_version(err, sent_version)) {
             retry = true;
             version_retried = true;
         }
