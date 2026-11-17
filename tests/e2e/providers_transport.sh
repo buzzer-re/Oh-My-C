@@ -49,6 +49,10 @@ check "token plan bad"    "Invalid QwenCloud Token Plan credential"  "${XENV[@]}
 printf '{"version":1,"credentials":[{"provider":"xiaomi","credential":{"type":"api_key","key":"tp-xm-key"}}]}' | "${XENV[@]}" "$B" auth import - >/dev/null 2>&1
 check "xiaomi tp chat"    "plain provider answer"  "${XENV[@]}" "$B" --model xiaomi/mimo-v2-flash --no-session -p hi
 check "xiaomi tp wire"    "/xmtp/v1/chat/completions Bearer tp-xm-key"  "${XL[@]}" /xmtp/ 'x["path"], h.get("authorization")'
+# only the standard host is redirected: a proxy (even one with xiaomi in its path) keeps the key (omp dfa8b2f442)
+mkdir -p "$T/pagent-xm" && cp "$T/pagent/auth.json" "$T/pagent-xm/" && printf 'providers:\n  xiaomi:\n    baseUrl: %s/xmproxy/xiaomi/v1\n' "$XB" > "$T/pagent-xm/models.yml"
+check "xiaomi tp proxy"   "plain provider answer"  "${XENV[@]}" OMC_CODING_AGENT_DIR="$T/pagent-xm" "$B" --model xiaomi/mimo-v2-flash --no-session -p hi
+check "xiaomi proxy wire" "/xmproxy/xiaomi/v1/chat/completions Bearer tp-xm-key"  "${XL[@]}" /xmproxy/ 'x["path"], h.get("authorization")'
 check "kilo login"        "Logged in to Kilo Gateway"  bash -c "${XENV[*]} '$B' login kilo </dev/null"
 check "kilo chat"         "plain provider answer"  "${XENV[@]}" "$B" --model "kilo/~anthropic/claude-sonnet-latest" --no-session -p hi
 check "kilo wire"         "/kilo/api/gateway/chat/completions Bearer kilo-tok"  "${XL[@]}" /kilo/ 'x["path"], h.get("authorization")'

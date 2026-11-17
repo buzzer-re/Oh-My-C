@@ -499,16 +499,31 @@ static int alibaba_token_plan_prepare(ai_transport_t *t, bool explicit_key, char
 /* Xiaomi MiMo Token Plan keys (catalog provider-models/openai-compat.ts xiaomiModelManagerOptions) */
 /* ======================================================================================= */
 
-static void xiaomi_prepare(ai_transport_t *t) {
+/* registry/oauth/xiaomi.ts resolveXiaomiRequestBaseUrl: bundled and cached generic Xiaomi rows pin the standard host,
+ * which rejects Token Plan (`tp-`/`ttp-`) keys. Only that host (or a missing URL) is redirected, to the Token Plan host
+ * of the provider's region; generic Xiaomi defaults to SGP.
+ * Every deliberate custom or regional endpoint and every ordinary key is kept. */
+static void xiaomi_prepare(ai_transport_t *t, const char *region) {
     const char *k = t->api_key;
     if (!k || !(str_starts(k, "tp-") || str_starts(k, "ttp-"))) return;
-    /* Token Plan keys authenticate only on the regional clusters; discovery pins the first (SGP) */
-    const char *std = "https://api.xiaomimimo.com/v1";
-    if (!str_starts(t->model.base_url, std)) return;
-    char *nb = xasprintf("https://token-plan-sgp.xiaomimimo.com/v1%s", t->model.base_url + strlen(std));
+    if (t->model.base_url && *t->model.base_url) {
+        url_t u;
+        if (url_parse(t->model.base_url, &u) != 0 || !str_eq(u.host, "api.xiaomimimo.com")) return;
+    }
+    /* the regional hosts of the xiaomi-token-plan-<region> auth rules' chat-completions validation */
+    char *base = xasprintf("https://token-plan-%s.xiaomimimo.com/v1", region ? region : "sgp");
     free(t->base_url);
-    t->base_url = nb;
-    t->model.base_url = nb;
+    t->base_url = base;
+    t->model.base_url = base;
+}
+
+/* xiaomi-token-plan-(sgp|ams|cn) -> its region, else NULL */
+static const char *xiaomi_token_plan_region(const char *p) {
+    static const char *const regions[] = {"sgp", "ams", "cn"};
+    if (!str_starts(p, "xiaomi-token-plan-")) return NULL;
+    for (size_t i = 0; i < ARRAY_LEN(regions); i++)
+        if (str_eq(p + strlen("xiaomi-token-plan-"), regions[i])) return regions[i];
+    return NULL;
 }
 
 /* ======================================================================================= */
@@ -807,9 +822,9 @@ int ai_transport_prepare(const ai_model_t *m, const ai_context_t *ctx, const ai_
         rc = snowflake_prepare(t, err);
     } else if (str_eq(p, "alibaba-token-plan") && str_starts(m->api, "openai-")) {
         rc = alibaba_token_plan_prepare(t, explicit_key, err);
-    } else if (str_eq(p, "xiaomi")) {
+    } else if (str_eq(p, "xiaomi") || xiaomi_token_plan_region(p)) {
         if (!t->api_key) t->api_key = ai_env_api_key(p);
-        xiaomi_prepare(t);
+        xiaomi_prepare(t, xiaomi_token_plan_region(p));
     } else if (str_eq(p, "github-copilot")) {
         if (!t->api_key) t->api_key = ai_env_api_key(p);
         if (t->api_key) rc = copilot_prepare(t, ctx);
