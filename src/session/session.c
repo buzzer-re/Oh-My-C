@@ -522,8 +522,12 @@ session_t *session_open(const char *path, char **err) {
         }
         const char *type = json_get_str(j, "type");
         if (str_eq(type, "title") && !s->header) {
+            free(s->title);
             s->title = xstrdup(json_get_str(j, "title"));
-            if (json_get_str(j, "source")) s->title_source = xstrdup(json_get_str(j, "source"));
+            if (json_get_str(j, "source")) {
+                free(s->title_source);
+                s->title_source = xstrdup(json_get_str(j, "source"));
+            }
             json_free(j);
         } else if (str_eq(type, "session") && !s->header) {
             s->header = j;
@@ -1212,7 +1216,7 @@ static bool read_info(const char *path, session_info_t *info) {
         if (str_eq(t, "title") && !info->title) {
             const char *tt = json_get_str(j, "title");
             if (tt && *tt) info->title = xstrdup(tt);
-        } else if (str_eq(t, "session")) {
+        } else if (str_eq(t, "session") && !ok) { /* the first header wins, as in session_open */
             ok = true;
             info->id = xstrdup(json_get_str(j, "id"));
             info->cwd = xstrdup(json_get_str(j, "cwd"));

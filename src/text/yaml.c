@@ -970,7 +970,8 @@ fail:
 }
 
 /* ---------------- documents ---------------- */
-static void anchors_free(yp_t *y) { hmap_free(&y->anchors, (void (*)(void *))json_free); }
+static void anchor_free(void *v) { json_free(v); }
+static void anchors_free(yp_t *y) { hmap_free(&y->anchors, anchor_free); }
 
 static json_t *parse_stream(const char *s, size_t len, char **err, bool all) {
     if (err) *err = NULL;
