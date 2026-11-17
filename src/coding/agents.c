@@ -617,8 +617,8 @@ typedef struct {
 
 static void *cancel_watch(void *p) {
     watch_t *w = p;
-    while (!w->done) {
-        if (*w->flag) {
+    while (!__atomic_load_n(&w->done, __ATOMIC_ACQUIRE)) {
+        if (__atomic_load_n(w->flag, __ATOMIC_RELAXED)) {
             agent_abort(w->ag);
             break;
         }
@@ -720,7 +720,7 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
     /* a focused view's empty Enter forced the queue into the continuation */
     while (agent_take_forced_delivery(child->agent) && agent_run_queued(child->agent) == 0) settle_owned_jobs(child, cancel);
     agent_unsubscribe(child->agent, on_child_event, r);
-    w.done = 1;
+    __atomic_store_n(&w.done, 1, __ATOMIC_RELEASE);
     if (watching) pthread_join(wt, NULL);
     const json_t *last = last_assistant(child->agent->messages);
     char *text = last ? ai_message_text(last) : xstrdup("");

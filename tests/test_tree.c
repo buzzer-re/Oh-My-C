@@ -349,7 +349,7 @@ static void *race_writer(void *p) {
             session_set_title(r->s, t, "auto");
         }
     }
-    r->done = 1;
+    __atomic_store_n(&r->done, 1, __ATOMIC_RELEASE);
     return NULL;
 }
 
@@ -360,7 +360,7 @@ static void test_session_concurrent_reads(void) {
     size_t last = 0;
     bool monotonic = true;
     int reads = 0;
-    while (!r.done || reads < 3) {
+    while (!__atomic_load_n(&r.done, __ATOMIC_ACQUIRE) || reads < 3) {
         json_t *path = session_current_path(r.s);
         char *leaf = session_leaf_dup(r.s), *title = session_title_dup(r.s);
         size_t n = json_len(path);
