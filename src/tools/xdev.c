@@ -475,7 +475,7 @@ char *xdev_prompt_docs_ex(agent_t *a, const strvec_t *listed_elsewhere) {
     json_t *v;
     json_obj_foreach(catalog, i, k, v) {
         if (listed_elsewhere && strvec_contains(listed_elsewhere, k)) continue;
-        sb_appendf(&lines, "- " XD "%s — %s\n", k, json_sv(v));
+        sb_appendf(&lines, "- %s — %s\n", k, json_sv(v));
     }
     json_free(catalog);
     if (!lines.len) {

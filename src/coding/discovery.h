@@ -104,6 +104,8 @@ typedef struct {
 
 /* "- " lines for the "# Internal URLs" section in omp registration order (owned) */
 strvec_t internal_url_docs(const sysprompt_url_host_t *h);
+/* InternalUrlRouter.reference(): sub-path grammar entries (xd://read/urls), owned strings */
+strvec_t internal_url_reference(void);
 
 /* returns owned array of system prompt blocks (strings) */
 json_t *build_system_prompt(const sysprompt_opts_t *o);

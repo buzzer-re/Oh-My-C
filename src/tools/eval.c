@@ -864,8 +864,6 @@ static json_t *template_ctx(const json_t *tool_names) {
     json_set_bool(ctx, "waitTool", tool_names ? names_have(tool_names, "wait") : true);
     json_set_bool(ctx, "autoBackgroundEnabled", false);
     json_set_bool(ctx, "autoProvision", true);
-    json_set_int(ctx, "timeoutMin", 1);
-    json_set_int(ctx, "timeoutMax", 3600);
     return ctx;
 }
 
@@ -920,8 +918,8 @@ agent_tool_t *tool_eval_new(tool_env_t *env) {
     free(py);
     char *desc = eval_description(NULL);
     json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"language\":{\"const\":\"py\",\"description\":"
-                           "\"\\\"py\\\": Python with IPython-style magics (not IPython)\"},\"code\":{\"type\":\"string\","
-                           "\"description\":\"Code or standalone % command; top-level await works.\"},\"title\":{\"type\":"
+                           "\"\\\"py\\\": Python\"},\"code\":{\"type\":\"string\","
+                           "\"description\":\"Code or standalone % command.\"},\"title\":{\"type\":"
                            "\"string\",\"description\":\"Short transcript label.\"},\"timeout\":{\"type\":\"number\","
                            "\"description\":\"Cell deadline in seconds; nonzero values clamp to 1–3600; 0 disables it.\"},"
                            "\"reset\":{\"type\":\"boolean\",\"description\":\"Wipe only this kernel.\"}},\"required\":["

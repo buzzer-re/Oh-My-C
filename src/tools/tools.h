@@ -156,6 +156,7 @@ typedef struct tool_env {
     bool wait_idle;
     int wait_idle_rung;
     int64_t wait_idle_ended, wait_idle_waited_ms;
+    bool task_lifecycle_shown; /* a spawn result already carried the job-lifecycle reference (task.c) */
     pthread_mutex_t mu;
 } tool_env_t;
 
@@ -215,6 +216,8 @@ bool think_supported(const ai_model_t *m);
 char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_error);
 /* re-render the eval description with the session tool names its bridge can call */
 void eval_set_tool_names(agent_tool_t *t, const json_t *names);
+/* re-renders the write description for whether `read` (the xd://read/sources transport) is active */
+void write_set_read_active(agent_tool_t *t, bool read_active);
 
 /* agent definitions (bundled + ~/.omc/agent/agents + .omc/agents): owned object name -> {name, description, tools[], model?, body} */
 json_t *agent_defs_load(const char *cwd);
