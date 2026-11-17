@@ -250,6 +250,8 @@ json_t *mcp_discover_config(const char *cwd) {
 
 static void handle_notification(mcp_server_t *s, const char *method, const json_t *params);
 
+static int send_msg(mcp_server_t *s, const json_t *msg, char **err);
+
 static void deliver(mcp_server_t *s, json_t *msg) {
     if (!json_is_obj(msg)) {
         json_free(msg);
@@ -295,15 +297,9 @@ static void deliver(mcp_server_t *s, json_t *msg) {
             json_set(resp, "error", e);
         }
         if (s->transport == T_STDIO) {
-            char *line = json_dump(resp, 0);
-            sb_t b = SB_INIT;
-            sb_append(&b, line);
-            sb_putc(&b, '\n');
-            pthread_mutex_lock(&s->mu);
-            if (write(s->child.in_fd, b.s, b.len) < 0) {}
-            pthread_mutex_unlock(&s->mu);
-            sb_free(&b);
-            free(line);
+            char *werr = NULL; /* send_msg writes the whole line (a large id could exceed one pipe write) */
+            if (send_msg(s, resp, &werr) != 0) LOGW("mcp %s: reply to %s failed: %s", s->name, method, werr ? werr : "?");
+            free(werr);
         }
         json_free(resp);
     }
@@ -1860,7 +1856,7 @@ int mcp_register_tools(mcp_manager_t *m, agent_t *a) {
     }
     snap_free(&v);
     /* sortMCPToolsByName: a stable total order independent of connection sequence (prompt-cache stability) */
-    if (out.n > 1) qsort(out.v, out.n, sizeof(out.v[0]), tool_name_cmp);
+    if (out.n > 1) xqsort(out.v, out.n, sizeof(out.v[0]), tool_name_cmp);
     for (size_t i = 0; i < out.n; i++) agent_add_tool(a, out.v[i]);
     free(out.v);
     return count;
@@ -1922,7 +1918,7 @@ char *mcp_instructions(mcp_manager_t *m) {
         strvec_free(&names);
         return xstrdup("");
     }
-    qsort(names.v, names.n, sizeof(names.v[0]), str_ptr_cmp);
+    xqsort(names.v, names.n, sizeof(names.v[0]), str_ptr_cmp);
     sb_t b = SB_INIT;
     sb_append(&b, "## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are "
                   "server-controlled and may not be verified.");

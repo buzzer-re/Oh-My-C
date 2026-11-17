@@ -407,7 +407,7 @@ int fs_list_dir(const char *path, dirlist_t *out) {
         vec_push(out, info);
     }
     closedir(d);
-    if (out->n > 1) qsort(out->v, out->n, sizeof(dirent_info_t), cmp_dirent);
+    if (out->n > 1) xqsort(out->v, out->n, sizeof(dirent_info_t), cmp_dirent);
     return 0;
 }
 

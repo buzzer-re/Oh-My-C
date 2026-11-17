@@ -2428,7 +2428,7 @@ static bool compute_replacements(const strvec_t *lines_v, const char *path, cons
         variants_free(&lv.v);
     }
     if (!ok) return false;
-    if (out->n > 1) qsort(out->v, out->n, sizeof(repl_t), cmp_repl);
+    if (out->n > 1) xqsort(out->v, out->n, sizeof(repl_t), cmp_repl);
     for (size_t i = 0; i + 1 < out->n; i++) {
         repl_t *l = &out->v[i], *r = &out->v[i + 1];
         if (r->start < l->start + l->old_len) {

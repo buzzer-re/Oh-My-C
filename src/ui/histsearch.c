@@ -127,7 +127,7 @@ void ui_hist_query(const char *jsonl, const char *query, int limit, ui_hist_list
     char *trimmed = str_trim(query ? query : "");
     bool searching = *trimmed;
     free(trimmed);
-    if (rows.n) qsort(rows.v, rows.n, sizeof(row_t), row_cmp);
+    if (rows.n) xqsort(rows.v, rows.n, sizeof(row_t), row_cmp);
     /* search() with no tokens (punctuation only) returns nothing */
     for (size_t i = 0; i < rows.n; i++) {
         row_t *r = &rows.v[i];

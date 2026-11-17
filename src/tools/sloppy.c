@@ -1853,7 +1853,7 @@ sloppy_outcome_t sloppy_apply(const char *text, const char *body, const char *pa
             last_match = plan.last_match;
             have_last = true;
         }
-        if (plan.edits.n > 1) qsort(plan.edits.v, plan.edits.n, sizeof(pedit_t), cmp_pedit);
+        xqsort(plan.edits.v, plan.edits.n, sizeof(pedit_t), cmp_pedit);
         /* defer later ops whose edits overlap an earlier op's */
         int *deferred = xcalloc(ops.n + 1, sizeof(int));
         for (size_t i = 0; i < plan.edits.n; i++)

@@ -388,7 +388,7 @@ static int cmp_depth(const void *a, const void *b) {
 static void load_templates_dir(prompt_tpls_t *out, const char *dir, const char *source) {
     strvec_t rels = {0};
     collect_md(dir, "", true, &rels);
-    if (rels.n > 1) qsort(rels.v, rels.n, sizeof(char *), cmp_depth);
+    if (rels.n > 1) xqsort(rels.v, rels.n, sizeof(char *), cmp_depth);
     for (size_t i = 0; i < rels.n; i++) {
         char *p = path_join(dir, rels.v[i]);
         char *raw = read_text(p);

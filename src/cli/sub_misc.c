@@ -546,7 +546,7 @@ static size_t spec_commands(const cli_cmd_t ***out) {
     size_t k = 0;
     for (size_t i = 0; i < n; i++)
         if (!all[i].hidden) v[k++] = &all[i];
-    qsort(v, k, sizeof *v, cmd_ptr_cmp);
+    xqsort(v, k, sizeof *v, cmd_ptr_cmp);
     *out = v;
     return k;
 }
@@ -584,7 +584,7 @@ static char *gen_bash(void) {
         vec_push(&toks, cmds[i]->name);
         for (int k = 0; cmds[i]->aliases && cmds[i]->aliases[k]; k++) vec_push(&toks, cmds[i]->aliases[k]);
     }
-    qsort(toks.v, toks.n, sizeof *toks.v, str_ptr_cmp);
+    xqsort(toks.v, toks.n, sizeof *toks.v, str_ptr_cmp);
     sb_append(&b, "_omc_root() {\n\tcase \"$prev\" in\n");
     bash_flag_case(&b, root->flags);
     sb_append(&b, "\n\tesac\n\tif [[ \"$cur\" == -* ]]; then\n\t\tCOMPREPLY=( $(compgen -W \"");

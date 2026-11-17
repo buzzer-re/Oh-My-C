@@ -354,7 +354,7 @@ char *record_redact_row(record_redactor_t *r, const char *row) {
         vec_free(&sp);
         return xstrdup(row);
     }
-    qsort(sp.v, sp.n / 2, 2 * sizeof(size_t), cmp_span);
+    xqsort(sp.v, sp.n / 2, 2 * sizeof(size_t), cmp_span);
     size_t m = 0;
     for (size_t i = 0; i < sp.n; i += 2) {
         if (m && sp.v[i] < sp.v[m - 1]) {

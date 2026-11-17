@@ -210,7 +210,7 @@ static void em_index_build(em_index_t *x, const char *s, size_t n, char marker, 
         }
         run = end;
     }
-    if (x->closers.n > 1) qsort(x->closers.v, x->closers.n, sizeof(em_delim_t), em_delim_cmp);
+    if (x->closers.n > 1) xqsort(x->closers.v, x->closers.n, sizeof(em_delim_t), em_delim_cmp);
 }
 
 /* EmphasisDelimiters.closeFor: the closer for the opener at `opener` in a source ending at `end`, or SIZE_MAX */

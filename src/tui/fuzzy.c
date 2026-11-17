@@ -381,7 +381,7 @@ size_t tui_fuzzy_rank(const char *query, const char *const *texts, size_t n, siz
         double s;
         if (tui_fuzzy_query_match(q, texts[i] ? texts[i] : "", &s)) r[m++] = (ranked_t){i, s};
     }
-    qsort(r, m, sizeof *r, cmp_ranked);
+    xqsort(r, m, sizeof *r, cmp_ranked);
     for (size_t i = 0; i < m; i++) out_idx[i] = r[i].idx;
     free(r);
     tui_fuzzy_query_free(q);

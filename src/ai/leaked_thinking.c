@@ -482,7 +482,7 @@ static json_t *proj_finish(proj_t *p, const json_t *message) {
         int a = i < p->anchors.n ? p->anchors.v[i] : -1;
         v[i] = (anchored_t){json_at(pc, i), a >= 0 ? a : (int)(mn + i), (int)i};
     }
-    qsort(v, n, sizeof(*v), anchored_cmp);
+    xqsort(v, n, sizeof(*v), anchored_cmp);
     json_t *out = json_arr();
     for (size_t i = 0; i < n; i++) json_push(out, json_clone(v[i].block));
     free(v);

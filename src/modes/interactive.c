@@ -2407,7 +2407,7 @@ static void local_command(ui_t *u, const char *target) {
         free(p);
         return;
     }
-    qsort(p->files.v, p->files.n, sizeof *p->files.v, local_cmp);
+    xqsort(p->files.v, p->files.n, sizeof *p->files.v, local_cmp);
     strvec_t labels = {0}, descs = {0};
     for (size_t i = 0; i < p->files.n; i++) {
         strvec_push_own(&labels, xasprintf("local://%s", p->files.v[i].name));

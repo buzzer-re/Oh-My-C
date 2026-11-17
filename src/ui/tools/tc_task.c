@@ -525,7 +525,7 @@ static size_t order_progress(const json_t *arr, const json_t **outv) {
     json_t *p;
     json_arr_foreach(arr, i, p) if (!is_unfinished(p)) outv[n++] = p;
     nf = n;
-    qsort(outv, nf, sizeof *outv, cmp_dur);
+    xqsort(outv, nf, sizeof *outv, cmp_dur);
     json_arr_foreach(arr, i, p) if (is_unfinished(p)) outv[n++] = p;
     return n;
 }
@@ -731,7 +731,7 @@ void tc_task(const tc_call_t *c, int width, strvec_t *out) {
         for (size_t i = start; i < n; i++) agent_progress(ord[i], c->expanded, cw, c->spinner, c->frozen, now, &lines);
     } else if (nres) {
         for (size_t i = 0; i < nres; i++) ord[i] = json_at(results, i);
-        qsort(ord, nres, sizeof *ord, cmp_dur);
+        xqsort(ord, nres, sizeof *ord, cmp_dur);
         bool *pick = xcalloc(nres, sizeof(bool));
         size_t picked = 0;
         if (c->expanded || nres <= 4) {

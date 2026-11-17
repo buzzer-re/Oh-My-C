@@ -66,7 +66,7 @@ static size_t ordered(const json_t ***out) {
     size_t n = 0;
     json_t *e;
     json_arr_foreach(reg, i, e) if (json_get_num(e, "order", -1) >= 0) v[n++] = e;
-    qsort(v, n, sizeof *v, by_order);
+    xqsort(v, n, sizeof *v, by_order);
     *out = v;
     return n;
 }
@@ -121,7 +121,7 @@ static int handle_list(bool json) {
         const char *t = json_get_str(defs[i], "tab");
         if (!strvec_contains(&tabs, t ? t : "internal")) strvec_push(&tabs, t ? t : "internal");
     }
-    qsort(tabs.v, tabs.n, sizeof *tabs.v, tab_cmp);
+    xqsort(tabs.v, tabs.n, sizeof *tabs.v, tab_cmp);
     for (size_t k = 0; k < tabs.n; k++) {
         char *g = xasprintf("[%s]", tabs.v[k]);
         char *bl = wrap_blue_bold(g);

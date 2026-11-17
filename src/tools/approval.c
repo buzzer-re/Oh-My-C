@@ -1854,7 +1854,7 @@ static void folder_listing(const char *dir, folder_listing_t *l) {
         strvec_push_own(&l->entries, isdir ? xasprintf("%s/", de->d_name) : xstrdup(de->d_name));
     }
     closedir(d);
-    qsort(l->entries.v, l->entries.n, sizeof *l->entries.v, cmp_str);
+    xqsort(l->entries.v, l->entries.n, sizeof *l->entries.v, cmp_str);
 }
 
 static char *count_str(size_t n, const char *one, const char *many) { return xasprintf("%zu %s", n, n == 1 ? one : many); }

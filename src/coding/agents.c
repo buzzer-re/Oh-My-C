@@ -1629,7 +1629,7 @@ json_t *agents_take_messages(tool_env_t *env) {
     size_t n = json_len(rows);
     json_t **v = xcalloc(n, sizeof *v);
     for (size_t i = 0; i < n; i++) v[i] = json_clone(json_at(rows, i));
-    qsort(v, n, sizeof *v, cmp_irc_ts);
+    xqsort(v, n, sizeof *v, cmp_irc_ts);
     json_free(rows);
     rows = json_arr();
     for (size_t i = 0; i < n; i++) json_push(rows, v[i]);
@@ -2322,7 +2322,7 @@ json_t *agents_job_tree(app_t *root, size_t recent_limit) {
     size_t n = json_len(recent_all);
     json_t **v = xcalloc(n + 1, sizeof *v);
     for (size_t i = 0; i < n; i++) v[i] = json_at(recent_all, i);
-    qsort(v, n, sizeof *v, job_newest_first);
+    xqsort(v, n, sizeof *v, job_newest_first);
     json_t *recent = json_arr();
     for (size_t i = 0; i < n && i < recent_limit; i++) json_push(recent, json_clone(v[i]));
     free(v);

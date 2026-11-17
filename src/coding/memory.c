@@ -1139,7 +1139,7 @@ int memory_apply_consolidation(const char *root, const json_t *parsed, char **er
         }
         strvec_t keys = {0};
         for (size_t k = 0; k < files->u.obj.n; k++) strvec_push(&keys, files->u.obj.keys[k]);
-        if (keys.n > 1) qsort(keys.v, keys.n, sizeof(char *), cmp_str);
+        if (keys.n > 1) xqsort(keys.v, keys.n, sizeof(char *), cmp_str);
         for (size_t k = 0; k < keys.n; k++) {
             char *fp = path_join(dir, keys.v[k]);
             const char *v = json_get_str(files, keys.v[k]);

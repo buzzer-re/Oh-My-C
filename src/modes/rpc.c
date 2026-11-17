@@ -2509,7 +2509,7 @@ static json_t *rpc_sub_list(rpc_t *r) {
     json_t *s;
     json_obj_foreach(r->subs, i, k, s) v[i] = s;
     UNUSED(k);
-    qsort(v, n, sizeof *v, sub_cmp);
+    xqsort(v, n, sizeof *v, sub_cmp);
     json_t *arr = json_arr();
     for (size_t i = 0; i < n; i++) json_push(arr, json_clone(v[i]));
     free(v);

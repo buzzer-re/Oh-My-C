@@ -1353,7 +1353,7 @@ int session_list(const char *dir, session_list_t *out) {
         free(p);
     }
     dirlist_free(&dl);
-    if (out->n > 1) qsort(out->v, out->n, sizeof(session_info_t), cmp_info);
+    if (out->n > 1) xqsort(out->v, out->n, sizeof(session_info_t), cmp_info);
     return 0;
 }
 
@@ -1370,7 +1370,7 @@ int session_list_titled(const char *dir, session_list_t *out) {
         free(p);
     }
     dirlist_free(&dl);
-    if (out->n > 1) qsort(out->v, out->n, sizeof(session_info_t), cmp_info);
+    if (out->n > 1) xqsort(out->v, out->n, sizeof(session_info_t), cmp_info);
     return 0;
 }
 
@@ -1392,7 +1392,7 @@ int session_list_all_titled(session_list_t *out) {
         dirlist_free(&dl);
     }
     free(root);
-    if (out->n > 1) qsort(out->v, out->n, sizeof(session_info_t), cmp_info);
+    if (out->n > 1) xqsort(out->v, out->n, sizeof(session_info_t), cmp_info);
     return 0;
 }
 
@@ -1460,7 +1460,7 @@ int session_list_all(session_list_t *out) {
         dirlist_free(&dl);
     }
     free(root);
-    if (out->n > 1) qsort(out->v, out->n, sizeof(session_info_t), cmp_info);
+    if (out->n > 1) xqsort(out->v, out->n, sizeof(session_info_t), cmp_info);
     return 0;
 }
 

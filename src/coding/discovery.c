@@ -644,7 +644,7 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
                 glob_pat_free(g);
             }
         }
-        if (d->skills.n > 1) qsort(d->skills.v, d->skills.n, sizeof(skill_t), cmp_skill);
+        if (d->skills.n > 1) xqsort(d->skills.v, d->skills.n, sizeof(skill_t), cmp_skill);
     }
     free(native);
     strvec_free(&chain);

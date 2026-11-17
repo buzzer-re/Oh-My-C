@@ -1219,7 +1219,7 @@ bool fz_replace_text(const char *content, const char *old_text, const char *new_
             vec_push(&reps, rp);
             fz_outcome_free(&o);
         }
-        qsort(reps.v, reps.n, sizeof(repl_t), cmp_repl);
+        xqsort(reps.v, reps.n, sizeof(repl_t), cmp_repl);
         sb_t b = SB_INIT;
         size_t si = 0;
         for (size_t i = 0; i < reps.n; i++) {

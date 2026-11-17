@@ -2081,7 +2081,7 @@ static void dedupe_sort(const json_t *all, jptrs_t *out) {
         }
         if (!dup) vec_push(out, d);
     }
-    if (out->n > 1) qsort(out->v, out->n, sizeof(json_t *), cmp_diag);
+    if (out->n > 1) xqsort(out->v, out->n, sizeof(json_t *), cmp_diag);
 }
 
 static char *format_location(const json_t *loc, const char *cwd) {
@@ -2365,7 +2365,7 @@ static int sort_validate(const json_t *edits, tedits_t *out, char **err) {
                      json_get_str(e, "newText") ? json_get_str(e, "newText") : "", i};
         vec_push(&all, t);
     }
-    if (all.n > 1) qsort(all.v, all.n, sizeof(tedit_t), cmp_tedit_desc);
+    if (all.n > 1) xqsort(all.v, all.n, sizeof(tedit_t), cmp_tedit_desc);
     for (size_t i = 0; i < all.n; i++) {
         tedit_t *t = &all.v[i];
         if (out->n) {

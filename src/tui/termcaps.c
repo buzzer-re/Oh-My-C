@@ -502,7 +502,7 @@ static int median_cut(const img_t *im, uint8_t pal[256][3]) {
         if (best < 0) break;
         box_t *bx = &boxes[best];
         g_sort_ch = best_ch;
-        qsort(bins + bx->lo, (size_t)(bx->hi - bx->lo), sizeof *bins, bin_cmp);
+        xqsort(bins + bx->lo, (size_t)(bx->hi - bx->lo), sizeof *bins, bin_cmp);
         uint64_t total = 0, acc = 0;
         for (int j = bx->lo; j < bx->hi; j++) total += bins[j].count;
         int cut = bx->lo + 1;

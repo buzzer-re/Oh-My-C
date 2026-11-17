@@ -260,7 +260,7 @@ static void import_history(const char *src, const char *dst, const migrate_opts_
     size_t n = json_len(rows);
     json_t **v = xcalloc(n ? n : 1, sizeof(json_t *));
     for (size_t i = 0; i < n; i++) v[i] = json_at(rows, i);
-    qsort(v, n, sizeof(json_t *), cmp_created);
+    xqsort(v, n, sizeof(json_t *), cmp_created);
     sb_t out = SB_INIT;
     size_t added = 0;
     for (size_t i = 0; i < n; i++) {

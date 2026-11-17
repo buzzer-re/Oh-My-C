@@ -214,7 +214,7 @@ static bool skip_entry(const char *name) {
 static void dir_tree(sb_t *out, const char *dir, int depth, int max_depth, const char *indent, bool root) {
     dirlist_t dl;
     if (fs_list_dir(dir, &dl) != 0) return;
-    if (dl.n > 1) qsort(dl.v, dl.n, sizeof(dirent_info_t), cmp_recent);
+    if (dl.n > 1) xqsort(dl.v, dl.n, sizeof(dirent_info_t), cmp_recent);
     size_t shown = 0, limit = root ? SIZE_MAX : 12;
     size_t total = 0;
     for (size_t i = 0; i < dl.n; i++)

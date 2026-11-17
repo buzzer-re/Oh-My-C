@@ -496,7 +496,7 @@ static char *capacity_line(const json_t *reports, json_t *json_out) {
         strvec_free(&keys);
         vec_free(&maxes);
     }
-    qsort(st.v, st.n, sizeof *st.v, wstat_cmp);
+    xqsort(st.v, st.n, sizeof *st.v, wstat_cmp);
     char *line = NULL;
     if (st.n) {
         sb_t b = SB_INIT;
@@ -547,7 +547,7 @@ static char *breakdown(const json_t *reports_in, const json_t *accounts, int64_t
     strvec_t provs = {0};
     json_arr_foreach(disp, i, r) if (!strvec_contains(&provs, json_get_str(r, "provider"))) strvec_push(&provs, json_get_str(r, "provider"));
     json_arr_foreach(unrep, i, a) if (!strvec_contains(&provs, json_get_str(a, "provider"))) strvec_push(&provs, json_get_str(a, "provider"));
-    qsort(provs.v, provs.n, sizeof *provs.v, cmp_str);
+    xqsort(provs.v, provs.n, sizeof *provs.v, cmp_str);
     strvec_t out = {0};
     double latest = 0;
     json_arr_foreach(disp, i, r) latest = MAX(latest, json_get_num(r, "fetchedAt", 0));
@@ -701,7 +701,7 @@ static char *no_provider_credentials(const char *provider, const json_t *stored)
     strvec_t ps = {0};
     json_t *a;
     json_arr_foreach(stored, i, a) if (!strvec_contains(&ps, json_get_str(a, "provider"))) strvec_push(&ps, json_get_str(a, "provider"));
-    qsort(ps.v, ps.n, sizeof *ps.v, cmp_str);
+    xqsort(ps.v, ps.n, sizeof *ps.v, cmp_str);
     char *hint;
     if (ps.n) {
         char *j = strvec_join(&ps, ", ");
@@ -786,7 +786,7 @@ static char *format_history(const json_t *entries, int64_t since, int64_t now, c
     strvec_t provs = {0};
     json_t *e;
     json_arr_foreach(entries, i, e) if (!strvec_contains(&provs, json_get_str(e, "provider"))) strvec_push(&provs, json_get_str(e, "provider"));
-    qsort(provs.v, provs.n, sizeof *provs.v, cmp_str);
+    xqsort(provs.v, provs.n, sizeof *provs.v, cmp_str);
     for (size_t pi = 0; pi < provs.n; pi++) {
         const char *prov = provs.v[pi];
         json_t *accts = json_arr(), *a;
@@ -825,7 +825,7 @@ static char *format_history(const json_t *entries, int64_t since, int64_t now, c
         free(nm), free(bn), free(cn), free(cnt), free(dc), free(pl);
         json_t **av = xcalloc(na ? na : 1, sizeof *av);
         for (size_t i = 0; i < na; i++) av[i] = json_at(accts, i);
-        qsort(av, na, sizeof *av, cmp_label);
+        xqsort(av, na, sizeof *av, cmp_label);
         for (size_t ai = 0; ai < na; ai++) {
             json_t *acc = av[ai];
             const char *label = json_get_str(acc, "_label");
@@ -860,7 +860,7 @@ static char *format_history(const json_t *entries, int64_t since, int64_t now, c
             size_t ns = json_len(series);
             json_t **sv = xcalloc(ns ? ns : 1, sizeof *sv);
             for (size_t k = 0; k < ns; k++) sv[k] = json_at(series, k);
-            qsort(sv, ns, sizeof *sv, cmp_title);
+            xqsort(sv, ns, sizeof *sv, cmp_title);
             for (size_t k = 0; k < ns; k++) {
                 json_t *se = json_get_arr(sv[k], "entries"), *y;
                 bool hl = false;

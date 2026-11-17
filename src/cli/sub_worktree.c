@@ -96,7 +96,7 @@ static strvec_t list_names(const char *dir, bool *ok) {
         for (size_t i = 0; i < dl.n; i++) strvec_push(&v, dl.v[i].name);
         dirlist_free(&dl);
     }
-    qsort(v.v, v.n, sizeof *v.v, name_cmp);
+    xqsort(v.v, v.n, sizeof *v.v, name_cmp);
     return v;
 }
 

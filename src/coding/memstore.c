@@ -237,7 +237,7 @@ int memstore_claim_stage1(const char *path, const mem_claim_params_t *p, mem_cla
     size_t nt = threads->u.obj.n;
     thread_ref_t *refs = xcalloc(nt + 1, sizeof *refs);
     for (size_t i = 0; i < nt; i++) refs[i] = (thread_ref_t){threads->u.obj.keys[i], threads->u.obj.vals[i]};
-    if (nt > 1) qsort(refs, nt, sizeof *refs, cmp_thread_desc);
+    if (nt > 1) xqsort(refs, nt, sizeof *refs, cmp_thread_desc);
     size_t limit = p->thread_scan_limit < 0 ? 0 : (size_t)p->thread_scan_limit;
     for (size_t i = 0; i < nt && i < limit; i++) {
         if ((int64_t)out->n >= p->max_rollouts_per_startup) break;
@@ -479,7 +479,7 @@ int memstore_list_outputs(const char *path, int64_t limit, const char *cwd, mem_
         vec_push(out, r);
     }
     free(scope);
-    if (out->n > 1) qsort(out->v, out->n, sizeof *out->v, cmp_output_desc);
+    if (out->n > 1) xqsort(out->v, out->n, sizeof *out->v, cmp_output_desc);
     if (limit >= 0 && (int64_t)out->n > limit) {
         mem_outputs_t keep = *out;
         for (size_t i = (size_t)limit; i < keep.n; i++) {

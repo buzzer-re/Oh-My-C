@@ -188,7 +188,7 @@ static int cmp_str(const void *a, const void *b) {
 }
 
 void strvec_sort(strvec_t *v) {
-    if (v->n > 1) qsort(v->v, v->n, sizeof(char *), cmp_str);
+    if (v->n > 1) xqsort(v->v, v->n, sizeof(char *), cmp_str);
 }
 
 strvec_t str_split(const char *s, const char *sep) {
