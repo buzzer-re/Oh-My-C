@@ -152,6 +152,69 @@ static int64_t parse_stamp(const char *p, bool *has_off, bool space_only) {
     return t;
 }
 
+/* digits at p: their value and the end, or NULL */
+static const char *read_digits(const char *p, double *v) {
+    if (!isdigit((unsigned char)*p)) return NULL;
+    double x = 0;
+    while (isdigit((unsigned char)*p)) x = x * 10 + (*p++ - '0');
+    *v = x;
+    return p;
+}
+
+/* `(?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)(ms|s)\b` at p (case-insensitive, with the regex's backtracking over the
+ * optional groups): total ms, or -1 */
+static double hms_at(const char *p) {
+    for (int take_h = 1; take_h >= 0; take_h--)
+        for (int take_m = 1; take_m >= 0; take_m--) {
+            const char *q = p;
+            double h = 0, m = 0, sec;
+            if (take_h) {
+                q = read_digits(q, &h);
+                if (!q || (*q != 'h' && *q != 'H')) continue;
+                q++;
+            }
+            if (take_m) {
+                q = read_digits(q, &m);
+                if (!q || (*q != 'm' && *q != 'M')) continue;
+                q++;
+            }
+            const char *r = read_digits(q, &sec);
+            if (!r) continue;
+            if (*r == '.' && isdigit((unsigned char)r[1])) {
+                double f = 1;
+                for (r++; isdigit((unsigned char)*r); r++) sec += (*r - '0') * (f /= 10);
+            }
+            bool ms = (r[0] == 'm' || r[0] == 'M') && (r[1] == 's' || r[1] == 'S') && !word_ch(r[2]);
+            bool s = (r[0] == 's' || r[0] == 'S') && !word_ch(r[1]);
+            if (!ms && !s) continue;
+            return (h * 60 + m) * 60000 + (ms ? sec : sec * 1000);
+        }
+    return -1;
+}
+
+/* omp fetch-retry.ts QUOTA_RESET_PATTERN (leftmost match): ms, or -1 */
+static double quota_reset_ms(const char *body) {
+    for (const char *p = body; *p; p++) {
+        const char *q = NULL;
+        if (!strncasecmp(p, "reset after", 11)) q = p + 11;
+        else if (!strncasecmp(p, "reset", 5)) {
+            const char *r = p + 5;
+            if (*r == 's' || *r == 'S') r++;
+            if (ws_ch(*r)) {
+                r = skip_ws(r);
+                if (!strncasecmp(r, "in", 2)) q = r + 2;
+            }
+        } else if (!strncasecmp(p, "\"quotaResetDelay\":", 18)) {
+            const char *r = skip_ws(p + 18);
+            if (*r == '"') q = r + 1;
+        }
+        if (!q) continue;
+        double ms = hms_at(skip_ws(q));
+        if (ms >= 0) return ms;
+    }
+    return -1;
+}
+
 typedef struct {
     double longest, naive;
     bool retry_now;
@@ -167,27 +230,9 @@ static void consider_clamped(hint_acc_t *a, double ms) {
 /* the body-text half of extractRetryHint */
 static int64_t body_retry_hint(const char *body, int64_t now) {
     hint_acc_t a = {-1, -1, false};
-    /* "reset after 1h2m3s" / "10m15s" / "39s" */
-    for (const char *p = str_istr(body, "reset after "); p; p = str_istr(p + 1, "reset after ")) {
-        const char *q = p + 12;
-        double hrs = 0, mins = 0, secs;
-        char *e;
-        long v = strtol(q, &e, 10);
-        if (e != q && isdigit((unsigned char)*q) && (*e == 'h' || *e == 'H')) {
-            hrs = (double)v;
-            q = e + 1;
-            v = strtol(q, &e, 10);
-        }
-        if (e != q && isdigit((unsigned char)*q) && (*e == 'm' || *e == 'M')) {
-            mins = (double)v;
-            q = e + 1;
-        }
-        const char *r = read_num(q, &secs);
-        if (r && (*r == 's' || *r == 'S')) {
-            consider(&a, ((hrs * 60 + mins) * 60 + secs) * 1000);
-            break;
-        }
-    }
+    /* QUOTA_RESET_PATTERN, first match: "reset after 1h2m3s" / "Resets in 71h48m47s" / "quotaResetDelay": "835ms" */
+    double qms = quota_reset_ms(body);
+    if (qms > 0) consider(&a, qms);
     /* "(will) reset at <stamp>" and "将在 <stamp> 重置": a naive wall clock (UTC) only as a fallback */
     for (const char *p = str_istr(body, "reset at"); p; p = str_istr(p + 1, "reset at")) {
         if (!ws_ch(p[8])) continue;

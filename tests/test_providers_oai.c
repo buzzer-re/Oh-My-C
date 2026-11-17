@@ -1116,6 +1116,12 @@ static void test_retry_hints(void) {
     CHECK(ai_extract_retry_hint(NULL, "Rate limited, try again in ~5 min.") == 300000);
     CHECK(ai_extract_retry_hint(NULL, "Your quota will reset after 1h2m3s") == 3723000);
     CHECK(ai_extract_retry_hint(NULL, "Resets in 2hr 15min") == 8100000);
+    /* omp 6d091aba7f: QUOTA_RESET_PATTERN takes ms as well as s, and covers "resets in" and quotaResetDelay */
+    CHECK(ai_extract_retry_hint(NULL, "{\"quotaResetDelay\": \"835ms\"}") == 835);
+    CHECK(ai_extract_retry_hint(NULL, "{\"quotaResetDelay\": \"17h48m25.5s\"}") == 64105500);
+    CHECK(ai_extract_retry_hint(NULL, "Resets in 71h48m47s") == 258527000);
+    CHECK(ai_extract_retry_hint(NULL, "quota will reset after 10ms") == 10);
+    CHECK(ai_extract_retry_hint(NULL, "reset after 2m5ms") == 120005);
     CHECK(ai_extract_retry_hint(NULL, "limit will reset in 3 days") == 3 * 86400000LL);
     CHECK(ai_extract_retry_hint(NULL, "429 slow down retry-after-ms=98497") == 98497);
     CHECK(ai_extract_retry_hint(NULL, "try again in 2s, or reset after 10s") == 10000); /* longest wins */
