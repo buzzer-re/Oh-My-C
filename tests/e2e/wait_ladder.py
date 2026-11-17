@@ -2,7 +2,7 @@
 """e2e: `wait` (tools/wait.ts): a wait with nothing new returns after the ladder's window with a nudge from the second
 rung on, jobs finishing moments apart share one result, a progress note neither ends a wait nor interrupts bash while a
 direct message ends it, and a subagent cannot broadcast.
-Usage: wait_ladder.py <omc> <request log> <models.yml> <scratch dir> ladder|peers"""
+Usage: wait_ladder.py <omc> <request log> <models.yml> <scratch dir> ladder|window|peers"""
 import json, os, shutil, subprocess, sys, time
 
 omc, reqlog, models, scratch, part = sys.argv[1:6]
@@ -61,8 +61,20 @@ if part == "ladder":
           "No job finished within 5.0s; a back-to-back wait allows up to 10.0s.", res)
     want = ("## Still Running (1)\n\n- `bg_1` [bash] — sleep 24\n\n"
             "No job finished within 10.0s; a back-to-back wait allows up to 30.0s.\n"
-            "<system-notice>\nNothing new after 15.0s of back-to-back waits. Waiting is not progress:")
+            "<system-notice>\nNothing new after 15.0s of back-to-back waits.\nWaiting is not progress:")
     check("second wait nudges", len(res) == 3 and res[2].startswith(want), res)
+elif part == "window":
+    # wait.windowMs gives every idle wait on owned jobs the same window; the notice totals the windows spent (omp 7b50d31d9a)
+    open(os.path.join(agent, "config.yml"), "w").write("wait:\n  windowMs: 1500\n")
+    run([["bash", {"command": "sleep 5", "async": True}], ["wait", {}], ["wait", {}]])
+    res = []
+    for r in requests():
+        msgs = [m for m in r.get("messages", []) if m.get("role") == "tool"]
+        if msgs and len(msgs) > len(res):
+            c = msgs[-1]["content"]
+            res.append("".join(p.get("text", "") for p in c) if not isinstance(c, str) else c)
+    check("fixed window", len(res) == 3 and res[1].endswith("No job finished within 1.5s; a back-to-back wait allows up to 1.5s.")
+          and "No job finished within 1.5s; a back-to-back wait allows up to 1.5s.\n<system-notice>\nNothing new after 3.0s" in res[2], res)
 else:
     # jobs finishing 1 s apart share one result
     run([["bash", {"command": "sleep 0.5; echo a", "async": True}], ["bash", {"command": "sleep 1.5; echo b", "async": True}], ["wait", {}]])

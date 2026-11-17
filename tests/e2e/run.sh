@@ -423,6 +423,7 @@ rm -f "$T/agent/config.yml"
 check "bash fork"      "got-bar|fn-bar|||Ran in a copy of the busy session shell; changes here won't persist.##forkb=[]"  python3 -I -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; m=[x for x in r[-1]["messages"] if x.get("role")=="tool"]; t=[x["content"] if isinstance(x["content"],str) else "".join(b.get("text","") for b in x["content"]) for x in m]; print("##".join(t[2:4]).replace("\n","|"))' "$T/req.jsonl"
 # wait: idle ladder and its nudge; settle window, progress notes vs direct messages, no broadcast from a subagent
 check "wait ladder" "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl1" ladder
+check "wait window" "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl3" window
 check "wait peers"  "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl2" peers
 # background jobs carry the call's intent: proc://, wait, /jobs; /jobs full requests the widget role's caption
 check "jobs intent" "jobs intent ok"  python3 -I "$ROOT/tests/e2e/jobs_intent.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ji"

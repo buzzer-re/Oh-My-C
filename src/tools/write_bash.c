@@ -1390,18 +1390,28 @@ static json_t *wait_job_rows(jobs_t *jobs, const json_t *done) {
 
 /* elapsedReport: the window an elapsed wait spent and the one a back-to-back wait gets (a bare still-running snapshot
  * reads as an empty result, and agents then start `sleep` jobs to block for longer) */
-static char *elapsed_report(const char *what, int rung) {
-    char *span = usage_fmt_duration((double)WAIT_LADDER_MS[rung]);
-    char *next = usage_fmt_duration((double)WAIT_LADDER_MS[MIN(rung + 1, WAIT_LADDER_RUNGS - 1)]);
+static char *elapsed_report(const char *what, int rung, int64_t fixed_ms) {
+    char *span = usage_fmt_duration((double)(fixed_ms >= 0 ? fixed_ms : WAIT_LADDER_MS[rung]));
+    char *next = usage_fmt_duration((double)(fixed_ms >= 0 ? fixed_ms : WAIT_LADDER_MS[MIN(rung + 1, WAIT_LADDER_RUNGS - 1)]));
     char *r = xasprintf("%s within %s; a back-to-back wait allows up to %s.", what, span, next);
     free(span);
     free(next);
     return r;
 }
 
+/* wait.windowMs (tools/settings.ts cfgWaitWindowMs): milliseconds from 0 to 2147483647, -1 when unset. omp's validate
+ * rejects any other value; omc ignores it and keeps the ladder. */
+static int64_t wait_window_setting(void) {
+    const json_t *v = settings_get("wait.windowMs");
+    if (!json_is_num(v)) return -1;
+    double d = v->u.num.d;
+    if (!(d >= 0 && d <= 2147483647.0)) return -1;
+    return (int64_t)d;
+}
+
 /* #elapsed: a window ran out with nothing new. Extend the idle streak and, from WAIT_NOTICE_RUNG on, append the reminder. */
-static void wait_elapsed(tool_env_t *env, tool_result_t *out, int rung, int64_t streak_ms) {
-    int64_t waited = streak_ms + WAIT_LADDER_MS[rung];
+static void wait_elapsed(tool_env_t *env, tool_result_t *out, int rung, int64_t streak_ms, int64_t window_ms) {
+    int64_t waited = streak_ms + window_ms;
     env->wait_idle = true;
     env->wait_idle_rung = rung;
     env->wait_idle_ended = mono_ms();
@@ -1508,7 +1518,10 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
     strvec_free(&watched);
     agents_replies_free(&replies);
     agents_replies_t no_reply = {0};
-    int64_t t0 = mono_ms(), deadline = t0 + WAIT_LADDER_MS[rung], next_progress = t0;
+    /* a configured window replaces the ladder for a wait on owned jobs; 0 arms none (cfgWaitWindowMs) */
+    int64_t fixed_ms = running ? wait_window_setting() : -1;
+    int64_t window_ms = fixed_ms >= 0 ? fixed_ms : WAIT_LADDER_MS[rung];
+    int64_t t0 = mono_ms(), deadline = window_ms > 0 ? t0 + window_ms : INT64_MAX, next_progress = t0;
     wait_wake_t wake;
     volatile sig_atomic_t *cancel = ctx ? ctx->cancel : NULL;
     for (;;) {
@@ -1550,7 +1563,7 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
             wait_emit_progress(ctx, jobs);
             next_progress = now + WAIT_PROGRESS_INTERVAL_MS;
         }
-        int64_t nap = MIN(100, deadline - now);
+        int64_t nap = deadline == INT64_MAX ? 100 : MIN(100, deadline - now);
         if (jobs && (running || service_running)) jobs_wait_any_ex(jobs, cancel, nap, true);
         else sleep_ms(nap);
     }
@@ -1582,7 +1595,7 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
         json_t *done = jobs_take_finished(jobs);
         char *txt = job_result_text(jobs, done, settled_at_entry, call_started);
         if (wake == WAKE_TIMEOUT) { /* the timeout line joins the report's text block */
-            char *rep = elapsed_report("No job finished", rung);
+            char *rep = elapsed_report("No job finished", rung, fixed_ms);
             char *joined = xasprintf("%s\n\n%s", *txt ? txt : "No background jobs.", rep);
             free(rep);
             free(txt);
@@ -1593,16 +1606,16 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
         json_set(out->details, "jobs", wait_job_rows(jobs, done));
         /* a wait where everything is still running carries no new information once a later wait exists */
         out->useless = !json_len(done) && wake != WAKE_SERVICE;
-        if (wake == WAKE_TIMEOUT) wait_elapsed(env, out, rung, streak_ms);
+        if (wake == WAKE_TIMEOUT) wait_elapsed(env, out, rung, streak_ms, window_ms);
         json_free(done);
     } else if (wake == WAKE_TIMEOUT) {
-        char *rep = elapsed_report(reply_wait ? "No reply" : "No service finished", rung);
+        char *rep = elapsed_report(reply_wait ? "No reply" : "No service finished", rung, -1);
         if (reply_wait) tool_result_text(out, rep);
         else tool_result_textf(out, "%s Read proc:// for status.", rep);
         free(rep);
         out->useless = true; /* a wait that ran out with nothing to report is an idle poll */
         json_set(out->details, "jobs", json_arr());
-        wait_elapsed(env, out, rung, streak_ms);
+        wait_elapsed(env, out, rung, streak_ms, window_ms);
     } else {
         if (wake == WAKE_UNANSWERABLE) {
             char *why = no_reply_text(&no_reply);

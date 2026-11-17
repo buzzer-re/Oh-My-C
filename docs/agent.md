@@ -506,7 +506,8 @@ tools are exclusive and mountable as `xd://` devices.
   result carries every queued message (`details.waited`).
 - **`wait`** (`tools/write_bash.c`, port of `tools/wait.ts`): with nothing new it returns after a window that climbs 5s, 10s,
   30s, 1m, 5m across back-to-back idle waits, restarting after news or a 60 s gap; from the second rung it appends the
-  `wait-idle.md` nudge. A wait woken by a job keeps collecting for up to 1.5 s while other watched jobs run. A wait for a reply
+  `wait-idle.md` nudge. `wait.windowMs` (config only, 0..2147483647 ms) replaces the ladder for a wait on the caller's own
+  jobs: every idle return gets that window (the nudge totals the windows spent), and `0` arms none. A wait woken by a job keeps collecting for up to 1.5 s while other watched jobs run. A wait for a reply
   ends at once when the asked agent can no longer answer soon: it finished its turn, it waits on the caller, or a dialog of
   its own (`ask`, an approval) waits on the user.
   Outputs are readable at `agent://<id>`, transcripts at `history://<id>`, and running agents at
