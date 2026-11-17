@@ -328,8 +328,10 @@ char *ttsr_take_deferred(ttsr_t *t) {
     pthread_mutex_lock(&t->mu);
     char *out = NULL;
     if (t->deferred.n) {
+        /* the rules matched output they did not interrupt: the notice must claim neither an interruption nor a
+         * completed output (omp 3e3ca57a34) */
         sb_t b = SB_INIT;
-        render_rules(&b, "coding-agent/prompts/system/ttsr-interrupt.md", t->deferred.v, t->deferred.n);
+        render_rules(&b, "coding-agent/prompts/system/ttsr-prose-notice.md", t->deferred.v, t->deferred.n);
         for (size_t i = 0; i < t->deferred.n; i++) ((trule_t *)t->deferred.v[i])->injected = true;
         t->deferred.n = 0;
         out = sb_detach(&b);

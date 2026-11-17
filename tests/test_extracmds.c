@@ -450,6 +450,22 @@ static void test_ttsr_frontmatter(void) {
     CHECK(!ttsr_text(t, "qqq")); /* a question rule's condition is only a prefilter */
     CHECK(!ttsr_text(t, "zzz in prose")); /* scope list: tool calls on .rs files only */
     ttsr_free(t);
+    /* a non-interrupting prose rule reports the match as a notice that claims no interruption (omp 3e3ca57a34) */
+    char *nf = path_join(rules, "quiet.md");
+    const char *rq = "---\nname: quiet\ndescription: \"x\"\ncondition: \"hushword\"\ninterruptMode: never\n---\n\nquiet body\n";
+    fs_write(nf, rq, strlen(rq));
+    discovery_free(&d);
+    memset(&d, 0, sizeof d);
+    discover_all(base, &d, true, true, false);
+    t = ttsr_new(&d);
+    CHECK(!ttsr_text(t, "a hushword here"));
+    char *notice = ttsr_take_deferred(t);
+    CHECK(notice && strstr(notice, "<system-reminder reason=\"rule_violation\" rule=\"quiet\"") &&
+          strstr(notice, "the output was not interrupted by the rule") && strstr(notice, "quiet body") &&
+          !strstr(notice, "Output interrupted"));
+    free(notice);
+    free(nf);
+    ttsr_free(t);
     discovery_free(&d);
     fs_rm_rf(base);
     free(a), free(b), free(c), free(rules), free(base);
