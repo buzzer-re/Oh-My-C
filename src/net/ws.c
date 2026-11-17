@@ -16,6 +16,8 @@ struct ws {
     size_t len, cap;
     size_t max_message;
     bool close_sent, closed;
+    sb_t frag;   /* data of a fragmented message received so far: kept across a ws_recv timeout */
+    int frag_op; /* its opcode, -1 when no message is in progress */
 };
 
 bool ws_is_open(const ws_t *w) { return w && w->c && !w->closed; }
@@ -139,6 +141,7 @@ ws_t *ws_connect(const char *url, const http_headers_t *headers, int64_t timeout
     ws_t *w = xcalloc(1, sizeof *w);
     w->c = c;
     w->max_message = WS_DEFAULT_MAX;
+    w->frag_op = -1;
     int rc = net_write_all(c, req.s, req.len);
     sb_free(&req);
     if (rc != 0) {
@@ -220,8 +223,10 @@ int ws_recv(ws_t *w, int64_t timeout_ms, volatile sig_atomic_t *cancel, ws_msg_t
         if (err) *err = xstrdup("WebSocket is closed");
         return -1;
     }
-    sb_t msg = SB_INIT;
-    int msg_op = -1;
+    sb_t msg = w->frag; /* a fragmented message a timed-out call left in progress */
+    int msg_op = w->frag_op;
+    w->frag = (sb_t)SB_INIT;
+    w->frag_op = -1;
     int64_t deadline = timeout_ms >= 0 ? mono_ms() + timeout_ms : 0;
     for (;;) {
         /* parse one frame if complete */
@@ -316,9 +321,13 @@ int ws_recv(ws_t *w, int64_t timeout_ms, volatile sig_atomic_t *cancel, ws_msg_t
     more:;
         int f = fill(w, deadline, cancel);
         if (f == 1) continue;
+        if (f == -2 || f == -4) {
+            /* timed out or cancelled between frames: keep the fragments consumed so far for the next call */
+            w->frag = msg;
+            w->frag_op = msg_op;
+            return f;
+        }
         sb_free(&msg);
-        if (f == -2) return -2;
-        if (f == -4) return -4;
         w->closed = true;
         if (err) *err = xstrdup(f == 0 ? "WebSocket connection closed without a close frame" : "WebSocket read failed");
         return -1;
@@ -341,5 +350,6 @@ void ws_close(ws_t *w, int code, const char *reason) {
     }
     net_close(w->c);
     free(w->buf);
+    sb_free(&w->frag);
     free(w);
 }
