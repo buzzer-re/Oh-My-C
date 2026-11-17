@@ -175,8 +175,29 @@ static char *split_path_sel(tool_env_t *env, const char *in, selector_t *sel) {
     char *abs = tool_resolve_path(env, in);
     if (fs_exists(abs)) return abs;
     free(abs);
-    char *work = xstrdup(in);
-    strip_sel(work, sel);
+    /* splitPathAndSel peels one selector (list colons folded: `a:20:40,85:100` reads as `a:20-40,85-100`); the
+     * path before it stays whole (`a.ts:12:5` asks for the path `a.ts:12`) */
+    char *sp = NULL, *ss = NULL;
+    read_split_path_sel(in, &sp, &ss);
+    char *work = NULL;
+    if (ss) {
+        char *only = xasprintf("\x01:%s", ss);
+        selector_t trial;
+        memset(&trial, 0, sizeof trial);
+        strip_sel(only, &trial);
+        if (!strcmp(only, "\x01")) {
+            *sel = trial;
+            work = sp;
+            sp = NULL;
+        } else vec_free(&trial.ranges);
+        free(only);
+    }
+    if (!work) {
+        work = xstrdup(in);
+        strip_sel(work, sel);
+    }
+    free(sp);
+    free(ss);
     char *r = tool_resolve_path(env, work);
     free(work);
     return r;
@@ -1447,7 +1468,12 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
     char *display = path_display(abs, env->cwd);
     struct stat st;
     if (stat(abs, &st) != 0) {
-        tool_result_error(out, "Path '%s' not found", path);
+        /* localReadPath: the path with its selector peeled */
+        char *sp = NULL, *ss = NULL;
+        if (sel.has_sel) read_split_path_sel(path, &sp, &ss);
+        tool_result_error(out, "Path '%s' not found", ss ? sp : path);
+        free(sp);
+        free(ss);
         goto done;
     }
     if (S_ISDIR(st.st_mode)) {

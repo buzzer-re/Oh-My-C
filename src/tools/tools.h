@@ -5,6 +5,7 @@
 #include "agent/agent.h"
 #include "coding/discovery.h"
 #include "core/core.h"
+#include "tools/readsel.h"
 #include "core/json.h"
 
 #include <pthread.h>

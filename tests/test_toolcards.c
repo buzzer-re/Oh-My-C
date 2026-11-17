@@ -14,6 +14,7 @@
 #include "tui/symbols.h"
 #include "tui/theme.h"
 #include "ui/tools/tc.h"
+#include "tools/readsel.h"
 
 static int failures;
 
@@ -784,6 +785,20 @@ int main(void) {
         CHECK(out.n == 1 + 5 + 4 && has_row(&out, "5") && !has_row(&out, "more line"), "expanded whole %zu", out.n);
         strvec_free(&out);
         sb_free(&lng);
+    }
+    /* omp 22c4f22848: a colon written as the range dash folds into a comma list; `a.ts:12:5` keeps its colons */
+    {
+        const char *cases[][3] = {{"a.ts:20:40,85:100", "a.ts", "20-40,85-100"}, {"a.ts:12:5", "a.ts:12", "5"},
+                                  {"a.ts:1-30,:-30", "a.ts", "1-30,-30"},      {"a.ts:2-3,10:12", "a.ts", "2-3,10-12"},
+                                  {"clip.mp4:1:30", "clip.mp4:1", "30"},      {"a.ts:1:2,5:6,9:10", "a.ts", "1-2,5-6,9-10"},
+                                  {"a.ts:3-4:raw", "a.ts", "3-4:raw"}};
+        for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            char *p, *sl;
+            read_split_path_sel(cases[i][0], &p, &sl);
+            CHECK(str_eq(p, cases[i][1]) && str_eq(sl, cases[i][2]), "split %s: %s | %s", cases[i][0], p, sl ? sl : "-");
+            free(p);
+            free(sl);
+        }
     }
     if (failures) fprintf(stderr, "%d failure(s)\n", failures);
     return failures ? 1 : 0;
