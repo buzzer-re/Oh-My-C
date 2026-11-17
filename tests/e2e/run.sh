@@ -869,6 +869,10 @@ check "out:// write"  "Shown to the user."  python3 -I -c "$REQS" "$T/req.jsonl"
 rm -f "$T/agent/config.yml"
 check "cfg:// read"   "maxRetries: 10"  "$B" --model mock/mock-1 --no-session -p "read:cfg://retry"
 check "conflict:// unknown"  "Conflict #1 not found: it was resolved"  "$B" --model mock/mock-1 --no-session -p "read:conflict://1"
+# a side with no lines leaves no blank line; a UTF-8 BOM survives the write (omp 47daf5e3bb, fca084bcdd)
+printf '\xef\xbb\xbfa\n<<<<<<< ours\n=======\nx\n>>>>>>> theirs\nb\n' > cfe.txt
+"$B" --model mock/mock-1 --no-session -p 'seq:[["read",{"path":"cfe.txt"}],["write",{"path":"conflict://1","content":"@ours"}]]' >/dev/null 2>&1 </dev/null
+check "conflict:// empty side"  $'\xef\xbb\xbfa\nb'  cat cfe.txt
 # turn-lifecycle signals (WP-11): terminal title + run state, OSC 7501, completion / error notifications, under a pty
 if script --version 2>/dev/null | grep -q util-linux; then
     tui_signals() { # out-file prompt env...

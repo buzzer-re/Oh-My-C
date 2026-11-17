@@ -182,6 +182,9 @@ static void scan_lines(const strvec_t *lines, int64_t first_line, cblocks_t *out
     if (have) cblock_free(&part);
 }
 
+/* a leading UTF-8 BOM: TextDecoder and `Bun.file().text()` drop it, so scans and splices see the text after it */
+static const char *after_bom(const char *t) { return str_starts(t, "\xEF\xBB\xBF") ? t + 3 : t; }
+
 /* omp scanFileForConflicts: *truncated_at = first unscanned line (0 when the whole file was scanned) */
 static bool scan_file(const char *abs, cblocks_t *out, int64_t *truncated_at) {
     *truncated_at = 0;
@@ -189,7 +192,7 @@ static bool scan_file(const char *abs, cblocks_t *out, int64_t *truncated_at) {
     bool trunc = false;
     char *text = fs_read_limit(abs, SCAN_MAX_BYTES, &n, &trunc);
     if (!text) return false;
-    strvec_t lines = str_split(text, "\n");
+    strvec_t lines = str_split(after_bom(text), "\n");
     scan_lines(&lines, 1, out);
     if (trunc) *truncated_at = (int64_t)lines.n;
     strvec_free(&lines);
@@ -343,7 +346,7 @@ static void reconcile_registered(conflict_history_t *h, const char *only_abs) {
             invalidate_path(h, files.v[f]);
             continue;
         }
-        strvec_t lines = str_split(text, "\n");
+        strvec_t lines = str_split(after_bom(text), "\n");
         cblocks_t all = {0}, found = {0};
         scan_lines(&lines, 1, &all);
         /* only blocks equal to a registered region count (findRegisteredBlocks) */
@@ -852,7 +855,7 @@ static int delim_balance(const strvec_t *l, size_t from, size_t to) {
 
 /* omp trimBoundaryEcho over rep[lo, hi) (in place by adjusting lo/hi) */
 static void trim_echo(const strvec_t *rep, size_t *lo, size_t *hi, const strvec_t *file, size_t ms, size_t me,
-                      const cblock_t *b, int *leading, int *trailing) {
+                      const cblock_t *b, size_t typed_leading, size_t typed_trailing, int *leading, int *trailing) {
     *leading = *trailing = 0;
     int ob = delim_balance(&b->ours, 0, b->ours.n);
     bool have_exp = ob == delim_balance(&b->theirs, 0, b->theirs.n);
@@ -861,7 +864,7 @@ static void trim_echo(const strvec_t *rep, size_t *lo, size_t *hi, const strvec_
     strvec_t after = {0}, before = {0};
     for (size_t i = me + 1; i < file->n && after.n < MAX_ECHO_LINES; i++) strvec_push_own(&after, strip_cr(file->v[i]));
     size_t len = *hi - *lo;
-    for (size_t k = MIN(after.n, len ? len - 1 : 0); k >= 1; k--) {
+    for (size_t k = MIN(MIN(after.n, len ? len - 1 : 0), typed_trailing); k >= 1; k--) {
         bool eq = true;
         for (size_t i = 0; i < k && eq; i++) eq = !strcmp(rep->v[*hi - k + i], after.v[i]);
         if (!eq) continue;
@@ -874,7 +877,7 @@ static void trim_echo(const strvec_t *rep, size_t *lo, size_t *hi, const strvec_
     for (size_t i = ms; i > 0 && before.n < MAX_ECHO_LINES; i--) strvec_push_own(&before, strip_cr(file->v[i - 1]));
     /* before is reversed: before.v[0] is the line directly above the region */
     len = *hi - *lo;
-    for (size_t k = MIN(before.n, len ? len - 1 : 0); k >= 1; k--) {
+    for (size_t k = MIN(MIN(before.n, len ? len - 1 : 0), typed_leading); k >= 1; k--) {
         bool eq = true;
         for (size_t i = 0; i < k && eq; i++) eq = !strcmp(rep->v[*lo + i], before.v[k - 1 - i]);
         if (!eq) continue;
@@ -889,8 +892,15 @@ static void trim_echo(const strvec_t *rep, size_t *lo, size_t *hi, const strvec_
     strvec_free(&before);
 }
 
-/* omp spliceConflict: new text (owned) or NULL with *err */
-static char *splice(const char *original, const centry_t *e, const char *replacement, int *echo, char **err) {
+/* omp ConflictReplacement: the lines replacing a region; only the lines the caller typed before the first and after
+ * the last token-expanded line may be dropped as a boundary echo */
+typedef struct {
+    strvec_t lines;
+    size_t typed_leading, typed_trailing;
+} crep_t;
+
+/* omp spliceConflict: new text (owned) or NULL with *err. Empty `lines` remove the region and leave no line behind. */
+static char *splice(const char *original, const centry_t *e, const crep_t *r, int *echo, char **err) {
     strvec_t lines = str_split(original, "\n");
     strvec_t exp = recorded_region(&e->b);
     size_t ms, me;
@@ -902,72 +912,84 @@ static char *splice(const char *original, const centry_t *e, const char *replace
         strvec_free(&exp);
         return NULL;
     }
-    size_t rl = strlen(replacement);
-    char *trimmed = rl >= 2 && !strcmp(replacement + rl - 2, "\r\n") ? xstrndup(replacement, rl - 2)
-                    : rl && replacement[rl - 1] == '\n'               ? xstrndup(replacement, rl - 1)
-                                                                      : xstrdup(replacement);
-    strvec_t raw = str_split(trimmed, "\n"), rep = {0};
-    for (size_t i = 0; i < raw.n; i++) strvec_push_own(&rep, strip_cr(raw.v[i]));
-    strvec_free(&raw);
-    free(trimmed);
-    size_t lo = 0, hi = rep.n;
+    const strvec_t *rep = &r->lines;
+    size_t lo = 0, hi = rep->n;
     int lead, trail;
-    trim_echo(&rep, &lo, &hi, &lines, ms, me, &e->b, &lead, &trail);
+    trim_echo(rep, &lo, &hi, &lines, ms, me, &e->b, r->typed_leading, r->typed_trailing, &lead, &trail);
     *echo += lead + trail;
     size_t ll = strlen(lines.v[ms]);
     bool crlf = ll && lines.v[ms][ll - 1] == '\r';
     bool following = me + 1 < lines.n;
+    /* removing a region that ends the file without a trailing newline makes the line above it the last line; it must
+     * not keep the \r of its old CRLF */
+    if (lo == hi && !following && ms > 0) {
+        char *t = strip_cr(lines.v[ms - 1]);
+        free(lines.v[ms - 1]);
+        lines.v[ms - 1] = t;
+    }
     sb_t b = SB_INIT;
     size_t parts = 0;
     for (size_t i = 0; i < ms; i++, parts++) sb_appendf(&b, "%s%s", parts ? "\n" : "", lines.v[i]);
     for (size_t i = lo; i < hi; i++, parts++) {
         bool cr = crlf && (i + 1 < hi || following);
-        sb_appendf(&b, "%s%s%s", parts ? "\n" : "", rep.v[i], cr ? "\r" : "");
+        sb_appendf(&b, "%s%s%s", parts ? "\n" : "", rep->v[i], cr ? "\r" : "");
     }
     for (size_t i = me + 1; i < lines.n; i++, parts++) sb_appendf(&b, "%s%s", parts ? "\n" : "", lines.v[i]);
     strvec_free(&lines);
     strvec_free(&exp);
-    strvec_free(&rep);
     return sb_detach(&b);
 }
 
-/* omp expandContentTokens; NULL with *err for `@base` on a 2-way block */
-static char *expand_tokens(const char *content, const centry_t *e, char **err) {
-    strvec_t in = str_split(content, "\n");
-    sb_t b = SB_INIT;
-    size_t parts = 0;
-#define PUSH(s)                                         \
-    do {                                                \
-        sb_appendf(&b, "%s%s", parts ? "\n" : "", s); \
-        parts++;                                        \
+/* omp expandContentTokens: write content as replacement lines (one trailing newline ends the last line), `@ours` /
+ * `@theirs` / `@base` / `@both` lines expanded to the recorded sections (an empty section adds no line, while a typed
+ * empty line, empty content included, stays one ""); false with *err for `@base` on a 2-way block */
+static bool expand_tokens(const char *content, const centry_t *e, crep_t *out, char **err) {
+    memset(out, 0, sizeof *out);
+    size_t cl = strlen(content);
+    char *norm = cl >= 2 && !strcmp(content + cl - 2, "\r\n") ? xstrndup(content, cl - 2)
+                 : cl && content[cl - 1] == '\n'                ? xstrndup(content, cl - 1)
+                                                                 : xstrdup(content);
+    strvec_t in = str_split(norm, "\n");
+    free(norm);
+    ssize_t first = -1;
+    size_t last_end = 0;
+#define SECTION(sv)                                                     \
+    do {                                                                \
+        if ((sv).n) {                                                   \
+            if (first < 0) first = (ssize_t)out->lines.n;               \
+            for (size_t k = 0; k < (sv).n; k++) strvec_push(&out->lines, (sv).v[k]); \
+            last_end = out->lines.n;                                    \
+        }                                                               \
     } while (0)
     for (size_t i = 0; i < in.n; i++) {
         char *line = strip_cr(in.v[i]);
         if (!strcmp(line, "@ours")) {
-            for (size_t k = 0; k < e->b.ours.n; k++) PUSH(e->b.ours.v[k]);
+            SECTION(e->b.ours);
         } else if (!strcmp(line, "@theirs")) {
-            for (size_t k = 0; k < e->b.theirs.n; k++) PUSH(e->b.theirs.v[k]);
+            SECTION(e->b.theirs);
         } else if (!strcmp(line, "@base")) {
             if (!e->b.has_base) {
                 *err = xasprintf("Conflict #%d has no base section (2-way merge). `@base` is only valid for diff3 conflicts.",
                                  e->id);
                 free(line);
                 strvec_free(&in);
-                sb_free(&b);
-                return NULL;
+                strvec_free(&out->lines);
+                return false;
             }
-            for (size_t k = 0; k < e->b.base.n; k++) PUSH(e->b.base.v[k]);
+            SECTION(e->b.base);
         } else if (!strcmp(line, "@both")) {
-            for (size_t k = 0; k < e->b.ours.n; k++) PUSH(e->b.ours.v[k]);
-            for (size_t k = 0; k < e->b.theirs.n; k++) PUSH(e->b.theirs.v[k]);
+            SECTION(e->b.ours);
+            SECTION(e->b.theirs);
         } else {
-            PUSH(in.v[i]);
+            strvec_push(&out->lines, line);
         }
         free(line);
     }
-#undef PUSH
+#undef SECTION
     strvec_free(&in);
-    return sb_detach(&b);
+    out->typed_leading = first < 0 ? out->lines.n : (size_t)first;
+    out->typed_trailing = out->lines.n - last_end;
+    return true;
 }
 
 static const char *const STRIPPED_NOTE = "Note: auto-stripped hashline display prefixes from content before writing.";
@@ -993,17 +1015,21 @@ static void resolve_one(tool_env_t *env, conflict_history_t *h, centry_t *e, con
         return;
     }
     char *err = NULL;
-    char *exp = expand_tokens(content, e, &err);
-    if (!exp) {
+    crep_t exp;
+    if (!expand_tokens(content, e, &exp, &err)) {
         tool_result_error(out, "%s", err);
         free(err);
         return;
     }
+    /* decode verbatim and keep a leading BOM across the write (omp fca084bcdd) */
     char *orig = fs_read(e->abs, NULL);
     int echo = 0;
-    char *next = orig ? splice(orig, e, exp, &echo, &err) : NULL;
+    bool bom = orig && after_bom(orig) != orig;
+    char *spliced = orig ? splice(after_bom(orig), e, &exp, &echo, &err) : NULL;
+    char *next = spliced && bom ? xasprintf("\xEF\xBB\xBF%s", spliced) : spliced;
+    if (next != spliced) free(spliced);
     free(orig);
-    free(exp);
+    strvec_free(&exp.lines);
     if (!next) {
         tool_result_error(out, "%s", err ? err : "cannot read file");
         free(err);
@@ -1019,7 +1045,7 @@ static void resolve_one(tool_env_t *env, conflict_history_t *h, centry_t *e, con
     cblock_copy(&rec, &e->b);
     int id = e->id;
     invalidate_id(h, id);
-    strvec_t nl = str_split(next, "\n");
+    strvec_t nl = str_split(after_bom(next), "\n");
     cblocks_t scan = {0};
     scan_lines(&nl, 1, &scan);
     reconcile_path(h, abs, &scan, 0);
@@ -1266,15 +1292,19 @@ static void resolve_all(tool_env_t *env, conflict_history_t *h, const char *clea
         char *text = fs_exists(files.v[f]) ? fs_read(files.v[f], NULL) : NULL;
         if (!fs_exists(files.v[f])) failure = xstrdup("file no longer exists");
         else if (!text) failure = xstrdup("cannot read file");
+        /* splice the BOM-stripped text; the write puts a leading BOM back (omp fca084bcdd) */
+        bool bom = text && after_bom(text) != text;
+        if (bom) memmove(text, text + 3, strlen(text + 3) + 1);
         int echo = 0;
         for (size_t i = 0; i < fe.n && !failure; i++) {
             char k[16];
             snprintf(k, sizeof k, "%d", fe.v[i]->id);
             const char *c = dirs ? json_get_str(dirs, k) : clean;
             char *e2 = NULL;
-            char *exp = expand_tokens(c, fe.v[i], &e2);
-            char *next = exp ? splice(text, fe.v[i], exp, &echo, &e2) : NULL;
-            free(exp);
+            crep_t exp;
+            bool expanded = expand_tokens(c, fe.v[i], &exp, &e2);
+            char *next = expanded ? splice(text, fe.v[i], &exp, &echo, &e2) : NULL;
+            if (expanded) strvec_free(&exp.lines);
             if (!next) {
                 failure = e2;
                 break;
@@ -1290,7 +1320,15 @@ static void resolve_all(tool_env_t *env, conflict_history_t *h, const char *clea
             vec_free(&fe);
             continue;
         }
-        if (!write_file(files.v[f], text)) {
+        bool wrote;
+        if (bom) {
+            char *with = xasprintf("\xEF\xBB\xBF%s", text);
+            wrote = write_file(files.v[f], with);
+            free(with);
+        } else {
+            wrote = write_file(files.v[f], text);
+        }
+        if (!wrote) {
             sb_appendf(&bad, "\n  %s: %zu %s (cannot write file)", disp, cnt, cnt == 1 ? "conflict" : "conflicts");
             bad_files++;
             free(text);
