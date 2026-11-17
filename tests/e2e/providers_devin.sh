@@ -25,7 +25,7 @@ auth = [r for r in rows if r["path"].endswith("/GetUserJwt")]
 chat = [r for r in rows if r["path"].endswith("/GetChatMessage")]
 md = chat[0]["request"]["metadata"]
 assert auth and auth[0]["metadata"]["apiKey"] == "devin-test-key" and auth[0]["metadata"]["userJwt"] == "", auth[0]
-assert md["ideName"] == "devin-cli" and md["ideType"] == "chisel" and md["ideVersion"] == "3000.11.205", md
+assert md["ideName"] == "devin-cli" and md["ideType"] == "chisel" and md["ideVersion"] == "3000.12.57", md
 assert md["extensionName"] == "chisel" and md["locale"] == "en" and md["userJwt"] == "jwt-devin-1", md
 r = chat[0]["request"]
 assert r["chatModelUid"] == "swe-1-6" and r["requestType"] == 5 and r["plannerMode"] == 1 and r["toolChoice"] == "auto", r
