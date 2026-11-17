@@ -71,6 +71,7 @@ void aws_sigv4_sign(const aws_sign_params_t *p, http_headers_t *out);
 /* ---------- event stream ---------- */
 
 #define AWS_ES_MAX_MESSAGE (24u * 1024u * 1024u)
+#define AWS_ES_MAX_HEADERS (128u * 1024u) /* encoded header-block limit of the Amazon Event Stream specification */
 
 typedef struct {
     http_headers_t headers;        /* all typed values surfaced as strings */

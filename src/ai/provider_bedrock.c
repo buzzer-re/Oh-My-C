@@ -167,6 +167,18 @@ static bool region_serves_geo(const char *r, const char *geo) {
     return false;
 }
 
+static bool is_aws_regional_host(const char *h);
+
+/* AWS_REGIONAL_BEDROCK_HOST capture of a baseUrl's host (bedrock-runtime.<region>.amazonaws.com), owned or NULL */
+static char *base_url_region(const char *base_url) {
+    if (!base_url || !*base_url) return NULL;
+    url_t u;
+    if (url_parse(base_url, &u) != 0) return NULL;
+    if (!is_aws_regional_host(u.host)) return NULL;
+    const char *p = u.host + strlen("bedrock-runtime.");
+    return xstrndup(p, strlen(p) - strlen(".amazonaws.com"));
+}
+
 char *bedrock_resolve_region(const ai_model_t *m, const char *guardrail_identifier) {
     char *explicit_region = region_from_arn(m->id);
     if (explicit_region) return explicit_region;
@@ -179,7 +191,10 @@ char *bedrock_resolve_region(const ai_model_t *m, const char *guardrail_identifi
         else if (guard && region_serves_geo(guard, geo)) out = xstrdup(guard);
         else out = xstrdup(geo_default(geo));
     } else {
-        out = xstrdup(ambient ? ambient : guard ? guard : "us-east-1");
+        /* then the region of AWS's own regional host in the configured baseUrl */
+        char *base_region = base_url_region(m->base_url);
+        out = xstrdup(ambient ? ambient : guard ? guard : base_region ? base_region : "us-east-1");
+        free(base_region);
     }
     free(ambient);
     free(guard);
@@ -1154,6 +1169,7 @@ static int on_frame(void *ud, const aws_es_msg_t *m) {
     } else if (str_eq(et, "contentBlockStop")) {
         on_block_stop(s, ev);
     } else if (str_eq(et, "messageStop")) {
+        s->saw_message_stop = true;
         on_message_stop(s, ev);
     } else if (str_eq(et, "metadata")) {
         on_metadata(s, ev);
@@ -1184,6 +1200,10 @@ json_t *bedrock_stream_finish(bedrock_stream_t *s, int rc, const char *err, bool
     if (cancelled || rc == -2) return aib_finish(&s->b, "aborted", err ? err : "Request was aborted");
     if (s->error) return aib_finish(&s->b, "error", s->error);
     if (rc != 0) return aib_finish(&s->b, "error", err ? err : "request failed");
+    /* the body ended before messageStop: the connection died mid-generation. A clean "stop" would end the turn on a
+     * truncated reply, so it fails as a retryable incomplete stream, worded like the other premature closes */
+    if (!s->saw_message_stop)
+        return aib_finish(&s->b, "error", "Bedrock stream closed before a terminal response event (messageStop) was received");
     return aib_finish(&s->b, s->stop_reason, NULL);
 }
 

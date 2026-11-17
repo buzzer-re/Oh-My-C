@@ -48,6 +48,7 @@ typedef struct {
     const ai_model_t *model;
     aws_es_decoder_t dec;
     bool sentinel_injected;
+    bool saw_message_stop;   /* the terminal messageStop event arrived */
     const char *stop_reason; /* mapped, static */
     char *error;             /* owned */
     json_t *input_transformations; /* owned or NULL */

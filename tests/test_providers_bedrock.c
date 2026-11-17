@@ -436,16 +436,37 @@ static void test_eventstream_streaming(void) {
     CHECK(d.error && strstr(d.error, "CRC mismatch"));
     aws_es_free(&d);
 
-    /* total length below minimum / above maximum */
-    static const unsigned char tiny[] = {0, 0, 0, 4, 0, 0, 0, 0};
-    aws_es_init(&d, count_cb, &log);
-    CHECK_INT(aws_es_feed(&d, tiny, sizeof tiny), -1);
-    CHECK_STR(d.error, "total length 4 below minimum");
-    aws_es_free(&d);
-    static const unsigned char huge[] = {0x7f, 0, 0, 0};
-    aws_es_init(&d, count_cb, &log);
-    CHECK_INT(aws_es_feed(&d, huge, sizeof huge), -1);
-    aws_es_free(&d);
+    /* the 12-byte prelude is validated before the rest of the frame is buffered (omp b650a08a28): CRC, then the
+     * total length (16 B..24 MiB) and the header length (<= 128 KiB, <= total - 16) */
+    static const struct {
+        uint32_t total, hlen;
+        const char *err;
+    } bad_preludes[] = {
+        {4, 0, "total length 4 below minimum"},
+        {0x7f000000u, 0, "total length 2130706432 exceeds maximum 25165824"},
+        {1u << 20, 200000, "headers length 200000 exceeds maximum 131072"},
+        {64, 49, "headers length 49 exceeds message length 64"},
+    };
+    for (size_t i = 0; i < ARRAY_LEN(bad_preludes); i++) {
+        unsigned char pre[12];
+        uint32_t vals[2] = {bad_preludes[i].total, bad_preludes[i].hlen};
+        for (int k = 0; k < 2; k++)
+            for (int b = 0; b < 4; b++) pre[k * 4 + b] = (unsigned char)(vals[k] >> (24 - 8 * b));
+        uint32_t crc = (uint32_t)crc32(0, pre, 8);
+        for (int b = 0; b < 4; b++) pre[8 + b] = (unsigned char)(crc >> (24 - 8 * b));
+        aws_es_init(&d, count_cb, &log);
+        CHECK_INT(aws_es_feed(&d, pre, 11), 0); /* an incomplete prelude waits */
+        CHECK_INT(aws_es_feed(&d, pre + 11, 1), -1);
+        CHECK_STR(d.error, bad_preludes[i].err);
+        aws_es_free(&d);
+        if (i == 0) { /* a corrupt prelude CRC is reported before any length */
+            pre[11] ^= 1;
+            aws_es_init(&d, count_cb, &log);
+            CHECK_INT(aws_es_feed(&d, pre, 12), -1);
+            CHECK_STR(d.error, "prelude CRC mismatch");
+            aws_es_free(&d);
+        }
+    }
     sb_free(&all);
     sb_free(&log);
 }
@@ -744,6 +765,21 @@ static void test_region_and_url(void) {
     r = bedrock_resolve_region(&plain, NULL);
     CHECK_STR(r, "us-east-1");
     free(r);
+    /* the region of AWS's own regional host in baseUrl comes after the ambient and guardrail regions (omp dc0709337a) */
+    ai_model_t regional = mk_model("{\"id\":\"anthropic.claude-3-5-haiku-20241022-v1:0\",\"baseUrl\":"
+                                   "\"https://bedrock-runtime.eu-west-3.amazonaws.com\"}");
+    r = bedrock_resolve_region(&regional, NULL);
+    CHECK_STR(r, "eu-west-3");
+    free(r);
+    r = bedrock_resolve_region(&regional, "arn:aws:bedrock:us-west-2:1:guardrail/g");
+    CHECK_STR(r, "us-west-2");
+    free(r);
+    setenv("AWS_REGION", "ca-central-1", 1);
+    r = bedrock_resolve_region(&regional, NULL);
+    CHECK_STR(r, "ca-central-1");
+    free(r);
+    unsetenv("AWS_REGION");
+    json_free(regional.raw);
 
     char *u = bedrock_request_url(&eu, "eu-west-1");
     CHECK_STR(u, "https://bedrock-runtime.eu-west-1.amazonaws.com/model/eu.anthropic.claude-opus-4-7/converse-stream");
@@ -914,6 +950,17 @@ static void test_stream_errors(void) {
     free(f);
     msg = bedrock_stream_finish(&s, 0, NULL, false);
     CHECK_STR(P(msg, "errorMessage"), "truncated message at end of stream");
+    json_free(msg);
+    bedrock_stream_free(&s);
+
+    /* whole frames, but the body ended before messageStop: a retryable incomplete stream, not a clean stop
+     * (omp 3f9a64f2eb) */
+    bedrock_stream_init(&s, &m, false, NULL, NULL);
+    feed_event(&s, "messageStart", "{\"role\":\"assistant\"}");
+    feed_event(&s, "contentBlockDelta", "{\"contentBlockIndex\":0,\"delta\":{\"text\":\"half a rep\"}}");
+    msg = bedrock_stream_finish(&s, 0, NULL, false);
+    CHECK_STR(P(msg, "stopReason"), "error");
+    CHECK_STR(P(msg, "errorMessage"), "Bedrock stream closed before a terminal response event (messageStop) was received");
     json_free(msg);
     bedrock_stream_free(&s);
 
