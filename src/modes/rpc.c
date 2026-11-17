@@ -15,6 +15,7 @@
 #include "tools/approval.h"
 #include "tools/artifacts.h"
 #include "tools/jobs.h"
+#include "tui/ansi.h"
 #include "tui/symbols.h"
 #include "ui/ui.h"
 
@@ -1259,6 +1260,23 @@ static void notice_rpc(void *ud, const char *level, const char *text) {
         json_set_str(j, "finalError", f2 + 1);
         emit(r, j);
         json_free(j);
+        return;
+    }
+    if (!strcmp(level, "session-persistence")) { /* registerRpcPersistenceSurface */
+        char *d0 = tui_truncate_to_width(text, 110, "\xe2\x80\xa6"), *d = tui_strip_ansi(d0);
+        free(d0);
+        char *m = xasprintf("Session persistence failed: %s. Writes are retried; unsaved entries stay in memory until the store "
+                            "accepts them again.", d);
+        free(d);
+        json_t *j = json_obj();
+        json_set_str(j, "type", "notice");
+        json_set_str(j, "level", "error");
+        json_set_str(j, "message", m);
+        json_set_str(j, "source", "session-persistence");
+        emit(r, j);
+        json_free(j);
+        fprintf(stderr, "%s\n", m);
+        free(m);
         return;
     }
     if (!strcmp(level, "retry_fallback_applied")) {

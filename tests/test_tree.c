@@ -6,6 +6,8 @@
 #include "ui/ui.h"
 
 #include <pthread.h>
+#include <stdlib.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -383,7 +385,51 @@ static void test_session_concurrent_reads(void) {
     session_free(r.s);
 }
 
+/* a failed append (disk full, read-only file) is reported once and the next entry rewrites the whole file, so the file
+ * never ends up with a hole in its parent chain (omp #rewriteRequired / onPersistenceError) */
+static void test_session_write_failure(void) {
+    if (geteuid() == 0) return; /* root writes through file modes */
+    char tmpl[] = "/tmp/omc-tree-XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    CHECK(dir != NULL);
+    if (!dir) return;
+    session_t *s = session_create("/tmp", dir);
+    json_t *u = json_parse_str("{\"role\":\"user\",\"content\":\"one\",\"timestamp\":1}");
+    json_t *a = json_parse_str("{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"two\"}],\"timestamp\":2}");
+    session_append_message(s, u);
+    session_append_message(s, a); /* materializes the file */
+    CHECK(s->on_disk && session_take_persist_error(s) == NULL);
+    CHECK(chmod(s->file, 0444) == 0 && chmod(dir, 0555) == 0); /* no append, no rewrite (temp file + rename) */
+    session_append_message(s, u); /* EACCES */
+    char *e = session_take_persist_error(s);
+    CHECK(e && strstr(e, "EACCES: permission denied, open '") == e);
+    free(e);
+    session_append_message(s, a); /* still failing: logged, not reported again */
+    CHECK(session_take_persist_error(s) == NULL);
+    char *still = session_persist_retry(s);
+    CHECK(still && strstr(still, "EACCES"));
+    free(still);
+    CHECK(chmod(dir, 0755) == 0);
+    session_append_message(s, u); /* the store accepts writes again: the full rewrite restores all five entries */
+    CHECK(session_take_persist_error(s) == NULL && !s->rewrite_required);
+    CHECK(session_persist_retry(s) == NULL);
+    char *err = NULL;
+    session_t *r = session_open(s->file, &err);
+    CHECK(r && json_len(r->entries) == json_len(s->entries) && json_len(r->entries) == 5);
+    json_t *path = r ? session_current_path(r) : NULL;
+    CHECK(json_len(path) == 5); /* the parent chain is whole */
+    json_free(path);
+    session_free(r);
+    free(err);
+    unlink(s->file);
+    rmdir(dir);
+    session_free(s);
+    json_free(u);
+    json_free(a);
+}
+
 int main(void) {
+    test_session_write_failure();
     test_session_concurrent_reads();
     test_picker_first_pass();
     char *err = NULL;

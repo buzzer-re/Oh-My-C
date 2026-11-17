@@ -96,6 +96,13 @@ check "json mode"      '"type":"agent_end"'              "$B" --model mock/mock-
 check "rpc mode"       '"status":"completed"'            bash -c "printf '%s\n' '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"bash:echo r\"}' | (cat; sleep 2) | '$B' --model mock/mock-1 --mode rpc"
 check "sessions list"  "msgs"                            "$B" sessions
 check "no-session"     "plain answer"                    "$B" --model mock/mock-1 --no-session -p "x"
+# a session dir omc cannot write: omp's persistence failure line, then the durability line at shutdown (exit 1)
+if [ "$(id -u)" != 0 ]; then
+    mkdir -p "$T/rosess" && chmod 555 "$T/rosess"
+    check "session ro"     "Session persistence failed: EACCES: permission denied, open '" "$B" --model mock/mock-1 --session-dir "$T/rosess" -p "say:hi"
+    check "session ro end" "Session persistence is still failing at shutdown: EACCES" bash -c "'$B' --model mock/mock-1 --session-dir '$T/rosess' -p 'say:hi'; echo rc=\$?"
+    check "session ro rc"  "rc=1" bash -c "'$B' --model mock/mock-1 --session-dir '$T/rosess' -p 'say:hi' 2>/dev/null; echo rc=\$?"
+fi
 # hashline edit: read to get the tag, then replace line 1 and append after it
 printf 'alpha\nbeta\ngamma\n' > e.txt
 TAG=$(timeout 30 "$B" --model mock/mock-1 -p "read:e.txt" </dev/null | grep -o 'e.txt#[0-9A-F]*' | head -1 | cut -d'#' -f2)

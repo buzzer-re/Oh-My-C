@@ -27,32 +27,7 @@
 
 /* ---------- write ---------- */
 
-/* Node's `<CODE>: <description>, <syscall> '<path>'` error text for a failed fs call (libuv descriptions) */
-static char *node_fs_error(int err, const char *syscall, const char *path) {
-    static const struct {
-        int no;
-        const char *code, *desc;
-    } T[] = {{ENOENT, "ENOENT", "no such file or directory"},
-             {EACCES, "EACCES", "permission denied"},
-             {EISDIR, "EISDIR", "illegal operation on a directory"},
-             {ENOTDIR, "ENOTDIR", "not a directory"},
-             {EROFS, "EROFS", "read-only file system"},
-             {ENOSPC, "ENOSPC", "no space left on device"},
-             {EEXIST, "EEXIST", "file already exists"},
-             {EPERM, "EPERM", "operation not permitted"},
-             {ENAMETOOLONG, "ENAMETOOLONG", "name too long"},
-             {ELOOP, "ELOOP", "too many symbolic links encountered"},
-             {EMFILE, "EMFILE", "too many open files"},
-             {EBUSY, "EBUSY", "resource busy or locked"},
-             {ETXTBSY, "ETXTBSY", "text file is busy"},
-             {EINVAL, "EINVAL", "invalid argument"},
-             {EIO, "EIO", "i/o error"},
-             {EDQUOT, "EDQUOT", "disk quota exceeded"},
-             {EFBIG, "EFBIG", "file too large"}};
-    for (size_t i = 0; i < sizeof T / sizeof T[0]; i++)
-        if (T[i].no == err) return xasprintf("%s: %s, %s '%s'", T[i].code, T[i].desc, syscall, path);
-    return xasprintf("%s, %s '%s'", strerror(err), syscall, path);
-}
+static char *node_fs_error(int err, const char *syscall, const char *path) { return fs_node_error(err, syscall, path); }
 
 /* formatPathRelativeToCwd: cwd-relative inside cwd ("." for cwd itself), else absolute */
 static char *rel_to_cwd(const char *abs, const char *cwd) {

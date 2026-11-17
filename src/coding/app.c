@@ -279,6 +279,17 @@ static json_t *job_results_message(app_t *a) {
     return m;
 }
 
+/* sessionManager.onPersistenceError: the first failed session write of an episode, as a "session-persistence" notice
+ * carrying the error text; each mode words it (interactive warning, print stderr line, rpc notice frame) */
+static void report_persist_error(app_t *a) {
+    char *e = session_take_persist_error(a->session);
+    if (!e) return;
+    for (char *p = e; *p; p++)
+        if (*p == '\r' || *p == '\n' || *p == '\t') *p = ' ';
+    notice(a, "session-persistence", "%s", e);
+    free(e);
+}
+
 static void on_agent_event(void *ud, const agent_event_t *ev) {
     app_t *a = ud;
     if (ev->type == AGENT_EV_AGENT_START) strvec_free(&a->retry_notes);
@@ -435,6 +446,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
         } else if (role && a->session) {
             session_append_message(a->session, ev->message);
         }
+        report_persist_error(a);
         if (str_eq(role, "assistant")) {
             json_t *u = json_get(ev->message, "usage");
             costgate_add(a, json_get_num(json_get(u, "cost"), "total", 0));

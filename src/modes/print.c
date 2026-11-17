@@ -4,6 +4,7 @@
 #include "coding/guards.h"
 #include "mcp/mcp.h"
 #include "tools/tools.h"
+#include "tui/ansi.h"
 
 #include <pthread.h>
 #include <unistd.h>
@@ -62,6 +63,30 @@ static char *single_line(const char *s) {
 
 static char *g_budget_error; /* the retry saga ended on the budget: the final error line */
 
+/* formatPersistenceFailure's detail: one line, at most TRUNCATE_LENGTHS.LINE (110) columns */
+static char *persist_detail(const char *text) {
+    char *t = tui_truncate_to_width(text, 110, "\xe2\x80\xa6");
+    char *p = tui_strip_ansi(t); /* plain text in, plain text out (no SGR reset before the ellipsis) */
+    free(t);
+    return p;
+}
+
+static bool g_persist_failed; /* a session write failed during the run (onPersistenceError) */
+
+static void print_persist_failure(const char *text) {
+    char *d = persist_detail(text);
+    fprintf(stderr, "Session persistence failed: %s. Writes are retried; unsaved entries stay in memory until the store accepts "
+                    "them again.\n", d);
+    free(d);
+    g_persist_failed = true;
+}
+
+/* --mode json: stdout carries the events; only a session-store failure reaches stderr */
+static void notice_json(void *ud, const char *level, const char *text) {
+    UNUSED(ud);
+    if (!strcmp(level, "session-persistence")) print_persist_failure(text);
+}
+
 static void notice_stderr(void *ud, const char *level, const char *text) {
     UNUSED(ud);
     if (!strcmp(level, "todo-reminder")) return;
@@ -72,6 +97,10 @@ static void notice_stderr(void *ud, const char *level, const char *text) {
             free(g_budget_error);
             g_budget_error = xstrndup(f1 + 1, (size_t)(f2 - f1 - 1));
         }
+        return;
+    }
+    if (!strcmp(level, "session-persistence")) {
+        print_persist_failure(text);
         return;
     }
     if (!strcmp(level, "retry_fallback_applied")) {
@@ -135,6 +164,7 @@ int run_print_mode(app_t *a, const print_opts_t *o) {
               stderr);
     if (o->json) {
         agent_subscribe(a->agent, json_listener, NULL);
+        a->notice = notice_json;
         json_t *hdr = json_obj();
         json_set_str(hdr, "type", "session");
         json_set_str(hdr, "id", session_id(a->session));
@@ -223,6 +253,16 @@ int run_print_mode(app_t *a, const print_opts_t *o) {
             free(text);
         }
         fflush(stdout);
+    }
+    /* dispose: a store failure still latched at teardown means the transcript is lost (formatPersistenceDurabilityFailure) */
+    char *still = g_persist_failed ? session_persist_retry(a->session) : NULL;
+    if (still) {
+        char *d = persist_detail(still);
+        fprintf(stderr, "Session persistence is still failing at shutdown: %s. The session transcript is not durable; unsaved entries "
+                        "are lost.\n", d);
+        free(d);
+        free(still);
+        if (!rc) rc = 1;
     }
     return rc;
 }

@@ -155,6 +155,8 @@ void session_free(session_t *s) {
     free(s->dir);
     free(s->title);
     free(s->title_source);
+    free(s->persist_error);
+    free(s->last_persist_error);
     if (s->mu) {
         pthread_mutex_destroy(s->mu);
         free(s->mu);
@@ -251,6 +253,41 @@ static char *title_slot_line(const char *title, const char *source) {
 
 static int write_full_locked(session_t *s);
 
+/* #noteDiskFailure: log every failure, report the first one of an episode; the next persist rewrites everything */
+static void note_disk_failure(session_t *s, int err, const char *syscall) {
+    bool path_err = err == EACCES || err == EPERM || err == EROFS || err == ENOENT || err == ENOTDIR || err == EISDIR;
+    char *msg = fs_node_error(err, syscall, path_err ? s->file : NULL);
+    LOGE("session persistence error: %s: %s", s->file, msg);
+    s->rewrite_required = true;
+    free(s->last_persist_error);
+    s->last_persist_error = xstrdup(msg);
+    if (s->disk_failed) {
+        free(msg);
+        return;
+    }
+    s->disk_failed = true;
+    free(s->persist_error);
+    s->persist_error = msg;
+}
+
+char *session_persist_retry(session_t *s) {
+    if (!s || !s->persist || !s->disk_failed) return NULL;
+    session_lock(s);
+    char *e = NULL;
+    if (s->rewrite_required && write_full_locked(s) != 0) e = xstrdup(s->last_persist_error ? s->last_persist_error : "write failed");
+    session_unlock(s);
+    return e;
+}
+
+char *session_take_persist_error(session_t *s) {
+    if (!s) return NULL;
+    session_lock(s);
+    char *e = s->persist_error;
+    s->persist_error = NULL;
+    session_unlock(s);
+    return e;
+}
+
 static int write_full(session_t *s) {
     session_lock(s);
     int rc = write_full_locked(s);
@@ -276,8 +313,13 @@ static int write_full_locked(session_t *s) {
     fs_mkdir_p(s->dir, 0700);
     int rc = fs_write_atomic(s->file, b.s, b.len, 0600);
     sb_free(&b);
-    if (rc == 0) s->on_disk = true;
-    else LOGE("session write failed: %s: %s", s->file, strerror(-rc));
+    if (rc == 0) {
+        s->on_disk = true;
+        s->rewrite_required = false;
+        s->disk_failed = false; /* #clearDiskError: a later failure is reported again */
+    } else {
+        note_disk_failure(s, -rc, "open");
+    }
     return rc;
 }
 
@@ -305,6 +347,10 @@ static void persist_entry(session_t *s, const json_t *e) {
         if (has_assistant) write_full(s);
         return;
     }
+    if (s->rewrite_required) { /* a write failed earlier: the full rewrite restores every entry still in memory */
+        write_full(s);
+        return;
+    }
     json_t *pe = session_blobs_externalize(e);
     char *line = json_dump(pe, 0);
     json_free(pe);
@@ -313,7 +359,7 @@ static void persist_entry(session_t *s, const json_t *e) {
     sb_putc(&b, '\n');
     free(line);
     int rc = fs_append(s->file, b.s, b.len);
-    if (rc != 0) LOGE("session append failed: %s", strerror(-rc));
+    if (rc != 0) note_disk_failure(s, -rc, rc == -ENOSPC || rc == -EDQUOT || rc == -EIO || rc == -EFBIG ? "write" : "open");
     sb_free(&b);
 }
 

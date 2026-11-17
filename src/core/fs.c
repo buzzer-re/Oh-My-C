@@ -444,3 +444,31 @@ char *fs_mktempdir(const char *prefix) {
     }
     return tmpl;
 }
+
+/* Node's `<CODE>: <description>, <syscall> '<path>'` error text for a failed fs call (libuv descriptions) */
+char *fs_node_error(int err, const char *syscall, const char *path) {
+    static const struct {
+        int no;
+        const char *code, *desc;
+    } T[] = {{ENOENT, "ENOENT", "no such file or directory"},
+             {EACCES, "EACCES", "permission denied"},
+             {EISDIR, "EISDIR", "illegal operation on a directory"},
+             {ENOTDIR, "ENOTDIR", "not a directory"},
+             {EROFS, "EROFS", "read-only file system"},
+             {ENOSPC, "ENOSPC", "no space left on device"},
+             {EEXIST, "EEXIST", "file already exists"},
+             {EPERM, "EPERM", "operation not permitted"},
+             {ENAMETOOLONG, "ENAMETOOLONG", "name too long"},
+             {ELOOP, "ELOOP", "too many symbolic links encountered"},
+             {EMFILE, "EMFILE", "too many open files"},
+             {EBUSY, "EBUSY", "resource busy or locked"},
+             {ETXTBSY, "ETXTBSY", "text file is busy"},
+             {EINVAL, "EINVAL", "invalid argument"},
+             {EIO, "EIO", "i/o error"},
+             {EDQUOT, "EDQUOT", "disk quota exceeded"},
+             {EFBIG, "EFBIG", "file too large"}};
+    for (size_t i = 0; i < sizeof T / sizeof T[0]; i++)
+        if (T[i].no == err)
+            return path ? xasprintf("%s: %s, %s '%s'", T[i].code, T[i].desc, syscall, path) : xasprintf("%s: %s, %s", T[i].code, T[i].desc, syscall);
+    return path ? xasprintf("%s, %s '%s'", strerror(err), syscall, path) : xasprintf("%s, %s", strerror(err), syscall);
+}
