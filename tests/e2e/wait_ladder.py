@@ -49,20 +49,25 @@ def tool_results(rs):
 
 
 if part == "ladder":
-    run([["bash", {"command": "sleep 24", "async": True}], ["wait", {}], ["wait", {}]])
+    # the second wait shares its turn with another call, so it climbs one rung (omp 502f43cabb)
+    run([["bash", {"command": "sleep 24", "async": True}], ["wait", {}], [["wait", {}], ["bash", {"command": "true"}]]])
     res = []
     for r in requests():  # each wait as first sent, before a later pruning pass could elide it
         msgs = [m for m in r.get("messages", []) if m.get("role") == "tool"]
         if msgs and len(msgs) > len(res):
-            c = msgs[-1]["content"]
-            res.append("".join(p.get("text", "") for p in c) if not isinstance(c, str) else c)
-    # an elapsed wait names the window it spent and the next one (omp cb3ff7a044)
-    check("first wait", len(res) == 3 and res[1] == "## Still Running (1)\n\n- `bg_1` [bash] — sleep 24\n\n"
-          "No job finished within 5.0s; a back-to-back wait allows up to 10.0s.", res)
+            res.extend("".join(p.get("text", "") for p in m["content"]) if not isinstance(m["content"], str) else m["content"]
+                       for m in msgs[len(res):])
+    # an elapsed wait names the window it spent and what to do once nothing else is left (omp 545b727cdd)
+    check("first wait", len(res) >= 3 and res[1] == "## Still Running (1)\n\n- `bg_1` [bash] — sleep 24\n\n"
+          "No job finished within 5.0s. Nothing else left? Call `wait` right away with no other tool call: it then blocks up to 4m.", res)
     want = ("## Still Running (1)\n\n- `bg_1` [bash] — sleep 24\n\n"
-            "No job finished within 10.0s; a back-to-back wait allows up to 30.0s.\n"
-            "<system-notice>\nNothing new after 15.0s of back-to-back waits. Waiting is not progress:")
-    check("second wait nudges", len(res) == 3 and res[2].startswith(want), res)
+            "No job finished within 10.0s. Nothing else left? Call `wait` right away with no other tool call: it then blocks up to 4m.\n"
+            "<system-notice>\nNothing new after 15.0s of back-to-back waits.\nWaiting is not progress:")
+    check("second wait nudges", len(res) >= 3 and res[2].startswith(want), res)
+    # a back-to-back wait alone in its turn takes the top rung at once: it lasts until the job settles
+    t = run([["bash", {"command": "sleep 14", "async": True}], ["wait", {}], ["wait", {}]])
+    res = tool_results(requests())
+    check("lone wait top rung", len(res) >= 3 and "## Completed (1)" in res[2] and t > 12, (t, res))
 else:
     # jobs finishing 1 s apart share one result
     run([["bash", {"command": "sleep 0.5; echo a", "async": True}], ["bash", {"command": "sleep 1.5; echo b", "async": True}], ["wait", {}]])

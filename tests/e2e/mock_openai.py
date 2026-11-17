@@ -10,7 +10,8 @@ Display commands (used by tests/tui/compare.sh to exercise transcript views):
   - "fail:<status>:<msg>"    reply with an HTTP error (non-retryable for 400/401/403/404)
   - "streamfail:<text>"      stream <text>, then an in-stream error chunk
   - "chunks:<JSON list>"     one content delta per string as is (a ["r", <text>] item is a reasoning_content delta)
-  - "seq:[[tool, args], ...]" one tool call per turn, in order, then the usual "Tool said:" answer
+  - "seq:[[tool, args], ...]" one tool call per turn, in order, then the usual "Tool said:" answer; a later step written
+    as a list of [tool, args] pairs is several calls in one assistant message
   - "batch:[[tool, args], ...]" all the tool calls in one assistant message, then the usual "Tool said:" answer
   - model "mock-flaky"        every request fails with HTTP 429 (retry fallback chains)
   - a compaction summary (tool-less) or handoff-document request whose messages mention SLOWSUMMARY answers after 4 s
@@ -126,7 +127,11 @@ def seq_next(msgs):
     try: calls = json.loads(script(msgs[ui])[4:])
     except ValueError: return None
     done = sum(1 for m in msgs[ui:] if m.get("role") == "tool")
-    return calls[done] if done < len(calls) else None
+    for step in calls:  # a step whose first item is a list is several calls in one assistant message
+        group = step if step and isinstance(step[0], list) else [step]
+        if done < len(group): return group
+        done -= len(group)
+    return None
 
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -242,10 +247,9 @@ class H(BaseHTTPRequestHandler):
             chunks.append({**base, "choices": [{"index": 0, "delta": {"content": "noted"}}]})
             chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
         elif last.get("role") == "tool" and seq_next(msgs):
-            tname, targs = seq_next(msgs)
-            a = json.dumps(targs)
             n = sum(1 for m in msgs if m.get("role") == "tool")
-            chunks.append({**base, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": f"call_{n + 1}", "type": "function", "function": {"name": tname, "arguments": a}}]}}]})
+            for k, (tname, targs) in enumerate(seq_next(msgs)):
+                chunks.append({**base, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": k, "id": f"call_{n + k + 1}", "type": "function", "function": {"name": tname, "arguments": json.dumps(targs)}}]}}]})
             chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
         elif last.get("role") == "tool":
             out = text_of(last)

@@ -505,8 +505,11 @@ tools are exclusive and mountable as `xd://` devices.
   (`agent_aside`) for the next step boundary: they never end a `wait` or interrupt bash. A direct message ends a wait, whose
   result carries every queued message (`details.waited`).
 - **`wait`** (`tools/write_bash.c`, port of `tools/wait.ts`): with nothing new it returns after a window that climbs 5s, 10s,
-  30s, 1m, 5m across back-to-back idle waits, restarting after news or a 60 s gap; from the second rung it appends the
-  `wait-idle.md` nudge. A wait woken by a job keeps collecting for up to 1.5 s while other watched jobs run. A wait for a reply
+  30s, 1m, 4m (inside a 5-minute prompt cache) across back-to-back idle waits, restarting after news or a 60 s gap; a
+  back-to-back wait that is the only tool call of its turn takes the 4m top rung at once. The elapsed line says what to do
+  once nothing else is left: the top-level interactive session is told to end its turn (results and messages start its
+  next one; the description says so too), every other caller to call `wait` right away alone. From the second rung it
+  appends the `wait-idle.md` nudge. A wait woken by a job keeps collecting for up to 1.5 s while other watched jobs run. A wait for a reply
   ends at once when the asked agent can no longer answer soon: it finished its turn, it waits on the caller, or a dialog of
   its own (`ask`, an approval) waits on the user.
   Outputs are readable at `agent://<id>`, transcripts at `history://<id>`, and running agents at
