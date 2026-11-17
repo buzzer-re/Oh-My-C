@@ -265,7 +265,9 @@ chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp
   context stays above the recovery band. Handoff generates the document over the live context
   (`tool_choice: none`, `auto-handoff-threshold-focus.md`; `compaction.handoffSaveToDisk` writes
   `handoff-<time>.md` to the session artifacts) and commits it with `method: "handoff"`, rendered
-  through `handoff-summary-context.md`.
+  through `handoff-summary-context.md`. A document that does not open with its `## Goal` heading is rejected
+  (an automatic handoff moves on to the next method, `/handoff` reports "Handoff generation produced an invalid
+  document").
 - **Triggers**: after each turn (`cmp_after_turn`: stale-read supersession and useless-result elision
   with `compaction.supersedeReads` / `dropUseless`, tool-output pruning, then the threshold), between
   tool-loop turns (`cmp_mid_turn`, `compaction.midTurnEnabled`, through the agent's `turn_boundary`

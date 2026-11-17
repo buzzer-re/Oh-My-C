@@ -344,8 +344,9 @@ without Kitty Unicode placeholders), video contact-sheet attachments, chip hyper
   selection with a scrollbar column, query tokens in the accent color, the `pickerAge` flush right, the
   `↑/↓ navigate · ⏎ select · ⎋ cancel` hints). omp's SQLite `HistoryStorage` is replaced by
   `prompt-history.jsonl` folded the same way: one row per `normalizePrompt` form with its latest
-  submission's time and cwd, newest first; a query keeps rows containing every token (letters/digits,
-  case-insensitive), at most 100. Enter puts the prompt in the composer, Esc cancels.
+  submission's time and cwd, newest first; a query keeps rows matching every whitespace-delimited term, either as one
+  phrase of the term's letter/digit runs (adjacent words, the last a prefix: `git-commit` finds `git commit`) or
+  literally as a case-insensitive substring (`a/b` needs `a/b`), at most 100. Enter puts the prompt in the composer, Esc cancels.
 - **Large pastes (`ui/attach.c`)**: a marker-sized paste (> 10 lines or > 1000 chars) in the composer becomes a
   text-attachment chip `📄 #N` (`tui_editor_insert_text_attachment`, numbered per draft, palette offset 2)
   whose card in the attachment band shows the first 4 rows x 12 cells and `+N lines` / `N chars`; it expands
