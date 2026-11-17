@@ -49,7 +49,7 @@ const cflag_t LAUNCH_FLAGS[] = {
     {.name = "models", .kind = CF_STR, .ch = 0, .desc = "Comma-separated model patterns for Ctrl+P cycling"},
     {.name = "no-tools", .kind = CF_BOOL, .ch = 0, .desc = "Disable all built-in tools"},
     {.name = "no-lsp", .kind = CF_BOOL, .ch = 0, .desc = "Disable LSP tools, formatting, and diagnostics"},
-    {.name = "tools", .kind = CF_STR, .ch = 0, .desc = "Comma-separated list of tools to enable (default: all)"},
+    {.name = "tools", .kind = CF_STR, .ch = 0, .desc = "Comma-separated built-in tool names to enable (default: tools enabled in settings; see Built-in Tools)"},
     {.name = "thinking", .kind = CF_STR, .ch = 0, .desc = "Set thinking level: off, minimal, low, medium, high, xhigh, max, auto", .options = THINKING_OPTS},
     {.name = "service-tier", .kind = CF_STR, .ch = 0, .desc = "OpenAI service tier for this session (none omits service_tier)",
      .options = SERVICE_TIER_OPTS},
@@ -412,7 +412,8 @@ const cli_cmd_t *cli_find_command(const char *name) {
 /* ---------- help-extra.ts ---------- */
 
 char *cli_extra_help(void) {
-    char *env = cli_bold("Environment Variables:"), *tools = cli_bold("Available Tools (default-enabled unless noted):");
+    char *env = cli_bold("Environment Variables:"), *tools = cli_bold("Built-in Tools (names accepted by --tools):");
+    char *ton = cli_dim("# Enabled by default"), *toff = cli_dim("# Optional (off by default; enable in settings)");
     char *useful = cli_bold("Useful Commands:");
     char *core = cli_dim("# Core Providers"), *more = cli_dim("# Additional LLM Providers"),
          *cloud = cli_dim("# Cloud Providers"), *search = cli_dim("# Search & Tools"), *cfg = cli_dim("# Configuration");
@@ -471,24 +472,40 @@ char *cli_extra_help(void) {
         "  PI_SLOW_MODEL              - Override slow/reasoning model (see --slow)\n"
         "  PI_PLAN_MODEL              - Override planning model (see --plan)\n"
         "%s\n"
-        "  read          - Read file contents\n"
-        "  bash          - Execute bash commands\n"
-        "  edit          - Edit files with find/replace\n"
-        "  write         - Write files (creates/overwrites)\n"
-        "  grep          - Search file contents\n"
+        "  %s\n"
+        "  read          - Read files, directories, URLs, archives, and databases\n"
+        "  edit          - Edit files in place\n"
+        "  write         - Create or overwrite files\n"
+        "  bash          - Execute shell commands\n"
+        "  grep          - Search file contents by regex\n"
         "  glob          - Find files by glob pattern\n"
-        "  lsp           - Language server protocol (code intelligence)\n"
-        "  task          - Launch sub-agents for parallel tasks\n"
-        "  todo          - Manage todo/task lists\n"
+        "  find          - Find code by describing what it does (when a native judge model is available)\n"
+        "  eval          - Run Python/JS cells\n"
+        "  task          - Launch subagents for parallel work\n"
+        "  wait          - Wait for background jobs\n"
+        "  todo          - Track a todo list\n"
+        "  ask           - Ask the user questions (interactive mode only)\n"
         "  web_search    - Search the web\n"
-        "  ask           - Ask user questions (interactive mode only)\n"
+        "  lsp           - Language server queries (code intelligence)\n"
+        "  ast_edit      - Rewrite code with AST patterns\n"
+        "  debug         - Debug a running process over DAP\n"
+        "\n"
+        "  %s\n"
+        "  ast_grep      - Search code with AST patterns\n"
+        "  github        - Query and act on GitHub repositories, issues, and PRs\n"
+        "  checkpoint    - Save a git-based checkpoint of session state\n"
+        "  rewind        - Rewind to a saved checkpoint\n"
+        "  learn         - Capture reusable lessons in long-term memory\n"
+        "  manage_skill  - Create, update, or delete managed skills\n"
         "\n"
         "%s\n"
         "  omc agents unpack           - Export bundled subagents to ~/.omc/agent/agents (default)\n"
         "  omc agents unpack --project - Export bundled subagents to ./.omc/agents",
-        env, core, more, cloud, search, cfg, tools, useful);
+        env, core, more, cloud, search, cfg, tools, ton, toff, useful);
     free(env);
     free(tools);
+    free(ton);
+    free(toff);
     free(useful);
     free(core);
     free(more);
