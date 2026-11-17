@@ -462,6 +462,30 @@ static bool async_wait_stop(ui_t *u) {
     return true;
 }
 
+/* /fork: the session moves onto a new file holding the conversation so far */
+static bool g_fork_pending; /* /fork aborted a running turn: fork once it settled */
+static void fork_now(ui_t *u) {
+    ui_btw_dispose(u);
+    char *err = NULL;
+    /* the session id before the fork is the one the hint offers to return to */
+    session_t *s = u->app->session;
+    char *prev = s && s->persist && s->file && fs_exists(s->file) ? xstrdup(session_id(s)) : NULL;
+    if (app_fork_from(u->app, NULL, &err) != 0) add_notice(u, "error", "Fork failed (session not persisted or cancelled)");
+    else {
+        char *label = prev ? xasprintf("%s Session forked \xc2\xb7 return to original: omc --resume %s or /resume %s",
+                                       tui_sym("status.success"), prev, prev)
+                           : xasprintf("%s Session forked", tui_sym("status.success"));
+        char *t = tui_fgs(NULL, TUI_TC_ACCENT, label);
+        tui_container_add(u->chat, &tui_spacer_new(1)->base);
+        tui_container_add(u->chat, &tui_text_new(t, 1, 1)->base);
+        free(t);
+        free(label);
+        tui_request_render(u->tui);
+    }
+    free(prev);
+    free(err);
+}
+
 static void plan_exec_resume(ui_t *u);
 static void worker_done(void *ud) {
     ui_t *u = ud;
@@ -470,6 +494,10 @@ static void worker_done(void *ud) {
     u->wake_suppressed = false; /* a turn ended on its own since the interrupt */
     ui_signals_settle();
     ui_signals_settle_startup(); /* a startup prompt whose run reported nothing goes back to idle */
+    if (g_fork_pending) {
+        g_fork_pending = false;
+        fork_now(u);
+    }
     iq_flush_deferred(u);
     plan_exec_resume(u);
     /* deferred `!cmd` results, a pending /compact, queued input left behind by an interrupted run */
@@ -1752,7 +1780,7 @@ static void plan_exit_confirmed(void *ud, bool yes) {
     /* an open review must not outlive the plan mode it approves: a later pick would autosave and dispatch the plan
      * while plan mode is paused (omp 660900d90e) */
     if (g_pr.open || g_pr.exec_pending) pr_finish(u, NULL);
-    if (u->worker_running) app_abort(u->app);
+    if (u->worker_running) app_abort_user(u->app); /* abort({reason: USER_INTERRUPT_LABEL}) */
     app_exit_plan_mode(u->app, true);
     add_notice(u, "info", "Plan mode paused.");
     tui_request_render(u->tui);
@@ -1773,7 +1801,8 @@ static void plan_review_command(ui_t *u) {
         add_notice(u, "warning", no_plan);
     } else {
         char *title = app_plan_resolve_title(NULL, content, plans.v[0]);
-        if (u->worker_running) {
+        if (u->worker_running) { /* #abortPlanApprovalTurnSilently */
+            agent_abort_silently(a->agent);
             app_abort(a);
             free(g_pending_review_path);
             free(g_pending_review_title);
@@ -2837,11 +2866,11 @@ static bool handle_command_inner(ui_t *u, const char *line) {
         if (prompt) iq_submit_mode(u, prompt, NULL, true); /* the first iteration runs through the normal submit flow */
         free(prompt);
     } else if (!strcmp(cmd, "fork")) {
-        ui_btw_dispose(u);
-        char *err = NULL;
-        if (app_fork_from(a, NULL, &err) != 0) add_notice(u, "error", err);
-        else add_notice(u, "info", "Forked into a new session");
-        free(err);
+        /* a running turn would finish on the new file and leave the original cut mid-turn: abort it, then fork */
+        if (u->worker_running) {
+            g_fork_pending = true;
+            app_abort(a);
+        } else fork_now(u);
     } else if (xc_command(u, cmd, parsed.name, arg)) { /* modes/extractl.c */
     } else {
         handled = false;

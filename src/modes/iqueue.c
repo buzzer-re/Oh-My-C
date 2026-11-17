@@ -238,6 +238,7 @@ void iq_compact(ui_t *u, const char *arg) {
         /* a manual compaction interrupts the live turn and summarizes once it has unwound */
         free(u->compact_pending);
         u->compact_pending = xstrdup(arg ? arg : "");
+        agent_abort_silently(u->app->agent); /* the UI is disconnected from the turn it interrupts: no aborted line */
         app_abort(u->app);
         return;
     }
