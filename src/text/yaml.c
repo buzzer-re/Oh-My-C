@@ -157,6 +157,7 @@ static json_t *resolve_plain(const char *t, bool force_str) {
 static json_t *parse_node(yp_t *y, int n);
 static json_t *parse_value_block(yp_t *y, int n, bool seq_ok);
 static json_t *parse_flow(yp_t *y);
+static char *js_string(const json_t *v);
 
 static size_t json_count(const json_t *j, size_t limit) {
     size_t c = 1;
@@ -573,9 +574,7 @@ static json_t *parse_block_map(yp_t *y, int m, char *first_key, bool first_merge
             skip_space(y);
             json_t *kn = at_eol(y) ? parse_value_block(y, m, false) : parse_node(y, m);
             if (!kn) goto fail;
-            if (json_is_str(kn)) key = xstrdup(kn->u.str.s);
-            else if (json_is_null(kn)) key = xstrdup("null");
-            else key = json_dump(kn, 0);
+            key = js_string(kn);
             json_free(kn);
             skip_to_content(y);
             if (y->err) { free(key); goto fail; }
@@ -877,10 +876,37 @@ static json_t *parse_flow_item(yp_t *y, char **raw_key) {
     return v;
 }
 
+/* JS String(value) for a collection used as a mapping key, as Bun.YAML gives it to omp: "[object Object]", arrays
+ * joined with "," (null elements empty). The JSON text omc used to take nested the escaping of every inner key, so a few
+ * hundred bytes of `{{{{...}}}}` grew exponentially (found by fuzz_yaml). */
+static void js_string_sb(sb_t *b, const json_t *v, bool in_array) {
+    if (json_is_null(v)) {
+        if (!in_array) sb_append(b, "null");
+    } else if (json_is_bool(v)) {
+        sb_append(b, v->u.b ? "true" : "false");
+    } else if (json_is_num(v)) {
+        json_js_num_sb(b, v->is_int ? (double)v->u.num.i : v->u.num.d);
+    } else if (json_is_str(v)) {
+        sb_appendn(b, v->u.str.s, v->u.str.len);
+    } else if (json_is_arr(v)) {
+        for (size_t i = 0; i < v->u.arr.n; i++) {
+            if (i) sb_putc(b, ',');
+            js_string_sb(b, v->u.arr.items[i], true);
+        }
+    } else {
+        sb_append(b, "[object Object]");
+    }
+}
+
+static char *js_string(const json_t *v) {
+    sb_t b = SB_INIT;
+    js_string_sb(&b, v, false);
+    return sb_detach(&b);
+}
+
 static char *key_text(json_t *k, char *raw) {
     if (raw) return raw;
-    if (json_is_str(k)) return xstrdup(k->u.str.s);
-    return json_dump(k, 0);
+    return js_string(k);
 }
 
 static json_t *parse_flow(yp_t *y) {

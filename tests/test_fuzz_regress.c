@@ -17,6 +17,7 @@
 #include "core/json.h"
 #include "core/rpcframe.h"
 #include "tools/fuzzy.h"
+#include "text/yaml.h"
 
 static int failures;
 #define CHECK(c)                                                                                                       \
@@ -73,6 +74,13 @@ static void unit_checks(void) {
     json_free(j);
     CHECK(time_add_ms(INT64_MAX - 5, 10) == INT64_MAX && time_add_ms(100, 1e300) == INT64_MAX && time_add_ms(100, 0.0 / 0.0) == 100);
     CHECK(time_add_ms(1000, -250.0) == 750 && time_add_ms(-5, 1e30) == INT64_MAX && time_add_ms(5, -1e30) == INT64_MIN);
+
+    /* YAML collection keys read as JS String(key), like Bun.YAML in omp (nested flow keys used to grow exponentially) */
+    json_t *y = yaml_parse("{{a: 1}: x, [p, [q, ~], 2.50]: y}", 33, NULL);
+    char *yd = json_dump(y, 0);
+    CHECK(!strcmp(yd, "{\"[object Object]\":\"x\",\"p,q,,2.5\":\"y\"}"));
+    free(yd);
+    json_free(y);
 
     /* trim never crosses its own start on a stray continuation byte (" \x80" used to give a negative length) */
     char *t = fz_trim(" \x80");
