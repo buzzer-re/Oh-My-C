@@ -601,15 +601,10 @@ printf '{"google-gemini-cli":{"type":"oauth","access":"cca-token","refresh":"r1"
 check "gemini-cli models" "google-gemini-cli ("  "${GENV[@]}" "$B" models gemini-2.5-pro
 check "gemini-cli text"   "plain cca answer"     "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "hi"
 check "gemini-cli tool"   "Tool said: gc-e2e"    "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "bash:echo gc-e2e"
-# Google Antigravity is back behind a login warning (omp e3fde96e2a): stored logins work without a prompt; a new login
-# shows the account risk and anything but "yes" stores nothing
-check "antigravity claude" "plain cca answer"    "${GENV[@]}" "$B" --model google-antigravity/claude-opus-4-6 --no-session -p "hi"
-check "antigravity tool"  "Tool said: ag-e2e"    "${GENV[@]}" "$B" --model google-antigravity/gemini-3.1-pro --no-session -p "bash:echo ag-e2e"
-check "antigravity risk"  'use at your own risk'  "${GENV[@]}" bash -c 'printf "no\n" | "$0" login google-antigravity' "$B"
-check "antigravity declined" 'Login failed: Login cancelled'  "${GENV[@]}" bash -c 'printf "no\n" | "$0" login google-antigravity' "$B"
-grep -q '"ua": "GeminiCLI/0.46.0/gemini-2.5-pro (' "$T/google.jsonl" && echo "   ok  gemini-cli client headers" || { echo "   FAIL gemini-cli client headers"; fail=1; }
-grep -q '"ua": "antigravity/hub/2.26.0 (aidev_client; .*"model": "claude-opus-4-6-thinking", "userAgent": "antigravity"' "$T/google.jsonl" \
-    && echo "   ok  antigravity envelope" || { echo "   FAIL antigravity envelope"; fail=1; }
+# omp 9a37046d3a paused Google Antigravity again: a stored credential is never used and login refuses it, as omp
+# 18.22.0 does. Its transport checks (claude, tool, envelope) come back with auth.unpausedProviders.
+check "antigravity paused" "No API key found for google-antigravity"  "${GENV[@]}" "$B" --model google-antigravity/claude-opus-4-6 --no-session -p "hi"
+check "antigravity login"  "Unknown OAuth provider 'google-antigravity'"  "${GENV[@]}" bash -c 'printf "no\n" | "$0" login google-antigravity' "$B"
 grep -q '"functionResponse": {"name": "bash"' "$T/google.jsonl" && echo "   ok  cca functionResponse replay" || { echo "   FAIL cca functionResponse replay"; fail=1; }
 if [ -f "$T/auth.json.bak" ]; then mv "$T/auth.json.bak" "$T/agent/auth.json"; else rm -f "$T/agent/auth.json"; fi
 # Cursor agent (Connect + protobuf over HTTP/1.1: RunSSE stream + BidiAppend unary appends, exec channel, KV blobs)
