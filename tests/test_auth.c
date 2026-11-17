@@ -628,46 +628,35 @@ int main(void) {
         s_free(&sf);
     }
 
-    /* ---- a login-warning provider (omp e3fde96e2a): Google Antigravity is back, at your own risk ---- */
+    /* ---- a paused provider (omp 9a37046d3a re-paused Google Antigravity; e3fde96e2a had lifted it) ---- */
     {
-        const char *warn = "Google's Antigravity terms do not allow signing in from third-party tools like omp, and Google has "
-                           "suspended accounts that did (see #18341). If you depend on this Google account, use GEMINI_API_KEY "
-                           "(AI Studio) or google-vertex instead.";
-        CHECK(!catalog_provider_pause_reason("google-antigravity"), "antigravity no longer paused");
-        CHECK(str_eq(catalog_provider_login_warning("google-antigravity"), warn), "antigravity login warning");
-        CHECK(!catalog_provider_login_warning("google-gemini-cli"), "gemini-cli has no login warning");
-        /* stored logins resolve again without a prompt */
+        const char *reason = catalog_provider_pause_reason("google-antigravity");
+        CHECK(reason && *reason, "antigravity is paused again");
+        char *want_err = xasprintf("google-antigravity is turned off: %s", reason ? reason : "");
+        /* stored logins never reach it (no login or stored credential reaches a disabled provider) */
         CHECK(auth_set_api_key("google-antigravity", "stored-token") == 0, "store an antigravity key");
         char *k = auth_get_api_key("google-antigravity");
-        CHECK(str_eq(k, "stored-token"), "stored antigravity key resolves: %s", k ? k : "(none)");
+        CHECK(k == NULL, "stored antigravity key stays unused: %s", k ? k : "(none)");
         free(k);
         auth_logout("google-antigravity");
-        /* a new login asks first; anything but "yes" (or a cancel) stores nothing */
-        const char *answers[] = {"no", "", NULL};
-        for (size_t i = 0; i < ARRAY_LEN(answers); i++) {
-            script_t sp = {.answers = {answers[i]}};
-            err = NULL;
-            int rc = login("google-antigravity", &sp, &err);
-            CHECK(rc != 0 && str_eq(err, "Login cancelled"), "declined risk: %s", err ? err : "(none)");
-            char *want = xasprintf("\xe2\x9a\xa0 Google Antigravity (Gemini, Claude, GPT-OSS): use at your own risk\n\n%s\n\n"
-                                   "Type \"yes\" to accept the risk and continue",
-                                   warn);
-            CHECK(sp.prompts.n == 1 && str_eq(sp.prompts.v[0], want), "risk prompt: %s", sp.prompts.n ? sp.prompts.v[0] : "(none)");
-            CHECK(!sp.url, "no login flow started");
-            free(want);
-            free(err);
-            s_free(&sp);
-            json_t *c = stored("google-antigravity");
-            CHECK(c == NULL, "nothing stored");
-            json_free(c);
-        }
+        /* a new login is refused before any prompt or flow */
+        script_t sp = {.answers = {"yes"}};
+        err = NULL;
+        int rc = login("google-antigravity", &sp, &err);
+        CHECK(rc != 0 && str_eq(err, want_err), "paused login: %s", err ? err : "(none)");
+        CHECK(sp.prompts.n == 0 && !sp.url, "no prompt, no login flow");
+        free(err);
+        s_free(&sp);
+        json_t *c = stored("google-antigravity");
+        CHECK(c == NULL, "nothing stored");
+        json_free(c);
+        free(want_err);
         json_t *d;
-        char *name = NULL;
+        bool listed = false;
         json_arr_foreach(auth_oauth_providers(), i, d) if (auth_login_listed(d) && str_eq(json_get_str(d, "id"), "google-antigravity"))
-            name = auth_login_name(d);
-        CHECK(str_eq(name, "Google Antigravity (Gemini, Claude, GPT-OSS) (at your own risk)"), "login list label: %s", name ? name : "(unlisted)");
-        free(name);
-        name = NULL;
+            listed = true;
+        CHECK(!listed, "a paused provider is not offered for login");
+        char *name = NULL;
         json_arr_foreach(auth_oauth_providers(), i, d) if (str_eq(json_get_str(d, "id"), "google-gemini-cli")) name = auth_login_name(d);
         CHECK(name && !strstr(name, "at your own risk"), "other providers keep their name");
         free(name);
