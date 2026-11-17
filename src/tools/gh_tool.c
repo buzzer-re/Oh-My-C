@@ -8,6 +8,7 @@
 #include "config/settings.h"
 #include "core/fs.h"
 #include "core/proc.h"
+#include "outsink.h"
 #include "session/worktree.h"
 
 #include <ctype.h>
@@ -1673,6 +1674,32 @@ static void set_opt(json_t *o, const char *k, const json_t *src, const char *sk)
     if (v) json_set(o, k, json_str_own(v));
 }
 
+static double ts_ms(const char *v);
+
+/* normalizeGithubTimestamp: a trimmed timestamp, absent when unset; steps that have not run report Go's zero time
+ * (`0001-01-01T00:00:00Z`) */
+static void set_ts(json_t *o, const char *k, const json_t *src, const char *sk) {
+    char *v = gh_norm_opt(json_get_str(src, sk));
+    if (v && ts_ms(v) > 0) json_set(o, k, json_str_own(v));
+    else free(v);
+}
+
+/* normalizeRunStep: {number, name, status?, conclusion?, startedAt?, completedAt?}; NULL without a positive number */
+static json_t *norm_step(const json_t *st) {
+    const json_t *num = json_get(st, "number");
+    if (!json_is_num(num) || !num->is_int || num->u.num.i < 1) return NULL;
+    int64_t n = num->u.num.i;
+    json_t *o = json_obj();
+    json_set_int(o, "number", n);
+    char *name = gh_norm_opt(json_get_str(st, "name"));
+    json_set(o, "name", json_str_own(name ? name : xasprintf("step-%lld", (long long)n)));
+    set_opt(o, "status", st, "status");
+    set_opt(o, "conclusion", st, "conclusion");
+    set_ts(o, "startedAt", st, "started_at");
+    set_ts(o, "completedAt", st, "completed_at");
+    return o;
+}
+
 static json_t *norm_job(const json_t *j) {
     if (!json_is_num(json_get(j, "id"))) return NULL;
     json_t *o = json_obj();
@@ -1681,10 +1708,45 @@ static json_t *norm_job(const json_t *j) {
     json_set(o, "name", json_str_own(name ? name : xasprintf("job-%lld", (long long)json_get_int(j, "id", 0))));
     set_opt(o, "status", j, "status");
     set_opt(o, "conclusion", j, "conclusion");
-    set_opt(o, "startedAt", j, "started_at");
-    set_opt(o, "completedAt", j, "completed_at");
+    set_ts(o, "startedAt", j, "started_at");
+    set_ts(o, "completedAt", j, "completed_at");
     set_opt(o, "url", j, "html_url");
+    /* the ordered steps the same jobs API call returned (omp 4c73c16e0b) */
+    const json_t *steps = json_get(j, "steps");
+    if (json_is_arr(steps)) {
+        json_t *sa = json_arr();
+        for (size_t i = 0; i < json_len(steps); i++) {
+            json_t *so = norm_step(json_at(steps, i));
+            if (so) json_push(sa, so);
+        }
+        json_set(o, "steps", sa);
+    }
     return o;
+}
+
+/* FAILURE_CONCLUSIONS (tui tools/github.ts) */
+static bool failure_conclusion(const char *c) {
+    static const char *const F[] = {"failure", "timed_out", "cancelled", "action_required", "startup_failure"};
+    for (size_t i = 0; c && i < ARRAY_LEN(F); i++)
+        if (!strcmp(c, F[i])) return true;
+    return false;
+}
+
+/* sanitizeDisplayLine: sanitizeText, tabs expanded, newline runs collapsed to one space, trimmed */
+static char *display_line(const char *s) {
+    char *c = out_sanitize(s ? s : "", strlen(s ? s : ""), NULL);
+    sb_t b = SB_INIT;
+    for (const char *p = c; *p; p++) {
+        if (*p == '\t') sb_append(&b, "   ");
+        else if (*p == '\r' || *p == '\n') {
+            while (p[1] == '\r' || p[1] == '\n') p++;
+            sb_putc(&b, ' ');
+        } else sb_putc(&b, *p);
+    }
+    free(c);
+    char *t = str_trim(sb_cstr(&b));
+    sb_free(&b);
+    return t;
 }
 
 static json_t *norm_run(const json_t *r, json_t *jobs, char **err) {
@@ -1857,6 +1919,16 @@ static void render_jobs(strvec_t *L, const json_t *jobs) {
                          : json_get_str(j, "status")   ? json_get_str(j, "status")
                                                        : "unknown";
         strvec_push_own(L, xasprintf("- [%s] %s", st, json_get_str(j, "name")));
+        /* the step a failed job broke on: the first that concluded in failure */
+        const json_t *steps = json_get(j, "steps");
+        for (size_t k = 0; k < json_len(steps); k++) {
+            const json_t *sp = json_at(steps, k);
+            if (!failure_conclusion(json_get_str(sp, "conclusion"))) continue;
+            char *nm = display_line(json_get_str(sp, "name"));
+            strvec_push_own(L, xasprintf("  Failed step: #%lld %s", (long long)json_get_int(sp, "number", 0), nm));
+            free(nm);
+            break;
+        }
         gh_push_s(L, "  Started", json_get_str(j, "startedAt"));
         gh_push_s(L, "  Completed", json_get_str(j, "completedAt"));
         gh_push_s(L, "  URL", json_get_str(j, "url"));
@@ -2076,6 +2148,27 @@ static json_t *watch_run_details(const json_t *run, double observed) {
             double d = floor((ct - st) / 1000.0);
             json_set_int(jo, "durationSeconds", (int64_t)(d > 0 ? d : 0));
         }
+        const json_t *steps = json_get(j, "steps");
+        if (json_is_arr(steps)) {
+            json_t *sa = json_arr();
+            for (size_t k = 0; k < json_len(steps); k++) {
+                const json_t *sp = json_at(steps, k);
+                json_t *so = json_obj();
+                json_set_int(so, "number", json_get_int(sp, "number", 0));
+                det_str(so, "name", json_get_str(sp, "name"));
+                det_str(so, "status", json_get_str(sp, "status"));
+                det_str(so, "conclusion", json_get_str(sp, "conclusion"));
+                double sst = ts_ms(json_get_str(sp, "startedAt"));
+                if (sst >= 0) {
+                    double sct = ts_ms(json_get_str(sp, "completedAt"));
+                    if (sct < 0) sct = observed;
+                    double d = floor((sct - sst) / 1000.0);
+                    json_set_int(so, "durationSeconds", (int64_t)(d > 0 ? d : 0));
+                }
+                json_push(sa, so);
+            }
+            json_set(jo, "steps", sa);
+        }
         det_str(jo, "url", json_get_str(j, "url"));
         json_push(jobs, jo);
     }
@@ -2202,7 +2295,18 @@ static json_t *fetch_failed_logs(const char *cwd, const char *repo, json_t *pair
         json_t *e = json_obj();
         json_set(e, "run", json_clone(json_get(p, "run")));
         json_set(e, "job", json_clone(json_get(p, "job")));
-        if (gh_run(cwd, &a, true, &r, &err) == 0) {
+        /* raw escapes in the log; an older gh that rejects the flag gets the call again without it (omp 2c94ff91cd) */
+        strvec_t ae = {0};
+        for (size_t k = 0; k < a.n; k++) strvec_push(&ae, a.v[k]);
+        strvec_push(&ae, "--allow-escape-sequences");
+        int rc = gh_run(cwd, &ae, true, &r, &err);
+        strvec_free(&ae);
+        if (rc == 0 && r.exit_code != 0 && r.err && str_starts(r.err, "unknown flag: --allow-escape-sequences") &&
+            (r.err[38] == 0 || r.err[38] == '\n' || (r.err[38] == '\r' && r.err[39] == '\n'))) {
+            gh_res_free(&r);
+            rc = gh_run(cwd, &a, true, &r, &err);
+        }
+        if (rc == 0) {
             char *full = r.exit_code == 0 ? gh_norm_block(r.out) : NULL;
             if (full && !*full) {
                 free(full);

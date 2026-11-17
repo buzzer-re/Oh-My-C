@@ -175,11 +175,21 @@ JOBS = {
             "completed_at": "2026-10-07T10:02:40Z", "html_url": URL + "/actions/runs/1001/job/9001"},
            {"id": 9002, "name": "test", "status": "completed", "conclusion": "skipped"}],
     1002: [{"id": 9003, "name": "clang-format", "status": "completed", "conclusion": "failure", "started_at": "2026-10-07T10:00:10Z",
-            "completed_at": "2026-10-07T10:01:00Z", "html_url": URL + "/actions/runs/1002/job/9003"},
+            "completed_at": "2026-10-07T10:01:00Z", "html_url": URL + "/actions/runs/1002/job/9003",
+            # steps (omp 4c73c16e0b); a step that never ran reports Go's zero time
+            "steps": [{"number": 1, "name": "Set up job", "status": "completed", "conclusion": "success",
+                       "started_at": "2026-10-07T10:00:10Z", "completed_at": "2026-10-07T10:00:12Z"},
+                      {"number": 2, "name": "Run\tclang-format", "status": "completed", "conclusion": "failure",
+                       "started_at": "2026-10-07T10:00:12Z", "completed_at": "2026-10-07T10:00:58Z"},
+                      {"number": 3, "name": "Post", "status": "completed", "conclusion": "skipped",
+                       "started_at": "0001-01-01T00:00:00Z", "completed_at": "0001-01-01T00:00:00Z"},
+                      {"number": 0, "name": "bogus"}]},
            {"id": 9004, "name": "tidy", "status": "completed", "conclusion": "cancelled", "started_at": "2026-10-07T10:00:10Z",
             "completed_at": "2026-10-07T10:01:30Z", "html_url": URL + "/actions/runs/1002/job/9004"}],
 }
-JOB_LOGS = {9003: "".join(f"2026-10-07T10:00:{i:02d}Z line {i}\n" for i in range(1, 31)) + "Error: src/frob.c is not formatted\n"}
+JOB_LOGS = {9003: "".join(f"2026-10-07T10:00:{i:02d}Z line {i}\n" for i in range(1, 31)) + "\x1b[31mError:\x1b[0m src/frob.c is not formatted\n",
+            # served only without --allow-escape-sequences, like a gh that predates the flag
+            9004: "tidy: cancelled\n"}
 
 def api():
     rest = [a for a in argv[1:]]
@@ -247,6 +257,8 @@ def api():
         if sub == f"/actions/runs/{rid}/jobs": out({"total_count": len(JOBS[rid]), "jobs": JOBS[rid]})
     if sub.startswith("/actions/jobs/") and sub.endswith("/logs"):
         jid = int(sub.split("/")[3])
+        if jid == 9004 and "--allow-escape-sequences" in rest:
+            sys.stderr.write("unknown flag: --allow-escape-sequences\n\nUsage:  gh api <endpoint> [flags]\n"); sys.exit(1)
         if jid in JOB_LOGS:
             sys.stdout.write(JOB_LOGS[jid]); sys.exit(0)
         fail("gh: Not Found (HTTP 404)", json.dumps({"message": "Not Found", "status": "404"}))

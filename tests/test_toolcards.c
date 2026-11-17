@@ -522,6 +522,31 @@ int main(void) {
         json_free(a);
         json_free(r);
     }
+    /* omp 4c73c16e0b: run_watch jobs show step progress collapsed (the first carries the expand hint), every step expanded */
+    {
+        json_t *a = J("{\"op\":\"run_watch\"}");
+        json_t *r = J("{\"content\":[{\"type\":\"text\",\"text\":\"x\"}],\"details\":{\"watch\":{\"mode\":\"run\",\"state\":\"watching\","
+                      "\"repo\":\"acme/w\",\"run\":{\"id\":7,\"workflowName\":\"CI\",\"jobs\":[{\"id\":1,\"name\":\"build\",\"status\":"
+                      "\"in_progress\",\"steps\":[{\"number\":1,\"name\":\"Set up\",\"status\":\"completed\",\"conclusion\":\"success\","
+                      "\"durationSeconds\":2},{\"number\":2,\"name\":\"Compile\",\"status\":\"in_progress\"}]},{\"id\":2,\"name\":\"lint\","
+                      "\"conclusion\":\"failure\",\"steps\":[{\"number\":1,\"name\":\"Run lint\",\"status\":\"completed\",\"conclusion\":"
+                      "\"failure\"}]}]}}}}");
+        tc_call_t c = call("github", a, r, false);
+        c.label = "GitHub";
+        c.partial = true;
+        strvec_t out = {0};
+        tc_render(&c, 100, &out);
+        CHECK(has_row(&out, "2/2 #2 Compile \xc2\xb7 in progress") && has_row(&out, "Ctrl+O: Expand"), "current step progress row");
+        CHECK(has_row(&out, "#1 Run lint \xc2\xb7 failure \xc2\xb7 1/1"), "failed step progress row");
+        strvec_free(&out);
+        c.expanded = true;
+        tc_render(&c, 100, &out);
+        CHECK(has_row(&out, "#1 Set up") && has_row(&out, "success") && has_row(&out, "2s") && !has_row(&out, "steps complete"),
+              "expanded step rows");
+        strvec_free(&out);
+        json_free(r);
+        json_free(a);
+    }
     /* omp f87959c6a6: a todo op naming several tasks shows their count; one names the task */
     {
         json_t *a = J("{\"op\":\"done\",\"task\":[\"alpha\",\"beta\"]}");
