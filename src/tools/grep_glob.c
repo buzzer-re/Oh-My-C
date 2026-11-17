@@ -611,9 +611,51 @@ static bool try_delim_split(tool_env_t *env, const char *entry, int mode, int re
     return ok;
 }
 
-/* splitDelimitedPathEntry (internal-URL lists aside) */
+/* an internal URL (`local://`, `artifact://`, ...): a scheme the router handles, not a web or file URL */
+static bool is_internal_url(const char *s) {
+    size_t n = 0;
+    while (isalnum((unsigned char)s[n]) || s[n] == '+' || s[n] == '-' || s[n] == '.') n++;
+    if (!n || !isalpha((unsigned char)s[0]) || strncmp(s + n, "://", 3)) return false;
+    static const char *const ext[] = {"http", "https", "ftp", "ws", "wss", "file"};
+    for (size_t i = 0; i < sizeof ext / sizeof *ext; i++)
+        if (n == strlen(ext[i]) && !strncasecmp(s, ext[i], n)) return false;
+    return true;
+}
+
+/* splitDelimitedPathEntry with mixedLocalPaths (omp 12a095085d, 1f08eab663, a7003d9901): a `;` list starting with an
+ * internal URL splits when every part is a URL (or a `!glob` exclusion for grep); a list that also names local paths
+ * splits only when the whole entry does not resolve, so a `;` inside one real URL stays intact */
+static bool split_url_list(tool_env_t *env, const char *entry, bool find_mode, strvec_t *out) {
+    strvec_t parts = {0};
+    if (!try_delim_split(env, entry, DL_SEMI, 0, find_mode, &parts) || parts.n <= 1) {
+        strvec_free(&parts);
+        return false;
+    }
+    bool all_urls = true;
+    for (size_t i = 0; i < parts.n; i++)
+        all_urls &= is_internal_url(parts.v[i]) || (!find_mode && parts.v[i][0] == '!' && parts.v[i][1] && !strstr(parts.v[i], "://"));
+    bool split = all_urls;
+    if (!split) {
+        char *peeled, *sel;
+        split_path_sel(entry, &peeled, &sel);
+        char *abs = tool_resolve_path(env, peeled);
+        struct stat st;
+        split = stat(abs, &st) != 0 && (errno == ENOENT || errno == ENOTDIR || errno == ENAMETOOLONG || errno == EINVAL);
+        free(abs);
+        free(peeled);
+        free(sel);
+    }
+    if (split)
+        for (size_t i = 0; i < parts.n; i++) strvec_push(out, parts.v[i]);
+    strvec_free(&parts);
+    return split;
+}
+
+/* splitDelimitedPathEntry */
 static bool split_delimited(tool_env_t *env, const char *entry, bool find_mode, strvec_t *out) {
-    if (!has_top_delim(entry) || strstr(entry, "://")) return false;
+    if (!has_top_delim(entry)) return false;
+    if (is_internal_url(entry)) return split_url_list(env, entry, find_mode, out);
+    if (strstr(entry, "://")) return false;
     if (probe_literal(env, entry) != 0) return false;
     char *peeled, *sel;
     split_path_sel(entry, &peeled, &sel);
