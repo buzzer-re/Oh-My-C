@@ -11,7 +11,7 @@ struct app;
 
 /* the omp release whose hosted viewer the page loads (assets/export/viewer.generated.json is pinned to
  * it; the upstream pin in UPDATE.md) */
-#define EXPORT_VIEWER_VERSION "18.18.7"
+#define EXPORT_VIEWER_VERSION "18.22.0"
 
 /* Load a session JSONL like omp's parseSessionContent: the fixed-width title slot folded into the header,
  * malformed lines skipped. *header (owned, NULL when the file has no valid session header), *entries

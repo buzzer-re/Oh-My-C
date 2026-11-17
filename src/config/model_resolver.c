@@ -304,7 +304,7 @@ static const char *const DEF_IMAGE[] = {"openai/gpt-image-2", "openai-codex/gpt-
 static const char *const DEF_WEB[] = {"web/parallel", "web/hosted", "web/exa", "web/firecrawl", "web/searxng",
                                       "web/startpage", "web/duckduckgo", "web/ecosia", "web/google", "web/mojeek",
                                       "web/public", NULL};
-static const char *const DEF_SPEECH[] = {"local/kokoro", "xai/grok-tts", "xai-oauth/grok-tts", NULL};
+static const char *const DEF_SPEECH[] = {"local/phonon-31m", "xai/grok-tts", "xai-oauth/grok-tts", NULL};
 static const char *const DEF_DICTATION[] = {"local/parakeet-tdt-0.6b-v3", NULL};
 static const char *const DEF_JUDGE[] = {"typesafe/jev-1.14.0", "openrouter/typesafe/jev-1.14", "@tiny", "@smol",
                                         "@default", NULL};

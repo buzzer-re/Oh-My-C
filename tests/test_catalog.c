@@ -302,9 +302,9 @@ static void test_google_base64_skip(void) {
 }
 
 /* omp 8895c0fa32: a paused provider is never called, even with a key passed in */
-/* omp e3fde96e2a: Google Antigravity is no longer paused; its auth rule carries a login warning instead */
+/* omp 9a37046d3a (v18.19+): Google Antigravity is paused again (e3fde96e2a had lifted it) */
 static void test_paused_provider_stream(void) {
-    CHECK(!catalog_provider_pause_reason("google-antigravity") && !catalog_provider_disabled_error("google-antigravity"));
+    CHECK(catalog_provider_pause_reason("google-antigravity") != NULL);
     CHECK(str_starts(catalog_provider_login_warning("google-antigravity"), "Google's Antigravity terms do not allow"));
 }
 
@@ -368,7 +368,7 @@ int main(void) {
     /* built-in local / web pseudo-providers: keyless, with omp's kinds */
     CHECK(catalog_provider_keyless("local") && catalog_provider_keyless("web") && catalog_provider_keyless("ollama"));
     CHECK(!catalog_provider_keyless("anthropic"));
-    const ai_model_t *kokoro = catalog_find("local", "kokoro"), *par = catalog_find("local", "parakeet-tdt-0.6b-v3");
+    const ai_model_t *kokoro = catalog_find("local", "phonon-31m"), *par = catalog_find("local", "parakeet-tdt-0.6b-v3");
     CHECK(kokoro && str_eq(catalog_model_kind(kokoro), "tts") && catalog_model_available(kokoro));
     CHECK(par && str_eq(catalog_model_kind(par), "stt"));
     CHECK(str_eq(catalog_model_kind(catalog_find("local", "lfm2.5-230m")), "tiny"));

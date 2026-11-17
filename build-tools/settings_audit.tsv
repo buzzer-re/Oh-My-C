@@ -183,7 +183,6 @@ async.printWake	inert	print mode does not wait for background jobs (omc's async.
 task.isolation.*	inert	no isolated task runs
 isolation.backend	inert	no isolated task runs
 worktree.clone	inert	worktrees are plain checkouts
-task.file	inert	no taskFile parameter
 task.structured	inert	no outputSchema/yield results
 task.speculativeLaunch	inert	batch items start after the call finishes streaming
 task.enableEffort	inert	no per-spawn effort parameter
@@ -224,3 +223,23 @@ debug.adapters	omc-only	no omp setting
 mcp.enabled	omc-only	no omp setting (omp's switch is --no-mcp)
 mcp.disabledServers	omc-only	omp keeps disabledServers in its MCP config files, not settings
 skills.compressDescriptions	omc-only	no omp equivalent
+models.noJudge	inert	no judge-model opt-out (omp v18.22) (added in omp v18.19-18.22)
+models.noSpotlight	inert	spotlight is omp-hosted, not ported (added in omp v18.19-18.22)
+models.offline	inert	offline model mode not ported yet (added in omp v18.19-18.22)
+auth.unpausedProviders	inert	pause overrides not ported yet (added in omp v18.19-18.22)
+disassembler.backend	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
+disassembler.maxOpen	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
+disassembler.idleCloseSec	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
+bash.allowedEnvVars	inert	not ported yet (added in omp v18.19-18.22)
+ghidra.installDir	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
+ghidra.python	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
+tui.renderEmbeds	inert	not ported yet (added in omp v18.19-18.22)
+systemPromptTemplates	inert	not ported yet (added in omp v18.19-18.22)
+encourageEdits	inert	not ported yet (added in omp v18.19-18.22)
+task.autoParallel	inert	not ported yet (added in omp v18.19-18.22)
+task.steps	inert	not ported yet (added in omp v18.19-18.22)
+task.agentPrewalkAuto	inert	not ported yet (added in omp v18.19-18.22)
+todo.midRunNudges	inert	not ported yet (added in omp v18.19-18.22)
+find.verifyModel	inert	not ported yet (added in omp v18.19-18.22)
+find.hitThreshold	inert	not ported yet (added in omp v18.19-18.22)
+launch.persist	inert	not ported yet (added in omp v18.19-18.22)
