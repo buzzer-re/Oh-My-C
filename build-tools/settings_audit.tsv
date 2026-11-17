@@ -115,6 +115,7 @@ advisor.syncBacklog	inert	main agent never waits for the advisor backlog
 advisor.evictStaleResults	inert	advisor context keeps old read/grep/glob output
 auth.broker.*	inert	no auth broker client
 auth.accountPolicies	inert	no per-account policies
+auth.unpausedProviders	wired	settings.c rebuild pushes the operator-layer value to catalog_set_unpaused_providers; ui/settings.c offers the paused providers
 judgment.attemptTimeoutMs	inert	omp registers it but no TypeScript reads it either
 prewalk.auto	inert	no automatic prewalk judging
 prewalk.autoTarget	inert	no automatic prewalk judging
