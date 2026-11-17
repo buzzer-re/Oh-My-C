@@ -7,7 +7,8 @@ Display commands (used by tests/tui/compare.sh to exercise transcript views):
   - "md:<name>"              stream tests/tui/fixtures/<name>.md as the answer (small chunks)
   - "think:<thinking>|<text>" stream reasoning_content deltas, then the text ("\\n" -> newline)
   - "slow:<secs>:<text>"     wait <secs> (loader visible), then stream <text> slowly
-  - "fail:<status>:<msg>"    reply with an HTTP error (non-retryable for 400/401/403/404)
+  - "fail:<status>:<msg>"    reply with an HTTP error (non-retryable for 400/401/403/404); a <msg> containing ZEROALLOW
+                             adds `x-ratelimit-limit-req-minute: 0`
   - "streamfail:<text>"      stream <text>, then an in-stream error chunk
   - "chunks:<JSON list>"     one content delta per string as is (a ["r", <text>] item is a reasoning_content delta)
   - "seq:[[tool, args], ...]" one tool call per turn, in order, then the usual "Tool said:" answer; a later step written
@@ -177,6 +178,8 @@ class H(BaseHTTPRequestHandler):
                 self.send_header("retry-after-ms", FAIL_RETRY_AFTER)
             if os.environ.get("MOCK_SHOULD_RETRY"):
                 self.send_header("x-should-retry", os.environ["MOCK_SHOULD_RETRY"])
+            if "ZEROALLOW" in m:  # the plan grants this model no allowance (Mistral, omp #19300)
+                self.send_header("x-ratelimit-limit-req-minute", "0")
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(b)))
             self.end_headers()

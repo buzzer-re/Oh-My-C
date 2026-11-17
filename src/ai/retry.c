@@ -413,8 +413,38 @@ static int message_status(const char *msg) {
     return 0;
 }
 
+/* ZERO_ALLOWANCE_PATTERN `\bx-ratelimit-limit-[a-z0-9-]+:\s*0(?![\d.])` (case-insensitive): a 429 whose
+ * x-ratelimit-limit-* header reported 0 (Mistral `x-ratelimit-limit-req-minute: 0` for a model the plan does not
+ * cover) is an entitlement wall, not a window. The transport appends the header to the message
+ * (ai_zero_allowance_notice) so classifiers of persisted turns see it. */
+bool ai_zero_allowance_text(const char *msg) {
+    for (const char *p = msg ? str_istr(msg, "x-ratelimit-limit-") : NULL; p; p = str_istr(p + 1, "x-ratelimit-limit-")) {
+        if (p > msg && word_ch(p[-1])) continue;
+        const char *q = p + 18, *name = q;
+        while (isalnum((unsigned char)*q) || *q == '-') q++;
+        if (q == name || *q != ':') continue;
+        q = skip_ws(q + 1);
+        if (*q == '0' && !isdigit((unsigned char)q[1]) && q[1] != '.') return true;
+    }
+    return false;
+}
+
+/* getZeroRateLimitHeader: the first x-ratelimit-limit-* response header whose value is 0 (lowercased name), or NULL */
+const char *ai_zero_rate_limit_header(const http_headers_t *h) {
+    for (size_t i = 0; h && i < h->n; i++) {
+        const char *n = h->v[i].name, *v = h->v[i].value;
+        if (!n || strncasecmp(n, "x-ratelimit-limit-", 18) != 0 || !v) continue;
+        char *t = str_trim(v);
+        bool zero = str_eq(t, "0");
+        free(t);
+        if (zero) return n;
+    }
+    return NULL;
+}
+
 /* account-level usage/quota limits belong to credential rotation, never to the provider backoff */
 bool ai_usage_limit_text(const char *msg, int status) {
+    if (ai_zero_allowance_text(msg)) return true;
     static const char *const pats[] = {
         "usage limit",       "usage_limit",        "limit_reached",         "quota exceeded",    "quota reached",
         "quota_exceeded",    "insufficient_quota", "insufficient quota",    "resource exhausted", "resource_exhausted",

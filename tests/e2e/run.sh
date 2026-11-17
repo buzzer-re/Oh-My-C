@@ -257,6 +257,11 @@ timeout 30 "$B" --model mock/mock-1 --no-session -p "fail:400:transport-once" </
 n=$(grep -c "fail:400:transport-once" "$T/req.jsonl")
 (( n == 1 )) && echo "   ok  400 not retried" || { echo "   FAIL 400 not retried: $n requests"; fail=1; }
 rm -f "$T/agent/config.yml"
+# a 429 with a zero x-ratelimit-limit-* allowance fails on the first request, naming the header (omp 03a02d0926)
+out=$(timeout 30 "$B" --model mock/mock-1 --no-session -p "fail:429:Rate limit exceeded ZEROALLOW" </dev/null 2>&1)
+n=$(grep -c "ZEROALLOW" "$T/req.jsonl")
+(( n == 1 )) && [[ "$out" == *"(x-ratelimit-limit-req-minute: 0 — this plan grants no allowance for the model; switch models or upgrade the plan)"* ]] \
+    && echo "   ok  zero allowance fails fast" || { echo "   FAIL zero allowance fails fast: $n requests: $out"; fail=1; }
 # without a header hint the delay comes from the body text ("Please retry in 100ms"): 5 x 100 ms + 500 ms + 5 x 100 ms
 TR_PORT=$((20000 + RANDOM % 20000)); [[ $TR_PORT == "$PORT" ]] && TR_PORT=$((TR_PORT + 1))
 mkdir -p "$T/agent-tr"

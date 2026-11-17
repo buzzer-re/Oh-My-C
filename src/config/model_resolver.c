@@ -1934,7 +1934,8 @@ const char *mr_rate_limit_reason(const char *msg) {
     if (!msg) return "UNKNOWN";
     char *l = lower_dup(msg);
     const char *r;
-    if (strstr(l, "quota will reset") || strstr(l, "exhausted your capacity")) r = "QUOTA_EXHAUSTED";
+    /* a zero-allowance notice is the same quota state, though its "Rate limit exceeded" body would land below */
+    if (strstr(l, "quota will reset") || strstr(l, "exhausted your capacity") || ai_zero_allowance_text(msg)) r = "QUOTA_EXHAUSTED";
     else if (strstr(l, "concurrent") || strstr(l, "concurrency")) r = "CONCURRENT_LIMIT";
     else if (strstr(l, "capacity") || strstr(l, "overloaded") || strstr(l, "529") || strstr(l, "503"))
         r = "MODEL_CAPACITY_EXHAUSTED";

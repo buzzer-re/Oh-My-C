@@ -375,6 +375,10 @@ char *ai_network_failure_message(const char *http_error, const char *url);
 enum { AI_RETRY_FETCH, AI_RETRY_OPENAI, AI_RETRY_OLLAMA, AI_RETRY_CODEX, AI_RETRY_GEMINI_CLI, AI_RETRY_ANTHROPIC };
 /* extractRetryHint: server-suggested delay from headers (may be NULL) and/or an error body (may be NULL); -1 none */
 int64_t ai_extract_retry_hint(const http_headers_t *h, const char *body);
+/* a zero x-ratelimit-limit-* allowance named in an error text (rate-limit.ts ZERO_ALLOWANCE_PATTERN) */
+bool ai_zero_allowance_text(const char *msg);
+/* getZeroRateLimitHeader: the first x-ratelimit-limit-* header reporting 0 (borrowed name), or NULL */
+const char *ai_zero_rate_limit_header(const http_headers_t *h);
 /* getRetryAfterMsFromHeaders: the longest of retry-after-ms / retry-after / x-ratelimit-reset(-ms); -1 none */
 int64_t ai_retry_after_from_headers(const http_headers_t *h);
 /* isProviderRetryableError over a finished error message (+ HTTP status, 0 = unknown) */
