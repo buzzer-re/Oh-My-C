@@ -164,7 +164,7 @@ r, fr = prompt(c, sid, "call:ask:" + json.dumps({"html": form}))
 el = getattr(c, "elicited", {})
 want_schema = {"type": "object", "properties": {
     "color": {"type": "string", "title": "Pick a color", "oneOf": [{"const": "red", "title": "Red"}, {"const": "blue", "title": "Blue"}], "default": "red"},
-    "color_other": {"type": "string", "title": "Pick a color \u2014 Other", "description": "Your own answer instead"},
+    "color__other": {"type": "string", "title": "Pick a color \u2014 Other", "description": "Your own answer instead"},
     "n": {"type": "number", "title": "Coats", "minimum": 1, "default": 2}}, "required": ["n"]}
 check("elicitation", el.get("message") == "Paint it" and el.get("requestedSchema") == want_schema and
       'User answers:\n{\n  "color": "blue",\n  "n": 5\n}' in texts(fr), (el, texts(fr)))

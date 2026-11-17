@@ -1655,7 +1655,7 @@ static char *form_message(const hf_form_t *f) {
     return sb_detach(&out);
 }
 
-/* otherProperties: `<name>_other` for each Other choice field, more underscores while another control uses it */
+/* otherProperties: `<name>__other` for each Other choice field, more underscores while another control uses it */
 static void other_props(const hf_form_t *f, strvec_t *out) {
     strvec_t taken = {0};
     for (size_t i = 0; i < f->fields.n; i++) strvec_push(&taken, f->fields.v[i]->name);
@@ -1666,7 +1666,7 @@ static void other_props(const hf_form_t *f, strvec_t *out) {
             strvec_push(out, "");
             continue;
         }
-        char *prop = xasprintf("%s_other", fl->name);
+        char *prop = xasprintf("%s__other", fl->name);
         for (;;) {
             bool used = false;
             for (size_t k = 0; k < taken.n && !used; k++) used = !strcmp(taken.v[k], prop);
