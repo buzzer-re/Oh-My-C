@@ -656,7 +656,7 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
 agent_tool_t *tool_write_new(tool_env_t *env) {
     char *desc = tool_prompt("write", NULL);
     json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":"
-                           "\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
+                           "\"string\"}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("write", "Write", desc, s, write_execute);
     t->exclusive = true;
     free(desc);

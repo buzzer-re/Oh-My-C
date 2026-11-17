@@ -127,7 +127,7 @@ CTAG=$(timeout 30 "$B" --model mock/mock-1 -p "read:blk.c" </dev/null | grep -o 
 check "edit block"     "PUT 1*: → resolved lines 1-3 (3 lines)"  "$B" --model mock/mock-1 -p "edit:[blk.c#$CTAG]\nPUT 1*:\n+int f(void) { return 2; }"
 printf 'a\r\nb\r\n' > crlf.txt
 check "write crlf"     "Note: kept the replaced file's CRLF line endings."  "$B" --model mock/mock-1 -p 'call:write:{"path":"crlf.txt","content":"x\ny\n"}'
-check "write no content" "content is required for nc.txt."  "$B" --model mock/mock-1 -p 'call:write:{"path":"nc.txt"}'
+check "write no content" "content: content must be a string (was missing)"  "$B" --model mock/mock-1 -p 'call:write:{"path":"nc.txt"}'
 check "write eisdir"   "EISDIR: illegal operation on a directory, open '"  "$B" --model mock/mock-1 -p "write:a:x"
 # non-interactive env: a config-file sequence.editor and GCM prompts must not hang a command
 check "bash env"       "true never" "$B" --model mock/mock-1 --no-session -p 'bash:echo $GIT_SEQUENCE_EDITOR $GCM_INTERACTIVE'

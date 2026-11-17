@@ -186,7 +186,7 @@ static int proc_read(tool_env_t *env, const char *url, tool_result_t *out) {
     if (str_eq(t.action, "kill")) {
         tool_result_error(out,
                           "proc://%s/kill is write-only; reading it did not stop anything. To cancel %s, call write with "
-                          "{\"path\":\"proc://%s/kill\"} (no content needed); read proc://%s for its status.",
+                          "{\"path\":\"proc://%s/kill\",\"content\":\"\"}; read proc://%s for its status.",
                           *id ? id : "<id>", *id ? id : "<id>", *id ? id : "<id>", *id ? id : "<id>");
         goto done;
     }
@@ -325,8 +325,8 @@ static int proc_write(tool_env_t *env, const char *url, const char *content, too
     } else if ((injob || agent) && !str_eq(t.action, "kill")) {
         tool_result_error(out,
                           "%s is an in-process %s; stdin and persist/session/detached modes are services-only. Start long-lived work as a "
-                          "named service when it needs stdin or lifetime controls. To cancel, call write with {\"path\":\"proc://%s/kill\"} "
-                          "(no content needed).",
+                          "named service when it needs stdin or lifetime controls. To cancel, call write with "
+                          "{\"path\":\"proc://%s/kill\",\"content\":\"\"}.",
                           id, injob ? "job" : "agent", id);
     } else if (str_eq(t.action, "mode")) {
         json_t *snap = NULL;
