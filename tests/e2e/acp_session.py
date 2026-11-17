@@ -72,6 +72,9 @@ class Client:
         elif method == "elicitation/create":
             self.elicited = p
             props = p["requestedSchema"]["properties"]
+            if getattr(self, "fail_elicit", False):  # the client fails the request: a tool error, not a user cancel
+                self.send({"id": rid, "error": {"code": -32603, "message": "schema not renderable"}})
+                return
             res = {"action": "accept", "content": {"color": props["color"]["oneOf"][1]["const"], "n": 5, "bogus": 1}}
         self.send({"id": rid, "result": res})
 
@@ -168,6 +171,11 @@ want_schema = {"type": "object", "properties": {
     "n": {"type": "number", "title": "Coats", "minimum": 1, "default": 2}}, "required": ["n"]}
 check("elicitation", el.get("message") == "Paint it" and el.get("requestedSchema") == want_schema and
       'User answers:\n{\n  "color": "blue",\n  "n": 5\n}' in texts(fr), (el, texts(fr)))
+c.fail_elicit = True
+r, fr = prompt(c, sid, "call:ask:" + json.dumps({"html": form}))
+c.fail_elicit = False
+check("elicitation error", "ACP client failed the formDialog elicitation: schema not renderable" in texts(fr) and
+      r["result"]["stopReason"] == "end_turn", (r, texts(fr)))
 r, fr = prompt(c, sid, "call:mcp__mock_echo_text:" + json.dumps({"text": "via mcp"}))
 check("mcp servers", "mcp echo: via mcp" in texts(fr), texts(fr))
 c.close()

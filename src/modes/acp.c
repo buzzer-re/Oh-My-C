@@ -1606,8 +1606,11 @@ static void flush_all_held(void *ud) {
 }
 
 /* unstable_createElicitation (form): accepted content (owned) or NULL; with a timeout, *timed_out when it passed */
+/* elicitFormFromAcpClient: the accepted content, or NULL (declined, cancelled, the deadline passed). A request the
+ * client failed (JSON-RPC error, closed transport) sets *err (owned) when the caller passes one: a failed request is
+ * not the user's decision */
 static json_t *elicit_form_timed(asess_t *s, const char *message, json_t *properties, json_t *required, int64_t timeout_ms,
-                                 bool *timed_out) {
+                                 bool *timed_out, char **err) {
     json_t *p = json_obj(), *schema = json_obj();
     json_set_str(p, "mode", "form");
     json_set_str(p, "sessionId", s->id);
@@ -1616,18 +1619,16 @@ static json_t *elicit_form_timed(asess_t *s, const char *message, json_t *proper
     json_set(schema, "properties", properties);
     if (required) json_set(schema, "required", required);
     json_set(p, "requestedSchema", schema);
-    json_t *r;
-    if (timeout_ms > 0) {
-        apend_t *pend = client_send(s->acp, "elicitation/create", p);
-        flush_all_held(s);
-        int rc = client_wait(s->acp, pend, timeout_ms, &s->app->agent->cancel);
-        if (rc != 1) {
-            if (rc == 0 && timed_out) *timed_out = true;
-            client_cancel(s->acp, pend);
-            return NULL;
-        }
-        r = client_take(s->acp, pend, NULL);
-    } else r = client_request(s->acp, "elicitation/create", p, &s->app->agent->cancel, flush_all_held, s, NULL);
+    apend_t *pend = client_send(s->acp, "elicitation/create", p);
+    flush_all_held(s);
+    int rc = client_wait(s->acp, pend, timeout_ms > 0 ? timeout_ms : 0, &s->app->agent->cancel);
+    if (rc != 1) {
+        if (rc == 0 && timeout_ms > 0 && timed_out) *timed_out = true;
+        if (err && s->acp->closed && !(s->app->agent->cancel)) *err = xstrdup("Connection closed");
+        client_cancel(s->acp, pend);
+        return NULL;
+    }
+    json_t *r = client_take(s->acp, pend, err);
     json_t *content = str_eq(json_get_str(r, "action"), "accept") ? json_take(r, "content") : NULL;
     json_free(r);
     if (content && !json_is_obj(content)) {
@@ -1638,7 +1639,7 @@ static json_t *elicit_form_timed(asess_t *s, const char *message, json_t *proper
 }
 
 static json_t *elicit_form(asess_t *s, const char *message, json_t *properties, json_t *required) {
-    return elicit_form_timed(s, message, properties, required, 0, NULL);
+    return elicit_form_timed(s, message, properties, required, 0, NULL, NULL);
 }
 
 /* the form elicitation's message: formContext, the section titles and context blocks as plain text without the text
@@ -1815,7 +1816,6 @@ static json_t *acp_form(void *ud, const char *html, int64_t timeout_ms, bool *ti
                         volatile sig_atomic_t *cancel, char **err) {
     asess_t *s = ud;
     UNUSED(cancel);
-    UNUSED(err);
     *timed_out = false;
     *notes = NULL;
     hf_form_t *f = hf_parse(html);
@@ -1827,8 +1827,16 @@ static json_t *acp_form(void *ud, const char *html, int64_t timeout_ms, bool *ti
         json_free(required);
         required = NULL;
     }
-    json_t *content = elicit_form_timed(s, msg, props, required, timeout_ms, &to);
+    char *why = NULL;
+    json_t *content = elicit_form_timed(s, msg, props, required, timeout_ms, &to, &why);
     free(msg);
+    if (why) { /* the ask tool fails with it; the turn goes on */
+        *err = xasprintf("ACP client failed the formDialog elicitation: %s", why);
+        free(why);
+        json_free(content);
+        hf_form_free(f);
+        return NULL;
+    }
     json_t *data = NULL;
     if (to) {
         *timed_out = true;
