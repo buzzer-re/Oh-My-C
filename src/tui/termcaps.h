@@ -47,6 +47,8 @@ void tui_set_terminal_background_light(bool light);
  * XTSMGRAPHICS (CSI ? 2 ; status ; geometry S), iTerm2 ReportCellSize. Returns true when consumed;
  * *changed is set when the protocol or cell size changed (repaint). */
 bool tui_termcaps_response(const char *seq, size_t n, bool *changed);
+/* DEC 2048 in-band resize reports are enabled (the decoder reassembles their torn fragments) */
+bool tui_termcaps_inband(void);
 /* Startup probes to write (owned, may be ""): XTSMGRAPHICS when no protocol is known, CSI 16 t when one is */
 char *tui_termcaps_probes(void);
 

@@ -218,6 +218,7 @@ void tui_set_cell_dims(int w, int h) {
 static bool g_bg_light;
 bool g_inband;      /* DEC 2048 in-band resize reports enabled (they carry the cell pixel size) */
 static sb_t g_pending; /* bytes written before the next frame: one-time Kitty transmits, mode switches */
+bool tui_termcaps_inband(void) { return g_inband; }
 uint32_t tui_terminal_background(void) { return g_bg_light ? 0xffffff : 0x000000; }
 void tui_set_terminal_background_light(bool light) { g_bg_light = light; }
 
