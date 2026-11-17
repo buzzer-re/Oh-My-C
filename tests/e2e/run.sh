@@ -103,6 +103,19 @@ if [ "$(id -u)" != 0 ]; then
     check "session ro end" "Session persistence is still failing at shutdown: EACCES" bash -c "'$B' --model mock/mock-1 --session-dir '$T/rosess' -p 'say:hi'; echo rc=\$?"
     check "session ro rc"  "rc=1" bash -c "'$B' --model mock/mock-1 --session-dir '$T/rosess' -p 'say:hi' 2>/dev/null; echo rc=\$?"
 fi
+# a provider behind a self-signed certificate: omp's network-cause sentence with Bun's error code
+if command -v openssl >/dev/null 2>&1; then
+    TLS_PORT=$((PORT + 101)) TLS_DIR="$T/tlsagent"
+    mkdir -p "$TLS_DIR"
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$TLS_DIR/k.pem" -out "$TLS_DIR/c.pem" -days 2 -subj /CN=localhost >/dev/null 2>&1
+    openssl s_server -accept $TLS_PORT -cert "$TLS_DIR/c.pem" -key "$TLS_DIR/k.pem" -www -quiet >/dev/null 2>&1 & TLS_PID=$!
+    printf 'providers:\n  mock:\n    baseUrl: https://127.0.0.1:%s/v1\n    apiKey: MOCK_KEY\n    api: openai-completions\n    models:\n      - id: mock-1\n' $TLS_PORT > "$TLS_DIR/models.yml"
+    printf 'retry:\n  enabled: false\n' > "$TLS_DIR/config.yml"
+    for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$TLS_PORT) 2>/dev/null && break; sleep 0.1; done
+    check "tls self-signed" "TLS certificate verification failed for 127.0.0.1:$TLS_PORT (DEPTH_ZERO_SELF_SIGNED_CERT). If you're behind" \
+        env OMC_CODING_AGENT_DIR="$TLS_DIR" "$B" --model mock/mock-1 --no-session -p "hi"
+    kill $TLS_PID 2>/dev/null
+fi
 # hashline edit: read to get the tag, then replace line 1 and append after it
 printf 'alpha\nbeta\ngamma\n' > e.txt
 TAG=$(timeout 30 "$B" --model mock/mock-1 -p "read:e.txt" </dev/null | grep -o 'e.txt#[0-9A-F]*' | head -1 | cut -d'#' -f2)

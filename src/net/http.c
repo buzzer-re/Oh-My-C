@@ -275,6 +275,28 @@ static char *ssl_errstr(void) {
     return xstrdup(buf);
 }
 
+/* the error code Bun/Node give a rejected certificate (the X509_V_ERR_* name), which omp's network-cause.ts shows in
+ * "TLS certificate verification failed for <host> (<code>)"; NULL for the rare ones, which keep OpenSSL's text */
+static const char *tls_verify_code(long vr) {
+    switch (vr) {
+    case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT: return "DEPTH_ZERO_SELF_SIGNED_CERT";
+    case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN: return "SELF_SIGNED_CERT_IN_CHAIN";
+    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY: return "UNABLE_TO_GET_ISSUER_CERT_LOCALLY";
+    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT: return "UNABLE_TO_GET_ISSUER_CERT";
+    case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE: return "UNABLE_TO_VERIFY_LEAF_SIGNATURE";
+    case X509_V_ERR_CERT_HAS_EXPIRED: return "CERT_HAS_EXPIRED";
+    case X509_V_ERR_CERT_NOT_YET_VALID: return "CERT_NOT_YET_VALID";
+    case X509_V_ERR_CERT_REVOKED: return "CERT_REVOKED";
+    case X509_V_ERR_CERT_UNTRUSTED: return "CERT_UNTRUSTED";
+    case X509_V_ERR_CERT_REJECTED: return "CERT_REJECTED";
+    case X509_V_ERR_CERT_SIGNATURE_FAILURE: return "CERT_SIGNATURE_FAILURE";
+    case X509_V_ERR_CERT_CHAIN_TOO_LONG: return "CERT_CHAIN_TOO_LONG";
+    case X509_V_ERR_INVALID_CA: return "INVALID_CA";
+    case X509_V_ERR_HOSTNAME_MISMATCH: return "ERR_TLS_CERT_ALTNAME_INVALID";
+    default: return NULL;
+    }
+}
+
 static int tls_handshake(net_conn_t *c, const char *host, int64_t timeout_ms, char **err) {
     http_global_init();
     c->ssl = SSL_new(g_ctx);
@@ -303,7 +325,10 @@ static int tls_handshake(net_conn_t *c, const char *host, int64_t timeout_ms, ch
         else {
             long vr = SSL_get_verify_result(c->ssl);
             if (err) {
-                if (vr != X509_V_OK) *err = xasprintf("TLS certificate verification failed for %s: %s", host, X509_verify_cert_error_string(vr));
+                if (vr != X509_V_OK) {
+                    const char *code = tls_verify_code(vr);
+                    *err = xasprintf("TLS certificate verification failed for %s: %s", host, code ? code : X509_verify_cert_error_string(vr));
+                }
                 else {
                     char *s = ssl_errstr();
                     *err = xasprintf("TLS handshake with %s failed: %s", host, s);
