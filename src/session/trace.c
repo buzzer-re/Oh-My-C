@@ -387,6 +387,15 @@ typedef struct {
     bool has_end;
 } bg_job_t;
 
+/* closeBackgroundJob: end the open job `jid` at `at`, never before it opened; a later job may reuse the id */
+static void close_bg_job(hmap_t *active, const char *jid, double at) {
+    bg_job_t *job = hmap_get(active, jid);
+    if (!job) return;
+    job->end = MAX(job->start, at);
+    job->has_end = true;
+    hmap_del(active, jid);
+}
+
 typedef struct {
     double time;
     char *label, *entry_id;
@@ -561,6 +570,18 @@ static track_t *scan_transcript(const json_t *entries, const char *track_id, con
             }
             continue;
         }
+        if (str_eq(type, "custom_message")) {
+            /* async-result deliveries persist as custom_message entries carrying details.jobs[].jobId */
+            json_t *jobs = json_get(json_get(entry, "details"), "jobs");
+            if (str_eq(json_get_str(entry, "customType"), "async-result") && has_env && json_is_arr(jobs)) {
+                json_t *job;
+                json_arr_foreach(jobs, k, job) {
+                    const char *jid = json_get_str(job, "jobId");
+                    if (jid) close_bg_job(&active_bg, jid, env);
+                }
+            }
+            continue;
+        }
         if (str_eq(type, "compaction") && has_env) {
             char *a = compact_tokens(json_get(entry, "tokensBefore")), *b = compact_tokens(json_get(entry, "tokensAfter"));
             push_marker(t, env, "compaction", xasprintf("compaction %s\xe2\x86\x92%s", a, b));
@@ -692,6 +713,22 @@ static track_t *scan_transcript(const json_t *entries, const char *track_id, con
                 vec_push(&bg, j);
                 hmap_put(&active_bg, j->job_id, j);
             }
+            /* a `wait` (details.jobs) or proc:// cancel (details.proc.jobs) that reports a settled job replaces its
+             * async-result delivery, so the job closes when it settled, or at this result */
+            json_t *proc = json_get(details, "proc");
+            json_t *reported = str_eq(json_get_str(details, "op"), "wait") ? json_get(details, "jobs")
+                               : (json_is_obj(proc) && str_eq(json_get_str(proc, "op"), "cancel")) ? json_get(proc, "jobs")
+                                                                                                 : NULL;
+            if (json_is_arr(reported)) {
+                json_t *job;
+                json_arr_foreach(reported, k, job) {
+                    const char *jid = json_get_str(job, "id"), *st = json_get_str(job, "status");
+                    if (!jid || !(str_eq(st, "completed") || str_eq(st, "failed") || str_eq(st, "cancelled"))) continue;
+                    double settled;
+                    double at = fin_num(json_get(job, "settledAtMs"), &settled) ? MIN(settled, end) : end;
+                    close_bg_job(&active_bg, jid, at);
+                }
+            }
             if (str_eq(json_get_str(msg, "toolName"), "task") && json_is_arr(json_get(details, "results"))) {
                 json_t *res;
                 json_arr_foreach(json_get(details, "results"), k, res) {
@@ -707,28 +744,6 @@ static track_t *scan_transcript(const json_t *entries, const char *track_id, con
                     tr.result_entry_id = xstrdup(eid ? eid : "");
                     tr.tool_span_end = end;
                     vec_push(&t->task_results, tr);
-                }
-            }
-            continue;
-        }
-        if (str_eq(role, "custom") && str_eq(json_get_str(msg, "customType"), "async-result")) {
-            double close_at;
-            bool ok = fin_num(json_get(msg, "timestamp"), &close_at);
-            if (!ok && has_env) {
-                close_at = env;
-                ok = true;
-            }
-            json_t *jobs = json_get(json_get(msg, "details"), "jobs");
-            if (ok && json_is_arr(jobs)) {
-                json_t *job;
-                json_arr_foreach(jobs, k, job) {
-                    const char *jid = json_get_str(job, "jobId");
-                    if (!jid) continue;
-                    bg_job_t *target = hmap_get(&active_bg, jid);
-                    if (!target || target->has_end) continue;
-                    target->end = close_at;
-                    target->has_end = true;
-                    hmap_del(&active_bg, jid);
                 }
             }
             continue;
