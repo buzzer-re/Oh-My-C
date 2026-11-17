@@ -1170,6 +1170,36 @@ static void read_virtual(tool_env_t *env, const char *url, const char *text, sel
     read_text(&tmp, url, url, text, strlen(text), sel, out);
 }
 
+/* xd:// docs: a `lines` scheme (omp c51e68b454), so `xd://eval/judge:1-20` pages the doc instead of naming a topic
+ * `judge:1-20` */
+static int read_xd(agent_t *agent, tool_env_t *env, const char *path, tool_result_t *out) {
+    char *work = xstrdup(path);
+    selector_t sel;
+    memset(&sel, 0, sizeof sel);
+    strip_sel(work + 5, &sel);
+    sel.entity = "resource";
+    sel.resource = true;
+    if (!sel.has_sel) {
+        xdev_read(agent, work, out);
+    } else {
+        tool_result_t doc = {0};
+        xdev_read(agent, work, &doc);
+        if (doc.is_error) {
+            *out = doc;
+            memset(&doc, 0, sizeof doc);
+        } else {
+            char *text = tool_result_joined_text(&doc);
+            read_virtual(env, work, text, &sel, out);
+            if (out->details && !out->is_error) json_del(out->details, "resolvedPath");
+            free(text);
+        }
+        tool_result_free(&doc);
+    }
+    free(work);
+    vec_free(&sel.ranges);
+    return 0;
+}
+
 /* cfg:// (cfg_url.c renders the settings view; selectors page it like any resource) */
 static int read_cfg(tool_env_t *env, const char *path, tool_result_t *out) {
     char *work = xstrdup(path);
@@ -1417,7 +1447,7 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
         }
         return web_read_url(env, path, ctx->cancel, out);
     }
-    if (xdev_read(ctx ? ctx->agent : NULL, path, out)) return 0;
+    if (!strncasecmp(path, "xd://", 5)) return read_xd(ctx ? ctx->agent : NULL, env, path, out);
     if (str_starts(path, "pr://") || str_starts(path, "issue://")) return read_github(env, path, out);
     if (str_starts(path, "mr://")) return read_mr(env, path, out);
     if (str_starts(path, "ssh://")) return read_ssh(env, path, out);
@@ -1549,7 +1579,7 @@ done:
 }
 
 /* acceptsLineSelector: whether `path` takes a trailing `:A-B` line selector: filesystem paths, web URLs and `lines` schemes
- * do; selector-free devices (`xd://`, `out://`, `attachment://`), opaque MCP resources and unregistered schemes would read
+ * do; selector-free schemes (`out://`, `attachment://`), opaque MCP resources and unregistered schemes would read
  * the tail as part of the URL */
 static bool accepts_line_selector(const char *path) {
     const char *sep = strstr(path, "://");
@@ -1559,7 +1589,7 @@ static bool accepts_line_selector(const char *path) {
     size_t n = (size_t)(sep - path);
     static const char *const passthrough[] = {"file", "http", "https", NULL};
     static const char *const lines[] = {"agent", "artifact", "cfg", "conflict", "history", "issue", "pr", "local", "memory", "mr", "omc", "omp",
-                                        "proc", "rule", "security", "skill", "ssh", "vault", NULL};
+                                        "proc", "rule", "security", "skill", "ssh", "vault", "xd", NULL};
     for (const char *const *s = passthrough; *s; s++)
         if (strlen(*s) == n && !strncasecmp(path, *s, n)) return true;
     for (const char *const *s = lines; *s; s++)

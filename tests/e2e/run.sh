@@ -129,6 +129,9 @@ printf 'a\r\nb\r\n' > crlf.txt
 check "write crlf"     "Note: kept the replaced file's CRLF line endings."  "$B" --model mock/mock-1 -p 'call:write:{"path":"crlf.txt","content":"x\ny\n"}'
 # xd://<wire alias> reaches the canonical tool: edit runs as apply_patch in apply_patch mode (omp 3eed7ca5ae, d247d81d34)
 check "xd:// wire alias" "[xdap.txt]"  env PI_EDIT_VARIANT=apply_patch "$B" --model mock/mock-1 --no-session -p 'seq:[["write",{"path":"xd://apply_patch","content":"{\"input\":\"*** Begin Patch\\n*** Add File: xdap.txt\\n+hi\\n*** End Patch\\n\"}"}]]'
+# xd:// docs take line selectors; a selector on a device write is refused (omp c51e68b454)
+check "xd:// doc range"  "more lines in resource. Use :6 to continue]"  "$B" --model mock/mock-1 --no-session -p 'call:read:{"path":"xd://ast_edit:1-2"}'
+check "xd:// write selector" 'write does not accept the trailing selector ":raw" on a device URL. Remove it.'  "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://ast_edit:raw","content":"{}"}'
 check "write no content" "content: content must be a string (was missing)"  "$B" --model mock/mock-1 -p 'call:write:{"path":"nc.txt"}'
 check "write eisdir"   "EISDIR: illegal operation on a directory, open '"  "$B" --model mock/mock-1 -p "write:a:x"
 # non-interactive env: a config-file sequence.editor and GCM prompts must not hang a command
