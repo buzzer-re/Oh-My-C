@@ -887,12 +887,12 @@ check "out:// write"  "Shown to the user."  python3 -I -c "$REQS" "$T/req.jsonl"
 rm -f "$T/agent/config.yml"
 check "cfg:// read"   "maxRetries: 10"  "$B" --model mock/mock-1 --no-session -p "read:cfg://retry"
 # /new starts the tools' conversation state fresh: repeat-read counts do not carry over (omp 84f5adc3bb)
-printf 'abc\n' > rr.txt
+printf 'abc\n' > rr.txt; : > "$T/req.jsonl"
 check "new resets repeat reads" "hinted=1 fresh=1" bash -c "( printf '%s\n' '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"seq:[[\\\"read\\\",{\\\"path\\\":\\\"rr.txt\\\"}],[\\\"read\\\",{\\\"path\\\":\\\"rr.txt\\\"}],[\\\"read\\\",{\\\"path\\\":\\\"rr.txt\\\"}]]\"}'; sleep 4; printf '%s\n' '{\"id\":\"2\",\"type\":\"new_session\"}'; sleep 1; printf '%s\n' '{\"id\":\"3\",\"type\":\"prompt\",\"message\":\"read:rr.txt\"}'; sleep 3 ) | timeout 20 '$B' --model mock/mock-1 --mode rpc >/dev/null 2>&1; python3 -I -c 'import json,sys
 rs=[json.loads(l) for l in open(sys.argv[1])]
 def tools(r): return [\"\".join(p.get(\"text\",\"\") for p in m[\"content\"]) if not isinstance(m[\"content\"],str) else m[\"content\"] for m in r[\"messages\"] if m.get(\"role\")==\"tool\"]
 first=max((tools(r) for r in rs), key=len)
-last=tools(rs[-1])
+last=[tools(r) for r in rs if tools(r)][-1]
 print(\"hinted=%d fresh=%d\" % (\"identical output 3 times\" in first[-1], len(last)==1 and \"identical output\" not in last[0]))' '$T/req.jsonl'"
 check "conflict:// unknown"  "Conflict #1 not found: it was resolved"  "$B" --model mock/mock-1 --no-session -p "read:conflict://1"
 # a side with no lines leaves no blank line; a UTF-8 BOM survives the write (omp 47daf5e3bb, fca084bcdd)
