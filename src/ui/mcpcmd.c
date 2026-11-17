@@ -7,7 +7,7 @@
  * Read-only listings are command reports (ui_show_report); results are bordered command messages in the
  * transcript (showCommandMessage). Everything that connects to a server runs on a worker thread and talks
  * to the UI through tui_post. omc keeps MCP OAuth credentials url-keyed in auth.json ("mcp:<url>"), so a
- * signed-in server needs no `auth` block in mcp.json. The Smithery registry subcommands are not ported. */
+ * signed-in server needs no `auth` block in mcp.json. */
 #include "tui/motion.h"
 #include "ui/mcpint.h"
 #include "coding/xdnotice.h"

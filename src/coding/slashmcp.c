@@ -1,7 +1,6 @@
 /* slashmcp.c - /mcp and /ssh for RPC and ACP (ports of omp slash-commands/helpers/mcp.ts handleMcpAcp and
  * helpers/ssh.ts handleSshAcp, v18.14.2): plain-text output through the runtime, temporary connections for
- * test / resources / prompts, and the reauth flow presented as text. The Smithery registry subcommands are not
- * ported (left out of the help text). */
+ * test / resources / prompts, and the reauth flow presented as text. */
 #include "coding/slashcmd.h"
 #include "coding/xdnotice.h"
 
@@ -533,7 +532,7 @@ void slash_mcp_text(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res
     if (!*verb || !strcmp(verb, "help")) out(rt, MCP_HELP_TEXT);
     else if (!strcmp(verb, "notifications"))
         usage(rt, res, "MCP notifications require the TUI client (live MCPManager). Use /mcp list to see server status.");
-    else if (!strcmp(verb, "unauth") || !strcmp(verb, "smithery-login") || !strcmp(verb, "smithery-logout") || !strcmp(verb, "reconnect"))
+    else if (!strcmp(verb, "unauth") || !strcmp(verb, "reconnect"))
         usagef(rt, res, xasprintf("/mcp %s requires OAuth or browser flows only available in the TUI client.", verb));
     else if (!strcmp(verb, "resources")) catalog_cmd(rt, false);
     else if (!strcmp(verb, "prompts")) catalog_cmd(rt, true);
