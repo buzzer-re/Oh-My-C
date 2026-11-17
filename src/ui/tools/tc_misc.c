@@ -3,6 +3,7 @@
 #include "ui/tools/tc.h"
 #include "img/img.h"
 #include "tui/termcaps.h"
+#include "tools/tools.h"
 
 #include <ctype.h>
 
@@ -123,7 +124,20 @@ void tc_todo(const tc_call_t *c, int width, strvec_t *out) {
             const json_t *e = ops ? json_at(ops, i) : a;
             sb_t b = SB_INIT;
             sb_append(&b, json_get_str(e, "op") ? json_get_str(e, "op") : "update");
-            if (json_get_str(e, "task")) sb_appendf(&b, " %s", json_get_str(e, "task"));
+            /* describeOp: one target task by name, several as a count (opTasks drops non-string entries) */
+            const json_t *tk = json_get(e, "task");
+            size_t ntasks = 0;
+            const char *one = NULL;
+            if (json_is_str(tk) && *json_sv(tk)) ntasks = 1, one = json_sv(tk);
+            else {
+                const json_t *x;
+                json_arr_foreach(json_is_arr(tk) ? tk : NULL, k, x) if (json_is_str(x) && *json_sv(x)) {
+                    if (!ntasks) one = json_sv(x);
+                    ntasks++;
+                }
+            }
+            if (ntasks == 1) sb_appendf(&b, " %s", one);
+            else if (ntasks > 1) sb_appendf(&b, " %zu tasks", ntasks);
             if (json_get_str(e, "phase")) sb_appendf(&b, " %s", json_get_str(e, "phase"));
             const json_t *items = json_get_arr(e, "items");
             if (items && json_len(items)) sb_appendf(&b, " %zu item%s", json_len(items), json_len(items) == 1 ? "" : "s");
@@ -183,6 +197,14 @@ void tc_todo(const tc_call_t *c, int width, strvec_t *out) {
         int cw = tc_block_content_width(width, -1, -1);
         bool multi = ph.n > 1;
         strvec_t body = {0};
+        /* computeTouchedPhases: phases holding a task the op targets */
+        strvec_t targeted = {0};
+        {
+            json_t *pa = json_arr();
+            for (size_t pi = 0; pi < ph.n; pi++) json_push(pa, json_clone(ph.v[pi]));
+            todo_task_targets(pa, json_get(c->args, "task"), &targeted);
+            json_free(pa);
+        }
         /* touched phases (collapsed multi-phase view): active, just completed, or named by the op */
         for (size_t pi = 0; pi < ph.n; pi++) {
             const json_t *phase = ph.v[pi];
@@ -195,7 +217,10 @@ void tc_todo(const tc_call_t *c, int width, strvec_t *out) {
                 if (str_eq(st, "in_progress")) active = true;
             }
             const char *op = json_get_str(c->args, "op");
-            bool touched = !multi || c->expanded || active || str_eq(op, "init") ||
+            bool names_task = false;
+            for (size_t k = 0; k < json_len(tasks) && !names_task; k++)
+                names_task = strvec_contains(&targeted, json_get_str(json_at(tasks, k), "content") ? json_get_str(json_at(tasks, k), "content") : "");
+            bool touched = !multi || c->expanded || active || str_eq(op, "init") || names_task ||
                            str_eq(json_get_str(c->args, "phase"), json_get_str(phase, "name"));
             char *rn = roman((int)pi + 1);
             char *pname = xasprintf("%s. %s", rn, json_get_str(phase, "name") ? json_get_str(phase, "name") : "");
@@ -259,6 +284,7 @@ void tc_todo(const tc_call_t *c, int width, strvec_t *out) {
                           .border_slot = TUI_TC_BORDER_MUTED};
         tc_output_block(&blk, out);
         strvec_free(&body);
+        strvec_free(&targeted);
     }
     free(header);
     free(cnt);

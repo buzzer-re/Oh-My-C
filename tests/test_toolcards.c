@@ -522,6 +522,22 @@ int main(void) {
         json_free(a);
         json_free(r);
     }
+    /* omp f87959c6a6: a todo op naming several tasks shows their count; one names the task */
+    {
+        json_t *a = J("{\"op\":\"done\",\"task\":[\"alpha\",\"beta\"]}");
+        tc_call_t c = call("todo", a, NULL, false);
+        strvec_t out = {0};
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, "done 2 tasks"), "several todo targets are counted");
+        strvec_free(&out);
+        json_free(a);
+        a = J("{\"op\":\"done\",\"task\":[\"alpha\"]}");
+        c = call("todo", a, NULL, false);
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, "done alpha"), "one todo target is named");
+        strvec_free(&out);
+        json_free(a);
+    }
     /* a1e7a928 / e2fbe87d: Task rows; a frozen live row dims its glyph; a merge failure is a warning */
     {
         json_t *a = J("{}");

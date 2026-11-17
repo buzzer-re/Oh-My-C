@@ -156,6 +156,8 @@ printf 'start();\nconst timeout = 1000;\nfinish();\n' > sl.ts
 check "sloppy mode"     "[sl.ts]"  env PI_EDIT_VARIANT=sloppy "$B" --model mock/mock-1 -p 'call:edit:{"input":"*** Edit File: sl.ts\n*** Find\nconst timeout = 1000;\n*** Replace\nconst timeout = 5000;\n*** Find\nfinish();\n*** Insert Before\nlog();\n"}'
 check "sloppy result"   $'start();\nconst timeout = 5000;\nlog();\nfinish();'  cat sl.ts
 check "todo tool"      "Remaining items (2)"  "$B" --model mock/mock-1 -p "todo:first,second"
+# done/drop/rm take several tasks: an array or a flattened list (omp f87959c6a6)
+check "todo several"   "Overall: 2/3 done, 1 open."  "$B" --model mock/mock-1 --no-session -p 'seq:[["todo",{"op":"init","items":["ta","tb","tc"]}],["todo",{"op":"done","task":"ta; tb"}]]'
 # tool output parity (omp OutputSink): middle elision + session artifact, column cap, sanitizing, exit notice
 LASTMSG='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; m=[x for x in r[-1]["messages"] if x.get("role")=="tool"][-1]; c=m["content"]; print(c if isinstance(c,str) else "".join(b.get("text","") for b in c), end="")'
 "$B" --model mock/mock-1 --session-dir "$T/sink" -p "bash:seq 1 30000" >/dev/null 2>&1 </dev/null
