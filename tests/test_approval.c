@@ -280,6 +280,10 @@ int main(void) {
     CHECK(reason_is("\"always-ask-cached\"", "read", "{\"path\":\"docs/a.md\"}", "target not yet approved"));
     CHECK(resolve("\"always-ask-cached\"", "read", "{\"path\":\"https://example.com/x\"}", NULL, NULL, "s1") == APOL_ALLOW);
     CHECK(resolve("\"always-ask-cached\"", "read", "{\"path\":\"http://127.0.0.1:8/x\"}", NULL, NULL, "s1") == APOL_PROMPT);
+    /* a trailing-dot absolute name is the same private host (omp 6065e08235) */
+    CHECK(resolve("\"always-ask-cached\"", "read", "{\"path\":\"http://intranet./x\"}", NULL, NULL, "s1") == APOL_PROMPT);
+    CHECK(resolve("\"always-ask-cached\"", "read", "{\"path\":\"http://db.corp.internal./x\"}", NULL, NULL, "s1") == APOL_PROMPT);
+    CHECK(resolve("\"always-ask-cached\"", "read", "{\"path\":\"https://example.com./x\"}", NULL, NULL, "s1") == APOL_ALLOW);
     CHECK(resolve("\"always-ask-cached\"", "todo", "{}", NULL, NULL, "s1") == APOL_ALLOW);
     {
         json_t *a = json_parse_str("{\"path\":\"docs/a.md\"}");

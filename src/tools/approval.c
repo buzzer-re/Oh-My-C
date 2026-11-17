@@ -363,6 +363,8 @@ static bool public_url(const char *url) {
         char *colon = strrchr(host, ':');
         if (colon) *colon = 0;
     }
+    /* an absolute name (`intranet.`, `localhost.`) resolves to the same host as its relative form (omp 6065e08235) */
+    for (size_t hl = strlen(host); hl && host[hl - 1] == '.'; hl--) host[hl - 1] = 0;
     bool ok;
     unsigned a, b, c2, d;
     char tail;
