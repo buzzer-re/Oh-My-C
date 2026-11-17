@@ -293,13 +293,26 @@ static bool is_active(agent_t *a, const agent_tool_t *t) {
     return false;
 }
 
-/* mounted or active top-level tool by name */
+/* a tool's customWireName: `edit` goes on the wire as `apply_patch` in apply_patch mode (edit/index.ts) */
+static const char *wire_alias(const agent_tool_t *t) {
+    return str_eq(t->name, "edit") && str_eq(tool_edit_mode_setting(), "apply_patch") ? "apply_patch" : NULL;
+}
+
+/* resolveXdevTool: a mounted or active top-level tool by canonical name or unambiguous wire alias; an exact registry
+ * name shadows aliases even when that tool is disabled (omp 3eed7ca5ae) */
 static agent_tool_t *resolve_tool(agent_t *a, const char *name) {
-    for (size_t i = 0; i < a->all_tools.n; i++) {
-        agent_tool_t *t = a->all_tools.v[i];
-        if (strcmp(t->name, name) == 0 && (t->mounted || is_active(a, t))) return t;
+    agent_tool_t *hit = NULL;
+    for (size_t i = 0; i < a->all_tools.n && !hit; i++)
+        if (strcmp(a->all_tools.v[i]->name, name) == 0) hit = a->all_tools.v[i];
+    if (!hit) {
+        for (size_t i = 0; i < a->all_tools.n; i++) {
+            agent_tool_t *t = a->all_tools.v[i];
+            if (!str_eq(wire_alias(t), name)) continue;
+            if (hit) return NULL; /* claimed by more than one tool */
+            hit = t;
+        }
     }
-    return NULL;
+    return hit && (hit->mounted || is_active(a, hit)) ? hit : NULL;
 }
 
 agent_tool_t *xdev_resolve_tool(agent_t *a, const char *name) { return resolve_tool(a, name); }

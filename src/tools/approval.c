@@ -214,7 +214,7 @@ static void xd_write_tier(const approval_call_t *c, const char *url, const json_
         approval_decision_t d;
         tool_decision_depth(&sub, &d, depth + 1);
         out->tier = d.tier;
-        out->policy_key = xstrdup(rest);
+        out->policy_key = xstrdup(inst->name); /* the canonical tool: `xd://apply_patch` follows tools.approval.edit */
         approval_decision_free(&d);
     }
     json_free(parsed);
