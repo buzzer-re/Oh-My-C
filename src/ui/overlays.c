@@ -265,6 +265,7 @@ char *ui_hotkeys_markdown(void) {
     HA("app.tools.toggleVisibility", "Toggle tool activity visibility");
     HA("app.links.hint", "Pick an extension link on screen by its tag");
     HA("app.ask.hide", "Hide/show a pending ask question");
+    HA("app.ask.note", "Add or edit a note on an ask option");
     HA("app.approval.approve", "Approve a pending tool call");
     HA("app.thinking.toggle", "Toggle thinking block visibility");
     HA("app.editor.external", "Edit message in external editor");
