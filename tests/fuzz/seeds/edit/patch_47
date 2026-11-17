@@ -1,0 +1,10 @@
+function retryIfBlockedOn(reason: string) {
+  return reason;
+}
+
+function describeNode(node: object) {
+  return String(node);
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ retryIfBlockedOn()\n-  return reason;\n+  return reason.toUpperCase();"}, {"op": "update", "diff": "@@ describeNode()\n-  return String(node);\n+  return JSON.stringify(node);"}]}

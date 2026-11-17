@@ -1,0 +1,10 @@
+export class EditTool implements AgentTool<Schema1, Details1> {
+	value = 1;
+}
+
+export class EditTool implements AgentTool<Schema2, Details2> {
+	value = 2;
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ class EditTool\n-\tvalue = 1;\n+\tvalue = 100;"}]}

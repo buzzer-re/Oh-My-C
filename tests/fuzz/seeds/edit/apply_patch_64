@@ -1,0 +1,6 @@
+const timeoutMs = 1000;
+other
+const timeoutMs = 2000;
+
+
+{"input": "*** Begin Patch\n*** Update File: a.txt\n@@\n-const timeoutMs = 3000;\n+const timeoutMs = 5000;\n*** End Patch"}

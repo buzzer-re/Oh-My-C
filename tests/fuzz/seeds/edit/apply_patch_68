@@ -1,0 +1,4 @@
+a
+
+
+{"input": "*** Begin Patch\n*** Update File: a.txt\n@@\n-a\n+A\n*** Update File: missing.txt\n@@\n-x\n+y\n*** End Patch"}

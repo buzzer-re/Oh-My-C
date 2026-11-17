@@ -1,0 +1,4 @@
+to delete
+
+
+{"input": "*** Begin Patch\n*** Add File: new.txt\n+brand new\n*** Update File: keep.txt\n@@\n-hello\n+HELLO\n*** Delete File: a.txt\n*** End Patch"}

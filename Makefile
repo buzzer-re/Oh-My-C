@@ -135,6 +135,7 @@ $(O)/embedded.o: $(O)/embedded.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # Unit tests link only the objects they exercise (several stub catalog/auth symbols).
+FUZZ_SRC := $(sort $(wildcard tests/fuzz/fuzz_*.c))
 CORE_OBJ := $(O)/core/core.o $(O)/core/json.o $(O)/core/fs.o $(O)/core/proc.o $(O)/core/embed.o $(O)/embedded.o
 NET_OBJ  := $(O)/net/http.o
 CODEC_OBJ := $(patsubst src/%.c,$(O)/%.o,$(wildcard src/img/*.c))
@@ -193,10 +194,11 @@ T_test_turn_recovery := $(LIB_OBJ)
 T_test_dcr           := $(LIB_OBJ)
 T_test_settings_audit := $(CORE_OBJ)
 T_test_htmlform      := $(LIB_OBJ)
+T_test_fuzz_regress  := $(LIB_OBJ) $(patsubst tests/fuzz/%.c,$(O)/tests/fuzz/%.o,$(FUZZ_SRC))
 UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
               test_chrome test_providers_google test_toolcards test_cursor test_judgment test_auth test_memory test_outsink test_catalog test_model_resolver test_compaction_point \
               test_planreview test_img test_img_jpeg test_img_webp test_btw test_queue test_guards test_keybindings test_slash test_commands test_export test_dump test_signals \
-              test_panels test_tree test_approval test_compaction test_tiers test_workspace test_agenthub test_mcp test_loop test_usage test_extracmds test_display test_turn_recovery test_dcr test_settings_audit test_htmlform
+              test_panels test_tree test_approval test_compaction test_tiers test_workspace test_agenthub test_mcp test_loop test_usage test_extracmds test_display test_turn_recovery test_dcr test_settings_audit test_htmlform test_fuzz_regress
 
 .SECONDEXPANSION:
 $(O)/tests/%: tests/%.c $$(T_$$*)
@@ -219,6 +221,23 @@ test-unit: $(addprefix $(O)/tests/,$(UNIT_TESTS))
 	@set -e; home=$$(mktemp -d "$(CURDIR)/$(O)/test-home.XXXXXX"); \
 	export HOME="$$home" OMC_CODING_AGENT_DIR="$$home/.omc/agent" PI_CODING_AGENT_DIR="$$home/.omp/agent" OMC_PLATFORM=linux; \
 	for t in $(UNIT_TESTS); do echo "== $$t"; ./$(O)/tests/$$t >/dev/null || { echo "   FAIL ($$t)"; exit 1; }; echo "   ok"; done
+
+# ---- libFuzzer harnesses (opt-in, clang only): `make fuzz` -> build/fuzz/fuzz_<name>; tests/fuzz/run.sh runs them ----
+# A separate object tree built with clang + libFuzzer/ASan/UBSan; the normal build and `make test` never touch it.
+FUZZ_CC  ?= clang-21
+FUZZ_BIN := $(patsubst tests/fuzz/%.c,build/fuzz/%,$(FUZZ_SRC))
+fuzz:
+	@$(MAKE) --no-print-directory O=build/fuzz/obj CC=$(FUZZ_CC) \
+	    OPT="-O1 -g -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined" fuzz-bins
+fuzz-bins: $(FUZZ_BIN)
+build/fuzz/%: tests/fuzz/%.c tests/fuzz/fuzz.h $(LIB_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -fsanitize=fuzzer -o $@ $< $(LIB_OBJ) $(LIBS)
+
+# the fuzz harnesses again, built normally (gcc, no libFuzzer): test_fuzz_regress replays tests/fuzz/regress/<name>/*
+$(O)/tests/fuzz/%.o: tests/fuzz/%.c tests/fuzz/fuzz.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DFUZZ_REGRESS -DFUZZ_NAME=$(patsubst fuzz_%,%,$*) -c -o $@ $<
 
 # release packaging. Each release carries a prebuilt binary per platform and the source:
 #   make dist      build/dist/omc-<version>-<os>-<arch>.tar.gz (+ .sha256): the binary, README and omp's license notice
@@ -259,5 +278,5 @@ PREFIX ?= $(HOME)/.local
 clean:
 	rm -rf build
 
-.PHONY: all lib install-lib test test-unit version dist dist-src clean install FORCE
+.PHONY: all lib install-lib test test-unit fuzz fuzz-bins version dist dist-src clean install FORCE
 -include $(OBJ:.o=.d)

@@ -1,0 +1,8 @@
+providers:
+  mock:
+    baseUrl: http://127.0.0.1:1/v1
+    api: openai-completions
+    models:
+      - id: m1
+        name: "Mock"
+        contextWindow: 128000

@@ -1,0 +1,5 @@
+const timeout = 1000;
+run(timeout);
+
+
+{"input": "*** Edit File: a.txt\n*** Find\nconst timeout = 1000;\n*** Replace\nconst timeout = 5000;\n"}

@@ -1,0 +1,14 @@
+class OtherTool {
+	constructor() {
+		this.value = 1;
+	}
+}
+
+class PatchTool {
+	constructor() {
+		this.value = 2;
+	}
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ class PatchTool constructor\n \tconstructor() {\n-\t\tthis.value = 2;\n+\t\tthis.value = 200;\n \t}"}]}

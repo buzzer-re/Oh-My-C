@@ -1,0 +1,6 @@
+function processItems(items: Item[], options?: Options): Result {
+  return items.map(i => i.value);
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ function processItems(items\n-  return items.map(i => i.value);\n+  return items.filter(i => i.valid).map(i => i.value);"}]}

@@ -1,0 +1,10 @@
+a: &x {k: v}
+b: *x
+c: |
+  lit
+  block
+d: !!str 12
+e: ~
+f: 0x1F
+g: 1e3
+h: 'q''uote'

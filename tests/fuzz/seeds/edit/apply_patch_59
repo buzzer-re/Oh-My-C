@@ -1,0 +1,4 @@
+old
+
+
+{"input": "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** Delete File: remove.txt\n*** Add File: added.txt\n+created\n*** End Patch"}

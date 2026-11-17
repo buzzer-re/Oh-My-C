@@ -1,0 +1,9 @@
+function outer() {
+  function inner() {
+    // This is an important comment
+    return 1;
+  }
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ function outer\n function outer() {\n   function inner() {\n-    return 1;\n+    return 42;\n   }\n }"}]}

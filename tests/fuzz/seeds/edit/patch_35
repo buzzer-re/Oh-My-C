@@ -1,0 +1,8 @@
+import { mkdirSync, unlinkSync } from "node:fs";
+
+function cleanup() {
+  unlinkSync("temp");
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ import { mkdirSync, unlinkSync }\n\n function cleanup() {\n-  unlinkSync(\"temp\");\n+  rmSync(\"temp\", { recursive: true });"}]}

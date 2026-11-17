@@ -1,0 +1,10 @@
+header
+foo
+bar
+middle
+foo
+baz
+footer
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@\n middle\n-foo\n+FOO"}]}

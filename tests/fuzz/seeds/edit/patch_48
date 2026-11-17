@@ -1,0 +1,8 @@
+import { startLoggingProfilingEvents, stopLoggingProfilingEvents } from "../SchedulerProfiling";
+
+export function run() {
+  return startLoggingProfilingEvents();
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ import block\n-import { startLoggingProfilingEvents, stopLoggingProfilingEvents } from \"../SchedulerProfiling\";\n+import { stopLoggingProfilingEvents, startLoggingProfilingEvents } from \"../SchedulerProfiling\";"}]}

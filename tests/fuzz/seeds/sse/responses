@@ -1,0 +1,30 @@
+	event: response.created
+data: {"type": "response.created", "response": {"id": "r1"}}
+
+event: response.output_item.added
+data: {"type": "response.output_item.added", "output_index": 0, "item": {"type": "reasoning", "id": "rs1", "summary": []}}
+
+event: response.reasoning_summary_text.delta
+data: {"type": "response.reasoning_summary_text.delta", "item_id": "rs1", "delta": "plan"}
+
+event: response.output_item.done
+data: {"type": "response.output_item.done", "output_index": 0, "item": {"type": "reasoning", "id": "rs1", "summary": [{"type": "summary_text", "text": "plan"}], "encrypted_content": "e"}}
+
+event: response.output_item.added
+data: {"type": "response.output_item.added", "output_index": 1, "item": {"type": "message", "id": "m1", "role": "assistant", "content": []}}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "item_id": "m1", "output_index": 1, "delta": "Hey"}
+
+event: response.output_item.added
+data: {"type": "response.output_item.added", "output_index": 2, "item": {"type": "function_call", "id": "fc1", "call_id": "call1", "name": "bash", "arguments": ""}}
+
+event: response.function_call_arguments.delta
+data: {"type": "response.function_call_arguments.delta", "item_id": "fc1", "delta": "{\"command\":\"ls\"}"}
+
+event: response.output_item.done
+data: {"type": "response.output_item.done", "output_index": 2, "item": {"type": "function_call", "id": "fc1", "call_id": "call1", "name": "bash", "arguments": "{\"command\":\"ls\"}"}}
+
+event: response.completed
+data: {"type": "response.completed", "response": {"id": "r1", "status": "completed", "usage": {"input_tokens": 5, "output_tokens": 7, "input_tokens_details": {"cached_tokens": 0}}}}
+

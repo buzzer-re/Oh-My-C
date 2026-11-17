@@ -1,0 +1,4 @@
+original
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@\n-original\n+modified\n*** End Patch"}]}
