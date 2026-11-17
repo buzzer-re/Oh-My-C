@@ -11,6 +11,7 @@
  * Tern's native description (question tabs, Review, action bar) is not ported: omc has no native rendering. */
 #include "ui/overlays.h"
 #include "ui/ui.h"
+#include "ui/signals.h"
 
 #include "config/settings.h"
 #include "core/fs.h"
@@ -94,6 +95,7 @@ typedef struct fd {
     int media_version;
     bool hidden, closed;
     char ***notes;            /* per field index (choice): per option, the saved note (NULL: none) */
+    int hold;                 /* the run shows `blocked` on this form (ui_signals_hold_blocked); 0: none */
     tui_editor_t *note_ed;    /* the note being edited (NULL: none) */
     hf_field_t *note_field;
     int note_option;
@@ -1892,6 +1894,7 @@ static void fd_invalidate(tui_component_t *c) {
 static void fd_destroy(tui_component_t *c) {
     fd_t *v = (fd_t *)c;
     stop_countdown(v);
+    if (v->hold) ui_signals_release_blocked(v->hold);
     pthread_mutex_lock(&g_live_mu);
     if (g_live == v) g_live = NULL;
     pthread_mutex_unlock(&g_live_mu);
@@ -2030,6 +2033,12 @@ void ui_form_dialog_show(ui_t *u, const char *html, int64_t timeout_ms, const ch
     ui_form_opts_t o = {.ui = u, .tui = u->tui, .draft = u->editor, .timeout_ms = timeout_ms, .cwd = (char *)cwd,
                         .done = done, .ud = ud};
     tui_component_t *c = ui_form_dialog_new(html, &o);
+    /* #presentDialog: blocked on the question of the form's first named field while it is shown */
+    fd_t *v = (fd_t *)c;
+    const char *msg = NULL;
+    for (size_t i = 0; i < v->form->fields.n && !msg; i++)
+        if (*v->form->fields.v[i]->name) msg = v->form->fields.v[i]->question;
+    v->hold = ui_signals_hold_blocked("question", msg);
     ui_show_selector(u, c, c);
 }
 

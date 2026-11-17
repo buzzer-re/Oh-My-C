@@ -458,6 +458,7 @@ static answer_t ask_user(tool_env_t *env, const char *path, const char *previous
     json_t *qs = json_arr(), *q = json_obj(), *opts = json_arr();
     json_set_str(q, "id", "cfg");
     json_set_str(q, "question", question);
+    json_set_str(q, "blockedKind", "permission"); /* the selector reports a permission wait */
     const char *labels[] = {OPT_SESSION, OPT_ONCE, OPT_DENY};
     for (size_t i = 0; i < 3; i++) {
         json_t *o = json_obj();

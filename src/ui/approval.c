@@ -45,6 +45,7 @@ typedef struct {
     bool remember_always;
     bool closed;
     int64_t armed_at;
+    int hold; /* the run shows `blocked` on this approval (ui_signals_hold_blocked); 0: released */
 } approval_view_t;
 
 struct approval_req {
@@ -365,6 +366,8 @@ static bool approval_key(tui_component_t *c, const tui_key_t *k) {
 
 static void approval_destroy(tui_component_t *c) {
     approval_view_t *v = (approval_view_t *)c;
+    if (v->hold) ui_signals_release_blocked(v->hold);
+    v->hold = 0;
     if (g_view == v) g_view = NULL;
     if (!v->closed) { /* closed from outside (another selector replaced it): the call is denied */
         pthread_mutex_lock(&g_mu);
@@ -425,7 +428,7 @@ static void show_request(void *ud) {
         v->ngrants++;
     }
     char *id = r->tool_call_id ? xstrdup(r->tool_call_id) : NULL, *tool = xstrdup(r->tool_name ? r->tool_name : ""),
-         *status = r->status ? xstrdup(r->status) : NULL;
+         *status = r->status ? xstrdup(r->status) : NULL, *compact = xstrdup(p->compact ? p->compact : "");
     pthread_mutex_unlock(&g_mu);
     build_choices(v);
     for (size_t i = 0; i < v->choices.n; i++)
@@ -433,7 +436,9 @@ static void show_request(void *ud) {
     v->armed_at = mono_ms() + APPROVE_ARM_MS;
     g_view = v;
     ui_show_selector(u, &v->base, &v->base);
+    v->hold = ui_signals_hold_blocked("permission", compact);
     ui_signals_approval_requested(id, tool, status);
+    free(compact);
     free(id);
     free(tool);
     free(status);

@@ -42,13 +42,19 @@ void ui_signals_resumed(void);
 /* the settings may have changed (tui.titleState, tui.titleSpinner, terminal.programStatus) */
 void ui_signals_settings_changed(void);
 
-/* agent events (event-controller.ts): agent_start -> working; an `ask` tool call blocks on a question until
- * its tool_execution_end */
+/* holdBlockedStatus: while a dialog waits on the user (the ask form, a tool approval, a cfg:// change, the plan
+ * review), the run shows as `blocked` on it (kind "question" | "permission", msg what it asks) whatever the event
+ * flow reports meanwhile; the newest open dialog shows. Returns the hold's id for ui_signals_release_blocked. */
+int ui_signals_hold_blocked(const char *kind, const char *msg);
+void ui_signals_release_blocked(int id);
+bool ui_signals_blocked(void); /* a dialog holds `blocked` */
+
+/* agent events (event-controller.ts): agent_start -> working; an `ask` tool call sends its notification and the
+ * Warp question_asked event */
 void ui_signals_agent_start(void);
 void ui_signals_tool_start(const char *tool_call_id, const char *tool_name, const json_t *args);
 void ui_signals_tool_end(const char *tool_call_id, const char *tool_name);
-/* a tool call waits on an approval prompt (#blockingPrompt kind permission, msg formatApprovalPrompt) until its
- * tool_execution_end; Warp permission_request / permission_replied (tool_approval_requested / _resolved) */
+/* Warp permission_request / permission_replied (tool_approval_requested / _resolved) */
 void ui_signals_approval_requested(const char *tool_call_id, const char *tool_name, const char *msg);
 void ui_signals_approval_resolved(void);
 /* the run settled (its last agent_end): run status done/error/idle from the run's messages, then the error

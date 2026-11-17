@@ -1028,6 +1028,7 @@ typedef struct {
     bool exec_pending; /* approval waiting for the aborted run to finish */
     ui_plan_save_t *save;
     char *save_content;
+    int hold; /* `blocked` on the plan's approval while the review is open (ui_signals_hold_blocked) */
 } plan_review_t;
 
 static plan_review_t g_pr;
@@ -1146,6 +1147,7 @@ char *ui_dialog_external_edit(ui_t *u, const char *text) {
 }
 
 static void plan_review_free_state(void) {
+    if (g_pr.hold) ui_signals_release_blocked(g_pr.hold);
     free(g_pr.path);
     free(g_pr.title);
     free(g_pr.edited);
@@ -1162,6 +1164,8 @@ static void plan_review_free_state(void) {
 static void plan_review_hide(ui_t *u) {
     if (!g_pr.open) return;
     g_pr.open = false;
+    if (g_pr.hold) ui_signals_release_blocked(g_pr.hold);
+    g_pr.hold = 0;
     tui_component_t *c = ui_plan_review_component(g_pr.ov);
     tui_overlay_hide(u->tui, c);
     tui_alt_screen(u->tui, false); /* the parked transcript resumes as it was */
@@ -1694,6 +1698,10 @@ static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) 
     free(details);
     free(content);
     g_pr.open = true;
+    /* the plan waits on the user's approval, after the turn that proposed it has ended */
+    char *wait = xasprintf("Review plan: %s", g_pr.title);
+    g_pr.hold = ui_signals_hold_blocked("permission", wait);
+    free(wait);
     /* fullscreen overlay on the alternate screen */
     tui_alt_screen(u->tui, true);
     tui_overlay_opts_t oo = {TUI_ANCHOR_TOP, 0, 0, 0, 0};

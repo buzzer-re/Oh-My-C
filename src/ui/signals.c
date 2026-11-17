@@ -169,11 +169,12 @@ char *ui_program_status_report(run_state_t state, const char *kind, const char *
 
 static char *g_warp_prompt; /* Warp bridge activePrompt */
 
+/* holdBlockedStatus: a dialog waiting on the user */
 typedef struct {
-    char *id;
+    int id;
     char *msg;
     const char *kind; /* "question" | "permission" */
-} blocker_t;
+} hold_t;
 
 static struct {
     ui_t *u;
@@ -186,11 +187,12 @@ static struct {
     int interval; /* the title spinner's period (setTerminalTitleSpinnerInterval) */
     char *last_title;
     const char *style;
-    /* program status */
+    /* program status: the event flow's status (setRunStatus), shown unless a dialog holds `blocked` */
     run_state_t status;
     char *kind, *msg;
     char *reported;
-    VEC(blocker_t) blockers;
+    VEC(hold_t) holds; /* open dialogs, newest last */
+    int next_hold;
     json_t *ended; /* the last agent_end's messages, not yet settled */
     bool startup_run;  /* set before init: a command-line prompt runs once startup ends */
     bool startup_hold; /* the boot `working` that prompt holds until its run reports (run-status.ts startup) */
@@ -269,10 +271,24 @@ static void set_title_state(run_state_t st) {
     emit_title();
 }
 
+/* shownStatus: the newest open dialog, else the event flow's status */
+static run_state_t shown_state(const char **kind, const char **msg) {
+    if (S.holds.n) {
+        *kind = S.holds.v[S.holds.n - 1].kind;
+        *msg = S.holds.v[S.holds.n - 1].msg;
+        return RUN_BLOCKED;
+    }
+    *kind = S.kind;
+    *msg = S.msg;
+    return S.status;
+}
+
 /* run-status.ts report / clear */
 static void report(void) {
     if (S.disposed || !program_status_enabled() || !term()) return;
-    char *next = ui_program_status_report(S.status, S.kind, S.msg);
+    const char *kind, *msg;
+    run_state_t st = shown_state(&kind, &msg);
+    char *next = ui_program_status_report(st, kind, msg);
     if (S.reported && !strcmp(next, S.reported)) {
         free(next);
         return;
@@ -289,6 +305,14 @@ static void clear_report(void) {
     write_seq("\x1b]7501;state=clear\x1b\\");
 }
 
+/* publish: the title separator and the OSC 7501 record follow the shown status */
+static void publish(void) {
+    const char *kind, *msg;
+    run_state_t st = shown_state(&kind, &msg);
+    set_title_state(st == RUN_WORKING ? RUN_WORKING : st == RUN_BLOCKED ? RUN_BLOCKED : RUN_IDLE);
+    report();
+}
+
 void ui_signals_run_status(run_state_t state, const char *kind, const char *msg) {
     S.startup_hold = false;
     S.status = state;
@@ -296,8 +320,30 @@ void ui_signals_run_status(run_state_t state, const char *kind, const char *msg)
     free(S.msg);
     S.kind = kind ? xstrdup(kind) : NULL;
     S.msg = msg ? xstrdup(msg) : NULL;
-    set_title_state(state == RUN_WORKING ? RUN_WORKING : state == RUN_BLOCKED ? RUN_BLOCKED : RUN_IDLE);
-    report();
+    publish();
+}
+
+int ui_signals_hold_blocked(const char *kind, const char *msg) {
+    hold_t h = {++S.next_hold, msg ? xstrdup(msg) : NULL, str_eq(kind, "permission") ? "permission" : "question"};
+    vec_push(&S.holds, h);
+    publish();
+    return h.id;
+}
+
+void ui_signals_release_blocked(int id) {
+    for (size_t i = 0; i < S.holds.n; i++) {
+        if (S.holds.v[i].id != id) continue;
+        free(S.holds.v[i].msg);
+        memmove(&S.holds.v[i], &S.holds.v[i + 1], (S.holds.n - i - 1) * sizeof S.holds.v[0]);
+        S.holds.n--;
+        publish();
+        return;
+    }
+}
+
+static void drop_holds(void) {
+    for (size_t i = 0; i < S.holds.n; i++) free(S.holds.v[i].msg);
+    S.holds.n = 0;
 }
 
 /* getFallbackTerminalTitle: the resolved cwd's basename (none for the root) */
@@ -325,7 +371,9 @@ void ui_signals_session_title(void) {
 
 /* resendProgramStatus: `done` and `error` survive a shell prompt, so only the others are reported again */
 void ui_signals_resumed(void) {
-    if (S.status == RUN_DONE || S.status == RUN_ERROR) return;
+    const char *kind, *msg;
+    run_state_t st = shown_state(&kind, &msg);
+    if (st == RUN_DONE || st == RUN_ERROR) return;
     free(S.reported);
     S.reported = NULL;
     report();
@@ -346,6 +394,8 @@ void ui_signals_settings_changed(void) {
     if (program_status_enabled()) report();
     else clear_report();
 }
+
+bool ui_signals_blocked(void) { return S.holds.n > 0; }
 
 static void settings_changed_cb(void *ud) {
     (void)ud;
@@ -385,6 +435,7 @@ void ui_signals_init(ui_t *u) {
     /* initProgramStatus({startupRun}): the first report is `working`, not the `idle` a supervisor waiting on
      * this terminal would take as finished before the prompt even starts; the title turns to the spinner right
      * after its idle first write (omp: `π >`, `π *`, then the report) */
+    drop_holds(); /* a UI starts with no dialog open */
     S.startup_hold = S.startup_run;
     S.startup_run = false;
     if (S.startup_hold) {
@@ -412,12 +463,9 @@ void ui_signals_dispose(void) {
     free(S.kind);
     free(S.msg);
     S.label = S.kind = S.msg = NULL;
-    for (size_t i = 0; i < S.blockers.n; i++) {
-        free(S.blockers.v[i].id);
-        free(S.blockers.v[i].msg);
-    }
-    free(S.blockers.v);
-    memset(&S.blockers, 0, sizeof S.blockers);
+    drop_holds();
+    free(S.holds.v);
+    memset(&S.holds, 0, sizeof S.holds);
     json_free(S.ended);
     S.ended = NULL;
     S.u = NULL; /* its ui lives on run_interactive_mode's stack; omc_main can run again in this process */
@@ -566,18 +614,6 @@ void ui_signals_tool_start(const char *tool_call_id, const char *tool_name, cons
     json_t *qa = warp_event("question_asked");
     json_set_str(qa, "summary", "Waiting for your answer");
     warp_emit(qa);
-    /* #blockingPrompt: the question of the form's first named field */
-    const char *html = json_get_str(args, "html");
-    char *msg = NULL;
-    if (html) {
-        hf_form_t *f = hf_parse(html);
-        for (size_t i = 0; i < f->fields.n && !msg; i++)
-            if (*f->fields.v[i]->name) msg = xstrdup(f->fields.v[i]->question);
-        hf_form_free(f);
-    }
-    blocker_t b = {xstrdup(tool_call_id), msg, "question"};
-    vec_push(&S.blockers, b);
-    ui_signals_run_status(RUN_BLOCKED, "question", msg);
 }
 
 void ui_signals_approval_requested(const char *tool_call_id, const char *tool_name, const char *msg) {
@@ -587,12 +623,6 @@ void ui_signals_approval_requested(const char *tool_call_id, const char *tool_na
     json_set_str(e, "summary", summary);
     free(summary);
     warp_emit(e);
-    if (!tool_call_id) return;
-    for (size_t i = 0; i < S.blockers.n; i++)
-        if (str_eq(S.blockers.v[i].id, tool_call_id)) return;
-    blocker_t b = {xstrdup(tool_call_id), msg ? xstrdup(msg) : NULL, "permission"};
-    vec_push(&S.blockers, b);
-    ui_signals_run_status(RUN_BLOCKED, "permission", msg);
 }
 
 void ui_signals_approval_resolved(void) { warp_emit(warp_event("permission_replied")); }
@@ -601,17 +631,6 @@ void ui_signals_tool_end(const char *tool_call_id, const char *tool_name) {
     json_t *tc = warp_event("tool_complete");
     json_set_str(tc, "tool_name", tool_name ? tool_name : "");
     warp_emit(tc);
-    for (size_t i = 0; i < S.blockers.n; i++) {
-        if (!str_eq(S.blockers.v[i].id, tool_call_id)) continue;
-        free(S.blockers.v[i].id);
-        free(S.blockers.v[i].msg);
-        memmove(&S.blockers.v[i], &S.blockers.v[i + 1], (S.blockers.n - i - 1) * sizeof S.blockers.v[0]);
-        S.blockers.n--;
-        /* back to `working` only when the last outstanding blocking prompt resolves */
-        if (S.blockers.n) ui_signals_run_status(RUN_BLOCKED, S.blockers.v[0].kind, S.blockers.v[0].msg);
-        else ui_signals_run_status(RUN_WORKING, NULL, NULL);
-        return;
-    }
 }
 
 static const json_t *sig_last_assistant(const json_t *msgs) {
@@ -635,12 +654,7 @@ static const char *session_title(void) {
 }
 
 void ui_signals_run_settled(const json_t *run_messages, bool interrupted) {
-    for (size_t i = 0; i < S.blockers.n; i++) {
-        free(S.blockers.v[i].id);
-        free(S.blockers.v[i].msg);
-    }
-    S.blockers.n = 0;
-    /* #settledRunStatus */
+    /* #settledRunStatus (a dialog still open shows over it) */
     const json_t *last = sig_last_assistant(run_messages);
     const char *stop = last ? json_get_str(last, "stopReason") : NULL;
     if (interrupted) ui_signals_run_status(RUN_IDLE, NULL, NULL);
