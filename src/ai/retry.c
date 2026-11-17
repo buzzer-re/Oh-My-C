@@ -613,6 +613,12 @@ json_t *ai_replay_safe_stream(ai_attempt_fn once, void *self, const ai_stream_op
 
 json_t *ai_replay_safe_stream_ex(ai_attempt_fn once, void *self, const ai_stream_opts_t *o, ai_event_cb cb, void *ud,
                                  const bool *retry_empty, int max_error_retries) {
+    return ai_replay_safe_stream_hook(once, self, o, cb, ud, retry_empty, max_error_retries, NULL);
+}
+
+json_t *ai_replay_safe_stream_hook(ai_attempt_fn once, void *self, const ai_stream_opts_t *o, ai_event_cb cb, void *ud,
+                                   const bool *retry_empty, int max_error_retries,
+                                   bool (*rebuild)(void *self, const json_t *msg)) {
     replay_t r = {.cb = cb, .ud = ud};
     int empty_retries = 0, error_retries = 0;
     for (;;) {
@@ -623,6 +629,12 @@ json_t *ai_replay_safe_stream_ex(ai_attempt_fn once, void *self, const ai_stream
         const char *sd = json_get_str(json_get(msg, "stopDetails"), "type");
         bool cancelled = o && o->cancel && *o->cancel;
         int64_t delay = -1;
+        /* a provider retry that rebuilds the request: immediate, before any meaningful output */
+        if (rebuild && !r.committed && !cancelled && rebuild(self, msg)) {
+            replay_drop(&r);
+            json_free(msg);
+            continue;
+        }
         if (*retry_empty && !(o && o->accept_empty_response) && !r.committed && str_eq(stop, "stop") &&
             !str_eq(sd, "pause_turn") && !str_eq(sd, "compaction") && !errmsg &&
             json_get_int(json_get(msg, "usage"), "output", 0) <= 1 && !visible_content(msg) &&

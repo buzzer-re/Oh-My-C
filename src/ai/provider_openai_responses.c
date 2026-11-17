@@ -321,6 +321,48 @@ static void convert_tool_result(json_t *out, const json_t *tr, const ai_model_t 
     json_push(out, o);
 }
 
+/* a reasoning item carrying an opaque server-issued `encrypted_content` blob */
+static bool encrypted_reasoning_item(const json_t *it) {
+    return str_eq(json_get_str(it, "type"), "reasoning") && json_is_str(json_get(it, "encrypted_content"));
+}
+
+/* replaysEncryptedReasoning: whether a built request input replays any encrypted reasoning blob */
+static bool replays_encrypted_reasoning(const json_t *input) {
+    json_t *it;
+    json_arr_foreach(input, i, it) if (encrypted_reasoning_item(it)) return true;
+    return false;
+}
+
+/* the floor marker of a turn retried without replayed encrypted reasoning: omp's
+ * providerPayload.encryptedReasoningFloor, or the message field omc writes (omc keeps no native history payload) */
+bool oair_encrypted_reasoning_floor(const json_t *msg) {
+    const json_t *pp = json_get_obj(msg, "providerPayload");
+    if (str_eq(json_get_str(pp, "type"), "openaiResponsesHistory") && json_get_bool(pp, "encryptedReasoningFloor", false))
+        return true;
+    return json_get_bool(msg, "encryptedReasoningFloor", false);
+}
+
+/* isOpenAIResponsesRefusedEncryptedReasoningError: the server refused a replayed `encrypted_content` blob it no
+ * longer honors (another key or credential, expired, unverifiable); resending the same history fails the same way */
+bool oair_refused_encrypted_reasoning(const char *msg) {
+    if (!msg) return false;
+    if (strstr(msg, "invalid_encrypted_content")) return true;
+    static const char *const why[] = {"was not issued to this caller", "has expired", "could not be verified"};
+    for (const char *p = msg; (p = str_istr(p, "encrypted")); p++) {
+        const char *q = p + 9;
+        if ((*q != ' ' && *q != '_') || strncasecmp(q + 1, "content", 7) != 0) continue;
+        q += 8;
+        if (isalnum((unsigned char)*q) || *q == '_') continue;
+        const char *eol = strchr(q, '\n');
+        size_t span = eol ? (size_t)(eol - q) : strlen(q);
+        for (size_t k = 0; k < ARRAY_LEN(why); k++) {
+            const char *w = str_istr(q, why[k]);
+            if (w && (size_t)(w - q) < span && (w == q || !isalnum((unsigned char)w[-1]))) return true;
+        }
+    }
+    return false;
+}
+
 static json_t *convert_input(const ai_model_t *m, const ai_context_t *ctx, int variant, bool wire_names) {
     json_t *out = json_arr();
     if (variant == V_AZURE) {
@@ -340,6 +382,16 @@ static json_t *convert_input(const ai_model_t *m, const ai_context_t *ctx, int v
     strvec_t known = {0};
     json_t *msgs = ai_transform_messages(ctx->messages, m);
     json_t *msg;
+    /* turns before this index replay no encrypted reasoning: the server refused it once, and the turn that recovered
+     * (it carries the floor marker) was requested without it; later turns' blobs were issued after the refusal */
+    size_t floor = ctx->drop_encrypted_reasoning ? json_len(msgs) : 0;
+    for (size_t i = json_len(msgs); i-- > floor + 1;) {
+        const json_t *fm = json_at(msgs, i);
+        if (str_eq(json_get_str(fm, "role"), "assistant") && oair_encrypted_reasoning_floor(fm)) {
+            floor = i;
+            break;
+        }
+    }
     json_arr_foreach(msgs, idx, msg) {
         const char *role = json_get_str(msg, "role");
         if (str_eq(role, "user") || str_eq(role, "developer")) {
@@ -354,6 +406,7 @@ static json_t *convert_input(const ai_model_t *m, const ai_context_t *ctx, int v
                     /* sanitizeOpenAIResponsesHistoryItemsForReplay: item ids dropped (computer calls keep theirs),
                      * reasoning reduced to its replayable fields, output-only statuses stripped */
                     if (!json_is_obj(it) || str_eq(json_get_str(it, "type"), "item_reference")) continue;
+                    if (idx < floor && encrypted_reasoning_item(it)) continue;
                     json_t *c;
                     if (str_eq(json_get_str(it, "type"), "reasoning")) {
                         c = json_obj();
@@ -392,7 +445,8 @@ static json_t *convert_input(const ai_model_t *m, const ai_context_t *ctx, int v
             }
             json_push(out, it);
         } else if (str_eq(role, "assistant")) {
-            convert_assistant(out, msg, m, idx, include_sigs, preserve_ids, &known, wire_names);
+            /* a thinking signature embeds the turn's reasoning item, blob included */
+            convert_assistant(out, msg, m, idx, include_sigs && idx >= floor, preserve_ids, &known, wire_names);
         } else if (str_eq(role, "toolResult")) {
             convert_tool_result(out, msg, m, strict_pairing, &known);
         }
@@ -1417,6 +1471,9 @@ typedef struct {
     const ai_stream_opts_t *o;
     int mode;             /* ResponsesAttemptContext.mode: 0 undecided, else WS_MODE_* */
     bool retry_empty;     /* retryEmptyCompletion: an SSE attempt; a successful empty WS response submits once */
+    bool drop_encrypted;  /* ResponsesAttemptContext.dropEncryptedReasoning: the server refused replayed blobs */
+    bool sent_encrypted;  /* the last request replayed encrypted reasoning */
+    bool encrypted_retry_used;
 } oair_attempt_t;
 
 enum { WS_MODE_SSE = 1, WS_MODE_WEBSOCKET = 2 };
@@ -1519,9 +1576,12 @@ static json_t *oair_ws_attempt(oair_attempt_t *at, const json_t *body, const htt
 static json_t *oair_stream_once(void *self, ai_event_cb cb, void *ud) {
     oair_attempt_t *at = self;
     const ai_model_t *m = at->m;
-    const ai_context_t *ctx = at->ctx;
+    ai_context_t lctx = *at->ctx;
+    lctx.drop_encrypted_reasoning = at->drop_encrypted;
+    const ai_context_t *ctx = &lctx;
     const ai_stream_opts_t *o = at->o;
     json_t *body = oair_build_request(m, ctx, o);
+    at->sent_encrypted = replays_encrypted_reasoning(json_get(body, "input"));
     if (o->on_payload) o->on_payload(o->payload_ud, body);
     http_headers_t h = {0};
     char *err = NULL;
@@ -1557,7 +1617,22 @@ static json_t *oair_stream_once(void *self, ai_event_cb cb, void *ud) {
     http_headers_free(&h);
     json_free(body);
     json_free(wire_names);
+    /* persisted with the turn so later requests, even after a restart, omit the refused blobs */
+    if (at->drop_encrypted && msg) json_set_bool(msg, "encryptedReasoningFloor", true);
     return msg;
+}
+
+/* prepareEncryptedReasoningRetry: the server refused a replayed encrypted reasoning blob before any output; resending
+ * fails the same way, so the full transcript is rebuilt once without any earlier blob (text, calls, results stay) */
+static bool oair_encrypted_retry(void *self, const json_t *msg) {
+    oair_attempt_t *at = self;
+    if (at->encrypted_retry_used || !at->sent_encrypted || !str_eq(json_get_str(msg, "stopReason"), "error") ||
+        !oair_refused_encrypted_reasoning(json_get_str(msg, "errorMessage")))
+        return false;
+    at->encrypted_retry_used = true;
+    at->drop_encrypted = true;
+    LOGD("OpenAI responses replayed encrypted reasoning refused; retrying without it");
+    return true;
 }
 
 /* streamOpenAIResponses / streamAzureOpenAIResponses / the Codex SSE transport: 6 transport attempts
@@ -1574,7 +1649,8 @@ json_t *provider_openai_responses_stream(const ai_model_t *m, const ai_context_t
     if (v == V_CODEX) lo.max_retry_delay_ms = 5 * 60 * 1000; /* CODEX_RATE_LIMIT_BUDGET_MS */
     oair_attempt_t at = {.m = m, .ctx = ctx, .o = &lo, .retry_empty = v == V_OPENAI};
     if (v == V_CODEX) return oair_stream_once(&at, cb, ud);
-    return ai_replay_safe_stream_ex(oair_stream_once, &at, &lo, cb, ud, &at.retry_empty, v == V_AZURE ? 1 : 0);
+    return ai_replay_safe_stream_hook(oair_stream_once, &at, &lo, cb, ud, &at.retry_empty, v == V_AZURE ? 1 : 0,
+                                      oair_encrypted_retry);
 }
 
 /* ====================================================================== */

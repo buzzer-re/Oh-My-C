@@ -262,6 +262,7 @@ typedef struct {
     json_t *system_prompt; /* array of strings (borrowed, may be NULL) */
     json_t *messages;      /* array of messages (borrowed) */
     json_t *tools;         /* array of {name, description, parameters} (borrowed, may be NULL) */
+    bool drop_encrypted_reasoning; /* Responses: replay no earlier turn's encrypted reasoning (a refused replay's retry) */
 } ai_context_t;
 
 /* ---------- events ---------- */
@@ -396,6 +397,11 @@ json_t *ai_replay_safe_stream(ai_attempt_fn once, void *self, const ai_stream_op
 /* retry_empty read after each attempt (a function-valued retryEmptyCompletion) */
 json_t *ai_replay_safe_stream_ex(ai_attempt_fn once, void *self, const ai_stream_opts_t *o, ai_event_cb cb, void *ud,
                                  const bool *retry_empty, int max_error_retries);
+/* ai_replay_safe_stream_ex plus a provider hook: when it returns true for an attempt's message (nothing meaningful
+ * streamed), the attempt is dropped and retried at once (the hook updates `self` for the rebuilt request) */
+json_t *ai_replay_safe_stream_hook(ai_attempt_fn once, void *self, const ai_stream_opts_t *o, ai_event_cb cb, void *ud,
+                                   const bool *retry_empty, int max_error_retries,
+                                   bool (*rebuild)(void *self, const json_t *msg));
 
 /* Streaming POST with SSE parsing + retry on transient errors (see the transport retry policies above).
  * on_event returns non-zero to abort. Returns 0 on success (2xx stream consumed);
