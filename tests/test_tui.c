@@ -386,6 +386,12 @@ static void test_markdown(void) {
     CHECK(has_line(&p, "  def f():"));
     strvec_free(&p);
 
+    /* task items keep their checkbox after the marker; wrapped rows hang under the task text (omp 687367522b) */
+    p = md_plain("- [x] Ship the fix today\n- [ ] Add a regression test", 20);
+    CHECK(p.n == 5 && !strcmp(p.v[0], "- [x] Ship the fix") && !strcmp(p.v[1], "      today") &&
+          !strcmp(p.v[2], "- [ ] Add a") && !strcmp(p.v[3], "      regression") && !strcmp(p.v[4], "      test"));
+    strvec_free(&p);
+
     /* wrapping keeps widths */
     p = md_plain("word word word word word word word word word word word word", 20);
     CHECK(p.n == 3);
