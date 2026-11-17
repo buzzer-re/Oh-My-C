@@ -3813,6 +3813,13 @@ json_t *app_user_bash(app_t *a, const char *cmd, bool exclude) {
     return m;
 }
 
+/* omp 345271b1b4: a session transition releases the previous session's eval kernel */
+static void app_release_eval(app_t *a) {
+    if (!a->agent) return;
+    for (size_t i = 0; i < a->agent->all_tools.n; i++)
+        if (!strcmp(a->agent->all_tools.v[i]->name, "eval")) eval_release_session(a->agent->all_tools.v[i]);
+}
+
 int app_new_session(app_t *a) {
     session_t *ns = a->opts.no_session ? session_in_memory(a->cwd) : session_create(a->cwd, a->opts.session_dir);
     session_free(a->session);
@@ -3841,6 +3848,7 @@ int app_new_session(app_t *a) {
     a->env->todo.phases = json_arr();
     app_goal_restore(a);
     prewalk_new_session(a);
+    app_release_eval(a);
     return 0;
 }
 
@@ -3857,6 +3865,7 @@ int app_switch_session(app_t *a, const char *path, char **err) {
     a->title_done = s->title != NULL;
     costgate_reseed(a);
     app_goal_restore(a);
+    app_release_eval(a);
     return 0;
 }
 
@@ -3872,6 +3881,7 @@ int app_fork_from(app_t *a, const char *entry_id, char **err) {
     app_bind_artifacts(a, old_dir);
     free(old_dir);
     load_session_into_agent(a);
+    app_release_eval(a);
     return 0;
 }
 

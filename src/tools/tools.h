@@ -215,6 +215,7 @@ bool think_supported(const ai_model_t *m);
 char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_error);
 /* re-render the eval description with the session tool names its bridge can call */
 void eval_set_tool_names(agent_tool_t *t, const json_t *names);
+void eval_release_session(agent_tool_t *t); /* stop the kernel and `sh` shell of the previous session */
 
 /* agent definitions (bundled + ~/.omc/agent/agents + .omc/agents): owned object name -> {name, description, tools[], model?, body} */
 json_t *agent_defs_load(const char *cwd);

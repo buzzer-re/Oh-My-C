@@ -914,6 +914,21 @@ void eval_set_tool_names(agent_tool_t *t, const json_t *names) {
     t->description = d;
 }
 
+/* omp 345271b1b4: kernels are keyed by session; a session transition (/new, resume, fork) releases the previous
+ * session's kernel and `sh` shell so the next cell starts fresh instead of reusing the old session's state */
+void eval_release_session(agent_tool_t *t) {
+    if (!t || t->execute != eval_execute) return;
+    eval_state_t *st = t->ud;
+    pthread_mutex_lock(&st->mu);
+    kernel_stop(st);
+    st->had_kernel = false;
+    pthread_mutex_unlock(&st->mu);
+    pthread_mutex_lock(&st->shmu);
+    shell_free(st->sh);
+    st->sh = NULL;
+    pthread_mutex_unlock(&st->shmu);
+}
+
 agent_tool_t *tool_eval_new(tool_env_t *env) {
     char *py = find_python();
     if (!py) return NULL; /* runtime unavailable: tool not offered */

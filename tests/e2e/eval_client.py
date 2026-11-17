@@ -113,6 +113,12 @@ cell("dies between cells", "import os, threading\nthreading.Timer(0.2, lambda: o
 time.sleep(0.8)
 cell("replaced on the next call", "print('back')", ["Kernel restarted", "back"])
 cell("xd docs", "print(await tool.read({'path': 'xd://eval/judge'}))", "judge_batch(states, questions")
+# omp 345271b1b4: a session switch releases the previous session's kernel; the new session's first cell starts fresh
+cell("before new session", "SESS_VAR = 1\nprint('set')", "set")
+p.stdin.write(json.dumps({"id": "ns", "type": "new_session"}) + "\n")
+p.stdin.flush()
+time.sleep(0.5)
+cell("fresh kernel after new session", "print('SESS_VAR' in globals())", "False", absent="Kernel restarted")
 p.stdin.close()
 p.wait(timeout=20)
 sys.exit(1 if fails else 0)
