@@ -705,7 +705,7 @@ import json,sys
 rs=[json.loads(l) for l in open(sys.argv[1])]
 r=[x for x in rs if x.get("tools") and "hello memory" in json.dumps(x["messages"][-1])][-1]
 s=r["messages"][0]["content"]; s=s if isinstance(s,str) else "".join(p.get("text","") for p in s)
-ok="Memory summary:\nMOCK SUMMARY from consolidation" in s and "Learned lessons" in s and "## Auto-Learn (experimental)" in s and "`memory://root`" in s
+ok="Memory summary:\nMOCK SUMMARY from consolidation" in s and "Learned lessons" in s and "## Auto-Learn (experimental)" in s and "- memory://root: project-memory summary." in s
 print("ok" if ok else "missing memory block")' "$T/req.jsonl" | grep -q '^ok$' && echo "   ok  memory prompt block" || { echo "   FAIL memory prompt block"; fail=1; }
 # auto-continue capture: one tool call reaches minToolCalls; rpc mode keeps the session alive for the private turn
 printf '%s\n' '{"id":"1","type":"prompt","message":"bash:echo cap"}' | (cat; sleep 3) | "${MENV[@]}" "$B" --model mock/mock-1 --mode rpc >/dev/null 2>&1
