@@ -176,7 +176,8 @@ typedef struct {
 } ui_hist_entry_t;
 typedef VEC(ui_hist_entry_t) ui_hist_list_t;
 /* HistoryStorage over the jsonl lines: unique normalized prompts, latest submission first. `query` NULL/blank:
- * getRecent; else search (every token a case-insensitive substring). At most `limit` entries. */
+ * getRecent; else search (every whitespace-delimited term as an FTS phrase of its letter/digit runs or a literal
+ * case-insensitive substring). At most `limit` entries. */
 void ui_hist_query(const char *jsonl, const char *query, int limit, ui_hist_list_t *out);
 void ui_hist_list_free(ui_hist_list_t *l);
 

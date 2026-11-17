@@ -154,7 +154,34 @@ static void test_report_docking(void) {
     close(pfd[0]);
 }
 
+/* prompt-history search keeps a term's punctuated parts together (omp 2d432ed9e4) */
+static void test_history_terms(void) {
+    const char *jsonl = "{\"text\":\"open a and b here\",\"ts\":1000}\n"
+                        "{\"text\":\"run git commit now\",\"ts\":2000}\n"
+                        "{\"text\":\"see a/b please\",\"ts\":3000}\n";
+    struct {
+        const char *q;
+        const char *want;
+    } cases[] = {
+        {"a/b", "see a/b please|"},
+        {"git-commit", "run git commit now|"},
+        {"git-com", "run git commit now|"},
+        {"mit", "run git commit now|"},
+        {"--", ""},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        ui_hist_list_t l = {0};
+        ui_hist_query(jsonl, cases[i].q, 100, &l);
+        sb_t b = SB_INIT;
+        for (size_t k = 0; k < l.n; k++) sb_appendf(&b, "%s|", l.v[k].prompt);
+        CHECK(str_eq(sb_cstr(&b), cases[i].want), "history %s: %s", cases[i].q, sb_cstr(&b));
+        sb_free(&b);
+        ui_hist_list_free(&l);
+    }
+}
+
 int main(void) {
+    test_history_terms();
     test_todo_markdown();
     test_todo_ops();
     test_wrap_long_word();
