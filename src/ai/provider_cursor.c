@@ -4167,8 +4167,35 @@ static void cs_free(cs_t *s) {
     json_free(s->exec_waiting);
 }
 
+/* withPromptLast: hosts append context after the prompt (developer messages), and Cursor sends the last message as
+ * the run's user message, so trailing developer context moves ahead of the user prompt. Owned array or NULL (as is). */
+static json_t *with_prompt_last(const json_t *messages) {
+    size_t n = json_len(messages), i = n;
+    while (i > 0 && str_eq(json_get_str(json_at(messages, i - 1), "role"), "developer")) i--;
+    if (i == n || i == 0 || !str_eq(json_get_str(json_at(messages, i - 1), "role"), "user")) return NULL;
+    json_t *out = json_arr();
+    for (size_t k = 0; k < n; k++)
+        if (k != i - 1) json_push(out, json_clone(json_at(messages, k)));
+    json_push(out, json_clone(json_at(messages, i - 1)));
+    return out;
+}
+
+static json_t *cursor_stream(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, ai_event_cb cb,
+                             void *ud);
+
 json_t *provider_cursor_stream(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, ai_event_cb cb,
                                void *ud) {
+    json_t *reordered = with_prompt_last(ctx->messages);
+    if (!reordered) return cursor_stream(m, ctx, o, cb, ud);
+    ai_context_t turn = *ctx;
+    turn.messages = reordered;
+    json_t *r = cursor_stream(m, &turn, o, cb, ud);
+    json_free(reordered);
+    return r;
+}
+
+static json_t *cursor_stream(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, ai_event_cb cb,
+                             void *ud) {
     cs_t s = {0};
     s.model = m;
     s.opts = o;
