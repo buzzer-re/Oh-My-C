@@ -245,10 +245,16 @@ transport layer turns them into the request shape. It ports the registry `prepar
      structured`) yield a JSON key for the transport layer.
 3. environment variables named by the catalog's `envVars` for the provider (`ai_env_api_key`).
 
-A provider its auth rule pauses (`disabled "<reason>"`, none at v18.18.7;
+A provider its auth rule pauses (`disabled "<reason>"`, at v18.22.0 Google Antigravity;
 `catalog_provider_pause_reason`) is reached by none of these: no key resolves, no token refreshes, no usage probe
 runs, no login list offers it and `omc login <id>` refuses it, and `ai_stream` answers "`<provider> is turned off:
 <reason>`" without calling it even when a key is passed in. Stored logins stay in `auth.json` untouched.
+`auth.unpausedProviders` (omp setUnpausedProviders) lists paused ids the operator turns back on: only the global
+config, `--config` files and runtime overrides count (a project's `.omc/config.yml` cannot unpause; the settings
+module pushes the operator value to `catalog_set_unpaused_providers` on every rebuild, so an edit applies at once).
+An unpaused provider behaves like a login-warning one below. `/settings` offers it as the **Unpaused Providers**
+membership picker (one choice per paused provider, its reason as the description), hidden while a project layer
+supplies the list.
 
 A provider whose auth rule carries `login-warning "<text>"` (at v18.18.7 Google Antigravity;
 `catalog_provider_login_warning`) stays usable: stored logins, refresh and requests are not asked again, but a new

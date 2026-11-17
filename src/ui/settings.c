@@ -13,6 +13,7 @@
 #include "tui/termcaps.h"
 
 #include "config/settings.h"
+#include "ai/ai.h"
 #include "coding/autolearn.h"
 #include "core/embed.h"
 #include "tui/composer.h"
@@ -91,6 +92,24 @@ static int group_rank(const sdef_t *d) {
  * (omp itself skips the check for a source checkout, which is how omc is built). The keys stay inert in config. */
 static bool omc_inert(const char *path) { return str_eq(path, "startup.checkUpdate") || str_eq(path, "update.channel"); }
 
+/* PAUSED_PROVIDER_CHOICES (model-settings.ts): the providers the auth rules pause, offered as a membership picker
+ * (UiArray options) that writes the global layer, hidden while a project layer supplies the list */
+static void paused_provider_choices(sdef_t *d) {
+    d->type = "multiselect";
+    d->condition = "unpausedProvidersNotProject";
+    json_t *a;
+    size_t n = 0;
+    json_arr_foreach(catalog_auth_providers(), i, a) if (json_get_str(a, "disabled")) n++;
+    if (!n || d->nopt) return;
+    free(d->opts);
+    d->opts = xcalloc(n + 1, sizeof *d->opts);
+    json_arr_foreach(catalog_auth_providers(), i, a) {
+        const char *reason = json_get_str(a, "disabled"), *id = json_get_str(a, "id"), *name = json_get_str(a, "name");
+        if (!reason || !id) continue;
+        d->opts[d->nopt++] = (sopt_t){xstrdup(id), xstrdup(name ? name : id), xstrdup(reason)};
+    }
+}
+
 static void load_defs(void) {
     if (g_json) return;
     size_t len = 0;
@@ -139,6 +158,7 @@ static void load_defs(void) {
             const char *v = json_get_str(o, "value"), *l = json_get_str(o, "label"), *de = json_get_str(o, "description");
             d->opts[d->nopt++] = (sopt_t){xstrdup(v ? v : ""), xstrdup(l ? l : (v ? v : "")), de ? xstrdup(de) : NULL};
         }
+        if (str_eq(d->path, "auth.unpausedProviders")) paused_provider_choices(d);
         if (d->path && d->label && d->type && d->tab >= 0 && !omc_inert(d->path)) g_ndefs++;
     }
     int nw = 0;
@@ -203,7 +223,12 @@ static bool condition_ok(const char *c) {
     if (!strcmp(c, "usageAwareFallbackEnabled")) return get_bool("retry.usageAwareFallback", false);
     if (!strcmp(c, "planModeEnabled")) return get_bool("plan.enabled", true);
     if (!strcmp(c, "planAutosaveEnabled")) return get_bool("plan.enabled", true) && get_bool("plan.autosave", false);
-    return true; /* *NotProject: the global layer edits apply */
+    /* these editors write the global layer: hidden while a project layer supplies the list, so it is never promoted */
+    if (!strcmp(c, "contextFilesExtraNotProject")) return !str_eq(settings_provenance("contextFiles.extra"), "project");
+    if (!strcmp(c, "restrictedFoldersNotProject")) return !str_eq(settings_provenance("tools.restrictedFolders"), "project");
+    if (!strcmp(c, "perCallModelAllowNotProject")) return !str_eq(settings_provenance("task.perCallModelAllow"), "project");
+    if (!strcmp(c, "unpausedProvidersNotProject")) return !str_eq(settings_provenance("auth.unpausedProviders"), "project");
+    return true;
 }
 
 /* JavaScript String(number) */

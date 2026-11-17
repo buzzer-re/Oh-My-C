@@ -576,10 +576,34 @@ json_t *catalog_auth_providers(void) {
     return json_get_arr(g_providers, "auth");
 }
 
-/* providerPauseReason: why the auth rules turn `provider` off (`disabled "<reason>"`), else NULL. omc has no
- * extension-registered logins that could take the id back. Borrowed. */
+/* Paused provider ids the operator turned back on (setUnpausedProviders; `auth.unpausedProviders` from operator
+ * layers only, pushed by the settings module on every rebuild). */
+static pthread_mutex_t g_unpaused_mu = PTHREAD_MUTEX_INITIALIZER;
+static strvec_t g_unpaused;
+
+void catalog_set_unpaused_providers(const json_t *ids) {
+    strvec_t next = {0};
+    json_t *v;
+    json_arr_foreach(ids, i, v) if (json_is_str(v) && !strvec_contains(&next, json_sv(v))) strvec_push(&next, json_sv(v));
+    pthread_mutex_lock(&g_unpaused_mu);
+    strvec_t old = g_unpaused;
+    g_unpaused = next;
+    pthread_mutex_unlock(&g_unpaused_mu);
+    strvec_free(&old);
+}
+
+static bool unpaused(const char *provider) {
+    pthread_mutex_lock(&g_unpaused_mu);
+    bool r = strvec_contains(&g_unpaused, provider);
+    pthread_mutex_unlock(&g_unpaused_mu);
+    return r;
+}
+
+/* providerPauseReason: why the auth rules turn `provider` off (`disabled "<reason>"`), else NULL. Listing it in
+ * `auth.unpausedProviders` takes the id back (the end user's choice); omc has no extension-registered logins that
+ * could. Borrowed. */
 const char *catalog_provider_pause_reason(const char *provider) {
-    if (!provider) return NULL;
+    if (!provider || unpaused(provider)) return NULL;
     json_t *d;
     json_arr_foreach(catalog_auth_providers(), i, d) if (str_eq(json_get_str(d, "id"), provider)) {
         const char *r = json_get_str(d, "disabled");

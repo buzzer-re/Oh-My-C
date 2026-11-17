@@ -3,6 +3,7 @@
 #include <strings.h>
 #include "tui/motion.h"
 #include "settings.h"
+#include "ai/ai.h"
 
 #include "core/fs.h"
 
@@ -221,6 +222,15 @@ static void rebuild(void) {
     for (size_t i = 0; i < ARRAY_LEN(layers); i++)
         if (layers[i]) json_merge(g_effective, layers[i]);
     json_free(project);
+    /* effect(cfgOperatorUnpausedProviders, setUnpausedProviders): the operator layers' value (never a project
+     * layer's) decides which paused providers are back on, applied to the process at once */
+    json_t *op = json_path(g_defaults, "auth.unpausedProviders");
+    json_t *olayers[] = {g_global, g_overlay, g_env, g_runtime};
+    for (size_t i = 0; i < ARRAY_LEN(olayers); i++) {
+        json_t *v = olayers[i] ? json_path(olayers[i], "auth.unpausedProviders") : NULL;
+        if (v) op = v;
+    }
+    catalog_set_unpaused_providers(json_is_arr(op) ? op : NULL);
 }
 
 /* the project layer (<cwd>/.omc or <cwd>/.omp config files); caller holds g_mu */
