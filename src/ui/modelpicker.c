@@ -7,7 +7,9 @@
  * whose context window is below the session's tokens grayed: picking one compacts with the current model
  * first), and a key-hint footer. A search starting with `@` lists the Ctrl+P quick roles (colored by their
  * cycle-track segment); pressing the picker key again toggles task mode (the pick becomes a session-only
- * task.agentModelOverrides.task override, red chrome). */
+ * task.agentModelOverrides.task override, red chrome). Tab / Shift+Tab step the list through all models
+ * and each provider's; in session mode ←/→ move a thinking slider for the highlighted model (shown after
+ * the status hint), whose level the pick applies (omp 807c6d37f5 / 94a10c5b22). */
 #include "ui/modelbrowser.h"
 #include "ui/overlays.h"
 #include "ui/ui.h"
@@ -34,7 +36,106 @@ typedef struct {
     char *current, *current_role, *task_selector;
     bool role_mode, task_mode;
     char *last_query;
+    char *scope;    /* NULL: all models; else the provider listed */
+    char *thinking; /* the slider's pending level (#thinking); NULL until moved */
 } picker_t;
+
+/* ----- the thinking slider (model-picker.ts thinkingSteps / thinkingStep / #slider) ----- */
+
+#define MAX_STEPS 9
+typedef struct {
+    const char *steps[MAX_STEPS];
+    size_t n;
+    const char *value;
+    bool disabled;
+} slider_t;
+
+static const char *step_label(const char *id) {
+    static const char *const L[][2] = {{"auto", "Auto"}, {"off", "Off"},   {"minimal", "Min"},  {"low", "Low"},
+                                       {"medium", "Med"}, {"high", "High"}, {"xhigh", "XHigh"}, {"max", "Max"}};
+    for (size_t i = 0; i < ARRAY_LEN(L); i++)
+        if (str_eq(id, L[i][0])) return L[i][1];
+    return id;
+}
+
+/* `model`'s steps (auto, off, its efforts), frozen at off..high when it has no effort to pick */
+static void thinking_steps(const ai_model_t *m, slider_t *s) {
+    s->n = 0;
+    s->disabled = false;
+    if (m->reasoning) {
+        s->steps[s->n++] = "auto";
+        s->steps[s->n++] = "off";
+        for (int e = EFFORT_MINIMAL; e <= EFFORT_MAX; e++)
+            if (model_supports_effort(m, (ai_effort_t)e)) s->steps[s->n++] = effort_name((ai_effort_t)e);
+        if (s->n > 2) return;
+        s->n = 0;
+    }
+    for (int e = EFFORT_OFF; e <= EFFORT_HIGH; e++) s->steps[s->n++] = effort_name((ai_effort_t)e);
+    s->disabled = true;
+}
+
+/* `level` as one of the live steps: unset / inherit as the model's default, an effort clamped to its ladder */
+static const char *thinking_step(const ai_model_t *m, const slider_t *s, const char *level) {
+    const char *dl = m->thinking ? json_get_str(m->thinking, "defaultLevel") : NULL;
+    const char *wanted = !level || str_eq(level, "inherit") ? (dl ? dl : "off") : level;
+    for (size_t i = 0; i < s->n; i++)
+        if (str_eq(s->steps[i], wanted)) return s->steps[i];
+    if (str_eq(wanted, "auto") || str_eq(wanted, "off")) return "off";
+    ai_effort_t e;
+    if (effort_parse(wanted, &e) != 0) return "off";
+    const char *c = effort_name(model_clamp_effort(m, e));
+    for (size_t i = 0; i < s->n; i++)
+        if (str_eq(s->steps[i], c)) return s->steps[i];
+    return "off";
+}
+
+/* thinkingLevelFor (selector-controller.ts): the role's level, else the session's (auto carries over; a fixed
+ * level yields to the model's own default) */
+static const char *thinking_level_for(const picker_t *p, const ai_model_t *m) {
+    const char *role = app_temporary_thinking(m);
+    if (role) return role;
+    app_t *a = p->u->app;
+    if (a->auto_thinking) return "auto";
+    const char *dl = m->thinking ? json_get_str(m->thinking, "defaultLevel") : NULL;
+    return dl ? dl : effort_name(a->thinking);
+}
+
+static bool session_mode(const picker_t *p) { return !p->task_mode && !p->role_mode; }
+
+static bool slider_of(const picker_t *p, slider_t *s) {
+    if (!session_mode(p)) return false;
+    const ui_model_item_t *it = ui_model_browser_selected(p->b);
+    if (!it || !it->model) return false;
+    thinking_steps(it->model, s);
+    if (s->disabled) {
+        s->value = "off";
+        return true;
+    }
+    s->value = thinking_step(it->model, s, p->thinking ? p->thinking : thinking_level_for(p, it->model));
+    return true;
+}
+
+/* #pendingThinking: the slider level picking `m` applies; NULL when untouched or the model has no effort */
+static const char *pending_thinking(const picker_t *p, const ai_model_t *m) {
+    if (!p->thinking || !session_mode(p)) return NULL;
+    slider_t s;
+    thinking_steps(m, &s);
+    return s.disabled ? NULL : thinking_step(m, &s, p->thinking);
+}
+
+static void step_thinking(picker_t *p, int delta) {
+    slider_t s;
+    if (!slider_of(p, &s) || s.disabled) return;
+    size_t i = 0;
+    while (i < s.n && !str_eq(s.steps[i], s.value)) i++;
+    long j = (long)i + delta;
+    if (j < 0) j = 0;
+    if (j >= (long)s.n) j = (long)s.n - 1;
+    if (str_eq(s.steps[j], s.value)) return;
+    free(p->thinking);
+    p->thinking = xstrdup(s.steps[j]);
+    tui_request_render(p->u->tui);
+}
 
 static picker_t *g_open; /* #focusOpenMenu("model-picker") */
 
@@ -54,8 +155,18 @@ static void add_items(picker_t *p, bool roles) {
             ui_model_browser_add_labeled(p->b, p->roles[i].model, sel, sel, color);
             free(sel);
         }
-    } else
-        for (size_t i = 0; i < p->models.n; i++) ui_model_browser_add(p->b, p->models.v[i]);
+    } else {
+        /* #scopedModelItems: a provider scope that lost its models falls back to all */
+        bool any = false;
+        for (size_t i = 0; p->scope && i < p->models.n; i++)
+            if (str_eq(p->models.v[i]->provider, p->scope)) any = true;
+        if (!any) {
+            free(p->scope);
+            p->scope = NULL;
+        }
+        for (size_t i = 0; i < p->models.n; i++)
+            if (!p->scope || str_eq(p->models.v[i]->provider, p->scope)) ui_model_browser_add(p->b, p->models.v[i]);
+    }
 }
 
 /* #syncItemsForQuery: swap model rows for quick-role rows when a leading `@` toggles the search mode */
@@ -64,6 +175,10 @@ static void sync_items(picker_t *p, bool refresh) {
     bool changed = role_mode != p->role_mode;
     if (!changed && !refresh) return;
     p->role_mode = role_mode;
+    if (role_mode) {
+        free(p->scope);
+        p->scope = NULL;
+    }
     p->b->show_provider = !role_mode;
     p->b->mark_over_context = !role_mode && !p->task_mode;
     const char *cur = role_mode ? p->current_role : p->task_mode ? p->task_selector : p->current;
@@ -88,17 +203,68 @@ static void sync_items(picker_t *p, bool refresh) {
     }
 }
 
+/* the providers with models, alphabetical (#pickerScopes) */
+static int cmp_provider(const void *a, const void *b) {
+    int c = strcasecmp(*(char *const *)a, *(char *const *)b);
+    return c ? c : strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static strvec_t picker_scopes(const picker_t *p) {
+    strvec_t v = {0};
+    for (size_t i = 0; i < p->models.n; i++) {
+        bool seen = false;
+        for (size_t k = 0; k < v.n && !seen; k++) seen = str_eq(v.v[k], p->models.v[i]->provider);
+        if (!seen) strvec_push(&v, p->models.v[i]->provider);
+    }
+    if (v.n > 1) qsort(v.v, v.n, sizeof *v.v, cmp_provider);
+    return v;
+}
+
+/* #setScope: a provider (picking the active one again goes back to all); the highlight stays on its model when
+ * the scope lists it, else falls back to the current model */
+static void set_scope(picker_t *p, const char *picked) {
+    const char *id = picked && p->scope && str_eq(picked, p->scope) ? NULL : picked;
+    if (p->role_mode || (!id && !p->scope) || (id && p->scope && str_eq(id, p->scope))) return;
+    const ui_model_item_t *sel = ui_model_browser_selected(p->b);
+    char *before = sel ? xstrdup(sel->selector) : NULL;
+    free(p->scope);
+    p->scope = id ? xstrdup(id) : NULL;
+    sync_items(p, true);
+    sel = ui_model_browser_selected(p->b);
+    const char *target = p->task_mode ? p->task_selector : p->current;
+    if (!(sel && before && str_eq(sel->selector, before)) && target) ui_model_browser_select(p->b, target);
+    free(before);
+    tui_request_render(p->u->tui);
+}
+
+/* #cycleScope: all models, then each provider, wrapping */
+static void cycle_scope(picker_t *p, int delta) {
+    strvec_t sc = picker_scopes(p);
+    long n = (long)sc.n + 1, idx = 0;
+    for (size_t i = 0; p->scope && i < sc.n; i++)
+        if (str_eq(sc.v[i], p->scope)) idx = (long)i + 1;
+    long next = (idx + delta + n) % n;
+    set_scope(p, next == 0 ? NULL : sc.v[next - 1]);
+    strvec_free(&sc);
+}
+
 static char *footer(const picker_t *p) {
     char *up = ui_editor_key("tui.select.up"), *down = ui_editor_key("tui.select.down");
     char *enter = ui_key_hint("enter"), *cancel = ui_editor_key("tui.select.cancel");
+    char *tab = ui_key_hint("tab"), *left = ui_key_hint("left"), *right = ui_key_hint("right");
     char *r;
     if (p->task_mode)
-        r = xasprintf("%s/%s models \xc2\xb7 %s use for Task subagents \xc2\xb7 type to search \xc2\xb7 %s close", up, down, enter, cancel);
+        r = xasprintf("%s/%s models \xc2\xb7 %s use for Task subagents \xc2\xb7 %s provider \xc2\xb7 type to search \xc2\xb7 %s close", up,
+                      down, enter, tab, cancel);
     else if (p->role_mode)
         r = xasprintf("%s/%s roles \xc2\xb7 %s apply role model \xc2\xb7 type to search \xc2\xb7 %s close", up, down, enter, cancel);
     else
-        r = xasprintf("%s/%s models \xc2\xb7 %s use for this session \xc2\xb7 type to search \xc2\xb7 @ quick roles \xc2\xb7 %s close", up,
-                      down, enter, cancel);
+        r = xasprintf("%s/%s models \xc2\xb7 %s use for this session \xc2\xb7 %s provider \xc2\xb7 %s/%s thinking \xc2\xb7 type to search "
+                      "\xc2\xb7 @ quick roles \xc2\xb7 %s close",
+                      up, down, enter, tab, left, right, cancel);
+    free(tab);
+    free(left);
+    free(right);
     char *tk = ui_editor_key("app.model.selectTemporary");
     if (*tk && !p->role_mode) {
         char *x = xasprintf("%s \xc2\xb7 %s %s", r, tk, p->task_mode ? "session model" : "task model");
@@ -124,6 +290,24 @@ static void picker_render(tui_component_t *c, int width, strvec_t *out) {
     int prev = ui_box_tone(tone);
     char *status = p->task_mode ? tui_fgs(NULL, TUI_TC_ERROR, " " TASK_STATUS_HINT)
                                 : tui_fgs(NULL, TUI_TC_MUTED, p->role_mode ? " " QUICK_ROLE_STATUS_HINT : " " STATUS_HINT);
+    slider_t sl;
+    if (slider_of(p, &sl)) {
+        char *add;
+        if (sl.disabled) add = tui_fgs(NULL, TUI_TC_DIM, " \xc2\xb7 no thinking");
+        else {
+            ai_effort_t e = EFFORT_OFF;
+            if (effort_parse(sl.value, &e) != 0) e = EFFORT_OFF; /* auto: thinkingOff */
+            char *m = tui_fgs(NULL, TUI_TC_MUTED, " \xc2\xb7 thinking ");
+            char *v = tui_fgs(NULL, (tui_tc_t)(TUI_TC_THINKING_OFF + (int)e), step_label(sl.value));
+            add = xasprintf("%s%s", m, v);
+            free(m);
+            free(v);
+        }
+        char *x = xasprintf("%s%s", status, add);
+        free(status);
+        free(add);
+        status = x;
+    }
     strvec_push_own(out, ui_box_top(width, p->task_mode ? "Switch Task Model" : "Switch Model"));
     strvec_push_own(out, ui_box_row(status, width));
     free(status);
@@ -231,9 +415,12 @@ static void activate(picker_t *p, const ui_model_item_t *it) {
     }
     const ai_model_t *m = it->model;
     bool over = ui_model_browser_over_context(p->b, it);
+    const char *pend = pending_thinking(p, m);
+    char *level = pend ? xstrdup(pend) : NULL;
     picker_close(p); /* an over-context pick closes first so the compaction loader shows */
     (void)over;
-    ui_switch_session_model(u, m, NULL);
+    ui_switch_session_model(u, m, level);
+    free(level);
 }
 
 static bool picker_key(tui_component_t *c, const tui_key_t *k) {
@@ -246,6 +433,27 @@ static bool picker_key(tui_component_t *c, const tui_key_t *k) {
         if (target) ui_model_browser_select(p->b, target);
         tui_request_render(p->u->tui);
         return true;
+    }
+    if (!p->role_mode) {
+        if (tui_key_matches(k, "tab")) {
+            cycle_scope(p, 1);
+            return true;
+        }
+        if (tui_key_matches(k, "shift+tab")) {
+            cycle_scope(p, -1);
+            return true;
+        }
+    }
+    /* ←/→ step the thinking slider; the search keeps ⌥←/→ and ⌃←/→ to move its caret by words */
+    if (session_mode(p)) {
+        if (tui_key_matches(k, "left")) {
+            step_thinking(p, -1);
+            return true;
+        }
+        if (tui_key_matches(k, "right")) {
+            step_thinking(p, 1);
+            return true;
+        }
     }
     int r = ui_model_browser_key(p->b, k);
     if (strcmp(p->last_query, query_of(p))) {
@@ -276,6 +484,8 @@ static void picker_destroy(tui_component_t *c) {
     free(p->current_role);
     free(p->task_selector);
     free(p->last_query);
+    free(p->scope);
+    free(p->thinking);
     free(p);
 }
 
