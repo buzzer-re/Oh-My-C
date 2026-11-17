@@ -295,6 +295,25 @@ static void test_tree_selector(void) {
     free(last_select), free(last_label_id), free(last_label);
 }
 
+/* old-session dates in /resume follow LC_ALL / LC_TIME / LANG (omp 1624f68779) */
+static void test_picker_dates(void) {
+    struct tm tm = {0};
+    tm.tm_year = 2026 - 1900;
+    tm.tm_mon = 2;
+    tm.tm_mday = 5;
+    const struct {
+        const char *loc, *want;
+    } cases[] = {{"", "3/5/2026"},          {"en-US", "3/5/2026"}, {"en-GB", "05/03/2026"}, {"de-DE", "5.3.2026"},
+                 {"fr-FR", "05/03/2026"},   {"ja-JP", "2026/3/5"}, {"sv-SE", "2026-03-05"}, {"ko-KR", "2026. 3. 5."},
+                 {"xx-YY", "3/5/2026"}};
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char *got = ui_locale_date(&tm, cases[i].loc);
+        if (strcmp(got, cases[i].want)) fprintf(stderr, "date %s: %s\n", cases[i].loc, got);
+        CHECK(!strcmp(got, cases[i].want));
+        free(got);
+    }
+}
+
 /* the resume picker's first pass: titled sessions from the file heads only */
 static void test_picker_first_pass(void) {
     char *dir = xasprintf("%s/omc-picker-%d", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());
@@ -386,6 +405,7 @@ static void test_session_concurrent_reads(void) {
 int main(void) {
     test_session_concurrent_reads();
     test_picker_first_pass();
+    test_picker_dates();
     char *err = NULL;
     tui_theme_t *th = tui_theme_load("titanium", TUI_COLOR_TRUECOLOR, &err);
     if (th) tui_theme_set(th);

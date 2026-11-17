@@ -14,6 +14,18 @@ char *ui_editor_key(const char *action) {
     return ui_key_hint(keys->v[0]);
 }
 
+char *ui_editor_keys(const char *action) {
+    const strvec_t *keys = tui_keybindings_get(tui_keybindings_global(), action);
+    sb_t b = SB_INIT;
+    for (size_t i = 0; keys && i < keys->n; i++) {
+        char *h = ui_key_hint(keys->v[i]);
+        if (i) sb_putc(&b, '/');
+        sb_append(&b, h);
+        free(h);
+    }
+    return sb_detach(&b);
+}
+
 /* ---------- lines ---------- */
 
 char *ui_center_line(const char *line, int width) {

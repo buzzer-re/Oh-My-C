@@ -20,6 +20,12 @@ struct ai_model;
 
 /* first key bound to an action ("tui.select.confirm"), formatted; "" when unbound. Owned. */
 char *ui_editor_key(const char *action);
+/* every key bound to `action`, joined with "/" (formatKeyHints); "" when unbound */
+char *ui_editor_keys(const char *action);
+/* the /resume picker's old-session dates: systemDateLocale ("" = en-US) and toLocaleDateString(locale) */
+const char *ui_system_date_locale(void);
+struct tm;
+char *ui_locale_date(const struct tm *tm, const char *locale);
 /* centerLine: pad left by floor((width - w) / 2) and right to width (truncate when too wide). Owned. */
 char *ui_center_line(const char *line, int width);
 /* pad (no truncation) to width; truncates when wider. Owned. */

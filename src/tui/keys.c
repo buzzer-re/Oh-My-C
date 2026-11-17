@@ -856,7 +856,7 @@ static const struct {
     {"app.session.togglePath", {"ctrl+p"}},
     {"app.session.toggleSort", {"ctrl+s"}},
     {"app.session.rename", {"ctrl+r"}},
-    {"app.session.delete", {"ctrl+d"}},
+    {"app.session.delete", {"backspace", "delete"}},
     {"app.session.deleteNoninvasive", {"ctrl+backspace"}},
     {"app.session.pin", {"alt+k"}},
     {"app.session.unpin", {"alt+shift+k"}},
