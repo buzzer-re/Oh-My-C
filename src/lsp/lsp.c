@@ -1142,6 +1142,15 @@ lsp_manager_t *lsp_manager_new(const char *cwd) {
     return m;
 }
 
+/* a new conversation reports every diagnostic again (the diagnostics ledger is conversation state) */
+void lsp_manager_reset_ledger(lsp_manager_t *m) {
+    if (!m) return;
+    pthread_mutex_lock(&m->mu);
+    json_free(m->ledger);
+    m->ledger = json_obj();
+    pthread_mutex_unlock(&m->mu);
+}
+
 void lsp_manager_free(lsp_manager_t *m) {
     if (!m) return;
     for (size_t i = 0; i < m->clients.n; i++) client_stop(m->clients.v[i], true);

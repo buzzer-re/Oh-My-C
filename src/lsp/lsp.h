@@ -7,6 +7,7 @@
 typedef struct lsp_manager lsp_manager_t;
 
 lsp_manager_t *lsp_manager_new(const char *cwd);
+void lsp_manager_reset_ledger(lsp_manager_t *m);
 void lsp_manager_free(lsp_manager_t *m);
 agent_tool_t *tool_lsp_new(tool_env_t *env, lsp_manager_t *m);
 /* After a write/edit: sync the file with running servers and return formatted diagnostics (owned) or NULL. */

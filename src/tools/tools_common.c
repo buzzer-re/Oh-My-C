@@ -25,6 +25,20 @@ tool_env_t *tool_env_new(const char *cwd) {
     return e;
 }
 
+/* a fresh ToolConversationState (omp 84f5adc3bb): /new and session switches start tools fresh — hashline snapshots,
+ * conflict:// ids and repeat-read counts do not carry over from the previous conversation */
+void tool_env_reset_conversation(tool_env_t *e) {
+    if (!e) return;
+    pthread_mutex_lock(&e->mu);
+    edit_store_free(&e->store);
+    edit_store_init(&e->store);
+    conflict_history_free(e->conflicts);
+    e->conflicts = NULL;
+    hmap_free(&e->read_repeats, free);
+    hmap_init(&e->read_repeats);
+    pthread_mutex_unlock(&e->mu);
+}
+
 void tool_env_free(tool_env_t *e) {
     if (!e) return;
     free(e->cwd);
