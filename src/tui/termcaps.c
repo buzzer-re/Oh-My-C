@@ -791,6 +791,24 @@ static uint32_t acquire_id(const char *key) {
     return id;
 }
 
+void tui_image_release(const char *key) {
+    if (!g_maps || !key || !*key) return;
+    void *v = hmap_get(&g_ids, key);
+    if (!v) return;
+    uint32_t id = (uint32_t)(uintptr_t)v;
+    char ids[16];
+    snprintf(ids, sizeof ids, "%u", id);
+    if (hmap_get(&g_transmitted, ids)) { /* deleteKittyImage: the placements and the data go */
+        char *del = wrap_passthrough(xasprintf("\x1b_Ga=d,d=I,i=%u,q=2\x1b\\", id));
+        sb_append(&g_pending, del);
+        free(del);
+        free(hmap_del(&g_transmitted, ids));
+    }
+    hmap_del(&g_placement, ids);
+    hmap_del(&g_ids, key);
+    free(hmap_del(&g_png, key));
+}
+
 char *tui_image_reset_display(void) {
     if (!g_maps || tui_image_protocol() != TUI_IMG_KITTY || !g_transmitted.n) return NULL;
     hmap_foreach(&g_transmitted, it) {

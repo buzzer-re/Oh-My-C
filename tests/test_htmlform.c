@@ -3,6 +3,7 @@
 #include "core/core.h"
 #include "core/json.h"
 #include "text/htmlform.h"
+#include "tui/termcaps.h"
 #include "tui/ansi.h"
 #include "tui/keys.h"
 #include "ui/overlays.h"
@@ -229,6 +230,18 @@ static void test_dialog(void) {
     CHECK(strstr(s, "[Image: dot") && strstr(s, "\xe2\x96\xa3 gone \xe2\x80\x94 couldn't load: ENOENT"), "pictures:\n%s", s);
     free(s);
     c->vt->destroy(c);
+    /* on Kitty a picture is an id'd placement that repainting never removes: it is deleted when the form closes
+     * (omp 27ed6a1307, 98162c0960) */
+    tui_set_image_protocol(TUI_IMG_KITTY);
+    c = ui_form_dialog_new(ih, &o4);
+    s = screen(c, 70);
+    free(s);
+    free(tui_image_take_pending());
+    c->vt->destroy(c);
+    char *pend = tui_image_take_pending();
+    CHECK(pend && strstr(pend, "\x1b_Ga=d,d=I,i="), "release: %s", pend ? pend : "(none)");
+    free(pend);
+    tui_set_image_protocol(TUI_IMG_NONE);
     free(ih);
     json_free(g_done_data);
     g_done_data = NULL;

@@ -1688,6 +1688,8 @@ static void fd_destroy(tui_component_t *c) {
     for (size_t i = 0; i < v->media.n; i++) {
         media_t *m = &v->media.v[i];
         if (m->job) m->job->cancel = 1; /* the job frees itself when its load lands */
+        /* the picture's id'd Kitty placement outlives a repaint: it leaves with the form */
+        if (m->state == MEDIA_READY) tui_image_release(m->key);
         free(m->reason), free(m->b64), free(m->mime), free(m->key);
     }
     free(v->media.v);
