@@ -320,6 +320,10 @@ check "plan blocks"    "working tree is read-only"  "$B" --model mock/mock-1 --p
 # eval (python kernel) when python3 is available
 if command -v python3 >/dev/null; then
     check "eval python"    "Tool said: 42"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"6*7"}'
+    # cells are `<cell-N>` in linecache (inspect.getsource, numbered frames); wait() refuses a number (omp 325470758a, c4d4c72cd2)
+    check "eval cell source" $'Tool said: def g():\n    return 41'  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"import inspect\ndef g():\n    return 41\nprint(inspect.getsource(g))"}'
+    check "eval cell frames" $'Traceback (most recent call last):\n  File "<cell-4>", line 1, in <module>\n    1/0'  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"1/0"}'
+    check "eval wait number" "TypeError: wait() takes agent or completion handles; it is not a sleep."  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"wait(3)"}'
     # sh(): a command run to completion on the eval session's shell; a failure raises ShellError (omp d013a0a269)
     check "eval sh"        "Tool said: 'hi\\n/tmp\\n' 3 'bad\\n'"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"x = sh(\"echo hi; pwd\", cwd=\"/tmp\")\ntry:\n    sh(\"echo bad; exit 3\")\nexcept ShellError as e:\n    print(repr(x), e.exit_code, repr(e.output))"}'
     # a kernel that exits during startup says why: its exit code and the end of its stderr (omp af92dbc0b2)
