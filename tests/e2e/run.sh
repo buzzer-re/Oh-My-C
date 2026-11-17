@@ -298,6 +298,12 @@ check "builtin rule"   "Box::leak"  "$B" --model mock/mock-1 -p "write:src/x.rs:
 # MCP stdio server bridged as mcp__<server>_<tool>
 printf '{"mcpServers":{"mockmcp":{"command":"python3","args":["-I","%s"]}}}' "$ROOT/tests/e2e/mock_mcp.py" > "$T/agent/mcp.json"
 check "mcp tool"       "mcp echo: hi-mcp"  "$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"hi-mcp"}'
+# MCP tool failures as omp's formatMCPToolFailure diagnostics (mcp/errors.ts): the server dies mid-call; a JSON-RPC
+# error whose data carries secrets and a request id
+check "mcp tool eof"   'Tool said: MCP failure\nserver: mockmcp\ntool: echo_text\ntransport: stdio\nstage: receive\nfailure: eof\nretryable: no\nmessage: MCP subprocess exited with code 3 before responding\ncode: 3\nnext: The connection was lost after the request was sent, so it may already have run; check its effect before retrying.' \
+    "$B" --model mock/mock-1 --mode json -p 'call:mcp__mockmcp_echo_text:{"text":"__crash__"}'
+check "mcp tool rpc"   'message: MCP error -32000: boom Bearer [redacted]\ncode: -32000\ntrace_id: req-42\ndata: {\"requestId\":\"req-42\",\"apiKey\":\"[redacted]\",\"detail\":\"x?token=[redacted]\",\"n\":[1,2]}\nnext: Address the server-reported MCP error before retrying.' \
+    "$B" --model mock/mock-1 --mode json -p 'call:mcp__mockmcp_echo_text:{"text":"__rpcerror__"}'
 grep -q "Mock MCP server instructions" "$T/req.jsonl" && echo "   ok  mcp instructions in prompt" || { echo "   FAIL mcp instructions"; fail=1; }
 rm -f "$T/agent/mcp.json"
 # MCP OAuth: discovery -> dynamic registration -> PKCE code (curl plays the browser) -> bearer token

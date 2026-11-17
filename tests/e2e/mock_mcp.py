@@ -91,6 +91,12 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "method": "notifications/prompts/list_changed"})
             send({"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": "mem://notes"}})
             res = {"content": [{"type": "text", "text": "prompts changed"}]}
+        elif msg["params"]["arguments"].get("text") == "__crash__":
+            sys.exit(3)  # the server dies mid-call, without answering
+        elif msg["params"]["arguments"].get("text") == "__rpcerror__":  # a JSON-RPC error with secret-bearing data
+            send({"jsonrpc": "2.0", "id": msg.get("id"), "error": {"code": -32000, "message": "boom Bearer abc.def",
+                  "data": {"requestId": "req-42", "apiKey": "s3cret", "detail": "x?token=zzz&q=1", "n": [1, 2]}}})
+            continue
         else:
             res = {"content": [{"type": "text", "text": "mcp echo: " + msg["params"]["arguments"].get("text", "")}]}
     elif FULL and method == "resources/list":

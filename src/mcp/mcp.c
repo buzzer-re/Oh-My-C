@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "mcp.h"
+#include "mcperr.h"
 
 #include "config/settings.h"
 #include "core/fs.h"
@@ -68,6 +69,7 @@ struct mcp_server {
     int http_status; /* last HTTP error status */
     bool no_oauth;   /* probe without stored OAuth tokens (config key "_noOAuth") */
     bool connected;  /* transport alive */
+    int exit_code;   /* stdio: the subprocess's exit code once stdout closed, -1 unknown (killed, still running) */
     sstate_t state;
     int64_t timeout_ms;
     int refs;
@@ -326,7 +328,10 @@ static void *stdio_reader(void *p) {
         }
     }
     sb_free(&line);
+    /* stdout closed: the exit code (when the process is gone by then) names the failure of requests in flight */
+    int code = s->closing ? -1 : child_wait(&s->child, 100);
     pthread_mutex_lock(&s->mu);
+    s->exit_code = code >= 0 ? code : -1;
     s->connected = false;
     pthread_cond_broadcast(&s->cv);
     pthread_mutex_unlock(&s->mu);
@@ -464,7 +469,26 @@ static int send_msg(mcp_server_t *s, const json_t *msg, char **err) {
     return http_send(s, msg, err);
 }
 
+static const char *transport_kind(const mcp_server_t *s) { return s->transport == T_STDIO ? "stdio" : "http"; }
+
+/* a failed send as normalizeMCPTransportError sees Bun's error */
+static void fail_from_send(mcp_server_t *s, const char *err, mcp_fail_t *fail) {
+    if (!fail) return;
+    const char *e = err ? err : "request failed";
+    if (strstr(e, "Connection refused")) /* Bun: code ConnectionRefused */
+        mcp_fail_normalize(fail, transport_kind(s), "send", "Unable to connect. Is the computer able to access the url?", "ConnectionRefused");
+    else mcp_fail_normalize(fail, transport_kind(s), s->transport == T_STDIO ? "send" : "receive", e, NULL);
+}
+
+static json_t *mcp_request_ex(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, char **err,
+                              mcp_fail_t *fail);
+
 json_t *mcp_request(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, char **err) {
+    return mcp_request_ex(s, method, params, timeout_ms, err, NULL);
+}
+
+static json_t *mcp_request_ex(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, char **err,
+                              mcp_fail_t *fail) {
     *err = NULL;
     pending_t *p = xcalloc(1, sizeof(*p));
     pthread_mutex_lock(&s->mu);
@@ -478,6 +502,7 @@ json_t *mcp_request(mcp_server_t *s, const char *method, json_t *params, int64_t
     if (params) json_set(msg, "params", params);
     int rc = send_msg(s, msg, err);
     json_free(msg);
+    if (rc != 0) fail_from_send(s, *err, fail);
     json_t *result = NULL;
     pthread_mutex_lock(&s->mu);
     if (rc == 0) {
@@ -496,14 +521,27 @@ json_t *mcp_request(mcp_server_t *s, const char *method, json_t *params, int64_t
         }
         if (p->done) {
             json_t *e = json_get(p->result, "error");
-            if (e) *err = xasprintf("%s (code %lld)", json_get_str(e, "message") ? json_get_str(e, "message") : "error",
-                                    (long long)json_get_int(e, "code", 0));
-            else result = json_take(p->result, "result");
+            if (e) {
+                *err = xasprintf("%s (code %lld)", json_get_str(e, "message") ? json_get_str(e, "message") : "error",
+                                 (long long)json_get_int(e, "code", 0));
+                mcp_fail_json_rpc(fail, transport_kind(s), e);
+            } else result = json_take(p->result, "result");
         } else if (s->ext_cancel && *s->ext_cancel) {
             *err = xstrdup("Aborted");
+        } else if (s->connected || s->transport == T_HTTP) {
+            *err = xasprintf("%s: %s timed out", s->name, method);
+            char *m = xasprintf("Request timeout after %lldms", (long long)timeout_ms);
+            mcp_fail_set(fail, transport_kind(s), "receive", "timeout", false, m, NULL);
+            free(m);
         } else {
-            *err = s->connected || s->transport == T_HTTP ? xasprintf("%s: %s timed out", s->name, method)
-                                                           : xasprintf("%s: server disconnected", s->name);
+            *err = xasprintf("%s: server disconnected", s->name);
+            /* the stdio transport's EOF: the request was written, so it is never replayed */
+            char *m = s->exit_code >= 0 ? xasprintf("MCP subprocess exited with code %d before responding", s->exit_code)
+                                        : xstrdup("MCP subprocess closed stdout before responding");
+            char *c = s->exit_code >= 0 ? xasprintf("%d", s->exit_code) : NULL;
+            mcp_fail_set(fail, "stdio", "receive", "eof", false, m, c);
+            free(m);
+            free(c);
         }
     }
     for (size_t i = 0; i < s->pending.n; i++) {
@@ -580,6 +618,7 @@ static void *sse_reader(void *p) {
 
 static mcp_server_t *server_new(const char *name, const json_t *cfg) {
     mcp_server_t *s = xcalloc(1, sizeof(*s));
+    s->exit_code = -1;
     s->name = xstrdup(name);
     s->cfg = json_clone(cfg);
     s->refs = 1;
@@ -1725,14 +1764,46 @@ static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *a
     pthread_mutex_lock(&s->mu);
     s->inflight_calls++;
     pthread_mutex_unlock(&s->mu);
-    json_t *res = mcp_request(s, "tools/call", p, s->timeout_ms, &err);
+    mcp_fail_t fail = {0};
+    json_t *res = mcp_request_ex(s, "tools/call", json_clone(p), s->timeout_ms, &err, &fail);
     settle_tool_call(s, b, ctx);
+    if (!res && !(cancel && *cancel) && mcp_fail_reconnectable(&fail)) {
+        /* isRetriableConnectionError: a stale connection gets one reconnect and replay */
+        srv_unref(s);
+        char *rerr = NULL;
+        mcp_reconnect_server(b->m, b->server, 0, &rerr);
+        free(rerr);
+        s = find_ref(b->m, b->server);
+        if (s && ready(s)) {
+            free(err);
+            err = NULL;
+            mcp_fail_free(&fail);
+            pthread_mutex_lock(&s->mu);
+            s->inflight_calls++;
+            pthread_mutex_unlock(&s->mu);
+            res = mcp_request_ex(s, "tools/call", json_clone(p), s->timeout_ms, &err, &fail);
+            settle_tool_call(s, b, ctx);
+        }
+    }
+    json_free(p);
     if (!res) {
-        tool_result_error(out, "MCP %s/%s failed: %s", b->server, b->tool, err ? err : "error");
+        if ((cancel && *cancel) || str_eq(err, "Aborted")) tool_result_error(out, "Aborted");
+        else if (fail.set) {
+            char *m = mcp_format_tool_failure(&fail, b->server, b->tool);
+            tool_result_error(out, "%s", m);
+            free(m);
+        } else {
+            mcp_fail_normalize(&fail, s ? transport_kind(s) : "unknown", "protocol", err ? err : "MCP tool call returned no result", NULL);
+            char *m = mcp_format_tool_failure(&fail, b->server, b->tool);
+            tool_result_error(out, "%s", m);
+            free(m);
+        }
+        mcp_fail_free(&fail);
         free(err);
         srv_unref(s);
         return 0;
     }
+    mcp_fail_free(&fail);
     srv_unref(s);
     json_t *c;
     json_arr_foreach(json_get_arr(res, "content"), i, c) {
