@@ -442,7 +442,7 @@ void oai_usage_accounting(ai_builder_t *b, int64_t prompt, int64_t output, int64
 
 static int64_t num_or(const json_t *o, const char *k, int64_t def) {
     json_t *v = json_get(o, k);
-    return json_is_num(v) ? (v->is_int ? v->u.num.i : (int64_t)v->u.num.d) : def;
+    return json_is_num(v) ? (v->is_int ? v->u.num.i : json_d2i(v->u.num.d)) : def;
 }
 
 static char *mistral_id(const char *id) {

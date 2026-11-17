@@ -775,8 +775,8 @@ static void fit_viewport(strvec_t *v, int rows) {
 static void apply_frame(screen_t *s, const json_t *f) {
     const char *t = json_get_str(f, "t");
     if (str_eq(t, "resize")) {
-        s->cols = (int)json_get_num(f, "cols", 0);
-        s->rows = (int)json_get_num(f, "rows", 0);
+        s->cols = (int)json_d2i(json_get_num(f, "cols", 0));
+        s->rows = (int)json_d2i(json_get_num(f, "rows", 0));
         fit_viewport(&s->viewport, s->rows);
     } else if (str_eq(t, "history")) {
         json_t *x;
@@ -792,7 +792,7 @@ static void apply_frame(screen_t *s, const json_t *f) {
         json_t *x;
         json_arr_foreach(json_get(f, "rows"), i, x) strvec_push(&s->viewport, json_sv(x));
     } else if (str_eq(t, "patch")) {
-        int rows = (int)json_get_num(f, "rows", 0);
+        int rows = (int)json_d2i(json_get_num(f, "rows", 0));
         s->rows = rows;
         fit_viewport(&s->viewport, rows);
         json_t *op;
@@ -941,8 +941,8 @@ static bool control_wait(double ms, bool *paused, painter_t *p) {
 int record_play(const json_t *recording, double speed, int64_t idle_limit_ms) {
     painter_t p = {0};
     const json_t *h = json_get(recording, "header");
-    p.screen.cols = (int)json_get_num(h, "cols", 80);
-    p.screen.rows = (int)json_get_num(h, "rows", 24);
+    p.screen.cols = (int)json_d2i(json_get_num(h, "cols", 80));
+    p.screen.rows = (int)json_d2i(json_get_num(h, "rows", 24));
     term_size(&p.width, &p.height);
     struct termios saved;
     bool raw = isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &saved) == 0;

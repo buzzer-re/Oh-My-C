@@ -149,8 +149,8 @@ json_t *debug_system_info(const char *cwd) {
 
 char *debug_format_system_info(const json_t *info) {
     const json_t *mem = json_get(info, "memory");
-    char *tot = out_format_bytes((int64_t)json_get_num(mem, "total", 0));
-    char *fr = out_format_bytes((int64_t)json_get_num(mem, "free", 0));
+    char *tot = out_format_bytes(json_d2i(json_get_num(mem, "total", 0)));
+    char *fr = out_format_bytes(json_d2i(json_get_num(mem, "free", 0)));
     sb_t b = SB_INIT;
     sb_append(&b, "System Information\n");
     sb_append(&b, "\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81"

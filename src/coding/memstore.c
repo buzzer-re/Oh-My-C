@@ -104,7 +104,7 @@ static int tx_end(tx_t *t) {
 static bool nget(const json_t *o, const char *k, int64_t *v) {
     json_t *x = json_get(o, k);
     if (!json_is_num(x)) return false;
-    *v = x->is_int ? x->u.num.i : (int64_t)x->u.num.d;
+    *v = x->is_int ? x->u.num.i : json_d2i(x->u.num.d);
     return true;
 }
 

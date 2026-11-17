@@ -1421,7 +1421,7 @@ static char *refresh_sso_token(const rctx_t *r, json_t *tok, const char *file, c
         if (at && *at) {
             out = xstrdup(at);
             json_set_str(tok, "accessToken", at);
-            char *exp = iso_no_ms(now_ms() + json_get_int(j, "expiresIn", 0) * 1000);
+            char *exp = iso_no_ms(time_add_ms(now_ms(), json_get_num(j, "expiresIn", 0) * 1000));
             json_set(tok, "expiresAt", json_str_own(exp));
             const char *nrt = json_get_str(j, "refreshToken");
             if (nrt && *nrt) json_set_str(tok, "refreshToken", nrt);

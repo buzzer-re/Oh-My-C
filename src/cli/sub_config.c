@@ -55,7 +55,7 @@ static bool truthy(const json_t *v) {
 }
 
 static int by_order(const void *x, const void *y) {
-    long a = (long)json_get_num(*(const json_t *const *)x, "order", 0), b = (long)json_get_num(*(const json_t *const *)y, "order", 0);
+    long a = (long)json_d2i(json_get_num(*(const json_t *const *)x, "order", 0)), b = (long)json_d2i(json_get_num(*(const json_t *const *)y, "order", 0));
     return a < b ? -1 : a > b;
 }
 

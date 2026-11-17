@@ -2614,7 +2614,7 @@ static bool rpc_sub_command(rpc_t *r, const json_t *cmd, const char *id, const c
         } else err = xstrdup("get_subagent_messages requires subagentId or sessionFile");
         pthread_mutex_unlock(&r->sub_mu);
         if (err) respond(r, id, type, false, NULL, err);
-        else respond(r, id, type, true, rpc_sub_transcript(file, fb ? (int64_t)json_get_num(cmd, "fromByte", 0) : 0), NULL);
+        else respond(r, id, type, true, rpc_sub_transcript(file, fb ? json_d2i(json_get_num(cmd, "fromByte", 0)) : 0), NULL);
         free(file), free(err);
         return true;
     }

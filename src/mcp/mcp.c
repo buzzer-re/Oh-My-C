@@ -257,7 +257,7 @@ static void deliver(mcp_server_t *s, json_t *msg) {
     }
     json_t *idj = json_get(msg, "id");
     if (json_is_num(idj) && (json_get(msg, "result") || json_get(msg, "error"))) {
-        int64_t id = idj->is_int ? idj->u.num.i : (int64_t)idj->u.num.d;
+        int64_t id = idj->is_int ? idj->u.num.i : json_d2i(idj->u.num.d);
         pthread_mutex_lock(&s->mu);
         for (size_t i = 0; i < s->pending.n; i++) {
             if (s->pending.v[i]->id == id && !s->pending.v[i]->done) {

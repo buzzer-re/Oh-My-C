@@ -146,7 +146,7 @@ static char *host_details(const json_t *h) {
     int n = 0;
     if (json_get_str(h, "host") && *json_get_str(h, "host")) sb_appendf(&b, "%s%s", n++ ? ", " : "", json_get_str(h, "host"));
     if (json_get_str(h, "username") && *json_get_str(h, "username")) sb_appendf(&b, "%suser=%s", n++ ? ", " : "", json_get_str(h, "username"));
-    int64_t port = (int64_t)json_get_num(h, "port", 0);
+    int64_t port = json_d2i(json_get_num(h, "port", 0));
     if (port && port != 22) sb_appendf(&b, "%sport=%lld", n++ ? ", " : "", (long long)port);
     char *t = n ? xasprintf("[%s]", sb_cstr(&b)) : xstrdup("");
     sb_free(&b);

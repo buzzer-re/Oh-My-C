@@ -151,7 +151,7 @@ static bool resolve_color(tui_theme_t *t, int slot, const json_t *val, const jso
         return false;
     }
     if (json_is_num(val)) {
-        int idx = (int)val->u.num.d;
+        int idx = (int)json_d2i(val->u.num.d);
         if (idx < 0 || idx > 255) {
             *err = xasprintf("color '%s': palette index out of range", SLOT_NAMES[slot]);
             return false;
@@ -214,7 +214,7 @@ static void resolve_ansi_palette(tui_theme_t *t, const json_t *terminal, const j
             }
         }
         if (v && json_is_num(v)) {
-            int idx = (int)v->u.num.d;
+            int idx = (int)json_d2i(v->u.num.d);
             if (idx >= 0 && idx <= 255) snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;5;%dm", idx);
         }
     }

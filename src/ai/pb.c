@@ -279,7 +279,7 @@ static int encode_msg(const pb_msg_t *m, const json_t *val, sb_t *out, char **er
 
 static int num_of(const json_t *v, const pb_field_t *f, int64_t *iv, double *dv, char **err) {
     if (json_is_num(v)) {
-        *iv = v->is_int ? v->u.num.i : (int64_t)v->u.num.d;
+        *iv = v->is_int ? v->u.num.i : json_d2i(v->u.num.d);
         *dv = v->is_int ? (double)v->u.num.i : v->u.num.d;
         return 0;
     }

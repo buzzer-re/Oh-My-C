@@ -893,7 +893,7 @@ static void bash_service(tool_env_t *env, tool_ctx_t *ctx, const char *name, con
     if (json_is_obj(rj)) {
         ready.log = blank_null(json_get_str(rj, "log"));
         ready.host = blank_null(json_get_str(rj, "host"));
-        ready.port = (int)json_get_num(rj, "port", 0);
+        ready.port = (int)json_d2i(json_get_num(rj, "port", 0));
         ready.timeout = json_get_num(rj, "timeout", 0);
         has_ready = ready.log || ready.host || json_get(rj, "port") || json_get(rj, "timeout");
     }

@@ -25,6 +25,12 @@
 #define JUDGE_PARSE_RETRIES 2
 #define IMAGE_MAX_BYTES (20u * 1024 * 1024)
 
+/* mono_ms() + ms without signed overflow (timeoutMs is model input: 1e300 is finite) */
+static int64_t deadline_after(int64_t ms) {
+    int64_t now = mono_ms();
+    return ms > INT64_MAX - now ? INT64_MAX : now + ms;
+}
+
 static const char *STRUCTURED_TOOL = "respond";
 static const char *SUBMIT_TOOL = "submit_judgment";
 
@@ -457,7 +463,7 @@ static json_t *op_wait(evalhost_t *h, const json_t *args, volatile sig_atomic_t 
         *err = xstrdup("wait() timeoutMs must be a non-negative finite number");
         return NULL;
     }
-    int64_t deadline = tm ? mono_ms() + (int64_t)tm->u.num.d : 0;
+    int64_t deadline = tm ? deadline_after(json_d2i(tm->u.num.d)) : 0;
     pthread_mutex_lock(&h->mu);
     VEC(chandle_t *) hs = {0};
     json_t *ref;
@@ -1175,7 +1181,7 @@ static json_t *batch_drain(batch_t *b, const json_t *args, volatile sig_atomic_t
         *err = batch_invalid("timeoutMs must be a non-negative finite number");
         return NULL;
     }
-    int64_t deadline = tm ? mono_ms() + (int64_t)tm->u.num.d : INT64_MAX;
+    int64_t deadline = tm ? deadline_after(json_d2i(tm->u.num.d)) : INT64_MAX;
     pthread_mutex_lock(&b->mu);
     if (b->cursor == json_len(b->settled) && b->running) {
         while (b->cursor == json_len(b->settled) && b->running && mono_ms() < deadline && !(cancel && *cancel))

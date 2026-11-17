@@ -223,7 +223,7 @@ static void print_hosts(const json_t *hosts) {
         const char *parts[4] = {0};
         char *port = NULL;
         parts[0] = json_get_str(v, "username");
-        int64_t pn = (int64_t)json_get_num(v, "port", 0);
+        int64_t pn = json_d2i(json_get_num(v, "port", 0));
         if (pn && pn != 22) parts[1] = port = xasprintf("port:%lld", (long long)pn);
         parts[2] = json_get_str(v, "keyPath");
         char *desc = json_get_str(v, "description") ? xasprintf("- %s", json_get_str(v, "description")) : NULL;
