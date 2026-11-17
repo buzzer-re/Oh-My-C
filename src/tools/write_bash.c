@@ -581,6 +581,8 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         handled = true;
     }
     if (handled) {
+        /* proc:// service stdin and mode writes change no files either (omp 60ef4a2e80) */
+        if (str_starts(path, "proc://") && !out->is_error) touches_no_files = true;
         if (touches_no_files) {
             if (!json_is_obj(out->details)) {
                 json_free(out->details);
