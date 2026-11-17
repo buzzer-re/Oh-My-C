@@ -1009,6 +1009,17 @@ static void jobs_free(jobs_t *jobs) {
     vec_free(jobs);
 }
 
+/* cascade.ts fallbackMatches: literal keyword lines from the already-read windows (score > 0), `rel:line` rows dealt
+ * round-robin across files so one keyword-dense file cannot crowd out the others; at most FIND_FALLBACK_ROWS */
+#define FIND_FALLBACK_ROWS 20
+#define FIND_FALLBACK_SNIPPET 160
+typedef struct {
+    size_t file;
+    int64_t line;
+    char *snippet;
+} fallback_row_t;
+typedef VEC(fallback_row_t) fallback_rows_t;
+
 typedef struct {
     size_t node;
     double lex;
@@ -1645,6 +1656,72 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         vec_free(&merged);
         free(rel);
     }
+    /* every judge request failed, but the lexical pass already read the strongest files and cut keyword windows:
+     * surface those literal matches so the caller need not re-run the search with grep */
+    json_t *fallback_j = json_arr();
+    if (str_eq(coverage, "unavailable") && kw.n) {
+        VEC(fallback_rows_t) per_file = {0};
+        for (size_t f = 0; f < files.n; f++) {
+            fallback_rows_t rows = {0};
+            for (size_t p = 0; p < files.v[f].passages.n && rows.n < FIND_FALLBACK_ROWS; p++) {
+                const passage_t *pg = &files.v[f].passages.v[p];
+                if (!(pg->score > 0)) continue;
+                char *plain = plain_content(pg);
+                strvec_t ls = text_lines(plain, strlen(plain));
+                for (size_t i = 0; i < ls.n && rows.n < FIND_FALLBACK_ROWS; i++) {
+                    char *lower = js_lower(ls.v[i]);
+                    bool hit = false;
+                    for (size_t k = 0; k < kw.n && !hit; k++) hit = strstr(lower, kw.v[k]) != NULL;
+                    free(lower);
+                    if (!hit) continue;
+                    char *t = trim_dup(ls.v[i]);
+                    fallback_row_t r = {f, pg->start + (int64_t)i, xstrndup(t, take_chars(t, FIND_FALLBACK_SNIPPET))};
+                    free(t);
+                    vec_push(&rows, r);
+                }
+                strvec_free(&ls);
+                free(plain);
+            }
+            if (rows.n) vec_push(&per_file, rows);
+            else vec_free(&rows);
+        }
+        bool header = false;
+        size_t added_total = 0;
+        for (size_t i = 0;; i++) {
+            bool added = false;
+            for (size_t f = 0; f < per_file.n; f++) {
+                if (i >= per_file.v[f].n || added_total >= FIND_FALLBACK_ROWS) continue;
+                const fallback_row_t *r = &per_file.v[f].v[i];
+                const fentry_t *e = &entries.v[files.v[r->file].node];
+                char *abs = strstr(e->rel, "://") || e->rel[0] == '/' ? xstrdup(e->rel) : path_join(root, e->rel);
+                char *rel = path_relative(env->cwd, abs);
+                if (str_starts(rel, "..")) {
+                    free(rel);
+                    rel = xstrdup(abs);
+                }
+                free(abs);
+                if (!header) {
+                    sb_append(&b, "\n\nunranked literal keyword matches (not semantically judged):");
+                    header = true;
+                }
+                sb_appendf(&b, "\n  %s:%lld  %s", rel, (long long)r->line, r->snippet);
+                json_t *o = json_obj();
+                json_set_str(o, "rel", rel);
+                json_set_int(o, "line", r->line);
+                json_set_str(o, "snippet", r->snippet);
+                json_push(fallback_j, o);
+                free(rel);
+                added_total++;
+                added = true;
+            }
+            if (!added || added_total >= FIND_FALLBACK_ROWS) break;
+        }
+        for (size_t f = 0; f < per_file.n; f++) {
+            for (size_t i = 0; i < per_file.v[f].n; i++) free(per_file.v[f].v[i].snippet);
+            vec_free(&per_file.v[f]);
+        }
+        vec_free(&per_file);
+    }
     {
         char *fb = fmt_bytes(st.file_bytes), *tok = fmt_number(st.input_tokens), *cost = js_fixed(st.cost, 4);
         char *wall = fmt_duration(elapsed), *api = fmt_duration(st.api_ms);
@@ -1672,6 +1749,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     json_set(out->details, "keywords", kj);
     json_set_num(out->details, "threshold", FIND_THRESHOLD);
     json_set(out->details, "hits", hits_j);
+    json_set(out->details, "lexicalFallback", fallback_j);
     json_set_str(out->details, "coverage", coverage);
     json_t *sj = json_obj();
     json_set_int(sj, "listed", st.listed);

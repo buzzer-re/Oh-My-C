@@ -786,6 +786,33 @@ int main(void) {
         strvec_free(&out);
         sb_free(&lng);
     }
+    /* omp e9be6da387: every judge request failed, the find card lists the literal fallback rows; omp 54f3265997: ask
+     * notes ride under their answer */
+    {
+        json_t *r = json_parse_str(
+            "{\"content\":[{\"type\":\"text\",\"text\":\"find unavailable\"}],\"details\":{\"query\":\"q\",\"keywords\":[\"x\"],"
+            "\"threshold\":0.2,\"hits\":[],\"lexicalFallback\":[{\"rel\":\"src/a.c\",\"line\":7,\"snippet\":\"int x;\"}],"
+            "\"coverage\":\"unavailable\",\"stats\":{\"listed\":1,\"requests\":3,\"failed\":3,\"failures\":[]}}}");
+        json_t *a = json_parse_str("{\"query\":\"q\",\"grep_keywords\":[\"x\"]}");
+        tc_call_t c = call("find", a, r, false);
+        strvec_t out = {0};
+        tc_render(&c, 100, &out);
+        CHECK(has_row(&out, "Unranked literal keyword matches (not semantically judged)") && has_row(&out, "src/a.c:7 int x;"),
+              "find fallback rows");
+        strvec_free(&out);
+        json_free(a);
+        json_free(r);
+        r = json_parse_str("{\"content\":[],\"details\":{\"answers\":[{\"name\":\"db\",\"question\":\"Database\",\"answer\":"
+                           "\"SQLite\"}],\"notes\":[{\"name\":\"db\",\"question\":\"Database\",\"option\":\"SQLite\",\"value\":"
+                           "\"sqlite\",\"text\":\"local only\"}]}}");
+        a = json_parse_str("{\"html\":\"<form></form>\"}");
+        c = call("ask", a, r, false);
+        tc_render(&c, 80, &out);
+        CHECK(has_row(&out, "\xe2\x9c\x8e SQLite: local only"), "ask note row");
+        strvec_free(&out);
+        json_free(a);
+        json_free(r);
+    }
     /* omp 22c4f22848: a colon written as the range dash folds into a comma list; `a.ts:12:5` keeps its colons */
     {
         const char *cases[][3] = {{"a.ts:20:40,85:100", "a.ts", "20-40,85-100"}, {"a.ts:12:5", "a.ts:12", "5"},

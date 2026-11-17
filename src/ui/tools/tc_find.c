@@ -163,10 +163,20 @@ void tc_find(const tc_call_t *c, int width, strvec_t *out) {
         tc_status_line_t sl = {.icon = TC_ST_WARNING, .spinner = -1, .title = "Find", .title_slot = TUI_TC_TOOL_TITLE,
                                .description = desc, .meta = (const char *const *)meta.v, .nmeta = meta.n};
         char *h = tc_status_line(&sl);
-        char *em = tc_empty_message(str_eq(json_get_str(d, "coverage"), "partial") ? "No relevant passages found in the judged files"
-                                                                                   : "No relevant passages found");
+        const json_t *fallback = json_get_arr(d, "lexicalFallback");
+        char *em = tc_empty_message(json_len(fallback) ? "Unranked literal keyword matches (not semantically judged)"
+                                    : str_eq(json_get_str(d, "coverage"), "partial") ? "No relevant passages found in the judged files"
+                                                                                       : "No relevant passages found");
         sb_t b = SB_INIT;
         sb_appendf(&b, "%s\n%s", h, em);
+        const json_t *lm;
+        json_arr_foreach(fallback, i, lm) { /* every judge request failed: the literal keyword lines */
+            char *loc = xasprintf("%s:%lld", json_get_str(lm, "rel") ? json_get_str(lm, "rel") : "", (long long)json_get_int(lm, "line", 0));
+            char *ps = tc_styled_path(loc), *sn = tc_replace_tabs(json_get_str(lm, "snippet") ? json_get_str(lm, "snippet") : "");
+            char *so = tc_fg(TUI_TC_TOOL_OUTPUT, sn);
+            sb_appendf(&b, "\n  %s %s", ps, so);
+            free(loc), free(ps), free(sn), free(so);
+        }
         json_t *f;
         json_arr_foreach(json_get_arr(stats, "failures"), i, f) if (json_is_str(f)) {
             char *w = tc_fg(TUI_TC_WARNING, json_sv(f));
