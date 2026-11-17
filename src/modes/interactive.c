@@ -2975,7 +2975,7 @@ static char *g_armed_bare_session;
 static bool focused_view_command(const char *name, const char *args) {
     if (str_eq(name, "jobs")) return !*args || str_eq(args, "full");
     if (str_eq(name, "usage")) return !*args || str_eq(args, "show");
-    return str_eq(name, "effort") || str_eq(name, "export");
+    return str_eq(name, "copy") || str_eq(name, "effort") || str_eq(name, "export");
 }
 
 static void skilldesc_start_cb(void *ud) { skilldesc_start_compression(ud); }
@@ -3007,7 +3007,7 @@ static void focused_submit(ui_t *u, tui_editor_t *ed, const char *text) {
             return;
         }
         char *ll = ui_double_tap_hint("left");
-        char *m = xasprintf("Only /btw, /effort, /export, /jobs, /model, /switch, /usage run here; other commands run in the main "
+        char *m = xasprintf("Only /btw, /copy, /effort, /export, /jobs, /model, /switch, /usage run here; other commands run in the main "
                             "session — press %s to return first",
                             ll);
         add_notice(u, "info", m);
