@@ -3,7 +3,8 @@
  *
  * Results are flat, ordered lines (match lines and context lines) per file, files sorted by path,
  * so callers can format them like upstream. Directory searches run in parallel; output ordering is
- * deterministic. Files containing NUL bytes are treated as binary and skipped (unless search_binary).
+ * deterministic. In directory walks, files containing NUL bytes are treated as binary and skipped (unless
+ * search_binary), only probed for a match; a single named file is searched as text.
  */
 #ifndef OMC_TEXT_SEARCH_H
 #define OMC_TEXT_SEARCH_H
@@ -63,6 +64,8 @@ typedef struct {
     uint32_t files_with_matches;
     uint32_t files_searched;
     uint32_t skipped_oversized;
+    strvec_t binary_matches;     /* searched-root-relative paths, in path order, of files skipped as binary although
+                                    their content matches (an explicitly named file is searched as text) */
     bool limit_reached;
     char *error;                 /* set when search_run returns -1 */
 } search_result_t;

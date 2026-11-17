@@ -470,6 +470,15 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
         free(t);
         free(j);
     }
+    /* files skipped as binary although their content matches */
+    char *binary_note = NULL;
+    if (json_len(json_get_arr(d, "binaryMatches"))) {
+        char *cnt = tc_format_count("file", (int64_t)json_len(json_get_arr(d, "binaryMatches")));
+        char *t = xasprintf("binary matches: %s", cnt);
+        binary_note = tc_fg(TUI_TC_WARNING, t);
+        free(t);
+        free(cnt);
+    }
     if (!detailed) {
         if (!*text || !strcmp(text, "No matches found")) {
             char *e = tc_empty_message("No matches found");
@@ -497,6 +506,7 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
             strvec_free(&all);
         }
         free(missing_note);
+        free(binary_note);
         strvec_free(&missing);
         free(text);
         free(subject);
@@ -510,9 +520,11 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
         char *h = tc_status_line(&sl);
         tc_push_wrapped(out, h, width);
         if (missing_note) tc_push_wrapped(out, missing_note, width);
+        if (binary_note) tc_push_wrapped(out, binary_note, width);
         free(h);
         strvec_free(&meta);
         free(missing_note);
+        free(binary_note);
         strvec_free(&missing);
         free(text);
         free(subject);
@@ -551,7 +563,7 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
             if (!x.marked || g.rows[li].kind == TC_GROW_FILE || grep_is_match(&g, li, &x)) compact[i].v[compact[i].n++] = li;
         }
     }
-    int extra = missing_note ? 1 : 0;
+    int extra = (missing_note ? 1 : 0) + (binary_note ? 1 : 0);
     tc_ggroup_t *shown;
     size_t nshown;
     char *summary;
@@ -560,6 +572,7 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
     strvec_t rows = {0};
     tc_grouped_tree(&g, shown, nshown, summary, grep_style, NULL, &rows);
     if (missing_note) strvec_push(&rows, missing_note);
+    if (binary_note) strvec_push(&rows, binary_note);
     tc_fit_headered(header, &rows, width, out);
     strvec_free(&rows);
     free(summary);
@@ -570,6 +583,7 @@ void tc_grep(const tc_call_t *c, int width, strvec_t *out) {
     free(header);
     free(ic);
     strvec_free(&meta);
+    free(binary_note);
     free(missing_note);
     strvec_free(&missing);
     free(text);

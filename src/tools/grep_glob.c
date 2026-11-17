@@ -20,6 +20,7 @@
 typedef struct {
     uint32_t line;
     bool match;
+    bool cut; /* grep: a column-cut row, not a complete source line */
     char mark; /* gutter marker overriding match (`-`/`+` for ast_edit), 0 = none */
     char *text;
 } dline_t;
@@ -670,8 +671,8 @@ static bool is_exclusion(tool_env_t *env, const char *entry) {
 /* ---------- grep (port of omp tools/grep.ts) ---------- */
 
 #define GREP_FILE_LIMIT 20
-#define GREP_MULTI_PER_FILE 20
-#define GREP_SINGLE_FILE 200
+#define GREP_MULTI_PER_FILE 10
+#define GREP_SINGLE_FILE 50
 #define GREP_TOTAL_CAP 2000
 #define GREP_MAX_COLUMN 512
 #define GREP_MAX_BYTES (50 * 1024)
@@ -686,6 +687,7 @@ typedef struct {
     char *text;
     bool truncated;
     VEC(gctx_t) before, after;
+    const lranges_t *ranges; /* the file's `path:N-M` ranges, NULL when unfiltered */
 } gmatch_t;
 typedef VEC(gmatch_t) gmatches_t;
 
@@ -694,6 +696,9 @@ typedef struct {
     char *glob;
     bool bare;
 } gtarget_t;
+
+/* omp's pushLine sanitizeText: ANSI escapes, NUL and other control characters never reach a grep row */
+static char *grep_clean(const char *s) { return out_sanitize(s, strlen(s), NULL); }
 
 static void gmatch_free(gmatch_t *m) {
     free(m->abs);
@@ -707,7 +712,7 @@ static void gmatch_free(gmatch_t *m) {
 /* run one native-equivalent search and append its matches (context grouped per match) */
 static int grep_run(const char *pattern, const char *root, const char *glob, bool bare, bool icase, bool multiline,
                     bool gitignore, int before, int after, int max_count, int per_file, const strvec_t *exclude,
-                    gmatches_t *out, bool *limit_reached, char **err) {
+                    gmatches_t *out, bool *limit_reached, strvec_t *binary_abs, char **err) {
     search_opts_t so = {0};
     so.pattern = pattern;
     so.path = root;
@@ -733,6 +738,8 @@ static int grep_run(const char *pattern, const char *root, const char *glob, boo
     if (sr.limit_reached) *limit_reached = true;
     struct stat st;
     bool root_is_dir = stat(root, &st) == 0 && S_ISDIR(st.st_mode);
+    /* binary files whose skipped content matches (named files are searched as text) */
+    for (size_t i = 0; i < sr.binary_matches.n && root_is_dir; i++) strvec_push_own(binary_abs, path_join(root, sr.binary_matches.v[i]));
     const char *cur_path = NULL;
     uint32_t cur_block = UINT32_MAX;
     size_t start = out->n;
@@ -810,7 +817,7 @@ static int grep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
 
     char *errmsg = NULL;
     strvec_t scoped = {0}, expanded = {0}, exclusions = {0}, entries = {0}, resolved = {0}, raw_paths = {0},
-             missing = {0}, effective = {0}, exact = {0};
+             missing = {0}, effective = {0}, exact = {0}, binary_abs = {0}, binary_disp = {0};
     VEC(lranges_t) spec_ranges = {0};
     VEC(gtarget_t) targets = {0};
     gmatches_t matches = {0};
@@ -1062,8 +1069,8 @@ static int grep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     int64_t native_max = has_ranges ? ((GREP_TOTAL_CAP + per_file_cap) / (per_file_cap + 1)) * native_per_file : GREP_TOTAL_CAP;
     if (native_max > INT32_MAX) native_max = INT32_MAX;
     json_t *cb = settings_get("grep.contextBefore"), *ca = settings_get("grep.contextAfter");
-    int before = json_is_num(cb) ? (int)MAX(0, cb->u.num.d) : 1;
-    int after = json_is_num(ca) ? (int)MAX(0, ca->u.num.d) : 3;
+    int before = json_is_num(cb) ? (int)MAX(0, cb->u.num.d) : 0;
+    int after = json_is_num(ca) ? (int)MAX(0, ca->u.num.d) : 0;
     bool multiline = strchr(pattern, '\n') || strstr(pattern, "\\n");
     bool limit_reached = false, total_cap = false;
     char *serr = NULL;
@@ -1075,7 +1082,7 @@ static int grep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             bool bare = exact.n ? false : targets.v[t].bare;
             gmatches_t tm = {0};
             if (grep_run(pattern, root, g, bare, !case_sensitive, multiline, gitignore, before, after, (int)native_max,
-                         (int)native_per_file, &exclusions, &tm, &limit_reached, &serr) != 0) {
+                         (int)native_per_file, &exclusions, &tm, &limit_reached, &binary_abs, &serr) != 0) {
                 vec_free(&tm);
                 goto search_err;
             }
@@ -1091,7 +1098,7 @@ static int grep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         }
     } else {
         if (grep_run(pattern, search_path, glob_filter, bare_glob, !case_sensitive, multiline, gitignore, before, after,
-                     (int)native_max, (int)native_per_file, &exclusions, &matches, &limit_reached, &serr) != 0)
+                     (int)native_max, (int)native_per_file, &exclusions, &matches, &limit_reached, &binary_abs, &serr) != 0)
             goto search_err;
         total_cap = (int64_t)matches.n >= native_max;
     }
@@ -1132,6 +1139,7 @@ searched:
                     else free(m->after.v[k].text);
                 }
                 m->after.n = a2;
+                m->ranges = rg; /* a cross-line match is kept by its first line: its other rows are filtered at render */
             }
             matches.v[w++] = *m;
         }
@@ -1178,11 +1186,23 @@ searched:
                                              "paths/pattern.",
                                              (long long)skip_files + 1, (long long)next_skip, total_label, (long long)next_skip)
                                  : NULL;
+    /* the page's warning notes, one per line (omp warningNote: missing paths, then binary matches) */
     char *missing_note = NULL;
-    if (missing.n) {
-        char *j = strvec_join(&missing, ", ");
-        missing_note = xasprintf("Skipped missing paths: %s", j);
-        free(j);
+    for (size_t k = 0; k < binary_abs.n; k++) strvec_push_own(&binary_disp, rel_cwd(binary_abs.v[k], env->cwd, false));
+    {
+        sb_t w = SB_INIT;
+        if (missing.n) {
+            char *j = strvec_join(&missing, ", ");
+            sb_appendf(&w, "Skipped missing paths: %s", j);
+            free(j);
+        }
+        if (binary_disp.n) {
+            char *names = format_capped(&binary_disp);
+            sb_appendf(&w, "%sBinary files also match (name one as `path` to search it as text): %s", w.len ? "\n" : "", names);
+            free(names);
+        }
+        if (w.len) missing_note = sb_detach(&w);
+        else sb_free(&w);
     }
     json_t *details = json_obj();
     json_set_str(details, "scopePath", scope_path);
@@ -1193,6 +1213,11 @@ searched:
         json_set_int(details, "fileCount", 0);
         json_set(details, "files", json_arr());
         json_set_bool(details, "truncated", false);
+        if (binary_disp.n) {
+            json_t *bm = json_arr();
+            for (size_t k = 0; k < binary_disp.n; k++) json_push_str(bm, binary_disp.v[k]);
+            json_set(details, "binaryMatches", bm);
+        }
         if (missing.n) {
             json_t *mp = json_arr();
             for (size_t k = 0; k < missing.n; k++) json_push_str(mp, missing.v[k]);
@@ -1201,6 +1226,7 @@ searched:
         bool past_end = can_page && skip > 0 && total_files > 0 && skip_files >= (int64_t)total_files;
         sb_t t = SB_INIT;
         if (past_end) sb_appendf(&t, "No more results (%s files total; skip=%lld is past the end)", total_label, (long long)skip);
+        else if (binary_disp.n) sb_append(&t, "No matches in text files");
         else sb_append(&t, "No matches found");
         if (missing_note) sb_appendf(&t, "\n%s", missing_note);
         tool_result_text(out, sb_cstr(&t));
@@ -1232,15 +1258,42 @@ searched:
         for (size_t k = 0; k < lists.v[li].n; k++) {
             gmatch_t *m = &matches.v[lists.v[li].v[k]];
             for (size_t c = 0; c < m->before.n; c++) {
-                dline_t dl = {.line = m->before.v[c].line, .text = xstrdup(m->before.v[c].text)};
+                dline_t dl = {.line = m->before.v[c].line, .text = grep_clean(m->before.v[c].text)};
                 vec_push(&df.lines, dl);
             }
-            dline_t ml = {.line = m->line, .match = true,
-                          .text = m->column ? xasprintf("%s [col %u]", m->text, m->column) : xstrdup(m->text)};
+            /* a cross-line match arrives as one block: each line it spans gets its own numbered row; a cut line shows a
+             * window around its first match, so the first row names where that match sits */
+            strvec_t rows = {0};
+            for (const char *p = m->text;;) {
+                const char *nl = strchr(p, '\n');
+                size_t n = nl ? (size_t)(nl - p) : strlen(p);
+                if (nl && n && p[n - 1] == '\r') n--;
+                char *raw_row = xstrndup(p, n);
+                strvec_push_own(&rows, grep_clean(raw_row));
+                free(raw_row);
+                if (!nl) break;
+                p = nl + 1;
+            }
+            if (m->column) {
+                char *c0 = xasprintf("%s [col %u]", rows.v[0], m->column);
+                free(rows.v[0]);
+                rows.v[0] = c0;
+            }
             if (m->truncated) lines_truncated = true;
-            vec_push(&df.lines, ml);
+            for (size_t r = 0; r < rows.n; r++) {
+                uint32_t ln = m->line + (uint32_t)r;
+                /* like context lines, rows outside the selected ranges are neither shown nor recorded as seen */
+                if (m->ranges && !in_ranges(ln, m->ranges)) continue;
+                /* the cut window is contiguous, so only the block's first and last rows may be partial */
+                dline_t ml = {.line = ln, .match = r == 0, .cut = m->truncated && (r == 0 || r + 1 == rows.n),
+                              .text = rows.v[r]};
+                rows.v[r] = NULL;
+                vec_push(&df.lines, ml);
+            }
+            for (size_t r = 0; r < rows.n; r++) free(rows.v[r]);
+            vec_free(&rows);
             for (size_t c = 0; c < m->after.n; c++) {
-                dline_t dl = {.line = m->after.v[c].line, .text = xstrdup(m->after.v[c].text)};
+                dline_t dl = {.line = m->after.v[c].line, .text = grep_clean(m->after.v[c].text)};
                 vec_push(&df.lines, dl);
             }
         }
@@ -1248,28 +1301,6 @@ searched:
     }
     bool grouped = is_dir || multi_scope;
     model = grep_render(&dfiles, grouped, hashline ? 1 : 0);
-    /* hashline: the rows shown become editable anchors (cut lines excluded) */
-    if (hashline) {
-        for (size_t i = 0; i < dfiles.n; i++) {
-            if (!dfiles.v[i].tag) continue;
-            char *abs = tool_resolve_path(env, dfiles.v[i].path);
-            for (size_t k = 0; k < dfiles.v[i].lines.n; k++) {
-                const dline_t *l = &dfiles.v[i].lines.v[k];
-                bool cut = (l->match && l->text && strstr(l->text, " [col ")) ||
-                           (!l->match && str_ends(l->text, "...") && strlen(l->text) >= GREP_MAX_COLUMN - 6);
-                if (cut) continue;
-                snapshot_t *sn = edit_store_find(&env->store, abs, dfiles.v[i].tag);
-                if (!sn) continue;
-                int64_t span = 1;
-                for (const char *p = l->text; (p = strchr(p, '\n')); p++) span++;
-                line_span_t r = {l->line, l->line + span - 1};
-                pthread_mutex_lock(&env->store.mu);
-                if (!(sn->seen.n == 1 && sn->seen.v[0].hi == INT64_MAX)) vec_push(&sn->seen, r);
-                pthread_mutex_unlock(&env->store.mu);
-            }
-            free(abs);
-        }
-    }
     /* capped files the kept text shows with a full cap of matches */
     strvec_t capped_disp = {0};
     VEC(size_t) capped_end = {0};
@@ -1327,6 +1358,52 @@ searched:
         out_truncate_head(raw, raw_len, (int64_t)GREP_MAX_BYTES - (int64_t)reserved, INT64_MAX, &tr);
         if (guard > 8) break;
     }
+    /* hashline: the rows the byte cap kept become editable anchors (cut rows excluded) */
+    if (hashline) {
+        int64_t kept = tr.truncated ? tr.output_lines : (int64_t)model.n;
+        for (size_t i = 0; i < dfiles.n; i++) {
+            const dfile_t *df = &dfiles.v[i];
+            if (!df->tag) continue;
+            /* the file's model rows (with `...` gaps) end at model_end; its header sits just above them */
+            int64_t nrows = 0;
+            uint32_t last = 0;
+            for (size_t k = 0; k < df->lines.n; k++) {
+                if (last && df->lines.v[k].line > last + 1) nrows++;
+                nrows++;
+                last = df->lines.v[k].line;
+            }
+            int64_t first_row = (int64_t)df->model_end - nrows;
+            if (kept < first_row) continue; /* dropped with its header: this output never showed the tag */
+            int64_t keep_rows = kept - first_row;
+            char *abs = tool_resolve_path(env, df->path);
+            snapshot_t *sn = edit_store_find(&env->store, abs, df->tag);
+            free(abs);
+            if (!sn) continue;
+            pthread_mutex_lock(&env->store.mu);
+            bool whole = sn->seen.n == 1 && sn->seen.v[0].hi == INT64_MAX;
+            bool any_cut = false; /* omp recordFullySeenRows: any cut row in the section */
+            for (size_t k = 0; k < df->lines.n; k++) any_cut |= df->lines.v[k].cut;
+            int64_t row = 0;
+            last = 0;
+            size_t recorded = 0;
+            for (size_t k = 0; k < df->lines.n && !whole; k++) {
+                const dline_t *l = &df->lines.v[k];
+                if (last && l->line > last + 1) row++;
+                last = l->line;
+                if (row++ >= keep_rows) break;
+                if (l->cut) continue;
+                line_span_t r = {l->line, l->line};
+                vec_push(&sn->seen, r);
+                recorded++;
+            }
+            /* only the header survived, or a cut row: provenance that anchors no line (omp NO_FULL_LINE) */
+            if (!whole && (any_cut || (keep_rows <= 0 && !recorded))) {
+                line_span_t r = {0, 0};
+                vec_push(&sn->seen, r);
+            }
+            pthread_mutex_unlock(&env->store.mu);
+        }
+    }
     sb_t text = SB_INIT;
     sb_appendn(&text, tr.content ? tr.content : "", tr.content ? tr.content_len : 0);
     sb_append(&text, suffix);
@@ -1354,6 +1431,11 @@ searched:
         char *dc = grep_display(&dfiles, grouped);
         json_set_str(details, "displayContent", dc);
         free(dc);
+    }
+    if (binary_disp.n) {
+        json_t *bm = json_arr();
+        for (size_t k = 0; k < binary_disp.n; k++) json_push_str(bm, binary_disp.v[k]);
+        json_set(details, "binaryMatches", bm);
     }
     if (missing.n) {
         json_t *mp = json_arr();
@@ -1418,6 +1500,8 @@ cleanup:
     strvec_free(&missing);
     strvec_free(&effective);
     strvec_free(&exact);
+    strvec_free(&binary_abs);
+    strvec_free(&binary_disp);
     return 0;
 }
 

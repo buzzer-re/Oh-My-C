@@ -138,6 +138,7 @@ typedef struct {
     bool more; /* stopped at cap while more matches exist */
     bool processed;
     bool oversized;
+    bool binary_match; /* skipped as binary although its content matches (pi-walker ScanOutcome.binary_match) */
 } fileres_t;
 
 static void *mem_rchr(const void *s, int c, size_t n) {
@@ -182,6 +183,15 @@ static char *line_text(const char *s, size_t n, ptrdiff_t ms, ptrdiff_t me, int 
     while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r' || s[n - 1] == '\n' || s[n - 1] == '\v' ||
                      s[n - 1] == '\f'))
         n--;
+    /* a named file is searched as text: a NUL byte becomes another C0 control, which the tool's sanitizeText drops
+     * like omp's (keeping the line's byte length for the column window) */
+    char *nul_free = NULL;
+    if (memchr(s, 0, n)) {
+        nul_free = xmalloc(n + 1);
+        for (size_t i = 0; i < n; i++) nul_free[i] = s[i] ? s[i] : '\x01';
+        nul_free[n] = 0;
+        s = nul_free;
+    }
     char *text;
     size_t tl;
     if (utf8_valid(s, n)) {
@@ -199,6 +209,7 @@ static char *line_text(const char *s, size_t n, ptrdiff_t ms, ptrdiff_t me, int 
             free(b);
         }
     }
+    free(nul_free);
     *truncated = false;
     if (maxcol <= 0 || tl <= (size_t)maxcol) return text;
     *truncated = true;
@@ -374,6 +385,7 @@ static void aggregate(const search_opts_t *o, char **paths, fileres_t *res, size
         }
         if (fr->oversized) { out->skipped_oversized++; continue; }
         out->files_searched++;
+        if (fr->binary_match && paths[i]) strvec_push(&out->binary_matches, paths[i]);
         if (fr->nmatch == 0) continue;
         out->files_with_matches++;
         out->total_matches += o->mode == SEARCH_FILES ? 1 : fr->nmatch;
@@ -532,7 +544,9 @@ static void *search_worker(void *arg) {
         if (r == 2) fr->oversized = true;
         else if (r == 1) {
             bool binary = !d->o->search_binary && memchr(rb.buf, 0, len) != NULL;
-            if (!binary) search_bytes(d->rx, rb.buf, len, &d->p, fr);
+            /* a binary input is not searched, only probed for a first match */
+            if (binary) fr->binary_match = rx_is_match(d->rx, rb.buf, len, 0);
+            else search_bytes(d->rx, rb.buf, len, &d->p, fr);
         }
         pthread_mutex_lock(&d->mu);
         fr->processed = true;
@@ -587,7 +601,8 @@ int search_run(const search_opts_t *o, search_result_t *out) {
     bool multiline = !(rx_flags(rx) & RX_LINE);
     sparams_t p = make_params(o, multiline);
     if (!S_ISDIR(st.st_mode)) {
-        /* single explicitly named file: no size limit, binary searched only if asked (like rg, skip) */
+        /* single explicitly named file: no size limit, searched as text even when it holds NUL bytes (pi-walker
+         * ScanParams.text for an explicit file root) */
         fileres_t fr;
         memset(&fr, 0, sizeof(fr));
         fr.processed = true;
@@ -599,8 +614,7 @@ int search_run(const search_opts_t *o, search_result_t *out) {
             if (map == MAP_FAILED) map = NULL;
             const char *buf = map ? map : "";
             if (!len || map) {
-                bool binary = !o->search_binary && len && memchr(buf, 0, len) != NULL;
-                if (!binary) search_bytes(rx, buf, len, &p, &fr);
+                search_bytes(rx, buf, len, &p, &fr);
             }
             if (map) munmap(map, len);
             close(fd);
@@ -694,6 +708,7 @@ void search_result_free(search_result_t *r) {
     if (!r) return;
     for (size_t i = 0; i < r->hits.n; i++) hit_free(&r->hits.v[i]);
     vec_free(&r->hits);
+    strvec_free(&r->binary_matches);
     free(r->error);
     r->error = NULL;
 }

@@ -88,6 +88,15 @@ check "tool suggest one"  "Tool ast_grep not found. Did you mean grep?"  "$B" --
 check "tool suggest none" "Tool zzz_nope not found"  "$B" --model mock/mock-1 --no-session -p 'call:zzz_nope:{}'
 check "tool suggest mcp"  "Tool mcp__srv__read not found. Did you mean read?"  "$B" --model mock/mock-1 --no-session -p 'call:mcp__srv__read:{}'
 check "grep partial"   "Skipped missing paths: nope"     "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"written","path":"a;nope"}'
+# grep v18.22: 10 matches per file across several files, cross-line rows numbered, binary files named only when they
+# match (a named one is searched as text), match lines only by default (omp 53058a755c, 1b7b9a6860, 390d9cd437)
+mkdir -p gq; for i in $(seq 1 12); do echo "gqx $i"; done > gq/many.txt; printf 'gqa\ngqb\nctx\n' > gq/x.txt; printf 'gqx\0bin\n' > gq/d.bin
+check "grep per-file cap" $'*10:gqx 10\n## x.txt#'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqx|gqa","path":"gq"}'
+check "grep cap notice" "More than 10 matches in gq/many.txt; grep keeps the first 10 per file when searching several. Search one file alone for up to 50."  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqx","path":"gq"}'
+check "grep binary note" 'Binary files also match (name one as `path` to search it as text): gq/d.bin'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqx","path":"gq"}'
+check "grep binary only" $'Tool said: No matches in text files\nBinary files also match'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"bin$","path":"gq"}'
+check "grep named binary" '*1:gqxbin'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"bin","path":"gq/d.bin"}'
+check "grep cross-line"  $'*1:gqa\n 2:gqb'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqa\\ngqb","path":"gq/x.txt"}'
 check "glob none"      "No files found matching pattern" "$B" --model mock/mock-1 -p 'call:glob:{"path":"*.zzq"}'
 check "glob limit"     "Requested limit 500 clamped to the max of 200" "$B" --model mock/mock-1 -p 'call:glob:{"path":"a","limit":500}'
 check "plain answer"   "plain answer"                    "$B" --model mock/mock-1 -p "hi"
