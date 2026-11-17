@@ -1341,7 +1341,9 @@ static void *plan_exec_main(void *p) {
     }
     /* seed an auto name from the plan title when the session has none */
     char *seeded = app_plan_humanize_title(x->title);
-    if (*seeded && a->session && !a->session->title) session_set_title(a->session, seeded, "auto");
+    /* unless automatic titling is off (`--no-title` / PI_NO_TITLE) */
+    if (*seeded && !env_truthy("PI_NO_TITLE") && !env_truthy("OMC_NO_TITLE") && a->session && !a->session->title)
+        session_set_title(a->session, seeded, "auto");
     free(seeded);
     a->plan_reference_sent = true; /* markPlanReferenceSent: the synthetic prompt carries the plan */
     char *prompt = app_plan_approved_prompt(a, x->path, x->content, x->preserve);
