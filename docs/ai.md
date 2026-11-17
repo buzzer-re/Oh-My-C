@@ -177,7 +177,7 @@ back as an assistant message with `stopReason: "error"` and `errorMessage`.
 | `devin-agent` | `provider_devin.c` | `devin.ts`, `catalog/src/wire/devin*.ts` | Connect + protobuf server stream |
 | provider `gitlab-duo` (on anthropic/completions/responses APIs) | `provider_gitlab_duo.c` | `gitlab-duo.ts` | direct-access token exchange, then GitLab Cloud Connector proxy through the matching provider above |
 | `gitlab-duo-agent` | `provider_gitlab_duo_workflow.c` | `gitlab-duo-workflow.ts` | Duo Workflow Service over WebSocket |
-| `typesafe`, `openrouter-decisions`, `workers-ai-systemone` (judgment only) | `judgment_native.c` | `ai/src/judgment/{native,systemone}.ts` | typed-question APIs used by the eval judge chain, not by chat |
+| `typesafe`, `openrouter-decisions`, `openai-decisions`, `workers-ai-systemone`, `liquid-systemone`, `nace-systemone`, `google-decisions` (judgment only) | `judgment_native.c` | `ai/src/judgment/{native,systemone,openai-decisions,google-decisions}.ts` | typed-question APIs used by the eval judge chain, not by chat; a gateway 502 `upstream_credentials_exhausted` is not retried |
 
 The catalog also lists APIs omc does not serve (`local-inference`, images, video, embeddings,
 rerank, transcription, speech, `web-search`, `openai-decisions`). Selecting one yields an

@@ -86,6 +86,18 @@ check "workers login"   "Logged in to Cloudflare Workers AI"  bash -c "printf 'w
 printf 'modelRoles:\n  judge: cloudflare-workers-ai/@cf/cloudflare/clef\n' > "$T/pagent/config.yml"
 check "workers judge"   "verdict {'type': 'bool', 'bool': 0.9}"  "${XENV[@]}" OMC_PROVIDER_URL_REWRITE="https://api.cloudflare.com=$XB/cfapi,https://api.kilo.ai=$XB/kilo" "$B" --model "kilo/~anthropic/claude-sonnet-latest" --no-session -p "$JQ"
 check "workers wire"    "/cfapi/client/v4/accounts/acct7/ai/run/@cf/cloudflare/clef Bearer wa-tok clef"  "${XL[@]}" /cfapi/ 'x["path"], h.get("authorization"), b.get("model")'
+# Liquid AI d1 (decisions/v1/systemone), Nace Drex (v1/systemone, media data URLs in text described) and Gemini
+# Decisions (positional q<i> questions, x-goog-api-key) (omp 88201f3057, bd06875649, d2fee621ea, 1bd5c0c2b6)
+printf 'modelRoles:\n  judge: liquid/d1.1\n' > "$T/pagent/config.yml"
+check "liquid judge"    "verdict {'type': 'bool', 'bool': 0.9}"  "${XENV[@]}" LIQUID_API_KEY=lq-key OMC_PROVIDER_URL_REWRITE="https://api.liquid.ai=$XB/liquid,https://api.kilo.ai=$XB/kilo" "$B" --model "kilo/~anthropic/claude-sonnet-latest" --no-session -p "$JQ"
+check "liquid wire"     "/liquid/decisions/v1/systemone Bearer lq-key d1.1"  "${XL[@]}" /liquid/ 'x["path"], h.get("authorization"), b.get("model")'
+NQ='call:eval:{"language":"py","code":"r = await judge({\"text\": \"see data:image/png;base64,iVBOR==\"}, {\"b\": {\"type\": \"bool\", \"instructions\": \"fine?\"}})\nprint(\"verdict\", r[\"b\"])"}'
+printf 'modelRoles:\n  judge: nace/drex-max-v1.1\n' > "$T/pagent/config.yml"
+check "drex judge"      "verdict {'type': 'bool', 'bool': 0.9}"  "${XENV[@]}" NACE_API_KEY=nc-key OMC_PROVIDER_URL_REWRITE="https://console.nace.ai=$XB/nace,https://api.kilo.ai=$XB/kilo" "$B" --model "kilo/~anthropic/claude-sonnet-latest" --no-session -p "$NQ"
+check "drex wire"       "/nace/v1/systemone Bearer nc-key {'text': 'see [image/png base64 data URL]'}"  "${XL[@]}" /nace/ 'x["path"], h.get("authorization"), b.get("state")'
+printf 'modelRoles:\n  judge: google/gemini-decision-1\n' > "$T/pagent/config.yml"
+check "gemini decision judge" "verdict {'type': 'bool', 'bool': 0.9}"  "${XENV[@]}" GEMINI_API_KEY=gm-key OMC_PROVIDER_URL_REWRITE="https://generativelanguage.googleapis.com=$XB/gdec,https://api.kilo.ai=$XB/kilo" "$B" --model "kilo/~anthropic/claude-sonnet-latest" --no-session -p "$JQ"
+check "gemini decision wire" "/gdec/v1beta/decisions gm-key None ['q0']"  "${XL[@]}" /gdec/ 'x["path"], h.get("x-goog-api-key"), h.get("authorization"), list(b.get("questions"))'
 rm -f "$T/pagent/config.yml"
 # externalThinking (WP-27): the private think scratchpad is forced on the turn's first request with reasoning off
 mkdir -p "$T/thagent"
