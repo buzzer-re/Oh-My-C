@@ -324,10 +324,12 @@ void ui_approval_shutdown(ui_t *u);
 typedef struct ui_plan_review ui_plan_review_t;
 typedef struct {
     const char *prompt_title;          /* "Plan mode - next step" */
-    const char *const *options;
+    const char *const *options;        /* the approval choices */
     size_t noptions;
     const int *disabled;               /* indices into options that render dimmed and cannot be picked */
     size_t ndisabled;
+    const char *const *metas;          /* per option: a dim `(meta)` after its label (NULL entries / array: none) */
+    const char *refine_label;          /* "Refine plan": listed first, preselected, only while the plan has feedback */
     const char *help_text;             /* trailing footer hint (the cancel hint) */
     int initial_index;
     const char *slider_caption;        /* model-tier slider ("continue with"); nsegments 0 = none */
@@ -348,6 +350,7 @@ typedef struct {
     void (*on_feedback)(void *ud, const char *feedback);      /* Refine feedback markdown ("" = none) */
     void (*on_annotation_state)(void *ud, const json_t *state);
     void (*on_slider)(void *ud, int index);
+    void (*on_save)(void *ud, const char *content);           /* NULL: no Save option; the review stays open */
     void *ud;
 } ui_plan_review_cb_t;
 ui_plan_review_t *ui_plan_review_new(tui_t *tui, const char *plan, const ui_plan_review_opts_t *o,
@@ -370,7 +373,7 @@ tui_editor_t *ui_hook_editor_of(tui_component_t *c); /* its editor when c is a h
 /* the ask dialog as a selector; its custom-answer / note prompt editor while one is open, else NULL */
 bool ui_ask_is_dialog(const tui_component_t *c);
 tui_editor_t *ui_ask_prompt_editor(tui_component_t *c);
-/* "Save and quit" path prompt (overlays/plan-save-overlay.ts); done(NULL) on cancel */
+/* "Save plan" path prompt (overlays/plan-save-overlay.ts); done(NULL) on cancel */
 typedef struct ui_plan_save ui_plan_save_t;
 ui_plan_save_t *ui_plan_save_new(const char *suggested, void (*done)(void *ud, const char *path), void *ud);
 tui_component_t *ui_plan_save_component(ui_plan_save_t *s);

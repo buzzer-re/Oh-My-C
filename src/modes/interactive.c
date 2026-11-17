@@ -1040,7 +1040,6 @@ static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *tim
 
 /* ---------- plan approval (InteractiveMode.handlePlanApproval / #approvePlan / #savePlanAndQuit) ---------- */
 
-#define PLAN_SAVE_AND_QUIT "Save and quit"
 #define PLAN_KEEP_CONTEXT_INDEX 2
 #define PLAN_KEEP_DISABLE_PERCENT 95.0
 
@@ -1442,7 +1441,7 @@ static void plan_start_exec(ui_t *u) {
     }
 }
 
-/* ----- save and quit ----- */
+/* ----- save ----- */
 
 static void plan_save_done_now(ui_t *u, const char *path);
 
@@ -1496,10 +1495,12 @@ static void *plan_name_main(void *p) {
     return NULL;
 }
 
+/* #savePlan: write the plan where the prompt says; the review stays open and gets the keys back */
 static void plan_save_done_now(ui_t *u, const char *path) {
     tui_component_t *c = ui_plan_save_component(g_pr.save);
     tui_overlay_hide(u->tui, c);
-    tui_set_focus(u->tui, &u->editor->base);
+    if (g_pr.open && g_pr.ov) tui_set_focus(u->tui, ui_plan_review_component(g_pr.ov));
+    else tui_set_focus(u->tui, &u->editor->base);
     char *sel = path ? xstrdup(path) : NULL;
     char *content = g_pr.save_content;
     g_pr.save_content = NULL;
@@ -1514,11 +1515,7 @@ static void plan_save_done_now(ui_t *u, const char *path) {
             add_notice(u, "error", m);
             free(m);
         } else {
-            app_exit_plan_mode(a, false);
-            if (g_plan_ann && g_pr.ann_key) json_del(g_plan_ann, g_pr.ann_key);
-            app_new_session(a);
-            ui_new_session_banner(u);
-            char *m = xasprintf("Saved plan to %s.", sp);
+            char *m = xasprintf("Saved plan to %s", sp);
             plan_status(u, m);
             free(m);
         }
@@ -1527,17 +1524,17 @@ static void plan_save_done_now(ui_t *u, const char *path) {
     }
     free(sel);
     free(content);
-    plan_review_free_state();
     tui_request_render(u->tui);
 }
 
-static void plan_save_and_quit(ui_t *u) {
-    char *content = g_pr.edited ? xstrdup(g_pr.edited) : app_plan_read(u->app, g_pr.path);
+/* Save: the plan as it stands (in-overlay edits, else the file), to a prompted path */
+static void plan_save_prompt(ui_t *u, const char *current) {
+    if (g_pr.save) return;
+    char *content = current ? xstrdup(current) : g_pr.edited ? xstrdup(g_pr.edited) : app_plan_read(u->app, g_pr.path);
     if (!content) {
         char *m = xasprintf("Plan file not found at %s", g_pr.path);
         add_notice(u, "error", m);
         free(m);
-        plan_review_free_state();
         return;
     }
     char *suggested = app_plan_save_file_name(g_pr.title);
@@ -1586,11 +1583,6 @@ static void pr_finish(ui_t *u, const char *choice) {
         plan_review_free_state();
         return;
     }
-    if (!strcmp(choice, PLAN_SAVE_AND_QUIT)) {
-        plan_review_hide(u);
-        plan_save_and_quit(u);
-        return;
-    }
     if (!strcmp(choice, "Approve and execute") || !strcmp(choice, "Approve and compact context") ||
         str_eq(choice, g_pr.keep_label)) {
         /* the overlay stays up ("— submitting…") until the execution prompt is queued */
@@ -1635,6 +1627,7 @@ static void pr_post_finish(ui_t *u, const char *label) {
 }
 
 static void pr_cb_pick(void *ud, const char *label) { pr_post_finish(ud, label); }
+static void pr_cb_save(void *ud, const char *content) { plan_save_prompt(ud, content); }
 static void pr_cb_cancel(void *ud) { pr_post_finish(ud, NULL); }
 
 static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) {
@@ -1667,17 +1660,20 @@ static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) 
     int64_t window = a->model ? a->model->context_window : 0;
     int64_t used = a->last_context_tokens;
     bool keep_disabled = false;
+    char *keep_meta = NULL;
     if (window > 0) {
         char *t = ui_format_number((double)MAX(0, used)), *w = ui_format_number((double)window);
         for (char *q = t; *q; q++) *q = (char)tolower((unsigned char)*q);
         for (char *q = w; *q; q++) *q = (char)tolower((unsigned char)*q);
-        g_pr.keep_label = xasprintf("Approve and keep context (~%s / %s)", t, w);
+        keep_meta = xasprintf("~%s / %s", t, w);
         free(t);
         free(w);
         keep_disabled = 100.0 * (double)used / (double)window > PLAN_KEEP_DISABLE_PERCENT;
-    } else g_pr.keep_label = xstrdup("Approve and keep context");
-    const char *options[] = {"Approve and execute", "Approve and compact context", g_pr.keep_label, "Refine plan",
-                             PLAN_SAVE_AND_QUIT};
+    }
+    g_pr.keep_label = xstrdup("Approve and keep context");
+    /* the approval choices; Refine shows only while the plan has feedback, Save writes a copy and keeps the review */
+    const char *options[] = {"Approve and execute", "Approve and compact context", g_pr.keep_label};
+    const char *metas[] = {NULL, NULL, keep_meta};
     int disabled[] = {PLAN_KEEP_CONTEXT_INDEX};
 
     /* model-tier slider over the role models, starting on `default`; hidden with fewer than two */
@@ -1699,6 +1695,8 @@ static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) 
     ui_plan_review_opts_t o = {.prompt_title = "Plan mode - next step",
                                .options = options,
                                .noptions = ARRAY_LEN(options),
+                               .metas = metas,
+                               .refine_label = "Refine plan",
                                .disabled = disabled,
                                .ndisabled = keep_disabled ? 1 : 0,
                                .help_text = help,
@@ -1719,8 +1717,10 @@ static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) 
                               .on_feedback = pr_cb_feedback,
                               .on_annotation_state = pr_cb_ann_state,
                               .on_slider = pr_cb_slider,
+                              .on_save = pr_cb_save,
                               .ud = u};
     g_pr.ov = ui_plan_review_new(u->tui, content, &o, &cb);
+    free(keep_meta);
     free(edkey);
     free(help);
     free(cancel);
