@@ -43,6 +43,15 @@ typedef struct {
 
 /* ---------- UI callbacks (interactive mode supplies these; NULL in print/rpc) ---------- */
 struct approval_prompt;
+/* ExtensionUIDialogOptions of a select the RPC host sees: the option to focus first, the marker style of the
+ * first `markable` options and, for checkboxes, the rows currently checked */
+typedef struct tool_select_opts {
+    int initial_index;   /* -1: unset */
+    const char *marker;  /* "radio" / "checkbox"; NULL: unset */
+    const int *checked;  /* checkedIndices (NULL: unset) */
+    size_t nchecked;
+    int markable;        /* markableCount; -1: unset */
+} tool_select_opts_t;
 typedef struct {
     /* questions dialog (cfg:// change approvals): returns owned JSON answer object or NULL if unavailable/cancelled */
     json_t *(*ask)(void *ud, const json_t *questions);
@@ -55,8 +64,8 @@ typedef struct {
                     volatile sig_atomic_t *cancel, char **err);
     /* dialog primitives of the field-by-field fallback (RPC). Each returns the owned answer or NULL (cancelled,
      * *timed_out at the deadline, *err (owned) when the host went away). */
-    char *(*select)(void *ud, const char *title, const strvec_t *options, int64_t timeout_ms, bool *timed_out,
-                    volatile sig_atomic_t *cancel, char **err);
+    char *(*select)(void *ud, const char *title, const strvec_t *options, const struct tool_select_opts *so,
+                    int64_t timeout_ms, bool *timed_out, volatile sig_atomic_t *cancel, char **err);
     char *(*input)(void *ud, const char *title, const char *placeholder, int64_t timeout_ms, bool *timed_out,
                    volatile sig_atomic_t *cancel, char **err);
     char *(*editor)(void *ud, const char *title, const char *prefill, bool prompt_style, volatile sig_atomic_t *cancel,

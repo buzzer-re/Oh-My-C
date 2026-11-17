@@ -839,6 +839,7 @@ typedef struct {
     hf_field_t *field;
     char *key; /* type\0name */
     size_t klen;
+    size_t sec, block; /* the section and block of its first option */
 } group_t;
 
 typedef struct {
@@ -1075,6 +1076,10 @@ static void fb_control(fb_t *b, const dnode_t *control, const hf_spans_t *wrappi
                 hf_field_t *g = b->groups.v[i].field;
                 vec_push(&g->opts, o);
                 g->required |= required;
+                /* text between the group's options: optionsEnd is the index just past the last of those blocks */
+                hf_section_t *sec = cur_section(b);
+                if (b->groups.v[i].sec == b->sec && sec->blocks.n && b->groups.v[i].block != sec->blocks.n - 1)
+                    sec->blocks.v[b->groups.v[i].block].options_end = sec->blocks.n;
                 free(key);
                 free(type);
                 return;
@@ -1082,9 +1087,9 @@ static void fb_control(fb_t *b, const dnode_t *control, const hf_spans_t *wrappi
         hf_field_t *f = field_new(HF_CHOICE, name, required);
         f->multi = !strcmp(type, "checkbox");
         vec_push(&f->opts, o);
-        group_t g = {f, key, klen};
-        vec_push(&b->groups, g);
         add_field(b, f);
+        group_t g = {f, key, klen, b->sec, cur_section(b)->blocks.n - 1};
+        vec_push(&b->groups, g);
         free(type);
         return;
     }
@@ -1783,6 +1788,137 @@ static char *answer_text(const hf_field_t *f, const json_t *value) {
         return r;
     }
     return answer_label(f, json_is_str(value) ? json_sv(value) : "");
+}
+
+char *hf_block_text(const hf_block_t *b) {
+    sb_t l = SB_INIT;
+    switch (b->kind) {
+    case HF_B_TEXT: return hf_spans_text(&b->spans);
+    case HF_B_PRE: return xstrdup(b->text ? b->text : "");
+    case HF_B_LIST:
+        for (size_t i = 0; i < b->items.n; i++) {
+            char *it = hf_spans_text(&b->items.v[i]);
+            if (i) sb_putc(&l, '\n');
+            if (b->ordered) sb_appendf(&l, "%zu. %s", i + 1, it);
+            else sb_appendf(&l, "- %s", it);
+            free(it);
+        }
+        return sb_detach(&l);
+    case HF_B_TABLE:
+        for (size_t r = 0; r < b->rows.n; r++) {
+            if (r) sb_putc(&l, '\n');
+            for (size_t c = 0; c < b->rows.v[r].n; c++) {
+                char *ct = hf_spans_text(&b->rows.v[r].v[c]);
+                if (c) sb_append(&l, " | ");
+                sb_append(&l, ct);
+                free(ct);
+            }
+        }
+        return sb_detach(&l);
+    default: return NULL;
+    }
+}
+
+static bool blank_text(const char *t) {
+    for (; t && *t; t++)
+        if (!isspace((unsigned char)*t)) return false;
+    return true;
+}
+
+/* oneLine(text) === question */
+static bool is_question(const char *text, const char *question) {
+    if (!question) return false;
+    char *o = hf_one_line(text);
+    bool eq = !strcmp(o, question);
+    free(o);
+    return eq;
+}
+
+strvec_t hf_form_context(const hf_form_t *f) {
+    strvec_t parts = {0};
+    for (size_t si = 0; si < f->sections.n; si++) {
+        const hf_section_t *sec = &f->sections.v[si];
+        for (size_t bi = 0; bi <= sec->blocks.n; bi++) {
+            char *text;
+            if (bi == 0) {
+                char *t = hf_spans_text(&sec->title);
+                text = str_trim(t);
+                free(t);
+            } else text = hf_block_text(&sec->blocks.v[bi - 1]);
+            bool keep = text && !blank_text(text);
+            for (size_t k = 0; keep && k < f->fields.n; k++)
+                if (*f->fields.v[k]->name && is_question(text, f->fields.v[k]->question)) keep = false;
+            if (keep) strvec_push_own(&parts, text);
+            else free(text);
+        }
+    }
+    return parts;
+}
+
+static char *join_parts(const strvec_t *v) {
+    sb_t b = SB_INIT;
+    for (size_t i = 0; i < v->n; i++) {
+        if (i) sb_append(&b, "\n\n");
+        sb_append(&b, v->v[i]);
+    }
+    return sb_detach(&b);
+}
+
+char **hf_field_contexts(const hf_form_t *f) {
+    size_t n = f->fields.n;
+    strvec_t *parts = xcalloc(n + 1, sizeof *parts);
+    bool *named = xcalloc(n + 1, sizeof *named);
+    strvec_t pending = {0};
+    strvec_t *last = NULL;
+    for (size_t si = 0; si < f->sections.n; si++) {
+        const hf_section_t *sec = &f->sections.v[si];
+        char *t = hf_spans_text(&sec->title), *title = str_trim(t);
+        free(t);
+        if (*title) strvec_push(&pending, title);
+        free(title);
+        /* a group with text between its options keeps that text until owner_end, unless a named field sits among
+         * those options: the text then stays with the field it precedes */
+        strvec_t *owner = NULL;
+        size_t owner_end = 0;
+        for (size_t bi = 0; bi < sec->blocks.n; bi++) {
+            const hf_block_t *b = &sec->blocks.v[bi];
+            if (b->kind == HF_B_FIELD) {
+                if (!*b->field->name) continue;
+                size_t fi = b->field->index;
+                strvec_t *own = &parts[fi];
+                named[fi] = true;
+                for (size_t k = 0; k < pending.n; k++)
+                    if (!is_question(pending.v[k], b->field->question)) strvec_push(own, pending.v[k]);
+                strvec_free(&pending);
+                last = own;
+                owner = own;
+                size_t end = b->options_end;
+                bool intervening = false;
+                for (size_t at = bi + 1; at < end && at < sec->blocks.n; at++)
+                    if (sec->blocks.v[at].kind == HF_B_FIELD && *sec->blocks.v[at].field->name) intervening = true;
+                owner_end = intervening ? 0 : end;
+                continue;
+            }
+            char *text = hf_block_text(b);
+            if (!text || blank_text(text)) {
+                free(text);
+                continue;
+            }
+            if (owner && bi < owner_end) strvec_push_own(owner, text);
+            else strvec_push_own(&pending, text);
+        }
+    }
+    if (last)
+        for (size_t k = 0; k < pending.n; k++) strvec_push(last, pending.v[k]);
+    strvec_free(&pending);
+    char **out = xcalloc(n + 1, sizeof *out);
+    for (size_t i = 0; i < n; i++) {
+        if (named[i]) out[i] = join_parts(&parts[i]);
+        strvec_free(&parts[i]);
+    }
+    free(parts);
+    free(named);
+    return out;
 }
 
 json_t *hf_answers(const hf_form_t *f, const json_t *data) {

@@ -117,6 +117,54 @@ static void test_paginate(void) {
 }
 
 
+/* fieldContexts / formContext (omp bfffc6ffb2, 040ee9d021, 5674262fe2) */
+static void test_contexts(void) {
+    hf_form_t *f = hf_parse("<form>\n  <p>Both jobs read the same base image.</p>\n"
+                            "  <ul><li>build: needs the toolchain</li><li>test: only the runtime</li></ul>\n"
+                            "  <pre>FROM debian:12</pre>\n"
+                            "  <table><tr><th>Job</th><th>Time</th></tr><tr><td>build</td><td>4m</td></tr></table>\n"
+                            "  <p>How should these two jobs use the image?</p>\n"
+                            "  <label><input type=\"radio\" name=\"mode\" value=\"share\" checked> Share it</label>\n"
+                            "  <label><input type=\"radio\" name=\"mode\" value=\"split\"> Split it</label>\n"
+                            "  <fieldset><legend>Caching</legend>\n    <p>Layers are cached per runner.</p>\n"
+                            "    <label>Cache size (GB) <input type=\"number\" name=\"cache\"></label>\n  </fieldset>\n"
+                            "  <p>Both answers can change later.</p>\n</form>");
+    char **c = hf_field_contexts(f);
+    CHECK(f->fields.n == 2 && str_eq(c[0], "Both jobs read the same base image.\n\n- build: needs the toolchain\n- test: only "
+                                           "the runtime\n\nFROM debian:12\n\nJob | Time\nbuild | 4m"),
+          "context 0: %s", c[0]);
+    CHECK(str_eq(c[1], "Caching\n\nLayers are cached per runner.\n\nBoth answers can change later."), "context 1: %s", c[1]);
+    for (size_t i = 0; i < f->fields.n; i++) free(c[i]);
+    free(c);
+    strvec_t parts = hf_form_context(f);
+    CHECK(parts.n == 7 && str_eq(parts.v[3], "Job | Time\nbuild | 4m") && str_eq(parts.v[4], "Caching") &&
+              str_eq(parts.v[6], "Both answers can change later."),
+          "form context %zu", parts.n);
+    strvec_free(&parts);
+    hf_form_free(f);
+    /* text before a field that sits between another group's options stays with that field */
+    f = hf_parse("<form>\n  <label><input type=\"radio\" name=\"plan\" value=\"basic\" checked> Basic</label>\n"
+                 "  <p>Choose a compliant region</p>\n"
+                 "  <label>Region <select name=\"region\"><option value=\"us\">US</option><option value=\"eu\">EU</option>"
+                 "</select></label>\n  <label><input type=\"radio\" name=\"plan\" value=\"premium\"> Premium</label>\n</form>");
+    c = hf_field_contexts(f);
+    CHECK(f->fields.n == 2 && str_eq(c[0], "") && str_eq(c[1], "Choose a compliant region"), "intervening: [%s] [%s]", c[0],
+          f->fields.n > 1 ? c[1] : "");
+    for (size_t i = 0; i < f->fields.n; i++) free(c[i]);
+    free(c);
+    hf_form_free(f);
+    /* text between a group's own options stays on the group */
+    f = hf_parse("<form><label><input type=radio name=a value=x> X</label><p>between</p>"
+                 "<label><input type=radio name=a value=y> Y</label><p>tail</p>"
+                 "<label>Name <input name=n></label></form>");
+    c = hf_field_contexts(f);
+    CHECK(f->fields.n == 2 && str_eq(c[0], "between") && str_eq(c[1], "tail"), "between: [%s] [%s]", c[0],
+          f->fields.n > 1 ? c[1] : "");
+    for (size_t i = 0; i < f->fields.n; i++) free(c[i]);
+    free(c);
+    hf_form_free(f);
+}
+
 /* ---------- HtmlFormDialog (src/ui/formdlg.c) ---------- */
 
 static void keys(tui_component_t *c, const char *raw) {
@@ -312,6 +360,7 @@ int main(void) {
     test_parse();
     test_answers();
     test_paginate();
+    test_contexts();
     test_dialog();
     test_dialog_notes();
     printf("%d passed, %d failed\n", g_pass, g_fail);

@@ -681,9 +681,14 @@ static int index_of(const strvec_t *v, const char *s) {
     return -1;
 }
 
+/* promptTitle: the field's form context, then `line` (its question, maybe annotated) (owned) */
+static char *prompt_title(const char *context, const char *line) {
+    return context && *context ? xasprintf("%s\n\n%s", context, line) : xstrdup(line);
+}
+
 /* askChoice: checked option indices (and an Other text) for a choice field; *timed_out at a deadline; false
  * when cancelled */
-static bool ask_choice(fb_ui_t *ui, const hf_field_t *f, const char *question, bool *checked, char **other,
+static bool ask_choice(fb_ui_t *ui, const hf_field_t *f, const char *question, const char *context, bool *checked, char **other,
                        bool *timed_out) {
     tool_ui_t *u = &ui->env->ui;
     strvec_t labels = {0};
@@ -714,14 +719,24 @@ static bool ask_choice(fb_ui_t *ui, const hf_field_t *f, const char *question, b
     bool ok = true;
     *timed_out = false;
     *other = NULL;
+    /* the first preselected row is focused first */
+    int cursor = 0;
+    for (size_t r = 0; r < opts.n; r++)
+        if (checked[opts.v[r]]) {
+            cursor = (int)r;
+            break;
+        }
     if (!f->multi) {
         for (;;) {
             bool to = false;
-            char *pick = u->select(u->ud, question, &rows, ui->timeout, &to, ui->cancel, &ui->err);
+            char *pt = prompt_title(context, question);
+            tool_select_opts_t so = {.initial_index = cursor, .marker = "radio", .markable = -1};
+            char *pick = u->select(u->ud, pt, &rows, &so, ui->timeout, &to, ui->cancel, &ui->err);
             if (other_row && str_eq(pick, other_row)) {
                 free(pick);
                 bool to2 = false;
-                char *typed = u->input(u->ud, question, NULL, ui->timeout, &to2, ui->cancel, &ui->err);
+                char *typed = u->input(u->ud, pt, NULL, ui->timeout, &to2, ui->cancel, &ui->err);
+                free(pt);
                 if (to2) {
                     *timed_out = true;
                     ok = false;
@@ -736,6 +751,7 @@ static bool ask_choice(fb_ui_t *ui, const hf_field_t *f, const char *question, b
                 char *t = typed ? str_trim(typed) : NULL;
                 bool blank = !t || !*t;
                 free(t);
+                cursor = (int)labels.n;
                 if (blank) {
                     free(typed);
                     continue;
@@ -744,6 +760,7 @@ static bool ask_choice(fb_ui_t *ui, const hf_field_t *f, const char *question, b
                 *other = typed;
                 break;
             }
+            free(pt);
             int row = index_of(&labels, pick);
             free(pick);
             *timed_out = to;
@@ -768,9 +785,19 @@ static bool ask_choice(fb_ui_t *ui, const hf_field_t *f, const char *question, b
             strvec_t shown = {0};
             for (size_t i = 0; i < rows.n; i++) strvec_push(&shown, rows.v[i]);
             if (!f->required || answered) strvec_push(&shown, done);
-            char *title = answered ? xasprintf("(%zu selected) %s", answered, question) : xstrdup(question);
+            char *line = answered ? xasprintf("(%zu selected) %s", answered, question) : xstrdup(question);
+            char *title = prompt_title(context, line);
+            free(line);
             bool to = false;
-            char *pick = u->select(u->ud, title, &shown, ui->timeout, &to, ui->cancel, &ui->err);
+            int *ci = xcalloc(opts.n + 2, sizeof *ci);
+            size_t nci = 0;
+            for (size_t r = 0; r < opts.n; r++)
+                if (checked[opts.v[r]]) ci[nci++] = (int)r;
+            if (*other) ci[nci++] = (int)labels.n;
+            tool_select_opts_t so = {.initial_index = cursor, .marker = "checkbox", .checked = ci, .nchecked = nci,
+                                     .markable = (int)rows.n};
+            char *pick = u->select(u->ud, title, &shown, &so, ui->timeout, &to, ui->cancel, &ui->err);
+            free(ci);
             free(title);
             strvec_free(&shown);
             if (to) { /* a deadline keeps whatever was checked so far */
@@ -788,13 +815,16 @@ static bool ask_choice(fb_ui_t *ui, const hf_field_t *f, const char *question, b
             }
             if (other_row && !strcmp(pick, other_row)) {
                 free(pick);
+                cursor = (int)labels.n;
                 if (*other) {
                     free(*other);
                     *other = NULL;
                     continue;
                 }
                 bool to2 = false;
-                char *typed = u->input(u->ud, question, NULL, ui->timeout, &to2, ui->cancel, &ui->err);
+                char *pt = prompt_title(context, question);
+                char *typed = u->input(u->ud, pt, NULL, ui->timeout, &to2, ui->cancel, &ui->err);
+                free(pt);
                 if (to2) {
                     free(typed);
                     *timed_out = true;
@@ -814,6 +844,7 @@ static bool ask_choice(fb_ui_t *ui, const hf_field_t *f, const char *question, b
             int row = index_of(&labels, pick);
             free(pick);
             if (row < 0) continue;
+            cursor = row;
             checked[opts.v[row]] = !checked[opts.v[row]];
         }
         free(done);
@@ -827,13 +858,15 @@ static bool ask_choice(fb_ui_t *ui, const hf_field_t *f, const char *question, b
 
 /* askText: re-asked with the validation error until valid; textareas and prefilled inputs open the editor on
  * their current value, empty inputs prompt with their placeholder. NULL when cancelled or timed out */
-static char *ask_text(fb_ui_t *ui, const hf_field_t *f, const char *question, bool *timed_out) {
+static char *ask_text(fb_ui_t *ui, const hf_field_t *f, const char *question, const char *context, bool *timed_out) {
     tool_ui_t *u = &ui->env->ui;
     bool use_editor = f->multiline || *f->value;
     char *error = NULL, *current = xstrdup(f->value);
     *timed_out = false;
     for (;;) {
-        char *title = error ? xasprintf("%s (%s)", question, error) : xstrdup(question);
+        char *line = error ? xasprintf("%s (%s)", question, error) : xstrdup(question);
+        char *title = prompt_title(context, line);
+        free(line);
         char *value;
         if (use_editor) value = u->editor(u->ud, title, current, !f->multiline, ui->cancel, &ui->err);
         else value = u->input(u->ud, title, *f->placeholder ? f->placeholder : NULL, ui->timeout, timed_out, ui->cancel, &ui->err);
@@ -856,20 +889,32 @@ static char *ask_text(fb_ui_t *ui, const hf_field_t *f, const char *question, bo
     }
 }
 
-/* askFieldByField: undefined (NULL) when cancelled; a deadline stops the walk with the rest at their defaults */
+static json_t *ask_fields(fb_ui_t *ui, const hf_form_t *form, const char *const *contexts, json_t *data, bool *timed_out);
+
+/* askFieldByField: undefined (NULL) when cancelled; a deadline stops the walk with the rest at their defaults. Each
+ * prompt is titled with the form text around its field, then its question (fieldContexts) */
 static json_t *ask_field_by_field(fb_ui_t *ui, const hf_form_t *form, bool *timed_out) {
     json_t *data = hf_default_data(form);
     *timed_out = false;
+    char **contexts = hf_field_contexts(form);
+    json_t *result = ask_fields(ui, form, (const char *const *)contexts, data, timed_out);
+    for (size_t i = 0; i < form->fields.n; i++) free(contexts[i]);
+    free(contexts);
+    return result;
+}
+
+static json_t *ask_fields(fb_ui_t *ui, const hf_form_t *form, const char *const *contexts, json_t *data, bool *timed_out) {
     for (size_t i = 0; i < form->fields.n; i++) {
         const hf_field_t *f = form->fields.v[i];
         if (!*f->name) continue;
         const char *question = f->question ? f->question : f->name;
+        const char *context = contexts[f->index];
         bool to = false;
         if (f->kind == HF_CHOICE) {
             bool *checked = xcalloc(f->opts.n + 1, sizeof *checked);
             for (size_t k = 0; k < f->opts.n; k++) checked[k] = f->opts.v[k].checked;
             char *other = NULL;
-            bool ok = ask_choice(ui, f, question, checked, &other, &to);
+            bool ok = ask_choice(ui, f, question, context, checked, &other, &to);
             if (ok || (to && f->multi)) {
                 json_t *v = hf_choice_value(f, checked, other);
                 if (v) json_set(data, f->name, v);
@@ -887,7 +932,7 @@ static json_t *ask_field_by_field(fb_ui_t *ui, const hf_form_t *form, bool *time
             }
             continue;
         }
-        char *text = ask_text(ui, f, question, &to);
+        char *text = ask_text(ui, f, question, context, &to);
         if (to) {
             *timed_out = true;
             return data;

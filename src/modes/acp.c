@@ -1641,50 +1641,12 @@ static json_t *elicit_form(asess_t *s, const char *message, json_t *properties, 
     return elicit_form_timed(s, message, properties, required, 0, NULL);
 }
 
-/* formElicitationMessage: section titles and context blocks as plain text (the fields are schema properties) */
+/* the form elicitation's message: formContext, the section titles and context blocks as plain text without the text
+ * that already titles a field property (the fields are schema properties) */
 static char *form_message(const hf_form_t *f) {
-    strvec_t parts = {0};
-    for (size_t si = 0; si < f->sections.n; si++) {
-        const hf_section_t *sec = &f->sections.v[si];
-        char *t = hf_spans_text(&sec->title), *tt = str_trim(t);
-        free(t);
-        if (*tt) strvec_push(&parts, tt);
-        free(tt);
-        for (size_t bi = 0; bi < sec->blocks.n; bi++) {
-            const hf_block_t *b = &sec->blocks.v[bi];
-            if (b->kind == HF_B_TEXT) strvec_push_own(&parts, hf_spans_text(&b->spans));
-            else if (b->kind == HF_B_PRE) strvec_push(&parts, b->text);
-            else if (b->kind == HF_B_LIST) {
-                sb_t l = SB_INIT;
-                for (size_t i = 0; i < b->items.n; i++) {
-                    char *it = hf_spans_text(&b->items.v[i]);
-                    if (i) sb_putc(&l, '\n');
-                    if (b->ordered) sb_appendf(&l, "%zu. %s", i + 1, it);
-                    else sb_appendf(&l, "- %s", it);
-                    free(it);
-                }
-                strvec_push_own(&parts, sb_detach(&l));
-            } else if (b->kind == HF_B_TABLE) {
-                sb_t l = SB_INIT;
-                for (size_t r = 0; r < b->rows.n; r++) {
-                    if (r) sb_putc(&l, '\n');
-                    for (size_t c = 0; c < b->rows.v[r].n; c++) {
-                        char *ct = hf_spans_text(&b->rows.v[r].v[c]);
-                        if (c) sb_append(&l, " | ");
-                        sb_append(&l, ct);
-                        free(ct);
-                    }
-                }
-                strvec_push_own(&parts, sb_detach(&l));
-            }
-        }
-    }
+    strvec_t parts = hf_form_context(f);
     sb_t out = SB_INIT;
     for (size_t i = 0; i < parts.n; i++) {
-        char *t = str_trim(parts.v[i]);
-        bool blank = !*t;
-        free(t);
-        if (blank) continue;
         if (out.len) sb_append(&out, "\n\n");
         sb_append(&out, parts.v[i]);
     }
