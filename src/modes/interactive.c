@@ -933,12 +933,14 @@ static json_t *ui_ask(void *ud, const json_t *questions) {
 
 /* ---------- formDialog bridge (the ask tool's HTML form; extension-ui-controller #showLocalFormDialog) ---------- */
 
-static void form_done(void *ud, json_t *data, bool timed_out) {
+static void form_done(void *ud, json_t *data, json_t *notes, bool timed_out) {
     ui_t *u = ud;
     pthread_mutex_lock(&u->mu);
     bool closed = g_ask_closed;
     json_free(u->ask_answers);
     u->ask_answers = data;
+    json_free(u->form_notes);
+    u->form_notes = notes;
     u->form_timed_out = timed_out;
     u->ask_done = true;
     pthread_cond_signal(&u->ask_cv);
@@ -961,11 +963,12 @@ static void form_abort(void *ud) {
     }
 }
 
-static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, volatile sig_atomic_t *cancel,
-                       char **err) {
+static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, json_t **notes,
+                       volatile sig_atomic_t *cancel, char **err) {
     ui_t *u = ud;
     UNUSED(err);
     *timed_out = false;
+    *notes = NULL;
     pthread_mutex_lock(&u->mu);
     if (g_ask_closed) {
         pthread_mutex_unlock(&u->mu);
@@ -974,6 +977,8 @@ static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *tim
     u->form_html = xstrdup(html);
     u->form_timeout = timeout_ms;
     u->form_timed_out = false;
+    json_free(u->form_notes);
+    u->form_notes = NULL;
     u->ask_answers = NULL;
     u->ask_done = false;
     pthread_mutex_unlock(&u->mu);
@@ -997,6 +1002,8 @@ static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *tim
     json_t *data = u->ask_answers;
     u->ask_answers = NULL;
     *timed_out = u->form_timed_out;
+    *notes = u->form_notes;
+    u->form_notes = NULL;
     free(u->form_html);
     u->form_html = NULL;
     pthread_mutex_unlock(&u->mu);

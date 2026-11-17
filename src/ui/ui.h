@@ -97,6 +97,7 @@ struct ui {
     char *form_html;      /* the ask tool's form while its dialog is up (formDialog bridge) */
     int64_t form_timeout;
     bool form_timed_out;
+    json_t *form_notes; /* optionNotes of the submitted form (owned until handed to the tool) */
     tui_select_list_t *picker;
     char *goal_cont; /* pending hidden continuation prompt (goal / advisor) */
     const char *cont_type;

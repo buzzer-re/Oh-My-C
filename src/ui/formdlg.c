@@ -93,6 +93,10 @@ typedef struct fd {
     VEC(media_t) media;
     int media_version;
     bool hidden, closed;
+    char ***notes;            /* per field index (choice): per option, the saved note (NULL: none) */
+    tui_editor_t *note_ed;    /* the note being edited (NULL: none) */
+    hf_field_t *note_field;
+    int note_option;
 } fd_t;
 
 static const tui_component_vt FD_VT;
@@ -599,9 +603,10 @@ static void reset_countdown(fd_t *v) {
     v->remaining = (int)((v->o.timeout_ms + 999) / 1000);
 }
 
-static void finish(fd_t *v, json_t *data, bool timed_out) {
+static void finish(fd_t *v, json_t *data, json_t *notes, bool timed_out) {
     if (v->closed) {
         json_free(data);
+        json_free(notes);
         return;
     }
     v->closed = true;
@@ -612,8 +617,139 @@ static void finish(fd_t *v, json_t *data, bool timed_out) {
         ui_close_nested_selector(v->o.ui);
         ui_close_selector(v->o.ui); /* destroys v */
     }
-    if (done) done(ud, data, timed_out);
-    else json_free(data);
+    if (done) done(ud, data, notes, timed_out);
+    else {
+        json_free(data);
+        json_free(notes);
+    }
+}
+
+/* ---------- option notes ---------- */
+
+static bool guard_blocks(const fd_t *v);
+
+/* optionNotes: saved notes on selected options ({name, question, option, value, text}); unselected drafts stay
+ * private to the dialog */
+static json_t *option_notes(fd_t *v) {
+    json_t *arr = json_arr();
+    for (size_t i = 0; i < v->form->fields.n; i++) {
+        hf_field_t *f = v->form->fields.v[i];
+        size_t fi = fidx(f);
+        if (f->kind == HF_TEXT || !v->notes[fi] || !*f->name) continue;
+        other_chosen(v, f);
+        for (size_t k = 0; k < f->opts.n; k++) {
+            const char *saved = v->notes[fi][k];
+            char *text = saved ? str_trim(saved) : NULL;
+            if (!text || !*text || f->opts.v[k].disabled || !v->checked[fi][k]) {
+                free(text);
+                continue;
+            }
+            json_t *n = json_obj();
+            json_set_str(n, "name", f->name);
+            json_set_str(n, "question", f->question && *f->question ? f->question : f->name);
+            char *ot = option_text(&f->opts.v[k]);
+            json_set_str(n, "option", *ot ? ot : f->opts.v[k].value);
+            free(ot);
+            json_set_str(n, "value", f->opts.v[k].value);
+            json_set_str(n, "text", text);
+            free(text);
+            json_push(arr, n);
+        }
+    }
+    if (!json_len(arr)) {
+        json_free(arr);
+        return NULL;
+    }
+    return arr;
+}
+
+/* app.ask.note keys; on a dropdown a text-typing key (`n`, `shift+n`) stays type-ahead */
+static strvec_t note_keys(bool dropdown) {
+    strvec_t out = {0};
+    const strvec_t *keys = tui_keybindings_get(tui_keybindings_global(), "app.ask.note");
+    for (size_t i = 0; keys && i < keys->n; i++) {
+        const char *k = keys->v[i];
+        bool typing = strlen(k) == 1 || (str_starts(k, "shift+") && strlen(k + 6) == 1);
+        if (dropdown && typing) continue;
+        strvec_push(&out, k);
+    }
+    return out;
+}
+
+static bool matches_note_key(const tui_key_t *k, bool dropdown) {
+    strvec_t keys = note_keys(dropdown);
+    bool hit = false;
+    for (size_t i = 0; i < keys.n && !hit; i++) hit = tui_key_matches(k, keys.v[i]);
+    strvec_free(&keys);
+    return hit;
+}
+
+/* the marker after a noted option: a submitted note, or a draft on an unchosen option (NULL: none; owned) */
+static char *note_tag(fd_t *v, const hf_field_t *f, int option, int *width) {
+    char **n = v->notes[fidx(f)];
+    if (width) *width = 0;
+    if (!n || option < 0 || !n[option]) return NULL;
+    bool chosen = v->checked[fidx(f)][option];
+    const char *text = chosen ? "  \xe2\x9c\x8e note" : "  \xe2\x9c\x8e draft";
+    if (width) *width = tui_visible_width(text);
+    return fg(chosen ? TUI_TC_SUCCESS : TUI_TC_DIM, text);
+}
+
+/* the open note's key hints; a note on an unchosen option is kept but not submitted */
+static char *note_hint(fd_t *v) {
+    bool chosen = v->checked[fidx(v->note_field)][v->note_option];
+    return xasprintf("enter save \xc2\xb7 blank removes \xc2\xb7 esc keep%s", chosen ? "" : " \xc2\xb7 sent only if chosen");
+}
+
+static void close_note(fd_t *v) {
+    if (v->note_ed) tui_component_destroy(&v->note_ed->base);
+    v->note_ed = NULL;
+    v->note_field = NULL;
+}
+
+static void save_note(fd_t *v) {
+    char *raw = tui_editor_get_expanded_text(v->note_ed), *text = str_trim(raw);
+    free(raw);
+    char **n = v->notes[fidx(v->note_field)];
+    free(n[v->note_option]);
+    n[v->note_option] = *text ? text : NULL;
+    if (!*text) free(text);
+    close_note(v);
+}
+
+static void start_note(fd_t *v, int target) {
+    const stop_t *s = &v->stops.v[v->focus];
+    if (v->hidden || guard_blocks(v) || (s->kind != STOP_OPTION && s->kind != STOP_SELECT)) return;
+    v->follow = true; /* the editor draws under the focused stop, so its page must be the one shown */
+    hf_field_t *f = s->field;
+    int option = target >= 0 ? target : s->kind == STOP_OPTION ? s->option : v->open ? v->highlight : current(v, f);
+    if (option < 0 || option >= (int)f->opts.n || f->opts.v[option].disabled) return;
+    v->guard_released = true; /* opening a note hands the keys over, as up/down does */
+    close_note(v);
+    tui_editor_t *ed = tui_editor_new();
+    tui_editor_set_composer(ed, "borderless");
+    free(ed->gutter);
+    ed->gutter = xstrdup("");
+    ed->padding_x = 0;
+    ed->max_height = 4;
+    ed->disable_submit = true;
+    if (v->o.draft) {
+        snprintf(ed->text_fg, sizeof ed->text_fg, "%s", v->o.draft->text_fg);
+        ed->use_terminal_cursor = v->o.draft->use_terminal_cursor;
+    }
+    const char *saved = v->notes[fidx(f)] ? v->notes[fidx(f)][option] : NULL;
+    tui_editor_set_text(ed, saved ? saved : "");
+    ed->cl = 0; /* a saved note reopens at its start */
+    ed->cc = 0;
+    v->note_ed = ed;
+    v->note_field = f;
+    v->note_option = option;
+}
+
+static void note_key(fd_t *v, const tui_key_t *k) {
+    if (tui_kb(k, "tui.select.cancel")) close_note(v);
+    else if (tui_kb(k, "tui.input.submit")) save_note(v);
+    else tui_editor_handle_key(v->note_ed, k);
 }
 
 static void on_tick(void *ud) {
@@ -621,7 +757,8 @@ static void on_tick(void *ud) {
     int64_t left = v->deadline - mono_ms();
     if (left <= 0) {
         stop_countdown(v);
-        finish(v, form_data(v), true);
+        if (v->note_ed) save_note(v);
+        finish(v, form_data(v), option_notes(v), true);
         return;
     }
     v->remaining = (int)((left + 999) / 1000);
@@ -689,7 +826,7 @@ static void submit(fd_t *v) {
     }
     if (!v->nerrors) {
         stop_countdown(v);
-        finish(v, form_data(v), false);
+        finish(v, form_data(v), option_notes(v), false);
         return;
     }
     for (size_t s = 0; s < v->stops.n; s++)
@@ -766,6 +903,10 @@ static void other_key(fd_t *v, hf_field_t *f, const tui_key_t *k) {
 
 /* a closed dropdown: ←/→ change it, Space opens it, a letter jumps to a matching option */
 static void select_key(fd_t *v, hf_field_t *f, const tui_key_t *k) {
+    if (matches_note_key(k, true)) {
+        start_note(v, -1);
+        return;
+    }
     int cur = current(v, f);
     if (tui_kb(k, "tui.select.up") || tui_kb(k, "tui.select.down")) {
         move_stop(v, tui_kb(k, "tui.select.down") ? 1 : -1);
@@ -793,6 +934,10 @@ static void select_key(fd_t *v, hf_field_t *f, const tui_key_t *k) {
 /* an open dropdown owns the keys until a pick (Enter/Space), Esc or Tab closes it */
 static void dropdown_key(fd_t *v, const tui_key_t *k) {
     hf_field_t *f = v->open;
+    if (matches_note_key(k, true)) {
+        start_note(v, v->highlight);
+        return;
+    }
     if (tui_kb(k, "tui.select.cancel")) {
         v->open = NULL;
         return;
@@ -835,6 +980,11 @@ static bool fd_key(tui_component_t *c, const tui_key_t *k) {
         request(v);
         return true;
     }
+    if (v->note_ed && !v->hidden) {
+        note_key(v, k);
+        request(v);
+        return true;
+    }
     if (v->open) {
         dropdown_key(v, k);
         request(v);
@@ -842,7 +992,7 @@ static bool fd_key(tui_component_t *c, const tui_key_t *k) {
     }
     if (tui_kb(k, "tui.select.cancel")) {
         stop_countdown(v);
-        finish(v, NULL, false);
+        finish(v, NULL, NULL, false);
         return true;
     }
     if (guard_blocks(v)) {
@@ -885,7 +1035,8 @@ static bool fd_key(tui_component_t *c, const tui_key_t *k) {
             submit(v);
             return true; /* v may be gone */
         }
-    } else if (tui_key_matches(k, "space")) toggle(v, s->field, s->option);
+    } else if (matches_note_key(k, false)) start_note(v, -1);
+    else if (tui_key_matches(k, "space")) toggle(v, s->field, s->option);
     else if (is_confirm(k)) {
         if (!s->field->multi) toggle(v, s->field, s->option);
         move_field(v, 1);
@@ -962,7 +1113,7 @@ static char *other_line(fd_t *v, hf_field_t *f, bool focused, int width) {
             free(ph);
             free(d);
         }
-        shown = input_row(in, inner, v->base.focused && !v->hidden, false, ov);
+        shown = input_row(in, inner, v->base.focused && !v->hidden && !v->note_ed, false, ov);
         free(ov);
     } else if (*value) {
         char *s = sanitize(value), *t = trunc_to(s, inner);
@@ -1002,9 +1153,9 @@ static void dropdown_field_lines(fd_t *v, const hf_field_t *f, bool focused, int
     char *position = NULL;
     if (cur < 0) position = xstrdup("");
     else {
-        char *p = xasprintf("  %d/%zu", cur + 1, f->opts.n);
-        position = fg(TUI_TC_DIM, p);
-        free(p);
+        char *p = xasprintf("  %d/%zu", cur + 1, f->opts.n), *d = fg(TUI_TC_DIM, p), *tag = note_tag(v, f, cur, NULL);
+        position = xasprintf("%s%s", d, tag ? tag : "");
+        free(p), free(d), free(tag);
     }
     int inner = MAX(1, width - FIELD_INDENT - 4 - tui_visible_width(position));
     char *value;
@@ -1082,7 +1233,7 @@ static void text_field_lines(fd_t *v, const hf_field_t *f, bool focused, int wid
     int inner = MAX(1, width - FIELD_INDENT);
     char *value = text_value(v, f);
     strvec_t rows = {0};
-    bool live = v->base.focused && !v->hidden;
+    bool live = v->base.focused && !v->hidden && !v->note_ed;
     if (f->multiline) {
         int height = textarea_rows(f);
         if (focused) {
@@ -1200,7 +1351,16 @@ static void field_atoms(fd_t *v, hf_field_t *f, int width, int focused_stop, int
         char *prefix = xasprintf("%s%s ", cur, mk);
         strvec_t lines = {0};
         base_t base = {color, false};
-        hang(prefix, &o->label, base, width, &lines);
+        int tw;
+        char *tag = note_tag(v, f, (int)i, &tw);
+        hang(prefix, &o->label, base, MAX(1, width - tw), &lines);
+        if (tag) {
+            if (!lines.n) strvec_push(&lines, "");
+            char *l0 = xasprintf("%s%s", lines.v[0], tag);
+            free(lines.v[0]);
+            lines.v[0] = l0;
+            free(tag);
+        }
         push_atom(atoms, lines, 0, HF_BREAK_INSIDE);
         vec_push(stops, !o->disabled);
         free(prefix);
@@ -1478,7 +1638,9 @@ static void dropdown_box(fd_t *v, int width, int max_rows, strvec_t *out) {
     int widest = 0;
     for (int i = 0; i < n; i++) {
         strvec_push_own(&labels, option_text(&f->opts.v[i]));
-        widest = MAX(widest, tui_visible_width(labels.v[i]));
+        int tw;
+        free(note_tag(v, f, i, &tw));
+        widest = MAX(widest, tui_visible_width(labels.v[i]) + tw);
     }
     int inner = MAX(4, MIN(width - FIELD_INDENT - 4, widest + 4));
     int first = MAX(0, MIN(n - visible, v->highlight - visible / 2));
@@ -1491,9 +1653,13 @@ static void dropdown_box(fd_t *v, int width, int max_rows, strvec_t *out) {
                 char *c = hl ? xasprintf("%s ", tui_sym("nav.cursor")) : xstrdup("  ");
                 char *mark = i == cur ? fg(TUI_TC_SUCCESS, "\xe2\x9c\x93") : xstrdup(" ");
                 tui_tc_t color = f->opts.v[i].disabled ? TUI_TC_DIM : hl ? TUI_TC_ACCENT : TUI_TC_TEXT;
-                char *lab = trunc_to(labels.v[i], MAX(1, inner - 4));
-                char *cl = xasprintf("%s%s", c, lab), *cs = fg(color, cl);
-                char *padding = pad(inner - 3 - tui_visible_width(lab));
+                int tw;
+                char *tag = note_tag(v, f, i, &tw);
+                char *lab = trunc_to(labels.v[i], MAX(1, inner - 4 - tw));
+                char *cl0 = xasprintf("%s%s", c, lab), *cs0 = fg(color, cl0), *cs = xasprintf("%s%s", cs0, tag ? tag : "");
+                char *cl = cl0;
+                free(cs0), free(tag);
+                char *padding = pad(inner - 3 - tui_visible_width(lab) - tw);
                 char *lv = xasprintf("%s ", tui_sym("boxRound.vertical")), *rv = xasprintf(" %s", tui_sym("boxRound.vertical"));
                 char *ls = fg(TUI_TC_ACCENT, lv), *rs = fg(TUI_TC_ACCENT, rv);
                 strvec_push_own(out, xasprintf("%s%s%s%s%s", ls, cs, padding, mark, rs));
@@ -1526,7 +1692,8 @@ static void render_page(fd_t *v, const layout_t *L, hf_page_t page, int rows, in
         free(tr);
     }
     bool anchored = false;
-    int anchor_top = 0, anchor_row = 0;
+    int anchor_top = 0, anchor_row = 0, note_row = -1;
+    size_t focus_atom = (size_t)v->focus < v->stop_atoms.n ? v->stop_atoms.v[v->focus] : (size_t)-1;
     for (size_t i = page.start; i < page.end; i++) {
         if (i > page.start)
             for (int g = 0; g < a->v[i].gap; g++) strvec_push(&lines, "");
@@ -1535,7 +1702,38 @@ static void render_page(fd_t *v, const layout_t *L, hf_page_t page, int rows, in
             anchor_top = (int)lines.n;
             anchor_row = (int)lines.n + L->dd_row;
         }
+        if (v->note_ed && i == focus_atom) note_row = (int)(lines.n + a->v[i].lines.n) - 1;
         for (size_t k = 0; k < a->v[i].lines.n; k++) strvec_push(&lines, a->v[i].lines.v[k]);
+    }
+    /* like the dropdown, the note editor covers the rows under its option rather than repaginating */
+    if (v->note_ed && note_row >= 0) {
+        int inner = MAX(1, width - FIELD_INDENT);
+        int start = MAX(0, note_row - MAX(0, rows - 3));
+        strvec_t shown = {0};
+        for (int i = start; i < (int)lines.n && i < start + rows; i++) strvec_push(&shown, lines.v[i]);
+        int top = note_row - start + 1;
+        v->note_ed->max_height = MAX(1, MIN(4, rows - top - 1));
+        char *ot = option_text(&v->note_field->opts.v[v->note_option]), *hint = note_hint(v);
+        char *ht = xasprintf("Note for %s \xc2\xb7 %s", ot, hint), *htr = trunc_to(ht, inner);
+        strvec_t editing = {0};
+        strvec_push_own(&editing, fg(TUI_TC_MUTED, htr));
+        free(ot), free(hint), free(ht), free(htr);
+        v->note_ed->base.focused = v->base.focused && !v->hidden;
+        v->note_ed->base.tui = v->base.tui;
+        tui_component_render(&v->note_ed->base, inner, &editing);
+        char *ind = pad(FIELD_INDENT);
+        /* splice(top, editing.length, ...editing) */
+        strvec_t out2 = {0};
+        for (int i = 0; i < top && i < (int)shown.n; i++) strvec_push(&out2, shown.v[i]);
+        for (size_t i = 0; i < editing.n; i++) strvec_push_own(&out2, xasprintf("%s%s", ind, editing.v[i]));
+        for (int i = top + (int)editing.n; i < (int)shown.n; i++) strvec_push(&out2, shown.v[i]);
+        free(ind);
+        for (size_t i = 0; i < out2.n && (int)i < rows; i++) strvec_push(out, out2.v[i]);
+        strvec_free(&out2);
+        strvec_free(&editing);
+        strvec_free(&shown);
+        strvec_free(&lines);
+        return;
     }
     while ((int)lines.n > rows) free(lines.v[--lines.n]);
     if (anchored && v->open && anchor_row < rows) {
@@ -1561,6 +1759,7 @@ static void render_page(fd_t *v, const layout_t *L, hf_page_t page, int rows, in
 }
 
 static char *footer_text(fd_t *v) {
+    if (v->note_ed) return note_hint(v);
     char *hide = ui_editor_key("app.ask.hide"), *esc = ui_editor_key("tui.select.cancel");
     char *cancel = *hide ? xasprintf("%s cancel \xc2\xb7 %s hide", esc, hide) : xasprintf("%s cancel", esc);
     char *r;
@@ -1572,12 +1771,17 @@ static char *footer_text(fd_t *v) {
         return r;
     }
     char *enter = ui_key_hint("enter"), *updown = editor_keys2("tui.select.up", "tui.select.down");
+    const stop_t *s = &v->stops.v[v->focus];
+    strvec_t nk = note_keys(s->kind == STOP_SELECT);
+    char *nkh = nk.n ? ui_key_hint(nk.v[0]) : NULL;
+    char *note = nkh ? xasprintf(" \xc2\xb7 %s note", nkh) : xstrdup("");
+    free(nkh);
+    strvec_free(&nk);
     if (v->open) {
-        r = xasprintf("%s highlight \xc2\xb7 %s choose \xc2\xb7 %s close", updown, enter, esc);
-        free(hide), free(esc), free(cancel), free(enter), free(updown);
+        r = xasprintf("%s highlight \xc2\xb7 %s choose%s \xc2\xb7 %s close", updown, enter, note, esc);
+        free(hide), free(esc), free(cancel), free(enter), free(updown), free(note);
         return r;
     }
-    const stop_t *s = &v->stops.v[v->focus];
     char *space = ui_key_hint("space"), *left = ui_key_hint("left"), *right = ui_key_hint("right"), *tab = ui_key_hint("tab");
     char *action;
     if (s->kind == STOP_SUBMIT) action = xasprintf("%s submit", enter);
@@ -1587,6 +1791,12 @@ static char *footer_text(fd_t *v) {
         action = xasprintf("%s open \xc2\xb7 %s/%s change \xc2\xb7 %s next", space, left, right, enter);
     else if (s->field->multi) action = xasprintf("%s toggle \xc2\xb7 %s next", space, enter);
     else action = xasprintf("%s choose", enter);
+    if (s->kind == STOP_OPTION || s->kind == STOP_SELECT) {
+        char *a2 = xasprintf("%s%s", action, note);
+        free(action);
+        action = a2;
+    }
+    free(note);
     sb_t b = SB_INIT;
     sb_appendf(&b, "%s \xc2\xb7 %s move \xc2\xb7 %s next field \xc2\xb7 %s", action, updown, tab, cancel);
     if (v->pages.n > 1) {
@@ -1693,8 +1903,12 @@ static void fd_destroy(tui_component_t *c) {
         free(m->reason), free(m->b64), free(m->mime), free(m->key);
     }
     free(v->media.v);
+    close_note(v);
     size_t n = v->form->fields.n;
     for (size_t i = 0; i < n; i++) {
+        if (v->notes[i])
+            for (size_t k = 0; k < v->form->fields.v[i]->opts.n; k++) free(v->notes[i][k]);
+        free(v->notes[i]);
         free(v->checked[i]);
         ui_input_free(&v->inputs[i]);
         ui_input_free(&v->others[i]);
@@ -1703,6 +1917,7 @@ static void fd_destroy(tui_component_t *c) {
         free(v->errors[i]);
     }
     free(v->checked), free(v->inputs), free(v->others), free(v->editors), free(v->other_seen), free(v->errors);
+    free(v->notes);
     free(v->stops.v);
     free(v->pages.v);
     free(v->stop_atoms.v);
@@ -1713,7 +1928,7 @@ static void fd_destroy(tui_component_t *c) {
     free(v->o.cwd);
     hf_form_free(v->form);
     free(v);
-    if (notify) done(ud, NULL, false); /* torn down from outside (e.g. /new): cancelled */
+    if (notify) done(ud, NULL, NULL, false); /* torn down from outside (e.g. /new): cancelled */
 }
 
 static const tui_component_vt FD_VT = {"form-dialog", fd_render, fd_key, fd_invalidate, fd_destroy};
@@ -1739,6 +1954,7 @@ tui_component_t *ui_form_dialog_new(const char *html, const ui_form_opts_t *o) {
     v->editors = xcalloc(n + 1, sizeof *v->editors);
     v->other_seen = xcalloc(n + 1, sizeof *v->other_seen);
     v->errors = xcalloc(n + 1, sizeof *v->errors);
+    v->notes = xcalloc(n + 1, sizeof *v->notes);
     for (size_t si = 0; si < v->form->sections.n; si++) {
         const hf_section_t *sec = &v->form->sections.v[si];
         for (size_t bi = 0; bi < sec->blocks.n; bi++) {
@@ -1773,6 +1989,7 @@ tui_component_t *ui_form_dialog_new(const char *html, const ui_form_opts_t *o) {
                 continue;
             }
             v->checked[i] = xcalloc(f->opts.n + 1, sizeof(bool));
+            v->notes[i] = xcalloc(f->opts.n + 1, sizeof(char *));
             for (size_t k = 0; k < f->opts.n; k++) {
                 if (!f->opts.v[k].checked) continue;
                 if (!f->multi) memset(v->checked[i], 0, f->opts.n * sizeof(bool)); /* several checked radios: the last wins */

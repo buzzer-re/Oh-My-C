@@ -289,9 +289,10 @@ void ui_ask_dialog_show(ui_t *u, const json_t *questions, ui_ask_done_fn done, v
 /* ---------- formdlg.c ---------- */
 
 /* the ask tool's HTML form (html-form/dialog.ts HtmlFormDialog) in the composer's place. `done` runs once on the UI
- * thread with the submitted form data (owned by the callee; NULL when cancelled); `timed_out` when the inactivity
- * timeout submitted the current values. */
-typedef void (*ui_form_done_fn)(void *ud, json_t *data, bool timed_out);
+ * thread with the submitted form data (owned by the callee; NULL when cancelled), the notes on selected options
+ * (optionNotes: an owned array of {name, question, option, value, text}, NULL when none); `timed_out` when the
+ * inactivity timeout submitted the current values. */
+typedef void (*ui_form_done_fn)(void *ud, json_t *data, json_t *notes, bool timed_out);
 typedef struct {
     ui_t *ui;             /* host (closes the selector on finish); NULL in tests */
     tui_t *tui;           /* terminal height, timers, repaints, background picture loads; NULL in tests */

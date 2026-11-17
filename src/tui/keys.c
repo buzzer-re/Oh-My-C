@@ -832,6 +832,7 @@ static const struct {
     {"app.tools.expand", {"ctrl+o"}},
     {"app.tools.toggleVisibility", {"ctrl+shift+o"}},
     {"app.ask.hide", {"alt+h"}},
+    {"app.ask.note", {"n", "alt+n"}},
     {"app.approval.approve", {"ctrl+enter", "ctrl+q"}},
     {"app.editor.external", {"ctrl+g"}},
     {"app.local.open", {"alt+g"}},

@@ -1,7 +1,11 @@
 /* todo + ask tools */
 #include "tools.h"
+
+#include <ctype.h>
+
 #include "coding/agents.h"
 #include "config/settings.h"
+#include "prompt/template.h"
 #include "text/htmlform.h"
 #include "tui/symbols.h"
 
@@ -926,9 +930,9 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
     volatile sig_atomic_t *cancel = ctx && ctx->agent ? &ctx->agent->cancel : NULL;
     bool timed_out = false;
     char *err = NULL;
-    json_t *data;
+    json_t *data, *notes = NULL;
     agents_user_wait(env, true);
-    if (env->ui.form) data = env->ui.form(env->ui.ud, html ? html : "", timeout, &timed_out, cancel, &err);
+    if (env->ui.form) data = env->ui.form(env->ui.ud, html ? html : "", timeout, &timed_out, &notes, cancel, &err);
     else {
         fb_ui_t fb = {env, timeout, cancel, NULL};
         data = ask_field_by_field(&fb, form, &timed_out);
@@ -939,6 +943,7 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
         }
     }
     agents_user_wait(env, false);
+    if (err || !data) json_free(notes);
     if (err) {
         tool_result_error(out, "%s", err);
         free(err);
@@ -949,13 +954,43 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
         hf_form_free(form);
         return ask_cancelled(ctx, out);
     }
+    if (notes && !json_len(notes)) {
+        json_free(notes);
+        notes = NULL;
+    }
     char *json = hf_data_json(data);
     out->details = json_obj();
     json_set(out->details, "answers", hf_answers(form, data));
-    if (timed_out) {
-        json_set_bool(out->details, "timedOut", true);
-        tool_result_textf(out, "No answer before the timeout; submitted the form's current values:\n%s", json);
-    } else tool_result_textf(out, "User answers:\n%s", json);
+    if (notes) json_set(out->details, "notes", json_clone(notes));
+    if (timed_out) json_set_bool(out->details, "timedOut", true);
+    /* ask-result.md: the data, then each selected option's note on one line */
+    json_t *c = json_obj();
+    json_set_bool(c, "timedOut", timed_out);
+    json_set_str(c, "json", json);
+    if (notes) {
+        json_t *nt;
+        json_arr_foreach(notes, i, nt) {
+            const char *t = json_get_str(nt, "text");
+            sb_t b = SB_INIT;
+            bool space = false;
+            for (const char *p = t ? t : ""; *p; p++) { /* text.replace(/\s+/g, " ").trim() */
+                if (isspace((unsigned char)*p)) space = true;
+                else {
+                    if (space && b.len) sb_putc(&b, ' ');
+                    space = false;
+                    sb_putc(&b, *p);
+                }
+            }
+            json_set_str(nt, "text", sb_cstr(&b));
+            sb_free(&b);
+        }
+        json_set(c, "notes", notes);
+        notes = NULL;
+    }
+    char *text = prompt_render("coding-agent/prompts/tools/ask-result.md", c);
+    tool_result_text(out, text);
+    free(text);
+    json_free(c);
     free(json);
     json_free(data);
     hf_form_free(form);
