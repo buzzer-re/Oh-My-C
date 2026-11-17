@@ -16,6 +16,7 @@ Display commands (used by tests/tui/compare.sh to exercise transcript views):
   - "batch:[[tool, args], ...]" all the tool calls in one assistant message, then the usual "Tool said:" answer
   - model "mock-flaky"        every request fails with HTTP 429 (retry fallback chains)
   - a compaction summary (tool-less) or handoff-document request whose messages mention SLOWSUMMARY answers after 4 s
+  - a handoff-document request answers "## Goal\nplain answer" (plain "plain answer" when the transcript mentions BADHANDOFF)
 Eval helper side requests (omc eval completion()/judge()):
   - completion (system "You are a helpful assistant." or a forced `respond` tool) -> "completion says: <prompt>", or a
     `respond` call whose fields echo the prompt (strings) / 42 (numbers) / true (booleans)
@@ -334,7 +335,10 @@ class H(BaseHTTPRequestHandler):
             elif kind == "edit": name, args = "edit", {"input": rest.replace("\\n", "\n")}
             elif kind == "todo": name, args = "todo", {"op": "init", "items": rest.split(",")}
             else:
-                chunks.append({**base, "choices": [{"index": 0, "delta": {"content": "plain answer"}}]})
+                # a handoff document must open with its Goal heading (omp 421281302f); "BADHANDOFF" in the transcript
+                # makes it a malformed one
+                handoff = "Write a handoff document" in lu and "BADHANDOFF" not in json.dumps(msgs[1:])
+                chunks.append({**base, "choices": [{"index": 0, "delta": {"content": "## Goal\nplain answer" if handoff else "plain answer"}}]})
                 chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
                 name = None
             if name:

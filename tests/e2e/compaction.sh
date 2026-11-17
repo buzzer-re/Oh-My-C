@@ -69,11 +69,15 @@ for f in glob.glob(sys.argv[1] + "/**/*.jsonl", recursive=True):
 # session artifacts with compaction.handoffSaveToDisk) and commits it as a handoff compaction
 cagent "$T/cg5" $'modelRoles:\n  default: mock/mock-1\ncompaction:\n  thresholdTokens: 75000\n  asyncEnabled: false\n  handoffSaveToDisk: true'
 OMC_CODING_AGENT_DIR="$T/cg5" "${CR[@]}" "{\"type\":\"prompt\",\"message\":\"$BIG1\"}" "{\"type\":\"prompt\",\"message\":\"$BIG2\"}" > "$T/cg5.out"
-check "auto handoff"           '"type": "auto_compaction_end", "action": "handoff", "result": {"summary": "plain answer"'  cat "$T/cg5.out"
+check "auto handoff"           '"type": "auto_compaction_end", "action": "handoff", "result": {"summary": "## Goal\nplain answer"'  cat "$T/cg5.out"
 check "handoff saved"          "plain answer"  python3 -I -c '
 import glob, sys
 fs = glob.glob(sys.argv[1] + "/**/handoff-*.md", recursive=True)
 print(open(fs[0]).read() if fs else "no handoff file")' "$T/cg5"
+# a handoff document without its leading Goal heading never replaces the history: the ladder moves on (omp 421281302f)
+cagent "$T/cg6" $'modelRoles:\n  default: mock/mock-1\ncompaction:\n  thresholdTokens: 75000\n  asyncEnabled: false'
+OMC_CODING_AGENT_DIR="$T/cg6" "${CR[@]}" "{\"type\":\"prompt\",\"message\":\"BADHANDOFF $BIG1\"}" "{\"type\":\"prompt\",\"message\":\"$BIG2\"}" > "$T/cg6.out"
+check "bad handoff skipped"    'auto_compaction_end'  bash -c 'grep -q "\"action\": \"handoff\", \"result\": {" "$1" && echo committed-handoff || grep -o auto_compaction_end "$1" | head -1' _ "$T/cg6.out"
 # overflow: the ladder skips handoff, shake finds nothing, the soft summary commits and the turn retries
 cagent "$T/cg2" $'modelRoles:\n  default: mock/mock-1\ncompaction:\n  asyncEnabled: false\n  keepRecentTokens: 10'
 OMC_CODING_AGENT_DIR="$T/cg2" "${CR[@]}" '{"type":"prompt","message":"say:first answer here"}' \
