@@ -594,8 +594,11 @@ static void browser_roles(hub_t *h, ui_model_browser_t *b) {
     free(ra);
 }
 
+/* #setCandidateItems: assigning a role or a role-keyed fallback re-applies the role's accepts predicate; model-keyed
+ * chains (`provider/model-id`, `provider/<any>`) have no role predicate and stay unfiltered */
 static bool assign_accepts(const hub_t *h, const ai_model_t *m) {
-    return h->assigning != A_ROLE || mr_role_accepts(h->assign_role, m);
+    bool role = h->assigning == A_ROLE || (h->assigning == A_FALLBACK && h->assign_role && !strchr(h->assign_role, '/'));
+    return !role || mr_role_accepts(h->assign_role, m);
 }
 
 static void rebuild_browser(hub_t *h) {
