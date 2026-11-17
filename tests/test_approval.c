@@ -170,6 +170,23 @@ int main(void) {
     CHECK(reason_is("\"yolo\"", "bash", "{\"command\":\"curl http://example.com; ls\"}",
                     "Prompt required by bash pattern: curl *"));
     CHECK(reason_is("\"yolo\"", "bash", "{\"command\":\"curl x\"}", "Prompt required by bash pattern: curl *"));
+    /* an explicit prompt rule keeps its reason over a critical pattern (omp 00929d42c2) */
+    set("bash.patterns", "[{\"match\":\"sudo *\",\"approval\":\"prompt\"}]");
+    CHECK(reason_is("\"write\"", "bash", "{\"command\":\"sudo rm x\"}", "Prompt required by bash pattern: sudo *"));
+    /* leading env assignments: allow rules strip exactly named ones (rule `env` + bash.allowedEnvVars), deny and
+     * prompt rules match a segment with or without them (omp 83efd89024, 11af7ea8dc) */
+    set("bash.patterns", "[{\"match\":\"cargo test*\",\"approval\":\"allow\",\"env\":[\"RUST_LOG\"]},"
+                         "{\"match\":\"make *\",\"approval\":\"allow\"},{\"match\":\"rm *\",\"approval\":\"deny\"}]");
+    CHECK(resolve("\"always-ask\"", "bash", "{\"command\":\"RUST_LOG=debug cargo test -q\"}", NULL, NULL, NULL) == APOL_ALLOW);
+    CHECK(resolve("\"always-ask\"", "bash", "{\"command\":\"RUST_LOG='a b' cargo test\"}", NULL, NULL, NULL) == APOL_ALLOW);
+    CHECK(resolve("\"always-ask\"", "bash", "{\"command\":\"PATH=/x cargo test\"}", NULL, NULL, NULL) == APOL_PROMPT);
+    CHECK(resolve("\"always-ask\"", "bash", "{\"command\":\"CC=clang make all\"}", NULL, NULL, NULL) == APOL_PROMPT);
+    set("bash.allowedEnvVars", "[\" CC \"]");
+    CHECK(resolve("\"always-ask\"", "bash", "{\"command\":\"CC=clang make all\"}", NULL, NULL, NULL) == APOL_ALLOW);
+    CHECK(resolve("\"always-ask\"", "bash", "{\"command\":\"CC=clang RUST_LOG=1 cargo test\"}", NULL, NULL, NULL) == APOL_ALLOW);
+    CHECK(resolve("\"always-ask\"", "bash", "{\"command\":\"CCX=1 make all\"}", NULL, NULL, NULL) == APOL_PROMPT);
+    CHECK(reason_is("\"yolo\"", "bash", "{\"command\":\"FOO=1 rm -rf x\"}", "Blocked by bash pattern: rm *"));
+    settings_unset_runtime("bash.allowedEnvVars");
     /* operator rules outrank project-layer rules: a project allow can't loosen an operator deny or prompt */
     settings_unset_runtime("bash.patterns");
     {

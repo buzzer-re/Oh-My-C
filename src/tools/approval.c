@@ -766,7 +766,36 @@ bool approval_bash_critical(const char *command) {
     return false;
 }
 
-/* lexShellCommand + tokenizeShellSegments */
+/* isShellEnvironmentAssignment: SHELL_ASSIGNMENT `NAME=`, `NAME+=`, `NAME[sub]=` */
+static bool shell_assignment_word(const char *w) {
+    if (!(isalpha((unsigned char)*w) || *w == '_')) return false;
+    w++;
+    while (isalnum((unsigned char)*w) || *w == '_') w++;
+    if (*w == '[') {
+        const char *e = strchr(w, ']');
+        if (!e) return false;
+        w = e + 1;
+    }
+    if (*w == '+') w++;
+    return *w == '=';
+}
+
+/* bashCommandSegments: each segment's words joined, plus the words after its leading `NAME=value` assignments */
+static void push_segment(strvec_t *cur, strvec_t *out) {
+    if (!cur->n) return;
+    strvec_push_own(out, strvec_join(cur, " "));
+    size_t first = 0;
+    while (first < cur->n && shell_assignment_word(cur->v[first])) first++;
+    if (first > 0 && first < cur->n) {
+        strvec_t rest = {0};
+        for (size_t i = first; i < cur->n; i++) strvec_push(&rest, cur->v[i]);
+        strvec_push_own(out, strvec_join(&rest, " "));
+        strvec_free(&rest);
+    }
+    strvec_free(cur);
+}
+
+/* lexShellCommand + tokenizeShellSegments (bashCommandSegments) */
 void approval_shell_segments(const char *command, strvec_t *out) {
     strvec_t cur = {0};
     sb_t value = SB_INIT;
@@ -796,10 +825,7 @@ void approval_shell_segments(const char *command, strvec_t *out) {
                 sb_clear(&value);
                 in_word = false;
             }
-            if (i < n && strchr("\n;&|()", ch) && cur.n) {
-                strvec_push_own(out, strvec_join(&cur, " "));
-                strvec_free(&cur);
-            }
+            if (i < n && strchr("\n;&|()", ch) && cur.n) push_segment(&cur, out);
             continue;
         }
         in_word = true;
@@ -809,7 +835,7 @@ void approval_shell_segments(const char *command, strvec_t *out) {
         else sb_putc(&value, ch);
     }
     if (in_word && value.len) strvec_push(&cur, sb_cstr(&value));
-    if (cur.n) strvec_push_own(out, strvec_join(&cur, " "));
+    push_segment(&cur, out);
     strvec_free(&cur);
     sb_free(&value);
 }
@@ -918,7 +944,76 @@ static bool segment_matches(const char *command, const char *pattern) {
 typedef struct {
     char *match; /* normalized */
     approval_policy_t pol;
+    strvec_t env; /* leading env assignment names this `allow` rule strips before matching */
 } bash_rule_t;
+
+/* normalizeBashAllowedEnvList: the string entries, trimmed, non-empty */
+static void env_list_load(const json_t *v, strvec_t *out) {
+    const json_t *e;
+    json_arr_foreach(json_is_arr(v) ? v : NULL, i, e) {
+        if (!json_is_str(e)) continue;
+        char *t = str_trim(json_sv(e));
+        if (*t) strvec_push_own(out, t);
+        else free(t);
+    }
+}
+
+/* skipShellWord: the end of a shell word (quotes and escapes respected), -1 for incomplete syntax */
+static ssize_t skip_shell_word(const char *c, size_t start) {
+    bool sq = false, dq = false;
+    size_t n = strlen(c);
+    for (size_t i = start; i < n; i++) {
+        char ch = c[i];
+        if (sq) {
+            if (ch == '\'') sq = false;
+            continue;
+        }
+        if (dq) {
+            if (ch == '\\') {
+                if (i + 1 >= n) return -1;
+                i++;
+                continue;
+            }
+            if (ch == '"') dq = false;
+            continue;
+        }
+        if (ch == '\'') sq = true;
+        else if (ch == '"') dq = true;
+        else if (ch == '\\') {
+            if (i + 1 >= n) return -1;
+            i++;
+        } else if (ch == ' ' || ch == '\t') return (ssize_t)i;
+    }
+    return sq || dq ? -1 : (ssize_t)n;
+}
+
+/* withoutLeadingEnvironmentAssignments with an exact-name allowlist (names never glob: `CARGO_*` would admit
+ * `CARGO_BUILD_RUSTC_WRAPPER`): the command after its leading allowed `NAME=value` words, or NULL */
+static char *strip_env_assignments(const char *command, const strvec_t *a, const strvec_t *b) {
+    if (!a->n && !b->n) return NULL;
+    size_t i = 0, n = strlen(command);
+    bool found = false;
+    while (i < n) {
+        while (command[i] == ' ' || command[i] == '\t') i++;
+        size_t k = i;
+        if (!(isalpha((unsigned char)command[k]) || command[k] == '_')) break;
+        while (isalnum((unsigned char)command[k]) || command[k] == '_') k++;
+        size_t name_end = k;
+        if (command[k] == '+') k++;
+        if (command[k] != '=') break;
+        char *name = xstrndup(command + i, name_end - i);
+        bool ok = strvec_contains(a, name) || strvec_contains(b, name);
+        free(name);
+        if (!ok) break;
+        ssize_t end = skip_shell_word(command, k + 1);
+        if (end < 0) return NULL;
+        found = true;
+        i = (size_t)end;
+    }
+    if (!found) return NULL;
+    while (command[i] == ' ' || command[i] == '\t' || command[i] == '\n' || command[i] == '\r') i++;
+    return command[i] ? xstrdup(command + i) : NULL;
+}
 
 /* getBashApprovalPatternRules */
 static size_t bash_rules_load(const json_t *patterns, bash_rule_t **out) {
@@ -934,13 +1029,18 @@ static size_t bash_rules_load(const json_t *patterns, bash_rule_t **out) {
             continue;
         }
         *out = xrealloc(*out, (n + 1) * sizeof **out);
-        (*out)[n++] = (bash_rule_t){m, p};
+        (*out)[n] = (bash_rule_t){m, p, {0}};
+        env_list_load(json_get(rule, "env"), &(*out)[n].env);
+        n++;
     }
     return n;
 }
 
 static void bash_rules_free(bash_rule_t *r, size_t n) {
-    for (size_t i = 0; i < n; i++) free(r[i].match);
+    for (size_t i = 0; i < n; i++) {
+        free(r[i].match);
+        strvec_free(&r[i].env);
+    }
     free(r);
 }
 
@@ -968,11 +1068,21 @@ static const bash_rule_t *bash_restriction_rule(const char *command, const bash_
     return hit ? hit : prompt;
 }
 
+/* bashApprovalRuleMatches for `allow`: the whole command, or the command after leading assignments of the names the
+ * rule's `env` and bash.allowedEnvVars allow */
+static bool allow_rule_matches(const char *command, const bash_rule_t *r, const strvec_t *allowed) {
+    if (pattern_matches(command, r->match)) return true;
+    char *stripped = strip_env_assignments(command, &r->env, allowed);
+    bool hit = stripped && pattern_matches(stripped, r->match);
+    free(stripped);
+    return hit;
+}
+
 /* findBashApprovalPatternRule */
-static const bash_rule_t *bash_pattern_rule(const char *command, const bash_rule_t *rules, size_t n) {
+static const bash_rule_t *bash_pattern_rule(const char *command, const bash_rule_t *rules, size_t n, const strvec_t *allowed) {
     if (has_shell_control(command)) return bash_restriction_rule(command, rules, n);
     for (size_t r = 0; r < n; r++)
-        if (rules[r].pol == APOL_ALLOW ? pattern_matches(command, rules[r].match) : segment_matches(command, rules[r].match))
+        if (rules[r].pol == APOL_ALLOW ? allow_rule_matches(command, &rules[r], allowed) : segment_matches(command, rules[r].match))
             return &rules[r];
     return NULL;
 }
@@ -987,8 +1097,15 @@ static void bash_decision(const json_t *args, approval_decision_t *out) {
     json_t *operator_patterns = settings_operator_get("bash.patterns");
     size_t an = bash_rules_load(operator_patterns, &arules);
     json_free(operator_patterns);
-    const bash_rule_t *rule = bash_pattern_rule(command, rules, n);
-    const bash_rule_t *arule = bash_pattern_rule(command, arules, an);
+    strvec_t env = {0}, aenv = {0};
+    env_list_load(settings_get("bash.allowedEnvVars"), &env);
+    json_t *operator_env = settings_operator_get("bash.allowedEnvVars");
+    env_list_load(operator_env, &aenv);
+    json_free(operator_env);
+    const bash_rule_t *rule = bash_pattern_rule(command, rules, n, &env);
+    const bash_rule_t *arule = bash_pattern_rule(command, arules, an, &aenv);
+    strvec_free(&env);
+    strvec_free(&aenv);
     const bash_rule_t *denied = arule && arule->pol == APOL_DENY ? arule : rule && rule->pol == APOL_DENY ? rule : NULL;
     const bash_rule_t *prompted =
         arule && arule->pol == APOL_PROMPT ? arule : rule && rule->pol == APOL_PROMPT ? rule : NULL;
@@ -997,13 +1114,13 @@ static void bash_decision(const json_t *args, approval_decision_t *out) {
         out->override = true;
         out->policy = APOL_DENY;
         out->reason = xasprintf("Blocked by bash pattern: %s", denied->match);
-    } else if (approval_bash_critical(command)) {
-        out->override = true;
-        out->reason = xstrdup("Critical pattern detected");
-    } else if (prompted) {
+    } else if (prompted) { /* an explicit prompt rule keeps its own reason over a critical pattern (omp 00929d42c2) */
         out->override = true;
         out->policy = APOL_PROMPT;
         out->reason = xasprintf("Prompt required by bash pattern: %s", prompted->match);
+    } else if (approval_bash_critical(command)) {
+        out->override = true;
+        out->reason = xstrdup("Critical pattern detected");
     } else if (rule && rule->pol == APOL_ALLOW) {
         out->tier = TIER_WRITE;
         out->policy = APOL_ALLOW;

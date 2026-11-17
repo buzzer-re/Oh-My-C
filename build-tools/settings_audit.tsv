@@ -230,7 +230,6 @@ auth.unpausedProviders	inert	pause overrides not ported yet (added in omp v18.19
 disassembler.backend	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
 disassembler.maxOpen	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
 disassembler.idleCloseSec	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
-bash.allowedEnvVars	inert	not ported yet (added in omp v18.19-18.22)
 ghidra.installDir	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
 ghidra.python	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
 tui.renderEmbeds	inert	not ported yet (added in omp v18.19-18.22)
