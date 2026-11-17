@@ -2046,6 +2046,7 @@ static bool relocate_session(ui_t *u, const char *path) {
         return false;
     }
     ui_signals_session_title();
+    ui_mcp_rescope(u); /* reloadTuiPluginState: the destination project's MCP servers (agents load per spawn) */
     tui_request_render(u->tui);
     return true;
 }

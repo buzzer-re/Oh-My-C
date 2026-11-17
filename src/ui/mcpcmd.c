@@ -1726,6 +1726,14 @@ static void *reload_worker(void *p) {
     return NULL;
 }
 
+/* reloadServers without the progress messages: /move rescopes the MCP servers to the new project */
+static void *rescope_worker(void *p) {
+    mjob_t *j = p;
+    reload_servers(j->u, j->m, j->cwd);
+    job_free(j);
+    return NULL;
+}
+
 static void *reconnect_worker(void *p) {
     mjob_t *j = p;
     ui_t *u = j->u;
@@ -1966,6 +1974,10 @@ static mjob_t *job(ui_t *u, const char *name) {
     j->cwd = xstrdup(u->app->cwd);
     j->m = manager(u);
     return j;
+}
+
+void ui_mcp_rescope(ui_t *u) {
+    if (manager(u)) mcpui_spawn(rescope_worker, job(u, NULL));
 }
 
 /* the text after "/mcp <verb>" */
