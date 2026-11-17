@@ -1,4 +1,5 @@
 /* test_providers_oai.c - offline tests for the OpenAI-family providers (request building + stream decoding). */
+#include <time.h>
 #include "ai/leaked_thinking.h"
 #include "ai/provider_openai.h"
 
@@ -1116,6 +1117,23 @@ static void test_retry_hints(void) {
     CHECK(ai_extract_retry_hint(NULL, "Rate limited, try again in ~5 min.") == 300000);
     CHECK(ai_extract_retry_hint(NULL, "Your quota will reset after 1h2m3s") == 3723000);
     CHECK(ai_extract_retry_hint(NULL, "Resets in 2hr 15min") == 8100000);
+    /* Cloud Code Assist quota formats (omp e482002caf, 6d091aba7f): "Resets in 71h48m47s", "quotaResetDelay" (with
+     * millisecond units), and the absolute "quotaResetTimeStamp" */
+    CHECK(ai_extract_retry_hint(NULL, "Individual quota reached. Resets in 71h48m47s.") == 258527000);
+    CHECK(ai_extract_retry_hint(NULL, "{\"quotaResetDelay\": \"17h48m25.5s\"}") == 64105500);
+    CHECK(ai_extract_retry_hint(NULL, "{\"quotaResetDelay\":\"835ms\"}") == 835);
+    CHECK(ai_extract_retry_hint(NULL, "{\"quotaResetDelay\": \"5mx\"}") == -1);
+    {
+        time_t future = time(NULL) + 7200;
+        char stamp[40], body[120];
+        strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%SZ", gmtime(&future));
+        snprintf(body, sizeof body, "{\"quotaResetTimeStamp\": \"%s\"}", stamp);
+        int64_t wait_ms = ai_extract_retry_hint(NULL, body);
+        CHECK(wait_ms > 7100000 && wait_ms <= 7200000);
+        stamp[19] = 0; /* naive (no Z): not this grammar */
+        snprintf(body, sizeof body, "{\"quotaResetTimeStamp\": \"%s\"}", stamp);
+        CHECK(ai_extract_retry_hint(NULL, body) == -1);
+    }
     CHECK(ai_extract_retry_hint(NULL, "limit will reset in 3 days") == 3 * 86400000LL);
     CHECK(ai_extract_retry_hint(NULL, "429 slow down retry-after-ms=98497") == 98497);
     CHECK(ai_extract_retry_hint(NULL, "try again in 2s, or reset after 10s") == 10000); /* longest wins */

@@ -164,29 +164,80 @@ static void consider_clamped(hint_acc_t *a, double ms) {
     else a->retry_now = true;
 }
 
+/* (\d+)<c> at p: the end past <c>, else NULL */
+static const char *int_unit(const char *p, char c, long *v) {
+    const char *q = p;
+    while (isdigit((unsigned char)*q)) q++;
+    if (q == p || tolower((unsigned char)*q) != c) return NULL;
+    *v = strtol(p, NULL, 10);
+    return q + 1;
+}
+
+/* `\s*(?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)(ms|s)\b` at p (with the optional groups' backtracking): ms, else -1 */
+static double hms_at(const char *p) {
+    p = skip_ws(p);
+    for (int with_h = 1; with_h >= 0; with_h--) {
+        long h = 0;
+        const char *a = with_h ? int_unit(p, 'h', &h) : p;
+        if (!a) continue;
+        for (int with_m = 1; with_m >= 0; with_m--) {
+            long m = 0;
+            const char *b = with_m ? int_unit(a, 'm', &m) : a;
+            if (!b || !isdigit((unsigned char)*b)) continue;
+            const char *c = b;
+            while (isdigit((unsigned char)*c)) c++;
+            if (*c == '.' && isdigit((unsigned char)c[1]))
+                for (c++; isdigit((unsigned char)*c); c++) {}
+            double secs = strtod(b, NULL);
+            bool ms = !strncasecmp(c, "ms", 2);
+            const char *e = ms ? c + 2 : (*c == 's' || *c == 'S') ? c + 1 : NULL;
+            if (!e || word_ch(*e)) continue;
+            return ((double)h * 60 + (double)m) * 60000 + (ms ? secs : secs * 1000);
+        }
+    }
+    return -1;
+}
+
+/* QUOTA_RESET_PATTERN: the leftmost `reset after` / `resets? in` / `"quotaResetDelay": "` followed by a duration */
+static double quota_reset_ms(const char *body) {
+    for (const char *p = body; *p; p++) {
+        const char *q = NULL;
+        if (!strncasecmp(p, "reset after", 11)) q = p + 11;
+        else if (!strncasecmp(p, "reset", 5)) {
+            const char *r = p + 5;
+            if (*r == 's' || *r == 'S') r++;
+            if (ws_ch(*r)) {
+                r = skip_ws(r);
+                if (!strncasecmp(r, "in", 2)) q = r + 2;
+            }
+        } else if (!strncasecmp(p, "\"quotaResetDelay\":", 18)) {
+            const char *r = skip_ws(p + 18);
+            if (*r == '"') q = r + 1;
+        }
+        if (!q) continue;
+        double ms = hms_at(q);
+        if (ms >= 0) return ms;
+    }
+    return -1;
+}
+
 /* the body-text half of extractRetryHint */
 static int64_t body_retry_hint(const char *body, int64_t now) {
     hint_acc_t a = {-1, -1, false};
-    /* "reset after 1h2m3s" / "10m15s" / "39s" */
-    for (const char *p = str_istr(body, "reset after "); p; p = str_istr(p + 1, "reset after ")) {
-        const char *q = p + 12;
-        double hrs = 0, mins = 0, secs;
-        char *e;
-        long v = strtol(q, &e, 10);
-        if (e != q && isdigit((unsigned char)*q) && (*e == 'h' || *e == 'H')) {
-            hrs = (double)v;
-            q = e + 1;
-            v = strtol(q, &e, 10);
-        }
-        if (e != q && isdigit((unsigned char)*q) && (*e == 'm' || *e == 'M')) {
-            mins = (double)v;
-            q = e + 1;
-        }
-        const char *r = read_num(q, &secs);
-        if (r && (*r == 's' || *r == 'S')) {
-            consider(&a, ((hrs * 60 + mins) * 60 + secs) * 1000);
-            break;
-        }
+    /* QUOTA_RESET_PATTERN: "reset after 1h2m3s" / "10m15s" / "39s" / "Resets in 71h48m47s" /
+     * "quotaResetDelay": "17h48m25.5s" / "835ms" (the leftmost match) */
+    double quota = quota_reset_ms(body);
+    if (quota >= 0) consider(&a, quota);
+    /* Cloud Code Assist RPC error detail "quotaResetTimeStamp": "<stamp>Z": an unambiguous absolute reset */
+    const char *rpc = str_istr(body, "\"quotaResetTimeStamp\":");
+    const char *rq = rpc ? skip_ws(rpc + 22) : NULL;
+    if (rq && *rq == '"' && strlen(rq) > 20) {
+        const char *z = rq + 20; /* past "YYYY-MM-DD?HH:MM:SS */
+        if (*z == '.' && isdigit((unsigned char)z[1]))
+            for (z++; isdigit((unsigned char)*z); z++) {}
+        bool off;
+        int64_t t = (*z == 'Z' || *z == 'z') && z[1] == '"' ? parse_stamp(rq + 1, &off, false) : -1;
+        if (t > now) consider(&a, (double)(t - now));
     }
     /* "(will) reset at <stamp>" and "将在 <stamp> 重置": a naive wall clock (UTC) only as a fallback */
     for (const char *p = str_istr(body, "reset at"); p; p = str_istr(p + 1, "reset at")) {
