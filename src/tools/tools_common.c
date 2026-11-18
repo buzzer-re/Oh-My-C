@@ -170,7 +170,13 @@ char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err) {
         if (slash) *slash = 0;
         const skill_t *sk = discovery_find_skill(env->disc, target);
         if (!sk && env->rediscover_skills && env->rediscover_skills(env)) sk = discovery_find_skill(env->disc, target);
-        if (!sk) *err = xasprintf("Unknown skill: %s", target);
+        if (!sk) {
+            sb_t avail = SB_INIT;
+            for (size_t i = 0; env->disc && i < env->disc->skills.n; i++)
+                sb_appendf(&avail, "%s%s", avail.len ? ", " : "", env->disc->skills.v[i].name);
+            *err = xasprintf("Unknown skill: %s\nAvailable: %s", target, avail.len ? avail.s : "none");
+            sb_free(&avail);
+        }
         else if (slash && slash[1]) {
             char *p = path_join(sk->dir, slash + 1);
             char *n = path_normalize(p);
@@ -184,11 +190,16 @@ char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err) {
         if (!r) *err = xasprintf("Unknown rule: %s", target);
         else path = xstrdup(r->path);
     } else {
-        if (strchr(target, '/') || strstr(target, "..")) *err = xasprintf("Invalid artifact id: %s", target);
+        /* artifact-protocol.ts parseArtifactId / resolveArtifactFile */
+        char *id = xstrndup(target, strcspn(target, "/?#"));
+        if (!*id) *err = xstrdup("artifact:// URL requires a numeric ID: artifact://0");
+        else if (id[strspn(id, "0123456789")]) *err = xasprintf("artifact:// ID must be numeric, got: %s", id);
+        else if (!env->artifacts) *err = xstrdup("No session - artifacts unavailable");
         else {
-            path = artifacts_find(env->artifacts, target);
-            if (!path) *err = xasprintf("Artifact not found: %s", target);
+            path = artifacts_find(env->artifacts, id);
+            if (!path) *err = artifacts_missing_error(env->artifacts, id);
         }
+        free(id);
     }
     free(target);
     if (!path) return NULL;

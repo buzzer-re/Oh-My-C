@@ -77,6 +77,9 @@ bool agents_has_pending(struct app *a);
 
 /* ---------- reads ---------- */
 char *agents_read_output(const char *id_and_path, char **err); /* agent://<id>[/json/path] */
+/* AgentProtocolHandler.locate: the published `<id>.md` output file of `id` (owned), NULL for `all`, a JSON-path
+ * suffix, an unknown id, no file, or an output superseded by a running turn (its banner comes from the handler) */
+char *agents_locate_output(const char *id);
 char *agents_history(const char *id, char **err);              /* history://[<id>] */
 /* running subagents for proc:// listings: [{id, agent, ageMs, activity}] (owned) */
 json_t *agents_running(void);

@@ -2,6 +2,7 @@
  * tools/write.ts, tools/edit.ts and chrome/diff.ts). */
 #include "ui/tools/tc.h"
 #include "tools/readsel.h"
+#include "tools/outsink.h"
 
 #include <ctype.h>
 
@@ -155,68 +156,217 @@ void tc_render_read_group(const tc_call_t *calls, size_t n, int width, strvec_t 
     free(title_b);
 }
 
-/* standalone read of a markdown resource (pr://, issue://): renderMarkdownCell with a `Read <path>` title */
-static bool read_markdown_card(const tc_call_t *c, int width, strvec_t *out) {
-    if (!c->has_result || c->partial || c->is_error || !str_eq(json_get_str(c->details, "contentType"), "text/markdown")) return false;
-    const char *raw = json_get_str(c->args, "path");
-    if (!raw) raw = json_get_str(c->args, "file_path");
-    if (!raw || json_get_bool(c->args, "raw", false)) return false;
+/* displayContent.lineNumbers[i]: 0 for a null (elided) row */
+static int64_t line_no_at(const json_t *nums, size_t i) {
+    const json_t *v = json_at(nums, i);
+    if (!json_is_num(v)) return 0;
+    return v->is_int ? v->u.num.i : (int64_t)v->u.num.d;
+}
+
+/* readResultIsMarkdown: Markdown content, unless the call reads `raw` (arg or a `:raw` selector chunk) */
+static bool read_result_is_markdown(const tc_call_t *c, const char *raw) {
+    if (!str_eq(json_get_str(c->details, "contentType"), "text/markdown") || json_get_bool(c->args, "raw", false)) return false;
     const char *sel = strstr(raw, "://");
     sel = sel ? strchr(sel + 3, ':') : NULL;
-    if (sel) {
-        strvec_t chunks = str_split(sel + 1, ":");
-        bool rawsel = false;
-        for (size_t i = 0; i < chunks.n; i++)
-            if (!strcasecmp(chunks.v[i], "raw")) rawsel = true;
-        strvec_free(&chunks);
-        if (rawsel) return false;
+    if (!sel) return true;
+    strvec_t chunks = str_split(sel + 1, ":");
+    bool rawsel = false;
+    for (size_t i = 0; i < chunks.n; i++)
+        if (!strcasecmp(chunks.v[i], "raw")) rawsel = true;
+    strvec_free(&chunks);
+    return !rawsel;
+}
+
+/* readToolRenderer.renderResult for a read that renders full (an internal URL; a Markdown resource): a Markdown cell
+ * for Markdown content, else a code cell numbered from details.displayContent, then an Output section with the
+ * resolved path and the truncation warning. proc:// and cfg:// have their own cards upstream (not ported). */
+static bool read_full_card(const tc_call_t *c, int width, strvec_t *out) {
+    if (!c->has_result || c->partial) return false;
+    const char *raw = json_get_str(c->args, "path");
+    if (!raw) raw = json_get_str(c->args, "file_path");
+    if (!raw || str_starts(raw, "proc://") || !strncasecmp(raw, "cfg:/", 5)) return false;
+    if (c->is_error) {
+        /* a failed full-card read: `✘ Read <path>` framing its message in the error color */
+        if (tc_read_groupable(c->args)) return false;
+        char *msg = tc_text_of(c->content);
+        const char *m = *msg ? msg : "Unknown error";
+        if (str_starts(m, "Error:")) m += 6 + strspn(m + 6, " \t");
+        char *shown = tc_shorten_path(raw);
+        char *t = xasprintf("Read %s", shown);
+        tc_status_line_t sl = {.icon = TC_ST_ERROR, .spinner = -1, .title = t, .title_slot = -1};
+        char *header = tc_status_line(&sl);
+        tc_section_t sec = {0};
+        strvec_t rows = {0};
+        tc_split_lines(m, &rows);
+        for (size_t i = 0; i < rows.n; i++) {
+            char *san = tc_sanitize_line(rows.v[i]);
+            strvec_push_own(&sec.lines, tc_fg(TUI_TC_ERROR, san));
+            free(san);
+        }
+        tc_block_t blk = {.header = header, .state = TC_STATE_ERROR, .sections = &sec, .nsections = 1, .width = width,
+                          .pad_left = -1, .pad_right = -1, .border_slot = -1};
+        tc_output_block(&blk, out);
+        strvec_free(&rows);
+        strvec_free(&sec.lines);
+        free(header);
+        free(t);
+        free(shown);
+        free(msg);
+        return true;
     }
-    char *text = tc_text_of(c->content);
-    /* displayContent: the page without its model-facing continuation notice */
-    char *nt = strstr(text, "\n[");
-    while (nt) {
-        char *next = strstr(nt + 2, "\n[");
-        if (!next) break;
-        nt = next;
+    bool md = read_result_is_markdown(c, raw);
+    if (!md && tc_read_groupable(c->args)) return false;
+    const json_t *d = c->details, *meta = json_get_obj(d, "meta"), *dc = json_get_obj(d, "displayContent");
+    char *text = NULL;
+    if (dc && json_get_str(dc, "text")) text = xstrdup(json_get_str(dc, "text"));
+    else {
+        /* stripOutputNotice, plus an in-body `[N more lines in … to continue]` continuation */
+        char *all = tc_text_of(c->content);
+        text = out_strip_notice(all, meta);
+        free(all);
+        char *nt = strstr(text, "\n[");
+        while (nt) {
+            char *next = strstr(nt + 2, "\n[");
+            if (!next) break;
+            nt = next;
+        }
+        if (nt && strstr(nt, " more lines in ") && str_ends(nt, " to continue]")) {
+            *nt = 0;
+            size_t l = strlen(text);
+            while (l && text[l - 1] == '\n') text[--l] = 0;
+        }
     }
-    if (nt && strstr(nt, " more lines in ") && str_ends(nt, " to continue]")) {
-        *nt = 0;
-        size_t l = strlen(text);
-        while (l && text[l - 1] == '\n') text[--l] = 0;
+    /* warning lines: the resolved path, the truncation notice */
+    strvec_t warn = {0};
+    const char *rp = json_get_str(d, "resolvedPath");
+    if (rp) {
+        char *sp = tc_shorten_path(rp);
+        char *w = xasprintf("%sResolved path: %s%s", tc_sym("format.bracketLeft"), sp, tc_sym("format.bracketRight"));
+        strvec_push_own(&warn, tc_fg(TUI_TC_DIM, w));
+        free(w);
+        free(sp);
+    }
+    if (json_get_obj(meta, "truncation")) {
+        char *wt = out_format_warning(meta);
+        if (wt) {
+            char *w = xasprintf("%s%s%s", tc_sym("format.bracketLeft"), wt, tc_sym("format.bracketRight"));
+            strvec_push_own(&warn, tc_fg(TUI_TC_WARNING, w));
+            free(w);
+            free(wt);
+        }
     }
     char *shown = tc_shorten_path(raw);
     char *t = xasprintf("Read %s", shown);
     char *icon = tc_status_icon(TC_ST_SUCCESS, -1);
     char *tt = tc_fg(TUI_TC_TOOL_TITLE, t);
     char *title = xasprintf("%s %s", icon, tt);
-    int iw = MAX(20, tc_block_content_width(width, -1, -1));
-    tc_section_t sec = {0};
-    char *trimmed = str_trim(text);
-    if (*trimmed) {
-        tui_md_opts_t mo;
-        tui_md_opts_default(&mo);
-        strvec_t all = {0};
-        tui_md_render(text, iw, &mo, &all);
-        size_t lim = c->expanded ? all.n : MIN(all.n, (size_t)12);
-        for (size_t i = 0; i < lim; i++) strvec_push(&sec.lines, all.v[i]);
-        if (all.n > lim) {
-            char *mi = tc_more_items((int64_t)(all.n - lim), "line");
+    int iw = tc_block_content_width(width, -1, -1);
+    tc_section_t secs[2] = {0};
+    if (md) {
+        /* renderMarkdownCell: the Markdown wraps at the block's inner width; collapsed rows cap at 12 */
+        char *trimmed = str_trim(text);
+        if (*trimmed) {
+            tui_md_opts_t mo;
+            tui_md_opts_default(&mo);
+            strvec_t all = {0};
+            tui_md_render(text, MAX(20, iw), &mo, &all);
+            size_t lim = c->expanded ? all.n : MIN(all.n, (size_t)12);
+            for (size_t i = 0; i < lim; i++) strvec_push(&secs[0].lines, all.v[i]);
+            if (all.n > lim) {
+                char *mi = tc_more_items((int64_t)(all.n - lim), "line");
+                char *hint = tc_expand_hint();
+                char *hp = tui_strip_ansi(hint);
+                char *m = xasprintf("%s %s", mi, hp);
+                strvec_push_own(&secs[0].lines, tc_fg(TUI_TC_DIM, m));
+                free(m);
+                free(hp);
+                free(hint);
+                free(mi);
+            }
+            strvec_free(&all);
+        }
+        free(trimmed);
+    } else {
+        /* renderCodeCell: highlighted by the path's language, a dim `N ` gutter from displayContent, 12 rows collapsed */
+        char *path = NULL, *sel = NULL;
+        split_path_sel(raw, &path, &sel);
+        char *norm = tc_replace_tabs(text);
+        strvec_t rows = {0};
+        tc_split_lines(norm, &rows);
+        size_t maxl = c->expanded ? rows.n : MIN(rows.n, (size_t)12);
+        size_t hidden = rows.n - maxl;
+        sb_t vis = SB_INIT;
+        for (size_t i = 0; i < maxl; i++) sb_appendf(&vis, "%s%s", i ? "\n" : "", rows.v[i]);
+        strvec_t hl = {0};
+        /* splitReadRenderPath: an internal URL's language comes from its path with the `:sel` peeled */
+        const char *sep = strstr(path, "://");
+        char *lp = sep ? xstrndup(sep + 3, strcspn(sep + 3, ":")) : xstrdup(path);
+        tc_highlight(sb_cstr(&vis), tc_lang_from_path(lp), &hl);
+        free(lp);
+        const json_t *nums = json_get_arr(dc, "lineNumbers");
+        int64_t start = dc ? json_get_int(dc, "startLine", 0) : 0;
+        int64_t maxv = 0;
+        for (size_t i = 0; i < maxl; i++) {
+            int64_t n = nums ? line_no_at(nums, i) : dc && start ? start + (int64_t)i : 0;
+            if (n > maxv) maxv = n;
+        }
+        int lnw = 0;
+        if (maxv > 0) {
+            char nb[24];
+            lnw = MAX(2, snprintf(nb, sizeof nb, "%lld", (long long)maxv));
+        }
+        for (size_t i = 0; i < hl.n; i++) {
+            if (!lnw) {
+                strvec_push(&secs[0].lines, hl.v[i]);
+                continue;
+            }
+            int64_t n = nums ? line_no_at(nums, i) : start + (int64_t)i;
+            char *g = n > 0 ? xasprintf("%*lld ", lnw, (long long)n) : xasprintf("%*s ", lnw, "");
+            char *gd = tc_fg(TUI_TC_DIM, g);
+            /* wrapPrefixedLine: continuation rows hang under the gutter */
+            strvec_t wl = {0};
+            tui_wrap_text_with_ansi(hl.v[i], MAX(1, iw - (lnw + 1)), &wl);
+            for (size_t k = 0; k < wl.n; k++) {
+                if (k == 0) strvec_push_own(&secs[0].lines, xasprintf("%s%s", gd, wl.v[k]));
+                else strvec_push_own(&secs[0].lines, xasprintf("%*s%s", lnw + 1, "", wl.v[k]));
+            }
+            if (!wl.n) strvec_push(&secs[0].lines, gd);
+            strvec_free(&wl);
+            free(gd);
+            free(g);
+        }
+        if (hidden) {
+            char *mi = tc_more_items((int64_t)hidden, "line");
             char *hint = tc_expand_hint();
-            char *hp = tui_strip_ansi(hint);
-            char *m = xasprintf("%s %s", mi, hp);
-            strvec_push_own(&sec.lines, tc_fg(TUI_TC_DIM, m));
+            char *m = xasprintf("%*s%s %s", lnw ? lnw + 1 : 0, "", mi, hint);
+            strvec_push_own(&secs[0].lines, tc_fg(TUI_TC_DIM, m));
             free(m);
-            free(hp);
             free(hint);
             free(mi);
         }
-        strvec_free(&all);
+        strvec_free(&hl);
+        sb_free(&vis);
+        strvec_free(&rows);
+        free(norm);
+        free(path);
+        free(sel);
     }
-    tc_block_t blk = {.header = title, .state = TC_STATE_SUCCESS, .sections = &sec, .nsections = 1, .width = width,
+    size_t ns = 1;
+    char *olabel = NULL;
+    if (warn.n) {
+        olabel = tc_fg(TUI_TC_TOOL_TITLE, "Output");
+        secs[1].label = olabel;
+        size_t lim = c->expanded ? warn.n : MIN(warn.n, (size_t)6);
+        for (size_t i = 0; i < lim; i++) strvec_push(&secs[1].lines, warn.v[i]);
+        ns = 2;
+    }
+    tc_block_t blk = {.header = title, .state = TC_STATE_SUCCESS, .sections = secs, .nsections = ns, .width = width,
                       .pad_left = -1, .pad_right = -1, .border_slot = -1};
     tc_output_block(&blk, out);
-    strvec_free(&sec.lines);
-    free(trimmed);
+    strvec_free(&secs[0].lines);
+    strvec_free(&secs[1].lines);
+    strvec_free(&warn);
+    free(olabel);
     free(title);
     free(tt);
     free(icon);
@@ -227,7 +377,7 @@ static bool read_markdown_card(const tc_call_t *c, int width, strvec_t *out) {
 }
 
 void tc_read(const tc_call_t *c, int width, strvec_t *out) {
-    if (read_markdown_card(c, width, out)) return;
+    if (read_full_card(c, width, out)) return;
     tc_render_read_group(c, 1, width, out);
 }
 

@@ -22,6 +22,8 @@ char *artifacts_alloc(artifact_store_t *s, const char *tool, char **id);
 char *artifacts_save(artifact_store_t *s, const char *tool, const char *data, size_t len);
 /* path of artifact `id` (`<id>.*.log`), owned, or NULL */
 char *artifacts_find(artifact_store_t *s, const char *id);
+/* resolveArtifactFile's miss: "No artifacts directory found" or "Artifact <id> not found. Available: <ids|none>" (owned) */
+char *artifacts_missing_error(artifact_store_t *s, const char *id);
 /* copy every artifact of `src_dir` into `dst_dir` without overwriting (session fork) */
 void artifacts_copy_dir(const char *src_dir, const char *dst_dir);
 /* `<session file minus .jsonl>` or NULL */

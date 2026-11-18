@@ -1789,6 +1789,22 @@ static char *last_text_of(const json_t *msgs) {
     return NULL;
 }
 
+char *agents_locate_output(const char *id) {
+    size_t n = strlen(id);
+    if (n && id[n - 1] == '/') n--; /* agent://<id>/ has no path extraction */
+    if (!n || memchr(id, '/', n) || strpbrk(id, "?#")) return NULL;
+    char *want = xstrndup(id, n);
+    char *res = NULL;
+    if (strcmp(want, "all") != 0) {
+        pthread_mutex_lock(&g_mu);
+        aref_t *r = find_any_locked(want);
+        if (r && !r->is_main && !r->running && r->output_path && fs_is_file(r->output_path)) res = xstrdup(r->output_path);
+        pthread_mutex_unlock(&g_mu);
+    }
+    free(want);
+    return res;
+}
+
 char *agents_read_output(const char *id_and_path, char **err) {
     *err = NULL;
     const char *slash = strchr(id_and_path, '/');
