@@ -2096,7 +2096,7 @@ int ui_mcp_complete(ui_t *u, const char *arg, tui_ac_result_t *out) {
     if (!strcmp(low, "remove")) { /* config-file entries only; user-only names get --scope user */
         json_obj_foreach(json_get_obj(pc, "mcpServers"), i, k, v) add_unique(&names, k);
         json_obj_foreach(json_get_obj(uc, "mcpServers"), i, k, v) add_unique(&names, k);
-        qsort(names.v, names.n, sizeof(char *), ci_cmp);
+        xqsort(names.v, names.n, sizeof(char *), ci_cmp);
         for (size_t i = 0; i < names.n; i++) {
             if (strncasecmp(names.v[i], prefix, strlen(prefix))) continue;
             bool proj = json_get(json_get_obj(pc, "mcpServers"), names.v[i]) != NULL;
@@ -2116,7 +2116,7 @@ int ui_mcp_complete(ui_t *u, const char *arg, tui_ac_result_t *out) {
         json_t *rt = mcp_server_names(u->app->mcp);
         json_arr_foreach(rt, i, x) add_unique(&names, json_sv(x));
         json_free(rt);
-        qsort(names.v, names.n, sizeof(char *), ci_cmp);
+        xqsort(names.v, names.n, sizeof(char *), ci_cmp);
         for (size_t i = 0; i < names.n; i++) {
             if (strncasecmp(names.v[i], prefix, strlen(prefix))) continue;
             strvec_push_own(&values, xasprintf("%s %s ", raw, names.v[i]));

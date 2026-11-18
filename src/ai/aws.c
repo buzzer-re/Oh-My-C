@@ -177,7 +177,7 @@ char *aws_canonical_query(const char *query) {
         if (!amp) break;
         p = amp + 1;
     }
-    if (pairs.n) qsort(pairs.v, pairs.n, sizeof(kv_t), kv_cmp);
+    if (pairs.n) xqsort(pairs.v, pairs.n, sizeof(kv_t), kv_cmp);
     sb_t b = SB_INIT;
     for (size_t i = 0; i < pairs.n; i++) {
         if (i) sb_putc(&b, '&');
@@ -230,7 +230,7 @@ char *aws_sigv4_authorization(const char *method, const char *path, const char *
             vec_push(&hs, kv);
         }
     }
-    if (hs.n) qsort(hs.v, hs.n, sizeof(kv_t), kv_cmp_key);
+    if (hs.n) xqsort(hs.v, hs.n, sizeof(kv_t), kv_cmp_key);
     sb_t canon_h = SB_INIT, signed_h = SB_INIT;
     for (size_t i = 0; i < hs.n; i++) {
         sb_appendf(&canon_h, "%s:%s\n", hs.v[i].k, hs.v[i].v);
@@ -1353,7 +1353,7 @@ static json_t *load_sso_cached_token(const char *start_url, const char *session,
         if (str_ends(de->d_name, ".json")) strvec_push(&entries, de->d_name);
     }
     closedir(d);
-    if (entries.n) qsort(entries.v, entries.n, sizeof(char *), strcmp_p);
+    if (entries.n) xqsort(entries.v, entries.n, sizeof(char *), strcmp_p);
     char *hash = sha1_hex(session && *session ? session : start_url);
     char *hfile = xasprintf("%s.json", hash);
     free(hash);
@@ -1423,7 +1423,7 @@ static char *refresh_sso_token(const rctx_t *r, json_t *tok, const char *file, c
         if (at && *at) {
             out = xstrdup(at);
             json_set_str(tok, "accessToken", at);
-            char *exp = iso_no_ms(now_ms() + json_get_int(j, "expiresIn", 0) * 1000);
+            char *exp = iso_no_ms(time_add_ms(now_ms(), json_get_num(j, "expiresIn", 0) * 1000));
             json_set(tok, "expiresAt", json_str_own(exp));
             const char *nrt = json_get_str(j, "refreshToken");
             if (nrt && *nrt) json_set_str(tok, "refreshToken", nrt);

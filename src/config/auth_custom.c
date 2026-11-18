@@ -263,8 +263,8 @@ static int copilot_login(const actx_t *c, alogin_t *out, char **err) {
     actx_auth(c, vuri, NULL, instr);
     free(instr);
     int64_t scale = scale_ms();
-    int64_t deadline = mono_ms() + (int64_t)(ex->u.num.d * 1000);
-    int64_t interval = MAX(scale, (int64_t)(iv->u.num.d * scale));
+    int64_t deadline = time_add_ms(mono_ms(), ex->u.num.d * 1000);
+    int64_t interval = MAX(scale, time_add_ms(0, iv->u.num.d * (double)scale));
     double mult = 1.2;
     int slow = 0;
     char *poll_body = xasprintf("client_id=%s&device_code=%s&grant_type=urn%%3Aietf%%3Aparams%%3Aoauth%%3Agrant-type%%3Adevice_code",
@@ -1301,7 +1301,7 @@ static int kilo_login(const actx_t *c, alogin_t *out, char **err) {
     char *ec = url_encode(code), *purl = xasprintf("https://api.kilo.ai/api/device-auth/codes/%s", ec);
     free(ec);
     int64_t scale = scale_ms();
-    int64_t deadline = mono_ms() + (int64_t)(ein->u.num.d * 1000);
+    int64_t deadline = time_add_ms(mono_ms(), ein->u.num.d * 1000);
     rc = -1;
     while (mono_ms() < deadline && rc != 0 && !*err) {
         if (cancelled(c, err)) break;

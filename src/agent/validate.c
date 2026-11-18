@@ -185,7 +185,7 @@ static char *format_path(const json_t *path) {
     sb_t b = SB_INIT;
     json_t *k;
     json_arr_foreach(path, i, k) {
-        if (json_is_num(k)) sb_appendf(&b, "[%lld]", (long long)k->u.num.d);
+        if (json_is_num(k)) sb_appendf(&b, "[%lld]", (long long)json_d2i(k->u.num.d));
         else sb_appendf(&b, "%s%s", b.len ? "." : "", json_sv(k));
     }
     return sb_detach(&b);
@@ -304,9 +304,9 @@ static char *expected_of(const json_t *s, int depth) {
     const char *t = ts[0];
     if (!strcmp(t, "string")) {
         json_t *mn = json_get(s, "minLength"), *mx = json_get(s, "maxLength");
-        if (mn && mx) return xasprintf("a string (length %lld to %lld)", (long long)mn->u.num.d, (long long)mx->u.num.d);
-        if (mn) return xasprintf("a string (length at least %lld)", (long long)mn->u.num.d);
-        if (mx) return xasprintf("a string (length at most %lld)", (long long)mx->u.num.d);
+        if (mn && mx) return xasprintf("a string (length %lld to %lld)", (long long)json_d2i(mn->u.num.d), (long long)json_d2i(mx->u.num.d));
+        if (mn) return xasprintf("a string (length at least %lld)", (long long)json_d2i(mn->u.num.d));
+        if (mx) return xasprintf("a string (length at most %lld)", (long long)json_d2i(mx->u.num.d));
         return xstrdup("a string");
     }
     if (!strcmp(t, "number") || !strcmp(t, "integer")) {
@@ -370,11 +370,11 @@ static void length_issue(const json_t *s, size_t len, const json_t *path, issues
     json_t *mn = json_get(s, kmin), *mx = json_get(s, kmax);
     json_t *lj = json_int((int64_t)len);
     if (json_is_num(mn) && (double)len < mn->u.num.d) {
-        char *e = xasprintf("at least length %lld", (long long)mn->u.num.d);
+        char *e = xasprintf("at least length %lld", (long long)json_d2i(mn->u.num.d));
         add_issue(is, path, e, desc, lj, false);
         free(e);
     } else if (json_is_num(mx) && (double)len > mx->u.num.d) {
-        char *e = xasprintf("at most length %lld", (long long)mx->u.num.d);
+        char *e = xasprintf("at most length %lld", (long long)json_d2i(mx->u.num.d));
         add_issue(is, path, e, desc, lj, false);
         free(e);
     }
@@ -738,7 +738,7 @@ static json_t **slot_at(json_t **root, const json_t *path) {
     json_arr_foreach(path, i, k) {
         json_t *c = *cur;
         if (json_is_num(k)) {
-            size_t idx = (size_t)k->u.num.d;
+            size_t idx = (size_t)json_d2i(k->u.num.d);
             if (!json_is_arr(c) || idx >= c->u.arr.n) return NULL;
             cur = &c->u.arr.items[idx];
         } else {
@@ -1189,7 +1189,7 @@ char *tool_args_validate(const json_t *schema, json_t **args, char **received) {
         json_t *k;
         json_arr_foreach(is.v[i].path, j, k) {
             if (j) sb_putc(&ip, '/');
-            if (json_is_num(k)) sb_appendf(&ip, "%lld", (long long)k->u.num.d);
+            if (json_is_num(k)) sb_appendf(&ip, "%lld", (long long)json_d2i(k->u.num.d));
             else sb_append(&ip, json_sv(k));
         }
         char *m = issue_message(&is.v[i]);

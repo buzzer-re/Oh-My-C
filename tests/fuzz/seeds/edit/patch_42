@@ -1,0 +1,14 @@
+class Alpha {
+	process() {
+		return "alpha";
+	}
+}
+
+class Beta {
+	process() {
+		return "beta";
+	}
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ class Beta\n@@   process\n \tprocess() {\n-\t\treturn \"beta\";\n+\t\treturn \"BETA\";\n \t}"}]}

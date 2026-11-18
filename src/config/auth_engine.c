@@ -317,7 +317,7 @@ json_t *auth_map_credentials(const json_t *map, const json_t *body, const char *
         expires = AUTH_NEVER_EXPIRES;
     } else if (str_eq(mode, "jwt")) {
         json_t *exp = json_get(claims, "exp");
-        expires = json_is_num(exp) ? (int64_t)(exp->u.num.d * 1000) - skew : now_ms() + json_get_int(ex, "fallbackMs", 3600000);
+        expires = json_is_num(exp) ? time_add_ms(-skew, exp->u.num.d * 1000) : time_add_ms(now_ms(), (double)json_get_int(ex, "fallbackMs", 3600000));
     } else {
         const char *path = json_get_str(ex, "path") ? json_get_str(ex, "path") : "expires_in";
         json_t *secs = json_path(body, path);
@@ -326,7 +326,7 @@ json_t *auth_map_credentials(const json_t *map, const json_t *body, const char *
             int64_t base = json_is_num(from) ? (int64_t)(from->u.num.d * 1000) : now_ms();
             expires = base + (int64_t)(secs->u.num.d * 1000) - skew;
         } else if (json_get(ex, "fallbackMs")) {
-            expires = now_ms() + json_get_int(ex, "fallbackMs", 0);
+            expires = time_add_ms(now_ms(), (double)json_get_int(ex, "fallbackMs", 0));
         } else {
             *err = xasprintf("%s token response missing %s", provider, path);
             free(access);
@@ -1154,8 +1154,8 @@ int auth_device_code_login(const actx_t *c, json_t **cred_out, char **err) {
     num_at(dev, json_get_str(resp, "interval"), &interval_s);
     bool has_exp = num_at(dev, json_get_str(resp, "expiresIn"), &expires_s);
     int64_t scale = poll_scale_ms();
-    int64_t deadline = has_exp ? mono_ms() + (int64_t)(expires_s * scale) : INT64_MAX;
-    int64_t interval = MAX(scale, (int64_t)(interval_s * scale));
+    int64_t deadline = has_exp ? time_add_ms(mono_ms(), expires_s * (double)scale) : INT64_MAX;
+    int64_t interval = MAX(scale, time_add_ms(0, interval_s * (double)scale));
     int slow = 0;
     json_t *pstd = json_obj();
     json_set_str(pstd, "grant_type", "urn:ietf:params:oauth:grant-type:device_code");

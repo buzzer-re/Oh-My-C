@@ -89,7 +89,7 @@ static void load_registry(void) {
         g_sorted = xcalloc(g_count + 1, sizeof *g_sorted);
         json_t *e;
         json_arr_foreach(g_registry, i, e) g_sorted[i] = (setting_t){json_get_str(e, "id"), e};
-        qsort(g_sorted, g_count, sizeof *g_sorted, setting_cmp);
+        xqsort(g_sorted, g_count, sizeof *g_sorted, setting_cmp);
     }
     pthread_mutex_unlock(&g_mu);
 }

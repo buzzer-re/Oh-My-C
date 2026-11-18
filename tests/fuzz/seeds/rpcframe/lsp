@@ -1,0 +1,8 @@
+Content-Length: 59
+
+{"jsonrpc": "2.0", "id": 1, "result": {"capabilities": {}}}noise
+
+Content-Type: application/vscode-jsonrpc; charset=utf-8
+Content-Length: 77
+
+{"jsonrpc": "2.0", "method": "window/logMessage", "params": {"message": "x"}}

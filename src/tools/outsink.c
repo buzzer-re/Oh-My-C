@@ -194,6 +194,7 @@ static void drop_controls(const unsigned char *s, size_t n, sb_t *o) {
 
 /* sanitizeWellFormedText on valid UTF-8 */
 static void sanitize_valid(const unsigned char *s, size_t n, sb_t *o) {
+    if (!n) return; /* s may be NULL (an empty buffer): memchr's pointer is nonnull */
     if (!memchr(s, 0x1B, n)) {
         drop_controls(s, n, o);
         return;

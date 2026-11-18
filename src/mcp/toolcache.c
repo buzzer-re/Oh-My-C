@@ -52,7 +52,7 @@ static void stable_sb(sb_t *b, const json_t *j, int depth, bool top) {
         for (size_t q = 0; q < k && !dup; q++) dup = !strcmp(keys[q], key);
         if (!dup) keys[k++] = key;
     }
-    qsort(keys, k, sizeof(char *), key_cmp);
+    xqsort(keys, k, sizeof(char *), key_cmp);
     sb_putc(b, '{');
     for (size_t i = 0; i < k; i++) {
         if (i) sb_putc(b, ',');

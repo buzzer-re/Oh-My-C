@@ -259,7 +259,7 @@ void tc_wait(const tc_call_t *c, int width, strvec_t *out) {
     char *header = tc_status_line(&sl);
     const json_t **sorted = xcalloc(nj + 1, sizeof *sorted);
     for (size_t i = 0; i < nj; i++) sorted[i] = json_at(jobs, i);
-    qsort(sorted, nj, sizeof *sorted, cmp_job);
+    xqsort(sorted, nj, sizeof *sorted, cmp_job);
     strvec_t all = {0};
     const char *dot = tc_sym("sep.dot");
     bool compact = !c->expanded && nj > 0;

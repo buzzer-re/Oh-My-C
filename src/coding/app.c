@@ -279,6 +279,17 @@ static json_t *job_results_message(app_t *a) {
     return m;
 }
 
+/* sessionManager.onPersistenceError: the first failed session write of an episode, as a "session-persistence" notice
+ * carrying the error text; each mode words it (interactive warning, print stderr line, rpc notice frame) */
+static void report_persist_error(app_t *a) {
+    char *e = session_take_persist_error(a->session);
+    if (!e) return;
+    for (char *p = e; *p; p++)
+        if (*p == '\r' || *p == '\n' || *p == '\t') *p = ' ';
+    notice(a, "session-persistence", "%s", e);
+    free(e);
+}
+
 static void on_agent_event(void *ud, const agent_event_t *ev) {
     app_t *a = ud;
     if (ev->type == AGENT_EV_AGENT_START) strvec_free(&a->retry_notes);
@@ -435,6 +446,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
         } else if (role && a->session) {
             session_append_message(a->session, ev->message);
         }
+        report_persist_error(a);
         if (str_eq(role, "assistant")) {
             json_t *u = json_get(ev->message, "usage");
             costgate_add(a, json_get_num(json_get(u, "cost"), "total", 0));
@@ -1006,13 +1018,13 @@ static int64_t retry_after_ms(const char *err) {
         p += strlen(keys[k]);
         char *end;
         double v = strtod(p, &end);
-        if (end == p || v < 0) continue;
+        if (end == p || !(v >= 0)) continue; /* also NaN ("retry after nan") */
         while (*end == ' ') end++;
         double ms = v * 1000;
         if (k <= 1 || !strncasecmp(end, "ms", 2)) ms = v;
         else if (!strncasecmp(end, "m", 1) && strncasecmp(end, "ms", 2)) ms = v * 60000;
         else if (!strncasecmp(end, "h", 1)) ms = v * 3600000;
-        return (int64_t)ms;
+        return ms < 9.0e18 ? (int64_t)ms : INT64_MAX; /* "retry after 1e30s" / "inf": saturate */
     }
     return -1;
 }
@@ -1446,7 +1458,7 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     maybe_thinking_loop_redirect(a, ag, err);
     strvec_push(&a->retry_notes, usage_limit ? "rate-limited; waited; retried" : "error; retried");
     /* ordinary backoff keeps its monotonic duration; a quota reset elapses while the machine sleeps too */
-    int64_t until = mono_ms() + (int64_t)ceil(delay);
+    int64_t until = time_add_ms(mono_ms(), ceil(delay));
     while (usage_limit ? now_ms() < usage_reset_deadline : mono_ms() < until) {
         if (ag->cancel) return false;
         sleep_ms(50);

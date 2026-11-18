@@ -1,0 +1,6 @@
+function doThing() {
+  return 1;
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@\n // NOTE: helper\n function doThing() {\n-  return 1;\n+  return 2;\n }"}]}

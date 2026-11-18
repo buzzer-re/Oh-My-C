@@ -2930,7 +2930,7 @@ static void handle(acp_t *a, json_t *msg) {
     json_t *params = json_get(msg, "params");
     if (!method) { /* a response to one of our requests */
         if (json_is_num(id)) {
-            int64_t iv = id->is_int ? id->u.num.i : (int64_t)id->u.num.d;
+            int64_t iv = id->is_int ? id->u.num.i : json_d2i(id->u.num.d);
             json_t *err = json_get(msg, "error");
             pthread_mutex_lock(&a->mu);
             for (size_t i = 0; i < a->pending.n; i++)

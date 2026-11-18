@@ -349,7 +349,7 @@ char *changelog_startup_summary(const changelog_startup_t *s) {
             if (!strcmp(s->categories.v[i], CATEGORY_ORDER[k]) && s->counts.v[i]) strvec_push(&order, CATEGORY_ORDER[k]);
     for (size_t i = 0; i < s->categories.n; i++)
         if (!known_category(s->categories.v[i])) strvec_push(&extra, s->categories.v[i]);
-    if (extra.n) qsort(extra.v, extra.n, sizeof *extra.v, cmp_str);
+    if (extra.n) xqsort(extra.v, extra.n, sizeof *extra.v, cmp_str);
     for (size_t i = 0; i < extra.n; i++) strvec_push(&order, extra.v[i]);
     sb_t br = SB_INIT;
     for (size_t k = 0; k < order.n; k++) {

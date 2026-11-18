@@ -198,7 +198,7 @@ void cli_render_root_help(FILE *f) {
             vec_push(&vis, &cmds[i]);
             w = MAX(w, strlen(cmds[i].name));
         }
-    qsort(vis.v, vis.n, sizeof *vis.v, cmd_name_cmp);
+    xqsort(vis.v, vis.n, sizeof *vis.v, cmd_name_cmp);
     if (vis.n) {
         sb_append(&b, "COMMANDS\n");
         for (size_t i = 0; i < vis.n; i++) {

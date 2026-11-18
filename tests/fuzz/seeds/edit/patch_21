@@ -1,0 +1,5 @@
+const enabled = true;
+const enabled = true; // secondary
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@\n-const enabled = true\n+const enabled = false"}]}

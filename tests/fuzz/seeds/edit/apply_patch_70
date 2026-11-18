@@ -1,0 +1,4 @@
+hello
+
+
+{"input": "*** Begin Patch\n*** Update File: a.txt\n*** Move to: dst.txt\n@@\n-hello\n+HELLO\n*** End Patch"}

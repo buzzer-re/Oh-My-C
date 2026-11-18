@@ -1,0 +1,14 @@
+function process() {
+    return 1;
+}
+
+function process() {
+    return 2;
+}
+
+function process() {
+    return 3;
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ -5,3 +5,3 @@ function process() {\n function process() {\n-    return 2;\n+    return 200;\n }"}]}

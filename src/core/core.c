@@ -188,7 +188,7 @@ static int cmp_str(const void *a, const void *b) {
 }
 
 void strvec_sort(strvec_t *v) {
-    if (v->n > 1) qsort(v->v, v->n, sizeof(char *), cmp_str);
+    if (v->n > 1) xqsort(v->v, v->n, sizeof(char *), cmp_str);
 }
 
 strvec_t str_split(const char *s, const char *sep) {
@@ -727,6 +727,19 @@ int64_t mono_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+int64_t time_add_ms(int64_t base, double ms) {
+    if (ms != ms) ms = 0;
+    double r = (double)base + ms;
+    if (r >= 9223372036854775807.0) return INT64_MAX;
+    if (r <= -9223372036854775808.0) return INT64_MIN;
+    if (ms >= -9.0e15 && ms <= 9.0e15) { /* exact integer arithmetic where it fits */
+        int64_t m = (int64_t)ms, s;
+        if (!__builtin_add_overflow(base, m, &s)) return s;
+        return m > 0 ? INT64_MAX : INT64_MIN;
+    }
+    return (int64_t)r;
 }
 
 char *iso8601_from_ms(int64_t ms) {

@@ -1223,7 +1223,7 @@ msgview_t *ui_parent_irc_view(const json_t *m) {
     if (!json_is_obj(pi)) return NULL;
     msgview_t *v = mv_new(MV_IRC);
     v->msg = json_clone(pi);
-    int64_t ts = (int64_t)json_get_num(m, "timestamp", 0);
+    int64_t ts = json_d2i(json_get_num(m, "timestamp", 0));
     if (ts) {
         int64_t age = (int64_t)llround((double)(now_ms() - ts) / 1000.0);
         v->text = tc_format_age(age < 1 ? 1 : age);

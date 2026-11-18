@@ -11,11 +11,15 @@ bool fz_is_js_ws(uint32_t c) {
            c == 0xfeff;
 }
 
-/* decode the code point that ends right before byte offset `end` */
-static size_t prev_cp(const char *s, size_t end, uint32_t *cp) {
+/* decode the code point that ends right before byte offset `end`, never starting before `lo` */
+static size_t prev_cp(const char *s, size_t lo, size_t end, uint32_t *cp) {
     size_t b = end - 1;
-    while (b > 0 && ((unsigned char)s[b] & 0xc0) == 0x80 && end - b < 4) b--;
-    utf8_decode(s + b, end - b, cp);
+    while (b > lo && ((unsigned char)s[b] & 0xc0) == 0x80 && end - b < 4) b--;
+    if ((size_t)utf8_decode(s + b, end - b, cp) != end - b) {
+        /* no whole sequence ends at `end` (a stray continuation byte): the last byte stands alone (U+FFFD) */
+        b = end - 1;
+        utf8_decode(s + b, 1, cp);
+    }
     return b;
 }
 
@@ -29,7 +33,7 @@ void fz_trim_span(const char *s, size_t len, size_t *start, size_t *end) {
     }
     while (e > a) {
         uint32_t cp;
-        size_t b = prev_cp(s, e, &cp);
+        size_t b = prev_cp(s, a, e, &cp);
         if (!fz_is_js_ws(cp)) break;
         e = b;
     }
@@ -47,7 +51,7 @@ char *fz_trim_end(const char *s) {
     size_t e = strlen(s);
     while (e > 0) {
         uint32_t cp;
-        size_t b = prev_cp(s, e, &cp);
+        size_t b = prev_cp(s, 0, e, &cp);
         if (!fz_is_js_ws(cp)) break;
         e = b;
     }
@@ -1215,7 +1219,7 @@ bool fz_replace_text(const char *content, const char *old_text, const char *new_
             vec_push(&reps, rp);
             fz_outcome_free(&o);
         }
-        qsort(reps.v, reps.n, sizeof(repl_t), cmp_repl);
+        xqsort(reps.v, reps.n, sizeof(repl_t), cmp_repl);
         sb_t b = SB_INIT;
         size_t si = 0;
         for (size_t i = 0; i < reps.n; i++) {

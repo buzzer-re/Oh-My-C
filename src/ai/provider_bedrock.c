@@ -105,7 +105,7 @@ static const char *mapped_effort(const ai_model_t *m, ai_effort_t e, bool minima
 
 static int64_t custom_budget(const ai_stream_opts_t *o, ai_effort_t e) {
     json_t *v = o->thinking_budgets ? json_get(o->thinking_budgets, effort_name(e)) : NULL;
-    return json_is_num(v) ? (int64_t)v->u.num.d : -1;
+    return json_is_num(v) ? json_d2i(v->u.num.d) : -1;
 }
 
 /* encodeURIComponent */
@@ -309,7 +309,7 @@ static cache_policy_t prompt_cache_policy(const ai_model_t *m, const char *reten
     int64_t max = 2;
     if (explicit_mode) {
         json_t *v = model_compat_get(m, "promptCacheMaximumCheckpoints");
-        max = json_is_num(v) ? (int64_t)v->u.num.d : 0;
+        max = json_is_num(v) ? json_d2i(v->u.num.d) : 0;
     }
     if (max <= 0) return p;
     p.remaining = (int)MIN(max, 2);

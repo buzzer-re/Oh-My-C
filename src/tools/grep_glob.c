@@ -336,7 +336,7 @@ static bool parse_line_ranges(const char *sel, lranges_t *out, char **err) {
         return false;
     }
     /* mergeLineRanges */
-    qsort(out->v, out->n, sizeof(lrange_t), cmp_lrange);
+    xqsort(out->v, out->n, sizeof(lrange_t), cmp_lrange);
     size_t m = 1;
     for (size_t i = 1; i < out->n; i++) {
         lrange_t *last = &out->v[m - 1];
@@ -1749,7 +1749,7 @@ static int glob_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         free(pat);
         globset_free(&sel);
         /* newest first by millisecond, ties by path; keep the limit */
-        if (g.items.n > 1) qsort(g.items.v, g.items.n, sizeof(gitem_t), cmp_gitem_mtime);
+        if (g.items.n > 1) xqsort(g.items.v, g.items.n, sizeof(gitem_t), cmp_gitem_mtime);
         for (size_t k = 0; k < g.items.n; k++) {
             if ((int64_t)k < limit) vec_push(&items, g.items.v[k]);
             else {

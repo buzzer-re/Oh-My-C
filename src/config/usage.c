@@ -1085,7 +1085,7 @@ char *usage_report_text(const json_t *reports, int64_t now, const char *active_p
     }
     strvec_t provs = {0};
     json_arr_foreach(disp, i, r) if (!strvec_contains(&provs, json_get_str(r, "provider"))) strvec_push(&provs, json_get_str(r, "provider"));
-    qsort(provs.v, provs.n, sizeof *provs.v, cmp_str);
+    xqsort(provs.v, provs.n, sizeof *provs.v, cmp_str);
     for (size_t pi = 0; pi < provs.n; pi++) {
         const char *prov = provs.v[pi];
         char *name = usage_provider_name(prov);

@@ -35,6 +35,7 @@ catalog or auth symbols and run without the rest of the program.
 | `test_judgment` | judge question validation, keyword prompts, reply parsing |
 | `test_memory` | memory job store semantics, redaction, lessons, consolidation, managed skills |
 | `test_settings_audit` | WP-26 settings honesty: scans `src/` for settings reads; fails on a read key missing from omp's registry (unless omc-only), an unread registry key not annotated inert/⛔, or a read key still annotated inert (`build-tools/settings_audit.tsv`; `build-tools/settings_audit.py` prints the full audit). Runs from the repo root |
+| `test_fuzz_regress` | replays every saved fuzzing finding (`tests/fuzz/regress/<harness>/*`) through its harness built without libFuzzer, plus direct checks of those fixes (JSON-RPC framing, saturating number conversions, trim). Runs from the repo root |
 | `test_htmlform` | the `ask` tool's HTML form: parser (sections, groups, captions, implied closes, truncated markup), form data, validation, `JSON.stringify` output, pagination, and the form dialog (layout, dropdown, hide row, timeout, paging, validation, pictures) |
 
 `test_http` (manual network smoke test) and `tests/tui_demo.c` (interactive TUI playground) are
@@ -215,6 +216,42 @@ Parallel suites and omp comparisons have OOM-killed it, so when more than one bu
 - `#ifdef __APPLE__` code never compiles on Linux, so run `build-tools/check_apple.sh` after touching it.
 - The checkout is shared with a Mac, and every `make` copies its own platform's binary over `build/omc`. So `make test`
   runs the e2e suite against `build/obj/<os>-<arch>/omc` (`OMC_BIN`), which a build on the other OS can't replace.
+
+## Fuzzing (`make fuzz`, `tests/fuzz/`)
+
+libFuzzer harnesses for every parser that reads input omc does not control. They are opt-in and clang-only: `make fuzz`
+builds `build/fuzz/fuzz_<name>` from a separate object tree (`build/fuzz/obj`, clang-21 with
+`-fsanitize=fuzzer-no-link,address,undefined`), so the normal gcc build and `make test` never see them.
+
+```sh
+make fuzz                          # FUZZ_CC=clang-21 by default
+tests/fuzz/run.sh -t 300 json sse  # one target at a time, RSS-capped (FUZZ_RSS_MB, default 1024)
+```
+
+| Harness | Input |
+|---|---|
+| `json` | JSON parser, partial parser, compact/indented/`JSON.stringify` dumps (round-trip property) |
+| `yaml` | YAML documents, multi-document streams, frontmatter, dump round trip |
+| `regex` | Rust-syntax linear engine and the backtracking fallback: pattern + subject, search/replace invariants |
+| `glob` | glob compile/match, gitignore sets |
+| `sse` | SSE parser feeding the Anthropic, Chat Completions, Responses and Google stream decoders; Ollama NDJSON |
+| `bedrock` | AWS event-stream binary framing and the ConverseStream state machine |
+| `http` | HTTP/1.1 responses (status, headers, 1xx, Content-Length, chunked, gzip) and WebSocket frames, from a loopback server thread |
+| `codec` | base64, URL parse/resolve/percent-decoding, path normalization, UTF-8 helpers, header lists |
+| `markdown` | the markdown renderer (blocks, tables, HTML, highlighting), streaming append; rendered lines fit the width |
+| `ansi` | ANSI/UTF-8 width, slicing, wrapping, truncation, SGR state |
+| `htmlform` | the `ask` tool's HTML form parser, values and validation |
+| `img` | PNG / JPEG / GIF / WebP decoders, resize, PNG re-encode |
+| `edit` | replace / patch / apply_patch / sloppy / hashline on an in-memory file system (`pe_opts_t` remote hooks) |
+| `session` | session JSONL loading and every tree reader (context, paths, export, listing) |
+| `rpcframe` | LSP/DAP Content-Length framing in arbitrary chunks |
+| `approval` | tool approval: shell segments, critical commands, per-tool decisions, argument formatting |
+| `pb` | Cursor Connect envelopes and protobuf decoding, `google.protobuf.Value` |
+
+Seeds live in `tests/fuzz/seeds/<name>/` (regenerate with `python3 -I tests/fuzz/mkseeds.py`); the working corpus and
+findings go to `build/fuzz/corpus/<name>` and `build/fuzz/crash/<name>`. Each harness points HOME and the agent dirs at a
+throwaway dir. When a finding is fixed, its input goes to `tests/fuzz/regress/<name>/`; `test_fuzz_regress` (in `make
+test`) replays it with gcc, and a sanitizer build of that test (see below) checks it the way the fuzzer did.
 
 ## Sanitizer runs (ASan + UBSan)
 

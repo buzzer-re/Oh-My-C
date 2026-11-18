@@ -236,7 +236,7 @@ json_t *usage_reset_accounts(const json_t *statuses) {
     size_t n = json_len(statuses);
     json_t **v = xcalloc(n ? n : 1, sizeof *v);
     for (size_t i = 0; i < n; i++) v[i] = reset_account(json_at(statuses, i));
-    qsort(v, n, sizeof *v, cmp_accounts);
+    xqsort(v, n, sizeof *v, cmp_accounts);
     json_t *out = json_arr();
     for (size_t i = 0; i < n; i++) json_push(out, v[i]);
     free(v);

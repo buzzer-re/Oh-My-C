@@ -411,7 +411,7 @@ static void build_sidebar(hub_t *h) {
         json_free(st);
         if (show) strvec_push(&unlocked, p);
     }
-    qsort(unlocked.v, unlocked.n, sizeof *unlocked.v, cmp_locale);
+    xqsort(unlocked.v, unlocked.n, sizeof *unlocked.v, cmp_locale);
     if (hub_query(h)) {
         strvec_t matched = {0}, rest = {0};
         for (size_t i = 0; i < unlocked.n; i++) strvec_push(match_count(h, unlocked.v[i]) > 0 ? &matched : &rest, unlocked.v[i]);
@@ -420,7 +420,7 @@ static void build_sidebar(hub_t *h) {
         unlocked = matched;
         strvec_free(&rest);
     }
-    qsort(locked.v, locked.n, sizeof *locked.v, cmp_locale);
+    xqsort(locked.v, locked.n, sizeof *locked.v, cmp_locale);
     json_t *oauth = catalog_auth_providers();
     if (unlocked.n) {
         push_entry(h, E_SEP, "", NULL, NULL, false);
@@ -675,7 +675,7 @@ static void build_role_rows(hub_t *h) {
     const char *k;
     json_obj_foreach(chains, i, k, v) if (strchr(k, '/') && json_is_arr(v)) strvec_push(&keys, k);
     /* Object.keys(...).sort(): code-unit order */
-    qsort(keys.v, keys.n, sizeof *keys.v, cmp_code_unit);
+    xqsort(keys.v, keys.n, sizeof *keys.v, cmp_code_unit);
     for (size_t i = 0; i < keys.n; i++) {
         push_rrow(h, R_CHAINKEY, keys.v[i], 0, NULL);
         strvec_t ch = chain_of(keys.v[i]);

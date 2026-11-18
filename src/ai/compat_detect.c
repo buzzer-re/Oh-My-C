@@ -1937,7 +1937,7 @@ static void model_like_segments(const char *id, strvec_t *out) {
         }
     }
     free(t);
-    if (out->n > 1) qsort(out->v, out->n, sizeof(char *), seg_cmp);
+    if (out->n > 1) xqsort(out->v, out->n, sizeof(char *), seg_cmp);
 }
 
 static bool ref_replaces(const json_t *existing, const json_t *c) {

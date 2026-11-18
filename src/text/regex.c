@@ -36,7 +36,7 @@ static int crange_cmp(const void *a, const void *b) {
 
 static void cls_norm(cls_t *c) {
     if (c->n < 2) return;
-    qsort(c->v, c->n, sizeof(crange_t), crange_cmp);
+    xqsort(c->v, c->n, sizeof(crange_t), crange_cmp);
     size_t out = 0;
     for (size_t i = 0; i < c->n; i++) {
         if (out > 0 && c->v[i].lo <= c->v[out - 1].hi + 1) {

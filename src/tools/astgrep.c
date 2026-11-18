@@ -559,7 +559,11 @@ static int astgrep_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *ar
                 }
                 char *text = xstrndup(src + ms.v[i].start, MIN(ms.v[i].end - ms.v[i].start, (size_t)300));
                 char *nl = strchr(text, '\n');
-                if (nl) strcpy(nl, " …");
+                if (nl) { /* " …" is longer than the "\n" it replaces: a match ending in a newline overflowed in place */
+                    char *t2 = xasprintf("%.*s \xe2\x80\xa6", (int)(nl - text), text);
+                    free(text);
+                    text = t2;
+                }
                 if (l2 > l1) sb_appendf(&b, "  %lld-%lld: %s\n", (long long)l1, (long long)l2, text);
                 else sb_appendf(&b, "  %lld: %s\n", (long long)l1, text);
                 for (size_t k = 0; k < ms.v[i].caps.n; k++) {

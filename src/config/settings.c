@@ -334,7 +334,7 @@ const char *settings_str(const char *path, const char *def) {
 
 int64_t settings_int(const char *path, int64_t def) {
     json_t *v = settings_get(path);
-    if (json_is_num(v)) return v->is_int ? v->u.num.i : (int64_t)v->u.num.d;
+    if (json_is_num(v)) return v->is_int ? v->u.num.i : json_d2i(v->u.num.d);
     if (json_is_str(v)) return strtoll(json_sv(v), NULL, 10);
     return def;
 }

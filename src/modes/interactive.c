@@ -315,6 +315,18 @@ static void post_notice(void *x) {
         uiev_free(e);
         return;
     }
+    if (!strcmp(e->name, "session-persistence")) {
+        char *d0 = tui_truncate_to_width(e->out, 110, "\xe2\x80\xa6"), *d = tui_strip_ansi(d0);
+        free(d0);
+        char *m = xasprintf("Session persistence failed: %s. Unsaved entries remain in memory; persistence will retry on the next "
+                            "entry.", d);
+        free(d);
+        add_notice(e->u, "warning", m);
+        free(m);
+        tui_request_render(e->u->tui);
+        uiev_free(e);
+        return;
+    }
     if (!strcmp(e->name, "retry_fallback_applied")) {
         char *m = app_fallback_notice_text(e->out);
         add_notice(e->u, "warning", m);
@@ -2442,7 +2454,7 @@ static void local_command(ui_t *u, const char *target) {
         free(p);
         return;
     }
-    qsort(p->files.v, p->files.n, sizeof *p->files.v, local_cmp);
+    xqsort(p->files.v, p->files.n, sizeof *p->files.v, local_cmp);
     strvec_t labels = {0}, descs = {0};
     for (size_t i = 0; i < p->files.n; i++) {
         strvec_push_own(&labels, xasprintf("local://%s", p->files.v[i].name));

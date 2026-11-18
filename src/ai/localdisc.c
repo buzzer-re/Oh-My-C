@@ -221,7 +221,7 @@ static int64_t pos_int_str(const char *s) {
 }
 
 static int64_t pos_int(const json_t *v) {
-    if (json_is_num(v) && v->u.num.d > 0) return (int64_t)v->u.num.d;
+    if (json_is_num(v) && v->u.num.d > 0) return json_d2i(v->u.num.d);
     return pos_int_str(json_sv(v));
 }
 

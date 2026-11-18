@@ -1,0 +1,4 @@
+x
+
+
+{"path": "a.txt", "edits": [{"op": "update", "rename": "a.txt", "diff": "@@\n-x\n+y"}]}

@@ -182,7 +182,7 @@ static char *betas_key(const char *header) {
         free(b);
     }
     strvec_free(&parts);
-    if (set.n > 1) qsort(set.v, set.n, sizeof set.v[0], str_cmp_qsort);
+    if (set.n > 1) xqsort(set.v, set.n, sizeof set.v[0], str_cmp_qsort);
     char *r = strvec_join(&set, ",");
     strvec_free(&set);
     return r;

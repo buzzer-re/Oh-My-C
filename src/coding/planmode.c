@@ -168,7 +168,7 @@ strvec_t app_plan_list(app_t *a) {
         free(p);
     }
     closedir(d);
-    if (v.n) qsort(v.v, v.n, sizeof *v.v, cmp_mtime);
+    if (v.n) xqsort(v.v, v.n, sizeof *v.v, cmp_mtime);
     for (size_t i = 0; i < v.n; i++) strvec_push_own(&out, v.v[i].url);
     vec_free(&v);
     return out;

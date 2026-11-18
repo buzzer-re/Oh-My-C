@@ -1,0 +1,10 @@
+export class Example {
+	private field = false;
+
+	get value(): boolean {
+		return this.field;
+	}
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ export class Example\n export class Example {\n \tprivate field = false;\n+\tprivate other = true;\n\n \tget value(): boolean {"}]}

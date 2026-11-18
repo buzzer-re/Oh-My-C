@@ -1,0 +1,3 @@
+<form><h2>Pick</h2><fieldset><legend>Color</legend><label><input type="radio" name="c" value="r" checked> Red</label><label><input type="radio" name="c" value="g"> Green</label></fieldset><label>Age <input type="number" name="age" min="1" max="120" required></label><select name="s" multiple><option value="a">A<option value="b" selected>B</select><textarea name="t" rows=3 minlength=2 pattern="[a-z]+"></textarea><input type="hidden" name="h" value="1"><table><tr><th>x<td>y</table><pre>code</pre><img src="data:image/png;base64,AA" alt="pic"></form>
+
+42

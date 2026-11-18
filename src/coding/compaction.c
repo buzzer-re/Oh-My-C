@@ -1318,7 +1318,7 @@ size_t cmp_block_ranges(const char *text, size_t **out) {
     }
     strvec_free(&stack);
     size_t n = r.n / 2;
-    qsort(r.v, n, 2 * sizeof(size_t), cmp_range);
+    xqsort(r.v, n, 2 * sizeof(size_t), cmp_range);
     /* mergeRanges: drop ranges overlapping an earlier kept one */
     size_t *kept = xcalloc(n ? 2 * n : 2, sizeof *kept), k = 0;
     size_t last_end = 0;
@@ -1515,7 +1515,7 @@ static int shake_elide_locked(app_t *a, const shake_cfg_t *cfg_in, bool require_
         if (regions.v[i].tool) res->tool_results_dropped++;
         else res->blocks_dropped++;
     }
-    qsort(order.v, order.n, sizeof *order.v, cmp_region_start);
+    xqsort(order.v, order.n, sizeof *order.v, cmp_region_start);
     for (size_t k = 0; k < order.n; k++) {
         region_t *r = order.v[k];
         const char *p = ph[r - regions.v];
@@ -2717,7 +2717,7 @@ static int64_t prune_stale_locked(app_t *a) {
         collect_useless(ents.v, ents.n, start, &c, &u);
         for (size_t i = 0; i < u.n; i++) vec_push(&c, u.v[i]);
         vec_free(&u);
-        if (c.n > 1) qsort(c.v, c.n, sizeof *c.v, cmp_cand);
+        if (c.n > 1) xqsort(c.v, c.n, sizeof *c.v, cmp_cand);
     }
     int64_t saved = 0;
     if (c.n) {

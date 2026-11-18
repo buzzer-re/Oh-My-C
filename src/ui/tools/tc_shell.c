@@ -33,7 +33,7 @@ static char *env_assignments(const json_t *env) {
     const char *k;
     json_t *v;
     json_obj_foreach(env, i, k, v) strvec_push(&keys, k);
-    qsort(keys.v, keys.n, sizeof(char *), cmp_keys);
+    xqsort(keys.v, keys.n, sizeof(char *), cmp_keys);
     sb_t b = SB_INIT;
     for (size_t j = 0; j < keys.n; j++) {
         json_t *val = json_get(env, keys.v[j]);

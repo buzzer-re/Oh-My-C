@@ -5,6 +5,7 @@
 #include "coding/slashcmd.h"
 #include "core/fs.h"
 #include "mcp/mcp.h"
+#include "mcp/mcperr.h"
 #include "tools/tools.h"
 
 #include <stdio.h>
@@ -309,7 +310,56 @@ static void test_prompt_args(void) {
     json_free(decl);
 }
 
+/* omp mcp/errors.ts: sanitizeDiagnosticText, serializeData bounds, normalizeMCPTransportError, formatMCPToolFailure */
+static void test_failure_diagnostics(void) {
+    char *s = mcp_sanitize_diag("auth Bearer abc.def-1 and Basic dXNlcg== ok; challenge Bearer realm=\"x\", url ?api_key=K&x=1 "
+                                "password: hunter2, token=t0k}",
+                                1000);
+    /* (the query rule leaves "&x=1", then the key=value rule takes "api_key=" up to the space, as in JS) */
+    CHECK(!strcmp(s, "auth Bearer [redacted] and Basic [redacted] ok; challenge Bearer realm=\"x\", url ?api_key=[redacted] "
+                     "password: [redacted], token=[redacted]}"));
+    free(s);
+    s = mcp_sanitize_diag("ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` "
+                          "in the second argument to fetch()",
+                          1000);
+    CHECK(!strcmp(s, "ECONNRESET: The socket connection was closed unexpectedly."));
+    free(s);
+    mcp_fail_t f = {0};
+    mcp_fail_normalize(&f, "http", "receive", s = xstrdup("ECONNRESET: The socket connection was closed unexpectedly."), NULL);
+    free(s);
+    CHECK(!strcmp(f.failure, "reset") && f.retryable && mcp_fail_reconnectable(&f));
+    mcp_fail_normalize(&f, "http", "receive", "HTTP 503: unavailable", NULL);
+    CHECK(!strcmp(f.failure, "http_status") && f.retryable && !strcmp(f.code, "503") && mcp_fail_reconnectable(&f));
+    mcp_fail_normalize(&f, "http", "receive", "HTTP 401: nope", NULL);
+    CHECK(!strcmp(f.failure, "http_status") && !f.retryable && !mcp_fail_reconnectable(&f));
+    char *t = mcp_format_tool_failure(&f, "srv", "tl");
+    CHECK(!strcmp(t, "MCP failure\nserver: srv\ntool: tl\ntransport: http\nstage: receive\nfailure: http_status\nretryable: no\n"
+                     "message: HTTP 401: nope\ncode: 401\nnext: Check the MCP endpoint and authentication configuration."));
+    free(t);
+    mcp_fail_normalize(&f, "stdio", "send", "Unable to connect. Is the computer able to access the url?", "ConnectionRefused");
+    CHECK(!strcmp(f.failure, "connect") && !strcmp(f.stage, "connect") && f.retryable);
+    mcp_fail_normalize(&f, "stdio", "receive", "Unexpected end of JSON input", NULL);
+    CHECK(!strcmp(f.failure, "malformed_response") && !strcmp(f.stage, "decode"));
+    /* data over 2000 characters becomes a bounded {truncated, preview} object; secrets and depth are cut */
+    json_t *d = json_parse_str("{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":{\"f\":{\"g\":1}}}}}},\"Authorization\":\"x\",\"traceId\":\"t-1\"}");
+    char *ser = mcp_serialize_data(d);
+    CHECK(ser && !strcmp(ser, "{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":{\"f\":\"[truncated]\"}}}}},\"Authorization\":\"[redacted]\",\"traceId\":\"t-1\"}"));
+    free(ser);
+    char *tid = mcp_find_trace_id(d, 0);
+    CHECK(tid && !strcmp(tid, "t-1"));
+    free(tid);
+    json_free(d);
+    d = json_arr();
+    for (int i = 0; i < 30; i++) json_push_str(d, "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789");
+    ser = mcp_serialize_data(d);
+    CHECK(ser && strlen(ser) <= 2000 && !strncmp(ser, "{\"truncated\":true,\"preview\":\"[\\\"0123", 34));
+    free(ser);
+    json_free(d);
+    mcp_fail_free(&f);
+}
+
 int main(void) {
+    test_failure_diagnostics();
     char tmpl[] = "/tmp/omc-test-mcp-XXXXXX";
     const char *tmp = getenv("TMPDIR");
     char *dir_t = tmp ? xasprintf("%s/omc-test-mcp-XXXXXX", tmp) : xstrdup(tmpl);

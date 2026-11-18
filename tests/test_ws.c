@@ -21,7 +21,7 @@ static int failures;
     } while (0)
 
 static int g_lfd, g_port;
-static int g_mode; /* 0 normal session, 1 masked server frame, 2 oversized, 3 refuse upgrade */
+static int g_mode; /* 0 normal session, 1 masked server frame, 2 oversized, 3 refuse upgrade, 4 slow second fragment */
 static char g_got[256];
 
 static void wr(int fd, const void *p, size_t n) {
@@ -77,6 +77,12 @@ static void *server(void *ud) {
     if (g_mode == 1) {
         unsigned char f[] = {0x81, 0x82, 1, 2, 3, 4, 'h' ^ 1, 'i' ^ 2};
         wr(c, f, sizeof f);
+    } else if (g_mode == 4) {
+        unsigned char f1[] = {0x01, 5, 'h', 'e', 'l', 'l', 'o'};
+        unsigned char f2[] = {0x80, 6, ' ', 'w', 'o', 'r', 'l', 'd'};
+        wr(c, f1, sizeof f1);
+        usleep(400000); /* the client's first ws_recv times out between the fragments */
+        wr(c, f2, sizeof f2);
     } else if (g_mode == 2) {
         unsigned char f[] = {0x82, 126, 0x10, 0x00}; /* 4096 bytes announced */
         wr(c, f, sizeof f);
@@ -181,6 +187,23 @@ int main(void) {
         free(err);
         err = NULL;
         ws_close(w, 0, NULL);
+    }
+    stop(th);
+
+    /* a timeout between fragments keeps the first fragment for the next call (it used to be dropped, and the next
+     * call then failed with "unexpected continuation frame") */
+    w = start(4, &th, &err);
+    if (w) {
+        ws_msg_t m;
+        int rc = ws_recv(w, 100, NULL, &m, &err);
+        CHECK(rc == -2, "timeout between fragments: %d", rc);
+        rc = ws_recv(w, 3000, NULL, &m, &err);
+        CHECK(rc == 1 && m.opcode == WS_OP_TEXT && str_eq(m.data, "hello world"), "fragments across a timeout: %d %s", rc,
+              rc == 1 && m.data ? m.data : (err ? err : ""));
+        if (rc == 1) ws_msg_free(&m);
+        free(err);
+        err = NULL;
+        ws_close(w, 1000, NULL);
     }
     stop(th);
 

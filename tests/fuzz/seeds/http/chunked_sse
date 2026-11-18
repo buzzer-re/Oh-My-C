@@ -1,0 +1,132 @@
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Transfer-Encoding: chunked
+
+25
+event: message_start
+data: {"type": "
+25
+message_start", "message": {"id": "m"
+25
+, "usage": {"input_tokens": 10, "cach
+25
+e_read_input_tokens": 2}}}
+
+event: co
+25
+ntent_block_start
+data: {"type": "con
+25
+tent_block_start", "index": 0, "conte
+25
+nt_block": {"type": "thinking", "thin
+25
+king": ""}}
+
+event: content_block_del
+25
+ta
+data: {"type": "content_block_delt
+25
+a", "index": 0, "delta": {"type": "th
+25
+inking_delta", "thinking": "hmm"}}
+
+e
+25
+vent: content_block_delta
+data: {"typ
+25
+e": "content_block_delta", "index": 0
+25
+, "delta": {"type": "signature_delta"
+25
+, "signature": "c2ln"}}
+
+event: conte
+25
+nt_block_stop
+data: {"type": "content
+25
+_block_stop", "index": 0}
+
+event: con
+25
+tent_block_start
+data: {"type": "cont
+25
+ent_block_start", "index": 1, "conten
+25
+t_block": {"type": "text", "text": ""
+25
+}}
+
+event: content_block_delta
+data: 
+25
+{"type": "content_block_delta", "inde
+25
+x": 1, "delta": {"type": "text_delta"
+25
+, "text": "Hello"}}
+
+event: content_b
+25
+lock_start
+data: {"type": "content_bl
+25
+ock_start", "index": 2, "content_bloc
+25
+k": {"type": "tool_use", "id": "t1", 
+25
+"name": "bash", "input": {}}}
+
+event:
+25
+ content_block_delta
+data: {"type": "
+25
+content_block_delta", "index": 2, "de
+25
+lta": {"type": "input_json_delta", "p
+25
+artial_json": "{\"command\":\"l"}}
+
+e
+25
+vent: content_block_delta
+data: {"typ
+25
+e": "content_block_delta", "index": 2
+25
+, "delta": {"type": "input_json_delta
+25
+", "partial_json": "s\"}"}}
+
+event: c
+25
+ontent_block_stop
+data: {"type": "con
+25
+tent_block_stop", "index": 2}
+
+event:
+25
+ message_delta
+data: {"type": "messag
+25
+e_delta", "delta": {"stop_reason": "t
+25
+ool_use"}, "usage": {"output_tokens":
+25
+ 5}}
+
+event: message_stop
+data: {"typ
+15
+e": "message_stop"}
+
+
+0
+X-Trailer: 1
+

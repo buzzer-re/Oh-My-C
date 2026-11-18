@@ -495,7 +495,7 @@ static void agent_rows(const json_t *ref, arows_t *out) {
     for (size_t i = 0; i < live.n; i++) vec_push(out, live.v[i]);
     vec_free(&tr);
     vec_free(&live);
-    qsort(&out->v[start], out->n - start, sizeof(arow_t), arow_cmp);
+    xqsort(&out->v[start], out->n - start, sizeof(arow_t), arow_cmp);
 }
 
 static char *activity_glyph(const arow_t *r) {
@@ -1252,7 +1252,7 @@ static void refresh_rows(hub_t *h) {
     json_t **arr = xcalloc(n + 1, sizeof *arr);
     for (size_t i = 0; i < n; i++) arr[i] = json_at(refs, i);
     g_sort_hub = h;
-    qsort(arr, n, sizeof *arr, rank_cmp);
+    xqsort(arr, n, sizeof *arr, rank_cmp);
     json_t *ordered = json_arr();
     const char *q = ui_input_value(&h->agent_filter);
     char *qt = str_trim(q ? q : "");
@@ -1281,7 +1281,7 @@ static void refresh_rows(hub_t *h) {
     /* activity: every listed agent's rows */
     arows_clear(&h->acts);
     json_arr_foreach(h->rows, i, r) agent_rows(r, &h->acts);
-    qsort(h->acts.v, h->acts.n, sizeof(arow_t), arow_cmp);
+    xqsort(h->acts.v, h->acts.n, sizeof(arow_t), arow_cmp);
     if (h->section == 1) refresh_activity_view(h);
 }
 

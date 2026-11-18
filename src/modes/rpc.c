@@ -15,6 +15,7 @@
 #include "tools/approval.h"
 #include "tools/artifacts.h"
 #include "tools/jobs.h"
+#include "tui/ansi.h"
 #include "tui/symbols.h"
 #include "ui/ui.h"
 
@@ -1272,6 +1273,23 @@ static void notice_rpc(void *ud, const char *level, const char *text) {
         json_free(j);
         return;
     }
+    if (!strcmp(level, "session-persistence")) { /* registerRpcPersistenceSurface */
+        char *d0 = tui_truncate_to_width(text, 110, "\xe2\x80\xa6"), *d = tui_strip_ansi(d0);
+        free(d0);
+        char *m = xasprintf("Session persistence failed: %s. Writes are retried; unsaved entries stay in memory until the store "
+                            "accepts them again.", d);
+        free(d);
+        json_t *j = json_obj();
+        json_set_str(j, "type", "notice");
+        json_set_str(j, "level", "error");
+        json_set_str(j, "message", m);
+        json_set_str(j, "source", "session-persistence");
+        emit(r, j);
+        json_free(j);
+        fprintf(stderr, "%s\n", m);
+        free(m);
+        return;
+    }
     if (!strcmp(level, "retry_fallback_applied")) {
         static const char *const keys[] = {"from", "to", "role", "reason"};
         json_t *j = json_obj();
@@ -2502,7 +2520,7 @@ static json_t *rpc_sub_list(rpc_t *r) {
     json_t *s;
     json_obj_foreach(r->subs, i, k, s) v[i] = s;
     UNUSED(k);
-    qsort(v, n, sizeof *v, sub_cmp);
+    xqsort(v, n, sizeof *v, sub_cmp);
     json_t *arr = json_arr();
     for (size_t i = 0; i < n; i++) json_push(arr, json_clone(v[i]));
     free(v);
@@ -2625,7 +2643,7 @@ static bool rpc_sub_command(rpc_t *r, const json_t *cmd, const char *id, const c
         } else err = xstrdup("get_subagent_messages requires subagentId or sessionFile");
         pthread_mutex_unlock(&r->sub_mu);
         if (err) respond(r, id, type, false, NULL, err);
-        else respond(r, id, type, true, rpc_sub_transcript(file, fb ? (int64_t)json_get_num(cmd, "fromByte", 0) : 0), NULL);
+        else respond(r, id, type, true, rpc_sub_transcript(file, fb ? json_d2i(json_get_num(cmd, "fromByte", 0)) : 0), NULL);
         free(file), free(err);
         return true;
     }

@@ -1,0 +1,6 @@
+keep();
+debugLog(request);
+finish();
+
+
+{"input": "*** Edit File: a.txt\n*** Find\ndebugLog(request);\n*** Replace\n"}

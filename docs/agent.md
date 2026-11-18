@@ -208,6 +208,11 @@ assistant message, and then the whole session is written at once.
 - **Entries** form a tree through `id` / `parentId`. Types: `message`, `model_change`,
   `thinking_level_change`, `compaction`, `branch_summary`, `custom`, `custom_message`, `label`,
   `reset_boundary`, `title_change`, `mode_change` (goal/plan state).
+- **Write failures** (disk full, a read-only session dir) never leave a hole in the parent chain: like omp's
+  `#rewriteRequired`, the entries stay in memory and the next entry rewrites the whole file (temp file + rename). The
+  first failure of an episode is reported once (`session_take_persist_error` → a `session-persistence` notice: an
+  interactive warning, print mode's stderr line, an RPC `notice` frame with `source: "session-persistence"`); print mode
+  retries at shutdown and, if the store still fails, prints omp's "still failing at shutdown" line and exits 1.
 - **Context rebuild** (`session_build_context`) walks root → current leaf. It restarts after a
   `reset_boundary`, replaces everything before a `compaction`'s `firstKeptEntryId` with the summary
   (rendered through `compaction-summary-context.md`), includes branch summaries, and reports the

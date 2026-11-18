@@ -143,7 +143,7 @@ static int cmp_u32(const void *a, const void *b) {
 }
 static void u32_sort_uniq(u32v_t *v) {
     if (!v->n) return;
-    qsort(v->v, v->n, sizeof(uint32_t), cmp_u32);
+    xqsort(v->v, v->n, sizeof(uint32_t), cmp_u32);
     size_t w = 1;
     for (size_t i = 1; i < v->n; i++)
         if (v->v[i] != v->v[w - 1]) v->v[w++] = v->v[i];
@@ -1504,7 +1504,7 @@ static bool normalize_overlaps(exec_t *x) {
         }
     }
     for (size_t i = 0; i < hs.n; i++) u32_sort_uniq(&hs.v[i].lines);
-    if (hs.n > 1) qsort(hs.v, hs.n, sizeof(hunk_t), cmp_hunk);
+    if (hs.n > 1) xqsort(hs.v, hs.n, sizeof(hunk_t), cmp_hunk);
     umap_t owner = {0};
     u32v_t dropped = {0};
     bool ok = true;
@@ -2353,7 +2353,7 @@ static int cmp_str(const void *a, const void *b) { return strcmp(*(char *const *
 static char *known_registers(hl_clip_t *c) {
     strvec_t k = {0};
     for (size_t i = 0; i < c->named.n; i++) strvec_push(&k, c->named.v[i].name);
-    if (k.n > 1) qsort(k.v, k.n, sizeof(char *), cmp_str);
+    if (k.n > 1) xqsort(k.v, k.n, sizeof(char *), cmp_str);
     sb_t b = SB_INIT;
     for (size_t i = 0; i < k.n; i++) sb_appendf(&b, "%s`@%s`", i ? ", " : "", k.v[i]);
     strvec_free(&k);
@@ -2963,7 +2963,7 @@ static char *materialize(char *const *orig, size_t n, const hedits_t *E, int64_t
         }
         vec_push(&an, a);
     }
-    if (an.n > 1) qsort(an.v, an.n, sizeof(aent_t), cmp_aent);
+    if (an.n > 1) xqsort(an.v, an.n, sizeof(aent_t), cmp_aent);
     VEC(const char *) out = {0};
     size_t copied = 0;
     for (size_t i = 0; i < an.n;) {

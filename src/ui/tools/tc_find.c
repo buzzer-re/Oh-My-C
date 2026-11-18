@@ -54,7 +54,7 @@ static char *render_hit(const json_t *hit, int range_limit) {
     size_t nr = json_len(ranges);
     const json_t **rv = xcalloc(nr ? nr : 1, sizeof *rv);
     for (size_t i = 0; i < nr; i++) rv[i] = json_at(ranges, i);
-    qsort(rv, nr, sizeof *rv, cmp_range);
+    xqsort(rv, nr, sizeof *rv, cmp_range);
     size_t shown = MIN(nr, (size_t)range_limit);
     const char *lang = tc_lang_from_path(rel);
     for (size_t i = 0; i < shown; i++) {

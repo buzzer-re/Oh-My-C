@@ -201,7 +201,7 @@ static void listing(const char *base, const char *prefix, suggvec_t *out) {
         free(disp);
     }
     dirlist_free(&dl);
-    if (out->n) qsort(out->v, out->n, sizeof(sugg_t), sugg_cmp);
+    if (out->n) xqsort(out->v, out->n, sizeof(sugg_t), sugg_cmp);
     free(dir), free(want), free(exp), free(pre);
 }
 
@@ -408,7 +408,7 @@ static void fuzzy(const char *base, const char *raw, bool quoted, suggvec_t *out
         ranked_t r = {&all->v[i], s, depth_of(all->v[i].path)};
         vec_push(&top, r);
     }
-    if (top.n) qsort(top.v, top.n, sizeof(ranked_t), ranked_cmp);
+    if (top.n) xqsort(top.v, top.n, sizeof(ranked_t), ranked_cmp);
     char *lq = str_lower(query);
     for (size_t i = 0; i < top.n && i < AT_MAX_RESULTS; i++) {
         const fentry_t *e = top.v[i].e;

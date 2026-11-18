@@ -1,0 +1,8 @@
+---
+name: skill
+description: >
+  folded
+  text
+tags: [a, b, {c: d}]
+---
+body

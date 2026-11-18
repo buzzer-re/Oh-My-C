@@ -1,0 +1,27 @@
+export class ProcessTerminal implements Terminal {
+	private wasRaw = false;
+	private inputHandler?: (data: string) => void;
+	private resizeHandler?: () => void;
+	private _kittyProtocolActive = false;
+	private stdinBuffer?: StdinBuffer;
+	private stdinDataHandler?: (data: string) => void;
+
+	get kittyProtocolActive(): boolean {
+		return this._kittyProtocolActive;
+	}
+
+	private safeWrite(data: string): void {
+		try {
+			process.stdout.write(data);
+		} catch (err) {
+			// EIO means terminal is dead - exit gracefully instead of crashing
+			if (err && typeof err === "object" && (err as { code?: string }).code === "EIO") {
+				process.exit(1);
+			}
+			throw err;
+		}
+	}
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ export class ProcessTerminal implements Terminal {\n export class ProcessTerminal implements Terminal {\n \tprivate wasRaw = false;\n \tprivate inputHandler?: (data: string) => void;\n \tprivate resizeHandler?: () => void;\n \tprivate _kittyProtocolActive = false;\n \tprivate stdinBuffer?: StdinBuffer;\n \tprivate stdinDataHandler?: (data: string) => void;\n+\tprivate dead = false;\n \n \tget kittyProtocolActive(): boolean {\n\n@@ private safeWrite(data: string): void {\n \tprivate safeWrite(data: string): void {\n+\t\tif (this.dead) return;\n \t\ttry {\n \t\t\tprocess.stdout.write(data);\n \t\t} catch (err) {\n-\t\t\t// EIO means terminal is dead - exit gracefully instead of crashing\n+\t\t\t// EIO means terminal is dead - mark dead and skip all future writes\n \t\t\tif (err && typeof err === \"object\" && (err as { code?: string }).code === \"EIO\") {\n-\t\t\t\tprocess.exit(1);\n+\t\t\t\tthis.dead = true;\n+\t\t\t\treturn;\n \t\t\t}\n \t\t\tthrow err;\n \t\t}\n \t}"}]}

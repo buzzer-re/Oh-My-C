@@ -1,0 +1,13 @@
+import { Something } from "somewhere";
+
+export class EditTool implements AgentTool<typeof replaceEditSchema | typeof patchEditSchema, EditToolDetails> {
+	public readonly name = "edit";
+
+	constructor(session: ToolSession) {
+		this.session = session;
+		this.patchMode = false;
+	}
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ class EditTool\n \tconstructor(session: ToolSession) {\n \t\tthis.session = session;\n-\t\tthis.patchMode = false;\n+\t\tthis.patchMode = true;\n \t}"}]}

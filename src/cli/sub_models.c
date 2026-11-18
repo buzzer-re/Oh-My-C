@@ -193,7 +193,7 @@ int cmd_models(cparse_t *p) {
     } else {
         for (size_t i = 0; i < avail.n; i++) vec_push(&filtered, avail.v[i]);
     }
-    if (filtered.n > 1) qsort(filtered.v, filtered.n, sizeof *filtered.v, by_provider_then_id);
+    if (filtered.n > 1) xqsort(filtered.v, filtered.n, sizeof *filtered.v, by_provider_then_id);
     int rc = 0;
     if (json) {
         json_t *out = json_obj(), *arr = json_arr();

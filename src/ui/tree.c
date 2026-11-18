@@ -626,7 +626,7 @@ static void order_active_first(tree_sel_t *t, size_t *v, size_t n) {
         if (t->nodes.v[v[i]].active) tmp[k++] = v[i];
     for (size_t i = 0; i < n; i++)
         if (!t->nodes.v[v[i]].active) tmp[k++] = v[i];
-    memcpy(v, tmp, n * sizeof *v);
+    if (n) memcpy(v, tmp, n * sizeof *v);
     free(tmp);
 }
 

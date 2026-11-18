@@ -272,7 +272,7 @@ static void build_cards(const json_t *reports, double now, const json_t *unavail
         strvec_free(&keys);
         strvec_free(&labels);
     }
-    qsort(out->v, out->n, sizeof *out->v, cmp_card);
+    xqsort(out->v, out->n, sizeof *out->v, cmp_card);
     strvec_free(&provs);
     json_free(disp);
 }
@@ -436,7 +436,7 @@ void ui_usage_load_activity(const char *sessions_dir, json_t **points_out) {
     double cutoff = (double)now_ms() - 371.0 * 86400000.0;
     scan_dir(sessions_dir, 0, &seen, &pts, cutoff, NULL);
     hmap_free(&seen, NULL);
-    qsort(pts.v, pts.n, sizeof *pts.v, cmp_point);
+    xqsort(pts.v, pts.n, sizeof *pts.v, cmp_point);
     json_t *arr = json_arr();
     for (size_t i = 0; i < pts.n; i++) {
         json_t *o = json_obj();
@@ -692,7 +692,7 @@ char *ui_usage_detail(const json_t *reports, double now, int width, const char *
             }
         }
     }
-    qsort(pe, provs.n, sizeof *pe, cmp_pentry);
+    xqsort(pe, provs.n, sizeof *pe, cmp_pentry);
     for (size_t pi = 0; pi < provs.n; pi++) {
         const char *prov = pe[pi].provider;
         json_t *peers = json_arr();

@@ -1,0 +1,10 @@
+alpha
+beta
+gamma
+
+
+[a.txt#@TAG@]
+PUT 2.=2:
++BETA
+PUT >3:
++delta

@@ -251,7 +251,7 @@ size_t fuzzy_rank(const char *pattern, const char *const *items, size_t n, fuzzy
         r[k].len = strlen(items[i]);
         k++;
     }
-    qsort(r, k, sizeof(rank_t), rank_cmp);
+    xqsort(r, k, sizeof(rank_t), rank_cmp);
     fuzzy_hit_t *o = xmalloc((k ? k : 1) * sizeof(fuzzy_hit_t));
     for (size_t i = 0; i < k; i++) o[i] = r[i].h;
     free(r);

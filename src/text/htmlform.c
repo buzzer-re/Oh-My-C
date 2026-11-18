@@ -1670,7 +1670,7 @@ static char *utf16_prefix(const char *s, size_t n) {
         size_t u = len == 4 ? 2 : 1;
         if (units + u > n) break;
         units += u;
-        i += len;
+        for (size_t k = 0; k < len && p[i]; k++) i++; /* a truncated sequence never steps over the NUL */
     }
     return xstrndup(s, i);
 }

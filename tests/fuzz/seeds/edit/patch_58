@@ -1,0 +1,18 @@
+class AgentSession {
+	async newSession(options?: NewSessionOptions): Promise<boolean> {
+		const previousSessionFile = this.sessionFile;
+
+		this._disconnectFromAgent();
+		await this.abort();
+		this.agent.reset();
+		await this.sessionManager.flush();
+		this.sessionManager.newSession(options);
+		this.agent.sessionId = this.sessionManager.getSessionId();
+		this._steeringMessages = [];
+		this._followUpMessages = [];
+		this._pendingNextTurnMessages = [];
+	}
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@\n         async newSession(options?: NewSessionOptions): Promise<boolean> {\n             const previousSessionFile = this.sessionFile;\n@@\n             this._disconnectFromAgent();\n             await this.abort();\n             this.agent.reset();\n             await this.sessionManager.flush();\n-            this.sessionManager.newSession(options);\n+            await this.sessionManager.newSession(options);\n             this.agent.sessionId = this.sessionManager.getSessionId();\n             this._steeringMessages = [];\n             this._followUpMessages = [];\n             this._pendingNextTurnMessages = [];"}]}

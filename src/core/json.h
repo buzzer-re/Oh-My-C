@@ -57,6 +57,8 @@ json_t *json_get(const json_t *obj, const char *key);
 const char *json_get_str(const json_t *obj, const char *key); /* NULL if missing/not string */
 double json_get_num(const json_t *obj, const char *key, double def);
 int64_t json_get_int(const json_t *obj, const char *key, int64_t def);
+/* double -> int64 without C's undefined cast: NaN -> 0, out-of-range values saturate (JSON numbers are untrusted) */
+int64_t json_d2i(double d);
 bool json_get_bool(const json_t *obj, const char *key, bool def);
 json_t *json_get_obj(const json_t *obj, const char *key); /* NULL if not object */
 json_t *json_get_arr(const json_t *obj, const char *key); /* NULL if not array */

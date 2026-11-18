@@ -1,0 +1,9 @@
+section
+value
+x
+section
+value
+
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@\n section\n-value\n+VALUE\n "}]}

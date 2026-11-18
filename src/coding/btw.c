@@ -520,7 +520,7 @@ json_t *btw_store_records(btw_store_t *s) {
     const json_t **v = xcalloc(s->entries.n + 1, sizeof *v);
     for (size_t i = 0; i < s->entries.n; i++)
         if (s->entries.v[i].record) v[n++] = s->entries.v[i].record;
-    qsort(v, n, sizeof *v, cmp_records);
+    xqsort(v, n, sizeof *v, cmp_records);
     json_t *out = json_arr();
     for (size_t i = 0; i < n; i++) json_push(out, json_clone(v[i]));
     free(v);

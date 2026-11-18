@@ -659,7 +659,7 @@ static json_t *s_openai(const ws_params_t *p, ws_err_t *e) {
                 json_t *st = json_get(an, "start_index"), *en = json_get(an, "end_index");
                 char *cited = NULL;
                 if (json_is_num(st) && json_is_num(en)) {
-                    int64_t a = (int64_t)st->u.num.d, z = (int64_t)en->u.num.d;
+                    int64_t a = json_d2i(st->u.num.d), z = json_d2i(en->u.num.d);
                     if (a >= 0 && z > a) cited = js_slice(text, a, z);
                 }
                 add_openai_source(&ss, json_get_str(an, "url"), json_get_str(an, "title"), cited);
@@ -1065,7 +1065,7 @@ static json_t *s_codex(const ws_params_t *p, ws_err_t *e) {
                         if (!str_eq(json_get_str(an, "type"), "url_citation") || !au) continue;
                         json_t *st = json_get(an, "start_index"), *en = json_get(an, "end_index");
                         char *snip = json_is_num(st) && json_is_num(en)
-                                         ? snippet_around(text, (int64_t)st->u.num.d, (int64_t)en->u.num.d)
+                                         ? snippet_around(text, json_d2i(st->u.num.d), json_d2i(en->u.num.d))
                                          : NULL;
                         const char *at = json_get_str(an, "title");
                         add_codex_source(sources, at ? at : au, au, snip);
@@ -1544,7 +1544,7 @@ static void xai_annotations(const json_t *anns, json_t *srcs, json_t *cits, json
         if (!cited) cited = json_get_str(a, "text");
         char *snip = NULL;
         json_t *st = json_get(a, "start_index"), *en = json_get(a, "end_index");
-        if (!cited && json_is_num(st) && json_is_num(en)) snip = snippet_around(text, (int64_t)st->u.num.d, (int64_t)en->u.num.d);
+        if (!cited && json_is_num(st) && json_is_num(en)) snip = snippet_around(text, json_d2i(st->u.num.d), json_d2i(en->u.num.d));
         xai_add(srcs, cits, seen, u, title, cited ? cited : snip);
         free(snip);
     }

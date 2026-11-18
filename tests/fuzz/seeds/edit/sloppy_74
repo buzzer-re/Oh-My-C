@@ -1,0 +1,5 @@
+const a = 1;
+const b = 2;
+
+
+{"input": "*** Edit File: a.txt\n*** Find\nconst a = 1;\n*** Replace\nconst a = 10;\n*** Find\nconst b = 2;\n*** Replace\nconst b = 20;\n"}

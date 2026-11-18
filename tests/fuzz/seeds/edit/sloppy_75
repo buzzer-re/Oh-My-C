@@ -1,0 +1,4 @@
+if (a < b && c) { run(); }
+
+
+{"input": "*** Edit File: a.txt\n*** Find\nif (a < b && c) { run(); }\n*** Replace\nif (a < b && c) { stop(); }\n"}

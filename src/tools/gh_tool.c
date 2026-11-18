@@ -292,7 +292,7 @@ static void op_file_read(tool_env_t *env, const json_t *args, tool_result_t *out
     const json_t *content = json_get(resp, "content");
     if (!str_eq(json_get_str(resp, "encoding"), "base64") || !json_is_str(content)) {
         const json_t *sz = json_get(resp, "size");
-        char *size = json_is_num(sz) && json_get_num(resp, "size", -1) >= 0 ? fmt_bytes((int64_t)json_get_num(resp, "size", 0))
+        char *size = json_is_num(sz) && json_get_num(resp, "size", -1) >= 0 ? fmt_bytes(json_d2i(json_get_num(resp, "size", 0)))
                                                                              : xstrdup("unknown size");
         char *t = xasprintf("[GitHub did not return file bytes for '%s' (%s). Open %s to view it.]", path, size, src);
         text_result(out, t, NULL, NULL, false);

@@ -21,6 +21,10 @@ typedef struct {
     char *title;
     char *title_source;
     hmap_t by_id;      /* id -> json_t* entry (borrowed) */
+    bool rewrite_required; /* an append failed: the next persist rewrites the whole file (omp #rewriteRequired) */
+    bool disk_failed;      /* a failure since the last successful write was reported (omp #diskFailure) */
+    char *persist_error;   /* failure text not yet taken by session_take_persist_error (owned) */
+    char *last_persist_error; /* the latest failure's text (owned) */
     pthread_mutex_t *mu; /* recursive; see "Threads" below */
 } session_t;
 
@@ -75,6 +79,11 @@ const char *session_append_entry(session_t *s, json_t *entry); /* generic: sets 
 void session_set_title(session_t *s, const char *title, const char *source);
 int session_ensure_on_disk(session_t *s);
 int session_rewrite(session_t *s); /* rewriteEntries: rewrite the whole file after in-place entry edits */
+/* the first write failure since the session last reached the disk (disk full, read-only dir, ...), once: owned text or
+ * NULL. Entries stay in memory and the next append rewrites the whole file (omp onPersistenceError). */
+char *session_take_persist_error(session_t *s);
+/* dispose: retry a pending rewrite once; owned error text when the store is still failing, else NULL */
+char *session_persist_retry(session_t *s);
 
 /* tree navigation */
 json_t *session_get(const session_t *s, const char *id); /* borrowed */

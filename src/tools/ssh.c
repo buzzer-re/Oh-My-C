@@ -694,7 +694,7 @@ static char *list_dir(const target_t *t, const char *path, const char *shell, ch
     } else if (!ents.n) {
         res = xstrdup("(empty directory)");
     } else {
-        qsort(ents.v, ents.n, sizeof(dent_t), dent_cmp);
+        xqsort(ents.v, ents.n, sizeof(dent_t), dent_cmp);
         sb_t b = SB_INIT;
         for (size_t k = 0; k < ents.n; k++) sb_appendf(&b, "%s%s%s", k ? "\n" : "", ents.v[k].name, ents.v[k].dir ? "/" : "");
         res = sb_detach(&b);

@@ -1,0 +1,4 @@
+original
+
+
+{"path": "a.txt", "edits": [{"op": "create", "diff": "replacement\n"}]}
