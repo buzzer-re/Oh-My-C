@@ -134,7 +134,7 @@ int main(int argc, char **argv) {
             names[n++] = strdup(e->d_name);
         }
         closedir(dp);
-        qsort(names, n, sizeof *names, cmp);
+        if (n > 1) qsort(names, n, sizeof *names, cmp);
         if (n) targets[t].setup();
         for (size_t i = 0; i < n; i++) {
             char path[2048];
