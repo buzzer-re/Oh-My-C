@@ -1,4 +1,4 @@
-/* test_planreview.c - plan review overlay (ui/planreview.c) against an omp v18.17.0 capture.
+/* test_planreview.c - plan review overlay (ui/planreview.c) against an omp v18.22.0 capture.
  *
  * tests/fixtures/planreview/overlay.ansi is `tmux capture-pane -e` of omp's plan review overlay (120x40,
  * titanium, truecolor, unicode glyphs) for tests/fixtures/planreview/plan.md, proposed in plan mode
@@ -22,8 +22,8 @@ static int failures;
         }                                                                      \
     } while (0)
 
-static const char *const OPTS[] = {"Approve and execute", "Approve and compact context",
-                                   "Approve and keep context (~105 / 100k)", "Refine plan", "Save and quit"};
+static const char *const OPTS[] = {"Approve and execute", "Approve and compact context", "Approve and keep context"};
+static const char *const METAS[] = {NULL, NULL, "~105 / 100k"};
 
 static char *last_feedback, *last_edit, *picked;
 static void on_feedback(void *ud, const char *f) {
@@ -42,16 +42,24 @@ static void on_pick(void *ud, const char *l) {
     picked = xstrdup(l);
 }
 static void on_copy(void *ud, const char *c) { (void)ud, (void)c; }
+static char *saved;
+static void on_save(void *ud, const char *c) {
+    (void)ud;
+    free(saved);
+    saved = xstrdup(c);
+}
 static void on_ext(void *ud) { (void)ud; }
 
 static ui_plan_review_t *make(const char *plan) {
     ui_plan_review_opts_t o = {.prompt_title = "Plan mode - next step",
                                .options = OPTS,
-                               .noptions = 5,
+                               .noptions = 3,
+                               .metas = METAS,
+                               .refine_label = "Refine plan",
                                .help_text = "\xe2\x8e\x8b cancel",
                                .external_editor_label = "Ctrl+G"};
     ui_plan_review_cb_t cb = {.on_pick = on_pick, .on_copy = on_copy, .on_external_editor = on_ext,
-                              .on_feedback = on_feedback, .on_plan_edited = on_edit};
+                              .on_feedback = on_feedback, .on_plan_edited = on_edit, .on_save = on_save};
     return ui_plan_review_new(NULL, plan, &o, &cb);
 }
 
@@ -85,7 +93,8 @@ static void test_capture(const char *plan) {
     /* colors: the title, the glowing ToC entry, the selected option, the help line */
     CHECK(strstr(got.v[0], "\x1b[38;2;0;180;255m Plan Review "), "title color: %s", got.v[0]);
     CHECK(strstr(got.v[1], "\x1b[38;2;0;180;255m\xe2\x96\x8e" "Context"), "toc glow: %s", got.v[1]);
-    CHECK(strstr(got.v[32], "\x1b[38;2;0;180;255m"), "cursor color");
+    CHECK(strstr(got.v[33], "\x1b[38;2;0;180;255m"), "cursor color");
+    CHECK(strstr(got.v[35], "\x1b[38;2;107;114;128m(~105 / 100k)"), "keep-context meta dim: %s", got.v[35]);
     CHECK(strstr(got.v[38], "\x1b[38;2;107;114;128m"), "help dim");
     strvec_free(&got);
     strvec_free(&want);
@@ -119,8 +128,21 @@ static void test_edit_flow(const char *plan) {
         if (strstr(out.v[i], "Context \xe2\x9c\x8e")) marker = true;
     CHECK(marker, "toc annotation marker");
     strvec_free(&out);
-    /* back to actions, pick the second option */
-    press(p, "\t\t\x1b[B\r");
+    /* the plan has feedback: Refine plan leads the options, preselected (omp 472dada633) */
+    render(p, &out);
+    bool refine = false;
+    for (size_t i = 0; i < out.n; i++) {
+        char *plain = tui_strip_ansi(out.v[i]);
+        if (strstr(plain, "\xe2\x9d\xaf Refine plan")) refine = true;
+        free(plain);
+    }
+    CHECK(refine, "refine preselected");
+    strvec_free(&out);
+    /* Save writes the plan and keeps the review open */
+    press(p, "\t\t\x1b[B\x1b[B\x1b[B\x1b[B\r");
+    CHECK(saved && strstr(saved, "## Context") && !picked, "save: %s", saved ? saved : "(none)");
+    /* back up to the second approval choice */
+    press(p, "\x1b[A\x1b[A\r");
     CHECK(picked && !strcmp(picked, "Approve and compact context"), "picked: %s", picked ? picked : "");
     render(p, &out);
     bool sub = false;

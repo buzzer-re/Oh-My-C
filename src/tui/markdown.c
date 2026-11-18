@@ -1796,10 +1796,13 @@ static void render_list_item(const lines_t *IL, int depth, int width, int conten
     free(T.v);
 }
 
-/* strip the task-list checkbox ("[ ] " / "[x] ") marked drops from item text */
-static const char *skip_task(const char *s) {
-    if (s[0] == '[' && (s[1] == ' ' || s[1] == 'x' || s[1] == 'X') && s[2] == ']' && (s[3] == ' ' || s[3] == '\t'))
+/* strip the task-list checkbox ("[ ] " / "[x] ") from item text; *task: 0 none, 1 open, 2 checked */
+static const char *skip_task(const char *s, int *task) {
+    if (s[0] == '[' && (s[1] == ' ' || s[1] == 'x' || s[1] == 'X') && s[2] == ']' && (s[3] == ' ' || s[3] == '\t')) {
+        *task = s[1] == ' ' ? 1 : 2;
         return skip_ws(s + 3);
+    }
+    *task = 0;
     return s;
 }
 
@@ -1835,8 +1838,9 @@ static void push_item_row(rows_t *out, const row_t *line, const char *first, con
 
 /* a list item's body: the first line after the marker, then lines up to the next sibling marker, de-indented to
  * the item's content column; returns the line after the item */
-static size_t list_item_body(const lines_t *L, const tok_t *t, size_t i, char kind, size_t co, size_t cc, strvec_t *body) {
-    strvec_push(body, skip_task(L->v[i] + co));
+static size_t list_item_body(const lines_t *L, const tok_t *t, size_t i, char kind, size_t co, size_t cc, strvec_t *body,
+                             int *task) {
+    strvec_push(body, skip_task(L->v[i] + co, task));
     size_t j = i + 1;
     while (j < t->to) {
         const char *s = L->v[j];
@@ -1875,13 +1879,23 @@ static void render_list(const lines_t *L, const tok_t *t, int depth, int width, 
             continue;
         }
         strvec_t body = {0};
-        size_t j = list_item_body(L, t, i, kind, co, cc, &body);
+        int task = 0;
+        size_t j = list_item_body(L, t, i, kind, co, cc, &body, &task);
         char bullet[24];
         if (ordered) snprintf(bullet, sizeof bullet, "%ld. ", start + idx);
         else snprintf(bullet, sizeof bullet, "- ");
         idx++;
-        int bw = (int)strlen(bullet);
-        char *first = xasprintf("%s%s%s\x1b[39m", indent, tui_fg_seq(c->th, TUI_TC_MD_LIST_BULLET), bullet);
+        /* a task item draws its checkbox after the bare marker, in the item's text style, so wrapped rows hang
+         * under the task text */
+        int bw = (int)strlen(bullet) + (task ? 4 : 0);
+        char *first;
+        if (task) {
+            bool styled = c->base[0] || c->deflt[0];
+            first = xasprintf("%s%s%s\x1b[39m%s%s[%c] %s", indent, tui_fg_seq(c->th, TUI_TC_MD_LIST_BULLET), bullet,
+                              c->base, c->deflt, task == 2 ? 'x' : ' ', styled ? TUI_RESET : "");
+        } else {
+            first = xasprintf("%s%s%s\x1b[39m", indent, tui_fg_seq(c->th, TUI_TC_MD_LIST_BULLET), bullet);
+        }
         char *cont = xasprintf("%s%*s", indent, bw, "");
         rows_t item = {0};
         lines_t BL = {(const char *const *)body.v, body.n};
@@ -2546,7 +2560,8 @@ static void extract_tokens(const lines_t *L, const toks_t *T, int depth, tui_md_
                     continue;
                 }
                 strvec_t body = {0};
-                i = list_item_body(L, t, i, kind, co, cc, &body);
+                int task;
+                i = list_item_body(L, t, i, kind, co, cc, &body, &task);
                 lines_t BL = {(const char *const *)body.v, body.n};
                 toks_t BT = {0};
                 lex_blocks(&BL, 0, BL.n, &BT);
@@ -2612,7 +2627,8 @@ static bool ends_in_setext(const lines_t *L, int depth) {
                     continue;
                 }
                 strvec_t body = {0};
-                size_t j = list_item_body(L, t, i, kind, co, cc, &body);
+                int task;
+                size_t j = list_item_body(L, t, i, kind, co, cc, &body, &task);
                 if (j >= t->to) { /* the last item */
                     lines_t BL = {(const char *const *)body.v, body.n};
                     r = ends_in_setext(&BL, depth + 1);

@@ -565,14 +565,25 @@ static void ui_answer(rpc_t *r, const json_t *frame) {
 }
 
 /* select: the chosen label (owned) or NULL (cancelled, timed out, client gone) */
-static char *ui_select(rpc_t *r, const char *title, const strvec_t *labels, const json_t *details, int64_t timeout_ms,
-                       volatile sig_atomic_t *cancel, bool *timed_out, bool *gone) {
+static char *ui_select(rpc_t *r, const char *title, const strvec_t *labels, const json_t *details,
+                       const tool_select_opts_t *so, int64_t timeout_ms, volatile sig_atomic_t *cancel, bool *timed_out,
+                       bool *gone) {
     json_t *f = json_obj(), *opts = json_arr();
     json_set_str(f, "method", "select");
     json_set_str(f, "title", title);
     for (size_t i = 0; i < labels->n; i++) json_push_str(opts, labels->v[i]);
     json_set(f, "options", opts);
     if (details) json_set(f, "optionDetails", json_clone(details));
+    if (so) { /* requestRpcSelect: the caller's initialIndex / selectionMarker / checkedIndices / markableCount */
+        if (so->initial_index >= 0) json_set_int(f, "initialIndex", so->initial_index);
+        if (so->marker) json_set_str(f, "selectionMarker", so->marker);
+        if (so->checked) {
+            json_t *ci = json_arr();
+            for (size_t i = 0; i < so->nchecked; i++) json_push(ci, json_int(so->checked[i]));
+            json_set(f, "checkedIndices", ci);
+        }
+        if (so->markable >= 0) json_set_int(f, "markableCount", so->markable);
+    }
     if (timeout_ms > 0) json_set_int(f, "timeout", timeout_ms);
     json_t *resp = NULL;
     int rc = ui_request(r, f, timeout_ms, cancel, &resp, timed_out);
@@ -643,7 +654,7 @@ static json_t *ask_one(rpc_t *r, const json_t *q, const char *progress, volatile
             while (details && json_len(details) < labels.n) json_push(details, json_obj());
             char *title = selected.n ? xasprintf("(%zu selected) %s", selected.n, prompt) : xstrdup(prompt);
             bool to = false;
-            char *choice = ui_select(r, title, &labels, details, timeout, cancel, &to, gone);
+            char *choice = ui_select(r, title, &labels, details, NULL, timeout, cancel, &to, gone);
             json_free(details);
             strvec_free(&labels);
             if (!choice) {
@@ -707,7 +718,7 @@ static json_t *ask_one(rpc_t *r, const json_t *q, const char *progress, volatile
             strvec_push(&labels, ASK_OTHER);
             while (details && json_len(details) < labels.n) json_push(details, json_obj());
             bool to = false;
-            char *choice = ui_select(r, prompt, &labels, details, timeout, cancel, &to, gone);
+            char *choice = ui_select(r, prompt, &labels, details, NULL, timeout, cancel, &to, gone);
             json_free(details);
             timed_out = to;
             if (!choice) {
@@ -930,10 +941,10 @@ static json_t *rpc_ask(void *ud, const json_t *qs) {
 
 #define RPC_GONE "RPC client disconnected before extension UI response completed"
 
-static char *rpc_fb_select(void *ud, const char *title, const strvec_t *options, int64_t timeout_ms, bool *timed_out,
-                           volatile sig_atomic_t *cancel, char **err) {
+static char *rpc_fb_select(void *ud, const char *title, const strvec_t *options, const tool_select_opts_t *so,
+                           int64_t timeout_ms, bool *timed_out, volatile sig_atomic_t *cancel, char **err) {
     bool gone = false, to = false;
-    char *v = ui_select(ud, title, options, NULL, timeout_ms, cancel, &to, &gone);
+    char *v = ui_select(ud, title, options, NULL, so, timeout_ms, cancel, &to, &gone);
     if (timed_out) *timed_out = to;
     if (gone && !*err) *err = xstrdup(RPC_GONE);
     return v;
@@ -984,7 +995,7 @@ static int rpc_approve(void *ud, const char *tool_call_id, const char *tool_name
     rpc_t *r = ud;
     strvec_t labels = {0};
     approval_choice_labels(p, &labels);
-    char *choice = ui_select(r, p->full, &labels, NULL, 0, cancel, NULL, NULL);
+    char *choice = ui_select(r, p->full, &labels, NULL, NULL, 0, cancel, NULL, NULL);
     strvec_free(&labels);
     approval_answer_t ans = approval_answer_for_choice(p, choice);
     free(choice);

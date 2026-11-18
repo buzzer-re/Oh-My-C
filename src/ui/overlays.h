@@ -20,6 +20,12 @@ struct ai_model;
 
 /* first key bound to an action ("tui.select.confirm"), formatted; "" when unbound. Owned. */
 char *ui_editor_key(const char *action);
+/* every key bound to `action`, joined with "/" (formatKeyHints); "" when unbound */
+char *ui_editor_keys(const char *action);
+/* the /resume picker's old-session dates: systemDateLocale ("" = en-US) and toLocaleDateString(locale) */
+const char *ui_system_date_locale(void);
+struct tm;
+char *ui_locale_date(const struct tm *tm, const char *locale);
 /* centerLine: pad left by floor((width - w) / 2) and right to width (truncate when too wide). Owned. */
 char *ui_center_line(const char *line, int width);
 /* pad (no truncation) to width; truncates when wider. Owned. */
@@ -283,9 +289,10 @@ void ui_ask_dialog_show(ui_t *u, const json_t *questions, ui_ask_done_fn done, v
 /* ---------- formdlg.c ---------- */
 
 /* the ask tool's HTML form (html-form/dialog.ts HtmlFormDialog) in the composer's place. `done` runs once on the UI
- * thread with the submitted form data (owned by the callee; NULL when cancelled); `timed_out` when the inactivity
- * timeout submitted the current values. */
-typedef void (*ui_form_done_fn)(void *ud, json_t *data, bool timed_out);
+ * thread with the submitted form data (owned by the callee; NULL when cancelled), the notes on selected options
+ * (optionNotes: an owned array of {name, question, option, value, text}, NULL when none); `timed_out` when the
+ * inactivity timeout submitted the current values. */
+typedef void (*ui_form_done_fn)(void *ud, json_t *data, json_t *notes, bool timed_out);
 typedef struct {
     ui_t *ui;             /* host (closes the selector on finish); NULL in tests */
     tui_t *tui;           /* terminal height, timers, repaints, background picture loads; NULL in tests */
@@ -317,10 +324,12 @@ void ui_approval_shutdown(ui_t *u);
 typedef struct ui_plan_review ui_plan_review_t;
 typedef struct {
     const char *prompt_title;          /* "Plan mode - next step" */
-    const char *const *options;
+    const char *const *options;        /* the approval choices */
     size_t noptions;
     const int *disabled;               /* indices into options that render dimmed and cannot be picked */
     size_t ndisabled;
+    const char *const *metas;          /* per option: a dim `(meta)` after its label (NULL entries / array: none) */
+    const char *refine_label;          /* "Refine plan": listed first, preselected, only while the plan has feedback */
     const char *help_text;             /* trailing footer hint (the cancel hint) */
     int initial_index;
     const char *slider_caption;        /* model-tier slider ("continue with"); nsegments 0 = none */
@@ -341,6 +350,7 @@ typedef struct {
     void (*on_feedback)(void *ud, const char *feedback);      /* Refine feedback markdown ("" = none) */
     void (*on_annotation_state)(void *ud, const json_t *state);
     void (*on_slider)(void *ud, int index);
+    void (*on_save)(void *ud, const char *content);           /* NULL: no Save option; the review stays open */
     void *ud;
 } ui_plan_review_cb_t;
 ui_plan_review_t *ui_plan_review_new(tui_t *tui, const char *plan, const ui_plan_review_opts_t *o,
@@ -363,7 +373,7 @@ tui_editor_t *ui_hook_editor_of(tui_component_t *c); /* its editor when c is a h
 /* the ask dialog as a selector; its custom-answer / note prompt editor while one is open, else NULL */
 bool ui_ask_is_dialog(const tui_component_t *c);
 tui_editor_t *ui_ask_prompt_editor(tui_component_t *c);
-/* "Save and quit" path prompt (overlays/plan-save-overlay.ts); done(NULL) on cancel */
+/* "Save plan" path prompt (overlays/plan-save-overlay.ts); done(NULL) on cancel */
 typedef struct ui_plan_save ui_plan_save_t;
 ui_plan_save_t *ui_plan_save_new(const char *suggested, void (*done)(void *ud, const char *path), void *ud);
 tui_component_t *ui_plan_save_component(ui_plan_save_t *s);

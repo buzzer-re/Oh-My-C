@@ -11,6 +11,7 @@
  * present when the dialog opened keeps the keyboard until ↑/↓ hands it over. */
 #include "ui/overlays.h"
 #include "ui/ui.h"
+#include "ui/signals.h"
 
 #include "config/settings.h"
 #include "tui/markdown.h"
@@ -80,6 +81,7 @@ typedef struct ask_view {
     int prow;
     ui_ask_done_fn done;
     void *ud;
+    int hold; /* the run shows `blocked` on this dialog (ui_signals_hold_blocked); 0: none */
 } ask_view_t;
 
 /* ---------- text helpers ---------- */
@@ -1169,6 +1171,7 @@ static void ask_render(tui_component_t *c, int width, strvec_t *out) {
 static void ask_destroy(tui_component_t *c) {
     ask_view_t *v = (ask_view_t *)c;
     stop_timer(v);
+    if (v->hold) ui_signals_release_blocked(v->hold);
     if (v->ped) tui_component_destroy(&v->ped->base);
     for (size_t i = 0; i < v->nq; i++) {
         aq_t *q = &v->q[i];
@@ -1260,5 +1263,9 @@ void ui_ask_dialog_show(ui_t *u, const json_t *questions, ui_ask_done_fn done, v
         v->timer_id = tui_add_timer(u->tui, 1000, true, countdown_tick, v);
     }
     v->guard = !tui_editor_is_empty(u->editor);
+    /* #presentDialog: blocked on the first question while shown; a cfg:// change is an approval */
+    const json_t *q0 = json_at(questions, 0);
+    v->hold = ui_signals_hold_blocked(str_eq(json_get_str(q0, "blockedKind"), "permission") ? "permission" : "question",
+                                      json_get_str(q0, "question"));
     ui_show_selector(u, &v->base, &v->base);
 }

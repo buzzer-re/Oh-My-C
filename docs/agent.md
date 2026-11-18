@@ -466,9 +466,10 @@ What happens next depends on the host:
   `__omp.silent_abort__`). Once the run settles the reviewed path is promoted into the plan state and
   the Plan Review overlay opens on the alternate screen. Its choices: *Approve and execute* (new
   session, local artifacts copied, plan rewritten there), *Approve and compact context* (compaction
-  with `plan-mode-compact-instructions.md`), *Approve and keep context* (disabled above 95% usage),
-  *Refine plan* (the annotation/deletion feedback becomes the next prompt) and *Save and quit* (path
-  prompt, write, exit plan mode, new session). Approvals exit plan mode, apply the slider's role model,
+  with `plan-mode-compact-instructions.md`), *Approve and keep context* (its context estimate dim
+  beside it; disabled above 95% usage), *Refine plan* (listed first and preselected only while the plan
+  has annotation/deletion feedback, which becomes the next prompt) and *Save* (path prompt, write; the
+  review stays open, plan mode and the session are untouched). Approvals exit plan mode, apply the slider's role model,
   autosave (`plan.autosave`), name an unnamed session after the plan and run the hidden
   `plan-mode-approved.md` developer prompt; the overlay stays up (`— submitting…`) until then.
 - **No review surface** (print, RPC, ACP): approved at once (`Plan approved at …`), the plan becomes

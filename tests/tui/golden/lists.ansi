@@ -1,7 +1,7 @@
 [49m Task list:
 
- [38;2;0;180;255m- [39mtodo item
- [38;2;0;180;255m- [39mdone item
+ [38;2;0;180;255m- [39m[ ] todo item
+ [38;2;0;180;255m- [39m[x] done item
 
  Mixed:
 

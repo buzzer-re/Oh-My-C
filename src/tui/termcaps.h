@@ -47,6 +47,8 @@ void tui_set_terminal_background_light(bool light);
  * XTSMGRAPHICS (CSI ? 2 ; status ; geometry S), iTerm2 ReportCellSize. Returns true when consumed;
  * *changed is set when the protocol or cell size changed (repaint). */
 bool tui_termcaps_response(const char *seq, size_t n, bool *changed);
+/* DEC 2048 in-band resize reports are enabled (the decoder reassembles their torn fragments) */
+bool tui_termcaps_inband(void);
 /* Startup probes to write (owned, may be ""): XTSMGRAPHICS when no protocol is known, CSI 16 t when one is */
 char *tui_termcaps_probes(void);
 
@@ -84,6 +86,9 @@ tui_image_opts_t tui_image_default_opts(int viewport_rows, int max_cols_setting,
  * its Kitty id. A needed Kitty transmit is queued (tui_image_take_pending). */
 void tui_image_render(const char *b64, const char *mime, const char *key, const char *filename, int width,
                       const tui_image_opts_t *o, const char *fallback_sgr, strvec_t *out);
+/* Image.release: an owner closing for good (a form) retires the image drawn under `key`; on Kitty its placements and
+ * data are deleted before the next frame, since repainting rows never removes an id'd placement */
+void tui_image_release(const char *key);
 /* queued one-time Kitty transmits, written before the next frame (owned; NULL when none) */
 char *tui_image_take_pending(void);
 /* destructive display reset: the Kitty delete-all sequence (NULL without Kitty images) and every transmitted

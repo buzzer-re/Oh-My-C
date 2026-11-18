@@ -86,6 +86,21 @@ static void test_restart_argv(void) {
     strvec_free(&k);
 }
 
+/* a bare --restore keeps the session --session already named (omp 59110aa258) */
+static void test_restore_flag(void) {
+    const char *cases[][4] = {{"omc", "--session", "sid", "--restore"}, {"omc", "--restore", "--session", "sid"}};
+    for (size_t i = 0; i < 2; i++) {
+        launch_args_t a;
+        CHECK(launch_parse_args(4, (char **)cases[i], &a) == 0, "parse %zu", i);
+        CHECK(a.restore && str_eq(a.resume, "sid"), "restore %zu: %s", i, a.resume ? a.resume : "(null)");
+        launch_args_free(&a);
+    }
+    char *b[] = {"omc", "--session", "a", "--restore", "b"};
+    launch_args_t a;
+    CHECK(launch_parse_args(5, b, &a) == 0 && str_eq(a.resume, "b"), "--restore <id> wins");
+    launch_args_free(&a);
+}
+
 static void test_worktree_helpers(void) {
     char *b = session_wt_default_branch();
     CHECK(strlen(b) == strlen("wt/20261102-153000") && str_starts(b, "wt/") && b[11] == '-', "default branch %s", b);
@@ -184,6 +199,7 @@ static void test_move_overlay(void) {
 int main(void) {
     test_workspace_dirs();
     test_restart_argv();
+    test_restore_flag();
     test_worktree_helpers();
     test_move_overlay();
     if (failures) fprintf(stderr, "%d failure(s)\n", failures);

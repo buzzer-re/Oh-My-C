@@ -204,6 +204,7 @@ struct agent {
     volatile sig_atomic_t mcp_tools_dirty;   /* an MCP call granted this session tools: re-register at the next boundary */
     volatile sig_atomic_t deliver_queued;    /* an empty Enter forced the queue into the continuation (see below) */
     volatile sig_atomic_t abort_user;        /* the abort carries USER_INTERRUPT_LABEL (agent_abort_user) */
+    volatile sig_atomic_t abort_silent;      /* the running turn's abort is an internal transition (agent_abort_silently) */
     bool running;
     json_t *streaming_message; /* borrowed while streaming */
     int max_turns;             /* 0 => unlimited */
@@ -238,6 +239,9 @@ void agent_abort(agent_t *a);
  * "Request was aborted". */
 void agent_abort_user(agent_t *a);
 #define AGENT_USER_INTERRUPT_LABEL "Interrupted by user"
+/* markPlanInternalAbortPending + abort(): stop the running turn as an expected internal transition; its aborted
+ * assistant message carries the silent-abort marker, so no "Operation aborted" line is drawn */
+void agent_abort_silently(agent_t *a);
 /* Abort the next model request of the running loop as an expected internal transition (omp
  * markPlanInternalAbortPending + abort): the aborted assistant message is stamped with
  * errorMessage "__omp.silent_abort__" so no abort line renders. */

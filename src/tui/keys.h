@@ -82,7 +82,14 @@ typedef struct {
     sb_t paste;
     int64_t pending_since; /* mono ms when an incomplete sequence started waiting; 0 = none */
     bool kitty_active;     /* informational: kitty keyboard protocol enabled */
+    bool inband;           /* DEC 2048 in-band resize reports enabled: reassemble their torn fragments */
+    int pending_wait;      /* how long the pending sequence may wait (ms); 0 = TUI_ESC_TIMEOUT_MS */
+    int64_t inband_t_at;   /* mono ms a report body was applied without its `t`; 0 = none */
 } tui_keydec_t;
+
+/* omp terminal.ts CSI_INTRODUCER_GRACE_MS / INBAND_TERMINATOR_GRACE_MS */
+#define TUI_CSI_INTRODUCER_GRACE_MS 150
+#define TUI_INBAND_TERMINATOR_GRACE_MS 300
 
 void tui_keydec_init(tui_keydec_t *d);
 void tui_keydec_free(tui_keydec_t *d);

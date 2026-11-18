@@ -165,6 +165,58 @@ static void test_keys(void) {
     tui_key_free(&key);
     tui_keydec_free(&d);
 
+    /* DEC 2048 report fragments never reach the composer (omp 65411839ae, c2d9b0f716) */
+    tui_keydec_init(&d);
+    d.inband = true;
+    /* the introducer flushed alone, the body in a later read */
+    tui_keydec_feed(&d, "\x1b[", strlen("\x1b["));
+    CHECK(!tui_keydec_next(&d, &key, 1000));
+    CHECK(!tui_keydec_next(&d, &key, 1000 + TUI_ESC_TIMEOUT_MS));
+    CHECK(tui_keydec_timeout_ms(&d, 1000 + TUI_ESC_TIMEOUT_MS) == TUI_CSI_INTRODUCER_GRACE_MS - TUI_ESC_TIMEOUT_MS);
+    tui_keydec_feed(&d, "48;30;100;600;800t", strlen("48;30;100;600;800t"));
+    CHECK(tui_keydec_next(&d, &key, 1100) && key.kind == TUI_KEY_RESPONSE);
+    CHECK_STR(key.text, "\x1b[48;30;100;600;800t");
+    tui_key_free(&key);
+    /* a body whose `t` is late applies on its own and swallows the terminator */
+    tui_keydec_feed(&d, "\x1b[48;31;100;620;800", strlen("\x1b[48;31;100;620;800"));
+    CHECK(!tui_keydec_next(&d, &key, 2000));
+    CHECK(tui_keydec_next(&d, &key, 2000 + TUI_CSI_INTRODUCER_GRACE_MS) && key.kind == TUI_KEY_RESPONSE);
+    CHECK_STR(key.text, "\x1b[48;31;100;620;800t");
+    tui_key_free(&key);
+    tui_keydec_feed(&d, "t", strlen("t"));
+    CHECK(!tui_keydec_next(&d, &key, 2200));
+    /* a body bundled with the next report's introducer */
+    tui_keydec_feed(&d, "\x1b[48;32;100;640;800\x1b[48;33;100;660;800t", strlen("\x1b[48;32;100;640;800\x1b[48;33;100;660;800t"));
+    CHECK(tui_keydec_next(&d, &key, 3000) && key.kind == TUI_KEY_RESPONSE);
+    CHECK_STR(key.text, "\x1b[48;32;100;640;800t");
+    tui_key_free(&key);
+    CHECK(tui_keydec_next(&d, &key, 3000) && key.kind == TUI_KEY_RESPONSE);
+    CHECK_STR(key.text, "\x1b[48;33;100;660;800t");
+    tui_key_free(&key);
+    /* a keystroke ends a held body: the body applies, the key is typed; a later `t` is a key again */
+    tui_keydec_feed(&d, "\x1b[48;34;100;680;800a", strlen("\x1b[48;34;100;680;800a"));
+    CHECK(tui_keydec_next(&d, &key, 4000) && key.kind == TUI_KEY_RESPONSE);
+    tui_key_free(&key);
+    CHECK(tui_keydec_next(&d, &key, 4000) && key.kind == TUI_KEY_CHAR && key.codepoint == 'a');
+    tui_key_free(&key);
+    tui_keydec_feed(&d, "t", strlen("t"));
+    CHECK(tui_keydec_next(&d, &key, 5000) && key.kind == TUI_KEY_CHAR && key.codepoint == 't');
+    tui_key_free(&key);
+    /* a split CSI key still reaches the input handler */
+    tui_keydec_feed(&d, "\x1b[", strlen("\x1b["));
+    CHECK(!tui_keydec_next(&d, &key, 6000));
+    tui_keydec_feed(&d, "A", strlen("A"));
+    CHECK(tui_keydec_next(&d, &key, 6100) && key.kind == TUI_KEY_UP);
+    tui_key_free(&key);
+    /* a stray introducer is released after the grace period */
+    tui_keydec_feed(&d, "\x1b[", strlen("\x1b["));
+    CHECK(!tui_keydec_next(&d, &key, 7000));
+    CHECK(tui_keydec_next(&d, &key, 7000 + TUI_CSI_INTRODUCER_GRACE_MS) && key.kind == TUI_KEY_ESCAPE);
+    tui_key_free(&key);
+    CHECK(tui_keydec_next(&d, &key, 7000 + TUI_CSI_INTRODUCER_GRACE_MS) && key.kind == TUI_KEY_CHAR && key.codepoint == '[');
+    tui_key_free(&key);
+    tui_keydec_free(&d);
+
     /* matcher */
     n = tui_keys_decode_all("\x03", 1, k, 8);
     CHECK(tui_key_matches(&k[0], "ctrl+c"));
@@ -384,6 +436,12 @@ static void test_markdown(void) {
     /* streaming: unclosed fence renders without crashing */
     p = md_plain("text\n```python\ndef f():\n    pass", 40);
     CHECK(has_line(&p, "  def f():"));
+    strvec_free(&p);
+
+    /* task items keep their checkbox after the marker; wrapped rows hang under the task text (omp 687367522b) */
+    p = md_plain("- [x] Ship the fix today\n- [ ] Add a regression test", 20);
+    CHECK(p.n == 5 && !strcmp(p.v[0], "- [x] Ship the fix") && !strcmp(p.v[1], "      today") &&
+          !strcmp(p.v[2], "- [ ] Add a") && !strcmp(p.v[3], "      regression") && !strcmp(p.v[4], "      test"));
     strvec_free(&p);
 
     /* wrapping keeps widths */

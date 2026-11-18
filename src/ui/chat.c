@@ -590,11 +590,12 @@ static void error_block_rows(strvec_t *o, const char *message, int width, size_t
 
 /* turn-ending error/abort label (resolveAssistantErrorPresentation); NULL when nothing renders. In the
  * interactive UI every abort without a custom reason is the user's Esc, which upstream keeps quiet. */
+/* shouldRenderAbortReason + resolveAbortLabel: a user interrupt and a silent abort draw nothing; a custom reason shows
+ * verbatim; a bare abort (no reason, or the generic "Request was aborted") reads "Operation aborted" */
 static const char *abort_label(const json_t *msg) {
     const char *err = json_get_str(msg, "errorMessage");
-    if (!err || !*err || !strcmp(err, "Request was aborted") || !strcmp(err, "Interrupted by user") ||
-        !strcmp(err, "__omp.silent_abort__"))
-        return NULL;
+    if (err && (!strcmp(err, "Interrupted by user") || !strcmp(err, "__omp.silent_abort__"))) return NULL;
+    if (!err || !*err || !strcmp(err, "Request was aborted")) return "Operation aborted";
     return err;
 }
 

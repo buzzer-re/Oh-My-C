@@ -574,19 +574,6 @@ static char *activity(const json_t *msgs) {
     return sb_detach(&b);
 }
 
-static bool open_work_all_blocked(app_t *a) {
-    json_t *phases = a->env ? a->env->todo.phases : NULL, *ph, *t;
-    bool blocked = false, actionable = false;
-    json_arr_foreach(phases, i, ph) {
-        json_arr_foreach(json_get_arr(ph, "tasks"), k, t) {
-            const char *st = json_get_str(t, "status");
-            if (str_eq(st, "blocked")) blocked = true;
-            else if (!str_eq(st, "completed") && !str_eq(st, "abandoned")) actionable = true;
-        }
-    }
-    return blocked && !actionable;
-}
-
 char *app_goal_after_run(app_t *a, const json_t *run_messages, bool was_continuation, const char *mode) {
     goal_t *g = a->goal;
     if (!g) return NULL;
@@ -619,7 +606,6 @@ char *app_goal_after_run(app_t *a, const json_t *run_messages, bool was_continua
     if (!allowed || g->suppress || a->plan_mode || !g->present || !g->enabled || strcmp(g->status, "active")) return NULL;
     const char *stop = json_get_str(last_assistant(a->agent->messages), "stopReason");
     if (str_eq(stop, "aborted") || str_eq(stop, "error")) return NULL;
-    if (open_work_all_blocked(a)) return NULL;
     return render("goal-continuation", g);
 }
 

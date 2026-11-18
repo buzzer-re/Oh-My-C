@@ -163,7 +163,8 @@ r.ui += [{"value": "B"}, {"value": "Zed"}, {"value": "final"}]
 n0 = len(r.frames)
 r.prompt("a1", "call:ask:" + json.dumps({"html": FORM1}))
 sel = r.wait(lambda f: f.get("type") == "extension_ui_request" and f.get("method") == "select" and f.get("title") == "Pick one")
-check("ask select", sel and sel["options"] == ["A", "B", "Other (type your own)"] and "optionDetails" not in sel, sel)
+check("ask select", sel and sel["options"] == ["A", "B", "Other (type your own)"] and "optionDetails" not in sel and
+      sel.get("initialIndex") == 1 and sel.get("selectionMarker") == "radio" and "checkedIndices" not in sel, sel)
 te = r.wait(lambda f: f.get("type") == "tool_execution_end" and f.get("toolName") == "ask")
 with r.lock:
     inp = next((f for f in r.frames[n0:] if f.get("method") == "input"), None)
@@ -186,7 +187,9 @@ with r.lock:
     ask = next((f for f in r.frames[n0:] if f.get("method") == "ask"), None)
     sels = [f for f in r.frames[n0:] if f.get("method") == "select"]
 check("ask no dialog", ask is None and len(sels) == 2 and sels[0]["title"] == "(1 selected) Q" and
-      sels[0]["options"] == ["X", "Y", "Other (type your own)", "\u2714 Done selecting"] and sels[1]["title"] == "(2 selected) Q", sels)
+      sels[0]["options"] == ["X", "Y", "Other (type your own)", "\u2714 Done selecting"] and sels[1]["title"] == "(2 selected) Q" and
+      sels[0].get("selectionMarker") == "checkbox" and sels[0].get("checkedIndices") == [0] and sels[0].get("markableCount") == 3 and
+      sels[0].get("initialIndex") == 0 and sels[1].get("checkedIndices") == [0, 2] and sels[1].get("initialIndex") == 2, sels)
 check("ask other", te and te["result"]["content"][0]["text"] == 'User answers:\n{\n  "c": [\n    "x",\n    "teal"\n  ]\n}', te)
 x = r.call({"id": "ad2", "type": "set_ask_dialog", "enabled": False})
 

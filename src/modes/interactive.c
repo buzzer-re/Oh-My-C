@@ -462,6 +462,30 @@ static bool async_wait_stop(ui_t *u) {
     return true;
 }
 
+/* /fork: the session moves onto a new file holding the conversation so far */
+static bool g_fork_pending; /* /fork aborted a running turn: fork once it settled */
+static void fork_now(ui_t *u) {
+    ui_btw_dispose(u);
+    char *err = NULL;
+    /* the session id before the fork is the one the hint offers to return to */
+    session_t *s = u->app->session;
+    char *prev = s && s->persist && s->file && fs_exists(s->file) ? xstrdup(session_id(s)) : NULL;
+    if (app_fork_from(u->app, NULL, &err) != 0) add_notice(u, "error", "Fork failed (session not persisted or cancelled)");
+    else {
+        char *label = prev ? xasprintf("%s Session forked \xc2\xb7 return to original: omc --resume %s or /resume %s",
+                                       tui_sym("status.success"), prev, prev)
+                           : xasprintf("%s Session forked", tui_sym("status.success"));
+        char *t = tui_fgs(NULL, TUI_TC_ACCENT, label);
+        tui_container_add(u->chat, &tui_spacer_new(1)->base);
+        tui_container_add(u->chat, &tui_text_new(t, 1, 1)->base);
+        free(t);
+        free(label);
+        tui_request_render(u->tui);
+    }
+    free(prev);
+    free(err);
+}
+
 static void plan_exec_resume(ui_t *u);
 static void worker_done(void *ud) {
     ui_t *u = ud;
@@ -470,6 +494,10 @@ static void worker_done(void *ud) {
     u->wake_suppressed = false; /* a turn ended on its own since the interrupt */
     ui_signals_settle();
     ui_signals_settle_startup(); /* a startup prompt whose run reported nothing goes back to idle */
+    if (g_fork_pending) {
+        g_fork_pending = false;
+        fork_now(u);
+    }
     iq_flush_deferred(u);
     plan_exec_resume(u);
     /* deferred `!cmd` results, a pending /compact, queued input left behind by an interrupted run */
@@ -933,12 +961,14 @@ static json_t *ui_ask(void *ud, const json_t *questions) {
 
 /* ---------- formDialog bridge (the ask tool's HTML form; extension-ui-controller #showLocalFormDialog) ---------- */
 
-static void form_done(void *ud, json_t *data, bool timed_out) {
+static void form_done(void *ud, json_t *data, json_t *notes, bool timed_out) {
     ui_t *u = ud;
     pthread_mutex_lock(&u->mu);
     bool closed = g_ask_closed;
     json_free(u->ask_answers);
     u->ask_answers = data;
+    json_free(u->form_notes);
+    u->form_notes = notes;
     u->form_timed_out = timed_out;
     u->ask_done = true;
     pthread_cond_signal(&u->ask_cv);
@@ -961,11 +991,12 @@ static void form_abort(void *ud) {
     }
 }
 
-static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, volatile sig_atomic_t *cancel,
-                       char **err) {
+static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, json_t **notes,
+                       volatile sig_atomic_t *cancel, char **err) {
     ui_t *u = ud;
     UNUSED(err);
     *timed_out = false;
+    *notes = NULL;
     pthread_mutex_lock(&u->mu);
     if (g_ask_closed) {
         pthread_mutex_unlock(&u->mu);
@@ -974,6 +1005,8 @@ static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *tim
     u->form_html = xstrdup(html);
     u->form_timeout = timeout_ms;
     u->form_timed_out = false;
+    json_free(u->form_notes);
+    u->form_notes = NULL;
     u->ask_answers = NULL;
     u->ask_done = false;
     pthread_mutex_unlock(&u->mu);
@@ -997,6 +1030,8 @@ static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *tim
     json_t *data = u->ask_answers;
     u->ask_answers = NULL;
     *timed_out = u->form_timed_out;
+    *notes = u->form_notes;
+    u->form_notes = NULL;
     free(u->form_html);
     u->form_html = NULL;
     pthread_mutex_unlock(&u->mu);
@@ -1005,7 +1040,6 @@ static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *tim
 
 /* ---------- plan approval (InteractiveMode.handlePlanApproval / #approvePlan / #savePlanAndQuit) ---------- */
 
-#define PLAN_SAVE_AND_QUIT "Save and quit"
 #define PLAN_KEEP_CONTEXT_INDEX 2
 #define PLAN_KEEP_DISABLE_PERCENT 95.0
 
@@ -1021,6 +1055,7 @@ typedef struct {
     bool exec_pending; /* approval waiting for the aborted run to finish */
     ui_plan_save_t *save;
     char *save_content;
+    int hold; /* `blocked` on the plan's approval while the review is open (ui_signals_hold_blocked) */
 } plan_review_t;
 
 static plan_review_t g_pr;
@@ -1139,6 +1174,7 @@ char *ui_dialog_external_edit(ui_t *u, const char *text) {
 }
 
 static void plan_review_free_state(void) {
+    if (g_pr.hold) ui_signals_release_blocked(g_pr.hold);
     free(g_pr.path);
     free(g_pr.title);
     free(g_pr.edited);
@@ -1155,6 +1191,8 @@ static void plan_review_free_state(void) {
 static void plan_review_hide(ui_t *u) {
     if (!g_pr.open) return;
     g_pr.open = false;
+    if (g_pr.hold) ui_signals_release_blocked(g_pr.hold);
+    g_pr.hold = 0;
     tui_component_t *c = ui_plan_review_component(g_pr.ov);
     tui_overlay_hide(u->tui, c);
     tui_alt_screen(u->tui, false); /* the parked transcript resumes as it was */
@@ -1330,7 +1368,9 @@ static void *plan_exec_main(void *p) {
     }
     /* seed an auto name from the plan title when the session has none */
     char *seeded = app_plan_humanize_title(x->title);
-    if (*seeded && a->session && !a->session->title) session_set_title(a->session, seeded, "auto");
+    /* unless automatic titling is off (`--no-title` / PI_NO_TITLE) */
+    if (*seeded && !env_truthy("PI_NO_TITLE") && !env_truthy("OMC_NO_TITLE") && a->session && !a->session->title)
+        session_set_title(a->session, seeded, "auto");
     free(seeded);
     a->plan_reference_sent = true; /* markPlanReferenceSent: the synthetic prompt carries the plan */
     char *prompt = app_plan_approved_prompt(a, x->path, x->content, x->preserve);
@@ -1401,7 +1441,7 @@ static void plan_start_exec(ui_t *u) {
     }
 }
 
-/* ----- save and quit ----- */
+/* ----- save ----- */
 
 static void plan_save_done_now(ui_t *u, const char *path);
 
@@ -1455,10 +1495,12 @@ static void *plan_name_main(void *p) {
     return NULL;
 }
 
+/* #savePlan: write the plan where the prompt says; the review stays open and gets the keys back */
 static void plan_save_done_now(ui_t *u, const char *path) {
     tui_component_t *c = ui_plan_save_component(g_pr.save);
     tui_overlay_hide(u->tui, c);
-    tui_set_focus(u->tui, &u->editor->base);
+    if (g_pr.open && g_pr.ov) tui_set_focus(u->tui, ui_plan_review_component(g_pr.ov));
+    else tui_set_focus(u->tui, &u->editor->base);
     char *sel = path ? xstrdup(path) : NULL;
     char *content = g_pr.save_content;
     g_pr.save_content = NULL;
@@ -1473,11 +1515,7 @@ static void plan_save_done_now(ui_t *u, const char *path) {
             add_notice(u, "error", m);
             free(m);
         } else {
-            app_exit_plan_mode(a, false);
-            if (g_plan_ann && g_pr.ann_key) json_del(g_plan_ann, g_pr.ann_key);
-            app_new_session(a);
-            ui_new_session_banner(u);
-            char *m = xasprintf("Saved plan to %s.", sp);
+            char *m = xasprintf("Saved plan to %s", sp);
             plan_status(u, m);
             free(m);
         }
@@ -1486,17 +1524,17 @@ static void plan_save_done_now(ui_t *u, const char *path) {
     }
     free(sel);
     free(content);
-    plan_review_free_state();
     tui_request_render(u->tui);
 }
 
-static void plan_save_and_quit(ui_t *u) {
-    char *content = g_pr.edited ? xstrdup(g_pr.edited) : app_plan_read(u->app, g_pr.path);
+/* Save: the plan as it stands (in-overlay edits, else the file), to a prompted path */
+static void plan_save_prompt(ui_t *u, const char *current) {
+    if (g_pr.save) return;
+    char *content = current ? xstrdup(current) : g_pr.edited ? xstrdup(g_pr.edited) : app_plan_read(u->app, g_pr.path);
     if (!content) {
         char *m = xasprintf("Plan file not found at %s", g_pr.path);
         add_notice(u, "error", m);
         free(m);
-        plan_review_free_state();
         return;
     }
     char *suggested = app_plan_save_file_name(g_pr.title);
@@ -1545,11 +1583,6 @@ static void pr_finish(ui_t *u, const char *choice) {
         plan_review_free_state();
         return;
     }
-    if (!strcmp(choice, PLAN_SAVE_AND_QUIT)) {
-        plan_review_hide(u);
-        plan_save_and_quit(u);
-        return;
-    }
     if (!strcmp(choice, "Approve and execute") || !strcmp(choice, "Approve and compact context") ||
         str_eq(choice, g_pr.keep_label)) {
         /* the overlay stays up ("— submitting…") until the execution prompt is queued */
@@ -1594,6 +1627,7 @@ static void pr_post_finish(ui_t *u, const char *label) {
 }
 
 static void pr_cb_pick(void *ud, const char *label) { pr_post_finish(ud, label); }
+static void pr_cb_save(void *ud, const char *content) { plan_save_prompt(ud, content); }
 static void pr_cb_cancel(void *ud) { pr_post_finish(ud, NULL); }
 
 static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) {
@@ -1626,17 +1660,20 @@ static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) 
     int64_t window = a->model ? a->model->context_window : 0;
     int64_t used = a->last_context_tokens;
     bool keep_disabled = false;
+    char *keep_meta = NULL;
     if (window > 0) {
         char *t = ui_format_number((double)MAX(0, used)), *w = ui_format_number((double)window);
         for (char *q = t; *q; q++) *q = (char)tolower((unsigned char)*q);
         for (char *q = w; *q; q++) *q = (char)tolower((unsigned char)*q);
-        g_pr.keep_label = xasprintf("Approve and keep context (~%s / %s)", t, w);
+        keep_meta = xasprintf("~%s / %s", t, w);
         free(t);
         free(w);
         keep_disabled = 100.0 * (double)used / (double)window > PLAN_KEEP_DISABLE_PERCENT;
-    } else g_pr.keep_label = xstrdup("Approve and keep context");
-    const char *options[] = {"Approve and execute", "Approve and compact context", g_pr.keep_label, "Refine plan",
-                             PLAN_SAVE_AND_QUIT};
+    }
+    g_pr.keep_label = xstrdup("Approve and keep context");
+    /* the approval choices; Refine shows only while the plan has feedback, Save writes a copy and keeps the review */
+    const char *options[] = {"Approve and execute", "Approve and compact context", g_pr.keep_label};
+    const char *metas[] = {NULL, NULL, keep_meta};
     int disabled[] = {PLAN_KEEP_CONTEXT_INDEX};
 
     /* model-tier slider over the role models, starting on `default`; hidden with fewer than two */
@@ -1658,6 +1695,8 @@ static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) 
     ui_plan_review_opts_t o = {.prompt_title = "Plan mode - next step",
                                .options = options,
                                .noptions = ARRAY_LEN(options),
+                               .metas = metas,
+                               .refine_label = "Refine plan",
                                .disabled = disabled,
                                .ndisabled = keep_disabled ? 1 : 0,
                                .help_text = help,
@@ -1678,8 +1717,10 @@ static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) 
                               .on_feedback = pr_cb_feedback,
                               .on_annotation_state = pr_cb_ann_state,
                               .on_slider = pr_cb_slider,
+                              .on_save = pr_cb_save,
                               .ud = u};
     g_pr.ov = ui_plan_review_new(u->tui, content, &o, &cb);
+    free(keep_meta);
     free(edkey);
     free(help);
     free(cancel);
@@ -1687,6 +1728,10 @@ static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) 
     free(details);
     free(content);
     g_pr.open = true;
+    /* the plan waits on the user's approval, after the turn that proposed it has ended */
+    char *wait = xasprintf("Review plan: %s", g_pr.title);
+    g_pr.hold = ui_signals_hold_blocked("permission", wait);
+    free(wait);
     /* fullscreen overlay on the alternate screen */
     tui_alt_screen(u->tui, true);
     tui_overlay_opts_t oo = {TUI_ANCHOR_TOP, 0, 0, 0, 0};
@@ -1735,7 +1780,7 @@ static void plan_exit_confirmed(void *ud, bool yes) {
     /* an open review must not outlive the plan mode it approves: a later pick would autosave and dispatch the plan
      * while plan mode is paused (omp 660900d90e) */
     if (g_pr.open || g_pr.exec_pending) pr_finish(u, NULL);
-    if (u->worker_running) app_abort(u->app);
+    if (u->worker_running) app_abort_user(u->app); /* abort({reason: USER_INTERRUPT_LABEL}) */
     app_exit_plan_mode(u->app, true);
     add_notice(u, "info", "Plan mode paused.");
     tui_request_render(u->tui);
@@ -1756,7 +1801,8 @@ static void plan_review_command(ui_t *u) {
         add_notice(u, "warning", no_plan);
     } else {
         char *title = app_plan_resolve_title(NULL, content, plans.v[0]);
-        if (u->worker_running) {
+        if (u->worker_running) { /* #abortPlanApprovalTurnSilently */
+            agent_abort_silently(a->agent);
             app_abort(a);
             free(g_pending_review_path);
             free(g_pending_review_title);
@@ -2000,6 +2046,7 @@ static bool relocate_session(ui_t *u, const char *path) {
         return false;
     }
     ui_signals_session_title();
+    ui_mcp_rescope(u); /* reloadTuiPluginState: the destination project's MCP servers (agents load per spawn) */
     tui_request_render(u->tui);
     return true;
 }
@@ -2820,11 +2867,11 @@ static bool handle_command_inner(ui_t *u, const char *line) {
         if (prompt) iq_submit_mode(u, prompt, NULL, true); /* the first iteration runs through the normal submit flow */
         free(prompt);
     } else if (!strcmp(cmd, "fork")) {
-        ui_btw_dispose(u);
-        char *err = NULL;
-        if (app_fork_from(a, NULL, &err) != 0) add_notice(u, "error", err);
-        else add_notice(u, "info", "Forked into a new session");
-        free(err);
+        /* a running turn would finish on the new file and leave the original cut mid-turn: abort it, then fork */
+        if (u->worker_running) {
+            g_fork_pending = true;
+            app_abort(a);
+        } else fork_now(u);
     } else if (xc_command(u, cmd, parsed.name, arg)) { /* modes/extractl.c */
     } else {
         handled = false;
@@ -2929,7 +2976,7 @@ static char *g_armed_bare_session;
 static bool focused_view_command(const char *name, const char *args) {
     if (str_eq(name, "jobs")) return !*args || str_eq(args, "full");
     if (str_eq(name, "usage")) return !*args || str_eq(args, "show");
-    return str_eq(name, "effort") || str_eq(name, "export");
+    return str_eq(name, "copy") || str_eq(name, "effort") || str_eq(name, "export");
 }
 
 static void skilldesc_start_cb(void *ud) { skilldesc_start_compression(ud); }
@@ -2961,7 +3008,7 @@ static void focused_submit(ui_t *u, tui_editor_t *ed, const char *text) {
             return;
         }
         char *ll = ui_double_tap_hint("left");
-        char *m = xasprintf("Only /btw, /effort, /export, /jobs, /model, /switch, /usage run here; other commands run in the main "
+        char *m = xasprintf("Only /btw, /copy, /effort, /export, /jobs, /model, /switch, /usage run here; other commands run in the main "
                             "session — press %s to return first",
                             ll);
         add_notice(u, "info", m);

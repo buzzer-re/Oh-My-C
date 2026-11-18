@@ -46,6 +46,13 @@ static json_t *current_phases(app_t *a) {
         }
     }
     json_free(path);
+    /* snapshots saved before the `blocked` status was removed read back with those tasks pending */
+    json_t *ph, *t;
+    json_arr_foreach(found, i, ph) json_arr_foreach(json_get_arr(ph, "tasks"), k, t) {
+        if (!str_eq(json_get_str(t, "status"), "blocked")) continue;
+        json_set_str(t, "status", "pending");
+        json_del(t, "blocker");
+    }
     if (found && json_len(found)) return found;
     json_free(found);
     pthread_mutex_lock(&a->env->mu);

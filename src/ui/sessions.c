@@ -11,6 +11,7 @@
 #include "tui/fuzzy.h"
 
 #include <math.h>
+#include <strings.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -38,6 +39,7 @@ typedef struct {
     uint64_t gen;      /* the listing a running full scan belongs to */
     strvec_t deleted;  /* paths deleted here: a listing scanned before the delete must not bring them back */
     json_t *renamed;   /* path -> title renamed here: a listing scanned before the rename must not revert them */
+    long scroll_start; /* window start kept across renders (edge-triggered scrolling); -1 = seed centered */
 } sess_view_t;
 
 static sess_view_t *g_sess_view; /* the open picker; a full scan finishing after it closed finds no view */
@@ -141,6 +143,70 @@ static void scan_session(const char *path, int *status, bool *forked) {
 
 static char *S(tui_tc_t slot, const char *s) { return tui_fgs(NULL, slot, s); }
 
+/* systemDateLocale: the BCP 47 tag of LC_ALL, then LC_TIME, then LANG ("de_DE.UTF-8" -> "de-DE"); "" for C/POSIX or
+ * unset (the runtime default, en-US) */
+const char *ui_system_date_locale(void) {
+    static char tag[48];
+    static bool done;
+    if (done) return tag;
+    done = true;
+    const char *raw = NULL;
+    const char *names[] = {"LC_ALL", "LC_TIME", "LANG"};
+    for (size_t i = 0; i < 3 && !raw; i++) {
+        const char *e = getenv(names[i]);
+        if (e && *e) raw = e;
+    }
+    if (!raw) return tag;
+    size_t n = strcspn(raw, ".@");
+    if (n >= sizeof tag) n = sizeof tag - 1;
+    memcpy(tag, raw, n);
+    tag[n] = 0;
+    for (char *p = tag; *p; p++)
+        if (*p == '_') *p = '-';
+    if (!strcmp(tag, "C") || !strcmp(tag, "POSIX")) tag[0] = 0;
+    return tag;
+}
+
+/* toLocaleDateString(locale): CLDR's numeric year-month-day pattern for the common locales (d/M: day/month, dd/MM
+ * zero-padded, y the full year); an unknown locale falls back to its language, then to en-US */
+static const struct {
+    const char *tag, *pat;
+} DATE_PATTERNS[] = {
+    {"en", "M/d/y"},        {"en-GB", "dd/MM/y"},   {"en-AU", "dd/MM/y"},  {"en-NZ", "dd/MM/y"},
+    {"en-IE", "d/M/y"},     {"en-IN", "d/M/y"},     {"en-SG", "d/M/y"},    {"en-CA", "y-MM-dd"},
+    {"en-ZA", "y/MM/dd"},   {"de", "d.M.y"},        {"de-CH", "d.M.y"},    {"fr", "dd/MM/y"},
+    {"fr-CA", "y-MM-dd"},   {"fr-CH", "dd.MM.y"},   {"es", "d/M/y"},       {"it", "d/M/y"},
+    {"pt", "dd/MM/y"},      {"nl", "d-M-y"},        {"ru", "dd.MM.y"},     {"uk", "dd.MM.y"},
+    {"pl", "d.MM.y"},       {"cs", "d. M. y"},      {"sk", "d. M. y"},     {"sv", "y-MM-dd"},
+    {"da", "d.M.y"},        {"nb", "d.M.y"},        {"no", "d.M.y"},       {"fi", "d.M.y"},
+    {"tr", "dd.MM.y"},      {"ja", "y/M/d"},        {"zh", "y/M/d"},       {"ko", "y. M. d."},
+    {"hu", "y. MM. dd."},   {"ro", "dd.MM.y"},      {"el", "d/M/y"},       {"he", "d.M.y"},
+    {"id", "d/M/y"},        {"vi", "d/M/y"},        {"lt", "y-MM-dd"},     {"et", "d.M.y"},
+    {"lv", "dd.MM.y."},     {"hr", "dd. MM. y."},   {"sl", "d. M. y"},     {"bg", "d.MM.y \xd0\xb3."},
+};
+
+char *ui_locale_date(const struct tm *tm, const char *locale) {
+    const char *pat = NULL;
+    char lang[16];
+    size_t ln = strcspn(locale, "-");
+    snprintf(lang, sizeof lang, "%.*s", (int)MIN(ln, sizeof lang - 1), locale);
+    for (int pass = 0; pass < 2 && !pat; pass++)
+        for (size_t i = 0; i < ARRAY_LEN(DATE_PATTERNS) && !pat; i++)
+            if (!strcasecmp(DATE_PATTERNS[i].tag, pass ? lang : locale)) pat = DATE_PATTERNS[i].pat;
+    if (!pat) pat = "M/d/y";
+    sb_t b = SB_INIT;
+    for (const char *p = pat; *p; p++) {
+        if (*p == 'y') sb_appendf(&b, "%d", tm->tm_year + 1900);
+        else if (*p == 'M' || *p == 'd') {
+            int v = *p == 'M' ? tm->tm_mon + 1 : tm->tm_mday;
+            bool pad = p[1] == *p;
+            sb_appendf(&b, pad ? "%02d" : "%d", v);
+            if (pad) p++;
+        } else sb_putc(&b, *p);
+    }
+    return sb_detach(&b);
+}
+
 static char *format_date(int64_t ms) {
     int64_t diff = now_ms() - ms;
     int64_t mins = diff / 60000, hours = diff / 3600000, days = diff / 86400000;
@@ -152,10 +218,7 @@ static char *format_date(int64_t ms) {
     time_t t = (time_t)(ms / 1000);
     struct tm tm;
     localtime_r(&t, &tm);
-    char buf[32];
-    strftime(buf, sizeof buf, "%m/%d/%Y", &tm); /* en-US toLocaleDateString */
-    char *p = buf[0] == '0' ? buf + 1 : buf;
-    return xstrdup(p);
+    return ui_locale_date(&tm, ui_system_date_locale());
 }
 
 static char *format_bytes(int64_t n) {
@@ -275,6 +338,7 @@ static void *sess_scan_main(void *p) {
  * the scan. */
 static void sess_load(sess_view_t *v) {
     char *dir = v->all_projects ? NULL : session_dir_for_cwd(v->u->app->cwd);
+    v->scroll_start = -1;
     v->gen = ++g_sess_gen;
     session_list_t titled;
     memset(&titled, 0, sizeof titled);
@@ -336,11 +400,19 @@ static void sess_list_lines(sess_view_t *v, int width, int budget, strvec_t *out
     budget = MAX(1, budget);
     size_t start = v->sel, end = v->sel + 1;
     int used = block_rows(&v->all.v[v->vis.v[v->sel]]);
-    int before = 0, target = MAX(0, budget - MIN(used, budget)) / 2;
-    while (start > 0 && before + block_rows(&v->all.v[v->vis.v[start - 1]]) <= target) before += block_rows(&v->all.v[v->vis.v[--start]]);
-    used += before;
+    if (v->scroll_start >= 0) { /* "nearest": keep the window until the selection moves past its edge */
+        start = MIN((size_t)v->scroll_start, v->sel);
+        used = 0;
+        for (size_t i = start; i <= v->sel; i++) used += block_rows(&v->all.v[v->vis.v[i]]);
+        while (used > budget && start < v->sel) used -= block_rows(&v->all.v[v->vis.v[start++]]);
+    } else { /* "center" */
+        int before = 0, target = MAX(0, budget - MIN(used, budget)) / 2;
+        while (start > 0 && before + block_rows(&v->all.v[v->vis.v[start - 1]]) <= target) before += block_rows(&v->all.v[v->vis.v[--start]]);
+        used += before;
+    }
     while (end < n && used + block_rows(&v->all.v[v->vis.v[end]]) <= budget) used += block_rows(&v->all.v[v->vis.v[end++]]);
     while (start > 0 && used + block_rows(&v->all.v[v->vis.v[start - 1]]) <= budget) used += block_rows(&v->all.v[v->vis.v[--start]]);
+    v->scroll_start = (long)start;
     int offset = 0;
     for (size_t i = 0; i < start; i++) offset += block_rows(&v->all.v[v->vis.v[i]]);
     int total_rows = total - 1;
@@ -556,14 +628,15 @@ static void sess_render(tui_component_t *c, int width, strvec_t *out) {
     while ((int)lines.n > target) free(lines.v[--lines.n]);
     while ((int)lines.n < target) strvec_push_own(&lines, ui_box_row("", width));
     char *e = ui_key_hint("enter"), *tab = ui_key_hint("tab"), *esc = ui_key_hint("escape");
-    char *del = ui_key_hint("delete"), *bs = ui_key_hint("backspace"), *f2 = ui_key_hint("f2");
+    char *dk = ui_editor_keys("app.session.delete"), *f2 = ui_key_hint("f2");
+    char *del = *dk ? xasprintf("%s delete \xc2\xb7 ", dk) : xstrdup("");
     const session_info_t *cur = v->vis.n ? &v->all.v[v->vis.v[v->sel]] : NULL;
     bool unpin = cur && is_pinned(v, cur->id);
     char *pk = ui_editor_key(unpin ? "app.session.unpin" : "app.session.pin");
-    char *hint = xasprintf("[%s/%s delete \xc2\xb7 %s rename \xc2\xb7 %s %s \xc2\xb7 %s select \xc2\xb7 %s %s \xc2\xb7 %s cancel]", del, bs,
-                           f2, pk, unpin ? "unpin" : "pin", e, tab, v->all_projects ? "current folder" : "all projects", esc);
+    char *hint = xasprintf("[%s%s rename \xc2\xb7 %s %s \xc2\xb7 %s select \xc2\xb7 %s %s \xc2\xb7 %s cancel]", del, f2, pk,
+                           unpin ? "unpin" : "pin", e, tab, v->all_projects ? "current folder" : "all projects", esc);
+    free(dk);
     free(del);
-    free(bs);
     free(f2);
     free(pk);
     char *hm = S(TUI_TC_MUTED, hint);
@@ -698,7 +771,12 @@ static bool sess_key(tui_component_t *c, const tui_key_t *k) {
         return true;
     }
     long n = (long)v->vis.n;
-    if (n && (tui_key_matches(k, "delete") || (tui_key_matches(k, "backspace") && !(v->query && *v->query)))) {
+    /* app.session.delete (Backspace or Delete): a bound key that also deletes backward in the search keeps editing a
+     * typed query; checked before the search so a binding such as Ctrl+D wins over its forward delete */
+    if (n && tui_kb(k, "app.session.delete") &&
+        (!(v->query && *v->query) ||
+         !(tui_kb(k, "tui.editor.deleteCharBackward") || tui_kb(k, "tui.editor.deleteWordBackward") ||
+           tui_kb(k, "tui.editor.deleteToLineStart")))) {
         v->mode = 1;
         v->choice = 0;
         tui_component_request_render(c);
@@ -765,6 +843,7 @@ static bool sess_key(tui_component_t *c, const tui_key_t *k) {
             next = xstrndup(before, i);
         } else if (tui_kb(k, "tui.editor.deleteToLineStart")) next = xstrdup("");
         if (next) {
+            if (strcmp(next, before)) v->scroll_start = -1;
             free(v->query);
             v->query = next;
             sess_refilter(v);

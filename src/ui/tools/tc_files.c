@@ -1,6 +1,7 @@
 /* tc_files.c - read (grouped), write and edit cards (port of omp chat/read-tool-group.ts,
  * tools/write.ts, tools/edit.ts and chrome/diff.ts). */
 #include "ui/tools/tc.h"
+#include "tools/readsel.h"
 
 #include <ctype.h>
 
@@ -9,24 +10,16 @@
 
 /* ---------- read group ---------- */
 
-static bool is_sel_chunk(const char *s) {
-    if (!*s) return false;
-    if (!strcmp(s, "raw") || !strcmp(s, "conflicts")) return true;
-    for (const char *p = s; *p; p++)
-        if (!strchr("0123456789-+,$ .", *p)) return false;
-    return true;
-}
 
-/* splitPathAndSel (simplified): trailing `:sel` where sel is a line list / raw */
+/* splitPathAndSel for filesystem paths (list colons folded: `a:20:40,85:100` shows `a` + `20-40,85-100`); an
+ * internal URL keeps the simplified split: trailing `:sel` where sel is a line list / raw */
 static void split_path_sel(const char *raw, char **path, char **sel) {
-    const char *colon = strrchr(raw, ':');
-    *sel = NULL;
-    if (!colon || colon == raw || !is_sel_chunk(colon + 1) || strstr(raw, "://")) {
-        *path = xstrdup(raw);
+    if (!strstr(raw, "://")) {
+        read_split_path_sel(raw, path, sel);
         return;
     }
-    *path = xstrndup(raw, (size_t)(colon - raw));
-    *sel = xstrdup(colon + 1);
+    *path = xstrdup(raw);
+    *sel = NULL;
 }
 
 bool tc_read_groupable(const json_t *args) {

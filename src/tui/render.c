@@ -1504,6 +1504,7 @@ void tui_dispatch_key(tui_t *t, const tui_key_t *k) {
 
 static void process_keys(tui_t *t, int64_t now) {
     tui_key_t k;
+    t->dec.inband = tui_termcaps_inband();
     while (!t->stop_requested && tui_keydec_next(&t->dec, &k, now)) {
         tui_dispatch_key(t, &k);
         tui_key_free(&k);

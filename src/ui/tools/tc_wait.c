@@ -94,24 +94,41 @@ static char *job_label(const json_t *j) {
     return xstrdup(json_get_str(j, "label") ? json_get_str(j, "label") : "");
 }
 
-/* bodyLines: quote-bordered preview of a received message, a dim counter marking elided lines */
-static void irc_body_lines_n(const char *body, bool expanded, size_t collapsed, strvec_t *out) {
-    size_t max = expanded ? 12 : collapsed, shown = 0, hidden = 0;
+/* bodyLines: quote-bordered preview of a received message, clipped to the card; expanded (Ctrl+O) the whole message
+ * soft-wraps to the card width. A dim counter (or `…` for a clipped row) marks what the collapsed view leaves out */
+static void irc_body_lines_n(const char *body, bool expanded, size_t collapsed, int width, strvec_t *out) {
     char *quote = tc_fg(TUI_TC_DIM, tc_sym("md.quoteBorder"));
+    char *prefix = xasprintf("  %s ", quote);
+    int content_width = MAX(1, width - tui_visible_width(prefix));
+    int cap = MIN(100, content_width); /* BODY_LINE_WIDTH, narrowed to the card */
+    size_t shown = 0, hidden = 0;
+    bool cut = false;
     for (const char *p = body ? body : ""; *p;) {
         size_t n = strcspn(p, "\n");
         char *l = xstrndup(p, n);
         char *t = str_trim(l);
         free(l);
         if (*t) {
-            if (shown < max) {
-                char *cut = tui_truncate_to_width(t, 100, NULL);
-                char *tabs = tc_replace_tabs(cut);
-                char *fg = tc_fg(TUI_TC_TOOL_OUTPUT, tabs);
-                strvec_push_own(out, xasprintf("  %s %s", quote, fg));
-                free(fg);
-                free(tabs);
-                free(cut);
+            if (expanded || shown < collapsed) {
+                char *text = tc_replace_tabs(t);
+                if (expanded) {
+                    strvec_t rows = {0};
+                    tui_wrap_text_with_ansi(text, content_width, &rows);
+                    for (size_t k = 0; k < rows.n; k++) {
+                        char *fg = tc_fg(TUI_TC_TOOL_OUTPUT, rows.v[k]);
+                        strvec_push_own(out, xasprintf("%s%s", prefix, fg));
+                        free(fg);
+                    }
+                    strvec_free(&rows);
+                } else {
+                    cut |= tui_visible_width(text) > cap;
+                    char *c = tui_truncate_to_width(text, cap, NULL);
+                    char *fg = tc_fg(TUI_TC_TOOL_OUTPUT, c);
+                    strvec_push_own(out, xasprintf("%s%s", prefix, fg));
+                    free(fg);
+                    free(c);
+                }
+                free(text);
                 shown++;
             } else hidden++;
         }
@@ -119,20 +136,24 @@ static void irc_body_lines_n(const char *body, bool expanded, size_t collapsed, 
         p += n;
         if (*p) p++;
     }
-    if (hidden) {
-        char *m = xasprintf("\xE2\x80\xA6 +%zu more %s", hidden, hidden == 1 ? "line" : "lines");
-        char *fg = tc_fg(TUI_TC_DIM, m);
-        strvec_push_own(out, xasprintf("  %s %s", quote, fg));
-        free(fg);
-        free(m);
+    if (hidden || cut) {
+        char *hint = expanded ? xstrdup("") : tc_expand_hint();
+        char *m = hidden ? xasprintf("\xE2\x80\xA6 +%zu more %s", hidden, hidden == 1 ? "line" : "lines") : xstrdup("\xE2\x80\xA6");
+        char *mh = *hint ? xasprintf("%s %s", m, hint) : xstrdup(m);
+        char *fg = tc_fg(TUI_TC_DIM, mh);
+        strvec_push_own(out, xasprintf("%s%s", prefix, fg));
+        free(fg), free(mh), free(m), free(hint);
     }
+    free(prefix);
     free(quote);
 }
 
-static void irc_body_lines(const char *body, bool expanded, strvec_t *out) { irc_body_lines_n(body, expanded, 2, out); }
+static void irc_body_lines(const char *body, bool expanded, int width, strvec_t *out) {
+    irc_body_lines_n(body, expanded, 2, width, out);
+}
 
 /* createIrcMessageCard, kind "incoming" (buildParentIrcMessageCard): `IRC ← from` with its age, then up to 3
- * body rows (12 expanded). `age` is the formatted age taken when the card was built. */
+ * body rows (the whole message expanded). `age` is the formatted age taken when the card was built. */
 void tc_irc_incoming_card(const char *from, const char *body, const char *age, bool expanded, int width, strvec_t *out) {
     strvec_t rows = {0};
     char *icon = tc_styled_sym("tool.irc", TUI_TC_ACCENT);
@@ -144,7 +165,7 @@ void tc_irc_incoming_card(const char *from, const char *body, const char *age, b
     tc_status_line_t sl = {.icon_override = icon, .spinner = -1, .title = title, .title_slot = -1, .meta = meta, .nmeta = nm};
     strvec_push_own(&rows, tc_status_line(&sl));
     char *bt = str_trim(body ? body : "");
-    if (*bt) irc_body_lines_n(body, expanded, 3, &rows);
+    if (*bt) irc_body_lines_n(body, expanded, 3, width, &rows);
     free(bt);
     for (size_t k = 0; k < rows.n; k++) strvec_push_own(out, tui_truncate_to_width(rows.v[k], width, NULL));
     strvec_free(&rows);
@@ -169,7 +190,7 @@ static void irc_messages(const json_t *waited, bool expanded, int width, strvec_
         if (json_get_str(m, "replyTo")) meta[nm++] = "reply";
         tc_status_line_t sl = {.icon_override = icon, .spinner = -1, .title = title, .title_slot = -1, .meta = meta, .nmeta = nm};
         strvec_push_own(&rows, tc_status_line(&sl));
-        irc_body_lines(json_get_str(m, "body"), expanded, &rows);
+        irc_body_lines(json_get_str(m, "body"), expanded, width, &rows);
         for (size_t k = 0; k < rows.n; k++) strvec_push_own(out, tui_truncate_to_width(rows.v[k], width, NULL));
         strvec_free(&rows);
         free(ages);

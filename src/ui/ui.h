@@ -97,6 +97,7 @@ struct ui {
     char *form_html;      /* the ask tool's form while its dialog is up (formDialog bridge) */
     int64_t form_timeout;
     bool form_timed_out;
+    json_t *form_notes; /* optionNotes of the submitted form (owned until handed to the tool) */
     tui_select_list_t *picker;
     char *goal_cont; /* pending hidden continuation prompt (goal / advisor) */
     const char *cont_type;
@@ -363,6 +364,7 @@ void ui_mcp_command(ui_t *u, const char *text);
 void ui_ssh_command(ui_t *u, const char *text);
 void ui_mcp_uninstall(void);                          /* the run ended: its ui is gone (omc_main can run again) */
 void ui_mcp_install(ui_t *u);                         /* live MCP tool / prompt refresh, mcp.notifications */
+void ui_mcp_rescope(ui_t *u);                         /* /move: reconnect the MCP servers configured for the new cwd */
 bool ui_mcp_escape(ui_t *u);                          /* Esc: stop an MCP OAuth wait / cancel /mcp test */
 bool ui_mcp_manual_input(ui_t *u, const char *value); /* `/login <value>` for a waiting MCP OAuth flow */
 /* buildMcpArgumentCompletions past the subcommand ("<sub> <name prefix>"): 1 when items were added, else 0 */

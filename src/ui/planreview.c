@@ -1,4 +1,4 @@
-/* planreview.c - fullscreen plan-review overlay and the "Save and quit" path prompt (ports of omp
+/* planreview.c - fullscreen plan-review overlay and the "Save plan" path prompt (ports of omp
  * packages/tui/src/overlays/plan-review-overlay.ts, plan-toc.ts, plan-save-overlay.ts and the
  * chrome/overlay-box.ts split-frame helpers).
  *
@@ -324,8 +324,11 @@ struct ui_plan_review {
     VEC(undo_t) undo;
     strvec_t deleted;
 
-    strvec_t options;
+    strvec_t options; /* the approval choices */
     bool *disabled;
+    strvec_t metas;   /* per choice ("" none) */
+    char *refine_label;
+    bool has_feedback; /* Refine is listed while the plan has feedback */
     char *help_suffix, *editor_label, *prompt_title;
     int selected;
     /* slider */
@@ -636,6 +639,50 @@ static char *md_fence_for(const char *text) {
     return sb_detach(&f);
 }
 
+/* ---------- the option list: Refine while the plan has feedback, the approval choices, then Save ---------- */
+
+enum { E_REFINE, E_APPROVE, E_SAVE };
+
+static bool refine_listed(const ui_plan_review_t *p) { return p->has_feedback && p->refine_label; }
+
+static int n_entries(const ui_plan_review_t *p) {
+    return (refine_listed(p) ? 1 : 0) + (int)p->options.n + (p->cb.on_save ? 1 : 0);
+}
+
+/* the entry at `i`: its kind and, for an approval choice, the choice index */
+static int entry_kind(const ui_plan_review_t *p, int i, int *choice) {
+    if (refine_listed(p)) {
+        if (i == 0) return E_REFINE;
+        i--;
+    }
+    if (i < (int)p->options.n) {
+        if (choice) *choice = i;
+        return E_APPROVE;
+    }
+    return E_SAVE;
+}
+
+static bool entry_disabled(const ui_plan_review_t *p, int i) {
+    int c = -1;
+    return entry_kind(p, i, &c) == E_APPROVE && p->disabled[c];
+}
+
+static const char *entry_label(const ui_plan_review_t *p, int i) {
+    int c = -1;
+    int k = entry_kind(p, i, &c);
+    return k == E_REFINE ? p->refine_label : k == E_APPROVE ? p->options.v[c] : "Save";
+}
+
+static int coerce_index(ui_plan_review_t *p, int index);
+
+/* Refine arrives preselected; when it leaves, the cursor keeps its option */
+static void set_has_feedback(ui_plan_review_t *p, bool has) {
+    if (has == p->has_feedback) return;
+    p->has_feedback = has;
+    if (!p->refine_label) return;
+    p->selected = has ? 0 : coerce_index(p, MAX(0, p->selected - 1));
+}
+
 static void recompute_feedback(ui_plan_review_t *p) {
     p->annotation_rev++;
     if (p->cb.on_annotation_state) {
@@ -646,6 +693,7 @@ static void recompute_feedback(ui_plan_review_t *p) {
     bool any = false;
     for (size_t i = 0; i < p->secs.n; i++)
         if (p->secs.v[i].ann.n) any = true;
+    set_has_feedback(p, any || p->deleted.n);
     if (!any && !p->deleted.n) {
         if (p->cb.on_feedback) p->cb.on_feedback(p->cb.ud, "");
         return;
@@ -678,32 +726,32 @@ static void recompute_feedback(ui_plan_review_t *p) {
 /* ---------- options / slider ---------- */
 
 static int coerce_index(ui_plan_review_t *p, int index) {
-    int max = (int)p->options.n - 1;
+    int max = n_entries(p) - 1;
     if (max < 0) return -1;
     int c = MAX(0, MIN(index, max));
-    if (!p->disabled[c]) return c;
+    if (!entry_disabled(p, c)) return c;
     for (int i = c + 1; i <= max; i++)
-        if (!p->disabled[i]) return i;
+        if (!entry_disabled(p, i)) return i;
     for (int i = c - 1; i >= 0; i--)
-        if (!p->disabled[i]) return i;
+        if (!entry_disabled(p, i)) return i;
     return c;
 }
 
 static int first_enabled(ui_plan_review_t *p) {
-    for (size_t i = 0; i < p->options.n; i++)
-        if (!p->disabled[i]) return (int)i;
+    for (int i = 0; i < n_entries(p); i++)
+        if (!entry_disabled(p, i)) return i;
     return -1;
 }
 
 static void move_selection(ui_plan_review_t *p, int delta) {
-    int max = (int)p->options.n - 1;
+    int max = n_entries(p) - 1;
     if (max < 0) return;
     int index = p->selected;
     for (;;) {
         int next = MAX(0, MIN(index + delta, max));
         if (next == index) return;
         index = next;
-        if (!p->disabled[index]) {
+        if (!entry_disabled(p, index)) {
             p->selected = index;
             return;
         }
@@ -718,13 +766,24 @@ static void move_slider(ui_plan_review_t *p, int delta) {
     if (p->cb.on_slider) p->cb.on_slider(p->cb.ud, next);
 }
 
+static char *join_sections(const ui_plan_review_t *p);
+
+/* #runEntry: Save keeps the review open, the others commit */
 static void confirm_selection(ui_plan_review_t *p) {
     int i = p->selected;
-    if (i < 0 || i >= (int)p->options.n || p->disabled[i]) return;
+    if (i < 0 || i >= n_entries(p) || entry_disabled(p, i)) return;
+    if (entry_kind(p, i, NULL) == E_SAVE) {
+        char *content = join_sections(p);
+        p->cb.on_save(p->cb.ud, content);
+        free(content);
+        return;
+    }
+    char *label = xstrdup(entry_label(p, i));
     p->committed = true;
     free(p->committed_label);
-    p->committed_label = xstrdup(p->options.v[i]);
-    if (p->cb.on_pick) p->cb.on_pick(p->cb.ud, p->options.v[i]);
+    p->committed_label = xstrdup(label);
+    if (p->cb.on_pick) p->cb.on_pick(p->cb.ud, label);
+    free(label);
 }
 
 /* ---------- scroll view ---------- */
@@ -1212,8 +1271,11 @@ static void slider_lines(ui_plan_review_t *p, strvec_t *out) {
 
 static void option_lines(ui_plan_review_t *p, strvec_t *out) {
     bool active = p->focus == F_ACTIONS;
-    for (size_t i = 0; i < p->options.n; i++) {
-        bool sel = (int)i == p->selected, dis = p->disabled[i];
+    for (int i = 0; i < n_entries(p); i++) {
+        bool sel = i == p->selected, dis = entry_disabled(p, i);
+        const char *label = entry_label(p, i);
+        int ci = -1;
+        const char *meta = entry_kind(p, i, &ci) == E_APPROVE && ci < (int)p->metas.n && *p->metas.v[ci] ? p->metas.v[ci] : NULL;
         char *cursor;
         if (sel) {
             char *c = xasprintf("%s ", tui_sym("nav.cursor"));
@@ -1221,12 +1283,17 @@ static void option_lines(ui_plan_review_t *p, strvec_t *out) {
             free(c);
         } else cursor = xstrdup("  ");
         char *text;
-        if (dis) text = tui_fgs(NULL, TUI_TC_DIM, p->options.v[i]);
+        if (dis) text = tui_fgs(NULL, TUI_TC_DIM, label);
         else if (sel && active) {
-            char *a = tui_fgs(NULL, TUI_TC_ACCENT, p->options.v[i]);
+            char *a = tui_fgs(NULL, TUI_TC_ACCENT, label);
             text = tui_bold(a);
             free(a);
-        } else text = tui_fgs(NULL, TUI_TC_TEXT, p->options.v[i]);
+        } else text = tui_fgs(NULL, TUI_TC_TEXT, label);
+        if (meta) { /* an approval choice's dim `(meta)` */
+            char *m = xasprintf("(%s)", meta), *dm = tui_fgs(NULL, TUI_TC_DIM, m), *t2 = xasprintf("%s %s", text, dm);
+            free(m), free(dm), free(text);
+            text = t2;
+        }
         strvec_push_own(out, xasprintf("%s%s", cursor, text));
         free(text);
         free(cursor);
@@ -1592,6 +1659,8 @@ static void pr_destroy(tui_component_t *c) {
     strvec_free(&p->deleted);
     strvec_free(&p->options);
     free(p->disabled);
+    strvec_free(&p->metas);
+    free(p->refine_label);
     free(p->help_suffix);
     free(p->editor_label);
     free(p->prompt_title);
@@ -1617,6 +1686,8 @@ ui_plan_review_t *ui_plan_review_new(tui_t *tui, const char *plan, const ui_plan
     p->disabled = xcalloc(MAX(1, o->noptions), sizeof(bool));
     for (size_t i = 0; i < o->ndisabled; i++)
         if (o->disabled[i] >= 0 && (size_t)o->disabled[i] < o->noptions) p->disabled[o->disabled[i]] = true;
+    for (size_t i = 0; i < o->noptions; i++) strvec_push(&p->metas, o->metas && o->metas[i] ? o->metas[i] : "");
+    p->refine_label = o->refine_label ? xstrdup(o->refine_label) : NULL;
     p->help_suffix = o->help_text ? xstrdup(o->help_text) : NULL;
     p->editor_label = o->external_editor_label ? xstrdup(o->external_editor_label) : NULL;
     p->prompt_title = o->prompt_title ? xstrdup(o->prompt_title) : NULL;
@@ -1682,12 +1753,22 @@ void ui_plan_review_set_slider(ui_plan_review_t *p, int index) {
     move_slider(p, index - p->slider_index);
 }
 
+/* selectOption: an enabled approval choice, or Refine (offered or not: the caller brings its own feedback) */
 bool ui_plan_review_select(ui_plan_review_t *p, const char *label) {
     if (p->committed) return false;
-    for (size_t i = 0; i < p->options.n; i++) {
-        if (strcmp(p->options.v[i], label) != 0) continue;
-        if (p->disabled[i]) return false;
-        p->selected = (int)i;
+    if (p->refine_label && !strcmp(label, p->refine_label)) {
+        p->committed = true;
+        free(p->committed_label);
+        p->committed_label = xstrdup(label);
+        if (p->cb.on_pick) p->cb.on_pick(p->cb.ud, label);
+        tui_component_request_render(&p->base);
+        return true;
+    }
+    for (int i = 0; i < n_entries(p); i++) {
+        int c = -1;
+        if (entry_kind(p, i, &c) != E_APPROVE || strcmp(p->options.v[c], label) != 0) continue;
+        if (p->disabled[c]) return false;
+        p->selected = i;
         confirm_selection(p);
         tui_component_request_render(&p->base);
         return p->committed;
@@ -1747,9 +1828,9 @@ static void ps_render(tui_component_t *c, int width, strvec_t *out) {
         free(before);
     }
     char *sub = ui_editor_key("tui.input.submit"), *can = ui_editor_key("tui.select.cancel");
-    char *hint = xasprintf("%s save and quit \xc2\xb7 %s cancel", sub, can);
+    char *hint = xasprintf("%s save \xc2\xb7 %s cancel", sub, can);
     char *dh = tui_fgs(NULL, TUI_TC_DIM, hint);
-    strvec_push_own(out, ui_box_top(width, "Save and quit"));
+    strvec_push_own(out, ui_box_top(width, "Save plan"));
     strvec_push_own(out, ui_box_row(input, width));
     strvec_push_own(out, ui_box_row(dh, width));
     strvec_push_own(out, ui_box_bottom(width));

@@ -1606,8 +1606,11 @@ static void flush_all_held(void *ud) {
 }
 
 /* unstable_createElicitation (form): accepted content (owned) or NULL; with a timeout, *timed_out when it passed */
+/* elicitFormFromAcpClient: the accepted content, or NULL (declined, cancelled, the deadline passed). A request the
+ * client failed (JSON-RPC error, closed transport) sets *err (owned) when the caller passes one: a failed request is
+ * not the user's decision */
 static json_t *elicit_form_timed(asess_t *s, const char *message, json_t *properties, json_t *required, int64_t timeout_ms,
-                                 bool *timed_out) {
+                                 bool *timed_out, char **err) {
     json_t *p = json_obj(), *schema = json_obj();
     json_set_str(p, "mode", "form");
     json_set_str(p, "sessionId", s->id);
@@ -1616,18 +1619,16 @@ static json_t *elicit_form_timed(asess_t *s, const char *message, json_t *proper
     json_set(schema, "properties", properties);
     if (required) json_set(schema, "required", required);
     json_set(p, "requestedSchema", schema);
-    json_t *r;
-    if (timeout_ms > 0) {
-        apend_t *pend = client_send(s->acp, "elicitation/create", p);
-        flush_all_held(s);
-        int rc = client_wait(s->acp, pend, timeout_ms, &s->app->agent->cancel);
-        if (rc != 1) {
-            if (rc == 0 && timed_out) *timed_out = true;
-            client_cancel(s->acp, pend);
-            return NULL;
-        }
-        r = client_take(s->acp, pend, NULL);
-    } else r = client_request(s->acp, "elicitation/create", p, &s->app->agent->cancel, flush_all_held, s, NULL);
+    apend_t *pend = client_send(s->acp, "elicitation/create", p);
+    flush_all_held(s);
+    int rc = client_wait(s->acp, pend, timeout_ms > 0 ? timeout_ms : 0, &s->app->agent->cancel);
+    if (rc != 1) {
+        if (rc == 0 && timeout_ms > 0 && timed_out) *timed_out = true;
+        if (err && s->acp->closed && !(s->app->agent->cancel)) *err = xstrdup("Connection closed");
+        client_cancel(s->acp, pend);
+        return NULL;
+    }
+    json_t *r = client_take(s->acp, pend, err);
     json_t *content = str_eq(json_get_str(r, "action"), "accept") ? json_take(r, "content") : NULL;
     json_free(r);
     if (content && !json_is_obj(content)) {
@@ -1638,53 +1639,15 @@ static json_t *elicit_form_timed(asess_t *s, const char *message, json_t *proper
 }
 
 static json_t *elicit_form(asess_t *s, const char *message, json_t *properties, json_t *required) {
-    return elicit_form_timed(s, message, properties, required, 0, NULL);
+    return elicit_form_timed(s, message, properties, required, 0, NULL, NULL);
 }
 
-/* formElicitationMessage: section titles and context blocks as plain text (the fields are schema properties) */
+/* the form elicitation's message: formContext, the section titles and context blocks as plain text without the text
+ * that already titles a field property (the fields are schema properties) */
 static char *form_message(const hf_form_t *f) {
-    strvec_t parts = {0};
-    for (size_t si = 0; si < f->sections.n; si++) {
-        const hf_section_t *sec = &f->sections.v[si];
-        char *t = hf_spans_text(&sec->title), *tt = str_trim(t);
-        free(t);
-        if (*tt) strvec_push(&parts, tt);
-        free(tt);
-        for (size_t bi = 0; bi < sec->blocks.n; bi++) {
-            const hf_block_t *b = &sec->blocks.v[bi];
-            if (b->kind == HF_B_TEXT) strvec_push_own(&parts, hf_spans_text(&b->spans));
-            else if (b->kind == HF_B_PRE) strvec_push(&parts, b->text);
-            else if (b->kind == HF_B_LIST) {
-                sb_t l = SB_INIT;
-                for (size_t i = 0; i < b->items.n; i++) {
-                    char *it = hf_spans_text(&b->items.v[i]);
-                    if (i) sb_putc(&l, '\n');
-                    if (b->ordered) sb_appendf(&l, "%zu. %s", i + 1, it);
-                    else sb_appendf(&l, "- %s", it);
-                    free(it);
-                }
-                strvec_push_own(&parts, sb_detach(&l));
-            } else if (b->kind == HF_B_TABLE) {
-                sb_t l = SB_INIT;
-                for (size_t r = 0; r < b->rows.n; r++) {
-                    if (r) sb_putc(&l, '\n');
-                    for (size_t c = 0; c < b->rows.v[r].n; c++) {
-                        char *ct = hf_spans_text(&b->rows.v[r].v[c]);
-                        if (c) sb_append(&l, " | ");
-                        sb_append(&l, ct);
-                        free(ct);
-                    }
-                }
-                strvec_push_own(&parts, sb_detach(&l));
-            }
-        }
-    }
+    strvec_t parts = hf_form_context(f);
     sb_t out = SB_INIT;
     for (size_t i = 0; i < parts.n; i++) {
-        char *t = str_trim(parts.v[i]);
-        bool blank = !*t;
-        free(t);
-        if (blank) continue;
         if (out.len) sb_append(&out, "\n\n");
         sb_append(&out, parts.v[i]);
     }
@@ -1693,7 +1656,7 @@ static char *form_message(const hf_form_t *f) {
     return sb_detach(&out);
 }
 
-/* otherProperties: `<name>_other` for each Other choice field, more underscores while another control uses it */
+/* otherProperties: `<name>__other` for each Other choice field, more underscores while another control uses it */
 static void other_props(const hf_form_t *f, strvec_t *out) {
     strvec_t taken = {0};
     for (size_t i = 0; i < f->fields.n; i++) strvec_push(&taken, f->fields.v[i]->name);
@@ -1704,7 +1667,7 @@ static void other_props(const hf_form_t *f, strvec_t *out) {
             strvec_push(out, "");
             continue;
         }
-        char *prop = xasprintf("%s_other", fl->name);
+        char *prop = xasprintf("%s__other", fl->name);
         for (;;) {
             bool used = false;
             for (size_t k = 0; k < taken.n && !used; k++) used = !strcmp(taken.v[k], prop);
@@ -1849,12 +1812,12 @@ static json_t *form_data_from(const hf_form_t *f, const json_t *content) {
 }
 
 /* formDialog over form elicitation (one elicitation with a property per field) */
-static json_t *acp_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, volatile sig_atomic_t *cancel,
-                        char **err) {
+static json_t *acp_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, json_t **notes,
+                        volatile sig_atomic_t *cancel, char **err) {
     asess_t *s = ud;
     UNUSED(cancel);
-    UNUSED(err);
     *timed_out = false;
+    *notes = NULL;
     hf_form_t *f = hf_parse(html);
     json_t *required = NULL;
     json_t *props = form_schema(f, &required);
@@ -1864,8 +1827,16 @@ static json_t *acp_form(void *ud, const char *html, int64_t timeout_ms, bool *ti
         json_free(required);
         required = NULL;
     }
-    json_t *content = elicit_form_timed(s, msg, props, required, timeout_ms, &to);
+    char *why = NULL;
+    json_t *content = elicit_form_timed(s, msg, props, required, timeout_ms, &to, &why);
     free(msg);
+    if (why) { /* the ask tool fails with it; the turn goes on */
+        *err = xasprintf("ACP client failed the formDialog elicitation: %s", why);
+        free(why);
+        json_free(content);
+        hf_form_free(f);
+        return NULL;
+    }
     json_t *data = NULL;
     if (to) {
         *timed_out = true;
@@ -2256,7 +2227,8 @@ static void end_of_turn_updates(asess_t *s) {
         json_set_str(u, "sessionUpdate", "usage_update");
         json_set_int(u, "size", a->model->context_window);
         json_set_int(u, "used", MAX(0, ui_context_used(a)));
-        double cost = session_cost(a);
+        /* the session's own spend plus its live subagent tree, background children included (#sessionTreeCost) */
+        double cost = a->session ? session_cost(a) + a->subagent_cost : a->total_cost;
         if (cost > 0) {
             json_t *c = json_obj();
             json_set_num(c, "amount", cost);

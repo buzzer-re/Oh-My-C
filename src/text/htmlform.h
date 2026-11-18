@@ -70,6 +70,8 @@ typedef struct {
     char *src, *alt;          /* image: src (http(s), data:, file: URL or path); image/svg: alt */
     char *markup;             /* svg: the element's source */
     hf_field_t *field;        /* field (borrowed from hf_form_t.fields) */
+    size_t options_end;       /* field: a group with text between its options: the index just past the last of those
+                                 blocks (0: none) */
 } hf_block_t;
 
 typedef struct {
@@ -107,6 +109,15 @@ json_t *hf_text_value(const hf_field_t *f, const char *text);
 char *hf_field_error(const hf_field_t *f, const json_t *value);
 /* defaultFormData (owned object) */
 json_t *hf_default_data(const hf_form_t *f);
+/* blockText: plain text of a context block (paragraph, list, pre, table); NULL for fields and pictures (owned) */
+char *hf_block_text(const hf_block_t *b);
+/* formContext: section titles and context blocks as plain text, leaving out text that is a named field's question;
+ * blank parts dropped (owned strings) */
+strvec_t hf_form_context(const hf_form_t *f);
+/* fieldContexts: per field index, the form text a field-by-field prompt carries (section titles and context since the
+ * previous named field, text between its own options, after the last field the rest), parts joined by blank lines;
+ * "" without context. Owned array of f->fields.n owned strings (NULL for unnamed fields). */
+char **hf_field_contexts(const hf_form_t *f);
 /* formAnswers: [{name, question, answer}] for every named field, option values shown as labels (owned array) */
 json_t *hf_answers(const hf_form_t *f, const json_t *data);
 /* JSON.stringify(data, null, 2) (owned) */

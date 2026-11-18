@@ -120,7 +120,8 @@ static double breakout_tier(const char *q, const char *t) {
     return 0;
 }
 
-/* skillBareNameBreakoutTier: the bare name or one of its hyphen-delimited segments starts with the query */
+/* skillBareNameBreakoutTier: the bare name (1000 exact) or one of its hyphen-delimited segments (900) starts with the
+ * query */
 static double skill_breakout_tier(const char *q, const char *bare) {
     size_t ql = strlen(q), bl = strlen(bare);
     if (!ql) return 0;
@@ -131,11 +132,9 @@ static double skill_breakout_tier(const char *q, const char *bare) {
         while (s < bl && bare[s] != '-') s++;
         s++;
         if (s >= bl) break;
-        if (!strncmp(bare + s, q, ql)) {
-            size_t e = s;
-            while (e < bl && bare[e] != '-') e++;
-            return ql == e - s ? 1000 : 900;
-        }
+        /* an inner-segment hit ranks at leading-prefix strength, never above a command whose name starts with the
+         * query (`/job` -> `jobs` before `skill:...-job-...`) */
+        if (!strncmp(bare + s, q, ql)) return 900;
     }
     return 0;
 }

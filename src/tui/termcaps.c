@@ -218,6 +218,7 @@ void tui_set_cell_dims(int w, int h) {
 static bool g_bg_light;
 bool g_inband;      /* DEC 2048 in-band resize reports enabled (they carry the cell pixel size) */
 static sb_t g_pending; /* bytes written before the next frame: one-time Kitty transmits, mode switches */
+bool tui_termcaps_inband(void) { return g_inband; }
 uint32_t tui_terminal_background(void) { return g_bg_light ? 0xffffff : 0x000000; }
 void tui_set_terminal_background_light(bool light) { g_bg_light = light; }
 
@@ -788,6 +789,24 @@ static uint32_t acquire_id(const char *key) {
     if (!g_next_id) g_next_id = 1;
     if (key && *key) hmap_put(&g_ids, key, (void *)(uintptr_t)id);
     return id;
+}
+
+void tui_image_release(const char *key) {
+    if (!g_maps || !key || !*key) return;
+    void *v = hmap_get(&g_ids, key);
+    if (!v) return;
+    uint32_t id = (uint32_t)(uintptr_t)v;
+    char ids[16];
+    snprintf(ids, sizeof ids, "%u", id);
+    if (hmap_get(&g_transmitted, ids)) { /* deleteKittyImage: the placements and the data go */
+        char *del = wrap_passthrough(xasprintf("\x1b_Ga=d,d=I,i=%u,q=2\x1b\\", id));
+        sb_append(&g_pending, del);
+        free(del);
+        free(hmap_del(&g_transmitted, ids));
+    }
+    hmap_del(&g_placement, ids);
+    hmap_del(&g_ids, key);
+    free(hmap_del(&g_png, key));
 }
 
 char *tui_image_reset_display(void) {

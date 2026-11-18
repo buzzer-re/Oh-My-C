@@ -398,12 +398,16 @@ int launch_parse_args(int argc, char **argv, launch_args_t *r) {
         } else if (is_optional_flag(arg)) {
             const char *next = i + 1 < args.n ? args.v[i + 1] : NULL;
             bool consume = next && next[0] != '-' && next[0];
-            r->resume_set = true;
+            bool restore = !strcmp(arg, "--restore");
             if (consume) {
                 strvec_push(&g_pool, args.v[++i]);
                 r->resume = g_pool.v[g_pool.n - 1];
-            } else r->resume = NULL;
-            if (!strcmp(arg, "--restore")) r->restore = true;
+                r->resume_set = true;
+            } else if (!restore || !r->resume) { /* a bare --restore keeps a session --session/--resume named */
+                r->resume = NULL;
+                r->resume_set = true;
+            }
+            if (restore) r->restore = true;
         } else if (set_valueless(r, arg)) {
         } else if (arg[0] == '@') {
             const char *fp = arg + 1;

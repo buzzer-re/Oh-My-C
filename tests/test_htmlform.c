@@ -3,6 +3,7 @@
 #include "core/core.h"
 #include "core/json.h"
 #include "text/htmlform.h"
+#include "tui/termcaps.h"
 #include "tui/ansi.h"
 #include "tui/keys.h"
 #include "ui/overlays.h"
@@ -116,6 +117,54 @@ static void test_paginate(void) {
 }
 
 
+/* fieldContexts / formContext (omp bfffc6ffb2, 040ee9d021, 5674262fe2) */
+static void test_contexts(void) {
+    hf_form_t *f = hf_parse("<form>\n  <p>Both jobs read the same base image.</p>\n"
+                            "  <ul><li>build: needs the toolchain</li><li>test: only the runtime</li></ul>\n"
+                            "  <pre>FROM debian:12</pre>\n"
+                            "  <table><tr><th>Job</th><th>Time</th></tr><tr><td>build</td><td>4m</td></tr></table>\n"
+                            "  <p>How should these two jobs use the image?</p>\n"
+                            "  <label><input type=\"radio\" name=\"mode\" value=\"share\" checked> Share it</label>\n"
+                            "  <label><input type=\"radio\" name=\"mode\" value=\"split\"> Split it</label>\n"
+                            "  <fieldset><legend>Caching</legend>\n    <p>Layers are cached per runner.</p>\n"
+                            "    <label>Cache size (GB) <input type=\"number\" name=\"cache\"></label>\n  </fieldset>\n"
+                            "  <p>Both answers can change later.</p>\n</form>");
+    char **c = hf_field_contexts(f);
+    CHECK(f->fields.n == 2 && str_eq(c[0], "Both jobs read the same base image.\n\n- build: needs the toolchain\n- test: only "
+                                           "the runtime\n\nFROM debian:12\n\nJob | Time\nbuild | 4m"),
+          "context 0: %s", c[0]);
+    CHECK(str_eq(c[1], "Caching\n\nLayers are cached per runner.\n\nBoth answers can change later."), "context 1: %s", c[1]);
+    for (size_t i = 0; i < f->fields.n; i++) free(c[i]);
+    free(c);
+    strvec_t parts = hf_form_context(f);
+    CHECK(parts.n == 7 && str_eq(parts.v[3], "Job | Time\nbuild | 4m") && str_eq(parts.v[4], "Caching") &&
+              str_eq(parts.v[6], "Both answers can change later."),
+          "form context %zu", parts.n);
+    strvec_free(&parts);
+    hf_form_free(f);
+    /* text before a field that sits between another group's options stays with that field */
+    f = hf_parse("<form>\n  <label><input type=\"radio\" name=\"plan\" value=\"basic\" checked> Basic</label>\n"
+                 "  <p>Choose a compliant region</p>\n"
+                 "  <label>Region <select name=\"region\"><option value=\"us\">US</option><option value=\"eu\">EU</option>"
+                 "</select></label>\n  <label><input type=\"radio\" name=\"plan\" value=\"premium\"> Premium</label>\n</form>");
+    c = hf_field_contexts(f);
+    CHECK(f->fields.n == 2 && str_eq(c[0], "") && str_eq(c[1], "Choose a compliant region"), "intervening: [%s] [%s]", c[0],
+          f->fields.n > 1 ? c[1] : "");
+    for (size_t i = 0; i < f->fields.n; i++) free(c[i]);
+    free(c);
+    hf_form_free(f);
+    /* text between a group's own options stays on the group */
+    f = hf_parse("<form><label><input type=radio name=a value=x> X</label><p>between</p>"
+                 "<label><input type=radio name=a value=y> Y</label><p>tail</p>"
+                 "<label>Name <input name=n></label></form>");
+    c = hf_field_contexts(f);
+    CHECK(f->fields.n == 2 && str_eq(c[0], "between") && str_eq(c[1], "tail"), "between: [%s] [%s]", c[0],
+          f->fields.n > 1 ? c[1] : "");
+    for (size_t i = 0; i < f->fields.n; i++) free(c[i]);
+    free(c);
+    hf_form_free(f);
+}
+
 /* ---------- HtmlFormDialog (src/ui/formdlg.c) ---------- */
 
 static void keys(tui_component_t *c, const char *raw) {
@@ -140,14 +189,68 @@ static char *screen(tui_component_t *c, int width) {
     return sb_detach(&b);
 }
 
-static json_t *g_done_data;
+static json_t *g_done_data, *g_done_notes;
 static bool g_done, g_done_timed_out;
-static void on_done(void *ud, json_t *data, bool timed_out) {
+static void on_done(void *ud, json_t *data, json_t *notes, bool timed_out) {
+    json_free(g_done_notes);
+    g_done_notes = notes;
     (void)ud;
     json_free(g_done_data);
     g_done_data = data;
     g_done = true;
     g_done_timed_out = timed_out;
+}
+
+/* per-option notes (omp 54f3265997, 593be268c3): `n` opens a note under the option, Enter saves it, the row shows
+ * `✎ note` (chosen) or `✎ draft`; only notes on chosen options are submitted */
+static void test_dialog_notes(void) {
+    const char *html = "<form><fieldset><legend>Pick a color</legend>"
+                       "<label><input type=radio name=color value=red checked> Red</label>"
+                       "<label><input type=radio name=color value=blue> Blue</label></fieldset>"
+                       "<select name=region><option>us</option><option selected>eu</option></select></form>";
+    ui_form_opts_t o = {.term_rows = 40, .done = on_done};
+    tui_component_t *c = ui_form_dialog_new(html, &o);
+    c->focused = true;
+    char *s = screen(c, 80);
+    CHECK(strstr(s, "\xe2\x8f\x8e choose \xc2\xb7 n note \xc2\xb7"), "note hint:\n%s", s);
+    free(s);
+    keys(c, "nwarm  tone");
+    s = screen(c, 80);
+    CHECK(strstr(s, "Note for Red \xc2\xb7 enter save \xc2\xb7 blank removes \xc2\xb7 esc keep") && strstr(s, "warm  tone"),
+          "note editor:\n%s", s);
+    free(s);
+    keys(c, "\r");
+    s = screen(c, 80);
+    CHECK(strstr(s, "Red  \xe2\x9c\x8e note"), "saved note:\n%s", s);
+    free(s);
+    keys(c, "\x1b[Bnx\r");
+    s = screen(c, 80);
+    CHECK(strstr(s, "Blue  \xe2\x9c\x8e draft"), "draft note:\n%s", s);
+    free(s);
+    /* on a dropdown the note key is Alt+N: `n` stays type-ahead */
+    keys(c, "\t");
+    s = screen(c, 80);
+    CHECK(strstr(s, "change \xc2\xb7 \xe2\x8f\x8e next \xc2\xb7 Alt+N note"),
+          "dropdown note hint:\n%s", s);
+    free(s);
+    keys(c, "\x1bnfar\r");
+    s = screen(c, 80);
+    CHECK(strstr(s, "2/2  \xe2\x9c\x8e note"), "dropdown note:\n%s", s);
+    free(s);
+    keys(c, "\t\r");
+    CHECK(g_done && g_done_notes && json_len(g_done_notes) == 2, "submitted notes");
+    const json_t *n0 = json_at(g_done_notes, 0);
+    CHECK(str_eq(json_get_str(n0, "name"), "color") && str_eq(json_get_str(n0, "question"), "Pick a color") &&
+              str_eq(json_get_str(n0, "option"), "Red") && str_eq(json_get_str(n0, "value"), "red") &&
+              str_eq(json_get_str(n0, "text"), "warm  tone"),
+          "note fields");
+    CHECK(str_eq(json_get_str(json_at(g_done_notes, 1), "value"), "eu"), "dropdown note value");
+    c->vt->destroy(c);
+    json_free(g_done_notes);
+    g_done_notes = NULL;
+    json_free(g_done_data);
+    g_done_data = NULL;
+    g_done = false;
 }
 
 static void test_dialog(void) {
@@ -229,6 +332,18 @@ static void test_dialog(void) {
     CHECK(strstr(s, "[Image: dot") && strstr(s, "\xe2\x96\xa3 gone \xe2\x80\x94 couldn't load: ENOENT"), "pictures:\n%s", s);
     free(s);
     c->vt->destroy(c);
+    /* on Kitty a picture is an id'd placement that repainting never removes: it is deleted when the form closes
+     * (omp 27ed6a1307, 98162c0960) */
+    tui_set_image_protocol(TUI_IMG_KITTY);
+    c = ui_form_dialog_new(ih, &o4);
+    s = screen(c, 70);
+    free(s);
+    free(tui_image_take_pending());
+    c->vt->destroy(c);
+    char *pend = tui_image_take_pending();
+    CHECK(pend && strstr(pend, "\x1b_Ga=d,d=I,i="), "release: %s", pend ? pend : "(none)");
+    free(pend);
+    tui_set_image_protocol(TUI_IMG_NONE);
     free(ih);
     json_free(g_done_data);
     g_done_data = NULL;
@@ -245,7 +360,9 @@ int main(void) {
     test_parse();
     test_answers();
     test_paginate();
+    test_contexts();
     test_dialog();
+    test_dialog_notes();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -411,7 +411,13 @@ static int decode_one(const char *s, size_t n, tui_key_t *k, bool force, size_t 
         unsigned char c1 = (unsigned char)s[1];
         if (c1 == '[') {
             size_t i = 2;
-            while (i < n && i < 256 && !((unsigned char)s[i] >= 0x40 && (unsigned char)s[i] <= 0x7e)) i++;
+            while (i < n && i < 256 && s[i] != 0x1b && !((unsigned char)s[i] >= 0x40 && (unsigned char)s[i] <= 0x7e)) i++;
+            if (i < n && s[i] == 0x1b) { /* a CSI never holds a raw ESC: the fragment ends at the next sequence */
+                mk(k, TUI_KEY_UNKNOWN, 0, 0);
+                key_set_text(k, s, i);
+                *used = i;
+                return 1;
+            }
             if (i >= 256) { /* absurd sequence: swallow what we scanned */
                 mk(k, TUI_KEY_UNKNOWN, 0, 0);
                 *used = i;
@@ -586,6 +592,86 @@ static const char *find_mem(const char *h, size_t hn, const char *nd, size_t nn)
     return NULL;
 }
 
+/* one DEC 2048 report field: \d+(:[\d:]*)? */
+static size_t inband_field(const char *p, size_t n) {
+    size_t i = 0;
+    while (i < n && p[i] >= '0' && p[i] <= '9') i++;
+    if (!i) return 0;
+    if (i < n && p[i] == ':')
+        while (i < n && ((p[i] >= '0' && p[i] <= '9') || p[i] == ':')) i++;
+    return i;
+}
+
+/* p (after CSI) is a whole report body without its terminator: 48;rows;cols;hPx;wPx */
+static bool inband_body(const char *p, size_t n) {
+    if (n < 3 || memcmp(p, "48;", 3)) return false;
+    size_t i = 3;
+    for (int f = 0; f < 4; f++) {
+        if (f) {
+            if (i >= n || p[i] != ';') return false;
+            i++;
+        }
+        size_t l = inband_field(p + i, n - i);
+        if (!l) return false;
+        i += l;
+    }
+    return i == n;
+}
+
+/* p (after CSI) can still grow into a report body: "", "4", "48", "48;<fields>" */
+static bool inband_partial(const char *p, size_t n) {
+    if (n == 0 || (n == 1 && p[0] == '4')) return true;
+    if (n == 2) return p[0] == '4' && p[1] == '8';
+    if (memcmp(p, "48;", 3)) return false;
+    int semis = 0;
+    for (size_t i = 3; i < n; i++) {
+        if (p[i] == ';' && ++semis > 3) return false;
+        if (p[i] != ';' && p[i] != ':' && !(p[i] >= '0' && p[i] <= '9')) return false;
+    }
+    return true;
+}
+
+static void inband_emit(tui_keydec_t *d, tui_key_t *out, const char *s, size_t n, int64_t now) {
+    mk(out, TUI_KEY_RESPONSE, 0, 0);
+    char *t = xmalloc(n + 2);
+    memcpy(t, s, n);
+    t[n] = 't';
+    t[n + 1] = 0;
+    out->text = t;
+    out->text_len = n + 1;
+    d->pos += n;
+    d->pending_since = 0;
+    d->pending_wait = 0;
+    d->inband_t_at = now > 0 ? now : 1;
+}
+
+/* omp ProcessTerminal: iTerm2 writes a DEC 2048 report's body and its `t` in separate chunks, and a read can end
+ * right after the CSI introducer. While in-band reports are on, a torn introducer or body waits
+ * CSI_INTRODUCER_GRACE_MS for the rest; a whole body applies without its terminator when its `t` is late or another
+ * key follows (the late `t` is then swallowed). Returns 1 with *out set, 0 to keep waiting, -1 for the normal path. */
+static int inband_reassemble(tui_keydec_t *d, const char *s, size_t avail, tui_key_t *out, int64_t now) {
+    if (avail < 2 || s[0] != 0x1b || s[1] != '[') return -1;
+    size_t i = 2;
+    while (i < avail && ((s[i] >= '0' && s[i] <= '9') || s[i] == ';' || s[i] == ':')) i++;
+    bool body = inband_body(s + 2, i - 2);
+    if (i < avail) {
+        if (body && s[i] != 't') { /* a keystroke or a new sequence ends the held body */
+            inband_emit(d, out, s, i, now);
+            return 1;
+        }
+        return -1;
+    }
+    if (!body && !inband_partial(s + 2, i - 2)) return -1;
+    if (!d->pending_since) d->pending_since = now > 0 ? now : 1;
+    d->pending_wait = TUI_CSI_INTRODUCER_GRACE_MS;
+    if (now - d->pending_since < TUI_CSI_INTRODUCER_GRACE_MS) return 0;
+    if (body) {
+        inband_emit(d, out, s, i, now);
+        return 1;
+    }
+    return -1; /* released: flush as a stale partial */
+}
+
 bool tui_keydec_next(tui_keydec_t *d, tui_key_t *out, int64_t now) {
     memset(out, 0, sizeof *out);
     for (;;) {
@@ -613,6 +699,7 @@ bool tui_keydec_next(tui_keydec_t *d, tui_key_t *out, int64_t now) {
         }
         if (avail == 0) {
             d->pending_since = 0;
+            d->pending_wait = 0;
             compact(d);
             return false;
         }
@@ -623,7 +710,25 @@ bool tui_keydec_next(tui_keydec_t *d, tui_key_t *out, int64_t now) {
             d->pending_since = 0;
             continue;
         }
-        bool force = d->pending_since && now - d->pending_since >= TUI_ESC_TIMEOUT_MS;
+        /* the late terminator of a report body applied without it */
+        if (d->inband_t_at && s[0] == 't') {
+            int64_t elapsed = now - d->inband_t_at;
+            d->inband_t_at = 0;
+            if (elapsed < TUI_INBAND_TERMINATOR_GRACE_MS) {
+                d->pos++;
+                continue;
+            }
+        }
+        if (d->inband) {
+            int ir = inband_reassemble(d, s, avail, out, now);
+            if (ir == 1) {
+                compact(d);
+                return true;
+            }
+            if (ir == 0) return false;
+            d->pending_wait = 0;
+        }
+        bool force = d->pending_since && now - d->pending_since >= (d->pending_wait ? d->pending_wait : TUI_ESC_TIMEOUT_MS);
         size_t used = 0;
         int r = decode_one(s, avail, out, force, &used, 0);
         if (!r) {
@@ -631,7 +736,11 @@ bool tui_keydec_next(tui_keydec_t *d, tui_key_t *out, int64_t now) {
             return false;
         }
         d->pending_since = 0;
+        d->pending_wait = 0;
         d->pos += used;
+        /* an explicit terminator arrived: a later lone `t` is a keystroke */
+        if (out->kind == TUI_KEY_RESPONSE && out->text && out->text_len > 4 && !memcmp(out->text, "\x1b[48;", 5))
+            d->inband_t_at = 0;
         if (out->kind == TUI_KEY_NONE) {
             tui_key_free(out);
             memset(out, 0, sizeof *out);
@@ -644,7 +753,7 @@ bool tui_keydec_next(tui_keydec_t *d, tui_key_t *out, int64_t now) {
 
 int tui_keydec_timeout_ms(const tui_keydec_t *d, int64_t now) {
     if (!d->pending_since) return -1;
-    int64_t left = d->pending_since + TUI_ESC_TIMEOUT_MS - now;
+    int64_t left = d->pending_since + (d->pending_wait ? d->pending_wait : TUI_ESC_TIMEOUT_MS) - now;
     return left < 0 ? 0 : (int)left;
 }
 
@@ -723,6 +832,7 @@ static const struct {
     {"app.tools.expand", {"ctrl+o"}},
     {"app.tools.toggleVisibility", {"ctrl+shift+o"}},
     {"app.ask.hide", {"alt+h"}},
+    {"app.ask.note", {"n", "alt+n"}},
     {"app.approval.approve", {"ctrl+enter", "ctrl+q"}},
     {"app.editor.external", {"ctrl+g"}},
     {"app.local.open", {"alt+g"}},
@@ -747,7 +857,7 @@ static const struct {
     {"app.session.togglePath", {"ctrl+p"}},
     {"app.session.toggleSort", {"ctrl+s"}},
     {"app.session.rename", {"ctrl+r"}},
-    {"app.session.delete", {"ctrl+d"}},
+    {"app.session.delete", {"backspace", "delete"}},
     {"app.session.deleteNoninvasive", {"ctrl+backspace"}},
     {"app.session.pin", {"alt+k"}},
     {"app.session.unpin", {"alt+shift+k"}},

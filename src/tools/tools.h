@@ -5,6 +5,7 @@
 #include "agent/agent.h"
 #include "coding/discovery.h"
 #include "core/core.h"
+#include "tools/readsel.h"
 #include "core/json.h"
 
 #include <pthread.h>
@@ -43,19 +44,29 @@ typedef struct {
 
 /* ---------- UI callbacks (interactive mode supplies these; NULL in print/rpc) ---------- */
 struct approval_prompt;
+/* ExtensionUIDialogOptions of a select the RPC host sees: the option to focus first, the marker style of the
+ * first `markable` options and, for checkboxes, the rows currently checked */
+typedef struct tool_select_opts {
+    int initial_index;   /* -1: unset */
+    const char *marker;  /* "radio" / "checkbox"; NULL: unset */
+    const int *checked;  /* checkedIndices (NULL: unset) */
+    size_t nchecked;
+    int markable;        /* markableCount; -1: unset */
+} tool_select_opts_t;
 typedef struct {
     /* questions dialog (cfg:// change approvals): returns owned JSON answer object or NULL if unavailable/cancelled */
     json_t *(*ask)(void *ud, const json_t *questions);
     /* formDialog: the `ask` tool's HTML form rendered whole (interactive TUI, ACP form elicitation). Returns the
      * owned form data object, or NULL when cancelled; *timed_out when the inactivity timeout (timeout_ms > 0)
-     * submitted the current values; *err (owned) when the host failed. NULL member: no form surface, so the tool
-     * walks the form's fields through select / input / editor below. */
-    json_t *(*form)(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, volatile sig_atomic_t *cancel,
-                    char **err);
+     * submitted the current values; *notes (owned array or NULL) the notes on selected options; *err (owned) when
+     * the host failed. NULL member: no form surface, so the tool walks the form's fields through select / input /
+     * editor below. */
+    json_t *(*form)(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, json_t **notes,
+                    volatile sig_atomic_t *cancel, char **err);
     /* dialog primitives of the field-by-field fallback (RPC). Each returns the owned answer or NULL (cancelled,
      * *timed_out at the deadline, *err (owned) when the host went away). */
-    char *(*select)(void *ud, const char *title, const strvec_t *options, int64_t timeout_ms, bool *timed_out,
-                    volatile sig_atomic_t *cancel, char **err);
+    char *(*select)(void *ud, const char *title, const strvec_t *options, const struct tool_select_opts *so,
+                    int64_t timeout_ms, bool *timed_out, volatile sig_atomic_t *cancel, char **err);
     char *(*input)(void *ud, const char *title, const char *placeholder, int64_t timeout_ms, bool *timed_out,
                    volatile sig_atomic_t *cancel, char **err);
     char *(*editor)(void *ud, const char *title, const char *prefill, bool prompt_style, volatile sig_atomic_t *cancel,

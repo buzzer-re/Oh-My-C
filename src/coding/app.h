@@ -73,6 +73,7 @@ struct app {
     app_opts_t opts;
     char *sys_custom, *sys_append;
     double total_cost;
+    double subagent_cost; /* the live subagent tree's spend merged into total_cost (blocking and background children) */
     int64_t last_context_tokens;
     bool compacting;
     struct cmp_spec *cmp_spec; /* background speculative compaction run (compaction.c), NULL when idle */

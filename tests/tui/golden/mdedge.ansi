@@ -9,9 +9,9 @@
 
  Top tasks:
 
- [38;2;0;180;255m- [39mopen task
- [38;2;0;180;255m- [39mdone task
-   [38;2;0;180;255m- [39mnested open
+ [38;2;0;180;255m- [39m[ ] open task
+ [38;2;0;180;255m- [39m[x] done task
+   [38;2;0;180;255m- [39m[ ] nested open
 
  Stars: [1m[38;2;208;111;237m/[3m.c and a* and *a and ***b*[0;1m[38;2;208;111;237m and __c_ and de and a[0mb**c and [1m[38;2;208;111;237m/x/[0m.
 

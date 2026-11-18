@@ -272,6 +272,17 @@ static void iteration(ui_t *u, const char *action, const char *prompt) {
 bool lp_run_end(ui_t *u) {
     if (!g.st.enabled) return false;
     cancel_auto_submit(u);
+    /* a terminal provider failure is not a loop yield: resubmitting the captured prompt would append another user
+     * turn (and every @file attachment) without making progress */
+    const json_t *last = NULL, *m;
+    pthread_mutex_lock(&u->app->agent->mu);
+    json_arr_foreach(u->app->agent->messages, i, m) if (str_eq(json_get_str(m, "role"), "assistant")) last = m;
+    bool failed = last && str_eq(json_get_str(last, "stopReason"), "error");
+    pthread_mutex_unlock(&u->app->agent->mu);
+    if (failed && g.st.prompt) {
+        pause_loop(u);
+        return true;
+    }
     if (g.st.prompt && !g.compacting) {
         const char *action = settings_str("loop.mode", "prompt");
         if (!str_eq(action, "compact") && !str_eq(action, "reset")) action = "prompt";

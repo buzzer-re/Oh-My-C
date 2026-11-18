@@ -181,7 +181,7 @@ check "args missing"   "  - pattern: pattern must be a string (was missing)"  py
 "$B" --model mock/mock-1 --no-session -p 'call:grep:{"pattern":true,"case":3}' >/dev/null 2>&1 </dev/null
 check "args coerced"   $'  - case: case must be boolean (was a number)\n\nReceived arguments:\n{\n  "original": {\n    "pattern": true,'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p 'call:todo:{"op":"bogus"}' >/dev/null 2>&1 </dev/null
-check "todo bad op"    'Invalid todo arguments: op must be "init", "start", "done", "rm", "drop", "block", "unblock", "append" or "view" (was "bogus")'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "todo bad op"    'Invalid todo arguments: op must be "init", "start", "done", "rm", "drop", "append" or "view" (was "bogus")'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p 'seq:[["todo",{"op":"init","items":["a"]}],["todo",{"op":"start","task":"nope"}]]' >/dev/null 2>&1 </dev/null
 check "todo errors"    $'Errors: Task "nope" not found\nRemaining items (1):'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 # an empty init phase name is `Tasks`; append without a phase joins the active task's phase (omp 60441bea29, 694e9e2079)
@@ -533,6 +533,8 @@ if python3 -c 'import pty' 2>/dev/null; then
     check "agent hub tui" $'hud ok\nhub ok\nactivity ok\nfilter ok\nagents ok\nkill ok\nrevive ok\ntree ok\nclose ok\nslash hub ok\nviewer ok\nchat ok\nviewer close ok\nhub close ok\nleft left ok\nfocus ok\nunfocus ok'  python3 -I "$ROOT/tests/e2e/agenthub_tui.py" "$B"
     # WP-22b: "Waiting for background job …" row, Esc stops waiting, /agents hub (strips, enable/disable -> config.yml)
     check "agents tui" $'waiting ok\ndelivered ok\nwaiting again ok\nstop waiting ok\nfolded ok\nagents ok\nstrip ok\nmodel strip ok\nback ok\ntoggle ok\nconfig True\nenable ok\nclose ok'  python3 -I "$ROOT/tests/e2e/agents_tui.py" "$B" "$T/agent"
+    # Alt+P model picker: Tab provider scopes, ←/→ thinking slider, the pick applies the slider's level (omp 94a10c5b22)
+    check "model picker tui" $'footer ok\nno thinking ok\nslider ok\nstep left ok\nprovider scope ok\nnext provider ok\nall again ok\nshift tab ok\npick applies level ok\npicked level kept ok'  python3 -I "$ROOT/tests/e2e/model_picker_tui.py" "$B" "$T/mpick"
     # WP-29: inline images per protocol, cache-miss marker, Ctrl+Shift+O tool activity, tui.mouse capture
     mkdir -p "$T/agent-disp" "$T/disp" && cp "$T/agent/models.yml" "$T/agent-disp/"
     check "display kitty" $'kitty transmit once ok\nkitty placement ok\ncache miss ok\nkitty placeholders ok'  env OMC_CODING_AGENT_DIR="$T/agent-disp" python3 -I "$ROOT/tests/e2e/display_tui.py" "$B" "$T/disp" kitty

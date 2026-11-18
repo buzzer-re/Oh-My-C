@@ -253,6 +253,22 @@ static void ask_result(const tc_call_t *c, int width, strvec_t *out) {
         char *shown = is_password(form, name ? name : "") ? bullets(ans, 12) : clean(ans);
         answer_lines(shown, cw, c->expanded, &sec.lines);
         free(ql), free(qt), free(shown);
+        /* notes on the selected options of this answer (detailsNotes / notesForAnswer) */
+        strvec_t note_lines = {0};
+        const json_t *nt;
+        json_arr_foreach(json_get_arr(c->details, "notes"), j, nt) {
+            const char *nn = json_get_str(nt, "name"), *nq = json_get_str(nt, "question"),
+                       *no = json_get_str(nt, "option"), *nx = json_get_str(nt, "text");
+            if (!nn || !nq || !no || !nx || !json_is_str(json_get(nt, "value"))) continue;
+            if (!str_eq(nn, name ? name : "") || !str_eq(nq, q)) continue;
+            char *ol = one_line(no), *xl = one_line(nx), *label = xasprintf("\xe2\x9c\x8e %s: %s", ol, xl);
+            char *m = tc_fg(TUI_TC_MUTED, label), *it = tc_italic(m);
+            tc_wrap_prefixed("   ", "   ", it, cw, &note_lines);
+            free(ol), free(xl), free(label), free(m), free(it);
+        }
+        cap_lines(&note_lines, c->expanded ? OUTPUT_EXPANDED : OUTPUT_COLLAPSED, "   ");
+        for (size_t k = 0; k < note_lines.n; k++) strvec_push(&sec.lines, note_lines.v[k]);
+        strvec_free(&note_lines);
     }
     if (timed_out) {
         char *d = tc_fg(TUI_TC_DIM, TIMED_OUT_NOTE);

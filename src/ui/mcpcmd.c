@@ -7,7 +7,7 @@
  * Read-only listings are command reports (ui_show_report); results are bordered command messages in the
  * transcript (showCommandMessage). Everything that connects to a server runs on a worker thread and talks
  * to the UI through tui_post. omc keeps MCP OAuth credentials url-keyed in auth.json ("mcp:<url>"), so a
- * signed-in server needs no `auth` block in mcp.json. The Smithery registry subcommands are not ported. */
+ * signed-in server needs no `auth` block in mcp.json. */
 #include "tui/motion.h"
 #include "ui/mcpint.h"
 #include "coding/xdnotice.h"
@@ -1726,6 +1726,14 @@ static void *reload_worker(void *p) {
     return NULL;
 }
 
+/* reloadServers without the progress messages: /move rescopes the MCP servers to the new project */
+static void *rescope_worker(void *p) {
+    mjob_t *j = p;
+    reload_servers(j->u, j->m, j->cwd);
+    job_free(j);
+    return NULL;
+}
+
 static void *reconnect_worker(void *p) {
     mjob_t *j = p;
     ui_t *u = j->u;
@@ -1966,6 +1974,10 @@ static mjob_t *job(ui_t *u, const char *name) {
     j->cwd = xstrdup(u->app->cwd);
     j->m = manager(u);
     return j;
+}
+
+void ui_mcp_rescope(ui_t *u) {
+    if (manager(u)) mcpui_spawn(rescope_worker, job(u, NULL));
 }
 
 /* the text after "/mcp <verb>" */

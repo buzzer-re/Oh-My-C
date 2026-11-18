@@ -23,18 +23,25 @@ static int failures;
 
 static void test_todo_markdown(void) {
     strvec_t errs = {0};
-    json_t *p = todo_markdown_to_phases("# Setup\n- [x] init repo\n- [ ] write tests\n\n## Ship\n* \\[!\\] deploy <!-- blocker: needs keys -->\n+ [-] drop it\n", &errs);
+    json_t *p = todo_markdown_to_phases("# Setup\n- [x] init repo\n- [ ] write tests\n\n## Ship\n* \\[-\\] deploy\n+ [ ] drop it\n", &errs);
     CHECK(errs.n == 0, "unexpected parse errors: %zu", errs.n);
     CHECK(json_len(p) == 2, "phases: %zu", json_len(p));
     const json_t *t0 = json_at(json_get(json_at(p, 0), "tasks"), 1);
     CHECK(str_eq(json_get_str(t0, "status"), "in_progress"), "first pending normalized to in_progress: %s", json_get_str(t0, "status"));
     const json_t *b = json_at(json_get(json_at(p, 1), "tasks"), 0);
-    CHECK(str_eq(json_get_str(b, "content"), "deploy") && str_eq(json_get_str(b, "blocker"), "needs keys"), "blocker: %s / %s",
-          json_get_str(b, "content"), json_get_str(b, "blocker"));
+    CHECK(str_eq(json_get_str(b, "content"), "deploy") && str_eq(json_get_str(b, "status"), "abandoned"), "escaped marker: %s",
+          json_get_str(b, "content"));
     char *md = todo_phases_to_markdown(p);
-    const char *want = "# Setup\n- [x] init repo\n- [/] write tests\n\n# Ship\n- [!] deploy <!-- blocker: needs keys -->\n- [-] drop it\n";
+    const char *want = "# Setup\n- [x] init repo\n- [/] write tests\n\n# Ship\n- [-] deploy\n- [ ] drop it\n";
     CHECK(!strcmp(md, want), "markdown:\n%s", md);
     free(md);
+    json_free(p);
+    /* `[!]` (the removed blocked status) is an unknown marker now (omp 7049d1b1af) */
+    p = todo_markdown_to_phases("- [!] deploy\n", &errs);
+    CHECK(errs.n == 1 && strstr(errs.v[0], "Line 1: unknown status marker \"[!]\" (use [ ], [x], [/], [-])"), "blocked marker: %s",
+          errs.n ? errs.v[0] : "");
+    strvec_free(&errs);
+    memset(&errs, 0, sizeof errs);
     /* tasks before any heading land in "Todos"; bad markers and lines are reported with their line number */
     json_free(p);
     p = todo_markdown_to_phases("- [ ] a\n- [?] b\nnot a task\n", &errs);

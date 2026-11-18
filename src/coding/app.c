@@ -3841,6 +3841,7 @@ int app_new_session(app_t *a) {
     free(label);
     a->title_done = false;
     a->total_cost = 0;
+    a->subagent_cost = 0;
     costgate_reseed(a);
     a->last_context_tokens = 0;
     json_free(a->env->todo.phases);
