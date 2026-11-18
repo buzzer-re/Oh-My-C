@@ -404,6 +404,9 @@ static rule_t *add_rule_text(discovery_t *d, char *text, const char *path, const
         strvec_free(&parts);
     }
     if (json_get_str(fm, "interruptMode")) r.interrupt_mode = xstrdup(json_get_str(fm, "interruptMode"));
+    /* omp 8c71a84a79: per-rule `repeatMode` frontmatter overrides ttsr.repeatMode; other values are ignored */
+    const char *rm = json_get_str(fm, "repeatMode");
+    if (str_eq(rm, "once") || str_eq(rm, "after-gap") || str_eq(rm, "always")) r.repeat_mode = xstrdup(rm);
     json_t *ast = json_get(fm, "astCondition");
     if (json_is_str(ast)) {
         char *t = str_trim(json_sv(ast));
@@ -697,6 +700,7 @@ void discovery_free(discovery_t *d) {
         free(r->ttsr);
         free(r->scope);
         free(r->interrupt_mode);
+        free(r->repeat_mode);
         strvec_free(&r->globs);
     }
     vec_free(&d->rules);

@@ -141,8 +141,6 @@ tools.format	inert	native tool calling only (no in-band/owned dialect)
 tools.abortOnFabricatedResult	inert	only applies to in-band tool calls (tools.format), which omc lacks
 ttsr.judge	inert	no judge-backed `question` rules
 ttsr.contextMode	inert	fixed at the default (partial output discarded); `keep` not implemented
-ttsr.repeatMode	inert	fixed at the default (once per session); `after-gap` not implemented
-ttsr.repeatGap	inert	only used by ttsr.repeatMode after-gap
 
 # ---------- inert: Files / Shell / Tools ----------
 edit.modelVariants	inert	no per-model edit variants

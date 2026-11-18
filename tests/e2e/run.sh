@@ -299,6 +299,15 @@ printf -- '---\ndescription: no forbidden word\ncondition: "FORBIDDEN"\nscope: t
 check "ttsr retry"     "complied with rule"  "$B" --model mock/mock-1 -p "say:this is FORBIDDEN text"
 grep -q 'Never say the forbidden word' "$T/req.jsonl" && echo "   ok  ttsr injection sent" || { echo "   FAIL ttsr injection sent"; fail=1; }
 check "builtin rule"   "Box::leak"  "$B" --model mock/mock-1 -p "write:src/x.rs:fn f() { Box::leak(v); }"
+# TTSR repeat policy (omp 8c71a84a79, ba99634f57, e792797d1c): a rule's repeatMode frontmatter overrides
+# ttsr.repeatMode; once fires once, always every turn, after-gap every ttsr.repeatGap (2) completed turns
+for mode in once always after-gap; do
+    mkdir -p "$T/rep-$mode/.omc/rules" "$T/rep-$mode/agent"
+    printf -- '---\ndescription: no forb\ncondition: "FORB"\nscope: tool:bash\ninterruptMode: never\nrepeatMode: %s\n---\nAvoid the forb marker.\n' $mode > "$T/rep-$mode/.omc/rules/forb.md"
+    cp "$T/agent/models.yml" "$T/rep-$mode/agent/"; printf 'ttsr:\n  repeatGap: 2\n' > "$T/rep-$mode/agent/config.yml"
+    (cd "$T/rep-$mode" && OMC_CODING_AGENT_DIR="$T/rep-$mode/agent" timeout 60 "$B" --model mock/mock-1 --no-session -p 'seq:[["bash",{"command":"echo FORB1"}],["bash",{"command":"echo FORB2"}],["bash",{"command":"echo FORB3"}]]' </dev/null >/dev/null 2>&1)
+    check "ttsr repeat $mode" "reminders=$(case $mode in once) echo 1;; always) echo 3;; *) echo 2;; esac)" python3 -I -c 'import json,sys; r=[x for x in map(json.loads, open(sys.argv[1])) if x.get("tools")][-1]["messages"]; print("reminders=%d" % sum("Avoid the forb marker" in json.dumps(m) for m in r if m.get("role")=="tool"))' "$T/req.jsonl"
+done
 # MCP stdio server bridged as mcp__<server>_<tool>
 printf '{"mcpServers":{"mockmcp":{"command":"python3","args":["-I","%s"]}}}' "$ROOT/tests/e2e/mock_mcp.py" > "$T/agent/mcp.json"
 check "mcp tool"       "mcp echo: hi-mcp"  "$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"hi-mcp"}'

@@ -350,6 +350,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
     title_on_event(a, ev);
     if (a->advisor) advisor_on_event(a->advisor, ev);
     autolearn_on_event(a->autolearn, ev);
+    if (ev->type == AGENT_EV_TURN_END) ttsr_turn_end(a->ttsr);
     if (ev->type == AGENT_EV_TURN_START || ev->type == AGENT_EV_MESSAGE_START) {
         if (ev->type == AGENT_EV_TURN_START || str_eq(json_get_str(ev->message, "role"), "assistant")) ttsr_reset(a->ttsr);
         if (ev->type == AGENT_EV_MESSAGE_START && str_eq(json_get_str(ev->message, "role"), "assistant"))

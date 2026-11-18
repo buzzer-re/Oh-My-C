@@ -18,7 +18,8 @@ typedef struct {
     bool text, thinking, any_tool;
     VEC(tool_scope_t) tools;
     const char *interrupt; /* resolved mode */
-    bool injected;
+    bool injected;         /* has an injection record */
+    int last_injected_at;  /* the record: the turn its reminder landed in (TtsrManager lastInjectedAt) */
 } trule_t;
 
 typedef VEC(const trule_t *) trule_list_t;
@@ -37,8 +38,27 @@ struct ttsr {
     trule_list_t pending;                 /* interrupting matches */
     trule_list_t deferred;                /* prose non-interrupting */
     json_t *tool_reminders;               /* tool_call_id -> [rule names] */
+    int message_count;                    /* completed turns (TtsrManager #messageCount) */
     pthread_mutex_t mu;
 };
+
+/* TtsrManager #canTrigger: a rule's own `repeatMode` wins over ttsr.repeatMode; `once` never repeats, `after-gap`
+ * waits ttsr.repeatGap completed turns after the turn its reminder landed in, `always` one (omp 8c71a84a79,
+ * ba99634f57, e792797d1c) */
+static bool can_trigger(const ttsr_t *t, const trule_t *r) {
+    if (!r->injected) return true;
+    const char *mode = r->rule->repeat_mode ? r->rule->repeat_mode : settings_str("ttsr.repeatMode", "once");
+    if (!str_eq(mode, "after-gap") && !str_eq(mode, "always")) return false;
+    int64_t gap = str_eq(mode, "always") ? 1 : settings_int("ttsr.repeatGap", 10);
+    return t->message_count - r->last_injected_at >= gap;
+}
+
+/* markInjectedByNames: the record is the delivery turn, never earlier than the current one */
+static void mark_injected(ttsr_t *t, trule_t *r, int delivery_turn) {
+    int at = MAX(delivery_turn, t->message_count);
+    r->last_injected_at = r->injected ? MAX(r->last_injected_at, at) : at;
+    r->injected = true;
+}
 
 static void parse_scope(trule_t *r, const char *scope) {
     if (!scope || !*scope) {
@@ -235,7 +255,7 @@ bool ttsr_on_event(ttsr_t *t, const ai_event_t *ev) {
     bool interrupt = false;
     for (size_t i = 0; i < t->rules.n; i++) {
         trule_t *r = &t->rules.v[i];
-        if (r->injected || already(&t->pending, r) || already(&t->deferred, r)) continue;
+        if (!can_trigger(t, r) || already(&t->pending, r) || already(&t->deferred, r)) continue;
         if (!scope_matches(r, b)) continue;
         if (!rx_is_match(r->rx, text, tlen, from)) continue;
         if (mode_interrupts(r->interrupt, kind)) {
@@ -248,7 +268,7 @@ bool ttsr_on_event(ttsr_t *t, const ai_event_t *ev) {
                 json_set(t->tool_reminders, b->tool_id, list);
             }
             json_push_str(list, r->rule->name);
-            r->injected = true;
+            mark_injected(t, r, t->message_count); /* a tool reminder lands in the triggering turn */
         } else {
             vec_push(&t->deferred, r);
         }
@@ -288,7 +308,7 @@ char *ttsr_take_interrupt(ttsr_t *t, json_t **names_out) {
         render_rules(&b, "coding-agent/prompts/system/ttsr-interrupt.md", t->pending.v, t->pending.n);
         json_t *names = json_arr();
         for (size_t i = 0; i < t->pending.n; i++) {
-            ((trule_t *)t->pending.v[i])->injected = true;
+            mark_injected(t, (trule_t *)t->pending.v[i], t->message_count + 1); /* lands in the interrupt's retry */
             json_push_str(names, t->pending.v[i]->rule->name);
         }
         if (names_out) *names_out = names;
@@ -330,10 +350,18 @@ char *ttsr_take_deferred(ttsr_t *t) {
     if (t->deferred.n) {
         sb_t b = SB_INIT;
         render_rules(&b, "coding-agent/prompts/system/ttsr-interrupt.md", t->deferred.v, t->deferred.n);
-        for (size_t i = 0; i < t->deferred.n; i++) ((trule_t *)t->deferred.v[i])->injected = true;
+        /* delivered after the triggering turn ended: the continuation it starts is the turn it lands in */
+        for (size_t i = 0; i < t->deferred.n; i++) mark_injected(t, (trule_t *)t->deferred.v[i], t->message_count + 1);
         t->deferred.n = 0;
         out = sb_detach(&b);
     }
     pthread_mutex_unlock(&t->mu);
     return out;
+}
+
+void ttsr_turn_end(ttsr_t *t) {
+    if (!t) return;
+    pthread_mutex_lock(&t->mu);
+    t->message_count++;
+    pthread_mutex_unlock(&t->mu);
 }
