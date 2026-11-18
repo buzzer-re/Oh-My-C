@@ -1338,6 +1338,29 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     bool flagged = false; /* providers mark opaque overflow errors (Devin large-history invalid_argument) */
     json_t *fl;
     json_arr_foreach(json_get(assistant, "errorFlags"), fi, fl) flagged = flagged || str_eq(json_sv(fl), "contextOverflow");
+    /* omp 44a52fe4f5: an overflow known only from the error text while the live context fits the model's usable
+     * window is some other rejection (a local server's prefill memory guard): compaction cannot help, the fallback
+     * chain can, so it is consulted like any other hard error */
+    bool text_overflow_fits = false;
+    if (!flagged && is_overflow(assistant) && a->model && a->model->context_window > 0) {
+        const json_t *u = json_get_obj(assistant, "usage");
+        int64_t in = u ? (json_get(u, "contextTokens") ? json_get_int(u, "contextTokens", 0)
+                                                        : json_get_int(u, "input", 0) + json_get_int(u, "cacheRead", 0) +
+                                                              json_get_int(u, "cacheWrite", 0))
+                       : 0;
+        text_overflow_fits = in <= a->model->context_window && cmp_context_fits_model(a, a->model, assistant);
+    }
+    if (text_overflow_fits && !is_abort_error(err) && settings_bool("retry.enabled", true) &&
+        settings_bool("retry.modelFallback", true) && mr_fallback_admits(is_usage_limit(err))) {
+        char *cur = current_selector(a);
+        bool switched = try_retry_fallback(a, ag, cur, assistant, err, false);
+        free(cur);
+        if (switched) {
+            a->retry_offset = attempt + 1;
+            strvec_push(&a->retry_notes, "switched model; retried");
+            return AGENT_RETRY_REPLAY;
+        }
+    }
     if ((flagged || is_overflow(assistant)) && !a->compacting) {
         /* overflow recovery: the method ladder with a retry of the failed turn (session-maintenance.ts) */
         int64_t billed = 0;

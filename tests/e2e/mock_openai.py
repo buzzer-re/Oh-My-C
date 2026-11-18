@@ -13,6 +13,7 @@ Display commands (used by tests/tui/compare.sh to exercise transcript views):
   - "seq:[[tool, args], ...]" one tool call per turn, in order, then the usual "Tool said:" answer
   - "batch:[[tool, args], ...]" all the tool calls in one assistant message, then the usual "Tool said:" answer
   - model "mock-flaky"        every request fails with HTTP 429 (retry fallback chains)
+  - model "mock-prefill"      every request fails with a 400 worded as a context overflow (text-only overflow)
   - a compaction summary (tool-less) or handoff-document request whose messages mention SLOWSUMMARY answers after 4 s
 Eval helper side requests (omc eval completion()/judge()):
   - completion (system "You are a helpful assistant." or a forced `respond` tool) -> "completion says: <prompt>", or a
@@ -168,6 +169,8 @@ class H(BaseHTTPRequestHandler):
             lu = lu.split("\nQuestion:\n", 1)[1].rsplit("\n</btw>", 1)[0]
         if body.get("model") == "mock-flaky":  # always rate limited (retry fallback chains)
             lu = "fail:429:Rate limit exceeded for mock-flaky"
+        if body.get("model") == "mock-prefill":  # a local server's memory guard worded as an overflow, on a tiny prompt
+            lu = "fail:400:rejected this prompt: prefill context length exceeded by the memory guard"
         if lu.startswith("fail:"):
             st, _, m = lu[5:].partition(":")
             b = json.dumps({"error": {"message": m or "mock failure", "type": "invalid_request_error", "code": int(st or 400)}}).encode()

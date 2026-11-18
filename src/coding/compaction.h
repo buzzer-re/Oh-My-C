@@ -33,6 +33,8 @@ void cmp_free(app_t *a);
 strvec_t cmp_method_order(void);
 /* canUseRemoteCompaction for omc's transports (OpenAI Responses V1, Anthropic compaction beta) */
 bool cmp_remote_supported(const ai_model_t *m);
+/* SessionMaintenance.contextFitsModel: the stored context (minus `excluded`) fits m's window less its reserve */
+bool cmp_context_fits_model(app_t *a, const ai_model_t *m, const json_t *excluded);
 /* rough per-message token estimate (omp uses its tokenizer) */
 int64_t cmp_message_tokens(const json_t *msg);
 

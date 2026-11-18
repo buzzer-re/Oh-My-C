@@ -247,6 +247,10 @@ out=$("${NOCRED[@]}" "$B" -p "hello" --model noauth/mock-1 2>&1 </dev/null); nrc
 printf 'bash:\n  autoBackground:\n    enabled: true\n    thresholdMs: 300\n' > "$T/agent/config.yml"
 check "bash auto-background" "plain answer"  "$B" --model mock/mock-1 --no-session -p "bash:sleep 2; echo finished"
 rm -f "$T/agent/config.yml"
+# an overflow known only from the error text while the context fits walks the fallback chain (omp 44a52fe4f5)
+mkdir -p "$T/prefill" && sed 's/^\(      - id: mock-2\)$/      - id: mock-prefill\n        contextWindow: 100000\n        maxTokens: 4096\n\1/' "$T/agent/models.yml" > "$T/prefill/models.yml"
+printf 'retry:\n  fallbackChains:\n    mock/mock-prefill:\n      - mock/mock-1\n' > "$T/prefill/config.yml"
+check "text overflow chain" "prefill fallback ok"  env OMC_CODING_AGENT_DIR="$T/prefill" "$B" --model mock/mock-prefill --no-session -p "say:prefill fallback ok"
 # retry model fallback: a rate-limited model walks retry.fallbackChains
 printf 'retry:\n  fallbackChains:\n    mock/mock-flaky:\n      - mock/mock-2\n' > "$T/agent/config.yml"
 out=$(timeout 60 "$B" --model mock/mock-flaky -p "bash:echo fb-ok" </dev/null 2>&1)
