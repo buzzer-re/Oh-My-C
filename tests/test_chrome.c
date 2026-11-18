@@ -324,6 +324,40 @@ static void test_rebuild_drops_live_cards(ui_t *u) {
     ui_working_stop(u);
 }
 
+/* a goal card renders with the goal renderer while goal mode is off: omp's registry keeps the inactive goal tool
+ * (tools/index.ts isToolAllowed) unless --tools restricts the set or a paused/complete goal record exists */
+static bool goal_card_is_goal(ui_t *u) {
+    msgview_t *v = toolcard_start(u, "call_goal", "goal", json_parse_str("{\"op\":\"get\"}"));
+    toolcard_result(u, v, "call_goal",
+                    json_parse_str("{\"content\":[{\"type\":\"text\",\"text\":\"no goal\"}],"
+                                   "\"details\":{\"op\":\"get\",\"goal\":null}}"),
+                    false, false);
+    strvec_t out = {0};
+    tui_component_render(&v->base, 120, &out);
+    bool goal = false;
+    for (size_t i = 0; i < out.n; i++) {
+        char *plain = tui_strip_ansi(out.v[i]);
+        if (strstr(plain, "Goal: check")) goal = true;
+        free(plain);
+    }
+    strvec_free(&out);
+    toolcard_forget(v);
+    tui_component_destroy(&v->base);
+    return goal;
+}
+
+static void test_goal_card(ui_t *u) {
+    u->chat = ui_transcript_new(false);
+    CHECK(!agent_find_tool(u->app->agent, "goal"), "goal tool inactive");
+    CHECK(goal_card_is_goal(u), "inactive goal tool: goal card");
+    strvec_t only = {0};
+    strvec_push(&only, "read");
+    u->app->opts.tools = &only;
+    CHECK(!goal_card_is_goal(u), "--tools without goal: generic card");
+    u->app->opts.tools = NULL;
+    strvec_free(&only);
+}
+
 int main(void) {
     char *dir = fs_mktempdir("omc-chrome");
     setenv("OMC_CODING_AGENT_DIR", dir, 1);
@@ -339,6 +373,7 @@ int main(void) {
     test_band_welcome(u);
     test_titled(u);
     test_rebuild_drops_live_cards(u);
+    test_goal_card(u);
     fs_rm_rf(dir);
     free(dir);
     if (failures) {

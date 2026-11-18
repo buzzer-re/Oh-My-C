@@ -7,6 +7,8 @@
  *   {"result": {content, details} | absent, "partial": bool, "isError": bool, "startMs": n, "endMs": n,
  *    "group": [ {id, args, result, done, isError}, ... ]   (grouped reads only)} */
 #include "tui/motion.h"
+#include "coding/goal.h"
+#include "config/settings.h"
 #include "ui/ui.h"
 #include "ui/tools/tc.h"
 #include "tui/termcaps.h"
@@ -379,13 +381,23 @@ void toolcard_frame(ui_t *u, const char *id, json_t *details) {
 
 /* ---------- rendering ---------- */
 
+/* the session's registry holds `goal` while it is inactive too (tools/index.ts isToolAllowed: goal.enabled, no
+ * --tools restriction, and no goal record or an enabled or dropped one); omc adds the tool only while goal mode is on */
+static bool goal_in_registry(app_t *a) {
+    if (agent_find_tool(a->agent, "goal")) return true;
+    if (!settings_bool("goal.enabled", true) || a->opts.tools || a->opts.no_tools) return false;
+    const goal_t *g = app_goal(a);
+    return !g || goal_enabled(g) || str_eq(goal_status(g), "dropped");
+}
+
 static void fill_call(tc_call_t *c, const char *name, const json_t *args, const json_t *result, bool done, bool partial,
                       bool is_error) {
     memset(c, 0, sizeof *c);
     c->name = name;
     c->label = tool_label(name);
     /* tool-call-block.ts: the name-keyed renderers only draw a tool the session holds */
-    c->unregistered = name && g_ui && g_ui->app && g_ui->app->agent && !agent_find_tool(g_ui->app->agent, name);
+    c->unregistered = name && g_ui && g_ui->app && g_ui->app->agent && !agent_find_tool(g_ui->app->agent, name) &&
+                      !(!strcmp(name, "goal") && goal_in_registry(g_ui->app));
     c->label_of = tool_label;
     c->args = args;
     c->content = result ? json_get_arr(result, "content") : NULL;
