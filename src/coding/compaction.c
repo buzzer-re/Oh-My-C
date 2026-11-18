@@ -1714,6 +1714,28 @@ static bool handoff_build(app_t *a, const char *focus, handoff_req_t *h, char **
     return true;
 }
 
+/* JS line terminators (\n, \r, U+2028, U+2029): the ^/$ boundaries of a multiline regex */
+static size_t js_line_term(const char *p) {
+    if (*p == '\n' || *p == '\r') return 1;
+    if ((unsigned char)p[0] == 0xE2 && (unsigned char)p[1] == 0x80 && ((unsigned char)p[2] == 0xA8 || (unsigned char)p[2] == 0xA9))
+        return 3;
+    return 0;
+}
+
+bool cmp_handoff_has_goal(const char *text) {
+    for (const char *line = text; line && *line;) {
+        if (str_starts(line, "## Goal")) {
+            const char *p = line + 7;
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p || js_line_term(p)) return true; /* `\r?$`: a \r is a line end itself */
+        }
+        const char *q = line;
+        while (*q && !js_line_term(q)) q++;
+        line = *q ? q + js_line_term(q) : NULL;
+    }
+    return false;
+}
+
 /* SessionHandoff.generateDocument's request: owned text, NULL + *err on failure; NULL without *err for an empty
  * auto-triggered document */
 static char *handoff_exec(app_t *a, handoff_req_t *h, bool auto_triggered, char **err) {
@@ -1752,21 +1774,9 @@ static char *handoff_exec(app_t *a, handoff_req_t *h, bool auto_triggered, char 
     } else {
         text = joined_text(r);
         char *t = str_trim(text);
-        /* a document must open with a Goal heading (`^## Goal[ \t]*\r?\n` after leading whitespace), or it would
-         * replace the user's goal; an automatic handoff advances to the next compaction method */
-        const char *failure = NULL;
-        if (!*t) failure = "no content";
-        else {
-            const char *lead = text;
-            while (isspace((unsigned char)*lead)) lead++;
-            const char *p = lead + (str_starts(lead, "## Goal") ? 7 : 0);
-            if (p == lead) failure = "an invalid document";
-            else {
-                while (*p == ' ' || *p == '\t') p++;
-                if (*p == '\r') p++;
-                if (*p != '\n') failure = "an invalid document";
-            }
-        }
+        /* a document needs a Goal heading line (`/^## Goal[ \t]*\r?$/m`, text before it allowed: omp ad5bcde746), or
+         * it would replace the user's goal; an automatic handoff advances to the next compaction method */
+        const char *failure = !*t ? "no content" : !cmp_handoff_has_goal(text) ? "an invalid document" : NULL;
         free(t);
         if (failure) {
             LOGW("Handoff generation produced %s", failure);

@@ -41,6 +41,8 @@ int64_t cmp_message_tokens(const json_t *msg);
 /* pure shake region scan: [start, end) byte ranges of fenced code blocks and top-level XML elements
  * (scanTextForBlockRanges + mergeRanges); returns the count, ranges in out (owned, 2 per range) */
 size_t cmp_block_ranges(const char *text, size_t **out);
+/* SessionHandoff's document check `/^## Goal[ \t]*\r?$/m`: a `## Goal` heading line anywhere in the text */
+bool cmp_handoff_has_goal(const char *text);
 /* readToolSupersedeKey (owned; NULL when exempt). "\x01" / "\x02" stand for omp's U+0000 / U+0001 separators. */
 char *cmp_read_supersede_key(const char *tool, const json_t *args);
 

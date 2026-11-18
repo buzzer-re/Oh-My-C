@@ -137,7 +137,24 @@ static void test_supersede_key(void) {
     json_free(a);
 }
 
+/* SessionHandoff: a document needs a `## Goal` heading line, text before it allowed (omp 421281302f, ad5bcde746) */
+static void test_handoff_goal(void) {
+    CHECK(cmp_handoff_has_goal("## Goal\nContinue from here"));
+    CHECK(cmp_handoff_has_goal("  \n## Goal  \r\nx"));
+    CHECK(cmp_handoff_has_goal("# Handoff\n\n## Goal\nContinue from here"));
+    CHECK(cmp_handoff_has_goal("intro\n## Goal"));                /* $ at the end of the text */
+    CHECK(cmp_handoff_has_goal("intro\r## Goal\t\rnext"));        /* \r is a JS line terminator */
+    CHECK(cmp_handoff_has_goal("intro\xe2\x80\xa8## Goal\xe2\x80\xa9")); /* U+2028 / U+2029 too */
+    CHECK(!cmp_handoff_has_goal("plain answer"));
+    CHECK(!cmp_handoff_has_goal("## Goals\nx"));
+    CHECK(!cmp_handoff_has_goal("## Goal: ship\nx"));
+    CHECK(!cmp_handoff_has_goal(" ## Goal\nx")); /* the heading starts its line */
+    CHECK(!cmp_handoff_has_goal("### Goal\nx"));
+    CHECK(!cmp_handoff_has_goal(""));
+}
+
 int main(void) {
+    test_handoff_goal();
     test_dialects();
     test_block_ranges();
     test_supersede_key();
