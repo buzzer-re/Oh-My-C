@@ -30,7 +30,8 @@ Launch flags (`src/cli/args.c`, port of `cli/args.ts` + `flag-tables.ts`; `--fla
 runtime `modelRoles` overrides), `--models a,b` (scope: the first in-scope model starts a fresh session,
 explicit `:level` honored), `--provider`, `--api-key`, `--thinking`, `--goal`, `--plan-yolo[-into]`,
 `--system-prompt`, `--system-prompt-template <file>` (Handlebars, replaces the bundled template; a project or
-agent-dir `SYSTEM_TEMPLATE.md` is discovered like `SYSTEM.md`), `--append-system-prompt`, `--cwd`, `--mode`,
+agent-dir `SYSTEM_TEMPLATE.md` is discovered like `SYSTEM.md`; failing those, the `systemPromptTemplates` setting maps
+model substrings to template files, longest match wins, a missing or empty file keeps the bundled prompt), `--append-system-prompt`, `--cwd`, `--mode`,
 `--config` (repeatable), `-p`, `-c`, `-r/--resume [id|path]` (no value: the session picker; Esc prints
 `No session selected`), `--restore <session>` (resume, then go on with the interrupted turn:
 `src/coding/restore.c`), `--session-dir`, `--no-session`, `--fork`, `--tools`, `--no-tools`, `--no-lsp`,

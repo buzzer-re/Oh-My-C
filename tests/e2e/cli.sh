@@ -52,6 +52,17 @@ printf 'CUSTOM TEMPLATE for {{cwd}}\n' > "$T/tpl.md"
 check "cli template"      "tplok"                "$B" --model mock/mock-1 --no-session --system-prompt-template "$T/tpl.md" -p "say:tplok"
 check "cli template wire" "CUSTOM TEMPLATE for $T/work"  cat "$T/req.jsonl"
 check "cli template miss" "ENOENT: no such file or directory, open '$T/none.md'"  "$B" --system-prompt-template "$T/none.md" -p x
+# systemPromptTemplates: the longest matching model pattern picks the template file; a missing file falls back to the
+# bundled prompt (omp 8a09723b3f, ea9e49444c, f79f5c869c)
+mkdir -p "$T/agent-spt" && cp "$T/agent/models.yml" "$T/agent-spt/"
+printf 'SHORT {{model}}\n' > "$T/spt-short.md"; printf 'LONG TEMPLATE for {{model}}\n' > "$T/spt-long.md"
+printf 'systemPromptTemplates:\n  "MOCK": %s\n  "mock/mock-1": %s\n  "mock-2": %s\n' "$T/spt-short.md" "$T/spt-long.md" "$T/spt-none.md" > "$T/agent-spt/config.yml"
+: > "$T/req.jsonl"
+OMC_CODING_AGENT_DIR="$T/agent-spt" timeout 30 "$B" --model mock/mock-1 --no-session -p "say:x" </dev/null >/dev/null 2>&1
+check "model template"    "LONG TEMPLATE for mock/mock-1"  cat "$T/req.jsonl"
+: > "$T/req.jsonl"
+OMC_CODING_AGENT_DIR="$T/agent-spt" timeout 30 "$B" --model mock/mock-2 --no-session -p "say:x" </dev/null >/dev/null 2>&1
+check "model template miss" "trusted coding assistant"  cat "$T/req.jsonl"
 # --export (exportFromFile)
 SESS=$(ls -t "$T/agent/sessions"/*/*.jsonl 2>/dev/null | head -1)
 check "cli export"        "Exported to: $T/cli-export.html"  "$B" --export "$SESS" "$T/cli-export.html"

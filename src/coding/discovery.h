@@ -69,6 +69,7 @@ typedef struct {
     const discovery_t *disc;
     const char *custom_prompt;        /* --system-prompt */
     const char *custom_template;      /* --system-prompt-template (template text) */
+    const char *model_key;            /* active "provider/id": selects the systemPromptTemplates file */
     const char *append_prompt;        /* --append-system-prompt */
     bool subagent;
     /* optional: routing hint shown for a skill (compressed description catalog); owned result or NULL */

@@ -825,6 +825,44 @@ static void filter_skills(discovery_t *d) {
     d->skills.n = w;
 }
 
+/* compileModelPatterns + matchModelPattern (utils/model-patterns.ts): the value of the longest key occurring in
+ * `model` (case-insensitive substring; equal lengths keep key order) */
+static const char *model_pattern_match(const json_t *record, const char *model) {
+    if (!json_is_obj(record) || !model || !*model) return NULL;
+    const char *best = NULL;
+    size_t best_len = 0;
+    const char *k;
+    json_t *v;
+    json_obj_foreach(record, i, k, v) {
+        size_t n = strlen(k);
+        if (!json_is_str(v) || (best && n <= best_len) || !str_istr(model, k)) continue;
+        best = json_sv(v);
+        best_len = n;
+    }
+    return best;
+}
+
+/* validateSystemPromptTemplates: blank model patterns and template paths that are neither absolute nor `~/`-relative
+ * make the setting invalid, which leaves its default (no per-model templates) */
+static const json_t *system_prompt_templates(void) {
+    const json_t *rec = settings_get("systemPromptTemplates");
+    if (!json_is_obj(rec)) return NULL;
+    const char *k;
+    json_t *v;
+    json_obj_foreach(rec, i, k, v) {
+        char *t = str_trim(k);
+        bool blank = !*t;
+        free(t);
+        const char *p = json_sv(v);
+        if (blank || !p || !(p[0] == '/' || !strncmp(p, "~/", 2))) {
+            LOGW("systemPromptTemplates: invalid entry \"%s\" (blank model pattern, or a template path that is not "
+                 "absolute or ~/-relative); ignoring the setting", k);
+            return NULL;
+        }
+    }
+    return rec;
+}
+
 /* discoverSystemPromptOverride: project (.omc/.omp) then user (agent dir); a blank template is ignored */
 static void discover_system_override(const char *cwd, char **text, char **templ) {
     for (int level = 0; level < 2; level++) {
@@ -1048,6 +1086,21 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
      * level the literal SYSTEM.md wins over the template) */
     char *templ = o->custom_template && !custom ? xstrdup(o->custom_template) : NULL;
     if (!custom && !templ) discover_system_override(o->cwd, &custom, &templ);
+    /* systemPromptTemplates (omp 8a09723b3f..f79f5c869c): a per-model file is discovered input like
+     * SYSTEM_TEMPLATE.md, read only when no prompt above applies; missing or empty falls back to the bundled prompt */
+    const char *mtp = !custom && !templ ? model_pattern_match(system_prompt_templates(), o->model_key) : NULL;
+    if (mtp) {
+        char *file = path_expand_home(mtp);
+        size_t n = 0;
+        char *t = fs_is_file(file) ? fs_read(file, &n) : NULL;
+        char *trimmed = t ? str_trim(t) : NULL;
+        if (!t) LOGW("systemPromptTemplates template not found; using the bundled prompt (model %s, path %s)", o->model_key, file);
+        else if (!*trimmed) LOGW("Ignoring empty systemPromptTemplates template; using the bundled prompt (model %s, path %s)", o->model_key, file);
+        else templ = xstrdup(t);
+        free(trimmed);
+        free(t);
+        free(file);
+    }
     json_t *blocks = json_arr();
     char *rendered;
     if (templ) {
