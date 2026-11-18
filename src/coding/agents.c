@@ -204,7 +204,16 @@ static bool row_on_event(json_t *row, int64_t started, const agent_event_t *ev, 
                 tot = json_get_int(u, "input", 0) + json_get_int(u, "output", 0) + json_get_int(u, "cacheRead", 0) +
                       json_get_int(u, "cacheWrite", 0);
             json_set_int(row, "tokens", json_get_int(row, "tokens", 0) + tot);
-            if (tot) json_set_int(row, "contextTokens", tot);
+            /* usageContextTokens (omp c7588c9257, 7162cde3a8): the occupied context, as compaction counts it: a
+             * reported contextTokens, else the billable total minus provider-side orchestration */
+            int64_t occupied;
+            if (json_get(u, "contextTokens")) occupied = MAX(0, json_get_int(u, "contextTokens", 0));
+            else {
+                const json_t *orc = json_get_obj(u, "orchestration");
+                int64_t ot = orc ? json_get_int(orc, "input", 0) + json_get_int(orc, "output", 0) + json_get_int(orc, "cacheRead", 0) : 0;
+                occupied = MAX(0, tot - ot);
+            }
+            if (occupied > 0) json_set_int(row, "contextTokens", occupied);
             if (context_window > 0) json_set_int(row, "contextWindow", context_window);
             double cost = json_get_num(json_get_obj(u, "cost"), "total", 0);
             json_set_num(row, "cost", json_get_num(row, "cost", 0) + cost);
