@@ -234,6 +234,9 @@ char *ssh_quote(const char *s); /* POSIX single-quote */
 /* ssh.json host files (ssh/config-writer.ts, shared by `/ssh` and `omc ssh`): user <agent dir>/ssh.json,
  * project <cwd>/.omc/ssh.json (owned) */
 char *ssh_config_path(const char *scope, const char *cwd);
+/* discovery/ssh-config.ts: concrete Host aliases of ~/.ssh/config then /etc/ssh/ssh_config (Include followed), as
+ * name/file pairs appended to `pairs` */
+void ssh_openssh_aliases(strvec_t *pairs);
 /* readSSHConfigFile: {hosts:{}} when missing; NULL with owned *err ("Failed to parse SSH config file …") */
 json_t *ssh_config_read(const char *path, char **err);
 const char *ssh_validate_host_name(const char *name); /* validateHostName: NULL when valid */

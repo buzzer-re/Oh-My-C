@@ -393,6 +393,11 @@ rm -f "$T/agent/config.yml"
 printf 'remote one\nremote two\n' > "$T/remote.txt"
 printf '{"hosts":{"box":{"host":"localhost","username":"me","description":"test box"}}}' > ssh.json
 check "ssh hosts"      "[box](ssh://box/)"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://"
+# ~/.ssh/config Host aliases (Include followed; wildcards, negations skipped) join the host index; ssh.json wins on a
+# clash (omp 2cbe2f5f46)
+mkdir -p "$T/sshhome/.ssh/conf.d" && printf 'Host cfgalias box *.corp !neg\n  HostName 10.0.0.1\nInclude conf.d/*.conf\n' > "$T/sshhome/.ssh/config"
+printf 'Host included\n' > "$T/sshhome/.ssh/conf.d/a.conf"
+check "ssh config hosts" $'- [box](ssh://box/) — `me@localhost` (test box)\n- [cfgalias](ssh://cfgalias/)\n- [included](ssh://included/)'  env HOME="$T/sshhome" PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://"
 check "ssh read sel"   "2:remote two"       env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://box$T/remote.txt:2"
 check "ssh write"      "Successfully wrote 7 bytes to ssh://box"    env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/w.txt\",\"content\":\"via ssh\"}"
 check "ssh write file" "via ssh"            cat "$T/sub/w.txt"

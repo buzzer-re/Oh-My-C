@@ -199,6 +199,27 @@ static void handle_list(ui_t *u) {
             disc[i] = hosts;
             ndisc += json_len(hosts);
         }
+        /* OpenSSH Config (omp 2cbe2f5f46): ~/.ssh/config and /etc/ssh/ssh_config aliases, grouped by the file
+         * that defines them, below the ssh.json sources */
+        strvec_t pairs = {0}, files = {0};
+        ssh_openssh_aliases(&pairs);
+        json_t *osh = json_obj(); /* file -> {name: {host}} */
+        for (size_t i = 0; i + 1 < pairs.n; i += 2) {
+            const char *nm = pairs.v[i], *file = pairs.v[i + 1];
+            bool taken = json_get(uh, nm) || json_get(ph, nm) || json_get(disc[0], nm) || json_get(disc[1], nm);
+            if (taken) continue;
+            json_t *g = json_get_obj(osh, file);
+            if (!g) {
+                json_set(osh, file, json_obj());
+                g = json_get_obj(osh, file);
+                strvec_push(&files, file);
+            }
+            json_t *h = json_obj();
+            json_set_str(h, "host", nm);
+            json_set(g, nm, h);
+            ndisc++;
+        }
+        strvec_free(&pairs);
         if (!json_len(uh) && !json_len(ph) && !ndisc) {
             char *m = S(TUI_TC_MUTED, "No SSH hosts configured."), *a = S(TUI_TC_ACCENT, "/ssh add");
             char *t = xasprintf("%s\n\nUse %s to add a host.", m, a);
@@ -225,10 +246,27 @@ static void handle_list(ui_t *u) {
                 }
                 free(sp), free(lbl);
             }
+            for (size_t f = 0; f < files.n; f++) {
+                char *sp = tc_shorten_path(files.v[f]), *lbl = xasprintf("OpenSSH Config: %s", sp);
+                char *a = S(TUI_TC_ACCENT, "Discovered"), *pl = xasprintf(" (%s):", lbl), *m = S(TUI_TC_MUTED, pl), *ro = S(TUI_TC_DIM, " read-only");
+                sb_appendf(&b, "%s%s%s\n", a, m, ro);
+                free(a), free(pl), free(m), free(ro);
+                const char *k;
+                json_t *v;
+                json_obj_foreach(json_get_obj(osh, files.v[f]), q, k, v) {
+                    char *n = S(TUI_TC_ACCENT, k), *d = host_details(v);
+                    sb_appendf(&b, "  %s %s\n", n, d);
+                    free(n), free(d);
+                }
+                sb_putc(&b, '\n');
+                free(sp), free(lbl);
+            }
             mcpui_show_report(u, "Configured SSH Hosts", sb_cstr(&b));
             sb_free(&b);
         }
         for (int i = 0; i < 2; i++) json_free(disc[i]), free(dpath[i]);
+        json_free(osh);
+        strvec_free(&files);
     }
     json_free(uc);
     json_free(pc);
