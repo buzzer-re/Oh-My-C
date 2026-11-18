@@ -11,6 +11,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define MCP_PROTOCOL "2025-06-18"
@@ -64,6 +65,7 @@ struct mcp_server {
     json_t *subscribed; /* URIs subscribed with resources/subscribe, or NULL */
     char *instructions;
     char *error;
+    char *eof_error; /* stdio EOF before a response: the subprocess exit status (StdioTransport) */
     char *www_auth; /* last 401 challenge (OAuth discovery) */
     int http_status; /* last HTTP error status */
     bool no_oauth;   /* probe without stored OAuth tokens (config key "_noOAuth") */
@@ -310,6 +312,19 @@ static void deliver(mcp_server_t *s, json_t *msg) {
     json_free(msg);
 }
 
+/* Bun's signalCode: the signal's SIG* name */
+static const char *sig_name(int sig) {
+    static const struct {
+        int n;
+        const char *name;
+    } T[] = {{SIGHUP, "SIGHUP"}, {SIGINT, "SIGINT"}, {SIGQUIT, "SIGQUIT"}, {SIGILL, "SIGILL"}, {SIGABRT, "SIGABRT"},
+             {SIGBUS, "SIGBUS"}, {SIGFPE, "SIGFPE"}, {SIGKILL, "SIGKILL"}, {SIGSEGV, "SIGSEGV"}, {SIGPIPE, "SIGPIPE"},
+             {SIGALRM, "SIGALRM"}, {SIGTERM, "SIGTERM"}, {SIGUSR1, "SIGUSR1"}, {SIGUSR2, "SIGUSR2"}};
+    for (size_t i = 0; i < ARRAY_LEN(T); i++)
+        if (T[i].n == sig) return T[i].name;
+    return "SIGKILL";
+}
+
 static void *stdio_reader(void *p) {
     mcp_server_t *s = p;
     sb_t line = SB_INIT;
@@ -330,8 +345,32 @@ static void *stdio_reader(void *p) {
         }
     }
     sb_free(&line);
+    /* StdioTransport EOF (omp b45330e867): the exit status, peeked without reaping (the child is reaped at close),
+     * waited for up to 100 ms; a process still alive keeps the closed-stdout wording */
+    char *eof = NULL;
+    pid_t pid = s->child.pid;
+    if (!s->closing && pid > 0) {
+        siginfo_t si;
+        int64_t until = mono_ms() + 100;
+        for (;;) {
+            memset(&si, 0, sizeof si);
+            if (waitid(P_PID, (id_t)pid, &si, WEXITED | WNOHANG | WNOWAIT) == 0 && si.si_pid == pid) break;
+            si.si_pid = 0;
+            if (mono_ms() >= until) break;
+            sleep_ms(10);
+        }
+        if (si.si_pid == pid && si.si_code == CLD_EXITED)
+            eof = xasprintf("MCP subprocess exited with code %d before responding", si.si_status);
+        else if (si.si_pid == pid && (si.si_code == CLD_KILLED || si.si_code == CLD_DUMPED))
+            eof = xasprintf("MCP subprocess was killed by %s before responding", sig_name(si.si_status));
+        else eof = xstrdup("MCP subprocess closed stdout before responding");
+    }
     pthread_mutex_lock(&s->mu);
     s->connected = false;
+    if (eof) {
+        free(s->eof_error);
+        s->eof_error = eof;
+    }
     pthread_cond_broadcast(&s->cv);
     pthread_mutex_unlock(&s->mu);
     return NULL;
@@ -507,6 +546,7 @@ json_t *mcp_request(mcp_server_t *s, const char *method, json_t *params, int64_t
             *err = xstrdup("Aborted");
         } else {
             *err = s->connected || s->transport == T_HTTP ? xasprintf("%s: %s timed out", s->name, method)
+                   : s->eof_error                          ? xstrdup(s->eof_error)
                                                            : xasprintf("%s: server disconnected", s->name);
         }
     }
@@ -623,6 +663,7 @@ static void server_free(mcp_server_t *s) {
     server_close(s);
     if (s->child_started) child_close(&s->child);
     if (s->reader_started) pthread_join(s->reader, NULL);
+    free(s->eof_error);
     json_free(s->cfg);
     json_free(s->tools);
     json_free(s->cached_tools);

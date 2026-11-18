@@ -324,6 +324,10 @@ check "mcp list dedup"   'no json'  python3 -I -c 'import json,sys; r=[x for x i
 check "mcp structured"   $'x\n```json\n{\n  "k": 1,\n  "s": "v"\n}\n```'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"struct:err"}' >/dev/null 2>&1 </dev/null
 check "mcp error result" $'Error: bad\n\n[Resource: mem://r]\nrt'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+# a stdio server that exits before answering is reported with its exit status (omp b45330e867)
+mkdir -p "$T/mcpexit" && cp "$T/agent/models.yml" "$T/mcpexit/"
+printf '{"mcpServers":{"bad":{"command":"sh","args":["-c","read x; exit 3"]}}}' > "$T/mcpexit/mcp.json"
+check "mcp exit status"  'MCP server "bad" failed to connect: MCP subprocess exited with code 3 before responding'  env OMC_CODING_AGENT_DIR="$T/mcpexit" "$B" --model mock/mock-1 --no-session -p "say:x"
 grep -q "Mock MCP server instructions" "$T/req.jsonl" && echo "   ok  mcp instructions in prompt" || { echo "   FAIL mcp instructions"; fail=1; }
 rm -f "$T/agent/mcp.json"
 # MCP OAuth: discovery -> dynamic registration -> PKCE code (curl plays the browser) -> bearer token
