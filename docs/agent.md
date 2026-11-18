@@ -465,7 +465,8 @@ overlay in `src/ui/planreview.c`. `/plan`, `plan.defaultOnStartup` (fresh intera
 omc's `--plan-mode` flag, ACP `session/set_mode` or the API option enter it. Entering appends a
 `mode_change` entry (`plan`, `data.planFilePath`, default `local://PLAN.md`) and, interactively,
 switches to the `plan` role model (restored on exit). Resuming re-enters the mode recorded by the last
-`mode_change` on the branch. The system prompt gains `plan-mode-active.md`, and the `before_tool` hook
+`mode_change` on the branch; `/new` (and RPC `new_session`) ends plan mode, enabled or paused, and restores the
+pre-plan model before the new session records it. The system prompt gains `plan-mode-active.md`, and the `before_tool` hook
 enforces a read-only working tree:
 
 - `write` only to `local://…` or `xd://propose`;
