@@ -112,8 +112,14 @@ if command -v openssl >/dev/null 2>&1; then
     printf 'providers:\n  mock:\n    baseUrl: https://127.0.0.1:%s/v1\n    apiKey: MOCK_KEY\n    api: openai-completions\n    models:\n      - id: mock-1\n' $TLS_PORT > "$TLS_DIR/models.yml"
     printf 'retry:\n  enabled: false\n' > "$TLS_DIR/config.yml"
     for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$TLS_PORT) 2>/dev/null && break; sleep 0.1; done
-    check "tls self-signed" "TLS certificate verification failed for 127.0.0.1:$TLS_PORT (DEPTH_ZERO_SELF_SIGNED_CERT). If you're behind" \
-        env OMC_CODING_AGENT_DIR="$TLS_DIR" "$B" --model mock/mock-1 --no-session -p "hi"
+    # (the transport retries a TLS failure like omp: ~32 s in both, past check's 30 s limit)
+    tls_out=$(OMC_CODING_AGENT_DIR="$TLS_DIR" timeout 120 "$B" --model mock/mock-1 --no-session -p "hi" </dev/null 2>&1)
+    if [[ "$tls_out" == *"TLS certificate verification failed for 127.0.0.1:$TLS_PORT (DEPTH_ZERO_SELF_SIGNED_CERT). If you're behind"* ]]; then
+        echo "   ok  tls self-signed"
+    else
+        echo "   FAIL tls self-signed: got: $tls_out"
+        fail=1
+    fi
     kill $TLS_PID 2>/dev/null
 fi
 # hashline edit: read to get the tag, then replace line 1 and append after it
