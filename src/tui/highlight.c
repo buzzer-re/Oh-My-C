@@ -9,6 +9,11 @@
  *   - unscoped text (identifiers, whitespace) is uncolored, except inside a function call's arguments
  *     (meta.function-call), where it takes the function color
  *   - "." / "->" member accessors are operator color
+ *   - Python builtin types and exceptions are type color even when called (their call's arguments stay function
+ *     color), except in a class's base list
+ *   - JS/TS: the names var/let/const bind are variable color (function color for a function value); a TypeScript
+ *     annotation colon is keyword color. Other JS identifiers are variable color in omp's grammar, which this lexer
+ *     does not reproduce yet
  * Unsupported languages render verbatim, as omp does. */
 #define _GNU_SOURCE /* memmem, strcasestr, vasprintf: glibc before 2.38 declares them only with it */
 #include "tui/markdown.h"
@@ -76,7 +81,18 @@ static const lang_t LANGS[] = {
     {" python py py3 python3 ", F_PY,
      " if elif else for while break continue return def class lambda try except finally raise with as import from "
      "global nonlocal pass yield assert del in is not and or async await match case ",
-     "", " int str float bool list dict set tuple bytes object type complex frozenset bytearray ",
+     "", " int str float bool list dict set tuple bytes object type complex frozenset bytearray "
+     /* support.type.exception.python */
+     "ArithmeticError AssertionError AttributeError BaseException BlockingIOError BrokenPipeError BufferError "
+     "BytesWarning ChildProcessError ConnectionAbortedError ConnectionError ConnectionRefusedError "
+     "ConnectionResetError DeprecationWarning EnvironmentError EOFError Exception FileExistsError FileNotFoundError "
+     "FloatingPointError FutureWarning GeneratorExit ImportError ImportWarning IndentationError IndexError "
+     "InterruptedError IOError IsADirectoryError KeyboardInterrupt KeyError LookupError MemoryError "
+     "ModuleNotFoundError NameError NotADirectoryError NotImplementedError OSError OverflowError "
+     "PendingDeprecationWarning PermissionError ProcessLookupError RecursionError ReferenceError ResourceWarning "
+     "RuntimeError RuntimeWarning StopAsyncIteration StopIteration SyntaxError SyntaxWarning SystemError SystemExit "
+     "TabError TimeoutError TypeError UnboundLocalError UnicodeDecodeError UnicodeEncodeError UnicodeError "
+     "UnicodeTranslateError UnicodeWarning UserWarning ValueError Warning ZeroDivisionError ",
      " None True False NotImplemented Ellipsis __name__ __file__ ",
      " print len range open enumerate zip map filter sorted reversed min max sum abs any all isinstance issubclass "
      "getattr setattr hasattr repr input iter next super round format id hash vars dir ",
@@ -208,6 +224,10 @@ typedef struct {
     int last;        /* previous significant token: 0 none/op, 1 identifier/type, 2 keyword-type */
     bool sh_cmd;     /* shell: at command position */
     bool sh_args;    /* shell: inside a command's arguments */
+    bool py_class;   /* python: a `class` line */
+    bool py_bases;   /* python: inside its base list */
+    bool bind;       /* js: after var/let/const, the names it binds (until `=`, `:`, `;`, of/in or the line end) */
+    int bind_depth;  /* js: `{` / `[` nesting of a destructuring pattern */
 } hs_t;
 
 static bool in_call(const hs_t *st) {
@@ -333,9 +353,37 @@ static void open_string(em_t *e, const lang_t *L, hs_t *st, const char *q, size_
 
 /* ---------- C-like / JS / Python / Ruby / Lua / SQL ---------- */
 
+/* js: after a bound name at s[j], `= function`, `= async`, `= (...) =>` or `= name =>` (a function value) */
+static bool js_function_value(const char *s, size_t j, size_t n) {
+    while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+    if (j >= n || s[j] != '=' || (j + 1 < n && (s[j + 1] == '=' || s[j + 1] == '>'))) return false;
+    j++;
+    while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+    if ((n - j >= 8 && !strncmp(s + j, "function", 8) && (j + 8 == n || !ident_char(s[j + 8]))) ||
+        (n - j >= 5 && !strncmp(s + j, "async", 5) && (j + 5 == n || !ident_char(s[j + 5]))))
+        return true;
+    size_t k = j;
+    if (k < n && s[k] == '(') {
+        int depth = 0;
+        for (; k < n; k++) {
+            if (s[k] == '(') depth++;
+            else if (s[k] == ')' && --depth == 0) break;
+        }
+        if (k >= n) return false;
+        k++;
+    } else {
+        while (k < n && ident_char(s[k])) k++;
+        if (k == j) return false;
+    }
+    while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+    return k + 1 < n && s[k] == '=' && s[k + 1] == '>';
+}
+
 static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n) {
     size_t i = 0;
     bool py = L->fam == F_PY, js = L->fam == F_JS, sql = L->fam == F_SQL;
+    st->bind = false; /* a declaration's names end with its line here */
+    st->py_class = st->py_bases = false;
     bool c_fmt = L->fam == F_C;
     const char *lc = py || L->fam == F_RUBY ? "#" : (sql || L->fam == F_LUA) ? "--" : "//";
     bool block = !py && L->fam != F_RUBY;
@@ -477,6 +525,9 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
                 st->expect = 0;
             } else if (sql ? word_in_ci(L->keywords, s + i, wl) : word_in(L->keywords, s + i, wl)) {
                 cat = H_KEYWORD;
+                if (js && word_in(" var let const ", s + i, wl)) st->bind = true, st->bind_depth = 0;
+                if (py && wl == 5 && !strncmp(s + i, "class", 5)) st->py_class = true;
+                else if (js && word_in(" of in ", s + i, wl)) st->bind = false;
                 if (word_in(L->defkw, s + i, wl)) st->expect = 1;
                 else if (word_in(L->classkw, s + i, wl)) st->expect = 2;
             } else if (sql ? word_in_ci(L->types, s + i, wl) : word_in(L->types, s + i, wl)) {
@@ -488,10 +539,17 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
                 cat = H_VARIABLE; /* variable.language */
             } else if (js && wl == 4 && !strncmp(s + i, "this", 4)) {
                 cat = H_VARIABLE;
+            } else if (py && word_in(L->support, s + i, wl) && !st->py_bases) {
+                /* support.type(.exception).python, called or not, beats meta.function-call; class bases stay plain */
+                cat = H_TYPE;
+            } else if (js && st->bind && !word_in(L->keywords, s + i, wl)) {
+                /* the names a var/let/const binds (variable.other.readwrite / .constant); a function value names a
+                 * function (entity.name.function) */
+                cat = st->bind_depth == 0 && js_function_value(s, j, n) ? H_FUNCTION : H_VARIABLE;
             } else if (call) {
                 cat = H_FUNCTION;
-            } else if (word_in(L->support, s + i, wl) || (L->caps_types && isupper((unsigned char)c) && wl > 1 &&
-                                                          !(wl > 2 && isupper((unsigned char)s[i + 1]) && isupper((unsigned char)s[j - 1])))) {
+            } else if (!st->py_bases && (word_in(L->support, s + i, wl) || (L->caps_types && isupper((unsigned char)c) && wl > 1 &&
+                                                          !(wl > 2 && isupper((unsigned char)s[i + 1]) && isupper((unsigned char)s[j - 1]))))) {
                 cat = H_TYPE;
             } else if (word_in(L->builtins, s + i, wl)) {
                 cat = H_FUNCTION;
@@ -505,7 +563,7 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
             if (macro) cat = H_NONE;
             em(e, cat, s + i, wl);
             i = j;
-            if (call && cat == H_FUNCTION) {
+            if (call && (cat == H_FUNCTION || (py && cat == H_TYPE && !st->py_class && word_in(L->support, s + i - wl, wl)))) {
                 /* a definition's parameter list vs a call's arguments */
                 bool def = cat == H_FUNCTION && (st->last == 3 || (L->fam == F_C && st->last == 1 && st->nf == 0));
                 st->last = def ? 4 : 5;
@@ -515,6 +573,8 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
             continue;
         }
         if (c == '(') {
+            if (py && st->last == 1 && st->py_class && st->nf == 0) st->py_bases = true; /* class Name( */
+            st->expect = 0; /* an anonymous `function (` names nothing */
             push_frame(st, st->last == 4 ? 'p' : st->last == 5 ? 'c' : '(');
             em(e, H_PUNCT, s + i, 1);
             i++;
@@ -522,6 +582,7 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
             continue;
         }
         if (c == '[' || c == '{') {
+            if (st->bind) st->bind_depth++;
             push_frame(st, c);
             em(e, H_PUNCT, s + i, 1);
             i++;
@@ -529,6 +590,9 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
             continue;
         }
         if (c == ')' || c == ']' || c == '}') {
+            if (st->bind && c != ')' && st->bind_depth > 0) st->bind_depth--;
+            else if (c == ')') st->bind = false;
+            if (c == ')') st->py_bases = false;
             pop_frame(st);
             em(e, H_PUNCT, s + i, 1);
             i++;
@@ -550,6 +614,7 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
             continue;
         }
         if (strchr("+-*/%=<>!&|^~?", c)) {
+            if (c == '=' && st->bind_depth == 0) st->bind = false;
             size_t l = 1;
             while (i + l < n && l < 3 && strchr("+-*/%=<>!&|^~?", s[i + l])) l++;
             em(e, H_KEYWORD, s + i, l); /* keyword.operator */
@@ -558,7 +623,11 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
             continue;
         }
         if (strchr(",;:", c)) {
-            em(e, H_PUNCT, s + i, 1);
+            /* TypeScript: a type annotation's colon is keyword.operator.type.annotation */
+            bool annot = c == ':' && strstr(L->names, " ts ") &&
+                         ((st->bind && st->bind_depth == 0) || (st->nf && st->frames[MIN(st->nf, MAX_FRAMES) - 1] == 'p'));
+            if (c == ';' || (c == ':' && st->bind_depth == 0)) st->bind = false;
+            em(e, annot ? H_KEYWORD : H_PUNCT, s + i, 1);
             i++;
             st->last = 0;
             continue;
