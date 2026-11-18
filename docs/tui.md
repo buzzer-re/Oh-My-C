@@ -225,6 +225,9 @@ shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, 
   Unsupported languages render plain. The Regular Expression lexer (`re`, and the grep card's
   header pattern) follows syntect's RegExp grammar, checked cell by cell against omp
   (tests/tui/golden/regex.ansi); it restarts at each line, where syntect carries an open set across.
+  Python builtin types/exceptions and the JS/TS grammar (identifiers variable color, call and control parens and
+  index brackets unscoped, declared names, `new`/`extends` targets, object keys, annotation and conditional colons)
+  were probed against omp 18.22.0 (tests/tui/golden/hlpyts.ansi, hlts.ansi).
 - `ansi.c` holds the ANSI-aware width, slice, truncate and wrap helpers (escape sequences are zero
   width, tabs are 3 columns). `fuzzy.c` is omp's word-local fuzzy matcher (`fuzzy.ts`) used by
   pickers.

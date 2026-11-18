@@ -11,9 +11,11 @@
  *   - "." / "->" member accessors are operator color
  *   - Python builtin types and exceptions are type color even when called (their call's arguments stay function
  *     color), except in a class's base list
- *   - JS/TS: the names var/let/const bind are variable color (function color for a function value); a TypeScript
- *     annotation colon is keyword color. Other JS identifiers are variable color in omp's grammar, which this lexer
- *     does not reproduce yet
+ *   - JS/TS (probed against omp, tests/tui/golden/hlts.ansi): identifiers are variable color (no function-call
+ *     color for arguments); bound names take function color for a function value; object literal keys, `extends`
+ *     targets and properties stay plain (TypeScript colors properties except in an assignment target); `new Foo` is
+ *     function color in TypeScript, variable in JavaScript; annotation and conditional colons are keyword color;
+ *     TypeScript leaves call / control-statement parens and index brackets unscoped, JavaScript punctuates them
  * Unsupported languages render verbatim, as omp does. */
 #define _GNU_SOURCE /* memmem, strcasestr, vasprintf: glibc before 2.38 declares them only with it */
 #include "tui/markdown.h"
@@ -45,6 +47,12 @@ typedef struct {
     bool backtick;         /* `...` strings */
     bool hash_comment;     /* '#' line comments (php) */
 } lang_t;
+
+/* JavaScript builtin classes (support.class): `new Error` is type color, `new Foo` function color */
+static const char JS_CLASSES[] = " Array ArrayBuffer BigInt Boolean DataView Date Error EvalError Float32Array Float64Array "
+                                 "Function Int8Array Int16Array Int32Array Intl JSON Map Math Number Object Promise Proxy "
+                                 "RangeError ReferenceError Reflect RegExp Set String Symbol SyntaxError TypeError URIError "
+                                 "Uint8Array Uint16Array Uint32Array WeakMap WeakRef WeakSet ";
 
 static const lang_t LANGS[] = {
     /* syntect's bundled RegExp.sublime-syntax: its `re` extension and its name (grep headers pass the name) */
@@ -228,12 +236,16 @@ typedef struct {
     bool py_bases;   /* python: inside its base list */
     bool bind;       /* js: after var/let/const, the names it binds (until `=`, `:`, `;`, of/in or the line end) */
     int bind_depth;  /* js: `{` / `[` nesting of a destructuring pattern */
+    bool js;         /* JS/TS grammar: no meta.function-call color for unscoped text */
+    bool ts_type;    /* ts: a `type` / `interface` statement, whose braces hold type members ('T' frames) */
+    bool after_dot;  /* js: the previous token was a `.` accessor */
+    int ternary;     /* js: open `?` of a conditional expression */
 } hs_t;
 
 static bool in_call(const hs_t *st) {
     for (int i = MIN(st->nf, MAX_FRAMES) - 1; i >= 0; i--) { /* frames past the cap are plain parens */
         if (st->frames[i] == 'c') return true;
-        if (st->frames[i] == '{' || st->frames[i] == 'p') return false;
+        if (st->frames[i] == '{' || st->frames[i] == 'T' || st->frames[i] == 'p') return false;
     }
     return false;
 }
@@ -250,7 +262,36 @@ static char pop_frame(hs_t *st) {
 }
 
 /* the category of unscoped text at this point */
-static int plain(const hs_t *st) { return in_call(st) ? H_FUNCTION : H_NONE; }
+static int plain(const hs_t *st) { return !st->js && in_call(st) ? H_FUNCTION : H_NONE; }
+
+static char top_frame(const hs_t *st) { return st->nf ? st->frames[MIN(st->nf, MAX_FRAMES) - 1] : 0; }
+
+/* ts: the property at s[j] ends a member chain that is assigned (`a.b.c = x`, not `==` / `=>`) */
+static bool js_assigned_chain(const char *s, size_t j, size_t n) {
+    for (;;) {
+        while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+        if (j < n && s[j] == '.' && j + 1 < n && (isalpha((unsigned char)s[j + 1]) || s[j + 1] == '_' || s[j + 1] == '$')) {
+            j++;
+            while (j < n && (isalnum((unsigned char)s[j]) || s[j] == '_' || s[j] == '$')) j++;
+            continue;
+        }
+        break;
+    }
+    return j < n && s[j] == '=' && !(j + 1 < n && (s[j + 1] == '=' || s[j + 1] == '>'));
+}
+
+/* js: the `(` at s[k] closes on this line into `{`, `=>` or a TypeScript `:` return type: a parameter list */
+static bool js_params_at(const char *s, size_t k, size_t n) {
+    int depth = 0;
+    for (; k < n; k++) {
+        if (s[k] == '(') depth++;
+        else if (s[k] == ')' && --depth == 0) break;
+    }
+    if (k >= n) return false;
+    k++;
+    while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+    return k < n && (s[k] == '{' || s[k] == ':' || (s[k] == '=' && k + 1 < n && s[k + 1] == '>'));
+}
 
 static bool ident_start(char c) { return isalpha((unsigned char)c) || c == '_' || (unsigned char)c >= 0x80; }
 static bool ident_char(char c) { return isalnum((unsigned char)c) || c == '_' || (unsigned char)c >= 0x80; }
@@ -382,8 +423,12 @@ static bool js_function_value(const char *s, size_t j, size_t n) {
 static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n) {
     size_t i = 0;
     bool py = L->fam == F_PY, js = L->fam == F_JS, sql = L->fam == F_SQL;
+    bool ts = js && strstr(L->names, " ts ") != NULL; /* TypeScript's grammar differs from JavaScript's in places */
     st->bind = false; /* a declaration's names end with its line here */
     st->py_class = st->py_bases = false;
+    st->js = js;
+    st->ts_type = st->after_dot = false;
+    st->ternary = 0;
     bool c_fmt = L->fam == F_C;
     const char *lc = py || L->fam == F_RUBY ? "#" : (sql || L->fam == F_LUA) ? "--" : "//";
     bool block = !py && L->fam != F_RUBY;
@@ -443,6 +488,8 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
             continue;
         }
         char c = s[i];
+        bool was_dot = st->after_dot;
+        st->after_dot = false;
         /* comments */
         if ((!strncmp(s + i, lc, strlen(lc)) && (lc[0] != '#' || !(i > 0 && s[i - 1] == '$'))) ||
             (L->hash_comment && c == '#')) {
@@ -523,6 +570,13 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
             } else if (st->expect == 2) {
                 cat = H_TYPE;
                 st->expect = 0;
+            } else if (st->expect == 3) {
+                cat = H_NONE; /* js: the class `extends` names (entity.other.inherited-class) */
+                st->expect = 0;
+            } else if (st->expect == 4) {
+                /* js: `new Name` (TypeScript names a constructor call, JavaScript leaves it a variable) */
+                cat = word_in(JS_CLASSES, s + i, wl) ? H_TYPE : ts ? H_FUNCTION : H_VARIABLE;
+                st->expect = 0;
             } else if (sql ? word_in_ci(L->keywords, s + i, wl) : word_in(L->keywords, s + i, wl)) {
                 cat = H_KEYWORD;
                 if (js && word_in(" var let const ", s + i, wl)) st->bind = true, st->bind_depth = 0;
@@ -530,6 +584,9 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
                 else if (js && word_in(" of in ", s + i, wl)) st->bind = false;
                 if (word_in(L->defkw, s + i, wl)) st->expect = 1;
                 else if (word_in(L->classkw, s + i, wl)) st->expect = 2;
+                if (js && wl == 7 && !strncmp(s + i, "extends", 7)) st->expect = 3;
+                else if (js && wl == 3 && !strncmp(s + i, "new", 3)) st->expect = 4;
+                if (js && strstr(L->names, " ts ") && word_in(" type interface ", s + i, wl)) st->ts_type = true;
             } else if (sql ? word_in_ci(L->types, s + i, wl) : word_in(L->types, s + i, wl)) {
                 cat = H_KEYWORD; /* storage.type */
             } else if (word_in(L->constants, s + i, wl) || (sql && word_in_ci(L->constants, s + i, wl))) {
@@ -548,6 +605,10 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
                 cat = st->bind_depth == 0 && js_function_value(s, j, n) ? H_FUNCTION : H_VARIABLE;
             } else if (call) {
                 cat = H_FUNCTION;
+            } else if (js && was_dot && (!ts || js_assigned_chain(s, j, n))) {
+                cat = H_NONE; /* a property: plain in JavaScript, and in an assignment target in TS */
+            } else if (js && top_frame(st) == '{' && !st->ternary && k < n && s[k] == ':' && !(k + 1 < n && s[k + 1] == ':')) {
+                cat = H_NONE; /* an object literal key */
             } else if (!st->py_bases && (word_in(L->support, s + i, wl) || (L->caps_types && isupper((unsigned char)c) && wl > 1 &&
                                                           !(wl > 2 && isupper((unsigned char)s[i + 1]) && isupper((unsigned char)s[j - 1]))))) {
                 cat = H_TYPE;
@@ -558,15 +619,19 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
             } else if (in_call(st) && k < n && s[k] == '=' && !(k + 1 < n && s[k + 1] == '=')) {
                 cat = H_VARIABLE; /* keyword argument */
             } else {
-                cat = plain(st);
+                cat = js ? H_VARIABLE : plain(st); /* JS/TS: variable.other.readwrite */
             }
             if (macro) cat = H_NONE;
             em(e, cat, s + i, wl);
             i = j;
-            if (call && (cat == H_FUNCTION || (py && cat == H_TYPE && !st->py_class && word_in(L->support, s + i - wl, wl)))) {
+            if (call && (cat == H_FUNCTION || (py && cat == H_TYPE && !st->py_class && word_in(L->support, s + i - wl, wl)) ||
+                         (js && cat == H_TYPE))) {
                 /* a definition's parameter list vs a call's arguments */
-                bool def = cat == H_FUNCTION && (st->last == 3 || (L->fam == F_C && st->last == 1 && st->nf == 0));
+                bool def = (cat == H_FUNCTION && (st->last == 3 || (L->fam == F_C && st->last == 1 && st->nf == 0))) ||
+                           (js && js_params_at(s, k, n));
                 st->last = def ? 4 : 5;
+            } else if (js && cat == H_KEYWORD && word_in(" if for while switch catch with ", s + i - wl, wl)) {
+                st->last = 7; /* its `(` is unscoped */
             } else {
                 st->last = cat == H_KEYWORD ? (word_in(L->defkw, s + i - wl, wl) ? 3 : 2) : 1;
             }
@@ -575,16 +640,22 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
         if (c == '(') {
             if (py && st->last == 1 && st->py_class && st->nf == 0) st->py_bases = true; /* class Name( */
             st->expect = 0; /* an anonymous `function (` names nothing */
-            push_frame(st, st->last == 4 ? 'p' : st->last == 5 ? 'c' : '(');
-            em(e, H_PUNCT, s + i, 1);
+            char fk = st->last == 4 ? 'p' : st->last == 5 ? 'c' : '(';
+            /* js: a call's or a control statement's parens are unscoped; `function (`, `(...) =>` are parameters */
+            if (ts && st->last == 7) fk = 'k';
+            else if (js && (st->last == 3 || (fk == '(' && js_params_at(s, i, n)))) fk = 'p';
+            push_frame(st, fk);
+            em(e, ts && (fk == 'c' || fk == 'k') ? H_NONE : H_PUNCT, s + i, 1);
             i++;
             st->last = 0;
             continue;
         }
         if (c == '[' || c == '{') {
+            /* js: brackets are unscoped outside a destructuring pattern; a type statement's braces hold members */
+            char fk = ts && c == '[' && !st->bind ? 'b' : js && c == '{' && st->ts_type ? 'T' : c;
             if (st->bind) st->bind_depth++;
-            push_frame(st, c);
-            em(e, H_PUNCT, s + i, 1);
+            push_frame(st, fk);
+            em(e, fk == 'b' ? H_NONE : H_PUNCT, s + i, 1);
             i++;
             st->last = 0;
             continue;
@@ -593,8 +664,8 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
             if (st->bind && c != ')' && st->bind_depth > 0) st->bind_depth--;
             else if (c == ')') st->bind = false;
             if (c == ')') st->py_bases = false;
-            pop_frame(st);
-            em(e, H_PUNCT, s + i, 1);
+            char fk = pop_frame(st);
+            em(e, ts && (fk == 'c' || fk == 'k' || fk == 'b') ? H_NONE : H_PUNCT, s + i, 1);
             i++;
             st->last = 1;
             continue;
@@ -603,6 +674,7 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
             size_t l = c == '.' ? 1 : 2;
             if (c == '.' && i + 2 < n && s[i + 1] == '.' && s[i + 2] == '.') l = 3;
             em(e, l == 3 ? H_KEYWORD : H_OPERATOR, s + i, l); /* punctuation.accessor */
+            if (c == '.' && l == 1) st->after_dot = true;
             i += l;
             st->last = 0;
             continue;
@@ -617,6 +689,7 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
             if (c == '=' && st->bind_depth == 0) st->bind = false;
             size_t l = 1;
             while (i + l < n && l < 3 && strchr("+-*/%=<>!&|^~?", s[i + l])) l++;
+            if (js && c == '?' && l == 1 && !(i + 1 < n && s[i + 1] == '.')) st->ternary++;
             em(e, H_KEYWORD, s + i, l); /* keyword.operator */
             i += l;
             st->last = 0;
@@ -625,7 +698,8 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
         if (strchr(",;:", c)) {
             /* TypeScript: a type annotation's colon is keyword.operator.type.annotation */
             bool annot = c == ':' && strstr(L->names, " ts ") &&
-                         ((st->bind && st->bind_depth == 0) || (st->nf && st->frames[MIN(st->nf, MAX_FRAMES) - 1] == 'p'));
+                         ((st->bind && st->bind_depth == 0) || top_frame(st) == 'p' || top_frame(st) == 'T');
+            if (js && c == ':' && st->ternary > 0) annot = true, st->ternary--; /* the conditional's `:` operator */
             if (c == ';' || (c == ':' && st->bind_depth == 0)) st->bind = false;
             em(e, annot ? H_KEYWORD : H_PUNCT, s + i, 1);
             i++;
@@ -634,7 +708,8 @@ static void lex_code(em_t *e, const lang_t *L, hs_t *st, const char *s, size_t n
         }
         uint32_t cp;
         int k = utf8_decode(s + i, n - i, &cp);
-        em(e, plain(st), s + i, (size_t)k);
+        /* JavaScript: the space between `new` and its constructor is in the call's (function color) scope */
+        em(e, js && !ts && st->expect == 4 ? H_FUNCTION : plain(st), s + i, (size_t)k);
         i += (size_t)k;
     }
 }
