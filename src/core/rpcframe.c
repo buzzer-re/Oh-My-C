@@ -1,4 +1,5 @@
 /* rpcframe.c - Content-Length framing for the LSP and DAP stdio clients (omp jsonrpc/message-framing.ts). */
+#define _GNU_SOURCE /* memmem: glibc declares it only with _GNU_SOURCE (build-tools/check_apple.sh) */
 #include "rpcframe.h"
 
 #include <ctype.h>
