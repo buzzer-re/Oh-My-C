@@ -194,31 +194,116 @@ static void add_file(discovery_t *d, const char *path, int depth) {
     vec_push(&d->files, f);
 }
 
-/* chain of directories from root (or home boundary) down to cwd */
-static strvec_t dir_chain(const char *cwd) {
-    strvec_t chain = {0};
+/* normalizePathForComparison: the real path, else the path as given (owned) */
+static char *cmp_path(const char *p) {
+    char *r = path_real(p);
+    return r ? r : path_normalize(p);
+}
+
+/* isWithin (helpers.ts): child at or below parent, lexically */
+static bool path_within(const char *parent, const char *child) {
+    size_t n = strlen(parent);
+    if (!strcmp(parent, "/")) return child[0] == '/';
+    return !strncmp(parent, child, n) && (child[n] == 0 || child[n] == '/');
+}
+
+/* getProjectDiscoveryCeilings: home, os.tmpdir() ($TMPDIR, $TMP, $TEMP, else /tmp), /tmp, /var/tmp */
+static strvec_t project_ceilings(void) {
+    strvec_t c = {0};
+    const char *tmp = NULL, *envs[] = {"TMPDIR", "TMP", "TEMP"};
+    for (size_t i = 0; i < ARRAY_LEN(envs) && !tmp; i++) {
+        const char *e = getenv(envs[i]);
+        if (e && *e) tmp = e;
+    }
+    const char *roots[] = {home_dir(), tmp ? tmp : "/tmp", "/tmp", "/var/tmp"};
+    for (size_t i = 0; i < ARRAY_LEN(roots); i++) {
+        char *n = cmp_path(roots[i]);
+        strvec_push(&c, n);
+        free(n);
+    }
+    return c;
+}
+
+/* isForeignUserConfigRoot: an inactive default user layout (<dir>/.omc/agent or <dir>/.omp/agent that is not the
+ * active agent dir) is not a project anchor without a repo */
+static bool foreign_user_root(const char *dir) {
+    const char *names[] = {".omc/agent", ".omp/agent"};
+    char *active = cmp_path(omc_agent_dir());
+    bool r = false;
+    for (size_t i = 0; i < ARRAY_LEN(names) && !r; i++) {
+        char *a = path_join(dir, names[i]);
+        if (fs_is_dir(a)) {
+            char *n = cmp_path(a);
+            r = strcmp(n, active) != 0;
+            free(n);
+        }
+        free(a);
+    }
+    free(active);
+    return r;
+}
+
+strvec_t discovery_native_ancestors(const char *cwd) {
+    strvec_t out = {0}, ceil = project_ceilings();
     char *root = find_repo_root(cwd);
-    const char *home = home_dir();
-    char *cur = xstrdup(cwd);
-    strvec_t rev = {0};
+    char *stop = cmp_path(root ? root : home_dir()), *home = cmp_path(home_dir());
+    char *cur = path_normalize(cwd);
     for (;;) {
-        strvec_push(&rev, cur);
-        if (root && !strcmp(cur, root)) break;
-        if (!root && !strcmp(cur, home)) break;
-        if (!strcmp(cur, "/")) break;
-        char *p = path_dirname(cur);
-        free(cur);
-        cur = p;
-        if (!root && !str_starts(cwd, home)) {
-            /* outside home without a repo: only cwd */
+        char *n = cmp_path(cur);
+        if (strvec_contains(&ceil, n)) {
+            free(n);
             break;
         }
+        /* isUserConfigRoot: <dir>/.omc is the user's config root only for home itself */
+        if (strcmp(n, home) != 0 && (root || !foreign_user_root(cur))) strvec_push(&out, cur);
+        bool at_stop = !strcmp(n, stop);
+        free(n);
+        if (at_stop) break;
+        char *parent = path_dirname(cur);
+        bool top = !strcmp(parent, cur);
+        free(cur);
+        cur = parent;
+        if (top) break;
     }
     free(cur);
+    free(stop);
+    free(home);
     free(root);
-    for (size_t i = rev.n; i > 0; i--) strvec_push(&chain, rev.v[i - 1]);
-    strvec_free(&rev);
-    return chain;
+    strvec_free(&ceil);
+    return out;
+}
+
+strvec_t discovery_standalone_dirs(const char *cwd) {
+    strvec_t out = {0};
+    char *home = path_normalize(home_dir()), *wd = path_normalize(cwd);
+    char *repo_found = find_repo_root(wd);
+    char *repo = repo_found ? path_normalize(repo_found) : NULL;
+    free(repo_found);
+    bool cwd_under_home = path_within(home, wd);
+    bool repo_is_home = repo && !strcmp(repo, home);
+    bool repo_under_home = repo && path_within(home, repo) && !repo_is_home;
+    bool scan_to_home = repo && cwd_under_home && repo_under_home;
+    const char *boundary = scan_to_home ? home : repo ? repo : cwd_under_home ? home : "/";
+    bool include_boundary = !repo ? cwd_under_home : strcmp(boundary, home) != 0 || repo_is_home;
+    char *cur = xstrdup(wd);
+    for (;;) {
+        bool at_boundary = !strcmp(cur, boundary);
+        bool at_home = scan_to_home && !strcmp(cur, home);
+        /* a file whose directory name starts with "." is never standalone context */
+        const char *base = path_basename(cur);
+        if (!(at_home || (at_boundary && !include_boundary)) && base[0] != '.') strvec_push(&out, cur);
+        if (at_boundary) break;
+        char *parent = path_dirname(cur);
+        bool top = !strcmp(parent, cur);
+        free(cur);
+        cur = parent;
+        if (top) break;
+    }
+    free(cur);
+    free(repo);
+    free(wd);
+    free(home);
+    return out;
 }
 
 /* ---------- skills ---------- */
@@ -442,6 +527,19 @@ static void scan_rules_dir(discovery_t *d, const char *dir, const char *ext) {
     dirlist_free(&dl);
 }
 
+/* findNearestProjectConfigDir: the closest non-empty .omc (preferred) or .omp along the native walk (owned) */
+static char *nearest_native_dir(const strvec_t *walk) {
+    for (size_t i = 0; i < walk->n; i++) {
+        const char *names[] = {".omc", ".omp"};
+        for (size_t k = 0; k < 2; k++) {
+            char *p = path_join(walk->v[i], names[k]);
+            if (fs_is_dir(p) && dir_nonempty(p)) return p;
+            free(p);
+        }
+    }
+    return NULL;
+}
+
 /* ---------- main discovery ---------- */
 
 static void filter_skills(discovery_t *d);
@@ -450,17 +548,11 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
     memset(d, 0, sizeof(*d));
     const char *agent = omc_agent_dir();
     const char *home = home_dir();
-    strvec_t chain = dir_chain(cwd);
-    /* nearest non-empty native dir (.omc preferred, .omp accepted) */
-    char *native = NULL;
-    for (size_t i = chain.n; i > 0 && !native; i--) {
-        const char *names[] = {".omc", ".omp"};
-        for (size_t k = 0; k < 2 && !native; k++) {
-            char *p = path_join(chain.v[i - 1], names[k]);
-            if (fs_is_dir(p) && dir_nonempty(p) && strcmp(chain.v[i - 1], home) != 0) native = p;
-            else free(p);
-        }
-    }
+    /* builtin.ts getProjectAncestorDirs (native dirs and skills), agents.ts getProjectPathCandidates and claude.ts
+     * loadSkills (.agent(s)/AGENTS.md, .claude/skills), helpers.ts loadStandaloneContextFiles (AGENTS.md, CLAUDE.md):
+     * three walks with their own bounds, all closest first */
+    strvec_t native_walk = discovery_native_ancestors(cwd), project_walk = discovery_project_ancestors(cwd);
+    char *native = nearest_native_dir(&native_walk);
     if (!no_context) {
         char *u = path_join(agent, "AGENTS.md");
         add_file(d, u, 0);
@@ -476,31 +568,49 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
             add_file(d, p, 1000);
             free(p);
         }
-        /* standalone walk: AGENTS.md beats CLAUDE.md at the same depth */
-        for (size_t i = 0; i < chain.n; i++) {
-            const char *dirp = chain.v[i];
+        /* farthest first; one file per depth: .agent(s)/AGENTS.md (project walk) beats AGENTS.md beats CLAUDE.md
+         * (standalone walk) */
+        strvec_t standalone = discovery_standalone_dirs(cwd), up = {0};
+        size_t top = 0;
+        for (char *cur = path_normalize(cwd);;) {
+            strvec_push(&up, cur);
+            if (strvec_contains(&project_walk, cur) || strvec_contains(&standalone, cur)) top = up.n;
+            char *parent = path_dirname(cur);
+            bool root = !strcmp(parent, cur);
+            free(cur);
+            cur = parent;
+            if (root) {
+                free(cur);
+                break;
+            }
+        }
+        for (size_t i = top; i > 0; i--) {
+            const char *dirp = up.v[i - 1];
+            bool in_project = strvec_contains(&project_walk, dirp), in_standalone = strvec_contains(&standalone, dirp);
             const char *per_depth[] = {".agents/AGENTS.md", ".agent/AGENTS.md", "AGENTS.md", "CLAUDE.md"};
             bool taken = false;
             for (size_t k = 0; k < ARRAY_LEN(per_depth) && !taken; k++) {
-                if (k < 2 && !strcmp(dirp, home)) continue;
+                if (!(k < 2 ? in_project : in_standalone)) continue;
                 char *p = path_join(dirp, per_depth[k]);
                 size_t before = d->files.n;
-                add_file(d, p, (int)i + 1);
+                add_file(d, p, (int)(i - 1));
                 if (d->files.n > before) taken = true;
                 free(p);
             }
             json_t *extra = settings_get("contextFiles.extra"), *x;
             json_arr_foreach(extra, k, x) {
-                if (!json_is_str(x) || strchr(json_sv(x), '/')) continue;
+                if (!in_standalone || !json_is_str(x) || strchr(json_sv(x), '/')) continue;
                 char *p = path_join(dirp, json_sv(x));
-                add_file(d, p, (int)i + 1);
+                add_file(d, p, (int)(i - 1));
                 free(p);
             }
         }
+        strvec_free(&up);
+        strvec_free(&standalone);
         const char *cwd_cfg[] = {".claude/CLAUDE.md", ".gemini/GEMINI.md", ".github/copilot-instructions.md"};
         for (size_t i = 0; i < ARRAY_LEN(cwd_cfg); i++) {
             char *p = path_join(cwd, cwd_cfg[i]);
-            add_file(d, p, (int)chain.n + 1);
+            add_file(d, p, 0);
             free(p);
         }
     }
@@ -576,11 +686,10 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
         bool agents_user = settings_bool("skills.enableAgentsUser", true);
         /* first wins, in omp provider-priority order: native (.omc/.omp project + agent dir, 100),
          * Claude project dirs (80), Agent Plugins (75), .agents/.agent (70), Claude Code plugins (70) */
-        for (size_t i = chain.n; i > 0 && pi_project; i--) { /* every ancestor's .omc/.omp skills, closest first */
-            if (!strcmp(chain.v[i - 1], home)) continue;
+        for (size_t i = 0; i < native_walk.n && pi_project; i++) { /* every ancestor's .omc/.omp skills, closest first */
             const char *pd[] = {".omc/skills", ".omp/skills"};
             for (size_t k = 0; k < 2; k++) {
-                char *p = path_join(chain.v[i - 1], pd[k]);
+                char *p = path_join(native_walk.v[i], pd[k]);
                 scan_skills_dir_opt(d, p, true);
                 free(p);
             }
@@ -598,26 +707,25 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
             free(p);
             free(cd);
         }
-        for (size_t i = chain.n; i > 0 && settings_bool("skills.enableClaudeProject", true); i--) {
-            if (!strcmp(chain.v[i - 1], home)) continue; /* $HOME/.claude is the user source */
-            char *p = path_join(chain.v[i - 1], ".claude/skills");
+        /* claude.ts loadSkills: cwd up to the repo root (else home, else /), home skipped ($HOME/.claude is the user
+         * source) */
+        for (size_t i = 0; i < project_walk.n && settings_bool("skills.enableClaudeProject", true); i++) {
+            char *p = path_join(project_walk.v[i], ".claude/skills");
             scan_skills_dir(d, p);
             free(p);
         }
         plugin_roots_t roots;
         plugin_roots_list(cwd, &roots);
         plugin_skills_standard(&roots, d);
-        /* agents.ts getProjectPathCandidates: cwd up to the repo root (else home, else /), home skipped */
-        strvec_t walk = discovery_project_ancestors(cwd);
-        for (size_t i = 0; i < walk.n && agents_project; i++) {
+        /* agents.ts getProjectPathCandidates: the same walk */
+        for (size_t i = 0; i < project_walk.n && agents_project; i++) {
             const char *dirs[] = {".agent/skills", ".agents/skills"};
             for (size_t k = 0; k < ARRAY_LEN(dirs); k++) {
-                char *p = path_join(walk.v[i], dirs[k]);
+                char *p = path_join(project_walk.v[i], dirs[k]);
                 scan_skills_dir(d, p);
                 free(p);
             }
         }
-        strvec_free(&walk);
         const char *uskills[] = {".agent/skills", ".agents/skills"};
         for (size_t i = 0; i < ARRAY_LEN(uskills) && agents_user; i++) {
             char *p = path_join(home, uskills[i]);
@@ -650,7 +758,8 @@ void discover_all(const char *cwd, discovery_t *d, bool no_context, bool no_skil
         if (d->skills.n > 1) xqsort(d->skills.v, d->skills.n, sizeof(skill_t), cmp_skill);
     }
     free(native);
-    strvec_free(&chain);
+    strvec_free(&native_walk);
+    strvec_free(&project_walk);
 }
 
 void discovery_free_skills(discovery_t *d) {

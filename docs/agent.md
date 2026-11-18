@@ -314,10 +314,20 @@ templates with the result. The system prompt is a list of parts:
 byte-stable across turns: the volatile date and cwd ride on user messages instead (below).
 
 **Context files.** User level: `<agent dir>/AGENTS.md`, `~/.agent(s)/AGENTS.md`. Project level,
-walking from the repo root to the cwd: `.agents/AGENTS.md`, `.agent/AGENTS.md`, `AGENTS.md`,
-`CLAUDE.md` (AGENTS.md wins at the same depth). Also `.omc/` / `.omp/` copies,
+farthest ancestor first: `.agents/AGENTS.md`, `.agent/AGENTS.md`, `AGENTS.md`,
+`CLAUDE.md` (the first wins at one depth). Also the nearest `.omc/` / `.omp/` copy,
 `.claude/CLAUDE.md`, `.gemini/GEMINI.md`, `.github/copilot-instructions.md`, and
 `contextFiles.extra`.
+
+Project discovery has three ancestor walks, each with omp's bound (`coding/discovery.c`):
+- `.agent(s)/` dirs and `.claude/skills` (agents.ts `getProjectPathCandidates`, claude.ts `loadSkills`): the cwd up to
+  the repo root (a `.git` entry), else up to home, else up to `/`; home itself is skipped.
+- native `.omc/` / `.omp/` dirs and their skills (builtin.ts `getProjectAncestorDirs`): the same, but never at or past a
+  ceiling (home, `os.tmpdir()`, `/tmp`, `/var/tmp`), and without a repo an inactive user layout (`<dir>/.omc/agent`,
+  `<dir>/.omp/agent` that is not the agent dir) is skipped.
+- `AGENTS.md`, `CLAUDE.md` and `contextFiles.extra` (helpers.ts `loadStandaloneContextFiles`): without a repo up to home
+  (included) under it, else up to `/` (excluded); a repo nested below home continues to home (excluded); other repos
+  stop at their root; dot-named directories are skipped.
 
 **Skills** (`SKILL.md` with frontmatter). Sources: `.omc/skills`, `.omp/skills`,
 `<agent dir>/skills`, Claude Code `~/.claude/skills` and `.claude/skills` up the tree,

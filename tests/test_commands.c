@@ -195,6 +195,93 @@ static void test_skill_message(const char *root) {
     free(dir);
 }
 
+static bool walk_is(const strvec_t *w, const char *const *want, size_t n) {
+    if (w->n != n) return false;
+    for (size_t i = 0; i < n; i++)
+        if (!str_eq(w->v[i], want[i])) return false;
+    return true;
+}
+
+/* the three project walks (builtin.ts getProjectAncestorDirs, agents.ts/claude.ts walk-up, helpers.ts
+ * loadStandaloneContextFiles): each with omp's own bound */
+static void test_discovery_walks(const char *root) {
+    char *home = path_join(root, "home");
+    /* outside home, no repo: up to / (standalone context files stop below it). The path need not exist */
+    char *nx = xasprintf("/omc-test-walk-%d", (int)getpid()), *a = path_join(nx, "a"), *b = path_join(nx, "a/b");
+    if (!fs_exists("/.git")) {
+        const char *want[] = {b, a, nx, "/"};
+        strvec_t w = discovery_project_ancestors(b);
+        CHECK(walk_is(&w, want, 4));
+        strvec_free(&w);
+        w = discovery_native_ancestors(b);
+        CHECK(walk_is(&w, want, 4));
+        strvec_free(&w);
+        w = discovery_standalone_dirs(b);
+        CHECK(walk_is(&w, want, 3));
+        strvec_free(&w);
+    }
+    /* the native walk never reaches a temporary root (os.tmpdir(), /tmp, /var/tmp) or home */
+    const char *old_tmp = getenv("TMPDIR");
+    char *saved_tmp = old_tmp ? xstrdup(old_tmp) : NULL;
+    char *ceil = path_join(root, "ceil"), *q = path_join(root, "ceil/p/q"), *p = path_join(root, "ceil/p");
+    fs_mkdir_p(q, 0755);
+    setenv("TMPDIR", ceil, 1);
+    strvec_t w = discovery_native_ancestors(q);
+    const char *want_ceil[] = {q, p};
+    CHECK(walk_is(&w, want_ceil, 2));
+    strvec_free(&w);
+    w = discovery_native_ancestors(ceil);
+    CHECK(w.n == 0);
+    strvec_free(&w);
+    if (saved_tmp) setenv("TMPDIR", saved_tmp, 1);
+    else unsetenv("TMPDIR");
+    free(saved_tmp);
+    char *tq = xasprintf("/tmp/omc-test-walk-%d/x", (int)getpid()), *tp = path_dirname(tq);
+    if (!fs_exists("/tmp/.git")) {
+        w = discovery_native_ancestors(tq);
+        const char *want_t[] = {tq, tp};
+        CHECK(walk_is(&w, want_t, 2));
+        strvec_free(&w);
+    }
+    char *hp = path_join(home, "wsp");
+    fs_mkdir_p(hp, 0755);
+    w = discovery_native_ancestors(hp);
+    const char *want_h[] = {hp};
+    CHECK(walk_is(&w, want_h, 1));
+    strvec_free(&w);
+    /* a repo nested below home: standalone files continue past the repo root up to (not including) home */
+    char *ws = path_join(home, "ws"), *repo = path_join(home, "ws/r"), *gitd = path_join(home, "ws/r/.git");
+    char *sub = path_join(home, "ws/r/sub");
+    fs_mkdir_p(gitd, 0755);
+    fs_mkdir_p(sub, 0755);
+    w = discovery_standalone_dirs(sub);
+    const char *want_ws[] = {sub, repo, ws};
+    CHECK(walk_is(&w, want_ws, 3));
+    strvec_free(&w);
+    w = discovery_project_ancestors(sub);
+    const char *want_r[] = {sub, repo};
+    CHECK(walk_is(&w, want_r, 2));
+    strvec_free(&w);
+    /* dot-named directories never hold standalone context files */
+    char *hid = path_join(home, ".hidden/x"), *hidd = path_join(home, ".hidden");
+    fs_mkdir_p(hid, 0755);
+    w = discovery_standalone_dirs(hid);
+    CHECK(w.n >= 1 && str_eq(w.v[0], hid) && !strvec_contains(&w, hidd));
+    strvec_free(&w);
+    /* .claude/skills: every ancestor up to the repo root, else to / outside home (omc stopped at the cwd there) */
+    char *out = path_join(root, "walk-out"), *cwd = path_join(root, "walk-out/x/y");
+    fs_mkdir_p(cwd, 0755);
+    put(out, ".claude/skills/far/SKILL.md", "---\nname: far\ndescription: Ancestor skill\n---\nBody\n");
+    put(home, ".claude/skills/homeskill/SKILL.md", "---\nname: homeskill\ndescription: User-level\n---\nBody\n");
+    discovery_t d;
+    discover_all(cwd, &d, true, false, true);
+    CHECK(discovery_find_skill(&d, "far") != NULL);
+    CHECK(discovery_find_skill(&d, "homeskill") == NULL); /* $HOME/.claude is the (opt-in) user source */
+    discovery_free(&d);
+    free(out), free(cwd), free(hid), free(hidd), free(ws), free(repo), free(gitd), free(sub), free(hp);
+    free(tq), free(tp), free(ceil), free(q), free(p), free(nx), free(a), free(b), free(home);
+}
+
 int main(void) {
     const char *tmp = getenv("TMPDIR");
     char *root = xasprintf("%s/omc-test-commands-%d", tmp && *tmp ? tmp : "/tmp", (int)getpid());
@@ -208,6 +295,7 @@ int main(void) {
     test_args();
     test_skill_parse();
     test_discovery(root);
+    test_discovery_walks(root);
     test_skill_message(root);
     fs_rm_rf(root);
     free(agent);

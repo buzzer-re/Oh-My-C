@@ -62,6 +62,14 @@ json_t *frontmatter_parse(const char *text, const char **body);
 char *find_repo_root(const char *cwd); /* nearest dir with .git, or NULL */
 /* getProjectPathCandidates' walk: cwd up to the repo root (else home, else /), home itself skipped (owned) */
 strvec_t discovery_project_ancestors(const char *cwd);
+/* builtin.ts getProjectAncestorDirs (native .omc/.omp dirs, their skills): cwd up through the repo root (else home),
+ * never at or past a ceiling (home, os.tmpdir(), /tmp, /var/tmp); home and, without a repo, inactive user layouts
+ * (<dir>/.omc/agent, <dir>/.omp/agent) skipped. Closest first (owned) */
+strvec_t discovery_native_ancestors(const char *cwd);
+/* helpers.ts loadStandaloneContextFiles (AGENTS.md, CLAUDE.md, contextFiles.extra): the directories it reads,
+ * closest first. Without a repo: up to home (included) when under it, else up to / (excluded); a repo nested below
+ * home scans on to home (excluded); dot-named directories skipped (owned) */
+strvec_t discovery_standalone_dirs(const char *cwd);
 
 typedef struct {
     const char *cwd;
