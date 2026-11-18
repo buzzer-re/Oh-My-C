@@ -134,6 +134,24 @@ static int64_t stored_context_tokens(app_t *a) {
     return n + nonmessage_tokens(a);
 }
 
+/* SessionMaintenance.contextFitsModel: the stored context (without `excluded`, the failed turn) fits `m`'s usable
+ * window (window minus the budget reserve); unknown windows fit */
+bool cmp_context_fits_model(app_t *a, const ai_model_t *m, const json_t *excluded) {
+    int64_t w = m ? m->context_window : 0;
+    if (w <= 0) return true;
+    int64_t budget = MAX(0, w - budget_reserve(w));
+    int64_t n = stored_context_tokens(a);
+    if (excluded) {
+        bool present = false;
+        pthread_mutex_lock(&a->agent->mu);
+        const json_t *x;
+        json_arr_foreach(a->agent->messages, i, x) present = present || x == excluded;
+        pthread_mutex_unlock(&a->agent->mu);
+        if (present) n -= cmp_message_tokens(excluded);
+    }
+    return n <= budget;
+}
+
 /* calculateContextTokens / calculatePromptTokens */
 static int64_t usage_context_tokens(const json_t *u) {
     if (!u) return 0;

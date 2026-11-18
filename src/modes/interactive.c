@@ -2266,7 +2266,8 @@ static void wt_exit_next(ui_t *u) {
         }
         const char *action = session_wt_decide_exit(policy, &st);
         if (str_eq(action, "remove")) {
-            wt_exit_plan_t p = {.wt = *w, .fingerprint = xstrdup(st.fingerprint)};
+            /* under `force` no fingerprint is approved: the worktree goes even if it changes while closing */
+            wt_exit_plan_t p = {.wt = *w, .fingerprint = str_eq(policy, "force") ? NULL : xstrdup(st.fingerprint)};
             memset(w, 0, sizeof *w);
             vec_push(&g_wt_plan, p);
         } else if (str_eq(action, "prompt")) {
@@ -3581,6 +3582,8 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_sym_set_preset(settings_str("symbolPreset", "unicode"));
     /* config warnings head the header (interactive-mode.ts #buildConfigWarningComponents): retry.fallbackChains
      * validation (turn-recovery validateRetryFallbackChains) and the model registry's discovery warnings */
+    strvec_t models_warns = {0};
+    catalog_take_models_file_warnings(&models_warns);
     {
         strvec_t warns = {0};
         mr_fallback_validate(&warns);
@@ -3691,6 +3694,9 @@ int run_interactive_mode(app_t *a, const char *initial) {
     if (fresh) tui_post(u.tui, wt_onstart_cb, &u);
     if (g_start && g_start->restore) tui_post(u.tui, restore_cb, &u);
     if (g_start && g_start->notice) add_notice(&u, "info", g_start->notice); /* main.ts notifs */
+    /* main.ts: models.yml findings (dropped input modalities) are startup warnings, not header lines */
+    for (size_t i = 0; i < models_warns.n; i++) add_notice(&u, "warning", models_warns.v[i]);
+    strvec_free(&models_warns);
     /* first-run setup wizard (omp main.ts: stale setupVersion, not resuming, TTY); the welcome intro
      * plays after it instead of at startup */
     if (ui_setup_pending(a->opts.resume || a->opts.continue_recent)) {

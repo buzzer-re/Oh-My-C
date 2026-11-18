@@ -15,6 +15,7 @@ Display commands (used by tests/tui/compare.sh to exercise transcript views):
     as a list of [tool, args] pairs is several calls in one assistant message
   - "batch:[[tool, args], ...]" all the tool calls in one assistant message, then the usual "Tool said:" answer
   - model "mock-flaky"        every request fails with HTTP 429 (retry fallback chains)
+  - model "mock-prefill"      every request fails with a 400 worded as a context overflow (text-only overflow)
   - a compaction summary (tool-less) or handoff-document request whose messages mention SLOWSUMMARY answers after 4 s
   - a handoff-document request answers "## Goal\nplain answer" (plain "plain answer" when the transcript mentions BADHANDOFF)
 Eval helper side requests (omc eval completion()/judge()):
@@ -116,6 +117,10 @@ def req_kind(body):
     if last.startswith("Compress into one routing hint"): return "compress"
     return "main" if body.get("tools") else "side"
 
+def raw_text(msg):
+    c = msg.get("content")
+    return c if isinstance(c, str) else "".join(p.get("text", "") for p in c if isinstance(p, dict)) if isinstance(c, list) else ""
+
 def text_of(msg):
     c = msg.get("content")
     if isinstance(c, str): return c
@@ -126,6 +131,7 @@ def text_of(msg):
         return t[m.end():] if m else t
     return ""
 
+MID_RUN_NUDGE = re.compile(r"^<system-reminder>\n\d+ todo items? still open\. ")  # mid-run-todo-nudge.md
 STEER_NUDGES = ("STOP: In NEXT reply", "Continue task now", "Before task complete, verify:")
 
 
@@ -174,7 +180,7 @@ class H(BaseHTTPRequestHandler):
         msgs = body.get("messages", [])
         # hidden steering nudges (prewalk plan/continue/checklist) trail the turn: answer what precedes them
         while len(msgs) > 1 and msgs[-1].get("role") in ("user", "system", "developer") and \
-                text_of(msgs[-1]).lstrip().startswith(STEER_NUDGES):
+                (text_of(msgs[-1]).lstrip().startswith(STEER_NUDGES) or MID_RUN_NUDGE.search(raw_text(msgs[-1]))):
             msgs = msgs[:-1]
         last = msgs[-1] if msgs else {}
         lu = text_of(last) if last.get("role") == "user" else ""
@@ -187,6 +193,8 @@ class H(BaseHTTPRequestHandler):
             lu = "fail:400:Unrecognized request argument supplied: reasoning"
         if os.environ.get("MOCK_PROBE_STATUS") and lu.startswith("What is 17 times 23?"):
             lu = "fail:" + os.environ["MOCK_PROBE_STATUS"] + ":probe failure"
+        if body.get("model") == "mock-prefill":  # a local server's memory guard worded as an overflow, on a tiny prompt
+            lu = "fail:400:rejected this prompt: prefill context length exceeded by the memory guard"
         if lu.startswith("fail:"):
             st, _, m = lu[5:].partition(":")
             b = json.dumps({"error": {"message": m or "mock failure", "type": "invalid_request_error", "code": int(st or 400)}}).encode()

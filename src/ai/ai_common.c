@@ -400,6 +400,8 @@ void aib_free(ai_builder_t *b) {
 
 /* catalog.c; weak so provider unit tests can link without the catalog */
 extern char *catalog_provider_disabled_error(const char *provider) __attribute__((weak));
+/* agents.c: models.offline refuses a call to another provider than the session's (weak, as above) */
+extern char *agents_offline_call_error(const char *provider) __attribute__((weak));
 
 /* thinkprobe.c / catalog.c; weak like catalog_provider_disabled_error, for the provider unit tests */
 extern bool tp_unverified(const json_t *raw) __attribute__((weak));
@@ -410,6 +412,7 @@ extern void catalog_model_free(ai_model_t *m) __attribute__((weak));
 
 static json_t *paused_message(const ai_model_t *model, ai_event_cb cb, void *ud) {
     char *paused = catalog_provider_disabled_error ? catalog_provider_disabled_error(model->provider) : NULL;
+    if (!paused && agents_offline_call_error) paused = agents_offline_call_error(model->provider); /* --offline */
     if (!paused) return NULL;
     json_t *m = ai_error_message(model, "error", paused);
     json_set_int(m, "errorId", AIE_CLASS | AIE_AUTH_FAILED); /* ProviderDisabledError is a MissingApiKeyError */

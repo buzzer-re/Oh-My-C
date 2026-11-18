@@ -12,6 +12,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define MCP_PROTOCOL "2025-06-18"
@@ -65,11 +66,12 @@ struct mcp_server {
     json_t *subscribed; /* URIs subscribed with resources/subscribe, or NULL */
     char *instructions;
     char *error;
+    char *eof_error; /* stdio EOF before a response: the subprocess exit status (StdioTransport) */
+    char *eof_code;  /* its MCPTransportError code: the exit code or the signal name, NULL when still running */
     char *www_auth; /* last 401 challenge (OAuth discovery) */
     int http_status; /* last HTTP error status */
     bool no_oauth;   /* probe without stored OAuth tokens (config key "_noOAuth") */
     bool connected;  /* transport alive */
-    int exit_code;   /* stdio: the subprocess's exit code once stdout closed, -1 unknown (killed, still running) */
     sstate_t state;
     int64_t timeout_ms;
     int refs;
@@ -308,6 +310,19 @@ static void deliver(mcp_server_t *s, json_t *msg) {
     json_free(msg);
 }
 
+/* Bun's signalCode: the signal's SIG* name */
+static const char *sig_name(int sig) {
+    static const struct {
+        int n;
+        const char *name;
+    } T[] = {{SIGHUP, "SIGHUP"}, {SIGINT, "SIGINT"}, {SIGQUIT, "SIGQUIT"}, {SIGILL, "SIGILL"}, {SIGABRT, "SIGABRT"},
+             {SIGBUS, "SIGBUS"}, {SIGFPE, "SIGFPE"}, {SIGKILL, "SIGKILL"}, {SIGSEGV, "SIGSEGV"}, {SIGPIPE, "SIGPIPE"},
+             {SIGALRM, "SIGALRM"}, {SIGTERM, "SIGTERM"}, {SIGUSR1, "SIGUSR1"}, {SIGUSR2, "SIGUSR2"}};
+    for (size_t i = 0; i < ARRAY_LEN(T); i++)
+        if (T[i].n == sig) return T[i].name;
+    return "SIGKILL";
+}
+
 static void *stdio_reader(void *p) {
     mcp_server_t *s = p;
     sb_t line = SB_INIT;
@@ -328,11 +343,36 @@ static void *stdio_reader(void *p) {
         }
     }
     sb_free(&line);
-    /* stdout closed: the exit code (when the process is gone by then) names the failure of requests in flight */
-    int code = s->closing ? -1 : child_wait(&s->child, 100);
+    /* StdioTransport EOF (omp b45330e867): the exit status, peeked without reaping (the child is reaped at close),
+     * waited for up to 100 ms; a process still alive keeps the closed-stdout wording */
+    char *eof = NULL, *code = NULL;
+    pid_t pid = s->child.pid;
+    if (!s->closing && pid > 0) {
+        siginfo_t si;
+        int64_t until = mono_ms() + 100;
+        for (;;) {
+            memset(&si, 0, sizeof si);
+            if (waitid(P_PID, (id_t)pid, &si, WEXITED | WNOHANG | WNOWAIT) == 0 && si.si_pid == pid) break;
+            si.si_pid = 0;
+            if (mono_ms() >= until) break;
+            sleep_ms(10);
+        }
+        if (si.si_pid == pid && si.si_code == CLD_EXITED) {
+            eof = xasprintf("MCP subprocess exited with code %d before responding", si.si_status);
+            code = xasprintf("%d", si.si_status);
+        } else if (si.si_pid == pid && (si.si_code == CLD_KILLED || si.si_code == CLD_DUMPED)) {
+            eof = xasprintf("MCP subprocess was killed by %s before responding", sig_name(si.si_status));
+            code = xstrdup(sig_name(si.si_status));
+        } else eof = xstrdup("MCP subprocess closed stdout before responding");
+    }
     pthread_mutex_lock(&s->mu);
-    s->exit_code = code >= 0 ? code : -1;
     s->connected = false;
+    if (eof) {
+        free(s->eof_error);
+        free(s->eof_code);
+        s->eof_error = eof;
+        s->eof_code = code;
+    }
     pthread_cond_broadcast(&s->cv);
     pthread_mutex_unlock(&s->mu);
     return NULL;
@@ -534,14 +574,11 @@ static json_t *mcp_request_ex(mcp_server_t *s, const char *method, json_t *param
             mcp_fail_set(fail, transport_kind(s), "receive", "timeout", false, m, NULL);
             free(m);
         } else {
-            *err = xasprintf("%s: server disconnected", s->name);
-            /* the stdio transport's EOF: the request was written, so it is never replayed */
-            char *m = s->exit_code >= 0 ? xasprintf("MCP subprocess exited with code %d before responding", s->exit_code)
-                                        : xstrdup("MCP subprocess closed stdout before responding");
-            char *c = s->exit_code >= 0 ? xasprintf("%d", s->exit_code) : NULL;
-            mcp_fail_set(fail, "stdio", "receive", "eof", false, m, c);
-            free(m);
-            free(c);
+            /* the stdio transport's EOF (with the subprocess exit status): the request was written, so it is never
+             * replayed */
+            *err = s->eof_error ? xstrdup(s->eof_error) : xasprintf("%s: server disconnected", s->name);
+            mcp_fail_set(fail, "stdio", "receive", "eof", false,
+                         s->eof_error ? s->eof_error : "MCP subprocess closed stdout before responding", s->eof_code);
         }
     }
     for (size_t i = 0; i < s->pending.n; i++) {
@@ -618,7 +655,6 @@ static void *sse_reader(void *p) {
 
 static mcp_server_t *server_new(const char *name, const json_t *cfg) {
     mcp_server_t *s = xcalloc(1, sizeof(*s));
-    s->exit_code = -1;
     s->name = xstrdup(name);
     s->cfg = json_clone(cfg);
     s->refs = 1;
@@ -658,6 +694,8 @@ static void server_free(mcp_server_t *s) {
     server_close(s);
     if (s->child_started) child_close(&s->child);
     if (s->reader_started) pthread_join(s->reader, NULL);
+    free(s->eof_error);
+    free(s->eof_code);
     json_free(s->cfg);
     json_free(s->tools);
     json_free(s->cached_tools);
@@ -1720,6 +1758,42 @@ static void wait_connected(mcp_server_t *s, volatile sig_atomic_t *cancel) {
     pthread_mutex_unlock(&s->mu);
 }
 
+
+/* textCarries: a trimmed text block carries `v` as a verbatim string echo or as JSON deep-equal to it */
+static bool text_carries(const char *trimmed, const json_t *parsed, const json_t *v) {
+    return (json_is_str(v) && !strcmp(trimmed, json_sv(v))) || (parsed && json_equal(parsed, v));
+}
+
+/* structuredContentAlreadyInText (omp 3e2ba2dd2c, 9c44c75c2e): a text block already carries the payload, verbatim
+ * or as the MCP SDK's `{result: value}` wrapper for non-object returns (a wrapped list matches item by item) */
+static bool structured_in_text(const json_t *sc, const json_t *content) {
+    const json_t *wrapped = json_is_obj(sc) && sc->u.obj.n == 1 && !strcmp(sc->u.obj.keys[0], "result") ? sc->u.obj.vals[0] : NULL;
+    size_t nb = 0, cap = json_len(content);
+    char **trims = cap ? xcalloc(cap, sizeof *trims) : NULL;
+    json_t **parsed = cap ? xcalloc(cap, sizeof *parsed) : NULL;
+    bool hit = false;
+    const json_t *c;
+    json_arr_foreach(content, i, c) {
+        if (hit || !str_eq(json_get_str(c, "type"), "text")) continue;
+        char *t = str_trim(json_get_str(c, "text") ? json_get_str(c, "text") : "");
+        json_t *p = json_parse_str(t);
+        if (text_carries(t, p, sc) || (wrapped && text_carries(t, p, wrapped))) hit = true;
+        trims[nb] = t;
+        parsed[nb++] = p;
+    }
+    if (!hit && json_is_arr(wrapped) && nb > 0 && json_len(wrapped) == nb) {
+        hit = true;
+        for (size_t i = 0; i < nb && hit; i++) hit = text_carries(trims[i], parsed[i], json_at(wrapped, i));
+    }
+    for (size_t i = 0; i < nb; i++) {
+        free(trims[i]);
+        json_free(parsed[i]);
+    }
+    free(trims);
+    free(parsed);
+    return hit;
+}
+
 static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     bridge_t *b = self->ud;
     volatile sig_atomic_t *cancel = ctx ? ctx->cancel : NULL;
@@ -1805,31 +1879,64 @@ static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *a
     }
     mcp_fail_free(&fail);
     srv_unref(s);
-    json_t *c;
-    json_arr_foreach(json_get_arr(res, "content"), i, c) {
+    /* formatMCPContent: text (and resource text) joined with blank lines into one block, images as their own
+     * blocks; other item types are dropped; an empty result is one empty text block */
+    json_t *rc = json_get_arr(res, "content"), *c;
+    sb_t text = SB_INIT;
+#define MCP_APPEND(S_)                                                                                    \
+    do {                                                                                                  \
+        if (text.len) sb_append(&text, "\n\n");                                                           \
+        sb_append(&text, (S_));                                                                           \
+    } while (0)
+#define MCP_FLUSH()                                                                                       \
+    do {                                                                                                  \
+        if (text.len) tool_result_text(out, text.s);                                                      \
+        text.len = 0;                                                                                     \
+        if (text.s) text.s[0] = 0;                                                                        \
+    } while (0)
+    json_arr_foreach(rc, i, c) {
         const char *t = json_get_str(c, "type");
-        if (str_eq(t, "text")) tool_result_text(out, json_get_str(c, "text"));
-        else if (str_eq(t, "image")) tool_result_image(out, json_get_str(c, "data"), json_get_str(c, "mimeType"));
-        else if (str_eq(t, "resource")) {
+        if (str_eq(t, "text")) MCP_APPEND(json_get_str(c, "text") ? json_get_str(c, "text") : "");
+        else if (str_eq(t, "image")) {
+            MCP_FLUSH();
+            tool_result_image(out, json_get_str(c, "data"), json_get_str(c, "mimeType"));
+        } else if (str_eq(t, "resource")) {
             json_t *r = json_get(c, "resource");
+            const char *uri = json_get_str(r, "uri") ? json_get_str(r, "uri") : "";
             const char *txt = json_get_str(r, "text");
-            tool_result_textf(out, "[resource %s]\n%s", json_get_str(r, "uri") ? json_get_str(r, "uri") : "", txt ? txt : "(binary)");
-        } else if (str_eq(t, "resource_link")) {
-            tool_result_textf(out, "[resource link %s] %s", json_get_str(c, "uri"), json_get_str(c, "name") ? json_get_str(c, "name") : "");
+            char *line = txt && *txt ? xasprintf("[Resource: %s]\n%s", uri, txt) : xasprintf("[Resource: %s]", uri);
+            MCP_APPEND(line);
+            free(line);
+        }
+    }
+    MCP_FLUSH();
+#undef MCP_APPEND
+#undef MCP_FLUSH
+    sb_free(&text);
+    if (!out->content) tool_result_text(out, "");
+    out->is_error = json_get_bool(res, "isError", false);
+    if (out->is_error) { /* buildResult: an error result leads with "Error: " */
+        json_t *first = json_at(out->content, 0);
+        if (str_eq(json_get_str(first, "type"), "text")) {
+            char *t = xasprintf("Error: %s", json_get_str(first, "text") ? json_get_str(first, "text") : "");
+            json_set_str(first, "text", t);
+            free(t);
         } else {
-            char *d = json_dump(c, 0);
-            tool_result_text(out, d);
-            free(d);
+            json_t *e = json_obj();
+            json_set_str(e, "type", "text");
+            json_set_str(e, "text", "Error:");
+            json_arr_insert(out->content, 0, e);
         }
     }
     json_t *sc = json_get(res, "structuredContent");
-    if (sc && !out->content) {
+    if (json_is_obj(sc) && !structured_in_text(sc, rc)) { /* formatStructuredContent: a fenced JSON block */
         char *d = json_dump(sc, 2);
-        tool_result_text(out, d);
+        char *fenced = xasprintf("```json\n%s\n```", d);
+        tool_result_text(out, fenced);
+        free(fenced);
         free(d);
     }
-    if (!out->content) tool_result_text(out, "(no content)");
-    out->is_error = json_get_bool(res, "isError", false);
+
     out->details = json_obj();
     json_set_str(out->details, "server", b->server);
     json_set_str(out->details, "tool", b->tool);

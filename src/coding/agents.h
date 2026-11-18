@@ -37,8 +37,8 @@ typedef struct {
     const char *name;           /* requested id (CamelCase) or NULL */
     const char *task;
     const char *context;
-    const char *source_session; /* seance */
-    const json_t *model;        /* string or [string] override (seance) */
+    const json_t *model;        /* string or [string] model override (internal callers) */
+    const json_t *steps;        /* task.steps: the rendered step prompts (array of strings), or NULL */
     task_card_t *card;          /* progress card this spawn reports into (NULL: none) */
     int card_index;
 } spawn_spec_t;
@@ -52,10 +52,9 @@ char *agents_run_blocking(tool_env_t *env, const spawn_spec_t *spec, volatile si
 const char *agents_id_of_env(tool_env_t *env); /* registry id of the agent owning env (borrowed) or NULL */
 /* `write agent://<to>[?progress]` from the agent owning env: returns the receipt text (owned) and sets *is_error */
 char *agents_send(tool_env_t *env, const char *to, const char *body, bool progress, bool *is_error);
-/* wait tool: every message queued for the agent owning env, oldest first, as omp IrcMessage rows
- * ({id,from,to,body,ts,broadcast?,progress?}); owned array or NULL when none. Session records (asides, peer steers) are
- * taken only when one of them is a direct message: broadcast legs and progress notes alone stay queued as asides. */
-json_t *agents_take_messages(tool_env_t *env);
+/* wait.ts handOffMail: hand the mail a wait consumed to the caller's session as user turns; true when a message
+ * that ends the wait now waits for the caller (handed over, or a direct one already queued) */
+bool agents_wait_hand_off(tool_env_t *env);
 /* while waiting, direct messages (and a broadcast from an agent in `asked`) queue for the wait tool. `watched`: agents
  * only whose results can end this wait (the awaits hold their reply waits read), or NULL. */
 void agents_wait_enter(tool_env_t *env, const strvec_t *asked, const strvec_t *watched);

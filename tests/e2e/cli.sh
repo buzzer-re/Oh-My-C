@@ -46,12 +46,34 @@ check "cli @missing"      "Error: File not found: $T/work/nope.txt"  "$B" --mode
 check "cli @image"        "plain answer"         bash -c "cd '$T/iwork' && ${IENV[*]} '$B' --model mock/vision-1 --no-session -p @shot.png 'say:x'"
 check "cli @image note"   "[Image: original 3200x1800, displayed at 1568x882."  cat "$T/req.jsonl"
 check "cli @image wire"   '"type": "image_url"'  cat "$T/req.jsonl"
+# --offline keeps every model call on the active session provider: the smol-role side call to another provider is
+# refused (omp 8b9b1ad22f); the flags are listed in --help
+mkdir -p "$T/agent-off/skills/demo" && sed 's/^providers:$/providers:/' "$T/agent/models.yml" > "$T/agent-off/models.yml"
+printf '  mock2:\n    baseUrl: %s\n    apiKey: MOCK_KEY\n    api: openai-completions\n    models:\n      - id: other-1\n' "$(grep -m1 baseUrl "$T/agent/models.yml" | sed 's/.*baseUrl: //')" >> "$T/agent-off/models.yml"
+printf -- '---\nname: demo\ndescription: Demo skill for tests, covering routing hints, previews, compression of long descriptions and the skill URL reads\n---\nB\n' > "$T/agent-off/skills/demo/SKILL.md"
+printf 'modelRoles:\n  smol: mock2/other-1\n' > "$T/agent-off/config.yml"
+: > "$T/req.jsonl"
+OMC_CODING_AGENT_DIR="$T/agent-off" timeout 30 "$B" --model mock/mock-1 --offline -p "say:offline ok" </dev/null >/dev/null 2>&1
+sleep 1
+check "cli offline"       "['mock-1']"  python3 -I -c 'import json,sys; print(sorted(set(json.loads(l)["model"] for l in open(sys.argv[1]))))' "$T/req.jsonl"
+check "cli offline help"  "--offline                         Restrict auxiliary services to the active model's provider (not a network firewall)"  "$B" --help
 # --system-prompt-template replaces the bundled template
 printf 'CUSTOM TEMPLATE for {{cwd}}\n' > "$T/tpl.md"
 : > "$T/req.jsonl"
 check "cli template"      "tplok"                "$B" --model mock/mock-1 --no-session --system-prompt-template "$T/tpl.md" -p "say:tplok"
 check "cli template wire" "CUSTOM TEMPLATE for $T/work"  cat "$T/req.jsonl"
 check "cli template miss" "ENOENT: no such file or directory, open '$T/none.md'"  "$B" --system-prompt-template "$T/none.md" -p x
+# systemPromptTemplates: the longest matching model pattern picks the template file; a missing file falls back to the
+# bundled prompt (omp 8a09723b3f, ea9e49444c, f79f5c869c)
+mkdir -p "$T/agent-spt" && cp "$T/agent/models.yml" "$T/agent-spt/"
+printf 'SHORT {{model}}\n' > "$T/spt-short.md"; printf 'LONG TEMPLATE for {{model}}\n' > "$T/spt-long.md"
+printf 'systemPromptTemplates:\n  "MOCK": %s\n  "mock/mock-1": %s\n  "mock-2": %s\n' "$T/spt-short.md" "$T/spt-long.md" "$T/spt-none.md" > "$T/agent-spt/config.yml"
+: > "$T/req.jsonl"
+OMC_CODING_AGENT_DIR="$T/agent-spt" timeout 30 "$B" --model mock/mock-1 --no-session -p "say:x" </dev/null >/dev/null 2>&1
+check "model template"    "LONG TEMPLATE for mock/mock-1"  cat "$T/req.jsonl"
+: > "$T/req.jsonl"
+OMC_CODING_AGENT_DIR="$T/agent-spt" timeout 30 "$B" --model mock/mock-2 --no-session -p "say:x" </dev/null >/dev/null 2>&1
+check "model template miss" "trusted coding assistant"  cat "$T/req.jsonl"
 # --export (exportFromFile)
 SESS=$(ls -t "$T/agent/sessions"/*/*.jsonl 2>/dev/null | head -1)
 check "cli export"        "Exported to: $T/cli-export.html"  "$B" --export "$SESS" "$T/cli-export.html"
@@ -67,7 +89,7 @@ check "config unknown"    "Unknown setting: nosuch.key"  "$B" config get nosuch.
 check "config set json"   '{"key":"display.showTokenUsage","value":true}'  "$B" config set display.showTokenUsage true --json
 check "config reset"      "Reset display.showTokenUsage to false"  "$B" config reset display.showTokenUsage
 check "config scope"      "Settings in the global layer:"  "$B" config list --scope global
-check "agents unpack"     '"total": 6'           "$B" agents unpack --dir "$T/ag" --json
+check "agents unpack"     '"total": 5'           "$B" agents unpack --dir "$T/ag" --json
 check "agents yaml"       'description: "Plain-text verdict summary, 1-3 sentences"'  cat "$T/ag/reviewer.md"
 check "ssh add"           'Added SSH host "box" to project config'  "$B" ssh add box --host 10.0.0.1 --user me --port 2222
 check "ssh list"          "box  10.0.0.1  me  port:2222"  "$B" ssh list

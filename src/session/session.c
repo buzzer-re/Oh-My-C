@@ -836,9 +836,31 @@ void session_build_context_for(const json_t *path, session_context_t *out) {
 static void build_context_path(const json_t *path, session_context_t *out, const reader_t *rd) {
     size_t n = json_len(path);
     ssize_t boundary = -1, compaction = -1;
+    /* omp ca42dc150a: a retry-fallback hop is ephemeral, so the thinking level it applied (a chain entry's `:level`)
+     * does not outlive it: the level in effect before the first hop wins unless a later change superseded the
+     * hop's own entry */
+    bool have_pre = false, from_hop = false, has_thinking = false;
+    char *pre_thinking = NULL, *pre_configured = NULL;
+    const json_t *prev = NULL;
     for (size_t i = 0; i < n; i++) {
         json_t *e = json_at(path, i);
         const char *t = json_get_str(e, "type");
+        if (str_eq(t, "thinking_level_change")) {
+            has_thinking = true;
+            from_hop = prev && str_eq(json_get_str(prev, "type"), "model_change") && json_get_bool(prev, "resolvedModelIsFallback", false);
+        } else if (str_eq(t, "model_change")) {
+            if (!json_get_bool(e, "resolvedModelIsFallback", false)) {
+                have_pre = false;
+                free(pre_thinking);
+                free(pre_configured);
+                pre_thinking = pre_configured = NULL;
+            } else if (!have_pre && has_thinking) {
+                have_pre = true;
+                pre_thinking = out->thinking ? xstrdup(out->thinking) : NULL;
+                pre_configured = out->thinking_configured ? xstrdup(out->thinking_configured) : NULL;
+            }
+        }
+        prev = e;
         if (str_eq(t, "model_change")) {
             const char *role = json_get_str(e, "role");
             if (!role || !strcmp(role, "default")) {
@@ -863,6 +885,15 @@ static void build_context_path(const json_t *path, session_context_t *out, const
         } else if (str_eq(t, "compaction")) {
             if (session_compaction_readable(e, rd->provider, rd->api)) compaction = (ssize_t)i;
         }
+    }
+    if (have_pre && from_hop) {
+        free(out->thinking);
+        free(out->thinking_configured);
+        out->thinking = pre_thinking;
+        out->thinking_configured = pre_configured;
+    } else {
+        free(pre_thinking);
+        free(pre_configured);
     }
     size_t start = (size_t)(boundary + 1);
     if (compaction >= 0) {

@@ -1261,7 +1261,31 @@ void mr_selector_free(mr_selector_t *s) {
     memset(s, 0, sizeof *s);
 }
 
-static bool parse_selector_lookup(const char *selector, mr_selector_t *out) {
+/* omp 8ddc3e51ce, e8ff8d8f25: a dotted revision spelling (`claude-sonnet-5.5`) adopts its catalog id
+ * (`claude-sonnet-5-5`), so a key or entry the lookup accepts also matches the live model; other aliases keep theirs */
+static void canonical_selector_id(mr_selector_t *s) {
+    if (!s->provider || !s->id || catalog_find(s->provider, s->id)) return;
+    char *want = spelling_key(s->id);
+    const ai_model_t *found = NULL;
+    bool ambiguous = false;
+    for (size_t i = 0; i < catalog_count() && !ambiguous; i++) {
+        const ai_model_t *m = catalog_at(i);
+        if (!m || strcasecmp(m->provider, s->provider) != 0) continue;
+        char *k = spelling_key(m->id);
+        if (!strcmp(k, want)) {
+            if (found && found != m) ambiguous = true;
+            found = m;
+        }
+        free(k);
+    }
+    free(want);
+    if (found && !ambiguous && strcmp(found->id, s->id) != 0) {
+        free(s->id);
+        s->id = xstrdup(found->id);
+    }
+}
+
+static bool parse_selector_raw(const char *selector, mr_selector_t *out) {
     memset(out, 0, sizeof *out);
     char *t = trim_dup(selector, strlen(selector));
     const char *sl = strchr(t, '/');
@@ -1288,6 +1312,12 @@ static bool parse_selector_lookup(const char *selector, mr_selector_t *out) {
     }
     free(base);
     out->id = xstrdup(id);
+    return true;
+}
+
+static bool parse_selector_lookup(const char *selector, mr_selector_t *out) {
+    if (!parse_selector_raw(selector, out)) return false;
+    canonical_selector_id(out);
     return true;
 }
 
@@ -1509,9 +1539,10 @@ static void sel_vec_push(mr_selector_t **v, size_t *n, size_t *cap, mr_selector_
     (*v)[(*n)++] = s;
 }
 
-static bool sel_seen(const mr_selector_t *v, size_t n, const char *raw) {
+/* keyed by catalog identity (provider/id:level), so a respelled entry for a model already in the chain is dropped */
+static bool sel_seen(const mr_selector_t *v, size_t n, const mr_selector_t *s) {
     for (size_t i = 0; i < n; i++)
-        if (!strcmp(v[i].raw, raw)) return true;
+        if (!strcasecmp(v[i].provider, s->provider) && !strcmp(v[i].id, s->id) && v[i].level == s->level) return true;
     return false;
 }
 
@@ -1557,7 +1588,7 @@ static size_t candidates_in(json_t *chains, const char *key, const char *current
             if (!json_is_str(x)) continue;
             mr_selector_t s;
             if (!parse_chain_entry(json_sv(x), has_cur ? &cur : NULL, &s)) continue;
-            if (sel_seen(chain, n, s.raw)) {
+            if (sel_seen(chain, n, &s)) {
                 mr_selector_free(&s);
                 continue;
             }

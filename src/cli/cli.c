@@ -604,6 +604,9 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     else if (A->auto_approve) settings_set_runtime("tools.approvalMode", json_str("yolo"));
     if (A->has_spinner_interval) settings_set_runtime("tui.spinnerInterval", json_num(A->spinner_interval));
     if (A->has_max_fps) settings_set_runtime("tui.maxFps", json_num(A->max_fps));
+    /* main.ts (omp 5bc2903877): print, RPC and ACP hosts serve a caller that outlives the session, so the services a
+     * run starts persist past this process's exit */
+    if (!interactive) settings_set_runtime("launch.persist", json_bool(true));
     if (A->motion) settings_set_runtime("tui.motion", json_str(A->motion));
     if (A->has_warn_cost) settings_set_runtime("session.warnCost", json_num(A->warn_cost));
     if (A->has_max_cost) settings_set_runtime("session.maxCost", json_num(A->max_cost));
@@ -620,6 +623,10 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     if (A->advisor) settings_set_runtime("advisor.enabled", json_bool(true));
     if (A->external_thinking) settings_set_runtime("externalThinking", json_bool(true)); /* ephemeral */
     if (A->no_lsp) settings_set_runtime("lsp.enabled", json_bool(false));
+    /* omp 8b9b1ad22f: runtime overrides, never persisted */
+    if (A->no_judge) settings_set_runtime("models.noJudge", json_bool(true));
+    if (A->no_spotlight) settings_set_runtime("models.noSpotlight", json_bool(true));
+    if (A->offline) settings_set_runtime("models.offline", json_bool(true));
     if (g_force_setup) { /* `omc setup`: every wizard scene, whatever the stored setupVersion */
         settings_set_runtime("setupVersion", json_num(0));
         settings_set_runtime("startup.setupWizard", json_bool(true));
@@ -891,6 +898,12 @@ static int launch_run(launch_args_t *A, bool force_acp) {
         dl.deadline = now_ms() + (int64_t)(A->max_time * 1000);
         app_set_deadline(app, dl.deadline);
         dl_on = pthread_create(&dlt, NULL, deadline_main, &dl) == 0;
+    }
+    if (rpc || print) { /* main.ts: the models.yml findings go to stderr without a TUI */
+        strvec_t warns = {0};
+        catalog_take_models_file_warnings(&warns);
+        for (size_t i = 0; i < warns.n; i++) fprintf(stderr, "Warning: %s\n", warns.v[i]);
+        strvec_free(&warns);
     }
     if (rpc) {
         rc = run_rpc_mode(app);

@@ -203,8 +203,19 @@ static bool row_on_event(json_t *row, int64_t started, const agent_event_t *ev, 
             if (!tot)
                 tot = json_get_int(u, "input", 0) + json_get_int(u, "output", 0) + json_get_int(u, "cacheRead", 0) +
                       json_get_int(u, "cacheWrite", 0);
-            json_set_int(row, "tokens", json_get_int(row, "tokens", 0) + tot);
-            if (tot) json_set_int(row, "contextTokens", tot);
+            /* getUsageTokens: input + output + cacheWrite (cache reads re-read context every turn), else the total */
+            int64_t billed = json_get_int(u, "input", 0) + json_get_int(u, "output", 0) + json_get_int(u, "cacheWrite", 0);
+            json_set_int(row, "tokens", json_get_int(row, "tokens", 0) + (billed > 0 ? billed : json_get_int(u, "totalTokens", 0)));
+            /* usageContextTokens (omp c7588c9257, 7162cde3a8): the occupied context, as compaction counts it: a
+             * reported contextTokens, else the billable total minus provider-side orchestration */
+            int64_t occupied;
+            if (json_get(u, "contextTokens")) occupied = MAX(0, json_get_int(u, "contextTokens", 0));
+            else {
+                const json_t *orc = json_get_obj(u, "orchestration");
+                int64_t ot = orc ? json_get_int(orc, "input", 0) + json_get_int(orc, "output", 0) + json_get_int(orc, "cacheRead", 0) : 0;
+                occupied = MAX(0, tot - ot);
+            }
+            if (occupied > 0) json_set_int(row, "contextTokens", occupied);
             if (context_window > 0) json_set_int(row, "contextWindow", context_window);
             double cost = json_get_num(json_get_obj(u, "cost"), "total", 0);
             json_set_num(row, "cost", json_get_num(row, "cost", 0) + cost);
@@ -674,8 +685,20 @@ static void settle_owned_jobs(app_t *child, volatile sig_atomic_t *cancel) {
 
 /* run one prompt on a child session; returns the last assistant text (owned). `executor`: a task spawn or IRC wake
  * run (lifecycle + progress are reported); a user chat turn from the hub (agents_prompt) is not. */
+static void deliver_step_report(aref_t *r, const char *report);
+
+/* run one prompt on a child session; `steps` (task.steps): the step prompts after `prompt`, each sent once the child
+ * delivered the previous one (a clean final message), its report going to the spawner as a progress note */
+static char *run_turn_steps(aref_t *r, app_t *child, const char *prompt, volatile sig_atomic_t *cancel, bool *aborted,
+                            char **error, bool executor, const char *assignment, const json_t *steps);
+
 static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile sig_atomic_t *cancel, bool *aborted, char **error,
                          bool executor, const char *assignment) {
+    return run_turn_steps(r, child, prompt, cancel, aborted, error, executor, assignment, NULL);
+}
+
+static char *run_turn_steps(aref_t *r, app_t *child, const char *prompt, volatile sig_atomic_t *cancel, bool *aborted,
+                            char **error, bool executor, const char *assignment, const json_t *steps) {
     *aborted = false;
     *error = NULL;
     json_t *lc = NULL;
@@ -715,10 +738,35 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
     agent_subscribe(child->agent, on_child_event, r);
     free(child->cost_refusal);
     child->cost_refusal = NULL;
+    /* executor.ts: a stepped run records the prompts it sent (task-steps entries), for --restore */
+    if (json_len(steps) && child->session) {
+        json_t *d = json_obj();
+        json_set(d, "prompts", json_clone(steps));
+        json_set_int(d, "sent", 1);
+        session_append_custom(child->session, "task-steps", d);
+    }
     bool refused = app_prompt(child, prompt, NULL) == APP_PROMPT_REFUSED;
     settle_owned_jobs(child, cancel);
     /* a focused view's empty Enter forced the queue into the continuation */
     while (agent_take_forced_delivery(child->agent) && agent_run_queued(child->agent) == 0) settle_owned_jobs(child, cancel);
+    for (size_t next = 1; !refused && next < json_len(steps); next++) {
+        /* delivered: a clean final message; a failed, aborted or refused step ends the chain with its result */
+        const json_t *prev = last_assistant(child->agent->messages);
+        if (!str_eq(json_get_str(prev, "stopReason"), "stop") || (cancel && *cancel) || child->cost_refusal) break;
+        char *report = prev ? ai_message_text(prev) : NULL;
+        char *rt = report ? str_trim(report) : NULL;
+        if (rt && *rt) deliver_step_report(r, report);
+        free(rt);
+        free(report);
+        if (child->session) {
+            json_t *d = json_obj();
+            json_set_int(d, "sent", (int64_t)next + 1);
+            session_append_custom(child->session, "task-steps", d);
+        }
+        refused = app_prompt(child, json_sv(json_at(steps, next)), NULL) == APP_PROMPT_REFUSED;
+        settle_owned_jobs(child, cancel);
+        while (agent_take_forced_delivery(child->agent) && agent_run_queued(child->agent) == 0) settle_owned_jobs(child, cancel);
+    }
     agent_unsubscribe(child->agent, on_child_event, r);
     __atomic_store_n(&w.done, 1, __ATOMIC_RELEASE);
     if (watching) pthread_join(wt, NULL);
@@ -881,7 +929,8 @@ typedef struct {
     tool_env_t *env;
     app_t *parent;
     aref_t *ref;
-    char *agent, *task, *context, *source, *model;
+    char *agent, *task, *context, *model;
+    json_t *steps; /* task.steps prompts (owned), NULL without steps */
 } spawn_t;
 
 static void spawn_free(void *p) {
@@ -889,16 +938,15 @@ static void spawn_free(void *p) {
     free(s->agent);
     free(s->task);
     free(s->context);
-    free(s->source);
     free(s->model);
+    json_free(s->steps);
     free(s);
 }
 
 /* a ref's registry status: the main session is `running` while its agent loop runs (syncSessionStatus) */
 static bool ref_live_running(const aref_t *r) { return r->is_main ? r->app && agent_is_running(r->app->agent) : r->running; }
 
-static char *peer_roster_prompt(aref_t *self, const char *agent_body, const char *context, const char *source,
-                                const char *model) {
+static char *peer_roster_prompt(aref_t *self, const char *agent_body, const char *context) {
     json_t *c = json_obj();
     json_set_str(c, "agent", agent_body ? agent_body : "");
     if (context && *context) json_set_str(c, "context", context);
@@ -944,17 +992,6 @@ static char *peer_roster_prompt(aref_t *self, const char *agent_body, const char
     if (omitted) json_set_int(c, "ircOmittedCount", (int64_t)omitted);
     char *s = prompt_render("coding-agent/prompts/system/subagent-system-prompt.md", c);
     json_free(c);
-    if (source) {
-        json_t *sc = json_obj();
-        json_set_str(sc, "sourceSession", source);
-        json_set_str(sc, "model", model ? model : "");
-        char *seance = prompt_render("coding-agent/prompts/system/seance-assignment.md", sc);
-        json_free(sc);
-        char *both = xasprintf("%s\n\n%s", s, seance);
-        free(s);
-        free(seance);
-        s = both;
-    }
     return s;
 }
 
@@ -980,25 +1017,7 @@ static app_t *make_child(spawn_t *sp, char **err) {
         sp->ref->model_override = mo;
         pthread_mutex_unlock(&g_mu);
     }
-    if (sp->source) {
-        char *file = session_resolve(sp->source, sp->env->cwd);
-        session_t *src = file ? session_open(file, err) : NULL;
-        if (!file && !*err) *err = xasprintf("Source session not found: %s", sp->source);
-        free(file);
-        if (!src) {
-            json_free(defs);
-            free(model);
-            return NULL;
-        }
-        session_context_t sc;
-        session_build_context(src, &sc);
-        msgs = sc.messages;
-        sc.messages = NULL;
-        if (!model && sc.model) model = xstrdup(sc.model);
-        session_context_free(&sc);
-        session_free(src);
-    }
-    char *append = peer_roster_prompt(sp->ref, json_get_str(def, "body"), sp->context, sp->source, model);
+    char *append = peer_roster_prompt(sp->ref, json_get_str(def, "body"), sp->context);
     bool ro = agent_def_read_only(def);
     /* the transcript persists next to the parent's artifacts (omp `<artifactsDir>/<id>.jsonl`) */
     const char *adir = sp->parent && sp->parent->env ? artifacts_dir(sp->parent->env->artifacts) : NULL;
@@ -1068,7 +1087,8 @@ static char *task_body_run(bgjob_t *job, void *ud, bool *failed) {
         free(err);
         return s;
     }
-    char *up = tool_subagent_user_prompt(sp->task);
+    /* a stepped spawn starts on its first step prompt; the rest follow it */
+    char *up = tool_subagent_user_prompt(sp->steps ? json_sv(json_at(sp->steps, 0)) : sp->task);
     job_set_output(job, "running");
     pthread_mutex_lock(&g_mu);
     task_card_t *card = card_retain(r->card);
@@ -1098,7 +1118,7 @@ static char *task_body_run(bgjob_t *job, void *ud, bool *failed) {
         agent_append_message(child->agent, m);
     }
     strvec_free(&asides);
-    char *text = run_turn_ex(r, child, up, cancel, &aborted, &error, true, sp->task);
+    char *text = run_turn_steps(r, child, up, cancel, &aborted, &error, true, sp->task, sp->steps);
     free(up);
     permit_release();
     publish_output(r, text, true, !aborted && !error);
@@ -1203,8 +1223,8 @@ static spawn_t *make_spawn(tool_env_t *env, const spawn_spec_t *spec, aref_t *r)
     sp->ref = r;
     sp->agent = xstrdup(spec->agent);
     sp->task = xstrdup(spec->task ? spec->task : "");
+    sp->steps = json_len(spec->steps) ? json_clone(spec->steps) : NULL;
     sp->context = spec->context ? xstrdup(spec->context) : NULL;
-    sp->source = spec->source_session ? xstrdup(spec->source_session) : NULL;
     sp->model = model_of(spec->model);
     return sp;
 }
@@ -1386,7 +1406,8 @@ static void deliver(const char *from, const char *to, const char *body, irc_flag
     /* IrcBus.unansweredSends: a message back answers what `to` asked `from`; progress only promises an answer */
     aref_t *sender = find_locked(from);
     if (sender && !strvec_contains(&sender->sent_run, to)) strvec_push(&sender->sent_run, to);
-    for (size_t i = 0; i < r->owed.n; i++)
+    /* a broadcast leg interrupts a reply wait but answers nothing (omp 131c4981f8: #lastReply skips broadcasts) */
+    for (size_t i = 0; i < r->owed.n && !fl.broadcast; i++)
         if (str_eq(r->owed.v[i].to, from)) {
             if (fl.progress) {
                 r->owed.v[i].promised = true;
@@ -1606,24 +1627,15 @@ static int cmp_irc_ts(const void *a, const void *b) {
     return strcmp(ix ? ix : "", iy ? iy : "");
 }
 
-json_t *agents_take_messages(tool_env_t *env) {
+/* the mail a wait's bus waiter took (oldest first), NULL when none */
+static json_t *agents_take_inbox(tool_env_t *env) {
     const char *self = env_id(env);
     if (!self) return NULL;
     pthread_mutex_lock(&g_mu);
     aref_t *r = find_locked(self);
     json_t *rows = r && r->inbox && json_len(r->inbox) ? r->inbox : NULL;
     if (rows) r->inbox = NULL;
-    app_t *app = r ? r->app : NULL;
     pthread_mutex_unlock(&g_mu);
-    if (app && app->agent) {
-        json_t *recs = agent_take_records(app->agent, is_irc_record, rows ? NULL : irc_record_direct);
-        const json_t *m;
-        json_arr_foreach(recs, i, m) {
-            if (!rows) rows = json_arr();
-            json_push(rows, json_clone(json_get_obj(m, "details")));
-        }
-        json_free(recs);
-    }
     if (!rows) return NULL;
     /* oldest first */
     size_t n = json_len(rows);
@@ -1635,6 +1647,71 @@ json_t *agents_take_messages(tool_env_t *env) {
     for (size_t i = 0; i < n; i++) json_push(rows, v[i]);
     free(v);
     return rows;
+}
+
+/* wait.ts handOffMail (omp 7b42b1be60): the messages a wait consumed become user turns of the caller's own session,
+ * injected right after the wait returns (IrcBridge.deliverIrcMessage while streaming: a parent's message steers through
+ * the parent template, any other one is an agent-attributed irc-incoming record; broadcast legs and progress notes
+ * join as asides). True when a message that ends a wait now waits for the caller: mail handed over here, or a direct
+ * message already queued in its session (IrcBridge.hasInterrupts). */
+bool agents_wait_hand_off(tool_env_t *env) {
+    json_t *rows = agents_take_inbox(env);
+    const char *self = env_id(env);
+    pthread_mutex_lock(&g_mu);
+    aref_t *r = self ? find_locked(self) : NULL;
+    app_t *app = r ? r->app : NULL;
+    char *parent = r && r->parent_id ? xstrdup(r->parent_id) : NULL;
+    pthread_mutex_unlock(&g_mu);
+    if (!app || !app->agent) {
+        free(parent);
+        bool any = json_len(rows) > 0;
+        json_free(rows);
+        return any;
+    }
+    const json_t *row;
+    json_arr_foreach(rows, i, row) {
+        const char *from = json_get_str(row, "from"), *body = json_get_str(row, "body");
+        irc_flags_t fl = {.wake_relay = json_get_bool(row, "wakeRelay", false),
+                          .broadcast = json_get_bool(row, "broadcast", false),
+                          .progress = json_get_bool(row, "progress", false)};
+        bool quiet = fl.broadcast || fl.progress;
+        pthread_mutex_lock(&g_mu);
+        bool from_parent = parent && str_eq(from, parent);
+        bool peer = parent && (fl.broadcast || (!from_parent && !from_descendant_locked(from, self)));
+        pthread_mutex_unlock(&g_mu);
+        json_t *m;
+        if (from_parent && !peer) {
+            json_t *c = json_obj();
+            json_set_str(c, "from", from);
+            json_set_str(c, "message", body);
+            char *txt = prompt_render("coding-agent/prompts/steering/parent-irc.md", c);
+            json_free(c);
+            m = msg_user_text(txt);
+            free(txt);
+            json_t *pi = json_obj();
+            json_set_str(pi, "from", from);
+            json_set_str(pi, "body", body);
+            json_set(m, "parentIrc", pi);
+        } else {
+            char *txt = render_irc(from, body, json_get_str(row, "replyTo"), fl.progress, !quiet, false);
+            m = msg_user_text(txt);
+            free(txt);
+            json_set(m, "details", json_clone(row));
+            json_set_str(m, "customType", "irc");
+        }
+        json_set_str(m, "attribution", "agent");
+        json_set_bool(m, "synthetic", true);
+        if (quiet) agent_aside(app->agent, m);
+        else agent_steer(app->agent, m);
+    }
+    free(parent);
+    bool handed = json_len(rows) > 0;
+    json_free(rows);
+    if (handed) return true;
+    json_t *direct = agent_peek_records(app->agent, is_irc_record, irc_record_direct);
+    bool queued = json_len(direct) > 0;
+    json_free(direct);
+    return queued;
 }
 
 void agents_wait_enter(tool_env_t *env, const strvec_t *asked, const strvec_t *watched) {
@@ -2371,4 +2448,39 @@ json_t *agents_job_tree(app_t *root, size_t recent_limit) {
     json_set(out, "recent", recent);
     json_set(out, "agents", agents);
     return out;
+}
+
+/* settingsAwareStreamFn (omp 8b9b1ad22f): with models.offline a model call to any provider other than the active
+ * session's is refused (owned message), NULL when allowed */
+char *agents_offline_call_error(const char *provider) {
+    if (!settings_bool("models.offline", false)) return NULL;
+    char *active = NULL;
+    pthread_mutex_lock(&g_mu);
+    for (size_t i = 0; i < g_refs.n && !active; i++)
+        if (g_refs.v[i]->is_main && g_refs.v[i]->app && g_refs.v[i]->app->model) active = xstrdup(g_refs.v[i]->app->model->provider);
+    pthread_mutex_unlock(&g_mu);
+    bool ok = active && provider && !strcmp(active, provider);
+    free(active);
+    return ok ? NULL : xstrdup("Offline mode restricts model calls to the active session provider.");
+}
+
+/* sendStepReport: what the child delivered for a prompt before the last reaches its spawner as an IRC progress note */
+static void deliver_step_report(aref_t *r, const char *report) {
+    pthread_mutex_lock(&g_mu);
+    char *from = xstrdup(r->id), *to = r->parent_id ? xstrdup(r->parent_id) : NULL;
+    pthread_mutex_unlock(&g_mu);
+    if (to) {
+        json_t *c = json_obj();
+        json_set_str(c, "report", report);
+        char *body = prompt_render("coding-agent/prompts/system/subagent-step-report.md", c);
+        json_free(c);
+        const char *oc = NULL;
+        char *err = NULL;
+        deliver(from, to, body ? body : report, (irc_flags_t){.progress = true}, &oc, &err);
+        if (!oc) LOGW("Step report not delivered (%s -> %s): %s", from, to, err ? err : "?");
+        free(err);
+        free(body);
+    }
+    free(from);
+    free(to);
 }

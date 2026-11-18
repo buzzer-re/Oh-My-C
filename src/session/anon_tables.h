@@ -559,7 +559,7 @@ static const char *const ANON_BUILTIN_TOOLS[] = {
 };
 
 static const char *const ANON_BUNDLED_AGENTS[] = {
-    "scout", "reviewer", "security-reviewer", "seance", "task", "sonic",
+    "scout", "reviewer", "security-reviewer", "task", "sonic",
     NULL,
 };
 

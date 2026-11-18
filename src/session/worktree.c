@@ -429,6 +429,7 @@ int session_wt_snapshot(const session_wt_t *w, session_wt_state_t *st, char **er
 
 const char *session_wt_decide_exit(const char *policy, const session_wt_state_t *st) {
     if (str_eq(policy, "keep")) return "keep";
+    if (str_eq(policy, "force")) return "remove"; /* omp ef540f208c: every session-created worktree, without asking */
     if (str_eq(policy, "remove") && !st->dirty && !st->moved && !st->off_branch) return "remove";
     return "prompt";
 }
@@ -452,7 +453,7 @@ char *session_wt_remove_planned(const session_wt_t *w, const char *approved) {
     if (session_wt_snapshot(w, &st, &err) != 0) return err;
     char *sp = path_display(w->path, NULL);
     char *msg = NULL;
-    if (st.present && !str_eq(st.fingerprint, approved)) {
+    if (st.present && approved && !str_eq(st.fingerprint, approved)) { /* NULL (force): removed regardless */
         msg = xasprintf("Kept worktree %s: it changed while the session was closing.", sp);
         goto out;
     }

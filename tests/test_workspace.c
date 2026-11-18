@@ -121,6 +121,7 @@ static void test_worktree_helpers(void) {
     CHECK(str_eq(session_wt_decide_exit("keep", &dirty), "keep"), "keep");
     CHECK(str_eq(session_wt_decide_exit("remove", &clean), "remove"), "remove clean");
     CHECK(str_eq(session_wt_decide_exit("remove", &dirty), "prompt"), "remove dirty prompts");
+    CHECK(str_eq(session_wt_decide_exit("force", &dirty), "remove"), "force removes a dirty worktree"); /* omp ef540f208c */
     CHECK(str_eq(session_wt_decide_exit("ask", &clean), "prompt"), "ask prompts");
     char *m = session_wt_exit_message(&w, &dirty);
     CHECK(str_eq(m, "/w/wt-1 (feat): has uncommitted changes; has new commits (branch is kept)"), "%s", m);

@@ -13,6 +13,8 @@ size_t ttsr_rule_count(const ttsr_t *t);
 
 /* Reset stream buffers (call at the start of each assistant attempt). */
 void ttsr_reset(ttsr_t *t);
+/* TtsrCoordinator.onTurnEnd: one more completed turn for the repeat gap */
+void ttsr_turn_end(ttsr_t *t);
 /* Feed a streaming event. Returns true when the stream must be interrupted now. */
 bool ttsr_on_event(ttsr_t *t, const ai_event_t *ev);
 /* After an interrupt: owned injection text (ttsr-interrupt.md for each pending rule) or NULL; clears pending

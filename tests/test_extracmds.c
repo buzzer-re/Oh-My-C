@@ -70,8 +70,8 @@ static void test_entries(void) {
     free(md);
     v = (changelog_view_t){CHANGELOG_LAST, 2};
     md = changelog_markdown(&v, &shown);
-    CHECK(shown == 2 && md && !strncmp(md, "## [18.21.0]", 12)); /* oldest first */
-    CHECK(md && strstr(md, "\n\n## [18.22.0]") != NULL);
+    CHECK(shown == 2 && md && !strncmp(md, "## [18.22.0]", 12)); /* newest first (omp 38523878d4) */
+    CHECK(md && strstr(md, "\n\n## [18.21.0]") != NULL);
     free(md);
     v = (changelog_view_t){CHANGELOG_FULL, 0};
     md = changelog_markdown(&v, &shown);

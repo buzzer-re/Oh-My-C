@@ -361,6 +361,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
     title_on_event(a, ev);
     if (a->advisor) advisor_on_event(a->advisor, ev);
     autolearn_on_event(a->autolearn, ev);
+    if (ev->type == AGENT_EV_TURN_END) ttsr_turn_end(a->ttsr);
     if (ev->type == AGENT_EV_TURN_START || ev->type == AGENT_EV_MESSAGE_START) {
         if (ev->type == AGENT_EV_TURN_START || str_eq(json_get_str(ev->message, "role"), "assistant")) ttsr_reset(a->ttsr);
         if (ev->type == AGENT_EV_MESSAGE_START && str_eq(json_get_str(ev->message, "role"), "assistant"))
@@ -1349,6 +1350,29 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     bool flagged = false; /* providers mark opaque overflow errors (Devin large-history invalid_argument) */
     json_t *fl;
     json_arr_foreach(json_get(assistant, "errorFlags"), fi, fl) flagged = flagged || str_eq(json_sv(fl), "contextOverflow");
+    /* omp 44a52fe4f5: an overflow known only from the error text while the live context fits the model's usable
+     * window is some other rejection (a local server's prefill memory guard): compaction cannot help, the fallback
+     * chain can, so it is consulted like any other hard error */
+    bool text_overflow_fits = false;
+    if (!flagged && is_overflow(assistant) && a->model && a->model->context_window > 0) {
+        const json_t *u = json_get_obj(assistant, "usage");
+        int64_t in = u ? (json_get(u, "contextTokens") ? json_get_int(u, "contextTokens", 0)
+                                                        : json_get_int(u, "input", 0) + json_get_int(u, "cacheRead", 0) +
+                                                              json_get_int(u, "cacheWrite", 0))
+                       : 0;
+        text_overflow_fits = in <= a->model->context_window && cmp_context_fits_model(a, a->model, assistant);
+    }
+    if (text_overflow_fits && !is_abort_error(err) && settings_bool("retry.enabled", true) &&
+        settings_bool("retry.modelFallback", true) && mr_fallback_admits(is_usage_limit(err))) {
+        char *cur = current_selector(a);
+        bool switched = try_retry_fallback(a, ag, cur, assistant, err, false);
+        free(cur);
+        if (switched) {
+            a->retry_offset = attempt + 1;
+            strvec_push(&a->retry_notes, "switched model; retried");
+            return AGENT_RETRY_REPLAY;
+        }
+    }
     if ((flagged || is_overflow(assistant)) && !a->compacting) {
         /* overflow recovery: the method ladder with a retry of the failed turn (session-maintenance.ts) */
         int64_t billed = 0;
@@ -1760,6 +1784,7 @@ void app_rebuild_system_prompt(app_t *a) {
                            .disc = &listed,
                            .custom_prompt = a->sys_custom,
                            .custom_template = a->opts.subagent ? NULL : a->opts.system_prompt_template,
+                           .model_key = a->model ? label : NULL,
                            .append_prompt = a->sys_append,
                            .subagent = a->opts.subagent,
                            .skill_desc = skilldesc_render,
@@ -3831,6 +3856,13 @@ static void app_reset_tool_state(app_t *a) {
     if (a->lsp) lsp_manager_reset_ledger(a->lsp);
 }
 
+/* omp 345271b1b4: a session transition releases the previous session's eval kernel */
+static void app_release_eval(app_t *a) {
+    if (!a->agent) return;
+    for (size_t i = 0; i < a->agent->all_tools.n; i++)
+        if (!strcmp(a->agent->all_tools.v[i]->name, "eval")) eval_release_session(a->agent->all_tools.v[i]);
+}
+
 int app_new_session(app_t *a) {
     session_t *ns = a->opts.no_session ? session_in_memory(a->cwd) : session_create(a->cwd, a->opts.session_dir);
     session_free(a->session);
@@ -3861,6 +3893,7 @@ int app_new_session(app_t *a) {
     app_reset_tool_state(a);
     app_goal_restore(a);
     prewalk_new_session(a);
+    app_release_eval(a);
     return 0;
 }
 
@@ -3878,6 +3911,7 @@ int app_switch_session(app_t *a, const char *path, char **err) {
     costgate_reseed(a);
     app_reset_tool_state(a);
     app_goal_restore(a);
+    app_release_eval(a);
     return 0;
 }
 
@@ -3893,6 +3927,7 @@ int app_fork_from(app_t *a, const char *entry_id, char **err) {
     app_bind_artifacts(a, old_dir);
     free(old_dir);
     load_session_into_agent(a);
+    app_release_eval(a);
     return 0;
 }
 

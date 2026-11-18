@@ -17,6 +17,7 @@
 #define ARGUMENT_SUMMARY_LIMIT 400
 #define MID_RUN_NUDGE_MUTATION_THRESHOLD 12
 #define MID_RUN_NUDGE_MAX_PER_CYCLE 2
+#define MID_RUN_NUDGE_BACKOFF_DOUBLINGS 4
 #define UNEXPECTED_STOP_MAX_RETRIES 3
 #define UNEXPECTED_STOP_TIMEOUT_MS 15000
 #define EMPTY_STOP_MAX_RETRIES 3
@@ -155,6 +156,55 @@ static bool exempt_tool(const char *name) {
     return false;
 }
 
+/* unwrapHashlineHeaderPath: `[PATH]` / `[PATH#XXXX]` -> PATH (owned) */
+static char *unwrap_header_path(const char *p) {
+    size_t n = strlen(p);
+    while (n && isspace((unsigned char)p[n - 1])) n--;
+    if (n < 2 || p[0] != '[' || p[n - 1] != ']') return xstrdup(p);
+    char *inner = xstrndup(p + 1, n - 2);
+    size_t il = strlen(inner);
+    bool tagged = il >= 5 && inner[il - 5] == '#';
+    for (size_t i = il >= 4 ? il - 4 : 0; tagged && i < il; i++) tagged = isxdigit((unsigned char)inner[i]) != 0;
+    if (tagged) inner[il - 5] = 0;
+    if (!*inner || (!tagged && strchr(inner, '#'))) {
+        free(inner);
+        return xstrdup(p);
+    }
+    return inner;
+}
+
+/* resolve.ts writeDeviceName (omp 7a6f101b82): the `xd://<device>` a write dispatches to, so an exemption names the
+ * device without exempting every write (owned, NULL when the call is no device write) */
+static char *write_device_name(const json_t *call) {
+    if (!str_eq(json_get_str(call, "name"), "write")) return NULL;
+    const json_t *args = json_get(call, "arguments");
+    const char *path = json_get_str(args, "path") ? json_get_str(args, "path") : json_get_str(args, "file_path");
+    if (!path) return NULL;
+    char *target = unwrap_header_path(path);
+    char *name = NULL;
+    /* splitUrlScheme: a scheme at the very start; parseXdUrl then trims */
+    const char *q = target;
+    if (isalpha((unsigned char)*q)) {
+        while (isalnum((unsigned char)*q) || *q == '+' || *q == '.' || *q == '-') q++;
+        if (!strncmp(q, "://", 3) && (size_t)(q - target) == 2 && !strncasecmp(target, "xd", 2)) {
+            char *t = str_trim(target);
+            const char *n = t + 5;
+            if (*n && !strpbrk(n, "/?#")) name = xstrdup(n);
+            free(t);
+        }
+    }
+    free(target);
+    return name;
+}
+
+static bool exempt_call(const json_t *call) {
+    if (exempt_tool(json_get_str(call, "name"))) return true;
+    char *dev = write_device_name(call);
+    bool r = dev && exempt_tool(dev);
+    free(dev);
+    return r;
+}
+
 static const json_t *find_result(const json_t *results, const char *id) {
     json_t *r;
     json_arr_foreach(results, i, r) if (str_eq(json_get_str(r, "toolCallId"), id)) return r;
@@ -184,7 +234,7 @@ static void loop_guard_turn(app_t *a, const json_t *msg, const json_t *results) 
     }
     bool all_exempt = true;
     json_t *c;
-    json_arr_foreach(calls, i, c) all_exempt = all_exempt && exempt_tool(json_get_str(c, "name"));
+    json_arr_foreach(calls, i, c) all_exempt = all_exempt && exempt_call(c);
     if (all_exempt) {
         /* an idle exempt poll (every result flagged useless) does not end the repetition */
         bool idle = true;
@@ -223,7 +273,7 @@ static void loop_guard_turn(app_t *a, const json_t *msg, const json_t *results) 
         return;
     }
     const json_t *report = json_at(calls, 0);
-    json_arr_foreach(calls, i, c) if (!exempt_tool(json_get_str(c, "name"))) {
+    json_arr_foreach(calls, i, c) if (!exempt_call(c)) {
         report = c;
         break;
     }
@@ -313,7 +363,14 @@ void guards_mid_run_nudge(app_t *a, const agent_event_t *ev) {
     json_t *blk;
     json_arr_foreach(json_get(ev->message, "content"), i, blk) has_tools = has_tools || str_eq(json_get_str(blk, "type"), "toolCall");
     if (!has_tools) return; /* a turn boundary inside the run, not the stop */
-    if (g->todo_mutations < MID_RUN_NUDGE_MUTATION_THRESHOLD || g->todo_nudges >= MID_RUN_NUDGE_MAX_PER_CYCLE) return;
+    /* todo.midRunNudges (omp a80b985192, dab28d7222): off, capped (twice per cycle at 12) or backoff (12, 24, 48, 96,
+     * then every 192 mutating results) */
+    const char *mode = settings_str("todo.midRunNudges", "capped");
+    if (str_eq(mode, "off")) return;
+    bool backoff = str_eq(mode, "backoff");
+    if (!backoff && g->todo_nudges >= MID_RUN_NUDGE_MAX_PER_CYCLE) return;
+    int threshold = MID_RUN_NUDGE_MUTATION_THRESHOLD << (backoff ? MIN(g->todo_nudges, MID_RUN_NUDGE_BACKOFF_DOUBLINGS) : 0);
+    if (g->todo_mutations < threshold) return;
     if (!settings_bool("todo.reminders", true) || a->plan_mode || !todo_active(a)) return;
     size_t n = 0;
     json_t *inc = incomplete_by_phase(a, &n);

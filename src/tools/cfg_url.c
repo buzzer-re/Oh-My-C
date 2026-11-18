@@ -415,11 +415,25 @@ static bool layer_in(const char *owner, const char *const *above, size_t n) {
     return false;
 }
 
+/* keepsGlobalListEntries (omp f869369d81): a project or `--config` overlay list of a `merge: "prepend"` setting
+ * (bash.patterns, bashInterceptor.patterns) adds its entries in front of the global ones instead of replacing them,
+ * unless it is empty: the global list then still takes effect */
+static bool keeps_global_list_entries(const setting_t *s, const char *owner, const json_t *eff, const json_t *global) {
+    if (strcmp(owner, "project") != 0 && strcmp(owner, "overlay") != 0) return false;
+    if (strcmp(s->id, "bash.patterns") != 0 && strcmp(s->id, "bashInterceptor.patterns") != 0) return false;
+    if (!json_is_arr(eff) || !json_is_arr(global) || json_len(eff) <= json_len(global)) return false;
+    size_t off = json_len(eff) - json_len(global);
+    json_t *x;
+    json_arr_foreach(global, i, x) if (!values_equal(json_at(eff, off + i), x)) return false;
+    return true;
+}
+
 /* shadowingLayer against the effective settings: the owning layer when it keeps `value` from taking effect */
 static const char *shadowing(const setting_t *s, const json_t *value, const char *const *above, size_t n) {
     const char *owner = settings_provenance(s->id);
     if (!layer_in(owner, above, n)) return NULL;
     const json_t *eff = s_value(s);
+    if (keeps_global_list_entries(s, owner, eff, value)) return NULL;
     if (!json_is_obj(value) || !json_is_obj(eff)) return values_equal(eff, value) ? NULL : owner;
     const char *k;
     json_t *v;
@@ -431,8 +445,10 @@ static const char *shadowing(const setting_t *s, const json_t *value, const char
 static const char *save_shadowing(const setting_t *s, const json_t *value, const char *const *above, size_t n) {
     const char *owner = settings_provenance(s->id);
     const json_t *eff = s_value(s);
-    if (!layer_in(owner, above, n) || !json_is_obj(value) || !json_is_obj(eff)) return shadowing(s, value, above, n);
     const json_t *global = json_path(settings_global(), s->id);
+    if (layer_in(owner, above, n) && keeps_global_list_entries(s, owner, eff, global ? global : json_get(s->def, "default")))
+        return NULL;
+    if (!layer_in(owner, above, n) || !json_is_obj(value) || !json_is_obj(eff)) return shadowing(s, value, above, n);
     const char *k;
     json_t *v;
     json_obj_foreach(value, i, k, v) {

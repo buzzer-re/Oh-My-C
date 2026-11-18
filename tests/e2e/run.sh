@@ -60,6 +60,8 @@ check "xd listing"     "mounted tool devices"             "$B" --model mock/mock
 check "xd docs"        "type Args = {"                    "$B" --model mock/mock-1 -p "read:xd://debug"
 check "xd dispatch"    "Invalid args for xd://lsp: Validation failed" "$B" --model mock/mock-1 -p 'call:write:{"path":"xd://lsp","content":"{\"action\":\"bogus\"}"}'
 check "xd report"      "Noted, thanks!"                   "$B" --model mock/mock-1 -p 'call:write:{"path":"xd://report_issue","content":"read: wrong output"}'
+# a device called with the xd:// prefix spelled in underscores dispatches to it (omp dd536ce059)
+check "xd underscore call" "debug session"                "$B" --model mock/mock-1 -p 'call:xd__debug:{"action":"sessions"}'
 check "glob tool"      $'Tool said: # a/\nb.txt'          "$B" --model mock/mock-1 -p "glob:**/*.txt"
 check "grep tool"      "*1:written by omc"               "$B" --model mock/mock-1 -p "grep:written"
 # grep / glob result text as omp words it (grouped path tree, errors, empty results)
@@ -79,6 +81,9 @@ env OMC_CODING_AGENT_DIR="$T/agent-img" "$B" --model mock/mock-1 -p "attach:read
 # (the last request carrying a tool result: a background skill-description compression may be logged after it)
 check "attachment read" "Read image file [image/"  python3 -I -c 'import json,sys; r=[x for x in map(json.loads, open(sys.argv[1])) if any(m.get("role") == "tool" for m in x.get("messages", []))][-1]; print([m["content"] for m in r["messages"] if m.get("role") == "tool"][-1])' "$T/req.jsonl"
 check "attachment list" "Available attachment URIs: attachment://1."  env OMC_CODING_AGENT_DIR="$T/agent-img" "$B" --model mock/mock-1 -p "attach:read:attachment://3" @red.png
+# an input modality the catalog cannot express is dropped with a warning instead of failing models.yml (omp 69dbcc599f)
+mkdir -p "$T/agent-vid" && sed 's/^\(      - id: mock-1\)$/\1\n        input: [text, video]/' "$T/agent/models.yml" > "$T/agent-vid/models.yml"
+check "models.yml modality" "Warning: $T/agent-vid/models.yml: provider \"mock\", model \"mock-1\": input modality \"video\" is not supported yet (allowed: text, image) — ignoring"  env OMC_CODING_AGENT_DIR="$T/agent-vid" "$B" --model mock/mock-1 -p "say:modality ok"
 rm -f "$T/work/red.png"
 check "grep file"      $'[a/b.txt#'                      "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"written","path":"a/b.txt:1-5"}'
 check "grep no match"  "Tool said: No matches found"     "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"zzq_none"}'
@@ -225,13 +230,45 @@ check "todo errors"    $'Errors: Task "nope" not found\nRemaining items (1):'  p
 check "todo append"    $'  - a [in_progress] (A)\n  - c [pending] (A)\n  - b [pending] (Tasks)'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p 'call:todo:{"op":"append","phase":"","items":["x"]}' >/dev/null 2>&1 </dev/null
 check "todo append ''" 'Errors: Missing phase name for append operation'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+# launch.persist (omp 5bc2903877): a print-mode run starts its services persistent, so they outlive the process
+"$B" --model mock/mock-1 --no-session -p 'call:bash:{"command":"sleep 3","name":"e2e-persist"}' </dev/null >/dev/null 2>&1
+check "service persists" '"persist": true'  bash -c "cat \$(find '$T/agent' -name '*.json' -path '*e2e-persist*' | head -1)"
+# todo.midRunNudges (omp a80b985192, dab28d7222): 26 bash results after a todo init nudge twice when capped (at 12, 24),
+# once with backoff (12, then 36) and never when off
+NUDGE_SCRIPT=$(python3 -I -c 'import json; print("calls:"+json.dumps([["todo",{"op":"init","items":["a","b"]}]]+[["bash",{"command":"echo %d"%i}] for i in range(26)]))')
+for mode in off capped backoff; do
+    mkdir -p "$T/ag-nudge-$mode"; cp "$T/agent/models.yml" "$T/ag-nudge-$mode/"
+    printf 'todo:\n  midRunNudges: %s\n' "$mode" > "$T/ag-nudge-$mode/config.yml"
+    OMC_CODING_AGENT_DIR="$T/ag-nudge-$mode" timeout 120 "$B" --model mock/mock-1 --no-session -p "$NUDGE_SCRIPT" </dev/null >/dev/null 2>&1
+    check "todo nudges $mode" "nudges=$(case $mode in off) echo 0;; capped) echo 2;; *) echo 1;; esac) tools=27" python3 -I -c 'import json,sys; r=[x for x in map(json.loads, open(sys.argv[1])) if x.get("tools")][-1]["messages"]; print("nudges=%d tools=%d" % (sum("todo items still open" in json.dumps(m) for m in r), sum(m.get("role") == "tool" for m in r)))' "$T/req.jsonl"
+done
 "$B" --model mock/mock-1 --no-session -p 'call:task:{}' >/dev/null 2>&1 </dev/null
 check "task shape"     'Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+# task.steps: items take ordered steps; each prompt goes out once the previous one was delivered, earlier reports reach
+# the spawner as progress notes (omp 02e8cb9939)
+mkdir -p "$T/steps" && cp "$T/agent/models.yml" "$T/steps/" && printf 'task:\n  steps: true\n' > "$T/steps/config.yml"
+STEPS='calls:'$(python3 -I -c 'import json; print(json.dumps([["task",{"context":"ctx","tasks":[{"steps":["first stage","second stage"],"solutionSpace":"one fix"}]}],["wait",{}]]))')
+: > "$T/req.jsonl"; OMC_CODING_AGENT_DIR="$T/steps" timeout 120 "$B" --model mock/mock-1 --no-session -p "$STEPS" </dev/null >/dev/null 2>&1
+check "task steps" "steps schema True, step 2 True, report True" python3 -I -c '
+import json,sys
+rs=[json.loads(l) for l in open(sys.argv[1])]
+main=[r for r in rs if r.get("tools") and any("calls:" in json.dumps(m) for m in r["messages"][:3])]
+task=[t for t in main[0]["tools"] if t["function"]["name"]=="task"][0]["function"]["parameters"]
+subs=[r for r in rs if any("# Step 1 of 2" in json.dumps(m) for m in r["messages"])]
+s2=bool(subs) and any(m.get("role")=="user" and json.dumps(m).find("# Step 2 of 2\\nsecond stage\\nLast step") >= 0 for m in subs[-1]["messages"])
+rep=any("Finished a step; the next one is underway" in json.dumps(m) for r in main for m in r["messages"])
+print("steps schema %s, step 2 %s, report %s" % ("steps" in json.dumps(task), s2, rep))' "$T/req.jsonl"
+# task.file is gone; a task item takes `task` or `steps` (omp 02e8cb9939)
+"$B" --model mock/mock-1 --no-session -p 'call:task:{"context":"c","tasks":[{"task":"a","steps":["x"]}]}' >/dev/null 2>&1 </dev/null
+check "task or steps"  'Task 1 takes `task` or `steps`, not both.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --no-session -p 'call:task:{"context":"c","tasks":[]}' >/dev/null 2>&1 </dev/null
+check "task empty batch" 'Missing `tasks`. Provide at least one task item with `task`.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p "bash:sh -c 'kill -9 \$\$'; printf 'x'; sh -c 'kill -SEGV \$\$'; echo after-kill" >/dev/null 2>&1 </dev/null
 check "bash no notice" "xafter-kill"  python3 -I -c "$LASTMSG; import re; sys.exit(1) if re.search('Killed|Segmentation', c) else None" "$T/req.jsonl"
 # skills + internal URLs + context files
 mkdir -p "$T/agent/skills/demo"
-printf -- '---\nname: demo\ndescription: Demo skill for tests\n---\nSKILL BODY LINE\n' > "$T/agent/skills/demo/SKILL.md"
+# (a description past the 100-char preview budget: a shorter one is used verbatim, never compressed (omp d36f905ad4))
+printf -- '---\nname: demo\ndescription: Demo skill for tests, covering routing hints, previews, compression of long descriptions and the skill URL reads\n---\nSKILL BODY LINE\n' > "$T/agent/skills/demo/SKILL.md"
 printf 'Project rule: always test.\n' > AGENTS.md
 check "skill url"      "SKILL BODY LINE"  "$B" --model mock/mock-1 -p "read:skill://demo"
 check "unknown skill"  $'Unknown skill: nope\nAvailable: demo'  "$B" --model mock/mock-1 -p "read:skill://nope"
@@ -294,6 +331,10 @@ out=$("${NOCRED[@]}" "$B" -p "hello" --model noauth/mock-1 2>&1 </dev/null); nrc
 printf 'bash:\n  autoBackground:\n    enabled: true\n    thresholdMs: 300\n' > "$T/agent/config.yml"
 check "bash auto-background" "plain answer"  "$B" --model mock/mock-1 --no-session -p "bash:sleep 2; echo finished"
 rm -f "$T/agent/config.yml"
+# an overflow known only from the error text while the context fits walks the fallback chain (omp 44a52fe4f5)
+mkdir -p "$T/prefill" && sed 's/^\(      - id: mock-2\)$/      - id: mock-prefill\n        contextWindow: 100000\n        maxTokens: 4096\n\1/' "$T/agent/models.yml" > "$T/prefill/models.yml"
+printf 'retry:\n  fallbackChains:\n    mock/mock-prefill:\n      - mock/mock-1\n' > "$T/prefill/config.yml"
+check "text overflow chain" "prefill fallback ok"  env OMC_CODING_AGENT_DIR="$T/prefill" "$B" --model mock/mock-prefill --no-session -p "say:prefill fallback ok"
 # retry model fallback: a rate-limited model walks retry.fallbackChains
 printf 'retry:\n  fallbackChains:\n    mock/mock-flaky:\n      - mock/mock-2\n' > "$T/agent/config.yml"
 out=$(timeout 60 "$B" --model mock/mock-flaky -p "bash:echo fb-ok" </dev/null 2>&1)
@@ -341,12 +382,25 @@ n=$(grep -c "Please retry in 100ms" "$T/req-tr.jsonl"); ms=$(( (s1 - s0) / 10000
 (( n == 12 && ms >= 1400 && ms < 8000 )) && echo "   ok  transport retry hint from the body" || { echo "   FAIL transport retry hint: $n requests in $ms ms: $out"; fail=1; }
 kill $TR_MPID 2>/dev/null; wait $TR_MPID 2>/dev/null
 grep -q "Project rule: always test." "$T/req.jsonl" && echo "   ok  AGENTS.md in prompt" || { echo "   FAIL AGENTS.md in prompt"; fail=1; }
+# a context file that leaves a code fence open has it closed at its end (omp e11a302d3a)
+mkdir -p "$T/fence" && printf 'Use this:\n\n```sh\nmake  test   \n' > "$T/fence/AGENTS.md"
+(cd "$T/fence" && timeout 30 "$B" --model mock/mock-1 --no-session -p "say:fenced" </dev/null >/dev/null 2>&1)
+check "context fence closed" 'make  test\n```\n</file>'  cat "$T/req.jsonl"
 # TTSR: a stream-triggered rule interrupts, injects and retries
 mkdir -p .omc/rules
 printf -- '---\ndescription: no forbidden word\ncondition: "FORBIDDEN"\nscope: text\n---\nNever say the forbidden word.\n' > .omc/rules/no-forbidden.md
 check "ttsr retry"     "complied with rule"  "$B" --model mock/mock-1 -p "say:this is FORBIDDEN text"
 grep -q 'Never say the forbidden word' "$T/req.jsonl" && echo "   ok  ttsr injection sent" || { echo "   FAIL ttsr injection sent"; fail=1; }
 check "builtin rule"   "Box::leak"  "$B" --model mock/mock-1 -p "write:src/x.rs:fn f() { Box::leak(v); }"
+# TTSR repeat policy (omp 8c71a84a79, ba99634f57, e792797d1c): a rule's repeatMode frontmatter overrides
+# ttsr.repeatMode; once fires once, always every turn, after-gap every ttsr.repeatGap (2) completed turns
+for mode in once always after-gap; do
+    mkdir -p "$T/rep-$mode/.omc/rules" "$T/rep-$mode/agent"
+    printf -- '---\ndescription: no forb\ncondition: "FORB"\nscope: tool:bash\ninterruptMode: never\nrepeatMode: %s\n---\nAvoid the forb marker.\n' $mode > "$T/rep-$mode/.omc/rules/forb.md"
+    cp "$T/agent/models.yml" "$T/rep-$mode/agent/"; printf 'ttsr:\n  repeatGap: 2\n' > "$T/rep-$mode/agent/config.yml"
+    (cd "$T/rep-$mode" && OMC_CODING_AGENT_DIR="$T/rep-$mode/agent" timeout 60 "$B" --model mock/mock-1 --no-session -p 'seq:[["bash",{"command":"echo FORB1"}],["bash",{"command":"echo FORB2"}],["bash",{"command":"echo FORB3"}]]' </dev/null >/dev/null 2>&1)
+    check "ttsr repeat $mode" "reminders=$(case $mode in once) echo 1;; always) echo 3;; *) echo 2;; esac)" python3 -I -c 'import json,sys; r=[x for x in map(json.loads, open(sys.argv[1])) if x.get("tools")][-1]["messages"]; print("reminders=%d" % sum("Avoid the forb marker" in json.dumps(m) for m in r if m.get("role")=="tool"))' "$T/req.jsonl"
+done
 # MCP stdio server bridged as mcp__<server>_<tool>
 printf '{"mcpServers":{"mockmcp":{"command":"python3","args":["-I","%s"]}}}' "$ROOT/tests/e2e/mock_mcp.py" > "$T/agent/mcp.json"
 check "mcp tool"       "mcp echo: hi-mcp"  "$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"hi-mcp"}'
@@ -356,6 +410,18 @@ check "mcp tool eof"   'Tool said: MCP failure\nserver: mockmcp\ntool: echo_text
     "$B" --model mock/mock-1 --mode json -p 'call:mcp__mockmcp_echo_text:{"text":"__crash__"}'
 check "mcp tool rpc"   'message: MCP error -32000: boom Bearer [redacted]\ncode: -32000\ntrace_id: req-42\ndata: {\"requestId\":\"req-42\",\"apiKey\":\"[redacted]\",\"detail\":\"x?token=[redacted]\",\"n\":[1,2]}\nnext: Address the server-reported MCP error before retrying.' \
     "$B" --model mock/mock-1 --mode json -p 'call:mcp__mockmcp_echo_text:{"text":"__rpcerror__"}'
+# MCP results as omp's buildResult renders them: structured content as a fenced JSON block unless a text block
+# carries it (an SDK {result: [...]} wrapper matching item by item: omp 3e2ba2dd2c), "Error: " lead, [Resource: uri]
+check "mcp wrapped list" 'Tool said: a'  "$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"struct:list"}'
+check "mcp list dedup"   'no json'  python3 -I -c 'import json,sys; r=[x for x in map(json.loads, open(sys.argv[1])) if x.get("tools")][-1]; c=[m for m in r["messages"] if m.get("role")=="tool"][-1]["content"]; print("json!" if "```json" in json.dumps(c) else "no json")' "$T/req.jsonl"
+"$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"struct:obj"}' >/dev/null 2>&1 </dev/null
+check "mcp structured"   $'x\n```json\n{\n  "k": 1,\n  "s": "v"\n}\n```'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"struct:err"}' >/dev/null 2>&1 </dev/null
+check "mcp error result" $'Error: bad\n\n[Resource: mem://r]\nrt'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+# a stdio server that exits before answering is reported with its exit status (omp b45330e867)
+mkdir -p "$T/mcpexit" && cp "$T/agent/models.yml" "$T/mcpexit/"
+printf '{"mcpServers":{"bad":{"command":"sh","args":["-c","read x; exit 3"]}}}' > "$T/mcpexit/mcp.json"
+check "mcp exit status"  'MCP server "bad" failed to connect: MCP subprocess exited with code 3 before responding'  env OMC_CODING_AGENT_DIR="$T/mcpexit" "$B" --model mock/mock-1 --no-session -p "say:x"
 grep -q "Mock MCP server instructions" "$T/req.jsonl" && echo "   ok  mcp instructions in prompt" || { echo "   FAIL mcp instructions"; fail=1; }
 rm -f "$T/agent/mcp.json"
 # MCP OAuth: discovery -> dynamic registration -> PKCE code (curl plays the browser) -> bearer token
@@ -433,6 +499,11 @@ rm -f "$T/agent/config.yml"
 printf 'remote one\nremote two\n' > "$T/remote.txt"
 printf '{"hosts":{"box":{"host":"localhost","username":"me","description":"test box"}}}' > ssh.json
 check "ssh hosts"      "[box](ssh://box/)"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://"
+# ~/.ssh/config Host aliases (Include followed; wildcards, negations skipped) join the host index; ssh.json wins on a
+# clash (omp 2cbe2f5f46)
+mkdir -p "$T/sshhome/.ssh/conf.d" && printf 'Host cfgalias box *.corp !neg\n  HostName 10.0.0.1\nInclude conf.d/*.conf\n' > "$T/sshhome/.ssh/config"
+printf 'Host included\n' > "$T/sshhome/.ssh/conf.d/a.conf"
+check "ssh config hosts" $'- [box](ssh://box/) — `me@localhost` (test box)\n- [cfgalias](ssh://cfgalias/)\n- [included](ssh://included/)'  env HOME="$T/sshhome" PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://"
 check "ssh read sel"   "2:remote two"       env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://box$T/remote.txt:2"
 check "ssh write"      "Successfully wrote 7 bytes to ssh://box"    env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/w.txt\",\"content\":\"via ssh\"}"
 check "ssh write file" "via ssh"            cat "$T/sub/w.txt"
@@ -819,7 +890,7 @@ import json,sys
 rs=[json.loads(l) for l in open(sys.argv[1])]
 r=[x for x in rs if x.get("tools") and "hello memory" in json.dumps(x["messages"][-1])][-1]
 s=r["messages"][0]["content"]; s=s if isinstance(s,str) else "".join(p.get("text","") for p in s)
-ok="Memory summary:\nMOCK SUMMARY from consolidation" in s and "Learned lessons" in s and "## Auto-Learn (experimental)" in s and "`memory://root`" in s
+ok="Memory summary:\nMOCK SUMMARY from consolidation" in s and "Learned lessons" in s and "## Auto-Learn (experimental)" in s and "- memory://root: project-memory summary." in s
 print("ok" if ok else "missing memory block")' "$T/req.jsonl" | grep -q '^ok$' && echo "   ok  memory prompt block" || { echo "   FAIL memory prompt block"; fail=1; }
 # auto-continue capture: one tool call reaches minToolCalls; rpc mode keeps the session alive for the private turn
 printf '%s\n' '{"id":"1","type":"prompt","message":"bash:echo cap"}' | (cat; sleep 3) | "${MENV[@]}" "$B" --model mock/mock-1 --mode rpc >/dev/null 2>&1
@@ -958,6 +1029,11 @@ n=$(mark); "$B" --model mock/mock-1 --no-session -p 'say:' >/dev/null 2>&1 </dev
 check "empty stop retry" "Stopped without actionable output; task incomplete."  python3 -I -c "$REQS" "$T/req.jsonl" $n
 n=$(mark); "$B" --model mock/mock-1 --no-session -p 'calls:[["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}]]' >/dev/null 2>&1 </dev/null
 check "tool-call loop guard" 'You called `bash` 5 consecutive times with identical arguments:'  python3 -I -c "$REQS" "$T/req.jsonl" $n
+# an exemption naming an xd:// device covers writes dispatched to it (omp 7a6f101b82)
+mkdir -p "$T/lgx" && cp "$T/agent/models.yml" "$T/lgx/" && printf 'model:\n  toolCallLoopGuard:\n    exemptTools: [wait, report_issue]\n' > "$T/lgx/config.yml"
+LGX='calls:'$(python3 -I -c 'import json; print(json.dumps([["write",{"path":"xd://report_issue","content":"read: same"}]]*6))')
+n=$(mark); OMC_CODING_AGENT_DIR="$T/lgx" "$B" --model mock/mock-1 --no-session -p "$LGX" >/dev/null 2>&1 </dev/null
+out=$(python3 -I -c "$REQS" "$T/req.jsonl" $n); [[ "$out" != *"consecutive times"* ]] && echo "   ok  loop guard device exemption" || { echo "   FAIL loop guard device exemption"; fail=1; }
 check "todo reminder (rpc)" '"type": "todo_reminder", "todos": [{"content": "alpha", "status": "in_progress"}, {"content": "beta", "status": "pending"}], "attempt": 1, "maxAttempts": 3'  python3 -I "$ROOT/tests/parity/rpc_drive.py" "$B" "todo:alpha,beta" 1
 n=$(mark); "$B" --model mock/mock-think --thinking auto --no-session -p 'say:medium sized change' >/dev/null 2>&1 </dev/null
 check "auto thinking judge" $'2\nlow State:\n<request>say:medium sized change</request>'  python3 -I -c "$REQS" "$T/req.jsonl" $n all

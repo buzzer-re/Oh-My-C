@@ -136,6 +136,24 @@ static void test_format(void) {
                          "\xe2\x86\x92 user-bash! echo x \xe2\x87\x92 error \xc2\xb7 exit 2 \xc2\xb7 1 line\n";
     CHECK_STR(h, want_h);
     free(h);
+    /* a skill-prompt row shows the user's request from its details past the skill body (omp c8dc5a795c) */
+    {
+        sb_t body = SB_INIT;
+        for (int i = 0; i < 40; i++) sb_append(&body, "Skill body line. ");
+        json_t *sm = json_arr(), *cm = json_obj(), *dd = json_obj();
+        json_set_str(cm, "role", "custom");
+        json_set_str(cm, "customType", "skill-prompt");
+        json_set_str(cm, "content", body.s);
+        json_set_str(dd, "name", "deploy");
+        json_set_str(dd, "args", "  ship the hotfix  ");
+        json_set(cm, "details", dd);
+        json_push(sm, cm);
+        char *sh = dump_history_markdown(sm);
+        CHECK(sh && strstr(sh, "[skill:deploy] User: ship the hotfix"));
+        free(sh);
+        json_free(sm);
+        sb_free(&body);
+    }
     json_free(sp);
     json_free(msgs);
 

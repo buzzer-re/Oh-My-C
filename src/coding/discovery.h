@@ -30,6 +30,7 @@ typedef struct {
     char *ttsr;   /* stream-trigger regex `condition` (time-traveling rules), optional */
     char *scope;  /* TTSR scope: "text", "thinking", "tool", "tool:edit(*.rs)", comma-separated */
     char *interrupt_mode; /* always | prose-only | tool-only | never (NULL = setting) */
+    char *repeat_mode;    /* once | after-gap | always (NULL = ttsr.repeatMode) */
     bool builtin; /* bundled builtin-defaults rule */
     bool has_condition;     /* any non-empty `condition` (string or list; omc's TTSR runs string regexes only) */
     bool has_ast_condition; /* `astCondition` (AST TTSR trigger; omc does not evaluate these) */
@@ -69,6 +70,7 @@ typedef struct {
     const discovery_t *disc;
     const char *custom_prompt;        /* --system-prompt */
     const char *custom_template;      /* --system-prompt-template (template text) */
+    const char *model_key;            /* active "provider/id": selects the systemPromptTemplates file */
     const char *append_prompt;        /* --append-system-prompt */
     bool subagent;
     /* optional: routing hint shown for a skill (compressed description catalog); owned result or NULL */

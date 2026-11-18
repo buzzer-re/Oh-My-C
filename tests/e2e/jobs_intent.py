@@ -48,7 +48,8 @@ check("wait intent", "## Completed (1)\n\n### bg_1 [bash] — completed\nIntent:
 
 # /jobs and /jobs full under a pty
 with open(os.path.join(agent, "config.yml"), "w") as f:
-    f.write("modelRoles:\n  widget: mock/mock-1\n")
+    # the widget role chain is walked when a model errors (omp 5e3fbe9ec9): mock-flaky always answers 429
+    f.write("modelRoles:\n  widget: mock/mock-flaky\nretry:\n  fallbackChains:\n    widget:\n      - mock/mock-1\n")
 pid, fd = pty.fork()
 if pid == 0:
     os.chdir(work)
@@ -77,10 +78,12 @@ def wait_for(text, seconds=20):
     return False
 
 
-def captions():
+def captions(model="mock-1"):
     n = 0
     for line in open(reqlog):
         r = json.loads(line)
+        if r.get("model") != model:
+            continue
         for m in r.get("messages", []):
             if m.get("role") == "system" and "You explain one background shell command" in json.dumps(m.get("content")):
                 n += 1
@@ -127,6 +130,7 @@ try:
     check("caption on a later listing", wait_for("Waits about 2 min, printing a tick every 3s"), bytes(buf)[-800:])
     check("one caption, none for the glanceable job", captions() == before + 1, captions() - before)
     r = last[0]
+    check("caption tried the erroring widget model first", captions("mock-flaky") > 0)
     text = json.dumps(r.get("messages")) if r else ""
     check("caption request", "Why it was started: Wait for the indexer" in text and "Killed after: 300s" in text and long_cmd in text, text[-500:])
     check("caption max tokens", r and (r.get("max_tokens") == 120 or r.get("max_completion_tokens") == 120), r and {k: v for k, v in r.items() if "max" in k})

@@ -140,7 +140,7 @@ char *changelog_markdown(const changelog_view_t *v, size_t *shown) {
     if (shown) *shown = n;
     if (!n) return NULL;
     sb_t b = SB_INIT;
-    for (size_t i = n; i-- > 0;) { /* oldest first */
+    for (size_t i = 0; i < n; i++) { /* newest first, like CHANGELOG.md (omp 38523878d4) */
         if (b.len) sb_append(&b, "\n\n");
         sb_append(&b, g_entries.v[i]);
     }

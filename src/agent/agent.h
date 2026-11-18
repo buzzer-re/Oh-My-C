@@ -261,6 +261,8 @@ void agent_aside(agent_t *a, json_t *msg);      /* owned: joins the next step bo
 /* Take the steering and aside records `is_record` selects, steering first. With `wakes`, takes nothing unless one
  * record satisfies it (IrcBridge.drainInboxMessages ifAny). Owned array, possibly empty. */
 json_t *agent_take_records(agent_t *a, bool (*is_record)(const json_t *msg), bool (*wakes)(const json_t *msg));
+/* Copies of the queued steering and aside records `is_record` (and `matches`, if given) select; nothing is taken. */
+json_t *agent_peek_records(agent_t *a, bool (*is_record)(const json_t *msg), bool (*matches)(const json_t *msg));
 void agent_clear_queues(agent_t *a);
 void agent_queue_changed(agent_t *a); /* run hooks.queue_changed (after an external queue edit) */
 bool agent_is_running(agent_t *a);
@@ -272,6 +274,8 @@ char *agent_queued_text(const json_t *msg);
 void agent_queue_texts(agent_t *a, strvec_t *steering, strvec_t *follow_up);
 /* Remove and return the last user-authored queued message, steering first (omp popLastQueuedMessage). Owned/NULL. */
 json_t *agent_pop_last_queued(agent_t *a);
+/* the same, with *follow_up set when it left the follow-up queue (omp DequeuedMessage.queue) */
+json_t *agent_pop_last_queued_ex(agent_t *a, bool *follow_up);
 /* Remove every user-authored queued message; returns {steering:[...], followUp:[...]} (omp clearQueue). Owned. */
 json_t *agent_take_user_queued(agent_t *a);
 size_t agent_queued_count(agent_t *a);

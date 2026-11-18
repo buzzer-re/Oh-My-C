@@ -404,6 +404,9 @@ static rule_t *add_rule_text(discovery_t *d, char *text, const char *path, const
         strvec_free(&parts);
     }
     if (json_get_str(fm, "interruptMode")) r.interrupt_mode = xstrdup(json_get_str(fm, "interruptMode"));
+    /* omp 8c71a84a79: per-rule `repeatMode` frontmatter overrides ttsr.repeatMode; other values are ignored */
+    const char *rm = json_get_str(fm, "repeatMode");
+    if (str_eq(rm, "once") || str_eq(rm, "after-gap") || str_eq(rm, "always")) r.repeat_mode = xstrdup(rm);
     json_t *ast = json_get(fm, "astCondition");
     if (json_is_str(ast)) {
         char *t = str_trim(json_sv(ast));
@@ -697,6 +700,7 @@ void discovery_free(discovery_t *d) {
         free(r->ttsr);
         free(r->scope);
         free(r->interrupt_mode);
+        free(r->repeat_mode);
         strvec_free(&r->globs);
     }
     vec_free(&d->rules);
@@ -840,6 +844,44 @@ static void filter_skills(discovery_t *d) {
     d->skills.n = w;
 }
 
+/* compileModelPatterns + matchModelPattern (utils/model-patterns.ts): the value of the longest key occurring in
+ * `model` (case-insensitive substring; equal lengths keep key order) */
+static const char *model_pattern_match(const json_t *record, const char *model) {
+    if (!json_is_obj(record) || !model || !*model) return NULL;
+    const char *best = NULL;
+    size_t best_len = 0;
+    const char *k;
+    json_t *v;
+    json_obj_foreach(record, i, k, v) {
+        size_t n = strlen(k);
+        if (!json_is_str(v) || (best && n <= best_len) || !str_istr(model, k)) continue;
+        best = json_sv(v);
+        best_len = n;
+    }
+    return best;
+}
+
+/* validateSystemPromptTemplates: blank model patterns and template paths that are neither absolute nor `~/`-relative
+ * make the setting invalid, which leaves its default (no per-model templates) */
+static const json_t *system_prompt_templates(void) {
+    const json_t *rec = settings_get("systemPromptTemplates");
+    if (!json_is_obj(rec)) return NULL;
+    const char *k;
+    json_t *v;
+    json_obj_foreach(rec, i, k, v) {
+        char *t = str_trim(k);
+        bool blank = !*t;
+        free(t);
+        const char *p = json_sv(v);
+        if (blank || !p || !(p[0] == '/' || !strncmp(p, "~/", 2))) {
+            LOGW("systemPromptTemplates: invalid entry \"%s\" (blank model pattern, or a template path that is not "
+                 "absolute or ~/-relative); ignoring the setting", k);
+            return NULL;
+        }
+    }
+    return rec;
+}
+
 /* discoverSystemPromptOverride: project (.omc/.omp) then user (agent dir); a blank template is ignored */
 static void discover_system_override(const char *cwd, char **text, char **templ) {
     for (int level = 0; level < 2; level++) {
@@ -953,6 +995,13 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
             json_push(cf, nf);
         }
         discovery_free(&extra);
+    }
+    /* omp e11a302d3a: a fence a file leaves open is closed at its end, so the rest of the prompt formats as usual */
+    json_t *cfe;
+    json_arr_foreach(cf, i, cfe) {
+        char *closed = prompt_close_code_fence(json_get_str(cfe, "content"));
+        json_set_str(cfe, "content", closed);
+        free(closed);
     }
     json_set(data, "contextFiles", cf);
     json_t *roots = json_arr();
@@ -1068,6 +1117,21 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
      * level the literal SYSTEM.md wins over the template) */
     char *templ = o->custom_template && !custom ? xstrdup(o->custom_template) : NULL;
     if (!custom && !templ) discover_system_override(o->cwd, &custom, &templ);
+    /* systemPromptTemplates (omp 8a09723b3f..f79f5c869c): a per-model file is discovered input like
+     * SYSTEM_TEMPLATE.md, read only when no prompt above applies; missing or empty falls back to the bundled prompt */
+    const char *mtp = !custom && !templ ? model_pattern_match(system_prompt_templates(), o->model_key) : NULL;
+    if (mtp) {
+        char *file = path_expand_home(mtp);
+        size_t n = 0;
+        char *t = fs_is_file(file) ? fs_read(file, &n) : NULL;
+        char *trimmed = t ? str_trim(t) : NULL;
+        if (!t) LOGW("systemPromptTemplates template not found; using the bundled prompt (model %s, path %s)", o->model_key, file);
+        else if (!*trimmed) LOGW("Ignoring empty systemPromptTemplates template; using the bundled prompt (model %s, path %s)", o->model_key, file);
+        else templ = xstrdup(t);
+        free(trimmed);
+        free(t);
+        free(file);
+    }
     json_t *blocks = json_arr();
     char *rendered;
     if (templ) {

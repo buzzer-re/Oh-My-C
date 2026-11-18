@@ -154,6 +154,57 @@ static int64_t cfg_mtime(void) {
     return -1;
 }
 
+/* omp models-config.ts normalizeModelInputModalities: drop the input modalities the catalog cannot express (the
+ * `input-modalities` axis: text, image) with a warning instead of failing the file; an emptied list is removed so
+ * the catalog default applies. Non-string entries stay. */
+static void normalize_input(json_t *model, const char *path, const char *owner, strvec_t *warns) {
+    json_t *in = json_get(model, "input");
+    if (!json_is_arr(in)) return;
+    json_t *keep = json_arr(), *e;
+    bool dropped = false;
+    json_arr_foreach(in, i, e) {
+        const char *s = json_sv(e);
+        if (s && strcmp(s, "text") != 0 && strcmp(s, "image") != 0) {
+            char *w = xasprintf("%s: %s: input modality \"%s\" is not supported yet (allowed: text, image) — ignoring", path, owner, s);
+            strvec_push(warns, w);
+            free(w);
+            dropped = true;
+            continue;
+        }
+        json_push(keep, json_clone(e));
+    }
+    if (!dropped) json_free(keep);
+    else if (json_len(keep) > 0) json_set(model, "input", keep);
+    else {
+        json_free(keep);
+        json_del(model, "input");
+    }
+}
+
+static void normalize_models_config(json_t *cfg, const char *path, strvec_t *warns) {
+    json_t *provs = json_get_obj(cfg, "providers"), *pv;
+    const char *pid;
+    json_obj_foreach(provs, i, pid, pv) {
+        if (!json_is_obj(pv)) continue;
+        json_t *models = json_get(pv, "models"), *m;
+        json_arr_foreach(models, k, m) {
+            if (!json_is_obj(m)) continue;
+            const char *id = json_get_str(m, "id") ? json_get_str(m, "id") : "<unnamed>";
+            char *owner = xasprintf("provider \"%s\", model \"%s\"", pid, id);
+            normalize_input(m, path, owner, warns);
+            free(owner);
+        }
+        json_t *ovr = json_get_obj(pv, "modelOverrides"), *ov;
+        const char *mid;
+        json_obj_foreach(ovr, k, mid, ov) {
+            if (!json_is_obj(ov)) continue;
+            char *owner = xasprintf("provider \"%s\", model override \"%s\"", pid, mid);
+            normalize_input(ov, path, owner, warns);
+            free(owner);
+        }
+    }
+}
+
 static json_t *load_custom_models_file(void) {
     g_cfg_mtime = cfg_mtime();
     for (size_t i = 0; i < ARRAY_LEN(g_cfg_names); i++) {
@@ -176,9 +227,17 @@ static json_t *load_custom_models_file(void) {
                 free(err);
             }
         }
+        if (j) {
+            strvec_t warns = {0};
+            normalize_models_config(j, p, &warns);
+            catalog_publish_models_file_warnings(&warns);
+            strvec_free(&warns);
+            free(p);
+            return j;
+        }
         free(p);
-        if (j) return j;
     }
+    catalog_publish_models_file_warnings(NULL);
     return NULL;
 }
 

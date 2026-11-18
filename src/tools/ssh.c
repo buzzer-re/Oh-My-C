@@ -8,6 +8,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <glob.h>
 #include <pthread.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -19,6 +20,7 @@
 typedef struct {
     char *name, *host, *user, *key, *desc;
     int port;
+    bool openssh; /* a ~/.ssh/config alias: host == name, nothing pinned */
 } ssh_host_t;
 
 typedef VEC(ssh_host_t) ssh_hosts_t;
@@ -95,6 +97,108 @@ static void load_file(ssh_hosts_t *out, const char *path) {
     json_free(j);
 }
 
+/* ---------- OpenSSH config aliases (discovery/ssh-config.ts, omp 2cbe2f5f46) ---------- */
+
+#define SSH_INCLUDE_MAX_DEPTH 16 /* OpenSSH READCONF_MAX_DEPTH */
+
+/* directive arguments, unquoted ("…", '…' or bare); an unquoted `#` token starts a trailing comment */
+static void split_args(const char *rest, strvec_t *out) {
+    const char *p = rest;
+    for (;;) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+        if (*p == '"' || *p == '\'') {
+            char q = *p++;
+            const char *e = strchr(p, q);
+            if (!e) { /* an unterminated quote: the regex skips the quote char and reads on */
+                continue;
+            }
+            char *a = xstrndup(p, (size_t)(e - p));
+            strvec_push_own(out, a);
+            p = e + 1;
+            continue;
+        }
+        const char *b = p;
+        while (*p && !isspace((unsigned char)*p) && *p != '"' && *p != '\'') p++;
+        if (*b == '#') break;
+        strvec_push_own(out, xstrndup(b, (size_t)(p - b)));
+    }
+}
+
+static void scan_ssh_config(const char *file, int depth, const char *base_dir, strvec_t *visited, strvec_t *pairs) {
+    if (strvec_contains(visited, file)) return;
+    strvec_push(visited, file);
+    char *txt = fs_read(file, NULL);
+    if (!txt) return;
+    for (char *line = txt; line && *line;) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        size_t ll = strlen(line);
+        if (ll && line[ll - 1] == '\r') line[ll - 1] = 0;
+        /* `Keyword args`, `Keyword=args`, `Keyword = args` */
+        const char *p = line;
+        while (isspace((unsigned char)*p)) p++;
+        const char *kw = p;
+        while (isalpha((unsigned char)*p)) p++;
+        size_t kl = (size_t)(p - kw);
+        bool ok = kl > 0 && (!*p || isspace((unsigned char)*p) || *p == '=');
+        if (ok) {
+            while (isspace((unsigned char)*p)) p++;
+            if (*p == '=') p++;
+            while (isspace((unsigned char)*p)) p++;
+            strvec_t args = {0};
+            if (kl == 4 && !strncasecmp(kw, "host", 4)) {
+                split_args(p, &args);
+                for (size_t i = 0; i < args.n; i++) {
+                    const char *nm = args.v[i];
+                    if (nm[0] == '!' || strpbrk(nm, "*?")) continue; /* negated / wildcard patterns name no host */
+                    bool seen = false;
+                    for (size_t k = 0; k + 1 < pairs->n && !seen; k += 2) seen = !strcmp(pairs->v[k], nm);
+                    if (seen) continue;
+                    strvec_push(pairs, nm);
+                    strvec_push(pairs, file);
+                }
+            } else if (kl == 7 && !strncasecmp(kw, "include", 7)) {
+                if (depth >= SSH_INCLUDE_MAX_DEPTH) {
+                    LOGW("ssh-config: Include nested deeper than %d levels in %s", SSH_INCLUDE_MAX_DEPTH, file);
+                } else {
+                    split_args(p, &args);
+                    for (size_t i = 0; i < args.n; i++) {
+                        char *ex = path_expand_home(args.v[i]);
+                        char *full = ex[0] == '/' ? xstrdup(ex) : path_join(base_dir, ex);
+                        free(ex);
+                        if (!strpbrk(full, "*?[")) scan_ssh_config(full, depth + 1, base_dir, visited, pairs);
+                        else {
+                            glob_t g;
+                            if (glob(full, 0, NULL, &g) == 0)
+                                for (size_t k = 0; k < g.gl_pathc; k++) scan_ssh_config(g.gl_pathv[k], depth + 1, base_dir, visited, pairs);
+                            globfree(&g);
+                        }
+                        free(full);
+                    }
+                }
+            }
+            strvec_free(&args);
+        }
+        if (!nl) break;
+        line = nl + 1;
+    }
+    free(txt);
+}
+
+/* the concrete `Host` aliases of ~/.ssh/config then /etc/ssh/ssh_config (following Include), first definition wins:
+ * name/file pairs */
+void ssh_openssh_aliases(strvec_t *pairs) {
+    const char *home = home_dir();
+    char *udir = path_join(home ? home : "", ".ssh"), *ucfg = path_join(udir, "config");
+    strvec_t visited = {0};
+    scan_ssh_config(ucfg, 0, udir, &visited, pairs);
+    scan_ssh_config("/etc/ssh/ssh_config", 0, "/etc/ssh", &visited, pairs);
+    strvec_free(&visited);
+    free(ucfg);
+    free(udir);
+}
+
 static void load_hosts(const char *cwd, ssh_hosts_t *out) {
     memset(out, 0, sizeof(*out));
     char *paths[6];
@@ -108,6 +212,17 @@ static void load_hosts(const char *cwd, ssh_hosts_t *out) {
         load_file(out, paths[i]);
         free(paths[i]);
     }
+    /* priority 3, below ssh.json: an explicit entry wins on a name clash */
+    strvec_t pairs = {0};
+    ssh_openssh_aliases(&pairs);
+    for (size_t i = 0; i + 1 < pairs.n; i += 2) {
+        bool dup = false;
+        for (size_t k = 0; k < out->n && !dup; k++) dup = !strcmp(out->v[k].name, pairs.v[i]);
+        if (dup) continue;
+        ssh_host_t e = {.name = xstrdup(pairs.v[i]), .host = xstrdup(pairs.v[i]), .openssh = true};
+        vec_push(out, e);
+    }
+    strvec_free(&pairs);
 }
 
 /* ---------- ssh.json config files (ssh/config-writer.ts) ---------- */
@@ -355,7 +470,10 @@ static int parse_url(const char *cwd, const char *url, target_t *t, char **raw_p
     ssh_host_t *match = NULL;
     for (size_t i = 0; i < hosts.n; i++)
         if (!strcmp(hosts.v[i].name, dhost)) match = &hosts.v[i];
-    if ((duser || port) && match) {
+    /* an override is ambiguous only on an entry that pins its destination; a ~/.ssh/config alias (host == name,
+     * nothing pinned) takes it the way `ssh -p 2222 root@alias` does */
+    bool pinned = match && !(!strcmp(match->host, match->name) && !match->user && !match->port && !match->key);
+    if ((duser || port) && pinned) {
         *err = xasprintf("ssh://: user/port overrides are not allowed for the configured host \"%s\"; use ssh://%s/<path> or an "
                          "unconfigured hostname",
                          dhost, dhost);
@@ -365,7 +483,7 @@ static int parse_url(const char *cwd, const char *url, target_t *t, char **raw_p
         hosts_free(&hosts);
         return -1;
     }
-    if (match) {
+    if (match && !((duser || port) && !pinned)) {
         t->name = xstrdup(match->name);
         t->host = xstrdup(match->host);
         t->user = match->user ? xstrdup(match->user) : NULL;
@@ -610,8 +728,8 @@ static char *host_index(const char *cwd) {
     load_hosts(cwd, &h);
     sb_t b = SB_INIT;
     if (!h.n) {
-        sb_append(&b, "# SSH hosts\n\nNo SSH hosts are configured. Add hosts to an `ssh.json` capability file, or read "
-                      "`ssh://<host>/<path>` with any destination OpenSSH can resolve (e.g. a `~/.ssh/config` alias).\n");
+        sb_append(&b, "# SSH hosts\n\nNo SSH hosts are configured. Add hosts to an `ssh.json` capability file or as `Host` "
+                      "entries in `~/.ssh/config`, or read `ssh://<host>/<path>` with any destination OpenSSH can resolve.\n");
     } else {
         sb_appendf(&b, "# SSH hosts\n\n%zu configured host%s:\n\n", h.n, h.n == 1 ? "" : "s");
         for (size_t i = 0; i < h.n; i++) {

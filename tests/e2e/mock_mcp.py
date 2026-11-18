@@ -97,6 +97,16 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "id": msg.get("id"), "error": {"code": -32000, "message": "boom Bearer abc.def",
                   "data": {"requestId": "req-42", "apiKey": "s3cret", "detail": "x?token=zzz&q=1", "n": [1, 2]}}})
             continue
+        elif msg["params"]["arguments"].get("text", "").startswith("struct:"):
+            kind = msg["params"]["arguments"]["text"][7:]
+            if kind == "list":  # the MCP SDK's {result: value} wrapper around a list return, one text block per item
+                res = {"content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}], "structuredContent": {"result": ["a", "b"]}}
+            elif kind == "obj":
+                res = {"content": [{"type": "text", "text": "x"}], "structuredContent": {"k": 1, "s": "v"}}
+            elif kind == "err":
+                res = {"content": [{"type": "text", "text": "bad"}, {"type": "resource", "resource": {"uri": "mem://r", "text": "rt"}}], "isError": True}
+            else:
+                res = {"content": [{"type": "text", "text": '{"k": 1}'}], "structuredContent": {"k": 1}}
         else:
             res = {"content": [{"type": "text", "text": "mcp echo: " + msg["params"]["arguments"].get("text", "")}]}
     elif FULL and method == "resources/list":

@@ -386,9 +386,12 @@ static void hs_render(tui_component_t *c, int width, strvec_t *out) {
     char *nav = tui_fgs(NULL, TUI_TC_MUTED, " navigate");
     char *enter = ui_key_hint("enter"), *enter_s = tui_fgs(NULL, TUI_TC_DIM, enter);
     char *sel = tui_fgs(NULL, TUI_TC_MUTED, " select");
+    char *del = ui_key_hint("delete"), *del_s = tui_fgs(NULL, TUI_TC_DIM, del);
+    char *dl = tui_fgs(NULL, TUI_TC_MUTED, " delete at end");
     char *cancel = ui_editor_key("tui.select.cancel"), *cancel_s = tui_fgs(NULL, TUI_TC_DIM, cancel);
     char *cn = tui_fgs(NULL, TUI_TC_MUTED, " cancel");
-    char *hint = xasprintf("%s%s%s%s%s%s%s%s", ud_s, nav, dot, enter_s, sel, dot, cancel_s, cn);
+    char *hint = xasprintf("%s%s%s%s%s%s%s%s%s%s%s", ud_s, nav, dot, enter_s, sel, dot, del_s, dl, dot, cancel_s, cn);
+    free(del), free(del_s), free(dl);
     ui_push_text(out, hint, width);
     strvec_push(out, "");
     free(dot), free(up), free(down), free(ud), free(ud_s), free(nav), free(enter), free(enter_s), free(sel);
@@ -404,6 +407,46 @@ static void hs_pick(hs_t *h) {
     tui_editor_set_text(target, prompt);
     free(prompt);
     tui_request_render(u->tui);
+}
+
+/* HistoryStorage.delete (omp 2be5bed17f): the stored prompt goes, every submission of it (the jsonl's lines whose
+ * normalized text is that prompt); the results refresh, the selection staying at its row */
+static void hs_delete(hs_t *h) {
+    if (h->sel < 0 || h->sel >= (int)h->items.n) return;
+    char *gone = xstrdup(h->items.v[h->sel].prompt);
+    int sel = h->sel;
+    char *path = omc_agent_path("prompt-history.jsonl");
+    size_t n = 0;
+    char *raw = fs_read(path, &n);
+    if (raw) {
+        sb_t keep = SB_INIT;
+        for (const char *ln = raw; *ln;) {
+            const char *e = strchr(ln, '\n');
+            size_t len = e ? (size_t)(e - ln) : strlen(ln);
+            char *line = xstrndup(ln, len);
+            json_t *j = json_parse_str(line);
+            const char *t = json_get_str(j, "text");
+            char *np = t ? normalize_prompt(t) : NULL;
+            bool drop = np && !strcmp(np, gone);
+            free(np);
+            json_free(j);
+            if (!drop && len) {
+                sb_append(&keep, line);
+                sb_putc(&keep, '\n');
+            }
+            free(line);
+            if (!e) break;
+            ln = e + 1;
+        }
+        if (fs_write_atomic(path, keep.s ? keep.s : "", keep.len, 0600) != 0) LOGW("history: could not rewrite %s", path);
+        free(h->jsonl);
+        h->jsonl = sb_detach(&keep);
+        free(raw);
+    }
+    free(path);
+    free(gone);
+    hs_update(h);
+    if (h->items.n) h->sel = MIN(sel, (int)h->items.n - 1);
 }
 
 static void hs_move(hs_t *h, int delta) {
@@ -430,6 +473,8 @@ static bool hs_key(tui_component_t *c, const tui_key_t *k) {
     } else if (tui_kb(k, "tui.input.submit")) {
         hs_pick(h);
         return true;
+    } else if (tui_key_matches(k, "delete") && h->input.cur == h->input.v.len) {
+        hs_delete(h); /* Delete at the end of the query removes the selected prompt */
     } else {
         ui_input_key(&h->input, k);
         hs_schedule(h);

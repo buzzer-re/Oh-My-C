@@ -620,6 +620,10 @@ static json_t *load_images(const json_t *v, const char *cwd, char **err) {
  * pool, goes first and the judge role chain follows without it; a selector matching nothing is logged once and
  * ignored (omp 904824b03a) */
 static size_t judge_candidates(app_t *a, const char *lead, const ai_model_t **out, size_t max) {
+    /* allowedJudgeCandidates (omp 8b9b1ad22f): models.noJudge / models.offline keep the judge on the session's
+     * provider (the lead model too); without a session model nothing qualifies */
+    bool restricted = settings_bool("models.noJudge", false) || settings_bool("models.offline", false);
+    if (restricted && !a->model) return 0;
     mr_chain_t chain;
     mr_role_chain("judge", NULL, &chain);
     size_t n = 0;
@@ -628,7 +632,7 @@ static size_t judge_candidates(app_t *a, const char *lead, const ai_model_t **ou
         mr_pool_role(&pool, "judge");
         mr_result_t r = {0};
         if (mr_resolve_value(lead, &pool, &r) && r.model) {
-            out[n++] = r.model;
+            if (!restricted || strcmp(r.model->provider, a->model->provider) == 0) out[n++] = r.model;
         } else {
             static bool warned;
             if (!warned) LOGW("judgment lead model matched no judge candidate; using the judge role chain (%s)", lead);
@@ -639,7 +643,7 @@ static size_t judge_candidates(app_t *a, const char *lead, const ai_model_t **ou
     }
     for (size_t i = 0; i <= chain.n && n < max; i++) {
         const ai_model_t *m = i < chain.n ? chain.v[i].model : a->model;
-        if (!m) continue;
+        if (!m || (restricted && strcmp(m->provider, a->model->provider) != 0)) continue;
         bool dup = false;
         for (size_t k = 0; k < n; k++) dup = dup || out[k] == m;
         if (!dup) out[n++] = m;

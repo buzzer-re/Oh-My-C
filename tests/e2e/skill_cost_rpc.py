@@ -97,7 +97,7 @@ def rpc(args, prompts, wait_after=2.5):
 
 
 # metered: the compression's cost reaches the cap, so the free main model's next request is refused
-skill("metered-skill", "Metered description, long enough that a routing hint is requested for it by the session")
+skill("metered-skill", "Metered description, long enough (past the 100-char preview budget) that a routing hint is requested for it by the session")
 before = len(requests())
 frames = rpc(["--max-cost", "0.000001"], ["say:first-after-compression"])
 later = requests()[before:]

@@ -87,12 +87,12 @@ static void scan_agents(json_t *out, const char *dir) {
 }
 
 
-/* Bundled agents in upstream order (task/agents.ts EMBEDDED_AGENT_DEFS): scout, reviewer, security-reviewer, seance
- * from their markdown; `task` and `sonic` share the task.md body with synthesized frontmatter. Then user agents
+/* Bundled agents in upstream order (task/agents.ts EMBEDDED_AGENT_DEFS): scout, reviewer, security-reviewer
+ * from their markdown (seance removed upstream: omp db5d932058); `task` and `sonic` share the task.md body with synthesized frontmatter. Then user agents
  * (~/.omc/agent/agents) and project agents (.omc/.omp/.claude agents dirs). Returns owned object name -> def. */
 json_t *agent_defs_load(const char *cwd) {
     json_t *out = json_obj();
-    static const char *files[] = {"scout", "reviewer", "security-reviewer", "seance"};
+    static const char *files[] = {"scout", "reviewer", "security-reviewer"};
     for (size_t i = 0; i < ARRAY_LEN(files); i++) {
         char *rel = xasprintf("coding-agent/prompts/agents/%s.md", files[i]);
         char *t = prompt_load(rel);
@@ -251,9 +251,105 @@ static spawn_spec_t spec_of(const json_t *t, const char *context) {
                          .name = json_get_str(t, "name"),
                          .task = json_get_str(t, "task"),
                          .context = context,
-                         .source_session = json_get_str(t, "sourceSession"),
-                         .model = blank_model(json_get(t, "model")) ? NULL : json_get(t, "model")};
+                         .model = blank_model(json_get(t, "model")) ? NULL : json_get(t, "model"),
+                         .steps = json_get_arr(t, "\x01stepPrompts")};
     return spec;
+}
+
+/* ---------- task.steps (task/steps.ts, omp 02e8cb9939) ---------- */
+
+#define TASK_MAX_STEPS 4 /* MAX_STEPS: more steps share prompts, earlier prompts taking the extra */
+
+/* a step's text, verbatim but trimmed with CRLF/CR as LF, goes into its slot after formatting */
+static char *step_text(const char *s) {
+    char *t = str_trim(s ? s : "");
+    sb_t b = SB_INIT;
+    for (const char *p = t; *p; p++) {
+        if (*p == '\r') {
+            if (p[1] == '\n') p++;
+            sb_putc(&b, '\n');
+        } else sb_putc(&b, *p);
+    }
+    free(t);
+    return sb_detach(&b);
+}
+
+static char *fill_step_slots(const char *rendered, const json_t *steps, size_t first, size_t n) {
+    char *out = xstrdup(rendered);
+    for (size_t i = first; i < first + n; i++) {
+        char *slot = xasprintf("\x02step-%zu\x02", i), *text = step_text(json_sv(json_at(steps, i)));
+        char *pos = strstr(out, slot);
+        if (pos) {
+            char *r = xasprintf("%.*s%s%s", (int)(pos - out), out, text, pos + strlen(slot));
+            free(out);
+            out = r;
+        }
+        free(slot);
+        free(text);
+    }
+    return out;
+}
+
+/* renderStepPrompts(steps, structured: false): at most TASK_MAX_STEPS prompts, as even as possible */
+static json_t *render_step_prompts(const json_t *steps) {
+    size_t count = json_len(steps), prompts = MIN(count, (size_t)TASK_MAX_STEPS);
+    json_t *out = json_arr();
+    if (!prompts) return out;
+    size_t base = count / prompts, larger = count % prompts, first = 0;
+    for (size_t k = 0; k < prompts; k++) {
+        size_t size = base + (k < larger ? 1 : 0);
+        json_t *ctx = json_obj(), *items = json_arr();
+        for (size_t o = 0; o < size; o++) {
+            json_t *it = json_obj();
+            json_set_int(it, "number", (int64_t)(first + o + 1));
+            json_set_int(it, "total", (int64_t)count);
+            char *slot = xasprintf("\x02step-%zu\x02", first + o);
+            json_set_str(it, "text", slot);
+            free(slot);
+            json_push(items, it);
+        }
+        json_set(ctx, "steps", items);
+        json_set_bool(ctx, "multiple", size > 1);
+        json_set_bool(ctx, "last", k == prompts - 1);
+        json_set_int(ctx, "next", (int64_t)(first + size + 1));
+        json_set_bool(ctx, "structured", false);
+        char *r = prompt_render("coding-agent/prompts/system/subagent-step.md", ctx);
+        json_free(ctx);
+        char *filled = fill_step_slots(r ? r : "", steps, first, size);
+        free(r);
+        json_push(out, json_str_own(filled));
+        first += size;
+    }
+    return out;
+}
+
+/* renderStepsBrief: every step as one Markdown brief, the run's assignment for labels and display */
+static char *render_steps_brief(const json_t *steps) {
+    json_t *ctx = json_obj(), *slots = json_arr();
+    for (size_t i = 0; i < json_len(steps); i++) json_push(slots, json_str_own(xasprintf("\x02step-%zu\x02", i)));
+    json_set(ctx, "steps", slots);
+    char *r = prompt_render("coding-agent/prompts/system/subagent-steps-brief.md", ctx);
+    json_free(ctx);
+    char *filled = fill_step_slots(r ? r : "", steps, 0, json_len(steps));
+    free(r);
+    return filled;
+}
+
+/* a stepped item runs with its brief as `task` and its prompts on a private key */
+static json_t *normalize_task_items(const json_t *tasks) {
+    json_t *out = json_arr(), *t;
+    json_arr_foreach(tasks, i, t) {
+        json_t *c = json_clone(t);
+        const json_t *steps = json_get_arr(t, "steps");
+        if (steps && !json_get(t, "task")) {
+            char *brief = render_steps_brief(steps);
+            json_set_str(c, "task", brief);
+            free(brief);
+            json_set(c, "\x01stepPrompts", render_step_prompts(steps));
+        }
+        json_push(out, c);
+    }
+    return out;
 }
 
 static bool blank_str(const json_t *v) {
@@ -263,23 +359,42 @@ static bool blank_str(const json_t *v) {
     return !*s;
 }
 
-/* omp validateSpawnParams (batch shape, task.file off): the tool takes raw args when the schema rejects them
- * (lenientArgValidation) and reports these model-facing problems itself */
+/* validateTaskInput (omp 02e8cb9939, task.steps off): a non-empty `task`, or non-empty `steps`; `label` is "The call"
+ * for a single spawn. Owned problem text or NULL. */
+static char *task_input_problem(const json_t *item, const char *label, bool steps_on) {
+    const json_t *steps = json_get(item, "steps");
+    if (json_get(item, "task") && steps) return xasprintf("%s takes `task` or `steps`, not both.", label);
+    if (steps) {
+        bool valid = json_is_arr(steps) && json_len(steps) > 0;
+        const json_t *x;
+        json_arr_foreach(steps, i, x) valid = valid && json_is_str(x) && !blank_str(x);
+        return valid ? NULL : xasprintf("%s has invalid `steps`: provide a non-empty list of non-empty instructions, one per stage.", label);
+    }
+    if (!blank_str(json_get(item, "task"))) return NULL;
+    if (steps_on && !json_get(item, "task"))
+        return !strcmp(label, "The call") ? xstrdup("Missing `steps`. Provide the agent's ordered stages, one instruction each.")
+                                          : xasprintf("%s is missing `steps`. Every task needs its ordered stages, one instruction each.", label);
+    return !strcmp(label, "The call") ? xstrdup("Missing `task`. Provide complete, self-contained instructions for the agent.")
+                                      : xasprintf("%s is missing `task`. Every task needs complete, self-contained instructions.", label);
+}
+
+/* omp validateSpawnParams (batch shape): the tool takes raw args when the schema rejects them (lenientArgValidation)
+ * and reports these model-facing problems itself */
 static char *spawn_params_problem(const json_t *args) {
+    bool steps_on = settings_bool("task.steps", false);
     json_t *tasks = json_get(args, "tasks");
     if (tasks) {
-        if (!json_is_arr(tasks) || !json_len(tasks)) return xstrdup("Missing `tasks`. Provide at least one task item with `task` or `taskFile`.");
-        if (json_get(args, "task") || json_get(args, "taskFile"))
-            return xstrdup("Top-level `task` or `taskFile` is not part of the batch shape. Put the work in `tasks[]` items.");
+        if (!json_is_arr(tasks) || !json_len(tasks))
+            return xasprintf("Missing `tasks`. Provide at least one task item with `%s`.", steps_on ? "steps" : "task");
+        if (json_get(args, "task") || json_get(args, "steps"))
+            return xstrdup("Top-level `task` or `steps` is not part of the batch shape. Put the work in `tasks[]` items.");
         json_t *it;
         json_arr_foreach(tasks, i, it) {
             const char *nm = json_get_str(it, "name");
             char *label = nm && *nm ? xasprintf("Task %zu (`%s`)", i + 1, nm) : xasprintf("Task %zu", i + 1);
-            char *r = NULL;
-            if (blank_str(json_get(it, "task")))
-                r = xasprintf("%s is missing `task`. Every task needs complete, self-contained instructions.", label);
-            else if (json_get(it, "effort") && !str_eq(json_get_str(it, "effort"), "lo") && !str_eq(json_get_str(it, "effort"), "med") &&
-                     !str_eq(json_get_str(it, "effort"), "hi")) {
+            char *r = task_input_problem(it, label, steps_on);
+            if (!r && json_get(it, "effort") && !str_eq(json_get_str(it, "effort"), "lo") && !str_eq(json_get_str(it, "effort"), "med") &&
+                !str_eq(json_get_str(it, "effort"), "hi")) {
                 char *e = json_dump(json_get(it, "effort"), 0);
                 r = xasprintf("%s has an invalid `effort` value %s. Use \"lo\", \"med\", or \"hi\".", label, e);
                 free(e);
@@ -319,10 +434,9 @@ static char *spawn_params_problem(const json_t *args) {
                            "the tasks share.");
         return NULL;
     }
-    if (!json_get(args, "task") && !json_get(args, "taskFile"))
+    if (!json_get(args, "task") && !json_get(args, "steps"))
         return xstrdup("Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.");
-    if (blank_str(json_get(args, "task"))) return xstrdup("Missing `task`. Provide complete, self-contained instructions for the agent.");
-    return NULL;
+    return task_input_problem(args, "The call", steps_on);
 }
 
 static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
@@ -345,7 +459,7 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     json_t *tasks = json_get_arr(args, "tasks");
     json_t *single = NULL;
     if (!tasks) {
-        if (!json_get_str(args, "task")) {
+        if (!json_get_str(args, "task") && !json_get_arr(args, "steps")) {
             tool_result_error(out, "tasks[] (or task) is required");
             return 0;
         }
@@ -353,6 +467,10 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         json_push(single, json_clone(args));
         tasks = single;
     }
+    json_t *normalized = normalize_task_items(tasks);
+    json_free(single);
+    single = normalized;
+    tasks = normalized;
     const char *context = json_get_str(args, "context");
     size_t n = json_len(tasks);
     if (!n) {
@@ -372,12 +490,7 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             sb_appendf(&errs, "tasks[%zu]: unknown agent \"%s\"\n", i, agent);
         if (json_len(json_get_arr(t, "tools")))
             sb_appendf(&errs, "tasks[%zu]: `tools` (eval-defined tools) are not supported\n", i);
-        bool seance = str_eq(agent, "seance");
-        if (json_get(t, "sourceSession") && !seance)
-            sb_appendf(&errs, "tasks[%zu]: `sourceSession` is only valid with agent \"seance\"\n", i);
-        if (seance && !json_get_str(t, "sourceSession"))
-            sb_appendf(&errs, "tasks[%zu]: agent \"seance\" requires `sourceSession`\n", i);
-        if (json_get(t, "model") && !blank_model(json_get(t, "model")) && !seance)
+        if (json_get(t, "model") && !blank_model(json_get(t, "model")))
             sb_appendf(&errs, "tasks[%zu]: per-call `model` is disabled (task.perCallModel: off)\n", i);
     }
     if (errs.len) {
@@ -535,7 +648,6 @@ agent_tool_t *tool_task_new(tool_env_t *env) {
     bool batch = settings_bool("task.batch", true);
     json_t *ctx = json_obj();
     json_t *agents = json_arr();
-    bool seance = false;
     const char *k;
     json_t *v;
     json_obj_foreach(defs, i, k, v) {
@@ -547,7 +659,6 @@ agent_tool_t *tool_task_new(tool_env_t *env) {
         json_set_bool(a, "blocking", false);
         json_set_bool(a, "structured", false);
         json_push(agents, a);
-        if (str_eq(k, "seance") && str_eq(json_get_str(v, "source"), "bundled")) seance = true;
     }
     json_set(ctx, "agents", agents);
     json_set_bool(ctx, "scoutAvailable", tools_scout_available());
@@ -558,11 +669,8 @@ agent_tool_t *tool_task_new(tool_env_t *env) {
     json_set_bool(ctx, "ircEnabled", irc);
     /* eval-defined `tools` are not implemented: the conditional stays off (never advertised) */
     json_set_bool(ctx, "evalToolsEnabled", false);
-    if (seance) {
-        char *sg = prompt_load("coding-agent/prompts/tools/seance-task-guidance.md");
-        json_set_str(ctx, "seanceGuidance", sg ? sg : "");
-        free(sg);
-    }
+    bool steps_on = settings_bool("task.steps", false); /* task.steps: items take ordered `steps` instead of `task` */
+    json_set_bool(ctx, "steps", steps_on);
     if (async) {
         json_t *ac = json_obj();
         json_set_bool(ac, "waitTool", true);
@@ -574,16 +682,14 @@ agent_tool_t *tool_task_new(tool_env_t *env) {
     char *desc = tool_prompt("task", ctx);
     json_free(ctx);
     json_free(defs);
-    /* upstream task/types.ts createTaskSchema (no isolation, no eval tools): `model` is declared only while the
-     * caller may send it, i.e. seance's selector list (task.perCallModel has no per-call selector here); an
-     * undeclared `model` still reaches the preflight refusal through lenient validation */
-    const char *seance_fields = seance ? ",\"model\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"array\",\"items\":{"
-                                         "\"type\":\"string\"}}]},\"sourceSession\":{\"type\":\"string\"}"
-                                       : "";
-    char *it = xasprintf("{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"solutionSpace\":{\"type\":"
-                         "\"string\"},\"name\":{\"type\":\"string\"},\"agent\":{\"type\":\"string\"}%s},\"required\":["
-                         "\"task\",\"solutionSpace\"],\"additionalProperties\":false}",
-                         seance_fields);
+    /* upstream task/types.ts createTaskSchema (no isolation, no eval tools, no per-call model): an undeclared
+     * `model` still reaches the preflight refusal through lenient validation */
+    char *it = steps_on ? xstrdup("{\"type\":\"object\",\"properties\":{\"steps\":{\"type\":\"array\",\"items\":{\"type\":"
+                                  "\"string\"}},\"solutionSpace\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"agent\":{"
+                                  "\"type\":\"string\"}},\"required\":[\"steps\",\"solutionSpace\"],\"additionalProperties\":false}")
+                        : xstrdup("{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"solutionSpace\":{\"type\":"
+                                  "\"string\"},\"name\":{\"type\":\"string\"},\"agent\":{\"type\":\"string\"}},\"required\":["
+                                  "\"task\",\"solutionSpace\"],\"additionalProperties\":false}");
     char *sch = batch ? xasprintf("{\"type\":\"object\",\"properties\":{\"context\":{\"type\":\"string\"},\"tasks\":{"
                                   "\"type\":\"array\",\"items\":%s}},\"required\":[\"context\",\"tasks\"],"
                                   "\"additionalProperties\":false}",

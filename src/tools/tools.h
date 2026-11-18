@@ -234,6 +234,7 @@ char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_
 void eval_set_tool_names(agent_tool_t *t, const json_t *names);
 /* re-renders the write description for whether `read` (the xd://read/sources transport) is active */
 void write_set_read_active(agent_tool_t *t, bool read_active);
+void eval_release_session(agent_tool_t *t); /* stop the kernel and `sh` shell of the previous session */
 
 /* agent definitions (bundled + ~/.omc/agent/agents + .omc/agents): owned object name -> {name, description, tools[], model?, body} */
 json_t *agent_defs_load(const char *cwd);
@@ -252,6 +253,9 @@ char *ssh_quote(const char *s); /* POSIX single-quote */
 /* ssh.json host files (ssh/config-writer.ts, shared by `/ssh` and `omc ssh`): user <agent dir>/ssh.json,
  * project <cwd>/.omc/ssh.json (owned) */
 char *ssh_config_path(const char *scope, const char *cwd);
+/* discovery/ssh-config.ts: concrete Host aliases of ~/.ssh/config then /etc/ssh/ssh_config (Include followed), as
+ * name/file pairs appended to `pairs` */
+void ssh_openssh_aliases(strvec_t *pairs);
 /* readSSHConfigFile: {hosts:{}} when missing; NULL with owned *err ("Failed to parse SSH config file …") */
 json_t *ssh_config_read(const char *path, char **err);
 const char *ssh_validate_host_name(const char *name); /* validateHostName: NULL when valid */

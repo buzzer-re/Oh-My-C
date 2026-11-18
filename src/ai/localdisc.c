@@ -96,6 +96,46 @@ static void warn_discovery_failure(const probe_t *p) {
     free(url);
 }
 
+/* omp #publishModelsFileWarnings: a (re)load of models.yml replaces the findings of the previous load still pending */
+static strvec_t g_models_file_warnings;
+void catalog_publish_models_file_warnings(const strvec_t *w) {
+    pthread_mutex_lock(&g_mu);
+    if (g_models_file_warnings.n) {
+        strvec_t keep = {0};
+        for (size_t i = 0; i < g_config_warnings.n; i++) {
+            bool published = false;
+            for (size_t j = 0; j < g_models_file_warnings.n && !published; j++)
+                published = !strcmp(g_config_warnings.v[i], g_models_file_warnings.v[j]);
+            if (!published) strvec_push(&keep, g_config_warnings.v[i]);
+        }
+        strvec_free(&g_config_warnings);
+        g_config_warnings = keep;
+        strvec_free(&g_models_file_warnings);
+    }
+    for (size_t i = 0; w && i < w->n; i++) {
+        strvec_push(&g_models_file_warnings, w->v[i]);
+        strvec_push(&g_config_warnings, w->v[i]);
+    }
+    pthread_mutex_unlock(&g_mu);
+}
+
+/* the models.yml findings still pending, taken out of the config warnings (main.ts reports them at launch: stderr
+ * without a TUI, warning notices in it), so the session's config-warning header keeps the discovery ones */
+void catalog_take_models_file_warnings(strvec_t *out) {
+    pthread_mutex_lock(&g_mu);
+    strvec_t keep = {0};
+    for (size_t i = 0; i < g_config_warnings.n; i++) {
+        bool mine = false;
+        for (size_t j = 0; j < g_models_file_warnings.n && !mine; j++)
+            mine = !strcmp(g_config_warnings.v[i], g_models_file_warnings.v[j]);
+        strvec_push(mine ? out : &keep, g_config_warnings.v[i]);
+    }
+    strvec_free(&g_config_warnings);
+    g_config_warnings = keep;
+    strvec_free(&g_models_file_warnings);
+    pthread_mutex_unlock(&g_mu);
+}
+
 void catalog_drain_config_warnings(strvec_t *out) {
     pthread_mutex_lock(&g_mu);
     for (size_t i = 0; i < g_config_warnings.n; i++) strvec_push(out, g_config_warnings.v[i]);

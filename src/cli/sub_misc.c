@@ -75,7 +75,7 @@ static char *serialize_agent(const json_t *fm_src, const char *body) {
 /* loadBundledAgents: (frontmatter, rendered body) pairs, sorted by name */
 static json_t *bundled_agents(void) {
     json_t *out = json_arr();
-    static const char *const md[] = {"reviewer", "scout", "seance", "security-reviewer"};
+    static const char *const md[] = {"reviewer", "scout", "security-reviewer"};
     for (size_t i = 0; i < ARRAY_LEN(md); i++) {
         char *rel = xasprintf("coding-agent/prompts/agents/%s.md", md[i]);
         char *t = prompt_load(rel);
@@ -111,7 +111,7 @@ static json_t *bundled_agents(void) {
     }
     free(tb);
     free(task);
-    return out; /* already in name order: reviewer scout seance security-reviewer sonic task */
+    return out; /* already in name order: reviewer scout security-reviewer sonic task */
 }
 
 int cmd_agents(cparse_t *p) {

@@ -34,6 +34,7 @@ typedef struct {
     bool has_tools;
     strvec_t tools;
     bool no_tools, no_lsp;
+    bool no_judge, no_spotlight, offline; /* auxiliary-model-policy: restrict auxiliary calls to the session provider */
     bool print, print_thoughts;
     const char *export_path;
     bool no_skills;

@@ -142,8 +142,6 @@ tools.format	inert	native tool calling only (no in-band/owned dialect)
 tools.abortOnFabricatedResult	inert	only applies to in-band tool calls (tools.format), which omc lacks
 ttsr.judge	inert	no judge-backed `question` rules
 ttsr.contextMode	inert	fixed at the default (partial output discarded); `keep` not implemented
-ttsr.repeatMode	inert	fixed at the default (once per session); `after-gap` not implemented
-ttsr.repeatGap	inert	only used by ttsr.repeatMode after-gap
 
 # ---------- inert: Files / Shell / Tools ----------
 edit.modelVariants	inert	no per-model edit variants
@@ -224,18 +222,11 @@ debug.adapters	omc-only	no omp setting
 mcp.enabled	omc-only	no omp setting (omp's switch is --no-mcp)
 mcp.disabledServers	omc-only	omp keeps disabledServers in its MCP config files, not settings
 skills.compressDescriptions	omc-only	no omp equivalent
-models.noJudge	inert	no judge-model opt-out (omp v18.22) (added in omp v18.19-18.22)
-models.noSpotlight	inert	spotlight is omp-hosted, not ported (added in omp v18.19-18.22)
-models.offline	inert	offline model mode not ported yet (added in omp v18.19-18.22)
 disassembler.backend	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
 disassembler.maxOpen	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
 disassembler.idleCloseSec	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
 ghidra.installDir	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
 ghidra.python	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
 tui.renderEmbeds	inert	not ported yet (added in omp v18.19-18.22)
-systemPromptTemplates	inert	not ported yet (added in omp v18.19-18.22)
 task.autoParallel	inert	not ported yet (added in omp v18.19-18.22)
-task.steps	inert	not ported yet (added in omp v18.19-18.22)
 task.agentPrewalkAuto	inert	not ported yet (added in omp v18.19-18.22)
-todo.midRunNudges	inert	not ported yet (added in omp v18.19-18.22)
-launch.persist	inert	not ported yet (added in omp v18.19-18.22)

@@ -673,7 +673,21 @@ static char *custom_one_liner(const json_t *msg) {
     }
     char *text = content_text(json_get(msg, "content"), "[image]");
     char *r;
-    if (!strcmp(type, "image-attachment")) {
+    if (!strcmp(type, "skill-prompt")) {
+        /* omp c8dc5a795c: the content puts the whole skill body before `User: <args>`, so the user's request comes from
+         * the details with its own 500-char budget */
+        char *pt = str_trim(DSTR("prompt")), *at = str_trim(DSTR("args"));
+        char *user = *pt ? xstrdup(pt) : *at ? xasprintf("User: %s", at) : NULL;
+        const char *name = DSTR("name");
+        char *label = *name ? xasprintf("skill:%s", name) : xstrdup("skill-prompt");
+        char *p = one_line(user ? user : text, user ? 500 : 120);
+        r = xasprintf("[%s] %s", label, p);
+        free(p);
+        free(label);
+        free(user);
+        free(pt);
+        free(at);
+    } else if (!strcmp(type, "image-attachment")) {
         const char *path = DSTR("path");
         char *found = NULL;
         if (!*path) {

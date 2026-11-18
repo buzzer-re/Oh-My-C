@@ -657,6 +657,26 @@ agent_tool_t *agent_find_tool(agent_t *a, const char *name) {
     return NULL;
 }
 
+/* sdk.ts resolveDeviceSpelling: a name the exact lookup missed may be a mounted xd:// device called as `xd://<name>` */
+static agent_tool_t *find_device_spelling(agent_t *a, const char *name) {
+    const char *bare = !strncasecmp(name, "xd://", 5) ? name + 5 : name;
+    for (size_t i = 0; i < a->all_tools.n; i++)
+        if (a->all_tools.v[i]->mounted && !strcmp(a->all_tools.v[i]->name, bare)) return a->all_tools.v[i];
+    return NULL;
+}
+
+/* the tool a model's call names: the exact tool, a mounted device spelled `xd://<name>`, then (omp dd536ce059) the
+ * prefix spelled with underscores by a model whose tool-name charset cannot carry `://` (`xd_recall`, `xd__recall`) */
+static agent_tool_t *find_call_tool(agent_t *a, const char *name) {
+    agent_tool_t *t = agent_find_tool(a, name);
+    if (t) return t;
+    if ((t = find_device_spelling(a, name))) return t;
+    if (strncasecmp(name, "xd_", 3) != 0) return NULL;
+    const char *p = name + 2;
+    while (*p == '_') p++;
+    return *p ? find_device_spelling(a, p) : NULL;
+}
+
 void agent_remove_tool(agent_t *a, const char *name) {
     pthread_mutex_lock(&a->mu);
     for (size_t i = 0; i < a->all_tools.n; i++) {
@@ -814,6 +834,19 @@ json_t *agent_take_records(agent_t *a, bool (*is_record)(const json_t *msg), boo
     return out;
 }
 
+json_t *agent_peek_records(agent_t *a, bool (*is_record)(const json_t *msg), bool (*matches)(const json_t *msg)) {
+    json_t *out = json_arr();
+    pthread_mutex_lock(&a->mu);
+    json_t *queues[2] = {a->steering, a->asides};
+    for (int q = 0; q < 2; q++)
+        for (size_t i = 0; i < json_len(queues[q]); i++) {
+            const json_t *m = json_at(queues[q], i);
+            if (is_record(m) && (!matches || matches(m))) json_push(out, json_clone(m));
+        }
+    pthread_mutex_unlock(&a->mu);
+    return out;
+}
+
 void agent_clear_queues(agent_t *a) {
     pthread_mutex_lock(&a->mu);
     json_free(a->steering);
@@ -857,7 +890,7 @@ void agent_queue_texts(agent_t *a, strvec_t *steering, strvec_t *follow_up) {
     pthread_mutex_unlock(&a->mu);
 }
 
-json_t *agent_pop_last_queued(agent_t *a) {
+json_t *agent_pop_last_queued_ex(agent_t *a, bool *follow_up) {
     json_t *out = NULL;
     pthread_mutex_lock(&a->mu);
     json_t *queues[2] = {a->steering, a->follow_up};
@@ -865,6 +898,7 @@ json_t *agent_pop_last_queued(agent_t *a) {
         for (size_t i = json_len(queues[q]); i > 0; i--) {
             if (agent_msg_user_authored(json_at(queues[q], i - 1))) {
                 out = json_arr_remove(queues[q], i - 1);
+                if (follow_up) *follow_up = q == 1;
                 break;
             }
         }
@@ -872,6 +906,8 @@ json_t *agent_pop_last_queued(agent_t *a) {
     pthread_mutex_unlock(&a->mu);
     return out;
 }
+
+json_t *agent_pop_last_queued(agent_t *a) { return agent_pop_last_queued_ex(a, NULL); }
 
 json_t *agent_take_user_queued(agent_t *a) {
     json_t *r = json_obj();
@@ -1649,7 +1685,7 @@ static void execute_tools(agent_t *a, json_t *run_msgs, const json_t *assistant,
         j->a = a;
         j->call = blk;
         const char *name = json_get_str(blk, "name");
-        j->tool = name ? agent_find_tool(a, name) : NULL;
+        j->tool = name ? find_call_tool(a, name) : NULL;
         json_t *args = json_get(blk, "arguments");
         j->args = json_is_obj(args) ? json_clone(args) : json_obj();
         j->intent = extract_intent(j->tool, j->args, &j->intent_too_long);

@@ -158,6 +158,128 @@ static json_t *env_layer(void) {
     return e;
 }
 
+/* ---------- layered array merges and path-scoped rule lists (omp settings.ts #deepMerge, resolvePathScopedArray) ---------- */
+
+/* array settings declaring `merge: "prepend"` and `pathScoped: {valuesKey: "patterns", itemType: "object"}` */
+static bool prepend_setting(const char *path) { return str_eq(path, "bash.patterns") || str_eq(path, "bashInterceptor.patterns"); }
+
+typedef enum { MERGE_REPLACE, MERGE_COMBINE, MERGE_LAYER } merge_mode_t;
+
+static void path_scope_prefixes(const json_t *entry, strvec_t *out) {
+    static const char *const keys[] = {"path", "paths", "pathPrefix", "pathPrefixes"};
+    for (size_t i = 0; i < ARRAY_LEN(keys); i++) {
+        const json_t *v = json_get(entry, keys[i]), *x;
+        if (json_is_str(v)) strvec_push(out, json_sv(v));
+        else json_arr_foreach(v, k, x) if (json_is_str(x)) strvec_push(out, json_sv(x));
+    }
+}
+
+/* scopedListDefault: a non-empty list of only scoped entries keeps the setting's default (omc registers no
+ * default rules for these lists, so it is the empty list either way); any unscoped entry replaces it */
+static json_t *scoped_list_default(const char *path, const json_t *list) {
+    (void)path;
+    (void)list;
+    return json_arr();
+}
+
+/* #deepMerge: `src` over `dst` in place. `mode` decides how a prepend array combines with the lower value: replace
+ * (the higher array wins), combine (prepend onto the lower array as found), layer (as combine, and a lower layer
+ * leaving it unset or null contributes the default from `defaults`). An empty higher array still replaces. */
+static void layer_merge(json_t *dst, const json_t *src, const char *prefix, merge_mode_t mode, const json_t *defaults) {
+    if (!json_is_obj(dst) || !json_is_obj(src)) return;
+    for (size_t i = 0; i < src->u.obj.n; i++) {
+        const char *k = src->u.obj.keys[i];
+        json_t *sv = src->u.obj.vals[i];
+        json_t *dv = json_get(dst, k);
+        char *sp = *prefix ? xasprintf("%s.%s", prefix, k) : xstrdup(k);
+        if (json_is_obj(sv) && (json_is_obj(dv) || (!dv && mode == MERGE_LAYER))) {
+            if (!dv) {
+                json_set(dst, k, json_obj());
+                dv = json_get(dst, k);
+            }
+            layer_merge(dv, sv, sp, mode, defaults);
+        } else if (mode != MERGE_REPLACE && json_is_arr(sv) && prepend_setting(sp) && json_len(sv) > 0) {
+            json_t *base = NULL;
+            if (json_is_arr(dv)) {
+                base = json_clone(dv);
+                json_t *d = scoped_list_default(sp, dv), *x;
+                json_arr_foreach(d, j, x) json_push(base, json_clone(x));
+                json_free(d);
+            } else if (mode == MERGE_LAYER && json_is_null(dv)) {
+                const json_t *def = defaults ? json_path((json_t *)defaults, sp) : NULL;
+                if (json_is_arr(def)) base = json_clone(def);
+            }
+            json_t *out = json_clone(sv), *x;
+            json_arr_foreach(base, j, x) json_push(out, json_clone(x));
+            json_free(base);
+            json_set(dst, k, out);
+        } else {
+            json_set(dst, k, json_clone(sv));
+        }
+        free(sp);
+    }
+}
+
+static bool path_matches_prefix(const char *cwd, const char *prefix, const char *proc_cwd) {
+    char *p = path_abs(prefix, proc_cwd), *c = path_abs(cwd, proc_cwd);
+    size_t n = strlen(p);
+    while (n > 1 && p[n - 1] == '/') p[--n] = 0;
+    bool ok = !strncmp(c, p, n) && (c[n] == 0 || c[n] == '/' || (n == 1 && p[0] == '/'));
+    free(p);
+    free(c);
+    return ok;
+}
+
+/* resolvePathScopedObjects: unscoped entries pass through; a scoped entry whose prefix covers `cwd` contributes its
+ * other fields as an inline rule, then its nested `values` / `items` / `patterns` entries resolved the same way */
+static void resolve_scoped_objects(const json_t *entries, const char *cwd, const char *proc_cwd, json_t *out, int depth) {
+    if (depth > 32) return;
+    json_t *e;
+    json_arr_foreach(entries, i, e) {
+        if (!json_is_obj(e)) continue;
+        strvec_t pre = {0};
+        path_scope_prefixes(e, &pre);
+        if (!pre.n) {
+            json_push(out, json_clone(e));
+            strvec_free(&pre);
+            continue;
+        }
+        bool in = false;
+        for (size_t k = 0; k < pre.n && !in; k++) in = path_matches_prefix(cwd, pre.v[k], proc_cwd);
+        strvec_free(&pre);
+        if (!in) continue;
+        static const char *const drop[] = {"path", "paths", "pathPrefix", "pathPrefixes", "values", "items", "patterns"};
+        json_t *inl = json_obj();
+        for (size_t k = 0; k < e->u.obj.n; k++) {
+            bool skip = false;
+            for (size_t d = 0; d < ARRAY_LEN(drop) && !skip; d++) skip = str_eq(e->u.obj.keys[k], drop[d]);
+            if (!skip) json_set(inl, e->u.obj.keys[k], json_clone(e->u.obj.vals[k]));
+        }
+        if (json_len(inl) > 0) json_push(out, inl);
+        else json_free(inl);
+        static const char *const nested[] = {"values", "items", "patterns"};
+        for (size_t d = 0; d < ARRAY_LEN(nested); d++)
+            if (json_is_arr(json_get(e, nested[d]))) resolve_scoped_objects(json_get(e, nested[d]), cwd, proc_cwd, out, depth + 1);
+    }
+}
+
+/* the merged view's path-scoped rule lists resolved for `cwd` (configuredValue) */
+static void resolve_path_scoped(json_t *view, const char *cwd) {
+    static const char *const keys[] = {"bash.patterns", "bashInterceptor.patterns"};
+    char *proc_cwd = get_cwd();
+    for (size_t i = 0; i < ARRAY_LEN(keys); i++) {
+        json_t *v = json_path(view, keys[i]);
+        if (!json_is_arr(v)) continue;
+        json_t *out = json_arr();
+        resolve_scoped_objects(v, cwd ? cwd : proc_cwd, proc_cwd, out, 0);
+        json_t *d = scoped_list_default(keys[i], v), *x;
+        json_arr_foreach(d, j, x) json_push(out, json_clone(x));
+        json_free(d);
+        set_path(view, keys[i], out);
+    }
+    free(proc_cwd);
+}
+
 /* the disabledProviders strings the layers resolve to with `project` as the project layer */
 static strvec_t disabled_providers(const json_t *project) {
     json_t *m = json_obj();
@@ -219,9 +341,12 @@ static void rebuild(void) {
     }
     /* precedence: runtime override (flags, session-only writes), the definition's environment variable, overlay, project, global */
     json_t *layers[] = {g_global, project, g_overlay, g_env, g_runtime};
+    /* #mergeOwnLayers: project and the `--config` overlay layer prepend-merged lists over the lower layers */
+    static const merge_mode_t modes[] = {MERGE_REPLACE, MERGE_LAYER, MERGE_LAYER, MERGE_REPLACE, MERGE_REPLACE};
     for (size_t i = 0; i < ARRAY_LEN(layers); i++)
-        if (layers[i]) json_merge(g_effective, layers[i]);
+        if (layers[i]) layer_merge(g_effective, layers[i], "", modes[i], g_defaults);
     json_free(project);
+    resolve_path_scoped(g_effective, g_cwd);
     /* effect(cfgOperatorUnpausedProviders, setUnpausedProviders): the operator layers' value (never a project
      * layer's) decides which paused providers are back on, applied to the process at once */
     json_t *op = json_path(g_defaults, "auth.unpausedProviders");
@@ -256,7 +381,7 @@ static void load_project(const char *cwd) {
                 if (j) {
                     if (str_eq(pf[k], "config.yml") && json_get(j, "modelRoles"))
                         g_native_roles = json_clone(json_get(j, "modelRoles"));
-                    json_merge(g_project, j);
+                    layer_merge(g_project, j, "", MERGE_COMBINE, NULL); /* #mergeProjectItems */
                     json_free(j);
                 }
                 free(p);
@@ -296,7 +421,7 @@ void settings_init(const char *cwd, const strvec_t *overlay_files) {
         for (size_t i = 0; i < overlay_files->n; i++) {
             json_t *j = load_file(overlay_files->v[i]);
             if (j) {
-                json_merge(g_overlay, j);
+                layer_merge(g_overlay, j, "", MERGE_COMBINE, NULL); /* #readConfigOverlays */
                 json_free(j);
             } else {
                 fprintf(stderr, "omc: warning: cannot load config %s\n", overlay_files->v[i]);
@@ -629,8 +754,10 @@ json_t *settings_operator_get(const char *path) {
     pthread_mutex_lock(&g_mu);
     json_t *view = json_clone(g_defaults);
     json_t *layers[] = {g_global, g_overlay, g_env, g_runtime};
+    static const merge_mode_t modes[] = {MERGE_REPLACE, MERGE_LAYER, MERGE_REPLACE, MERGE_REPLACE};
     for (size_t i = 0; i < ARRAY_LEN(layers); i++)
-        if (layers[i]) json_merge(view, layers[i]);
+        if (layers[i]) layer_merge(view, layers[i], "", modes[i], g_defaults);
+    resolve_path_scoped(view, g_cwd);
     json_t *v = json_path(view, path);
     json_t *r = v ? json_clone(v) : NULL;
     json_free(view);
