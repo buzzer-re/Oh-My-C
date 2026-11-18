@@ -72,7 +72,8 @@ print("ok available commands")
 checks = [
     ("/dirs", "Workspace directories:\n  "),
     ("/model", "Current model: mock/mock-1"),
-    ("/effort bogus", "mock/mock-1 has no adjustable thinking level."),
+    # mock-1 has no `reasoning`: a provisional ladder (omp 3f8862bf9e), adjustable with auto
+    ("/effort bogus", "Unknown thinking level: bogus. Available: off, auto, minimal, low, medium, high, xhigh, max"),
     ("/advisor status", "Advisor is disabled."),
     ("/advisor bogus", "Usage: /advisor [on|off|status|dump [raw]|configure]"),
     ("/shake bogus", 'Unknown /shake mode "bogus". Use elide, images, or thinking.'),

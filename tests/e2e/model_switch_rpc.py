@@ -116,6 +116,9 @@ if not wait(lambda f: f.get("type") == "prompt_result" and f.get("id") == "run",
 with open(reqlog) as f:
     f.seek(mark)
     reqs = [json.loads(l) for l in f if l.strip()]
+# thinking-capability probes (omp 3f8862bf9e) run before a model's first thinking request: not turns
+PROBE = "What is 17 times 23? Answer with only the number.\n"
+reqs = [r for r in reqs if not (len(r.get("messages") or []) == 1 and r["messages"][0].get("content") == PROBE)]
 models = [r.get("model") for r in reqs if r.get("messages")]
 # a file-free coordination write (agent://) before the first file edit does not hand off (omp 605b460c7a)
 if not models or models[0] != "mock-1" or len(models) < 4 or models[2] != "mock-1" or models[-1] != "mock-2":

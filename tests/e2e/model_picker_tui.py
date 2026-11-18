@@ -21,6 +21,7 @@ open(os.path.join(agent, "models.yml"), "w").write("""providers:
     models:
       - id: mock-1
         name: Mock One
+        reasoning: false
         contextWindow: 100000
         maxTokens: 4096
       - id: mock-r
