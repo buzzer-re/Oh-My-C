@@ -171,6 +171,16 @@ check "sink marker"    "4317"$'\n'"[…20564ln elided…]"$'\n'"24882"  python3 
 check "sink artifact"  "168894"  bash -c "wc -c < \"\$(ls $T/sink/*/0.bash.log)\""
 "$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://0:raw:29999-29999" >/dev/null 2>&1 </dev/null
 check "artifact read"  "29999"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://0:5-6" >/dev/null 2>&1 </dev/null
+check "artifact plain" $'4\n5\n6\n7\n8\n9\n\n[Backing file: '  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "artifact hint"  $' (164.9KB). Use artifact://0:raw:1-3000 for bounded verbatim chunks, artifact://0:1-3000 for numbered exploration, and the backing file path for search/copy workflows.]\n\n[Showing lines 4-9 of 30000. Use :10 to continue]'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "artifact source" '"source":{"type":"internal","value":"artifact://0"}'  bash -c 'cat "$0"/sink/*.jsonl' "$T"
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://0:raw" >/dev/null 2>&1 </dev/null
+check "artifact raw cap" 'Unbounded raw read blocked for artifact://0 (164.9KB). Reading the whole file verbatim can exhaust memory.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://0:40000" >/dev/null 2>&1 </dev/null
+check "artifact eof"   'Line 40000 is beyond end of file (30000 lines total). Use artifact://0:1 to read from the start, or artifact://0:30000 to read the last line.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://99" >/dev/null 2>&1 </dev/null
+check "artifact miss"  'Artifact 99 not found. Available: 0'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p "bash:python3 -c \"print('x'*2000)\"; printf 'a\\033[31mb\\rc\\n'; exit 3" >/dev/null 2>&1 </dev/null
 check "sink columns"   "…"$'\n'"ab"$'\n'"c"$'\n\n\n'"Command exited with code 3"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 check "sink col note"  "[Some lines truncated to 768 bytes]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
@@ -198,7 +208,21 @@ mkdir -p "$T/agent/skills/demo"
 printf -- '---\nname: demo\ndescription: Demo skill for tests\n---\nSKILL BODY LINE\n' > "$T/agent/skills/demo/SKILL.md"
 printf 'Project rule: always test.\n' > AGENTS.md
 check "skill url"      "SKILL BODY LINE"  "$B" --model mock/mock-1 -p "read:skill://demo"
-check "unknown skill"  "Unknown skill"    "$B" --model mock/mock-1 -p "read:skill://nope"
+check "unknown skill"  $'Unknown skill: nope\nAvailable: demo'  "$B" --model mock/mock-1 -p "read:skill://nope"
+# located internal URLs read under the URL's identity (omp read.ts LocatedRead): an immutable scheme mints no
+# hashline anchors, skill:// carries its provenance (not under :raw), hints name the URL
+printf 'extra file\nsecond\n' > "$T/agent/skills/demo/notes.txt"
+"$B" --model mock/mock-1 --no-session -p "read:skill://demo" >/dev/null 2>&1 </dev/null
+check "skill located"  "[Skill file: $T/agent/skills/demo/SKILL.md]"$'\n---\nname: demo\n'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --no-session -p "read:skill://demo/notes.txt:9" >/dev/null 2>&1 </dev/null
+check "skill eof"      $'/notes.txt]\nLine 9 is beyond end of file (2 lines total). Use :1 to read from the start, or :2 to read the last line.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --no-session -p "read:skill://demo:raw" >/dev/null 2>&1 </dev/null
+check "skill raw"      $'SKILL BODY LINE\n|raw-ok'  python3 -I -c "$LASTMSG; print('|raw-ok' if c.startswith('---') else '|raw-bad')" "$T/req.jsonl"
+mkdir -p "$T/agent/rules"
+printf -- '---\ndescription: Lint rule\n---\nRULE BODY\nrule line 2\n' > "$T/agent/rules/e2e-lint.md"
+"$B" --model mock/mock-1 --no-session -p "read:rule://e2e-lint" >/dev/null 2>&1 </dev/null
+check "rule resource"  $'RULE BODY\nrule line 2'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+rm -rf "$T/agent/rules"
 grep -q "Demo skill for tests" "$T/req.jsonl" && echo "   ok  skill in system prompt" || { echo "   FAIL skill in system prompt"; fail=1; }
 # skill hints are compressed on the smol role chain (omp never falls back to the session model)
 printf 'modelRoles:\n  smol: mock/mock-1\n' > "$T/agent/config.yml"
