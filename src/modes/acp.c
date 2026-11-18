@@ -2016,6 +2016,7 @@ static json_t *mcp_config(const json_t *servers, char **err) {
             json_free(cfg);
             return NULL;
         }
+        json_set_str(c, "_provider", "ACP Client"); /* acp-agent.ts: provider "acp", providerName "ACP Client" */
         json_set(cfg, name ? name : "", c);
     }
     return cfg;

@@ -651,7 +651,7 @@ check "acp forget"     "Remembered approvals forgotten; the next read or write a
 # stop reasons, usage_update, and the fs / terminal / elicitation client bridges and client mcpServers
 timeout 120 python3 -I "$ROOT/tests/e2e/acp_session.py" "$B" "$ROOT/tests/e2e/mock_mcp.py" > "$T/acp_session.out" 2>&1 </dev/null
 for c in init configOptions bootstrap "fs read" "fs write" terminal usage_update "turn usage" "steering idle" \
-         set_config_option refusal "fork close" "load replay" resume elicitation "mcp servers"; do
+         set_config_option refusal "fork close" "load replay" resume elicitation "mcp servers" "mcp details"; do
     check "acp $c" "ok $c" cat "$T/acp_session.out"
 done
 # tool approval (WP-10): tools.approvalMode tiers, tools.approval policies, restricted folders, CLI flags

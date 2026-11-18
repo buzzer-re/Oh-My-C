@@ -178,4 +178,11 @@ check("elicitation error", "ACP client failed the formDialog elicitation: schema
       r["result"]["stopReason"] == "end_turn", (r, texts(fr)))
 r, fr = prompt(c, sid, "call:mcp__mock_echo_text:" + json.dumps({"text": "via mcp"}))
 check("mcp servers", "mcp echo: via mcp" in texts(fr), texts(fr))
+# tool-bridge.ts MCPToolDetails: client-declared servers are provider "acp" / "ACP Client"
+det = [u["params"]["update"].get("rawOutput", {}).get("details") for u in fr
+       if u.get("params", {}).get("update", {}).get("status") == "completed"]
+det = det[-1] if det else {}
+check("mcp details", det == {"serverName": "mock", "mcpToolName": "echo_text",
+                             "rawContent": [{"type": "text", "text": "mcp echo: via mcp"}], "provider": "acp",
+                             "providerName": "ACP Client"}, det)
 c.close()

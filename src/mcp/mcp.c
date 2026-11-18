@@ -1702,6 +1702,17 @@ char *mcp_tool_name(const char *server, const char *tool) {
     return name;
 }
 
+/* a discovery provider's id from its display name (`_provider`), as omp's SourceMeta carries both */
+static const char *provider_id(const char *name) {
+    static const char *const MAP[][2] = {{"OMP", "native"},       {"MCP Config", "mcp-json"}, {"Claude Code", "claude"},
+                                         {"Cursor", "cursor"},     {"VS Code", "vscode"},      {"OpenCode", "opencode"},
+                                         {"Gemini CLI", "gemini"}, {"OpenAI Codex", "codex"},  {"Windsurf", "windsurf"},
+                                         {"ACP Client", "acp"}};
+    for (size_t i = 0; name && i < ARRAY_LEN(MAP); i++)
+        if (!strcmp(MAP[i][0], name)) return MAP[i][1];
+    return NULL;
+}
+
 /* the bridge names its server: a reconnect / reload replaces the server object, the tool stays valid */
 typedef struct {
     mcp_manager_t *m;
@@ -1878,6 +1889,7 @@ static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *a
         return 0;
     }
     mcp_fail_free(&fail);
+    char *s_provider = json_get_str(s->cfg, "_provider") ? xstrdup(json_get_str(s->cfg, "_provider")) : NULL;
     srv_unref(s);
     /* formatMCPContent: text (and resource text) joined with blank lines into one block, images as their own
      * blocks; other item types are dropped; an empty result is one empty text block */
@@ -1937,12 +1949,17 @@ static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *a
         free(d);
     }
 
+    /* tool-bridge.ts buildResult: MCPToolDetails */
     out->details = json_obj();
-    json_set_str(out->details, "server", b->server);
-    json_set_str(out->details, "tool", b->tool);
-    json_set_str(out->details, "serverName", b->server); /* omp MCPToolDetails */
+    json_set_str(out->details, "serverName", b->server);
     json_set_str(out->details, "mcpToolName", b->tool);
-    if (out->is_error) json_set_bool(out->details, "isError", true);
+    if (json_is_bool(json_get(res, "isError"))) json_set(out->details, "isError", json_clone(json_get(res, "isError")));
+    if (rc) json_set(out->details, "rawContent", json_clone(rc));
+    if (json_get(res, "_meta")) json_set(out->details, "mcpMeta", json_clone(json_get(res, "_meta")));
+    const char *pname = s_provider, *pid = provider_id(pname);
+    if (pid) json_set_str(out->details, "provider", pid);
+    if (pname) json_set_str(out->details, "providerName", pname);
+    free(s_provider);
     json_free(res);
     return 0;
 }
