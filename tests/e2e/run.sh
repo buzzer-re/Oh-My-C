@@ -316,6 +316,14 @@ done
 # MCP stdio server bridged as mcp__<server>_<tool>
 printf '{"mcpServers":{"mockmcp":{"command":"python3","args":["-I","%s"]}}}' "$ROOT/tests/e2e/mock_mcp.py" > "$T/agent/mcp.json"
 check "mcp tool"       "mcp echo: hi-mcp"  "$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"hi-mcp"}'
+# MCP results as omp's buildResult renders them: structured content as a fenced JSON block unless a text block
+# carries it (an SDK {result: [...]} wrapper matching item by item: omp 3e2ba2dd2c), "Error: " lead, [Resource: uri]
+check "mcp wrapped list" 'Tool said: a'  "$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"struct:list"}'
+check "mcp list dedup"   'no json'  python3 -I -c 'import json,sys; r=[x for x in map(json.loads, open(sys.argv[1])) if x.get("tools")][-1]; c=[m for m in r["messages"] if m.get("role")=="tool"][-1]["content"]; print("json!" if "```json" in json.dumps(c) else "no json")' "$T/req.jsonl"
+"$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"struct:obj"}' >/dev/null 2>&1 </dev/null
+check "mcp structured"   $'x\n```json\n{\n  "k": 1,\n  "s": "v"\n}\n```'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"struct:err"}' >/dev/null 2>&1 </dev/null
+check "mcp error result" $'Error: bad\n\n[Resource: mem://r]\nrt'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 grep -q "Mock MCP server instructions" "$T/req.jsonl" && echo "   ok  mcp instructions in prompt" || { echo "   FAIL mcp instructions"; fail=1; }
 rm -f "$T/agent/mcp.json"
 # MCP OAuth: discovery -> dynamic registration -> PKCE code (curl plays the browser) -> bearer token
