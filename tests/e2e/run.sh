@@ -544,6 +544,7 @@ check "plan propose dispatch" '"xdev": {"args": {"title": "retry"}, "inner": {"p
 # omp 5fd26783af: the approval is recorded, so a resumed session trusts only an approved plan as its reference
 check "plan approval entry" '"mode":"none","data":{"approvedPlanFilePath":"local://retry-plan.md"}' bash -c 'grep -ho "\"mode\":\"none\",\"data\":{[^}]*}" $(ls -t "$0"/agent/sessions/*/*.jsonl | head -1)' "$T"
 check "plan propose off" 'No plan is awaiting approval' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B"
+check "plan ends at new"  'plan new ok' python3 -I "$ROOT/tests/e2e/plan_new_rpc.py" "$B"
 # --plan-yolo: plan phase first, approved on the first propose, then implemented on the hand-off model
 check "plan yolo"      '"tool": "propose"}} Plan approved. Implementing now with mock-1.' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-yolo --plan-yolo-into mock/mock-1
 check "plan yolo into" '--plan-yolo-into requires --plan-yolo' "$B" --model mock/mock-1 --plan-yolo-into mock/mock-1 -p hi

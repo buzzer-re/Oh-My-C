@@ -3868,6 +3868,7 @@ static void app_release_eval(app_t *a) {
 }
 
 int app_new_session(app_t *a) {
+    app_plan_clear_transient(a); /* the reconciler on a session switch: a fresh session has no plan mode */
     session_t *ns = a->opts.no_session ? session_in_memory(a->cwd) : session_create(a->cwd, a->opts.session_dir);
     session_free(a->session);
     a->session = ns;

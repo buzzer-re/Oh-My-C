@@ -267,6 +267,8 @@ void app_set_plan_review_ui(app_t *a, bool on);
 int app_plan_restore_from_session(app_t *a);
 void app_plan_record_approval(app_t *a, const char *path); /* mode_change none {approvedPlanFilePath} */
 void app_exit_plan_mode_silently(app_t *a);
+/* a `/new` boundary: plan mode (enabled or paused) ends unjournaled and the pre-plan model returns */
+void app_plan_clear_transient(app_t *a);
 bool app_plan_should_start(app_t *a); /* plan.defaultOnStartup applies to this (fresh) session */
 void app_set_plan_reference(app_t *a, const char *path);
 json_t *app_plan_reference_message(app_t *a); /* hidden plan-mode-reference prompt once per rewrite, or NULL */

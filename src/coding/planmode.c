@@ -791,6 +791,27 @@ int app_plan_restore_from_session(app_t *a) {
     return r;
 }
 
+/* #clearTransientModeState (plan part) for a `/new` boundary: plan mode, enabled or paused, ends without a
+ * mode_change, and the pre-plan model comes back (restorePlanModel: the new session records no model of its own
+ * yet). Runs before the new session records its model, so the restore journals nothing in either session. */
+void app_plan_clear_transient(app_t *a) {
+    if (!a->plan_mode && !a->plan_paused) return;
+    if (a->plan_prev_set) {
+        a->plan_prev_set = false;
+        const ai_model_t *prev_model = a->model;
+        const char *prev_wire = app_wire_thinking(a);
+        a->model = a->plan_prev_model;
+        agent_set_model(a->agent, a->model);
+        a->thinking = a->plan_prev_thinking;
+        a->agent->thinking = a->plan_prev_thinking;
+        app_model_state_changed(a, prev_model, prev_wire);
+    }
+    free(a->plan_file);
+    a->plan_file = NULL;
+    a->plan_has_entered = false;
+    app_exit_plan_mode_silently(a);
+}
+
 /* clear the live plan state without journaling (the session being left/entered already says so) */
 void app_exit_plan_mode_silently(app_t *a) {
     a->plan_mode = false;
