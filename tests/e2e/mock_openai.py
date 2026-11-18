@@ -101,6 +101,10 @@ def req_kind(body):
     if last.startswith("Compress into one routing hint"): return "compress"
     return "main" if body.get("tools") else "side"
 
+def raw_text(msg):
+    c = msg.get("content")
+    return c if isinstance(c, str) else "".join(p.get("text", "") for p in c if isinstance(p, dict)) if isinstance(c, list) else ""
+
 def text_of(msg):
     c = msg.get("content")
     if isinstance(c, str): return c
@@ -111,6 +115,7 @@ def text_of(msg):
         return t[m.end():] if m else t
     return ""
 
+MID_RUN_NUDGE = re.compile(r"^<system-reminder>\n\d+ todo items? still open\. ")  # mid-run-todo-nudge.md
 STEER_NUDGES = ("STOP: In NEXT reply", "Continue task now", "Before task complete, verify:")
 
 
@@ -155,7 +160,7 @@ class H(BaseHTTPRequestHandler):
         msgs = body.get("messages", [])
         # hidden steering nudges (prewalk plan/continue/checklist) trail the turn: answer what precedes them
         while len(msgs) > 1 and msgs[-1].get("role") in ("user", "system", "developer") and \
-                text_of(msgs[-1]).lstrip().startswith(STEER_NUDGES):
+                (text_of(msgs[-1]).lstrip().startswith(STEER_NUDGES) or MID_RUN_NUDGE.search(raw_text(msgs[-1]))):
             msgs = msgs[:-1]
         last = msgs[-1] if msgs else {}
         lu = text_of(last) if last.get("role") == "user" else ""

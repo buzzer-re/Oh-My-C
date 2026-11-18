@@ -17,6 +17,7 @@
 #define ARGUMENT_SUMMARY_LIMIT 400
 #define MID_RUN_NUDGE_MUTATION_THRESHOLD 12
 #define MID_RUN_NUDGE_MAX_PER_CYCLE 2
+#define MID_RUN_NUDGE_BACKOFF_DOUBLINGS 4
 #define UNEXPECTED_STOP_MAX_RETRIES 3
 #define UNEXPECTED_STOP_TIMEOUT_MS 15000
 #define EMPTY_STOP_MAX_RETRIES 3
@@ -313,7 +314,14 @@ void guards_mid_run_nudge(app_t *a, const agent_event_t *ev) {
     json_t *blk;
     json_arr_foreach(json_get(ev->message, "content"), i, blk) has_tools = has_tools || str_eq(json_get_str(blk, "type"), "toolCall");
     if (!has_tools) return; /* a turn boundary inside the run, not the stop */
-    if (g->todo_mutations < MID_RUN_NUDGE_MUTATION_THRESHOLD || g->todo_nudges >= MID_RUN_NUDGE_MAX_PER_CYCLE) return;
+    /* todo.midRunNudges (omp a80b985192, dab28d7222): off, capped (twice per cycle at 12) or backoff (12, 24, 48, 96,
+     * then every 192 mutating results) */
+    const char *mode = settings_str("todo.midRunNudges", "capped");
+    if (str_eq(mode, "off")) return;
+    bool backoff = str_eq(mode, "backoff");
+    if (!backoff && g->todo_nudges >= MID_RUN_NUDGE_MAX_PER_CYCLE) return;
+    int threshold = MID_RUN_NUDGE_MUTATION_THRESHOLD << (backoff ? MIN(g->todo_nudges, MID_RUN_NUDGE_BACKOFF_DOUBLINGS) : 0);
+    if (g->todo_mutations < threshold) return;
     if (!settings_bool("todo.reminders", true) || a->plan_mode || !todo_active(a)) return;
     size_t n = 0;
     json_t *inc = incomplete_by_phase(a, &n);

@@ -172,6 +172,15 @@ check "todo errors"    $'Errors: Task "nope" not found\nRemaining items (1):'  p
 check "todo append"    $'  - a [in_progress] (A)\n  - c [pending] (A)\n  - b [pending] (Tasks)'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p 'call:todo:{"op":"append","phase":"","items":["x"]}' >/dev/null 2>&1 </dev/null
 check "todo append ''" 'Errors: Missing phase name for append operation'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+# todo.midRunNudges (omp a80b985192, dab28d7222): 26 bash results after a todo init nudge twice when capped (at 12, 24),
+# once with backoff (12, then 36) and never when off
+NUDGE_SCRIPT=$(python3 -I -c 'import json; print("calls:"+json.dumps([["todo",{"op":"init","items":["a","b"]}]]+[["bash",{"command":"echo %d"%i}] for i in range(26)]))')
+for mode in off capped backoff; do
+    mkdir -p "$T/ag-nudge-$mode"; cp "$T/agent/models.yml" "$T/ag-nudge-$mode/"
+    printf 'todo:\n  midRunNudges: %s\n' "$mode" > "$T/ag-nudge-$mode/config.yml"
+    OMC_CODING_AGENT_DIR="$T/ag-nudge-$mode" timeout 120 "$B" --model mock/mock-1 --no-session -p "$NUDGE_SCRIPT" </dev/null >/dev/null 2>&1
+    check "todo nudges $mode" "nudges=$(case $mode in off) echo 0;; capped) echo 2;; *) echo 1;; esac) tools=27" python3 -I -c 'import json,sys; r=[x for x in map(json.loads, open(sys.argv[1])) if x.get("tools")][-1]["messages"]; print("nudges=%d tools=%d" % (sum("todo items still open" in json.dumps(m) for m in r), sum(m.get("role") == "tool" for m in r)))' "$T/req.jsonl"
+done
 "$B" --model mock/mock-1 --no-session -p 'call:task:{}' >/dev/null 2>&1 </dev/null
 check "task shape"     'Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p "bash:sh -c 'kill -9 \$\$'; printf 'x'; sh -c 'kill -SEGV \$\$'; echo after-kill" >/dev/null 2>&1 </dev/null
