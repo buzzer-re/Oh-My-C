@@ -198,7 +198,8 @@ check "task empty batch" 'Missing `tasks`. Provide at least one task item with `
 check "bash no notice" "xafter-kill"  python3 -I -c "$LASTMSG; import re; sys.exit(1) if re.search('Killed|Segmentation', c) else None" "$T/req.jsonl"
 # skills + internal URLs + context files
 mkdir -p "$T/agent/skills/demo"
-printf -- '---\nname: demo\ndescription: Demo skill for tests\n---\nSKILL BODY LINE\n' > "$T/agent/skills/demo/SKILL.md"
+# (a description past the 100-char preview budget: a shorter one is used verbatim, never compressed (omp d36f905ad4))
+printf -- '---\nname: demo\ndescription: Demo skill for tests, covering routing hints, previews, compression of long descriptions and the skill URL reads\n---\nSKILL BODY LINE\n' > "$T/agent/skills/demo/SKILL.md"
 printf 'Project rule: always test.\n' > AGENTS.md
 check "skill url"      "SKILL BODY LINE"  "$B" --model mock/mock-1 -p "read:skill://demo"
 check "unknown skill"  "Unknown skill"    "$B" --model mock/mock-1 -p "read:skill://nope"

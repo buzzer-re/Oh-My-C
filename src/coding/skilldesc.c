@@ -354,6 +354,23 @@ void skilldesc_free(skilldesc_t *c) {
 char *skilldesc_render(void *catalog, const char *name, const char *description) {
     skilldesc_t *c = catalog;
     if (!c || !name || !description) return NULL;
+    /* omp d36f905ad4, dfb02f0644, 18e38771a8: an authored description already within the preview budget needs no
+     * compression and is used verbatim (whitespace collapsed), so its exclusions survive */
+    {
+        size_t chars = 0;
+        bool sp = false, any = false;
+        for (const char *p = description; *p; p++) {
+            if (isspace((unsigned char)*p)) {
+                sp = any;
+                continue;
+            }
+            if (sp) chars++;
+            sp = false;
+            any = true;
+            if (((unsigned char)*p & 0xC0) != 0x80) chars++;
+        }
+        if (chars <= MAX_PREVIEW_CHARS) return skilldesc_preview(description);
+    }
     char *key = key_for(name, description);
     pthread_mutex_lock(&c->mu);
     const char *snap = json_get_str(c->snapshot, key);
