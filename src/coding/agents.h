@@ -37,8 +37,7 @@ typedef struct {
     const char *name;           /* requested id (CamelCase) or NULL */
     const char *task;
     const char *context;
-    const char *source_session; /* seance */
-    const json_t *model;        /* string or [string] override (seance) */
+    const json_t *model;        /* string or [string] model override (internal callers) */
     task_card_t *card;          /* progress card this spawn reports into (NULL: none) */
     int card_index;
 } spawn_spec_t;

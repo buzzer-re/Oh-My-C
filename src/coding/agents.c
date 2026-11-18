@@ -881,7 +881,7 @@ typedef struct {
     tool_env_t *env;
     app_t *parent;
     aref_t *ref;
-    char *agent, *task, *context, *source, *model;
+    char *agent, *task, *context, *model;
 } spawn_t;
 
 static void spawn_free(void *p) {
@@ -889,7 +889,6 @@ static void spawn_free(void *p) {
     free(s->agent);
     free(s->task);
     free(s->context);
-    free(s->source);
     free(s->model);
     free(s);
 }
@@ -897,8 +896,7 @@ static void spawn_free(void *p) {
 /* a ref's registry status: the main session is `running` while its agent loop runs (syncSessionStatus) */
 static bool ref_live_running(const aref_t *r) { return r->is_main ? r->app && agent_is_running(r->app->agent) : r->running; }
 
-static char *peer_roster_prompt(aref_t *self, const char *agent_body, const char *context, const char *source,
-                                const char *model) {
+static char *peer_roster_prompt(aref_t *self, const char *agent_body, const char *context) {
     json_t *c = json_obj();
     json_set_str(c, "agent", agent_body ? agent_body : "");
     if (context && *context) json_set_str(c, "context", context);
@@ -944,17 +942,6 @@ static char *peer_roster_prompt(aref_t *self, const char *agent_body, const char
     if (omitted) json_set_int(c, "ircOmittedCount", (int64_t)omitted);
     char *s = prompt_render("coding-agent/prompts/system/subagent-system-prompt.md", c);
     json_free(c);
-    if (source) {
-        json_t *sc = json_obj();
-        json_set_str(sc, "sourceSession", source);
-        json_set_str(sc, "model", model ? model : "");
-        char *seance = prompt_render("coding-agent/prompts/system/seance-assignment.md", sc);
-        json_free(sc);
-        char *both = xasprintf("%s\n\n%s", s, seance);
-        free(s);
-        free(seance);
-        s = both;
-    }
     return s;
 }
 
@@ -980,25 +967,7 @@ static app_t *make_child(spawn_t *sp, char **err) {
         sp->ref->model_override = mo;
         pthread_mutex_unlock(&g_mu);
     }
-    if (sp->source) {
-        char *file = session_resolve(sp->source, sp->env->cwd);
-        session_t *src = file ? session_open(file, err) : NULL;
-        if (!file && !*err) *err = xasprintf("Source session not found: %s", sp->source);
-        free(file);
-        if (!src) {
-            json_free(defs);
-            free(model);
-            return NULL;
-        }
-        session_context_t sc;
-        session_build_context(src, &sc);
-        msgs = sc.messages;
-        sc.messages = NULL;
-        if (!model && sc.model) model = xstrdup(sc.model);
-        session_context_free(&sc);
-        session_free(src);
-    }
-    char *append = peer_roster_prompt(sp->ref, json_get_str(def, "body"), sp->context, sp->source, model);
+    char *append = peer_roster_prompt(sp->ref, json_get_str(def, "body"), sp->context);
     bool ro = agent_def_read_only(def);
     /* the transcript persists next to the parent's artifacts (omp `<artifactsDir>/<id>.jsonl`) */
     const char *adir = sp->parent && sp->parent->env ? artifacts_dir(sp->parent->env->artifacts) : NULL;
@@ -1204,7 +1173,6 @@ static spawn_t *make_spawn(tool_env_t *env, const spawn_spec_t *spec, aref_t *r)
     sp->agent = xstrdup(spec->agent);
     sp->task = xstrdup(spec->task ? spec->task : "");
     sp->context = spec->context ? xstrdup(spec->context) : NULL;
-    sp->source = spec->source_session ? xstrdup(spec->source_session) : NULL;
     sp->model = model_of(spec->model);
     return sp;
 }

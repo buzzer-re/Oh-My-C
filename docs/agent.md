@@ -491,7 +491,7 @@ tools are exclusive and mountable as `xd://` devices.
 ## Subagents and background jobs
 
 - **Agent definitions** (`tools/task.c` `agent_defs_load`): the bundled `scout`, `reviewer`,
-  `security-reviewer`, `seance`, `task` and `sonic` (omp `task/agents.ts` order), then user agents
+  `security-reviewer`, `task` and `sonic` (omp `task/agents.ts` order), then user agents
   from `<agent dir>/agents` and project agents from `.omc/agents`, `.omp/agents`, `.claude/agents`
   (markdown with frontmatter: tools, model, ...).
 - **Spawning** (`coding/agents.c`, the process-wide agent registry, port of `AgentRegistry` plus the

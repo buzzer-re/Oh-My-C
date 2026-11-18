@@ -87,12 +87,12 @@ static void scan_agents(json_t *out, const char *dir) {
 }
 
 
-/* Bundled agents in upstream order (task/agents.ts EMBEDDED_AGENT_DEFS): scout, reviewer, security-reviewer, seance
- * from their markdown; `task` and `sonic` share the task.md body with synthesized frontmatter. Then user agents
+/* Bundled agents in upstream order (task/agents.ts EMBEDDED_AGENT_DEFS): scout, reviewer, security-reviewer
+ * from their markdown (seance removed upstream: omp db5d932058); `task` and `sonic` share the task.md body with synthesized frontmatter. Then user agents
  * (~/.omc/agent/agents) and project agents (.omc/.omp/.claude agents dirs). Returns owned object name -> def. */
 json_t *agent_defs_load(const char *cwd) {
     json_t *out = json_obj();
-    static const char *files[] = {"scout", "reviewer", "security-reviewer", "seance"};
+    static const char *files[] = {"scout", "reviewer", "security-reviewer"};
     for (size_t i = 0; i < ARRAY_LEN(files); i++) {
         char *rel = xasprintf("coding-agent/prompts/agents/%s.md", files[i]);
         char *t = prompt_load(rel);
@@ -251,7 +251,6 @@ static spawn_spec_t spec_of(const json_t *t, const char *context) {
                          .name = json_get_str(t, "name"),
                          .task = json_get_str(t, "task"),
                          .context = context,
-                         .source_session = json_get_str(t, "sourceSession"),
                          .model = blank_model(json_get(t, "model")) ? NULL : json_get(t, "model")};
     return spec;
 }
@@ -385,12 +384,7 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             sb_appendf(&errs, "tasks[%zu]: unknown agent \"%s\"\n", i, agent);
         if (json_len(json_get_arr(t, "tools")))
             sb_appendf(&errs, "tasks[%zu]: `tools` (eval-defined tools) are not supported\n", i);
-        bool seance = str_eq(agent, "seance");
-        if (json_get(t, "sourceSession") && !seance)
-            sb_appendf(&errs, "tasks[%zu]: `sourceSession` is only valid with agent \"seance\"\n", i);
-        if (seance && !json_get_str(t, "sourceSession"))
-            sb_appendf(&errs, "tasks[%zu]: agent \"seance\" requires `sourceSession`\n", i);
-        if (json_get(t, "model") && !blank_model(json_get(t, "model")) && !seance)
+        if (json_get(t, "model") && !blank_model(json_get(t, "model")))
             sb_appendf(&errs, "tasks[%zu]: per-call `model` is disabled (task.perCallModel: off)\n", i);
     }
     if (errs.len) {
@@ -541,7 +535,6 @@ agent_tool_t *tool_task_new(tool_env_t *env) {
     bool batch = settings_bool("task.batch", true);
     json_t *ctx = json_obj();
     json_t *agents = json_arr();
-    bool seance = false;
     const char *k;
     json_t *v;
     json_obj_foreach(defs, i, k, v) {
@@ -553,7 +546,6 @@ agent_tool_t *tool_task_new(tool_env_t *env) {
         json_set_bool(a, "blocking", false);
         json_set_bool(a, "structured", false);
         json_push(agents, a);
-        if (str_eq(k, "seance") && str_eq(json_get_str(v, "source"), "bundled")) seance = true;
     }
     json_set(ctx, "agents", agents);
     json_set_bool(ctx, "scoutAvailable", tools_scout_available());
@@ -564,11 +556,6 @@ agent_tool_t *tool_task_new(tool_env_t *env) {
     json_set_bool(ctx, "ircEnabled", irc);
     /* eval-defined `tools` are not implemented: the conditional stays off (never advertised) */
     json_set_bool(ctx, "evalToolsEnabled", false);
-    if (seance) {
-        char *sg = prompt_load("coding-agent/prompts/tools/seance-task-guidance.md");
-        json_set_str(ctx, "seanceGuidance", sg ? sg : "");
-        free(sg);
-    }
     if (async) {
         json_t *ac = json_obj();
         json_set_bool(ac, "ircEnabled", irc);
@@ -581,16 +568,11 @@ agent_tool_t *tool_task_new(tool_env_t *env) {
     char *desc = tool_prompt("task", ctx);
     json_free(ctx);
     json_free(defs);
-    /* upstream task/types.ts createTaskSchema (no isolation, no eval tools): `model` is declared only while the
-     * caller may send it, i.e. seance's selector list (task.perCallModel has no per-call selector here); an
-     * undeclared `model` still reaches the preflight refusal through lenient validation */
-    const char *seance_fields = seance ? ",\"model\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"array\",\"items\":{"
-                                         "\"type\":\"string\"}}]},\"sourceSession\":{\"type\":\"string\"}"
-                                       : "";
-    char *it = xasprintf("{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"solutionSpace\":{\"type\":"
-                         "\"string\"},\"name\":{\"type\":\"string\"},\"agent\":{\"type\":\"string\"}%s},\"required\":["
-                         "\"task\",\"solutionSpace\"],\"additionalProperties\":false}",
-                         seance_fields);
+    /* upstream task/types.ts createTaskSchema (no isolation, no eval tools, no per-call model): an undeclared
+     * `model` still reaches the preflight refusal through lenient validation */
+    char *it = xstrdup("{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"solutionSpace\":{\"type\":"
+                       "\"string\"},\"name\":{\"type\":\"string\"},\"agent\":{\"type\":\"string\"}},\"required\":["
+                       "\"task\",\"solutionSpace\"],\"additionalProperties\":false}");
     char *sch = batch ? xasprintf("{\"type\":\"object\",\"properties\":{\"context\":{\"type\":\"string\"},\"tasks\":{"
                                   "\"type\":\"array\",\"items\":%s}},\"required\":[\"context\",\"tasks\"],"
                                   "\"additionalProperties\":false}",
