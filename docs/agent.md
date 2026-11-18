@@ -382,7 +382,11 @@ mode decides what happens (`always`, `prose-only`, `tool-only`, `never`):
 - **tool reminder**: append `ttsr-tool-reminder.md` to that tool call's result;
 - **deferred**: queue the reminder as a follow-up after the message.
 
-Each rule fires once per session. AST conditions (`astCondition`) and judged `question` triggers
+The repeat policy is `ttsr.repeatMode` (`once`, the default, or `after-gap`: again after `ttsr.repeatGap`
+completed turns), overridden per rule by a `repeatMode` frontmatter key (`once`, `after-gap`, or `always`, a
+one-turn gap). A rule's record is the turn its reminder lands in: an interrupt's retry, a deferred reminder's
+continuation, or a tool reminder's own turn, so a reminder can never re-fire its rule. Records are in memory
+only (not restored on resume). AST conditions (`astCondition`) and judged `question` triggers
 are recognized but not evaluated.
 
 ## Goal mode (`coding/goal.c`)
