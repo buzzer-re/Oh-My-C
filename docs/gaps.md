@@ -102,7 +102,7 @@ Every package must:
 | WP-23 Loop mode ✅ (done: `/loop` arguments, budget, `--while`/`--until`, `loop.mode` prompt/compact/reset, `loop.conditionTimeoutMs`, Esc pause, status-line segment, live autocomplete text; open: omp's vibe-mode guard for reset loops (omc has no `/vibe`), condition commands run through `proc_shell` instead of omp's per-session persistent shell) | `/loop [count\|duration] [--while\|--until cmd] [prompt]`, `loop.*`, Esc suspends | `src/modes/loopctl.c`, `src/coding/loop.c`, `src/modes/iqueue.c`, `src/ui/statusline.c` | U/slash-commands/builtin-modes.ts (loop), U/modes/{loop-limit,loop-condition}.ts |
 | WP-24 Provider usage 🟡 (**done:** fetchers for anthropic, openai-codex, github-copilot, google-gemini-cli, zai, synthetic, ollama(-cloud) with the shared cache + history; `/usage` dashboard + Details; `/usage reset` picker and Codex / Claude saved resets; per-turn usage row; `omc usage`; ACP `_omp/usage`; RPC `get_state.usageLimit`; text `/usage`. **Remaining:** the other 14 fetchers (kimi-code, minimax-code, opencode-go, google-antigravity, cursor, devin, xai-oauth, factory-droid, cline-pass, umans, commandcode, alibaba-token-plan, charm-hyper, muse-code), rate-limit header ingestion, usage-aware ranking / reserve fallback, account policies + tombstones + re-login / reset-expiry banners in `omc usage`, auto reset redemption, read-group usage rows, status-line usage segment) | `/usage` provider quota dashboard + `/usage reset` selector; per-provider usage fetchers; per-turn usage row (`display.showTokenUsage`, `display.showTurnTime`) | `src/modes/interactive.c`, `src/config/auth*.c`, `src/ui/chat.c` | T/overlays/{usage-dashboard,usage-display,usage-row,reset-usage-selector}.ts, U/slash-commands/helpers/usage-report.ts |
 | WP-25 Web search providers (done: web role chain + hosted expansion, anthropic/openai/codex/gemini/xai grounding, perplexity (API key), kimi, zai, searxng, `omc search` on the same code; omp's transport retries per provider; remaining: query directives (parseSearchQuery / applyQueryConstraints / per-provider formatQuery), Perplexity OAuth/cookie/anonymous transport, keyless Exa MCP, OpenRouter grounding, the scraper engines (startpage, ecosia, google, mojeek, public) and firecrawl/jina/kagi/deepseek/ollama/synthetic/tinyfish, `providers.fetch` reader backends (omc always uses its native reader, which is also omp's `auto` first choice)) | Search through logged-in providers (anthropic, openai, gemini, codex, xai, perplexity, kimi, zai), SearXNG (`searxng.endpoint`), `providers.fetch` | `src/tools/web.c` | U/web/search/{index,providers/*}.ts |
-| WP-26 Settings honesty 🟡 (**done:** recount with `build-tools/settings_audit.py` + `settings_audit.tsv` (§3: of the 417 in `/settings`, 203 wired, 8 partial, 124 inert, 82 ⛔); `tests/test_settings_audit.c` (a newly read key outside the registry, an unannotated unread key, or a read key still annotated inert fails `make test`); wired `fetch.enabled`, `goal.statusInFooter`, `exa.searchDelayMs`, `autocompleteMaxVisible`, the skill source toggles + `skills.customDirectories`, `read.summarize.minTotalLines`, `autoResume`, `topP` (+ negative sampling = provider default); e2e `tests/e2e/settings.sh`. **Remaining:** the presentation decision below; the inert features themselves (§3b/§3c, each a feature port, most in other WPs); the 16 omc-only keys (§3e)) | **Presentation, for the user to decide.** Parity says `/settings` should look like omp's, so nothing was hidden beyond the two update-check rows. Options: (a) keep showing everything (current; honest only through docs); (b) hide the 76 ⛔ rows (whole Memory sub-groups Mnemopi/Hindsight/Sharpshooter, Interaction Speech/Collab/Stream, Tools Computer/IDA/Browser rows), the way the update-check rows already are; (c) keep every row but append "(not supported in omc)" to the description of ⛔ and inert rows. Recommendation: (b) for ⛔ rows, since those features will never exist in omc, plus (c)'s marker for inert rows, since they may land later and hiding them would hide the gap. Both use the audit annotations as their source | `src/ui/settings.c`, `build-tools/settings_audit.{py,tsv}`, `tests/test_settings_audit.c` | T/overlays/settings-selector.ts |
+| WP-26 Settings honesty 🟡 (**done:** recount with `build-tools/settings_audit.py` + `settings_audit.tsv` (§3: of the 417 in `/settings`, 203 wired, 8 partial, 124 inert, 82 ⛔); `tests/test_settings_audit.c` (a newly read key outside the registry, an unannotated unread key, or a read key still annotated inert fails `make test`); wired `fetch.enabled`, `goal.statusInFooter`, `exa.searchDelayMs`, `autocompleteMaxVisible`, the skill source toggles + `skills.customDirectories`, `read.summarize.minTotalLines`, `autoResume`, `topP` (+ negative sampling = provider default); e2e `tests/e2e/settings.sh`. **Remaining:** the presentation decision below; the inert features themselves (§3b/§3c, each a feature port, most in other WPs); the 16 omc-only keys (§3e)) | **Presentation, for the user to decide.** Parity says `/settings` should look like omp's, so nothing is hidden beyond the `update.channel` row. Options: (a) keep showing everything (current; honest only through docs); (b) hide the 76 ⛔ rows (whole Memory sub-groups Mnemopi/Hindsight/Sharpshooter, Interaction Speech/Collab/Stream, Tools Computer/IDA/Browser rows), the way the `update.channel` row already is; (c) keep every row but append "(not supported in omc)" to the description of ⛔ and inert rows. Recommendation: (b) for ⛔ rows, since those features will never exist in omc, plus (c)'s marker for inert rows, since they may land later and hiding them would hide the gap. Both use the audit annotations as their source | `src/ui/settings.c`, `build-tools/settings_audit.{py,tsv}`, `tests/test_settings_audit.c` | T/overlays/settings-selector.ts |
 
 ### P3 — niche or large, low frequency
 
@@ -116,7 +116,8 @@ Every package must:
 
 Out of scope (⛔) and not packaged: JS/TS extensions, hooks and custom tools; the eval JS kernel;
 collab/share/stream (hosted); the skills.omp.sh registry; browser and computer use; STT, live voice,
-local TTS and tiny models; IDA; macOS spelling; npm self-update.
+local TTS and tiny models; IDA; macOS spelling; omp's build-service / npm self-update (omc updates from its own
+GitHub releases instead: `omc update`, the startup check, `update.auto`).
 
 ## 1. Slash commands
 
@@ -350,7 +351,7 @@ the dropdown is clamped to the viewport like omp's), `skills.enabled` / `enableP
 cfgSampling, instead of being sent as -1).
 
 **Presentation (pending the user's decision):** `/settings` still shows every omp setting, inert and ⛔ ones
-included, exactly like omp, except `startup.checkUpdate` and `update.channel`, which are hidden. See the WP-26 row
+included, exactly like omp, except `update.channel`, which is hidden (omc's releases have one channel). See the WP-26 row
 for the options.
 
 ### 3a. Partially implemented
@@ -426,8 +427,7 @@ platform API omc does not target. omc treats them as off.
 | `statusLine.showHookStatus` | hook statuses come from JS hooks/extensions |
 | `spelling.typoDetection` | macOS dictionaries |
 | `spelling.autocorrect` | macOS dictionaries |
-| `startup.checkUpdate` | omp's release feed / npm; hidden from /settings (src/ui/settings.c) |
-| `update.channel` | omp's release feed / npm; hidden from /settings (src/ui/settings.c) |
+| `update.channel` | omc's GitHub releases have one channel (no canary); hidden from /settings (src/ui/settings.c) |
 | `providers.tinyModelDevice` | local ONNX inference |
 | `providers.tinyModelDtype` | local ONNX inference |
 | `sharpshooter.*` (4, 1 in /settings) | Sharpshooter memory extraction backend (part of the ⛔ memory backends) |
@@ -779,7 +779,8 @@ the plugin manager omc lacks), omp commands omc does not port error with `is not
 | usage | ✅ | WP-24: breakdown, `--json`, `-p`, `-r`, `--history`, `accounts`, `reset`, `invalidate`; `clients` (no auth broker) prints the empty state; `-e`/`--no-extensions` not offered (no extensions) |
 | play | ✅ | `src/cli/sub_play.c`: `omc play [file] [-s speed] [-i idle-limit]`, omp's usage errors and help |
 | stats, gc, shell, ps, find, compress, toks, render, anonymize, images, grievances, git, cleanse, gallery, bench, if-bench, dry-balance, auth-broker, auth-gateway | ❌ | refused |
-| plugin/plugins/install, update | ⛔ | npm/Bun packages, self-update of the npm distribution |
+| update | ✅ | `src/cli/sub_update.c` over omc's GitHub releases (`src/coding/selfupdate.c`): `-c/--check`, `-f/--force`; `-l/--plugins`, `--canary`, `--stable` are not offered (no plugin manager, one channel) |
+| plugin/plugins/install | ⛔ | npm/Bun packages |
 | share, join, collab, clip, stream, skill/skills | ⛔ | hosted relay/stream/Skillshare services |
 | say, predict, tiny-models, browser-relay | ⛔ | local TTS/ML runtimes, Chrome CDP relay |
 | omc-only: migrate (listed), mcp, logout, sessions, export, glob, bash, version | n/a | hidden from `--help` except migrate |

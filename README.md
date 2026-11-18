@@ -31,6 +31,10 @@ curl -fsSL https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.sh |
 ./install.sh --build                # the same, from a clone
 ```
 
+### Updating
+
+`omc update` installs the latest release's binary over the one you run, checked against `SHA256SUMS` like the installer does; `omc update --check` only tells you whether there is a newer one. Interactive sessions also check on startup and show a notice when a release is out (turn it off with `startup.checkUpdate: false`, or set `update.auto: true` to install it in the background). A build from a clone updates with `git pull && make` instead.
+
 
 ## Building
 

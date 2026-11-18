@@ -69,6 +69,37 @@ latest release is found by following GitHub's `releases/latest` redirect, so it 
 `main`, so the script only works once the repository is public (a private repository's raw files and release assets
 need authentication).
 
+## Updating (`omc update`)
+
+`omc update` (`src/cli/sub_update.c`, mechanics in `src/coding/selfupdate.c`) is omp's `omp update` over these
+releases instead of omp's build service and npm:
+
+1. The latest version comes from the same `releases/latest` redirect `install.sh` follows (`/tag/v<version>`; no API,
+   no token) and is compared with the running version part by part (omp's `compareVersions`). `--check` (`-c`) stops
+   after reporting it; `--force` (`-f`) reinstalls the current version.
+2. It downloads `omc-<version>-<os>-<arch>.tar.gz` and `SHA256SUMS`, checks the SHA-256 with OpenSSL (a mismatch or a
+   missing entry installs nothing), inflates the archive with zlib in memory under size caps and takes the one
+   regular file `omc-<version>-<os>-<arch>/omc` with a strict tar reader (`src/core/tarx.c`: checksums, bounds, no
+   links, no duplicates; nothing in the archive names a path on disk).
+3. The new binary is written beside the real path of the running one (`/proc/self/exe`; `_NSGetExecutablePath` and
+   `realpath` on macOS), made executable, must print `omc/<version>` for `--version`, and is then renamed over the
+   old one, so a running omc keeps working. One installer runs at a time (`~/.omc/update/install.lock`).
+
+It refuses, with a message saying what to do instead, on a platform without a prebuilt binary (`install.sh --build`),
+in a directory it cannot write (permissions, or reinstall somewhere you own), and for a source checkout's
+`build/omc` (a git work tree with omc's Makefile: `git pull && make`).
+
+Interactive launches also check on startup (`startup.checkUpdate`, default on), on a detached thread with a 5 s
+timeout, and show omp's "Update Available" notice after the startup transcript when a newer release exists; failures
+are silent, and a source checkout is never checked. `update.auto: true` installs it in the background instead
+(a detached worker, `~/.omc/update/auto-update.json` / `.log`), with progress after the welcome banner's version
+label; the next launch runs it. There is one channel, so `update.channel` and `--canary` / `--stable` don't exist.
+
+Environment: `OMC_REPO` and `OMC_DOWNLOAD_URL` as in `install.sh`; `OMC_LATEST_URL` replaces the `releases/latest`
+URL (plain `http://` is accepted, for local mocks); `OMC_UPDATE_TARGET` names the binary to replace instead of the
+running one (a testing hook; its own `--version` is the current version); `OMC_NO_UPDATE_CHECK=1` turns off the
+startup check and `update.auto` (the test suites set it, so `make test` never contacts GitHub).
+
 ## Supply chain
 
 The workflows use no third-party actions: the code is checked out with `git`, the token is passed as a one-off

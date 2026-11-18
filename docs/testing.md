@@ -6,7 +6,8 @@ fresh `omc-test.*` dir under yours holding a `.git` entry (and `tests/e2e/run.sh
 the `TMPDIR` of everything it runs): project discovery walks ancestors up to the repo root, else to `/`, so without
 that a `TMPDIR` under the real home would load its `.agents`/`.claude` skills and commands. It
 needs a C compiler and `python3` (for the mock servers). It needs **no network access, no real
-credentials and no omp install**. The parity harnesses that compare against a live `omp` are
+credentials and no omp install**; `OMC_NO_UPDATE_CHECK=1` keeps every interactive launch from looking for a new omc
+release (`tests/e2e/update.sh` lifts it against `mock_release.py`). The parity harnesses that compare against a live `omp` are
 separate developer tools (below).
 
 Rule of thumb: prefer the mock servers. Real-model checks cost the user's tokens and are only for
@@ -39,6 +40,7 @@ catalog or auth symbols and run without the rest of the program.
 | `test_memory` | memory job store semantics, redaction, lessons, consolidation, managed skills |
 | `test_settings_audit` | WP-26 settings honesty: scans `src/` for settings reads; fails on a read key missing from omp's registry (unless omc-only), an unread registry key not annotated inert/⛔, or a read key still annotated inert (`build-tools/settings_audit.tsv`; `build-tools/settings_audit.py` prints the full audit). Runs from the repo root |
 | `test_fuzz_regress` | replays every saved fuzzing finding (`tests/fuzz/regress/<harness>/*`) through its harness built without libFuzzer, plus direct checks of those fixes (JSON-RPC framing, saturating number conversions, trim). Runs from the repo root |
+| `test_update` | `omc update` mechanics: omp's version comparison cases, the reported-version parse, SHA256SUMS lookup, the strict tar.gz member reader (dialects, caps, corrupt / truncated / duplicate / link members), source-checkout detection, the auto-update status file and lock |
 | `test_htmlform` | the `ask` tool's HTML form: parser (sections, groups, captions, implied closes, truncated markup), form data, validation, `JSON.stringify` output, pagination, and the form dialog (layout, dropdown, hide row, timeout, paging, validation, pictures) |
 
 `test_http` (manual network smoke test) and `tests/tui_demo.c` (interactive TUI playground) are
@@ -87,6 +89,7 @@ Other mocks reach real provider code paths through `OMC_PROVIDER_URL_REWRITE` /
 | `mock_auth.py` | device-code, oauth-code, api-key validation, custom hooks (`omc login` over stdin) |
 | `mock_mcp.py`, `mock_mcp_oauth.py` | stdio MCP tool (`--startup-delay=<s>`: a slow server for the startup window / tool cache, tests/e2e/mcp_cache.sh); OAuth-protected streamable-HTTP MCP |
 | `mock_dap.py` | scripted debug adapter |
+| `mock_release.py` | omc's GitHub releases: the `releases/latest` redirect, the download redirect and the assets + `SHA256SUMS` it builds (`make`); `omc update`, the startup notice and `update.auto` (`update.sh`, `update_tui.py`) |
 | `rpc_client.py`, `acp_client.py`, `eval_client.py` | protocol drivers for RPC, ACP and multi-cell eval sessions |
 | `acp_session.py` | `omc acp` as an editor drives it: session lifecycle (load replay, resume, fork, close), configOptions, steering, refusal, usage, and a fake client advertising fs / terminal / form elicitation for the bridges, plus client `mcpServers` |
 | `editor_io.py` + `fake_editor.sh` | the interactive composer under a pty: Ctrl+G through a scripted `$EDITOR`, Ctrl+R, paste chips and the large-paste menu, raw paste through a fake `xclip`, `#` actions / `#N` refs, `@` mentions (checked in the mock's request log) |
@@ -250,6 +253,7 @@ tests/fuzz/run.sh -t 300 json sse  # one target at a time, RSS-capped (FUZZ_RSS_
 | `rpcframe` | LSP/DAP Content-Length framing in arbitrary chunks |
 | `approval` | tool approval: shell segments, critical commands, per-tool decisions, argument formatting |
 | `pb` | Cursor Connect envelopes and protobuf decoding, `google.protobuf.Value` |
+| `tarx` | the `omc update` tar.gz reader: gunzip under a cap, then one member out of ustar / GNU / pax headers |
 
 Seeds live in `tests/fuzz/seeds/<name>/` (regenerate with `python3 -I tests/fuzz/mkseeds.py`); the working corpus and
 findings go to `build/fuzz/corpus/<name>` and `build/fuzz/crash/<name>`. Each harness points HOME and the agent dirs at a

@@ -22,7 +22,7 @@ omc <command> [args]                subcommand (see below)
 Routing (`src/cli/args.c`, port of `cli-commands.ts resolveCliArgv`): a registered command name or alias
 runs it, even behind leading launch flags (`omc --cwd x models` → `models`, launch-only flags dropped);
 omp's plugin verbs (`list`, `remove`, `marketplace add …`) and omp commands omc does not port (`stats`,
-`update`, `plugin`, `commit`, `session`, `ttsr`, …) are refused with `error: …` (exit 1) instead of
+`plugin`, `commit`, `session`, `ttsr`, …) are refused with `error: …` (exit 1) instead of
 reaching the model as a prompt; everything else is the launch command (`omc launch <words>` forces that).
 
 Launch flags (`src/cli/args.c`, port of `cli/args.ts` + `flag-tables.ts`; `--flag=value` everywhere,
@@ -47,9 +47,10 @@ node:util `parseArgs` strict mode, with its `error: … / USAGE / Run \`omc <cmd
 `acp`, `agents unpack`, `auth export|import`, `completions bash|zsh|fish` (+ hidden `__complete`),
 `config list|get|set|reset|path` (`--json`, `--scope global|project`), `grep`, `login [provider]`,
 `models [ls|find|refresh|<provider>]` (`--json`, `--kind`), `read`, `search` (`q`, `web-search`), `setup
-[python]` (no component: the first-run wizard), `ssh add|remove|list`, `token <provider>`, `worktree
+[python]` (no component: the first-run wizard), `ssh add|remove|list`, `token <provider>`, `update [-c|--check] [-f|--force]` (omc's GitHub releases; see
+[release.md](release.md#updating-omc-update)), `worktree
 list|clear|add` (`wt`), `migrate`. Hidden omc extras: `mcp list|login|logout`, `export <session> [out]`,
-`sessions`, `logout`, `glob`, `bash`, `version`.
+`sessions`, `logout`, `glob`, `bash`, `version`, and `__omc_worker_auto_update` (the `update.auto` worker).
 
 ## Interactive (`modes/interactive.c`)
 
