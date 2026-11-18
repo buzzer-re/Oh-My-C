@@ -271,4 +271,27 @@ msg = ld(1, ld(1, ld(1, b"hello")))
 put("pb", "msg", bytes([0]) + msg)
 put("pb", "connect", bytes([0x85]) + bytes([0]) + struct.pack(">I", len(msg)) + msg + bytes([2]) + struct.pack(">I", 37) + b'{"error":{"code":"internal","message":"x"}}'[:37])
 put("pb", "value", bytes([0x40]) + ld(5, ld(1, ld(1, b"k") + ld(2, varint(3 << 3 | 2)[:0] + b"\x1a\x01v"))))
+# ---- tarx: <selector> tar.gz (even) or tar (odd): `omc update` release archives in each tar dialect
+import tarfile
+def tarball(fmt, names, gz):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=fmt) as t:
+        for name, body in names:
+            info = tarfile.TarInfo(name)
+            info.mtime = 1700000000
+            if body is None:
+                info.type = tarfile.DIRTYPE
+                t.addfile(info)
+            else:
+                info.size = len(body)
+                info.mode = 0o755
+                t.addfile(info, io.BytesIO(body))
+    raw = buf.getvalue()
+    return gzip.compress(raw, mtime=0) if gz else raw
+REL = [("omc-9.9.9-linux-arm64", None), ("omc-9.9.9-linux-arm64/omc", b"#!/bin/sh\necho omc/9.9.9\n"),
+       ("omc-9.9.9-linux-arm64/README.md", b"readme\n")]
+put("tarx", "release-gz", bytes([0]) + tarball(tarfile.USTAR_FORMAT, REL, True))
+put("tarx", "release-tar", bytes([1]) + tarball(tarfile.USTAR_FORMAT, REL, False))
+put("tarx", "gnu-longname", bytes([1]) + tarball(tarfile.GNU_FORMAT, [("d/" * 60 + "omc", b"x" * 700)], False))
+put("tarx", "pax", bytes([1 | 4]) + tarball(tarfile.PAX_FORMAT, [("omc", b"bin"), ("\u00e9" * 120, b"y")], False))
 print("seeds written to", OUT)

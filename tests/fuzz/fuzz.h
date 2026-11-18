@@ -22,7 +22,7 @@
 /* the harness list (test_fuzz_regress walks it) */
 #define FUZZ_TARGETS(X)                                                                                                \
     X(json) X(yaml) X(regex) X(glob) X(sse) X(bedrock) X(http) X(codec) X(markdown) X(ansi) X(htmlform) X(img)         \
-    X(edit) X(session) X(rpcframe) X(approval) X(pb)
+    X(edit) X(session) X(rpcframe) X(approval) X(pb) X(tarx)
 
 #define FUZZ_CAT2(a, b) a##b
 #define FUZZ_CAT(a, b) FUZZ_CAT2(a, b)
