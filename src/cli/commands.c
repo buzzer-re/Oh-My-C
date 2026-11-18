@@ -254,6 +254,14 @@ static const char *const TOKEN_EXAMPLES[] = {
     "# List Anthropic OAuth accounts\n  omc token anthropic --list",
     "# Get the 2nd Anthropic OAuth account's token\n  omc token anthropic --account 2", NULL};
 
+/* commands/update.ts: --plugins, --canary and --stable are left out (omc has no plugin manager and one channel), so
+ * the strict parse rejects them as unknown options */
+static const cflag_t UPDATE_FLAGS[] = {
+    {.name = "force", .kind = CF_BOOL, .ch = 'f', .desc = "Force update", .options = NOOPT, .multiple = false, .def = "false"},
+    {.name = "check", .kind = CF_BOOL, .ch = 'c', .desc = "Check for updates without installing", .options = NOOPT, .multiple = false, .def = "false"},
+    {0}};
+static const char *const UPDATE_EXAMPLES[] = {"omc update", "omc update --check", NULL};
+
 static const char *const USAGE_ACTIONS[] = {"invalidate", "clients", "accounts", "reset", NULL};
 static const carg_t USAGE_ARGS[] = {
     {"action", "Optional subcommand to execute", false, false, USAGE_ACTIONS},
@@ -370,6 +378,8 @@ static const cli_cmd_t COMMANDS[] = {
     {.name = "read", .desc = "Show what the read tool will return for a path, URL, or internal URI", .aliases = NULL, .hidden = false, .flags = NULL, .args = READ_ARGS,
      .examples = READ_EXAMPLES, .run = cmd_read},
     {.name = "ssh", .desc = "Manage SSH host configurations", .aliases = NULL, .hidden = false, .flags = SSH_FLAGS, .args = SSH_ARGS, .examples = NULL, .run = cmd_ssh},
+    {.name = "update", .desc = "Check for and install updates", .aliases = NULL, .hidden = false, .flags = UPDATE_FLAGS,
+     .args = NULL, .examples = UPDATE_EXAMPLES, .run = cmd_update},
     {.name = "usage", .desc = "Show provider usage limits for every authenticated account", .aliases = NULL, .hidden = false, .flags = USAGE_FLAGS,
      .args = USAGE_ARGS, .examples = USAGE_EXAMPLES, .run = cmd_usage},
     {.name = "token", .desc = "Get the API key or OAuth token for a provider", .aliases = NULL, .hidden = false, .flags = TOKEN_FLAGS, .args = TOKEN_ARGS, .examples = TOKEN_EXAMPLES,
@@ -393,6 +403,7 @@ static const cli_cmd_t COMMANDS[] = {
     {"glob", NULL, NULL, true, NULL, NULL, NULL, NULL, cmd_glob_raw},
     {"bash", NULL, NULL, true, NULL, NULL, NULL, NULL, cmd_bash_raw},
     {"version", NULL, NULL, true, NULL, NULL, NULL, NULL, cmd_version_raw},
+    {"__omc_worker_auto_update", NULL, NULL, true, NULL, NULL, NULL, NULL, cmd_auto_update_worker_raw}, /* update.auto */
 };
 
 const cli_cmd_t *cli_commands(size_t *n) {

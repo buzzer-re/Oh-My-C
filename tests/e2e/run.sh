@@ -40,7 +40,8 @@ YML
 MOCK_LOG="$T/req.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $PORT & MPID=$!
 trap 'kill $(jobs -p) $MPID 2>/dev/null; rm -rf "$T"' EXIT
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break; sleep 0.1; done
-export OMC_CODING_AGENT_DIR="$T/agent" MOCK_KEY=x OMC_NO_TITLE=1 OMC_NO_LOCAL_DISCOVERY=1
+# OMC_NO_UPDATE_CHECK: no interactive launch looks for a new omc release (tests/e2e/update.sh lifts it against a mock)
+export OMC_CODING_AGENT_DIR="$T/agent" MOCK_KEY=x OMC_NO_TITLE=1 OMC_NO_LOCAL_DISCOVERY=1 OMC_NO_UPDATE_CHECK=1
 cd "$T/work"
 fail=0
 check() { # name expected-substring command...
@@ -940,6 +941,7 @@ source "$ROOT/tests/e2e/provider_responses_ws.sh"
 source "$ROOT/tests/e2e/usage.sh"
 source "$ROOT/tests/e2e/websearch.sh"
 source "$ROOT/tests/e2e/settings.sh"
+source "$ROOT/tests/e2e/update.sh"
 source "$ROOT/tests/e2e/stall.sh"
 source "$ROOT/tests/e2e/mcp_cache.sh"
 source "$ROOT/tests/e2e/first_request.sh"

@@ -375,6 +375,10 @@ int ui_mcp_complete(ui_t *u, const char *arg, tui_ac_result_t *out);
 tui_component_t *ui_welcome_new(void);
 void ui_welcome_play_intro(tui_component_t *w, tui_t *tui);
 void ui_welcome_set_tip(tui_component_t *w, const char *tip); /* fixed tip (tests); NULL = random */
+/* the background auto-update after the version label (welcome.ts VersionUpdate): UI_UPD_UPDATING (fraction in 0..1,
+ * < 0 before bytes are counted), UI_UPD_READY, UI_UPD_FAILED; UI_UPD_NONE or a NULL version clears it */
+enum { UI_UPD_NONE, UI_UPD_UPDATING, UI_UPD_READY, UI_UPD_FAILED };
+void ui_welcome_set_update(tui_component_t *w, int phase, const char *version, double fraction);
 void ui_welcome_tip_lines(const char *tip, int width, double phase, strvec_t *out);
 
 #endif

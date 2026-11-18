@@ -193,12 +193,13 @@ T_test_display       := $(LIB_OBJ)
 T_test_turn_recovery := $(LIB_OBJ)
 T_test_dcr           := $(LIB_OBJ)
 T_test_settings_audit := $(CORE_OBJ)
+T_test_update        := $(CORE_OBJ) $(NET_OBJ) $(O)/core/tarx.o $(O)/coding/selfupdate.o
 T_test_htmlform      := $(LIB_OBJ)
 T_test_fuzz_regress  := $(LIB_OBJ) $(patsubst tests/fuzz/%.c,$(O)/tests/fuzz/%.o,$(FUZZ_SRC))
 UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
               test_chrome test_providers_google test_toolcards test_cursor test_judgment test_auth test_memory test_outsink test_catalog test_model_resolver test_compaction_point \
               test_planreview test_img test_img_jpeg test_img_webp test_btw test_queue test_guards test_keybindings test_slash test_commands test_export test_dump test_signals \
-              test_panels test_tree test_approval test_compaction test_tiers test_workspace test_agenthub test_mcp test_loop test_usage test_extracmds test_display test_turn_recovery test_dcr test_settings_audit test_htmlform test_fuzz_regress
+              test_panels test_tree test_approval test_compaction test_tiers test_workspace test_agenthub test_mcp test_loop test_usage test_extracmds test_display test_turn_recovery test_dcr test_settings_audit test_htmlform test_update test_fuzz_regress
 
 .SECONDEXPANSION:
 $(O)/tests/%: tests/%.c $$(T_$$*)
@@ -209,7 +210,8 @@ build/examples/main_twice: tests/e2e/main_twice.c $(LIB_STATIC)
 	@mkdir -p build/examples
 	$(CC) -O2 -Wall -Wextra -Iinclude -o $@ $< $(LIB_STATIC) $(LIBS)
 
-# Never the real ~/.omc or ~/.omp: each run gets a fresh HOME and agent dir under the build dir.
+# Never the real ~/.omc or ~/.omp: each run gets a fresh HOME and agent dir under the build dir, and no launch looks for
+# a new omc release (OMC_NO_UPDATE_CHECK; tests/e2e/update.sh checks the update paths against a local mock).
 # TEST_TMP: the tests' TMPDIR is a fresh directory holding a `.git` entry, so project discovery (skills, commands,
 # context files, which walk ancestors up to the repo root, else to /) stops there instead of reaching the real
 # home's .claude/.agents dirs when TMPDIR lies under it; removed after a passing run
@@ -217,7 +219,7 @@ TEST_TMP = tmp=$$(mktemp -d "$${TMPDIR:-/tmp}"/omc-test.XXXXXX); tmp=$$(cd "$$tm
 	export TMPDIR="$$tmp";
 test: $(addprefix $(O)/tests/,$(UNIT_TESTS)) build/examples/embed build/examples/main_twice $(BIN)
 	@set -e; home=$$(mktemp -d "$(CURDIR)/$(O)/test-home.XXXXXX"); $(TEST_TMP) \
-	export HOME="$$home" OMC_CODING_AGENT_DIR="$$home/.omc/agent" PI_CODING_AGENT_DIR="$$home/.omp/agent" OMC_PLATFORM=linux; \
+	export HOME="$$home" OMC_CODING_AGENT_DIR="$$home/.omc/agent" PI_CODING_AGENT_DIR="$$home/.omp/agent" OMC_PLATFORM=linux OMC_NO_UPDATE_CHECK=1; \
 	for t in $(UNIT_TESTS); do echo "== $$t"; ./$(O)/tests/$$t >/dev/null || { echo "   FAIL ($$t)"; exit 1; }; echo "   ok"; done; \
 	OMC_BIN=$(CURDIR)/$(O)/omc ./tests/e2e/run.sh; \
 	rm -rf "$$tmp"
@@ -225,7 +227,7 @@ test: $(addprefix $(O)/tests/,$(UNIT_TESTS)) build/examples/embed build/examples
 # unit tests only (CI on platforms where the e2e suite's pty and process assumptions are not yet verified)
 test-unit: $(addprefix $(O)/tests/,$(UNIT_TESTS))
 	@set -e; home=$$(mktemp -d "$(CURDIR)/$(O)/test-home.XXXXXX"); $(TEST_TMP) \
-	export HOME="$$home" OMC_CODING_AGENT_DIR="$$home/.omc/agent" PI_CODING_AGENT_DIR="$$home/.omp/agent" OMC_PLATFORM=linux; \
+	export HOME="$$home" OMC_CODING_AGENT_DIR="$$home/.omc/agent" PI_CODING_AGENT_DIR="$$home/.omp/agent" OMC_PLATFORM=linux OMC_NO_UPDATE_CHECK=1; \
 	for t in $(UNIT_TESTS); do echo "== $$t"; ./$(O)/tests/$$t >/dev/null || { echo "   FAIL ($$t)"; exit 1; }; echo "   ok"; done; \
 	rm -rf "$$tmp"
 

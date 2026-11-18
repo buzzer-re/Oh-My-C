@@ -79,6 +79,13 @@ void xc_whats_new(ui_t *u, tui_container_t *root);
 void xc_toggle_recording(ui_t *u);
 void xc_recording_shutdown(ui_t *u);
 
+/* updatectl.c: the startup update check / update.auto (main.ts checkForNewVersion, auto-update.ts runAutoUpdate).
+ * start: off the UI thread, silent on failure; `gate_open` false holds the notice until updatectl_open_gate (setup
+ * wizard or startup session picker still up). shutdown: before the TUI is freed. */
+void updatectl_start(ui_t *u, bool gate_open);
+void updatectl_open_gate(ui_t *u);
+void updatectl_shutdown(void);
+
 /* debugctl.c (/debug, Shift+Ctrl+D: debug/index.ts DebugSelectorComponent) */
 void dc_debug_open(ui_t *u);
 /* formatTerminalState over omc's renderer state (owned; exposed for tests) */

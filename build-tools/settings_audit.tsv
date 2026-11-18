@@ -45,8 +45,7 @@ extensionRenderers.*	oos	JS extension runtime
 eval.js	oos	Bun JS eval kernel
 eval.autoProvision	oos	provisions the managed JavaScript eval package environment
 statusLine.showHookStatus	oos	hook statuses come from JS hooks/extensions
-startup.checkUpdate	oos	omp's release feed / npm; hidden from /settings (src/ui/settings.c)
-update.channel	oos	omp's release feed / npm; hidden from /settings (src/ui/settings.c)
+update.channel	oos	omc's GitHub releases have one channel (no canary); hidden from /settings (src/ui/settings.c)
 skills.registryUrl	oos	omp-hosted skills registry (skills.omp.sh)
 dev.autoqaPush.*	oos	omp-hosted Auto QA collector (qa.omp.sh)
 spelling.typoDetection	oos	macOS dictionaries
@@ -80,7 +79,6 @@ task.workerThreads	inert	omc subagents are threads already; no worker-thread pla
 providers.openaiResponsesWebsockets	wired	standard Responses over WebSocket
 extensionRenderers.transcriptPresenters	oos	needs the JS extension runtime
 display.shellVisualization	oos	needs upstream's Rust shell engine (RunTrace)
-update.auto	oos	omp's release feed and install methods
 ovnfs.path	oos	ovnfs isolation backend, base feature absent
 spotlight.*	oos	omp-hosted spotlight service
 startup.showSplash	inert	no animated splash

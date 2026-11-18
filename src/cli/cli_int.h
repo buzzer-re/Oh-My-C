@@ -32,6 +32,7 @@ int cmd_setup(cparse_t *p);
 int cmd_ssh(cparse_t *p);
 int cmd_token(cparse_t *p);
 int cmd_ttsr(cparse_t *p);
+int cmd_update(cparse_t *p); /* sub_update.c */
 int cmd_usage(cparse_t *p);
 int cmd_worktree(cparse_t *p);
 
@@ -44,6 +45,7 @@ int cmd_logout_raw(int argc, char **argv);
 int cmd_glob_raw(int argc, char **argv);
 int cmd_bash_raw(int argc, char **argv);
 int cmd_version_raw(int argc, char **argv);
+int cmd_auto_update_worker_raw(int argc, char **argv); /* sub_update.c: the update.auto worker */
 
 /* helpers */
 void cli_err_line(const char *msg);       /* chalk.red(msg) + "\n" on stderr */

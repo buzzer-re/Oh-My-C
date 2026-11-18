@@ -65,7 +65,7 @@ launch() { # cols rows extra-args...
     local cols=$1 rows=$2; shift 2
     workdirs
     tmux new-session -d -s "$N-omp" -x "$cols" -y "$rows" -c "$WO" "env HOME=$D/home MOCK_KEY=x ${CMP_PATH:+PATH=$CMP_PATH:$PATH} ${CMP_ENV:+$CMP_ENV }PI_CODING_AGENT_DIR=$D/omp-agent $OMP $*"
-    tmux new-session -d -s "$N-omc" -x "$cols" -y "$rows" -c "$WC" "env HOME=$D/home MOCK_KEY=x ${CMP_PATH:+PATH=$CMP_PATH:$PATH} ${CMP_ENV:+$CMP_ENV }${OMC_TUI_DEBUG:+OMC_TUI_DEBUG=$OMC_TUI_DEBUG }OMC_CODING_AGENT_DIR=$D/omc-agent $ROOT/build/omc $*"
+    tmux new-session -d -s "$N-omc" -x "$cols" -y "$rows" -c "$WC" "env HOME=$D/home MOCK_KEY=x ${CMP_PATH:+PATH=$CMP_PATH:$PATH} ${CMP_ENV:+$CMP_ENV }${OMC_TUI_DEBUG:+OMC_TUI_DEBUG=$OMC_TUI_DEBUG }OMC_NO_UPDATE_CHECK=1 OMC_CODING_AGENT_DIR=$D/omc-agent $ROOT/build/omc $*"
     echo "$cols $rows" > "$D/size"
 }
 case "$cmd" in
@@ -117,7 +117,7 @@ replay)
     python3 -I "$ROOT/tests/tui/mksession.py" "$1" "$WO" "$D/replay-omp.jsonl"
     python3 -I "$ROOT/tests/tui/mksession.py" "$1" "$WC" "$D/replay-omc.jsonl"
     tmux new-session -d -s "$N-omp" -x "$cols" -y "$rows" -c "$WO" "env HOME=$D/home MOCK_KEY=x ${CMP_PATH:+PATH=$CMP_PATH:$PATH} ${CMP_ENV:+$CMP_ENV }PI_CODING_AGENT_DIR=$D/omp-agent $OMP -r $D/replay-omp.jsonl"
-    tmux new-session -d -s "$N-omc" -x "$cols" -y "$rows" -c "$WC" "env HOME=$D/home MOCK_KEY=x ${CMP_PATH:+PATH=$CMP_PATH:$PATH} ${CMP_ENV:+$CMP_ENV }${OMC_TUI_DEBUG:+OMC_TUI_DEBUG=$OMC_TUI_DEBUG }OMC_CODING_AGENT_DIR=$D/omc-agent $ROOT/build/omc -r $D/replay-omc.jsonl"
+    tmux new-session -d -s "$N-omc" -x "$cols" -y "$rows" -c "$WC" "env HOME=$D/home MOCK_KEY=x ${CMP_PATH:+PATH=$CMP_PATH:$PATH} ${CMP_ENV:+$CMP_ENV }${OMC_TUI_DEBUG:+OMC_TUI_DEBUG=$OMC_TUI_DEBUG }OMC_NO_UPDATE_CHECK=1 OMC_CODING_AGENT_DIR=$D/omc-agent $ROOT/build/omc -r $D/replay-omc.jsonl"
     sleep "${CMP_WAIT:-5}"
     echo "replayed";;
 keys)

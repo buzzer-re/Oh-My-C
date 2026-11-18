@@ -42,6 +42,9 @@ typedef struct {
     double nag_roll, tip_roll;
     bool rolled;
     char *tip_override; /* tests */
+    int upd_phase;      /* VersionUpdate after the version label: UI_UPD_* (0 = none) */
+    char *upd_version;
+    double upd_fraction; /* < 0: bytes not counted yet */
     int cache_w;
     strvec_t cache;
 } welcome_t;
@@ -363,6 +366,76 @@ static void logo_frame(welcome_t *w, strvec_t *out) {
     gradient_logo(phase, pow(1 - eased, 1.5), pos, out);
 }
 
+/* ---------- background auto-update indicator (welcome.ts versionUpdateLabels / appendVersionUpdate) ---------- */
+
+#define UPDATE_BAR_WIDTH 10
+
+/* terminal forms, widest first: `→ v<new>` with a progress bar and percent while downloading (`updating…` before
+ * bytes are counted), `✔ next launch` once ready, `⚠ update failed` when stopped; then the arrow and version with
+ * the bare percent */
+static void update_labels(const welcome_t *w, strvec_t *out) {
+    tui_tc_t tone = w->upd_phase == UI_UPD_READY ? TUI_TC_SUCCESS : w->upd_phase == UI_UPD_FAILED ? TUI_TC_WARNING : TUI_TC_ACCENT;
+    char *arrow = xasprintf("\xe2\x86\x92 v%s", w->upd_version), *head = fg(tone, arrow);
+    free(arrow);
+    char *detail, *compact = xstrdup(head);
+    if (w->upd_phase == UI_UPD_UPDATING) {
+        if (w->upd_fraction < 0) {
+            detail = fg(TUI_TC_MUTED, "updating\xe2\x80\xa6");
+        } else {
+            double f = MIN(1.0, MAX(0.0, w->upd_fraction));
+            char *pct_raw = xasprintf("%d%%", (int)floor(f * 100)), *pct = fg(TUI_TC_ACCENT, pct_raw);
+            int filled = (int)floor(f * UPDATE_BAR_WIDTH + 0.5);
+            sb_t a = SB_INIT, e = SB_INIT;
+            for (int i = 0; i < filled; i++) sb_append(&a, tui_sym("progress.filled"));
+            for (int i = filled; i < UPDATE_BAR_WIDTH; i++) sb_append(&e, tui_sym("progress.empty"));
+            char *fa = fg(TUI_TC_ACCENT, sb_cstr(&a)), *ea = fg(TUI_TC_DIM, sb_cstr(&e));
+            detail = xasprintf("%s%s %s", fa, ea, pct);
+            free(compact);
+            compact = xasprintf("%s %s", head, pct);
+            free(fa);
+            free(ea);
+            sb_free(&a);
+            sb_free(&e);
+            free(pct_raw);
+            free(pct);
+        }
+    } else {
+        bool ready = w->upd_phase == UI_UPD_READY;
+        char *t = xasprintf("%s %s", tui_sym(ready ? "status.success" : "status.warning"), ready ? "next launch" : "update failed");
+        detail = fg(tone, t);
+        free(t);
+    }
+    strvec_push_own(out, xasprintf("%s %s", head, detail));
+    strvec_push_own(out, compact);
+    free(head);
+    free(detail);
+}
+
+/* the widest form that fits after the version label, keeping the right margin column clear; nothing when none fits */
+static void append_update(const welcome_t *w, strvec_t *lines, size_t row, int width) {
+    if (!w->upd_phase || !w->upd_version || row >= lines->n) return;
+    int room = width - 2 - tui_visible_width(lines->v[row]);
+    strvec_t forms = {0};
+    update_labels(w, &forms);
+    for (size_t i = 0; i < forms.n; i++) {
+        if (tui_visible_width(forms.v[i]) > room) continue;
+        char *r = xasprintf("%s %s", lines->v[row], forms.v[i]);
+        free(lines->v[row]);
+        lines->v[row] = r;
+        break;
+    }
+    strvec_free(&forms);
+}
+
+void ui_welcome_set_update(tui_component_t *c, int phase, const char *version, double fraction) {
+    welcome_t *w = (welcome_t *)c;
+    free(w->upd_version);
+    w->upd_phase = version ? phase : UI_UPD_NONE;
+    w->upd_version = version ? xstrdup(version) : NULL;
+    w->upd_fraction = fraction;
+    w->cache_w = -1;
+}
+
 /* ---------- component ---------- */
 
 /* `block_w` > 0 centers as if the block were that wide (what overhangs it runs on to the right) */
@@ -409,6 +482,8 @@ static void render_lines(welcome_t *w, int width, strvec_t *out) {
         for (int i = 0; i < 5; i++) strvec_push(out, logo.v[i]);
     }
     center_block(out, start, width, room >= lockup_w ? lockup_w : 0);
+    /* centered without the update indicator, which then trails the version: the lockup stays put as it appears */
+    if (room >= lockup_w) append_update(w, out, start + 4, width);
     strvec_free(&logo);
     free(version);
     const char *tip = width >= TIP_MIN_COLUMNS ? welcome_tip(w) : NULL;
@@ -467,6 +542,7 @@ static void welcome_destroy(tui_component_t *c) {
     stop_intro(w);
     strvec_free(&w->cache);
     free(w->tip_override);
+    free(w->upd_version);
     free(w);
 }
 

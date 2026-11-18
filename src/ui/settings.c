@@ -87,10 +87,16 @@ static int group_rank(const sdef_t *d) {
     return (int)json_len(gs);
 }
 
-/* omp settings that cannot mean anything in omc and are not offered: the startup update check and its channel
- * ask omp's build service / npm for a newer omp and advise `omp update`; omc has no release feed or self-update
- * (omp itself skips the check for a source checkout, which is how omc is built). The keys stay inert in config. */
-static bool omc_inert(const char *path) { return str_eq(path, "startup.checkUpdate") || str_eq(path, "update.channel"); }
+/* omp settings that cannot mean anything in omc and are not offered: omc's GitHub releases have one channel, so
+ * update.channel (stable / canary) stays inert in config */
+static bool omc_inert(const char *path) { return str_eq(path, "update.channel"); }
+
+/* omp's descriptions name the binary they update; these update omc (`omc update`, its own releases) */
+static const char *omc_description(const char *path, const char *desc) {
+    if (str_eq(path, "startup.checkUpdate")) return "Check for omc updates on startup";
+    if (str_eq(path, "update.auto")) return "Install omc updates in the background on startup; the next launch runs the new version";
+    return desc;
+}
 
 /* PAUSED_PROVIDER_CHOICES (model-settings.ts): the providers the auth rules pause, offered as a membership picker
  * (UiArray options) that writes the global layer, hidden while a project layer supplies the list */
@@ -141,7 +147,7 @@ static void load_defs(void) {
         d->type = json_get_str(s, "type");
         d->group = json_get_str(s, "group");
         d->label = json_get_str(s, "label");
-        d->description = json_get_str(s, "description");
+        d->description = omc_description(json_get_str(s, "path"), json_get_str(s, "description"));
         d->warning = json_get_str(s, "warning");
         d->condition = json_get_str(s, "condition");
         d->def = json_get(s, "default");

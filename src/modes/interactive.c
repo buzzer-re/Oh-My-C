@@ -3538,7 +3538,10 @@ static void startup_picker_cb(void *ud) {
 bool ix_startup_picker_closed(ui_t *u, bool resumed) {
     if (!g_start_picker) return false;
     g_start_picker = false;
-    if (resumed) return false;
+    if (resumed) {
+        updatectl_open_gate(u); /* the resumed transcript is drawn by then: the update notice follows it */
+        return false;
+    }
     g_start_cancelled = true;
     tui_stop(u->tui, 0);
     return true;
@@ -3546,6 +3549,7 @@ bool ix_startup_picker_closed(ui_t *u, bool resumed) {
 
 static void setup_done_cb(void *ud) {
     if (g_ui && g_ui->welcome) ui_welcome_play_intro(g_ui->welcome, g_ui->tui); /* playWelcomeIntro */
+    if (g_ui) updatectl_open_gate(g_ui); /* main.ts: the version banner waits for the setup wizard */
     if (ud) initial_prompt_cb(ud);
 }
 
@@ -3697,9 +3701,12 @@ int run_interactive_mode(app_t *a, const char *initial) {
     /* main.ts: models.yml findings (dropped input modalities) are startup warnings, not header lines */
     for (size_t i = 0; i < models_warns.n; i++) add_notice(&u, "warning", models_warns.v[i]);
     strvec_free(&models_warns);
+    /* main.ts checkForNewVersion: in the background from here; its notice lands after the startup transcript */
+    bool setup_pending = ui_setup_pending(a->opts.resume || a->opts.continue_recent);
+    updatectl_start(&u, !setup_pending && !(g_start && g_start->resume_picker));
     /* first-run setup wizard (omp main.ts: stale setupVersion, not resuming, TTY); the welcome intro
      * plays after it instead of at startup */
-    if (ui_setup_pending(a->opts.resume || a->opts.continue_recent)) {
+    if (setup_pending) {
         tui_post(u.tui, setup_start_cb, init_job);
     } else {
         if (u.welcome) ui_welcome_play_intro(u.welcome, u.tui);
@@ -3708,6 +3715,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     /* startDeferredStartupWork: resolving the compression model composes the catalog, so it runs off the first frame */
     tui_add_timer(u.tui, 1, false, skilldesc_start_cb, a->skilldesc);
     int code = tui_run(u.tui);
+    updatectl_shutdown(); /* nothing more may be posted to the TUI freed below */
     /* a tool thread waiting on the ask dialog would block the worker join forever once the loop is gone
      * (terminal closed mid-question): answer it as cancelled */
     pthread_mutex_lock(&u.mu);
