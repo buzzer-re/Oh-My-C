@@ -83,9 +83,10 @@ static void test_agent_queue(void) {
     CHECK(json_get_bool(json_at(a->steering, 0), "steering", false), "steered user input is marked for the interjection envelope");
     CHECK(!json_get_bool(json_at(a->steering, 1), "steering", false), "synthetic steering is not marked");
     /* dequeue: the last user-authored steering message first, then follow-ups */
-    json_t *m = agent_pop_last_queued(a);
+    bool sq = true;
+    json_t *m = agent_pop_last_queued_ex(a, &sq);
     char *t = agent_queued_text(m);
-    CHECK(!strcmp(t, "s2"), "pop last steering: %s", t);
+    CHECK(!strcmp(t, "s2") && !sq, "pop last steering: %s", t);
     free(t);
     json_free(m);
     m = agent_pop_last_queued(a);
@@ -93,9 +94,10 @@ static void test_agent_queue(void) {
     CHECK(!strcmp(t, "s1"), "pop steering again: %s", t);
     free(t);
     json_free(m);
-    m = agent_pop_last_queued(a);
+    bool fq = false;
+    m = agent_pop_last_queued_ex(a, &fq);
     t = agent_queued_text(m);
-    CHECK(!strcmp(t, "f1"), "then follow-ups: %s", t);
+    CHECK(!strcmp(t, "f1") && fq, "then follow-ups, tagged as such: %s", t);
     free(t);
     json_free(m);
     CHECK(agent_pop_last_queued(a) == NULL, "agent-authored messages are never dequeued");

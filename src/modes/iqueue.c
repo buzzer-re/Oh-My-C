@@ -20,6 +20,45 @@ static void status(ui_t *u, const char *text) { add_notice(u, "info", text); }
 
 /* ---------- editor restore (InputController#restoreEntriesToEditor) ---------- */
 
+/* #restoreEntriesToEditor's `queued` (omp 1d31aec67c): the entries return as one `=>` queue message ahead of an
+ * empty draft, or as the first item of a draft already in that form; any other draft keeps the plain merge */
+static bool restore_queued_to_editor(ui_t *u, const char *queued) {
+    char *cur = tui_editor_get_text(u->editor);
+    char *trimmed = str_trim(cur ? cur : "");
+    const char *body = *trimmed ? ui_queue_shorthand(cur) : "";
+    bool done = false;
+    if (body) {
+        strvec_t msgs = {0};
+        strvec_push(&msgs, queued);
+        char *b = str_trim(body);
+        if (*b) ui_split_queued_messages(b, &msgs);
+        free(b);
+        char *text = ui_format_queue_shorthand(&msgs);
+        tui_editor_set_text(u->editor, text);
+        free(text);
+        strvec_free(&msgs);
+        done = true;
+    }
+    free(trimmed);
+    free(cur);
+    if (done) ui_queue_refresh(u);
+    return done;
+}
+
+/* #restoresAsQueued: a follow-up left in the main view returns as `=>` shorthand, so Enter queues it behind the turn
+ * again; a builtin command (a queued /compact) or a skill invocation returns as typed */
+static bool restores_as_queued(ui_t *u, const char *text, bool follow_up) {
+    if (!follow_up || u->view) return false;
+    slash_parsed_t p;
+    if (text[0] == '/' && slash_parse(text, &p)) {
+        const slash_cmd_t *c = slash_lookup(p.name);
+        bool builtin = c && (c->allow_args || !p.args || !*p.args);
+        slash_parsed_free(&p);
+        if (builtin) return false;
+    }
+    return !ix_is_skill_command(u, text);
+}
+
 static void restore_to_editor(ui_t *u, const strvec_t *texts) {
     if (!texts->n) {
         ui_queue_refresh(u);
@@ -647,8 +686,9 @@ void iq_dequeue(ui_t *u) {
     strvec_t st = {0};
     if (u->yield_compaction) agent_queue_texts(u->app->agent, &st, NULL);
     /* steering pops first; behind a yield compaction the follow-ups it holds go next, then the request */
+    bool follow_up = false;
     if (!u->yield_compaction || st.n) {
-        json_t *m = agent_pop_last_queued(u->app->agent);
+        json_t *m = agent_pop_last_queued_ex(u->app->agent, &follow_up);
         if (m) text = agent_queued_text(m);
         json_free(m);
     }
@@ -656,14 +696,21 @@ void iq_dequeue(ui_t *u) {
     if (!text && json_len(u->compaction_queue)) {
         json_t *last = json_arr_remove(u->compaction_queue, json_len(u->compaction_queue) - 1);
         text = xstrdup(json_get_str(last, "text") ? json_get_str(last, "text") : "");
+        follow_up = !str_eq(json_get_str(last, "mode"), "steer");
         json_free(last);
     }
     if (!text && u->yield_compaction) {
         text = u->yield_compaction;
         u->yield_compaction = NULL;
+        follow_up = true;
     }
     if (!text) {
         status(u, "No queued messages to restore");
+        return;
+    }
+    if (restores_as_queued(u, text, follow_up) && restore_queued_to_editor(u, text)) {
+        free(text);
+        status(u, "Restored last queued message to editor");
         return;
     }
     strvec_t one = {0};

@@ -842,7 +842,7 @@ void agent_queue_texts(agent_t *a, strvec_t *steering, strvec_t *follow_up) {
     pthread_mutex_unlock(&a->mu);
 }
 
-json_t *agent_pop_last_queued(agent_t *a) {
+json_t *agent_pop_last_queued_ex(agent_t *a, bool *follow_up) {
     json_t *out = NULL;
     pthread_mutex_lock(&a->mu);
     json_t *queues[2] = {a->steering, a->follow_up};
@@ -850,6 +850,7 @@ json_t *agent_pop_last_queued(agent_t *a) {
         for (size_t i = json_len(queues[q]); i > 0; i--) {
             if (agent_msg_user_authored(json_at(queues[q], i - 1))) {
                 out = json_arr_remove(queues[q], i - 1);
+                if (follow_up) *follow_up = q == 1;
                 break;
             }
         }
@@ -857,6 +858,8 @@ json_t *agent_pop_last_queued(agent_t *a) {
     pthread_mutex_unlock(&a->mu);
     return out;
 }
+
+json_t *agent_pop_last_queued(agent_t *a) { return agent_pop_last_queued_ex(a, NULL); }
 
 json_t *agent_take_user_queued(agent_t *a) {
     json_t *r = json_obj();

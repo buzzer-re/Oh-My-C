@@ -270,6 +270,8 @@ char *agent_queued_text(const json_t *msg);
 void agent_queue_texts(agent_t *a, strvec_t *steering, strvec_t *follow_up);
 /* Remove and return the last user-authored queued message, steering first (omp popLastQueuedMessage). Owned/NULL. */
 json_t *agent_pop_last_queued(agent_t *a);
+/* the same, with *follow_up set when it left the follow-up queue (omp DequeuedMessage.queue) */
+json_t *agent_pop_last_queued_ex(agent_t *a, bool *follow_up);
 /* Remove every user-authored queued message; returns {steering:[...], followUp:[...]} (omp clearQueue). Owned. */
 json_t *agent_take_user_queued(agent_t *a);
 size_t agent_queued_count(agent_t *a);
