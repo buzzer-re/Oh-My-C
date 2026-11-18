@@ -192,6 +192,74 @@ int main(void) {
         free(pdir), free(pcfg), free(gcfg);
         settings_init(g_cwd, NULL);
     }
+    /* bash.patterns layering (omp e522b71016, c292179814, 8c9339cecf): project and `--config` overlay lists prepend
+     * onto the lower layers, an empty list resets, a null global falls back to the default, runtime overrides replace;
+     * path-scoped object entries resolve for the cwd (34a6f7a582, eb6e03bd30) */
+    {
+        char *pdir = path_join(g_cwd, ".omc");
+        fs_mkdir_p(pdir, 0700);
+        char *pcfg = path_join(pdir, "config.yml"), *gcfg = path_join(agent, "config.yml");
+        char *ocfg = path_join(root, "overlay.yml");
+        const char *gy = "bash:\n  patterns:\n    - match: \"g1\"\n      approval: allow\n";
+        const char *py = "bash:\n  patterns:\n    - match: \"p1\"\n      approval: deny\n";
+        const char *oy = "bash:\n  patterns:\n    - match: \"o1\"\n      approval: prompt\n";
+        fs_write(gcfg, gy, strlen(gy));
+        fs_write(pcfg, py, strlen(py));
+        fs_write(ocfg, oy, strlen(oy));
+        strvec_t ov = {0};
+        strvec_push(&ov, ocfg);
+#define PATTERNS_ARE(want)                                                                                             \
+    do {                                                                                                               \
+        json_t *v_ = settings_get("bash.patterns"), *x_;                                                               \
+        sb_t b_ = SB_INIT;                                                                                             \
+        json_arr_foreach(v_, i_, x_) sb_appendf(&b_, "%s%s", i_ ? "," : "", json_get_str(x_, "match") ? json_get_str(x_, "match") : "?"); \
+        bool ok_ = !strcmp(b_.s ? b_.s : "", want);                                                                    \
+        if (!ok_) fprintf(stderr, "bash.patterns: got [%s] want [%s]\n", b_.s ? b_.s : "", want);                     \
+        CHECK(ok_);                                                                                                    \
+        sb_free(&b_);                                                                                                  \
+    } while (0)
+        settings_init(g_cwd, NULL);
+        PATTERNS_ARE("p1,g1");
+        settings_init(g_cwd, &ov);
+        PATTERNS_ARE("o1,p1,g1");
+        set("bash.patterns", "[{\"match\":\"r1\",\"approval\":\"allow\"}]");
+        PATTERNS_ARE("r1");
+        settings_unset_runtime("bash.patterns");
+        PATTERNS_ARE("o1,p1,g1");
+        /* the operator view leaves the project out */
+        json_t *op = settings_operator_get("bash.patterns");
+        CHECK(json_len(op) == 2 && !strcmp(json_get_str(json_at(op, 0), "match"), "o1"));
+        json_free(op);
+        const char *pe = "bash:\n  patterns: []\n";
+        fs_write(pcfg, pe, strlen(pe));
+        settings_init(g_cwd, NULL);
+        PATTERNS_ARE("");
+        const char *gn = "bash:\n  patterns: null\n";
+        fs_write(gcfg, gn, strlen(gn));
+        fs_write(pcfg, py, strlen(py));
+        settings_init(g_cwd, NULL);
+        PATTERNS_ARE("p1");
+        /* path-scoped entries: inline rule, nested `patterns`, an entry for another tree, unscoped entries */
+        char *gs = xasprintf("bash:\n  patterns:\n    - path: %s\n      match: \"in1\"\n      approval: allow\n"
+                             "    - pathPrefixes: [/nonexistent-omc-tree, %s]\n      patterns:\n        - match: \"in2\"\n"
+                             "          approval: allow\n        - path: /nonexistent-omc-tree\n          match: \"out2\"\n"
+                             "    - path: %s/sub\n      match: \"out1\"\n    - match: \"u1\"\n      approval: deny\n",
+                             g_cwd, root, g_cwd);
+        fs_write(gcfg, gs, strlen(gs));
+        free(gs);
+        unlink(pcfg);
+        settings_init(g_cwd, NULL);
+        PATTERNS_ARE("in1,in2,u1");
+        CHECK(json_get(json_at(settings_get("bash.patterns"), 0), "path") == NULL);
+        CHECK(reason_is("\"yolo\"", "bash", "{\"command\":\"u1\"}", "Blocked by bash pattern: u1"));
+#undef PATTERNS_ARE
+        unlink(gcfg);
+        unlink(ocfg);
+        rmdir(pdir);
+        strvec_free(&ov);
+        free(pdir), free(pcfg), free(gcfg), free(ocfg);
+        settings_init(g_cwd, NULL);
+    }
     /* extractLeadingCdTarget (shell-tokenize.test.ts) */
     {
         static const struct {
