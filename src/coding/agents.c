@@ -203,7 +203,9 @@ static bool row_on_event(json_t *row, int64_t started, const agent_event_t *ev, 
             if (!tot)
                 tot = json_get_int(u, "input", 0) + json_get_int(u, "output", 0) + json_get_int(u, "cacheRead", 0) +
                       json_get_int(u, "cacheWrite", 0);
-            json_set_int(row, "tokens", json_get_int(row, "tokens", 0) + tot);
+            /* getUsageTokens: input + output + cacheWrite (cache reads re-read context every turn), else the total */
+            int64_t billed = json_get_int(u, "input", 0) + json_get_int(u, "output", 0) + json_get_int(u, "cacheWrite", 0);
+            json_set_int(row, "tokens", json_get_int(row, "tokens", 0) + (billed > 0 ? billed : json_get_int(u, "totalTokens", 0)));
             /* usageContextTokens (omp c7588c9257, 7162cde3a8): the occupied context, as compaction counts it: a
              * reported contextTokens, else the billable total minus provider-side orchestration */
             int64_t occupied;
