@@ -604,6 +604,9 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     else if (A->auto_approve) settings_set_runtime("tools.approvalMode", json_str("yolo"));
     if (A->has_spinner_interval) settings_set_runtime("tui.spinnerInterval", json_num(A->spinner_interval));
     if (A->has_max_fps) settings_set_runtime("tui.maxFps", json_num(A->max_fps));
+    /* main.ts (omp 5bc2903877): print, RPC and ACP hosts serve a caller that outlives the session, so the services a
+     * run starts persist past this process's exit */
+    if (!interactive) settings_set_runtime("launch.persist", json_bool(true));
     if (A->motion) settings_set_runtime("tui.motion", json_str(A->motion));
     if (A->has_warn_cost) settings_set_runtime("session.warnCost", json_num(A->warn_cost));
     if (A->has_max_cost) settings_set_runtime("session.maxCost", json_num(A->max_cost));

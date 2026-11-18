@@ -1,6 +1,7 @@
 /* services.c - named long-lived bash services under detached supervisor processes (see services.h). */
 #define _GNU_SOURCE
 #include "services.h"
+#include "config/settings.h"
 
 #include "core/fs.h"
 #include "core/proc.h"
@@ -631,7 +632,8 @@ int services_start(jobs_t *owner, const char *project, const char *name, const c
     }
     pthread_mutex_lock(&g_mu);
     json_t *spec = NULL;
-    int rc = start_locked(owner, project, name, command, cwd, pty, false, false, rspec, &spec, err);
+    /* startService: persist follows launch.persist (on for print, RPC and ACP runs; omp 5bc2903877) */
+    int rc = start_locked(owner, project, name, command, cwd, pty, settings_bool("launch.persist", false), false, rspec, &spec, err);
     pthread_mutex_unlock(&g_mu);
     json_free(rspec);
     if (rc != 0) {

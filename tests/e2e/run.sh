@@ -175,6 +175,9 @@ check "todo errors"    $'Errors: Task "nope" not found\nRemaining items (1):'  p
 check "todo append"    $'  - a [in_progress] (A)\n  - c [pending] (A)\n  - b [pending] (Tasks)'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p 'call:todo:{"op":"append","phase":"","items":["x"]}' >/dev/null 2>&1 </dev/null
 check "todo append ''" 'Errors: Missing phase name for append operation'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+# launch.persist (omp 5bc2903877): a print-mode run starts its services persistent, so they outlive the process
+"$B" --model mock/mock-1 --no-session -p 'call:bash:{"command":"sleep 3","name":"e2e-persist"}' </dev/null >/dev/null 2>&1
+check "service persists" '"persist": true'  bash -c "cat \$(find '$T/agent' -name '*.json' -path '*e2e-persist*' | head -1)"
 # todo.midRunNudges (omp a80b985192, dab28d7222): 26 bash results after a todo init nudge twice when capped (at 12, 24),
 # once with backoff (12, then 36) and never when off
 NUDGE_SCRIPT=$(python3 -I -c 'import json; print("calls:"+json.dumps([["todo",{"op":"init","items":["a","b"]}]]+[["bash",{"command":"echo %d"%i}] for i in range(26)]))')
