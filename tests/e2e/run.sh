@@ -164,7 +164,7 @@ check "args missing"   "  - pattern: pattern must be a string (was missing)"  py
 "$B" --model mock/mock-1 --no-session -p 'call:grep:{"pattern":true,"case":3}' >/dev/null 2>&1 </dev/null
 check "args coerced"   $'  - case: case must be boolean (was a number)\n\nReceived arguments:\n{\n  "original": {\n    "pattern": true,'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p 'call:todo:{"op":"bogus"}' >/dev/null 2>&1 </dev/null
-check "todo bad op"    'Invalid todo arguments: op must be "init", "start", "done", "rm", "drop", "block", "unblock", "append" or "view" (was "bogus")'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "todo bad op"    'Invalid todo arguments: op must be "init", "start", "done", "rm", "drop", "append" or "view" (was "bogus")'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p 'seq:[["todo",{"op":"init","items":["a"]}],["todo",{"op":"start","task":"nope"}]]' >/dev/null 2>&1 </dev/null
 check "todo errors"    $'Errors: Task "nope" not found\nRemaining items (1):'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 # an empty init phase name is `Tasks`; append without a phase joins the active task's phase (omp 60441bea29, 694e9e2079)
