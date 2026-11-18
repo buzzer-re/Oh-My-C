@@ -284,6 +284,10 @@ n=$(grep -c "Please retry in 100ms" "$T/req-tr.jsonl"); ms=$(( (s1 - s0) / 10000
 (( n == 12 && ms >= 1400 && ms < 8000 )) && echo "   ok  transport retry hint from the body" || { echo "   FAIL transport retry hint: $n requests in $ms ms: $out"; fail=1; }
 kill $TR_MPID 2>/dev/null; wait $TR_MPID 2>/dev/null
 grep -q "Project rule: always test." "$T/req.jsonl" && echo "   ok  AGENTS.md in prompt" || { echo "   FAIL AGENTS.md in prompt"; fail=1; }
+# a context file that leaves a code fence open has it closed at its end (omp e11a302d3a)
+mkdir -p "$T/fence" && printf 'Use this:\n\n```sh\nmake  test   \n' > "$T/fence/AGENTS.md"
+(cd "$T/fence" && timeout 30 "$B" --model mock/mock-1 --no-session -p "say:fenced" </dev/null >/dev/null 2>&1)
+check "context fence closed" 'make  test\n```\n</file>'  cat "$T/req.jsonl"
 # TTSR: a stream-triggered rule interrupts, injects and retries
 mkdir -p .omc/rules
 printf -- '---\ndescription: no forbidden word\ncondition: "FORBIDDEN"\nscope: text\n---\nNever say the forbidden word.\n' > .omc/rules/no-forbidden.md

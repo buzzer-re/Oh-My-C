@@ -1066,3 +1066,25 @@ char *prompt_load_or(const char *rel, const char *fallback) {
     free(t);
     return r;
 }
+
+/* prompt.ts closeCodeFence: `text` with a closing fence appended when it ends inside a code fence by the format
+ * pass's rule (a line whose first non-blank characters are ``` or ~~~ toggles the fence), so an unclosed fence in one
+ * inserted text never leaves the text after it unformatted. Owned. */
+char *prompt_close_code_fence(const char *text) {
+    char open[4] = "";
+    for (const char *line = text; line && *line;) {
+        const char *e = strchr(line, '\n');
+        size_t n = e ? (size_t)(e - line) : strlen(line);
+        size_t ind = 0;
+        while (ind < n && (line[ind] == ' ' || line[ind] == '\t')) ind++;
+        if (n - ind >= 3 && (!strncmp(line + ind, "```", 3) || !strncmp(line + ind, "~~~", 3))) {
+            if (*open) open[0] = 0;
+            else memcpy(open, line + ind, 3), open[3] = 0;
+        }
+        if (!e) break;
+        line = e + 1;
+    }
+    if (!*open) return xstrdup(text ? text : "");
+    size_t len = strlen(text);
+    return len && text[len - 1] == '\n' ? xasprintf("%s%s", text, open) : xasprintf("%s\n%s", text, open);
+}

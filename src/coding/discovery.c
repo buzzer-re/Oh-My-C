@@ -977,6 +977,13 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
         }
         discovery_free(&extra);
     }
+    /* omp e11a302d3a: a fence a file leaves open is closed at its end, so the rest of the prompt formats as usual */
+    json_t *cfe;
+    json_arr_foreach(cf, i, cfe) {
+        char *closed = prompt_close_code_fence(json_get_str(cfe, "content"));
+        json_set_str(cfe, "content", closed);
+        free(closed);
+    }
     json_set(data, "contextFiles", cf);
     json_t *roots = json_arr();
     for (size_t r = 0; o->additional_roots && r < o->additional_roots->n; r++)

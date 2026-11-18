@@ -12,6 +12,9 @@ char *tpl_render_raw(const char *tpl, const json_t *ctx);
 /* omp prompt format pass: trim trailing ws, collapse blank lines, compact tables... */
 char *prompt_format(const char *text);
 
+/* closeCodeFence: append the closing fence an unclosed ```/~~~ block needs. Owned. */
+char *prompt_close_code_fence(const char *text);
+
 /* Load an embedded prompt by relative path under prompts/ (e.g. "coding-agent/prompts/tools/read.md").
  * Users can override by placing a file at ~/.omc/agent/prompts/<same path>. Returns owned text or NULL. */
 char *prompt_load(const char *rel);
