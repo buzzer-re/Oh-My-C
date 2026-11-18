@@ -1,0 +1,4 @@
+data: {"candidates": [{"content": {"parts": [{"text": "think", "thought": true, "thoughtSignature": "c2ln"}], "role": "model"}}]}
+
+data: {"candidates": [{"content": {"parts": [{"text": "Hello"}, {"functionCall": {"name": "bash", "args": {"command": "ls"}}}]}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 4, "thoughtsTokenCount": 1}}
+

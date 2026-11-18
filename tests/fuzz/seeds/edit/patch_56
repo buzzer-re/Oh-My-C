@@ -1,0 +1,15 @@
+export class ProcessTerminal implements Terminal {
+	private wasRaw = false;
+	private inputHandler?: (data: string) => void;
+	private resizeHandler?: () => void;
+	private _kittyProtocolActive = false;
+	private stdinBuffer?: StdinBuffer;
+	private stdinDataHandler?: (data: string) => void;
+
+	get kittyProtocolActive(): boolean {
+		return this._kittyProtocolActive;
+	}
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ export class ProcessTerminal implements Terminal {\n export class ProcessTerminal implements Terminal {\n \tprivate wasRaw = false;\n \tprivate inputHandler?: (data: string) => void;\n \tprivate resizeHandler?: () => void;\n \tprivate _kittyProtocolActive = false;\n \tprivate stdinBuffer?: StdinBuffer;\n \tprivate stdinDataHandler?: (data: string) => void;\n+\tprivate dead = false;\n\n \tget kittyProtocolActive(): boolean {"}]}

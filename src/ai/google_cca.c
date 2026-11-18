@@ -476,7 +476,7 @@ static int ag_onboard(cca_ctx_t *c, const char *endpoint, char **err) {
                 const char *m = json_get_str(e, "message");
                 json_t *code = json_get(e, "code");
                 char *desc;
-                if (m) desc = json_is_num(code) ? xasprintf("%lld: %s", (long long)code->u.num.d, m) : xstrdup(m);
+                if (m) desc = json_is_num(code) ? xasprintf("%lld: %s", (long long)json_d2i(code->u.num.d), m) : xstrdup(m);
                 else desc = json_dump(e, 0);
                 *err = xasprintf("OnboardUser operation failed: %s", desc);
                 free(desc);

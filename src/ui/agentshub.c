@@ -154,7 +154,7 @@ static void load_agents(hub_t *h) {
         vec_push(&h->agents, a);
     }
     json_free(defs);
-    if (h->agents.n > 1) qsort(h->agents.v, h->agents.n, sizeof *h->agents.v, cmp_agent);
+    if (h->agents.n > 1) xqsort(h->agents.v, h->agents.n, sizeof *h->agents.v, cmp_agent);
 }
 
 /* resolveAgentModelPatterns (no request model): the settings override, the agent's own model (bar

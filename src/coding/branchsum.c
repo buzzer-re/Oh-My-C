@@ -107,7 +107,7 @@ static void extract_file_ops(const json_t *msg, json_t *ops) {
 static int cmp_str(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
 static json_t *sorted(strvec_t *v) {
-    qsort(v->v, v->n, sizeof *v->v, cmp_str);
+    xqsort(v->v, v->n, sizeof *v->v, cmp_str);
     json_t *out = json_arr();
     for (size_t i = 0; i < v->n; i++) json_push_str(out, v->v[i]);
     return out;

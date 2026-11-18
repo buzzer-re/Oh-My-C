@@ -1,0 +1,6 @@
+if (ready) {
+  handle();
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@\n if (ready) {\n  handle();\n}\n if (ready) {\n  handle();\n}\n-  handle();\n+  handleNext();"}]}

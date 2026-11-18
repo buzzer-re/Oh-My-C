@@ -1,0 +1,9 @@
+if (a) {
+  return foo;
+}
+if (b) {
+  return foo;
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ return foo;\n-  return foo;\n+  return bar;"}]}

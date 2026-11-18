@@ -110,7 +110,7 @@ static void split_candidates(const char *path, const char *const *exts, size_t n
         i = end;
     }
     free(norm);
-    if (out->n > 1) qsort(out->v, out->n, sizeof(rf_split_t), cmp_split_len);
+    if (out->n > 1) xqsort(out->v, out->n, sizeof(rf_split_t), cmp_split_len);
 }
 
 /* upstream FORMAT_EXTENSIONS, longest first */
@@ -392,7 +392,7 @@ int rf_archive_list(rf_archive_t *a, const char *sub, rf_dirents_t *out, char **
         free(rc);
     }
     hmap_free(&seen, NULL);
-    if (out->n > 1) qsort(out->v, out->n, sizeof(rf_dirent_t), cmp_dirent);
+    if (out->n > 1) xqsort(out->v, out->n, sizeof(rf_dirent_t), cmp_dirent);
     free(norm);
     free(res);
     return 0;
@@ -3988,7 +3988,7 @@ static char *sq_list(sqdb_t *db, sqschemas_t *sch) {
     for (size_t i = 0; i < sch->n; i++)
         if (!strcmp(sch->v[i].type, "table") && !is_internal_name(sch->v[i].name)) strvec_push(&names, sch->v[i].name);
     if (!names.n) return xstrdup("(no tables)");
-    qsort(names.v, names.n, sizeof(char *), cmp_nocase);
+    xqsort(names.v, names.n, sizeof(char *), cmp_nocase);
     hmap_t est;
     hmap_init(&est);
     sqtab_t st;

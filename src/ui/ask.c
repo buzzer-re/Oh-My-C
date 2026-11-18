@@ -1219,7 +1219,7 @@ static void load_questions(ask_view_t *v, const json_t *questions) {
         q->multi = json_is_bool(jm) && jm->u.b;
         json_t *jr = json_get(e, "recommended");
         q->recommended = -1;
-        if (json_is_num(jr) && jr->u.num.d == floor(jr->u.num.d) && fabs(jr->u.num.d) < 1e9) q->recommended = (int)jr->u.num.d;
+        if (json_is_num(jr) && jr->u.num.d == floor(jr->u.num.d) && fabs(jr->u.num.d) < 1e9) q->recommended = (int)json_d2i(jr->u.num.d);
         json_t *opts = json_get_arr(e, "options");
         size_t no = opts ? json_len(opts) : 0;
         q->opts = xcalloc(no + 1, sizeof *q->opts);

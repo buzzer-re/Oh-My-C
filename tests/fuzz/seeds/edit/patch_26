@@ -1,0 +1,5 @@
+foo
+bar
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@\n foo\n-bar\n+baz"}]}

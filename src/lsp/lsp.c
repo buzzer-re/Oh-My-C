@@ -8,6 +8,7 @@
 #include "core/embed.h"
 #include "core/fs.h"
 #include "core/proc.h"
+#include "core/rpcframe.h"
 #include "text/glob.h"
 #include "text/walker.h"
 #include "tui/symbols.h"
@@ -65,6 +66,7 @@ typedef struct lsp_client {
     bool reader_started;
     volatile bool alive;
     int exit_code;
+    char *close_error; /* reader failure ("LSP connection closed: ..."), owned */
     sb_t stderr_tail;
     pthread_mutex_t mu;
     pthread_cond_t cv;
@@ -728,7 +730,7 @@ static void handle_message(lsp_client_t *c, json_t *msg) {
         return;
     }
     if (id && json_is_num(id)) {
-        int64_t iv = id->is_int ? id->u.num.i : (int64_t)id->u.num.d;
+        int64_t iv = id->is_int ? id->u.num.i : json_d2i(id->u.num.d);
         pthread_mutex_lock(&c->mu);
         for (size_t i = 0; i < c->pending.n; i++) {
             if (c->pending.v[i]->id == iv) {
@@ -779,24 +781,27 @@ static void *reader_main(void *p) {
         if (n <= 0) break;
         sb_appendn(&buf, tmp, (size_t)n);
         for (;;) {
-            char *hdr_end = buf.len ? memmem(buf.s, buf.len, "\r\n\r\n", 4) : NULL;
-            if (!hdr_end) break;
-            size_t hlen = (size_t)(hdr_end - buf.s) + 4;
-            const char *cl = str_istr(buf.s, "Content-Length:");
-            if (!cl || cl > hdr_end) {
-                memmove(buf.s, buf.s + hlen, buf.len - hlen);
-                sb_truncate(&buf, buf.len - hlen);
+            const char *body;
+            size_t blen, used;
+            char *ferr = NULL;
+            rpcframe_rc_t fr = rpcframe_next(&buf, &body, &blen, &used, &ferr);
+            if (fr == RPCFRAME_RESYNC) {
+                LOGW("LSP framing resync: header block without Content-Length (%s)", c->name);
                 continue;
             }
-            size_t blen = (size_t)strtoull(cl + 15, NULL, 10);
-            if (blen > (256u << 20)) {
+            if (fr == RPCFRAME_ERROR) {
+                /* MessageFramingError: the reader fails and every pending request is rejected with it */
+                pthread_mutex_lock(&c->mu);
+                free(c->close_error);
+                c->close_error = xasprintf("LSP connection closed: MessageFramingError: %s", ferr);
+                pthread_mutex_unlock(&c->mu);
+                free(ferr);
                 out_open = false;
                 break;
             }
-            if (buf.len < hlen + blen) break;
-            json_t *msg = json_parse(buf.s + hlen, blen, NULL);
-            memmove(buf.s, buf.s + hlen + blen, buf.len - hlen - blen);
-            sb_truncate(&buf, buf.len - hlen - blen);
+            if (fr != RPCFRAME_MSG) break;
+            json_t *msg = json_parse(body, blen, NULL);
+            rpcframe_consume(&buf, used);
             if (msg) handle_message(c, msg);
         }
     }
@@ -835,6 +840,11 @@ typedef struct {
 /* exit message (client.ts proc.exited handler) */
 static char *exit_message(lsp_client_t *c) {
     pthread_mutex_lock(&c->mu);
+    if (c->close_error) {
+        char *r = xstrdup(c->close_error);
+        pthread_mutex_unlock(&c->mu);
+        return r;
+    }
     strvec_t lines = str_split(sb_cstr(&c->stderr_tail), "\n");
     pthread_mutex_unlock(&c->mu);
     sb_t keep = SB_INIT;
@@ -1031,6 +1041,7 @@ static void client_free(lsp_client_t *c) {
     json_free(c->progress);
     json_free(c->idle_closed);
     sb_free(&c->stderr_tail);
+    free(c->close_error);
     free(c->name);
     free(c->root);
     pthread_mutex_destroy(&c->mu);
@@ -2070,7 +2081,7 @@ static void dedupe_sort(const json_t *all, jptrs_t *out) {
         }
         if (!dup) vec_push(out, d);
     }
-    if (out->n > 1) qsort(out->v, out->n, sizeof(json_t *), cmp_diag);
+    if (out->n > 1) xqsort(out->v, out->n, sizeof(json_t *), cmp_diag);
 }
 
 static char *format_location(const json_t *loc, const char *cwd) {
@@ -2354,7 +2365,7 @@ static int sort_validate(const json_t *edits, tedits_t *out, char **err) {
                      json_get_str(e, "newText") ? json_get_str(e, "newText") : "", i};
         vec_push(&all, t);
     }
-    if (all.n > 1) qsort(all.v, all.n, sizeof(tedit_t), cmp_tedit_desc);
+    if (all.n > 1) xqsort(all.v, all.n, sizeof(tedit_t), cmp_tedit_desc);
     for (size_t i = 0; i < all.n; i++) {
         tedit_t *t = &all.v[i];
         if (out->n) {
@@ -3805,13 +3816,13 @@ static void do_request(call_t *k) {
         if (json_get(k->args, "line")) {
             int64_t col = 0;
             char *err = NULL;
-            if (resolve_symbol_column(resolved, (int64_t)json_get_num(k->args, "line", 1), json_get_str(k->args, "symbol"), &col, &err)) {
+            if (resolve_symbol_column(resolved, json_d2i(json_get_num(k->args, "line", 1)), json_get_str(k->args, "symbol"), &col, &err)) {
                 tool_result_error(k->out, "%s", err);
                 free(err);
                 goto out;
             }
             json_t *pos = json_obj();
-            json_set_int(pos, "line", (int64_t)json_get_num(k->args, "line", 1) - 1);
+            json_set_int(pos, "line", json_d2i(json_get_num(k->args, "line", 1)) - 1);
             json_set_int(pos, "character", col);
             json_set(params, "position", pos);
         }
@@ -4195,7 +4206,7 @@ static void do_file_action(call_t *k, const char *resolved) {
     }
     const json_t *args = k->args;
     bool has_line = json_get(args, "line") != NULL;
-    int64_t line = has_line ? (int64_t)json_get_num(args, "line", 1) : 1;
+    int64_t line = has_line ? json_d2i(json_get_num(args, "line", 1)) : 1;
     const char *symbol = json_get_str(args, "symbol");
     bool pa = project_aware(server, c->cfg);
     bool ra = is_rust_analyzer(c) || !strcmp(server, "rust-analyzer");

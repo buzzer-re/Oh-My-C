@@ -1028,7 +1028,7 @@ json_t *session_trace_build(const json_t *root_header, const json_t *root_entrie
             for (size_t k = 0; k < keys.n && !dup; k++) dup = !strcmp(keys.v[k], sub_sessions->u.obj.keys[i]);
             if (!dup) vec_push(&keys, sub_sessions->u.obj.keys[i]);
         }
-    if (keys.n) qsort(keys.v, keys.n, sizeof *keys.v, cmp_key);
+    if (keys.n) xqsort(keys.v, keys.n, sizeof *keys.v, cmp_key);
     trackvec_t tracks = {0};
     track_t *root = visit(root_header, root_entries, "main", NULL, sub_sessions, keys.v, keys.n, &tracks);
     vec_free(&keys);

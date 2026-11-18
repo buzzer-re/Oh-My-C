@@ -44,9 +44,13 @@ static ptrdiff_t brace_close(const char *p, size_t open) {
     return -1;
 }
 
-static void brace_expand(const char *p, strvec_t *out, int depth) {
-    if (out->n >= GLOB_MAX_ALTS) return;
-    ptrdiff_t open = -1, close = -1;
+/* the leftmost '{' that has a matching '}' (same escape and [class] skipping as brace_close), in one O(n) pass with a
+ * stack: calling brace_close for every '{' was quadratic, and the expansion re-scans each alternative */
+static bool first_brace_pair(const char *p, ptrdiff_t *open, ptrdiff_t *close) {
+    size_t n = strlen(p);
+    size_t *stack = xmalloc((n + 1) * sizeof *stack);
+    size_t sp = 0;
+    ptrdiff_t best_o = -1, best_c = -1;
     for (size_t i = 0; p[i]; i++) {
         if (p[i] == '\\' && p[i + 1]) { i++; continue; }
         if (p[i] == '[') {
@@ -57,12 +61,26 @@ static void brace_expand(const char *p, strvec_t *out, int depth) {
             if (p[j] == ']') i = j;
             continue;
         }
-        if (p[i] == '{') {
-            ptrdiff_t c = brace_close(p, i);
-            if (c >= 0) { open = (ptrdiff_t)i; close = c; break; }
+        if (p[i] == '{') stack[sp++] = i;
+        else if (p[i] == '}' && sp) {
+            size_t o = stack[--sp];
+            if (best_o < 0 || (ptrdiff_t)o < best_o) best_o = (ptrdiff_t)o, best_c = (ptrdiff_t)i;
         }
     }
-    if (open < 0 || depth > GLOB_MAX_DEPTH) {
+    free(stack);
+    *open = best_o;
+    *close = best_c;
+    return best_o >= 0;
+}
+
+/* total bytes the alternatives of one pattern may take while expanding (a pattern of a few hundred braces otherwise
+ * builds millions of intermediate strings before GLOB_MAX_ALTS stops it; found by fuzz_glob) */
+#define GLOB_EXPAND_BUDGET (4u << 20)
+
+static void brace_expand_rec(const char *p, strvec_t *out, int depth, size_t *budget) {
+    if (out->n >= GLOB_MAX_ALTS) return;
+    ptrdiff_t open = -1, close = -1;
+    if (!first_brace_pair(p, &open, &close) || depth > GLOB_MAX_DEPTH || *budget == 0) {
         strvec_push(out, p);
         return;
     }
@@ -76,12 +94,19 @@ static void brace_expand(const char *p, strvec_t *out, int depth) {
         else if (c == '}' && i < (size_t)close) d--;
         if ((c == ',' && d == 0) || i == (size_t)close) {
             char *alt = xasprintf("%.*s%.*s%s", (int)open, p, (int)(i - start), p + start, p + close + 1);
-            brace_expand(alt, out, depth + 1);
+            size_t al = strlen(alt) + 1;
+            *budget = *budget > al ? *budget - al : 0;
+            brace_expand_rec(alt, out, depth + 1, budget);
             free(alt);
             start = i + 1;
             if (out->n >= GLOB_MAX_ALTS) return;
         }
     }
+}
+
+static void brace_expand(const char *p, strvec_t *out, int depth) {
+    size_t budget = GLOB_EXPAND_BUDGET;
+    brace_expand_rec(p, out, depth, &budget);
 }
 
 /* ---------------- single-segment wildcard matching ---------------- */

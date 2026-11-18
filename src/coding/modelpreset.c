@@ -42,7 +42,7 @@ strvec_t mp_names(void) {
     const char *k;
     json_obj_foreach(all, i, k, x) if (owned_preset(k)) strvec_push(&v, k);
     (void)x;
-    qsort(v.v, v.n, sizeof *v.v, cmp_locale);
+    xqsort(v.v, v.n, sizeof *v.v, cmp_locale);
     return v;
 }
 
@@ -241,7 +241,7 @@ char *mp_apply(app_t *a, const char *name, bool *clean_out, bool *switched_out, 
     /* shadowedRoles + shadowedThinking */
     json_t *after = mp_effective_roles();
     strvec_t un = role_union(after, roles);
-    qsort(un.v, un.n, sizeof *un.v, cmp_locale);
+    xqsort(un.v, un.n, sizeof *un.v, cmp_locale);
     sb_t shadow = SB_INIT;
     for (size_t i = 0; i < un.n; i++) {
         const char *ex = json_get_str(roles, un.v[i]), *ac = json_get_str(after, un.v[i]);

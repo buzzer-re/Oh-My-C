@@ -6,6 +6,7 @@
 #include "core/embed.h"
 #include "core/fs.h"
 #include "core/proc.h"
+#include "core/rpcframe.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -34,6 +35,7 @@ typedef struct {
     bool initialized_ev;  /* "initialized" event received */
     bool stopped;
     bool terminated;
+    char *close_error;    /* why the transport ended ("DAP connection closed: ..."), owned */
     int64_t thread_id;    /* last stopped thread */
     char *stop_reason;
     char *stop_text;
@@ -152,21 +154,37 @@ static void *dreader(void *p) {
         ssize_t n = read(s->child.out_fd, tmp, sizeof tmp);
         if (n <= 0) break;
         sb_appendn(&buf, tmp, (size_t)n);
+        bool framing_failed = false;
         for (;;) {
-            char *he = buf.len ? memmem(buf.s, buf.len, "\r\n\r\n", 4) : NULL;
-            if (!he) break;
-            size_t hl = (size_t)(he - buf.s) + 4;
-            const char *cl = str_istr(buf.s, "Content-Length:");
-            size_t bl = cl && cl < he ? (size_t)strtoull(cl + 15, NULL, 10) : 0;
-            if (buf.len < hl + bl) break;
-            json_t *m = json_parse(buf.s + hl, bl, NULL);
-            memmove(buf.s, buf.s + hl + bl, buf.len - hl - bl);
-            sb_truncate(&buf, buf.len - hl - bl);
+            const char *body;
+            size_t bl, used;
+            char *ferr = NULL;
+            rpcframe_rc_t fr = rpcframe_next(&buf, &body, &bl, &used, &ferr);
+            if (fr == RPCFRAME_RESYNC) {
+                LOGW("DAP framing resync: header block without Content-Length");
+                continue;
+            }
+            if (fr == RPCFRAME_ERROR) {
+                /* omp: the reader fails ("DAP connection closed: ..."), pending requests fail, the adapter is disposed */
+                LOGW("DAP connection closed: %s", ferr);
+                pthread_mutex_lock(&s->mu);
+                free(s->close_error);
+                s->close_error = xasprintf("DAP connection closed: %s", ferr);
+                pthread_mutex_unlock(&s->mu);
+                free(ferr);
+                framing_failed = true;
+                break;
+            }
+            if (fr != RPCFRAME_MSG) break;
+            json_t *m = json_parse(body, bl, NULL);
+            rpcframe_consume(&buf, used);
             if (m) handle(s, m);
         }
+        if (framing_failed) break;
     }
     sb_free(&buf);
     pthread_mutex_lock(&s->mu);
+    if (s->alive && !s->close_error) s->close_error = xasprintf("DAP connection closed: %s transport ended", s->adapter ? s->adapter : "");
     s->alive = false;
     s->terminated = true;
     s->stop_seq++;
@@ -216,6 +234,8 @@ static json_t *drequest(dsession_t *s, const char *command, json_t *args, int64_
             const char *fm = json_get_str(json_get(json_get(p->resp, "body"), "error"), "format");
             *err = xasprintf("%s failed: %s", command, fm ? fm : m ? m : "error");
         }
+    } else if (!s->alive && s->close_error) {
+        *err = xstrdup(s->close_error); /* failConnection: in-flight requests fail at once with the close reason */
     } else {
         *err = xasprintf("%s timed out", command);
     }
@@ -252,6 +272,7 @@ static void session_end(dsession_t *s) {
     json_free(s->data_bps);
     sb_free(&s->output);
     free(s->adapter);
+    free(s->close_error);
     free(s->stop_reason);
     free(s->stop_text);
     free(s->program);

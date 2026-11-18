@@ -1,0 +1,9 @@
+aaa
+bbb
+aaa
+ccc
+bbb
+ddd
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@\n-aaa\n+AAA\n@@\n-ccc\n+CCC"}]}

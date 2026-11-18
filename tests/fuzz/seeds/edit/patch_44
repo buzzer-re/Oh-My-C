@@ -1,0 +1,16 @@
+function outer() {
+	function helper() {
+		return 1;
+	}
+	return helper();
+}
+
+function process() {
+	function helper() {
+		return 2;
+	}
+	return helper();
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ function process helper\n \tfunction helper() {\n-\t\treturn 2;\n+\t\treturn 200;\n \t}"}]}

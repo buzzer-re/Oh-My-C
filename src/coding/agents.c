@@ -617,8 +617,8 @@ typedef struct {
 
 static void *cancel_watch(void *p) {
     watch_t *w = p;
-    while (!w->done) {
-        if (*w->flag) {
+    while (!__atomic_load_n(&w->done, __ATOMIC_ACQUIRE)) {
+        if (__atomic_load_n(w->flag, __ATOMIC_RELAXED)) {
             agent_abort(w->ag);
             break;
         }
@@ -720,7 +720,7 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
     /* a focused view's empty Enter forced the queue into the continuation */
     while (agent_take_forced_delivery(child->agent) && agent_run_queued(child->agent) == 0) settle_owned_jobs(child, cancel);
     agent_unsubscribe(child->agent, on_child_event, r);
-    w.done = 1;
+    __atomic_store_n(&w.done, 1, __ATOMIC_RELEASE);
     if (watching) pthread_join(wt, NULL);
     const json_t *last = last_assistant(child->agent->messages);
     char *text = last ? ai_message_text(last) : xstrdup("");
@@ -1629,7 +1629,7 @@ json_t *agents_take_messages(tool_env_t *env) {
     size_t n = json_len(rows);
     json_t **v = xcalloc(n, sizeof *v);
     for (size_t i = 0; i < n; i++) v[i] = json_clone(json_at(rows, i));
-    qsort(v, n, sizeof *v, cmp_irc_ts);
+    xqsort(v, n, sizeof *v, cmp_irc_ts);
     json_free(rows);
     rows = json_arr();
     for (size_t i = 0; i < n; i++) json_push(rows, v[i]);
@@ -2322,7 +2322,7 @@ json_t *agents_job_tree(app_t *root, size_t recent_limit) {
     size_t n = json_len(recent_all);
     json_t **v = xcalloc(n + 1, sizeof *v);
     for (size_t i = 0; i < n; i++) v[i] = json_at(recent_all, i);
-    qsort(v, n, sizeof *v, job_newest_first);
+    xqsort(v, n, sizeof *v, job_newest_first);
     json_t *recent = json_arr();
     for (size_t i = 0; i < n && i < recent_limit; i++) json_push(recent, json_clone(v[i]));
     free(v);

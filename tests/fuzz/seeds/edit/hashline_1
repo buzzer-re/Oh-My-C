@@ -1,0 +1,11 @@
+int f(void) {
+    return 1;
+}
+
+
+[a.txt#@TAG@]
+PUT 1*:
++int f(void) { return 2; }
+CUT 2.=2 @r1
+PUT >1 @r1
+REM 3

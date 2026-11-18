@@ -1,0 +1,6 @@
+alpha
+beta
+gamma
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@\n alpha\n beta\n beta\n-gamma\n+GAMMA"}]}

@@ -1,0 +1,5 @@
+{"type":"title","title":"one","source":"auto"}
+{"type":"title","title":"two","source":"user"}
+{"type":"session","id":"s1","cwd":"/tmp"}
+{"type":"session","id":"s2","cwd":"/x"}
+{"type":"message","id":"m1","parentId":null,"message":{"role":"user","content":"hi"}}

@@ -428,7 +428,7 @@ json_t *gemini_cli_build_request(const ai_model_t *m, const ai_context_t *ctx, c
     if (ag) {
         json_t *profile = wire_profile(m, wire);
         json_t *pmax = json_get(profile, "maxOutputTokens");
-        if (json_is_num(pmax)) json_set_int(gen, "maxOutputTokens", (int64_t)pmax->u.num.d);
+        if (json_is_num(pmax)) json_set_int(gen, "maxOutputTokens", json_d2i(pmax->u.num.d));
         json_t *tcfg = json_get_obj(gen, "thinkingConfig");
         if (profile && tcfg && th.enabled && tier_variant(m, wire)) {
             /* a tier SKU fixes its own thinking strength: send it the way the SKU advertises */
@@ -438,7 +438,7 @@ json_t *gemini_cli_build_request(const ai_model_t *m, const ai_context_t *ctx, c
                 json_t *nt = json_obj();
                 json_set_bool(nt, "includeThoughts", json_get_bool(tcfg, "includeThoughts", false));
                 if (lvl) json_set_str(nt, "thinkingLevel", lvl);
-                else json_set_int(nt, "thinkingBudget", (int64_t)pb->u.num.d);
+                else json_set_int(nt, "thinkingBudget", json_d2i(pb->u.num.d));
                 json_set(gen, "thinkingConfig", nt);
             }
         }
@@ -978,7 +978,7 @@ json_t *provider_gemini_cli_stream(const ai_model_t *m, const ai_context_t *ctx,
     ai_apply_headers(&h, NULL, o);
 
     json_t *fet = model_compat_get(m, "streamFirstEventTimeoutMs");
-    int64_t first_event_ms = json_is_num(fet) && fet->u.num.d > 0 ? (int64_t)fet->u.num.d : DEFAULT_FIRST_EVENT_TIMEOUT_MS;
+    int64_t first_event_ms = json_is_num(fet) && fet->u.num.d > 0 ? json_d2i(fet->u.num.d) : DEFAULT_FIRST_EVENT_TIMEOUT_MS;
     /* streamFirstEventTimeoutMs request option (providers.streamFirstEventTimeoutSeconds); 0 disables */
     if (o->first_event_timeout_ms > 0) first_event_ms = o->first_event_timeout_ms;
     else if (o->first_event_timeout_ms == 0) first_event_ms = 24LL * 3600 * 1000;

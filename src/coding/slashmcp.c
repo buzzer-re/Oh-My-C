@@ -577,7 +577,7 @@ static void ssh_list(slash_rt_t *rt) {
             json_obj_foreach(json_get_obj(pass ? uc : pc, "hosts"), i, k, v) {
                 if (json_get(seen, k)) continue;
                 json_set_bool(seen, k, true);
-                int64_t port = json_is_num(json_get(v, "port")) ? (int64_t)json_get_num(v, "port", 22) : 22;
+                int64_t port = json_is_num(json_get(v, "port")) ? json_d2i(json_get_num(v, "port", 22)) : 22;
                 if (b.len) sb_putc(&b, '\n');
                 sb_appendf(&b, "%s | %s | %s | %lld [%s]", k, json_get_str(v, "host") ? json_get_str(v, "host") : "undefined",
                            json_get_str(v, "username") ? json_get_str(v, "username") : "-", (long long)port, pass ? "user" : "project");

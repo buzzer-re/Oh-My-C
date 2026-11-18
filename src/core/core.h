@@ -49,6 +49,11 @@ NORETURN void die(const char *fmt, ...) PRINTF_LIKE(1, 2);
 void *xmalloc(size_t n);
 void *xcalloc(size_t n, size_t sz);
 void *xrealloc(void *p, size_t n);
+/* qsort that accepts an empty array: VEC storage is NULL until the first push, and qsort(NULL, 0, ...) is undefined
+ * (glibc declares the base nonnull) */
+static inline void xqsort(void *base, size_t n, size_t size, int (*cmp)(const void *, const void *)) {
+    if (n > 1) qsort(base, n, size, cmp);
+}
 char *xstrdup(const char *s);
 char *xstrndup(const char *s, size_t n);
 char *xasprintf(const char *fmt, ...) PRINTF_LIKE(1, 2);
@@ -152,6 +157,9 @@ void hmap_free(hmap_t *m, void (*free_val)(void *));
 /* ---------- time ---------- */
 int64_t now_ms(void);      /* wall clock */
 int64_t mono_ms(void);     /* monotonic */
+/* base + ms for deadlines and expiries, saturating instead of overflowing (ms may be huge, infinite or NaN = 0 when
+ * it comes from a server or the model) */
+int64_t time_add_ms(int64_t base, double ms);
 char *iso8601_now(void);   /* owned, UTC with ms */
 char *iso8601_from_ms(int64_t ms);
 void sleep_ms(int64_t ms);

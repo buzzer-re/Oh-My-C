@@ -1199,7 +1199,7 @@ static void collect_dir(const char *dir, const char *parent, subsess_list_t *out
         free(p);
     }
     closedir(d);
-    qsort(files.v, files.n, sizeof *files.v, cmp_str);
+    xqsort(files.v, files.n, sizeof *files.v, cmp_str);
     for (size_t i = 0; i < files.n; i++) {
         const char *name = files.v[i];
         if (!str_ends(name, ".jsonl") || strstr(name, ".bak")) continue;

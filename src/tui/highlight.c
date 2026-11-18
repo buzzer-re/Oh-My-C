@@ -211,7 +211,7 @@ typedef struct {
 } hs_t;
 
 static bool in_call(const hs_t *st) {
-    for (int i = st->nf - 1; i >= 0; i--) {
+    for (int i = MIN(st->nf, MAX_FRAMES) - 1; i >= 0; i--) { /* frames past the cap are plain parens */
         if (st->frames[i] == 'c') return true;
         if (st->frames[i] == '{' || st->frames[i] == 'p') return false;
     }

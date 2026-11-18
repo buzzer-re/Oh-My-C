@@ -72,7 +72,7 @@ bool ai_reaches_budgeted_host(const ai_model_t *m) {
 int ai_image_count_budget(const ai_model_t *m) {
     if (!m) return 5;
     json_t *own = m->raw ? json_get(m->raw, "imageCountBudget") : NULL;
-    if (json_is_num(own) && json_get_num(m->raw, "imageCountBudget", 0) >= 1) return (int)json_get_num(m->raw, "imageCountBudget", 0);
+    if (json_is_num(own) && json_get_num(m->raw, "imageCountBudget", 0) >= 1) return (int)json_d2i(json_get_num(m->raw, "imageCountBudget", 0));
     const char *p = m->provider ? m->provider : "";
     bool official = ai_reaches_budgeted_host(m);
     bool claude = ai_is_claude_model(m->id);

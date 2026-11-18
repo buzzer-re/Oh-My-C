@@ -1,0 +1,4 @@
+before
+
+
+{"path": "a.txt", "edits": [{"op": "update", "rename": "dir/new.txt", "diff": "@@\n-before\n+after"}]}

@@ -845,7 +845,7 @@ static void prune_request_dumps(const char *dir, const char *keep) {
         free(p);
     }
     closedir(d);
-    qsort(v.v, v.n, sizeof *v.v, req_dump_newest_first);
+    xqsort(v.v, v.n, sizeof *v.v, req_dump_newest_first);
     int64_t retained = 0;
     for (size_t i = 0; i < v.n; i++) {
         bool stay = str_eq(v.v[i].name, keep) || (now - v.v[i].mtime <= 7 * 24 * 3600 && retained + v.v[i].size <= 64LL * 1024 * 1024);

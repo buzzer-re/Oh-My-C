@@ -1,0 +1,8 @@
+diff --git a b
+alpha
+mid
+diff --git a b
+alpha
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@\n diff --git a b\n-alpha\n+ALPHA"}]}

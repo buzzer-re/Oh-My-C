@@ -1,0 +1,9 @@
+class Example {
+    constructor() {
+        this.value = 1;
+        this.name = "test";
+    }
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ constructor() {\n-this.value = 1;\n-this.name = \"test\";\n+this.value = 42;\n+this.name = \"updated\";"}]}

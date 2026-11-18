@@ -656,7 +656,7 @@ int search_run(const search_opts_t *o, search_result_t *out) {
     pthread_mutex_destroy(&fc.mu);
     globset_free(&inc);
     globset_free(&exc);
-    if (fc.files.n > 1) qsort(fc.files.v, fc.files.n, sizeof(char *), cmp_str);
+    if (fc.files.n > 1) xqsort(fc.files.v, fc.files.n, sizeof(char *), cmp_str);
 
     sdrv_t d;
     memset(&d, 0, sizeof(d));

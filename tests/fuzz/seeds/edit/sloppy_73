@@ -1,0 +1,5 @@
+logger.debug(a);
+logger.debug(b);
+
+
+{"input": "*** Edit File: a.txt all\n*** Find\nlogger.debug(\n*** Replace\nlogger.trace(\n"}

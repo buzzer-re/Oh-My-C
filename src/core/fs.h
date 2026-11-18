@@ -29,7 +29,10 @@ char *path_join3(const char *a, const char *b, const char *c);
 char *path_dirname(const char *p);
 const char *path_basename(const char *p); /* borrowed into p */
 const char *path_ext(const char *p);      /* ".c" or "" */
-char *path_normalize(const char *p);      /* lexical: removes . and .., collapses // */
+char *path_normalize(const char *p);
+/* Node's `<CODE>: <description>, <syscall> '<path>'` text for a failed fs call (libuv descriptions); path NULL leaves
+ * out the quoted part ("ENOSPC: no space left on device, write"). Owned. */
+char *fs_node_error(int err, const char *syscall, const char *path);      /* lexical: removes . and .., collapses // */
 char *path_abs(const char *p, const char *cwd); /* expands ~, joins with cwd, normalizes */
 char *path_real(const char *p);           /* realpath or NULL */
 char *path_relative(const char *from_dir, const char *to); /* both absolute */

@@ -562,7 +562,7 @@ static void resolve_opts(const ai_model_t *m, const ai_stream_opts_t *o, anth_ro
     if ((int)e < EFFORT_MINIMAL || (int)e > EFFORT_MAX) return;
     int64_t budget = ANTHROPIC_THINKING[e];
     json_t *cb = o->thinking_budgets ? json_get(o->thinking_budgets, effort_name(e)) : NULL;
-    if (json_is_num(cb)) budget = (int64_t)cb->u.num.d;
+    if (json_is_num(cb)) budget = json_d2i(cb->u.num.d);
     if (budget <= 0) return;
     const char *mode = thinking_mode(m);
     const char *effort = (str_eq(mode, "anthropic-adaptive") || str_eq(mode, "anthropic-budget-effort"))

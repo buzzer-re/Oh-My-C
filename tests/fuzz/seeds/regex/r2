@@ -1,0 +1,3 @@
+[[:alpha:]&&[^aeiou]]+|\p{Greek}+
+
+xyzαβγ

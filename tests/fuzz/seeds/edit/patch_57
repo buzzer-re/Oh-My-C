@@ -1,0 +1,11 @@
+export class ProcessTerminal {
+	private _kittyProtocolActive = false;
+	private stdinDataHandler?: (data: string) => void;
+
+	get kittyProtocolActive(): boolean {
+		return this._kittyProtocolActive;
+	}
+}
+
+
+{"path": "a.txt", "edits": [{"op": "update", "diff": "@@ export class ProcessTerminal\n export class ProcessTerminal {\n \tprivate _kittyProtocolActive = false;\n \tprivate stdinDataHandler?: (data: string) => void;\n+\tprivate dead = false;\n\n \tget kittyProtocolActive(): boolean {"}]}

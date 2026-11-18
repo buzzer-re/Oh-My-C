@@ -96,6 +96,32 @@ check "json mode"      '"type":"agent_end"'              "$B" --model mock/mock-
 check "rpc mode"       '"status":"completed"'            bash -c "printf '%s\n' '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"bash:echo r\"}' | (cat; sleep 2) | '$B' --model mock/mock-1 --mode rpc"
 check "sessions list"  "msgs"                            "$B" sessions
 check "no-session"     "plain answer"                    "$B" --model mock/mock-1 --no-session -p "x"
+# a session dir omc cannot write: omp's persistence failure line, then the durability line at shutdown (exit 1)
+if [ "$(id -u)" != 0 ]; then
+    mkdir -p "$T/rosess" && chmod 555 "$T/rosess"
+    check "session ro"     "Session persistence failed: EACCES: permission denied, open '" "$B" --model mock/mock-1 --session-dir "$T/rosess" -p "say:hi"
+    check "session ro end" "Session persistence is still failing at shutdown: EACCES" bash -c "'$B' --model mock/mock-1 --session-dir '$T/rosess' -p 'say:hi'; echo rc=\$?"
+    check "session ro rc"  "rc=1" bash -c "'$B' --model mock/mock-1 --session-dir '$T/rosess' -p 'say:hi' 2>/dev/null; echo rc=\$?"
+fi
+# a provider behind a self-signed certificate: omp's network-cause sentence with Bun's error code
+if command -v openssl >/dev/null 2>&1; then
+    TLS_PORT=$((PORT + 101)) TLS_DIR="$T/tlsagent"
+    mkdir -p "$TLS_DIR"
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$TLS_DIR/k.pem" -out "$TLS_DIR/c.pem" -days 2 -subj /CN=localhost >/dev/null 2>&1
+    openssl s_server -accept $TLS_PORT -cert "$TLS_DIR/c.pem" -key "$TLS_DIR/k.pem" -www -quiet >/dev/null 2>&1 & TLS_PID=$!
+    printf 'providers:\n  mock:\n    baseUrl: https://127.0.0.1:%s/v1\n    apiKey: MOCK_KEY\n    api: openai-completions\n    models:\n      - id: mock-1\n' $TLS_PORT > "$TLS_DIR/models.yml"
+    printf 'retry:\n  enabled: false\n' > "$TLS_DIR/config.yml"
+    for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$TLS_PORT) 2>/dev/null && break; sleep 0.1; done
+    # (the transport retries a TLS failure like omp: ~32 s in both, past check's 30 s limit)
+    tls_out=$(OMC_CODING_AGENT_DIR="$TLS_DIR" timeout 120 "$B" --model mock/mock-1 --no-session -p "hi" </dev/null 2>&1)
+    if [[ "$tls_out" == *"TLS certificate verification failed for 127.0.0.1:$TLS_PORT (DEPTH_ZERO_SELF_SIGNED_CERT). If you're behind"* ]]; then
+        echo "   ok  tls self-signed"
+    else
+        echo "   FAIL tls self-signed: got: $tls_out"
+        fail=1
+    fi
+    kill $TLS_PID 2>/dev/null
+fi
 # hashline edit: read to get the tag, then replace line 1 and append after it
 printf 'alpha\nbeta\ngamma\n' > e.txt
 TAG=$(timeout 30 "$B" --model mock/mock-1 -p "read:e.txt" </dev/null | grep -o 'e.txt#[0-9A-F]*' | head -1 | cut -d'#' -f2)
@@ -278,6 +304,12 @@ check "builtin rule"   "Box::leak"  "$B" --model mock/mock-1 -p "write:src/x.rs:
 # MCP stdio server bridged as mcp__<server>_<tool>
 printf '{"mcpServers":{"mockmcp":{"command":"python3","args":["-I","%s"]}}}' "$ROOT/tests/e2e/mock_mcp.py" > "$T/agent/mcp.json"
 check "mcp tool"       "mcp echo: hi-mcp"  "$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"hi-mcp"}'
+# MCP tool failures as omp's formatMCPToolFailure diagnostics (mcp/errors.ts): the server dies mid-call; a JSON-RPC
+# error whose data carries secrets and a request id
+check "mcp tool eof"   'Tool said: MCP failure\nserver: mockmcp\ntool: echo_text\ntransport: stdio\nstage: receive\nfailure: eof\nretryable: no\nmessage: MCP subprocess exited with code 3 before responding\ncode: 3\nnext: The connection was lost after the request was sent, so it may already have run; check its effect before retrying.' \
+    "$B" --model mock/mock-1 --mode json -p 'call:mcp__mockmcp_echo_text:{"text":"__crash__"}'
+check "mcp tool rpc"   'message: MCP error -32000: boom Bearer [redacted]\ncode: -32000\ntrace_id: req-42\ndata: {\"requestId\":\"req-42\",\"apiKey\":\"[redacted]\",\"detail\":\"x?token=[redacted]\",\"n\":[1,2]}\nnext: Address the server-reported MCP error before retrying.' \
+    "$B" --model mock/mock-1 --mode json -p 'call:mcp__mockmcp_echo_text:{"text":"__rpcerror__"}'
 grep -q "Mock MCP server instructions" "$T/req.jsonl" && echo "   ok  mcp instructions in prompt" || { echo "   FAIL mcp instructions"; fail=1; }
 rm -f "$T/agent/mcp.json"
 # MCP OAuth: discovery -> dynamic registration -> PKCE code (curl plays the browser) -> bearer token

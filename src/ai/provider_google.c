@@ -70,13 +70,13 @@ static int64_t effort_budget_field(const ai_model_t *m, ai_effort_t e, bool *fou
     json_t *eb = m->thinking ? json_get_obj(m->thinking, "effortBudgets") : NULL;
     json_t *v = eb ? json_get(eb, effort_name(e)) : NULL;
     *found = json_is_num(v);
-    return *found ? (int64_t)v->u.num.d : 0;
+    return *found ? json_d2i(v->u.num.d) : 0;
 }
 
 static int64_t custom_budget(const ai_stream_opts_t *o, ai_effort_t e, bool *found) {
     json_t *v = o->thinking_budgets ? json_get(o->thinking_budgets, effort_name(e)) : NULL;
     *found = json_is_num(v);
-    return *found ? (int64_t)v->u.num.d : 0;
+    return *found ? json_d2i(v->u.num.d) : 0;
 }
 
 static int64_t thinking_headroom(const ai_model_t *m, const ai_stream_opts_t *o, ai_effort_t e) {

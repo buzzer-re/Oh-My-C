@@ -563,7 +563,7 @@ static void jnode_settle(jnode_t *n, int depth) {
         if (k->job || k->kids.n) n->kids.v[w++] = k;
     }
     n->kids.n = w;
-    qsort(n->kids.v, n->kids.n, sizeof *n->kids.v, jnode_cmp);
+    xqsort(n->kids.v, n->kids.n, sizeof *n->kids.v, jnode_cmp);
     n->size = 0;
     n->running = n->job && str_eq(json_get_str(n->job, "status"), "running");
     n->start = n->job ? json_get_int(n->job, "startedAt", 0) : INT64_MAX;

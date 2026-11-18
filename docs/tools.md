@@ -273,6 +273,10 @@ call to it runs, every session sees.
 - Servers connect in parallel at session start (`mcp.startupTimeoutMs`). Their tools become
   `mcp__<server>_<tool>` (mounted under `xd://` by default) and their instructions are appended to
   the system prompt. Resources are read through `mcp://`. Subagents share the parent's connections.
+- A failed tool call returns omp's `formatMCPToolFailure` block (`src/mcp/mcperr.c`, `mcp/errors.ts`): `MCP failure`,
+  server, tool, transport, stage, failure class, retryable, the sanitized message, code, trace id, bounded and
+  credential-redacted JSON-RPC `data`, and the next step. A retryable connection-class failure gets one reconnect and
+  replay (`isRetriableConnectionError`); a stdio server that exits mid-call reports its exit code and is never replayed.
 - OAuth for remote servers (`mcp/oauth.c`, port of `mcp/oauth-discovery.ts` and `oauth-flow.ts`):
   RFC 9728 resource metadata → RFC 8414/OIDC metadata → RFC 7591 dynamic registration (or a
   configured client) → authorization code + PKCE with the RFC 8707 `resource` indicator, through the
@@ -329,6 +333,10 @@ with subagents. `lsp_after_write()` syncs written files and returns diagnostics,
 write results (`lsp.diagnosticsOnWrite`, on) and to edit results only with `lsp.diagnosticsOnEdit`
 (off by default, like omp). The wait is `lsp.diagnosticsWaitMs`.
 Timeouts follow omp's `resolveLspTimeouts`.
+Both the LSP and DAP readers use `src/core/rpcframe.c` (omp `jsonrpc/message-framing.ts`): headers are capped at
+16 KiB, exactly one numeric `Content-Length` up to 256 MiB is accepted, a header block without one is dropped as
+stdout noise, and anything else ends the reader with a MessageFramingError ("LSP connection closed: …" / "DAP
+connection closed: …" for the requests in flight).
 
 ## DAP client (`src/dap/dap.c`)
 

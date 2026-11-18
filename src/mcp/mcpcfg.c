@@ -193,7 +193,7 @@ int mcp_config_set_disabled(const char *path, const char *name, bool disabled, c
                 set.n--;
                 break;
             }
-    qsort(set.v, set.n, sizeof(char *), cmp_str);
+    xqsort(set.v, set.n, sizeof(char *), cmp_str);
     if (set.n) {
         json_t *arr = json_arr();
         for (size_t i = 0; i < set.n; i++) json_push_str(arr, set.v[i]);

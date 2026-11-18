@@ -1,0 +1,4 @@
+kept
+
+
+{"input": "*** Begin Patch\n*** Add File: a.txt\n+overwritten\n*** End Patch"}

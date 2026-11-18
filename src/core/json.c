@@ -125,10 +125,17 @@ double json_get_num(const json_t *o, const char *key, double def) {
     return json_is_num(v) ? v->u.num.d : def;
 }
 
+int64_t json_d2i(double d) {
+    if (d != d) return 0;
+    if (d >= 9223372036854775807.0) return INT64_MAX;
+    if (d <= -9223372036854775808.0) return INT64_MIN;
+    return (int64_t)d;
+}
+
 int64_t json_get_int(const json_t *o, const char *key, int64_t def) {
     json_t *v = json_get(o, key);
     if (!json_is_num(v)) return def;
-    return v->is_int ? v->u.num.i : (int64_t)v->u.num.d;
+    return v->is_int ? v->u.num.i : json_d2i(v->u.num.d);
 }
 
 bool json_get_bool(const json_t *o, const char *key, bool def) {

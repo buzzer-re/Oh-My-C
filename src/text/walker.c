@@ -560,7 +560,7 @@ int walk_collect(const char *root, const walk_opts_t *opts, walk_list_t *out) {
     c.out = out;
     int r = walk(root, opts, collect_cb, &c);
     pthread_mutex_destroy(&c.mu);
-    if (out->n > 1) qsort(out->v, out->n, sizeof(walk_item_t), item_cmp);
+    if (out->n > 1) xqsort(out->v, out->n, sizeof(walk_item_t), item_cmp);
     return r;
 }
 

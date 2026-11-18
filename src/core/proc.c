@@ -27,6 +27,14 @@ void proc_ignore_sigpipe(void) {
     sigaction(SIGPIPE, &sa, NULL);
 }
 
+static void close_pair(int p[2]) {
+    for (int k = 0; k < 2; k++)
+        if (p[k] >= 0) {
+            close(p[k]);
+            p[k] = -1;
+        }
+}
+
 static char **build_env(const char *const *extra) {
     size_t n = 0;
     while (environ[n]) n++;
@@ -84,27 +92,28 @@ int proc_run(const char *const *argv, const proc_opts_t *o, proc_result_t *res) 
     memset(res, 0, sizeof(*res));
     size_t cap = o->max_output ? o->max_output : (16u << 20);
 
-    int in_p[2] = {-1, -1}, out_p[2] = {-1, -1}, err_p[2] = {-1, -1}, exec_p[2];
+    int in_p[2] = {-1, -1}, out_p[2] = {-1, -1}, err_p[2] = {-1, -1}, exec_p[2] = {-1, -1};
     int master = -1;
-    if (pipe2(exec_p, O_CLOEXEC) != 0) return -1;
-    if (o->stdin_data && pipe2(in_p, O_CLOEXEC) != 0) return -1;
+    /* a failed pipe/openpty/fork (EMFILE, EAGAIN) must not leak the fds opened before it */
+    if (pipe2(exec_p, O_CLOEXEC) != 0) goto fail;
+    if (o->stdin_data && pipe2(in_p, O_CLOEXEC) != 0) goto fail;
     if (o->use_pty) {
         struct winsize ws = {.ws_row = 40, .ws_col = 200};
         int slave;
-        if (openpty(&master, &slave, NULL, NULL, &ws) != 0) return -1;
+        if (openpty(&master, &slave, NULL, NULL, &ws) != 0) goto fail;
         out_p[0] = master;
         out_p[1] = slave;
         fcntl(master, F_SETFD, FD_CLOEXEC);
     } else {
-        if (pipe2(out_p, O_CLOEXEC) != 0) return -1;
-        if (!o->merge_stderr && pipe2(err_p, O_CLOEXEC) != 0) return -1;
+        if (pipe2(out_p, O_CLOEXEC) != 0) goto fail;
+        if (!o->merge_stderr && pipe2(err_p, O_CLOEXEC) != 0) goto fail;
     }
     char **env = build_env(o->env_extra);
 
     pid_t pid = fork();
     if (pid < 0) {
         free(env);
-        return -1;
+        goto fail;
     }
     if (pid == 0) {
         reset_child_signals();
@@ -261,6 +270,12 @@ int proc_run(const char *const *argv, const proc_opts_t *o, proc_result_t *res) 
     res->err_len = err.len;
     res->err = sb_detach(&err);
     return 0;
+fail:
+    close_pair(exec_p);
+    close_pair(in_p);
+    close_pair(out_p);
+    close_pair(err_p);
+    return -1;
 }
 
 void proc_result_free(proc_result_t *r) {
@@ -314,13 +329,20 @@ const char *proc_shell_name(void) {
 
 int child_spawn(const char *const *argv, const char *cwd, const char *const *env_extra, bool capture_stderr,
                 child_t *c) {
-    int in_p[2], out_p[2], err_p[2] = {-1, -1}, exec_p[2];
-    if (pipe2(in_p, O_CLOEXEC) || pipe2(out_p, O_CLOEXEC) || pipe2(exec_p, O_CLOEXEC)) return -1;
-    if (capture_stderr && pipe2(err_p, O_CLOEXEC)) return -1;
-    char **env = build_env(env_extra);
-    pid_t pid = fork();
+    int in_p[2] = {-1, -1}, out_p[2] = {-1, -1}, err_p[2] = {-1, -1}, exec_p[2] = {-1, -1};
+    pid_t pid = -1;
+    char **env = NULL;
+    if (pipe2(in_p, O_CLOEXEC) || pipe2(out_p, O_CLOEXEC) || pipe2(exec_p, O_CLOEXEC) || (capture_stderr && pipe2(err_p, O_CLOEXEC)))
+        goto fail;
+    env = build_env(env_extra);
+    pid = fork();
     if (pid < 0) {
+    fail:
         free(env);
+        close_pair(in_p);
+        close_pair(out_p);
+        close_pair(exec_p);
+        close_pair(err_p);
         return -1;
     }
     if (pid == 0) {

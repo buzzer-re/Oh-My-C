@@ -1,0 +1,6 @@
+*.{ts,tsx}
+[!a-c]?.md
+/root.txt
+\#lit
+
+a/b/x.tsx

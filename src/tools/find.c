@@ -734,7 +734,7 @@ static void select_windows(passages_t *ps, size_t limit) {
         } else {
             passages_t tmp = {0};
             for (size_t i = 0; i < ps->n; i++) vec_push(&tmp, ps->v[i]);
-            qsort(tmp.v, tmp.n, sizeof(passage_t), cmp_pass_score);
+            xqsort(tmp.v, tmp.n, sizeof(passage_t), cmp_pass_score);
             for (size_t i = 0; i < limit; i++)
                 for (size_t j = 0; j < ps->n; j++)
                     if (ps->v[j].start == tmp.v[i].start) keep[j] = true;
@@ -748,7 +748,7 @@ static void select_windows(passages_t *ps, size_t limit) {
         ps->n = w;
         free(keep);
     }
-    if (ps->n > 1) qsort(ps->v, ps->n, sizeof(passage_t), cmp_pass_start);
+    if (ps->n > 1) xqsort(ps->v, ps->n, sizeof(passage_t), cmp_pass_start);
 }
 
 /* passage text with the `L<n>| ` tags stripped */
@@ -799,7 +799,7 @@ static char *make_sketch(const passage_t *p, const strvec_t *kw, const double *w
         rline_t r = {i, score};
         vec_push(&ranked, r);
     }
-    if (ranked.n > 1) qsort(ranked.v, ranked.n, sizeof(rline_t), cmp_rline);
+    if (ranked.n > 1) xqsort(ranked.v, ranked.n, sizeof(rline_t), cmp_rline);
     VEC(rline_t) sel = {0};
     strvec_t texts = {0};
     size_t used = 0;
@@ -815,7 +815,7 @@ static char *make_sketch(const passage_t *p, const strvec_t *kw, const double *w
         vec_push(&sel, r);
         strvec_push_own(&texts, text);
     }
-    if (sel.n > 1) qsort(sel.v, sel.n, sizeof(rline_t), cmp_rline_index);
+    if (sel.n > 1) xqsort(sel.v, sel.n, sizeof(rline_t), cmp_rline_index);
     sb_t out = SB_INIT;
     for (size_t i = 0; i < sel.n; i++) {
         if (i) sb_putc(&out, '\n');
@@ -852,7 +852,7 @@ static void merge_heat(const heats_t *in, double threshold, heats_t *out) {
     heats_t kept = {0};
     for (size_t i = 0; i < in->n; i++)
         if (in->v[i].p >= threshold && in->v[i].p > 0 && in->v[i].start <= in->v[i].end) vec_push(&kept, in->v[i]);
-    if (kept.n > 1) qsort(kept.v, kept.n, sizeof(heat_t), cmp_heat_pos);
+    if (kept.n > 1) xqsort(kept.v, kept.n, sizeof(heat_t), cmp_heat_pos);
     for (size_t i = 0; i < kept.n; i++) {
         if (out->n && kept.v[i].start <= out->v[out->n - 1].end + 1) {
             heat_t *last = &out->v[out->n - 1];
@@ -865,7 +865,7 @@ static void merge_heat(const heats_t *in, double threshold, heats_t *out) {
         vec_push(out, h);
     }
     vec_free(&kept);
-    if (out->n > 1) qsort(out->v, out->n, sizeof(heat_t), cmp_heat_rank);
+    if (out->n > 1) xqsort(out->v, out->n, sizeof(heat_t), cmp_heat_rank);
 }
 
 /* ---------- judge requests (jfind/questions.ts, prompts/judge/find.json) ---------- */
@@ -1169,7 +1169,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         wo.want_stat = true;
         walk(root, &wo, list_cb, &lc);
         pthread_mutex_destroy(&lc.mu);
-        if (entries.n > 1) qsort(entries.v, entries.n, sizeof(fentry_t), cmp_fentry);
+        if (entries.n > 1) xqsort(entries.v, entries.n, sizeof(fentry_t), cmp_fentry);
     }
     gindex_t ix;
     grep_index(root, &kw, &ix);
@@ -1196,7 +1196,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         vec_push(&ranked, r);
     }
     G_cmp_entries = entries.v;
-    if (ranked.n > 1) qsort(ranked.v, ranked.n, sizeof(rank_t), cmp_rank_lex);
+    if (ranked.n > 1) xqsort(ranked.v, ranked.n, sizeof(rank_t), cmp_rank_lex);
     if (ranked.n > FIND_CANDIDATES) ranked.n = FIND_CANDIDATES;
     double *name_score = xmalloc((entries.n + 1) * sizeof(double));
     for (size_t i = 0; i <= entries.n; i++) name_score[i] = NAN;
