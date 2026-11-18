@@ -302,6 +302,9 @@ static bool set_valueless(launch_args_t *r, const char *a) {
     else if (!strcmp(a, "--no-session")) r->no_session = true;
     else if (!strcmp(a, "--no-tools")) r->no_tools = true;
     else if (!strcmp(a, "--no-lsp")) r->no_lsp = true;
+    else if (!strcmp(a, "--no-judge")) r->no_judge = true;
+    else if (!strcmp(a, "--no-spotlight")) r->no_spotlight = true;
+    else if (!strcmp(a, "--offline")) r->offline = true;
     else if (!strcmp(a, "--hide-thinking")) r->hide_thinking = true;
     else if (!strcmp(a, "--advisor")) r->advisor = true;
     else if (!strcmp(a, "--external-thinking")) r->external_thinking = true;

@@ -623,6 +623,10 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     if (A->advisor) settings_set_runtime("advisor.enabled", json_bool(true));
     if (A->external_thinking) settings_set_runtime("externalThinking", json_bool(true)); /* ephemeral */
     if (A->no_lsp) settings_set_runtime("lsp.enabled", json_bool(false));
+    /* omp 8b9b1ad22f: runtime overrides, never persisted */
+    if (A->no_judge) settings_set_runtime("models.noJudge", json_bool(true));
+    if (A->no_spotlight) settings_set_runtime("models.noSpotlight", json_bool(true));
+    if (A->offline) settings_set_runtime("models.offline", json_bool(true));
     if (g_force_setup) { /* `omc setup`: every wizard scene, whatever the stored setupVersion */
         settings_set_runtime("setupVersion", json_num(0));
         settings_set_runtime("startup.setupWizard", json_bool(true));

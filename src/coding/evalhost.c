@@ -611,12 +611,16 @@ static json_t *load_images(const json_t *v, const char *cwd, char **err) {
 /* the live judge role chain (resolveRoleChain("judge"): modelRoles.judge or the catalog chain
  * typesafe jev -> @tiny -> @smol -> @default, or retry.fallbackChains.judge), then the session model */
 static size_t judge_candidates(app_t *a, const ai_model_t **out, size_t max) {
+    /* allowedJudgeCandidates (omp 8b9b1ad22f): models.noJudge / models.offline keep the judge on the session's
+     * provider; without a session model nothing qualifies */
+    bool restricted = settings_bool("models.noJudge", false) || settings_bool("models.offline", false);
+    if (restricted && !a->model) return 0;
     mr_chain_t chain;
     mr_role_chain("judge", NULL, &chain);
     size_t n = 0;
     for (size_t i = 0; i <= chain.n && n < max; i++) {
         const ai_model_t *m = i < chain.n ? chain.v[i].model : a->model;
-        if (!m) continue;
+        if (!m || (restricted && strcmp(m->provider, a->model->provider) != 0)) continue;
         bool dup = false;
         for (size_t k = 0; k < n; k++) dup = dup || out[k] == m;
         if (!dup) out[n++] = m;

@@ -221,9 +221,6 @@ debug.adapters	omc-only	no omp setting
 mcp.enabled	omc-only	no omp setting (omp's switch is --no-mcp)
 mcp.disabledServers	omc-only	omp keeps disabledServers in its MCP config files, not settings
 skills.compressDescriptions	omc-only	no omp equivalent
-models.noJudge	inert	no judge-model opt-out (omp v18.22) (added in omp v18.19-18.22)
-models.noSpotlight	inert	spotlight is omp-hosted, not ported (added in omp v18.19-18.22)
-models.offline	inert	offline model mode not ported yet (added in omp v18.19-18.22)
 auth.unpausedProviders	inert	pause overrides not ported yet (added in omp v18.19-18.22)
 disassembler.backend	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
 disassembler.maxOpen	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)

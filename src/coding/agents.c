@@ -2390,3 +2390,17 @@ json_t *agents_job_tree(app_t *root, size_t recent_limit) {
     json_set(out, "agents", agents);
     return out;
 }
+
+/* settingsAwareStreamFn (omp 8b9b1ad22f): with models.offline a model call to any provider other than the active
+ * session's is refused (owned message), NULL when allowed */
+char *agents_offline_call_error(const char *provider) {
+    if (!settings_bool("models.offline", false)) return NULL;
+    char *active = NULL;
+    pthread_mutex_lock(&g_mu);
+    for (size_t i = 0; i < g_refs.n && !active; i++)
+        if (g_refs.v[i]->is_main && g_refs.v[i]->app && g_refs.v[i]->app->model) active = xstrdup(g_refs.v[i]->app->model->provider);
+    pthread_mutex_unlock(&g_mu);
+    bool ok = active && provider && !strcmp(active, provider);
+    free(active);
+    return ok ? NULL : xstrdup("Offline mode restricts model calls to the active session provider.");
+}

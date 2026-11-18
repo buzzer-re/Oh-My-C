@@ -46,6 +46,17 @@ check "cli @missing"      "Error: File not found: $T/work/nope.txt"  "$B" --mode
 check "cli @image"        "plain answer"         bash -c "cd '$T/iwork' && ${IENV[*]} '$B' --model mock/vision-1 --no-session -p @shot.png 'say:x'"
 check "cli @image note"   "[Image: original 3200x1800, displayed at 1568x882."  cat "$T/req.jsonl"
 check "cli @image wire"   '"type": "image_url"'  cat "$T/req.jsonl"
+# --offline keeps every model call on the active session provider: the smol-role side call to another provider is
+# refused (omp 8b9b1ad22f); the flags are listed in --help
+mkdir -p "$T/agent-off/skills/demo" && sed 's/^providers:$/providers:/' "$T/agent/models.yml" > "$T/agent-off/models.yml"
+printf '  mock2:\n    baseUrl: %s\n    apiKey: MOCK_KEY\n    api: openai-completions\n    models:\n      - id: other-1\n' "$(grep -m1 baseUrl "$T/agent/models.yml" | sed 's/.*baseUrl: //')" >> "$T/agent-off/models.yml"
+printf -- '---\nname: demo\ndescription: Demo skill for tests, covering routing hints, previews, compression of long descriptions and the skill URL reads\n---\nB\n' > "$T/agent-off/skills/demo/SKILL.md"
+printf 'modelRoles:\n  smol: mock2/other-1\n' > "$T/agent-off/config.yml"
+: > "$T/req.jsonl"
+OMC_CODING_AGENT_DIR="$T/agent-off" timeout 30 "$B" --model mock/mock-1 --offline -p "say:offline ok" </dev/null >/dev/null 2>&1
+sleep 1
+check "cli offline"       "['mock-1']"  python3 -I -c 'import json,sys; print(sorted(set(json.loads(l)["model"] for l in open(sys.argv[1]))))' "$T/req.jsonl"
+check "cli offline help"  "--offline                         Restrict auxiliary services to the active model's provider (not a network firewall)"  "$B" --help
 # --system-prompt-template replaces the bundled template
 printf 'CUSTOM TEMPLATE for {{cwd}}\n' > "$T/tpl.md"
 : > "$T/req.jsonl"
