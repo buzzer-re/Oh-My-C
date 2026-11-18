@@ -237,6 +237,24 @@ int main(void) {
     CHECK(json_len(dp) == 1 && str_eq(json_sv(json_at(dp, 0)), "native"));
     free(proj), free(pdir), free(pcfg), free(gcfg);
 
+    { /* a dotted revision spelling adopts the catalog id (omp 8ddc3e51ce, e8ff8d8f25) */
+        const ai_model_t *dashed = NULL;
+        for (size_t i = 0; i < catalog_count() && !dashed; i++) {
+            const ai_model_t *m = catalog_at(i);
+            if (m && !strcmp(m->provider, "anthropic") && strstr(m->id, "-4-5") && !strchr(m->id, '.')) dashed = m;
+        }
+        CHECK(dashed != NULL);
+        if (dashed) {
+            char *dotted = xstrdup(dashed->id), *p = strstr(dotted, "-4-5");
+            p[2] = '.';
+            char *sel = xasprintf("anthropic/%s", dotted);
+            mr_selector_t s;
+            CHECK(mr_parse_selector(sel, &s) && !strcmp(s.id, dashed->id) && !strcmp(s.raw, sel));
+            mr_selector_free(&s);
+            free(sel);
+            free(dotted);
+        }
+    }
     mr_pool_free(&avail);
     if (fails) fprintf(stderr, "%d failure(s)\n", fails);
     else printf("model resolver ok\n");
