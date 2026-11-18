@@ -60,6 +60,8 @@ check "xd listing"     "mounted tool devices"             "$B" --model mock/mock
 check "xd docs"        "type Args = {"                    "$B" --model mock/mock-1 -p "read:xd://debug"
 check "xd dispatch"    "Invalid args for xd://lsp: Validation failed" "$B" --model mock/mock-1 -p 'call:write:{"path":"xd://lsp","content":"{\"action\":\"bogus\"}"}'
 check "xd report"      "Noted, thanks!"                   "$B" --model mock/mock-1 -p 'call:write:{"path":"xd://report_issue","content":"read: wrong output"}'
+# a device called with the xd:// prefix spelled in underscores dispatches to it (omp dd536ce059)
+check "xd underscore call" "debug session"                "$B" --model mock/mock-1 -p 'call:xd__debug:{"action":"sessions"}'
 check "glob tool"      $'Tool said: # a/\nb.txt'          "$B" --model mock/mock-1 -p "glob:**/*.txt"
 check "grep tool"      "*1:written by omc"               "$B" --model mock/mock-1 -p "grep:written"
 # grep / glob result text as omp words it (grouped path tree, errors, empty results)
