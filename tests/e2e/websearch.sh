@@ -8,9 +8,9 @@ for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$WSPORT) 2>/dev/null && break
 WSM=http://127.0.0.1:$WSPORT
 mkdir -p "$T/wsagent" "$T/wswork"
 WSENV=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_OAUTH_TOKEN -u OPENAI_API_KEY -u GEMINI_API_KEY -u XAI_API_KEY -u ZAI_API_KEY
-       -u PERPLEXITY_API_KEY -u KEENABLE_API_KEY -u EXA_API_KEY -u BRAVE_API_KEY -u TAVILY_API_KEY
+       -u PERPLEXITY_API_KEY -u KEENABLE_API_KEY -u SOFYA_API_KEY -u EXA_API_KEY -u BRAVE_API_KEY -u TAVILY_API_KEY
        HOME="$T" OMC_CODING_AGENT_DIR="$T/wsagent" NO_COLOR=1 SEARXNG_ENDPOINT="$WSM/searx"
-       OMC_PROVIDER_URL_REWRITE="https://api.anthropic.com=$WSM/anthropic,https://api.openai.com=$WSM/openai,https://chatgpt.com=$WSM/chatgpt,https://generativelanguage.googleapis.com=$WSM/google,https://api.x.ai=$WSM/xai,https://api.perplexity.ai=$WSM/pplx,https://api.kimi.com=$WSM/kimi,https://api.keenable.ai=$WSM/keenable,https://api.z.ai=$WSM/zai,https://search.parallel.ai=$WSM/parallel,https://html.duckduckgo.com=$WSM/ddg")
+       OMC_PROVIDER_URL_REWRITE="https://api.anthropic.com=$WSM/anthropic,https://api.openai.com=$WSM/openai,https://chatgpt.com=$WSM/chatgpt,https://generativelanguage.googleapis.com=$WSM/google,https://api.x.ai=$WSM/xai,https://api.perplexity.ai=$WSM/pplx,https://api.kimi.com=$WSM/kimi,https://api.keenable.ai=$WSM/keenable,https://sofya.co=$WSM/sofya,https://api.z.ai=$WSM/zai,https://search.parallel.ai=$WSM/parallel,https://html.duckduckgo.com=$WSM/ddg")
 ws_search() { # selector query [env...] -> rendered output of `omc search`
     local sel=$1 q=$2; shift 2
     (cd "$T/wswork" && timeout 30 "${WSENV[@]}" "$@" "$B" search ${sel:+--model "$sel"} "$q" 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
@@ -57,6 +57,14 @@ out=$(ws_search web/keenable 'site:github.com/x "exact phrase" foo after:2024 be
 out=$(ws_search web/keenable 'site:a.com' KEENABLE_API_KEY=keen-fake)
 [[ "$(ws_hdr)" == '/keenable/v1/search {"max_results": 10, "query": "a.com", "site": "a.com"} keen-fake None' ]] \
     && echo "   ok  web search: keenable site-only" || { echo "   FAIL web search keenable site-only: $(ws_hdr)"; fail=1; }
+# Sofya (omp aff70c46f9): bearer key, phrases and exclusions kept, site:/-site: as domain lists, a closed freshness range
+out=$(ws_search web/sofya 'site:github.com/x -site:spam.com "exact phrase" foo after:2024-01-01 before:2025-02-01 -bar' SOFYA_API_KEY=sofya-fake)
+sofya_req=$(tail -1 "$T/websearch.jsonl" | python3 -c "import json,sys; r=json.load(sys.stdin); print(r['path'], json.dumps(r['body'], sort_keys=True), r['headers'].get('authorization'))")
+[[ "$out" == *"Sofya Source"* && "$out" == *"https://example.com/s2"* && "$sofya_req" == '/sofya/v1/search {"exclude_domains": ["spam.com"], "freshness": "2024-01-01:2025-01-31", "include_domains": ["github.com"], "max_results": 10, "query": "\"exact phrase\" foo -bar", "search_depth": "snippets"} Bearer sofya-fake' ]] \
+    && echo "   ok  web search: sofya" || { echo "   FAIL web search sofya: $out / $sofya_req"; fail=1; }
+out=$(ws_search web/sofya 'plain' )
+[[ "$out" == *"Sofya web search is unavailable. Configure its credentials"* ]] \
+    && echo "   ok  web search: sofya no key" || { echo "   FAIL web search sofya no key: $out"; fail=1; }
 out=$(ws_search web/keenable 'after:2024' KEENABLE_API_KEY=keen-fake)
 [[ "$out" == *"Keenable needs search terms; date-only queries are not supported"* ]] \
     && echo "   ok  web search: keenable date-only" || { echo "   FAIL web search keenable date-only: $out"; fail=1; }

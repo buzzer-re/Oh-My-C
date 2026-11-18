@@ -681,6 +681,7 @@ static const struct {
     {"perplexity", "PERPLEXITY_API_KEY"},
     {"tinyfish", "TINYFISH_API_KEY"},
     {"keenable", "KEENABLE_API_KEY"},
+    {"sofya", "SOFYA_API_KEY"},
     {"firecrawl", "FIRECRAWL_API_KEY"},
     {"anthropic", "ANTHROPIC_OAUTH_TOKEN"},
     {"google", "GOOGLE_API_KEY"},

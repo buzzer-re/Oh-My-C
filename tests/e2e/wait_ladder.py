@@ -2,7 +2,7 @@
 """e2e: `wait` (tools/wait.ts): a wait with nothing new returns after the ladder's window with a nudge from the second
 rung on, jobs finishing moments apart share one result, a progress note neither ends a wait nor interrupts bash while a
 direct message ends it, and a subagent cannot broadcast.
-Usage: wait_ladder.py <omc> <request log> <models.yml> <scratch dir> ladder|peers"""
+Usage: wait_ladder.py <omc> <request log> <models.yml> <scratch dir> ladder|lone|peers"""
 import json, os, shutil, subprocess, sys, time
 
 omc, reqlog, models, scratch, part = sys.argv[1:6]
@@ -64,6 +64,7 @@ if part == "ladder":
             "No job finished within 10.0s. Nothing else left? Call `wait` right away with no other tool call: it then blocks up to 4m.\n"
             "<system-notice>\nNothing new after 15.0s of back-to-back waits.\nWaiting is not progress:")
     check("second wait nudges", len(res) >= 3 and res[2].startswith(want), res)
+elif part == "lone":
     # a back-to-back wait alone in its turn takes the top rung at once: it lasts until the job settles
     t = run([["bash", {"command": "sleep 14", "async": True}], ["wait", {}], ["wait", {}]])
     res = tool_results(requests())

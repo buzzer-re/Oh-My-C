@@ -428,6 +428,7 @@ rm -f "$T/agent/config.yml"
 check "bash fork"      "got-bar|fn-bar|||Ran in a copy of the busy session shell; changes here won't persist.##forkb=[]"  python3 -I -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; m=[x for x in r[-1]["messages"] if x.get("role")=="tool"]; t=[x["content"] if isinstance(x["content"],str) else "".join(b.get("text","") for b in x["content"]) for x in m]; print("##".join(t[2:4]).replace("\n","|"))' "$T/req.jsonl"
 # wait: idle ladder and its nudge; settle window, progress notes vs direct messages, no broadcast from a subagent
 check "wait ladder" "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl1" ladder
+check "wait lone"   "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl3" lone
 check "wait peers"  "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl2" peers
 # background jobs carry the call's intent: proc://, wait, /jobs; /jobs full requests the widget role's caption
 check "jobs intent" "jobs intent ok"  python3 -I "$ROOT/tests/e2e/jobs_intent.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ji"
@@ -623,8 +624,8 @@ check "antigravity project unpause" "No API key found for google-antigravity"  "
 check "antigravity claude" "plain cca answer"    "${GENV[@]}" "$B" --config "$T/unpause.yml" --model google-antigravity/claude-opus-4-6 --no-session -p "hi"
 check "antigravity tool"  "Tool said: ag-e2e"    "${GENV[@]}" "$B" --config "$T/unpause.yml" --model google-antigravity/gemini-3.1-pro --no-session -p "bash:echo ag-e2e"
 # a new login of an unpaused provider still shows the account risk, and anything but "yes" stores nothing
-[ -f "$T/agent/config.yml" ] && cp "$T/agent/config.yml" "$T/config.yml.bak"
-cat "$T/unpause.yml" >> "$T/agent/config.yml"
+[ -f "$T/agent/config.yml" ] && mv "$T/agent/config.yml" "$T/config.yml.bak"
+cp "$T/unpause.yml" "$T/agent/config.yml"
 check "antigravity risk"  'Google has suspended accounts that did'  "${GENV[@]}" bash -c 'printf "no\n" | "$0" login google-antigravity' "$B"
 check "antigravity declined" 'Login failed: Login cancelled'  "${GENV[@]}" bash -c 'printf "no\n" | "$0" login google-antigravity' "$B"
 if [ -f "$T/config.yml.bak" ]; then mv "$T/config.yml.bak" "$T/agent/config.yml"; else rm -f "$T/agent/config.yml"; fi
