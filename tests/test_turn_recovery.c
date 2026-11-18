@@ -3,8 +3,10 @@
  * classifyResolvedInterruptedToolTurn, handleCommittedTextStreamStall) */
 #include "coding/turn_recovery.h"
 #include "ai/ai.h"
+#include "session/session.h"
 
 #include <stdio.h>
+#include <string.h>
 
 static int fails;
 #define CHECK(c)                                                         \
@@ -295,6 +297,33 @@ int main(void) {
         json_push(own, b);
         CHECK(tr_tool_replay_start(own) == -1);
         json_free(own);
+    }
+
+    { /* a retry-fallback hop's own thinking level does not outlive it on resume (omp ca42dc150a) */
+        json_t *path = json_parse_str("[{\"type\":\"model_change\",\"model\":\"p/a\"},"
+                                      "{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"high\"},"
+                                      "{\"type\":\"model_change\",\"model\":\"p/b\",\"resolvedModelIsFallback\":true},"
+                                      "{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"xhigh\"}]");
+        session_context_t c;
+        session_build_context_for(path, &c);
+        CHECK(c.thinking && !strcmp(c.thinking, "high"));
+        session_context_free(&c);
+        /* a level changed after the hop is kept */
+        json_push(path, json_parse_str("{\"type\":\"custom\",\"customType\":\"x\"}"));
+        json_push(path, json_parse_str("{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"low\"}"));
+        session_build_context_for(path, &c);
+        CHECK(c.thinking && !strcmp(c.thinking, "low"));
+        session_context_free(&c);
+        json_free(path);
+        /* a non-fallback model change drops the snapshot */
+        path = json_parse_str("[{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"high\"},"
+                              "{\"type\":\"model_change\",\"model\":\"p/b\",\"resolvedModelIsFallback\":true},"
+                              "{\"type\":\"model_change\",\"model\":\"p/c\"},"
+                              "{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"medium\"}]");
+        session_build_context_for(path, &c);
+        CHECK(c.thinking && !strcmp(c.thinking, "medium"));
+        session_context_free(&c);
+        json_free(path);
     }
 
     if (fails) fprintf(stderr, "%d failure(s)\n", fails);
