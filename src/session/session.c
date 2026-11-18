@@ -685,6 +685,11 @@ static json_t *summary_msg(const char *tpl_path, const char *summary) {
 static json_t *to_llm(const json_t *msg);
 json_t *session_message_to_llm(const json_t *msg) { return to_llm(msg); }
 
+bool session_message_is_user(const json_t *m) {
+    return str_eq(json_get_str(m, "role"), "user") && !json_get_str(m, "sourceRole") &&
+           !json_get_bool(m, "sessionSummary", false);
+}
+
 static json_t *to_llm(const json_t *msg) {
     const char *role = json_get_str(msg, "role");
     if (!role) return NULL;
@@ -696,6 +701,7 @@ static json_t *to_llm(const json_t *msg) {
         char *t = !strcmp(role, "bashExecution") ? out_bash_execution_text(msg) : out_python_execution_text(msg);
         json_t *m = user_text_msg(t, json_get_int(msg, "timestamp", now_ms()));
         free(t);
+        json_set_str(m, "sourceRole", role);
         return m;
     }
     if (!strcmp(role, "custom") || !strcmp(role, "hookMessage") || !strcmp(role, "fileMention")) {
@@ -704,6 +710,7 @@ static json_t *to_llm(const json_t *msg) {
         json_t *c = json_get(msg, "content");
         json_set(m, "content", c ? json_clone(c) : json_str(""));
         json_set_int(m, "timestamp", json_get_int(msg, "timestamp", now_ms()));
+        json_set_str(m, "sourceRole", role);
         return m;
     }
     return NULL;
@@ -721,6 +728,7 @@ static void emit_entry(json_t *out, const json_t *e) {
         /* isUserInvokedSkillPrompt: a /skill: invocation replays as the user's own turn */
         bool skill = str_eq(json_get_str(e, "customType"), "skill-prompt") && str_eq(attr, "user");
         json_set_str(m, "role", attr && !skill ? "developer" : "user");
+        json_set_str(m, "sourceRole", "custom");
         if (attr) json_set_str(m, "attribution", attr);
         if (skill) {
             json_set_bool(m, "display", true);

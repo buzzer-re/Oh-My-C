@@ -132,8 +132,16 @@ x = r.call({"id": "s", "type": "get_state"})
 s = x["data"] if x else {}
 for k in ("queuedMessages", "isSettled", "contextUsage", "autoCompactionEnabled", "dumpTools", "systemPrompt", "todoPhases"):
     check("state " + k, k in s, list(s))
+ev = [t for t in s.get("dumpTools", []) if t.get("name") == "eval"]
+check("state dumpTools examples", ev and ev[0].get("examples", [{}])[0].get("call", {}).get("code") == '%load "scripts/my setup.py"'
+      and all("examples" not in t for t in s.get("dumpTools", []) if t.get("name") == "glob"), ev)
 x = r.call({"id": "ss", "type": "get_session_stats"})
 check("stats", x and set(x["data"].get("tokens", {})) == {"input", "output", "reasoning", "cacheRead", "cacheWrite", "total"}, x)
+# a user `bash` run is a bashExecution message in omp's agent state, not a user message (session-stats.ts)
+r.call({"id": "sb", "type": "bash", "command": "echo counted"}, 10)
+y = r.call({"id": "ss2", "type": "get_session_stats"})
+check("stats bash not user", x and y and y["data"]["userMessages"] == x["data"]["userMessages"]
+      and y["data"]["totalMessages"] == x["data"]["totalMessages"] + 1, (x and x["data"], y and y["data"]))
 x = r.call({"id": "sn", "type": "set_session_name", "name": " "})
 check("session name", x and x.get("error") == "Session name cannot be empty", x)
 

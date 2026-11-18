@@ -1665,7 +1665,7 @@ static json_t *session_stats_json(app_t *a) {
     json_arr_foreach(a->agent->messages, i, m) {
         const char *role = json_get_str(m, "role");
         const json_t *u = NULL;
-        if (str_eq(role, "user")) user++;
+        if (session_message_is_user(m)) user++;
         else if (str_eq(role, "toolResult")) {
             tres++;
             if (str_eq(json_get_str(m, "toolName"), "task")) u = json_get_obj(json_get(m, "details"), "usage");
@@ -1782,6 +1782,7 @@ static json_t *state_json(rpc_t *r) {
         json_set_str(x, "name", t->name);
         json_set_str(x, "description", t->description ? t->description : "");
         json_set(x, "parameters", t->parameters ? json_clone(t->parameters) : json_obj());
+        if (t->examples) json_set(x, "examples", json_clone(t->examples)); /* rpc-mode.ts dumpTools: tool.examples */
         json_push(tools, x);
     }
     pthread_mutex_unlock(&a->agent->mu);

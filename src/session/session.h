@@ -118,6 +118,9 @@ bool session_compaction_readable(const json_t *compaction, const char *provider,
 void session_build_context_for(const json_t *path, session_context_t *out);
 /* convertToLlm for a persisted message (custom roles: bash/python execution, hook messages); owned or NULL */
 json_t *session_message_to_llm(const json_t *msg);
+/* a message omp's agent state holds with role "user" (session-stats.ts userMessages): not a converted
+ * bashExecution / pythonExecution / custom / hookMessage / fileMention (`sourceRole`) or a session summary */
+bool session_message_is_user(const json_t *m);
 /* the provider replay payload of a compaction entry: {type:"openaiResponsesHistory", provider, items}
  * (*openai_history set) or {type:"anthropicCompaction", ...}; owned or NULL */
 json_t *session_compaction_payload(const json_t *compaction, bool *openai_history);

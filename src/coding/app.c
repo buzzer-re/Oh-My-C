@@ -3795,7 +3795,9 @@ void app_record_bash(app_t *a, const json_t *result) {
     if (a->session) session_append_message(a->session, m);
     if (!json_get_bool(m, "excludeFromContext", false)) {
         char *t = out_bash_execution_text(m);
-        agent_append_message(a->agent, msg_user_text(t));
+        json_t *um = msg_user_text(t);
+        json_set_str(um, "sourceRole", "bashExecution"); /* omp keeps the bashExecution message (session stats) */
+        agent_append_message(a->agent, um);
         free(t);
     }
     json_free(m);
@@ -3839,7 +3841,9 @@ void app_record_python(app_t *a, const json_t *result) {
     if (a->session) session_append_message(a->session, result);
     if (!json_get_bool(result, "excludeFromContext", false)) {
         char *t = out_python_execution_text(result);
-        agent_append_message(a->agent, msg_user_text(t));
+        json_t *um = msg_user_text(t);
+        json_set_str(um, "sourceRole", "pythonExecution");
+        agent_append_message(a->agent, um);
         free(t);
     }
 }
@@ -4000,7 +4004,7 @@ json_t *app_stats(app_t *a) {
     json_t *m;
     json_arr_foreach(a->agent->messages, i, m) {
         const char *role = json_get_str(m, "role");
-        if (str_eq(role, "user")) user++;
+        if (session_message_is_user(m)) user++;
         else if (str_eq(role, "toolResult")) tools++;
         else if (str_eq(role, "assistant")) {
             asst++;
