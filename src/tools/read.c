@@ -12,6 +12,7 @@
 #include "readfmt.h"
 #include "outsink.h"
 #include "artifacts.h"
+#include "coding/agents.h"
 #include "summary.h"
 #include "web.h"
 #include "ai/ai_images.h"
@@ -34,6 +35,15 @@ typedef struct {
     int64_t req_end; /* the end the selector asked for, kept through normalization (0 = open): names the range in notices */
 } lrange_t;
 
+/* omp LocatedRead: a file-backed internal URL (skill://, artifact://, memory://, agent://, attachment://, local://)
+ * located to its backing file and read through the filesystem pipeline under the URL's identity (SchemeSpec flags) */
+typedef struct {
+    char *url;           /* the URL as written, selector peeled: names the read in hints and details.meta.source */
+    bool immutable;      /* no hashline anchors, no conflict scan; a large file carries the backing-file notice */
+    bool unbounded;      /* skill://: the whole document through the in-memory builder, no summary or result limits */
+    bool artifact_store; /* artifact://: pages keep the full budget and never spill */
+} located_t;
+
 typedef struct {
     bool raw, img, conflicts;
     VEC(lrange_t) ranges;
@@ -46,6 +56,11 @@ typedef struct {
     /* internal-URL resource (pr://, issue://): omp's buildInMemoryTextResult - whole text when no selector bounds it
      * (within the 50 KB / 3000-line head budget), `[N more lines in resource. Use :X to continue]` after a page */
     bool resource;
+    /* SchemeSpec.unbounded / ignoreResultLimits: a resource read whole, past the head budget */
+    bool unlimited;
+    /* buildInMemoryTextResult's details (rowPrefixes, displayContent; no pagedSource): skill:// and rule:// reads */
+    bool builder_details;
+    const located_t *loc; /* NULL for plain paths */
 } selector_t;
 
 
@@ -323,9 +338,31 @@ static void emit_line(sb_t *out, int64_t no, const char *text, bool numbered) {
     sb_putc(out, '\n');
 }
 
+/* formatLocatedFileNotice: workflow hint for a large located file (page it through its URL, search/copy its backing
+ * file); `raw_blocked` explains a refused whole-file `:raw` read. Owned. */
+static char *located_notice(const char *url, const char *backing, int64_t size, bool raw_blocked) {
+    const char *home = home_dir();
+    size_t hl = home ? strlen(home) : 0;
+    char *shortp = hl > 1 && !strncmp(backing, home, hl) && (backing[hl] == '/' || !backing[hl]) ? xasprintf("~%s", backing + hl)
+                                                                                                 : xstrdup(backing);
+    char *sz = out_format_bytes(size);
+    char *wf = xasprintf("Use %s:raw:1-3000 for bounded verbatim chunks, %s:1-3000 for numbered exploration, and the backing file "
+                         "path for search/copy workflows",
+                         url, url);
+    char *r = raw_blocked ? xasprintf("Unbounded raw read blocked for %s (%s). Reading the whole file verbatim can exhaust memory. %s: %s",
+                                      url, sz, wf, shortp)
+                          : xasprintf("Backing file: %s (%s). %s.", shortp, sz, wf);
+    free(wf);
+    free(sz);
+    free(shortp);
+    return r;
+}
+
 /* omp read page budget: max(50 KB, lines*512) capped by the spill threshold minus the row-prefix reserve */
+static __thread bool g_budget_uncapped; /* artifact:// pages: artifact storage never spills, so no spill cap */
 static int64_t page_budget(int64_t first_line, int64_t line_count, bool numbered) {
     int64_t scaled = MAX((int64_t)READ_MAX_BYTES, line_count * 512);
+    if (g_budget_uncapped) return scaled;
     int64_t threshold = (int64_t)tool_spill_threshold();
     int64_t pw = 0;
     if (numbered) {
@@ -406,13 +443,13 @@ static void collect_window(const strvec_t *lines, int64_t start, int64_t max_lin
 }
 
 /* formatOmittedRequestedLineNotice */
-static void omitted_line_notice(sb_t *b, const line_window_t *w, int64_t budget) {
+static void omitted_line_notice(sb_t *b, const line_window_t *w, int64_t budget, const char *base) {
     char *lb = out_format_bytes(w->limit_bytes), *mb = out_format_bytes(budget);
     int64_t no = w->limit_index + 1;
     sb_appendf(b,
-               "\n[Line %lld is %s and could not fit after preceding context in the %s read budget. Use :raw:%lld-%lld to read that "
+               "\n[Line %lld is %s and could not fit after preceding context in the %s read budget. Use %s:raw:%lld-%lld to read that "
                "line without context (byte-capped if it exceeds the budget), or widen the requested range to increase the budget.]\n",
-               (long long)no, lb, mb, (long long)no, (long long)no);
+               (long long)no, lb, mb, base, (long long)no, (long long)no);
     free(lb);
     free(mb);
 }
@@ -432,6 +469,17 @@ static void page_meta(json_t *details, int64_t start_line, int64_t total, int64_
     json_t *m = meta ? json_clone(meta) : NULL;
     out_meta_from_trunc(&m, &r, "head", start_line, total, NULL, max_bytes, next_offset);
     json_set(details, "meta", m);
+    /* details.truncation: toReadTruncationStats of the page's TruncationResult */
+    json_t *t = json_obj();
+    json_set_bool(t, "truncated", true);
+    json_set_str(t, "truncatedBy", stopped ? "bytes" : "lines");
+    json_set_int(t, "totalLines", r.total_lines);
+    json_set_int(t, "totalBytes", sel_bytes);
+    json_set_int(t, "outputLines", shown);
+    json_set_int(t, "outputBytes", out_bytes);
+    json_set_bool(t, "lastLinePartial", false);
+    json_set_bool(t, "firstLineExceedsLimit", false);
+    json_set(details, "truncation", t);
 }
 
 /* read.ts firstLineExceedsLimit: no line fits the budget, not even cut. A hashline page refuses (it requires full lines),
@@ -480,7 +528,9 @@ static void raw_note(json_t *details, const char *note) {
  * (in details.notes for a raw read) */
 static void conflict_footer(tool_env_t *env, const char *abs, const selector_t *sel, const strvec_t *all, int64_t first,
                             int64_t last, sb_t *b, json_t *details) {
-    if (sel->immutable || sel->no_anchor || sel->resource || !abs || abs[0] != '/' || first < 1 || last < first) return;
+    if (sel->immutable || sel->no_anchor || sel->resource || (sel->loc && sel->loc->immutable) || !abs || abs[0] != '/' ||
+        first < 1 || last < first)
+        return;
     strvec_t win = {.v = all->v + first - 1, .n = (size_t)(last - first + 1)};
     int count = 0;
     char *w = conflict_on_read(env, abs, NULL, &win, first, &count);
@@ -495,12 +545,30 @@ static void conflict_footer(tool_env_t *env, const char *abs, const selector_t *
     free(w);
 }
 
+/* details.displayContent: the source lines a page shows, without row prefixes or notices */
+static void display_content(json_t *details, const strvec_t *lines, int64_t first, int64_t last, bool final_nl) {
+    if (first < 1 || last < first || last > (int64_t)lines->n) return;
+    sb_t dc = SB_INIT;
+    for (int64_t i = first; i <= last; i++) sb_appendf(&dc, "%s%s", i > first ? "\n" : "", lines->v[i - 1]);
+    if (final_nl) sb_putc(&dc, '\n');
+    json_t *o = json_obj(), *nums = json_arr();
+    int64_t n = dc.len ? (int64_t)str_count(sb_cstr(&dc), "\n") + 1 : 0;
+    for (int64_t i = 0; i < n; i++) json_push(nums, json_int(first + i));
+    json_set_str(o, "text", sb_cstr(&dc));
+    json_set_int(o, "startLine", first);
+    json_set(o, "lineNumbers", nums);
+    json_set(details, "displayContent", o);
+    sb_free(&dc);
+}
+
 static int read_text(tool_env_t *env, const char *abs, const char *display, const char *data, size_t len,
                      selector_t *sel, tool_result_t *out) {
     text_lines_t t;
     split_text(data, len, &t);
     int64_t total = (int64_t)t.lines.n;
-    bool hashline = !sel->raw && !sel->immutable && !sel->no_anchor && str_eq(env->edit_mode, "hashline");
+    /* resolveFileDisplayMode({immutable}): an immutable source (skill://, artifact://, ...) mints no hashline anchors */
+    bool hashline = !sel->raw && !sel->immutable && !sel->no_anchor && !(sel->loc && sel->loc->immutable) &&
+                    str_eq(env->edit_mode, "hashline");
     bool numbered = hashline || (!sel->raw && sel->no_anchor && str_eq(env->edit_mode, "hashline")) ||
                     (!sel->raw && settings_bool("readLineNumbers", false));
     const char *ent = sel->entity ? sel->entity : "file";
@@ -513,8 +581,14 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
     /* no line fits the budget: in-memory documents keep their capped single-line page */
     bool can_first_exceed = !sel->resource && !sel->immutable;
     json_set_str(details, "resolvedPath", abs);
+    /* selectorBase: in-body continuation hints of a located read name its URL, so paging stays on the URL; the
+     * in-memory builder (sel->resource) keeps bare `:N` hints */
+    const char *base = sel->loc && !sel->resource ? sel->loc->url : "";
+    const char *label = sel->loc ? sel->loc->url : display; /* resolvedDisplayPath */
+    g_budget_uncapped = sel->loc && sel->loc->artifact_store;
     int64_t seen_lo = -1, seen_hi = -1;
-    bool whole = false;
+    bool whole = false, eof_only = false;
+    int64_t dc_first = 0, dc_last = -1; /* in-memory builder: the source lines shown (details.displayContent) */
 
     summary_lang_t slang = summary_lang(abs);
     bool want_summary = !sel->ranges.n && !sel->raw && !sel->immutable && slang != SUM_NONE && total >= settings_int("read.summarize.minTotalLines", 100) && len <= (2u << 20) &&
@@ -588,7 +662,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
             else sb_appendf(&ex, "%lld-%lld", (long long)runs.v[k].lo, (long long)runs.v[k].hi);
         }
         sb_appendf(&b, "[…%lldln elided; re-read needed ranges%s %s:%s]", (long long)elines,
-                   runs.n > samples ? ", e.g." : " with", display, sb_cstr(&ex));
+                   runs.n > samples ? ", e.g." : " with", label, sb_cstr(&ex));
         sb_free(&ex);
         json_t *sum = json_obj();
         json_set_int(sum, "lines", total);
@@ -600,8 +674,8 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
     } else if (!sel->ranges.n) {
         /* an in-memory resource has no default line limit: truncateHead's 50 KB / 3000-line budget pages it */
         int64_t limit = sel->resource ? MAX(total, 1) : DEFAULT_LIMIT;
-        int64_t max_lines = MIN(limit, OUT_DEFAULT_MAX_LINES);
-        int64_t budget = sel->resource ? (int64_t)READ_MAX_BYTES : page_budget(0, max_lines, numbered);
+        int64_t max_lines = sel->unlimited ? limit : MIN(limit, OUT_DEFAULT_MAX_LINES);
+        int64_t budget = sel->unlimited ? INT64_MAX / 4 : sel->resource ? (int64_t)READ_MAX_BYTES : page_budget(0, max_lines, numbered);
         line_window_t w;
         collect_window(&t.lines, 0, max_lines, budget, limit, display_columns, &w);
         bool first_exceeds = w.n == 0 && w.stopped && can_first_exceed;
@@ -620,7 +694,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
             const char *tag = edit_store_record(&env->store, abs, data, last >= total ? 0 : 1, last);
             format_hashline_header(&b, display, tag);
         }
-        if (sel->resource && sel->raw && last >= total && !t.trailing_nl && body.len && body.s[body.len - 1] == '\n')
+        if (sel->raw && last >= total && !t.trailing_nl && body.len && body.s[body.len - 1] == '\n')
             sb_truncate(&body, body.len - 1); /* verbatim: no newline the text does not have */
         sb_append(&b, sb_cstr(&body));
         sb_free(&body);
@@ -634,6 +708,8 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         whole = last >= total;
         seen_lo = 1;
         seen_hi = last;
+        dc_first = 1;
+        dc_last = last;
     } else {
         /* normalize ranges */
         VEC(lrange_t) rs = {0};
@@ -649,11 +725,12 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
             }
             if (r.start > total) {
                 if (sel->ranges.n == 1) {
+                    eof_only = true;
                     if (total == 0)
                         sb_appendf(&notes, "Line %lld is beyond end of %s (0 lines total). The %s is empty.", (long long)r.start, ent, ent);
                     else
-                        sb_appendf(&notes, "Line %lld is beyond end of %s (%lld lines total). Use :1 to read from the start, or :%lld to read the last line.",
-                                   (long long)r.start, ent, (long long)total, (long long)total);
+                        sb_appendf(&notes, "Line %lld is beyond end of %s (%lld lines total). Use %s:1 to read from the start, or %s:%lld to read the last line.",
+                                   (long long)r.start, ent, (long long)total, base, base, (long long)total);
                 } else {
                     if (r.req_end) sb_appendf(&beyond, "[Range %lld-%lld is beyond end of %s (%lld lines total); skipped]\n", (long long)r.start, (long long)r.req_end, ent, (long long)total);
                     else sb_appendf(&beyond, "[Range %lld is beyond end of %s (%lld lines total); skipped]\n", (long long)r.start, ent, (long long)total);
@@ -704,9 +781,9 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
             int64_t req = q->start - 1, lead = !sel->raw && q->start > 1 ? CTX_BEFORE : 0, trail = !sel->raw && q->end ? CTX_AFTER : 0;
             int64_t eff = q->end ? q->end - q->start + 1 : DEFAULT_LIMIT;
             int64_t st = req - lead;
-            int64_t max_lines = MIN(eff + lead + trail, OUT_DEFAULT_MAX_LINES);
+            int64_t max_lines = sel->unlimited ? eff + lead + trail : MIN(eff + lead + trail, OUT_DEFAULT_MAX_LINES);
             int64_t page_cols = sel->raw ? 0 : display_columns;
-            pg_budget = page_budget(st, max_lines, numbered);
+            pg_budget = sel->unlimited ? INT64_MAX / 4 : page_budget(st, max_lines, numbered);
             collect_window(&t.lines, st, max_lines, pg_budget, eff + lead + trail, page_cols, &pw);
             /* Leading context is optional padding: a context line must not hide the page that was asked for. When the
              * context itself fit (a cut wide line can), keep it unless the retry shows the requested line: a requested
@@ -749,7 +826,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
                     char *mb = out_format_bytes(budget);
                     char *bound = r->req_end ? xasprintf("%lld-%lld", (long long)r->start, (long long)r->req_end) : xasprintf("%lld", (long long)r->start);
                     char *rest = r->req_end ? xasprintf("%lld-%lld", (long long)next, (long long)r->req_end) : xasprintf("%lld", (long long)next);
-                    sb_appendf(&notes, "[Range %s stopped before line %lld at the %s read budget. Use :%s to continue]\n", bound, (long long)next, mb, rest);
+                    sb_appendf(&notes, "[Range %s stopped before line %lld at the %s read budget. Use %s:%s to continue]\n", bound, (long long)next, mb, base, rest);
                     free(mb);
                     free(bound);
                     free(rest);
@@ -790,7 +867,11 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         }
         sb_append(&b, sb_cstr(&body));
         sb_free(&body);
-        if (omitted) omitted_line_notice(&b, &pw, pg_budget);
+        if (rs.n == 1 && last_shown >= rs.v[0].start) {
+            dc_first = rs.v[0].start;
+            dc_last = last_shown;
+        }
+        if (omitted) omitted_line_notice(&b, &pw, pg_budget, base);
         if (rs.n == 1) conflict_footer(env, abs, sel, &t.lines, rs.v[0].start, last_shown, &b, details);
         /* a byte stop truncates the page only when it left a line out: a sole last line whose cut display overflows the
          * budget is still shown whole in its cut form */
@@ -803,7 +884,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
                 page_meta(details, rs.v[0].start, total, last_shown - rs.v[0].start + 1, pw.selected, pw.collected, pw.stopped, pg_budget,
                           omitted ? -1 : 0);
         } else if (cut || (rs.n == 1 && sel->ranges.v[0].end == 0 && last_shown < total && !sel->raw))
-            sb_appendf(&b, "\n[%lld more lines in %s. Use :%lld to continue]", (long long)(total - last_shown), ent,
+            sb_appendf(&b, "\n[%lld more lines in %s. Use %s:%lld to continue]", (long long)(total - last_shown), ent, base,
                        (long long)(last_shown + 1));
         if (notes.len) {
             if (sel->raw) { /* appendReadNotice: a raw read keeps its notices out of the verbatim text */
@@ -824,16 +905,25 @@ rendered:
     if (g_col_first) {
         json_t *meta = json_get_obj(details, "meta");
         json_t *m = meta ? json_clone(meta) : NULL;
-        out_meta_column_truncated(&m, g_col_max, "chars", NULL, 0, g_col_first, g_col_last, "");
+        out_meta_column_truncated(&m, g_col_max, "chars", NULL, 0, g_col_first, g_col_last, base);
         /* a `:raw:N-N` read gets the budget of a one-line raw page; a cut line past it comes back byte-capped */
-        int64_t raw_line_budget = MIN((int64_t)READ_MAX_BYTES, (int64_t)tool_spill_threshold());
+        int64_t raw_line_budget = sel->loc && sel->loc->artifact_store ? (int64_t)READ_MAX_BYTES
+                                                                       : MIN((int64_t)READ_MAX_BYTES, (int64_t)tool_spill_threshold());
         if (g_col_first_bytes > raw_line_budget) out_meta_column_raw_cap(m, raw_line_budget);
         json_set(details, "meta", m);
     }
     g_col_max = 0;
+    g_budget_uncapped = false;
     if (!sel->raw && b.len && b.s[b.len - 1] == '\n') sb_truncate(&b, b.len - 1); /* rows are joined, not terminated */
-    /* a bounded page re-readable with `:N` selectors is not spilled (omp pagedSource) */
-    if (b.len <= tool_spill_threshold() + OUT_INLINE_CAP_SLACK_BYTES) {
+    /* immutable sources have no write path, so the hint never lands in a written-back file */
+    if (sel->loc && sel->loc->immutable && !sel->resource && !sel->raw && !eof_only && len > READ_MAX_BYTES) {
+        char *notice = located_notice(sel->loc->url, abs, (int64_t)len, false);
+        sb_appendf(&b, "\n\n[%s]", notice);
+        free(notice);
+    }
+    /* a bounded page re-readable with `:N` selectors is not spilled (omp pagedSource); a page of artifact storage
+     * is re-readable with selectors, so it never spills */
+    if (b.len <= tool_spill_threshold() + OUT_INLINE_CAP_SLACK_BYTES || (sel->loc && sel->loc->artifact_store)) {
         json_t *meta = json_get_obj(details, "meta");
         if (!meta) {
             meta = json_obj();
@@ -841,8 +931,33 @@ rendered:
         }
         json_set_bool(meta, "pagedSource", true);
     }
+    if (sel->builder_details) {
+        json_t *meta = json_get_obj(details, "meta");
+        meta = meta ? json_clone(meta) : NULL;
+        json_del(details, "meta");
+        if (meta) json_del(meta, "pagedSource"); /* the in-memory builders never mark a paged source */
+        if (sel->raw) json_set_bool(details, "raw", true);
+        json_set_int(details, "totalLines", total);
+        if (!eof_only) { /* the beyond-EOF notice returns before these */
+            json_set_bool(details, "rowPrefixes", numbered);
+            display_content(details, &t.lines, dc_first, dc_last, sel->raw && b.len && b.s[b.len - 1] == '\n');
+        }
+        if (meta && json_len(meta)) json_set(details, "meta", meta);
+        else json_free(meta);
+    } else if (sel->loc && eof_only) {
+        /* the file pipeline's beyond-EOF notice: {resolvedPath, raw} only */
+        json_del(details, "meta");
+        if (sel->raw) json_set_bool(details, "raw", true);
+    } else {
+        json_set_int(details, "totalLines", total);
+        if (sel->loc) { /* the file pipeline's page details (read_located orders them) */
+            json_set_bool(details, "rowPrefixes", hashline || numbered);
+            display_content(details, &t.lines, dc_first, dc_last, sel->raw && b.len && b.s[b.len - 1] == '\n');
+            json_set_int(details, "fileSize", (int64_t)len);
+            if (sel->raw) json_set_bool(details, "raw", true);
+        }
+    }
     tool_result_text(out, sb_cstr(&b));
-    json_set_int(details, "totalLines", total);
     out->details = details;
     sb_free(&b);
     strvec_free(&t.lines);
@@ -1191,6 +1306,36 @@ static void read_virtual(tool_env_t *env, const char *url, const char *text, sel
     read_text(&tmp, url, url, text, strlen(text), sel, out);
 }
 
+/* move `key` of an object to its end (omp spreads details/meta in a fixed order) */
+static void json_move_last(json_t *o, const char *key) {
+    json_t *v = json_get(o, key);
+    if (!v) return;
+    v = json_clone(v);
+    json_del(o, key);
+    json_set(o, key, v);
+}
+
+/* #handleInternalUrl's details for a virtual resource read through the in-memory builder: {resolvedPath (the
+ * resource's sourcePath, omitted when it has none), contentType, ...builder details, meta.source = the URL} */
+static void virtual_details(tool_result_t *out, const char *url, const char *source_path, const char *content_type) {
+    if (!out->details || out->is_error) return;
+    json_t *d = out->details;
+    if (source_path) json_set_str(d, "resolvedPath", source_path);
+    else json_del(d, "resolvedPath");
+    json_set_str(d, "contentType", content_type);
+    json_t *meta = json_get_obj(d, "meta");
+    if (!meta) {
+        meta = json_obj();
+        json_set(d, "meta", meta);
+    }
+    json_t *src = json_obj();
+    json_set_str(src, "type", "internal");
+    json_set_str(src, "value", url);
+    json_set(meta, "source", src);
+    static const char *const order[] = {"raw", "totalLines", "rowPrefixes", "displayContent", "truncation", "meta"};
+    for (size_t i = 0; i < ARRAY_LEN(order); i++) json_move_last(d, order[i]);
+}
+
 /* xd:// docs: a `lines` scheme (omp c51e68b454), so `xd://eval/judge:1-20` pages the doc instead of naming a topic
  * `judge:1-20` */
 static int read_xd(agent_t *agent, tool_env_t *env, const char *path, tool_result_t *out) {
@@ -1318,6 +1463,10 @@ static int read_omc_docs(tool_env_t *env, const char *path, tool_result_t *out) 
     selector_t sel;
     memset(&sel, 0, sizeof sel);
     strip_sel(work, &sel);
+    /* OmpProtocolHandler: a virtual Markdown resource paged by the in-memory builder */
+    sel.entity = "resource";
+    sel.resource = sel.builder_details = true;
+    char *url = xasprintf("omc://%s", work);
     char *name = work;
     while (*name == '/') name++;
     if (str_starts(name, "docs/")) name += 5;
@@ -1339,6 +1488,7 @@ static int read_omc_docs(tool_env_t *env, const char *path, tool_result_t *out) 
             if (omc_doc_name(omc_embedded[i].name, &doc)) sb_appendf(&b, "- [%s](omc://%s)\n", doc, doc);
         char *listing = sb_detach(&b);
         read_virtual(env, path, listing, &sel, out);
+        virtual_details(out, url, NULL, "text/markdown");
         free(listing);
         goto done;
     }
@@ -1351,6 +1501,7 @@ static int read_omc_docs(tool_env_t *env, const char *path, tool_result_t *out) 
         size_t len;
         const char *data = embed_get(found, &len);
         read_virtual(env, path, data ? data : "", &sel, out);
+        virtual_details(out, url, NULL, "text/markdown");
     } else {
         sb_t sug = SB_INIT;
         int n = 0;
@@ -1369,6 +1520,7 @@ static int read_omc_docs(tool_env_t *env, const char *path, tool_result_t *out) 
     }
     free(want);
 done:
+    free(url);
     free(work);
     vec_free(&sel.ranges);
     return 0;
@@ -1454,6 +1606,135 @@ static bool read_image(tool_ctx_t *ctx, const char *abs, const char *display, in
     return true;
 }
 
+static int read_path(tool_env_t *env, tool_ctx_t *ctx, const char *path, const located_t *loc, tool_result_t *out);
+
+/* isMarkdownPath (lang-from-path.ts: md, markdown, mdx, mdc, mkd, mdown) */
+static bool is_markdown_path(const char *p) {
+    static const char *const ext[] = {".md", ".markdown", ".mdx", ".mdc", ".mkd", ".mdown"};
+    const char *e = path_ext(p);
+    for (size_t i = 0; i < ARRAY_LEN(ext); i++)
+        if (!strcasecmp(e, ext[i])) return true;
+    return false;
+}
+
+static bool sel_has_raw(const char *sel) {
+    strvec_t chunks = str_split(sel, ":");
+    bool raw = false;
+    for (size_t i = 0; i < chunks.n; i++)
+        if (!strcmp(chunks.v[i], "raw")) raw = true;
+    strvec_free(&chunks);
+    return raw;
+}
+
+/* omp read.ts: a routed URL located to its backing file (`backing`, the selector kept) reads through the filesystem
+ * pipeline under the URL's identity: the scheme's spec decides hashlines (immutable), whole-document reads
+ * (unbounded) and the page budget (artifactStore); the result names the URL in details.meta.source, Markdown
+ * backing files render as Markdown, and a skill file read carries its provenance line */
+static void read_located(tool_env_t *env, tool_ctx_t *ctx, const char *path, const char *backing, tool_result_t *out) {
+    const char *rest = strstr(path, "://") + 3;
+    located_t loc = {0};
+    loc.url = xstrndup(path, (size_t)(rest - path) + strcspn(rest, ":"));
+    const char *selpart = path + strlen(loc.url);
+    bool skill = str_starts(path, "skill://");
+    loc.immutable = !str_starts(path, "local://");
+    loc.unbounded = skill;
+    loc.artifact_store = str_starts(path, "artifact://");
+    read_path(env, ctx, backing, &loc, out);
+    if (!out->is_error) {
+        if (!out->details) out->details = json_obj();
+        json_t *d = out->details;
+        size_t bl = strlen(backing), sl = strlen(selpart);
+        char *bare = sl <= bl && !strcmp(backing + bl - sl, selpart) ? xstrndup(backing, bl - sl) : xstrdup(backing);
+        char *file = tool_resolve_path(env, bare);
+        if (!json_get_str(d, "resolvedPath")) json_set_str(d, "resolvedPath", file);
+        /* protocol reads render Markdown regardless of `read.renderMarkdown`, as their resources always did */
+        bool md = !json_get_str(d, "contentType") && is_markdown_path(file);
+        /* `{...details.meta, source}` after contentType: the in-memory builder already put meta (its sourcePath) ahead */
+        json_t *meta = json_get_obj(d, "meta");
+        if (!meta && loc.unbounded) {
+            meta = json_obj();
+            json_set(d, "meta", meta);
+        }
+        if (md) json_set_str(d, "contentType", "text/markdown");
+        if (!meta) {
+            meta = json_obj();
+            json_set(d, "meta", meta);
+        }
+        /* the result builder records the source first, then pagedSource, then the truncation / limit metas */
+        json_t *nm = json_obj(), *src = json_obj(), *v;
+        json_set_str(src, "type", "internal");
+        json_set_str(src, "value", loc.url);
+        json_set(nm, "source", src);
+        if ((v = json_get(meta, "pagedSource"))) json_set(nm, "pagedSource", json_clone(v));
+        const char *k;
+        json_obj_foreach(meta, mi, k, v) if (!str_eq(k, "pagedSource") && !str_eq(k, "source")) json_set(nm, k, json_clone(v));
+        json_set(d, "meta", nm); /* replaces in place */
+        if (!loc.unbounded) {
+            /* the file pipeline's order: page details, meta, then the located wrapper's resolvedPath / contentType */
+            static const char *const order[] = {"truncation", "totalLines", "rowPrefixes", "displayContent", "fileSize", "raw", "meta",
+                                                "resolvedPath", "contentType"};
+            for (size_t i = 0; json_get(d, "totalLines") && i < ARRAY_LEN(order); i++) json_move_last(d, order[i]);
+            /* linkable schemes with a synchronous locate (memory://, local://) name the backing file for the UI */
+            if (str_starts(path, "memory://") || str_starts(path, "local://")) json_set_str(d, "displayTarget", file);
+        }
+        /* nested skill reads need their own provenance: the outer invocation may belong to another plugin */
+        if (skill && !sel_has_raw(selpart)) {
+            json_t *first = NULL, *b;
+            json_arr_foreach(out->content, i, b) {
+                if (!first && str_eq(json_get_str(b, "type"), "text")) first = b;
+            }
+            char *prov = xasprintf("[Skill file: %s]", file);
+            if (first) {
+                char *t = xasprintf("%s\n%s", prov, json_get_str(first, "text"));
+                json_set_str(first, "text", t);
+                free(t);
+            } else {
+                json_t *blk = json_obj();
+                json_set_str(blk, "type", "text");
+                json_set_str(blk, "text", prov);
+                json_t *c = json_arr();
+                json_push(c, blk);
+                json_arr_foreach(out->content, i, b) json_push(c, json_clone(b));
+                json_free(out->content);
+                out->content = c;
+            }
+            free(prov);
+        }
+        free(file);
+        free(bare);
+    }
+    free(loc.url);
+}
+
+/* rule://<name>: a virtual resource (RuleProtocolHandler.resolve): the rule body with its frontmatter stripped, paged
+ * by the in-memory builder */
+static int read_rule(tool_env_t *env, const char *path, tool_result_t *out) {
+    char *work = xstrdup(path);
+    selector_t sel;
+    memset(&sel, 0, sizeof sel);
+    strip_sel(work + 7, &sel);
+    sel.entity = "resource";
+    sel.resource = sel.builder_details = true;
+    char *name = xstrndup(work + 7, strcspn(work + 7, "/?#"));
+    const rule_t *r = *name ? discovery_find_rule(env->disc, name) : NULL;
+    if (!*name) {
+        tool_result_error(out, "rule:// URL requires a rule name: rule://<name>");
+    } else if (!r) {
+        sb_t avail = SB_INIT;
+        for (size_t i = 0; env->disc && i < env->disc->rules.n; i++)
+            sb_appendf(&avail, "%s%s", avail.len ? ", " : "", env->disc->rules.v[i].name);
+        tool_result_error(out, "Unknown rule: %s\nAvailable: %s", name, avail.len ? avail.s : "none");
+        sb_free(&avail);
+    } else {
+        read_virtual(env, work, r->content ? r->content : "", &sel, out);
+        virtual_details(out, work, r->path, "text/markdown");
+    }
+    free(name);
+    free(work);
+    vec_free(&sel.ranges);
+    return 0;
+}
+
 static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     const char *path = json_get_str(args, "path");
@@ -1472,11 +1753,25 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
     if (str_starts(path, "pr://") || str_starts(path, "issue://")) return read_github(env, path, out);
     if (str_starts(path, "mr://")) return read_mr(env, path, out);
     if (str_starts(path, "ssh://")) return read_ssh(env, path, out);
+    if (str_starts(path, "agent://")) { /* AgentProtocolHandler.locate: a published, current output reads as its file */
+        size_t ul = 8 + strcspn(path + 8, ":");
+        char *id = xstrndup(path + 8, ul - 8);
+        char *file = agents_locate_output(id);
+        free(id);
+        if (file) {
+            char *backing = xasprintf("%s%s", file, path + ul);
+            read_located(env, ctx, path, backing, out);
+            free(backing);
+            free(file);
+            return 0;
+        }
+    }
     if (vurl_is(path)) return vurl_read(env, path, out);
     if (!strncasecmp(path, "cfg:/", 5)) return read_cfg(env, path, out);
     if (iurl_read(env, path, out)) return 0;
     if (str_starts(path, "omc://")) return read_omc_docs(env, path, out);
     if (str_starts(path, "mcp://")) return read_mcp(env, path, out);
+    if (str_starts(path, "rule://")) return read_rule(env, path, out);
     char *uerr = NULL;
     char *internal = tool_resolve_internal_url(env, path, &uerr);
     if (uerr) {
@@ -1484,18 +1779,24 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
         free(uerr);
         return 0;
     }
-    if (internal) {
-        json_t *a2 = json_obj();
-        json_set_str(a2, "path", internal);
+    if (internal || str_starts(path, "local://")) {
+        read_located(env, ctx, path, internal ? internal : path, out);
         free(internal);
-        int rc = read_execute_inner(self, ctx, a2, out);
-        json_free(a2);
-        return rc;
+        return 0;
     }
+    return read_path(env, ctx, path, NULL, out);
+}
+
+/* the filesystem read pipeline: directories, archives, sqlite, PDFs, images, notebooks and text. `loc` carries the
+ * URL a routed read resolved to `path`; its hints name that URL. */
+static int read_path(tool_env_t *env, tool_ctx_t *ctx, const char *path, const located_t *loc, tool_result_t *out) {
     if (read_structured(env, path, out) || read_pdf_pages(env, path, out)) return 0;
     selector_t sel;
     char *abs = split_path_sel(env, path, &sel);
-    char *display = path_display(abs, env->cwd);
+    sel.loc = loc;
+    /* hdr: the hashline header names the backing file; display (resolvedDisplayPath) names a located read by its URL */
+    char *hdr = path_display(abs, env->cwd);
+    char *display = loc ? xstrdup(loc->url) : xstrdup(hdr);
     struct stat st;
     if (stat(abs, &st) != 0) {
         /* localReadPath: the path with its selector peeled */
@@ -1517,7 +1818,7 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
             tool_env_t tmp = *env;
             char *mode = tmp.edit_mode;
             tmp.edit_mode = "raw";
-            read_text(&tmp, abs, display, listing, strlen(listing), &s2, out);
+            read_text(&tmp, abs, hdr, listing, strlen(listing), &s2, out);
             tmp.edit_mode = mode;
         } else {
             tool_result_text(out, listing);
@@ -1531,6 +1832,16 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
         const char *kind = S_ISCHR(st.st_mode) ? "character device" : S_ISBLK(st.st_mode) ? "block device"
                            : S_ISFIFO(st.st_mode) ? "FIFO" : S_ISSOCK(st.st_mode) ? "socket" : "special file";
         tool_result_error(out, "Cannot read '%s': it is a %s, not a regular file or directory.", path, kind);
+        goto done;
+    }
+    /* located files are often large session storage (spilled tool output): a bare `:raw` read inlines one only below
+     * the budget; bigger ones page with ranges */
+    if (loc && !loc->unbounded && sel.raw && !sel.ranges.n && !sel.img && !sel.conflicts && st.st_size > READ_MAX_BYTES) {
+        char *notice = located_notice(loc->url, abs, (int64_t)st.st_size, true);
+        tool_result_text(out, notice);
+        free(notice);
+        out->details = json_obj();
+        json_set_str(out->details, "resolvedPath", abs);
         goto done;
     }
     if (!sel.raw && read_image(ctx, abs, display, (int64_t)st.st_size, out)) goto done;
@@ -1568,11 +1879,11 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
     }
     /* ACP bridge first: the editor's in-memory buffer is the source of truth (routeReadThroughBridge);
      * a failed client read falls back to disk */
-    if (!sel.conflicts && env->bridge && env->bridge->read_text) {
+    if (!loc && !sel.conflicts && env->bridge && env->bridge->read_text) { /* located URLs read their backing file */
         char *berr = NULL;
         char *btext = env->bridge->read_text(env->bridge, abs, &berr);
         if (btext) {
-            read_text(env, abs, display, btext, strlen(btext), &sel, out);
+            read_text(env, abs, hdr, btext, strlen(btext), &sel, out);
             json_t *meta = json_get_obj(out->details, "meta");
             if (meta) {
                 json_del(meta, "pagedSource");
@@ -1593,13 +1904,21 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
         out->details = json_obj();
         json_set_str(out->details, "resolvedPath", abs);
         json_set_int(out->details, "conflictCount", count);
+    } else if (loc && loc->unbounded) {
+        /* unbounded schemes (instruction documents) read whole through the in-memory builder: no summary, no result
+         * limits, the BOM stripped */
+        size_t bom = len >= 3 && !memcmp(data, "\xEF\xBB\xBF", 3) ? 3 : 0;
+        sel.resource = sel.immutable = sel.unlimited = sel.builder_details = true;
+        sel.entity = "file";
+        read_text(env, abs, hdr, data + bom, len - bom, &sel, out);
     } else {
-        read_text(env, abs, display, data, len, &sel, out);
+        read_text(env, abs, hdr, data, len, &sel, out);
     }
     free(data);
 done:
     vec_free(&sel.ranges);
     free(abs);
+    free(hdr);
     free(display);
     return 0;
 }

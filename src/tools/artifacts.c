@@ -173,6 +173,47 @@ char *artifacts_find(artifact_store_t *s, const char *id) {
     return p;
 }
 
+static int cmp_num(const void *a, const void *b) {
+    long long x = *(const long long *)a, y = *(const long long *)b;
+    return x < y ? -1 : x > y;
+}
+
+char *artifacts_missing_error(artifact_store_t *s, const char *id) {
+    pthread_mutex_lock(&s->mu);
+    char *md = s->mem_dir ? xstrdup(s->mem_dir) : NULL;
+    pthread_mutex_unlock(&s->mu);
+    const char *dirs[] = {s->dir, md};
+    bool any = false;
+    VEC(long long) ids = {0};
+    for (size_t k = 0; k < ARRAY_LEN(dirs); k++) {
+        dirlist_t dl = {0};
+        if (!dirs[k] || fs_list_dir(dirs[k], &dl) != 0) continue;
+        any = true;
+        for (size_t i = 0; i < dl.n; i++) {
+            const char *n = dl.v[i].name;
+            size_t dn = strspn(n, "0123456789");
+            if (!dn || n[dn] != '.') continue;
+            long long v = strtoll(n, NULL, 10);
+            bool dup = false;
+            for (size_t j = 0; j < ids.n; j++) dup |= ids.v[j] == v;
+            if (!dup) vec_push(&ids, v);
+        }
+        dirlist_free(&dl);
+    }
+    free(md);
+    if (!any) {
+        vec_free(&ids);
+        return xstrdup("No artifacts directory found");
+    }
+    qsort(ids.v, ids.n, sizeof ids.v[0], cmp_num);
+    sb_t b = SB_INIT;
+    for (size_t j = 0; j < ids.n; j++) sb_appendf(&b, "%s%lld", j ? ", " : "", ids.v[j]);
+    char *r = xasprintf("Artifact %s not found. Available: %s", id, b.len ? b.s : "none");
+    sb_free(&b);
+    vec_free(&ids);
+    return r;
+}
+
 void artifacts_copy_dir(const char *src_dir, const char *dst_dir) {
     if (!src_dir || !dst_dir || !fs_is_dir(src_dir)) return;
     dirlist_t dl = {0};
