@@ -523,16 +523,18 @@ int aws_es_feed(aws_es_decoder_t *d, const void *data, size_t len) {
     if (len) sb_appendn(&d->buf, data, len);
     size_t off = 0;
     int rc = 0;
-    while (d->buf.len - off >= 4) {
+    /* declaredMessageLength: the 12-byte prelude is validated (prelude CRC first, then the lengths) before any more of
+     * the message is buffered, so a corrupt length prefix never drives buffering */
+    while (d->buf.len - off >= ES_HDR_OFF) {
         const unsigned char *p = (const unsigned char *)d->buf.s + off;
-        uint32_t total = be32(p);
-        if (total < ES_MIN) {
-            d->error = xasprintf("total length %u below minimum", total);
-            rc = -1;
-            break;
-        }
-        if (total > AWS_ES_MAX_MESSAGE) {
-            d->error = xasprintf("total length %u exceeds maximum", total);
+        uint32_t total = be32(p), hlen = be32(p + 4);
+        if (aws_crc32(p, ES_PRELUDE) != be32(p + 8)) d->error = xstrdup("prelude CRC mismatch");
+        else if (total < ES_MIN) d->error = xasprintf("total length %u below minimum", total);
+        else if (total > AWS_ES_MAX_MESSAGE) d->error = xasprintf("total length %u exceeds maximum %u", total, AWS_ES_MAX_MESSAGE);
+        else if (hlen > AWS_ES_MAX_HEADERS)
+            d->error = xasprintf("headers length %u exceeds maximum %u", hlen, AWS_ES_MAX_HEADERS);
+        else if (hlen > total - ES_MIN) d->error = xasprintf("headers length %u exceeds message length %u", hlen, total);
+        if (d->error) {
             rc = -1;
             break;
         }

@@ -36,6 +36,22 @@ int64_t google_thinking_headroom(const ai_model_t *m, const ai_stream_opts_t *o,
 int64_t google_max_output(int64_t base, const ai_model_t *m, int64_t headroom); /* googleMaxOutputTokens; -1 unset */
 int64_t google_effort_budget(const ai_model_t *m, const ai_stream_opts_t *o, ai_effort_t e); /* custom ?? catalog ?? default */
 
+/* ---------- segmented generations (followGoogleContinuations) ---------- */
+/* Gemini 4 Hydrogen ends each 65,536-token output segment with finishReason CONTINUATION + a continuationToken;
+ * resending the request with the token streams the next segment. */
+typedef struct {
+    char *token;    /* owned: the token of the segment that just ended, until taken */
+    json_t *earlier; /* owned: summed usageMetadata of the finished segments (NULL until a segment continued) */
+    json_t *seg;     /* owned: the current segment's latest usageMetadata */
+} google_cont_t;
+#define GOOGLE_CONTINUATION_MAX_ATTEMPTS 4 /* attempts per resume request */
+/* a chunk's candidate and usageMetadata, before the parser reads them: drops a token-carrying CONTINUATION finish
+ * (the next segment follows) and replaces the usage with the sum across segments from the second one on */
+void google_cont_observe(google_cont_t *c, json_t *candidate, json_t *usage_holder);
+/* the segment ended: its token (owned) when it continues, else NULL; folds its usage into the earlier sum */
+char *google_cont_take(google_cont_t *c);
+void google_cont_free(google_cont_t *c);
+
 /* ---------- SSE state machine ---------- */
 typedef struct {
     ai_builder_t b;
@@ -43,6 +59,7 @@ typedef struct {
     bool saw_finish;
     const char *stop_reason; /* static */
     char *error;             /* owned */
+    google_cont_t cont;
 } google_sse_t;
 
 void google_sse_init(google_sse_t *s, const ai_model_t *m, ai_event_cb cb, void *ud);
@@ -96,6 +113,7 @@ typedef struct {
     char *tbuf_sig;
     bool stripped_leak;
     void *heal; /* think_heal_t */
+    google_cont_t cont;
 } cca_sse_t;
 
 void cca_sse_init(cca_sse_t *s, const ai_model_t *m, const json_t *tools, ai_event_cb cb, void *ud);

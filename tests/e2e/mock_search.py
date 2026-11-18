@@ -136,6 +136,11 @@ class H(BaseHTTPRequestHandler):
                  "related_questions": ["What next?"]},
                 {"id": "pplx_1", "choices": [{"delta": {}, "finish_reason": "stop"}],
                  "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11}}])
+        if path.startswith("/sofya/"):
+            return self.send(200, json.dumps({"results": [
+                {"title": "Sofya  Source", "url": "https://example.com/sofya", "description": "sofya\n snippet", "published_date": "2026-01-05"},
+                {"title": "dup", "url": "https://example.com/sofya"}, {"title": "Body only", "url": "https://example.com/s2", "content": "page body"}],
+                "altered_query": None, "relaxed_query": "sofya relaxed"}))
         if path.startswith("/keenable/"):
             return self.send(200, json.dumps({"results": [
                 {"title": "Keenable  Source", "url": "HTTPS://Example.COM", "snippet": "keenable\n snippet", "published_at": "2026-01-02T00:00:00Z"},

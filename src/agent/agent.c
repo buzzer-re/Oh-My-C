@@ -433,6 +433,30 @@ json_t *msg_tool_result(const char *id, const char *name, const tool_result_t *r
     return m;
 }
 
+/* wait.ts isOnlyCallOfTurn: `tool_call_id` is the only tool call of the latest assistant message in context (a call
+ * that is not there, e.g. one from an eval cell, counts as not alone) */
+bool agent_tool_call_alone(agent_t *a, const char *tool_call_id) {
+    if (!a || !tool_call_id) return false;
+    bool r = false;
+    pthread_mutex_lock(&a->mu);
+    for (size_t i = json_len(a->messages); i-- > 0;) {
+        const json_t *m = json_at(a->messages, i);
+        if (!str_eq(json_get_str(m, "role"), "assistant")) continue;
+        size_t calls = 0;
+        bool found = false;
+        json_t *b;
+        json_arr_foreach(json_get(m, "content"), k, b) {
+            if (!str_eq(json_get_str(b, "type"), "toolCall")) continue;
+            calls++;
+            found |= str_eq(json_get_str(b, "id"), tool_call_id);
+        }
+        r = found && calls == 1;
+        break;
+    }
+    pthread_mutex_unlock(&a->mu);
+    return r;
+}
+
 const json_t *last_assistant(const json_t *messages) {
     for (size_t i = json_len(messages); i > 0; i--) {
         json_t *m = json_at(messages, i - 1);

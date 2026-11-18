@@ -779,7 +779,22 @@ strvec_t internal_url_docs(const sysprompt_url_host_t *h) {
     if (glab) push_url_doc(&out, "mr", NULL, NULL);
     free(glab);
     push_url_doc(&out, "mcp", NULL, NULL);
-    push_url_doc(&out, "omp", "`omp://`", "`omc://`");
+    push_url_doc(&out, "omp", "omp://", "omc://");
+    return out;
+}
+
+/* InternalUrlRouter.reference(): the protocol handlers' promptReference entries in registration order (proc, ssh
+ * when the ssh CLI is installed, issue/pr when gh is); the body of xd://read/urls, inlined into the system prompt
+ * when `read` is off */
+strvec_t internal_url_reference(void) {
+    strvec_t out = {0};
+    push_url_doc(&out, "proc-reference", NULL, NULL);
+    char *ssh = which("ssh");
+    if (ssh) push_url_doc(&out, "ssh-reference", NULL, NULL);
+    free(ssh);
+    char *gh = which("gh");
+    if (gh) push_url_doc(&out, "issue-reference", NULL, NULL);
+    free(gh);
     return out;
 }
 
@@ -985,6 +1000,11 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     for (size_t i = 0; i < docs.n; i++) json_push_str(urls, docs.v[i]);
     strvec_free(&docs);
     json_set(data, "internalUrls", urls);
+    json_t *uref = json_arr();
+    strvec_t refs_doc = internal_url_reference();
+    for (size_t i = 0; i < refs_doc.n; i++) json_push_str(uref, refs_doc.v[i]);
+    strvec_free(&refs_doc);
+    json_set(data, "internalUrlReference", uref);
     json_set_str(data, "cwd", o->cwd);
     json_set_str(data, "model", settings_bool("includeModelInPrompt", true) && o->model_name ? o->model_name : "");
     /* delegation (sdk.ts buildSystemPrompt options): model catalog bias, task.eager/batch/maxConcurrency, IRC */
@@ -996,8 +1016,6 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     json_set_str(data, "delegationTier", eager_tasks && !str_eq(bias, "gated") ? "eager" : bias);
     json_set_bool(data, "eagerTasks", eager_tasks);
     json_set_bool(data, "eagerTasksAlways", str_eq(eager, "always"));
-    int64_t maxc = settings_int("task.maxConcurrency", 32);
-    json_set_int(data, "MAX_CONCURRENCY", maxc > 0 ? maxc : 0);
     json_set_bool(data, "taskBatch", settings_bool("task.batch", true));
     json_set_bool(data, "taskIrcEnabled", o->irc_enabled);
     bool scout = true;
@@ -1005,6 +1023,8 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
     json_arr_foreach(dis, di, dv) if (str_eq(json_sv(dv), "scout")) scout = false;
     json_set_bool(data, "scoutAvailable", scout);
     json_set_bool(data, "renderMermaid", false);
+    /* encourageEdits (default on): a critical rule makes file edits go through `edit` */
+    json_set_bool(data, "encourageEdits", settings_bool("encourageEdits", true));
     json_set_bool(data, "subagent", o->subagent);
     /* personality: "none" (and every subagent: sdk.ts passes "none" for agentKind "sub") skips the file lookup */
     const char *pers = o->subagent ? "none" : settings_str("personality", "default");

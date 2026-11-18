@@ -292,7 +292,8 @@ bool tr_billing_cap_usage_limit(int status, const char *msg) {
         return opaque_status_body(msg) || m(P_STATUS_402_QUOTA, msg) || str_eq(reason, "QUOTA_EXHAUSTED") ||
                str_eq(reason, "CONCURRENT_LIMIT");
     return m(P_OUT_OF_CREDIT, msg) || m(P_INSUFFICIENT_BALANCE, msg) || m(P_CREDITS_EXHAUSTED, msg) ||
-           m(P_PREPAID_EXHAUSTED, msg) || m(P_SPEND_LIMIT, msg) || m(P_CREDITS_REQUIRED, msg) || m(P_INSUFFICIENT_QUOTA, msg);
+           m(P_PREPAID_EXHAUSTED, msg) || m(P_SPEND_LIMIT, msg) || m(P_CREDITS_REQUIRED, msg) || m(P_INSUFFICIENT_QUOTA, msg) ||
+           ai_zero_allowance_text(msg);
 }
 
 static bool terminal_client_status(int st) { return st >= 400 && st < 500 && st != 408 && st != 429; }

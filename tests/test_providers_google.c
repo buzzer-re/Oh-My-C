@@ -342,7 +342,7 @@ static reply_t adc_route(const char *method, const char *path, const http_header
         return ok ? R(200, NULL, "{\"accessToken\":\"ya29.imp-token\",\"expireTime\":\"2099-01-01T00:00:00Z\"}")
                   : R(403, NULL, "{\"error\":{\"message\":\"denied\"}}");
     }
-    if (str_starts(path, "/v1/projects/proj-9/locations/us-central1/publishers/google/models/gemini-x:streamGenerateContent")) {
+    if (str_starts(path, "/v1beta1/projects/proj-9/locations/us-central1/publishers/google/models/gemini-x:streamGenerateContent")) {
         if (!str_eq(auth, "Bearer ya29.sa-token")) return R(401, NULL, "{\"error\":{\"message\":\"bad token\"}}");
         return R(200, "text/event-stream",
                  "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"vertex says hi\"}]},"
@@ -766,6 +766,28 @@ static void test_cca_sse(void) {
     CHECK_STR(P(msg, "content.0.thinking"), "hidden");
     CHECK_STR(P(msg, "content.1.text"), "visible");
     json_free(msg);
+
+    /* a signature-only thought part signs thinking of its own: it neither merges the text around it nor vanishes
+     * when no block is open (omp d0b09e88ae) */
+    msg = run_cca(&m, NULL,
+                  "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"answer\"},{\"thought\":true,"
+                  "\"text\":\"\",\"thoughtSignature\":\"VEhPVUdIVA==\"},{\"text\":\" more\"}]}}]}}\n\n"
+                  "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"read\","
+                  "\"args\":{\"path\":\"a.ts\"}},\"thoughtSignature\":\"Q0FMTA==\"}]}}]}}\n\n"
+                  "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"thought\":true,\"text\":\"\","
+                  "\"thoughtSignature\":\"TE9ORQ==\"},{\"functionCall\":{\"name\":\"read\",\"args\":{\"path\":\"b.ts\"}},"
+                  "\"thoughtSignature\":\"Q0FMTDI=\"}]},\"finishReason\":\"STOP\"}]}}\n\n",
+                  NULL, NULL, NULL);
+    CHECK_STR(P(msg, "content.0.text"), "answer");
+    CHECK_STR(P(msg, "content.1.type"), "thinking");
+    CHECK_STR(P(msg, "content.1.thinkingSignature"), "VEhPVUdIVA==");
+    CHECK_STR(P(msg, "content.2.text"), " more");
+    CHECK_STR(P(msg, "content.3.thoughtSignature"), "Q0FMTA==");
+    CHECK_STR(P(msg, "content.4.type"), "thinking");
+    CHECK_STR(P(msg, "content.4.thinkingSignature"), "TE9ORQ==");
+    CHECK_STR(P(msg, "content.5.thoughtSignature"), "Q0FMTDI=");
+    CHECK_INT(json_len(json_get(msg, "content")), 6);
+    json_free(msg);
     json_free(raw);
 
     /* flash planning leak: a leading {"thought": ...} object is buffered and stripped */
@@ -786,6 +808,15 @@ static void test_cca_sse(void) {
     msg = run_cca(&m, tools, "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"{\\\"a\\\": 1}\"}]},\"finishReason\":\"STOP\"}]}}\n\n", &k, NULL, NULL);
     CHECK(!k.stripped_leak);
     CHECK_STR(P(msg, "content.0.text"), "{\"a\": 1}");
+    json_free(msg);
+    /* a thought settles reply text still held in the planning buffer first (omp f99a342be8) */
+    msg = run_cca(&m, tools,
+                  "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"{\\\"a\\\": \"}]}}]}}\n\n"
+                  "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"thought\":true,\"text\":\"hmm\"}]},"
+                  "\"finishReason\":\"STOP\"}]}}\n\n",
+                  NULL, NULL, NULL);
+    CHECK_STR(P(msg, "content.0.text"), "{\"a\": ");
+    CHECK_STR(P(msg, "content.1.thinking"), "hmm");
     json_free(msg);
     json_free(tools);
     json_free(raw);

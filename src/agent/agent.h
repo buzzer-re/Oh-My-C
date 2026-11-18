@@ -311,6 +311,8 @@ json_t *text_block(const char *text);
 json_t *image_block(const char *b64, const char *mime);
 /* last assistant message in an array (borrowed) */
 const json_t *last_assistant(const json_t *messages);
+/* the call is the only tool call of the latest assistant message (wait.ts isOnlyCallOfTurn) */
+bool agent_tool_call_alone(agent_t *a, const char *tool_call_id);
 
 /* Tool-argument validation (src/agent/validate.c, port of omp validateToolArguments with omptype messages).
  * tool_args_validate: on success returns NULL and replaces *args with the normalized/coerced value; on failure

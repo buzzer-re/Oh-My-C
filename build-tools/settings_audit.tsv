@@ -115,6 +115,7 @@ advisor.syncBacklog	inert	main agent never waits for the advisor backlog
 advisor.evictStaleResults	inert	advisor context keeps old read/grep/glob output
 auth.broker.*	inert	no auth broker client
 auth.accountPolicies	inert	no per-account policies
+auth.unpausedProviders	wired	settings.c rebuild pushes the operator-layer value to catalog_set_unpaused_providers; ui/settings.c offers the paused providers
 judgment.attemptTimeoutMs	inert	omp registers it but no TypeScript reads it either
 prewalk.auto	inert	no automatic prewalk judging
 prewalk.autoTarget	inert	no automatic prewalk judging
@@ -226,7 +227,6 @@ skills.compressDescriptions	omc-only	no omp equivalent
 models.noJudge	inert	no judge-model opt-out (omp v18.22) (added in omp v18.19-18.22)
 models.noSpotlight	inert	spotlight is omp-hosted, not ported (added in omp v18.19-18.22)
 models.offline	inert	offline model mode not ported yet (added in omp v18.19-18.22)
-auth.unpausedProviders	inert	pause overrides not ported yet (added in omp v18.19-18.22)
 disassembler.backend	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
 disassembler.maxOpen	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
 disassembler.idleCloseSec	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
@@ -234,7 +234,6 @@ ghidra.installDir	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
 ghidra.python	inert	no disassembler tool (dsm) (added in omp v18.19-18.22)
 tui.renderEmbeds	inert	not ported yet (added in omp v18.19-18.22)
 systemPromptTemplates	inert	not ported yet (added in omp v18.19-18.22)
-encourageEdits	inert	not ported yet (added in omp v18.19-18.22)
 task.autoParallel	inert	not ported yet (added in omp v18.19-18.22)
 task.steps	inert	not ported yet (added in omp v18.19-18.22)
 task.agentPrewalkAuto	inert	not ported yet (added in omp v18.19-18.22)

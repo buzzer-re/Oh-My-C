@@ -265,7 +265,9 @@ chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp
   context stays above the recovery band. Handoff generates the document over the live context
   (`tool_choice: none`, `auto-handoff-threshold-focus.md`; `compaction.handoffSaveToDisk` writes
   `handoff-<time>.md` to the session artifacts) and commits it with `method: "handoff"`, rendered
-  through `handoff-summary-context.md`.
+  through `handoff-summary-context.md`. A document that does not open with its `## Goal` heading is rejected
+  (an automatic handoff moves on to the next method, `/handoff` reports "Handoff generation produced an invalid
+  document").
 - **Triggers**: after each turn (`cmp_after_turn`: stale-read supersession and useless-result elision
   with `compaction.supersedeReads` / `dropUseless`, tool-output pruning, then the threshold), between
   tool-loop turns (`cmp_mid_turn`, `compaction.midTurnEnabled`, through the agent's `turn_boundary`
@@ -506,8 +508,11 @@ tools are exclusive and mountable as `xd://` devices.
   (`agent_aside`) for the next step boundary: they never end a `wait` or interrupt bash. A direct message ends a wait, whose
   result carries every queued message (`details.waited`).
 - **`wait`** (`tools/write_bash.c`, port of `tools/wait.ts`): with nothing new it returns after a window that climbs 5s, 10s,
-  30s, 1m, 5m across back-to-back idle waits, restarting after news or a 60 s gap; from the second rung it appends the
-  `wait-idle.md` nudge. A wait woken by a job keeps collecting for up to 1.5 s while other watched jobs run. A wait for a reply
+  30s, 1m, 4m (inside a 5-minute prompt cache) across back-to-back idle waits, restarting after news or a 60 s gap; a
+  back-to-back wait that is the only tool call of its turn takes the 4m top rung at once. The elapsed line says what to do
+  once nothing else is left: the top-level interactive session is told to end its turn (results and messages start its
+  next one; the description says so too), every other caller to call `wait` right away alone. From the second rung it
+  appends the `wait-idle.md` nudge. A wait woken by a job keeps collecting for up to 1.5 s while other watched jobs run. A wait for a reply
   ends at once when the asked agent can no longer answer soon: it finished its turn, it waits on the caller, or a dialog of
   its own (`ask`, an approval) waits on the user.
   Outputs are readable at `agent://<id>`, transcripts at `history://<id>`, and running agents at

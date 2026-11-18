@@ -78,6 +78,10 @@ json_t *oaic_stream_finish(oaic_stream_t *s, int transport_rc, const char *trans
 
 json_t *oair_build_request(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o);
 json_t *oair_convert_input(const ai_model_t *m, const ai_context_t *ctx, int variant);
+/* isOpenAIResponsesRefusedEncryptedReasoningError over an error message */
+bool oair_refused_encrypted_reasoning(const char *msg);
+/* an assistant turn retried without replayed encrypted reasoning (omp providerPayload.encryptedReasoningFloor) */
+bool oair_encrypted_reasoning_floor(const json_t *msg);
 char *oair_codex_account_id(const char *access_token); /* owned or NULL */
 char *oair_url(const ai_model_t *m);                   /* owned request URL */
 

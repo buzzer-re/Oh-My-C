@@ -560,6 +560,7 @@ void cca_sse_free(cca_sse_t *s) {
     free(s->tbuf_sig);
     sb_free(&s->tbuf);
     strvec_free(&s->tool_names);
+    google_cont_free(&s->cont);
     if (s->heal) {
         think_heal_free(s->heal);
         free(s->heal);
@@ -729,6 +730,36 @@ static void flush_planning_buffer(cca_sse_t *s, bool final) {
     free(sig);
 }
 
+/* settleVisibleText: reply text waits in two stages (the planning-leak buffer and markup healing); anything that ends a
+ * run of reply text lands it first, or the next block lands ahead of text that streamed before it. The signature the
+ * buffered text carried signs where it landed. */
+static void settle_visible(cca_sse_t *s) {
+    char *sig = s->tbuf_sig;
+    s->tbuf_sig = NULL;
+    if (s->buffering) {
+        char *vis = NULL;
+        int r = consume_planning(s, sb_cstr(&s->tbuf), true, &vis);
+        s->buffering = false;
+        sb_clear(&s->tbuf);
+        if (r == PB_LEAK) s->stripped_leak = true;
+        if (r != PB_INCOMPLETE && vis) feed_visible(s, vis, strlen(vis), NULL);
+        free(vis);
+    }
+    flush_visible(s, NULL);
+    if (sig) retain_sig(s, sig);
+    free(sig);
+}
+
+/* signVisibleText: an unmarked signature-only part signs the reply text before it, which may still be held */
+static void sign_visible(cca_sse_t *s, const char *sig) {
+    if (s->buffering) {
+        set_str(&s->tbuf_sig, sig);
+        return;
+    }
+    flush_visible(s, NULL);
+    retain_sig(s, sig);
+}
+
 static void push_tool_call(cca_sse_t *s, const json_t *part) {
     json_t *fc = json_get_obj(part, "functionCall");
     const char *name = json_get_str(fc, "name");
@@ -808,6 +839,7 @@ int cca_sse_event(void *ud, const char *event, const char *data, size_t len) {
         return 2;
     }
     json_t *cand = json_at(cands, 0);
+    google_cont_observe(&s->cont, cand, resp);
     json_t *part;
     json_arr_foreach(json_get_arr(json_get_obj(cand, "content"), "parts"), i, part) {
         json_t *tv = json_get(part, "text");
@@ -817,7 +849,7 @@ int cca_sse_event(void *ud, const char *event, const char *data, size_t len) {
             const char *text = tv->u.str.s;
             size_t tl = tv->u.str.len;
             if (json_get_bool(part, "thought", false)) {
-                flush_visible(s, NULL);
+                settle_visible(s);
                 thinking_delta(s, text, tl);
                 retain_sig(s, sig);
             } else {
@@ -835,7 +867,24 @@ int cca_sse_event(void *ud, const char *event, const char *data, size_t len) {
                 if (s->buffering) flush_planning_buffer(s, false);
             }
         } else if (json_is_str(tv) && sig && *sig && !has_fc) {
-            retain_sig(s, sig);
+            /* a signature-only part: an unmarked one signs the reply text before it (which may still be held), a
+             * thought part signs thinking of its own, as on the other Google routes (omp d0b09e88ae, f99a342be8) */
+            if (!json_get_bool(part, "thought", false)) {
+                sign_visible(s, sig);
+            } else {
+                settle_visible(s);
+                if (str_eq(json_get_str(cur_block(s), "type"), "thinking")) {
+                    retain_sig(s, sig);
+                } else {
+                    aib_start(&s->b);
+                    aib_end_block(&s->b);
+                    json_t *tb = json_obj();
+                    json_set_str(tb, "type", "thinking");
+                    json_set_str(tb, "thinking", "");
+                    json_set_str(tb, "thinkingSignature", sig);
+                    json_push(ccontent(s), tb);
+                }
+            }
         }
         if (has_fc) {
             flush_visible(s, NULL);
@@ -1041,6 +1090,36 @@ json_t *provider_gemini_cli_stream(const ai_model_t *m, const ai_context_t *ctx,
                 else error = xstrdup(s.error ? s.error : "Cloud Code Assist stream error");
                 break;
             }
+            /* followGoogleContinuations: a segment that ended in CONTINUATION resumes with its token
+             * (request.continuationToken in the envelope) into the same message; each resume gets the pre-response
+             * watchdog and retries transient failures, since a failed one would discard every streamed segment */
+            for (char *tok; !error && (tok = google_cont_take(&s.cont));) {
+                json_t *pj = json_parse_str(body);
+                json_t *req = json_get_obj(pj, "request");
+                if (req) json_set_str(req, "continuationToken", tok);
+                free(tok);
+                char *cbody = json_dump(pj, 0);
+                json_free(pj);
+                ai_stream_opts_t co = ro;
+                co.max_retries = GOOGLE_CONTINUATION_MAX_ATTEMPTS - 1;
+                ai_post_ex_t cex = {.idle_timeout_ms = first_event_ms};
+                int cstatus = 0;
+                char *cerr = NULL;
+                int crc = ai_sse_post_ex(url, &h, cbody, &co, cca_sse_event, &s, &cstatus, &cerr, &cex);
+                free(cbody);
+                if (crc == -2) result = aib_finish(&s.b, "aborted", "Request was aborted");
+                else if (crc == -1 && cstatus >= 400) {
+                    char *text = xasprintf("Cloud Code Assist API error (%d): %s", cstatus,
+                                           cex.err_body ? cex.err_body : cerr ? cerr : "");
+                    error = ai_rewrap_http_error(text, cerr);
+                    free(text);
+                } else if (crc == -1) error = xstrdup(cerr ? cerr : "request failed");
+                else if (crc == 2) error = xstrdup(s.error ? s.error : "Cloud Code Assist stream error");
+                free(cerr);
+                free(cex.err_body);
+                if (result) break;
+            }
+            if (result || error) break;
             cca_sse_end(&s);
             bool meaningful = cca_sse_meaningful(&s);
             if (strcmp(s.stop_reason, "stop") != 0 || meaningful) {

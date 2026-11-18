@@ -1385,9 +1385,15 @@ static int run_validation(const json_t *v, const char *label, const char *key, c
         return auth_validate_anthropic(lab, key, json_get_str(v, "baseUrl"), json_get_str(v, "model"), c, status, err);
     if (str_eq(kind, "models-endpoint")) {
         char *env_base = json_get_str(v, "baseUrlEnv") ? trim_dup(env_get(json_get_str(v, "baseUrlEnv"))) : NULL;
-        char *url = env_base && *env_base ? xasprintf("%s%s", rtrim_slashes(env_base),
-                                                      json_get_str(v, "baseUrlPath") ? json_get_str(v, "baseUrlPath") : "/models")
-                                          : xstrdup(json_get_str(v, "url") ? json_get_str(v, "url") : "");
+        char *url;
+        if (env_base && *env_base) {
+            /* baseUrlAppend (Modal's /v1) joins an env base that does not already end with it */
+            const char *base = rtrim_slashes(env_base), *app = json_get_str(v, "baseUrlAppend");
+            url = xasprintf("%s%s%s", base, app && !str_ends(base, app) ? app : "",
+                            json_get_str(v, "baseUrlPath") ? json_get_str(v, "baseUrlPath") : "/models");
+        } else {
+            url = xstrdup(json_get_str(v, "url") ? json_get_str(v, "url") : "");
+        }
         free(env_base);
         http_headers_t h = {0};
         int rc = 0;

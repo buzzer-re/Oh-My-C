@@ -5,6 +5,7 @@
  * trustForbidden, headers hook) and refresh of stored OAuth credentials. Runs from the repository root. */
 #include "ai/ai.h"
 #include "config/auth.h"
+#include "config/settings.h"
 #include "core/fs.h"
 #include "net/http.h"
 
@@ -660,6 +661,57 @@ int main(void) {
         json_arr_foreach(auth_oauth_providers(), i, d) if (str_eq(json_get_str(d, "id"), "google-gemini-cli")) name = auth_login_name(d);
         CHECK(name && !strstr(name, "at your own risk"), "other providers keep their name");
         free(name);
+    }
+
+    /* ---- auth.unpausedProviders (omp af8e4c142b): operator layers turn a paused provider back on ---- */
+    {
+        CHECK(auth_set_api_key("google-antigravity", "stored-token") == 0, "store an antigravity key");
+        /* a project layer never unpauses (the agent can write repository settings) */
+        char *proj = path_join(dir, "proj");
+        char *pcfg = path_join(proj, ".omc/config.yml");
+        const char *ptext = "auth:\n  unpausedProviders:\n    - google-antigravity\n";
+        char *pdir = path_join(proj, ".omc");
+        fs_mkdir_p(pdir, 0755);
+        free(pdir);
+        CHECK(fs_write(pcfg, ptext, strlen(ptext)) == 0, "write project config");
+        char *home_cwd = get_cwd();
+        settings_reload_for_cwd(proj);
+        CHECK(str_eq(settings_provenance("auth.unpausedProviders"), "project"), "project layer supplies the list");
+        CHECK(catalog_provider_pause_reason("google-antigravity") != NULL, "project layer cannot unpause");
+        char *k = auth_get_api_key("google-antigravity");
+        CHECK(k == NULL, "stored key stays unused under a project unpause: %s", k ? k : "(none)");
+        free(k);
+        settings_reload_for_cwd(home_cwd);
+        /* an operator layer (runtime here; global and --config alike) does, at once */
+        settings_set_runtime("auth.unpausedProviders", json_parse_str("[\"google-antigravity\"]"));
+        CHECK(catalog_provider_pause_reason("google-antigravity") == NULL, "unpaused");
+        k = auth_get_api_key("google-antigravity");
+        CHECK(str_eq(k, "stored-token"), "stored login comes back: %s", k ? k : "(none)");
+        free(k);
+        json_t *d;
+        char *name = NULL;
+        json_arr_foreach(auth_oauth_providers(), i, d) if (auth_login_listed(d) && str_eq(json_get_str(d, "id"), "google-antigravity"))
+            name = auth_login_name(d);
+        CHECK(str_eq(name, "Google Antigravity (Gemini, Claude, GPT-OSS) (at your own risk)"), "login list label: %s", name ? name : "(unlisted)");
+        free(name);
+        /* a new login still names the account risk; anything but "yes" stores nothing */
+        auth_logout("google-antigravity");
+        script_t sp = {.answers = {"no"}};
+        err = NULL;
+        int rc = login("google-antigravity", &sp, &err);
+        CHECK(rc != 0 && str_eq(err, "Login cancelled"), "declined risk: %s", err ? err : "(none)");
+        CHECK(sp.prompts.n == 1 && strstr(sp.prompts.v[0], "use at your own risk") &&
+                  strstr(sp.prompts.v[0], "Type \"yes\" to accept the risk and continue"),
+              "risk prompt: %s", sp.prompts.n ? sp.prompts.v[0] : "(none)");
+        CHECK(!sp.url, "no login flow started");
+        free(err);
+        s_free(&sp);
+        /* removing it pauses the provider again */
+        settings_unset_runtime("auth.unpausedProviders");
+        CHECK(catalog_provider_pause_reason("google-antigravity") != NULL, "paused again");
+        free(home_cwd);
+        free(pcfg);
+        free(proj);
     }
 
     if (mock > 0) {

@@ -7,13 +7,16 @@ Display commands (used by tests/tui/compare.sh to exercise transcript views):
   - "md:<name>"              stream tests/tui/fixtures/<name>.md as the answer (small chunks)
   - "think:<thinking>|<text>" stream reasoning_content deltas, then the text ("\\n" -> newline)
   - "slow:<secs>:<text>"     wait <secs> (loader visible), then stream <text> slowly
-  - "fail:<status>:<msg>"    reply with an HTTP error (non-retryable for 400/401/403/404)
+  - "fail:<status>:<msg>"    reply with an HTTP error (non-retryable for 400/401/403/404); a <msg> containing ZEROALLOW
+                             adds `x-ratelimit-limit-req-minute: 0`
   - "streamfail:<text>"      stream <text>, then an in-stream error chunk
   - "chunks:<JSON list>"     one content delta per string as is (a ["r", <text>] item is a reasoning_content delta)
-  - "seq:[[tool, args], ...]" one tool call per turn, in order, then the usual "Tool said:" answer
+  - "seq:[[tool, args], ...]" one tool call per turn, in order, then the usual "Tool said:" answer; a later step written
+    as a list of [tool, args] pairs is several calls in one assistant message
   - "batch:[[tool, args], ...]" all the tool calls in one assistant message, then the usual "Tool said:" answer
   - model "mock-flaky"        every request fails with HTTP 429 (retry fallback chains)
   - a compaction summary (tool-less) or handoff-document request whose messages mention SLOWSUMMARY answers after 4 s
+  - a handoff-document request answers "## Goal\nplain answer" (plain "plain answer" when the transcript mentions BADHANDOFF)
 Eval helper side requests (omc eval completion()/judge()):
   - completion (system "You are a helpful assistant." or a forced `respond` tool) -> "completion says: <prompt>", or a
     `respond` call whose fields echo the prompt (strings) / 42 (numbers) / true (booleans)
@@ -126,7 +129,11 @@ def seq_next(msgs):
     try: calls = json.loads(script(msgs[ui])[4:])
     except ValueError: return None
     done = sum(1 for m in msgs[ui:] if m.get("role") == "tool")
-    return calls[done] if done < len(calls) else None
+    for step in calls:  # a step whose first item is a list is several calls in one assistant message
+        group = step if step and isinstance(step[0], list) else [step]
+        if done < len(group): return group
+        done -= len(group)
+    return None
 
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -172,6 +179,8 @@ class H(BaseHTTPRequestHandler):
                 self.send_header("retry-after-ms", FAIL_RETRY_AFTER)
             if os.environ.get("MOCK_SHOULD_RETRY"):
                 self.send_header("x-should-retry", os.environ["MOCK_SHOULD_RETRY"])
+            if "ZEROALLOW" in m:  # the plan grants this model no allowance (Mistral, omp #19300)
+                self.send_header("x-ratelimit-limit-req-minute", "0")
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(b)))
             self.end_headers()
@@ -242,10 +251,9 @@ class H(BaseHTTPRequestHandler):
             chunks.append({**base, "choices": [{"index": 0, "delta": {"content": "noted"}}]})
             chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
         elif last.get("role") == "tool" and seq_next(msgs):
-            tname, targs = seq_next(msgs)
-            a = json.dumps(targs)
             n = sum(1 for m in msgs if m.get("role") == "tool")
-            chunks.append({**base, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": f"call_{n + 1}", "type": "function", "function": {"name": tname, "arguments": a}}]}}]})
+            for k, (tname, targs) in enumerate(seq_next(msgs)):
+                chunks.append({**base, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": k, "id": f"call_{n + k + 1}", "type": "function", "function": {"name": tname, "arguments": json.dumps(targs)}}]}}]})
             chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
         elif last.get("role") == "tool":
             out = text_of(last)
@@ -327,7 +335,10 @@ class H(BaseHTTPRequestHandler):
             elif kind == "edit": name, args = "edit", {"input": rest.replace("\\n", "\n")}
             elif kind == "todo": name, args = "todo", {"op": "init", "items": rest.split(",")}
             else:
-                chunks.append({**base, "choices": [{"index": 0, "delta": {"content": "plain answer"}}]})
+                # a handoff document must open with its Goal heading (omp 421281302f); "BADHANDOFF" in the transcript
+                # makes it a malformed one
+                handoff = "Write a handoff document" in lu and "BADHANDOFF" not in json.dumps(msgs[1:])
+                chunks.append({**base, "choices": [{"index": 0, "delta": {"content": "## Goal\nplain answer" if handoff else "plain answer"}}]})
                 chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
                 name = None
             if name:

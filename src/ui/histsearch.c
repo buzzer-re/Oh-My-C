@@ -6,8 +6,9 @@
  * fallback); omc's store is prompt-history.jsonl ({text, cwd, ts} per submission, oldest first). The jsonl is
  * folded into HistoryStorage's rows: one row per normalized prompt (normalizePrompt), its created_at / cwd from
  * the latest submission and its id from the first. getRecent orders by created_at, id descending; search keeps
- * the rows where every query token (split on non-letters/digits, lowercased) is a case-insensitive substring,
- * which is the union FTS prefix + LIKE substring returns. At most 100 results (the component's resultLimit).
+ * the rows matching every whitespace-delimited query term, either as one FTS phrase of the term's letter/digit runs
+ * (adjacent prompt tokens, the last a prefix) or literally as a case-insensitive substring (the union FTS +
+ * LIKE returns). At most 100 results (the component's resultLimit).
  *
  * The overlay replaces the composer: an OverlayPanel "History" with the search Input, up to 10 result rows
  * (selection-centered window, scrollbar column when they overflow, query tokens in the accent color, the
@@ -78,6 +79,40 @@ static bool contains_ci(const char *hay, const char *tok) {
     return false;
 }
 
+/* #terms: whitespace-delimited query terms, lowercased; a term without a letter or digit matches nothing and is
+ * dropped */
+static void query_terms(const char *q, strvec_t *out) {
+    char *l = str_lower(q ? q : "");
+    for (char *p = l; *p;) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        char *e = p;
+        while (*e && !isspace((unsigned char)*e)) e++;
+        bool word = false;
+        for (char *c = p; c < e && !word; c++) word = isalnum((unsigned char)*c) || (unsigned char)*c >= 0x80;
+        if (word) strvec_push_own(out, xstrndup(p, (size_t)(e - p)));
+        p = e;
+    }
+    free(l);
+}
+
+/* FTS5 phrase-prefix match of one term: its letter/digit runs (ftsTokens) must be adjacent tokens of the prompt,
+ * the last one a prefix ("git-commit" -> "git commit"*) */
+static bool phrase_match(const strvec_t *prompt_tokens, const char *term) {
+    strvec_t runs = {0};
+    query_tokens(term, &runs);
+    bool hit = false;
+    for (size_t i = 0; runs.n && !hit && i + runs.n <= prompt_tokens->n; i++) {
+        bool ok = true;
+        for (size_t k = 0; ok && k < runs.n; k++) {
+            const char *t = prompt_tokens->v[i + k], *r = runs.v[k];
+            ok = k + 1 < runs.n ? str_eq(t, r) : str_starts(t, r);
+        }
+        hit = ok;
+    }
+    strvec_free(&runs);
+    return hit;
+}
+
 typedef struct {
     char *prompt, *cwd;
     int64_t created_at;
@@ -123,7 +158,7 @@ void ui_hist_query(const char *jsonl, const char *query, int limit, ui_hist_list
     hmap_free(&idx, free);
     strvec_free(&lines);
     strvec_t toks = {0};
-    query_tokens(query, &toks);
+    query_terms(query, &toks);
     char *trimmed = str_trim(query ? query : "");
     bool searching = *trimmed;
     free(trimmed);
@@ -132,7 +167,20 @@ void ui_hist_query(const char *jsonl, const char *query, int limit, ui_hist_list
     for (size_t i = 0; i < rows.n; i++) {
         row_t *r = &rows.v[i];
         bool keep = (int)out->n < limit && (!searching || toks.n > 0);
-        for (size_t k = 0; keep && searching && k < toks.n; k++) keep = contains_ci(r->prompt, toks.v[k]);
+        if (keep && searching) {
+            /* the union of the FTS phrase-prefix match and the literal term-AND substring fallback */
+            bool literal = true;
+            for (size_t k = 0; literal && k < toks.n; k++) literal = contains_ci(r->prompt, toks.v[k]);
+            if (!literal) {
+                strvec_t pt = {0};
+                query_tokens(r->prompt, &pt);
+                bool phrase = true;
+                for (size_t k = 0; phrase && k < toks.n; k++) phrase = phrase_match(&pt, toks.v[k]);
+                strvec_free(&pt);
+                literal = phrase;
+            }
+            keep = literal;
+        }
         if (keep) {
             ui_hist_entry_t e = {r->prompt, r->created_at, r->cwd};
             vec_push(out, e);

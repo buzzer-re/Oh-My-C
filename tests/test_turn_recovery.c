@@ -3,6 +3,7 @@
  * classifyResolvedInterruptedToolTurn, handleCommittedTextStreamStall) */
 #include "coding/turn_recovery.h"
 #include "ai/ai.h"
+#include "config/model_resolver.h"
 
 #include <stdio.h>
 
@@ -261,6 +262,16 @@ int main(void) {
     CHECK(tr_billing_cap_usage_limit(402, lithos));
     CHECK(tr_billing_cap_usage_limit(0, lithos));
     CHECK(tr_billing_cap_usage_limit(429, "Insufficient balance in account"));
+    /* a zero x-ratelimit-limit-* allowance is a billing wall: no wait or replay can succeed (omp 03a02d0926) */
+    const char *zero = "429 Rate limit exceeded (x-ratelimit-limit-req-minute: 0 \xe2\x80\x94 this plan grants no allowance "
+                       "for the model; switch models or upgrade the plan)";
+    CHECK(tr_billing_cap_usage_limit(429, zero));
+    CHECK(ai_usage_limit_text(zero, 429));
+    CHECK(str_eq(mr_rate_limit_reason(zero), "QUOTA_EXHAUSTED"));
+    CHECK(!ai_zero_allowance_text("x-ratelimit-limit-req-minute: 0.5"));
+    CHECK(!ai_zero_allowance_text("x-ratelimit-limit-req-minute: 10"));
+    CHECK(!ai_zero_allowance_text("myx-ratelimit-limit-requests: 0"));
+    CHECK(ai_zero_allowance_text("X-RateLimit-Limit-Requests:0"));
     CHECK(tr_billing_cap_usage_limit(429, "OpenRouter: Insufficient credits"));
     CHECK(tr_billing_cap_usage_limit(403, "Your monthly spend limit has been reached"));
     CHECK(!tr_billing_cap_usage_limit(429, "429 You exceeded your current quota, please check your plan and billing details. For details, see: "

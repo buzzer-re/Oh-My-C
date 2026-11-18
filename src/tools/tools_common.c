@@ -425,9 +425,9 @@ static const struct {
     {"read", "Read", NULL},
     {"bash", "Bash", NULL},
     {"edit", "Edit", NULL},
-    {"ast_grep", "AST Grep", "Search code with AST patterns (structural grep)"},
-    {"ast_edit", "AST Edit", "Perform AST-aware code edits (structural refactoring)"},
-    {"ask", "Ask", "Ask the user a clarifying question"},
+    {"ast_grep", "AST Grep", "Search code with AST patterns (SHOULD be preferred for structural search)"},
+    {"ast_edit", "AST Edit", "Perform AST-aware code edits (SHOULD be preferred for codemods)"},
+    {"ask", "Ask", "Ask the user to fill in a form"},
     {"debug", "Debug", "Debug a running process with DAP (debugger adapter protocol)"},
     {"eval", "Eval", NULL},
     {"github", "GitHub", "Interact with GitHub repositories, files, pull requests, and Actions"},
@@ -500,12 +500,16 @@ void tools_finalize(agent_t *a, const strvec_t *requested) {
     for (size_t i = 0; i < a->all_tools.n; i++)
         if (!a->all_tools.v[i]->hidden) vec_push(&a->tools, a->all_tools.v[i]);
     /* eval's bridge reaches every session tool: top-level ones, then xd:// devices */
-    agent_tool_t *ev = NULL;
+    agent_tool_t *ev = NULL, *wr = NULL;
+    bool read_active = false;
     json_t *names = json_arr();
     for (size_t i = 0; i < a->tools.n; i++) {
         json_push_str(names, a->tools.v[i]->name);
         if (!strcmp(a->tools.v[i]->name, "eval")) ev = a->tools.v[i];
+        if (!strcmp(a->tools.v[i]->name, "write")) wr = a->tools.v[i];
+        if (!strcmp(a->tools.v[i]->name, "read")) read_active = true;
     }
+    if (wr) write_set_read_active(wr, read_active);
     for (size_t i = 0; i < a->all_tools.n; i++)
         if (a->all_tools.v[i]->mounted) json_push_str(names, a->all_tools.v[i]->name);
     if (ev) eval_set_tool_names(ev, names);

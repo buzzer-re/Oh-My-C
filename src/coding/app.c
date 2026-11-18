@@ -988,7 +988,7 @@ static bool is_usage_limit(const char *err) {
                                        "spending-limit", "out of usage", "access_terminated_error", "402"};
     for (size_t i = 0; err && i < ARRAY_LEN(pats); i++)
         if (str_istr(err, pats[i])) return true;
-    return false;
+    return ai_zero_allowance_text(err);
 }
 
 static bool is_abort_error(const char *err) {

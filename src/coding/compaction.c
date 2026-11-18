@@ -1734,12 +1734,27 @@ static char *handoff_exec(app_t *a, handoff_req_t *h, bool auto_triggered, char 
     } else {
         text = joined_text(r);
         char *t = str_trim(text);
-        bool empty = !*t;
+        /* a document must open with a Goal heading (`^## Goal[ \t]*\r?\n` after leading whitespace), or it would
+         * replace the user's goal; an automatic handoff advances to the next compaction method */
+        const char *failure = NULL;
+        if (!*t) failure = "no content";
+        else {
+            const char *lead = text;
+            while (isspace((unsigned char)*lead)) lead++;
+            const char *p = lead + (str_starts(lead, "## Goal") ? 7 : 0);
+            if (p == lead) failure = "an invalid document";
+            else {
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p == '\r') p++;
+                if (*p != '\n') failure = "an invalid document";
+            }
+        }
         free(t);
-        if (empty) {
+        if (failure) {
+            LOGW("Handoff generation produced %s", failure);
             free(text);
             text = NULL;
-            if (!auto_triggered) *err = xstrdup("Handoff generation produced no content");
+            if (!auto_triggered) *err = xasprintf("Handoff generation produced %s", failure);
         }
     }
     json_free(r);

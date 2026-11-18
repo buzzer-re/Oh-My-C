@@ -590,11 +590,11 @@ static const char *nonblank_prop(const json_t *o, const char *k) {
 
 /* createOpenAIHttpError's message merged with the captured body: `<status> <detail>` carrying the core message once,
  * plus the ` (type=… param=… code=…)` suffix of the payload (numbered by what is present, as formatCapturedHttpErrorParts) */
-static char *openai_error_text(int status, const char *raw) {
+static char *openai_error_text(int status, const char *raw, const char *notice) {
     char *body = trimmed_copy(raw);
     if (!*body) {
         free(body);
-        return xasprintf("%d status code (no body)", status);
+        return xasprintf("%d status code (no body)%s%s", status, notice ? " " : "", notice ? notice : "");
     }
     json_t *j = json_parse_str(body);
     const json_t *obj = json_is_obj(j) ? j : NULL;
@@ -628,7 +628,7 @@ static char *openai_error_text(int status, const char *raw) {
         if (n) sb_putc(&suffix, ')');
     }
     /* mergeCapturedBody */
-    char *msg = xasprintf("%d %s", status, detail);
+    char *msg = xasprintf("%d %s%s%s", status, detail, notice ? " " : "", notice ? notice : "");
     char *r;
     if (strstr(msg, core)) r = suffix.len && !strstr(msg, suffix.s) ? xasprintf("%s%s", msg, suffix.s) : xstrdup(msg);
     else r = xasprintf("%s\n%s%s", msg, core, suffix.len ? suffix.s : "");
@@ -799,8 +799,19 @@ static char *codex_error_text(int status, const char *raw, const http_headers_t 
 static char *http_error_text(int policy, int status, const char *url, const http_headers_t *h, const char *body) {
     switch (policy) {
     case AI_RETRY_ANTHROPIC: return anthropic_error_text(status, body);
-    case AI_RETRY_OPENAI:
-        return g_req_model && str_eq(g_req_model->api, "azure-openai-responses") ? azure_error_text(status, body) : openai_error_text(status, body);
+    case AI_RETRY_OPENAI: {
+        if (g_req_model && str_eq(g_req_model->api, "azure-openai-responses")) return azure_error_text(status, body);
+        /* captureOpenAIHttpError: headers do not reach persisted turns, so a zero x-ratelimit-limit-* allowance rides
+         * in the text for the retry/rotation classifiers and the user (formatZeroAllowanceNotice) */
+        const char *zero = status == 429 ? ai_zero_rate_limit_header(h) : NULL;
+        if (!zero) return openai_error_text(status, body, NULL);
+        char *lname = str_lower(zero);
+        char *notice = xasprintf("(%s: 0 \xe2\x80\x94 this plan grants no allowance for the model; switch models or upgrade the plan)", lname);
+        char *t = openai_error_text(status, body, notice);
+        free(notice);
+        free(lname);
+        return t;
+    }
     case AI_RETRY_OLLAMA: return ollama_error_text(status, url, body);
     case AI_RETRY_CODEX: return codex_error_text(status, body, h);
     default: return ai_extract_error(status, body);
@@ -1220,8 +1231,10 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
         } else {
             retry = !c.got_data && (!http_fail || c.status >= 500 || c.status == 408 || c.status == 429);
             /* postOpenAIStream: a gateway's `x-should-retry: false` is terminal, as is a concurrency-admission 429 */
+            /* ... and so is a 429 with a zero x-ratelimit-limit-* allowance: the plan cannot serve the model */
             if (retry && http_fail && policy == AI_RETRY_OPENAI &&
-                (ai_should_retry_verdict(&c.hdrs) == 0 || admission_rejection(&c.hdrs, ebody)))
+                (ai_should_retry_verdict(&c.hdrs) == 0 || admission_rejection(&c.hdrs, ebody) ||
+                 (c.status == 429 && ai_zero_rate_limit_header(&c.hdrs))))
                 retry = false;
             if (retry && http_fail && policy == AI_RETRY_OLLAMA && c.status >= 500 &&
                 (str_istr(ebody, "failed to parse tool call arguments as json") ||

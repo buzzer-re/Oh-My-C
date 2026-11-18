@@ -274,6 +274,11 @@ timeout 30 "$B" --model mock/mock-1 --no-session -p "fail:400:transport-once" </
 n=$(grep -c "fail:400:transport-once" "$T/req.jsonl")
 (( n == 1 )) && echo "   ok  400 not retried" || { echo "   FAIL 400 not retried: $n requests"; fail=1; }
 rm -f "$T/agent/config.yml"
+# a 429 with a zero x-ratelimit-limit-* allowance fails on the first request, naming the header (omp 03a02d0926)
+out=$(timeout 30 "$B" --model mock/mock-1 --no-session -p "fail:429:Rate limit exceeded ZEROALLOW" </dev/null 2>&1)
+n=$(grep -c "ZEROALLOW" "$T/req.jsonl")
+(( n == 1 )) && [[ "$out" == *"(x-ratelimit-limit-req-minute: 0 — this plan grants no allowance for the model; switch models or upgrade the plan)"* ]] \
+    && echo "   ok  zero allowance fails fast" || { echo "   FAIL zero allowance fails fast: $n requests: $out"; fail=1; }
 # without a header hint the delay comes from the body text ("Please retry in 100ms"): 5 x 100 ms + 500 ms + 5 x 100 ms
 TR_PORT=$((20000 + RANDOM % 20000)); [[ $TR_PORT == "$PORT" ]] && TR_PORT=$((TR_PORT + 1))
 mkdir -p "$T/agent-tr"
@@ -452,6 +457,7 @@ rm -f "$T/agent/config.yml"
 check "bash fork"      "got-bar|fn-bar|||Ran in a copy of the busy session shell; changes here won't persist.##forkb=[]"  python3 -I -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; m=[x for x in r[-1]["messages"] if x.get("role")=="tool"]; t=[x["content"] if isinstance(x["content"],str) else "".join(b.get("text","") for b in x["content"]) for x in m]; print("##".join(t[2:4]).replace("\n","|"))' "$T/req.jsonl"
 # wait: idle ladder and its nudge; settle window, progress notes vs direct messages, no broadcast from a subagent
 check "wait ladder" "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl1" ladder
+check "wait lone"   "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl3" lone
 check "wait peers"  "wait ok"  python3 -I "$ROOT/tests/e2e/wait_ladder.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/wl2" peers
 # background jobs carry the call's intent: proc://, wait, /jobs; /jobs full requests the widget role's caption
 check "jobs intent" "jobs intent ok"  python3 -I "$ROOT/tests/e2e/jobs_intent.py" "$B" "$T/req.jsonl" "$T/agent/models.yml" "$T/ji"
@@ -620,8 +626,12 @@ if openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$T/sa.pem"
     check "vertex models"     "google-vertex ("       "${VENV[@]}" "$B" models gemini-3.1-pro-preview
     check "vertex adc text"   "plain google answer"   "${VENV[@]}" "$B" --model google-vertex/gemini-3.1-pro-preview --no-session -p "hi"
     check "vertex adc tool"   "Tool said: vx-e2e"     "${VENV[@]}" "$B" --model google-vertex/gemini-3.1-pro-preview --no-session -p "bash:echo vx-e2e"
+    # a long decode split into segments (Gemini 4 Hydrogen, finishReason CONTINUATION + continuationToken) resumes
+    # with the token into one answer (omp 1aa73b27a5)
+    check "vertex continuation" "seg1 seg2 seg3"  "${VENV[@]}" "$B" --model google-vertex/gemini-3.1-pro-preview --no-session -p "segments:3"
+    grep -q '"continuationToken": "tok-2"' "$T/google.jsonl" && echo "   ok  vertex continuation token" || { echo "   FAIL vertex continuation token"; fail=1; }
     check "vertex no project" "No API key found for google-vertex."  "${GENV[@]}" GOOGLE_APPLICATION_CREDENTIALS="$T/sa.json" "$B" --model google-vertex/gemini-3.1-pro-preview --no-session -p "hi"
-    grep -q '"path": "/v1/projects/proj-v/locations/us-central1/publishers/google/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse", "ua": "[^"]*", "auth": "Bearer ya29.mock-sa"' "$T/google.jsonl" \
+    grep -q '"path": "/v1beta1/projects/proj-v/locations/us-central1/publishers/google/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse", "ua": "[^"]*", "auth": "Bearer ya29.mock-sa"' "$T/google.jsonl" \
         && echo "   ok  vertex request path" || { echo "   FAIL vertex request path"; fail=1; }
 fi
 check "vertex no adc"     "No models matching \"gemini-3.1-pro-preview\""      "${GENV[@]}" "$B" models gemini-3.1-pro-preview
@@ -632,10 +642,27 @@ printf '{"google-gemini-cli":{"type":"oauth","access":"cca-token","refresh":"r1"
 check "gemini-cli models" "google-gemini-cli ("  "${GENV[@]}" "$B" models gemini-2.5-pro
 check "gemini-cli text"   "plain cca answer"     "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "hi"
 check "gemini-cli tool"   "Tool said: gc-e2e"    "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "bash:echo gc-e2e"
-# omp 9a37046d3a paused Google Antigravity again: a stored credential is never used and login refuses it, as omp
-# 18.22.0 does. Its transport checks (claude, tool, envelope) come back with auth.unpausedProviders.
+check "gemini-cli continuation" "seg1 seg2"  "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "segments:2"
+check "gemini-cli continuation token" "tok-1"  python3 -I -c 'import json,sys; print([r["body"]["request"].get("continuationToken") for r in map(json.loads, open(sys.argv[1])) if r["path"].startswith("/v1internal")])' "$T/google.jsonl"
+# omp 9a37046d3a paused Google Antigravity again: a stored credential is never used and login refuses it.
+# auth.unpausedProviders (omp af8e4c142b) turns it back on from operator layers only (global config, --config,
+# runtime); a project's .omc/config.yml cannot.
 check "antigravity paused" "No API key found for google-antigravity"  "${GENV[@]}" "$B" --model google-antigravity/claude-opus-4-6 --no-session -p "hi"
 check "antigravity login"  "Unknown OAuth provider 'google-antigravity'"  "${GENV[@]}" bash -c 'printf "no\n" | "$0" login google-antigravity' "$B"
+printf 'auth:\n  unpausedProviders:\n    - google-antigravity\n' > "$T/unpause.yml"
+mkdir -p "$T/agproj/.omc" && cp "$T/unpause.yml" "$T/agproj/.omc/config.yml"
+check "antigravity project unpause" "No API key found for google-antigravity"  "${GENV[@]}" bash -c 'cd "$1" && "$0" --model google-antigravity/claude-opus-4-6 --no-session -p hi' "$B" "$T/agproj"
+check "antigravity claude" "plain cca answer"    "${GENV[@]}" "$B" --config "$T/unpause.yml" --model google-antigravity/claude-opus-4-6 --no-session -p "hi"
+check "antigravity tool"  "Tool said: ag-e2e"    "${GENV[@]}" "$B" --config "$T/unpause.yml" --model google-antigravity/gemini-3.1-pro --no-session -p "bash:echo ag-e2e"
+# a new login of an unpaused provider still shows the account risk, and anything but "yes" stores nothing
+[ -f "$T/agent/config.yml" ] && mv "$T/agent/config.yml" "$T/config.yml.bak"
+cp "$T/unpause.yml" "$T/agent/config.yml"
+check "antigravity risk"  'Google has suspended accounts that did'  "${GENV[@]}" bash -c 'printf "no\n" | "$0" login google-antigravity' "$B"
+check "antigravity declined" 'Login failed: Login cancelled'  "${GENV[@]}" bash -c 'printf "no\n" | "$0" login google-antigravity' "$B"
+if [ -f "$T/config.yml.bak" ]; then mv "$T/config.yml.bak" "$T/agent/config.yml"; else rm -f "$T/agent/config.yml"; fi
+grep -q '"ua": "GeminiCLI/0.46.0/gemini-2.5-pro (' "$T/google.jsonl" && echo "   ok  gemini-cli client headers" || { echo "   FAIL gemini-cli client headers"; fail=1; }
+grep -q '"ua": "antigravity/hub/2.26.0 (aidev_client; .*"model": "claude-opus-4-6-thinking", "userAgent": "antigravity"' "$T/google.jsonl" \
+    && echo "   ok  antigravity envelope" || { echo "   FAIL antigravity envelope"; fail=1; }
 grep -q '"functionResponse": {"name": "bash"' "$T/google.jsonl" && echo "   ok  cca functionResponse replay" || { echo "   FAIL cca functionResponse replay"; fail=1; }
 if [ -f "$T/auth.json.bak" ]; then mv "$T/auth.json.bak" "$T/agent/auth.json"; else rm -f "$T/agent/auth.json"; fi
 # Cursor agent (Connect + protobuf over HTTP/1.1: RunSSE stream + BidiAppend unary appends, exec channel, KV blobs)

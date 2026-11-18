@@ -4,12 +4,15 @@
   POST /token                                   OAuth2 token endpoint: jwt-bearer grant (service-account ADC) whose
                                                 assertion must be an RS256 JWT from sa@mock.iam.gserviceaccount.com
                                                 -> access token ya29.mock-sa
-  POST /v1/projects/P/locations/L/publishers/google/models/M:streamGenerateContent?alt=sse
+  POST /v1beta1/projects/P/locations/L/publishers/google/models/M:streamGenerateContent?alt=sse
                                                 Vertex AI (Bearer ya29.mock-sa), Gemini SSE chunks
   POST /v1internal:streamGenerateContent?alt=sse
                                                 Cloud Code Assist (Bearer cca-token, project proj-cca), chunks wrapped
                                                 in {"response": ...}
 Replies: last user text "bash:<cmd>" -> functionCall bash; a functionResponse -> "Tool said: <output>";
+"segments:<n>" -> a long decode split into n segments (Gemini 4 Hydrogen): each but the last ends with finishReason
+CONTINUATION + continuationToken "tok-<k>", and a resend carrying that token (top level on Vertex, request.* on CCA)
+streams segment k+1 ("seg<k+1> "); usage is per segment (prompt 12 + 4 per earlier segment, 4 candidates);
 anything else -> a thought part plus "plain google answer" (CCA: "plain cca answer").
 Requests are appended to $MOCK_LOG (JSONL: path, headers subset, body)."""
 import base64, json, os, sys, urllib.parse
@@ -21,6 +24,20 @@ LOG = os.environ.get("MOCK_LOG")
 def b64url_json(seg):
     seg += "=" * (-len(seg) % 4)
     return json.loads(base64.urlsafe_b64decode(seg))
+
+
+def segment_reply(contents, token):
+    """`segments:<n>` long decode: (parts, finish, continuationToken, usage) of the segment after `token`, else None"""
+    last = contents[-1] if contents else {}
+    text = "".join(p.get("text", "") for p in last.get("parts", []) if not p.get("text", "").startswith("<system-reminder>"))
+    if not text.startswith("segments:"):
+        return None
+    n = int(text[9:])
+    k = int(token[4:]) if token else 0
+    usage = {"promptTokenCount": 12 + 4 * k, "candidatesTokenCount": 4, "totalTokenCount": 16 + 4 * k}
+    if k + 1 < n:
+        return [{"text": "seg%d " % (k + 1)}], "CONTINUATION", "tok-%d" % (k + 1), usage
+    return [{"text": "seg%d" % (k + 1)}], "STOP", None, usage
 
 
 def reply_parts(contents, plain):
@@ -76,23 +93,27 @@ class H(BaseHTTPRequestHandler):
                 return self.send(400, '{"error":"invalid_grant"}')
             return self.send(200, '{"access_token":"ya29.mock-sa","expires_in":3600,"token_type":"Bearer"}')
         req = json.loads(raw)
-        if path.startswith("/v1/projects/") and ":streamGenerateContent" in path:
+        if path.startswith("/v1beta1/projects/") and ":streamGenerateContent" in path:
             if auth != "Bearer ya29.mock-sa":
                 return self.send(401, '{"error":{"code":401,"message":"Request had invalid authentication credentials.","status":"UNAUTHENTICATED"}}')
-            parts, finish = reply_parts(req.get("contents", []), "plain google answer")
+            seg = segment_reply(req.get("contents", []), req.get("continuationToken"))
+            parts, finish = seg[:2] if seg else reply_parts(req.get("contents", []), "plain google answer")
             chunks = [{"candidates": [{"content": {"role": "model", "parts": [p]}}]} for p in parts]
             chunks[-1]["candidates"][0]["finishReason"] = finish
-            chunks[-1]["usageMetadata"] = {"promptTokenCount": 12, "candidatesTokenCount": 4, "totalTokenCount": 16}
+            if seg and seg[2]: chunks[-1]["candidates"][0]["continuationToken"] = seg[2]
+            chunks[-1]["usageMetadata"] = seg[3] if seg else {"promptTokenCount": 12, "candidatesTokenCount": 4, "totalTokenCount": 16}
             wrap = lambda c: c
         elif path == "/v1internal:streamGenerateContent?alt=sse":
             if auth != "Bearer cca-token":
                 return self.send(401, '{"error":{"code":401,"message":"unauthenticated"}}')
             if req.get("project") != "proj-cca" or "request" not in req:
                 return self.send(400, '{"error":{"code":400,"message":"bad envelope"}}')
-            parts, finish = reply_parts(req["request"].get("contents", []), "plain cca answer")
+            seg = segment_reply(req["request"].get("contents", []), req["request"].get("continuationToken"))
+            parts, finish = seg[:2] if seg else reply_parts(req["request"].get("contents", []), "plain cca answer")
             chunks = [{"candidates": [{"content": {"role": "model", "parts": [p]}}]} for p in parts]
             chunks[-1]["candidates"][0]["finishReason"] = finish
-            chunks[-1]["usageMetadata"] = {"promptTokenCount": 12, "candidatesTokenCount": 4, "totalTokenCount": 16}
+            if seg and seg[2]: chunks[-1]["candidates"][0]["continuationToken"] = seg[2]
+            chunks[-1]["usageMetadata"] = seg[3] if seg else {"promptTokenCount": 12, "candidatesTokenCount": 4, "totalTokenCount": 16}
             chunks[0]["responseId"] = "resp-mock"
             wrap = lambda c: {"response": c, "traceId": "trace-mock"}
         else:

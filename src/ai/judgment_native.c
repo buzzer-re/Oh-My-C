@@ -4,18 +4,165 @@
  *   openrouter-decisions  POST {baseUrl}/decisions         same body, images as image_url parts in state
  *   openai-decisions      POST {baseUrl}/decisions         openai-decisions.ts: questions as an array, translated both ways
  *   workers-ai-systemone  POST {baseUrl with account}/{model}  {state, model: last segment, questions[, images]},
- *                         answers inside Cloudflare's {result, success, errors} envelope */
+ *                         answers inside Cloudflare's {result, success, errors} envelope
+ *   liquid-systemone      POST {baseUrl}/decisions/v1/systemone  {state, model, questions[, images: data URLs]}
+ *   nace-systemone        POST {baseUrl}/v1/systemone      the liquid body, media data URLs in text described
+ *   google-decisions      POST {baseUrl}/decisions         google-decisions.ts: `input`, positional `q<i>` questions,
+ *                         x-goog-api-key */
 #define _GNU_SOURCE
 #include "judgment_native.h"
 
 #include "net/http.h"
+
+#include <ctype.h>
+#include <strings.h>
 
 #define JUDGE_TIMEOUT_MS 10000
 #define JUDGE_ATTEMPTS 3
 
 bool ai_is_judgment_api(const char *api) {
     return str_eq(api, "typesafe") || str_eq(api, "openrouter-decisions") || str_eq(api, "openai-decisions") ||
-           str_eq(api, "workers-ai-systemone");
+           str_eq(api, "workers-ai-systemone") || str_eq(api, "google-decisions") || str_eq(api, "liquid-systemone") ||
+           str_eq(api, "nace-systemone");
+}
+
+static bool mime_ch(char c) { return isalnum((unsigned char)c) || (c && strchr("!#$&^_.+-", c)); }
+static bool b64url_ch(char c) { return isalnum((unsigned char)c) || c == '+' || c == '/' || c == '=' || c == '_' || c == '-'; }
+
+/* MEDIA_DATA_URL at p: `data:((?:image|audio|video)/<subtype>|application/pdf)(?:;[^;,\s]*)*;base64,[A-Za-z0-9+/=_-]*`
+ * (case-insensitive). Returns the end, with the type span in *t / *tn; NULL when no match starts at p. */
+static const char *media_data_url_at(const char *p, const char **t, size_t *tn) {
+    if (strncasecmp(p, "data:", 5) != 0) return NULL;
+    const char *q = p + 5, *ty = q;
+    if (!strncasecmp(q, "application/pdf", 15)) q += 15;
+    else {
+        size_t k = !strncasecmp(q, "image/", 6) || !strncasecmp(q, "audio/", 6) || !strncasecmp(q, "video/", 6) ? 6 : 0;
+        if (!k || !isalnum((unsigned char)q[k])) return NULL;
+        q += k;
+        while (mime_ch(*q)) q++;
+    }
+    *t = ty;
+    *tn = (size_t)(q - ty);
+    /* (?:;[^;,\s]*)*;base64, : the parameter list must end in ;base64, (backtracking over the parameters) */
+    const char *r = q;
+    for (;;) {
+        if (*r != ';') return NULL;
+        if (!strncasecmp(r, ";base64,", 8)) {
+            r += 8;
+            while (b64url_ch(*r)) r++;
+            return r;
+        }
+        r++;
+        while (*r && *r != ';' && *r != ',' && !isspace((unsigned char)*r)) r++;
+    }
+}
+
+/* describeMediaDataUrls: each media data URL in the strings (never the keys) becomes `[<type> base64 data URL]`;
+ * Drex rejects any text holding one (422 `is media (image/png data URL)`). Owned clone. */
+static json_t *describe_media_data_urls(const json_t *v) {
+    if (json_is_str(v)) {
+        const char *s = json_sv(v);
+        if (!str_istr(s, "data:")) return json_clone(v);
+        sb_t b = SB_INIT;
+        for (const char *p = s; *p;) {
+            const char *t;
+            size_t tn;
+            const char *e = media_data_url_at(p, &t, &tn);
+            if (e) {
+                sb_appendf(&b, "[%.*s base64 data URL]", (int)tn, t);
+                p = e;
+            } else {
+                sb_putc(&b, *p++);
+            }
+        }
+        return json_str_own(sb_detach(&b));
+    }
+    if (json_is_arr(v)) {
+        json_t *out = json_arr(), *it;
+        json_arr_foreach(v, i, it) json_push(out, describe_media_data_urls(it));
+        return out;
+    }
+    if (json_is_obj(v)) {
+        json_t *out = json_obj(), *it;
+        const char *k;
+        json_obj_foreach(v, i, k, it) json_set(out, k, describe_media_data_urls(it));
+        return out;
+    }
+    return json_clone(v);
+}
+
+/* google-decisions.ts encodeQuestion: positional keys, noul criteria as {true,false}_description, choice nulls as "";
+ * NULL with *err for a box question */
+static json_t *gdecisions_question(const char *id, const json_t *q, char **err) {
+    const char *type = json_get_str(q, "type");
+    json_t *o = json_obj();
+    json_set_str(o, "type", type ? type : "");
+    if (json_get(q, "instructions")) json_set(o, "instructions", json_clone(json_get(q, "instructions")));
+    const json_t *crit = json_get(q, "criteria");
+    if (str_eq(type, "noul")) {
+        const json_t *yes = json_get(crit, "true"), *no = json_get(crit, "false");
+        if (yes || no) {
+            json_t *c = json_obj();
+            if (yes) json_set(c, "true_description", json_clone(yes));
+            if (no) json_set(c, "false_description", json_clone(no));
+            json_set(o, "criteria", c);
+        }
+    } else if (str_eq(type, "choice")) {
+        json_t *c = json_obj(), *cv;
+        const char *opt;
+        json_obj_foreach(crit, i, opt, cv) json_set(c, opt, json_is_null(cv) || !cv ? json_str("") : json_clone(cv));
+        json_set(o, "criteria", c);
+    } else if (str_eq(type, "score")) {
+        if (crit) json_set(o, "criteria", json_clone(crit));
+    } else {
+        *err = xasprintf("Gemini Decisions has no box question type (question \"%s\")", id);
+        json_free(o);
+        return NULL;
+    }
+    return o;
+}
+
+/* google-decisions.ts decode: answers read back by position into a System One shaped response, in place */
+static void gdecisions_decode(json_t *resp, const json_t *questions) {
+    const json_t *ans = json_get_obj(resp, "answers");
+    json_t *out = json_obj();
+    size_t idx = 0;
+    const char *id;
+    json_t *q;
+    json_obj_foreach(questions, i, id, q) {
+        char key[32];
+        snprintf(key, sizeof key, "q%zu", idx++);
+        const json_t *e = json_get_obj(ans, key);
+        const char *ty = json_get_str(e, "type");
+        json_t *a = NULL;
+        if (str_eq(ty, "noul") && json_is_num(json_get(e, "noul"))) {
+            a = json_obj();
+            json_set_str(a, "type", "noul");
+            json_set(a, "noul", json_clone(json_get(e, "noul")));
+        } else if ((str_eq(ty, "choice") || str_eq(ty, "score")) && json_is_obj(json_get(e, "probabilities")) &&
+                   json_is_num(json_get(e, "confidence")) &&
+                   (str_eq(ty, "choice") ? json_is_str(json_get(e, "choice")) : json_is_num(json_get(e, "score")))) {
+            bool numbers = true;
+            json_t *pv;
+            const char *pk;
+            json_obj_foreach(json_get(e, "probabilities"), k, pk, pv) numbers = numbers && json_is_num(pv);
+            if (numbers) {
+                a = json_obj();
+                json_set_str(a, "type", ty);
+                json_set(a, ty, json_clone(json_get(e, ty)));
+                json_set(a, "probabilities", json_clone(json_get(e, "probabilities")));
+                json_set(a, "confidence", json_clone(json_get(e, "confidence")));
+            }
+        }
+        if (a) json_set(out, id, a);
+    }
+    json_set(resp, "answers", out);
+    const json_t *u = json_get_obj(resp, "usage");
+    json_t *usage = json_obj();
+    if (json_is_num(json_get(u, "total_input_tokens"))) json_set(usage, "input_tokens", json_clone(json_get(u, "total_input_tokens")));
+    if (json_is_num(json_get(u, "total_output_tokens"))) json_set(usage, "output_tokens", json_clone(json_get(u, "total_output_tokens")));
+    json_set(resp, "usage", usage);
+    json_del(resp, "model");
 }
 
 static bool model_has_image_input(const ai_model_t *m) { return m->input_image; }
@@ -165,6 +312,17 @@ static void decisions_decode(json_t *resp) {
     json_set(resp, "answers", answers);
 }
 
+/* OpenAIHttpError.parseEnvelope's code (the error envelope's `code`, else `type`) is upstream_credentials_exhausted */
+static bool gateway_credentials_exhausted(const char *body) {
+    json_t *j = body ? json_parse_str(body) : NULL;
+    const json_t *e = json_get_obj(j, "error");
+    const json_t *src = e ? e : j;
+    const char *code = json_get_str(src, "code") ? json_get_str(src, "code") : json_get_str(src, "type");
+    bool r = str_eq(code, "upstream_credentials_exhausted");
+    json_free(j);
+    return r;
+}
+
 json_t *ai_native_judge(const ai_model_t *m, const char *key, const json_t *state, const json_t *questions,
                         const json_t *images, volatile sig_atomic_t *cancel, double *cost, int64_t tokens[2], char **model_out, char **err) {
     json_t *wire_q = wire_questions(questions);
@@ -267,6 +425,60 @@ json_t *ai_native_judge(const ai_model_t *m, const char *key, const json_t *stat
             json_push(qs, eq);
         }
         json_set(body, "questions", qs);
+    } else if (str_eq(api, "google-decisions")) {
+        /* Gemini Decisions: `input` text (JSON serialized) plus image blocks, positional question keys, the key in
+         * x-goog-api-key */
+        url = xasprintf("%s/decisions", base);
+        token = xstrdup(key);
+        char *st = json_is_str(state) ? xstrdup(json_sv(state)) : json_dump(state, 0);
+        json_set_str(body, "model", wire_model);
+        if (want_images) {
+            json_t *in = json_arr(), *txt = json_obj(), *img;
+            json_set_str(txt, "type", "text");
+            json_set_str(txt, "text", st);
+            json_push(in, txt);
+            json_arr_foreach(images, i, img) {
+                json_t *p = json_obj();
+                json_set_str(p, "type", "image");
+                json_set_str(p, "data", json_get_str(img, "data") ? json_get_str(img, "data") : "");
+                json_set_str(p, "mime_type", json_get_str(img, "mimeType") ? json_get_str(img, "mimeType") : "image/png");
+                json_push(in, p);
+            }
+            json_set(body, "input", in);
+        } else {
+            json_set_str(body, "input", st);
+        }
+        free(st);
+        json_t *qs = json_obj();
+        size_t qi = 0;
+        const char *qn;
+        json_t *qv;
+        json_obj_foreach(wire_q, qx, qn, qv) {
+            json_t *eq = gdecisions_question(qn, qv, err);
+            if (!eq) break;
+            char qk[32];
+            snprintf(qk, sizeof qk, "q%zu", qi++);
+            json_set(qs, qk, eq);
+        }
+        json_set(body, "questions", qs);
+    } else if (str_eq(api, "liquid-systemone") || str_eq(api, "nace-systemone")) {
+        /* Liquid AI `{base}/decisions/v1/systemone`, Nace Drex `{base}/v1/systemone`: the verbatim body plus a
+         * top-level array of image data URLs; Drex also gets every media data URL in its text described */
+        bool nace = str_eq(api, "nace-systemone");
+        url = xasprintf(nace ? "%s/v1/systemone" : "%s/decisions/v1/systemone", base);
+        token = xstrdup(key);
+        json_set(body, "state", nace ? describe_media_data_urls(state) : json_clone(state));
+        json_set_str(body, "model", wire_model);
+        json_set(body, "questions", nace ? describe_media_data_urls(wire_q) : json_clone(wire_q));
+        if (want_images) {
+            json_t *arr = json_arr(), *img;
+            json_arr_foreach(images, i, img) {
+                char *d = data_url(img);
+                json_push_str(arr, d);
+                free(d);
+            }
+            json_set(body, "images", arr);
+        }
     } else if (str_eq(api, "openrouter-decisions")) {
         url = xasprintf("%s/decisions", base);
         token = xstrdup(key);
@@ -322,9 +534,13 @@ json_t *ai_native_judge(const ai_model_t *m, const char *key, const json_t *stat
     }
     json_t *answers = NULL;
     if (!*err) {
-        char *auth = xasprintf("Bearer %s", token ? token : "");
-        http_headers_set(&h, "Authorization", auth);
-        free(auth);
+        if (str_eq(api, "google-decisions")) {
+            http_headers_set(&h, "x-goog-api-key", token ? token : "");
+        } else {
+            char *auth = xasprintf("Bearer %s", token ? token : "");
+            http_headers_set(&h, "Authorization", auth);
+            free(auth);
+        }
         http_headers_set(&h, "Accept", "application/json");
         http_headers_set(&h, "Content-Type", "application/json");
         if (!http_headers_get(&h, "User-Agent")) http_headers_set(&h, "User-Agent", OMC_NAME "/" OMC_VERSION);
@@ -347,7 +563,10 @@ json_t *ai_native_judge(const ai_model_t *m, const char *key, const json_t *stat
                 resp = json_parse_str(r.body ? r.body : "");
                 if (!resp) *err = xasprintf("%s returned a malformed judgment response", label);
             } else {
-                bool transient = r.status == 408 || r.status == 429 || r.status >= 500;
+                /* isGatewayCredentialsExhausted: a gateway's 502 upstream_credentials_exhausted (every upstream key
+                 * for the provider and model failed) cannot succeed until the gateway's keys change */
+                bool transient = (r.status == 408 || r.status == 429 || r.status >= 500) &&
+                                 !(r.status == 502 && gateway_credentials_exhausted(r.body));
                 if (!transient || last) *err = xasprintf("%s API error (%d): %s", label, r.status, r.body ? r.body : "");
             }
             http_resp_free(&r);
@@ -357,6 +576,7 @@ json_t *ai_native_judge(const ai_model_t *m, const char *key, const json_t *stat
         free(payload);
         if (resp) {
             if (str_eq(api, "openai-decisions") && json_get_arr(resp, "answers")) decisions_decode(resp);
+            if (str_eq(api, "google-decisions") && json_get_obj(resp, "answers")) gdecisions_decode(resp, wire_q);
             const json_t *res = str_eq(api, "workers-ai-systemone") ? json_get(resp, "result") : resp;
             const json_t *ans = json_get_obj(res, "answers");
             if (!json_is_obj(res) || !ans) {

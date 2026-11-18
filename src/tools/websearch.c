@@ -50,7 +50,7 @@ static const char *const LABELS[][2] = {
     {"parallel", "Parallel"},   {"perplexity", "Perplexity"}, {"gemini", "Gemini"},       {"anthropic", "Anthropic"},
     {"codex", "OpenAI Codex"},  {"openai", "OpenAI API"},     {"xai", "xAI"},             {"openrouter", "OpenRouter"},
     {"zai", "Z.AI"},            {"exa", "Exa"},               {"tinyfish", "TinyFish"},   {"keenable", "Keenable"},
-    {"jina", "Jina"},
+    {"jina", "Jina"},           {"sofya", "Sofya"},
     {"kagi", "Kagi"},           {"tavily", "Tavily"},         {"firecrawl", "Firecrawl"}, {"brave", "Brave"},
     {"deepseek", "DeepSeek"},   {"kimi", "Kimi"},             {"synthetic", "Synthetic"}, {"ollama", "Ollama"},
     {"searxng", "SearXNG"},     {"startpage", "Startpage"},   {"duckduckgo", "DuckDuckGo"}, {"ecosia", "Ecosia"},
@@ -2302,11 +2302,14 @@ static bool has_zai(const ai_model_t *m) { return key_kind("zai") != NULL; }
  * back as keywords; omc has no central post-filter, so they filter nothing (see docs/tools.md). */
 typedef struct {
     strvec_t terms, sites, in_title, in_url, in_text, filetypes;
+    strvec_t neg_terms, excluded_sites; /* `-term` / `-"phrase"` (rendered) and `-site:` hosts, for engines with negation */
     char *before, *after;
     bool has_directives;
 } kq_t;
 
 static void kq_free(kq_t *q) {
+    strvec_free(&q->neg_terms);
+    strvec_free(&q->excluded_sites);
     strvec_free(&q->terms);
     strvec_free(&q->sites);
     strvec_free(&q->in_title);
@@ -2414,6 +2417,11 @@ static bool kq_directive(const char *t, const char **name, size_t *nl, const cha
 static void kq_constraint(kq_t *q, int field, const char *value, bool negated) {
     q->has_directives = true;
     char *v = str_trim(value);
+    if (*v && negated && field == 1) {
+        char *site = kq_site(v);
+        if (*site) strvec_push(&q->excluded_sites, site);
+        free(site);
+    }
     if (*v && !negated) {
         if (field == 1) {
             char *site = kq_site(v);
@@ -2608,7 +2616,12 @@ static void kq_parse(const char *raw, kq_t *q) {
             kq_constraint(q, all_mode, text, negated);
             continue;
         }
-        if (negated) continue; /* renderTerm: no negation syntax */
+        if (negated) { /* renderTerm: dropped without negation syntax; kept for engines that take it */
+            char *w = as_phrase ? xasprintf("-\"%s\"", text) : xasprintf("-%s", text);
+            strvec_push(&q->neg_terms, w);
+            free(w);
+            continue;
+        }
         if (as_phrase) {
             char *w = xasprintf("\"%s\"", text);
             strvec_push(&q->terms, w);
@@ -2754,6 +2767,147 @@ static json_t *s_keenable(const ws_params_t *p, ws_err_t *e) {
 }
 
 static bool has_keenable(const ai_model_t *m) { return key_kind("keenable") != NULL; }
+
+/* ---------- Sofya (providers/sofya.ts) ---------- */
+
+#define SOFYA_MAX_DOMAIN_FILTERS 10 /* Sofya rejects more than 10 hosts in either domain list with a 422 */
+
+/* siteHosts: bare, deduplicated hosts of site values, at most `cap`; NULL when none */
+static json_t *sofya_hosts(const strvec_t *sites, size_t cap) {
+    json_t *arr = json_arr();
+    strvec_t seen = {0};
+    for (size_t i = 0; i < sites->n && seen.n < cap; i++) {
+        char *h = xstrndup(sites->v[i], strcspn(sites->v[i], "/"));
+        if (*h && !strvec_contains(&seen, h)) {
+            strvec_push(&seen, h);
+            json_push_str(arr, h);
+        }
+        free(h);
+    }
+    strvec_free(&seen);
+    if (!json_len(arr)) {
+        json_free(arr);
+        return NULL;
+    }
+    return arr;
+}
+
+/* POST https://sofya.co/v1/search (bearer SOFYA_API_KEY or a stored `sofya` credential): keywords, quoted phrases
+ * and `-` exclusions; site:/-site: hosts as include/exclude_domains; after:/before: as a closed freshness range
+ * (`before:` exclusive, a missing side spans to the epoch or today), else the recency window */
+static json_t *s_sofya(const ws_params_t *p, ws_err_t *e) {
+    int max = clamp_results(want_results(p), 10, 20);
+    char *key = auth_get_api_key("sofya");
+    if (!key || !*key) {
+        free(key);
+        fail_typed(e, "sofya", 0, xstrdup("Sofya credentials not found. Set SOFYA_API_KEY or configure an API key for provider \"sofya\"."));
+        return NULL;
+    }
+    kq_t q;
+    kq_parse(p->query, &q);
+    char *kw = q.has_directives || q.neg_terms.n ? kq_format(&q) : str_trim(p->query);
+    sb_t qb = SB_INIT;
+    sb_append(&qb, kw);
+    if (q.has_directives || q.neg_terms.n)
+        for (size_t i = 0; i < q.neg_terms.n; i++) sb_appendf(&qb, "%s%s", qb.len ? " " : "", q.neg_terms.v[i]);
+    free(kw);
+    json_t *body = json_obj();
+    json_set(body, "query", json_str_own(sb_detach(&qb)));
+    json_set_str(body, "search_depth", "snippets"); /* 1 credit; `basic` page text would be truncated anyway */
+    json_set_int(body, "max_results", max);
+    json_t *inc = sofya_hosts(&q.sites, SOFYA_MAX_DOMAIN_FILTERS), *exc = sofya_hosts(&q.excluded_sites, SOFYA_MAX_DOMAIN_FILTERS);
+    if (inc) json_set(body, "include_domains", inc);
+    if (exc) json_set(body, "exclude_domains", exc);
+    if (q.after || q.before) {
+        char end[16];
+        time_t t = time(NULL);
+        if (q.before) {
+            struct tm tm = {0};
+            if (sscanf(q.before, "%4d-%2d-%2d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday) == 3) {
+                tm.tm_year -= 1900;
+                tm.tm_mon -= 1;
+                t = timegm(&tm) - 86400;
+            }
+        }
+        strftime(end, sizeof end, "%Y-%m-%d", gmtime(&t));
+        json_set(body, "freshness", json_str_own(xasprintf("%s:%s", q.after ? q.after : "1970-01-01", end)));
+    } else if (p->recency && *p->recency) {
+        json_set_str(body, "freshness", p->recency);
+    }
+    kq_free(&q);
+    http_headers_t h = {0};
+    http_headers_set(&h, "Content-Type", "application/json");
+    char *auth = xasprintf("Bearer %s", key);
+    http_headers_set(&h, "Authorization", auth);
+    free(auth);
+    free(key);
+    char *payload = json_dump(body, 0);
+    json_free(body);
+    http_resp_t r;
+    int rc = ws_http("POST", "https://sofya.co/v1/search", &h, payload, p, &r);
+    free(payload);
+    http_headers_free(&h);
+    if (rc != 0) {
+        fail_transport(e, p, &r);
+        http_resp_free(&r);
+        return NULL;
+    }
+    if (r.status < 200 || r.status >= 300) {
+        char *txt = xstrndup(r.body ? r.body : "", MIN(r.body_len, (size_t)(8 * 1024)));
+        if (!classify_http(e, "sofya", r.status, txt))
+            fail_typed(e, "sofya", r.status, xasprintf("Sofya search API error (%d): %s", r.status, txt));
+        free(txt);
+        http_resp_free(&r);
+        return NULL;
+    }
+    json_t *data = json_parse_str(r.body ? r.body : "");
+    http_resp_free(&r);
+    if (!data) {
+        fail_typed(e, "sofya", 500, xstrdup("Sofya search API returned invalid JSON"));
+        return NULL;
+    }
+    const json_t *results = json_get(data, "results");
+    if (!json_is_arr(results)) {
+        json_free(data);
+        fail_typed(e, "sofya", 500, xstrdup("Sofya search API returned an unexpected response shape"));
+        return NULL;
+    }
+    json_t *resp = resp_new("sofya"), *srcs = json_get(resp, "sources");
+    strvec_t seen = {0};
+    const json_t *x;
+    json_arr_foreach(results, i, x) {
+        if (!json_is_obj(x) || (int)json_len(srcs) >= max) continue;
+        char *url = ws_normalize_http_url(json_get_str(x, "url"));
+        if (!url || strvec_contains(&seen, url)) {
+            free(url);
+            continue;
+        }
+        strvec_push(&seen, url);
+        char *title = json_get_str(x, "title") ? ws_collapse_spaces(json_get_str(x, "title")) : xstrdup("");
+        const char *sraw = json_get_str(x, "description") && *json_get_str(x, "description") ? json_get_str(x, "description")
+                                                                                           : json_get_str(x, "content");
+        char *snip = sraw ? ws_collapse_spaces(sraw) : xstrdup("");
+        const char *date = json_get_str(x, "published_date");
+        json_push(srcs, src_new(*title ? title : url, url, *snip ? snip : NULL, date && *date ? date : NULL));
+        free(snip);
+        free(title);
+        free(url);
+    }
+    strvec_free(&seen);
+    /* a query Sofya rewrote is reported, so a dropped site: or quote is visible */
+    const char *exec = json_get_str(data, "relaxed_query") && *json_get_str(data, "relaxed_query") ? json_get_str(data, "relaxed_query")
+                                                                                                 : json_get_str(data, "altered_query");
+    if (exec && *exec) {
+        json_t *qs = json_arr();
+        json_push(qs, json_str_own(ws_collapse_spaces(exec)));
+        json_set(resp, "searchQueries", qs);
+    }
+    json_free(data);
+    json_set_str(resp, "authMode", "api_key");
+    return resp;
+}
+
+static bool has_sofya(const ai_model_t *m) { return key_kind("sofya") != NULL; }
 
 /* ---------- SearXNG (providers/searxng.ts) ---------- */
 
@@ -3051,6 +3205,7 @@ static const provider_t ENGINES[] = {
     {"duckduckgo", s_ddg, always, always},      {"perplexity", s_perplexity, has_perplexity, NULL},
     {"kimi", s_kimi, has_kimi, NULL},           {"zai", s_zai, has_zai, NULL},
     {"searxng", s_searxng, has_searxng, NULL},  {"keenable", s_keenable, has_keenable, always},
+    {"sofya", s_sofya, has_sofya, NULL},
 };
 static const provider_t GROUNDED[] = {
     {"anthropic", s_anthropic, has_anthropic, NULL}, {"openai", s_openai, has_openai, NULL},

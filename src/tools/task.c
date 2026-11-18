@@ -470,6 +470,13 @@ static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             for (size_t i = 0; i < agents.n; i++) sb_appendf(&label, "%s%s", i ? ", " : "", agents.v[i]);
             json_t *c = json_obj();
             json_set_bool(c, "mixed", false);
+            /* job lifecycle (proc://, expiry, agent://) rides the first spawn result only */
+            pthread_mutex_lock(&env->mu);
+            bool lifecycle = !env->task_lifecycle_shown;
+            env->task_lifecycle_shown = true;
+            pthread_mutex_unlock(&env->mu);
+            json_set_bool(c, "lifecycle", lifecycle);
+            json_set_bool(c, "ircEnabled", irc_enabled(env));
             json_set_bool(c, "singular", ns == 1);
             json_set_bool(c, "singleCall", n == 1);
             json_set_bool(c, "showListing", n > 1);
@@ -558,7 +565,6 @@ agent_tool_t *tool_task_new(tool_env_t *env) {
     }
     if (async) {
         json_t *ac = json_obj();
-        json_set_bool(ac, "ircEnabled", irc);
         json_set_bool(ac, "waitTool", true);
         char *g = prompt_render("coding-agent/prompts/tools/task-async-contract.md", ac);
         json_free(ac);

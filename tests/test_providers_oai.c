@@ -1,4 +1,5 @@
 /* test_providers_oai.c - offline tests for the OpenAI-family providers (request building + stream decoding). */
+#include <time.h>
 #include "ai/leaked_thinking.h"
 #include "ai/provider_openai.h"
 
@@ -781,6 +782,40 @@ static void test_responses_stream(void) {
     CHECK_STR(json_get_str(block_of(msg, "thinking", 0), "thinking"), "");
     CHECK(json_get_str(block_of(msg, "thinking", 0), "thinkingSignature") != NULL);
     CHECK_STR(json_get_str(block_of(msg, "text", 0), "text"), "cut");
+    {
+        /* a refused encrypted reasoning replay (omp 80ad1d6b2e): turns before the floor marker (and every turn of the
+         * retrying request) replay no reasoning item; the floor turn and later ones keep theirs */
+        json_t *hist = json_arr();
+        json_push(hist, J("{\"role\":\"user\",\"content\":\"q1\"}"));
+        json_push(hist, json_clone(msg));
+        json_push(hist, J("{\"role\":\"user\",\"content\":\"q2\"}"));
+        json_t *floor_turn = json_clone(msg);
+        json_set_bool(floor_turn, "encryptedReasoningFloor", true);
+        json_push(hist, floor_turn);
+        json_push(hist, J("{\"role\":\"user\",\"content\":\"q3\"}"));
+        ai_context_t ctx = {.messages = hist};
+        json_t *in = oair_convert_input(&t.m, &ctx, 0);
+        int reasoning_at = -1, n_reasoning = 0;
+        json_t *it;
+        json_arr_foreach(in, i, it) if (str_eq(json_get_str(it, "type"), "reasoning")) {
+            n_reasoning++;
+            reasoning_at = (int)i;
+        }
+        CHECK(n_reasoning == 1 && reasoning_at > 2);
+        json_free(in);
+        ctx.drop_encrypted_reasoning = true;
+        in = oair_convert_input(&t.m, &ctx, 0);
+        n_reasoning = 0;
+        json_arr_foreach(in, i, it) n_reasoning += str_eq(json_get_str(it, "type"), "reasoning");
+        CHECK(n_reasoning == 0);
+        json_free(in);
+        json_free(hist);
+        CHECK(oair_refused_encrypted_reasoning("400 The encrypted content was not issued to this caller (code=invalid_encrypted_content)"));
+        CHECK(oair_refused_encrypted_reasoning("reasoning `encrypted_content` has expired"));
+        CHECK(oair_refused_encrypted_reasoning("gateway: Encrypted content could not be verified"));
+        CHECK(!oair_refused_encrypted_reasoning("encrypted content\nwas not issued to this caller"));
+        CHECK(!oair_refused_encrypted_reasoning("400 bad request"));
+    }
     json_free(msg);
 
     const char *sse3 = "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n\n";
@@ -1116,6 +1151,23 @@ static void test_retry_hints(void) {
     CHECK(ai_extract_retry_hint(NULL, "Rate limited, try again in ~5 min.") == 300000);
     CHECK(ai_extract_retry_hint(NULL, "Your quota will reset after 1h2m3s") == 3723000);
     CHECK(ai_extract_retry_hint(NULL, "Resets in 2hr 15min") == 8100000);
+    /* Cloud Code Assist quota formats (omp e482002caf, 6d091aba7f): "Resets in 71h48m47s", "quotaResetDelay" (with
+     * millisecond units), and the absolute "quotaResetTimeStamp" */
+    CHECK(ai_extract_retry_hint(NULL, "Individual quota reached. Resets in 71h48m47s.") == 258527000);
+    CHECK(ai_extract_retry_hint(NULL, "{\"quotaResetDelay\": \"17h48m25.5s\"}") == 64105500);
+    CHECK(ai_extract_retry_hint(NULL, "{\"quotaResetDelay\":\"835ms\"}") == 835);
+    CHECK(ai_extract_retry_hint(NULL, "{\"quotaResetDelay\": \"5mx\"}") == -1);
+    {
+        time_t future = time(NULL) + 7200;
+        char stamp[40], body[120];
+        strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%SZ", gmtime(&future));
+        snprintf(body, sizeof body, "{\"quotaResetTimeStamp\": \"%s\"}", stamp);
+        int64_t wait_ms = ai_extract_retry_hint(NULL, body);
+        CHECK(wait_ms > 7100000 && wait_ms <= 7200000);
+        stamp[19] = 0; /* naive (no Z): not this grammar */
+        snprintf(body, sizeof body, "{\"quotaResetTimeStamp\": \"%s\"}", stamp);
+        CHECK(ai_extract_retry_hint(NULL, body) == -1);
+    }
     CHECK(ai_extract_retry_hint(NULL, "limit will reset in 3 days") == 3 * 86400000LL);
     CHECK(ai_extract_retry_hint(NULL, "429 slow down retry-after-ms=98497") == 98497);
     CHECK(ai_extract_retry_hint(NULL, "try again in 2s, or reset after 10s") == 10000); /* longest wins */

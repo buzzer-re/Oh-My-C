@@ -674,8 +674,24 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
     return 0;
 }
 
+/* WriteTool.description: the archive/SQLite target grammar lives in xd://read/sources; it is inlined when that doc
+ * is unreachable (`read` off: docTopicsReadable) */
+static char *write_description(bool read_active) {
+    json_t *ctx = json_obj();
+    json_set_bool(ctx, "readActive", read_active);
+    char *d = tool_prompt("write", ctx);
+    json_free(ctx);
+    return d;
+}
+
+void write_set_read_active(agent_tool_t *t, bool read_active) {
+    char *d = write_description(read_active);
+    free(t->description);
+    t->description = d;
+}
+
 agent_tool_t *tool_write_new(tool_env_t *env) {
-    char *desc = tool_prompt("write", NULL);
+    char *desc = write_description(true);
     json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":"
                            "\"string\"}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("write", "Write", desc, s, write_execute);
@@ -1212,6 +1228,24 @@ static bool python_available(void) {
     return ok;
 }
 
+/* major.minor of the bash the tool runs (BASH_VERSINFO), once per process; empty when the shell is not bash */
+static pthread_once_t g_bash_ver_once = PTHREAD_ONCE_INIT;
+static char g_bash_ver[32];
+
+static void probe_bash_version(void) {
+    const char *sh = proc_shell_path();
+    if (!str_ends(sh, "bash")) return;
+    char *out = proc_shell_capture("printf '%s.%s' \"${BASH_VERSINFO[0]}\" \"${BASH_VERSINFO[1]}\"", NULL, 3000);
+    if (out && *out && strlen(out) < sizeof g_bash_ver && isdigit((unsigned char)out[0]))
+        snprintf(g_bash_ver, sizeof g_bash_ver, "%s", out);
+    free(out);
+}
+
+static const char *real_bash_version(void) {
+    pthread_once(&g_bash_ver_once, probe_bash_version);
+    return g_bash_ver[0] ? g_bash_ver : NULL;
+}
+
 char *bash_tool_description(bool has_eval) {
     json_t *ctx = json_obj();
     json_set_bool(ctx, "hasEval", has_eval);
@@ -1224,9 +1258,23 @@ char *bash_tool_description(bool has_eval) {
     json_set_str(ctx, "autoBackgroundSeconds", secs);
     free(secs);
     json_set_bool(ctx, "hasLaunch", settings_bool("launch.enabled", true));
+    /* omp lists its embedded shell's in-process builtins (shellBuiltins); omc runs the system's real bash, which has
+     * none, so the line is dropped rather than advertising them */
+    json_set(ctx, "builtins", json_arr());
     char *desc = tool_prompt("bash", ctx);
     json_free(ctx);
-    return desc;
+    char *r = str_replace(desc, "In-process builtins, ahead of PATH: .\n", "");
+    free(desc);
+    /* "Persistent bash 5.3." names omp's engine; the real bash may be another release (macOS ships 3.2) */
+    const char *ver = real_bash_version();
+    if (ver && !str_eq(ver, "5.3")) {
+        char *want = xasprintf("Persistent bash %s.", ver);
+        char *v = str_replace(r, "Persistent bash 5.3.", want);
+        free(want);
+        free(r);
+        r = v;
+    }
+    return r;
 }
 
 json_t *bash_tool_schema(void) {
@@ -1268,7 +1316,7 @@ char *jobs_render_results(const json_t *jobs) {
 
 /* Windows a blocking wait gives its first wake before it returns with nothing new; each back-to-back idle wait climbs one
  * rung, so the agent gets its turn back early while work warms up, and a wait loop backs off. */
-static const int64_t WAIT_LADDER_MS[] = {5000, 10000, 30000, 60000, 300000};
+static const int64_t WAIT_LADDER_MS[] = {5000, 10000, 30000, 60000, 240000};
 #define WAIT_LADDER_RUNGS 5
 #define WAIT_LADDER_RESET_MS 60000 /* a gap this long since the last idle wait means the agent worked in between */
 #define WAIT_NOTICE_RUNG 1         /* one idle wait is patience, a second back-to-back is a loop */
@@ -1409,14 +1457,22 @@ static json_t *wait_job_rows(jobs_t *jobs, const json_t *done) {
     return rows;
 }
 
-/* elapsedReport: the window an elapsed wait spent and the one a back-to-back wait gets (a bare still-running snapshot
- * reads as an empty result, and agents then start `sleep` jobs to block for longer) */
-static char *elapsed_report(const char *what, int rung) {
+/* elapsedReport: the window an elapsed wait spent, then what to do once nothing else is left (a bare still-running
+ * snapshot reads as an empty result, and agents then start `sleep` jobs to block for longer). Every result and message
+ * starts the next turn of the top-level interactive session (endTurn), so it is told to end its turn; any other caller,
+ * to wait again right away with no other tool call, which takes the top rung. */
+static char *elapsed_report(const char *what, int rung, bool end_turn) {
     char *span = usage_fmt_duration((double)WAIT_LADDER_MS[rung]);
-    char *next = usage_fmt_duration((double)WAIT_LADDER_MS[MIN(rung + 1, WAIT_LADDER_RUNGS - 1)]);
-    char *r = xasprintf("%s within %s; a back-to-back wait allows up to %s.", what, span, next);
+    char *r;
+    if (end_turn) {
+        r = xasprintf("%s within %s. Nothing else left? End your turn: results and messages start your next one.", what, span);
+    } else {
+        char *top = usage_fmt_duration((double)WAIT_LADDER_MS[WAIT_LADDER_RUNGS - 1]);
+        r = xasprintf("%s within %s. Nothing else left? Call `wait` right away with no other tool call: it then blocks up to %s.",
+                      what, span, top);
+        free(top);
+    }
     free(span);
-    free(next);
     return r;
 }
 
@@ -1506,7 +1562,11 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
         return 0;
     }
     bool streak = idle && mono_ms() - idle_ended < WAIT_LADDER_RESET_MS;
-    int rung = streak ? MIN(idle_rung + 1, WAIT_LADDER_RUNGS - 1) : 0;
+    /* a back-to-back wait that is the only call of its turn takes the top rung at once: the agent has nothing else to
+     * do, so an early return would only cost it a request */
+    int rung = !streak ? 0
+               : agent_tool_call_alone(ctx ? ctx->agent : NULL, ctx ? ctx->tool_call_id : NULL) ? WAIT_LADDER_RUNGS - 1
+                                                                                                 : MIN(idle_rung + 1, WAIT_LADDER_RUNGS - 1);
     int64_t streak_ms = streak ? idle_waited : 0;
     bool reply_wait = !running && !service_running;
     /* a wait only these subagents' results can end blocks the caller on them; a bash job or service is another way out */
@@ -1603,7 +1663,7 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
         json_t *done = jobs_take_finished(jobs);
         char *txt = job_result_text(jobs, done, settled_at_entry, call_started);
         if (wake == WAKE_TIMEOUT) { /* the timeout line joins the report's text block */
-            char *rep = elapsed_report("No job finished", rung);
+            char *rep = elapsed_report("No job finished", rung, out_tui_transcript(env));
             char *joined = xasprintf("%s\n\n%s", *txt ? txt : "No background jobs.", rep);
             free(rep);
             free(txt);
@@ -1617,7 +1677,7 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
         if (wake == WAKE_TIMEOUT) wait_elapsed(env, out, rung, streak_ms);
         json_free(done);
     } else if (wake == WAKE_TIMEOUT) {
-        char *rep = elapsed_report(reply_wait ? "No reply" : "No service finished", rung);
+        char *rep = elapsed_report(reply_wait ? "No reply" : "No service finished", rung, out_tui_transcript(env));
         if (reply_wait) tool_result_text(out, rep);
         else tool_result_textf(out, "%s Read proc:// for status.", rep);
         free(rep);
@@ -1639,7 +1699,11 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
 }
 
 agent_tool_t *tool_wait_new(tool_env_t *env) {
-    char *desc = tool_prompt("wait", NULL);
+    json_t *dctx = json_obj();
+    json_set_bool(dctx, "endTurn", out_tui_transcript(env)); /* the top-level interactive session ends its turn instead */
+    json_set(dctx, "longest", json_str_own(usage_fmt_duration((double)WAIT_LADDER_MS[WAIT_LADDER_RUNGS - 1])));
+    char *desc = tool_prompt("wait", dctx);
+    json_free(dctx);
     json_t *s = json_parse_str("{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("wait", "Wait", desc, s, wait_execute);
     free(desc);

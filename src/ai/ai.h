@@ -74,6 +74,8 @@ json_t *catalog_auth_providers(void);                  /* borrowed array of OAut
  * stored logins stay on disk. The reason is borrowed; the error ("<provider> is turned off: <reason>") owned. */
 const char *catalog_provider_pause_reason(const char *provider);
 char *catalog_provider_disabled_error(const char *provider);
+/* setUnpausedProviders: paused ids (a json string array) that ignore their `disabled` rule; replaces the list */
+void catalog_set_unpaused_providers(const json_t *ids);
 /* auth rule `login-warning "<text>"` (providerLoginWarning): the account risk a new login must accept first. Borrowed */
 const char *catalog_provider_login_warning(const char *provider);
 const ai_model_t *catalog_register(json_t *model_obj); /* takes ownership; for custom/discovered models */
@@ -260,6 +262,7 @@ typedef struct {
     json_t *system_prompt; /* array of strings (borrowed, may be NULL) */
     json_t *messages;      /* array of messages (borrowed) */
     json_t *tools;         /* array of {name, description, parameters} (borrowed, may be NULL) */
+    bool drop_encrypted_reasoning; /* Responses: replay no earlier turn's encrypted reasoning (a refused replay's retry) */
 } ai_context_t;
 
 /* ---------- events ---------- */
@@ -373,6 +376,10 @@ char *ai_network_failure_message(const char *http_error, const char *url);
 enum { AI_RETRY_FETCH, AI_RETRY_OPENAI, AI_RETRY_OLLAMA, AI_RETRY_CODEX, AI_RETRY_GEMINI_CLI, AI_RETRY_ANTHROPIC };
 /* extractRetryHint: server-suggested delay from headers (may be NULL) and/or an error body (may be NULL); -1 none */
 int64_t ai_extract_retry_hint(const http_headers_t *h, const char *body);
+/* a zero x-ratelimit-limit-* allowance named in an error text (rate-limit.ts ZERO_ALLOWANCE_PATTERN) */
+bool ai_zero_allowance_text(const char *msg);
+/* getZeroRateLimitHeader: the first x-ratelimit-limit-* header reporting 0 (borrowed name), or NULL */
+const char *ai_zero_rate_limit_header(const http_headers_t *h);
 /* getRetryAfterMsFromHeaders: the longest of retry-after-ms / retry-after / x-ratelimit-reset(-ms); -1 none */
 int64_t ai_retry_after_from_headers(const http_headers_t *h);
 /* isProviderRetryableError over a finished error message (+ HTTP status, 0 = unknown) */
@@ -390,6 +397,11 @@ json_t *ai_replay_safe_stream(ai_attempt_fn once, void *self, const ai_stream_op
 /* retry_empty read after each attempt (a function-valued retryEmptyCompletion) */
 json_t *ai_replay_safe_stream_ex(ai_attempt_fn once, void *self, const ai_stream_opts_t *o, ai_event_cb cb, void *ud,
                                  const bool *retry_empty, int max_error_retries);
+/* ai_replay_safe_stream_ex plus a provider hook: when it returns true for an attempt's message (nothing meaningful
+ * streamed), the attempt is dropped and retried at once (the hook updates `self` for the rebuilt request) */
+json_t *ai_replay_safe_stream_hook(ai_attempt_fn once, void *self, const ai_stream_opts_t *o, ai_event_cb cb, void *ud,
+                                   const bool *retry_empty, int max_error_retries,
+                                   bool (*rebuild)(void *self, const json_t *msg));
 
 /* Streaming POST with SSE parsing + retry on transient errors (see the transport retry policies above).
  * on_event returns non-zero to abort. Returns 0 on success (2xx stream consumed);

@@ -14,6 +14,7 @@
 #include "artifacts.h"
 #include "summary.h"
 #include "web.h"
+#include "coding/discovery.h"
 #include "ai/ai_images.h"
 #include "img/imgpipe.h"
 
@@ -1704,15 +1705,50 @@ static int read_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     return rc;
 }
 
+/* omc's read has no executable reader (omp's on-disk ELF/PE/Mach-O metadata view): its lines are left out */
+static char *drop_executable_lines(char *text) {
+    sb_t b = SB_INIT;
+    for (char *line = text; *line;) {
+        char *nl = strchr(line, '\n');
+        size_t n = nl ? (size_t)(nl - line + 1) : strlen(line);
+        bool drop = !strncmp(line, "- Executables (ELF/PE/Mach-O", 28) || !strncmp(line, "  - Universal Mach-O:", 21);
+        if (!drop) sb_appendn(&b, line, n);
+        line += n;
+    }
+    free(text);
+    return sb_detach(&b);
+}
+
+/* ReadTool.docTopics: `xd://read/sources` (selectors for sources the description only names) and `xd://read/urls`
+ * (the internal-URL grammar the system prompt's one-line entries leave out) */
+static json_t *read_doc_topics(agent_tool_t *self) {
+    json_t *ctx = json_obj();
+    json_set_bool(ctx, "BINARY_VIEWS", false); /* no disassembler backend */
+    char *sources = tool_prompt("read-sources", ctx);
+    json_free(ctx);
+    json_t *t = json_obj();
+    json_set(t, "sources", json_str_own(drop_executable_lines(sources ? sources : xstrdup(""))));
+    strvec_t refs = internal_url_reference();
+    sb_t b = SB_INIT;
+    for (size_t i = 0; i < refs.n; i++) sb_appendf(&b, "%s- %s", i ? "\n" : "", refs.v[i]);
+    strvec_free(&refs);
+    json_set(t, "urls", json_str_own(sb_detach(&b)));
+    return t;
+}
+
 agent_tool_t *tool_read_new(tool_env_t *env) {
     json_t *ctx = json_obj();
     json_set_bool(ctx, "IS_HL_MODE", str_eq(env->edit_mode, "hashline"));
     char *desc = tool_prompt("read", ctx);
     json_free(ctx);
+    char *fixed = str_replace(desc, ", executable metadata, video", ", video");
+    free(desc);
+    desc = fixed;
     json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Local path, "
                            "internal URI, or URL; selectors inline.\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("read", "Read", desc, s, read_execute);
     free(desc);
+    t->doc_topics = read_doc_topics;
     t->ud = env;
     return t;
 }

@@ -145,9 +145,9 @@ static json_t *cli_metadata(const char *api_key, const char *user_jwt) {
     json_set_str(m, "userJwt", user_jwt ? user_jwt : "");
     json_set_str(m, "ideName", "devin-cli");
     json_set_str(m, "ideType", "chisel");
-    json_set_str(m, "ideVersion", "3000.11.205");
+    json_set_str(m, "ideVersion", "3000.12.57");
     json_set_str(m, "extensionName", "chisel");
-    json_set_str(m, "extensionVersion", "3000.11.205");
+    json_set_str(m, "extensionVersion", "3000.12.57");
     json_set_str(m, "locale", "en");
     json_set_str(m, "os", devin_os());
     return m;
@@ -573,7 +573,12 @@ static json_t *build_chat_request(const ai_model_t *m, const ai_context_t *ctx, 
     json_set_int(cfg, "numCompletions", 1);
     json_set_int(cfg, "maxTokens", o->max_tokens > 0 ? o->max_tokens : m->max_tokens > 0 ? m->max_tokens : 64000);
     json_set_int(cfg, "maxNewlines", 400);
-    json_set_num(cfg, "temperature", isnan(o->temperature) ? 1.0 : o->temperature);
+    /* clampDevinTemperature: Cascade answers temperature 0 with an opaque invalid_argument while any positive value
+     * works, so an explicit temperature is raised to the catalog's temperatureFloor (unset: wire default 1) */
+    double temp = isnan(o->temperature) ? 1.0 : o->temperature;
+    const json_t *tfloor = model_compat_get(m, "temperatureFloor");
+    if (json_is_num(tfloor) && temp < tfloor->u.num.d) temp = tfloor->u.num.d;
+    json_set_num(cfg, "temperature", temp);
     json_set_int(cfg, "topK", 40);
     json_set_num(cfg, "topP", (double)(float)(isnan(o->top_p) ? 0.95 : o->top_p));
     json_t *stops = json_arr(), *sp;

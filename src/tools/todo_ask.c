@@ -994,17 +994,6 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
     return 0;
 }
 
-static const char ASK_EXAMPLE_FORM[] =
-    "<form>\n"
-    "  <p>Sessions live in memory and are lost on restart.</p>\n"
-    "  <fieldset>\n"
-    "    <legend>Session store</legend>\n"
-    "    <label><input type=\"radio\" name=\"store\" value=\"sqlite\" checked> SQLite: one file, no new service</label>\n"
-    "    <label><input type=\"radio\" name=\"store\" value=\"redis\"> Redis: shared across instances, needs ops</label>\n"
-    "  </fieldset>\n"
-    "  <label>Session lifetime (days) <input type=\"number\" name=\"ttl_days\" value=\"30\" min=\"1\"></label>\n"
-    "</form>";
-
 agent_tool_t *tool_ask_new(tool_env_t *env) {
     char *desc = tool_prompt("ask", NULL);
     json_t *s = schema_obj();
@@ -1013,13 +1002,7 @@ agent_tool_t *tool_ask_new(tool_env_t *env) {
     schema_prop_json(s, "html", h, true);
     json_set_bool(s, "additionalProperties", false);
     agent_tool_t *t = agent_tool_new("ask", "Ask", desc, s, ask_execute);
-    t->exclusive = true;
-    json_t *ex = json_arr(), *e = json_obj(), *call = json_obj();
-    json_set_str(e, "caption", "Choice with context and a number");
-    json_set_str(call, "html", ASK_EXAMPLE_FORM);
-    json_set(e, "call", call);
-    json_push(ex, e);
-    t->examples = ex;
+    t->exclusive = true; /* the form example lives in the description (omp f2c2894ffa), no `examples` */
     free(desc);
     t->ud = env;
     return t;
