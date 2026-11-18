@@ -29,35 +29,27 @@ typedef struct {
     int64_t timeout_sec;
 } request_t;
 
-/* resolveWidgetModel: the `widget` role's model with a usable credential: the role (configured, or resolved like `smol`),
- * then the built-in `smol` defaults */
-static const ai_model_t *widget_model(void) {
-    const ai_model_t *m = mr_resolve_role("widget", NULL);
-    char *key = m ? app_api_key_for(m) : NULL;
-    if (key) {
-        free(key);
-        return m;
-    }
-    mr_pool_t pool = {0};
-    mr_pool_available(&pool, NULL);
-    strvec_t defaults = mr_role_priority_defaults("smol");
-    const ai_model_t *found = NULL;
-    for (size_t i = 0; i < defaults.n && !found; i++) {
-        mr_result_t r;
-        if (!mr_parse_pattern(defaults.v[i], &pool, &r) || !r.model) continue;
-        char *k = app_api_key_for(r.model);
-        if (k) found = r.model;
-        free(k);
-    }
-    strvec_free(&defaults);
-    mr_pool_free(&pool);
-    return found;
+static void record_usage(const json_t *r) {
+    if (!r || !json_get(r, "usage")) return;
+    const char *stop = json_get_str(r, "stopReason");
+    json_t *row = json_obj();
+    json_set_str(row, "purpose", "job-caption");
+    json_set_str(row, "api", json_get_str(r, "api") ? json_get_str(r, "api") : "");
+    json_set_str(row, "provider", json_get_str(r, "provider") ? json_get_str(r, "provider") : "");
+    json_set_str(row, "model", json_get_str(r, "model") ? json_get_str(r, "model") : "");
+    json_set(row, "usage", json_clone(json_get(r, "usage")));
+    json_set_str(row, "stopReason", stop ? stop : "");
+    /* omp 5f25874081: the reply's errorMessage rides along with its stopReason */
+    if (json_get_str(r, "errorMessage")) json_set_str(row, "errorMessage", json_get_str(r, "errorMessage"));
+    pthread_mutex_lock(&g_usage_mu);
+    if (!g_usage) g_usage = json_arr();
+    json_push(g_usage, row);
+    pthread_mutex_unlock(&g_usage_mu);
 }
 
 static void *caption_thread(void *p) {
     request_t *rq = p;
-    const ai_model_t *m = widget_model();
-    if (m && !rq->caption->cancel) {
+    if (!rq->caption->cancel) {
         /* redactWidgetSample: credential-shaped text never reaches the cheap model */
         char *cmd_t = str_trim(rq->command), *cmd_r = memory_redact_secrets(cmd_t), *cmd = job_truncate(cmd_r, MAX_COMMAND_CHARS);
         free(cmd_t);
@@ -79,41 +71,45 @@ static void *caption_thread(void *p) {
         json_push_str(sys, system);
         json_push(msgs, msg_user_text(user ? user : ""));
         ai_context_t ctx = {.system_prompt = sys, .messages = msgs};
-        ai_stream_opts_t o;
-        ai_stream_opts_init(&o);
-        char *key = app_api_key_for(m);
-        o.api_key = key;
-        o.disable_reasoning = true;
-        o.max_tokens = MAX_CAPTION_TOKENS;
-        o.cancel = &rq->caption->cancel;
-        json_t *r = ai_complete(m, &ctx, &o);
-        const char *stop = json_get_str(r, "stopReason");
-        if (r && json_get(r, "usage")) {
-            json_t *row = json_obj();
-            json_set_str(row, "purpose", "job-caption");
-            json_set_str(row, "api", json_get_str(r, "api") ? json_get_str(r, "api") : "");
-            json_set_str(row, "provider", json_get_str(r, "provider") ? json_get_str(r, "provider") : "");
-            json_set_str(row, "model", json_get_str(r, "model") ? json_get_str(r, "model") : "");
-            json_set(row, "usage", json_clone(json_get(r, "usage")));
-            json_set_str(row, "stopReason", stop ? stop : "");
-            pthread_mutex_lock(&g_usage_mu);
-            if (!g_usage) g_usage = json_arr();
-            json_push(g_usage, row);
-            pthread_mutex_unlock(&g_usage_mu);
+        /* completeWidgetRequest (omp 5e3fbe9ec9): the `widget` role chain (resolveRoleChain over roleCandidatePool:
+         * the role, retry.fallbackChains.widget, then the smol defaults), each candidate with a credential in turn
+         * until one does not error */
+        mr_chain_t chain = {0};
+        mr_role_chain("widget", NULL, &chain);
+        for (size_t i = 0; i < chain.n && !rq->caption->cancel; i++) {
+            const ai_model_t *m = chain.v[i].model;
+            char *key = app_api_key_for(m);
+            if (!key) continue;
+            ai_stream_opts_t o;
+            ai_stream_opts_init(&o);
+            o.api_key = key;
+            o.disable_reasoning = true;
+            o.max_tokens = MAX_CAPTION_TOKENS;
+            o.cancel = &rq->caption->cancel;
+            json_t *r = ai_complete(m, &ctx, &o);
+            free(key);
+            record_usage(r);
+            const char *stop = json_get_str(r, "stopReason");
+            if (str_eq(stop, "aborted") || rq->caption->cancel) {
+                json_free(r);
+                break;
+            }
+            if (r && !str_eq(stop, "error")) {
+                /* normalized here, so any reply is as safe to render as the model's */
+                char *text = ai_message_text(r), *caption = job_caption_normalize(text);
+                pthread_mutex_lock(&rq->caption->mu);
+                free(rq->caption->text);
+                rq->caption->text = caption;
+                pthread_mutex_unlock(&rq->caption->mu);
+                free(text);
+                json_free(r);
+                break;
+            }
+            json_free(r);
         }
-        if (!str_eq(stop, "error") && !str_eq(stop, "aborted")) {
-            /* normalized here, so any reply is as safe to render as the model's */
-            char *text = ai_message_text(r), *caption = job_caption_normalize(text);
-            pthread_mutex_lock(&rq->caption->mu);
-            free(rq->caption->text);
-            rq->caption->text = caption;
-            pthread_mutex_unlock(&rq->caption->mu);
-            free(text);
-        }
-        json_free(r);
+        mr_chain_free(&chain);
         json_free(sys);
         json_free(msgs);
-        free(key);
         free(user);
         free(system);
     }

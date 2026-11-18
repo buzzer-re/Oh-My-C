@@ -604,6 +604,7 @@ static void record_usage(cache_warmer_t *w, const json_t *msg, const json_t *ref
     json_set_str(e, "model", json_get_str(msg, "model"));
     json_set(e, "usage", json_clone(json_get(msg, "usage")));
     json_set_str(e, "stopReason", json_get_str(msg, "stopReason"));
+    if (json_get_str(msg, "errorMessage")) json_set_str(e, "errorMessage", json_get_str(msg, "errorMessage")); /* omp 5f25874081 */
     if (refresh) json_set(e, "cacheRefresh", json_clone(refresh));
     if (!w->usage) w->usage = json_arr();
     json_push(w->usage, e);
