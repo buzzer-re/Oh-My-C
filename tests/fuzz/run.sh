@@ -16,7 +16,8 @@ shift $((OPTIND - 1))
 targets=("$@")
 [ ${#targets[@]} -eq 0 ] && targets=($(ls tests/fuzz/fuzz_*.c | sed 's|.*/fuzz_||; s|\.c$||'))
 export OMC_NO_CRASH_HANDLER=1
-export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=1:allocator_may_return_null=1}
+# a smaller quarantine keeps long runs under the RSS cap (the default 256 MiB read as false OOMs in glob/regex)
+export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=1:allocator_may_return_null=1:quarantine_size_mb=64}
 export UBSAN_OPTIONS=${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1}
 rc=0
 for t in "${targets[@]}"; do
