@@ -893,6 +893,11 @@ n=$(mark); "$B" --model mock/mock-1 --no-session -p 'say:' >/dev/null 2>&1 </dev
 check "empty stop retry" "Stopped without actionable output; task incomplete."  python3 -I -c "$REQS" "$T/req.jsonl" $n
 n=$(mark); "$B" --model mock/mock-1 --no-session -p 'calls:[["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}]]' >/dev/null 2>&1 </dev/null
 check "tool-call loop guard" 'You called `bash` 5 consecutive times with identical arguments:'  python3 -I -c "$REQS" "$T/req.jsonl" $n
+# an exemption naming an xd:// device covers writes dispatched to it (omp 7a6f101b82)
+mkdir -p "$T/lgx" && cp "$T/agent/models.yml" "$T/lgx/" && printf 'model:\n  toolCallLoopGuard:\n    exemptTools: [wait, report_issue]\n' > "$T/lgx/config.yml"
+LGX='calls:'$(python3 -I -c 'import json; print(json.dumps([["write",{"path":"xd://report_issue","content":"read: same"}]]*6))')
+n=$(mark); OMC_CODING_AGENT_DIR="$T/lgx" "$B" --model mock/mock-1 --no-session -p "$LGX" >/dev/null 2>&1 </dev/null
+out=$(python3 -I -c "$REQS" "$T/req.jsonl" $n); [[ "$out" != *"consecutive times"* ]] && echo "   ok  loop guard device exemption" || { echo "   FAIL loop guard device exemption"; fail=1; }
 check "todo reminder (rpc)" '"type": "todo_reminder", "todos": [{"content": "alpha", "status": "in_progress"}, {"content": "beta", "status": "pending"}], "attempt": 1, "maxAttempts": 3'  python3 -I "$ROOT/tests/parity/rpc_drive.py" "$B" "todo:alpha,beta" 1
 n=$(mark); "$B" --model mock/mock-think --thinking auto --no-session -p 'say:medium sized change' >/dev/null 2>&1 </dev/null
 check "auto thinking judge" $'2\nlow State:\n<request>say:medium sized change</request>'  python3 -I -c "$REQS" "$T/req.jsonl" $n all
