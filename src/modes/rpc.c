@@ -3224,12 +3224,11 @@ static void handle(rpc_t *r, json_t *cmd) {
         if (!a->model || !a->model->reasoning) {
             respond(r, id, type, true, json_null(), NULL);
         } else {
-            bool auto_ok = !json_get_bool(a->model->thinking, "unverified", false);
             if (a->auto_thinking) {
                 int e = EFFORT_MINIMAL;
                 while (e <= EFFORT_MAX && !model_supports_effort(a->model, (ai_effort_t)e)) e++;
                 app_set_thinking(a, e > EFFORT_MAX ? EFFORT_OFF : (ai_effort_t)e);
-            } else if (a->thinking == EFFORT_OFF && auto_ok) {
+            } else if (a->thinking == EFFORT_OFF) {
                 app_set_thinking_auto(a);
             } else {
                 int cur = (int)a->thinking, next = cur;

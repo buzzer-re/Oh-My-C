@@ -370,8 +370,7 @@ const char *slash_parse_shake_mode(const char *args, char **err) {
 void slash_effort_selectors(app_t *a, strvec_t *out) {
     if (!a->model || !a->model->reasoning) return;
     strvec_push(out, "off");
-    /* auto never opts an unverified ladder into thinking */
-    if (!json_get_bool(a->model->thinking, "unverified", false)) strvec_push(out, "auto");
+    strvec_push(out, "auto");
     for (int i = EFFORT_MINIMAL; i <= EFFORT_MAX; i++)
         if (model_supports_effort(a->model, (ai_effort_t)i)) strvec_push(out, effort_name((ai_effort_t)i));
 }

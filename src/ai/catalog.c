@@ -1,6 +1,7 @@
 /* catalog.c - bundled model catalog (assets/models.json.z) + provider metadata + custom models. */
 #include "ai.h"
 #include "ai/compat_detect.h"
+#include "ai/thinkprobe.h"
 #include "core/embed.h"
 #include "core/fs.h"
 #include "core/proc.h"
@@ -350,6 +351,12 @@ static void apply_custom(json_t *cfg) {
             const char *pauth = json_get_str(pv, "auth");
             if (str_eq(pauth, "oauth") || (!pauth && str_eq(json_get_str(o, "api"), "anthropic-messages")))
                 json_set_bool(o, "isOAuth", true);
+            /* #finalizeModels: a provisional ladder takes the capability its probes learned (withThinkingCapability) */
+            json_t *learned = tp_learned_row(o);
+            if (learned) {
+                json_free(o);
+                o = learned;
+            }
             ai_model_t *added = add_model(o);
             if (added) {
                 if (compat_api_has_record(added->api)) added->compat_defaults = NULL;
@@ -460,11 +467,32 @@ const ai_model_t *catalog_register(json_t *obj) {
     catalog_init();
     bool resolved = json_is_obj(obj) && !json_get(obj, "compat"); /* discovered local models */
     if (resolved) compat_resolve_model(obj);
+    json_t *learned = resolved ? tp_learned_row(obj) : NULL; /* #finalizeModels: withThinkingCapability */
+    if (learned) {
+        json_free(obj);
+        obj = learned;
+    }
     pthread_rwlock_wrlock(&g_lock);
     ai_model_t *m = add_model(obj);
     if (m && resolved && compat_api_has_record(m->api)) m->compat_defaults = NULL;
     pthread_rwlock_unlock(&g_lock);
     return m;
+}
+
+ai_model_t *catalog_model_variant(const ai_model_t *base, json_t *raw, bool rebuilt) {
+    ai_model_t *m = xcalloc(1, sizeof *m);
+    m->raw = raw;
+    m->context_window_pinned = base && base->context_window_pinned;
+    fill_model(m);
+    m->compat_defaults = base ? base->compat_defaults : NULL;
+    if (rebuilt && m->api && compat_api_has_record(m->api)) m->compat_defaults = NULL;
+    return m;
+}
+
+void catalog_model_free(ai_model_t *m) {
+    if (!m) return;
+    json_free(m->raw);
+    free(m);
 }
 
 /* callers hold g_lock (read) */

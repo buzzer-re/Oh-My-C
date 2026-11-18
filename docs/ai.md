@@ -35,7 +35,8 @@ models without image input, and drops errored or aborted assistant turns
   `compat_finalize_custom()` (finalizeCustomModel, models.yml) first fills what the entry leaves out from its bundled
   reference (`compat_ref_lookup`: identity/reference.ts, tried through the bracket, namespace, `:cloud`, marker and
   case variants of the id; the largest limits win; `charm-hyper` / `factory-droid` rows are excluded because omp only
-  discovers them online), else omp's defaults (free, text, not reasoning, 128000 / 16384). `compat_resolve_model()`
+  discovers them online), else omp's defaults (free, text, 128000 / 16384; `reasoning` stays unset: no evidence, see
+  "Thinking-capability probes"). `compat_resolve_model()`
   (buildModel, also used for discovered models) then computes the identity (taxonomy with overrides and variant
   collapse), resolves the rule cascade (`assets/compat_rules.json.z`: per axis, the matching rule with the greatest
   exactness, dimensions and priority wins), builds the API's compat record (loopback and private-network URLs count as a
@@ -87,7 +88,9 @@ token budgets for budget-style APIs (overridable with the `thinkingBudgets` sett
 ## API registry and dispatch
 
 `ai_providers_init()` (`providers.c`) registers one stream function per wire API
-(`ai_register_api`). `ai_stream()` then:
+(`ai_register_api`). `ai_stream()` refuses a paused provider, then sends a model with a provisional thinking ladder
+through its probed capability (`thinkprobe.c`, below; without a requested effort it goes out as non-reasoning, the
+ladder stripped). `ai_stream_dispatch()` (omp `streamSimpleDispatch`) then:
 
 1. runs `ai_transport_prepare()` (`provider_transport.c`), the provider-owned shaping step that
    turns structured credentials into the bearer, base URL and headers (see below);
@@ -116,6 +119,48 @@ token budgets for budget-style APIs (overridable with the `thinkingBudgets` sett
 
 `ai_complete()` is the non-streaming wrapper used for one-shot side requests: titles, compaction
 summaries, judges, the advisor and memory extraction.
+
+### Thinking-capability probes (`thinkprobe.c`)
+
+Port of omp `thinking-probe.ts` and `catalog/thinking-capability.ts` (omp 3f8862bf9e). A chat model whose reasoning
+nothing establishes (a `models.yml` row without `reasoning` and no bundled reference, a discovered local model without
+capability data: `reasoning` unset, not `false`) on openai-completions, openrouter, openai-responses,
+azure-openai-responses, anthropic-messages or the Google APIs gets a provisional ladder,
+`thinking: {mode, efforts: minimal..max, unverified: true}` (`resolve_thinking`; an explicit `reasoning: false` or an
+explicit `thinking.efforts` list is authoritative). It follows the session's thinking level like any ladder, offers
+`auto`, and the auto classifier and `chillax` apply to it.
+
+The first request with a thinking level (`tp_stream`, from `ai_stream`) first learns the capability:
+
+- **Probes**: the prompt `prompts/ai/prompts/thinking-probe.md` ("What is 17 times 23? Answer with only the
+  number.") as a lone user message, no tools, 1024 output tokens, 45 s (first-event, idle and total), one HTTP
+  attempt (`max_http_attempts` 1, `single_http_attempt`: no transport retry, identity fallback or failure-hook
+  replay; a second payload aborts the probe), no prompt cache, no stateful Responses, no websocket, empty answers
+  accepted. Batch one is the API's first format at every effort, the requested one first, plus one reasoning-off
+  control (openai-completions: `reasoning_effort` × 6 + a plain request = 7 parallel requests); later batches run only
+  when nothing was accepted (openai-completions: `openrouter` `reasoning.effort` × 6, `zai` `thinking`, `qwen`
+  `enable_thinking`, `qwen-chat-template`, `chat-template` × 6 = 15; anthropic adaptive then budget; Google level then
+  budget; Responses has one). HTTP 400/422 rejects a tier; any other failure (auth, quota, 5xx, timeout) makes the
+  run inconclusive: nothing is saved and the next request probes again. The first accepted format wins with the
+  efforts it accepted; observed reasoning is `reasoningTokens` > 0 or a non-empty thinking block. With nothing
+  accepted but the control the verdict is `none`.
+- **Cache**: `<agent dir>/thinking-capability.json`, `{"rows":[{provider_id, api, endpoint, wire_model_id,
+  capability}]}`, mirroring omp's `thinking_capability` table in `models.db` (omc has no SQLite); `capability` is the
+  same JSON text (`checkedAt` ms, `format`, `efforts`, `observed`, `attempts`). The endpoint is the base URL without
+  userinfo, query, fragment or trailing slashes. Positive verdicts live 30 days, `none` 1 day; rows are validated on
+  read (omp `isCapability`). Written atomically under `thinking-capability.json.lock`.
+- **Flights**: concurrent requests for the same provider/api/base URL/wire id share one probe run (a detached
+  worker); a caller that cancels leaves it, and the last one to leave aborts it.
+- **Apply** (`tp_apply_raw`, omp `applyThinkingCapability`): the row is rebuilt from its authored compat with
+  `reasoning: format != none || observed`, the learned ladder (`effortMap` identity; Google budgets for
+  `google-budget`) and the format's compat overrides (`thinkingFormat`, `reasoningDisableMode`, `supportsReasoning*`,
+  toggle-only `omitReasoningEffort`; `none`: no reasoning params, `trustExplicitThinkingOnly`; Anthropic adaptive /
+  `disabledThinking: omit`); limits, prices and kind stay. The request then clamps its level onto the learned ladder
+  (omp `clampThinkingLevelForModel`). An inconclusive run sends the request with the first format's hypothesis, so
+  the requested level still goes out.
+- **Next start**: the catalog applies a fresh cached capability to every provisional row it loads (custom models,
+  `catalog_register`; omp `#finalizeModels`), so the picker shows the learned ladder and no probe runs. Probes and the
+  learned overlay never touch the session, its transcript or the TUI (omp logs only at debug level).
 
 ### Leaked reasoning markup (`leaked_thinking.c`, `think_heal.c`)
 

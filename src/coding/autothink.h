@@ -15,7 +15,7 @@ struct app;
 size_t autothink_supported(const ai_model_t *m, ai_effort_t out[6]);
 /* clampAutoThinkingEffort: never below low, snapped down into the pool at or under `ceiling`; false = undefined */
 bool autothink_clamp(const ai_model_t *m, ai_effort_t effort, ai_effort_t ceiling, ai_effort_t *out);
-/* resolveProvisionalAutoLevel; false for non-reasoning / unverified models or an empty pool */
+/* resolveProvisionalAutoLevel; false for non-reasoning models or an empty pool */
 bool autothink_provisional(const ai_model_t *m, ai_effort_t *out);
 /* applyAutoThinkingLevel's classification: ultrathink (when enabled) -> max clamp, else the judge (4 s budget).
  * Returns true and the effort to use; false when the model has nothing to pick (caller keeps its level). */

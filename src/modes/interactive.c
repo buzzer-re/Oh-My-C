@@ -3387,19 +3387,18 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
         return true;
     }
     if (tui_kb(k, "app.thinking.cycle")) {
-        /* cycleThinkingLevel: off -> auto -> minimal..max -> off (auto skipped for an unverified ladder) */
+        /* cycleThinkingLevel: off -> auto -> minimal..max -> off */
         ui_hint_record("effort");
         app_t *a = u->app;
         if (!a->model || !a->model->reasoning) {
             add_notice(u, "info", "Current model does not support thinking");
             return true;
         }
-        bool auto_ok = !json_get_bool(a->model->thinking, "unverified", false);
         if (a->auto_thinking) {
             ai_effort_t e = EFFORT_MINIMAL;
             while (e <= EFFORT_MAX && !model_supports_effort(a->model, e)) e++;
             app_set_thinking(a, e > EFFORT_MAX ? EFFORT_OFF : e);
-        } else if (a->thinking == EFFORT_OFF && auto_ok) {
+        } else if (a->thinking == EFFORT_OFF) {
             app_set_thinking_auto(a);
         } else {
             ai_effort_t e = a->thinking;

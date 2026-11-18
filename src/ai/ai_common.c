@@ -2,6 +2,7 @@
 #include "ai.h"
 #include "provider_transport.h"
 #include "leaked_thinking.h"
+#include "thinkprobe.h"
 #include "coding/turn_recovery.h"
 
 #include <ctype.h>
@@ -400,8 +401,53 @@ void aib_free(ai_builder_t *b) {
 /* catalog.c; weak so provider unit tests can link without the catalog */
 extern char *catalog_provider_disabled_error(const char *provider) __attribute__((weak));
 
+/* thinkprobe.c / catalog.c; weak like catalog_provider_disabled_error, for the provider unit tests */
+extern bool tp_unverified(const json_t *raw) __attribute__((weak));
+extern json_t *tp_stream(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, ai_event_cb cb, void *ud)
+    __attribute__((weak));
+extern ai_model_t *catalog_model_variant(const ai_model_t *base, json_t *raw, bool rebuilt) __attribute__((weak));
+extern void catalog_model_free(ai_model_t *m) __attribute__((weak));
+
+static json_t *paused_message(const ai_model_t *model, ai_event_cb cb, void *ud) {
+    char *paused = catalog_provider_disabled_error ? catalog_provider_disabled_error(model->provider) : NULL;
+    if (!paused) return NULL;
+    json_t *m = ai_error_message(model, "error", paused);
+    json_set_int(m, "errorId", AIE_CLASS | AIE_AUTH_FAILED); /* ProviderDisabledError is a MissingApiKeyError */
+    free(paused);
+    if (cb) {
+        ai_event_t ev = {.type = AI_EV_ERROR, .content_index = -1, .partial = m, .reason = "error"};
+        cb(ud, &ev);
+    }
+    return m;
+}
+
 json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts, ai_event_cb cb,
                   void *ud) {
+    ai_stream_opts_t def;
+    if (!opts) {
+        ai_stream_opts_init(&def);
+        opts = &def;
+    }
+    /* assertProviderEnabled: a provider the auth rules turn off is never called (nor probed), even with a key passed in */
+    json_t *paused = paused_message(model, cb, ud);
+    if (paused) return paused;
+    if (!tp_unverified || !tp_stream || !catalog_model_variant || !tp_unverified(model->raw))
+        return ai_stream_dispatch(model, ctx, opts, cb, ud);
+    /* streamSimple: requests without an effort keep unknown thinking controls off the wire (withoutUnverifiedThinking) */
+    if (opts->reasoning == EFFORT_OFF || opts->disable_reasoning || opts->force_reasoning_off) {
+        json_t *raw = json_clone(model->raw);
+        json_del(raw, "thinking");
+        json_set_bool(raw, "reasoning", false);
+        ai_model_t *neutral = catalog_model_variant(model, raw, false);
+        json_t *r = ai_stream_dispatch(neutral, ctx, opts, cb, ud);
+        catalog_model_free(neutral);
+        return r;
+    }
+    return tp_stream(model, ctx, opts, cb, ud); /* withProbedThinking */
+}
+
+json_t *ai_stream_dispatch(const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts, ai_event_cb cb,
+                           void *ud) {
     ai_stream_fn fn;
     ai_stream_opts_t def;
     if (!opts) {
@@ -414,18 +460,8 @@ json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_str
         tiered.service_tier = ai_resolve_model_service_tier(&opts->service_tiers, model);
         opts = &tiered;
     }
-    /* assertProviderEnabled: a provider the auth rules turn off is never called, even with a key passed in */
-    char *paused = catalog_provider_disabled_error ? catalog_provider_disabled_error(model->provider) : NULL;
-    if (paused) {
-        json_t *m = ai_error_message(model, "error", paused);
-        json_set_int(m, "errorId", AIE_CLASS | AIE_AUTH_FAILED); /* ProviderDisabledError is a MissingApiKeyError */
-        free(paused);
-        if (cb) {
-            ai_event_t ev = {.type = AI_EV_ERROR, .content_index = -1, .partial = m, .reason = "error"};
-            cb(ud, &ev);
-        }
-        return m;
-    }
+    json_t *paused = paused_message(model, cb, ud);
+    if (paused) return paused;
     ai_transport_t t;
     char *terr = NULL;
     if (ai_transport_prepare(model, ctx, opts, &t, &terr) != 0) {
@@ -1114,7 +1150,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
                            ai_sse_cb sse_cb, http_data_cb raw_cb, void *ud, int *status, char **err, ai_post_ex_t *ex) {
     if (!http_headers_get(headers, "Content-Type")) http_headers_add(headers, "Content-Type", "application/json");
     if (sse_cb && !http_headers_get(headers, "Accept")) http_headers_add(headers, "Accept", "text/event-stream");
-    int max_retries = opts && opts->max_retries > 0 ? opts->max_retries : 0;
+    int max_retries = opts && opts->max_retries > 0 && !opts->single_http_attempt ? opts->max_retries : 0;
     int policy = opts ? opts->retry_policy : AI_RETRY_FETCH;
     /* the per-delay cap: maxRetryDelayMs for anthropic / gemini-cli, fetchWithRetry's 60 s default elsewhere */
     int64_t max_delay = 60000;
@@ -1167,7 +1203,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
             return ret;
         }
         /* GitHub Copilot client-identity denial (wrapFetchForCopilotFallback): retry once as the other surface */
-        if (opts && opts->copilot_identity_retry && !identity_retry && rc == 0 &&
+        if (opts && opts->copilot_identity_retry && !opts->single_http_attempt && !identity_retry && rc == 0 &&
             (c.status == 403 || (c.status == 400 && copilot_model_not_supported(sb_cstr(&c.errbody))))) {
             const char *out = http_headers_get(headers, "Copilot-Integration-Id");
             const char *alt = NULL;
@@ -1186,7 +1222,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
             }
         }
         /* failure: a caller hook decides first (slow-mode lanes, rejected options) */
-        if (ex && ex->on_failure && !c.got_data) {
+        if (ex && ex->on_failure && !c.got_data && !(opts && opts->single_http_attempt)) {
             int64_t d = ex->on_failure(ex->hook_ud, rc == 0 ? c.status : 0, sb_cstr(&c.errbody), headers);
             if (d >= 0) {
                 ctx_reset(&c, &resp);

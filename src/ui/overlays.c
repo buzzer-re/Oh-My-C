@@ -130,11 +130,10 @@ void ui_overlay_thinking(ui_t *u) {
         return;
     }
     ui_panel_t *p = ui_panel_new("Thinking Level");
-    /* getAvailableEffortSelectors: off, auto (never for an unverified ladder), then the supported efforts */
-    bool auto_ok = !json_get_bool(a->model->thinking, "unverified", false);
+    /* getAvailableEffortSelectors: off, auto, then the supported efforts */
     strvec_t levels = {0};
     strvec_push(&levels, "off");
-    if (auto_ok) strvec_push(&levels, "auto");
+    strvec_push(&levels, "auto");
     for (int i = EFFORT_MINIMAL; i <= EFFORT_MAX; i++)
         if (model_supports_effort(a->model, (ai_effort_t)i)) strvec_push(&levels, effort_name((ai_effort_t)i));
     tui_select_list_t *l = tui_select_list_new((int)levels.n);

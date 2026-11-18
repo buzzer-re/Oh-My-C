@@ -2313,14 +2313,14 @@ strvec_t app_cycle_order(void) {
 
 /* #reapplyThinkingLevel after a model change: keep auto (re-clamped), else the new model's
  * thinking.defaultLevel, else the level that was effective on the previous model, clamped to the new one
- * (an unverified ladder stays as it is until the user picks) */
+ * (automaticThinkingLevel: a provisional ladder follows it too, its probes run on the first request) */
 static void reapply_thinking(app_t *a, const ai_model_t *prev) {
     if (a->auto_thinking) {
         app_set_thinking_auto(a);
         return;
     }
     const ai_model_t *m = a->model;
-    if (!m || json_get_bool(m->thinking, "unverified", false)) return;
+    if (!m) return;
     ai_effort_t base = prev ? model_clamp_effort(prev, a->thinking) : a->thinking, d;
     const char *dl = json_get_str(m->thinking, "defaultLevel");
     if (dl && effort_parse(dl, &d) == 0) base = d;
@@ -3304,7 +3304,7 @@ static bool apply_chillax(app_t *a, const char *text) {
     if (!text || !keywords_enabled("chillax") || !keywords_contains(text, "chillax")) return false;
     const ai_model_t *m = a->model;
     ai_effort_t sup[6];
-    if (!m || !m->reasoning || json_get_bool(m->thinking, "unverified", false) || !model_compat_bool(m, "supportsPerMessageEffort", false) ||
+    if (!m || !m->reasoning || !model_compat_bool(m, "supportsPerMessageEffort", false) ||
         !autothink_supported(m, sup))
         return false;
     ai_effort_t floor_e = sup[0];

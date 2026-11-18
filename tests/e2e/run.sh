@@ -810,6 +810,7 @@ source "$ROOT/tests/e2e/settings.sh"
 source "$ROOT/tests/e2e/stall.sh"
 source "$ROOT/tests/e2e/mcp_cache.sh"
 source "$ROOT/tests/e2e/first_request.sh"
+source "$ROOT/tests/e2e/thinking_probe.sh"
 source "$ROOT/tests/e2e/agent_core.sh"
 # provider logins over stdin (omc login) against tests/e2e/mock_auth.py
 APORT=$((PORT + 7)); python3 -I "$ROOT/tests/e2e/mock_auth.py" $APORT & APID=$!
