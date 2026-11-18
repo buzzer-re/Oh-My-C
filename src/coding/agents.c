@@ -1386,7 +1386,8 @@ static void deliver(const char *from, const char *to, const char *body, irc_flag
     /* IrcBus.unansweredSends: a message back answers what `to` asked `from`; progress only promises an answer */
     aref_t *sender = find_locked(from);
     if (sender && !strvec_contains(&sender->sent_run, to)) strvec_push(&sender->sent_run, to);
-    for (size_t i = 0; i < r->owed.n; i++)
+    /* a broadcast leg interrupts a reply wait but answers nothing (omp 131c4981f8: #lastReply skips broadcasts) */
+    for (size_t i = 0; i < r->owed.n && !fl.broadcast; i++)
         if (str_eq(r->owed.v[i].to, from)) {
             if (fl.progress) {
                 r->owed.v[i].promised = true;
@@ -1606,24 +1607,15 @@ static int cmp_irc_ts(const void *a, const void *b) {
     return strcmp(ix ? ix : "", iy ? iy : "");
 }
 
-json_t *agents_take_messages(tool_env_t *env) {
+/* the mail a wait's bus waiter took (oldest first), NULL when none */
+static json_t *agents_take_inbox(tool_env_t *env) {
     const char *self = env_id(env);
     if (!self) return NULL;
     pthread_mutex_lock(&g_mu);
     aref_t *r = find_locked(self);
     json_t *rows = r && r->inbox && json_len(r->inbox) ? r->inbox : NULL;
     if (rows) r->inbox = NULL;
-    app_t *app = r ? r->app : NULL;
     pthread_mutex_unlock(&g_mu);
-    if (app && app->agent) {
-        json_t *recs = agent_take_records(app->agent, is_irc_record, rows ? NULL : irc_record_direct);
-        const json_t *m;
-        json_arr_foreach(recs, i, m) {
-            if (!rows) rows = json_arr();
-            json_push(rows, json_clone(json_get_obj(m, "details")));
-        }
-        json_free(recs);
-    }
     if (!rows) return NULL;
     /* oldest first */
     size_t n = json_len(rows);
@@ -1635,6 +1627,71 @@ json_t *agents_take_messages(tool_env_t *env) {
     for (size_t i = 0; i < n; i++) json_push(rows, v[i]);
     free(v);
     return rows;
+}
+
+/* wait.ts handOffMail (omp 7b42b1be60): the messages a wait consumed become user turns of the caller's own session,
+ * injected right after the wait returns (IrcBridge.deliverIrcMessage while streaming: a parent's message steers through
+ * the parent template, any other one is an agent-attributed irc-incoming record; broadcast legs and progress notes
+ * join as asides). True when a message that ends a wait now waits for the caller: mail handed over here, or a direct
+ * message already queued in its session (IrcBridge.hasInterrupts). */
+bool agents_wait_hand_off(tool_env_t *env) {
+    json_t *rows = agents_take_inbox(env);
+    const char *self = env_id(env);
+    pthread_mutex_lock(&g_mu);
+    aref_t *r = self ? find_locked(self) : NULL;
+    app_t *app = r ? r->app : NULL;
+    char *parent = r && r->parent_id ? xstrdup(r->parent_id) : NULL;
+    pthread_mutex_unlock(&g_mu);
+    if (!app || !app->agent) {
+        free(parent);
+        bool any = json_len(rows) > 0;
+        json_free(rows);
+        return any;
+    }
+    const json_t *row;
+    json_arr_foreach(rows, i, row) {
+        const char *from = json_get_str(row, "from"), *body = json_get_str(row, "body");
+        irc_flags_t fl = {.wake_relay = json_get_bool(row, "wakeRelay", false),
+                          .broadcast = json_get_bool(row, "broadcast", false),
+                          .progress = json_get_bool(row, "progress", false)};
+        bool quiet = fl.broadcast || fl.progress;
+        pthread_mutex_lock(&g_mu);
+        bool from_parent = parent && str_eq(from, parent);
+        bool peer = parent && (fl.broadcast || (!from_parent && !from_descendant_locked(from, self)));
+        pthread_mutex_unlock(&g_mu);
+        json_t *m;
+        if (from_parent && !peer) {
+            json_t *c = json_obj();
+            json_set_str(c, "from", from);
+            json_set_str(c, "message", body);
+            char *txt = prompt_render("coding-agent/prompts/steering/parent-irc.md", c);
+            json_free(c);
+            m = msg_user_text(txt);
+            free(txt);
+            json_t *pi = json_obj();
+            json_set_str(pi, "from", from);
+            json_set_str(pi, "body", body);
+            json_set(m, "parentIrc", pi);
+        } else {
+            char *txt = render_irc(from, body, json_get_str(row, "replyTo"), fl.progress, !quiet, false);
+            m = msg_user_text(txt);
+            free(txt);
+            json_set(m, "details", json_clone(row));
+            json_set_str(m, "customType", "irc");
+        }
+        json_set_str(m, "attribution", "agent");
+        json_set_bool(m, "synthetic", true);
+        if (quiet) agent_aside(app->agent, m);
+        else agent_steer(app->agent, m);
+    }
+    free(parent);
+    bool handed = json_len(rows) > 0;
+    json_free(rows);
+    if (handed) return true;
+    json_t *direct = agent_peek_records(app->agent, is_irc_record, irc_record_direct);
+    bool queued = json_len(direct) > 0;
+    json_free(direct);
+    return queued;
 }
 
 void agents_wait_enter(tool_env_t *env, const strvec_t *asked, const strvec_t *watched) {

@@ -1336,23 +1336,12 @@ static char *no_reply_text(const agents_replies_t *r) {
     return t;
 }
 
-/* messageResult (irc/messaging.ts): `msgs` (owned) in the result text and details.waited */
-static void wait_message_result(tool_env_t *env, json_t *msgs, tool_result_t *out) {
-    sb_t b = SB_INIT;
-    const json_t *m;
-    json_arr_foreach(msgs, i, m) {
-        const char *reply = json_get_str(m, "replyTo");
-        if (i) sb_append(&b, "\n\n");
-        sb_appendf(&b, "[%s] %s", json_get_str(m, "id"), json_get_str(m, "from"));
-        if (reply) sb_appendf(&b, " (reply to %s)", reply);
-        if (json_get_bool(m, "progress", false)) sb_append(&b, " (progress; reply follows)");
-        sb_appendf(&b, ": %s", json_get_str(m, "body"));
-    }
-    tool_result_text(out, sb_cstr(&b));
-    sb_free(&b);
-    const char *self = agents_id_of_env(env);
-    if (self) json_set_str(out->details, "from", self);
-    json_set(out->details, "waited", msgs);
+/* interruptedResult: a wait cut short by news that injects right after it as its own turn (a message, steering);
+ * not useless, the loop guard counts it as progress */
+static void wait_interrupted_result(tool_result_t *out) {
+    tool_result_text(out, "Wait interrupted by message.");
+    json_set(out->details, "jobs", json_arr());
+    json_set_bool(out->details, "interrupted", true);
 }
 
 /* omp JobSnapshot rows: {id, type, status, label, durationMs, resultText | errorText}, settled ones then what still runs */
@@ -1454,9 +1443,8 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
 static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_result_t *out, bool idle, int idle_rung,
                     int64_t idle_ended, int64_t idle_waited, const strvec_t *settled_at_entry, int64_t call_started) {
     UNUSED(self);
-    json_t *msgs = agents_take_messages(env);
-    if (msgs) {
-        wait_message_result(env, msgs, out);
+    if (agents_wait_hand_off(env)) {
+        wait_interrupted_result(out);
         return 0;
     }
     jobs_t *jobs = env->jobs;
@@ -1511,9 +1499,9 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
     int64_t t0 = mono_ms(), deadline = t0 + WAIT_LADDER_MS[rung], next_progress = t0;
     wait_wake_t wake;
     volatile sig_atomic_t *cancel = ctx ? ctx->cancel : NULL;
+    bool handed = false;
     for (;;) {
-        msgs = agents_take_messages(env);
-        if (msgs) {
+        if ((handed = agents_wait_hand_off(env))) {
             wake = WAKE_MESSAGE;
             break;
         }
@@ -1558,8 +1546,7 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
         /* keep collecting briefly so near-simultaneous completions share one result; other wakes still end it */
         int64_t settle = mono_ms() + WAIT_SETTLE_WINDOW_MS;
         while (jobs_running_watchable(jobs) && mono_ms() < settle && !(cancel && *cancel) && !steer_queued(ctx)) {
-            msgs = agents_take_messages(env);
-            if (msgs) {
+            if ((handed = agents_wait_hand_off(env))) {
                 wake = WAKE_MESSAGE;
                 break;
             }
@@ -1568,16 +1555,11 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
     }
     agents_wait_leave(env);
     /* a dequeued message wins a photo-finish with a job: the job remains deliverable, a lost message cannot be recovered */
-    if (!msgs) msgs = agents_take_messages(env);
-    if (msgs) {
-        wait_message_result(env, msgs, out);
+    if (!handed) handed = agents_wait_hand_off(env);
+    if (handed || (wake == WAKE_STEER && !(cancel && *cancel))) {
+        wait_interrupted_result(out);
     } else if (cancel && *cancel) {
         tool_result_error(out, "Operation aborted");
-    } else if (wake == WAKE_STEER) {
-        /* not useless: a message woke the agent, which the loop guard must treat as progress */
-        tool_result_text(out, "Wait interrupted by message.");
-        json_set(out->details, "jobs", json_arr());
-        json_set_bool(out->details, "interrupted", true);
     } else if (running || (jobs && jobs_undelivered(jobs))) {
         json_t *done = jobs_take_finished(jobs);
         char *txt = job_result_text(jobs, done, settled_at_entry, call_started);

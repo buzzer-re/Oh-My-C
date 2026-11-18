@@ -786,6 +786,19 @@ json_t *agent_take_records(agent_t *a, bool (*is_record)(const json_t *msg), boo
     return out;
 }
 
+json_t *agent_peek_records(agent_t *a, bool (*is_record)(const json_t *msg), bool (*matches)(const json_t *msg)) {
+    json_t *out = json_arr();
+    pthread_mutex_lock(&a->mu);
+    json_t *queues[2] = {a->steering, a->asides};
+    for (int q = 0; q < 2; q++)
+        for (size_t i = 0; i < json_len(queues[q]); i++) {
+            const json_t *m = json_at(queues[q], i);
+            if (is_record(m) && (!matches || matches(m))) json_push(out, json_clone(m));
+        }
+    pthread_mutex_unlock(&a->mu);
+    return out;
+}
+
 void agent_clear_queues(agent_t *a) {
     pthread_mutex_lock(&a->mu);
     json_free(a->steering);

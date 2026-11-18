@@ -257,6 +257,8 @@ void agent_aside(agent_t *a, json_t *msg);      /* owned: joins the next step bo
 /* Take the steering and aside records `is_record` selects, steering first. With `wakes`, takes nothing unless one
  * record satisfies it (IrcBridge.drainInboxMessages ifAny). Owned array, possibly empty. */
 json_t *agent_take_records(agent_t *a, bool (*is_record)(const json_t *msg), bool (*wakes)(const json_t *msg));
+/* Copies of the queued steering and aside records `is_record` (and `matches`, if given) select; nothing is taken. */
+json_t *agent_peek_records(agent_t *a, bool (*is_record)(const json_t *msg), bool (*matches)(const json_t *msg));
 void agent_clear_queues(agent_t *a);
 void agent_queue_changed(agent_t *a); /* run hooks.queue_changed (after an external queue edit) */
 bool agent_is_running(agent_t *a);

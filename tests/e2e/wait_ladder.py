@@ -80,10 +80,14 @@ else:
     check("progress keeps the wait", len(res) >= 2 and "## Completed (1)" in res[1], res)
     texts = json.dumps([r.get("messages") for r in rs])
     check("progress aside", "(progress; its reply follows later)" in texts and "Active interruptible wait stopped" not in texts, texts[-600:])
-    # a direct message ends the wait and is returned by it
+    # a direct message ends the wait and arrives right after it as an agent-authored user turn (omp 7b42b1be60)
     kid = [["bash", {"command": "sleep 0.3"}], ["write", {"path": "agent://Main", "content": "direct hello"}], ["bash", {"command": "sleep 3"}]]
     run([["task", {"context": "c", "tasks": [{"task": "seq:" + json.dumps(kid)}]}], ["wait", {}]])
-    res = tool_results(requests())
-    check("direct ends the wait", len(res) >= 2 and res[1].startswith("[m") and res[1].endswith(": direct hello") and "Completed" not in res[1], res)
+    rs = requests()
+    res = tool_results(rs)
+    check("direct ends the wait", len(res) >= 2 and res[1] == "Wait interrupted by message.", res)
+    after = [m for r in rs for m in r.get("messages", [])]
+    turn = [m for m in after if m.get("role") == "user" and "Incoming IRC message from agent" in json.dumps(m) and "direct hello" in json.dumps(m)]
+    check("message as a user turn", bool(turn) and "Active interruptible wait stopped early" in json.dumps(turn[-1]), after[-4:])
 print("wait ok" if not fails else "wait failed")
 sys.exit(1 if fails else 0)
