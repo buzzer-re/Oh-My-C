@@ -498,6 +498,12 @@ tools are exclusive and mountable as `xd://` devices.
   `security-reviewer`, `task` and `sonic` (omp `task/agents.ts` order), then user agents
   from `<agent dir>/agents` and project agents from `.omc/agents`, `.omp/agents`, `.claude/agents`
   (markdown with frontmatter: tools, model, ...).
+- **task.steps** (off by default): items carry `steps` instead of `task` (schema and description switch). The steps
+  go out in at most 4 prompts (`subagent-step.md`, earlier prompts taking the extra steps); the first is the
+  assignment, each later one is sent once the child delivered the previous one with a clean final message, whose text
+  reaches the spawner as an IRC progress note (`subagent-step-report.md`). The last prompt's result is the spawn's;
+  `task-steps` custom entries record the prompts and how many went out. omc has no `--restore` of subagents, so they
+  are written but not read back.
 - **Spawning** (`coding/agents.c`, the process-wide agent registry, port of `AgentRegistry` plus the
   IRC bus): `task` creates child `app_t`s via `app_subagent_new()`. Children share the parent's MCP,
   LSP and artifact store, run at most `task.maxRecursionDepth` deep, and use the `task` model role

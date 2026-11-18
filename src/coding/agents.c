@@ -685,8 +685,20 @@ static void settle_owned_jobs(app_t *child, volatile sig_atomic_t *cancel) {
 
 /* run one prompt on a child session; returns the last assistant text (owned). `executor`: a task spawn or IRC wake
  * run (lifecycle + progress are reported); a user chat turn from the hub (agents_prompt) is not. */
+static void deliver_step_report(aref_t *r, const char *report);
+
+/* run one prompt on a child session; `steps` (task.steps): the step prompts after `prompt`, each sent once the child
+ * delivered the previous one (a clean final message), its report going to the spawner as a progress note */
+static char *run_turn_steps(aref_t *r, app_t *child, const char *prompt, volatile sig_atomic_t *cancel, bool *aborted,
+                            char **error, bool executor, const char *assignment, const json_t *steps);
+
 static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile sig_atomic_t *cancel, bool *aborted, char **error,
                          bool executor, const char *assignment) {
+    return run_turn_steps(r, child, prompt, cancel, aborted, error, executor, assignment, NULL);
+}
+
+static char *run_turn_steps(aref_t *r, app_t *child, const char *prompt, volatile sig_atomic_t *cancel, bool *aborted,
+                            char **error, bool executor, const char *assignment, const json_t *steps) {
     *aborted = false;
     *error = NULL;
     json_t *lc = NULL;
@@ -726,10 +738,35 @@ static char *run_turn_ex(aref_t *r, app_t *child, const char *prompt, volatile s
     agent_subscribe(child->agent, on_child_event, r);
     free(child->cost_refusal);
     child->cost_refusal = NULL;
+    /* executor.ts: a stepped run records the prompts it sent (task-steps entries), for --restore */
+    if (json_len(steps) && child->session) {
+        json_t *d = json_obj();
+        json_set(d, "prompts", json_clone(steps));
+        json_set_int(d, "sent", 1);
+        session_append_custom(child->session, "task-steps", d);
+    }
     bool refused = app_prompt(child, prompt, NULL) == APP_PROMPT_REFUSED;
     settle_owned_jobs(child, cancel);
     /* a focused view's empty Enter forced the queue into the continuation */
     while (agent_take_forced_delivery(child->agent) && agent_run_queued(child->agent) == 0) settle_owned_jobs(child, cancel);
+    for (size_t next = 1; !refused && next < json_len(steps); next++) {
+        /* delivered: a clean final message; a failed, aborted or refused step ends the chain with its result */
+        const json_t *prev = last_assistant(child->agent->messages);
+        if (!str_eq(json_get_str(prev, "stopReason"), "stop") || (cancel && *cancel) || child->cost_refusal) break;
+        char *report = prev ? ai_message_text(prev) : NULL;
+        char *rt = report ? str_trim(report) : NULL;
+        if (rt && *rt) deliver_step_report(r, report);
+        free(rt);
+        free(report);
+        if (child->session) {
+            json_t *d = json_obj();
+            json_set_int(d, "sent", (int64_t)next + 1);
+            session_append_custom(child->session, "task-steps", d);
+        }
+        refused = app_prompt(child, json_sv(json_at(steps, next)), NULL) == APP_PROMPT_REFUSED;
+        settle_owned_jobs(child, cancel);
+        while (agent_take_forced_delivery(child->agent) && agent_run_queued(child->agent) == 0) settle_owned_jobs(child, cancel);
+    }
     agent_unsubscribe(child->agent, on_child_event, r);
     w.done = 1;
     if (watching) pthread_join(wt, NULL);
@@ -893,6 +930,7 @@ typedef struct {
     app_t *parent;
     aref_t *ref;
     char *agent, *task, *context, *model;
+    json_t *steps; /* task.steps prompts (owned), NULL without steps */
 } spawn_t;
 
 static void spawn_free(void *p) {
@@ -901,6 +939,7 @@ static void spawn_free(void *p) {
     free(s->task);
     free(s->context);
     free(s->model);
+    json_free(s->steps);
     free(s);
 }
 
@@ -1048,7 +1087,8 @@ static char *task_body_run(bgjob_t *job, void *ud, bool *failed) {
         free(err);
         return s;
     }
-    char *up = tool_subagent_user_prompt(sp->task);
+    /* a stepped spawn starts on its first step prompt; the rest follow it */
+    char *up = tool_subagent_user_prompt(sp->steps ? json_sv(json_at(sp->steps, 0)) : sp->task);
     job_set_output(job, "running");
     pthread_mutex_lock(&g_mu);
     task_card_t *card = card_retain(r->card);
@@ -1078,7 +1118,7 @@ static char *task_body_run(bgjob_t *job, void *ud, bool *failed) {
         agent_append_message(child->agent, m);
     }
     strvec_free(&asides);
-    char *text = run_turn_ex(r, child, up, cancel, &aborted, &error, true, sp->task);
+    char *text = run_turn_steps(r, child, up, cancel, &aborted, &error, true, sp->task, sp->steps);
     free(up);
     permit_release();
     publish_output(r, text, true, !aborted && !error);
@@ -1183,6 +1223,7 @@ static spawn_t *make_spawn(tool_env_t *env, const spawn_spec_t *spec, aref_t *r)
     sp->ref = r;
     sp->agent = xstrdup(spec->agent);
     sp->task = xstrdup(spec->task ? spec->task : "");
+    sp->steps = json_len(spec->steps) ? json_clone(spec->steps) : NULL;
     sp->context = spec->context ? xstrdup(spec->context) : NULL;
     sp->model = model_of(spec->model);
     return sp;
@@ -2405,4 +2446,25 @@ char *agents_offline_call_error(const char *provider) {
     bool ok = active && provider && !strcmp(active, provider);
     free(active);
     return ok ? NULL : xstrdup("Offline mode restricts model calls to the active session provider.");
+}
+
+/* sendStepReport: what the child delivered for a prompt before the last reaches its spawner as an IRC progress note */
+static void deliver_step_report(aref_t *r, const char *report) {
+    pthread_mutex_lock(&g_mu);
+    char *from = xstrdup(r->id), *to = r->parent_id ? xstrdup(r->parent_id) : NULL;
+    pthread_mutex_unlock(&g_mu);
+    if (to) {
+        json_t *c = json_obj();
+        json_set_str(c, "report", report);
+        char *body = prompt_render("coding-agent/prompts/system/subagent-step-report.md", c);
+        json_free(c);
+        const char *oc = NULL;
+        char *err = NULL;
+        deliver(from, to, body ? body : report, (irc_flags_t){.progress = true}, &oc, &err);
+        if (!oc) LOGW("Step report not delivered (%s -> %s): %s", from, to, err ? err : "?");
+        free(err);
+        free(body);
+    }
+    free(from);
+    free(to);
 }

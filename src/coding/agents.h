@@ -38,6 +38,7 @@ typedef struct {
     const char *task;
     const char *context;
     const json_t *model;        /* string or [string] model override (internal callers) */
+    const json_t *steps;        /* task.steps: the rendered step prompts (array of strings), or NULL */
     task_card_t *card;          /* progress card this spawn reports into (NULL: none) */
     int card_index;
 } spawn_spec_t;

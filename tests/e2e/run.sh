@@ -191,6 +191,20 @@ for mode in off capped backoff; do
 done
 "$B" --model mock/mock-1 --no-session -p 'call:task:{}' >/dev/null 2>&1 </dev/null
 check "task shape"     'Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+# task.steps: items take ordered steps; each prompt goes out once the previous one was delivered, earlier reports reach
+# the spawner as progress notes (omp 02e8cb9939)
+mkdir -p "$T/steps" && cp "$T/agent/models.yml" "$T/steps/" && printf 'task:\n  steps: true\n' > "$T/steps/config.yml"
+STEPS='calls:'$(python3 -I -c 'import json; print(json.dumps([["task",{"context":"ctx","tasks":[{"steps":["first stage","second stage"],"solutionSpace":"one fix"}]}],["wait",{}]]))')
+: > "$T/req.jsonl"; OMC_CODING_AGENT_DIR="$T/steps" timeout 120 "$B" --model mock/mock-1 --no-session -p "$STEPS" </dev/null >/dev/null 2>&1
+check "task steps" "steps schema True, step 2 True, report True" python3 -I -c '
+import json,sys
+rs=[json.loads(l) for l in open(sys.argv[1])]
+main=[r for r in rs if r.get("tools") and any("calls:" in json.dumps(m) for m in r["messages"][:3])]
+task=[t for t in main[0]["tools"] if t["function"]["name"]=="task"][0]["function"]["parameters"]
+subs=[r for r in rs if any("# Step 1 of 2" in json.dumps(m) for m in r["messages"])]
+s2=bool(subs) and any(m.get("role")=="user" and json.dumps(m).find("# Step 2 of 2\\nsecond stage\\nLast step") >= 0 for m in subs[-1]["messages"])
+rep=any("Finished a step; the next one is underway" in json.dumps(m) for r in main for m in r["messages"])
+print("steps schema %s, step 2 %s, report %s" % ("steps" in json.dumps(task), s2, rep))' "$T/req.jsonl"
 # task.file is gone; a task item takes `task` or `steps` (omp 02e8cb9939)
 "$B" --model mock/mock-1 --no-session -p 'call:task:{"context":"c","tasks":[{"task":"a","steps":["x"]}]}' >/dev/null 2>&1 </dev/null
 check "task or steps"  'Task 1 takes `task` or `steps`, not both.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
