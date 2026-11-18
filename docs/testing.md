@@ -1,7 +1,10 @@
 # Testing
 
 `make test` builds and runs every unit test, builds `examples/embed`, then runs the e2e suite, always with a fresh
-`HOME` and agent dir under the build dir, so no test can reach the real `~/.omc` or `~/.omp`. It
+`HOME` and agent dir under the build dir, so no test can reach the real `~/.omc` or `~/.omp`. Its `TMPDIR` is a
+fresh `omc-test.*` dir under yours holding a `.git` entry (and `tests/e2e/run.sh` makes its own `$T` a repo root and
+the `TMPDIR` of everything it runs): project discovery walks ancestors up to the repo root, else to `/`, so without
+that a `TMPDIR` under the real home would load its `.agents`/`.claude` skills and commands. It
 needs a C compiler and `python3` (for the mock servers). It needs **no network access, no real
 credentials and no omp install**. The parity harnesses that compare against a live `omp` are
 separate developer tools (below).

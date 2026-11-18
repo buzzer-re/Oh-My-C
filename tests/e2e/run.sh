@@ -6,6 +6,11 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # other machines building from the same checkout (a macOS make replaces it mid-run)
 B="${OMC_BIN:-$ROOT/build/omc}"
 T=$(mktemp -d "${TMPDIR:-/tmp}/omc-e2e.XXXXXX")
+# $T is a repo root (a `.git` entry, as omp's findRepoRoot sees it) and the TMPDIR of everything below: project
+# discovery walks ancestors up to the repo root (else to /), so without it a TMPDIR under the real home would reach
+# its .claude/.agents skills and commands. Product behaviour is unchanged; only the harness bounds the walk.
+mkdir "$T/.git"
+export TMPDIR="$T"
 PORT=$((20000 + RANDOM % 20000))
 mkdir -p "$T/agent" "$T/work"
 cat > "$T/agent/models.yml" <<YML

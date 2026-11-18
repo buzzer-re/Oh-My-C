@@ -209,18 +209,25 @@ build/examples/main_twice: tests/e2e/main_twice.c $(LIB_STATIC)
 	@mkdir -p build/examples
 	$(CC) -O2 -Wall -Wextra -Iinclude -o $@ $< $(LIB_STATIC) $(LIBS)
 
-# Never the real ~/.omc or ~/.omp: each run gets a fresh HOME and agent dir under the build dir
+# Never the real ~/.omc or ~/.omp: each run gets a fresh HOME and agent dir under the build dir.
+# TEST_TMP: the tests' TMPDIR is a fresh directory holding a `.git` entry, so project discovery (skills, commands,
+# context files, which walk ancestors up to the repo root, else to /) stops there instead of reaching the real
+# home's .claude/.agents dirs when TMPDIR lies under it; removed after a passing run
+TEST_TMP = tmp=$$(mktemp -d "$${TMPDIR:-/tmp}"/omc-test.XXXXXX); tmp=$$(cd "$$tmp" && pwd -P); mkdir "$$tmp/.git"; \
+	export TMPDIR="$$tmp";
 test: $(addprefix $(O)/tests/,$(UNIT_TESTS)) build/examples/embed build/examples/main_twice $(BIN)
-	@set -e; home=$$(mktemp -d "$(CURDIR)/$(O)/test-home.XXXXXX"); \
+	@set -e; home=$$(mktemp -d "$(CURDIR)/$(O)/test-home.XXXXXX"); $(TEST_TMP) \
 	export HOME="$$home" OMC_CODING_AGENT_DIR="$$home/.omc/agent" PI_CODING_AGENT_DIR="$$home/.omp/agent" OMC_PLATFORM=linux; \
 	for t in $(UNIT_TESTS); do echo "== $$t"; ./$(O)/tests/$$t >/dev/null || { echo "   FAIL ($$t)"; exit 1; }; echo "   ok"; done; \
-	OMC_BIN=$(CURDIR)/$(O)/omc ./tests/e2e/run.sh
+	OMC_BIN=$(CURDIR)/$(O)/omc ./tests/e2e/run.sh; \
+	rm -rf "$$tmp"
 
 # unit tests only (CI on platforms where the e2e suite's pty and process assumptions are not yet verified)
 test-unit: $(addprefix $(O)/tests/,$(UNIT_TESTS))
-	@set -e; home=$$(mktemp -d "$(CURDIR)/$(O)/test-home.XXXXXX"); \
+	@set -e; home=$$(mktemp -d "$(CURDIR)/$(O)/test-home.XXXXXX"); $(TEST_TMP) \
 	export HOME="$$home" OMC_CODING_AGENT_DIR="$$home/.omc/agent" PI_CODING_AGENT_DIR="$$home/.omp/agent" OMC_PLATFORM=linux; \
-	for t in $(UNIT_TESTS); do echo "== $$t"; ./$(O)/tests/$$t >/dev/null || { echo "   FAIL ($$t)"; exit 1; }; echo "   ok"; done
+	for t in $(UNIT_TESTS); do echo "== $$t"; ./$(O)/tests/$$t >/dev/null || { echo "   FAIL ($$t)"; exit 1; }; echo "   ok"; done; \
+	rm -rf "$$tmp"
 
 # ---- libFuzzer harnesses (opt-in, clang only): `make fuzz` -> build/fuzz/fuzz_<name>; tests/fuzz/run.sh runs them ----
 # A separate object tree built with clang + libFuzzer/ASan/UBSan; the normal build and `make test` never touch it.

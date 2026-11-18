@@ -3,6 +3,7 @@
  * rendering, file-command discovery and precedence, prompt templates, /skill: parsing and the
  * user-invocation message. */
 #include "coding/commands.h"
+#include "coding/discovery.h"
 #include "config/settings.h"
 #include "core/fs.h"
 
@@ -136,15 +137,28 @@ static void test_discovery(const char *root) {
     CHECK(str_eq(x, "Template one"));
     free(x);
     prompt_templates_free(&t);
-    /* agents.ts walk: ancestors up to / when no repo and outside home */
+    /* agents.ts walk: up to the repo root, else home (skipped), else /. `make test` runs under a TMPDIR that is a
+     * repo root (so no walk reaches the real home), so the no-repo expectations apply only without one */
+    char *enclosing = find_repo_root(proj);
     strvec_t w = discovery_project_ancestors(proj);
-    CHECK(w.n == 1 && str_eq(w.v[0], proj)); /* stops at home (skipped) */
+    if (!enclosing) CHECK(w.n == 1 && str_eq(w.v[0], proj)); /* stops at home (skipped) */
+    else CHECK(w.n >= 1 && str_eq(w.v[0], proj) && str_eq(w.v[w.n - 1], enclosing));
     strvec_free(&w);
     char *outside = path_join(root, "outside/x");
     fs_mkdir_p(outside, 0755);
     w = discovery_project_ancestors(outside);
-    CHECK(w.n >= 3 && str_eq(w.v[0], outside) && str_eq(w.v[w.n - 1], "/"));
+    if (!enclosing) CHECK(w.n >= 3 && str_eq(w.v[0], outside) && str_eq(w.v[w.n - 1], "/"));
+    else CHECK(w.n >= 2 && str_eq(w.v[0], outside) && str_eq(w.v[w.n - 1], enclosing));
     strvec_free(&w);
+    free(enclosing);
+    /* a repo root bounds the walk, home or not */
+    char *repo = path_join(root, "repo"), *gitd = path_join(root, "repo/.git"), *deep = path_join(root, "repo/a/b");
+    fs_mkdir_p(gitd, 0755);
+    fs_mkdir_p(deep, 0755);
+    w = discovery_project_ancestors(deep);
+    CHECK(w.n == 3 && str_eq(w.v[0], deep) && str_eq(w.v[2], repo));
+    strvec_free(&w);
+    free(repo), free(gitd), free(deep);
     free(outside);
     free(home);
     free(proj);
