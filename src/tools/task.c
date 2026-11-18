@@ -263,23 +263,37 @@ static bool blank_str(const json_t *v) {
     return !*s;
 }
 
-/* omp validateSpawnParams (batch shape, task.file off): the tool takes raw args when the schema rejects them
- * (lenientArgValidation) and reports these model-facing problems itself */
+/* validateTaskInput (omp 02e8cb9939, task.steps off): a non-empty `task`, or non-empty `steps`; `label` is "The call"
+ * for a single spawn. Owned problem text or NULL. */
+static char *task_input_problem(const json_t *item, const char *label) {
+    const json_t *steps = json_get(item, "steps");
+    if (json_get(item, "task") && steps) return xasprintf("%s takes `task` or `steps`, not both.", label);
+    if (steps) {
+        bool valid = json_is_arr(steps) && json_len(steps) > 0;
+        const json_t *x;
+        json_arr_foreach(steps, i, x) valid = valid && json_is_str(x) && !blank_str(x);
+        return valid ? NULL : xasprintf("%s has invalid `steps`: provide a non-empty list of non-empty instructions, one per stage.", label);
+    }
+    if (!blank_str(json_get(item, "task"))) return NULL;
+    return !strcmp(label, "The call") ? xstrdup("Missing `task`. Provide complete, self-contained instructions for the agent.")
+                                      : xasprintf("%s is missing `task`. Every task needs complete, self-contained instructions.", label);
+}
+
+/* omp validateSpawnParams (batch shape): the tool takes raw args when the schema rejects them (lenientArgValidation)
+ * and reports these model-facing problems itself */
 static char *spawn_params_problem(const json_t *args) {
     json_t *tasks = json_get(args, "tasks");
     if (tasks) {
-        if (!json_is_arr(tasks) || !json_len(tasks)) return xstrdup("Missing `tasks`. Provide at least one task item with `task` or `taskFile`.");
-        if (json_get(args, "task") || json_get(args, "taskFile"))
-            return xstrdup("Top-level `task` or `taskFile` is not part of the batch shape. Put the work in `tasks[]` items.");
+        if (!json_is_arr(tasks) || !json_len(tasks)) return xstrdup("Missing `tasks`. Provide at least one task item with `task`.");
+        if (json_get(args, "task") || json_get(args, "steps"))
+            return xstrdup("Top-level `task` or `steps` is not part of the batch shape. Put the work in `tasks[]` items.");
         json_t *it;
         json_arr_foreach(tasks, i, it) {
             const char *nm = json_get_str(it, "name");
             char *label = nm && *nm ? xasprintf("Task %zu (`%s`)", i + 1, nm) : xasprintf("Task %zu", i + 1);
-            char *r = NULL;
-            if (blank_str(json_get(it, "task")))
-                r = xasprintf("%s is missing `task`. Every task needs complete, self-contained instructions.", label);
-            else if (json_get(it, "effort") && !str_eq(json_get_str(it, "effort"), "lo") && !str_eq(json_get_str(it, "effort"), "med") &&
-                     !str_eq(json_get_str(it, "effort"), "hi")) {
+            char *r = task_input_problem(it, label);
+            if (!r && json_get(it, "effort") && !str_eq(json_get_str(it, "effort"), "lo") && !str_eq(json_get_str(it, "effort"), "med") &&
+                !str_eq(json_get_str(it, "effort"), "hi")) {
                 char *e = json_dump(json_get(it, "effort"), 0);
                 r = xasprintf("%s has an invalid `effort` value %s. Use \"lo\", \"med\", or \"hi\".", label, e);
                 free(e);
@@ -319,10 +333,9 @@ static char *spawn_params_problem(const json_t *args) {
                            "the tasks share.");
         return NULL;
     }
-    if (!json_get(args, "task") && !json_get(args, "taskFile"))
+    if (!json_get(args, "task") && !json_get(args, "steps"))
         return xstrdup("Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.");
-    if (blank_str(json_get(args, "task"))) return xstrdup("Missing `task`. Provide complete, self-contained instructions for the agent.");
-    return NULL;
+    return task_input_problem(args, "The call");
 }
 
 static int task_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {

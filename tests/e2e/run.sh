@@ -189,6 +189,11 @@ for mode in off capped backoff; do
 done
 "$B" --model mock/mock-1 --no-session -p 'call:task:{}' >/dev/null 2>&1 </dev/null
 check "task shape"     'Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+# task.file is gone; a task item takes `task` or `steps` (omp 02e8cb9939)
+"$B" --model mock/mock-1 --no-session -p 'call:task:{"context":"c","tasks":[{"task":"a","steps":["x"]}]}' >/dev/null 2>&1 </dev/null
+check "task or steps"  'Task 1 takes `task` or `steps`, not both.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --no-session -p 'call:task:{"context":"c","tasks":[]}' >/dev/null 2>&1 </dev/null
+check "task empty batch" 'Missing `tasks`. Provide at least one task item with `task`.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --no-session -p "bash:sh -c 'kill -9 \$\$'; printf 'x'; sh -c 'kill -SEGV \$\$'; echo after-kill" >/dev/null 2>&1 </dev/null
 check "bash no notice" "xafter-kill"  python3 -I -c "$LASTMSG; import re; sys.exit(1) if re.search('Killed|Segmentation', c) else None" "$T/req.jsonl"
 # skills + internal URLs + context files
