@@ -1417,14 +1417,32 @@ static json_t *merge_effort_map(const char *api, const char *provider, const cha
     return out;
 }
 
-/* Owned thinking config, or NULL for none */
-static json_t *resolve_thinking(const char *api, const char *provider, const char *url, const char *id, const model_identity_t *idn,
-                                const axes_t *ax, const json_t *compat, const json_t *spec_thinking, bool spec_reasoning) {
+/* Owned thinking config, or NULL for none. spec_reasoning is the authored capability: 1 true, 0 false, -1 no evidence. */
+static json_t *resolve_thinking(const char *api, const char *provider, const char *url, const char *id, const char *kind,
+                                const model_identity_t *idn, const axes_t *ax, const json_t *compat, const json_t *spec_thinking,
+                                int spec_reasoning) {
     const json_t *rule = ax->thinking;
     const json_t *explicit_t = json_len(json_get_arr(spec_thinking, "efforts")) > 0 ? spec_thinking : NULL;
     bool rule_unverified = json_get_bool(rule, "unverified", false);
-    bool unverified = !compat_reasoning(spec_reasoning, ax);
-    if (unverified && (explicit_t || !is_cls(idn, "unknown") || !rule_unverified)) return NULL;
+    bool capable = compat_reasoning(spec_reasoning == 1, ax);
+    /* reviewed neutral-upgrade rules may repair stale false capability data; reviewed unverified rules also keep their
+     * provisional opt-in for capability-less seeds. An explicit vocabulary remains authoritative. */
+    if (spec_reasoning == 0 && !capable && (!rule_unverified || explicit_t)) return NULL;
+    if (!capable && !explicit_t) { /* no evidence either way: a provisional ladder the thinking probe verifies */
+        bool supported = str_eq(api, "openai-completions") || str_eq(api, "openrouter") || str_eq(api, "openai-responses") ||
+                         str_eq(api, "azure-openai-responses") || str_eq(api, "anthropic-messages") ||
+                         str_eq(api, "google-generative-ai") || str_eq(api, "google-vertex") || str_eq(api, "google-gemini-cli");
+        if ((kind && !str_eq(kind, "chat")) || (!supported && !rule_unverified)) return NULL;
+        json_t *cfg = json_obj();
+        const char *mode = json_get_str(rule, "mode");
+        json_set_str(cfg, "mode", mode ? mode : default_thinking_mode(api, idn));
+        json_t *efforts = json_arr();
+        static const char *const all[] = {"minimal", "low", "medium", "high", "xhigh", "max"}; /* THINKING_EFFORTS */
+        for (size_t e = 0; e < ARRAY_LEN(all); e++) json_push_str(efforts, all[e]);
+        json_set(cfg, "efforts", efforts);
+        json_set_bool(cfg, "unverified", true);
+        return cfg;
+    }
     bool responses = str_eq(api, "openai-responses") || str_eq(api, "openai-codex-responses") || str_eq(api, "azure-openai-responses");
     if (responses && json_is_bool(json_get(compat, "supportsReasoningEffort")) && !json_get_bool(compat, "supportsReasoningEffort", true))
         return NULL;
@@ -1457,10 +1475,6 @@ static json_t *resolve_thinking(const char *api, const char *provider, const cha
     json_set(cfg, "efforts", efforts);
     json_t *m = merge_effort_map(api, provider, url, rule_map, compat, efforts);
     if (m) json_set(cfg, "effortMap", m);
-    if (unverified) {
-        json_set_bool(cfg, "unverified", true);
-        return cfg;
-    }
     if (json_get_str(rule, "defaultLevel")) json_set_str(cfg, "defaultLevel", json_get_str(rule, "defaultLevel"));
     if (json_get_obj(rule, "effortBudgets")) json_set(cfg, "effortBudgets", json_clone(json_get(rule, "effortBudgets")));
     if (display) json_set_bool(cfg, "supportsDisplay", true);
@@ -1684,15 +1698,17 @@ static void build_model(json_t *model) {
     if (!id || !provider) return;
     json_t *t = json_get_obj(model, "thinking");
     if (t) normalize_thinking(t);
-    if (json_get_bool(t, "unverified", false)) { /* withoutUnverifiedThinking: derived output, not authored input */
+    if (json_get_bool(t, "unverified", false)) { /* resolveModelPolicy: a provisional ladder is derived output, not evidence */
         json_del(model, "thinking");
         t = NULL;
-        json_set_bool(model, "reasoning", false);
+        json_del(model, "reasoning");
     }
     const char *url = json_get_str(model, "baseUrl");
     const char *backend = json_get_str(model, "providerType");
     if (!backend) backend = provider;
-    bool reasoning = json_get_bool(model, "reasoning", false);
+    const json_t *rv = json_get(model, "reasoning");
+    int spec_reasoning = json_is_bool(rv) ? rv->u.b : -1; /* undefined: no evidence; false explicitly rules it out */
+    bool reasoning = spec_reasoning == 1;
     model_identity_t idn;
     model_identity_classify(provider, id, &idn);
     axes_t ax = {0};
@@ -1731,7 +1747,8 @@ static void build_model(json_t *model) {
         compat = google_compat(api, user, &ax);
     }
 
-    json_t *thinking = resolve_thinking(api ? api : "", provider, url, id, &idn, &ax, compat, json_get_obj(model, "thinking"), reasoning);
+    json_t *thinking = resolve_thinking(api ? api : "", provider, url, id, json_get_str(model, "kind"), &idn, &ax, compat,
+                                        json_get_obj(model, "thinking"), spec_reasoning);
     if (thinking) json_set(model, "thinking", thinking);
     else json_del(model, "thinking");
     json_set_bool(model, "reasoning", reasoning || thinking != NULL);
@@ -1852,7 +1869,8 @@ void compat_finalize_custom(json_t *o, const json_t *reference) {
     }
     if (!json_get(o, "supportsTools") && json_is_bool(json_get(reference, "supportsTools")))
         json_set(o, "supportsTools", json_clone(json_get(reference, "supportsTools")));
-    if (!json_is_bool(json_get(o, "reasoning")))
+    /* reasoning ?? reference?.reasoning: left unset, nothing says whether the model reasons (the thinking probe decides) */
+    if (!json_is_bool(json_get(o, "reasoning")) && json_is_bool(json_get(reference, "reasoning")))
         json_set_bool(o, "reasoning", json_get_bool(reference, "reasoning", false));
     /* inheritReferenceThinking: wire routing is provider-specific, so only a same-provider reference */
     if (!json_get_obj(o, "thinking") && json_get_obj(reference, "thinking") && str_eq(json_get_str(reference, "provider"), provider))

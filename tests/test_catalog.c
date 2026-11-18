@@ -3,6 +3,7 @@
  * expected values are omp v18.14.2's get_available_models output for the same models.yml entries). */
 #include "ai/ai.h"
 #include "ai/compat_detect.h"
+#include "ai/thinkprobe.h"
 #include "core/fs.h"
 #include "tui/ansi.h"
 #include "tui/symbols.h"
@@ -134,8 +135,15 @@ static void test_custom_policy(void) {
     m = resolved("splash", "http://127.0.0.1:9/v1", "{\"id\":\"deepseek-r1-distill-qwen-32b\",\"reasoning\":true}");
     check_json(json_get(m, "identity"), "{\"class\":\"qwen\"}", "distill identity");
     json_free(m);
+    /* an explicit vocabulary without a `reasoning` verdict is authoritative (omp 3f8862bf9e) */
     m = resolved("splash", "http://127.0.0.1:9/v1", "{\"id\":\"gemma-3-27b-it\",\"thinking\":{\"mode\":\"effort\",\"efforts\":[\"low\"]}}");
-    CHECK(!json_get(m, "thinking"));
+    check_json(json_get_arr(json_get(m, "thinking"), "efforts"), "[\"low\"]", "gemma explicit thinking");
+    CHECK(json_get_bool(m, "reasoning", false));
+    json_free(m);
+    /* ...and `reasoning: false` still rules it out */
+    m = resolved("splash", "http://127.0.0.1:9/v1",
+                 "{\"id\":\"gemma-3-27b-it\",\"reasoning\":false,\"thinking\":{\"mode\":\"effort\",\"efforts\":[\"low\"]}}");
+    CHECK(!json_get(m, "thinking") && !json_get_bool(m, "reasoning", true));
     check_json(json_get(m, "identity"), "{\"class\":\"gemma\",\"revision\":\"3.0.0\"}", "gemma identity");
     json_free(m);
     /* the rule cascade reaches a custom id: DeepSeek keeps text-only input unless the id names vision (classes/deepseek.kdl) */
@@ -171,8 +179,27 @@ static void test_custom_policy(void) {
     /* no reference: omp's defaults */
     m = json_parse_str("{\"id\":\"plain\",\"provider\":\"splash\",\"api\":\"openai-completions\",\"baseUrl\":\"https://x.example.com/v1\",\"name\":\"Acme: Plain (latest)\"}");
     compat_finalize_custom(m, NULL);
-    CHECK(json_get_int(m, "contextWindow", 0) == 128000 && json_get_int(m, "maxTokens", 0) == 16384 && !json_get_bool(m, "reasoning", true));
+    CHECK(json_get_int(m, "contextWindow", 0) == 128000 && json_get_int(m, "maxTokens", 0) == 16384);
     CHECK(str_eq(json_get_str(m, "name"), "Plain"));
+    /* nothing says whether it reasons: a provisional ladder the thinking probe verifies (omp 3f8862bf9e) */
+    CHECK(json_get_bool(m, "reasoning", false));
+    check_json(json_get(m, "thinking"),
+               "{\"mode\":\"effort\",\"efforts\":[\"minimal\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"],\"unverified\":true}",
+               "provisional thinking");
+    json_free(m);
+    /* an explicit `reasoning: false` stays non-reasoning */
+    m = json_parse_str("{\"id\":\"plain\",\"provider\":\"splash\",\"api\":\"openai-completions\",\"baseUrl\":\"https://x.example.com/v1\",\"reasoning\":false}");
+    compat_finalize_custom(m, NULL);
+    CHECK(!json_get_bool(m, "reasoning", true) && !json_get(m, "thinking"));
+    json_free(m);
+    /* only chat models on the probed APIs get one */
+    m = json_parse_str("{\"id\":\"plain\",\"provider\":\"splash\",\"api\":\"bedrock-converse-stream\",\"baseUrl\":\"https://x.example.com\"}");
+    compat_finalize_custom(m, NULL);
+    CHECK(!json_get_bool(m, "reasoning", true) && !json_get(m, "thinking"));
+    json_free(m);
+    m = json_parse_str("{\"id\":\"plain\",\"provider\":\"splash\",\"api\":\"openai-completions\",\"kind\":\"embedding\",\"baseUrl\":\"https://x.example.com\"}");
+    compat_finalize_custom(m, NULL);
+    CHECK(!json_get(m, "thinking"));
     json_free(m);
     json_free(row);
     /* loopback / private ranges */
@@ -334,6 +361,121 @@ static void test_catalog_policy(void) {
     CHECK(catalog_find("factory-droid", "muse-spark-1.3") && catalog_find("factory-droid", "gemini-4-argon"));
 }
 
+/* thinking-capability.ts: cache key, validation, freshness and the overlay on a provisional ladder (omp 3f8862bf9e) */
+static void test_thinking_capability(void) {
+    char *e = tp_endpoint("http://user:pw@Example.COM:80/v1/?key=1#frag");
+    CHECK(str_eq(e, "http://example.com/v1"));
+    free(e);
+    e = tp_endpoint("https://h.example.com:443");
+    CHECK(str_eq(e, "https://h.example.com"));
+    free(e);
+    e = tp_endpoint("http://127.0.0.1:9/Deploy/X//");
+    CHECK(str_eq(e, "http://127.0.0.1:9/Deploy/X"));
+    free(e);
+    CHECK(!tp_endpoint("") && !tp_endpoint("no-scheme") && !tp_endpoint("http://"));
+
+    const char *good = "{\"checkedAt\":1,\"format\":\"openai\",\"efforts\":[\"low\",\"high\"],\"observed\":false,"
+                       "\"attempts\":[{\"format\":\"openai\",\"effort\":\"low\",\"accepted\":true,\"observed\":false},"
+                       "{\"format\":\"none\",\"accepted\":true,\"observed\":false}]}";
+    json_t *c = json_parse_str(good);
+    CHECK(tp_capability_valid(c));
+    json_free(c);
+    const char *bad[] = {
+        "{\"checkedAt\":1,\"format\":\"openai\",\"efforts\":[\"high\",\"low\"],\"observed\":false,\"attempts\":[]}", /* order */
+        "{\"checkedAt\":1,\"format\":\"openai\",\"efforts\":[],\"observed\":false,\"attempts\":[]}",               /* empty */
+        "{\"checkedAt\":1,\"format\":\"none\",\"efforts\":[\"low\"],\"observed\":false,\"attempts\":[]}",          /* none + efforts */
+        "{\"checkedAt\":1.5,\"format\":\"none\",\"efforts\":[],\"observed\":false,\"attempts\":[]}",               /* not an integer */
+        "{\"checkedAt\":1,\"format\":\"bogus\",\"efforts\":[],\"observed\":false,\"attempts\":[]}",
+        "{\"checkedAt\":1,\"format\":\"none\",\"efforts\":[],\"observed\":false,"
+        "\"attempts\":[{\"format\":\"none\",\"accepted\":false,\"observed\":true}]}", /* observed without acceptance */
+    };
+    for (size_t i = 0; i < ARRAY_LEN(bad); i++) {
+        c = json_parse_str(bad[i]);
+        if (tp_capability_valid(c)) fprintf(stderr, "FAIL capability %zu accepted\n", i), fails++;
+        json_free(c);
+    }
+
+    /* the overlay: exact learned ladder and controls, the row's limits kept */
+    json_t *row = json_parse_str("{\"id\":\"probe-x\",\"provider\":\"probe\",\"api\":\"openai-completions\","
+                                 "\"baseUrl\":\"http://u:p@127.0.0.1:7/v1?k=1\",\"contextWindow\":4321,\"maxTokens\":99}");
+    compat_finalize_custom(row, NULL);
+    CHECK(tp_unverified(row));
+    c = json_parse_str(good);
+    json_t *l = tp_apply_raw(row, c);
+    CHECK(l && json_get_bool(l, "reasoning", false) && !tp_unverified(l));
+    check_json(json_get(l, "thinking"), "{\"mode\":\"effort\",\"efforts\":[\"low\",\"high\"],\"effortMap\":{\"low\":\"low\",\"high\":\"high\"}}",
+               "learned thinking");
+    CHECK(str_eq(json_get_str(json_get(l, "compat"), "thinkingFormat"), "openai"));
+    CHECK(json_get_int(l, "contextWindow", 0) == 4321 && json_get_int(l, "maxTokens", 0) == 99);
+    json_free(l);
+    json_free(c);
+    c = json_parse_str("{\"checkedAt\":1,\"format\":\"none\",\"efforts\":[],\"observed\":false,\"attempts\":[]}");
+    l = tp_apply_raw(row, c);
+    CHECK(l && !json_get_bool(l, "reasoning", true) && !json_get(l, "thinking"));
+    CHECK(l && !json_get_bool(json_get(l, "compat"), "supportsReasoningParams", true) &&
+          json_get_bool(json_get(l, "compat"), "trustExplicitThinkingOnly", false));
+    json_free(l);
+    json_free(c);
+    /* a toggle format without an accepted effort: on/off only */
+    c = json_parse_str("{\"checkedAt\":1,\"format\":\"zai\",\"efforts\":[\"high\"],\"observed\":true,"
+                       "\"attempts\":[{\"format\":\"zai\",\"accepted\":true,\"observed\":true}]}");
+    l = tp_apply_raw(row, c);
+    json_t *lc = json_get(l, "compat");
+    CHECK(str_eq(json_get_str(lc, "reasoningDisableMode"), "zai-thinking-disabled") && json_get_bool(lc, "omitReasoningEffort", false) &&
+          !json_get_bool(lc, "supportsReasoningEffort", true) && !json_get_bool(lc, "zaiReasoningEffortDialect", true));
+    json_free(l);
+    json_free(c);
+
+    /* the cache: the credential-free endpoint keys it, positive verdicts live 30 days, `none` one day */
+    char *now = xasprintf("{\"checkedAt\":%lld,\"format\":\"openai\",\"efforts\":[\"low\",\"high\"],\"observed\":false,\"attempts\":[]}",
+                          (long long)now_ms());
+    c = json_parse_str(now);
+    tp_write(row, c);
+    json_t *plain = json_clone(row);
+    json_set_str(plain, "baseUrl", "http://127.0.0.1:7/v1/");
+    json_t *got = tp_read(plain);
+    CHECK(got && json_equal(got, c));
+    json_free(got);
+    l = tp_learned_row(plain);
+    CHECK(l && json_len(json_get_arr(json_get(l, "thinking"), "efforts")) == 2);
+    json_free(l);
+    json_set_str(plain, "requestModelId", "other-wire");
+    CHECK(!tp_read(plain));
+    json_free(c);
+    free(now);
+    now = xasprintf("{\"checkedAt\":%lld,\"format\":\"openai\",\"efforts\":[\"low\"],\"observed\":false,\"attempts\":[]}",
+                    (long long)(now_ms() - 31LL * 86400000));
+    c = json_parse_str(now);
+    tp_write(row, c);
+    CHECK(!tp_read(row)); /* stale */
+    json_free(c);
+    free(now);
+    now = xasprintf("{\"checkedAt\":%lld,\"format\":\"none\",\"efforts\":[],\"observed\":false,\"attempts\":[]}",
+                    (long long)(now_ms() - 2LL * 86400000));
+    c = json_parse_str(now);
+    tp_write(row, c);
+    CHECK(!tp_read(row)); /* `none` expires after a day */
+    json_free(c);
+    free(now);
+    now = xasprintf("{\"checkedAt\":%lld,\"format\":\"none\",\"efforts\":[],\"observed\":false,\"attempts\":[]}",
+                    (long long)(now_ms() - 3600000));
+    c = json_parse_str(now);
+    tp_write(row, c);
+    got = tp_read(row);
+    CHECK(got && str_eq(json_get_str(got, "format"), "none"));
+    json_free(got);
+    json_free(c);
+    free(now);
+    /* a discovered row registers with its learned capability (#finalizeModels) */
+    json_t *disc = json_parse_str("{\"id\":\"probe-x\",\"provider\":\"probe\",\"api\":\"openai-completions\",\"baseUrl\":\"http://127.0.0.1:7/v1\","
+                                  "\"input\":[\"text\"],\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0},"
+                                  "\"contextWindow\":8000,\"maxTokens\":800}");
+    const ai_model_t *dm = catalog_register(disc);
+    CHECK(dm && !dm->reasoning && !dm->thinking && !tp_unverified(dm->raw));
+    json_free(plain);
+    json_free(row);
+}
+
 int main(void) {
     char tmpl[] = "/tmp/omc-test-catalog.XXXXXX";
     char *dir = mkdtemp(tmpl);
@@ -441,6 +583,7 @@ int main(void) {
     free(yml);
 
     test_custom_policy();
+    test_thinking_capability();
 
     fs_rm_rf(dir);
     if (fails) return 1;

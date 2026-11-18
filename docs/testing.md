@@ -61,6 +61,7 @@ the reply**, so a test is just a prompt:
 | `say:<text>` | stream text word by word |
 | `md:<fixture>`, `think:<thinking>\|<text>`, `slow:<s>:<text>` | display scenarios used by the TUI harness |
 | `fail:<status>:<msg>`, `streamfail:<text>` | HTTP and in-stream errors |
+| the thinking probe (`What is 17 times 23? …`) | `391`; `MOCK_REJECT_REASONING=1` (or a list of `reasoning_effort` values) answers 400 to reasoning controls, `MOCK_PROBE_THINK=1` streams reasoning first, `MOCK_PROBE_STATUS=<code>` fails probes (`tests/e2e/thinking_probe.sh`) |
 | anything else | `plain answer` |
 
 It also answers eval `completion()`/`judge()` side requests and the memory pipeline stages, and

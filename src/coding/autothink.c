@@ -29,8 +29,6 @@ size_t autothink_supported(const ai_model_t *m, ai_effort_t out[6]) {
     return n;
 }
 
-static bool unverified(const ai_model_t *m) { return m && json_get_bool(m->thinking, "unverified", false); }
-
 bool autothink_clamp(const ai_model_t *m, ai_effort_t effort, ai_effort_t ceiling, ai_effort_t *out) {
     ai_effort_t sup[6];
     size_t n;
@@ -59,7 +57,7 @@ bool autothink_clamp(const ai_model_t *m, ai_effort_t effort, ai_effort_t ceilin
 }
 
 bool autothink_provisional(const ai_model_t *m, ai_effort_t *out) {
-    if (!m || !m->reasoning || unverified(m)) return false;
+    if (!m || !m->reasoning) return false;
     ai_effort_t pref = EFFORT_HIGH;
     const char *dl = json_get_str(m->thinking, "defaultLevel");
     if (dl) effort_parse(dl, &pref);
@@ -371,7 +369,7 @@ static bool classify(app_t *a, const char *request, ai_effort_t *out) {
 bool autothink_resolve(app_t *a, const char *prompt, ai_effort_t *out) {
     const ai_model_t *m = a->model;
     ai_effort_t sup[6];
-    if (!m || !m->reasoning || unverified(m) || !autothink_supported(m, sup)) return false;
+    if (!m || !m->reasoning || !autothink_supported(m, sup)) return false;
     ai_effort_t e;
     bool ok;
     if (keywords_enabled("ultrathink") && keywords_contains(prompt, "ultrathink")) ok = autothink_clamp(m, EFFORT_MAX, EFFORT_MAX, &e);

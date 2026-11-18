@@ -53,14 +53,14 @@ icheck "img read"          "plain answer"  "${IENV[@]}" "$B" --model mock/vision
 # the tool text and the image the model receives: decodable, 1568x882, within omp's 500 KiB budget
 icheck "img read note"     "Read image file [image/png] (displayed as image/" python3 -I -c '
 import json, sys
-r = [json.loads(l) for l in open(sys.argv[1])][-1]
+r = [x for x in (json.loads(l) for l in open(sys.argv[1])) if x.get("tools")][-1]
 print([m["content"] for m in r["messages"] if m["role"] == "tool"][-1])' "$T/req.jsonl"
 icheck "img read dims"     "[Image: original 3200x1800, displayed at 1568x882. Multiply coordinates by 2.04 to map to original image.]" \
-    python3 -I -c 'import json, sys; r = [json.loads(l) for l in open(sys.argv[1])][-1]; print([m["content"] for m in r["messages"] if m["role"] == "tool"][-1])' "$T/req.jsonl"
+    python3 -I -c 'import json, sys; r = [x for x in (json.loads(l) for l in open(sys.argv[1])) if x.get("tools")][-1]; print([m["content"] for m in r["messages"] if m["role"] == "tool"][-1])' "$T/req.jsonl"
 picheck "img wire"          "1568x882 ok" python3 -I -c '
 import json, sys, base64, io
 from PIL import Image
-r = [json.loads(l) for l in open(sys.argv[1])][-1]
+r = [x for x in (json.loads(l) for l in open(sys.argv[1])) if x.get("tools")][-1]
 u = [p["image_url"]["url"] for m in r["messages"] for p in (m["content"] if isinstance(m["content"], list) else []) if p.get("type") == "image_url"][-1]
 raw = base64.b64decode(u.split(",", 1)[1]); im = Image.open(io.BytesIO(raw)); im.load()
 print("%dx%d %s" % (im.size[0], im.size[1], "ok" if len(raw) <= 500 * 1024 else "too big"))' "$T/req.jsonl"

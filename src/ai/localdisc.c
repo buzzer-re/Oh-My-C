@@ -226,14 +226,14 @@ static int64_t pos_int(const json_t *v) {
 }
 
 static json_t *new_model(const char *id, const char *name, const char *api, const char *provider, const char *base_url,
-                         bool reasoning, bool image, int64_t ctx, int64_t max_tokens) {
+                         int reasoning, bool image, int64_t ctx, int64_t max_tokens) {
     json_t *m = json_obj();
     json_set_str(m, "id", id);
     json_set_str(m, "name", name ? name : id);
     json_set_str(m, "api", api);
     json_set_str(m, "provider", provider);
     json_set_str(m, "baseUrl", base_url);
-    json_set_bool(m, "reasoning", reasoning);
+    if (reasoning >= 0) json_set_bool(m, "reasoning", reasoning); /* < 0: no capability evidence (probed on first use) */
     json_t *in = json_arr();
     json_push_str(in, "text");
     if (image) json_push_str(in, "image");
@@ -300,12 +300,14 @@ static void probe_ollama(probe_t *p) {
         json_t *show = fetch_json(surl, body, p->api_key, probe_timeout(p->base, 150), NULL);
         free(body);
         free(surl);
-        bool reasoning = false, image = false;
+        int reasoning = -1;
+        bool image = false;
         int64_t ctx = 0;
         if (show) {
             ctx = ollama_ctx(show);
             json_t *caps = json_get(show, "capabilities"), *c;
             if (json_is_arr(caps)) {
+                reasoning = 0;
                 json_arr_foreach(caps, k2, c) {
                     const char *s = json_sv(c);
                     if (!s) continue;
@@ -313,7 +315,7 @@ static void probe_ollama(probe_t *p) {
                     if (!strcasecmp(s, "vision") || !strcasecmp(s, "image")) image = true;
                 }
             } else if (json_is_obj(caps)) {
-                reasoning = json_get_bool(caps, "thinking", false);
+                if (json_is_bool(json_get(caps, "thinking"))) reasoning = json_get_bool(caps, "thinking", false);
                 image = json_get_bool(caps, "vision", false) || json_get_bool(caps, "image", false);
             }
             json_free(show);
@@ -388,7 +390,7 @@ static bool probe_llamacpp_at(probe_t *p, const char *base) {
             json_arr_foreach(im, k, x) if (json_sv(x) && !strcasecmp(json_sv(x), "image")) image = true;
         }
         int64_t max_tokens = unlimited ? ctx : MIN(ctx, (int64_t)DISC_DEFAULT_MAX_TOKENS);
-        json_push(p->models, new_model(id, id, p->api, p->provider, v1, false, image, ctx, max_tokens));
+        json_push(p->models, new_model(id, id, p->api, p->provider, v1, -1, image, ctx, max_tokens));
     }
     free(v1);
     json_free(list);
@@ -439,7 +441,7 @@ static void probe_lmstudio(probe_t *p) {
         if (!ctx) ctx = DISC_DEFAULT_CTX;
         int64_t max_tokens = pos_int(json_get(it, "max_completion_tokens"));
         if (!max_tokens) max_tokens = MIN(ctx, (int64_t)DISC_DEFAULT_MAX_TOKENS);
-        json_t *m = new_model(id, id, p->api, p->provider, p->base, false, image, ctx, max_tokens);
+        json_t *m = new_model(id, id, p->api, p->provider, p->base, -1, image, ctx, max_tokens);
         if (str_eq(type, "embeddings") || str_eq(type, "embedding")) json_set_str(m, "kind", "embedding");
         json_push(p->models, m);
     }

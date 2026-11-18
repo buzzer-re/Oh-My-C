@@ -48,6 +48,12 @@ Mid-stream connection drops (turn recovery), driven by the latest user message:
   terminating chunk) or "rst" (TCP reset mid-body).
 /btw side questions ("<btw>…Question:\n<q>\n</btw>"): <q> may be md:/think:/slow:/streamfail:/fail:, else a fixed
   markdown answer naming <q>.
+Thinking-capability probes (omp thinking-probe.md, "What is 17 times 23? ...") answer "391".
+$MOCK_REJECT_REASONING=1: any request carrying a reasoning control (reasoning_effort, reasoning, thinking,
+  enable_thinking, chat_template_kwargs thinking/enable_thinking/reasoning_effort) fails with HTTP 400, like a server
+  that rejects unknown parameters; a comma list instead (e.g. "max,minimal") rejects only those reasoning_effort
+  values; $MOCK_PROBE_THINK=1: a probe that carries one streams reasoning_content first; $MOCK_PROBE_STATUS=<code>:
+  probes fail with that HTTP status.
 Every request body is appended to $MOCK_LOG (JSONL) for assertions."""
 import json, os, re, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -95,6 +101,12 @@ def thinking_on(body):
     kw = body.get("chat_template_kwargs") or {}
     if body.get("enable_thinking") is False or kw.get("enable_thinking") is False: return False
     return body.get("reasoning_effort") not in ("none",)
+
+def reasoning_controls(body):
+    """The request asks for reasoning in any wire dialect the thinking probes try."""
+    kw = body.get("chat_template_kwargs") or {}
+    return any(k in body for k in ("reasoning_effort", "reasoning", "thinking", "enable_thinking")) or \
+        any(k in kw for k in ("thinking", "enable_thinking", "reasoning_effort"))
 
 def req_kind(body):
     """main (tools + system prompt), title, compress (skill description), or side."""
@@ -170,6 +182,11 @@ class H(BaseHTTPRequestHandler):
             lu = lu.split("\nQuestion:\n", 1)[1].rsplit("\n</btw>", 1)[0]
         if body.get("model") == "mock-flaky":  # always rate limited (retry fallback chains)
             lu = "fail:429:Rate limit exceeded for mock-flaky"
+        rej = os.environ.get("MOCK_REJECT_REASONING")
+        if rej and reasoning_controls(body) and (rej == "1" or body.get("reasoning_effort") in rej.split(",")):
+            lu = "fail:400:Unrecognized request argument supplied: reasoning"
+        if os.environ.get("MOCK_PROBE_STATUS") and lu.startswith("What is 17 times 23?"):
+            lu = "fail:" + os.environ["MOCK_PROBE_STATUS"] + ":probe failure"
         if lu.startswith("fail:"):
             st, _, m = lu[5:].partition(":")
             b = json.dumps({"error": {"message": m or "mock failure", "type": "invalid_request_error", "code": int(st or 400)}}).encode()
@@ -305,6 +322,12 @@ class H(BaseHTTPRequestHandler):
                 for c in json.loads(rest):
                     delta = {"reasoning_content": c[1]} if isinstance(c, list) else {"content": c}
                     chunks.append({**base, "choices": [{"index": 0, "delta": delta}]})
+                chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+                name = None
+            elif u.startswith("What is 17 times 23?"):  # thinking-capability probe
+                if os.environ.get("MOCK_PROBE_THINK") and reasoning_controls(body):
+                    chunks.append({**base, "choices": [{"index": 0, "delta": {"reasoning_content": "17*23 = 391"}}]})
+                chunks.append({**base, "choices": [{"index": 0, "delta": {"content": "391"}}]})
                 chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
                 name = None
             elif kind == "say":

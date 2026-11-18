@@ -42,8 +42,9 @@ const json_t *compat_factory_droid_credit_cards(const char *model_id);
 
 /* finalizeCustomModel in place, for a models.yml model: `reference` (or NULL) fills what the entry leaves out (cost,
  * input, supportsTools, reasoning, same-provider thinking, context window, max tokens, omitMaxOutputTokens, compat), else
- * omp's defaults (free, text only, not reasoning, 128000 / 16384); then buildModel. Explicit prices, limits, kind and
- * promptCache beat the rule cascade. */
+ * omp's defaults (free, text only, 128000 / 16384; `reasoning` stays unset, so an unclassified chat model gets the
+ * provisional ladder the thinking probe verifies); then buildModel. Explicit prices, limits, kind and promptCache beat the
+ * rule cascade. */
 void compat_finalize_custom(json_t *model, const json_t *reference);
 
 /* mergeCompat: objects merge recursively, otherwise the override wins. Owned (NULL when both are NULL). */

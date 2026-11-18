@@ -79,6 +79,10 @@ void catalog_set_unpaused_providers(const json_t *ids);
 /* auth rule `login-warning "<text>"` (providerLoginWarning): the account risk a new login must accept first. Borrowed */
 const char *catalog_provider_login_warning(const char *provider);
 const ai_model_t *catalog_register(json_t *model_obj); /* takes ownership; for custom/discovered models */
+/* a standalone model over `raw` (owned; never indexed) that keeps `base`'s context policy and per-api defaults (none for a
+ * `rebuilt` row with a complete compat record); catalog_model_free releases both */
+ai_model_t *catalog_model_variant(const ai_model_t *base, json_t *raw, bool rebuilt);
+void catalog_model_free(ai_model_t *m);
 /* ModelRegistry.refreshIfStale: re-applies models.yml when it changed on disk since the last load (new models
  * appear, edited ones update in place, removed ones are marked gone); true when the catalog changed */
 bool catalog_refresh_if_stale(void);
@@ -219,6 +223,8 @@ typedef struct {
     int retry_policy;            /* AI_RETRY_* transport policy (set by the provider) */
     int max_http_attempts;       /* omp maxHttpAttempts (openai-completions): total transport attempts, 0 = default */
     bool accept_empty_response;  /* omp acceptEmptyResponse: no empty-completion retry */
+    /* thinking probes (thinkprobe.c): one HTTP attempt, no transport retry, identity fallback or failure-hook replay */
+    bool single_http_attempt;
     volatile sig_atomic_t *cancel;
     /* debug: called with the request JSON before sending (may be NULL) */
     void (*on_payload)(void *ud, const json_t *payload);
@@ -298,6 +304,10 @@ typedef void (*ai_event_cb)(void *ud, const ai_event_t *ev);
 /* Stream a completion. Always returns an owned AssistantMessage (stopReason "error"/"aborted" on failure). */
 json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts, ai_event_cb cb,
                   void *ud);
+/* ai_stream past the provider gate and the unverified-thinking step: the transport and provider dispatch for `model` as
+ * given (omp streamSimpleDispatch; used by the thinking probes) */
+json_t *ai_stream_dispatch(const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts, ai_event_cb cb,
+                           void *ud);
 /* ai_stream's provider call through the stream watchdog and providers.maxInFlightRequests slots (stream_guard.c);
  * resolves o's first_event/idle budgets in place */
 typedef json_t *(*ai_stream_fn)(const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts,
