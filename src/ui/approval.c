@@ -259,6 +259,7 @@ static void finish(approval_view_t *v, int answer) {
     v->closed = true;
     pthread_mutex_lock(&g_mu);
     approval_req_t *r = v->req;
+    char *answered_id = r && r->tool_call_id ? xstrdup(r->tool_call_id) : NULL;
     if (r && g_req == r) {
         if (answer == ANS_ONCE) r->answer = APPROVE_ONCE;
         else if (answer == ANS_SESSION) r->answer = APPROVE_SESSION;
@@ -274,7 +275,8 @@ static void finish(approval_view_t *v, int answer) {
     pthread_mutex_unlock(&g_mu);
     ui_t *u = v->u;
     if (g_view == v) g_view = NULL;
-    ui_signals_approval_resolved();
+    ui_signals_approval_resolved(answered_id);
+    free(answered_id);
     ui_close_selector(u); /* destroys v */
     tui_set_focus(u->tui, &u->editor->base);
     tui_request_render(u->tui);

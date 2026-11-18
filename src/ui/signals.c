@@ -595,13 +595,8 @@ void ui_signals_approval_requested(const char *tool_call_id, const char *tool_na
     ui_signals_run_status(RUN_BLOCKED, "permission", msg);
 }
 
-void ui_signals_approval_resolved(void) { warp_emit(warp_event("permission_replied")); }
-
-void ui_signals_tool_end(const char *tool_call_id, const char *tool_name) {
-    json_t *tc = warp_event("tool_complete");
-    json_set_str(tc, "tool_name", tool_name ? tool_name : "");
-    warp_emit(tc);
-    for (size_t i = 0; i < S.blockers.n; i++) {
+static bool drop_blocker(const char *tool_call_id) {
+    for (size_t i = 0; tool_call_id && i < S.blockers.n; i++) {
         if (!str_eq(S.blockers.v[i].id, tool_call_id)) continue;
         free(S.blockers.v[i].id);
         free(S.blockers.v[i].msg);
@@ -610,8 +605,26 @@ void ui_signals_tool_end(const char *tool_call_id, const char *tool_name) {
         /* back to `working` only when the last outstanding blocking prompt resolves */
         if (S.blockers.n) ui_signals_run_status(RUN_BLOCKED, S.blockers.v[0].kind, S.blockers.v[0].msg);
         else ui_signals_run_status(RUN_WORKING, NULL, NULL);
-        return;
+        return true;
     }
+    return false;
+}
+
+void ui_signals_approval_resolved(const char *tool_call_id) {
+    warp_emit(warp_event("permission_replied"));
+    /* only the approval's own blocker: an `ask` of the same call id stays blocked until its tool ends */
+    for (size_t i = 0; tool_call_id && i < S.blockers.n; i++)
+        if (str_eq(S.blockers.v[i].id, tool_call_id) && str_eq(S.blockers.v[i].kind, "permission")) {
+            drop_blocker(tool_call_id);
+            break;
+        }
+}
+
+void ui_signals_tool_end(const char *tool_call_id, const char *tool_name) {
+    json_t *tc = warp_event("tool_complete");
+    json_set_str(tc, "tool_name", tool_name ? tool_name : "");
+    warp_emit(tc);
+    drop_blocker(tool_call_id);
 }
 
 static const json_t *sig_last_assistant(const json_t *msgs) {

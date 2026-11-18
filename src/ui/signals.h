@@ -50,7 +50,9 @@ void ui_signals_tool_end(const char *tool_call_id, const char *tool_name);
 /* a tool call waits on an approval prompt (#blockingPrompt kind permission, msg formatApprovalPrompt) until its
  * tool_execution_end; Warp permission_request / permission_replied (tool_approval_requested / _resolved) */
 void ui_signals_approval_requested(const char *tool_call_id, const char *tool_name, const char *msg);
-void ui_signals_approval_resolved(void);
+/* an approval answered: its blocker is released at once (omp 46288e029d / 3dcc5c0106: an approval reports `working` as
+ * soon as it is answered, not when its tool ends) */
+void ui_signals_approval_resolved(const char *tool_call_id);
 /* the run settled (its last agent_end): run status done/error/idle from the run's messages, then the error
  * and completion notifications (`error.notify`, `completion.notify`) */
 void ui_signals_run_settled(const json_t *run_messages, bool interrupted);

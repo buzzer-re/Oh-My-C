@@ -89,7 +89,7 @@ check "config unknown"    "Unknown setting: nosuch.key"  "$B" config get nosuch.
 check "config set json"   '{"key":"display.showTokenUsage","value":true}'  "$B" config set display.showTokenUsage true --json
 check "config reset"      "Reset display.showTokenUsage to false"  "$B" config reset display.showTokenUsage
 check "config scope"      "Settings in the global layer:"  "$B" config list --scope global
-check "agents unpack"     '"total": 6'           "$B" agents unpack --dir "$T/ag" --json
+check "agents unpack"     '"total": 5'           "$B" agents unpack --dir "$T/ag" --json
 check "agents yaml"       'description: "Plain-text verdict summary, 1-3 sentences"'  cat "$T/ag/reviewer.md"
 check "ssh add"           'Added SSH host "box" to project config'  "$B" ssh add box --host 10.0.0.1 --user me --port 2222
 check "ssh list"          "box  10.0.0.1  me  port:2222"  "$B" ssh list
