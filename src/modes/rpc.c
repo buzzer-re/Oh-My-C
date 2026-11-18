@@ -48,6 +48,7 @@ struct rpc {
     uint64_t host_seq;
     pthread_t th;
     bool running;
+    bool settling;   /* the run's agent loop ended (agent_end sent): its thread only finishes and reports the run */
     bool compacting; /* a manual compaction is replacing history */
     char *prompt_id;
     char *text;
@@ -1190,6 +1191,12 @@ static void rpc_project_messages(json_t *frame) {
 /* hasPendingAsyncWork: a background job still running or a settled one not yet delivered can wake the session */
 static bool rpc_pending_async_work(app_t *a) { return app_pending_async_work(a); }
 
+static void set_settling(rpc_t *r, bool on) {
+    pthread_mutex_lock(&r->mu);
+    r->settling = on;
+    pthread_mutex_unlock(&r->mu);
+}
+
 static void rpc_listener(void *ud, const agent_event_t *ev) {
     rpc_t *r = ud;
     json_t *j = agent_event_to_json(ev);
@@ -1203,6 +1210,9 @@ static void rpc_listener(void *ud, const agent_event_t *ev) {
         if (awaiting) json_set_bool(j, "awaitingAsyncWork", true);
     }
     rpc_project_messages(j);
+    /* past agent_end the prompt thread only finishes the run, unless another agent run starts (set before the
+     * client can see the event and send its next prompt) */
+    if (ev->type == AGENT_EV_AGENT_START || ev->type == AGENT_EV_AGENT_END) set_settling(r, ev->type == AGENT_EV_AGENT_END);
     forward(r, j);
     if (ev->type == AGENT_EV_AGENT_END) {
         pthread_mutex_lock(&r->mu);
@@ -1350,6 +1360,7 @@ static void rpc_slash_agent(void *ud) {
 static void *prompt_thread(void *p) {
     rpc_t *r = p;
 again:;
+    set_settling(r, false);
     size_t before = json_len(r->a->agent->messages);
     bool refused = false;
     if (r->slash) {
@@ -1422,6 +1433,7 @@ again:;
         free(x);
     }
     r->images = NULL;
+    set_settling(r, true); /* the prompt returned: what follows is this run's tail (also without an agent run) */
     abort_barrier(r); /* an `abort` of this run is answered before its prompt_result */
     const json_t *last = last_assistant(r->a->agent->messages);
     const char *stop = json_get_str(last, "stopReason");
@@ -1474,7 +1486,9 @@ again:;
         was_cont = true;
         before = json_len(r->a->agent->messages);
         prev_type = ctype;
+        set_settling(r, false); /* a continuation turn: prompts queue into it again */
         app_prompt_hidden(r->a, cont, ctype);
+        set_settling(r, true);
         free(cont);
     }
     /* isSessionSettled: background work that can still wake the session keeps it unsettled; its wake run's
@@ -1543,6 +1557,7 @@ static void rpc_wake(void *ud) {
     if (r->th) pthread_join(r->th, NULL);
     r->th = 0;
     r->running = true;
+    r->settling = false;
     r->hidden = "async-result";
     r->text = t;
     r->prompt_id = NULL;
@@ -2934,6 +2949,13 @@ static void handle(rpc_t *r, json_t *cmd) {
             }
         }
         pthread_mutex_lock(&r->mu);
+        /* a run past its agent_end is only reporting (prompt_result, after-run checks) and cleaning up: omp's agent
+         * is idle by then, so wait for it and start a run, instead of steering into one that never takes the prompt */
+        for (int k = 0; r->running && r->settling && k < 300; k++) {
+            pthread_mutex_unlock(&r->mu);
+            usleep(10 * 1000);
+            pthread_mutex_lock(&r->mu);
+        }
         if (r->running) {
             pthread_mutex_unlock(&r->mu);
             const char *behav = json_get_str(cmd, "streamingBehavior");
@@ -2959,6 +2981,7 @@ static void handle(rpc_t *r, json_t *cmd) {
         if (r->th) pthread_join(r->th, NULL);
         r->th = 0;
         r->running = true;
+        r->settling = false;
         r->hidden = NULL;
         r->text = xstrdup(msg ? msg : "");
         r->prompt_id = id ? xstrdup(id) : NULL;
