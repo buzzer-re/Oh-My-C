@@ -49,6 +49,6 @@ const char *session_wt_decide_exit(const char *policy, const session_wt_state_t 
 /* the exit prompt's message: `<short path> (<branch>)[: <risks>]` (owned) */
 char *session_wt_exit_message(const session_wt_t *w, const session_wt_state_t *st);
 /* removeExitWorktrees for one planned worktree: NULL when removed quietly, else the message to show (owned) */
-char *session_wt_remove_planned(const session_wt_t *w, const char *approved_fingerprint);
+char *session_wt_remove_planned(const session_wt_t *w, const char *approved_fingerprint); /* NULL fingerprint: force */
 
 #endif

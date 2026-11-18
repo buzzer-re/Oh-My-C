@@ -2207,7 +2207,8 @@ static void wt_exit_next(ui_t *u) {
         }
         const char *action = session_wt_decide_exit(policy, &st);
         if (str_eq(action, "remove")) {
-            wt_exit_plan_t p = {.wt = *w, .fingerprint = xstrdup(st.fingerprint)};
+            /* under `force` no fingerprint is approved: the worktree goes even if it changes while closing */
+            wt_exit_plan_t p = {.wt = *w, .fingerprint = str_eq(policy, "force") ? NULL : xstrdup(st.fingerprint)};
             memset(w, 0, sizeof *w);
             vec_push(&g_wt_plan, p);
         } else if (str_eq(action, "prompt")) {
