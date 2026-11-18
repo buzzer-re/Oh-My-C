@@ -79,6 +79,9 @@ env OMC_CODING_AGENT_DIR="$T/agent-img" "$B" --model mock/mock-1 -p "attach:read
 # (the last request carrying a tool result: a background skill-description compression may be logged after it)
 check "attachment read" "Read image file [image/"  python3 -I -c 'import json,sys; r=[x for x in map(json.loads, open(sys.argv[1])) if any(m.get("role") == "tool" for m in x.get("messages", []))][-1]; print([m["content"] for m in r["messages"] if m.get("role") == "tool"][-1])' "$T/req.jsonl"
 check "attachment list" "Available attachment URIs: attachment://1."  env OMC_CODING_AGENT_DIR="$T/agent-img" "$B" --model mock/mock-1 -p "attach:read:attachment://3" @red.png
+# an input modality the catalog cannot express is dropped with a warning instead of failing models.yml (omp 69dbcc599f)
+mkdir -p "$T/agent-vid" && sed 's/^\(      - id: mock-1\)$/\1\n        input: [text, video]/' "$T/agent/models.yml" > "$T/agent-vid/models.yml"
+check "models.yml modality" "Warning: $T/agent-vid/models.yml: provider \"mock\", model \"mock-1\": input modality \"video\" is not supported yet (allowed: text, image) — ignoring"  env OMC_CODING_AGENT_DIR="$T/agent-vid" "$B" --model mock/mock-1 -p "say:modality ok"
 rm -f "$T/work/red.png"
 check "grep file"      $'[a/b.txt#'                      "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"written","path":"a/b.txt:1-5"}'
 check "grep no match"  "Tool said: No matches found"     "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"zzq_none"}'

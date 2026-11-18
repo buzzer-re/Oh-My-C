@@ -892,6 +892,12 @@ static int launch_run(launch_args_t *A, bool force_acp) {
         app_set_deadline(app, dl.deadline);
         dl_on = pthread_create(&dlt, NULL, deadline_main, &dl) == 0;
     }
+    if (rpc || print) { /* main.ts: the models.yml findings go to stderr without a TUI */
+        strvec_t warns = {0};
+        catalog_take_models_file_warnings(&warns);
+        for (size_t i = 0; i < warns.n; i++) fprintf(stderr, "Warning: %s\n", warns.v[i]);
+        strvec_free(&warns);
+    }
     if (rpc) {
         rc = run_rpc_mode(app);
     } else if (print) {

@@ -99,6 +99,8 @@ int catalog_discover_local(bool force);
 /* omp ModelRegistry.drainConfigWarnings: discovery warnings for built-in providers an env var redirected (moved
  * into `out`, which the interactive startup shows as warnings) */
 void catalog_drain_config_warnings(strvec_t *out);
+void catalog_publish_models_file_warnings(const strvec_t *w);
+void catalog_take_models_file_warnings(strvec_t *out); /* pending models.yml findings, removed from the list */ /* replaces the previous models.yml load's findings */
 /* re-probe one local provider now (selector-controller.ts: refreshProvider after a login), so its models appear without
  * a restart; other providers untouched. Blocks for the probe: call off the UI thread. No-op for non-local providers. */
 int catalog_discover_provider(const char *provider);
