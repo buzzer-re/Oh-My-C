@@ -1194,6 +1194,17 @@ static bool is_fence(const char *s, char *fch, size_t *flen, const char **info) 
     return true;
 }
 
+/* `^ {0,3}(=+|-+)[ \t]*$`: a setext heading underline */
+static bool is_setext_underline(const char *line) {
+    if (indent_of(line) > 3) return false;
+    const char *x = skip_ws(line);
+    if (*x != '=' && *x != '-') return false;
+    char u = *x;
+    while (*x == u) x++;
+    while (*x == ' ' || *x == '\t') x++;
+    return !*x;
+}
+
 static int heading_level(const char *s) {
     if (indent_of(s) > 3) return 0;
     s = skip_ws(s);
@@ -1506,20 +1517,18 @@ static void lex_blocks(const lines_t *L, size_t from, size_t to, toks_t *out) {
             t.t = T_PARA;
             size_t j = i + 1;
             while (j < to && !is_blank(L->v[j])) {
-                const char *x = skip_ws(L->v[j]);
-                /* setext underline: === -> h1, --- -> h2 */
-                if (indent_of(L->v[j]) <= 3 && (*x == '=' || *x == '-')) {
-                    char u = *x;
-                    const char *p = x;
-                    while (*p == u) p++;
-                    if (!*skip_ws(p)) {
+                /* setext underline: === -> h1, --- -> h2. omp's lexer underlines one line: a paragraph line followed
+                 * by an underline ends the paragraph before it and becomes the heading (isBlockStart) */
+                if (is_setext_underline(L->v[j])) {
+                    if (j == i + 1) {
                         t.t = T_HEADING;
-                        t.level = u == '=' ? 1 : 2;
+                        t.level = *skip_ws(L->v[j]) == '=' ? 1 : 2;
                         t.setext = true;
                         j++;
-                        break;
                     }
+                    break;
                 }
+                if (j + 1 < to && is_setext_underline(L->v[j + 1])) break;
                 if (interrupts_para(L, j, to)) break;
                 j++;
             }

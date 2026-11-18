@@ -375,6 +375,21 @@ static bool has_line(const strvec_t *v, const char *s) {
     return false;
 }
 
+/* omp's lexer underlines one line: `a\nb\n---` is paragraph `a` then heading `b` (a skill file's frontmatter) */
+static void test_setext_one_line(void) {
+    strvec_t p = md_plain("name: sk1\ndescription: A skill\n---\nbody", 60);
+    CHECK(p.n >= 5);
+    if (p.n >= 5) {
+        CHECK_STR(p.v[0], "name: sk1");
+        CHECK_STR(p.v[1], "");
+        CHECK_STR(p.v[2], "description: A skill");
+    }
+    strvec_free(&p);
+    p = md_plain("Title\n===\nbody", 60);
+    CHECK(p.n >= 1 && !strcmp(p.v[0], "Title"));
+    strvec_free(&p);
+}
+
 static void test_markdown(void) {
     tui_theme_set(tui_theme_builtin("dark", TUI_COLOR_TRUECOLOR));
     const char *doc = "# Title\n"
@@ -1945,6 +1960,7 @@ int main(void) {
     test_ansi();
     test_theme();
     test_markdown();
+    test_setext_one_line();
     test_markdown_html();
     test_golden();
     test_editor();
