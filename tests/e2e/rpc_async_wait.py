@@ -40,7 +40,7 @@ outer = "call:task:" + json.dumps({"context": "ctx", "tasks": [{"task": inner}, 
 send({"id": "p1", "type": "prompt", "message": outer})
 te = wait(lambda f: f.get("type") == "tool_execution_end" and f.get("toolName") == "task", "task end")
 text = te["result"]["content"][0]["text"]
-print("advisories", "Tip: this call spawned 2 generic `task` workers" in text, "2 siblings run together" in text)
+print("advisories", "Tip: this call spawned 2 generic workers (`task`)" in text, "2 siblings run together" in text)
 end1 = wait(lambda f: f.get("type") == "agent_end", "first agent_end")
 print("first end", end1.get("isTerminal"), end1.get("awaitingAsyncWork"))
 pr = wait(lambda f: f.get("type") == "prompt_result" and f.get("id") == "p1", "prompt_result")

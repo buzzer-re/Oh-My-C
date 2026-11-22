@@ -870,6 +870,8 @@ strvec_t internal_url_docs(const sysprompt_url_host_t *h) {
     { /* agent-protocol.ts: a subagent's `agent://all` is refused, so it goes unadvertised */
         json_t *c = json_obj();
         json_set_bool(c, "subagent", h->subagent);
+        /* task.crossInstance (agent://peers, agent://<pid>) runs over omp's per-user daemon, which omc doesn't have */
+        json_set_bool(c, "crossInstanceAgents", false);
         char *doc = prompt_render("coding-agent/prompts/internal-urls/agent.md", c);
         json_free(c);
         if (doc) {

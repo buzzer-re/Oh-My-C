@@ -177,19 +177,23 @@ static char *spawn_advisory(const tool_env_t *env, const json_t *tasks, size_t a
     if (!can_spawn_at_depth(env->subagent_depth)) return NULL;
     sb_t b = SB_INIT;
     size_t generics = 0;
-    const char *first = NULL;
+    bool seen_task = false, seen_sonic = false;
+    sb_t names = SB_INIT; /* unique generic names in first-seen order, each in backticks */
     json_t *t;
     json_arr_foreach(tasks, i, t) {
         const char *agent = json_get_str(t, "agent") ? json_get_str(t, "agent") : "task";
-        if (str_eq(agent, "task") || str_eq(agent, "sonic")) {
-            if (!first) first = agent;
-            generics++;
-        }
+        bool is_task = str_eq(agent, "task"), is_sonic = str_eq(agent, "sonic");
+        if (!is_task && !is_sonic) continue;
+        generics++;
+        if ((is_task && seen_task) || (is_sonic && seen_sonic)) continue;
+        if (is_task) seen_task = true;
+        else seen_sonic = true;
+        sb_appendf(&names, "%s`%s`", names.len ? ", " : "", agent);
     }
     if (generics >= 2) {
         json_t *c = json_obj();
         json_set_int(c, "count", (int64_t)generics);
-        json_set_str(c, "agent", first);
+        json_set_str(c, "agents", names.s ? names.s : "");
         json_set_bool(c, "scoutAvailable", tools_scout_available());
         char *r = prompt_render("coding-agent/prompts/tools/task-specialization-advisory.md", c);
         json_free(c);
@@ -198,6 +202,7 @@ static char *spawn_advisory(const tool_env_t *env, const json_t *tasks, size_t a
         free(tr);
         free(r);
     }
+    sb_free(&names);
     if (will_run_async && irc_enabled(env) && async_items >= 2) {
         json_t *c = json_obj();
         json_set_int(c, "count", (int64_t)async_items);
