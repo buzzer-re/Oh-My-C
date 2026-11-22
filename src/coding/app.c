@@ -290,9 +290,16 @@ static void report_persist_error(app_t *a) {
     free(e);
 }
 
+static void resolve_auto_thinking(app_t *a, ai_effort_t e);
+
 static void on_agent_event(void *ud, const agent_event_t *ev) {
     app_t *a = ud;
     if (ev->type == AGENT_EV_AGENT_START) strvec_free(&a->retry_notes);
+    /* settleAutoThinkingLevel: a run no classification resolved (IRC wakes, resumed, agent-originated and synthetic
+     * turns) publishes the level it thinks at as the auto resolution; the next user turn still reclassifies */
+    if (ev->type == AGENT_EV_AGENT_START && a->auto_thinking && a->auto_resolved < 0 && a->model && a->model->reasoning &&
+        a->thinking != EFFORT_OFF)
+        resolve_auto_thinking(a, a->thinking);
     if ((ev->type == AGENT_EV_AGENT_START || ev->type == AGENT_EV_TURN_START) && a->rewind_graveyard) {
         json_free(a->rewind_graveyard);
         a->rewind_graveyard = NULL;
@@ -2222,6 +2229,8 @@ int app_set_model(app_t *a, const char *pattern, char **err) {
 
 void app_use_model(app_t *a, const ai_model_t *m) { app_apply_model(a, m, false, EFFORT_OFF); }
 
+static void reapply_thinking(app_t *a, const ai_model_t *prev);
+
 void app_apply_model(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e) {
     const ai_model_t *prev_model = a->model;
     const char *prev_wire = app_wire_thinking(a);
@@ -2234,11 +2243,11 @@ void app_apply_model(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e) {
     char *uk = mr_model_key(m);
     mr_usage_record(uk);
     free(uk);
-    if (has_e) app_set_thinking(a, e);
-    else if (a->auto_thinking) app_set_thinking_auto(a); /* #reapplyThinkingLevel keeps auto, re-clamped */
     char *label = app_model_label(a);
     session_append_model_change(a->session, label, NULL);
     free(label);
+    if (has_e) app_set_thinking(a, e);
+    else reapply_thinking(a, prev_model); /* setModel: #reapplyThinkingLevel(the model's default as the fallback) */
     app_rebuild_system_prompt(a);
     app_model_state_changed(a, prev_model, prev_wire);
 }
@@ -2348,8 +2357,9 @@ strvec_t app_cycle_order(void) {
     return v;
 }
 
-/* #reapplyThinkingLevel after a model change: keep auto (re-clamped), else the new model's
- * thinking.defaultLevel, else the level that was effective on the previous model, clamped to the new one
+/* #reapplyThinkingLevel after a model change: keep auto (re-clamped), else carry the level that was effective on
+ * the previous model, clamped to the nearest effort the new one supports; the new model's thinking.defaultLevel
+ * applies only when no level is set (the previous model had no thinking, omp's undefined level)
  * (automaticThinkingLevel: a provisional ladder follows it too, its probes run on the first request) */
 static void reapply_thinking(app_t *a, const ai_model_t *prev) {
     if (a->auto_thinking) {
@@ -2360,7 +2370,7 @@ static void reapply_thinking(app_t *a, const ai_model_t *prev) {
     if (!m) return;
     ai_effort_t base = prev ? model_clamp_effort(prev, a->thinking) : a->thinking, d;
     const char *dl = json_get_str(m->thinking, "defaultLevel");
-    if (dl && effort_parse(dl, &d) == 0) base = d;
+    if (prev && !prev->reasoning && dl && effort_parse(dl, &d) == 0) base = d;
     ai_effort_t eff = base == EFFORT_OFF ? EFFORT_OFF : model_clamp_effort(m, base);
     if (eff == a->thinking) return;
     if (prev && eff == model_clamp_effort(prev, a->thinking)) {
@@ -2442,24 +2452,6 @@ int app_cycle_role_model(app_t *a, bool backward) {
     }
     app_role_cycle_free(es, n);
     return res;
-}
-
-/* resolveTemporaryModelThinkingLevel: the explicit level of a configured role resolving to `m` (static) */
-const char *app_temporary_thinking(const ai_model_t *m) {
-    mr_pool_t avail = {0};
-    mr_pool_available(&avail, "all");
-    const char *lv = NULL;
-    strvec_t roles = mr_known_roles();
-    for (size_t i = 0; i < roles.n && !lv && avail.n; i++) {
-        const char *v = mr_role_get(roles.v[i]);
-        if (!v) continue;
-        mr_result_t r = {0};
-        if (mr_resolve_value(v, &avail, &r) && r.explicit_level && r.level && r.model == m) lv = r.level;
-        mr_result_clear(&r);
-    }
-    strvec_free(&roles);
-    mr_pool_free(&avail);
-    return lv;
 }
 
 int app_set_model_temporary(app_t *a, const ai_model_t *m, const char *level, const char *role, char **err) {

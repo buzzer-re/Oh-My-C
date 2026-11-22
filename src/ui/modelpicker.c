@@ -89,15 +89,15 @@ static const char *thinking_step(const ai_model_t *m, const slider_t *s, const c
     return "off";
 }
 
-/* thinkingLevelFor (selector-controller.ts): the role's level, else the session's (auto carries over; a fixed
- * level yields to the model's own default) */
+/* thinkingLevelFor (selector-controller.ts): what picking a model applies without a slider level, the session's
+ * configured level (configuredThinkingLevel: auto, else the effective level, unset on a model without thinking);
+ * the slider clamps it per model */
 static const char *thinking_level_for(const picker_t *p, const ai_model_t *m) {
-    const char *role = app_temporary_thinking(m);
-    if (role) return role;
+    (void)m;
     app_t *a = p->u->app;
     if (a->auto_thinking) return "auto";
-    const char *dl = m->thinking ? json_get_str(m->thinking, "defaultLevel") : NULL;
-    return dl ? dl : effort_name(a->thinking);
+    if (!a->model || !a->model->reasoning) return NULL;
+    return effort_name(model_clamp_effort(a->model, a->thinking));
 }
 
 static bool session_mode(const picker_t *p) { return !p->task_mode && !p->role_mode; }
@@ -339,9 +339,9 @@ typedef struct {
 
 static void apply_now(ui_t *u, const ai_model_t *m, const char *level) {
     app_t *a = u->app;
-    const char *lv = level ? level : app_temporary_thinking(m);
+    /* without a slider level, the session's level carries over (clamped to the model) */
     char *err = NULL;
-    if (app_set_model_temporary(a, m, lv, NULL, &err) != 0) {
+    if (app_set_model_temporary(a, m, level, NULL, &err) != 0) {
         add_notice(u, "error", err);
         free(err);
         return;

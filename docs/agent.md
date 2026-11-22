@@ -166,7 +166,14 @@ continuations print mode suppresses).
   ceiling) through `evalhost_judge` with a 4 s budget, or jumps to the model's max on `ultrathink`. Failures keep the
   last classified level. Resolutions are persisted as `thinking_level_change {configured: "auto"}`; an abort during
   classification drops the prompt (`abort_gen`). `app_set_thinking_level("auto")` / `app_set_thinking_auto` serve
-  `/thinking`, the selector, Shift+Tab and RPC.
+  `/thinking`, the selector, Shift+Tab and RPC. A run no classification resolved (IRC wakes, resumed, synthetic turns)
+  settles auto on the level it starts at (`settleAutoThinkingLevel`, at `agent_start`).
+- **Thinking across model switches** (`reapply_thinking` in `coding/app.c`; omp `#reapplyThinkingLevel`). Every switch
+  (`/model`, `/switch`, the picker, RPC `set_model`, role picks without a level) keeps auto, else carries the level
+  that was effective on the previous model, clamped to the nearest effort the new one supports. The new model's
+  `thinking.defaultLevel` applies only when no level is set (the previous model had no thinking). A session-only pick
+  no longer borrows the level of a role that names the picked model; quick-role picks and role cycling still apply
+  their role's explicit suffix.
 - **Magic keywords** (`coding/keywords.c`; omp `modes/magic-keywords.ts`, `markdown-prose.ts`). `keywords_notices`
   turns standalone prose `ultrathink` / `orchestrate` / `jevify` (never inside code fences, code spans or XML/HTML
   sections) into hidden developer messages (`attribution: user`, `customType: <id>-notice`) placed ahead of the user

@@ -697,6 +697,8 @@ check "rpc workspace"  "workspace rpc ok"  python3 -I "$ROOT/tests/e2e/workspace
 # model switching (WP-19): /switch, /modelpreset, prewalk handoff, in a throwaway agent dir
 mkdir -p "$T/agent-ms" && cp "$T/agent/models.yml" "$T/agent-ms/"
 check "rpc model switch" "ok prewalk session entries"  env OMC_CODING_AGENT_DIR="$T/agent-ms" python3 -I "$ROOT/tests/e2e/model_switch_rpc.py" "$B" "$T/agent-ms" "$T/req.jsonl"
+# switching models keeps the thinking level, clamped; a model's defaultLevel applies only when none is set (omp 5b4fb78a55)
+check "thinking carry" "thinking carry ok"  python3 -I "$ROOT/tests/e2e/thinking_carry_rpc.py" "$B" "$T/agent-tc" "$PORT"
 # custom commands (WP-9): file commands, prompt templates, /skill:, MCP prompts over RPC, ACP and print mode
 check "rpc commands"   "ok empty MCP prompt consumed"  python3 -I "$ROOT/tests/e2e/commands_rpc.py" "$B" "$T/req.jsonl" "$ROOT/tests/e2e/mock_mcp.py"
 # MCP and SSH management (WP-18): /mcp and /ssh over RPC (text mode) and in the TUI (wizard, test, cancel)

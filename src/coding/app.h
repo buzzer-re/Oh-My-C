@@ -464,8 +464,6 @@ void app_apply_role_entry(app_t *a, const app_role_entry_t *e);
 /* setModelTemporary: session-only switch (model_change role "temporary" unless `role`), never persisted;
  * `level` an explicit thinking selector or NULL (keep / re-clamp). -1 + *err "No API key for p/id" */
 int app_set_model_temporary(app_t *a, const ai_model_t *m, const char *level, const char *role, char **err);
-/* resolveTemporaryModelThinkingLevel: explicit level of a configured role that resolves to `m` (static) */
-const char *app_temporary_thinking(const ai_model_t *m);
 /* a role's model (resolveModelRoleValue("@role") over its candidate pool) */
 const ai_model_t *app_role_model(const char *role, ai_effort_t *effort_out, bool *has_effort);
 /* first answer from `models` (skipping the session model), then the session model; owned or NULL */
