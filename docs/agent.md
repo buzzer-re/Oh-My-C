@@ -149,7 +149,7 @@ then call `app_after_run()`, which may return a hidden follow-up prompt (async j
 advisor continuation, or a goal continuation) that the mode runs with `app_prompt_hidden()`.
 
 Other entry points: `app_set_model`, `app_set_thinking`, `app_compact`, `app_new_session`,
-`app_switch_session`, `app_fork_from`, `app_branch_to`, `app_clear_context`, `app_handoff`,
+`app_switch_session`, `app_fork_from`, `app_branch_to`, `app_clear_context`, `app_handoff_background`,
 `app_retry`, `app_shake` (elide large tool results from the live context), `app_side_question`
 (`/btw`: answer from context, no tools, not added to history) and `app_user_bash` (`!cmd`).
 
@@ -278,8 +278,8 @@ chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp
   (`tool_choice: none`, `auto-handoff-threshold-focus.md`; `compaction.handoffSaveToDisk` writes
   `handoff-<time>.md` to the session artifacts) and commits it with `method: "handoff"`, rendered
   through `handoff-summary-context.md`. A document without a `## Goal` heading line (text before it is allowed) is
-  rejected (an automatic handoff moves on to the next method, `/handoff` reports "Handoff generation produced an invalid
-  document").
+  rejected (an automatic handoff moves on to the next method, `/handoff` reports "Compaction failed: Handoff generation
+  produced an invalid document").
 - **Triggers**: after each turn (`cmp_after_turn`: stale-read supersession and useless-result elision
   with `compaction.supersedeReads` / `dropUseless`, tool-output pruning, then the threshold), between
   tool-loop turns (`cmp_mid_turn`, `compaction.midTurnEnabled`, through the agent's `turn_boundary`
@@ -299,7 +299,19 @@ chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp
 
 `app_compaction_threshold()` gives the trigger (`compaction.thresholdTokens`, `thresholdPercent`,
 per-model `compaction.modelThresholds`, else the reserve-based budget); the status-line gauge uses the
-same value. `app_handoff()` (`/handoff`) commits a handoff document the same way.
+same value.
+
+**`/handoff` = `/compact handoff`** (`app_handoff_background`; omp `compact(focus, {mode: "handoff"})`) is a background
+compaction: it prepares against a snapshot of the branch (the cut point and the handoff request built from the live
+messages) and generates the document on its caller's thread without interrupting the live turn or holding follow-ups.
+The result applies at the first safe boundary: between tool turns (`cmp_mid_turn`), at the run's end
+(`cmp_after_turn`), or once idle through the mode's hook (the TUI's UI thread, RPC under its run lock). Messages that
+arrived meanwhile stay after the summary verbatim. A newer compaction, a reset or a branch change that dropped the
+snapshot discards it ("Conversation changed while compacting; discarded the summary"); Esc in the TUI, `abort` and
+`abortCompaction` cancel it ("Compaction cancelled"). Auto-compaction may still run meanwhile. The TUI shows
+`Compacting context in the background… (Esc to cancel)` in the working row while idle and a right-aligned HUD row with
+its clock above the working row beside a turn; it reports "Compaction complete" or "Compaction failed: …". RPC
+`handoff` runs in the background with one `manual_compaction_start {mode: "handoff"}` / `_end` pair.
 
 ## System prompt assembly (`src/coding/discovery.c`)
 

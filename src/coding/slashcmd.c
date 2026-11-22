@@ -101,7 +101,7 @@ static const struct {
     {"fresh", NULL, true, h_fresh},
     {"clear", NULL, true, NULL},
     {"delete", NULL, true, NULL},
-    {"compact", "soft", true, h_compact},
+    {"compact", "soft handoff", true, h_compact},
     {"shake", "*", true, h_shake},
     {"handoff", NULL, true, h_handoff},
     {"resume", NULL, true, NULL},
@@ -325,7 +325,7 @@ void slash_subcommand(const char *args, char **verb, char **rest) {
 }
 
 bool slash_parse_compact_args(const char *args, const char **mode, char **instructions, char **err) {
-    static const char *const MODES[] = {"soft", "remote", "snapcompact"};
+    static const char *const MODES[] = {"soft", "remote", "snapcompact", "handoff"};
     *mode = NULL;
     *instructions = NULL;
     *err = NULL;
@@ -649,6 +649,8 @@ static void h_advisor(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *r
     free(rest);
 }
 
+static void compact_text(slash_rt_t *rt, slash_result_t *res, const char *mode, char *focus);
+
 static void h_compact(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
     const char *mode;
     char *focus, *err = NULL;
@@ -657,6 +659,12 @@ static void h_compact(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *r
         free(err);
         return;
     }
+    compact_text(rt, res, mode, focus);
+}
+
+/* handleCompact (builtin-lifecycle.ts), shared by /compact and /handoff (= /compact handoff); takes `focus` */
+static void compact_text(slash_rt_t *rt, slash_result_t *res, const char *mode, char *focus) {
+    char *err = NULL;
     int64_t before = rt->app->last_context_tokens;
     if (app_compact_mode(rt->app, mode, focus, &err) != 0) {
         char *m = xasprintf("Compaction failed: %s", err ? err : "compaction failed");
@@ -692,23 +700,7 @@ static void h_shake(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res
 }
 
 static void h_handoff(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
-    if (agent_is_running(rt->app->agent)) {
-        usage(rt, res, "Wait for the current response to finish or abort it before handing off.");
-        return;
-    }
-    if (rt->app->compacting) {
-        usage(rt, res, "Handoff generation is already in progress.");
-        return;
-    }
-    char *err = NULL;
-    if (app_handoff(rt->app, *c->args ? c->args : NULL, &err) != 0) {
-        char *m = xasprintf("Handoff failed: %s", err ? err : "handoff failed");
-        usage(rt, res, m);
-        free(m);
-    } else {
-        out(rt, "Context handed off and compacted in place.");
-    }
-    free(err);
+    compact_text(rt, res, "handoff", *c->args ? xstrdup(c->args) : NULL);
 }
 
 static void h_retry(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {

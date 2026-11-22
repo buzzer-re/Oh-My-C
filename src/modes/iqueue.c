@@ -7,6 +7,7 @@
  * queued-messages band (ui/queue.c) until the agent delivers them, when their user message_start draws
  * them in the transcript. `!cmd`, /compact and /handoff run on their own threads so the UI keeps
  * painting and Esc cancels them; input typed meanwhile queues behind the compaction. */
+#include "coding/compaction.h"
 #include "coding/goal.h"
 #include "coding/slashcmd.h"
 #include "modes/interactive.h"
@@ -131,7 +132,8 @@ static void flush_compaction_queue(ui_t *u) {
     ui_queue_refresh(u);
 }
 
-bool iq_busy(ui_t *u) { return u->bg_kind != 0; }
+/* a background compaction (/handoff) holds neither the session nor its follow-ups */
+bool iq_busy(ui_t *u) { return u->bg_kind != 0 && u->bg_kind != 2; }
 
 void iq_hold(ui_t *u, bool on) {
     u->bg_kind = on ? 3 : 0;
@@ -156,7 +158,8 @@ static void bg_done(void *p) {
     ui_t *u = b->u;
     pthread_join(u->bg_thread, NULL);
     u->bg_kind = 0;
-    ui_working_stop(u);
+    if (b->kind == BG_HANDOFF) ui_bg_compaction_stop(u); /* the live turn keeps its working row */
+    else ui_working_stop(u);
     if (b->kind == BG_COMPACT) {
         if (b->rc != 0) {
             const char *e = b->err ? b->err : "compaction failed";
@@ -167,30 +170,17 @@ static void bg_done(void *p) {
                 free(m);
             }
         }
-    } else if (b->rc != 0) {
-        const char *e = b->err ? b->err : "handoff failed";
-        if (!strcmp(e, "Compaction cancelled")) add_notice(u, "error", "Handoff cancelled");
+    } else if (b->rc != 0) { /* executeCompaction: a background run reports like any manual compaction */
+        const char *e = b->err ? b->err : "Compaction failed";
+        if (!strcmp(e, "Compaction cancelled")) add_notice(u, "error", "Compaction cancelled");
         else {
-            char *m = xasprintf("Handoff failed: %s", e);
+            char *m = xasprintf("Compaction failed: %s", e);
             add_notice(u, "error", m);
             free(m);
         }
     } else {
-        /* the transcript was rebuilt around the handoff divider ("Context compacted"); renderInitialMessages
-         * reports the compaction count */
-        size_t n = 0;
-        json_t *e;
-        json_arr_foreach(u->app->session->entries, i, e) if (str_eq(json_get_str(e, "type"), "compaction")) n++;
-        if (n) {
-            char *c = n == 1 ? xstrdup("Session compacted 1 time") : xasprintf("Session compacted %zu times", n);
-            status(u, c);
-            free(c);
-        }
-        char *t = xasprintf("%s Context handed off and compacted in place", tui_sym("status.success"));
-        char *s = fg(TUI_TC_ACCENT, t);
-        tui_container_add(u->chat, &tui_text_new(s, 1, 1)->base);
-        free(s);
-        free(t);
+        ui_chat_rebuild(u); /* rebuildChatFromMessages: the summary landed behind the kept tail */
+        status(u, "Compaction complete");
     }
     /* a committed (or no-op) manual pass resumes the turn it interrupted (compaction.autoContinue) */
     bool noop = b->err && (str_starts(b->err, "Nothing to compact") || !strcmp(b->err, "Already compacted"));
@@ -217,6 +207,20 @@ static void bg_done(void *p) {
     if (!u->worker_running && !u->bg_kind) ix_job_wake(u);
 }
 
+/* the background compaction's idle hook: the UI thread applies it while no turn runs (a turn starts there) */
+static void idle_commit_cb(void *p) {
+    ui_t *u = p;
+    u->bg_commit_posted = false;
+    if (!u->worker_running && !agent_is_running(u->app->agent)) cmp_bg_apply(u->app);
+}
+
+static bool ui_idle_commit(app_t *a, void *ud) {
+    UNUSED(a);
+    ui_t *u = ud;
+    if (!__atomic_exchange_n(&u->bg_commit_posted, true, __ATOMIC_ACQ_REL)) tui_post(u->tui, idle_commit_cb, u);
+    return false; /* the wait loop sees the commit */
+}
+
 static void *bg_main(void *p) {
     bg_t *b = p;
     app_t *a = b->u->app;
@@ -230,7 +234,8 @@ static void *bg_main(void *p) {
         } else b->rc = app_compact_mode(a, mode, focus, &b->err);
         free(focus);
     } else {
-        b->rc = app_handoff(a, b->instructions, &b->err); /* focus instructions */
+        /* compact(focus, {mode: "handoff"}): applies at a turn boundary or, through the UI thread, once idle */
+        b->rc = app_handoff_background(a, b->instructions, ui_idle_commit, b->u, &b->err);
     }
     tui_post(b->u->tui, bg_done, b);
     return NULL;
@@ -243,10 +248,12 @@ static void bg_start(ui_t *u, int kind, const char *instructions, bool resume) {
     b->resume = resume;
     b->instructions = instructions && *instructions ? xstrdup(instructions) : NULL;
     u->bg_kind = kind;
-    ui_working_compaction(u, kind == BG_COMPACT ? "Compacting context..." : "Generating handoff\xe2\x80\xa6");
+    if (kind == BG_HANDOFF) ui_bg_compaction_start(u, "Compacting context in the background");
+    else ui_working_compaction(u, "Compacting context...");
     if (pthread_create(&u->bg_thread, NULL, bg_main, b) != 0) {
         u->bg_kind = 0;
-        ui_working_stop(u);
+        if (kind == BG_HANDOFF) ui_bg_compaction_stop(u);
+        else ui_working_stop(u);
         add_notice(u, "error", "failed to start compaction thread");
         free(b->instructions);
         free(b);
@@ -300,6 +307,16 @@ void iq_compact_then(ui_t *u, void (*then)(ui_t *u, bool ok, void *ud), void *ud
     }
 }
 
+/* `/compact handoff [focus]`: a background mode starts right away instead of waiting for the yield */
+static bool compact_is_background(const char *args) {
+    const char *mode;
+    char *focus = NULL, *err = NULL;
+    bool bg = slash_parse_compact_args(args, &mode, &focus, &err) && str_eq(mode, "handoff");
+    free(focus);
+    free(err);
+    return bg;
+}
+
 /* follow-up key while streaming: run the compaction once the agent yields (InteractiveMode.yieldCompaction) */
 static void compact_on_yield(ui_t *u, const char *text) {
     free(u->yield_compaction);
@@ -308,18 +325,15 @@ static void compact_on_yield(ui_t *u, const char *text) {
     status(u, "Queued compaction for when the agent yields");
 }
 
+/* `/handoff [focus]` = `/compact handoff [focus]`: a background compaction that neither interrupts the live turn
+ * nor holds follow-ups (handleCompactTui -> handleCompactCommand -> executeCompaction) */
 void iq_handoff(ui_t *u, const char *arg) {
-    if (u->worker_running) {
-        add_notice(u, "warning", "Wait for the current response to finish or abort it before handing off.");
-        return;
-    }
-    if (u->bg_kind == BG_COMPACT) {
-        add_notice(u, "warning", "Wait for context compaction to finish or cancel it before handing off.");
-        return;
-    }
-    if (u->bg_kind) return;
     if (message_entries(u) < 2) {
-        add_notice(u, "warning", "Nothing to hand off (no messages yet)");
+        add_notice(u, "warning", "Nothing to compact (no messages yet)");
+        return;
+    }
+    if (u->bg_kind || u->app->compacting) {
+        add_notice(u, "warning", "Context compaction is already in progress");
         return;
     }
     bg_start(u, BG_HANDOFF, arg, false);
@@ -662,7 +676,7 @@ void iq_follow_up(ui_t *u) {
     ix_history_add(u, t);
     if (u->bg_kind == BG_COMPACT || u->yield_compaction) {
         queue_compaction_message(u, t, "followUp");
-    } else if (!strncmp(t, "/compact", 8) && (!t[8] || t[8] == ' ') && u->worker_running) {
+    } else if (!strncmp(t, "/compact", 8) && (!t[8] || t[8] == ' ') && u->worker_running && !compact_is_background(t + 8)) {
         compact_on_yield(u, t);
     } else if (t[0] == '/' && ix_handle_command(u, t)) {
         /* handled */
@@ -744,7 +758,11 @@ static void restore_all(ui_t *u) {
 /* ---------- Esc (app.interrupt) ---------- */
 
 bool iq_escape(ui_t *u) {
-    if (u->bg_kind) { /* abortCompaction / abortHandoff */
+    if (u->bg_kind == BG_HANDOFF) { /* abortCompaction: cancels the background pass, never the live response */
+        cmp_bg_abort(u->app);
+        return true;
+    }
+    if (u->bg_kind) { /* abortCompaction */
         agent_abort(u->app->agent);
         return true;
     }
@@ -888,6 +906,7 @@ void iq_shutdown(ui_t *u) {
     }
     u->bash = u->python = NULL;
     if (u->bg_kind) {
+        cmp_bg_abort(u->app);
         agent_abort(u->app->agent);
         pthread_join(u->bg_thread, NULL);
         u->bg_kind = 0;

@@ -2301,6 +2301,7 @@ bool app_set_thinking_level(app_t *a, const char *level) {
 
 void app_abort(app_t *a) {
     __atomic_add_fetch(&a->abort_gen, 1, __ATOMIC_SEQ_CST);
+    cmp_bg_abort(a); /* abort() cancels a background compaction too (abortCompaction) */
     agent_abort(a->agent);
     app_goal_on_abort(a);
 }

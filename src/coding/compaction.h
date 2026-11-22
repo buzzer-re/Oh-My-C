@@ -4,7 +4,7 @@
  * preparation (cut point, split turns, file operations, short summary), provider-native ("remote") compaction
  * (OpenAI Responses /responses/compact, the Anthropic compaction beta), handoff documents, shake (fenced/XML
  * regions, recent-tail protection, artifact offload) and per-turn pruning (supersedeReads, dropUseless).
- * The app.h entry points app_compact / app_compact_mode / app_handoff / app_shake are implemented here. */
+ * The app.h entry points app_compact / app_compact_mode / app_shake are implemented here. */
 #ifndef OMC_COMPACTION_H
 #define OMC_COMPACTION_H
 
@@ -18,6 +18,18 @@ enum { CMP_NONE = 0, CMP_COMMITTED = 1, CMP_REWRITTEN = 2, CMP_BLOCKED = 4 };
 /* runAutoCompaction: the first usable method of compaction.methodOrder, falling through on failure.
  * trigger_tokens (<= 0: unknown) is the context size that fired the pass. */
 int cmp_auto(app_t *a, cmp_reason_t reason, bool will_retry, int64_t trigger_tokens);
+/* compact(focus, {mode: "handoff"}): generate a handoff summary from a snapshot of the branch without interrupting
+ * the live turn, then apply it at a safe boundary (between tool turns, at the run's end, or through `idle_commit`,
+ * which must call cmp_bg_apply only while no run can start, and return what it returned; NULL: when no run holds
+ * the agent). Blocks the calling thread until applied, failed or cancelled; 0 = committed, else -1 + *err
+ * ("Compaction cancelled", "Conversation changed while compacting; discarded the summary", ...). */
+int app_handoff_background(app_t *a, const char *focus, bool (*idle_commit)(app_t *, void *), void *ud, char **err);
+/* commit a ready background compaction on the thread that owns the idle or boundary agent; true when committed */
+bool cmp_bg_apply(app_t *a);
+/* a background compaction is preparing or waiting to apply (isBackgroundCompacting) */
+bool cmp_bg_active(app_t *a);
+/* abortCompaction for the background pass: true when one was running */
+bool cmp_bg_abort(app_t *a);
 /* post-turn maintenance (checkCompaction threshold case): stale-result pruning, tool-output pruning, then
  * the threshold check */
 void cmp_after_turn(app_t *a);

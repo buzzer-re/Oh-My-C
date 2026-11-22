@@ -1821,46 +1821,179 @@ static void handoff_result(const prep_t *p, const char *doc, result_t *r) {
     r->tokens_before = p->tokens_before;
 }
 
-int app_handoff(app_t *a, const char *focus, char **err) {
+/* ---------- background handoff (compact(focus, {mode: "handoff"})) ---------- */
+
+/* A background compaction prepares its summary against a branch snapshot without interrupting the live turn,
+ * then applies at a safe boundary: between tool turns (cmp_mid_turn), when the run ends (cmp_after_turn), or once
+ * the session is idle (the caller's idle hook). Messages appended meanwhile stay after the summary verbatim. */
+static ssize_t branch_index(json_t **ents, size_t n, const char *id);
+
+enum { BG_GENERATING, BG_READY, BG_APPLIED, BG_FAILED };
+
+struct cmp_bg {
+    int state;
+    volatile sig_atomic_t cancel;
+    prep_t prep;
+    result_t result;
+    char *snapshot_leaf;
+    char *err;
+};
+
+static pthread_mutex_t g_bg_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_bg_cv = PTHREAD_COND_INITIALIZER;
+
+/* the commit check of SessionMaintenance.compact: the snapshot is still on the active branch, no newer
+ * compaction or reset superseded it, and the kept tail starts inside it */
+static bool bg_snapshot_valid(app_t *a, const struct cmp_bg *bg) {
+    if (a->compacting) return false;
+    entvec_t ents = {0};
+    branch_entries(a, &ents);
+    ssize_t leaf = branch_index(ents.v, ents.n, bg->snapshot_leaf);
+    ssize_t kept = branch_index(ents.v, ents.n, bg->result.first_kept);
+    bool ok = leaf >= 0 && kept >= 0 && kept <= leaf;
+    for (size_t i = (size_t)(leaf + 1); ok && i < ents.n; i++) {
+        const char *t = json_get_str(ents.v[i], "type");
+        if (str_eq(t, "compaction") || str_eq(t, "reset_boundary")) ok = false;
+    }
+    vec_free(&ents);
+    return ok;
+}
+
+bool cmp_bg_apply(app_t *a) {
+    pthread_mutex_lock(&g_bg_mu);
+    struct cmp_bg *bg = a->cmp_bg;
+    if (!bg || bg->state != BG_READY) {
+        pthread_mutex_unlock(&g_bg_mu);
+        return false;
+    }
+    bool applied = false;
+    if (bg->cancel) {
+        bg->state = BG_FAILED;
+        bg->err = xstrdup("Compaction cancelled");
+    } else if (!bg_snapshot_valid(a, bg)) {
+        bg->state = BG_FAILED;
+        bg->err = xstrdup("Conversation changed while compacting; discarded the summary");
+    } else {
+        commit(a, &bg->prep, &bg->result, "handoff");
+        bg->state = BG_APPLIED;
+        applied = true;
+    }
+    pthread_cond_broadcast(&g_bg_cv);
+    pthread_mutex_unlock(&g_bg_mu);
+    return applied;
+}
+
+bool cmp_bg_active(app_t *a) {
+    pthread_mutex_lock(&g_bg_mu);
+    bool on = a->cmp_bg != NULL;
+    pthread_mutex_unlock(&g_bg_mu);
+    return on;
+}
+
+bool cmp_bg_abort(app_t *a) {
+    pthread_mutex_lock(&g_bg_mu);
+    struct cmp_bg *bg = a->cmp_bg;
+    if (bg) {
+        bg->cancel = 1;
+        if (bg->state == BG_READY) {
+            bg->state = BG_FAILED;
+            bg->err = xstrdup("Compaction cancelled");
+        }
+        pthread_cond_broadcast(&g_bg_cv);
+    }
+    pthread_mutex_unlock(&g_bg_mu);
+    return bg != NULL;
+}
+
+/* without a caller hook the session is idle when no run holds the agent (print mode, text slash commands) */
+static bool bg_idle_default(app_t *a, void *ud) {
+    UNUSED(ud);
+    return !agent_is_running(a->agent) && cmp_bg_apply(a);
+}
+
+int app_handoff_background(app_t *a, const char *focus, bool (*idle_commit)(app_t *, void *), void *ud, char **err) {
     *err = NULL;
-    if (a->compacting) {
+    if (!a->model) {
+        *err = xstrdup("No model selected");
+        return -1;
+    }
+    pthread_mutex_lock(&g_bg_mu);
+    if (a->cmp_bg || a->compacting) {
+        pthread_mutex_unlock(&g_bg_mu);
         *err = xstrdup("Compaction already in progress");
         return -1;
     }
-    if (!a->model) {
-        *err = xstrdup("No model selected for handoff");
-        return -1;
-    }
-    size_t messages = 0;
-    entvec_t ents = {0};
-    branch_entries(a, &ents);
-    for (size_t i = 0; i < ents.n; i++) messages += str_eq(json_get_str(ents.v[i], "type"), "message");
-    vec_free(&ents);
-    if (messages < 2) {
-        *err = xstrdup("Nothing to hand off (no messages yet)");
-        return -1;
-    }
-    spec_cancel(a);
-    a->compacting = true;
-    if (!agent_is_running(a->agent)) a->agent->cancel = 0;
-    prep_t p;
+    struct cmp_bg *bg = xcalloc(1, sizeof *bg);
+    bg->state = BG_GENERATING;
+    a->cmp_bg = bg;
+    pthread_mutex_unlock(&g_bg_mu);
+    volatile sig_atomic_t *prev_cancel = tl_cancel;
+    tl_cancel = &bg->cancel;
+    dcr_set_side_thread(true); /* the turn that writes the session may still be running */
     int rc = -1;
-    if (prepare(a, a->model, &p) != 0) {
-        *err = xstrdup("Nothing to hand off (already compacted)");
-        goto out;
+    handoff_req_t h;
+    memset(&h, 0, sizeof h);
+    int pr = prepare(a, a->model, &bg->prep);
+    char *leaf = a->session ? session_leaf_dup(a->session) : NULL;
+    if (pr || !leaf) {
+        *err = xstrdup(pr == 1 ? "Already compacted" : "Nothing to compact (session too small)");
+        free(leaf);
+        goto done;
     }
-    char *doc = handoff_document(a, focus, false, err);
-    if (!doc) goto out;
-    result_t r;
-    handoff_result(&p, doc, &r);
+    bg->snapshot_leaf = leaf;
+    if (!handoff_build(a, focus, &h, err)) goto done;
+    char *doc = handoff_exec(a, &h, false, err);
+    handoff_req_free(&h);
+    if (!doc) {
+        if (bg->cancel) {
+            free(*err);
+            *err = xstrdup("Compaction cancelled");
+        }
+        goto done;
+    }
+    pthread_mutex_lock(&g_bg_mu);
+    handoff_result(&bg->prep, doc, &bg->result);
     free(doc);
-    commit(a, &p, &r, "handoff");
-    result_free(&r);
-    app_notice(a, "info", "Context compacted");
-    rc = 0;
-out:
-    prep_free(&p);
-    a->compacting = false;
+    if (bg->cancel) {
+        bg->state = BG_FAILED;
+        bg->err = xstrdup("Compaction cancelled");
+    } else bg->state = BG_READY;
+    pthread_mutex_unlock(&g_bg_mu);
+    /* #waitForCompactionBoundary: a turn boundary applies it, or the idle hook once no run holds the session */
+    for (;;) {
+        pthread_mutex_lock(&g_bg_mu);
+        int st = bg->state;
+        pthread_mutex_unlock(&g_bg_mu);
+        if (st != BG_READY) break;
+        if ((idle_commit ? idle_commit : bg_idle_default)(a, ud)) break;
+        pthread_mutex_lock(&g_bg_mu);
+        if (bg->state == BG_READY) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 200 * 1000000L;
+            if (ts.tv_nsec >= 1000000000L) {
+                ts.tv_sec++;
+                ts.tv_nsec -= 1000000000L;
+            }
+            pthread_cond_timedwait(&g_bg_cv, &g_bg_mu, &ts);
+        }
+        pthread_mutex_unlock(&g_bg_mu);
+    }
+    pthread_mutex_lock(&g_bg_mu);
+    if (bg->state == BG_APPLIED) rc = 0;
+    else if (bg->err) *err = xstrdup(bg->err);
+    else *err = xstrdup("Compaction failed");
+    pthread_mutex_unlock(&g_bg_mu);
+done:
+    tl_cancel = prev_cancel;
+    pthread_mutex_lock(&g_bg_mu);
+    a->cmp_bg = NULL;
+    pthread_mutex_unlock(&g_bg_mu);
+    prep_free(&bg->prep);
+    result_free(&bg->result);
+    free(bg->snapshot_leaf);
+    free(bg->err);
+    free(bg);
     return rc;
 }
 
@@ -1947,6 +2080,7 @@ static int manual(app_t *a, const char *mode, const char *instructions, char **e
 
 int app_compact_mode(app_t *a, const char *mode, const char *instructions, char **err) {
     *err = NULL;
+    if (str_eq(mode, "handoff")) return app_handoff_background(a, instructions, NULL, NULL, err); /* background mode */
     if (a->compacting) {
         *err = xstrdup("compaction already running");
         return -1;
@@ -2851,6 +2985,7 @@ static const json_t *last_assistant_msg(app_t *a) {
 
 void cmp_after_turn(app_t *a) {
     if (!a->session || !a->model) return;
+    cmp_bg_apply(a); /* a background compaction ready for the run's end */
     prune_stale(a);
     if (!settings_bool("compaction.enabled", true)) return;
     strvec_t methods = cmp_method_order();
@@ -2896,6 +3031,7 @@ void cmp_before_prompt(app_t *a, const json_t *pending) {
 
 void cmp_mid_turn(app_t *a, const json_t *assistant) {
     if (!a->session || !a->model || a->compacting || cancelled(a)) return;
+    if (cmp_bg_apply(a)) return; /* maintainContextMidRun: a prepared background compaction lands first */
     if (!settings_bool("compaction.enabled", true) || !settings_bool("compaction.midTurnEnabled", true)) return;
     strvec_t methods = cmp_method_order();
     size_t nm = methods.n;

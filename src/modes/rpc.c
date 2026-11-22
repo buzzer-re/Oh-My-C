@@ -1,5 +1,6 @@
 /* rpc mode: JSONL commands on stdin, responses + agent events on stdout (omp RPC protocol subset). */
 #include "modes.h"
+#include "coding/compaction.h"
 #include "coding/agents.h"
 #include "coding/modelctl.h"
 #include "coding/btw.h"
@@ -2167,6 +2168,39 @@ static void *bg_main(void *p) {
     return NULL;
 }
 
+/* the background compaction's idle hook: no prompt can start while r->mu is held */
+static bool rpc_idle_commit(app_t *a, void *ud) {
+    rpc_t *r = ud;
+    pthread_mutex_lock(&r->mu);
+    bool applied = !r->running && !r->compacting && !agent_is_running(a->agent) && cmp_bg_apply(a);
+    pthread_mutex_unlock(&r->mu);
+    return applied;
+}
+
+/* `handoff`: one manual_compaction_start {mode: "handoff"} / _end pair; the response once the summary landed */
+static void handoff_main(rpc_t *r, const json_t *cmd) {
+    app_t *a = r->a;
+    const char *id = json_get_str(cmd, "id");
+    json_t *st = json_obj();
+    json_set_str(st, "type", "manual_compaction_start");
+    json_set_str(st, "mode", "handoff");
+    app_emit(a, st);
+    char *err = NULL;
+    int rc = app_handoff_background(a, json_get_str(cmd, "customInstructions"), rpc_idle_commit, r, &err);
+    json_t *en = json_obj();
+    json_set_str(en, "type", "manual_compaction_end");
+    bool skipped = rc != 0 && err && (!strcmp(err, "Already compacted") || !strncmp(err, "Nothing to compact", 18));
+    if (rc == 0) json_set(en, "result", app_compaction_result(a));
+    json_set_bool(en, "aborted", rc != 0 && !skipped && err && !strcmp(err, "Compaction cancelled"));
+    if (skipped) json_set_bool(en, "skipped", true);
+    if (rc != 0) json_set_str(en, "errorMessage", err ? err : "Compaction failed");
+    app_emit(a, en);
+    if (rc == 0) respond(r, id, "handoff", true, json_obj(), NULL);
+    else respond(r, id, "handoff", false, NULL, err ? err : "Compaction failed");
+    free(err);
+    rpc_wake(r); /* results that settled meanwhile go into the compacted context */
+}
+
 static void run_background(rpc_t *r, const json_t *cmd, void (*fn)(rpc_t *, const json_t *)) {
     bg_cmd_t *b = xcalloc(1, sizeof *b);
     b->r = r;
@@ -2824,7 +2858,10 @@ static void session_change(rpc_t *r, const json_t *cmd, const char *id, const ch
     respond(r, id, type, true, d, NULL);
 }
 
-static void rpc_abort_user(app_t *a) { agent_abort_user(a->agent); }
+static void rpc_abort_user(app_t *a) {
+    cmp_bg_abort(a); /* session.abort cancels a background compaction too */
+    agent_abort_user(a->agent);
+}
 
 /* `abort`: session.abort waits for the agent to go idle (its agent_end is out) before the reply */
 typedef struct {
@@ -3332,17 +3369,9 @@ static void handle(rpc_t *r, json_t *cmd) {
         free(written);
         free(err);
     } else if (!strcmp(type, "handoff")) {
-        if (r->running || agent_is_running(a->agent)) respond(r, id, type, false, NULL, "Cannot hand off while a response is in progress");
-        else {
-            char *err = NULL;
-            if (app_handoff(a, json_get_str(cmd, "customInstructions"), &err) != 0)
-                respond(r, id, type, false, NULL, err ? err : "handoff failed");
-            else {
-                /* RpcHandoffResult: savedPath only for an auto-triggered handoff saved to disk */
-                respond(r, id, type, true, json_obj(), NULL);
-            }
-            free(err);
-        }
+        /* session.compact(focus, {mode: "handoff"}) in the background: the queue stays free for steering and abort */
+        if (cmp_bg_active(a) || a->compacting) respond(r, id, type, false, NULL, "Compaction already in progress");
+        else run_background(r, cmd, handoff_main);
     } else if (!strcmp(type, "btw")) {
         /* Side questions (/btw): answers stream as btw_delta / btw_record frames */
         char *err = NULL;
@@ -3713,6 +3742,7 @@ void rpc_detach(rpc_t *r) {
     if (th) pthread_join(th, NULL);
     rpc_close_input(r);
     r->bash_cancel = 1;
+    cmp_bg_abort(a); /* abortCompaction("RPC client disconnected") */
     for (;;) {
         pthread_mutex_lock(&r->bg_mu);
         bool any = r->bg_threads.n > 0;

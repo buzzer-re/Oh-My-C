@@ -77,6 +77,7 @@ struct app {
     int64_t last_context_tokens;
     bool compacting;
     struct cmp_spec *cmp_spec; /* background speculative compaction run (compaction.c), NULL when idle */
+    struct cmp_bg *cmp_bg;     /* background (handoff) compaction in flight (compaction.c), NULL when idle */
     bool title_done;
     int retry_count;
     int retry_offset;
@@ -383,7 +384,6 @@ int app_remove_workspace_dir(app_t *a, const char *dir, char **resolved);       
 char *app_workspace_dirs_text(app_t *a, const char *note);
 /* resolveToCwd for a user-typed path (~, absolute, "/" = cwd) (owned) */
 char *app_resolve_user_path(app_t *a, const char *p);
-int app_handoff(app_t *a, const char *focus, char **err); /* handoff document (+ focus instructions) + compact in place */
 /* AgentSession.retry (turn-recovery.ts retry): with the agent idle, strip the failed/aborted last turn (and its
  * synthetic tool results) from context, or, for a fully failed tool batch, its results (the session leaf moves back
  * to the calling turn) so the continuation re-executes the calls; a restored session whose context already lost the
