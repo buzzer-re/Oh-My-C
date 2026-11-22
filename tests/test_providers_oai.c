@@ -1305,7 +1305,20 @@ static void test_codex_client_version(void) {
     setenv("PI_AI_CODEX_CLIENT_VERSION", CODEX_CLIENT_VERSION_PIN, 1);
 }
 
+/* omp 6c57f9091e: codex-rs routing fields lead the body, the rest keeps its order */
+static void test_codex_routing_order(void) {
+    json_t *b = json_parse_str("{\"input\":[1],\"instructions\":\"x\",\"stream\":true,\"tools\":[],\"service_tier\":\"priority\","
+                               "\"model\":\"gpt-6-luna\",\"store\":false}");
+    oair_codex_routing_fields_first(b);
+    char *d = json_dump(b, 0);
+    CHECK_STR(d, "{\"model\":\"gpt-6-luna\",\"stream\":true,\"service_tier\":\"priority\",\"input\":[1],\"instructions\":\"x\","
+                 "\"tools\":[],\"store\":false}");
+    free(d);
+    json_free(b);
+}
+
 int main(void) {
+    test_codex_routing_order();
     test_codex_client_version();
     test_prompt_cache_session_header();
     test_retry_hints();

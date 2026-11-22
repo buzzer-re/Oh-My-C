@@ -220,7 +220,8 @@ class H(BaseHTTPRequestHandler):
                 if f.get("code") != "ac1" or f.get("code_verifier") != "cv1" or f.get("redirect_uri") != "https://auth.openai.com/deviceauth/callback":
                     return self.send(400, {"error": "invalid_grant", "error_description": "bad code"})
                 return self.send(200, {"access_token": jwt(claims), "refresh_token": "or1", "expires_in": 3600})
-            if f.get("grant_type") == "refresh_token" and f.get("refresh_token") == "or1":
+            # codex-rs AuthAPI refresh diagnostics (omp 6425ef0e8d): omc only refreshes a token nearing expiry
+            if f.get("grant_type") == "refresh_token" and f.get("refresh_token") == "or1" and f.get("refresh_reason") == "proactive_expiry":
                 return self.send(200, {"access_token": jwt(dict(claims, n=2)), "refresh_token": "or2", "expires_in": 3600})
             return self.send(400, {"error": "invalid_grant"})
 

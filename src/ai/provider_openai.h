@@ -95,6 +95,7 @@ bool oair_refused_encrypted_reasoning(const char *msg);
 bool oair_encrypted_reasoning_floor(const json_t *msg);
 char *oair_codex_account_id(const char *access_token); /* owned or NULL */
 char *oair_url(const ai_model_t *m);                   /* owned request URL */
+void oair_codex_routing_fields_first(json_t *body);    /* codex-rs routing field order, in place */
 
 typedef struct oair_stream oair_stream_t;
 oair_stream_t *oair_stream_new(const ai_model_t *m, ai_event_cb cb, void *ud);

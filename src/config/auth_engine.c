@@ -1528,6 +1528,9 @@ int auth_refresh_credential(const char *provider, const json_t *d, const json_t 
     vset(vars, "base", base);
     vset(vars, "auth", authb);
     vset(vars, "claude_code_sdk_version", "0.60.0");
+    /* registry/engine/refresh.ts refreshReasonParam (omp 6425ef0e8d): omc refreshes only an access token nearing
+     * expiry (no 401 auth-recovery refresh), so it is always proactive */
+    vset(vars, "refresh_reason", "proactive_expiry");
     vset(std, "grant_type", "refresh_token");
     vset(std, "client_id", client_id);
     vset(std, "client_secret", client_secret);
