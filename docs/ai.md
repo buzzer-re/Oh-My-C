@@ -215,7 +215,7 @@ back as an assistant message with `stopReason: "error"` and `errorMessage`.
 | `openai-completions`, `openrouter` | `provider_openai_completions.c` | `openai-completions.ts`, `openai-shared.ts` | SSE; per-model compat flags, reasoning formats |
 | `openai-responses`, `azure-openai-responses`, `openai-codex-responses` | `provider_openai_responses.c` | `openai-responses.ts`, `azure-openai-responses.ts`, `openai-codex-responses.ts` | SSE; Azure api-version and deployment map, Codex ChatGPT backend (JWT account header, `store:false`) |
 | `google-generative-ai`, `google-vertex` | `provider_google.c` (+ `google_schema.c`, `google_auth.c`) | `google.ts`, `google-vertex.ts`, `google-shared.ts`, `google-auth.ts` | SSE `streamGenerateContent`; Vertex via API key or Application Default Credentials |
-| `google-gemini-cli` (Gemini CLI, Antigravity) | `provider_gemini_cli.c` (+ `google_cca.c`, `think_heal.c`) | `google-gemini-cli.ts`, `catalog/src/wire/gemini-headers.ts` | Cloud Code Assist `v1internal:streamGenerateContent`, endpoint failover |
+| `google-gemini-cli` (Antigravity, custom Cloud Code Assist providers; the Gemini CLI provider itself was removed in omp 19.1.0) | `provider_gemini_cli.c` (+ `google_cca.c`, `think_heal.c`) | `google-gemini-cli.ts`, `catalog/src/wire/gemini-headers.ts` | Cloud Code Assist `v1internal:streamGenerateContent`, endpoint failover (Antigravity); a custom provider sends `Accept: text/event-stream` and no client identity |
 | `ollama-chat` | `provider_ollama.c` | `ollama.ts` | NDJSON `POST /api/chat` |
 | `bedrock-converse-stream` | `provider_bedrock.c` (+ `aws.c`) | `amazon-bedrock.ts`, `aws-*.ts` | AWS event-stream; SigV4 or bearer key |
 | `cursor-agent` | `provider_cursor.c` (+ `cursor_proto.c`, `pb.c`) | `cursor.ts`, `connect-frame.ts`, `cursor-proto.ts` | Connect + protobuf over HTTP/1.1 RunSSE + BidiAppend |
@@ -342,7 +342,7 @@ There are two levels:
      min(0.5 s·2ⁿ, 8 s) with up to 25% jitter; a header retry-after wins when longer, one above `retry.maxDelayMs`
      fails at once (11 requests / ~48 s for a plain 503).
    - Codex SSE: 6 attempts at 500 ms·(n+1), 5 min cap. Ollama: 5 attempts at 2 s / 5 s / 10 s, llama.cpp tool-call
-     parse 500s fail at once. Bedrock: fetchWithRetry defaults (5 attempts). Gemini CLI: 4 attempts at 1 s·2ⁿ on the
+     parse 500s fail at once. Bedrock: fetchWithRetry defaults (5 attempts). Cloud Code Assist: 4 attempts at 1 s·2ⁿ on the
      last endpoint. Google generative AI / Vertex: no transport retries (one request). A segmented long decode
      (Gemini 4 Hydrogen: `finishReason: CONTINUATION` + `continuationToken` per 65,536-token segment) resumes with
      the token (top-level on the Gemini API / Vertex, `request.continuationToken` in the Cloud Code Assist envelope)

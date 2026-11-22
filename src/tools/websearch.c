@@ -1369,7 +1369,6 @@ static json_t *s_gemini(const ws_params_t *p, ws_err_t *e) {
             cca_antigravity_headers(&h);
         } else {
             http_headers_set(&h, "Accept", "text/event-stream");
-            cca_gemini_cli_headers(&h, NULL);
         }
         char *base = xstrdup(m->base_url ? m->base_url : "");
         size_t bl = strlen(base);

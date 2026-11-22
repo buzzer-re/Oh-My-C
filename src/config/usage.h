@@ -7,7 +7,7 @@
  *               sharedGroup?}, window?: {id, label, durationMs?, resetsAt?, resetLabel?},
  *               amount: {used?, limit?, remaining?, usedFraction?, remainingFraction?, unit}, status?, notes?}
  *
- * One fetcher per provider (anthropic, openai-codex, github-copilot, google-gemini-cli, zai, synthetic, ollama,
+ * One fetcher per provider (anthropic, openai-codex, github-copilot, zai, synthetic, ollama,
  * ollama-cloud) runs against the credential stored in auth.json (or the provider's runtime / env API
  * key). Every probe goes through OMC_AUTH_URL_REWRITE so tests point them at mock servers. */
 #ifndef OMC_USAGE_H

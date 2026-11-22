@@ -1040,7 +1040,7 @@ static int factory_region(const actx_t *c, const char *phase, json_t **credp, co
 int auth_after_exchange(const char *hook, const actx_t *c, const char *phase, json_t **cred, const json_t *raw,
                         const json_t *stored, char **err) {
     if (!hook) return 0;
-    if (str_eq(hook, "google-gemini-cli-project") || str_eq(hook, "google-antigravity-project")) {
+    if (str_eq(hook, "google-antigravity-project")) {
         if (!str_eq(phase, "login")) return 0; /* refresh keeps the stored projectId (merged by the caller) */
         const char *rt = json_get_str(raw, "refresh_token");
         if (!rt || !*rt) {

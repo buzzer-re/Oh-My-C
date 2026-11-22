@@ -1,10 +1,9 @@
 /* usage_providers.c - per-provider usage fetchers (ports of omp packages/ai/src/usage/{claude,claude-api,
- * openai-codex,openai-codex-base-url,openai-codex-reset,github-copilot,gemini,zai,synthetic,ollama,shared}.ts).
+ * openai-codex,openai-codex-base-url,openai-codex-reset,github-copilot,zai,synthetic,ollama,shared}.ts).
  * Every request goes through auth_http, so OMC_AUTH_URL_REWRITE redirects the probes to mocks in tests. */
 #define _GNU_SOURCE
 #include "usage.h"
 
-#include "ai/google_cca.h"
 #include "ai/provider_anthropic.h"
 #include "config/auth_engine.h"
 #include "session/trace.h"
@@ -1861,137 +1860,6 @@ static json_t *copilot_fetch(const usage_params_t *p, bool *rejected) {
 }
 
 const usage_provider_t usage_provider_copilot = {"github-copilot", copilot_supports, copilot_fetch, 0};
-
-/* ============================================================================================
- * Google Gemini CLI (usage/gemini.ts)
- * ============================================================================================ */
-
-/* quotaTierFor("google-gemini-cli", model) */
-static const char *gemini_tier(const char *model) {
-    static const char *const flash3[] = {"gemini-3-flash-preview", "gemini-3-flash", "gemini-3.5-flash", NULL};
-    static const char *const flash[] = {"gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash", NULL};
-    static const char *const pro[] = {"gemini-2.5-pro", "gemini-3-pro-preview", "gemini-3.1-pro-preview", "gemini-3-pro",
-                                      "gemini-3.1-pro", "gemini-pro-agent", "gemini-1.5-pro", NULL};
-    for (int i = 0; flash3[i]; i++)
-        if (!strcmp(model, flash3[i])) return "3-Flash";
-    for (int i = 0; flash[i]; i++)
-        if (!strcmp(model, flash[i])) return "Flash";
-    for (int i = 0; pro[i]; i++)
-        if (!strcmp(model, pro[i])) return "Pro";
-    if (strstr(model, "flash")) return "Flash";
-    if (strstr(model, "pro")) return "Pro";
-    return NULL;
-}
-
-static bool gemini_supports(const usage_params_t *p) {
-    return str_eq(json_get_str(p->cred, "type"), "oauth") && cstr(p->cred, "accessToken");
-}
-
-static json_t *gemini_post(const char *url, const char *token, const json_t *body, const usage_params_t *p) {
-    http_headers_t h = {0};
-    char *a = xasprintf("Bearer %s", token);
-    http_headers_set(&h, "Authorization", a);
-    free(a);
-    http_headers_set(&h, "Content-Type", "application/json");
-    cca_gemini_cli_headers(&h, NULL);
-    char *bs = json_dump(body, 0);
-    http_resp_t r;
-    json_t *out = NULL;
-    if (uhttp("POST", url, &h, bs, p, &r) == 0 && r.status >= 200 && r.status < 300) out = resp_json(&r);
-    http_resp_free(&r);
-    free(bs);
-    http_headers_free(&h);
-    return out;
-}
-
-static json_t *gemini_fetch(const usage_params_t *p, bool *rejected) {
-    (void)rejected;
-    const char *token = cstr(p->cred, "accessToken");
-    double exp;
-    if (!token || (get_num(p->cred, "expiresAt", &exp) && exp <= (double)now_ms())) return NULL;
-    char *base = p->base_url && *p->base_url ? str_trim(p->base_url) : xstrdup(CCA_GEMINI_CLI_ENDPOINT);
-    if (!*base) {
-        free(base);
-        base = xstrdup(CCA_GEMINI_CLI_ENDPOINT);
-    }
-    size_t n = strlen(base);
-    if (n && base[n - 1] == '/') base[n - 1] = 0;
-    const char *proj = cstr(p->cred, "projectId");
-    json_t *lb = json_obj();
-    if (proj) json_set_str(lb, "cloudaicompanionProject", proj);
-    json_t *meta = json_obj();
-    json_set_str(meta, "ideType", "IDE_UNSPECIFIED");
-    json_set_str(meta, "platform", "PLATFORM_UNSPECIFIED");
-    json_set_str(meta, "pluginType", "GEMINI");
-    json_set(lb, "metadata", meta);
-    char *url = xasprintf("%s/v1internal:loadCodeAssist", base);
-    json_t *load = gemini_post(url, token, lb, p);
-    free(url);
-    json_free(lb);
-    char *project = proj ? xstrdup(proj) : NULL;
-    if (!project) {
-        json_t *cp = json_get(load, "cloudaicompanionProject");
-        if (json_is_str(cp)) project = xstrdup(json_sv(cp));
-        else if (json_get_str(cp, "id")) project = xstrdup(json_get_str(cp, "id"));
-    }
-    json_t *qb = json_obj();
-    if (project) json_set_str(qb, "project", project);
-    url = xasprintf("%s/v1internal:retrieveUserQuota", base);
-    json_t *quota = gemini_post(url, token, qb, p);
-    free(url);
-    json_free(qb);
-    json_t *report = NULL;
-    if (quota) {
-        report = report_new("google-gemini-cli", now_ms());
-        json_t *limits = json_get_arr(report, "limits"), *b;
-        json_arr_foreach(json_get_arr(quota, "buckets"), i, b) {
-            const char *model = json_get_str(b, "modelId");
-            double ra, rf;
-            json_t *w;
-            if (iso_ms(json_get_str(b, "resetTime"), &ra)) {
-                char wid[48];
-                snprintf(wid, sizeof wid, "reset-%.0f", ra);
-                w = window_new(wid, "Quota window");
-                json_set_num(w, "resetsAt", ra);
-            } else w = window_new("quota", "Quota window");
-            json_t *amount = json_obj();
-            json_set_str(amount, "unit", "percent");
-            if (json_is_num(json_get(b, "remainingFraction")) && isfinite((rf = json_get_num(b, "remainingFraction", 0)))) {
-                double rem = MIN(MAX(rf, 0.0), 1.0), used = MIN(MAX(1 - rem, 0.0), 1.0);
-                json_set_num(amount, "used", floor(used * 1000 + 0.5) / 10);
-                json_set_num(amount, "remaining", floor(rem * 1000 + 0.5) / 10);
-                json_set_num(amount, "limit", 100);
-                json_set_num(amount, "usedFraction", used);
-                json_set_num(amount, "remainingFraction", rem);
-            }
-            char *id = xasprintf("%s:%s", model ? model : "unknown", json_get_str(w, "id"));
-            char *label = model ? xasprintf("Gemini %s", model) : xstrdup("Gemini quota");
-            json_t *s = scope_new("google-gemini-cli");
-            if (cstr(p->cred, "accountId")) json_set_str(s, "accountId", cstr(p->cred, "accountId"));
-            if (project) json_set_str(s, "projectId", project);
-            if (model) json_set_str(s, "modelId", model);
-            if (model && gemini_tier(model)) json_set_str(s, "tier", gemini_tier(model));
-            json_set_str(s, "windowId", json_get_str(w, "id"));
-            json_push(limits, limit_new(id, label, s, w, amount, NULL));
-            free(id);
-            free(label);
-        }
-        json_t *md = json_obj();
-        const json_t *tier = json_get_obj(load, "currentTier");
-        if (json_get_str(tier, "id")) json_set_str(md, "currentTierId", json_get_str(tier, "id"));
-        if (json_get_str(tier, "name")) json_set_str(md, "currentTierName", json_get_str(tier, "name"));
-        json_set(report, "metadata", md);
-        json_set(report, "raw", quota);
-        quota = NULL;
-    }
-    json_free(quota);
-    json_free(load);
-    free(project);
-    free(base);
-    return report;
-}
-
-const usage_provider_t usage_provider_gemini_cli = {"google-gemini-cli", gemini_supports, gemini_fetch, 0};
 
 /* ============================================================================================
  * Z.AI (usage/zai.ts)

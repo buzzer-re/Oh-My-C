@@ -490,7 +490,7 @@ char *mr_expand_role_alias(const char *value) {
 /* ---------- preferences ---------- */
 
 static const char *const PROVIDER_ORDER[] = {
-    "openai-codex", "anthropic", "openai", "google-gemini-cli", "google", "google-vertex", "kimi-code", "moonshot",
+    "openai-codex", "anthropic", "openai", "google", "google-vertex", "kimi-code", "moonshot",
     "qwen-portal", "alibaba-token-plan", "zai", "xai-oauth", "xai", "mistral", "deepseek", "groq", "fireworks",
     "cerebras", "baseten", "deepinfra", "openrouter", "aimlapi", "together", "alibaba-coding-plan", "umans",
     "google-antigravity", "opencode-zen", "gitlab-duo", "opencode-go", "kilo", "vercel-ai-gateway",

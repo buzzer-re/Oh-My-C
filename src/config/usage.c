@@ -22,13 +22,12 @@
 /* ---------- registry ---------- */
 
 extern const usage_provider_t usage_provider_anthropic, usage_provider_codex, usage_provider_copilot,
-    usage_provider_gemini_cli, usage_provider_zai, usage_provider_synthetic, usage_provider_ollama,
-    usage_provider_ollama_cloud;
+    usage_provider_zai, usage_provider_synthetic, usage_provider_ollama, usage_provider_ollama_cloud;
 
 /* DEFAULT_USAGE_PROVIDERS probe order (the ported subset) */
 static const usage_provider_t *const PROVIDERS[] = {
-    &usage_provider_codex,     &usage_provider_gemini_cli, &usage_provider_ollama,   &usage_provider_ollama_cloud,
-    &usage_provider_anthropic, &usage_provider_zai,        &usage_provider_copilot, &usage_provider_synthetic,
+    &usage_provider_codex, &usage_provider_ollama,  &usage_provider_ollama_cloud, &usage_provider_anthropic,
+    &usage_provider_zai,   &usage_provider_copilot, &usage_provider_synthetic,
 };
 
 size_t usage_provider_count(void) { return ARRAY_LEN(PROVIDERS); }

@@ -1,7 +1,8 @@
 /*
- * google_cca.h - Google Cloud Code Assist (Gemini CLI / Antigravity) client identity and project provisioning.
- * Ports catalog/src/wire/gemini-headers.ts, utils/google-validation.ts and the project-discovery hooks of
- * registry/oauth/google-gemini-cli.ts / google-antigravity.ts.
+ * google_cca.h - Google Cloud Code Assist (Antigravity) client identity and project provisioning.
+ * Ports catalog/src/wire/gemini-headers.ts, utils/google-validation.ts and the project-discovery hook of
+ * registry/oauth/google-antigravity.ts. (omp 39c050d4ad removed the Gemini CLI OAuth provider, its user agent and
+ * its onboarding; the `google-gemini-cli` API id stays for Antigravity and custom Cloud Code Assist providers.)
  */
 #ifndef OMC_GOOGLE_CCA_H
 #define OMC_GOOGLE_CCA_H
@@ -13,11 +14,6 @@
 #define CCA_GEMINI_CLI_ENDPOINT "https://cloudcode-pa.googleapis.com"
 #define CCA_ANTIGRAVITY_DAILY_ENDPOINT "https://daily-cloudcode-pa.googleapis.com"
 #define CCA_ANTIGRAVITY_SANDBOX_ENDPOINT "https://daily-cloudcode-pa.sandbox.googleapis.com"
-
-/* `GeminiCLI/<PI_AI_GEMINI_CLI_VERSION|0.46.0>/<model> (<platform>; <arch>; terminal)` (owned) */
-char *cca_gemini_cli_user_agent(const char *model_id);
-/* User-Agent + Client-Metadata */
-void cca_gemini_cli_headers(http_headers_t *h, const char *model_id);
 
 /* Antigravity client version: PI_AI_ANTIGRAVITY_VERSION > manifest-discovered > 2.26.0 (owned). */
 char *cca_antigravity_version(void);
@@ -37,8 +33,8 @@ char *cca_validation_message(const char *url, const char *next_action, const cha
 
 typedef void (*cca_progress_fn)(void *ud, const char *msg);
 
-/* Post-login project discovery/onboarding for "google-gemini-cli" or "google-antigravity".
- * endpoint NULL => the provider's production control plane. Returns 0 and *project_out (owned), or -1 and *err. */
+/* Post-login project discovery/onboarding for "google-antigravity".
+ * endpoint NULL => the Antigravity daily control plane. Returns 0 and *project_out (owned), or -1 and *err. */
 int cca_discover_project(const char *provider, const char *access_token, const char *endpoint, cca_progress_fn progress,
                          void *ud, char **project_out, char **err);
 
