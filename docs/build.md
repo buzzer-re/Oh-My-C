@@ -92,7 +92,7 @@ checkout. They are run by hand when omp is updated, and the binary never runs th
 
 | Tool | Regenerates | Notes |
 |---|---|---|
-| `sync_prompts.sh <omp checkout> [--apply]` | `prompts/` | reports changed, removed and new upstream prompt files (`prompts/<pkg>/<path>` mirrors `packages/<pkg>/src/<path>`; `prompts/crates/pi-edit/` mirrors `crates/pi-edit`) and copies them with `--apply` |
+| `sync_prompts.sh <omp checkout> [--apply]` | `prompts/` | reports changed, removed and new upstream prompt files (`prompts/<pkg>/<path>` mirrors `packages/<pkg>/src/<path>`; `prompts/crates/pi-edit/` mirrors `crates/edit`, named `crates/pi-edit` before omp v19) and copies them with `--apply` |
 | `slim_catalog.py <models.json> <out>` | `assets/models.json.z` | factors per-API compat defaults, zlib-compresses |
 | `extract_symbols.py <symbols.ts> <out>` | `assets/tui/symbols.json` | asserts all presets have the same keys |
 | `extract_slash_commands.py <omp checkout>` | `assets/tui/slash-commands.json` | reads `slash-commands/builtin-*.ts` in registry order |

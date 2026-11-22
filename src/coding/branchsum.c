@@ -284,7 +284,7 @@ static char *upsert_file_ops(const char *summary, const json_t *read_files, cons
                                           : xstrdup(tree);
     json_t *ctx = json_obj();
     json_set_str(ctx, "files", files);
-    char *section = prompt_render("agent/compaction/prompts/file-operations.md", ctx);
+    char *section = prompt_render("snapcompact/prompts/file-operations.md", ctx);
     json_free(ctx);
     char *out;
     if (!section || !*section) out = xstrdup(base);

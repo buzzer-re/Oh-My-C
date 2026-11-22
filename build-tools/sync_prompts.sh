@@ -2,7 +2,8 @@
 # Dev-time only: sync the verbatim upstream prompt templates embedded under prompts/ from an omp checkout.
 #   build-tools/sync_prompts.sh <omp checkout> [--apply]
 # Layout: prompts/<package>/<path> mirrors packages/<package>/src/<path>; prompts/crates/pi-edit/<name>.md
-# mirrors the file of that name under crates/pi-edit/. Without --apply it only reports what differs.
+# mirrors the file of that name under crates/edit/ (named crates/pi-edit/ before omp v19). Without --apply it only
+# reports what differs.
 set -eu
 U=${1:?usage: sync_prompts.sh <omp checkout> [--apply]}
 APPLY=${2:-}
@@ -13,7 +14,7 @@ changed=0
 while IFS= read -r f; do
     rel=${f#prompts/}
     case "$rel" in
-        crates/pi-edit/*) up=$(find "$U/crates/pi-edit" -name "$(basename "$rel")" -type f 2>/dev/null | head -1) ;;
+        crates/pi-edit/*) up=$(find "$U/crates/edit" "$U/crates/pi-edit" -name "$(basename "$rel")" -type f 2>/dev/null | head -1) ;;
         *) pkg=${rel%%/*}; up="$U/packages/$pkg/src/${rel#*/}" ;;
     esac
     if [ -z "${up:-}" ] || [ ! -f "$up" ]; then echo "removed upstream: $f"; changed=1; continue; fi
