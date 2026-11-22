@@ -2,6 +2,8 @@
 #include <time.h>
 #include "ai/leaked_thinking.h"
 #include "ai/provider_openai.h"
+#include "core/fs.h"
+#include <unistd.h>
 
 #include <math.h>
 
@@ -1271,7 +1273,40 @@ static void test_replay_safe(void) {
     json_free(t.raw);
 }
 
+/* omp f54745ac23: the Codex client version tracks npm through a record in the agent dir, never below the pin */
+static void test_codex_client_version(void) {
+    setenv("OMC_PROVIDER_URL_REWRITE", "https://registry.npmjs.org=http://127.0.0.1:1", 1); /* never the real registry */
+    setenv("PI_AI_CODEX_CLIENT_VERSION", "9.8.7", 1);
+    CHECK_STR(ai_codex_client_version(), "9.8.7");
+    unsetenv("PI_AI_CODEX_CLIENT_VERSION");
+    CHECK(ai_codex_semver_cmp("0.170.0", "0.169.0") > 0);
+    CHECK(ai_codex_semver_cmp("0.99.0", "0.169.0") < 0);
+    CHECK(!ai_codex_semver_valid("0.170.0-alpha.1"));
+    CHECK(!ai_codex_semver_valid("1.2"));
+    const char *dir = omc_agent_dir();
+    fs_mkdir_p(dir, 0755);
+    char *path = omc_agent_path("codex-client-version.json");
+    struct {
+        const char *version, *want;
+    } cases[] = {{"0.200.1", "0.200.1"}, {"0.100.0", CODEX_CLIENT_VERSION_PIN}, {"0.300.0-beta", CODEX_CLIENT_VERSION_PIN}};
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char *rec = xasprintf("{\"version\":\"%s\",\"checkedAt\":%lld}", cases[i].version, (long long)now_ms());
+        fs_write(path, rec, strlen(rec));
+        free(rec);
+        ai_codex_client_version_reset_for_tests();
+        CHECK_STR(ai_codex_client_version(), cases[i].want);
+    }
+    /* fixed for the life of the process */
+    fs_write(path, "{\"version\":\"0.400.0\",\"checkedAt\":1}", 37);
+    CHECK_STR(ai_codex_client_version(), CODEX_CLIENT_VERSION_PIN);
+    unlink(path);
+    free(path);
+    ai_codex_client_version_reset_for_tests();
+    setenv("PI_AI_CODEX_CLIENT_VERSION", CODEX_CLIENT_VERSION_PIN, 1);
+}
+
 int main(void) {
+    test_codex_client_version();
     test_prompt_cache_session_header();
     test_retry_hints();
     test_replay_safe();

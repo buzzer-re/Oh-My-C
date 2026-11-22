@@ -966,7 +966,7 @@ static json_t *s_codex(const ws_params_t *p, ws_err_t *e) {
     else http_headers_del(&h, "chatgpt-account-id");
     free(acc);
     http_headers_set(&h, "originator", "omp");
-    http_headers_set(&h, "version", "0.159.0");
+    http_headers_set(&h, "version", ai_codex_client_version());
     http_headers_set(&h, "User-Agent", OMC_NAME "/" OMC_VERSION);
     http_headers_set(&h, "Accept", "text/event-stream");
     http_headers_set(&h, "Content-Type", "application/json");

@@ -42,6 +42,8 @@ trap 'kill $(jobs -p) $MPID 2>/dev/null; rm -rf "$T"' EXIT
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break; sleep 0.1; done
 # OMC_NO_UPDATE_CHECK: no interactive launch looks for a new omc release (tests/e2e/update.sh lifts it against a mock)
 export OMC_CODING_AGENT_DIR="$T/agent" MOCK_KEY=x OMC_NO_TITLE=1 OMC_NO_LOCAL_DISCOVERY=1 OMC_NO_UPDATE_CHECK=1
+# the Codex client version stays at the pin unless a check unsets this (its npm refresh would reach the registry)
+export PI_AI_CODEX_CLIENT_VERSION=0.169.0
 cd "$T/work"
 fail=0
 check() { # name expected-substring command...

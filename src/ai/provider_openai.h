@@ -8,6 +8,17 @@
 
 #include "ai/ai.h"
 
+/* ---------- Codex client version (codex_version.c) ---------- */
+
+/* Pinned @openai/codex version: the floor and offline fallback of ai_codex_client_version(). */
+#define CODEX_CLIENT_VERSION_PIN "0.169.0"
+/* PI_AI_CODEX_CLIENT_VERSION, else the newer of the pin and <agent dir>/codex-client-version.json (refreshed from npm
+ * in the background every 6 h). Fixed for the life of the process; borrowed. */
+const char *ai_codex_client_version(void);
+bool ai_codex_semver_valid(const char *s);
+int ai_codex_semver_cmp(const char *a, const char *b);
+void ai_codex_client_version_reset_for_tests(void);
+
 /* return code used by stream callbacks to stop reading once the response is complete */
 #define OAI_STREAM_STOP 7001
 

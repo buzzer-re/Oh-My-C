@@ -15,7 +15,6 @@
 enum { V_OPENAI = 0, V_AZURE = 1, V_CODEX = 2 };
 
 #define CODEX_BASE_URL "https://chatgpt.com/backend-api"
-#define CODEX_CLIENT_VERSION "0.159.0"
 #define CODEX_ORIGINATOR "omp" /* upstream OPENAI_HEADER_VALUES.ORIGINATOR_CODEX */
 #define NON_VISION_PLACEHOLDER "[image omitted: model does not support vision]"
 
@@ -969,11 +968,10 @@ static bool build_headers(http_headers_t *h, const ai_model_t *m, const ai_strea
         free(hint);
         /* codex-rs sends `OpenAI-Beta` only on the WebSocket handshake; HTTP carries none */
         http_headers_set(h, "originator", CODEX_ORIGINATOR);
-        http_headers_set(h, "version", CODEX_CLIENT_VERSION);
+        http_headers_set(h, "version", ai_codex_client_version());
         http_headers_set(h, "User-Agent", OMC_NAME "/" OMC_VERSION);
-        if (!str_empty(o->session_id)) {
-            http_headers_set(h, "conversation_id", o->session_id);
-            http_headers_set(h, "session_id", o->session_id);
+        if (!str_empty(o->session_id)) { /* codex-rs SESSION_ID_HEADER only: no underscore names (omp ad383b54c7) */
+            http_headers_set(h, "session-id", o->session_id);
             http_headers_set(h, "x-client-request-id", o->session_id);
         }
         http_headers_set(h, "Accept", "text/event-stream");

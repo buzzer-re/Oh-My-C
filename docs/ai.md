@@ -109,7 +109,7 @@ ladder stripped). `ai_stream_dispatch()` (omp `streamSimpleDispatch`) then:
   `idle_timeout_ms` (settings `providers.streamFirstEventTimeoutSeconds` / `streamIdleTimeoutSeconds`,
   -1 auto, 0 off), else `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` / `PI_STREAM_IDLE_TIMEOUT_MS` (OpenAI-family
   APIs and Ollama prefer `PI_OPENAI_STREAM_*`), else the model's compat `streamIdleTimeoutMs` /
-  `streamFirstEventTimeoutMs`, else 300 s; the first-event budget never undercuts the idle one.
+  `streamFirstEventTimeoutMs`, else 900 s (15 minutes since omp 19.1.0); the first-event budget never undercuts the idle one.
   Cloud Code Assist keeps its own first-event watchdog (it fails over between endpoints); Cursor and
   GitLab Duo have none. The byte-level HTTP read timeout is widened so it never fires first.
 - **In-flight caps** (`providers.maxInFlightRequests`, `{provider: n}`): a request holds one of `n`
@@ -213,7 +213,7 @@ back as an assistant message with `stopReason: "error"` and `errorMessage`.
 |---|---|---|---|
 | `anthropic-messages` | `provider_anthropic.c` | `providers/anthropic.ts`, `anthropic-identity.ts`, `claude-code-fingerprint.ts` | SSE; API key or Claude OAuth identity (Claude Code headers/fingerprint) |
 | `openai-completions`, `openrouter` | `provider_openai_completions.c` | `openai-completions.ts`, `openai-shared.ts` | SSE; per-model compat flags, reasoning formats |
-| `openai-responses`, `azure-openai-responses`, `openai-codex-responses` | `provider_openai_responses.c` | `openai-responses.ts`, `azure-openai-responses.ts`, `openai-codex-responses.ts` | SSE; Azure api-version and deployment map, Codex ChatGPT backend (JWT account header, `store:false`) |
+| `openai-responses`, `azure-openai-responses`, `openai-codex-responses` | `provider_openai_responses.c` | `openai-responses.ts`, `azure-openai-responses.ts`, `openai-codex-responses.ts` | SSE; Azure api-version and deployment map, Codex ChatGPT backend (JWT account header, `store:false`, the session under `session-id` only, and the client `version` from `codex_version.c`: `PI_AI_CODEX_CLIENT_VERSION`, else the newer of the 0.169.0 pin and `<agent dir>/codex-client-version.json`, which a background fetch of npm's `@openai/codex` latest refreshes every 6 h) |
 | `google-generative-ai`, `google-vertex` | `provider_google.c` (+ `google_schema.c`, `google_auth.c`) | `google.ts`, `google-vertex.ts`, `google-shared.ts`, `google-auth.ts` | SSE `streamGenerateContent`; Vertex via API key or Application Default Credentials |
 | `google-gemini-cli` (Antigravity, custom Cloud Code Assist providers; the Gemini CLI provider itself was removed in omp 19.1.0) | `provider_gemini_cli.c` (+ `google_cca.c`, `think_heal.c`) | `google-gemini-cli.ts`, `catalog/src/wire/gemini-headers.ts` | Cloud Code Assist `v1internal:streamGenerateContent`, endpoint failover (Antigravity); a custom provider sends `Accept: text/event-stream` and no client identity |
 | `ollama-chat` | `provider_ollama.c` | `ollama.ts` | NDJSON `POST /api/chat` |

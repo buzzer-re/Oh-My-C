@@ -10,7 +10,7 @@ mkdir -p "$T/wsagent" "$T/wswork"
 WSENV=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_OAUTH_TOKEN -u OPENAI_API_KEY -u GEMINI_API_KEY -u XAI_API_KEY -u ZAI_API_KEY
        -u PERPLEXITY_API_KEY -u KEENABLE_API_KEY -u SOFYA_API_KEY -u EXA_API_KEY -u BRAVE_API_KEY -u TAVILY_API_KEY
        HOME="$T" OMC_CODING_AGENT_DIR="$T/wsagent" NO_COLOR=1 SEARXNG_ENDPOINT="$WSM/searx"
-       OMC_PROVIDER_URL_REWRITE="https://api.anthropic.com=$WSM/anthropic,https://api.openai.com=$WSM/openai,https://chatgpt.com=$WSM/chatgpt,https://generativelanguage.googleapis.com=$WSM/google,https://api.x.ai=$WSM/xai,https://api.perplexity.ai=$WSM/pplx,https://api.kimi.com=$WSM/kimi,https://api.keenable.ai=$WSM/keenable,https://sofya.co=$WSM/sofya,https://api.z.ai=$WSM/zai,https://search.parallel.ai=$WSM/parallel,https://html.duckduckgo.com=$WSM/ddg")
+       OMC_PROVIDER_URL_REWRITE="https://api.anthropic.com=$WSM/anthropic,https://api.openai.com=$WSM/openai,https://chatgpt.com=$WSM/chatgpt,https://generativelanguage.googleapis.com=$WSM/google,https://api.x.ai=$WSM/xai,https://api.perplexity.ai=$WSM/pplx,https://api.kimi.com=$WSM/kimi,https://api.keenable.ai=$WSM/keenable,https://sofya.co=$WSM/sofya,https://api.z.ai=$WSM/zai,https://search.parallel.ai=$WSM/parallel,https://html.duckduckgo.com=$WSM/ddg,https://registry.npmjs.org=$WSM/npm")
 ws_search() { # selector query [env...] -> rendered output of `omc search`
     local sel=$1 q=$2; shift 2
     (cd "$T/wswork" && timeout 30 "${WSENV[@]}" "$@" "$B" search ${sel:+--model "$sel"} "$q" 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
@@ -37,6 +37,18 @@ out=$(ws_search openai-codex/gpt-6-luna "codex query")
 rm -f "$T/wsagent/auth.json"
 [[ "$out" == *"Codex answer about codex query"* && "$(ws_last)" == /chatgpt/backend-api/codex/responses* ]] \
     && echo "   ok  web search: codex grounding" || { echo "   FAIL web search codex: $out"; fail=1; }
+# the Codex client version (omp f54745ac23): PI_AI_CODEX_CLIENT_VERSION pins it; unset, the newer of the 0.169.0 pin and
+# <agent dir>/codex-client-version.json goes out, and a missing or 6h-old record is refreshed from npm in the background
+printf '{"openai-codex":{"type":"oauth","access":"tok-codex","refresh":"r","expires":4102444800000}}' > "$T/wsagent/auth.json"
+ws_search openai-codex/gpt-6-luna "codex pinned" PI_AI_CODEX_CLIENT_VERSION=0.150.0 >/dev/null
+check "codex version pinned" "0.150.0"  python3 -I -c 'import json,sys; print([json.loads(l) for l in open(sys.argv[1])][-1]["headers"].get("version"))' "$T/websearch.jsonl"
+ws_search openai-codex/gpt-6-luna "codex default" PI_AI_CODEX_CLIENT_VERSION= >/dev/null
+for _ in $(seq 30); do grep -q '"path": "/npm/@openai/codex/latest"' "$T/websearch.jsonl" && break; sleep 0.1; done
+check "codex version default" "0.169.0 True"  python3 -I -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; print([x for x in r if x["path"].endswith("/codex/responses")][-1]["headers"].get("version"), any(x["path"] == "/npm/@openai/codex/latest" for x in r))' "$T/websearch.jsonl"
+printf '{"version":"0.181.0","checkedAt":%s}' "$(( $(date +%s) * 1000 ))" > "$T/wsagent/codex-client-version.json"
+ws_search openai-codex/gpt-6-luna "codex recorded" PI_AI_CODEX_CLIENT_VERSION= >/dev/null
+check "codex version recorded" "0.181.0"  python3 -I -c 'import json,sys; print([json.loads(l) for l in open(sys.argv[1])][-1]["headers"].get("version"))' "$T/websearch.jsonl"
+rm -f "$T/wsagent/auth.json" "$T/wsagent/codex-client-version.json"
 out=$(ws_search web/perplexity "pplx query" PERPLEXITY_API_KEY=p-fake)
 [[ "$out" == *"Perplexity answer about pplx query"* && "$(ws_last)" == *'"return_related_questions": true'* ]] \
     && echo "   ok  web search: perplexity api" || { echo "   FAIL web search perplexity: $out"; fail=1; }

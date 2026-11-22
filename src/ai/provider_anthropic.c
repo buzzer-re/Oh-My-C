@@ -28,7 +28,7 @@
 #define MAX_STREAM_BLOCKS 4096
 #define MAX_TOOL_ID_LEN 64
 
-#define DEFAULT_CLAUDE_CODE_VERSION "2.1.321"
+#define DEFAULT_CLAUDE_CODE_VERSION "2.1.326"
 #define CLAUDE_CODE_SDK_VERSION "0.128.0"
 #define CLAUDE_CODE_SYSTEM_INSTRUCTION "You are Claude Code, Anthropic's official CLI for Claude."
 #define CLAUDE_TOOL_PREFIX "_"

@@ -85,6 +85,8 @@ class H(BaseHTTPRequestHandler):
             return self.send(int(m.group(1)), json.dumps({"error": {"message": "mock failure " + m.group(1), "type": "mock_error"}}))
         if method == "HEAD":
             return self.send(302, "", headers={"Location": "https://example.com/resolved"})
+        if path == "/npm/@openai/codex/latest":  # the Codex client version refresh (omp f54745ac23)
+            return self.send(200, json.dumps({"name": "@openai/codex", "version": "0.181.0"}))
         if path.endswith("/v1/messages"):
             return self.send(200, json.dumps({
                 "id": "msg_mock", "model": body.get("model"), "type": "message", "role": "assistant",
