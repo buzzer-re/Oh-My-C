@@ -81,7 +81,8 @@
 		"statusLineOutput": "cream",
 		"statusLineCost": "copper",
 		"statusLineSubagents": "vein",
-		"pythonMode": "#f0c040"
+		"pythonMode": "#f0c040",
+		"btwMode": "vein"
 	},
 	"export": {
 		"pageBg": "stone",

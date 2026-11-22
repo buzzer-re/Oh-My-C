@@ -87,7 +87,8 @@
 		"statusLineOutput": 138,
 		"statusLineCost": 138,
 		"statusLineSubagents": "brass",
-		"pythonMode": "amber"
+		"pythonMode": "amber",
+		"btwMode": "brass"
 	},
 	"export": {
 		"pageBg": "#181210",

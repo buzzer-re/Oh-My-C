@@ -96,7 +96,8 @@
 		"statusLineUntracked": "blue",
 		"statusLineOutput": "magenta",
 		"statusLineCost": "coral",
-		"statusLineSubagents": "primary"
+		"statusLineSubagents": "primary",
+		"btwMode": "primary"
 	},
 	"export": {
 		"pageBg": "base",

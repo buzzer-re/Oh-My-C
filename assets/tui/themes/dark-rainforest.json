@@ -81,7 +81,8 @@
 		"statusLineOutput": "treefrogOrange",
 		"statusLineCost": "fireflyGold",
 		"statusLineSubagents": "orchidPurple",
-		"pythonMode": "#f0c040"
+		"pythonMode": "#f0c040",
+		"btwMode": "orchidPurple"
 	},
 	"export": {
 		"pageBg": "#080C0A",

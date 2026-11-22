@@ -88,7 +88,8 @@
 		"statusLineOutput": "nord12",
 		"statusLineCost": "nord12",
 		"statusLineSubagents": "nord8",
-		"pythonMode": "#f0c040"
+		"pythonMode": "#f0c040",
+		"btwMode": "nord8"
 	},
 	"export": {
 		"pageBg": "nord0",

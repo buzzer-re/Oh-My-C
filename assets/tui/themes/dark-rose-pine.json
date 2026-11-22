@@ -86,7 +86,8 @@
 		"statusLineOutput": "pine",
 		"statusLineCost": "rose",
 		"statusLineSubagents": "iris",
-		"pythonMode": "gold"
+		"pythonMode": "gold",
+		"btwMode": "iris"
 	},
 	"export": {
 		"pageBg": "base",

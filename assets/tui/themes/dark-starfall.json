@@ -81,7 +81,8 @@
 		"statusLineOutput": "spark",
 		"statusLineCost": "gold",
 		"statusLineSubagents": "gold",
-		"pythonMode": "gold"
+		"pythonMode": "gold",
+		"btwMode": "gold"
 	},
 	"export": {
 		"pageBg": "#0a0c10",
