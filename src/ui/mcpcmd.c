@@ -438,7 +438,7 @@ static bool g_install_done;
 static void deferred_mount_notice(ui_t *u) {
     app_t *a = u->app;
     if (!a->mcp || settings_bool("startup.quiet", false) || settings_bool("startup.quietWarnings", false) ||
-        !settings_bool("tools.xdevNotices", true))
+        !settings_bool("tools.commandNotices", true))
         return;
     strvec_t names = {0}, servers = {0};
     pthread_mutex_lock(&a->agent->mu);

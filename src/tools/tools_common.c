@@ -493,7 +493,7 @@ void tools_finalize(agent_t *a, const strvec_t *requested) {
         if (!strcmp(t->name, "read")) have_read = true;
         if (!strcmp(t->name, "write")) have_write = true;
     }
-    bool xdev = settings_bool("tools.xdev", true) && have_read && have_write;
+    bool xdev = settings_bool("tools.commands", true) && have_read && have_write;
     for (size_t i = 0; i < a->all_tools.n; i++) {
         agent_tool_t *t = a->all_tools.v[i];
         if (t->mounted) {

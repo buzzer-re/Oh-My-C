@@ -450,14 +450,14 @@ static bool glob_match_simple(const char *pat, const char *s) {
 static bool should_inline(const agent_tool_t *t, const char *mode) {
     if (str_eq(mode, "catalog")) return false;
     if (str_eq(mode, "inline") || tool_is_builtin(t)) return true;
-    json_t *globs = settings_get("tools.xdevInlineDevices"), *g;
+    json_t *globs = settings_get("tools.commandInline"), *g;
     json_arr_foreach(globs, i, g) if (json_sv(g) && *json_sv(g) && glob_match_simple(json_sv(g), t->name)) return true;
     return false;
 }
 
 /* planXdevPromptDocs: inlined docs sections, then catalog entries ({name: summary}, presentation order) */
 static void plan_docs(agent_t *a, sb_t *sections, json_t *catalog) {
-    const char *mode = settings_str("tools.xdevDocs", "catalog");
+    const char *mode = settings_str("tools.commandDocs", "catalog");
     size_t used = 0;
     for (size_t i = 0; i < a->all_tools.n; i++) {
         agent_tool_t *t = a->all_tools.v[i];
@@ -512,7 +512,7 @@ char *xdev_prompt_docs(agent_t *a) { return xdev_prompt_docs_ex(a, NULL); }
 
 /* xdevDocsFor: inlined docs of the named mounted devices under the prompt-doc policy */
 char *xdev_docs_for(agent_t *a, const strvec_t *names) {
-    const char *mode = settings_str("tools.xdevDocs", "catalog");
+    const char *mode = settings_str("tools.commandDocs", "catalog");
     sb_t sections = SB_INIT;
     size_t used = 0;
     for (size_t k = 0; names && k < names->n; k++) {

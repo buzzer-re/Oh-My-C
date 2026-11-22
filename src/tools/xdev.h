@@ -23,7 +23,7 @@ size_t xdev_mounted_count(agent_t *a);
 json_t *xdev_entries(agent_t *a);
 /* `read xd://` listing (owned). */
 char *xdev_listing(agent_t *a);
-/* Mounted-device section for the system prompt under tools.xdevDocs (owned; "" when nothing). */
+/* Mounted-device section for the system prompt under tools.commandDocs (owned; "" when nothing). */
 char *xdev_prompt_docs(agent_t *a);
 /* the same, without catalog lines for `listed_elsewhere` (renderXdevPromptDocs; may be NULL) */
 char *xdev_prompt_docs_ex(agent_t *a, const strvec_t *listed_elsewhere);

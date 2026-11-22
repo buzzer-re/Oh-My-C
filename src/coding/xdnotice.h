@@ -3,7 +3,7 @@
  *
  * When the mounted device set changes mid-session (MCP enable/disable/reload/reconnect, tool refreshes), the
  * delta is coalesced into a pending set and announced in the UI (`xdev: xd://: mounted …; unmounted …`,
- * tools.xdevNotices, startup.quiet). The model learns of it with the next user prompt through a hidden
+ * tools.commandNotices, startup.quiet). The model learns of it with the next user prompt through a hidden
  * `xdev-mount-notice` custom message (prompts/system/xdev-mount-notice.md), placed right before the prompt.
  * Devices the outgoing base prompt already lists (its xd:// catalog or the MCP route guidance) are recorded as
  * announced without a notice line; re-mounts of announced devices and unmounts of never-announced ones are

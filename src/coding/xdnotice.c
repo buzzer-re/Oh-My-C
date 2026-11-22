@@ -104,7 +104,7 @@ void xdnotice_sync(app_t *a, char **shown) {
     x->mounted = cur;
     if (added.n || removed.n) coalesce(x, &added, &removed);
     pthread_mutex_unlock(&x->mu);
-    if ((added.n || removed.n) && !settings_bool("startup.quiet", false) && settings_bool("tools.xdevNotices", true)) {
+    if ((added.n || removed.n) && !settings_bool("startup.quiet", false) && settings_bool("tools.commandNotices", true)) {
         sb_t b = SB_INIT;
         if (added.n) {
             char *j = strvec_join(&added, ", ");

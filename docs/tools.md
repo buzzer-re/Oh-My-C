@@ -61,7 +61,7 @@ listed in [status.md](status.md). Their names stay in `BUILTIN_ORDER` so orderin
 
 ## `xd://` tool devices (`tools/xdev.c`)
 
-This ports `tools/xdev.ts` and `internal-urls/xd-protocol.ts`. With `tools.xdev` on (the default)
+This ports `tools/xdev.ts` and `internal-urls/xd-protocol.ts`. With `tools.commands` on (the default; `tools.xdev` before omp v19)
 and both `read` and `write` present, *discoverable* tools are taken off the request's top-level tool
 list and driven through files:
 
@@ -78,9 +78,9 @@ list and driven through files:
 The default mounts are `ast_grep`, `ast_edit`, `debug`, `lsp`, `checkpoint`, `rewind`, `generate_image` and MCP tools.
 `todo`, `ask`, `grep`, `web_search`, `read` and `write` stay top-level (omp's
 `XDEV_KEEP_TOP_LEVEL`), as does any tool named explicitly in `--tools`. The system prompt carries the
-device catalog or inline docs (`tools.xdevDocs`, `tools.xdevInlineDevices`); mounted MCP tools are listed once, in the
+device catalog or inline docs (`tools.commandDocs`, `tools.commandInline`); mounted MCP tools are listed once, in the
 `## MCP Tool Routes` append part with their catalog summary. When the mounted set changes mid-session
-(`coding/xdnotice.c`) the UI shows `xdev: xd://: mounted …; unmounted …` (`tools.xdevNotices`) and the next user prompt
+(`coding/xdnotice.c`) the UI shows `xdev: xd://: mounted …; unmounted …` (`tools.commandNotices`) and the next user prompt
 carries a hidden `xdev-mount-notice` naming the net change the model has not seen yet.
 
 ## Internal URLs
