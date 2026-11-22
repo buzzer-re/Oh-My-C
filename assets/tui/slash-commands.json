@@ -985,6 +985,11 @@
    {
     "name": "snapcompact",
     "description": "Archive history onto dense bitmap images the model reads back (no LLM call)"
+   },
+   {
+    "name": "handoff",
+    "description": "Generate a handoff summary in the background and compact in place",
+    "usage": "[focus]"
    }
   ],
   "handle": true,
@@ -1017,8 +1022,7 @@
  {
   "name": "handoff",
   "icon": "handoff",
-  "description": "Summarize the session into a handoff document and compact in place",
-  "acpDescription": "Summarize the session into a handoff document and compact in place",
+  "description": "Compact in the background with a handoff summary (alias for /compact handoff)",
   "inlineHint": "[focus instructions]",
   "allowArgs": true,
   "handle": true,
