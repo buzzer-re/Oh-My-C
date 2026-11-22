@@ -658,7 +658,7 @@ int main(void) {
             listed = true;
         CHECK(!listed, "a paused provider is not offered for login");
         char *name = NULL;
-        json_arr_foreach(auth_oauth_providers(), i, d) if (str_eq(json_get_str(d, "id"), "google-gemini-cli")) name = auth_login_name(d);
+        json_arr_foreach(auth_oauth_providers(), i, d) if (str_eq(json_get_str(d, "id"), "github-copilot")) name = auth_login_name(d);
         CHECK(name && !strstr(name, "at your own risk"), "other providers keep their name");
         free(name);
     }
