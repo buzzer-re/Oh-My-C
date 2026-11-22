@@ -3082,6 +3082,15 @@ static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
     json_t *attachments = ui_attach_take(u, t, &compacted);
     free(t);
     t = compacted;
+    /* `? <question>` is the /btw shortcut: it runs as the slash command it stands for (a bare `?` stays a prompt) */
+    if (t[0] == '?') {
+        char *q = str_trim(t + 1);
+        if (*q) {
+            free(t);
+            t = xasprintf("/btw %s", q);
+        }
+        free(q);
+    }
     iq_submit(u, t, attachments);
     free(t);
     tui_request_render(u->tui);

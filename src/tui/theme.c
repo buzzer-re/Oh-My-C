@@ -19,7 +19,8 @@ int tui_theme_slot_from_name(const char *name) {
 }
 
 static bool slot_optional(int i) {
-    return i == TUI_TC_THINKING_MAX || i == TUI_TC_ASSISTANT_MESSAGE_TEXT || i == TUI_TC_LINK;
+    return i == TUI_TC_THINKING_MAX || i == TUI_TC_ASSISTANT_MESSAGE_TEXT || i == TUI_TC_LINK ||
+           (i >= TUI_TC_SUBAGENT1 && i <= TUI_TC_SUBAGENT6);
 }
 
 /* Upstream packages/tui/src/theme/dark.json and light.json (vars + colors). */
@@ -47,7 +48,7 @@ static const char DARK_JSON[] =
     "\"statusLinePath\":\"#00afaf\",\"statusLineGitClean\":\"#5faf5f\",\"statusLineGitDirty\":\"#d7af5f\","
     "\"statusLineContext\":\"#8787af\",\"statusLineSpend\":\"#5fafaf\",\"statusLineStaged\":70,"
     "\"statusLineDirty\":178,\"statusLineUntracked\":39,\"statusLineOutput\":205,\"statusLineCost\":205,"
-    "\"statusLineSubagents\":\"accent\",\"pythonMode\":\"yellow\"}}";
+    "\"statusLineSubagents\":\"accent\",\"pythonMode\":\"yellow\",\"btwMode\":\"accent\"}}";
 
 static const char LIGHT_JSON[] =
     "{\"name\":\"light\",\"vars\":{\"teal\":\"#5a8080\",\"blue\":\"#547da7\",\"green\":\"#588458\","
@@ -74,7 +75,7 @@ static const char LIGHT_JSON[] =
     "\"statusLineGitClean\":\"#005f00\",\"statusLineGitDirty\":\"#af5f00\",\"statusLineContext\":\"#5f5f87\","
     "\"statusLineSpend\":\"#005f5f\",\"statusLineStaged\":28,\"statusLineDirty\":136,"
     "\"statusLineUntracked\":31,\"statusLineOutput\":133,\"statusLineCost\":133,"
-    "\"statusLineSubagents\":\"teal\",\"pythonMode\":\"yellow\"}}";
+    "\"statusLineSubagents\":\"teal\",\"pythonMode\":\"yellow\",\"btwMode\":\"teal\"}}";
 
 static const char *DEFAULT_SPINNER[] = {"\xe2\xa3\xbe", "\xe2\xa3\xbd", "\xe2\xa3\xbb", "\xe2\xa2\xbf",
                                         "\xe2\xa1\xbf", "\xe2\xa3\x9f", "\xe2\xa3\xaf", "\xe2\xa3\xb7"};

@@ -36,6 +36,7 @@
     X(THINKING_LOW, "thinkingLow") X(THINKING_MEDIUM, "thinkingMedium")                            \
     X(THINKING_HIGH, "thinkingHigh") X(THINKING_XHIGH, "thinkingXhigh")                            \
     X(THINKING_MAX, "thinkingMax") X(BASH_MODE, "bashMode") X(PYTHON_MODE, "pythonMode")           \
+    X(BTW_MODE, "btwMode")                                                                          \
     X(STATUS_LINE_BG, "statusLineBg") X(STATUS_LINE_SEP, "statusLineSep")                          \
     X(STATUS_LINE_MODEL, "statusLineModel") X(STATUS_LINE_PATH, "statusLinePath")                  \
     X(STATUS_LINE_GIT_CLEAN, "statusLineGitClean") X(STATUS_LINE_GIT_DIRTY, "statusLineGitDirty")  \
@@ -43,7 +44,8 @@
     X(STATUS_LINE_STAGED, "statusLineStaged") X(STATUS_LINE_DIRTY, "statusLineDirty")              \
     X(STATUS_LINE_UNTRACKED, "statusLineUntracked") X(STATUS_LINE_OUTPUT, "statusLineOutput")      \
     X(STATUS_LINE_COST, "statusLineCost") X(STATUS_LINE_SUBAGENTS, "statusLineSubagents")          \
-    X(LINK, "link")
+    X(LINK, "link") X(SUBAGENT1, "subagent1") X(SUBAGENT2, "subagent2") X(SUBAGENT3, "subagent3")  \
+    X(SUBAGENT4, "subagent4") X(SUBAGENT5, "subagent5") X(SUBAGENT6, "subagent6")
 
 typedef enum {
 #define TUI_TC_ENUM(id, name) TUI_TC_##id,

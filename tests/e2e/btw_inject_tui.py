@@ -186,6 +186,18 @@ if sent_count("say:OFF-SENT"):
 os.write(fd, b"\x1b")  # close the panel
 pump(0.3)
 
+# ---- `? question`: the /btw shortcut runs as /btw (omp c910e91258)
+start = len(requests())
+mark = len(out)
+command("? slow:0:Shortcut answer")
+if not wait_out("to close", 15, mark):
+    fail("shortcut answer", out[mark:][-800:])
+side = [r for r in requests()[start:] if any("<btw>" in t for t in user_texts(r))]
+if not side or "Shortcut answer" not in user_texts(side[-1])[-1]:
+    fail("shortcut side request", side[-1:] or "no side request")
+os.write(fd, b"\x1b")
+pump(0.3)
+
 # ---- Ctrl+R over the ask form: History opens over it and the pick lands in the composer (the form has no prompt
 # editor of its own); closing History brings the form back
 mark = len(out)
