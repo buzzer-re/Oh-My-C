@@ -7,6 +7,7 @@
 #include "tools/outsink.h"
 #include "tui/ansi.h"
 #include "ui/ui.h"
+#include "modes/interactive.h"
 
 static int failures;
 
@@ -271,6 +272,37 @@ static void test_batch_interrupt(void) {
     tool_result_free(&r);
 }
 
+/* composer-prediction-controller.ts parseComposerPrediction / parseComposerPredictions */
+static void test_prediction_parse(void) {
+    struct { const char *in, *want; } one[] = {
+        {"  Run   the\ntests ", "Run the tests"}, {"\"Ship it\"", "Ship it"}, {"\xe2\x80\x9cShip it\xe2\x80\x9d", "Ship it"},
+        {"`git push`", "git push"}, {"NO_PREDICTION", NULL}, {"Sure. NO_PREDICTION", NULL}, {"   ", NULL},
+        {"\"a\" and \"b\"", "\"a\" and \"b\""}, {"\x1b[1mbold\x1b[0m\r", "bold"}};
+    for (size_t i = 0; i < ARRAY_LEN(one); i++) {
+        char *got = pred_parse_one(one[i].in);
+        CHECK(one[i].want ? got && !strcmp(got, one[i].want) : !got, "parse_one %zu: %s", i, got ? got : "(null)");
+        free(got);
+    }
+    sb_t big = SB_INIT;
+    for (int i = 0; i < 501; i++) sb_putc(&big, 'x');
+    char *got = pred_parse_one(sb_cstr(&big));
+    CHECK(!got, "501 chars dropped");
+    free(got);
+    sb_free(&big);
+    strvec_t out = {0};
+    CHECK(pred_parse_many("Here are some options:\n1. Run tests\n- run tests!\n* Ship it\n2) Fix lint\nfifth\nsixth", 4, &out),
+          "parse_many");
+    CHECK(out.n == 4 && !strcmp(out.v[0], "Run tests") && !strcmp(out.v[1], "Ship it") && !strcmp(out.v[2], "Fix lint") &&
+              !strcmp(out.v[3], "fifth"),
+          "parse_many choices: %zu %s", out.n, out.n ? out.v[0] : "");
+    strvec_free(&out);
+    CHECK(!pred_parse_many("NO_PREDICTION\nRun tests", 4, &out) && !out.n, "leading skip declines");
+    CHECK(pred_parse_many("Run tests\nNO_PREDICTION", 4, &out) && out.n == 1, "later skip line dropped");
+    strvec_free(&out);
+    CHECK(pred_parse_many("Only option:", 4, &out) && out.n == 1, "a lone colon line stays");
+    strvec_free(&out);
+}
+
 int main(void) {
     char *dir = fs_mktempdir("omc-queue");
     setenv("OMC_CODING_AGENT_DIR", dir, 1);
@@ -284,6 +316,7 @@ int main(void) {
     test_batch_interrupt();
     test_band();
     test_python_text();
+    test_prediction_parse();
     fs_rm_rf(dir);
     free(dir);
     if (failures) fprintf(stderr, "%d failure(s)\n", failures);

@@ -10,6 +10,7 @@ Scenarios, each a fresh `omc --model mock/mock-1 --no-session call:ask:{html}`:
   cancel   Esc cancels the form and ends the run
 Prints "ask form tui ok" or the first failing step."""
 import json, os, pty, re, select, sys, time
+NOPRED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-predictions.yml")  # composer.predictions off
 
 omc, reqlog, scratch = sys.argv[1:4]
 ANSI = re.compile(r"\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[PX^_][^\x1b]*\x1b\\|\x1b.")
@@ -43,7 +44,7 @@ def run(name, html, keys, expect_tool=None, expect_screen=None, agent=None, befo
             env.pop(k, None)
         if agent:
             env["OMC_CODING_AGENT_DIR"] = agent
-        os.execvpe(omc, [omc, "--model", "mock/mock-1", "--no-session", "call:ask:" + json.dumps({"html": html})], env)
+        os.execvpe(omc, [omc, "--config", NOPRED, "--model", "mock/mock-1", "--no-session", "call:ask:" + json.dumps({"html": html})], env)
     raw = b""
 
     def pump(until, timeout):

@@ -514,6 +514,8 @@ static void collapse_tokens(tui_editor_t *ed) {
 
 static void notify_change(tui_editor_t *ed) {
     collapse_tokens(ed);
+    free(ed->inserted_prediction);
+    ed->inserted_prediction = NULL;
     if (ed->on_change) ed->on_change(ed, ed->cb_ud);
     tui_component_request_render(&ed->base);
 }
@@ -581,6 +583,7 @@ static void close_ac(tui_editor_t *ed) {
     if (ed->ac_list) tui_component_destroy(&ed->ac_list->base);
     ed->ac_list = NULL;
     ed->ac_args = false;
+    ed->ac_prediction = false;
     strvec_free(&ed->ac_ghosts);
     strvec_free(&ed->ac_actions);
 }
@@ -1115,6 +1118,29 @@ static void accept_ac(tui_editor_t *ed) {
         free(act);
         return;
     }
+    if (ed->ac_prediction) { /* #applyAssistReplacement over the predictions: swap the whole line */
+        char *val = xstrdup(it->value);
+        bool same = !strcmp(cur_line(ed), val) || ed->lines.n != 1;
+        close_ac(ed);
+        if (!same) {
+            push_undo(ed, ACT_OTHER);
+            set_line(ed, 0, xstrdup(val));
+            ed->cl = 0;
+            ed->cc = strlen(val);
+            ed->last_action = ACT_OTHER;
+            notify_change(ed);
+            ed->inserted_prediction = xstrdup(val);
+            const strvec_t *pv = ed->predictions_fn ? ed->predictions_fn(ed->predictions_ud) : NULL;
+            for (size_t i = 0; pv && i < pv->n; i++)
+                if (!strcmp(pv->v[i], val)) {
+                    if (ed->on_prediction_accepted) ed->on_prediction_accepted(ed->predictions_ud, (int)i);
+                    break;
+                }
+        }
+        free(val);
+        tui_component_request_render(&ed->base);
+        return;
+    }
     char *val = xstrdup(it->value);
     push_undo(ed, ACT_OTHER);
     size_t start = ed->cc - MIN(ed->ac_prefix_len, ed->cc);
@@ -1128,6 +1154,93 @@ static void accept_ac(tui_editor_t *ed) {
     free(val);
     ed->last_action = ACT_OTHER;
     notify_change(ed);
+}
+
+/* ---------- composer predictions (editor.ts #getShownPrediction / #acceptPrediction) ---------- */
+
+/* the first prediction the single-line buffer is a strict prefix of (cursor at its end, no list open); none while
+ * the buffer is a prediction insert equal to one of two or more predictions (Tab opens their list instead) */
+static int shown_prediction(tui_editor_t *ed, const strvec_t **out) {
+    if (ed->ac_list || !ed->predictions_fn || ed->lines.n != 1) return -1;
+    const strvec_t *pv = ed->predictions_fn(ed->predictions_ud);
+    if (!pv || !pv->n) return -1;
+    const char *typed = ed->lines.v[0];
+    size_t tl = strlen(typed);
+    if (ed->cc != tl) return -1;
+    if (pv->n > 1 && ed->inserted_prediction && !strcmp(typed, ed->inserted_prediction))
+        for (size_t i = 0; i < pv->n; i++)
+            if (!strcmp(pv->v[i], typed)) return -1;
+    for (size_t i = 0; i < pv->n; i++)
+        if (tl < strlen(pv->v[i]) && !strncmp(pv->v[i], typed, tl)) {
+            *out = pv;
+            return (int)i;
+        }
+    return -1;
+}
+
+char *tui_editor_prediction_suffix(tui_editor_t *ed) {
+    const strvec_t *pv = NULL;
+    int i = shown_prediction(ed, &pv);
+    return i < 0 ? NULL : xstrdup(pv->v[i] + strlen(ed->lines.v[0]));
+}
+
+/* two or more predictions and the one the single-line buffer equals (cursor at its end), else -1 */
+static int prediction_alternative(tui_editor_t *ed, const strvec_t **out) {
+    if (ed->ac_list || !ed->predictions_fn || ed->lines.n != 1) return -1;
+    const strvec_t *pv = ed->predictions_fn(ed->predictions_ud);
+    if (!pv || pv->n < 2) return -1;
+    if (ed->cc != strlen(ed->lines.v[0])) return -1;
+    for (size_t i = 0; i < pv->n; i++)
+        if (!strcmp(pv->v[i], ed->lines.v[0])) {
+            *out = pv;
+            return (int)i;
+        }
+    return -1;
+}
+
+static bool accept_prediction(tui_editor_t *ed) {
+    const strvec_t *pv = NULL;
+    int i = shown_prediction(ed, &pv);
+    if (i < 0) return false;
+    char *suffix = xstrdup(pv->v[i] + strlen(ed->lines.v[0]));
+    push_undo(ed, ACT_OTHER);
+    insert_raw(ed, suffix);
+    free(suffix);
+    ed->last_action = ACT_OTHER;
+    notify_change(ed);
+    ed->inserted_prediction = xstrdup(ed->lines.v[0]);
+    if (ed->on_prediction_accepted) ed->on_prediction_accepted(ed->predictions_ud, i);
+    return true;
+}
+
+static bool show_prediction_alternatives(tui_editor_t *ed) {
+    const strvec_t *pv = NULL;
+    int sel = prediction_alternative(ed, &pv);
+    if (sel < 0) return false;
+    strvec_t vals = {0};
+    for (size_t i = 0; i < pv->n; i++) strvec_push(&vals, pv->v[i]);
+    ed->ac_list = tui_select_list_new(ed->ac_max_visible);
+    ed->ac_list->filter_enabled = false;
+    ed->ac_list->base.tui = ed->base.tui;
+    for (size_t i = 0; i < vals.n; i++) {
+        tui_select_list_add_item(ed->ac_list, vals.v[i], vals.v[i], NULL, NULL, false);
+        strvec_push(&ed->ac_ghosts, "");
+        strvec_push(&ed->ac_actions, "");
+    }
+    strvec_free(&vals);
+    ed->ac_list->selected = (size_t)sel;
+    ed->ac_enter_accepts = true;
+    ed->ac_prefix_len = strlen(ed->lines.v[0]);
+    ed->ac_prediction = true;
+    tui_component_request_render(&ed->base);
+    return true;
+}
+
+void tui_editor_set_predictions(tui_editor_t *ed, const strvec_t *(*fn)(void *ud), void (*accepted)(void *ud, int index),
+                                void *ud) {
+    ed->predictions_fn = fn;
+    ed->on_prediction_accepted = accepted;
+    ed->predictions_ud = ud;
 }
 
 /* ---------- key handling ---------- */
@@ -1382,6 +1495,7 @@ bool tui_editor_handle_key(tui_editor_t *ed, const tui_key_t *k) {
         insert_raw(ed, "\n");
         close_ac(ed);
     } else if (tui_kb(k, "tui.input.tab")) {
+        if (accept_prediction(ed) || show_prediction_alternatives(ed)) return true;
         if (ed->ac_fn) refresh_ac(ed, true);
         changed = false;
     } else if (tui_kb(k, "tui.editor.deleteToLineEnd")) {
@@ -1440,6 +1554,7 @@ bool tui_editor_handle_key(tui_editor_t *ed, const tui_key_t *k) {
         }
         moved = true;
     } else if (tui_kb(k, "tui.editor.cursorRight")) {
+        if (accept_prediction(ed)) return true; /* Right walks over the ghost prediction as if it were typed */
         const char *l = cur_line(ed);
         if (ed->cc < strlen(l)) {
             long me = marker_starting_at(ed, l, ed->cc);
@@ -1613,7 +1728,9 @@ static void composer_render(tui_editor_t *ed, int width, strvec_t *out) {
     if (row) strvec_push_own(out, row);
 
     bool empty = tui_editor_is_empty(ed);
-    char *ph = empty && !ed->ac_list && ed->placeholder_fn ? ed->placeholder_fn(ed->placeholder_ud) : NULL;
+    char *psuf = tui_editor_prediction_suffix(ed);
+    char *ph = empty && !ed->ac_list && !psuf && ed->placeholder_fn ? ed->placeholder_fn(ed->placeholder_ud) : NULL;
+    free(psuf);
     if (ph && !*ph) {
         free(ph);
         ph = NULL;
@@ -1844,6 +1961,7 @@ static void editor_destroy(tui_component_t *c) {
     vec_free(&ed->texts);
     free(ed->placeholder);
     free(ed->gutter);
+    free(ed->inserted_prediction);
     free(ed);
 }
 
@@ -2003,6 +2121,19 @@ char *tui_editor_ghost(tui_editor_t *ed) {
     if (ed->ac_list) {
         size_t sel = ed->ac_list->selected;
         return sel < ed->ac_ghosts.n && *ed->ac_ghosts.v[sel] ? xstrdup(ed->ac_ghosts.v[sel]) : NULL;
+    }
+    char *pred = tui_editor_prediction_suffix(ed);
+    if (pred) return pred;
+    const strvec_t *pv = NULL;
+    if (prediction_alternative(ed, &pv) >= 0) {
+        /* Tab opens the alternatives list from here; without a bound key there is nothing to hint */
+        char *tab = ed->prediction_tab_hint ? ed->prediction_tab_hint() : NULL;
+        if (tab && *tab) {
+            char *h = xasprintf(" %s %zu more", tab, pv->n - 1);
+            free(tab);
+            return h;
+        }
+        free(tab);
     }
     if (!ed->hint_fn) return NULL;
     char *h = ed->hint_fn(ed->hint_ud, line, lines_above_blank(ed));

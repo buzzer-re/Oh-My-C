@@ -5,6 +5,7 @@ glanceable command gets none.
 Usage: jobs_intent.py <omc> <mock request log> <models.yml> <dir>
 Prints "jobs intent ok" or the failing steps."""
 import fcntl, json, os, pty, select, shutil, signal, struct, subprocess, sys, termios, time
+NOPRED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-predictions.yml")  # composer.predictions off
 
 omc, reqlog, models, root = sys.argv[1:5]
 work = os.path.join(root, "work")
@@ -39,7 +40,7 @@ def tool_messages():
 script = [["bash", {"i": "Watch the\n  nightly build", "command": "sleep 1; echo built", "async": True}],
           ["read", {"path": "proc://"}],
           ["wait", {}]]
-subprocess.run([omc, "--model", "mock/mock-1", "--no-session", "-p", "calls:" + json.dumps(script)], cwd=work, env=env, stdin=subprocess.DEVNULL,
+subprocess.run([omc, "--config", NOPRED, "--model", "mock/mock-1", "--no-session", "-p", "calls:" + json.dumps(script)], cwd=work, env=env, stdin=subprocess.DEVNULL,
                capture_output=True, timeout=60)
 msgs = tool_messages()
 check("proc listing leads with intent", len(msgs) > 1 and " — Watch the nightly build — sleep 1; echo built" in msgs[1], msgs)
@@ -53,7 +54,7 @@ with open(os.path.join(agent, "config.yml"), "w") as f:
 pid, fd = pty.fork()
 if pid == 0:
     os.chdir(work)
-    os.execve(omc, [omc, "--model", "mock/mock-1", "--no-session"], env)
+    os.execve(omc, [omc, "--config", NOPRED, "--model", "mock/mock-1", "--no-session"], env)
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 120, 0, 0))
 buf = bytearray()
 

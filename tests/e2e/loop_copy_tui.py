@@ -4,6 +4,7 @@ requests the mock model receives, the OSC 52 clipboard writes and a fake `xdg-op
 usage: loop_copy_tui.py <omc> <req.jsonl> <scratch dir> loop|copy
 Prints "loop copy ok" or the first failing step."""
 import base64, fcntl, json, os, pty, re, select, struct, sys, termios, time
+NOPRED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-predictions.yml")  # composer.predictions off
 
 omc, reqlog, scratch, part = sys.argv[1:5]
 bindir = os.path.join(scratch, "bin")
@@ -22,7 +23,7 @@ for k in ("OMC_NO_BROWSER", "TMUX", "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"):
     env.pop(k, None)
 lc_pid, fd = pty.fork()
 if lc_pid == 0:
-    os.execve(omc, [omc, "--model", "mock/mock-1", "--no-session"], env)
+    os.execve(omc, [omc, "--config", NOPRED, "--model", "mock/mock-1", "--no-session"], env)
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))  # wide: notices stay on one row
 out = bytearray()
 

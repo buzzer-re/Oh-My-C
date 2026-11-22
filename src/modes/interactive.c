@@ -186,6 +186,7 @@ static void ui_apply_event(void *ud) {
         }
         break;
     case AGENT_EV_AGENT_START:
+        pred_cancel(u);
         async_wait_end(u); /* a background result woke the run: the row follows this run again */
         u->synthetic_cards.n = 0;
         toolcard_break_group(u);
@@ -360,6 +361,7 @@ static void post_notice(void *x) {
                       : !strcmp(e->name, "auto_compaction_start") ? "auto_compaction_start" /* compaction.c events */
                       : !strcmp(e->name, "auto_compaction_end")   ? "auto_compaction_end"
                                                           : "info";
+    if (!strcmp(e->name, "auto_compaction_start")) pred_cancel(e->u);
     /* a generated session title only shows in the status band / working row, as in omp */
     if (strcmp(e->name, "title")) add_notice(e->u, lvl, e->out);
     else ui_signals_session_title();
@@ -504,7 +506,7 @@ static void worker_done(void *ud) {
     pthread_join(u->worker, NULL);
     u->worker_running = false;
     u->wake_suppressed = false; /* a turn ended on its own since the interrupt */
-    ui_signals_settle();
+    bool settled_done = ui_signals_settle();
     ui_signals_settle_startup(); /* a startup prompt whose run reported nothing goes back to idle */
     if (g_fork_pending) {
         g_fork_pending = false;
@@ -521,6 +523,7 @@ static void worker_done(void *ud) {
         u->async_hold = false;
     }
     ui_sync_retry_hint(u); /* #finishAgentEnd: a turn that died on a tool call offers F5 */
+    if (settled_done) pred_request(u); /* skipped when the queue, a loop or a goal started the next run */
     tui_request_render(u->tui);
 }
 
@@ -3646,6 +3649,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_container_add(root, ui_editor_gap_new(&u));
     tui_editor_set_on_submit(u.editor, on_submit, &u);
     ui_chrome_setup(&u);
+    pred_attach(&u);
     history_load(u.editor);
     tui_ac_default_t *ac = tui_ac_default_new(a->cwd);
     ui_slash_register(&u, ac);
@@ -3742,6 +3746,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
         pthread_join(u.worker, NULL);
     }
     ui_btw_free(&u);
+    pred_shutdown(&u);
     xc_recording_shutdown(&u); /* save a running /record */
     tc_shutdown(&u);
     cc_shutdown(&u);

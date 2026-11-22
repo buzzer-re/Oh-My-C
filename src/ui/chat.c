@@ -8,6 +8,7 @@
  *   - transcript replay from the session tree on resume/branch */
 #include "tui/motion.h"
 #include "ui/ui.h"
+#include "modes/interactive.h"
 #include "tui/termcaps.h"
 #include "ui/signals.h"
 #include "ui/tools/tc.h"
@@ -2174,6 +2175,7 @@ const char *ui_session_title(ui_t *u) {
  * display.collapseCompacted off: the whole path, a divider at each compaction). Without a session file the
  * agent's live context is replayed instead. */
 void ui_chat_rebuild(ui_t *u) {
+    pred_cancel(u); /* EventController reset: the transcript changed under any prediction */
     tui_container_clear(u->chat);
     ui_report_clear(u);
     hmap_free(&u->tools, NULL);

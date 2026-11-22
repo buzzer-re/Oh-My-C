@@ -6,6 +6,7 @@ editor.
 usage: resume_tui.py <omc> <request log> <scratch dir>
 Prints "resume tui ok" or the first failing step."""
 import fcntl, glob, json, os, pty, re, select, signal, struct, subprocess, sys, termios, time
+NOPRED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-predictions.yml")  # composer.predictions off
 
 omc, log, scratch = sys.argv[1:4]
 work = os.path.join(scratch, "work")
@@ -48,7 +49,7 @@ def launch(model):
     out = bytearray()
     pid, fd = pty.fork()
     if pid == 0:
-        os.execve(omc, [omc, "--model", model, "--no-session"], env)
+        os.execve(omc, [omc, "--config", NOPRED, "--model", model, "--no-session"], env)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
 
 
@@ -166,7 +167,7 @@ resumes_with_directive("dot after a handoff")
 os.unlink(os.path.join(agent, "config.yml"))
 
 # a compaction that kept nothing: the summary alone is resumable, not a prompt that runs again as is
-subprocess.run([omc, "--model", "mock/mock-1", "-p", "say:only-in-summary"], env=env, stdin=subprocess.DEVNULL,
+subprocess.run([omc, "--config", NOPRED, "--model", "mock/mock-1", "-p", "say:only-in-summary"], env=env, stdin=subprocess.DEVNULL,
                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
 files = sorted(glob.glob(os.path.join(agent, "sessions", "**", "*.jsonl"), recursive=True), key=os.path.getmtime)
 if not files:
@@ -181,7 +182,7 @@ stop()
 out = bytearray()
 pid, fd = pty.fork()
 if pid == 0:
-    os.execve(omc, [omc, "--model", "mock/mock-1", "--continue"], env)
+    os.execve(omc, [omc, "--config", NOPRED, "--model", "mock/mock-1", "--continue"], env)
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
 pump(1.5)
 resumes_with_directive("dot on a summary alone")
@@ -261,7 +262,7 @@ if len(requests()) != count:
 
 # the picker opens on titled sessions and the full scan brings in the untitled one and the prompts
 def run_print(text):
-    subprocess.run([omc, "--model", "mock/mock-1", "-p", text], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    subprocess.run([omc, "--config", NOPRED, "--model", "mock/mock-1", "-p", text], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
 
 
 run_print("say:picker-named-prompt")
@@ -278,7 +279,7 @@ stop()
 out = bytearray()
 pid, fd = pty.fork()
 if pid == 0:
-    os.execve(omc, [omc, "--model", "mock/mock-1", "--resume"], env)
+    os.execve(omc, [omc, "--config", NOPRED, "--model", "mock/mock-1", "--resume"], env)
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
 if not wait_for("Picker Titled Row"):
     fail("titled row", plain()[-600:])

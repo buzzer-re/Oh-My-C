@@ -5,6 +5,7 @@ there is no instruction, block or send. Ctrl+R over the ask form opens History a
 usage: btw_inject_tui.py <omc> <req.jsonl> <scratch dir>
 Prints "btw inject tui ok" or the first failing step."""
 import fcntl, json, os, pty, select, signal, struct, sys, termios, time
+NOPRED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-predictions.yml")  # composer.predictions off
 
 omc, reqlog, scratch = sys.argv[1:4]
 work = os.path.join(scratch, "work")
@@ -50,7 +51,7 @@ def launch(inject):
     out = bytearray()
     pid, fd = pty.fork()
     if pid == 0:
-        os.execve(omc, [omc, "--model", "mock/mock-1", "--no-session"], env)
+        os.execve(omc, [omc, "--config", NOPRED, "--model", "mock/mock-1", "--no-session"], env)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 160, 0, 0))
     pump(1.0)
 

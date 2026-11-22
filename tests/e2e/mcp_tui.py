@@ -8,6 +8,7 @@ usage: mcp_tui.py <omc> <mock_mcp.py> [mock request log]
 Runs in a throwaway project dir; OMC_CODING_AGENT_DIR comes from the caller. Prints "mcp tui ok" or what the
 screen showed instead."""
 import fcntl, json, os, pty, re, select, struct, subprocess, sys, tempfile, termios, time
+NOPRED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-predictions.yml")  # composer.predictions off
 
 omc, mock = sys.argv[1], sys.argv[2]
 reqlog = sys.argv[3] if len(sys.argv) > 3 else None
@@ -20,7 +21,7 @@ if pid == 0:
     env = dict(os.environ, TERM="xterm-256color", OMC_SKIP_SETUP="1", PI_NO_DESKTOP_NOTIFY="1", OMC_NO_BROWSER="1")
     for k in ("TMUX", "STY", "ZELLIJ", "TERM_PROGRAM"):
         env.pop(k, None)
-    os.execvpe(omc, [omc, "--model", "mock/mock-1", "--no-session"], env)
+    os.execvpe(omc, [omc, "--config", NOPRED, "--model", "mock/mock-1", "--no-session"], env)
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 140, 0, 0))
 
 raw = b""

@@ -206,6 +206,15 @@ struct tui_editor {
     int theme_padding_x; /* theme's editor padding request (-1 = unset) */
     bool use_terminal_cursor; /* park the hardware cursor instead of drawing a cursor cell */
     const char *eol_cursor;   /* one-column end-of-line caret glyph (theme inputCursor); NULL = reverse-video cell */
+    /* composer predictions (editor.ts `predictions`): whole-message guesses for the next prompt, most likely first
+     * (borrowed, NULL = none); the first one the single-line buffer is a strict prefix of shows as ghost text after an
+     * end-of-line cursor and hides the placeholder; Tab or Right inserts the rest without submitting */
+    const strvec_t *(*predictions_fn)(void *ud);
+    void (*on_prediction_accepted)(void *ud, int index);
+    void *predictions_ud;
+    char *(*prediction_tab_hint)(void); /* owned display of tui.input.tab ("" = unbound) for the alternatives hint */
+    char *inserted_prediction; /* the line a prediction insert left; any later edit clears it */
+    bool ac_prediction;        /* the open list offers the predictions for the whole line */
 };
 
 tui_editor_t *tui_editor_new(void);
@@ -261,6 +270,9 @@ void tui_editor_set_chrome_colors(tui_editor_t *ed, tui_composer_color_fn border
                                   tui_composer_color_fn surface, void *ud);
 void tui_editor_set_top_provider(tui_editor_t *ed, char *(*fn)(void *ud, int avail, int *width), void *ud);
 void tui_editor_set_placeholder_fn(tui_editor_t *ed, char *(*fn)(void *ud), void *ud);
+void tui_editor_set_predictions(tui_editor_t *ed, const strvec_t *(*fn)(void *ud), void (*accepted)(void *ud, int index),
+                                void *ud);
+char *tui_editor_prediction_suffix(tui_editor_t *ed); /* the shown prediction's untyped rest (owned) or NULL */
 /* Feed a key (same as the component's handle_key). */
 bool tui_editor_handle_key(tui_editor_t *ed, const tui_key_t *k);
 

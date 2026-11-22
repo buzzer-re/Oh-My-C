@@ -38,6 +38,8 @@ Memory pipeline side requests (memory.backend=local startup):
   - stage-2 consolidation (system "memory-stage-two consolidator") -> {memory_md, memory_summary, skills:[mock-skill]}
 Subagent turns ("Complete assignment thoroughly:\n\n<assignment>") run <assignment> as the script (e.g. slow:3:done).
 Idle recap side turns ("<recap>…") answer a fixed one-line recap.
+Composer prediction side turns ("<composer-prediction>…") answer "PREDICTED-NEXT", or the `predict=<text>` token of the
+  latest user message (`~` -> space, `|` -> newline, e.g. predict=NO_PREDICTION); SLOWPREDICT there answers after 3 s.
 /agents architect requests ("Custom agent request:…" containing AGENTSPEC) answer a docs-writer agent spec as JSON.
 Mid-stream connection drops (turn recovery), driven by the latest user message:
   - "drop:<mode>:<n>:<text>"   the first <n> requests stream <text> (may be empty) and then drop the connection;
@@ -307,6 +309,12 @@ class H(BaseHTTPRequestHandler):
             elif u.startswith("Custom agent request:") and "AGENTSPEC" in u:  # /agents architect (agent-creation-user.md)
                 kind, rest = "say", json.dumps({"identifier": "docs-writer", "whenToUse": "Use this agent when docs need writing.",
                                                 "systemPrompt": "You write docs.\nKeep them short."})
+            elif u.startswith("<composer-prediction>"):  # composer prediction side turn (composer-prediction-user.md)
+                prev = [text_of(m) for m in msgs if m.get("role") == "user" and not text_of(m).startswith("<composer-prediction>")
+                        and text_of(m).strip()]
+                pm = re.search(r"predict=(\S*)", prev[-1] if prev else "")
+                kind, rest = "say", (pm.group(1).replace("~", " ").replace("|", "\n") if pm else "PREDICTED-NEXT")
+                if "SLOWPREDICT" in (prev[-1] if prev else ""): time.sleep(3)
             elif u.startswith("<recap>"):  # idle recap side turn (recap-user.md)
                 kind, rest = "say", "Recap: goal is fixing the flaky park tests; next, rerun the suite."
             elif "You name coding-agent sessions" in sysc:  # title model fallback

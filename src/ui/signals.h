@@ -63,7 +63,7 @@ void ui_signals_run_settled(const json_t *run_messages, bool interrupted);
 /* agent_end keeps its messages; the worker's end settles the run with them (continuations of one prompt —
  * stop recoveries, plan reminders — are non-terminal settles in omp) */
 void ui_signals_agent_end(const json_t *run_messages);
-void ui_signals_settle(void);
+bool ui_signals_settle(void); /* true when the run settled done (#settledRunStatus) */
 /* Warp CLI-agent events (WARP_CLI_AGENT_PROTOCOL_VERSION >= 1): `\x1b]777;notify;warp://cli-agent;{json}\x07`
  * for session_start (also after a session switch), prompt_submit (user-authored message_start), question_asked,
  * tool_complete and the run's stop / stop_failure */
