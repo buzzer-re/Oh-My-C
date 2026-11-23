@@ -2400,6 +2400,65 @@ static int64_t anth_on_failure(void *ud, int status, const char *body, http_head
     return d;
 }
 
+/* anthropicPrewarmRejection: what in `params` the endpoint refuses on a max_tokens 0 pre-warm, or NULL */
+static const char *prewarm_rejection(const json_t *params) {
+    if (str_eq(json_get_str(json_get_obj(params, "thinking"), "type"), "enabled")) return "budget thinking";
+    const char *tc = json_get_str(json_get_obj(params, "tool_choice"), "type");
+    if (str_eq(tc, "any") || str_eq(tc, "tool")) return "a forced tool_choice";
+    const json_t *fmt = json_get(json_get_obj(params, "output_config"), "format");
+    if (fmt && !json_is_null(fmt)) return "structured output";
+    return NULL;
+}
+
+static int prewarm_body_cb(void *ud, const char *data, size_t len) {
+    sb_appendn(ud, data, len);
+    return 0;
+}
+
+/* the body the real request would send (same client, auth and headers, so the same cache key), non-streaming with
+ * max_tokens 0: the endpoint reads the prompt, refreshes the cache and returns usage, no output billed */
+static json_t *prewarm_send(const ai_model_t *m, const ai_stream_opts_t *lo, json_t *params, http_headers_t *h,
+                            const char *url, bool oauth, ai_event_cb cb, void *ud) {
+    anthropic_sse_t s;
+    anthropic_sse_init(&s, m, oauth, cb, ud);
+    const char *refusal = prewarm_rejection(params);
+    json_t *msg;
+    if (refusal) {
+        char *e = xasprintf("Anthropic prompt-cache pre-warm (max_tokens: 0) cannot be sent with %s", refusal);
+        msg = aib_finish(&s.b, "error", e);
+        free(e);
+        anthropic_sse_free(&s);
+        return msg;
+    }
+    json_set_int(params, "max_tokens", 0);
+    json_set_bool(params, "stream", false);
+    char *body = anthropic_serialize_body(params);
+    sb_t resp = SB_INIT;
+    int status = 0;
+    char *err = NULL;
+    int rc = ai_stream_post(url, h, body, lo, prewarm_body_cb, &resp, &status, &err);
+    free(body);
+    if (rc == 0) {
+        json_t *j = json_parse(resp.s ? resp.s : "", resp.len, NULL);
+        if (!json_is_obj(json_get(j, "usage"))) {
+            msg = aib_finish(&s.b, "error", "Anthropic pre-warm response carried no usage");
+        } else {
+            aib_start(&s.b);
+            if (json_get_str(j, "id")) aib_set(&s.b, "responseId", json_str(json_get_str(j, "id")));
+            apply_usage(&s, json_get(j, "usage"), true);
+            msg = aib_finish(&s.b, "length", NULL); /* zero output tokens always stop at the cap */
+        }
+        json_free(j);
+    } else {
+        msg = aib_finish(&s.b, rc == -2 ? "aborted" : "error", err ? err : "request failed");
+        if (status) json_set_int(msg, "errorStatus", status);
+    }
+    free(err);
+    sb_free(&resp);
+    anthropic_sse_free(&s);
+    return msg;
+}
+
 static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, int is_oauth,
                                      ai_event_cb cb, void *ud) {
     ai_stream_opts_t defo;
@@ -2452,6 +2511,13 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
         hk.sent_slow = hk.lane && anthropic_slow_is_active(o->slow_hooks, hk.lane);
         if (hk.sent_slow) http_headers_set(&h, "anthropic-usage-limit", "slow");
         char *url = anthropic_request_url(m, oauth);
+        if (lo.prewarm) {
+            result = prewarm_send(m, &lo, params, &h, url, oauth, cb, ud);
+            free(url);
+            http_headers_free(&h);
+            json_free(params);
+            break;
+        }
         /* `params` stays the full body; only the wire sees the thread shape, with its beta */
         json_t *wire = thread ? anth_thread_plan(thread, params, http_headers_get(&h, "anthropic-beta"), now_ms(), NULL) : NULL;
         if (wire) {

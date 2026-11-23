@@ -2009,8 +2009,12 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (!o->subagent) {
         modelctl_apply_context_policy();
         modelctl_watch_settings();
-        /* prompt-cache warmer for the main agent loop only (spawned sessions opt out) */
-        a->warmer = cachewarm_new(a);
+        /* prompt-cache warmer for the main agent loop */
+        a->warmer = cachewarm_new(a, "idle");
+        settings_on_change(warm_settings_changed, a);
+    } else {
+        /* task subagents bridge their long tool waits but never warm after they settle; the user's "off" still wins */
+        a->warmer = cachewarm_new(a, "streaming");
         settings_on_change(warm_settings_changed, a);
     }
     a->cwd = o->cwd ? path_abs(o->cwd, NULL) : get_cwd();

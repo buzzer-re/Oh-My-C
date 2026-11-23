@@ -477,6 +477,22 @@ what is being fixed. An `advise` call from a cancelled review records nothing (`
   (it sends the main session id as the cache key and keeps its own provider session id); every tool but `learn` and
   `manage_skill` is a copy that refuses the call without running anything.
 
+## Prompt-cache warming (`coding/cachewarm.c`)
+
+The main loop's latest request is kept warm (`providers.cacheWarming`: `off`, `streaming`, `idle`; task subagents are
+capped at `streaming`): a decision is due at 90% of the model's declared `promptCache` lifetime (at least ten seconds
+before expiry). A refresh is a `max_tokens: 0` pre-warm where the catalog declares `promptCachePrewarm` and the model
+uses its provider's own HTTPS host (first-party Anthropic; the provider sends it non-streaming and returns usage, a 400
+falls back to a replay in the same slot and for the rest of the session), otherwise a one-token replay priced with the
+session's mean billed replay output (512 tokens before the first). Idle phase: refresh while 15% of the miss cost
+minus the refresh clears $0.05, for 30 minutes. Streaming phase (ski rental): refresh while the refresh spend since the
+last request plus the next refresh stays within the cheaper buy-out: letting the entry expire, or a bridge compaction
+(`providers.cacheWarmingStrategy` `auto`/`keepalive`/`compact`, prompts past min(`cacheWarmingCompactPercent` of the
+window, `cacheWarmingCompactTokens`)). A bridge is decided a minute before expiry and runs as a background speculation
+(`cmp_bridge_start`, remote or handoff, never soft) over the history before the pending tool call; its armed result
+commits at the next mid-run boundary whatever the threshold, and one that failed before a provider accepted it is
+replaced by one refresh. `cache_warming_start`/`_end` carry the `method`.
+
 ## Titles (`coding/title.c`)
 
 Under `title.generator: fork` (the default), when the reply to the user's first substantive message

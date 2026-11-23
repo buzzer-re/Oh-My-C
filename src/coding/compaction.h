@@ -40,6 +40,14 @@ void cmp_mid_turn(app_t *a, const json_t *assistant);
 void cmp_before_prompt(app_t *a, const json_t *pending);
 /* cancel and join a background speculation (app teardown) */
 void cmp_free(app_t *a);
+/* cache-warming bridge compaction (CacheBridgeCompactor): cost inputs for compacting a prompt_tokens prompt, false when
+ * no bridge-capable method (remote or handoff, async and mid-turn compaction on) can run now */
+bool cmp_bridge_estimate(app_t *a, int64_t prompt_tokens, int64_t *summary_tokens, int64_t *kept_tokens);
+/* start compacting the history before the pending tool call in the background (taking over a running speculation of
+ * a bridge-capable method) and wait until it settles or *stop: CMP_BRIDGE_ARMED (commits at the next mid-run boundary),
+ * _FAILED_ACCEPTED (a provider billed it, so it read the cache), _FAILED_UNACCEPTED */
+enum { CMP_BRIDGE_ARMED = 1, CMP_BRIDGE_FAILED_ACCEPTED, CMP_BRIDGE_FAILED_UNACCEPTED };
+int cmp_bridge_start(app_t *a, volatile sig_atomic_t *stop);
 
 /* resolveCompactionMethodOrder of compaction.methodOrder (owned strings) */
 strvec_t cmp_method_order(void);

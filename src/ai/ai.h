@@ -210,6 +210,11 @@ typedef struct {
      * reasoning {effort: "none"} whatever the model's disable mode */
     bool force_reasoning_off;
     bool hide_thinking_summary;
+    /* prompt-cache pre-warm (Anthropic Messages only): the request is built as usual, then sent non-streaming with
+     * max_tokens 0; the result has empty content, stopReason "length" and the request's usage. Budget thinking, a
+     * forced tool_choice and structured output end in an error without sending. Callers gate it on the catalog's
+     * promptCachePrewarm policy. */
+    bool prewarm;
     const char *session_id;      /* prompt-cache key / affinity */
     const char *prompt_cache_key; /* prompt_cache_key when it differs from session_id (side requests); NULL = session_id */
     const char *cache_retention; /* "none" | "short" | "long" (NULL => short) */

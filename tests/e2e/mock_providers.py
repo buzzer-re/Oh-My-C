@@ -241,6 +241,17 @@ class H(BaseHTTPRequestHandler):
                 return drop_connection(self, mode)
             if kind == "user":
                 text = "resumed after drop"
+        if path.endswith("/messages") and body.get("stream") is False and body.get("max_tokens") == 0:
+            # a prompt-cache pre-warm: usage only, no content (MOCK_PREWARM_400 refuses it like a gateway would)
+            if os.environ.get("MOCK_PREWARM_400"):
+                return self.reply(400, {"type": "error", "error": {"type": "invalid_request_error", "message": "max_tokens: must be >= 1"}})
+            usage = {"input_tokens": 5, "output_tokens": 0}
+            cache = int(os.environ.get("MOCK_CACHE_TOKENS", "0"))
+            if cache:
+                key = json.dumps([body.get("system"), body.get("tools"), body.get("messages")], sort_keys=True)
+                usage["cache_read_input_tokens" if key in SEEN else "cache_creation_input_tokens"] = cache
+                SEEN.add(key)
+            return self.reply(200, {"id": "msg_pw", "type": "message", "role": "assistant", "content": [], "stop_reason": "max_tokens", "usage": usage})
         if path.endswith("/messages"):
             self.sse_start()
             usage = {"input_tokens": 5, "output_tokens": 0}
@@ -275,6 +286,8 @@ class H(BaseHTTPRequestHandler):
             else:
                 answer = ("Tool said: " + text.strip()) if kind == "tool" else \
                     "resumed after drop" if text == "resumed after drop" else "plain provider answer"
+                if "Write a handoff document" in latest_user_text(body):
+                    answer = "## Goal\nplain provider answer"  # a handoff document opens with its Goal heading
                 self.ev({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}, "content_block_start")
                 self.ev({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": answer}}, "content_block_delta")
                 stop = "end_turn"
