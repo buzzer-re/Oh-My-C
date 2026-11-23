@@ -390,6 +390,8 @@ enum { AI_RETRY_FETCH, AI_RETRY_OPENAI, AI_RETRY_OLLAMA, AI_RETRY_CODEX, AI_RETR
 int64_t ai_extract_retry_hint(const http_headers_t *h, const char *body);
 /* a zero x-ratelimit-limit-* allowance named in an error text (rate-limit.ts ZERO_ALLOWANCE_PATTERN) */
 bool ai_zero_allowance_text(const char *msg);
+/* a LiteLLM spent-budget rejection ("Budget Exceeded", "Budget has been exceeded!"): an account usage limit */
+bool ai_budget_exceeded_text(const char *msg);
 /* getZeroRateLimitHeader: the first x-ratelimit-limit-* header reporting 0 (borrowed name), or NULL */
 const char *ai_zero_rate_limit_header(const http_headers_t *h);
 /* getRetryAfterMsFromHeaders: the longest of retry-after-ms / retry-after / x-ratelimit-reset(-ms); -1 none */

@@ -443,8 +443,32 @@ const char *ai_zero_rate_limit_header(const http_headers_t *h) {
 }
 
 /* account-level usage/quota limits belong to credential rotation, never to the provider backoff */
+/* rate-limit.ts BUDGET_EXCEEDED_PATTERN /\bbudget(?:[\s_-]+has[\s_-]+been)?[\s_-]+exceeded\b/i: LiteLLM rejects a spent
+ * virtual key with HTTP 422 "Budget Exceeded" / "Budget has been exceeded!" (omp bba7495658) */
+static bool sep(char c) { return isspace((unsigned char)c) || c == '_' || c == '-'; }
+static bool wordc(char c) { return isalnum((unsigned char)c) || c == '_'; }
+static const char *skip_sep(const char *p) {
+    if (!sep(*p)) return NULL;
+    while (sep(*p)) p++;
+    return p;
+}
+bool ai_budget_exceeded_text(const char *msg) {
+    for (const char *p = msg ? str_istr(msg, "budget") : NULL; p; p = str_istr(p + 1, "budget")) {
+        if (p > msg && wordc(p[-1])) continue;
+        const char *q = skip_sep(p + 6);
+        if (!q) continue;
+        if (!strncasecmp(q, "has", 3)) {
+            const char *r = skip_sep(q + 3);
+            if (r && !strncasecmp(r, "been", 4) && (r = skip_sep(r + 4))) q = r;
+        }
+        if (!strncasecmp(q, "exceeded", 8) && !wordc(q[8])) return true;
+    }
+    return false;
+}
+
 bool ai_usage_limit_text(const char *msg, int status) {
     if (ai_zero_allowance_text(msg)) return true;
+    if (ai_budget_exceeded_text(msg)) return true;
     static const char *const pats[] = {
         "usage limit",       "usage_limit",        "limit_reached",         "quota exceeded",    "quota reached",
         "quota_exceeded",    "insufficient_quota", "insufficient quota",    "resource exhausted", "resource_exhausted",
