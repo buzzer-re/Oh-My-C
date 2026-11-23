@@ -103,12 +103,8 @@ static void notice_stderr(void *ud, const char *level, const char *text) {
         print_persist_failure(text);
         return;
     }
-    if (!strcmp(level, "retry_fallback_applied")) {
-        char *m = app_fallback_notice_text(text);
-        fprintf(stderr, "[warning] %s\n", m);
-        free(m);
-        return;
-    }
+    /* print-mode.ts prints no retry_fallback_applied: the switch shows as its auto_retry_start line below */
+    if (!strcmp(level, "retry_fallback_applied") || !strcmp(level, "retry-ended")) return;
     /* auto_retry_start: a turn stuck retrying (offline, an outage) says why */
     int at, max;
     if (!strcmp(level, "warning") && sscanf(text, "Retrying (%d/%d)", &at, &max) == 2) {

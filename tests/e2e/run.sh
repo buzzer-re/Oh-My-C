@@ -378,7 +378,7 @@ out=$("${NOCRED[@]}" "$B" -p "hello" --model scaleway/glm-5.3 2>&1 </dev/null); 
 printf 'retry:\n  fallbackChains:\n    scaleway/glm-5.3:\n      - mock/mock-1\n' > "$T/nocred/config.yml"
 : > "$T/req.jsonl"
 out=$("${NOCRED[@]}" "$B" -p "hello" --model scaleway/glm-5.3 2>&1 </dev/null); nrc=$?
-[[ $nrc == 0 && "$out" == *"[warning] Fallback: scaleway/glm-5.3"*" -> mock/mock-1"$'\n'"no credential for scaleway"* && "$out" != *"No API key"* ]] && echo "   ok  no credential walks the chain" || { echo "   FAIL no credential walks the chain: $nrc $out"; fail=1; }
+[[ $nrc == 0 && "$out" != *"Fallback:"* && "$out" != *"No API key"* ]] && echo "   ok  no credential walks the chain" || { echo "   FAIL no credential walks the chain: $nrc $out"; fail=1; }
 tail -1 "$T/req.jsonl" | grep -q '"model": "mock-1"' && echo "   ok  no credential fallback used" || { echo "   FAIL no credential fallback used"; fail=1; }
 printf 'retry:\n  modelFallback: false\n  fallbackChains:\n    scaleway/glm-5.3:\n      - mock/mock-1\n' > "$T/nocred/config.yml"
 out=$("${NOCRED[@]}" "$B" -p "hello" --model scaleway/glm-5.3 2>&1 </dev/null); nrc=$?
@@ -402,10 +402,11 @@ rm -f "$T/agent/config.yml"
 mkdir -p "$T/prefill" && sed 's/^\(      - id: mock-2\)$/      - id: mock-prefill\n        contextWindow: 100000\n        maxTokens: 4096\n\1/' "$T/agent/models.yml" > "$T/prefill/models.yml"
 printf 'retry:\n  fallbackChains:\n    mock/mock-prefill:\n      - mock/mock-1\n' > "$T/prefill/config.yml"
 check "text overflow chain" "prefill fallback ok"  env OMC_CODING_AGENT_DIR="$T/prefill" "$B" --model mock/mock-prefill --no-session -p "say:prefill fallback ok"
-# retry model fallback: a rate-limited model walks retry.fallbackChains
+# retry model fallback: a rate-limited model walks retry.fallbackChains; print mode shows the switch as omp's
+# auto_retry_start line (no Fallback warning)
 printf 'retry:\n  fallbackChains:\n    mock/mock-flaky:\n      - mock/mock-2\n' > "$T/agent/config.yml"
 out=$(timeout 60 "$B" --model mock/mock-flaky -p "bash:echo fb-ok" </dev/null 2>&1)
-[[ "$out" == *"Tool said: fb-ok"* && "$out" == *"[warning] Fallback: mock/mock-flaky:high -> mock/mock-2"* ]] && echo "   ok  retry fallback" || { echo "   FAIL retry fallback: $out"; fail=1; }
+[[ "$out" == *"Tool said: fb-ok"* && "$out" == *"Retrying (1/10): 429 Rate limit exceeded for mock-flaky"* && "$out" != *"Fallback:"* ]] && echo "   ok  retry fallback" || { echo "   FAIL retry fallback: $out"; fail=1; }
 tail -1 "$T/req.jsonl" | grep -q '"model": "mock-2"' && echo "   ok  fallback model used" || { echo "   FAIL fallback model used"; fail=1; }
 # a plain 503 retries after the exponential base (retry.baseDelayMs), not the 45-75 s capacity window
 # (the transport's own retries of each request come on top; the mock's retry-after-ms: 0 makes them immediate)

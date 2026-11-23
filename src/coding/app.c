@@ -1394,6 +1394,35 @@ static void hook_turn_boundary(void *ud, agent_t *ag, const json_t *assistant) {
     }
 }
 
+/* auto_retry_start (a switched model announces one too, with no wait); where no session-event listener takes it, the
+ * "Retrying (n/max) in Ns: error" notice the TUI and print mode render */
+static void announce_retry(app_t *a, const json_t *assistant, int saga, int max, double delay, const char *err) {
+    json_t *ev = json_obj();
+    json_set_str(ev, "type", "auto_retry_start");
+    json_set_int(ev, "attempt", saga);
+    json_set_int(ev, "maxAttempts", max);
+    json_set_num(ev, "delayMs", delay);
+    json_set_str(ev, "errorMessage", err ? err : "error");
+    if (json_get(assistant, "errorId")) json_set(ev, "errorId", json_clone(json_get(assistant, "errorId")));
+    a->retry_saga = saga;
+    if (!app_emit(a, ev))
+        notice(a, "warning", "Retrying (%d/%d) in %llds: %s", saga, max, (long long)ceil(delay / 1000), err ? err : "error");
+}
+
+/* closeRetrySaga failure without superseded attempts (a refusal with no model left to walk to): auto_retry_end, or the
+ * "retry-ended" notice ("<attempt>\x1f<final error>") */
+static void close_retry_saga_failed(app_t *a, const char *err) {
+    int n = a->retry_saga;
+    a->retry_saga = 0;
+    strvec_free(&a->retry_notes);
+    json_t *ev = json_obj();
+    json_set_str(ev, "type", "auto_retry_end");
+    json_set_bool(ev, "success", false);
+    json_set_int(ev, "attempt", n);
+    json_set_str(ev, "finalError", err ? err : "Unknown error");
+    if (!app_emit(a, ev)) notice(a, "retry-ended", "%d\x1f%s", n, err ? err : "Unknown error");
+}
+
 static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int attempt, json_t **append) {
     app_t *a = ud;
     if (attempt < 0 && a->gemini_interrupt > 0) { /* LoopGuards #interruptGeminiHeaderRunaway */
@@ -1471,8 +1500,15 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
         bool switched = try_retry_fallback(a, ag, cur, assistant, err, false, false);
         free(cur);
         if (switched) {
-            a->retry_offset = attempt + 1;
+            int max = (int)settings_int("retry.maxRetries", 10);
+            if (attempt == 0) a->retry_offset = 0;
+            int saga = attempt - a->retry_offset + 1;
+            if (saga > max) { /* a fallback model gets a fresh retry budget once the old one is spent */
+                a->retry_offset = attempt;
+                saga = 1;
+            }
             strvec_push(&a->retry_notes, "switched model; retried");
+            announce_retry(a, assistant, saga, max, 0, err);
             return AGENT_RETRY_REPLAY;
         }
     }
@@ -1581,8 +1617,12 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     free(walk_key);
     if (switched) {
         maybe_thinking_loop_redirect(a, ag, err);
-        a->retry_offset = attempt + 1; /* a fallback model gets a fresh retry budget */
+        if (exhausted) { /* a fallback model gets a fresh retry budget once the old one is spent */
+            a->retry_offset = attempt;
+            saga = 1;
+        }
         strvec_push(&a->retry_notes, usage_limit ? "rate-limited; switched model; retried" : "switched model; retried");
+        announce_retry(a, assistant, saga, max, 0, err);
         return again;
     }
     if (!retryable) return false;
@@ -1597,12 +1637,7 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     }
     if (classifier_refusal && !immediate) {
         /* no model left to walk to: the refusal ends the turn; a saga an earlier attempt announced closes with it */
-        if (a->retry_saga > 0) {
-            int n = a->retry_saga;
-            a->retry_saga = 0;
-            notice(a, "retry-failed", "%d\x1f%s\x1f%s", n, err ? err : "Unknown error", err ? err : "Unknown error");
-            strvec_free(&a->retry_notes);
-        }
+        if (a->retry_saga > 0) close_retry_saga_failed(a, err);
         return false;
     }
     double delay = immediate ? 0 : mr_retry_backoff_ms(settings_int("retry.baseDelayMs", 500), saga);
@@ -1628,19 +1663,7 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     }
     /* captured before event delivery, so delivery counts toward the announced wait */
     int64_t usage_reset_deadline = now_ms() + (int64_t)ceil(delay);
-    {
-        json_t *ev = json_obj();
-        json_set_str(ev, "type", "auto_retry_start");
-        json_set_int(ev, "attempt", saga);
-        json_set_int(ev, "maxAttempts", max);
-        json_set_num(ev, "delayMs", delay);
-        json_set_str(ev, "errorMessage", err ? err : "error");
-        if (json_get(assistant, "errorId")) json_set(ev, "errorId", json_clone(json_get(assistant, "errorId")));
-        a->retry_saga = saga;
-        if (!app_emit(a, ev))
-            notice(a, "warning", "Retrying (%d/%d) in %llds: %s", saga, max, (long long)ceil(delay / 1000),
-                   err ? err : "error");
-    }
+    announce_retry(a, assistant, saga, max, delay, err);
     maybe_thinking_loop_redirect(a, ag, err);
     strvec_push(&a->retry_notes, usage_limit ? "rate-limited; waited; retried" : "error; retried");
     /* ordinary backoff keeps its monotonic duration; a quota reset elapses while the machine sleeps too */

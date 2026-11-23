@@ -426,7 +426,9 @@ There are two levels:
    from the current selector, with the branch's last assigned role (`model_change` role, temporary `fallback` and
    `prewalk` switches skipped) as the hint while that role's configured model is the current one; `--model pi/<role>`
    (also `@<role>` or a bare configured role name) records that role after the default entry, on `--continue` too, so
-   its retries walk the role's chain, not `default`'s. A prompt whose model
+   its retries walk the role's chain, not `default`'s. A switch is announced like a retry (`auto_retry_start` with no
+   wait: the TUI retry row, print mode's `Retrying (n/max): <error>` line; print mode prints no Fallback line) and
+   keeps the saga's attempt count; only a switch made once the budget is spent starts a fresh one. A prompt whose model
    has no usable credential (`auth_has_usable_credential`: none stored or in the environment, or an OAuth token still
    expired after its refresh) walks the same chain before it is sent (`credential_preflight` in `app.c`, omp
    `applyMissingCredentialFallback`), unpinned so the primary returns with its credential. With no candidate, or

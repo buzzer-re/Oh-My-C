@@ -322,6 +322,16 @@ static void post_notice(void *x) {
         uiev_free(e);
         return;
     }
+    if (!strcmp(e->name, "retry-ended")) {
+        char *f1 = strchr(e->out, '\x1f');
+        if (f1) {
+            *f1 = 0;
+            ui_retry_ended(e->u, atoi(e->out), f1 + 1);
+        }
+        tui_request_render(e->u->tui);
+        uiev_free(e);
+        return;
+    }
     if (!strcmp(e->name, "session-persistence")) {
         char *d0 = tui_truncate_to_width(e->out, 110, "\xe2\x80\xa6"), *d = tui_strip_ansi(d0);
         free(d0);

@@ -76,7 +76,7 @@ printf 'composer:\n  predictions: false\nretry:\n  fallbackChains:\n    mocka/mo
 rfmodels() { python3 -I -c 'import json,sys; print(",".join(r["body"]["model"] for r in map(json.loads, open(sys.argv[1])) if r["body"].get("tools")))' "$T/rfprov.jsonl"; }
 : > "$T/rfprov.jsonl"
 out=$(timeout 60 env OMC_CODING_AGENT_DIR="$T/rfwalk" "$B" --model mocka/mock-a --no-session -p "refuseon:mock-a:walk" </dev/null 2>&1)
-[[ "$out" == *"Fallback: mocka/mock-a:high -> mocka/mock-b"* && "$out" == *"plain provider answer"* && "$(rfmodels)" == "mock-a,mock-b" ]] &&
+[[ "$out" == *"Retrying (1/10): Refusal (cyber): declined by mock-a"* && "$out" == *"plain provider answer"* && "$(rfmodels)" == "mock-a,mock-b" ]] &&
     echo "   ok  refusal walks the chain" || { echo "   FAIL refusal walks the chain: $(rfmodels) $out"; fail=1; }
 : > "$T/rfprov.jsonl"
 out=$(timeout 60 env OMC_CODING_AGENT_DIR="$T/rfwalk" "$B" --model mocka/mock-a --no-session -p "refuseon:mock-a,mock-b:walk" </dev/null 2>&1)

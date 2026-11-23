@@ -211,6 +211,8 @@ size_t ui_segment_palette(size_t n, int *out);
 void ui_async_result(ui_t *u, const json_t *msg);
 void ui_retry_recovered(ui_t *u, const char *notes); /* "\n"-separated notes for the failed attempts */
 void ui_retry_failed(ui_t *u, int attempts, const char *final_error, const char *error);
+/* auto_retry_end failure that supersedes nothing (a classifier refusal with no model left to walk to) */
+void ui_retry_ended(ui_t *u, int attempts, const char *final_error);
 /* a run ended with retry-hidden attempt errors the saga never accounted for: show them again */
 void ui_retry_restore_hidden(ui_t *u);
 void ui_assistant_streamed(ui_t *u, msgview_t *v); /* message_update applied: drive the smooth reveal */

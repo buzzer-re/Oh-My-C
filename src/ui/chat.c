@@ -1411,6 +1411,25 @@ void ui_retry_failed(ui_t *u, int attempts, const char *final_error, const char 
 
 void add_notice(ui_t *u, const char *level, const char *text);
 
+/* #handleAutoRetryEnd for a failure carrying no retryErrors: the attempts the pending retry hid show their errors
+ * again; when the pinned error is the final one, its banner reads "Retry failed after N attempts: <error>", else the
+ * stale pin goes back inline and the line is a transcript error */
+void ui_retry_ended(ui_t *u, int attempts, const char *final_error) {
+    msgview_t *pinned = u->pinned_error && chat_holds(u, u->pinned_error) ? u->pinned_error : NULL;
+    bool terminal_pinned = pinned && str_eq(json_get_str(pinned->msg, "errorMessage"), final_error);
+    if (pinned && !terminal_pinned) {
+        pinned->error_pinned = false;
+        pinned->dirty = true;
+        u->pinned_error = NULL;
+        ui_error_banner_clear(u);
+    }
+    ui_retry_restore_hidden(u);
+    char *m = xasprintf("Retry failed after %d attempts: %s", attempts, final_error && *final_error ? final_error : "Unknown error");
+    if (terminal_pinned) ui_error_banner_show(u, m);
+    else add_notice(u, "error", m);
+    free(m);
+}
+
 /* event-controller.ts #handleAutoCompactionStart / #handleAutoCompactionEnd (the event JSON from compaction.c) */
 static void auto_compaction_event(ui_t *u, bool start, const char *text) {
     json_t *ev = json_parse(text, strlen(text), NULL);
