@@ -15,7 +15,8 @@ Anthropic "drop:<mode>:<n>:<text>" (the latest user message): the first <n> requ
 connection ("stall": silent for $MOCK_STALL_SECS (60), "close": FIN before the last chunk, "rst": TCP reset); later
 requests answer "resumed after drop" (turn recovery checks, tests/e2e/stall.sh).
 Anthropic "think:<x>" streams unsigned reasoning before the answer; "refusecot:<x>" is refused (stop_details category
-reasoning_extraction, before any output) while an assistant text block replays that reasoning (tests/e2e/refusal.sh).
+reasoning_extraction, before any output) while an assistant text block replays that reasoning (tests/e2e/refusal.sh);
+"refuseon:<model>,<model>:<x>" is refused before any output (category cyber) on every request to a listed model id.
 Paths under /deny answer 403 to Copilot-Integration-Id copilot-chat (identity fallback test)."""
 import json, os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -287,6 +288,14 @@ class H(BaseHTTPRequestHandler):
                 # the classifier refuses a request replaying another model's reasoning as text, before any output
                 self.ev({"type": "message_delta", "delta": {"stop_reason": "refusal", "stop_details": {"type": "refusal",
                          "category": "reasoning_extraction", "explanation": "declined"}},
+                         "usage": {"output_tokens": 0}}, "message_delta")
+                self.ev({"type": "message_stop"}, "message_stop")
+                return self.end()
+            elif kind == "user" and latest_user_text(body).startswith("refuseon:") and \
+                    body.get("model") in latest_user_text(body)[9:].split(":")[0].split(","):
+                # the classifier of each listed model refuses the request before any output, every time
+                self.ev({"type": "message_delta", "delta": {"stop_reason": "refusal", "stop_details": {"type": "refusal",
+                         "category": "cyber", "explanation": "declined by " + body.get("model")}},
                          "usage": {"output_tokens": 0}}, "message_delta")
                 self.ev({"type": "message_stop"}, "message_stop")
                 return self.end()

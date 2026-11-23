@@ -82,6 +82,9 @@ struct app {
     int retry_count;
     int retry_offset;
     bool refusal_resampled; /* turn-recovery.ts #midStreamRefusalResampled: this saga resampled a mid-stream refusal */
+    /* turn-recovery.ts #refusalWalkTried: the models (provider/id, no thinking level) a classifier refusal already moved
+     * off in this retry saga; a refusal walk visits each one at most once */
+    strvec_t refusal_walk;
     /* turn-recovery.ts #demotedReasoningOmittedFor: the session id whose requests to classifier-cot-extraction models
      * leave other models' reasoning out (set by a reasoning_extraction refusal of a request that replayed some) */
     char *demoted_omitted_for;

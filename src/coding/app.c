@@ -315,6 +315,7 @@ static void report_persist_error(app_t *a) {
 }
 
 static void resolve_auto_thinking(app_t *a, ai_effort_t e);
+static char *current_selector(app_t *a);
 
 /* provider-refusal.ts providerRefusalData: what the refused turn looked like (no fallback-credit token or handle) */
 static json_t *provider_refusal_data(const json_t *m) {
@@ -392,7 +393,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
             }
             if (a->fallback.active && !a->fallback.served && a->model) {
                 a->fallback.served = true;
-                char *k = mr_model_key(a->model);
+                char *k = current_selector(a); /* formatRetryFallbackSelector(model, thinkingLevel) */
                 notice(a, "retry_fallback_succeeded", "%s\x1f%s", k, a->fallback.role ? a->fallback.role : "");
                 free(k);
             }
@@ -1220,9 +1221,10 @@ static void apply_fallback(app_t *a, const char *role, const ai_model_t *cand, c
     free(from);
 }
 
-/* #tryRetryModelFallback: walk the pinned chain, then the current model's own chain */
+/* #tryRetryModelFallback: walk the pinned chain, then the current model's own chain. A refusal walk skips the models
+ * the saga's refusals already moved off and pins the fallback (no revert to the primary on cooldown expiry). */
 static bool try_retry_fallback(app_t *a, agent_t *ag, const char *cur, const json_t *failed, const char *err,
-                               bool same_model_retry) {
+                               bool same_model_retry, bool refusal_walk) {
     strvec_t keys = {0};
     char *hint = live_retry_role_hint(a);
     char *own = mr_fallback_chain_key(cur, a->model, hint);
@@ -1238,6 +1240,12 @@ static bool try_retry_fallback(app_t *a, agent_t *ag, const char *cur, const jso
         size_t n = mr_fallback_candidates(keys.v[k], cur, a->model, false, &c);
         for (size_t i = 0; i < n; i++) {
             if (done || mr_selector_suppressed(c[i].raw)) continue;
+            if (refusal_walk) { /* formatRetryFallbackBaseSelector: provider/id */
+                char *base = xasprintf("%s/%s", c[i].provider, c[i].id);
+                bool tried = strvec_contains(&a->refusal_walk, base);
+                free(base);
+                if (tried) continue;
+            }
             mr_result_t r;
             const ai_model_t *cand = mr_resolve_value(c[i].raw, &avail, &r) ? r.model : NULL;
             mr_result_clear(&r);
@@ -1249,6 +1257,7 @@ static bool try_retry_fallback(app_t *a, agent_t *ag, const char *cur, const jso
             if (!mr_provider_available(cand->provider)) continue;
             char *reason = xasprintf("Request failed: %s", err ? err : "provider returned an error without details");
             apply_fallback(a, keys.v[k], cand, c[i].level, cur, reason);
+            if (refusal_walk) a->fallback.pinned = true; /* pinFallback */
             free(reason);
             done = true;
         }
@@ -1459,7 +1468,7 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     if (text_overflow_fits && !is_abort_error(err) && settings_bool("retry.enabled", true) &&
         settings_bool("retry.modelFallback", true) && mr_fallback_admits(is_usage_limit(err))) {
         char *cur = current_selector(a);
-        bool switched = try_retry_fallback(a, ag, cur, assistant, err, false);
+        bool switched = try_retry_fallback(a, ag, cur, assistant, err, false, false);
         free(cur);
         if (switched) {
             a->retry_offset = attempt + 1;
@@ -1497,23 +1506,24 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     }
     /* resolved stream-stall tools and proven-unexecuted calls keep their assistant/result pair */
     uint32_t eid = aie_classify_message(assistant);
-    bool preserve = resolved_stall || ((aie_retriable(eid) || (eid & AIE_MALFORMED_FUNCTION_CALL)) &&
+    const json_t *rsd = json_get_obj(assistant, "stopDetails");
+    bool classifier_refusal = str_eq(json_get_str(rsd, "type"), "refusal") || str_eq(json_get_str(rsd, "type"), "sensitive");
+    bool preserve = resolved_stall || ((classifier_refusal || aie_retriable(eid) || (eid & AIE_MALFORMED_FUNCTION_CALL)) &&
                                        tr_unexecuted_tool_calls_replay_safe(assistant, committed, 0));
     int again = preserve ? AGENT_RETRY_PRESERVE : AGENT_RETRY_REPLAY;
     if (!settings_bool("retry.enabled", true)) return false;
-    if (attempt == 0) {
+    if (attempt == 0) { /* a new retry saga: resolveRetry cleared the last one's walk */
         a->retry_offset = 0;
         a->refusal_resampled = false;
+        strvec_free(&a->refusal_walk);
     }
     int max = (int)settings_int("retry.maxRetries", 10);
     int saga = attempt - a->retry_offset + 1; /* omp #retryAttempt after its increment */
     bool exhausted = saga > max;
-    const json_t *rsd = json_get_obj(assistant, "stopDetails");
     bool immediate = false; /* a same-model retry at once (delayMs 0), before any fallback */
     /* a reasoning_extraction refusal of a request that replayed other models' reasoning as text: resent once on this
      * model without that reasoning, which stays out for the rest of the session, before walking the chain. A refusal
      * of a request that carried none would only be refused again (omp 873763609a, 69f22a4733) */
-    bool classifier_refusal = str_eq(json_get_str(rsd, "type"), "refusal") || str_eq(json_get_str(rsd, "type"), "sensitive");
     if (retryable && !exhausted && classifier_refusal && str_eq(json_get_str(rsd, "category"), "reasoning_extraction") &&
         json_get_int(assistant, "demotedReasoningBlocks", 0) > 0 && a->model && classifier_cot_extraction(a->model) &&
         a->session && !str_eq(a->demoted_omitted_for, session_id(a->session))) {
@@ -1549,16 +1559,26 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     bool billing_cap = tr_billing_cap_usage_limit(status ? status : aie_status_from_text(err), err);
     /* model fallback: consulted on every failed attempt, retryable or hard (hardErrorFallback) */
     bool switched = false;
-    if (!immediate && a->model && !is_abort_error(err) && settings_bool("retry.modelFallback", true) &&
+    /* a classifier refusal walks the chain instead of retrying the same model (that reproduces a refusal of the request
+     * itself), and visits any one model at most once per saga, so chains naming each other end (A -> B -> A stops) */
+    char *walk_key = classifier_refusal && a->model ? mr_model_key(a->model) : NULL;
+    bool walk_repeats = walk_key && strvec_contains(&a->refusal_walk, walk_key);
+    if (!immediate && a->model && !walk_repeats && (!classifier_refusal || retryable) && !is_abort_error(err) && settings_bool("retry.modelFallback", true) &&
         mr_fallback_admits(usage_limit) && !(is_overflow(assistant))) {
         char *cur = current_selector(a);
-        int64_t hint = retry_after_ms(err);
-        mr_suppress_selector(cur, now_ms() + (hint > 0 ? hint : mr_rate_limit_backoff_ms(err)));
+        if (classifier_refusal) {
+            strvec_push(&a->refusal_walk, walk_key);
+        } else {
+            int64_t hint = retry_after_ms(err);
+            mr_suppress_selector(cur, now_ms() + (hint > 0 ? hint : mr_rate_limit_backoff_ms(err)));
+        }
         bool rate_limited = str_istr(err, "429") || str_eq(mr_rate_limit_reason(err), "RATE_LIMIT_EXCEEDED");
-        bool same_model_retry = retryable && !exhausted && !billing_cap && !(settings_bool("retry.rateLimitWalksChain", false) && rate_limited);
-        switched = try_retry_fallback(a, ag, cur, assistant, err, same_model_retry);
+        bool same_model_retry = retryable && !exhausted && !billing_cap && !classifier_refusal &&
+                                !(settings_bool("retry.rateLimitWalksChain", false) && rate_limited);
+        switched = try_retry_fallback(a, ag, cur, assistant, err, same_model_retry, classifier_refusal);
         free(cur);
     }
+    free(walk_key);
     if (switched) {
         maybe_thinking_loop_redirect(a, ag, err);
         a->retry_offset = attempt + 1; /* a fallback model gets a fresh retry budget */
@@ -1573,6 +1593,16 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
         notice(a, "retry-failed", "%d\x1fRetry budget exhausted after %d %s: %s\x1f%s", saga - 1, saga - 1,
                saga - 1 == 1 ? "retry" : "retries", err ? err : "error", err ? err : "Unknown error");
         strvec_free(&a->retry_notes);
+        return false;
+    }
+    if (classifier_refusal && !immediate) {
+        /* no model left to walk to: the refusal ends the turn; a saga an earlier attempt announced closes with it */
+        if (a->retry_saga > 0) {
+            int n = a->retry_saga;
+            a->retry_saga = 0;
+            notice(a, "retry-failed", "%d\x1f%s\x1f%s", n, err ? err : "Unknown error", err ? err : "Unknown error");
+            strvec_free(&a->retry_notes);
+        }
         return false;
     }
     double delay = immediate ? 0 : mr_retry_backoff_ms(settings_int("retry.baseDelayMs", 500), saga);
@@ -2381,6 +2411,7 @@ void app_free(app_t *a) {
     free(a->fallback.role);
     free(a->fallback.original);
     strvec_free(&a->retry_notes);
+    strvec_free(&a->refusal_walk);
     free(a->model_role);
     free(a->checkpoint_entry);
     free(a->pending_rewind);

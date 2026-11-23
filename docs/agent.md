@@ -46,8 +46,11 @@ agent_end(messages added in this run)
   turn's in-memory `demotedReasoningBlocks`) is resent at once on the same model without that reasoning, if the
   model's catalog policy has `classifierCotExtraction`. From then on the session (`app_t.demoted_omitted_for`, a
   session id; a whole-session fork carries it to the new id) sets `omit_demoted_reasoning` on every request to such a
-  model: main turns, compaction and branch summaries, native compaction, handoff and ephemeral side turns. A refusal
-  of a request that carried none takes the path above.
+  model: main turns, compaction and branch summaries, native compaction, handoff and ephemeral side turns. Any other
+  refusal walks `retry.fallbackChains` (the refusal walk, turn-recovery.ts `#refusalWalkTried`): it never retries the
+  refused model, visits each model (provider/id) at most once per retry saga, so chains naming each other stop, puts
+  no cooldown on the refused selector and pins the fallback (no revert on cooldown expiry). With no candidate left the
+  refusal ends the turn (a saga an earlier attempt announced closes with `auto_retry_end` failure).
 
 - **Steering** (`agent_steer`) is delivered at the batch boundary, after the current turn's tools: the next turn opens
   (`turn_start`) and the steer is emitted into it. A steer queued while a batch runs (or while its calls were still
