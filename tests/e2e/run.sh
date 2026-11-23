@@ -416,6 +416,14 @@ check "mcp tool eof"   'Tool said: MCP failure\nserver: mockmcp\ntool: echo_text
     "$B" --model mock/mock-1 --mode json -p 'call:mcp__mockmcp_echo_text:{"text":"__crash__"}'
 check "mcp tool rpc"   'message: MCP error -32000: boom Bearer [redacted]\ncode: -32000\ntrace_id: req-42\ndata: {\"requestId\":\"req-42\",\"apiKey\":\"[redacted]\",\"detail\":\"x?token=[redacted]\",\"n\":[1,2]}\nnext: Address the server-reported MCP error before retrying.' \
     "$B" --model mock/mock-1 --mode json -p 'call:mcp__mockmcp_echo_text:{"text":"__rpcerror__"}'
+# tools/call carries a progress token (progress restarts its deadline); a configured timeout is a hard cap with omp's
+# next step; an expired session is re-initialized and the call retried once (omp e86bc4fe6e)
+check "mcp progress token" 'Tool said: meta {"progressToken": '  "$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"__meta__"}'
+check "mcp expired session" 'recovered after re-initialize'  "$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"__expired__"}'
+printf '{"mcpServers":{"mockmcp":{"command":"python3","args":["-I","%s"],"timeout":1000}}}' "$ROOT/tests/e2e/mock_mcp.py" > "$T/agent/mcp.json"
+check "mcp call timeout" 'failure: timeout\nretryable: no\nmessage: Request timeout after 1000ms\nnext: Raise this server'"'"'s `timeout` (ms) in its MCP config or set OMP_MCP_TIMEOUT_MS; the request outcome is unknown.' \
+    "$B" --model mock/mock-1 --mode json -p 'call:mcp__mockmcp_echo_text:{"text":"__slow__"}'
+printf '{"mcpServers":{"mockmcp":{"command":"python3","args":["-I","%s"]}}}' "$ROOT/tests/e2e/mock_mcp.py" > "$T/agent/mcp.json"
 # MCP results as omp's buildResult renders them: structured content as a fenced JSON block unless a text block
 # carries it (an SDK {result: [...]} wrapper matching item by item: omp 3e2ba2dd2c), "Error: " lead, [Resource: uri]
 check "mcp wrapped list" 'Tool said: a'  "$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"struct:list"}'

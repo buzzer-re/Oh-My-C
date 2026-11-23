@@ -304,7 +304,15 @@ call to it runs, every session sees.
 - A failed tool call returns omp's `formatMCPToolFailure` block (`src/mcp/mcperr.c`, `mcp/errors.ts`): `MCP failure`,
   server, tool, transport, stage, failure class, retryable, the sanitized message, code, trace id, bounded and
   credential-redacted JSON-RPC `data`, and the next step. A retryable connection-class failure gets one reconnect and
-  replay (`isRetriableConnectionError`); a stdio server that exits mid-call reports its exit code and is never replayed.
+  replay (`isRetriableConnectionError`, which also covers an expired HTTP session: `Unknown or expired session`, as a
+  JSON-RPC error or HTTP status); a stdio server that exits mid-call reports its exit code and is never replayed.
+- Deadlines (timeout.ts `resolveMCPRequestDeadline`): handshakes and listings use the configured timeout
+  (`OMP_MCP_TIMEOUT_MS`, else the server's `timeout`, else 30 s). A `tools/call` without a configured timeout gets
+  10 minutes, raised to the wait its own arguments ask for plus 30 s (`timeout`, `timeout_ms`, `timeoutInSeconds`,
+  `wait_seconds`, ...; a bare `timeout` reads as seconds up to 1000) and restarted by `notifications/progress` for its
+  `_meta.progressToken` (the request id) up to one hour; a configured timeout is a hard cap. A timed-out stdio/SSE call
+  sends `notifications/cancelled` (`Request timed out after Nms`). Progress is not displayed (omc has no MCP progress
+  rows).
 - OAuth for remote servers (`mcp/oauth.c`, port of `mcp/oauth-discovery.ts` and `oauth-flow.ts`):
   RFC 9728 resource metadata → RFC 8414/OIDC metadata → RFC 7591 dynamic registration (`client_name` `Codex`,
   `application_type` `native`; a rejected registration or a missing endpoint fails with omp's `OAuth provider requires

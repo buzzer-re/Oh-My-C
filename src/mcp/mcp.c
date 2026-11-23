@@ -10,6 +10,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <poll.h>
+#include <math.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -26,6 +27,7 @@ typedef struct {
     int64_t id;
     json_t *result; /* owned response object */
     bool done;
+    int64_t progress_at; /* mono ms of the last notifications/progress for this request's progress token (0: none) */
 } pending_t;
 
 struct mcp_server {
@@ -279,6 +281,20 @@ static void deliver(mcp_server_t *s, json_t *msg) {
         return;
     }
     const char *method = json_get_str(msg, "method");
+    if (method && !idj && !strcmp(method, "notifications/progress")) {
+        /* routeProgressNotification: progress for a request's token shows the server is still working on it */
+        const json_t *params = json_get(msg, "params"), *tok = json_get(params, "progressToken");
+        if (json_is_num(tok) && json_is_num(json_get(params, "progress"))) {
+            int64_t id = tok->is_int ? tok->u.num.i : json_d2i(tok->u.num.d);
+            pthread_mutex_lock(&s->mu);
+            for (size_t i = 0; i < s->pending.n; i++)
+                if (s->pending.v[i]->id == id && !s->pending.v[i]->done) s->pending.v[i]->progress_at = mono_ms();
+            pthread_cond_broadcast(&s->cv);
+            pthread_mutex_unlock(&s->mu);
+        }
+        json_free(msg);
+        return;
+    }
     if (method && !idj) { /* server notification */
         handle_notification(s, method, json_get(msg, "params"));
         json_free(msg);
@@ -435,6 +451,9 @@ static void add_oauth(mcp_server_t *s, http_headers_t *h) {
     free(tok);
 }
 
+/* a request's own HTTP bounds (tools/call deadlines), else the server's timeout */
+static __thread int64_t tl_http_total = -1, tl_http_idle = -1;
+
 static int http_send(mcp_server_t *s, const json_t *msg, char **err) {
     char *body = json_dump(msg, 0);
     http_headers_t h = {0};
@@ -450,7 +469,8 @@ static int http_send(mcp_server_t *s, const json_t *msg, char **err) {
     sse_init(&c.sse, post_sse_cb, &c);
     const char *url = s->transport == T_SSE ? s->post_url : s->url;
     http_req_t req = {.method = "POST", .url = url, .headers = &h, .body = body, .body_len = strlen(body),
-                      .timeout_ms = s->timeout_ms ? s->timeout_ms + 5000 : 0, .on_headers = post_hdr, .on_data = post_data,
+                      .timeout_ms = tl_http_total >= 0 ? tl_http_total : s->timeout_ms ? s->timeout_ms + 5000 : 0,
+                      .idle_timeout_ms = tl_http_idle > 0 ? tl_http_idle : 0, .on_headers = post_hdr, .on_data = post_data,
                       .ud = &c, .max_redirects = 5, .cancel = &s->cancel};
     http_resp_t r;
     int rc = http_request(&req, &r);
@@ -527,8 +547,18 @@ json_t *mcp_request(mcp_server_t *s, const char *method, json_t *params, int64_t
     return mcp_request_ex(s, method, params, timeout_ms, err, NULL);
 }
 
+/* a request bounded by timeout_ms, restarted by progress for its token but never past max_total_ms (MCPRequestDeadline);
+ * progress adds _meta.progressToken (the request id) */
+static json_t *mcp_request_dl(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, int64_t max_total_ms,
+                              bool progress, char **err, mcp_fail_t *fail);
+
 static json_t *mcp_request_ex(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, char **err,
                               mcp_fail_t *fail) {
+    return mcp_request_dl(s, method, params, timeout_ms, timeout_ms, false, err, fail);
+}
+
+static json_t *mcp_request_dl(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, int64_t max_total_ms,
+                              bool progress, char **err, mcp_fail_t *fail) {
     *err = NULL;
     pending_t *p = xcalloc(1, sizeof(*p));
     pthread_mutex_lock(&s->mu);
@@ -539,14 +569,30 @@ static json_t *mcp_request_ex(mcp_server_t *s, const char *method, json_t *param
     json_set_str(msg, "jsonrpc", "2.0");
     json_set_int(msg, "id", p->id);
     json_set_str(msg, "method", method);
+    if (progress) { /* withProgressToken */
+        if (!params) params = json_obj();
+        json_t *meta = json_get_obj(params, "_meta");
+        if (!meta) {
+            meta = json_obj();
+            json_set(params, "_meta", meta);
+        }
+        json_set_int(meta, "progressToken", p->id);
+    }
     if (params) json_set(msg, "params", params);
+    if (s->transport == T_HTTP && max_total_ms != timeout_ms) {
+        /* the response rides in the POST: bounded whole by the cap, and between bytes (progress) by the deadline */
+        tl_http_total = max_total_ms > 0 ? max_total_ms + 5000 : 0;
+        tl_http_idle = timeout_ms > 0 ? timeout_ms + 5000 : 24 * 3600 * 1000LL;
+    }
+    int64_t started = mono_ms();
     int rc = send_msg(s, msg, err);
+    tl_http_total = tl_http_idle = -1;
     json_free(msg);
     if (rc != 0) fail_from_send(s, *err, fail);
     json_t *result = NULL;
     pthread_mutex_lock(&s->mu);
+    int64_t limit = timeout_ms;
     if (rc == 0) {
-        int64_t deadline = timeout_ms > 0 ? mono_ms() + timeout_ms : 0;
         /* streamable HTTP delivers the response inside the POST; stdio/SSE responses arrive on the reader */
         while (!p->done && s->transport != T_HTTP && s->connected && !s->closing && !(s->ext_cancel && *s->ext_cancel)) {
             struct timespec ts;
@@ -557,7 +603,15 @@ static json_t *mcp_request_ex(mcp_server_t *s, const char *method, json_t *param
                 ts.tv_nsec -= 1000000000;
             }
             pthread_cond_timedwait(&s->cv, &s->mu, &ts);
-            if (deadline && mono_ms() > deadline) break;
+            if (timeout_ms > 0) {
+                /* progress restarts the deadline, never past the request's hard cap */
+                int64_t base = p->progress_at ? p->progress_at : started, cap = started + max_total_ms;
+                int64_t deadline = MIN(base + timeout_ms, cap);
+                if (mono_ms() > deadline) {
+                    limit = cap < base + timeout_ms ? max_total_ms : timeout_ms;
+                    break;
+                }
+            }
         }
         if (p->done) {
             json_t *e = json_get(p->result, "error");
@@ -570,9 +624,25 @@ static json_t *mcp_request_ex(mcp_server_t *s, const char *method, json_t *param
             *err = xstrdup("Aborted");
         } else if (s->connected || s->transport == T_HTTP) {
             *err = xasprintf("%s: %s timed out", s->name, method);
-            char *m = xasprintf("Request timeout after %lldms", (long long)timeout_ms);
+            char *m = xasprintf("Request timeout after %lldms", (long long)limit);
             mcp_fail_set(fail, transport_kind(s), "receive", "timeout", false, m, NULL);
             free(m);
+            if (s->transport != T_HTTP) { /* sendCancellation: the server need not finish what its caller gave up on */
+                json_t *cn = json_obj(), *cp = json_obj();
+                json_set_str(cn, "jsonrpc", "2.0");
+                json_set_str(cn, "method", "notifications/cancelled");
+                json_set_int(cp, "requestId", p->id);
+                char *why = xasprintf("Request timed out after %lldms", (long long)limit);
+                json_set_str(cp, "reason", why);
+                free(why);
+                json_set(cn, "params", cp);
+                pthread_mutex_unlock(&s->mu);
+                char *e2 = NULL;
+                send_msg(s, cn, &e2);
+                free(e2);
+                json_free(cn);
+                pthread_mutex_lock(&s->mu);
+            }
         } else {
             /* the stdio transport's EOF (with the subprocess exit status): the request was written, so it is never
              * replayed */
@@ -1076,6 +1146,91 @@ int64_t mcp_startup_timeout_ms(void) {
     }
     int64_t v = settings_int("mcp.startupTimeoutMs", 250);
     return v < 0 ? 250 : v;
+}
+
+/* ---------- tools/call deadlines (timeout.ts resolveMCPRequestDeadline) ---------- */
+
+#define MCP_TOOL_CALL_TIMEOUT_MS 600000LL    /* default tools/call deadline */
+#define MCP_TOOL_CALL_MAX_TOTAL_MS 3600000LL /* cap on a default-deadline call that keeps reporting progress */
+#define TOOL_TIMEOUT_ARG_MARGIN_MS 30000LL   /* headroom over a tool's own requested wait */
+
+static bool ends_ci(const char *s, const char *suf) {
+    size_t n = strlen(s), m = strlen(suf);
+    return n >= m && !strcasecmp(s + n - m, suf);
+}
+static bool ends_cs(const char *s, const char *suf) {
+    size_t n = strlen(s), m = strlen(suf);
+    return n >= m && !strcmp(s + n - m, suf);
+}
+
+/* requestedToolTimeoutMs: the longest wait a call's own arguments ask for (timeout, timeout_ms, timeoutInSeconds,
+ * wait_seconds, ...); a bare timeout reads as seconds up to 1000 and as milliseconds above. -1 when none. */
+int64_t mcp_requested_tool_timeout_ms(const json_t *args) {
+    double longest = -1;
+    const char *k;
+    json_t *v;
+    if (!json_is_obj(args)) return -1;
+    json_obj_foreach((json_t *)args, i, k, v) {
+        if (!json_is_num(v)) continue;
+        double val = v->is_int ? (double)v->u.num.i : v->u.num.d;
+        if (!(val > 0) || !isfinite(val)) continue;
+        /* TIMEOUT_ARG /^(?:timeout|wait|deadline|max_?wait)/i */
+        if (strncasecmp(k, "timeout", 7) && strncasecmp(k, "wait", 4) && strncasecmp(k, "deadline", 8) && strncasecmp(k, "max_wait", 8) &&
+            strncasecmp(k, "maxwait", 7))
+            continue;
+        /* MILLISECONDS_ARG /(?:^|_)ms$|Ms$|_?millis(?:econds)?$/i */
+        bool ms = ends_ci(k, "ms") || ends_ci(k, "millis") || ends_ci(k, "milliseconds");
+        /* SECONDS_ARG /(?:^|_)(?:s|sec|secs|seconds?)$|Seconds?$|Secs?$/ */
+        bool secs = false;
+        static const char *const lo[] = {"s", "sec", "secs", "second", "seconds"};
+        for (size_t j = 0; j < ARRAY_LEN(lo) && !secs; j++) {
+            size_t n = strlen(k), m = strlen(lo[j]);
+            secs = ends_cs(k, lo[j]) && (n == m || k[n - m - 1] == '_');
+        }
+        secs = secs || ends_cs(k, "Second") || ends_cs(k, "Seconds") || ends_cs(k, "Sec") || ends_cs(k, "Secs");
+        double out = ms ? val : (secs || val <= 1000) ? val * 1000 : val;
+        if (out > longest) longest = out;
+    }
+    return longest < 0 ? -1 : (int64_t)MIN(longest, 9.0e15);
+}
+
+/* the configured timeout (OMP_MCP_TIMEOUT_MS / OMC_MCP_TIMEOUT_MS, else the server's `timeout`): true when set */
+static bool configured_timeout(const json_t *cfg, int64_t *out) {
+    const char *raw = env_get("OMP_MCP_TIMEOUT_MS");
+    if (!raw) raw = env_get("OMC_MCP_TIMEOUT_MS");
+    if (raw) {
+        char *end;
+        char *t = str_trim(raw);
+        double v = strtod(t, &end);
+        bool ok = *t && !*end && isfinite(v) && v >= 0;
+        free(t);
+        if (ok) {
+            *out = (int64_t)v;
+            return true;
+        }
+    }
+    const json_t *c = json_get(cfg, "timeout");
+    if (json_is_num(c)) {
+        *out = c->is_int ? c->u.num.i : json_d2i(c->u.num.d);
+        return true;
+    }
+    return false;
+}
+
+/* resolveMCPRequestDeadline for tools/call: a configured timeout is a hard cap; without one 10 minutes, restarted by
+ * progress up to an hour; neither shorter than the wait the call's arguments request */
+void mcp_tool_call_deadline(const json_t *cfg, const json_t *args, int64_t *timeout_ms, int64_t *max_total_ms) {
+    int64_t configured = 0;
+    bool has = configured_timeout(cfg, &configured);
+    int64_t base = has ? configured : MCP_TOOL_CALL_TIMEOUT_MS;
+    if (base <= 0) {
+        *timeout_ms = *max_total_ms = base;
+        return;
+    }
+    int64_t requested = mcp_requested_tool_timeout_ms(args);
+    int64_t t = requested < 0 ? base : MAX(base, requested + TOOL_TIMEOUT_ARG_MARGIN_MS);
+    *timeout_ms = t;
+    *max_total_ms = has ? t : MAX(t, MCP_TOOL_CALL_MAX_TOTAL_MS);
 }
 
 /* resolveMCPTimeoutMs: OMP_MCP_TIMEOUT_MS, else 30 s */
@@ -1850,7 +2005,9 @@ static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *a
     s->inflight_calls++;
     pthread_mutex_unlock(&s->mu);
     mcp_fail_t fail = {0};
-    json_t *res = mcp_request_ex(s, "tools/call", json_clone(p), s->timeout_ms, &err, &fail);
+    int64_t call_timeout, call_cap;
+    mcp_tool_call_deadline(s->cfg, json_get(p, "arguments"), &call_timeout, &call_cap);
+    json_t *res = mcp_request_dl(s, "tools/call", json_clone(p), call_timeout, call_cap, true, &err, &fail);
     settle_tool_call(s, b, ctx);
     if (!res && !(cancel && *cancel) && mcp_fail_reconnectable(&fail)) {
         /* isRetriableConnectionError: a stale connection gets one reconnect and replay */
@@ -1866,7 +2023,7 @@ static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *a
             pthread_mutex_lock(&s->mu);
             s->inflight_calls++;
             pthread_mutex_unlock(&s->mu);
-            res = mcp_request_ex(s, "tools/call", json_clone(p), s->timeout_ms, &err, &fail);
+            res = mcp_request_dl(s, "tools/call", json_clone(p), call_timeout, call_cap, true, &err, &fail);
             settle_tool_call(s, b, ctx);
         }
     }

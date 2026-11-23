@@ -91,6 +91,19 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "method": "notifications/prompts/list_changed"})
             send({"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": "mem://notes"}})
             res = {"content": [{"type": "text", "text": "prompts changed"}]}
+        elif msg["params"]["arguments"].get("text") == "__meta__":  # what the call carried in _meta (a progress token)
+            res = {"content": [{"type": "text", "text": "meta " + json.dumps(msg["params"].get("_meta"))}]}
+        elif msg["params"]["arguments"].get("text") == "__slow__":  # outlasts a 1 s server timeout
+            time.sleep(2.5)
+            res = {"content": [{"type": "text", "text": "too late"}]}
+        elif msg["params"]["arguments"].get("text") == "__expired__":
+            # an expired session refuses the first call (marker file in TMPDIR); the re-initialized one answers
+            mark = os.path.join(os.environ.get("TMPDIR", "/tmp"), "mock-mcp-expired")
+            if not os.path.exists(mark):
+                open(mark, "w").close()
+                send({"jsonrpc": "2.0", "id": msg.get("id"), "error": {"code": -32001, "message": "Unknown or expired session"}})
+                continue
+            res = {"content": [{"type": "text", "text": "recovered after re-initialize"}]}
         elif msg["params"]["arguments"].get("text") == "__crash__":
             sys.exit(3)  # the server dies mid-call, without answering
         elif msg["params"]["arguments"].get("text") == "__rpcerror__":  # a JSON-RPC error with secret-bearing data
