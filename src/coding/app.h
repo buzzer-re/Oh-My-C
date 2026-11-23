@@ -82,6 +82,9 @@ struct app {
     int retry_count;
     int retry_offset;
     bool refusal_resampled; /* turn-recovery.ts #midStreamRefusalResampled: this saga resampled a mid-stream refusal */
+    /* turn-recovery.ts #demotedReasoningOmittedFor: the session id whose requests to classifier-cot-extraction models
+     * leave other models' reasoning out (set by a reasoning_extraction refusal of a request that replayed some) */
+    char *demoted_omitted_for;
     int retry_saga; /* attempt of the last auto_retry_start (0: no retry saga open) */
     char *prompt_refusal; /* why the last APP_PROMPT_REFUSED prompt was refused (owned) */
     char *cost_refusal;   /* a subagent's cost-cap refusal of a mid-run model request (owned; costgate.c) */
@@ -484,6 +487,10 @@ char *app_complete_first(app_t *a, const mr_pool_t *models, const char *system, 
 void app_notice(app_t *a, const char *level, const char *fmt, ...) PRINTF_LIKE(3, 4);
 void app_reload_context(app_t *a);
 void app_fill_request_opts(app_t *a, ai_stream_opts_t *o);
+/* omitsDemotedReasoning(model): this session turned replayed foreign reasoning off after a refusal and `m`'s classifier
+ * refuses reasoning replayed as text; sets o->omit_demoted_reasoning (a caller's own true is kept) */
+bool app_omits_demoted_reasoning(app_t *a, const struct ai_model *m);
+void app_omit_demoted_opts(app_t *a, const struct ai_model *m, ai_stream_opts_t *o);
 const json_t *app_session_metadata(app_t *a, const char *provider);
 
 /* record paid cache-warm requests (cachewarm.c) as model_usage entries; call from the session's own thread */

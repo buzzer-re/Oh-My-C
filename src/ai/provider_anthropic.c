@@ -1205,7 +1205,14 @@ static json_t *thinking_wire(const char *thinking, const char *sig) {
     return b;
 }
 
-static json_t *convert_assistant(const ai_model_t *m, const json_t *msg, bool oauth) {
+/* encodeAnthropicMessages' demotion bookkeeping: `omit` leaves other models' reasoning that would replay as text out,
+ * `demoted` counts the blocks replayed that way */
+typedef struct {
+    bool omit;
+    int demoted;
+} demote_enc_t;
+
+static json_t *convert_assistant(const ai_model_t *m, const json_t *msg, bool oauth, demote_enc_t *enc) {
     json_t *content = json_get(msg, "content");
     json_t *blocks = json_arr(), *blk;
     bool has_signed = false;
@@ -1218,6 +1225,10 @@ static json_t *convert_assistant(const ai_model_t *m, const json_t *msg, bool oa
         if (str_eq(ty, "text")) {
             const char *t = json_get_str(blk, "text");
             if (str_blank(t)) continue;
+            if (json_get_bool(blk, AI_DEMOTED_THINKING_KEY, false) && enc) {
+                if (enc->omit) continue;
+                enc->demoted++;
+            }
             json_push(blocks, text_block(t));
         } else if (str_eq(ty, "thinking")) {
             const char *th = json_get_str(blk, "thinking");
@@ -1230,6 +1241,11 @@ static json_t *convert_assistant(const ai_model_t *m, const json_t *msg, bool oa
             } else if (!has_signed && replay_unsigned) {
                 json_push(blocks, thinking_wire(th, ""));
             } else {
+                /* unsigned blocks beside signed thinking are the turn's own and keep their text replay */
+                if (!has_signed && enc) {
+                    if (enc->omit) continue;
+                    enc->demoted++;
+                }
                 char *d = render_demoted_thinking(m->id, th);
                 json_push(blocks, text_block(d));
                 free(d);
@@ -1319,7 +1335,7 @@ static json_t *compaction_replay_block(const ai_model_t *m, const json_t *msg) {
 static json_t *wire_msg(const char *role, json_t *content);
 
 static json_t *convert_messages(const ai_model_t *m, const json_t *msgs, bool oauth, bool thinking_enabled, bool replay,
-                                bool compaction_request) {
+                                bool compaction_request, demote_enc_t *enc) {
     json_t *params = json_arr();
     /* harness file metadata queued behind a replayed compaction block: it lands before the first message created
      * after the summary, or at the end */
@@ -1388,7 +1404,7 @@ static json_t *convert_messages(const ai_model_t *m, const json_t *msgs, bool oa
             if (str_eq(role, "user") && !agent_authored) json_set_bool(p, CONV_KEY, true);
             json_push(params, p);
         } else if (str_eq(role, "assistant")) {
-            json_t *blocks = convert_assistant(m, msg, oauth);
+            json_t *blocks = convert_assistant(m, msg, oauth, enc);
             if (json_len(blocks) == 0) {
                 json_free(blocks);
                 continue;
@@ -1536,7 +1552,7 @@ static bool wants_fast_mode(const ai_model_t *m, const ai_stream_opts_t *o) {
 }
 
 static json_t *build_request(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, bool oauth,
-                             bool *thinking_on_out) {
+                             bool *thinking_on_out, int *demoted_out) {
     ai_stream_opts_t defo;
     if (!o) {
         ai_stream_opts_init(&defo);
@@ -1628,7 +1644,9 @@ static json_t *build_request(const ai_model_t *m, const ai_context_t *ctx, const
 
     json_t *transformed = ai_transform_messages(ctx->messages, m);
     ai_anthropic_prepare_images(transformed, m); /* Claude's image contract: 8000 px, 10 MB base64 */
-    json_t *msgs = convert_messages(m, transformed, oauth, thinking_on, compaction_ok, comp_req != NULL);
+    demote_enc_t enc = {.omit = o->omit_demoted_reasoning};
+    json_t *msgs = convert_messages(m, transformed, oauth, thinking_on, compaction_ok, comp_req != NULL, &enc);
+    if (demoted_out) *demoted_out = enc.demoted;
     json_free(transformed);
 
     apply_head_caching(system, tools, cc);
@@ -1727,7 +1745,7 @@ static json_t *build_request(const ai_model_t *m, const ai_context_t *ctx, const
 }
 
 json_t *anthropic_build_request(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o, bool oauth) {
-    return build_request(m, ctx, o, oauth, NULL);
+    return build_request(m, ctx, o, oauth, NULL, NULL);
 }
 
 /* replayResponse: the response as the next request's history serializes it, so a message thread can tell whether that
@@ -1737,7 +1755,7 @@ static json_t *replay_response(const ai_model_t *m, const json_t *message, bool 
     json_push(one, json_clone(message));
     json_t *transformed = ai_transform_messages(one, m);
     json_free(one);
-    json_t *params = convert_messages(m, transformed, oauth, thinking_on, anthropic_compaction_supported(m), false);
+    json_t *params = convert_messages(m, transformed, oauth, thinking_on, anthropic_compaction_supported(m), false, NULL);
     json_free(transformed);
     strip_private_keys(params);
     json_t *out = NULL, *it;
@@ -2507,7 +2525,8 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
     for (int guard = 0; guard < 8; guard++) {
         char sent_version[32]; /* the Claude Code version this request advertises */
         snprintf(sent_version, sizeof sent_version, "%s", anthropic_claude_code_version());
-        json_t *params = build_request(m, ctx, &lo, oauth, &thinking_on);
+        int demoted = 0; /* other models' reasoning blocks this request replays as text */
+        json_t *params = build_request(m, ctx, &lo, oauth, &thinking_on, &demoted);
         if (o->on_payload) o->on_payload(o->payload_ud, params);
         /* omp 7f6b4a096f/228ddc8d7c: Anthropic answers `messages: []` with a bare 400 "messages is required", so an empty
          * conversation is named before sending (omc's payload hook only observes, so encoding is the side that emptied it) */
@@ -2552,7 +2571,9 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
         anthropic_sse_init(&s, m, oauth, cb, ud);
         int status = 0;
         char *err = NULL;
-        ai_post_ex_t ex = {.on_headers = anth_on_headers, .on_failure = anth_on_failure, .hook_ud = &hk};
+        /* transportFetch: first-party `anthropic` requests ride the Cowork transport */
+        ai_post_ex_t ex = {.on_headers = anth_on_headers, .on_failure = anth_on_failure, .hook_ud = &hk,
+                           .cowork = str_eq(m->provider, "anthropic") && str_eq(m->api, "anthropic-messages")};
         int rc = ai_sse_post_ex(url, &h, body, &lo, anthropic_sse_event, &s, &status, &err, &ex);
         free(url);
         free(body);
@@ -2589,6 +2610,9 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
             continue;
         }
         result = anthropic_sse_finish(&s, rc, err);
+        /* a refused request reports how much of other models' reasoning it replayed as text (turn recovery strips it) */
+        if (demoted > 0 && str_eq(json_get_str(json_get_obj(result, "stopDetails"), "type"), "refusal"))
+            json_set_int(result, "demotedReasoningBlocks", demoted);
         free(err);
         anthropic_sse_free(&s);
         break;

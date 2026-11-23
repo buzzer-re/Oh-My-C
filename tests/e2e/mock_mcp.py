@@ -13,6 +13,7 @@ config (so a cached catalog can differ from the live one).
 `--modern` speaks MCP 2026-07-28: it answers server/discover (initialize is unknown to it), requires the request _meta,
 asks for roots through an input_required round trip (`echo_text` with text "roots"), and acknowledges a
 subscriptions/listen stream, on which `echo_text` "notify" announces a new tool `late_tool`.
+echo_text "__client__" (legacy) / "client" (modern) answers the clientInfo the client declared.
 `--lazy` serves lazy loaders shaped like Kata's `load_*`: `load_extra` adds `extra_tool` and announces it before its
 reply, `load_extra_late` replies first and announces it afterwards (no call to the server running)."""
 import json, os, sys, time
@@ -28,6 +29,7 @@ notified = [False]
 initialized_seen = [False]
 extra_prompt = [False]
 loaded = [False]
+client_info = [None]  # the clientInfo the client declared (initialize params, or the 2026-07-28 request _meta)
 
 
 def send(obj):
@@ -41,6 +43,7 @@ def modern(msg):
     if method != "notifications/initialized" and mid is not None and meta.get("io.modelcontextprotocol/protocolVersion") != "2026-07-28":
         send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32022, "message": "Unsupported protocol version"}})
         return True
+    client_info[0] = meta.get("io.modelcontextprotocol/clientInfo", client_info[0])
     if method == "server/discover":
         res = {"resultType": "complete", "supportedVersions": ["2026-07-28"], "capabilities": {"tools": {"listChanged": True}},
                "instructions": "Modern MCP server instructions.", "ttlMs": 60000, "cacheScope": "public",
@@ -63,6 +66,8 @@ def modern(msg):
         elif text == "roots":
             roots = params["inputResponses"]["r1"]["roots"]
             res = {"content": [{"type": "text", "text": "roots %s state=%s initialized=%s" % (roots[0]["uri"].startswith("file:///"), params.get("requestState"), initialized_seen[0])}]}
+        elif text == "client":
+            res = {"content": [{"type": "text", "text": "client " + json.dumps(client_info[0])}]}
         elif text == "notify":
             notified[0] = True
             send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed", "params": {"_meta": {"io.modelcontextprotocol/subscriptionId": listen_id[0]}}})
@@ -87,6 +92,7 @@ for line in sys.stdin:
     if mid is None:
         continue
     if method == "initialize":
+        client_info[0] = (msg.get("params") or {}).get("clientInfo")
         if STARTUP_DELAY:
             time.sleep(STARTUP_DELAY)
         caps = {"tools": {}, "prompts": {}}
@@ -146,6 +152,8 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "method": "notifications/prompts/list_changed"})
             send({"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": "mem://notes"}})
             res = {"content": [{"type": "text", "text": "prompts changed"}]}
+        elif msg["params"]["arguments"].get("text") == "__client__":  # the clientInfo initialize declared
+            res = {"content": [{"type": "text", "text": "client " + json.dumps(client_info[0])}]}
         elif msg["params"]["arguments"].get("text") == "__meta__":  # what the call carried in _meta (a progress token)
             res = {"content": [{"type": "text", "text": "meta " + json.dumps(msg["params"].get("_meta"))}]}
         elif msg["params"]["arguments"].get("text") == "__slow__":  # outlasts a 1 s server timeout

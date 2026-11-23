@@ -209,6 +209,9 @@ typedef struct {
     /* forceReasoningOff (external-thinking scratchpad): implies disable_reasoning; the Responses APIs send
      * reasoning {effort: "none"} whatever the model's disable mode */
     bool force_reasoning_off;
+    /* omitDemotedReasoning (Anthropic Messages): leave out other models' reasoning that would replay as text (after a
+     * reasoning_extraction refusal); a refused request reports demotedReasoningBlocks when it carried some */
+    bool omit_demoted_reasoning;
     bool hide_thinking_summary;
     /* prompt-cache pre-warm (Anthropic Messages only): the request is built as usual, then sent non-streaming with
      * max_tokens 0; the result has empty content, stopReason "length" and the request's usage. Budget thinking, a
@@ -439,7 +442,14 @@ typedef struct {
      * -2 fails now without retrying; may be NULL */
     int64_t (*on_failure)(void *ud, int status, const char *body, http_headers_t *headers);
     void *hook_ud;
+    /* the request rides omp's Cowork transport (first-party `anthropic` on anthropic-messages): a connection lost
+     * after connect and before any response names how far the body got (ConnectionLostBeforeResponseError) */
+    bool cowork;
 } ai_post_ex_t;
+
+/* ConnectionLostBeforeResponseError's message for a failed request's upload progress (http_resp_t), e.g.
+ * "connection lost after 1.2s while uploading the 32.0MB request body; no response received (EPIPE)". Owned. */
+char *ai_connection_lost_message(const http_resp_t *resp);
 int ai_sse_post_ex(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
                    ai_sse_cb on_event, void *ud, int *status, char **err, ai_post_ex_t *ex);
 /* Raw streaming POST (for newline-delimited JSON etc.). */
@@ -467,6 +477,9 @@ void ai_apply_headers(http_headers_t *h, const ai_model_t *m, const ai_stream_op
 
 /* Normalize history for a target model: drops/converts foreign thinking, synthesizes missing tool results,
  * strips images if model lacks image input, drops errored/aborted assistant turns. Returns owned array. */
+/* kDemotedThinking: marks a text block ai_transform_messages synthesized from another model's thinking (encoders build
+ * their own wire blocks, so the key never reaches a provider or the session) */
+#define AI_DEMOTED_THINKING_KEY "__demotedThinking"
 json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target);
 /* OpenAI Responses remote compaction (agent compaction/openai.ts requestOpenAiRemoteCompaction): POST
  * <base>/responses/compact {model, input, instructions, prompt_cache_key?} with `messages` (LLM messages) encoded as

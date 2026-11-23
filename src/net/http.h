@@ -65,6 +65,14 @@ typedef struct {
     char *final_url;
     bool aborted;
     bool truncated;
+    /* the connection was up (TLS done, or a pooled socket) and failed before any response headers: how far the
+     * request got (cowork-fetch.ts RequestUploadProgress). `error` keeps the transport's own wording. */
+    bool lost_before_response;
+    bool body_sent;        /* the socket took the whole body (the OS may still hold some of it unsent) */
+    size_t body_bytes;     /* request body size on the wire */
+    int64_t elapsed_ms;    /* since the request started */
+    const char *lost_code; /* the socket error's code (static: "EPIPE", "ECONNRESET", ...), NULL when unknown */
+    bool via_proxy;        /* the request went through a configured proxy */
 } http_resp_t;
 
 int http_request(const http_req_t *req, http_resp_t *resp); /* 0 if a response was received */

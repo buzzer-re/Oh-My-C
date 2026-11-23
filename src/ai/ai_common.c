@@ -1173,11 +1173,65 @@ char *ai_network_failure_message(const char *http_error, const char *url) {
     return msg;
 }
 
-/* the transports omp re-describes a rejected fetch on: postOpenAIStream, Codex, the Anthropic connection error */
-static char *network_failure_message(const char *http_error, const char *url, int policy) {
+/* pi-utils formatDuration */
+static char *format_duration(int64_t ms) {
+    const int64_t SEC = 1000, MIN_ = 60 * SEC, HOUR = 60 * MIN_, DAY = 24 * HOUR;
+    if (ms <= 0) return xstrdup("0ms");
+    if (ms < SEC) return xasprintf("%lldms", (long long)ms);
+    if (ms < MIN_) {
+        int64_t tenths = (ms + 50) / 100; /* Math.round(ms / 100) */
+        return tenths < 600 ? xasprintf("%lld.%llds", (long long)(tenths / 10), (long long)(tenths % 10)) : xstrdup("1m");
+    }
+    if (ms < HOUR) {
+        int64_t m = ms / MIN_, sec = (ms % MIN_) / SEC;
+        return sec ? xasprintf("%lldm%llds", (long long)m, (long long)sec) : xasprintf("%lldm", (long long)m);
+    }
+    if (ms < DAY) {
+        int64_t h = ms / HOUR, m = (ms % HOUR) / MIN_;
+        return m ? xasprintf("%lldh%lldm", (long long)h, (long long)m) : xasprintf("%lldh", (long long)h);
+    }
+    int64_t d = ms / DAY, h = (ms % DAY) / HOUR;
+    return h ? xasprintf("%lldd%lldh", (long long)d, (long long)h) : xasprintf("%lldd", (long long)d);
+}
+
+/* pi-utils formatBytes */
+static char *format_bytes(size_t b) {
+    if (b < 1024) return xasprintf("%zuB", b);
+    if (b < 1024 * 1024) return xasprintf("%.1fKB", (double)b / 1024.0);
+    if (b < 1024UL * 1024 * 1024) return xasprintf("%.1fMB", (double)b / (1024.0 * 1024.0));
+    return xasprintf("%.1fGB", (double)b / (1024.0 * 1024.0 * 1024.0));
+}
+
+char *ai_connection_lost_message(const http_resp_t *resp) {
+    char *dur = format_duration(resp->elapsed_ms), *size = format_bytes(resp->body_bytes);
+    char *code = resp->lost_code ? xasprintf(" (%s)", resp->lost_code) : xstrdup("");
+    char *msg;
+    if (resp->body_bytes == 0) msg = xasprintf("connection lost after %s, before any response%s", dur, code);
+    else if (resp->body_sent)
+        msg = xasprintf("connection lost after %s, after the %s request body was written to the socket, before any "
+                        "response%s",
+                        dur, size, code);
+    else msg = xasprintf("connection lost after %s while uploading the %s request body; no response received%s", dur, size, code);
+    free(dur);
+    free(size);
+    free(code);
+    return msg;
+}
+
+/* the transports omp re-describes a rejected fetch on: postOpenAIStream, Codex, the Anthropic connection error.
+ * The Cowork transport (direct HTTPS, no proxy) turns a connection lost after connect into the AnthropicConnectionError
+ * "Connection error: <how far the body got>." (omp 0fc9f0ead9, a6e107e2b6, a0e27a294a) */
+static char *network_failure_message(const http_resp_t *resp, const char *url, int policy, const ai_post_ex_t *ex) {
+    if (policy == AI_RETRY_ANTHROPIC && ex && ex->cowork && resp->lost_before_response && !resp->via_proxy &&
+        str_starts(url, "https://")) {
+        char *lost = ai_connection_lost_message(resp);
+        char *msg = xasprintf("Connection error: %s.", lost);
+        free(lost);
+        return msg;
+    }
     if (policy == AI_RETRY_OPENAI || policy == AI_RETRY_CODEX || policy == AI_RETRY_ANTHROPIC)
-        return ai_network_failure_message(http_error, url);
-    return xstrdup(http_error ? http_error : "network error");
+        return ai_network_failure_message(resp->error, url);
+    return xstrdup(resp->error ? resp->error : "network error");
 }
 
 static int stream_post_url(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
@@ -1272,7 +1326,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
                 continue;
             }
             if (d == -2) {
-                *err = rc != 0 ? network_failure_message(resp.error, url, policy) : http_error_text(policy, c.status, url, &c.hdrs, sb_cstr(&c.errbody));
+                *err = rc != 0 ? network_failure_message(&resp, url, policy, ex) : http_error_text(policy, c.status, url, &c.hdrs, sb_cstr(&c.errbody));
                 if (rc == 0) {
                     g_req_status = c.status;
                     *err = with_retry_after(*err, &c.hdrs);
@@ -1287,7 +1341,7 @@ static int stream_post_url(const char *url, http_headers_t *headers, const char 
         /* failure: decide retry (fetchWithRetry / the anthropic.ts provider loop) */
         const char *ebody = sb_cstr(&c.errbody);
         bool http_fail = rc == 0;
-        char *msg = !http_fail ? network_failure_message(resp.error, url, policy) : http_error_text(policy, c.status, url, &c.hdrs, ebody);
+        char *msg = !http_fail ? network_failure_message(&resp, url, policy, ex) : http_error_text(policy, c.status, url, &c.hdrs, ebody);
         bool retry;
         int64_t delay;
         if (policy == AI_RETRY_ANTHROPIC) {
@@ -1520,6 +1574,7 @@ json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target) 
                             json_t *tb = json_obj();
                             json_set_str(tb, "type", "text");
                             json_set_str(tb, "text", txt);
+                            json_set_bool(tb, AI_DEMOTED_THINKING_KEY, true); /* kDemotedThinking: never on the wire */
                             json_push(nc, tb);
                             free(txt);
                         }

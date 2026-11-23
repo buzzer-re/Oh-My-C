@@ -7,7 +7,11 @@
 #include "ai/provider_anthropic.h"
 #include "ai/provider_google.h"
 
+#include <arpa/inet.h>
 #include <math.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 /* catalog symbol referenced by the providers' network entry points (not exercised offline) */
@@ -1030,6 +1034,138 @@ static void test_anthropic_compaction_gate(void) {
     }
 }
 
+/* omp 0fc9f0ead9 / a6e107e2b6 / a0e27a294a: ConnectionLostBeforeResponseError names how far the request body got */
+static void test_connection_lost_message(void) {
+    http_resp_t r = {.lost_before_response = true, .body_bytes = 32u << 20, .elapsed_ms = 1234, .lost_code = "EPIPE"};
+    char *m = ai_connection_lost_message(&r);
+    CHECK_STR(m, "connection lost after 1.2s while uploading the 32.0MB request body; no response received (EPIPE)");
+    free(m);
+    r.body_sent = true;
+    r.lost_code = "ECONNRESET";
+    r.elapsed_ms = 61000;
+    m = ai_connection_lost_message(&r);
+    CHECK_STR(m, "connection lost after 1m1s, after the 32.0MB request body was written to the socket, before any response "
+                 "(ECONNRESET)");
+    free(m);
+    r.body_bytes = 0;
+    r.lost_code = NULL;
+    r.elapsed_ms = 7;
+    m = ai_connection_lost_message(&r);
+    CHECK_STR(m, "connection lost after 7ms, before any response");
+    free(m);
+    r.body_bytes = 1536;
+    r.body_sent = false;
+    r.elapsed_ms = 59990;
+    m = ai_connection_lost_message(&r);
+    CHECK_STR(m, "connection lost after 1m while uploading the 1.5KB request body; no response received");
+    free(m);
+}
+
+/* a server that never responds: it drops the connection once it has read `cutoff` body bytes (-1: the whole body) */
+typedef struct {
+    int lfd;
+    long cutoff;
+} drop_srv_t;
+
+static void *drop_server(void *arg) {
+    drop_srv_t *d = arg;
+    int fd = accept(d->lfd, NULL, NULL);
+    if (fd < 0) return NULL;
+    char buf[65536];
+    sb_t head = SB_INIT;
+    long body = -1, limit = 0, clen = 0;
+    for (;;) {
+        ssize_t n = recv(fd, buf, sizeof buf, 0);
+        if (n <= 0) break;
+        if (body < 0) {
+            sb_appendn(&head, buf, (size_t)n);
+            char *e = memmem(head.s, head.len, "\r\n\r\n", 4);
+            if (!e) continue;
+            const char *cl = strcasestr(head.s, "content-length:");
+            clen = cl ? atol(cl + 15) : 0;
+            limit = d->cutoff < 0 ? clen : d->cutoff;
+            body = (long)(head.len - (size_t)(e + 4 - head.s));
+        } else body += n;
+        if (body >= limit) break;
+    }
+    sb_free(&head);
+    close(fd);
+    return NULL;
+}
+
+static void post_to_dropping_server(long cutoff, http_resp_t *resp, size_t len) {
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in sa = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t sl = sizeof sa;
+    CHECK(bind(lfd, (struct sockaddr *)&sa, sizeof sa) == 0 && listen(lfd, 1) == 0);
+    getsockname(lfd, (struct sockaddr *)&sa, &sl);
+    drop_srv_t d = {.lfd = lfd, .cutoff = cutoff};
+    pthread_t th;
+    pthread_create(&th, NULL, drop_server, &d);
+    char *body = xmalloc(len);
+    memset(body, 'x', len);
+    char *url = xasprintf("http://127.0.0.1:%d/v1/messages", ntohs(sa.sin_port));
+    http_req_t req = {.method = "POST", .url = url, .body = body, .body_len = len, .no_proxy = true, .idle_timeout_ms = 10000};
+    http_request(&req, resp);
+    pthread_join(th, NULL);
+    close(lfd);
+    free(url);
+    free(body);
+}
+
+/* net/http.c tracks how far a request got when its connection drops before any response */
+static void test_http_upload_progress(void) {
+    http_resp_t r;
+    size_t big = 32u << 20; /* larger than loopback socket buffers on both ends */
+    post_to_dropping_server(256 * 1024, &r, big);
+    CHECK(r.lost_before_response);
+    CHECK(!r.body_sent);
+    CHECK(r.body_bytes == big);
+    CHECK(r.lost_code && (str_eq(r.lost_code, "EPIPE") || str_eq(r.lost_code, "ECONNRESET")));
+    CHECK(!r.via_proxy);
+    http_resp_free(&r);
+    post_to_dropping_server(-1, &r, 4096);
+    CHECK(r.lost_before_response);
+    CHECK(r.body_sent);
+    CHECK(r.body_bytes == 4096);
+    CHECK_STR(r.lost_code, "ECONNRESET");
+    char *m = ai_connection_lost_message(&r);
+    CHECK(str_ends(m, "after the 4.0KB request body was written to the socket, before any response (ECONNRESET)"));
+    free(m);
+    http_resp_free(&r);
+}
+
+/* omp 873763609a: omitDemotedReasoning leaves another model's reasoning (demoted to text) out of the request, while a
+ * turn's own unsigned thinking beside signed thinking keeps its text replay */
+static void test_anthropic_omit_demoted(void) {
+    json_t *raw = J(SONNET45);
+    ai_model_t m = mk_model(raw);
+    json_t *msgs = J("[{\"role\":\"user\",\"content\":\"q1\",\"timestamp\":1},"
+                     "{\"role\":\"assistant\",\"provider\":\"openai\",\"api\":\"openai-responses\",\"model\":\"gpt-5\","
+                     "\"stopReason\":\"stop\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"foreign thoughts\"},"
+                     "{\"type\":\"text\",\"text\":\"a1\"}],\"timestamp\":2},"
+                     "{\"role\":\"user\",\"content\":\"q2\",\"timestamp\":3}]");
+    ai_context_t ctx = {.messages = msgs};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    o.api_key = "sk-ant-api03-test";
+    json_t *req = anthropic_build_request(&m, &ctx, &o, false);
+    char *wire = json_dump(json_get(req, "messages"), 0);
+    CHECK(strstr(wire, "foreign thoughts") != NULL);
+    free(wire);
+    json_free(req);
+    o.omit_demoted_reasoning = true;
+    req = anthropic_build_request(&m, &ctx, &o, false);
+    wire = json_dump(json_get(req, "messages"), 0);
+    CHECK(strstr(wire, "foreign thoughts") == NULL);
+    CHECK(strstr(wire, "\"a1\"") != NULL);
+    CHECK(strstr(wire, AI_DEMOTED_THINKING_KEY) == NULL);
+    free(wire);
+    json_free(req);
+    json_free(msgs);
+    json_free(raw);
+}
+
 /* omp 7f6b4a096f: an empty conversation is named before it reaches Anthropic's bare 400 */
 static void test_anthropic_empty_request(void) {
     json_t *raw = J(SONNET45);
@@ -1058,6 +1194,9 @@ int main(void) {
     unsetenv("PI_AI_CLAUDE_CODE_VERSION");
 
     test_message_threads();
+    test_connection_lost_message();
+    test_http_upload_progress();
+    test_anthropic_omit_demoted();
     test_anthropic_empty_request();
     test_anthropic_compaction_gate();
     test_anthropic_request_apikey();

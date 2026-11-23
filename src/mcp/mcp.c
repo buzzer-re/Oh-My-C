@@ -477,14 +477,20 @@ static char *mcp_header_value(const char *v) {
     return r;
 }
 
+/* MCP_CLIENT_INFO (protocol.ts): the identity omp declares in both eras, kept 1:1 */
+static json_t *mcp_client_info(void) {
+    json_t *ci = json_obj();
+    json_set_str(ci, "name", "omp-coding-agent");
+    json_set_str(ci, "version", "1.0.0");
+    return ci;
+}
+
 /* requestMeta: the _meta every 2026-07-28 request carries (revision, capabilities, identity) */
 static json_t *request_meta(void) {
     json_t *m = json_obj();
     json_set_str(m, "io.modelcontextprotocol/protocolVersion", MCP_PROTOCOL_VERSION);
     json_set(m, "io.modelcontextprotocol/clientCapabilities", json_parse_str("{\"roots\":{}}"));
-    json_t *ci = json_obj();
-    json_set_str(ci, "name", "omc");
-    json_set_str(ci, "version", OMC_VERSION);
+    json_t *ci = mcp_client_info();
     json_set(m, "io.modelcontextprotocol/clientInfo", ci);
     return m;
 }
@@ -979,9 +985,7 @@ static json_t *legacy_init_params(void) {
     json_t *params = json_obj();
     json_set_str(params, "protocolVersion", MCP_LEGACY_PROTOCOL_VERSION);
     json_set(params, "capabilities", json_parse_str("{\"roots\":{\"listChanged\":false}}"));
-    json_t *ci = json_obj();
-    json_set_str(ci, "name", "omc");
-    json_set_str(ci, "version", OMC_VERSION);
+    json_t *ci = mcp_client_info();
     json_set(params, "clientInfo", ci);
     return params;
 }
