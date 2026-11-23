@@ -2435,6 +2435,20 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
         snprintf(sent_version, sizeof sent_version, "%s", anthropic_claude_code_version());
         json_t *params = build_request(m, ctx, &lo, oauth, &thinking_on);
         if (o->on_payload) o->on_payload(o->payload_ud, params);
+        /* omp 7f6b4a096f/228ddc8d7c: Anthropic answers `messages: []` with a bare 400 "messages is required", so an empty
+         * conversation is named before sending (omc's payload hook only observes, so encoding is the side that emptied it) */
+        if (json_len(json_get_arr(params, "messages")) == 0) {
+            char *e = xasprintf("anthropic: refusing to send a request with no messages for model %s (provider %s). Context had "
+                                "%zu input messages; none survived encoding.",
+                                m->id, m->provider ? m->provider : "", json_len(ctx->messages));
+            ai_builder_t b;
+            aib_init(&b, m, cb, ud);
+            result = aib_finish(&b, "error", e);
+            aib_free(&b);
+            free(e);
+            json_free(params);
+            break;
+        }
         http_headers_t h = {0};
         anthropic_build_headers(m, &lo, ctx, params, key, oauth, &h);
         hk.fast_wanted = json_get_str(params, "speed") != NULL;

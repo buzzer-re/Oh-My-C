@@ -1004,6 +1004,24 @@ static void test_message_threads(void) {
     json_free(a1);
 }
 
+/* omp 7f6b4a096f: an empty conversation is named before it reaches Anthropic's bare 400 */
+static void test_anthropic_empty_request(void) {
+    json_t *raw = J(SONNET45);
+    ai_model_t m = mk_model(raw);
+    json_t *msgs = J("[]");
+    ai_context_t ctx = {.messages = msgs};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    o.api_key = "sk-ant-api03-test";
+    json_t *r = provider_anthropic_stream(&m, &ctx, &o, NULL, NULL);
+    CHECK_STR(P(r, "stopReason"), "error");
+    CHECK_STR(P(r, "errorMessage"), "anthropic: refusing to send a request with no messages for model claude-sonnet-4-5 (provider "
+                                    "anthropic). Context had 0 input messages; none survived encoding.");
+    json_free(r);
+    json_free(msgs);
+    json_free(raw);
+}
+
 int main(void) {
     /* isolate the OAuth install-id file */
     const char *tmp = getenv("TMPDIR");
@@ -1014,6 +1032,7 @@ int main(void) {
     unsetenv("PI_AI_CLAUDE_CODE_VERSION");
 
     test_message_threads();
+    test_anthropic_empty_request();
     test_anthropic_request_apikey();
     test_anthropic_request_adaptive();
     test_anthropic_request_oauth();
