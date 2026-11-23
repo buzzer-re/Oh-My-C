@@ -343,16 +343,16 @@ int main(void) {
 
     run("bash1", "\xe2\x95\xad", "bash", "{\"command\":\"echo hi; ls\"}",
         "{\"content\":[{\"type\":\"text\",\"text\":\"hi\\na.txt\\nlong.txt\\nsrc\"}],"
-        "\"details\":{\"exitCode\":0,\"wallTimeMs\":20,\"timeoutSeconds\":300}}",
+        "\"details\":{\"exitCode\":0,\"wallTimeMs\":44,\"timeoutSeconds\":300}}",
         false);
     run("basherr", "\xe2\x95\xad", "bash", "{\"command\":\"echo oops; exit 3\"}",
         "{\"content\":[{\"type\":\"text\",\"text\":\"oops\\n\\nCommand exited with code 3\"}],"
-        "\"details\":{\"exitCode\":3,\"wallTimeMs\":20,\"timeoutSeconds\":300}}",
+        "\"details\":{\"exitCode\":3,\"wallTimeMs\":19,\"timeoutSeconds\":300}}",
         true);
     /* shell highlighting of the command row (Sublime Bash scopes: keywords, options, quotes, vars, redirects) */
     run("bashhl", "\xe2\x95\xad", "bash", "{\"command\":\"if test -n \\\"$HOME\\\"; then FOO=1 echo 'x' \\\"y $HOME\\\" 2>/dev/null\"}",
         "{\"content\":[{\"type\":\"text\",\"text\":\"bash: -c: line 2: syntax error: unexpected end of file from `if' command on line 1\\n\\nCommand exited with code 2\"}],"
-        "\"details\":{\"exitCode\":2,\"wallTimeMs\":10,\"timeoutSeconds\":300}}",
+        "\"details\":{\"exitCode\":2,\"wallTimeMs\":14,\"timeoutSeconds\":300}}",
         true);
     run("write1", "Write:", "write", "{\"path\":\"new.txt\",\"content\":\"alpha\\\\nbeta\"}",
         "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"details\":{}}", false);
