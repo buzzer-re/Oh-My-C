@@ -1,5 +1,6 @@
 /* tc_shell.c - bash tool card (port of omp tools/bash.ts createShellRenderer). */
 #include "ui/tools/tc.h"
+#include "tools/jobtext.h"
 #include "tui/symbols.h"
 #include "tui/markdown.h"
 #include "tools/outsink.h"
@@ -323,12 +324,100 @@ static char *strip_bash_notices(const char *raw, const json_t *d) {
     return t;
 }
 
+/* serviceStateSymbol: the glyph of a supervised service's free-form lifecycle state */
+static const char *service_state_symbol(const char *state) {
+    char *v = str_lower(state ? state : "");
+    const char *r = "status.info";
+    if (strstr(v, "fail") || strstr(v, "error") || strstr(v, "crash") || strstr(v, "dead")) r = "status.error";
+    else if (strstr(v, "stop") || strstr(v, "exit") || strstr(v, "cancel") || strstr(v, "kill")) r = "status.aborted";
+    else if (strstr(v, "start") || strstr(v, "pending") || strstr(v, "wait") || strstr(v, "init") || strstr(v, "restart"))
+        r = "status.pending";
+    else if (strstr(v, "run") || strstr(v, "ready") || strstr(v, "up") || strstr(v, "alive") || strstr(v, "active"))
+        r = "status.success";
+    free(v);
+    return tc_sym(r);
+}
+
+static void push_dim(strvec_t *v, char *text) {
+    strvec_push_own(v, tc_fg(TUI_TC_DIM, text));
+    free(text);
+}
+
+/* bashStatsParts: the footer chips under shell output (`⏱ 1.2s/5m`, `✘ 1`, …), dim except the exit code's tint
+ * (omp f343972602) */
+static void bash_stats_parts(const json_t *d, const char *artifact_id, bool is_error, strvec_t *out) {
+    bool timeout_disabled = json_get_bool(d, "timeoutDisabled", false);
+    const json_t *as = json_get_obj(d, "async");
+    if (as && str_eq(json_get_str(as, "state"), "running"))
+        push_dim(out, xasprintf("%s %s", tc_sym("icon.job"), json_get_str(as, "jobId") ? json_get_str(as, "jobId") : ""));
+    const json_t *svc = json_get_obj(d, "service");
+    if (svc) {
+        const char *st = json_get_str(svc, "state") ? json_get_str(svc, "state") : "";
+        push_dim(out, xasprintf("%s %s", tc_sym("icon.server"), json_get_str(svc, "name") ? json_get_str(svc, "name") : ""));
+        push_dim(out, xasprintf("%s %s", service_state_symbol(st), st));
+        push_dim(out, json_get_bool(svc, "ready", false)      ? xasprintf("%s ready", tc_sym("status.success"))
+                      : json_get_bool(svc, "timedOut", false) ? xasprintf("%s ready timed out", tc_sym("status.warning"))
+                                                              : xasprintf("%s not ready", tc_sym("status.error")));
+        if (json_is_num(json_get(svc, "pid")))
+            push_dim(out, xasprintf("%s%lld", tc_sym("icon.pid"), (long long)json_get_int(svc, "pid", 0)));
+    }
+    char *timeout_label = NULL;
+    if (timeout_disabled) timeout_label = xstrdup("disabled");
+    else if (json_is_num(json_get(d, "timeoutSeconds"))) {
+        int64_t ts = json_get_int(d, "timeoutSeconds", 0);
+        timeout_label = tc_format_duration(ts * 1000);
+        if (json_is_num(json_get(d, "requestedTimeoutSeconds")) && json_get_int(d, "requestedTimeoutSeconds", 0) != ts) {
+            char *rq = tc_format_duration(json_get_int(d, "requestedTimeoutSeconds", 0) * 1000);
+            char *t = xasprintf("%s (requested %s clamped)", timeout_label, rq);
+            free(timeout_label);
+            free(rq);
+            timeout_label = t;
+        }
+    }
+    if (json_is_num(json_get(d, "wallTimeMs"))) {
+        char *el = tc_format_duration((int64_t)json_get_num(d, "wallTimeMs", 0));
+        push_dim(out, timeout_label ? xasprintf("%s %s/%s", tc_sym("icon.time"), el, timeout_label)
+                                    : xasprintf("%s %s", tc_sym("icon.time"), el));
+        free(el);
+    } else if (timeout_disabled) push_dim(out, xasprintf("%s disabled", tc_sym("status.disabled")));
+    else if (timeout_label) push_dim(out, xasprintf("%s %s", tc_sym("status.pending"), timeout_label));
+    free(timeout_label);
+    if (artifact_id) push_dim(out, xasprintf("%s local://%s.log", tc_sym("icon.output"), artifact_id)); /* spillUrl (stream b) */
+    if (is_error && json_is_num(json_get(d, "exitCode"))) {
+        int64_t code = json_get_int(d, "exitCode", 0);
+        char *t = xasprintf("%s %lld", tc_sym(code ? "status.error" : "status.success"), (long long)code);
+        strvec_push_own(out, tc_fg(code ? TUI_TC_ERROR : TUI_TC_SUCCESS, t));
+        free(t);
+    }
+}
+
+/* callIntent: the model's `i` as its brief label, one line (omp 4d08e232b3); the bash card has no header of its own,
+ * so the label heads it muted */
+static char *bash_intent_header(const json_t *args) {
+    const char *i = json_get_str(args, "i");
+    if (!i) return NULL;
+    char *l = tool_intent_label(i), *san = tc_sanitize_line(l), *t = str_trim(san);
+    free(l);
+    free(san);
+    for (char *p = t; *p; p++)
+        if (*p == '\n' || *p == '\r') *p = ' ';
+    if (!*t) {
+        free(t);
+        return NULL;
+    }
+    tc_status_line_t sl = {.icon = TC_ST_NONE, .spinner = -1, .title = t, .title_slot = TUI_TC_MUTED};
+    char *h = tc_status_line(&sl);
+    free(t);
+    return h;
+}
+
 void tc_bash(const tc_call_t *c, int width, strvec_t *out) {
     const json_t *d = c->details;
     int cw = tc_block_content_width(width, -1, -1);
     strvec_t cmd = {0};
     if (c->args) command_lines(c->args, c->cwd, &cmd);
     tc_cap_preview(&cmd, c->expanded, tc_preview_window_rows(c->term_rows));
+    char *header = bash_intent_header(c->args);
 
     if (!c->has_result) {
         char *footer = NULL;
@@ -340,10 +429,11 @@ void tc_bash(const tc_call_t *c, int width, strvec_t *out) {
             free(dur);
         }
         tc_section_t sec = {.lines = cmd};
-        tc_block_t blk = {.no_bg = true, .footer_meta = footer, .state = TC_STATE_PENDING, .sections = &sec, .nsections = 1, .width = width,
-                          .pad_left = -1, .pad_right = -1, .border_slot = -1};
+        tc_block_t blk = {.header = header, .no_bg = true, .footer_meta = footer, .state = TC_STATE_PENDING, .sections = &sec,
+                          .nsections = 1, .width = width, .pad_left = -1, .pad_right = -1, .border_slot = -1};
         tc_output_block(&blk, out);
         free(footer);
+        free(header);
         strvec_free(&cmd);
         return;
     }
@@ -358,30 +448,15 @@ void tc_bash(const tc_call_t *c, int width, strvec_t *out) {
     strvec_t stats = {0};
     if (partial && !json_get(d, "wallTimeMs") && c->elapsed_ms >= 1000) {
         char *dur = tc_format_duration((c->elapsed_ms / 1000) * 1000);
-        strvec_push_own(&stats, xasprintf("elapsed %s", dur));
+        push_dim(&stats, xasprintf("%s %s", tc_sym("icon.time"), dur));
         free(dur);
     }
-    const json_t *as = json_get_obj(d, "async");
-    if (as && str_eq(json_get_str(as, "state"), "running"))
-        strvec_push_own(&stats, xasprintf("Backgrounded: %s", json_get_str(as, "jobId") ? json_get_str(as, "jobId") : ""));
-    if (json_get(d, "wallTimeMs")) strvec_push_own(&stats, xasprintf("Wall: %.2fs", json_get_num(d, "wallTimeMs", 0) / 1000.0));
-    bool tdis = json_get_bool(d, "timeoutDisabled", false);
-    if (tdis) strvec_push(&stats, "Timeout: disabled");
-    else if (json_get(d, "timeoutSeconds")) {
-        int64_t ts = json_get_int(d, "timeoutSeconds", 0);
-        if (json_get(d, "requestedTimeoutSeconds") && json_get_int(d, "requestedTimeoutSeconds", 0) != ts)
-            strvec_push_own(&stats, xasprintf("Timeout: %llds (requested %llds clamped)", (long long)ts,
-                                              (long long)json_get_int(d, "requestedTimeoutSeconds", 0)));
-        else strvec_push_own(&stats, xasprintf("Timeout: %llds", (long long)ts));
-    }
-    if (json_get_str(d, "artifactId")) strvec_push_own(&stats, xasprintf("Artifact: %s", json_get_str(d, "artifactId")));
-    if (is_error && json_get(d, "exitCode") && json_is_num(json_get(d, "exitCode")))
-        strvec_push_own(&stats, xasprintf("Exit: %lld", (long long)json_get_int(d, "exitCode", 0)));
+    bash_stats_parts(d, json_get_str(d, "artifactId"), is_error, &stats);
     char *footer = NULL;
     if (stats.n) {
-        char *j = strvec_join(&stats, tc_sym("sep.dot"));
-        footer = tc_fg(TUI_TC_DIM, j);
-        free(j);
+        char *sep = tc_fg(TUI_TC_DIM, tc_sym("sep.dot"));
+        footer = strvec_join(&stats, sep);
+        free(sep);
     }
 
     strvec_t olines = {0};
@@ -420,12 +495,14 @@ void tc_bash(const tc_call_t *c, int width, strvec_t *out) {
     char *label = tc_fg(TUI_TC_TOOL_TITLE, "Output");
     secs[1].label = label;
     /* bash.ts: shell cards keep the neutral segmented look, the phase colours status and border, never a background wash */
-    tc_block_t blk = {.no_bg = true,
+    tc_block_t blk = {.header = header,
+                      .no_bg = true,
                       .footer_meta = footer,
                       .state = partial ? TC_STATE_PENDING : is_error ? (timed_out ? TC_STATE_WARNING : TC_STATE_ERROR) : TC_STATE_SUCCESS,
                       .sections = secs, .nsections = 2, .width = width, .pad_left = -1, .pad_right = -1, .border_slot = -1};
     tc_output_block(&blk, out);
     free(label);
+    free(header);
     strvec_free(&olines);
     strvec_free(&raw_lines);
     free(footer);

@@ -319,6 +319,21 @@ int main(void) {
         json_free(a);
         json_free(r);
     }
+    { /* bash: the intent label heads the card muted; the footer is icon chips (omp 4d08e232b3, f343972602) */
+        json_t *a = J("{\"command\":\"npm run dev\",\"i\":\"Starting the dev server: watch it come up\"}");
+        json_t *r = J("{\"content\":[{\"type\":\"text\",\"text\":\"up\"}],\"details\":{\"service\":{\"name\":\"dev\","
+                      "\"state\":\"running\",\"ready\":false,\"timedOut\":true,\"pid\":42},\"timeoutDisabled\":true}}");
+        tc_call_t c = call("bash", a, r, false);
+        strvec_t out = {0};
+        tc_render(&c, 120, &out);
+        CHECK(has_row(&out, "Starting the dev server") && !has_row(&out, "watch it"), "bash intent header");
+        CHECK(has_row(&out, "dev \xc2\xb7 \xe2\x9c\x94 running \xc2\xb7 \xe2\x9a\xa0 ready timed out \xc2\xb7 #42 \xc2\xb7 "),
+              "bash service chips");
+        for (size_t q = 0; q < out.n && getenv("TC_DEBUG"); q++) fprintf(stderr, "%s\n", out.v[q]);
+        strvec_free(&out);
+        json_free(a);
+        json_free(r);
+    }
     { /* formatAge: a year or more reads in years (omp f20951a27f) */
         char *a = tc_format_age(23LL * 365 * 86400 + 86400), *b = tc_format_age(40LL * 86400);
         CHECK(!strcmp(a, "23y ago") && !strcmp(b, "1mo ago"), "format age: %s / %s", a, b);
