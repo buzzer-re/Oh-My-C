@@ -35,6 +35,14 @@ static char *with_icon(const char *icon, const char *text) {
 static bool g_recording;
 void ui_status_set_recording(bool on) { g_recording = on; }
 
+/* setAwaitingAnswer: the turn waits on an ask the user hasn't answered; the brand's spinner turns into a question mark */
+static bool g_awaiting_answer;
+void ui_status_set_awaiting_answer(ui_t *u, bool awaiting) {
+    if (g_awaiting_answer == awaiting) return;
+    g_awaiting_answer = awaiting;
+    if (u && u->tui) tui_request_render(u->tui);
+}
+
 static char *fgw(tui_tc_t slot, const char *s) { return xasprintf("%s%s\x1b[39m", tui_fg_seq(TH(), slot), s); }
 
 static char *fg_rgb(uint32_t rgb, const char *s) {
@@ -230,9 +238,15 @@ void ui_hint_record(const char *id) {
     free(s);
 }
 
-/* resolveComposerHint: `<key>` accent + dim italic label */
+/* the composer's hint while an ask waits above it */
+#define ASK_COMPOSER_HINT "\xe2\x86\x91 answer the questions above, or type here to skip them"
+
+/* #composerHint / resolveComposerHint: `<key>` accent + dim italic label */
 static char *composer_hint(void *ud) {
     ui_t *u = ud;
+    /* an ask above holding the keys: its key hints; the keys here: what typing does */
+    tui_component_t *ask = ui_ask_current(u);
+    if (ask) return ui_ask_holds_keys(u) ? ui_form_dialog_key_hints(ask) : xstrdup(ASK_COMPOSER_HINT);
     size_t running = 0;
     agents_counts(&running, NULL);
     if (running && !u->focus_id && hint_uses("agents") < 3) { /* the ←← gesture opens the agent hub */
@@ -652,6 +666,8 @@ static char *render_segment(const char *id, const segctx_t *c) {
             const char *const *frames;
             size_t nf = tui_sym_spinner("activity", &frames);
             const char *fr = nf ? frames[tui_shared_spinner_frame((int)nf)] : "";
+            /* waiting on the user's answer to an ask, a question mark stands in for the spinner */
+            if (g_awaiting_answer) fr = *sym("cmd.question") ? sym("cmd.question") : "?";
             int64_t s = el / 1000;
             char t[16];
             if (s < 60) snprintf(t, sizeof t, "%llds", (long long)s);

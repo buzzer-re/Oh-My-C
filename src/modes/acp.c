@@ -1820,12 +1820,13 @@ static json_t *form_data_from(const hf_form_t *f, const json_t *content) {
 }
 
 /* formDialog over form elicitation (one elicitation with a property per field) */
-static json_t *acp_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, json_t **notes,
+static json_t *acp_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, json_t **notes, json_t **given,
                         volatile sig_atomic_t *cancel, char **err) {
     asess_t *s = ud;
     UNUSED(cancel);
     *timed_out = false;
     *notes = NULL;
+    *given = NULL;
     hf_form_t *f = hf_parse(html);
     json_t *required = NULL;
     json_t *props = form_schema(f, &required);

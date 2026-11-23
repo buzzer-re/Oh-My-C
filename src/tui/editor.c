@@ -1577,6 +1577,8 @@ bool tui_editor_handle_key(tui_editor_t *ed, const tui_key_t *k) {
         ed->cc = strlen(cur_line(ed));
         moved = true;
     } else if (tui_kb(k, "tui.editor.cursorUp")) {
+        /* out to what waits above (an ask), else history navigation or cursor movement */
+        if (ed->hist_index < 0 && on_first_visual_line(ed) && ed->up_from_top && ed->up_from_top(ed->ask_hook_ud)) return true;
         if (on_first_visual_line(ed) && (tui_editor_is_empty(ed) || ed->hist_index >= 0) && ed->history.n) {
             history_nav(ed, -1);
             return true;
@@ -1862,7 +1864,39 @@ static void composer_render(tui_editor_t *ed, int width, strvec_t *out) {
     ac_render(ed, width, out, first_row);
 }
 
+static void editor_render_rows(tui_component_t *c, int width, strvec_t *out);
+
+/* CustomEditor.render: faint every cell, re-applied after each reset the rows carry, so styled runs stay faint too */
 static void editor_render(tui_component_t *c, int width, strvec_t *out) {
+    tui_editor_t *ed = (tui_editor_t *)c;
+    size_t first = out->n;
+    editor_render_rows(c, width, out);
+    if (!ed->faint_fn || !ed->faint_fn(ed->ask_hook_ud)) return;
+    for (size_t i = first; i < out->n; i++) {
+        const char *l = out->v[i];
+        sb_t b = SB_INIT;
+        sb_append(&b, "\x1b[2m");
+        for (const char *p = l; *p;) {
+            /* /\x1b\[(?:0|22)?m/g -> reset + \x1b[2m */
+            size_t n = 0;
+            if (p[0] == '\x1b' && p[1] == '[') {
+                if (p[2] == 'm') n = 3;
+                else if (p[2] == '0' && p[3] == 'm') n = 4;
+                else if (p[2] == '2' && p[3] == '2' && p[4] == 'm') n = 5;
+            }
+            if (n) {
+                sb_appendn(&b, p, n);
+                sb_append(&b, "\x1b[2m");
+                p += n;
+            } else sb_putc(&b, *p++);
+        }
+        sb_append(&b, "\x1b[22m");
+        free(out->v[i]);
+        out->v[i] = sb_detach(&b);
+    }
+}
+
+static void editor_render_rows(tui_component_t *c, int width, strvec_t *out) {
     tui_editor_t *ed = (tui_editor_t *)c;
     if (ed->composer) {
         composer_render(ed, width, out);

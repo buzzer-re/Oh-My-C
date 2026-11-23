@@ -916,6 +916,53 @@ static int ask_cancelled(tool_ctx_t *ctx, tool_result_t *out) {
     return 0;
 }
 
+/* ask-result.md over form data and its notes (each note's text on one line): owned */
+static char *ask_result_text(const json_t *data, const json_t *notes, bool timed_out, bool interrupted) {
+    char *json = hf_data_json(data);
+    json_t *c = json_obj();
+    json_set_bool(c, "interrupted", interrupted);
+    json_set_bool(c, "timedOut", timed_out);
+    json_set_str(c, "json", json);
+    if (notes && json_len(notes)) {
+        json_t *copy = json_clone(notes), *nt;
+        json_arr_foreach(copy, i, nt) {
+            char *one = collapse_ws(json_get_str(nt, "text")); /* text.replace(/\s+/g, " ").trim() */
+            json_set_str(nt, "text", one);
+            free(one);
+        }
+        json_set(c, "notes", copy);
+    }
+    char *text = prompt_render("coding-agent/prompts/tools/ask-result.md", c);
+    json_free(c);
+    free(json);
+    return text;
+}
+
+/* The dialog's signal (AbortSignal.any([signal, userSteering.signal])): the run's abort, or a message the user queued.
+ * The user's message closes the dialog without cancelling the turn: they moved on, and the message reaches the agent at
+ * the batch boundary. Peer IRC, asides and finished background jobs are not the user's answer, so the dialog stays
+ * open for them. */
+typedef struct {
+    agent_t *agent;
+    volatile sig_atomic_t cancel;  /* the dialog's signal, handed to the host */
+    volatile sig_atomic_t steered; /* userSteering aborted */
+    volatile sig_atomic_t stop;
+} ask_signal_t;
+
+static void *ask_signal_main(void *p) {
+    ask_signal_t *w = p;
+    while (!w->stop) {
+        if (w->agent->cancel) w->cancel = 1;
+        else if (agent_tool_steering_signal(w->agent) && str_eq(agent_tool_interrupt_source(w->agent), "user")) {
+            w->steered = 1;
+            w->cancel = 1;
+        }
+        if (w->cancel) break;
+        sleep_ms(20);
+    }
+    return NULL;
+}
+
 static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     if (!env->ui.form && !(env->ui.select && env->ui.input && env->ui.editor)) {
@@ -934,12 +981,15 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
     bool plan = env->plan_mode_active && env->plan_mode_active(env);
     double secs = settings_num("ask.timeout", 0);
     int64_t timeout = plan || !(secs > 0) ? 0 : (int64_t)(secs * 1000);
-    volatile sig_atomic_t *cancel = ctx && ctx->agent ? &ctx->agent->cancel : NULL;
+    ask_signal_t sig = {.agent = ctx ? ctx->agent : NULL};
+    pthread_t watcher;
+    bool watching = sig.agent && pthread_create(&watcher, NULL, ask_signal_main, &sig) == 0;
+    volatile sig_atomic_t *cancel = watching ? &sig.cancel : sig.agent ? &sig.agent->cancel : NULL;
     bool timed_out = false;
     char *err = NULL;
-    json_t *data, *notes = NULL;
+    json_t *data, *notes = NULL, *given = NULL;
     agents_user_wait(env, true);
-    if (env->ui.form) data = env->ui.form(env->ui.ud, html ? html : "", timeout, &timed_out, &notes, cancel, &err);
+    if (env->ui.form) data = env->ui.form(env->ui.ud, html ? html : "", timeout, &timed_out, &notes, &given, cancel, &err);
     else {
         fb_ui_t fb = {env, timeout, cancel, NULL};
         data = ask_field_by_field(&fb, form, &timed_out);
@@ -950,8 +1000,14 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
         }
     }
     agents_user_wait(env, false);
+    if (watching) {
+        sig.stop = 1;
+        pthread_join(watcher, NULL);
+    }
+    bool steered = sig.steered && !(sig.agent && sig.agent->cancel);
     if (err || !data) json_free(notes);
     if (err) {
+        json_free(given);
         tool_result_error(out, "%s", err);
         free(err);
         hf_form_free(form);
@@ -959,36 +1015,37 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
     }
     if (!data) {
         hf_form_free(form);
+        if (steered) {
+            /* what the user answered before a message closed the form: the model gets it with the interruption */
+            if (given) {
+                char *text = ask_result_text(json_get(given, "data"), json_get(given, "notes"), false, true);
+                tool_result_error(out, "%s", text);
+                free(text);
+                json_free(given);
+            } else tool_result_error(out, "Ask interrupted by message");
+            return 0;
+        }
+        json_free(given);
+        if (sig.agent && sig.agent->cancel) { /* the turn aborted (Esc in the composer): the dialog's signal */
+            tool_result_error(out, "Ask input was cancelled");
+            return 0;
+        }
         return ask_cancelled(ctx, out);
     }
+    json_free(given);
     if (notes && !json_len(notes)) {
         json_free(notes);
         notes = NULL;
     }
-    char *json = hf_data_json(data);
     out->details = json_obj();
     json_set(out->details, "answers", hf_answers(form, data));
     if (notes) json_set(out->details, "notes", json_clone(notes));
     if (timed_out) json_set_bool(out->details, "timedOut", true);
     /* ask-result.md: the data, then each selected option's note on one line */
-    json_t *c = json_obj();
-    json_set_bool(c, "timedOut", timed_out);
-    json_set_str(c, "json", json);
-    if (notes) {
-        json_t *nt;
-        json_arr_foreach(notes, i, nt) {
-            char *one = collapse_ws(json_get_str(nt, "text")); /* text.replace(/\s+/g, " ").trim() */
-            json_set_str(nt, "text", one);
-            free(one);
-        }
-        json_set(c, "notes", notes);
-        notes = NULL;
-    }
-    char *text = prompt_render("coding-agent/prompts/tools/ask-result.md", c);
+    char *text = ask_result_text(data, notes, timed_out, false);
     tool_result_text(out, text);
     free(text);
-    json_free(c);
-    free(json);
+    json_free(notes);
     json_free(data);
     hf_form_free(form);
     return 0;

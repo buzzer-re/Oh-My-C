@@ -99,6 +99,7 @@ struct ui {
     int64_t form_timeout;
     bool form_timed_out;
     json_t *form_notes; /* optionNotes of the submitted form (owned until handed to the tool) */
+    json_t *form_given; /* givenAnswers of a form its signal closed ({data, notes?}, owned until handed to the tool) */
     tui_select_list_t *picker;
     char *goal_cont; /* pending hidden continuation prompt (goal / advisor) */
     const char *cont_type;
@@ -351,6 +352,7 @@ size_t ui_background_job_count(ui_t *u);                   /* statusline.c: runn
 void ui_pause_run(ui_t *u);
 /* statusline.c: the `stream` segment's `● REC` badge while /record runs */
 void ui_status_set_recording(bool on);
+void ui_status_set_awaiting_answer(ui_t *u, bool awaiting); /* the `pi` segment's spinner becomes a question mark */
 bool ui_pause_active(void);
 /* renderPauseScreen: exactly `height` rows (exposed for tests) */
 void ui_pause_render(int width, int height, int64_t elapsed_ms, const char *session_name, int turns, int jobs,

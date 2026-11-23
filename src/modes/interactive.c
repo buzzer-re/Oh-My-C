@@ -1003,22 +1003,27 @@ static void form_start(void *ud) {
     ui_form_dialog_show(u, u->form_html, u->form_timeout, u->app->env->cwd, form_done, u);
 }
 
-/* the run was aborted while the form waited: close it as cancelled */
+/* the dialog's signal aborted while the form waited (the run aborted, or a message the user sent instead): close it
+ * as cancelled; what was answered goes along (extension-ui-controller onAbandon) */
 static void form_abort(void *ud) {
     ui_t *u = ud;
-    tui_component_t *top = ui_selector_top(u);
-    if (ui_form_is_dialog(top)) {
-        ui_close_nested_selector(u);
-        ui_close_selector(u); /* destroying it reports a cancel */
-    }
+    tui_component_t *ask = ui_ask_current(u);
+    if (!ui_form_is_dialog(ask)) return;
+    json_t *given = ui_form_dialog_given(ask); /* before the close reports the cancel the tool thread waits on */
+    pthread_mutex_lock(&u->mu);
+    json_free(u->form_given);
+    u->form_given = given;
+    pthread_mutex_unlock(&u->mu);
+    ui_ask_close(u, NULL); /* destroying it reports a cancel */
 }
 
-static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, json_t **notes,
+static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, json_t **notes, json_t **given,
                        volatile sig_atomic_t *cancel, char **err) {
     ui_t *u = ud;
     UNUSED(err);
     *timed_out = false;
     *notes = NULL;
+    *given = NULL;
     pthread_mutex_lock(&u->mu);
     if (g_ask_closed) {
         pthread_mutex_unlock(&u->mu);
@@ -1029,6 +1034,8 @@ static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *tim
     u->form_timed_out = false;
     json_free(u->form_notes);
     u->form_notes = NULL;
+    json_free(u->form_given);
+    u->form_given = NULL;
     u->ask_answers = NULL;
     u->ask_done = false;
     pthread_mutex_unlock(&u->mu);
@@ -1042,7 +1049,7 @@ static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *tim
         }
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += 100 * 1000000L;
+        ts.tv_nsec += 50 * 1000000L;
         if (ts.tv_nsec >= 1000000000L) {
             ts.tv_sec++;
             ts.tv_nsec -= 1000000000L;
@@ -1054,6 +1061,8 @@ static json_t *ui_form(void *ud, const char *html, int64_t timeout_ms, bool *tim
     *timed_out = u->form_timed_out;
     *notes = u->form_notes;
     u->form_notes = NULL;
+    *given = u->form_given;
+    u->form_given = NULL;
     free(u->form_html);
     u->form_html = NULL;
     pthread_mutex_unlock(&u->mu);
@@ -3433,6 +3442,8 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
         return true;
     }
     if (tui_kb(k, "app.thinking.cycle")) {
+        /* Shift+Tab, Tab's way back: from the composer to the ask waiting above it */
+        if (ui_ask_focus(u)) return true;
         /* cycleThinkingLevel: off -> auto -> minimal..max -> off */
         ui_hint_record("effort");
         app_t *a = u->app;
@@ -3517,6 +3528,9 @@ static bool key_hook(tui_t *t, const tui_key_t *k, void *ud) {
 }
 
 static void signals_init_cb(void *ud) { ui_signals_init(ud); }
+
+static bool editor_faint(void *ud) { return ui_ask_holds_keys(ud); }
+static bool editor_up_from_top(void *ud) { return ui_ask_focus(ud); } /* ↑ on the first line: to the ask above */
 
 /* launch startup inputs (run_interactive_mode_ex) */
 static const interactive_start_t *g_start;
@@ -3660,12 +3674,17 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_container_add(root, &u.banner->base);
     u.model_cycle = tui_container_new();
     tui_container_add(root, &u.model_cycle->base);
+    /* the ask waiting for answers, over the working row and the composer, a blank row under it */
+    tui_container_add(root, ui_ask_slot_new(&u));
     u.working = ui_working_new(&u);
     tui_container_add(root, u.working);
     u.loader = tui_loader_new(u.tui, "Working…");
     u.loader->base.hidden = true;
     tui_container_add(root, ui_status_row_new(&u, &u.loader->base));
     u.editor = tui_editor_new();
+    u.editor->faint_fn = editor_faint; /* the composer under an ask holding the keys draws faint */
+    u.editor->up_from_top = editor_up_from_top;
+    u.editor->ask_hook_ud = &u;
     tui_container_add(root, ui_attach_band_new(&u)); /* attachment chips, between the status row and the gap */
     tui_container_add(root, ui_editor_gap_new(&u));
     tui_editor_set_on_submit(u.editor, on_submit, &u);
