@@ -302,8 +302,11 @@ call to it runs, every session sees.
   credential-redacted JSON-RPC `data`, and the next step. A retryable connection-class failure gets one reconnect and
   replay (`isRetriableConnectionError`); a stdio server that exits mid-call reports its exit code and is never replayed.
 - OAuth for remote servers (`mcp/oauth.c`, port of `mcp/oauth-discovery.ts` and `oauth-flow.ts`):
-  RFC 9728 resource metadata → RFC 8414/OIDC metadata → RFC 7591 dynamic registration (or a
-  configured client) → authorization code + PKCE with the RFC 8707 `resource` indicator, through the
+  RFC 9728 resource metadata → RFC 8414/OIDC metadata → RFC 7591 dynamic registration (`client_name` `Codex`,
+  `application_type` `native`; a rejected registration or a missing endpoint fails with omp's `OAuth provider requires
+  client_id, …` diagnostic naming the endpoint, status and first body line, passed through `/mcp reauth` unchanged.
+  omp instead goes on clientless after a non-`unapproved_client` rejection and only fails if the authorize endpoint
+  asks for a client id) (or a configured client) → authorization code + PKCE with the RFC 8707 `resource` indicator, through the
   shared login engine. Credentials are stored in `auth.json` under `mcp:<server url>` and refreshed
   automatically. Managed with `omc mcp list|login|logout` and `/mcp reauth|unauth`.
 - `mcp.enableProjectConfig` (on) gates every project-level source; a server named in the user

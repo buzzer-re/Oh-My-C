@@ -24,6 +24,11 @@ class H(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(body)
     def do_GET(self):
         u = urllib.parse.urlparse(self.path); q = dict(urllib.parse.parse_qsl(u.query))
+        if u.path == "/.well-known/oauth-protected-resource/deny/mcp":  # a server whose registration is closed (403)
+            return self.send(200, {"resource": BASE + "/deny/mcp", "authorization_servers": [BASE + "/deny"]})
+        if u.path == "/.well-known/oauth-authorization-server/deny":
+            return self.send(200, {"issuer": BASE + "/deny", "authorization_endpoint": BASE + "/authorize", "token_endpoint": BASE + "/token",
+                                   "registration_endpoint": BASE + "/deny/register"})
         if u.path.startswith("/.well-known/oauth-protected-resource"):
             return self.send(200, {"resource": BASE + "/mcp", "authorization_servers": [BASE], "scopes_supported": ["mcp.read"]})
         if u.path == "/.well-known/oauth-authorization-server":
@@ -39,8 +44,14 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
         data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if u.path == "/deny/register":
+            return self.send(403, None, raw=b"Forbidden\nclient not listed")
+        if u.path == "/deny/mcp":
+            return self.send(401, {"error": "unauthorized"}, {"WWW-Authenticate":
+                f'Bearer resource_metadata="{BASE}/.well-known/oauth-protected-resource/deny/mcp"'})
         if u.path == "/register":
             reg = json.loads(data); assert reg["redirect_uris"][0].startswith("http://127.0.0.1:")
+            assert reg["client_name"] == "Codex" and reg["application_type"] == "native", reg
             return self.send(201, {"client_id": "cid-1"})
         if u.path == "/token":
             f = dict(urllib.parse.parse_qsl(data.decode()))

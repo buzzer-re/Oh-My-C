@@ -659,6 +659,8 @@ int mcpui_oauth_flow(ui_t *u, const char *server_url, const json_t *cfg, const c
     if (abort && *abort) {
         *cancelled = true;
         *err = xstrdup("OAuth flow cancelled");
+    } else if (str_starts(m, "OAuth provider requires client_id")) {
+        *err = xstrdup(m); /* MCPOAuthClientIdRequiredError: already a complete diagnostic; its "HTTP 403" is not remapped */
     } else if (strstr(m, "timeout") || strstr(m, "timed out")) *err = xstrdup("OAuth flow timed out. Please try again.");
     else if (strstr(m, "403") || strstr(m, "unauthorized")) *err = xstrdup("OAuth authorization failed. Please check your client credentials.");
     else if (strstr(m, "invalid_grant")) *err = xstrdup("OAuth authorization code is invalid or expired. Please try again.");

@@ -444,6 +444,9 @@ check "mcp oauth tool"  "authorized as tok-1"  "$B" --model mock/mock-1 -p 'call
 check "mcp oauth list"  "[oauth: logged in]"  "$B" mcp list
 python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); [v.update(expires=1) for k,v in d.items() if k.startswith("mcp:")]; json.dump(d,open(p,"w"))' "$T/agent/auth.json"
 check "mcp oauth refresh" "authorized as tok-2"  "$B" --model mock/mock-1 -p 'call:mcp__oa_whoami:{}'
+# a closed registration endpoint (403) names the endpoint, the status and the body's first line (omp d08f8f6c09)
+printf '{"mcpServers":{"dn":{"type":"http","url":"http://127.0.0.1:%s/deny/mcp"}}}' $OPORT > "$T/agent/mcp.json"
+check "mcp oauth dcr rejected" "OAuth provider requires client_id, and dynamic client registration was rejected (POST http://127.0.0.1:$OPORT/deny/register → HTTP 403 — Forbidden). The server likely restricts registration to pre-approved clients."  env OMC_NO_BROWSER=1 "$B" mcp login dn
 kill $OPID $LPID 2>/dev/null; rm -f "$T/agent/mcp.json"
 # persistent bash: state survives across calls in one session
 check "bash persists"  "FOO=kept"  bash -c "( printf '%s\n' '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"bash:export FOO=kept\"}'; sleep 2; printf '%s\n' '{\"id\":\"2\",\"type\":\"prompt\",\"message\":\"bash:echo FOO=\$FOO\"}'; sleep 2 ) | '$B' --model mock/mock-1 --mode rpc"
