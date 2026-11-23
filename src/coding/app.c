@@ -44,6 +44,7 @@
 #include "prompt/template.h"
 #include "ai/anthropic_threads.h"
 #include "ai/responses_ws.h"
+#include "ai/kiro.h"
 #include "ai/provider_anthropic.h"
 #include "ai/ai_images.h"
 
@@ -1898,6 +1899,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     catalog_init();
     auth_init();
     catalog_discover_local(false); /* implicit local servers (ollama, llama.cpp, LM Studio); once per process */
+    if (auth_has_credentials("kiro")) kiro_discover(false); /* Kiro's roster is per credential (2 h cache) */
     app_t *a = xcalloc(1, sizeof(*a));
     pthread_mutex_init(&a->mu, NULL);
     pthread_mutex_init(&a->tier_mu, NULL);

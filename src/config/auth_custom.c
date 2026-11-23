@@ -1881,6 +1881,7 @@ int auth_custom_hook_login(const actx_t *c, const char *hook, alogin_t *out, cha
     if (str_eq(hook, "mistral-vibe-sign-in")) return mistral_vibe_login(c, out, err);
     if (str_eq(hook, "devin-cli")) return devin_cli_login(out, err);
     if (str_eq(hook, "devin-windsurf")) return devin_windsurf_login(c, out, err);
+    if (str_eq(hook, "kiro-login")) return auth_kiro_login(c, out, err);
     *err = xasprintf("auth rules reference unknown login hook \"%s\"", hook ? hook : "");
     return -1;
 }
@@ -1897,6 +1898,7 @@ int auth_custom_hook_refresh(const char *hook, const char *provider, const json_
     }
     if (str_eq(hook, "cursor")) return cursor_refresh(stored, out, err);
     if (str_eq(hook, "snowflake")) return snowflake_refresh(stored, out, err);
+    if (str_eq(hook, "kiro-refresh")) return auth_kiro_refresh(stored, out, err);
     *err = xasprintf("auth rules reference unknown refresh hook \"%s\" (%s)", hook ? hook : "", provider);
     return -1;
 }

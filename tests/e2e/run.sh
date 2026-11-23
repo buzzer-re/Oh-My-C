@@ -938,6 +938,7 @@ fi
 source "$ROOT/tests/e2e/providers_transport.sh"
 source "$ROOT/tests/e2e/providers_devin.sh"
 source "$ROOT/tests/e2e/providers_gitlab.sh"
+source "$ROOT/tests/e2e/providers_kiro.sh"
 source "$ROOT/tests/e2e/images.sh"
 source "$ROOT/tests/e2e/compaction.sh"
 source "$ROOT/tests/e2e/date_reminder.sh"

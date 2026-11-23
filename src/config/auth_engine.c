@@ -33,12 +33,16 @@ void actx_auth(const actx_t *c, const char *url, const char *launch, const char 
 }
 
 char *actx_prompt(const actx_t *c, const char *message, const char *placeholder, bool allow_empty, char **err) {
+    auth_prompt_t p = {message, placeholder, allow_empty, false};
+    return actx_prompt_ex(c, &p, err);
+}
+
+char *actx_prompt_ex(const actx_t *c, const auth_prompt_t *p, char **err) {
     if (!c->h || !c->h->prompt) {
         *err = xasprintf("%s login requires onPrompt callback", c->label);
         return NULL;
     }
-    auth_prompt_t p = {message, placeholder, allow_empty, false};
-    char *a = c->h->prompt(c->h->ud, &p);
+    char *a = c->h->prompt(c->h->ud, p);
     if (!a || actx_aborted(c)) {
         free(a);
         *err = xstrdup("Login cancelled");

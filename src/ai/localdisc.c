@@ -12,6 +12,7 @@
  * its lazily loaded instances change); catalog_discover_local(true) (F5) always probes. Only a server that
  * answered updates the cache. */
 #include "ai.h"
+#include "kiro.h"
 #include "core/fs.h"
 
 #include <ctype.h>
@@ -662,6 +663,7 @@ int catalog_discover_local(bool force) {
 
 int catalog_discover_provider(const char *provider) {
     catalog_init();
+    if (str_eq(provider, "kiro")) return kiro_discover(true); /* a Kiro login lists its own roster */
     if (!provider || (strcmp(provider, "ollama") && strcmp(provider, "llama.cpp") && strcmp(provider, "lm-studio"))) return 0;
     return discover(true, provider);
 }

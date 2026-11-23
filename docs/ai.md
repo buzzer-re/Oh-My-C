@@ -222,6 +222,7 @@ back as an assistant message with `stopReason: "error"` and `errorMessage`.
 | `devin-agent` | `provider_devin.c` | `devin.ts`, `catalog/src/wire/devin*.ts` | Connect + protobuf server stream |
 | provider `gitlab-duo` (on anthropic/completions/responses APIs) | `provider_gitlab_duo.c` | `gitlab-duo.ts` | direct-access token exchange, then GitLab Cloud Connector proxy through the matching provider above |
 | `gitlab-duo-agent` | `provider_gitlab_duo_workflow.c` | `gitlab-duo-workflow.ts` | Duo Workflow Service over WebSocket |
+| `kiro-api` | `kiro.c` (+ `aws.c`; login `config/auth_kiro.c`) | `providers/kiro/{transform,stream}.ts`, `catalog/src/wire/kiro*.ts`, `discovery/kiro.ts` | AWS JSON 1.0 `GenerateAssistantResponse` with the Kiro CLI 3.2.0 identity headers, AWS event-stream reply; the roster is discovered per credential (below) |
 | `typesafe`, `openrouter-decisions`, `openai-decisions`, `workers-ai-systemone`, `liquid-systemone`, `nace-systemone`, `google-decisions` (judgment only) | `judgment_native.c` | `ai/src/judgment/{native,systemone,openai-decisions,google-decisions}.ts` | typed-question APIs used by the eval judge chain, not by chat; a gateway 502 `upstream_credentials_exhausted` is not retried |
 
 The catalog also lists APIs omc does not serve (`local-inference`, images, video, embeddings,
@@ -253,6 +254,24 @@ Points worth knowing per provider:
   (its `filesText` queued as a user turn before the first newer message). `anthropic_compaction_supported()`
   is omp's `supportsAnthropicCompaction` for the model's own route. Bedrock Converse compaction (an
   InvokeModel side request) and the Codex V2 streaming compaction are not implemented.
+- **Kiro** (`kiro.c`): the request key is the credential codec's JSON (`{kind:"oauth", token, region, loginId,
+  profileArn?}` from a stored login, `{kind:"api_key", token, region?}` or a raw `ksk_` key; `KIRO_API_KEY`,
+  `KIRO_API_REGION` pins an unpinned key). Requests go to `runtime.<region>.kiro.dev` (an unpinned key uses the region
+  discovery found) with `tokentype: API_KEY` for keys and the login's `profileArn` in the body. The transform folds the
+  transcript into alternating user/assistant turns (system prompt in the first user turn, the continuation prompt for
+  an empty turn, images only on the current turn, retired tools declared as placeholders), cuts tool results at the
+  800 KB service limit and, over the 850,000-bytes-per-200k-tokens budget, shrinks the oldest results to 25 KB; what
+  still does not fit is a context overflow (as are HTTP 413, `CONTENT_LENGTH_EXCEEDS_THRESHOLD` and "Input is too
+  long."). Thinking: adaptive models get `thinking`/`output_config.effort`/`max_tokens`, effort models
+  `reasoning.effort`; thinking off sends the advertised off value. One replay before any visible or metered output
+  for a capacity throttle, the transient "Invalid tool use format." rejection or a body cut off mid-frame.
+  Unfinished tool calls of a truncated or filtered turn are dropped; a refusal ends as `stopDetails {type:
+  "refusal"}`. Usage comes from `metadataEvent.tokenUsage`, `usage.contextTokens` from `contextUsageEvent`.
+  **Discovery**: `kiro_discover()` (omp `kiroModelManagerOptions`) lists `ListAvailableModels` (paged) for the
+  stored login or key, maps thinking controls from `additionalModelRequestFieldsSchema`, and registers the roster
+  (unlisted earlier models are marked gone), cached 2 h per credential in `<agent dir>/kiro-models.json`; a failed
+  refresh keeps the last cache. It runs at startup when Kiro has a credential, after `/login kiro`, on hub F5 and
+  `omc models refresh`. omp unions the rosters of several Kiro accounts; omc stores one credential per provider.
 - **Transcript dialects** (`dialect.c`): each dialect's `renderTranscript` and
   `serializeConversationForSummary`, used for compaction and branch-summary input (not for in-band tool
   calls).
@@ -317,6 +336,7 @@ starts only on an explicit `yes` (any other answer or a cancel is "Login cancell
 | `device-code` | `auth_engine.c` | RFC 8628 with interval / `slow_down` / expiry / denial, templated endpoints, OIDC discovery (xAI), JWT-claim fields |
 | `api-key` | `auth_engine.c` | prompt, normalization, optional validation probes (chat completions / anthropic messages / models endpoint) |
 | custom hooks | `auth_custom.c` | GitHub Copilot, Cursor, Devin CLI seat key (`devin-cli`), Windsurf Enterprise (`devin-windsurf`), Codex device, Alibaba coding/token plan, Xiaomi, Perplexity, Cloudflare AI Gateway / Workers AI, Snowflake, Kilo, Mistral Vibe browser sign-in (mints a plain API key) |
+| `kiro-login` / `kiro-refresh` | `auth_kiro.c` | Kiro: IAM Identity Center (Start URL + OIDC region, AWS SSO-OIDC device grant, then the profile picker over the partition's regions, GovCloud included), Builder ID, Google/GitHub (Kiro's social device flow; the poll's profile ARN, else a listed profile, else the CLI's default), `ksk_` API key (pinned to `KIRO_API_REGION` or the one bootstrap region that accepts it, stored as the codec JSON). Each login mints a random `accountId`. Refresh: the OIDC token endpoint for device logins, the Kiro auth service (which may move the profile) for social ones; unrecoverable failures say "run /login kiro again" (omp also disables the row) |
 
 Entry points: `omc login [provider]`, `/login` in the TUI, the setup wizard, and RPC
 `get_login_providers`. MCP servers reuse the same oauth-code machinery (`src/mcp/oauth.c`, see

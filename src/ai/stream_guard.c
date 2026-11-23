@@ -71,6 +71,10 @@ static limits_t limits_for(const char *api) {
         l.first_msg = "OpenAI Codex SSE stream timed out while waiting for the first event";
         l.idle_msg = "OpenAI Codex SSE stream stalled while waiting for the next event";
         l.openai_env = true;
+    } else if (str_eq(api, "kiro-api")) {
+        /* providers/kiro/stream.ts: its idle iterator counts visible output (text, reasoning, tool calls) as progress */
+        l.first_msg = "Kiro stream timed out while waiting for the first visible output";
+        l.idle_msg = "Kiro stream timed out while waiting for the next event";
     } else if (str_eq(api, "ollama-chat") || str_eq(api, "ollama")) {
         l.openai_env = true;
     } else if (str_eq(api, "google-gemini-cli")) {

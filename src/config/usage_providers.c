@@ -1,9 +1,10 @@
 /* usage_providers.c - per-provider usage fetchers (ports of omp packages/ai/src/usage/{claude,claude-api,
- * openai-codex,openai-codex-base-url,openai-codex-reset,github-copilot,zai,synthetic,ollama,shared}.ts).
+ * openai-codex,openai-codex-base-url,openai-codex-reset,github-copilot,zai,synthetic,ollama,kiro,shared}.ts).
  * Every request goes through auth_http, so OMC_AUTH_URL_REWRITE redirects the probes to mocks in tests. */
 #define _GNU_SOURCE
 #include "usage.h"
 
+#include "ai/kiro.h"
 #include "ai/provider_anthropic.h"
 #include "config/auth_engine.h"
 #include "session/trace.h"
@@ -2156,3 +2157,251 @@ static bool ollama_cloud_supports(const usage_params_t *p) { return str_eq(p->pr
 
 const usage_provider_t usage_provider_ollama = {"ollama", ollama_supports, ollama_fetch, 0};
 const usage_provider_t usage_provider_ollama_cloud = {"ollama-cloud", ollama_cloud_supports, ollama_fetch, 0};
+
+/* ============================================================================================
+ * Kiro (usage/kiro.ts): GetUsageLimits on the credential's management region: monthly plan credits, active bonus
+ * grants, purchased add-ons and overage. Timestamps arrive as epoch seconds; the …WithPrecision counters carry the
+ * fractional credits the dashboard shows. (kiroRankingStrategy needs credential pools, which omc does not have.)
+ * ============================================================================================ */
+
+#define KIRO_MONTH_MS (30 * DAY_MS)
+
+/* parsePositiveTimestamp: seconds below 1e12 become milliseconds */
+static bool pos_ts(const json_t *v, double *out) {
+    double d;
+    if (!to_num(v, &d) || d <= 0) return false;
+    *out = d < 1e12 ? d * 1000 : d;
+    return true;
+}
+
+/* prefer the fractional …WithPrecision counter over its rounded twin */
+static bool precise(const json_t *o, const char *key, double *out) {
+    char *k = xasprintf("%sWithPrecision", key);
+    bool ok = get_num(o, k, out) || get_num(o, key, out);
+    free(k);
+    return ok;
+}
+
+static char *trimmed_text(const json_t *v) {
+    if (!json_is_str(v)) return NULL;
+    char *t = str_trim(json_sv(v));
+    if (*t) return t;
+    free(t);
+    return NULL;
+}
+
+/* credits used of limit; a zero-credit allowance counts as fully used */
+static json_t *kiro_credits(double used, double limit) {
+    return counter_amount(true, used, true, limit, true, MAX(0.0, limit - used), true, limit > 0 ? MIN(used / limit, 1.0) : 1.0,
+                          "credits");
+}
+
+static json_t *kiro_scope(const char *window_id) {
+    json_t *s = scope_new("kiro");
+    json_set_str(s, "windowId", window_id);
+    json_set_bool(s, "shared", true);
+    return s;
+}
+
+/* a prepaid credit grant (bonus or purchased add-on): it expires rather than resetting monthly */
+static json_t *kiro_grant(bool bonus, size_t index, const char *label, double used, double limit, bool has_exp, double exp) {
+    char *wid = xasprintf("%s-%zu", bonus ? "bonus" : "add-on", index);
+    json_t *w = window_new(wid, bonus ? "Bonus" : "Add-on");
+    json_set_str(w, "resetLabel", "expires");
+    if (has_exp) json_set_num(w, "resetsAt", exp);
+    char *id = xasprintf("%s%zu", bonus ? "kiro:bonus:" : "kiro:add-on:", index);
+    json_t *amount = kiro_credits(used, limit);
+    double f = json_get_num(amount, "usedFraction", 0);
+    json_t *l = limit_new(id, label, kiro_scope(wid), w, amount, status_of(true, f));
+    free(id);
+    free(wid);
+    return l;
+}
+
+json_t *usage_kiro_parse(const json_t *payload, int64_t fetched_at) {
+    json_t *list = json_get_arr(payload, "usageBreakdownList");
+    if (!json_is_obj(payload) || !list) return NULL;
+    const json_t *credit = NULL, *e;
+    json_arr_foreach(list, i, e) if (!credit && json_is_obj(e) && str_eq(json_get_str(e, "resourceType"), "CREDIT")) credit = e;
+    double plan_used, plan_limit;
+    if (!credit || !precise(credit, "currentUsage", &plan_used) || !precise(credit, "usageLimit", &plan_limit) || plan_limit < 0)
+        return NULL;
+    char *title = trimmed_text(json_get(json_get_obj(payload, "subscriptionInfo"), "subscriptionTitle"));
+    /* "KIRO PRO" -> "Kiro Pro" */
+    char *plan = title ? str_lower(title) : xstrdup("Kiro");
+    if (title)
+        for (size_t i = 0; plan[i]; i++) {
+            bool w = isalnum((unsigned char)plan[i]) || plan[i] == '_';
+            bool pw = i > 0 && (isalnum((unsigned char)plan[i - 1]) || plan[i - 1] == '_');
+            if (w && !pw) plan[i] = (char)toupper((unsigned char)plan[i]);
+        }
+    json_t *monthly = window_new("monthly", "Monthly");
+    json_set_num(monthly, "durationMs", KIRO_MONTH_MS);
+    double resets;
+    if (pos_ts(json_get(credit, "nextDateReset"), &resets) || pos_ts(json_get(payload, "nextDateReset"), &resets))
+        json_set_num(monthly, "resetsAt", resets);
+
+    json_t *bonuses = json_arr();
+    json_arr_foreach(json_get_arr(credit, "bonuses"), i, e) {
+        double used, limit, exp = 0;
+        if (!json_is_obj(e) || !str_eq(json_get_str(e, "status"), "ACTIVE")) continue;
+        if (!get_num(e, "currentUsage", &used) || !get_num(e, "usageLimit", &limit) || limit <= 0) continue;
+        char *label = trimmed_text(json_get(e, "displayName"));
+        bool he = pos_ts(json_get(e, "expiresAt"), &exp);
+        json_push(bonuses, kiro_grant(true, json_len(bonuses), label ? label : "Bonus credits", used, limit, he, exp));
+        free(label);
+    }
+    /* the two lists project the same purchases: the legacy list only when the current one is missing or empty */
+    json_t *current = json_get_arr(json_get_obj(credit, "addOnMetadata"), "addOns");
+    json_t *purchases = json_len(current) > 0 ? current : json_get_arr(credit, "overageCredits");
+    json_t *addons = json_arr();
+    json_arr_foreach(purchases, i, e) {
+        double used, limit, exp = 0;
+        if (!json_is_obj(e)) continue;
+        bool he = pos_ts(json_get(e, "expiresAt"), &exp);
+        if (!precise(e, "currentUsage", &used) || !precise(e, "usageLimit", &limit) || limit <= 0) continue;
+        if (he && exp <= (double)fetched_at) continue;
+        json_push(addons, kiro_grant(false, json_len(addons), "Add-on credits", used, limit, he, exp));
+    }
+
+    double overage_used = 0, overage_cap = 0;
+    if (!precise(credit, "currentOverages", &overage_used)) overage_used = 0;
+    if (!precise(credit, "overageCap", &overage_cap)) overage_cap = 0;
+    bool overage_on = str_eq(json_get_str(json_get_obj(payload, "overageConfiguration"), "overageStatus"), "ENABLED") && overage_cap > 0;
+
+    json_t *plan_amount = kiro_credits(plan_used, plan_limit);
+    double pf = json_get_num(plan_amount, "usedFraction", 0);
+    bool spent = pf == 1;
+    bool bonus_left = false, addon_left = false;
+    json_arr_foreach(bonuses, i, e) if (!str_eq(json_get_str(e, "status"), "exhausted")) bonus_left = true;
+    json_arr_foreach(addons, i, e) if (!str_eq(json_get_str(e, "status"), "exhausted")) addon_left = true;
+    bool grant_left = bonus_left || addon_left;
+    const char *plan_status = status_of(true, pf);
+    if (spent && (grant_left || (overage_on && overage_used < overage_cap))) plan_status = "warning";
+    char *unit = trimmed_text(json_get(credit, "displayNamePlural"));
+    char *unit_l = unit ? str_lower(unit) : xstrdup("credits");
+    char *plan_label = xasprintf("%s %s", plan, unit_l);
+    json_t *report = report_new("kiro", fetched_at);
+    json_t *limits = json_get(report, "limits");
+    json_t *pl = limit_new("kiro:credits", plan_label, kiro_scope("monthly"), json_clone(monthly), plan_amount, plan_status);
+    if (spent && grant_left) {
+        json_t *notes = json_arr();
+        char *n = xasprintf("Plan credits used up; drawing on %s credits",
+                            bonus_left && addon_left ? "bonus and add-on" : bonus_left ? "bonus" : "add-on");
+        json_push_str(notes, n);
+        free(n);
+        json_set(pl, "notes", notes);
+    }
+    json_push(limits, pl);
+    while (json_len(bonuses)) json_push(limits, json_arr_remove(bonuses, 0));
+    while (json_len(addons)) json_push(limits, json_arr_remove(addons, 0));
+    if (overage_on) {
+        json_t *amount = kiro_credits(overage_used, overage_cap);
+        json_t *notes = json_arr();
+        if (spent && !grant_left) json_push_str(notes, "Free credits used up; drawing paid overage");
+        double charges, rate;
+        if (get_num(credit, "overageCharges", &charges)) {
+            char *per = get_num(credit, "overageRate", &rate) ? xasprintf(" ($%.2f per credit)", rate) : xstrdup("");
+            char *n = xasprintf("Overage charges: $%.2f%s", charges, per);
+            json_push_str(notes, n);
+            free(n);
+            free(per);
+        }
+        double of = json_get_num(amount, "usedFraction", 0);
+        json_t *ol = limit_new("kiro:overage", "Overage credits", kiro_scope("monthly"), json_clone(monthly), amount, status_of(true, of));
+        if (json_len(notes)) json_set(ol, "notes", notes);
+        else json_free(notes);
+        json_push(limits, ol);
+    }
+    /* the response's userInfo (the account email) is deliberately not carried over */
+    if (title) {
+        json_t *md = json_obj();
+        json_set_str(md, "planType", plan);
+        json_set(report, "metadata", md);
+    }
+    json_free(monthly);
+    json_free(bonuses);
+    json_free(addons);
+    free(title);
+    free(plan);
+    free(unit);
+    free(unit_l);
+    free(plan_label);
+    return report;
+}
+
+/* region, bearer and (OAuth only) profile ARN to ask for usage; false when the credential has no region */
+static bool kiro_route(const json_t *cred, char **region, char **token, char **arn, bool *api_key) {
+    *region = *token = *arn = NULL;
+    if (str_eq(json_get_str(cred, "type"), "oauth")) {
+        if (!cstr(cred, "accessToken") || !cstr(cred, "region")) return false;
+        *region = xstrdup(cstr(cred, "region"));
+        *token = xstrdup(cstr(cred, "accessToken"));
+        if (cstr(cred, "kiroProfileArn")) *arn = xstrdup(cstr(cred, "kiroProfileArn"));
+        *api_key = false;
+        return true;
+    }
+    kiro_cred_t c;
+    char *err = NULL;
+    if (kiro_decode_credential(json_get_str(cred, "apiKey") ? json_get_str(cred, "apiKey") : "", &c, &err) != 0) {
+        free(err);
+        return false;
+    }
+    /* an env key without KIRO_API_REGION has no region; usage never probes */
+    bool ok = c.region != NULL;
+    if (ok) {
+        *region = xstrdup(c.region);
+        *token = xstrdup(c.token);
+        *api_key = true;
+    }
+    kiro_cred_free(&c);
+    return ok;
+}
+
+static bool kiro_supports(const usage_params_t *p) {
+    char *r, *t, *a;
+    bool k;
+    bool ok = str_eq(p->provider, "kiro") && kiro_route(p->cred, &r, &t, &a, &k);
+    if (ok) free(r), free(t), free(a);
+    return ok;
+}
+
+static json_t *kiro_fetch(const usage_params_t *p, bool *rejected) {
+    char *region, *token, *arn;
+    bool api_key;
+    if (!str_eq(p->provider, "kiro") || !kiro_route(p->cred, &region, &token, &arn, &api_key)) return NULL;
+    json_t *report = NULL;
+    /* an expired bearer whose refresh failed would only 401 and drop the last good report */
+    json_t *exp = json_get(p->cred, "expiresAt");
+    if (!(json_is_num(exp) && exp->u.num.d <= (double)now_ms())) {
+        json_t *body = json_obj();
+        json_set_str(body, "origin", "KIRO_CLI");
+        if (arn) json_set_str(body, "profileArn", arn);
+        json_set_str(body, "resourceType", "AGENTIC_REQUEST");
+        int status = 0;
+        char *err = NULL;
+        json_t *payload = kiro_management_request(region, token, "GetUsageLimits", body, NULL, &status, &err);
+        json_free(body);
+        if (!payload) {
+            /* a rejected login has lost access: drop its cached quota; an API key the usage route refuses has no report */
+            if (!api_key && (status == 401 || status == 403)) *rejected = true;
+            else LOGW("Kiro usage request failed: %s", err ? err : "?");
+        } else {
+            report = usage_kiro_parse(payload, now_ms());
+            /* attribute the report to the login it measured: logins sharing a profile stay separate accounts */
+            if (report && cstr(p->cred, "accountId")) {
+                json_t *md = json_get_obj(report, "metadata");
+                if (!md) json_set(report, "metadata", md = json_obj());
+                json_set_str(md, "accountId", cstr(p->cred, "accountId"));
+            }
+            json_free(payload);
+        }
+        free(err);
+    }
+    free(region);
+    free(token);
+    free(arn);
+    return report;
+}
+
+const usage_provider_t usage_provider_kiro = {"kiro", kiro_supports, kiro_fetch, 0};
