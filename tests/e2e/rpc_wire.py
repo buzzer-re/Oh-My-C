@@ -221,10 +221,21 @@ check("ask number + hidden", te and not te["isError"] and '"k": 3' in te["result
 te, _ = ask_with("a9", FORM1, {"cancelled": True, "timedOut": True})
 check("ask timed out", te and te["result"]["details"].get("timedOut") is True and '"q1": "b"' in te["result"]["content"][0]["text"], te)
 
+# resume (the `.`/`c` continue) and abort_and_deliver_queue (empty Enter) for remote clients (omp 82e8e939a7)
+x = r.call({"id": "adq", "type": "abort_and_deliver_queue"})
+check("abort_and_deliver_queue idle", x and x.get("success") and x["data"] == {"aborted": False}, x)
+n0 = len(r.frames)
+x = r.call({"id": "rs", "type": "resume"})
+end = r.wait(lambda f: f.get("type") == "agent_end" and r.frames.index(f) >= n0, 30)
+with r.lock:
+    pr = [f for f in r.frames[n0:] if f.get("type") == "prompt_result"]
+check("resume", x and x.get("success") and "error" not in x and end is not None and not pr, (x, pr))
 # session change shapes
 n0 = len(r.frames)
 x = r.call({"id": "ns", "type": "new_session"})
 check("new_session", x and x["data"] == {"cancelled": False}, x)
+x = r.call({"id": "rs2", "type": "resume"})
+check("resume nothing", x and x.get("success") is False and x.get("error") == "Nothing to resume", x)
 x = r.call({"id": "lg", "type": "login", "providerId": "nope"})
 check("login unknown", x and x.get("error") == "Unknown OAuth provider: nope", x)
 

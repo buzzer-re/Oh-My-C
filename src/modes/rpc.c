@@ -64,6 +64,7 @@ struct rpc {
     int abort_waiters;
     unsigned agent_ends;
     json_t *skill_msg;  /* the prompt invokes a skill (dispatchRpcSkillPrompt): its built custom message */
+    bool resume;        /* the run is a `resume` (AgentSession.resume): no prompt ticket */
     pthread_mutex_t mu;
     /* /btw (rpc-btw.ts) */
     pthread_mutex_t btw_mu;
@@ -1657,6 +1658,18 @@ again:;
             pthread_mutex_unlock(&r->mu);
             return NULL;
         }
+    } else if (r->resume) {
+        char *err = NULL;
+        if (app_resume(r->a, &err) != 0 && err) { /* a failure after the acknowledgement is a late error */
+            json_t *f = json_obj();
+            json_set_str(f, "type", "response");
+            json_set_str(f, "command", "resume");
+            json_set_bool(f, "success", false);
+            json_set_str(f, "error", err);
+            emit(r, f);
+            json_free(f);
+        }
+        free(err);
     } else if (r->hidden) app_prompt_hidden(r->a, r->text, r->hidden);
     else if (r->skill_msg) {
         json_t *m = r->skill_msg;
@@ -1724,7 +1737,8 @@ again:;
     bool was_cont = false;
     const char *prev_type = r->hidden;
     /* a background-job wake run has no prompt ticket: omp reports no prompt_result for it (rpc-prompt-results.ts) */
-    bool wake_run = str_eq(r->hidden, "async-result");
+    bool wake_run = str_eq(r->hidden, "async-result") || r->resume;
+    r->resume = false;
     for (;;) {
         json_t *run = json_arr();
         pthread_mutex_lock(&r->a->agent->mu);
@@ -3260,6 +3274,70 @@ static void handle(rpc_t *r, json_t *cmd) {
         if (pthread_create(&r->th, NULL, prompt_thread, r) != 0) {
             r->running = false;
             respond(r, id, type, false, NULL, "failed to start agent thread");
+        }
+    } else if (!strcmp(type, "abort_and_deliver_queue")) {
+        /* the TUI's empty Enter (omp 82e8e939a7): a streaming run with queued user input is interrupted and continues
+         * with that input; ordered behind earlier input, so a prompt sent just before is the input it delivers */
+        pthread_mutex_lock(&r->mu);
+        bool running = r->running && !r->settling;
+        pthread_mutex_unlock(&r->mu);
+        bool aborted = running && agent_has_interruptible_input(a->agent);
+        if (aborted) {
+            agent_abort_deliver_queued(a->agent);
+            app_abort_user(a);
+        }
+        json_t *d = json_obj();
+        json_set_bool(d, "aborted", aborted);
+        respond(r, id, type, true, d, NULL);
+    } else if (!strcmp(type, "resume")) {
+        /* the TUI's `.`/`c` continue (AgentSession.resume): a running turn is interrupted first; queued input continues
+         * the run in place of the directive; answered once the continuation is under way */
+        pthread_mutex_lock(&r->mu);
+        bool running = r->running;
+        pthread_mutex_unlock(&r->mu);
+        if (running && agent_has_interruptible_input(a->agent)) {
+            agent_abort_deliver_queued(a->agent);
+            app_abort_user(a);
+            respond(r, id, type, true, NULL, NULL);
+            return;
+        }
+        if (running) {
+            app_abort_user(a);
+            for (int k = 0; k < 600; k++) { /* wait for the run to unwind (max ~60s) */
+                pthread_mutex_lock(&r->mu);
+                bool busy = r->running;
+                pthread_mutex_unlock(&r->mu);
+                if (!busy) break;
+                usleep(100 * 1000);
+            }
+        }
+        bool has_user = false;
+        pthread_mutex_lock(&a->agent->mu);
+        const json_t *m;
+        json_arr_foreach(a->agent->messages, mi, m) if (str_eq(json_get_str(m, "role"), "user")) has_user = true;
+        pthread_mutex_unlock(&a->agent->mu);
+        pthread_mutex_lock(&r->mu);
+        if (!has_user || r->running) {
+            pthread_mutex_unlock(&r->mu);
+            respond(r, id, type, false, NULL, "Nothing to resume");
+            return;
+        }
+        if (r->th) pthread_join(r->th, NULL);
+        r->th = 0;
+        r->running = true;
+        r->settling = false;
+        r->hidden = NULL;
+        r->resume = true;
+        r->text = xstrdup("");
+        r->prompt_id = NULL;
+        r->images = NULL;
+        r->skill_msg = NULL;
+        r->slash = r->slash_reply = false;
+        pthread_mutex_unlock(&r->mu);
+        respond(r, id, type, true, NULL, NULL);
+        if (pthread_create(&r->th, NULL, prompt_thread, r) != 0) {
+            r->running = false;
+            r->resume = false;
         }
     } else if (!strcmp(type, "steer") || !strcmp(type, "follow_up")) {
         /* steer() / followUp(): prompt templates expand (no slash or skill commands) */
