@@ -274,6 +274,22 @@ static void test_dialog_sole(void) {
     g_done = false;
 }
 
+/* table cells word-wrap within their fitted widths instead of truncating, keeping <br> breaks (omp e701ef8cbe) */
+static void test_dialog_table_wrap(void) {
+    const char *html = "<form><table><tr><th>Step</th><th>Notes</th></tr>"
+                       "<tr><td>build</td><td>compiles every module of the project in parallel then links them</td></tr>"
+                       "<tr><td>a<br>b</td><td>x</td></tr></table>"
+                       "<input name=ok value=y></form>";
+    ui_form_opts_t o = {.term_rows = 40, .done = on_done};
+    tui_component_t *c = ui_form_dialog_new(html, &o);
+    char *s = screen(c, 40);
+    CHECK(strstr(s, "compiles every") && strstr(s, "links them"), "wrapped cells:\n%s", s);
+    const char *a = strstr(s, "a  "), *b = a ? strstr(a, "\n") : NULL;
+    CHECK(a && b && strstr(b, "b"), "br break kept:\n%s", s);
+    free(s);
+    c->vt->destroy(c);
+}
+
 static void test_dialog(void) {
     const char *html = "<form><p>Paint it</p><fieldset><legend>Pick a color</legend>"
                        "<label><input type=radio name=color value=red checked> Red</label>"
@@ -385,6 +401,7 @@ int main(void) {
     test_dialog();
     test_dialog_notes();
     test_dialog_sole();
+    test_dialog_table_wrap();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

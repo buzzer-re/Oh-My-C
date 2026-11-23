@@ -23,6 +23,7 @@
 #include "ui/tools/tc.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
@@ -1418,60 +1419,117 @@ static void field_atoms(fd_t *v, hf_field_t *f, int width, int focused_stop, int
 }
 
 /* renderTableRow over fitted columns */
+/* table.ts shrinkEvenly: the widest columns shrink first, level by level, down to their minimums */
+static int shrink_evenly(int *w, const int *mins, size_t n, int overflow) {
+    while (overflow > 0) {
+        int top = -1;
+        for (size_t c = 0; c < n; c++)
+            if (w[c] > mins[c] && w[c] > top) top = w[c];
+        if (top < 0) break;
+        int level = INT_MIN;
+        size_t nwide = 0;
+        for (size_t c = 0; c < n; c++) {
+            if (w[c] <= mins[c]) continue;
+            if (w[c] < top) level = MAX(level, w[c]);
+            else {
+                nwide++;
+                level = MAX(level, mins[c]);
+            }
+        }
+        int step = MIN(top - level, (int)((overflow + (int)nwide - 1) / (int)nwide));
+        for (size_t c = n; c-- > 0 && overflow > 0;) { /* widest.reverse() */
+            if (w[c] <= mins[c] || w[c] != top) continue;
+            int cut = MIN(step, overflow);
+            w[c] -= cut;
+            overflow -= cut;
+        }
+    }
+    return overflow;
+}
+
+/* table rows over as many lines as their tallest cell: cells word-wrap within their fitted width and keep <br>
+ * breaks; a row's continuation lines refuse a page break before them (omp e701ef8cbe) */
 static void table_atoms(const hf_block_t *blk, int width, hf_atoms_t *atoms) {
     size_t count = 0;
     for (size_t r = 0; r < blk->rows.n; r++) count = MAX(count, blk->rows.v[r].n);
     VEC(char **) cells = {0};
-    int *w = xcalloc(count + 1, sizeof *w);
+    int *w = xcalloc(count + 1, sizeof *w), *mins = xcalloc(count + 1, sizeof *mins);
     for (size_t c = 0; c < count; c++) w[c] = 1;
     for (size_t r = 0; r < blk->rows.n; r++) {
         char **row = xcalloc(count + 1, sizeof *row);
         for (size_t c = 0; c < count; c++) {
             if (c < blk->rows.v[r].n) {
                 char *t = hf_spans_text(&blk->rows.v[r].v[c]);
-                row[c] = sanitize_line(t);
+                row[c] = sanitize(t);
                 free(t);
             } else row[c] = xstrdup("");
-            w[c] = MAX(w[c], tui_visible_width(row[c]));
+            strvec_t ls = str_split(row[c], "\n");
+            for (size_t k = 0; k < ls.n; k++) w[c] = MAX(w[c], tui_visible_width(ls.v[k]));
+            strvec_free(&ls);
         }
         vec_push(&cells, row);
     }
-    /* fitWidths: shrink from the last truncating column down to minWidth 4 */
+    /* fitWidths: every column wraps, minWidth 4 */
     int gap = 2, total = 0;
-    for (size_t c = 0; c < count; c++) total += w[c];
-    int overflow = total + (count ? (int)(count - 1) * gap : 0) - width;
-    for (size_t c = count; c-- > 0 && overflow > 0;) {
-        int minimum = MIN(w[c], 4), shrink = MIN(overflow, w[c] - minimum);
-        w[c] -= shrink;
-        overflow -= shrink;
+    for (size_t c = 0; c < count; c++) {
+        total += w[c];
+        mins[c] = MIN(w[c], 4);
     }
+    shrink_evenly(w, mins, count, total + (count ? (int)(count - 1) * gap : 0) - width);
+    sb_t rule = SB_INIT;
+    sb_repeat(&rule, "\xe2\x94\x80", width);
     for (size_t r = 0; r < cells.n; r++) {
-        bool head = r < blk->header_rows;
-        sb_t line = SB_INIT;
-        for (size_t c = 0; c < count; c++) {
-            char *t = cells.v[r][c];
-            char *fit = tui_visible_width(t) > w[c] ? trunc_to(t, w[c]) : xstrdup(t);
-            char *padded = xasprintf("%s%*s", fit, MAX(0, w[c] - tui_visible_width(fit)), "");
-            char *styled = head ? fg_bold(TUI_TC_TEXT, padded) : fg(TUI_TC_MUTED, padded);
-            if (c) sb_append(&line, "  ");
-            sb_append(&line, styled);
-            free(styled);
-            free(padded);
-            free(fit);
+        if (r > 0 && r == blk->header_rows) {
+            strvec_t lines = {0};
+            strvec_push_own(&lines, fg(TUI_TC_DIM, sb_cstr(&rule)));
+            push_atom(atoms, lines, 0, HF_BREAK_NEVER);
         }
-        strvec_t lines = {0};
-        strvec_push_own(&lines, sb_detach(&line));
-        push_atom(atoms, lines, 0, HF_BREAK_INSIDE);
+        bool head = r < blk->header_rows;
+        strvec_t *stacks = xcalloc(count + 1, sizeof *stacks);
+        size_t height = 1;
+        for (size_t c = 0; c < count; c++) {
+            strvec_t hard = str_split(cells.v[r][c], "\n");
+            for (size_t k = 0; k < hard.n; k++) {
+                strvec_t wrapped = {0};
+                tui_wrap_text_with_ansi(hard.v[k], MAX(1, w[c]), &wrapped);
+                if (!wrapped.n) strvec_push(&stacks[c], "");
+                for (size_t q = 0; q < wrapped.n; q++) strvec_push(&stacks[c], wrapped.v[q]);
+                strvec_free(&wrapped);
+            }
+            if (!hard.n) strvec_push(&stacks[c], "");
+            strvec_free(&hard);
+            height = MAX(height, stacks[c].n);
+        }
+        for (size_t l = 0; l < height; l++) {
+            sb_t line = SB_INIT;
+            for (size_t c = 0; c < count; c++) {
+                const char *t = l < stacks[c].n ? stacks[c].v[l] : "";
+                char *fit = tui_visible_width(t) > w[c] ? trunc_to(t, w[c]) : xstrdup(t);
+                char *padded = xasprintf("%s%*s", fit, MAX(0, w[c] - tui_visible_width(fit)), "");
+                char *styled = head ? fg_bold(TUI_TC_TEXT, padded) : fg(TUI_TC_MUTED, padded);
+                if (c) sb_append(&line, "  ");
+                sb_append(&line, styled);
+                free(styled);
+                free(padded);
+                free(fit);
+            }
+            strvec_t lines = {0};
+            strvec_push_own(&lines, sb_detach(&line));
+            push_atom(atoms, lines, 0, l == 0 ? HF_BREAK_INSIDE : HF_BREAK_NEVER);
+        }
+        for (size_t c = 0; c < count; c++) strvec_free(&stacks[c]);
+        free(stacks);
         for (size_t c = 0; c < count; c++) free(cells.v[r][c]);
         free(cells.v[r]);
     }
+    sb_free(&rule);
     free(cells.v);
     free(w);
+    free(mins);
 }
 
 /* atoms of a non-field block: one per wrapped line, list item or table row */
 static void context_atoms(fd_t *v, const hf_block_t *blk, int width, hf_atoms_t *atoms) {
-    size_t first = atoms->n;
     switch (blk->kind) {
     case HF_B_TEXT: {
         strvec_t lines = {0};
@@ -1525,26 +1583,9 @@ static void context_atoms(fd_t *v, const hf_block_t *blk, int width, hf_atoms_t 
         push_atom(atoms, lines, 0, HF_BREAK_INSIDE);
         break;
     }
-    case HF_B_TABLE: {
+    case HF_B_TABLE:
         table_atoms(blk, width, atoms);
-        size_t made = atoms->n - first;
-        if (blk->header_rows > 0 && blk->header_rows < made) {
-            sb_t r = SB_INIT;
-            sb_repeat(&r, "\xe2\x94\x80", width);
-            char *rule = fg(TUI_TC_DIM, sb_cstr(&r));
-            sb_free(&r);
-            strvec_t lines = {0};
-            strvec_push_own(&lines, rule);
-            hf_atom_t sep = {.lines = lines, .gap = 0, .break_rank = HF_BREAK_NEVER};
-            vec_push(atoms, sep);
-            /* move it into place after the header rows */
-            size_t at = first + blk->header_rows;
-            hf_atom_t tmp = atoms->v[atoms->n - 1];
-            memmove(&atoms->v[at + 1], &atoms->v[at], (atoms->n - 1 - at) * sizeof *atoms->v);
-            atoms->v[at] = tmp;
-        }
         break;
-    }
     case HF_B_FIELD:
         break;
     }
