@@ -516,6 +516,17 @@ static char *openai_error_detail(const char *body) {
     return sb_detach(&b);
 }
 
+/* searchReasoningEffort: the web role's level as the wire `reasoning.effort`, clamped to the model's ladder and mapped
+ * like chat requests; NULL (omit the field) when unset, auto, off, inherit, or the model does not reason */
+static const char *search_reasoning_effort(const ai_model_t *m, const char *level) {
+    if (!m || !m->reasoning || !level || !*level) return NULL;
+    ai_effort_t e;
+    if (effort_parse(level, &e) != 0 || e == EFFORT_OFF) return NULL;
+    ai_effort_t c = model_clamp_effort(m, e);
+    if (c == EFFORT_OFF) return NULL;
+    return oai_effort_wire(m, NULL, effort_name(c));
+}
+
 static json_t *s_openai(const ws_params_t *p, ws_err_t *e) {
     const ai_model_t *m = p->model;
     if (str_eq(key_kind(m->provider), "oauth")) {
@@ -546,10 +557,13 @@ static json_t *s_openai(const ws_params_t *p, ws_err_t *e) {
     json_push_str(inc, "web_search_call.action.sources");
     json_set(body, "include", inc);
     json_set_bool(body, "store", false);
+    /* effort follows the web role's level; `mode` is the catalog pro alias */
     const char *rmode = m->raw ? json_get_str(m->raw, "reasoningMode") : NULL;
-    if (rmode) {
+    const char *reff = search_reasoning_effort(m, p->level);
+    if (rmode || reff) {
         json_t *rs = json_obj();
-        json_set_str(rs, "mode", rmode);
+        if (reff) json_set_str(rs, "effort", reff);
+        if (rmode) json_set_str(rs, "mode", rmode);
         json_set(body, "reasoning", rs);
     }
     if (!isnan(p->max_tokens)) json_set_num(body, "max_output_tokens", p->max_tokens);
@@ -996,6 +1010,12 @@ static json_t *s_codex(const ws_params_t *p, ws_err_t *e) {
     json_set_str(tc, "type", "web_search");
     json_set(body, "tool_choice", tc);
     json_set_str(body, "instructions", p->system_prompt);
+    const char *reff = search_reasoning_effort(m, p->level);
+    if (reff) {
+        json_t *rs = json_obj();
+        json_set_str(rs, "effort", reff);
+        json_set(body, "reasoning", rs);
+    }
     char *payload = json_dump(body, 0);
     json_free(body);
     http_resp_t r;
