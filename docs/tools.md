@@ -308,7 +308,8 @@ call to it runs, every session sees.
   omp instead goes on clientless after a non-`unapproved_client` rejection and only fails if the authorize endpoint
   asks for a client id) (or a configured client) → authorization code + PKCE with the RFC 8707 `resource` indicator, through the
   shared login engine. Credentials are stored in `auth.json` under `mcp:<server url>` and refreshed
-  automatically. Managed with `omc mcp list|login|logout` and `/mcp reauth|unauth`.
+  automatically; a credential keeps the grant's `scope` (the token response's, else the authorize request's), which
+  each refresh repeats and a refresh response's scope replaces. Managed with `omc mcp list|login|logout` and `/mcp reauth|unauth`.
 - `mcp.enableProjectConfig` (on) gates every project-level source; a server named in the user
   `mcp.json` `disabledServers` list or set `enabled: false` is not connected.
 - Manager (`mcp.c`): servers are refcounted and named by the tool bridges, so `/mcp reload`,

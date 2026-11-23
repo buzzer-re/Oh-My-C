@@ -296,12 +296,25 @@ json_t *mcp_oauth_descriptor(const char *server_url, const json_t *server_cfg, c
     if (client_secret) json_set_str(tp, "client_secret", client_secret);
     json_set(tok, "params", tp);
     json_set(login, "token", tok);
-    json_set(login, "credential", json_parse_str("{\"access\":{\"path\":\"access_token\"},\"refresh\":{\"path\":\"refresh_token\"},"
-                                                 "\"expires\":{\"path\":\"expires_in\",\"mode\":\"seconds\",\"skewMs\":60000}}"));
+    /* the credential keeps the scope the grant holds: the token response's (RFC 6749 §5.1), else the authorize
+     * request's; a refresh sends it again (Entra v2 refuses a scope-less refresh, AADSTS90009) and a refresh
+     * response's scope replaces it (omp c653ae09be, 164dd7153c) */
+    json_t *cmap = json_parse_str("{\"access\":{\"path\":\"access_token\"},\"refresh\":{\"path\":\"refresh_token\"},"
+                                  "\"expires\":{\"path\":\"expires_in\",\"mode\":\"seconds\",\"skewMs\":60000},"
+                                  "\"scope\":{\"path\":\"scope\"}}");
+    json_t *rmap = json_clone(cmap);
+    sb_t requested = SB_INIT;
+    json_arr_foreach(scopes, i, x) sb_appendf(&requested, "%s%s", requested.len ? " " : "", json_sv(x));
+    char *req_trim = str_trim(sb_cstr(&requested));
+    if (*req_trim) json_set_str(json_get_obj(cmap, "scope"), "literal", req_trim);
+    free(req_trim);
+    sb_free(&requested);
+    json_set(login, "credential", cmap);
     json_set(d, "login", login);
     json_t *rf = json_obj();
     json_set_str(rf, "kind", "request");
     json_set(rf, "token", json_clone(tok));
+    json_set(rf, "credential", rmap);
     json_set(d, "refresh", rf);
     free(redirect);
     free(client_id);

@@ -67,7 +67,8 @@ class H(BaseHTTPRequestHandler):
                 if not ok or f.get("redirect_uri") != red or f.get("resource") != res: return self.send(400, {"error": "invalid_grant"})
                 tokens["tok-1"] = True
                 return self.send(200, {"access_token": "tok-1", "refresh_token": "ref-1", "expires_in": 3600, "token_type": "Bearer"})
-            if f.get("grant_type") == "refresh_token" and f.get("refresh_token") == "ref-1":
+            # the refresh repeats the scope the grant holds (the authorize request's: the token reply named none)
+            if f.get("grant_type") == "refresh_token" and f.get("refresh_token") == "ref-1" and f.get("scope") == "mcp.read":
                 tokens["tok-2"] = True
                 return self.send(200, {"access_token": "tok-2", "expires_in": 3600, "token_type": "Bearer"})
             return self.send(400, {"error": "unsupported_grant_type"})
