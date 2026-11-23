@@ -1788,10 +1788,9 @@ static void install_agent(app_t *a) {
         mcp_open_tool_scope(a->mcp, ag->mcp_scope, a->opts.mcp_seed_scope);
     }
     if (a->mcp && !a->opts.no_tools) mcp_register_tools(a->mcp, ag);
-    /* subagents get lsp only with task.enableLsp (task/index.ts enableLsp, off by default) */
-    bool lsp_ok = !a->opts.no_tools && settings_bool("lsp.enabled", true) &&
-                  (!a->opts.subagent || settings_bool("task.enableLsp", false)) &&
-                  (!a->opts.tools || strvec_contains(a->opts.tools, "lsp"));
+    /* subagents always get the lsp tool; task.enableLsp (off by default) only gates the formatting / diagnostics
+     * writethrough on their edits (executor.ts subagentLspWritethroughSettings, omp 3312e428d0) */
+    bool lsp_ok = !a->opts.no_tools && settings_bool("lsp.enabled", true) && (!a->opts.tools || strvec_contains(a->opts.tools, "lsp"));
     if (lsp_ok) {
         if (!a->lsp && a->opts.lsp) a->lsp = a->opts.lsp;
         if (!a->lsp) {
@@ -1799,8 +1798,10 @@ static void install_agent(app_t *a) {
             a->owns_lsp = true;
         }
         agent_add_tool(ag, tool_lsp_new(a->env, a->lsp));
-        a->env->after_write = app_after_write;
-        a->env->after_edit = app_after_edit;
+        if (!a->opts.subagent || settings_bool("task.enableLsp", false)) {
+            a->env->after_write = app_after_write;
+            a->env->after_edit = app_after_edit;
+        }
     }
     /* checkpoint/rewind: off by default (checkpoint.enabled); top-level sessions or explicit lists; paired */
     if (!a->opts.no_tools && settings_bool("checkpoint.enabled", false) &&

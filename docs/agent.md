@@ -627,7 +627,8 @@ tools are exclusive and mountable as `xd://` devices.
   afterwards its card frames carry omp's texts (`Running background task <id>...`, `Running agent
   <id>...`, `Background task <id> complete.` / `failed.`), forwarded to RPC as `tool_execution_update`.
 - **Subagent sessions** carry no personality block (sdk.ts passes `personality: "none"` for subagents),
-  no `todo` tool (parent-owned bookkeeping) and no `lsp` unless `task.enableLsp`; the peer roster lists
+  no `todo` tool (parent-owned bookkeeping); they always get the shared `lsp` tool, while `task.enableLsp` (off)
+  only turns on LSP formatting/diagnostics after their edits and writes; the peer roster lists
   `main` / agent-type display names with kind `main` / `sub`, running before idle, and the progress gist
   as activity. `agent://`, `history://` and `proc://` are always listed in the internal-URL docs.
 - **Jobs** (`tools/jobs.c`, port of `async/` AsyncJobManager): async bash (`async: true`), bash
