@@ -1,6 +1,9 @@
 /* test_kiro.c - offline tests for the native Kiro provider (omp v19.1.0 catalog/test/kiro-provider.test.ts,
  * ai/test/kiro-transform.test.ts, kiro-usage.test.ts): region / profile-ARN routing, the credential codec, the Kiro CLI
  * headers, ListAvailableModels mapping, the request transform and budget, and parseKiroUsage. */
+#include <stdlib.h>
+#include <unistd.h> /* mkdtemp (macOS declares it here) */
+
 #include "ai/kiro.h"
 #include "config/usage.h"
 #include "core/fs.h"

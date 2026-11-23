@@ -386,8 +386,8 @@ static void test_thinking_capability(void) {
         "{\"checkedAt\":1,\"format\":\"none\",\"efforts\":[\"low\"],\"observed\":false,\"attempts\":[]}",          /* none + efforts */
         "{\"checkedAt\":1.5,\"format\":\"none\",\"efforts\":[],\"observed\":false,\"attempts\":[]}",               /* not an integer */
         "{\"checkedAt\":1,\"format\":\"bogus\",\"efforts\":[],\"observed\":false,\"attempts\":[]}",
-        "{\"checkedAt\":1,\"format\":\"none\",\"efforts\":[],\"observed\":false,"
-        "\"attempts\":[{\"format\":\"none\",\"accepted\":false,\"observed\":true}]}", /* observed without acceptance */
+        ("{\"checkedAt\":1,\"format\":\"none\",\"efforts\":[],\"observed\":false,"
+         "\"attempts\":[{\"format\":\"none\",\"accepted\":false,\"observed\":true}]}"), /* observed without acceptance */
     };
     for (size_t i = 0; i < ARRAY_LEN(bad); i++) {
         c = json_parse_str(bad[i]);
