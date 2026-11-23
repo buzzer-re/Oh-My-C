@@ -33,7 +33,7 @@ void actx_auth(const actx_t *c, const char *url, const char *launch, const char 
 }
 
 char *actx_prompt(const actx_t *c, const char *message, const char *placeholder, bool allow_empty, char **err) {
-    auth_prompt_t p = {message, placeholder, allow_empty, false};
+    auth_prompt_t p = {.message = message, .placeholder = placeholder, .allow_empty = allow_empty};
     return actx_prompt_ex(c, &p, err);
 }
 

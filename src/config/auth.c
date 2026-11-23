@@ -676,7 +676,8 @@ static int login_run(const char *provider, const json_t *d, bool embed, const au
     if (warning) {
         char *msg = xasprintf("\xe2\x9a\xa0 %s: use at your own risk\n\n%s\n\nType \"yes\" to accept the risk and continue", c.label,
                               warning);
-        char *ans = actx_prompt(&c, msg, "yes", true, err);
+        auth_prompt_t q = {.message = msg, .placeholder = "yes", .allow_empty = true, .risk_acknowledgement = true};
+        char *ans = actx_prompt_ex(&c, &q, err);
         free(msg);
         if (!ans) return -1;
         char *t = str_trim(ans);

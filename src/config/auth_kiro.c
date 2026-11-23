@@ -542,7 +542,7 @@ out:
 
 /* pin a ksk_ key to its region (KIRO_API_REGION, else the one bootstrap region that accepts it) and probe its models */
 static char *login_api_key(const actx_t *c, char **err) {
-    auth_prompt_t q = {"Paste your Kiro API key", "ksk_...", false, true};
+    auth_prompt_t q = {.message = "Paste your Kiro API key", .placeholder = "ksk_...", .secret = true};
     char *input = actx_prompt_ex(c, &q, err);
     if (!input) return NULL;
     char *token = str_trim(input);
