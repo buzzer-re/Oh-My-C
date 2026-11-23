@@ -1609,7 +1609,7 @@ static json_t *model_json(const ai_model_t *m) {
             "supportsUsageInStreaming", "alwaysSendMaxTokens", "disableReasoningOnForcedToolChoice",
             "disableReasoningOnToolChoice", "disableReasoningWithTools", "supportsToolChoice", "supportsForcedToolChoice",
             "supportsNamedToolChoice", "maxTokensField", "requiresToolResultName", "requiresAssistantAfterToolResult",
-            "requiresThinkingAsText", "requiresMistralToolIds", "thinkingFormat", "reasoningDisableMode",
+            "foldUserAfterToolResult", "requiresThinkingAsText", "requiresMistralToolIds", "thinkingFormat", "reasoningDisableMode",
             "omitReasoningEffort", "includeEncryptedReasoning", "filterReasoningHistory", "reasoningContentField",
             "requiresReasoningContentForToolCalls", "requiresReasoningContentForAllAssistantTurns",
             "allowsSyntheticReasoningContentForToolCalls", "replayReasoningContent", "qwenPreserveThinking",

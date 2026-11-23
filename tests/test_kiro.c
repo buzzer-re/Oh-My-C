@@ -510,6 +510,35 @@ static void test_usage_parse(void) {
     json_free(p);
 }
 
+/* compat foldUserAfterToolResult (omp ec588c2710): user text after a tool result folds into it, at every position */
+static void test_fold_user(void) {
+    json_t *raw = J("{\"id\":\"g4\",\"api\":\"openai-completions\",\"provider\":\"openrouter\",\"baseUrl\":\"u\",\"input\":[\"text\"],"
+                    "\"compat\":{\"foldUserAfterToolResult\":true}}");
+    ai_model_t *m = catalog_model_variant(NULL, raw, true);
+    json_t *msgs = J("[{\"role\":\"user\",\"content\":\"go\",\"timestamp\":0},"
+                     "{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"c1\",\"name\":\"t\",\"arguments\":{}}],"
+                     "\"stopReason\":\"toolUse\",\"api\":\"openai-completions\",\"provider\":\"openrouter\",\"model\":\"g4\",\"timestamp\":1},"
+                     "{\"role\":\"toolResult\",\"toolCallId\":\"c1\",\"toolName\":\"t\",\"content\":[{\"type\":\"text\",\"text\":\"r\"}],"
+                     "\"isError\":false,\"timestamp\":2},{\"role\":\"user\",\"content\":\"more\",\"timestamp\":3},"
+                     "{\"role\":\"developer\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}],\"timestamp\":4},"
+                     "{\"role\":\"user\",\"content\":\"  \",\"timestamp\":5}]");
+    json_t *out = ai_transform_messages(msgs, m);
+    CHECK(json_len(out) == 3);
+    char *s = json_dump(json_get(json_at(out, 2), "content"), 0);
+    CHECK_STR(s, "[{\"type\":\"text\",\"text\":\"r\"},{\"type\":\"text\",\"text\":\"more\"},{\"type\":\"text\",\"text\":\"note\"}]");
+    free(s);
+    json_free(out);
+    json_set(m->raw, "compat", J("{\"foldUserAfterToolResult\":false}"));
+    catalog_model_free(m);
+    raw = J("{\"id\":\"g4\",\"api\":\"openai-completions\",\"provider\":\"openrouter\",\"baseUrl\":\"u\",\"input\":[\"text\"]}");
+    m = catalog_model_variant(NULL, raw, true);
+    out = ai_transform_messages(msgs, m);
+    CHECK(json_len(out) == 6);
+    json_free(out);
+    json_free(msgs);
+    catalog_model_free(m);
+}
+
 int main(void) {
     char tmpl[] = "/tmp/omc-kiro-XXXXXX";
     const char *td = getenv("TMPDIR");
@@ -525,6 +554,7 @@ int main(void) {
     test_transform();
     test_budget();
     test_usage_parse();
+    test_fold_user();
     free(agent);
     free(home);
     printf("test_kiro: %d checks, %d failures\n", g_checks, g_fail);
