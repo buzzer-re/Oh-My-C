@@ -167,6 +167,7 @@ static void ui_apply_event(void *ud) {
         break;
     }
     case AGENT_EV_AGENT_END:
+        ui_retry_restore_hidden(u);
         ui_signals_agent_end(e->msg); /* settled when the worker ends (worker_done) */
         ui_working_stop(u);
         toolcard_run_end();

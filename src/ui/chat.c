@@ -1332,6 +1332,24 @@ static msgview_t *last_view(ui_t *u) {
 
 static int working_mode(ui_t *u);
 
+/* whether `v` is still a transcript view (a rebuild destroys views) */
+static bool chat_holds(ui_t *u, msgview_t *v) {
+    for (size_t i = 0; i < u->chat->children.n; i++)
+        if (u->chat->children.v[i] == &v->base) return true;
+    return false;
+}
+
+/* attempts a pending retry hid and the saga never accounted for (a cancelled wait): their errors show again */
+void ui_retry_restore_hidden(ui_t *u) {
+    for (size_t i = 0; i < u->retry_hidden.n; i++) {
+        msgview_t *v = u->retry_hidden.v[i];
+        if (v == u->pinned_error || !chat_holds(u, v)) continue;
+        v->error_pinned = false;
+        v->dirty = true;
+    }
+    u->retry_hidden.n = 0;
+}
+
 /* auto_retry_end success: the failed attempts of this run (newest last) take the recovery notes
  * ("\n"-separated, oldest first) and the pinned error banner goes away */
 void ui_retry_recovered(ui_t *u, const char *notes) {
@@ -1357,6 +1375,7 @@ void ui_retry_recovered(ui_t *u, const char *notes) {
         if (u->pinned_error == mv) u->pinned_error = NULL;
     }
     strvec_free(&v);
+    u->retry_hidden.n = 0;
     ui_error_banner_clear(u);
 }
 
@@ -1382,6 +1401,7 @@ void ui_retry_failed(ui_t *u, int attempts, const char *final_error, const char 
         tui_component_destroy(c);
     }
     if (last && u->pinned_error == last) u->pinned_error = NULL;
+    u->retry_hidden.n = 0;
     ui_error_banner_clear(u);
     char *m = xasprintf("Retry failed after %d attempts: %s", attempts, error);
     add_notice(u, "error", m);
@@ -1483,7 +1503,16 @@ void add_notice(ui_t *u, const char *level, const char *text) {
                     break;
                 }
             }
-            ui_working_retry(u, at, max, secs * 1000);
+            /* the failed attempt is not the turn's outcome while a retry is pending: its banner unpins and its inline
+             * error stays hidden, so a recovered retry leaves no error in the transcript; the retry row names the
+             * reason (omp 5ad164a69e) */
+            if (u->pinned_error) {
+                vec_push(&u->retry_hidden, u->pinned_error);
+                u->pinned_error = NULL;
+            }
+            ui_error_banner_clear(u);
+            const char *colon = strstr(text, "s: ");
+            ui_working_retry(u, at, max, secs * 1000, colon ? colon + 3 : NULL);
             return;
         }
     }
@@ -1716,6 +1745,7 @@ typedef struct {
     char *message;
     int retry_attempt, retry_max;
     int64_t retry_delay;
+    char *retry_reason; /* previewLine(sanitizeText(errorMessage), 80); NULL when blank */
     char *compaction_label;
 } working_t;
 
@@ -1760,8 +1790,10 @@ static void working_render(tui_component_t *c, int width, strvec_t *out) {
         char d[32];
         int64_t left = w->retry_delay - (mono_ms() - w->started);
         format_duration(d, sizeof d, left);
-        char *msg = xasprintf("Retrying (%d/%d) in %s\xe2\x80\xa6 (%s to cancel)", w->retry_attempt, w->retry_max, d,
-                              tui_sym("key.esc"));
+        char *msg = w->retry_reason ? xasprintf("Retrying (%d/%d) in %s \xc2\xb7 %s (%s to cancel)", w->retry_attempt, w->retry_max, d,
+                                                w->retry_reason, tui_sym("key.esc"))
+                                    : xasprintf("Retrying (%d/%d) in %s\xe2\x80\xa6 (%s to cancel)", w->retry_attempt, w->retry_max, d,
+                                                tui_sym("key.esc"));
         tui_fg(&b, th, TUI_TC_MUTED, msg);
         free(msg);
     } else {
@@ -1793,6 +1825,7 @@ static void working_destroy(tui_component_t *c) {
     working_t *w = (working_t *)c;
     working_timer(w, 0);
     free(w->message);
+    free(w->retry_reason);
     free(w->compaction_label);
     free(w);
 }
@@ -1858,11 +1891,22 @@ void ui_working_compaction(ui_t *u, const char *label) {
     tui_request_render(u->tui);
 }
 
-void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms) {
+void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms, const char *reason) {
     u->retry_hint = false; /* the loader takes the status row (disposeChildren) */
     working_t *w = (working_t *)u->working;
     if (!w) return;
     w->mode = 2;
+    free(w->retry_reason);
+    w->retry_reason = NULL;
+    if (reason) { /* previewLine: flattened to one line, at most 80 columns */
+        char *san = tc_sanitize_line(reason);
+        for (char *q = san; *q; q++)
+            if (*q == '\n' || *q == '\r') *q = ' ';
+        char *t = str_trim(san);
+        free(san);
+        if (*t) w->retry_reason = tui_truncate_to_width(t, 80, NULL);
+        free(t);
+    }
     loader_visible(u, false);
     w->retry_attempt = attempt;
     w->retry_max = max;

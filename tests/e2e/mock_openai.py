@@ -10,6 +10,8 @@ Display commands (used by tests/tui/compare.sh to exercise transcript views):
   - "fail:<status>:<msg>"    reply with an HTTP error (non-retryable for 400/401/403/404); a <msg> containing ZEROALLOW
                              adds `x-ratelimit-limit-req-minute: 0`
   - "streamfail:<text>"      stream <text>, then an in-stream error chunk
+  - "failfor:<secs>:<status>:<msg>|<prompt>" requests for this prompt within <secs> of the first reply like "fail:"
+                             (the transport's immediate retries included), later ones answer <prompt> like a prompt
   - "chunks:<JSON list>"     one content delta per string as is (a ["r", <text>] item is a reasoning_content delta)
   - "seq:[[tool, args], ...]" one tool call per turn, in order, then the usual "Tool said:" answer; a later step written
     as a list of [tool, args] pairs is several calls in one assistant message
@@ -63,6 +65,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG = os.environ.get("MOCK_LOG")
 DELAY = float(os.environ.get("MOCK_DELAY") or 0)
+FAILED_SINCE = {}  # "failfor:" prompt -> when it first failed
 FAIL_RETRY_AFTER = os.environ.get("MOCK_FAIL_RETRY_AFTER_MS", "0")
 STALL_SECS = float(os.environ.get("MOCK_STALL_SECS") or 60)
 SLOT_SECS = float(os.environ.get("MOCK_SLOT_SECS") or 0)
@@ -197,6 +200,16 @@ class H(BaseHTTPRequestHandler):
             lu = "fail:" + os.environ["MOCK_PROBE_STATUS"] + ":probe failure"
         if body.get("model") == "mock-prefill":  # a local server's memory guard worded as an overflow, on a tiny prompt
             lu = "fail:400:rejected this prompt: prefill context length exceeded by the memory guard"
+        if lu.startswith("failfor:"):  # fail every attempt for a while, then answer the next one
+            secs, _, rest = lu[8:].partition(":")
+            spec, _, after = rest.partition("|")
+            first = FAILED_SINCE.setdefault(lu, time.time())
+            if time.time() - first < float(secs or 1):
+                lu = "fail:" + spec
+            else:
+                last = dict(last, content=after)
+                msgs = msgs[:-1] + [last]
+                lu = after
         if lu.startswith("fail:"):
             st, _, m = lu[5:].partition(":")
             b = json.dumps({"error": {"message": m or "mock failure", "type": "invalid_request_error", "code": int(st or 400)}}).encode()

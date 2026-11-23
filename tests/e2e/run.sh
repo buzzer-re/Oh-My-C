@@ -715,6 +715,8 @@ if python3 -c 'import pty' 2>/dev/null; then
     mkdir -p "$T/ask_form" && check "tui ask form" "ask form tui ok"  python3 -I "$ROOT/tests/e2e/ask_form_tui.py" "$B" "$T/req.jsonl" "$T/ask_form"
     # manual retry (omp TurnRecovery.retry, syncRetryHintRow): the idle "F5 to retry" row, tool replay, -c, nothing to retry
     mkdir -p "$T/retry_tui" && check "tui retry"  "retry tui ok"  python3 -I "$ROOT/tests/e2e/retry_tui.py" "$B" "$T/req.jsonl" "$T/retry_tui"
+    # quieter auto-retries: the retry row names the reason, the failed attempt's error stays out of the transcript (omp 5ad164a69e)
+    mkdir -p "$T/retry_quiet" && check "tui quiet retry"  "retry quiet ok"  python3 -I "$ROOT/tests/e2e/retry_quiet_tui.py" "$B" "$T/retry_quiet"
     check "tui fs stall"  "fs stall ok"  python3 -I "$ROOT/tests/e2e/fs_stall_tui.py" "$B" "$T/fs_stall"
 fi
 check "acp file cmd"   "stop end_turn"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/init"
