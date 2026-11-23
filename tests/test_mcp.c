@@ -358,8 +358,36 @@ static void test_failure_diagnostics(void) {
     mcp_fail_free(&f);
 }
 
+/* timeout.ts resolveMCPRequestDeadline for tools/call and requestedToolTimeoutMs (omp e86bc4fe6e) */
+static void test_tool_call_deadlines(void) {
+    unsetenv("OMP_MCP_TIMEOUT_MS");
+    unsetenv("OMC_MCP_TIMEOUT_MS");
+    int64_t t, cap;
+    json_t *none = json_parse_str("{}"), *cfg45 = json_parse_str("{\"timeout\":45000}"), *cfg30 = json_parse_str("{\"timeout\":30000}");
+    mcp_tool_call_deadline(none, none, &t, &cap);
+    CHECK(t == 600000 && cap == 3600000);
+    mcp_tool_call_deadline(cfg45, none, &t, &cap);
+    CHECK(t == 45000 && cap == 45000);
+    static const struct { const char *args; int64_t want; } v[] = {
+        {"{\"timeout\":1500000}", 1530000}, {"{\"timeoutInSeconds\":120}", 150000}, {"{\"wait_seconds\":45}", 75000},
+        {"{\"timeout_ms\":90000}", 120000}, {"{\"timeout\":5}", 35000}, {"{\"limit\":999999}", 30000}};
+    for (size_t i = 0; i < sizeof v / sizeof v[0]; i++) {
+        json_t *a = json_parse_str(v[i].args);
+        mcp_tool_call_deadline(cfg30, a, &t, &cap);
+        if (t != v[i].want) fprintf(stderr, "deadline %s: %lld\n", v[i].args, (long long)t);
+        CHECK(t == v[i].want);
+        json_free(a);
+    }
+    setenv("OMP_MCP_TIMEOUT_MS", "2000", 1);
+    mcp_tool_call_deadline(none, none, &t, &cap);
+    CHECK(t == 2000 && cap == 2000);
+    unsetenv("OMP_MCP_TIMEOUT_MS");
+    json_free(none), json_free(cfg45), json_free(cfg30);
+}
+
 int main(void) {
     test_failure_diagnostics();
+    test_tool_call_deadlines();
     char tmpl[] = "/tmp/omc-test-mcp-XXXXXX";
     const char *tmp = getenv("TMPDIR");
     char *dir_t = tmp ? xasprintf("%s/omc-test-mcp-XXXXXX", tmp) : xstrdup(tmpl);

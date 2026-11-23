@@ -42,6 +42,7 @@
 #include "tools/gh.h"
 #include "mcp/mcp.h"
 #include "prompt/template.h"
+#include "ai/compat_detect.h"
 #include "ai/anthropic_threads.h"
 #include "ai/responses_ws.h"
 #include "ai/kiro.h"
@@ -291,9 +292,34 @@ static void report_persist_error(app_t *a) {
     free(e);
 }
 
+static void resolve_auto_thinking(app_t *a, ai_effort_t e);
+
+/* provider-refusal.ts providerRefusalData: what the refused turn looked like (no fallback-credit token or handle) */
+static json_t *provider_refusal_data(const json_t *m) {
+    const json_t *sd = json_get_obj(m, "stopDetails");
+    json_t *d = json_obj();
+    static const char *const head[] = {"api", "provider", "model"};
+    for (size_t i = 0; i < ARRAY_LEN(head); i++)
+        if (json_get(m, head[i])) json_set(d, head[i], json_clone(json_get(m, head[i])));
+    const char *st = json_get_str(sd, "type");
+    json_set_str(d, "stopType", st ? st : json_get_str(m, "stopReason"));
+    if (json_get_str(sd, "category")) json_set_str(d, "category", json_get_str(sd, "category"));
+    if (json_get_str(sd, "explanation")) json_set_str(d, "explanation", json_get_str(sd, "explanation"));
+    static const char *const tail[] = {"errorMessage", "responseId", "demotedReasoningBlocks", "usage", "timestamp",
+                                       "duration", "ttft", "content"};
+    for (size_t i = 0; i < ARRAY_LEN(tail); i++)
+        if (json_get(m, tail[i]) && !json_is_null(json_get(m, tail[i]))) json_set(d, tail[i], json_clone(json_get(m, tail[i])));
+    return d;
+}
+
 static void on_agent_event(void *ud, const agent_event_t *ev) {
     app_t *a = ud;
     if (ev->type == AGENT_EV_AGENT_START) strvec_free(&a->retry_notes);
+    /* settleAutoThinkingLevel: a run no classification resolved (IRC wakes, resumed, agent-originated and synthetic
+     * turns) publishes the level it thinks at as the auto resolution; the next user turn still reclassifies */
+    if (ev->type == AGENT_EV_AGENT_START && a->auto_thinking && a->auto_resolved < 0 && a->model && a->model->reasoning &&
+        a->thinking != EFFORT_OFF)
+        resolve_auto_thinking(a, a->thinking);
     if ((ev->type == AGENT_EV_AGENT_START || ev->type == AGENT_EV_TURN_START) && a->rewind_graveyard) {
         json_free(a->rewind_graveyard);
         a->rewind_graveyard = NULL;
@@ -421,7 +447,14 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
             }
         }
         const char *ctype = json_get_str(ev->message, "customType");
-        if (prewalk_is_plan_nudge(ev->message)) {
+        const char *sdt = json_get_str(json_get_obj(ev->message, "stopDetails"), "type");
+        bool refused = str_eq(role, "assistant") && str_eq(json_get_str(ev->message, "stopReason"), "error") &&
+                       (str_eq(sdt, "refusal") || str_eq(sdt, "sensitive"));
+        if (refused) {
+            /* provider-refusal.ts: a classifier-refused turn never becomes a session message (replaying it feeds the
+             * classifier its own verdict); a provider_refusal custom entry keeps it inspectable, out of context */
+            if (a->session) session_append_custom(a->session, "provider_refusal", provider_refusal_data(ev->message));
+        } else if (prewalk_is_plan_nudge(ev->message)) {
             /* one-run instruction: never returns from persisted history */
         } else if (role && a->session && ctype && (str_eq(role, "user") || str_eq(role, "developer"))) {
             /* hidden steering (goal context, continuations, budget limits, guard notices) persists as custom_message
@@ -784,9 +817,15 @@ static json_t *hook_transform_inner(void *ud, agent_t *ag, const json_t *message
 static json_t *hook_transform(void *ud, agent_t *ag, const json_t *messages) {
     json_t *r = hook_transform_inner(ud, ag, messages);
     json_t *o = omit_images_for_model(r ? r : messages, ag->model);
-    if (!o) return r;
+    if (o) {
+        json_free(r);
+        r = o;
+    }
+    /* sdk.ts filterProviderReplayMessages(convertToLlmWithBlockImages(...)) */
+    json_t *p = agent_provider_replay(r ? r : messages);
+    if (!p) return r;
     json_free(r);
-    return o;
+    return p;
 }
 
 static json_t *hook_transform_inner(void *ud, agent_t *ag, const json_t *messages) {
@@ -1408,10 +1447,33 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
                                        tr_unexecuted_tool_calls_replay_safe(assistant, committed, 0));
     int again = preserve ? AGENT_RETRY_PRESERVE : AGENT_RETRY_REPLAY;
     if (!settings_bool("retry.enabled", true)) return false;
-    if (attempt == 0) a->retry_offset = 0;
+    if (attempt == 0) {
+        a->retry_offset = 0;
+        a->refusal_resampled = false;
+    }
     int max = (int)settings_int("retry.maxRetries", 10);
     int saga = attempt - a->retry_offset + 1; /* omp #retryAttempt after its increment */
     bool exhausted = saga > max;
+    /* a reasoning_extraction refusal that stopped output already streaming judged that sample, not the request: the
+     * same request on this model answers on the next try. Resampled at once, once per saga, before any fallback
+     * (omp 92fe816a0e) */
+    const json_t *rsd = json_get_obj(assistant, "stopDetails");
+    if (retryable && !exhausted && !a->refusal_resampled && str_eq(json_get_str(rsd, "type"), "refusal") &&
+        str_eq(json_get_str(rsd, "category"), "reasoning_extraction")) {
+        bool streamed = false;
+        const json_t *blk;
+        json_arr_foreach(json_get(assistant, "content"), bi, blk) {
+            const char *bt = json_get_str(blk, "type");
+            const char *bs = str_eq(bt, "thinking") ? json_get_str(blk, "thinking") : str_eq(bt, "text") ? json_get_str(blk, "text") : NULL;
+            if (str_eq(bt, "toolCall")) streamed = true;
+            for (const char *c = bs; c && *c && !streamed; c++) streamed = !isspace((unsigned char)*c);
+        }
+        if (streamed) {
+            a->refusal_resampled = true;
+            LOGI("Classifier refused a turn mid-stream; resampling it on the same model");
+            return again;
+        }
+    }
     bool usage_limit = is_usage_limit(err);
     /* an account out of money has no reset to wait for: fallbacks still run, then the provider's error surfaces and
      * the error frame's Retry re-attempts at once */
@@ -1453,7 +1515,8 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     int64_t maxd = settings_int("retry.maxDelayMs", 5 * 60 * 1000);
     if (billing_cap || (maxd > 0 && delay > (double)maxd)) {
         char *fe = billing_cap ? xstrdup(err)
-                               : xasprintf("Provider requested %.0fms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
+                               : xasprintf("%s %.0fms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
+                                           hint >= 0 && delay == (double)hint ? "Provider requested" : "Retry requires",
                                            ceil(delay), (long long)maxd, err ? err : "error");
         json_t *ev = json_obj();
         json_set_str(ev, "type", "auto_retry_end");
@@ -1588,6 +1651,20 @@ void app_sync_queue_modes(app_t *a) {
     a->agent->interrupt_wait = str_eq(settings_str("interruptMode", "immediate"), "wait");
 }
 
+/* tool_approval_resolved: the wait ended (approved, denied, aborted, or refused for lack of a UI) */
+static void approval_record_resolved(app_t *a, const char *call_id, const char *name, bool approved, const char *why) {
+    if (!a->session) return;
+    json_t *d = json_obj();
+    json_set_str(d, "toolCallId", call_id);
+    json_set_str(d, "toolName", name);
+    json_set_bool(d, "approved", approved);
+    if (why) json_set_str(d, "reason", why);
+    char *at = iso8601_now();
+    json_set_str(d, "resolvedAt", at);
+    free(at);
+    session_append_custom(a->session, "tool_approval_resolved", d);
+}
+
 /* the extension wrapper's approval gate (extensibility/extensions/wrapper.ts execute): resolve against the
  * validated input, deny, or prompt through the UI (requestApproval) and remember what the answer covers */
 static tool_gate_t hook_approve_tool(void *ud, agent_t *ag, const json_t *call, const json_t *args, char **reason) {
@@ -1619,7 +1696,23 @@ static tool_gate_t hook_approve_tool(void *ud, agent_t *ag, const json_t *call, 
     bool cache_targets = grantable && targets.n > 0;
     bool scoped = !cache_targets && approval_session_scope(&r, name, &scope_subject, &scope_key);
     if (scoped && approval_session_has(sid, scope_key)) goto done;
+    /* tool-approval-records.ts: the wait is on disk before the prompt opens (the session file is created when no
+     * assistant message wrote it yet), so a process reading the file sees a session blocked on the user */
+    const char *call_id = json_get_str(call, "id") ? json_get_str(call, "id") : "";
+    if (a->session) {
+        json_t *rq = json_obj();
+        json_set_str(rq, "toolCallId", call_id);
+        json_set_str(rq, "toolName", name);
+        json_set_str(rq, "approvalMode", approval_mode_name(ctx.mode));
+        if (r.reason && *r.reason) json_set_str(rq, "reason", r.reason);
+        char *at = iso8601_now();
+        json_set_str(rq, "requestedAt", at);
+        free(at);
+        session_ensure_on_disk(a->session);
+        session_append_custom(a->session, "tool_approval_requested", rq);
+    }
     if (!a->env->ui.approve) {
+        approval_record_resolved(a, call_id, name, false, "no interactive UI available");
         if (r.source == ASRC_RESTRICTION)
             *reason = xasprintf("Tool \"%s\" requires approval but no interactive UI available.\nReason: %s\nA restricted "
                                 "folder (tools.restrictedFolders) asks in every approval mode.",
@@ -1648,6 +1741,9 @@ static tool_gate_t hook_approve_tool(void *ud, agent_t *ag, const json_t *call, 
         *reason = xasprintf("Tool call denied by user: %s", name);
         gate = TOOL_BLOCK;
     }
+    /* an abort (Esc, a session switch) closes the prompt as a refusal too */
+    approval_record_resolved(a, call_id, name, gate == TOOL_ALLOW,
+                             gate == TOOL_ALLOW ? NULL : ag->cancel ? "approval aborted" : "denied by user");
     approval_prompt_free(&p);
 done:
     strvec_free(&targets);
@@ -1693,10 +1789,9 @@ static void install_agent(app_t *a) {
         mcp_open_tool_scope(a->mcp, ag->mcp_scope, a->opts.mcp_seed_scope);
     }
     if (a->mcp && !a->opts.no_tools) mcp_register_tools(a->mcp, ag);
-    /* subagents get lsp only with task.enableLsp (task/index.ts enableLsp, off by default) */
-    bool lsp_ok = !a->opts.no_tools && settings_bool("lsp.enabled", true) &&
-                  (!a->opts.subagent || settings_bool("task.enableLsp", false)) &&
-                  (!a->opts.tools || strvec_contains(a->opts.tools, "lsp"));
+    /* subagents always get the lsp tool; task.enableLsp (off by default) only gates the formatting / diagnostics
+     * writethrough on their edits (executor.ts subagentLspWritethroughSettings, omp 3312e428d0) */
+    bool lsp_ok = !a->opts.no_tools && settings_bool("lsp.enabled", true) && (!a->opts.tools || strvec_contains(a->opts.tools, "lsp"));
     if (lsp_ok) {
         if (!a->lsp && a->opts.lsp) a->lsp = a->opts.lsp;
         if (!a->lsp) {
@@ -1704,8 +1799,10 @@ static void install_agent(app_t *a) {
             a->owns_lsp = true;
         }
         agent_add_tool(ag, tool_lsp_new(a->env, a->lsp));
-        a->env->after_write = app_after_write;
-        a->env->after_edit = app_after_edit;
+        if (!a->opts.subagent || settings_bool("task.enableLsp", false)) {
+            a->env->after_write = app_after_write;
+            a->env->after_edit = app_after_edit;
+        }
     }
     /* checkpoint/rewind: off by default (checkpoint.enabled); top-level sessions or explicit lists; paired */
     if (!a->opts.no_tools && settings_bool("checkpoint.enabled", false) &&
@@ -1915,8 +2012,12 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (!o->subagent) {
         modelctl_apply_context_policy();
         modelctl_watch_settings();
-        /* prompt-cache warmer for the main agent loop only (spawned sessions opt out) */
-        a->warmer = cachewarm_new(a);
+        /* prompt-cache warmer for the main agent loop */
+        a->warmer = cachewarm_new(a, "idle");
+        settings_on_change(warm_settings_changed, a);
+    } else {
+        /* task subagents bridge their long tool waits but never warm after they settle; the user's "off" still wins */
+        a->warmer = cachewarm_new(a, "streaming");
         settings_on_change(warm_settings_changed, a);
     }
     a->cwd = o->cwd ? path_abs(o->cwd, NULL) : get_cwd();
@@ -2225,6 +2326,7 @@ int app_set_model(app_t *a, const char *pattern, char **err) {
 void app_use_model(app_t *a, const ai_model_t *m) { app_apply_model(a, m, false, EFFORT_OFF); }
 
 static void apply_model_role(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e, const char *role);
+static void reapply_thinking(app_t *a, const ai_model_t *prev);
 
 void app_use_model_role(app_t *a, const ai_model_t *m, const char *role) { apply_model_role(a, m, false, EFFORT_OFF, role); }
 
@@ -2242,11 +2344,11 @@ static void apply_model_role(app_t *a, const ai_model_t *m, bool has_e, ai_effor
     char *uk = mr_model_key(m);
     mr_usage_record(uk);
     free(uk);
-    if (has_e) app_set_thinking(a, e);
-    else if (a->auto_thinking) app_set_thinking_auto(a); /* #reapplyThinkingLevel keeps auto, re-clamped */
     char *label = app_model_label(a);
     session_append_model_change(a->session, label, role);
     free(label);
+    if (has_e) app_set_thinking(a, e);
+    else reapply_thinking(a, prev_model); /* setModel: #reapplyThinkingLevel(the model's default as the fallback) */
     app_rebuild_system_prompt(a);
     app_model_state_changed(a, prev_model, prev_wire);
 }
@@ -2300,6 +2402,7 @@ bool app_set_thinking_level(app_t *a, const char *level) {
 
 void app_abort(app_t *a) {
     __atomic_add_fetch(&a->abort_gen, 1, __ATOMIC_SEQ_CST);
+    cmp_bg_abort(a); /* abort() cancels a background compaction too (abortCompaction) */
     agent_abort(a->agent);
     app_goal_on_abort(a);
 }
@@ -2356,8 +2459,9 @@ strvec_t app_cycle_order(void) {
     return v;
 }
 
-/* #reapplyThinkingLevel after a model change: keep auto (re-clamped), else the new model's
- * thinking.defaultLevel, else the level that was effective on the previous model, clamped to the new one
+/* #reapplyThinkingLevel after a model change: keep auto (re-clamped), else carry the level that was effective on
+ * the previous model, clamped to the nearest effort the new one supports; the new model's thinking.defaultLevel
+ * applies only when no level is set (the previous model had no thinking, omp's undefined level)
  * (automaticThinkingLevel: a provisional ladder follows it too, its probes run on the first request) */
 static void reapply_thinking(app_t *a, const ai_model_t *prev) {
     if (a->auto_thinking) {
@@ -2368,7 +2472,7 @@ static void reapply_thinking(app_t *a, const ai_model_t *prev) {
     if (!m) return;
     ai_effort_t base = prev ? model_clamp_effort(prev, a->thinking) : a->thinking, d;
     const char *dl = json_get_str(m->thinking, "defaultLevel");
-    if (dl && effort_parse(dl, &d) == 0) base = d;
+    if (prev && !prev->reasoning && dl && effort_parse(dl, &d) == 0) base = d;
     ai_effort_t eff = base == EFFORT_OFF ? EFFORT_OFF : model_clamp_effort(m, base);
     if (eff == a->thinking) return;
     if (prev && eff == model_clamp_effort(prev, a->thinking)) {
@@ -2450,24 +2554,6 @@ int app_cycle_role_model(app_t *a, bool backward) {
     }
     app_role_cycle_free(es, n);
     return res;
-}
-
-/* resolveTemporaryModelThinkingLevel: the explicit level of a configured role resolving to `m` (static) */
-const char *app_temporary_thinking(const ai_model_t *m) {
-    mr_pool_t avail = {0};
-    mr_pool_available(&avail, "all");
-    const char *lv = NULL;
-    strvec_t roles = mr_known_roles();
-    for (size_t i = 0; i < roles.n && !lv && avail.n; i++) {
-        const char *v = mr_role_get(roles.v[i]);
-        if (!v) continue;
-        mr_result_t r = {0};
-        if (mr_resolve_value(v, &avail, &r) && r.explicit_level && r.level && r.model == m) lv = r.level;
-        mr_result_clear(&r);
-    }
-    strvec_free(&roles);
-    mr_pool_free(&avail);
-    return lv;
 }
 
 int app_set_model_temporary(app_t *a, const ai_model_t *m, const char *level, const char *role, char **err) {
@@ -2696,9 +2782,17 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
     if (st && str_eq(json_get_str(st, "role"), "assistant") && json_is_arr(json_get(st, "content"))) {
         json_t *blocks = json_arr(), *blk;
         sb_t txt = SB_INIT;
+        /* a thinking block still streaming has no signature: a reader whose classifier refuses quoted reasoning
+         * (snapcompact readerIncludesThinking: catalog classifierCotExtraction, Claude) gets none of those */
+        const json_t *cot = compat_catalog_policy(model->provider, model->api, model->id, "classifierCotExtraction");
+        bool keep_unsigned = !(json_is_bool(cot) && cot->u.b);
         json_arr_foreach(json_get(st, "content"), i, blk) {
             const char *t = json_get_str(blk, "type");
-            if (str_eq(t, "thinking")) json_push(blocks, json_clone(blk));
+            const char *sig = json_get_str(blk, "thinkingSignature");
+            char *sig_t = sig ? str_trim(sig) : NULL;
+            bool signed_blk = sig_t && *sig_t;
+            free(sig_t);
+            if (str_eq(t, "thinking") && (keep_unsigned || signed_blk)) json_push(blocks, json_clone(blk));
             else if (str_eq(t, "text") && json_get_str(blk, "text")) sb_append(&txt, json_get_str(blk, "text"));
         }
         if (txt.len) json_push(blocks, text_block(sb_cstr(&txt)));

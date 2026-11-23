@@ -77,9 +77,11 @@ struct app {
     int64_t last_context_tokens;
     bool compacting;
     struct cmp_spec *cmp_spec; /* background speculative compaction run (compaction.c), NULL when idle */
+    struct cmp_bg *cmp_bg;     /* background (handoff) compaction in flight (compaction.c), NULL when idle */
     bool title_done;
     int retry_count;
     int retry_offset;
+    bool refusal_resampled; /* turn-recovery.ts #midStreamRefusalResampled: this saga resampled a mid-stream refusal */
     int retry_saga; /* attempt of the last auto_retry_start (0: no retry saga open) */
     char *prompt_refusal; /* why the last APP_PROMPT_REFUSED prompt was refused (owned) */
     char *cost_refusal;   /* a subagent's cost-cap refusal of a mid-run model request (owned; costgate.c) */
@@ -393,7 +395,6 @@ int app_remove_workspace_dir(app_t *a, const char *dir, char **resolved);       
 char *app_workspace_dirs_text(app_t *a, const char *note);
 /* resolveToCwd for a user-typed path (~, absolute, "/" = cwd) (owned) */
 char *app_resolve_user_path(app_t *a, const char *p);
-int app_handoff(app_t *a, const char *focus, char **err); /* handoff document (+ focus instructions) + compact in place */
 /* AgentSession.retry (turn-recovery.ts retry): with the agent idle, strip the failed/aborted last turn (and its
  * synthetic tool results) from context, or, for a fully failed tool batch, its results (the session leaf moves back
  * to the calling turn) so the continuation re-executes the calls; a restored session whose context already lost the
@@ -474,8 +475,6 @@ void app_apply_role_entry(app_t *a, const app_role_entry_t *e);
 /* setModelTemporary: session-only switch (model_change role "temporary" unless `role`), never persisted;
  * `level` an explicit thinking selector or NULL (keep / re-clamp). -1 + *err "No API key for p/id" */
 int app_set_model_temporary(app_t *a, const ai_model_t *m, const char *level, const char *role, char **err);
-/* resolveTemporaryModelThinkingLevel: explicit level of a configured role that resolves to `m` (static) */
-const char *app_temporary_thinking(const ai_model_t *m);
 /* a role's model (resolveModelRoleValue("@role") over its candidate pool) */
 const ai_model_t *app_role_model(const char *role, ai_effort_t *effort_out, bool *has_effort);
 /* first answer from `models` (skipping the session model), then the session model; owned or NULL */

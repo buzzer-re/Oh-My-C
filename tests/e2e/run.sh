@@ -420,6 +420,14 @@ check "mcp tool eof"   'Tool said: MCP failure\nserver: mockmcp\ntool: echo_text
     "$B" --model mock/mock-1 --mode json -p 'call:mcp__mockmcp_echo_text:{"text":"__crash__"}'
 check "mcp tool rpc"   'message: MCP error -32000: boom Bearer [redacted]\ncode: -32000\ntrace_id: req-42\ndata: {\"requestId\":\"req-42\",\"apiKey\":\"[redacted]\",\"detail\":\"x?token=[redacted]\",\"n\":[1,2]}\nnext: Address the server-reported MCP error before retrying.' \
     "$B" --model mock/mock-1 --mode json -p 'call:mcp__mockmcp_echo_text:{"text":"__rpcerror__"}'
+# tools/call carries a progress token (progress restarts its deadline); a configured timeout is a hard cap with omp's
+# next step; an expired session is re-initialized and the call retried once (omp e86bc4fe6e)
+check "mcp progress token" 'Tool said: meta {"progressToken": '  "$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"__meta__"}'
+check "mcp expired session" 'recovered after re-initialize'  "$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"__expired__"}'
+printf '{"mcpServers":{"mockmcp":{"command":"python3","args":["-I","%s"],"timeout":1000}}}' "$ROOT/tests/e2e/mock_mcp.py" > "$T/agent/mcp.json"
+check "mcp call timeout" 'failure: timeout\nretryable: no\nmessage: Request timeout after 1000ms\nnext: Raise this server'"'"'s `timeout` (ms) in its MCP config or set OMP_MCP_TIMEOUT_MS; the request outcome is unknown.' \
+    "$B" --model mock/mock-1 --mode json -p 'call:mcp__mockmcp_echo_text:{"text":"__slow__"}'
+printf '{"mcpServers":{"mockmcp":{"command":"python3","args":["-I","%s"]}}}' "$ROOT/tests/e2e/mock_mcp.py" > "$T/agent/mcp.json"
 # MCP results as omp's buildResult renders them: structured content as a fenced JSON block unless a text block
 # carries it (an SDK {result: [...]} wrapper matching item by item: omp 3e2ba2dd2c), "Error: " lead, [Resource: uri]
 check "mcp wrapped list" 'Tool said: a'  "$B" --model mock/mock-1 -p 'call:mcp__mockmcp_echo_text:{"text":"struct:list"}'
@@ -448,6 +456,9 @@ check "mcp oauth tool"  "authorized as tok-1"  "$B" --model mock/mock-1 -p 'call
 check "mcp oauth list"  "[oauth: logged in]"  "$B" mcp list
 python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); [v.update(expires=1) for k,v in d.items() if k.startswith("mcp:")]; json.dump(d,open(p,"w"))' "$T/agent/auth.json"
 check "mcp oauth refresh" "authorized as tok-2"  "$B" --model mock/mock-1 -p 'call:mcp__oa_whoami:{}'
+# a closed registration endpoint (403) names the endpoint, the status and the body's first line (omp d08f8f6c09)
+printf '{"mcpServers":{"dn":{"type":"http","url":"http://127.0.0.1:%s/deny/mcp"}}}' $OPORT > "$T/agent/mcp.json"
+check "mcp oauth dcr rejected" "OAuth provider requires client_id, and dynamic client registration was rejected (POST http://127.0.0.1:$OPORT/deny/register → HTTP 403 — Forbidden). The server likely restricts registration to pre-approved clients."  env OMC_NO_BROWSER=1 "$B" mcp login dn
 kill $OPID $LPID 2>/dev/null; rm -f "$T/agent/mcp.json"
 # persistent bash: state survives across calls in one session
 check "bash persists"  "FOO=kept"  bash -c "( printf '%s\n' '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"bash:export FOO=kept\"}'; sleep 2; printf '%s\n' '{\"id\":\"2\",\"type\":\"prompt\",\"message\":\"bash:echo FOO=\$FOO\"}'; sleep 2 ) | '$B' --model mock/mock-1 --mode rpc"
@@ -530,6 +541,8 @@ printf 'goal:\n  continuationModes: ["rpc"]\n' > "$T/agent/config.yml"
 check "goal continue"  '"customType":"goal-continuation"'  bash -c "( echo '{\"id\":\"g\",\"type\":\"goal\",\"op\":\"create\",\"objective\":\"Ship it\"}'; sleep 0.5; echo '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"bash:echo step\"}'; sleep 4 ) | '$B' --model mock/mock-1 --mode rpc"
 check "goal resumed paused" '"status":"paused"'  bash -c "( echo '{\"id\":\"s\",\"type\":\"goal\",\"op\":\"get\"}'; sleep 1 ) | '$B' --model mock/mock-1 -c --mode rpc"
 check "goal complete"  'Status: complete'  bash -c "( echo '{\"id\":\"r\",\"type\":\"goal\",\"op\":\"resume\"}'; sleep 0.5; echo '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"call:goal:{\\\"op\\\":\\\"complete\\\"}\"}'; sleep 3 ) | '$B' --model mock/mock-1 -c --mode rpc"
+# the goal tool's pause op stops continuation while blocked on the user (omp e86bc4fe6e)
+check "goal pause op"  'Status: paused'  bash -c "( echo '{\"id\":\"g\",\"type\":\"goal\",\"op\":\"create\",\"objective\":\"Wait for the user\"}'; sleep 0.5; echo '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"call:goal:{\\\"op\\\":\\\"pause\\\"}\"}'; sleep 3 ) | timeout 20 '$B' --model mock/mock-1 --no-session --mode rpc"
 rm -f "$T/agent/config.yml"
 # advisor: shadow model reviews the turn, its concern continues the run as an <advisory>
 # omp resolves the advisor only through the `advisor` role (no fallback to the session model)
@@ -662,6 +675,15 @@ for c in init configOptions bootstrap "fs read" "fs write" terminal usage_update
 done
 # tool approval (WP-10): tools.approvalMode tiers, tools.approval policies, restricted folders, CLI flags
 check "approval no ui" 'Tool "bash" requires approval but no interactive UI available.'  "$B" --model mock/mock-1 --no-session --approval-mode always-ask -p "bash:echo x"
+# the wait is recorded in the session file (tool_approval_requested / _resolved custom entries, omp 2ecc358ae5)
+mkdir -p "$T/apagent" && cp "$T/agent/models.yml" "$T/apagent/"
+OMC_CODING_AGENT_DIR="$T/apagent" timeout 30 "$B" --model mock/mock-1 --approval-mode always-ask -p "bash:echo x" </dev/null >/dev/null 2>&1
+check "approval records" "requested=bash/always-ask resolved=False/no interactive UI available same=True"  python3 -I -c '
+import json,glob,sys
+es=[json.loads(l) for f in glob.glob(sys.argv[1]+"/sessions/*/*.jsonl") for l in open(f) if l.strip()]
+c=lambda t:[e["data"] for e in es if e.get("type")=="custom" and e.get("customType")==t]
+q,r=c("tool_approval_requested"),c("tool_approval_resolved")
+print("requested=%s/%s resolved=%s/%s same=%s" % (q[0]["toolName"], q[0]["approvalMode"], r[0]["approved"], r[0].get("reason"), q[0]["toolCallId"]==r[0]["toolCallId"] and "requestedAt" in q[0]))' "$T/apagent"
 check "approval write" "Successfully wrote 3 bytes to ap.txt"  "$B" --model mock/mock-1 --no-session --approval-mode=write -p "write:ap.txt:abc"
 check "approval yolo"  "Tool said: yolo-ok"  "$B" --model mock/mock-1 --no-session --approval-mode always-ask --yolo -p "bash:echo yolo-ok"
 check "approval flag"  'Invalid --approval-mode value: "nope". Expected one of: always-ask, always-ask-cached, write, yolo.'  "$B" --approval-mode nope -p x
@@ -678,7 +700,7 @@ if python3 -c 'import pty' 2>/dev/null; then
     # WP-22b: "Waiting for background job …" row, Esc stops waiting, /agents hub (strips, enable/disable -> config.yml)
     check "agents tui" $'waiting ok\ndelivered ok\nwaiting again ok\nstop waiting ok\nfolded ok\nagents ok\nstrip ok\nmodel strip ok\nback ok\ntoggle ok\nconfig True\nenable ok\nclose ok'  python3 -I "$ROOT/tests/e2e/agents_tui.py" "$B" "$T/agent"
     # Alt+P model picker: Tab provider scopes, ←/→ thinking slider, the pick applies the slider's level (omp 94a10c5b22)
-    check "model picker tui" $'footer ok\nno thinking ok\nslider ok\nstep left ok\nprovider scope ok\nnext provider ok\nall again ok\nshift tab ok\npick applies level ok\npicked level kept ok\nstep right ok\nesc keeps level ok'  python3 -I "$ROOT/tests/e2e/model_picker_tui.py" "$B" "$T/mpick"
+    check "model picker tui" $'footer ok\nno thinking ok\nslider ok\nstep right ok\nprovider scope ok\nnext provider ok\nall again ok\nshift tab ok\npick applies level ok\npicked level kept ok\nstep right again ok\nesc keeps level ok'  python3 -I "$ROOT/tests/e2e/model_picker_tui.py" "$B" "$T/mpick"
     # WP-29: inline images per protocol, cache-miss marker, Ctrl+Shift+O tool activity, tui.mouse capture
     mkdir -p "$T/agent-disp" "$T/disp" && cp "$T/agent/models.yml" "$T/agent-disp/"
     check "display kitty" $'kitty transmit once ok\nkitty placement ok\ncache miss ok\nkitty placeholders ok'  env OMC_CODING_AGENT_DIR="$T/agent-disp" python3 -I "$ROOT/tests/e2e/display_tui.py" "$B" "$T/disp" kitty
@@ -701,6 +723,10 @@ check "rpc workspace"  "workspace rpc ok"  python3 -I "$ROOT/tests/e2e/workspace
 # model switching (WP-19): /switch, /modelpreset, prewalk handoff, in a throwaway agent dir
 mkdir -p "$T/agent-ms" && cp "$T/agent/models.yml" "$T/agent-ms/"
 check "rpc model switch" "ok prewalk session entries"  env OMC_CODING_AGENT_DIR="$T/agent-ms" python3 -I "$ROOT/tests/e2e/model_switch_rpc.py" "$B" "$T/agent-ms" "$T/req.jsonl"
+# switching models keeps the thinking level, clamped; a model's defaultLevel applies only when none is set (omp 5b4fb78a55)
+check "thinking carry" "thinking carry ok"  python3 -I "$ROOT/tests/e2e/thinking_carry_rpc.py" "$B" "$T/agent-tc" "$PORT"
+# /handoff runs as a background compaction: applied at the next turn boundary, the turn goes on (omp 9ed87e0c21)
+check "handoff background" "handoff bg ok"  python3 -I "$ROOT/tests/e2e/handoff_bg_rpc.py" "$B" "$T/agent-hb" "$T/req.jsonl"
 # custom commands (WP-9): file commands, prompt templates, /skill:, MCP prompts over RPC, ACP and print mode
 check "rpc commands"   "ok empty MCP prompt consumed"  python3 -I "$ROOT/tests/e2e/commands_rpc.py" "$B" "$T/req.jsonl" "$ROOT/tests/e2e/mock_mcp.py"
 # MCP and SSH management (WP-18): /mcp and /ssh over RPC (text mode) and in the TUI (wizard, test, cancel)
@@ -959,9 +985,12 @@ source "$ROOT/tests/e2e/settings.sh"
 source "$ROOT/tests/e2e/update.sh"
 source "$ROOT/tests/e2e/stall.sh"
 source "$ROOT/tests/e2e/mcp_cache.sh"
+source "$ROOT/tests/e2e/mcp_modern.sh"
 source "$ROOT/tests/e2e/first_request.sh"
 source "$ROOT/tests/e2e/thinking_probe.sh"
 source "$ROOT/tests/e2e/agent_core.sh"
+source "$ROOT/tests/e2e/refusal.sh"
+source "$ROOT/tests/e2e/cachewarm.sh"
 # provider logins over stdin (omc login) against tests/e2e/mock_auth.py
 APORT=$((PORT + 7)); python3 -I "$ROOT/tests/e2e/mock_auth.py" $APORT & APID=$!
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$APORT) 2>/dev/null && break; sleep 0.1; done

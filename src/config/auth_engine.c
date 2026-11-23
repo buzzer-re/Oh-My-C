@@ -300,7 +300,8 @@ static char *read_field(const json_t *field, const json_t *body, const json_t *c
     return json_get_str(field, "literal") ? xstrdup(json_get_str(field, "literal")) : NULL;
 }
 
-static const char *const OPTIONAL_FIELDS[] = {"email", "accountId", "orgId", "orgName", "projectId", "apiEndpoint", "enterpriseUrl"};
+static const char *const OPTIONAL_FIELDS[] = {"email",       "accountId",     "orgId", "orgName", "projectId",
+                                              "apiEndpoint", "enterpriseUrl", "scope"};
 
 json_t *auth_map_credentials(const json_t *map, const json_t *body, const char *provider, const json_t *prev, char **err) {
     char *access = read_field(json_get(map, "access"), body, NULL);
@@ -1543,6 +1544,11 @@ int auth_refresh_credential(const char *provider, const json_t *d, const json_t 
     vset(std, "client_secret", client_secret);
     vset(std, "refresh_token", rt);
     vset(std, "organization_id", json_get_str(stored, "activeOrganizationId"));
+    /* MCP OAuth: the grant's scope, repeated (RFC 6749 §6); only MCP credentials map one */
+    const char *scope = json_get_str(stored, "scope");
+    char *scope_t = scope ? str_trim(scope) : NULL;
+    if (scope_t && *scope_t) vset(std, "scope", scope_t);
+    free(scope_t);
     if (auth_post_token(json_get_obj(rf, "token"), std, vars, &hh, provider, "token-refresh", &c, NULL, &body, err) != 0) goto out;
     const json_t *cmap = json_get_obj(rf, "credential") ? json_get_obj(rf, "credential") : json_get_obj(login, "credential");
     json_t *cred = auth_map_credentials(cmap, body, provider, stored, err);

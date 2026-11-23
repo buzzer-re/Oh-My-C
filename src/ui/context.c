@@ -285,8 +285,15 @@ static void build(cdata_t *d, app_t *a) {
     }
     /* messages */
     json_arr_foreach(msgs, i, x) {
-        const char *role = json_get_str(x, "role");
         if (json_get_bool(x, "excludeFromContext", false)) continue;
+        /* the send path's replay policy: provider refusals are dropped, provider-error placeholders lose the error */
+        json_t *replay = agent_provider_replay_msg(x);
+        if (replay == AGENT_REPLAY_DROP) continue;
+        if (replay) { /* msgs is our clone */
+            json_set(x, "content", json_take(replay, "content"));
+            json_free(replay);
+        }
+        const char *role = json_get_str(x, "role");
         if (str_eq(role, "assistant")) {
             add_assistant(d, x, i);
             continue;

@@ -177,7 +177,11 @@ folder covering every target, listed in the prompt: up to 24 entries, 200 scanne
 *Approve*, each "for this session" or, with the *Remember across sessions* toggle, in
 `<agentDir>/approval-cache.json`. A grant covers its tier and the tiers below; a folder grant covers the
 folder's own entries, never subfolders; a recursive search has its own tree key. `/forget-approvals`
-clears every grant.
+clears every grant. Every wait is recorded in the session file (tool-approval-records.ts): a
+`tool_approval_requested` custom entry (`toolCallId`, `toolName`, `approvalMode`, `reason?`, `requestedAt`) is on
+disk before the prompt opens (the file is created if no assistant message wrote it yet), and
+`tool_approval_resolved` (`approved`, `reason?`: `denied by user`, `approval aborted`, `no interactive UI available`,
+`resolvedAt`) ends it.
 
 **ACP** (`modes/acp.c`, omp `#wrapToolForAcpPermission`): `bash` (resolved with `always-ask` unless the
 yolo mode was configured explicitly or `--auto-approve` given) and edits that delete or move a file ask
@@ -289,7 +293,26 @@ next turn boundary). A new view starts from its spawner's. Tools present at conn
 call to it runs, every session sees.
 
 - Transports: stdio (`command` + `args`, a reader thread per server), streamable HTTP (`url`,
-  `type: http|streamable-http`) and legacy SSE (`type: sse`). Protocol version `2025-06-18`.
+  `type: http|streamable-http`) and legacy SSE (`type: sse`). Servers stay per session (omp's daemon-shared MCP
+  host is out of scope), but they are spoken to as omp's host speaks to them (protocol.ts, host/peers.ts):
+  - Era probe: stdio sends `server/discover` (with the request `_meta`) and `initialize` right behind it; a discover
+    answer (`supportedVersions` + `capabilities`) or a 2026-07-28-only error (-32020/-32021/-32022) means a modern
+    server, else the initialize answer opens a handshake-era session (one process, where omp's host probes on a
+    throwaway one). Streamable HTTP POSTs `server/discover` first; a 400/404/405 or a JSON-RPC error falls back to the
+    handshake, anything else (an OAuth challenge, an outage) is the connect error. Legacy SSE always handshakes.
+  - Handshake era: `initialize` with protocol `2025-11-25`, `roots` capability, then `notifications/initialized`; the
+    negotiated version rides on HTTP requests as `MCP-Protocol-Version`.
+  - Modern (2026-07-28): no session; every request's `_meta` carries `io.modelcontextprotocol/protocolVersion`,
+    `clientCapabilities` (`roots`) and `clientInfo`; HTTP adds `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name`
+    (`name` of tools/call and prompts/get, `uri` of resources/read, Base64-wrapped when not plain ASCII) and never
+    sends `Mcp-Session-Id`. Capabilities, instructions and serverInfo come from the discover answer. `tools/call`,
+    `prompts/get` and `resources/read` answered `input_required` are retried with `inputResponses` (roots only) and
+    the echoed `requestState`, up to 8 rounds. List changes arrive on one `subscriptions/listen` stream (stdio:
+    notifications tagged with its id; HTTP: the listen POST's SSE response on a thread of its own).
+  - `roots/list` (and the roots input) answer the project directory as one `file://` root.
+  - Not ported: result caching by `ttlMs`/`cacheScope` (each session lists afresh), resource subscriptions through
+    `subscriptions/listen` (`resources/subscribe` is a handshake-era request), `Mcp-Param-*` headers from tool
+    schemas. clientInfo stays `omc`/version where omp sends `omp-coding-agent`/`1.0.0`.
 - Config discovery (project first, then user; `mcp_discover_config`): `.omc/mcp.json`,
   `.omp/mcp.json`, `mcp.json`, `.mcp.json`, `.claude/mcp.json`, `.cursor/mcp.json`,
   `.vscode/mcp.json`, `<agent dir>/mcp.json`, `~/.cursor/mcp.json`, `~/.claude/mcp.json` and
@@ -300,12 +323,24 @@ call to it runs, every session sees.
 - A failed tool call returns omp's `formatMCPToolFailure` block (`src/mcp/mcperr.c`, `mcp/errors.ts`): `MCP failure`,
   server, tool, transport, stage, failure class, retryable, the sanitized message, code, trace id, bounded and
   credential-redacted JSON-RPC `data`, and the next step. A retryable connection-class failure gets one reconnect and
-  replay (`isRetriableConnectionError`); a stdio server that exits mid-call reports its exit code and is never replayed.
+  replay (`isRetriableConnectionError`, which also covers an expired HTTP session: `Unknown or expired session`, as a
+  JSON-RPC error or HTTP status); a stdio server that exits mid-call reports its exit code and is never replayed.
+- Deadlines (timeout.ts `resolveMCPRequestDeadline`): handshakes and listings use the configured timeout
+  (`OMP_MCP_TIMEOUT_MS`, else the server's `timeout`, else 30 s). A `tools/call` without a configured timeout gets
+  10 minutes, raised to the wait its own arguments ask for plus 30 s (`timeout`, `timeout_ms`, `timeoutInSeconds`,
+  `wait_seconds`, ...; a bare `timeout` reads as seconds up to 1000) and restarted by `notifications/progress` for its
+  `_meta.progressToken` (the request id) up to one hour; a configured timeout is a hard cap. A timed-out stdio/SSE call
+  sends `notifications/cancelled` (`Request timed out after Nms`). Progress is not displayed (omc has no MCP progress
+  rows).
 - OAuth for remote servers (`mcp/oauth.c`, port of `mcp/oauth-discovery.ts` and `oauth-flow.ts`):
-  RFC 9728 resource metadata → RFC 8414/OIDC metadata → RFC 7591 dynamic registration (or a
-  configured client) → authorization code + PKCE with the RFC 8707 `resource` indicator, through the
+  RFC 9728 resource metadata → RFC 8414/OIDC metadata → RFC 7591 dynamic registration (`client_name` `Codex`,
+  `application_type` `native`; a rejected registration or a missing endpoint fails with omp's `OAuth provider requires
+  client_id, …` diagnostic naming the endpoint, status and first body line, passed through `/mcp reauth` unchanged.
+  omp instead goes on clientless after a non-`unapproved_client` rejection and only fails if the authorize endpoint
+  asks for a client id) (or a configured client) → authorization code + PKCE with the RFC 8707 `resource` indicator, through the
   shared login engine. Credentials are stored in `auth.json` under `mcp:<server url>` and refreshed
-  automatically. Managed with `omc mcp list|login|logout` and `/mcp reauth|unauth`.
+  automatically; a credential keeps the grant's `scope` (the token response's, else the authorize request's), which
+  each refresh repeats and a refresh response's scope replaces. Managed with `omc mcp list|login|logout` and `/mcp reauth|unauth`.
 - `mcp.enableProjectConfig` (on) gates every project-level source; a server named in the user
   `mcp.json` `disabledServers` list or set `enabled: false` is not connected.
 - Manager (`mcp.c`): servers are refcounted and named by the tool bridges, so `/mcp reload`,

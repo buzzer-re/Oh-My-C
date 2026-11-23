@@ -1917,6 +1917,118 @@ void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms, const cha
     tui_request_render(u->tui);
 }
 
+/* BackgroundCompactionHud (progress-hud.ts): a background compaction (/handoff) leaves the composer free. While no
+ * turn holds the status row it shows its working row there; beside a turn, a right-aligned HUD row above the
+ * working line, `<dim label> <elapsed>`, instead, so neither replaces the other. */
+typedef struct {
+    tui_component_t base;
+    ui_t *u;
+    int timer;
+    int64_t started;
+    char *label; /* NULL: no background compaction */
+} bghud_t;
+
+static char *bg_cancel_hint(void) {
+    char *k = ui_editor_key("app.interrupt");
+    char *h = xasprintf("(%s to cancel)", k);
+    free(k);
+    return h;
+}
+
+static void bghud_render(tui_component_t *c, int width, strvec_t *out) {
+    bghud_t *h = (bghud_t *)c;
+    if (!h->label || !h->u->worker_running || width <= 0) return;
+    const tui_theme_t *th = TH();
+    char d[32];
+    format_duration(d, sizeof d, mono_ms() - h->started);
+    sb_t took = SB_INIT;
+    tui_fg(&took, th, TUI_TC_TEXT, d);
+    char *tail = sb_detach(&took);
+    int remaining = width - tui_visible_width(tail);
+    if (remaining > 1) {
+        char *hint = bg_cancel_hint();
+        char *full = xasprintf("%s %s", h->label, hint);
+        char *lab = tui_truncate_to_width(full, remaining - 1, "");
+        if (*lab) {
+            sb_t b = SB_INIT;
+            tui_fg(&b, th, TUI_TC_DIM, lab);
+            sb_putc(&b, ' ');
+            sb_append(&b, tail);
+            free(tail);
+            tail = sb_detach(&b);
+        }
+        free(lab), free(full), free(hint);
+    }
+    if (tui_visible_width(tail) > width) {
+        free(tail);
+        sb_t b = SB_INIT;
+        tui_fg(&b, th, TUI_TC_TEXT, d);
+        char *fb = sb_detach(&b);
+        tail = tui_truncate_to_width(fb, width, "");
+        free(fb);
+    }
+    int pad = width - tui_visible_width(tail);
+    sb_t row = SB_INIT;
+    for (int i = 0; i < pad; i++) sb_putc(&row, ' ');
+    sb_append(&row, tail);
+    free(tail);
+    strvec_push_own(out, sb_detach(&row));
+}
+
+static void bghud_destroy(tui_component_t *c) {
+    bghud_t *h = (bghud_t *)c;
+    if (h->timer && h->u && h->u->tui) tui_remove_timer(h->u->tui, h->timer);
+    free(h->label);
+    free(h);
+}
+
+static const tui_component_vt BGHUD_VT = {"bg-compaction-hud", bghud_render, NULL, NULL, bghud_destroy};
+
+tui_component_t *ui_bg_compaction_hud_new(ui_t *u) {
+    bghud_t *h = xcalloc(1, sizeof *h);
+    tui_component_init(&h->base, &BGHUD_VT);
+    h->u = u;
+    u->bg_hud = &h->base;
+    return &h->base;
+}
+
+/* the idle working row: `<label>… (Esc to cancel)` while nothing else holds the status row */
+static void bghud_idle_row(bghud_t *h) {
+    ui_t *u = h->u;
+    if (!h->label || u->worker_running || working_mode(u) != 0) return;
+    char *l = xasprintf("%s\xe2\x80\xa6", h->label);
+    ui_working_compaction(u, l);
+    free(l);
+}
+
+static void bghud_tick(void *ud) {
+    bghud_t *h = ud;
+    bghud_idle_row(h);
+    if (h->u && h->u->tui) tui_request_render(h->u->tui);
+}
+
+void ui_bg_compaction_start(ui_t *u, const char *label) {
+    bghud_t *h = (bghud_t *)u->bg_hud;
+    if (!h) return;
+    free(h->label);
+    h->label = xstrdup(label);
+    h->started = mono_ms();
+    if (!h->timer && u->tui) h->timer = tui_add_clock_timer(u->tui, NULL, bghud_tick, h);
+    bghud_idle_row(h);
+    tui_request_render(u->tui);
+}
+
+void ui_bg_compaction_stop(ui_t *u) {
+    bghud_t *h = (bghud_t *)u->bg_hud;
+    if (!h || !h->label) return;
+    free(h->label);
+    h->label = NULL;
+    if (h->timer && u->tui) tui_remove_timer(u->tui, h->timer);
+    h->timer = 0;
+    if (!u->worker_running && working_mode(u) == 3) ui_working_stop(u);
+    tui_request_render(u->tui);
+}
+
 /* ---------------------------------------------------------------------- */
 /* transcript replay                                                       */
 /* ---------------------------------------------------------------------- */

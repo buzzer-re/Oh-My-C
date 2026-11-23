@@ -5,6 +5,7 @@
 #include "ai/ai.h"
 #include "config/model_resolver.h"
 #include "session/session.h"
+#include "agent/agent.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -264,6 +265,10 @@ int main(void) {
     CHECK(tr_billing_cap_usage_limit(402, lithos));
     CHECK(tr_billing_cap_usage_limit(0, lithos));
     CHECK(tr_billing_cap_usage_limit(429, "Insufficient balance in account"));
+    /* omp 3efa3bab9e: a structured INSUFFICIENT_G1_CREDITS_BALANCE is a billing cap */
+    CHECK(tr_billing_cap_usage_limit(429, "{\"error\":{\"status\":\"RESOURCE_EXHAUSTED\",\"message\":\"Resource exhausted\","
+                                          "\"details\":[{\"@type\":\"type.googleapis.com/google.rpc.ErrorInfo\","
+                                          "\"reason\":\"INSUFFICIENT_G1_CREDITS_BALANCE\"}]}}"));
     /* a zero x-ratelimit-limit-* allowance is a billing wall: no wait or replay can succeed (omp 03a02d0926) */
     const char *zero = "429 Rate limit exceeded (x-ratelimit-limit-req-minute: 0 \xe2\x80\x94 this plan grants no allowance "
                        "for the model; switch models or upgrade the plan)";
@@ -343,6 +348,33 @@ int main(void) {
         CHECK(c.thinking && !strcmp(c.thinking, "medium"));
         session_context_free(&c);
         json_free(path);
+    }
+
+    /* replay-policy.ts toProviderReplayMessage: refusals dropped, provider-error placeholders lose the error text */
+    {
+        json_t *msgs = json_parse_str(
+            "[{\"role\":\"user\",\"content\":\"hi\"},"
+            "{\"role\":\"assistant\",\"stopReason\":\"error\",\"stopDetails\":{\"type\":\"refusal\"},"
+            "\"errorMessage\":\"refused\",\"content\":[{\"type\":\"toolCall\",\"id\":\"c1\",\"name\":\"read\"}]},"
+            "{\"role\":\"toolResult\",\"toolCallId\":\"c1\",\"toolName\":\"read\",\"isError\":true,"
+            "\"content\":[{\"type\":\"text\",\"text\":\"Tool call was not executed because the provider stream ended with "
+            "an error before the tool could run: refused\"}],"
+            "\"details\":{\"__synthetic\":true,\"source\":\"assistant_stop_error\",\"upstreamError\":\"refused\"}},"
+            "{\"role\":\"assistant\",\"stopReason\":\"error\",\"errorMessage\":\"boom\",\"content\":[]}]");
+        json_t *rp = agent_provider_replay(msgs);
+        CHECK(rp && json_len(rp) == 3);
+        if (rp && json_len(rp) == 3) {
+            CHECK(!strcmp(json_get_str(json_at(rp, 1), "role"), "toolResult"));
+            CHECK(!strcmp(json_get_str(json_at(json_get(json_at(rp, 1), "content"), 0), "text"),
+                          "Tool call was not executed because the provider stream ended with an error before the tool could run."));
+            CHECK(!strcmp(json_get_str(json_get(json_at(rp, 1), "details"), "upstreamError"), "refused"));
+            CHECK(!strcmp(json_get_str(json_at(rp, 2), "errorMessage"), "boom")); /* a plain error turn stays */
+        }
+        json_free(rp);
+        json_t *plain = json_parse_str("[{\"role\":\"user\",\"content\":\"hi\"}]");
+        CHECK(agent_provider_replay(plain) == NULL);
+        json_free(plain);
+        json_free(msgs);
     }
 
     if (fails) fprintf(stderr, "%d failure(s)\n", fails);

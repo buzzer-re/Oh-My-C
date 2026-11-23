@@ -41,11 +41,12 @@ check "rst text request"      "n=2 last=user,assistant,user reminders=Attempt #1
 # past STREAM_STALL_CONTINUE_MAX_RETRIES the error surfaces (no hang, no fourth reminder)
 check "stall cap"             '"stopReason":"error"'  bash -c "${SJ[*]} 'drop:close:4:Partial cap text' | grep -o '\"type\":\"agent_end\".*' | grep -o '\"stopReason\":\"error\"' | tail -1"
 check "stall cap requests"    "n=4 last=user,assistant,user,assistant,user,assistant,user reminders=Attempt #1/3Attempt #2/3Attempt #3/3"  "${STREQS[@]}" "$T/stall-oai.jsonl" "drop:close:4:Partial cap text"
-# a tool call streamed before the drop never runs: its synthetic result is sent back and the turn resumes
-check "stall tool resumes"    "Tool said: Tool call was not executed because the provider stream ended with an error before the tool could run: OpenAI completions stream stalled while waiting for the next event"  "${STENV[@]}" "$B" --model mock/mock-1 --no-session -p "dropcall:stall:1:touch $T/stall-ran"
+# a tool call streamed before the drop never runs: its synthetic result is sent back and the turn resumes; the replay
+# keeps the "not executed" fact without the provider's error text (omp 9bed2a4d8f), which stays in the session
+check "stall tool resumes"    "Tool said: Tool call was not executed because the provider stream ended with an error before the tool could run."  "${STENV[@]}" "$B" --model mock/mock-1 --no-session -p "dropcall:stall:1:touch $T/stall-ran"
 check "stall tool not run"    "absent"  bash -c "[ -e '$T/stall-ran' ] && echo ran || echo absent"
 check "stall tool request"    "n=2 last=user,assistant,tool reminders="  "${STREQS[@]}" "$T/stall-oai.jsonl" "dropcall:stall:1:touch"
-check "close tool resumes"    "Tool said: Tool call was not executed because the provider stream ended with an error before the tool could run: ECONNRESET: The socket connection was closed unexpectedly."  "${STENV[@]}" "$B" --model mock/mock-1 --no-session -p "dropcall:close:1:echo close-tool"
+check "close tool resumes"    "Tool said: Tool call was not executed because the provider stream ended with an error before the tool could run."  "${STENV[@]}" "$B" --model mock/mock-1 --no-session -p "dropcall:close:1:echo close-tool"
 check "close tool details"    '"details":{"__synthetic":true,"source":"assistant_stop_error","executed":false,"upstreamError":"ECONNRESET'  "${SJ[@]}" "dropcall:rst:1:echo rst-tool"
 # nothing streamed yet: the transport retries the request; print-mode text is buffered, so the turn replays
 check "drop before output"    "resumed after drop"  "${STENV[@]}" "$B" --model mock/mock-1 --no-session -p "drop:close:1:"

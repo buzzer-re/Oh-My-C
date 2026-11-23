@@ -141,16 +141,47 @@ static int free_port(void) {
     return port;
 }
 
+/* oauth-flow.ts truncateDetail: the first line, trimmed, at most 200 chars (+ an ellipsis); NULL when empty */
+static char *dcr_detail(const char *raw) {
+    if (!raw) return NULL;
+    size_t n = strcspn(raw, "\r\n");
+    char *line = xstrndup(raw, n), *t = str_trim(line);
+    free(line);
+    if (!*t) {
+        free(t);
+        return NULL;
+    }
+    /* length / slice(0, 200) count UTF-16 code units */
+    size_t units = 0, cut = 0, len = strlen(t);
+    for (size_t i = 0; i < len;) {
+        uint32_t cp;
+        int k = utf8_decode(t + i, len - i, &cp);
+        units += cp > 0xFFFF ? 2 : 1;
+        i += (size_t)k;
+        if (units <= 200) cut = i;
+    }
+    if (units > 200) {
+        char *r = xasprintf("%.*s\xe2\x80\xa6", (int)cut, t);
+        free(t);
+        t = r;
+    }
+    return t;
+}
+
+#define DCR_MANUAL_HINT "Configure `oauth.clientId` (and `oauth.clientSecret` if the flow needs one) on the MCP server entry in mcp.json."
+
+/* MCPOAuthFlow #tryRegisterClient (RFC 7591, client_name "Codex") + #missingClientIdError for a rejected registration */
 static int register_client(const char *endpoint, const char *redirect, const char *scope, char **client_id, char **client_secret,
                            char **err) {
     json_t *body = json_obj();
-    json_set_str(body, "client_name", "omc");
+    json_set_str(body, "client_name", "Codex");
     json_t *ru = json_arr();
     json_push_str(ru, redirect);
     json_set(body, "redirect_uris", ru);
     json_set(body, "grant_types", json_parse_str("[\"authorization_code\",\"refresh_token\"]"));
     json_set(body, "response_types", json_parse_str("[\"code\"]"));
     json_set_str(body, "token_endpoint_auth_method", "none");
+    json_set_str(body, "application_type", "native");
     if (scope && *scope) json_set_str(body, "scope", scope);
     char *txt = json_dump(body, 0);
     json_free(body);
@@ -162,16 +193,29 @@ static int register_client(const char *endpoint, const char *redirect, const cha
     int rc = http_request(&req, &r);
     free(txt);
     http_headers_free(&h);
-    json_t *j = rc == 0 && r.status >= 200 && r.status < 300 && r.body ? json_parse(r.body, r.body_len, NULL) : NULL;
-    if (!json_get_str(j, "client_id")) {
-        *err = rc != 0 ? xasprintf("client registration failed: %s", r.error ? r.error : "request failed")
-                       : xasprintf("client registration failed: HTTP %d %.200s", r.status, r.body ? r.body : "");
+    bool ok = rc == 0 && r.status >= 200 && r.status < 300;
+    json_t *j = ok && r.body ? json_parse(r.body, r.body_len, NULL) : NULL;
+    char *id = json_get_str(j, "client_id") ? str_trim(json_get_str(j, "client_id")) : NULL;
+    if (!id || !*id) {
+        char *detail = dcr_detail(rc != 0 ? (r.error ? r.error : NULL) : ok ? NULL : r.body);
+        char *outcome = rc != 0 ? (detail ? xasprintf("network error \xe2\x80\x94 %s", detail) : xstrdup("network error"))
+                        : detail ? xasprintf("HTTP %d \xe2\x80\x94 %s", r.status, detail)
+                                 : xasprintf("HTTP %d", r.status);
+        *err = xasprintf("OAuth provider requires client_id, and dynamic client registration was rejected (POST %s \xe2\x86\x92 %s). "
+                         "The server likely restricts registration to pre-approved clients. " DCR_MANUAL_HINT,
+                         endpoint, outcome);
+        free(outcome);
+        free(detail);
+        free(id);
         json_free(j);
         http_resp_free(&r);
         return -1;
     }
-    *client_id = xstrdup(json_get_str(j, "client_id"));
-    *client_secret = json_get_str(j, "client_secret") ? xstrdup(json_get_str(j, "client_secret")) : NULL;
+    *client_id = id;
+    const char *sec = json_get_str(j, "client_secret");
+    char *st = sec ? str_trim(sec) : NULL;
+    *client_secret = st && *st ? xstrdup(sec) : NULL;
+    free(st);
     json_free(j);
     http_resp_free(&r);
     return 0;
@@ -209,7 +253,7 @@ json_t *mcp_oauth_descriptor(const char *server_url, const json_t *server_cfg, c
     const char *reg = json_get_str(asm_, "registration_endpoint");
     if (!client_id) {
         if (!reg) {
-            *err = xasprintf("MCP server %s supports no dynamic client registration; set oauth.clientId in its config", server_url);
+            *err = xstrdup("OAuth provider requires client_id, and no dynamic-client-registration endpoint was advertised. " DCR_MANUAL_HINT);
             free(redirect);
             sb_free(&scope);
             goto out;
@@ -252,12 +296,25 @@ json_t *mcp_oauth_descriptor(const char *server_url, const json_t *server_cfg, c
     if (client_secret) json_set_str(tp, "client_secret", client_secret);
     json_set(tok, "params", tp);
     json_set(login, "token", tok);
-    json_set(login, "credential", json_parse_str("{\"access\":{\"path\":\"access_token\"},\"refresh\":{\"path\":\"refresh_token\"},"
-                                                 "\"expires\":{\"path\":\"expires_in\",\"mode\":\"seconds\",\"skewMs\":60000}}"));
+    /* the credential keeps the scope the grant holds: the token response's (RFC 6749 §5.1), else the authorize
+     * request's; a refresh sends it again (Entra v2 refuses a scope-less refresh, AADSTS90009) and a refresh
+     * response's scope replaces it (omp c653ae09be, 164dd7153c) */
+    json_t *cmap = json_parse_str("{\"access\":{\"path\":\"access_token\"},\"refresh\":{\"path\":\"refresh_token\"},"
+                                  "\"expires\":{\"path\":\"expires_in\",\"mode\":\"seconds\",\"skewMs\":60000},"
+                                  "\"scope\":{\"path\":\"scope\"}}");
+    json_t *rmap = json_clone(cmap);
+    sb_t requested = SB_INIT;
+    json_arr_foreach(scopes, i, x) sb_appendf(&requested, "%s%s", requested.len ? " " : "", json_sv(x));
+    char *req_trim = str_trim(sb_cstr(&requested));
+    if (*req_trim) json_set_str(json_get_obj(cmap, "scope"), "literal", req_trim);
+    free(req_trim);
+    sb_free(&requested);
+    json_set(login, "credential", cmap);
     json_set(d, "login", login);
     json_t *rf = json_obj();
     json_set_str(rf, "kind", "request");
     json_set(rf, "token", json_clone(tok));
+    json_set(rf, "credential", rmap);
     json_set(d, "refresh", rf);
     free(redirect);
     free(client_id);

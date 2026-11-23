@@ -281,11 +281,24 @@ void mcp_fail_normalize(mcp_fail_t *f, const char *transport, const char *stage,
     free(m);
 }
 
+/* EXPIRED_SESSION: /(?:unknown|expired|invalid) session|session (?:not found|expired|is invalid)/i */
+static bool expired_session(const char *m) {
+    if (!m) return false;
+    static const char *const pre[] = {"unknown session", "expired session", "invalid session", "session not found",
+                                      "session expired", "session is invalid"};
+    for (size_t i = 0; i < ARRAY_LEN(pre); i++)
+        if (str_istr(m, pre[i])) return true;
+    return false;
+}
+
 bool mcp_fail_reconnectable(const mcp_fail_t *f) {
     if (!f || !f->set) return false;
     if (!strcmp(f->failure, "connect") || !strcmp(f->failure, "reset") || !strcmp(f->failure, "eof") || !strcmp(f->failure, "closed"))
         return f->retryable;
-    return !strcmp(f->failure, "http_status") && f->code && (!strcmp(f->code, "404") || !strcmp(f->code, "502") || !strcmp(f->code, "503"));
+    if (!strcmp(f->failure, "http_status") && f->code && (!strcmp(f->code, "404") || !strcmp(f->code, "502") || !strcmp(f->code, "503")))
+        return true;
+    /* an expired HTTP session (-32001 Unknown or expired session) never ran the call: re-initialize and retry once */
+    return (!strcmp(f->failure, "http_status") || !strcmp(f->failure, "json_rpc")) && expired_session(f->message);
 }
 
 static const char *next_step(const mcp_fail_t *f) {
@@ -293,7 +306,8 @@ static const char *next_step(const mcp_fail_t *f) {
     if (!f->retryable && (!strcmp(fl, "connect") || !strcmp(fl, "eof") || !strcmp(fl, "reset") || !strcmp(fl, "closed")))
         return "The connection was lost after the request was sent, so it may already have run; check its effect before retrying.";
     if (!strcmp(fl, "connect")) return "Check that the MCP server is running and reachable, then retry.";
-    if (!strcmp(fl, "timeout")) return "Check server health or increase the MCP timeout; the request outcome is unknown.";
+    if (!strcmp(fl, "timeout"))
+        return "Raise this server's `timeout` (ms) in its MCP config or set OMP_MCP_TIMEOUT_MS; the request outcome is unknown.";
     if (!strcmp(fl, "eof") || !strcmp(fl, "reset"))
         return !strcmp(f->transport, "stdio") ? "Inspect the MCP subprocess logs, restart the server, then retry."
                                              : "Check the MCP server logs and availability, then retry.";

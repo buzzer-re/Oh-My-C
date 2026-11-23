@@ -10,12 +10,18 @@
 #include <ctype.h>
 #include <errno.h>
 #include <poll.h>
+#include <math.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define MCP_PROTOCOL "2025-06-18"
+/* protocol.ts: the 2026-07-28 revision (stateless: discovery, per-request _meta) and the newest handshake-era one */
+#define MCP_PROTOCOL_VERSION "2026-07-28"
+#define MCP_LEGACY_PROTOCOL_VERSION "2025-11-25"
+#define MCP_MAX_ROUND_TRIPS 8          /* input_required rounds a request may take */
+#define PROBE_DISCOVER_GRACE_MS 250    /* how long a server that answered initialize may still answer server/discover */
+static json_t *project_roots(void);
 
 typedef enum { T_STDIO, T_HTTP, T_SSE } transport_t;
 
@@ -26,6 +32,7 @@ typedef struct {
     int64_t id;
     json_t *result; /* owned response object */
     bool done;
+    int64_t progress_at; /* mono ms of the last notifications/progress for this request's progress token (0: none) */
 } pending_t;
 
 struct mcp_server {
@@ -42,6 +49,10 @@ struct mcp_server {
     char *url;          /* http/sse */
     char *post_url;     /* sse: endpoint for POST */
     char *session_id;   /* streamable http Mcp-Session-Id */
+    bool modern;        /* speaks MCP 2026-07-28 (server/discover answered); else the initialize handshake */
+    char *protocol;     /* the legacy session's negotiated protocolVersion (MCP-Protocol-Version on HTTP) */
+    pthread_t listen_th;
+    bool listen_started;
     http_headers_t headers;
     child_t child;
     bool child_started;
@@ -279,6 +290,20 @@ static void deliver(mcp_server_t *s, json_t *msg) {
         return;
     }
     const char *method = json_get_str(msg, "method");
+    if (method && !idj && !strcmp(method, "notifications/progress")) {
+        /* routeProgressNotification: progress for a request's token shows the server is still working on it */
+        const json_t *params = json_get(msg, "params"), *tok = json_get(params, "progressToken");
+        if (json_is_num(tok) && json_is_num(json_get(params, "progress"))) {
+            int64_t id = tok->is_int ? tok->u.num.i : json_d2i(tok->u.num.d);
+            pthread_mutex_lock(&s->mu);
+            for (size_t i = 0; i < s->pending.n; i++)
+                if (s->pending.v[i]->id == id && !s->pending.v[i]->done) s->pending.v[i]->progress_at = mono_ms();
+            pthread_cond_broadcast(&s->cv);
+            pthread_mutex_unlock(&s->mu);
+        }
+        json_free(msg);
+        return;
+    }
     if (method && !idj) { /* server notification */
         handle_notification(s, method, json_get(msg, "params"));
         json_free(msg);
@@ -292,7 +317,7 @@ static void deliver(mcp_server_t *s, json_t *msg) {
         if (!strcmp(method, "ping")) json_set(resp, "result", json_obj());
         else if (!strcmp(method, "roots/list")) {
             json_t *r = json_obj();
-            json_set(r, "roots", json_arr());
+            json_set(r, "roots", project_roots());
             json_set(resp, "result", r);
         } else {
             json_t *e = json_obj();
@@ -435,6 +460,69 @@ static void add_oauth(mcp_server_t *s, http_headers_t *h) {
     free(tok);
 }
 
+/* encodeMcpHeaderValue: as-is when plain visible ASCII (and not the sentinel shape), else =?base64?...?= of its UTF-8 */
+static char *mcp_header_value(const char *v) {
+    size_t n = strlen(v);
+    bool plain = true;
+    for (size_t i = 0; i < n && plain; i++) {
+        unsigned char c = (unsigned char)v[i];
+        bool edge = i == 0 || i == n - 1;
+        plain = (c >= 0x21 && c <= 0x7e) || (!edge && (c == 0x20 || c == '\t'));
+    }
+    bool sentinel = n >= 12 && !strncmp(v, "=?base64?", 9) && !strcmp(v + n - 2, "?=");
+    if (plain && !sentinel) return xstrdup(v);
+    char *b = base64_encode((const unsigned char *)v, n);
+    char *r = xasprintf("=?base64?%s?=", b);
+    free(b);
+    return r;
+}
+
+/* requestMeta: the _meta every 2026-07-28 request carries (revision, capabilities, identity) */
+static json_t *request_meta(void) {
+    json_t *m = json_obj();
+    json_set_str(m, "io.modelcontextprotocol/protocolVersion", MCP_PROTOCOL_VERSION);
+    json_set(m, "io.modelcontextprotocol/clientCapabilities", json_parse_str("{\"roots\":{}}"));
+    json_t *ci = json_obj();
+    json_set_str(ci, "name", "omc");
+    json_set_str(ci, "version", OMC_VERSION);
+    json_set(m, "io.modelcontextprotocol/clientInfo", ci);
+    return m;
+}
+
+/* withRequestMeta: the required request metadata merged over any caller _meta (a progress token) */
+static json_t *with_request_meta(json_t *params) {
+    if (!params) params = json_obj();
+    json_t *meta = json_get_obj(params, "_meta");
+    if (!meta) {
+        meta = json_obj();
+        json_set(params, "_meta", meta);
+    }
+    json_t *rm = request_meta();
+    const char *k;
+    json_t *v;
+    json_obj_foreach(rm, i, k, v) json_set(meta, k, json_clone(v));
+    json_free(rm);
+    return params;
+}
+
+/* projectRoots: the session's project directory as the one root */
+static json_t *project_roots(void) {
+    char *cwd = get_cwd();
+    json_t *roots = json_arr(), *r = json_obj();
+    char *uri = xasprintf("file://%s", cwd);
+    json_set_str(r, "uri", uri);
+    const char *base = strrchr(cwd, '/');
+    json_set_str(r, "name", base && base[1] ? base + 1 : cwd);
+    json_push(roots, r);
+    free(uri);
+    free(cwd);
+    return roots;
+}
+
+static int http_send(mcp_server_t *s, const json_t *msg, char **err);
+/* a request's own HTTP bounds (tools/call deadlines), else the server's timeout */
+static __thread int64_t tl_http_total = -1, tl_http_idle = -1;
+
 static int http_send(mcp_server_t *s, const json_t *msg, char **err) {
     char *body = json_dump(msg, 0);
     http_headers_t h = {0};
@@ -443,14 +531,34 @@ static int http_send(mcp_server_t *s, const json_t *msg, char **err) {
     http_headers_set(&h, "Content-Type", "application/json");
     http_headers_set(&h, "Accept", "application/json, text/event-stream");
     pthread_mutex_lock(&s->mu);
-    if (s->session_id) http_headers_set(&h, "Mcp-Session-Id", s->session_id);
-    if (s->connected) http_headers_set(&h, "MCP-Protocol-Version", MCP_PROTOCOL);
+    const char *method = json_get_str(msg, "method");
+    if (s->modern && method) {
+        /* #postHeaders: every message is its own POST carrying the request metadata headers */
+        const json_t *params = json_get_obj(msg, "params");
+        const char *ver = json_get_str(json_get_obj(params, "_meta"), "io.modelcontextprotocol/protocolVersion");
+        http_headers_set(&h, "MCP-Protocol-Version", ver ? ver : MCP_PROTOCOL_VERSION);
+        http_headers_set(&h, "Mcp-Method", method);
+        const char *np = !strcmp(method, "tools/call") || !strcmp(method, "prompts/get") ? "name"
+                         : !strcmp(method, "resources/read")                         ? "uri"
+                                                                                      : NULL;
+        const char *nv = np ? json_get_str(params, np) : NULL;
+        if (nv) {
+            char *enc = mcp_header_value(nv);
+            http_headers_set(&h, "Mcp-Name", enc);
+            free(enc);
+        }
+    } else {
+        if (s->session_id) http_headers_set(&h, "Mcp-Session-Id", s->session_id);
+        /* Streamable HTTP echoes the negotiated version on every request after initialize */
+        if (s->connected && s->protocol) http_headers_set(&h, "MCP-Protocol-Version", s->protocol);
+    }
     pthread_mutex_unlock(&s->mu);
     post_ctx_t c = {.s = s};
     sse_init(&c.sse, post_sse_cb, &c);
     const char *url = s->transport == T_SSE ? s->post_url : s->url;
     http_req_t req = {.method = "POST", .url = url, .headers = &h, .body = body, .body_len = strlen(body),
-                      .timeout_ms = s->timeout_ms ? s->timeout_ms + 5000 : 0, .on_headers = post_hdr, .on_data = post_data,
+                      .timeout_ms = tl_http_total >= 0 ? tl_http_total : s->timeout_ms ? s->timeout_ms + 5000 : 0,
+                      .idle_timeout_ms = tl_http_idle > 0 ? tl_http_idle : 0, .on_headers = post_hdr, .on_data = post_data,
                       .ud = &c, .max_redirects = 5, .cancel = &s->cancel};
     http_resp_t r;
     int rc = http_request(&req, &r);
@@ -527,8 +635,84 @@ json_t *mcp_request(mcp_server_t *s, const char *method, json_t *params, int64_t
     return mcp_request_ex(s, method, params, timeout_ms, err, NULL);
 }
 
+/* a request bounded by timeout_ms, restarted by progress for its token but never past max_total_ms (MCPRequestDeadline);
+ * progress adds _meta.progressToken (the request id) */
+static json_t *mcp_request_dl(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, int64_t max_total_ms,
+                              bool progress, char **err, mcp_fail_t *fail);
+
 static json_t *mcp_request_ex(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, char **err,
                               mcp_fail_t *fail) {
+    return mcp_request_dl(s, method, params, timeout_ms, timeout_ms, false, err, fail);
+}
+
+static json_t *mcp_request_once(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, int64_t max_total_ms,
+                                bool progress, char **err, mcp_fail_t *fail);
+
+/* requestWithInput: a 2026-07-28 server may answer tools/call, prompts/get and resources/read with input_required;
+ * roots are the only input supplied, and each retry is the original request plus this round's answers */
+static json_t *mcp_request_dl(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, int64_t max_total_ms,
+                              bool progress, char **err, mcp_fail_t *fail) {
+    bool mrtr = s->modern && (!strcmp(method, "tools/call") || !strcmp(method, "prompts/get") || !strcmp(method, "resources/read"));
+    if (!mrtr) return mcp_request_once(s, method, params, timeout_ms, max_total_ms, progress, err, fail);
+    json_t *orig = params ? params : json_obj();
+    for (int round = 0; round < MCP_MAX_ROUND_TRIPS; round++) {
+        json_t *attempt = json_clone(orig);
+        if (round > 0 && fail) mcp_fail_free(fail);
+        json_t *r = mcp_request_once(s, method, attempt, timeout_ms, max_total_ms, progress, err, fail);
+        if (!r) {
+            json_free(orig);
+            return NULL;
+        }
+        const char *rt = json_get_str(r, "resultType");
+        if (!rt || !strcmp(rt, "complete")) {
+            json_free(orig);
+            return r;
+        }
+        if (strcmp(rt, "input_required")) {
+            *err = xasprintf("Unsupported MCP result type: %s", rt);
+            json_free(r);
+            json_free(orig);
+            return NULL;
+        }
+        const json_t *asks = json_get_obj(r, "inputRequests");
+        const json_t *state = json_get(r, "requestState");
+        if (!asks && !state) {
+            *err = xasprintf("MCP server \"%s\" asked for input on %s without saying which", s->name, method);
+            json_free(r);
+            json_free(orig);
+            return NULL;
+        }
+        json_del(orig, "requestState");
+        json_del(orig, "inputResponses");
+        if (state) json_set(orig, "requestState", json_clone(state));
+        if (asks) {
+            json_t *answers = json_obj();
+            const char *k;
+            json_t *ask;
+            json_obj_foreach((json_t *)asks, i, k, ask) {
+                const char *asked = json_get_str(ask, "method");
+                if (!str_eq(asked, "roots/list")) {
+                    *err = xasprintf("MCP server \"%s\" asked for unsupported input \"%s\" on %s", s->name, asked ? asked : "undefined", method);
+                    json_free(answers);
+                    json_free(r);
+                    json_free(orig);
+                    return NULL;
+                }
+                json_t *a = json_obj();
+                json_set(a, "roots", project_roots());
+                json_set(answers, k, a);
+            }
+            json_set(orig, "inputResponses", answers);
+        }
+        json_free(r);
+    }
+    *err = xasprintf("MCP server \"%s\" still asked for input on %s after %d round trips", s->name, method, MCP_MAX_ROUND_TRIPS);
+    json_free(orig);
+    return NULL;
+}
+
+static json_t *mcp_request_once(mcp_server_t *s, const char *method, json_t *params, int64_t timeout_ms, int64_t max_total_ms,
+                                bool progress, char **err, mcp_fail_t *fail) {
     *err = NULL;
     pending_t *p = xcalloc(1, sizeof(*p));
     pthread_mutex_lock(&s->mu);
@@ -539,14 +723,31 @@ static json_t *mcp_request_ex(mcp_server_t *s, const char *method, json_t *param
     json_set_str(msg, "jsonrpc", "2.0");
     json_set_int(msg, "id", p->id);
     json_set_str(msg, "method", method);
+    if (s->modern) params = with_request_meta(params);
+    if (progress) { /* withProgressToken */
+        if (!params) params = json_obj();
+        json_t *meta = json_get_obj(params, "_meta");
+        if (!meta) {
+            meta = json_obj();
+            json_set(params, "_meta", meta);
+        }
+        json_set_int(meta, "progressToken", p->id);
+    }
     if (params) json_set(msg, "params", params);
+    if (s->transport == T_HTTP && max_total_ms != timeout_ms) {
+        /* the response rides in the POST: bounded whole by the cap, and between bytes (progress) by the deadline */
+        tl_http_total = max_total_ms > 0 ? max_total_ms + 5000 : 0;
+        tl_http_idle = timeout_ms > 0 ? timeout_ms + 5000 : 24 * 3600 * 1000LL;
+    }
+    int64_t started = mono_ms();
     int rc = send_msg(s, msg, err);
+    tl_http_total = tl_http_idle = -1;
     json_free(msg);
     if (rc != 0) fail_from_send(s, *err, fail);
     json_t *result = NULL;
     pthread_mutex_lock(&s->mu);
+    int64_t limit = timeout_ms;
     if (rc == 0) {
-        int64_t deadline = timeout_ms > 0 ? mono_ms() + timeout_ms : 0;
         /* streamable HTTP delivers the response inside the POST; stdio/SSE responses arrive on the reader */
         while (!p->done && s->transport != T_HTTP && s->connected && !s->closing && !(s->ext_cancel && *s->ext_cancel)) {
             struct timespec ts;
@@ -557,7 +758,15 @@ static json_t *mcp_request_ex(mcp_server_t *s, const char *method, json_t *param
                 ts.tv_nsec -= 1000000000;
             }
             pthread_cond_timedwait(&s->cv, &s->mu, &ts);
-            if (deadline && mono_ms() > deadline) break;
+            if (timeout_ms > 0) {
+                /* progress restarts the deadline, never past the request's hard cap */
+                int64_t base = p->progress_at ? p->progress_at : started, cap = started + max_total_ms;
+                int64_t deadline = MIN(base + timeout_ms, cap);
+                if (mono_ms() > deadline) {
+                    limit = cap < base + timeout_ms ? max_total_ms : timeout_ms;
+                    break;
+                }
+            }
         }
         if (p->done) {
             json_t *e = json_get(p->result, "error");
@@ -570,9 +779,25 @@ static json_t *mcp_request_ex(mcp_server_t *s, const char *method, json_t *param
             *err = xstrdup("Aborted");
         } else if (s->connected || s->transport == T_HTTP) {
             *err = xasprintf("%s: %s timed out", s->name, method);
-            char *m = xasprintf("Request timeout after %lldms", (long long)timeout_ms);
+            char *m = xasprintf("Request timeout after %lldms", (long long)limit);
             mcp_fail_set(fail, transport_kind(s), "receive", "timeout", false, m, NULL);
             free(m);
+            if (s->transport != T_HTTP) { /* sendCancellation: the server need not finish what its caller gave up on */
+                json_t *cn = json_obj(), *cp = json_obj();
+                json_set_str(cn, "jsonrpc", "2.0");
+                json_set_str(cn, "method", "notifications/cancelled");
+                json_set_int(cp, "requestId", p->id);
+                char *why = xasprintf("Request timed out after %lldms", (long long)limit);
+                json_set_str(cp, "reason", why);
+                free(why);
+                json_set(cn, "params", cp);
+                pthread_mutex_unlock(&s->mu);
+                char *e2 = NULL;
+                send_msg(s, cn, &e2);
+                free(e2);
+                json_free(cn);
+                pthread_mutex_lock(&s->mu);
+            }
         } else {
             /* the stdio transport's EOF (with the subprocess exit status): the request was written, so it is never
              * replayed */
@@ -694,6 +919,8 @@ static void server_free(mcp_server_t *s) {
     server_close(s);
     if (s->child_started) child_close(&s->child);
     if (s->reader_started) pthread_join(s->reader, NULL);
+    if (s->listen_started) pthread_join(s->listen_th, NULL);
+    free(s->protocol);
     free(s->eof_error);
     free(s->eof_code);
     json_free(s->cfg);
@@ -743,6 +970,287 @@ static json_t *resource_uris(const json_t *resources) {
     json_t *uris = json_arr(), *r;
     json_arr_foreach(resources, i, r) if (json_get_str(r, "uri")) json_push_str(uris, json_get_str(r, "uri"));
     return uris;
+}
+
+/* ---------- MCP 2026-07-28 era probe and handshakes (host/peers.ts, legacy-session.ts) ---------- */
+
+/* MCP_LEGACY_INITIALIZE_PARAMS: roots are the only server request answered */
+static json_t *legacy_init_params(void) {
+    json_t *params = json_obj();
+    json_set_str(params, "protocolVersion", MCP_LEGACY_PROTOCOL_VERSION);
+    json_set(params, "capabilities", json_parse_str("{\"roots\":{\"listChanged\":false}}"));
+    json_t *ci = json_obj();
+    json_set_str(ci, "name", "omc");
+    json_set_str(ci, "version", OMC_VERSION);
+    json_set(params, "clientInfo", ci);
+    return params;
+}
+
+/* discoverResultOf: a server/discover answer names its versions and capabilities */
+static bool discover_result(const json_t *r) { return json_is_arr(json_get(r, "supportedVersions")) && json_is_obj(json_get(r, "capabilities")); }
+
+/* isModernErrorCode: errors only a 2026-07-28 server emits (header mismatch, missing capability, unsupported version) */
+static bool modern_error_code(int64_t c) { return c == -32020 || c == -32021 || c == -32022; }
+
+static pending_t *req_start(mcp_server_t *s, const char *method, json_t *params, char **err) {
+    pending_t *p = xcalloc(1, sizeof *p);
+    pthread_mutex_lock(&s->mu);
+    p->id = ++s->next_id;
+    vec_push(&s->pending, p);
+    pthread_mutex_unlock(&s->mu);
+    json_t *msg = json_obj();
+    json_set_str(msg, "jsonrpc", "2.0");
+    json_set_int(msg, "id", p->id);
+    json_set_str(msg, "method", method);
+    json_set(msg, "params", params);
+    int rc = send_msg(s, msg, err);
+    json_free(msg);
+    if (rc == 0) return p;
+    pthread_mutex_lock(&s->mu);
+    for (size_t i = 0; i < s->pending.n; i++)
+        if (s->pending.v[i] == p) {
+            memmove(s->pending.v + i, s->pending.v + i + 1, (s->pending.n - i - 1) * sizeof(void *));
+            s->pending.n--;
+            break;
+        }
+    pthread_mutex_unlock(&s->mu);
+    free(p);
+    return NULL;
+}
+
+static void req_drop(mcp_server_t *s, pending_t *p) {
+    if (!p) return;
+    pthread_mutex_lock(&s->mu);
+    for (size_t i = 0; i < s->pending.n; i++)
+        if (s->pending.v[i] == p) {
+            memmove(s->pending.v + i, s->pending.v + i + 1, (s->pending.n - i - 1) * sizeof(void *));
+            s->pending.n--;
+            break;
+        }
+    pthread_mutex_unlock(&s->mu);
+    json_free(p->result);
+    free(p);
+}
+
+/* wait (s->mu held) until `a` or `b` is done, the transport ends or `deadline` (mono ms, 0: none) passes */
+static void wait_either(mcp_server_t *s, pending_t *a, pending_t *b, int64_t deadline) {
+    while (!(a && a->done) && !(b && b->done) && s->connected && !s->closing && !(s->ext_cancel && *s->ext_cancel)) {
+        if (deadline && mono_ms() >= deadline) break;
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 50000000;
+        if (ts.tv_nsec >= 1000000000) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000;
+        }
+        pthread_cond_timedwait(&s->cv, &s->mu, &ts);
+    }
+}
+
+/* the record of a legacy server's initialize answer; the session's version rides on later HTTP requests */
+static int adopt_initialize(mcp_server_t *s, json_t *init, char **err) {
+    if (!json_get_str(init, "protocolVersion")) {
+        *err = xstrdup("MCP server answered initialize without a protocol version");
+        return -1;
+    }
+    char *instr = json_get_str(init, "instructions") && json_get_bool(s->cfg, "instructions", true)
+                      ? xstrdup(json_get_str(init, "instructions"))
+                      : NULL;
+    json_t *scaps = json_get_obj(init, "capabilities") ? json_clone(json_get_obj(init, "capabilities")) : json_obj();
+    json_t *info = json_get_obj(init, "serverInfo") ? json_clone(json_get_obj(init, "serverInfo")) : json_obj();
+    if (!json_get_str(info, "name")) json_set_str(info, "name", "unknown");
+    if (!json_get_str(info, "version")) json_set_str(info, "version", "unknown");
+    pthread_mutex_lock(&s->mu);
+    s->modern = false;
+    free(s->protocol);
+    s->protocol = xstrdup(json_get_str(init, "protocolVersion"));
+    s->instructions = instr;
+    s->caps = scaps;
+    s->info = info;
+    s->connected = true;
+    pthread_mutex_unlock(&s->mu);
+    notify(s, "notifications/initialized");
+    return 0;
+}
+
+/* discoverServer: capabilities, instructions and identity from a 2026-07-28 server's discover answer */
+static void adopt_discover(mcp_server_t *s, const json_t *d) {
+    char *instr = json_get_str(d, "instructions") && json_get_bool(s->cfg, "instructions", true) ? xstrdup(json_get_str(d, "instructions")) : NULL;
+    json_t *caps = json_clone(json_get_obj(d, "capabilities"));
+    const json_t *si = json_get_obj(json_get_obj(d, "_meta"), "io.modelcontextprotocol/serverInfo");
+    json_t *info = json_obj();
+    if (json_get_str(si, "name") && json_get_str(si, "version")) {
+        json_set_str(info, "name", json_get_str(si, "name"));
+        json_set_str(info, "version", json_get_str(si, "version"));
+        if (json_get_str(si, "title")) json_set_str(info, "title", json_get_str(si, "title"));
+    } else {
+        json_set_str(info, "name", s->name);
+        json_set_str(info, "version", "unknown");
+    }
+    pthread_mutex_lock(&s->mu);
+    s->modern = true;
+    s->instructions = instr;
+    s->caps = caps;
+    s->info = info;
+    s->connected = true;
+    pthread_mutex_unlock(&s->mu);
+}
+
+/* the subscriptions/listen request of the list-change stream: all three types, whatever the server advertises */
+static json_t *listen_msg(mcp_server_t *s) {
+    json_t *params = json_obj();
+    json_set(params, "notifications", json_parse_str("{\"toolsListChanged\":true,\"promptsListChanged\":true,\"resourcesListChanged\":true}"));
+    params = with_request_meta(params);
+    json_t *msg = json_obj();
+    json_set_str(msg, "jsonrpc", "2.0");
+    pthread_mutex_lock(&s->mu);
+    json_set_int(msg, "id", ++s->next_id);
+    pthread_mutex_unlock(&s->mu);
+    json_set_str(msg, "method", "subscriptions/listen");
+    json_set(msg, "params", params);
+    return msg;
+}
+
+/* an HTTP listen stream: the POST's SSE response carries the subscription's notifications until either side ends it */
+static void *http_listen_main(void *arg) {
+    mcp_server_t *s = arg;
+    json_t *msg = listen_msg(s);
+    char *err = NULL;
+    tl_http_total = 0;
+    tl_http_idle = 24 * 3600 * 1000LL;
+    http_send(s, msg, &err);
+    tl_http_total = tl_http_idle = -1;
+    free(err);
+    json_free(msg);
+    return NULL;
+}
+
+/* ConnectionListens.openLists */
+static void open_listen(mcp_server_t *s) {
+    if (s->transport == T_HTTP) {
+        if (pthread_create(&s->listen_th, NULL, http_listen_main, s) == 0) s->listen_started = true;
+        return;
+    }
+    json_t *msg = listen_msg(s); /* stdio: notifications arrive tagged with its id; its answer ends the stream */
+    char *err = NULL;
+    send_msg(s, msg, &err);
+    free(err);
+    json_free(msg);
+}
+
+/* mcpUpstreams.probe + start: server/discover decides the era; a handshake-era server is opened with initialize */
+static int era_handshake(mcp_server_t *s, char **err) {
+    *err = NULL;
+    int64_t bound = s->timeout_ms > 0 ? s->timeout_ms : 30000; /* PROBE_TIMEOUT_MS when the spec disables its own */
+    json_t *discovered = NULL;
+    bool modern = false;
+    if (s->transport == T_STDIO) {
+        /* server/discover, and right behind it initialize, so a server that ignores the unknown method still shows
+         * itself without waiting out the bound */
+        pending_t *dp = req_start(s, "server/discover", with_request_meta(NULL), err);
+        if (!dp) return -1;
+        pending_t *ip = req_start(s, "initialize", legacy_init_params(), err);
+        if (!ip) {
+            req_drop(s, dp);
+            return -1;
+        }
+        int64_t deadline = mono_ms() + bound;
+        pthread_mutex_lock(&s->mu);
+        wait_either(s, dp, ip, deadline);
+        if (!dp->done && ip->done) wait_either(s, dp, NULL, MIN(deadline, mono_ms() + PROBE_DISCOVER_GRACE_MS));
+        bool d_done = dp->done, i_done = ip->done;
+        pthread_mutex_unlock(&s->mu);
+        if (d_done) {
+            const json_t *e = json_get_obj(dp->result, "error");
+            if (e) modern = modern_error_code(json_get_int(e, "code", 0));
+            else if (discover_result(json_get(dp->result, "result"))) {
+                modern = true;
+                discovered = json_clone(json_get(dp->result, "result"));
+            }
+        }
+        if (!modern) {
+            if (!i_done) {
+                pthread_mutex_lock(&s->mu);
+                wait_either(s, ip, NULL, deadline);
+                i_done = ip->done;
+                pthread_mutex_unlock(&s->mu);
+            }
+            json_t *e = i_done ? json_get_obj(ip->result, "error") : NULL;
+            int rc;
+            if (!i_done) {
+                *err = s->eof_error ? xstrdup(s->eof_error) : xasprintf("MCP server did not answer within %lldms", (long long)bound);
+                rc = -1;
+            } else if (e) {
+                *err = xasprintf("%s (code %lld)", json_get_str(e, "message") ? json_get_str(e, "message") : "error",
+                                 (long long)json_get_int(e, "code", 0));
+                rc = -1;
+            } else {
+                rc = adopt_initialize(s, json_get(ip->result, "result"), err);
+            }
+            req_drop(s, dp);
+            req_drop(s, ip);
+            return rc;
+        }
+        req_drop(s, dp);
+        req_drop(s, ip);
+    } else if (s->transport == T_HTTP) {
+        s->modern = true;
+        mcp_fail_t fail = {0};
+        json_t *r = mcp_request_ex(s, "server/discover", NULL, bound, err, &fail);
+        s->modern = false;
+        if (r && discover_result(r)) {
+            modern = true;
+            discovered = r;
+            r = NULL;
+        } else if (!r) {
+            if (fail.set && !strcmp(fail.failure, "json_rpc") && fail.code && modern_error_code(strtoll(fail.code, NULL, 10))) modern = true;
+            else {
+                /* anything but a server's own answer or the statuses a handshake-era endpoint gives an unknown POST is
+                 * the caller's to see: an auth challenge, an outage */
+                int st = s->http_status;
+                bool refused = st ? (st == 400 || st == 404 || st == 405) : (fail.set && !strcmp(fail.failure, "json_rpc"));
+                if (!refused) {
+                    mcp_fail_free(&fail);
+                    return -1;
+                }
+            }
+        }
+        json_free(r);
+        mcp_fail_free(&fail);
+        if (!modern) {
+            free(*err);
+            *err = NULL;
+            s->http_status = 0;
+            pthread_mutex_lock(&s->mu);
+            free(s->session_id);
+            s->session_id = NULL;
+            pthread_mutex_unlock(&s->mu);
+        }
+    }
+    if (modern) {
+        free(*err);
+        *err = NULL;
+        if (!discovered) { /* a modern-only error: ask again, as the client's discoverServer does */
+            s->modern = true;
+            discovered = mcp_request_ex(s, "server/discover", NULL, bound, err, NULL);
+            if (!discovered) return -1;
+            if (!json_is_obj(json_get(discovered, "capabilities"))) {
+                json_free(discovered);
+                *err = xasprintf("MCP server \"%s\" answered server/discover without capabilities", s->name);
+                return -1;
+            }
+        }
+        adopt_discover(s, discovered);
+        json_free(discovered);
+        open_listen(s);
+        return 0;
+    }
+    /* legacy: the initialize handshake (SSE always) */
+    json_t *init = mcp_request(s, "initialize", legacy_init_params(), s->timeout_ms, err);
+    if (!init) return -1;
+    int rc = adopt_initialize(s, init, err);
+    json_free(init);
+    return rc;
 }
 
 static int server_connect(mcp_server_t *s) {
@@ -802,33 +1310,10 @@ static int server_connect(mcp_server_t *s) {
             return -1;
         }
     }
-    json_t *params = json_obj();
-    json_set_str(params, "protocolVersion", MCP_PROTOCOL);
-    json_t *caps = json_obj();
-    json_set(caps, "roots", json_parse_str("{\"listChanged\":false}"));
-    json_set(params, "capabilities", caps);
-    json_t *ci = json_obj();
-    json_set_str(ci, "name", "omc");
-    json_set_str(ci, "version", OMC_VERSION);
-    json_set(params, "clientInfo", ci);
-    json_t *init = mcp_request(s, "initialize", params, s->timeout_ms, &err);
-    if (!init) {
+    if (era_handshake(s, &err) != 0) {
         s->error = err ? err : xstrdup("initialize failed");
         return -1;
     }
-    char *instr = json_get_str(init, "instructions") && json_get_bool(s->cfg, "instructions", true)
-                      ? xstrdup(json_get_str(init, "instructions"))
-                      : NULL;
-    json_t *scaps = json_get_obj(init, "capabilities") ? json_clone(json_get_obj(init, "capabilities")) : json_obj();
-    json_t *info = json_get_obj(init, "serverInfo") ? json_clone(json_get_obj(init, "serverInfo")) : json_obj();
-    json_free(init);
-    pthread_mutex_lock(&s->mu);
-    s->instructions = instr;
-    s->caps = scaps;
-    s->info = info;
-    s->connected = true;
-    pthread_mutex_unlock(&s->mu);
-    notify(s, "notifications/initialized");
     /* list tools (paginated) */
     json_t *tools = list_all(s, "tools/list", "tools", &err);
     if (!tools) {
@@ -1076,6 +1561,91 @@ int64_t mcp_startup_timeout_ms(void) {
     }
     int64_t v = settings_int("mcp.startupTimeoutMs", 250);
     return v < 0 ? 250 : v;
+}
+
+/* ---------- tools/call deadlines (timeout.ts resolveMCPRequestDeadline) ---------- */
+
+#define MCP_TOOL_CALL_TIMEOUT_MS 600000LL    /* default tools/call deadline */
+#define MCP_TOOL_CALL_MAX_TOTAL_MS 3600000LL /* cap on a default-deadline call that keeps reporting progress */
+#define TOOL_TIMEOUT_ARG_MARGIN_MS 30000LL   /* headroom over a tool's own requested wait */
+
+static bool ends_ci(const char *s, const char *suf) {
+    size_t n = strlen(s), m = strlen(suf);
+    return n >= m && !strcasecmp(s + n - m, suf);
+}
+static bool ends_cs(const char *s, const char *suf) {
+    size_t n = strlen(s), m = strlen(suf);
+    return n >= m && !strcmp(s + n - m, suf);
+}
+
+/* requestedToolTimeoutMs: the longest wait a call's own arguments ask for (timeout, timeout_ms, timeoutInSeconds,
+ * wait_seconds, ...); a bare timeout reads as seconds up to 1000 and as milliseconds above. -1 when none. */
+int64_t mcp_requested_tool_timeout_ms(const json_t *args) {
+    double longest = -1;
+    const char *k;
+    json_t *v;
+    if (!json_is_obj(args)) return -1;
+    json_obj_foreach((json_t *)args, i, k, v) {
+        if (!json_is_num(v)) continue;
+        double val = v->is_int ? (double)v->u.num.i : v->u.num.d;
+        if (!(val > 0) || !isfinite(val)) continue;
+        /* TIMEOUT_ARG /^(?:timeout|wait|deadline|max_?wait)/i */
+        if (strncasecmp(k, "timeout", 7) && strncasecmp(k, "wait", 4) && strncasecmp(k, "deadline", 8) && strncasecmp(k, "max_wait", 8) &&
+            strncasecmp(k, "maxwait", 7))
+            continue;
+        /* MILLISECONDS_ARG /(?:^|_)ms$|Ms$|_?millis(?:econds)?$/i */
+        bool ms = ends_ci(k, "ms") || ends_ci(k, "millis") || ends_ci(k, "milliseconds");
+        /* SECONDS_ARG /(?:^|_)(?:s|sec|secs|seconds?)$|Seconds?$|Secs?$/ */
+        bool secs = false;
+        static const char *const lo[] = {"s", "sec", "secs", "second", "seconds"};
+        for (size_t j = 0; j < ARRAY_LEN(lo) && !secs; j++) {
+            size_t n = strlen(k), m = strlen(lo[j]);
+            secs = ends_cs(k, lo[j]) && (n == m || k[n - m - 1] == '_');
+        }
+        secs = secs || ends_cs(k, "Second") || ends_cs(k, "Seconds") || ends_cs(k, "Sec") || ends_cs(k, "Secs");
+        double out = ms ? val : (secs || val <= 1000) ? val * 1000 : val;
+        if (out > longest) longest = out;
+    }
+    return longest < 0 ? -1 : (int64_t)MIN(longest, 9.0e15);
+}
+
+/* the configured timeout (OMP_MCP_TIMEOUT_MS / OMC_MCP_TIMEOUT_MS, else the server's `timeout`): true when set */
+static bool configured_timeout(const json_t *cfg, int64_t *out) {
+    const char *raw = env_get("OMP_MCP_TIMEOUT_MS");
+    if (!raw) raw = env_get("OMC_MCP_TIMEOUT_MS");
+    if (raw) {
+        char *end;
+        char *t = str_trim(raw);
+        double v = strtod(t, &end);
+        bool ok = *t && !*end && isfinite(v) && v >= 0;
+        free(t);
+        if (ok) {
+            *out = (int64_t)v;
+            return true;
+        }
+    }
+    const json_t *c = json_get(cfg, "timeout");
+    if (json_is_num(c)) {
+        *out = c->is_int ? c->u.num.i : json_d2i(c->u.num.d);
+        return true;
+    }
+    return false;
+}
+
+/* resolveMCPRequestDeadline for tools/call: a configured timeout is a hard cap; without one 10 minutes, restarted by
+ * progress up to an hour; neither shorter than the wait the call's arguments request */
+void mcp_tool_call_deadline(const json_t *cfg, const json_t *args, int64_t *timeout_ms, int64_t *max_total_ms) {
+    int64_t configured = 0;
+    bool has = configured_timeout(cfg, &configured);
+    int64_t base = has ? configured : MCP_TOOL_CALL_TIMEOUT_MS;
+    if (base <= 0) {
+        *timeout_ms = *max_total_ms = base;
+        return;
+    }
+    int64_t requested = mcp_requested_tool_timeout_ms(args);
+    int64_t t = requested < 0 ? base : MAX(base, requested + TOOL_TIMEOUT_ARG_MARGIN_MS);
+    *timeout_ms = t;
+    *max_total_ms = has ? t : MAX(t, MCP_TOOL_CALL_MAX_TOTAL_MS);
 }
 
 /* resolveMCPTimeoutMs: OMP_MCP_TIMEOUT_MS, else 30 s */
@@ -1850,7 +2420,9 @@ static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *a
     s->inflight_calls++;
     pthread_mutex_unlock(&s->mu);
     mcp_fail_t fail = {0};
-    json_t *res = mcp_request_ex(s, "tools/call", json_clone(p), s->timeout_ms, &err, &fail);
+    int64_t call_timeout, call_cap;
+    mcp_tool_call_deadline(s->cfg, json_get(p, "arguments"), &call_timeout, &call_cap);
+    json_t *res = mcp_request_dl(s, "tools/call", json_clone(p), call_timeout, call_cap, true, &err, &fail);
     settle_tool_call(s, b, ctx);
     if (!res && !(cancel && *cancel) && mcp_fail_reconnectable(&fail)) {
         /* isRetriableConnectionError: a stale connection gets one reconnect and replay */
@@ -1866,7 +2438,7 @@ static int mcp_tool_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *a
             pthread_mutex_lock(&s->mu);
             s->inflight_calls++;
             pthread_mutex_unlock(&s->mu);
-            res = mcp_request_ex(s, "tools/call", json_clone(p), s->timeout_ms, &err, &fail);
+            res = mcp_request_dl(s, "tools/call", json_clone(p), call_timeout, call_cap, true, &err, &fail);
             settle_tool_call(s, b, ctx);
         }
     }

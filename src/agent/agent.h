@@ -205,6 +205,7 @@ struct agent {
     volatile sig_atomic_t deliver_queued;    /* an empty Enter forced the queue into the continuation (see below) */
     volatile sig_atomic_t abort_user;        /* the abort carries USER_INTERRUPT_LABEL (agent_abort_user) */
     volatile sig_atomic_t abort_silent;      /* the running turn's abort is an internal transition (agent_abort_silently) */
+    const char *volatile abort_reason;       /* agent_abort_reason: errorMessage of the aborted turn (static), or NULL */
     bool running;
     json_t *streaming_message; /* borrowed while streaming */
     int max_turns;             /* 0 => unlimited */
@@ -246,6 +247,9 @@ void agent_abort_kill(agent_t *a); /* abort({reason: AGENT_KILL_LABEL}) */
 /* markPlanInternalAbortPending + abort(): stop the running turn as an expected internal transition; its aborted
  * assistant message carries the silent-abort marker, so no "Operation aborted" line is drawn */
 void agent_abort_silently(agent_t *a);
+/* abort(reason): stop the running turn with `reason` (a static string) as its aborted message's errorMessage, e.g.
+ * INTERRUPTED_TURN_ERROR when the process ends under the turn (SIGTERM/SIGHUP), so --restore goes on with it */
+void agent_abort_reason(agent_t *a, const char *reason);
 /* Abort the next model request of the running loop as an expected internal transition (omp
  * markPlanInternalAbortPending + abort): the aborted assistant message is stamped with
  * errorMessage "__omp.silent_abort__" so no abort line renders. */
@@ -319,6 +323,13 @@ json_t *text_block(const char *text);
 json_t *image_block(const char *b64, const char *mime);
 /* last assistant message in an array (borrowed) */
 const json_t *last_assistant(const json_t *messages);
+/* replay-policy.ts toProviderReplayMessage: NULL when the message is replayed as is, AGENT_REPLAY_DROP for an API-level
+ * provider refusal (stopReason error, stopDetails refusal/sensitive), else an owned copy of a provider-error tool
+ * placeholder without the provider's error text */
+#define AGENT_REPLAY_DROP ((json_t *)(uintptr_t)1)
+json_t *agent_provider_replay_msg(const json_t *msg);
+/* filterProviderReplayMessages over a message array: NULL when nothing changes, else an owned copy */
+json_t *agent_provider_replay(const json_t *messages);
 /* the call is the only tool call of the latest assistant message (wait.ts isOnlyCallOfTurn) */
 bool agent_tool_call_alone(agent_t *a, const char *tool_call_id);
 

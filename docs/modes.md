@@ -34,7 +34,8 @@ agent-dir `SYSTEM_TEMPLATE.md` is discovered like `SYSTEM.md`; failing those, th
 model substrings to template files, longest match wins, a missing or empty file keeps the bundled prompt), `--append-system-prompt`, `--cwd`, `--mode`,
 `--config` (repeatable), `-p`, `-c`, `-r/--resume [id|path]` (no value: the session picker; Esc prints
 `No session selected`), `--restore <session>` (resume, then go on with the interrupted turn:
-`src/coding/restore.c`), `--session-dir`, `--no-session`, `--fork`, `--tools`, `--no-tools`, `--no-lsp`,
+`src/coding/restore.c`; a turn the host's SIGTERM/SIGHUP cut off is labelled interrupted on the way out, a quit or
+Ctrl+C stops it), `--session-dir`, `--no-session`, `--fork`, `--tools`, `--no-tools`, `--no-lsp`,
 `--hide-thinking`, `--advisor`, `--skills <globs>` (`skills.includeSkills`), `--no-skills`, `--no-rules`,
 `--no-context-files`, `--export <session> [out]`, `--no-title`, `--print-thoughts`, `--max-time 600|10m|1h`
 (runs stop at the deadline), `--warn-cost` / `--max-cost` (`session.warnCost` / `session.maxCost`:

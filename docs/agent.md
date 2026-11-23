@@ -32,6 +32,17 @@ loop:
 agent_end(messages added in this run)
 ```
 
+- **Replay policy** (`agent_provider_replay`, replay-policy.ts): the request context (app.c's transform hook, after the
+  image placeholders) and the `/context` view drop API-level provider refusals (`stopReason` error with
+  `stopDetails.type` `refusal`/`sensitive`), and a provider-error placeholder result (`source: assistant_stop_error`)
+  replays only "Tool call was not executed because the provider stream ended with an error before the tool could run.";
+  the provider's text stays in `details.upstreamError` for the UI.
+- **Classifier refusals** (Anthropic `stop_reason` `refusal`/`sensitive`; the provider keeps the wire `stop_details` as
+  `stopDetails`): the refused turn is never a session message; app.c writes a `provider_refusal` custom entry (api,
+  provider, model, stopType, category, explanation, errorMessage, usage, timing, streamed content; no fallback-credit
+  token). A `reasoning_extraction` refusal that stopped output already streaming is resampled at once on the same model,
+  once per retry saga, before the fallback walk.
+
 - **Steering** (`agent_steer`) is delivered at the batch boundary, after the current turn's tools: the next turn opens
   (`turn_start`) and the steer is emitted into it. A steer queued while a batch runs (or while its calls were still
   streaming) never skips an already-emitted call (agent-loop.ts runTool, omp #10439): the expensive part, generating
@@ -149,7 +160,7 @@ then call `app_after_run()`, which may return a hidden follow-up prompt (async j
 advisor continuation, or a goal continuation) that the mode runs with `app_prompt_hidden()`.
 
 Other entry points: `app_set_model`, `app_set_thinking`, `app_compact`, `app_new_session`,
-`app_switch_session`, `app_fork_from`, `app_branch_to`, `app_clear_context`, `app_handoff`,
+`app_switch_session`, `app_fork_from`, `app_branch_to`, `app_clear_context`, `app_handoff_background`,
 `app_retry`, `app_shake` (elide large tool results from the live context), `app_side_question`
 (`/btw`: answer from context, no tools, not added to history) and `app_user_bash` (`!cmd`).
 
@@ -166,7 +177,14 @@ continuations print mode suppresses).
   ceiling) through `evalhost_judge` with a 4 s budget, or jumps to the model's max on `ultrathink`. Failures keep the
   last classified level. Resolutions are persisted as `thinking_level_change {configured: "auto"}`; an abort during
   classification drops the prompt (`abort_gen`). `app_set_thinking_level("auto")` / `app_set_thinking_auto` serve
-  `/thinking`, the selector, Shift+Tab and RPC.
+  `/thinking`, the selector, Shift+Tab and RPC. A run no classification resolved (IRC wakes, resumed, synthetic turns)
+  settles auto on the level it starts at (`settleAutoThinkingLevel`, at `agent_start`).
+- **Thinking across model switches** (`reapply_thinking` in `coding/app.c`; omp `#reapplyThinkingLevel`). Every switch
+  (`/model`, `/switch`, the picker, RPC `set_model`, role picks without a level) keeps auto, else carries the level
+  that was effective on the previous model, clamped to the nearest effort the new one supports. The new model's
+  `thinking.defaultLevel` applies only when no level is set (the previous model had no thinking). A session-only pick
+  no longer borrows the level of a role that names the picked model; quick-role picks and role cycling still apply
+  their role's explicit suffix.
 - **Magic keywords** (`coding/keywords.c`; omp `modes/magic-keywords.ts`, `markdown-prose.ts`). `keywords_notices`
   turns standalone prose `ultrathink` / `orchestrate` / `jevify` (never inside code fences, code spans or XML/HTML
   sections) into hidden developer messages (`attribution: user`, `customType: <id>-notice`) placed ahead of the user
@@ -271,8 +289,8 @@ chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp
   (`tool_choice: none`, `auto-handoff-threshold-focus.md`; `compaction.handoffSaveToDisk` writes
   `handoff-<time>.md` to the session artifacts) and commits it with `method: "handoff"`, rendered
   through `handoff-summary-context.md`. A document without a `## Goal` heading line (text before it is allowed) is
-  rejected (an automatic handoff moves on to the next method, `/handoff` reports "Handoff generation produced an invalid
-  document").
+  rejected (an automatic handoff moves on to the next method, `/handoff` reports "Compaction failed: Handoff generation
+  produced an invalid document").
 - **Triggers**: after each turn (`cmp_after_turn`: stale-read supersession and useless-result elision
   with `compaction.supersedeReads` / `dropUseless`, tool-output pruning, then the threshold), between
   tool-loop turns (`cmp_mid_turn`, `compaction.midTurnEnabled`, through the agent's `turn_boundary`
@@ -292,7 +310,19 @@ chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp
 
 `app_compaction_threshold()` gives the trigger (`compaction.thresholdTokens`, `thresholdPercent`,
 per-model `compaction.modelThresholds`, else the reserve-based budget); the status-line gauge uses the
-same value. `app_handoff()` (`/handoff`) commits a handoff document the same way.
+same value.
+
+**`/handoff` = `/compact handoff`** (`app_handoff_background`; omp `compact(focus, {mode: "handoff"})`) is a background
+compaction: it prepares against a snapshot of the branch (the cut point and the handoff request built from the live
+messages) and generates the document on its caller's thread without interrupting the live turn or holding follow-ups.
+The result applies at the first safe boundary: between tool turns (`cmp_mid_turn`), at the run's end
+(`cmp_after_turn`), or once idle through the mode's hook (the TUI's UI thread, RPC under its run lock). Messages that
+arrived meanwhile stay after the summary verbatim. A newer compaction, a reset or a branch change that dropped the
+snapshot discards it ("Conversation changed while compacting; discarded the summary"); Esc in the TUI, `abort` and
+`abortCompaction` cancel it ("Compaction cancelled"). Auto-compaction may still run meanwhile. The TUI shows
+`Compacting context in the background… (Esc to cancel)` in the working row while idle and a right-aligned HUD row with
+its clock above the working row beside a turn; it reports "Compaction complete" or "Compaction failed: …". RPC
+`handoff` runs in the background with one `manual_compaction_start {mode: "handoff"}` / `_end` pair.
 
 ## System prompt assembly (`src/coding/discovery.c`)
 
@@ -447,6 +477,22 @@ what is being fixed. An `advise` call from a cancelled review records nothing (`
   (it sends the main session id as the cache key and keeps its own provider session id); every tool but `learn` and
   `manage_skill` is a copy that refuses the call without running anything.
 
+## Prompt-cache warming (`coding/cachewarm.c`)
+
+The main loop's latest request is kept warm (`providers.cacheWarming`: `off`, `streaming`, `idle`; task subagents are
+capped at `streaming`): a decision is due at 90% of the model's declared `promptCache` lifetime (at least ten seconds
+before expiry). A refresh is a `max_tokens: 0` pre-warm where the catalog declares `promptCachePrewarm` and the model
+uses its provider's own HTTPS host (first-party Anthropic; the provider sends it non-streaming and returns usage, a 400
+falls back to a replay in the same slot and for the rest of the session), otherwise a one-token replay priced with the
+session's mean billed replay output (512 tokens before the first). Idle phase: refresh while 15% of the miss cost
+minus the refresh clears $0.05, for 30 minutes. Streaming phase (ski rental): refresh while the refresh spend since the
+last request plus the next refresh stays within the cheaper buy-out: letting the entry expire, or a bridge compaction
+(`providers.cacheWarmingStrategy` `auto`/`keepalive`/`compact`, prompts past min(`cacheWarmingCompactPercent` of the
+window, `cacheWarmingCompactTokens`)). A bridge is decided a minute before expiry and runs as a background speculation
+(`cmp_bridge_start`, remote or handoff, never soft) over the history before the pending tool call; its armed result
+commits at the next mid-run boundary whatever the threshold, and one that failed before a provider accepted it is
+replaced by one refresh. `cache_warming_start`/`_end` carry the `method`.
+
 ## Titles (`coding/title.c`)
 
 Under `title.generator: fork` (the default), when the reply to the user's first substantive message
@@ -457,6 +503,9 @@ such as `🧪 FLAKY: Fix flaky park tests`. This reuses the prompt cache. Low-si
 `OMC_NO_TITLE=1` disables them (RPC mode always does). Every billed title request (the fork, each
 title-model attempt, errors included) is journaled as an off-transcript `model_usage` entry with
 `purpose: "title"` and charged to the session's cost gate, so `/usage` and `--max-cost` count it.
+Compaction requests are journaled the same way (usage only), under the method that made them:
+`compaction:remote` (provider-native, including OpenAI `/responses/compact`, priced from its `usage`),
+`compaction:soft` (local summary requests) and `compaction:handoff` (the handoff document).
 
 ## Plan mode
 
@@ -578,7 +627,8 @@ tools are exclusive and mountable as `xd://` devices.
   afterwards its card frames carry omp's texts (`Running background task <id>...`, `Running agent
   <id>...`, `Background task <id> complete.` / `failed.`), forwarded to RPC as `tool_execution_update`.
 - **Subagent sessions** carry no personality block (sdk.ts passes `personality: "none"` for subagents),
-  no `todo` tool (parent-owned bookkeeping) and no `lsp` unless `task.enableLsp`; the peer roster lists
+  no `todo` tool (parent-owned bookkeeping); they always get the shared `lsp` tool, while `task.enableLsp` (off)
+  only turns on LSP formatting/diagnostics after their edits and writes; the peer roster lists
   `main` / agent-type display names with kind `main` / `sub`, running before idle, and the progress gist
   as activity. `agent://`, `history://` and `proc://` are always listed in the internal-URL docs.
 - **Jobs** (`tools/jobs.c`, port of `async/` AsyncJobManager): async bash (`async: true`), bash

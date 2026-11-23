@@ -101,11 +101,12 @@ size_t ui_thinking_slider(const ai_model_t *m, const char *level, const char **s
     return n;
 }
 
-/* configuredThinkingLevel: the session's selection, `auto` included */
-static const char *configured_level(const app_t *a) { return a->auto_thinking ? "auto" : effort_name(a->thinking); }
+/* configuredThinkingLevel: `auto`, else the session's effective level (NULL, unset, on a model without thinking) */
+static const char *configured_level(app_t *a) { return a->auto_thinking ? "auto" : app_wire_thinking(a); }
 
-/* thinkingLevelFor (selector-controller.ts): the level the session runs at, auto's resolved effort once a turn
- * settled it (as the status line shows); the slider clamps it per model (omp 01985becf3, 081b4fbf8b) */
+/* thinkingLevelFor (selector-controller.ts): autoResolvedThinkingLevel() ?? configuredThinkingLevel(), the level
+ * the session runs at (auto's resolved effort once a turn settled it, as the status line shows); the slider clamps
+ * it per model (omp 01985becf3, 081b4fbf8b, 5b4fb78a55) */
 static const char *thinking_level_for(const picker_t *p, const ai_model_t *m) {
     UNUSED(m);
     app_t *a = p->u->app;

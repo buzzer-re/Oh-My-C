@@ -2888,6 +2888,7 @@ static bool handle_command_inner(ui_t *u, const char *line) {
         const char *mode;
         char *focus, *err = NULL;
         if (!slash_parse_compact_args(arg, &mode, &focus, &err)) add_notice(u, "warning", err);
+        else if (str_eq(mode, "handoff")) iq_handoff(u, focus); /* a background mode never holds the turn */
         else iq_compact(u, arg); /* the worker parses the mode/focus again (iqueue.c bg_main) */
         free(focus);
         free(err);
@@ -3660,6 +3661,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_container_add(root, &u.banner->base);
     u.model_cycle = tui_container_new();
     tui_container_add(root, &u.model_cycle->base);
+    tui_container_add(root, ui_bg_compaction_hud_new(&u)); /* omp progressHudContainer: above the working row */
     u.working = ui_working_new(&u);
     tui_container_add(root, u.working);
     u.loader = tui_loader_new(u.tui, "Working…");
@@ -3763,6 +3765,9 @@ int run_interactive_mode(app_t *a, const char *initial) {
     ui_signals_dispose();
     ui_mcp_uninstall(); /* a settings listener outlives this run and must not reach this stack frame */
     if (u.worker_running) {
+        /* cutsTurnOff: the host's SIGTERM / SIGHUP (a terminal restarting) ends the process under the turn: label it
+         * interrupted so `omc --restore` goes on with it; a quit or Ctrl+C stops it */
+        if (code == 128 + SIGTERM || code == 128 + SIGHUP) agent_abort_reason(a->agent, INTERRUPTED_TURN_ERROR);
         app_abort(a);
         pthread_join(u.worker, NULL);
     }

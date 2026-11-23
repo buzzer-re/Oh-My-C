@@ -1,10 +1,14 @@
 /* cachewarm.h - prompt cache warmer (port of omp session/cache-warmer.ts, `providers.cacheWarming`).
  *
- * The main loop's latest request is replayed with a one-token output budget at 90% of the model's declared
- * prompt-cache lifetime (at least ten seconds before expiry), only while the conversation still matches it and
- * only when the expected avoided cache-miss cost minus the refresh cost is at least $0.05. Warming runs in a
- * "streaming" phase while the agent run is active and an "idle" phase after it settles (mode "idle"), and stops on
- * context change, mode change, a refresh that misses the cache, or the 60 min streaming / 30 min idle windows.
+ * The main loop's latest request is refreshed at 90% of the model's declared prompt-cache lifetime (at least ten
+ * seconds before expiry), only while the conversation still matches it: a `max_tokens: 0` pre-warm where the catalog
+ * declares the endpoint takes one (first-party Anthropic; a 400 falls back to replay for the session), else a
+ * one-token replay priced with the session's observed replay output (512-token prior). Idle phase: while the expected
+ * savings clear $0.05 (15% continuation, 30 min window). Streaming phase (ski rental): while the refresh spend since
+ * the last request plus the next refresh stays within the cheapest buy-out: letting the entry expire, or, per
+ * `providers.cacheWarmingStrategy`, a bridge compaction a minute before expiry (cmp_bridge_start) for prompts past
+ * min(cacheWarmingCompactPercent of the window, cacheWarmingCompactTokens). Stops on context change, mode change, or
+ * a refresh that misses the cache.
  * A model is warmed only when its catalog entry declares `promptCache` lifetimes for the retention tier used. */
 #ifndef OMC_CACHEWARM_H
 #define OMC_CACHEWARM_H
@@ -14,7 +18,8 @@
 typedef struct cache_warmer cache_warmer_t;
 typedef struct app app_t;
 
-cache_warmer_t *cachewarm_new(app_t *a); /* starts the timer thread */
+/* starts the timer thread; cap: the highest mode for this session ("idle"; task subagents "streaming") */
+cache_warmer_t *cachewarm_new(app_t *a, const char *cap);
 void cachewarm_stop(cache_warmer_t *w);  /* stops and joins the thread (pending usage is kept) */
 void cachewarm_free(cache_warmer_t *w);  /* stops, joins and frees */
 

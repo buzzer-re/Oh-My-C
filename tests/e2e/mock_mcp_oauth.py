@@ -24,6 +24,11 @@ class H(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(body)
     def do_GET(self):
         u = urllib.parse.urlparse(self.path); q = dict(urllib.parse.parse_qsl(u.query))
+        if u.path == "/.well-known/oauth-protected-resource/deny/mcp":  # a server whose registration is closed (403)
+            return self.send(200, {"resource": BASE + "/deny/mcp", "authorization_servers": [BASE + "/deny"]})
+        if u.path == "/.well-known/oauth-authorization-server/deny":
+            return self.send(200, {"issuer": BASE + "/deny", "authorization_endpoint": BASE + "/authorize", "token_endpoint": BASE + "/token",
+                                   "registration_endpoint": BASE + "/deny/register"})
         if u.path.startswith("/.well-known/oauth-protected-resource"):
             return self.send(200, {"resource": BASE + "/mcp", "authorization_servers": [BASE], "scopes_supported": ["mcp.read"]})
         if u.path == "/.well-known/oauth-authorization-server":
@@ -39,8 +44,14 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
         data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if u.path == "/deny/register":
+            return self.send(403, None, raw=b"Forbidden\nclient not listed")
+        if u.path == "/deny/mcp":
+            return self.send(401, {"error": "unauthorized"}, {"WWW-Authenticate":
+                f'Bearer resource_metadata="{BASE}/.well-known/oauth-protected-resource/deny/mcp"'})
         if u.path == "/register":
             reg = json.loads(data); assert reg["redirect_uris"][0].startswith("http://127.0.0.1:")
+            assert reg["client_name"] == "Codex" and reg["application_type"] == "native", reg
             return self.send(201, {"client_id": "cid-1"})
         if u.path == "/token":
             f = dict(urllib.parse.parse_qsl(data.decode()))
@@ -56,7 +67,8 @@ class H(BaseHTTPRequestHandler):
                 if not ok or f.get("redirect_uri") != red or f.get("resource") != res: return self.send(400, {"error": "invalid_grant"})
                 tokens["tok-1"] = True
                 return self.send(200, {"access_token": "tok-1", "refresh_token": "ref-1", "expires_in": 3600, "token_type": "Bearer"})
-            if f.get("grant_type") == "refresh_token" and f.get("refresh_token") == "ref-1":
+            # the refresh repeats the scope the grant holds (the authorize request's: the token reply named none)
+            if f.get("grant_type") == "refresh_token" and f.get("refresh_token") == "ref-1" and f.get("scope") == "mcp.read":
                 tokens["tok-2"] = True
                 return self.send(200, {"access_token": "tok-2", "expires_in": 3600, "token_type": "Bearer"})
             return self.send(400, {"error": "unsupported_grant_type"})

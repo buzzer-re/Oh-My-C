@@ -63,7 +63,7 @@ if cmds.get("init", {}).get("source") != "file":  # the bundled /init file comma
     fail("bundled /init not advertised")
 if cmds["model"].get("aliases") != ["models"]:
     fail("model aliases")
-if cmds["compact"]["input"]["hint"] != "[soft] [focus]":
+if cmds["compact"]["input"]["hint"] != "[soft|handoff] [focus]":
     fail("compact hint " + json.dumps(cmds["compact"].get("input")))
 if [s["name"] for s in cmds["shake"].get("subcommands", [])] != ["elide", "images", "thinking"]:
     fail("shake subcommands")

@@ -465,6 +465,45 @@ const json_t *last_assistant(const json_t *messages) {
     return NULL;
 }
 
+/* replay-policy.ts PROVIDER_ERROR_NOT_EXECUTED_TEXT: the model-facing text of a provider-error placeholder (the
+ * provider's error, details.upstreamError, stays in the session for the UI) */
+static const char PROVIDER_ERROR_NOT_EXECUTED_TEXT[] =
+    "Tool call was not executed because the provider stream ended with an error before the tool could run.";
+
+json_t *agent_provider_replay_msg(const json_t *msg) {
+    const char *role = json_get_str(msg, "role");
+    if (str_eq(role, "assistant")) {
+        /* isProviderRefusalMessage */
+        const char *sd = json_get_str(json_get_obj(msg, "stopDetails"), "type");
+        bool refusal = str_eq(json_get_str(msg, "stopReason"), "error") && (str_eq(sd, "refusal") || str_eq(sd, "sensitive"));
+        return refusal ? AGENT_REPLAY_DROP : NULL;
+    }
+    if (!str_eq(role, "toolResult")) return NULL;
+    /* isProviderErrorPlaceholder: replaying a refusal explanation feeds the classifier its own verdict */
+    const json_t *d = json_get_obj(msg, "details");
+    if (!json_get_bool(d, "__synthetic", false) || !str_eq(json_get_str(d, "source"), "assistant_stop_error")) return NULL;
+    json_t *r = json_clone(msg);
+    json_t *c = json_arr();
+    json_push(c, text_block(PROVIDER_ERROR_NOT_EXECUTED_TEXT));
+    json_set(r, "content", c);
+    return r;
+}
+
+json_t *agent_provider_replay(const json_t *messages) {
+    json_t *out = NULL, *m;
+    json_arr_foreach((json_t *)messages, i, m) {
+        json_t *r = agent_provider_replay_msg(m);
+        if (!r && !out) continue;
+        if (!out) {
+            out = json_arr();
+            for (size_t k = 0; k < i; k++) json_push(out, json_clone(json_at(messages, k)));
+        }
+        if (r == AGENT_REPLAY_DROP) continue;
+        json_push(out, r ? r : json_clone(m));
+    }
+    return out;
+}
+
 /* ---------- events ---------- */
 
 static const char *ev_names[] = {"agent_start",   "agent_end",      "turn_start",           "turn_end",
@@ -750,6 +789,10 @@ void agent_abort_kill(agent_t *a) {
     a->cancel = 1;
 }
 void agent_abort_next_silently(agent_t *a) { a->silent_abort_next = 1; }
+void agent_abort_reason(agent_t *a, const char *reason) {
+    a->abort_reason = reason;
+    a->cancel = 1;
+}
 void agent_abort_silently(agent_t *a) {
     a->abort_silent = 1;
     a->cancel = 1;
@@ -1136,7 +1179,8 @@ static json_t *aborted_boundary(agent_t *a) {
     json_t *m = ai_error_message(a->model, "aborted", a->abort_silent ? "__omp.silent_abort__"
                                                       : a->abort_user == 2 ? AGENT_KILL_LABEL
                                                       : a->abort_user ? AGENT_USER_INTERRUPT_LABEL
-                                                                      : "Request was aborted");
+                                                      : a->abort_reason ? a->abort_reason
+                                                                        : "Request was aborted");
     int64_t ts = json_get_int(m, "timestamp", now_ms());
     json_del(m, "timestamp");
     json_set_int(m, "errorId", a->abort_silent ? 33558528 : a->abort_user ? AIE_ID_USER_INTERRUPT : AIE_ID_ABORT);
@@ -1278,6 +1322,9 @@ static json_t *stream_assistant(agent_t *a, int *ttsr_abort, json_t **cursor_res
     else if (a->abort_user && !a->abort_silent && str_eq(json_get_str(msg, "stopReason"), "aborted") &&
              (!json_get_str(msg, "errorMessage") || str_eq(json_get_str(msg, "errorMessage"), "Request was aborted")))
         user_interrupt_label(a, msg); /* abortReasonText: the caller's reason, classified UserInterrupt */
+    else if (a->abort_reason && !a->abort_silent && str_eq(json_get_str(msg, "stopReason"), "aborted") &&
+             (!json_get_str(msg, "errorMessage") || str_eq(json_get_str(msg, "errorMessage"), "Request was aborted")))
+        json_set_str(msg, "errorMessage", a->abort_reason); /* abortReasonText: the caller's reason */
     if (a->cancel && !silent && str_eq(json_get_str(msg, "stopReason"), "aborted")) {
         /* finishAbortedStream commits the streaming partial: the provider's closing timings never land on it */
         json_del(msg, "duration");
@@ -1840,6 +1887,7 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
     a->cancel = 0;
     a->abort_user = 0;
     a->abort_silent = 0;
+    a->abort_reason = NULL;
     a->run_started_mono = mono_ms();
     live_loops_add(1);
     json_t *run_msgs = json_arr();

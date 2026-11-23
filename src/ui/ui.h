@@ -120,6 +120,8 @@ struct ui {
     bool resume_pending;            /* `.`/`c` interrupted the running turn: the continuation starts once it unwinds */
     strvec_t optimistic;            /* submitted prompts already drawn: their user message_start is not drawn again */
     int bg_kind;                    /* running maintenance op: 0 none, 1 compaction, 2 handoff */
+    tui_component_t *bg_hud;        /* the background compaction HUD (chat.c) */
+    bool bg_commit_posted;          /* a background compaction asked the UI thread to apply it once idle */
     /* iq_compact_then: runs once the manual compaction settles (ok: committed or nothing to compact) */
     void (*after_compact)(ui_t *u, bool ok, void *ud);
     void *after_compact_ud;
@@ -223,6 +225,10 @@ void ui_working_set_message(ui_t *u, const char *message);
 /* the retry countdown row; `reason` (the failed attempt's error, may be NULL) follows the wait */
 void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms, const char *reason);
 void ui_working_compaction(ui_t *u, const char *label);
+/* background compaction (/handoff): its working row while idle, a HUD row beside a running turn */
+tui_component_t *ui_bg_compaction_hud_new(ui_t *u);
+void ui_bg_compaction_start(ui_t *u, const char *label);
+void ui_bg_compaction_stop(ui_t *u);
 bool ui_working_busy(ui_t *u); /* a retry countdown or compaction row replaces the working/title row */
 /* highlightMagicKeywords over a rendered row: paints each keyword standing as prose with its gradient; escapes in the row are
  * kept. `reset_to`: the SGR restored after a keyword (NULL: foreground reset); `only_fg`: only paint where this is the active

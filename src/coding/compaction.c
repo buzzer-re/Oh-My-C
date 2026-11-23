@@ -29,6 +29,10 @@
 #define PRUNE_IDLE_FLUSH_MS (90LL * 60000)
 
 static const char *const DEFAULT_METHODS[] = {"remote", "snapcompact", "handoff", "shake", "soft"};
+/* set while a bridge speculation is prepared: the history before the pending tool call is what it summarizes */
+static __thread bool tl_bridge;
+/* a claimed bridge speculation the next cmp_auto pass commits (owned until consumed) */
+static __thread struct cmp_spec *tl_forced;
 #define SUPERSEDED_NOTICE "[Superseded by a newer read of this file]"
 #define USELESS_NOTICE "[Uneventful result elided]"
 #define REMOTE_SUMMARY "Remote compaction preserved provider-native history for this session."
@@ -332,10 +336,51 @@ static void ops_add(json_t *ops, const char *key, const char *v) {
 }
 
 /* 0 ok, 1 already compacted, 2 nothing to compact */
+/* findPendingToolCall over a message array: index of the newest assistant message with a tool call no later result
+ * answers, or -1 */
+static ssize_t pending_tool_call(const json_t *msgs, const json_t *(*msg_of)(const json_t *)) {
+    strvec_t answered = {0};
+    ssize_t found = -1;
+    for (size_t i = json_len(msgs); i-- > 0;) {
+        const json_t *m = msg_of(json_at(msgs, i));
+        const char *role = json_get_str(m, "role");
+        if (str_eq(role, "toolResult")) {
+            strvec_push(&answered, json_get_str(m, "toolCallId") ? json_get_str(m, "toolCallId") : "");
+        } else if (str_eq(role, "assistant")) {
+            const json_t *b;
+            json_arr_foreach(json_get_arr(m, "content"), k, b) {
+                if (!str_eq(json_get_str(b, "type"), "toolCall")) continue;
+                bool ok = false;
+                for (size_t j = 0; j < answered.n && !ok; j++) ok = str_eq(answered.v[j], json_get_str(b, "id"));
+                if (!ok) found = (ssize_t)i;
+            }
+            break;
+        }
+    }
+    strvec_free(&answered);
+    return found;
+}
+static const json_t *entry_message(const json_t *e) {
+    return str_eq(json_get_str(e, "type"), "message") ? json_get_obj(e, "message") : NULL;
+}
+static const json_t *self_message(const json_t *m) { return m; }
+
+/* the branch a preparation reads: the session's, or for a bridge the entries before the pending tool call's; false
+ * when nothing is left */
+static bool prepare_path(app_t *a, json_t **path_out) {
+    json_t *path = session_path_to(a->session, a->session->leaf_id);
+    if (tl_bridge) {
+        ssize_t i = pending_tool_call(path, entry_message);
+        while (i >= 0 && json_len(path) > (size_t)i) json_free(json_arr_remove(path, json_len(path) - 1));
+    }
+    *path_out = path;
+    return json_len(path) > 0;
+}
+
 static int prepare(app_t *a, const ai_model_t *model, prep_t *p) {
     memset(p, 0, sizeof *p);
     if (!a->session || !a->session->leaf_id) return 2;
-    p->path = session_path_to(a->session, a->session->leaf_id);
+    if (!prepare_path(a, &p->path)) return 2;
     size_t n = json_len(p->path);
     if (!n) return 2;
     const json_t *last = json_at(p->path, n - 1);
@@ -501,6 +546,15 @@ static char *joined_text(const json_t *msg) {
 static __thread volatile sig_atomic_t *tl_cancel;
 static volatile sig_atomic_t *cancel_ptr(app_t *a) { return tl_cancel ? tl_cancel : &a->agent->cancel; }
 static bool cancelled(app_t *a) { return *cancel_ptr(a) != 0; }
+/* the model_usage purpose of this pass's requests: compaction:<method> (omp 625d62739c) */
+static __thread const char *tl_purpose;
+/* a bridge speculation's "a provider billed one of my requests" flag (it read the cached prefix) */
+static __thread volatile int *tl_accepted;
+static void note(app_t *a, const char *purpose, const json_t *resp) {
+    app_note_side_usage(a, purpose, resp);
+    if (tl_accepted && json_get_int(json_get_obj(resp, "usage"), "totalTokens", 0) > 0) *tl_accepted = 1;
+}
+static void journal(app_t *a, const json_t *resp) { note(a, tl_purpose ? tl_purpose : "compaction:soft", resp); }
 
 /* one summarization oneshot: owned text, NULL + *err (owned) on failure; *status the HTTP status if known */
 static char *oneshot_ex(app_t *a, const ai_model_t *m, const char *system, const char *user, int64_t max_tokens,
@@ -522,6 +576,7 @@ static char *oneshot_ex(app_t *a, const ai_model_t *m, const char *system, const
     o.metadata = (json_t *)app_session_metadata(a, m->provider);
     o.cancel = cancel_ptr(a);
     json_t *r = ai_complete(m, &ctx, &o);
+    journal(a, r);
     char *text = NULL;
     const char *stop = json_get_str(r, "stopReason");
     if (status) *status = (int)json_get_int(r, "errorStatus", 0);
@@ -849,6 +904,7 @@ static bool anthropic_compact(app_t *a, const ai_model_t *m, const prep_t *p, co
     o.tool_choice = NULL;
     o.anthropic_compaction = ac;
     json_t *resp = ai_complete(m, &c, &o);
+    journal(a, resp);
     json_free(ac);
     json_free(sys);
     json_free(tools);
@@ -918,6 +974,7 @@ static bool openai_compact(app_t *a, const ai_model_t *m, const prep_t *p, resul
     free(instr);
     json_free(msgs);
     if (!out) return false;
+    if (json_get(out, "usageMessage")) journal(a, json_get(out, "usageMessage"));
     json_t *keep = json_obj();
     json_set_str(keep, "provider", m->provider);
     json_set(keep, "replacementHistory", json_take(out, "replacementHistory"));
@@ -936,6 +993,7 @@ static bool compact_with(app_t *a, const ai_model_t *m, prep_t *p, const char *i
     memset(r, 0, sizeof *r);
     r->first_kept = xstrdup(p->first_kept);
     r->tokens_before = p->tokens_before;
+    tl_purpose = remote ? "compaction:remote" : "compaction:soft";
     bool used_remote = false, native = false;
     const char *prev = p->prev ? json_get_str(p->prev, "summary") : NULL;
     if (remote && settings_bool("compaction.remoteEnabled", true)) {
@@ -1695,6 +1753,10 @@ static bool handoff_build(app_t *a, const char *focus, handoff_req_t *h, char **
     json_free(ctx);
     pthread_mutex_lock(&a->agent->mu);
     json_t *msgs = json_clone(a->agent->messages);
+    if (tl_bridge) { /* a bridge summarizes what preceded the pending tool call */
+        ssize_t pi = pending_tool_call(msgs, self_message);
+        while (pi >= 0 && json_len(msgs) > (size_t)pi) json_free(json_arr_remove(msgs, json_len(msgs) - 1));
+    }
     h->sys = json_clone(a->agent->system_prompt);
     h->tools = json_arr();
     for (size_t i = 0; i < a->agent->tools.n; i++) json_push(h->tools, agent_tool_wire(a->agent->tools.v[i]));
@@ -1757,12 +1819,14 @@ static char *handoff_exec(app_t *a, handoff_req_t *h, bool auto_triggered, char 
     json_t *none = json_str("none"), *autoc = json_str("auto");
     o.tool_choice = none;
     json_t *r = ai_complete(model, &c, &o);
+    note(a, "compaction:handoff", r);
     const char *em = json_get_str(r, "errorMessage");
     if (str_eq(json_get_str(r, "stopReason"), "error") && json_get_int(r, "errorStatus", 0) == 400 && em &&
         str_istr(em, "tool_choice") && str_istr(em, "auto") && str_istr(em, "supported")) {
         json_free(r);
         o.tool_choice = autoc;
         r = ai_complete(model, &c, &o);
+        note(a, "compaction:handoff", r);
     }
     json_free(none), json_free(autoc);
     char *text = NULL;
@@ -1821,46 +1885,179 @@ static void handoff_result(const prep_t *p, const char *doc, result_t *r) {
     r->tokens_before = p->tokens_before;
 }
 
-int app_handoff(app_t *a, const char *focus, char **err) {
+/* ---------- background handoff (compact(focus, {mode: "handoff"})) ---------- */
+
+/* A background compaction prepares its summary against a branch snapshot without interrupting the live turn,
+ * then applies at a safe boundary: between tool turns (cmp_mid_turn), when the run ends (cmp_after_turn), or once
+ * the session is idle (the caller's idle hook). Messages appended meanwhile stay after the summary verbatim. */
+static ssize_t branch_index(json_t **ents, size_t n, const char *id);
+
+enum { BG_GENERATING, BG_READY, BG_APPLIED, BG_FAILED };
+
+struct cmp_bg {
+    int state;
+    volatile sig_atomic_t cancel;
+    prep_t prep;
+    result_t result;
+    char *snapshot_leaf;
+    char *err;
+};
+
+static pthread_mutex_t g_bg_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_bg_cv = PTHREAD_COND_INITIALIZER;
+
+/* the commit check of SessionMaintenance.compact: the snapshot is still on the active branch, no newer
+ * compaction or reset superseded it, and the kept tail starts inside it */
+static bool bg_snapshot_valid(app_t *a, const struct cmp_bg *bg) {
+    if (a->compacting) return false;
+    entvec_t ents = {0};
+    branch_entries(a, &ents);
+    ssize_t leaf = branch_index(ents.v, ents.n, bg->snapshot_leaf);
+    ssize_t kept = branch_index(ents.v, ents.n, bg->result.first_kept);
+    bool ok = leaf >= 0 && kept >= 0 && kept <= leaf;
+    for (size_t i = (size_t)(leaf + 1); ok && i < ents.n; i++) {
+        const char *t = json_get_str(ents.v[i], "type");
+        if (str_eq(t, "compaction") || str_eq(t, "reset_boundary")) ok = false;
+    }
+    vec_free(&ents);
+    return ok;
+}
+
+bool cmp_bg_apply(app_t *a) {
+    pthread_mutex_lock(&g_bg_mu);
+    struct cmp_bg *bg = a->cmp_bg;
+    if (!bg || bg->state != BG_READY) {
+        pthread_mutex_unlock(&g_bg_mu);
+        return false;
+    }
+    bool applied = false;
+    if (bg->cancel) {
+        bg->state = BG_FAILED;
+        bg->err = xstrdup("Compaction cancelled");
+    } else if (!bg_snapshot_valid(a, bg)) {
+        bg->state = BG_FAILED;
+        bg->err = xstrdup("Conversation changed while compacting; discarded the summary");
+    } else {
+        commit(a, &bg->prep, &bg->result, "handoff");
+        bg->state = BG_APPLIED;
+        applied = true;
+    }
+    pthread_cond_broadcast(&g_bg_cv);
+    pthread_mutex_unlock(&g_bg_mu);
+    return applied;
+}
+
+bool cmp_bg_active(app_t *a) {
+    pthread_mutex_lock(&g_bg_mu);
+    bool on = a->cmp_bg != NULL;
+    pthread_mutex_unlock(&g_bg_mu);
+    return on;
+}
+
+bool cmp_bg_abort(app_t *a) {
+    pthread_mutex_lock(&g_bg_mu);
+    struct cmp_bg *bg = a->cmp_bg;
+    if (bg) {
+        bg->cancel = 1;
+        if (bg->state == BG_READY) {
+            bg->state = BG_FAILED;
+            bg->err = xstrdup("Compaction cancelled");
+        }
+        pthread_cond_broadcast(&g_bg_cv);
+    }
+    pthread_mutex_unlock(&g_bg_mu);
+    return bg != NULL;
+}
+
+/* without a caller hook the session is idle when no run holds the agent (print mode, text slash commands) */
+static bool bg_idle_default(app_t *a, void *ud) {
+    UNUSED(ud);
+    return !agent_is_running(a->agent) && cmp_bg_apply(a);
+}
+
+int app_handoff_background(app_t *a, const char *focus, bool (*idle_commit)(app_t *, void *), void *ud, char **err) {
     *err = NULL;
-    if (a->compacting) {
+    if (!a->model) {
+        *err = xstrdup("No model selected");
+        return -1;
+    }
+    pthread_mutex_lock(&g_bg_mu);
+    if (a->cmp_bg || a->compacting) {
+        pthread_mutex_unlock(&g_bg_mu);
         *err = xstrdup("Compaction already in progress");
         return -1;
     }
-    if (!a->model) {
-        *err = xstrdup("No model selected for handoff");
-        return -1;
-    }
-    size_t messages = 0;
-    entvec_t ents = {0};
-    branch_entries(a, &ents);
-    for (size_t i = 0; i < ents.n; i++) messages += str_eq(json_get_str(ents.v[i], "type"), "message");
-    vec_free(&ents);
-    if (messages < 2) {
-        *err = xstrdup("Nothing to hand off (no messages yet)");
-        return -1;
-    }
-    spec_cancel(a);
-    a->compacting = true;
-    if (!agent_is_running(a->agent)) a->agent->cancel = 0;
-    prep_t p;
+    struct cmp_bg *bg = xcalloc(1, sizeof *bg);
+    bg->state = BG_GENERATING;
+    a->cmp_bg = bg;
+    pthread_mutex_unlock(&g_bg_mu);
+    volatile sig_atomic_t *prev_cancel = tl_cancel;
+    tl_cancel = &bg->cancel;
+    dcr_set_side_thread(true); /* the turn that writes the session may still be running */
     int rc = -1;
-    if (prepare(a, a->model, &p) != 0) {
-        *err = xstrdup("Nothing to hand off (already compacted)");
-        goto out;
+    handoff_req_t h;
+    memset(&h, 0, sizeof h);
+    int pr = prepare(a, a->model, &bg->prep);
+    char *leaf = a->session ? session_leaf_dup(a->session) : NULL;
+    if (pr || !leaf) {
+        *err = xstrdup(pr == 1 ? "Already compacted" : "Nothing to compact (session too small)");
+        free(leaf);
+        goto done;
     }
-    char *doc = handoff_document(a, focus, false, err);
-    if (!doc) goto out;
-    result_t r;
-    handoff_result(&p, doc, &r);
+    bg->snapshot_leaf = leaf;
+    if (!handoff_build(a, focus, &h, err)) goto done;
+    char *doc = handoff_exec(a, &h, false, err);
+    handoff_req_free(&h);
+    if (!doc) {
+        if (bg->cancel) {
+            free(*err);
+            *err = xstrdup("Compaction cancelled");
+        }
+        goto done;
+    }
+    pthread_mutex_lock(&g_bg_mu);
+    handoff_result(&bg->prep, doc, &bg->result);
     free(doc);
-    commit(a, &p, &r, "handoff");
-    result_free(&r);
-    app_notice(a, "info", "Context compacted");
-    rc = 0;
-out:
-    prep_free(&p);
-    a->compacting = false;
+    if (bg->cancel) {
+        bg->state = BG_FAILED;
+        bg->err = xstrdup("Compaction cancelled");
+    } else bg->state = BG_READY;
+    pthread_mutex_unlock(&g_bg_mu);
+    /* #waitForCompactionBoundary: a turn boundary applies it, or the idle hook once no run holds the session */
+    for (;;) {
+        pthread_mutex_lock(&g_bg_mu);
+        int st = bg->state;
+        pthread_mutex_unlock(&g_bg_mu);
+        if (st != BG_READY) break;
+        if ((idle_commit ? idle_commit : bg_idle_default)(a, ud)) break;
+        pthread_mutex_lock(&g_bg_mu);
+        if (bg->state == BG_READY) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 200 * 1000000L;
+            if (ts.tv_nsec >= 1000000000L) {
+                ts.tv_sec++;
+                ts.tv_nsec -= 1000000000L;
+            }
+            pthread_cond_timedwait(&g_bg_cv, &g_bg_mu, &ts);
+        }
+        pthread_mutex_unlock(&g_bg_mu);
+    }
+    pthread_mutex_lock(&g_bg_mu);
+    if (bg->state == BG_APPLIED) rc = 0;
+    else if (bg->err) *err = xstrdup(bg->err);
+    else *err = xstrdup("Compaction failed");
+    pthread_mutex_unlock(&g_bg_mu);
+done:
+    tl_cancel = prev_cancel;
+    pthread_mutex_lock(&g_bg_mu);
+    a->cmp_bg = NULL;
+    pthread_mutex_unlock(&g_bg_mu);
+    prep_free(&bg->prep);
+    result_free(&bg->result);
+    free(bg->snapshot_leaf);
+    free(bg->err);
+    free(bg);
     return rc;
 }
 
@@ -1945,8 +2142,9 @@ static int manual(app_t *a, const char *mode, const char *instructions, char **e
     return rc;
 }
 
-int app_compact_mode(app_t *a, const char *mode, const char *instructions, char **err) {
+static int app_compact_mode_locked(app_t *a, const char *mode, const char *instructions, char **err) {
     *err = NULL;
+    if (str_eq(mode, "handoff")) return app_handoff_background(a, instructions, NULL, NULL, err); /* background mode */
     if (a->compacting) {
         *err = xstrdup("compaction already running");
         return -1;
@@ -2070,11 +2268,29 @@ static void stamp_warning(app_t *a, const char *warning) {
 #define SPECULATION_LEAD_MIN_TOKENS 8192
 #define SPECULATION_LEAD_MAX_TOKENS 32000
 
+/* a bridge speculation's outcome, shared with the cache warmer waiting on it (refcounted under g_ticket_mu) */
+typedef struct {
+    int refs;
+    volatile int state; /* 0 pending, else CMP_BRIDGE_* */
+} bridge_ticket_t;
+static pthread_mutex_t g_ticket_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void ticket_release(bridge_ticket_t *t) {
+    if (!t) return;
+    pthread_mutex_lock(&g_ticket_mu);
+    bool last = --t->refs == 0;
+    pthread_mutex_unlock(&g_ticket_mu);
+    if (last) free(t);
+}
+
 struct cmp_spec {
     app_t *a;
     pthread_t th;
     volatile sig_atomic_t cancel;
     volatile int done; /* the thread finished (armed or failed) */
+    volatile int accepted; /* a provider billed one of its requests (which read the cached prefix) */
+    bool bridge;           /* bridges a long tool call: the armed result commits at the next mid-run boundary */
+    bridge_ticket_t *ticket;
     bool armed, native_failed, joined;
     char *method; /* remote | handoff | soft */
     char *snapshot_leaf;
@@ -2118,9 +2334,18 @@ static const char *spec_method(app_t *a, bool skip_remote) {
     return out;
 }
 
+static void spec_settle_ticket(struct cmp_spec *sp) {
+    pthread_mutex_lock(&g_ticket_mu);
+    if (sp->ticket && !sp->ticket->state)
+        sp->ticket->state = sp->armed ? CMP_BRIDGE_ARMED : sp->accepted ? CMP_BRIDGE_FAILED_ACCEPTED : CMP_BRIDGE_FAILED_UNACCEPTED;
+    pthread_mutex_unlock(&g_ticket_mu);
+}
+
 static void *spec_main(void *arg) {
     struct cmp_spec *sp = arg;
     tl_cancel = &sp->cancel;
+    tl_accepted = &sp->accepted;
+    tl_purpose = NULL;
     dcr_set_side_thread(true); /* the turn that writes the session may still be running */
     char *err = NULL;
     bool ok;
@@ -2137,6 +2362,7 @@ static void *spec_main(void *arg) {
     free(err);
     sp->armed = ok && !sp->cancel;
     __atomic_store_n(&sp->done, 1, __ATOMIC_RELEASE);
+    spec_settle_ticket(sp);
     return NULL;
 }
 
@@ -2149,6 +2375,7 @@ static void spec_free(struct cmp_spec *sp) {
     result_free(&sp->result);
     free(sp->method);
     free(sp->snapshot_leaf);
+    ticket_release(sp->ticket);
     free(sp);
 }
 
@@ -2158,14 +2385,35 @@ static void spec_cancel(app_t *a) {
     a->cmp_spec = NULL;
 }
 
-void cmp_free(app_t *a) { spec_cancel(a); }
 
 static bool spec_done(const struct cmp_spec *sp) { return __atomic_load_n(&sp->done, __ATOMIC_ACQUIRE) != 0; }
+
+/* a->cmp_spec is driven from the agent thread's maintenance hooks and, for a bridge compaction, from the cache
+ * warmer's thread: one recursive lock serializes them (a hook's blocking pass holds it; the warmer only tries it) */
+static pthread_mutex_t g_spec_mu;
+static pthread_once_t g_spec_once = PTHREAD_ONCE_INIT;
+static void spec_mu_init(void) {
+    pthread_mutexattr_t at;
+    pthread_mutexattr_init(&at);
+    pthread_mutexattr_settype(&at, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_spec_mu, &at);
+    pthread_mutexattr_destroy(&at);
+}
+static void spec_lock(void) {
+    pthread_once(&g_spec_once, spec_mu_init);
+    pthread_mutex_lock(&g_spec_mu);
+}
+static bool spec_trylock(void) {
+    pthread_once(&g_spec_once, spec_mu_init);
+    return pthread_mutex_trylock(&g_spec_mu) == 0;
+}
+static void spec_unlock(void) { pthread_mutex_unlock(&g_spec_mu); }
 
 /* #startSpeculationRun: the branch snapshot is prepared here; only the model requests run in the background */
 static void spec_start(app_t *a, int64_t ctx, const char *method) {
     struct cmp_spec *sp = xcalloc(1, sizeof *sp);
     sp->a = a;
+    sp->bridge = tl_bridge;
     if (prepare(a, a->model, &sp->prep) != 0 || !a->session->leaf_id) {
         prep_free(&sp->prep);
         free(sp);
@@ -2183,7 +2431,9 @@ static void spec_start(app_t *a, int64_t ctx, const char *method) {
         }
     }
     sp->method = xstrdup(method);
-    sp->snapshot_leaf = xstrdup(a->session->leaf_id);
+    /* a bridge's snapshot ends before the pending tool call: the call and its coming result stay in the kept tail */
+    const json_t *last = json_at(sp->prep.path, json_len(sp->prep.path) - 1);
+    sp->snapshot_leaf = xstrdup(sp->bridge && json_get_str(last, "id") ? json_get_str(last, "id") : a->session->leaf_id);
     sp->ctx_at_start = ctx;
     if (pthread_create(&sp->th, NULL, spec_main, sp) != 0) {
         prep_free(&sp->prep);
@@ -2263,7 +2513,7 @@ static void spec_maybe_start(app_t *a, int64_t ctx) {
     struct cmp_spec *sp = a->cmp_spec;
     bool skip_remote = sp && spec_done(sp) && sp->native_failed;
     if (sp) {
-        if (!spec_done(sp)) return; /* one run at a time */
+        if (!spec_done(sp) || sp->bridge) return; /* one run at a time; a bridge result waits for the boundary that commits it */
         if (sp->armed) {
             /* refresh on growth: a fresh cut reclaims more once the kept tail grew past the keep budget */
             int64_t growth = ctx - sp->ctx_at_start;
@@ -2403,7 +2653,7 @@ static bool threshold_fixed_context_dead_end(app_t *a) {
     return true;
 }
 
-int cmp_auto(app_t *a, cmp_reason_t reason, bool will_retry, int64_t trigger) {
+static int cmp_auto_locked(app_t *a, cmp_reason_t reason, bool will_retry, int64_t trigger) {
     if (reason != CMP_IDLE && !settings_bool("compaction.enabled", true)) return CMP_NONE;
     if (a->compacting || !a->session) return CMP_NONE;
     /* every threshold caller and strategy goes through here, so the fixed-context gate lives here once */
@@ -2419,10 +2669,13 @@ int cmp_auto(app_t *a, cmp_reason_t reason, bool will_retry, int64_t trigger) {
     bool from_shake = false, picked_any = false;
     for (size_t idx = 0; idx < methods.n; idx++) {
         const char *m = methods.v[idx];
-        if (!method_usable(m, reason, a->model)) continue;
+        /* a claimed bridge result commits under its own method whatever the configured order, with no fallback */
+        struct cmp_spec *forced = tl_forced;
+        tl_forced = NULL;
+        if (!forced && !method_usable(m, reason, a->model)) continue;
         picked_any = true;
         /* an armed background speculation supplies this pass's summary (snapcompact is local and never waits) */
-        struct cmp_spec *armed = str_eq(m, "snapcompact") ? NULL : spec_claim(a, trigger);
+        struct cmp_spec *armed = forced ? forced : str_eq(m, "snapcompact") ? NULL : spec_claim(a, trigger);
         if (armed) {
             const char *action = str_eq(armed->method, "remote") ? "remote" : str_eq(armed->method, "handoff") ? "handoff" : "context-full";
             emit_start(a, reason, action);
@@ -2849,8 +3102,9 @@ static const json_t *last_assistant_msg(app_t *a) {
     return m;
 }
 
-void cmp_after_turn(app_t *a) {
+static void cmp_after_turn_locked(app_t *a) {
     if (!a->session || !a->model) return;
+    cmp_bg_apply(a); /* a background compaction ready for the run's end */
     prune_stale(a);
     if (!settings_bool("compaction.enabled", true)) return;
     strvec_t methods = cmp_method_order();
@@ -2873,10 +3127,10 @@ void cmp_after_turn(app_t *a) {
         return;
     }
     if (spec_defer(a, ctx)) return; /* a background speculation absorbs the blocking summarization */
-    cmp_auto(a, CMP_THRESHOLD, false, ctx);
+    cmp_auto_locked(a, CMP_THRESHOLD, false, ctx);
 }
 
-void cmp_before_prompt(app_t *a, const json_t *pending) {
+static void cmp_before_prompt_locked(app_t *a, const json_t *pending) {
     if (!a->session || !a->model || a->compacting || a->model->context_window <= 0) return;
     if (!settings_bool("compaction.enabled", true)) return;
     strvec_t methods = cmp_method_order();
@@ -2891,11 +3145,12 @@ void cmp_before_prompt(app_t *a, const json_t *pending) {
         return;
     }
     if (spec_defer(a, ctx)) return;
-    cmp_auto(a, CMP_THRESHOLD, false, ctx);
+    cmp_auto_locked(a, CMP_THRESHOLD, false, ctx);
 }
 
-void cmp_mid_turn(app_t *a, const json_t *assistant) {
+static void cmp_mid_turn_locked(app_t *a, const json_t *assistant) {
     if (!a->session || !a->model || a->compacting || cancelled(a)) return;
+    if (cmp_bg_apply(a)) return; /* maintainContextMidRun: a prepared background compaction lands first */
     if (!settings_bool("compaction.enabled", true) || !settings_bool("compaction.midTurnEnabled", true)) return;
     strvec_t methods = cmp_method_order();
     size_t nm = methods.n;
@@ -2906,6 +3161,20 @@ void cmp_mid_turn(app_t *a, const json_t *assistant) {
     if (a->model->context_window <= 0) return;
     int64_t billed = usage_context_tokens(json_get_obj(assistant, "usage"));
     int64_t ctx = MAX(billed, stored_context_tokens(a));
+    /* a bridge compaction replaced the long tool call's prompt-cache entry: its result lands here, whatever the
+     * threshold says; one still summarizing leaves this turn on the old, still warm, context */
+    struct cmp_spec *bs = a->cmp_spec;
+    if (bs && bs->bridge && spec_done(bs) && bs->armed) {
+        struct cmp_spec *claimed = spec_claim(a, ctx);
+        if (claimed) {
+            tl_forced = claimed;
+            cmp_auto_locked(a, CMP_THRESHOLD, false, ctx);
+            if (tl_forced) spec_free(tl_forced); /* not consumed */
+            tl_forced = NULL;
+            LOGD("Bridge compaction committed between provider calls");
+            return;
+        }
+    }
     int64_t th = threshold_for(a->model);
     if (th <= 0) return;
     if (ctx <= th) {
@@ -2913,5 +3182,126 @@ void cmp_mid_turn(app_t *a, const json_t *assistant) {
         return;
     }
     if (spec_defer(a, ctx)) return;
-    cmp_auto(a, CMP_THRESHOLD, false, ctx);
+    cmp_auto_locked(a, CMP_THRESHOLD, false, ctx);
+}
+
+/* ---------- locked entry points ---------- */
+
+void cmp_free(app_t *a) {
+    spec_lock();
+    spec_cancel(a);
+    spec_unlock();
+}
+
+int cmp_auto(app_t *a, cmp_reason_t reason, bool will_retry, int64_t trigger) {
+    spec_lock();
+    int r = cmp_auto_locked(a, reason, will_retry, trigger);
+    spec_unlock();
+    return r;
+}
+
+int app_compact_mode(app_t *a, const char *mode, const char *instructions, char **err) {
+    spec_lock();
+    int r = app_compact_mode_locked(a, mode, instructions, err);
+    spec_unlock();
+    return r;
+}
+
+void cmp_after_turn(app_t *a) {
+    spec_lock();
+    cmp_after_turn_locked(a);
+    spec_unlock();
+}
+
+void cmp_before_prompt(app_t *a, const json_t *pending) {
+    spec_lock();
+    cmp_before_prompt_locked(a, pending);
+    spec_unlock();
+}
+
+void cmp_mid_turn(app_t *a, const json_t *assistant) {
+    spec_lock();
+    cmp_mid_turn_locked(a, assistant);
+    spec_unlock();
+}
+
+/* ---------- cache-warming bridge compaction (session-maintenance.ts, omp 0501d518bd) ---------- */
+
+#define BRIDGE_SUMMARY_TOKENS 5000 /* measured remote summaries run ~3-5k tokens */
+
+/* #bridgeMethod: the first available configured method speculation can run in the background, minus soft (its
+ * summary request reads nothing from the prompt cache); NULL when automatic, async or mid-turn compaction is off or
+ * another compaction owns the session */
+static const char *bridge_method(app_t *a) {
+    if (!a->session || !a->model) return NULL;
+    if (!settings_bool("compaction.enabled", true) || !settings_bool("compaction.asyncEnabled", true) ||
+        !settings_bool("compaction.midTurnEnabled", true))
+        return NULL;
+    if (a->compacting || cmp_bg_active(a)) return NULL;
+    struct cmp_spec *sp = a->cmp_spec;
+    bool skip_remote = sp && spec_done(sp) && sp->native_failed;
+    const char *m = spec_method(a, skip_remote);
+    if (str_eq(m, "soft")) {
+        /* resolveSpeculationMethod over the order without soft */
+        strvec_t methods = cmp_method_order();
+        m = NULL;
+        for (size_t i = 0; i < methods.n && !m; i++) {
+            const char *c = methods.v[i];
+            if (str_eq(c, "remote") && !skip_remote && remote_usable(a->model) && (remote_endpoint_set() || openai_v1(a->model))) m = "remote";
+            else if (str_eq(c, "handoff")) m = "handoff";
+            else if (str_eq(c, "snapcompact") && a->model->input_image) break;
+        }
+        strvec_free(&methods);
+    }
+    return m;
+}
+
+bool cmp_bridge_estimate(app_t *a, int64_t prompt_tokens, int64_t *summary_tokens, int64_t *kept_tokens) {
+    if (!bridge_method(a)) return false;
+    *summary_tokens = BRIDGE_SUMMARY_TOKENS;
+    /* omc keeps no tokensAfter on compaction entries: the keep-recent budget plus the summary, never above the prompt */
+    *kept_tokens = MIN(settings_int("compaction.keepRecentTokens", 20000) + BRIDGE_SUMMARY_TOKENS, prompt_tokens);
+    return true;
+}
+
+int cmp_bridge_start(app_t *a, volatile sig_atomic_t *stop) {
+    if (!spec_trylock()) return CMP_BRIDGE_FAILED_UNACCEPTED; /* a blocking pass owns the session */
+    const char *method = bridge_method(a);
+    bridge_ticket_t *t = NULL;
+    if (method) {
+        t = xcalloc(1, sizeof *t);
+        t->refs = 1;
+        struct cmp_spec *sp = a->cmp_spec;
+        if (sp && !str_eq(sp->method, "soft") && !sp->ticket) {
+            /* a run already summarizing with a bridge-capable method is taken over */
+            sp->bridge = true;
+        } else {
+            spec_cancel(a);
+            int64_t ctx = MAX(a->last_context_tokens, stored_context_tokens(a));
+            tl_bridge = true;
+            dcr_set_side_thread(true);
+            spec_start(a, ctx, method);
+            dcr_set_side_thread(false);
+            tl_bridge = false;
+            sp = a->cmp_spec;
+        }
+        if (sp && !sp->ticket) {
+            pthread_mutex_lock(&g_ticket_mu);
+            t->refs++;
+            sp->ticket = t;
+            pthread_mutex_unlock(&g_ticket_mu);
+            if (spec_done(sp)) spec_settle_ticket(sp);
+        } else {
+            t->state = CMP_BRIDGE_FAILED_UNACCEPTED;
+        }
+    }
+    spec_unlock();
+    if (!t) return CMP_BRIDGE_FAILED_UNACCEPTED;
+    int state;
+    while (!(state = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE))) {
+        if (stop && *stop) break;
+        sleep_ms(100);
+    }
+    ticket_release(t);
+    return state ? state : CMP_BRIDGE_FAILED_UNACCEPTED;
 }

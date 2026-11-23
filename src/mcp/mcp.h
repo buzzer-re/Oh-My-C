@@ -40,6 +40,9 @@ void mcp_connect_all(mcp_manager_t *m, const json_t *config, int64_t timeout_ms)
 int64_t mcp_startup_timeout_ms(void);
 /* resolveMCPTimeoutMs: the per-server request timeout (OMP_MCP_TIMEOUT_MS, default 30 s) */
 int64_t mcp_timeout_ms(void);
+/* tools/call deadline (timeout.ts resolveMCPRequestDeadline): *timeout_ms restarts on progress, *max_total_ms caps it */
+void mcp_tool_call_deadline(const json_t *server_cfg, const json_t *args, int64_t *timeout_ms, int64_t *max_total_ms);
+int64_t mcp_requested_tool_timeout_ms(const json_t *args); /* requestedToolTimeoutMs; -1 when none */
 /* MCPManager.waitForStartup: wait until no server is still connecting, at most timeout_ms (0 = no limit) */
 void mcp_wait_startup(mcp_manager_t *m, int64_t timeout_ms);
 /* Add (or replace) one server and connect it, waiting up to timeout_ms. Returns its state. */

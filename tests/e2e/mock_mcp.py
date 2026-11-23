@@ -10,6 +10,9 @@ that adds a `fresh` prompt and sends `notifications/prompts/list_changed` plus
 `--startup-delay=<secs>` holds the initialize reply back (a slow server: omp's startup window, MCP tool cache and
 deferred tools). $MOCK_MCP_EXTRA_TOOL=<name> adds a tool of that name to tools/list without changing the server
 config (so a cached catalog can differ from the live one).
+`--modern` speaks MCP 2026-07-28: it answers server/discover (initialize is unknown to it), requires the request _meta,
+asks for roots through an input_required round trip (`echo_text` with text "roots"), and acknowledges a
+subscriptions/listen stream, on which `echo_text` "notify" announces a new tool `late_tool`.
 `--lazy` serves lazy loaders shaped like Kata's `load_*`: `load_extra` adds `extra_tool` and announces it before its
 reply, `load_extra_late` replies first and announces it afterwards (no call to the server running)."""
 import json, os, sys, time
@@ -18,6 +21,10 @@ FULL = "--full" in sys.argv[1:]
 STARTUP_DELAY = next((float(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("--startup-delay=")), 0.0)
 EXTRA_TOOL = os.environ.get("MOCK_MCP_EXTRA_TOOL")
 LAZY = "--lazy" in sys.argv[1:]
+MODERN = "--modern" in sys.argv[1:]
+listen_id = [None]
+notified = [False]
+initialized_seen = [False]
 extra_prompt = [False]
 loaded = [False]
 
@@ -26,8 +33,55 @@ def send(obj):
     print(json.dumps(obj), flush=True)
 
 
+def modern(msg):
+    """one 2026-07-28 request; True when handled"""
+    mid, method, params = msg.get("id"), msg.get("method"), msg.get("params") or {}
+    meta = params.get("_meta") or {}
+    if method != "notifications/initialized" and mid is not None and meta.get("io.modelcontextprotocol/protocolVersion") != "2026-07-28":
+        send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32022, "message": "Unsupported protocol version"}})
+        return True
+    if method == "server/discover":
+        res = {"resultType": "complete", "supportedVersions": ["2026-07-28"], "capabilities": {"tools": {"listChanged": True}},
+               "instructions": "Modern MCP server instructions.", "ttlMs": 60000, "cacheScope": "public",
+               "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "modern-mock", "version": "2"}}}
+    elif method == "subscriptions/listen":
+        listen_id[0] = mid
+        send({"jsonrpc": "2.0", "method": "notifications/subscriptions/acknowledged",
+              "params": {"notifications": params.get("notifications"), "_meta": {"io.modelcontextprotocol/subscriptionId": mid}}})
+        return True
+    elif method == "tools/list":
+        tools = [{"name": "echo_text", "description": "Echo text back",
+                  "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]
+        if notified[0]:
+            tools.append({"name": "late_tool", "description": "Announced on the listen stream", "inputSchema": {"type": "object", "properties": {}}})
+        res = {"resultType": "complete", "tools": tools, "ttlMs": 60000, "cacheScope": "public"}
+    elif method == "tools/call":
+        text = (params.get("arguments") or {}).get("text", "")
+        if text == "roots" and "inputResponses" not in params:
+            res = {"resultType": "input_required", "inputRequests": {"r1": {"method": "roots/list"}}, "requestState": "st-1"}
+        elif text == "roots":
+            roots = params["inputResponses"]["r1"]["roots"]
+            res = {"content": [{"type": "text", "text": "roots %s state=%s initialized=%s" % (roots[0]["uri"].startswith("file:///"), params.get("requestState"), initialized_seen[0])}]}
+        elif text == "notify":
+            notified[0] = True
+            send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed", "params": {"_meta": {"io.modelcontextprotocol/subscriptionId": listen_id[0]}}})
+            res = {"content": [{"type": "text", "text": "notified"}]}
+        else:
+            res = {"content": [{"type": "text", "text": "modern echo: " + text}]}
+    elif method == "notifications/initialized":
+        initialized_seen[0] = True
+        return True
+    else:
+        send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "Method not found"}})
+        return True
+    send({"jsonrpc": "2.0", "id": mid, "result": res})
+    return True
+
+
 for line in sys.stdin:
     msg = json.loads(line)
+    if MODERN and modern(msg):
+        continue
     mid, method = msg.get("id"), msg.get("method")
     if mid is None:
         continue
@@ -91,6 +145,19 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "method": "notifications/prompts/list_changed"})
             send({"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": "mem://notes"}})
             res = {"content": [{"type": "text", "text": "prompts changed"}]}
+        elif msg["params"]["arguments"].get("text") == "__meta__":  # what the call carried in _meta (a progress token)
+            res = {"content": [{"type": "text", "text": "meta " + json.dumps(msg["params"].get("_meta"))}]}
+        elif msg["params"]["arguments"].get("text") == "__slow__":  # outlasts a 1 s server timeout
+            time.sleep(2.5)
+            res = {"content": [{"type": "text", "text": "too late"}]}
+        elif msg["params"]["arguments"].get("text") == "__expired__":
+            # an expired session refuses the first call (marker file in TMPDIR); the re-initialized one answers
+            mark = os.path.join(os.environ.get("TMPDIR", "/tmp"), "mock-mcp-expired")
+            if not os.path.exists(mark):
+                open(mark, "w").close()
+                send({"jsonrpc": "2.0", "id": msg.get("id"), "error": {"code": -32001, "message": "Unknown or expired session"}})
+                continue
+            res = {"content": [{"type": "text", "text": "recovered after re-initialize"}]}
         elif msg["params"]["arguments"].get("text") == "__crash__":
             sys.exit(3)  # the server dies mid-call, without answering
         elif msg["params"]["arguments"].get("text") == "__rpcerror__":  # a JSON-RPC error with secret-bearing data

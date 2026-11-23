@@ -233,11 +233,8 @@ live.apiKey	oos	realtime voice audio (added in omp v19.0-19.1)
 mcp.shared	oos	omp daemon shares MCP processes across instances; omc runs MCP servers per session (added in omp v19.0-19.1)
 mcp.idleStopMinutes	oos	only applies to daemon-shared MCP servers (mcp.shared) (added in omp v19.0-19.1)
 mcp.evalNamespaces	oos	JS eval MCP namespaces (added in omp v19.0-19.1)
-mcp.builtinTransforms	inert	no built-in MCP server transforms yet (added in omp v19.0-19.1)
+mcp.builtinTransforms	inert	its only transform (drop Codex's node_repl) applies while eval runs JavaScript (eval.js, oos); omc never reads ~/.codex MCP configs either
 pty.notify	inert	no pty input notification yet (added in omp v19.0-19.1)
-providers.cacheWarmingStrategy	inert	no compaction bridge for long tool calls yet (added in omp v19.0-19.1)
-providers.cacheWarmingCompactPercent	inert	no compaction bridge for long tool calls yet (added in omp v19.0-19.1)
-providers.cacheWarmingCompactTokens	inert	no compaction bridge for long tool calls yet (added in omp v19.0-19.1)
 providers.webKeyless	inert	keyless web providers are not gated yet (added in omp v19.0-19.1)
 task.crossInstance	inert	no cross-instance agent:// peers yet (added in omp v19.0-19.1)
 tools.commands	partial	src/tools/tools_common.c gates omc's xd:// devices (renamed from tools.xdev in omp v19); omp v19 mounts tools as bash commands instead
