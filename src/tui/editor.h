@@ -147,6 +147,12 @@ struct tui_editor {
     bool (*paste_hook)(void *ud, tui_editor_t *ed, const char *text);
     char *(*row_hook)(void *ud, tui_editor_t *ed, const char *row);
     void *row_hook_ud;
+    /* CustomEditor.faint: while it returns true every row draws faint (an ask above holds the keys) */
+    bool (*faint_fn)(void *ud);
+    /* Editor.onUpFromTop: ↑ on the first line, not browsing history; true when the host took the keys (to an ask
+     * waiting above the composer), false lets ↑ recall history or move the cursor as usual */
+    bool (*up_from_top)(void *ud);
+    void *ask_hook_ud;
     void *paste_hook_ud;
     /* completed-token collapse (CustomEditor #collapseSkillTokens): in `line` of the buffer `text`, the first
      * token at or after byte `from` to turn into an atom (span, label, expansion, style: owned); false when

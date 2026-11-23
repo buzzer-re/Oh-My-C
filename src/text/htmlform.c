@@ -1,4 +1,4 @@
-/* htmlform.c - see htmlform.h. Ports omp html-form/parse.ts (FormBuilder), data.ts and paginate.ts over a small
+/* htmlform.c - see htmlform.h. Ports omp html-form/parse.ts (FormBuilder) and data.ts over a small
  * from-scratch HTML tree builder that follows htmlparser2's tokenizer and implied-close rules (what linkedom's
  * parseHTML uses upstream). */
 #define _GNU_SOURCE /* memmem: glibc declares it only with _GNU_SOURCE (build-tools/check_apple.sh) */
@@ -1136,14 +1136,15 @@ static void fb_label(fb_t *b, const dnode_t *label, int style) {
     free(controls.v);
 }
 
-static void start_section(fb_t *b, hf_spans_t *title) {
+static void start_section(fb_t *b, hf_spans_t *title, bool fieldset) {
     hf_section_t *s = cur_section(b);
     if (!s->blocks.n && !s->title.n) {
         spans_free(&s->title);
         s->title = *title;
+        s->fieldset = fieldset;
         return;
     }
-    hf_section_t ns = {.title = *title};
+    hf_section_t ns = {.title = *title, .fieldset = fieldset};
     vec_push(&b->form->sections, ns);
     b->sec = b->form->sections.n - 1;
 }
@@ -1156,7 +1157,7 @@ static void fb_fieldset(fb_t *b, const dnode_t *fs) {
     } else {
         hf_spans_t title = {0};
         if (legend) spans_of(legend, &title);
-        start_section(b, &title);
+        start_section(b, &title, true);
     }
     b->fieldset_depth++;
     for (size_t i = 0; i < fs->kids.n; i++)
@@ -1165,7 +1166,7 @@ static void fb_fieldset(fb_t *b, const dnode_t *fs) {
     b->fieldset_depth--;
     if (!b->fieldset_depth) {
         hf_spans_t empty = {0};
-        start_section(b, &empty);
+        start_section(b, &empty, false);
     }
 }
 
@@ -1977,61 +1978,4 @@ char *hf_data_json(const json_t *data) {
     sb_t b = SB_INIT;
     pretty(&b, data, 0);
     return sb_detach(&b);
-}
-
-/* ======================================================================== */
-/* pagination                                                               */
-/* ======================================================================== */
-
-int hf_page_height(const hf_atoms_t *a, size_t start, size_t end) {
-    int used = start < a->n && a->v[start].continuation ? 1 : 0;
-    for (size_t i = start; i < end && i < a->n; i++) used += (i == start ? 0 : a->v[i].gap) + (int)a->v[i].lines.n;
-    return used;
-}
-
-static double break_score(int rank, int used, int budget) {
-    double bonus = rank == HF_BREAK_SECTION ? 0.5 : rank == HF_BREAK_BLOCK ? 0.25 : 0;
-    return bonus - (double)(budget - used) / budget;
-}
-
-static size_t best_break(const hf_atoms_t *a, size_t start, size_t end, int budget) {
-    size_t best = end;
-    double best_score = -INFINITY;
-    for (size_t c = end; c > start; c--) {
-        int rank = a->v[c].break_rank;
-        if (rank == HF_BREAK_NEVER) continue;
-        double score = break_score(rank, hf_page_height(a, start, c), budget);
-        if (score > best_score) {
-            best = c;
-            best_score = score;
-        }
-    }
-    return best;
-}
-
-void hf_paginate(const hf_atoms_t *a, int rows, hf_pages_t *out) {
-    int budget = MAX(1, rows);
-    out->n = 0;
-    size_t start = 0;
-    while (start < a->n) {
-        size_t end = start + 1;
-        while (end < a->n && hf_page_height(a, start, end + 1) <= budget) end++;
-        if (end < a->n) end = best_break(a, start, end, budget);
-        hf_page_t p = {start, end};
-        vec_push(out, p);
-        start = end;
-    }
-    if (!out->n) {
-        hf_page_t p = {0, 0};
-        vec_push(out, p);
-    }
-}
-
-void hf_atoms_free(hf_atoms_t *a) {
-    for (size_t i = 0; i < a->n; i++) {
-        strvec_free(&a->v[i].lines);
-        free(a->v[i].continuation);
-    }
-    free(a->v);
-    memset(a, 0, sizeof *a);
 }

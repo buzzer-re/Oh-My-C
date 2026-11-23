@@ -7,7 +7,12 @@ Scenarios, each a fresh `omc --model mock/mock-1 --no-session call:ask:{html}`:
   invalid  Submit with a required field empty shows "1 to fix" and the field's error, then typing fixes it
   other    typing into a radio group's Other answer replaces the pick
   timeout  ask.timeout 2: the countdown title, then the defaults are submitted as a timeout
-  cancel   Esc cancels the form and ends the run
+  cancel   Esc hands the keys to the composer (its hint says typing skips the questions), a second Esc interrupts the
+           turn and so cancels the ask
+  skip     ↓ Enter picks Blue; Esc, then a typed draft warns in the panel that sending skips the questions; Shift+Tab
+           and ↑ hand the keys back and forth; sending the draft skips the ask and the model gets the answers given so
+           far (omp 093f499464, 792c2986d5)
+  status   the status line's spinner is a question mark while the ask waits
 Prints "ask form tui ok" or the first failing step."""
 import json, os, pty, re, select, sys, time
 NOPRED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-predictions.yml")  # composer.predictions off
@@ -124,7 +129,13 @@ with open(os.path.join(agent, "models.yml")) as src, open(os.path.join(tagent, "
     dst.write(src.read())
 with open(os.path.join(tagent, "config.yml"), "w") as f:
     f.write("ask:\n  timeout: 2\n")
-run("timeout", FORM, [("Ask (2s)",)], agent=tagent,
+run("timeout", FORM, [("Ask \u00b7 2 of 2 answered (2s)",)], agent=tagent,
     expect_tool="No answer before the timeout; submitted the form's current values:\n{\n  \"color\": \"red\",\n  \"n\": 2\n}")
-run("cancel", FORM, [ESC], expect_screen="Ask tool was cancelled by the user")
+run("cancel", FORM, [ESC, ("answer the questions above, or type here to skip them",), ESC],
+    expect_screen="Ask input was cancelled")
+UP, BTAB = "\x1b[A", "\x1b[Z"
+run("skip", FORM, [DOWN, ENTER, ESC, "go on", ("Sending your message skips these questions \u00b7 \u21e7\u21e5 answers them",),
+                   BTAB, ESC, UP, ESC, ENTER],
+    expect_tool='Ask interrupted by message. Answers the user gave before it:\n{\n  "color": "blue"\n}')
+run("status", FORM, [("\u2753",), ESC, ESC], expect_screen="Ask input was cancelled")
 print("ask form tui ok")

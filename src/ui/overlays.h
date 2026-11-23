@@ -288,27 +288,43 @@ void ui_ask_dialog_show(ui_t *u, const json_t *questions, ui_ask_done_fn done, v
 
 /* ---------- formdlg.c ---------- */
 
-/* the ask tool's HTML form (html-form/dialog.ts HtmlFormDialog) in the composer's place. `done` runs once on the UI
- * thread with the submitted form data (owned by the callee; NULL when cancelled), the notes on selected options
- * (optionNotes: an owned array of {name, question, option, value, text}, NULL when none); `timed_out` when the
- * inactivity timeout submitted the current values. */
+/* the ask tool's HTML form (html-form/dialog.ts HtmlFormDialog) above the composer. `done` runs once on the UI thread
+ * with the submitted form data (owned by the callee; NULL when cancelled), the notes on selected options (optionNotes:
+ * an owned array of {name, question, option, value, text}, NULL when none); `timed_out` when the inactivity timeout
+ * submitted the current values. */
 typedef void (*ui_form_done_fn)(void *ud, json_t *data, json_t *notes, bool timed_out);
 typedef struct {
-    ui_t *ui;             /* host (closes the selector on finish); NULL in tests */
+    ui_t *ui;             /* host (unmounts the ask on finish); NULL in tests */
     tui_t *tui;           /* terminal height, timers, repaints, background picture loads; NULL in tests */
-    tui_editor_t *draft;  /* a composer draft keeps typing until ↑/↓ hands the keyboard over (NULL: none) */
+    tui_editor_t *draft;  /* the composer: textareas and notes take its text color and cursor style (NULL: none) */
     int64_t timeout_ms;   /* inactivity timeout (0: none) */
     char *cwd;            /* relative <img src> paths resolve here (copied) */
     char *title;          /* panel title (copied; NULL: "Ask") */
     int term_rows;        /* terminal height without a tui (tests) */
     ui_form_done_fn done;
     void *ud;
+    /* skipNotice: what the form warns while sending the composer's draft would skip it (owned; NULL: nothing) */
+    char *(*skip_notice)(void *hook_ud);
+    void (*release_keys)(void *hook_ud); /* Esc, or Tab past Submit: the keys to the composer under the form */
+    void *hook_ud;
 } ui_form_opts_t;
 tui_component_t *ui_form_dialog_new(const char *html, const ui_form_opts_t *o);
 void ui_form_dialog_show(ui_t *u, const char *html, int64_t timeout_ms, const char *cwd, ui_form_done_fn done, void *ud);
 bool ui_form_is_dialog(const tui_component_t *c);
 json_t *ui_form_dialog_data(tui_component_t *c); /* current answers as submission would report them (owned) */
+/* givenAnswers: {data, notes?} of the fields changed from their defaults and the notes on chosen options, NULL when
+ * neither (owned) */
+json_t *ui_form_dialog_given(tui_component_t *c);
+char *ui_form_dialog_key_hints(tui_component_t *c); /* keyHints: one dim line (owned) */
 void ui_form_dialog_tick(tui_component_t *c, int64_t now_ms); /* tests: the countdown's deadline passes */
+/* the ask slot (interactive-mode askContainer): over the working row, a blank row under the ask */
+tui_component_t *ui_ask_slot_new(ui_t *u);
+tui_component_t *ui_ask_current(const ui_t *u); /* the ask waiting above the composer, NULL when none */
+bool ui_ask_focus(ui_t *u);                     /* focusAsk: the keys to the waiting ask; false when none waits */
+bool ui_ask_holds_keys(const ui_t *u);          /* askHoldsKeys: an ask waits and the composer lacks the keys */
+bool ui_ask_draft_skips(ui_t *u);               /* #draftSkipsAsk: sending the draft now skips the ask */
+/* close the waiting ask as cancelled; *given (when non-NULL) gets its givenAnswers first */
+void ui_ask_close(ui_t *u, json_t **given);
 
 /* ---------- approval.c ---------- */
 

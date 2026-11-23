@@ -44,9 +44,6 @@ static char *one_line(const char *s) {
     return r;
 }
 
-static const char *marker(bool multi, bool selected) {
-    return tc_sym(multi ? (selected ? "checkbox.checked" : "checkbox.unchecked") : (selected ? "radio.selected" : "radio.unselected"));
-}
 
 static char *spaces(int n) { return xasprintf("%*s", MAX(0, n), ""); }
 
@@ -70,128 +67,11 @@ static hf_form_t *args_form(const json_t *args) {
     return blank ? NULL : hf_parse(html);
 }
 
-static void choice_field_lines(const hf_field_t *f, int width, bool expanded, strvec_t *out) {
-    size_t limit = expanded ? f->opts.n : MIN(f->opts.n, COLLAPSED_ITEMS);
-    for (size_t i = 0; i < limit; i++) {
-        const hf_option_t *o = &f->opts.v[i];
-        char *mk = tc_fg(o->checked ? TUI_TC_SUCCESS : TUI_TC_DIM, marker(f->multi, o->checked));
-        tui_tc_t color = o->disabled ? TUI_TC_DIM : o->checked ? TUI_TC_TOOL_OUTPUT : TUI_TC_MUTED;
-        char *prefix = xasprintf(" %s ", mk), *ind = spaces(tui_visible_width(prefix));
-        char *lt = hf_spans_text(&o->label), *label = one_line(lt);
-        if (!*label) {
-            free(label);
-            label = one_line(o->value);
-        }
-        char *styled = tc_fg(color, label);
-        tc_wrap_prefixed(prefix, ind, styled, width, out);
-        free(mk), free(prefix), free(ind), free(lt), free(label), free(styled);
-    }
-    size_t hidden = f->opts.n - limit;
-    if (hidden > 0) {
-        char *cnt = tc_format_count("more option", (int64_t)hidden), *t = xasprintf("\xe2\x80\xa6 %s", cnt), *d = tc_fg(TUI_TC_DIM, t);
-        strvec_push_own(out, xasprintf("   %s", d));
-        free(cnt), free(t), free(d);
-    } else if (f->other) {
-        char *t = xasprintf("%s " HF_OTHER_LABEL "\xe2\x80\xa6", marker(f->multi, false)), *d = tc_fg(TUI_TC_DIM, t);
-        strvec_push_own(out, xasprintf(" %s", d));
-        free(t), free(d);
-    }
-}
-
 static char *bullets(const char *s, size_t cap) {
     size_t n = MIN(hf_utf16_len(s), cap);
     sb_t b = SB_INIT;
     for (size_t i = 0; i < n; i++) sb_append(&b, "\xe2\x80\xa2");
     return sb_detach(&b);
-}
-
-static void text_field_lines(const hf_field_t *f, int width, bool expanded, strvec_t *out) {
-    char *bar = tc_fg(TUI_TC_BORDER, tc_sym("boxRound.vertical")), *prefix = xasprintf("   %s ", bar);
-    int inner = MAX(1, width - tui_visible_width(prefix));
-    char *shown = str_eq(f->type, "password") ? bullets(f->value, 12) : clean(f->value);
-    strvec_t lines = {0};
-    if (*shown) {
-        strvec_t parts = {0};
-        tc_split_lines(shown, &parts);
-        for (size_t i = 0; i < parts.n; i++) {
-            char *t = tui_truncate_to_width(parts.v[i], inner, NULL), *c = tc_fg(TUI_TC_TOOL_OUTPUT, t);
-            strvec_push_own(&lines, xasprintf("%s%s", prefix, c));
-            free(t), free(c);
-        }
-        strvec_free(&parts);
-    } else {
-        char *p = one_line(f->placeholder), *t = tui_truncate_to_width(p, inner, NULL), *d = tc_fg(TUI_TC_DIM, t);
-        strvec_push_own(&lines, xasprintf("%s%s", prefix, d));
-        free(p), free(t), free(d);
-    }
-    cap_lines(&lines, expanded ? EXPANDED_LINES : COLLAPSED_LINES, "   ");
-    for (size_t i = 0; i < lines.n; i++) strvec_push(out, lines.v[i]);
-    strvec_free(&lines);
-    free(shown), free(prefix), free(bar);
-}
-
-/* formSections: one card section per fieldset, each field's question over its options or input */
-static size_t form_sections(const hf_form_t *form, int width, bool expanded, tc_section_t **out) {
-    tc_section_t *secs = xcalloc(form->sections.n + 1, sizeof *secs);
-    size_t n = 0;
-    for (size_t si = 0; si < form->sections.n; si++) {
-        const hf_section_t *sec = &form->sections.v[si];
-        tc_section_t *s = &secs[n];
-        char *tt = hf_spans_text(&sec->title), *title = one_line(tt);
-        free(tt);
-        if (*title) {
-            char *a = tc_fg(TUI_TC_ACCENT, title), *b = tc_bold(a);
-            tc_wrap_prefixed(" ", " ", b, width, &s->lines);
-            free(a), free(b);
-        }
-        for (size_t bi = 0; bi < sec->blocks.n; bi++) {
-            const hf_block_t *blk = &sec->blocks.v[bi];
-            if (blk->kind != HF_B_FIELD) continue;
-            const hf_field_t *f = blk->field;
-            char *q = one_line(f->question ? f->question : f->name);
-            /* a fieldset's lone group answers its legend; the title already says it */
-            if (*q && strcmp(q, title)) {
-                char *qt = tc_fg(TUI_TC_TEXT, q), *req = f->required ? tc_fg(TUI_TC_ERROR, " *") : xstrdup("");
-                char *c = xasprintf("%s%s", qt, req);
-                tc_wrap_prefixed(" ", " ", c, width, &s->lines);
-                free(qt), free(req), free(c);
-            }
-            free(q);
-            if (f->kind == HF_CHOICE) choice_field_lines(f, width, expanded, &s->lines);
-            else text_field_lines(f, width, expanded, &s->lines);
-        }
-        free(title);
-        if (s->lines.n) {
-            s->separator = n > 0;
-            n++;
-        }
-    }
-    *out = secs;
-    return n;
-}
-
-static void ask_call(const tc_call_t *c, int width, strvec_t *out) {
-    int cw = tc_block_content_width(width, -1, -1);
-    hf_form_t *form = args_form(c->args);
-    size_t named = hf_named_count(form);
-    char *footer = NULL;
-    if (named) {
-        char *cnt = tc_format_count("field", (int64_t)named);
-        footer = tc_fg(TUI_TC_DIM, cnt);
-        free(cnt);
-    }
-    char *header = tc_fg(TUI_TC_TOOL_TITLE, "\x1b[1mAsk\x1b[22m");
-    tc_section_t *secs = NULL;
-    size_t n = form ? form_sections(form, cw, c->expanded, &secs) : 0;
-    tc_block_t blk = {.header = header, .footer_meta = footer, .state = TC_STATE_PENDING, .sections = secs, .nsections = n,
-                      .width = width, .pad_left = -1, .pad_right = -1, .border_slot = TUI_TC_BORDER_MUTED};
-    tc_output_block(&blk, out);
-    if (secs)
-        for (size_t i = 0; i <= (form ? form->sections.n : 0); i++) strvec_free(&secs[i].lines);
-    free(secs);
-    free(header);
-    free(footer);
-    hf_form_free(form);
 }
 
 /* answerLines: a success check before the answer with continuation rows beneath it, or a dim placeholder */
@@ -284,7 +164,8 @@ static void ask_result(const tc_call_t *c, int width, strvec_t *out) {
     hf_form_free(form);
 }
 
+/* renderCall paints nothing: the ask panel over the composer owns the questions while they wait; the transcript shows
+ * the answers (omp 093f499464) */
 void tc_ask(const tc_call_t *c, int width, strvec_t *out) {
     if (c->has_result) ask_result(c, width, out);
-    else ask_call(c, width, out);
 }

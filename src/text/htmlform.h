@@ -1,5 +1,4 @@
-/* htmlform.h - the `ask` tool's HTML form model (port of omp packages/tui/src/html-form/parse.ts, data.ts and
- * paginate.ts).
+/* htmlform.h - the `ask` tool's HTML form model (port of omp packages/tui/src/html-form/parse.ts and data.ts).
  *
  * hf_parse reduces agent-written form HTML to what a terminal form draws: titled sections (one per top-level
  * `<fieldset>`, plus untitled runs of loose content between them), context blocks (paragraphs, headings, lists,
@@ -77,6 +76,7 @@ typedef struct {
 typedef struct {
     hf_spans_t title;
     VEC(hf_block_t) blocks;
+    bool fieldset; /* a top-level `<fieldset>`, legend or not; false for loose content between fieldsets */
 } hf_section_t;
 
 typedef struct {
@@ -126,27 +126,5 @@ char *hf_data_json(const json_t *data);
 bool hf_js_number(const char *text, double *out);
 /* String.length (UTF-16 code units) */
 size_t hf_utf16_len(const char *s);
-
-/* ---------- pagination (paginate.ts) ---------- */
-
-enum { HF_BREAK_NEVER = 0, HF_BREAK_INSIDE = 1, HF_BREAK_BLOCK = 2, HF_BREAK_SECTION = 3 };
-
-typedef struct {
-    strvec_t lines;      /* owned */
-    int gap;             /* blank rows before it; dropped when it starts a page */
-    int break_rank;      /* how good a page break before it is */
-    char *continuation;  /* title repeated atop a page starting here (`X (cont.)`), NULL none (owned) */
-} hf_atom_t;
-typedef VEC(hf_atom_t) hf_atoms_t;
-
-typedef struct {
-    size_t start, end;
-} hf_page_t;
-typedef VEC(hf_page_t) hf_pages_t;
-
-int hf_page_height(const hf_atoms_t *a, size_t start, size_t end);
-/* paginate: pages of at most `rows` rows; always at least one page */
-void hf_paginate(const hf_atoms_t *a, int rows, hf_pages_t *out);
-void hf_atoms_free(hf_atoms_t *a);
 
 #endif

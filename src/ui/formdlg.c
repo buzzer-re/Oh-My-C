@@ -1,14 +1,24 @@
-/* formdlg.c - the ask tool's HTML form in the composer's place (port of omp packages/tui/src/html-form/dialog.ts
- * HtmlFormDialog, row rendering, and html-form/media.ts; hosted like extension-ui-controller #showLocalFormDialog).
+/* formdlg.c - the ask tool's HTML form above the composer (port of omp packages/tui/src/html-form/dialog.ts
+ * HtmlFormDialog, row rendering, chrome/ask-fold.ts and html-form/media.ts; hosted like extension-ui-controller
+ * #showLocalFormDialog / #mountAsk).
  *
- * The whole form is laid out as one column inside a fixed-height "Ask" panel: section titles, context, choice rows,
- * one-row dropdowns, text fields, then a Submit row. A column taller than the panel (70% of the terminal) splits into
- * pages at section boundaries where possible; focus drives the visible page. Keys: ↑/↓ move between choices and
- * fields, Tab/Shift+Tab jump fields, Space toggles (or opens a dropdown), ←/→ change a dropdown or turn pages, Enter
- * picks a radio and moves on, Enter on Submit validates and submits, PgUp/PgDn turn pages, app.ask.hide collapses
- * the form to one row, Esc cancels. With a timeout, inactivity submits the current values.
+ * The form stacks in one column inside an "Ask" panel over the working row, the composer staying under it: the context
+ * before the first question on top, then every question (a top-level `<fieldset>`, or a field of loose content between
+ * fieldsets, with the context before it). The question holding focus is open, its context and the focused field's
+ * controls shown; every other field folds to its question over its answer or option chips. Focus on Submit folds them
+ * all. The panel ({@link DIALOG_HEIGHT_RATIO} of the terminal at most, leaving ASK_RESERVED_ROWS) scrolls to keep the
+ * focused row in view, with the open question's head when it fits, and past a picture it would cut when it can; one it
+ * must cut is a dim frame naming it.
  *
- * Tern's native description (question tabs, Review, action bar) is not ported: omc has no native rendering. */
+ * Keys: ↑/↓ move between choices and fields, crossing from a question's last row into the next, Tab/Shift+Tab jump
+ * fields, Space toggles (or opens a dropdown), ←/→ change a dropdown, Enter picks a radio and moves on, Enter on Submit
+ * validates and submits or opens the first question to fix, PgUp/PgDn (←/→ on choices) open the previous or next
+ * question. Esc (outside an open dropdown or note) and Tab on Submit hand the keys to the composer, where Esc
+ * interrupts the turn and so cancels the ask. ↑ on a question's first row first scrolls up to its head when that is
+ * cut off, app.ask.hide collapses the form to one row, and the faint composer shows the form's key hints. With a
+ * timeout, inactivity submits the current values.
+ *
+ * Tern's native card (native/ask-card.ts, pills a click picks) is not ported: omc has no native rendering. */
 #include "ui/overlays.h"
 #include "ui/ui.h"
 #include "ui/signals.h"
@@ -31,7 +41,11 @@
 
 #define DIALOG_HEIGHT_RATIO 0.7
 #define MIN_BODY_ROWS 6
-#define CHROME_ROWS 4 /* top border, footer divider, footer, bottom border */
+#define CHROME_ROWS 2 /* top and bottom border */
+/* chrome/ask-fold.ts ASK_RESERVED_ROWS: rows the panel leaves to the composer, its borders, the spacer and working row
+ * over it, the status line and some slack */
+#define ASK_RESERVED_ROWS 8
+#define FOLD_INDENT "  " /* cells the folded summary and error sit in from the mark */
 #define FIELD_INDENT 4
 #define MAX_TEXTAREA_ROWS 10
 #define DEFAULT_TITLE "Ask"
@@ -41,6 +55,9 @@
 #define PICTURE_SHARE 0.35
 #define DROPDOWN_PAGE 5
 #define OTHER_PLACEHOLDER "type your own"
+#define WELL_PLACEHOLDER "type your answer" /* a folded text field's well when the form gives no placeholder */
+#define PILL_LIMIT 4        /* native/ask-card.ts: option pills a folded question shows */
+#define PILL_LABEL_WIDTH 20 /* widest a pill's label grows, in cells, before it is cut */
 #define MAX_FORM_IMAGE_BYTES (10 * 1024 * 1024)
 #define FETCH_TIMEOUT_MS 10000
 
@@ -65,7 +82,17 @@ typedef struct {
     struct media_job *job;
 } media_t;
 
-typedef VEC(bool) boolvec_t;
+/* blocks [start, end) of one form section */
+typedef struct {
+    size_t section, start, end;
+} part_t;
+typedef VEC(part_t) parts_t;
+
+/* a question group: the section parts it shows while open, and the fields in them */
+typedef struct {
+    parts_t parts;
+    VEC(hf_field_t *) fields;
+} group_t;
 
 typedef struct fd {
     tui_component_t base;
@@ -80,16 +107,23 @@ typedef struct fd {
     char **other_seen;       /* per field index: a radio group's Other text as last seen */
     char **errors;           /* per field index */
     size_t nerrors;
-    int focus, page;
+    int focus;
     bool sole; /* the keys reach one field only: Enter on it submits (omp 05c0e53513) */
-    bool follow;
-    hf_pages_t pages;
-    VEC(size_t) stop_atoms;
-    char height_key[96];
+    parts_t intro;           /* context above every question group */
+    VEC(group_t) groups;     /* question groups, the one holding focus open */
+    int *field_group;        /* per field index: its group */
+    int scroll;              /* first column row the body shows */
+    /* set while ↑ scrolls up to the open question's cut-off head: the body keeps its offset instead of following
+     * focus until another key brings focus back */
+    bool peek;
+    struct {
+        bool valid;
+        int focus, offset, rows, head;
+    } view;                  /* the last body render: the focus it showed, its offset, height and head row */
+    char *height_key;
     int height_rows;
     hf_field_t *open;        /* dropdown showing its options */
     int highlight;
-    bool guard, guard_released;
     int64_t deadline;
     int remaining;           /* -1: no countdown */
     int timer_id;
@@ -165,7 +199,18 @@ static char *pad(int n) {
     return sb_detach(&b);
 }
 
-static char *trunc_to(const char *s, int w) { return tui_truncate_to_width(s, MAX(0, w), NULL); }
+/* truncateToWidth (Ellipsis.Unicode): the native truncation resets before the ellipsis only when it copied SGR codes,
+ * so a plain string's ellipsis keeps the color it is wrapped in */
+static char *trunc_with(const char *s, int w, const char *ellipsis) {
+    char *r = tui_truncate_to_width(s, MAX(0, w), ellipsis);
+    if (s && !strchr(s, '\x1b')) {
+        char *at = strstr(r, TUI_RESET);
+        if (at) memmove(at, at + strlen(TUI_RESET), strlen(at + strlen(TUI_RESET)) + 1);
+    }
+    return r;
+}
+
+static char *trunc_to(const char *s, int w) { return trunc_with(s, w, NULL); }
 
 /* the base style a span run takes: `slot` color, optionally bold */
 typedef struct {
@@ -609,6 +654,8 @@ static void reset_countdown(fd_t *v) {
 
 static const fd_t *g_closed; /* the dialog a key just closed (compared, never dereferenced) */
 
+static void ask_unmount(ui_t *u, tui_component_t *ask);
+
 static void finish(fd_t *v, json_t *data, json_t *notes, bool timed_out) {
     g_closed = v;
     if (v->closed) {
@@ -620,10 +667,7 @@ static void finish(fd_t *v, json_t *data, json_t *notes, bool timed_out) {
     stop_countdown(v);
     ui_form_done_fn done = v->o.done;
     void *ud = v->o.ud;
-    if (v->o.ui) {
-        ui_close_nested_selector(v->o.ui);
-        ui_close_selector(v->o.ui); /* destroys v */
-    }
+    if (v->o.ui) ask_unmount(v->o.ui, &v->base); /* destroys v */
     if (done) done(ud, data, notes, timed_out);
     else {
         json_free(data);
@@ -632,8 +676,6 @@ static void finish(fd_t *v, json_t *data, json_t *notes, bool timed_out) {
 }
 
 /* ---------- option notes ---------- */
-
-static bool guard_blocks(const fd_t *v);
 
 /* optionNotes: saved notes on selected options ({name, question, option, value, text}); unselected drafts stay
  * private to the dialog */
@@ -726,12 +768,11 @@ static void save_note(fd_t *v) {
 
 static void start_note(fd_t *v, int target) {
     const stop_t *s = &v->stops.v[v->focus];
-    if (v->hidden || guard_blocks(v) || (s->kind != STOP_OPTION && s->kind != STOP_SELECT)) return;
-    v->follow = true; /* the editor draws under the focused stop, so its page must be the one shown */
+    if (v->hidden || (s->kind != STOP_OPTION && s->kind != STOP_SELECT)) return;
+    v->peek = false; /* the editor draws under the focused stop, so the body must show it */
     hf_field_t *f = s->field;
     int option = target >= 0 ? target : s->kind == STOP_OPTION ? s->option : v->open ? v->highlight : current(v, f);
     if (option < 0 || option >= (int)f->opts.n || f->opts.v[option].disabled) return;
-    v->guard_released = true; /* opening a note hands the keys over, as up/down does */
     close_note(v);
     tui_editor_t *ed = tui_editor_new();
     tui_editor_set_composer(ed, "borderless");
@@ -774,12 +815,38 @@ static void on_tick(void *ud) {
 
 /* ---------- focus ---------- */
 
-static void set_focus(fd_t *v, int index) {
-    v->focus = MAX(0, MIN((int)v->stops.n - 1, index));
-    v->follow = true;
+/* the field of stop `i`; NULL for Submit */
+static hf_field_t *field_of_stop(const fd_t *v, int i) {
+    if (i < 0 || i >= (int)v->stops.n) return NULL;
+    const stop_t *s = &v->stops.v[i];
+    return s->kind == STOP_SUBMIT ? NULL : s->field;
 }
 
-static void move_stop(fd_t *v, int delta) { set_focus(v, v->focus + delta); }
+/* #groupOfStop: the question group holding stop `i`; groups.n for Submit */
+static int group_of_stop(const fd_t *v, int i) {
+    hf_field_t *f = field_of_stop(v, i);
+    if (!f) return (int)v->groups.n;
+    return v->field_group[fidx(f)];
+}
+
+static void set_focus(fd_t *v, int index) {
+    v->focus = MAX(0, MIN((int)v->stops.n - 1, index));
+    v->peek = false;
+}
+
+/* #moveStop: move focus `delta` stops, across questions. ↑ on an open question's first stop whose head the body cuts
+ * off scrolls up toward that head first, a body less a row at a time; the next ↑ at the head crosses into the previous
+ * question */
+static void move_stop(fd_t *v, int delta) {
+    int group = group_of_stop(v, v->focus);
+    if (delta < 0 && v->view.valid && v->view.focus == v->focus && v->view.offset > v->view.head &&
+        (v->focus == 0 || group_of_stop(v, v->focus - 1) != group)) {
+        v->peek = true;
+        v->scroll = MAX(v->view.head, v->view.offset - MAX(1, v->view.rows - 1));
+        return;
+    }
+    set_focus(v, v->focus + delta);
+}
 
 static const void *field_of(const stop_t *s) { return s->kind == STOP_SUBMIT ? (const void *)s : (const void *)s->field; }
 
@@ -816,33 +883,15 @@ static void advance(fd_t *v) {
     else move_field(v, 1);
 }
 
-static int page_of_atom(const fd_t *v, size_t atom) {
-    for (size_t i = 0; i < v->pages.n; i++)
-        if (atom >= v->pages.v[i].start && atom < v->pages.v[i].end) return (int)i;
-    return 0;
-}
-
-static void turn_page(fd_t *v, int delta) {
-    if (v->pages.n < 2) return;
-    int target = MAX(0, MIN((int)v->pages.n - 1, v->page + delta));
-    hf_page_t p = v->pages.v[target];
-    for (size_t s = 0; s < v->stop_atoms.n; s++)
-        if (v->stop_atoms.v[s] >= p.start && v->stop_atoms.v[s] < p.end) {
-            set_focus(v, (int)s);
+/* #jumpQuestion: open the previous or next question group at its first field's answer; past the last, Submit */
+static void jump_question(fd_t *v, int delta) {
+    int target = group_of_stop(v, v->focus) + delta;
+    for (int i = 0; i < (int)v->stops.n; i++)
+        if (group_of_stop(v, i) == target) {
+            hf_field_t *f = field_of_stop(v, i);
+            set_focus(v, f ? answer_stop(v, f) : i);
             return;
         }
-    v->page = target;
-    v->follow = false;
-}
-
-static bool guard_blocks(const fd_t *v) {
-    return v->guard && !v->guard_released && v->o.draft && !tui_editor_is_empty(v->o.draft);
-}
-
-static char *guard_hint(void) {
-    char *ud = editor_keys2("tui.select.up", "tui.select.down"), *r = xasprintf("%s answer \xc2\xb7 typing edits your prompt", ud);
-    free(ud);
-    return r;
 }
 
 static void submit(fd_t *v) {
@@ -1001,6 +1050,10 @@ static void set_hidden(fd_t *v, bool hidden) {
     v->open = NULL;
 }
 
+static void release_keys(fd_t *v) {
+    if (v->o.release_keys) v->o.release_keys(v->o.hook_ud);
+}
+
 static bool fd_key(tui_component_t *c, const tui_key_t *k) {
     fd_t *v = (fd_t *)c;
     if (v->closed) return true;
@@ -1021,15 +1074,9 @@ static bool fd_key(tui_component_t *c, const tui_key_t *k) {
         request(v);
         return true;
     }
+    /* Esc hands the keys to the composer, where Esc interrupts the turn and so cancels the ask */
     if (tui_kb(k, "tui.select.cancel")) {
-        stop_countdown(v);
-        finish(v, NULL, NULL, false);
-        return true;
-    }
-    if (guard_blocks(v)) {
-        if (tui_kb(k, "tui.select.up") || tui_kb(k, "tui.select.down")) v->guard_released = true;
-        else tui_editor_handle_key(v->o.draft, k);
-        request(v);
+        release_keys(v);
         return true;
     }
     if (v->hidden) {
@@ -1037,9 +1084,23 @@ static bool fd_key(tui_component_t *c, const tui_key_t *k) {
         request(v);
         return true;
     }
+    bool confirm = is_confirm(k), up = tui_kb(k, "tui.select.up"), down = tui_kb(k, "tui.select.down");
+    if (v->peek && !up) {
+        /* focus sits below the rows shown: the keys that would act on it bring it back instead of acting unseen */
+        v->peek = false;
+        if (down || tui_key_matches(k, "space") || confirm) {
+            request(v);
+            return true;
+        }
+    }
     if (tui_kb(k, "tui.select.pageDown") || tui_kb(k, "tui.select.pageUp")) {
-        turn_page(v, tui_kb(k, "tui.select.pageDown") ? 1 : -1);
+        jump_question(v, tui_kb(k, "tui.select.pageDown") ? 1 : -1);
         request(v);
+        return true;
+    }
+    stop_t *s = &v->stops.v[v->focus];
+    if (tui_key_matches(k, "tab") && s->kind == STOP_SUBMIT) {
+        release_keys(v);
         return true;
     }
     if (tui_key_matches(k, "tab") || tui_key_matches(k, "shift+tab")) {
@@ -1047,28 +1108,22 @@ static bool fd_key(tui_component_t *c, const tui_key_t *k) {
         request(v);
         return true;
     }
-    stop_t *s = &v->stops.v[v->focus];
-    /* focus sits on another page: ←/→ keep paging, and the keys that would act on it bring it into view */
-    if (!v->follow && v->pages.n > 1) {
-        if (tui_key_matches(k, "left") || tui_key_matches(k, "right")) turn_page(v, tui_key_matches(k, "right") ? 1 : -1);
-        else if (tui_kb(k, "tui.select.up") || tui_kb(k, "tui.select.down") || tui_key_matches(k, "space") || is_confirm(k))
-            v->follow = true;
-        request(v);
-        return true;
-    }
     if (s->kind == STOP_TEXT) text_key(v, s->field, k);
     else if (s->kind == STOP_SELECT) select_key(v, s->field, k);
     else if (s->kind == STOP_OTHER) other_key(v, s->field, k);
-    else if (tui_kb(k, "tui.select.up") || tui_kb(k, "tui.select.down")) move_stop(v, tui_kb(k, "tui.select.down") ? 1 : -1);
-    else if (tui_key_matches(k, "left") || tui_key_matches(k, "right")) turn_page(v, tui_key_matches(k, "right") ? 1 : -1);
+    else if (up || down) move_stop(v, down ? 1 : -1);
+    else if (tui_key_matches(k, "left") || tui_key_matches(k, "right")) jump_question(v, tui_key_matches(k, "right") ? 1 : -1);
     else if (s->kind == STOP_SUBMIT) {
-        if (is_confirm(k)) {
+        if (confirm) {
             submit(v);
-            return true; /* v may be gone */
+            if (g_closed == v) { /* submitted: v is gone */
+                g_closed = NULL;
+                return true;
+            }
         }
     } else if (matches_note_key(k, false)) start_note(v, -1);
     else if (tui_key_matches(k, "space")) toggle(v, s->field, s->option);
-    else if (is_confirm(k)) {
+    else if (confirm) {
         /* Enter picks a radio; on a checkbox group with nothing checked it checks the focused box */
         bool none = true;
         for (size_t q = 0; q < s->field->opts.n; q++)
@@ -1086,10 +1141,52 @@ static bool fd_key(tui_component_t *c, const tui_key_t *k) {
 
 /* ---------- rows ---------- */
 
-static char *title_text(const fd_t *v) {
-    const char *t = v->o.title ? v->o.title : DEFAULT_TITLE;
-    return v->remaining < 0 ? xstrdup(t) : xasprintf("%s (%ds)", t, v->remaining);
+/* whether the keyboard can reach `f`: a text field, or a choice with an enabled option or an Other answer */
+static bool reachable(const hf_field_t *f) {
+    if (f->kind == HF_TEXT || f->other) return true;
+    for (size_t k = 0; k < f->opts.n; k++)
+        if (!f->opts.v[k].disabled) return true;
+    return false;
 }
+
+/* #answered: `f` holds an answer that passes its rules */
+static bool answered(fd_t *v, const hf_field_t *f) {
+    json_t *x = field_value(v, f);
+    bool r = false;
+    if (x && !(json_is_str(x) && !*json_sv(x)) && !(json_is_arr(x) && !json_len(x))) {
+        char *e = hf_field_error(f, x);
+        r = !e;
+        free(e);
+    }
+    json_free(x);
+    return r;
+}
+
+/* #progress: `2 of 5 answered`, for forms of two or more questions the keyboard reaches (NULL otherwise) */
+static char *progress_text(fd_t *v) {
+    size_t named = 0, done = 0;
+    for (size_t i = 0; i < v->form->fields.n; i++) {
+        hf_field_t *f = v->form->fields.v[i];
+        if (!*f->name || !reachable(f)) continue;
+        named++;
+        done += answered(v, f);
+    }
+    return named < 2 ? NULL : xasprintf("%zu of %zu answered", done, named);
+}
+
+static char *title_text(fd_t *v) {
+    const char *t = v->o.title ? v->o.title : DEFAULT_TITLE;
+    char *p = progress_text(v);
+    char *base = p ? xasprintf("%s \xc2\xb7 %s", t, p) : xstrdup(t);
+    free(p);
+    if (v->remaining < 0) return base;
+    char *r = xasprintf("%s (%ds)", base, v->remaining);
+    free(base);
+    return r;
+}
+
+/* setUseTerminalCursor: the TUI hands the focused form its hardware-cursor mode (showHardwareCursor), as the composer's */
+static bool hw_cursor(const fd_t *v) { return v->o.draft && v->o.draft->use_terminal_cursor; }
 
 static char *cursor_prefix(bool focused) {
     if (!focused) return xstrdup("  ");
@@ -1099,7 +1196,7 @@ static char *cursor_prefix(bool focused) {
 }
 
 /* Input.render with prompt "": windowed value, cursor cell (or `override` at the end), padded to width */
-static char *input_row(const ui_input_t *in, int width, bool focused, bool mask, const char *override) {
+static char *input_row(const ui_input_t *in, int width, bool focused, bool mask, const char *override, bool hw_cursor) {
     ui_input_t tmp = {0};
     const ui_input_t *src = in;
     if (mask) {
@@ -1128,7 +1225,7 @@ static char *input_row(const ui_input_t *in, int width, bool focused, bool mask,
         tui_sb_spaces(&b, MAX(0, avail - tui_visible_width(before) - ow));
         free(before);
         r = sb_detach(&b);
-    } else r = ui_input_render(src, "", width, focused);
+    } else r = ui_input_render_hw(src, "", width, focused, hw_cursor); /* Input #cursorCell: plain under a hardware cursor */
     sb_free(&tmp.v);
     return r;
 }
@@ -1152,7 +1249,7 @@ static char *other_line(fd_t *v, hf_field_t *f, bool focused, int width) {
             free(ph);
             free(d);
         }
-        shown = input_row(in, inner, v->base.focused && !v->hidden && !v->note_ed, false, ov);
+        shown = input_row(in, inner, v->base.focused && !v->hidden && !v->note_ed, false, ov, hw_cursor(v));
         free(ov);
     } else if (*value) {
         char *s = sanitize(value), *t = trunc_to(s, inner);
@@ -1315,7 +1412,7 @@ static void text_field_lines(fd_t *v, const hf_field_t *f, bool focused, int wid
             free(ph);
             free(d);
         }
-        strvec_push_own(&rows, input_row(&v->inputs[fidx(f)], inner, live, str_eq(f->type, "password"), ov));
+        strvec_push_own(&rows, input_row(&v->inputs[fidx(f)], inner, live, str_eq(f->type, "password"), ov, hw_cursor(v)));
         free(ov);
     } else if (*value) {
         char *shown;
@@ -1340,14 +1437,28 @@ static void text_field_lines(fd_t *v, const hf_field_t *f, bool focused, int wid
     free(prefix);
 }
 
-static void push_atom(hf_atoms_t *atoms, strvec_t lines, int gap, int rank) {
-    hf_atom_t a = {.lines = lines, .gap = gap, .break_rank = rank};
-    vec_push(atoms, a);
+/* one run of a field's rows: an option, a control, its label or error; `stop` when focus rests on it */
+typedef struct {
+    strvec_t lines;
+    bool stop;
+} run_t;
+typedef VEC(run_t) runs_t;
+
+static void runs_free(runs_t *r) {
+    for (size_t i = 0; i < r->n; i++) strvec_free(&r->v[i].lines);
+    free(r->v);
+    r->v = NULL;
+    r->n = 0;
 }
 
-/* atoms of one field (each flagged when it is a focus stop); stops are numbered from first_stop */
-static void field_atoms(fd_t *v, hf_field_t *f, int width, int focused_stop, int first_stop, hf_atoms_t *atoms,
-                        boolvec_t *stops) {
+static void push_run(runs_t *r, strvec_t lines, bool stop) {
+    run_t x = {lines, stop};
+    vec_push(r, x);
+}
+
+/* #fieldRuns: rows of one open field in runs, each flagged when it is a focus stop; stops are numbered from
+ * first_stop */
+static void field_runs(fd_t *v, hf_field_t *f, int width, int focused_stop, int first_stop, runs_t *out) {
     const char *err = v->errors[fidx(f)];
     strvec_t err_lines = {0};
     if (err) {
@@ -1366,17 +1477,14 @@ static void field_atoms(fd_t *v, hf_field_t *f, int width, int focused_stop, int
         strvec_free(&err_lines);
         bool has_stop = f->kind == HF_TEXT;
         for (size_t k = 0; k < f->opts.n; k++) has_stop |= !f->opts.v[k].disabled;
-        push_atom(atoms, lines, 0, HF_BREAK_INSIDE);
-        vec_push(stops, has_stop);
+        push_run(out, lines, has_stop);
         return;
     }
     other_chosen(v, f); /* settle typing into a radio group's Other before drawing its options */
     if (f->label.n) {
         strvec_t lines = {0};
-        base_t base = {TUI_TC_TEXT, false};
-        hang("  ", &f->label, base, width, &lines);
-        push_atom(atoms, lines, 0, HF_BREAK_INSIDE);
-        vec_push(stops, false);
+        hang("  ", &f->label, (base_t){TUI_TC_TEXT, false}, width, &lines);
+        push_run(out, lines, false);
     }
     int stop = first_stop;
     for (size_t i = 0; i < f->opts.n; i++) {
@@ -1389,19 +1497,17 @@ static void field_atoms(fd_t *v, hf_field_t *f, int width, int focused_stop, int
         tui_tc_t color = o->disabled ? TUI_TC_DIM : focused ? TUI_TC_ACCENT : ch ? TUI_TC_TOOL_OUTPUT : TUI_TC_TEXT;
         char *prefix = xasprintf("%s%s ", cur, mk);
         strvec_t lines = {0};
-        base_t base = {color, false};
         int tw;
         char *tag = note_tag(v, f, (int)i, &tw);
-        hang(prefix, &o->label, base, MAX(1, width - tw), &lines);
+        hang(prefix, &o->label, (base_t){color, false}, MAX(1, width - tw), &lines);
+        if (!lines.n) strvec_push(&lines, "");
         if (tag) {
-            if (!lines.n) strvec_push(&lines, "");
             char *l0 = xasprintf("%s%s", lines.v[0], tag);
             free(lines.v[0]);
             lines.v[0] = l0;
             free(tag);
         }
-        push_atom(atoms, lines, 0, HF_BREAK_INSIDE);
-        vec_push(stops, !o->disabled);
+        push_run(out, lines, !o->disabled);
         free(prefix);
         free(mk);
         free(cur);
@@ -1409,16 +1515,12 @@ static void field_atoms(fd_t *v, hf_field_t *f, int width, int focused_stop, int
     if (f->other) {
         strvec_t lines = {0};
         strvec_push_own(&lines, other_line(v, f, focused_stop == stop, width));
-        push_atom(atoms, lines, 0, HF_BREAK_INSIDE);
-        vec_push(stops, true);
+        push_run(out, lines, true);
     }
-    if (err_lines.n) {
-        push_atom(atoms, err_lines, 0, HF_BREAK_NEVER);
-        vec_push(stops, false);
-    } else strvec_free(&err_lines);
+    if (err_lines.n) push_run(out, err_lines, false);
+    else strvec_free(&err_lines);
 }
 
-/* renderTableRow over fitted columns */
 /* table.ts shrinkEvenly: the widest columns shrink first, level by level, down to their minimums */
 static int shrink_evenly(int *w, const int *mins, size_t n, int overflow) {
     while (overflow > 0) {
@@ -1448,8 +1550,8 @@ static int shrink_evenly(int *w, const int *mins, size_t n, int overflow) {
 }
 
 /* table rows over as many lines as their tallest cell: cells word-wrap within their fitted width and keep <br>
- * breaks; a row's continuation lines refuse a page break before them (omp e701ef8cbe) */
-static void table_atoms(const hf_block_t *blk, int width, hf_atoms_t *atoms) {
+ * breaks (renderTableRowLines, omp e701ef8cbe) */
+static void table_lines(const hf_block_t *blk, int width, strvec_t *out) {
     size_t count = 0;
     for (size_t r = 0; r < blk->rows.n; r++) count = MAX(count, blk->rows.v[r].n);
     VEC(char **) cells = {0};
@@ -1479,11 +1581,7 @@ static void table_atoms(const hf_block_t *blk, int width, hf_atoms_t *atoms) {
     sb_t rule = SB_INIT;
     sb_repeat(&rule, "\xe2\x94\x80", width);
     for (size_t r = 0; r < cells.n; r++) {
-        if (r > 0 && r == blk->header_rows) {
-            strvec_t lines = {0};
-            strvec_push_own(&lines, fg(TUI_TC_DIM, sb_cstr(&rule)));
-            push_atom(atoms, lines, 0, HF_BREAK_NEVER);
-        }
+        if (r > 0 && r == blk->header_rows) strvec_push_own(out, fg(TUI_TC_DIM, sb_cstr(&rule)));
         bool head = r < blk->header_rows;
         strvec_t *stacks = xcalloc(count + 1, sizeof *stacks);
         size_t height = 1;
@@ -1513,9 +1611,7 @@ static void table_atoms(const hf_block_t *blk, int width, hf_atoms_t *atoms) {
                 free(padded);
                 free(fit);
             }
-            strvec_t lines = {0};
-            strvec_push_own(&lines, sb_detach(&line));
-            push_atom(atoms, lines, 0, l == 0 ? HF_BREAK_INSIDE : HF_BREAK_NEVER);
+            strvec_push_own(out, sb_detach(&line));
         }
         for (size_t c = 0; c < count; c++) strvec_free(&stacks[c]);
         free(stacks);
@@ -1528,28 +1624,21 @@ static void table_atoms(const hf_block_t *blk, int width, hf_atoms_t *atoms) {
     free(mins);
 }
 
-/* atoms of a non-field block: one per wrapped line, list item or table row */
-static void context_atoms(fd_t *v, const hf_block_t *blk, int width, hf_atoms_t *atoms) {
+/* #contextRows: rows of a non-field block: its wrapped lines, list items or table rows, or a picture (*picture set
+ * when the rows are a drawn picture) */
+static void context_rows(fd_t *v, const hf_block_t *blk, int width, strvec_t *out, bool *picture) {
+    *picture = false;
     switch (blk->kind) {
     case HF_B_TEXT: {
-        strvec_t lines = {0};
         base_t base = blk->heading ? (base_t){TUI_TC_TEXT, true} : (base_t){TUI_TC_MUTED, false};
-        hang("", &blk->spans, base, width, &lines);
-        for (size_t i = 0; i < lines.n; i++) {
-            strvec_t one = {0};
-            strvec_push(&one, lines.v[i]);
-            push_atom(atoms, one, 0, HF_BREAK_INSIDE);
-        }
-        strvec_free(&lines);
+        hang("", &blk->spans, base, width, out);
         break;
     }
     case HF_B_LIST:
         for (size_t i = 0; i < blk->items.n; i++) {
             char *b = blk->ordered ? xasprintf("%zu. ", i + 1) : xstrdup("\xe2\x80\xa2 ");
             char *bullet = fg(TUI_TC_MD_LIST_BULLET, b);
-            strvec_t lines = {0};
-            hang(bullet, &blk->items.v[i], (base_t){TUI_TC_MUTED, false}, width, &lines);
-            push_atom(atoms, lines, 0, HF_BREAK_INSIDE);
+            hang(bullet, &blk->items.v[i], (base_t){TUI_TC_MUTED, false}, width, out);
             free(bullet);
             free(b);
         }
@@ -1559,9 +1648,7 @@ static void context_atoms(fd_t *v, const hf_block_t *blk, int width, hf_atoms_t 
         strvec_t ls = str_split(s, "\n");
         for (size_t i = 0; i < ls.n; i++) {
             char *t = trunc_to(ls.v[i], MAX(1, width - 2)), *c = fg(TUI_TC_MD_CODE_BLOCK, t);
-            strvec_t lines = {0};
-            strvec_push_own(&lines, xasprintf("  %s", c));
-            push_atom(atoms, lines, 0, HF_BREAK_INSIDE);
+            strvec_push_own(out, xasprintf("  %s", c));
             free(t);
             free(c);
         }
@@ -1572,138 +1659,468 @@ static void context_atoms(fd_t *v, const hf_block_t *blk, int width, hf_atoms_t 
     case HF_B_IMAGE:
     case HF_B_SVG: {
         media_t *m = media_of(v, blk);
-        strvec_t lines = {0};
-        if (m) media_rows(v, blk, m, width, &lines);
-        if (!lines.n && m) {
+        size_t before = out->n;
+        if (m) media_rows(v, blk, m, width, out);
+        if (out->n > before) *picture = true;
+        else if (m) {
             char *n = media_note(blk, m), *t = trunc_to(n, width);
-            strvec_push_own(&lines, fg(TUI_TC_DIM, t));
+            strvec_push_own(out, fg(TUI_TC_DIM, t));
             free(n);
             free(t);
         }
-        push_atom(atoms, lines, 0, HF_BREAK_INSIDE);
         break;
     }
     case HF_B_TABLE:
-        table_atoms(blk, width, atoms);
+        table_lines(blk, width, out);
         break;
     case HF_B_FIELD:
         break;
     }
 }
 
+/* ---------- folded questions (chrome/ask-fold.ts, native/ask-card.ts foldPills) ---------- */
+
+enum { SUM_ANSWER, SUM_WELL, SUM_PILLS };
+
 typedef struct {
-    hf_atoms_t atoms;
-    VEC(size_t) stop_atoms;
+    char *label;
+    bool chosen;
+} pill_t;
+
+/* FoldSummary: the typed answer, an empty field's placeholder, or the options as pills */
+typedef struct {
+    int kind;
+    char *text; /* answer / well placeholder */
+    char *note; /* the first chosen option's note, one line (NULL: none) */
+    VEC(pill_t) pills;
+} summary_t;
+
+static void summary_free(summary_t *s) {
+    free(s->text);
+    free(s->note);
+    for (size_t i = 0; i < s->pills.n; i++) free(s->pills.v[i].label);
+    free(s->pills.v);
+}
+
+/* text.replace(/\s+/g, " ") of a sanitized string, trimmed when asked */
+static char *one_space(const char *s, bool trim) {
+    char *a = sanitize_line(s);
+    if (!trim) return a;
+    char *t = str_trim(a);
+    free(a);
+    return t;
+}
+
+/* #foldSummary */
+static void fold_summary(fd_t *v, const hf_field_t *f, summary_t *out) {
+    memset(out, 0, sizeof *out);
+    if (f->kind == HF_TEXT) {
+        char *value = text_value(v, f), *t = str_trim(value);
+        if (!*t) {
+            char *ph = sanitize(f->placeholder);
+            out->kind = SUM_WELL;
+            out->text = *ph ? ph : xstrdup(WELL_PLACEHOLDER);
+            if (!*ph) free(ph);
+        } else if (str_eq(f->type, "password")) {
+            sb_t b = SB_INIT;
+            for (size_t i = 0; i < hf_utf16_len(value); i++) sb_append(&b, "\xe2\x80\xa2");
+            out->kind = SUM_ANSWER;
+            out->text = sb_detach(&b);
+        } else {
+            out->kind = SUM_ANSWER;
+            out->text = one_space(value, true);
+        }
+        free(t);
+        free(value);
+        return;
+    }
+    /* before reading the checks: typing a radio group's Other drops its picked option */
+    bool other = other_chosen(v, f);
+    const bool *checked = v->checked[fidx(f)];
+    out->kind = SUM_PILLS;
+    for (size_t k = 0; k < f->opts.n; k++) {
+        if (f->opts.v[k].disabled && !checked[k]) continue;
+        char *t = option_text(&f->opts.v[k]);
+        pill_t p = {*t ? t : xstrdup(f->opts.v[k].value), checked[k]};
+        if (!*t) free(t);
+        vec_push(&out->pills, p);
+    }
+    if (other) {
+        char *typed = one_space(ui_input_value(&v->others[fidx(f)]), true);
+        pill_t p = {xasprintf("%s: %s", HF_OTHER_LABEL, typed), true};
+        vec_push(&out->pills, p);
+        free(typed);
+    }
+    char **notes = v->notes[fidx(f)];
+    for (size_t k = 0; notes && k < f->opts.n && !out->note; k++) {
+        if (!checked[k] || !notes[k]) continue;
+        char *t = str_trim(notes[k]);
+        if (*t) out->note = one_space(t, false);
+        free(t);
+    }
+}
+
+/* noteText: the note after a summary, dim (owned; "" without one) */
+static char *note_text(const char *note) {
+    if (!note) return xstrdup("");
+    char *t = trunc_to(note, 60), *s = xasprintf("  \xe2\x9c\x8e %s", t), *r = fg(TUI_TC_DIM, s);
+    free(t);
+    free(s);
+    return r;
+}
+
+/* summaryLine (owned; "" when it shows nothing) */
+static char *summary_line(const summary_t *s) {
+    if (s->kind == SUM_ANSWER) {
+        char *t = one_space(s->text, false), *m = fg(TUI_TC_MUTED, t), *n = note_text(s->note);
+        char *r = xasprintf("%s%s", m, n);
+        free(t), free(m), free(n);
+        return r;
+    }
+    if (s->kind == SUM_WELL) return fg(TUI_TC_DIM, s->text);
+    /* foldPills: options in order, up to PILL_LIMIT, the chosen ones always among them, each cut to a label width */
+    size_t chosen = 0;
+    for (size_t i = 0; i < s->pills.n; i++) chosen += s->pills.v[i].chosen;
+    size_t room = chosen >= PILL_LIMIT ? 0 : PILL_LIMIT - chosen, shown = 0;
+    bool any_chosen = false;
+    sb_t b = SB_INIT;
+    for (size_t i = 0; i < s->pills.n && shown < PILL_LIMIT; i++) {
+        const pill_t *p = &s->pills.v[i];
+        if (!p->chosen) {
+            if (!room) continue;
+            room--;
+        }
+        char *cut = trunc_to(p->label, PILL_LABEL_WIDTH);
+        size_t cl = strlen(cut);
+        if (cl >= 3 && !strcmp(cut + cl - 3, "\xe2\x80\xa6")) { /* a cut after a word keeps no space before its ellipsis */
+            size_t e = cl - 3;
+            while (e > 0 && isspace((unsigned char)cut[e - 1])) e--;
+            if (e < cl - 3) memmove(cut + e, cut + cl - 3, 4);
+        }
+        char *chip;
+        if (p->chosen) {
+            char *t = xasprintf(" \xe2\x9c\x93 %s ", cut), *f = fg(TUI_TC_SUCCESS, t);
+            chip = tui_bgs(TH(), TUI_TC_TOOL_SUCCESS_BG, f);
+            free(t), free(f);
+            any_chosen = true;
+        } else {
+            char *t = xasprintf(" %s ", cut), *f = fg(TUI_TC_MUTED, t);
+            chip = tui_bgs(TH(), TUI_TC_SELECTED_BG, f);
+            free(t), free(f);
+        }
+        if (shown) sb_putc(&b, ' ');
+        sb_append(&b, chip);
+        free(chip);
+        free(cut);
+        shown++;
+    }
+    size_t hidden = s->pills.n - shown;
+    if (hidden > 0) {
+        char *t = xasprintf(" +%zu ", hidden), *f = fg(TUI_TC_DIM, t), *chip = tui_bgs(TH(), TUI_TC_SELECTED_BG, f);
+        if (shown) sb_putc(&b, ' ');
+        sb_append(&b, chip);
+        free(t), free(f), free(chip);
+    }
+    if (any_chosen) {
+        char *n = note_text(s->note);
+        sb_append(&b, n);
+        free(n);
+    }
+    return sb_detach(&b);
+}
+
+/* renderFoldedQuestion: the mark and wrapped question, then its summary cut to one row, then its error */
+static void folded_rows(fd_t *v, const hf_field_t *f, int width, strvec_t *out) {
+    const char *err = v->errors[fidx(f)];
+    char *mark = err ? fg(TUI_TC_ERROR, "!") : answered(v, f) ? fg(TUI_TC_SUCCESS, "\xe2\x9c\x93") : fg(TUI_TC_DIM, "\xe2\x97\x8b");
+    int inner = MAX(1, width - (int)strlen(FOLD_INDENT));
+    char *q = sanitize(f->question && *f->question ? f->question : f->name), *qs = fg(TUI_TC_TEXT, q);
+    strvec_t wrapped = {0};
+    tui_wrap_text_with_ansi(qs, inner, &wrapped);
+    for (size_t i = 0; i < wrapped.n; i++) strvec_push_own(out, i ? xasprintf(FOLD_INDENT "%s", wrapped.v[i]) : xasprintf("%s %s", mark, wrapped.v[i]));
+    strvec_free(&wrapped);
+    summary_t sum;
+    fold_summary(v, f, &sum);
+    char *line = summary_line(&sum);
+    if (*line) {
+        char *t = tui_truncate_to_width(line, inner, NULL);
+        strvec_push_own(out, xasprintf(FOLD_INDENT "%s", t));
+        free(t);
+    }
+    if (err) {
+        char *e = fg(TUI_TC_ERROR, err);
+        strvec_t ew = {0};
+        tui_wrap_text_with_ansi(e, inner, &ew);
+        for (size_t i = 0; i < ew.n; i++) strvec_push_own(out, xasprintf(FOLD_INDENT "%s", ew.v[i]));
+        strvec_free(&ew);
+        free(e);
+    }
+    free(line);
+    summary_free(&sum);
+    free(qs);
+    free(q);
+    free(mark);
+}
+
+/* ---------- question groups (buildGroups) ---------- */
+
+/* Question groups: one per `<fieldset>` holding fields, and one per field of loose content between fieldsets, each
+ * with the context before it. Sections of context alone before the first group are the intro, shown above every
+ * group; later ones join the next group, or the last one when nothing follows. */
+static void build_groups(fd_t *v) {
+    parts_t lead = {0};
+    const hf_form_t *form = v->form;
+    for (size_t si = 0; si < form->sections.n; si++) {
+        const hf_section_t *sec = &form->sections.v[si];
+        size_t end = sec->blocks.n;
+        bool any = false;
+        for (size_t bi = 0; bi < end && !any; bi++) any = sec->blocks.v[bi].kind == HF_B_FIELD;
+        if (!any) {
+            part_t p = {si, 0, end};
+            vec_push(v->groups.n ? &lead : &v->intro, p);
+            continue;
+        }
+        /* where each question of this section ends: after each loose field, the last one at the section's end. A
+         * group's question also keeps the text between its options, unless its options straddle the next field: then
+         * that field keeps the context before it. A field the keyboard cannot reach is no question of its own */
+        VEC(size_t) cuts = {0};
+        if (!sec->fieldset) {
+            for (size_t bi = 0; bi < end; bi++) {
+                const hf_block_t *blk = &sec->blocks.v[bi];
+                if (blk->kind != HF_B_FIELD || !reachable(blk->field)) continue;
+                size_t through = MAX(bi + 1, blk->options_end);
+                size_t next = end;
+                for (size_t k = bi + 1; k < end; k++)
+                    if (sec->blocks.v[k].kind == HF_B_FIELD) {
+                        next = k;
+                        break;
+                    }
+                size_t cut = through <= next ? through : bi + 1;
+                vec_push(&cuts, cut);
+            }
+        }
+        if (!cuts.n) vec_push(&cuts, end);
+        else cuts.v[cuts.n - 1] = end;
+        size_t start = 0;
+        for (size_t c = 0; c < cuts.n; c++) {
+            group_t g = {0};
+            for (size_t i = 0; i < lead.n; i++) vec_push(&g.parts, lead.v[i]);
+            lead.n = 0;
+            part_t p = {si, start, cuts.v[c]};
+            vec_push(&g.parts, p);
+            for (size_t bi = start; bi < cuts.v[c]; bi++)
+                if (sec->blocks.v[bi].kind == HF_B_FIELD) vec_push(&g.fields, sec->blocks.v[bi].field);
+            vec_push(&v->groups, g);
+            start = cuts.v[c];
+        }
+        free(cuts.v);
+    }
+    if (v->groups.n)
+        for (size_t i = 0; i < lead.n; i++) vec_push(&v->groups.v[v->groups.n - 1].parts, lead.v[i]);
+    free(lead.v);
+    v->field_group = xcalloc(form->fields.n + 1, sizeof *v->field_group);
+    for (size_t g = 0; g < v->groups.n; g++)
+        for (size_t i = 0; i < v->groups.v[g].fields.n; i++) v->field_group[fidx(v->groups.v[g].fields.v[i])] = (int)g;
+}
+
+/* ---------- layout ---------- */
+
+/* a picture's rows in the column, drawn again only while the body shows it whole */
+typedef struct {
+    int start, end;
+    const hf_block_t *blk;
+} placed_t;
+
+/* the stacked column at one width, and where focus, the open question and the overlays sit in it */
+typedef struct {
+    int width;
+    strvec_t lines;
+    int focus_start, focus_end; /* rows [start, end) of the focused stop */
+    int head;                   /* first row of the open question: 0 for the first, Submit's row on Submit */
     bool has_dropdown;
-    size_t dd_atom;
-    int dd_row;
+    int dd_top, dd_row;         /* the open dropdown's field's first row and its value row */
+    int note_row;               /* last row of the option whose note is open (-1: none) */
+    VEC(placed_t) pictures;
 } layout_t;
 
 static void layout_free(layout_t *l) {
-    hf_atoms_free(&l->atoms);
-    free(l->stop_atoms.v);
+    strvec_free(&l->lines);
+    free(l->pictures.v);
 }
 
-static void build_layout(fd_t *v, int width, layout_t *L) {
-    memset(L, 0, sizeof *L);
-    int stop = 0;
-    int focused_stop = v->base.focused ? v->focus : -1;
-    for (size_t si = 0; si < v->form->sections.n; si++) {
-        const hf_section_t *sec = &v->form->sections.v[si];
-        char *tt = hf_spans_text(&sec->title), *title = sanitize_line(tt);
-        free(tt);
-        int gap = si == 0 ? 0 : 1, rank = HF_BREAK_SECTION;
-        if (*title) {
-            strvec_t lines = {0};
-            hang("", &sec->title, (base_t){TUI_TC_TEXT, true}, width, &lines);
-            push_atom(&L->atoms, lines, gap, rank);
-            gap = 0;
-            rank = HF_BREAK_NEVER;
+/* pushes `rows` a blank row under the rows before them (none when `tight`); returns their first row. Takes the rows */
+static int emit(layout_t *L, strvec_t *rows, bool tight) {
+    if (L->lines.n && !tight) strvec_push(&L->lines, "");
+    int start = (int)L->lines.n;
+    for (size_t i = 0; i < rows->n; i++) {
+        strvec_push_own(&L->lines, rows->v[i]);
+        rows->v[i] = NULL;
+    }
+    free(rows->v);
+    memset(rows, 0, sizeof *rows);
+    return start;
+}
+
+/* #isFoldCaption: `blocks[at]` is the caption of a folded field right after it, which shows it as its question */
+static bool is_fold_caption(const hf_section_t *sec, size_t at, const hf_field_t *focused) {
+    if (at + 1 >= sec->blocks.n) return false;
+    const hf_block_t *blk = &sec->blocks.v[at], *next = &sec->blocks.v[at + 1];
+    if (blk->kind != HF_B_TEXT || next->kind != HF_B_FIELD || next->field == focused) return false;
+    char *t = hf_spans_text(&blk->spans), *one = hf_one_line(t);
+    bool r = str_eq(next->field->question ? next->field->question : "", one);
+    free(t);
+    free(one);
+    return r;
+}
+
+static int first_stop_of(const fd_t *v, const hf_field_t *f) {
+    for (size_t i = 0; i < v->stops.n; i++)
+        if (v->stops.v[i].kind != STOP_SUBMIT && v->stops.v[i].field == f) return (int)i;
+    return -1;
+}
+
+static void emit_parts(fd_t *v, layout_t *L, const parts_t *parts, int focus, int highlight, int width) {
+    const hf_field_t *focus_field = field_of_stop(v, focus);
+    for (size_t pi = 0; pi < parts->n; pi++) {
+        const part_t *p = &parts->v[pi];
+        const hf_section_t *sec = &v->form->sections.v[p->section];
+        /* a title keeps the block after it under it; a short text block right before a field, that field */
+        enum { KEEP_NONE, KEEP_TITLE, KEEP_CAPTION } keep = KEEP_NONE;
+        if (p->start == 0 && sec->title.n) {
+            strvec_t rows = {0};
+            hang("", &sec->title, (base_t){TUI_TC_TEXT, true}, width, &rows);
+            emit(L, &rows, false);
+            keep = KEEP_TITLE;
         }
-        bool have_caption = false;
-        size_t cap_start = 0, cap_end = 0;
-        for (size_t bi = 0; bi < sec->blocks.n; bi++) {
-            const hf_block_t *blk = &sec->blocks.v[bi];
-            hf_atoms_t ba = {0};
-            boolvec_t stops = {0};
-            if (blk->kind == HF_B_FIELD) {
-                /* models ask a group's question in a <p> right before it: keep the two as one unit */
-                if (have_caption && cap_end - cap_start <= CAPTION_MAX_ROWS) {
-                    for (size_t i = cap_start + 1; i < cap_end; i++) L->atoms.v[i].break_rank = HF_BREAK_NEVER;
-                    gap = 0;
-                    rank = HF_BREAK_NEVER;
+        for (size_t at = p->start; at < p->end; at++) {
+            const hf_block_t *blk = &sec->blocks.v[at];
+            if (blk->kind != HF_B_FIELD) {
+                if (is_fold_caption(sec, at, focus_field)) continue;
+                strvec_t rows = {0};
+                bool picture;
+                context_rows(v, blk, width, &rows, &picture);
+                int n = (int)rows.n;
+                int top = emit(L, &rows, keep == KEEP_TITLE);
+                if (picture) {
+                    placed_t pl = {top, top + n, blk};
+                    vec_push(&L->pictures, pl);
                 }
-                hf_field_t *f = blk->field;
-                field_atoms(v, f, width, focused_stop, stop, &ba, &stops);
-                for (size_t i = 0; i < ba.n; i++)
-                    if (stops.v[i]) {
-                        size_t at = L->atoms.n + i;
-                        vec_push(&L->stop_atoms, at);
-                        stop++;
-                    }
-                if (f->kind == HF_CHOICE && v->open == f) {
-                    L->has_dropdown = true;
-                    L->dd_atom = L->atoms.n;
-                    L->dd_row = f->label.n ? (int)ba.v[0].lines.n - 1 : 0;
-                }
-            } else context_atoms(v, blk, width, &ba);
-            free(stops.v);
-            if (!ba.n) {
-                free(ba.v);
+                keep = blk->kind == HF_B_TEXT && n <= CAPTION_MAX_ROWS ? KEEP_CAPTION : KEEP_NONE;
                 continue;
             }
-            ba.v[0].gap = gap;
-            ba.v[0].break_rank = rank;
-            /* no orphans or widows: a split block keeps at least two atoms on each page */
-            if (ba.n > 1) {
-                ba.v[1].break_rank = HF_BREAK_NEVER;
-                ba.v[ba.n - 1].break_rank = HF_BREAK_NEVER;
+            hf_field_t *f = blk->field;
+            bool tight = keep != KEEP_NONE;
+            keep = KEEP_NONE;
+            if (f != focus_field) {
+                strvec_t rows = {0};
+                folded_rows(v, f, width, &rows);
+                emit(L, &rows, tight);
+                continue;
             }
-            have_caption = blk->kind == HF_B_TEXT;
-            cap_start = L->atoms.n;
-            cap_end = L->atoms.n + ba.n;
-            for (size_t i = 0; i < ba.n; i++) {
-                if (*title) ba.v[i].continuation = xstrdup(title);
-                vec_push(&L->atoms, ba.v[i]);
+            int first = first_stop_of(v, f);
+            runs_t runs = {0};
+            field_runs(v, f, width, highlight, first, &runs);
+            strvec_t all = {0};
+            for (size_t r = 0; r < runs.n; r++)
+                for (size_t k = 0; k < runs.v[r].lines.n; k++) strvec_push(&all, runs.v[r].lines.v[k]);
+            int top = emit(L, &all, tight);
+            int row = top, stop = first;
+            for (size_t r = 0; r < runs.n; r++) {
+                if (runs.v[r].stop && stop++ == focus) {
+                    L->focus_start = row;
+                    L->focus_end = row + (int)runs.v[r].lines.n;
+                }
+                row += (int)runs.v[r].lines.n;
             }
-            free(ba.v);
-            gap = 1;
-            rank = HF_BREAK_BLOCK;
+            if (f->kind == HF_CHOICE && v->open == f) {
+                int err_rows = v->errors[fidx(f)] ? 1 : 0;
+                L->has_dropdown = true;
+                L->dd_top = top;
+                L->dd_row = top + (int)runs.v[0].lines.n - 1 - err_rows; /* the value row, above the error */
+            }
+            if (v->note_ed && v->note_field == f) L->note_row = L->focus_end - 1;
+            runs_free(&runs);
         }
-        free(title);
     }
-    bool submit_focused = focused_stop == (int)v->stops.n - 1;
+}
+
+/* #layout: the stacked column at `width`, stop `focus` holding focus and stop `highlight` drawn focused (-1: none):
+ * the intro, then each question group (the one holding focus open: its context, its focused field's controls and its
+ * other fields folded; the rest folded field by field), then the Submit row */
+static void build_layout(fd_t *v, int width, int focus, int highlight, layout_t *L) {
+    memset(L, 0, sizeof *L);
+    L->width = width;
+    L->note_row = -1;
+    const hf_field_t *focus_field = field_of_stop(v, focus);
+    int open = group_of_stop(v, focus);
+    emit_parts(v, L, &v->intro, focus, highlight, width);
+    for (size_t g = 0; g < v->groups.n; g++) {
+        const group_t *grp = &v->groups.v[g];
+        if ((int)g != open) {
+            for (size_t i = 0; i < grp->fields.n; i++) {
+                strvec_t rows = {0};
+                folded_rows(v, grp->fields.v[i], width, &rows);
+                emit(L, &rows, false);
+            }
+            continue;
+        }
+        int before = (int)L->lines.n;
+        emit_parts(v, L, &grp->parts, focus, highlight, width);
+        L->head = g == 0 || before == 0 ? 0 : before + 1; /* the first group's head is the intro's too */
+    }
     char *sub;
-    if (submit_focused) {
+    if (highlight == (int)v->stops.n - 1) {
         char *t = xasprintf("%s %s", tui_sym("nav.cursor"), SUBMIT_LABEL), *b = tui_bold(t);
         sub = fg(TUI_TC_ACCENT, b);
         free(t);
         free(b);
     } else sub = fg(TUI_TC_MUTED, "  " SUBMIT_LABEL);
-    char *pending = NULL;
+    char *pending;
     if (v->nerrors) {
         char *t = xasprintf("  %zu to fix", v->nerrors);
         pending = fg(TUI_TC_ERROR, t);
         free(t);
     } else pending = xstrdup("");
-    vec_push(&L->stop_atoms, L->atoms.n);
-    strvec_t lines = {0};
-    strvec_push_own(&lines, xasprintf("%s%s", sub, pending));
-    push_atom(&L->atoms, lines, 1, HF_BREAK_BLOCK);
+    strvec_t rows = {0};
+    strvec_push_own(&rows, xasprintf("%s%s", sub, pending));
+    int submit_row = emit(L, &rows, false);
+    if (!focus_field) {
+        L->focus_start = submit_row;
+        L->focus_end = submit_row + 1;
+        L->head = submit_row;
+    }
     free(sub);
     free(pending);
 }
 
-/* body rows: the whole form's natural height, capped by the terminal; fixed per width, height, error count and
- * media version, so moving focus or typing never resizes the panel */
-static int body_rows(fd_t *v, int width, const hf_atoms_t *atoms) {
+/* #bodyRows: the column's natural height (the tallest it gets with any one question open, or with Submit focused),
+ * capped by the terminal. Fixed per width, terminal height, pictures and errors, so moving focus or typing never
+ * resizes the panel; only a failed submit (new error rows) may */
+static int body_rows(fd_t *v, int width) {
     int trows = term_rows(v);
-    char key[96];
-    snprintf(key, sizeof key, "%d:%d:%zu:%d", width, trows, v->nerrors, v->media_version);
-    if (!strcmp(key, v->height_key)) return v->height_rows;
-    int cap = MAX(MIN_BODY_ROWS, (int)floor(trows * DIALOG_HEIGHT_RATIO) - CHROME_ROWS);
-    int rows = MIN(cap, MAX(1, hf_page_height(atoms, 0, atoms->n)));
-    snprintf(v->height_key, sizeof v->height_key, "%s", key);
+    sb_t key = SB_INIT;
+    sb_appendf(&key, "%d:%d:%d:", width, trows, v->media_version);
+    for (size_t i = 0; i < v->form->fields.n; i++)
+        if (v->errors[i]) sb_appendf(&key, "%zu=%s%c", i, v->errors[i], 1);
+    if (v->height_key && !strcmp(v->height_key, sb_cstr(&key))) {
+        sb_free(&key);
+        return v->height_rows;
+    }
+    /* the panel leaves the composer and status their reserved rows, but keeps a usable body on a tiny terminal */
+    int panel = MIN((int)floor(trows * DIALOG_HEIGHT_RATIO), trows - ASK_RESERVED_ROWS);
+    int cap = MAX(MIN_BODY_ROWS, panel - CHROME_ROWS);
+    int rows = 1;
+    /* a field opens alike whichever of its stops holds focus, so its first stop measures it */
+    for (int s = 0; s < (int)v->stops.n && rows < cap; s++) {
+        if (s > 0 && field_of_stop(v, s - 1) == field_of_stop(v, s)) continue;
+        layout_t L;
+        build_layout(v, width, s, -1, &L);
+        rows = MAX(rows, (int)L.lines.n);
+        layout_free(&L);
+    }
+    rows = MIN(cap, rows);
+    free(v->height_key);
+    v->height_key = sb_detach(&key);
     v->height_rows = rows;
     return rows;
 }
@@ -1736,13 +2153,12 @@ static void dropdown_box(fd_t *v, int width, int max_rows, strvec_t *out) {
                 char *tag = note_tag(v, f, i, &tw);
                 char *lab = trunc_to(labels.v[i], MAX(1, inner - 4 - tw));
                 char *cl0 = xasprintf("%s%s", c, lab), *cs0 = fg(color, cl0), *cs = xasprintf("%s%s", cs0, tag ? tag : "");
-                char *cl = cl0;
                 free(cs0), free(tag);
                 char *padding = pad(inner - 3 - tui_visible_width(lab) - tw);
                 char *lv = xasprintf("%s ", tui_sym("boxRound.vertical")), *rv = xasprintf(" %s", tui_sym("boxRound.vertical"));
                 char *ls = fg(TUI_TC_ACCENT, lv), *rs = fg(TUI_TC_ACCENT, rv);
                 strvec_push_own(out, xasprintf("%s%s%s%s%s", ls, cs, padding, mark, rs));
-                free(c), free(mark), free(lab), free(cl), free(cs), free(padding), free(lv), free(rv), free(ls), free(rs);
+                free(c), free(mark), free(lab), free(cl0), free(cs), free(padding), free(lv), free(rv), free(ls), free(rs);
             }
         }
         bool top = edge == 0;
@@ -1761,36 +2177,188 @@ static void dropdown_box(fd_t *v, int width, int max_rows, strvec_t *out) {
     strvec_free(&labels);
 }
 
-static void render_page(fd_t *v, const layout_t *L, hf_page_t page, int rows, int width, strvec_t *out) {
-    strvec_t lines = {0};
-    const hf_atoms_t *a = &L->atoms;
-    if (page.start < a->n && a->v[page.start].continuation) {
-        char *t = xasprintf("%s (cont.)", a->v[page.start].continuation), *tr = trunc_to(t, width);
-        strvec_push_own(&lines, fg(TUI_TC_DIM, tr));
+/* cuts(at): pictures straddling an edge of a body `rows` tall starting at `at` */
+static int picture_cuts(const layout_t *L, int at, int rows) {
+    int n = 0;
+    for (size_t i = 0; i < L->pictures.n; i++) {
+        const placed_t *p = &L->pictures.v[i];
+        if ((p->start < at && at < p->end) || (p->start < at + rows && at + rows < p->end)) n++;
+    }
+    return n;
+}
+
+/* clearPictureEdges: `offset` moved so fewer pictures straddle an edge (a picture draws only whole; a cut one draws as
+ * a frame): among the offsets that put a picture's top or bottom on an edge, the one cutting the fewest, nearest
+ * `offset`, that keeps rows [keep_start, keep_end) in view (keep_start < 0: none) and stays at or above `limit` */
+static int clear_picture_edges(const layout_t *L, int offset, int rows, int max, int keep_start, int keep_end, int limit) {
+    int own = picture_cuts(L, offset, rows), best = offset, fewest = own;
+    for (size_t i = 0; i < L->pictures.n; i++) {
+        const placed_t *p = &L->pictures.v[i];
+        int cands[4] = {p->start, p->end, p->end - rows, p->start - rows};
+        for (int c = 0; c < 4; c++) {
+            int at = cands[c];
+            if (own == 0 || at < 0 || at > MIN(max, limit)) continue;
+            if (keep_start >= 0 && (keep_start < at || (keep_end > at + rows && keep_start != at))) continue;
+            int count = picture_cuts(L, at, rows);
+            bool nearer = abs(at - offset) < abs(best - offset);
+            if (count < fewest || (count == fewest && fewest < own && nearer)) {
+                best = at;
+                fewest = count;
+            }
+        }
+    }
+    return best;
+}
+
+/* cutPictureRows: a dim frame naming a picture the body cuts off over its `visible` rows, open on each cut side */
+static void cut_picture_rows(const char *alt, int visible, int width, bool cut_top, bool cut_bottom, strvec_t *out) {
+    char *name = xasprintf("\xe2\x96\xa3 %s", alt);
+    if (visible <= 1) {
+        char *t = trunc_to(name, width);
+        strvec_push_own(out, fg(TUI_TC_DIM, t));
         free(t);
+        free(name);
+        return;
+    }
+    int inner = MAX(0, width - 3); /* a column short of the body so the frame doesn't run into the scrollbar */
+    char *lt = cut_top ? xasprintf(" %s", name) : xasprintf("\xe2\x94\x80 %s ", name);
+    char *label = trunc_to(lt, inner);
+    int lw = tui_visible_width(label);
+    sb_t row = SB_INIT;
+    if (cut_top) {
+        sb_appendf(&row, "\xe2\x94\x82%s", label);
+        tui_sb_spaces(&row, MAX(0, inner - lw));
+        sb_append(&row, "\xe2\x94\x82");
+    } else {
+        sb_appendf(&row, "\xe2\x95\xad%s", label);
+        sb_repeat(&row, "\xe2\x94\x80", MAX(0, inner - lw));
+        sb_append(&row, "\xe2\x95\xae");
+    }
+    strvec_push_own(out, fg(TUI_TC_DIM, sb_cstr(&row)));
+    sb_free(&row);
+    for (int r = 1; r < visible - 1; r++) {
+        sb_t m = SB_INIT;
+        sb_append(&m, "\xe2\x94\x82");
+        tui_sb_spaces(&m, inner);
+        sb_append(&m, "\xe2\x94\x82");
+        strvec_push_own(out, fg(TUI_TC_DIM, sb_cstr(&m)));
+        sb_free(&m);
+    }
+    sb_t last = SB_INIT;
+    if (cut_bottom) {
+        sb_append(&last, "\xe2\x94\x82");
+        tui_sb_spaces(&last, inner);
+        sb_append(&last, "\xe2\x94\x82");
+    } else {
+        sb_append(&last, "\xe2\x95\xb0");
+        sb_repeat(&last, "\xe2\x94\x80", inner);
+        sb_append(&last, "\xe2\x95\xaf");
+    }
+    strvec_push_own(out, fg(TUI_TC_DIM, sb_cstr(&last)));
+    sb_free(&last);
+    free(label);
+    free(lt);
+    free(name);
+}
+
+/* mediaName: what a picture stands for in text: its alt, else its source or `drawing` */
+static char *media_name(const hf_block_t *blk) {
+    if (blk->alt && *blk->alt) return sanitize(blk->alt);
+    if (blk->kind == HF_B_IMAGE) {
+        char *s = xstrndup(blk->src, 80), *r = sanitize(s);
+        free(s);
+        return r;
+    }
+    return xstrdup("drawing");
+}
+
+/* ScrollView (scrollbar "auto") over an already-windowed slice: `shown` is the body's `height` rows from `offset` of
+ * `total` logical rows */
+static void scroll_window(const strvec_t *shown, int height, int offset, int total, int width, strvec_t *out) {
+    bool bar = total > height && width > 1;
+    int cw = MAX(0, width - (bar ? 1 : 0));
+    int ts = 0, te = height;
+    if (bar) {
+        int size = MAX(1, MIN((height * height) / total, height));
+        int maxoff = MAX(0, total - height);
+        int off = MAX(0, MIN(offset, maxoff));
+        ts = maxoff ? (int)lround((double)off / maxoff * (height - size)) : 0;
+        te = ts + size;
+    }
+    for (int row = 0; row < height; row++) {
+        const char *src = row < (int)shown->n ? shown->v[row] : "";
+        char *rt = tui_replace_tabs(src), *tr = trunc_to(rt, cw);
+        free(rt);
+        if (!bar) {
+            strvec_push_own(out, tr);
+            continue;
+        }
+        char *padded = tui_pad_to_width(tr, cw);
+        bool thumb = row >= ts && row < te;
+        char *g = fg(thumb ? TUI_TC_ACCENT : TUI_TC_MUTED, thumb ? "\xe2\x96\x88" : "\xe2\x94\x82");
+        strvec_push_own(out, xasprintf("%s%s", padded, g));
+        free(g);
+        free(padded);
         free(tr);
     }
-    bool anchored = false;
-    int anchor_top = 0, anchor_row = 0, note_row = -1;
-    size_t focus_atom = (size_t)v->focus < v->stop_atoms.n ? v->stop_atoms.v[v->focus] : (size_t)-1;
-    for (size_t i = page.start; i < page.end; i++) {
-        if (i > page.start)
-            for (int g = 0; g < a->v[i].gap; g++) strvec_push(&lines, "");
-        if (L->has_dropdown && L->dd_atom == i) {
-            anchored = true;
-            anchor_top = (int)lines.n;
-            anchor_row = (int)lines.n + L->dd_row;
-        }
-        if (v->note_ed && i == focus_atom) note_row = (int)(lines.n + a->v[i].lines.n) - 1;
-        for (size_t k = 0; k < a->v[i].lines.n; k++) strvec_push(&lines, a->v[i].lines.v[k]);
+}
+
+/* #renderBody: `rows` rows of the column from the scroll offset, the shown pictures drawn, the open note editor or
+ * dropdown over them, and a scrollbar while the column overflows. The offset moves as little as keeps the focused
+ * stop's rows in view (its top when it is taller than the body), then up to the open question's head when that fits
+ * along, then to the nearest offset that cuts fewer pictures. While ↑ peeks at a cut-off head it keeps the peeked
+ * offset, or one above where the body was that cuts fewer. An open note keeps rows under its option for the editor */
+static void render_body(fd_t *v, const layout_t *L, int rows, int width, strvec_t *out) {
+    int nlines = (int)L->lines.n;
+    int max = MAX(0, nlines - rows);
+    int offset = MIN(v->scroll, max);
+    if (!v->peek) {
+        if (L->focus_start < offset || L->focus_end - L->focus_start >= rows) offset = L->focus_start;
+        else if (L->focus_end > offset + rows) offset = L->focus_end - rows;
+        if (L->head < offset && L->focus_end - L->head <= rows) offset = L->head;
+        offset = MIN(offset, max);
     }
-    /* like the dropdown, the note editor covers the rows under its option rather than repaginating */
-    if (v->note_ed && note_row >= 0) {
-        int inner = MAX(1, width - FIELD_INDENT);
-        int start = MAX(0, note_row - MAX(0, rows - 3));
-        strvec_t shown = {0};
-        for (int i = start; i < (int)lines.n && i < start + rows; i++) strvec_push(&shown, lines.v[i]);
-        int top = note_row - start + 1;
+    /* like the dropdown, the note editor covers the rows under its option rather than pushing them */
+    int note_row = v->note_ed ? L->note_row : -1;
+    if (note_row >= 0) offset = MAX(offset, note_row - MAX(0, rows - 3));
+    else {
+        /* ↑ peeking toward the head moves the body up at least a row, never back down */
+        int limit = v->peek ? MAX(offset, (v->view.valid ? v->view.offset : offset) - 1) : max;
+        offset = clear_picture_edges(L, offset, rows, max, v->peek ? -1 : L->focus_start, L->focus_end, limit);
+    }
+    v->scroll = offset;
+    v->view.valid = true;
+    v->view.focus = v->focus;
+    v->view.offset = offset;
+    v->view.rows = rows;
+    v->view.head = L->head;
+    strvec_t shown = {0};
+    for (int i = offset; i < offset + rows; i++) strvec_push(&shown, i < nlines ? L->lines.v[i] : "");
+    for (size_t pi = 0; pi < L->pictures.n; pi++) {
+        const placed_t *p = &L->pictures.v[pi];
+        int top = p->start - offset, bottom = p->end - offset;
+        if (bottom <= 0 || top >= rows) continue;
+        /* drawn only whole, so only shown pictures take image slots and none draws past the body's edge; a cut one is
+         * a frame naming it */
+        int from = MAX(0, top), to = MIN(rows, bottom);
+        strvec_t drawn = {0};
+        if (top >= 0 && bottom <= rows) {
+            media_t *m = media_of(v, p->blk);
+            if (m) media_rows(v, p->blk, m, L->width, &drawn);
+        } else {
+            char *alt = media_name(p->blk);
+            cut_picture_rows(alt, to - from, L->width, top < 0, bottom > rows, &drawn);
+            free(alt);
+        }
+        for (int r = from; r < to; r++) {
+            free(shown.v[r]);
+            shown.v[r] = xstrdup(r - from < (int)drawn.n ? drawn.v[r - from] : "");
+        }
+        strvec_free(&drawn);
+    }
+    if (note_row >= 0) {
+        int inner = MAX(1, L->width - FIELD_INDENT);
+        int top = note_row - offset + 1;
         v->note_ed->max_height = MAX(1, MIN(4, rows - top - 1));
         char *ot = option_text(&v->note_field->opts.v[v->note_option]), *hint = note_hint(v);
         char *ht = xasprintf("Note for %s \xc2\xb7 %s", ot, hint), *htr = trunc_to(ht, inner);
@@ -1801,54 +2369,47 @@ static void render_page(fd_t *v, const layout_t *L, hf_page_t page, int rows, in
         v->note_ed->base.tui = v->base.tui;
         tui_component_render(&v->note_ed->base, inner, &editing);
         char *ind = pad(FIELD_INDENT);
-        /* splice(top, editing.length, ...editing) */
-        strvec_t out2 = {0};
-        for (int i = 0; i < top && i < (int)shown.n; i++) strvec_push(&out2, shown.v[i]);
-        for (size_t i = 0; i < editing.n; i++) strvec_push_own(&out2, xasprintf("%s%s", ind, editing.v[i]));
-        for (int i = top + (int)editing.n; i < (int)shown.n; i++) strvec_push(&out2, shown.v[i]);
+        /* shown.splice(top, editing.length, ...editing) */
+        strvec_t spliced = {0};
+        for (int i = 0; i < top && i < (int)shown.n; i++) strvec_push(&spliced, shown.v[i]);
+        for (size_t i = 0; i < editing.n; i++) strvec_push_own(&spliced, xasprintf("%s%s", ind, editing.v[i]));
+        for (int i = top + (int)editing.n; i < (int)shown.n; i++) strvec_push(&spliced, shown.v[i]);
         free(ind);
-        for (size_t i = 0; i < out2.n && (int)i < rows; i++) strvec_push(out, out2.v[i]);
-        strvec_free(&out2);
         strvec_free(&editing);
         strvec_free(&shown);
-        strvec_free(&lines);
-        return;
-    }
-    while ((int)lines.n > rows) free(lines.v[--lines.n]);
-    if (anchored && v->open && anchor_row < rows) {
-        int below = rows - anchor_row - 1, above = anchor_top;
-        int wanted = (int)v->open->opts.n + 2;
-        bool place_below = below >= MIN(wanted, 5) || below >= above;
-        strvec_t box = {0};
-        dropdown_box(v, width, place_below ? below : above, &box);
-        if (box.n) {
-            int start = place_below ? anchor_row + 1 : anchor_top - (int)box.n;
-            while ((int)lines.n < start + (int)box.n) strvec_push(&lines, "");
-            char *ind = pad(FIELD_INDENT - 2);
-            for (size_t i = 0; i < box.n; i++) {
-                free(lines.v[start + i]);
-                lines.v[start + i] = xasprintf("%s%s", ind, box.v[i]);
+        shown = spliced;
+    } else if (L->has_dropdown && v->open) {
+        int row = L->dd_row - offset, top = MAX(0, L->dd_top - offset);
+        if (row >= 0 && row < rows) {
+            /* #overlayDropdown: below its value row, or above its field when there is more room there */
+            int below = rows - row - 1, above = top;
+            int wanted = (int)v->open->opts.n + 2;
+            bool place_below = below >= MIN(wanted, 5) || below >= above;
+            strvec_t box = {0};
+            dropdown_box(v, L->width, place_below ? below : above, &box);
+            if (box.n) {
+                int start = place_below ? row + 1 : top - (int)box.n;
+                while ((int)shown.n < start + (int)box.n) strvec_push(&shown, "");
+                char *ind = pad(FIELD_INDENT - 2);
+                for (size_t i = 0; i < box.n; i++) {
+                    free(shown.v[start + i]);
+                    shown.v[start + i] = xasprintf("%s%s", ind, box.v[i]);
+                }
+                free(ind);
             }
-            free(ind);
+            strvec_free(&box);
         }
-        strvec_free(&box);
     }
-    for (size_t i = 0; i < lines.n; i++) strvec_push(out, lines.v[i]);
-    strvec_free(&lines);
+    scroll_window(&shown, rows, offset, MAX(nlines, offset + rows), width, out);
+    strvec_free(&shown);
 }
 
-static char *footer_text(fd_t *v) {
+/* #keyHintText: the focused stop's keys, moving, Esc to the composer, hiding and jumping questions; the open note's or
+ * dropdown's keys while one is open */
+static char *key_hint_text(fd_t *v) {
     if (v->note_ed) return note_hint(v);
     char *hide = ui_editor_key("app.ask.hide"), *esc = ui_editor_key("tui.select.cancel");
-    char *cancel = *hide ? xasprintf("%s cancel \xc2\xb7 %s hide", esc, hide) : xasprintf("%s cancel", esc);
-    char *r;
-    if (guard_blocks(v)) {
-        char *g = guard_hint();
-        r = xasprintf("%s \xc2\xb7 %s", g, cancel);
-        free(g);
-        free(hide), free(esc), free(cancel);
-        return r;
-    }
+    char *composer = *hide ? xasprintf("%s composer \xc2\xb7 %s hide", esc, hide) : xasprintf("%s composer", esc);
     char *enter = ui_key_hint("enter"), *updown = editor_keys2("tui.select.up", "tui.select.down");
     const stop_t *s = &v->stops.v[v->focus];
     strvec_t nk = note_keys(s->kind == STOP_SELECT);
@@ -1856,14 +2417,15 @@ static char *footer_text(fd_t *v) {
     char *note = nkh ? xasprintf(" \xc2\xb7 %s note", nkh) : xstrdup("");
     free(nkh);
     strvec_free(&nk);
+    char *r;
     if (v->open) {
         r = xasprintf("%s highlight \xc2\xb7 %s choose%s \xc2\xb7 %s close", updown, enter, note, esc);
-        free(hide), free(esc), free(cancel), free(enter), free(updown), free(note);
+        free(hide), free(esc), free(composer), free(enter), free(updown), free(note);
         return r;
     }
     char *space = ui_key_hint("space"), *left = ui_key_hint("left"), *right = ui_key_hint("right"), *tab = ui_key_hint("tab");
-    char *action;
     const char *next = v->sole ? "submit" : "next";
+    char *action;
     if (s->kind == STOP_SUBMIT) action = xasprintf("%s submit", enter);
     else if (s->kind == STOP_TEXT) action = xasprintf("%s %s", enter, next);
     else if (s->kind == STOP_OTHER) action = xasprintf("type your own \xc2\xb7 %s %s", enter, next);
@@ -1871,26 +2433,24 @@ static char *footer_text(fd_t *v) {
         action = xasprintf("%s open \xc2\xb7 %s/%s change \xc2\xb7 %s %s", space, left, right, enter, next);
     else if (s->field->multi) action = xasprintf("%s toggle \xc2\xb7 %s %s", space, enter, next);
     else action = xasprintf("%s %s", enter, v->sole ? "submit" : "choose");
-    if (s->kind == STOP_OPTION || s->kind == STOP_SELECT) {
-        char *a2 = xasprintf("%s%s", action, note);
-        free(action);
-        action = a2;
-    }
-    free(note);
     sb_t b = SB_INIT;
-    sb_appendf(&b, "%s \xc2\xb7 %s move \xc2\xb7 %s next field \xc2\xb7 %s", action, updown, tab, cancel);
-    if (v->pages.n > 1) {
+    sb_append(&b, action);
+    if (s->kind == STOP_OPTION || s->kind == STOP_SELECT) sb_append(&b, note);
+    sb_appendf(&b, " \xc2\xb7 %s move", updown);
+    if (s->kind != STOP_SUBMIT) sb_appendf(&b, " \xc2\xb7 %s next field", tab);
+    sb_appendf(&b, " \xc2\xb7 %s", composer);
+    if (v->groups.n > 1) {
         char *keys = s->kind == STOP_TEXT || s->kind == STOP_SELECT ? editor_keys2("tui.select.pageUp", "tui.select.pageDown")
                                                                      : xasprintf("%s/%s", left, right);
-        sb_appendf(&b, " \xc2\xb7 %s page", keys);
+        sb_appendf(&b, " \xc2\xb7 %s question", keys);
         free(keys);
     }
-    free(action), free(space), free(left), free(right), free(tab);
-    free(hide), free(esc), free(cancel), free(enter), free(updown);
+    free(action), free(space), free(left), free(right), free(tab), free(note);
+    free(hide), free(esc), free(composer), free(enter), free(updown);
     return sb_detach(&b);
 }
 
-/* the question in focus (else the first) for the hidden row, with how many more there are */
+/* #hiddenSummary: the question in focus (else the first) for the hidden row, with how many more there are */
 static char *hidden_summary(fd_t *v) {
     const stop_t *s = &v->stops.v[v->focus];
     const hf_field_t *f = s->kind != STOP_SUBMIT ? s->field : v->form->fields.n ? v->form->fields.v[0] : NULL;
@@ -1902,71 +2462,63 @@ static char *hidden_summary(fd_t *v) {
     return r;
 }
 
+/* #renderHidden: one row, the title, the question clipped to fit, and how to bring it back */
 static void render_hidden(fd_t *v, int width, strvec_t *out) {
     char *hide = ui_editor_key("app.ask.hide"), *enter = ui_key_hint("enter"), *esc = ui_editor_key("tui.select.cancel");
-    bool blocked = guard_blocks(v);
-    char *show = blocked ? xstrdup(hide) : *hide ? xasprintf("%s/%s", hide, enter) : xstrdup(enter);
-    sb_t h = SB_INIT;
-    if (blocked) {
-        char *g = guard_hint();
-        sb_appendf(&h, "%s \xc2\xb7 ", g);
-        free(g);
-    }
-    if (*show) sb_appendf(&h, "%s show \xc2\xb7 ", show);
-    sb_appendf(&h, "%s cancel", esc);
-    char *ht = xasprintf(" \xc2\xb7 %s", sb_cstr(&h)), *hint = fg(TUI_TC_DIM, ht);
+    char *show = *hide ? xasprintf("%s/%s", hide, enter) : xstrdup(enter);
+    char *ht = xasprintf(" \xc2\xb7 %s show \xc2\xb7 %s composer", show, esc), *hint = fg(TUI_TC_DIM, ht);
     char *tt = title_text(v), *lt = xasprintf("%s hidden:", tt), *label = fg(TUI_TC_ACCENT, lt);
     int room = MAX(1, width - tui_visible_width(label) - tui_visible_width(hint) - 1);
     char *sum = hidden_summary(v), *clip = trunc_to(sum, room), *cm = fg(TUI_TC_MUTED, clip);
     char *line = xasprintf("%s %s%s", label, cm, hint);
-    strvec_push_own(out, trunc_to(line, width));
+    strvec_push_own(out, tui_truncate_to_width(line, width, NULL));
     free(line), free(cm), free(clip), free(sum), free(label), free(lt), free(tt), free(hint), free(ht);
-    sb_free(&h);
     free(show), free(hide), free(enter), free(esc);
 }
 
 static void fd_render(tui_component_t *c, int width, strvec_t *out) {
     fd_t *v = (fd_t *)c;
-    if (v->o.draft) v->o.draft->base.focused = guard_blocks(v);
-    if (v->hidden) render_hidden(v, width, out);
-    else {
-        int inner = MAX(1, width - 4);
-        layout_t L;
-        build_layout(v, inner, &L);
-        int rows = body_rows(v, inner, &L.atoms);
-        hf_paginate(&L.atoms, rows, &v->pages);
-        v->stop_atoms.n = 0;
-        for (size_t i = 0; i < L.stop_atoms.n; i++) vec_push(&v->stop_atoms, L.stop_atoms.v[i]);
-        size_t fa = (size_t)v->focus < L.stop_atoms.n ? L.stop_atoms.v[v->focus] : 0;
-        int focus_page = page_of_atom(v, fa);
-        if (v->follow) v->page = focus_page;
-        v->page = MIN(v->page, (int)v->pages.n - 1);
-        if (v->page == focus_page) v->follow = true;
-        char *tt = title_text(v), *title;
-        if (v->pages.n > 1) title = xasprintf("%s \xc2\xb7 %d/%zu", tt, v->page + 1, v->pages.n);
-        else title = xstrdup(tt);
-        strvec_t body = {0};
-        render_page(v, &L, v->pages.v[v->page], rows, inner, &body);
-        while ((int)body.n < rows) strvec_push(&body, "");
-        char *ft = footer_text(v), *fs = fg(TUI_TC_DIM, ft);
-        strvec_push_own(out, ui_box_top(width, title));
-        for (size_t i = 0; i < body.n; i++) strvec_push_own(out, ui_box_row(body.v[i], width));
-        strvec_push_own(out, ui_box_divider(width));
-        strvec_push_own(out, ui_box_row(fs, width));
-        strvec_push_own(out, ui_box_bottom(width));
-        free(ft), free(fs), free(title), free(tt);
-        strvec_free(&body);
+    if (v->hidden) {
+        render_hidden(v, width, out);
+        return;
+    }
+    int inner = MAX(1, width - 4);
+    char *skip = v->o.skip_notice ? v->o.skip_notice(v->o.hook_ud) : NULL;
+    /* the notice takes a body row, so the panel keeps its height while it comes and goes */
+    int rows = MAX(1, body_rows(v, inner) - (skip ? 1 : 0));
+    int highlight = v->base.focused ? v->focus : -1;
+    layout_t L;
+    build_layout(v, inner, v->focus, highlight, &L);
+    if ((int)L.lines.n > rows && inner > 1) { /* an overflowing column gives the scrollbar a column */
         layout_free(&L);
+        build_layout(v, inner - 1, v->focus, highlight, &L);
     }
-    if (v->guard && v->o.draft) { /* the guarded draft stays visible beneath the form while typing edits it */
-        tui_component_t *ed = &v->o.draft->base;
-        ed->vt->render(ed, width, out);
+    char *title = title_text(v);
+    strvec_t body = {0};
+    render_body(v, &L, rows, inner, &body);
+    strvec_push_own(out, ui_box_top(width, title));
+    for (size_t i = 0; i < body.n; i++) {
+        char *t = tui_visible_width(body.v[i]) > inner ? tui_truncate_to_width(body.v[i], inner, NULL) : xstrdup(body.v[i]);
+        strvec_push_own(out, ui_box_row(t, width));
+        free(t);
     }
+    if (skip) {
+        char *one = sanitize_line(skip), *t = xasprintf("\xe2\x9a\xa0 %s", one), *w = fg(TUI_TC_WARNING, t);
+        char *tr = tui_visible_width(w) > inner ? tui_truncate_to_width(w, inner, NULL) : xstrdup(w);
+        strvec_push_own(out, ui_box_row(tr, width));
+        free(one), free(t), free(w), free(tr);
+    }
+    strvec_push_own(out, ui_box_bottom(width));
+    free(skip);
+    free(title);
+    strvec_free(&body);
+    layout_free(&L);
 }
 
 static void fd_invalidate(tui_component_t *c) {
     fd_t *v = (fd_t *)c;
-    v->height_key[0] = 0;
+    free(v->height_key);
+    v->height_key = NULL;
 }
 
 static void fd_destroy(tui_component_t *c) {
@@ -2000,8 +2552,14 @@ static void fd_destroy(tui_component_t *c) {
     free(v->checked), free(v->inputs), free(v->others), free(v->editors), free(v->other_seen), free(v->errors);
     free(v->notes);
     free(v->stops.v);
-    free(v->pages.v);
-    free(v->stop_atoms.v);
+    free(v->intro.v);
+    for (size_t g = 0; g < v->groups.n; g++) {
+        free(v->groups.v[g].parts.v);
+        free(v->groups.v[g].fields.v);
+    }
+    free(v->groups.v);
+    free(v->field_group);
+    free(v->height_key);
     bool notify = !v->closed && v->o.done;
     ui_form_done_fn done = v->o.done;
     void *ud = v->o.ud;
@@ -2036,6 +2594,7 @@ tui_component_t *ui_form_dialog_new(const char *html, const ui_form_opts_t *o) {
     v->other_seen = xcalloc(n + 1, sizeof *v->other_seen);
     v->errors = xcalloc(n + 1, sizeof *v->errors);
     v->notes = xcalloc(n + 1, sizeof *v->notes);
+    build_groups(v);
     for (size_t si = 0; si < v->form->sections.n; si++) {
         const hf_section_t *sec = &v->form->sections.v[si];
         for (size_t bi = 0; bi < sec->blocks.n; bi++) {
@@ -2112,7 +2671,6 @@ tui_component_t *ui_form_dialog_new(const char *html, const ui_form_opts_t *o) {
     }
     /* open where the answer is, so Enter accepts a preselected choice instead of overwriting it */
     if (v->stops.n > 1) v->focus = answer_stop(v, v->stops.v[0].field);
-    if (o->draft && !tui_editor_is_empty(o->draft)) v->guard = true;
     if (o->timeout_ms > 0) {
         v->deadline = mono_ms() + o->timeout_ms;
         v->remaining = (int)((o->timeout_ms + 999) / 1000);
@@ -2121,17 +2679,44 @@ tui_component_t *ui_form_dialog_new(const char *html, const ui_form_opts_t *o) {
     return &v->base;
 }
 
-void ui_form_dialog_show(ui_t *u, const char *html, int64_t timeout_ms, const char *cwd, ui_form_done_fn done, void *ud) {
-    ui_form_opts_t o = {.ui = u, .tui = u->tui, .draft = u->editor, .timeout_ms = timeout_ms, .cwd = (char *)cwd,
-                        .done = done, .ud = ud};
-    tui_component_t *c = ui_form_dialog_new(html, &o);
-    /* #presentDialog: blocked on the question of the form's first named field while it is shown */
+/* HtmlFormDialog.givenAnswers: what the user answered so far, for a form closed before its submit: the named fields
+ * whose value differs from the form's defaults, and the notes on selected options; NULL when there are neither.
+ * Owned {data, notes?} */
+json_t *ui_form_dialog_given(tui_component_t *c) {
+    if (!ui_form_is_dialog(c)) return NULL;
     fd_t *v = (fd_t *)c;
-    const char *msg = NULL;
-    for (size_t i = 0; i < v->form->fields.n && !msg; i++)
-        if (*v->form->fields.v[i]->name) msg = v->form->fields.v[i]->question;
-    v->hold = ui_signals_hold_blocked("question", msg);
-    ui_show_selector(u, c, c);
+    json_t *defaults = hf_default_data(v->form), *current = form_data(v), *data = json_obj();
+    bool changed = false;
+    const char *k;
+    json_t *x;
+    json_obj_foreach(current, i, k, x) {
+        char *a = json_dump_js(x), *b = json_get(defaults, k) ? json_dump_js(json_get(defaults, k)) : NULL;
+        bool same = b && !strcmp(a, b);
+        free(a);
+        free(b);
+        if (same) continue;
+        json_set(data, k, json_clone(x));
+        changed = true;
+    }
+    json_free(current);
+    json_free(defaults);
+    json_t *notes = option_notes(v);
+    if (!changed && !notes) {
+        json_free(data);
+        return NULL;
+    }
+    json_t *r = json_obj();
+    json_set(r, "data", data);
+    if (notes) json_set(r, "notes", notes);
+    return r;
+}
+
+/* HtmlFormDialog.keyHints: the form's key hints on one dim line, for the faint composer under it (owned) */
+char *ui_form_dialog_key_hints(tui_component_t *c) {
+    if (!ui_form_is_dialog(c)) return xstrdup("");
+    char *t = key_hint_text((fd_t *)c), *r = fg(TUI_TC_DIM, t);
+    free(t);
+    return r;
 }
 
 json_t *ui_form_dialog_data(tui_component_t *c) { return ui_form_is_dialog(c) ? form_data((fd_t *)c) : NULL; }
@@ -2142,4 +2727,138 @@ void ui_form_dialog_tick(tui_component_t *c, int64_t now_ms) {
     if (v->remaining < 0) return;
     v->deadline = now_ms; /* tests: the deadline passes */
     on_tick(v);
+}
+
+/* ---------- the ask slot above the composer (extension-ui-controller #mountAsk, interactive-mode AskContainer) ---------- */
+
+static struct {
+    ui_t *u;
+    tui_component_t *ask; /* the ask waiting for answers (not owned by the slot) */
+} g_slot;
+
+/* AskContainer: the ask, a blank row parting it from the working row under it */
+static void slot_render(tui_component_t *c, int width, strvec_t *out) {
+    UNUSED(c);
+    if (!g_slot.ask) return;
+    size_t before = out->n;
+    tui_component_render(g_slot.ask, width, out);
+    if (out->n > before) strvec_push(out, "");
+}
+
+static void slot_invalidate(tui_component_t *c) {
+    UNUSED(c);
+    if (g_slot.ask) tui_component_invalidate(g_slot.ask);
+}
+
+static void slot_destroy(tui_component_t *c) {
+    if (g_slot.ask) {
+        tui_component_t *a = g_slot.ask;
+        g_slot.ask = NULL;
+        tui_component_destroy(a);
+    }
+    g_slot.u = NULL;
+    free(c);
+}
+
+static const tui_component_vt SLOT_VT = {"ask-slot", slot_render, NULL, slot_invalidate, slot_destroy};
+
+tui_component_t *ui_ask_slot_new(ui_t *u) {
+    g_slot.u = u;
+    tui_component_t *c = xcalloc(1, sizeof *c);
+    tui_component_init(c, &SLOT_VT);
+    return c;
+}
+
+tui_component_t *ui_ask_current(const ui_t *u) {
+    UNUSED(u);
+    return g_slot.ask;
+}
+
+bool ui_ask_focus(ui_t *u) {
+    if (!g_slot.ask) return false;
+    tui_set_focus(u->tui, g_slot.ask);
+    tui_request_render(u->tui);
+    return true;
+}
+
+/* #focusComposer: the keys to the composer (Esc or Tab past the ask's last stop, the ask closing) */
+static void focus_composer(void *ud) {
+    ui_t *u = ud;
+    ui_focus_editor_area(u);
+    tui_request_render(u->tui);
+}
+
+bool ui_ask_holds_keys(const ui_t *u) { return g_slot.ask && tui_focus(u->tui) != &u->editor->base; }
+
+/* #draftSkipsAsk: sending the composer's draft now skips the ask shown: a plain message, which reaches the agent as the
+ * user's and closes the ask, not a command, a shell or Python run or a `/btw` question */
+bool ui_ask_draft_skips(ui_t *u) {
+    if (!g_slot.ask) return false;
+    char *text = tui_editor_get_text(u->editor), *t = str_trim(text);
+    const char *p = text;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    size_t dollars = p[0] == '$' ? (p[1] == '$' ? 2 : 1) : 0;
+    bool python = dollars && (p[dollars] == ' ' || p[dollars] == '\t' || p[dollars] == '\n' || p[dollars] == '\r');
+    bool r = *t && t[0] != '/' && p[0] != '!' && p[0] != '?' && !python;
+    free(t);
+    free(text);
+    return r;
+}
+
+#define ASK_SKIP_NOTICE "Sending your message skips these questions"
+
+/* #skipNotice: the ask's warning while sending the composer's draft would skip it, with the key back to it */
+static char *skip_notice(void *ud) {
+    ui_t *u = ud;
+    if (!ui_ask_draft_skips(u)) return NULL;
+    const strvec_t *keys = tui_keybindings_get(tui_keybindings_global(), "app.thinking.cycle");
+    if (tui_focus(u->tui) == &u->editor->base && keys && keys->n) {
+        char *k = ui_key_hint(keys->v[0]), *r = xasprintf(ASK_SKIP_NOTICE " \xc2\xb7 %s answers them", k);
+        free(k);
+        return r;
+    }
+    return xstrdup(ASK_SKIP_NOTICE);
+}
+
+static void ask_mount(ui_t *u, tui_component_t *ask) {
+    g_slot.ask = ask;
+    tui_attach(u->tui, ask);
+    ui_status_set_awaiting_answer(u, true);
+    char *text = tui_editor_get_text(u->editor), *t = str_trim(text);
+    bool draft = *t;
+    free(t);
+    free(text);
+    /* the ask takes the keys unless the composer holds a draft, whose sending skips it */
+    if (draft || ui_selector_open(u)) tui_request_render(u->tui);
+    else ui_ask_focus(u);
+}
+
+static void ask_unmount(ui_t *u, tui_component_t *ask) {
+    bool had_keys = tui_focus(u->tui) == ask;
+    if (g_slot.ask == ask) g_slot.ask = NULL;
+    ui_status_set_awaiting_answer(u, g_slot.ask != NULL);
+    if (had_keys || !ui_selector_open(u)) focus_composer(u);
+    tui_component_destroy(ask);
+    tui_request_render(u->tui);
+}
+
+void ui_ask_close(ui_t *u, json_t **given) {
+    if (given) *given = NULL;
+    if (!g_slot.ask) return;
+    if (given) *given = ui_form_dialog_given(g_slot.ask);
+    ask_unmount(u, g_slot.ask); /* destroying it reports a cancel */
+}
+
+void ui_form_dialog_show(ui_t *u, const char *html, int64_t timeout_ms, const char *cwd, ui_form_done_fn done, void *ud) {
+    ui_form_opts_t o = {.ui = u, .tui = u->tui, .draft = u->editor, .timeout_ms = timeout_ms, .cwd = (char *)cwd,
+                        .done = done, .ud = ud, .skip_notice = skip_notice, .release_keys = focus_composer, .hook_ud = u};
+    tui_component_t *c = ui_form_dialog_new(html, &o);
+    /* #presentDialog: blocked on the question of the form's first named field while it is shown */
+    fd_t *v = (fd_t *)c;
+    const char *msg = NULL;
+    for (size_t i = 0; i < v->form->fields.n && !msg; i++)
+        if (*v->form->fields.v[i]->name) msg = v->form->fields.v[i]->question;
+    v->hold = ui_signals_hold_blocked("question", msg);
+    if (g_slot.ask) ui_ask_close(u, NULL);
+    ask_mount(u, c);
 }

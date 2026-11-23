@@ -1,5 +1,6 @@
-/* test_htmlform.c - the ask tool's HTML form: parser, data and pagination (src/text/htmlform.c, ports of omp
- * html-form/parse.ts, data.ts, paginate.ts; cases follow packages/tui/test/html-form.test.ts). */
+/* test_htmlform.c - the ask tool's HTML form: parser, data and the stacked dialog (src/text/htmlform.c,
+ * src/ui/formdlg.c, ports of omp html-form/parse.ts, data.ts, dialog.ts; cases follow
+ * packages/tui/test/html-form.test.ts). */
 #include "core/core.h"
 #include "core/json.h"
 #include "text/htmlform.h"
@@ -99,24 +100,6 @@ static void test_answers(void) {
     hf_form_free(f);
 }
 
-static void test_paginate(void) {
-    hf_atoms_t a = {0};
-    for (int i = 0; i < 6; i++) {
-        hf_atom_t at = {0};
-        strvec_push(&at.lines, "x");
-        strvec_push(&at.lines, "y");
-        at.gap = i ? 1 : 0;
-        at.break_rank = i == 3 ? HF_BREAK_SECTION : HF_BREAK_INSIDE;
-        vec_push(&a, at);
-    }
-    hf_pages_t p = {0};
-    hf_paginate(&a, 10, &p);
-    CHECK(p.n == 2 && p.v[0].end == 3, "pages %zu end %zu", p.n, p.n ? p.v[0].end : 0);
-    free(p.v);
-    hf_atoms_free(&a);
-}
-
-
 /* fieldContexts / formContext (omp bfffc6ffb2, 040ee9d021, 5674262fe2) */
 static void test_contexts(void) {
     hf_form_t *f = hf_parse("<form>\n  <p>Both jobs read the same base image.</p>\n"
@@ -176,6 +159,13 @@ static void keys(tui_component_t *c, const char *raw) {
     }
 }
 
+/* keyHints, plain */
+static char *hints(tui_component_t *c) {
+    char *h = ui_form_dialog_key_hints(c), *p = tui_strip_ansi(h);
+    free(h);
+    return p;
+}
+
 static char *screen(tui_component_t *c, int width) {
     strvec_t out = {0};
     c->vt->render(c, width, &out);
@@ -211,7 +201,7 @@ static void test_dialog_notes(void) {
     ui_form_opts_t o = {.term_rows = 40, .done = on_done};
     tui_component_t *c = ui_form_dialog_new(html, &o);
     c->focused = true;
-    char *s = screen(c, 80);
+    char *s = hints(c);
     CHECK(strstr(s, "\xe2\x8f\x8e choose \xc2\xb7 n note \xc2\xb7"), "note hint:\n%s", s);
     free(s);
     keys(c, "nwarm  tone");
@@ -229,7 +219,7 @@ static void test_dialog_notes(void) {
     free(s);
     /* on a dropdown the note key is Alt+N: `n` stays type-ahead */
     keys(c, "\t");
-    s = screen(c, 80);
+    s = hints(c);
     CHECK(strstr(s, "change \xc2\xb7 \xe2\x8f\x8e next \xc2\xb7 Alt+N note"),
           "dropdown note hint:\n%s", s);
     free(s);
@@ -261,9 +251,10 @@ static void test_dialog_sole(void) {
     ui_form_opts_t o = {.term_rows = 40, .done = on_done};
     tui_component_t *c = ui_form_dialog_new(html, &o);
     c->focused = true;
-    char *s = screen(c, 80);
-    CHECK(strstr(s, "\xe2\x9d\xaf \xe2\x97\x89 M") && strstr(s, "\xe2\x8f\x8e submit"), "sole layout:\n%s", s);
+    char *s = screen(c, 80), *h = hints(c);
+    CHECK(strstr(s, "\xe2\x9d\xaf \xe2\x97\x89 M") && strstr(h, "\xe2\x8f\x8e submit"), "sole layout:\n%s%s", s, h);
     free(s);
+    free(h);
     keys(c, "\r");
     CHECK(g_done && str_eq(json_get_str(g_done_data, "size"), "m"), "Enter submits the preselected answer");
     c->vt->destroy(c);
@@ -300,16 +291,18 @@ static void test_dialog(void) {
     tui_component_t *c = ui_form_dialog_new(html, &o);
     c->focused = true;
     char *s = screen(c, 60);
-    CHECK(strstr(s, "Ask (30s)") && strstr(s, "Paint it") && strstr(s, "\xe2\x9d\xaf \xe2\x97\x89 Red") &&
-              strstr(s, "Other: type your own") && strstr(s, "\xe2\x80\xb9 eu-west-1 \xe2\x80\xba  2/2") &&
+    CHECK(strstr(s, "Ask \xc2\xb7 3 of 3 answered (30s)") && strstr(s, "Paint it") && strstr(s, "\xe2\x9d\xaf \xe2\x97\x89 Red") &&
+              strstr(s, "Other: type your own") && strstr(s, "\xe2\x9c\x93 region") && strstr(s, "\xe2\x9c\x93 eu-west-1 ") &&
               strstr(s, "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2") && !strstr(s, "abc") && strstr(s, "Submit"),
           "dialog layout:\n%s", s);
     free(s);
     /* Tab to the dropdown, Space opens it, ↑ highlights us-east-1, Enter picks */
     keys(c, "\t ");
     s = screen(c, 60);
-    CHECK(strstr(s, "\xe2\x95\xad") && strstr(s, "eu-west-1 \xe2\x9c\x93") && strstr(s, "highlight"), "dropdown open:\n%s", s);
+    char *h = hints(c);
+    CHECK(strstr(s, "\xe2\x95\xad") && strstr(s, "eu-west-1 \xe2\x9c\x93") && strstr(h, "highlight"), "dropdown open:\n%s%s", s, h);
     free(s);
+    free(h);
     keys(c, "\x1b[A\r");
     json_t *d = ui_form_dialog_data(c);
     CHECK(str_eq(json_get_str(d, "region"), "us-east-1") && str_eq(json_get_str(d, "pw"), "abc"), "dropdown pick");
@@ -317,7 +310,9 @@ static void test_dialog(void) {
     /* Alt+H hides the form to one row */
     keys(c, "\x1bh");
     s = screen(c, 100);
-    CHECK(strstr(s, "Ask (30s) hidden: region (+2 more)") && strchr(s, '\n') == s + strlen(s) - 1, "hidden row:\n%s", s);
+    CHECK(strstr(s, "Ask \xc2\xb7 3 of 3 answered (30s) hidden: region (+2 more)") && strstr(s, "composer") &&
+              strchr(s, '\n') == s + strlen(s) - 1,
+          "hidden row:\n%s", s);
     free(s);
     keys(c, "\x1bh");
     /* the deadline submits the current values */
@@ -327,7 +322,8 @@ static void test_dialog(void) {
           "timeout submit");
     c->vt->destroy(c);
 
-    /* a long form pages at section boundaries; the page shows in the title */
+    /* every question stacks in one scrolling panel: the focused one open, the rest folded; ←/→ open the next or
+     * previous question; the panel keeps a fixed height that leaves the composer its reserved rows */
     sb_t long_html = SB_INIT;
     sb_append(&long_html, "<form>");
     for (int i = 0; i < 6; i++)
@@ -337,13 +333,25 @@ static void test_dialog(void) {
     ui_form_opts_t o2 = {.term_rows = 20};
     c = ui_form_dialog_new(sb_cstr(&long_html), &o2);
     c->focused = true;
-    s = screen(c, 120);
-    CHECK(strstr(s, "Ask \xc2\xb7 1/") && strstr(s, "PgUp/PgDn page") == NULL && strstr(s, "\xe2\x86\x90/\xe2\x86\x92 page"),
-          "paged:\n%s", s);
-    free(s);
-    keys(c, "\x1b[C");
     s = screen(c, 60);
-    CHECK(strstr(s, "Ask \xc2\xb7 2/"), "page 2:\n%s", s);
+    size_t height = 0;
+    for (const char *p = s; *p; p++) height += *p == '\n';
+    CHECK(strstr(s, "Ask \xc2\xb7 0 of 6 answered") && strstr(s, "\xe2\x9d\xaf \xe2\x97\x8b A") &&
+              strstr(s, "\xe2\x97\x8b Q1") && height <= 20 - 8 && strstr(s, "\xe2\x96\x88"),
+          "stacked:\n%s", s);
+    free(s);
+    h = hints(c);
+    CHECK(strstr(h, "\xe2\x86\x90/\xe2\x86\x92 question") && strstr(h, " composer"), "question hints: %s", h);
+    free(h);
+    keys(c, "\x1b[C\x1b[C\x1b[C\x1b[C\x1b[C");
+    s = screen(c, 60);
+    size_t height5 = 0;
+    for (const char *p = s; *p; p++) height5 += *p == '\n';
+    CHECK(strstr(s, "\xe2\x94\x82 Q5 ") && strstr(s, "\xe2\x9d\xaf \xe2\x97\x8b A") && height5 == height, "Q5 open:\n%s", s);
+    free(s);
+    keys(c, " \x1b[C"); /* Space picks Q5's A, → past the last question: Submit, every question folded */
+    s = screen(c, 60);
+    CHECK(strstr(s, "\xe2\x9d\xaf Submit") && strstr(s, "\xe2\x9c\x93 Q5") && strstr(s, "1 of 6 answered"), "submit:\n%s", s);
     free(s);
     c->vt->destroy(c);
     sb_free(&long_html);
@@ -386,6 +394,83 @@ static void test_dialog(void) {
     g_done_data = NULL;
 }
 
+static int g_released;
+static void on_release(void *ud) {
+    (void)ud;
+    g_released++;
+}
+static const char *g_skip;
+static char *on_skip(void *ud) {
+    (void)ud;
+    return g_skip ? xstrdup(g_skip) : NULL;
+}
+
+/* the redesigned ask (omp 093f499464, 708fccb73c): folded questions over their answer or option chips, Esc and Tab
+ * past Submit hand the keys to the composer, the skip notice takes the body's last row, givenAnswers */
+static void test_dialog_stacked(void) {
+    const char *html = "<form><label>Owner <input name=owner placeholder=\"who ships it\"></label><p>Rollout?</p>"
+                       "<label><input type=radio name=when value=v0> Behind a feature flag for a week</label>"
+                       "<label><input type=radio name=when value=v1> Default on</label>"
+                       "<label><input type=radio name=when value=v2> Next minor</label>"
+                       "<label><input type=radio name=when value=v3> After a soak</label>"
+                       "<label><input type=radio name=when value=v4> Never</label>"
+                       "<label><input type=radio name=when value=v5> Ask me</label>"
+                       "<fieldset><legend>Targets</legend><label><input type=checkbox name=t value=linux checked> Linux</label>"
+                       "<label><input type=checkbox name=t value=mac> macOS</label></fieldset></form>";
+    ui_form_opts_t o = {.term_rows = 40, .done = on_done, .release_keys = on_release, .skip_notice = on_skip};
+    g_done = false;
+    tui_component_t *c = ui_form_dialog_new(html, &o);
+    c->focused = true;
+    char *s = screen(c, 80);
+    /* the first four options as chips, the first cut to twenty cells, then how many more; a preselected answer stays
+     * among its options */
+    CHECK(strstr(s, "\xe2\x97\x8b Rollout?") &&
+              strstr(s, " Behind a feature fl\xe2\x80\xa6   Default on   Next minor   After a soak   +2 ") &&
+              strstr(s, "\xe2\x9c\x93 Targets") && strstr(s, " \xe2\x9c\x93 Linux   macOS ") &&
+              strstr(s, "Ask \xc2\xb7 1 of 3 answered") && !strstr(s, "composer"),
+          "folded:\n%s", s);
+    size_t height = 0;
+    for (const char *p = s; *p; p++) height += *p == '\n';
+    free(s);
+    /* the skip notice is the panel's last row, the panel keeping its height */
+    g_skip = "Sending your message skips these questions";
+    s = screen(c, 80);
+    size_t h2 = 0;
+    for (const char *p = s; *p; p++) h2 += *p == '\n';
+    const char *warn = strstr(s, "\xe2\x9a\xa0 Sending your message skips these questions");
+    CHECK(warn && h2 == height && strstr(warn, "\n\xe2\x95\xb0") == strchr(warn, '\n'), "skip notice:\n%s", s);
+    free(s);
+    g_skip = NULL;
+    /* Esc hands the keys to the composer; the form stays */
+    keys(c, "\x1b");
+    CHECK(g_released == 1 && !g_done, "Esc releases the keys");
+    keys(c, "ada\t\x1b[B"); /* typed owner, Tab to Rollout, ↓ to Default on */
+    keys(c, " ");
+    json_t *given = ui_form_dialog_given(c);
+    CHECK(given && str_eq(json_get_str(json_get(given, "data"), "owner"), "ada") &&
+              str_eq(json_get_str(json_get(given, "data"), "when"), "v1") && !json_get(json_get(given, "data"), "t"),
+          "given answers: %s", given ? json_dump(given, 0) : "(none)");
+    json_free(given);
+    s = screen(c, 80);
+    CHECK(strstr(s, "\xe2\x9c\x93 Owner ") && strstr(s, "\xe2\x94\x82   ada "), "answered fold:\n%s", s);
+    free(s);
+    /* Tab past Submit hands the keys over too */
+    keys(c, "\t\t");
+    s = screen(c, 80);
+    CHECK(strstr(s, "\xe2\x9d\xaf Submit") && strstr(s, "3 of 3 answered"), "on submit:\n%s", s);
+    free(s);
+    keys(c, "\t");
+    CHECK(g_released == 2 && !g_done, "Tab past Submit releases the keys");
+    c->vt->destroy(c);
+    CHECK(g_done && !g_done_data, "torn down: cancelled");
+    g_done = false;
+    /* an untouched form has given nothing */
+    c = ui_form_dialog_new(html, &o);
+    CHECK(!ui_form_dialog_given(c), "nothing given");
+    c->vt->destroy(c);
+    g_done = false;
+}
+
 int main(void) {
     const char *td = getenv("TMPDIR");
     char *tmpl = xasprintf("%s/omc-htmlform-XXXXXX", td && *td ? td : "/tmp");
@@ -396,12 +481,12 @@ int main(void) {
     }
     test_parse();
     test_answers();
-    test_paginate();
     test_contexts();
     test_dialog();
     test_dialog_notes();
     test_dialog_sole();
     test_dialog_table_wrap();
+    test_dialog_stacked();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

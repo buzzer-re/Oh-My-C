@@ -1159,10 +1159,11 @@ static json_t *form_parse_data(const hf_form_t *form, const json_t *submitted, c
 
 /* tool_ui_t.form: the ask tool's HTML form as one `form` request; a timeout submits the form's defaults. A frame
  * larger than the negotiated protocol delivers intact fails without being sent (omp 9a323f5dc7). */
-static json_t *rpc_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, json_t **notes,
+static json_t *rpc_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, json_t **notes, json_t **given,
                         volatile sig_atomic_t *cancel, char **err) {
     rpc_t *r = ud;
     *timed_out = false;
+    *given = NULL;
     if (notes) *notes = NULL;
     json_t *f = json_obj();
     json_set_str(f, "method", "form");

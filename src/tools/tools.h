@@ -58,10 +58,11 @@ typedef struct {
     json_t *(*ask)(void *ud, const json_t *questions);
     /* formDialog: the `ask` tool's HTML form rendered whole (interactive TUI, ACP form elicitation). Returns the
      * owned form data object, or NULL when cancelled; *timed_out when the inactivity timeout (timeout_ms > 0)
-     * submitted the current values; *notes (owned array or NULL) the notes on selected options; *err (owned) when
+     * submitted the current values; *notes (owned array or NULL) the notes on selected options; *given (owned
+     * {data, notes?} or NULL) what the user answered before `cancel` closed the form (onAbandon); *err (owned) when
      * the host failed. NULL member: no form surface, so the tool walks the form's fields through select / input /
      * editor below. */
-    json_t *(*form)(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, json_t **notes,
+    json_t *(*form)(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, json_t **notes, json_t **given,
                     volatile sig_atomic_t *cancel, char **err);
     /* dialog primitives of the field-by-field fallback (RPC). Each returns the owned answer or NULL (cancelled,
      * *timed_out at the deadline, *err (owned) when the host went away). */
