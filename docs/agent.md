@@ -184,7 +184,7 @@ continuations print mode suppresses).
 - **Stream loop guard** (`coding/thinkloop.c`; omp `ai/utils/thinking-loop.ts`, `stream-guards.ts`). Exact suffix cycles
   for every guarded model, plus near-duplicate and low-information paragraph heuristics for Gemini/DeepSeek/Grok;
   Claude is never guarded. A hit ends the turn as a retryable `Thinking loop detected` error, and the retry carries
-  `thinking-loop-redirect`. A Gemini stream with 36 planning headers and no tool call is interrupted and re-sampled
+  `thinking-loop-redirect`. A Gemini stream with 64 planning headers and no tool call is interrupted and re-sampled
   with `gemini-tool-call-reminder`.
 
 ## Sessions (`src/session/session.c`)

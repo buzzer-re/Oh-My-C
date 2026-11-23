@@ -331,9 +331,13 @@ static json_t *s_anthropic(const ws_params_t *p, ws_err_t *e) {
     }
     http_headers_t h = {0};
     char *url = NULL;
+    /* the model decides whether to search and answers from its weights when a query reads as stable knowledge; a search
+     * backend must always search (omp 88e412881e) */
+    char *instr = prompt_load("coding-agent/prompts/system/web-search-anthropic.md");
     char *body = anthropic_search_request(m, key, p->query, p->system_prompt,
                                           isnan(p->max_tokens) ? 0 : (int64_t)p->max_tokens, p->temperature,
-                                          p->session_id, &h, &url);
+                                          p->session_id, instr, &h, &url);
+    free(instr);
     http_resp_t r;
     int rc = ws_http("POST", url, &h, body, p, &r);
     free(url);
@@ -359,6 +363,7 @@ static json_t *s_anthropic(const ws_params_t *p, ws_err_t *e) {
     }
     /* parseResponse */
     json_t *res = resp_new("anthropic"), *srcs = json_get(res, "sources"), *cits = json_arr(), *queries = json_arr();
+    strvec_t tool_errors = {0};
     sb_t answer = SB_INIT;
     bool prev_text = false;
     json_t *b;
@@ -368,6 +373,10 @@ static json_t *s_anthropic(const ws_params_t *p, ws_err_t *e) {
         if (str_eq(t, "server_tool_use") && str_eq(json_get_str(b, "name"), "web_search")) {
             const char *q = json_get_str(json_get_obj(b, "input"), "query");
             if (q && *q) json_push_str(queries, q);
+        } else if (str_eq(t, "web_search_tool_result") && json_is_obj(json_get(b, "content"))) {
+            /* a failed search carries one error object instead of a result list (still an HTTP 200) */
+            const char *code = json_get_str(json_get(b, "content"), "error_code");
+            if (code && !strvec_contains(&tool_errors, code)) strvec_push(&tool_errors, code);
         } else if (str_eq(t, "web_search_tool_result") && json_is_arr(json_get(b, "content"))) {
             json_t *it;
             json_arr_foreach(json_get(b, "content"), k, it) {
@@ -394,6 +403,39 @@ static json_t *s_anthropic(const ws_params_t *p, ws_err_t *e) {
                 json_push(cits, ci);
             }
         }
+    }
+    /* a classifier decline (before or mid-output) leaves any text incomplete and Anthropic says to discard it; results it
+     * already searched stay usable and the answer says why it is missing */
+    const char *model_name = json_get_str(j, "model") ? json_get_str(j, "model") : "";
+    char *failure = NULL;
+    if (str_eq(json_get_str(j, "stop_reason"), "refusal")) {
+        const json_t *sd = json_get_obj(j, "stop_details");
+        const char *cat = json_get_str(sd, "category") ? json_get_str(sd, "category") : "uncategorized";
+        const char *expl = json_get_str(sd, "explanation");
+        char *refusal = expl ? xasprintf("%s declined the query (%s safety classifier): %s", model_name, cat, expl)
+                             : xasprintf("%s declined the query (%s safety classifier).", model_name, cat);
+        if (json_len(srcs) == 0) failure = refusal;
+        else {
+            sb_clear(&answer);
+            sb_appendf(&answer, "%s The results it found before declining follow.", refusal);
+            free(refusal);
+            json_free(cits);
+            cits = json_arr();
+        }
+    } else if (json_len(srcs) == 0 && tool_errors.n > 0) {
+        char *codes = strvec_join(&tool_errors, ", ");
+        failure = xasprintf("Anthropic web search failed: %s.", codes);
+        free(codes);
+    }
+    strvec_free(&tool_errors);
+    if (failure) {
+        fail_typed(e, "anthropic", 0, failure);
+        sb_free(&answer);
+        json_free(cits);
+        json_free(queries);
+        json_free(res);
+        json_free(j);
+        return NULL;
     }
     if (answer.len) json_set_str(res, "answer", sb_cstr(&answer));
     sb_free(&answer);
@@ -966,7 +1008,7 @@ static json_t *s_codex(const ws_params_t *p, ws_err_t *e) {
     else http_headers_del(&h, "chatgpt-account-id");
     free(acc);
     http_headers_set(&h, "originator", "omp");
-    http_headers_set(&h, "version", "0.159.0");
+    http_headers_set(&h, "version", ai_codex_client_version());
     http_headers_set(&h, "User-Agent", OMC_NAME "/" OMC_VERSION);
     http_headers_set(&h, "Accept", "text/event-stream");
     http_headers_set(&h, "Content-Type", "application/json");
@@ -1369,7 +1411,6 @@ static json_t *s_gemini(const ws_params_t *p, ws_err_t *e) {
             cca_antigravity_headers(&h);
         } else {
             http_headers_set(&h, "Accept", "text/event-stream");
-            cca_gemini_cli_headers(&h, NULL);
         }
         char *base = xstrdup(m->base_url ? m->base_url : "");
         size_t bl = strlen(base);

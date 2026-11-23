@@ -28,7 +28,7 @@
 #define MAX_STREAM_BLOCKS 4096
 #define MAX_TOOL_ID_LEN 64
 
-#define DEFAULT_CLAUDE_CODE_VERSION "2.1.321"
+#define DEFAULT_CLAUDE_CODE_VERSION "2.1.326"
 #define CLAUDE_CODE_SDK_VERSION "0.128.0"
 #define CLAUDE_CODE_SYSTEM_INSTRUCTION "You are Claude Code, Anthropic's official CLI for Claude."
 #define CLAUDE_TOOL_PREFIX "_"
@@ -1289,7 +1289,12 @@ bool anthropic_compaction_supported(const ai_model_t *m) {
     char *route = resolve_base_url(m);
     bool official = is_official_url(route);
     bool ok = false;
-    if (cflag(m, "bedrockMessagesApi")) ok = true;
+    char *own = normalize_base_url(m->base_url);
+    /* declaresAnthropicCompactionEndpoint (omp 60304f9e52, 51ef3e7060): a gateway outside the known deployments qualifies
+     * only by declaring remoteCompaction {api: "anthropic-messages", enabled: true} for its own configured endpoint */
+    bool declared = str_eq(json_get_str(rc, "api"), "anthropic-messages") && json_get_bool(rc, "enabled", false) && str_eq(route, own);
+    free(own);
+    if (cflag(m, "bedrockMessagesApi") || declared) ok = true;
     else if (official || (route && (strstr(route, "aiplatform.googleapis.com") || strstr(route, ".services.ai.azure.com"))))
         ok = cflag(m, "firstPartyProvider") || str_eq(m->provider, "google-vertex") || json_get_bool(rc, "enabled", false);
     free(route);
@@ -2435,6 +2440,20 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
         snprintf(sent_version, sizeof sent_version, "%s", anthropic_claude_code_version());
         json_t *params = build_request(m, ctx, &lo, oauth, &thinking_on);
         if (o->on_payload) o->on_payload(o->payload_ud, params);
+        /* omp 7f6b4a096f/228ddc8d7c: Anthropic answers `messages: []` with a bare 400 "messages is required", so an empty
+         * conversation is named before sending (omc's payload hook only observes, so encoding is the side that emptied it) */
+        if (json_len(json_get_arr(params, "messages")) == 0) {
+            char *e = xasprintf("anthropic: refusing to send a request with no messages for model %s (provider %s). Context had "
+                                "%zu input messages; none survived encoding.",
+                                m->id, m->provider ? m->provider : "", json_len(ctx->messages));
+            ai_builder_t b;
+            aib_init(&b, m, cb, ud);
+            result = aib_finish(&b, "error", e);
+            aib_free(&b);
+            free(e);
+            json_free(params);
+            break;
+        }
         http_headers_t h = {0};
         anthropic_build_headers(m, &lo, ctx, params, key, oauth, &h);
         hk.fast_wanted = json_get_str(params, "speed") != NULL;
@@ -2544,9 +2563,13 @@ json_t *provider_anthropic_stream_ex(const ai_model_t *m, const ai_context_t *ct
 
 /* ---------- hosted web search (coding-agent web/search/providers/anthropic.ts callSearch) ---------- */
 
+/* compat_detect.c (weak: the provider unit tests link without the catalog) */
+extern const json_t *compat_catalog_policy(const char *provider, const char *api, const char *id, const char *key)
+    __attribute__((weak));
+
 char *anthropic_search_request(const ai_model_t *m, const char *key, const char *query, const char *system_prompt,
-                               int64_t max_tokens, double temperature, const char *session_id, http_headers_t *h,
-                               char **url_out) {
+                               int64_t max_tokens, double temperature, const char *session_id, const char *search_instruction,
+                               http_headers_t *h, char **url_out) {
     bool oauth = anthropic_is_oauth_token(key);
     /* buildAnthropicAuthConfig: the model's base URL, else ANTHROPIC_BASE_URL, else the default */
     char *base = normalize_base_url(m->base_url);
@@ -2559,6 +2582,12 @@ char *anthropic_search_request(const ai_model_t *m, const char *key, const char 
     strvec_t betas = {0};
     if (oauth) claude_code_betas(&betas, true, true, false, true);
     beta_add(&betas, "web-search-2025-03-05");
+    /* server-side refusal fallback (fallbacks: "default", omp 88e412881e): only Anthropic's own endpoint runs the chain, and
+     * only models with a refusal classifier have targets to fall back to */
+    const json_t *targets =
+        compat_catalog_policy ? compat_catalog_policy(m->provider, m->api, m->id, "fallbackCreditTargets") : NULL;
+    bool server_fallback = official && json_len(targets) > 0;
+    if (server_fallback) beta_add(&betas, "server-side-fallback-2026-07-01");
     char *beta_hdr = strvec_join(&betas, ",");
     strvec_free(&betas);
     http_headers_t caller = {0};
@@ -2627,6 +2656,7 @@ char *anthropic_search_request(const ai_model_t *m, const char *key, const char 
     json_set_str(tool, "name", "web_search");
     json_push(tools, tool);
     json_set(body, "tools", tools);
+    if (server_fallback) json_set_str(body, "fallbacks", "default");
     /* resolveAnthropicMetadataUserId(sessionId, isOAuth, sessionId): API keys forward the session id verbatim */
     json_t *md = json_obj();
     if (session_id && *session_id) json_set_str(md, "user_id", session_id);
@@ -2651,7 +2681,11 @@ char *anthropic_search_request(const ai_model_t *m, const char *key, const char 
         json_set(id, "cache_control", e);
         json_push(sys, id);
     }
+    /* the search instruction (always search, keep operators as intent) on every request; extra instructions are trimmed */
     if (oauth) json_push(sys, text_block("You are a helpful AI assistant with web search capabilities."));
+    char *instr = search_instruction ? str_trim(search_instruction) : NULL;
+    if (instr && *instr) json_push(sys, text_block(instr));
+    free(instr);
     if (system_prompt && !str_blank(system_prompt)) json_push(sys, text_block(system_prompt));
     if (json_len(sys)) json_set(body, "system", sys);
     else json_free(sys);

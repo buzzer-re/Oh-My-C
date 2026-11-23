@@ -33,12 +33,16 @@ void actx_auth(const actx_t *c, const char *url, const char *launch, const char 
 }
 
 char *actx_prompt(const actx_t *c, const char *message, const char *placeholder, bool allow_empty, char **err) {
+    auth_prompt_t p = {.message = message, .placeholder = placeholder, .allow_empty = allow_empty};
+    return actx_prompt_ex(c, &p, err);
+}
+
+char *actx_prompt_ex(const actx_t *c, const auth_prompt_t *p, char **err) {
     if (!c->h || !c->h->prompt) {
         *err = xasprintf("%s login requires onPrompt callback", c->label);
         return NULL;
     }
-    auth_prompt_t p = {message, placeholder, allow_empty, false};
-    char *a = c->h->prompt(c->h->ud, &p);
+    char *a = c->h->prompt(c->h->ud, p);
     if (!a || actx_aborted(c)) {
         free(a);
         *err = xstrdup("Login cancelled");
@@ -1040,7 +1044,7 @@ static int factory_region(const actx_t *c, const char *phase, json_t **credp, co
 int auth_after_exchange(const char *hook, const actx_t *c, const char *phase, json_t **cred, const json_t *raw,
                         const json_t *stored, char **err) {
     if (!hook) return 0;
-    if (str_eq(hook, "google-gemini-cli-project") || str_eq(hook, "google-antigravity-project")) {
+    if (str_eq(hook, "google-antigravity-project")) {
         if (!str_eq(phase, "login")) return 0; /* refresh keeps the stored projectId (merged by the caller) */
         const char *rt = json_get_str(raw, "refresh_token");
         if (!rt || !*rt) {
@@ -1072,6 +1076,9 @@ int auth_after_exchange(const char *hook, const actx_t *c, const char *phase, js
     if (str_eq(hook, "muse-code-key")) return muse_code_key(c, *cred, err);
     if (str_eq(hook, "factory-droid-region")) return factory_region(c, phase, cred, raw, stored, err);
     if (str_eq(hook, "gitlab-duo-clear-cache")) return 0; /* omc keeps no GitLab Duo direct-access cache */
+    /* devinIdentityHook (omp 8369d4772d) reads email / user id / organization from the Devin usage provider's
+     * GetUserStatus call; omc has no Devin usage provider, so the login is stored the way omp stores an unidentified one */
+    if (str_eq(hook, "devin-identity")) return 0;
     *err = xasprintf("auth rules reference unknown after-exchange hook \"%s\"", hook);
     return -1;
 }
@@ -1528,6 +1535,9 @@ int auth_refresh_credential(const char *provider, const json_t *d, const json_t 
     vset(vars, "base", base);
     vset(vars, "auth", authb);
     vset(vars, "claude_code_sdk_version", "0.60.0");
+    /* registry/engine/refresh.ts refreshReasonParam (omp 6425ef0e8d): omc refreshes only an access token nearing
+     * expiry (no 401 auth-recovery refresh), so it is always proactive */
+    vset(vars, "refresh_reason", "proactive_expiry");
     vset(std, "grant_type", "refresh_token");
     vset(std, "client_id", client_id);
     vset(std, "client_secret", client_secret);

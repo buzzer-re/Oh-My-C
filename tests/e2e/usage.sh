@@ -1,5 +1,5 @@
 # Provider usage (WP-24) against tests/e2e/mock_usage.py; sourced from run.sh (uses $B $T $PORT $ROOT, check() and
-# fail). Fake credentials only: Anthropic / Z.AI / Gemini CLI / Copilot reach the mock through models.yml baseUrl
+# fail). Fake credentials only: Anthropic / Z.AI / Copilot reach the mock through models.yml baseUrl
 # overrides (as omp does), Codex (canonical ChatGPT origin only) through OMC_AUTH_URL_REWRITE. Expected strings
 # were checked against omp v18.14.2 driven against the same mock.
 USGPORT=$((PORT + 13))
@@ -12,8 +12,6 @@ providers:
     baseUrl: http://127.0.0.1:$USGPORT/v1
   zai:
     baseUrl: http://127.0.0.1:$USGPORT/api/coding/paas/v4
-  google-gemini-cli:
-    baseUrl: http://127.0.0.1:$USGPORT
   github-copilot:
     baseUrl: http://127.0.0.1:$USGPORT
 YML
@@ -22,7 +20,6 @@ cat > "$T/usgcreds.json" <<JSON
 {"version": 1, "credentials": [
  {"provider": "anthropic", "credential": {"type": "oauth", "access": "sk-ant-oat01-mock", "refresh": "sk-ant-ort01-mock", "expires": $USGEXP}},
  {"provider": "zai", "credential": {"type": "api_key", "key": "zai-mock-key"}},
- {"provider": "google-gemini-cli", "credential": {"type": "oauth", "access": "ya29.mock", "refresh": "1//mock", "expires": $USGEXP, "projectId": "proj-gemini-1", "email": "gem.user@example.com"}},
  {"provider": "github-copilot", "credential": {"type": "oauth", "access": "tid=mock", "refresh": "gho_mock", "expires": $USGEXP}},
  {"provider": "openai-codex", "credential": {"type": "oauth", "access": "codex-mock-token", "refresh": "codex-r", "expires": $USGEXP, "accountId": "acct-codex-1", "email": "codex.user@example.com"}}
 ]}
@@ -32,7 +29,7 @@ USGENV=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_OAUTH_TOKEN -u GH_TOKEN -u GITHUB_
         OMC_AUTH_URL_REWRITE="https://chatgpt.com=http://127.0.0.1:$USGPORT")
 "${USGENV[@]}" "$B" auth import "$T/usgcreds.json" >/dev/null 2>&1
 pushd "$T/usgwork" >/dev/null
-check "usage breakdown"  $'Anthropic \xe2\x80\x94 1 account\n  \xe2\x97\x8f claude.user@example.com\n      \xe2\x97\x8f Claude 5 Hour         \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91  42.0% used \xc2\xb7 resets in 2h' \
+check "usage breakdown"  $'Anthropic \xe2\x80\x94 1 account\n  \xe2\x97\x8f claude.user@example.com \xc2\xb7 plan: Max 20x\n      \xe2\x97\x8f Claude 5 Hour         \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91\xe2\x96\x91  42.0% used \xc2\xb7 resets in 2h' \
     "${USGENV[@]}" "$B" usage
 check "usage extra usd"  'Claude Extra Usage    ' "${USGENV[@]}" "$B" usage
 check "usage capacity"   $'capacity: 5h \xe2\x86\x92 0.42/1 account used (0.58\xc3\x97 quota left) \xc2\xb7 7d \xe2\x86\x92 0.77/1 account used' "${USGENV[@]}" "$B" usage
@@ -40,19 +37,19 @@ check "usage codex"      $'\xe2\x97\x8f codex.user@example.com \xc2\xb7 plan: pl
 check "usage codex spark" '5 hours (Spark)' "${USGENV[@]}" "$B" usage -p openai-codex
 check "usage copilot"    "Premium Requests (individual) (Monthly)" "${USGENV[@]}" "$B" usage -p github-copilot
 check "usage zai"        "account 1 · plan: pro" "${USGENV[@]}" "$B" usage -p zai
-check "usage redact"     $'  \xe2\x97\x8f pr*\n' "${USGENV[@]}" "$B" usage -p google-gemini-cli -r
+check "usage redact"     $'  \xe2\x97\x8f co* \xc2\xb7 plan: plus' "${USGENV[@]}" "$B" usage -p openai-codex -r
 check "usage json"       '"availableCount": 2' "${USGENV[@]}" "$B" usage -p openai-codex --json
 check "usage json raw"   "no raw" bash -c "${USGENV[*]} '$B' usage --json | grep -c '\"raw\"' | sed 's/^0$/no raw/'"
-check "usage no provider" 'No credentials stored for provider "nope". Providers with stored credentials: anthropic, github-copilot, google-gemini-cli, openai-codex, zai.' \
+check "usage no provider" 'No credentials stored for provider "nope". Providers with stored credentials: anthropic, github-copilot, openai-codex, zai.' \
     "${USGENV[@]}" "$B" usage -p nope
-check "usage accounts"   $'anthropic\n  (no identity key: no pool can name this account)\ngoogle-gemini-cli\n  email:gem.user@example.com' "${USGENV[@]}" "$B" usage accounts
+check "usage accounts"   $'anthropic\n  (no identity key: no pool can name this account)\ngithub-copilot\n  (no identity key: no pool can name this account)\nopenai-codex\n  email:codex.user@example.com' "${USGENV[@]}" "$B" usage accounts
 check "usage accounts redact" '`omc usage accounts` prints identity keys verbatim for configuration; --redact does not apply.' "${USGENV[@]}" "$B" usage accounts -r
 check "usage history"    $'Usage history \xc2\xb7 last 7d \xc2\xb7 peak per bucket' "${USGENV[@]}" "$B" usage --history
 check "usage invalidate" 'Invalidated cached usage reports for provider "zai".' "${USGENV[@]}" "$B" usage invalidate -p zai
-check "usage reset list" $'Saved rate-limit resets:\n- codex.user@example.com [Codex \xc2\xb7 openai-codex/5]: 2 saved, 2 usable now, expires' "${USGENV[@]}" "$B" usage reset
+check "usage reset list" $'Saved rate-limit resets:\n- codex.user@example.com [Codex \xc2\xb7 openai-codex/4]: 2 saved, 2 usable now, expires' "${USGENV[@]}" "$B" usage reset
 check "usage reset claude" $'- account [Claude \xc2\xb7 anthropic/1]: 0 saved, 0 usable now (not eligible)' "${USGENV[@]}" "$B" usage reset
 check "usage reset active" '`omc usage reset` runs outside a session, so no account is active.' "${USGENV[@]}" "$B" usage reset codex/active
-check "usage reset spend" $'Reset applied for codex.user@example.com (Codex) \xe2\x80\x94 your rate-limit window has been refreshed.' "${USGENV[@]}" "$B" usage reset codex/5
+check "usage reset spend" $'Reset applied for codex.user@example.com (Codex) \xe2\x80\x94 your rate-limit window has been refreshed.' "${USGENV[@]}" "$B" usage reset codex/4
 check "usage help"       "Saved reset to spend with \`reset\`: <provider>/<credential id> as \`omc usage reset\` lists it" "$B" usage --help
 # text-mode /usage over RPC (helpers/usage-report.ts) and ACP _omp/usage
 check "usage rpc"        $'Anthropic\\n  Models with usage data\\n    anthropic/claude' \

@@ -178,7 +178,7 @@ usually because Bun, npm packages or Rust crates provide it in omp.
 | `ai/provider_openai_completions.c` | `providers/openai-completions.ts`, `openai-shared.ts` |
 | `ai/provider_openai_responses.c` | `providers/openai-responses.ts`, `azure-openai-responses.ts`, `openai-codex-responses.ts` |
 | `ai/provider_google.c`, `google_schema.c`, `google_auth.c` | `providers/google.ts`, `google-vertex.ts`, `google-shared.ts`, `google-auth.ts`, `utils/schema/*` |
-| `ai/provider_gemini_cli.c`, `google_cca.c` | `providers/google-gemini-cli.ts`, `catalog/src/wire/gemini-headers.ts`, `registry/oauth/google-{gemini-cli,antigravity}.ts` |
+| `ai/provider_gemini_cli.c`, `google_cca.c` | `providers/google-gemini-cli.ts`, `catalog/src/wire/gemini-headers.ts`, `registry/oauth/google-antigravity.ts` |
 | `ai/provider_ollama.c` | `providers/ollama.ts` |
 | `ai/provider_bedrock.c`, `aws.c` | `providers/amazon-bedrock.ts`, `aws-sigv4.ts`, `aws-eventstream.ts`, `aws-credentials.ts`, `registry/aws.ts` |
 | `ai/provider_cursor.c`, `cursor_proto.c`, `pb.c` | `providers/cursor.ts`, `connect-frame.ts`, `connect-error-detail.ts`, `catalog/src/discovery/cursor-proto.ts`, `coding-agent/src/cursor.ts` (exec handlers) |

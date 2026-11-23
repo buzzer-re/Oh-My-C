@@ -41,6 +41,9 @@ typedef struct {
     const char *placeholder;
     bool allow_empty;
     bool secret;
+    /* the yes/no acceptance of a provider's login-warning, asked before any auth URL: hosts that refuse pre-auth input
+     * (RPC) still surface it (omp 39f9483f66) */
+    bool risk_acknowledgement;
 } auth_prompt_t;
 
 /* TUI-friendly variant: never reads stdin unless read_stdin; reports the authorize / verification URL through

@@ -109,7 +109,7 @@ ladder stripped). `ai_stream_dispatch()` (omp `streamSimpleDispatch`) then:
   `idle_timeout_ms` (settings `providers.streamFirstEventTimeoutSeconds` / `streamIdleTimeoutSeconds`,
   -1 auto, 0 off), else `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` / `PI_STREAM_IDLE_TIMEOUT_MS` (OpenAI-family
   APIs and Ollama prefer `PI_OPENAI_STREAM_*`), else the model's compat `streamIdleTimeoutMs` /
-  `streamFirstEventTimeoutMs`, else 300 s; the first-event budget never undercuts the idle one.
+  `streamFirstEventTimeoutMs`, else 900 s (15 minutes since omp 19.1.0); the first-event budget never undercuts the idle one.
   Cloud Code Assist keeps its own first-event watchdog (it fails over between endpoints); Cursor and
   GitLab Duo have none. The byte-level HTTP read timeout is widened so it never fires first.
 - **In-flight caps** (`providers.maxInFlightRequests`, `{provider: n}`): a request holds one of `n`
@@ -140,10 +140,12 @@ The first request with a thinking level (`tp_stream`, from `ai_stream`) first le
   control (openai-completions: `reasoning_effort` × 6 + a plain request = 7 parallel requests); later batches run only
   when nothing was accepted (openai-completions: `openrouter` `reasoning.effort` × 6, `zai` `thinking`, `qwen`
   `enable_thinking`, `qwen-chat-template`, `chat-template` × 6 = 15; anthropic adaptive then budget; Google level then
-  budget; Responses has one). HTTP 400/422 rejects a tier; any other failure (auth, quota, 5xx, timeout) makes the
-  run inconclusive: nothing is saved and the next request probes again. The first accepted format wins with the
-  efforts it accepted; observed reasoning is `reasoningTokens` > 0 or a non-empty thinking block. With nothing
-  accepted but the control the verdict is `none`.
+  budget; Responses has one). HTTP 400/422 rejects a tier; any other failure (auth, quota, 5xx, timeout) is
+  inconclusive for that attempt's format only (omp 537c08fe41). A format whose own ladder finished with an acceptance
+  is saved with the efforts it accepted; an accepted format whose ladder did not finish serves the turn without being
+  saved; with nothing accepted and a ladder unfinished, the turn uses the first format not refused, minus the
+  efforts its probes refused, and the next request probes again. Observed reasoning is `reasoningTokens` > 0 or a
+  non-empty thinking block. With nothing accepted but the control the verdict is `none`.
 - **Cache**: `<agent dir>/thinking-capability.json`, `{"rows":[{provider_id, api, endpoint, wire_model_id,
   capability}]}`, mirroring omp's `thinking_capability` table in `models.db` (omc has no SQLite); `capability` is the
   same JSON text (`checkedAt` ms, `format`, `efforts`, `observed`, `attempts`). The endpoint is the base URL without
@@ -156,8 +158,8 @@ The first request with a thinking level (`tp_stream`, from `ai_stream`) first le
   `google-budget`) and the format's compat overrides (`thinkingFormat`, `reasoningDisableMode`, `supportsReasoning*`,
   toggle-only `omitReasoningEffort`; `none`: no reasoning params, `trustExplicitThinkingOnly`; Anthropic adaptive /
   `disabledThinking: omit`); limits, prices and kind stay. The request then clamps its level onto the learned ladder
-  (omp `clampThinkingLevelForModel`). An inconclusive run sends the request with the first format's hypothesis, so
-  the requested level still goes out.
+  (omp `clampThinkingLevelForModel`). A run that saved nothing sends the request with the format chosen above, so the
+  requested level still goes out and no refused dialect is repeated.
 - **Next start**: the catalog applies a fresh cached capability to every provisional row it loads (custom models,
   `catalog_register`; omp `#finalizeModels`), so the picker shows the learned ladder and no probe runs. Probes and the
   learned overlay never touch the session, its transcript or the TUI (omp logs only at debug level).
@@ -213,15 +215,16 @@ back as an assistant message with `stopReason: "error"` and `errorMessage`.
 |---|---|---|---|
 | `anthropic-messages` | `provider_anthropic.c` | `providers/anthropic.ts`, `anthropic-identity.ts`, `claude-code-fingerprint.ts` | SSE; API key or Claude OAuth identity (Claude Code headers/fingerprint) |
 | `openai-completions`, `openrouter` | `provider_openai_completions.c` | `openai-completions.ts`, `openai-shared.ts` | SSE; per-model compat flags, reasoning formats |
-| `openai-responses`, `azure-openai-responses`, `openai-codex-responses` | `provider_openai_responses.c` | `openai-responses.ts`, `azure-openai-responses.ts`, `openai-codex-responses.ts` | SSE; Azure api-version and deployment map, Codex ChatGPT backend (JWT account header, `store:false`) |
+| `openai-responses`, `azure-openai-responses`, `openai-codex-responses` | `provider_openai_responses.c` | `openai-responses.ts`, `azure-openai-responses.ts`, `openai-codex-responses.ts` | SSE; Azure api-version and deployment map, Codex ChatGPT backend (JWT account header, `store:false`, the session under `session-id` only, and the client `version` from `codex_version.c`: `PI_AI_CODEX_CLIENT_VERSION`, else the newer of the 0.169.0 pin and `<agent dir>/codex-client-version.json`, which a background fetch of npm's `@openai/codex` latest refreshes every 6 h) |
 | `google-generative-ai`, `google-vertex` | `provider_google.c` (+ `google_schema.c`, `google_auth.c`) | `google.ts`, `google-vertex.ts`, `google-shared.ts`, `google-auth.ts` | SSE `streamGenerateContent`; Vertex via API key or Application Default Credentials |
-| `google-gemini-cli` (Gemini CLI, Antigravity) | `provider_gemini_cli.c` (+ `google_cca.c`, `think_heal.c`) | `google-gemini-cli.ts`, `catalog/src/wire/gemini-headers.ts` | Cloud Code Assist `v1internal:streamGenerateContent`, endpoint failover |
+| `google-gemini-cli` (Antigravity, custom Cloud Code Assist providers; the Gemini CLI provider itself was removed in omp 19.1.0) | `provider_gemini_cli.c` (+ `google_cca.c`, `think_heal.c`) | `google-gemini-cli.ts`, `catalog/src/wire/gemini-headers.ts` | Cloud Code Assist `v1internal:streamGenerateContent`, endpoint failover (Antigravity); a custom provider sends `Accept: text/event-stream` and no client identity |
 | `ollama-chat` | `provider_ollama.c` | `ollama.ts` | NDJSON `POST /api/chat` |
 | `bedrock-converse-stream` | `provider_bedrock.c` (+ `aws.c`) | `amazon-bedrock.ts`, `aws-*.ts` | AWS event-stream; SigV4 or bearer key |
 | `cursor-agent` | `provider_cursor.c` (+ `cursor_proto.c`, `pb.c`) | `cursor.ts`, `connect-frame.ts`, `cursor-proto.ts` | Connect + protobuf over HTTP/1.1 RunSSE + BidiAppend |
 | `devin-agent` | `provider_devin.c` | `devin.ts`, `catalog/src/wire/devin*.ts` | Connect + protobuf server stream |
 | provider `gitlab-duo` (on anthropic/completions/responses APIs) | `provider_gitlab_duo.c` | `gitlab-duo.ts` | direct-access token exchange, then GitLab Cloud Connector proxy through the matching provider above |
 | `gitlab-duo-agent` | `provider_gitlab_duo_workflow.c` | `gitlab-duo-workflow.ts` | Duo Workflow Service over WebSocket |
+| `kiro-api` | `kiro.c` (+ `aws.c`; login `config/auth_kiro.c`) | `providers/kiro/{transform,stream}.ts`, `catalog/src/wire/kiro*.ts`, `discovery/kiro.ts` | AWS JSON 1.0 `GenerateAssistantResponse` with the Kiro CLI 3.2.0 identity headers, AWS event-stream reply; the roster is discovered per credential (below) |
 | `typesafe`, `openrouter-decisions`, `openai-decisions`, `workers-ai-systemone`, `liquid-systemone`, `nace-systemone`, `google-decisions` (judgment only) | `judgment_native.c` | `ai/src/judgment/{native,systemone,openai-decisions,google-decisions}.ts` | typed-question APIs used by the eval judge chain, not by chat; a gateway 502 `upstream_credentials_exhausted` is not retried |
 
 The catalog also lists APIs omc does not serve (`local-inference`, images, video, embeddings,
@@ -251,8 +254,27 @@ Points worth knowing per provider:
   `stopDetails {type: "compaction"}` + `providerPayload {type: "anthropicCompaction", …}`, and a summary
   message carrying that payload replays as a `compaction` block opening the following assistant turn
   (its `filesText` queued as a user turn before the first newer message). `anthropic_compaction_supported()`
-  is omp's `supportsAnthropicCompaction` for the model's own route. Bedrock Converse compaction (an
+  is omp's `supportsAnthropicCompaction` for the model's own route; a gateway outside the known deployments qualifies
+  only with `remoteCompaction: {api: "anthropic-messages", enabled: true}` for its own configured `baseUrl`. Bedrock Converse compaction (an
   InvokeModel side request) and the Codex V2 streaming compaction are not implemented.
+- **Kiro** (`kiro.c`): the request key is the credential codec's JSON (`{kind:"oauth", token, region, loginId,
+  profileArn?}` from a stored login, `{kind:"api_key", token, region?}` or a raw `ksk_` key; `KIRO_API_KEY`,
+  `KIRO_API_REGION` pins an unpinned key). Requests go to `runtime.<region>.kiro.dev` (an unpinned key uses the region
+  discovery found) with `tokentype: API_KEY` for keys and the login's `profileArn` in the body. The transform folds the
+  transcript into alternating user/assistant turns (system prompt in the first user turn, the continuation prompt for
+  an empty turn, images only on the current turn, retired tools declared as placeholders), cuts tool results at the
+  800 KB service limit and, over the 850,000-bytes-per-200k-tokens budget, shrinks the oldest results to 25 KB; what
+  still does not fit is a context overflow (as are HTTP 413, `CONTENT_LENGTH_EXCEEDS_THRESHOLD` and "Input is too
+  long."). Thinking: adaptive models get `thinking`/`output_config.effort`/`max_tokens`, effort models
+  `reasoning.effort`; thinking off sends the advertised off value. One replay before any visible or metered output
+  for a capacity throttle, the transient "Invalid tool use format." rejection or a body cut off mid-frame.
+  Unfinished tool calls of a truncated or filtered turn are dropped; a refusal ends as `stopDetails {type:
+  "refusal"}`. Usage comes from `metadataEvent.tokenUsage`, `usage.contextTokens` from `contextUsageEvent`.
+  **Discovery**: `kiro_discover()` (omp `kiroModelManagerOptions`) lists `ListAvailableModels` (paged) for the
+  stored login or key, maps thinking controls from `additionalModelRequestFieldsSchema`, and registers the roster
+  (unlisted earlier models are marked gone), cached 2 h per credential in `<agent dir>/kiro-models.json`; a failed
+  refresh keeps the last cache. It runs at startup when Kiro has a credential, after `/login kiro`, on hub F5 and
+  `omc models refresh`. omp unions the rosters of several Kiro accounts; omc stores one credential per provider.
 - **Transcript dialects** (`dialect.c`): each dialect's `renderTranscript` and
   `serializeConversationForSummary`, used for compaction and branch-summary input (not for in-band tool
   calls).
@@ -317,6 +339,7 @@ starts only on an explicit `yes` (any other answer or a cancel is "Login cancell
 | `device-code` | `auth_engine.c` | RFC 8628 with interval / `slow_down` / expiry / denial, templated endpoints, OIDC discovery (xAI), JWT-claim fields |
 | `api-key` | `auth_engine.c` | prompt, normalization, optional validation probes (chat completions / anthropic messages / models endpoint) |
 | custom hooks | `auth_custom.c` | GitHub Copilot, Cursor, Devin CLI seat key (`devin-cli`), Windsurf Enterprise (`devin-windsurf`), Codex device, Alibaba coding/token plan, Xiaomi, Perplexity, Cloudflare AI Gateway / Workers AI, Snowflake, Kilo, Mistral Vibe browser sign-in (mints a plain API key) |
+| `kiro-login` / `kiro-refresh` | `auth_kiro.c` | Kiro: IAM Identity Center (Start URL + OIDC region, AWS SSO-OIDC device grant, then the profile picker over the partition's regions, GovCloud included), Builder ID, Google/GitHub (Kiro's social device flow; the poll's profile ARN, else a listed profile, else the CLI's default), `ksk_` API key (pinned to `KIRO_API_REGION` or the one bootstrap region that accepts it, stored as the codec JSON). Each login mints a random `accountId`. Refresh: the OIDC token endpoint for device logins, the Kiro auth service (which may move the profile) for social ones; unrecoverable failures say "run /login kiro again" (omp also disables the row) |
 
 Entry points: `omc login [provider]`, `/login` in the TUI, the setup wizard, and RPC
 `get_login_providers`. MCP servers reuse the same oauth-code machinery (`src/mcp/oauth.c`, see
@@ -342,7 +365,7 @@ There are two levels:
      min(0.5 s·2ⁿ, 8 s) with up to 25% jitter; a header retry-after wins when longer, one above `retry.maxDelayMs`
      fails at once (11 requests / ~48 s for a plain 503).
    - Codex SSE: 6 attempts at 500 ms·(n+1), 5 min cap. Ollama: 5 attempts at 2 s / 5 s / 10 s, llama.cpp tool-call
-     parse 500s fail at once. Bedrock: fetchWithRetry defaults (5 attempts). Gemini CLI: 4 attempts at 1 s·2ⁿ on the
+     parse 500s fail at once. Bedrock: fetchWithRetry defaults (5 attempts). Cloud Code Assist: 4 attempts at 1 s·2ⁿ on the
      last endpoint. Google generative AI / Vertex: no transport retries (one request). A segmented long decode
      (Gemini 4 Hydrogen: `finishReason: CONTINUATION` + `continuationToken` per 65,536-token segment) resumes with
      the token (top-level on the Gemini API / Vertex, `request.continuationToken` in the Cloud Code Assist envelope)

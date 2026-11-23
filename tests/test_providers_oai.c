@@ -2,6 +2,8 @@
 #include <time.h>
 #include "ai/leaked_thinking.h"
 #include "ai/provider_openai.h"
+#include "core/fs.h"
+#include <unistd.h>
 
 #include <math.h>
 
@@ -288,6 +290,60 @@ static void test_completions_dialects(void) {
     json_free(sys);
     json_free(qwen.raw);
     json_free(msgs);
+}
+
+/* reasoning_details (omp 5759bdacc9, 4a064201a9, 67ccb2ca07, 25c2fb8211, e1cffa057e): Bifrost streams Gemini thinking
+ * only as reasoning.text entries; a plain field arriving after them is a mirror; the entries replay verbatim */
+static void test_reasoning_details(void) {
+    tmodel_t t;
+    model_init(&t, "{\"id\":\"gemini-3.5-flash\",\"api\":\"openai-completions\",\"provider\":\"bifrost\",\"reasoning\":true,\"compat\":{}}");
+    const char *sse =
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"index\":0,\"text\":\"Think \"}]}}]}\n\n"
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"mirror\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"index\":0,\"text\":\"hard.\",\"signature\":\"SIG\"}]}}]}\n\n"
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\n"
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"id\":\"call_1\",\"signature\":\"BLOB\"}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+    oaic_stream_t *st = oaic_stream_new(&t.m, NULL, NULL);
+    int rc = feed_sse(oaic_stream_on_sse, st, sse, 4096);
+    json_t *msg = oaic_stream_finish(st, rc, NULL);
+    json_t *th = block_of(msg, "thinking", 0);
+    CHECK_STR(json_get_str(th, "thinking"), "Think hard.");
+    json_t *env = json_parse_str(json_get_str(th, "thinkingSignature"));
+    char *d = json_dump(json_get(env, "reasoningDetails"), 0);
+    CHECK_STR(d, "[{\"type\":\"reasoning.text\",\"index\":0,\"text\":\"Think hard.\",\"signature\":\"SIG\"},"
+                 "{\"type\":\"reasoning.encrypted\",\"id\":\"call_1\",\"signature\":\"BLOB\"}]");
+    free(d);
+    CHECK_STR(json_get_str(env, "field"), "reasoning");
+    json_free(env);
+    CHECK(json_get_str(block_of(msg, "toolCall", 0), "thoughtSignature") != NULL); /* the encrypted entry stays on its call */
+    /* replay: the entries go back verbatim on the same model's turn */
+    json_set_str(msg, "provider", "bifrost");
+    json_t *msgs = json_arr();
+    json_push(msgs, J("{\"role\":\"user\",\"content\":\"hi\"}"));
+    json_push(msgs, msg);
+    json_push(msgs, J("{\"role\":\"toolResult\",\"toolCallId\":\"call_1\",\"toolName\":\"read\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"isError\":false}"));
+    ai_context_t ctx = {.messages = msgs};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    json_t *p = oaic_build_request(&t.m, &ctx, &o);
+    json_t *am = json_at(json_get(p, "messages"), 1);
+    d = json_dump(json_get(am, "reasoning_details"), 0);
+    /* the model's own unsigned thinking text would be dropped where its thinking is not sent; signed text stays */
+    CHECK_STR(d, "[{\"type\":\"reasoning.text\",\"index\":0,\"text\":\"Think hard.\",\"signature\":\"SIG\"},"
+                 "{\"type\":\"reasoning.encrypted\",\"id\":\"call_1\",\"signature\":\"BLOB\"}]");
+    free(d);
+    json_free(p);
+    json_free(msgs);
+    /* an encrypted-only turn stays empty, so the empty-stop retry still runs */
+    st = oaic_stream_new(&t.m, NULL, NULL);
+    rc = feed_sse(oaic_stream_on_sse, st,
+                  "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"data\":\"X\"}]},"
+                  "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                  4096);
+    msg = oaic_stream_finish(st, rc, NULL);
+    CHECK(json_len(json_get(msg, "content")) == 0);
+    json_free(msg);
+    json_free(t.raw);
 }
 
 static void test_completions_stream(void) {
@@ -1271,7 +1327,53 @@ static void test_replay_safe(void) {
     json_free(t.raw);
 }
 
+/* omp f54745ac23: the Codex client version tracks npm through a record in the agent dir, never below the pin */
+static void test_codex_client_version(void) {
+    setenv("OMC_PROVIDER_URL_REWRITE", "https://registry.npmjs.org=http://127.0.0.1:1", 1); /* never the real registry */
+    setenv("PI_AI_CODEX_CLIENT_VERSION", "9.8.7", 1);
+    CHECK_STR(ai_codex_client_version(), "9.8.7");
+    unsetenv("PI_AI_CODEX_CLIENT_VERSION");
+    CHECK(ai_codex_semver_cmp("0.170.0", "0.169.0") > 0);
+    CHECK(ai_codex_semver_cmp("0.99.0", "0.169.0") < 0);
+    CHECK(!ai_codex_semver_valid("0.170.0-alpha.1"));
+    CHECK(!ai_codex_semver_valid("1.2"));
+    const char *dir = omc_agent_dir();
+    fs_mkdir_p(dir, 0755);
+    char *path = omc_agent_path("codex-client-version.json");
+    struct {
+        const char *version, *want;
+    } cases[] = {{"0.200.1", "0.200.1"}, {"0.100.0", CODEX_CLIENT_VERSION_PIN}, {"0.300.0-beta", CODEX_CLIENT_VERSION_PIN}};
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char *rec = xasprintf("{\"version\":\"%s\",\"checkedAt\":%lld}", cases[i].version, (long long)now_ms());
+        fs_write(path, rec, strlen(rec));
+        free(rec);
+        ai_codex_client_version_reset_for_tests();
+        CHECK_STR(ai_codex_client_version(), cases[i].want);
+    }
+    /* fixed for the life of the process */
+    fs_write(path, "{\"version\":\"0.400.0\",\"checkedAt\":1}", 37);
+    CHECK_STR(ai_codex_client_version(), CODEX_CLIENT_VERSION_PIN);
+    unlink(path);
+    free(path);
+    ai_codex_client_version_reset_for_tests();
+    setenv("PI_AI_CODEX_CLIENT_VERSION", CODEX_CLIENT_VERSION_PIN, 1);
+}
+
+/* omp 6c57f9091e: codex-rs routing fields lead the body, the rest keeps its order */
+static void test_codex_routing_order(void) {
+    json_t *b = json_parse_str("{\"input\":[1],\"instructions\":\"x\",\"stream\":true,\"tools\":[],\"service_tier\":\"priority\","
+                               "\"model\":\"gpt-6-luna\",\"store\":false}");
+    oair_codex_routing_fields_first(b);
+    char *d = json_dump(b, 0);
+    CHECK_STR(d, "{\"model\":\"gpt-6-luna\",\"stream\":true,\"service_tier\":\"priority\",\"input\":[1],\"instructions\":\"x\","
+                 "\"tools\":[],\"store\":false}");
+    free(d);
+    json_free(b);
+}
+
 int main(void) {
+    test_codex_routing_order();
+    test_codex_client_version();
     test_prompt_cache_session_header();
     test_retry_hints();
     test_replay_safe();
@@ -1279,6 +1381,7 @@ int main(void) {
     test_completions_mistral();
     test_completions_dialects();
     test_completions_stream();
+    test_reasoning_details();
     test_completions_stream_errors();
     test_responses_request();
     test_tool_name_prefix();

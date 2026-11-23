@@ -28,6 +28,7 @@ void actx_progress(const actx_t *c, const char *msg);
 void actx_auth(const actx_t *c, const char *url, const char *launch, const char *instructions);
 /* owned answer; NULL with *err = "Login cancelled" when cancelled */
 char *actx_prompt(const actx_t *c, const char *message, const char *placeholder, bool allow_empty, char **err);
+char *actx_prompt_ex(const actx_t *c, const auth_prompt_t *p, char **err); /* with the masked-entry flag */
 bool actx_sleep(const actx_t *c, int64_t ms); /* false when aborted */
 
 /* HTTP for auth flows: OMC_AUTH_URL_REWRITE ("from=to,from=to", prefix match; test-only) applies to every URL */
@@ -72,6 +73,9 @@ char *auth_windsurf_exchange(const actx_t *c, const char *code, const char *veri
 
 /* auth_custom.c */
 int auth_custom_hook_login(const actx_t *c, const char *hook, alogin_t *out, char **err);
+/* auth_kiro.c: the kiro-login / kiro-refresh hooks */
+int auth_kiro_login(const actx_t *c, alogin_t *out, char **err);
+int auth_kiro_refresh(const json_t *current, json_t **out, char **err);
 int auth_custom_hook_refresh(const char *hook, const char *provider, const json_t *stored, json_t **out, char **err);
 
 #endif

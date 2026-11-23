@@ -5,6 +5,7 @@
 #include "ai/ai.h"
 #include "ai/aws.h"
 #include "ai/google_auth.h"
+#include "ai/kiro.h"
 #include "core/fs.h"
 #include "core/proc.h"
 #include "net/http.h"
@@ -230,7 +231,12 @@ char *auth_get_api_key(const char *provider) {
                 dd = json_get_obj(e, "descriptor") ? json_get_obj(e, "descriptor") : descriptor(provider);
             }
             const char *acc = json_get_str(e, "access");
-            if (acc) r = str_eq(json_get_str(dd, "apiKeyFormat"), "structured") ? structured_key(e) : xstrdup(acc);
+            if (acc && str_eq(provider, "kiro")) {
+                /* registry/kiro.ts kiroTransport.getApiKey: requests route by the login's region, profile and login id */
+                char *kerr = NULL;
+                if (!(r = kiro_encode_oauth_row(e, &kerr))) LOGW("kiro: %s", kerr ? kerr : "?");
+                free(kerr);
+            } else if (acc) r = str_eq(json_get_str(dd, "apiKeyFormat"), "structured") ? structured_key(e) : xstrdup(acc);
         }
     }
     pthread_mutex_unlock(&g_mu);
@@ -670,7 +676,8 @@ static int login_run(const char *provider, const json_t *d, bool embed, const au
     if (warning) {
         char *msg = xasprintf("\xe2\x9a\xa0 %s: use at your own risk\n\n%s\n\nType \"yes\" to accept the risk and continue", c.label,
                               warning);
-        char *ans = actx_prompt(&c, msg, "yes", true, err);
+        auth_prompt_t q = {.message = msg, .placeholder = "yes", .allow_empty = true, .risk_acknowledgement = true};
+        char *ans = actx_prompt_ex(&c, &q, err);
         free(msg);
         if (!ans) return -1;
         char *t = str_trim(ans);

@@ -490,7 +490,7 @@ char *mr_expand_role_alias(const char *value) {
 /* ---------- preferences ---------- */
 
 static const char *const PROVIDER_ORDER[] = {
-    "openai-codex", "anthropic", "openai", "google-gemini-cli", "google", "google-vertex", "kimi-code", "moonshot",
+    "openai-codex", "anthropic", "openai", "google", "google-vertex", "kimi-code", "moonshot",
     "qwen-portal", "alibaba-token-plan", "zai", "xai-oauth", "xai", "mistral", "deepseek", "groq", "fireworks",
     "cerebras", "baseten", "deepinfra", "openrouter", "aimlapi", "together", "alibaba-coding-plan", "umans",
     "google-antigravity", "opencode-zen", "gitlab-duo", "opencode-go", "kilo", "vercel-ai-gateway",
@@ -1966,7 +1966,9 @@ const char *mr_rate_limit_reason(const char *msg) {
     char *l = lower_dup(msg);
     const char *r;
     /* a zero-allowance notice is the same quota state, though its "Rate limit exceeded" body would land below */
-    if (strstr(l, "quota will reset") || strstr(l, "exhausted your capacity") || ai_zero_allowance_text(msg)) r = "QUOTA_EXHAUSTED";
+    if (strstr(l, "quota will reset") || strstr(l, "exhausted your capacity") || ai_zero_allowance_text(msg) ||
+        ai_budget_exceeded_text(msg))
+        r = "QUOTA_EXHAUSTED";
     else if (strstr(l, "concurrent") || strstr(l, "concurrency")) r = "CONCURRENT_LIMIT";
     else if (strstr(l, "capacity") || strstr(l, "overloaded") || strstr(l, "529") || strstr(l, "503"))
         r = "MODEL_CAPACITY_EXHAUSTED";

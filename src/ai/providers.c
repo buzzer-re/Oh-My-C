@@ -1,5 +1,6 @@
 /* providers.c - registry of built-in API implementations. */
 #include "ai.h"
+#include "kiro.h"
 
 /* stream.ts routes provider "gitlab-duo" to streamGitLabDuo whatever the row's api: the chat APIs its rows use
  * dispatch through these wrappers (direct-access token exchange + Cloud Connector proxy). */
@@ -40,4 +41,5 @@ void ai_providers_init(void) {
     ai_register_api("cursor-agent", provider_cursor_stream);
     ai_register_api("devin-agent", provider_devin_stream);
     ai_register_api("gitlab-duo-agent", provider_gitlab_duo_workflow_stream);
+    ai_register_api("kiro-api", provider_kiro_stream);
 }

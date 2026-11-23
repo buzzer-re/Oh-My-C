@@ -13,6 +13,7 @@
  * Role assignments persist to modelRoles.<role> in config.yml, or to the project config when
  * modelRoleStorage is "project" (a project/global scope strip asks first). F5 re-probes local servers;
  * SGR mouse: sidebar clicks/wheel, row hover, click-to-select / click-again-to-activate, footer chips. */
+#include "ai/kiro.h"
 #include "ui/modelbrowser.h"
 #include "ui/overlays.h"
 #include "ui/ui.h"
@@ -2496,7 +2497,7 @@ static void hub_mouse(hub_t *h, const tui_key_t *k) {
 
 /* ---------- keys ---------- */
 
-/* F5: re-probe the provider's model list (local servers; remote catalogs are bundled) */
+/* F5: re-probe the provider's model list (local servers and Kiro; other remote catalogs are bundled) */
 static void f5_refresh(hub_t *h) {
     const entry_t *e = &h->entries.v[h->active];
     if (e->kind != E_PROVIDER || e->locked) return;
@@ -2504,6 +2505,7 @@ static void f5_refresh(hub_t *h) {
     for (size_t i = 0; i < ARRAY_LEN(LOCAL_PROVIDERS); i++)
         if (!strcmp(LOCAL_PROVIDERS[i], e->provider)) local = true;
     if (local || catalog_provider_keyless(e->provider)) catalog_discover_local(true);
+    else if (!strcmp(e->provider, "kiro")) kiro_discover(true); /* the credential's roster (kiroModelManagerOptions) */
     refresh_after_mutation(h);
 }
 

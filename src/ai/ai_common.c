@@ -449,6 +449,29 @@ json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_str
     return tp_stream(model, ctx, opts, cb, ud); /* withProbedThinking */
 }
 
+/* normalizeMandatoryReasoningOptions: mandatory-reasoning endpoints (thinking.requiresEffort, not suppressWhenOff) reject
+ * disabled or omitted thinking, so an effort-less request runs at defaultSupportedEffort (the effort routed to the
+ * default wire id, else the lowest supported one). EFFORT_OFF when the request keeps its options. */
+static ai_effort_t mandatory_reasoning_floor(const ai_model_t *m, const ai_stream_opts_t *o) {
+    const json_t *th = m->thinking;
+    if (!m->reasoning || !th || !json_get_bool(th, "requiresEffort", false) || json_get_bool(th, "suppressWhenOff", false))
+        return EFFORT_OFF;
+    if (o->reasoning != EFFORT_OFF && !o->disable_reasoning && !o->force_reasoning_off) return EFFORT_OFF;
+    json_t *efforts = json_get_arr(th, "efforts");
+    if (json_len(efforts) == 0) return EFFORT_OFF;
+    json_t *routing = json_get_obj(th, "effortRouting");
+    const char *wire = json_get_str(m->raw, "requestModelId");
+    for (int pass = routing && wire ? 0 : 1; pass < 2; pass++)
+        for (int e = EFFORT_MINIMAL; e <= EFFORT_MAX; e++) {
+            bool listed = false;
+            json_t *it;
+            json_arr_foreach(efforts, i, it) if (str_eq(json_sv(it), effort_name((ai_effort_t)e))) listed = true;
+            if (listed && (pass == 1 || str_eq(json_get_str(routing, effort_name((ai_effort_t)e)), wire))) return (ai_effort_t)e;
+        }
+    ai_effort_t first;
+    return effort_parse(json_sv(json_at(efforts, 0)), &first) == 0 ? first : EFFORT_OFF;
+}
+
 json_t *ai_stream_dispatch(const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts, ai_event_cb cb,
                            void *ud) {
     ai_stream_fn fn;
@@ -462,6 +485,14 @@ json_t *ai_stream_dispatch(const ai_model_t *model, const ai_context_t *ctx, con
         tiered = *opts;
         tiered.service_tier = ai_resolve_model_service_tier(&opts->service_tiers, model);
         opts = &tiered;
+    }
+    ai_stream_opts_t mandatory;
+    ai_effort_t floor = mandatory_reasoning_floor(model, opts);
+    if (floor != EFFORT_OFF) {
+        mandatory = *opts;
+        mandatory.reasoning = floor;
+        mandatory.disable_reasoning = mandatory.force_reasoning_off = false;
+        opts = &mandatory;
     }
     json_t *paused = paused_message(model, cb, ud);
     if (paused) return paused;
@@ -1377,6 +1408,53 @@ int64_t ai_thinking_budget(const ai_model_t *m, ai_effort_t e, const json_t *cus
 
 /* ---------- transform messages ---------- */
 
+/* foldUserMessagesIntoToolResults: each user/developer message that directly follows a tool result is appended to that
+ * result's content, so the request never continues with user text after a function response. Folding every position,
+ * not only the tail, keeps earlier turns byte-stable for prompt caching; messages carrying native provider history
+ * (providerPayload) stay separate turns. Consumes `in`. */
+static json_t *fold_user_into_tool_results(json_t *in) {
+    json_t *out = json_arr();
+    while (json_len(in)) {
+        json_t *msg = json_arr_remove(in, 0);
+        json_t *prev = json_len(out) ? json_at(out, json_len(out) - 1) : NULL;
+        const char *role = json_get_str(msg, "role");
+        if (!prev || !str_eq(json_get_str(prev, "role"), "toolResult") || !(str_eq(role, "user") || str_eq(role, "developer")) ||
+            !json_is_null(json_get(msg, "providerPayload"))) {
+            json_push(out, msg);
+            continue;
+        }
+        json_t *pc = json_get(prev, "content");
+        if (!json_is_arr(pc)) {
+            json_t *arr = json_arr();
+            if (json_is_str(pc)) {
+                json_t *t = json_obj();
+                json_set_str(t, "type", "text");
+                json_set_str(t, "text", json_sv(pc));
+                json_push(arr, t);
+            }
+            json_set(prev, "content", arr);
+            pc = arr;
+        }
+        json_t *c = json_get(msg, "content");
+        if (json_is_str(c)) {
+            char *t = str_trim(json_sv(c));
+            if (*t) {
+                json_t *p = json_obj();
+                json_set_str(p, "type", "text");
+                json_set_str(p, "text", json_sv(c));
+                json_push(pc, p);
+            }
+            free(t);
+        } else {
+            json_t *p;
+            json_arr_foreach(c, i, p) json_push(pc, json_clone(p));
+        }
+        json_free(msg);
+    }
+    json_free(in);
+    return out;
+}
+
 json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target) {
     json_t *out = json_arr();
     json_t *msg;
@@ -1548,5 +1626,9 @@ json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target) 
     }
     strvec_free(&pending_ids);
     strvec_free(&pending_names);
+    /* compat foldUserAfterToolResult (omp ec588c2710: Gemini 4 on chat-completions / Responses records) */
+    json_t *fold = target ? json_get(target->compat, "foldUserAfterToolResult") : NULL;
+    if (!fold && target) fold = json_get(target->compat_defaults, "foldUserAfterToolResult");
+    if (json_is_bool(fold) && fold->u.b) out = fold_user_into_tool_results(out);
     return out;
 }

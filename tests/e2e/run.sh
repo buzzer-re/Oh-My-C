@@ -42,6 +42,8 @@ trap 'kill $(jobs -p) $MPID 2>/dev/null; rm -rf "$T"' EXIT
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break; sleep 0.1; done
 # OMC_NO_UPDATE_CHECK: no interactive launch looks for a new omc release (tests/e2e/update.sh lifts it against a mock)
 export OMC_CODING_AGENT_DIR="$T/agent" MOCK_KEY=x OMC_NO_TITLE=1 OMC_NO_LOCAL_DISCOVERY=1 OMC_NO_UPDATE_CHECK=1
+# the Codex client version stays at the pin unless a check unsets this (its npm refresh would reach the registry)
+export PI_AI_CODEX_CLIENT_VERSION=0.169.0
 cd "$T/work"
 fail=0
 check() { # name expected-substring command...
@@ -744,13 +746,16 @@ grep -q '"path": "/model/us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/converse
 grep -q '"toolResult": {"toolUseId": "tooluse_mock1"' "$T/bedrock.jsonl" && echo "   ok  bedrock toolResult replay" || { echo "   FAIL bedrock toolResult replay"; fail=1; }
 cp "$T/models.yml.bak" "$T/agent/models.yml"
 # Google: Vertex AI via Application Default Credentials (service-account RS256 JWT -> token endpoint) and Cloud Code
-# Assist (google-gemini-cli / google-antigravity) with a stored OAuth credential, against a local mock; no real creds.
+# Assist (api google-gemini-cli: google-antigravity with a stored OAuth credential, and a custom models.yml provider with
+# a structured key; omp 39c050d4ad removed the google-gemini-cli provider), against a local mock; no real creds.
 GPORT=$((PORT + 2))
 MOCK_LOG="$T/google.jsonl" python3 -I "$ROOT/tests/e2e/mock_google.py" $GPORT & GPID=$!
 trap 'kill $(jobs -p) $MPID $BPID $GPID 2>/dev/null; rm -rf "$T"' EXIT
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$GPORT) 2>/dev/null && break; sleep 0.1; done
-printf '  google-vertex:\n    baseUrl: http://127.0.0.1:%s\n  google-gemini-cli:\n    baseUrl: http://127.0.0.1:%s\n  google-antigravity:\n    baseUrl: http://127.0.0.1:%s\n' \
-    $GPORT $GPORT $GPORT >> "$T/agent/models.yml"
+printf '  google-vertex:\n    baseUrl: http://127.0.0.1:%s\n  google-antigravity:\n    baseUrl: http://127.0.0.1:%s\n' \
+    $GPORT $GPORT >> "$T/agent/models.yml"
+printf '  my-cca:\n    baseUrl: http://127.0.0.1:%s\n    api: google-gemini-cli\n    apiKey: '"'"'{"token":"cca-token","projectId":"proj-cca"}'"'"'\n    models:\n      - id: gemini-2.5-pro\n        reasoning: true\n' \
+    $GPORT >> "$T/agent/models.yml"
 GENV=(env -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_ACCESS_TOKEN -u CLOUDSDK_AUTH_ACCESS_TOKEN -u GOOGLE_CLOUD_API_KEY \
     -u GOOGLE_CLOUD_PROJECT -u GCP_PROJECT -u GCLOUD_PROJECT -u GOOGLE_VERTEX_LOCATION -u GOOGLE_CLOUD_LOCATION -u VERTEX_LOCATION \
     HOME="$T" GCE_METADATA_HOST=127.0.0.1:1 PI_AI_ANTIGRAVITY_VERSION=2.26.0)
@@ -773,11 +778,13 @@ cp "$T/agent/auth.json" "$T/auth.json.bak" 2>/dev/null
 FAR=$(( $(date +%s) * 1000 + 3600000 ))
 printf '{"google-gemini-cli":{"type":"oauth","access":"cca-token","refresh":"r1","expires":%s,"projectId":"proj-cca","email":"me@example.com"},"google-antigravity":{"type":"oauth","access":"cca-token","refresh":"r2","expires":%s,"projectId":"proj-cca"}}' \
     $FAR $FAR > "$T/agent/auth.json"
-check "gemini-cli models" "google-gemini-cli ("  "${GENV[@]}" "$B" models gemini-2.5-pro
-check "gemini-cli text"   "plain cca answer"     "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "hi"
-check "gemini-cli tool"   "Tool said: gc-e2e"    "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "bash:echo gc-e2e"
-check "gemini-cli continuation" "seg1 seg2"  "${GENV[@]}" "$B" --model google-gemini-cli/gemini-2.5-pro --no-session -p "segments:2"
-check "gemini-cli continuation token" "tok-1"  python3 -I -c 'import json,sys; print([r["body"]["request"].get("continuationToken") for r in map(json.loads, open(sys.argv[1])) if r["path"].startswith("/v1internal")])' "$T/google.jsonl"
+# a stored google-gemini-cli login is inert: the provider has no models any more
+check "gemini-cli retired" 'No models matching "google-gemini-cli/"'  "${GENV[@]}" "$B" models google-gemini-cli/
+check "cca custom models" "my-cca"               "${GENV[@]}" "$B" models my-cca/gemini-2.5-pro
+check "cca custom text"   "plain cca answer"     "${GENV[@]}" "$B" --model my-cca/gemini-2.5-pro --no-session -p "hi"
+check "cca custom tool"   "Tool said: gc-e2e"    "${GENV[@]}" "$B" --model my-cca/gemini-2.5-pro --no-session -p "bash:echo gc-e2e"
+check "cca continuation" "seg1 seg2"  "${GENV[@]}" "$B" --model my-cca/gemini-2.5-pro --no-session -p "segments:2"
+check "cca continuation token" "tok-1"  python3 -I -c 'import json,sys; print([r["body"]["request"].get("continuationToken") for r in map(json.loads, open(sys.argv[1])) if r["path"].startswith("/v1internal")])' "$T/google.jsonl"
 # omp 9a37046d3a paused Google Antigravity again: a stored credential is never used and login refuses it.
 # auth.unpausedProviders (omp af8e4c142b) turns it back on from operator layers only (global config, --config,
 # runtime); a project's .omc/config.yml cannot.
@@ -794,7 +801,9 @@ cp "$T/unpause.yml" "$T/agent/config.yml"
 check "antigravity risk"  'Google has suspended accounts that did'  "${GENV[@]}" bash -c 'printf "no\n" | "$0" login google-antigravity' "$B"
 check "antigravity declined" 'Login failed: Login cancelled'  "${GENV[@]}" bash -c 'printf "no\n" | "$0" login google-antigravity' "$B"
 if [ -f "$T/config.yml.bak" ]; then mv "$T/config.yml.bak" "$T/agent/config.yml"; else rm -f "$T/agent/config.yml"; fi
-grep -q '"ua": "GeminiCLI/0.46.0/gemini-2.5-pro (' "$T/google.jsonl" && echo "   ok  gemini-cli client headers" || { echo "   FAIL gemini-cli client headers"; fail=1; }
+# a custom Cloud Code Assist provider sends no Gemini CLI identity (omp 39c050d4ad)
+grep -q '"path": "/v1internal:streamGenerateContent?alt=sse"' "$T/google.jsonl" && ! grep -q '"ua": "GeminiCLI/' "$T/google.jsonl" \
+    && echo "   ok  cca custom client headers" || { echo "   FAIL cca custom client headers"; fail=1; }
 grep -q '"ua": "antigravity/hub/2.26.0 (aidev_client; .*"model": "claude-opus-4-6-thinking", "userAgent": "antigravity"' "$T/google.jsonl" \
     && echo "   ok  antigravity envelope" || { echo "   FAIL antigravity envelope"; fail=1; }
 grep -q '"functionResponse": {"name": "bash"' "$T/google.jsonl" && echo "   ok  cca functionResponse replay" || { echo "   FAIL cca functionResponse replay"; fail=1; }
@@ -929,6 +938,7 @@ fi
 source "$ROOT/tests/e2e/providers_transport.sh"
 source "$ROOT/tests/e2e/providers_devin.sh"
 source "$ROOT/tests/e2e/providers_gitlab.sh"
+source "$ROOT/tests/e2e/providers_kiro.sh"
 source "$ROOT/tests/e2e/images.sh"
 source "$ROOT/tests/e2e/compaction.sh"
 source "$ROOT/tests/e2e/date_reminder.sh"

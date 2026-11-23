@@ -25,7 +25,7 @@
 #define LEX_NOVELTY_WINDOW 8
 #define LEX_STALL_NOVELTY_FLOOR 0.2
 #define LEX_STALL_MIN_RUN 8
-#define GEMINI_HEADER_RUNAWAY_THRESHOLD 36
+#define GEMINI_HEADER_RUNAWAY_THRESHOLD 64
 
 /* ---------- string sets ---------- */
 

@@ -3,6 +3,7 @@
 #include "cli/cli_int.h"
 
 #include "ai/ai.h"
+#include "ai/kiro.h"
 #include "config/auth.h"
 #include "config/model_resolver.h"
 #include "config/settings.h"
@@ -163,6 +164,7 @@ int cmd_models(cparse_t *p) {
     cli_init_runtime(cp_strs(p, "config"));
     if (!strcmp(action, "refresh") && !json && isatty(2)) fprintf(stderr, "Refreshing models from all providers…\n");
     catalog_discover_local(!strcmp(action, "refresh"));
+    kiro_discover(!strcmp(action, "refresh"));
     VEC(const ai_model_t *) avail = {0}, filtered = {0};
     for (size_t i = 0; i < catalog_count(); i++) {
         const ai_model_t *m = catalog_at(i);

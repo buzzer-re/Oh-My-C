@@ -250,7 +250,7 @@ static const cflag_t TOKEN_FLAGS[] = {
 static const char *const TOKEN_EXAMPLES[] = {
     "# Get API key for Anthropic\n  omc token anthropic",
     "# Get raw Copilot credential JSON\n  omc token github-copilot --raw",
-    "# Force refresh and get Gemini CLI token\n  omc token google-gemini-cli --force-refresh",
+    "# Force refresh and get an Antigravity token\n  omc token google-antigravity --force-refresh",
     "# List Anthropic OAuth accounts\n  omc token anthropic --list",
     "# Get the 2nd Anthropic OAuth account's token\n  omc token anthropic --account 2", NULL};
 

@@ -7,8 +7,8 @@
  *               sharedGroup?}, window?: {id, label, durationMs?, resetsAt?, resetLabel?},
  *               amount: {used?, limit?, remaining?, usedFraction?, remainingFraction?, unit}, status?, notes?}
  *
- * One fetcher per provider (anthropic, openai-codex, github-copilot, google-gemini-cli, zai, synthetic, ollama,
- * ollama-cloud) runs against the credential stored in auth.json (or the provider's runtime / env API
+ * One fetcher per provider (anthropic, openai-codex, github-copilot, zai, synthetic, ollama,
+ * ollama-cloud, kiro) runs against the credential stored in auth.json (or the provider's runtime / env API
  * key). Every probe goes through OMC_AUTH_URL_REWRITE so tests point them at mock servers. */
 #ifndef OMC_USAGE_H
 #define OMC_USAGE_H
@@ -35,6 +35,11 @@ typedef struct {
     json_t *(*fetch)(const usage_params_t *p, bool *auth_rejected);
     int64_t failure_backoff_ms; /* 0 = shared 10 s */
 } usage_provider_t;
+
+/* usage/claude.ts claudeProfilePlan: the subscription plan a /api/oauth/profile response names (owned) or NULL */
+char *claude_profile_plan(const json_t *profile);
+/* usage/kiro.ts parseKiroUsage: the report of a GetUsageLimits payload, or NULL without a readable credit breakdown */
+json_t *usage_kiro_parse(const json_t *payload, int64_t fetched_at);
 
 /* built-in fetcher for a provider id, NULL when the provider has no usage endpoint */
 const usage_provider_t *usage_provider_for(const char *provider);

@@ -83,7 +83,7 @@ int ai_image_count_budget(const ai_model_t *m) {
     }
     if (!strcmp(p, "openai")) return 200;
     if (!strcmp(p, "openai-codex")) return official ? 2000 : 200;
-    if (!strcmp(p, "google") || !strcmp(p, "google-vertex") || !strcmp(p, "google-gemini-cli")) return 200;
+    if (!strcmp(p, "google") || !strcmp(p, "google-vertex")) return 200;
     if (!strcmp(p, "google-antigravity")) return claude ? 20 : 60;
     if (!strcmp(p, "amazon-bedrock")) return 90;
     if (!strcmp(p, "cursor")) return str_eq(m->id, "default") || claude ? 20 : 60;

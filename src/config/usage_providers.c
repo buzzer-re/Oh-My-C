@@ -1,10 +1,10 @@
 /* usage_providers.c - per-provider usage fetchers (ports of omp packages/ai/src/usage/{claude,claude-api,
- * openai-codex,openai-codex-base-url,openai-codex-reset,github-copilot,gemini,zai,synthetic,ollama,shared}.ts).
+ * openai-codex,openai-codex-base-url,openai-codex-reset,github-copilot,zai,synthetic,ollama,kiro,shared}.ts).
  * Every request goes through auth_http, so OMC_AUTH_URL_REWRITE redirects the probes to mocks in tests. */
 #define _GNU_SOURCE
 #include "usage.h"
 
-#include "ai/google_cca.h"
+#include "ai/kiro.h"
 #include "ai/provider_anthropic.h"
 #include "config/auth_engine.h"
 #include "session/trace.h"
@@ -1030,6 +1030,28 @@ json_t *usage_claude_consume_reset(const char *token, const char *org_in, const 
 #undef FAIL
 }
 
+/* claudeProfilePlan: "Max 5x" / "Max 20x" from organization.rate_limit_tier, else the organization type (Max, Pro, Team,
+ * Enterprise); NULL when the profile names no recognised plan. Owned. */
+char *claude_profile_plan(const json_t *profile) {
+    json_t *org = json_get_obj(profile, "organization");
+    if (!org) return NULL;
+    const char *tier = json_get_str(org, "rate_limit_tier");
+    for (const char *q = tier; q && (q = str_istr(q, "max_")); q++) {
+        const char *d = q + 4;
+        size_t n = 0;
+        while (isdigit((unsigned char)d[n])) n++;
+        if (n && (d[n] == 'x' || d[n] == 'X')) return xasprintf("Max %.*sx", (int)n, d);
+    }
+    char *type = json_get_str(org, "organization_type") ? str_lower(json_get_str(org, "organization_type")) : NULL;
+    static const char *const plans[][2] = {{"claude_max", "Max"}, {"claude_pro", "Pro"}, {"claude_team", "Team"},
+                                           {"claude_enterprise", "Enterprise"}};
+    char *out = NULL;
+    for (size_t i = 0; type && i < ARRAY_LEN(plans) && !out; i++)
+        if (!strcmp(type, plans[i][0])) out = xstrdup(plans[i][1]);
+    free(type);
+    return out;
+}
+
 static json_t *claude_fetch(const usage_params_t *p, bool *rejected) {
     const char *token = claude_token(p->cred);
     if (!token) return NULL;
@@ -1080,22 +1102,37 @@ static json_t *claude_fetch(const usage_params_t *p, bool *rejected) {
             json_t *md = json_get_obj(report, "metadata");
             const char *acc = json_get_str(md, "accountId") ? json_get_str(md, "accountId") : cstr(p->cred, "accountId");
             const char *email = json_get_str(md, "email") ? json_get_str(md, "email") : cstr(p->cred, "email");
-            char *pacc = NULL, *pemail = NULL;
-            if (!acc || !email) { /* fetchProfile */
+            char *pacc = NULL, *pemail = NULL, *plan = NULL;
+            /* fetchProfile, every time: the plan can change under a long-lived credential and /usage never reports it;
+             * a failed probe keeps the plan the previous report carried (omp d5ea5dccf8) */
+            {
                 char *url = xasprintf("%s/profile", base);
                 http_resp_t r;
                 if (uhttp("GET", url, &h, NULL, p, &r) == 0 && r.status >= 200 && r.status < 300) {
                     json_t *prof = resp_json(&r);
-                    const char *u = payload_str(prof, "uuid");
-                    if (!u) u = payload_str(json_get_obj(prof, "account"), "uuid");
-                    const char *e = payload_str(prof, "email");
-                    if (!e) e = payload_str(json_get_obj(prof, "account"), "email");
-                    if (u) pacc = str_trim(u);
-                    if (e) pemail = str_trim(e);
+                    if (!acc || !email) {
+                        const char *u = payload_str(prof, "uuid");
+                        if (!u) u = payload_str(json_get_obj(prof, "account"), "uuid");
+                        const char *e = payload_str(prof, "email");
+                        if (!e) e = payload_str(json_get_obj(prof, "account"), "email");
+                        if (u) pacc = str_trim(u);
+                        if (e) pemail = str_trim(e);
+                    }
+                    plan = claude_profile_plan(prof);
                     json_free(prof);
                 }
                 http_resp_free(&r);
                 free(url);
+            }
+            if (!plan) {
+                const char *prev = json_get_str(json_get_obj(p->previous, "metadata"), "subscriptionPlan");
+                if (prev) {
+                    plan = str_trim(prev);
+                    if (!*plan) {
+                        free(plan);
+                        plan = NULL;
+                    }
+                }
             }
             if (resets) {
                 json_t *rc = json_clone(resets);
@@ -1112,7 +1149,8 @@ static json_t *claude_fetch(const usage_params_t *p, bool *rejected) {
             if (a2) json_set_str(md, "accountId", a2);
             if (e2) json_set_str(md, "email", e2);
             if (cstr(p->cred, "orgId")) json_set_str(md, "orgId", cstr(p->cred, "orgId"));
-            free(a2), free(e2), free(pacc), free(pemail);
+            if (plan) json_set_str(md, "subscriptionPlan", plan);
+            free(a2), free(e2), free(pacc), free(pemail), free(plan);
         }
         json_free(resets);
     }
@@ -1291,14 +1329,16 @@ static char *codex_extra_name(const char *slug, const char *name) {
 }
 
 static json_t *codex_extra_limit(const char *key, const char *slug, const char *display, const cwin_t *w, const char *acc,
-                                 const char *name, int allowed, int reached, double now) {
+                                 const char *name, const char *feature, int allowed, int reached, double now) {
     json_t *win = codex_window(w, key, now), *amount = codex_amount(w);
     char *id = xasprintf("openai-codex:%s:%s", slug, key);
     char *label = xasprintf("%s (%s)", json_get_str(win, "label"), display);
     json_t *s = scope_new("openai-codex");
     if (acc) json_set_str(s, "accountId", acc);
     json_set_str(s, "tier", slug);
+    /* the meter is per model even when the payload names only its feature codename (omp 98c0a96770) */
     if (name) json_set_str(s, "modelId", name);
+    else if (feature) json_set_str(s, "modelId", feature);
     json_set_str(s, "windowId", json_get_str(win, "id"));
     json_set_bool(s, "shared", true);
     json_t *l = limit_new(id, label, s, win, amount, codex_status(amount, codex_allowed(allowed, reached, false)));
@@ -1500,9 +1540,9 @@ static json_t *codex_fetch(const usage_params_t *p, bool *rejected) {
                 json_set(meters, slug, ms);
                 cwin_t a, b;
                 if (parse_cwin(json_get(xr, "primary_window"), &a))
-                    json_push(limits, codex_extra_limit("primary", slug, disp, &a, acc, name, xa, xre, now));
+                    json_push(limits, codex_extra_limit("primary", slug, disp, &a, acc, name, feat, xa, xre, now));
                 if (parse_cwin(json_get(xr, "secondary_window"), &b))
-                    json_push(limits, codex_extra_limit("secondary", slug, disp, &b, acc, name, xa, xre, now));
+                    json_push(limits, codex_extra_limit("secondary", slug, disp, &b, acc, name, feat, xa, xre, now));
                 free(slug);
                 free(disp);
             }
@@ -1863,137 +1903,6 @@ static json_t *copilot_fetch(const usage_params_t *p, bool *rejected) {
 const usage_provider_t usage_provider_copilot = {"github-copilot", copilot_supports, copilot_fetch, 0};
 
 /* ============================================================================================
- * Google Gemini CLI (usage/gemini.ts)
- * ============================================================================================ */
-
-/* quotaTierFor("google-gemini-cli", model) */
-static const char *gemini_tier(const char *model) {
-    static const char *const flash3[] = {"gemini-3-flash-preview", "gemini-3-flash", "gemini-3.5-flash", NULL};
-    static const char *const flash[] = {"gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash", NULL};
-    static const char *const pro[] = {"gemini-2.5-pro", "gemini-3-pro-preview", "gemini-3.1-pro-preview", "gemini-3-pro",
-                                      "gemini-3.1-pro", "gemini-pro-agent", "gemini-1.5-pro", NULL};
-    for (int i = 0; flash3[i]; i++)
-        if (!strcmp(model, flash3[i])) return "3-Flash";
-    for (int i = 0; flash[i]; i++)
-        if (!strcmp(model, flash[i])) return "Flash";
-    for (int i = 0; pro[i]; i++)
-        if (!strcmp(model, pro[i])) return "Pro";
-    if (strstr(model, "flash")) return "Flash";
-    if (strstr(model, "pro")) return "Pro";
-    return NULL;
-}
-
-static bool gemini_supports(const usage_params_t *p) {
-    return str_eq(json_get_str(p->cred, "type"), "oauth") && cstr(p->cred, "accessToken");
-}
-
-static json_t *gemini_post(const char *url, const char *token, const json_t *body, const usage_params_t *p) {
-    http_headers_t h = {0};
-    char *a = xasprintf("Bearer %s", token);
-    http_headers_set(&h, "Authorization", a);
-    free(a);
-    http_headers_set(&h, "Content-Type", "application/json");
-    cca_gemini_cli_headers(&h, NULL);
-    char *bs = json_dump(body, 0);
-    http_resp_t r;
-    json_t *out = NULL;
-    if (uhttp("POST", url, &h, bs, p, &r) == 0 && r.status >= 200 && r.status < 300) out = resp_json(&r);
-    http_resp_free(&r);
-    free(bs);
-    http_headers_free(&h);
-    return out;
-}
-
-static json_t *gemini_fetch(const usage_params_t *p, bool *rejected) {
-    (void)rejected;
-    const char *token = cstr(p->cred, "accessToken");
-    double exp;
-    if (!token || (get_num(p->cred, "expiresAt", &exp) && exp <= (double)now_ms())) return NULL;
-    char *base = p->base_url && *p->base_url ? str_trim(p->base_url) : xstrdup(CCA_GEMINI_CLI_ENDPOINT);
-    if (!*base) {
-        free(base);
-        base = xstrdup(CCA_GEMINI_CLI_ENDPOINT);
-    }
-    size_t n = strlen(base);
-    if (n && base[n - 1] == '/') base[n - 1] = 0;
-    const char *proj = cstr(p->cred, "projectId");
-    json_t *lb = json_obj();
-    if (proj) json_set_str(lb, "cloudaicompanionProject", proj);
-    json_t *meta = json_obj();
-    json_set_str(meta, "ideType", "IDE_UNSPECIFIED");
-    json_set_str(meta, "platform", "PLATFORM_UNSPECIFIED");
-    json_set_str(meta, "pluginType", "GEMINI");
-    json_set(lb, "metadata", meta);
-    char *url = xasprintf("%s/v1internal:loadCodeAssist", base);
-    json_t *load = gemini_post(url, token, lb, p);
-    free(url);
-    json_free(lb);
-    char *project = proj ? xstrdup(proj) : NULL;
-    if (!project) {
-        json_t *cp = json_get(load, "cloudaicompanionProject");
-        if (json_is_str(cp)) project = xstrdup(json_sv(cp));
-        else if (json_get_str(cp, "id")) project = xstrdup(json_get_str(cp, "id"));
-    }
-    json_t *qb = json_obj();
-    if (project) json_set_str(qb, "project", project);
-    url = xasprintf("%s/v1internal:retrieveUserQuota", base);
-    json_t *quota = gemini_post(url, token, qb, p);
-    free(url);
-    json_free(qb);
-    json_t *report = NULL;
-    if (quota) {
-        report = report_new("google-gemini-cli", now_ms());
-        json_t *limits = json_get_arr(report, "limits"), *b;
-        json_arr_foreach(json_get_arr(quota, "buckets"), i, b) {
-            const char *model = json_get_str(b, "modelId");
-            double ra, rf;
-            json_t *w;
-            if (iso_ms(json_get_str(b, "resetTime"), &ra)) {
-                char wid[48];
-                snprintf(wid, sizeof wid, "reset-%.0f", ra);
-                w = window_new(wid, "Quota window");
-                json_set_num(w, "resetsAt", ra);
-            } else w = window_new("quota", "Quota window");
-            json_t *amount = json_obj();
-            json_set_str(amount, "unit", "percent");
-            if (json_is_num(json_get(b, "remainingFraction")) && isfinite((rf = json_get_num(b, "remainingFraction", 0)))) {
-                double rem = MIN(MAX(rf, 0.0), 1.0), used = MIN(MAX(1 - rem, 0.0), 1.0);
-                json_set_num(amount, "used", floor(used * 1000 + 0.5) / 10);
-                json_set_num(amount, "remaining", floor(rem * 1000 + 0.5) / 10);
-                json_set_num(amount, "limit", 100);
-                json_set_num(amount, "usedFraction", used);
-                json_set_num(amount, "remainingFraction", rem);
-            }
-            char *id = xasprintf("%s:%s", model ? model : "unknown", json_get_str(w, "id"));
-            char *label = model ? xasprintf("Gemini %s", model) : xstrdup("Gemini quota");
-            json_t *s = scope_new("google-gemini-cli");
-            if (cstr(p->cred, "accountId")) json_set_str(s, "accountId", cstr(p->cred, "accountId"));
-            if (project) json_set_str(s, "projectId", project);
-            if (model) json_set_str(s, "modelId", model);
-            if (model && gemini_tier(model)) json_set_str(s, "tier", gemini_tier(model));
-            json_set_str(s, "windowId", json_get_str(w, "id"));
-            json_push(limits, limit_new(id, label, s, w, amount, NULL));
-            free(id);
-            free(label);
-        }
-        json_t *md = json_obj();
-        const json_t *tier = json_get_obj(load, "currentTier");
-        if (json_get_str(tier, "id")) json_set_str(md, "currentTierId", json_get_str(tier, "id"));
-        if (json_get_str(tier, "name")) json_set_str(md, "currentTierName", json_get_str(tier, "name"));
-        json_set(report, "metadata", md);
-        json_set(report, "raw", quota);
-        quota = NULL;
-    }
-    json_free(quota);
-    json_free(load);
-    free(project);
-    free(base);
-    return report;
-}
-
-const usage_provider_t usage_provider_gemini_cli = {"google-gemini-cli", gemini_supports, gemini_fetch, 0};
-
-/* ============================================================================================
  * Z.AI (usage/zai.ts)
  * ============================================================================================ */
 
@@ -2288,3 +2197,251 @@ static bool ollama_cloud_supports(const usage_params_t *p) { return str_eq(p->pr
 
 const usage_provider_t usage_provider_ollama = {"ollama", ollama_supports, ollama_fetch, 0};
 const usage_provider_t usage_provider_ollama_cloud = {"ollama-cloud", ollama_cloud_supports, ollama_fetch, 0};
+
+/* ============================================================================================
+ * Kiro (usage/kiro.ts): GetUsageLimits on the credential's management region: monthly plan credits, active bonus
+ * grants, purchased add-ons and overage. Timestamps arrive as epoch seconds; the …WithPrecision counters carry the
+ * fractional credits the dashboard shows. (kiroRankingStrategy needs credential pools, which omc does not have.)
+ * ============================================================================================ */
+
+#define KIRO_MONTH_MS (30 * DAY_MS)
+
+/* parsePositiveTimestamp: seconds below 1e12 become milliseconds */
+static bool pos_ts(const json_t *v, double *out) {
+    double d;
+    if (!to_num(v, &d) || d <= 0) return false;
+    *out = d < 1e12 ? d * 1000 : d;
+    return true;
+}
+
+/* prefer the fractional …WithPrecision counter over its rounded twin */
+static bool precise(const json_t *o, const char *key, double *out) {
+    char *k = xasprintf("%sWithPrecision", key);
+    bool ok = get_num(o, k, out) || get_num(o, key, out);
+    free(k);
+    return ok;
+}
+
+static char *trimmed_text(const json_t *v) {
+    if (!json_is_str(v)) return NULL;
+    char *t = str_trim(json_sv(v));
+    if (*t) return t;
+    free(t);
+    return NULL;
+}
+
+/* credits used of limit; a zero-credit allowance counts as fully used */
+static json_t *kiro_credits(double used, double limit) {
+    return counter_amount(true, used, true, limit, true, MAX(0.0, limit - used), true, limit > 0 ? MIN(used / limit, 1.0) : 1.0,
+                          "credits");
+}
+
+static json_t *kiro_scope(const char *window_id) {
+    json_t *s = scope_new("kiro");
+    json_set_str(s, "windowId", window_id);
+    json_set_bool(s, "shared", true);
+    return s;
+}
+
+/* a prepaid credit grant (bonus or purchased add-on): it expires rather than resetting monthly */
+static json_t *kiro_grant(bool bonus, size_t index, const char *label, double used, double limit, bool has_exp, double exp) {
+    char *wid = xasprintf("%s-%zu", bonus ? "bonus" : "add-on", index);
+    json_t *w = window_new(wid, bonus ? "Bonus" : "Add-on");
+    json_set_str(w, "resetLabel", "expires");
+    if (has_exp) json_set_num(w, "resetsAt", exp);
+    char *id = xasprintf("%s%zu", bonus ? "kiro:bonus:" : "kiro:add-on:", index);
+    json_t *amount = kiro_credits(used, limit);
+    double f = json_get_num(amount, "usedFraction", 0);
+    json_t *l = limit_new(id, label, kiro_scope(wid), w, amount, status_of(true, f));
+    free(id);
+    free(wid);
+    return l;
+}
+
+json_t *usage_kiro_parse(const json_t *payload, int64_t fetched_at) {
+    json_t *list = json_get_arr(payload, "usageBreakdownList");
+    if (!json_is_obj(payload) || !list) return NULL;
+    const json_t *credit = NULL, *e;
+    json_arr_foreach(list, i, e) if (!credit && json_is_obj(e) && str_eq(json_get_str(e, "resourceType"), "CREDIT")) credit = e;
+    double plan_used, plan_limit;
+    if (!credit || !precise(credit, "currentUsage", &plan_used) || !precise(credit, "usageLimit", &plan_limit) || plan_limit < 0)
+        return NULL;
+    char *title = trimmed_text(json_get(json_get_obj(payload, "subscriptionInfo"), "subscriptionTitle"));
+    /* "KIRO PRO" -> "Kiro Pro" */
+    char *plan = title ? str_lower(title) : xstrdup("Kiro");
+    if (title)
+        for (size_t i = 0; plan[i]; i++) {
+            bool w = isalnum((unsigned char)plan[i]) || plan[i] == '_';
+            bool pw = i > 0 && (isalnum((unsigned char)plan[i - 1]) || plan[i - 1] == '_');
+            if (w && !pw) plan[i] = (char)toupper((unsigned char)plan[i]);
+        }
+    json_t *monthly = window_new("monthly", "Monthly");
+    json_set_num(monthly, "durationMs", KIRO_MONTH_MS);
+    double resets;
+    if (pos_ts(json_get(credit, "nextDateReset"), &resets) || pos_ts(json_get(payload, "nextDateReset"), &resets))
+        json_set_num(monthly, "resetsAt", resets);
+
+    json_t *bonuses = json_arr();
+    json_arr_foreach(json_get_arr(credit, "bonuses"), i, e) {
+        double used, limit, exp = 0;
+        if (!json_is_obj(e) || !str_eq(json_get_str(e, "status"), "ACTIVE")) continue;
+        if (!get_num(e, "currentUsage", &used) || !get_num(e, "usageLimit", &limit) || limit <= 0) continue;
+        char *label = trimmed_text(json_get(e, "displayName"));
+        bool he = pos_ts(json_get(e, "expiresAt"), &exp);
+        json_push(bonuses, kiro_grant(true, json_len(bonuses), label ? label : "Bonus credits", used, limit, he, exp));
+        free(label);
+    }
+    /* the two lists project the same purchases: the legacy list only when the current one is missing or empty */
+    json_t *current = json_get_arr(json_get_obj(credit, "addOnMetadata"), "addOns");
+    json_t *purchases = json_len(current) > 0 ? current : json_get_arr(credit, "overageCredits");
+    json_t *addons = json_arr();
+    json_arr_foreach(purchases, i, e) {
+        double used, limit, exp = 0;
+        if (!json_is_obj(e)) continue;
+        bool he = pos_ts(json_get(e, "expiresAt"), &exp);
+        if (!precise(e, "currentUsage", &used) || !precise(e, "usageLimit", &limit) || limit <= 0) continue;
+        if (he && exp <= (double)fetched_at) continue;
+        json_push(addons, kiro_grant(false, json_len(addons), "Add-on credits", used, limit, he, exp));
+    }
+
+    double overage_used = 0, overage_cap = 0;
+    if (!precise(credit, "currentOverages", &overage_used)) overage_used = 0;
+    if (!precise(credit, "overageCap", &overage_cap)) overage_cap = 0;
+    bool overage_on = str_eq(json_get_str(json_get_obj(payload, "overageConfiguration"), "overageStatus"), "ENABLED") && overage_cap > 0;
+
+    json_t *plan_amount = kiro_credits(plan_used, plan_limit);
+    double pf = json_get_num(plan_amount, "usedFraction", 0);
+    bool spent = pf == 1;
+    bool bonus_left = false, addon_left = false;
+    json_arr_foreach(bonuses, i, e) if (!str_eq(json_get_str(e, "status"), "exhausted")) bonus_left = true;
+    json_arr_foreach(addons, i, e) if (!str_eq(json_get_str(e, "status"), "exhausted")) addon_left = true;
+    bool grant_left = bonus_left || addon_left;
+    const char *plan_status = status_of(true, pf);
+    if (spent && (grant_left || (overage_on && overage_used < overage_cap))) plan_status = "warning";
+    char *unit = trimmed_text(json_get(credit, "displayNamePlural"));
+    char *unit_l = unit ? str_lower(unit) : xstrdup("credits");
+    char *plan_label = xasprintf("%s %s", plan, unit_l);
+    json_t *report = report_new("kiro", fetched_at);
+    json_t *limits = json_get(report, "limits");
+    json_t *pl = limit_new("kiro:credits", plan_label, kiro_scope("monthly"), json_clone(monthly), plan_amount, plan_status);
+    if (spent && grant_left) {
+        json_t *notes = json_arr();
+        char *n = xasprintf("Plan credits used up; drawing on %s credits",
+                            bonus_left && addon_left ? "bonus and add-on" : bonus_left ? "bonus" : "add-on");
+        json_push_str(notes, n);
+        free(n);
+        json_set(pl, "notes", notes);
+    }
+    json_push(limits, pl);
+    while (json_len(bonuses)) json_push(limits, json_arr_remove(bonuses, 0));
+    while (json_len(addons)) json_push(limits, json_arr_remove(addons, 0));
+    if (overage_on) {
+        json_t *amount = kiro_credits(overage_used, overage_cap);
+        json_t *notes = json_arr();
+        if (spent && !grant_left) json_push_str(notes, "Free credits used up; drawing paid overage");
+        double charges, rate;
+        if (get_num(credit, "overageCharges", &charges)) {
+            char *per = get_num(credit, "overageRate", &rate) ? xasprintf(" ($%.2f per credit)", rate) : xstrdup("");
+            char *n = xasprintf("Overage charges: $%.2f%s", charges, per);
+            json_push_str(notes, n);
+            free(n);
+            free(per);
+        }
+        double of = json_get_num(amount, "usedFraction", 0);
+        json_t *ol = limit_new("kiro:overage", "Overage credits", kiro_scope("monthly"), json_clone(monthly), amount, status_of(true, of));
+        if (json_len(notes)) json_set(ol, "notes", notes);
+        else json_free(notes);
+        json_push(limits, ol);
+    }
+    /* the response's userInfo (the account email) is deliberately not carried over */
+    if (title) {
+        json_t *md = json_obj();
+        json_set_str(md, "planType", plan);
+        json_set(report, "metadata", md);
+    }
+    json_free(monthly);
+    json_free(bonuses);
+    json_free(addons);
+    free(title);
+    free(plan);
+    free(unit);
+    free(unit_l);
+    free(plan_label);
+    return report;
+}
+
+/* region, bearer and (OAuth only) profile ARN to ask for usage; false when the credential has no region */
+static bool kiro_route(const json_t *cred, char **region, char **token, char **arn, bool *api_key) {
+    *region = *token = *arn = NULL;
+    if (str_eq(json_get_str(cred, "type"), "oauth")) {
+        if (!cstr(cred, "accessToken") || !cstr(cred, "region")) return false;
+        *region = xstrdup(cstr(cred, "region"));
+        *token = xstrdup(cstr(cred, "accessToken"));
+        if (cstr(cred, "kiroProfileArn")) *arn = xstrdup(cstr(cred, "kiroProfileArn"));
+        *api_key = false;
+        return true;
+    }
+    kiro_cred_t c;
+    char *err = NULL;
+    if (kiro_decode_credential(json_get_str(cred, "apiKey") ? json_get_str(cred, "apiKey") : "", &c, &err) != 0) {
+        free(err);
+        return false;
+    }
+    /* an env key without KIRO_API_REGION has no region; usage never probes */
+    bool ok = c.region != NULL;
+    if (ok) {
+        *region = xstrdup(c.region);
+        *token = xstrdup(c.token);
+        *api_key = true;
+    }
+    kiro_cred_free(&c);
+    return ok;
+}
+
+static bool kiro_supports(const usage_params_t *p) {
+    char *r, *t, *a;
+    bool k;
+    bool ok = str_eq(p->provider, "kiro") && kiro_route(p->cred, &r, &t, &a, &k);
+    if (ok) free(r), free(t), free(a);
+    return ok;
+}
+
+static json_t *kiro_fetch(const usage_params_t *p, bool *rejected) {
+    char *region, *token, *arn;
+    bool api_key;
+    if (!str_eq(p->provider, "kiro") || !kiro_route(p->cred, &region, &token, &arn, &api_key)) return NULL;
+    json_t *report = NULL;
+    /* an expired bearer whose refresh failed would only 401 and drop the last good report */
+    json_t *exp = json_get(p->cred, "expiresAt");
+    if (!(json_is_num(exp) && exp->u.num.d <= (double)now_ms())) {
+        json_t *body = json_obj();
+        json_set_str(body, "origin", "KIRO_CLI");
+        if (arn) json_set_str(body, "profileArn", arn);
+        json_set_str(body, "resourceType", "AGENTIC_REQUEST");
+        int status = 0;
+        char *err = NULL;
+        json_t *payload = kiro_management_request(region, token, "GetUsageLimits", body, NULL, &status, &err);
+        json_free(body);
+        if (!payload) {
+            /* a rejected login has lost access: drop its cached quota; an API key the usage route refuses has no report */
+            if (!api_key && (status == 401 || status == 403)) *rejected = true;
+            else LOGW("Kiro usage request failed: %s", err ? err : "?");
+        } else {
+            report = usage_kiro_parse(payload, now_ms());
+            /* attribute the report to the login it measured: logins sharing a profile stay separate accounts */
+            if (report && cstr(p->cred, "accountId")) {
+                json_t *md = json_get_obj(report, "metadata");
+                if (!md) json_set(report, "metadata", md = json_obj());
+                json_set_str(md, "accountId", cstr(p->cred, "accountId"));
+            }
+            json_free(payload);
+        }
+        free(err);
+    }
+    free(region);
+    free(token);
+    free(arn);
+    return report;
+}
+
+const usage_provider_t usage_provider_kiro = {"kiro", kiro_supports, kiro_fetch, 0};

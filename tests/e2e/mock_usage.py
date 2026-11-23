@@ -56,7 +56,8 @@ def codex_credits():
 
 ROUTES_GET = {
     "/api/oauth/usage": claude_usage,
-    "/api/oauth/profile": lambda: {"account": {"uuid": "acct-claude-1", "email": "claude.user@example.com"}},
+    "/api/oauth/profile": lambda: {"account": {"uuid": "acct-claude-1", "email": "claude.user@example.com"},
+                                   "organization": {"organization_type": "claude_max", "rate_limit_tier": "default_claude_max_20x"}},
     "/backend-api/wham/usage": codex_usage,
     "/backend-api/wham/rate-limit-reset-credits": codex_credits,
     "/backend-api/accounts/verified_access": lambda: {"programs": [{"program": "cyber", "state": "active", "grants": []}]},

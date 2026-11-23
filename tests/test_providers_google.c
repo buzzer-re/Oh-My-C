@@ -1,6 +1,6 @@
 /*
- * test_providers_google.c - offline tests for google-vertex ADC and the Cloud Code Assist api (google-gemini-cli /
- * google-antigravity): RS256 JWT signing (verified with libcrypto against a key generated here), ADC token
+ * test_providers_google.c - offline tests for google-vertex ADC and the Cloud Code Assist api (google-gemini-cli: a
+ * custom provider / google-antigravity): RS256 JWT signing (verified with libcrypto against a key generated here), ADC token
  * exchange/caching/impersonation, CCA envelopes, SSE parsing, leaked-thinking healing, the CCA schema normalizer
  * and project onboarding. Network flows run against an in-process loopback HTTP server; no real credentials.
  */
@@ -486,7 +486,7 @@ static void test_adc(void) {
 /* ====================================================================== CCA requests */
 
 #define GEMINI_CLI_PRO                                                                                                 \
-    "{'id':'gemini-2.5-pro','api':'google-gemini-cli','provider':'google-gemini-cli',"                                 \
+    "{'id':'gemini-2.5-pro','api':'google-gemini-cli','provider':'my-cca',"                                            \
     "'baseUrl':'https://cloudcode-pa.googleapis.com','reasoning':true,'maxTokens':65536,"                              \
     "'thinking':{'mode':'budget','efforts':['minimal','low','medium','high'],'requiresEffort':true},"                 \
     "'identity':{'class':'gemini'},'compat':{'thinkingLoopGuard':'gemini'}}"
@@ -919,13 +919,6 @@ static reply_t cca_route(const char *method, const char *path, const http_header
     const char *ua = http_headers_get(h, "User-Agent");
     if (!str_eq(http_headers_get(h, "Authorization"), "Bearer at-1")) {
         r = R(401, NULL, "{}");
-    } else if (!strcmp(path, "/gem/v1internal:loadCodeAssist")) {
-        bool ok = ua && str_starts(ua, "GeminiCLI/") && str_eq(P(b, "metadata.pluginType"), "GEMINI");
-        r = ok ? R(200, NULL, "{\"allowedTiers\":[{\"id\":\"free-tier\",\"isDefault\":true}]}") : R(400, NULL, "{}");
-    } else if (!strcmp(path, "/gem/v1internal:onboardUser")) {
-        r = str_eq(json_get_str(b, "tierId"), "free-tier")
-                ? R(200, NULL, "{\"done\":true,\"response\":{\"cloudaicompanionProject\":{\"id\":\"gem-proj\"}}}")
-                : R(400, NULL, "{}");
     } else if (!strcmp(path, "/val/v1internal:loadCodeAssist")) {
         r = R(403, NULL, "{\"error\":{\"code\":403,\"status\":\"PERMISSION_DENIED\",\"details\":[{\"reason\":\"VALIDATION_REQUIRED\","
                          "\"metadata\":{\"validation_url\":\"https://accounts.google.com/verify\"}}]}}");
@@ -949,15 +942,8 @@ static void test_discovery(void) {
     g_route = cca_route;
     unsetenv("GOOGLE_CLOUD_PROJECT");
     unsetenv("GOOGLE_CLOUD_PROJECT_ID");
-    char *ep = xasprintf("http://127.0.0.1:%d/gem", g_port);
+    char *ep = xasprintf("http://127.0.0.1:%d/ag", g_port);
     char *proj = NULL, *err = NULL;
-    CHECK(cca_discover_project("google-gemini-cli", "at-1", ep, NULL, NULL, &proj, &err) == 0);
-    CHECK_STR(proj, "gem-proj");
-    free(proj);
-    free(err);
-    free(ep);
-    ep = xasprintf("http://127.0.0.1:%d/ag", g_port);
-    proj = err = NULL;
     CHECK(cca_discover_project("google-antigravity", "at-1", ep, NULL, NULL, &proj, &err) == 0);
     CHECK_STR(proj, "ag-proj");
     CHECK_INT(g_ag_polls, 1);
@@ -967,7 +953,7 @@ static void test_discovery(void) {
     free(ep);
     ep = xasprintf("http://127.0.0.1:%d/val", g_port);
     proj = err = NULL;
-    CHECK(cca_discover_project("google-gemini-cli", "at-1", ep, NULL, NULL, &proj, &err) != 0);
+    CHECK(cca_discover_project("google-antigravity", "at-1", ep, NULL, NULL, &proj, &err) != 0);
     char *vu = cca_extract_validation_url(err);
     CHECK_STR(vu, "https://accounts.google.com/verify");
     char *vm = cca_validation_message(vu, "sign in again", "me@x");
@@ -995,7 +981,8 @@ static reply_t stream_route(const char *method, const char *path, const http_hea
     } else if (str_eq(text, "empty")) {
         r = R(200, "text/event-stream", "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" \"}]},\"finishReason\":\"STOP\"}]}}\n\n");
     } else if (str_eq(json_get_str(b, "project"), "proj-x") && str_eq(http_headers_get(h, "Accept"), "text/event-stream") &&
-               str_starts(http_headers_get(h, "User-Agent"), "GeminiCLI/0.46.0/gemini-2.5-pro (")) {
+               !http_headers_get(h, "Client-Metadata") &&
+               !str_starts(http_headers_get(h, "User-Agent"), "GeminiCLI/")) { /* omp 39c050d4ad: no Gemini CLI identity */
         r = R(200, "text/event-stream", CCA_SSE);
     } else {
         r = R(400, NULL, "{\"error\":{\"message\":\"bad envelope\"}}");
@@ -1058,10 +1045,6 @@ static void test_identity(void) {
     char *ua = cca_antigravity_user_agent();
     CHECK(str_starts(ua, "antigravity/hub/9.9.9 (aidev_client; os_type="));
     CHECK(strstr(ua, "; cl=1005016104)") != NULL);
-    free(ua);
-    ua = cca_gemini_cli_user_agent("gemini-3-pro-preview");
-    CHECK(str_starts(ua, "GeminiCLI/0.46.0/gemini-3-pro-preview ("));
-    CHECK(str_ends(ua, "; terminal)"));
     free(ua);
     char *v = cca_parse_manifest_version("files:\n  - url: x\nversion: 2.31.4\npath: y\n");
     CHECK_STR(v, "2.31.4");

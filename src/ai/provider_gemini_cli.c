@@ -1,6 +1,7 @@
 /*
  * provider_gemini_cli.c - api "google-gemini-cli": Google Cloud Code Assist `v1internal:streamGenerateContent`
- * (providers google-gemini-cli and google-antigravity). Port of packages/ai/src/providers/google-gemini-cli.ts and
+ * (google-antigravity and custom Cloud Code Assist providers; omp 39c050d4ad removed the Gemini CLI OAuth provider but kept
+ * the api id). Port of packages/ai/src/providers/google-gemini-cli.ts and
  * the google-gemini-cli branch of stream.ts option mapping. Message/tool mapping is shared with provider_google.c.
  *
  * The api key is the structured OAuth credential `{"token","projectId",...}` produced by auth.c.
@@ -1020,7 +1021,6 @@ json_t *provider_gemini_cli_stream(const ai_model_t *m, const ai_context_t *ctx,
         http_headers_set(&h, "Accept", "*/*"); /* the native Go client sends no specific Accept */
     } else {
         http_headers_set(&h, "Accept", "text/event-stream");
-        cca_gemini_cli_headers(&h, m->id);
     }
     if (cflag(m, "claudeThinkingBetaHeader") && str_eq(identity_class(m), "anthropic") && m->reasoning)
         http_headers_set(&h, "anthropic-beta", CLAUDE_THINKING_BETA_HEADER);

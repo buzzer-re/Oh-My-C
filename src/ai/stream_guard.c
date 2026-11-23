@@ -5,7 +5,7 @@
  * budget, or goes silent longer than the idle budget afterwards, is aborted locally and ends as an error with the
  * provider's timeout message. Budgets come from the request (providers.streamFirstEventTimeoutSeconds /
  * streamIdleTimeoutSeconds), else PI_STREAM_* / PI_OPENAI_STREAM_* env vars, else the model's compat
- * streamIdleTimeoutMs / streamFirstEventTimeoutMs, else 300 s; 0 disables.
+ * streamIdleTimeoutMs / streamFirstEventTimeoutMs, else 900 s; 0 disables.
  *
  * In-flight caps (port of omp pi-ai stream.ts provider in-flight leases, providers.maxInFlightRequests): each
  * request holds one of N slot files under <config root>/run/provider-inflight/<sha256(provider)>/ (flock), so the
@@ -22,7 +22,7 @@
 #include <sys/file.h>
 #include <unistd.h>
 
-#define DEFAULT_STREAM_TIMEOUT_MS 300000
+#define DEFAULT_STREAM_TIMEOUT_MS 900000 /* 15 min (omp f426a79bb7) */
 
 /* normalizeIdleTimeoutMs: unset -> fallback, non-numeric -> fallback, <= 0 -> disabled (0) */
 static int64_t env_timeout(const char *name, int64_t fallback, bool *set) {
@@ -71,6 +71,10 @@ static limits_t limits_for(const char *api) {
         l.first_msg = "OpenAI Codex SSE stream timed out while waiting for the first event";
         l.idle_msg = "OpenAI Codex SSE stream stalled while waiting for the next event";
         l.openai_env = true;
+    } else if (str_eq(api, "kiro-api")) {
+        /* providers/kiro/stream.ts: its idle iterator counts visible output (text, reasoning, tool calls) as progress */
+        l.first_msg = "Kiro stream timed out while waiting for the first visible output";
+        l.idle_msg = "Kiro stream timed out while waiting for the next event";
     } else if (str_eq(api, "ollama-chat") || str_eq(api, "ollama")) {
         l.openai_env = true;
     } else if (str_eq(api, "google-gemini-cli")) {

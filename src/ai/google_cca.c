@@ -2,63 +2,18 @@
 #include "ai/google_cca.h"
 
 #include <pthread.h>
-#include <sys/utsname.h>
 
-#define DEFAULT_GEMINI_CLI_VERSION "0.46.0"
 #define DEFAULT_ANTIGRAVITY_VERSION "2.26.0"
 #define ANTIGRAVITY_CL "1005016104"
 #define ANTIGRAVITY_MANIFEST_URL "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml"
 #define MANIFEST_TIMEOUT_MS 5000
 #define MANIFEST_RETRY_MS (10 * 60000)
 #define OAUTH_REQUEST_TIMEOUT_MS 30000
-#define GEMINI_POLL_INTERVAL_MS 5000
-#define GEMINI_POLL_MAX_ATTEMPTS 24
 #define AG_ONBOARD_TIMEOUT_MS 30000
 #define AG_ONBOARD_POLL_MS 1000
 #define TIER_FREE "free-tier"
-#define TIER_LEGACY "legacy-tier"
-#define TIER_STANDARD "standard-tier"
-#define GCA_DOCS "See https://goo.gle/gemini-cli-auth-docs#workspace-gca"
 
 /* ---------- client identity ---------- */
-
-static const char *host_platform(void) {
-#if defined(__APPLE__)
-    return "darwin";
-#elif defined(__linux__)
-    return "linux";
-#elif defined(__FreeBSD__)
-    return "freebsd";
-#else
-    return "linux";
-#endif
-}
-
-static const char *host_arch(void) {
-    static char arch[80];
-    if (!arch[0]) {
-        struct utsname u;
-        const char *m = uname(&u) == 0 ? u.machine : "x86_64";
-        if (!strcmp(m, "x86_64") || !strcmp(m, "amd64")) m = "x64";
-        else if (!strcmp(m, "aarch64")) m = "arm64";
-        else if (!strncmp(m, "i686", 4) || !strncmp(m, "i386", 4)) m = "ia32";
-        snprintf(arch, sizeof arch, "%s", m);
-    }
-    return arch;
-}
-
-char *cca_gemini_cli_user_agent(const char *model_id) {
-    const char *v = env_get("PI_AI_GEMINI_CLI_VERSION");
-    return xasprintf("GeminiCLI/%s/%s (%s; %s; terminal)", v ? v : DEFAULT_GEMINI_CLI_VERSION,
-                     model_id && *model_id ? model_id : "gemini-3.1-pro-preview", host_platform(), host_arch());
-}
-
-void cca_gemini_cli_headers(http_headers_t *h, const char *model_id) {
-    char *ua = cca_gemini_cli_user_agent(model_id);
-    http_headers_set(h, "User-Agent", ua);
-    free(ua);
-    http_headers_set(h, "Client-Metadata", "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI");
-}
 
 static pthread_mutex_t g_ver_mu = PTHREAD_MUTEX_INITIALIZER;
 static char *g_discovered_version;
@@ -233,158 +188,6 @@ static char *dump_obj(json_t *j) {
     return s;
 }
 
-static json_t *gemini_metadata(const char *duet) {
-    json_t *m = json_obj();
-    json_set_str(m, "ideType", "IDE_UNSPECIFIED");
-    json_set_str(m, "platform", "PLATFORM_UNSPECIFIED");
-    json_set_str(m, "pluginType", "GEMINI");
-    if (duet) json_set_str(m, "duetProject", duet);
-    return m;
-}
-
-static bool vpc_sc_affected(const char *body) {
-    json_t *j = json_parse_str(body ? body : "");
-    bool hit = false;
-    json_t *d;
-    json_arr_foreach(json_get_arr(json_get_obj(j, "error"), "details"), i, d) {
-        if (str_eq(json_get_str(d, "reason"), "SECURITY_POLICY_VIOLATED")) hit = true;
-    }
-    json_free(j);
-    return hit;
-}
-
-static int gemini_discover(cca_ctx_t *c, const char *endpoint, char **project, char **err) {
-    const char *envp = env_get("GOOGLE_CLOUD_PROJECT");
-    if (!envp) envp = env_get("GOOGLE_CLOUD_PROJECT_ID");
-    progress(c, "Checking for existing Cloud Code Assist project...");
-    json_t *lb = json_obj();
-    if (envp) json_set_str(lb, "cloudaicompanionProject", envp);
-    json_set(lb, "metadata", gemini_metadata(envp));
-    char *body = dump_obj(lb);
-    char *url = xasprintf("%s/v1internal:loadCodeAssist", endpoint);
-    int status = 0;
-    char *resp = NULL;
-    int rc = cca_request(c, "POST", url, body, 0, &status, &resp, err);
-    free(url);
-    free(body);
-    if (rc) return -1;
-    json_t *data = NULL;
-    if (status < 200 || status >= 300) {
-        if (vpc_sc_affected(resp)) {
-            data = json_parse_str("{\"currentTier\":{\"id\":\"" TIER_STANDARD "\"}}");
-        } else {
-            *err = xasprintf("loadCodeAssist failed: %d %s: %s", status, status_text(status), resp);
-            free(resp);
-            return -1;
-        }
-    } else {
-        data = json_parse_str(resp);
-        if (!json_is_obj(data)) {
-            json_free(data);
-            data = json_obj();
-        }
-    }
-    free(resp);
-    if (json_get(data, "currentTier") && !json_is_null(json_get(data, "currentTier"))) {
-        const char *p = json_get_str(data, "cloudaicompanionProject");
-        if (p && *p) *project = xstrdup(p);
-        else if (envp) *project = xstrdup(envp);
-        else *err = xstrdup("This account requires setting the GOOGLE_CLOUD_PROJECT or GOOGLE_CLOUD_PROJECT_ID environment "
-                            "variable. " GCA_DOCS);
-        json_free(data);
-        return *project ? 0 : -1;
-    }
-    const char *tier_id = TIER_LEGACY;
-    json_t *t;
-    json_t *allowed = json_get_arr(data, "allowedTiers");
-    json_arr_foreach(allowed, i, t) {
-        if (json_get_bool(t, "isDefault", false)) {
-            tier_id = json_get_str(t, "id");
-            break;
-        }
-    }
-    if (!tier_id) tier_id = TIER_FREE;
-    char *tier = xstrdup(tier_id);
-    json_free(data);
-    if (strcmp(tier, TIER_FREE) != 0 && !envp) {
-        free(tier);
-        *err = xstrdup("This account requires setting the GOOGLE_CLOUD_PROJECT or GOOGLE_CLOUD_PROJECT_ID environment variable. " GCA_DOCS);
-        return -1;
-    }
-    progress(c, "Provisioning Cloud Code Assist project (this may take a moment)...");
-    json_t *ob = json_obj();
-    json_set_str(ob, "tierId", tier);
-    bool paid = strcmp(tier, TIER_FREE) != 0 && envp;
-    json_set(ob, "metadata", gemini_metadata(paid ? envp : NULL));
-    if (paid) {
-        /* cloudaicompanionProject goes after metadata, as upstream assigns it later */
-        json_set_str(ob, "cloudaicompanionProject", envp);
-    }
-    free(tier);
-    body = dump_obj(ob);
-    url = xasprintf("%s/v1internal:onboardUser", endpoint);
-    rc = cca_request(c, "POST", url, body, 0, &status, &resp, err);
-    free(url);
-    free(body);
-    if (rc) return -1;
-    if (status < 200 || status >= 300) {
-        *err = xasprintf("onboardUser failed: %d %s: %s", status, status_text(status), resp);
-        free(resp);
-        return -1;
-    }
-    json_t *lro = json_parse_str(resp);
-    free(resp);
-    if (!json_get_bool(lro, "done", false) && json_get_str(lro, "name")) {
-        char *name = xstrdup(json_get_str(lro, "name"));
-        json_free(lro);
-        lro = NULL;
-        for (int attempt = 0; attempt < GEMINI_POLL_MAX_ATTEMPTS; attempt++) {
-            if (attempt > 0) {
-                char *m = xasprintf("Waiting for project provisioning (attempt %d/%d)...", attempt + 1, GEMINI_POLL_MAX_ATTEMPTS);
-                progress(c, m);
-                free(m);
-                sleep_ms(GEMINI_POLL_INTERVAL_MS);
-            }
-            url = xasprintf("%s/v1internal/%s", endpoint, name);
-            rc = cca_request(c, "GET", url, NULL, 0, &status, &resp, err);
-            free(url);
-            if (rc) {
-                free(name);
-                return -1;
-            }
-            if (status < 200 || status >= 300) {
-                *err = xasprintf("Failed to poll operation: %d %s", status, status_text(status));
-                free(resp);
-                free(name);
-                return -1;
-            }
-            json_t *d = json_parse_str(resp);
-            free(resp);
-            if (json_get_bool(d, "done", false)) {
-                lro = d;
-                break;
-            }
-            json_free(d);
-        }
-        free(name);
-        if (!lro) {
-            *err = xasprintf("Project provisioning did not complete after %d attempts", GEMINI_POLL_MAX_ATTEMPTS);
-            return -1;
-        }
-    }
-    const char *pid = json_get_str(json_get_obj(json_get_obj(lro, "response"), "cloudaicompanionProject"), "id");
-    if (pid && *pid) *project = xstrdup(pid);
-    else if (envp) *project = xstrdup(envp);
-    json_free(lro);
-    if (*project) return 0;
-    *err = xstrdup("Could not discover or provision a Google Cloud project. Try setting the GOOGLE_CLOUD_PROJECT or "
-                   "GOOGLE_CLOUD_PROJECT_ID environment variable. " GCA_DOCS);
-    return -1;
-}
-
-/* ---- antigravity ---- */
-
-/* POST/GET returning parsed JSON on HTTP 200, else NULL + *err */
 static json_t *ag_call(cca_ctx_t *c, const char *label, const char *method, const char *url, const char *body,
                        int64_t timeout_ms, char **err) {
     int status = 0;
@@ -543,18 +346,16 @@ int cca_discover_project(const char *provider, const char *access_token, const c
                          void *ud, char **project_out, char **err) {
     *project_out = NULL;
     *err = NULL;
-    bool ag = str_eq(provider, "google-antigravity");
     cca_ctx_t c = {.provider = provider, .progress = progress_fn, .ud = ud};
     char *bearer = xasprintf("Bearer %s", access_token ? access_token : "");
     http_headers_set(&c.h, "Authorization", bearer);
     free(bearer);
     http_headers_set(&c.h, "Content-Type", "application/json");
-    if (ag) cca_antigravity_headers(&c.h);
-    else cca_gemini_cli_headers(&c.h, NULL);
-    char *base = xstrdup(endpoint ? endpoint : ag ? CCA_ANTIGRAVITY_DAILY_ENDPOINT : CCA_GEMINI_CLI_ENDPOINT);
+    cca_antigravity_headers(&c.h);
+    char *base = xstrdup(endpoint ? endpoint : CCA_ANTIGRAVITY_DAILY_ENDPOINT);
     size_t bl = strlen(base);
     while (bl && base[bl - 1] == '/') base[--bl] = 0;
-    int rc = ag ? antigravity_discover(&c, base, project_out, err) : gemini_discover(&c, base, project_out, err);
+    int rc = antigravity_discover(&c, base, project_out, err);
     free(base);
     http_headers_free(&c.h);
     return rc;

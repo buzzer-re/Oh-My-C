@@ -31,6 +31,7 @@ catalog or auth symbols and run without the rest of the program.
 | `test_providers_oai` | Chat Completions, Responses (Azure, Codex), Ollama |
 | `test_providers_google` | Vertex ADC (RS256 JWT, token exchange, caching, impersonation), Cloud Code Assist envelopes, healing, schema normalizer, onboarding, against an in-process loopback server |
 | `test_providers_bedrock` | SigV4 (AWS test suite), event-stream framing, request mapping, stream state machine |
+| `test_kiro` | Kiro routing (regions, profile ARNs), credential codec, Kiro CLI headers, model mapping, request transform and budget, `GetUsageLimits` parsing; `foldUserAfterToolResult` |
 | `test_cursor` | protobuf codec, Cursor schema, Connect framing |
 | `test_ws` | WebSocket keys, framing, loopback session (fragmentation, ping, close, oversize/masked-frame rejection) |
 | `test_auth` | every login engine and custom hook against `tests/e2e/mock_auth.py` |
@@ -84,6 +85,7 @@ Other mocks reach real provider code paths through `OMC_PROVIDER_URL_REWRITE` /
 | `mock_google.py` | Google OAuth token endpoint, Vertex and Cloud Code Assist |
 | `mock_cursor.py` | Cursor RunSSE/BidiAppend, exec frames |
 | `mock_devin.py` | Devin Cascade Connect stream (`providers_devin.sh`) |
+| `mock_kiro.py` | Kiro runtime event stream, management API (models, profiles, usage), AWS SSO-OIDC and the social device flow (`providers_kiro.sh`) |
 | `mock_gitlab.py` | GitLab Duo and Duo Workflow WebSocket (`providers_gitlab.sh`) |
 | `mock_providers.py` | credential transports: URL, bearer and headers built from stored logins (`providers_transport.sh`) |
 | `mock_auth.py` | device-code, oauth-code, api-key validation, custom hooks (`omc login` over stdin) |

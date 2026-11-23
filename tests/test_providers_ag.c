@@ -923,6 +923,14 @@ static void test_message_threads(void) {
     json_free(p);
     anth_thread_turn_free(t);
 
+    /* a body replaying a native compaction block is never threaded (omp 04041d110f) */
+    t = anth_thread_turn_new("https://api.anthropic.com", "tm", "s-compaction", false);
+    p = thread_params("[{\"role\":\"assistant\",\"content\":[{\"type\":\"compaction\",\"content\":\"sum\"}]}," T_U1 "]", "sys");
+    w = anth_thread_plan(t, p, "", 1000, &cont);
+    CHECK(w == NULL);
+    json_free(p);
+    anth_thread_turn_free(t);
+
     /* past the reuse window, changed fixed fields or rewritten history start a new thread */
     static const struct {
         const char *msgs, *system;
@@ -1004,6 +1012,42 @@ static void test_message_threads(void) {
     json_free(a1);
 }
 
+/* supportsAnthropicCompaction: a gateway qualifies only by declaring its own endpoint (omp 51ef3e7060) */
+static void test_anthropic_compaction_gate(void) {
+    const char *base = "{\"id\":\"claude-opus-4-8\",\"api\":\"anthropic-messages\",\"provider\":\"gw\","
+                       "\"baseUrl\":\"https://gw.example/v1/\",\"compat\":{\"supportsServerCompaction\":true}%s}";
+    const char *variants[] = {"", ",\"remoteCompaction\":{\"enabled\":true}",
+                              ",\"remoteCompaction\":{\"api\":\"anthropic-messages\",\"enabled\":true}",
+                              ",\"remoteCompaction\":{\"api\":\"anthropic-messages\",\"enabled\":false}"};
+    const bool want[] = {false, false, true, false};
+    for (int i = 0; i < 4; i++) {
+        char *s = xasprintf(base, variants[i]);
+        json_t *raw = J(s);
+        ai_model_t m = mk_model(raw);
+        CHECK(anthropic_compaction_supported(&m) == want[i]);
+        json_free(raw);
+        free(s);
+    }
+}
+
+/* omp 7f6b4a096f: an empty conversation is named before it reaches Anthropic's bare 400 */
+static void test_anthropic_empty_request(void) {
+    json_t *raw = J(SONNET45);
+    ai_model_t m = mk_model(raw);
+    json_t *msgs = J("[]");
+    ai_context_t ctx = {.messages = msgs};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    o.api_key = "sk-ant-api03-test";
+    json_t *r = provider_anthropic_stream(&m, &ctx, &o, NULL, NULL);
+    CHECK_STR(P(r, "stopReason"), "error");
+    CHECK_STR(P(r, "errorMessage"), "anthropic: refusing to send a request with no messages for model claude-sonnet-4-5 (provider "
+                                    "anthropic). Context had 0 input messages; none survived encoding.");
+    json_free(r);
+    json_free(msgs);
+    json_free(raw);
+}
+
 int main(void) {
     /* isolate the OAuth install-id file */
     const char *tmp = getenv("TMPDIR");
@@ -1014,6 +1058,8 @@ int main(void) {
     unsetenv("PI_AI_CLAUDE_CODE_VERSION");
 
     test_message_threads();
+    test_anthropic_empty_request();
+    test_anthropic_compaction_gate();
     test_anthropic_request_apikey();
     test_anthropic_request_adaptive();
     test_anthropic_request_oauth();

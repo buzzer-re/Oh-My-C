@@ -147,7 +147,7 @@ T_test_providers_ag  := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/leake
 T_test_providers_google := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/leaked_thinking.o $(O)/ai/think_heal.o $(O)/ai/retry.o $(O)/ai/stream_guard.o $(O)/ai/service_tier.o $(O)/ai/provider_transport.o $(GOOGLE_OBJ) $(O)/ai/google_cca.o \
                         $(O)/ai/provider_gemini_cli.o $(IMG_OBJ)
 T_test_providers_oai := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/leaked_thinking.o $(O)/ai/think_heal.o $(O)/ai/retry.o $(O)/ai/stream_guard.o $(O)/ai/service_tier.o $(O)/ai/provider_transport.o $(O)/ai/provider_openai_completions.o \
-                        $(O)/ai/provider_openai_responses.o $(O)/ai/responses_ws.o $(O)/net/ws.o $(O)/ai/provider_ollama.o $(O)/ai/compat_detect.o
+                        $(O)/ai/provider_openai_responses.o $(O)/ai/codex_version.o $(O)/ai/responses_ws.o $(O)/net/ws.o $(O)/ai/provider_ollama.o $(O)/ai/compat_detect.o
 T_test_http          := $(CORE_OBJ) $(NET_OBJ)
 T_test_ws            := $(CORE_OBJ) $(NET_OBJ) $(O)/net/ws.o
 T_test_providers_bedrock := $(CORE_OBJ) $(NET_OBJ) $(O)/ai/ai_common.o $(O)/ai/leaked_thinking.o $(O)/ai/think_heal.o $(O)/ai/retry.o $(O)/ai/stream_guard.o $(O)/ai/service_tier.o $(O)/ai/provider_transport.o $(O)/ai/aws.o $(O)/ai/provider_bedrock.o
@@ -188,6 +188,7 @@ T_test_agenthub      := $(LIB_OBJ)
 T_test_mcp           := $(LIB_OBJ)
 T_test_loop          := $(LIB_OBJ)
 T_test_usage         := $(LIB_OBJ)
+T_test_kiro          := $(LIB_OBJ)
 T_test_extracmds     := $(LIB_OBJ)
 T_test_display       := $(LIB_OBJ)
 T_test_turn_recovery := $(LIB_OBJ)
@@ -199,7 +200,7 @@ T_test_fuzz_regress  := $(LIB_OBJ) $(patsubst tests/fuzz/%.c,$(O)/tests/fuzz/%.o
 UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
               test_chrome test_providers_google test_toolcards test_cursor test_judgment test_auth test_memory test_outsink test_catalog test_model_resolver test_compaction_point \
               test_planreview test_img test_img_jpeg test_img_webp test_btw test_queue test_guards test_keybindings test_slash test_commands test_export test_dump test_signals \
-              test_panels test_tree test_approval test_compaction test_tiers test_workspace test_agenthub test_mcp test_loop test_usage test_extracmds test_display test_turn_recovery test_dcr test_settings_audit test_htmlform test_update test_fuzz_regress
+              test_panels test_tree test_approval test_compaction test_tiers test_workspace test_agenthub test_mcp test_loop test_usage test_extracmds test_display test_turn_recovery test_dcr test_settings_audit test_htmlform test_update test_kiro test_fuzz_regress
 
 .SECONDEXPANSION:
 $(O)/tests/%: tests/%.c $$(T_$$*)

@@ -22,13 +22,12 @@
 /* ---------- registry ---------- */
 
 extern const usage_provider_t usage_provider_anthropic, usage_provider_codex, usage_provider_copilot,
-    usage_provider_gemini_cli, usage_provider_zai, usage_provider_synthetic, usage_provider_ollama,
-    usage_provider_ollama_cloud;
+    usage_provider_zai, usage_provider_synthetic, usage_provider_ollama, usage_provider_ollama_cloud, usage_provider_kiro;
 
 /* DEFAULT_USAGE_PROVIDERS probe order (the ported subset) */
 static const usage_provider_t *const PROVIDERS[] = {
-    &usage_provider_codex,     &usage_provider_gemini_cli, &usage_provider_ollama,   &usage_provider_ollama_cloud,
-    &usage_provider_anthropic, &usage_provider_zai,        &usage_provider_copilot, &usage_provider_synthetic,
+    &usage_provider_codex, &usage_provider_ollama,  &usage_provider_ollama_cloud, &usage_provider_anthropic,
+    &usage_provider_zai,   &usage_provider_copilot, &usage_provider_synthetic,   &usage_provider_kiro,
 };
 
 size_t usage_provider_count(void) { return ARRAY_LEN(PROVIDERS); }
@@ -61,7 +60,8 @@ static json_t *usage_credential(const json_t *e) {
         for (size_t i = 0; i < ARRAY_LEN(map); i++)
             if (json_get_str(e, map[i][0]) && *json_get_str(e, map[i][0])) json_set_str(c, map[i][1], json_get_str(e, map[i][0]));
         if (json_is_num(json_get(e, "expires"))) json_set(c, "expiresAt", json_clone(json_get(e, "expires")));
-        static const char *const keep[] = {"accountId", "projectId", "email", "orgId", "orgName", "enterpriseUrl", "apiEndpoint"};
+        static const char *const keep[] = {"accountId", "projectId", "email",          "orgId", "orgName",
+                                           "enterpriseUrl", "apiEndpoint", "kiroProfileArn", "region"};
         for (size_t i = 0; i < ARRAY_LEN(keep); i++)
             if (json_get_str(e, keep[i]) && *json_get_str(e, keep[i])) json_set_str(c, keep[i], json_get_str(e, keep[i]));
     } else {
@@ -95,6 +95,7 @@ char *usage_account_key(const json_t *cred) {
     if (*org) sb_appendf(&b, "|org:%s", org);
     if (*proj) sb_appendf(&b, "|project:%s", proj);
     if (*ent) sb_appendf(&b, "|enterprise:%s", ent);
+    if (json_get_str(cred, "region") && *json_get_str(cred, "region")) sb_appendf(&b, "|region:%s", json_get_str(cred, "region"));
     if (!*acc && !*em && !*org) {
         const char *sec = json_get_str(cred, "apiKey");
         if (!sec || !*sec) sec = json_get_str(cred, "refreshToken");

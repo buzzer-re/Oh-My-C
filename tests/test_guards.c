@@ -2,6 +2,7 @@
  * isAwaitingUserAnswer, tool-call loop canonicalization, URL-read bot walls (ports of omp magic-keywords.ts /
  * markdown-prose.ts, tiny/message-preproc.ts, pi-tui thinking.ts, session/todo-tracker.ts, utils/tool-call-loop-guard.ts,
  * web/scrapers/types.ts botWallOf) */
+#include "agent/agent.h"
 #include "coding/autothink.h"
 #include "coding/guards.h"
 #include "coding/keywords.h"
@@ -28,7 +29,24 @@ static bool pre_eq(const char *in, const char *want) {
     return ok;
 }
 
+/* validateToolArguments: an explicit null an optional property's schema accepts is kept (omp 3763f4df73) */
+static void explicit_nulls(void) {
+    json_t *schema = json_parse_str("{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"note\":{\"type\":"
+                                    "[\"string\",\"null\"]},\"assignee\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}]},"
+                                    "\"label\":{\"type\":\"string\"}},\"required\":[\"id\"]}");
+    json_t *args = json_parse_str("{\"id\":\"1\",\"note\":null,\"assignee\":null,\"label\":null}");
+    char *err = tool_args_validate(schema, &args, NULL);
+    char *s = json_dump(args, 0);
+    CHECK(!err && !strcmp(s, "{\"id\":\"1\",\"note\":null,\"assignee\":null}"));
+    if (err || strcmp(s, "{\"id\":\"1\",\"note\":null,\"assignee\":null}")) fprintf(stderr, "explicit nulls: %s %s\n", s, err ? err : "");
+    free(s);
+    free(err);
+    json_free(args);
+    json_free(schema);
+}
+
 int main(void) {
+    explicit_nulls();
     /* standalone prose keyword */
     CHECK(kw("please ultrathink"));
     CHECK(kw("ultrathink."));

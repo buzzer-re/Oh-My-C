@@ -1609,7 +1609,7 @@ static json_t *model_json(const ai_model_t *m) {
             "supportsUsageInStreaming", "alwaysSendMaxTokens", "disableReasoningOnForcedToolChoice",
             "disableReasoningOnToolChoice", "disableReasoningWithTools", "supportsToolChoice", "supportsForcedToolChoice",
             "supportsNamedToolChoice", "maxTokensField", "requiresToolResultName", "requiresAssistantAfterToolResult",
-            "requiresThinkingAsText", "requiresMistralToolIds", "thinkingFormat", "reasoningDisableMode",
+            "foldUserAfterToolResult", "requiresThinkingAsText", "requiresMistralToolIds", "thinkingFormat", "reasoningDisableMode",
             "omitReasoningEffort", "includeEncryptedReasoning", "filterReasoningHistory", "reasoningContentField",
             "requiresReasoningContentForToolCalls", "requiresReasoningContentForAllAssistantTurns",
             "allowsSyntheticReasoningContentForToolCalls", "replayReasoningContent", "qwenPreserveThinking",
@@ -2266,7 +2266,7 @@ static char *login_prompt(void *ud, const auth_prompt_t *p) {
         c->r->login_abort = 1;
         return NULL;
     }
-    if (!c->auth_emitted) {
+    if (!c->auth_emitted && !p->risk_acknowledgement) { /* the login-warning acceptance is a plain yes/no the host can show */
         if (!c->error)
             c->error = xasprintf("Provider '%s' requires interactive prompts which are not supported in RPC mode. Use the "
                                  "terminal UI to log in.",

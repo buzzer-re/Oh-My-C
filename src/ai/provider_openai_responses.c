@@ -15,7 +15,6 @@
 enum { V_OPENAI = 0, V_AZURE = 1, V_CODEX = 2 };
 
 #define CODEX_BASE_URL "https://chatgpt.com/backend-api"
-#define CODEX_CLIENT_VERSION "0.159.0"
 #define CODEX_ORIGINATOR "omp" /* upstream OPENAI_HEADER_VALUES.ORIGINATOR_CODEX */
 #define NON_VISION_PLACEHOLDER "[image omitted: model does not support vision]"
 
@@ -172,7 +171,7 @@ static void parse_text_sig(const char *sig, char **id, char **phase) {
         if (json_is_obj(j) && json_get_int(j, "v", 0) == 1 && json_get_str(j, "id")) {
             *id = xstrdup(json_get_str(j, "id"));
             const char *ph = json_get_str(j, "phase");
-            if (str_eq(ph, "commentary") || str_eq(ph, "final_answer")) *phase = xstrdup(ph);
+            if (str_eq(ph, "commentary") || str_eq(ph, "final_answer") || str_eq(ph, "partial_answer")) *phase = xstrdup(ph);
             json_free(j);
             return;
         }
@@ -854,6 +853,28 @@ json_t *oair_build_request(const ai_model_t *m, const ai_context_t *ctx, const a
     return p;
 }
 
+/* withCodexRoutingFieldsFirst (omp 6c57f9091e): codex-rs 0.161+ serializes `type`, `model`, `stream`, `service_tier` and
+ * `previous_response_id` ahead of a potentially multi-megabyte `input`, so gateways can route on the leading bytes;
+ * every other field keeps its position. Reorders `body` in place. */
+void oair_codex_routing_fields_first(json_t *body) {
+    static const char *const routing[] = {"type", "model", "stream", "service_tier", "previous_response_id"};
+    if (!json_is_obj(body)) return;
+    size_t n = body->u.obj.n, at = 0;
+    for (size_t r = 0; r < ARRAY_LEN(routing); r++) {
+        for (size_t i = at; i < n; i++) {
+            if (strcmp(body->u.obj.keys[i], routing[r]) != 0) continue;
+            char *k = body->u.obj.keys[i];
+            json_t *v = body->u.obj.vals[i];
+            memmove(body->u.obj.keys + at + 1, body->u.obj.keys + at, (i - at) * sizeof *body->u.obj.keys);
+            memmove(body->u.obj.vals + at + 1, body->u.obj.vals + at, (i - at) * sizeof *body->u.obj.vals);
+            body->u.obj.keys[at] = k;
+            body->u.obj.vals[at] = v;
+            at++;
+            break;
+        }
+    }
+}
+
 /* ---------- URL / auth ---------- */
 
 char *oair_codex_account_id(const char *tok) {
@@ -969,11 +990,10 @@ static bool build_headers(http_headers_t *h, const ai_model_t *m, const ai_strea
         free(hint);
         /* codex-rs sends `OpenAI-Beta` only on the WebSocket handshake; HTTP carries none */
         http_headers_set(h, "originator", CODEX_ORIGINATOR);
-        http_headers_set(h, "version", CODEX_CLIENT_VERSION);
+        http_headers_set(h, "version", ai_codex_client_version());
         http_headers_set(h, "User-Agent", OMC_NAME "/" OMC_VERSION);
-        if (!str_empty(o->session_id)) {
-            http_headers_set(h, "conversation_id", o->session_id);
-            http_headers_set(h, "session_id", o->session_id);
+        if (!str_empty(o->session_id)) { /* codex-rs SESSION_ID_HEADER only: no underscore names (omp ad383b54c7) */
+            http_headers_set(h, "session-id", o->session_id);
             http_headers_set(h, "x-client-request-id", o->session_id);
         }
         http_headers_set(h, "Accept", "text/event-stream");
@@ -1606,6 +1626,7 @@ static json_t *oair_stream_once(void *self, ai_event_cb cb, void *ud) {
         msg = oair_stream_finish(st, -1, err);
     } else {
         char *url = oair_url(m);
+        if (variant_of(m) == V_CODEX) oair_codex_routing_fields_first(body);
         char *payload = json_dump(body, 0);
         int status = 0;
         int rc = ai_sse_post(url, &h, payload, o, oair_stream_on_sse, st, &status, &err);
@@ -1738,6 +1759,7 @@ json_t *ai_openai_remote_compact(const ai_model_t *m, const char *api_key, const
     http_headers_set(&h, "Content-Type", "application/json");
     http_headers_set(&h, "Accept", "*/*");
     char *url = compact_endpoint(m);
+    if (variant_of(m) == V_CODEX) oair_codex_routing_fields_first(body);
     char *payload = json_dump(body, 0);
     http_req_t req = {.method = "POST", .url = url, .headers = &h, .body = payload, .body_len = strlen(payload),
                       .timeout_ms = 300000, .cancel = cancel};

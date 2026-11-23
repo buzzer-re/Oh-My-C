@@ -207,6 +207,11 @@ x = r.call({"id": "ns", "type": "new_session"})
 check("new_session", x and x["data"] == {"cancelled": False}, x)
 x = r.call({"id": "lg", "type": "login", "providerId": "nope"})
 check("login unknown", x and x.get("error") == "Unknown OAuth provider: nope", x)
+# the login-warning acceptance reaches RPC hosts as a plain input before any auth URL (omp 39f9483f66); "no" cancels
+r.ui.append({"value": "no"})
+x = r.call({"id": "lw", "type": "login", "providerId": "antigravity-cli"})
+risk = r.wait(lambda f: f.get("type") == "extension_ui_request" and f.get("method") == "input" and "use at your own risk" in f.get("title", ""))
+check("login risk prompt", risk and x and x.get("error") == "Login cancelled", (risk, x))
 
 # transport limits: v1 replaces an oversized response with an error, v2 chunks it
 big = [{"name": "p", "tasks": [{"content": "x" * 1200000, "status": "pending"}]}]
