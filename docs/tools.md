@@ -312,7 +312,7 @@ call to it runs, every session sees.
   - `roots/list` (and the roots input) answer the project directory as one `file://` root.
   - Not ported: result caching by `ttlMs`/`cacheScope` (each session lists afresh), resource subscriptions through
     `subscriptions/listen` (`resources/subscribe` is a handshake-era request), `Mcp-Param-*` headers from tool
-    schemas. clientInfo stays `omc`/version where omp sends `omp-coding-agent`/`1.0.0`.
+    schemas. clientInfo is omp's own, `omp-coding-agent`/`1.0.0`, in both eras (initialize and request `_meta`).
 - Config discovery (project first, then user; `mcp_discover_config`): `.omc/mcp.json`,
   `.omp/mcp.json`, `mcp.json`, `.mcp.json`, `.claude/mcp.json`, `.cursor/mcp.json`,
   `.vscode/mcp.json`, `<agent dir>/mcp.json`, `~/.cursor/mcp.json`, `~/.claude/mcp.json` and
