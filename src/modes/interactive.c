@@ -3731,6 +3731,9 @@ int run_interactive_mode(app_t *a, const char *initial) {
     ui_signals_dispose();
     ui_mcp_uninstall(); /* a settings listener outlives this run and must not reach this stack frame */
     if (u.worker_running) {
+        /* cutsTurnOff: the host's SIGTERM / SIGHUP (a terminal restarting) ends the process under the turn: label it
+         * interrupted so `omc --restore` goes on with it; a quit or Ctrl+C stops it */
+        if (code == 128 + SIGTERM || code == 128 + SIGHUP) agent_abort_reason(a->agent, INTERRUPTED_TURN_ERROR);
         app_abort(a);
         pthread_join(u.worker, NULL);
     }

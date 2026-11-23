@@ -205,6 +205,7 @@ struct agent {
     volatile sig_atomic_t deliver_queued;    /* an empty Enter forced the queue into the continuation (see below) */
     volatile sig_atomic_t abort_user;        /* the abort carries USER_INTERRUPT_LABEL (agent_abort_user) */
     volatile sig_atomic_t abort_silent;      /* the running turn's abort is an internal transition (agent_abort_silently) */
+    const char *volatile abort_reason;       /* agent_abort_reason: errorMessage of the aborted turn (static), or NULL */
     bool running;
     json_t *streaming_message; /* borrowed while streaming */
     int max_turns;             /* 0 => unlimited */
@@ -242,6 +243,9 @@ void agent_abort_user(agent_t *a);
 /* markPlanInternalAbortPending + abort(): stop the running turn as an expected internal transition; its aborted
  * assistant message carries the silent-abort marker, so no "Operation aborted" line is drawn */
 void agent_abort_silently(agent_t *a);
+/* abort(reason): stop the running turn with `reason` (a static string) as its aborted message's errorMessage, e.g.
+ * INTERRUPTED_TURN_ERROR when the process ends under the turn (SIGTERM/SIGHUP), so --restore goes on with it */
+void agent_abort_reason(agent_t *a, const char *reason);
 /* Abort the next model request of the running loop as an expected internal transition (omp
  * markPlanInternalAbortPending + abort): the aborted assistant message is stamped with
  * errorMessage "__omp.silent_abort__" so no abort line renders. */

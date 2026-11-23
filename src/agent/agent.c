@@ -784,6 +784,10 @@ void agent_abort_user(agent_t *a) {
     a->cancel = 1;
 }
 void agent_abort_next_silently(agent_t *a) { a->silent_abort_next = 1; }
+void agent_abort_reason(agent_t *a, const char *reason) {
+    a->abort_reason = reason;
+    a->cancel = 1;
+}
 void agent_abort_silently(agent_t *a) {
     a->abort_silent = 1;
     a->cancel = 1;
@@ -1169,7 +1173,8 @@ static void user_interrupt_label(json_t *msg) {
 static json_t *aborted_boundary(agent_t *a) {
     json_t *m = ai_error_message(a->model, "aborted", a->abort_silent ? "__omp.silent_abort__"
                                                       : a->abort_user ? AGENT_USER_INTERRUPT_LABEL
-                                                                      : "Request was aborted");
+                                                      : a->abort_reason ? a->abort_reason
+                                                                        : "Request was aborted");
     int64_t ts = json_get_int(m, "timestamp", now_ms());
     json_del(m, "timestamp");
     json_set_int(m, "errorId", a->abort_silent ? 33558528 : a->abort_user ? AIE_ID_USER_INTERRUPT : AIE_ID_ABORT);
@@ -1311,6 +1316,9 @@ static json_t *stream_assistant(agent_t *a, int *ttsr_abort, json_t **cursor_res
     else if (a->abort_user && !a->abort_silent && str_eq(json_get_str(msg, "stopReason"), "aborted") &&
              (!json_get_str(msg, "errorMessage") || str_eq(json_get_str(msg, "errorMessage"), "Request was aborted")))
         user_interrupt_label(msg); /* abortReasonText: the caller's reason, classified UserInterrupt */
+    else if (a->abort_reason && !a->abort_silent && str_eq(json_get_str(msg, "stopReason"), "aborted") &&
+             (!json_get_str(msg, "errorMessage") || str_eq(json_get_str(msg, "errorMessage"), "Request was aborted")))
+        json_set_str(msg, "errorMessage", a->abort_reason); /* abortReasonText: the caller's reason */
     if (a->cancel && !silent && str_eq(json_get_str(msg, "stopReason"), "aborted")) {
         /* finishAbortedStream commits the streaming partial: the provider's closing timings never land on it */
         json_del(msg, "duration");
@@ -1873,6 +1881,7 @@ static void run_loop(agent_t *a, json_t *new_messages, bool poll_steering) {
     a->cancel = 0;
     a->abort_user = 0;
     a->abort_silent = 0;
+    a->abort_reason = NULL;
     a->run_started_mono = mono_ms();
     live_loops_add(1);
     json_t *run_msgs = json_arr();

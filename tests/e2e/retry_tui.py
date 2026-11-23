@@ -194,6 +194,40 @@ if not res or "replayed-42" not in res[-1]:
     fail("restore replayed output", res)
 stop()
 
+# sigterm: the host's SIGTERM ends the process under the turn: the cut-off turn is labelled interrupted (not a user
+# stop), so --restore goes on with it (omp bbde84bf1c)
+for f in glob.glob(os.path.join(agent, "sessions", "*", "*.jsonl")):
+    os.remove(f)
+launch()
+if not wait_for("mock-1", 10):
+    fail("sigterm startup", plain()[-600:])
+send("bash:sleep 1; echo after-term-$((40+3))")
+send(ENTER)
+if not wait_for("$ sleep 1"):
+    fail("sigterm tool start", plain()[-600:])
+time.sleep(0.3)
+os.kill(pid, signal.SIGTERM)
+deadline = time.time() + 10
+while time.time() < deadline:
+    if os.waitpid(pid, os.WNOHANG)[0]:
+        pid = None
+        break
+    pump(0.05)  # the exiting TUI still writes to the pty
+if pid:
+    fail("sigterm exit")
+sessions = glob.glob(os.path.join(agent, "sessions", "*", "*.jsonl"))
+tail = [json.loads(l) for l in open(sessions[0]) if l.strip()] if len(sessions) == 1 else []
+aborted = [e["message"] for e in tail if e.get("type") == "message" and e["message"].get("stopReason") == "aborted"]
+if not aborted or aborted[-1].get("errorMessage") != "Previous OMC process exited before completing the turn.":
+    fail("sigterm label", aborted[-1:] if aborted else sessions)
+launch("--restore", sessions[0])
+if not wait_for("Tool said:", 15):
+    fail("sigterm restore answer", plain()[-800:])
+res = last_tool_results()
+if not res or "after-term-43" not in res[-1]:
+    fail("sigterm restore output", res)
+stop()
+
 # reuse: a later turn's streamed read reusing call_1 leaves the earlier bash card in place
 launch()
 if not wait_for("mock-1", 10):
