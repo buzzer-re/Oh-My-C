@@ -16,7 +16,11 @@ interchangeable and unknown fields survive a round trip.
 `ai_transform_messages()` normalizes a history for the target model before every request. It
 drops or converts foreign thinking blocks, synthesizes missing tool results, strips images for
 models without image input, and drops errored or aborted assistant turns
-(`providers/transform-messages.ts`).
+(`providers/transform-messages.ts`). A foreign thinking block demoted to text carries the private
+`__demotedThinking` key (omp `kDemotedThinking`; encoders build their own wire blocks, so it never leaves the
+process): the Anthropic encoder counts those blocks, a refused request reports the count as
+`demotedReasoningBlocks`, and `ai_stream_opts_t.omit_demoted_reasoning` leaves them out (see agent.md, classifier
+refusals).
 
 ## Model catalog (`catalog.c`)
 

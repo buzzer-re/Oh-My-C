@@ -575,6 +575,7 @@ static char *oneshot_ex(app_t *a, const ai_model_t *m, const char *system, const
     o.provider_session_state = true;
     o.metadata = (json_t *)app_session_metadata(a, m->provider);
     o.cancel = cancel_ptr(a);
+    app_omit_demoted_opts(a, m, &o); /* #sideStreamFn */
     json_t *r = ai_complete(m, &ctx, &o);
     journal(a, r);
     char *text = NULL;
@@ -892,6 +893,7 @@ static bool anthropic_compact(app_t *a, const ai_model_t *m, const prep_t *p, co
     ai_stream_opts_t o = a->agent->base_opts;
     char *key = app_api_key_for(m);
     o.api_key = key;
+    app_omit_demoted_opts(a, m, &o); /* side requests over the history send it as the live turns do (omp 69f22a4733) */
     o.max_tokens = MIN((int64_t)floor(0.8 * (double)reserve_tokens()), MAX_SUMMARY_TOKENS);
     compaction_effort(a, m, &o);
     o.disable_reasoning = false;
@@ -1807,6 +1809,7 @@ static char *handoff_exec(app_t *a, handoff_req_t *h, bool auto_triggered, char 
     char *key = app_api_key_for(model);
     o.api_key = key;
     app_fill_request_opts(a, &o);
+    app_omit_demoted_opts(a, model, &o); /* #sideStreamFn */
     o.session_id = h->sid;
     o.provider_session_state = true;
     o.metadata = (json_t *)app_session_metadata(a, model->provider);

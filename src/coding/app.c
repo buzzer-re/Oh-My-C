@@ -557,6 +557,21 @@ static void fill_request_opts(app_t *a, ai_stream_opts_t *o) {
 
 void app_fill_request_opts(app_t *a, ai_stream_opts_t *o) { fill_request_opts(a, o); }
 
+/* resolveCatalogPolicy(model).classifierCotExtraction: the model's classifier refuses reasoning replayed as text */
+static bool classifier_cot_extraction(const ai_model_t *m) {
+    const json_t *cot = m ? compat_catalog_policy(m->provider, m->api, m->id, "classifierCotExtraction") : NULL;
+    return json_is_bool(cot) && cot->u.b;
+}
+
+bool app_omits_demoted_reasoning(app_t *a, const ai_model_t *m) {
+    return m && a->session && a->demoted_omitted_for && str_eq(a->demoted_omitted_for, session_id(a->session)) &&
+           classifier_cot_extraction(m);
+}
+
+void app_omit_demoted_opts(app_t *a, const ai_model_t *m, ai_stream_opts_t *o) {
+    if (app_omits_demoted_reasoning(a, m)) o->omit_demoted_reasoning = true;
+}
+
 /* session/session-metadata.ts buildSessionMetadata: the per-request `metadata`, so the backend buckets requests under
  * one session; the Claude account stays off every other provider. Interned: providers borrow it for the whole request,
  * and the set is bounded by the sessions and accounts of the process. */
@@ -706,6 +721,7 @@ static void hook_prepare(void *ud, agent_t *ag, ai_stream_opts_t *o) {
     }
     extracmd_prepare_request(a, o); /* /force */
     fill_request_opts(a, o);
+    app_omit_demoted_opts(a, ag->model, o); /* sdk.ts streamFn: omitDemotedReasoning */
     if (!o->metadata && ag->model) o->metadata = (json_t *)app_session_metadata(a, ag->model->provider);
     app_note_provider_state(a);
 }
@@ -1454,11 +1470,25 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     int max = (int)settings_int("retry.maxRetries", 10);
     int saga = attempt - a->retry_offset + 1; /* omp #retryAttempt after its increment */
     bool exhausted = saga > max;
+    const json_t *rsd = json_get_obj(assistant, "stopDetails");
+    bool immediate = false; /* a same-model retry at once (delayMs 0), before any fallback */
+    /* a reasoning_extraction refusal of a request that replayed other models' reasoning as text: resent once on this
+     * model without that reasoning, which stays out for the rest of the session, before walking the chain. A refusal
+     * of a request that carried none would only be refused again (omp 873763609a, 69f22a4733) */
+    bool classifier_refusal = str_eq(json_get_str(rsd, "type"), "refusal") || str_eq(json_get_str(rsd, "type"), "sensitive");
+    if (retryable && !exhausted && classifier_refusal && str_eq(json_get_str(rsd, "category"), "reasoning_extraction") &&
+        json_get_int(assistant, "demotedReasoningBlocks", 0) > 0 && a->model && classifier_cot_extraction(a->model) &&
+        a->session && !str_eq(a->demoted_omitted_for, session_id(a->session))) {
+        free(a->demoted_omitted_for);
+        a->demoted_omitted_for = xstrdup(session_id(a->session));
+        LOGI("Classifier refused other models' reasoning replayed as text; retrying without it (%s/%s, %lld blocks)",
+             a->model->provider, a->model->id, (long long)json_get_int(assistant, "demotedReasoningBlocks", 0));
+        immediate = true;
+    }
     /* a reasoning_extraction refusal that stopped output already streaming judged that sample, not the request: the
      * same request on this model answers on the next try. Resampled at once, once per saga, before any fallback
      * (omp 92fe816a0e) */
-    const json_t *rsd = json_get_obj(assistant, "stopDetails");
-    if (retryable && !exhausted && !a->refusal_resampled && str_eq(json_get_str(rsd, "type"), "refusal") &&
+    if (!immediate && retryable && !exhausted && !a->refusal_resampled && classifier_refusal &&
         str_eq(json_get_str(rsd, "category"), "reasoning_extraction")) {
         bool streamed = false;
         const json_t *blk;
@@ -1471,7 +1501,7 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
         if (streamed) {
             a->refusal_resampled = true;
             LOGI("Classifier refused a turn mid-stream; resampling it on the same model");
-            return again;
+            immediate = true;
         }
     }
     bool usage_limit = is_usage_limit(err);
@@ -1481,8 +1511,8 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     bool billing_cap = tr_billing_cap_usage_limit(status ? status : aie_status_from_text(err), err);
     /* model fallback: consulted on every failed attempt, retryable or hard (hardErrorFallback) */
     bool switched = false;
-    if (a->model && !is_abort_error(err) && settings_bool("retry.modelFallback", true) && mr_fallback_admits(usage_limit) &&
-        !(is_overflow(assistant))) {
+    if (!immediate && a->model && !is_abort_error(err) && settings_bool("retry.modelFallback", true) &&
+        mr_fallback_admits(usage_limit) && !(is_overflow(assistant))) {
         char *cur = current_selector(a);
         int64_t hint = retry_after_ms(err);
         mr_suppress_selector(cur, now_ms() + (hint > 0 ? hint : mr_rate_limit_backoff_ms(err)));
@@ -1507,9 +1537,9 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
         strvec_free(&a->retry_notes);
         return false;
     }
-    double delay = mr_retry_backoff_ms(settings_int("retry.baseDelayMs", 500), saga);
-    int64_t hint = retry_after_ms(err);
-    int64_t window = mr_reason_window_ms(err, mr_error_status(err), usage_limit, hint >= 0);
+    double delay = immediate ? 0 : mr_retry_backoff_ms(settings_int("retry.baseDelayMs", 500), saga);
+    int64_t hint = immediate ? -1 : retry_after_ms(err);
+    int64_t window = immediate ? 0 : mr_reason_window_ms(err, mr_error_status(err), usage_limit, hint >= 0);
     if ((double)window > delay) delay = (double)window;
     if ((double)hint > delay) delay = (double)hint;
     int64_t maxd = settings_int("retry.maxDelayMs", 5 * 60 * 1000);
@@ -2284,6 +2314,7 @@ void app_free(app_t *a) {
     free(a->sys_custom);
     free(a->sys_append);
     free(a->cost_refusal);
+    free(a->demoted_omitted_for);
     free(a->fixed_dead_end_session);
     free(a->plan_file);
     free(a->plan_reference_path);
@@ -2832,6 +2863,7 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
     char *key = app_api_key_for(model);
     o.api_key = key;
     fill_request_opts(a, &o);
+    app_omit_demoted_opts(a, model, &o); /* #sideStreamFn */
     /* side requests never share provider conversation state with the main turn; a keyed topic keeps one lineage,
      * while the prompt-cache key stays the main session's */
     char *rid = e->conversation_key ? NULL : short_id();
@@ -2957,6 +2989,7 @@ static int branch_summary(app_t *a, const json_t *entries, const char *custom, c
     o.max_tokens = 2048;
     o.disable_reasoning = true;
     o.cancel = &g_branch_summary_cancel;
+    app_omit_demoted_opts(a, m, &o); /* #sideStreamFn */
     json_t *r = ai_complete(m, &ctx, &o);
     const char *stop = json_get_str(r, "stopReason");
     int rc = 0;
@@ -4045,10 +4078,17 @@ int app_switch_session(app_t *a, const char *path, char **err) {
 }
 
 int app_fork_from(app_t *a, const char *entry_id, char **err) {
+    /* a whole-session fork keeps this recovery state running under the fresh id (reanchorServedAttribution) */
+    bool whole = !entry_id || str_eq(entry_id, a->session->leaf_id);
+    bool omitted = a->demoted_omitted_for && str_eq(a->demoted_omitted_for, session_id(a->session));
     session_t *ns = session_fork(a->session, entry_id, a->opts.session_dir);
     if (!ns) {
         *err = xstrdup("fork failed");
         return -1;
+    }
+    if (whole && omitted) {
+        free(a->demoted_omitted_for);
+        a->demoted_omitted_for = xstrdup(session_id(ns));
     }
     char *old_dir = a->env->artifacts && artifacts_dir(a->env->artifacts) ? xstrdup(artifacts_dir(a->env->artifacts)) : NULL;
     session_free(a->session);

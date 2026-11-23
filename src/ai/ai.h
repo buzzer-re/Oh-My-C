@@ -209,6 +209,9 @@ typedef struct {
     /* forceReasoningOff (external-thinking scratchpad): implies disable_reasoning; the Responses APIs send
      * reasoning {effort: "none"} whatever the model's disable mode */
     bool force_reasoning_off;
+    /* omitDemotedReasoning (Anthropic Messages): leave out other models' reasoning that would replay as text (after a
+     * reasoning_extraction refusal); a refused request reports demotedReasoningBlocks when it carried some */
+    bool omit_demoted_reasoning;
     bool hide_thinking_summary;
     /* prompt-cache pre-warm (Anthropic Messages only): the request is built as usual, then sent non-streaming with
      * max_tokens 0; the result has empty content, stopReason "length" and the request's usage. Budget thinking, a
@@ -467,6 +470,9 @@ void ai_apply_headers(http_headers_t *h, const ai_model_t *m, const ai_stream_op
 
 /* Normalize history for a target model: drops/converts foreign thinking, synthesizes missing tool results,
  * strips images if model lacks image input, drops errored/aborted assistant turns. Returns owned array. */
+/* kDemotedThinking: marks a text block ai_transform_messages synthesized from another model's thinking (encoders build
+ * their own wire blocks, so the key never reaches a provider or the session) */
+#define AI_DEMOTED_THINKING_KEY "__demotedThinking"
 json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target);
 /* OpenAI Responses remote compaction (agent compaction/openai.ts requestOpenAiRemoteCompaction): POST
  * <base>/responses/compact {model, input, instructions, prompt_cache_key?} with `messages` (LLM messages) encoded as

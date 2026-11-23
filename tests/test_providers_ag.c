@@ -1030,6 +1030,37 @@ static void test_anthropic_compaction_gate(void) {
     }
 }
 
+/* omp 873763609a: omitDemotedReasoning leaves another model's reasoning (demoted to text) out of the request, while a
+ * turn's own unsigned thinking beside signed thinking keeps its text replay */
+static void test_anthropic_omit_demoted(void) {
+    json_t *raw = J(SONNET45);
+    ai_model_t m = mk_model(raw);
+    json_t *msgs = J("[{\"role\":\"user\",\"content\":\"q1\",\"timestamp\":1},"
+                     "{\"role\":\"assistant\",\"provider\":\"openai\",\"api\":\"openai-responses\",\"model\":\"gpt-5\","
+                     "\"stopReason\":\"stop\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"foreign thoughts\"},"
+                     "{\"type\":\"text\",\"text\":\"a1\"}],\"timestamp\":2},"
+                     "{\"role\":\"user\",\"content\":\"q2\",\"timestamp\":3}]");
+    ai_context_t ctx = {.messages = msgs};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    o.api_key = "sk-ant-api03-test";
+    json_t *req = anthropic_build_request(&m, &ctx, &o, false);
+    char *wire = json_dump(json_get(req, "messages"), 0);
+    CHECK(strstr(wire, "foreign thoughts") != NULL);
+    free(wire);
+    json_free(req);
+    o.omit_demoted_reasoning = true;
+    req = anthropic_build_request(&m, &ctx, &o, false);
+    wire = json_dump(json_get(req, "messages"), 0);
+    CHECK(strstr(wire, "foreign thoughts") == NULL);
+    CHECK(strstr(wire, "\"a1\"") != NULL);
+    CHECK(strstr(wire, AI_DEMOTED_THINKING_KEY) == NULL);
+    free(wire);
+    json_free(req);
+    json_free(msgs);
+    json_free(raw);
+}
+
 /* omp 7f6b4a096f: an empty conversation is named before it reaches Anthropic's bare 400 */
 static void test_anthropic_empty_request(void) {
     json_t *raw = J(SONNET45);
@@ -1058,6 +1089,7 @@ int main(void) {
     unsetenv("PI_AI_CLAUDE_CODE_VERSION");
 
     test_message_threads();
+    test_anthropic_omit_demoted();
     test_anthropic_empty_request();
     test_anthropic_compaction_gate();
     test_anthropic_request_apikey();

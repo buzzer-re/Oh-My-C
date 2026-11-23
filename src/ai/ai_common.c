@@ -1520,6 +1520,7 @@ json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target) 
                             json_t *tb = json_obj();
                             json_set_str(tb, "type", "text");
                             json_set_str(tb, "text", txt);
+                            json_set_bool(tb, AI_DEMOTED_THINKING_KEY, true); /* kDemotedThinking: never on the wire */
                             json_push(nc, tb);
                             free(txt);
                         }

@@ -14,6 +14,8 @@ MOCK_CACHE_TOKENS=<n> reports <n> cache-write tokens on a new Anthropic request 
 Anthropic "drop:<mode>:<n>:<text>" (the latest user message): the first <n> requests stream <text> and then drop the
 connection ("stall": silent for $MOCK_STALL_SECS (60), "close": FIN before the last chunk, "rst": TCP reset); later
 requests answer "resumed after drop" (turn recovery checks, tests/e2e/stall.sh).
+Anthropic "think:<x>" streams unsigned reasoning before the answer; "refusecot:<x>" is refused (stop_details category
+reasoning_extraction, before any output) while an assistant text block replays that reasoning (tests/e2e/refusal.sh).
 Paths under /deny answer 403 to Copilot-Integration-Id copilot-chat (identity fallback test)."""
 import json, os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +24,7 @@ LOG = os.environ.get("MOCK_LOG")
 SEEN = set()
 REFUSED = set()  # refuse: prompts already refused once
 DROPS = {}  # drop command -> requests dropped so far
+CARRIED_THOUGHT = "Private chain of thought."  # think: reasoning; refusecot: refuses a request replaying it as text
 
 
 def latest_user_text(body):
@@ -267,6 +270,26 @@ class H(BaseHTTPRequestHandler):
                 self.ev({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_f", "name": forced["name"], "input": {}}}, "content_block_start")
                 self.ev({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps(args)}}, "content_block_delta")
                 stop = "tool_use"
+            elif kind == "user" and latest_user_text(body).startswith("think:"):
+                # unsigned reasoning, as a model that is not Claude writes it, then the answer
+                self.ev({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}, "content_block_start")
+                self.ev({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": CARRIED_THOUGHT}}, "content_block_delta")
+                self.ev({"type": "content_block_stop", "index": 0}, "content_block_stop")
+                self.ev({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}, "content_block_start")
+                self.ev({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "plain provider answer"}}, "content_block_delta")
+                self.ev({"type": "content_block_stop", "index": 1}, "content_block_stop")
+                self.ev({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}}, "message_delta")
+                self.ev({"type": "message_stop"}, "message_stop")
+                return self.end()
+            elif kind == "user" and latest_user_text(body).startswith("refusecot:") and any(
+                    CARRIED_THOUGHT in (b.get("text") or "") for m in body.get("messages") or [] if m.get("role") == "assistant"
+                    for b in (m.get("content") if isinstance(m.get("content"), list) else [])):
+                # the classifier refuses a request replaying another model's reasoning as text, before any output
+                self.ev({"type": "message_delta", "delta": {"stop_reason": "refusal", "stop_details": {"type": "refusal",
+                         "category": "reasoning_extraction", "explanation": "declined"}},
+                         "usage": {"output_tokens": 0}}, "message_delta")
+                self.ev({"type": "message_stop"}, "message_stop")
+                return self.end()
             elif kind == "user" and latest_user_text(body).startswith("refuse:") and latest_user_text(body) not in REFUSED:
                 # a classifier refusal that stops output already streaming (once per prompt text)
                 REFUSED.add(latest_user_text(body))
