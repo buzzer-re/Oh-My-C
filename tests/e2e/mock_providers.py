@@ -17,6 +17,7 @@ requests answer "resumed after drop" (turn recovery checks, tests/e2e/stall.sh).
 Anthropic "think:<x>" streams unsigned reasoning before the answer; "refusecot:<x>" is refused (stop_details category
 reasoning_extraction, before any output) while an assistant text block replays that reasoning (tests/e2e/refusal.sh);
 "refuseon:<model>,<model>:<x>" is refused before any output (category cyber) on every request to a listed model id.
+Anthropic requests under a path containing "nostrict" answer a 400 refusing the first strict tool.
 Paths under /deny answer 403 to Copilot-Integration-Id copilot-chat (identity fallback test)."""
 import json, os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -245,6 +246,11 @@ class H(BaseHTTPRequestHandler):
                 return drop_connection(self, mode)
             if kind == "user":
                 text = "resumed after drop"
+        if path.endswith("/messages") and "nostrict" in path and any(t.get("strict") for t in body.get("tools") or []):
+            # an endpoint without structured outputs refuses strict tools (matchesStrictToolsRejection)
+            i = next(i for i, t in enumerate(body["tools"]) if t.get("strict"))
+            return self.reply(400, {"type": "error", "error": {"type": "invalid_request_error",
+                                    "message": "tools.%d.custom.strict: Extra inputs are not permitted" % i}})
         if path.endswith("/messages") and body.get("stream") is False and body.get("max_tokens") == 0:
             # a prompt-cache pre-warm: usage only, no content (MOCK_PREWARM_400 refuses it like a gateway would)
             if os.environ.get("MOCK_PREWARM_400"):

@@ -454,6 +454,68 @@ static void test_anthropic_schema(void) {
     json_free(s);
 }
 
+/* buildAnthropicToolSchemaPlans / normalizeAnthropicStrictSchema / matchesStrictToolsRejection */
+static void test_anthropic_strict_tools(void) {
+    /* required follows the property order; optionals stay optional within the budget, then turn nullable-required */
+    json_t *s = J("{\"type\":\"object\",\"properties\":{\"i\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},"
+                  "\"n\":{\"type\":\"number\"}},\"required\":[\"input\",\"i\"],\"additionalProperties\":false}");
+    int ou = -1, uu = -1;
+    json_t *n = anthropic_strict_schema(s, 24, 16, &ou, &uu);
+    CHECK(n != NULL);
+    CHECK_STR(P(n, "required.0"), "i");
+    CHECK_STR(P(n, "required.1"), "input");
+    CHECK(json_len(json_get(n, "required")) == 2 && ou == 1 && uu == 0);
+    json_free(n);
+    n = anthropic_strict_schema(s, 0, 16, &ou, &uu);
+    CHECK(n && json_len(json_get(n, "required")) == 3 && uu == 1);
+    CHECK_STR(P(n, "properties.n.anyOf.0.type"), "number");
+    CHECK_STR(P(n, "properties.n.anyOf.1.type"), "null");
+    json_free(n);
+    CHECK(anthropic_strict_schema(s, 0, 0, NULL, NULL) == NULL); /* no union budget left for the optional */
+    json_free(s);
+    /* an open object cannot be strict */
+    s = J("{\"type\":\"object\",\"properties\":{\"m\":{\"type\":\"object\",\"properties\":{}}},\"required\":[\"m\"],"
+          "\"additionalProperties\":false}");
+    CHECK(anthropic_strict_schema(s, 24, 16, NULL, NULL) == NULL);
+    json_free(s);
+
+    /* only allowlisted tools (edit, find, python, yield) go strict; PI_NO_STRICT and compat disableStrictTools turn it off */
+    json_t *raw = J("{\"id\":\"claude-sonnet-4-5\",\"api\":\"anthropic-messages\",\"provider\":\"anthropic\","
+                    "\"baseUrl\":\"https://api.anthropic.com\",\"reasoning\":true,\"maxTokens\":64000,\"contextWindow\":200000}");
+    ai_model_t m = mk_model(raw);
+    json_t *msgs = J("[{\"role\":\"user\",\"content\":\"hi\"}]");
+    json_t *tools = J("[{\"name\":\"edit\",\"description\":\"e\",\"parameters\":{\"type\":\"object\",\"properties\":{"
+                      "\"i\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"}},\"required\":[\"input\",\"i\"],"
+                      "\"additionalProperties\":false}},{\"name\":\"bash\",\"description\":\"b\",\"parameters\":{\"type\":"
+                      "\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"],"
+                      "\"additionalProperties\":false}}]");
+    ai_context_t ctx = {.messages = msgs, .tools = tools};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    json_t *p = anthropic_build_request(&m, &ctx, &o, false);
+    CHECK(json_get_bool(json_path(p, "tools.0"), "strict", false));
+    CHECK_STR(P(p, "tools.0.input_schema.required.0"), "i");
+    CHECK(json_path(p, "tools.1.strict") == NULL);
+    json_free(p);
+    setenv("PI_NO_STRICT", "1", 1);
+    p = anthropic_build_request(&m, &ctx, &o, false);
+    CHECK(json_path(p, "tools.0.strict") == NULL);
+    CHECK_STR(P(p, "tools.0.input_schema.required.0"), "input");
+    json_free(p);
+    unsetenv("PI_NO_STRICT");
+    json_free(tools);
+    json_free(msgs);
+    json_free(raw);
+
+    CHECK(anthropic_strict_tools_rejection("tools.0.custom.strict: Extra inputs are not permitted", 400));
+    CHECK(!anthropic_strict_tools_rejection("tools.0.custom.strict: Extra inputs are not permitted", 429));
+    CHECK(anthropic_strict_tools_rejection("structured outputs are not supported for this model", 400));
+    CHECK(anthropic_strict_tools_rejection("Request uses disallowed feature structured_outputs", 400));
+    CHECK(anthropic_strict_tools_rejection("{\"type\":\"invalid_request_error\",\"message\":\"The compiled grammar is too large\"}", 400));
+    CHECK(anthropic_strict_tools_rejection("invalid_request_error: schema is too complex to compile", 400));
+    CHECK(!anthropic_strict_tools_rejection("invalid_request_error: messages: field required", 400));
+}
+
 static const char *ANTH_SSE =
     "event: message_start\n"
     "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01ABC\",\"type\":\"message\",\"role\":\"assistant\","
@@ -1204,6 +1266,7 @@ int main(void) {
     test_anthropic_request_oauth();
     test_anthropic_proxy_headers();
     test_anthropic_schema();
+    test_anthropic_strict_tools();
     test_anthropic_sse();
     test_anthropic_sse_edges();
     test_google_request();

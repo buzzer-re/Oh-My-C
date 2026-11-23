@@ -84,4 +84,11 @@ json_t *anthropic_normalize_tool_schema(const json_t *schema);
 /* buildSessionMetadata's user_id: {session_id[, account_uuid, device_id]} as JSON text. Owned. */
 char *anthropic_session_user_id(const char *session_id, const char *account_uuid);
 
+/* normalizeAnthropicStrictSchema: the strict form of a tool input schema within the remaining optional/union budgets
+ * (owned), NULL when it cannot be strict; *_used receive what it spent */
+json_t *anthropic_strict_schema(const json_t *schema, int optional_remaining, int union_remaining, int *optional_used,
+                                int *union_used);
+/* matchesStrictToolsRejection: a 400 whose text refuses strict tools */
+bool anthropic_strict_tools_rejection(const char *msg, int status);
+
 #endif

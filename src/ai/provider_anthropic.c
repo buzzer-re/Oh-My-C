@@ -1044,6 +1044,291 @@ static json_t *tool_input_schema(const json_t *params) {
     return out;
 }
 
+/* ---------- strict tools (buildAnthropicToolSchemaPlans, normalizeAnthropicStrictSchema) ---------- */
+
+/* ANTHROPIC_STRICT_TOOL_ALLOWLIST and its budgets */
+static const char *const STRICT_TOOL_ALLOWLIST[] = {"python", "edit", "find", "yield"};
+#define MAX_STRICT_TOOLS 20
+#define MAX_STRICT_OPTIONAL_PARAMETERS 24
+#define MAX_STRICT_UNION_PARAMETERS 16
+#define STRICT_MAX_DEPTH 64
+
+/* providerSessionState.strictToolsDisabled: an endpoint+model that rejected strict tools gets none again */
+static pthread_mutex_t g_strict_mu = PTHREAD_MUTEX_INITIALIZER;
+static strvec_t g_strict_off;
+
+static char *strict_key(const ai_model_t *m) {
+    char *url = anthropic_request_url(m, false);
+    char *k = xasprintf("%s\x1f%s", url ? url : "", m->id);
+    free(url);
+    return k;
+}
+
+static bool strict_tools_disabled(const ai_model_t *m) {
+    if (env_truthy("PI_NO_STRICT") || cflag(m, "disableStrictTools")) return true;
+    char *k = strict_key(m);
+    pthread_mutex_lock(&g_strict_mu);
+    bool off = strvec_contains(&g_strict_off, k);
+    pthread_mutex_unlock(&g_strict_mu);
+    free(k);
+    return off;
+}
+
+static void strict_tools_disable(const ai_model_t *m) {
+    char *k = strict_key(m);
+    pthread_mutex_lock(&g_strict_mu);
+    if (!strvec_contains(&g_strict_off, k)) strvec_push(&g_strict_off, k);
+    pthread_mutex_unlock(&g_strict_mu);
+    free(k);
+}
+
+/* hasAnthropicStrictIncompatibleKeyword: oneOf / allOf / $ref / patternProperties / propertyNames anywhere */
+static bool strict_incompatible(const json_t *v, int depth) {
+    if (depth > STRICT_MAX_DEPTH) return true;
+    if (json_is_arr(v)) {
+        const json_t *e;
+        json_arr_foreach(v, i, e) if (strict_incompatible(e, depth + 1)) return true;
+        return false;
+    }
+    if (!json_is_obj(v)) return false;
+    static const char *const bad[] = {"oneOf", "allOf", "$ref", "patternProperties", "propertyNames"};
+    for (size_t i = 0; i < ARRAY_LEN(bad); i++)
+        if (json_get(v, bad[i])) return true;
+    const char *k;
+    const json_t *x;
+    json_obj_foreach(v, i, k, x) {
+        UNUSED(k);
+        if (strict_incompatible(x, depth + 1)) return true;
+    }
+    return false;
+}
+
+typedef struct {
+    int optional_remaining, union_remaining, optional_count, union_count;
+} strict_budget_t;
+
+static bool type_has(const json_t *t, const char *name) {
+    if (json_is_str(t)) return str_eq(json_sv(t), name);
+    const json_t *e;
+    json_arr_foreach(t, i, e) if (json_is_str(e) && str_eq(json_sv(e), name)) return true;
+    return false;
+}
+
+/* isJsonSchemaArrayNode / isJsonSchemaObjectNode */
+static bool schema_array_node(const json_t *s) {
+    const json_t *t = json_get(s, "type");
+    if (json_is_str(t) && str_eq(json_sv(t), "array")) return true;
+    if (json_is_arr(t) && type_has(t, "array") && !type_has(t, "object")) return true;
+    return json_get(s, "items") || json_is_arr(json_get(s, "prefixItems"));
+}
+
+static bool schema_object_node(const json_t *s) {
+    if (schema_array_node(s)) return false;
+    const json_t *t = json_get(s, "type");
+    return type_has(t, "object") || json_is_obj(json_get(s, "properties"));
+}
+
+static const char *const COMBINATOR_KEYS[] = {"anyOf", "allOf", "oneOf"};
+
+/* hasAnthropicSchemaDefiningKeyword */
+static bool schema_defining(const json_t *s) {
+    static const char *const keys[] = {"type", "properties", "additionalProperties", "items", "prefixItems", "enum", "const",
+                                       "$ref", "$defs", "definitions"};
+    for (size_t i = 0; i < ARRAY_LEN(keys); i++)
+        if (json_get(s, keys[i])) return true;
+    for (size_t i = 0; i < ARRAY_LEN(COMBINATOR_KEYS); i++)
+        if (json_get(s, COMBINATOR_KEYS[i])) return true;
+    return false;
+}
+
+/* makeAnthropicNullableSchema (consumes `s`) */
+static json_t *strict_nullable(json_t *s, strict_budget_t *b) {
+    if (json_is_obj(s)) {
+        const json_t *t = json_get(s, "type"), *any = json_get(s, "anyOf"), *e;
+        bool has_null = json_is_arr(t) && type_has(t, "null");
+        json_arr_foreach(any, i, e) if (json_is_obj(e) && str_eq(json_get_str(e, "type"), "null")) has_null = true;
+        if (has_null) return s;
+        json_t *null_t = json_obj();
+        json_set_str(null_t, "type", "null");
+        if (json_is_arr(any)) {
+            json_push(json_get(s, "anyOf"), null_t);
+            return s;
+        }
+        json_free(null_t);
+        if (json_is_arr(t)) {
+            json_push_str(json_get(s, "type"), "null");
+            return s;
+        }
+    }
+    if (b->union_remaining <= 0) {
+        json_free(s);
+        return NULL;
+    }
+    b->union_remaining--;
+    b->union_count++;
+    json_t *u = json_obj(), *arr = json_arr(), *null_t = json_obj();
+    json_set_str(null_t, "type", "null");
+    json_push(arr, s);
+    json_push(arr, null_t);
+    json_set(u, "anyOf", arr);
+    return u;
+}
+
+/* normalizeAnthropicStrictSchemaNode: NULL when the node cannot be strict (an owned copy otherwise). JSON trees here
+ * share no nodes, so omp's per-node cache has nothing to reuse. */
+static json_t *strict_node(const json_t *v, strict_budget_t *b, int depth) {
+    if (depth > STRICT_MAX_DEPTH) return NULL;
+    if (json_is_arr(v)) {
+        json_t *out = json_arr();
+        const json_t *e;
+        json_arr_foreach(v, i, e) {
+            json_t *n = strict_node(e, b, depth + 1);
+            if (!n) {
+                json_free(out);
+                return NULL;
+            }
+            json_push(out, n);
+        }
+        return out;
+    }
+    if (!json_is_obj(v)) return json_clone(v);
+    if (!schema_defining(v)) return NULL;
+    /* strict tool use only supports closed objects */
+    const json_t *ap = json_get(v, "additionalProperties");
+    if (schema_object_node(v) && !(json_is_bool(ap) && !ap->u.b)) return NULL;
+    json_t *r = json_clone(v);
+    if (json_is_arr(json_get(r, "type")) || json_is_arr(json_get(r, "anyOf"))) {
+        if (b->union_remaining <= 0) goto fail;
+        b->union_remaining--;
+        b->union_count++;
+    }
+    if (json_is_obj(json_get(r, "properties"))) {
+        const json_t *props = json_get(v, "properties"), *ps;
+        const json_t *oreq = json_get(v, "required");
+        json_t *np = json_obj(), *req = json_arr();
+        const char *name;
+        json_obj_foreach(props, i, name, ps) {
+            json_t *n = strict_node(ps, b, depth + 1);
+            if (!n) {
+                json_free(np);
+                json_free(req);
+                goto fail;
+            }
+            bool required = false;
+            const json_t *e;
+            json_arr_foreach(oreq, k, e) if (json_is_str(e) && str_eq(json_sv(e), name)) required = true;
+            if (required) {
+                json_set(np, name, n);
+                json_push_str(req, name);
+                continue;
+            }
+            if (b->optional_remaining > 0) {
+                b->optional_remaining--;
+                b->optional_count++;
+                json_set(np, name, n);
+                continue;
+            }
+            json_t *nn = strict_nullable(n, b);
+            if (!nn) {
+                json_free(np);
+                json_free(req);
+                goto fail;
+            }
+            json_set(np, name, nn);
+            json_push_str(req, name);
+        }
+        json_set(r, "properties", np);
+        json_set(r, "required", req);
+    }
+    static const char *const nested[] = {"items", "prefixItems", "anyOf", "allOf", "oneOf"};
+    for (size_t i = 0; i < ARRAY_LEN(nested); i++) {
+        const json_t *x = json_get(v, nested[i]);
+        if (!x || (i == 1 && !json_is_arr(x)) || (i >= 2 && !json_is_arr(x)) || (i == 0 && !json_is_arr(x) && !json_is_obj(x)))
+            continue;
+        json_t *n = strict_node(x, b, depth + 1);
+        if (!n) goto fail;
+        json_set(r, nested[i], n);
+    }
+    static const char *const defs[] = {"$defs", "definitions"};
+    for (size_t i = 0; i < ARRAY_LEN(defs); i++) {
+        const json_t *d = json_get(v, defs[i]), *ds;
+        if (!json_is_obj(d)) continue;
+        json_t *nd = json_obj();
+        const char *dn;
+        json_obj_foreach(d, k, dn, ds) {
+            json_t *n = strict_node(ds, b, depth + 1);
+            if (!n) {
+                json_free(nd);
+                goto fail;
+            }
+            json_set(nd, dn, n);
+        }
+        json_set(r, defs[i], nd);
+    }
+    return r;
+fail:
+    json_free(r);
+    return NULL;
+}
+
+/* normalizeAnthropicStrictSchema: the strict form of `schema` within the remaining budget, or NULL */
+json_t *anthropic_strict_schema(const json_t *schema, int optional_remaining, int union_remaining, int *optional_used,
+                                int *union_used) {
+    strict_budget_t b = {.optional_remaining = optional_remaining, .union_remaining = union_remaining};
+    json_t *n = strict_node(schema, &b, 0);
+    if (n && !json_is_obj(n)) {
+        json_free(n);
+        n = NULL;
+    }
+    if (optional_used) *optional_used = b.optional_count;
+    if (union_used) *union_used = b.union_count;
+    return n;
+}
+
+/* matchesStrictToolsRejection: a 400 refusing strict tools (the strict field itself, structured outputs, a grammar or
+ * schema too large to compile) */
+bool anthropic_strict_tools_rejection(const char *msg, int status) {
+    if (status != 400 || !msg) return false;
+    /* /\btools\.\d+\.custom\.strict\b/ with /extra inputs? (?:are|is) not permitted/ */
+    bool strict_field = false;
+    for (const char *p = str_istr(msg, "tools."); p && !strict_field; p = str_istr(p + 1, "tools.")) {
+        const char *q = p + 6;
+        if (!isdigit((unsigned char)*q)) continue;
+        while (isdigit((unsigned char)*q)) q++;
+        strict_field = !strncasecmp(q, ".custom.strict", 14) && !isalnum((unsigned char)q[14]) && q[14] != '_';
+    }
+    bool extra = false;
+    for (const char *p = str_istr(msg, "extra input"); p && !extra; p = str_istr(p + 1, "extra input")) {
+        const char *q = p + 11;
+        if (*q == 's' || *q == 'S') q++;
+        extra = !strncasecmp(q, " are not permitted", 18) || !strncasecmp(q, " is not permitted", 17);
+    }
+    if (strict_field && extra) return true;
+    /* /structured[_ -]?outputs?/ with a not-supported phrase */
+    bool structured = false, vertex = false;
+    for (const char *p = str_istr(msg, "structured"); p; p = str_istr(p + 1, "structured")) {
+        const char *q = p + 10;
+        if (*q == '_' || *q == ' ' || *q == '-') q++;
+        if (strncasecmp(q, "output", 6)) continue;
+        structured = true;
+        /* /\bdisallowed feature\s+structured[_ -]?outputs?\b/ */
+        const char *d = p;
+        while (d > msg && isspace((unsigned char)d[-1])) d--;
+        if (d < p && d - msg >= 18 && !strncasecmp(d - 18, "disallowed feature", 18) &&
+            (d - 18 == msg || !isalnum((unsigned char)d[-19])))
+            vertex = true;
+    }
+    bool unsupported = str_istr(msg, "not supported") || str_istr(msg, "not available") || str_istr(msg, "not enabled") ||
+                       str_istr(msg, "unsupported") || str_istr(msg, "does not support") || str_istr(msg, "doesnt support") ||
+                       str_istr(msg, "doesn't support");
+    if ((structured && unsupported) || vertex) return true;
+    if (str_istr(msg, "invalid schema for function") || str_istr(msg, "invalid tool parameters schema")) return true;
+    if (!str_istr(msg, "invalid_request_error")) return false;
+    bool grammar = str_istr(msg, "compiled grammar") && str_istr(msg, "too large");
+    bool complex = str_istr(msg, "schema") && str_istr(msg, "too complex") && str_istr(msg, "compil");
+    return grammar || complex;
+}
+
 static bool eager_tool_streaming(const ai_model_t *m, const char *base_url) {
     if (!cflag(m, "supportsEagerToolInputStreaming")) return false;
     if (is_official_url(base_url)) return true;
@@ -1053,6 +1338,9 @@ static bool eager_tool_streaming(const ai_model_t *m, const char *base_url) {
 static json_t *convert_tools(const ai_model_t *m, const json_t *tools, bool oauth, const char *base_url) {
     json_t *out = json_arr();
     bool eager = eager_tool_streaming(m, base_url);
+    /* buildAnthropicToolSchemaPlans: allowlisted tools whose wire schema normalizes within the budgets go strict */
+    bool strict_ok = !strict_tools_disabled(m);
+    int strict_tools = 0, optional_left = MAX_STRICT_OPTIONAL_PARAMETERS, union_left = MAX_STRICT_UNION_PARAMETERS;
     json_t *t;
     json_arr_foreach(tools, i, t) {
         const char *name = json_get_str(t, "name");
@@ -1060,12 +1348,37 @@ static json_t *convert_tools(const ai_model_t *m, const json_t *tools, bool oaut
         json_set(w, "name", json_str_own(encode_tool_name(m, name, oauth)));
         const char *desc = json_get_str(t, "description");
         json_set_str(w, "description", desc ? desc : "");
-        json_set(w, "input_schema", tool_input_schema(json_get(t, "parameters")));
+        json_t *schema = tool_input_schema(json_get(t, "parameters"));
+        bool strict = false;
+        bool allowed = false;
+        for (size_t k = 0; k < ARRAY_LEN(STRICT_TOOL_ALLOWLIST); k++) allowed = allowed || str_eq(name, STRICT_TOOL_ALLOWLIST[k]);
+        const json_t *ts = json_get(t, "strict");
+        if (strict_ok && allowed && strict_tools < MAX_STRICT_TOOLS && !(json_is_bool(ts) && !ts->u.b) &&
+            !strict_incompatible(json_get(t, "parameters"), 0)) {
+            int ou = 0, uu = 0;
+            json_t *ns = anthropic_strict_schema(schema, optional_left, union_left, &ou, &uu);
+            if (ns) {
+                json_free(schema);
+                schema = ns;
+                strict = true;
+                strict_tools++;
+                optional_left -= ou;
+                union_left -= uu;
+            }
+        }
+        json_set(w, "input_schema", schema);
         if (eager) json_set_bool(w, "eager_input_streaming", !str_eq(name, "yield"));
+        if (strict) json_set_bool(w, "strict", true);
         if (json_get_bool(t, "deferLoading", false)) json_set_bool(w, "defer_loading", true);
         json_push(out, w);
     }
     return out;
+}
+
+static bool has_strict_tools(const json_t *params) {
+    const json_t *t;
+    json_arr_foreach(json_get_arr(params, "tools"), i, t) if (json_get_bool(t, "strict", false)) return true;
+    return false;
 }
 
 /* ======================================================================
@@ -2527,6 +2840,7 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
         snprintf(sent_version, sizeof sent_version, "%s", anthropic_claude_code_version());
         int demoted = 0; /* other models' reasoning blocks this request replays as text */
         json_t *params = build_request(m, ctx, &lo, oauth, &thinking_on, &demoted);
+        bool sent_strict = has_strict_tools(params);
         if (o->on_payload) o->on_payload(o->payload_ud, params);
         /* omp 7f6b4a096f/228ddc8d7c: Anthropic answers `messages: []` with a bare 400 "messages is required", so an empty
          * conversation is named before sending (omc's payload hook only observes, so encoding is the side that emptied it) */
@@ -2587,6 +2901,13 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
                                                      : "anthropic: thread refused, resending without thread");
                 retry = true;
             }
+        }
+        if (!retry && sent_strict && rc == -1 && !s.saw_start &&
+            (anthropic_strict_tools_rejection(err, status) || anthropic_strict_tools_rejection(ex.err_body, status))) {
+            /* the endpoint refuses strict tools: resend without them, and send none to it again */
+            LOGW("anthropic: strict tools rejected, retrying without strict tools (%s)", m->id);
+            strict_tools_disable(m);
+            retry = true;
         }
         if (!retry && oauth && !version_retried && rc == -1 && !s.saw_start && adopt_required_version(err, sent_version)) {
             retry = true;

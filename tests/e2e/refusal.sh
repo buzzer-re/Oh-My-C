@@ -87,4 +87,12 @@ printf 'composer:\n  predictions: false\n' > "$T/rfwalk/config.yml"
 out=$(timeout 60 env OMC_CODING_AGENT_DIR="$T/rfwalk" "$B" --model mocka/mock-a --no-session -p "refuseon:mock-a:walk" </dev/null 2>&1)
 [[ "$out" == *"Refusal (cyber): declined by mock-a"* && "$out" != *"Retrying"* && "$(rfmodels)" == "mock-a" ]] &&
     echo "   ok  refusal without a chain ends the turn" || { echo "   FAIL refusal without a chain ends the turn: $(rfmodels) $out"; fail=1; }
+# an endpoint that refuses strict tools: the request is resent without them, and later requests to it send none
+mkdir -p "$T/rfstrict"
+sed "s|baseUrl: http://127.0.0.1:$RFPORT|baseUrl: http://127.0.0.1:$RFPORT/nostrict|" "$T/rfwalk/models.yml" > "$T/rfstrict/models.yml"
+printf 'composer:\n  predictions: false\n' > "$T/rfstrict/config.yml"
+: > "$T/rfprov.jsonl"
+out=$(timeout 60 env OMC_CODING_AGENT_DIR="$T/rfstrict" "$B" --model mocka/mock-a --no-session -p "strict check" </dev/null 2>&1)
+st=$(python3 -I -c 'import json,sys; print(",".join(str(any(t.get("strict") for t in r["body"]["tools"])) for r in map(json.loads, open(sys.argv[1])) if r["body"].get("tools")))' "$T/rfprov.jsonl")
+[[ "$out" == *"plain provider answer"* && "$st" == "True,False" ]] && echo "   ok  strict tools refused" || { echo "   FAIL strict tools refused: $st $out"; fail=1; }
 kill $RFPID 2>/dev/null

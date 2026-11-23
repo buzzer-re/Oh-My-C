@@ -451,6 +451,12 @@ request itself or fail it at once. Anthropic uses it for:
 - **Fast-mode fallback** (omp `anthropic-state.ts`): a 400 rejecting `speed` or a 429 fast-mode
   entitlement error before any content drops `speed` + the fast-mode beta, resends once, and remembers
   the endpoint+model for the session (the `/fast` badge then goes away); `/fast on` re-arms it.
+- **Strict tools** (omp `buildAnthropicToolSchemaPlans`): the allowlisted tools (`edit`, `find`, `python`, `yield`,
+  at most 20, 24 optional and 16 union parameters in all) whose schema has no `oneOf`/`allOf`/`$ref`/
+  `patternProperties`/`propertyNames` and only closed objects go out with `strict: true` and the strict form of
+  their schema (`required` in property order; optionals past the budget become nullable-required). A 400 refusing
+  them (`matchesStrictToolsRejection`) before any output resends without strict tools and latches the endpoint+model
+  off (process-wide; omp keeps it per session); `PI_NO_STRICT` and compat `disableStrictTools` turn them off.
 - **Subscription slow mode** (`anthropic_slow.c`, omp `anthropic-slow-mode.ts` both halves): only for
   first-party OAuth requests to `api.anthropic.com`. Per account lane (process-wide), response headers
   track the wrap-up allowance (`anthropic-ratelimit-unified-grace-*`) and the slow-lane offer; with
