@@ -1409,6 +1409,26 @@ static void announce_retry(app_t *a, const json_t *assistant, int saga, int max,
         notice(a, "warning", "Retrying (%d/%d) in %llds: %s", saga, max, (long long)ceil(delay / 1000), err ? err : "error");
 }
 
+/* persistTerminalEmptyErrorTurn for a classifier refusal: the refused turn is kept out of the session at message_end (a
+ * provider_refusal entry stands for it), but one a retry announces or a saga closes on, carrying nothing but the error
+ * (isEmptyErrorTurn), is recorded as a session message (replay drops provider refusals) */
+static void persist_refused_turn(app_t *a, const json_t *m) {
+    const char *sdt = json_get_str(json_get_obj(m, "stopDetails"), "type");
+    if (!a->session || !str_eq(json_get_str(m, "stopReason"), "error") || !(str_eq(sdt, "refusal") || str_eq(sdt, "sensitive")))
+        return;
+    const json_t *b;
+    json_arr_foreach(json_get(m, "content"), i, b) {
+        const char *t = json_get_str(b, "type");
+        const char *txt = str_eq(t, "text") ? json_get_str(b, "text") : str_eq(t, "thinking") ? json_get_str(b, "thinking") : NULL;
+        if (str_eq(t, "fallback")) continue;
+        if (!str_eq(t, "text") && !str_eq(t, "thinking")) return; /* tool calls, redacted thinking, unknown blocks */
+        for (const char *c = txt; c && *c; c++)
+            if (!isspace((unsigned char)*c)) return;
+        if (str_eq(t, "thinking") && !str_empty(json_get_str(b, "thinkingSignature"))) return;
+    }
+    session_append_message(a->session, m);
+}
+
 /* closeRetrySaga failure without superseded attempts (a refusal with no model left to walk to): auto_retry_end, or the
  * "retry-ended" notice ("<attempt>\x1f<final error>") */
 static void close_retry_saga_failed(app_t *a, const char *err) {
@@ -1623,6 +1643,7 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
         }
         strvec_push(&a->retry_notes, usage_limit ? "rate-limited; switched model; retried" : "switched model; retried");
         announce_retry(a, assistant, saga, max, 0, err);
+        persist_refused_turn(a, assistant); /* #recordPendingRetryError */
         return again;
     }
     if (!retryable) return false;
@@ -1637,7 +1658,10 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     }
     if (classifier_refusal && !immediate) {
         /* no model left to walk to: the refusal ends the turn; a saga an earlier attempt announced closes with it */
-        if (a->retry_saga > 0) close_retry_saga_failed(a, err);
+        if (a->retry_saga > 0) {
+            persist_refused_turn(a, assistant); /* the saga's terminal turn */
+            close_retry_saga_failed(a, err);
+        }
         return false;
     }
     double delay = immediate ? 0 : mr_retry_backoff_ms(settings_int("retry.baseDelayMs", 500), saga);
@@ -1664,6 +1688,7 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     /* captured before event delivery, so delivery counts toward the announced wait */
     int64_t usage_reset_deadline = now_ms() + (int64_t)ceil(delay);
     announce_retry(a, assistant, saga, max, delay, err);
+    persist_refused_turn(a, assistant); /* #recordPendingRetryError */
     maybe_thinking_loop_redirect(a, ag, err);
     strvec_push(&a->retry_notes, usage_limit ? "rate-limited; waited; retried" : "error; retried");
     /* ordinary backoff keeps its monotonic duration; a quota reset elapses while the machine sleeps too */

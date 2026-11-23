@@ -46,8 +46,9 @@ YML
 : > "$T/rfprov.jsonl"
 check "cot carried" "plain provider answer" env OMC_CODING_AGENT_DIR="$T/rfcot" "$B" --model mocka/mock-a -p "think:carry"
 check "cot strip retry" "plain provider answer" env OMC_CODING_AGENT_DIR="$T/rfcot" "$B" --model mocka/claude-sonnet-4-5 -c -p "refusecot:1" "refusecot:2"
-# the refused request carried the reasoning as text; its retry and the next prompt's request leave it out
-check "cot strip requests" "claude=3 carried=1,0,0 refusals=1 errors=0" python3 -I -c '
+# the refused request carried the reasoning as text; its retry and the next prompt's request leave it out. The refused
+# turn, empty and retried, is also kept as a session message (persistTerminalEmptyErrorTurn) that replay drops
+check "cot strip requests" "claude=3 carried=1,0,0 refusals=1 errors=1" python3 -I -c '
 import json,glob,sys
 reqs=[r["body"] for r in map(json.loads, open(sys.argv[2])) if r["body"].get("tools") and r["body"].get("model")=="claude-sonnet-4-5"]
 carried=[sum("Private chain of thought." in (b.get("text") or "") for m in r["messages"] if m["role"]=="assistant" for b in m["content"] if isinstance(m["content"],list)) for r in reqs]
