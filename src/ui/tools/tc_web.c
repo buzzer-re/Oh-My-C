@@ -60,7 +60,8 @@ char *tc_url_hyperlink_always(const char *url, const char *text) {
 
 char *tc_format_age(int64_t secs) {
     if (secs <= 0) return xstrdup("");
-    int64_t mins = secs / 60, hours = mins / 60, days = hours / 24, weeks = days / 7, months = days / 30;
+    int64_t mins = secs / 60, hours = mins / 60, days = hours / 24, weeks = days / 7, months = days / 30, years = days / 365;
+    if (years > 0) return xasprintf("%lldy ago", (long long)years);
     if (months > 0) return xasprintf("%lldmo ago", (long long)months);
     if (weeks > 0) return xasprintf("%lldw ago", (long long)weeks);
     if (days > 0) return xasprintf("%lldd ago", (long long)days);

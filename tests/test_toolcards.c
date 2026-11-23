@@ -301,6 +301,13 @@ int main(void) {
     tui_theme_set(tui_theme_builtin("titanium", TUI_COLOR_TRUECOLOR));
     tui_sym_set_preset("unicode");
 
+    { /* formatAge: a year or more reads in years (omp f20951a27f) */
+        char *a = tc_format_age(23LL * 365 * 86400 + 86400), *b = tc_format_age(40LL * 86400);
+        CHECK(!strcmp(a, "23y ago") && !strcmp(b, "1mo ago"), "format age: %s / %s", a, b);
+        free(a);
+        free(b);
+    }
+
     run("bash1", "\xe2\x95\xad", "bash", "{\"command\":\"echo hi; ls\"}",
         "{\"content\":[{\"type\":\"text\",\"text\":\"hi\\na.txt\\nlong.txt\\nsrc\"}],"
         "\"details\":{\"exitCode\":0,\"wallTimeMs\":20,\"timeoutSeconds\":300}}",

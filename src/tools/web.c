@@ -1006,10 +1006,11 @@ char *ws_collapse_spaces(const char *s) {
 /* omp formatAge */
 char *ws_format_age(int64_t age) {
     if (!age) return xstrdup("");
-    int64_t mins = age / 60, hours = mins / 60, days = hours / 24, weeks = days / 7, months = days / 30;
+    int64_t mins = age / 60, hours = mins / 60, days = hours / 24, weeks = days / 7, months = days / 30, years = days / 365;
     if (age < 0) { /* Math.floor of negatives: never > 0 */
         return xstrdup("just now");
     }
+    if (years > 0) return xasprintf("%lldy ago", (long long)years);
     if (months > 0) return xasprintf("%lldmo ago", (long long)months);
     if (weeks > 0) return xasprintf("%lldw ago", (long long)weeks);
     if (days > 0) return xasprintf("%lldd ago", (long long)days);
