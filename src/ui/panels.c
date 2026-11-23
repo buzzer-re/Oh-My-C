@@ -256,6 +256,7 @@ static char *session_info_text(ui_t *u) {
     sb_t *s = &b2;
     kv(s, "File:", json_get_str(st, "sessionFile") ? json_get_str(st, "sessionFile") : "In-memory");
     kv(s, "ID:", json_get_str(st, "sessionId") ? json_get_str(st, "sessionId") : "");
+    if (a->env && a->env->local_dir) kv(s, "Local:", a->env->local_dir); /* omp 7cc6ba48cc */
     kv(s, "Build:", OMC_VERSION);
     sb_append(s, "\n");
     head(s, "Provider");

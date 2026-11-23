@@ -169,6 +169,12 @@ def copy_part():
     send("/copy cmd\r", 0.8)
     if not wait_out("No command to copy.", 3, mark):
         fail("copy cmd none", out[-300:])
+    # /copy local creates and copies the session's local:// directory (omp 7cc6ba48cc)
+    mark = len(out)
+    send("/copy local\r", 0.8)
+    got = clipboard_since(mark)
+    if not got or not os.path.isdir(got) or not wait_out("to clipboard", 3, mark):
+        fail("copy local", got)
 
     # the picker: the last turn is outlined; Enter copies it, Right descends into its blocks, `o` opens a link
     mark = len(out)

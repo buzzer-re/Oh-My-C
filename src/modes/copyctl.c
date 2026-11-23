@@ -6,6 +6,8 @@
  * opener. `/copy code|cmd|link` copy the most recent fenced code block, bash/eval command or link of the
  * conversation; `/open` opens the most recent link. */
 #include "modes/interactive.h"
+#include "ui/tools/tc.h"
+#include "core/fs.h"
 
 #include <ctype.h>
 
@@ -143,8 +145,16 @@ void cc_copy_command(ui_t *u, const char *arg) {
             add_notice(u, "info", "Copied link to clipboard");
         }
         free(href);
+    } else if (str_eq(a, "local") && u->app->env && u->app->env->local_dir) {
+        /* the session's local:// directory, created first so the copied path can be entered (omp 7cc6ba48cc) */
+        const char *root = u->app->env->local_dir;
+        fs_mkdir_p(root, 0755);
+        copy_text(u, root);
+        char *sp = tc_shorten_path(root), *m = xasprintf("Copied %s to clipboard", sp);
+        add_notice(u, "info", m);
+        free(m), free(sp);
     } else {
-        add_notice(u, "info", "Usage: /copy [code|cmd|link]");
+        add_notice(u, "info", "Usage: /copy [code|cmd|link|local]");
     }
     json_free(msgs);
     free(a);
