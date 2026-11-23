@@ -715,12 +715,9 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     out_sink_opts_t so;
     out_sink_opts_from_settings(&so);
     out_sink_t *cellsink = out_sink_new(&so);
-    char *art_id = NULL, *art_path = artifacts_alloc(st->env->artifacts, "eval", &art_id);
-    so.artifact_path = art_path;
-    so.artifact_id = art_id;
+    so.artifact_alloc = st->env->artifacts ? artifacts_alloc_lazy : NULL; /* claimed on the first overflow */
+    so.artifact_alloc_ud = st->env->artifacts;
     out_sink_t *rawsink = out_sink_new(&so);
-    free(art_path);
-    free(art_id);
     sb_t stream = SB_INIT;
     const char *so_out = json_get_str(result, "stdout");
     if (so_out && *so_out) sb_append(&stream, so_out);

@@ -56,6 +56,10 @@ typedef struct out_sink out_sink_t;
 typedef struct {
     const char *artifact_path; /* full raw stream mirrored here once inline capture loses bytes (NULL: none) */
     const char *artifact_id;
+    /* ArtifactAllocator: claims the spill (path owned, *id owned; NULL on failure) on the first overflow, so output
+     * that fits inline leaves no empty spill file (used when artifact_path is NULL) */
+    char *(*artifact_alloc)(void *ud, char **id);
+    void *artifact_alloc_ud;
     size_t spill_threshold;    /* inline budget (default OUT_DEFAULT_MAX_BYTES when 0) */
     size_t head_bytes;         /* > 0: keep a head window and elide the middle */
     size_t max_columns;        /* > 0: per-line byte cap with `…` */

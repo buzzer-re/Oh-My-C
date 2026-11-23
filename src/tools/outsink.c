@@ -590,6 +590,8 @@ struct out_sink {
     bool col_unmapped;
 
     char *artifact_path, *artifact_id;
+    char *(*artifact_alloc)(void *ud, char **id);
+    void *artifact_alloc_ud;
     FILE *file;
     bool file_tried, finalized;
     const char *artifact_error;
@@ -612,6 +614,8 @@ out_sink_t *out_sink_new(const out_sink_opts_t *o) {
     }
     s->artifact_path = o->artifact_path ? xstrdup(o->artifact_path) : NULL;
     s->artifact_id = o->artifact_id ? xstrdup(o->artifact_id) : NULL;
+    s->artifact_alloc = o->artifact_path ? NULL : o->artifact_alloc;
+    s->artifact_alloc_ud = o->artifact_alloc_ud;
     s->spill = o->spill_threshold ? o->spill_threshold : OUT_DEFAULT_MAX_BYTES;
     s->head_limit = MIN(o->head_bytes, s->spill / 2);
     s->max_columns = o->max_columns;
@@ -705,6 +709,17 @@ static void art_write_chunk(out_sink_t *s, const char *p, size_t n) {
     if (!s->file) {
         if (s->file_tried) return;
         s->file_tried = true;
+        if (!s->artifact_path && s->artifact_alloc) { /* the first overflow claims the spill */
+            char *id = NULL;
+            s->artifact_path = s->artifact_alloc(s->artifact_alloc_ud, &id);
+            if (!s->artifact_path) {
+                free(id);
+                art_error(s, "open");
+                return;
+            }
+            free(s->artifact_id);
+            s->artifact_id = id;
+        }
         s->file = fopen(s->artifact_path, "w");
         if (!s->file) {
             art_error(s, "open");
@@ -865,7 +880,7 @@ static void store(out_sink_t *s, const char *c, size_t n) {
     bool capped_this = cn < n;
     size_t thr = s->spill > s->head.len ? s->spill - s->head.len : 0;
     bool will_overflow = s->buffer.len + cn > thr;
-    if (s->artifact_path && (s->file || capped_this || will_overflow)) art_write_chunk(s, c, n);
+    if ((s->artifact_path || s->artifact_alloc) && (s->file || capped_this || will_overflow)) art_write_chunk(s, c, n);
     if (cn == 0) {
         sb_free(&capbuf);
         return;

@@ -1025,16 +1025,12 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         free(full);
         full = redirected;
     }
-    /* omp allocates the call's artifact up front (ids advance per call); the sink writes it only on spill */
-    char *art_id = NULL;
-    char *art_path = artifacts_alloc(env->artifacts, "bash", &art_id);
+    /* the spill is claimed on the first overflow (omp 4fa93996d4): output that fits inline leaves no empty N.log */
     out_sink_opts_t so;
     out_sink_opts_from_settings(&so);
-    so.artifact_path = art_path;
-    so.artifact_id = art_id;
+    so.artifact_alloc = env->artifacts ? artifacts_alloc_lazy : NULL;
+    so.artifact_alloc_ud = env->artifacts;
     bash_stream_t bs = {.ctx = ctx, .sink = out_sink_new(&so)};
-    free(art_path);
-    free(art_id);
     /* the client terminal (an ACP client advertising `terminal`) shows a live terminal card in the editor; it wins
      * over auto-backgrounding. PTY runs need the local terminal UI. */
     if (!pty && env->bridge && env->bridge->run_terminal) {

@@ -226,7 +226,7 @@ These port omp's `OutputSink` (`tui/src/tools/streaming-output.ts`), `output-met
   (`<session file minus .jsonl>/local`, or `$TMPDIR/omc-local/<session id>` without a session file), read, listed and
   written like any `local://` file. Ids are a per-session counter shared with subagents (they adopt the parent's store
   and `local://` root); each id's file is created exclusively, so a model-written `N.log` is skipped, never clobbered.
-  Ids are allocated per bash/eval call. Files are capped at `tools.artifactMaxBytes`, and the session directory
+  A bash/eval call claims its id on the first overflow (omp 4fa93996d4), so output that fits inline leaves no file. Files are capped at `tools.artifactMaxBytes`, and the session directory
   (spills included) is copied recursively when a session is forked or moved. Old sessions' `artifact://N` links are
   not migrated.
 - `tool_postprocess_result()` (the `after_tool` hook) spills any oversized result from any tool

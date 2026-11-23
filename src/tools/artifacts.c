@@ -125,6 +125,8 @@ char *artifacts_alloc(artifact_store_t *s, const char *tool, char **id) {
     return path;
 }
 
+char *artifacts_alloc_lazy(void *store, char **id) { return artifacts_alloc(store, NULL, id); }
+
 char *artifacts_save(artifact_store_t *s, const char *tool, const char *data, size_t len) {
     char *id = NULL, *path = artifacts_alloc(s, tool, &id);
     if (!path) return NULL;

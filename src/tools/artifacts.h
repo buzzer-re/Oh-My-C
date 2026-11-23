@@ -22,6 +22,8 @@ void artifacts_set_root(artifact_store_t *s, const char *root);
 /* allocatePath: claim the next spill id (past every `<N>.log` at the root) with an exclusively created empty file;
  * returns its path (owned; *id owned). NULL when no root is bound. `tool` is unused (spills are untyped). */
 char *artifacts_alloc(artifact_store_t *s, const char *tool, char **id);
+/* ArtifactAllocator over a store (ud): artifacts_alloc for out_sink_opts_t.artifact_alloc */
+char *artifacts_alloc_lazy(void *store, char **id);
 /* save content as a new spill; returns its id (owned) or NULL on failure */
 char *artifacts_save(artifact_store_t *s, const char *tool, const char *data, size_t len);
 /* path of spill `id` (`<root>/<id>.log`, a regular file), owned, or NULL */
