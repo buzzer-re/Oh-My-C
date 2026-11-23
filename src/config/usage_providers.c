@@ -1329,14 +1329,16 @@ static char *codex_extra_name(const char *slug, const char *name) {
 }
 
 static json_t *codex_extra_limit(const char *key, const char *slug, const char *display, const cwin_t *w, const char *acc,
-                                 const char *name, int allowed, int reached, double now) {
+                                 const char *name, const char *feature, int allowed, int reached, double now) {
     json_t *win = codex_window(w, key, now), *amount = codex_amount(w);
     char *id = xasprintf("openai-codex:%s:%s", slug, key);
     char *label = xasprintf("%s (%s)", json_get_str(win, "label"), display);
     json_t *s = scope_new("openai-codex");
     if (acc) json_set_str(s, "accountId", acc);
     json_set_str(s, "tier", slug);
+    /* the meter is per model even when the payload names only its feature codename (omp 98c0a96770) */
     if (name) json_set_str(s, "modelId", name);
+    else if (feature) json_set_str(s, "modelId", feature);
     json_set_str(s, "windowId", json_get_str(win, "id"));
     json_set_bool(s, "shared", true);
     json_t *l = limit_new(id, label, s, win, amount, codex_status(amount, codex_allowed(allowed, reached, false)));
@@ -1538,9 +1540,9 @@ static json_t *codex_fetch(const usage_params_t *p, bool *rejected) {
                 json_set(meters, slug, ms);
                 cwin_t a, b;
                 if (parse_cwin(json_get(xr, "primary_window"), &a))
-                    json_push(limits, codex_extra_limit("primary", slug, disp, &a, acc, name, xa, xre, now));
+                    json_push(limits, codex_extra_limit("primary", slug, disp, &a, acc, name, feat, xa, xre, now));
                 if (parse_cwin(json_get(xr, "secondary_window"), &b))
-                    json_push(limits, codex_extra_limit("secondary", slug, disp, &b, acc, name, xa, xre, now));
+                    json_push(limits, codex_extra_limit("secondary", slug, disp, &b, acc, name, feat, xa, xre, now));
                 free(slug);
                 free(disp);
             }
