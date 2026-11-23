@@ -42,6 +42,7 @@
 #include "tools/gh.h"
 #include "mcp/mcp.h"
 #include "prompt/template.h"
+#include "ai/compat_detect.h"
 #include "ai/anthropic_threads.h"
 #include "ai/responses_ws.h"
 #include "ai/provider_anthropic.h"
@@ -2667,9 +2668,17 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
     if (st && str_eq(json_get_str(st, "role"), "assistant") && json_is_arr(json_get(st, "content"))) {
         json_t *blocks = json_arr(), *blk;
         sb_t txt = SB_INIT;
+        /* a thinking block still streaming has no signature: a reader whose classifier refuses quoted reasoning
+         * (snapcompact readerIncludesThinking: catalog classifierCotExtraction, Claude) gets none of those */
+        const json_t *cot = compat_catalog_policy(model->provider, model->api, model->id, "classifierCotExtraction");
+        bool keep_unsigned = !(json_is_bool(cot) && cot->u.b);
         json_arr_foreach(json_get(st, "content"), i, blk) {
             const char *t = json_get_str(blk, "type");
-            if (str_eq(t, "thinking")) json_push(blocks, json_clone(blk));
+            const char *sig = json_get_str(blk, "thinkingSignature");
+            char *sig_t = sig ? str_trim(sig) : NULL;
+            bool signed_blk = sig_t && *sig_t;
+            free(sig_t);
+            if (str_eq(t, "thinking") && (keep_unsigned || signed_blk)) json_push(blocks, json_clone(blk));
             else if (str_eq(t, "text") && json_get_str(blk, "text")) sb_append(&txt, json_get_str(blk, "text"));
         }
         if (txt.len) json_push(blocks, text_block(sb_cstr(&txt)));
