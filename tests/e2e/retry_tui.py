@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Manual retry under a pty (omp InputController.handleRetry, TurnRecovery.retry, InteractiveMode.syncRetryHintRow):
-  ask     Esc on an ask form aborts the turn: the idle row shows "F5 to retry"; F5 re-runs the ask call itself (no
+  ask     Esc on an ask form hands the keys to the composer, Esc there aborts the turn (omp 093f499464): the idle row shows "F5 to retry"; F5 re-runs the ask call itself (no
           model request), and the answered form goes on to the model
-  resume  a session whose last turn died on a tool call (Esc on the form, then exit) shows the row again after
+  resume  a session whose last turn died on a tool call (Esc twice on the form, then exit) shows the row again after
           `-c`, and F5 replays the call there too
   nothing F5 after a turn that settled reports "Nothing to retry" and sends nothing
   restore a process killed during a bash call: `--restore <session>` closes the cut-off turn and replays the call
@@ -126,8 +126,9 @@ def prompt_ask():
     if not wait_for("Submit"):
         fail("form", plain()[-600:])
     time.sleep(0.3)
-    send(ESC)
-    if not wait_for("Ask tool was cancelled by the user"):
+    send(ESC)  # the keys to the composer; the form stays
+    send(ESC)  # Esc in the composer aborts the turn, the dialog's signal
+    if not wait_for("Ask input was cancelled"):
         fail("cancel", plain()[-600:])
 
 
@@ -146,7 +147,7 @@ def replay_and_answer(step):
         fail(step + " answer", plain()[-800:])
 
 
-# ask: Esc on the form, the hint, F5 replays the call
+# ask: Esc twice (form, then composer), the hint, F5 replays the call
 launch()
 prompt_ask()
 if not wait_for("F5 to retry"):
