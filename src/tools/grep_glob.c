@@ -1604,9 +1604,90 @@ static bool glob_walk_cb(const walk_entry_t *e, void *ud) {
     return true;
 }
 
+/* globSearchPath (omp 1d9d5d1d46): the `path` a call searches. Models often pass the glob as `pattern` beside a
+ * directory `path` or instead of it; each `;` entry of `pattern` is scoped under each `path` entry unless it is
+ * absolute, `~` or a URL. Owned, or NULL without either. */
+char *glob_search_path(const json_t *args) {
+    const char *base = json_get_str(args, "path");
+    const char *pattern = json_get_str(args, "pattern");
+    if (!pattern) return base ? xstrdup(base) : NULL;
+    strvec_t pats = {0}, bases = {0}, scoped = {0};
+    strvec_t ps = str_split(pattern, ";");
+    for (size_t i = 0; i < ps.n; i++) {
+        char *t = str_trim(ps.v[i]);
+        if (*t) strvec_push_own(&pats, t);
+        else free(t);
+    }
+    strvec_free(&ps);
+    if (base) {
+        strvec_t bs = str_split(base, ";");
+        for (size_t i = 0; i < bs.n; i++) {
+            char *t = str_trim(bs.v[i]);
+            if (*t) strvec_push_own(&bases, t);
+            else free(t);
+        }
+        strvec_free(&bs);
+    }
+    char *r;
+    if (!bases.n) {
+        r = strvec_join(&pats, ";");
+    } else {
+        for (size_t b = 0; b < bases.n; b++) {
+            size_t bl = strlen(bases.v[b]);
+            while (bl && (bases.v[b][bl - 1] == '/' || bases.v[b][bl - 1] == '\\')) bl--;
+            for (size_t k = 0; k < pats.n; k++) {
+                const char *pt = pats.v[k];
+                const char *sep = strstr(pt, "://");
+                bool url = sep && sep > pt && isalpha((unsigned char)pt[0]);
+                for (const char *q = pt; url && q < sep; q++) url = isalnum((unsigned char)*q) || strchr("+.-", *q);
+                bool standalone = pt[0] == '/' || pt[0] == '~' || url;
+                char *e = standalone ? xstrdup(pt) : xasprintf("%.*s/%s", (int)bl, bases.v[b], pt);
+                if (!strvec_contains(&scoped, e)) strvec_push_own(&scoped, e);
+                else free(e);
+            }
+        }
+        r = strvec_join(&scoped, ";");
+    }
+    strvec_free(&pats);
+    strvec_free(&bases);
+    strvec_free(&scoped);
+    return r;
+}
+
 static int glob_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     UNUSED(ctx);
+    /* unknown keys reach execute (lenient validation) so a misplaced `pattern` is refused, not dropped unread */
+    {
+        static const char *const known[] = {"path", "hidden", "gitignore", "limit", "pattern", NULL};
+        sb_t bad = SB_INIT;
+        const char *k;
+        json_t *v;
+        json_obj_foreach(args, i, k, v) {
+            bool ok = false;
+            for (size_t j = 0; known[j] && !ok; j++) ok = !strcmp(known[j], k);
+            if (!ok) sb_appendf(&bad, "%s`%s`", bad.len ? ", " : "", k);
+        }
+        if (bad.len) {
+            tool_result_error(out, "glob has no %s argument; put the glob in `path`", bad.s);
+            sb_free(&bad);
+            return 0;
+        }
+        if (json_get(args, "pattern") && !json_is_str(json_get(args, "pattern"))) {
+            tool_result_error(out, "`pattern` must be a string glob");
+            return 0;
+        }
+        json_t *declared = json_clone(args);
+        json_del(declared, "pattern");
+        char *summary = schema_summary(self->parameters, declared);
+        json_free(declared);
+        if (summary) {
+            tool_result_error(out, "%s", summary);
+            free(summary);
+            return 0;
+        }
+    }
+    char *search_path = glob_search_path(args);
     char *errmsg = NULL;
     strvec_t scoped = {0}, expanded = {0}, patterns = {0}, missing = {0}, effective = {0};
     VEC(gitem_t) items = {0};
@@ -1617,7 +1698,12 @@ static int glob_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     } ttarget_t;
     VEC(ttarget_t) targets = {0};
 
-    path_list(json_get(args, "path"), &scoped);
+    {
+        json_t *sp = search_path ? json_str(search_path) : NULL;
+        path_list(sp, &scoped);
+        json_free(sp);
+        free(search_path);
+    }
     if (!scoped.n) strvec_push(&scoped, ".");
     expand_entries(env, &scoped, true, &expanded);
     for (size_t i = 0; i < expanded.n; i++) {
@@ -1646,9 +1732,10 @@ static int glob_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             free(b);
         }
         if (!effective.n) {
-            char *j = strvec_join(&missing, ", ");
-            errmsg = xasprintf("Path not found: %s", j);
-            free(j);
+            sb_t m = SB_INIT;
+            for (size_t i = 0; i < missing.n; i++) sb_appendf(&m, "\n- %s", missing.v[i]);
+            errmsg = xasprintf("None of the %zu paths exist:%s", missing.n, m.s);
+            sb_free(&m);
             goto fail;
         }
     } else {
@@ -1891,5 +1978,6 @@ agent_tool_t *tool_glob_new(tool_env_t *env) {
     agent_tool_t *t = agent_tool_new("glob", "Glob", desc, s, glob_execute);
     free(desc);
     t->ud = env;
+    t->lenient_args = true; /* lenientArgValidation: glob_execute refuses unknown keys and validates the rest */
     return t;
 }

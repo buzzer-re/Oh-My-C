@@ -126,8 +126,12 @@ check "grep named binary" '*1:gqxbin'  "$B" --model mock/mock-1 -p 'call:grep:{"
 check "grep cross-line"  $'*1:gqa\n 2:gqb'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqa\\ngqb","path":"gq/x.txt"}'
 check "grep url;path list" $'## x.txt#'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqa","path":"local://nope.md;gq"}'
 check "glob none"      "No files found matching pattern" "$B" --model mock/mock-1 -p 'call:glob:{"path":"*.zzq"}'
-# the schema bounds limit to 1-200 (omp 1d9d5d1d46: no silent clamp)
-check "glob limit"     "  - limit: limit must be a number at most 200 (was 500)" "$B" --model mock/mock-1 -p 'call:glob:{"path":"a","limit":500}'
+# the schema bounds limit to 1-200 (omp 1d9d5d1d46: no silent clamp); glob validates its own arguments: a `pattern` is
+# scoped under `path`, other unknown keys are refused, a list of missing paths names each
+check "glob limit"     "Tool said: limit must be a number at most 200 (was 500)" "$B" --model mock/mock-1 -p 'call:glob:{"path":"a","limit":500}'
+check "glob pattern"   $'Tool said: # a/\nb.txt'  "$B" --model mock/mock-1 -p 'call:glob:{"path":"a","pattern":"*.txt"}'
+check "glob unknown"   'Tool said: glob has no `bogus` argument; put the glob in `path`'  "$B" --model mock/mock-1 -p 'call:glob:{"path":"a","bogus":1}'
+check "glob missing"   $'Tool said: None of the 2 paths exist:\n- nope/*.ts\n- also/*.ts'  "$B" --model mock/mock-1 -p 'call:glob:{"path":"nope/*.ts;also/*.ts"}'
 check "plain answer"   "plain answer"                    "$B" --model mock/mock-1 -p "hi"
 check "continue"       "plain answer"                    "$B" --model mock/mock-1 -c -p "again"
 check "json mode"      '"type":"agent_end"'              "$B" --model mock/mock-1 --mode json -p "bash:echo j"

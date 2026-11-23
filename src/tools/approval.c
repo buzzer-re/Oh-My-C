@@ -1223,7 +1223,13 @@ static void tool_decision_depth(const approval_call_t *c, approval_decision_t *o
         free(ds);
     } else if (!strcmp(t, "bash")) {
         bash_decision(c, args, out);
-    } else if (!strcmp(t, "grep") || !strcmp(t, "glob") || !strcmp(t, "ast_grep") || !strcmp(t, "find")) {
+    } else if (!strcmp(t, "glob")) { /* approved for where a `pattern` actually searches */
+        json_t *g = json_obj();
+        char *sp = glob_search_path(args);
+        if (sp) json_set(g, "path", json_str_own(sp));
+        dec_tier(out, search_path_tier(g));
+        json_free(g);
+    } else if (!strcmp(t, "grep") || !strcmp(t, "ast_grep") || !strcmp(t, "find")) {
         dec_tier(out, search_path_tier(args));
     } else if (!strcmp(t, "github")) {
         dec_tier(out, in_list(json_get_str(args, "op"), GITHUB_READONLY) ? TIER_READ : TIER_EXEC);
@@ -1471,7 +1477,13 @@ static void cache_targets_raw(const approval_call_t *c, strvec_t *out) {
     } else if (!strcmp(t, "grep")) {
         search_targets(c, SR_GREP, out);
     } else if (!strcmp(t, "glob")) {
-        search_targets(c, SR_GLOB, out);
+        json_t *g = json_obj();
+        char *sp = glob_search_path(c->args);
+        if (sp) json_set(g, "path", json_str_own(sp));
+        approval_call_t gc = *c;
+        gc.args = g;
+        search_targets(&gc, SR_GLOB, out);
+        json_free(g);
     } else if (!strcmp(t, "ast_grep")) {
         search_targets(c, SR_GREP, out);
     } else if (!strcmp(t, "find")) {

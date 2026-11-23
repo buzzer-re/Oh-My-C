@@ -210,6 +210,8 @@ const char *tool_edit_mode_setting(void); /* edit.mode / PI_EDIT_VARIANT: an edi
 char *jobs_render_results(const json_t *jobs);
 agent_tool_t *tool_grep_new(tool_env_t *env);
 agent_tool_t *tool_glob_new(tool_env_t *env);
+/* globSearchPath: glob's `path` with a `pattern` argument scoped under it (owned, NULL without either) */
+char *glob_search_path(const json_t *args);
 agent_tool_t *tool_todo_new(tool_env_t *env);
 /* /todo helpers (tools/todo.ts): one todo op applied to a copy of `phases` (in-progress normalized; errors appended);
  * phasesToMarkdown; markdownToPhases (errors appended). All return owned values. */
