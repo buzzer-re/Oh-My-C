@@ -81,6 +81,7 @@ struct app {
     bool title_done;
     int retry_count;
     int retry_offset;
+    bool refusal_resampled; /* turn-recovery.ts #midStreamRefusalResampled: this saga resampled a mid-stream refusal */
     int retry_saga; /* attempt of the last auto_retry_start (0: no retry saga open) */
     char *prompt_refusal; /* why the last APP_PROMPT_REFUSED prompt was refused (owned) */
     char *cost_refusal;   /* a subagent's cost-cap refusal of a mid-run model request (owned; costgate.c) */

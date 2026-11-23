@@ -2031,6 +2031,8 @@ void anthropic_sse_init(anthropic_sse_t *s, const ai_model_t *m, bool oauth, ai_
 void anthropic_sse_free(anthropic_sse_t *s) {
     json_free(s->compaction);
     s->compaction = NULL;
+    json_free(s->stop_details);
+    s->stop_details = NULL;
     for (size_t i = 0; i < s->blocks.n; i++) sb_free(&s->blocks.v[i].sig);
     vec_free(&s->blocks);
     free(s->error);
@@ -2198,6 +2200,13 @@ static void on_message_delta(anthropic_sse_t *s, const json_t *ev) {
         s->saw_terminal = true;
         if (!strcmp(raw, "compaction")) s->compaction_stop = true;
     }
+    if (str_eq(s->stop_reason, "error") && raw) {
+        /* output.stopDetails = stop_details ?? {type: rawStopReason} (refusal category / explanation for recovery) */
+        json_t *wsd = d ? json_get_obj(d, "stop_details") : NULL;
+        json_free(s->stop_details);
+        s->stop_details = wsd ? json_clone(wsd) : json_obj();
+        if (!wsd) json_set_str(s->stop_details, "type", raw);
+    }
     if (str_eq(s->stop_reason, "error") && !s->error) {
         json_t *sd = d ? json_get_obj(d, "stop_details") : NULL;
         if (sd && str_eq(json_get_str(sd, "type"), "refusal")) {
@@ -2299,6 +2308,7 @@ json_t *anthropic_sse_finish(anthropic_sse_t *s, int rc, const char *err) {
         json_set(msg, "stopDetails", sd);
         if (s->compaction) json_set(msg, "providerPayload", json_clone(s->compaction));
     }
+    if (s->stop_details && str_eq(json_get_str(msg, "stopReason"), "error")) json_set(msg, "stopDetails", json_clone(s->stop_details));
     return msg;
 }
 

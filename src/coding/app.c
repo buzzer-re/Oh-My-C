@@ -293,6 +293,24 @@ static void report_persist_error(app_t *a) {
 
 static void resolve_auto_thinking(app_t *a, ai_effort_t e);
 
+/* provider-refusal.ts providerRefusalData: what the refused turn looked like (no fallback-credit token or handle) */
+static json_t *provider_refusal_data(const json_t *m) {
+    const json_t *sd = json_get_obj(m, "stopDetails");
+    json_t *d = json_obj();
+    static const char *const head[] = {"api", "provider", "model"};
+    for (size_t i = 0; i < ARRAY_LEN(head); i++)
+        if (json_get(m, head[i])) json_set(d, head[i], json_clone(json_get(m, head[i])));
+    const char *st = json_get_str(sd, "type");
+    json_set_str(d, "stopType", st ? st : json_get_str(m, "stopReason"));
+    if (json_get_str(sd, "category")) json_set_str(d, "category", json_get_str(sd, "category"));
+    if (json_get_str(sd, "explanation")) json_set_str(d, "explanation", json_get_str(sd, "explanation"));
+    static const char *const tail[] = {"errorMessage", "responseId", "demotedReasoningBlocks", "usage", "timestamp",
+                                       "duration", "ttft", "content"};
+    for (size_t i = 0; i < ARRAY_LEN(tail); i++)
+        if (json_get(m, tail[i]) && !json_is_null(json_get(m, tail[i]))) json_set(d, tail[i], json_clone(json_get(m, tail[i])));
+    return d;
+}
+
 static void on_agent_event(void *ud, const agent_event_t *ev) {
     app_t *a = ud;
     if (ev->type == AGENT_EV_AGENT_START) strvec_free(&a->retry_notes);
@@ -428,7 +446,14 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
             }
         }
         const char *ctype = json_get_str(ev->message, "customType");
-        if (prewalk_is_plan_nudge(ev->message)) {
+        const char *sdt = json_get_str(json_get_obj(ev->message, "stopDetails"), "type");
+        bool refused = str_eq(role, "assistant") && str_eq(json_get_str(ev->message, "stopReason"), "error") &&
+                       (str_eq(sdt, "refusal") || str_eq(sdt, "sensitive"));
+        if (refused) {
+            /* provider-refusal.ts: a classifier-refused turn never becomes a session message (replaying it feeds the
+             * classifier its own verdict); a provider_refusal custom entry keeps it inspectable, out of context */
+            if (a->session) session_append_custom(a->session, "provider_refusal", provider_refusal_data(ev->message));
+        } else if (prewalk_is_plan_nudge(ev->message)) {
             /* one-run instruction: never returns from persisted history */
         } else if (role && a->session && ctype && (str_eq(role, "user") || str_eq(role, "developer"))) {
             /* hidden steering (goal context, continuations, budget limits, guard notices) persists as custom_message
@@ -1421,10 +1446,33 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
                                        tr_unexecuted_tool_calls_replay_safe(assistant, committed, 0));
     int again = preserve ? AGENT_RETRY_PRESERVE : AGENT_RETRY_REPLAY;
     if (!settings_bool("retry.enabled", true)) return false;
-    if (attempt == 0) a->retry_offset = 0;
+    if (attempt == 0) {
+        a->retry_offset = 0;
+        a->refusal_resampled = false;
+    }
     int max = (int)settings_int("retry.maxRetries", 10);
     int saga = attempt - a->retry_offset + 1; /* omp #retryAttempt after its increment */
     bool exhausted = saga > max;
+    /* a reasoning_extraction refusal that stopped output already streaming judged that sample, not the request: the
+     * same request on this model answers on the next try. Resampled at once, once per saga, before any fallback
+     * (omp 92fe816a0e) */
+    const json_t *rsd = json_get_obj(assistant, "stopDetails");
+    if (retryable && !exhausted && !a->refusal_resampled && str_eq(json_get_str(rsd, "type"), "refusal") &&
+        str_eq(json_get_str(rsd, "category"), "reasoning_extraction")) {
+        bool streamed = false;
+        const json_t *blk;
+        json_arr_foreach(json_get(assistant, "content"), bi, blk) {
+            const char *bt = json_get_str(blk, "type");
+            const char *bs = str_eq(bt, "thinking") ? json_get_str(blk, "thinking") : str_eq(bt, "text") ? json_get_str(blk, "text") : NULL;
+            if (str_eq(bt, "toolCall")) streamed = true;
+            for (const char *c = bs; c && *c && !streamed; c++) streamed = !isspace((unsigned char)*c);
+        }
+        if (streamed) {
+            a->refusal_resampled = true;
+            LOGI("Classifier refused a turn mid-stream; resampling it on the same model");
+            return again;
+        }
+    }
     bool usage_limit = is_usage_limit(err);
     /* an account out of money has no reset to wait for: fallbacks still run, then the provider's error surfaces and
      * the error frame's Retry re-attempts at once */

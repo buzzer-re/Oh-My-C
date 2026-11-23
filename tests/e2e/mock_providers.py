@@ -19,7 +19,8 @@ import json, os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG = os.environ.get("MOCK_LOG")
-SEEN = set()  # Anthropic request prefixes already "cached" (MOCK_CACHE_TOKENS)
+SEEN = set()
+REFUSED = set()  # refuse: prompts already refused once
 DROPS = {}  # drop command -> requests dropped so far
 
 
@@ -254,6 +255,17 @@ class H(BaseHTTPRequestHandler):
                 self.ev({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_f", "name": forced["name"], "input": {}}}, "content_block_start")
                 self.ev({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps(args)}}, "content_block_delta")
                 stop = "tool_use"
+            elif kind == "user" and latest_user_text(body).startswith("refuse:") and latest_user_text(body) not in REFUSED:
+                # a classifier refusal that stops output already streaming (once per prompt text)
+                REFUSED.add(latest_user_text(body))
+                self.ev({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}, "content_block_start")
+                self.ev({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "partial before refusal"}}, "content_block_delta")
+                self.ev({"type": "content_block_stop", "index": 0}, "content_block_stop")
+                self.ev({"type": "message_delta", "delta": {"stop_reason": "refusal", "stop_details": {"type": "refusal",
+                         "category": "reasoning_extraction", "explanation": "declined", "fallback_credit_token": "fct-1"}},
+                         "usage": {"output_tokens": 3}}, "message_delta")
+                self.ev({"type": "message_stop"}, "message_stop")
+                return self.end()
             elif kind == "user" and text.startswith(("bash:", "read:")):
                 tool, args = ("bash", {"command": text[5:]}) if text.startswith("bash:") else ("read", {"path": text[5:]})
                 self.ev({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": tool, "input": {}}}, "content_block_start")

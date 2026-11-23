@@ -61,6 +61,7 @@ typedef struct {
     VEC(anthropic_block_t) blocks;
     json_t *compaction;   /* streamed `compaction` block as an anthropicCompaction payload (owned) */
     bool compaction_stop; /* stop_reason "compaction" */
+    json_t *stop_details; /* error-class stop: the wire stop_details, else {type: stop_reason} (owned) */
 } anthropic_sse_t;
 
 /* supportsAnthropicCompaction: model policy (compat.supportsServerCompaction) and the model's route */

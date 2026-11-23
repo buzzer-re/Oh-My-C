@@ -37,6 +37,11 @@ agent_end(messages added in this run)
   `stopDetails.type` `refusal`/`sensitive`), and a provider-error placeholder result (`source: assistant_stop_error`)
   replays only "Tool call was not executed because the provider stream ended with an error before the tool could run.";
   the provider's text stays in `details.upstreamError` for the UI.
+- **Classifier refusals** (Anthropic `stop_reason` `refusal`/`sensitive`; the provider keeps the wire `stop_details` as
+  `stopDetails`): the refused turn is never a session message; app.c writes a `provider_refusal` custom entry (api,
+  provider, model, stopType, category, explanation, errorMessage, usage, timing, streamed content; no fallback-credit
+  token). A `reasoning_extraction` refusal that stopped output already streaming is resampled at once on the same model,
+  once per retry saga, before the fallback walk.
 
 - **Steering** (`agent_steer`) is delivered at the batch boundary, after the current turn's tools: the next turn opens
   (`turn_start`) and the steer is emitted into it. A steer queued while a batch runs (or while its calls were still
