@@ -250,6 +250,10 @@ static void ui_listener(void *ud, const agent_event_t *ev) {
     if (ev->tool_call_id) e->id = xstrdup(ev->tool_call_id);
     if (ev->tool_name) e->name = xstrdup(ev->tool_name);
     if (ev->args) e->args = json_clone(ev->args);
+    /* the card renders the call as the model wrote it: the intent the loop stripped before execution comes back as
+     * `i` (omp's renderers read args[INTENT_FIELD], e.g. the bash card's intent header) */
+    if (ev->type == AGENT_EV_TOOL_START && ev->intent && json_is_obj(e->args) && !json_get(e->args, "i"))
+        json_set_str(e->args, "i", ev->intent);
     if (ev->result) {
         e->out = result_display(ev->tool_name ? ev->tool_name : "", ev->result);
         e->result = json_obj();
