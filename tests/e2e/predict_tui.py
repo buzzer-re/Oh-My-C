@@ -2,7 +2,7 @@
 """Composer predictions under a pty (tests/e2e/run.sh, omp composer-prediction-controller.ts): after a completed turn
 one side request asks for the next message; its reply shows as ghost text in the empty composer, Tab inserts it
 without sending, Enter then sends it; NO_PREDICTION shows nothing; with composer.predictionAlternatives a second Tab
-lists the alternatives; with composer.predictions off no side request is made.
+lists the alternatives; a /compact keeps the ghost; with composer.predictions off no side request is made.
 usage: predict_tui.py <omc> <req.jsonl> <scratch dir>
 Prints "predict tui ok" or the first failing step."""
 import fcntl, json, os, pty, select, signal, struct, sys, termios, time
@@ -181,6 +181,24 @@ start = len(requests())
 os.write(fd, b"\r")
 if not wait_requests(lambda: any(last_user(r).endswith("Beta plan") for r in requests()[start:])):
     fail("alternative sent", [last_user(r)[-60:] for r in requests()[start:]])
+
+# ---- a /compact keeps the prediction: its anchor (the last message) survives in the kept tail, so the ghost comes
+# back once the command leaves the composer (omp cancels only on a new session or a focus switch)
+launch("compaction:\n  keepRecentTokens: 1\n")
+command("say:fifth reply")
+if not wait_out("fifth reply", 15, len(out)):
+    fail("compact first reply", out[-800:])
+mark = len(out)
+command("say:sixth reply predict=Keep~going")
+if not wait_out("Keep going", 15, mark):
+    fail("compact ghost", out[mark:][-800:])
+pump(0.5)
+mark = len(out)
+command("/compact")
+if not wait_out("compacted", 20, mark):
+    fail("compact ran", out[mark:][-800:])
+if not wait_out("Keep going", 5, mark):
+    fail("ghost after compact", out[mark:][-800:])
 
 # ---- off: no side request
 launch("composer:\n  predictions: false\n")

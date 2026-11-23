@@ -21,6 +21,16 @@
 #define PREDICTION_DEADLINE_MS 15000
 #define USAGE_PURPOSE "composer-prediction"
 
+/* predictionAnchor: the last message that reaches the model. omp keys on the message object, which a compaction's
+ * kept tail carries over; omc's rebuilt history holds copies, so the message is matched by role and timestamp (the
+ * pointer and the count only when it has no timestamp) */
+typedef struct {
+    const json_t *ptr;
+    size_t count;
+    int64_t ts;
+    char role[16];
+} anchor_t;
+
 typedef struct job {
     ui_t *u;
     pthread_t th;
@@ -31,8 +41,7 @@ typedef struct job {
     char *reply, *err;
     json_t *assistant;
     /* the conversation point it was made for */
-    const json_t *anchor;
-    size_t count;
+    anchor_t anchor;
     app_t *view;
     bool joined;        /* pred_shutdown waited for the thread */
 } job_t;
@@ -41,8 +50,7 @@ static struct {
     VEC(job_t *) running; /* every thread not yet joined, cancelled ones too */
     job_t *job;         /* in flight (owned until its done callback runs) */
     strvec_t choices;   /* the offered prediction, most likely first */
-    const json_t *anchor;
-    size_t count;
+    anchor_t anchor;
     app_t *view;
     bool live;          /* choices are offered */
 } P;
@@ -199,27 +207,31 @@ bool pred_parse_many(const char *reply, int max, strvec_t *out) {
 /* ---------- conversation point ---------- */
 
 /* predictionAnchor: the last message that reaches the model and is no advisor card (borrowed pointer; compared only) */
-static const json_t *anchor_of(app_t *a, size_t *count) {
-    const json_t *found = NULL;
+static anchor_t anchor_of(app_t *a) {
+    anchor_t an = {0};
     pthread_mutex_lock(&a->agent->mu);
     const json_t *msgs = a->agent->messages;
-    *count = json_len(msgs);
+    an.count = json_len(msgs);
     for (size_t i = json_len(msgs); i-- > 0;) {
         const json_t *m = json_at(msgs, i);
         if (json_get_bool(m, "excludeFromContext", false)) continue;
         if (str_eq(json_get_str(m, "role"), "custom") && str_eq(json_get_str(m, "customType"), "advisor")) continue;
-        found = m;
+        an.ptr = m;
+        an.ts = json_get_int(m, "timestamp", 0);
+        snprintf(an.role, sizeof an.role, "%s", json_get_str(m, "role") ? json_get_str(m, "role") : "");
         break;
     }
     pthread_mutex_unlock(&a->agent->mu);
-    return found;
+    return an;
 }
 
-static bool is_current(ui_t *u, const json_t *anchor, size_t count, app_t *view) {
+static bool is_current(ui_t *u, const anchor_t *an, app_t *view) {
     if (u->view != view) return false;
-    size_t n = 0;
-    const json_t *now = anchor_of(ui_view_app(u), &n);
-    return now == anchor && n >= count && (anchor || n == count);
+    anchor_t now = anchor_of(ui_view_app(u));
+    if (!an->ptr) return !now.ptr && now.count == an->count;
+    if (!now.ptr) return false;
+    if (an->ts) return now.ts == an->ts && !strcmp(now.role, an->role);
+    return now.ptr == an->ptr && now.count >= an->count;
 }
 
 /* ---------- the side turn ---------- */
@@ -271,7 +283,7 @@ void pred_job_done(void *ud) {
         P.job = NULL;
         if (j->timer) tui_remove_timer(u->tui, j->timer);
         /* #offer: still wanted, still the same conversation point, and the model guessed */
-        if (!j->cancel && j->assistant && is_current(u, j->anchor, j->count, j->view)) {
+        if (!j->cancel && j->assistant && is_current(u, &j->anchor, j->view)) {
             strvec_t choices = {0};
             bool ok;
             if (j->alternatives) ok = pred_parse_many(j->reply, MAX_PREDICTION_CHOICES, &choices);
@@ -284,7 +296,6 @@ void pred_job_done(void *ud) {
                 strvec_free(&P.choices);
                 P.choices = choices;
                 P.anchor = j->anchor;
-                P.count = j->count;
                 P.view = j->view;
                 P.live = true;
                 tui_request_render(u->tui);
@@ -321,7 +332,7 @@ void pred_request(ui_t *u) {
     job_t *j = xcalloc(1, sizeof *j);
     j->u = u;
     j->alternatives = settings_bool("composer.predictionAlternatives", false);
-    j->anchor = anchor_of(a, &j->count);
+    j->anchor = anchor_of(a);
     j->view = u->view;
     if (pthread_create(&j->th, NULL, job_main, j) != 0) {
         free(j);
@@ -339,7 +350,7 @@ static const strvec_t *pred_choices(void *ud) {
     if (!settings_bool("composer.predictions", true)) return NULL;
     /* alternatives already offered keep their list only while the setting stays on */
     if (P.choices.n > 1 && !settings_bool("composer.predictionAlternatives", false)) return NULL;
-    if (!is_current(u, P.anchor, P.count, P.view)) return NULL;
+    if (!is_current(u, &P.anchor, P.view)) return NULL;
     return &P.choices;
 }
 

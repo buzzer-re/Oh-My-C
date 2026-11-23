@@ -2351,7 +2351,8 @@ const char *ui_session_title(ui_t *u) {
  * display.collapseCompacted off: the whole path, a divider at each compaction). Without a session file the
  * agent's live context is replayed instead. */
 void ui_chat_rebuild(ui_t *u) {
-    pred_cancel(u); /* EventController reset: the transcript changed under any prediction */
+    /* a rebuild keeps the prediction (omp cancels only in resetTranscriptAnchors: a new session or a focus switch,
+     * which change its anchor anyway); a stale one is never offered (predictctl is_current) */
     tui_container_clear(u->chat);
     ui_report_clear(u);
     hmap_free(&u->tools, NULL);
