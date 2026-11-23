@@ -442,7 +442,14 @@ typedef struct {
      * -2 fails now without retrying; may be NULL */
     int64_t (*on_failure)(void *ud, int status, const char *body, http_headers_t *headers);
     void *hook_ud;
+    /* the request rides omp's Cowork transport (first-party `anthropic` on anthropic-messages): a connection lost
+     * after connect and before any response names how far the body got (ConnectionLostBeforeResponseError) */
+    bool cowork;
 } ai_post_ex_t;
+
+/* ConnectionLostBeforeResponseError's message for a failed request's upload progress (http_resp_t), e.g.
+ * "connection lost after 1.2s while uploading the 32.0MB request body; no response received (EPIPE)". Owned. */
+char *ai_connection_lost_message(const http_resp_t *resp);
 int ai_sse_post_ex(const char *url, http_headers_t *headers, const char *body, const ai_stream_opts_t *opts,
                    ai_sse_cb on_event, void *ud, int *status, char **err, ai_post_ex_t *ex);
 /* Raw streaming POST (for newline-delimited JSON etc.). */

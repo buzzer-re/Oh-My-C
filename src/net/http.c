@@ -708,6 +708,29 @@ static int parse_status_headers(const char *hdr, size_t len, http_resp_t *resp) 
 
 typedef enum { RR_OK, RR_RETRYABLE, RR_FAIL } rr_t;
 
+/* the error code node's socket errors carry, for the errno a failed send / recv left */
+static const char *sock_errno_code(int e) {
+    switch (e) {
+    case EPIPE: return "EPIPE";
+    case ECONNRESET: return "ECONNRESET";
+    case ECONNABORTED: return "ECONNABORTED";
+    case ETIMEDOUT: return "ETIMEDOUT";
+    case ENETUNREACH: return "ENETUNREACH";
+    case EHOSTUNREACH: return "EHOSTUNREACH";
+    default: return NULL;
+    }
+}
+
+/* a request whose established connection failed before any response headers (cowork-fetch.ts sendCoworkRequest's
+ * request error after connect) */
+static void note_lost(http_resp_t *resp, int64_t started, size_t body_len, bool body_sent, const char *code) {
+    resp->lost_before_response = true;
+    resp->body_bytes = body_len;
+    resp->body_sent = body_sent;
+    resp->elapsed_ms = mono_ms() - started;
+    resp->lost_code = code;
+}
+
 static rr_t do_once(const http_req_t *req, const char *url_s, const char *method, const char *body, size_t body_len,
                     http_resp_t *resp, bool *keepalive_ok) {
     url_t u;
@@ -721,7 +744,9 @@ static rr_t do_once(const http_req_t *req, const char *url_s, const char *method
         url_free(&u);
         return RR_FAIL;
     }
+    int64_t started = mono_ms();
     const char *proxy = req->no_proxy ? NULL : proxy_for(u.scheme, u.host);
+    resp->via_proxy = proxy != NULL;
     char *key = xasprintf("%s|%s|%d|%s", tls ? "s" : "p", u.host, u.port, proxy ? proxy : "");
     int64_t connect_to = req->connect_timeout_ms ? req->connect_timeout_ms : 30000;
     int64_t idle_to = req->idle_timeout_ms ? req->idle_timeout_ms : 300000;
@@ -779,13 +804,16 @@ static rr_t do_once(const http_req_t *req, const char *url_s, const char *method
     sb_append(&r, "\r\n");
     url_free(&u);
 
+    errno = 0;
     int wr = net_write_all(c, r.s, r.len);
     sb_free(&r);
     if (wr == 0 && body_len) wr = net_write_all(c, body, body_len);
     if (wr != 0) {
+        int werr = errno;
         net_close(c);
         if (reused) return RR_RETRYABLE;
         resp->error = xstrdup("failed to send request");
+        note_lost(resp, started, body_len, false, sock_errno_code(werr));
         return RR_FAIL;
     }
 
@@ -806,8 +834,10 @@ static rr_t do_once(const http_req_t *req, const char *url_s, const char *method
         }
         int64_t to = idle_to;
         if (deadline) to = MIN(to, deadline - mono_ms());
+        errno = 0;
         int fr = conn_fill(c, to, req->cancel);
         if (fr <= 0) {
+            int rerr = errno;
             bool got_any = c->rlen > 0;
             net_close(c);
             if (fr == -4) {
@@ -817,6 +847,8 @@ static rr_t do_once(const http_req_t *req, const char *url_s, const char *method
             }
             if (reused && !got_any && fr == 0) return RR_RETRYABLE;
             resp->error = xstrdup(fr == -2 ? "timed out waiting for response" : "connection closed before response");
+            /* a peer close reads as node's "socket hang up" (ECONNRESET); a timeout stays a timeout */
+            if (fr != -2) note_lost(resp, started, body_len, true, fr == 0 ? "ECONNRESET" : sock_errno_code(rerr));
             return RR_FAIL;
         }
     }

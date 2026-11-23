@@ -2571,7 +2571,9 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
         anthropic_sse_init(&s, m, oauth, cb, ud);
         int status = 0;
         char *err = NULL;
-        ai_post_ex_t ex = {.on_headers = anth_on_headers, .on_failure = anth_on_failure, .hook_ud = &hk};
+        /* transportFetch: first-party `anthropic` requests ride the Cowork transport */
+        ai_post_ex_t ex = {.on_headers = anth_on_headers, .on_failure = anth_on_failure, .hook_ud = &hk,
+                           .cowork = str_eq(m->provider, "anthropic") && str_eq(m->api, "anthropic-messages")};
         int rc = ai_sse_post_ex(url, &h, body, &lo, anthropic_sse_event, &s, &status, &err, &ex);
         free(url);
         free(body);

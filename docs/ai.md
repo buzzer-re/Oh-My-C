@@ -435,7 +435,12 @@ There are two levels:
 A connect failure on the OpenAI, Codex and Anthropic transports surfaces as omp's sentence
 (`ai_network_failure_message`, omp `networkFailureMessage`): `Couldn't connect to <host> (connection refused)...`,
 `Couldn't reach <host> (getaddrinfo ENOTFOUND)...`, `No internet connection: couldn't reach <host> (...)...`, `TLS
-certificate verification failed for <host> (...)...`. In `-p` text mode each automatic retry prints
+certificate verification failed for <host> (...)...`. A first-party `anthropic` request (omp's Cowork transport:
+direct HTTPS, no proxy) whose connection was up and then lost before any response headers names how far the body got
+(omp `ConnectionLostBeforeResponseError`; `net/http.c` records it in `http_resp_t`, a timeout or abort excepted):
+`Connection error: connection lost after 1.2s while uploading the 32.0MB request body; no response received (EPIPE).`,
+`... after the 32.0MB request body was written to the socket, before any response (ECONNRESET).` once the socket took
+the whole body, or `... before any response` with no body. In `-p` text mode each automatic retry prints
 `Retrying (n/m): <error>` to stderr, after one `Working...` line.
 
 Before the transport retry decision, a provider hook (`ai_post_ex_t.on_failure`) may resend the
