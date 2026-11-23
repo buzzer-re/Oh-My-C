@@ -181,7 +181,7 @@ check "edit block"     "PUT 1*: → resolved lines 1-3 (3 lines)"  "$B" --model 
 printf 'a\r\nb\r\n' > crlf.txt
 check "write crlf"     "Note: kept the replaced file's CRLF line endings."  "$B" --model mock/mock-1 -p 'call:write:{"path":"crlf.txt","content":"x\ny\n"}'
 # help:// docs take line selectors (omp c51e68b454, de21c0ac45)
-check "help doc range"  "more lines in resource. Use :6 to continue]"  "$B" --model mock/mock-1 --no-session -p 'call:read:{"path":"help://read/sources:1-2"}'
+check "help doc range"  "more lines in resource. Use :6- to continue]"  "$B" --model mock/mock-1 --no-session -p 'call:read:{"path":"help://read/sources:1-2"}'
 check "write no content" "content: content must be a string (was missing)"  "$B" --model mock/mock-1 -p 'call:write:{"path":"nc.txt"}'
 check "write eisdir"   "EISDIR: illegal operation on a directory, open '"  "$B" --model mock/mock-1 -p "write:a:x"
 # non-interactive env: a config-file sequence.editor and GCM prompts must not hang a command
@@ -224,7 +224,7 @@ check "sink spill"     "168894"  bash -c "wc -c < \"\$(ls $T/sink/*/local/0.log)
 check "spill read"     "29999"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 "$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:local://0.log:5-6" >/dev/null 2>&1 </dev/null
 check "spill page"     $'#'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-check "spill lines"    $']\n4:4\n5:5\n6:6\n7:7\n8:8\n9:9\n\n[Showing lines 4-9 of 30000. Use :10 to continue]'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "spill lines"    $']\n4:4\n5:5\n6:6\n7:7\n8:8\n9:9\n\n[Showing lines 4-9 of 30000. Use :10- to continue]'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 check "spill source"   '"source":{"type":"internal","value":"local://0.log"}'  bash -c 'cat "$0"/sink/*.jsonl' "$T"
 "$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:local://0.log:raw" >/dev/null 2>&1 </dev/null
 check "spill raw cap"  'Unbounded raw read blocked for local://0.log (164.9KB). Reading the whole file verbatim can exhaust memory.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
@@ -532,7 +532,7 @@ check "ssh read sel"   "2:remote two"       env PATH="$ROOT/tests/e2e/bin:$PATH"
 check "ssh write"      "Successfully wrote 7 bytes to ssh://box"    env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/w.txt\",\"content\":\"via ssh\"}"
 check "ssh write file" "via ssh"            cat "$T/sub/w.txt"
 # a read projection written to a new remote file has no source to discard; over a longer one it is refused
-SSHPROJ='remote one\n\n[Showing lines 1-1 of 60. Use :2 to continue]'
+SSHPROJ='remote one\n\n[Showing lines 1-1 of 60. Use :2- to continue]'
 check "ssh projection new" "Successfully wrote"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/newproj.txt\",\"content\":\"$SSHPROJ\"}"
 check "ssh projection over" "Refusing to overwrite"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/remote.txt\",\"content\":\"$SSHPROJ\"}"
 check "ssh edit refused" 'is written through `write`, not edited'  env PI_EDIT_VARIANT=replace PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:edit:{\"path\":\"ssh://box$T/sub/w.txt\",\"old_string\":\"via ssh\",\"new_string\":\"replaced over ssh\"}"

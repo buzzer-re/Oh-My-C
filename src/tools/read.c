@@ -84,7 +84,7 @@ static bool parse_range_chunk(const char *c, lrange_t *r) {
     if (end == c || a <= 0) return false;
     if (!*end) {
         r->start = a;
-        r->end = 0; /* resolved by caller: single N is open-ended unless raw-single */
+        r->end = a; /* `:N` is that one line; `:N-` runs on (omp 49018fe880) */
         return true;
     }
     if (*end == '-' || (end[0] == '.' && end[1] == '.')) {
@@ -878,14 +878,14 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
          * budget is still shown whole in its cut form */
         int64_t window_end = sel->raw && paged && sel->ranges.v[0].end ? MIN(total, sel->ranges.v[0].end) : total;
         if (paged && sel->resource && last_shown < total && !pw.stopped && sel->ranges.v[0].end != 0) {
-            sb_appendf(&b, "%s\n[%lld more lines in %s. Use :%lld to continue]", b.len && b.s[b.len - 1] == '\n' ? "" : "\n",
+            sb_appendf(&b, "%s\n[%lld more lines in %s. Use :%lld- to continue]", b.len && b.s[b.len - 1] == '\n' ? "" : "\n",
                        (long long)(total - last_shown), ent, (long long)(last_shown + 1));
         } else if (paged) {
             if (last_shown < window_end)
                 page_meta(details, rs.v[0].start, total, last_shown - rs.v[0].start + 1, pw.selected, pw.collected, pw.stopped, pg_budget,
                           omitted ? -1 : 0);
         } else if (cut || (rs.n == 1 && sel->ranges.v[0].end == 0 && last_shown < total && !sel->raw))
-            sb_appendf(&b, "\n[%lld more lines in %s. Use %s:%lld to continue]", (long long)(total - last_shown), ent, base,
+            sb_appendf(&b, "\n[%lld more lines in %s. Use %s:%lld- to continue]", (long long)(total - last_shown), ent, base,
                        (long long)(last_shown + 1));
         if (notes.len) {
             if (sel->raw) { /* appendReadNotice: a raw read keeps its notices out of the verbatim text */

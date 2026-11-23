@@ -1310,7 +1310,7 @@ static void truncation_notice(sb_t *b, const json_t *t, const json_t *source) {
             sb_appendf(b, "Showing %lld of %lld lines; middle elided", (long long)MIN(ol, total_lines), (long long)total_lines);
         }
         free(fb);
-        if (has_key(t, "nextOffset")) sb_appendf(b, ". Use :%lld to continue", (long long)json_get_int(t, "nextOffset", 0));
+        if (has_key(t, "nextOffset")) sb_appendf(b, ". Use :%lld- to continue", (long long)json_get_int(t, "nextOffset", 0));
         if (ref.len) sb_appendf(b, ". %s", ref.s);
         sb_free(&ref);
         return;
@@ -1336,7 +1336,7 @@ static void truncation_notice(sb_t *b, const json_t *t, const json_t *source) {
         sb_appendf(b, " (%s limit)", f);
         free(f);
     }
-    if (has_key(t, "nextOffset")) sb_appendf(b, ". Use :%lld to continue", (long long)json_get_int(t, "nextOffset", 0));
+    if (has_key(t, "nextOffset")) sb_appendf(b, ". Use :%lld- to continue", (long long)json_get_int(t, "nextOffset", 0));
     if (ref.len) sb_appendf(b, ". %s", ref.s);
     sb_free(&ref);
 }
