@@ -2,7 +2,7 @@
 """Model picker (Alt+P) provider scopes and thinking slider under a pty (omp 807c6d37f5 / 94a10c5b22): the footer
 names Tab provider and ←/→ thinking, ←/→ step the highlighted model's thinking level (shown after the status hint),
 Tab / Shift+Tab step the list through all models and each provider's, and a pick applies the slider's level.
-Expected text is omp 18.22.0's, compared side by side in tmux with tests/tui/compare.sh.
+Expected text is omp 19.1.0's (this script with PI_CODING_AGENT_DIR), compared side by side in tmux with tests/tui/compare.sh.
 
 usage: model_picker_tui.py <omc> <scratch dir>
 Prints one "<step> ok" line per step, or "<step> FAIL: ..." and exits 1."""
@@ -90,9 +90,10 @@ try:
     check("footer", "⇥ provider · ←/→ thinking · type to search" in out, out)
     check("no thinking", "role models stay unchanged · no thinking" in out, out)
     out = press("\x1b[B")
-    check("slider", "role models stay unchanged · thinking High" in out, out)
-    out = press("\x1b[D")
-    check("step left", "thinking Med" in out, out)
+    # the slider starts at the session's level (Off on the non-reasoning mock-1), not a role's (omp 5b4fb78a55)
+    check("slider", "role models stay unchanged · thinking Off" in out, out)
+    out = press("\x1b[C")
+    check("step right", "thinking Min" in out, out)
     out = press("\t")
     check("provider scope", "\u2502" in out and "other/other-1" not in out, out)
     out = press("\t")
@@ -106,7 +107,7 @@ try:
     out = press("\r", 1.2)
     check("pick applies level", "Session-only model: mock/mock-r" in out, out)
     out = press("\x1bp", 1.5)
-    check("picked level kept", "mock/mock-r" in out and "thinking Med" in out, out)
+    check("picked level kept", "mock/mock-r" in out and "thinking Min" in out, out)
 finally:
     if os.environ.get("MP_DUMP"):
         open(os.environ["MP_DUMP"], "wb").write(raw)
