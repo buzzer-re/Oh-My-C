@@ -21,6 +21,9 @@ void rf_splits_free(rf_splits_t *s);
 void rf_archive_candidates(const char *path, rf_splits_t *out);
 /* upstream parseSqlitePathCandidates: .sqlite/.sqlite3/.db/.db3 followed by ':', '?' or end */
 void rf_sqlite_candidates(const char *path, rf_splits_t *out);
+/* splits at every `:`/`?` boundary, last first, for SQLite files without a database extension (`state.vscdb?q=…`,
+ * Chrome's `History:urls`); only the header can confirm one, so callers sniff it */
+void rf_sqlite_boundary_candidates(const char *path, rf_splits_t *out);
 
 /* "123B" / "1.5KB" / "2.0MB" / "1.0GB" (upstream formatBytes); owned */
 char *rf_fmt_bytes(int64_t n);

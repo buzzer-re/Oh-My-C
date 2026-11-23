@@ -298,6 +298,18 @@ printf 'Project rule: always test.\n' > AGENTS.md
 check "skill url"      "SKILL BODY LINE"  "$B" --model mock/mock-1 -p "read:skill://demo"
 check "unknown skill"  $'Unknown skill: nope\nAvailable: demo'  "$B" --model mock/mock-1 -p "read:skill://nope"
 # located internal URLs read under the URL's identity (omp read.ts LocatedRead): an immutable scheme mints no
+# ranged :raw keeps each line's terminator, per-range :raw lists, an extensionless SQLite file (omp 49018fe880)
+printf 'A\nB\nC\nD\n' > rawr.txt
+RAWQ='import json,sys
+for l in sys.stdin:
+    try: e=json.loads(l)
+    except Exception: continue
+    if e.get("type")=="tool_execution_end": print(repr("".join(b.get("text","") for b in e["result"]["content"])))'
+check "raw terminators" "'A\\nC\\n'"  bash -c "'$B' --model mock/mock-1 --no-session --mode json -p 'read:rawr.txt:1-1:raw,3:raw' </dev/null 2>/dev/null | python3 -I -c '$RAWQ'"
+python3 -I -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("create table users(id integer primary key, name text)"); c.executemany("insert into users(name) values (?)",[("a",),("b",)]); c.commit()' state.vscdb 2>/dev/null
+check "sqlite noext"   "users (2 rows)"  "$B" --model mock/mock-1 --no-session -p "read:state.vscdb"
+check "sqlite noext q" $'| --- |\n| 2   |'  "$B" --model mock/mock-1 --no-session -p "read:state.vscdb?q=SELECT count(*) AS n FROM users"
+rm -f rawr.txt state.vscdb
 # hashline anchors, skill:// carries its provenance (not under :raw), hints name the URL
 printf 'extra file\nsecond\n' > "$T/agent/skills/demo/notes.txt"
 "$B" --model mock/mock-1 --no-session -p "read:skill://demo" >/dev/null 2>&1 </dev/null

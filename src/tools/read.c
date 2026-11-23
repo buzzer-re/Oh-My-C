@@ -22,6 +22,7 @@
 #include <errno.h>
 
 #include <ctype.h>
+#include <unistd.h>
 #include <sys/stat.h>
 
 #define READ_MAX_BYTES (50u * 1024)
@@ -149,10 +150,33 @@ static bool parse_sel_token(const char *tok, selector_t *sel, bool *single_bare)
     return ok;
 }
 
+/* per-range `:raw` lists (`1-1:raw,3:raw`) are one raw range list (omp 49018fe880); rewritten in place (never longer) */
+static void fold_raw_list(char *work) {
+    for (char *c = strchr(work, ':'); c; c = strchr(c + 1, ':')) {
+        if (c == work || !strchr("0123456789L-", c[1])) continue;
+        strvec_t parts = str_split(c + 1, ",");
+        bool all_raw = parts.n > 1;
+        sb_t joined = SB_INIT;
+        for (size_t i = 0; i < parts.n && all_raw; i++) {
+            size_t pl = strlen(parts.v[i]);
+            lrange_t r;
+            char *head = pl > 4 && !strcasecmp(parts.v[i] + pl - 4, ":raw") ? xstrndup(parts.v[i], pl - 4) : NULL;
+            all_raw = head && parse_range_chunk(head, &r);
+            if (all_raw) sb_appendf(&joined, "%s%s", i ? "," : "", head);
+            free(head);
+        }
+        if (all_raw) sprintf(c + 1, "%s:raw", joined.s);
+        sb_free(&joined);
+        strvec_free(&parts);
+        if (all_raw) break;
+    }
+}
+
 /* split "path:sel:sel" preferring literal existing files */
 /* strip trailing :selector tokens from work (in place) into sel */
 static void strip_sel(char *work, selector_t *sel) {
     bool single_bare = false;
+
     for (int guard = 0; guard < 3; guard++) {
         char *colon = strrchr(work, ':');
         if (!colon || colon == work) break;
@@ -191,6 +215,9 @@ static char *split_path_sel(tool_env_t *env, const char *in, selector_t *sel) {
     char *abs = tool_resolve_path(env, in);
     if (fs_exists(abs)) return abs;
     free(abs);
+    char *folded = xstrdup(in);
+    fold_raw_list(folded);
+    in = folded;
     /* splitPathAndSel peels one selector (list colons folded: `a:20:40,85:100` reads as `a:20-40,85-100`); the
      * path before it stays whole (`a.ts:12:5` asks for the path `a.ts:12`) */
     char *sp = NULL, *ss = NULL;
@@ -216,6 +243,7 @@ static char *split_path_sel(tool_env_t *env, const char *in, selector_t *sel) {
     free(ss);
     char *r = tool_resolve_path(env, work);
     free(work);
+    free(folded);
     return r;
 }
 
@@ -872,10 +900,9 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
                 last_shown = ln;
             }
         }
-        if (sel->raw && body.len && body.s[body.len - 1] == '\n') {
-            bool open_to_eof = rs.n == 1 && sel->ranges.v[0].end == 0 && last_shown == total && t.trailing_nl;
-            if (!open_to_eof) sb_truncate(&body, body.len - 1);
-        }
+        /* a raw range keeps its last line's terminator: every line has one but an unterminated final line (omp 49018fe880) */
+        if (sel->raw && body.len && body.s[body.len - 1] == '\n' && last_shown == total && !t.trailing_nl)
+            sb_truncate(&body, body.len - 1);
         if (hashline && rs.n) {
             const char *tag = NULL;
             for (size_t i = 0; i < rs.n; i++) {
@@ -1075,7 +1102,8 @@ static void read_pdf_bytes(tool_env_t *env, const char *abs, const char *data, s
     strvec_free(&pages);
 }
 
-static void read_archive(tool_env_t *env, const char *path, const char *abs, const char *sub, tool_result_t *out) {
+static bool read_image(tool_ctx_t *ctx, const char *abs, const char *display, int64_t size, tool_result_t *out);
+static void read_archive(tool_env_t *env, tool_ctx_t *ctx, const char *path, const char *abs, const char *sub, tool_result_t *out) {
     char *err = NULL;
     rf_archive_t *a = rf_archive_open(abs, &err);
     if (!a) {
@@ -1136,22 +1164,28 @@ static void read_archive(tool_env_t *env, const char *path, const char *abs, con
         } else {
             /* selectors address entries with line semantics: ":50" starts at the 50th, ":-20" lists the last 20 */
             int64_t total = (int64_t)ents.n, off = 1, limit = 500;
+            bool explicit_limit = false;
             if (sel.ranges.n == 1) {
                 lrange_t r = sel.ranges.v[0];
                 if (r.start < 0) {
                     off = MAX(1, total + r.start + 1);
                     limit = MAX((int64_t)1, MIN(-r.start, total));
+                    explicit_limit = true;
                 } else {
                     off = r.start;
-                    if (r.end) limit = r.end - r.start + 1;
+                    if (r.end) {
+                        limit = r.end - r.start + 1;
+                        explicit_limit = true;
+                    }
                 }
             }
             int64_t avail = MAX((int64_t)0, total - (off - 1));
             int64_t shown = MIN(avail, limit);
             char *list = shown > 0 ? rf_format_dirents(ents.v + (off - 1), (size_t)shown) : xstrdup("(empty archive directory)");
-            if (limit > 0 && avail >= limit)
-                tool_result_textf(out, "%s\n\n[%lld results limit reached. Use limit=%lld for more]", list, (long long)limit,
-                                  (long long)limit * 2);
+            /* an open listing names where the rest continues (omp 49018fe880) */
+            if (!explicit_limit && avail > shown)
+                tool_result_textf(out, "%s\n\n[%lld more entries in listing. Use :%lld- to continue]", list,
+                                  (long long)(avail - shown), (long long)(off + shown));
             else
                 tool_result_text(out, list);
             free(list);
@@ -1171,6 +1205,29 @@ static void read_archive(tool_env_t *env, const char *path, const char *abs, con
             char *mp = xasprintf("%s:%s", abs, norm);
             read_pdf_bytes(env, mp, data, len, pdf_first, pdf_last, &sel, out);
             free(mp);
+        } else if (!sel.ranges.n && !sel.raw && img_sniff((const uint8_t *)data, len, &(img_meta_t){0})) {
+            /* an image member goes to the image loader, materialized under an owned name (omp 49018fe880) */
+            const char *tmpd = getenv("TMPDIR");
+            char *tmpl = xasprintf("%s/omc-read-archive-image-XXXXXX", tmpd && *tmpd ? tmpd : "/tmp");
+            int fd = mkstemp(tmpl);
+            bool shown = false;
+            if (fd >= 0) {
+                bool wrote = write(fd, data, len) == (ssize_t)len;
+                close(fd);
+                if (wrote) shown = read_image(ctx, tmpl, path, (int64_t)len, out);
+                unlink(tmpl);
+            }
+            free(tmpl);
+            if (shown) {
+                details = json_obj();
+                char *mp = xasprintf("%s:%s", abs, norm);
+                json_set_str(details, "resolvedPath", mp);
+                free(mp);
+            } else {
+                char *sz = rf_fmt_bytes((int64_t)len);
+                tool_result_textf(out, "[Cannot read binary archive entry '%s' (%s)]", norm, sz);
+                free(sz);
+            }
         } else if (!rf_is_text(data, len)) {
             char *sz = rf_fmt_bytes((int64_t)len);
             tool_result_textf(out, "[Cannot read binary archive entry '%s' (%s)]", norm, sz);
@@ -1191,7 +1248,7 @@ static void read_archive(tool_env_t *env, const char *path, const char *abs, con
 }
 
 /* archive members ("x.zip:dir/file:10-20") and SQLite selectors ("x.db:table?limit=5"); true when handled */
-static bool read_structured(tool_env_t *env, const char *path, tool_result_t *out) {
+static bool read_structured(tool_env_t *env, tool_ctx_t *ctx, const char *path, tool_result_t *out) {
     char *full = tool_resolve_path(env, path);
     bool literal = fs_exists(full);
     free(full);
@@ -1203,7 +1260,7 @@ static bool read_structured(tool_env_t *env, const char *path, tool_result_t *ou
         struct stat st;
         bool ok = stat(abs, &st) == 0 && !S_ISDIR(st.st_mode);
         if (ok) {
-            read_archive(env, path, abs, c.v[i].sub, out);
+            read_archive(env, ctx, path, abs, c.v[i].sub, out);
             if (!out->details) {
                 out->details = json_obj();
                 json_set_str(out->details, "resolvedPath", abs);
@@ -1239,6 +1296,31 @@ static bool read_structured(tool_env_t *env, const char *path, tool_result_t *ou
         }
     }
     rf_splits_free(&c);
+    /* a SQLite file without a database extension is recognized by its header alone (omp 49018fe880) */
+    if (!literal) {
+        rf_sqlite_boundary_candidates(path, &c);
+        for (size_t i = 0; i < c.n; i++) {
+            char *abs = tool_resolve_path(env, c.v[i].container);
+            struct stat st;
+            bool ok = stat(abs, &st) == 0 && S_ISREG(st.st_mode) && rf_sqlite_sniff(abs);
+            if (ok) {
+                bool is_err = false;
+                char *txt = rf_sqlite_read(abs, c.v[i].sub, c.v[i].query, &is_err);
+                if (is_err) tool_result_error(out, "%s", txt);
+                else tool_result_text(out, txt);
+                free(txt);
+                json_free(out->details);
+                out->details = json_obj();
+                json_set_str(out->details, "resolvedPath", abs);
+            }
+            free(abs);
+            if (ok) {
+                rf_splits_free(&c);
+                return true;
+            }
+        }
+        rf_splits_free(&c);
+    }
     return false;
 }
 
@@ -1909,7 +1991,7 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
 /* the filesystem read pipeline: directories, archives, sqlite, PDFs, images, notebooks and text. `loc` carries the
  * URL a routed read resolved to `path`; its hints name that URL. */
 static int read_path(tool_env_t *env, tool_ctx_t *ctx, const char *path, const located_t *loc, tool_result_t *out) {
-    if (read_structured(env, path, out) || read_pdf_pages(env, path, out)) return 0;
+    if (read_structured(env, ctx, path, out) || read_pdf_pages(env, path, out)) return 0;
     selector_t sel;
     char *abs = split_path_sel(env, path, &sel);
     sel.loc = loc;
@@ -2014,8 +2096,20 @@ static int read_path(tool_env_t *env, tool_ctx_t *ctx, const char *path, const l
         goto done;
     }
     if (!sel.raw && fs_is_binary(data, len)) {
+        /* a database without a `.db`/`.sqlite` name (`state.vscdb`, Chrome's `History`) lists its tables */
+        if (!sel.has_sel && rf_sqlite_sniff(abs)) {
+            bool is_err = false;
+            char *txt = rf_sqlite_read(abs, "", "", &is_err);
+            if (is_err) tool_result_error(out, "%s", txt);
+            else tool_result_text(out, txt);
+            free(txt);
+            out->details = json_obj();
+            json_set_str(out->details, "resolvedPath", abs);
+            free(data);
+            goto done;
+        }
         char *sz = fmt_bytes((int64_t)len);
-        tool_result_textf(out, "[Binary file %s (%s); use :raw to force a text read]", display, sz);
+        tool_result_textf(out, "[Cannot read binary file '%s' (%s); not valid UTF-8 text. Use ':raw' to read bytes verbatim.]", display, sz);
         free(sz);
         free(data);
         goto done;
