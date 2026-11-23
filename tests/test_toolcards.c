@@ -301,6 +301,24 @@ int main(void) {
     tui_theme_set(tui_theme_builtin("titanium", TUI_COLOR_TRUECOLOR));
     tui_sym_set_preset("unicode");
 
+    { /* answerless web search: no Answer section, each source shows its cleaned excerpt (omp e42b1f9e89) */
+        json_t *a = J("{\"query\":\"q\"}");
+        json_t *r = J("{\"content\":[{\"type\":\"text\",\"text\":\"1. A\\n2. B\"}],\"details\":{\"response\":{"
+                      "\"provider\":\"parallel\",\"sources\":[{\"title\":\"A\",\"url\":\"https://a.example/x\","
+                      "\"snippet\":\"```\\n\\tfirst   line\\r\\n---\\nsecond\"},{\"title\":\"B\",\"url\":\"https://b.example\"}]}}}");
+        tc_call_t c = call("web_search", a, r, false);
+        strvec_t out = {0};
+        tc_render(&c, 120, &out);
+        CHECK(!has_row(&out, "Answer") && has_row(&out, "first line") && !has_row(&out, "second") && !has_row(&out, "1. A"),
+              "answerless web search collapsed");
+        strvec_free(&out);
+        c.expanded = true;
+        tc_render(&c, 120, &out);
+        CHECK(has_row(&out, "first line") && has_row(&out, "second"), "answerless web search expanded");
+        strvec_free(&out);
+        json_free(a);
+        json_free(r);
+    }
     { /* formatAge: a year or more reads in years (omp f20951a27f) */
         char *a = tc_format_age(23LL * 365 * 86400 + 86400), *b = tc_format_age(40LL * 86400);
         CHECK(!strcmp(a, "23y ago") && !strcmp(b, "1mo ago"), "format age: %s / %s", a, b);
