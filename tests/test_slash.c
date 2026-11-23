@@ -44,8 +44,9 @@ static void test_registry(void) {
     for (size_t i = 0; i < a->nsubs; i++) configure |= str_eq(a->subs[i].name, "configure");
     CHECK(a->nsubs >= 3 && !configure);
     const slash_cmd_t *c = slash_lookup("compact");
-    CHECK(c->nsubs == 1 && str_eq(c->subs[0].name, "soft") && str_eq(c->subs[0].usage, "[focus]"));
-    CHECK(str_eq(c->acp_input_hint, "[soft] [focus]"));
+    CHECK(c->nsubs == 2 && str_eq(c->subs[0].name, "soft") && str_eq(c->subs[0].usage, "[focus]") &&
+          str_eq(c->subs[1].name, "handoff"));
+    CHECK(str_eq(c->acp_input_hint, "[soft|handoff] [focus]"));
     CHECK(str_eq(slash_lookup("resume")->inline_hint, "[session id]"));
     slash_parsed_t p;
     CHECK(!slash_match("/new now", &p));     /* no allowArgs: goes to the model */
