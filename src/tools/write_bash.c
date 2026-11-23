@@ -608,23 +608,48 @@ typedef struct {
     out_sink_t *sink;
     size_t pushed; /* raw bytes fed to the sink */
     int64_t last_emit;
+    toolcmd_run_t *tc_run; /* the call's tool command run (NULL: none): every frame carries its dispatches so far */
+    pthread_mutex_t mu;    /* output (reader thread) and dispatch changes (command threads) both emit frames */
 } bash_stream_t;
+
+/* one live frame of the card: the output preview, details.toolCommands while the run dispatched any (bash.ts
+ * withReplies). Called with s->mu held. */
+static void bash_emit_frame(bash_stream_t *s) {
+    char *pv = out_sink_preview(s->sink);
+    tool_result_t partial = {0};
+    tool_result_text(&partial, pv);
+    json_t *recs = s->tc_run ? toolcmd_run_records(s->tc_run) : NULL;
+    if (json_len(recs)) {
+        partial.details = json_obj();
+        json_set(partial.details, "toolCommands", recs);
+        recs = NULL;
+    }
+    json_free(recs);
+    s->ctx->update(s->ctx, &partial);
+    tool_result_free(&partial);
+    free(pv);
+}
 
 static void bash_on_output(void *ud, int stream, const char *data, size_t len) {
     bash_stream_t *s = ud;
     UNUSED(stream);
+    pthread_mutex_lock(&s->mu);
     out_sink_push(s->sink, data, len);
     s->pushed += len;
     int64_t now = mono_ms();
     if (s->ctx && s->ctx->update && now - s->last_emit >= 50) {
         s->last_emit = now;
-        char *pv = out_sink_preview(s->sink);
-        tool_result_t partial = {0};
-        tool_result_text(&partial, pv);
-        s->ctx->update(s->ctx, &partial);
-        tool_result_free(&partial);
-        free(pv);
+        bash_emit_frame(s);
     }
+    pthread_mutex_unlock(&s->mu);
+}
+
+/* a tool command dispatch started, progressed or finished: re-emit the run's frame (the nested card moves) */
+static void bash_on_tool_command(void *ud) {
+    bash_stream_t *s = ud;
+    pthread_mutex_lock(&s->mu);
+    if (s->ctx && s->ctx->update) bash_emit_frame(s); /* output throttling stays keyed to output frames */
+    pthread_mutex_unlock(&s->mu);
 }
 
 /* an internal-URL style target (`local://x`): never a host directory */
@@ -1149,7 +1174,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     out_sink_opts_from_settings(&so);
     so.artifact_alloc = env->artifacts ? artifacts_alloc_lazy : NULL;
     so.artifact_alloc_ud = env->artifacts;
-    bash_stream_t bs = {.ctx = ctx, .sink = out_sink_new(&so)};
+    bash_stream_t bs = {.ctx = ctx, .sink = out_sink_new(&so), .mu = PTHREAD_MUTEX_INITIALIZER};
     /* the client terminal (an ACP client advertising `terminal`) shows a live terminal card in the editor; it wins
      * over auto-backgrounding. PTY runs need the local terminal UI. */
     if (!pty && env->bridge && env->bridge->run_terminal) {
@@ -1207,6 +1232,10 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     bool auto_bg = !pty && env->jobs && async_on && settings_bool("bash.autoBackground.enabled", true) &&
                    (int64_t)jobs_running(env->jobs) < cap;
     if (tc_names.n && !pty) tc_run = toolcmd_run_begin(ctx, env);
+    if (tc_run) {
+        bs.tc_run = tc_run;
+        toolcmd_run_on_change(tc_run, bash_on_tool_command, &bs);
+    }
     auto_bg_run = auto_bg && tc_run;
     int64_t t0 = mono_ms();
     proc_result_t r;
@@ -1273,7 +1302,10 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         free(pre);
     }
     int64_t dur = mono_ms() - t0;
-    if (tc_run) tc_records = toolcmd_run_records(tc_run);
+    if (tc_run) {
+        toolcmd_run_on_change(tc_run, NULL, NULL); /* bs goes away with this call */
+        tc_records = toolcmd_run_records(tc_run);
+    }
     bash_finish(env, out, &r, &bs, tsec, req_tsec, timeout_ms, cwd, dur, &notices);
     if (tc_run) { /* the commands' images follow the output text (bash.ts: [text, ...result.images]) */
         json_t *imgs = toolcmd_run_images(tc_run), *im;
@@ -1293,6 +1325,7 @@ done:
     }
     json_free(tc_records);
     if (tc_run) {
+        toolcmd_run_on_change(tc_run, NULL, NULL);
         /* the auto-background job owns the run (its shell may still call); a direct run is over */
         if (auto_bg_run) toolcmd_run_unref(tc_run);
         else toolcmd_run_end(tc_run);

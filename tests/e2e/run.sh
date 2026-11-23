@@ -99,6 +99,14 @@ check "tc report"      "Noted, thanks!"                   "$B" --model mock/mock
 # a direct call by a mounted command's exact name still runs it (sdk.ts resolveToolCommandTool)
 check "tc direct call" "Tool said: No active debug session."  "$B" --model mock/mock-1 -p 'call:debug:{"action":"sessions"}'
 check "tc records"     '"toolCommands":[{"tool":"debug","mode":"help","exitCode":0},{"tool":"debug","mode":"execute","exitCode":0,"args":{"action":"sessions"},"tier":"read","inner":{"action":"sessions","success":true}}]'  "$B" --model mock/mock-1 --mode json -p "bash:debug --help >/dev/null; debug sessions"
+# every live frame of the bash card carries the dispatches so far (bash.ts withReplies), so the nested card shows mid-run
+check "tc live frame"  'live debug' bash -c '"$0" --model mock/mock-1 --mode json -p "bash:debug sessions; sleep 0.3" </dev/null 2>/dev/null | python3 -I -c "
+import json,sys
+for l in sys.stdin:
+    try: e=json.loads(l)
+    except Exception: continue
+    d=((e.get(\"partialResult\") or {}).get(\"details\") or {}) if e.get(\"type\")==\"tool_execution_update\" else {}
+    if d.get(\"toolCommands\"): print(\"live\", d[\"toolCommands\"][0][\"tool\"]); break"' "$B"
 check "help topics"    $'Tool said: help://read/sources\nhelp://read/urls'  "$B" --model mock/mock-1 -p "read:help://read"
 check "help unknown"   "Unknown topic 'nope' for read. Available: sources, urls."  "$B" --model mock/mock-1 -p "read:help://read/nope"
 check "glob tool"      $'Tool said: # a/\nb.txt'          "$B" --model mock/mock-1 -p "glob:**/*.txt"

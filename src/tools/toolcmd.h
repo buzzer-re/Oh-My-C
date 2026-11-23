@@ -129,7 +129,8 @@ json_t *toolcmd_run_records(toolcmd_run_t *r);
  * terminal graphics back into images of the bash result; omc's bash output drops the escape sequences, so the run hands
  * them over directly */
 json_t *toolcmd_run_images(toolcmd_run_t *r);
-/* hook for live bash frames: called (from a dispatch thread) after each dispatch progress or finish */
+/* hook for live bash frames: called (from a dispatch thread) after each dispatch progress or finish; fn NULL clears it,
+ * waiting out a call in flight */
 void toolcmd_run_on_change(toolcmd_run_t *r, void (*fn)(void *ud), void *ud);
 /* an extra reference (a bash call that hands the run to a job but still reads its records) */
 void toolcmd_run_ref(toolcmd_run_t *r);

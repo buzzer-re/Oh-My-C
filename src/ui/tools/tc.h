@@ -168,6 +168,8 @@ void tc_push_wrapped(strvec_t *out, const char *s, int width);
 
 /* per-tool renderers (internal) */
 void tc_bash(const tc_call_t *c, int width, strvec_t *out);
+/* bash.ts isSoleInvocation: `command` is one simple invocation of `tool` (no pipes, lists, redirections, substitutions) */
+bool tc_bash_sole_invocation(const char *command, const char *tool);
 void tc_write(const tc_call_t *c, int width, strvec_t *out);
 void tc_edit(const tc_call_t *c, int width, strvec_t *out);
 void tc_read(const tc_call_t *c, int width, strvec_t *out);

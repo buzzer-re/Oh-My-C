@@ -411,6 +411,91 @@ static char *bash_intent_header(const json_t *args) {
     return h;
 }
 
+/* ---------- nested tool command cards (tui tools/tool-commands.ts, bash.ts shellToolCommands) ---------- */
+
+/* bash.ts isSoleInvocation: `command` is one simple invocation of `tool` (no pipes, lists, redirections or
+ * substitutions) */
+bool tc_bash_sole_invocation(const char *command, const char *tool) {
+    if (!command || !tool) return false;
+    char *line = str_trim(command);
+    size_t tl = strlen(tool);
+    bool ok = *line && (!strcmp(line, tool) || (!strncmp(line, tool, tl) && (line[tl] == ' ' || line[tl] == '\t')));
+    char quote = 0;
+    for (size_t i = 0; ok && line[i]; i++) {
+        char ch = line[i];
+        if (quote == '\'') {
+            if (ch == '\'') quote = 0;
+            continue;
+        }
+        if (ch == '\\') {
+            if (line[i + 1]) i++;
+            continue;
+        }
+        if (quote == '"') {
+            if (ch == '"') quote = 0;
+            else if (ch == '$' || ch == '`') ok = false;
+            continue;
+        }
+        if (ch == '\'' || ch == '"') quote = ch;
+        else if (strchr("|&;<>()$`\n", ch)) ok = false;
+    }
+    free(line);
+    return ok;
+}
+
+/* displayLabel: the mounted tool's label, else `server/tool` for an MCP name, else the name */
+static char *tool_command_label(const tc_call_t *c, const char *name) {
+    const char *l = c->label_of ? c->label_of(name) : NULL;
+    char *raw;
+    const char *us = !l && !strncmp(name, "mcp__", 5) ? strchr(name + 5, '_') : NULL;
+    if (l) raw = xstrdup(l);
+    else if (us) raw = xasprintf("%.*s/%s", (int)(us - (name + 5)), name + 5, us + 1);
+    else raw = xstrdup(name);
+    char *san = tc_sanitize_line(raw);
+    free(raw);
+    return san;
+}
+
+/* renderToolCommandDispatch: an executed command draws through the wrapped tool's renderer (its parsed arguments as
+ * the call, its details as the result); `--help` is a one-line card; no arguments get the generic card. Only the last
+ * record of a live run is still running. */
+static void tool_command_card(const tc_call_t *c, const json_t *dispatch, const char *output, bool running, int width,
+                              strvec_t *out) {
+    const char *tool = json_get_str(dispatch, "tool");
+    if (!tool) return;
+    char *label = tool_command_label(c, tool);
+    bool is_error = json_get_int(dispatch, "exitCode", 0) != 0;
+    if (str_eq(json_get_str(dispatch, "mode"), "help")) {
+        char *desc = tc_fg(TUI_TC_DIM, "--help");
+        tc_status_line_t sl = {.icon = is_error ? TC_ST_ERROR : TC_ST_SUCCESS, .spinner = -1, .title = label,
+                               .title_slot = -1, .description = desc};
+        char *line = tc_status_line(&sl);
+        strvec_push_own(out, tui_truncate_to_width(line, width, "\xe2\x80\xa6"));
+        free(line);
+        free(desc);
+        free(label);
+        return;
+    }
+    json_t *content = json_arr();
+    if (output && *output) {
+        json_t *b = json_obj();
+        json_set_str(b, "type", "text");
+        json_set_str(b, "text", output);
+        json_push(content, b);
+    }
+    const json_t *args = json_get_obj(dispatch, "args");
+    json_t *empty = args ? NULL : json_obj();
+    tc_call_t in = {.name = tool, .label = label, .args = args ? args : empty, .content = content,
+                    .details = json_get(dispatch, "inner"), .has_result = true, .partial = running, .is_error = is_error,
+                    .expanded = c->expanded, .spinner = running ? c->spinner : -1, .elapsed_ms = -1, .exec_started = true,
+                    .cwd = c->cwd, .term_rows = c->term_rows, .now_ms = c->now_ms, .label_of = c->label_of,
+                    .args_complete = true, .unregistered = !args};
+    tc_render(&in, width, out);
+    json_free(empty);
+    json_free(content);
+    free(label);
+}
+
 void tc_bash(const tc_call_t *c, int width, strvec_t *out) {
     const json_t *d = c->details;
     int cw = tc_block_content_width(width, -1, -1);
@@ -491,16 +576,43 @@ void tc_bash(const tc_call_t *c, int width, strvec_t *out) {
         }
     }
 
-    tc_section_t secs[2] = {{.lines = cmd}, {.lines = olines}};
+    /* shellToolCommands: the run's tool command records, and whether the whole call was one executed command whose
+     * card stands for the call's entire output (then the Output section is dropped while it has nothing else) */
+    const json_t *dispatches = json_get_arr(d, "toolCommands");
+    size_t ndisp = json_len(dispatches);
+    bool sole = ndisp == 1 && str_eq(json_get_str(json_at(dispatches, 0), "mode"), "execute") &&
+                tc_bash_sole_invocation(json_get_str(c->args, "command"), json_get_str(json_at(dispatches, 0), "tool"));
+    if (sole) {
+        for (size_t i = 0; i < olines.n; i++) free(olines.v[i]);
+        olines.n = 0;
+        if (meta && (json_get_str(meta, "artifactError") || (json_get_obj(meta, "truncation") && !c->expanded))) {
+            char *wt = out_format_warning(meta);
+            if (wt) {
+                char *w = xasprintf("%s%s%s", tc_sym("format.bracketLeft"), wt, tc_sym("format.bracketRight"));
+                strvec_push_own(&olines, tc_fg(TUI_TC_WARNING, w));
+                free(w);
+                free(wt);
+            }
+        }
+    }
+    strvec_t cards = {0};
+    const json_t *dp;
+    json_arr_foreach(dispatches, di, dp) tool_command_card(c, dp, sole ? display : NULL, partial && di == ndisp - 1, cw, &cards);
+
+    tc_section_t secs[3];
+    size_t nsec = 0;
+    secs[nsec++] = (tc_section_t){.lines = cmd};
+    if (ndisp) secs[nsec++] = (tc_section_t){.lines = cards};
     char *label = tc_fg(TUI_TC_TOOL_TITLE, "Output");
-    secs[1].label = label;
+    if (!(sole && olines.n == 0)) secs[nsec++] = (tc_section_t){.label = label, .lines = olines};
     /* bash.ts: shell cards keep the neutral segmented look, the phase colours status and border, never a background wash */
     tc_block_t blk = {.header = header,
                       .no_bg = true,
                       .footer_meta = footer,
                       .state = partial ? TC_STATE_PENDING : is_error ? (timed_out ? TC_STATE_WARNING : TC_STATE_ERROR) : TC_STATE_SUCCESS,
-                      .sections = secs, .nsections = 2, .width = width, .pad_left = -1, .pad_right = -1, .border_slot = -1};
+                      .sections = secs, .nsections = nsec, .width = width, .pad_left = -1, .pad_right = -1, .border_slot = -1};
     tc_output_block(&blk, out);
+    strvec_free(&cards);
     free(label);
     free(header);
     strvec_free(&olines);

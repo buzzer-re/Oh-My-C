@@ -275,6 +275,8 @@ static json_t *J(const char *s) {
     return j;
 }
 
+static const char *lsp_label(const char *tool) { return !strcmp(tool, "lsp") ? "LSP" : NULL; }
+
 static tc_call_t call(const char *name, const json_t *args, const json_t *result, bool is_error) {
     tc_call_t c = {.name = name, .args = args, .spinner = -1, .elapsed_ms = -1, .cwd = "/work", .term_rows = 50};
     if (result) {
@@ -354,6 +356,33 @@ int main(void) {
         "{\"content\":[{\"type\":\"text\",\"text\":\"bash: -c: line 2: syntax error: unexpected end of file from `if' command on line 1\\n\\nCommand exited with code 2\"}],"
         "\"details\":{\"exitCode\":2,\"wallTimeMs\":14,\"timeoutSeconds\":300}}",
         true);
+    { /* tool commands run inside bash draw as nested cards (tools/tool-commands.ts renderToolCommandDispatch): a sole
+       * executed command's card stands for the whole output (no Output section); otherwise the cards sit between the
+       * command and the Output section, `--help` as one line (captures of omp 19.1.0) */
+        static const struct {
+            const char *fixture, *command, *result;
+        } TC[] = {
+            {"bashtc1", "lsp status", "{\"content\": [{\"type\": \"text\", \"text\": \"No language servers configured for this project\\n\"}], \"details\": {\"wallTimeNoticeEmitted\": false, \"timeoutSeconds\": 300, \"wallTimeMs\": 34.17894000000069, \"toolCommands\": [{\"tool\": \"lsp\", \"mode\": \"execute\", \"exitCode\": 0, \"args\": {\"action\": \"status\"}, \"tier\": \"read\", \"inner\": {\"action\": \"status\", \"success\": true, \"request\": {\"action\": \"status\"}}}]}, \"isError\": false}"},
+            {"bashtc2", "lsp status; lsp --help >/dev/null; echo hi", "{\"content\": [{\"type\": \"text\", \"text\": \"No language servers configured for this project\\nhi\\n\"}], \"details\": {\"wallTimeNoticeEmitted\": false, \"timeoutSeconds\": 300, \"wallTimeMs\": 29.343002999999953, \"toolCommands\": [{\"tool\": \"lsp\", \"mode\": \"execute\", \"exitCode\": 0, \"args\": {\"action\": \"status\"}, \"tier\": \"read\", \"inner\": {\"action\": \"status\", \"success\": true, \"request\": {\"action\": \"status\"}}}, {\"tool\": \"lsp\", \"mode\": \"help\", \"exitCode\": 0}]}, \"isError\": false}"},
+        };
+        for (size_t i = 0; i < ARRAY_LEN(TC); i++) {
+            json_t *a = json_obj();
+            json_set_str(a, "command", TC[i].command);
+            json_t *r = J(TC[i].result);
+            tc_call_t c = call("bash", a, r, false);
+            c.label_of = lsp_label;
+            strvec_t out = {0};
+            tc_render(&c, 120, &out);
+            compare(TC[i].fixture, "\xe2\x95\xad", &out);
+            strvec_free(&out);
+            json_free(a);
+            json_free(r);
+        }
+        CHECK(tc_bash_sole_invocation("lsp status --file 'a b.c'", "lsp") && !tc_bash_sole_invocation("lsp status | cat", "lsp") &&
+                  !tc_bash_sole_invocation("lspx status", "lsp") && !tc_bash_sole_invocation("lsp \"$X\"", "lsp") &&
+                  tc_bash_sole_invocation("lsp '$X'", "lsp") && !tc_bash_sole_invocation("FOO=1 lsp status", "lsp"),
+              "isSoleInvocation");
+    }
     run("write1", "Write:", "write", "{\"path\":\"new.txt\",\"content\":\"alpha\\\\nbeta\"}",
         "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"details\":{}}", false);
     run("todo1", "Todo 3", "todo", "{\"op\":\"init\",\"items\":[\"first task\",\"second task\",\"third\"]}",

@@ -952,6 +952,8 @@ struct toolcmd_run {
     VEC(int) finished;
     void (*on_change)(void *ud);
     void *on_change_ud;
+    int change_calls; /* on_change calls in flight (detach waits them out: their ud dies with the bash call) */
+    pthread_cond_t change_done;
     pthread_mutex_t mu;
 };
 
@@ -970,6 +972,7 @@ static void run_unref(toolcmd_run_t *r) {
     json_free(r->images);
     free(r->finished.v);
     free(r->tool_call_id);
+    pthread_cond_destroy(&r->change_done);
     pthread_mutex_destroy(&r->mu);
     free(r);
 }
@@ -1076,6 +1079,7 @@ toolcmd_run_t *toolcmd_run_begin(tool_ctx_t *ctx, tool_env_t *env) {
     r->records = json_arr();
     r->images = json_arr();
     pthread_mutex_init(&r->mu, NULL);
+    pthread_cond_init(&r->change_done, NULL);
     pthread_mutex_lock(&g_mu);
     vec_push(&g_runs, r);
     pthread_mutex_unlock(&g_mu);
@@ -1129,6 +1133,8 @@ void toolcmd_run_on_change(toolcmd_run_t *r, void (*fn)(void *ud), void *ud) {
     pthread_mutex_lock(&r->mu);
     r->on_change = fn;
     r->on_change_ud = ud;
+    if (!fn)
+        while (r->change_calls > 0) pthread_cond_wait(&r->change_done, &r->mu);
     pthread_mutex_unlock(&r->mu);
 }
 
@@ -1137,6 +1143,7 @@ void toolcmd_run_detach(toolcmd_run_t *r) {
     pthread_mutex_lock(&r->mu);
     r->live = false;
     r->on_change = NULL;
+    while (r->change_calls > 0) pthread_cond_wait(&r->change_done, &r->mu);
     pthread_mutex_unlock(&r->mu);
 }
 
@@ -1185,8 +1192,13 @@ static void run_set_record(toolcmd_run_t *r, unsigned index, json_t *rec, bool f
     if (finish) vec_push(&r->finished, (int)index);
     void (*fn)(void *) = r->live ? r->on_change : NULL;
     void *ud = r->on_change_ud;
+    if (fn) r->change_calls++;
     pthread_mutex_unlock(&r->mu);
-    if (fn) fn(ud);
+    if (!fn) return;
+    fn(ud);
+    pthread_mutex_lock(&r->mu);
+    if (--r->change_calls == 0) pthread_cond_broadcast(&r->change_done);
+    pthread_mutex_unlock(&r->mu);
 }
 
 static void dispatch_progress(tool_ctx_t *ctx, const tool_result_t *partial) {

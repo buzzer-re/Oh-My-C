@@ -78,6 +78,12 @@ Every dispatch is recorded on the bash result as `details.toolCommands` (`{tool,
 tier?, inner?}`, in invocation order). Without `bash` (or with `tools.commands` off) every tool is an ordinary tool, and
 `resolve`/`reject` (while `ast_edit` is active) and `propose` (in plan mode) are presented top-level. A direct call by a
 mounted command's exact name still runs it. Doc topics moved to `help://<tool>/<topic>` (`read`, with line selectors).
+Every live frame of the call carries the dispatches so far (`toolcmd_run_on_change` re-emits the frame when one
+starts, progresses or finishes), and the bash card (`ui/tools/tc_shell.c`, port of tui `tools/tool-commands.ts`) draws
+each as a nested card between the command and the Output section: an executed command through the wrapped tool's own
+renderer (its parsed args as the call, `inner` as the details; the generic card without args), `--help` as one
+`✔ <label>: --help` row, the label the mounted tool's (else `server/tool` for MCP names). A call that is one simple
+invocation of one executed command (`isSoleInvocation`) gives that card the whole output and drops the Output section.
 
 **How a call reaches omc.** omp runs its own shell engine with the session commands built in; omc runs the real
 `bash` (AGENTS.md). Each `bash` call that has tool commands begins a run (`toolcmd_run_begin`): the persistent shell
@@ -101,8 +107,7 @@ catalog (`tools.commandDocs`: `inline`/`builtins`/`catalog`, `tools.commandInlin
 (`coding/xdnotice.c`) the UI shows `toolCommands: Tool commands: added …; removed …` (`tools.commandNotices`) and the
 next user prompt carries a hidden `tool-command-mount-notice` naming the net change the model has not seen yet.
 
-Not ported: the eval shell bridge's tool commands (omp `eval/shell-bridge.ts`), nested tool-command cards inside the
-bash card (the TUI renders the bash card only; `toolcmd_run_on_change` is the hook for live frames).
+Not ported: the eval shell bridge's tool commands (omp `eval/shell-bridge.ts`).
 
 ## Internal URLs
 
