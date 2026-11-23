@@ -255,6 +255,7 @@ static bool clamp_message(json_t *msg, clamp_t *s) {
     json_t *c = input_content(msg);
     if (!c || !needs_drop(s)) return false;
     bool changed = false;
+    int dropped = 0;
     for (size_t i = 0; i < json_len(c);) {
         json_t *b = json_at(c, i);
         if (is_image(b) && needs_drop(s)) {
@@ -264,13 +265,21 @@ static bool clamp_message(json_t *msg, clamp_t *s) {
                 if (s->drops > 0) s->drops--;
                 s->inline_bytes -= bytes;
                 changed = true;
+                dropped++;
                 continue;
             }
         }
         i++;
     }
-    if (changed && json_len(c) == 0) json_push(c, text_block(AI_IMAGE_OMISSION_TEXT));
-    return changed;
+    if (!changed) return false;
+    if (json_len(c) == 0) {
+        json_push(c, text_block(AI_IMAGE_OMISSION_TEXT));
+    } else { /* kept text must not read as the whole result: say images were there (omp 3967d6bcc6) */
+        char *t = xasprintf("[%d image%s omitted: provider image limit]", dropped, dropped == 1 ? "" : "s");
+        json_push(c, text_block(t));
+        free(t);
+    }
+    return true;
 }
 
 static int count_images(const json_t *messages) {
