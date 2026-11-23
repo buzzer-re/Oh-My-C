@@ -478,6 +478,14 @@ if command -v python3 >/dev/null; then
     check "eval wait number" "TypeError: wait() takes agent or completion handles; it is not a sleep."  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"wait(3)"}'
     # sh(): a command run to completion on the eval session's shell; a failure raises ShellError (omp d013a0a269)
     check "eval sh"        "Tool said: 'hi\\n/tmp\\n' 3 'bad\\n'"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"x = sh(\"echo hi; pwd\", cwd=\"/tmp\")\ntry:\n    sh(\"echo bad; exit 3\")\nexcept ShellError as e:\n    print(repr(x), e.exit_code, repr(e.output))"}'
+    # the bridge (omp 3967d6bcc6, 6b4d6f3122): a FREEFORM tool takes its raw text (`tool.apply_patch(...)` is edit's
+    # wire alias), a program's `:raw` read comes back whole, checkpoint/rewind/yield are refused
+    check "eval freeform"  $'Tool said: [ev-ap.txt]\n1:hi'  env PI_EDIT_VARIANT=apply_patch "$B" --model mock/mock-1 --no-session -p 'call:eval:{"language":"py","code":"print(await tool.apply_patch(\"*** Begin Patch\\n*** Add File: ev-ap.txt\\n+hi\\n*** End Patch\"))"}'
+    seq 4000 > ev-big.txt
+    check "eval raw whole" "Tool said: 4000 4000"  "$B" --model mock/mock-1 --no-session -p 'call:eval:{"language":"py","code":"x = await tool.read({\"path\":\"ev-big.txt:raw\"})\nprint(len(x.splitlines()), len(read(\"ev-big.txt\").splitlines()))"}'
+    printf "checkpoint:\n  enabled: true\n" > "$T/agent/config.yml"
+    check "eval no checkpoint" 'ERR `checkpoint` cannot run through the eval bridge; call the direct `checkpoint` tool.'  "$B" --model mock/mock-1 --no-session -p 'call:eval:{"language":"py","code":"try:\n    await tool.checkpoint({\"goal\":\"g\"})\nexcept Exception as e:\n    print(\"ERR\", e)"}'
+    rm -f "$T/agent/config.yml" ev-big.txt ev-ap.txt
     # a kernel that exits during startup says why: its exit code and the end of its stderr (omp af92dbc0b2)
     printf '#!/bin/sh\necho "no module named boom" >&2\nexit 3\n' > "$T/fakepy" && chmod +x "$T/fakepy"
     printf "python:\n  interpreter: $T/fakepy\n" > "$T/agent/config.yml"

@@ -36,6 +36,8 @@ typedef struct tool_ctx {
     void (*update)(struct tool_ctx *ctx, const tool_result_t *partial);
     void *app; /* application context (coding-agent session) */
     const char *intent; /* the call's `i` intent as the model wrote it (trimmed; may be NULL) */
+    /* a program (eval's tool bridge) parses the result: `:raw` reads come back whole (omp context.programmatic) */
+    bool programmatic;
 } tool_ctx_t;
 
 struct agent_tool {

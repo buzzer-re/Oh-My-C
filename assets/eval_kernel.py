@@ -241,18 +241,30 @@ def env(key=None, value=None):
     return os.environ.get(key)
 
 
+def _read_through_tool(path, offset, limit):
+    if limit is not None and limit <= 0:
+        return ""
+    # `:raw` reads come back whole through the bridge: no row prefixes, pages or cut lines.
+    # Web URLs keep their reader text; `:raw` there means the original HTML.
+    if not re.match(r"https?://", path, re.IGNORECASE) and not re.search(r":raw(?::|$)", path, re.IGNORECASE):
+        path = f"{path}:raw"
+    sel = path
+    if offset > 1 or limit is not None:
+        start = max(1, offset)
+        sel = f"{path}:{start}-" if limit is None else f"{path}:{start}-{start + limit - 1}"
+    return _tool_text(_bridge_call("read", {"path": sel}))
+
+
 def read(path, offset=1, limit=None):
     """Read file or read-tool URI contents. offset/limit are 1-indexed lines."""
     m = _URL_RE.match(path) if isinstance(path, str) else None
     if m and m.group(1).lower() != "local":
-        if limit is not None and limit <= 0:
-            return ""
-        sel = path
-        if offset > 1 or limit is not None:
-            start = max(1, offset)
-            sel = f"{path}:{start}-" if limit is None else f"{path}:{start}-{start + limit - 1}"
-        return _tool_text(_bridge_call("read", {"path": sel}))
-    data = _resolve_path(path).read_text(encoding="utf-8")
+        return _read_through_tool(path, offset, limit)
+    p = _resolve_path(path)
+    if p.is_dir():
+        # The read tool renders the listing.
+        return _read_through_tool(str(p), offset, limit)
+    data = p.read_text(encoding="utf-8")
     if offset > 1 or limit is not None:
         lines = data.splitlines(keepends=True)
         start = max(0, offset - 1)
@@ -261,10 +273,14 @@ def read(path, offset=1, limit=None):
 
 
 def write(path, content):
-    """Write file contents (create parents)."""
+    """Write file contents (create parents). `scheme://` paths without an on-disk root go through the write tool."""
+    m = _URL_RE.match(path) if isinstance(path, str) else None
+    if m and m.group(1).lower() != "local":
+        _bridge_call("write", {"path": path, "content": content})
+        return path
     p = _resolve_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
+    p.write_text(content, encoding="utf-8", newline="")
     return p
 
 
@@ -375,13 +391,17 @@ class _ToolCallable:
         return f"<tool.{self._name}>"
 
     async def __call__(self, args=None, /, **kwargs):
-        if args is None:
-            merged = {}
+        if isinstance(args, str) and not kwargs:
+            # FREEFORM tools (e.g. `edit`) take their raw text; the host maps it to `{input}`.
+            merged = args
+        elif args is None:
+            merged = dict(kwargs)
         elif isinstance(args, dict):
-            merged = dict(args)
+            merged = {**args, **kwargs}
         else:
-            raise TypeError(f"tool.{self._name}(...) expects a dict of arguments (got {type(args).__name__})")
-        merged.update(kwargs)
+            raise TypeError(
+                f"tool.{self._name}(...) expects a dict of arguments or a FREEFORM tool's raw text (got {type(args).__name__})"
+            )
         return _tool_text(await asyncio.to_thread(_bridge_call, self._name, merged))
 
 

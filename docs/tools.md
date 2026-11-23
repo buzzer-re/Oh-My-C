@@ -266,7 +266,7 @@ job widgets, so `/jobs full` is the only trigger. Requests are off-transcript `m
 ## Eval kernel protocol (`tools/eval.c`, `assets/eval_kernel.py`)
 
 The kernel is a persistent Python process started as `python3 -u -c <embedded source>` (interpreter
-from `python.interpreter`, else `python3`/`python` on `PATH`). At startup it keeps private
+from `python.interpreter`, else `python3`/`python` on `PATH`; each candidate must be Python 3.9+). At startup it keeps private
 duplicates of its stdin/stdout pipes for the protocol, points fd 0 at `/dev/null` and fd 1 at fd 2.
 Anything user code, C extensions or subprocesses print lands on the stderr pipe, which the host
 captures as raw cell output, so stray output can never corrupt the framing.
@@ -284,7 +284,12 @@ host → kernel   {"type":"exec","id":N,"code":"…"}
 
 - A host reader thread owns the read side. Each bridge `call` runs on its own worker thread, so
   concurrent helper calls (`asyncio.gather` over `judge()`) never block each other.
-- `tool.<name>(...)` calls session tools. Session helpers go through `coding/evalhost.c`:
+- `tool.<name>(...)` calls session tools (also edit's wire alias `tool.apply_patch`); a FREEFORM tool (edit in
+  hashline/apply_patch/sloppy/magic mode) takes its raw text as `{input}`. Bridged calls are programmatic
+  (`tool_ctx_t.programmatic`): a `:raw` read comes back whole, and `read()` asks delegated URLs for `:raw`.
+  `checkpoint`, `rewind` and `yield` are left out of the bridge's tool names and refused (they need direct tool
+  events). Every session tool but an MCP one pauses the cell deadline while it runs. Session helpers go through
+  `coding/evalhost.c`:
   `completion()` handles (default/smol/slow tiers, `schema` via a forced `respond` tool) with
   `wait()`/`.status`/`.cancel()`, `judge()` typed choice/bool/score answers (text judge with keyword
   prompts, `coding/judgment.c`, or native judgment APIs), `judge_batch()` host-owned async batches,
@@ -294,7 +299,9 @@ host → kernel   {"type":"exec","id":N,"code":"…"}
   (`tools/eval.c` `__shell__`, apart from the bash tool's shell): output capped at 16 MiB, a non-zero
   exit or timeout raises `ShellError`.
 - Interrupts (timeout or abort) send SIGINT and cancel the cell's in-flight calls. A kernel that
-  doesn't answer within 5 s is killed. Waiting on helpers pauses the cell deadline.
+  doesn't answer within 5 s is killed. Waiting on helpers pauses the cell deadline. The "Kernel restarted" notice is
+  keyed by session id: a session switched away from (its kernel released) and back reports the loss; only `reset`
+  forgets it.
 
 omp's JS/Bun eval runtime and the `agent()`/`workpool()`/browser preludes are not implemented and are
 not advertised in the description.

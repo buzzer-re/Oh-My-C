@@ -525,14 +525,23 @@ void tools_finalize(agent_t *a, const strvec_t *requested) {
     bool read_active = false;
     json_t *names = json_arr();
     for (size_t i = 0; i < a->tools.n; i++) {
-        json_push_str(names, a->tools.v[i]->name);
+        const char *n = a->tools.v[i]->name;
+        /* checkpoint/rewind/yield need direct tool events: omitted from (and refused by) the bridge */
+        if (!str_eq(n, "checkpoint") && !str_eq(n, "rewind") && !str_eq(n, "yield")) json_push_str(names, n);
+        /* edit's unambiguous wire alias */
+        if (str_eq(n, "edit") && a->tools.v[i]->ud && str_eq(((tool_env_t *)a->tools.v[i]->ud)->edit_mode, "apply_patch")) {
+            bool taken = false; /* exact registered names shadow aliases */
+            for (size_t j = 0; j < a->all_tools.n && !taken; j++) taken = str_eq(a->all_tools.v[j]->name, "apply_patch");
+            if (!taken) json_push_str(names, "apply_patch");
+        }
         if (!strcmp(a->tools.v[i]->name, "eval")) ev = a->tools.v[i];
         if (!strcmp(a->tools.v[i]->name, "write")) wr = a->tools.v[i];
         if (!strcmp(a->tools.v[i]->name, "read")) read_active = true;
     }
     if (wr) write_set_read_active(wr, read_active);
     for (size_t i = 0; i < a->all_tools.n; i++)
-        if (a->all_tools.v[i]->mounted) json_push_str(names, a->all_tools.v[i]->name);
+        if (a->all_tools.v[i]->mounted && !str_eq(a->all_tools.v[i]->name, "checkpoint") && !str_eq(a->all_tools.v[i]->name, "rewind"))
+            json_push_str(names, a->all_tools.v[i]->name);
     if (ev) eval_set_tool_names(ev, names);
     json_free(names);
     pthread_mutex_unlock(&a->mu);

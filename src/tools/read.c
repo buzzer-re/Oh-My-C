@@ -1282,6 +1282,7 @@ static bool read_pdf_pages(tool_env_t *env, const char *path, tool_result_t *out
 }
 
 static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out);
+static bool accepts_line_selector(const char *path);
 
 static int read_ssh(tool_env_t *env, const char *path, tool_result_t *out) {
     selector_t sel;
@@ -1862,6 +1863,28 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
             return 0;
         }
     }
+    /* eval's read() asks every delegated URL for `:raw`; a scheme that takes no selectors (mcp://) reads whole */
+    char *peeled = NULL;
+    if (ctx && ctx->programmatic && strlen(path) > 4 && !strcasecmp(path + strlen(path) - 4, ":raw") && strstr(path, "://")) {
+        char *bare = xstrndup(path, strlen(path) - 4);
+        if (!accepts_line_selector(bare)) {
+            peeled = bare;
+            path = peeled;
+        } else {
+            free(bare);
+        }
+    }
+    if (peeled) {
+        json_t *a2 = json_clone(args);
+        json_set_str(a2, "path", peeled);
+        int rc = read_execute_inner(self, &(tool_ctx_t){.agent = ctx->agent, .tool_call_id = ctx->tool_call_id,
+                                                        .tool_name = ctx->tool_name, .cancel = ctx->cancel, .app = ctx->app,
+                                                        .programmatic = false},
+                                    a2, out);
+        json_free(a2);
+        free(peeled);
+        return rc;
+    }
     if (vurl_is(path)) return vurl_read(env, path, out);
     if (!strncasecmp(path, "cfg:/", 5)) return read_cfg(env, path, out);
     if (iurl_read(env, path, out)) return 0;
@@ -1954,7 +1977,9 @@ static int read_path(tool_env_t *env, tool_ctx_t *ctx, const char *path, const l
     }
     /* located files are often large session storage (spilled tool output): a bare `:raw` read inlines one only below
      * the budget; bigger ones page with ranges */
-    if (loc && !loc->unbounded && sel.raw && !sel.ranges.n && !sel.img && !sel.conflicts && st.st_size > READ_MAX_BYTES) {
+    bool programmatic = ctx && ctx->programmatic;
+    if (loc && !loc->unbounded && !programmatic && sel.raw && !sel.ranges.n && !sel.img && !sel.conflicts &&
+        st.st_size > READ_MAX_BYTES) {
         char *notice = located_notice(loc->url, abs, (int64_t)st.st_size, true);
         tool_result_text(out, notice);
         free(notice);
@@ -2022,9 +2047,9 @@ static int read_path(tool_env_t *env, tool_ctx_t *ctx, const char *path, const l
         out->details = json_obj();
         json_set_str(out->details, "resolvedPath", abs);
         json_set_int(out->details, "conflictCount", count);
-    } else if (loc && loc->unbounded) {
+    } else if ((loc && loc->unbounded) || (programmatic && sel.raw)) {
         /* unbounded schemes (instruction documents) read whole through the in-memory builder: no summary, no result
-         * limits, the BOM stripped */
+         * limits, the BOM stripped; so does a program's `:raw` read (a page or a cut line would corrupt what it parses) */
         size_t bom = len >= 3 && !memcmp(data, "\xEF\xBB\xBF", 3) ? 3 : 0;
         sel.resource = sel.immutable = sel.unlimited = sel.builder_details = true;
         sel.entity = "file";
