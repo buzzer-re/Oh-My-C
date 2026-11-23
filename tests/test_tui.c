@@ -284,6 +284,10 @@ static void test_ansi(void) {
     CHECK(str_starts(t, "\x1b[1m"));
     free(plain);
     free(t);
+    /* a tinted row keeps its background under the ellipsis (omp 559afe1a70) */
+    t = tui_truncate_to_width("\x1b[48;2;1;2;3mtinted row text\x1b[49m", 6, NULL);
+    CHECK(str_ends(t, "\x1b[0m\x1b[48;2;1;2;3m\xe2\x80\xa6\x1b[49m"));
+    free(t);
     /* wide chars never split */
     t = tui_truncate_to_width("\xe6\x97\xa5\xe6\x97\xa5\xe6\x97\xa5", 5, "");
     CHECK(tui_visible_width(t) == 4);
