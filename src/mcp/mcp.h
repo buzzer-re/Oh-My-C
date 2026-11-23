@@ -149,6 +149,9 @@ mcp_manager_t *mcp_default_manager(void);
  * best-matching URI template). Returns 0 with owned *text (text parts joined by "\n---\n") and
  * *server, or -1 with an owned *err listing the available resources. */
 int mcp_read_resource(mcp_manager_t *m, const char *uri, char **text, char **server, char **err);
+/* the same; with `bytes` a lone binary part comes back decoded (*bytes owned, *mime owned, *text NULL) */
+int mcp_read_resource_ex(mcp_manager_t *m, const char *uri, char **text, char **server, unsigned char **bytes, size_t *nbytes,
+                         char **mime, char **err);
 
 /* prompt-args.ts mapPromptArguments over the tokens typed after a prompt command (owned object) */
 json_t *mcp_map_prompt_arguments(const json_t *declared, const strvec_t *tokens);

@@ -487,6 +487,11 @@ printf '{"mcpServers":{"bad":{"command":"sh","args":["-c","read x; exit 3"]}}}' 
 check "mcp exit status"  'MCP server "bad" failed to connect: MCP subprocess exited with code 3 before responding'  env OMC_CODING_AGENT_DIR="$T/mcpexit" "$B" --model mock/mock-1 --no-session -p "say:x"
 grep -q "Mock MCP server instructions" "$T/req.jsonl" && echo "   ok  mcp instructions in prompt" || { echo "   FAIL mcp instructions"; fail=1; }
 rm -f "$T/agent/mcp.json"
+# mcp:// byte resources read like files under the URL (omp 578b47d077): images by content, other bytes as binary files
+printf '{"mcpServers":{"mockmcp":{"command":"python3","args":["-I","%s","--full"]}}}' "$ROOT/tests/e2e/mock_mcp.py" > "$T/agent/mcp.json"
+check "mcp blob image" 'read `mcp://mem://blob/logo.png?q=<question>`'  "$B" --model mock/mock-1 --no-session -p "read:mcp://mem://blob/logo.png"
+check "mcp blob binary" "Tool said: [Cannot read binary file 'mcp://mem://blob/data' (6B); not valid UTF-8 text. Use ':raw' to read bytes verbatim.]"  "$B" --model mock/mock-1 --no-session -p "read:mcp://mem://blob/data"
+rm -f "$T/agent/mcp.json"
 # MCP OAuth: discovery -> dynamic registration -> PKCE code (curl plays the browser) -> bearer token
 OPORT=$((PORT + 1)); python3 -I "$ROOT/tests/e2e/mock_mcp_oauth.py" $OPORT & OPID=$!
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$OPORT) 2>/dev/null && break; sleep 0.1; done

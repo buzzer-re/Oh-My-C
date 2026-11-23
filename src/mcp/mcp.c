@@ -2285,6 +2285,12 @@ mcp_manager_t *mcp_default_manager(void) {
 }
 
 int mcp_read_resource(mcp_manager_t *m, const char *uri, char **text, char **server, char **err) {
+    return mcp_read_resource_ex(m, uri, text, server, NULL, NULL, NULL, err);
+}
+
+int mcp_read_resource_ex(mcp_manager_t *m, const char *uri, char **text, char **server, unsigned char **bytes, size_t *nbytes,
+                         char **mime, char **err) {
+    if (bytes) *bytes = NULL;
     *text = NULL;
     *server = NULL;
     *err = NULL;
@@ -2351,6 +2357,25 @@ int mcp_read_resource(mcp_manager_t *m, const char *uri, char **text, char **ser
     sb_t b = SB_INIT;
     int parts = 0;
     json_t *contents = json_get(res, "contents"), *x;
+    /* a lone binary part is the resource's bytes, typed by the server's MIME type (omp 578b47d077) */
+    json_t *only = json_len(contents) == 1 ? json_at(contents, 0) : NULL;
+    if (bytes && only && !json_get_str(only, "text") && json_get_str(only, "blob") && *json_get_str(only, "blob")) {
+        const char *blob = json_get_str(only, "blob");
+        size_t n = 0;
+        unsigned char *dec = base64_decode(blob, strlen(blob), &n);
+        if (dec) {
+            *bytes = dec;
+            *nbytes = n;
+            const char *mt = json_get_str(only, "mimeType");
+            *mime = xstrdup(mt ? mt : "application/octet-stream");
+            *text = NULL;
+            *server = xstrdup(target->name);
+            json_free(res);
+            sb_free(&b);
+            snap_free(&v);
+            return 0;
+        }
+    }
     json_arr_foreach(contents, i, x) {
         const char *t = json_get_str(x, "text");
         const char *blob = json_get_str(x, "blob");

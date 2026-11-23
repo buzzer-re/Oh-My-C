@@ -110,12 +110,20 @@ for line in sys.stdin:
         else:
             res = {"content": [{"type": "text", "text": "mcp echo: " + msg["params"]["arguments"].get("text", "")}]}
     elif FULL and method == "resources/list":
-        res = {"resources": [{"uri": "mem://notes", "name": "notes", "description": "Mock notes", "mimeType": "text/plain"}]}
+        res = {"resources": [{"uri": "mem://notes", "name": "notes", "description": "Mock notes", "mimeType": "text/plain"},
+                             {"uri": "mem://blob/logo.png", "name": "logo", "mimeType": "image/png"},
+                             {"uri": "mem://blob/data", "name": "data", "mimeType": "application/octet-stream"}]}
     elif FULL and method == "resources/templates/list":
         res = {"resourceTemplates": [{"uriTemplate": "mem://item/{id}", "name": "item", "description": "One item"}]}
     elif FULL and method == "resources/read":
         uri = msg["params"]["uri"]
-        res = {"contents": [{"uri": uri, "mimeType": "text/plain", "text": "contents of " + uri}]}
+        if uri == "mem://blob/logo.png":  # a lone binary part: the resource's bytes (a 1x1 PNG)
+            png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+            res = {"contents": [{"uri": uri, "mimeType": "image/png", "blob": png}]}
+        elif uri == "mem://blob/data":
+            res = {"contents": [{"uri": uri, "mimeType": "application/octet-stream", "blob": "AAECAwQF"}]}
+        else:
+            res = {"contents": [{"uri": uri, "mimeType": "text/plain", "text": "contents of " + uri}]}
     elif FULL and method in ("resources/subscribe", "resources/unsubscribe"):
         res = {}
     else:

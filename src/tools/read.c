@@ -1706,7 +1706,106 @@ done:
 }
 
 /* mcp://<resource-uri>: read a resource from the connected MCP server that advertises it */
-static int read_mcp(tool_env_t *env, const char *path, tool_result_t *out) {
+static int read_path(tool_env_t *env, tool_ctx_t *ctx, const char *path, const located_t *loc, tool_result_t *out);
+
+/* decodeURIComponent: owned, or NULL on malformed percent-encoding */
+static char *pct_decode_dup(const char *s) {
+    sb_t b = SB_INIT;
+    for (const char *p = s; *p; p++) {
+        if (*p != '%') {
+            sb_putc(&b, *p);
+            continue;
+        }
+        if (!isxdigit((unsigned char)p[1]) || !isxdigit((unsigned char)p[2])) {
+            sb_free(&b);
+            return NULL;
+        }
+        char hx[3] = {p[1], p[2], 0};
+        sb_putc(&b, (char)strtol(hx, NULL, 16));
+        p += 2;
+    }
+    char *r = sb_detach(&b);
+    if (!utf8_valid(r, strlen(r))) {
+        free(r);
+        return NULL;
+    }
+    return r;
+}
+
+/* writeResourceBackingFile (omp 578b47d077): a byte resource as a stable file named after the URL's last segment, with the
+ * extension its MIME type implies when the name has none, so `read` handles it like any other file. Owned path or NULL. */
+static char *resource_backing_file(const char *url, const unsigned char *bytes, size_t n, const char *mime) {
+    static const char *const ext_by_mime[][2] = {
+        {"application/pdf", ".pdf"},
+        {"application/x-pdf", ".pdf"},
+        {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"},
+        {"application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx"},
+        {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"},
+        {"application/epub+zip", ".epub"},
+        {"application/zip", ".zip"},
+        {"application/x-zip-compressed", ".zip"},
+        {"application/x-tar", ".tar"},
+        {"application/gzip", ".tar.gz"},
+        {"application/x-gzip", ".tar.gz"},
+        {"application/x-ipynb+json", ".ipynb"},
+    };
+    size_t ul = strcspn(url, "?#");
+    char *head = xstrndup(url, ul);
+    char *name = NULL;
+    for (char *p = head + ul; p > head;) { /* the last non-empty `/` segment of the whole string */
+        char *e = p;
+        while (p > head && p[-1] != '/') p--;
+        if (e > p) {
+            name = xstrndup(p, (size_t)(e - p));
+            break;
+        }
+        if (p > head) p--;
+    }
+    free(head);
+    if (name) {
+        char *dec = pct_decode_dup(name);
+        if (dec) {
+            free(name);
+            name = dec;
+        }
+        for (unsigned char *q = (unsigned char *)name; *q; q++)
+            if (strchr("\\/:*?\"<>|", *q) || *q < 0x20) *q = '_';
+    }
+    if (!name || !*name || !strcmp(name, ".") || !strcmp(name, "..")) {
+        free(name);
+        name = xstrdup("resource");
+    }
+    char *mt = str_lower(mime ? mime : "");
+    mt[strcspn(mt, ";")] = 0;
+    char *mtt = str_trim(mt);
+    free(mt);
+    if (!strrchr(name, '.') || strrchr(name, '.') == name)
+        for (size_t i = 0; i < ARRAY_LEN(ext_by_mime); i++)
+            if (!strcmp(mtt, ext_by_mime[i][0])) {
+                char *nn = xasprintf("%s%s", name, ext_by_mime[i][1]);
+                free(name);
+                name = nn;
+                break;
+            }
+    free(mtt);
+    const char *tmpd = getenv("TMPDIR");
+    char *root = realpath(tmpd && *tmpd ? tmpd : "/tmp", NULL);
+    if (!root) root = xstrdup(tmpd && *tmpd ? tmpd : "/tmp");
+    char *dir = xasprintf("%s/omc-resource/%llx", root, (unsigned long long)hash_fnv1a(url, strlen(url)));
+    fs_mkdir_p(dir, 0700);
+    char *file = path_join(dir, name);
+    bool ok = fs_write(file, bytes, n) == 0;
+    free(root);
+    free(dir);
+    free(name);
+    if (!ok) {
+        free(file);
+        return NULL;
+    }
+    return file;
+}
+
+static int read_mcp(tool_env_t *env, tool_ctx_t *ctx, const char *path, tool_result_t *out) {
     const char *rest = path + strlen("mcp://");
     char *uri = str_trim(rest);
     size_t ul = strlen(uri);
@@ -1716,9 +1815,34 @@ static int read_mcp(tool_env_t *env, const char *path, tool_result_t *out) {
         free(uri);
         return 0;
     }
-    char *text = NULL, *server = NULL, *err = NULL;
-    if (mcp_read_resource(mcp_default_manager(), uri, &text, &server, &err) != 0) {
+    char *text = NULL, *server = NULL, *err = NULL, *mime = NULL;
+    unsigned char *bytes = NULL;
+    size_t nbytes = 0;
+    if (mcp_read_resource_ex(mcp_default_manager(), uri, &text, &server, &bytes, &nbytes, &mime, &err) != 0) {
         tool_result_error(out, "%s", err ? err : "MCP resource read failed");
+    } else if (bytes) {
+        /* bytes take the file pipeline under the URL's identity: images and documents by their content and type,
+         * anything else as a binary file (`:raw` reads it verbatim) */
+        char *backing = resource_backing_file(path, bytes, nbytes, mime);
+        if (!backing) {
+            tool_result_error(out, "Cannot store the MCP resource bytes of %s", path);
+        } else {
+            located_t loc = {.url = (char *)path, .immutable = true};
+            read_path(env, ctx, backing, &loc, out);
+            if (!out->is_error) {
+                if (!out->details) out->details = json_obj();
+                json_t *meta = json_get_obj(out->details, "meta");
+                if (!meta) {
+                    meta = json_obj();
+                    json_set(out->details, "meta", meta);
+                }
+                json_t *src = json_obj();
+                json_set_str(src, "type", "internal");
+                json_set_str(src, "value", path);
+                json_set(meta, "source", src);
+            }
+            free(backing);
+        }
     } else {
         tool_result_text(out, text);
         out->details = json_obj();
@@ -1728,6 +1852,8 @@ static int read_mcp(tool_env_t *env, const char *path, tool_result_t *out) {
     free(text);
     free(server);
     free(err);
+    free(mime);
+    free(bytes);
     free(uri);
     return 0;
 }
@@ -1971,7 +2097,7 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
     if (!strncasecmp(path, "cfg:/", 5)) return read_cfg(env, path, out);
     if (iurl_read(env, path, out)) return 0;
     if (str_starts(path, "omc://")) return read_omc_docs(env, path, out);
-    if (str_starts(path, "mcp://")) return read_mcp(env, path, out);
+    if (str_starts(path, "mcp://")) return read_mcp(env, ctx, path, out);
     if (str_starts(path, "rule://")) return read_rule(env, path, out);
     char *uerr = NULL;
     char *internal = tool_resolve_internal_url(env, path, &uerr);
