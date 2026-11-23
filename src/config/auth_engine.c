@@ -1076,6 +1076,9 @@ int auth_after_exchange(const char *hook, const actx_t *c, const char *phase, js
     if (str_eq(hook, "muse-code-key")) return muse_code_key(c, *cred, err);
     if (str_eq(hook, "factory-droid-region")) return factory_region(c, phase, cred, raw, stored, err);
     if (str_eq(hook, "gitlab-duo-clear-cache")) return 0; /* omc keeps no GitLab Duo direct-access cache */
+    /* devinIdentityHook (omp 8369d4772d) reads email / user id / organization from the Devin usage provider's
+     * GetUserStatus call; omc has no Devin usage provider, so the login is stored the way omp stores an unidentified one */
+    if (str_eq(hook, "devin-identity")) return 0;
     *err = xasprintf("auth rules reference unknown after-exchange hook \"%s\"", hook);
     return -1;
 }
