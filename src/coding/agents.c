@@ -1881,6 +1881,13 @@ char *agents_locate_output(const char *id) {
     free(want);
     return res;
 }
+/* `!rawContent.trim()` */
+static bool blank_text(const char *s) {
+    for (; s && *s; s++)
+        if (!isspace((unsigned char)*s)) return false;
+    return true;
+}
+
 
 char *agents_read_output(const char *id_and_path, char **err) {
     *err = NULL;
@@ -1903,7 +1910,7 @@ char *agents_read_output(const char *id_and_path, char **err) {
             if (!g_refs.v[i]->is_main) sb_appendf(&b, "%s%s", k++ ? ", " : "", g_refs.v[i]->id);
         *err = b.len ? xasprintf("Not found: %s\nDid you mean: %s", id, sb_cstr(&b)) : xasprintf("Not found: %s\nList agents with history://", id);
         sb_free(&b);
-    } else if (r->has_output && !(r->running && !path)) {
+    } else if (r->has_output && !(r->running && !path) && (path || !blank_text(r->output))) {
         res = path ? json_path_extract(r->output, path, err) : xstrdup(r->output);
     } else if (r->has_output && r->running) {
         char *age = fmt_duration(now_ms() - r->published_at);
@@ -1913,9 +1920,12 @@ char *agents_read_output(const char *id_and_path, char **err) {
         *err = xasprintf("Output %s is not published yet (status: %s); read agent://%s for its progress.", r->id,
                          r->running ? "running" : "idle", r->id);
     } else {
+        /* a run that failed or was cancelled can publish an empty output: a blank read would pass for success, so it
+         * shows what the agent did instead */
         json_t *c = json_obj();
         json_set_str(c, "id", r->id);
         json_set_str(c, "status", r->running ? "running" : r->aborted ? "aborted" : "idle");
+        json_set_bool(c, "publishedEmpty", r->has_output && !r->running);
         json_set(c, "sections", json_arr());
         char *lt = last_text_of(ref_messages(r));
         if (lt) json_set_str(c, "lastText", lt);

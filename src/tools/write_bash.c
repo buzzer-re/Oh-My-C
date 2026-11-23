@@ -1190,7 +1190,13 @@ static const char *real_bash_version(void) {
     return g_bash_ver[0] ? g_bash_ver : NULL;
 }
 
-char *bash_tool_description(bool has_eval) {
+/* #ptyAvailable: an interactive UI, unless PI_NO_PTY=1 */
+static bool pty_available(const tool_env_t *env) {
+    const char *np = getenv("PI_NO_PTY");
+    return env && (env->ui.form || env->ui.select) && !(np && !strcmp(np, "1"));
+}
+
+char *bash_tool_description(bool has_eval, bool pty_ok) {
     json_t *ctx = json_obj();
     json_set_bool(ctx, "hasEval", has_eval);
     json_set_bool(ctx, "asyncEnabled", settings_bool("async.enabled", true));
@@ -1202,6 +1208,7 @@ char *bash_tool_description(bool has_eval) {
     json_set_str(ctx, "autoBackgroundSeconds", secs);
     free(secs);
     json_set_bool(ctx, "hasLaunch", settings_bool("launch.enabled", true));
+    json_set_bool(ctx, "hasPty", pty_ok || settings_bool("launch.enabled", true));
     /* omp lists its embedded shell's in-process builtins (shellBuiltins); omc runs the system's real bash, which has
      * none, so the line is dropped rather than advertising them */
     json_set(ctx, "builtins", json_arr());
@@ -1239,7 +1246,7 @@ json_t *bash_tool_schema(void) {
 }
 
 agent_tool_t *tool_bash_new(tool_env_t *env) {
-    char *desc = bash_tool_description(python_available());
+    char *desc = bash_tool_description(python_available(), pty_available(env));
     agent_tool_t *t = agent_tool_new("bash", "Bash", desc, bash_tool_schema(), bash_execute);
     t->exclusive = true;
     free(desc);
@@ -1258,12 +1265,17 @@ char *jobs_render_results(const json_t *jobs) {
     return s;
 }
 
-/* Windows a blocking wait gives its first wake before it returns with nothing new; each back-to-back idle wait climbs one
- * rung, so the agent gets its turn back early while work warms up, and a wait loop backs off. */
-static const int64_t WAIT_LADDER_MS[] = {5000, 10000, 30000, 60000, 240000};
-#define WAIT_LADDER_RUNGS 5
+/* Windows a blocking wait gives its first wake before it returns with nothing new. The first idle wait hands the agent its
+ * turn back early while work warms up; a back-to-back idle wait means it has nothing else to do, so it takes the top
+ * window, and keeps taking it while the waits stay back-to-back. The top-level interactive session skips the floor on
+ * job waits: an early return there can only end its turn. A job or service wait's top window stays inside the shortest
+ * (5-minute) prompt-cache lifetime; a reply wait's stretches to the session's known cache lifetime (agentWaitTopMs). */
+static const int64_t WAIT_LADDER_MS[] = {5000, 240000};
+#define WAIT_LADDER_RUNGS 2
+#define WAIT_TOP_MS 240000
+#define WAIT_AGENT_CACHE_MARGIN_MS 60000    /* how long before its cache entry expires a reply wait's top window returns */
+#define WAIT_AGENT_TOP_MAX_MS (30 * 60000) /* longest top window of a reply wait, whatever the cache lifetime */
 #define WAIT_LADDER_RESET_MS 60000 /* a gap this long since the last idle wait means the agent worked in between */
-#define WAIT_NOTICE_RUNG 1         /* one idle wait is patience, a second back-to-back is a loop */
 #define WAIT_SETTLE_WINDOW_MS 1500 /* after one watched job settles, near-simultaneous completions share the result */
 #define WAIT_PROGRESS_INTERVAL_MS 500
 
@@ -1394,29 +1406,36 @@ static json_t *wait_job_rows(jobs_t *jobs, const json_t *done) {
  * snapshot reads as an empty result, and agents then start `sleep` jobs to block for longer). Every result and message
  * starts the next turn of the top-level interactive session (endTurn), so it is told to end its turn; any other caller,
  * to wait again right away with no other tool call, which takes the top rung. */
-static char *elapsed_report(const char *what, int rung, bool end_turn) {
-    char *span = usage_fmt_duration((double)WAIT_LADDER_MS[rung]);
+static char *elapsed_report(const char *what, int64_t span_ms, int64_t top_ms, bool end_turn) {
+    char *span = usage_fmt_duration((double)span_ms);
     char *r;
     if (end_turn) {
         r = xasprintf("%s within %s. Nothing else left? End your turn: results and messages start your next one.", what, span);
     } else {
-        char *top = usage_fmt_duration((double)WAIT_LADDER_MS[WAIT_LADDER_RUNGS - 1]);
-        r = xasprintf("%s within %s. Nothing else left? Call `wait` right away with no other tool call: it then blocks up to %s.",
-                      what, span, top);
+        char *top = usage_fmt_duration((double)top_ms);
+        r = xasprintf("%s within %s. Nothing else left? Call `wait` again right away: it then blocks up to %s.", what, span, top);
         free(top);
     }
     free(span);
     return r;
 }
 
-/* #elapsed: a window ran out with nothing new. Extend the idle streak and, from WAIT_NOTICE_RUNG on, append the reminder. */
-static void wait_elapsed(tool_env_t *env, tool_result_t *out, int rung, int64_t streak_ms) {
-    int64_t waited = streak_ms + WAIT_LADDER_MS[rung];
+/* agentWaitTopMs: a reply wait's top window: the cache lifetime of the caller's latest request less a margin, between
+ * the job top window and WAIT_AGENT_TOP_MAX_MS; the job top window without a known entry */
+static int64_t agent_wait_top_ms(tool_env_t *env) {
+    int64_t ttl = env->prompt_cache_ttl_ms ? env->prompt_cache_ttl_ms(env) : -1;
+    if (ttl <= 0) return WAIT_TOP_MS;
+    return MIN(MAX(ttl - WAIT_AGENT_CACHE_MARGIN_MS, (int64_t)WAIT_TOP_MS), (int64_t)WAIT_AGENT_TOP_MAX_MS);
+}
+
+/* #elapsed: a window ran out with nothing new. Extend the idle streak and, once the streak holds a second wait, append
+ * the reminder (one idle wait is patience; a second back-to-back is a loop). */
+static void wait_elapsed(tool_env_t *env, tool_result_t *out, int64_t window_ms, bool streak, int64_t streak_ms) {
+    int64_t waited = streak_ms + window_ms;
     env->wait_idle = true;
-    env->wait_idle_rung = rung;
     env->wait_idle_ended = mono_ms();
     env->wait_idle_waited_ms = waited;
-    if (rung < WAIT_NOTICE_RUNG) return;
+    if (!streak) return;
     char *span = usage_fmt_duration((double)waited);
     json_t *c = json_obj();
     json_set_str(c, "waited", span);
@@ -1440,7 +1459,7 @@ static void wait_emit_progress(tool_ctx_t *ctx, jobs_t *jobs) {
 
 typedef enum { WAKE_TIMEOUT, WAKE_JOB, WAKE_MESSAGE, WAKE_ABORT, WAKE_STEER, WAKE_UNANSWERABLE, WAKE_SERVICE } wait_wake_t;
 
-static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_result_t *out, bool idle, int idle_rung,
+static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_result_t *out, bool idle,
                     int64_t idle_ended, int64_t idle_waited, const strvec_t *settled_at_entry, int64_t call_started);
 
 static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
@@ -1450,18 +1469,17 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     json_set_str(out->details, "op", "wait");
     /* any wait ends the idle streak unless its window elapses too */
     bool idle = env->wait_idle;
-    int idle_rung = env->wait_idle_rung;
     int64_t idle_ended = env->wait_idle_ended, idle_waited = env->wait_idle_waited_ms;
     env->wait_idle = false;
     /* stamped once at entry, before any wait: a job already settled here was not handed over by this call */
     int64_t call_started = now_ms();
     strvec_t settled_at_entry = jobs_settled_ids(env->jobs);
-    int rc = wait_run(self, ctx, env, out, idle, idle_rung, idle_ended, idle_waited, &settled_at_entry, call_started);
+    int rc = wait_run(self, ctx, env, out, idle, idle_ended, idle_waited, &settled_at_entry, call_started);
     strvec_free(&settled_at_entry);
     return rc;
 }
 
-static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_result_t *out, bool idle, int idle_rung,
+static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_result_t *out, bool idle,
                     int64_t idle_ended, int64_t idle_waited, const strvec_t *settled_at_entry, int64_t call_started) {
     UNUSED(self);
     if (agents_wait_hand_off(env)) {
@@ -1494,13 +1512,12 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
         return 0;
     }
     bool streak = idle && mono_ms() - idle_ended < WAIT_LADDER_RESET_MS;
-    /* a back-to-back wait that is the only call of its turn takes the top rung at once: the agent has nothing else to
-     * do, so an early return would only cost it a request */
-    int rung = !streak ? 0
-               : agent_tool_call_alone(ctx ? ctx->agent : NULL, ctx ? ctx->tool_call_id : NULL) ? WAIT_LADDER_RUNGS - 1
-                                                                                                 : MIN(idle_rung + 1, WAIT_LADDER_RUNGS - 1);
     int64_t streak_ms = streak ? idle_waited : 0;
     bool reply_wait = !running && !service_running;
+    /* the top window for a back-to-back wait, and for the interactive session's job waits */
+    bool top = streak || (out_tui_transcript(env) && running > 0);
+    int64_t top_ms = reply_wait ? agent_wait_top_ms(env) : WAIT_TOP_MS;
+    int64_t span_ms = top ? top_ms : WAIT_LADDER_MS[0];
     /* a wait only these subagents' results can end blocks the caller on them; a bash job or service is another way out */
     strvec_t watched = {0};
     if (running && !service_running) {
@@ -1521,7 +1538,7 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
     strvec_free(&watched);
     agents_replies_free(&replies);
     agents_replies_t no_reply = {0};
-    int64_t t0 = mono_ms(), deadline = t0 + WAIT_LADDER_MS[rung], next_progress = t0;
+    int64_t t0 = mono_ms(), deadline = t0 + span_ms, next_progress = t0;
     wait_wake_t wake;
     volatile sig_atomic_t *cancel = ctx ? ctx->cancel : NULL;
     bool handed = false;
@@ -1589,7 +1606,7 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
         json_t *done = jobs_take_finished(jobs);
         char *txt = job_result_text(jobs, done, settled_at_entry, call_started);
         if (wake == WAKE_TIMEOUT) { /* the timeout line joins the report's text block */
-            char *rep = elapsed_report("No job finished", rung, out_tui_transcript(env));
+            char *rep = elapsed_report("No job finished", span_ms, top_ms, out_tui_transcript(env));
             char *joined = xasprintf("%s\n\n%s", *txt ? txt : "No background jobs.", rep);
             free(rep);
             free(txt);
@@ -1600,16 +1617,16 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
         json_set(out->details, "jobs", wait_job_rows(jobs, done));
         /* a wait where everything is still running carries no new information once a later wait exists */
         out->useless = !json_len(done) && wake != WAKE_SERVICE;
-        if (wake == WAKE_TIMEOUT) wait_elapsed(env, out, rung, streak_ms);
+        if (wake == WAKE_TIMEOUT) wait_elapsed(env, out, span_ms, streak, streak_ms);
         json_free(done);
     } else if (wake == WAKE_TIMEOUT) {
-        char *rep = elapsed_report(reply_wait ? "No reply" : "No service finished", rung, out_tui_transcript(env));
+        char *rep = elapsed_report(reply_wait ? "No reply" : "No service finished", span_ms, top_ms, out_tui_transcript(env));
         if (reply_wait) tool_result_text(out, rep);
         else tool_result_textf(out, "%s Read proc:// for status.", rep);
         free(rep);
         out->useless = true; /* a wait that ran out with nothing to report is an idle poll */
         json_set(out->details, "jobs", json_arr());
-        wait_elapsed(env, out, rung, streak_ms);
+        wait_elapsed(env, out, span_ms, streak, streak_ms);
     } else {
         if (wake == WAKE_UNANSWERABLE) {
             char *why = no_reply_text(&no_reply);
@@ -1627,7 +1644,8 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
 agent_tool_t *tool_wait_new(tool_env_t *env) {
     json_t *dctx = json_obj();
     json_set_bool(dctx, "endTurn", out_tui_transcript(env)); /* the top-level interactive session ends its turn instead */
-    json_set(dctx, "longest", json_str_own(usage_fmt_duration((double)WAIT_LADDER_MS[WAIT_LADDER_RUNGS - 1])));
+    json_set_bool(dctx, "subagent", env->subagent_depth > 0);
+    json_set(dctx, "longest", json_str_own(usage_fmt_duration((double)WAIT_TOP_MS)));
     char *desc = tool_prompt("wait", dctx);
     json_free(dctx);
     json_t *s = json_parse_str("{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}");

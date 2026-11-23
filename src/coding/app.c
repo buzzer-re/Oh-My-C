@@ -1566,6 +1566,16 @@ static json_t *app_eval_bridge(tool_env_t *env, const char *name, const json_t *
     return evalhost_call(a->evalhost, name, args, cell, cancel, err);
 }
 
+/* AgentSession.promptCacheEntry ttlMs (wait.ts agentWaitTopMs): the lifetime of the entry the latest request wrote */
+static int64_t app_prompt_cache_ttl(tool_env_t *env) {
+    app_t *a = env->session;
+    cache_status_t st;
+    if (!a || !cachewarm_status(a, now_ms(), 0, &st)) return -1;
+    int64_t ttl = st.ttl_ms;
+    cache_status_free(&st);
+    return ttl;
+}
+
 static char *app_after_write(tool_env_t *env, const char *abs) {
     app_t *a = env->session;
     /* lsp.enabled gates the writethrough per write (a settings change applies at once) */
@@ -1993,6 +2003,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (!o->subagent) agents_register_main(a);
     a->env->run_subagent = app_run_subagent;
     a->env->plan_mode_active = app_env_plan_mode;
+    a->env->prompt_cache_ttl_ms = app_prompt_cache_ttl;
     a->env->judge = app_tool_judge;
     a->env->active_model = app_tool_active_model;
     a->evalhost = evalhost_new(a);

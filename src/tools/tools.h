@@ -133,6 +133,8 @@ typedef struct tool_env {
     const char *delegation_bias; /* model delegation bias ("eager"/"balanced"/"restrained"/"gated"; static) */
     void *session;             /* app session (for task tool) */
     bool (*plan_mode_active)(struct tool_env *env); /* plan mode is on (the ask timeout is off); NULL: never */
+    /* lifetime (ms) of the prompt-cache entry the latest request wrote; -1 unknown (NULL: never known) */
+    int64_t (*prompt_cache_ttl_ms)(struct tool_env *env);
     struct shell *shell;       /* persistent bash session (lazy) */
     const discovery_t *disc;   /* skills/rules for skill:// and rule:// (borrowed) */
     /* a skill:// name no loaded skill owns: rediscover the session's skills (rate-limited); true when the list
@@ -165,7 +167,6 @@ typedef struct tool_env {
     hmap_t read_repeats;       /* read repeat tracker: selector -> identical-output count (read.c) */
     /* wait's IdleStreak: back-to-back waits that each elapsed with nothing new (write_bash.c) */
     bool wait_idle;
-    int wait_idle_rung;
     int64_t wait_idle_ended, wait_idle_waited_ms;
     bool task_lifecycle_shown; /* a spawn result already carried the job-lifecycle reference (task.c) */
     pthread_mutex_t mu;
