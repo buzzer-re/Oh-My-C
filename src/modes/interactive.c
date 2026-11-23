@@ -517,8 +517,10 @@ static void worker_done(void *ud) {
     plan_exec_resume(u);
     /* deferred `!cmd` results, a pending /compact, queued input left behind by an interrupted run */
     /* the input waiter re-arms: loop mode re-submits its prompt, else a goal continuation may follow */
-    if (!iq_run_end(u) && !lp_run_end(u) && u->goal_cont) tui_add_timer(u->tui, 800, false, goal_continue_cb, u);
-    else if (!u->worker_running && !u->goal_cont) async_wait_begin(u);
+    /* #isAutoSubmitBlocked: a run paused on background subagents / jobs is still open (isRunActive); its wake run's
+     * end re-arms loop iterations and goal continuations (omp ad0db62554) */
+    if (!iq_run_end(u) && !u->async_hold && !lp_run_end(u) && u->goal_cont) tui_add_timer(u->tui, 800, false, goal_continue_cb, u);
+    else if (!u->worker_running && (!u->goal_cont || u->async_hold)) async_wait_begin(u);
     if (u->async_hold && !u->async_wait && !u->worker_running && !u->goal_cont) {
         ui_chrome_turn(u, false);
         u->async_hold = false;
