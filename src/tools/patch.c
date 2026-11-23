@@ -3583,7 +3583,14 @@ static void finish(stageds_t *st, pe_mode_t mode, const pe_opts_t *o, hl_clip_t 
         staged_t *s = &st->v[i];
         if (s->op != OP_NOOP) {
             char *err = NULL;
-            if (write_file(o, s, &err) != 0) {
+            if (o->raw_snapshot) { /* magic: refuse a file that changed after the numbered snapshot was read */
+                size_t len = 0;
+                char *now = fs_read(s->abs, &len);
+                bool same = now && len == o->raw_snapshot_len && !memcmp(now, o->raw_snapshot, len);
+                free(now);
+                if (!same) err = xstrdup("The file changed after the numbered snapshot was read; re-read and retry.");
+            }
+            if (err || write_file(o, s, &err) != 0) {
                 out->is_error = true;
                 out->error_kind = K_WRITE;
                 out->text = err;

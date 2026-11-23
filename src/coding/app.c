@@ -1594,6 +1594,10 @@ static json_t *app_tool_judge(tool_env_t *env, const char *lead_model, const jso
     return evalhost_judge_lead(env->session, lead_model, state, questions, cancel, usage, err);
 }
 
+static void app_tool_side_usage(tool_env_t *env, const char *purpose, const json_t *msg) {
+    app_note_side_usage(env->session, purpose, msg);
+}
+
 static json_t *app_eval_bridge(tool_env_t *env, const char *name, const json_t *args, int64_t cell,
                                volatile sig_atomic_t *cancel, char **err) {
     app_t *a = env->session;
@@ -2045,6 +2049,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     a->env->plan_mode_active = app_env_plan_mode;
     a->env->prompt_cache_ttl_ms = app_prompt_cache_ttl;
     a->env->judge = app_tool_judge;
+    a->env->side_usage = app_tool_side_usage;
     a->env->active_model = app_tool_active_model;
     a->evalhost = evalhost_new(a);
     a->env->eval_bridge = app_eval_bridge;

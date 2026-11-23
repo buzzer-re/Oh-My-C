@@ -7,6 +7,7 @@
 #include "text/regex.h"
 #include "text/rxbt.h"
 #include "tools/hashline.h"
+#include "tools/magic.h"
 #include "tools/patch.h"
 #include "tools/toolcmd.h"
 #include "tui/ansi.h"
@@ -501,6 +502,8 @@ static void edit_inspect_mode(const approval_call_t *c, const char *mode, edit_i
         }
     } else if (!strcmp(mode, "apply_patch")) {
         if (input) inspect_apply_patch(input, x);
+    } else if (!strcmp(mode, "magic")) { /* the payload names its files itself */
+        if (input) magic_edit_paths(input, &x->paths);
     } else if (!strcmp(mode, "sloppy")) {
         sloppy_sections_t secs = {0};
         char *err = NULL;

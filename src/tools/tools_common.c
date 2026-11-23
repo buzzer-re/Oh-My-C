@@ -1,5 +1,6 @@
 #include "tools.h"
 #include "toolcmd.h"
+#include "patch.h"
 #include "ai/judgment_native.h"
 #include "config/model_resolver.h"
 #include "coding/memory.h"
@@ -406,6 +407,10 @@ void tools_register_builtin(agent_t *a, tool_env_t *env, const strvec_t *enabled
     if (str_eq(tool_edit_mode_setting(), "none")) { /* no edit tool to read anchors for */
         free(env->edit_mode);
         env->edit_mode = xstrdup("none");
+    } else { /* read (built before edit) words its description for the session's edit mode */
+        const char *mode = tool_edit_mode_setting();
+        free(env->edit_mode);
+        env->edit_mode = xstrdup(str_eq(mode, "magic") || pe_mode_parse(mode) >= 0 ? mode : "hashline");
     }
     env->find_enabled = (!enabled || strvec_contains(enabled, "find")) && builtin_allowed(env, "find");
     for (size_t i = 0; i < ARRAY_LEN(CTORS); i++) {

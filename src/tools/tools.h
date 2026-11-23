@@ -123,7 +123,7 @@ typedef struct tool_env {
     todo_state_t todo;
     tool_ui_t ui;
     json_t *settings;          /* borrowed effective settings */
-    char *edit_mode;           /* "hashline" | "replace" | "patch" | "apply_patch" | "sloppy" | "none" (no edit tool, no anchors) */
+    char *edit_mode;           /* "hashline" | "replace" | "patch" | "apply_patch" | "sloppy" | "magic" | "none" (no edit tool, no anchors) */
     struct artifact_store *artifacts; /* session spills (local://<N>.log; shared with subagents; NULL: none) */
     int subagent_depth;
     bool can_prompt_user;      /* a UI can answer `ask` (interactive mode) */
@@ -156,6 +156,9 @@ typedef struct tool_env {
     /* spawn a subagent: returns owned final text; used by task tool (set by app) */
     char *(*run_subagent)(struct tool_env *env, const char *agent_name, const char *assignment, const char *context,
                           json_t **out_details, volatile sig_atomic_t *cancel);
+    /* an off-transcript side request a tool made billed `msg` (journaled as a model_usage entry of `purpose`, e.g.
+     * "magic-edit"); any thread (set by app, NULL: not journaled) */
+    void (*side_usage)(struct tool_env *env, const char *purpose, const json_t *msg);
     /* the session's active model and session id (owned, may be NULL) for web_search's `web/hosted` (set by app) */
     const struct ai_model *(*active_model)(struct tool_env *env, char **session_id);
     struct jobs *jobs;         /* async background jobs (owned; NULL disables async) */
