@@ -212,6 +212,84 @@ static bool recent_or_role(const ui_model_browser_t *b, const ui_model_item_t *i
     return false;
 }
 
+/* compactModelSearchText: lowercased, punctuation and spaces dropped (non-ASCII kept) */
+static char *compact_search(const char *v) {
+    sb_t b = SB_INIT;
+    for (const unsigned char *p = (const unsigned char *)(v ? v : ""); *p; p++)
+        if (*p >= 0x80 || isalnum(*p)) sb_putc(&b, (char)tolower(*p));
+    return sb_detach(&b);
+}
+
+/* modelSearchTier: exact id -> contiguous literal -> fuzzy-only */
+static int search_tier(const char *q, const char *id) {
+    if (!*q) return 2;
+    if (!strcmp(q, id)) return 0;
+    return strstr(id, q) ? 1 : 2;
+}
+
+typedef struct {
+    size_t idx;
+    int scope, tier;
+    double score;
+} scoped_row_t;
+
+static int scoped_cmp(const void *a, const void *b) {
+    const scoped_row_t *x = a, *y = b;
+    if (x->scope != y->scope) return x->scope - y->scope;
+    if (x->tier != y->tier) return x->tier - y->tier;
+    long bx = lround(x->score / 10), by = lround(y->score / 10);
+    if (bx != by) return bx < by ? -1 : 1;
+    if (x->score != y->score) return x->score < y->score ? -1 : 1;
+    return x->idx < y->idx ? -1 : x->idx > y->idx;
+}
+
+/* parseProviderScopedQuery + #rankScoped (omp 0aa5f2359f): `provider/model` lists the prefixed providers' models
+ * first (exact provider ahead of a prefix), matched on the model part alone; returns the rows (owned) */
+static scoped_row_t *rank_scoped(const ui_model_browser_t *b, const char *query, size_t *nout) {
+    *nout = 0;
+    char *t = str_trim(query ? query : "");
+    const char *slash = strchr(t, '/');
+    scoped_row_t *rows = NULL;
+    if (slash && slash > t) {
+        char *prov = xstrndup(t, (size_t)(slash - t));
+        char *pkey = compact_search(prov);
+        bool ws = false;
+        for (const char *p = prov; *p; p++)
+            if (isspace((unsigned char)*p)) ws = true;
+        if (!ws && *pkey) {
+            const char *model = slash + 1;
+            char *mkey = compact_search(model);
+            tui_fuzzy_query_t *mq = *mkey ? tui_fuzzy_query_new(model) : NULL;
+            rows = xcalloc(b->items.n ? b->items.n : 1, sizeof *rows);
+            for (size_t i = 0; i < b->items.n; i++) {
+                const ui_model_item_t *it = &b->items.v[i];
+                if (it->label) continue; /* quick-role rows have no provider */
+                char *cp = compact_search(it->model->provider);
+                int scope = !strcmp(cp, pkey) ? 0 : str_starts(cp, pkey) ? 1 : 2;
+                free(cp);
+                if (scope == 2) continue;
+                double score = 0;
+                if (mq) {
+                    char *text = is_free(it->model) ? xasprintf("%s free", it->model->id) : xstrdup(it->model->id);
+                    bool ok = tui_fuzzy_query_match(mq, text, &score);
+                    free(text);
+                    if (!ok) continue;
+                }
+                char *cid = compact_search(it->model->id);
+                rows[(*nout)++] = (scoped_row_t){i, scope, search_tier(mkey, cid), score};
+                free(cid);
+            }
+            if (*nout > 1) xqsort(rows, *nout, sizeof *rows, scoped_cmp);
+            if (mq) tui_fuzzy_query_free(mq);
+            free(mkey);
+        }
+        free(pkey);
+        free(prov);
+    }
+    free(t);
+    return rows;
+}
+
 static void refilter(ui_model_browser_t *b, const char *keep) {
     b->visible.n = 0;
     b->next_credit_change = 0;
@@ -231,6 +309,20 @@ static void refilter(ui_model_browser_t *b, const char *keep) {
     }
     size_t *idx = xmalloc((n ? n : 1) * sizeof *idx);
     size_t m = tui_fuzzy_rank(b->query ? b->query : "", (const char *const *)texts, n, idx);
+    size_t nscoped = 0;
+    scoped_row_t *scoped = b->query ? rank_scoped(b, b->query, &nscoped) : NULL;
+    if (nscoped) { /* scoped rows, then the whole-text matches not among them (ids holding `/` stay reachable) */
+        bool *seen = xcalloc(n ? n : 1, sizeof *seen);
+        size_t *all = xmalloc((n ? n : 1) * sizeof *all), k = 0;
+        for (size_t i = 0; i < nscoped; i++) all[k++] = scoped[i].idx, seen[scoped[i].idx] = true;
+        for (size_t i = 0; i < m; i++)
+            if (!seen[idx[i]]) all[k++] = idx[i];
+        free(idx);
+        free(seen);
+        idx = all;
+        m = k;
+    }
+    free(scoped);
     /* #insertSeparator: a rule after the leading recent/role-assigned rows */
     size_t first_other = m;
     if (b->hub)
