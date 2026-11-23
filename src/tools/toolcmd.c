@@ -4,6 +4,7 @@
 
 #include "approval.h"
 #include "config/settings.h"
+#include "core/compat_sys.h"
 #include "core/fs.h"
 #include "img/img.h"
 #include "prompt/template.h"

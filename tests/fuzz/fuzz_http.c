@@ -2,6 +2,7 @@
  * gzip/deflate, keep-alive) and the SSE parser on top of it (src/net/http.c), plus WebSocket frame decoding after a
  * valid opening handshake (src/net/ws.c). A loopback server thread answers each request with the fuzz input.
  * Input: <selector byte><raw response bytes (HTTP) or raw frames (WebSocket)>. */
+#define _GNU_SOURCE /* memmem, strcasestr (glibc 2.35, the CI baseline) */
 #include "core/core.h"
 #include "net/http.h"
 #include "net/ws.h"

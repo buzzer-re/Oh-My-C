@@ -2,6 +2,7 @@
  * test_providers_ag.c - offline tests for the Anthropic and Google providers:
  * request shaping (bodies/headers/urls) and recorded SSE streams fed through the event handlers.
  */
+#define _GNU_SOURCE /* memmem, strcasestr (glibc 2.35, the CI baseline) */
 #include "ai/anthropic_threads.h"
 #include "ai/ai.h"
 #include "ai/provider_anthropic.h"
