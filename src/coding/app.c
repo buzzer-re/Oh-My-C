@@ -951,7 +951,9 @@ static tool_gate_t hook_before_tool(void *ud, agent_t *ag, const json_t *call, c
 static void app_bind_local(app_t *a) {
     const char *sid = session_id(a->session);
     free(a->env->local_dir);
-    char *adir = a->session->persist ? artifacts_dir_for_session(a->session->file) : NULL;
+    /* a subagent adopts its parent's store, whose session directory keys its local:// root (getArtifactsDir) */
+    const char *shared = a->opts.subagent ? artifacts_dir(a->env->artifacts) : NULL;
+    char *adir = shared ? xstrdup(shared) : a->session->persist ? artifacts_dir_for_session(a->session->file) : NULL;
     if (adir) { /* resolveLocalRoot: <artifacts dir>/local; sessions from before this keep <sessions>/<id>/local */
         a->env->local_dir = path_join(adir, "local");
         free(adir);
@@ -963,11 +965,20 @@ static void app_bind_local(app_t *a) {
             free(old);
         }
     } else if (a->session->dir) a->env->local_dir = xasprintf("%s/%s/local", a->session->dir, sid);
-    else {
-        char *base = omc_agent_path("local");
-        a->env->local_dir = xasprintf("%s/%s", base, sid);
-        free(base);
+    else { /* resolveLocalRoot without a session file: $TMPDIR/omp-local/<safe session id> (omc-local here) */
+        const char *tmp = getenv("TMPDIR");
+        char *safe = xstrdup(sid ? sid : "session");
+        for (char *p = safe; *p; p++)
+            if (!isalnum((unsigned char)*p) && *p != '_' && *p != '.' && *p != '-') *p = '_';
+        if (!*safe || !strcmp(safe, ".") || !strcmp(safe, "..")) {
+            free(safe);
+            safe = xstrdup("session");
+        }
+        a->env->local_dir = xasprintf("%s/omc-local/%s", tmp && *tmp ? tmp : "/tmp", safe);
+        free(safe);
     }
+    /* spills (local://N.log) live at the local:// root; a subagent's store is the parent's, already bound */
+    if (!a->opts.subagent) artifacts_set_root(a->env->artifacts, a->env->local_dir);
 }
 
 /* point the tool env at the session's artifact directory (session file minus `.jsonl`) */
@@ -4163,6 +4174,7 @@ app_t *app_subagent_new_at(app_t *parent, const char *agent_name, const char *mo
     /* subagents share the parent's artifact id space and directory (omp adoptArtifactManager) */
     artifacts_unref(child->env->artifacts);
     child->env->artifacts = artifacts_ref(parent->env->artifacts);
+    app_bind_local(child); /* the parent's local:// root (spills included) */
     child->thinking = parent->thinking;
     child->agent->thinking = parent->thinking;
     child->auto_thinking = parent->auto_thinking;

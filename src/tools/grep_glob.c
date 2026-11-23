@@ -516,7 +516,7 @@ static bool try_delim_split(tool_env_t *env, const char *entry, int mode, int re
     return ok;
 }
 
-/* an internal URL (`local://`, `artifact://`, ...): a scheme the router handles, not a web or file URL */
+/* an internal URL (`local://`, `skill://`, ...): a scheme the router handles, not a web or file URL */
 static bool is_internal_url(const char *s) {
     size_t n = 0;
     while (isalnum((unsigned char)s[n]) || s[n] == '+' || s[n] == '-' || s[n] == '.') n++;

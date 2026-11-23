@@ -6,15 +6,19 @@
 #include "core/fs.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <strings.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 struct artifact_store {
     pthread_mutex_t mu;
     int refs;
-    char *dir;      /* session dir, or NULL */
-    char *mem_dir;  /* temp dir for a non-persistent session's saves (lazy) */
-    int64_t next;   /* -1: not scanned yet */
-    int64_t mem_next;
+    char *dir;    /* the session's directory (`<session>` beside `<session>.jsonl`), or NULL */
+    char *root;   /* the `local://` root spills live in (`<root>/<N>.log`), or NULL until bound */
+    int64_t next; /* -1: not scanned yet */
 };
 
 artifact_store_t *artifacts_new(const char *dir) {
@@ -40,8 +44,7 @@ void artifacts_unref(artifact_store_t *s) {
     int r = --s->refs;
     pthread_mutex_unlock(&s->mu);
     if (r > 0) return;
-    if (s->mem_dir) fs_rm_rf(s->mem_dir);
-    free(s->mem_dir);
+    free(s->root);
     free(s->dir);
     pthread_mutex_destroy(&s->mu);
     free(s);
@@ -49,22 +52,32 @@ void artifacts_unref(artifact_store_t *s) {
 
 const char *artifacts_dir(const artifact_store_t *s) { return s ? s->dir : NULL; }
 
+void artifacts_set_root(artifact_store_t *s, const char *root) {
+    if (!s) return;
+    pthread_mutex_lock(&s->mu);
+    if (!str_eq(s->root, root)) {
+        free(s->root);
+        s->root = root ? xstrdup(root) : NULL;
+        s->next = -1;
+    }
+    pthread_mutex_unlock(&s->mu);
+}
+
 char *artifacts_dir_for_session(const char *session_file) {
     if (!session_file || !str_ends(session_file, ".jsonl")) return NULL;
     return xstrndup(session_file, strlen(session_file) - 6);
 }
 
-/* `<n>.<anything>.log` -> n, else -1 */
+/* spillIdOfFileName: `<N>.log` -> N, else -1 */
 static int64_t file_id(const char *name) {
-    if (!isdigit((unsigned char)*name) || !str_ends(name, ".log")) return -1;
+    if (!isdigit((unsigned char)*name)) return -1;
     const char *p = name;
     int64_t v = 0;
     while (isdigit((unsigned char)*p)) {
         if (v > (INT64_MAX - 9) / 10) return -1;
         v = v * 10 + (*p++ - '0');
     }
-    if (*p != '.' || strlen(p) < 5) return -1; /* ".log" alone would need `n..log`; omp's /^(\d+)\..*\.log$/ */
-    return v;
+    return strcmp(p, ".log") == 0 ? v : -1;
 }
 
 static int64_t scan_max(const char *dir) {
@@ -79,66 +92,42 @@ static int64_t scan_max(const char *dir) {
     return max;
 }
 
-/* sanitizeToolType */
-static char *tool_type(const char *t) {
-    sb_t b = SB_INIT;
-    bool in_bad = false;
-    for (const char *p = t ? t : ""; *p; p++) {
-        unsigned char c = (unsigned char)*p;
-        if (isalnum(c) || c == '_' || c == '-') {
-            sb_putc(&b, (char)c);
-            in_bad = false;
-        } else if (!in_bad) {
-            sb_putc(&b, '_');
-            in_bad = true;
-        }
-    }
-    char *s = sb_detach(&b);
-    if (strlen(s) > 64) s[64] = 0;
-    size_t a = 0, e = strlen(s);
-    while (a < e && s[a] == '_') a++;
-    while (e > a && s[e - 1] == '_') e--;
-    char *r = e > a ? xstrndup(s + a, e - a) : xstrdup("tool");
-    free(s);
-    return r;
-}
-
-static char *alloc_in(artifact_store_t *s, const char *dir, int64_t *counter, bool scan, const char *tool, char **id) {
+/* allocatePath: claim the next free spill id by creating its file exclusively, bumping past any `<N>.log` that
+ * appeared since the scan (a model-written N.log is skipped, never clobbered) */
+char *artifacts_alloc(artifact_store_t *s, const char *tool, char **id) {
+    UNUSED(tool);
+    *id = NULL;
+    if (!s) return NULL;
     pthread_mutex_lock(&s->mu);
-    if (*counter < 0) {
-        fs_mkdir_p(dir, 0700);
-        *counter = scan ? scan_max(dir) + 1 : 0;
+    if (!s->root) {
+        pthread_mutex_unlock(&s->mu);
+        return NULL;
     }
-    int64_t n = (*counter)++;
+    if (s->next < 0) {
+        fs_mkdir_p(s->root, 0700);
+        s->next = scan_max(s->root) + 1;
+    }
+    char *path = NULL;
+    for (;;) {
+        int64_t n = s->next++;
+        char *p = xasprintf("%s/%lld.log", s->root, (long long)n);
+        int fd = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (fd >= 0) {
+            close(fd);
+            path = p;
+            *id = xasprintf("%lld", (long long)n);
+            break;
+        }
+        free(p);
+        if (errno != EEXIST) break;
+    }
     pthread_mutex_unlock(&s->mu);
-    char *tt = tool_type(tool);
-    char *path = xasprintf("%s/%lld.%s.log", dir, (long long)n, tt);
-    free(tt);
-    *id = xasprintf("%lld", (long long)n);
     return path;
 }
 
-char *artifacts_alloc(artifact_store_t *s, const char *tool, char **id) {
-    *id = NULL;
-    if (!s || !s->dir) return NULL;
-    return alloc_in(s, s->dir, &s->next, true, tool, id);
-}
-
 char *artifacts_save(artifact_store_t *s, const char *tool, const char *data, size_t len) {
-    if (!s) return NULL;
-    char *id = NULL, *path;
-    if (s->dir) {
-        path = alloc_in(s, s->dir, &s->next, true, tool, &id);
-    } else {
-        pthread_mutex_lock(&s->mu);
-        if (!s->mem_dir) {
-            s->mem_dir = fs_mktempdir("omc-artifacts");
-            s->mem_next = -1;
-        }
-        pthread_mutex_unlock(&s->mu);
-        if (!s->mem_dir) return NULL;
-        path = alloc_in(s, s->mem_dir, &s->mem_next, false, tool, &id);
-    }
+    char *id = NULL, *path = artifacts_alloc(s, tool, &id);
+    if (!path) return NULL;
     int rc = fs_write_atomic(path, data, len, 0600);
     free(path);
     if (rc != 0) {
@@ -148,70 +137,37 @@ char *artifacts_save(artifact_store_t *s, const char *tool, const char *data, si
     return id;
 }
 
-static char *find_in(const char *dir, const char *id) {
-    if (!dir) return NULL;
-    dirlist_t dl = {0};
-    char *r = NULL;
-    size_t il = strlen(id);
-    if (fs_list_dir(dir, &dl) == 0)
-        for (size_t i = 0; i < dl.n && !r; i++)
-            if (!strncmp(dl.v[i].name, id, il) && dl.v[i].name[il] == '.') r = path_join(dir, dl.v[i].name);
-    dirlist_free(&dl);
-    return r;
+char *artifacts_spill_url(const char *id) { return xasprintf("local://%s.log", id); }
+
+int64_t artifacts_parse_spill_url(const char *text) {
+    if (!text) return -1;
+    while (isspace((unsigned char)*text)) text++;
+    if (strncasecmp(text, "local://", 8) != 0) return -1;
+    const char *p = text + 8;
+    if (!isdigit((unsigned char)*p)) return -1;
+    int64_t v = 0;
+    while (isdigit((unsigned char)*p)) {
+        if (v > (INT64_MAX - 9) / 10) return -1;
+        v = v * 10 + (*p++ - '0');
+    }
+    if (strncasecmp(p, ".log", 4) != 0) return -1;
+    p += 4;
+    if (*p == ':') return v;
+    while (isspace((unsigned char)*p)) p++; /* text.trim() */
+    return *p ? -1 : v;
 }
 
 char *artifacts_find(artifact_store_t *s, const char *id) {
     if (!s || !id || !*id) return NULL;
-    char *p = find_in(s->dir, id);
-    if (!p) {
-        pthread_mutex_lock(&s->mu);
-        char *md = s->mem_dir ? xstrdup(s->mem_dir) : NULL;
-        pthread_mutex_unlock(&s->mu);
-        p = find_in(md, id);
-        free(md);
+    pthread_mutex_lock(&s->mu);
+    char *p = s->root ? xasprintf("%s/%s.log", s->root, id) : NULL;
+    pthread_mutex_unlock(&s->mu);
+    struct stat st;
+    if (p && (stat(p, &st) != 0 || !S_ISREG(st.st_mode))) {
+        free(p);
+        p = NULL;
     }
     return p;
-}
-
-static int cmp_num(const void *a, const void *b) {
-    long long x = *(const long long *)a, y = *(const long long *)b;
-    return x < y ? -1 : x > y;
-}
-
-char *artifacts_missing_error(artifact_store_t *s, const char *id) {
-    pthread_mutex_lock(&s->mu);
-    char *md = s->mem_dir ? xstrdup(s->mem_dir) : NULL;
-    pthread_mutex_unlock(&s->mu);
-    const char *dirs[] = {s->dir, md};
-    bool any = false;
-    VEC(long long) ids = {0};
-    for (size_t k = 0; k < ARRAY_LEN(dirs); k++) {
-        dirlist_t dl = {0};
-        if (!dirs[k] || fs_list_dir(dirs[k], &dl) != 0) continue;
-        any = true;
-        for (size_t i = 0; i < dl.n; i++) {
-            const char *n = dl.v[i].name;
-            size_t dn = strspn(n, "0123456789");
-            if (!dn || n[dn] != '.') continue;
-            long long v = strtoll(n, NULL, 10);
-            bool dup = false;
-            for (size_t j = 0; j < ids.n; j++) dup |= ids.v[j] == v;
-            if (!dup) vec_push(&ids, v);
-        }
-        dirlist_free(&dl);
-    }
-    free(md);
-    if (!any) {
-        vec_free(&ids);
-        return xstrdup("No artifacts directory found");
-    }
-    qsort(ids.v, ids.n, sizeof ids.v[0], cmp_num);
-    sb_t b = SB_INIT;
-    for (size_t j = 0; j < ids.n; j++) sb_appendf(&b, "%s%lld", j ? ", " : "", ids.v[j]);
-    char *r = xasprintf("Artifact %s not found. Available: %s", id, b.len ? b.s : "none");
-    sb_free(&b);
-    vec_free(&ids);
-    return r;
 }
 
 void artifacts_copy_dir(const char *src_dir, const char *dst_dir) {
@@ -220,9 +176,10 @@ void artifacts_copy_dir(const char *src_dir, const char *dst_dir) {
     if (fs_list_dir(src_dir, &dl) != 0) return;
     fs_mkdir_p(dst_dir, 0700);
     for (size_t i = 0; i < dl.n; i++) {
-        if (dl.v[i].is_dir) continue;
         char *src = path_join(src_dir, dl.v[i].name), *dst = path_join(dst_dir, dl.v[i].name);
-        if (!fs_exists(dst)) {
+        if (dl.v[i].is_dir) { /* recursive (fs.cp recursive, force: false): the local:// root and its spills too */
+            artifacts_copy_dir(src, dst);
+        } else if (!fs_exists(dst)) {
             size_t n;
             char *data = fs_read(src, &n);
             if (data) fs_write(dst, data, n);

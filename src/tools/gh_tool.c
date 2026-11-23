@@ -45,7 +45,7 @@ static void fail(tool_result_t *out, char *msg) {
 /* buildTextResult with an optional artifact reference */
 static void text_result(tool_result_t *out, const char *text, const char *artifact_id, const char *label, bool useless) {
     if (artifact_id) {
-        char *t = xasprintf("%s\n\n%s: artifact://%s", text, label ? label : "Saved artifact", artifact_id);
+        char *t = xasprintf("%s\n\n%s: local://%s.log", text, label ? label : "Saved artifact", artifact_id);
         tool_result_text(out, t);
         free(t);
     } else {

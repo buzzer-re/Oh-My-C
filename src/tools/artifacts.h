@@ -9,22 +9,28 @@
 
 typedef struct artifact_store artifact_store_t;
 
-/* `dir` is the session's artifact directory (session file minus `.jsonl`); NULL for a non-persistent session:
- * then allocation yields no path (streaming tools keep no artifact) and saves land in a private temp dir. */
+/* Session spill storage (session/artifacts.ts ArtifactManager): spill N is the file `<root>/<N>.log` at the session's
+ * `local://` root, read back as `local://N.log`. `dir` is the session's directory (`<session>` beside
+ * `<session>.jsonl`; NULL without a session file), which other features (agent outputs, subagent transcripts) use;
+ * the spill root is bound separately (artifacts_set_root) once the local:// root is known. Subagents adopt the
+ * parent's store, so the tree shares one id space and one root. */
 artifact_store_t *artifacts_new(const char *dir);
 artifact_store_t *artifacts_ref(artifact_store_t *s);
 void artifacts_unref(artifact_store_t *s);
 const char *artifacts_dir(const artifact_store_t *s); /* may be NULL */
-/* allocatePath: next sequential id (continuing after the highest existing `<n>.*.log`) and its path
- * `<dir>/<id>.<tool>.log` (owned; *id owned). NULL when the session has no directory. */
+void artifacts_set_root(artifact_store_t *s, const char *root);
+/* allocatePath: claim the next spill id (past every `<N>.log` at the root) with an exclusively created empty file;
+ * returns its path (owned; *id owned). NULL when no root is bound. `tool` is unused (spills are untyped). */
 char *artifacts_alloc(artifact_store_t *s, const char *tool, char **id);
-/* save content as a new artifact; returns its id (owned) or NULL on failure */
+/* save content as a new spill; returns its id (owned) or NULL on failure */
 char *artifacts_save(artifact_store_t *s, const char *tool, const char *data, size_t len);
-/* path of artifact `id` (`<id>.*.log`), owned, or NULL */
+/* path of spill `id` (`<root>/<id>.log`, a regular file), owned, or NULL */
 char *artifacts_find(artifact_store_t *s, const char *id);
-/* resolveArtifactFile's miss: "No artifacts directory found" or "Artifact <id> not found. Available: <ids|none>" (owned) */
-char *artifacts_missing_error(artifact_store_t *s, const char *id);
-/* copy every artifact of `src_dir` into `dst_dir` without overwriting (session fork) */
+/* the URL of spill `id` (spillUrl: `local://<id>.log`; owned) */
+char *artifacts_spill_url(const char *id);
+/* parseSpillUrl: the spill id `text` names when it is `local://N.log`, optionally followed by a `:selector`; -1 else */
+int64_t artifacts_parse_spill_url(const char *text);
+/* copy `src_dir` into `dst_dir` recursively without overwriting (copySessionArtifacts: session fork/move) */
 void artifacts_copy_dir(const char *src_dir, const char *dst_dir);
 /* `<session file minus .jsonl>` or NULL */
 char *artifacts_dir_for_session(const char *session_file);

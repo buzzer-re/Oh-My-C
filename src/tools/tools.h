@@ -124,7 +124,7 @@ typedef struct tool_env {
     tool_ui_t ui;
     json_t *settings;          /* borrowed effective settings */
     char *edit_mode;           /* "hashline" | "replace" | "patch" | "apply_patch" | "sloppy" | "none" (no edit tool, no anchors) */
-    struct artifact_store *artifacts; /* session artifacts (artifact://<id>; shared with subagents; NULL: none) */
+    struct artifact_store *artifacts; /* session spills (local://<N>.log; shared with subagents; NULL: none) */
     int subagent_depth;
     bool can_prompt_user;      /* a UI can answer `ask` (interactive mode) */
     bool ask_ui;               /* the protocol client answers `ask`: `--mode rpc-ui`, or an ACP client with form elicitation */
@@ -175,7 +175,7 @@ typedef struct tool_env {
 tool_env_t *tool_env_new(const char *cwd);
 void tool_env_free(tool_env_t *e);
 
-/* map internal URLs (skill://, rule://, artifact://) to a local path, keeping any :selector suffix.
+/* map internal URLs (skill://, rule://) to a local path, keeping any :selector suffix.
  * Returns owned path or NULL if not an internal URL; sets *err (owned) when the URL is unknown. */
 char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err);
 /* resolve a model-supplied path against env cwd (expands ~), owned */

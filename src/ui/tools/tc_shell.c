@@ -374,7 +374,7 @@ void tc_bash(const tc_call_t *c, int width, strvec_t *out) {
                                               (long long)json_get_int(d, "requestedTimeoutSeconds", 0)));
         else strvec_push_own(&stats, xasprintf("Timeout: %llds", (long long)ts));
     }
-    if (json_get_str(d, "artifactId")) strvec_push_own(&stats, xasprintf("Artifact: %s", json_get_str(d, "artifactId")));
+    if (json_get_str(d, "artifactId")) strvec_push_own(&stats, xasprintf("Full output: local://%s.log", json_get_str(d, "artifactId")));
     if (is_error && json_get(d, "exitCode") && json_is_num(json_get(d, "exitCode")))
         strvec_push_own(&stats, xasprintf("Exit: %lld", (long long)json_get_int(d, "exitCode", 0)));
     char *footer = NULL;

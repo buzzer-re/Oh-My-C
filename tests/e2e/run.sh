@@ -207,27 +207,32 @@ check "sloppy result"   $'start();\nconst timeout = 5000;\nlog();\nfinish();'  c
 check "todo tool"      "Remaining items (2)"  "$B" --model mock/mock-1 -p "todo:first,second"
 # done/drop/rm take several tasks: an array or a flattened list (omp f87959c6a6)
 check "todo several"   "Overall: 2/3 done, 1 open."  "$B" --model mock/mock-1 --no-session -p 'seq:[["todo",{"op":"init","items":["ta","tb","tc"]}],["todo",{"op":"done","task":"ta; tb"}]]'
-# tool output parity (omp OutputSink): middle elision + session artifact, column cap, sanitizing, exit notice
+# tool output parity (omp OutputSink): middle elision + session spill (local://N.log since omp b279532036), column cap,
+# sanitizing, exit notice
 LASTMSG='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; m=[x for x in r[-1]["messages"] if x.get("role")=="tool"][-1]; c=m["content"]; print(c if isinstance(c,str) else "".join(b.get("text","") for b in c), end="")'
 "$B" --model mock/mock-1 --session-dir "$T/sink" -p "bash:seq 1 30000" >/dev/null 2>&1 </dev/null
-check "sink elision"   "[Showing lines 1-4317 and 24882-30000 of 30000; 20,564 middle lines (114.9KB) elided. Read artifact://0 for full output]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "sink elision"   "[Showing lines 1-4317 and 24882-30000 of 30000; 20,564 middle lines (114.9KB) elided. Read local://0.log for full output]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 check "sink marker"    "4317"$'\n'"[…20564ln elided…]"$'\n'"24882"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-check "sink artifact"  "168894"  bash -c "wc -c < \"\$(ls $T/sink/*/0.bash.log)\""
-"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://0:raw:29999-29999" >/dev/null 2>&1 </dev/null
-check "artifact read"  "29999"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://0:5-6" >/dev/null 2>&1 </dev/null
-check "artifact plain" $'4\n5\n6\n7\n8\n9\n\n[Backing file: '  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-check "artifact hint"  $' (164.9KB). Use artifact://0:raw:1-3000 for bounded verbatim chunks, artifact://0:1-3000 for numbered exploration, and the backing file path for search/copy workflows.]\n\n[Showing lines 4-9 of 30000. Use :10 to continue]'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-check "artifact source" '"source":{"type":"internal","value":"artifact://0"}'  bash -c 'cat "$0"/sink/*.jsonl' "$T"
-"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://0:raw" >/dev/null 2>&1 </dev/null
-check "artifact raw cap" 'Unbounded raw read blocked for artifact://0 (164.9KB). Reading the whole file verbatim can exhaust memory.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://0:40000" >/dev/null 2>&1 </dev/null
-check "artifact eof"   'Line 40000 is beyond end of file (30000 lines total). Use artifact://0:1 to read from the start, or artifact://0:30000 to read the last line.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://99" >/dev/null 2>&1 </dev/null
-check "artifact miss"  'Artifact 99 not found. Available: 0'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "sink spill"     "168894"  bash -c "wc -c < \"\$(ls $T/sink/*/local/0.log)\""
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:local://0.log:raw:29999-29999" >/dev/null 2>&1 </dev/null
+check "spill read"     "29999"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:local://0.log:5-6" >/dev/null 2>&1 </dev/null
+check "spill page"     $'#'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "spill lines"    $']\n4:4\n5:5\n6:6\n7:7\n8:8\n9:9\n\n[Showing lines 4-9 of 30000. Use :10 to continue]'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "spill source"   '"source":{"type":"internal","value":"local://0.log"}'  bash -c 'cat "$0"/sink/*.jsonl' "$T"
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:local://0.log:raw" >/dev/null 2>&1 </dev/null
+check "spill raw cap"  'Unbounded raw read blocked for local://0.log (164.9KB). Reading the whole file verbatim can exhaust memory.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:local://0.log:40000" >/dev/null 2>&1 </dev/null
+check "spill eof"      'Line 40000 is beyond end of file (30000 lines total). Use local://0.log:1 to read from the start, or local://0.log:30000 to read the last line.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:local://99.log" >/dev/null 2>&1 </dev/null
+check "spill miss"     "Path 'local://99.log' not found"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+# a model-written N.log is never clobbered: the next spill id skips it
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p 'seq:[["write",{"path":"local://1.log","content":"mine\n"}],["bash",{"command":"seq 1 30000"}]]' >/dev/null 2>&1 </dev/null
+check "spill skips"    "Read local://2.log for full output]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "spill kept"     "mine"  bash -c 'cat "$0"/sink/*/local/1.log' "$T"
 "$B" --model mock/mock-1 --no-session -p "bash:python3 -c \"print('x'*2000)\"; printf 'a\\033[31mb\\rc\\n'; exit 3" >/dev/null 2>&1 </dev/null
 check "sink columns"   "…"$'\n'"ab"$'\n'"c"$'\n\n\n'"Command exited with code 3"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-check "sink col note"  "[Some lines truncated to 768 bytes]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "sink col note"  "[Some lines truncated to 768 bytes. Use local://0.log:raw:1-1 to read line 1 whole]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 # tool result text parity with omp: argument validation (omptype messages, coercion, received args), todo/task
 # errors, bash without bash's job-status notices
 "$B" --model mock/mock-1 --no-session -p 'call:grep:{}' >/dev/null 2>&1 </dev/null

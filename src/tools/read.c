@@ -36,13 +36,13 @@ typedef struct {
     int64_t req_end; /* the end the selector asked for, kept through normalization (0 = open): names the range in notices */
 } lrange_t;
 
-/* omp LocatedRead: a file-backed internal URL (skill://, artifact://, memory://, agent://, attachment://, local://)
+/* omp LocatedRead: a file-backed internal URL (skill://, memory://, agent://, attachment://, local://)
  * located to its backing file and read through the filesystem pipeline under the URL's identity (SchemeSpec flags) */
 typedef struct {
     char *url;           /* the URL as written, selector peeled: names the read in hints and details.meta.source */
     bool immutable;      /* no hashline anchors, no conflict scan; a large file carries the backing-file notice */
     bool unbounded;      /* skill://: the whole document through the in-memory builder, no summary or result limits */
-    bool artifact_store; /* artifact://: pages keep the full budget and never spill */
+    bool unspilled_pages; /* SchemeSpec.unspilledPages (local://): pages keep the full budget and never spill */
 } located_t;
 
 typedef struct {
@@ -360,7 +360,7 @@ static char *located_notice(const char *url, const char *backing, int64_t size, 
 }
 
 /* omp read page budget: max(50 KB, lines*512) capped by the spill threshold minus the row-prefix reserve */
-static __thread bool g_budget_uncapped; /* artifact:// pages: artifact storage never spills, so no spill cap */
+static __thread bool g_budget_uncapped; /* unspilledPages (local://) pages never spill, so no spill cap */
 static int64_t page_budget(int64_t first_line, int64_t line_count, bool numbered) {
     int64_t scaled = MAX((int64_t)READ_MAX_BYTES, line_count * 512);
     if (g_budget_uncapped) return scaled;
@@ -567,7 +567,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
     text_lines_t t;
     split_text(data, len, &t);
     int64_t total = (int64_t)t.lines.n;
-    /* resolveFileDisplayMode({immutable}): an immutable source (skill://, artifact://, ...) mints no hashline anchors */
+    /* resolveFileDisplayMode({immutable}): an immutable source (skill://, agent://, ...) mints no hashline anchors */
     bool hashline = !sel->raw && !sel->immutable && !sel->no_anchor && !(sel->loc && sel->loc->immutable) &&
                     str_eq(env->edit_mode, "hashline");
     bool numbered = hashline || (!sel->raw && sel->no_anchor && str_eq(env->edit_mode, "hashline")) ||
@@ -586,7 +586,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
      * in-memory builder (sel->resource) keeps bare `:N` hints */
     const char *base = sel->loc && !sel->resource ? sel->loc->url : "";
     const char *label = sel->loc ? sel->loc->url : display; /* resolvedDisplayPath */
-    g_budget_uncapped = sel->loc && sel->loc->artifact_store;
+    g_budget_uncapped = sel->loc && sel->loc->unspilled_pages;
     int64_t seen_lo = -1, seen_hi = -1;
     bool whole = false, eof_only = false;
     int64_t dc_first = 0, dc_last = -1; /* in-memory builder: the source lines shown (details.displayContent) */
@@ -908,7 +908,7 @@ rendered:
         json_t *m = meta ? json_clone(meta) : NULL;
         out_meta_column_truncated(&m, g_col_max, "chars", NULL, 0, g_col_first, g_col_last, base);
         /* a `:raw:N-N` read gets the budget of a one-line raw page; a cut line past it comes back byte-capped */
-        int64_t raw_line_budget = sel->loc && sel->loc->artifact_store ? (int64_t)READ_MAX_BYTES
+        int64_t raw_line_budget = sel->loc && sel->loc->unspilled_pages ? (int64_t)READ_MAX_BYTES
                                                                        : MIN((int64_t)READ_MAX_BYTES, (int64_t)tool_spill_threshold());
         if (g_col_first_bytes > raw_line_budget) out_meta_column_raw_cap(m, raw_line_budget);
         json_set(details, "meta", m);
@@ -924,7 +924,7 @@ rendered:
     }
     /* a bounded page re-readable with `:N` selectors is not spilled (omp pagedSource); a page of artifact storage
      * is re-readable with selectors, so it never spills */
-    if (b.len <= tool_spill_threshold() + OUT_INLINE_CAP_SLACK_BYTES || (sel->loc && sel->loc->artifact_store)) {
+    if (b.len <= tool_spill_threshold() + OUT_INLINE_CAP_SLACK_BYTES || (sel->loc && sel->loc->unspilled_pages)) {
         json_t *meta = json_get_obj(details, "meta");
         if (!meta) {
             meta = json_obj();
@@ -1703,7 +1703,7 @@ static bool sel_has_raw(const char *sel) {
 
 /* omp read.ts: a routed URL located to its backing file (`backing`, the selector kept) reads through the filesystem
  * pipeline under the URL's identity: the scheme's spec decides hashlines (immutable), whole-document reads
- * (unbounded) and the page budget (artifactStore); the result names the URL in details.meta.source, Markdown
+ * (unbounded) and the page budget (unspilledPages); the result names the URL in details.meta.source, Markdown
  * backing files render as Markdown, and a skill file read carries its provenance line */
 static void read_located(tool_env_t *env, tool_ctx_t *ctx, const char *path, const char *backing, tool_result_t *out) {
     const char *rest = strstr(path, "://") + 3;
@@ -1713,7 +1713,7 @@ static void read_located(tool_env_t *env, tool_ctx_t *ctx, const char *path, con
     bool skill = str_starts(path, "skill://");
     loc.immutable = !str_starts(path, "local://");
     loc.unbounded = skill;
-    loc.artifact_store = str_starts(path, "artifact://");
+    loc.unspilled_pages = str_starts(path, "local://");
     read_path(env, ctx, backing, &loc, out);
     if (!out->is_error) {
         if (!out->details) out->details = json_obj();
@@ -2008,7 +2008,7 @@ static bool accepts_line_selector(const char *path) {
         if (!isalnum((unsigned char)*p) && !strchr("+-.", *p)) return true;
     size_t n = (size_t)(sep - path);
     static const char *const passthrough[] = {"file", "http", "https", NULL};
-    static const char *const lines[] = {"agent", "artifact", "cfg", "conflict", "history", "issue", "pr", "local", "memory", "mr", "omc", "omp",
+    static const char *const lines[] = {"agent", "cfg", "conflict", "history", "issue", "pr", "local", "memory", "mr", "omc", "omp",
                                         "proc", "rule", "security", "skill", "ssh", "vault", "help", NULL};
     for (const char *const *s = passthrough; *s; s++)
         if (strlen(*s) == n && !strncasecmp(path, *s, n)) return true;

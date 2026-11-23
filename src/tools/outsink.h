@@ -48,7 +48,7 @@ void out_trunc_free(out_trunc_t *r);
 /* byte windows on UTF-8 boundaries: returns the kept length (head) or the start offset (tail) */
 size_t out_head_bytes(const char *s, size_t len, size_t max);
 size_t out_tail_start(const char *s, size_t len, size_t max);
-/* final-defense inline cap (enforceInlineByteCap); artifact_id appends `[raw output: artifact://<id>]` (owned result) */
+/* final-defense inline cap (enforceInlineByteCap); artifact_id appends `[raw output: local://<id>.log]` (owned result) */
 char *out_enforce_inline_cap(const char *text, size_t len, size_t max_bytes, const char *artifact_id, bool *capped);
 
 /* ---------- OutputSink ---------- */

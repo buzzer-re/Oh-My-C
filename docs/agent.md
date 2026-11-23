@@ -268,7 +268,7 @@ chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp
   (`cmp_auto`) run the first usable method and fall through on failure or when a pass would not reduce
   the context. Handoff is skipped for overflow; snapcompact is not implemented (explicit
   `/compact snapcompact` reports it, the ladder passes over it). Shake elides tool results and large
-  fenced/XML regions outside a protected recent tail into an `artifact://` and falls back when the
+  fenced/XML regions outside a protected recent tail into a `local://N.log` spill and falls back when the
   context stays above the recovery band. Handoff generates the document over the live context
   (`tool_choice: none`, `auto-handoff-threshold-focus.md`; `compaction.handoffSaveToDisk` writes
   `handoff-<time>.md` to the session artifacts) and commits it with `method: "handoff"`, rendered

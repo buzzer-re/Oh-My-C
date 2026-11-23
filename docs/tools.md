@@ -115,7 +115,6 @@ from omp's `prompts/internal-urls/*.md`, listing only what the session can serve
 |---|---|---|---|
 | `skill://<name>[/file]` | `tools_common.c`, `read.c` | the skill's `SKILL.md`, or a file inside its dir (no escape); located, unbounded | `skill-protocol.ts` |
 | `rule://<name>` | `read.c` (`read_rule`) | the rule body without its frontmatter (virtual resource) | `rule-protocol.ts` |
-| `artifact://<id>[:sel]` | `tools_common.c`, `artifacts.c` | full output of a truncated tool call | `artifact-protocol.ts` |
 | `local://<path>` | `tool_resolve_path` | per-session scratch dir `<session dir>/<id>/local` (plans live here); paths clamped to the root; read/write/edit | `local-protocol.ts` |
 | `memory://root[/…]` | `coding/memory.c` | local-backend memory files | `memory-protocol.ts` |
 | `agent://<id>[/json/path]`, `agent://all` | `read.c`, `vurl.c`, `coding/agents.c` | subagent outputs (a published, current `<id>.md` is located; JSON paths, progress and superseded outputs render through `vurl.c`); `write` sends a peer message | `agent-protocol.ts` |
@@ -134,7 +133,7 @@ from omp's `prompts/internal-urls/*.md`, listing only what the session can serve
 | `http(s)://…` | `tools/web.c` | page as reader markdown, `:raw` for the original | `tools/read.ts` URL path |
 | `file://…` | `tool_resolve_path` | plain path | |
 
-**Located reads** (omp `read.ts` `LocatedRead`). A file-backed scheme (`skill://`, `artifact://`, `memory://`,
+**Located reads** (omp `read.ts` `LocatedRead`). A file-backed scheme (`skill://`, `memory://`,
 `agent://` with a published output, `attachment://`, `local://`) resolves to its backing file and `read_located()`
 reads that file through the filesystem pipeline (`read_path()`) under the URL's identity, with the scheme's spec:
 
@@ -143,7 +142,7 @@ reads that file through the filesystem pipeline (`read_path()`) under the URL's 
   …]` notice, and a bare `:raw` of one is refused with omp's `Unbounded raw read blocked for <url> …` notice.
 - *unbounded* (`skill://`): read whole through the in-memory builder (entity `file`, no summary, no result limits,
   `[N more lines in file. Use :N to continue]`); a non-`:raw` read starts with `[Skill file: <backing path>]`.
-- *artifactStore* (`artifact://`): pages keep the full page budget and are never spilled.
+- *unspilledPages* (`local://`, where spills live): pages keep the full page budget and are never spilled.
 - in-body hints (`Line N is beyond end of file … Use <url>:1 …`, `more lines in file`, budget / omitted-line notices,
   the column-cap selector) name the URL; the summary footer names it too.
 - details: `meta.source = {type: internal, value: <url>}`, `contentType: text/markdown` for a Markdown backing file,
@@ -218,14 +217,18 @@ These port omp's `OutputSink` (`tui/src/tools/streaming-output.ts`), `output-met
 `session/artifacts.ts`, so bash, eval and read results are byte-identical to omp's:
 
 - `sanitizeText`: UTF-8 repair, ANSI/OSC/DCS/APC stripping, C0/C1 removal, CR/CRLF → LF.
-- Per-line cap `tools.outputMaxColumns` (768 bytes) with a `…` marker and an `artifact://N:raw:L-L`
+- Per-line cap `tools.outputMaxColumns` (768 bytes) with a `…` marker and a `local://N.log:raw:L-L`
   recovery notice.
 - Head window `tools.artifactHeadBytes` plus a rolling tail within
   `tools.artifactSpillThreshold` (50 KB). The middle is elided as `[…Nln elided…]` with a
-  `Read artifact://N for full output` notice.
-- Artifacts are stored as `<session file minus .jsonl>/<id>.<tool>.log`, numbered per session and
-  shared with subagents. Ids are allocated per bash/eval call. Files are capped at
-  `tools.artifactMaxBytes`, and they are copied when a session is forked.
+  `Read local://N.log for full output` notice (`[raw output: local://N.log]` on a capped bash result).
+- Spills (omp b279532036 folded `artifact://` into `local://`) are the files `<N>.log` at the session's `local://` root
+  (`<session file minus .jsonl>/local`, or `$TMPDIR/omc-local/<session id>` without a session file), read, listed and
+  written like any `local://` file. Ids are a per-session counter shared with subagents (they adopt the parent's store
+  and `local://` root); each id's file is created exclusively, so a model-written `N.log` is skipped, never clobbered.
+  Ids are allocated per bash/eval call. Files are capped at `tools.artifactMaxBytes`, and the session directory
+  (spills included) is copied recursively when a session is forked or moved. Old sessions' `artifact://N` links are
+  not migrated.
 - `tool_postprocess_result()` (the `after_tool` hook) spills any oversized result from any tool
   the same way and writes omp's `details.meta`.
 

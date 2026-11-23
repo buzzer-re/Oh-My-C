@@ -559,7 +559,7 @@ char *out_enforce_inline_cap(const char *text, size_t len, size_t max_bytes, con
     sb_appendn(&b, text + ts, len - ts);
     if (artifact_id) {
         if (!(b.len && b.s[b.len - 1] == '\n')) sb_putc(&b, '\n');
-        sb_appendf(&b, "[raw output: artifact://%s]", artifact_id);
+        sb_appendf(&b, "[raw output: local://%s.log]", artifact_id);
     }
     return sb_detach(&b);
 }
@@ -1270,10 +1270,10 @@ void out_meta_from_trunc(json_t **meta, const out_trunc_t *r, const char *direct
 static void full_output_ref(sb_t *b, const char *id, int64_t aeb) {
     if (aeb > 0) {
         char *f = out_format_bytes(aeb);
-        sb_appendf(b, "Read artifact://%s for a head/tail sample of the output; %s from its middle was not saved", id, f);
+        sb_appendf(b, "Read local://%s.log for a head/tail sample of the output; %s from its middle was not saved", id, f);
         free(f);
     } else {
-        sb_appendf(b, "Read artifact://%s for full output", id);
+        sb_appendf(b, "Read local://%s.log for full output", id);
     }
 }
 
@@ -1285,7 +1285,7 @@ static void truncation_notice(sb_t *b, const json_t *t, const json_t *source) {
     sb_t ref = SB_INIT;
     if (aid) {
         if (str_eq(json_get_str(source, "type"), "report"))
-            sb_appendf(&ref, "Read artifact://%s for full report (%s)", aid, json_get_str(source, "value"));
+            sb_appendf(&ref, "Read local://%s.log for full report (%s)", aid, json_get_str(source, "value"));
         else full_output_ref(&ref, aid, json_get_int(t, "artifactElidedBytes", 0));
     }
     int64_t total_lines = json_get_int(t, "totalLines", 0), total_bytes = json_get_int(t, "totalBytes", 0);
@@ -1432,7 +1432,7 @@ char *out_format_notice(const json_t *meta) {
         const char *aid = json_get_str(l, "artifactId");
         int64_t aeb = json_get_int(l, "artifactElidedBytes", 0);
         char *base = json_get_str(l, "selectorBase") ? xstrdup(json_get_str(l, "selectorBase"))
-                     : (aid && aeb <= 0)              ? xasprintf("artifact://%s", aid)
+                     : (aid && aeb <= 0)              ? xasprintf("local://%s.log", aid)
                                                       : NULL;
         const json_t *ln = json_get_obj(l, "lines");
         if (ln && base) {

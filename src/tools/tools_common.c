@@ -155,7 +155,7 @@ char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err) {
         free(p);
         return r;
     }
-    const char *schemes[] = {"skill://", "rule://", "artifact://"};
+    const char *schemes[] = {"skill://", "rule://"};
     size_t si = ARRAY_LEN(schemes);
     for (size_t i = 0; i < ARRAY_LEN(schemes); i++)
         if (str_starts(url, schemes[i])) si = i;
@@ -190,17 +190,6 @@ char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err) {
         const rule_t *r = discovery_find_rule(env->disc, target);
         if (!r) *err = xasprintf("Unknown rule: %s", target);
         else path = xstrdup(r->path);
-    } else {
-        /* artifact-protocol.ts parseArtifactId / resolveArtifactFile */
-        char *id = xstrndup(target, strcspn(target, "/?#"));
-        if (!*id) *err = xstrdup("artifact:// URL requires a numeric ID: artifact://0");
-        else if (id[strspn(id, "0123456789")]) *err = xasprintf("artifact:// ID must be numeric, got: %s", id);
-        else if (!env->artifacts) *err = xstrdup("No session - artifacts unavailable");
-        else {
-            path = artifacts_find(env->artifacts, id);
-            if (!path) *err = artifacts_missing_error(env->artifacts, id);
-        }
-        free(id);
     }
     free(target);
     if (!path) return NULL;

@@ -85,7 +85,7 @@ strings. In practice:
   socket, and writes are staged to a temp file next to the target and then copied over an existing
   regular file or moved into place (directories and special files are refused).
 - **Path clamping:** `local://` paths are normalized and clamped to the session's local root.
-  `skill://<name>/<file>` cannot escape the skill directory. `artifact://` ids reject `/` and `..`.
+  `skill://<name>/<file>` cannot escape the skill directory.
   Theme names, `omc://` doc names and embedded asset lookups reject `/` and `..`.
 - **Managed skills** (auto-learn) refuse symlinked roots, directories and `SKILL.md` files
   (`lstat`, `O_NOFOLLOW`, `O_EXCL`), enforce strict names, and cap the size at 64 KB.

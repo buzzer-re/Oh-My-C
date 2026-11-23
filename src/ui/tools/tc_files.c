@@ -29,7 +29,7 @@ bool tc_read_groupable(const json_t *args) {
     if (!p) return false;
     /* internal URL schemes render full cards in omp, unless their spec is compactTranscript (help://); filesystem /
      * external targets collapse */
-    static const char *internal[] = {"skill://", "rule://", "agent://", "artifact://", "local://", "memory://", "omp://",
+    static const char *internal[] = {"skill://", "rule://", "agent://", "local://", "memory://", "omp://",
                                      "proc://", "cfg://", "mcp://", "pr://", "issue://", "jobs://"};
     for (size_t i = 0; i < ARRAY_LEN(internal); i++)
         if (str_starts(p, internal[i])) return false;

@@ -124,7 +124,7 @@ static const struct {
 } SCHEMES[] = {
     {"skill", WS_NONE, false},   {"rule", WS_NONE, false},     {"memory", WS_NONE, false},
     {"out", WS_READ, false},     {"agent", WS_READ, false},    {"history", WS_NONE, false},
-    {"artifact", WS_NONE, false}, {"local", WS_READ, false},   {"proc", WS_EXEC, false},
+    {"local", WS_READ, false},   {"proc", WS_EXEC, false},
     {"cfg", WS_WRITE, false},    {"ssh", WS_EXEC, true},       {"security", WS_NONE, false},
     {"vault", WS_WRITE, false},  {"issue", WS_NONE, false},    {"pr", WS_NONE, false},
     {"mr", WS_NONE, false},      {"mcp", WS_NONE, false},      {"omp", WS_NONE, false},
