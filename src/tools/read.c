@@ -374,6 +374,21 @@ static int64_t page_budget(int64_t first_line, int64_t line_count, bool numbered
     return MIN(scaled, threshold - reserve);
 }
 
+/* buildInMemoryTextResult's byte budget (omp f441a32e1a): 50 KB capped by the spill threshold minus the row-prefix
+ * reserve, so a bounded page of an in-memory resource fits inline and keeps its continuation */
+static int64_t inmem_budget(int64_t first_line, int64_t line_count, bool numbered) {
+    int64_t threshold = (int64_t)tool_spill_threshold();
+    int64_t pw = 0;
+    if (numbered) {
+        char tmp[32];
+        pw = snprintf(tmp, sizeof tmp, "%lld", (long long)(first_line + line_count)) + 1;
+    }
+    return MIN((int64_t)READ_MAX_BYTES, threshold - MIN(line_count * pw, threshold / 2));
+}
+
+/* the page's first line did not fit the budget (firstLineExceedsLimit): such a page is never a paged source */
+static __thread bool g_first_cut;
+
 /* lineBudgetBytes: what a line costs against the page budget: the UTF-8 bytes of its column-capped display when a cap
  * applies (stray bytes show as 3-byte U+FFFD), so a cut line is charged what the reader sees, not its source size.
  * `display_columns` 0 charges source bytes (raw reads, cap off). */
@@ -487,6 +502,7 @@ static void page_meta(json_t *details, int64_t start_line, int64_t total, int64_
  * every other page shows a byte-capped preview; both carry the "partial" truncation notice. */
 static void first_line_page(sb_t *b, json_t *details, const char *line, int64_t line_no, int64_t total, int64_t budget, bool hashline,
                             bool numbered) {
+    g_first_cut = true;
     int64_t lb = (int64_t)strlen(line), keep = MIN(lb, budget);
     while (keep > 0 && keep < lb && ((unsigned char)line[keep] & 0xC0) == 0x80) keep--;
     char *fb = out_format_bytes(lb), *mb = out_format_bytes(budget);
@@ -575,6 +591,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
     const char *ent = sel->entity ? sel->entity : "file";
     sb_t b = SB_INIT;
     json_t *details = json_obj();
+    g_first_cut = false;
     g_col_max = sel->raw || sel->resource ? 0 : settings_int("tools.outputMaxColumns", 768); /* buildInMemoryTextResult keeps lines whole */
     g_col_first = g_col_last = g_col_first_bytes = 0;
     /* numbered pages charge a cut line its capped width, so the budget bounds what is shown */
@@ -676,7 +693,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         /* an in-memory resource has no default line limit: truncateHead's 50 KB / 3000-line budget pages it */
         int64_t limit = sel->resource ? MAX(total, 1) : DEFAULT_LIMIT;
         int64_t max_lines = sel->unlimited ? limit : MIN(limit, OUT_DEFAULT_MAX_LINES);
-        int64_t budget = sel->unlimited ? INT64_MAX / 4 : sel->resource ? (int64_t)READ_MAX_BYTES : page_budget(0, max_lines, numbered);
+        int64_t budget = sel->unlimited ? INT64_MAX / 4 : sel->resource ? inmem_budget(0, max_lines, numbered) : page_budget(0, max_lines, numbered);
         line_window_t w;
         collect_window(&t.lines, 0, max_lines, budget, limit, display_columns, &w);
         bool first_exceeds = w.n == 0 && w.stopped && can_first_exceed;
@@ -784,13 +801,14 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
             int64_t st = req - lead;
             int64_t max_lines = sel->unlimited ? eff + lead + trail : MIN(eff + lead + trail, OUT_DEFAULT_MAX_LINES);
             int64_t page_cols = sel->raw ? 0 : display_columns;
-            pg_budget = sel->unlimited ? INT64_MAX / 4 : page_budget(st, max_lines, numbered);
+            pg_budget = sel->unlimited ? INT64_MAX / 4 : sel->resource ? inmem_budget(st, max_lines, numbered) : page_budget(st, max_lines, numbered);
             collect_window(&t.lines, st, max_lines, pg_budget, eff + lead + trail, page_cols, &pw);
             /* Leading context is optional padding: a context line must not hide the page that was asked for. When the
              * context itself fit (a cut wide line can), keep it unless the retry shows the requested line: a requested
              * line too large alone keeps its "could not fit after preceding context" notice. */
             if (lead && pw.stopped && pw.n <= lead) {
-                int64_t retry_lines = MIN(eff + trail, OUT_DEFAULT_MAX_LINES), retry_budget = page_budget(req, retry_lines, numbered);
+                int64_t retry_lines = MIN(eff + trail, OUT_DEFAULT_MAX_LINES),
+                        retry_budget = sel->resource ? inmem_budget(req, retry_lines, numbered) : page_budget(req, retry_lines, numbered);
                 line_window_t rw;
                 collect_window(&t.lines, req, retry_lines, retry_budget, eff + trail, page_cols, &rw);
                 if (pw.n < lead || rw.n > 0) {
@@ -936,7 +954,10 @@ rendered:
         json_t *meta = json_get_obj(details, "meta");
         meta = meta ? json_clone(meta) : NULL;
         json_del(details, "meta");
-        if (meta) json_del(meta, "pagedSource"); /* the in-memory builders never mark a paged source */
+        /* the in-memory builder marks a page that fits inline as a paged source (omp f441a32e1a) unless it ignores result
+         * limits or its first line did not fit */
+        if (meta && (sel->unlimited || g_first_cut || b.len > tool_spill_threshold() + OUT_INLINE_CAP_SLACK_BYTES))
+            json_del(meta, "pagedSource");
         if (sel->raw) json_set_bool(details, "raw", true);
         json_set_int(details, "totalLines", total);
         if (!eof_only) { /* the beyond-EOF notice returns before these */
