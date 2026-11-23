@@ -215,7 +215,7 @@ usually because Bun, npm packages or Rust crates provide it in omp.
 | `tools/patch.c`, `sloppy.c`, `fuzzy.c`, `diff.c` | `crates/pi-edit` (replace/patch/apply_patch/sloppy, fuzzy ladder) |
 | `tools/outsink.c`, `artifacts.c` | `tui/src/tools/streaming-output.ts`, `output-meta.ts`, `coding-agent/src/tools/output-meta.ts`, `session/artifacts.ts`, `utils/src/sanitize-text.ts` |
 | `tools/jobs.c`, `services.c` | `coding-agent/src/async/*` (AsyncJobManager), `launch/*` |
-| `tools/xdev.c`, `vurl.c`, `github.c`, `ssh.c` | `tools/xdev.ts`, `internal-urls/*` |
+| `tools/toolcmd.c`, `toolcli.c`, `schema_ts.c`, `vurl.c`, `github.c`, `ssh.c` | `tools/tool-commands.ts`, `exec/tool-cli.ts`, `exec/tool-command-host.ts`, `tools/resolve.ts`, `internal-urls/*` |
 | `tools/shell.c` | `crates/pi-shell` (omp embeds a shell; omc keeps a persistent `bash`, each command a sourced file with its own output pipe, so `exec` redirections, `EXIT` traps and late job output end with the command) |
 | `mcp/mcp.c`, `mcp/oauth.c` | `coding-agent/src/mcp/*` |
 | `lsp/lsp.c` + `assets/lsp-servers.json` | `coding-agent/src/lsp/*` |

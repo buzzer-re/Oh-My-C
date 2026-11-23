@@ -4,7 +4,8 @@ crate set is unchanged and restarts it when a new Cargo.toml appeared (reloadWor
 initialize). Uses the fake server tests/e2e/bin-lsp/rust-analyzer.
 Usage: lsp_reload.py <omc> <mock request log> <models.yml> <dir>
 Prints "lsp reload ok" or the failing steps."""
-import json, os, shutil, subprocess, sys, time
+import json
+import shlex, os, shutil, subprocess, sys, time
 
 omc, reqlog, models, root = sys.argv[1:5]
 here = os.path.dirname(os.path.abspath(__file__))
@@ -42,11 +43,8 @@ def run(script):
     return texts, [json.loads(line) for line in open(log)]
 
 
-lsp = "xd://lsp"
-
-
-def call(args):
-    return ["write", {"path": lsp, "content": json.dumps(args)}]
+def call(args):  # the lsp tool runs as a bash tool command (omp de21c0ac45)
+    return ["bash", {"command": "lsp -j " + shlex.quote(json.dumps(args))}]
 
 
 texts, events = run([call({"action": "request", "file": "src/lib.rs", "query": "rust-analyzer/x", "payload": "null"})])

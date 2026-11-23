@@ -27,7 +27,10 @@ void jobs_set_notify(jobs_t *j, void (*fn)(void *ud), void *ud);
 /* explicit `async: true` bash job (fresh shell); returns owned job id (bg_N) */
 char *job_command_identity(const char *command);    /* commandIdentity (owned) */
 char *job_escape_harness_tags(const char *text);    /* escapeHarnessTags (owned) */
-char *jobs_start_bash(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *label, const char *intent);
+struct toolcmd_run;
+/* run: the call's tool commands (owned by the job, ended when its shell run ends; NULL: none) */
+char *jobs_start_bash(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *label, const char *intent,
+                      struct toolcmd_run *run);
 /* generic job of `type` ("task", "service", ...). id_hint NULL => bg_N; a taken id gets a -N suffix.
  * agent_id: subagent behind a task job (NULL otherwise). hidden: never listed (service watchers).
  * ud_free (may be NULL) releases ud after the job is reaped. Returns the owned job id. */
@@ -59,7 +62,7 @@ void job_set_output(bgjob_t *job, const char *text); /* live output/progress sho
 /* Start `cmd` as an attached (unlisted) foreground job; output is forwarded to cb while attached. `shell` is the
  * session's persistent shell (NULL => fresh shell); a busy shell falls back to a temporary one. Owned handle id. */
 char *jobs_start_bash_fg(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *intent, struct shell *shell,
-                         proc_output_cb cb, void *cb_ud);
+                         proc_output_cb cb, void *cb_ud, struct toolcmd_run *run);
 /* wait up to ms for an attached job; returns true once it finished. A set *cancel cancels the command. */
 bool jobs_fg_wait(jobs_t *j, const char *id, int64_t ms, volatile sig_atomic_t *cancel);
 /* take a finished attached job's raw result (removes the job); *notice (owned, may be NULL) explains a temporary shell */

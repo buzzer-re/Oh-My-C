@@ -642,5 +642,5 @@ void tc_render(const tc_call_t *c, int width, strvec_t *out) {
     else if (!strncmp(n, "mcp__", 5)) tc_mcp(c, width, out);
     else if (!strcmp(n, "lsp")) tc_lsp(c, width, out);
     else if (!strcmp(n, "github") && c->label) tc_github(c, width, out); /* omp: generic unless the tool is registered */
-    else tc_generic(c, width, out);
+    else if (!tc_resolve_tools(c, width, out)) tc_generic(c, width, out);
 }

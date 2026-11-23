@@ -1,7 +1,7 @@
 /* write + bash tools */
 #include "tools.h"
+#include "toolcmd.h"
 #include "jobs.h"
-#include "xdev.h"
 #include "services.h"
 #include "vurl.h"
 #include "iurl.h"
@@ -124,24 +124,12 @@ static char *unwrap_header(const char *p) {
     return inner;
 }
 
-static bool one_edit_away(const char *typo, const char *word) {
-    size_t a = strlen(typo), b = strlen(word);
-    if (!strcmp(typo, word) || (a > b ? a - b : b - a) > 1) return false;
-    size_t c = 0;
-    while (c < a && c < b && typo[c] == word[c]) c++;
-    const char *x = typo + c, *y = word + c;
-    size_t xl = a - c, yl = b - c;
-    if (xl && yl && !strcmp(x + 1, y + 1)) return true;
-    if (xl && !strcmp(x + 1, y)) return true;
-    if (yl && !strcmp(x, y + 1)) return true;
-    return xl >= 2 && yl >= 2 && x[0] == y[1] && x[1] == y[0] && !strcmp(x + 2, y + 2);
-}
-
 /* assertWriteTargetAddressable: URI-like targets no router scheme handles */
 static char *write_target_error(const char *target) {
-    static const char *const KNOWN[] = {"local", "xd",  "ssh",   "proc",     "agent", "history", "artifact",
-                                        "memory", "skill", "rule", "omp", "omc", "mcp", "pr",
-                                        "issue", "conflict", "jobs", "file", "out", "cfg"};
+    static const char *const KNOWN[] = {"skill", "rule",  "memory", "out",      "agent",      "history",  "local",
+                                        "proc",  "cfg",   "ssh",    "security", "vault",      "issue",    "pr",
+                                        "mr",    "mcp",   "omp",    "omc",      "help",       "attachment", "conflict",
+                                        "jobs",  "file"};
     char *t = str_trim(target);
     char *msg = NULL;
     size_t sl = 0;
@@ -155,19 +143,11 @@ static char *write_target_error(const char *target) {
     for (size_t i = 0; scheme && i < sizeof KNOWN / sizeof KNOWN[0]; i++)
         if (!strcmp(scheme, KNOWN[i])) known = true;
     if (scheme && t[sl] == ':' && t[sl + 1] == '/' && t[sl + 2] == '/' && known) goto done;
-    if (scheme && t[sl] == '/' && !strcmp(scheme, "xd")) {
-        const char *rest = t + sl;
-        while (*rest == '/') rest++;
-        msg = xasprintf("Unknown URI-like write target '%s'. Did you mean 'xd://%s'? Prefix the path with './' to write it "
-                        "as a filesystem path.",
-                        t, rest);
-        goto done;
-    }
+    if (scheme && known && !strcmp(scheme, "local") && t[sl] == ':' && t[sl + 1] == '/') goto done; /* `local:/x` */
     if (scheme && t[sl] == ':' && t[sl + 1] == '/') {
         const char *rest = t + sl + 2;
         if (*rest == '/') rest++;
-        char *sugg = known || one_edit_away(scheme, "xd") ? xasprintf(" Did you mean '%s://%s'?", known ? scheme : "xd", rest)
-                                                          : xstrdup(" Tool devices use 'xd://<tool>'.");
+        char *sugg = known ? xasprintf(" Did you mean '%s://%s'?", scheme, rest) : xstrdup("");
         msg = xasprintf("Unknown URI-like write target '%s'.%s Prefix the path with './' to write it as a filesystem path.",
                         t, sugg);
         free(sugg);
@@ -178,7 +158,6 @@ done:
     return msg;
 }
 
-/* restore the replaced file's BOM / CRLF convention (write.ts applyTextFileConvention) */
 static char *apply_text_convention(const char *abs, const char *content, bool *crlf_applied, bool *bom_applied) {
     *crlf_applied = *bom_applied = false;
     int fd = open(abs, O_RDONLY | O_CLOEXEC);
@@ -328,16 +307,6 @@ static char *read_projection_refusal(const char *display, const char *raw_conten
                            "less than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use "
                            "edit for a partial change.",
                            display);
-}
-
-/* a `lines` selector token (`raw`, `conflicts`, `raw:1-5`, `5`, `1-20`, `-30`, `L5`, `1-20,40`) after a URL's last ':' */
-static bool xd_selector_like(const char *s) {
-    if (!strncmp(s, "raw", 3) && (!s[3] || s[3] == ':')) s += s[3] ? 4 : 3;
-    else if (!strcmp(s, "conflicts")) return true;
-    if (!*s) return true;
-    for (const char *p = s; *p; p++)
-        if (!strchr("0123456789L-,.", *p)) return false;
-    return strpbrk(s, "0123456789") != NULL;
 }
 
 static int write_local(tool_env_t *env, tool_ctx_t *ctx, const char *raw_path, const char *raw_content, tool_result_t *out) {
@@ -568,51 +537,6 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         return 0;
     }
     if (!content) content = "";
-    if (!strcmp(path, "xd://resolve") || !strcmp(path, "xd://reject")) {
-        bool err = false;
-        char *r = astedit_resolve(env, !strcmp(path, "xd://resolve"), content, &err);
-        tool_result_text(out, r);
-        out->is_error = err;
-        free(r);
-        return 0;
-    }
-    if (!strcmp(path, "xd://propose")) { /* resolve.ts dispatchResolutionDevice */
-        if (!env->propose_plan) {
-            tool_result_error(out, "No plan is awaiting approval \xe2\x80\x94 xd://propose only accepts a plan title while plan mode is active.");
-            return 0;
-        }
-        char *title = str_trim(content);
-        bool err = false;
-        json_t *inner = NULL;
-        char *r = env->propose_plan(env, title, &err, &inner);
-        tool_result_text(out, r ? r : "");
-        out->is_error = err;
-        if (!err) { /* XdevDispatch {tool, mode, args, inner} on the write details */
-            json_t *x = json_obj(), *xa = json_obj();
-            json_set_str(x, "tool", "propose");
-            json_set_str(x, "mode", "execute");
-            json_set_str(xa, "title", title);
-            json_set(x, "args", xa);
-            if (inner) json_set(x, "inner", inner);
-            inner = NULL;
-            out->details = json_obj();
-            json_set(out->details, "xdev", x);
-        }
-        json_free(inner);
-        free(r);
-        free(title);
-        return 0;
-    }
-    /* router.peelWriteSelector: a device URL refuses every trailing selector, since approval judged the unpeeled URL
-     * (omp c51e68b454) */
-    if (!strncasecmp(path, "xd://", 5)) {
-        const char *colon = strrchr(path + 5, ':');
-        if (colon && xd_selector_like(colon + 1)) {
-            tool_result_error(out, "write does not accept the trailing selector \":%s\" on a device URL. Remove it.", colon + 1);
-            return 0;
-        }
-    }
-    if (xdev_write(ctx, path, content, out)) return 0;
     if (!str_starts(path, "ssh://")) return write_local(env, ctx, path, raw_content, out);
     char *err = NULL;
     size_t n = strlen(content);
@@ -649,7 +573,7 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
     return 0;
 }
 
-/* WriteTool.description: the archive/SQLite target grammar lives in xd://read/sources; it is inlined when that doc
+/* WriteTool.description: the archive/SQLite target grammar lives in help://read/sources; it is inlined when that doc
  * is unreachable (`read` off: docTopicsReadable) */
 static char *write_description(bool read_active) {
     json_t *ctx = json_obj();
@@ -985,6 +909,10 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         }
     }
     char *cmd = xstrdup(command);
+    strvec_t tc_names = {0};
+    toolcmd_run_t *tc_run = NULL;
+    bool auto_bg_run = false;
+    json_t *tc_records = NULL;
     const char *cwd_arg = json_get_str(args, "cwd");
     char *cwd = NULL;
     char *full = NULL;
@@ -1028,6 +956,17 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         bash_service(env, ctx, name, full, cwd, args, &notices, out);
         goto done;
     }
+    /* tool commands exist only in the session shell: a line naming one never leaves it */
+    toolcmd_names(ctx ? ctx->agent : NULL, &tc_names);
+    {
+        char *invoked = toolcmd_invoked(cmd, &tc_names);
+        if (invoked && json_get_bool(args, "pty", false)) {
+            tool_result_error(out, "`%s` is a session tool command and cannot run in a PTY; run it without `pty`.", invoked);
+            free(invoked);
+            goto done;
+        }
+        free(invoked);
+    }
     double tsec = json_get_num(args, "timeout", 300);
     double req_tsec = json_get(args, "timeout") ? tsec : -1;
     int64_t max_to = settings_int("tools.maxTimeout", 0);
@@ -1037,7 +976,9 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     int64_t timeout_ms = tsec > 0 ? (int64_t)(tsec * 1000) : 0;
     bool pty = json_get_bool(args, "pty", false);
     if (async_req && env->jobs) {
-        char *jid = jobs_start_bash(env->jobs, full, cwd, timeout_ms, NULL, ctx ? ctx->intent : NULL);
+        toolcmd_run_t *jrun = tc_names.n && !pty ? toolcmd_run_begin(ctx, env) : NULL;
+        if (jrun) toolcmd_run_detach(jrun);
+        char *jid = jobs_start_bash(env->jobs, full, cwd, timeout_ms, NULL, ctx ? ctx->intent : NULL, jrun);
         background_result(out, jid, NULL, &notices, tsec);
         free(jid);
         goto done;
@@ -1116,12 +1057,16 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     int64_t cap = MIN(100, settings_int("async.maxJobs", 100));
     bool auto_bg = !pty && env->jobs && async_on && settings_bool("bash.autoBackground.enabled", true) &&
                    (int64_t)jobs_running(env->jobs) < cap;
+    if (tc_names.n && !pty) tc_run = toolcmd_run_begin(ctx, env);
+    auto_bg_run = auto_bg && tc_run;
     int64_t t0 = mono_ms();
     proc_result_t r;
     if (auto_bg) {
         int64_t thr = settings_int("bash.autoBackground.thresholdMs", 60000);
         int64_t wait_ms = thr <= 0 ? 0 : timeout_ms ? MAX(0, MIN(thr, timeout_ms - 1000)) : thr;
-        char *fid = jobs_start_bash_fg(env->jobs, full, cwd, timeout_ms, ctx ? ctx->intent : NULL, persistent ? env->shell : NULL, bash_on_output, &bs);
+        toolcmd_run_ref(tc_run); /* the job ends the run with its shell; this call still reads its records */
+        char *fid = jobs_start_bash_fg(env->jobs, full, cwd, timeout_ms, ctx ? ctx->intent : NULL, persistent ? env->shell : NULL,
+                                       bash_on_output, &bs, tc_run);
         bool fin = false, steered = false;
         int64_t deadline = mono_ms() + wait_ms;
         for (;;) {
@@ -1138,6 +1083,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         if (!fin) {
             char *jid = jobs_fg_detach(env->jobs, fid);
             if (jid) {
+                toolcmd_run_detach(tc_run);
                 if (steered) strvec_push(&notices, "Backgrounded early to handle an incoming message; the command keeps running.");
                 char *pv = out_sink_preview(bs.sink);
                 background_result(out, jid, pv, &notices, tsec);
@@ -1171,15 +1117,32 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
                          .cancel = ctx->cancel,
                          .on_output = bash_on_output,
                          .ud = &bs};
+        char *pre = tc_run ? toolcmd_run_preamble(tc_run) : NULL;
+        o.shell_preamble = pre;
         int rc = (!pty && persistent) ? shell_run(env->shell, full, cwd, &o, &r) : shell_exec_once(full, &o, &r);
         if (rc != 0 && !r.spawn_errno) r.spawn_errno = errno ? errno : EIO;
+        free(pre);
     }
     int64_t dur = mono_ms() - t0;
+    if (tc_run) tc_records = toolcmd_run_records(tc_run);
     bash_finish(env, out, &r, &bs, tsec, req_tsec, timeout_ms, cwd, dur, &notices);
     out_redirect_collect(&reply_files, out);
     out_sink_free(bs.sink);
     proc_result_free(&r);
 done:
+    /* details.toolCommands: each tool command the run dispatched, in invocation order */
+    if (json_len(tc_records) && (out->details || !out->is_error)) {
+        if (!out->details) out->details = json_obj();
+        json_set(out->details, "toolCommands", tc_records);
+        tc_records = NULL;
+    }
+    json_free(tc_records);
+    if (tc_run) {
+        /* the auto-background job owns the run (its shell may still call); a direct run is over */
+        if (auto_bg_run) toolcmd_run_unref(tc_run);
+        else toolcmd_run_end(tc_run);
+    }
+    strvec_free(&tc_names);
     /* details.cwd / cdSeparator: the directory the command actually ran in (a thrown error carries no details) */
     if (ran_cwd && (out->details || !out->is_error)) {
         if (!out->details) out->details = json_obj();

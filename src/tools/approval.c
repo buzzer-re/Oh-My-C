@@ -8,7 +8,7 @@
 #include "text/rxbt.h"
 #include "tools/hashline.h"
 #include "tools/patch.h"
-#include "tools/xdev.h"
+#include "tools/toolcmd.h"
 #include "tui/ansi.h"
 
 #include <ctype.h>
@@ -28,7 +28,6 @@
 #define FOLDER_FULL_LISTING 24
 #define FOLDER_COMPACT_LISTING 4
 #define FOLDER_SCAN_LIMIT 200
-#define XD_DEPTH_MAX 8
 
 static const char *const TIER_NAMES[] = {"read", "write", "exec"};
 static const char *const MODE_NAMES[] = {"always-ask", "always-ask-cached", "write", "yolo"};
@@ -117,7 +116,7 @@ static bool is_readable_url(const char *s) {
 
 /* ---------- internal URL schemes (internal-urls/router.ts) ---------- */
 
-typedef enum { WS_NONE, WS_READ, WS_WRITE, WS_EXEC, WS_XD } write_spec_t;
+typedef enum { WS_NONE, WS_READ, WS_WRITE, WS_EXEC } write_spec_t;
 static const struct {
     const char *scheme;
     write_spec_t write; /* WS_NONE: read-only scheme */
@@ -129,7 +128,7 @@ static const struct {
     {"cfg", WS_WRITE, false},    {"ssh", WS_EXEC, true},       {"security", WS_NONE, false},
     {"vault", WS_WRITE, false},  {"issue", WS_NONE, false},    {"pr", WS_NONE, false},
     {"mr", WS_NONE, false},      {"mcp", WS_NONE, false},      {"omp", WS_NONE, false},
-    {"xd", WS_XD, false},        {"attachment", WS_NONE, false}, {"conflict", WS_WRITE, false},
+    {"help", WS_NONE, false},    {"attachment", WS_NONE, false}, {"conflict", WS_WRITE, false},
 };
 
 static int scheme_index(const char *name, size_t n) {
@@ -192,34 +191,6 @@ static approval_tier_t read_tier(const char *text) {
 
 static void tool_decision_depth(const approval_call_t *c, approval_decision_t *out, int depth);
 
-/* xd-protocol.ts deviceWriteTier */
-static void xd_write_tier(const approval_call_t *c, const char *url, const json_t *content, approval_decision_t *out,
-                          int depth) {
-    dec_tier(out, TIER_EXEC);
-    const char *rest = url + 5; /* "xd://" */
-    if (!*rest || strpbrk(rest, "/?#")) return;
-    if (!strcmp(rest, "report_issue")) {
-        out->tier = TIER_WRITE;
-        return;
-    }
-    if (!strcmp(rest, "resolve") || !strcmp(rest, "reject") || !strcmp(rest, "propose")) {
-        out->tier = TIER_READ;
-        return;
-    }
-    agent_tool_t *inst = c->agent ? xdev_resolve_tool(c->agent, rest) : NULL;
-    if (!inst || !json_is_str(content) || depth >= XD_DEPTH_MAX) return;
-    json_t *parsed = json_parse_str(json_sv(content));
-    if (json_is_obj(parsed)) {
-        approval_call_t sub = {c->env, c->agent, inst->name, parsed};
-        approval_decision_t d;
-        tool_decision_depth(&sub, &d, depth + 1);
-        out->tier = d.tier;
-        out->policy_key = xstrdup(inst->name); /* the canonical tool: `xd://apply_patch` follows tools.approval.edit */
-        approval_decision_free(&d);
-    }
-    json_free(parsed);
-}
-
 /* router.writeTier */
 static void write_tier(const approval_call_t *c, const char *target, const json_t *content, approval_decision_t *out,
                        int depth) {
@@ -236,7 +207,6 @@ static void write_tier(const approval_call_t *c, const char *target, const json_
         case WS_READ: dec_tier(out, TIER_READ); break;
         case WS_WRITE: dec_tier(out, TIER_WRITE); break;
         case WS_EXEC: dec_tier(out, TIER_EXEC); break;
-        case WS_XD: xd_write_tier(c, n, content, out, depth); break;
         }
     }
     free(n);
@@ -1089,7 +1059,17 @@ static const bash_rule_t *bash_pattern_rule(const char *command, const bash_rule
     return NULL;
 }
 
-static void bash_decision(const json_t *args, approval_decision_t *out) {
+/* isToolCommandLine over the session's tool command names */
+static bool bash_tool_command_line(const approval_call_t *c, const char *command) {
+    if (!c->agent) return false;
+    strvec_t names = {0};
+    toolcmd_names(c->agent, &names);
+    bool r = toolcmd_is_line(command, &names);
+    strvec_free(&names);
+    return r;
+}
+
+static void bash_decision(const approval_call_t *c, const json_t *args, approval_decision_t *out) {
     const char *command = json_get_str(args, "command");
     if (!command) command = "";
     bash_rule_t *rules, *arules;
@@ -1123,6 +1103,8 @@ static void bash_decision(const json_t *args, approval_decision_t *out) {
     } else if (approval_bash_critical(command)) {
         out->override = true;
         out->reason = xstrdup("Critical pattern detected");
+    } else if (bash_tool_command_line(c, command)) {
+        out->tier = TIER_READ; /* each tool command passes its own approval when it runs; the line itself only reads */
     } else if (rule && rule->pol == APOL_ALLOW) {
         out->tier = TIER_WRITE;
         out->policy = APOL_ALLOW;
@@ -1218,7 +1200,7 @@ static void tool_decision_depth(const approval_call_t *c, approval_decision_t *o
         for (size_t i = 0; i < n; i++) approval_decision_free(&ds[i]);
         free(ds);
     } else if (!strcmp(t, "bash")) {
-        bash_decision(args, out);
+        bash_decision(c, args, out);
     } else if (!strcmp(t, "grep") || !strcmp(t, "glob") || !strcmp(t, "ast_grep") || !strcmp(t, "find")) {
         dec_tier(out, search_path_tier(args));
     } else if (!strcmp(t, "github")) {
@@ -1237,8 +1219,10 @@ static void tool_decision_depth(const approval_call_t *c, approval_decision_t *o
         bool w = json_truthy(json_get(args, "skill")) || str_eq(json_get_str(args, "scope"), "global") ||
                  str_eq(settings_str("memory.backend", "off"), "local");
         dec_tier(out, w ? TIER_WRITE : TIER_READ);
-    } else if (!strcmp(t, "manage_skill")) {
+    } else if (!strcmp(t, "manage_skill") || !strcmp(t, "report_issue")) {
         dec_tier(out, TIER_WRITE);
+    } else if (!strcmp(t, "resolve") || !strcmp(t, "reject") || !strcmp(t, "propose")) {
+        dec_tier(out, TIER_READ);
     } else if (in_list(t, READ_TOOLS)) {
         dec_tier(out, TIER_READ);
     } else if (str_starts(t, "mcp__")) {
@@ -1360,14 +1344,8 @@ static void details_raw(const approval_call_t *c, strvec_t *out) {
         const char *p = json_get_str(args, "path");
         const char *target = p ? p : "(missing)";
         const char *content = json_get_str(args, "content");
-        char *u = unwrap_header_path(target);
-        bool xd = !strncasecmp(u, "xd:", 3);
-        free(u);
-        json_t *parsed = xd && content ? json_parse_str(content) : NULL;
         push_tr(out, "Path: ", target);
-        if (parsed) approval_format_arguments(parsed, true, out);
-        else push_tr(out, "Content:\n", content ? content : "");
-        json_free(parsed);
+        push_tr(out, "Content:\n", content ? content : "");
     } else if (!strcmp(t, "edit")) {
         edit_inspection_t x;
         edit_inspect(c, &x);

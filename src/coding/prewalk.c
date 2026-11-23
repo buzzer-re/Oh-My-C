@@ -1,4 +1,5 @@
 /* prewalk.c - one-shot model handoff (session/prewalk.ts). See prewalk.h. */
+#include "tools/toolcmd.h"
 #include "coding/prewalk.h"
 
 #include "coding/app.h"
@@ -224,17 +225,22 @@ int prewalk_restart(app_t *a, const ai_model_t *source, const char *source_level
     return r;
 }
 
-/* a direct edit/write (an xd:// device write needs the write approval tier: omc's dispatch records none) */
+/* prewalkImplementationTool: a direct edit/write (unless it touched no files), or a `bash` run through a tool command
+ * whose wrapped tool resolved to the `write` approval tier (not an MCP tool declared read-only); exec-tier commands
+ * count no more than a plain shell command (omp 60ef4a2e80) */
 static bool implementation_action(const json_t *r) {
     const char *tn = json_get_str(r, "toolName");
-    if (!str_eq(tn, "edit") && !str_eq(tn, "write")) return false;
-    /* a write that touched no files (a peer message, a reply, a cancellation) is coordination, not implementation */
-    if (json_get_bool(json_get(r, "details"), "touchesNoFiles", false)) return false;
-    const json_t *x = json_get(json_get(r, "details"), "xdev");
-    if (!x || json_is_null(x)) return true;
-    const char *tier = json_get_str(x, "tier");
-    if (!str_eq(tier, "write")) return false; /* exec-tier devices count no more than bash itself (omp 60ef4a2e80) */
-    return !json_get_bool(x, "readOnlyHint", false);
+    if (str_eq(tn, "edit") || str_eq(tn, "write")) {
+        /* a write that touched no files (a peer message, a reply, a cancellation) is coordination, not implementation */
+        return !json_get_bool(json_get(r, "details"), "touchesNoFiles", false);
+    }
+    const json_t *d = toolcmd_dispatches(tn, json_get(r, "details")), *x;
+    json_arr_foreach(d, i, x) {
+        if (str_eq(json_get_str(x, "mode"), "execute") && str_eq(json_get_str(x, "tier"), "write") &&
+            !json_get_bool(x, "readOnlyHint", false))
+            return true;
+    }
+    return false;
 }
 
 static bool todo_active(app_t *a) {

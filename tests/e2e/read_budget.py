@@ -126,9 +126,9 @@ check("context retry", s.get(2) == "y" * 300, sorted(s))
 put("repeat.txt", "a\nb\n")
 t = calls([["read", {"path": "repeat.txt"}]] * 3)
 check("repeat hint", "[You have received this identical output 3 times. Re-reading 'repeat.txt' will not change it \u2014 use a narrower selector (path:A-B), or proceed with the edit.]" in t, t)
-t = calls([["read", {"path": "xd://debug"}]] * 3)
-# xd:// docs take line selectors since omp c51e68b454, so their hint suggests one too
-check("repeat hint xd://", "identical output 3 times" in t and "use a narrower selector (path:A-B), or proceed with the edit.]" in t, t[-300:])
+t = calls([["read", {"path": "help://read/urls"}]] * 3)
+# help:// docs take line selectors (omp c51e68b454), so their hint suggests one too
+check("repeat hint help://", "identical output 3 times" in t and "use a narrower selector (path:A-B), or proceed with the edit.]" in t, t[-300:])
 t = calls([["read", {"path": "repeat.txt"}]] * 2)
 check("no hint on second read", "identical output" not in t, t)
 

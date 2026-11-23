@@ -26,7 +26,7 @@
 #include "tools/jobs.h"
 #include "coding/jobcaption.h"
 #include "tools/patch.h"
-#include "tools/xdev.h"
+#include "tools/toolcmd.h"
 #include "agents.h"
 
 #include "config/auth.h"
@@ -908,9 +908,9 @@ static tool_gate_t hook_before_tool(void *ud, agent_t *ag, const json_t *call, c
     json_t *args = json_get(call, "arguments");
     if (str_eq(name, "write")) {
         const char *p = json_get_str(args, "path");
-        if (p && (str_starts(p, "local://") || !strcmp(p, "xd://propose"))) return TOOL_ALLOW;
+        if (p && str_starts(p, "local://")) return TOOL_ALLOW;
         *reason = xstrdup("Plan mode is active: the working tree is read-only. Write plans to local://<slug>-plan.md and "
-                          "propose with xd://propose.");
+                          "submit them with `propose`.");
         return TOOL_BLOCK;
     }
     if (str_eq(name, "edit")) {
@@ -1731,13 +1731,15 @@ static void install_agent(app_t *a) {
     if (!a->opts.no_tools && !a->opts.subagent && settings_bool("generate_image.enabled", false) &&
         (!a->opts.tools || strvec_contains(a->opts.tools, "generate_image")))
         agent_add_tool(ag, imagegen_tool_new(a));
-    /* discoverable (xd://-mountable) tools added outside tools_register_builtin; MCP tools too */
+    /* discoverable (command-mountable) tools added outside tools_register_builtin; MCP tools too */
     for (size_t i = 0; i < ag->all_tools.n; i++) {
         agent_tool_t *t = ag->all_tools.v[i];
         if (str_eq(t->name, "lsp") || str_eq(t->name, "debug") || str_eq(t->name, "github") || str_eq(t->name, "checkpoint") ||
             str_eq(t->name, "rewind") || str_starts(t->name, "mcp__"))
             t->discoverable = true;
     }
+    /* resolve / reject / propose / report_issue: commands while bash is on, top-level otherwise */
+    if (!a->opts.no_tools) toolcmd_register_special(ag, a->env);
     tools_finalize(ag, a->opts.tools);
 }
 
@@ -1753,7 +1755,7 @@ void app_rebuild_system_prompt(app_t *a) {
         if (a->agent->tools.v[i]->label) json_set_str(labels, a->agent->tools.v[i]->name, a->agent->tools.v[i]->label);
     }
     char *label = app_model_label(a);
-    json_t *xdev_tools = xdev_entries(a->agent);
+    json_t *mounted = toolcmd_entries(a->agent);
     /* sdk.ts appendParts: memory backend instructions, then auto-learn guidance (driven by the tools present) */
     sb_t gen = SB_INIT;
     char *mem = memory_instructions(a);
@@ -1765,13 +1767,13 @@ void app_rebuild_system_prompt(app_t *a) {
     /* mounted MCP route guidance (a routed tool carries its catalog summary on the route line, no catalog line),
      * then the connected servers' instructions */
     strvec_t routed = {0};
-    char *routes = xdev_mcp_route_guidance(a->agent, &routed);
+    char *routes = toolcmd_mcp_guidance(a->agent, &routed);
     if (routes) sb_appendf(&gen, "%s%s", gen.len ? "\n\n" : "", routes);
     free(routes);
     char *mi = a->mcp ? mcp_instructions(a->mcp) : NULL;
     if (mi && *mi) sb_appendf(&gen, "%s%s", gen.len ? "\n\n" : "", mi);
     free(mi);
-    char *xdev_docs = json_len(xdev_tools) ? xdev_prompt_docs_ex(a->agent, &routed) : xstrdup("");
+    char *tc_docs = json_len(mounted) ? toolcmd_prompt_docs(a->agent, &routed) : xstrdup("");
     strvec_free(&routed);
     strvec_t roots = {0};
     if (a->session) roots = session_additional_dirs(a->session);
@@ -1790,9 +1792,9 @@ void app_rebuild_system_prompt(app_t *a) {
                            .skill_desc = skilldesc_render,
                            .skill_desc_ud = a->skilldesc,
                            .tool_labels = labels,
-                           .xdev_tools = xdev_tools,
-                           .xdev_docs = xdev_docs,
-                           .auto_qa = !a->opts.tools && xdev_autoqa_enabled(),
+                           .mounted_commands = mounted,
+                           .tool_command_docs = tc_docs,
+                           .auto_qa = !a->opts.tools && toolcmd_autoqa_enabled(),
                            .tool_refs = refs,
                            .delegation_bias = model_delegation_bias(a->model),
                            .irc_enabled = !a->opts.tools && agent_find_tool(a->agent, "task") != NULL,
@@ -1803,11 +1805,12 @@ void app_rebuild_system_prompt(app_t *a) {
     sb_free(&gen);
     json_free(labels);
     json_free(refs);
-    json_free(xdev_tools);
-    free(xdev_docs);
+    json_free(mounted);
     if (a->plan_mode) {
         json_t *pc = json_obj();
         json_set_str(pc, "writeToolName", "write");
+        json_set_str(pc, "bashToolName", "bash");
+        json_set_bool(pc, "proposeIsCommand", toolcmd_transport_active(a->agent));
         json_set_str(pc, "editToolName", "edit");
         json_set_str(pc, "askToolName", "ask");
         json_set_bool(pc, "askAvailable", agent_find_tool(a->agent, "ask") != NULL);
@@ -1824,9 +1827,10 @@ void app_rebuild_system_prompt(app_t *a) {
         free(pm);
         json_free(pc);
     }
-    /* xdevCatalogNames: the mounted devices count as delivered when block 0 carries the xd:// section */
+    /* toolCommandCatalogNames: the mounted commands count as delivered when block 0 carries the tool-command docs */
     const char *b0 = json_sv(json_at(blocks, 0));
-    xdnotice_base_rebuilt(a, !a->sys_custom && b0 && strstr(b0, "xd://") && xdev_mounted_count(a->agent) > 0);
+    xdnotice_base_rebuilt(a, !a->sys_custom && b0 && *tc_docs && strstr(b0, tc_docs));
+    free(tc_docs);
     agent_set_system_prompt_parts(a->agent, blocks);
     free(label);
     strvec_free(&names);
@@ -3465,7 +3469,7 @@ int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
     json_arr_foreach(notices, i, img) json_push(msgs, json_clone(img));
     json_free(notices);
     a->think_force = a->forced_step == 0; /* the turn's first request (a pending /force directive wins) */
-    /* the pending xd:// mount delta rides with the next user prompt, right before it */
+    /* the pending tool-command mount delta rides with the next user prompt, right before it */
     json_t *xn = xdnotice_take(a);
     if (xn) json_push(msgs, xn);
     json_t *sn = autolearn_take_skill_notice(a); /* skills written or found since the prompt listed them */

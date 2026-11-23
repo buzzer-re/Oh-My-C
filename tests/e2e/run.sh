@@ -61,13 +61,19 @@ check "intent stripped" "Tool said: hi-intent"           "$B" --model mock/mock-
 check "bash cd hoist"  "Tool said: Working directory does not exist: /nonexistent-omc-cd" "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /nonexistent-omc-cd && echo hi"}'
 check "bash cd semi"   "after-cd"                         "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /nonexistent-omc-cd; echo after-cd"}'
 check "bash cd root"   "Tool said: /"                     "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /; pwd"}'
-# xd:// devices: discoverable tools are mounted, listed, documented and dispatched through read/write
-check "xd listing"     "mounted tool devices"             "$B" --model mock/mock-1 -p "read:xd://"
-check "xd docs"        "type Args = {"                    "$B" --model mock/mock-1 -p "read:xd://debug"
-check "xd dispatch"    "Invalid args for xd://lsp: Validation failed" "$B" --model mock/mock-1 -p 'call:write:{"path":"xd://lsp","content":"{\"action\":\"bogus\"}"}'
-check "xd report"      "Noted, thanks!"                   "$B" --model mock/mock-1 -p 'call:write:{"path":"xd://report_issue","content":"read: wrong output"}'
-# a device called with the xd:// prefix spelled in underscores dispatches to it (omp dd536ce059)
-check "xd underscore call" "debug session"                "$B" --model mock/mock-1 -p 'call:xd__debug:{"action":"sessions"}'
+# tool commands: discoverable tools run as bash commands (`<tool> --help`, `<tool> args`, `-j` JSON), recorded on the
+# bash result as details.toolCommands; doc topics are help://<tool>/<topic> (omp de21c0ac45)
+tc() { python3 -I -c 'import json,shlex,sys; print("call:bash:"+json.dumps({"command": sys.argv[1]+" -j "+shlex.quote(sys.argv[2])}))' "$1" "$2"; }
+check "tc help"        $'Usage:\n  debug <action> [OPTIONS] [@FILE] [-]'  "$B" --model mock/mock-1 -p "bash:debug --help"
+check "tc dispatch"    'Invalid arguments for lsp: Validation failed for tool "lsp":'  "$B" --model mock/mock-1 -p "$(tc lsp '{"action":"bogus"}')"
+check "tc usage"       $'lsp: invalid value for `bogus`; expected an enum member\nlsp: run `lsp --help`'  "$B" --model mock/mock-1 -p "bash:lsp bogus"
+check "tc pipeline"    $'No active debug session.\nok'  "$B" --model mock/mock-1 -p "bash:echo x | debug sessions && echo ok"
+check "tc report"      "Noted, thanks!"                   "$B" --model mock/mock-1 -p 'bash:report_issue "read: wrong output"'
+# a direct call by a mounted command's exact name still runs it (sdk.ts resolveToolCommandTool)
+check "tc direct call" "Tool said: No active debug session."  "$B" --model mock/mock-1 -p 'call:debug:{"action":"sessions"}'
+check "tc records"     '"toolCommands":[{"tool":"debug","mode":"help","exitCode":0},{"tool":"debug","mode":"execute","exitCode":0,"args":{"action":"sessions"},"tier":"read","inner":{"action":"sessions","success":true}}]'  "$B" --model mock/mock-1 --mode json -p "bash:debug --help >/dev/null; debug sessions"
+check "help topics"    $'Tool said: help://read/sources\nhelp://read/urls'  "$B" --model mock/mock-1 -p "read:help://read"
+check "help unknown"   "Unknown topic 'nope' for read. Available: sources, urls."  "$B" --model mock/mock-1 -p "read:help://read/nope"
 check "glob tool"      $'Tool said: # a/\nb.txt'          "$B" --model mock/mock-1 -p "glob:**/*.txt"
 check "grep tool"      "*1:written by omc"               "$B" --model mock/mock-1 -p "grep:written"
 # grep / glob result text as omp words it (grouped path tree, errors, empty results)
@@ -164,11 +170,8 @@ CTAG=$(timeout 30 "$B" --model mock/mock-1 -p "read:blk.c" </dev/null | grep -o 
 check "edit block"     "PUT 1*: → resolved lines 1-3 (3 lines)"  "$B" --model mock/mock-1 -p "edit:[blk.c#$CTAG]\nPUT 1*:\n+int f(void) { return 2; }"
 printf 'a\r\nb\r\n' > crlf.txt
 check "write crlf"     "Note: kept the replaced file's CRLF line endings."  "$B" --model mock/mock-1 -p 'call:write:{"path":"crlf.txt","content":"x\ny\n"}'
-# xd://<wire alias> reaches the canonical tool: edit runs as apply_patch in apply_patch mode (omp 3eed7ca5ae, d247d81d34)
-check "xd:// wire alias" "[xdap.txt]"  env PI_EDIT_VARIANT=apply_patch "$B" --model mock/mock-1 --no-session -p 'seq:[["write",{"path":"xd://apply_patch","content":"{\"input\":\"*** Begin Patch\\n*** Add File: xdap.txt\\n+hi\\n*** End Patch\\n\"}"}]]'
-# xd:// docs take line selectors; a selector on a device write is refused (omp c51e68b454)
-check "xd:// doc range"  "more lines in resource. Use :6 to continue]"  "$B" --model mock/mock-1 --no-session -p 'call:read:{"path":"xd://ast_edit:1-2"}'
-check "xd:// write selector" 'write does not accept the trailing selector ":raw" on a device URL. Remove it.'  "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://ast_edit:raw","content":"{}"}'
+# help:// docs take line selectors (omp c51e68b454, de21c0ac45)
+check "help doc range"  "more lines in resource. Use :6 to continue]"  "$B" --model mock/mock-1 --no-session -p 'call:read:{"path":"help://read/sources:1-2"}'
 check "write no content" "content: content must be a string (was missing)"  "$B" --model mock/mock-1 -p 'call:write:{"path":"nc.txt"}'
 check "write eisdir"   "EISDIR: illegal operation on a directory, open '"  "$B" --model mock/mock-1 -p "write:a:x"
 # non-interactive env: a config-file sequence.editor and GCM prompts must not hang a command
@@ -464,7 +467,7 @@ if command -v python3 >/dev/null; then
     printf "python:\n  interpreter: $T/fakepy\n" > "$T/agent/config.yml"
     check "eval init exit" "Python kernel init failed: Python kernel exited with code 3; its last stderr output: no module named boom"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"1"}'
     rm -f "$T/agent/config.yml"
-    # eval helpers: completion/wait, judge, judge_batch (drain/iter/attach/cancel/min_ok), budget, timeouts, xd://eval docs
+    # eval helpers: completion/wait, judge, judge_batch (drain/iter/attach/cancel/min_ok), budget, timeouts, help://eval docs
     python3 -I "$ROOT/tests/e2e/eval_client.py" "$B" || fail=1
 fi
 # checkpoint / rewind (off by default: checkpoint.enabled)
@@ -539,9 +542,9 @@ check "rpc host exclusive"  "host exclusive ok"  python3 -I "$ROOT/tests/e2e/hos
 # branch summary on navigation (WP-8): omp's branch_summary entry at the new leaf and summarizer request
 check "branch summary entry" $'summary leaf True fromId parent True\nsummary "User explored another conversation branch, then returned here.\\nExploration summary:plain answer"\ndetails {"readFiles": [], "modifiedFiles": []} fromExtension False' python3 -I "$ROOT/tests/e2e/rpc_tree.py" "$B" "$T/req.jsonl"
 check "branch summary request" 'request "<conversation>\n\n\nAssistant: plain answer\n</conversation>\n\nYou MUST create a structured summary' python3 -I "$ROOT/tests/e2e/rpc_tree.py" "$B" "$T/req.jsonl"
-# plan mode without a review surface: xd://propose auto-approves (ACP-without-elicitation semantics)
+# plan mode without a review surface: `propose` auto-approves (ACP-without-elicitation semantics)
 check "plan propose"   'Tool said: Plan approved at local://retry-plan.md. Plan mode exited; proceed with the implementation.' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-mode
-check "plan propose dispatch" '"xdev": {"args": {"title": "retry"}, "inner": {"planExists": true, "planFilePath": "local://retry-plan.md", "title": "retry"}, "mode": "execute", "tool": "propose"}' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-mode
+check "plan propose dispatch" '"toolCommands": [{"args": {"title": "retry"}, "exitCode": 0, "inner": {"planExists": true, "planFilePath": "local://retry-plan.md", "title": "retry"}, "mode": "execute", "tier": "read", "tool": "propose"}]' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-mode
 # omp 5fd26783af: the approval is recorded, so a resumed session trusts only an approved plan as its reference
 check "plan approval entry" '"mode":"none","data":{"approvedPlanFilePath":"local://retry-plan.md"}' bash -c 'grep -ho "\"mode\":\"none\",\"data\":{[^}]*}" $(ls -t "$0"/agent/sessions/*/*.jsonl | head -1)' "$T"
 check "plan propose off" 'No plan is awaiting approval' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B"
@@ -812,7 +815,7 @@ check "cursor text"     "plain cursor answer"   "${CENV[@]}" "$B" --model "$CM" 
 check "cursor shell"    "Tool said: cur-e2e"    "${CENV[@]}" "$B" --model "$CM" --session-dir "$T/cur" -p "bash:echo cur-e2e"
 check "cursor history"  "user,assistant,tool,assistant"  "${CENV[@]}" "$B" --model "$CM" --session-dir "$T/cur" -c -p "history"
 check "cursor read"     "Read said: cursor line one"     "${CENV[@]}" "$B" --model "$CM" --no-session -p "read:$T/cur/r.txt"
-check "cursor xd read"  "Read said: # debug"              "${CENV[@]}" "$B" --model "$CM" --no-session -p "read:xd://debug"
+check "cursor help read" "Read said: help://read/sources"  "${CENV[@]}" "$B" --model "$CM" --no-session -p "read:help://read"
 printf 'orig\n' > "$T/cur/e.txt"
 check "cursor edit order" "Order: write,shell; Shell said: edited"  "${CENV[@]}" "$B" --model "$CM" --no-session -p "editorder:$T/cur/e.txt"
 printf 'orig\n' > "$T/cur/e2.txt"
@@ -915,13 +918,14 @@ if command -v clangd >/dev/null; then
     # omp only configures servers whose root markers exist in the cwd (.clangd here)
     mkdir -p lspw && pushd lspw >/dev/null && : > .clangd
     printf 'static int add(int a, int b) { return a + b; }\nint main(void) { return add(1, 2); }\n' > l.c
-    lsp() { echo "call:write:{\"path\":\"xd://lsp\",\"content\":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1")}"; }
+    lsp() { tc lsp "$1"; }
     check "lsp status"      "Language servers: clangd (configured, not started)" "$B" --model mock/mock-1 -p "$(lsp '{"action":"status"}')"
     check "lsp definition"  $'Found 1 definition(s):\n  l.c:1:12\n    1: static int add'  "$B" --model mock/mock-1 -p "$(lsp '{"action":"definition","file":"l.c","line":2,"symbol":"add"}')"
     check "lsp symbols"     $'Symbols in l.c:\n\xe2\x9f\xb2 add int (int, int) @ line 1'  "$B" --model mock/mock-1 -p "$(lsp '{"action":"symbols","file":"l.c"}')"
     check "lsp no symbol"   'LSP error: Symbol "nope" not found on line 2'  "$B" --model mock/mock-1 -p "$(lsp '{"action":"hover","file":"l.c","line":2,"symbol":"nope"}')"
+    printf 'int main(void) { return nope; }\n' > bad.c
     check "lsp diagnostics" $'1 error(s):\n# bad.c\n  1:25 [error] [clang] Use of undeclared identifier \'nope\' (undeclared_var_use)' \
-        bash -c "printf 'int main(void) { return nope; }\n' > bad.c; '$B' --model mock/mock-1 -p '$(lsp '{"action":"diagnostics","file":"bad.c"}')'"
+        "$B" --model mock/mock-1 -p "$(lsp '{"action":"diagnostics","file":"bad.c"}')"
     check "lsp write diags" $'\n\nLSP Diagnostics (1 error(s)):\n# bad2.c\n  1:25 [error] [clang] Use of undeclared identifier'  "$B" --model mock/mock-1 -p 'write:bad2.c:int main(void) { return nope; }'
     popd >/dev/null
 fi
@@ -965,10 +969,10 @@ kill $APID 2>/dev/null
 # github tool + pr:// / issue:// through the fake `gh` (tests/e2e/bin-gh: canned acme/widgets data, never GitHub)
 mkdir -p "$T/ghagent" "$T/ghcfg"; cp "$T/agent/models.yml" "$T/ghagent/"; printf 'github:\n  enabled: true\n' > "$T/ghagent/config.yml"
 GENV=(env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST PATH="$ROOT/tests/e2e/bin-gh:$PATH" GH_CONFIG_DIR="$T/ghcfg" OMC_CODING_AGENT_DIR="$T/ghagent")
-check "gh repo_view"     "Default branch: main"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"repo_view\",\"repo\":\"acme/widgets\"}"}'
-check "gh search"        "Labels: bug, p1"       "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"search_issues\",\"query\":\"crash\",\"repo\":\"acme/widgets\"}"}'
-check "gh run_watch"     "All jobs passed."      "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"run_watch\",\"run\":\"1001\",\"repo\":\"acme/widgets\"}"}'
-check "gh bad op"        "op must be github operation (was \"nope\")"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"nope\"}"}'
+check "gh repo_view"     "Default branch: main"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "$(tc github '{"op":"repo_view","repo":"acme/widgets"}')"
+check "gh search"        "Labels: bug, p1"       "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "$(tc github '{"op":"search_issues","query":"crash","repo":"acme/widgets"}')"
+check "gh run_watch"     "All jobs passed."      "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "$(tc github '{"op":"run_watch","run":"1001","repo":"acme/widgets"}')"
+check "gh bad op"        "op must be github operation (was \"nope\")"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "$(tc github '{"op":"nope"}')"
 check "pr:// view"       "Review Comments (2)"   "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "read:pr://acme/widgets/12"
 check "pr:// diff list"  "3. new.txt  +0 -0  [renamed]  (renamed from old.txt)"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "read:pr://acme/widgets/12/diff"
 check "issue:// list"    "# Issues in acme/widgets (open, up to 30)"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "read:issue://acme/widgets"
@@ -986,12 +990,12 @@ SH
 chmod +x "$T/ghorigin/bin/gh"
 (cd "$T/ghorigin/w" && git init -q . && git remote add origin git@github.com:me/fork.git && git remote add upstream https://github.com/merged/from.git)
 GORIGIN=(env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST HOME="$T" PATH="$T/ghorigin/bin:$PATH" GH_CONFIG_DIR="$T/ghcfg" OMC_CODING_AGENT_DIR="$T/ghagent" FAKE_GH_LOG="$T/ghorigin/log")
-gh_search_q() { : > "$T/ghorigin/log"; (cd "$T/ghorigin/w" && "${GORIGIN[@]}" FAKE_GH_PARENT="$1" timeout 30 "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"search_prs\",\"query\":\"bug\"}"}' </dev/null >/dev/null 2>&1); cat "$T/ghorigin/log"; }
+gh_search_q() { : > "$T/ghorigin/log"; (cd "$T/ghorigin/w" && "${GORIGIN[@]}" FAKE_GH_PARENT="$1" timeout 30 "$B" --model mock/mock-1 --no-session -p "$(tc github '{"op":"search_prs","query":"bug"}')" </dev/null >/dev/null 2>&1); cat "$T/ghorigin/log"; }
 gh_search_q null > "$T/ghorigin/a"
 check "gh prefers origin"  "repo:me/fork"  cat "$T/ghorigin/a"
 gh_search_q '{"name":"from","owner":{"login":"merged"}}' > "$T/ghorigin/b"
 check "gh keeps fork parent"  "repo:merged/from"  cat "$T/ghorigin/b"
-check "gh needs enable"  "No such tool: xd://github"  env PATH="$ROOT/tests/e2e/bin-gh:$PATH" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"repo_view\"}"}'
+check "gh needs enable"  "github: command not found"  env PATH="$ROOT/tests/e2e/bin-gh:$PATH" "$B" --model mock/mock-1 --no-session -p "$(tc github '{"op":"repo_view"}')"
 # implicit local servers (ollama / llama.cpp / LM Studio discovery) against tests/e2e/mock_local.py
 DPORT=$((PORT + 9)); python3 -I "$ROOT/tests/e2e/mock_local.py" $DPORT & DPID=$!
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$DPORT) 2>/dev/null && break; sleep 0.1; done
@@ -1037,11 +1041,11 @@ n=$(mark); "$B" --model mock/mock-1 --no-session -p 'say:' >/dev/null 2>&1 </dev
 check "empty stop retry" "Stopped without actionable output; task incomplete."  python3 -I -c "$REQS" "$T/req.jsonl" $n
 n=$(mark); "$B" --model mock/mock-1 --no-session -p 'calls:[["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}]]' >/dev/null 2>&1 </dev/null
 check "tool-call loop guard" 'You called `bash` 5 consecutive times with identical arguments:'  python3 -I -c "$REQS" "$T/req.jsonl" $n
-# an exemption naming an xd:// device covers writes dispatched to it (omp 7a6f101b82)
+# an exemption naming a tool command covers the bash calls that run it (omp 7a6f101b82, de21c0ac45)
 mkdir -p "$T/lgx" && cp "$T/agent/models.yml" "$T/lgx/" && printf 'model:\n  toolCallLoopGuard:\n    exemptTools: [wait, report_issue]\n' > "$T/lgx/config.yml"
-LGX='calls:'$(python3 -I -c 'import json; print(json.dumps([["write",{"path":"xd://report_issue","content":"read: same"}]]*6))')
+LGX='calls:'$(python3 -I -c 'import json; print(json.dumps([["bash",{"command":"report_issue \"read: same\""}]]*6))')
 n=$(mark); OMC_CODING_AGENT_DIR="$T/lgx" "$B" --model mock/mock-1 --no-session -p "$LGX" >/dev/null 2>&1 </dev/null
-out=$(python3 -I -c "$REQS" "$T/req.jsonl" $n); [[ "$out" != *"consecutive times"* ]] && echo "   ok  loop guard device exemption" || { echo "   FAIL loop guard device exemption"; fail=1; }
+out=$(python3 -I -c "$REQS" "$T/req.jsonl" $n); [[ "$out" != *"consecutive times"* ]] && echo "   ok  loop guard command exemption" || { echo "   FAIL loop guard command exemption"; fail=1; }
 check "todo reminder (rpc)" '"type": "todo_reminder", "todos": [{"content": "alpha", "status": "in_progress"}, {"content": "beta", "status": "pending"}], "attempt": 1, "maxAttempts": 3'  python3 -I "$ROOT/tests/parity/rpc_drive.py" "$B" "todo:alpha,beta" 1
 n=$(mark); "$B" --model mock/mock-think --thinking auto --no-session -p 'say:medium sized change' >/dev/null 2>&1 </dev/null
 check "auto thinking judge" $'2\nlow State:\n<request>say:medium sized change</request>'  python3 -I -c "$REQS" "$T/req.jsonl" $n all

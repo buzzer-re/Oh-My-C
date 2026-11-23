@@ -110,7 +110,7 @@ struct app {
     bool checkpoint_pending;    /* checkpoint tool ran; boundary captured at its message_end */
     char *plan_file; /* plan-mode state planFilePath (local://PLAN.md or the agent's local://<slug>-plan.md) */
     bool plan_paused, plan_has_entered, plan_reentry;
-    bool plan_review_ui;        /* xd://propose opens a review (TUI) instead of approving automatically */
+    bool plan_review_ui;        /* `propose` opens a review (TUI) instead of approving automatically */
     char *plan_reference_path;  /* approved plan re-injected (plan-mode-reference.md) after history rewrites */
     bool plan_reference_sent;
     bool plan_reference_approved; /* only an approved plan becomes an execution reference (omp 5fd26783af) */
@@ -144,7 +144,7 @@ struct app {
     struct evalhost *evalhost; /* eval helpers' host state: completion handles, judge batches (evalhost.c) */
     struct memory_rt *memory;  /* memory backend runtime: prompt snapshot + startup pipeline (memory.c) */
     struct autolearn *autolearn; /* auto-learn controller + private capture runs (autolearn.c) */
-    struct xdnotice *xdnotice;   /* xd:// mount-delta notices (xdnotice.c) */
+    struct xdnotice *xdnotice;   /* tool-command mount-delta notices (xdnotice.c) */
     int64_t output_tokens;     /* cumulative assistant output tokens (atomic; eval `budget`) */
     /* `+Nk` / `+Nk!` per-turn budget directive of the latest user prompt (0 = none) */
     int64_t turn_budget_total;

@@ -29,7 +29,7 @@ typedef struct {
     const char *cwd;      /* project dir (path shortening, `cd` prefixes) */
     int term_rows;        /* terminal height (preview windows); 0 = unknown */
     int64_t now_ms;       /* wall clock for live elapsed facts (0 = now) */
-    /* registered tool label lookup (xd:// device writes delegate to the mounted tool's card); may be NULL */
+    /* registered tool label lookup (nested tool-command cards use the mounted tool's label); may be NULL */
     const char *(*label_of)(const char *tool);
     bool show_images;     /* result images draw as terminal graphics below the card (no text indicator) */
     bool args_complete;   /* arguments are final (omp argsComplete); false while a write/edit body streams */
@@ -189,6 +189,8 @@ void tc_wait(const tc_call_t *c, int width, strvec_t *out);
 void tc_irc_incoming_card(const char *from, const char *body, const char *age, bool expanded, int width, strvec_t *out);
 void tc_github(const tc_call_t *c, int width, strvec_t *out);
 void tc_lsp(const tc_call_t *c, int width, strvec_t *out);
+/* resolve / reject / propose / report_issue run top-level (tc_resolve.c); false for any other tool */
+bool tc_resolve_tools(const tc_call_t *c, int width, strvec_t *out);
 
 /* grouped-file-output helpers (tc_search.c) */
 char *tc_scoped_subject(const char *subject, const char *scope); /* formatScopedSubject; NULL when both are absent */

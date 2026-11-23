@@ -1,24 +1,24 @@
-/* xdnotice.c - `xd://` mount notices (see xdnotice.h; port of session-tools.ts). */
+/* xdnotice.c - tool-command mount notices (see xdnotice.h; port of session-tools.ts). */
 #include "xdnotice.h"
 
 #include "config/settings.h"
 #include "prompt/template.h"
-#include "tools/xdev.h"
+#include "tools/toolcmd.h"
 
 #include <pthread.h>
 #include <string.h>
 
-#define NOTICE_TYPE "xdev-mount-notice"
+#define NOTICE_TYPE "tool-command-mount-notice"
 
 struct xdnotice {
     pthread_mutex_t mu;
     strvec_t mounted;   /* the mounted set the last sync saw */
     strvec_t added;     /* pending (unannounced) delta, insertion order */
     strvec_t removed;
-    strvec_t announced; /* devices the model has been told about */
+    strvec_t announced; /* commands the model has been told about */
     bool seeded;        /* announced replayed from persisted notices */
-    strvec_t base;      /* devices the current base system prompt lists */
-    strvec_t base_routed; /* devices whose route line, with its catalog summary, that prompt renders */
+    strvec_t base;      /* commands the current base system prompt lists */
+    strvec_t base_routed; /* commands whose route line, with its catalog summary, that prompt renders */
 };
 
 static void sv_remove(strvec_t *v, const char *s) {
@@ -108,16 +108,16 @@ void xdnotice_sync(app_t *a, char **shown) {
         sb_t b = SB_INIT;
         if (added.n) {
             char *j = strvec_join(&added, ", ");
-            sb_appendf(&b, "mounted %s", j);
+            sb_appendf(&b, "added %s", j);
             free(j);
         }
         if (removed.n) {
             char *j = strvec_join(&removed, ", ");
-            sb_appendf(&b, "%sunmounted %s", b.len ? "; " : "", j);
+            sb_appendf(&b, "%sremoved %s", b.len ? "; " : "", j);
             free(j);
         }
-        if (shown) *shown = xasprintf("xd://: %s", sb_cstr(&b));
-        else app_notice(a, "xdev", "xd://: %s", sb_cstr(&b));
+        if (shown) *shown = xasprintf("Tool commands: %s", sb_cstr(&b));
+        else app_notice(a, "toolCommands", "Tool commands: %s", sb_cstr(&b));
         sb_free(&b);
     }
     strvec_free(&added);
@@ -129,7 +129,7 @@ void xdnotice_base_rebuilt(app_t *a, bool catalog_delivered) {
     struct xdnotice *x = state(a);
     strvec_t cur = catalog_delivered ? mounted_names(a->agent) : (strvec_t){0};
     strvec_t routed = {0};
-    free(xdev_mcp_route_guidance(a->agent, &routed));
+    free(toolcmd_mcp_guidance(a->agent, &routed));
     pthread_mutex_lock(&x->mu);
     strvec_free(&x->base);
     x->base = cur;
@@ -146,7 +146,7 @@ void xdnotice_reset_announced(app_t *a) {
     pthread_mutex_unlock(&a->xdnotice->mu);
 }
 
-/* #ensureAnnouncedMountsSeeded: replay persisted notices (structured details, else the legacy rendered lists) */
+/* #ensureAnnouncedMountsSeeded: replay the structured details of persisted notices */
 static void seed(struct xdnotice *x, agent_t *ag) {
     if (x->seeded) return;
     x->seeded = true;
@@ -158,32 +158,13 @@ static void seed(struct xdnotice *x, agent_t *ag) {
         if (!str_eq(json_get_str(m, "customType"), NOTICE_TYPE)) continue;
         const json_t *d = json_get_obj(m, "details");
         const json_t *ad = json_get_arr(d, "added"), *rm = json_get_arr(d, "removed"), *n;
-        if (ad && rm) {
-            json_arr_foreach(ad, k, n) if (json_sv(n)) sv_add(&x->announced, json_sv(n));
-            json_arr_foreach(rm, k, n) if (json_sv(n)) sv_remove(&x->announced, json_sv(n));
-            continue;
-        }
-        char *text = ai_message_text(m);
-        strvec_t lines = str_split_lines(text, strlen(text));
-        int section = 0; /* 1 added, 2 removed */
-        for (size_t l = 0; l < lines.n; l++) {
-            const char *ln = lines.v[l];
-            if (!strcmp(ln, "These tools became available:")) section = 1;
-            else if (str_starts(ln, "No longer mounted")) section = 2;
-            else if (!strcmp(ln, "Configured inline device docs:") || !strcmp(ln, "</system-notice>")) break;
-            else if (str_starts(ln, "Read `xd://<tool>`")) section = 0;
-            else if (section && str_starts(ln, "- xd://")) {
-                const char *s = ln + 7, *e = s;
-                while (*e && *e != ' ' && *e != '\t') e++;
-                if (e == s) continue;
-                char *name = xstrndup(s, (size_t)(e - s));
-                if (section == 1) sv_add(&x->announced, name);
-                else sv_remove(&x->announced, name);
-                free(name);
-            }
-        }
-        strvec_free(&lines);
-        free(text);
+        if (!ad || !rm) continue;
+        bool strings = true;
+        json_arr_foreach(ad, k, n) strings &= json_is_str(n);
+        json_arr_foreach(rm, k, n) strings &= json_is_str(n);
+        if (!strings) continue;
+        json_arr_foreach(ad, k, n) sv_add(&x->announced, json_sv(n));
+        json_arr_foreach(rm, k, n) sv_remove(&x->announced, json_sv(n));
     }
     json_free(msgs);
 }
@@ -214,7 +195,7 @@ json_t *xdnotice_take(app_t *a) {
     pthread_mutex_unlock(&x->mu);
     if (!added.n && !removed.n) return NULL;
 
-    json_t *entries = xdev_entries(a->agent), *e;
+    json_t *entries = toolcmd_entries(a->agent), *e;
     json_t *ctx = json_obj(), *ja = json_arr(), *jr = json_arr();
     json_t *det = json_obj(), *da = json_arr(), *dr = json_arr();
     for (size_t i = 0; i < added.n; i++) {
@@ -234,8 +215,8 @@ json_t *xdnotice_take(app_t *a) {
     }
     json_set(ctx, "added", ja);
     json_set(ctx, "removed", jr);
-    json_set(ctx, "docs", json_str_own(xdev_docs_for(a->agent, &added)));
-    char *body = prompt_render("coding-agent/prompts/system/xdev-mount-notice.md", ctx);
+    json_set(ctx, "docs", json_str_own(toolcmd_docs_for(a->agent, &added)));
+    char *body = prompt_render("coding-agent/prompts/system/tool-command-mount-notice.md", ctx);
     json_free(ctx);
     json_free(entries);
     json_t *m = msg_developer_text(body);

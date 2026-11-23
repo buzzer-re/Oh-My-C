@@ -1,4 +1,5 @@
 /* interactive mode: TUI chat (port of omp's InteractiveMode, core feature set). */
+#include "tools/toolcmd.h"
 #include "modes.h"
 #include "modes/interactive.h"
 #include "tui/termcaps.h"
@@ -346,8 +347,8 @@ static void post_notice(void *x) {
         uiev_free(e);
         return;
     }
-    if (!strcmp(e->name, "xdev")) { /* event-controller #handleNotice: `${source}: ${message}` as a status line */
-        char *m = xasprintf("xdev: %s", e->out);
+    if (!strcmp(e->name, "toolCommands")) { /* event-controller #handleNotice: `${source}: ${message}` as a status line */
+        char *m = xasprintf("toolCommands: %s", e->out);
         add_notice(e->u, "info", m);
         free(m);
         tui_request_render(e->u->tui);
@@ -1750,13 +1751,10 @@ static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) 
     tui_overlay_show(u->tui, ui_plan_review_component(g_pr.ov), &oo);
 }
 
-/* tool_execution_end of `write xd://propose` in review mode: the XdevDispatch inner carries
- * PlanApprovalDetails (event-controller.ts) */
+/* tool_execution_end of a `propose` (direct, or run as a bash command) in review mode: its details carry
+ * PlanApprovalDetails (event-controller.ts proposeDispatchDetails) */
 static void maybe_plan_approval(ui_t *u, const char *tool, const json_t *result, bool is_error) {
-    if (is_error || !str_eq(tool, "write")) return;
-    const json_t *x = json_get(json_get(result, "details"), "xdev");
-    if (!str_eq(json_get_str(x, "tool"), "propose") || !str_eq(json_get_str(x, "mode"), "execute")) return;
-    const json_t *in = json_get(x, "inner");
+    const json_t *in = toolcmd_propose_details(tool, json_get(result, "details"), is_error);
     const char *path = json_get_str(in, "planFilePath"), *title = json_get_str(in, "title");
     if (!path || !title || !json_is_bool(json_get(in, "planExists"))) return;
     if (u->worker_running) { /* the aborted turn settles first (#abortPlanApprovalTurnSilently awaits it) */

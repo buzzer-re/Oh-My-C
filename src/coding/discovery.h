@@ -86,9 +86,9 @@ typedef struct {
     void *skill_desc_ud;
     /* tool presentation (all optional) */
     const json_t *tool_labels;        /* object: tool name -> label for the Tool Inventory */
-    const json_t *xdev_tools;         /* array of {name, summary, dynamic} mounted xd:// devices */
-    const char *xdev_docs;            /* rendered xd:// device docs/catalog section */
-    bool auto_qa;                     /* xd://report_issue automated QA advertised */
+    const json_t *mounted_commands;   /* array of {name, summary, dynamic} mounted tool commands */
+    const char *tool_command_docs;    /* rendered tool-command help sections / catalog */
+    bool auto_qa;                     /* `report_issue` automated QA advertised */
     const json_t *tool_refs;          /* object: tool name -> name used in prompt references (e.g. edit -> apply_patch) */
     const char *delegation_bias;      /* model_delegation_bias() of the session model */
     bool irc_enabled;                 /* `write agent://<id>` peer messaging available */
@@ -114,7 +114,7 @@ typedef struct {
 
 /* "- " lines for the "# Internal URLs" section in omp registration order (owned) */
 strvec_t internal_url_docs(const sysprompt_url_host_t *h);
-/* InternalUrlRouter.reference(): sub-path grammar entries (xd://read/urls), owned strings */
+/* InternalUrlRouter.reference(): sub-path grammar entries (help://read/urls), owned strings */
 strvec_t internal_url_reference(void);
 
 /* returns owned array of system prompt blocks (strings) */

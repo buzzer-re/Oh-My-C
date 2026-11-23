@@ -361,7 +361,7 @@ def sc_edit(c):
 
 
 PLAN_SEQ = "seq:" + json.dumps([["write", {"path": "local://PLAN.md", "content": "# Ship it\n\n1. step one\n2. step two\n"}],
-                                 ["write", {"path": "xd://propose", "content": "Ship it"}]])
+                                 ["bash", {"command": "propose 'Ship it'"}]])
 
 
 def sc_plan(c):

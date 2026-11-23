@@ -3,6 +3,7 @@
  * delivered to the agent as a follow-up (or collected by the `wait` tool). */
 #define _GNU_SOURCE
 #include "jobs.h"
+#include "toolcmd.h"
 #include "jobtext.h"
 #include "tools.h"
 #include "artifacts.h"
@@ -315,6 +316,7 @@ typedef struct {
     proc_output_cb fwd;
     void *fwd_ud;
     streams_t *streams;
+    struct toolcmd_run *tc_run; /* the run's tool commands (owned: ended with the shell run; NULL: none) */
 } bashx_t;
 
 struct job {
@@ -364,6 +366,7 @@ void jobs_set_notify(jobs_t *j, void (*fn)(void *ud), void *ud) {
 
 static void bashx_free(bashx_t *b) {
     if (!b) return;
+    if (b->tc_run) toolcmd_run_end(b->tc_run); /* a job that never ran */
     free(b->cmd);
     free(b->cwd);
     proc_result_free(&b->res);
@@ -613,6 +616,8 @@ static char *bash_body(bgjob_t *x, void *ud, bool *failed) {
                      .cancel = &x->cancel,
                      .on_output = bash_out,
                      .ud = x};
+    char *pre = b->tc_run ? toolcmd_run_preamble(b->tc_run) : NULL;
+    o.shell_preamble = pre;
     int rc = -2;
     int64_t t0 = mono_ms();
     if (b->shell) rc = shell_run_try(b->shell, cmd, b->cwd, &o, &b->res);
@@ -622,6 +627,11 @@ static char *bash_body(bgjob_t *x, void *ud, bool *failed) {
     }
     b->wall_ms = mono_ms() - t0;
     b->rc = rc;
+    free(pre);
+    if (b->tc_run) {
+        toolcmd_run_end(b->tc_run);
+        b->tc_run = NULL;
+    }
     free(rewritten);
     if (b->streams) streams_finish(b->streams);
     *failed = rc != 0 || b->res.exit_code != 0 || b->res.timed_out || b->res.cancelled;
@@ -641,9 +651,11 @@ static bgjob_t *bash_job_new(jobs_t *j, const char *cmd, const char *cwd, int64_
     return x;
 }
 
-char *jobs_start_bash(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *label, const char *intent) {
+char *jobs_start_bash(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *label, const char *intent,
+                      struct toolcmd_run *run) {
     prune(j);
     bgjob_t *x = bash_job_new(j, cmd, cwd, timeout_ms, label, intent);
+    x->bash->tc_run = run;
     pthread_mutex_lock(&j->mu);
     x->id = assign_id(j, NULL);
     char *id = xstrdup(x->id);
@@ -653,9 +665,10 @@ char *jobs_start_bash(jobs_t *j, const char *cmd, const char *cwd, int64_t timeo
 }
 
 char *jobs_start_bash_fg(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *intent, struct shell *shell,
-                         proc_output_cb cb, void *cb_ud) {
+                         proc_output_cb cb, void *cb_ud, struct toolcmd_run *run) {
     prune(j);
     bgjob_t *x = bash_job_new(j, cmd, cwd, timeout_ms, NULL, intent);
+    x->bash->tc_run = run;
     x->bash->shell = shell;
     x->bash->fwd = cb;
     x->bash->fwd_ud = cb_ud;

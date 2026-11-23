@@ -148,7 +148,7 @@ typedef struct tool_env {
      * answers keyed by id or NULL with *err (owned); usage accumulates [input, output, cost] (set by app) */
     json_t *(*judge)(struct tool_env *env, const char *lead_model, const json_t *state, const json_t *questions,
                      volatile sig_atomic_t *cancel, double usage[3], char **err);
-    /* write to xd://propose (plan approval) with the trimmed plan title; returns owned result text, sets
+    /* `propose` (plan approval) with the trimmed plan title; returns owned result text, sets
      * *is_error and *details (owned PlanApprovalDetails {planFilePath, title, planExists} or NULL) */
     char *(*propose_plan)(struct tool_env *env, const char *title, bool *is_error, json_t **details);
     /* spawn a subagent: returns owned final text; used by task tool (set by app) */
@@ -190,7 +190,7 @@ char *tool_truncate_head(const char *s, size_t len, size_t max_bytes, size_t max
 /* builtin registration */
 void tools_register_builtin(agent_t *a, tool_env_t *env, const strvec_t *enabled /* NULL => defaults */);
 const char *const *tools_default_names(void); /* canonical built-in order (NULL-terminated) */
-/* order tools canonically and mount discoverable ones under xd:// (call after all tools are added) */
+/* order tools canonically and mount discoverable ones as bash tool commands (call after all tools are added) */
 void tools_finalize(agent_t *a, const strvec_t *requested);
 bool tools_scout_available(void);                     /* `scout` not in task.disabledAgents */
 bool tools_eager_delegation(const tool_env_t *env);   /* model delegation bias is "eager" */
@@ -228,13 +228,15 @@ agent_tool_t *tool_ast_edit_new(tool_env_t *env);
  * reasoning (think.ts supportsExternalThinking) */
 agent_tool_t *tool_think_new(void);
 bool think_supported(const ai_model_t *m);
-/* finalize a staged ast_edit proposal (xd://resolve / xd://reject) */
-char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_error);
+/* finalize the staged ast_edit proposal (`resolve` / `reject`): owned result text with *details (ResolveDetails), or
+ * NULL when no preview is pending */
+char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_error, json_t **details);
 /* re-render the eval description with the session tool names its bridge can call */
 void eval_set_tool_names(agent_tool_t *t, const json_t *names);
-/* re-renders the write description for whether `read` (the xd://read/sources transport) is active */
+/* re-renders the write description for whether `read` (the help://read/sources transport) is active */
 void write_set_read_active(agent_tool_t *t, bool read_active);
 void eval_release_session(agent_tool_t *t); /* stop the kernel and `sh` shell of the previous session */
+json_t *eval_default_doc_topics(void);      /* help://eval/<topic> without an eval tool (owned) */
 
 /* agent definitions (bundled + ~/.omc/agent/agents + .omc/agents): owned object name -> {name, description, tools[], model?, body} */
 json_t *agent_defs_load(const char *cwd);

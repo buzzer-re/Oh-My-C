@@ -733,7 +733,7 @@ static void emit_entry(json_t *out, const json_t *e) {
         if (skill) {
             json_set_bool(m, "display", true);
             if (json_get(e, "details")) json_set(m, "details", json_clone(json_get(e, "details")));
-        } else if ((str_eq(json_get_str(e, "customType"), "xdev-mount-notice") ||
+        } else if ((str_eq(json_get_str(e, "customType"), "tool-command-mount-notice") ||
                     str_eq(json_get_str(e, "customType"), "skill-notice")) &&
                    json_get(e, "details")) {
             /* announced-mount / announced-skill replay (xdnotice.c, autolearn.c) */

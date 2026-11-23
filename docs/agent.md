@@ -170,7 +170,7 @@ continuations print mode suppresses).
 - **Magic keywords** (`coding/keywords.c`; omp `modes/magic-keywords.ts`, `markdown-prose.ts`). `keywords_notices`
   turns standalone prose `ultrathink` / `orchestrate` / `jevify` (never inside code fences, code spans or XML/HTML
   sections) into hidden developer messages (`attribution: user`, `customType: <id>-notice`) placed ahead of the user
-  message, when the keyword's tools are enabled (active tools plus mounted xd:// devices). `workflowz` is recognised
+  message, when the keyword's tools are enabled (active tools plus mounted tool commands). `workflowz` is recognised
   but not injected: its notice teaches eval `agent()`/`workpool()`, which omc lacks.
 - **Guards** (`coding/guards.c`). `guards_on_event` runs the cross-turn tool-call loop guard at each turn end
   (`model.toolCallLoopGuard.*`; the redirect is steered in and persisted as a `tool-call-loop-redirect`
@@ -301,7 +301,7 @@ templates with the result. The system prompt is a list of parts:
 
 1. `system-prompt.md`, or `custom-system-prompt.md` when a custom prompt is given (`--system-prompt`
    text or file, or `SYSTEM.md` in `.omc/`, `.omp/` or the agent dir), with tool inventory and
-   labels, `xd://` device docs, skills, rules, internal-URL docs, delegation settings (`delegationTier`:
+   labels, tool-command docs, skills, rules, internal-URL docs, delegation settings (`delegationTier`:
    the catalog delegation bias, `balanced` without a rule, lifted to `eager` by `task.eager` in the main
    agent only; `task.*`), personality (`personality` setting or `PERSONALITY.md`), the model
    name, and the append prompt (`--append-system-prompt` or `APPEND_SYSTEM.md`) composed after
@@ -469,7 +469,7 @@ switches to the `plan` role model (restored on exit). Resuming re-enters the mod
 pre-plan model before the new session records it. The system prompt gains `plan-mode-active.md`, and the `before_tool` hook
 enforces a read-only working tree:
 
-- `write` only to `local://…` or `xd://propose`;
+- `write` only to `local://…` (the plan is submitted with the `propose` command);
 - `edit` only on `local://` files;
 - `bash` commands that look state-changing (rm, mv, git commit/push/checkout, package installs,
   `sed -i`, redirections to files, ...) are refused.
@@ -477,10 +477,11 @@ enforces a read-only working tree:
 A plan turn that ends in plain text gets the decision reminder (a developer message) and one more
 turn with `tool_choice: required`, at most three times before a user turn, `ask` or a proposal.
 
-**Proposal.** The agent writes `local://<slug>-plan.md`, then writes the slug to `xd://propose`. The
-plan is resolved like omp's `resolveApprovedPlan` (supplied slug, a state plan the scan cannot see,
-`local://*plan.md` newest first, the state plan) and the write result carries
-`details.xdev = {tool: "propose", mode: "execute", args: {title}, inner: {planFilePath, title, planExists}}`.
+**Proposal.** The agent writes `local://<slug>-plan.md`, then runs `propose <slug>` (a bash tool command; a top-level
+`propose` tool when `bash` is off). The plan is resolved like omp's `resolveApprovedPlan` (supplied slug, a state plan
+the scan cannot see, `local://*plan.md` newest first, the state plan); the dispatch record on the bash result
+(`details.toolCommands[]`, or the direct tool's details) carries
+`{tool: "propose", mode: "execute", args: {title}, inner: {planFilePath, title, planExists}}`.
 What happens next depends on the host:
 
 - **TUI** (`plan_review_ui`): the result is `Plan ready for review.` and the next model request is
@@ -509,7 +510,7 @@ These are off by default (`checkpoint.enabled`) and limited to top-level session
 records the boundary (message count and session entry). `rewind` with a report cuts the live context
 back to that boundary at the end of the turn, branches the session to the checkpoint entry, and
 appends the report (`rewind-report.md`). The exploration in between is replaced by its summary. Both
-tools are exclusive and mountable as `xd://` devices.
+tools are exclusive and mountable as bash tool commands.
 
 ## Subagents and background jobs
 

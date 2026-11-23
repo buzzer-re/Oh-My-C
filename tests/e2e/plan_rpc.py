@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan-mode e2e over RPC: write a plan, then propose it with `write xd://propose`.
+"""Plan-mode e2e over RPC: write a plan, then submit it with the `propose` bash command.
 Usage: plan_rpc.py <omc> [extra omc args...]. Prints assistant texts, tool results and notices."""
 import json, subprocess, sys, threading, time
 
@@ -34,6 +34,6 @@ def prompt(i, msg):
         time.sleep(0.05)
 
 prompt("1", "call:write:" + json.dumps({"path": "local://retry-plan.md", "content": PLAN}))
-prompt("2", 'call:write:{"path":"xd://propose","content":"retry"}')
+prompt("2", 'bash:propose retry')
 p.stdin.close()
 p.wait(timeout=10)

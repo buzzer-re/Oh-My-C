@@ -867,7 +867,7 @@ static json_t *template_ctx(const json_t *tool_names) {
     return ctx;
 }
 
-/* xd://eval/<topic> docs: judge (incl. completion) and helpers */
+/* help://eval/<topic> docs: judge (incl. completion) and helpers */
 static json_t *topics_for(const json_t *tool_names) {
     json_t *ctx = template_ctx(tool_names);
     json_t *t = json_obj();
@@ -877,6 +877,8 @@ static json_t *topics_for(const json_t *tool_names) {
     return t;
 }
 
+json_t *eval_default_doc_topics(void) { return topics_for(NULL); }
+
 static json_t *eval_doc_topics(agent_tool_t *self) {
     eval_state_t *st = self->ud;
     return topics_for(st->tool_names);
@@ -885,7 +887,7 @@ static json_t *eval_doc_topics(agent_tool_t *self) {
 static char *eval_description(const json_t *tool_names) {
     json_t *ctx = template_ctx(tool_names);
     if (json_len(tool_names)) json_set(ctx, "toolNames", json_clone(tool_names));
-    /* a session without `read` cannot open xd://eval/<topic>: inline every topic */
+    /* a session without `read` cannot open help://eval/<topic>: inline every topic */
     if (tool_names && !names_have(tool_names, "read")) {
         json_t *topics = topics_for(tool_names);
         sb_t b = SB_INIT;

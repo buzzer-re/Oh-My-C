@@ -108,7 +108,7 @@ strings. In practice:
   stored), never to third parties. Keyless providers (`N/A` sentinel) send no Authorization header.
 - **Redaction:** the memory pipeline redacts secret-looking keywords and JWTs before anything is
   sent for summarization or written to memory files (`coding/memory.c`, port of
-  `memory-backend/redact.ts`). The login dialog masks secret answers. `xd://report_issue` QA reports
+  `memory-backend/redact.ts`). The login dialog masks secret answers. `report_issue` QA reports
   are written to a local file only, and only after consent (`dev.autoqaConsent`). They are never
   uploaded.
 - **Borrowing:** some login flows can reuse an installed desktop app's token (the Perplexity

@@ -1,6 +1,6 @@
 /* read tool: files (line selectors, hashline anchors), directories, images, URLs, archives, SQLite, PDF, notebooks. */
 #include "tools.h"
-#include "xdev.h"
+#include "toolcmd.h"
 #include "vurl.h"
 #include "iurl.h"
 #include "mr.h"
@@ -1337,20 +1337,94 @@ static void virtual_details(tool_result_t *out, const char *url, const char *sou
     for (size_t i = 0; i < ARRAY_LEN(order); i++) json_move_last(d, order[i]);
 }
 
-/* xd:// docs: a `lines` scheme (omp c51e68b454), so `xd://eval/judge:1-20` pages the doc instead of naming a topic
- * `judge:1-20` */
-static int read_xd(agent_t *agent, tool_env_t *env, const char *path, tool_result_t *out) {
+/* parseHelpUrl: `help://`, `help://<tool>`, `help://<tool>/<topic>` (trailing slash allowed); false otherwise */
+static bool parse_help_url(const char *url, char **tool, char **topic) {
+    *tool = *topic = NULL;
+    char *t = str_trim(url);
+    if (strncasecmp(t, "help://", 7) != 0) {
+        free(t);
+        return false;
+    }
+    const char *rest = t + 7;
+    size_t n = strlen(rest);
+    if (n && rest[n - 1] == '/') n--;
+    const char *sl = memchr(rest, '/', n);
+    size_t tl = sl ? (size_t)(sl - rest) : n;
+    bool ok = true;
+    for (size_t i = 0; i < n; i++)
+        if (rest[i] == '?' || rest[i] == '#' || isspace((unsigned char)rest[i])) ok = false;
+    if (ok && sl) ok = tl > 0 && (size_t)(sl - rest) + 1 < n && !memchr(sl + 1, '/', n - tl - 1);
+    if (ok && !n && rest[0] == '/') ok = false; /* `help:///` */
+    if (ok && tl) {
+        *tool = xstrndup(rest, tl);
+        if (sl) *topic = xstrndup(sl + 1, n - tl - 1);
+    }
+    free(t);
+    return ok;
+}
+
+/* a session tool's doc topics; a session without eval still serves the eval docs its assignments link */
+static json_t *help_topics(agent_t *agent, const char *name, char **err) {
+    agent_tool_t *t = agent ? agent_find_tool(agent, name) : NULL;
+    json_t *topics = t && t->doc_topics ? t->doc_topics(t) : NULL;
+    if (!topics && !t && str_eq(name, "eval")) topics = eval_default_doc_topics();
+    if (!topics) *err = t ? xasprintf("Tool '%s' has no doc topics.", name) : xasprintf("No tool '%s' in this session.", name);
+    return topics;
+}
+
+/* HelpProtocolHandler.resolve: the doc text of `url` or an error */
+static void help_resolve(agent_t *agent, const char *url, tool_result_t *out) {
+    char *tool = NULL, *topic = NULL, *err = NULL;
+    if (!parse_help_url(url, &tool, &topic)) {
+        tool_result_error(out, "Invalid help:// URL: %s. Use help://<tool>/<topic>.", url);
+        return;
+    }
+    if (!tool) {
+        tool_result_error(out, "help:// needs a tool and topic: use help://<tool>/<topic>.");
+        return;
+    }
+    json_t *topics = help_topics(agent, tool, &err);
+    if (!topics) {
+        tool_result_error(out, "%s", err);
+    } else if (!topic) {
+        sb_t b = SB_INIT;
+        const char *k;
+        json_t *v;
+        json_obj_foreach(topics, i, k, v) sb_appendf(&b, "%shelp://%s/%s", i ? "\n" : "", tool, k);
+        tool_result_text(out, sb_cstr(&b));
+        sb_free(&b);
+    } else {
+        const char *doc = json_get_str(topics, topic);
+        if (doc) {
+            tool_result_text(out, doc);
+        } else {
+            sb_t b = SB_INIT;
+            const char *k;
+            json_t *v;
+            json_obj_foreach(topics, i, k, v) sb_appendf(&b, "%s%s", i ? ", " : "", k);
+            tool_result_error(out, "Unknown topic '%s' for %s. Available: %s.", topic, tool, sb_cstr(&b));
+            sb_free(&b);
+        }
+    }
+    json_free(topics);
+    free(err);
+    free(tool);
+    free(topic);
+}
+
+/* help:// docs: a `lines` scheme, so `help://eval/judge:1-20` pages the doc instead of naming a topic `judge:1-20` */
+static int read_help(agent_t *agent, tool_env_t *env, const char *path, tool_result_t *out) {
     char *work = xstrdup(path);
     selector_t sel;
     memset(&sel, 0, sizeof sel);
-    strip_sel(work + 5, &sel);
+    strip_sel(work + 7, &sel);
     sel.entity = "resource";
     sel.resource = true;
     if (!sel.has_sel) {
-        xdev_read(agent, work, out);
+        help_resolve(agent, work, out);
     } else {
         tool_result_t doc = {0};
-        xdev_read(agent, work, &doc);
+        help_resolve(agent, work, &doc);
         if (doc.is_error) {
             *out = doc;
             memset(&doc, 0, sizeof doc);
@@ -1750,7 +1824,7 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
         }
         return web_read_url(env, path, ctx->cancel, out);
     }
-    if (!strncasecmp(path, "xd://", 5)) return read_xd(ctx ? ctx->agent : NULL, env, path, out);
+    if (!strncasecmp(path, "help://", 7)) return read_help(ctx ? ctx->agent : NULL, env, path, out);
     if (str_starts(path, "pr://") || str_starts(path, "issue://")) return read_github(env, path, out);
     if (str_starts(path, "mr://")) return read_mr(env, path, out);
     if (str_starts(path, "ssh://")) return read_ssh(env, path, out);
@@ -1935,7 +2009,7 @@ static bool accepts_line_selector(const char *path) {
     size_t n = (size_t)(sep - path);
     static const char *const passthrough[] = {"file", "http", "https", NULL};
     static const char *const lines[] = {"agent", "artifact", "cfg", "conflict", "history", "issue", "pr", "local", "memory", "mr", "omc", "omp",
-                                        "proc", "rule", "security", "skill", "ssh", "vault", "xd", NULL};
+                                        "proc", "rule", "security", "skill", "ssh", "vault", "help", NULL};
     for (const char *const *s = passthrough; *s; s++)
         if (strlen(*s) == n && !strncasecmp(path, *s, n)) return true;
     for (const char *const *s = lines; *s; s++)
@@ -2038,7 +2112,7 @@ static char *drop_executable_lines(char *text) {
     return sb_detach(&b);
 }
 
-/* ReadTool.docTopics: `xd://read/sources` (selectors for sources the description only names) and `xd://read/urls`
+/* ReadTool.docTopics: `help://read/sources` (selectors for sources the description only names) and `help://read/urls`
  * (the internal-URL grammar the system prompt's one-line entries leave out) */
 static json_t *read_doc_topics(agent_tool_t *self) {
     json_t *ctx = json_obj();

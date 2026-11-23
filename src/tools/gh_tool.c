@@ -1,6 +1,6 @@
 /* gh_tool.c - the `github` tool (port of omp's tools/gh.ts, gh-search.ts, gh-view.ts repo_view,
  * gh-pr-checkout.ts, gh-run-watch.ts). Every op shells out to the `gh` CLI with omp's exact argv and renders
- * omp's exact result text. Registered only when `gh` is on PATH and `github.enabled` is on (xd:// device). */
+ * omp's exact result text. Registered only when `gh` is on PATH and `github.enabled` is on (a tool command while bash is on). */
 #include "gh.h"
 #include "gh_int.h"
 

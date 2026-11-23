@@ -1,4 +1,5 @@
 #include "tools.h"
+#include "toolcmd.h"
 #include "ai/judgment_native.h"
 #include "config/model_resolver.h"
 #include "coding/memory.h"
@@ -333,19 +334,19 @@ void format_hashline_header(sb_t *b, const char *display_path, const char *tag) 
 /* ---------- registration ---------- */
 
 /* Built-in tool order (upstream tools/index.ts BUILTIN_TOOLS key order); the request's tool list and the
- * xd:// device listing follow it. Names omc does not implement are kept so the order stays canonical. */
+ * tool-command catalog follow it. Names omc does not implement are kept so the order stays canonical. */
 static const char *const BUILTIN_ORDER[] = {
     "read",     "security_scan", "bash",       "edit",    "ast_grep",  "ast_edit", "ask",    "debug",
     "ida",      "eval",          "github",     "glob",    "grep",      "find",     "lsp",    "checkpoint",
     "rewind",   "context_notes", "new_context", "task",   "wait",      "todo",     "web_search", "write",
     "memory_edit", "retain",     "recall",     "reflect", "learn",     "manage_skill", NULL};
 
-/* upstream loadMode "discoverable" built-ins (mountable under xd:// unless kept top-level) */
+/* upstream loadMode "discoverable" built-ins (mountable as bash tool commands unless kept top-level) */
 static const char *const DISCOVERABLE[] = {"security_scan", "ast_grep", "ast_edit", "ask",      "debug",  "ida",
                                            "github",        "grep",     "lsp",      "checkpoint", "rewind", "todo",
                                            "web_search",    "memory_edit", "retain", "recall", "reflect", NULL};
-/* discoverable built-ins that stay top-level (xdev.ts XDEV_KEEP_TOP_LEVEL) + the read/write transport */
-static const char *const KEEP_TOP_LEVEL[] = {"todo", "yield", "ask", "grep", "web_search", "read", "write", NULL};
+/* discoverable built-ins that stay top-level (tool-commands.ts TOOL_COMMAND_KEEP_TOP_LEVEL) + the bash transport */
+static const char *const KEEP_TOP_LEVEL[] = {"todo", "yield", "ask", "grep", "web_search", "bash", NULL};
 
 static bool in_list(const char *const *l, const char *n) {
     for (; *l; l++)
@@ -429,7 +430,7 @@ void tools_register_builtin(agent_t *a, tool_env_t *env, const strvec_t *enabled
     }
 }
 
-/* upstream tool `label` / `summary` (catalog line for xd:// devices) */
+/* upstream tool `label` / `summary` (catalog line for tool commands) */
 static const struct {
     const char *name, *label, *summary;
 } TOOL_META[] = {
@@ -485,32 +486,47 @@ void tools_finalize(agent_t *a, const strvec_t *requested) {
         }
         a->all_tools.v[j] = t;
     }
-    /* xd:// mounting: needs both transport halves; explicitly requested tools stay top-level */
-    bool have_read = false, have_write = false;
+    /* tool commands run inside `bash`: mounting engages only while it is enabled, and every mountable tool is
+     * presented top-level otherwise; explicitly requested tools stay top-level */
+    bool have_bash = false;
     for (size_t i = 0; i < a->all_tools.n; i++) {
         agent_tool_t *t = a->all_tools.v[i];
         if (t->hidden && !t->mounted) continue;
-        if (!strcmp(t->name, "read")) have_read = true;
-        if (!strcmp(t->name, "write")) have_write = true;
+        if (!strcmp(t->name, "bash")) have_bash = true;
     }
-    bool xdev = settings_bool("tools.commands", true) && have_read && have_write;
+    bool commands = settings_bool("tools.commands", true) && have_bash;
+    a->tool_commands = commands;
+    bool deferrable = false;
     for (size_t i = 0; i < a->all_tools.n; i++) {
         agent_tool_t *t = a->all_tools.v[i];
+        if (toolcmd_is_special(t->name)) continue;
         if (t->mounted) {
             t->mounted = false;
             t->hidden = false;
         }
         if (t->hidden) continue;
         bool pinned = requested && strvec_contains(requested, t->name);
-        if (xdev && t->discoverable && !pinned && !in_list(KEEP_TOP_LEVEL, t->name)) {
+        if (commands && t->discoverable && !pinned && !in_list(KEEP_TOP_LEVEL, t->name) && toolcmd_name_ok(t->name)) {
             t->mounted = true;
             t->hidden = true;
         }
+        if (!t->hidden && str_eq(t->name, "ast_edit")) deferrable = true; /* AstEditTool.deferrable */
+    }
+    /* special tools: commands while bash is on; top-level otherwise, when they have something to act on */
+    for (size_t i = 0; i < a->all_tools.n; i++) {
+        agent_tool_t *t = a->all_tools.v[i];
+        if (!toolcmd_is_special(t->name)) continue;
+        tool_env_t *env = t->ud;
+        bool applies = str_eq(t->name, "resolve") || str_eq(t->name, "reject")
+                           ? deferrable
+                           : str_eq(t->name, "propose") ? env && env->plan_mode_active && env->plan_mode_active(env) : true;
+        t->mounted = false;
+        t->hidden = commands || !applies;
     }
     a->tools.n = 0;
     for (size_t i = 0; i < a->all_tools.n; i++)
         if (!a->all_tools.v[i]->hidden) vec_push(&a->tools, a->all_tools.v[i]);
-    /* eval's bridge reaches every session tool: top-level ones, then xd:// devices */
+    /* eval's bridge reaches every session tool: top-level ones, then mounted tool commands */
     agent_tool_t *ev = NULL, *wr = NULL;
     bool read_active = false;
     json_t *names = json_arr();

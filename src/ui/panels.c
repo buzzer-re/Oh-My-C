@@ -12,7 +12,7 @@
 #include "tools/jobs.h"
 #include "tools/jobtext.h"
 #include "tools/outsink.h"
-#include "tools/xdev.h"
+#include "tools/toolcmd.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -500,10 +500,10 @@ void ui_tools_command(ui_t *u) {
         n++;
     }
     pthread_mutex_unlock(&ag->mu);
-    json_t *xd = xdev_entries(ag), *e;
+    json_t *xd = toolcmd_entries(ag), *e;
     json_arr_foreach(xd, i, e) {
         char *d = table_cell(json_get_str(e, "summary"));
-        sb_appendf(&rows, "\n| `xd://%s` | %s |", json_get_str(e, "name"), *d ? d : "No description provided.");
+        sb_appendf(&rows, "\n| `%s` | %s |", json_get_str(e, "name"), *d ? d : "No description provided.");
         free(d);
         n++;
     }

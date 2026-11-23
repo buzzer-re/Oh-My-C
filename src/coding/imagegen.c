@@ -912,6 +912,6 @@ agent_tool_t *imagegen_tool_new(app_t *a) {
     free(d);
     t->ud = a;
     t->exclusive = true; /* approval "write" */
-    t->discoverable = true; /* custom tools mount under xd:// */
+    t->discoverable = true; /* custom tools mount as tool commands */
     return t;
 }
