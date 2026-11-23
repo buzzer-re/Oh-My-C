@@ -1284,9 +1284,32 @@ static void pr_cb_ann_state(void *ud, const json_t *st) {
     else json_del(g_plan_ann, g_pr.ann_key);
 }
 
+/* #planKeepContextChoice: the keep-context meter (`~378k / 1m`) against `m`'s window (the session model's without one),
+ * disabled past PLAN_KEEP_DISABLE_PERCENT (owned; NULL without a window) */
+static char *plan_keep_meta(app_t *a, const ai_model_t *m, bool *disabled) {
+    *disabled = false;
+    int64_t window = m && m->context_window > 0 ? m->context_window : a->model ? a->model->context_window : 0;
+    if (window <= 0) return NULL;
+    int64_t used = a->last_context_tokens;
+    char *t = ui_format_number((double)MAX(0, used)), *w = ui_format_number((double)window);
+    for (char *q = t; *q; q++) *q = (char)tolower((unsigned char)*q);
+    for (char *q = w; *q; q++) *q = (char)tolower((unsigned char)*q);
+    char *meta = xasprintf("~%s / %s", t, w);
+    free(t);
+    free(w);
+    *disabled = 100.0 * (double)used / (double)window > PLAN_KEEP_DISABLE_PERCENT;
+    return meta;
+}
+
 static void pr_cb_slider(void *ud, int index) {
     (void)ud;
     g_pr.sel_tier = index;
+    if (index >= 0 && (size_t)index < g_pr.ncycle && g_pr.ov) { /* the keep-context meter re-measured for the tier */
+        bool dis = false;
+        char *meta = plan_keep_meta(g_pr.u->app, g_pr.cycle[index].model, &dis);
+        ui_plan_review_set_choice(g_pr.ov, PLAN_KEEP_CONTEXT_INDEX, meta, dis);
+        free(meta);
+    }
 }
 
 /* ----- approve ----- */
@@ -1674,25 +1697,7 @@ static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) 
     app_set_plan_file(a, path);
     g_pr.ann_key = app_plan_path(a, path);
 
-    /* "Approve and keep context (~tokens / window)", disabled above 95% */
-    int64_t window = a->model ? a->model->context_window : 0;
-    int64_t used = a->last_context_tokens;
-    bool keep_disabled = false;
-    char *keep_meta = NULL;
-    if (window > 0) {
-        char *t = ui_format_number((double)MAX(0, used)), *w = ui_format_number((double)window);
-        for (char *q = t; *q; q++) *q = (char)tolower((unsigned char)*q);
-        for (char *q = w; *q; q++) *q = (char)tolower((unsigned char)*q);
-        keep_meta = xasprintf("~%s / %s", t, w);
-        free(t);
-        free(w);
-        keep_disabled = 100.0 * (double)used / (double)window > PLAN_KEEP_DISABLE_PERCENT;
-    }
     g_pr.keep_label = xstrdup("Approve and keep context");
-    /* the approval choices; Refine shows only while the plan has feedback, Save writes a copy and keeps the review */
-    const char *options[] = {"Approve and execute", "Approve and compact context", g_pr.keep_label};
-    const char *metas[] = {NULL, NULL, keep_meta};
-    int disabled[] = {PLAN_KEEP_CONTEXT_INDEX};
 
     /* model-tier slider over the role models, starting on `default`; hidden with fewer than two */
     int current = 0;
@@ -1703,6 +1708,15 @@ static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) 
     g_pr.start_tier = def >= 0 ? def : current;
     g_pr.sel_tier = g_pr.start_tier;
     g_pr.slider = g_pr.ncycle > 1;
+    /* keep-context availability follows the model that executes: the selected tier while the slider shows, else the
+     * pre-plan model plan mode restores (omp 0e72a9e9a4) */
+    bool keep_disabled = false;
+    char *keep_meta = plan_keep_meta(a, g_pr.slider ? g_pr.cycle[g_pr.start_tier].model : (a->plan_prev_model ? a->plan_prev_model : a->model),
+                                     &keep_disabled);
+    /* the approval choices; Refine shows only while the plan has feedback, Save writes a copy and keeps the review */
+    const char *options[] = {"Approve and execute", "Approve and compact context", g_pr.keep_label};
+    const char *metas[] = {NULL, NULL, keep_meta};
+    int disabled[] = {PLAN_KEEP_CONTEXT_INDEX};
     const char **labels = xcalloc(MAX(1, g_pr.ncycle), sizeof *labels), **details = xcalloc(MAX(1, g_pr.ncycle), sizeof *details);
     for (size_t i = 0; i < g_pr.ncycle; i++) {
         labels[i] = g_pr.cycle[i].role;
