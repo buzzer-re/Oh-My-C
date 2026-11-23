@@ -892,8 +892,11 @@ static bool send_locked(cache_warmer_t *w, const char *method) {
         schedule_locked(w);
         if (!w->run.active) stop = w->reason; /* the schedule ended warming */
     }
+    /* {...refresh, outcome, usage?, warmingStopReason?} */
     json_set_str(ev, "type", "cache_warming_end");
+    json_t *usage = json_take(ev, "usage");
     json_set_str(ev, "outcome", outcome);
+    if (usage) json_set(ev, "usage", usage);
     if (stop) json_set_str(ev, "warmingStopReason", stop);
     pthread_mutex_unlock(&w->mu);
     emit_event(w, ev);
