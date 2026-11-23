@@ -488,7 +488,7 @@ check "mcp exit status"  'MCP server "bad" failed to connect: MCP subprocess exi
 grep -q "Mock MCP server instructions" "$T/req.jsonl" && echo "   ok  mcp instructions in prompt" || { echo "   FAIL mcp instructions"; fail=1; }
 rm -f "$T/agent/mcp.json"
 # mcp:// byte resources read like files under the URL (omp 578b47d077): images by content, other bytes as binary files
-printf '{"mcpServers":{"mockmcp":{"command":"python3","args":["-I","%s","--full"]}}}' "$ROOT/tests/e2e/mock_mcp.py" > "$T/agent/mcp.json"
+printf '{"mcpServers":{"mockmcp":{"command":"python3","args":["-I","%s","--full","--blobs"]}}}' "$ROOT/tests/e2e/mock_mcp.py" > "$T/agent/mcp.json"
 check "mcp blob image" 'read `mcp://mem://blob/logo.png?q=<question>`'  "$B" --model mock/mock-1 --no-session -p "read:mcp://mem://blob/logo.png"
 check "mcp blob binary" "Tool said: [Cannot read binary file 'mcp://mem://blob/data' (6B); not valid UTF-8 text. Use ':raw' to read bytes verbatim.]"  "$B" --model mock/mock-1 --no-session -p "read:mcp://mem://blob/data"
 rm -f "$T/agent/mcp.json"

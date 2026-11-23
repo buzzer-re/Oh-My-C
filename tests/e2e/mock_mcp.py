@@ -15,6 +15,7 @@ reply, `load_extra_late` replies first and announces it afterwards (no call to t
 import json, os, sys, time
 
 FULL = "--full" in sys.argv[1:]
+BLOBS = "--blobs" in sys.argv[1:]
 STARTUP_DELAY = next((float(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("--startup-delay=")), 0.0)
 EXTRA_TOOL = os.environ.get("MOCK_MCP_EXTRA_TOOL")
 LAZY = "--lazy" in sys.argv[1:]
@@ -110,9 +111,10 @@ for line in sys.stdin:
         else:
             res = {"content": [{"type": "text", "text": "mcp echo: " + msg["params"]["arguments"].get("text", "")}]}
     elif FULL and method == "resources/list":
-        res = {"resources": [{"uri": "mem://notes", "name": "notes", "description": "Mock notes", "mimeType": "text/plain"},
-                             {"uri": "mem://blob/logo.png", "name": "logo", "mimeType": "image/png"},
-                             {"uri": "mem://blob/data", "name": "data", "mimeType": "application/octet-stream"}]}
+        res = {"resources": [{"uri": "mem://notes", "name": "notes", "description": "Mock notes", "mimeType": "text/plain"}]}
+        if BLOBS:  # byte resources (read as a lone blob part)
+            res["resources"] += [{"uri": "mem://blob/logo.png", "name": "logo", "mimeType": "image/png"},
+                                 {"uri": "mem://blob/data", "name": "data", "mimeType": "application/octet-stream"}]
     elif FULL and method == "resources/templates/list":
         res = {"resourceTemplates": [{"uriTemplate": "mem://item/{id}", "name": "item", "description": "One item"}]}
     elif FULL and method == "resources/read":
