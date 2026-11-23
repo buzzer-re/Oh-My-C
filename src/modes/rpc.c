@@ -16,6 +16,8 @@
 #include "tools/artifacts.h"
 #include "tools/jobs.h"
 #include "text/htmlform.h"
+#include "tui/fuzzy.h"
+#include "ui/modelbrowser.h"
 #include "tui/ansi.h"
 #include "tui/symbols.h"
 #include "ui/ui.h"
@@ -2007,12 +2009,117 @@ static bool session_settled(rpc_t *r) {
     return !running && !agent_is_running(a->agent) && !queued && !jobs_running(a->env->jobs) && !jobs_undelivered(a->env->jobs);
 }
 
+/* getAvailableEffortSelectors: off, auto, then the model's efforts; [] without reasoning */
+static json_t *effort_selectors(app_t *a) {
+    json_t *lv = json_arr();
+    if (!a->model || !a->model->reasoning) return lv;
+    json_push_str(lv, "off");
+    json_push_str(lv, "auto");
+    for (int i = EFFORT_OFF + 1; i <= EFFORT_MAX; i++)
+        if (model_supports_effort(a->model, (ai_effort_t)i)) json_push_str(lv, effort_name((ai_effort_t)i));
+    return lv;
+}
+
+/* get_model_picker (rpc-model-picker.ts): omp's session model picker served over RPC: the Recent block first, the
+ * search ranking, role chips, the thinking slider, `@` quick roles */
+static json_t *model_picker_json(app_t *a, const char *query, int64_t limit) {
+    json_t *rows = json_arr(), *out = json_obj();
+    int64_t total = 0, recent = 0;
+    if (query && query[0] == '@') {
+        app_role_entry_t *cyc = NULL;
+        int cur = 0;
+        size_t n = app_role_cycle(a, &cyc, &cur);
+        char **texts = xcalloc(n ? n : 1, sizeof *texts);
+        for (size_t i = 0; i < n; i++) texts[i] = xasprintf("/@%s", cyc[i].role); /* modelSearchText of `@role` */
+        size_t *idx = xmalloc((n ? n : 1) * sizeof *idx), m = n;
+        char *q = str_trim(query);
+        if (*q) m = tui_fuzzy_rank(query, (const char *const *)texts, n, idx);
+        else
+            for (size_t i = 0; i < n; i++) idx[i] = i;
+        free(q);
+        total = (int64_t)m;
+        for (size_t k = 0; k < m && (int64_t)k < limit; k++) {
+            const app_role_entry_t *e = &cyc[idx[k]];
+            json_t *row = json_obj();
+            json_set_str(row, "provider", e->model->provider);
+            json_set_str(row, "id", e->model->id);
+            json_set_str(row, "name", e->model->name ? e->model->name : e->model->id);
+            json_set_str(row, "role", e->role);
+            if (e->explicit_level && e->level) json_set_str(row, "thinkingLevel", e->level);
+            if ((int)idx[k] == cur) json_set_bool(row, "current", true);
+            json_push(rows, row);
+        }
+        for (size_t i = 0; i < n; i++) free(texts[i]);
+        free(texts);
+        free(idx);
+        app_role_cycle_free(cyc, n);
+    } else {
+        ui_model_browser_t *b = ui_session_model_browser();
+        ui_model_browser_done_adding(b);
+        char *q = str_trim(query ? query : "");
+        ui_model_browser_set_query(b, *q ? q : NULL);
+        free(q);
+        /* the untouched slider shows the level the session runs at: auto's resolved effort once a turn settled it */
+        const char *level = a->auto_thinking ? (a->auto_resolved >= 0 ? effort_name((ai_effort_t)a->auto_resolved) : "auto")
+                                             : effort_name(a->thinking);
+        int64_t tokens = a->model ? ui_context_used(a) : 0;
+        bool sep_seen = false;
+        for (size_t v = 0; v < b->visible.n; v++) {
+            if (b->visible.v[v] == UI_MB_SEPARATOR) {
+                sep_seen = true;
+                continue;
+            }
+            if (!sep_seen) recent++;
+            total++;
+            if (total > limit) continue;
+            const ai_model_t *m = b->items.v[b->visible.v[v]].model;
+            json_t *row = json_obj();
+            json_set_str(row, "provider", m->provider);
+            json_set_str(row, "id", m->id);
+            json_set_str(row, "name", m->name ? m->name : m->id);
+            json_t *roles = json_arr();
+            for (size_t i = 0; i < b->nroles; i++) {
+                if (b->roles[i].model != m || b->roles[i].hidden) continue;
+                json_t *ro = json_obj();
+                json_set_str(ro, "role", b->roles[i].role);
+                json_set_str(ro, "label", b->roles[i].label ? b->roles[i].label : b->roles[i].role);
+                if (b->roles[i].auto_selected) json_set_bool(ro, "auto", true);
+                json_push(roles, ro);
+            }
+            if (json_len(roles)) json_set(row, "roles", roles);
+            else json_free(roles);
+            const char *steps[12], *value = NULL;
+            bool disabled = true;
+            size_t ns = ui_thinking_slider(m, level, steps, ARRAY_LEN(steps), &value, &disabled);
+            if (!disabled) {
+                json_t *th = json_arr();
+                for (size_t i = 0; i < ns; i++) json_push_str(th, steps[i]);
+                json_set(row, "thinking", th);
+                json_set_str(row, "thinkingLevel", value);
+            }
+            if (tokens > 0 && m->context_window > 0 && tokens > m->context_window) json_set_bool(row, "overContext", true);
+            if (a->model == m) json_set_bool(row, "current", true);
+            json_push(rows, row);
+        }
+        if (!sep_seen) recent = 0;
+        recent = MIN(recent, (int64_t)json_len(rows));
+        ui_model_browser_free(b);
+    }
+    json_set(out, "rows", rows);
+    json_set_int(out, "recent", recent);
+    json_set_int(out, "total", total);
+    return out;
+}
+
 /* RpcSessionState (get_state) */
 static json_t *state_json(rpc_t *r) {
     app_t *a = r->a;
     json_t *s = json_obj();
     if (a->model) json_set(s, "model", model_json(a->model));
     if (app_wire_thinking(a)) json_set_str(s, "thinkingLevel", app_wire_thinking(a));
+    /* the user's selector (`auto` while auto mode picks the effort) and the selectors the model accepts */
+    json_set_str(s, "configuredThinkingLevel", a->auto_thinking ? "auto" : effort_name(a->thinking));
+    json_set(s, "thinkingLevels", effort_selectors(a));
     bool streaming = agent_is_running(a->agent);
     json_set_bool(s, "isStreaming", streaming);
     json_set_bool(s, "isCompacting", a->compacting);
@@ -3856,8 +3963,22 @@ static void handle(rpc_t *r, json_t *cmd) {
             respond(r, id, type, false, NULL, e);
             free(e);
         } else {
-            app_use_model(a, m);
+            /* `role` records the role the switch belongs to (a quick-role pick); `thinkingLevel` runs it at that
+             * level, clamped; nothing is persisted (omp 4189e22bea) */
+            const char *role = json_get_str(cmd, "role");
+            if (role && *role) app_use_model_role(a, m, role);
+            else app_use_model(a, m);
+            const char *lv = json_get_str(cmd, "thinkingLevel");
+            if (lv) app_set_thinking_level(a, lv);
             respond(r, id, type, true, model_json(m), NULL);
+        }
+    } else if (!strcmp(type, "get_model_picker")) {
+        const json_t *lj = json_get(cmd, "limit");
+        int64_t limit = lj ? json_get_int(cmd, "limit", 0) : 100;
+        if (lj && (!json_is_num(lj) || lj->u.num.d != floor(lj->u.num.d) || lj->u.num.d < 1)) {
+            respond(r, id, type, false, NULL, "`limit` must be a positive integer.");
+        } else {
+            respond(r, id, type, true, model_picker_json(a, json_get_str(cmd, "query"), limit), NULL);
         }
     } else if (!strcmp(type, "set_thinking_level")) {
         if (app_set_thinking_level(a, json_get_str(cmd, "level"))) {

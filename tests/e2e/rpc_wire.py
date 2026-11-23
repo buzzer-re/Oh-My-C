@@ -230,6 +230,24 @@ end = r.wait(lambda f: f.get("type") == "agent_end" and r.frames.index(f) >= n0,
 with r.lock:
     pr = [f for f in r.frames[n0:] if f.get("type") == "prompt_result"]
 check("resume", x and x.get("success") and "error" not in x and end is not None and not pr, (x, pr))
+# remote model controls (omp 4189e22bea, 7329ff9cc0): get_model_picker, get_state's selectors, set_model role/level
+x = r.call({"id": "mp", "type": "get_model_picker"})
+rows = x and x.get("data", {}).get("rows") or []
+cur = [row for row in rows if row.get("current")]
+check("model picker", x and x.get("success") and x["data"]["total"] >= len(rows) > 0 and isinstance(x["data"]["recent"], int) and
+      len(cur) == 1 and cur[0]["provider"] == "mock" and cur[0]["name"], (x and x.get("data", {}).get("total"), x and x.get("data", {}).get("recent"), cur))
+x = r.call({"id": "mp2", "type": "get_model_picker", "query": "mock/think", "limit": 1})
+rows = x and x.get("data", {}).get("rows") or []
+check("model picker query", len(rows) == 1 and rows[0]["id"] == "mock-think" and rows[0]["thinking"][:2] == ["auto", "off"] and
+      rows[0]["thinkingLevel"] in rows[0]["thinking"], x)
+x = r.call({"id": "mp3", "type": "get_model_picker", "limit": 0})
+check("model picker limit", x and x.get("success") is False and x.get("error") == "`limit` must be a positive integer.", x)
+x = r.call({"id": "sm", "type": "set_model", "provider": "mock", "modelId": "mock-think", "thinkingLevel": "auto"})
+st = r.call({"id": "gs2", "type": "get_state"})
+check("set_model level", x and x.get("success") and st and st["data"]["configuredThinkingLevel"] == "auto" and
+      st["data"]["thinkingLevels"] == ["off", "auto", "low", "medium", "high", "xhigh"], st)
+x = r.call({"id": "sm2", "type": "set_model", "provider": "mock", "modelId": "mock-1"})
+
 # session change shapes
 n0 = len(r.frames)
 x = r.call({"id": "ns", "type": "new_session"})

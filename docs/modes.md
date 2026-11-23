@@ -171,7 +171,7 @@ response (`code` is a machine-readable reason on some errors):
 | Protocol | `negotiate_protocol` (only v2) |
 | Prompting | `prompt`, `steer`, `follow_up`, `abort`, `abort_and_prompt`, `abort_and_deliver_queue` (empty Enter: `{aborted}`), `resume` (the `.`/`c` continue; `Nothing to resume`), `abort_retry`, `abort_bash`, `abort_branch_summary`, `abort_and_restore_queue`, `remove_queued_message`, `promote_queued_message`, `bash`, `btw`, `btw_cancel`, `handoff`, `compact` |
 | State | `get_state`, `get_messages`, `get_messages_page`, `get_entries`, `get_last_assistant_text`, `get_session_stats`, `get_available_commands`, `get_btw_history` |
-| Model | `set_model`, `cycle_model`, `get_available_models`, `set_thinking_level`, `cycle_thinking_level`, `get_available_thinking_levels` |
+| Model | `set_model` (optional `thinkingLevel`, `role`), `cycle_model`, `get_available_models`, `get_model_picker` (`{rows, recent, total}`: the alt+p picker's order, ranking, role chips, thinking slider and `@` quick roles), `set_thinking_level` (accepts `auto`), `cycle_thinking_level`, `get_available_thinking_levels`; `get_state` carries `configuredThinkingLevel` and `thinkingLevels` |
 | Session | `new_session`, `open_session`, `switch_session`, `fork`, `branch`, `get_tree`, `navigate_tree`, `get_branch_messages`, `set_label`, `set_session_name`, `export_html` |
 | Behavior | `set_steering_mode`, `set_follow_up_mode`, `set_interrupt_mode`, `set_auto_compaction`, `set_auto_retry`, `set_event_filter`, `set_ask_dialog`, `set_todos`, `goal`, `set_advisor` |
 | Auth | `get_login_providers`, `login`, `get_logout_accounts`, `logout` |

@@ -200,6 +200,8 @@ const char *app_wire_thinking(app_t *a);
 void app_model_state_changed(app_t *a, const struct ai_model *prev_model, const char *prev_thinking);
 /* select an exact catalog model like an explicit /model pick (session entry, thinking re-clamp, events) */
 void app_use_model(app_t *a, const struct ai_model *m);
+/* setModel(model, role): app_use_model whose model_change records `role` */
+void app_use_model_role(app_t *a, const struct ai_model *m, const char *role);
 void app_apply_model(app_t *a, const struct ai_model *m, bool has_effort, ai_effort_t effort);
 /* queue_update when the displayable steering / follow-up queue differs from the last one sent */
 void app_queue_changed(app_t *a);

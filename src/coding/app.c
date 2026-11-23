@@ -2222,7 +2222,13 @@ int app_set_model(app_t *a, const char *pattern, char **err) {
 
 void app_use_model(app_t *a, const ai_model_t *m) { app_apply_model(a, m, false, EFFORT_OFF); }
 
-void app_apply_model(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e) {
+static void apply_model_role(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e, const char *role);
+
+void app_use_model_role(app_t *a, const ai_model_t *m, const char *role) { apply_model_role(a, m, false, EFFORT_OFF, role); }
+
+void app_apply_model(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e) { apply_model_role(a, m, has_e, e, NULL); }
+
+static void apply_model_role(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e, const char *role) {
     const ai_model_t *prev_model = a->model;
     const char *prev_wire = app_wire_thinking(a);
     a->model = m;
@@ -2237,7 +2243,7 @@ void app_apply_model(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e) {
     if (has_e) app_set_thinking(a, e);
     else if (a->auto_thinking) app_set_thinking_auto(a); /* #reapplyThinkingLevel keeps auto, re-clamped */
     char *label = app_model_label(a);
-    session_append_model_change(a->session, label, NULL);
+    session_append_model_change(a->session, label, role);
     free(label);
     app_rebuild_system_prompt(a);
     app_model_state_changed(a, prev_model, prev_wire);

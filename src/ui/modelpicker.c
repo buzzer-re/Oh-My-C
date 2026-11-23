@@ -89,6 +89,18 @@ static const char *thinking_step(const ai_model_t *m, const slider_t *s, const c
     return "off";
 }
 
+/* thinkingSlider for other surfaces (the RPC model picker): the steps of `m` and `level` as one of them */
+size_t ui_thinking_slider(const ai_model_t *m, const char *level, const char **steps, size_t cap, const char **value,
+                          bool *disabled) {
+    slider_t sl;
+    thinking_steps(m, &sl);
+    *disabled = sl.disabled;
+    *value = sl.disabled ? "off" : thinking_step(m, &sl, level);
+    size_t n = MIN(sl.n, cap);
+    for (size_t i = 0; i < n; i++) steps[i] = sl.steps[i];
+    return n;
+}
+
 /* configuredThinkingLevel: the session's selection, `auto` included */
 static const char *configured_level(const app_t *a) { return a->auto_thinking ? "auto" : effort_name(a->thinking); }
 
