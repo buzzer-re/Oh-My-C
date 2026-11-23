@@ -1763,6 +1763,11 @@ static void test_kill_ring_jump(void) {
     CHECK(ed->cl == 0 && ed->cc == 9);
     feed(ed, "\x1d\x1d" "q"); /* the jump key again cancels; q is typed */
     check_text(ed, "alpha betqa\ngamma");
+    /* backwards at column 0 skips the cursor's own character (omp dbca46b6f8) */
+    tui_editor_set_text(ed, "ab\nab");
+    feed(ed, "\x01"); /* line 1, col 0 */
+    feed(ed, "\x1b\x1d" "a");
+    CHECK(ed->cl == 0 && ed->cc == 0);
     /* alt+enter is upstream's hard-coded newline fallback */
     tui_editor_set_text(ed, "x");
     feed(ed, "\x1b\r");

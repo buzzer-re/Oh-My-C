@@ -1370,9 +1370,9 @@ static void jump_to_char(tui_editor_t *ed, const char *ch, int dir) {
                 if (p) found = p - line;
             }
         } else {
-            /* JS lastIndexOf(ch, cursorCol - 1): a negative start searches from 0 */
+            /* lastIndexOf(ch, cursorCol - 1), except that at column 0 nothing precedes the cursor (omp dbca46b6f8:
+             * the clamped start found the cursor's own character) */
             long from = cur ? (long)ed->cc - 1 : (long)n;
-            if (from < 0) from = 0;
             for (long i = MIN(from, (long)n - (long)chl); i >= 0; i--)
                 if (!memcmp(line + i, ch, chl)) {
                     found = i;
