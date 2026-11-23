@@ -361,10 +361,15 @@ const tui_theme_t *tui_theme(void) {
     return g_theme;
 }
 
+static bool g_theme_loaded;
+
 void tui_theme_set(tui_theme_t *t) {
     if (g_theme && g_theme != t) tui_theme_free(g_theme);
     g_theme = t;
+    g_theme_loaded = true;
 }
+
+bool tui_theme_loaded(void) { return g_theme_loaded; }
 
 const char *tui_fg_seq(const tui_theme_t *th, tui_tc_t slot) {
     if (!th) th = tui_theme();

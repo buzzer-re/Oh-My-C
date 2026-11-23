@@ -77,6 +77,15 @@ tc() { python3 -I -c 'import json,shlex,sys; print("call:bash:"+json.dumps({"com
 check "tc help"        $'Usage:\n  debug <action> [OPTIONS] [@FILE] [-]'  "$B" --model mock/mock-1 -p "bash:debug --help"
 check "tc dispatch"    'Invalid arguments for lsp: Validation failed for tool "lsp":'  "$B" --model mock/mock-1 -p "$(tc lsp '{"action":"bogus"}')"
 check "tc usage"       $'lsp: invalid value for `bogus`; expected an enum member\nlsp: run `lsp --help`'  "$B" --model mock/mock-1 -p "bash:lsp bogus"
+# lsp rename_file: a bare new name stays beside the source; a rename no server rewrites imports for says so (omp 290d787845)
+mkdir -p rnf && echo x > rnf/old.txt
+check "lsp rename bare" $'Tool said: Renamed rnf/old.txt \u2192 rnf/new.txt; imports NOT rewritten: no language server handles these files'  "$B" --model mock/mock-1 -p "$(tc lsp '{"action":"rename_file","file":"rnf/old.txt","new_name":"new.txt"}')"
+rm -rf rnf
+# no server for a file says why: none claims the type, or a claiming one lacks its root marker / binary (omp 290d787845)
+echo x > nols.zzz; echo 'package main' > nols.go
+check "lsp no server"  'Tool said: ✗ nols.zzz: No language server handles .zzz files'  "$B" --model mock/mock-1 -p "$(tc lsp '{"action":"diagnostics","file":"nols.zzz"}')"
+check "lsp no marker"  $'Tool said: No language server for .go:\n  gopls: no go.mod, go.work, go.sum in the file\'s directory or its parents'  "$B" --model mock/mock-1 -p "$(tc lsp '{"action":"hover","file":"nols.go","line":1}')"
+rm -f nols.zzz nols.go
 check "tc pipeline"    $'No active debug session.\nok'  "$B" --model mock/mock-1 -p "bash:echo x | debug sessions && echo ok"
 check "tc report"      "Noted, thanks!"                   "$B" --model mock/mock-1 -p 'bash:report_issue "read: wrong output"'
 # a direct call by a mounted command's exact name still runs it (sdk.ts resolveToolCommandTool)
