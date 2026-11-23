@@ -715,11 +715,6 @@ static char *rebuild_notice(const tui_term_t *tm, int width, int height) {
 static void full_render(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int width, int height, bool clear) {
     tui_term_t *tm = t->term;
     size_t mark = tm->out.len;
-    /* a destructive reset purges every Kitty image (text erases leave placements painted); the live ones
-     * are transmitted again after the clear */
-    char *purge = clear ? tui_image_reset_display() : NULL;
-    if (purge) tui_term_puts(tm, purge);
-    free(purge);
     paint_begin(t);
     int r0;
     bool fused_exit = false;
@@ -737,6 +732,12 @@ static void full_render(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int w
         }
         tui_term_puts(tm, LINE_TERMINATOR);
         tui_term_clear_screen(tm, true);
+        /* a destructive reset purges every Kitty image (text erases leave placements painted), after the erases: d=A
+         * removes only on-screen placements, and a terminal that keeps a scrollback-anchored one moves it to the
+         * top-left when ED3 erases its row (omp 9eaf37275e); the live ones are transmitted again */
+        char *purge = tui_image_reset_display();
+        if (purge) tui_term_puts(tm, purge);
+        free(purge);
         write_transmits(tm);
         t->full_count++;
         r0 = 0;
