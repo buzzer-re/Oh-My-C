@@ -533,6 +533,32 @@ static json_t *msg_obj(const char *role, json_t *content) {
 
 static bool has_key(const json_t *o, const char *k) { return json_get(o, k) != NULL; }
 
+/* signatureReasoningField: the reasoning field a thinking block's text arrived in, from its bare marker or its
+ * reasoning_details envelope ({"reasoningDetails": [...], "field"?}); other signatures pass through. buf holds a parsed
+ * field. */
+static const char *sig_field(const char *sig, char buf[32]) {
+    if (!sig || sig[0] != '{') return sig;
+    json_t *env = json_parse_str(sig);
+    const char *f = json_is_arr(json_get(env, "reasoningDetails")) ? json_get_str(env, "field") : NULL;
+    const char *r = sig;
+    if (json_is_arr(json_get(env, "reasoningDetails"))) {
+        r = NULL;
+        if (oai_is_reasoning_field(f)) {
+            snprintf(buf, 32, "%s", f);
+            r = buf;
+        }
+    }
+    json_free(env);
+    return r;
+}
+
+static bool readable_detail(const json_t *d) {
+    const char *t = json_get_str(d, "type");
+    return str_eq(t, "reasoning.text") || str_eq(t, "reasoning.summary");
+}
+
+static bool signed_detail(const json_t *d) { return !json_is_null(json_get(d, "signature")) || !json_is_null(json_get(d, "data")); }
+
 static void convert_assistant(json_t *out, const json_t *msg, const ai_model_t *m, const json_t *over, idnorm_t *idn,
                               size_t msg_index) {
     bool think_as_text = oai_cbool(m, over, "requiresThinkingAsText", false);
@@ -582,6 +608,9 @@ static void convert_assistant(json_t *out, const json_t *msg, const ai_model_t *
         }
     }
     if (have_text) json_set(am, "content", json_strn(text.s, text.len));
+    char fbuf[32], fbuf_all[32];
+    first_sig = sig_field(first_sig, fbuf);
+    first_sig_all = sig_field(first_sig_all, fbuf_all);
 
     if (n_think > 0) {
         if (think_as_text) {
@@ -656,8 +685,34 @@ static void convert_assistant(json_t *out, const json_t *msg, const ai_model_t *
             json_push(tcs, tc);
         }
         json_set(am, "tool_calls", tcs);
-        if (json_len(details) > 0) json_set(am, "reasoning_details", details);
-        else json_free(details);
+        json_set(am, "__per_call_details", details);
+    }
+    /* replay reasoning_details exactly as received; once the envelope is gone (a pass rewrote the turn, or it predates
+     * it), the encrypted entries kept on unchanged tool calls still replay. A request that drops the model's own thinking
+     * also drops its unsigned text. */
+    {
+        json_t *received = json_arr();
+        json_arr_foreach(content, j, blk) {
+            if (!str_eq(json_get_str(blk, "type"), "thinking")) continue;
+            const char *sig = json_get_str(blk, "thinkingSignature");
+            json_t *env = sig && sig[0] == '{' ? json_parse_str(sig) : NULL;
+            json_t *d;
+            json_arr_foreach(json_get_arr(env, "reasoningDetails"), k, d) json_push(received, json_clone(d));
+            json_free(env);
+        }
+        json_t *per = json_take(am, "__per_call_details");
+        json_t *details = json_len(received) ? received : per;
+        if (details == received) json_free(per);
+        else json_free(received);
+        bool sends_own = oai_cbool(m, over, "mistralReasoningContentParts", false) || think_as_text || rc_tools ||
+                         (str_eq(fmt, "zai") && m->reasoning) || replay_rc;
+        json_t *replayed = json_arr(), *d;
+        json_arr_foreach(details, k, d) {
+            if (sends_own || !readable_detail(d) || signed_detail(d)) json_push(replayed, json_clone(d));
+        }
+        json_free(details);
+        if (json_len(replayed)) json_set(am, "reasoning_details", replayed);
+        else json_free(replayed);
     }
     json_t *c = json_get(am, "content");
     if (json_is_null(c) && (has_rf || n_tools > 0)) json_set_str(am, "content", "");
@@ -1177,6 +1232,12 @@ struct oaic_stream {
      * ThinkingInbandScanner: the kimi/dsml/qwen tool-call grammars are not ported) */
     think_heal_t *heal;
     bool suppress_healed_thinking; /* explicit reasoning seen: drop thinking the healer recovers */
+    /* reasoning_details (omp 5759bdacc9 / 4a064201a9 / 67ccb2ca07 / 25c2fb8211): one thinking source per turn (0 none,
+     * 1 a reasoning field, 2 the reasoning.text entries), the field mirrored beside winning entries, and every entry as
+     * received (streamed fragments of one entry concatenated) */
+    int reasoning_source;
+    const char *mirrored_field;
+    json_t *received_details;
 };
 
 oaic_stream_t *oaic_stream_new(const ai_model_t *m, ai_event_cb cb, void *ud) {
@@ -1234,6 +1295,30 @@ static void map_finish(oaic_stream_t *s, const char *reason) {
     if (err) {
         free(s->finish_err);
         s->finish_err = err;
+    }
+}
+
+/* accumulateReasoningDetail: a reasoning.text / reasoning.summary fragment of the same entry (type, index, id) extends it */
+static void accumulate_detail(json_t *details, const json_t *d) {
+    const char *type = json_get_str(d, "type");
+    const char *frag = str_eq(type, "reasoning.text") ? "text" : str_eq(type, "reasoning.summary") ? "summary" : NULL;
+    json_t *last = json_len(details) ? json_at(details, json_len(details) - 1) : NULL;
+    json_t *did = json_get(d, "id"), *lid = last ? json_get(last, "id") : NULL;
+    if (!frag || !last || !str_eq(json_get_str(last, "type"), type) || !json_equal(json_get(last, "index"), json_get(d, "index")) ||
+        (!json_is_null(did) && !json_is_null(lid) && !json_equal(did, lid))) {
+        json_push(details, json_clone(d));
+        return;
+    }
+    const char *k;
+    json_t *v;
+    json_obj_foreach(d, i, k, v) {
+        if (!strcmp(k, frag) && json_is_str(v)) {
+            const char *prev = json_get_str(last, k);
+            char *cat = xasprintf("%s%s", prev ? prev : "", json_sv(v));
+            json_set(last, k, json_str_own(cat));
+        } else if (!json_is_null(v) || !json_get(last, k)) {
+            json_set(last, k, json_clone(v));
+        }
     }
 }
 
@@ -1420,22 +1505,46 @@ int oaic_stream_on_sse(void *ud, const char *event, const char *data, size_t len
     json_t *delta = json_get_obj(choice, "delta");
     if (delta) {
         static const char *const fields[] = {"reasoning_content", "reasoning", "reasoning_text"};
-        for (int i = 0; i < 3; i++) {
+        const char *found = NULL;
+        json_t *fv = NULL;
+        for (int i = 0; i < 3 && !found; i++) {
             json_t *v = json_get(delta, fields[i]);
-            if (json_is_str(v) && v->u.str.len) {
-                thinking_delta(s, v->u.str.s, v->u.str.len, fields[i]);
+            if (json_is_str(v) && v->u.str.len) found = fields[i], fv = v;
+        }
+        sb_t details_text = SB_INIT;
+        json_t *det0;
+        json_arr_foreach(json_get_arr(delta, "reasoning_details"), di0, det0) {
+            if (str_eq(json_get_str(det0, "type"), "reasoning.text") && json_get_str(det0, "text"))
+                sb_append(&details_text, json_get_str(det0, "text"));
+        }
+        if (found && s->reasoning_source != 2) {
+            s->reasoning_source = 1;
+            thinking_delta(s, fv->u.str.s, fv->u.str.len, found);
+            s->suppress_healed_thinking = true;
+        } else if (s->reasoning_source != 1) {
+            /* Bifrost streams Gemini thinking only as reasoning.text entries; once they won the turn, a plain field beside
+             * them is OpenRouter's mirror: kept as the replay marker, never rendered */
+            if (found && !s->mirrored_field) s->mirrored_field = found;
+            if (details_text.len) {
+                s->reasoning_source = 2;
+                thinking_delta(s, details_text.s, details_text.len, NULL);
                 s->suppress_healed_thinking = true;
-                break;
             }
         }
+        sb_free(&details_text);
         handle_content_value(s, json_get(delta, "content"));
         json_t *calls = json_get_arr(delta, "tool_calls");
         if (json_len(calls)) handle_tool_calls(s, calls);
         json_t *det;
         json_arr_foreach(json_get_arr(delta, "reasoning_details"), di, det) {
+            if (!json_is_obj(det)) continue;
+            if (!s->received_details) s->received_details = json_arr();
+            accumulate_detail(s->received_details, det);
+            /* an encrypted entry also stays on the tool call it names (blob in OpenRouter's `data` or Bifrost's
+             * `signature`): a pass that rewrites the turn drops the envelope, and an unchanged call keeps its signature */
             if (!str_eq(json_get_str(det, "type"), "reasoning.encrypted")) continue;
             const char *did = json_get_str(det, "id");
-            if (!did || !json_get(det, "data")) continue;
+            if (!did || (json_is_null(json_get(det, "data")) && json_is_null(json_get(det, "signature")))) continue;
             json_t *blk;
             json_arr_foreach(s_content(s), bi, blk) {
                 if (str_eq(json_get_str(blk, "type"), "toolCall") && str_eq(json_get_str(blk, "id"), did)) {
@@ -1465,6 +1574,7 @@ static void free_stream(oaic_stream_t *s) {
         think_heal_free(s->heal);
         free(s->heal);
     }
+    json_free(s->received_details);
     aib_free(&s->b);
     free(s);
 }
@@ -1484,6 +1594,35 @@ json_t *oaic_stream_finish(oaic_stream_t *s, int rc, const char *terr) {
     /* held-back healer fragments flush once the stream completed (a thrown stream error skips this upstream) */
     if (s->heal && (rc == 0 || rc == OAI_STREAM_STOP) && !s->error) think_heal_flush(s->heal, heal_emit, s);
     aib_end_block(&s->b);
+    /* keep the received reasoning_details on the first thinking block whose signature only names its text's source
+     * field, so replay sends them back verbatim; with no such block an empty thinking block holds them only when the turn
+     * has other content (an encrypted-only turn stays empty so the empty-stop retry still runs) */
+    if (json_len(s->received_details) > 0) {
+        json_t *holder = NULL, *blk;
+        json_arr_foreach(s_content(s), hi, blk) {
+            if (holder || !str_eq(json_get_str(blk, "type"), "thinking")) continue;
+            const char *sig = json_get_str(blk, "thinkingSignature");
+            if (!sig || oai_is_reasoning_field(sig)) holder = blk;
+        }
+        json_t *env = json_obj();
+        json_set(env, "reasoningDetails", s->received_details);
+        s->received_details = NULL;
+        const char *hs = holder ? json_get_str(holder, "thinkingSignature") : NULL;
+        const char *field = oai_is_reasoning_field(hs) ? hs : s->mirrored_field;
+        if (field) json_set_str(env, "field", field);
+        char *sig = json_dump_js(env);
+        json_free(env);
+        if (holder) json_set_str(holder, "thinkingSignature", sig);
+        else if (json_len(s_content(s)) > 0) {
+            json_t *tb = json_obj();
+            json_set_str(tb, "type", "thinking");
+            json_set_str(tb, "thinking", "");
+            json_set_str(tb, "thinkingSignature", sig);
+            json_set_bool(tb, "summary", false);
+            json_push(s_content(s), tb);
+        }
+        free(sig);
+    }
     /* authoritative tool arguments from the per-call accumulators */
     for (size_t i = 0; i < s->tcs.n; i++) {
         oaic_tc_t *t = &s->tcs.v[i];

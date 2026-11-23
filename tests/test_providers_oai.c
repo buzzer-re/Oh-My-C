@@ -292,6 +292,60 @@ static void test_completions_dialects(void) {
     json_free(msgs);
 }
 
+/* reasoning_details (omp 5759bdacc9, 4a064201a9, 67ccb2ca07, 25c2fb8211, e1cffa057e): Bifrost streams Gemini thinking
+ * only as reasoning.text entries; a plain field arriving after them is a mirror; the entries replay verbatim */
+static void test_reasoning_details(void) {
+    tmodel_t t;
+    model_init(&t, "{\"id\":\"gemini-3.5-flash\",\"api\":\"openai-completions\",\"provider\":\"bifrost\",\"reasoning\":true,\"compat\":{}}");
+    const char *sse =
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"index\":0,\"text\":\"Think \"}]}}]}\n\n"
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"mirror\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"index\":0,\"text\":\"hard.\",\"signature\":\"SIG\"}]}}]}\n\n"
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\n"
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"id\":\"call_1\",\"signature\":\"BLOB\"}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+    oaic_stream_t *st = oaic_stream_new(&t.m, NULL, NULL);
+    int rc = feed_sse(oaic_stream_on_sse, st, sse, 4096);
+    json_t *msg = oaic_stream_finish(st, rc, NULL);
+    json_t *th = block_of(msg, "thinking", 0);
+    CHECK_STR(json_get_str(th, "thinking"), "Think hard.");
+    json_t *env = json_parse_str(json_get_str(th, "thinkingSignature"));
+    char *d = json_dump(json_get(env, "reasoningDetails"), 0);
+    CHECK_STR(d, "[{\"type\":\"reasoning.text\",\"index\":0,\"text\":\"Think hard.\",\"signature\":\"SIG\"},"
+                 "{\"type\":\"reasoning.encrypted\",\"id\":\"call_1\",\"signature\":\"BLOB\"}]");
+    free(d);
+    CHECK_STR(json_get_str(env, "field"), "reasoning");
+    json_free(env);
+    CHECK(json_get_str(block_of(msg, "toolCall", 0), "thoughtSignature") != NULL); /* the encrypted entry stays on its call */
+    /* replay: the entries go back verbatim on the same model's turn */
+    json_set_str(msg, "provider", "bifrost");
+    json_t *msgs = json_arr();
+    json_push(msgs, J("{\"role\":\"user\",\"content\":\"hi\"}"));
+    json_push(msgs, msg);
+    json_push(msgs, J("{\"role\":\"toolResult\",\"toolCallId\":\"call_1\",\"toolName\":\"read\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"isError\":false}"));
+    ai_context_t ctx = {.messages = msgs};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    json_t *p = oaic_build_request(&t.m, &ctx, &o);
+    json_t *am = json_at(json_get(p, "messages"), 1);
+    d = json_dump(json_get(am, "reasoning_details"), 0);
+    /* the model's own unsigned thinking text would be dropped where its thinking is not sent; signed text stays */
+    CHECK_STR(d, "[{\"type\":\"reasoning.text\",\"index\":0,\"text\":\"Think hard.\",\"signature\":\"SIG\"},"
+                 "{\"type\":\"reasoning.encrypted\",\"id\":\"call_1\",\"signature\":\"BLOB\"}]");
+    free(d);
+    json_free(p);
+    json_free(msgs);
+    /* an encrypted-only turn stays empty, so the empty-stop retry still runs */
+    st = oaic_stream_new(&t.m, NULL, NULL);
+    rc = feed_sse(oaic_stream_on_sse, st,
+                  "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"data\":\"X\"}]},"
+                  "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                  4096);
+    msg = oaic_stream_finish(st, rc, NULL);
+    CHECK(json_len(json_get(msg, "content")) == 0);
+    json_free(msg);
+    json_free(t.raw);
+}
+
 static void test_completions_stream(void) {
     tmodel_t t;
     model_init(&t, "{\"id\":\"m1\",\"api\":\"openai-completions\",\"provider\":\"test\",\"reasoning\":true,\"compat\":{}}");
@@ -1327,6 +1381,7 @@ int main(void) {
     test_completions_mistral();
     test_completions_dialects();
     test_completions_stream();
+    test_reasoning_details();
     test_completions_stream_errors();
     test_responses_request();
     test_tool_name_prefix();
