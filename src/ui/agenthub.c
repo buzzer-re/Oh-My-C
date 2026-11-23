@@ -12,6 +12,7 @@
 #include "ui/tools/tc.h"
 
 #include "coding/agents.h"
+#include "tools/jobtext.h"
 #include "config/settings.h"
 #include "tui/keys.h"
 
@@ -316,6 +317,7 @@ typedef struct {
     int64_t ts;
     int kind, status;
     char *title, *summary, *tool;
+    bool intent; /* summaryIsToolIntent: the summary is a tool-call intent, shown by its label (omp 4d08e232b3) */
 } arow_t;
 
 static void arow_free(arow_t *r) {
@@ -332,9 +334,12 @@ static void arows_clear(arows_t *v) {
 static void arow_push(arows_t *v, const char *id, const char *agent, int64_t ts, int kind, const char *title,
                       const char *summary, int status, const char *tool) {
     arow_t r = {xstrdup(id), xstrdup(agent), ts, kind, status, xstrdup(title ? title : ""), xstrdup(summary ? summary : ""),
-                tool ? xstrdup(tool) : NULL};
+                tool ? xstrdup(tool) : NULL, false};
     vec_push(v, r);
 }
+
+/* activitySummaryLabel: the full intent stays searchable, the list shows its headline */
+static char *arow_summary_label(const arow_t *r) { return r->intent ? tool_intent_label(r->summary) : xstrdup(r->summary); }
 
 static int arow_cmp(const void *a, const void *b) {
     const arow_t *x = a, *y = b;
@@ -361,9 +366,11 @@ static void live_rows(const json_t *ref, int64_t last_update, arows_t *out) {
     if (cur) {
         char *rid = xasprintf("live:%s:current-tool", id);
         const char *sum = json_get_str(p, "lastIntent");
+        bool is_intent = sum != NULL;
         if (!sum) sum = json_get_str(p, "currentToolArgs");
         if (!sum) sum = cur;
         arow_push(out, rid, id, json_get_int(p, "currentToolStartMs", last_update), AK_TOOL, cur, sum, AS_PENDING, cur);
+        out->v[out->n - 1].intent = is_intent;
         free(rid);
     }
     const char *st = json_get_str(p, "status");
@@ -403,7 +410,7 @@ static char *first_arg(const json_t *args, const char *const *keys) {
 
 /* argumentsSummary */
 static char *activity_args_summary(const char *tool, const json_t *args) {
-    static const char *const INTENT[] = {"i", "intent", NULL}, *const PATH[] = {"path", NULL}, *const CMD[] = {"command", NULL},
+    static const char *const INTENT[] = {"intent", NULL}, *const PATH[] = {"path", NULL}, *const CMD[] = {"command", NULL},
                              *const PAT[] = {"pattern", NULL},
                              *const COMMON[] = {"path", "query", "name", "task", "title", NULL};
     char *v = first_arg(args, INTENT);
@@ -452,8 +459,11 @@ static void transcript_rows(const char *agent, const json_t *msgs, arows_t *out)
             json_arr_foreach(json_get_arr(m, "content"), k, b) {
                 if (!str_eq(json_get_str(b, "type"), "toolCall") || !json_get_str(b, "id") || !json_get_str(b, "name")) continue;
                 char *rid = xasprintf("%s:tool:%s", agent, json_get_str(b, "id"));
-                char *sum = activity_args_summary(json_get_str(b, "name"), json_get(b, "arguments"));
+                static const char *const I[] = {"i", NULL};
+                char *intent = first_arg(json_get(b, "arguments"), I);
+                char *sum = intent ? intent : activity_args_summary(json_get_str(b, "name"), json_get(b, "arguments"));
                 arow_push(out, rid, agent, ts, AK_TOOL, json_get_str(b, "name"), sum, AS_PENDING, json_get_str(b, "name"));
+                out->v[out->n - 1].intent = intent != NULL;
                 free(sum);
                 free(rid);
             }
@@ -488,7 +498,8 @@ static void agent_rows(const json_t *ref, arows_t *out) {
         bool echoed = false;
         for (size_t k = 0; k < live.n && !echoed; k++) {
             const char *lt = live.v[k].tool ? live.v[k].tool : live.v[k].title, *tt = tr.v[i].tool ? tr.v[i].tool : tr.v[i].title;
-            echoed = live.v[k].kind == tr.v[i].kind && str_eq(lt, tt) && str_eq(live.v[k].summary, tr.v[i].summary);
+            echoed = live.v[k].kind == tr.v[i].kind && str_eq(lt, tt) && str_eq(live.v[k].summary, tr.v[i].summary) &&
+                     live.v[k].intent == tr.v[i].intent;
         }
         if (echoed) arow_free(&tr.v[i]);
         else vec_push(out, tr.v[i]);
@@ -542,7 +553,8 @@ static char *hud_preview(const json_t *p, int width) {
     if (!tool) return NULL;
     const char *intent = cur ? json_get_str(p, "currentToolIntent") : json_get_str(recent, "intent");
     const char *args = cur ? json_get_str(p, "currentToolArgs") : json_get_str(recent, "args");
-    const char *detail = intent ? intent : args;
+    char *ilabel = intent ? tool_intent_label(intent) : NULL;
+    const char *detail = ilabel ? ilabel : args;
     int64_t elapsed = cur && json_get_int(p, "currentToolStartMs", 0) ? now_ms() - json_get_int(p, "currentToolStartMs", 0) : 0;
     char *el = NULL;
     if (elapsed > 5000) {
@@ -574,6 +586,7 @@ static char *hud_preview(const json_t *p, int width) {
     }
     if (el) sb_append(&b, el);
     free(el);
+    free(ilabel);
     char *r = tui_truncate_to_width(b.s, width, "");
     sb_free(&b);
     return r;
@@ -1697,7 +1710,7 @@ static void detail_panel(hub_t *h, int width, int rows, strvec_t *out) {
     const char *cur_tool = json_get_str(p, "currentTool");
     char *current = cur_tool ? (json_get_str(p, "currentToolArgs") ? xasprintf("%s%s%s", cur_tool, dot, json_get_str(p, "currentToolArgs"))
                                                                     : xstrdup(cur_tool))
-                  : json_get_str(p, "lastIntent") ? xstrdup(json_get_str(p, "lastIntent"))
+                  : json_get_str(p, "lastIntent") ? tool_intent_label(json_get_str(p, "lastIntent"))
                   : json_get_str(ref, "activity") ? xstrdup(json_get_str(ref, "activity"))
                                                   : NULL;
     if (current) {
@@ -1812,10 +1825,10 @@ static void detail_panel(hub_t *h, int width, int rows, strvec_t *out) {
             char *clk = clock_hms(a->ts), *dc = S(TUI_TC_DIM, clk), *gl = activity_glyph(a);
             char *tt = one_line(arow_title(a)), *ttt = trunc_w(tt, width), *mt = S(TUI_TC_MUTED, ttt);
             char *prefix = xasprintf("%s %s %s ", dc, gl, mt);
-            char *sm = one_line(a->summary), *smt = trunc_w(sm, MAX(1, width - tui_visible_width(prefix)));
+            char *sl = arow_summary_label(a), *sm = one_line(sl), *smt = trunc_w(sm, MAX(1, width - tui_visible_width(prefix)));
             char *l = xasprintf("%s%s", prefix, smt);
             ADD(l);
-            free(clk), free(dc), free(gl), free(tt), free(ttt), free(mt), free(prefix), free(sm), free(smt), free(l);
+            free(clk), free(dc), free(gl), free(tt), free(ttt), free(mt), free(prefix), free(sm), free(smt), free(l), free(sl);
         }
     }
 #undef ADD
@@ -1945,10 +1958,10 @@ static void render_activity(hub_t *h, int width, strvec_t *out) {
             char *tt1 = one_line(arow_title(a)), *tt = trunc_w(tt1, inner), *ttc = S(a->kind == AK_RESPONSE ? TUI_TC_SUCCESS : TUI_TC_MUTED, tt);
             char *prefix = xasprintf("%s %s %s %s %s", cursor, dc, gl, agb, ttc);
             int availw = MAX(1, inner - tui_visible_width(prefix) - tui_visible_width(dot));
-            char *sm1 = one_line(a->summary), *sm = trunc_w(sm1, availw), *dd = S(TUI_TC_DIM, dot);
+            char *sl = arow_summary_label(a), *sm1 = one_line(sl), *sm = trunc_w(sm1, availw), *dd = S(TUI_TC_DIM, dot);
             strvec_push_own(&body, xasprintf("%s%s%s", prefix, dd, sm));
             free(cursor), free(clk), free(dc), free(gl), free(ag1), free(ag), free(agb), free(tt1), free(tt), free(ttc), free(prefix),
-                free(sm1), free(sm), free(dd);
+                free(sm1), free(sm), free(dd), free(sl);
         }
     }
     strvec_push_own(out, ui_box_top(width, "Agent Hub"));

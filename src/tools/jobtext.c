@@ -204,3 +204,26 @@ char *job_caption_normalize(const char *reply) {
     free(sh);
     return r;
 }
+
+char *tool_intent_label(const char *intent) {
+    if (!intent) return xstrdup("");
+    for (const char *p = intent; *p; p++) {
+        if (*p != ':') continue;
+        char nx = p[1];
+        if (nx && !(nx == ' ' || nx == '\t' || nx == '\n' || nx == '\r' || nx == '\v' || nx == '\f' ||
+                    !strncmp(p + 1, "\xc2\xa0", 2) || !strncmp(p + 1, "\xe2\x80\xa8", 3)))
+            continue;
+        if (p == intent) break; /* separator > 0 */
+        char *head = xstrndup(intent, (size_t)(p - intent));
+        char *t = str_trim(head);
+        free(head);
+        if (*t) return t;
+        free(t);
+        break;
+    }
+    return xstrdup(intent);
+}
+
+char *job_display_label(const char *intent, const char *label) {
+    return intent && *intent ? tool_intent_label(intent) : xstrdup(label ? label : "");
+}

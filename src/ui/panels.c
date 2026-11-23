@@ -718,8 +718,12 @@ static void jobs_report(ui_t *u, bool full) {
             const char *label = json_get_str(j, "label") ? json_get_str(j, "label") : "";
             /* what the job is for leads; full mode follows it with what the command does and the whole command */
             const char *intent = json_get_str(j, "intent");
-            const char *text = full ? (json_get_str(j, "command") ? json_get_str(j, "command") : label) : (intent ? intent : label);
-            if (!strcmp(text, id)) continue;
+            char *dlabel = job_display_label(intent, label);
+            const char *text = full ? (json_get_str(j, "command") ? json_get_str(j, "command") : label) : dlabel;
+            if (!strcmp(text, id)) {
+                free(dlabel);
+                continue;
+            }
             char *indent = jrow_indent(r);
             char *prefix = S(TUI_TC_DIM, indent);
             int iw = tui_visible_width(indent);
@@ -749,6 +753,7 @@ static void jobs_report(ui_t *u, bool full) {
                 free(san), free(rt);
             }
             free(prefix);
+            free(dlabel);
         }
         vec_free(&rows);
         for (size_t i = 0; i < all.n; i++) {

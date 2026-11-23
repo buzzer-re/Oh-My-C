@@ -3,6 +3,7 @@
  * the call returns), finalized result rows with the run summary footer. Review/yield structured
  * output and nested task trees are not ported (omc subagents do not produce them). */
 #include "ui/tools/tc.h"
+#include "tools/jobtext.h"
 
 #include "tui/ansi.h"
 #include "tui/markdown.h"
@@ -309,7 +310,8 @@ static void agent_progress(const json_t *p, bool expanded, int width, int spinne
             char *nm = tc_fg(cur ? TUI_TC_MUTED : TUI_TC_DIM, name ? name : "");
             sb_t l = SB_INIT;
             sb_appendf(&l, "%s%s %s", cont, tc_sym("tree.hook"), nm);
-            const char *detail = intent && *intent ? intent : args;
+            char *ilabel = intent && *intent ? tool_intent_label(intent) : NULL;
+            const char *detail = ilabel ? ilabel : args;
             if (detail && *detail) {
                 char *pv = preview_line(detail, 40);
                 char *d = tc_fg(TUI_TC_DIM, pv);
@@ -317,6 +319,7 @@ static void agent_progress(const json_t *p, bool expanded, int width, int spinne
                 free(d);
                 free(pv);
             }
+            free(ilabel);
             int64_t st = json_get_int(p, "currentToolStartMs", 0);
             if (cur && st && now_ms - st > 5000) {
                 char *du = tc_format_duration(now_ms - st);

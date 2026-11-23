@@ -2,6 +2,7 @@
  * while collapsed, job tree with output previews when expanded, interrupted/empty forms. Live job widgets
  * (job-widget.ts charts), shimmer and agent roster rows are not ported. */
 #include "ui/tools/tc.h"
+#include "tools/jobtext.h"
 
 #include "tui/ansi.h"
 
@@ -89,9 +90,7 @@ static char *job_label(const json_t *j) {
         if (*t) return t;
         free(t);
     }
-    const char *intent = json_get_str(j, "intent");
-    if (intent && *intent) return xstrdup(intent);
-    return xstrdup(json_get_str(j, "label") ? json_get_str(j, "label") : "");
+    return job_display_label(json_get_str(j, "intent"), json_get_str(j, "label"));
 }
 
 /* bodyLines: quote-bordered preview of a received message, clipped to the card; expanded (Ctrl+O) the whole message
