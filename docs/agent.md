@@ -487,6 +487,9 @@ such as `🧪 FLAKY: Fix flaky park tests`. This reuses the prompt cache. Low-si
 `OMC_NO_TITLE=1` disables them (RPC mode always does). Every billed title request (the fork, each
 title-model attempt, errors included) is journaled as an off-transcript `model_usage` entry with
 `purpose: "title"` and charged to the session's cost gate, so `/usage` and `--max-cost` count it.
+Compaction requests are journaled the same way (usage only), under the method that made them:
+`compaction:remote` (provider-native, including OpenAI `/responses/compact`, priced from its `usage`),
+`compaction:soft` (local summary requests) and `compaction:handoff` (the handoff document).
 
 ## Plan mode
 

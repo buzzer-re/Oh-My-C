@@ -104,6 +104,15 @@ for f in glob.glob(sys.argv[1] + "/**/*.jsonl", recursive=True):
     for l in open(f):
         e = json.loads(l)
         if e.get("type") == "compaction": print(e["method"], e["summary"], e["preserveData"]["openaiRemoteCompaction"]["compactionItem"]["encrypted_content"])' "$T/cg3"
+# compaction spend is journaled per method: model_usage purpose compaction:<method> (omp 625d62739c)
+check "compaction spend journal" "remote=1234/1000/56 soft=True handoff=True"  python3 -I -c '
+import glob, json, sys
+def usage(d):
+    return [e for f in glob.glob(d + "/**/*.jsonl", recursive=True) for e in map(json.loads, open(f)) if e.get("type") == "model_usage"]
+r = [e for e in usage(sys.argv[1]) if e["purpose"] == "compaction:remote"]
+u = r[0]["usage"] if r else {}
+print("remote=%s/%s/%s soft=%s handoff=%s" % (u.get("input", 0) + u.get("cacheRead", 0), u.get("cacheRead"), u.get("output"),
+      any(e["purpose"] == "compaction:soft" for e in usage(sys.argv[2])), any(e["purpose"] == "compaction:handoff" for e in usage(sys.argv[3]))))' "$T/cg3" "$T/cg1" "$T/cg5"
 check "openai compact strips metadata" "clean"  python3 -I -c '
 import json, sys
 rs = [json.loads(l) for l in open(sys.argv[1])]

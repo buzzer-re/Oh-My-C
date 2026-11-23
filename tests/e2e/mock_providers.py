@@ -167,7 +167,8 @@ class H(BaseHTTPRequestHandler):
             out = users[-1:] + [{"type": "compaction", "id": "cmp_1", "encrypted_content": "ENC:%d" % len(body.get("input") or []),
                                  "internal_chat_message_metadata_passthrough": {"turn_id": "turn_0"}}]
             return self.reply(200, {"id": "resp_c", "object": "response.compaction", "output": out,
-                                    "usage": {"input_tokens": 1234, "output_tokens": 56}})
+                                    "usage": {"input_tokens": 1234, "output_tokens": 56, "total_tokens": 1290,
+                                              "input_tokens_details": {"cached_tokens": 1000}}})
         kind, text = last_turn(body)
         if path.endswith("/messages") and body.get("compaction") is not None:
             # Anthropic on-demand compaction: a signed compaction block, stop_reason "compaction"

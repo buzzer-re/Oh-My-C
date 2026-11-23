@@ -501,6 +501,9 @@ static char *joined_text(const json_t *msg) {
 static __thread volatile sig_atomic_t *tl_cancel;
 static volatile sig_atomic_t *cancel_ptr(app_t *a) { return tl_cancel ? tl_cancel : &a->agent->cancel; }
 static bool cancelled(app_t *a) { return *cancel_ptr(a) != 0; }
+/* the model_usage purpose of this pass's requests: compaction:<method> (omp 625d62739c) */
+static __thread const char *tl_purpose;
+static void journal(app_t *a, const json_t *resp) { app_note_side_usage(a, tl_purpose ? tl_purpose : "compaction:soft", resp); }
 
 /* one summarization oneshot: owned text, NULL + *err (owned) on failure; *status the HTTP status if known */
 static char *oneshot_ex(app_t *a, const ai_model_t *m, const char *system, const char *user, int64_t max_tokens,
@@ -522,6 +525,7 @@ static char *oneshot_ex(app_t *a, const ai_model_t *m, const char *system, const
     o.metadata = (json_t *)app_session_metadata(a, m->provider);
     o.cancel = cancel_ptr(a);
     json_t *r = ai_complete(m, &ctx, &o);
+    journal(a, r);
     char *text = NULL;
     const char *stop = json_get_str(r, "stopReason");
     if (status) *status = (int)json_get_int(r, "errorStatus", 0);
@@ -849,6 +853,7 @@ static bool anthropic_compact(app_t *a, const ai_model_t *m, const prep_t *p, co
     o.tool_choice = NULL;
     o.anthropic_compaction = ac;
     json_t *resp = ai_complete(m, &c, &o);
+    journal(a, resp);
     json_free(ac);
     json_free(sys);
     json_free(tools);
@@ -918,6 +923,7 @@ static bool openai_compact(app_t *a, const ai_model_t *m, const prep_t *p, resul
     free(instr);
     json_free(msgs);
     if (!out) return false;
+    if (json_get(out, "usageMessage")) journal(a, json_get(out, "usageMessage"));
     json_t *keep = json_obj();
     json_set_str(keep, "provider", m->provider);
     json_set(keep, "replacementHistory", json_take(out, "replacementHistory"));
@@ -936,6 +942,7 @@ static bool compact_with(app_t *a, const ai_model_t *m, prep_t *p, const char *i
     memset(r, 0, sizeof *r);
     r->first_kept = xstrdup(p->first_kept);
     r->tokens_before = p->tokens_before;
+    tl_purpose = remote ? "compaction:remote" : "compaction:soft";
     bool used_remote = false, native = false;
     const char *prev = p->prev ? json_get_str(p->prev, "summary") : NULL;
     if (remote && settings_bool("compaction.remoteEnabled", true)) {
@@ -1757,12 +1764,14 @@ static char *handoff_exec(app_t *a, handoff_req_t *h, bool auto_triggered, char 
     json_t *none = json_str("none"), *autoc = json_str("auto");
     o.tool_choice = none;
     json_t *r = ai_complete(model, &c, &o);
+    app_note_side_usage(a, "compaction:handoff", r);
     const char *em = json_get_str(r, "errorMessage");
     if (str_eq(json_get_str(r, "stopReason"), "error") && json_get_int(r, "errorStatus", 0) == 400 && em &&
         str_istr(em, "tool_choice") && str_istr(em, "auto") && str_istr(em, "supported")) {
         json_free(r);
         o.tool_choice = autoc;
         r = ai_complete(model, &c, &o);
+        app_note_side_usage(a, "compaction:handoff", r);
     }
     json_free(none), json_free(autoc);
     char *text = NULL;

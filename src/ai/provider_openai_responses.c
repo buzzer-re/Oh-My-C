@@ -1808,6 +1808,7 @@ json_t *ai_openai_remote_compact(const ai_model_t *m, const char *api_key, const
     http_req_t req = {.method = "POST", .url = url, .headers = &h, .body = payload, .body_len = strlen(payload),
                       .timeout_ms = 300000, .cancel = cancel};
     http_resp_t resp = {0};
+    int64_t started = mono_ms();
     int hr = http_request(&req, &resp);
     if (status) *status = resp.status;
     if (cancel && *cancel) *err = xstrdup("Remote compaction aborted");
@@ -1833,6 +1834,23 @@ json_t *ai_openai_remote_compact(const ai_model_t *m, const char *api_key, const
             out = json_obj();
             json_set(out, "compactionItem", json_clone(item));
             json_set(out, "replacementHistory", hist);
+            /* remoteCompactionUsageMessage: the request's priced usage (this transport bypasses the stream journal) */
+            const json_t *u = json_get_obj(data, "usage");
+            if (json_is_num(json_get(u, "input_tokens")) && json_is_num(json_get(u, "output_tokens")) &&
+                json_is_num(json_get(u, "total_tokens"))) {
+                const json_t *idt = json_get_obj(u, "input_tokens_details"), *odt = json_get_obj(u, "output_tokens_details");
+                ai_builder_t b;
+                aib_init(&b, m, NULL, NULL);
+                oai_usage_accounting(&b, json_get_int(u, "input_tokens", 0), json_get_int(u, "output_tokens", 0),
+                                     jint(idt, "cached_tokens", 0), jint(odt, "reasoning_tokens", 0),
+                                     jint(idt, "cache_write_tokens", -1), -1, false);
+                json_t *um = aib_finish(&b, "stop", NULL);
+                aib_free(&b);
+                json_set(um, "content", json_arr());
+                json_set_str(um, "model", model);
+                json_set_int(um, "duration", mono_ms() - started);
+                json_set(out, "usageMessage", um);
+            }
         }
         json_free(data);
     }
