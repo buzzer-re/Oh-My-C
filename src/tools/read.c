@@ -1877,6 +1877,28 @@ static int read_path(tool_env_t *env, tool_ctx_t *ctx, const char *path, const l
         /* localReadPath: the path with its selector peeled */
         char *sp = NULL, *ss = NULL;
         if (sel.has_sel) read_split_path_sel(path, &sp, &ss);
+        /* a numeric pair can also be a literal filename plus a selector: diagnosed only after the lookup failed */
+        char *pp = NULL, *ps = NULL;
+        if (ss && *ss && !ss[strspn(ss, "0123456789")]) read_split_path_sel(sp, &pp, &ps);
+        if (ps && *ps && !ps[strspn(ps, "0123456789")]) {
+            char *pabs = tool_resolve_path(env, pp);
+            struct stat pst;
+            bool exists = stat(pabs, &pst) == 0;
+            free(pabs);
+            if (exists) {
+                /* `file:10:5` is usually a line and column; a reversed range would only fail again */
+                char *range = strtoll(ss, NULL, 10) > strtoll(ps, NULL, 10) ? xasprintf(" or :%s-%s for a range", ps, ss) : xstrdup("");
+                tool_result_error(out, "Invalid line selector ':%s:%s'. Use :%s for a single line%s.", ps, ss, ps, range);
+                free(range);
+                free(pp);
+                free(ps);
+                free(sp);
+                free(ss);
+                goto done;
+            }
+        }
+        free(pp);
+        free(ps);
         tool_result_error(out, "Path '%s' not found", ss ? sp : path);
         free(sp);
         free(ss);

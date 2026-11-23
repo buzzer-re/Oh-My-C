@@ -1042,8 +1042,27 @@ static const bash_rule_t *bash_restriction_rule(const char *command, const bash_
 
 /* bashApprovalRuleMatches for `allow`: the whole command, or the command after leading assignments of the names the
  * rule's `env` and bash.allowedEnvVars allow */
+/* isShellEnvironmentAssignment of a word's start: NAME=, NAME+=, NAME[x]= */
+static bool starts_with_assignment(const char *w) {
+    if (!w || !(isalpha((unsigned char)*w) || *w == '_')) return false;
+    const char *p = w + 1;
+    while (isalnum((unsigned char)*p) || *p == '_') p++;
+    if (*p == '[') {
+        const char *e = strchr(p, ']');
+        if (!e) return false;
+        p = e + 1;
+    }
+    if (*p == '+') p++;
+    return *p == '=';
+}
+
 static bool allow_rule_matches(const char *command, const bash_rule_t *r, const strvec_t *allowed) {
-    if (pattern_matches(command, r->match)) return true;
+    /* a command with leading assignments matches directly only a rule that itself begins with one; otherwise every
+     * assignment must be one the rule's `env` or bash.allowedEnvVars permits (omp a478f08b91) */
+    while (*command == ' ' || *command == '\t' || *command == '\n' || *command == '\r') command++;
+    bool leading_env = starts_with_assignment(command);
+    if ((!leading_env || starts_with_assignment(r->match)) && pattern_matches(command, r->match)) return true;
+    if (!leading_env) return false;
     char *stripped = strip_env_assignments(command, &r->env, allowed);
     bool hit = stripped && pattern_matches(stripped, r->match);
     free(stripped);
