@@ -661,6 +661,15 @@ for c in init configOptions bootstrap "fs read" "fs write" terminal usage_update
 done
 # tool approval (WP-10): tools.approvalMode tiers, tools.approval policies, restricted folders, CLI flags
 check "approval no ui" 'Tool "bash" requires approval but no interactive UI available.'  "$B" --model mock/mock-1 --no-session --approval-mode always-ask -p "bash:echo x"
+# the wait is recorded in the session file (tool_approval_requested / _resolved custom entries, omp 2ecc358ae5)
+mkdir -p "$T/apagent" && cp "$T/agent/models.yml" "$T/apagent/"
+OMC_CODING_AGENT_DIR="$T/apagent" timeout 30 "$B" --model mock/mock-1 --approval-mode always-ask -p "bash:echo x" </dev/null >/dev/null 2>&1
+check "approval records" "requested=bash/always-ask resolved=False/no interactive UI available same=True"  python3 -I -c '
+import json,glob,sys
+es=[json.loads(l) for f in glob.glob(sys.argv[1]+"/sessions/*/*.jsonl") for l in open(f) if l.strip()]
+c=lambda t:[e["data"] for e in es if e.get("type")=="custom" and e.get("customType")==t]
+q,r=c("tool_approval_requested"),c("tool_approval_resolved")
+print("requested=%s/%s resolved=%s/%s same=%s" % (q[0]["toolName"], q[0]["approvalMode"], r[0]["approved"], r[0].get("reason"), q[0]["toolCallId"]==r[0]["toolCallId"] and "requestedAt" in q[0]))' "$T/apagent"
 check "approval write" "Successfully wrote 3 bytes to ap.txt"  "$B" --model mock/mock-1 --no-session --approval-mode=write -p "write:ap.txt:abc"
 check "approval yolo"  "Tool said: yolo-ok"  "$B" --model mock/mock-1 --no-session --approval-mode always-ask --yolo -p "bash:echo yolo-ok"
 check "approval flag"  'Invalid --approval-mode value: "nope". Expected one of: always-ask, always-ask-cached, write, yolo.'  "$B" --approval-mode nope -p x

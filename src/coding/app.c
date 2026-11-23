@@ -1649,6 +1649,20 @@ void app_sync_queue_modes(app_t *a) {
     a->agent->interrupt_wait = str_eq(settings_str("interruptMode", "immediate"), "wait");
 }
 
+/* tool_approval_resolved: the wait ended (approved, denied, aborted, or refused for lack of a UI) */
+static void approval_record_resolved(app_t *a, const char *call_id, const char *name, bool approved, const char *why) {
+    if (!a->session) return;
+    json_t *d = json_obj();
+    json_set_str(d, "toolCallId", call_id);
+    json_set_str(d, "toolName", name);
+    json_set_bool(d, "approved", approved);
+    if (why) json_set_str(d, "reason", why);
+    char *at = iso8601_now();
+    json_set_str(d, "resolvedAt", at);
+    free(at);
+    session_append_custom(a->session, "tool_approval_resolved", d);
+}
+
 /* the extension wrapper's approval gate (extensibility/extensions/wrapper.ts execute): resolve against the
  * validated input, deny, or prompt through the UI (requestApproval) and remember what the answer covers */
 static tool_gate_t hook_approve_tool(void *ud, agent_t *ag, const json_t *call, const json_t *args, char **reason) {
@@ -1680,7 +1694,23 @@ static tool_gate_t hook_approve_tool(void *ud, agent_t *ag, const json_t *call, 
     bool cache_targets = grantable && targets.n > 0;
     bool scoped = !cache_targets && approval_session_scope(&r, name, &scope_subject, &scope_key);
     if (scoped && approval_session_has(sid, scope_key)) goto done;
+    /* tool-approval-records.ts: the wait is on disk before the prompt opens (the session file is created when no
+     * assistant message wrote it yet), so a process reading the file sees a session blocked on the user */
+    const char *call_id = json_get_str(call, "id") ? json_get_str(call, "id") : "";
+    if (a->session) {
+        json_t *rq = json_obj();
+        json_set_str(rq, "toolCallId", call_id);
+        json_set_str(rq, "toolName", name);
+        json_set_str(rq, "approvalMode", approval_mode_name(ctx.mode));
+        if (r.reason && *r.reason) json_set_str(rq, "reason", r.reason);
+        char *at = iso8601_now();
+        json_set_str(rq, "requestedAt", at);
+        free(at);
+        session_ensure_on_disk(a->session);
+        session_append_custom(a->session, "tool_approval_requested", rq);
+    }
     if (!a->env->ui.approve) {
+        approval_record_resolved(a, call_id, name, false, "no interactive UI available");
         if (r.source == ASRC_RESTRICTION)
             *reason = xasprintf("Tool \"%s\" requires approval but no interactive UI available.\nReason: %s\nA restricted "
                                 "folder (tools.restrictedFolders) asks in every approval mode.",
@@ -1709,6 +1739,9 @@ static tool_gate_t hook_approve_tool(void *ud, agent_t *ag, const json_t *call, 
         *reason = xasprintf("Tool call denied by user: %s", name);
         gate = TOOL_BLOCK;
     }
+    /* an abort (Esc, a session switch) closes the prompt as a refusal too */
+    approval_record_resolved(a, call_id, name, gate == TOOL_ALLOW,
+                             gate == TOOL_ALLOW ? NULL : ag->cancel ? "approval aborted" : "denied by user");
     approval_prompt_free(&p);
 done:
     strvec_free(&targets);

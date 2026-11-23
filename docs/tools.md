@@ -177,7 +177,11 @@ folder covering every target, listed in the prompt: up to 24 entries, 200 scanne
 *Approve*, each "for this session" or, with the *Remember across sessions* toggle, in
 `<agentDir>/approval-cache.json`. A grant covers its tier and the tiers below; a folder grant covers the
 folder's own entries, never subfolders; a recursive search has its own tree key. `/forget-approvals`
-clears every grant.
+clears every grant. Every wait is recorded in the session file (tool-approval-records.ts): a
+`tool_approval_requested` custom entry (`toolCallId`, `toolName`, `approvalMode`, `reason?`, `requestedAt`) is on
+disk before the prompt opens (the file is created if no assistant message wrote it yet), and
+`tool_approval_resolved` (`approved`, `reason?`: `denied by user`, `approval aborted`, `no interactive UI available`,
+`resolvedAt`) ends it.
 
 **ACP** (`modes/acp.c`, omp `#wrapToolForAcpPermission`): `bash` (resolved with `always-ask` unless the
 yolo mode was configured explicitly or `--auto-approve` given) and edits that delete or move a file ask
