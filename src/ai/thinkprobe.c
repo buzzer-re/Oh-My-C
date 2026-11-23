@@ -486,7 +486,7 @@ typedef struct flight {
     volatile sig_atomic_t cancel; /* every waiter left */
     int refs, waiters;
     bool done;
-    json_t *cap; /* the verdict, NULL when inconclusive or aborted */
+    json_t *cap; /* the capability this turn dispatches with, NULL when aborted */
     pthread_cond_t cv;
     struct flight *next;
 } flight_t;
@@ -622,8 +622,106 @@ static json_t *attempt_json(const attempt_t *a) {
     return o;
 }
 
-/* probe(): the capability, or NULL when inconclusive or aborted */
-static json_t *probe(flight_t *f) {
+/* capabilityFor: the format's accepted efforts (a toggle format records "high") */
+static json_t *capability_for(const char *fmt, const json_t *attempts, const json_t *all) {
+    bool accepted[N_EFFORTS] = {0}, observed = false;
+    const json_t *a;
+    json_arr_foreach(attempts, x, a) {
+        if (!str_eq(json_get_str(a, "format"), fmt) || !json_get_bool(a, "accepted", false)) continue;
+        if (json_get_bool(a, "observed", false)) observed = true;
+        int e = effort_index(json_get_str(a, "effort"));
+        if (e >= 0) accepted[e] = true;
+    }
+    json_t *cap = json_obj();
+    json_set_int(cap, "checkedAt", now_ms());
+    json_set_str(cap, "format", fmt);
+    json_t *ef = json_arr();
+    if (toggle_format(fmt)) json_push_str(ef, "high");
+    else
+        for (int e = 0; e < N_EFFORTS; e++)
+            if (accepted[e]) json_push_str(ef, EFFORTS[e]);
+    json_set(cap, "efforts", ef);
+    json_set_bool(cap, "observed", observed);
+    json_set(cap, "attempts", json_clone(all));
+    return cap;
+}
+
+static json_t *none_capability(bool observed, const json_t *attempts) {
+    json_t *cap = json_obj();
+    json_set_int(cap, "checkedAt", now_ms());
+    json_set_str(cap, "format", "none");
+    json_set(cap, "efforts", json_arr());
+    json_set_bool(cap, "observed", observed);
+    json_set(cap, "attempts", json_clone(attempts));
+    return cap;
+}
+
+/* the conclusive rows a format has (inconclusive attempts are not rows) */
+static size_t rows_of(const json_t *attempts, const char *fmt, bool *any_accepted, bool rejected[N_EFFORTS]) {
+    size_t n = 0;
+    const json_t *a;
+    if (any_accepted) *any_accepted = false;
+    if (rejected) memset(rejected, 0, N_EFFORTS * sizeof *rejected);
+    json_arr_foreach(attempts, x, a) {
+        if (!str_eq(json_get_str(a, "format"), fmt)) continue;
+        n++;
+        bool ok = json_get_bool(a, "accepted", false);
+        if (ok && any_accepted) *any_accepted = true;
+        int e = effort_index(json_get_str(a, "effort"));
+        if (!ok && e >= 0 && rejected) rejected[e] = true;
+    }
+    return n;
+}
+
+static bool ladder_complete(const json_t *attempts, const char *fmt) {
+    return rows_of(attempts, fmt, NULL, NULL) == (toggle_format(fmt) ? 1u : (size_t)N_EFFORTS);
+}
+
+/* selectDispatch: no format run so far was accepted. Skip formats whose ladders finished as rejections, and never send
+ * an effort those probes refused (omp 537c08fe41). baseline: -2 never concluded, 0 rejected, 1 accepted. */
+static json_t *select_dispatch(const batch_t *batches, size_t nb, const json_t *attempts, int baseline, bool baseline_observed) {
+    for (size_t bi = 0; bi < nb; bi++)
+        for (size_t k = 0; k < batches[bi].n; k++) {
+            const char *fmt = batches[bi].f[k];
+            if (ladder_complete(attempts, fmt)) continue;
+            bool rejected[N_EFFORTS];
+            rows_of(attempts, fmt, NULL, rejected);
+            bool any_rejected = false;
+            for (int e = 0; e < N_EFFORTS; e++) any_rejected |= rejected[e];
+            if (toggle_format(fmt) || !any_rejected) {
+                json_t *h = hypothesis(fmt);
+                json_set(h, "attempts", json_clone(attempts));
+                return h;
+            }
+            json_t *ef = json_arr();
+            for (int e = 0; e < N_EFFORTS; e++)
+                if (!rejected[e]) json_push_str(ef, EFFORTS[e]);
+            if (json_len(ef) == 0) {
+                json_free(ef);
+                continue;
+            }
+            json_t *cap = json_obj();
+            json_set_int(cap, "checkedAt", now_ms());
+            json_set_str(cap, "format", fmt);
+            json_set(cap, "efforts", ef);
+            json_set_bool(cap, "observed", false);
+            json_set(cap, "attempts", json_clone(attempts));
+            return cap;
+        }
+    if (baseline == 1) return none_capability(baseline_observed, attempts);
+    /* every dialect run finished as a rejection; a plain check that never completed is not a refusal, and resending a
+     * rejected dialect fails the turn (the caller does not save this guess) */
+    if (baseline == -2) return none_capability(false, attempts);
+    json_t *h = hypothesis(nb ? batches[0].f[0] : "openai");
+    json_set(h, "attempts", json_clone(attempts));
+    return h;
+}
+
+/* probe(): the capability this turn dispatches with (NULL when aborted); *persist (owned or NULL) is set only when the
+ * chosen format's own ladder finished. A quota, auth, transport or timeout failure is not a rejection, and it belongs
+ * only to the format that failed. */
+static json_t *probe(flight_t *f, json_t **persist) {
+    *persist = NULL;
     batch_t batches[2];
     size_t nb = format_batches(f->model->api, batches);
     int req = f->requested == EFFORT_OFF ? 3 : (int)f->requested - EFFORT_MINIMAL;
@@ -632,10 +730,9 @@ static json_t *probe(flight_t *f) {
     for (int i = 0; i < N_EFFORTS; i++)
         if (i != req) order[no++] = i;
     json_t *attempts = json_arr();
-    int baseline = -1; /* the reasoning-off control's verdict, shared by the first batch */
+    int baseline = -2; /* the reasoning-off control's verdict, shared by the first batch (-2: never concluded) */
     bool baseline_observed = false;
-    json_t *cap = NULL;
-    for (size_t bi = 0; bi < nb && !cap; bi++) {
+    for (size_t bi = 0; bi < nb; bi++) {
         size_t n = 0;
         for (size_t k = 0; k < batches[bi].n; k++) n += toggle_format(batches[bi].f[k]) ? 1 : N_EFFORTS;
         if (bi == 0) n++;
@@ -662,55 +759,53 @@ static json_t *probe(flight_t *f) {
             at[j++].model = candidate(f, "none");
         }
         bool ok = run_batch(f, at, n);
-        bool inconclusive = false;
-        for (size_t i = 0; i < n; i++) {
-            if (at[i].verdict < 0) inconclusive = true;
-            catalog_model_free(at[i].model);
-        }
-        /* a quota, auth, transport or timeout failure is not evidence against a tier: never save a truncated ladder */
-        if (!ok || inconclusive) {
+        for (size_t i = 0; i < n; i++) catalog_model_free(at[i].model);
+        if (!ok) {
             free(at);
             json_free(attempts);
             return NULL;
         }
         for (size_t i = 0; i < n; i++) {
-            json_push(attempts, attempt_json(&at[i]));
-            if (str_eq(at[i].format, "none")) baseline = at[i].verdict, baseline_observed = at[i].observed;
+            if (at[i].verdict < 0) continue;
+            if (str_eq(at[i].format, "none")) {
+                baseline = at[i].verdict, baseline_observed = at[i].observed;
+                json_push(attempts, attempt_json(&at[i]));
+            } else json_push(attempts, attempt_json(&at[i]));
         }
         free(at);
-        for (size_t k = 0; k < batches[bi].n && !cap; k++) {
+        /* save a format once its own ladder finished; an unfinished rival does not discard it */
+        for (size_t k = 0; k < batches[bi].n; k++) {
             const char *fmt = batches[bi].f[k];
-            bool accepted[N_EFFORTS] = {0}, any = false, observed = false;
-            const json_t *a;
-            json_arr_foreach(attempts, x, a) {
-                if (!str_eq(json_get_str(a, "format"), fmt) || !json_get_bool(a, "accepted", false)) continue;
-                any = true;
-                if (json_get_bool(a, "observed", false)) observed = true;
-                int e = effort_index(json_get_str(a, "effort"));
-                if (e >= 0) accepted[e] = true;
-            }
+            bool any = false;
+            rows_of(attempts, fmt, &any, NULL);
+            if (!any || !ladder_complete(attempts, fmt)) continue;
+            json_t *cap = capability_for(fmt, attempts, attempts);
+            *persist = json_clone(cap);
+            json_free(attempts);
+            return cap;
+        }
+        for (size_t k = 0; k < batches[bi].n; k++) {
+            const char *fmt = batches[bi].f[k];
+            bool any = false;
+            rows_of(attempts, fmt, &any, NULL);
             if (!any) continue;
-            cap = json_obj();
-            json_set_int(cap, "checkedAt", now_ms());
-            json_set_str(cap, "format", fmt);
-            json_t *ef = json_arr();
-            if (toggle_format(fmt)) json_push_str(ef, "high");
-            else
-                for (int e = 0; e < N_EFFORTS; e++)
-                    if (accepted[e]) json_push_str(ef, EFFORTS[e]);
-            json_set(cap, "efforts", ef);
-            json_set_bool(cap, "observed", observed);
-            json_set(cap, "attempts", json_clone(attempts));
+            json_t *cap = capability_for(fmt, attempts, attempts);
+            json_free(attempts);
+            return cap;
+        }
+        bool unfinished = false;
+        for (size_t k = 0; k < batches[bi].n; k++) unfinished |= !ladder_complete(attempts, batches[bi].f[k]);
+        if (unfinished) {
+            json_t *cap = select_dispatch(batches, nb, attempts, baseline, baseline_observed);
+            json_free(attempts);
+            return cap;
         }
     }
-    if (!cap && baseline == 1) {
-        cap = json_obj();
-        json_set_int(cap, "checkedAt", now_ms());
-        json_set_str(cap, "format", "none");
-        json_set(cap, "efforts", json_arr());
-        json_set_bool(cap, "observed", baseline_observed);
-        json_set(cap, "attempts", json_clone(attempts));
-    }
+    json_t *cap;
+    if (baseline == 1) {
+        cap = none_capability(baseline_observed, attempts);
+        *persist = json_clone(cap);
+    } else cap = select_dispatch(batches, nb, attempts, baseline, baseline_observed);
     json_free(attempts);
     return cap;
 }
@@ -729,14 +824,17 @@ static void flight_release(flight_t *f) { /* g_mu held */
 
 static void *flight_main(void *arg) {
     flight_t *f = arg;
-    json_t *cap = probe(f);
-    if (cap && !f->cancel) {
-        tp_write(f->raw, cap);
-        char *ef = json_dump(json_get(cap, "efforts"), 0);
+    json_t *persist = NULL;
+    json_t *cap = probe(f, &persist);
+    if (persist && !f->cancel) {
+        tp_write(f->raw, persist);
+        char *ef = json_dump(json_get(persist, "efforts"), 0);
         LOGD("Learned thinking capability: provider=%s model=%s format=%s efforts=%s observed=%s", f->model->provider, f->model->id,
-             json_get_str(cap, "format"), ef, json_get_bool(cap, "observed", false) ? "true" : "false");
+             json_get_str(persist, "format"), ef, json_get_bool(persist, "observed", false) ? "true" : "false");
         free(ef);
-    } else if (f->cancel) {
+    }
+    json_free(persist);
+    if (f->cancel) {
         json_free(cap);
         cap = NULL;
     }
@@ -829,7 +927,7 @@ json_t *tp_stream(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_
         }
         return msg;
     }
-    /* inconclusive probes leave the capability unknown: still honor the requested level rather than turning it off */
+    /* a format this run accepted, else the first one it did not reject: never repeat a dialect already refused */
     json_t *use = cap ? cap : hypothesis(batches[0].f[0]);
     json_t *raw = tp_apply_raw(m->raw, use);
     json_free(use);
