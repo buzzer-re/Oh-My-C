@@ -223,6 +223,8 @@ static int goal_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         else rc = app_goal_create(a, json_get_str(args, "objective"), b, &err);
     } else if (str_eq(op, "get")) {
         /* nothing to change */
+    } else if (str_eq(op, "pause")) {
+        app_goal_pause(a); /* stops continuation while blocked on the user */
     } else if (str_eq(op, "resume")) {
         rc = app_goal_resume(a, &err);
     } else if (str_eq(op, "drop")) {
@@ -237,7 +239,7 @@ static int goal_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     } else if (str_eq(op, "complete")) {
         rc = app_goal_complete(a, &err);
     } else {
-        err = xasprintf("unknown op '%s' (expected create, get, complete, resume or drop)", op ? op : "");
+        err = xasprintf("unknown op '%s' (expected create, get, complete, pause, resume or drop)", op ? op : "");
     }
     if (err || rc) {
         tool_result_error(out, "%s", err ? err : "goal operation failed");
@@ -256,7 +258,7 @@ static void sync_tool(app_t *a) {
         json_t *s = schema_obj();
         json_t *op = json_obj();
         json_set_str(op, "type", "string");
-        json_set(op, "enum", json_parse_str("[\"create\",\"get\",\"complete\",\"resume\",\"drop\"]"));
+        json_set(op, "enum", json_parse_str("[\"create\",\"get\",\"complete\",\"pause\",\"resume\",\"drop\"]"));
         json_set_str(op, "description", "goal operation");
         schema_prop_json(s, "op", op, true);
         schema_prop(s, "objective", "string", "goal objective", false);

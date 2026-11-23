@@ -529,6 +529,8 @@ printf 'goal:\n  continuationModes: ["rpc"]\n' > "$T/agent/config.yml"
 check "goal continue"  '"customType":"goal-continuation"'  bash -c "( echo '{\"id\":\"g\",\"type\":\"goal\",\"op\":\"create\",\"objective\":\"Ship it\"}'; sleep 0.5; echo '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"bash:echo step\"}'; sleep 4 ) | '$B' --model mock/mock-1 --mode rpc"
 check "goal resumed paused" '"status":"paused"'  bash -c "( echo '{\"id\":\"s\",\"type\":\"goal\",\"op\":\"get\"}'; sleep 1 ) | '$B' --model mock/mock-1 -c --mode rpc"
 check "goal complete"  'Status: complete'  bash -c "( echo '{\"id\":\"r\",\"type\":\"goal\",\"op\":\"resume\"}'; sleep 0.5; echo '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"call:goal:{\\\"op\\\":\\\"complete\\\"}\"}'; sleep 3 ) | '$B' --model mock/mock-1 -c --mode rpc"
+# the goal tool's pause op stops continuation while blocked on the user (omp e86bc4fe6e)
+check "goal pause op"  'Status: paused'  bash -c "( echo '{\"id\":\"g\",\"type\":\"goal\",\"op\":\"create\",\"objective\":\"Wait for the user\"}'; sleep 0.5; echo '{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"call:goal:{\\\"op\\\":\\\"pause\\\"}\"}'; sleep 3 ) | timeout 20 '$B' --model mock/mock-1 --no-session --mode rpc"
 rm -f "$T/agent/config.yml"
 # advisor: shadow model reviews the turn, its concern continues the run as an <advisory>
 # omp resolves the advisor only through the `advisor` role (no fallback to the session model)
