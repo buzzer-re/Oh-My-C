@@ -948,6 +948,7 @@ struct toolcmd_run {
     int refs;
     unsigned invocations;
     json_t *records; /* index -> dispatch (null placeholders) */
+    json_t *images;  /* image blocks the commands printed (omp decodes their terminal graphics back into images) */
     VEC(int) finished;
     void (*on_change)(void *ud);
     void *on_change_ud;
@@ -966,6 +967,7 @@ static void run_unref(toolcmd_run_t *r) {
     pthread_mutex_unlock(&r->mu);
     if (!last) return;
     json_free(r->records);
+    json_free(r->images);
     free(r->finished.v);
     free(r->tool_call_id);
     pthread_mutex_destroy(&r->mu);
@@ -1072,6 +1074,7 @@ toolcmd_run_t *toolcmd_run_begin(tool_ctx_t *ctx, tool_env_t *env) {
     r->live = true;
     r->refs = 1;
     r->records = json_arr();
+    r->images = json_arr();
     pthread_mutex_init(&r->mu, NULL);
     pthread_mutex_lock(&g_mu);
     vec_push(&g_runs, r);
@@ -1102,6 +1105,14 @@ char *toolcmd_run_preamble(toolcmd_run_t *r) {
     free(qs);
     strvec_free(&names);
     return sb_detach(&b);
+}
+
+json_t *toolcmd_run_images(toolcmd_run_t *r) {
+    if (!r) return json_arr();
+    pthread_mutex_lock(&r->mu);
+    json_t *out = json_clone(r->images);
+    pthread_mutex_unlock(&r->mu);
+    return out;
 }
 
 json_t *toolcmd_run_records(toolcmd_run_t *r) {
@@ -1272,6 +1283,11 @@ static void dispatch_call(void *ud, json_t *args, toolcli_result_t *res) {
     }
     free(reason);
     json_free(validated);
+    /* the images the command prints as terminal graphics reach the bash result as image blocks */
+    json_t *blk;
+    pthread_mutex_lock(&r->mu);
+    json_arr_foreach(out.content, i, blk) if (str_eq(json_get_str(blk, "type"), "image")) json_push(r->images, json_clone(blk));
+    pthread_mutex_unlock(&r->mu);
     render_tool_result(&out, res);
     tool_result_free(&out);
 }

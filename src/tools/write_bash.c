@@ -1126,6 +1126,12 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     int64_t dur = mono_ms() - t0;
     if (tc_run) tc_records = toolcmd_run_records(tc_run);
     bash_finish(env, out, &r, &bs, tsec, req_tsec, timeout_ms, cwd, dur, &notices);
+    if (tc_run) { /* the commands' images follow the output text (bash.ts: [text, ...result.images]) */
+        json_t *imgs = toolcmd_run_images(tc_run), *im;
+        if (!out->content) out->content = json_arr();
+        json_arr_foreach(imgs, i, im) json_push(out->content, json_clone(im));
+        json_free(imgs);
+    }
     out_redirect_collect(&reply_files, out);
     out_sink_free(bs.sink);
     proc_result_free(&r);

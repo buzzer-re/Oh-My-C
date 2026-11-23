@@ -125,6 +125,10 @@ toolcmd_run_t *toolcmd_run_begin(tool_ctx_t *ctx, struct tool_env *env);
 char *toolcmd_run_preamble(toolcmd_run_t *r);
 /* the dispatches so far, in invocation order (owned array; empty when none) */
 json_t *toolcmd_run_records(toolcmd_run_t *r);
+/* the image blocks the run's commands printed, in order (owned array; empty when none). omp's shell decodes a command's
+ * terminal graphics back into images of the bash result; omc's bash output drops the escape sequences, so the run hands
+ * them over directly */
+json_t *toolcmd_run_images(toolcmd_run_t *r);
 /* hook for live bash frames: called (from a dispatch thread) after each dispatch progress or finish */
 void toolcmd_run_on_change(toolcmd_run_t *r, void (*fn)(void *ud), void *ud);
 /* an extra reference (a bash call that hands the run to a job but still reads its records) */
