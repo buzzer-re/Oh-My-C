@@ -125,6 +125,10 @@ check "grep binary only" $'Tool said: No matches in text files\nBinary files als
 check "grep named binary" '*1:gqxbin'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"bin","path":"gq/d.bin"}'
 check "grep cross-line"  $'*1:gqa\n 2:gqb'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqa\\ngqb","path":"gq/x.txt"}'
 check "grep url;path list" $'## x.txt#'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqa","path":"local://nope.md;gq"}'
+# a gitignore-respecting directory search that found nothing names a gitignored match (omp 1d9d5d1d46)
+mkdir -p gig/gen && (cd gig && git init -q . 2>/dev/null; echo "gen/" > .gitignore; echo zqxtoken > gen/x.txt; echo other > y.txt)
+check "grep gitignored" $'Tool said: No matches found\nGitignored files match (e.g. gig/gen/x.txt); pass `gitignore: false` to search them.'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"zqxtoken","path":"gig"}'
+rm -rf gig
 check "glob none"      "No files found matching pattern" "$B" --model mock/mock-1 -p 'call:glob:{"path":"*.zzq"}'
 # the schema bounds limit to 1-200 (omp 1d9d5d1d46: no silent clamp); glob validates its own arguments: a `pattern` is
 # scoped under `path`, other unknown keys are refused, a list of missing paths names each

@@ -1175,6 +1175,24 @@ searched:
         if (past_end) sb_appendf(&t, "No more results (%s files total; skip=%lld is past the end)", total_label, (long long)skip);
         else if (binary_disp.n) sb_append(&t, "No matches in text files");
         else sb_append(&t, "No matches found");
+        /* a directory search that respected .gitignore and found nothing says whether ignored files would have
+         * matched, so "no matches" is not mistaken for absence (omp 1d9d5d1d46) */
+        if (gitignore && is_dir && !multi_targets && !exact.n && !past_end) {
+            gmatches_t im = {0};
+            strvec_t ib = {0};
+            bool ilim = false;
+            char *ierr = NULL;
+            if (grep_run(pattern, search_path, glob_filter, bare_glob, !case_sensitive, multiline, false, 0, 0, 1, 1, &exclusions,
+                         &im, &ilim, &ib, &ierr) == 0 && im.n) {
+                char *ex = rel_cwd(im.v[0].abs, env->cwd, false);
+                sb_appendf(&t, "\nGitignored files match (e.g. %s); pass `gitignore: false` to search them.", ex);
+                free(ex);
+            }
+            free(ierr);
+            for (size_t k = 0; k < im.n; k++) gmatch_free(&im.v[k]);
+            vec_free(&im);
+            strvec_free(&ib);
+        }
         if (missing_note) sb_appendf(&t, "\n%s", missing_note);
         tool_result_text(out, sb_cstr(&t));
         sb_free(&t);
