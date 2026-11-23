@@ -530,7 +530,8 @@ if command -v python3 >/dev/null; then
     check "eval no checkpoint" 'ERR `checkpoint` cannot run through the eval bridge; call the direct `checkpoint` tool.'  "$B" --model mock/mock-1 --no-session -p 'call:eval:{"language":"py","code":"try:\n    await tool.checkpoint({\"goal\":\"g\"})\nexcept Exception as e:\n    print(\"ERR\", e)"}'
     rm -f "$T/agent/config.yml" ev-big.txt ev-ap.txt
     # a kernel that exits during startup says why: its exit code and the end of its stderr (omp af92dbc0b2)
-    printf '#!/bin/sh\necho "no module named boom" >&2\nexit 3\n' > "$T/fakepy" && chmod +x "$T/fakepy"
+    # (it passes the 3.9+ version probe, omp 3967d6bcc6, then dies starting the kernel)
+    printf '#!/bin/sh\ncase "$*" in *version_info*) exit 0;; esac\necho "no module named boom" >&2\nexit 3\n' > "$T/fakepy" && chmod +x "$T/fakepy"
     printf "python:\n  interpreter: $T/fakepy\n" > "$T/agent/config.yml"
     check "eval init exit" "Python kernel init failed: Python kernel exited with code 3; its last stderr output: no module named boom"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"1"}'
     rm -f "$T/agent/config.yml"
