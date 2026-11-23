@@ -618,7 +618,7 @@ int services_start(jobs_t *owner, const char *project, const char *name, const c
         }
         if (ready->log) {
             char *rerr = NULL;
-            rx = rx_compile(ready->log, 0, &rerr);
+            rx = rx_compile(ready->log, RX_MULTILINE, &rerr); /* DAEMON_OUTPUT_PATTERN_FLAGS "mu": ^ and $ at line boundaries (omp cf93771fa1) */
             if (!rx) {
                 *err = xasprintf("Invalid readiness regex: %s", rerr ? rerr : "?");
                 free(rerr);

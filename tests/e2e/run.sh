@@ -239,6 +239,8 @@ check "todo append ''" 'Errors: Missing phase name for append operation'  python
 # launch.persist (omp 5bc2903877): a print-mode run starts its services persistent, so they outlive the process
 "$B" --model mock/mock-1 --no-session -p 'call:bash:{"command":"sleep 3","name":"e2e-persist"}' </dev/null >/dev/null 2>&1
 check "service persists" '"persist": true'  bash -c "cat \$(find '$T/agent' -name '*.json' -path '*e2e-persist*' | head -1)"
+# a service's ready.log matches line anchors after earlier startup output (omp cf93771fa1)
+check "service ready per line" 'e2e-ready: ready'  "$B" --model mock/mock-1 --no-session -p 'call:bash:{"command":"echo starting; sleep 0.3; echo ready; sleep 5","name":"e2e-ready","ready":{"log":"^ready$","timeout":5}}'
 # todo.midRunNudges (omp a80b985192, dab28d7222): 26 bash results after a todo init nudge twice when capped (at 12, 24),
 # once with backoff (12, then 36) and never when off
 NUDGE_SCRIPT=$(python3 -I -c 'import json; print("calls:"+json.dumps([["todo",{"op":"init","items":["a","b"]}]]+[["bash",{"command":"echo %d"%i}] for i in range(26)]))')
