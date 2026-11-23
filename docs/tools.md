@@ -293,7 +293,26 @@ next turn boundary). A new view starts from its spawner's. Tools present at conn
 call to it runs, every session sees.
 
 - Transports: stdio (`command` + `args`, a reader thread per server), streamable HTTP (`url`,
-  `type: http|streamable-http`) and legacy SSE (`type: sse`). Protocol version `2025-06-18`.
+  `type: http|streamable-http`) and legacy SSE (`type: sse`). Servers stay per session (omp's daemon-shared MCP
+  host is out of scope), but they are spoken to as omp's host speaks to them (protocol.ts, host/peers.ts):
+  - Era probe: stdio sends `server/discover` (with the request `_meta`) and `initialize` right behind it; a discover
+    answer (`supportedVersions` + `capabilities`) or a 2026-07-28-only error (-32020/-32021/-32022) means a modern
+    server, else the initialize answer opens a handshake-era session (one process, where omp's host probes on a
+    throwaway one). Streamable HTTP POSTs `server/discover` first; a 400/404/405 or a JSON-RPC error falls back to the
+    handshake, anything else (an OAuth challenge, an outage) is the connect error. Legacy SSE always handshakes.
+  - Handshake era: `initialize` with protocol `2025-11-25`, `roots` capability, then `notifications/initialized`; the
+    negotiated version rides on HTTP requests as `MCP-Protocol-Version`.
+  - Modern (2026-07-28): no session; every request's `_meta` carries `io.modelcontextprotocol/protocolVersion`,
+    `clientCapabilities` (`roots`) and `clientInfo`; HTTP adds `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name`
+    (`name` of tools/call and prompts/get, `uri` of resources/read, Base64-wrapped when not plain ASCII) and never
+    sends `Mcp-Session-Id`. Capabilities, instructions and serverInfo come from the discover answer. `tools/call`,
+    `prompts/get` and `resources/read` answered `input_required` are retried with `inputResponses` (roots only) and
+    the echoed `requestState`, up to 8 rounds. List changes arrive on one `subscriptions/listen` stream (stdio:
+    notifications tagged with its id; HTTP: the listen POST's SSE response on a thread of its own).
+  - `roots/list` (and the roots input) answer the project directory as one `file://` root.
+  - Not ported: result caching by `ttlMs`/`cacheScope` (each session lists afresh), resource subscriptions through
+    `subscriptions/listen` (`resources/subscribe` is a handshake-era request), `Mcp-Param-*` headers from tool
+    schemas. clientInfo stays `omc`/version where omp sends `omp-coding-agent`/`1.0.0`.
 - Config discovery (project first, then user; `mcp_discover_config`): `.omc/mcp.json`,
   `.omp/mcp.json`, `mcp.json`, `.mcp.json`, `.claude/mcp.json`, `.cursor/mcp.json`,
   `.vscode/mcp.json`, `<agent dir>/mcp.json`, `~/.cursor/mcp.json`, `~/.claude/mcp.json` and
