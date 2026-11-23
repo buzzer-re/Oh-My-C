@@ -11,6 +11,7 @@
 
 #include <ctype.h>
 #include <math.h>
+#include <openssl/sha.h>
 
 enum { V_OPENAI = 0, V_AZURE = 1, V_CODEX = 2 };
 
@@ -662,6 +663,68 @@ static char *azure_deployment(const ai_model_t *m) {
     return xstrdup(m->id);
 }
 
+/* RFC 4122 name-based UUID (SHA-1, version 5) of `name` in namespace `ns` (16 bytes) into out[16] */
+static void uuid5_bytes(const unsigned char ns[16], const char *name, unsigned char out[16]) {
+    size_t n = strlen(name);
+    unsigned char *buf = xmalloc(16 + n), d[SHA_DIGEST_LENGTH];
+    memcpy(buf, ns, 16);
+    memcpy(buf + 16, name, n);
+    SHA1(buf, 16 + n, d);
+    free(buf);
+    memcpy(out, d, 16);
+    out[6] = (unsigned char)((out[6] & 0x0F) | 0x50);
+    out[8] = (unsigned char)((out[8] & 0x3F) | 0x80);
+}
+
+/* request-transformer.ts moveCodexInstructionsToInput (codex-rs 0.162 BaseInstructionsFragment): top-level
+ * `instructions` become a leading developer message tagged `model.base_instructions`, with id
+ * msg_<uuidv5(uuidv5(NAMESPACE_OID, thread), text)> where the thread is the prompt cache key (no key: no id). Empty
+ * instructions are dropped. Takes ownership of `text` (may be NULL). */
+static void codex_instructions_to_input(json_t *body, char *text) {
+    json_del(body, "instructions");
+    if (!text || !*text) {
+        free(text);
+        return;
+    }
+    json_t *it = json_obj();
+    const char *thread = json_get_str(body, "prompt_cache_key");
+    if (!str_empty(thread)) {
+        static const unsigned char OID[16] = {0x6b, 0xa7, 0xb8, 0x12, 0x9d, 0xad, 0x11, 0xd1,
+                                              0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8};
+        unsigned char ns[16], id[16];
+        uuid5_bytes(OID, thread, ns);
+        uuid5_bytes(ns, text, id);
+        char hex[37];
+        size_t j = 0;
+        for (int i = 0; i < 16; i++) {
+            if (i == 4 || i == 6 || i == 8 || i == 10) hex[j++] = '-';
+            j += (size_t)snprintf(hex + j, sizeof hex - j, "%02x", id[i]);
+        }
+        json_set(it, "id", json_str_own(xasprintf("msg_%s", hex)));
+    }
+    json_set_str(it, "type", "message");
+    json_set_str(it, "role", "developer");
+    json_t *c = json_arr();
+    json_push(c, input_text(text));
+    json_set(it, "content", c);
+    json_t *meta = json_obj(), *kinds = json_arr();
+    json_push_str(kinds, "model.base_instructions");
+    json_set(meta, "content_item_kinds", kinds);
+    json_set(it, "internal_chat_message_metadata_passthrough", meta);
+    free(text);
+    json_t *input = json_get_arr(body, "input");
+    if (!input) {
+        input = json_arr();
+        json_set(body, "input", input);
+    }
+    json_arr_insert(input, 0, it);
+}
+
+void oair_codex_instructions_to_input(json_t *body) {
+    const char *t = json_get_str(body, "instructions");
+    codex_instructions_to_input(body, t ? xstrdup(t) : NULL);
+}
+
 static json_t *build_codex(const ai_model_t *m, const ai_context_t *ctx, const ai_stream_opts_t *o) {
     json_t *p = json_obj();
     const char *wire_id = json_get_str(m->raw, "requestModelId");
@@ -709,7 +772,8 @@ static json_t *build_codex(const ai_model_t *m, const ai_context_t *ctx, const a
         json_set(p, "tools", convert_tools(m, ctx->tools, V_CODEX));
         apply_tool_choice(p, m, o, V_CODEX);
     }
-    if (json_len(sys)) json_set_str(p, "instructions", json_sv(json_at(sys, 0)));
+    /* every Responses request leads with the base instructions as an input item (no top-level `instructions`) */
+    codex_instructions_to_input(p, json_len(sys) && json_sv(json_at(sys, 0)) ? xstrdup(json_sv(json_at(sys, 0))) : NULL);
     json_free(sys);
     json_set_bool(p, "store", false);
     /* reasoning */
@@ -1732,6 +1796,8 @@ json_t *ai_openai_remote_compact(const ai_model_t *m, const char *api_key, const
     json_set_str(body, "instructions", instructions ? instructions : "");
     char *key = oai_prompt_cache_key(&o, 64, "pc_");
     if (key) json_set(body, "prompt_cache_key", json_str_own(key));
+    /* codex-rs routes /responses/compact through build_responses_request: the instructions ride as an input item */
+    if (variant_of(m) == V_CODEX) codex_instructions_to_input(body, instructions ? xstrdup(instructions) : NULL);
     http_headers_t h = {0};
     json_t *out = NULL;
     if (!build_headers(&h, m, &o, body, err)) goto done;

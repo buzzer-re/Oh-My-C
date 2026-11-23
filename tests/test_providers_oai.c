@@ -617,7 +617,8 @@ static void test_codex_azure(void) {
     o.temperature = 0.3;
     /* history comes from api openai-responses; re-label so ids would be replayable */
     json_t *p = oair_build_request(&t.m, &ctx, &o);
-    CHECK_STR(json_get_str(p, "instructions"), "base instructions");
+    /* moveCodexInstructionsToInput: no top-level instructions; the base instructions lead the input (no cache key: no id) */
+    CHECK(json_get(p, "instructions") == NULL);
     CHECK(json_get(p, "store") && !json_get_bool(p, "store", true));
     CHECK(json_get(p, "max_output_tokens") == NULL);
     CHECK(json_get(p, "temperature") == NULL);
@@ -626,8 +627,28 @@ static void test_codex_azure(void) {
     CHECK_STR(json_sv(json_at(json_get(p, "include"), 0)), "reasoning.encrypted_content");
     json_t *in = json_get(p, "input"), *it;
     CHECK_STR(json_get_str(json_at(in, 0), "role"), "developer");
-    CHECK_STR(json_get_str(json_at(json_get(json_at(in, 0), "content"), 0), "text"), "extra dev");
+    CHECK_STR(json_get_str(json_at(json_get(json_at(in, 0), "content"), 0), "text"), "base instructions");
+    CHECK_STR(json_sv(json_at(json_get(json_get(json_at(in, 0), "internal_chat_message_metadata_passthrough"), "content_item_kinds"), 0)),
+              "model.base_instructions");
+    CHECK_STR(json_get_str(json_at(in, 1), "role"), "developer");
+    CHECK_STR(json_get_str(json_at(json_get(json_at(in, 1), "content"), 0), "text"), "extra dev");
     json_arr_foreach(in, i, it) CHECK(json_get(it, "id") == NULL);
+    /* the item id: uuid5(uuid5(NAMESPACE_OID, thread), text), as codex-rs build_responses_request computes it */
+    json_t *mv = J("{\"instructions\":\"sys\",\"prompt_cache_key\":\"thread-1\",\"input\":[{\"role\":\"user\"}]}");
+    oair_codex_instructions_to_input(mv);
+    char *mvs = json_dump(mv, 0);
+    CHECK_STR(mvs, "{\"prompt_cache_key\":\"thread-1\",\"input\":[{\"id\":\"msg_6e6ddc8f-32b3-592b-a5b6-b5f2aface174\","
+                   "\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"sys\"}],"
+                   "\"internal_chat_message_metadata_passthrough\":{\"content_item_kinds\":[\"model.base_instructions\"]}},"
+                   "{\"role\":\"user\"}]}");
+    free(mvs);
+    json_free(mv);
+    mv = J("{\"instructions\":\"\",\"input\":[]}");
+    oair_codex_instructions_to_input(mv);
+    mvs = json_dump(mv, 0);
+    CHECK_STR(mvs, "{\"input\":[]}");
+    free(mvs);
+    json_free(mv);
     CHECK(json_get(json_at(json_get(p, "tools"), 0), "strict") == NULL);
     char *url = oair_url(&t.m);
     CHECK_STR(url, "https://chatgpt.com/backend-api/codex/responses");
@@ -667,7 +688,7 @@ static void test_codex_azure(void) {
     ai_context_t meta_ctx = {.system_prompt = sys, .messages = meta_msgs};
     json_t *pm = oair_build_request(&t.m, &meta_ctx, &o);
     char *pms = json_dump(json_get(pm, "input"), 0);
-    CHECK(strstr(pms, "internal_chat_message_metadata_passthrough") == NULL);
+    CHECK(strstr(pms, "turn_id") == NULL); /* only the base-instructions item carries the passthrough key */
     CHECK(strstr(pms, "\"reasoning\"") != NULL);
     free(pms);
     json_free(pm);
