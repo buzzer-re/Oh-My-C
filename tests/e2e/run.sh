@@ -69,6 +69,12 @@ check "bash cd root"   "Tool said: /"                     "$B" --model mock/mock
 # blocked wait; a bad regex fails the call; cd targets the shell expands stay in the command (omp 25ba9cbe22)
 NOTIFYQ='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; print("\n".join((m["content"] if isinstance(m["content"],str) else "".join(b.get("text","") for b in m["content"])) for m in r[-1]["messages"] if m["role"] in ("user","tool")))'
 check "bash notify"    $'Wait interrupted by message.\n<system-notice>\nBackground job bg_1 (echo start; echo ERROR one; sleep 2) is still running. Its output matched /ERROR/:\nERROR one\n</system-notice>'  bash -c "'$B' --model mock/mock-1 --no-session -p 'seq:[[\"bash\",{\"command\":\"echo start; echo ERROR one; sleep 2\",\"notify\":\"ERROR\"}],[\"wait\",{}]]' >/dev/null 2>&1 </dev/null; python3 -I -c '$NOTIFYQ' '$T/req.jsonl'"
+# a service whose ready.port another process already listens on is refused before it starts (omp 04833e5623)
+BUSYP=$((PORT + 23))
+python3 -I -c 'import socket,sys,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("127.0.0.1",int(sys.argv[1]))); s.listen(); time.sleep(15)' $BUSYP & BUSYPID=$!
+sleep 0.3
+check "service busy port" "Tool said: Port $BUSYP already accepts connections on 127.0.0.1 before busysvc started; another process holds it, so ready.port cannot tell when busysvc is ready. Stop that process or use another port."  "$B" --model mock/mock-1 --no-session -p "call:bash:{\"command\":\"sleep 5\",\"name\":\"busysvc\",\"ready\":{\"port\":$BUSYP}}"
+kill $BUSYPID 2>/dev/null; wait $BUSYPID 2>/dev/null
 check "bash notify bad" "Invalid notify regex: "  "$B" --model mock/mock-1 --no-session -p 'call:bash:{"command":"true","notify":"(unclosed"}'
 check "bash cd glob"   "Tool said: /"  "$B" --model mock/mock-1 --no-session -p 'call:bash:{"command":"cd /* 2>/dev/null; cd /; pwd"}'
 # tool commands: discoverable tools run as bash commands (`<tool> --help`, `<tool> args`, `-j` JSON), recorded on the
@@ -217,7 +223,10 @@ check "apply_patch add" "fresh"  cat ap-new.txt
 [[ ! -e ap.txt && ! -e ap-gone.txt ]] && echo "   ok  apply_patch move/delete" || { echo "   FAIL apply_patch move/delete"; fail=1; }
 grep -q 'stripped-down, file-oriented diff' "$T/req.jsonl" && echo "   ok  apply_patch prompt" || { echo "   FAIL apply_patch prompt"; fail=1; }
 check "apply_patch err" "Failed to find expected lines in ap-moved.txt"  "$B" --model mock/mock-1 -p 'call:edit:{"input":"*** Begin Patch\n*** Update File: ap-moved.txt\n@@\n-missing\n+x\n*** End Patch"}'
-rm -f "$T/agent/config.yml"
+# apply_patch typed as a shell command runs the apply_patch tool (omp 04833e5623)
+check "bash apply_patch" $'Tool said: [bp.txt]\n1:hello'  "$B" --model mock/mock-1 --no-session -p "$(python3 -I -c 'import json; print("call:bash:" + json.dumps({"command": "apply_patch <<'"'"'EOF'"'"'\n*** Begin Patch\n*** Add File: bp.txt\n+hello\n*** End Patch\nEOF"}))')"
+check "bash apply_patch arg" "Tool said: apply_patch is a tool, not a shell command: call it with the patch text."  "$B" --model mock/mock-1 --no-session -p "bash:apply_patch --help"
+rm -f "$T/agent/config.yml" bp.txt
 printf 'def greet():\n    print("Hi")\n' > pm.py
 check "patch mode"      '2:    print("Hello")'  env PI_EDIT_VARIANT=patch "$B" --model mock/mock-1 -p 'call:edit:{"path":"pm.py","edits":[{"op":"update","diff":"@@ def greet():\n def greet():\n-    print(\"Hi\")\n+    print(\"Hello\")\n"}]}'
 check "patch result"    'print("Hello")'  cat pm.py

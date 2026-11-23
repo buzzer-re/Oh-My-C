@@ -487,6 +487,15 @@ static bool port_open(const char *host, int port) {
     return ok;
 }
 
+/* readinessHosts / listeningHost (omp 04833e5623): the configured host, else both loopbacks (`localhost` servers such as
+ * Vite or Node >= 17 may bind only ::1); the first that accepts a connection, or NULL */
+static const char *listening_host(const char *host, int port) {
+    if (host) return port_open(host, port) ? host : NULL;
+    if (port_open("127.0.0.1", port)) return "127.0.0.1";
+    if (port_open("::1", port)) return "::1";
+    return NULL;
+}
+
 /* the service exited: deliver a completion notice to the owning session (unless it was stopped on purpose) */
 typedef struct {
     char *project, *name;
@@ -677,7 +686,27 @@ int services_start(jobs_t *owner, const char *project, const char *name, const c
         rspec = json_obj();
         if (ready->log) json_set_str(rspec, "log", ready->log);
         if (ready->port) json_set_int(rspec, "port", ready->port);
-        json_set_str(rspec, "host", ready->host ? ready->host : "127.0.0.1");
+        if (ready->host) json_set_str(rspec, "host", ready->host);
+    }
+    /* a listener already on the port would satisfy the readiness probe before this service binds it (and the service
+     * itself then fails with "address in use") */
+    if (ready && ready->port) {
+        char *sdir = service_dir(project, name);
+        json_t *cur = read_spec(sdir);
+        json_t *snap = cur ? snapshot_of(sdir, cur) : NULL;
+        bool running = snap && !services_state_terminal(json_get_str(snap, "state"));
+        json_free(snap);
+        json_free(cur);
+        free(sdir);
+        const char *busy = running ? NULL : listening_host(ready->host, ready->port);
+        if (busy) {
+            *err = xasprintf("Port %d already accepts connections on %s before %s started; another process holds it, so "
+                             "ready.port cannot tell when %s is ready. Stop that process or use another port.",
+                             ready->port, busy, name, name);
+            json_free(rspec);
+            if (rx) rx_free(rx);
+            return -1;
+        }
     }
     pthread_mutex_lock(&g_mu);
     json_t *spec = NULL;
@@ -709,7 +738,7 @@ int services_start(jobs_t *owner, const char *project, const char *name, const c
                     free(raw);
                 }
             }
-            if (!port_ok) port_ok = port_open(ready->host ? ready->host : "127.0.0.1", ready->port);
+            if (!port_ok) port_ok = listening_host(ready->host, ready->port) != NULL;
             if (log_ok && port_ok) {
                 ok = true;
                 break;

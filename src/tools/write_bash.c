@@ -891,6 +891,78 @@ static bool steer_queued(tool_ctx_t *ctx) {
     return ctx && agent_tool_interrupted(ctx->agent);
 }
 
+/* applyPatchShellInput (omp 04833e5623): the patch text of a Codex-style `apply_patch` shell call (`apply_patch <<'EOF'
+ * … EOF`, `apply_patch '<patch>'`, `apply_patch "<patch>"`), taken literally. *is_call false when the command does not run
+ * apply_patch; NULL with *is_call true for any other apply_patch command. Owned. */
+static bool sp_ch(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'; }
+static char *apply_patch_shell_input(const char *command, bool *is_call) {
+    const char *p = command;
+    while (sp_ch(*p)) p++;
+    *is_call = false;
+    if (strncmp(p, "apply_patch", 11) || (p[11] && !sp_ch(p[11]))) return NULL;
+    *is_call = true;
+    const char *q = p + 11;
+    const char *end = command + strlen(command);
+    const char *te = end; /* trimmed end */
+    while (te > q && sp_ch(te[-1])) te--;
+    const char *h = q;
+    while (sp_ch(*h)) h++;
+    if (h[0] == '<' && h[1] == '<') {
+        h += 2;
+        if (*h == '-') h++;
+        while (sp_ch(*h)) h++;
+        char quote = 0;
+        if (*h == '\'' || *h == '"') quote = *h++;
+        const char *ds = h;
+        if (!(isalpha((unsigned char)*h) || *h == '_')) return NULL;
+        while (isalnum((unsigned char)*h) || *h == '_' || *h == '-') h++;
+        size_t dl = (size_t)(h - ds);
+        if (quote) {
+            if (*h != quote) return NULL;
+            h++;
+        }
+        while (*h == ' ' || *h == '\t') h++;
+        if (*h != '\n') return NULL;
+        const char *body = h + 1;
+        /* the last line (before trailing whitespace) is the delimiter, optionally indented */
+        const char *ls = te;
+        while (ls > body && ls[-1] != '\n') ls--;
+        if (ls <= body) return NULL;
+        const char *d = ls;
+        while (*d == ' ' || *d == '\t') d++;
+        const char *de = te;
+        while (de > d && (de[-1] == ' ' || de[-1] == '\t')) de--;
+        if ((size_t)(de - d) != dl || strncmp(d, ds, dl)) return NULL;
+        return xstrndup(body, (size_t)(ls - 1 - body));
+    }
+    if (q == h) return NULL; /* `apply_patch` needs whitespace before a quoted argument */
+    if (*h == '\'') {
+        const char *e = strchr(h + 1, '\'');
+        if (!e || e + 1 != te) return NULL;
+        return xstrndup(h + 1, (size_t)(e - h - 1));
+    }
+    if (*h == '"') {
+        sb_t b = SB_INIT;
+        const char *r = h + 1;
+        for (; *r && *r != '"'; r++) {
+            if (*r == '\\' && r[1]) {
+                r++;
+                if (*r == '\n') continue;
+                if (!strchr("\\\"$`", *r)) sb_putc(&b, '\\');
+                sb_putc(&b, *r);
+            } else {
+                sb_putc(&b, *r);
+            }
+        }
+        if (*r != '"' || r + 1 != te) {
+            sb_free(&b);
+            return NULL;
+        }
+        return sb_detach(&b);
+    }
+    return NULL;
+}
+
 static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     const char *command = json_get_str(args, "command");
@@ -938,6 +1010,53 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             strvec_free(&notices);
             return 0;
         }
+    }
+
+    /* models trained on Codex call the apply_patch tool as a shell command; omc ships no such program, so a patch given
+     * that way goes to the tool (through its own approval) */
+    if (!name && ctx && ctx->agent && str_eq(env->edit_mode, "apply_patch")) {
+        bool is_call = false;
+        char *patch = apply_patch_shell_input(command, &is_call);
+        char *found = is_call ? which("apply_patch") : NULL;
+        agent_tool_t *ed = is_call && !found ? agent_find_tool(ctx->agent, "edit") : NULL;
+        free(found);
+        if (ed) {
+            if (!patch) {
+                tool_result_error(out, "apply_patch is a tool, not a shell command: call it with the patch text.");
+            } else {
+                json_t *ea = json_obj();
+                json_set_str(ea, "input", patch);
+                char *reason = NULL;
+                agent_t *a = ctx->agent;
+                bool blocked = false;
+                if (a->hooks.approve_tool) {
+                    json_t *call = json_obj();
+                    json_set_str(call, "type", "toolCall");
+                    json_set_str(call, "id", ctx->tool_call_id ? ctx->tool_call_id : "");
+                    json_set_str(call, "name", "edit");
+                    json_set(call, "arguments", json_clone(ea));
+                    blocked = a->hooks.approve_tool(a->hooks.ud, a, call, ea, &reason) == TOOL_BLOCK;
+                    json_free(call);
+                }
+                if (blocked) {
+                    tool_result_error(out, "%s", reason ? reason : "Tool call was blocked");
+                } else {
+                    tool_result_t r = {0};
+                    ed->execute(ed, ctx, ea, &r);
+                    out->content = r.content;
+                    r.content = NULL;
+                    out->is_error = r.is_error;
+                    tool_result_free(&r);
+                    out->details = json_obj();
+                }
+                free(reason);
+                json_free(ea);
+            }
+            free(patch);
+            strvec_free(&notices);
+            return 0;
+        }
+        free(patch);
     }
 
     char *cmd = xstrdup(command);
